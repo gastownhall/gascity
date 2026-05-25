@@ -676,7 +676,15 @@ func (m *memSampler) stop() MemReport {
 	if ms.TotalAlloc >= m.startTotalAlloc {
 		m.report.AllocDelta = ms.TotalAlloc - m.startTotalAlloc
 	}
+	m.report.HeapInuseDelta = heapInuseDelta(m.report.HeapInuseBaseline, m.report.HeapInusePeak)
 	return m.report
+}
+
+func heapInuseDelta(baseline, peak uint64) uint64 {
+	if peak >= baseline {
+		return peak - baseline
+	}
+	return 0
 }
 
 // readRSSBytes reads the resident set size from /proc/self/status (VmRSS).

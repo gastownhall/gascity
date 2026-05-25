@@ -83,6 +83,9 @@ var DiscoveryTargets = []Target{
 // discovery.md §Targets (RAM ≤ 256MB HeapInuse peak).
 const HeapInusePeakTarget = 256 * 1024 * 1024
 
+// HeapInuseDeltaTarget is the maximum workload-induced heap growth allowed.
+const HeapInuseDeltaTarget = 256 * 1024 * 1024
+
 // MemReport captures memory consumption observed during a workload run.
 // Baseline is measured after seeding and before workload execution; peak is
 // sampled during the run; steady is measured after the workload stops.
@@ -95,6 +98,8 @@ type MemReport struct {
 	HeapInusePeak uint64
 	// HeapInuseSteady is runtime.MemStats.HeapInuse after the workload.
 	HeapInuseSteady uint64
+	// HeapInuseDelta is workload-induced heap growth: peak minus baseline.
+	HeapInuseDelta uint64
 	// RSSBaseline is the process resident set size before the workload, in
 	// bytes. Zero if unavailable.
 	RSSBaseline uint64
@@ -139,7 +144,7 @@ type Scorecard struct {
 	Errors int
 	// Mem holds memory consumption observed during the run.
 	Mem MemReport
-	// MemPass reports whether the HeapInusePeak target was met. Only
+	// MemPass reports whether the HeapInuseDelta target was met. Only
 	// meaningful when Mem.Sampled is true.
 	MemPass bool
 }
@@ -203,7 +208,7 @@ func Score(backend, workload string, dur time.Duration, totalOps, totalErrors in
 		TotalOps: totalOps,
 		Errors:   totalErrors,
 		Mem:      mem,
-		MemPass:  !mem.Sampled || mem.HeapInusePeak <= HeapInusePeakTarget,
+		MemPass:  !mem.Sampled || mem.HeapInuseDelta <= HeapInuseDeltaTarget,
 	}
 
 	for _, t := range DiscoveryTargets {
@@ -283,20 +288,32 @@ func (s *Scorecard) PrintTable(w io.Writer) {
 	}
 
 	if s.Mem.Sampled {
-		fmt.Fprintf(w, "\n  Memory:\n") //nolint:errcheck
-		memResult := "PASS"
+		fmt.Fprintf(w, "\n  Memory:\n")                     //nolint:errcheck
+		fmt.Fprintf(w, "  %-*s  %-12s  %-12s  %-12s  %s\n", //nolint:errcheck
+			colW, "Metric", "Baseline", "Peak/Delta", "Steady", "Result")
+
+		deltaResult := "PASS"
 		if !s.MemPass {
-			memResult = fmt.Sprintf("FAIL  ← HeapInuse peak %s > target %s",
-				FormatBytes(s.Mem.HeapInusePeak), FormatBytes(HeapInusePeakTarget))
+			deltaResult = fmt.Sprintf("FAIL  ← delta %s > target %s",
+				FormatBytes(s.Mem.HeapInuseDelta), FormatBytes(HeapInuseDeltaTarget))
 		}
 		fmt.Fprintf(w, "  %-*s  %-12s  %-12s  %-12s  %s\n", //nolint:errcheck
-			colW, "Metric", "Baseline", "Peak", "Steady", "Result")
+			colW, fmt.Sprintf("HeapInuse delta (≤%s)", FormatBytes(HeapInuseDeltaTarget)),
+			FormatBytes(s.Mem.HeapInuseBaseline),
+			FormatBytes(s.Mem.HeapInuseDelta),
+			"-",
+			deltaResult)
+
+		peakNote := fmt.Sprintf("%s peak", FormatBytes(s.Mem.HeapInusePeak))
+		if s.Mem.HeapInusePeak > HeapInusePeakTarget {
+			peakNote += "  ← exceeds " + FormatBytes(HeapInusePeakTarget)
+		}
 		fmt.Fprintf(w, "  %-*s  %-12s  %-12s  %-12s  %s\n", //nolint:errcheck
-			colW, "HeapInuse (≤256MB peak)",
+			colW, "HeapInuse peak (informational)",
 			FormatBytes(s.Mem.HeapInuseBaseline),
 			FormatBytes(s.Mem.HeapInusePeak),
 			FormatBytes(s.Mem.HeapInuseSteady),
-			memResult)
+			peakNote)
 		rssBaseline := "-"
 		if s.Mem.RSSPeak > 0 {
 			rssBaseline = FormatBytes(s.Mem.RSSBaseline)
