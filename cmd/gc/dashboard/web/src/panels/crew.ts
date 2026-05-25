@@ -262,7 +262,7 @@ export function installCrewInteractions(): void {
   });
 }
 
-async function openLogDrawer(sessionID: string, label: string): Promise<void> {
+export async function openLogDrawer(sessionID: string, label: string): Promise<void> {
   const drawer = byId("agent-log-drawer");
   const nameEl = byId("log-drawer-agent-name");
   const messagesEl = byId("log-drawer-messages");

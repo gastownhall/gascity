@@ -6,6 +6,7 @@
     <meta name="supervisor-url" content="" />
     <title>Gas City Dashboard</title>
     <link rel="stylesheet" href="/dashboard.css" />
+    <link rel="stylesheet" href="/village.css" />
   </head>
   <body>
     <div class="dashboard" id="dashboard-main">
@@ -15,6 +16,9 @@
 / (_ / __ |_\ \  / /___/ /  / /    \  / / // / __ |_\ \/ _  / _  / /_/ / __ |/ , _/ // /
 \___/_/ |_/___/  \___/___/ /_/     /_/ /____/_/ |_/___/_//_/____/\____/_/ |_/_/|_/____/</pre>
         <div style="display: flex; align-items: center; gap: 12px;">
+          <button class="cmd-btn" id="toggle-view-btn" style="display: none;">
+            🗺️ Town Map
+          </button>
           <button class="cmd-btn" id="open-palette-btn">
             <span>⌘</span> Commands <kbd>⌘K</kbd>
           </button>
@@ -35,6 +39,8 @@
       </div>
 
       <div class="summary-banner" id="status-banner"></div>
+
+      <div id="village-container" style="display: none;"></div>
 
       <div class="panels">
         <div class="panel panel-full" id="supervisor-overview-panel" hidden>

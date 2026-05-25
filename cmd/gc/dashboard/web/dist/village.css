@@ -1,0 +1,328 @@
+/* ==========================================================================
+   Gas City Village Map Styles
+   ========================================================================== */
+
+#village-container {
+  width: 100%;
+  height: 75vh;
+  min-height: 600px;
+  position: relative;
+  overflow: hidden;
+  background: #7CB342;
+  font-family: 'JetBrains Mono', monospace;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  border: 2px solid #5d4037;
+  border-radius: 12px;
+  box-shadow: inset 0 0 30px rgba(0, 0, 0, 0.7), 0 10px 25px rgba(0, 0, 0, 0.5);
+  margin-top: 15px;
+}
+
+#village-container.active {
+  display: flex;
+}
+
+.village-viewport {
+  width: 100%;
+  height: 100%;
+  position: relative;
+  overflow: hidden;
+  background: #7CB342;
+}
+
+.terrain-layer {
+  width: 100%;
+  height: 100%;
+}
+
+.village-viewport:not(.day) .terrain-layer {
+  filter: brightness(0.65) sepia(0.2) hue-rotate(-12deg);
+}
+
+.v-building-art {
+  filter: drop-shadow(0 15px 12px rgba(0,0,0,0.5));
+  transform-origin: bottom center;
+}
+
+.v-building-label {
+  display: inline-block;
+  background: rgba(18, 10, 5, 0.9);
+  color: #FFD54F;
+  padding: 5px 10px;
+  border: 1px solid #B87333;
+  border-radius: 4px;
+  font-size: 12px;
+  font-weight: bold;
+  white-space: nowrap;
+  box-shadow: 0 4px 8px rgba(0,0,0,0.4);
+  text-shadow: 0 1px 2px rgba(0,0,0,0.8);
+}
+
+.v-goose-wrapper {
+  position: absolute;
+  z-index: 10;
+  transition: opacity 0.4s ease;
+}
+
+.v-goose-anim {
+  transform-origin: bottom center;
+  filter: drop-shadow(0 10px 6px rgba(0,0,0,0.45));
+  transition: transform 0.22s ease-out, filter 0.22s ease-out;
+  cursor: default;
+  pointer-events: none;
+}
+
+.v-goose-anim[data-session-id] {
+  cursor: pointer;
+  pointer-events: auto;
+}
+
+.v-goose-anim[data-session-id]:hover {
+  transform: scale(1.18);
+  filter: drop-shadow(0 0 12px rgba(255, 213, 79, 0.85)) drop-shadow(0 10px 6px rgba(0,0,0,0.45));
+}
+
+.v-goose-anim.walking {
+  animation: waddle 0.28s infinite alternate ease-in-out;
+}
+
+.v-goose-anim.working {
+  animation: bob 0.75s infinite;
+}
+
+.v-goose-hidden {
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* Custom spin animation for gears and wrenches */
+.anim-spin {
+  animation: spin-gear 4s infinite linear;
+}
+
+@keyframes spin-gear {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+/* Status alerts and bubbles */
+.v-status-alert {
+  animation: pulse-alert 1.8s infinite ease-in-out;
+  transform-origin: 48px 18px;
+}
+
+@keyframes pulse-alert {
+  0%, 100% { transform: scale(0.92); }
+  50% { transform: scale(1.12); }
+}
+
+@keyframes waddle {
+  from { transform: rotate(-7deg); }
+  to { transform: rotate(7deg); }
+}
+
+@keyframes bob {
+  0%, 100% { transform: scaleY(1); }
+  50% { transform: scaleY(0.88) translateY(3.5px); }
+}
+
+/* Smoke puff effects */
+.anim-smoke {
+  animation: float-up 2.6s infinite linear;
+}
+.anim-smoke:nth-child(2) {
+  animation-delay: 1.3s;
+}
+@keyframes float-up {
+  0% { transform: translateY(0) scale(0.9); opacity: 0.8; }
+  100% { transform: translateY(-35px) scale(1.6); opacity: 0; }
+}
+
+/* Blinking beacons & searchlights */
+.anim-flicker {
+  animation: flicker 0.7s infinite alternate;
+}
+@keyframes flicker {
+  0% { opacity: 0.75; }
+  100% { opacity: 1; filter: brightness(1.4); }
+}
+
+.anim-fountain {
+  animation: fountain-spray 1.6s infinite alternate ease-in-out;
+  transform-origin: 40px 40px;
+}
+@keyframes fountain-spray {
+  0% { transform: scaleY(0.95); opacity: 0.65; }
+  100% { transform: scaleY(1.22); opacity: 0.95; }
+}
+
+/* Ripple effects */
+.anim-ripple {
+  transform-origin: 20px 20px;
+  animation: ripple 2.6s infinite linear;
+}
+.anim-ripple-delay {
+  transform-origin: 20px 20px;
+  animation: ripple 2.6s infinite linear;
+  animation-delay: 1.3s;
+}
+@keyframes ripple {
+  0% { transform: scale(0.4); opacity: 0.85; }
+  100% { transform: scale(1.6); opacity: 0; }
+}
+
+.anim-swim-bob {
+  animation: swim-bob 2.2s infinite alternate ease-in-out;
+}
+@keyframes swim-bob {
+  0% { transform: translate(-10px, -20px) rotate(-3deg); }
+  100% { transform: translate(-10px, -17px) rotate(3deg); }
+}
+
+.anim-wander {
+  animation: wander 9s infinite alternate ease-in-out;
+}
+@keyframes wander {
+  0% { transform: translateX(-6px); }
+  100% { transform: translateX(16px); }
+}
+
+.anim-farm-wander {
+  animation: farm-wander 25s infinite linear;
+}
+@keyframes farm-wander {
+  0%   { transform: translate(0px, 0px) scaleX(1); }
+  20%  { transform: translate(200px, 0px) scaleX(1); }
+  22%  { transform: translate(200px, 40px) scaleX(-1); }
+  42%  { transform: translate(0px, 40px) scaleX(-1); }
+  44%  { transform: translate(0px, 80px) scaleX(1); }
+  64%  { transform: translate(200px, 80px) scaleX(1); }
+  66%  { transform: translate(200px, 120px) scaleX(-1); }
+  86%  { transform: translate(0px, 120px) scaleX(-1); }
+  88%  { transform: translate(0px, 0px) scaleX(1); }
+  100% { transform: translate(0px, 0px) scaleX(1); }
+}
+
+/* Speech bubbles and text pops */
+.v-speech {
+  position: absolute;
+  bottom: 100%;
+  left: 50%;
+  transform: translate(-50%, -10px);
+  background: #FFFDE7;
+  color: #212121;
+  border: 2px solid #5D4037;
+  padding: 6px 10px;
+  border-radius: 8px;
+  font-size: 11px;
+  font-weight: bold;
+  white-space: normal;
+  word-wrap: break-word;
+  max-width: 180px;
+  width: max-content;
+  box-shadow: 3px 3px 0 rgba(0,0,0,0.4);
+  animation: pop 0.22s cubic-bezier(0.175, 0.885, 0.32, 1.275) forwards;
+  z-index: 100;
+  pointer-events: none;
+}
+
+.v-speech::after {
+  content: '';
+  position: absolute;
+  bottom: -8px;
+  left: 50%;
+  margin-left: -5px;
+  border-width: 5px 5px 0 0;
+  border-style: solid;
+  border-color: #5D4037 transparent transparent transparent;
+}
+
+.v-speech-inner {
+  display: contents;
+}
+
+.v-speech-inner::after {
+  content: '';
+  position: absolute;
+  bottom: -4px;
+  left: 50%;
+  margin-left: -3px;
+  border-width: 3px 3px 0 0;
+  border-style: solid;
+  border-color: #FFFDE7 transparent transparent transparent;
+  z-index: 101;
+}
+
+@keyframes pop {
+  0% { transform: translate(-50%, 0px) scale(0); }
+  100% { transform: translate(-50%, -10px) scale(1); }
+}
+
+.v-nameplate {
+  display: inline-block;
+  background: rgba(18, 10, 5, 0.85);
+  color: #FFF;
+  font-size: 9px;
+  font-weight: bold;
+  padding: 1.5px 5px;
+  border: 1px solid #B87333;
+  border-radius: 4px;
+  white-space: nowrap;
+  box-shadow: 0 2px 4px rgba(0,0,0,0.3);
+  pointer-events: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .v-goose-anim, .anim-smoke, .anim-flicker, .anim-fountain, .anim-ripple, .anim-ripple-delay, .anim-swim-bob, .anim-wander, .anim-farm-wander {
+    animation: none !important;
+  }
+}
+
+/* Town Map Mode panel overrides to allow showing the agent log drawer as a premium floating side drawer on the right */
+.panels.view-town-mode > .panel:not(#agent-log-drawer) {
+  display: none !important;
+}
+.panels.view-town-mode {
+  display: block;
+}
+
+.panels.view-town-mode > #agent-log-drawer {
+  position: fixed;
+  top: 70px;
+  right: 20px;
+  width: 480px;
+  max-width: calc(100vw - 40px);
+  height: calc(100vh - 90px);
+  z-index: 1000;
+  box-shadow: -10px 10px 30px rgba(0, 0, 0, 0.7);
+  background: rgba(18, 10, 5, 0.95);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 2px solid #B87333; /* premium copper border */
+  border-radius: 8px;
+  animation: slideInRight 0.3s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+.panels.view-town-mode > #agent-log-drawer:not([style*="display: none"]) {
+  display: flex !important;
+  flex-direction: column;
+}
+
+/* Ensure inside elements scroll correctly with viewport-relative height */
+.panels.view-town-mode > #agent-log-drawer .log-drawer-body {
+  flex: 1;
+  max-height: none; /* override default max-height */
+  overflow-y: auto;
+}
+
+@keyframes slideInRight {
+  from {
+    transform: translateX(100%);
+    opacity: 0;
+  }
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}

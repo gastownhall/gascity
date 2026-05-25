@@ -25,6 +25,10 @@ import {
 import { renderSupervisorOverview } from "./panels/supervisor";
 import { installSharedModals } from "./modals";
 import { createRefreshScheduler } from "./refresh_scheduler";
+import { renderTownMap, updateAndRenderMap, setMapPanelVisible } from "./panels/map";
+
+let viewMode: "grid" | "town" = "grid";
+
 
 const CITY_SCOPED_PANEL_IDS = [
   "convoy-panel",
@@ -102,6 +106,15 @@ function setConnectionBadge(status: "connecting" | "live" | "reconnecting"): voi
   el.classList.add(`connection-${status}`);
 }
 
+function installViewToggle(): void {
+  const btn = byId("toggle-view-btn");
+  if (!btn) return;
+  btn.addEventListener("click", () => {
+    viewMode = viewMode === "grid" ? "town" : "grid";
+    void refreshVisibleResources(true);
+  });
+}
+
 function installInteractions(): void {
   installPanelAffordances();
   installSharedModals();
@@ -112,6 +125,7 @@ function installInteractions(): void {
   installActivityInteractions();
   installAdminInteractions();
   installCommandPalette({ refreshAll });
+  installViewToggle();
 }
 
 async function boot(): Promise<void> {
@@ -244,6 +258,38 @@ async function refreshVisibleResources(force = false): Promise<void> {
   const status = currentCityStatus();
   const canFetchCity = canFetchCityScopedResources(status);
   syncCityScopedControls(canFetchCity);
+
+  const toggleBtn = byId("toggle-view-btn") as HTMLButtonElement | null;
+  const hasCity = cityScope() !== "";
+  if (toggleBtn) {
+    if (hasCity && canFetchCity) {
+      toggleBtn.style.display = "";
+      toggleBtn.textContent = viewMode === "town" ? "🏭 Grid View" : "🗺️ Town Map";
+    } else {
+      toggleBtn.style.display = "none";
+      viewMode = "grid";
+      toggleBtn.textContent = "🗺️ Town Map";
+    }
+  }
+
+  const panels = document.querySelector(".panels") as HTMLElement | null;
+  const village = byId("village-container");
+  if (viewMode === "town" && canFetchCity) {
+    if (panels) {
+      panels.classList.add("view-town-mode");
+      panels.style.display = "";
+    }
+    if (village) village.style.display = "block";
+    setMapPanelVisible(true);
+  } else {
+    if (panels) {
+      panels.classList.remove("view-town-mode");
+      panels.style.display = "";
+    }
+    if (village) village.style.display = "none";
+    setMapPanelVisible(false);
+  }
+
   if (isKnownUnavailableCity(status)) {
     resetCityScopedResourceViews();
   }
@@ -263,6 +309,12 @@ async function refreshVisibleResources(force = false): Promise<void> {
     queueRefresh(tasks, dirty, "mail", () => renderMail());
     queueRefresh(tasks, dirty, "convoys", () => renderConvoys());
     queueRefresh(tasks, dirty, "admin", () => renderAdminPanels());
+    if (viewMode === "town") {
+      if (force || dirty.has("crew") || dirty.has("status") || dirty.has("issues")) {
+        renderTownMap();
+        tasks.push(updateAndRenderMap());
+      }
+    }
   }
 
   const results = await Promise.allSettled(tasks);
