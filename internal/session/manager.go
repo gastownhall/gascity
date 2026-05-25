@@ -813,6 +813,27 @@ func (m *Manager) Suspend(id string) error {
 
 // RequestFreshRestart marks a session for a controller-owned fresh restart
 // without closing its bead or clearing resume metadata immediately.
+//
+// In addition to flagging the bead, this clears the provider-identity spawn
+// metadata (command, resume_flag, resume_style, resume_command,
+// continuation_epoch) so the next reconcile tick re-materializes them from
+// the current agent.toml/provider spec. Without this, an edit to agent.toml
+// between two `gc session reset` invocations (e.g. switching wake_mode from
+// "resume" to "fresh", or changing the spawn command) is not honored on the
+// next wake because the bead still carries the previous resolved values.
+//
+// session_key, started_config_hash, started_live_hash, and live_hash are
+// deliberately PRESERVED here. These fields participate in the
+// resume-continuity contract enforced by the controller-side reset path
+// (see resetConfiguredNamedSessionForConfigDrift and the cmd-level
+// TestCmdSessionReset_RequestsFreshRestartWithController test): the
+// reconciler decides on the next tick whether the prior conversation is
+// still resumable by hash-comparing the started_config_hash. A new
+// provider spec with an empty ResumeFlag (the wake_mode="fresh" case)
+// makes the resume_flag refill a no-op, so the reconstructed command
+// won't carry --resume even though session_key persists; for resume-
+// capable providers with matching hashes, the session_key is reused so
+// the wake is `--resume <prior-key>` rather than `--session-id <new>`.
 func (m *Manager) RequestFreshRestart(id string) error {
 	return withSessionMutationLock(id, func() error {
 		if _, _, err := m.sessionBead(id); err != nil {
@@ -821,6 +842,17 @@ func (m *Manager) RequestFreshRestart(id string) error {
 		return m.store.SetMetadataBatch(id, map[string]string{
 			"restart_requested":          "true",
 			"continuation_reset_pending": "true",
+			// Provider-identity spawn metadata: cleared so the reconciler
+			// refills from the current agent.toml/provider spec on the
+			// next tick. Empty values in the new spec stay empty
+			// (resume_flag is only refilled when non-empty in the spec),
+			// which is what flips a wake_mode="fresh" agent from
+			// `claude --resume <key>` to a bare spawn command.
+			"command":            "",
+			"resume_flag":        "",
+			"resume_style":       "",
+			"resume_command":     "",
+			"continuation_epoch": "",
 		})
 	})
 }
