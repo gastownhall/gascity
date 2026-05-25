@@ -1248,6 +1248,32 @@ func (s *BdStore) CloseAll(ids []string, metadata map[string]string) (int, error
 	return len(ids), nil
 }
 
+// CloseAllWithReason closes multiple beads with one reasoned bd close command
+// without pre-writing metadata on each bead.
+func (s *BdStore) CloseAllWithReason(ids []string, reason string) (int, error) {
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	reason = strings.TrimSpace(reason)
+	_, err := s.runner(s.dir, "bd", bdCloseArgs(reason, ids...)...)
+	if err != nil {
+		closed := 0
+		var fallbackErr error
+		for _, id := range ids {
+			if closeErr := s.close(id, reason); closeErr == nil {
+				closed++
+			} else {
+				fallbackErr = errors.Join(fallbackErr, closeErr)
+			}
+		}
+		if fallbackErr != nil {
+			return closed, errors.Join(fmt.Errorf("bd close batch: %w", err), fallbackErr)
+		}
+		return closed, nil
+	}
+	return len(ids), nil
+}
+
 // Close sets a bead's status to closed via bd close. If the bead already has
 // metadata.close_reason, the trimmed value is forwarded as bd close --reason.
 // Idempotent: closing an already-closed bead returns nil.

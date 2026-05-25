@@ -1163,6 +1163,37 @@ func TestBdStoreCloseAllForwardsCloseReason(t *testing.T) {
 	}
 }
 
+func TestBdStoreCloseAllWithReasonSkipsMetadataWrites(t *testing.T) {
+	const reason = "mail archive: bounded advisory cleanup"
+	commands := make([]string, 0, 1)
+	runner := func(_ string, name string, args ...string) ([]byte, error) {
+		cmd := name + " " + strings.Join(args, " ")
+		commands = append(commands, cmd)
+		if strings.HasPrefix(cmd, "bd update ") {
+			t.Fatalf("CloseAllWithReason must not pre-write metadata: %s", cmd)
+		}
+		if cmd != "bd close --force --json --reason "+reason+" bd-1 bd-2" {
+			return nil, fmt.Errorf("unexpected command: %s", cmd)
+		}
+		return []byte(`[
+			{"id":"bd-1","title":"one","status":"closed","issue_type":"message","created_at":"2025-01-15T10:30:00Z"},
+			{"id":"bd-2","title":"two","status":"closed","issue_type":"message","created_at":"2025-01-15T10:30:00Z"}
+		]`), nil
+	}
+
+	s := beads.NewBdStore("/city", runner)
+	closed, err := s.CloseAllWithReason([]string{"bd-1", "bd-2"}, reason)
+	if err != nil {
+		t.Fatalf("CloseAllWithReason: %v", err)
+	}
+	if closed != 2 {
+		t.Fatalf("closed = %d, want 2", closed)
+	}
+	if len(commands) != 1 {
+		t.Fatalf("commands = %v, want exactly one close command", commands)
+	}
+}
+
 // TestBdStoreCloseAllOmitsReasonWhenAbsent verifies that when no
 // close_reason is present in the metadata map, CloseAll does not pass
 // --reason and lets bd assign its default. Preserves backward

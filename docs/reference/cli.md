@@ -1645,13 +1645,23 @@ Use this to dismiss messages without reading them. Each message is marked
 as closed and will no longer appear in mail check or inbox results. When
 multiple IDs are passed, they are archived in a single batch round-trip.
 
+For large advisory backlogs, use --to with --subject-prefix, --subject-contains,
+or --from to archive a bounded matching slice without enumerating IDs by hand.
+
 ```
 gc mail archive <id>... [flags]
 ```
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
+| `--dry-run` | bool |  | list matching messages without archiving them |
+| `--from` | string |  | archive matching unread messages from this exact sender |
+| `--include-read` | bool |  | include read-but-open messages when selecting by filter |
 | `--json` | bool |  | emit JSONL result |
+| `--limit` | int | `100` | maximum matching messages to archive in this run |
+| `--subject-contains` | string |  | archive matching unread messages whose subject contains this text |
+| `--subject-prefix` | string |  | archive matching unread messages whose subject starts with this text |
+| `--to` | string |  | archive matching unread messages addressed to this recipient |
 
 ## gc mail check
 

@@ -2547,6 +2547,68 @@ func TestMailArchiveMultiPartialFailure(t *testing.T) {
 	}
 }
 
+func TestMailArchiveSelectedIsFilteredAndBounded(t *testing.T) {
+	store := beads.NewMemStore()
+	mp := beadmail.New(store)
+	first, err := mp.Send("human", "operator", "Dolt health advisory one", "archive me")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := mp.Send("human", "operator", "Dolt health advisory two", "archive later")
+	if err != nil {
+		t.Fatal(err)
+	}
+	readMatch, err := mp.Send("human", "operator", "Dolt health advisory read", "leave read")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := mp.MarkRead(readMatch.ID); err != nil {
+		t.Fatal(err)
+	}
+	nonMatch, err := mp.Send("human", "operator", "Human handoff", "preserve")
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherRecipient, err := mp.Send("human", "other", "Dolt health advisory other", "preserve")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doMailArchiveSelected(mp, events.Discard, mailArchiveSelectOptions{
+		Recipient:       "operator",
+		SubjectPrefix:   "Dolt health",
+		Limit:           1,
+		CaseInsensitive: true,
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doMailArchiveSelected = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Archived message "+first.ID) {
+		t.Fatalf("stdout = %q, want archive confirmation for %s", stdout.String(), first.ID)
+	}
+	if strings.Contains(stdout.String(), second.ID) {
+		t.Fatalf("stdout = %q, did not expect second match past limit", stdout.String())
+	}
+
+	status := func(id string) string {
+		t.Helper()
+		b, err := store.Get(id)
+		if err != nil {
+			t.Fatalf("Get(%s): %v", id, err)
+		}
+		return b.Status
+	}
+	if got := status(first.ID); got != "closed" {
+		t.Fatalf("first status = %q, want closed", got)
+	}
+	for _, id := range []string{second.ID, readMatch.ID, nonMatch.ID, otherRecipient.ID} {
+		if got := status(id); got != "open" {
+			t.Fatalf("message %s status = %q, want open", id, got)
+		}
+	}
+}
+
 // --- gc mail send --notify ---
 
 func TestMailSendNotifySuccess(t *testing.T) {
