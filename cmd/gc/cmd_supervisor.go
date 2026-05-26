@@ -1764,8 +1764,8 @@ func reconcileCities(
 		cs.pokeCh = pokeCh
 		cs.configDirty = configDirty
 		cs.services = cityRuntime.svc
-		cs.startBeadEventWatcher(cityCtx)
 		cityRuntime.setControllerState(cs)
+		cs.startBeadEventWatcher(cityCtx)
 
 		// Run pool on_boot hooks (same as runController does).
 		if err := runPostPrepareStep("running_pool_on_boot", func() error {

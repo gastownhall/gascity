@@ -8,10 +8,13 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/pidutil"
 )
+
+var atomicWriteNonce uint64
 
 // WriteFileAtomic writes data to path atomically using a temp file + rename.
 // The temp file is created in the same directory as path to ensure the rename
@@ -19,7 +22,8 @@ import (
 // are enforced on the temp file before the rename so the final path is never
 // visible with a wider mode (no write-then-chmod window).
 func WriteFileAtomic(fs FS, path string, data []byte, perm os.FileMode) error {
-	suffix := strconv.Itoa(os.Getpid()) + "." + strconv.FormatInt(time.Now().UnixNano(), 36)
+	nonce := time.Now().UnixNano() + int64(atomic.AddUint64(&atomicWriteNonce, 1))
+	suffix := strconv.Itoa(os.Getpid()) + "." + strconv.FormatInt(nonce, 36)
 	tmp := path + ".tmp." + suffix
 	if err := fs.WriteFile(tmp, data, perm); err != nil {
 		return fmt.Errorf("writing temp file: %w", err)
@@ -85,6 +89,14 @@ func parseAtomicTempPID(suffix string) (int, bool) {
 	pid, err := strconv.Atoi(suffix[:dot])
 	if err != nil || pid <= 0 {
 		return 0, false
+	}
+	if suffix[dot+1:] == "" {
+		return 0, false
+	}
+	for _, r := range suffix[dot+1:] {
+		if ('0' > r || r > '9') && ('a' > r || r > 'z') {
+			return 0, false
+		}
 	}
 	if _, err := strconv.ParseInt(suffix[dot+1:], 36, 64); err != nil {
 		return 0, false

@@ -1214,6 +1214,7 @@ gc event emit <type> [flags]
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--actor` | string |  | Actor name (default: $GC_ALIAS, else $GC_AGENT, else $GC_SESSION_ID, else "human") |
+| `--bead-payload` | string |  | Best-effort bead ID fallback for hook payloads |
 | `--json` | bool |  | emit JSON summary |
 | `--message` | string |  | Event message |
 | `--payload` | string |  | JSON payload to attach to the event |
