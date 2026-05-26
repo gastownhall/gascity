@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"errors"
 	"fmt"
 	"io"
@@ -38,6 +39,17 @@ var (
 	supervisorCityErrorHook            = supervisorCityError
 	reloadSupervisorNoWaitHook         = reloadSupervisorNoWait
 )
+
+// assumeYesForSupervisorCycle is set by the --yes flag on commands that
+// may trigger a cross-city supervisor reconcile (currently `gc init` and
+// `gc register`). When true, confirmCrossCitySupervisorImpact still prints
+// the warning (audit trail) but skips the interactive prompt.
+var assumeYesForSupervisorCycle bool
+
+// confirmCrossCitySupervisorImpactStdin is the input source for the
+// interactive confirmation prompt. Defaults to os.Stdin; tests override
+// to inject canned responses.
+var confirmCrossCitySupervisorImpactStdin io.Reader = os.Stdin
 
 type supervisorRegistry interface {
 	List() ([]supervisor.CityEntry, error)
@@ -188,6 +200,78 @@ func ensureNoStandaloneController(cityPath string) (int, error) {
 	return 0, err
 }
 
+// otherRegisteredCities returns the cities currently in the supervisor
+// registry whose normalized path is not the given target. Used to assess
+// blast radius before operations that may cycle the shared supervisor.
+// Returns nil + the registry error on failure so callers can choose to
+// fail-open (proceed without warning) on a registry read failure rather
+// than block valid operations.
+func otherRegisteredCities(targetCityPath string) ([]supervisor.CityEntry, error) {
+	reg := newSupervisorRegistry()
+	entries, err := reg.List()
+	if err != nil {
+		return nil, err
+	}
+	target := normalizePathForCompare(targetCityPath)
+	var others []supervisor.CityEntry
+	for _, e := range entries {
+		if normalizePathForCompare(e.Path) != target {
+			others = append(others, e)
+		}
+	}
+	return others, nil
+}
+
+// confirmCrossCitySupervisorImpact warns the operator when registering or
+// reconciling cityPath is about to interact with a supervisor that is
+// currently managing other registered cities. The reconcile path normally
+// uses a graceful socket reload (same supervisor PID), but escalates to a
+// non-graceful kill-and-respawn when the supervisor is absent, drifted
+// from the local binary, or in a zombie state after a recent
+// `gc supervisor stop`. The new supervisor inherits all previously-
+// registered cities, cycling their in-flight work without prior notice.
+//
+// This guard makes the blast radius visible: it enumerates other registered
+// cities and asks the operator to confirm before any registry mutation or
+// reload command is issued. Single-city and supervisor-absent cases skip
+// the prompt (nothing at risk). The --yes flag bypasses the prompt but
+// still prints the warning for the audit trail.
+//
+// Returns true to proceed, false to abort.
+//
+// The registry is checked BEFORE supervisorAliveHook so that single-city
+// callers (the common case, including most tests with isolated GC_HOME)
+// don't burn a probe call to the alive hook. This keeps the guard's
+// observable side effects scoped to the actual multi-city case it
+// protects against.
+func confirmCrossCitySupervisorImpact(cityPath string, _, stderr io.Writer) bool {
+	others, err := otherRegisteredCities(cityPath)
+	if err != nil || len(others) == 0 {
+		return true
+	}
+	if supervisorAliveHook() == 0 {
+		return true
+	}
+	fmt.Fprintf(stderr, "Warning: this operation reconciles the supervisor managing %d other registered city(ies):\n", len(others)) //nolint:errcheck // best-effort stderr
+	for _, e := range others {
+		fmt.Fprintf(stderr, "  - %s (%s)\n", e.EffectiveName(), e.Path) //nolint:errcheck // best-effort stderr
+	}
+	fmt.Fprintln(stderr, "Reload normally uses a graceful socket reload (same supervisor PID), but escalates to a non-graceful kill+respawn") //nolint:errcheck // best-effort stderr
+	fmt.Fprintln(stderr, "if the supervisor is absent, drifted, or in a zombie state — which cycles those cities' in-flight work.")           //nolint:errcheck // best-effort stderr
+	if assumeYesForSupervisorCycle {
+		fmt.Fprintln(stderr, "Continuing (--yes).") //nolint:errcheck // best-effort stderr
+		return true
+	}
+	fmt.Fprint(stderr, "Continue? [y/N]: ") //nolint:errcheck // best-effort stderr
+	br := bufio.NewReader(confirmCrossCitySupervisorImpactStdin)
+	line := readLine(br)
+	if strings.EqualFold(line, "y") || strings.EqualFold(line, "yes") {
+		return true
+	}
+	fmt.Fprintln(stderr, "Aborted.") //nolint:errcheck // best-effort stderr
+	return false
+}
+
 func registerCityWithSupervisor(cityPath string, stdout, stderr io.Writer, commandName string, showProgress bool) int {
 	return registerCityWithSupervisorNamed(cityPath, "", stdout, stderr, commandName, showProgress)
 }
@@ -199,6 +283,10 @@ func supervisorAlreadyManagesCity(cityPath string) bool {
 
 func registerCityWithSupervisorNamed(cityPath, nameOverride string, stdout, stderr io.Writer, commandName string, showProgress bool) int {
 	cityPath = normalizePathForCompare(cityPath)
+	if !confirmCrossCitySupervisorImpact(cityPath, stdout, stderr) {
+		fmt.Fprintf(stderr, "%s: aborted by user (pass --yes to bypass the cross-city supervisor cycle check)\n", commandName) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	if !supervisorAlreadyManagesCity(cityPath) {
 		if pid, err := ensureNoStandaloneController(cityPath); err != nil {
 			if errors.Is(err, errControllerAlreadyRunning) {
