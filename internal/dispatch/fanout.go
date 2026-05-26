@@ -89,7 +89,7 @@ func processFanout(store beads.Store, bead beads.Bead, opts ProcessOptions) (Con
 
 	items, err := resolveFanoutItems(source, bead.Metadata["gc.for_each"])
 	if err != nil {
-		return ControlResult{}, fmt.Errorf("%s: resolving items: %w", bead.ID, err)
+		return ControlResult{}, fmt.Errorf("%w: %s: resolving items: %w", ErrControlGraphMalformed, bead.ID, err)
 	}
 	if len(items) == 0 {
 		if err := setOutcomeAndClose(store, bead.ID, "pass"); err != nil {
@@ -111,7 +111,7 @@ func processFanout(store beads.Store, bead beads.Bead, opts ProcessOptions) (Con
 
 	bondVars, err := parseFanoutVars(bead.Metadata["gc.bond_vars"])
 	if err != nil {
-		return ControlResult{}, fmt.Errorf("%s: parsing gc.bond_vars: %w", bead.ID, err)
+		return ControlResult{}, fmt.Errorf("%w: %s: parsing gc.bond_vars: %w", ErrControlGraphMalformed, bead.ID, err)
 	}
 	mode := bead.Metadata["gc.fanout_mode"]
 	if mode == "" {

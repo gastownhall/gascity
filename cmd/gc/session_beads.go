@@ -63,6 +63,8 @@ func syncSessionCachedState(sessionName string, existing beads.Bead, exists bool
 		switch session.State(strings.TrimSpace(existing.Metadata["state"])) {
 		case "", session.StateActive, session.StateAwake:
 			return string(session.StateActive)
+		case session.StateStartPending:
+			return string(session.StateStartPending)
 		case session.StateCreating:
 			return string(session.StateCreating)
 		case session.StateAsleep, session.StateSuspended, session.StateDraining, session.StateArchived, session.StateQuarantined:
@@ -505,11 +507,56 @@ func retiredSessionFallbackRoute(b beads.Bead) string {
 }
 
 func sessionAssignmentIdentifiers(sessionBead beads.Bead) []string {
-	raw := []string{
+	return compactSessionAssignmentIdentifiers(sessionAssignmentIdentifierRaw(sessionBead))
+}
+
+// sessionAssignmentIdentifiersForConfig extends the persisted session-bead
+// identifiers with the configured named-session identity when a recovered bead
+// is missing identity metadata. Keep this fallback aligned with
+// sessionAssigneeMatches and compute_awake_bridge's AwakeNamedSession fields.
+func sessionAssignmentIdentifiersForConfig(sessionBead beads.Bead, cfg *config.City) []string {
+	raw := sessionAssignmentIdentifierRaw(sessionBead)
+	if cfg == nil ||
+		strings.TrimSpace(sessionBead.Metadata[namedSessionMetadataKey]) != "true" ||
+		strings.TrimSpace(sessionBead.Metadata[namedSessionIdentityMetadata]) != "" {
+		return compactSessionAssignmentIdentifiers(raw)
+	}
+
+	sessionName := strings.TrimSpace(sessionBead.Metadata["session_name"])
+	if sessionName == "" {
+		return compactSessionAssignmentIdentifiers(raw)
+	}
+	template := normalizedSessionTemplate(sessionBead, cfg)
+	if template == "" {
+		template = strings.TrimSpace(sessionBead.Metadata["template"])
+	}
+	cityName := config.EffectiveCityName(cfg, "")
+	for i := range cfg.NamedSessions {
+		identity := cfg.NamedSessions[i].QualifiedName()
+		if identity == "" {
+			continue
+		}
+		if config.NamedSessionRuntimeName(cityName, cfg.Workspace, identity) != sessionName {
+			continue
+		}
+		backingTemplate := cfg.NamedSessions[i].TemplateQualifiedName()
+		if template != "" && backingTemplate != "" && template != backingTemplate {
+			continue
+		}
+		raw = append(raw, identity)
+	}
+	return compactSessionAssignmentIdentifiers(raw)
+}
+
+func sessionAssignmentIdentifierRaw(sessionBead beads.Bead) []string {
+	return []string{
 		strings.TrimSpace(sessionBead.ID),
 		strings.TrimSpace(sessionBead.Metadata["session_name"]),
 		strings.TrimSpace(sessionBead.Metadata[namedSessionIdentityMetadata]),
 	}
+}
+
+func compactSessionAssignmentIdentifiers(raw []string) []string {
 	seen := make(map[string]struct{}, len(raw))
 	identifiers := make([]string, 0, len(raw))
 	for _, id := range raw {
@@ -816,7 +863,7 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 		}
 		canonical, ok := bySessionName[sn]
 		if ok && canonical.ID != b.ID {
-			if closeSessionBeadIfUnassigned(store, rigStores, b, "duplicate", clk.Now().UTC(), stderr) {
+			if closeSessionBeadIfUnassigned(store, rigStores, cfg, b, "duplicate", clk.Now().UTC(), stderr) {
 				openBeads[i].Status = "closed"
 			}
 		}
@@ -917,7 +964,7 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 					if strings.TrimSpace(open.Metadata["session_name"]) != sn {
 						continue
 					}
-					if closeSessionBeadIfUnassigned(store, rigStores, open, "duplicate", now, stderr) {
+					if closeSessionBeadIfUnassigned(store, rigStores, cfg, open, "duplicate", now, stderr) {
 						openBeads[i].Status = "closed"
 					}
 				}
@@ -939,7 +986,7 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 			// Create a new session bead.
 			createState := state
 			if createState != "active" {
-				createState = "creating"
+				createState = string(session.StateStartPending)
 			}
 			instanceToken := session.NewInstanceToken()
 			meta := map[string]string{
@@ -1801,6 +1848,109 @@ func cleanupDeadRuntimeSessionCorpses(
 	return cleaned
 }
 
+// reapRuntimesBoundToClosedBeads stops live runtime sessions whose
+// GC_SESSION_ID identifies a session bead that has already been closed.
+//
+// This heals the case where a session_name (or its public alias) is reassigned
+// from one bead to another — e.g. a named session is retired and the same
+// identity is re-minted as a pool slot, or the two race over the alias and the
+// loser is archived. The losing bead is closed, but its tmux runtime can keep
+// running, still stamped with the closed bead's GC_SESSION_ID. The session_name
+// is now owned by a different, live bead, so:
+//   - `gc session attach <alias>` resolves to the live bead but lands on the
+//     stale runtime (matched by name), which exits on the next interaction
+//     because its own bead is gone; and
+//   - the live bead cannot (re)bind the name because the corpse still holds it.
+//
+// cleanupDeadRuntimeSessionCorpses does not catch this: it walks *open* beads
+// and only stops runtimes whose pane is already dead. Here the bead is *closed*
+// and the runtime is very much alive, so we walk the other direction — over
+// live runtimes — and reap any whose owning bead is confirmed closed.
+//
+// Safety: a runtime is only reaped when its GC_SESSION_ID names a bead the store
+// confirms is closed. A runtime without a readable GC_SESSION_ID, or one whose
+// bead is still open or cannot be fetched (e.g. another rig, or a transient
+// store error), is left untouched. Active drains are left to the drainTracker.
+func reapRuntimesBoundToClosedBeads(
+	store beads.Store,
+	sessionBeads *sessionBeadSnapshot,
+	dt *drainTracker,
+	sp runtime.Provider,
+	stderr io.Writer,
+) int {
+	if store == nil || sp == nil {
+		return 0
+	}
+	if stderr == nil {
+		stderr = io.Discard
+	}
+	visible, err := sp.ListRunning("")
+	partialList := runtime.IsPartialListError(err)
+	if err != nil && !partialList {
+		fmt.Fprintf(stderr, "session reconciler: listing runtime sessions for closed-bead reap: %v\n", err) //nolint:errcheck
+		return 0
+	}
+	if partialList {
+		fmt.Fprintf(stderr, "session reconciler: listing runtime sessions partially failed for closed-bead reap; checking %d visible session(s): %v\n", len(visible), err) //nolint:errcheck
+	}
+	if len(visible) == 0 {
+		return 0
+	}
+
+	reaped := 0
+	seen := make(map[string]bool, len(visible))
+	for _, name := range visible {
+		name = strings.TrimSpace(name)
+		if name == "" || seen[name] {
+			continue
+		}
+		seen[name] = true
+
+		// Attribute the runtime to a bead via GC_SESSION_ID. Without it we
+		// cannot tell which bead owns the runtime, so we leave it alone.
+		liveID, err := sp.GetMeta(name, "GC_SESSION_ID")
+		if err != nil {
+			continue
+		}
+		liveID = strings.TrimSpace(liveID)
+		if liveID == "" {
+			continue
+		}
+
+		// A runtime whose bead is still open is healthy (or is mid-wake and
+		// will be); the snapshot holds only open beads, so a hit means leave it.
+		if _, ok := sessionBeads.FindByID(liveID); ok {
+			continue
+		}
+
+		// The bead is not open. Confirm it is actually closed before reaping —
+		// a missing or unreadable record must not trigger a stop.
+		bead, err := store.Get(liveID)
+		if err != nil {
+			continue
+		}
+		if bead.Status != "closed" {
+			continue
+		}
+
+		// Teardown ordering for draining beads belongs to the drainTracker.
+		if dt != nil && dt.get(liveID) != nil {
+			continue
+		}
+
+		if err := sp.Stop(name); err != nil {
+			if runtime.IsSessionGone(err) {
+				continue
+			}
+			fmt.Fprintf(stderr, "session reconciler: reaping runtime %q bound to closed bead %s: %v\n", name, liveID, err) //nolint:errcheck
+			continue
+		}
+		fmt.Fprintf(stderr, "session reconciler: reaped runtime %q bound to closed session bead %s\n", name, liveID) //nolint:errcheck
+		reaped++
+	}
+	return reaped
+}
+
 func closeSessionBeadIfRuntimeStoppedAndUnassigned(
 	store beads.Store,
 	rigStores map[string]beads.Store,
@@ -1815,7 +1965,7 @@ func closeSessionBeadIfRuntimeStoppedAndUnassigned(
 	if stderr == nil {
 		stderr = io.Discard
 	}
-	hasAssignedWork, err := sessionHasOpenAssignedWork(store, rigStores, b)
+	hasAssignedWork, err := sessionHasOpenAssignedWorkForConfig(store, rigStores, b, cfg)
 	if err != nil {
 		fmt.Fprintf(stderr, "session work guard: checking assigned work for %s: %v\n", b.ID, err) //nolint:errcheck
 		return false
@@ -1826,7 +1976,7 @@ func closeSessionBeadIfRuntimeStoppedAndUnassigned(
 	if !stopRuntimeBeforeSessionBeadMutation(store, sp, cfg, b, stopReason, stderr) {
 		return false
 	}
-	hasAssignedWork, err = sessionHasOpenAssignedWork(store, rigStores, b)
+	hasAssignedWork, err = sessionHasOpenAssignedWorkForConfig(store, rigStores, b, cfg)
 	if err != nil {
 		fmt.Fprintf(stderr, "session work guard: checking assigned work for %s: %v\n", b.ID, err) //nolint:errcheck
 		return false

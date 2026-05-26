@@ -50,6 +50,14 @@ Do NOT skip ahead. Do NOT claim steps done without actually doing them.
 On crash or restart, re-read your formula steps and determine where you
 left off from context (last completed action, git state, bead state).
 
+**Never use wide filesystem searches when a CLI command exists.** Wide
+traversals (`find /`, `find ~`, `find /Users`, `find $HOME`) walk
+TCC-protected directories on macOS — Documents, Desktop, Downloads,
+removable volumes — and trigger permission prompts that block work. If
+you don't know how to locate a formula, recipe, bead, mail, or Dolt
+state, the answer is a `gc` / `bd` introspection command, not a
+filesystem search. If no command exists for what you need, file a bead.
+
 ## Molecules — STOP, check BEFORE you start working
 
 **CRITICAL:** When you run `bd show` in step 4, look at the METADATA

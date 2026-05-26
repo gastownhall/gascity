@@ -1,10 +1,8 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"io"
-	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -15,12 +13,6 @@ import (
 	"github.com/gastownhall/gascity/internal/workspacesvc"
 	"github.com/spf13/cobra"
 )
-
-func jsonEncoder(w io.Writer) *json.Encoder {
-	enc := json.NewEncoder(w)
-	enc.SetIndent("", "  ")
-	return enc
-}
 
 func loadConfigCommandCityConfig(cityPath string) (*config.City, *config.Provenance, error) {
 	return loadCityConfigWithBuiltinPacks(cityPath, extraConfigFiles...)
@@ -390,8 +382,8 @@ func validateLegacyFormulaConfigRoutes(cfg *config.City) []string {
 	if len(paths) == 0 {
 		return nil
 	}
-	parser := formula.NewParser(paths...)
-	formulaNames := discoverFormulaNames(paths)
+	parser := formula.NewParser(paths...).SetSource(formula.SourceFromEnv())
+	formulaNames := discoverFormulaNamesFromSource(parser.Source(), paths)
 	agentTargets, namedTargets := formulaValidationTargets(cfg)
 	var errs []string
 	for _, name := range formulaNames {
@@ -436,19 +428,26 @@ func formulaValidationPaths(cfg *config.City) []string {
 	return paths
 }
 
-func discoverFormulaNames(paths []string) []string {
+// discoverFormulaNamesFromSource lists formula names through the same
+// Source the parser uses for loading. This keeps catalog discovery
+// consistent with ref-stable resolution (#2030 / PR #2537 Copilot
+// finding): when GC_FORMULA_REF is set, a name discovered via
+// working-tree ReadDir but absent at the ref would otherwise either
+// vanish silently from listings or surface a hard load error during
+// validation.
+func discoverFormulaNamesFromSource(src formula.Source, paths []string) []string {
+	if src == nil {
+		src = formula.FSSource{}
+	}
 	seen := make(map[string]struct{})
 	var names []string
 	for _, dir := range paths {
-		entries, err := os.ReadDir(dir)
+		entries, err := src.ListDir(dir)
 		if err != nil {
 			continue
 		}
 		for _, entry := range entries {
-			if entry.IsDir() {
-				continue
-			}
-			name, ok := formula.TrimTOMLFilename(entry.Name())
+			name, ok := formula.TrimTOMLFilename(entry)
 			if !ok {
 				continue
 			}
@@ -588,6 +587,9 @@ func explainAgent(w io.Writer, a *config.Agent, prov *config.Provenance) {
 	}
 	if a.StartCommand != "" {
 		explainField(w, "start_command", a.StartCommand, source)
+	}
+	if a.Lifecycle != "" {
+		explainField(w, "lifecycle", a.Lifecycle, source)
 	}
 	if a.Nudge != "" {
 		explainField(w, "nudge", a.Nudge, source)
@@ -817,8 +819,7 @@ func renderProviderExplainJSON(r config.ResolvedProvider, name string, stdout, s
 			"map_key_layer": r.Provenance.MapKeyLayer,
 		},
 	}
-	enc := jsonEncoder(stdout)
-	if err := enc.Encode(payload); err != nil {
+	if err := writeCLIJSONLine(stdout, payload); err != nil {
 		fmt.Fprintf(stderr, "gc config explain: json encode: %v\n", err) //nolint:errcheck
 		return 1
 	}

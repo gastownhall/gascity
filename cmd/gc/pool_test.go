@@ -688,21 +688,21 @@ func TestExpandSessionSetup_Empty(t *testing.T) {
 }
 
 func TestResolveSetupScript_Relative(t *testing.T) {
-	got := resolveSetupScript("scripts/setup.sh", "/home/user/city/packs/gastown", "/home/user/city")
+	got := config.ResolveSessionSetupScriptPath("/home/user/city", "/home/user/city/packs/gastown", "scripts/setup.sh")
 	if got != "/home/user/city/packs/gastown/scripts/setup.sh" {
 		t.Errorf("got %q, want absolute path", got)
 	}
 }
 
 func TestResolveSetupScript_DoubleSlashUsesCityRoot(t *testing.T) {
-	got := resolveSetupScript("//scripts/setup.sh", "/home/user/city/packs/gastown", "/home/user/city")
+	got := config.ResolveSessionSetupScriptPath("/home/user/city", "/home/user/city/packs/gastown", "//scripts/setup.sh")
 	if got != "/home/user/city/scripts/setup.sh" {
 		t.Errorf("got %q, want city-root path", got)
 	}
 }
 
 func TestResolveSetupScript_LegacyCityRelativeStillWorks(t *testing.T) {
-	got := resolveSetupScript("packs/gastown/scripts/setup.sh", "/home/user/city/packs/gastown", "/home/user/city")
+	got := config.ResolveSessionSetupScriptPath("/home/user/city", "/home/user/city/packs/gastown", "packs/gastown/scripts/setup.sh")
 	if got != "/home/user/city/packs/gastown/scripts/setup.sh" {
 		t.Errorf("got %q, want legacy city-root-relative path to remain supported", got)
 	}
@@ -722,21 +722,21 @@ func TestResolveSetupScript_LegacySharedCityRelativeFallback(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got := resolveSetupScript("packs/shared/scripts/setup.sh", sourceDir, cityPath)
+	got := config.ResolveSessionSetupScriptPath(cityPath, sourceDir, "packs/shared/scripts/setup.sh")
 	if got != cityScript {
 		t.Errorf("got %q, want legacy shared city-root-relative path to remain supported", got)
 	}
 }
 
 func TestResolveSetupScript_Absolute(t *testing.T) {
-	got := resolveSetupScript("/usr/local/bin/setup.sh", "/home/user/city/packs/gastown", "/home/user/city")
+	got := config.ResolveSessionSetupScriptPath("/home/user/city", "/home/user/city/packs/gastown", "/usr/local/bin/setup.sh")
 	if got != "/usr/local/bin/setup.sh" {
 		t.Errorf("got %q, want unchanged absolute path", got)
 	}
 }
 
 func TestResolveSetupScript_Empty(t *testing.T) {
-	got := resolveSetupScript("", "/home/user/city/packs/gastown", "/home/user/city")
+	got := config.ResolveSessionSetupScriptPath("/home/user/city", "/home/user/city/packs/gastown", "")
 	if got != "" {
 		t.Errorf("got %q, want empty", got)
 	}
@@ -814,6 +814,7 @@ func TestDeepCopyAgentCoversAllFields(t *testing.T) {
 		Session:                      "acp",
 		Provider:                     "claude",
 		StartCommand:                 "claude --dangerously",
+		Lifecycle:                    config.AgentLifecycleOneShot,
 		Args:                         []string{"--arg1"},
 		PromptMode:                   "flag",
 		PromptFlag:                   "--prompt",
@@ -853,6 +854,7 @@ func TestDeepCopyAgentCoversAllFields(t *testing.T) {
 		ResumeCommand:                "claude --resume {{.SessionKey}} --dangerously",
 		DependsOn:                    []string{"other-agent"},
 		WakeMode:                     "fresh",
+		TmuxAlias:                    "worker--{{.CityName}}",
 		Implicit:                     true,
 		DrainTimeout:                 "10m",
 		OnBoot:                       "echo boot",

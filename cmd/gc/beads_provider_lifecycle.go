@@ -664,6 +664,11 @@ func ensureBeadsProvider(cityPath string) error {
 
 		script := strings.TrimPrefix(provider, "exec:")
 		managedBDProvider := samePath(script, gcBeadsBdScriptPath(cityPath))
+		if managedBDProvider {
+			if err := standaloneBdDoltConflictIfPresent(cityPath); err != nil {
+				return err
+			}
+		}
 		providerEnv, envErr := providerLifecycleProcessEnvWithError(cityPath, provider)
 		if envErr != nil {
 			return envErr
@@ -1806,6 +1811,21 @@ func providerLifecycleProcessEnvFromBase(cityPath, provider string, env []string
 	if gcBin := resolveProviderLifecycleGCBinary(); gcBin != "" {
 		env = removeEnvKey(env, "GC_BIN")
 		env = append(env, "GC_BIN="+gcBin)
+	}
+	// Strip any inherited test-mode env unconditionally so a stray
+	// GC_MANAGED_DOLT_TEST_MODE=1 in a production parent shell can never
+	// reach child managed-dolt processes. Only Go test binaries
+	// (managedDoltTestMode()) get the variable re-injected. Gating on
+	// managedDoltTestModeEnabled() — which also honors the env var itself —
+	// would have re-injected the stray value, defeating the guard
+	// (gastownhall/gascity#2313 follow-up M1).
+	env = removeEnvKey(env, managedDoltTestModeEnv)
+	env = removeEnvKey(env, managedDoltTestParentPIDEnv)
+	if managedDoltTestMode() {
+		env = append(env,
+			managedDoltTestModeEnv+"=1",
+			managedDoltTestParentPIDEnv+"="+managedDoltTestParentPIDString(),
+		)
 	}
 	// Propagate archive_level from city config so the managed dolt
 	// server inherits it without shell-script changes.

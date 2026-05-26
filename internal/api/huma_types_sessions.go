@@ -35,8 +35,9 @@ func (s *SessionListInput) Resolve(ctx huma.Context) []error {
 // SessionGetInput is the Huma input for GET /v0/city/{cityName}/session/{id}.
 type SessionGetInput struct {
 	CityScope
-	ID   string `path:"id" doc:"Session ID, alias, or runtime session_name."`
-	Peek bool   `query:"peek" required:"false" doc:"Include last output preview."`
+	ID        string `path:"id" doc:"Session ID, alias, or runtime session_name."`
+	Peek      bool   `query:"peek" required:"false" doc:"Include last output preview."`
+	PeekLines int    `query:"peek_lines" required:"false" minimum:"0" maximum:"10000" doc:"Number of lines to include in the last output preview when peek=true. Defaults to 5."`
 }
 
 // sessionCreateBody is the request body for POST /v0/sessions.

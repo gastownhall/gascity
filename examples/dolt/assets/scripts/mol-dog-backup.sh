@@ -74,7 +74,7 @@ append_failed_db() {
 
 DOLT_VERSION="$(dolt version 2>/dev/null | awk 'NR == 1 {print $NF}' || true)"
 if ! dolt_version_at_least "$DOLT_VERSION" "$MIN_DOLT_BACKUP_VERSION"; then
-    gc mail send mayor/ \
+    gc mail send mayor/ --from controller \
         -s "Backup dog: dolt-too-old for backup sync [HIGH]" \
         -m "Skipping backup sync: dolt version ${DOLT_VERSION:-unknown} is below required ${MIN_DOLT_BACKUP_VERSION}. Older versions can hang the sql-server during dolt backup sync." \
         2>/dev/null || true
@@ -149,7 +149,7 @@ fi
 # --- Step 4: Report ---
 
 if [ "$FAILED_COUNT" -gt 0 ]; then
-    gc mail send mayor/ \
+    gc mail send mayor/ --from controller \
         -s "Backup dog: $FAILED_COUNT/$TOTAL databases failed to sync [MEDIUM]" \
         -m "Failed databases:$FAILED_DBS" \
         2>/dev/null || true

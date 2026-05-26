@@ -1,10 +1,20 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
-  "required": ["schema_version", "city_path", "config", "warnings", "validation"],
+  "required": [
+    "schema_version",
+    "ok",
+    "city_path",
+    "config",
+    "warnings",
+    "validation"
+  ],
   "properties": {
     "schema_version": {
       "type": "string"
+    },
+    "ok": {
+      "const": true
     },
     "city_path": {
       "type": "string"
@@ -21,7 +31,11 @@
     },
     "validation": {
       "type": "object",
-      "required": ["ok", "warnings", "errors"],
+      "required": [
+        "ok",
+        "warnings",
+        "errors"
+      ],
       "properties": {
         "ok": {
           "type": "boolean"

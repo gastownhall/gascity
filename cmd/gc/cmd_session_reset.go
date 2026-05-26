@@ -4,13 +4,16 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"strings"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/spf13/cobra"
 )
 
 // newSessionResetCmd creates the "gc session reset <id-or-alias>" command.
 func newSessionResetCmd(stdout, stderr io.Writer) *cobra.Command {
-	return &cobra.Command{
+	var jsonOutput bool
+	cmd := &cobra.Command{
 		Use:   "reset <session-id-or-alias>",
 		Short: "Restart a session fresh while preserving the bead",
 		Long: `Request a fresh restart for an existing session without closing its bead.
@@ -24,13 +27,15 @@ the fresh restart.
 Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
-			if cmdSessionReset(args, stdout, stderr) != 0 {
+			if cmdSessionReset(args, stdout, stderr, jsonOutput) != 0 {
 				return errExit
 			}
 			return nil
 		},
 		ValidArgsFunction: completeSessionIDs,
 	}
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "emit JSONL")
+	return cmd
 }
 
 // cmdSessionReset is the CLI entry point for "gc session reset".
@@ -38,7 +43,8 @@ Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).`,
 // This command intentionally requires a managed controller. The controller owns
 // the fresh restart lifecycle, including key rotation and immediate restart of
 // already-desired sessions.
-func cmdSessionReset(args []string, stdout, stderr io.Writer) int {
+func cmdSessionReset(args []string, stdout, stderr io.Writer, jsonOutput ...bool) int {
+	asJSON := sessionJSONRequested(jsonOutput)
 	store, code := openCityStore(stderr, "gc session reset")
 	if store == nil {
 		return code
@@ -92,6 +98,32 @@ func cmdSessionReset(args []string, stdout, stderr io.Writer) int {
 
 	_ = pokeController(cityPath)
 
+	if asJSON {
+		if err := writeSessionActionJSON(stdout, sessionActionResult{
+			Action:    "reset",
+			SessionID: sessionID,
+			Identity:  identity,
+		}); err != nil {
+			fmt.Fprintf(stderr, "gc session reset: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		return 0
+	}
 	fmt.Fprintf(stdout, "Session %s reset requested. Controller will restart it fresh.\n", sessionID) //nolint:errcheck // best-effort stdout
 	return 0
+}
+
+func resetSessionCircuitBreakerAfterExplicitKill(cityPath string, store beads.Store, sessionID, identity string) error {
+	identity = strings.TrimSpace(identity)
+	if identity == "" {
+		return nil
+	}
+	if strings.TrimSpace(cityPath) != "" && cityUsesManagedReconciler(cityPath) {
+		if err := resetSessionCircuitBreakerOnController(cityPath, sessionID, identity); err != nil {
+			return err
+		}
+		_ = pokeController(cityPath)
+		return nil
+	}
+	return resetSessionCircuitBreakerState(store, sessionID, identity, defaultSessionCircuitBreaker())
 }

@@ -183,19 +183,32 @@ func initialMessageResumeResult(tc phase2ProviderCase, prepared *preparedStart) 
 		return workertest.Fail(tc.profileID, workertest.RequirementInputInitialMessageResume,
 			fmt.Sprintf("PromptSuffix encoding invalid: %v", err)).WithEvidence(evidence)
 	}
+	if prepared == nil {
+		return workertest.Fail(tc.profileID, workertest.RequirementInputInitialMessageResume,
+			"prepared start = nil").WithEvidence(evidence)
+	}
 	switch {
-	case got != "":
+	case strings.TrimSpace(prepared.cfg.PromptSuffix) != "":
 		return workertest.Fail(tc.profileID, workertest.RequirementInputInitialMessageResume,
-			fmt.Sprintf("PromptSuffix payload = %q, want no startup user-turn on resume", got)).WithEvidence(evidence)
-	case strings.Contains(got, "Do the first task."):
+			fmt.Sprintf("PromptSuffix = %q, want resume restart prompt delivered via nudge", prepared.cfg.PromptSuffix)).WithEvidence(evidence)
+	case strings.TrimSpace(prepared.cfg.PromptFlag) != "":
 		return workertest.Fail(tc.profileID, workertest.RequirementInputInitialMessageResume,
-			fmt.Sprintf("PromptSuffix payload = %q, want no replayed initial message", got)).WithEvidence(evidence)
-	case prepared.cfg.Env[startupPromptDeliveredEnv] != "":
+			fmt.Sprintf("PromptFlag = %q, want no flag startup prompt replay on resume", prepared.cfg.PromptFlag)).WithEvidence(evidence)
+	case got != "Base worker prompt":
 		return workertest.Fail(tc.profileID, workertest.RequirementInputInitialMessageResume,
-			fmt.Sprintf("%s = %q, want unset on resume", startupPromptDeliveredEnv, prepared.cfg.Env[startupPromptDeliveredEnv])).WithEvidence(evidence)
+			fmt.Sprintf("restart prompt payload = %q, want base worker prompt on resume", got)).WithEvidence(evidence)
+	case strings.Contains(prepared.cfg.Nudge, "Do the first task."):
+		return workertest.Fail(tc.profileID, workertest.RequirementInputInitialMessageResume,
+			fmt.Sprintf("cfg.Nudge = %q, want no replayed initial message", prepared.cfg.Nudge)).WithEvidence(evidence)
+	case prepared.cfg.Env[startupPromptDeliveredEnv] != "1":
+		return workertest.Fail(tc.profileID, workertest.RequirementInputInitialMessageResume,
+			fmt.Sprintf("%s = %q, want 1 when restart prompt is delivered on resume", startupPromptDeliveredEnv, prepared.cfg.Env[startupPromptDeliveredEnv])).WithEvidence(evidence)
+	case !startupNudgeMatches(tc, prepared.cfg.Nudge):
+		return workertest.Fail(tc.profileID, workertest.RequirementInputInitialMessageResume,
+			fmt.Sprintf("cfg.Nudge = %q, want configured nudge preserved after restart prompt", prepared.cfg.Nudge)).WithEvidence(evidence)
 	default:
 		return workertest.Pass(tc.profileID, workertest.RequirementInputInitialMessageResume,
-			"resumed sessions do not replay startup prompt material as a new user turn").WithEvidence(evidence)
+			"resumed sessions receive the base restart prompt without replaying initial_message").WithEvidence(evidence)
 	}
 }
 
@@ -226,6 +239,50 @@ func inputOverrideDefaultsResult(tc phase2ProviderCase, prepared *preparedStart)
 	default:
 		return workertest.Pass(tc.profileID, workertest.RequirementInputOverrideDefaults,
 			"provider default launch flags survive schema overrides while first-input delivery stays exact-once").WithEvidence(evidence)
+	}
+}
+
+func inProgressResumeRestartResult(tc phase2ProviderCase, prepared *preparedStart) workertest.Result {
+	return resumeRestartPromptResult(tc, prepared, workertest.RequirementInputInProgressResumeRestart, "in-progress assigned work")
+}
+
+func preClaimResumeRestartResult(tc phase2ProviderCase, prepared *preparedStart) workertest.Result {
+	return resumeRestartPromptResult(tc, prepared, workertest.RequirementInputPreClaimResumeRestart, "pre-claim work demand")
+}
+
+func resumeRestartPromptResult(tc phase2ProviderCase, prepared *preparedStart, requirement workertest.RequirementCode, label string) workertest.Result {
+	got, evidence, err := phase2PromptPayload(tc, prepared)
+	if err != nil {
+		return workertest.Fail(tc.profileID, requirement,
+			fmt.Sprintf("PromptSuffix encoding invalid: %v", err)).WithEvidence(evidence)
+	}
+	if prepared != nil {
+		evidence["cfg_prompt_suffix"] = prepared.cfg.PromptSuffix
+		evidence["cfg_prompt_flag"] = prepared.cfg.PromptFlag
+		evidence["cfg_nudge"] = prepared.cfg.Nudge
+		evidence["startup_prompt_delivered"] = prepared.cfg.Env[startupPromptDeliveredEnv]
+	}
+	switch {
+	case prepared == nil:
+		return workertest.Fail(tc.profileID, requirement, "prepared start = nil").WithEvidence(evidence)
+	case strings.TrimSpace(prepared.cfg.PromptSuffix) != "":
+		return workertest.Fail(tc.profileID, requirement,
+			fmt.Sprintf("PromptSuffix = %q, want restart prompt delivered via nudge", prepared.cfg.PromptSuffix)).WithEvidence(evidence)
+	case strings.TrimSpace(prepared.cfg.PromptFlag) != "":
+		return workertest.Fail(tc.profileID, requirement,
+			fmt.Sprintf("PromptFlag = %q, want no flag startup prompt replay on resume", prepared.cfg.PromptFlag)).WithEvidence(evidence)
+	case got != "Base worker prompt":
+		return workertest.Fail(tc.profileID, requirement,
+			fmt.Sprintf("restart prompt payload = %q, want base worker prompt", got)).WithEvidence(evidence)
+	case strings.Contains(prepared.cfg.Nudge, "Do the first task."):
+		return workertest.Fail(tc.profileID, requirement,
+			fmt.Sprintf("cfg.Nudge = %q, want no replayed initial_message on resume", prepared.cfg.Nudge)).WithEvidence(evidence)
+	case prepared.cfg.Env[startupPromptDeliveredEnv] != "1":
+		return workertest.Fail(tc.profileID, requirement,
+			fmt.Sprintf("%s = %q, want 1 when restart prompt is delivered", startupPromptDeliveredEnv, prepared.cfg.Env[startupPromptDeliveredEnv])).WithEvidence(evidence)
+	default:
+		return workertest.Pass(tc.profileID, requirement,
+			fmt.Sprintf("%s receives a restart prompt on resume without replaying initial_message", label)).WithEvidence(evidence)
 	}
 }
 

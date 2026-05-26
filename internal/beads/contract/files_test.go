@@ -373,6 +373,220 @@ func TestEnsureCanonicalConfigIsIdempotent(t *testing.T) {
 	}
 }
 
+// TestEnsureCanonicalConfigRepairsGluedSyncRemoteLine guards against the
+// ga-um7 reproducer: `bd init` against a git repo with a remote can leave
+// `.beads/config.yaml` with the `sync.remote:` line lacking a trailing
+// newline, so the next emitted key gets glued onto its value. The next
+// EnsureCanonicalConfig call must restructure the file into valid YAML
+// rather than silently passing the corrupt line through.
+func TestEnsureCanonicalConfigRepairsGluedSyncRemoteLine(t *testing.T) {
+	fs := fsys.OSFS{}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	input := strings.Join([]string{
+		"issue_prefix: si",
+		"issue-prefix: si",
+		"dolt.auto-start: false",
+		"export.auto: false",
+		"gc.endpoint_origin: inherited_city",
+		"gc.endpoint_status: verified",
+		"",
+		`sync.remote: "git+ssh://git@example.com/foo/service-inventory.git"  types.custom: molecule,convoy,message,event,gate,merge-request,agent,role,rig,session,spec,convergence,step`,
+		"types.custom: molecule,convoy,message,event,gate,merge-request,agent,role,rig,session,spec,convergence,step",
+		"",
+	}, "\n")
+	if err := fs.WriteFile(path, []byte(input), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	changed, err := EnsureCanonicalConfig(fs, path, ConfigState{
+		IssuePrefix:    "si",
+		EndpointOrigin: EndpointOriginInheritedCity,
+		EndpointStatus: EndpointStatusVerified,
+	})
+	if err != nil {
+		t.Fatalf("EnsureCanonicalConfig() error = %v", err)
+	}
+	if !changed {
+		t.Fatal("EnsureCanonicalConfig() should report changes when repairing glued line")
+	}
+
+	data, err := fs.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+
+	// The repaired file must parse as YAML.
+	if _, err := readConfigDoc(fs, path); err != nil {
+		t.Fatalf("repaired config must parse as YAML, got error %v\n%s", err, text)
+	}
+
+	// sync.remote line must be a standalone key/value, not glued to anything.
+	if !strings.Contains(text, `sync.remote: "git+ssh://git@example.com/foo/service-inventory.git"`+"\n") &&
+		!strings.Contains(text, "sync.remote: git+ssh://git@example.com/foo/service-inventory.git\n") {
+		t.Fatalf("sync.remote line must be standalone, got:\n%s", text)
+	}
+	if strings.Contains(text, `"types.custom`) {
+		t.Fatalf("types.custom must not be glued to a quoted value:\n%s", text)
+	}
+
+	// types.custom must appear at most once.
+	if got := countLineOccurrences(text, "types.custom: molecule,convoy,message,event,gate,merge-request,agent,role,rig,session,spec,convergence,step"); got != 1 {
+		t.Fatalf("types.custom should appear exactly once, found %d:\n%s", got, text)
+	}
+
+	changed, err = EnsureCanonicalConfig(fs, path, ConfigState{
+		IssuePrefix:    "si",
+		EndpointOrigin: EndpointOriginInheritedCity,
+		EndpointStatus: EndpointStatusVerified,
+	})
+	if err != nil {
+		t.Fatalf("second EnsureCanonicalConfig() error = %v", err)
+	}
+	if changed {
+		t.Fatalf("second EnsureCanonicalConfig() should be idempotent:\n%s", text)
+	}
+}
+
+// TestEnsureCanonicalConfigDedupsUnmanagedKeysOnMalformedRepair ensures
+// that when fallback rewrites malformed input, duplicate top-level keys are
+// collapsed even when they aren't in the managed set. YAML semantics say
+// last-write-wins, and this fallback rewrite should match.
+func TestEnsureCanonicalConfigDedupsUnmanagedKeysOnMalformedRepair(t *testing.T) {
+	fs := fsys.OSFS{}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	// Include a malformed marker so the fallback path runs.
+	input := strings.Join([]string{
+		"issue_prefix: gc",
+		"types.custom: first-value",
+		"types.custom: second-value",
+		": not yaml",
+		"",
+	}, "\n")
+	if err := fs.WriteFile(path, []byte(input), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := EnsureCanonicalConfig(fs, path, ConfigState{
+		IssuePrefix:    "gc",
+		EndpointOrigin: EndpointOriginManagedCity,
+		EndpointStatus: EndpointStatusVerified,
+	}); err != nil {
+		t.Fatalf("EnsureCanonicalConfig() error = %v", err)
+	}
+
+	data, err := fs.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	if strings.Contains(text, "types.custom: first-value") {
+		t.Fatalf("first duplicate value should be dropped:\n%s", text)
+	}
+	if count := countLineOccurrences(text, "types.custom: second-value"); count != 1 {
+		t.Fatalf("expected exactly one types.custom line, found %d:\n%s", count, text)
+	}
+}
+
+func TestEnsureCanonicalConfigFallbackPreservesEmptyKeyMalformedLines(t *testing.T) {
+	fs := fsys.OSFS{}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	input := strings.Join([]string{
+		"issue_prefix: gc",
+		": first malformed line",
+		": second malformed line",
+		"",
+	}, "\n")
+	if err := fs.WriteFile(path, []byte(input), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := EnsureCanonicalConfig(fs, path, ConfigState{
+		IssuePrefix:    "gc",
+		EndpointOrigin: EndpointOriginManagedCity,
+		EndpointStatus: EndpointStatusVerified,
+	}); err != nil {
+		t.Fatalf("EnsureCanonicalConfig() error = %v", err)
+	}
+
+	data, err := fs.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	for _, needle := range []string{": first malformed line", ": second malformed line"} {
+		if got := countLineOccurrences(text, needle); got != 1 {
+			t.Fatalf("expected malformed line %q to be preserved once, found %d:\n%s", needle, got, text)
+		}
+	}
+}
+
+func TestSplitGluedConfigLine(t *testing.T) {
+	cases := []struct {
+		name string
+		line string
+		want []string
+	}{
+		{
+			name: "adjacent key",
+			line: `sync.remote: "git+ssh://git@example.com/foo.git"types.custom: molecule`,
+			want: []string{
+				`sync.remote: "git+ssh://git@example.com/foo.git"`,
+				"types.custom: molecule",
+			},
+		},
+		{
+			name: "horizontal whitespace before glued key",
+			line: `sync.remote: "git+ssh://git@example.com/foo.git"  types.custom: molecule`,
+			want: []string{
+				`sync.remote: "git+ssh://git@example.com/foo.git"`,
+				"types.custom: molecule",
+			},
+		},
+		{
+			name: "recursive chain",
+			line: `sync.remote: "git+ssh://git@example.com/foo.git"types.custom: "molecule"gc.endpoint_origin: managed_city`,
+			want: []string{
+				`sync.remote: "git+ssh://git@example.com/foo.git"`,
+				`types.custom: "molecule"`,
+				"gc.endpoint_origin: managed_city",
+			},
+		},
+		{
+			name: "comment line",
+			line: `# sync.remote: "git+ssh://git@example.com/foo.git"types.custom: molecule`,
+			want: []string{`# sync.remote: "git+ssh://git@example.com/foo.git"types.custom: molecule`},
+		},
+		{
+			name: "indented line",
+			line: `  sync.remote: "git+ssh://git@example.com/foo.git"types.custom: molecule`,
+			want: []string{`  sync.remote: "git+ssh://git@example.com/foo.git"types.custom: molecule`},
+		},
+		{
+			name: "unbalanced quote",
+			line: `sync.remote: "git+ssh://git@example.com/foo.gittypes.custom: molecule`,
+			want: []string{`sync.remote: "git+ssh://git@example.com/foo.gittypes.custom: molecule`},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := splitGluedConfigLine(tc.line)
+			if len(got) != len(tc.want) {
+				t.Fatalf("splitGluedConfigLine() = %#v, want %#v", got, tc.want)
+			}
+			for i := range got {
+				if got[i] != tc.want[i] {
+					t.Fatalf("splitGluedConfigLine()[%d] = %q, want %q; all got %#v", i, got[i], tc.want[i], got)
+				}
+			}
+		})
+	}
+}
+
 func TestEnsureCanonicalConfigFallsBackToLineRewriteOnMalformedYAML(t *testing.T) {
 	fs := fsys.OSFS{}
 	dir := t.TempDir()
@@ -876,7 +1090,7 @@ func TestReadDoltDatabase(t *testing.T) {
 func countLineOccurrences(text, needle string) int {
 	count := 0
 	for _, line := range strings.Split(text, "\n") {
-		if strings.TrimSpace(line) == needle {
+		if line == needle {
 			count++
 		}
 	}

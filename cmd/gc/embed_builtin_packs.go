@@ -65,6 +65,9 @@ func MaterializeBuiltinPacks(cityPath string) error {
 			return fmt.Errorf("pruning legacy %s order paths: %w", bp.Name, err)
 		}
 	}
+	if err := repairLegacyGcBeadsBdScript(cityPath); err != nil {
+		return fmt.Errorf("repairing legacy gc-beads-bd script: %w", err)
+	}
 	return nil
 }
 
@@ -350,6 +353,44 @@ func materializeFS(embedded fs.FS, root, dstDir string) (map[string]struct{}, er
 		return nil, err
 	}
 	return desired, nil
+}
+
+func repairLegacyGcBeadsBdScript(cityPath string) error {
+	path := legacyGcBeadsBdScriptPath(cityPath)
+	info, err := os.Lstat(path)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if info.IsDir() {
+		return nil
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	if !looksLikeGeneratedGcBeadsBdScript(data) {
+		return nil
+	}
+	return fsys.WriteFileIfContentOrModeChangedAtomic(fsys.OSFS{}, path, legacyGcBeadsBdShim(), 0o755)
+}
+
+func looksLikeGeneratedGcBeadsBdScript(data []byte) bool {
+	text := string(data)
+	return strings.Contains(text, "gc-beads-bd") && strings.Contains(text, "exec: beads provider")
+}
+
+func legacyGcBeadsBdShim() []byte {
+	return []byte(`#!/bin/sh
+set -eu
+
+script_dir=$(dirname "$0")
+city_root=$(cd "$script_dir/../.." && pwd)
+
+exec "$city_root/.gc/system/packs/bd/assets/scripts/gc-beads-bd.sh" "$@"
+`)
 }
 
 // pruneLegacyEmbeddedOrders removes deprecated order directory layouts when the

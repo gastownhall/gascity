@@ -73,6 +73,23 @@ func GenerateCitySchema() (*jsonschema.Schema, error) {
 	s.Title = "Gas City Configuration"
 	s.Description = "Schema for city.toml — the PackV2 deployment file for a Gas City instance. " +
 		"Pack definitions live in pack.toml and conventional pack directories such as agents/, formulas/, orders/, and commands/. " +
-		"Use [imports.*] for PackV2 composition; legacy includes, [packs.*], and [[agent]] fields remain visible for migration compatibility."
+		"Use [imports.*] for PackV2 composition; legacy includes, [packs.*], and [[agent]] fields remain visible for migration compatibility.\n\n" +
+		"> **PackV2 format source of truth:** The public PackV2 format and loader semantics are specified in [Gas City Pack Specification (2.0)](/specs/pack-spec)."
+	return s, nil
+}
+
+// GeneratePackSchema produces a JSON Schema for the pack.toml manifest
+// format (PackV2). It reflects the config.PackConfig struct using TOML
+// field names and extracts doc comments as descriptions.
+func GeneratePackSchema() (*jsonschema.Schema, error) {
+	r, err := newReflector()
+	if err != nil {
+		return nil, err
+	}
+	s := r.Reflect(&config.PackConfig{})
+	s.Title = "Gas City Pack Manifest"
+	s.Description = "Schema for pack.toml — the PackV2 manifest that declares " +
+		"a pack's metadata, agents, providers, services, commands, and import surface. " +
+		"Cities and rigs compose packs via [imports.*]."
 	return s, nil
 }

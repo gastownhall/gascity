@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -62,6 +63,7 @@ to add cities.`,
 }
 
 func newSupervisorStartCmd(stdout, stderr io.Writer) *cobra.Command {
+	var jsonOut bool
 	cmd := &cobra.Command{
 		Use:   "start",
 		Short: "Start the machine-wide supervisor in the background",
@@ -70,18 +72,20 @@ func newSupervisorStartCmd(stdout, stderr io.Writer) *cobra.Command {
 This forks "gc supervisor run", verifies it became ready, and returns.`,
 		Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
-			if doSupervisorStart(stdout, stderr) != 0 {
+			if doSupervisorStartJSON(stdout, stderr, jsonOut) != 0 {
 				return errExit
 			}
 			return nil
 		},
 	}
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit JSONL summary")
 	return cmd
 }
 
 func newSupervisorStopCmd(stdout, stderr io.Writer) *cobra.Command {
 	var wait bool
 	var waitTimeout time.Duration
+	var jsonOut bool
 	cmd := &cobra.Command{
 		Use:   "stop",
 		Short: "Stop the machine-wide supervisor",
@@ -95,7 +99,7 @@ tests that then expect to remove temp directories without racing
 against lingering supervisor / controller subprocesses).`,
 		Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
-			if stopSupervisorWithWait(stdout, stderr, wait, waitTimeout) != 0 {
+			if stopSupervisorWithWaitJSON(stdout, stderr, wait, waitTimeout, jsonOut) != 0 {
 				return errExit
 			}
 			return nil
@@ -103,6 +107,7 @@ against lingering supervisor / controller subprocesses).`,
 	}
 	cmd.Flags().BoolVar(&wait, "wait", false, "Wait for the supervisor to finish stopping all managed cities and release its socket before returning")
 	cmd.Flags().DurationVar(&waitTimeout, "wait-timeout", 30*time.Second, "Maximum time to wait when --wait is set")
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit JSONL summary")
 	return cmd
 }
 
@@ -121,6 +126,62 @@ func newSupervisorStatusCmd(stdout, stderr io.Writer) *cobra.Command {
 	}
 	cmd.Flags().BoolVar(&asJSON, "json", false, "emit JSON")
 	return cmd
+}
+
+// openSupervisorLogForTee opens the supervisor log file in append mode for
+// runSupervisor to tee output into.
+func openSupervisorLogForTee() (*os.File, error) {
+	f, err := os.OpenFile(supervisorLogPath(), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		return nil, fmt.Errorf("opening supervisor log %s: %w", supervisorLogPath(), err)
+	}
+	return f, nil
+}
+
+// shouldTeeSupervisorLog reports whether w is distinct from supervisor.log.
+// Service managers and manual background start can hand this process
+// fd-backed stdout/stderr that already append to supervisor.log while still
+// carrying cosmetic names like /dev/stdout. Compare open file identity instead
+// of names so those paths do not double-log.
+func shouldTeeSupervisorLog(w io.Writer, logFile *os.File) bool {
+	if w == nil || logFile == nil {
+		return false
+	}
+	wf, ok := fileWriterForSupervisorLog(w)
+	if !ok {
+		return true
+	}
+	same, err := sameOpenFile(wf, logFile)
+	if err != nil {
+		return true
+	}
+	return !same
+}
+
+func fileWriterForSupervisorLog(w io.Writer) (*os.File, bool) {
+	switch v := w.(type) {
+	case *os.File:
+		return v, true
+	case *switchableWriter:
+		if v == nil || v.target == nil {
+			return nil, false
+		}
+		return fileWriterForSupervisorLog(v.target)
+	default:
+		return nil, false
+	}
+}
+
+func sameOpenFile(a, b *os.File) (bool, error) {
+	aInfo, err := a.Stat()
+	if err != nil {
+		return false, err
+	}
+	bInfo, err := b.Stat()
+	if err != nil {
+		return false, err
+	}
+	return os.SameFile(aInfo, bInfo), nil
 }
 
 // acquireSupervisorLock takes an exclusive flock on the supervisor lock file.
@@ -196,9 +257,11 @@ const (
 const supervisorPreserveSessionsOnSignalEnv = "GC_SUPERVISOR_PRESERVE_SESSIONS_ON_SIGNAL"
 
 // supervisorOmitProviderCredsEnv, when set to "1" at the time the supervisor
-// service file is generated, causes provider-credential env vars
-// (ANTHROPIC_*, GEMINI_*, GOOGLE_*, OPENAI_*) to be excluded from the
-// generated launchd plist or systemd unit. Default behavior is unchanged.
+// service file is generated, causes env vars matched by the shared
+// provider-credential predicate to be excluded from the generated launchd
+// plist or systemd unit. The source of truth is providerCredentialEnvPrefixes
+// and providerCredentialEnvKeys in cmd_supervisor_lifecycle.go. Default
+// behavior is unchanged.
 // When opted out, the user is responsible for delivering provider creds to
 // the supervisor's environment via some other mechanism (e.g. a wrapper
 // around `gc supervisor run` that sources a credentials file).
@@ -207,6 +270,27 @@ const supervisorOmitProviderCredsEnv = "GC_SUPERVISOR_OMIT_PROVIDER_CREDS"
 var supervisorShutdownSettleDelay = 50 * time.Millisecond
 
 var supervisorSignalNotify = signal.Notify
+
+// supervisorLoadConfig follows the package's test-double convention; tests
+// that replace it must not run in parallel.
+var supervisorLoadConfig = supervisor.LoadConfig
+
+// supervisorHardExitCodeRepeatedShutdown is the exit code for repeated
+// destructive shutdown escalation. 130 approximates the shell SIGINT
+// convention; the supervisor does not retain which destructive signal caused
+// the escalation.
+const supervisorHardExitCodeRepeatedShutdown = 130
+
+// supervisorHardExit terminates the supervisor immediately. It intentionally
+// bypasses graceful cleanup and may leave managed sessions or child processes
+// alive for operator recovery. Overridable for tests.
+var supervisorHardExit = func(stderr io.Writer, code int) {
+	if stderr == nil {
+		stderr = os.Stderr
+	}
+	fmt.Fprintln(stderr, "gc supervisor: repeated shutdown request received; exiting immediately") //nolint:errcheck
+	os.Exit(code)
+}
 
 func supervisorPreserveSessionsOnSignal() bool {
 	return os.Getenv(supervisorPreserveSessionsOnSignalEnv) == "1"
@@ -230,7 +314,62 @@ func newSupervisorShutdownController() *supervisorShutdownController {
 	return &supervisorShutdownController{destructiveCh: make(chan struct{})}
 }
 
-func supervisorSignalLoop(sigCh <-chan os.Signal, done <-chan struct{}, requestShutdown func(supervisorShutdownMode), requestReconcile func()) {
+// shutdownTrigger carries the attribution for a supervisor shutdown so
+// the requestShutdown wrapper can log and emit it before the context is
+// canceled. Source values are "signal" or "socket_stop".
+type shutdownTrigger struct {
+	Source     string
+	Signal     string
+	ClientAddr string
+}
+
+// supervisorShutdownModeName returns the stable string for a shutdown
+// mode, used in log lines and structured event payloads.
+func supervisorShutdownModeName(mode supervisorShutdownMode) string {
+	switch mode {
+	case supervisorShutdownPreserveSessions:
+		return "preserve_sessions"
+	case supervisorShutdownDestructive:
+		return "destructive"
+	default:
+		return "unknown"
+	}
+}
+
+func requestSupervisorShutdown(stderr io.Writer, rec events.Recorder, shutdownCtl *supervisorShutdownController, cancel context.CancelFunc, mode supervisorShutdownMode, trigger shutdownTrigger) bool {
+	modeName := supervisorShutdownModeName(mode)
+	// Plain-text breadcrumb to stderr -> ~/.gc/supervisor.log via the
+	// launchd/systemd-redirected stream. This is the canonical place
+	// operators look after an unexpected graceful exit.
+	fmt.Fprintf(stderr, "gc supervisor: shutdown requested: source=%s signal=%q client=%q mode=%s\n", //nolint:errcheck
+		trigger.Source, trigger.Signal, trigger.ClientAddr, modeName)
+	if rec != nil {
+		payload := api.SupervisorShutdownPayload{
+			Source:     trigger.Source,
+			Signal:     trigger.Signal,
+			ClientAddr: trigger.ClientAddr,
+			Mode:       modeName,
+		}
+		raw, err := json.Marshal(payload)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc supervisor: marshal shutdown event: %v\n", err) //nolint:errcheck
+		} else {
+			rec.Record(events.Event{
+				Type:    events.SupervisorShutdownRequested,
+				Actor:   "supervisor",
+				Subject: "supervisor",
+				Payload: raw,
+			})
+		}
+	}
+	repeatedDestructive := shutdownCtl.request(mode)
+	if !repeatedDestructive {
+		cancel()
+	}
+	return repeatedDestructive
+}
+
+func supervisorSignalLoop(sigCh <-chan os.Signal, done <-chan struct{}, requestShutdown func(supervisorShutdownMode, shutdownTrigger) bool, requestReconcile func(), stderr io.Writer) {
 	for {
 		select {
 		case sig := <-sigCh:
@@ -241,27 +380,40 @@ func supervisorSignalLoop(sigCh <-chan os.Signal, done <-chan struct{}, requestS
 				requestReconcile()
 				continue
 			}
-			requestShutdown(supervisorShutdownModeForSignal(sig))
+			mode := supervisorShutdownModeForSignal(sig)
+			if requestShutdown(mode, shutdownTrigger{
+				Source: "signal",
+				Signal: sig.String(),
+			}) {
+				supervisorHardExit(stderr, supervisorHardExitCodeRepeatedShutdown)
+				return
+			}
 		case <-done:
 			return
 		}
 	}
 }
 
-func (c *supervisorShutdownController) request(mode supervisorShutdownMode) {
+// request records shutdown intent and reports whether this is a repeated
+// destructive shutdown request. Signal callers use a repeated destructive
+// request as the hard-exit trigger; socket callers keep the request local.
+func (c *supervisorShutdownController) request(mode supervisorShutdownMode) bool {
 	if mode == supervisorShutdownDestructive {
-		c.destructiveRequested.Store(true)
+		if !c.destructiveRequested.CompareAndSwap(false, true) {
+			return true
+		}
 		c.mode.Store(int32(supervisorShutdownDestructive))
 		c.destructiveOnce.Do(func() {
 			if c.destructiveCh != nil {
 				close(c.destructiveCh)
 			}
 		})
-		return
+		return false
 	}
 	if mode == supervisorShutdownPreserveSessions {
 		c.mode.CompareAndSwap(int32(supervisorShutdownNone), int32(supervisorShutdownPreserveSessions))
 	}
+	return false
 }
 
 func (c *supervisorShutdownController) preservesSessions() bool {
@@ -313,7 +465,7 @@ func (s *shutdownState) finish(err error) {
 	close(s.done)
 }
 
-func startSupervisorSocket(sockPath string, requestShutdown func(supervisorShutdownMode), reconcileCh chan reconcileRequest, shut *shutdownState) (net.Listener, error) {
+func startSupervisorSocket(sockPath string, requestShutdown func(supervisorShutdownMode, shutdownTrigger) bool, reconcileCh chan reconcileRequest, shut *shutdownState) (net.Listener, error) {
 	os.Remove(sockPath) //nolint:errcheck // remove stale socket from previous crash
 	lis, err := net.Listen("unix", sockPath)
 	if err != nil {
@@ -345,14 +497,21 @@ func startSupervisorSocket(sockPath string, requestShutdown func(supervisorShutd
 // then — if the client keeps the connection open — blocks until shutdown
 // completes and sends a second line "done:ok\n" or "done:err:<detail>\n"
 // so --wait clients can distinguish clean shutdown from partial failure.
-func handleSupervisorConn(conn net.Conn, requestShutdown func(supervisorShutdownMode), reconcileCh chan reconcileRequest, shut *shutdownState) {
+func handleSupervisorConn(conn net.Conn, requestShutdown func(supervisorShutdownMode, shutdownTrigger) bool, reconcileCh chan reconcileRequest, shut *shutdownState) {
 	defer conn.Close()                                     //nolint:errcheck
 	conn.SetReadDeadline(time.Now().Add(60 * time.Second)) //nolint:errcheck
 	scanner := bufio.NewScanner(conn)
 	if scanner.Scan() {
 		switch scanner.Text() {
 		case "stop":
-			requestShutdown(supervisorShutdownDestructive)
+			peer := ""
+			if addr := conn.RemoteAddr(); addr != nil {
+				peer = addr.String()
+			}
+			_ = requestShutdown(supervisorShutdownDestructive, shutdownTrigger{
+				Source:     "socket_stop",
+				ClientAddr: peer,
+			})
 			if _, err := conn.Write([]byte("ok\n")); err != nil {
 				return
 			}
@@ -476,6 +635,10 @@ func stopSupervisor(stdout, stderr io.Writer) int {
 // the supervisor acknowledges the destructive socket stop, so launchd/systemd
 // will not restart it when the process exits.
 func stopSupervisorWithWait(stdout, stderr io.Writer, wait bool, waitTimeout time.Duration) int {
+	return stopSupervisorWithWaitJSON(stdout, stderr, wait, waitTimeout, false)
+}
+
+func stopSupervisorWithWaitJSON(stdout, stderr io.Writer, wait bool, waitTimeout time.Duration, jsonOut bool) int {
 	sockPath, _ := runningSupervisorSocket()
 	if sockPath == "" {
 		fmt.Fprintln(stderr, "gc supervisor stop: supervisor is not running") //nolint:errcheck
@@ -495,9 +658,14 @@ func stopSupervisorWithWait(stdout, stderr io.Writer, wait bool, waitTimeout tim
 		fmt.Fprintln(stderr, "gc supervisor stop: no acknowledgment from supervisor") //nolint:errcheck
 		return 1
 	}
-	fmt.Fprintln(stdout, "Supervisor stopping...") //nolint:errcheck
+	if !jsonOut {
+		fmt.Fprintln(stdout, "Supervisor stopping...") //nolint:errcheck
+	}
 	unloadSupervisorService()
 	if !wait {
+		if jsonOut {
+			return writeSupervisorStopSuccess(stdout, stderr, wait)
+		}
 		return 0
 	}
 	if waitTimeout <= 0 {
@@ -520,6 +688,9 @@ func stopSupervisorWithWait(stdout, stderr io.Writer, wait bool, waitTimeout tim
 			if err := waitForSupervisorExitUntil(sockPath, time.Now().Add(5*time.Second)); err != nil {
 				fmt.Fprintf(stderr, "gc supervisor stop: %v\n", err) //nolint:errcheck
 				return 1
+			}
+			if jsonOut {
+				return writeSupervisorStopSuccess(stdout, stderr, wait)
 			}
 			fmt.Fprintln(stdout, "Supervisor stopped.") //nolint:errcheck
 			return 0
@@ -548,8 +719,20 @@ func stopSupervisorWithWait(stdout, stderr io.Writer, wait bool, waitTimeout tim
 		fmt.Fprintf(stderr, "gc supervisor stop: %v\n", err) //nolint:errcheck
 		return 1
 	}
+	if jsonOut {
+		return writeSupervisorStopSuccess(stdout, stderr, wait)
+	}
 	fmt.Fprintln(stdout, "Supervisor stopped.") //nolint:errcheck
 	return 0
+}
+
+func writeSupervisorStopSuccess(stdout, stderr io.Writer, wait bool) int {
+	return writeLifecycleActionJSONOrExit(stdout, stderr, "gc supervisor stop", lifecycleActionJSON{
+		Command: "supervisor stop",
+		Action:  "stop",
+		Message: "Supervisor stopped.",
+		Wait:    lifecycleBoolPtr(wait),
+	})
 }
 
 // waitForSupervisorExitUntil polls the supervisor socket until it stops
@@ -603,6 +786,7 @@ func supervisorStatusWithOptions(stdout, _ io.Writer, asJSON bool) int {
 }
 
 func newSupervisorReloadCmd(stdout, stderr io.Writer) *cobra.Command {
+	var jsonOut bool
 	cmd := &cobra.Command{
 		Use:   "reload",
 		Short: "Trigger immediate reconciliation of all cities",
@@ -612,17 +796,22 @@ after killing a child process to force the supervisor to detect the
 change and restart it without waiting for the next patrol tick.`,
 		Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
-			if reloadSupervisor(stdout, stderr) != 0 {
+			if reloadSupervisorJSON(stdout, stderr, jsonOut) != 0 {
 				return errExit
 			}
 			return nil
 		},
 	}
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit JSONL summary")
 	return cmd
 }
 
 // reloadSupervisor sends a reload command to the running supervisor.
 func reloadSupervisor(stdout, stderr io.Writer) int {
+	return reloadSupervisorJSON(stdout, stderr, false)
+}
+
+func reloadSupervisorJSON(stdout, stderr io.Writer, jsonOut bool) int {
 	sockPath, _ := runningSupervisorSocket()
 	if sockPath == "" {
 		fmt.Fprintln(stderr, "gc supervisor reload: supervisor is not running; start it with 'gc supervisor start'") //nolint:errcheck
@@ -641,6 +830,13 @@ func reloadSupervisor(stdout, stderr io.Writer) int {
 	resp := strings.TrimSpace(string(buf[:n]))
 	switch resp {
 	case "ok":
+		if jsonOut {
+			return writeLifecycleActionJSONOrExit(stdout, stderr, "gc supervisor reload", lifecycleActionJSON{
+				Command: "supervisor reload",
+				Action:  "reload",
+				Message: "Reconciliation triggered.",
+			})
+		}
 		fmt.Fprintln(stdout, "Reconciliation triggered.") //nolint:errcheck
 		return 0
 	case "busy":
@@ -803,6 +999,31 @@ func runSupervisor(stdout, stderr io.Writer) int {
 		return 1
 	}
 
+	// Ensure ~/.gc/ exists. doSupervisorStart does this when invoked
+	// manually (mkdir + open log file before spawning the child), but the
+	// systemd/launchd/container paths jump straight to `gc supervisor run`
+	// without that prep — which leaves operators with `gc supervisor logs`
+	// reporting "log file not found" and no way to see startup errors.
+	if err := os.MkdirAll(supervisor.DefaultHome(), 0o700); err != nil {
+		fmt.Fprintf(stderr, "gc supervisor: ensuring home dir %s: %v\n", supervisor.DefaultHome(), err) //nolint:errcheck
+		return 1
+	}
+	// Always tee to ~/.gc/supervisor.log so `gc supervisor logs` works
+	// regardless of how the supervisor was invoked. We skip the tee when
+	// stdout/stderr already point at the same file (manual `gc supervisor
+	// start` path) to avoid double-logging.
+	if logFile, err := openSupervisorLogForTee(); err != nil {
+		fmt.Fprintf(stderr, "gc supervisor: tee disabled: %v\n", err) //nolint:errcheck
+	} else {
+		defer logFile.Close() //nolint:errcheck // keep after later run-loop cleanup defers
+		if shouldTeeSupervisorLog(stdout, logFile) {
+			stdout = io.MultiWriter(stdout, logFile)
+		}
+		if shouldTeeSupervisorLog(stderr, logFile) {
+			stderr = io.MultiWriter(stderr, logFile)
+		}
+	}
+
 	lock, err := acquireSupervisorLock()
 	if err != nil {
 		fmt.Fprintf(stderr, "gc supervisor: %v\n", err) //nolint:errcheck
@@ -813,9 +1034,16 @@ func runSupervisor(stdout, stderr io.Writer) int {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	shutdownCtl := newSupervisorShutdownController()
-	requestShutdown := func(mode supervisorShutdownMode) {
-		shutdownCtl.request(mode)
-		cancel()
+	// Track managed cities via atomic-snapshot registry. API reads are
+	// lock-free (atomic pointer load); mutations go through citiesMu.
+	registry := newCityRegistry()
+	supEvPath := filepath.Join(supervisor.RuntimeDir(), "events.jsonl")
+	if supFR, supErr := events.NewFileRecorder(supEvPath, stderr); supErr == nil {
+		registry.SetSupervisorRecorder(supFR)
+		defer supFR.Close() //nolint:errcheck
+	}
+	requestShutdown := func(mode supervisorShutdownMode, trigger shutdownTrigger) bool {
+		return requestSupervisorShutdown(stderr, registry.SupervisorEventRecorder(), shutdownCtl, cancel, mode, trigger)
 	}
 
 	// Reconcile channel — triggers immediate reconciliation from SIGHUP
@@ -834,10 +1062,10 @@ func runSupervisor(stdout, stderr io.Writer) int {
 		case reconcileCh <- reconcileRequest{}:
 		default: // reconcile already pending
 		}
-	})
+	}, stderr)
 
 	// Load supervisor config.
-	supCfg, err := supervisor.LoadConfig(supervisor.ConfigPath())
+	supCfg, err := supervisorLoadConfig(supervisor.ConfigPath())
 	if err != nil {
 		fmt.Fprintf(stderr, "gc supervisor: config: %v\n", err) //nolint:errcheck
 		return 1
@@ -847,15 +1075,6 @@ func runSupervisor(stdout, stderr io.Writer) int {
 	if err := cleanupSupervisorWorkspaceServicesForSupervisorStart(supervisor.DefaultHome()); err != nil {
 		fmt.Fprintf(stderr, "gc supervisor: workspace-service startup cleanup: %v\n", err) //nolint:errcheck
 		return 1
-	}
-
-	// Track managed cities via atomic-snapshot registry. API reads are
-	// lock-free (atomic pointer load); mutations go through citiesMu.
-	registry := newCityRegistry()
-	supEvPath := filepath.Join(supervisor.RuntimeDir(), "events.jsonl")
-	if supFR, supErr := events.NewFileRecorder(supEvPath, stderr); supErr == nil {
-		registry.SetSupervisorRecorder(supFR)
-		defer supFR.Close() //nolint:errcheck
 	}
 
 	// Start API server with city-namespaced routing (Phase 2).

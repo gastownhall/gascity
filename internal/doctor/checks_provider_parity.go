@@ -61,10 +61,11 @@ func (c *ProviderParityCheck) Run(_ *CheckContext) *CheckResult {
 	var details []string
 	for _, name := range names {
 		provider := providers[name]
-		if !provider.hasResume {
+		if strings.TrimSpace(provider.ResumeFlag) == "" && strings.TrimSpace(provider.ResumeCommand) == "" {
 			details = append(details, fmt.Sprintf(
 				"provider %q has no ResumeFlag or ResumeCommand: session restarts will silently drop the session-id and start a fresh process",
-				name))
+				name,
+			))
 		}
 	}
 
@@ -86,17 +87,18 @@ func (c *ProviderParityCheck) CanFix() bool { return false }
 // Fix is a no-op.
 func (c *ProviderParityCheck) Fix(_ *CheckContext) error { return nil }
 
-type providerResumeState struct {
-	hasResume bool
-}
-
-// providersInUse returns resume capability state for every provider used by
-// at least one configured agent. It delegates provider inheritance and
-// agent-level overrides to config.ResolveProvider, using a PATH lookup stub
-// because provider-parity checks config semantics rather than host binaries.
-// Agents that pin StartCommand are skipped because they bypass ProviderSpec.
-func providersInUse(cfg *config.City) map[string]providerResumeState {
-	out := map[string]providerResumeState{}
+// providersInUse returns the fully resolved provider for every provider
+// used by at least one configured agent. It delegates provider inheritance
+// and agent-level overrides to config.ResolveProvider, using a PATH lookup
+// stub because provider-parity checks config semantics rather than host
+// binaries. Agents that pin StartCommand are skipped because they bypass
+// ProviderSpec.
+//
+// When the same provider name is referenced by multiple agents, the result
+// prefers the entry whose resume capability is *missing* — that is the
+// signal worth surfacing.
+func providersInUse(cfg *config.City) map[string]config.ResolvedProvider {
+	out := map[string]config.ResolvedProvider{}
 
 	addResolved := func(agent config.Agent) {
 		resolved, err := config.ResolveProvider(&agent, &cfg.Workspace, cfg.Providers, providerParityLookPath)
@@ -109,8 +111,9 @@ func providersInUse(cfg *config.City) map[string]providerResumeState {
 		}
 		hasResume := strings.TrimSpace(resolved.ResumeFlag) != "" || strings.TrimSpace(resolved.ResumeCommand) != ""
 		current, seen := out[name]
-		if !seen || (current.hasResume && !hasResume) {
-			out[name] = providerResumeState{hasResume: hasResume}
+		currentHasResume := strings.TrimSpace(current.ResumeFlag) != "" || strings.TrimSpace(current.ResumeCommand) != ""
+		if !seen || (currentHasResume && !hasResume) {
+			out[name] = *resolved
 		}
 	}
 

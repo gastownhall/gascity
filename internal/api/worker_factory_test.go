@@ -74,6 +74,37 @@ func TestResolveWorkerSessionRuntimePreservesStoredResolvedCommandAndBackfillsCu
 	if got, want := runtimeCfg.Hints.ReadyDelayMs, 321; got != want {
 		t.Fatalf("Hints.ReadyDelayMs = %d, want %d", got, want)
 	}
+	// Regression for upstream gastownhall/gascity#101 (re-opened): the
+	// API resume resolver must seed the three city-anchor identity vars
+	// so the restarted shell can locate its city. Without this assertion
+	// the new reseed could silently regress without test coverage.
+	if got, want := runtimeCfg.SessionEnv["GC_CITY"], fs.cityPath; got != want {
+		t.Errorf("SessionEnv[GC_CITY] = %q, want %q", got, want)
+	}
+	if got, want := runtimeCfg.SessionEnv["GC_CITY_PATH"], fs.cityPath; got != want {
+		t.Errorf("SessionEnv[GC_CITY_PATH] = %q, want %q", got, want)
+	}
+	if runtimeCfg.SessionEnv["GC_CITY_RUNTIME_DIR"] == "" {
+		t.Error("SessionEnv[GC_CITY_RUNTIME_DIR] = empty, want set")
+	}
+	// Identity-only contract (per Copilot review): no dispatcher trace
+	// default — that must stay per-dispatcher-qualified, not reseeded
+	// to the city-uniform value here.
+	if got, present := runtimeCfg.SessionEnv["GC_CONTROL_DISPATCHER_TRACE_DEFAULT"]; present {
+		t.Errorf("SessionEnv[GC_CONTROL_DISPATCHER_TRACE_DEFAULT] = %q present, want absent (identity-only)", got)
+	}
+	if got, want := runtimeCfg.Hints.Env["GC_CITY"], fs.cityPath; got != want {
+		t.Errorf("Hints.Env[GC_CITY] = %q, want %q", got, want)
+	}
+	if got, want := runtimeCfg.Hints.Env["GC_CITY_PATH"], fs.cityPath; got != want {
+		t.Errorf("Hints.Env[GC_CITY_PATH] = %q, want %q", got, want)
+	}
+	if runtimeCfg.Hints.Env["GC_CITY_RUNTIME_DIR"] == "" {
+		t.Error("Hints.Env[GC_CITY_RUNTIME_DIR] = empty, want set")
+	}
+	if got, present := runtimeCfg.Hints.Env["GC_CONTROL_DISPATCHER_TRACE_DEFAULT"]; present {
+		t.Errorf("Hints.Env[GC_CONTROL_DISPATCHER_TRACE_DEFAULT] = %q present, want absent (identity-only)", got)
+	}
 }
 
 func TestResolveWorkerSessionRuntimeUsesResolvedCommandWhenPersistedCommandIsStale(t *testing.T) {

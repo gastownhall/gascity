@@ -74,6 +74,26 @@ Point the next agent at these artifacts:
 
 If a real session existed and the bug crossed into runtime behavior, also include the relevant session or provider logs.
 
+Drain-ack stop completion is event-first: newer controllers record
+`SessionStopped` with message `drain acknowledged by agent` instead of relying
+on the old `Stopped drain-acked session` stdout line. Use `.gc/events.jsonl`
+and the trace `operation` records as the durable signal, with stdout/stderr as
+supporting diagnostics only.
+
+## Rig-Scoped Convergence Rollback
+
+Before rolling back a release that has created rig-scoped convergence loops,
+stop active loops in each affected rig:
+
+```bash
+gc --rig <rig-name> converge list
+gc --rig <rig-name> converge stop <bead-id>
+```
+
+Older controllers only watch the city/HQ convergence store. If rollback happens
+with active rig-scoped convergence beads still present, those loops become
+crash-orphans until a controller with rig-scoped convergence support runs again.
+
 ## How To Read The Trace
 
 These record types are usually the fastest path to the bug:

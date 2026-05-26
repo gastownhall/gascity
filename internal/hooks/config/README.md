@@ -29,10 +29,10 @@ the event, or it does but Gas City has not opted in yet).
 
 | Canonical event | claude | codex | cursor | copilot | gemini | opencode | omp | pi |
 |---|---|---|---|---|---|---|---|---|
-| session start    | `SessionStart` ✓ | `SessionStart` ✓ | `sessionStart` ✓ | `sessionStart` ✓ | `SessionStart` ✓ | `session.created` ✓ | `session.created` ✓ | `session_start` ✓ |
-| pre-compaction   | `PreCompact` ✓   | `PreCompact` ✓   | `preCompact` ✓   | — (gap, #672)    | `PreCompress` ✓  | `session.compacted` ✓ | `session.compacted` ✓ | `session_compact` ✓ |
-| user prompt submit | `UserPromptSubmit` ✓ | `UserPromptSubmit` ✓ | `beforeSubmitPrompt` ✓ | `userPromptSubmitted` ✓ | — | — | `experimental.chat.system.transform` ✓ | — |
-| before agent run | —                | —                | —                | —                | `BeforeAgent` ✓  | —                | (via prompt transform) | `before_agent_start` ✓ |
+| session start    | `SessionStart` ✓ | `SessionStart` ✓ | `sessionStart` ✓ | `sessionStart` ✓ | `SessionStart` ✓ | `session.created` ✓ | `session_start` ✓ | `session_start` ✓ |
+| pre-compaction   | `PreCompact` ✓   | `PreCompact` ✓   | `preCompact` ✓   | — (gap, #672)    | `PreCompress` ✓  | `session.compacted` ✓ | `session_compact` ✓ | `session_compact` ✓ |
+| user prompt submit | `UserPromptSubmit` ✓ | `UserPromptSubmit` ✓ | `beforeSubmitPrompt` ✓ | `userPromptSubmitted` ✓ | — | — | — | — |
+| before agent run | —                | —                | —                | —                | `BeforeAgent` ✓  | —                | `before_agent_start` ✓ | `before_agent_start` ✓ |
 
 ### Gas City command bindings
 

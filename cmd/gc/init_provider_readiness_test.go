@@ -745,6 +745,41 @@ func TestCheckHardDependenciesAcceptsPythonFallbackForBdContract(t *testing.T) {
 	}
 }
 
+func TestCheckHardDependenciesRejectsBdBelowExplicitIDSupport(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+
+	oldLookPath := initLookPath
+	initLookPath = func(name string) (string, error) {
+		return "/usr/bin/" + name, nil
+	}
+	t.Cleanup(func() { initLookPath = oldLookPath })
+
+	oldRunVersion := initRunVersion
+	initRunVersion = func(binary string) (string, error) {
+		switch binary {
+		case "bd":
+			return "bd version 1.0.3", nil
+		case "dolt":
+			return "dolt version " + doltMinVersion, nil
+		case "flock", "tmux", "jq", "git", "pgrep", "lsof":
+			return binary + " version", nil
+		default:
+			return binary + " version " + doltMinVersion, nil
+		}
+	}
+	t.Cleanup(func() { initRunVersion = oldRunVersion })
+
+	missing := checkHardDependencies(t.TempDir())
+	if len(missing) != 1 {
+		t.Fatalf("missing deps = %#v, want only bd version rejection", missing)
+	}
+	for _, want := range []string{"bd", "1.0.3", "1.0.4"} {
+		if !strings.Contains(missing[0].name, want) {
+			t.Fatalf("missing dep = %#v, want %q", missing[0], want)
+		}
+	}
+}
+
 func TestCheckHardDependenciesRejectsDoltPreReleaseAtFloor(t *testing.T) {
 	t.Setenv("GC_BEADS", "bd")
 
@@ -892,6 +927,7 @@ func TestFinalizeInitCanonicalizesBdStoreBeforeProviderReadinessBlock(t *testing
 	t.Setenv("GC_BEADS", "bd")
 	t.Setenv("GC_DOLT", "skip")
 	configureIsolatedRuntimeEnv(t)
+	stubInitDependencyChecks(t)
 
 	cityPath := filepath.Join(t.TempDir(), "bright-lights")
 	var initStdout, initStderr bytes.Buffer
@@ -1422,6 +1458,7 @@ func TestInitRunDoltConfigGetTreatsSilentEmptyExitAsMissingKey(t *testing.T) {
 func TestFinalizeInitCanonicalizesBdStoreBeforeProviderReadinessBlockWithoutSkip(t *testing.T) {
 	t.Setenv("GC_BEADS", "bd")
 	configureIsolatedRuntimeEnv(t)
+	stubInitDependencyChecks(t)
 	stubInitDoltAuthorIdentity(t, map[string]string{
 		"user.name":  "gc-test",
 		"user.email": "gc-test@test.local",
@@ -1475,6 +1512,7 @@ func TestFinalizeInitCanonicalizesBdStoreBeforeProviderReadinessBlockWithoutSkip
 func TestFinalizeInitDoesNotRunBdProviderBeforeProviderReadinessBlock(t *testing.T) {
 	configureIsolatedRuntimeEnv(t)
 	t.Setenv("GC_DOLT", "")
+	stubInitDependencyChecks(t)
 	stubInitDoltAuthorIdentity(t, map[string]string{
 		"user.name":  "gc-test",
 		"user.email": "gc-test@test.local",

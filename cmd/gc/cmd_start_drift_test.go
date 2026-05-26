@@ -2,10 +2,13 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -352,6 +355,69 @@ func TestRunStartDriftCheck_ErrorReturnsTerminal(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "supervisor binary drift") {
 		t.Errorf("stderr missing drift error:\n%s", stderr.String())
+	}
+}
+
+func TestDoStartJSONAlreadyRunningSupervisorKeepsStdoutJSONOnly(t *testing.T) {
+	cases := []struct {
+		name              string
+		localBuildID      string
+		supervisorBuildID string
+	}{
+		{
+			name:              "no drift",
+			localBuildID:      "same-build-id",
+			supervisorBuildID: "same-build-id",
+		},
+		{
+			name:              "drift restart",
+			localBuildID:      "new-build-id",
+			supervisorBuildID: "old-build-id",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cityPath, setCommit := driftCheckEnv(t, tc.supervisorBuildID)
+			setCommit(tc.localBuildID)
+			if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+				t.Fatalf("mkdir city .gc: %v", err)
+			}
+			writeCityToml(t, cityPath, "[workspace]\nname = \"test-city\"\n")
+
+			oldDry, oldNoAR := dryRunMode, noAutoRestartMode
+			dryRunMode, noAutoRestartMode = false, false
+			t.Cleanup(func() { dryRunMode, noAutoRestartMode = oldDry, oldNoAR })
+
+			oldRegister := registerCityWithSupervisorTestHook
+			registerCityWithSupervisorTestHook = func(_ string, _ string, stdout, _ io.Writer) (bool, int) {
+				if _, err := fmt.Fprintln(stdout, "Registered city 'test-city'"); err != nil {
+					t.Fatalf("write registration output: %v", err)
+				}
+				return true, 0
+			}
+			t.Cleanup(func() { registerCityWithSupervisorTestHook = oldRegister })
+
+			var stdout, stderr bytes.Buffer
+			code := doStartWithNameOverrideJSON([]string{cityPath}, false, &stdout, &stderr, "", true)
+			if code != 0 {
+				t.Fatalf("doStartWithNameOverrideJSON = %d; stderr=%q stdout=%q", code, stderr.String(), stdout.String())
+			}
+			if strings.Contains(stdout.String(), "Supervisor:") || strings.Contains(stdout.String(), "Drift detected:") || strings.Contains(stdout.String(), "Registered city") {
+				t.Fatalf("stdout contains human text in JSON mode:\n%s", stdout.String())
+			}
+			lines := strings.Split(strings.TrimSuffix(stdout.String(), "\n"), "\n")
+			if len(lines) != 1 {
+				t.Fatalf("stdout lines = %d, want 1 JSONL record:\n%s", len(lines), stdout.String())
+			}
+			var payload map[string]any
+			if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+				t.Fatalf("stdout is not JSON: %v\n%s", err, stdout.String())
+			}
+			if payload["command"] != "start" || payload["action"] != "start" {
+				t.Fatalf("payload command/action = %v/%v, want start/start\n%s", payload["command"], payload["action"], stdout.String())
+			}
+		})
 	}
 }
 

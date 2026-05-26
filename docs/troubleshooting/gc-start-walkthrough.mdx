@@ -83,8 +83,6 @@ on disk matches the running supervisor — see
 [Pack schema mismatch](#pack-schema-mismatch) for the drift-detection
 flow.
 
-**Background**: [PRD `ga-sn06`](https://github.com/gastownhall/gascity/issues/sn06).
-
 ## 2. Pack schema mismatch {#pack-schema-mismatch}
 
 **Symptom**
@@ -126,8 +124,6 @@ gc start                  # prints "Supervisor: pid=… exe=… buildID=…"
 ```
 
 The reported `buildID` should match `gc version`.
-
-**Background**: [PRD `ga-7kwr`](https://github.com/gastownhall/gascity/issues/7kwr).
 
 ## 3. Duplicate agent name {#duplicate-name}
 
@@ -177,8 +173,6 @@ is for packs that intentionally wrap a system pack and need the local
 declaration to win when both are present.
 
 **Background**: [Pack v1 → v2 migration guide](/guides/migrating-to-pack-vnext) ·
-[PRD `ga-ytx2`](https://github.com/gastownhall/gascity/issues/ytx2) ·
-[PRD `ga-qpbe`](https://github.com/gastownhall/gascity/issues/qpbe).
 
 ## 4. Unknown field {#unknown-field-agent-pool}
 

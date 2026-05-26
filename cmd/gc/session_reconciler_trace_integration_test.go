@@ -712,7 +712,7 @@ func createRoutedReadyWork(t *testing.T, store beads.Store, template string, cou
 func createCanonicalPoolSession(t *testing.T, store beads.Store, cfgAgent *config.Agent, now time.Time, slot int) beads.Bead {
 	t.Helper()
 	_, qualifiedInstance := poolInstanceIdentity(cfgAgent, slot, io.Discard)
-	session, err := createPoolSessionBead(store, cfgAgent.QualifiedName(), nil, now, poolSessionCreateIdentity{
+	session, err := createPoolSessionBead(store, cfgAgent.QualifiedName(), now, poolSessionCreateIdentity{
 		AgentName: qualifiedInstance,
 		Alias:     qualifiedInstance,
 		Slot:      slot,

@@ -184,6 +184,9 @@ name = "legacy-workspace"
 	fs.Files["/city/fragment.toml"] = []byte(`
 [workspace]
 provider = "claude"
+start_command = "claude --resume"
+suspended = true
+install_agent_hooks = ["claude"]
 global_fragments = ["shared"]
 `)
 
@@ -192,7 +195,7 @@ global_fragments = ["shared"]
 		t.Fatalf("LoadWithIncludes: %v", err)
 	}
 
-	for _, field := range []string{"provider", "global_fragments"} {
+	for _, field := range []string{"provider", "start_command", "suspended", "install_agent_hooks", "global_fragments"} {
 		want := "/city/fragment.toml: workspace." + field + " is deprecated:"
 		if !containsWarningPrefix(prov.Warnings, want) {
 			t.Fatalf("missing fragment-sourced %s warning with prefix %q in %v", field, want, prov.Warnings)
@@ -201,6 +204,26 @@ global_fragments = ["shared"]
 		if containsWarningPrefix(prov.Warnings, wrong) {
 			t.Fatalf("warning for fragment-authored %s was attributed to root: %v", field, prov.Warnings)
 		}
+	}
+}
+
+func TestLoadWithIncludesLegacyWorkspaceWarningsDetectExplicitSuspendedFalse(t *testing.T) {
+	t.Parallel()
+	fs := fsys.NewFake()
+	fs.Files["/city/city.toml"] = []byte(`
+[workspace]
+name = "legacy-workspace"
+suspended = false
+`)
+
+	_, prov, err := LoadWithIncludes(fs, "/city/city.toml")
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+
+	want := "/city/city.toml: workspace.suspended is deprecated:"
+	if !containsWarningPrefix(prov.Warnings, want) {
+		t.Fatalf("missing explicit suspended=false warning with prefix %q in %v", want, prov.Warnings)
 	}
 }
 

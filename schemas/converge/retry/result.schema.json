@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["schema_version", "ok", "source_bead_id", "new_bead_id"],
+  "properties": {
+    "schema_version": { "const": "1" },
+    "ok": { "const": true },
+    "source_bead_id": { "type": "string" },
+    "new_bead_id": { "type": "string" }
+  },
+  "additionalProperties": true
+}

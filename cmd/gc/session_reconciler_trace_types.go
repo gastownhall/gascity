@@ -57,44 +57,58 @@ const (
 type TraceSiteCode string
 
 const (
-	TraceSiteUnknown                 TraceSiteCode = "unknown"
-	TraceSiteScaleCheckExec          TraceSiteCode = "trace.scale_check_exec"
-	TraceSiteCycleStart              TraceSiteCode = "cycle.start"
-	TraceSiteCycleFinish             TraceSiteCode = "cycle.finish"
-	TraceSiteConfigReload            TraceSiteCode = "config.reload"
-	TraceSiteDesiredStateBuild       TraceSiteCode = "desired_state.build"
-	TraceSitePoolDemandCompute       TraceSiteCode = "pool_desired.compute"
-	TraceSitePoolAgentCap            TraceSiteCode = "reconciler.pool.agent_cap"
-	TraceSitePoolRigCap              TraceSiteCode = "reconciler.pool.rig_cap"
-	TraceSitePoolWorkspaceCap        TraceSiteCode = "reconciler.pool.workspace_cap"
-	TraceSitePoolAccept              TraceSiteCode = "reconciler.pool.accept"
-	TraceSitePoolMinFill             TraceSiteCode = "reconciler.pool.min_fill"
-	TraceSitePoolInFlightReuse       TraceSiteCode = "reconciler.pool.inflight_reuse"
-	TraceSiteReconcilerUnknownState  TraceSiteCode = "reconciler.session.skip_unknown_state"
-	TraceSiteReconcilerOrphaned      TraceSiteCode = "reconciler.session.orphan_or_suspended"
-	TraceSiteReconcilerCloseOrphan   TraceSiteCode = "reconciler.session.close_orphan"
-	TraceSiteReconcilerPendingCreate TraceSiteCode = "reconciler.session.rollback_pending_create"
-	TraceSiteReconcilerConfigDrift   TraceSiteCode = "reconciler.session.config_drift"
-	TraceSiteReconcilerIdleDrain     TraceSiteCode = "reconciler.session.idle_drain"
-	TraceSiteReconcilerIdleTimeout   TraceSiteCode = "reconciler.session.idle_timeout"
-	TraceSiteReconcilerWakeDecision  TraceSiteCode = "reconciler.session.wake_decision"
-	TraceSiteReconcilerDrainDecision TraceSiteCode = "reconciler.session.drain"
-	TraceSiteDrainStale              TraceSiteCode = "reconciler.drain.stale"
-	TraceSiteDrainComplete           TraceSiteCode = "reconciler.drain.complete"
-	TraceSiteDrainCancel             TraceSiteCode = "reconciler.drain.cancel"
-	TraceSiteDrainTimeout            TraceSiteCode = "reconciler.drain.timeout"
-	TraceSiteMutationBeadMetadata    TraceSiteCode = "bead_metadata"
-	TraceSiteMutationRuntimeMeta     TraceSiteCode = "runtime_meta"
-	TraceSiteLifecycleStartRollback  TraceSiteCode = "reconciler.start.rollback_pending"
-	TraceSiteLifecycleStartFailed    TraceSiteCode = "reconciler.start.failed"
-	TraceSiteLifecycleStartRun       TraceSiteCode = "reconciler.start.execute"
-	TraceSiteLifecycleStartPrepare   TraceSiteCode = "lifecycle.start.prepare"
-	TraceSiteLifecycleStartExecute   TraceSiteCode = "lifecycle.start.execute"
-	TraceSiteLifecycleStartCommit    TraceSiteCode = "lifecycle.start.commit"
-	TraceSiteLifecycleDrainBegin     TraceSiteCode = "lifecycle.drain.begin"
-	TraceSiteLifecycleDrainAdvance   TraceSiteCode = "lifecycle.drain.advance"
-	TraceSiteSupervisorFSPressure    TraceSiteCode = "supervisor.fs_pressure"
-	TraceSiteTraceControl            TraceSiteCode = "trace.control"
+	TraceSiteUnknown                        TraceSiteCode = "unknown"
+	TraceSiteScaleCheckExec                 TraceSiteCode = "trace.scale_check_exec"
+	TraceSiteCycleStart                     TraceSiteCode = "cycle.start"
+	TraceSiteCycleFinish                    TraceSiteCode = "cycle.finish"
+	TraceSiteConfigReload                   TraceSiteCode = "config.reload"
+	TraceSiteControllerTickPhase            TraceSiteCode = "controller.tick.phase"
+	TraceSiteDesiredStateBuild              TraceSiteCode = "desired_state.build"
+	TraceSiteDemandSnapshot                 TraceSiteCode = "demand_snapshot.load"
+	TraceSiteOrderDispatch                  TraceSiteCode = "orders.dispatch"
+	TraceSitePoolDemandCompute              TraceSiteCode = "pool_desired.compute"
+	TraceSiteSessionSnapshot                TraceSiteCode = "session_snapshot.load"
+	TraceSiteSessionSync                    TraceSiteCode = "session_sync.update_index"
+	TraceSiteSessionReconcileBuildDeps      TraceSiteCode = "session_reconcile.build_deps"
+	TraceSiteSessionReconcileHealRetire     TraceSiteCode = "session_reconcile.heal_retire"
+	TraceSiteSessionReconcileTopoOrder      TraceSiteCode = "session_reconcile.topo_order"
+	TraceSiteSessionReconcileCircuitBreaker TraceSiteCode = "session_reconcile.circuit_breaker"
+	TraceSiteSessionReconcileForwardPass    TraceSiteCode = "session_reconcile.forward_pass"
+	TraceSiteSessionReconcileAwakeSet       TraceSiteCode = "session_reconcile.awake_set"
+	TraceSiteSessionReconcileWakeSleep      TraceSiteCode = "session_reconcile.wake_sleep"
+	TraceSiteSessionReconcileStartExecution TraceSiteCode = "session_reconcile.start_execution"
+	TraceSiteSessionReconcileDrainAdvance   TraceSiteCode = "session_reconcile.drain_advance"
+	TraceSitePoolAgentCap                   TraceSiteCode = "reconciler.pool.agent_cap"
+	TraceSitePoolRigCap                     TraceSiteCode = "reconciler.pool.rig_cap"
+	TraceSitePoolWorkspaceCap               TraceSiteCode = "reconciler.pool.workspace_cap"
+	TraceSitePoolAccept                     TraceSiteCode = "reconciler.pool.accept"
+	TraceSitePoolMinFill                    TraceSiteCode = "reconciler.pool.min_fill"
+	TraceSitePoolInFlightReuse              TraceSiteCode = "reconciler.pool.inflight_reuse"
+	TraceSiteReconcilerUnknownState         TraceSiteCode = "reconciler.session.skip_unknown_state"
+	TraceSiteReconcilerOrphaned             TraceSiteCode = "reconciler.session.orphan_or_suspended"
+	TraceSiteReconcilerCloseOrphan          TraceSiteCode = "reconciler.session.close_orphan"
+	TraceSiteReconcilerPendingCreate        TraceSiteCode = "reconciler.session.rollback_pending_create"
+	TraceSiteReconcilerConfigDrift          TraceSiteCode = "reconciler.session.config_drift"
+	TraceSiteReconcilerIdleDrain            TraceSiteCode = "reconciler.session.idle_drain"
+	TraceSiteReconcilerIdleTimeout          TraceSiteCode = "reconciler.session.idle_timeout"
+	TraceSiteReconcilerWakeDecision         TraceSiteCode = "reconciler.session.wake_decision"
+	TraceSiteReconcilerDrainDecision        TraceSiteCode = "reconciler.session.drain"
+	TraceSiteDrainStale                     TraceSiteCode = "reconciler.drain.stale"
+	TraceSiteDrainComplete                  TraceSiteCode = "reconciler.drain.complete"
+	TraceSiteDrainCancel                    TraceSiteCode = "reconciler.drain.cancel"
+	TraceSiteDrainTimeout                   TraceSiteCode = "reconciler.drain.timeout"
+	TraceSiteMutationBeadMetadata           TraceSiteCode = "bead_metadata"
+	TraceSiteMutationRuntimeMeta            TraceSiteCode = "runtime_meta"
+	TraceSiteLifecycleStartRollback         TraceSiteCode = "reconciler.start.rollback_pending"
+	TraceSiteLifecycleStartFailed           TraceSiteCode = "reconciler.start.failed"
+	TraceSiteLifecycleStartRun              TraceSiteCode = "reconciler.start.execute"
+	TraceSiteLifecycleStartPrepare          TraceSiteCode = "lifecycle.start.prepare"
+	TraceSiteLifecycleStartExecute          TraceSiteCode = "lifecycle.start.execute"
+	TraceSiteLifecycleStartCommit           TraceSiteCode = "lifecycle.start.commit"
+	TraceSiteLifecycleDrainBegin            TraceSiteCode = "lifecycle.drain.begin"
+	TraceSiteLifecycleDrainAdvance          TraceSiteCode = "lifecycle.drain.advance"
+	TraceSiteSupervisorFSPressure           TraceSiteCode = "supervisor.fs_pressure"
+	TraceSiteTraceControl                   TraceSiteCode = "trace.control"
 )
 
 type TraceReasonCode string
@@ -539,8 +553,22 @@ func normalizeTraceSiteCode(raw string) (TraceSiteCode, string) {
 		TraceSiteCycleStart,
 		TraceSiteCycleFinish,
 		TraceSiteConfigReload,
+		TraceSiteControllerTickPhase,
 		TraceSiteDesiredStateBuild,
+		TraceSiteDemandSnapshot,
+		TraceSiteOrderDispatch,
 		TraceSitePoolDemandCompute,
+		TraceSiteSessionSnapshot,
+		TraceSiteSessionSync,
+		TraceSiteSessionReconcileBuildDeps,
+		TraceSiteSessionReconcileHealRetire,
+		TraceSiteSessionReconcileTopoOrder,
+		TraceSiteSessionReconcileCircuitBreaker,
+		TraceSiteSessionReconcileForwardPass,
+		TraceSiteSessionReconcileAwakeSet,
+		TraceSiteSessionReconcileWakeSleep,
+		TraceSiteSessionReconcileStartExecution,
+		TraceSiteSessionReconcileDrainAdvance,
 		TraceSitePoolAgentCap,
 		TraceSitePoolRigCap,
 		TraceSitePoolWorkspaceCap,

@@ -1226,15 +1226,30 @@ func findLatestAttempt(store beads.Store, control beads.Bead) (beads.Bead, error
 	}
 
 	all, err := listByWorkflowRoot(store, rootID)
-	if err != nil {
-		return beads.Bead{}, err
+	if err == nil {
+		latest := latestAttemptFromCandidates(control, all)
+		if latest.ID != "" {
+			return latest, nil
+		}
 	}
 
-	latest := latestAttemptFromCandidates(control, all)
+	latest, depErr := latestAttemptFromDependencies(store, control)
+	if depErr != nil {
+		if err != nil {
+			return beads.Bead{}, fmt.Errorf("%w; dependency fallback: %w", err, depErr)
+		}
+		return beads.Bead{}, depErr
+	}
 	if latest.ID != "" {
 		return latest, nil
 	}
+	if err != nil {
+		return beads.Bead{}, err
+	}
+	return beads.Bead{}, nil
+}
 
+func latestAttemptFromDependencies(store beads.Store, control beads.Bead) (beads.Bead, error) {
 	deps, err := store.DepList(control.ID, "down")
 	if err != nil {
 		return beads.Bead{}, err

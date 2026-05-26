@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -12,6 +13,7 @@ import (
 	"github.com/gastownhall/gascity/internal/agent"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/runtime"
 )
 
 var testBeaconTime = time.Unix(1_700_000_000, 0)
@@ -197,6 +199,110 @@ func TestTemplateParamsToConfigNoneModeUsesNudge(t *testing.T) {
 	}
 }
 
+func TestResolveTemplateControlDispatcherSuppressesStartupPrompt(t *testing.T) {
+	cityPath := t.TempDir()
+	fakeFS := fsys.NewFake()
+	promptPath := filepath.Join(cityPath, "prompts", "control-dispatcher.template.md")
+	if err := fakeFS.WriteFile(promptPath, []byte("startup prompt for {{.AgentName}}"), 0o644); err != nil {
+		t.Fatalf("write prompt template: %v", err)
+	}
+	params := &agentBuildParams{
+		fs:              fakeFS,
+		cityName:        "maintainer-city",
+		cityPath:        cityPath,
+		workspace:       &config.Workspace{Name: "maintainer-city"},
+		providers:       map[string]config.ProviderSpec{},
+		lookPath:        func(string) (string, error) { return "", fmt.Errorf("not found") },
+		beaconTime:      testBeaconTime,
+		sessionTemplate: "",
+		beadNames:       make(map[string]string),
+		stderr:          io.Discard,
+	}
+	agent := &config.Agent{
+		Name:           config.ControlDispatcherAgentName,
+		Dir:            "gascity",
+		PromptTemplate: "prompts/control-dispatcher.template.md",
+		StartCommand:   config.ControlDispatcherStartCommandFor("gascity/" + config.ControlDispatcherAgentName),
+		Nudge:          "configured startup nudge",
+		ProcessNames:   []string{"gc"},
+		Implicit:       true,
+	}
+
+	tp, err := resolveTemplate(params, agent, agent.QualifiedName(), nil)
+	if err != nil {
+		t.Fatalf("resolveTemplate: %v", err)
+	}
+	if tp.Prompt != "" {
+		t.Fatalf("Prompt = %q, want empty for deterministic control dispatcher", tp.Prompt)
+	}
+	cfg := templateParamsToConfig(tp)
+	if cfg.PromptSuffix != "" {
+		t.Fatalf("PromptSuffix = %q, want empty", cfg.PromptSuffix)
+	}
+	if cfg.Nudge != "" {
+		t.Fatalf("Nudge = %q, want empty", cfg.Nudge)
+	}
+	if cfg.AcceptStartupDialogs == nil || *cfg.AcceptStartupDialogs {
+		t.Fatalf("AcceptStartupDialogs = %v, want false", cfg.AcceptStartupDialogs)
+	}
+	if !reflect.DeepEqual(cfg.ProcessNames, []string{"gc"}) {
+		t.Fatalf("ProcessNames = %v, want [gc]", cfg.ProcessNames)
+	}
+}
+
+func TestResolveTemplateExplicitControlDispatcherKeepsStartupPrompt(t *testing.T) {
+	cityPath := t.TempDir()
+	fakeFS := fsys.NewFake()
+	promptPath := filepath.Join(cityPath, "prompts", "control-dispatcher.template.md")
+	if err := fakeFS.WriteFile(promptPath, []byte("startup prompt for {{.AgentName}}"), 0o644); err != nil {
+		t.Fatalf("write prompt template: %v", err)
+	}
+	params := &agentBuildParams{
+		fs:              fakeFS,
+		cityName:        "maintainer-city",
+		cityPath:        cityPath,
+		workspace:       &config.Workspace{Name: "maintainer-city"},
+		providers:       map[string]config.ProviderSpec{},
+		lookPath:        func(string) (string, error) { return "", fmt.Errorf("not found") },
+		beaconTime:      testBeaconTime,
+		sessionTemplate: "",
+		beadNames:       make(map[string]string),
+		stderr:          io.Discard,
+	}
+	agent := &config.Agent{
+		Name:           config.ControlDispatcherAgentName,
+		Dir:            "gascity",
+		PromptTemplate: "prompts/control-dispatcher.template.md",
+		StartCommand:   "custom-control-dispatcher --serve",
+		Nudge:          "configured startup nudge",
+		ProcessNames:   []string{"custom-control-dispatcher"},
+	}
+
+	tp, err := resolveTemplate(params, agent, agent.QualifiedName(), nil)
+	if err != nil {
+		t.Fatalf("resolveTemplate: %v", err)
+	}
+	if !strings.Contains(tp.Prompt, "startup prompt for "+agent.QualifiedName()) {
+		t.Fatalf("Prompt = %q, want rendered startup prompt for explicit agent", tp.Prompt)
+	}
+	cfg := templateParamsToConfig(tp)
+	if cfg.PromptSuffix != "" {
+		t.Fatalf("PromptSuffix = %q, want prompt delivered by nudge for start_command prompt_mode=none", cfg.PromptSuffix)
+	}
+	if !strings.Contains(cfg.Nudge, "startup prompt for "+agent.QualifiedName()) {
+		t.Fatalf("Nudge = %q, want startup prompt for explicit agent", cfg.Nudge)
+	}
+	if !strings.Contains(cfg.Nudge, "configured startup nudge") {
+		t.Fatalf("Nudge = %q, want configured nudge preserved", cfg.Nudge)
+	}
+	if cfg.AcceptStartupDialogs != nil {
+		t.Fatalf("AcceptStartupDialogs = %v, want no deterministic suppression override", cfg.AcceptStartupDialogs)
+	}
+	if !reflect.DeepEqual(cfg.ProcessNames, []string{"custom-control-dispatcher"}) {
+		t.Fatalf("ProcessNames = %v, want [custom-control-dispatcher]", cfg.ProcessNames)
+	}
+}
+
 func TestTemplateParamsToConfigNoneModeWithHooksStillUsesStartupNudge(t *testing.T) {
 	tp := TemplateParams{
 		Command: "opencode",
@@ -366,6 +472,36 @@ func TestTemplateParamsToConfigNilResolvedProvider(t *testing.T) {
 	}
 	if strings.HasPrefix(cfg.PromptSuffix, "--") {
 		t.Errorf("nil ResolvedProvider should not add flag prefix, got %q", cfg.PromptSuffix)
+	}
+}
+
+func TestResolveTemplateCarriesOneShotLifecycleToRuntimeConfig(t *testing.T) {
+	cityPath := t.TempDir()
+	params := &agentBuildParams{
+		fs:         fsys.NewFake(),
+		cityName:   "bright-lights",
+		cityPath:   cityPath,
+		workspace:  &config.Workspace{Name: "bright-lights"},
+		beaconTime: testBeaconTime,
+		beadNames:  make(map[string]string),
+		stderr:     io.Discard,
+	}
+	agent := &config.Agent{
+		Name:         "scripted",
+		StartCommand: "env GC_LOG_LEVEL=debug custom-once --work",
+		Lifecycle:    config.AgentLifecycleOneShot,
+		Nudge:        "Check your hook for work.",
+	}
+
+	tp, err := resolveTemplate(params, agent, agent.QualifiedName(), nil)
+	if err != nil {
+		t.Fatalf("resolveTemplate: %v", err)
+	}
+	if got, want := tp.Hints.Lifecycle, runtime.LifecycleOneShot; got != want {
+		t.Fatalf("TemplateParams.Hints.Lifecycle = %q, want %q", got, want)
+	}
+	if got, want := templateParamsToConfig(tp).Lifecycle, runtime.LifecycleOneShot; got != want {
+		t.Fatalf("runtime config Lifecycle = %q, want %q", got, want)
 	}
 }
 
@@ -715,7 +851,7 @@ func TestResolveTemplateWrappedClaudeProjectsSettings(t *testing.T) {
 	}
 }
 
-func TestResolveTemplateImportedPackAppendFragmentsLayerBeforeCityDefaults(t *testing.T) {
+func TestResolveTemplateCityAppendFragmentsApplyToImportedPackAgent(t *testing.T) {
 	cityPath := t.TempDir()
 	write := func(rel, data string) {
 		path := filepath.Join(cityPath, rel)
@@ -740,9 +876,6 @@ append_fragments = ["city-footer"]
 name = "imported"
 schema = 2
 
-[agent_defaults]
-append_fragments = ["pack-footer"]
-
 [[agent]]
 name = "mayor"
 provider = "claude"
@@ -750,7 +883,6 @@ scope = "city"
 prompt_template = "agents/mayor/prompt.template.md"
 `)
 	write("packs/imported/agents/mayor/prompt.template.md", "Hello")
-	write("packs/imported/agents/mayor/template-fragments/pack-footer.template.md", `{{ define "pack-footer" }}Pack Footer{{ end }}`)
 	write("packs/imported/agents/mayor/template-fragments/city-footer.template.md", `{{ define "city-footer" }}City Footer{{ end }}`)
 
 	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
@@ -788,13 +920,8 @@ prompt_template = "agents/mayor/prompt.template.md"
 	if err != nil {
 		t.Fatalf("resolveTemplate: %v", err)
 	}
-	packIdx := strings.Index(tp.Prompt, "Pack Footer")
-	cityIdx := strings.Index(tp.Prompt, "City Footer")
-	if packIdx < 0 || cityIdx < 0 {
-		t.Fatalf("prompt missing inherited fragments: %q", tp.Prompt)
-	}
-	if packIdx > cityIdx {
-		t.Fatalf("pack fragment should render before city fragment: %q", tp.Prompt)
+	if !strings.Contains(tp.Prompt, "City Footer") {
+		t.Fatalf("prompt missing city append fragment: %q", tp.Prompt)
 	}
 }
 
@@ -864,286 +991,5 @@ func TestResolveTemplateConventionAgentAppendFragments(t *testing.T) {
 	}
 	if !strings.Contains(tp.Prompt, "Discord Ready") {
 		t.Fatalf("prompt missing per-agent append fragment: %q", tp.Prompt)
-	}
-}
-
-func TestResolveTemplateNestedIncludedPackAppendFragmentsLayerBeforeCityDefaults(t *testing.T) {
-	cityPath := t.TempDir()
-	write := func(rel, data string) {
-		path := filepath.Join(cityPath, rel)
-		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-			t.Fatalf("MkdirAll(%s): %v", path, err)
-		}
-		if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
-			t.Fatalf("WriteFile(%s): %v", path, err)
-		}
-	}
-
-	write("city.toml", `
-[workspace]
-name = "test"
-includes = ["packs/imported"]
-
-[agent_defaults]
-append_fragments = ["city-footer"]
-`)
-	write("packs/imported/pack.toml", `
-[pack]
-name = "imported"
-schema = 2
-includes = ["../base"]
-
-[agent_defaults]
-append_fragments = ["pack-footer"]
-`)
-	write("packs/base/pack.toml", `
-[pack]
-name = "base"
-schema = 2
-
-[[agent]]
-name = "mayor"
-provider = "claude"
-scope = "city"
-prompt_template = "agents/mayor/prompt.template.md"
-`)
-	write("packs/base/agents/mayor/prompt.template.md", "Hello")
-	write("packs/base/agents/mayor/template-fragments/pack-footer.template.md", `{{ define "pack-footer" }}Pack Footer{{ end }}`)
-	write("packs/base/agents/mayor/template-fragments/city-footer.template.md", `{{ define "city-footer" }}City Footer{{ end }}`)
-
-	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
-	if err != nil {
-		t.Fatalf("LoadWithIncludes: %v", err)
-	}
-	var agentCfg config.Agent
-	found := false
-	for _, a := range cfg.Agents {
-		if !a.Implicit && a.Name == "mayor" {
-			agentCfg = a
-			found = true
-			break
-		}
-	}
-	if !found {
-		t.Fatalf("expected explicit imported mayor agent, got %v", cfg.Agents)
-	}
-	params := &agentBuildParams{
-		fs:              fsys.OSFS{},
-		cityName:        "test",
-		cityPath:        cityPath,
-		workspace:       &cfg.Workspace,
-		providers:       config.BuiltinProviders(),
-		lookPath:        func(string) (string, error) { return "/usr/bin/claude", nil },
-		beaconTime:      testBeaconTime,
-		packDirs:        cfg.PackDirs,
-		globalFragments: cfg.Workspace.GlobalFragments,
-		appendFragments: mergeFragmentLists(cfg.AgentDefaults.AppendFragments, cfg.AgentsDefaults.AppendFragments),
-		beadNames:       make(map[string]string),
-		stderr:          io.Discard,
-	}
-
-	tp, err := resolveTemplate(params, &agentCfg, agentCfg.QualifiedName(), nil)
-	if err != nil {
-		t.Fatalf("resolveTemplate: %v", err)
-	}
-	packIdx := strings.Index(tp.Prompt, "Pack Footer")
-	cityIdx := strings.Index(tp.Prompt, "City Footer")
-	if packIdx < 0 || cityIdx < 0 {
-		t.Fatalf("prompt missing inherited fragments: %q", tp.Prompt)
-	}
-	if packIdx > cityIdx {
-		t.Fatalf("pack fragment should render before city fragment: %q", tp.Prompt)
-	}
-}
-
-func TestResolveTemplateWrapperPackDefaultsDoNotBleedAcrossImports(t *testing.T) {
-	cityPath := t.TempDir()
-	write := func(rel, data string) {
-		path := filepath.Join(cityPath, rel)
-		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-			t.Fatalf("MkdirAll(%s): %v", path, err)
-		}
-		if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
-			t.Fatalf("WriteFile(%s): %v", path, err)
-		}
-	}
-
-	write("city.toml", `
-[workspace]
-name = "test"
-includes = ["packs/wrapper"]
-
-[agent_defaults]
-append_fragments = ["city-footer"]
-`)
-	write("packs/wrapper/pack.toml", `
-[pack]
-name = "wrapper"
-schema = 2
-
-[agent_defaults]
-append_fragments = ["wrapper-footer"]
-
-[imports.dep]
-source = "../dep"
-`)
-	write("packs/dep/pack.toml", `
-[pack]
-name = "dep"
-schema = 2
-
-[agent_defaults]
-append_fragments = ["dep-footer"]
-
-[[agent]]
-name = "mayor"
-provider = "claude"
-scope = "city"
-prompt_template = "agents/mayor/prompt.template.md"
-`)
-	write("packs/dep/agents/mayor/prompt.template.md", "Hello")
-	write("packs/dep/agents/mayor/template-fragments/dep-footer.template.md", `{{ define "dep-footer" }}Dep Footer{{ end }}`)
-	write("packs/dep/agents/mayor/template-fragments/wrapper-footer.template.md", `{{ define "wrapper-footer" }}Wrapper Footer{{ end }}`)
-	write("packs/dep/agents/mayor/template-fragments/city-footer.template.md", `{{ define "city-footer" }}City Footer{{ end }}`)
-
-	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
-	if err != nil {
-		t.Fatalf("LoadWithIncludes: %v", err)
-	}
-	var agentCfg config.Agent
-	found := false
-	for _, a := range cfg.Agents {
-		if !a.Implicit && a.BindingName == "dep" && a.Name == "mayor" {
-			agentCfg = a
-			found = true
-			break
-		}
-	}
-	if !found {
-		t.Fatalf("expected explicit imported dep.mayor agent, got %v", cfg.Agents)
-	}
-	params := &agentBuildParams{
-		fs:              fsys.OSFS{},
-		cityName:        "test",
-		cityPath:        cityPath,
-		workspace:       &cfg.Workspace,
-		providers:       config.BuiltinProviders(),
-		lookPath:        func(string) (string, error) { return "/usr/bin/claude", nil },
-		beaconTime:      testBeaconTime,
-		packDirs:        cfg.PackDirs,
-		globalFragments: cfg.Workspace.GlobalFragments,
-		appendFragments: mergeFragmentLists(cfg.AgentDefaults.AppendFragments, cfg.AgentsDefaults.AppendFragments),
-		beadNames:       make(map[string]string),
-		stderr:          io.Discard,
-	}
-
-	tp, err := resolveTemplate(params, &agentCfg, agentCfg.QualifiedName(), nil)
-	if err != nil {
-		t.Fatalf("resolveTemplate: %v", err)
-	}
-	if strings.Contains(tp.Prompt, "Wrapper Footer") {
-		t.Fatalf("wrapper fragment should not bleed across imports: %q", tp.Prompt)
-	}
-	if !strings.Contains(tp.Prompt, "Dep Footer") || !strings.Contains(tp.Prompt, "City Footer") {
-		t.Fatalf("prompt missing expected fragments: %q", tp.Prompt)
-	}
-}
-
-func TestResolveTemplateIncludingPackDefaultsDoNotBleedAcrossNestedImportBoundaries(t *testing.T) {
-	cityPath := t.TempDir()
-	write := func(rel, data string) {
-		path := filepath.Join(cityPath, rel)
-		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-			t.Fatalf("MkdirAll(%s): %v", path, err)
-		}
-		if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
-			t.Fatalf("WriteFile(%s): %v", path, err)
-		}
-	}
-
-	write("city.toml", `
-[workspace]
-name = "test"
-includes = ["packs/outer"]
-
-[agent_defaults]
-append_fragments = ["city-footer"]
-`)
-	write("packs/outer/pack.toml", `
-[pack]
-name = "outer"
-schema = 2
-includes = ["../mid"]
-
-[agent_defaults]
-append_fragments = ["outer-footer"]
-`)
-	write("packs/mid/pack.toml", `
-[pack]
-name = "mid"
-schema = 2
-
-[imports.dep]
-source = "../dep"
-`)
-	write("packs/dep/pack.toml", `
-[pack]
-name = "dep"
-schema = 2
-
-[agent_defaults]
-append_fragments = ["dep-footer"]
-
-[[agent]]
-name = "mayor"
-provider = "claude"
-scope = "city"
-prompt_template = "agents/mayor/prompt.template.md"
-`)
-	write("packs/dep/agents/mayor/prompt.template.md", "Hello")
-	write("packs/dep/agents/mayor/template-fragments/dep-footer.template.md", `{{ define "dep-footer" }}Dep Footer{{ end }}`)
-	write("packs/dep/agents/mayor/template-fragments/outer-footer.template.md", `{{ define "outer-footer" }}Outer Footer{{ end }}`)
-	write("packs/dep/agents/mayor/template-fragments/city-footer.template.md", `{{ define "city-footer" }}City Footer{{ end }}`)
-
-	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
-	if err != nil {
-		t.Fatalf("LoadWithIncludes: %v", err)
-	}
-	var agentCfg config.Agent
-	found := false
-	for _, a := range cfg.Agents {
-		if !a.Implicit && a.BindingName == "dep" && a.Name == "mayor" {
-			agentCfg = a
-			found = true
-			break
-		}
-	}
-	if !found {
-		t.Fatalf("expected explicit imported dep.mayor agent, got %v", cfg.Agents)
-	}
-	params := &agentBuildParams{
-		fs:              fsys.OSFS{},
-		cityName:        "test",
-		cityPath:        cityPath,
-		workspace:       &cfg.Workspace,
-		providers:       config.BuiltinProviders(),
-		lookPath:        func(string) (string, error) { return "/usr/bin/claude", nil },
-		beaconTime:      testBeaconTime,
-		packDirs:        cfg.PackDirs,
-		globalFragments: cfg.Workspace.GlobalFragments,
-		appendFragments: mergeFragmentLists(cfg.AgentDefaults.AppendFragments, cfg.AgentsDefaults.AppendFragments),
-		beadNames:       make(map[string]string),
-		stderr:          io.Discard,
-	}
-
-	tp, err := resolveTemplate(params, &agentCfg, agentCfg.QualifiedName(), nil)
-	if err != nil {
-		t.Fatalf("resolveTemplate: %v", err)
-	}
-	if strings.Contains(tp.Prompt, "Outer Footer") {
-		t.Fatalf("including-pack fragment should not bleed across nested import boundaries: %q", tp.Prompt)
-	}
-	if !strings.Contains(tp.Prompt, "Dep Footer") || !strings.Contains(tp.Prompt, "City Footer") {
-		t.Fatalf("prompt missing expected fragments: %q", tp.Prompt)
 	}
 }

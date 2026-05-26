@@ -1,35 +1,98 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
-  "required": ["schema", "port", "rigs_protected", "force_blockers", "dropped", "purge", "reaped", "summary", "errors"],
+  "required": [
+    "ok",
+    "schema",
+    "port",
+    "rigs_protected",
+    "force_blockers",
+    "dropped",
+    "purge",
+    "reaped",
+    "summary",
+    "errors"
+  ],
   "properties": {
-    "schema": { "const": "gc.dolt.cleanup.v1" },
+    "ok": {
+      "const": true
+    },
+    "schema": {
+      "const": "gc.dolt.cleanup.v1"
+    },
     "port": {
       "type": "object",
-      "required": ["resolved", "source", "fallback"],
+      "required": [
+        "resolved",
+        "source",
+        "fallback"
+      ],
       "properties": {
-        "resolved": { "type": "integer" },
-        "source": { "type": "string" },
-        "fallback": { "type": "boolean" }
+        "resolved": {
+          "type": "integer"
+        },
+        "source": {
+          "type": "string"
+        },
+        "fallback": {
+          "type": "boolean"
+        }
       },
       "additionalProperties": true
     },
-    "rigs_protected": { "type": "array", "items": { "type": "object", "additionalProperties": true } },
-    "force_blockers": { "type": "array", "items": { "type": "object", "additionalProperties": true } },
-    "dropped": { "type": "object", "additionalProperties": true },
-    "purge": { "type": "object", "additionalProperties": true },
-    "reaped": { "type": "object", "additionalProperties": true },
+    "rigs_protected": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": true
+      }
+    },
+    "force_blockers": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": true
+      }
+    },
+    "dropped": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "purge": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "reaped": {
+      "type": "object",
+      "additionalProperties": true
+    },
     "summary": {
       "type": "object",
-      "required": ["bytes_freed_disk", "bytes_freed_rss", "errors_total"],
+      "required": [
+        "bytes_freed_disk",
+        "bytes_freed_rss",
+        "errors_total"
+      ],
       "properties": {
-        "bytes_freed_disk": { "type": "integer" },
-        "bytes_freed_rss": { "type": "integer" },
-        "errors_total": { "type": "integer" }
+        "bytes_freed_disk": {
+          "type": "integer"
+        },
+        "bytes_freed_rss": {
+          "type": "integer"
+        },
+        "errors_total": {
+          "type": "integer"
+        }
       },
       "additionalProperties": true
     },
-    "errors": { "type": "array", "items": { "type": "object", "additionalProperties": true } }
+    "errors": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": true
+      }
+    }
   },
   "additionalProperties": true
 }

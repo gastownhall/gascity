@@ -63,6 +63,35 @@ func fatalUndecodedWarnings(md toml.MetaData, source string) []string {
 	return warnings
 }
 
+func validateCityAuthoringSurface(md toml.MetaData) error {
+	if md.IsDefined("formulas", "dir") {
+		return fmt.Errorf("[formulas].dir is no longer supported; use the well-known formulas/ directory")
+	}
+	return nil
+}
+
+func validatePackAuthoringSurface(md toml.MetaData, source string) error {
+	if md.IsDefined("agent_defaults") {
+		return fmt.Errorf("%s: [agent_defaults] is a city.toml table, not a pack.toml field", source)
+	}
+	if md.IsDefined("agents") {
+		return fmt.Errorf("%s: [agents] is a city.toml compatibility alias for [agent_defaults], not a pack.toml field", source)
+	}
+	if md.IsDefined("defaults", "rig", "imports") {
+		return fmt.Errorf("%s: [defaults.rig.imports] belongs in city.toml, not pack.toml", source)
+	}
+	if md.IsDefined("formulas", "dir") {
+		return fmt.Errorf("%s: [formulas].dir is no longer supported; use the well-known formulas/ directory", source)
+	}
+	if md.IsDefined("patches", "rigs") {
+		return fmt.Errorf("%s: [[patches.rigs]] is only valid in city.toml; pack.toml supports [[patches.agent]] only", source)
+	}
+	if md.IsDefined("patches", "providers") {
+		return fmt.Errorf("%s: [[patches.providers]] is only valid in city.toml; pack.toml supports [[patches.agent]] only", source)
+	}
+	return nil
+}
+
 func unknownFieldWarning(source, key string, known []string) string {
 	suggestion := suggestKey(key, known)
 	w := fmt.Sprintf("%s: unknown field %q", source, key)
@@ -189,7 +218,7 @@ func knownTOMLKeys() []string {
 		reflect.TypeOf(ServiceWorkflowConfig{}),
 		reflect.TypeOf(ServiceProcessConfig{}),
 		reflect.TypeOf(AgentDefaults{}),
-		reflect.TypeOf(packConfig{}),
+		reflect.TypeOf(PackConfig{}),
 		reflect.TypeOf(PackMeta{}),
 		reflect.TypeOf(Import{}),
 		reflect.TypeOf(NamedSession{}),
@@ -197,8 +226,8 @@ func knownTOMLKeys() []string {
 		reflect.TypeOf(PackDoctorEntry{}),
 		reflect.TypeOf(PackCommandEntry{}),
 		reflect.TypeOf(PackGlobal{}),
-		reflect.TypeOf(packDefaults{}),
-		reflect.TypeOf(packRigDefaults{}),
+		reflect.TypeOf(PackDefaults{}),
+		reflect.TypeOf(PackRigDefaults{}),
 	}
 	for _, t := range types {
 		collectTOMLTags(t, seen)

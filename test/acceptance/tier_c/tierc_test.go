@@ -188,7 +188,7 @@ func TestSwarm_SlingWorkCoderCommits(t *testing.T) {
 	time.Sleep(15 * time.Second)
 
 	// Sling work to the coder pool.
-	out, err := c.GC("sling", rigName+"/coder", "Create a file called hello.txt with the text 'hello world'")
+	out, err := c.GC("sling", swarmRigAgent(rigName, "coder"), "Create a file called hello.txt with the text 'hello world'")
 	if err != nil {
 		t.Fatalf("gc sling: %v\n%s", err, out)
 	}
@@ -205,7 +205,7 @@ func TestSwarm_SlingWorkCoderCommits(t *testing.T) {
 		gitLog := gitCmd(t, rigDir, "log", "--oneline", "-10")
 		status, _ := c.GC("status")
 		rigBeads, _ := bdCmd(testEnvC, rigDir, "list", "--json", "--limit=50")
-		sessionDiag := gatherSessionDiagnostics(t, c, c.Dir, "repo/coder", "repo/committer")
+		sessionDiag := gatherSessionDiagnostics(t, c, c.Dir, swarmRigAgent(rigName, "coder"), swarmRigAgent(rigName, "committer"))
 		t.Fatalf("hello.txt not created within %s\ngit log:\n%s\nstatus:\n%s\nrig beads:\n%s\n%s", deadline, gitLog, status, rigBeads, sessionDiag)
 	}
 
@@ -231,6 +231,7 @@ func TestGastown_PolecatImplementsRefineryMerges(t *testing.T) {
 
 	// Add the rig via gc rig add (initializes beads, hooks, routes).
 	c.RigAdd(rigDir, "packs/gastown")
+	seedGastownClaudeProjects(t, c, rigName)
 
 	// Start with polecat suspended so we can verify the attached-formula
 	// queue invariants before any worker claims the work.
@@ -244,13 +245,13 @@ func TestGastown_PolecatImplementsRefineryMerges(t *testing.T) {
 	}, 2*time.Minute, 2*time.Second, "rig bead store did not become ready")
 
 	// Sling attached formula work while the pool is suspended.
-	out, err := c.GC("sling", rigName+"/polecat", "Create a file called feature.txt containing 'new feature'", "--on", "mol-polecat-work")
+	out, err := c.GC("sling", gastownRigAgent(rigName, "polecat"), "Create a file called feature.txt containing 'new feature'", "--on", "mol-polecat-work")
 	if err != nil {
 		t.Fatalf("gc sling: %v\n%s", err, out)
 	}
 	t.Logf("Slung work to polecat: %s", strings.TrimSpace(out))
 
-	routeKey := rigName + "/polecat"
+	routeKey := gastownRigAgent(rigName, "polecat")
 	readyOut, err := bdCmd(testEnvC, rigDir, "ready", "--metadata-field", "gc.routed_to="+routeKey, "--unassigned", "--json", "--limit=20")
 	require.NoError(t, err, "bd ready")
 	var ready []beadJSON
@@ -300,9 +301,9 @@ func TestGastown_PolecatImplementsRefineryMerges(t *testing.T) {
 		originMain := gitCmd(t, rigDir, "log", "--oneline", "-5", "origin/main")
 		status, _ := c.GC("status")
 		outerFinal, _ := bdCmd(testEnvC, rigDir, "show", outerID, "--json")
-		refineryAssigned, _ := bdCmd(testEnvC, rigDir, "list", "--assignee=repo/refinery", "--json", "--limit=20")
-		refineryInProgress, _ := bdCmd(testEnvC, rigDir, "list", "--status=in_progress", "--assignee=repo/refinery", "--json", "--limit=20")
-		sessionDiag := gatherSessionDiagnostics(t, c, c.Dir, "mayor", "repo/witness", "repo/refinery", "repo/polecat")
+		refineryAssigned, _ := bdCmd(testEnvC, rigDir, "list", "--assignee="+gastownRigAgent(rigName, "refinery"), "--json", "--limit=20")
+		refineryInProgress, _ := bdCmd(testEnvC, rigDir, "list", "--status=in_progress", "--assignee="+gastownRigAgent(rigName, "refinery"), "--json", "--limit=20")
+		sessionDiag := gatherSessionDiagnostics(t, c, c.Dir, "mayor", gastownRigAgent(rigName, "witness"), gastownRigAgent(rigName, "refinery"), gastownRigAgent(rigName, "polecat"))
 		t.Fatalf("feature.txt was not merged to origin/main within %s\nbranches:\n%s\ngit log:\n%s\norigin/main:\n%s\nstatus:\n%s",
 			deadline, branches, gitLog, originMain, status+
 				"\nouter bead:\n"+outerFinal+
@@ -345,7 +346,7 @@ func TestGastown_PolecatLifecycle(t *testing.T) {
 	time.Sleep(15 * time.Second) // Wait for init.
 
 	// Sling a small, verifiable task.
-	out, err := c.GC("sling", rigName+"/polecat", "Add a function called Hello that prints 'hello world' to main.go")
+	out, err := c.GC("sling", gastownRigAgent(rigName, "polecat"), "Add a function called Hello that prints 'hello world' to main.go")
 	require.NoError(t, err, "gc sling: %s", out)
 	t.Logf("Slung work: %s", strings.TrimSpace(out))
 
@@ -421,7 +422,7 @@ func TestGastown_MayorDispatchPipeline(t *testing.T) {
 		if mayorInboxErr != nil {
 			mayorInbox = strings.TrimSpace(mayorInbox + "\nERR: " + mayorInboxErr.Error())
 		}
-		sessionDiag := gatherSessionDiagnostics(t, c, c.Dir, "mayor", "repo/witness", "repo/refinery", "repo/polecat")
+		sessionDiag := gatherSessionDiagnostics(t, c, c.Dir, "mayor", gastownRigAgent(rigName, "witness"), gastownRigAgent(rigName, "refinery"), gastownRigAgent(rigName, "polecat"))
 		t.Fatalf("mayor did not dispatch work within %s\nstatus:\n%s\nrig beads:\n%s\nmayor inbox:\n%s\n%s", deadline, status, rigBeads, mayorInbox, sessionDiag)
 	}
 
@@ -465,6 +466,18 @@ func newGastownAcceptanceCity(t *testing.T) *helpers.City {
 
 func applyTierCAcceptanceConfig(c *helpers.City) {
 	c.AppendToConfig(tierCAcceptanceConfig)
+}
+
+func swarmRigAgent(rigName, agent string) string {
+	return boundRigAgent(rigName, "swarm", agent)
+}
+
+func gastownRigAgent(rigName, agent string) string {
+	return boundRigAgent(rigName, "gastown", agent)
+}
+
+func boundRigAgent(rigName, binding, agent string) string {
+	return rigName + "/" + binding + "." + agent
 }
 
 func gitCmd(t *testing.T, dir string, args ...string) string {
@@ -623,6 +636,7 @@ func seedGastownClaudeProjects(t *testing.T, c *helpers.City, rigName string) {
 	for _, path := range []string{
 		filepath.Join(c.Dir, ".gc", "agents", rigName, "witness"),
 		filepath.Join(c.Dir, ".gc", "worktrees", rigName, "refinery"),
+		filepath.Join(c.Dir, ".gc", "worktrees", rigName, "polecats", "gastown.furiosa"),
 		filepath.Join(c.Dir, ".gc", "worktrees", rigName, "polecats", "polecat"),
 	} {
 		seedClaudeProjectState(t, c, path)

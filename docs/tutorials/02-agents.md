@@ -4,7 +4,7 @@ sidebarTitle: 02 - Agents
 description: Define agents and use them to execute work.
 ---
 
-In [Tutorial 01](/tutorials/01-cities-and-rigs), you created a city, slung work to an
+In [Tutorial 01](./01-cities-and-rigs.md), you created a city, slung work to an
 implicit agent, and added a rig. The implicit agents (`claude`, `codex`, etc.)
 are convenient, but they have no custom prompt — they're just the raw provider.
 In this tutorial, you'll define your own agents with specific roles and use them
@@ -30,13 +30,22 @@ provider = "codex"
 EOF
 ```
 
-This creates `agents/reviewer/prompt.template.md`. Add
-`agents/reviewer/agent.toml` when you want per-agent overrides. Here we use it
-to scope the reviewer to the `my-project` rig and switch it from the city's
-default `claude` provider to `codex`.
+This creates both `agents/reviewer/prompt.template.md` and, because `--dir`
+was passed, `agents/reviewer/agent.toml` pre-filled with `dir = "my-project"`.
+Without `--dir`, `agent.toml` is not created — add one later when you want
+per-agent overrides. Here we edit `agent.toml` to add a provider override,
+switching the reviewer from the city's default `claude` provider to `codex`.
 
-You'll want to create a prompt for the new agent. Let's take a look at the
-default GC prompt if you don't provide one:
+<Note>
+This section sets `provider = "codex"`. If you don't have Codex installed and
+configured, substitute another provider you do have (e.g., `provider =
+"claude"`); the rest of the walkthrough is the same.
+</Note>
+
+You'll want to create a prompt for the new agent. Let's first see what
+`gc prime` returns when you don't name an agent — without an agent argument,
+it falls back to a generic worker prompt useful for a single-shot CLI
+invocation:
 
 ```shell
 ~/my-city
@@ -60,15 +69,18 @@ and execute it.
 4. Check for more work. Repeat until the queue is empty.
 ```
 
-The `gc prime` command let's an agent running in GC know how to behave, specifically how
-to look for work that's been assigned to it. In [tutorial
-01](/tutorials/01-cities-and-rigs), we learned that slinging work to an agent created a
-bead. Looking here at the default prompt, it should be clear how the agent can
-actually pick up work that was slung its way.
+The `gc prime` command tells you the prompt an agent is running with. In
+[tutorial 01](./01-cities-and-rigs.md) we learned that slinging work to
+an agent created a bead; the agent's prompt is what tells it how to pick up
+and act on that work. Pass an agent name to inspect a specific agent:
+`gc prime mayor` would print the mayor's prompt;
+`gc prime my-project/reviewer` would print the reviewer's prompt once we've
+written one.
 
-What we want to do is to preserve the instructions on how to be an agent in GC,
-but also add the specifics for being a review agent. To do that, create the
-reviewer prompt to look like the following:
+To make the reviewer useful, we'll write a prompt that tells it how to
+discover work (the standard Gas City "find and execute" loop) and then
+layer on the specifics of being a review agent. Create the reviewer prompt
+to look like the following:
 
 ```shell
 ~/my-city
@@ -145,15 +157,15 @@ No findings.
 This is handy for fire-and-forget kind of work. However, if you'd like to see
 the agent in action or even talk to one directly, you're going to need a
 session. And for that, you'll want to check in on [the next
-tutorial](/tutorials/03-sessions).
+tutorial](./03-sessions.md).
 
 ## What's next
 
 You've defined agents with custom prompts, interacted with them through
 sessions and configured different agents with different providers. From here:
 
-- **[Sessions](/tutorials/03-sessions)** — session lifecycle, sleep/wake,
+- **[Sessions](./03-sessions.md)** — session lifecycle, sleep/wake,
   suspension, named sessions
-- **[Formulas](/tutorials/05-formulas)** — multi-step workflow templates with
+- **[Formulas](./05-formulas.md)** — multi-step workflow templates with
   dependencies and variables
-- **[Beads](/tutorials/06-beads)** — the work tracking system underneath it all
+- **[Beads](./06-beads.md)** — the work tracking system underneath it all

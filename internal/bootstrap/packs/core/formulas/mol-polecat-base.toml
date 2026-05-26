@@ -170,13 +170,42 @@ Do the actual implementation work.
 from load-context. Focus on fixing the specific issue that caused
 rejection — don't redo everything.
 
-**Commit frequently:**
+**Commit frequently with detailed messages.** Every commit gets a
+subject AND a body. The body is what makes the repo navigable a year
+from now — the reviewer (and future-you) needs to understand *why* the
+change exists, not just *what* the diff did. The diff already shows
+the what.
+
 ```bash
 git add <files>
-git commit -m "<type>: <description> ({{issue}})"
+git commit -m "<type>: <imperative subject> ({{issue}})" -m "$(cat <<'BODY'
+<1-3 paragraph explanation:>
+- The motivation: which bug, regression, design decision, or upstream
+  request drove this commit
+- What the change actually does at a higher level than the diff
+- Anything non-obvious about the approach: trade-offs taken, paths not
+  chosen, hidden constraints honored
+- Validation: which tests/benchmarks/manual checks confirmed correctness
+
+Note any follow-ups, deferred edge cases, or downstream impacts here.
+BODY
+)"
 ```
 
-Commit types: feat, fix, refactor, test, docs, chore
+Commit types: feat, fix, refactor, perf, test, docs, chore
+
+**Examples of strong subjects + bodies:**
+- `fix(session): preserve lifecycle metadata during crash adoption (ga-xxxx)`
+  body: explains the stale session projection, the resume path that
+  lost metadata, the projection update, and the focused adoption test
+- `perf(events): batch typed payload registration lookups (ga-xxxx)`
+  body: cites the event fan-out profile, names the registry call site
+  that drove the regression, and notes why the cache stays read-only
+
+**Weak commits to avoid** (refinery/reviewer can't tell what's going on):
+- `fix: stuff (ga-xxxx)`
+- `perf: speed up the slow loop`
+- `refactor` with no body
 
 **Discovered work (outside scope):**
 ```bash
@@ -241,9 +270,16 @@ git status                  # Must be clean
 git log origin/{{base_branch}}..HEAD --oneline  # Must show your commits
 ```
 
-If uncommitted changes exist:
+If uncommitted changes exist, commit them with a body explaining what
+slipped through the `implement` step (typically a self-review touch-up,
+test addition, or formatter run):
 ```bash
-git add -A && git commit -m "<type>: <description> ({{issue}})"
+git add -A
+git commit -m "<type>: <imperative subject> ({{issue}})" -m "$(cat <<'BODY'
+<Explain what these residual changes are: a self-review fix,
+test-only addition, formatter run, etc. Be specific.>
+BODY
+)"
 ```
 
 NEVER discard implementation changes with `git checkout -- .`

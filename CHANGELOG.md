@@ -7,8 +7,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `gc mail inbox`, `gc mail read`, `gc mail peek`, `gc mail thread`,
+  and `gc mail count` now accept `--json` and emit schema-versioned result
+  envelopes for script and dashboard consumers. `gc mail inbox --json` and
+  `gc mail count --json` always include the resolved `recipients` array,
+  including single-recipient targets.
+
 ### Fixed
 
+- `gc --json-schema` manifest output no longer includes the removed
+  `transport` field. Consumers should use each role schema's `x-gc-jsonl`
+  extension, when present, to determine JSONL record-count behavior.
+- `gc session attach` now re-applies `session_live` hooks (status-bar theme,
+  keybindings) when it recreates a session whose tmux runtime had exited.
+  Previously the resume path in `resolvedWorkerRuntimeWithConfigAndMetadata`
+  built the runtime `Hints` without `SessionLive`, so `runSessionLive`
+  early-returned on the empty list and attach-recreated sessions came up
+  unthemed while reconciler-started sessions did not. The setup context is
+  built via the reconciler's own `sessionSetupContextForAgent` so
+  `session_live` templates referencing `{{.Rig}}`/`{{.RigRoot}}`/`{{.AgentBase}}`
+  expand correctly on the resume path.
+- Managed bd provider startup now detects a bd-standalone dolt server running
+  against the same `.beads/dolt` database before invoking the managed-bd
+  lifecycle script, and refuses with a message naming `bd dolt stop` as the
+  unblock. This covers `gc start`, `gc init`, and `gc rig add` provider
+  convergence paths. Previously, running `bd dolt start` while a city was
+  registered at the same path would leave the standalone dolt holding the
+  exclusive write lock; the city-managed dolt could not acquire it and startup
+  failed with a generic "dolt server could not start via gc helper" error that
+  did not point at the lock holder. Stale `.beads/dolt-server.pid` files and
+  live PIDs that do not look like `dolt sql-server` are ignored so leftover
+  files and PID reuse do not block startup.
+- Default bead-backed pool-demand counts now use the same routed target
+  resolution as worker claim queries and exclude epic-routed beads, matching
+  the default worker `work_query` behavior. Custom `scale_check` overrides are
+  unchanged.
+- Empty JSON result collections for `gc mail thread`, `gc trace status`, and
+  `gc trace show` now encode as `[]` instead of `null`; `gc trace show` also
+  reports a concise no-records message in the default text mode.
+- `events.FileRecorder.Record` no longer blocks indefinitely on `flock` when
+  a prior `gc event emit` process died holding the lock. Acquisition now
+  uses non-blocking `LOCK_EX|LOCK_NB` retried at a 5 ms cadence for up to
+  250 ms total, then logs `events: lock: timed out after 250ms waiting on
+  flock at <path>` to stderr and returns without recording. The deferred
+  `LOCK_UN` still runs after a successful acquire; the happy path and
+  non-`EWOULDBLOCK` flock-error path are unchanged. Operators previously
+  saw hundreds of stuck `gc event emit` processes after a `SIGKILL` of the
+  holder; the new bounded wait drops the stuck event recorder instead of
+  stacking processes.
 - Kiro provider launch behavior is now explicit in release notes and provider
   docs: the built-in Kiro provider starts `kiro-cli` with `chat`,
   `--no-interactive`, `--agent gascity`, and `--trust-all-tools` by default.
@@ -51,6 +99,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `gc converge status --json` returns the convergence metadata object with
+  `ok: true` injected. `gc converge list --json` returns an object with
+  `ok: true` and `entries`. These converge JSON outputs do not include a
+  `schema_version` field.
+- `gc runtime drain-check --json` now emits a JSON result when the target
+  session is not draining, with `ok: true`, `draining: false`, and the
+  existing shell-condition exit code of 1.
+- `gc sling --json` now emits one JSONL result record, matching its checked-in
+  result schema; earlier JSON support emitted an indented multi-line object.
+- `gc trace status` and `gc trace show` now default to human-readable output;
+  scripts that need machine-readable trace data should pass `--json`. The
+  `--json` result shapes are also envelope objects now: `gc trace status
+  --json` uses `active_arms` instead of `arms` and includes
+  `schema_version`, `as_of`, `controller_running`, and `controller_pid`;
+  `gc trace show --json` returns `schema_version`, `city_path`, `count`, and
+  `records` instead of a bare record array. See
+  `schemas/trace/status/result.schema.json` and
+  `schemas/trace/show/result.schema.json` for the exact contracts.
+  During rolling upgrades, trace controller socket status replies include the
+  legacy `arms` alias and upgraded CLIs still accept `arms` from older
+  controllers.
 - Pack import cache validation now requires commit abbreviations in
   `packs.lock` to be at least seven characters long. Shorter abbreviations
   should be refreshed with `gc import install`.

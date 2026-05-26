@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -81,6 +82,140 @@ type defaultScaleCheckTarget struct {
 	storeKey string
 	store    beads.Store
 	err      error
+}
+
+var errPoolSessionCreateBudgetExhausted = errors.New("pool session create budget exhausted")
+
+// poolSessionCreateFairShareCounter rotates scarce create tokens across
+// contending pools so stable template sort order does not always win.
+var poolSessionCreateFairShareCounter atomic.Uint64
+
+type poolSessionCreateBudget struct {
+	mu                sync.Mutex
+	remaining         int
+	templateRemaining map[string]int
+	spare             int
+}
+
+func newPoolSessionCreateBudget(limit int) *poolSessionCreateBudget {
+	if limit <= 0 {
+		return nil
+	}
+	return &poolSessionCreateBudget{remaining: limit}
+}
+
+func (b *poolSessionCreateBudget) configureFairShare(states []PoolDesiredState, seed uint64) {
+	if b == nil {
+		return
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	shares, spare := fairPoolSessionCreateShares(states, b.remaining, seed)
+	b.templateRemaining = shares
+	b.spare = spare
+}
+
+func fairPoolSessionCreateShares(states []PoolDesiredState, limit int, seed uint64) (map[string]int, int) {
+	if limit <= 0 {
+		return nil, 0
+	}
+	type demand struct {
+		template string
+		count    int
+	}
+	var demands []demand
+	for _, state := range states {
+		count := 0
+		for _, request := range state.Requests {
+			// Requests with a session bead ID represent in-flight capacity and
+			// should not reserve fresh-create budget for this template.
+			if request.Tier == "new" && request.SessionBeadID == "" {
+				count++
+			}
+		}
+		if count > 0 {
+			demands = append(demands, demand{template: state.Template, count: count})
+		}
+	}
+	if len(demands) <= 1 {
+		return nil, 0
+	}
+	shares := make(map[string]int, len(demands))
+	start := int(seed % uint64(len(demands)))
+	remaining := limit
+	for remaining > 0 {
+		progressed := false
+		for offset := 0; offset < len(demands) && remaining > 0; offset++ {
+			d := demands[(start+offset)%len(demands)]
+			if shares[d.template] >= d.count {
+				continue
+			}
+			shares[d.template]++
+			remaining--
+			progressed = true
+		}
+		if !progressed {
+			break
+		}
+	}
+	return shares, remaining
+}
+
+func (b *poolSessionCreateBudget) tryClaim(template string) bool {
+	if b == nil {
+		return true
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.remaining <= 0 {
+		return false
+	}
+	if b.templateRemaining != nil {
+		switch {
+		case b.templateRemaining[template] > 0:
+			b.templateRemaining[template]--
+		case b.spare > 0:
+			b.spare--
+		default:
+			return false
+		}
+	}
+	b.remaining--
+	return true
+}
+
+func (b *poolSessionCreateBudget) release() {
+	if b == nil {
+		return
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.remaining++
+	if b.templateRemaining != nil {
+		b.spare++
+	}
+}
+
+func (bp *agentBuildParams) configurePoolSessionCreateFairShare(states []PoolDesiredState) {
+	if bp == nil || bp.poolSessionCreateBudget == nil {
+		return
+	}
+	seed := poolSessionCreateFairShareCounter.Add(1) - 1
+	bp.poolSessionCreateBudget.configureFairShare(states, seed)
+}
+
+func (bp *agentBuildParams) tryClaimPoolSessionCreate(template string) bool {
+	if bp == nil || bp.poolSessionCreateBudget == nil {
+		return true
+	}
+	return bp.poolSessionCreateBudget.tryClaim(template)
+}
+
+func (bp *agentBuildParams) releasePoolSessionCreate() {
+	if bp == nil || bp.poolSessionCreateBudget == nil {
+		return
+	}
+	bp.poolSessionCreateBudget.release()
 }
 
 func evaluatePendingPools(
@@ -334,7 +469,15 @@ func buildDesiredStateWithSessionBeads(
 		if len(defaultScaleTargets) > 0 {
 			defaultCounts, partialTemplates, errs := defaultScaleCheckCounts(defaultScaleTargets)
 			for _, err := range errs {
-				fmt.Fprintf(stderr, "buildDesiredState: %v (using new demand=0)\n", err) //nolint:errcheck
+				// defaultScaleCheckCounts can fail on either of two
+				// demand sources (Ready iteration or pool-demand list);
+				// the wrapped error message names which one ("Ready()"
+				// vs "List(gc.pool_demand)") so this generic outer log
+				// stays honest about the partial nature without
+				// claiming the demand is necessarily zero. A failing
+				// pool-demand list does not zero the Ready-source
+				// contributions to scaleCheckCounts[template].
+				fmt.Fprintf(stderr, "buildDesiredState: %v (counts above may be a partial of one demand source)\n", err) //nolint:errcheck
 			}
 			poolScaleCheckPartialTemplates = mergeScaleCheckPartialTemplates(poolScaleCheckPartialTemplates, partialTemplates)
 			for template, count := range defaultCounts {
@@ -358,6 +501,7 @@ func buildDesiredStateWithSessionBeads(
 		poolWorkBeads := filterAssignedWorkBeadsForPoolDemand(cfg, cityPath, sessionBeads.Open(), assignedWorkBeads, assignedWorkStoreRefs)
 		bp.assignedWorkBeads = poolWorkBeads
 		poolDesiredStates := ComputePoolDesiredStatesTraced(cfg, poolWorkBeads, sessionBeads.Open(), scaleCheckCounts, trace)
+		bp.configurePoolSessionCreateFairShare(poolDesiredStates)
 		for _, poolState := range poolDesiredStates {
 			cfgAgent := findAgentByTemplate(cfg, poolState.Template)
 			if cfgAgent == nil {
@@ -819,6 +963,9 @@ func defaultScaleCheckTargetForAgent(
 	return target
 }
 
+// defaultScaleCheckCounts reports ready, unassigned, routed work as fresh
+// generic pool demand. Assigned beads are handled by assigned-work collection
+// and named-session demand so they are intentionally excluded here.
 func defaultScaleCheckCounts(targets []defaultScaleCheckTarget) (map[string]int, map[string]bool, []error) {
 	counts := make(map[string]int, len(targets))
 	if len(targets) == 0 {
@@ -862,12 +1009,23 @@ func defaultScaleCheckCounts(targets []defaultScaleCheckTarget) (map[string]int,
 	}
 
 	for key, group := range groups {
-		ready, err := readyForControllerDemand(group.store)
-		if err != nil {
-			errs = append(errs, fmt.Errorf("default scale_check %s templates=%s: Ready(): %w", key, strings.Join(sortedStringSet(group.templates), ","), err))
+		// counted dedups across the two demand sources below so a bead
+		// surfaced by both Ready() and the gc.pool_demand list (rare —
+		// only if a task-shaped routed bead also happens to carry the
+		// flag) is counted exactly once per template.
+		counted := make(map[string]struct{})
+
+		// Source 1: Ready()/CachedReady() iteration. Surfaces the
+		// actionable-type set (task, etc.) matched against gc.routed_to.
+		// Legacy formula step beads are NOT here because PR #1154 added
+		// "step" to readyExcludeTypes; molecule wisps are NOT here
+		// because workflow containers were already excluded.
+		ready, readyErr := readyForControllerDemand(group.store)
+		if readyErr != nil {
+			errs = append(errs, fmt.Errorf("default scale_check %s templates=%s: Ready(): %w", key, strings.Join(sortedStringSet(group.templates), ","), readyErr))
 			partialTemplates = markScaleCheckPartialSet(partialTemplates, group.templates)
-			if !beads.IsPartialResult(err) || len(ready) == 0 {
-				continue
+			if !beads.IsPartialResult(readyErr) {
+				ready = nil
 			}
 		}
 		for _, b := range ready {
@@ -875,9 +1033,62 @@ func defaultScaleCheckCounts(targets []defaultScaleCheckTarget) (map[string]int,
 				continue
 			}
 			template := strings.TrimSpace(b.Metadata["gc.routed_to"])
-			if _, ok := group.templates[template]; ok {
-				counts[template]++
+			if _, ok := group.templates[template]; !ok {
+				continue
 			}
+			if _, dup := counted[b.ID]; dup {
+				continue
+			}
+			counted[b.ID] = struct{}{}
+			counts[template]++
+		}
+
+		// Source 2: explicit pool-demand path. Two writers stamp the wisp
+		// when a.Pool != "" — doOrderRunWithJSON (cmd_order.go, the
+		// gc order run CLI path) and memoryOrderDispatcher.dispatchOne
+		// (order_dispatch.go, the supervisor's in-process cron path).
+		// Both write poolDemandMetadataPair() alongside the routing key,
+		// so cron-fired pool orders surface scale_check demand even when
+		// the wisp lands as a molecule that readyExcludeTypes filters out
+		// (per PR #1154 / issue #1039 — formula steps are not actionable
+		// work, the molecule is the container). The list filter is
+		// metadata-only (open + gc.pool_demand=<sentinel>); the
+		// unassigned + matching-routed_to checks apply below as for the
+		// Ready source.
+		//
+		// Live: true skips the CachingStore in-memory snapshot and reads
+		// the backing store directly. The cache populates from PrimeActive
+		// at supervisor startup and is maintained by the event stream, but
+		// gc order run is a sibling subprocess so the cache lag would
+		// otherwise stretch demand observation by an unbounded number of
+		// reconcile ticks. Mirrors openSessionBeadExists in
+		// adoption_barrier.go, which uses Live: true for the same
+		// cross-process freshness reason.
+		demand, demandErr := group.store.List(beads.ListQuery{
+			Status:   "open",
+			Metadata: poolDemandMetadataPair(),
+			Live:     true,
+		})
+		if demandErr != nil {
+			errs = append(errs, fmt.Errorf("default scale_check %s templates=%s: List(%s): %w", key, strings.Join(sortedStringSet(group.templates), ","), poolDemandMetadataKey, demandErr))
+			partialTemplates = markScaleCheckPartialSet(partialTemplates, group.templates)
+			if !beads.IsPartialResult(demandErr) {
+				demand = nil
+			}
+		}
+		for _, b := range demand {
+			if strings.TrimSpace(b.Assignee) != "" {
+				continue
+			}
+			template := strings.TrimSpace(b.Metadata["gc.routed_to"])
+			if _, ok := group.templates[template]; !ok {
+				continue
+			}
+			if _, dup := counted[b.ID]; dup {
+				continue
+			}
+			counted[b.ID] = struct{}{}
+			counts[template]++
 		}
 	}
 	return counts, partialTemplates, errs
@@ -940,6 +1151,18 @@ func defaultNamedSessionDemand(targets []defaultScaleCheckTarget, cfg *config.Ci
 		identitiesByTemplate[template] = append(identitiesByTemplate[template], spec.Identity)
 	}
 
+	// NOTE: this loop intentionally only consults Ready(), not the
+	// gc.pool_demand list path that defaultScaleCheckCounts uses for
+	// pool agents. All current pack-shipped cron orders route to pool
+	// agents (none target named on_demand sessions), so this function
+	// is never the load-bearing demand source for cron-fired wisps in
+	// practice. If a future named on_demand cron order surfaces — i.e.
+	// a wisp lands with gc.routed_to=<named-identity> AND the molecule
+	// type filters it out of Ready() — mirror the Source-2 List path
+	// from defaultScaleCheckCounts here (query open + poolDemandMetadataPair()
+	// from the same group.store, apply the unassigned + routed-to
+	// match, dedup against the Ready source) and add a parallel test
+	// next to TestDefaultScaleCheckCountsCountsCronPoolDemandViaMetadataFlag.
 	for key, group := range groups {
 		ready, err := readyForControllerDemand(group.store)
 		if err != nil {
@@ -1045,7 +1268,7 @@ func retainScaleCheckPartialPoolDesired(counts map[string]int, sessionBeads *ses
 // failures, but do not count them as awake demand.
 func scaleCheckPartialSessionPreservable(b beads.Bead) bool {
 	switch strings.TrimSpace(b.Metadata["state"]) {
-	case "", "active", "awake", "creating", "asleep", "stopped", "suspended", "quarantined", "draining", "drained", "archived":
+	case "", "active", "awake", "start-pending", "creating", "asleep", "stopped", "suspended", "quarantined", "draining", "drained", "archived":
 		return true
 	default:
 		return isPendingPoolCreate(b)
@@ -1054,7 +1277,7 @@ func scaleCheckPartialSessionPreservable(b beads.Bead) bool {
 
 func scaleCheckPartialSessionRetainable(b beads.Bead) bool {
 	switch strings.TrimSpace(b.Metadata["state"]) {
-	case "active", "awake", "creating":
+	case "active", "awake", "start-pending", "creating":
 		return true
 	default:
 		return isPendingPoolCreate(b)
@@ -1299,7 +1522,7 @@ func discoverSessionBeadsWithRoots(
 		// no work.
 		if isEphemeralSessionBeadForAgent(b, cfgAgent) {
 			manualSession := isManualSessionBeadForAgent(b, cfgAgent)
-			creating := b.Metadata["state"] == "creating"
+			creating := b.Metadata["state"] == "creating" || b.Metadata["state"] == string(session.StateStartPending)
 			pendingCreate := isPendingPoolCreate(b)
 			templateDesired := desiredHasTemplate(desired, template)
 			// Pool-managed beads are controller-created capacity. A pending
@@ -1541,12 +1764,12 @@ func desiredHasCanonicalNonExpandingPoolSession(desired map[string]TemplateParam
 }
 
 // poolRealizeParallelism caps the number of concurrent pool session bead
-// creates inside realizePoolDesiredSessions. Each create acquires a per-alias
-// session lock + commits to dolt; with N>cap pending creates the work pool
+// creates inside realizePoolDesiredSessions. Each create acquires per-identity
+// session locks + commits to dolt; with N>cap pending creates the work pool
 // drains in O(ceil(N/cap) × commit-latency) wall time instead of the prior
 // O(N × commit-latency). The cap is intentionally modest: dolt commit
-// contention and per-city alias-lock churn put a ceiling on useful
-// parallelism even when many distinct aliases are pending. See
+// contention and per-city identity-lock churn put a ceiling on useful
+// parallelism even when many distinct identities are pending. See
 // gastownhall/gascity#2319.
 const poolRealizeParallelism = 8
 
@@ -1606,7 +1829,11 @@ func realizePoolDesiredSessions(
 			}
 			sessionBead, slot, plan, err := selectOrPlanPoolSessionBead(bp, cfgAgent, qualifiedName, prefer, used, usedSlots)
 			if err != nil {
-				fmt.Fprintf(stderr, "buildDesiredState: pool %q request: %v (skipping)\n", qualifiedName, err) //nolint:errcheck
+				if errors.Is(err, errPoolSessionCreateBudgetExhausted) {
+					fmt.Fprintf(stderr, "buildDesiredState: pool %q request: %v (fresh create deferred)\n", qualifiedName, err) //nolint:errcheck
+				} else {
+					fmt.Fprintf(stderr, "buildDesiredState: pool %q request: %v (skipping)\n", qualifiedName, err) //nolint:errcheck
+				}
 				item.skip = true
 				return item
 			}
@@ -1627,10 +1854,11 @@ func realizePoolDesiredSessions(
 		items = append(items, planItem())
 	}
 
-	// Phase B (parallel, bounded): materialize planned creates. Per-alias
-	// session locks serialize same-alias calls; distinct aliases proceed in
-	// parallel up to poolRealizeParallelism workers. The store write and
-	// alias-conflict bookkeeping happen here.
+	// Phase B (parallel, bounded): materialize planned creates. Per-identity
+	// session locks serialize calls that share either the public alias or the
+	// resolved tmux_alias session name; distinct identities proceed in parallel
+	// up to poolRealizeParallelism workers. The store write and alias-conflict
+	// bookkeeping happen here.
 	pending := make([]int, 0, len(items))
 	for idx := range items {
 		if items[idx].plan != nil {
@@ -1780,7 +2008,8 @@ func poolRuntimeAliasIsDeferred(sessionBead beads.Bead) bool {
 	if strings.TrimSpace(sessionBead.Metadata["pending_create_claim"]) == boolMetadata(true) {
 		return true
 	}
-	return strings.TrimSpace(sessionBead.Metadata["state"]) == "creating"
+	state := strings.TrimSpace(sessionBead.Metadata["state"])
+	return state == "creating" || state == string(session.StateStartPending)
 }
 
 func normalizeNonExpandingPoolSessionBead(
@@ -2356,6 +2585,10 @@ func selectOrPlanPoolSessionBead(
 	}
 	slot := claimDesiredPoolSlot(bp.city, cfgAgent, beads.Bead{}, usedSlots)
 	_, qualifiedInstance, poolSlot := poolDesiredRequestIdentity(cfgAgent, slot)
+	if !bp.tryClaimPoolSessionCreate(template) {
+		delete(usedSlots, slot)
+		return beads.Bead{}, 0, nil, errPoolSessionCreateBudgetExhausted
+	}
 	plan := &poolSessionCreatePlan{
 		qualifiedInstance: qualifiedInstance,
 		slot:              slot,
@@ -2366,16 +2599,20 @@ func selectOrPlanPoolSessionBead(
 
 // executePlannedPoolSessionBeadCreate materializes a pool session bead from a
 // plan produced by selectOrPlanPoolSessionBead. The underlying call is
-// createPoolSessionBeadWithGuardedAlias, whose per-alias session lock makes
-// concurrent invocations safe across distinct qualifiedInstance values. Calls
-// with the same qualifiedInstance are still serialized by the alias lock.
+// createPoolSessionBeadWithGuardedAlias, whose per-identity session locks make
+// concurrent invocations safe across both distinct qualifiedInstance values
+// and shared resolved tmux_alias values.
 func executePlannedPoolSessionBeadCreate(
 	bp *agentBuildParams,
 	cfgAgent *config.Agent,
 	template string,
 	plan poolSessionCreatePlan,
 ) (beads.Bead, error) {
-	return createPoolSessionBeadWithGuardedAlias(bp, cfgAgent, template, plan.qualifiedInstance, plan.slot)
+	bead, err := createPoolSessionBeadWithGuardedAlias(bp, cfgAgent, template, plan.qualifiedInstance, plan.slot)
+	if err != nil {
+		bp.releasePoolSessionCreate()
+	}
+	return bead, err
 }
 
 func claimDesiredPoolSlot(cfg *config.City, cfgAgent *config.Agent, sessionBead beads.Bead, used map[int]bool) int {
@@ -2551,24 +2788,44 @@ func createPoolSessionBeadWithGuardedAlias(
 	if err := validateAgentSessionTransportForBuild(bp, cfgAgent, qualifiedInstance); err != nil {
 		return beads.Bead{}, err
 	}
+	resolvedTmuxAlias, err := bp.resolveTmuxAliasForAgent(cfgAgent)
+	if err != nil {
+		return beads.Bead{}, err
+	}
+	resolvedTmuxAlias, err = validateResolvedPoolTmuxAlias(template, resolvedTmuxAlias)
+	if err != nil {
+		return beads.Bead{}, err
+	}
 	identity := poolSessionCreateIdentity{
 		AgentName: qualifiedInstance,
 		Slot:      slot,
 	}
 	alias := strings.TrimSpace(qualifiedInstance)
-	if alias == "" || bp.beadStore == nil {
-		return createPoolSessionBead(bp.beadStore, template, bp.sessionBeads, poolSessionCreateStartedAt(bp), identity)
+	if bp.beadStore == nil {
+		return createPoolSessionBeadWithAlias(bp.beadStore, template, bp.city, bp.sessionBeads, poolSessionCreateStartedAt(bp), identity, resolvedTmuxAlias)
+	}
+	lockIDs := []string{}
+	if alias != "" {
+		lockIDs = append(lockIDs, alias)
+	}
+	if resolvedTmuxAlias != "" {
+		lockIDs = append(lockIDs, resolvedTmuxAlias)
+	}
+	if len(lockIDs) == 0 {
+		return createPoolSessionBeadWithAlias(bp.beadStore, template, bp.city, bp.sessionBeads, poolSessionCreateStartedAt(bp), identity, resolvedTmuxAlias)
 	}
 
 	var bead beads.Bead
 	createdWithLock := false
-	lockErr := session.WithCitySessionAliasLock(bp.cityPath, alias, func() error {
+	lockErr := session.WithCitySessionIdentifierLocks(bp.cityPath, lockIDs, func() error {
 		createIdentity := identity
-		if err := session.EnsureAliasAvailableWithConfig(bp.beadStore, bp.city, alias, ""); err == nil {
-			createIdentity.Alias = alias
+		if alias != "" {
+			if err := session.EnsureAliasAvailableWithConfig(bp.beadStore, bp.city, alias, ""); err == nil {
+				createIdentity.Alias = alias
+			}
 		}
 		var err error
-		bead, err = createPoolSessionBead(bp.beadStore, template, bp.sessionBeads, poolSessionCreateStartedAt(bp), createIdentity)
+		bead, err = createPoolSessionBeadWithAlias(bp.beadStore, template, bp.city, bp.sessionBeads, poolSessionCreateStartedAt(bp), createIdentity, resolvedTmuxAlias)
 		createdWithLock = true
 		return err
 	})
@@ -2578,7 +2835,7 @@ func createPoolSessionBeadWithGuardedAlias(
 	if lockErr != nil && bp.stderr != nil {
 		fmt.Fprintf(bp.stderr, "createPoolSessionBeadWithGuardedAlias: locking alias %q for %s: %v; creating without alias\n", alias, template, lockErr) //nolint:errcheck
 	}
-	return createPoolSessionBead(bp.beadStore, template, bp.sessionBeads, poolSessionCreateStartedAt(bp), identity)
+	return createPoolSessionBeadWithAlias(bp.beadStore, template, bp.city, bp.sessionBeads, poolSessionCreateStartedAt(bp), identity, "")
 }
 
 func isFailedCreateSessionBead(bead beads.Bead) bool {
@@ -2619,6 +2876,9 @@ func selectOrCreateDependencyPoolSessionBead(
 		return normalizeNonExpandingPoolSessionBeadForSelection(bp, cfgAgent, bead)
 	}
 	_, qualifiedInstance, poolSlot := poolDesiredRequestIdentity(cfgAgent, 1)
+	// Dependency floors are bounded prerequisites for already-realized roots,
+	// so they bypass the ordinary fresh pool create budget. The wake budget
+	// still caps when those floor sessions can actually start.
 	return createPoolSessionBeadWithGuardedAlias(bp, cfgAgent, template, qualifiedInstance, poolSlot)
 }
 

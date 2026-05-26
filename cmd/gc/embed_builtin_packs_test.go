@@ -491,8 +491,57 @@ module.exports = {
 	}
 }
 
+func TestMaterializeBuiltinPacksOmpHookPublishesProviderSessionID(t *testing.T) {
+	dir := t.TempDir()
+
+	if err := MaterializeBuiltinPacks(dir); err != nil {
+		t.Fatalf("MaterializeBuiltinPacks() error: %v", err)
+	}
+
+	data := readMaterializedOmpHook(t, dir)
+	for _, want := range []string{
+		`import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent"`,
+		`const GC_OMP_HOOK_VERSION = 1`,
+		`export default function gascityOmpExtension(pi: ExtensionAPI)`,
+		`pi.on("session_start"`,
+		`pi.on("session_compact"`,
+		`pi.on("before_agent_start"`,
+		`GC_PROVIDER_SESSION_ID`,
+		`getSessionId`,
+		`logRunFailure`,
+	} {
+		if !strings.Contains(data, want) {
+			t.Errorf("materialized OMP hook missing provider-session marker %q:\n%s", want, data)
+		}
+	}
+	for _, legacy := range []string{
+		"export default {",
+		`"session.created"`,
+		`"session.compacted"`,
+		`"experimental.chat.system.transform"`,
+	} {
+		if strings.Contains(data, legacy) {
+			t.Errorf("materialized OMP hook still contains legacy API marker %q:\n%s", legacy, data)
+		}
+	}
+}
+
 func materializedPiHookPath(dir string) string {
 	return filepath.Join(dir, citylayout.SystemPacksRoot, "core", "overlay", "per-provider", "pi", ".pi", "extensions", "gc-hooks.js")
+}
+
+func materializedOmpHookPath(dir string) string {
+	return filepath.Join(dir, citylayout.SystemPacksRoot, "core", "overlay", "per-provider", "omp", ".omp", "hooks", "gc-hook.ts")
+}
+
+func readMaterializedOmpHook(t *testing.T, dir string) string {
+	t.Helper()
+	path := materializedOmpHookPath(dir)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile(%s): %v", path, err)
+	}
+	return string(data)
 }
 
 func readMaterializedPiHook(t *testing.T, dir string) string {
@@ -667,6 +716,45 @@ func TestMaterializeBuiltinPacks_PrunesLegacyOrderDirs(t *testing.T) {
 	}
 }
 
+func TestMaterializeBuiltinPacks_RepairsLegacyGcBeadsBdScript(t *testing.T) {
+	dir := t.TempDir()
+	legacyScript := filepath.Join(dir, ".gc", "scripts", "gc-beads-bd.sh")
+	if err := os.MkdirAll(filepath.Dir(legacyScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	stale := `#!/bin/sh
+# gc-beads-bd - exec: beads provider for Dolt-backed beads (bd).
+run_bd_pinned "$dir" config set issue_prefix "$prefix" 2>/dev/null || true
+run_bd_pinned "$dir" config set types.custom "$custom_types" 2>/dev/null || true
+`
+	if err := os.WriteFile(legacyScript, []byte(stale), 0o755); err != nil {
+		t.Fatalf("write legacy script: %v", err)
+	}
+
+	if err := MaterializeBuiltinPacks(dir); err != nil {
+		t.Fatalf("MaterializeBuiltinPacks() error: %v", err)
+	}
+
+	data, err := os.ReadFile(legacyScript)
+	if err != nil {
+		t.Fatalf("read repaired legacy script: %v", err)
+	}
+	body := string(data)
+	if strings.Contains(body, "config set") {
+		t.Fatalf("legacy script still contains config mutation:\n%s", body)
+	}
+	if !strings.Contains(body, ".gc/system/packs/bd/assets/scripts/gc-beads-bd.sh") {
+		t.Fatalf("legacy script was not repaired to system-pack shim:\n%s", body)
+	}
+	info, err := os.Stat(legacyScript)
+	if err != nil {
+		t.Fatalf("stat repaired legacy script: %v", err)
+	}
+	if info.Mode()&0o111 == 0 {
+		t.Fatalf("repaired legacy script is not executable: mode %v", info.Mode())
+	}
+}
+
 func TestMaterializeBuiltinPacks_PrunesStaleGeneratedPackFiles(t *testing.T) {
 	dir := t.TempDir()
 
@@ -754,14 +842,14 @@ func TestLoadCityConfigMaterializesBuiltinPacks(t *testing.T) {
 	}
 }
 
-func TestLoadCityConfigSuppressDeprecatedOrderWarningsMaterializesBuiltinPacks(t *testing.T) {
+func TestLoadCityConfigForRegistryMaterializesBuiltinPacks(t *testing.T) {
 	dir := t.TempDir()
 	if err := writeBuiltinPackLoadTestCity(dir); err != nil {
 		t.Fatal(err)
 	}
 
-	if _, err := loadCityConfigSuppressDeprecatedOrderWarnings(dir); err != nil {
-		t.Fatalf("loadCityConfigSuppressDeprecatedOrderWarnings() error: %v", err)
+	if _, err := loadCityConfig(dir, io.Discard); err != nil {
+		t.Fatalf("loadCityConfig() error: %v", err)
 	}
 
 	for _, path := range []string{
@@ -906,7 +994,7 @@ func TestLoadCityConfigDeduplicatesBuiltinPackRefreshWarningsPerProcess(t *testi
 	}
 }
 
-func TestLoadCityConfigSuppressDeprecatedOrderWarningsDoesNotSuppressBuiltinPackRefreshWarnings(t *testing.T) {
+func TestLoadCityConfigForRegistryDoesNotSuppressBuiltinPackRefreshWarnings(t *testing.T) {
 	dir := t.TempDir()
 	if err := writeBuiltinPackLoadTestCity(dir); err != nil {
 		t.Fatal(err)
@@ -934,8 +1022,8 @@ func TestLoadCityConfigSuppressDeprecatedOrderWarningsDoesNotSuppressBuiltinPack
 		loadCityConfigDefaultWarningWriter = origDefaultWarningWriter
 	})
 
-	if _, err := loadCityConfigSuppressDeprecatedOrderWarnings(dir); err != nil {
-		t.Fatalf("loadCityConfigSuppressDeprecatedOrderWarnings() fallback error: %v", err)
+	if _, err := loadCityConfig(dir); err != nil {
+		t.Fatalf("loadCityConfig() fallback error: %v", err)
 	}
 	if !strings.Contains(stderr.String(), "builtin pack refresh incomplete") {
 		t.Fatalf("expected builtin pack refresh warning, got %q", stderr.String())
@@ -1105,6 +1193,26 @@ func TestLoadCityConfigRevalidatesRequiredBuiltinPackContentsAfterReadyCacheSucc
 	}
 	if _, err := os.Stat(targetFile); err != nil {
 		t.Fatalf("required builtin asset missing after ready-cache content revalidation: %v", err)
+	}
+}
+
+func TestMaterializeBuiltinPacksIncludesWorkerFilesystemSearchGuidance(t *testing.T) {
+	dir := t.TempDir()
+	if err := MaterializeBuiltinPacks(dir); err != nil {
+		t.Fatalf("MaterializeBuiltinPacks() error: %v", err)
+	}
+
+	for _, name := range []string{"pool-worker.md", "graph-worker.md"} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(dir, citylayout.SystemPacksRoot, "core", "assets", "prompts", name)
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("ReadFile(%s): %v", path, err)
+			}
+			if !strings.Contains(string(data), formulaFilesystemSearchGuidance) {
+				t.Fatalf("materialized %s missing filesystem search guidance", name)
+			}
+		})
 	}
 }
 

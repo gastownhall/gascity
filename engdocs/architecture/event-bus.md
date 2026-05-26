@@ -282,8 +282,9 @@ API/SSE projection:
 | `MailDeleted` | `mail.deleted` | Mail delete command and API handler |
 | `ConvoyCreated` | `convoy.created` | Convoy creation |
 | `ConvoyClosed` | `convoy.closed` | Convoy close |
-| `ControllerStarted` | `controller.started` | Controller startup |
-| `ControllerStopped` | `controller.stopped` | Controller shutdown |
+| `ControllerStarted` | `controller.started` | Per-city controller startup |
+| `ControllerStopped` | `controller.stopped` | Per-city controller shutdown |
+| `SupervisorShutdownRequested` | `supervisor.shutdown_requested` | Machine-wide supervisor process: emitted when a shutdown trigger is observed (SIGINT/SIGTERM or socket `stop`), before the cascade of per-city `controller.stopped` events. Carries trigger attribution (source, signal, client addr, mode). |
 | `CitySuspended` | `city.suspended` | City suspend command |
 | `CityResumed` | `city.resumed` | City resume command |
 | `RequestResultCityCreate` | `request.result.city.create` | Supervisor/API city create completion |
@@ -299,6 +300,8 @@ API/SSE projection:
 | `OrderFailed` | `order.failed` | Order dispatch on failure |
 | `ProviderSwapped` | `provider.swapped` | Controller provider-swap reload path |
 | `WorkerOperation` | `worker.operation` | Worker session handle and runtime handle operation tracing |
+| `ProjectIdentityStamped` | `project.identity.stamped` | Project identity writer when a scope receives or reconciles project identity metadata |
+| `SupervisorFSPressureSkippedTick` | `supervisor.fs_pressure.skipped_tick` | Supervisor filesystem-pressure guard when a scan tick is skipped under pressure |
 | `ExtMsgBound` | `extmsg.bound` | External messaging bind handler |
 | `ExtMsgUnbound` | `extmsg.unbound` | External messaging unbind handler |
 | `ExtMsgGroupCreated` | `extmsg.group_created` | External messaging group ensure handler |
@@ -306,6 +309,7 @@ API/SSE projection:
 | `ExtMsgAdapterRemoved` | `extmsg.adapter_removed` | External messaging adapter unregister handler |
 | `ExtMsgInbound` | `extmsg.inbound` | External messaging inbound adapter pipeline |
 | `ExtMsgOutbound` | `extmsg.outbound` | External messaging outbound adapter pipeline |
+| `EventsRotated` | `events.rotated` | File event recorder after rotating an active log, carrying the archived seq range |
 
 ## Configuration
 

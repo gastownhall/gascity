@@ -62,6 +62,10 @@
           "type": "string",
           "description": "WorkDir overrides the session working directory without changing the\nagent's qualified identity. Relative paths resolve against city root\nand may use the same template placeholders as session_setup."
         },
+        "tmux_alias": {
+          "type": "string",
+          "description": "TmuxAlias overrides the tmux session_name for pool and factory-created\nmanual sessions of this agent. When unset, sessions fall back to the\nuniversal derivation (\"s-\u003cbeadID\u003e\" for ad-hoc sessions,\n\"\u003cbasename\u003e-\u003cbeadID\u003e\" for pool sessions). When set, it is expanded as a\nGo text/template using the same PathContext fields as work_dir /\nsession_setup (Agent, AgentBase, Rig, RigRoot, CityRoot, CityName),\nsanitized for tmux, and validated as an explicit session name. For pool\nsessions, a live-name collision appends the bead ID as a deterministic\nsuffix. For manual `gc session new` sessions, tmux_alias becomes the\nexplicit session_name and takes precedence over --alias, which remains the\ncommand/mail alias; duplicate explicit names fail closed. Configured named\nsessions keep their named-session runtime name instead of using\ntmux_alias. When no --alias is supplied, work_dir templates that use\n{{.Agent}} see the resolved tmux_alias as the concrete session identity."
+        },
         "scope": {
           "type": "string",
           "enum": [
@@ -103,6 +107,13 @@
         "start_command": {
           "type": "string",
           "description": "StartCommand overrides the provider's command for this agent."
+        },
+        "lifecycle": {
+          "type": "string",
+          "enum": [
+            "one_shot"
+          ],
+          "description": "Lifecycle controls runtime lifetime semantics. Empty uses the default\nlong-lived session lifecycle; \"one_shot\" means the command is expected\nto do bounded work and exit cleanly."
         },
         "args": {
           "items": {
@@ -388,6 +399,10 @@
           "type": "string",
           "description": "WorkDir overrides the agent's working directory without changing\nits qualified identity or rig association."
         },
+        "tmux_alias": {
+          "type": "string",
+          "description": "TmuxAlias overrides the tmux session name template\n(see Agent.TmuxAlias for semantics)."
+        },
         "scope": {
           "type": "string",
           "description": "Scope overrides the agent's scope (\"city\" or \"rig\")."
@@ -423,7 +438,7 @@
         },
         "prompt_template": {
           "type": "string",
-          "description": "PromptTemplate overrides the prompt template path.\nRelative paths resolve against the city directory."
+          "description": "PromptTemplate overrides the prompt template path.\nRelative paths resolve against the declaring config file's directory\n(pack-safe). Paths prefixed with \"//\" resolve against the city root."
         },
         "session": {
           "type": "string",
@@ -436,6 +451,13 @@
         "start_command": {
           "type": "string",
           "description": "StartCommand overrides the start command."
+        },
+        "lifecycle": {
+          "type": "string",
+          "enum": [
+            "one_shot"
+          ],
+          "description": "Lifecycle overrides the runtime lifecycle (\"one_shot\" or empty)."
         },
         "nudge": {
           "type": "string",
@@ -506,7 +528,7 @@
         },
         "overlay_dir": {
           "type": "string",
-          "description": "OverlayDir overrides the agent's overlay_dir path. Copies contents\nadditively into the agent's working directory at startup.\nRelative paths resolve against the city directory."
+          "description": "OverlayDir overrides the agent's overlay_dir path. Copies contents\nadditively into the agent's working directory at startup.\nRelative paths resolve against the declaring config file's directory\n(pack-safe). Paths prefixed with \"//\" resolve against the city root."
         },
         "default_sling_formula": {
           "type": "string",
@@ -639,6 +661,10 @@
           "type": "string",
           "description": "WorkDir overrides the agent's session working directory."
         },
+        "tmux_alias": {
+          "type": "string",
+          "description": "TmuxAlias overrides the tmux session name template\n(see Agent.TmuxAlias for semantics)."
+        },
         "scope": {
           "type": "string",
           "description": "Scope overrides the agent's scope (\"city\" or \"rig\")."
@@ -674,7 +700,7 @@
         },
         "prompt_template": {
           "type": "string",
-          "description": "PromptTemplate overrides the prompt template path.\nRelative paths resolve against the city directory."
+          "description": "PromptTemplate overrides the prompt template path.\nRelative paths resolve against the declaring config file's directory\n(pack-safe). Paths prefixed with \"//\" resolve against the city root."
         },
         "session": {
           "type": "string",
@@ -687,6 +713,13 @@
         "start_command": {
           "type": "string",
           "description": "StartCommand overrides the start command."
+        },
+        "lifecycle": {
+          "type": "string",
+          "enum": [
+            "one_shot"
+          ],
+          "description": "Lifecycle overrides the runtime lifecycle (\"one_shot\" or empty)."
         },
         "nudge": {
           "type": "string",
@@ -771,7 +804,7 @@
         },
         "overlay_dir": {
           "type": "string",
-          "description": "OverlayDir overrides the agent's overlay_dir path. Copies contents\nadditively into the agent's working directory at startup.\nRelative paths resolve against the city directory."
+          "description": "OverlayDir overrides the agent's overlay_dir path. Copies contents\nadditively into the agent's working directory at startup.\nRelative paths resolve against the declaring config file's directory\n(pack-safe). Paths prefixed with \"//\" resolve against the city root."
         },
         "default_sling_formula": {
           "type": "string",
@@ -934,12 +967,16 @@
           "type": "object",
           "description": "Imports defines named pack imports (V2 mechanism). Each key is a\nbinding name; the value specifies the source and optional version,\nexport, and transitive controls. Processed during ExpandCityPacks."
         },
+        "defaults": {
+          "$ref": "#/$defs/PackDefaults",
+          "description": "Defaults holds city-level defaults that seed generated config. The\ncanonical default-rig import table is [defaults.rig.imports]."
+        },
         "agent": {
           "items": {
             "$ref": "#/$defs/Agent"
           },
           "type": "array",
-          "description": "Agents lists all configured agents in this city."
+          "description": "Agents lists all configured agents in this city. Optional: PackV2\ncities compose agents through [imports.*] and ship without any\n[[agent]] block."
         },
         "named_session": {
           "items": {
@@ -1033,8 +1070,7 @@
       "additionalProperties": false,
       "type": "object",
       "required": [
-        "workspace",
-        "agent"
+        "workspace"
       ],
       "description": "City is the top-level configuration for a Gas City instance."
     },
@@ -1042,7 +1078,7 @@
       "properties": {
         "max_per_agent": {
           "type": "integer",
-          "description": "MaxPerAgent is the maximum number of active convergence loops per agent.\n0 means use default (2).",
+          "description": "MaxPerAgent is the maximum number of active convergence loops per agent\nin each bead store scope. City/HQ and each bound rig enforce the limit\nindependently. 0 means use default (2).",
           "default": 2
         },
         "max_total": {
@@ -1135,7 +1171,7 @@
         },
         "max_wakes_per_tick": {
           "type": "integer",
-          "description": "MaxWakesPerTick caps how many sessions the reconciler may start in a\nsingle tick. Nil (unset) defaults to 5. Values \u003c= 0 are treated as the\ndefault — set a positive integer to override.",
+          "description": "MaxWakesPerTick caps how many sessions the reconciler may start in a\nsingle tick. Fresh generic pool session-bead creation uses the same\nbudget so the controller does not materialize more ordinary pool sessions\nthan it can wake. Bounded dependency-floor prerequisites are exempt.\nNil (unset) defaults to 5. Values \u003c= 0 are treated as the default — set a\npositive integer to override.",
           "default": 5
         },
         "nudge_dispatcher": {
@@ -1151,6 +1187,11 @@
           "type": "boolean",
           "description": "AutoRestartOnDrift controls whether `gc start` automatically restarts\nthe supervisor when it detects the running supervisor's binary or\npack snapshot has drifted from on-disk state. Nil (unset) defaults\nto true — operators get the correct-by-default behavior. Set to\nfalse as a global kill switch (e.g., for production cities where a\nrebuild on the host should not auto-restart the supervisor).",
           "default": true
+        },
+        "start_ready_timeout": {
+          "type": "string",
+          "description": "StartReadyTimeout is how long `gc start` and `gc register` wait for\nthe supervisor to report the city as Running. Cities with many\nregistered or adopted sessions take longer to start because the\nper-tick wake budget (max_wakes_per_tick) throttles startup: wall\ntime to wake N sessions is roughly ceil(N / max_wakes_per_tick) *\npatrol_interval. At the defaults (5 wakes / 30s), ~40 sessions\nneed ~4 minutes. Duration string (e.g., \"5m\", \"10m\"). Defaults to\nDefaultStartReadyTimeout (5m). When set, this value replaces the\ndefault start/register budget; [session].startup_timeout may still\nextend the effective wait for a slow single session.",
+          "default": "5m"
         }
       },
       "additionalProperties": false,
@@ -1248,16 +1289,10 @@
       "description": "EventsRotationConfig holds file-backed events rotation settings."
     },
     "FormulasConfig": {
-      "properties": {
-        "dir": {
-          "type": "string",
-          "description": "Dir is the path to the formulas directory. Defaults to \"formulas\".",
-          "default": "formulas"
-        }
-      },
+      "properties": {},
       "additionalProperties": false,
       "type": "object",
-      "description": "FormulasConfig holds formula directory settings."
+      "description": "FormulasConfig holds legacy formula directory settings."
     },
     "Import": {
       "properties": {
@@ -1529,6 +1564,29 @@
       "additionalProperties": false,
       "type": "object",
       "description": "OrdersConfig holds order settings."
+    },
+    "PackDefaults": {
+      "properties": {
+        "rig": {
+          "$ref": "#/$defs/PackRigDefaults"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "PackDefaults holds [defaults] entries used to seed generated rig configuration."
+    },
+    "PackRigDefaults": {
+      "properties": {
+        "imports": {
+          "additionalProperties": {
+            "$ref": "#/$defs/Import"
+          },
+          "type": "object"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "PackRigDefaults holds the [defaults.rig] block — defaults applied to rigs created from this pack."
     },
     "PackSource": {
       "properties": {
@@ -2289,7 +2347,14 @@
             "type": "string"
           },
           "type": "array",
-          "description": "DefaultRigIncludes is the legacy city.toml default-rig pack list.\n\nDeprecated: use root pack.toml [defaults.rig.imports.\u003cbinding\u003e] instead.\nRun gc doctor to inspect; gc doctor --fix handles the safe mechanical\nrewrites available in this release wave."
+          "description": "DefaultRigIncludes is the legacy city.toml default-rig pack list.\n\nDeprecated: use city.toml [defaults.rig.imports.\u003cbinding\u003e] instead.\nRun gc doctor to inspect; gc doctor --fix handles the safe mechanical\nrewrites available in this release wave."
+        },
+        "env": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object",
+          "description": "Env defines workspace-wide environment variables applied to every\nmanaged session. Lowest config-precedence — overridden by provider,\nagent, and patch env. Use for cross-cutting variables like\nGC_TARGET_BRANCH that every agent should inherit."
         }
       },
       "additionalProperties": false,
@@ -2298,5 +2363,5 @@
     }
   },
   "title": "Gas City Configuration",
-  "description": "Schema for city.toml — the PackV2 deployment file for a Gas City instance. Pack definitions live in pack.toml and conventional pack directories such as agents/, formulas/, orders/, and commands/. Use [imports.*] for PackV2 composition; legacy includes, [packs.*], and [[agent]] fields remain visible for migration compatibility."
+  "description": "Schema for city.toml — the PackV2 deployment file for a Gas City instance. Pack definitions live in pack.toml and conventional pack directories such as agents/, formulas/, orders/, and commands/. Use [imports.*] for PackV2 composition; legacy includes, [packs.*], and [[agent]] fields remain visible for migration compatibility.\n\n\u003e **PackV2 format source of truth:** The public PackV2 format and loader semantics are specified in [Gas City Pack Specification (2.0)](/specs/pack-spec)."
 }

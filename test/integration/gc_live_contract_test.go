@@ -53,6 +53,7 @@ func TestGCLiveContract_BeadsAndEvents(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	cmd := exec.CommandContext(ctx, bin, "supervisor", "run")
+	configureIntegrationSupervisorCommand(cmd)
 	cmd.Env = env
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
@@ -147,10 +148,9 @@ func TestGCLiveContract_BeadsAndEvents(t *testing.T) {
 		Agent  string `json:"agent"`
 	}](t, baseURL, validator, http.MethodPost, cityBase+"/agents", map[string]string{
 		"name":     "worker",
-		"dir":      rigName,
 		"provider": "contract-agent",
 	}, http.StatusCreated)
-	targetAgent := rigName + "/worker"
+	targetAgent := "worker"
 	waitForLiveContractAgent(t, baseURL, validator, cityBase, targetAgent, 30*time.Second)
 
 	publicProviders := liveContractJSON[struct {
@@ -166,7 +166,7 @@ func TestGCLiveContract_BeadsAndEvents(t *testing.T) {
 	cfg := liveContractJSON[struct {
 		Agents []contractConfigAgent `json:"agents"`
 	}](t, baseURL, validator, http.MethodGet, cityBase+"/config", nil, http.StatusOK)
-	if !liveContractConfigHasAgent(cfg.Agents, "worker", rigName) {
+	if !liveContractConfigHasAgent(cfg.Agents, "worker", "") {
 		t.Fatalf("GET config missing created agent %q; agents=%+v", targetAgent, cfg.Agents)
 	}
 
@@ -683,8 +683,12 @@ func createLiveContractAgentSession(t *testing.T, baseURL string, v openapivalid
 	if result.Session.Title != "real-world app contract "+label {
 		t.Fatalf("%s session title = %q", label, result.Session.Title)
 	}
-	if result.Session.Rig != rigName {
-		t.Fatalf("%s session rig = %q, want %q", label, result.Session.Rig, rigName)
+	expectedSessionRig := ""
+	if dir, _, ok := strings.Cut(targetAgent, "/"); ok {
+		expectedSessionRig = dir
+	}
+	if result.Session.Rig != expectedSessionRig {
+		t.Fatalf("%s session rig = %q, want %q", label, result.Session.Rig, expectedSessionRig)
 	}
 	if result.Session.Alias == "" {
 		t.Fatalf("%s session missing controller-managed alias", label)
@@ -697,14 +701,7 @@ func closeLiveContractRigSessions(t *testing.T, baseURL string, v openapivalidat
 	t.Helper()
 	deadline := time.Now().Add(30 * time.Second)
 	for {
-		sessions := liveContractJSON[struct {
-			Items []struct {
-				ID       string `json:"id"`
-				Rig      string `json:"rig"`
-				Template string `json:"template"`
-				State    string `json:"state"`
-			} `json:"items"`
-		}](t, baseURL, v, http.MethodGet, cityBase+"/sessions?limit=100", nil, http.StatusOK)
+		sessions := liveContractSessionListEventually(t, baseURL, v, cityBase+"/sessions?limit=100", deadline)
 
 		remaining := 0
 		for _, sess := range sessions.Items {
@@ -724,6 +721,63 @@ func closeLiveContractRigSessions(t *testing.T, baseURL string, v openapivalidat
 		}
 		if time.Now().After(deadline) {
 			t.Fatalf("timed out closing %d live contract rig session(s)", remaining)
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+}
+
+type liveContractSessionListResponse struct {
+	Items []liveContractSessionListItem `json:"items"`
+}
+
+type liveContractSessionListItem struct {
+	ID       string `json:"id"`
+	Rig      string `json:"rig"`
+	Template string `json:"template"`
+	State    string `json:"state"`
+}
+
+func liveContractSessionListEventually(t *testing.T, baseURL string, v openapivalidator.Validator, path string, deadline time.Time) liveContractSessionListResponse {
+	t.Helper()
+	var lastStatus int
+	var lastBody string
+	var lastErr error
+	for {
+		req, err := liveContractHTTPRequest(baseURL, http.MethodGet, path, nil)
+		if err != nil {
+			t.Fatalf("GET %s build request: %v", path, err)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			lastErr = err
+		} else {
+			raw, readErr := io.ReadAll(resp.Body)
+			_ = resp.Body.Close()
+			if readErr != nil {
+				t.Fatalf("GET %s read response: %v", path, readErr)
+			}
+			lastErr = nil
+			lastStatus = resp.StatusCode
+			lastBody = string(raw)
+			if resp.StatusCode == http.StatusOK {
+				if v != nil {
+					validateLiveContractResponse(t, v, req, resp, raw)
+				}
+				var out liveContractSessionListResponse
+				if err := json.Unmarshal(raw, &out); err != nil {
+					t.Fatalf("GET %s decode response: %v\nbody: %s", path, err, string(raw))
+				}
+				return out
+			}
+			if resp.StatusCode != http.StatusServiceUnavailable || !strings.Contains(lastBody, "cache_not_live:") {
+				t.Fatalf("GET %s status = %d, want 200; body: %s", path, resp.StatusCode, string(raw))
+			}
+		}
+		if time.Now().After(deadline) {
+			if lastErr != nil {
+				t.Fatalf("GET %s: %v", path, lastErr)
+			}
+			t.Fatalf("GET %s status = %d, want 200; body: %s", path, lastStatus, lastBody)
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
@@ -1439,11 +1493,13 @@ func liveContractRigList(baseURL string, v openapivalidator.Validator, cityBase 
 
 func waitForLiveContractAgent(t *testing.T, baseURL string, v openapivalidator.Validator, cityBase, targetAgent string, timeout time.Duration) {
 	t.Helper()
-	dir, base, ok := strings.Cut(targetAgent, "/")
-	if !ok || dir == "" || base == "" {
-		t.Fatalf("target agent %q is not a qualified rig agent", targetAgent)
+	path := cityBase + "/agent/" + url.PathEscape(targetAgent)
+	if dir, base, ok := strings.Cut(targetAgent, "/"); ok {
+		if dir == "" || base == "" {
+			t.Fatalf("target agent %q has an empty qualifier", targetAgent)
+		}
+		path = cityBase + "/agent/" + url.PathEscape(dir) + "/" + url.PathEscape(base)
 	}
-	path := cityBase + "/agent/" + url.PathEscape(dir) + "/" + url.PathEscape(base)
 	deadline := time.Now().Add(timeout)
 	var lastErr error
 	for time.Now().Before(deadline) {

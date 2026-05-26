@@ -23,31 +23,56 @@ const packFile = "pack.toml"
 // currentPackSchema is the supported pack schema version.
 const currentPackSchema = 2
 
-// packConfig is the TOML structure of a pack.toml file.
+type deferredRigPatches struct {
+	rigName            string
+	agentStart         int
+	agentEnd           int
+	expectedAgentCount int
+	expectedAgentNames []string
+	overrides          []AgentOverride
+}
+
+// PackConfig is the TOML structure of a pack.toml file.
 // It has a [pack] metadata header and agent definitions.
-type packConfig struct {
-	Pack           PackMeta                `toml:"pack"`
+type PackConfig struct {
+	Pack           PackMeta                `toml:"pack" jsonschema:"required"`
 	Imports        map[string]Import       `toml:"imports,omitempty"`
-	AgentDefaults  AgentDefaults           `toml:"agent_defaults,omitempty"`
+	AgentDefaults  AgentDefaults           `toml:"agent_defaults,omitempty" jsonschema:"-"`
 	AgentsDefaults AgentDefaults           `toml:"agents,omitempty" jsonschema:"-"`
-	Defaults       packDefaults            `toml:"defaults,omitempty"`
-	Agents         []Agent                 `toml:"agent"`
+	Defaults       PackDefaults            `toml:"defaults,omitempty" jsonschema:"-"`
+	Agents         []Agent                 `toml:"agent,omitempty"`
 	NamedSessions  []NamedSession          `toml:"named_session,omitempty"`
 	Services       []Service               `toml:"service,omitempty"`
 	Providers      map[string]ProviderSpec `toml:"providers,omitempty"`
-	Formulas       FormulasConfig          `toml:"formulas,omitempty"`
-	Patches        Patches                 `toml:"patches,omitempty"`
+	Formulas       FormulasConfig          `toml:"formulas,omitempty" jsonschema:"-"`
+	Patches        PackPatches             `toml:"patches,omitempty"`
 	Doctor         []PackDoctorEntry       `toml:"doctor,omitempty"`
 	Commands       []PackCommandEntry      `toml:"commands,omitempty"`
 	Global         PackGlobal              `toml:"global,omitempty"`
 	Pricing        []pricing.ModelPricing  `toml:"pricing,omitempty"`
 }
 
-type packDefaults struct {
-	Rig packRigDefaults `toml:"rig,omitempty"`
+// PackPatches holds the patch operations valid in pack.toml. City
+// configuration may patch agents, rigs, and providers; packs may only patch
+// agents visible within that pack load.
+type PackPatches struct {
+	Agents []AgentPatch `toml:"agent,omitempty"`
 }
 
-type packRigDefaults struct {
+// IsEmpty reports whether the pack declares no supported patch entries.
+func (p *PackPatches) IsEmpty() bool {
+	return p == nil || len(p.Agents) == 0
+}
+
+// PackDefaults holds [defaults] entries used to seed generated rig
+// configuration.
+type PackDefaults struct {
+	Rig PackRigDefaults `toml:"rig,omitempty"`
+}
+
+// PackRigDefaults holds the [defaults.rig] block — defaults applied
+// to rigs created from this pack.
+type PackRigDefaults struct {
 	Imports map[string]Import `toml:"imports,omitempty"`
 }
 
@@ -60,6 +85,9 @@ type packRigDefaults struct {
 // Overrides from the rig are applied to the stamped agents (after all
 // packs for the rig are expanded). All expansion happens before
 // validation — downstream sees a flat City struct.
+// ExpandPacks applies those rig overrides inline. It does not coordinate
+// ordering with city-level ApplyPatches; use LoadWithIncludes for full
+// city composition where city-level patches run before rig overrides.
 //
 // rigFormulaDirs is populated with per-rig pack formula directories
 // (Layer 3). cityRoot is the city directory (parent of city.toml), used
@@ -70,6 +98,13 @@ func ExpandPacks(cfg *City, fs fsys.FS, cityRoot string, rigFormulaDirs map[stri
 
 func expandPacks(cfg *City, fs fsys.FS, cityRoot string, rigFormulaDirs map[string][]string, opts LoadOptions) error {
 	var expanded []Agent
+	// City-scoped agents and named sessions encountered through a rig-scope
+	// include/import are hoisted to city scope (deduped) rather than dropped,
+	// so a city-scoped agent that lives in a rig-included pack (e.g. a routing
+	// coordinator in a pack only ever rig-included) still registers. Collected
+	// here across all rigs and merged into cfg once below.
+	var hoistedAgents []Agent
+	var hoistedNamedSessions []NamedSession
 	for i := range cfg.Rigs {
 		rig := &cfg.Rigs[i]
 		cache := &packLoadCache{results: make(map[string]*packLoadResult)}
@@ -147,7 +182,10 @@ func expandPacks(cfg *City, fs fsys.FS, cityRoot string, rigFormulaDirs map[stri
 			rigTopoDirs = appendUnique(rigTopoDirs, topoDirs...)
 			rigPackGraphOnlyDirs = appendUniqueLastWins(rigPackGraphOnlyDirs, topoDirs...)
 
-			// Keep only rig-scoped and unscoped agents for rig expansion.
+			// Keep only rig-scoped and unscoped agents for rig expansion;
+			// hoist city-scoped ones to city scope instead of dropping them.
+			hoistedAgents = append(hoistedAgents, hoistCityScopedAgents(agents)...)
+			hoistedNamedSessions = append(hoistedNamedSessions, hoistCityScopedNamedSessions(namedSessions)...)
 			agents = filterAgentsByScope(agents, false)
 			namedSessions = filterNamedSessionsByScope(namedSessions, false)
 
@@ -331,6 +369,10 @@ func expandPacks(cfg *City, fs fsys.FS, cityRoot string, rigFormulaDirs map[stri
 				rigTopoDirs = appendUnique(rigTopoDirs, topoDirs...)
 				rigImportPackDirs = prependUniqueBlock(rigImportPackDirs, mcpTopoDirs...)
 
+				// Hoist city-scoped agents/sessions to city scope instead of
+				// dropping them at the rig-import boundary.
+				hoistedAgents = append(hoistedAgents, hoistCityScopedAgents(agents)...)
+				hoistedNamedSessions = append(hoistedNamedSessions, hoistCityScopedNamedSessions(namedSessions)...)
 				agents = filterAgentsByScope(agents, false)
 				namedSessions = filterNamedSessionsByScope(namedSessions, false)
 
@@ -403,11 +445,25 @@ func expandPacks(cfg *City, fs fsys.FS, cityRoot string, rigFormulaDirs map[stri
 			return err
 		}
 
-		// Apply per-rig overrides/patches after all packs for this rig.
+		// Apply or defer per-rig overrides/patches after all packs for this rig.
 		// V2 accepts both "overrides" (V1) and "patches" (V2) TOML keys.
-		allOverrides := rig.Overrides
+		allOverrides := append([]AgentOverride(nil), rig.Overrides...)
 		allOverrides = append(allOverrides, rig.RigPatches...)
-		if err := applyOverrides(rigAgents, allOverrides, rig.Name); err != nil {
+		if opts.deferRigPatches {
+			if opts.deferredRigPatches == nil {
+				return fmt.Errorf("rig %q: deferred rig patches requested without destination", rig.Name)
+			}
+			if len(allOverrides) > 0 {
+				start := len(cfg.Agents) + len(expanded)
+				*opts.deferredRigPatches = append(*opts.deferredRigPatches, deferredRigPatches{
+					rigName:            rig.Name,
+					agentStart:         start,
+					agentEnd:           start + len(rigAgents),
+					expectedAgentNames: qualifiedAgentNames(rigAgents),
+					overrides:          allOverrides,
+				})
+			}
+		} else if err := applyOverrides(rigAgents, allOverrides, rig.Name); err != nil {
 			return fmt.Errorf("rig %q: %w", rig.Name, err)
 		}
 
@@ -423,6 +479,19 @@ func expandPacks(cfg *City, fs fsys.FS, cityRoot string, rigFormulaDirs map[stri
 		cfg.NamedSessions = append(cfg.NamedSessions, rigNamedSessions...)
 	}
 	cfg.Agents = append(cfg.Agents, expanded...)
+	// Merge hoisted city-scoped agents/sessions (from rig includes/imports)
+	// into the city set, deduped by qualified name. The same pack is commonly
+	// included by several rigs; without dedup the same city-scoped agent would
+	// be registered once per rig and collide (see duplicate_agent_error.go).
+	// Any name already present at city scope (city-scope expansion, a city-root
+	// agents/<name>/, or an earlier hoist) wins; the hoisted copy is skipped.
+	cfg.Agents = mergeHoistedCityAgents(cfg.Agents, hoistedAgents)
+	cfg.NamedSessions = mergeHoistedCityNamedSessions(cfg.NamedSessions, hoistedNamedSessions)
+	if opts.deferRigPatches && opts.deferredRigPatches != nil {
+		for i := range *opts.deferredRigPatches {
+			(*opts.deferredRigPatches)[i].expectedAgentCount = len(cfg.Agents)
+		}
+	}
 	return nil
 }
 
@@ -996,16 +1065,16 @@ type packLoadResult struct {
 	warnings       []string
 }
 
-func parsePackConfigWithMeta(data []byte, source string) (packConfig, []string, error) {
+func parsePackConfigWithMeta(data []byte, source string) (PackConfig, []string, error) {
 	cfg, _, warnings, err := parsePackConfigWithMetadata(data, source)
 	return cfg, warnings, err
 }
 
-func parsePackConfigWithMetadata(data []byte, source string) (packConfig, toml.MetaData, []string, error) {
-	var cfg packConfig
+func parsePackConfigWithMetadata(data []byte, source string) (PackConfig, toml.MetaData, []string, error) {
+	var cfg PackConfig
 	md, err := toml.Decode(string(data), &cfg)
 	if err != nil {
-		return packConfig{}, md, nil, err
+		return PackConfig{}, md, nil, err
 	}
 	normalizePackAgentDefaultsAlias(&cfg, md)
 	warnings := agentDefaultsCompatibilityWarnings(md, source)
@@ -1013,7 +1082,7 @@ func parsePackConfigWithMetadata(data []byte, source string) (packConfig, toml.M
 	return cfg, md, warnings, nil
 }
 
-func normalizePackAgentDefaultsAlias(cfg *packConfig, meta toml.MetaData) {
+func normalizePackAgentDefaultsAlias(cfg *PackConfig, meta toml.MetaData) {
 	if !meta.IsDefined("agents") {
 		cfg.AgentsDefaults = AgentDefaults{}
 		return
@@ -1033,6 +1102,53 @@ func loadPack(fs fsys.FS, topoPath, topoDir, cityRoot, rigName string, seen map[
 
 func loadPackWithCache(fs fsys.FS, topoPath, topoDir, cityRoot, rigName string, seen map[string]bool, cache *packLoadCache) ([]Agent, []NamedSession, map[string]ProviderSpec, []Service, []string, []PackRequirement, []ResolvedPackGlobal, error) {
 	return loadPackWithCacheOptions(fs, topoPath, topoDir, cityRoot, rigName, seen, cache, LoadOptions{})
+}
+
+// LintPackLoad is the pack graph state needed by CLI linting.
+type LintPackLoad struct {
+	Path          string
+	Name          string
+	Agents        []Agent
+	NamedSessions []NamedSession
+	Providers     map[string]ProviderSpec
+	PackDirs      []string
+	Warnings      []string
+}
+
+// LoadPackForLint loads a standalone pack directory using the same parser,
+// include/import expansion, and path adjustment as normal pack loading.
+func LoadPackForLint(fs fsys.FS, packDir string) (*LintPackLoad, error) {
+	if strings.TrimSpace(packDir) == "" {
+		return nil, fmt.Errorf("pack directory is required")
+	}
+	absDir, err := filepath.Abs(packDir)
+	if err != nil {
+		return nil, fmt.Errorf("resolving pack directory %q: %w", packDir, err)
+	}
+	topoPath := filepath.Join(absDir, packFile)
+	cache := &packLoadCache{results: make(map[string]*packLoadResult)}
+	agents, namedSessions, providers, _, topoDirs, _, _, err := loadPackWithCacheOptions(
+		fs, topoPath, absDir, absDir, "", nil, cache, LoadOptions{})
+	if err != nil {
+		return nil, err
+	}
+	data, err := fs.ReadFile(topoPath)
+	if err != nil {
+		return nil, fmt.Errorf("loading %s: %w", packFile, err)
+	}
+	packName, err := decodePackName(data)
+	if err != nil {
+		return nil, fmt.Errorf("parsing %s: %w", packFile, err)
+	}
+	return &LintPackLoad{
+		Path:          absDir,
+		Name:          packName,
+		Agents:        agents,
+		NamedSessions: namedSessions,
+		Providers:     providers,
+		PackDirs:      topoDirs,
+		Warnings:      cachedPackWarnings(cache, absDir),
+	}, nil
 }
 
 func loadPackWithCacheOptions(fs fsys.FS, topoPath, topoDir, cityRoot, rigName string, seen map[string]bool, cache *packLoadCache, opts LoadOptions) ([]Agent, []NamedSession, map[string]ProviderSpec, []Service, []string, []PackRequirement, []ResolvedPackGlobal, error) {
@@ -1096,11 +1212,11 @@ func loadPackWithCacheOptionsLocked(fs fsys.FS, topoPath, topoDir, cityRoot, rig
 	if err != nil {
 		return nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("parsing %s: %w", packFile, err)
 	}
+	if err := validatePackAuthoringSurface(md, topoPath); err != nil {
+		return nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("parsing %s: %w", packFile, err)
+	}
 	if fatalWarnings := fatalUndecodedWarnings(md, topoPath); len(fatalWarnings) > 0 {
 		return nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("parsing %s: %s", packFile, strings.Join(fatalWarnings, "; "))
-	}
-	if len(tc.Defaults.Rig.Imports) > 0 {
-		return nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("parsing %s: [defaults.rig.imports] is only supported in a city root pack.toml", packFile)
 	}
 
 	if err := validatePackMeta(&tc.Pack); err != nil {
@@ -1334,13 +1450,16 @@ func loadPackWithCacheOptionsLocked(fs fsys.FS, topoPath, topoDir, cityRoot, rig
 	}
 
 	// V2 convention-based order discovery: top-level orders/ flat files are the
-	// standard layout. Deprecated locations are still discovered so pack loads
-	// surface migration warnings consistently.
-	if _, err := orders.ScanRootsWithOptions(fs, []orders.ScanRoot{{
-		Dir:          filepath.Join(topoDir, "orders"),
-		FormulaLayer: filepath.Join(topoDir, "formulas"),
-	}}, nil, orders.ScanOptions{SuppressDeprecatedPathWarnings: opts.SuppressDeprecatedOrderWarnings}); err != nil {
-		return nil, nil, nil, nil, nil, nil, nil, err
+	// standard layout. Deprecated subdirectory order paths are a filesystem
+	// layout cutover, not a city.toml PackV1 authoring surface, so they are
+	// rejected for all pack schemas.
+	if !opts.allowLegacyOrderLayouts {
+		if _, err := orders.ScanRoots(fs, []orders.ScanRoot{{
+			Dir:          filepath.Join(topoDir, "orders"),
+			FormulaLayer: filepath.Join(topoDir, "formulas"),
+		}}, nil); err != nil {
+			return nil, nil, nil, nil, nil, nil, nil, err
+		}
 	}
 
 	// Stamp parent agents: set dir = rigName (unless already set), adjust paths.
@@ -2098,11 +2217,25 @@ func legacyPackDoctors(fs fsys.FS, entries []PackDoctorEntry, packDir, packName 
 // to matching agents. City-level globals affect ALL agents. Rig-level
 // globals affect only agents in that rig.
 func applyPackGlobals(cfg *City) {
+	applied := make([]map[string]bool, len(cfg.Agents))
+	apply := func(agentIndex int, g ResolvedPackGlobal) {
+		if g.PackName != "" {
+			if applied[agentIndex] == nil {
+				applied[agentIndex] = make(map[string]bool)
+			}
+			if applied[agentIndex][g.PackName] {
+				return
+			}
+			applied[agentIndex][g.PackName] = true
+		}
+		cfg.Agents[agentIndex].SessionLive = append(
+			cfg.Agents[agentIndex].SessionLive, g.SessionLive...)
+	}
+
 	// City-level globals → all agents.
 	for _, g := range cfg.PackGlobals {
 		for i := range cfg.Agents {
-			cfg.Agents[i].SessionLive = append(
-				cfg.Agents[i].SessionLive, g.SessionLive...)
+			apply(i, g)
 		}
 	}
 	// Rig-level globals → only that rig's agents.
@@ -2110,8 +2243,7 @@ func applyPackGlobals(cfg *City) {
 		for _, g := range globals {
 			for i := range cfg.Agents {
 				if cfg.Agents[i].Dir == rigName {
-					cfg.Agents[i].SessionLive = append(
-						cfg.Agents[i].SessionLive, g.SessionLive...)
+					apply(i, g)
 				}
 			}
 		}
@@ -2134,7 +2266,7 @@ func resolveConfigDirInCommands(cmds []string, configDir string) []string {
 // absolute path because patches do not retain independent source provenance
 // after application; prompt_template and overlay_dir keep the existing
 // city-root-relative representation used elsewhere in composition.
-func adjustPackPatchPaths(patches *Patches, topoDir, cityRoot string) {
+func adjustPackPatchPaths(patches *PackPatches, topoDir, cityRoot string) {
 	for i := range patches.Agents {
 		p := &patches.Agents[i]
 		if p.SessionSetupScript != nil && *p.SessionSetupScript != "" {
@@ -2309,6 +2441,116 @@ func filterNamedSessionsByScope(sessions []NamedSession, cityExpansion bool) []N
 	return result
 }
 
+// hoistCityScopedAgents returns copies of the city-scoped agents in the
+// given slice, restamped for city scope (Dir cleared — it was stamped to the
+// rig name during pack load). Used at rig include/import boundaries so a
+// city-scoped agent that lives in a rig-included pack is hoisted to city
+// scope instead of being silently dropped. BindingName is preserved so a
+// city-scoped agent imported under a binding keeps its qualified identity.
+func hoistCityScopedAgents(agents []Agent) []Agent {
+	var hoisted []Agent
+	for _, a := range agents {
+		if a.Scope != "city" {
+			continue
+		}
+		a.Dir = ""
+		hoisted = append(hoisted, a)
+	}
+	return hoisted
+}
+
+// hoistCityScopedNamedSessions mirrors hoistCityScopedAgents for named
+// sessions.
+func hoistCityScopedNamedSessions(sessions []NamedSession) []NamedSession {
+	var hoisted []NamedSession
+	for _, s := range sessions {
+		if s.Scope != "city" {
+			continue
+		}
+		s.Dir = ""
+		hoisted = append(hoisted, s)
+	}
+	return hoisted
+}
+
+// mergeHoistedCityAgents appends hoisted city-scoped agents to the city
+// agent set, skipping any whose qualified name is already present (from
+// city-scope expansion, a city-root agent, or an earlier hoist of the same
+// agent via another rig). First occurrence wins, so an existing city-scope
+// or city-root definition is preferred over a hoisted one. Identical
+// definitions reached through multiple rigs register exactly once.
+func mergeHoistedCityAgents(agents, hoisted []Agent) []Agent {
+	if len(hoisted) == 0 {
+		return agents
+	}
+	seen := make(map[string]bool, len(agents))
+	for i := range agents {
+		seen[agents[i].QualifiedName()] = true
+	}
+	for _, a := range hoisted {
+		qn := a.QualifiedName()
+		if seen[qn] {
+			continue
+		}
+		seen[qn] = true
+		agents = append(agents, a)
+	}
+	return agents
+}
+
+// mergeHoistedCityNamedSessions mirrors mergeHoistedCityAgents for named
+// sessions.
+func mergeHoistedCityNamedSessions(sessions, hoisted []NamedSession) []NamedSession {
+	if len(hoisted) == 0 {
+		return sessions
+	}
+	seen := make(map[string]bool, len(sessions))
+	for i := range sessions {
+		seen[sessions[i].QualifiedName()] = true
+	}
+	for _, s := range hoisted {
+		qn := s.QualifiedName()
+		if seen[qn] {
+			continue
+		}
+		seen[qn] = true
+		sessions = append(sessions, s)
+	}
+	return sessions
+}
+
+func applyDeferredRigPatches(cfg *City, deferred []deferredRigPatches) error {
+	for _, d := range deferred {
+		if d.agentStart < 0 || d.agentEnd < d.agentStart || d.agentEnd > len(cfg.Agents) {
+			return fmt.Errorf("rig %q: deferred agent range [%d:%d] outside merged agents", d.rigName, d.agentStart, d.agentEnd)
+		}
+		if len(cfg.Agents) != d.expectedAgentCount {
+			return fmt.Errorf("rig %q: merged agent count changed before deferred rig patches: got %d, want %d", d.rigName, len(cfg.Agents), d.expectedAgentCount)
+		}
+		if len(d.expectedAgentNames) != d.agentEnd-d.agentStart {
+			return fmt.Errorf("rig %q: deferred agent range [%d:%d] has %d identity snapshots", d.rigName, d.agentStart, d.agentEnd, len(d.expectedAgentNames))
+		}
+		for i, want := range d.expectedAgentNames {
+			got := cfg.Agents[d.agentStart+i].QualifiedName()
+			if got != want {
+				return fmt.Errorf("rig %q: agent at deferred range index %d changed before deferred rig patches: got %q, want %q", d.rigName, d.agentStart+i, got, want)
+			}
+		}
+		if err := applyOverrides(cfg.Agents[d.agentStart:d.agentEnd], d.overrides, d.rigName); err != nil {
+			return fmt.Errorf("rig %q: %w", d.rigName, err)
+		}
+	}
+	return nil
+}
+
+func qualifiedAgentNames(agents []Agent) []string {
+	names := make([]string, 0, len(agents))
+	for i := range agents {
+		names = append(names, agents[i].QualifiedName())
+	}
+	return names
+}
+
 // applyOverrides applies per-rig overrides to pack-stamped agents.
 // Each override targets an agent by name within the pack.
 func applyOverrides(agents []Agent, overrides []AgentOverride, _ string) error {
@@ -2339,6 +2581,9 @@ func applyAgentOverride(a *Agent, ov *AgentOverride) {
 	if ov.WorkDir != nil {
 		a.WorkDir = *ov.WorkDir
 	}
+	if ov.TmuxAlias != nil {
+		a.TmuxAlias = *ov.TmuxAlias
+	}
 	if ov.Scope != nil {
 		a.Scope = *ov.Scope
 	}
@@ -2362,6 +2607,9 @@ func applyAgentOverride(a *Agent, ov *AgentOverride) {
 	}
 	if ov.StartCommand != nil {
 		a.StartCommand = *ov.StartCommand
+	}
+	if ov.Lifecycle != nil {
+		a.Lifecycle = *ov.Lifecycle
 	}
 	if ov.Nudge != nil {
 		a.Nudge = *ov.Nudge
@@ -2671,7 +2919,7 @@ func packSummaryOne(fs fsys.FS, ref, cityRoot string) string {
 	if err != nil {
 		return ref + " (unreadable)"
 	}
-	var tc packConfig
+	var tc PackConfig
 	if _, err := toml.Decode(string(data), &tc); err != nil {
 		return ref + " (parse error)"
 	}
@@ -2724,7 +2972,7 @@ func LoadPackDoctorEntries(fs fsys.FS, topoDirs []string) []PackDoctorInfo {
 			continue
 		}
 
-		var tc packConfig
+		var tc PackConfig
 		if _, err := toml.Decode(string(data), &tc); err != nil {
 			continue
 		}
@@ -2775,7 +3023,7 @@ func LoadPackCommandEntries(fs fsys.FS, packDirs []string) []PackCommandInfo {
 			continue
 		}
 
-		var tc packConfig
+		var tc PackConfig
 		if _, err := toml.Decode(string(data), &tc); err != nil {
 			continue
 		}

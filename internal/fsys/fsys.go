@@ -70,6 +70,16 @@ func (OSFS) Lstat(name string) (os.FileInfo, error) {
 	return os.Lstat(name)
 }
 
+// Readlink delegates to [os.Readlink].
+func (OSFS) Readlink(name string) (string, error) {
+	return os.Readlink(name)
+}
+
+// Symlink delegates to [os.Symlink].
+func (OSFS) Symlink(oldname, newname string) error {
+	return os.Symlink(oldname, newname)
+}
+
 // ReadDir delegates to [os.ReadDir].
 func (OSFS) ReadDir(name string) ([]os.DirEntry, error) {
 	return os.ReadDir(name)

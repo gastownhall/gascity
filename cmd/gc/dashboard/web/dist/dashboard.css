@@ -2219,6 +2219,7 @@
         .scope-stat-value {
             font-size: 0.85rem;
             font-weight: 500;
+            white-space: nowrap;
         }
 
         .scope-stat-value.active {
@@ -2421,7 +2422,9 @@
             }
 
             .scope-status {
+                flex-wrap: wrap;
                 justify-content: center;
+                row-gap: 8px;
             }
 
             .health-grid {
@@ -2541,7 +2544,10 @@
             }
 
             .scope-status {
+                flex-wrap: wrap;
                 justify-content: center;
+                row-gap: 8px;
+                column-gap: 12px;
             }
 
             .summary-banner {

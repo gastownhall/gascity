@@ -11,6 +11,8 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 )
 
+const formulaFilesystemSearchGuidance = "**Never use wide filesystem searches when a CLI command exists.**"
+
 func TestRenderPromptEmptyPath(t *testing.T) {
 	f := fsys.NewFake()
 	got := renderPrompt(f, "/city", "", "", PromptContext{}, "", io.Discard, nil, nil, nil)
@@ -761,6 +763,45 @@ func TestRenderPromptMaintenanceDogPromptHasRequiredSharedTemplates(t *testing.T
 	}
 	if !strings.Contains(got, "Following Your Formula") {
 		t.Fatalf("rendered prompt missing following-mol fragment:\n%s", got)
+	}
+	if !strings.Contains(got, formulaFilesystemSearchGuidance) {
+		t.Fatalf("rendered prompt missing filesystem search guidance:\n%s", got)
+	}
+}
+
+func TestFormulaFilesystemSearchGuidanceCoversPromptSources(t *testing.T) {
+	repoRoot, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatalf("filepath.Abs(repo root): %v", err)
+	}
+
+	paths := []string{
+		"examples/gastown/packs/gastown/template-fragments/following-mol.template.md",
+		"examples/gastown/packs/maintenance/template-fragments/following-mol.template.md",
+		"internal/bootstrap/packs/core/assets/prompts/pool-worker.md",
+		"internal/bootstrap/packs/core/assets/prompts/graph-worker.md",
+	}
+	for _, rel := range paths {
+		t.Run(rel, func(t *testing.T) {
+			path := filepath.Join(repoRoot, rel)
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("os.ReadFile(%s): %v", path, err)
+			}
+			text := string(data)
+			for _, want := range []string{
+				formulaFilesystemSearchGuidance,
+				"`find /`",
+				"`find ~`",
+				"`find /Users`",
+				"`find $HOME`",
+				"`gc` / `bd`",
+			} {
+				if !strings.Contains(text, want) {
+					t.Fatalf("%s missing %q", rel, want)
+				}
+			}
+		})
 	}
 }
 

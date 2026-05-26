@@ -24,6 +24,9 @@ type AgentPatch struct {
 	Name string `toml:"name" jsonschema:"required"`
 	// WorkDir overrides the agent's session working directory.
 	WorkDir *string `toml:"work_dir,omitempty"`
+	// TmuxAlias overrides the tmux session name template
+	// (see Agent.TmuxAlias for semantics).
+	TmuxAlias *string `toml:"tmux_alias,omitempty"`
 	// Scope overrides the agent's scope ("city" or "rig").
 	Scope *string `toml:"scope,omitempty"`
 	// Suspended overrides the agent's suspended state.
@@ -37,7 +40,8 @@ type AgentPatch struct {
 	// PreStart overrides the agent's pre_start commands.
 	PreStart []string `toml:"pre_start,omitempty"`
 	// PromptTemplate overrides the prompt template path.
-	// Relative paths resolve against the city directory.
+	// Relative paths resolve against the declaring config file's directory
+	// (pack-safe). Paths prefixed with "//" resolve against the city root.
 	PromptTemplate *string `toml:"prompt_template,omitempty"`
 	// Session overrides the session transport ("acp" or "tmux").
 	Session *string `toml:"session,omitempty"`
@@ -45,6 +49,8 @@ type AgentPatch struct {
 	Provider *string `toml:"provider,omitempty"`
 	// StartCommand overrides the start command.
 	StartCommand *string `toml:"start_command,omitempty"`
+	// Lifecycle overrides the runtime lifecycle ("one_shot" or empty).
+	Lifecycle *string `toml:"lifecycle,omitempty" jsonschema:"enum=one_shot"`
 	// Nudge overrides the nudge text.
 	Nudge *string `toml:"nudge,omitempty"`
 	// IdleTimeout overrides the idle timeout. Duration string (e.g., "30s", "5m", "1h").
@@ -95,7 +101,8 @@ type AgentPatch struct {
 	SessionLive []string `toml:"session_live,omitempty"`
 	// OverlayDir overrides the agent's overlay_dir path. Copies contents
 	// additively into the agent's working directory at startup.
-	// Relative paths resolve against the city directory.
+	// Relative paths resolve against the declaring config file's directory
+	// (pack-safe). Paths prefixed with "//" resolve against the city root.
 	OverlayDir *string `toml:"overlay_dir,omitempty"`
 	// DefaultSlingFormula overrides the default sling formula.
 	DefaultSlingFormula *string `toml:"default_sling_formula,omitempty"`
@@ -299,6 +306,9 @@ func applyAgentPatchFields(a *Agent, p *AgentPatch) {
 	if p.WorkDir != nil {
 		a.WorkDir = *p.WorkDir
 	}
+	if p.TmuxAlias != nil {
+		a.TmuxAlias = *p.TmuxAlias
+	}
 	if p.Scope != nil {
 		a.Scope = *p.Scope
 	}
@@ -322,6 +332,9 @@ func applyAgentPatchFields(a *Agent, p *AgentPatch) {
 	}
 	if p.StartCommand != nil {
 		a.StartCommand = *p.StartCommand
+	}
+	if p.Lifecycle != nil {
+		a.Lifecycle = *p.Lifecycle
 	}
 	if p.Nudge != nil {
 		a.Nudge = *p.Nudge

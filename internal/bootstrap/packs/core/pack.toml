@@ -1,4 +1,15 @@
+# Bundled with the gc binary and materialized into each city at
+# .gc/system/packs/core.
+#
+# Gas City auto-includes this system pack when loading a city. It contributes
+# the gc-* skills that teach agents how to use Gas City, default worker prompts,
+# core formulas such as mol-do-work and mol-scoped-work, the beads-health order,
+# and per-provider hook overlays.
+#
+# Inspect this directory after `gc init` or `gc start` to see the exact
+# behavior your city received from the bundled core pack.
 [pack]
 name = "core"
 version = "0.1.0"
 schema = 2
+description = "Bundled Gas City core behavior: gc workflow skills, default prompts, core formulas, orders, and provider hook overlays."

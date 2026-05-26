@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -14,8 +13,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/agentutil"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	convoycore "github.com/gastownhall/gascity/internal/convoy"
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
@@ -157,6 +158,7 @@ type slingOpts = sling.SlingOpts
 var (
 	slingPokeController        = pokeController
 	slingPokeControlDispatcher = pokeControlDispatch
+	slingOpenCityStore         = openCityStoreAt
 )
 
 // slingDeps is an alias for sling.SlingDeps.
@@ -623,7 +625,11 @@ func (r cliBeadRouter) Route(_ context.Context, req sling.RouteRequest) error {
 	if r.deps.Store == nil {
 		return fmt.Errorf("built-in sling routing requires a store")
 	}
-	if err := r.deps.Store.SetMetadata(req.BeadID, "gc.routed_to", req.Target); err != nil {
+	routedTo := req.Target
+	if r.deps.Cfg != nil {
+		routedTo = agentutil.NormalizePoolRouteTarget(r.deps.Cfg, req.Target)
+	}
+	if err := r.deps.Store.SetMetadata(req.BeadID, "gc.routed_to", routedTo); err != nil {
 		return fmt.Errorf("setting gc.routed_to on %s: %w", req.BeadID, err)
 	}
 	return nil
@@ -882,11 +888,16 @@ func doSlingBatchWithJSON(opts slingOpts, deps slingDeps, querier BeadChildQueri
 			return writeSlingJSONResult(result, jsonStdout, stderr)
 		}
 		// For batch dry-run, look up the container bead for display.
-		if querier != nil {
+		// DoSling sets ContainerType on the result only when it actually
+		// went down the batch path (i.e. the bead is a container type
+		// like convoy). For leaf tasks it returns the single-bead result
+		// with ContainerType unset — so the dry-run preview must use
+		// dryRunSingle, otherwise it renders the misleading "container
+		// with zero children" output even though the real run would
+		// route the bead itself.
+		if result.ContainerType != "" && querier != nil {
 			if b, getErr := querier.Get(opts.BeadOrFormula); getErr == nil {
-				children, _ := querier.List(beads.ListQuery{
-					ParentID: b.ID, IncludeClosed: true, Sort: beads.SortCreatedAsc,
-				})
+				children, _ := dryRunBatchChildren(querier, b.ID)
 				var open []beads.Bead
 				for _, c := range children {
 					if c.Status == "open" {
@@ -905,6 +916,15 @@ func doSlingBatchWithJSON(opts slingOpts, deps slingDeps, querier BeadChildQueri
 		return writeSlingJSONResult(result, jsonStdout, stderr)
 	}
 	return 0
+}
+
+func dryRunBatchChildren(querier BeadChildQuerier, containerID string) ([]beads.Bead, error) {
+	if store, ok := querier.(beads.Store); ok {
+		return convoycore.Members(store, containerID, true)
+	}
+	return querier.List(beads.ListQuery{
+		ParentID: containerID, IncludeClosed: true, Sort: beads.SortCreatedAsc,
+	})
 }
 
 type slingJSONResult struct {
@@ -935,9 +955,7 @@ type slingJSONBatchSummary struct {
 
 func writeSlingJSONResult(result sling.SlingResult, stdout, stderr io.Writer) int {
 	payload := slingJSONFromResult(result)
-	enc := json.NewEncoder(stdout)
-	enc.SetIndent("", "  ")
-	if err := enc.Encode(payload); err != nil {
+	if err := writeCLIJSONLine(stdout, payload); err != nil {
 		fmt.Fprintf(stderr, "gc sling: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -1451,20 +1469,33 @@ func doSlingNudge(a *config.Agent, cityName, cityPath string, cfg *config.City,
 	}
 
 	if a.SupportsInstanceExpansion() {
-		// Find a running multi-session instance to nudge.
 		sp0 := scaleParamsFor(a)
-		for _, qn := range discoverPoolInstances(a.Name, a.Dir, sp0, a, cityName, st, sp) {
-			sn := lookupSessionNameOrLegacy(store, cityName, qn, st)
-			running, err := workerSessionTargetRunningWithConfig(cityPath, store, sp, cfg, sn)
-			if err == nil && running {
-				member, ok := resolveAgentIdentity(cfg, qn, currentRigContext(cfg))
+		tryNudgeStore := func(sessionStore beads.Store) bool {
+			refs := resolvePoolSessionRefs(sessionStore, cfg, a.Name, a.Dir, sp0, a, cityName, st, sp, stderr)
+			for _, ref := range refs {
+				running, err := workerSessionTargetRunningWithConfig(cityPath, sessionStore, sp, cfg, ref.sessionName)
+				if err != nil || !running {
+					continue
+				}
+				member, ok := resolveAgentIdentity(cfg, ref.qualifiedInstance, currentRigContext(cfg))
 				if !ok {
-					fmt.Fprintf(stderr, "gc sling: agent %q not found in config\n", qn) //nolint:errcheck // best-effort
+					fmt.Fprintf(stderr, "gc sling: agent %q not found in config\n", ref.qualifiedInstance) //nolint:errcheck // best-effort
+					return true
+				}
+				target := buildSlingNudgeTarget(member, cityName, cityPath, cfg, sessionStore, ref.sessionName)
+				deliverSlingNudge(target, sp, sessionStore, cityPath, stdout, stderr)
+				return true
+			}
+			return false
+		}
+		if tryNudgeStore(store) {
+			return
+		}
+		if cityPath != "" {
+			if _, statErr := os.Stat(filepath.Join(cityPath, "city.toml")); statErr == nil {
+				if cityStore, err := slingOpenCityStore(cityPath); err == nil && cityStore != nil && tryNudgeStore(cityStore) {
 					return
 				}
-				target := buildSlingNudgeTarget(member, cityName, cityPath, cfg, store, sn)
-				deliverSlingNudge(target, sp, store, cityPath, stdout, stderr)
-				return
 			}
 		}
 		// No running config session — poke controller for immediate wake.
@@ -1627,7 +1658,9 @@ func dryRunSingle(opts slingOpts, deps slingDeps, querier BeadQuerier, stdout, s
 			printBeadInfo(w, querier, opts.BeadOrFormula)
 			printCrossRigSection(w, opts.BeadOrFormula, a, deps.Cfg)
 
-			check := sling.CheckBeadState(querier, opts.BeadOrFormula, a, deps)
+			check := sling.CheckBeadStateWithOptions(querier, opts.BeadOrFormula, a, deps, sling.BeadCheckOptions{
+				NoConvoy: opts.NoConvoy,
+			})
 			if check.Idempotent {
 				w("Idempotency:")
 				w("  Bead " + opts.BeadOrFormula + " is already routed to " + a.QualifiedName() + ".")
@@ -1746,7 +1779,9 @@ func dryRunBatch(opts slingOpts, deps slingDeps, stdout, _ io.Writer,
 	for _, c := range children {
 		clabel := sling.FormatBeadLabel(c.ID, c.Title)
 		if c.Status == "open" {
-			check := sling.CheckBeadState(querier, c.ID, a, deps)
+			check := sling.CheckBeadStateWithOptions(querier, c.ID, a, deps, sling.BeadCheckOptions{
+				NoConvoy: opts.NoConvoy,
+			})
 			if check.Idempotent {
 				w("    " + clabel + " (open) → already routed (skip)")
 			} else {

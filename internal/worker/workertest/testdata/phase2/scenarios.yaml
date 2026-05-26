@@ -48,6 +48,22 @@ scenarios:
     executable: true
     profiles: [claude/tmux-cli, codex/tmux-cli, gemini/tmux-cli, kimi/tmux-cli, opencode/tmux-cli, pi/tmux-cli]
     requirement_codes: [WC-INPUT-003]
+  - id: input-in-progress-resume-restart
+    runner: fake-worker
+    phase: phase2
+    kind: input_delivery
+    description: In-progress assigned work receives a restart turn on resume even without an explicit nudge.
+    executable: true
+    profiles: [claude/tmux-cli, codex/tmux-cli, gemini/tmux-cli, kimi/tmux-cli, opencode/tmux-cli, pi/tmux-cli]
+    requirement_codes: [WC-INPUT-004]
+  - id: input-pre-claim-resume-restart
+    runner: fake-worker
+    phase: phase2
+    kind: input_delivery
+    description: Pre-claim work demand receives a restart turn on resume even without an explicit nudge.
+    executable: true
+    profiles: [claude/tmux-cli, codex/tmux-cli, gemini/tmux-cli, kimi/tmux-cli, opencode/tmux-cli, pi/tmux-cli]
+    requirement_codes: [WC-INPUT-005]
   - id: transcript-diagnostics
     runner: fake-worker
     phase: phase2

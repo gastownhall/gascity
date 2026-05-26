@@ -3,7 +3,6 @@ package doctor
 import (
 	"fmt"
 	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -11,7 +10,7 @@ import (
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
-	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/orderdiscovery"
 	"github.com/gastownhall/gascity/internal/orders"
 )
 
@@ -138,109 +137,11 @@ func (c *OrderFiringCurrentCheck) Run(ctx *CheckContext) *CheckResult {
 }
 
 func scanOrderFiringCurrentOrders(cityPath string, cfg *config.City) ([]orders.Order, error) {
-	cityLayers := orderFiringCityFormulaLayers(cityPath, cfg)
-	cityOrders, err := orders.ScanRoots(fsys.OSFS{}, orderFiringCityOrderRoots(cityPath, cfg), cfg.Orders.Skip)
+	allOrders, err := orderdiscovery.ScanAll(cityPath, cfg, orderdiscovery.ScanOptions{})
 	if err != nil {
 		return nil, err
 	}
-
-	var rigOrders []orders.Order
-	rigNames := make([]string, 0, len(cfg.FormulaLayers.Rigs))
-	for rigName := range cfg.FormulaLayers.Rigs {
-		rigNames = append(rigNames, rigName)
-	}
-	sort.Strings(rigNames)
-	for _, rigName := range rigNames {
-		exclusive := orderFiringRigExclusiveLayers(cfg.FormulaLayers.Rigs[rigName], cityLayers)
-		if len(exclusive) == 0 {
-			continue
-		}
-		aa, err := orders.ScanRoots(fsys.OSFS{}, orderFiringRigOrderRoots(exclusive), cfg.Orders.Skip)
-		if err != nil {
-			return nil, fmt.Errorf("rig %s: %w", rigName, err)
-		}
-		for i := range aa {
-			aa[i].Rig = rigName
-		}
-		rigOrders = append(rigOrders, aa...)
-	}
-
-	allOrders := make([]orders.Order, 0, len(cityOrders)+len(rigOrders))
-	allOrders = append(allOrders, cityOrders...)
-	allOrders = append(allOrders, rigOrders...)
-	if len(cfg.Orders.Overrides) > 0 {
-		if err := orders.ApplyOverrides(allOrders, orderFiringOverrides(cfg.Orders.Overrides)); err != nil {
-			return nil, err
-		}
-	}
 	return orders.FilterEnabled(allOrders), nil
-}
-
-func orderFiringCityFormulaLayers(cityPath string, cfg *config.City) []string {
-	if len(cfg.FormulaLayers.City) > 0 {
-		return cfg.FormulaLayers.City
-	}
-	return []string{citylayout.ResolveFormulasDir(cityPath, cfg.FormulasDir())}
-}
-
-func orderFiringCityOrderRoots(cityPath string, cfg *config.City) []orders.ScanRoot {
-	formulaLayers := orderFiringCityFormulaLayers(cityPath, cfg)
-	localFormulas := citylayout.ResolveFormulasDir(cityPath, cfg.FormulasDir())
-	roots := make([]orders.ScanRoot, 0, len(formulaLayers))
-	seen := make(map[string]bool, len(formulaLayers))
-	for _, layer := range formulaLayers {
-		root := orders.ScanRoot{
-			Dir:          filepath.Join(filepath.Dir(layer), "orders"),
-			FormulaLayer: layer,
-		}
-		if layer == localFormulas {
-			root.Dir = citylayout.OrdersPath(cityPath)
-		}
-		key := filepath.Clean(root.Dir) + "\n" + filepath.Clean(root.FormulaLayer)
-		if seen[key] {
-			continue
-		}
-		seen[key] = true
-		roots = append(roots, root)
-	}
-	return roots
-}
-
-func orderFiringRigOrderRoots(formulaLayers []string) []orders.ScanRoot {
-	roots := make([]orders.ScanRoot, 0, len(formulaLayers))
-	for _, layer := range formulaLayers {
-		roots = append(roots, orders.ScanRoot{
-			Dir:          filepath.Join(filepath.Dir(layer), "orders"),
-			FormulaLayer: layer,
-		})
-	}
-	return roots
-}
-
-func orderFiringRigExclusiveLayers(rigLayers, cityLayers []string) []string {
-	if len(rigLayers) <= len(cityLayers) {
-		return nil
-	}
-	return rigLayers[len(cityLayers):]
-}
-
-func orderFiringOverrides(cfgOverrides []config.OrderOverride) []orders.Override {
-	out := make([]orders.Override, len(cfgOverrides))
-	for i, override := range cfgOverrides {
-		out[i] = orders.Override{
-			Name:     override.Name,
-			Rig:      override.Rig,
-			Enabled:  override.Enabled,
-			Trigger:  override.Trigger,
-			Interval: override.Interval,
-			Schedule: override.Schedule,
-			Check:    override.Check,
-			On:       override.On,
-			Pool:     override.Pool,
-			Timeout:  override.Timeout,
-		}
-	}
-	return out
 }
 
 func expectedIntervalForOrder(order orders.Order, cronCache map[string]time.Duration) (time.Duration, error) {
@@ -275,38 +176,72 @@ func computeExpectedIntervalForCronSchedule(schedule string) (time.Duration, err
 		return 0, fmt.Errorf("invalid cron schedule: want 5 fields, got %d", len(fields))
 	}
 
-	const day = 24 * time.Hour
-	base := time.Date(2026, 5, 12, 0, 0, 0, 0, time.UTC)
-	matches := make([]time.Time, 0, 1440)
-	for i := 0; i < 1440; i++ {
-		ts := base.Add(time.Duration(i) * time.Minute)
-		matched, err := cronScheduleMatchesAt(fields, ts)
-		if err != nil {
-			return 0, err
+	// Scan minute-by-minute from a fixed base so the result is deterministic
+	// and independent of when the check runs. Widen the scan progressively so
+	// weekly, monthly, and yearly schedules are computed honestly instead of
+	// erroring out: the typical 24h window has zero matches for any schedule
+	// coarser than daily (#2499). The 24h fast-path stays cheap for the
+	// common case; coarser schedules pay the larger scan once per unique
+	// schedule (results are cached at the caller).
+	//
+	// Base is the start of a leap year so the 366d window can include a
+	// Feb 29 occurrence — `0 0 29 2 *` (leap-day schedules) would otherwise
+	// produce a permanent doctor-red on cities whose check started outside
+	// a leap-year window (Copilot review on #2525).
+	base := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	windowsMinutes := []int{
+		1440,       // 24h — covers sub-daily and daily schedules
+		7 * 1440,   // 7d  — covers weekly and weekday-set schedules
+		31 * 1440,  // 31d — covers monthly schedules (longest month)
+		366 * 1440, // 366d — covers yearly + leap-year (Feb 29) schedules
+	}
+	lastWindowIndex := len(windowsMinutes) - 1
+	for windowIndex, windowMinutes := range windowsMinutes {
+		matches := make([]time.Time, 0, 16)
+		for i := 0; i < windowMinutes; i++ {
+			ts := base.Add(time.Duration(i) * time.Minute)
+			matched, err := cronScheduleMatchesAt(fields, ts)
+			if err != nil {
+				return 0, err
+			}
+			if matched {
+				matches = append(matches, ts)
+			}
 		}
-		if matched {
-			matches = append(matches, ts)
+		if len(matches) == 0 {
+			continue
 		}
-	}
-	switch len(matches) {
-	case 0:
-		return 0, fmt.Errorf("cron schedule %q has no firing minutes in a 24h window", schedule)
-	case 1:
-		return day, nil
-	}
-
-	minGap := day
-	for i := 1; i < len(matches); i++ {
-		gap := matches[i].Sub(matches[i-1])
-		if gap < minGap {
-			minGap = gap
+		window := time.Duration(windowMinutes) * time.Minute
+		if len(matches) == 1 {
+			// Don't fix the interval on the first window that happens to
+			// catch one match: a yearly schedule whose firing minute
+			// coincidentally falls inside the 24h or 7d window (e.g.
+			// `0 0 12 5 *` from a base near May 5) would otherwise be
+			// mis-classified as sub-daily. Keep widening until either a
+			// second match lands (use the real minGap) or we exhaust the
+			// horizon — only then is the window length a defensible
+			// conservative interval (Copilot review on #2525).
+			if windowIndex < lastWindowIndex {
+				continue
+			}
+			return window, nil
 		}
+		minGap := window
+		for i := 1; i < len(matches); i++ {
+			gap := matches[i].Sub(matches[i-1])
+			if gap < minGap {
+				minGap = gap
+			}
+		}
+		// Do not include a wrap-around gap (matches[0]+window - matches[last]).
+		// It is only meaningful when the schedule's natural period divides the
+		// window evenly, and produces wrong results for schedules whose period
+		// does not — e.g. a weekly schedule in the 31d window would report a
+		// bogus 3d "wrap" from Mon to Mon-of-next-month-mod-31d, drowning out
+		// the real 7d gap from the loop above.
+		return minGap, nil
 	}
-	wrapGap := matches[0].Add(day).Sub(matches[len(matches)-1])
-	if wrapGap < minGap {
-		minGap = wrapGap
-	}
-	return minGap, nil
+	return 0, fmt.Errorf("cron schedule %q has no firing minutes in a 366-day window", schedule)
 }
 
 func cronScheduleMatchesAt(fields []string, ts time.Time) (bool, error) {

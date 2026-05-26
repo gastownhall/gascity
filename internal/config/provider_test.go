@@ -345,6 +345,7 @@ func TestBuiltinProvidersResumeFlags(t *testing.T) {
 		{"amp", "threads continue", "subcommand"},
 		{"opencode", "--session", "flag"},
 		{"auggie", "--resume", "flag"},
+		{"omp", "--resume", "flag"},
 	}
 	providers := BuiltinProviders()
 	for _, tt := range tests {

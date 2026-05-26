@@ -104,6 +104,29 @@ If GC finishes but the size barely moves, the chunks are nearly all live
 - **Avoid long-lived `dolt sql` sessions from outside Gas City.** External
   clients hold open transactions that can block GC.
 
+## Compact Quarantine Reasons
+
+`gc dolt compact` writes exact reason strings into
+`.gc/runtime/packs/dolt/compact-quarantine/<database>` when it detects
+possible writer interference before full GC. Operator dashboards and runbooks
+should treat these strings as the current vocabulary:
+
+| Reason | Meaning |
+|--------|---------|
+| `post-flatten HEAD probe failed` | The compactor could not read the database HEAD after flatten. |
+| `post-flatten integrity check failed` | A post-flatten integrity check failed before recording a more specific reason. |
+| `post-flatten row count decreased` | A table lost rows after flatten. |
+| `post-flatten row count probe failed` | The post-flatten row-count query failed or returned a non-number. |
+| `post-flatten table value hash probe failed` | A post-flatten table hash query failed or returned empty. |
+| `post-flatten table value hash changed with row-count increase` | A table gained rows and its value hash changed. |
+| `post-flatten table value hash changed without row-count increase` | A table's value hash changed without a row-count gain. |
+| `post-flatten table list changed` | A table appeared or an invalid table name was observed after preflight. |
+| `post-flatten table list probe failed` | The post-flatten `information_schema.tables` query failed. |
+| `post-flatten value hash probe failed` | The database hash query failed after flatten. |
+| `post-flatten value hash probe returned empty value` | The database hash query returned an empty value after flatten. |
+| `post-flatten value hash changed with row-count increase` | The database hash changed after at least one stable-table row-count gain. |
+| `post-flatten value hash changed without row-count increase` | The database hash changed without a row-count gain. |
+
 ## When to Escalate
 
 If a recovery GC reduces the store by less than ~10% and `gc doctor` still

@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log"
 	"os"
 	"path/filepath"
@@ -25,6 +24,7 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/git"
 	"github.com/gastownhall/gascity/internal/mail"
+	"github.com/gastownhall/gascity/internal/orderdiscovery"
 	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
@@ -66,11 +66,16 @@ type controllerState struct {
 
 var controllerStateInitRigDirIfReady = initDirIfReady
 
+// newControllerStateOpenCityStore opens the city-level bead store for
+// newControllerState. Test code can swap this to return an in-memory store
+// and skip spawning managed dolt (~12s per call).
+var newControllerStateOpenCityStore = openCityStoreAt
+
 type configMutationSnapshot struct {
-	cityPath   string
-	files      map[string][]byte
-	existed    map[string]bool
-	agentFiles map[string]struct{}
+	cityPath  string
+	files     map[string][]byte
+	existed   map[string]bool
+	agentTree *fsys.TreeSnapshot
 }
 
 // newControllerState creates a controllerState with per-rig stores.
@@ -100,7 +105,7 @@ func newControllerState(
 	}
 	cs.beadStores = cs.buildStores(cfg)
 	// Open city-level store for session beads and mail (best-effort).
-	if store, err := openCityStoreAt(cityPath); err != nil {
+	if store, err := newControllerStateOpenCityStore(cityPath); err != nil {
 		fmt.Fprintf(os.Stderr, "api: city bead store: %v (session/mail endpoints disabled)\n", err)
 	} else {
 		cs.cityBeadStore = wrapWithCachingStore(ctx, store, ep)
@@ -765,15 +770,17 @@ func (cs *controllerState) OrdersAll() []orders.Order {
 	cfg := cs.cfg
 	cs.mu.RUnlock()
 
-	allAA, err := scanAllOrders(cs.cityPath, cfg, io.Discard, "gc api: order scan")
+	allAA, err := orderdiscovery.ScanAll(cs.cityPath, cfg, orderdiscovery.ScanOptions{
+		OnRigScanError: func(_ string, _ error) error {
+			return nil
+		},
+		OnOverrideError: func(err error) error {
+			log.Printf("gc api: applying order overrides for %s: %v", cs.cityPath, err)
+			return nil
+		},
+	})
 	if err != nil {
 		return nil
-	}
-
-	if len(cfg.Orders.Overrides) > 0 {
-		if err := orders.ApplyOverrides(allAA, convertOverrides(cfg.Orders.Overrides)); err != nil {
-			log.Printf("gc api: applying order overrides for %s: %v", cs.cityPath, err)
-		}
 	}
 
 	return allAA
@@ -1033,10 +1040,9 @@ func (cs *controllerState) DeleteProviderPatch(name string) error {
 
 func captureConfigMutationSnapshot(cityPath string) (*configMutationSnapshot, error) {
 	snapshot := &configMutationSnapshot{
-		cityPath:   cityPath,
-		files:      make(map[string][]byte),
-		existed:    make(map[string]bool),
-		agentFiles: make(map[string]struct{}),
+		cityPath: cityPath,
+		files:    make(map[string][]byte),
+		existed:  make(map[string]bool),
 	}
 
 	capture := func(path string) error {
@@ -1062,16 +1068,11 @@ func captureConfigMutationSnapshot(cityPath string) (*configMutationSnapshot, er
 		}
 	}
 
-	agentFiles, err := filepath.Glob(filepath.Join(cityPath, "agents", "*", "agent.toml"))
+	agentTree, err := fsys.SnapshotTree(fsys.OSFS{}, filepath.Join(cityPath, "agents"))
 	if err != nil {
-		return nil, fmt.Errorf("listing agent overrides: %w", err)
+		return nil, fmt.Errorf("snapshotting agent scaffolds: %w", err)
 	}
-	for _, path := range agentFiles {
-		snapshot.agentFiles[path] = struct{}{}
-		if err := capture(path); err != nil {
-			return nil, err
-		}
-	}
+	snapshot.agentTree = agentTree
 
 	return snapshot, nil
 }
@@ -1079,17 +1080,9 @@ func captureConfigMutationSnapshot(cityPath string) (*configMutationSnapshot, er
 func (s *configMutationSnapshot) restore() error {
 	var restoreErr error
 
-	currentAgentFiles, err := filepath.Glob(filepath.Join(s.cityPath, "agents", "*", "agent.toml"))
-	if err != nil {
-		restoreErr = errors.Join(restoreErr, fmt.Errorf("listing current agent overrides: %w", err))
-	} else {
-		for _, path := range currentAgentFiles {
-			if _, existed := s.agentFiles[path]; existed {
-				continue
-			}
-			if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-				restoreErr = errors.Join(restoreErr, fmt.Errorf("removing %s: %w", path, err))
-			}
+	if s.agentTree != nil {
+		if err := s.agentTree.Restore(fsys.OSFS{}); err != nil {
+			restoreErr = errors.Join(restoreErr, fmt.Errorf("restoring agent scaffolds: %w", err))
 		}
 	}
 
@@ -1207,7 +1200,7 @@ func (cs *controllerState) WaitForSessionCommandable(ctx context.Context, sessio
 		switch info.State {
 		case session.StateActive, session.StateAwake, session.StateAsleep, session.StateSuspended, session.StateQuarantined:
 			return info, nil
-		case session.StateCreating, "":
+		case session.StateStartPending, session.StateCreating, "":
 		default:
 			return session.Info{}, fmt.Errorf("session %s reached non-commandable state %q", sessionID, info.State)
 		}

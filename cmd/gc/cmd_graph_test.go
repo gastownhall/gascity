@@ -55,6 +55,36 @@ func TestGraphTable(t *testing.T) {
 	}
 }
 
+func TestGraphJSON(t *testing.T) {
+	store := beads.NewMemStore()
+	_, _ = store.Create(beads.Bead{Title: "setup DB"})      // gc-1
+	_, _ = store.Create(beads.Bead{Title: "add migration"}) // gc-2
+	_ = store.DepAdd("gc-2", "gc-1", "blocks")
+
+	var stdout, stderr bytes.Buffer
+	code := doGraph(store, []string{"gc-1", "gc-2"}, graphOpts{JSON: true}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doGraph --json = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	lines := strings.Split(strings.TrimSuffix(stdout.String(), "\n"), "\n")
+	if len(lines) != 1 {
+		t.Fatalf("stdout lines = %d, want 1: %q", len(lines), stdout.String())
+	}
+	var payload graphJSONResult
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("stdout is not JSON: %v\n%s", err, stdout.String())
+	}
+	if payload.SchemaVersion != "1" || !payload.OK {
+		t.Fatalf("payload metadata = %+v", payload)
+	}
+	if payload.Summary.Total != 2 || payload.Summary.Ready != 1 || payload.Summary.Blocked != 1 {
+		t.Fatalf("summary = %+v, want total=2 ready=1 blocked=1", payload.Summary)
+	}
+	if len(payload.Nodes) != 2 || payload.Nodes[1].ID != "gc-2" || len(payload.Nodes[1].OpenBlockers) != 1 {
+		t.Fatalf("nodes = %+v, want gc-2 with one open blocker", payload.Nodes)
+	}
+}
+
 func TestGraphMermaid(t *testing.T) {
 	store := beads.NewMemStore()
 	_, _ = store.Create(beads.Bead{Title: "task A"}) // gc-1
@@ -96,6 +126,33 @@ func TestGraphConvoyExpansion(t *testing.T) {
 	}
 	if !strings.Contains(out, "child A") || !strings.Contains(out, "child B") {
 		t.Errorf("should show convoy children:\n%s", out)
+	}
+}
+
+func TestGraphConvoyExpansionUsesTracksDependencies(t *testing.T) {
+	store := beads.NewMemStore()
+	_, _ = store.Create(beads.Bead{Title: "my convoy", Type: "convoy"}) // gc-1
+	_, _ = store.Create(beads.Bead{Title: "child A"})                   // gc-2
+	_, _ = store.Create(beads.Bead{Title: "child B"})                   // gc-3
+	if err := store.DepAdd("gc-1", "gc-2", "tracks"); err != nil {
+		t.Fatalf("DepAdd child A: %v", err)
+	}
+	if err := store.DepAdd("gc-1", "gc-3", "tracks"); err != nil {
+		t.Fatalf("DepAdd child B: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doGraph(store, []string{"gc-1"}, graphOpts{}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doGraph convoy = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	out := stdout.String()
+
+	if strings.Contains(out, "my convoy") {
+		t.Errorf("convoy bead should be expanded, not shown:\n%s", out)
+	}
+	if !strings.Contains(out, "child A") || !strings.Contains(out, "child B") {
+		t.Errorf("should show tracks-based convoy children:\n%s", out)
 	}
 }
 
@@ -402,9 +459,7 @@ func TestOpenRigAwareStoreUsesProviderAwareRigStore(t *testing.T) {
 		t.Fatal(err)
 	}
 	toml := "[workspace]\nname = \"graph-city\"\n\n[[agent]]\nname = \"mayor\"\n\n[[rigs]]\nname = \"frontend\"\nprefix = \"fe\"\npath = \"" + rigDir + "\"\n"
-	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(toml), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	writeRigAnywhereCityToml(t, cityDir, toml)
 	if err := ensureScopedFileStoreLayout(cityDir); err != nil {
 		t.Fatalf("ensureScopedFileStoreLayout: %v", err)
 	}

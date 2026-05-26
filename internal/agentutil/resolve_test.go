@@ -183,3 +183,44 @@ func TestResolveAgentNotFound(t *testing.T) {
 		t.Error("expected not found")
 	}
 }
+
+func TestNormalizePoolRouteTarget(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "polecat", Dir: "myrig", MaxActiveSessions: intPtr(3)},
+			{Name: "solo", Dir: "myrig", MaxActiveSessions: intPtr(1)},
+			{Name: "witness", BindingName: "gastown", MaxActiveSessions: intPtr(-1)},
+			{Name: "mayor"},
+		},
+	}
+	tests := []struct {
+		name   string
+		target string
+		want   string
+	}{
+		{"qualified slot instance collapses to base", "myrig/polecat-2", "myrig/polecat"},
+		{"highest in-range slot collapses", "myrig/polecat-3", "myrig/polecat"},
+		{"binding slot instance collapses to base", "gastown.witness-7", "gastown.witness"},
+		{"base qualified name is left unchanged", "myrig/polecat", "myrig/polecat"},
+		{"out-of-range slot is left unchanged", "myrig/polecat-9", "myrig/polecat-9"},
+		{"zero slot is left unchanged", "myrig/polecat-0", "myrig/polecat-0"},
+		{"non-numeric suffix is left unchanged", "myrig/polecat-foo", "myrig/polecat-foo"},
+		{"singleton pool is left unchanged", "myrig/solo-1", "myrig/solo-1"},
+		{"non-pool agent is left unchanged", "mayor", "mayor"},
+		{"unknown target is left unchanged", "myrig/ghost-2", "myrig/ghost-2"},
+		{"empty target is left unchanged", "", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := NormalizePoolRouteTarget(cfg, tt.target); got != tt.want {
+				t.Errorf("NormalizePoolRouteTarget(%q) = %q, want %q", tt.target, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestNormalizePoolRouteTargetNilConfig(t *testing.T) {
+	if got := NormalizePoolRouteTarget(nil, "myrig/polecat-2"); got != "myrig/polecat-2" {
+		t.Errorf("NormalizePoolRouteTarget(nil) = %q, want unchanged", got)
+	}
+}

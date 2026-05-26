@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "ok",
+    "base_image",
+    "context_only",
+    "push",
+    "rig_path_count"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1"
+    },
+    "ok": {
+      "const": true
+    },
+    "city_path": {
+      "type": "string"
+    },
+    "tag": {
+      "type": "string"
+    },
+    "base_image": {
+      "type": "string"
+    },
+    "context_only": {
+      "type": "boolean"
+    },
+    "context_dir": {
+      "type": "string",
+      "description": "Temporary build context directory retained only when context_only is true; build progress streams to stderr when JSON output is enabled."
+    },
+    "push": {
+      "type": "boolean"
+    },
+    "rig_path_count": {
+      "type": "integer"
+    }
+  },
+  "additionalProperties": true
+}

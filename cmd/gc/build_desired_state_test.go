@@ -95,7 +95,7 @@ func newBlockingPoolCreateStore(alias string) *blockingPoolCreateStore {
 }
 
 func (s *blockingPoolCreateStore) Create(bead beads.Bead) (beads.Bead, error) {
-	if bead.Type == sessionBeadType && bead.Metadata["agent_name"] == s.alias {
+	if bead.Type == sessionBeadType && (s.alias == "" || bead.Metadata["agent_name"] == s.alias) {
 		s.mu.Lock()
 		s.createCount++
 		createNumber := s.createCount
@@ -120,6 +120,7 @@ type demandListCountingStore struct {
 	beads.Store
 	liveInProgressLists int
 	liveOpenMolecules   int
+	livePoolDemand      int
 }
 
 func (s *demandListCountingStore) List(query beads.ListQuery) ([]beads.Bead, error) {
@@ -128,6 +129,9 @@ func (s *demandListCountingStore) List(query beads.ListQuery) ([]beads.Bead, err
 	}
 	if query.Live && query.Status == "open" && query.Type == "molecule" {
 		s.liveOpenMolecules++
+	}
+	if query.Live && query.Status == "open" && query.Metadata[poolDemandMetadataKey] == poolDemandMetadataValue {
+		s.livePoolDemand++
 	}
 	return s.Store.List(query)
 }
@@ -387,6 +391,105 @@ func TestDefaultScaleCheckCountsUsesCachedReadyReadModel(t *testing.T) {
 	}
 }
 
+func TestDefaultScaleCheckCountsCountsUnassignedRoutedPoolWork(t *testing.T) {
+	const template = "gascity/reviewer"
+	backing := beads.NewMemStore()
+	if _, err := backing.Create(beads.Bead{
+		Title:  "routed pool work",
+		Type:   "task",
+		Status: "open",
+		Metadata: map[string]string{
+			"gc.routed_to": template,
+		},
+	}); err != nil {
+		t.Fatalf("create handoff bead: %v", err)
+	}
+	cache := beads.NewCachingStoreForTest(backing, nil)
+	if err := cache.PrimeActive(); err != nil {
+		t.Fatalf("PrimeActive: %v", err)
+	}
+
+	counts, _, errs := defaultScaleCheckCounts([]defaultScaleCheckTarget{{
+		template: template,
+		storeKey: "rig:gascity",
+		store:    cache,
+	}})
+	if len(errs) != 0 {
+		t.Fatalf("defaultScaleCheckCounts errs = %v", errs)
+	}
+	if got := counts[template]; got != 1 {
+		t.Fatalf("defaultScaleCheckCounts[%q] = %d, want 1", template, got)
+	}
+}
+
+func TestDefaultScaleCheckCountsDoesNotTreatTemplateAssigneeAsDemand(t *testing.T) {
+	const template = "gascity/reviewer"
+	backing := beads.NewMemStore()
+	if _, err := backing.Create(beads.Bead{
+		Title:    "assigned routed work",
+		Type:     "task",
+		Status:   "open",
+		Assignee: template,
+		Metadata: map[string]string{
+			"gc.routed_to": template,
+		},
+	}); err != nil {
+		t.Fatalf("create assigned bead: %v", err)
+	}
+	cache := beads.NewCachingStoreForTest(backing, nil)
+	if err := cache.PrimeActive(); err != nil {
+		t.Fatalf("PrimeActive: %v", err)
+	}
+
+	counts, _, errs := defaultScaleCheckCounts([]defaultScaleCheckTarget{{
+		template: template,
+		storeKey: "rig:gascity",
+		store:    cache,
+	}})
+	if len(errs) != 0 {
+		t.Fatalf("defaultScaleCheckCounts errs = %v", errs)
+	}
+	if got := counts[template]; got != 0 {
+		t.Fatalf("defaultScaleCheckCounts[%q] = %d, want 0 (assignee must be a concrete session identity, never pool demand)", template, got)
+	}
+}
+
+// TestDefaultScaleCheckCountsExcludesBeadsAssignedToSession pins the
+// invariant that beads with assignee==<session-id> (Path 1 territory) are
+// NOT counted by defaultScaleCheckCounts, to avoid double-counting when
+// collectAssignedWorkBeadsWithStores has already counted them.
+func TestDefaultScaleCheckCountsExcludesBeadsAssignedToSession(t *testing.T) {
+	const template = "gascity/reviewer"
+	backing := beads.NewMemStore()
+	if _, err := backing.Create(beads.Bead{
+		Title:    "in-flight session work",
+		Type:     "task",
+		Status:   "open",
+		Assignee: "reviewer-gc-12345",
+		Metadata: map[string]string{
+			"gc.routed_to": template,
+		},
+	}); err != nil {
+		t.Fatalf("create in-flight bead: %v", err)
+	}
+	cache := beads.NewCachingStoreForTest(backing, nil)
+	if err := cache.PrimeActive(); err != nil {
+		t.Fatalf("PrimeActive: %v", err)
+	}
+
+	counts, _, errs := defaultScaleCheckCounts([]defaultScaleCheckTarget{{
+		template: template,
+		storeKey: "rig:gascity",
+		store:    cache,
+	}})
+	if len(errs) != 0 {
+		t.Fatalf("defaultScaleCheckCounts errs = %v", errs)
+	}
+	if got := counts[template]; got != 0 {
+		t.Fatalf("defaultScaleCheckCounts[%q] = %d, want 0 (session-identity assignee is Path 1's territory; counting here would double-count)", template, got)
+	}
+}
+
 func TestDefaultScaleCheckCountsIgnoresOpenMoleculeContainers(t *testing.T) {
 	backing := &demandListCountingStore{Store: beads.NewMemStore()}
 	if _, err := backing.Create(beads.Bead{
@@ -417,6 +520,266 @@ func TestDefaultScaleCheckCountsIgnoresOpenMoleculeContainers(t *testing.T) {
 	}
 	if backing.liveOpenMolecules != 0 {
 		t.Fatalf("live open molecule list calls = %d, want no molecule demand query", backing.liveOpenMolecules)
+	}
+}
+
+// TestDefaultScaleCheckCountsCountsCronPoolDemandViaMetadataFlag asserts the
+// gc.pool_demand path end-to-end: cmd/gc/cmd_order.go and
+// cmd/gc/order_dispatch.go both write the pair from
+// poolDemandMetadataPair() onto the wisp when a.Pool != "", and
+// defaultScaleCheckCounts must count such beads regardless of type. The
+// molecule type itself is still excluded from Ready()/CachedReady() per
+// PR #1154 + the TestDefaultScaleCheckCountsIgnoresOpenMoleculeContainers
+// invariant above, so without the explicit metadata-list path cron pool
+// orders generate zero scale_check demand and the pool never spawns.
+// Regression for https://github.com/gastownhall/gascity/pull/2531
+// → https://github.com/gastownhall/gascity/pull/2556.
+//
+// Also asserts the Live: true cache-bypass behavior is load-bearing:
+// the demandListCountingStore's livePoolDemand counter must increment,
+// proving defaultScaleCheckCounts goes through to the backing store
+// rather than the CachingStore snapshot (which can lag for wisps
+// created by sibling subprocesses like gc order run).
+func TestDefaultScaleCheckCountsCountsCronPoolDemandViaMetadataFlag(t *testing.T) {
+	backing := &demandListCountingStore{Store: beads.NewMemStore()}
+	if _, err := backing.Create(beads.Bead{
+		Title:    "mol-dog-stale-db",
+		Type:     "molecule",
+		Status:   "open",
+		Metadata: poolWispMetadata("dog"),
+	}); err != nil {
+		t.Fatalf("create pool-order wisp: %v", err)
+	}
+	cache := beads.NewCachingStoreForTest(backing, nil)
+	if err := cache.PrimeActive(); err != nil {
+		t.Fatalf("PrimeActive: %v", err)
+	}
+
+	counts, _, errs := defaultScaleCheckCounts([]defaultScaleCheckTarget{{
+		template: "dog",
+		storeKey: "city",
+		store:    cache,
+	}})
+	if len(errs) != 0 {
+		t.Fatalf("defaultScaleCheckCounts errs = %v", errs)
+	}
+	if got := counts["dog"]; got != 1 {
+		t.Fatalf("defaultScaleCheckCounts[%q] = %d, want 1 (gc.pool_demand wisp must count as cron pool demand)", "dog", got)
+	}
+	if backing.livePoolDemand == 0 {
+		t.Fatalf("livePoolDemand list calls = 0, want >0 (defaultScaleCheckCounts must use Live: true to bypass the CachingStore snapshot, since cron pool orders fire from sibling subprocesses and the cache lags)")
+	}
+}
+
+// poolWispMetadata builds the metadata map a pool-order wisp carries —
+// gc.routed_to + the poolDemandMetadataPair pair — for fixture use.
+// Mirrors the production composition in cmd/gc/cmd_order.go and
+// cmd/gc/order_dispatch.go so tests drift with the production
+// contract instead of duplicating string literals.
+func poolWispMetadata(pool string) map[string]string {
+	m := map[string]string{"gc.routed_to": pool}
+	for k, v := range poolDemandMetadataPair() {
+		m[k] = v
+	}
+	return m
+}
+
+// TestDefaultScaleCheckCountsIgnoresMoleculeWithoutPoolDemand asserts that a
+// molecule carrying gc.routed_to but NO gc.pool_demand flag stays excluded
+// from the count — the workflow-container invariant from PR #1154 / the
+// existing TestDefaultScaleCheckCountsIgnoresOpenMoleculeContainers test
+// holds even after the metadata-list path is added.
+func TestDefaultScaleCheckCountsIgnoresMoleculeWithoutPoolDemand(t *testing.T) {
+	backing := &demandListCountingStore{Store: beads.NewMemStore()}
+	if _, err := backing.Create(beads.Bead{
+		Title:  "graph workflow root",
+		Type:   "molecule",
+		Status: "open",
+		Metadata: map[string]string{
+			"gc.routed_to": "gascity/workflows.codex-min",
+		},
+	}); err != nil {
+		t.Fatalf("create molecule: %v", err)
+	}
+	cache := beads.NewCachingStoreForTest(backing, nil)
+	if err := cache.PrimeActive(); err != nil {
+		t.Fatalf("PrimeActive: %v", err)
+	}
+
+	counts, _, errs := defaultScaleCheckCounts([]defaultScaleCheckTarget{{
+		template: "gascity/workflows.codex-min",
+		storeKey: "rig:gascity",
+		store:    cache,
+	}})
+	if len(errs) != 0 {
+		t.Fatalf("defaultScaleCheckCounts errs = %v", errs)
+	}
+	if got := counts["gascity/workflows.codex-min"]; got != 0 {
+		t.Fatalf("defaultScaleCheckCounts = %d, want 0 (molecule without gc.pool_demand is a workflow container, not pool demand)", got)
+	}
+}
+
+// TestDefaultScaleCheckCountsIgnoresAssignedCronPoolDemand asserts that even
+// with gc.pool_demand="order", a bead that has already been claimed (Assignee
+// non-empty) is not double-counted alongside the worker session itself.
+// Mirrors the existing TestDefaultScaleCheckCountsExcludesBeadsAssignedToSession
+// invariant for the new metadata path.
+func TestDefaultScaleCheckCountsIgnoresAssignedCronPoolDemand(t *testing.T) {
+	backing := &demandListCountingStore{Store: beads.NewMemStore()}
+	wisp := poolWispMetadata("dog")
+	if _, err := backing.Create(beads.Bead{
+		Title:    "mol-dog-stale-db",
+		Type:     "molecule",
+		Status:   "open",
+		Assignee: "dog-1",
+		Metadata: wisp,
+	}); err != nil {
+		t.Fatalf("create assigned pool wisp: %v", err)
+	}
+	cache := beads.NewCachingStoreForTest(backing, nil)
+	if err := cache.PrimeActive(); err != nil {
+		t.Fatalf("PrimeActive: %v", err)
+	}
+
+	counts, _, errs := defaultScaleCheckCounts([]defaultScaleCheckTarget{{
+		template: "dog",
+		storeKey: "city",
+		store:    cache,
+	}})
+	if len(errs) != 0 {
+		t.Fatalf("defaultScaleCheckCounts errs = %v", errs)
+	}
+	if got := counts["dog"]; got != 0 {
+		t.Fatalf("defaultScaleCheckCounts[%q] = %d, want 0 (assigned bead is a worker's territory, not pool demand)", "dog", got)
+	}
+}
+
+// TestDefaultScaleCheckCountsIgnoresGraphV2StepRoutedToPool pins the
+// "graph.v2 step → not counted" invariant @sjarmak enumerated in the
+// Option B design discussion on PR #2531. The trifecta defense:
+//   - readyExcludeTypes filters Type:"step" out of Ready() per PR #1154.
+//   - The metadata-list source only matches beads carrying
+//     poolDemandMetadataPair(), which only cmd_order.go and
+//     order_dispatch.go write (and only on the wisp ROOT, never on
+//     step children stamped by stampLegacyRecipeRouting).
+//   - graph.v2 steps carry gc.kind=workflow plus gc.routed_to to the
+//     pool but no gc.pool_demand, so neither source counts them.
+//
+// Guards against future regressions where (a) step gets removed from
+// readyExcludeTypes, or (b) stampLegacyRecipeRouting or its graph.v2
+// equivalent starts propagating gc.pool_demand to step children.
+func TestDefaultScaleCheckCountsIgnoresGraphV2StepRoutedToPool(t *testing.T) {
+	backing := &demandListCountingStore{Store: beads.NewMemStore()}
+	if _, err := backing.Create(beads.Bead{
+		Title:  "graph.v2 step routed to dog",
+		Type:   "step",
+		Status: "open",
+		Metadata: map[string]string{
+			"gc.routed_to": "dog",
+			"gc.kind":      "workflow",
+		},
+	}); err != nil {
+		t.Fatalf("create graph.v2 step: %v", err)
+	}
+	cache := beads.NewCachingStoreForTest(backing, nil)
+	if err := cache.PrimeActive(); err != nil {
+		t.Fatalf("PrimeActive: %v", err)
+	}
+
+	counts, _, errs := defaultScaleCheckCounts([]defaultScaleCheckTarget{{
+		template: "dog",
+		storeKey: "city",
+		store:    cache,
+	}})
+	if len(errs) != 0 {
+		t.Fatalf("defaultScaleCheckCounts errs = %v", errs)
+	}
+	if got := counts["dog"]; got != 0 {
+		t.Fatalf("defaultScaleCheckCounts[%q] = %d, want 0 (graph.v2 step routed to a pool is not pool demand — it's workflow scaffolding handled by the parent agent)", "dog", got)
+	}
+}
+
+// TestDefaultScaleCheckCountsIgnoresNumericPoolDemand pins the value
+// choice in poolDemandMetadataValue against future drift to a
+// numeric-looking string. bd's --set-metadata write path infers JSON
+// type from string content, so a bead created with "1" (or any digit
+// string) lands in storage as a JSON integer, and the cache's
+// matchesMetadata does strict string equality — so a "1" writer paired
+// with a "1" reader silently misses every bead. Pins:
+//
+//   - Whatever sentinel we ship, a bead with the numeric "1" must NOT
+//     match the count predicate. If this test starts failing because
+//     someone changed poolDemandMetadataValue to "1", they are
+//     reintroducing the trap.
+//   - If they fixed the bd cast bug upstream and want to use "1",
+//     they should also delete this test and add a parallel one
+//     asserting "1" DOES match.
+func TestDefaultScaleCheckCountsIgnoresNumericPoolDemand(t *testing.T) {
+	if poolDemandMetadataValue == "1" {
+		t.Skip("poolDemandMetadataValue is now \"1\"; this regression guard no longer applies — see test comment")
+	}
+	backing := &demandListCountingStore{Store: beads.NewMemStore()}
+	if _, err := backing.Create(beads.Bead{
+		Title:  "wisp with numeric pool_demand",
+		Type:   "molecule",
+		Status: "open",
+		Metadata: map[string]string{
+			"gc.routed_to":        "dog",
+			poolDemandMetadataKey: "1",
+		},
+	}); err != nil {
+		t.Fatalf("create numeric-flagged wisp: %v", err)
+	}
+	cache := beads.NewCachingStoreForTest(backing, nil)
+	if err := cache.PrimeActive(); err != nil {
+		t.Fatalf("PrimeActive: %v", err)
+	}
+
+	counts, _, errs := defaultScaleCheckCounts([]defaultScaleCheckTarget{{
+		template: "dog",
+		storeKey: "city",
+		store:    cache,
+	}})
+	if len(errs) != 0 {
+		t.Fatalf("defaultScaleCheckCounts errs = %v", errs)
+	}
+	if got := counts["dog"]; got != 0 {
+		t.Fatalf("defaultScaleCheckCounts[%q] = %d, want 0 (a numeric-string pool_demand must not match the non-numeric sentinel — see cmd/gc/pool_demand.go for the rationale)", "dog", got)
+	}
+}
+
+// TestDefaultScaleCheckCountsDedupsBeadInBothSources pins the dedup
+// map at defaultScaleCheckCounts: a task-shaped routed bead that also
+// happens to carry gc.pool_demand would be visible to BOTH the Ready
+// iteration (task is not in readyExcludeTypes) and the metadata-list
+// source. Without the counted-by-ID dedup it would be counted twice.
+// Documents the defensive shape so future refactors don't drop the
+// dedup when "the two sources can't overlap" looks self-evident.
+func TestDefaultScaleCheckCountsDedupsBeadInBothSources(t *testing.T) {
+	backing := &demandListCountingStore{Store: beads.NewMemStore()}
+	if _, err := backing.Create(beads.Bead{
+		Title:    "task with both signals",
+		Type:     "task",
+		Status:   "open",
+		Metadata: poolWispMetadata("dog"),
+	}); err != nil {
+		t.Fatalf("create dual-source bead: %v", err)
+	}
+	cache := beads.NewCachingStoreForTest(backing, nil)
+	if err := cache.PrimeActive(); err != nil {
+		t.Fatalf("PrimeActive: %v", err)
+	}
+
+	counts, _, errs := defaultScaleCheckCounts([]defaultScaleCheckTarget{{
+		template: "dog",
+		storeKey: "city",
+		store:    cache,
+	}})
+	if len(errs) != 0 {
+		t.Fatalf("defaultScaleCheckCounts errs = %v", errs)
+	}
+	if got := counts["dog"]; got != 1 {
+		t.Fatalf("defaultScaleCheckCounts[%q] = %d, want 1 (bead visible to BOTH Ready and gc.pool_demand list must count exactly once)", "dog", got)
 	}
 }
 
@@ -1420,15 +1783,20 @@ source = "./assets/sidecar"
 `,
 		filepath.Join(cityPath, "city.toml"): `
 [workspace]
-name = "import-regression"
 provider = "claude"
 
 [[rigs]]
 name = "repo"
-path = "./repo"
 
 [rigs.imports.gs]
 source = "./assets/sidecar"
+`,
+		filepath.Join(cityPath, ".gc", "site.toml"): `
+workspace_name = "import-regression"
+
+[[rig]]
+name = "repo"
+path = "./repo"
 `,
 		filepath.Join(cityPath, "assets", "sidecar", "pack.toml"): `
 [pack]
@@ -2433,6 +2801,298 @@ func TestRealizePoolDesiredSessionsDefersAliasWhenNormalizationCollides(t *testi
 	}
 }
 
+func TestRealizePoolDesiredSessionsLimitsFreshCreatesToWakeBudget(t *testing.T) {
+	maxWakes := 2
+	store := beads.NewMemStore()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Daemon:    config.DaemonConfig{MaxWakesPerTick: &maxWakes},
+		Agents: []config.Agent{{
+			Name:              "worker",
+			StartCommand:      "true",
+			MinActiveSessions: intPtr(0),
+			MaxActiveSessions: intPtr(10),
+		}},
+	}
+	var stderr bytes.Buffer
+	bp := newAgentBuildParams("test-city", t.TempDir(), cfg, runtime.NewFake(), time.Now().UTC(), store, &stderr)
+	bp.sessionBeads = &sessionBeadSnapshot{}
+	requests := make([]SessionRequest, 5)
+	for i := range requests {
+		requests[i] = SessionRequest{Template: "worker", Tier: "new"}
+	}
+	desired := map[string]TemplateParams{}
+
+	realizePoolDesiredSessions(bp, &cfg.Agents[0], PoolDesiredState{
+		Template: "worker",
+		Requests: requests,
+	}, desired, &stderr)
+
+	if got := len(bp.sessionBeads.Open()); got != maxWakes {
+		t.Fatalf("created session beads = %d, want wake budget %d; stderr=%q", got, maxWakes, stderr.String())
+	}
+	if got := len(desired); got != maxWakes {
+		t.Fatalf("desired sessions = %d, want wake budget %d; stderr=%q", got, maxWakes, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "pool session create budget exhausted") {
+		t.Fatalf("stderr = %q, want budget exhaustion diagnostic", stderr.String())
+	}
+}
+
+func TestRealizePoolDesiredSessionsBudgetExhaustionStillAllowsLaterReuse(t *testing.T) {
+	maxWakes := 1
+	store := beads.NewMemStore()
+	reusable, err := store.Create(beads.Bead{
+		Title:  "worker reusable",
+		Type:   sessionBeadType,
+		Status: "open",
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"template":             "worker",
+			"agent_name":           "worker-7",
+			"alias":                "worker-7",
+			"session_name":         "worker-reusable",
+			"state":                "awake",
+			"pool_slot":            "7",
+			poolManagedMetadataKey: boolMetadata(true),
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Daemon:    config.DaemonConfig{MaxWakesPerTick: &maxWakes},
+		Agents: []config.Agent{{
+			Name:              "worker",
+			StartCommand:      "true",
+			MinActiveSessions: intPtr(0),
+			MaxActiveSessions: intPtr(10),
+		}},
+	}
+	snapshot := &sessionBeadSnapshot{}
+	snapshot.add(reusable)
+	var stderr bytes.Buffer
+	bp := newAgentBuildParams("test-city", t.TempDir(), cfg, runtime.NewFake(), time.Now().UTC(), store, &stderr)
+	bp.sessionBeads = snapshot
+	desired := map[string]TemplateParams{}
+
+	realizePoolDesiredSessions(bp, &cfg.Agents[0], PoolDesiredState{
+		Template: "worker",
+		Requests: []SessionRequest{
+			{Template: "worker", Tier: "new"},
+			{Template: "worker", Tier: "new"},
+			{Template: "worker", Tier: "resume", SessionBeadID: reusable.ID},
+		},
+	}, desired, &stderr)
+
+	if got := len(bp.sessionBeads.Open()); got != 2 {
+		t.Fatalf("open session beads = %d, want one fresh plus one reused; stderr=%q", got, stderr.String())
+	}
+	if _, ok := desired["worker-reusable"]; !ok {
+		t.Fatalf("desired missing reusable session after budget exhaustion; keys=%v stderr=%q", mapKeys(desired), stderr.String())
+	}
+}
+
+func TestRealizePoolDesiredSessionsRefundsFreshCreateBudgetAfterFailure(t *testing.T) {
+	maxWakes := 1
+	store := &failingPoolCreateStore{MemStore: beads.NewMemStore(), failuresRemaining: 1}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Daemon:    config.DaemonConfig{MaxWakesPerTick: &maxWakes},
+		Agents: []config.Agent{
+			{
+				Name:              "alpha",
+				StartCommand:      "true",
+				MinActiveSessions: intPtr(0),
+				MaxActiveSessions: intPtr(10),
+			},
+			{
+				Name:              "zulu",
+				StartCommand:      "true",
+				MinActiveSessions: intPtr(0),
+				MaxActiveSessions: intPtr(10),
+			},
+		},
+	}
+	var stderr bytes.Buffer
+	bp := newAgentBuildParams("test-city", t.TempDir(), cfg, runtime.NewFake(), time.Now().UTC(), store, &stderr)
+	bp.sessionBeads = &sessionBeadSnapshot{}
+	desired := map[string]TemplateParams{}
+
+	realizePoolDesiredSessions(bp, &cfg.Agents[0], PoolDesiredState{
+		Template: "alpha",
+		Requests: []SessionRequest{{
+			Template: "alpha",
+			Tier:     "new",
+		}},
+	}, desired, &stderr)
+	realizePoolDesiredSessions(bp, &cfg.Agents[1], PoolDesiredState{
+		Template: "zulu",
+		Requests: []SessionRequest{{
+			Template: "zulu",
+			Tier:     "new",
+		}},
+	}, desired, &stderr)
+
+	if got := len(desired); got != 1 {
+		t.Fatalf("desired sessions = %d, want later pool create after refund; desired=%v stderr=%q", got, desired, stderr.String())
+	}
+	for _, tp := range desired {
+		if tp.TemplateName != "zulu" {
+			t.Fatalf("created template = %q, want zulu after alpha create failure; stderr=%q", tp.TemplateName, stderr.String())
+		}
+	}
+	if !strings.Contains(stderr.String(), "injected pool create failure") {
+		t.Fatalf("stderr = %q, want injected create failure diagnostic", stderr.String())
+	}
+}
+
+func TestBuildDesiredStateFairSharesFreshPoolCreatesAcrossPools(t *testing.T) {
+	maxWakes := 2
+	store := beads.NewMemStore()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Daemon:    config.DaemonConfig{MaxWakesPerTick: &maxWakes},
+		Agents: []config.Agent{
+			{
+				Name:              "alpha",
+				StartCommand:      "true",
+				ScaleCheck:        "printf 5",
+				MinActiveSessions: intPtr(0),
+				MaxActiveSessions: intPtr(5),
+			},
+			{
+				Name:              "zulu",
+				StartCommand:      "true",
+				ScaleCheck:        "printf 5",
+				MinActiveSessions: intPtr(0),
+				MaxActiveSessions: intPtr(5),
+			},
+		},
+	}
+	var stderr bytes.Buffer
+
+	result := buildDesiredState("test-city", t.TempDir(), time.Now().UTC(), cfg, runtime.NewFake(), store, &stderr)
+
+	counts := map[string]int{}
+	for _, tp := range result.State {
+		counts[tp.TemplateName]++
+	}
+	if got := counts["alpha"]; got != 1 {
+		t.Fatalf("alpha fresh creates = %d, want 1 under fair shared budget; counts=%v stderr=%q", got, counts, stderr.String())
+	}
+	if got := counts["zulu"]; got != 1 {
+		t.Fatalf("zulu fresh creates = %d, want 1 under fair shared budget; counts=%v stderr=%q", got, counts, stderr.String())
+	}
+}
+
+func TestBuildDesiredStateFairShareIgnoresInFlightPoolCreates(t *testing.T) {
+	maxWakes := 2
+	store := beads.NewMemStore()
+	if _, err := store.Create(beads.Bead{
+		Title:  "alpha-1",
+		Type:   sessionBeadType,
+		Status: "open",
+		Labels: []string{sessionBeadLabel, "agent:alpha-1", "template:alpha"},
+		Metadata: map[string]string{
+			"template":             "alpha",
+			"agent_name":           "alpha-1",
+			"alias":                "alpha-1",
+			"session_name":         "s-alpha-creating",
+			"state":                "creating",
+			"pool_slot":            "1",
+			poolManagedMetadataKey: boolMetadata(true),
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Daemon:    config.DaemonConfig{MaxWakesPerTick: &maxWakes},
+		Agents: []config.Agent{
+			{
+				Name:              "alpha",
+				StartCommand:      "true",
+				ScaleCheck:        "printf 1",
+				MinActiveSessions: intPtr(0),
+				MaxActiveSessions: intPtr(5),
+			},
+			{
+				Name:              "zulu",
+				StartCommand:      "true",
+				ScaleCheck:        "printf 2",
+				MinActiveSessions: intPtr(0),
+				MaxActiveSessions: intPtr(5),
+			},
+		},
+	}
+	var stderr bytes.Buffer
+
+	result := buildDesiredState("test-city", t.TempDir(), time.Now().UTC(), cfg, runtime.NewFake(), store, &stderr)
+
+	counts := map[string]int{}
+	for _, tp := range result.State {
+		counts[tp.TemplateName]++
+	}
+	if got := counts["alpha"]; got != 1 {
+		t.Fatalf("alpha desired sessions = %d, want reused in-flight create; counts=%v stderr=%q", got, counts, stderr.String())
+	}
+	if got := counts["zulu"]; got != 2 {
+		t.Fatalf("zulu fresh creates = %d, want full budget after alpha in-flight reuse; counts=%v stderr=%q", got, counts, stderr.String())
+	}
+}
+
+func TestBuildDesiredStateDependencyFloorExemptFromFreshCreateBudget(t *testing.T) {
+	maxWakes := 1
+	store := beads.NewMemStore()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Daemon:    config.DaemonConfig{MaxWakesPerTick: &maxWakes},
+		Agents: []config.Agent{
+			{
+				Name:              "db",
+				Dir:               "svc",
+				StartCommand:      "true",
+				ScaleCheck:        "printf 0",
+				MinActiveSessions: intPtr(0),
+				MaxActiveSessions: intPtr(3),
+			},
+			{
+				Name:              "api",
+				Dir:               "svc",
+				StartCommand:      "true",
+				ScaleCheck:        "printf 2",
+				DependsOn:         []string{"svc/db"},
+				MinActiveSessions: intPtr(0),
+				MaxActiveSessions: intPtr(3),
+			},
+		},
+	}
+	var stderr bytes.Buffer
+
+	result := buildDesiredState("test-city", t.TempDir(), time.Now().UTC(), cfg, runtime.NewFake(), store, &stderr)
+
+	var apiCreates, dbFloors int
+	for _, tp := range result.State {
+		switch {
+		case tp.TemplateName == "svc/api" && !tp.DependencyOnly:
+			apiCreates++
+		case tp.TemplateName == "svc/db" && tp.DependencyOnly:
+			dbFloors++
+		}
+	}
+	if apiCreates != 1 {
+		t.Fatalf("api fresh creates = %d, want one budgeted root create; stderr=%q", apiCreates, stderr.String())
+	}
+	if dbFloors != 1 {
+		t.Fatalf("db dependency floors = %d, want one exempt dependency floor; stderr=%q", dbFloors, stderr.String())
+	}
+	if got := len(result.State); got != 2 {
+		t.Fatalf("desired entries = %d, want root plus dependency floor; state=%v stderr=%q", got, result.State, stderr.String())
+	}
+}
+
 func TestSyncSessionBeads_ReclaimsDeferredSingletonAliasAfterConflictClears(t *testing.T) {
 	cityPath := t.TempDir()
 	store := beads.NewMemStore()
@@ -3197,6 +3857,119 @@ func TestSelectOrCreatePoolSessionBead_SerializesAliasCheckAndCreate(t *testing.
 	}
 }
 
+func TestCreatePoolSessionBeadWithGuardedAliasSerializesResolvedTmuxAlias(t *testing.T) {
+	store := newBlockingPoolCreateStore("")
+	cityPath := t.TempDir()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "worker",
+			StartCommand:      "true",
+			MinActiveSessions: intPtr(0),
+			MaxActiveSessions: intPtr(2),
+			TmuxAlias:         "crew--{{.CityName}}",
+		}},
+	}
+	bp := newAgentBuildParams("test-city", cityPath, cfg, runtime.NewFake(), time.Now().UTC(), store, io.Discard)
+	bp.sessionBeads = newSessionBeadSnapshot(nil)
+	cfgAgent := &cfg.Agents[0]
+
+	results := make(chan struct {
+		bead beads.Bead
+		err  error
+	}, 2)
+	create := func(qualifiedInstance string, slot int) {
+		bead, err := createPoolSessionBeadWithGuardedAlias(bp, cfgAgent, "worker", qualifiedInstance, slot)
+		results <- struct {
+			bead beads.Bead
+			err  error
+		}{bead: bead, err: err}
+	}
+	go create("worker-1", 1)
+	go create("worker-2", 2)
+
+	select {
+	case <-store.firstCreateStarted:
+	case <-time.After(time.Second):
+		t.Fatal("first pool create did not start")
+	}
+
+	select {
+	case <-store.secondCreateStarted:
+		close(store.releaseFirstCreate)
+		close(store.releaseSecondCreate)
+		t.Fatal("second pool create reached the store before first tmux_alias create finished")
+	case <-time.After(150 * time.Millisecond):
+		close(store.releaseFirstCreate)
+		select {
+		case <-store.secondCreateStarted:
+			close(store.releaseSecondCreate)
+		case <-time.After(time.Second):
+			t.Fatal("second pool create did not start after first create completed")
+		}
+	}
+
+	seen := map[string]bool{}
+	for i := 0; i < 2; i++ {
+		result := <-results
+		if result.err != nil {
+			t.Fatalf("create result %d: %v", i+1, result.err)
+		}
+		sessionName := result.bead.Metadata["session_name"]
+		if sessionName == "" {
+			t.Fatalf("create result %d has empty session_name: %#v", i+1, result.bead)
+		}
+		if seen[sessionName] {
+			t.Fatalf("duplicate session_name %q across tmux_alias pool creates", sessionName)
+		}
+		stored, err := store.Get(result.bead.ID)
+		if err != nil {
+			t.Fatalf("store.Get(%s): %v", result.bead.ID, err)
+		}
+		if got := stored.Metadata["session_name"]; got != sessionName {
+			t.Fatalf("stored session_name for %s = %q, want %q", result.bead.ID, got, sessionName)
+		}
+		seen[sessionName] = true
+	}
+	if !seen["crew--test-city"] {
+		t.Fatalf("created names = %#v, want one unsuffixed tmux_alias name", seen)
+	}
+}
+
+func TestCreatePoolSessionBeadWithGuardedAliasDropsTmuxAliasWhenIdentifierLockFails(t *testing.T) {
+	store := beads.NewMemStore()
+	cityPath := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(cityPath, []byte("city path blocks lock dir creation"), 0o600); err != nil {
+		t.Fatalf("write cityPath file: %v", err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "worker",
+			StartCommand:      "true",
+			MinActiveSessions: intPtr(0),
+			MaxActiveSessions: intPtr(2),
+			TmuxAlias:         "crew--{{.CityName}}",
+		}},
+	}
+	var stderr bytes.Buffer
+	bp := newAgentBuildParams("test-city", cityPath, cfg, runtime.NewFake(), time.Now().UTC(), store, &stderr)
+	bp.sessionBeads = newSessionBeadSnapshot(nil)
+
+	bead, err := createPoolSessionBeadWithGuardedAlias(bp, &cfg.Agents[0], "worker", "worker-1", 1)
+	if err != nil {
+		t.Fatalf("createPoolSessionBeadWithGuardedAlias: %v", err)
+	}
+
+	want := PoolSessionName("worker", bead.ID)
+	if got := bead.Metadata["session_name"]; got != want {
+		t.Fatalf("session_name = %q, want unique pool fallback %q when tmux_alias lock fails", got, want)
+	}
+	if strings.Contains(stderr.String(), "creating without alias") && strings.Contains(bead.Metadata["session_name"], "crew--test-city") {
+		t.Fatalf("lock failure warning emitted but session_name still used tmux_alias: %q", bead.Metadata["session_name"])
+	}
+}
+
 // delayingPoolCreateStore sleeps for `delay` on every session-bead create so
 // tests can measure whether realizePoolDesiredSessions runs distinct-alias
 // creates in parallel or serializes them. Wraps MemStore for all other ops.
@@ -3206,6 +3979,29 @@ type delayingPoolCreateStore struct {
 	mu                      sync.Mutex
 	activeSessionCreates    int
 	maxActiveSessionCreates int
+}
+
+type failingPoolCreateStore struct {
+	*beads.MemStore
+	mu                sync.Mutex
+	failuresRemaining int
+}
+
+func (s *failingPoolCreateStore) Create(bead beads.Bead) (beads.Bead, error) {
+	if bead.Type == sessionBeadType && s.claimFailure() {
+		return beads.Bead{}, errors.New("injected pool create failure")
+	}
+	return s.MemStore.Create(bead)
+}
+
+func (s *failingPoolCreateStore) claimFailure() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.failuresRemaining <= 0 {
+		return false
+	}
+	s.failuresRemaining--
+	return true
 }
 
 func (s *delayingPoolCreateStore) Create(bead beads.Bead) (beads.Bead, error) {
@@ -3247,18 +4043,21 @@ func (s *delayingPoolCreateStore) maxConcurrentSessionCreates() int {
 //
 // The store records in-flight session-bead creates directly so a regression
 // that re-serializes the loop (e.g., a future refactor that accidentally holds
-// a mutex across the create call) fails without depending on wall-clock
-// scheduler slack.
+// a mutex across the create call) or collapses the worker fanout fails without
+// depending on wall-clock scheduler slack.
 func TestRealizePoolDesiredSessions_ParallelizesDistinctAliasCreates(t *testing.T) {
 	const (
-		requestCount = 8
-		// Keep scheduler overhead small relative to the half-serial ceiling.
+		requestCount = 16
+		// Keep concurrent creates overlapping long enough to observe the full
+		// worker cap without using elapsed time as the assertion.
 		createDelay = 100 * time.Millisecond
 	)
 	store := &delayingPoolCreateStore{MemStore: beads.NewMemStore(), delay: createDelay}
 	cityPath := t.TempDir()
+	maxWakes := requestCount
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "test-city"},
+		Daemon:    config.DaemonConfig{MaxWakesPerTick: &maxWakes},
 		Agents: []config.Agent{{
 			Name:              "claude",
 			StartCommand:      "true",
@@ -3283,8 +4082,8 @@ func TestRealizePoolDesiredSessions_ParallelizesDistinctAliasCreates(t *testing.
 		t.Fatalf("desired count = %d, want %d; stderr=%q", got, requestCount, stderr.String())
 	}
 
-	if got := store.maxConcurrentSessionCreates(); got < 2 {
-		t.Fatalf("session bead creates max concurrency = %d, want at least 2", got)
+	if got := store.maxConcurrentSessionCreates(); got < poolRealizeParallelism {
+		t.Fatalf("session bead creates max concurrency = %d, want at least %d", got, poolRealizeParallelism)
 	}
 
 	aliases := make(map[string]bool, requestCount)
@@ -3469,7 +4268,7 @@ func TestBuildDesiredState_GH1654PoolReadyWorkGrowsPastMinActiveSessions(t *test
 	existingSessionNames := make(map[string]bool)
 	for slot := 1; slot <= 3; slot++ {
 		_, qualifiedInstance := poolInstanceIdentity(cfgAgent, slot, io.Discard)
-		session, err := createPoolSessionBead(store, cfgAgent.QualifiedName(), nil, time.Now().UTC(), poolSessionCreateIdentity{
+		session, err := createPoolSessionBead(store, cfgAgent.QualifiedName(), time.Now().UTC(), poolSessionCreateIdentity{
 			AgentName: qualifiedInstance,
 			Alias:     qualifiedInstance,
 			Slot:      slot,
@@ -3872,6 +4671,99 @@ func TestBuildDesiredState_OnDemandNamedSession_DirectAssigneeMaterializes(t *te
 	}
 }
 
+func TestBuildDesiredState_RigOnDemandNamedSessionAssigneeWithRouteMaterializesNamedOnly(t *testing.T) {
+	tests := []struct {
+		name     string
+		metadata map[string]string
+	}{
+		{
+			name: "retained route metadata",
+			metadata: map[string]string{
+				"gc.routed_to": "riga/refinery",
+			},
+		},
+		{
+			name: "cleared route metadata",
+			metadata: map[string]string{
+				"gc.routed_to": "",
+			},
+		},
+		{
+			name: "absent route metadata",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cityPath := t.TempDir()
+			rigPath := filepath.Join(cityPath, "riga")
+			if err := os.MkdirAll(rigPath, 0o755); err != nil {
+				t.Fatalf("create rig dir: %v", err)
+			}
+			cityStore := beads.NewMemStore()
+			rigStore := beads.NewMemStore()
+			if _, err := rigStore.Create(beads.Bead{
+				Title:    "refinery handoff",
+				Type:     "task",
+				Status:   "open",
+				Assignee: "riga/refinery",
+				Metadata: tc.metadata,
+			}); err != nil {
+				t.Fatalf("create rig work: %v", err)
+			}
+			cfg := &config.City{
+				Workspace: config.Workspace{Name: "test-city"},
+				Rigs:      []config.Rig{{Name: "riga", Path: rigPath}},
+				Agents: []config.Agent{{
+					Name:              "refinery",
+					Dir:               "riga",
+					StartCommand:      "true",
+					MaxActiveSessions: intPtr(1),
+					WorkQuery:         "printf ''",
+				}},
+				NamedSessions: []config.NamedSession{{
+					Template: "refinery",
+					Dir:      "riga",
+					Mode:     "on_demand",
+				}},
+			}
+
+			dsResult := buildDesiredStateWithSessionBeads(
+				"test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(),
+				cityStore, map[string]beads.Store{"riga": rigStore}, nil, nil, io.Discard,
+			)
+			if !dsResult.NamedSessionDemand["riga/refinery"] {
+				t.Fatal("NamedSessionDemand[riga/refinery] = false for direct named-session assignee")
+			}
+			if got := dsResult.ScaleCheckCounts["riga/refinery"]; got != 0 {
+				t.Fatalf("ScaleCheckCounts[riga/refinery] = %d, want 0 for assigned named-session handoff", got)
+			}
+			var refineryEntries []TemplateParams
+			for _, tp := range dsResult.State {
+				if tp.ConfiguredNamedIdentity == "riga/refinery" || tp.TemplateName == "riga/refinery" {
+					refineryEntries = append(refineryEntries, tp)
+				}
+			}
+			if len(refineryEntries) != 1 {
+				t.Fatalf("refinery desired entries = %d, want exactly one named session: %+v", len(refineryEntries), refineryEntries)
+			}
+			refinery := refineryEntries[0]
+			if refinery.ConfiguredNamedIdentity != "riga/refinery" {
+				t.Fatalf("ConfiguredNamedIdentity = %q, want riga/refinery", refinery.ConfiguredNamedIdentity)
+			}
+			if refinery.PoolSlot != 0 {
+				t.Fatalf("PoolSlot = %d, want 0 for named session", refinery.PoolSlot)
+			}
+			if got := refinery.Env["GC_ALIAS"]; got != "riga/refinery" {
+				t.Fatalf("GC_ALIAS = %q, want riga/refinery", got)
+			}
+			if got := refinery.Env["GC_TEMPLATE"]; got != "riga/refinery" {
+				t.Fatalf("GC_TEMPLATE = %q, want riga/refinery", got)
+			}
+		})
+	}
+}
+
 func TestBuildDesiredState_OnDemandNamedSession_IgnoresUnreachableAssignedWork(t *testing.T) {
 	cityPath := t.TempDir()
 	rigPath := filepath.Join(cityPath, "riga")
@@ -4097,6 +4989,123 @@ func TestBuildDesiredState_SuspendedNamedSession_DoesNotMaterialize(t *testing.T
 	}
 	if dsResult.NamedSessionDemand["mayor"] {
 		t.Fatal("suspended named session should not record demand")
+	}
+}
+
+func TestBuildDesiredState_ProductionDemandSkipsSuspendedAgentScaleCheck(t *testing.T) {
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+	liveMarker := filepath.Join(cityPath, "live.probed")
+	parkedMarker := filepath.Join(cityPath, "parked.probed")
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{
+			{
+				Name:       "live",
+				ScaleCheck: scaleCheckMarkerCommand(liveMarker, 0),
+			},
+			{
+				Name:       "parked",
+				Suspended:  true,
+				ScaleCheck: scaleCheckMarkerCommand(parkedMarker, 1),
+			},
+		},
+	}
+
+	var stderr strings.Builder
+	dsResult := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, &stderr)
+
+	assertMarkerExists(t, liveMarker)
+	assertMarkerAbsent(t, parkedMarker)
+	if _, ok := dsResult.ScaleCheckCounts["parked"]; ok {
+		t.Fatalf("ScaleCheckCounts contains suspended agent: %#v", dsResult.ScaleCheckCounts)
+	}
+}
+
+func TestBuildDesiredState_ProductionDemandSkipsSuspendedRigScaleCheck(t *testing.T) {
+	cityPath := t.TempDir()
+	liveRigPath := filepath.Join(cityPath, "rigs", "live-rig")
+	parkedRigPath := filepath.Join(cityPath, "rigs", "parked-rig")
+	if err := os.MkdirAll(liveRigPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(parkedRigPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	store := beads.NewMemStore()
+	liveMarker := filepath.Join(cityPath, "live-rig.probed")
+	parkedMarker := filepath.Join(cityPath, "parked-rig.probed")
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs: []config.Rig{
+			{Name: "live-rig", Path: liveRigPath},
+			{Name: "parked-rig", Path: parkedRigPath, Suspended: true},
+		},
+		Agents: []config.Agent{
+			{
+				Name:       "alpha",
+				Dir:        "live-rig",
+				ScaleCheck: scaleCheckMarkerCommand(liveMarker, 0),
+			},
+			{
+				Name:       "beta",
+				Dir:        "parked-rig",
+				ScaleCheck: scaleCheckMarkerCommand(parkedMarker, 1),
+			},
+		},
+	}
+
+	var stderr strings.Builder
+	dsResult := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, &stderr)
+
+	assertMarkerExists(t, liveMarker)
+	assertMarkerAbsent(t, parkedMarker)
+	if _, ok := dsResult.ScaleCheckCounts["parked-rig/beta"]; ok {
+		t.Fatalf("ScaleCheckCounts contains agent on suspended rig: %#v", dsResult.ScaleCheckCounts)
+	}
+}
+
+func TestBuildDesiredState_ProductionDemandSkipsAllScaleChecksWhenCitySuspended(t *testing.T) {
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+	marker := filepath.Join(cityPath, "worker.probed")
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city", Suspended: true},
+		Agents: []config.Agent{{
+			Name:       "worker",
+			ScaleCheck: scaleCheckMarkerCommand(marker, 1),
+		}},
+	}
+
+	var stderr strings.Builder
+	dsResult := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, &stderr)
+
+	assertMarkerAbsent(t, marker)
+	if len(dsResult.State) != 0 {
+		t.Fatalf("State = %#v, want empty for suspended city", dsResult.State)
+	}
+	if len(dsResult.ScaleCheckCounts) != 0 {
+		t.Fatalf("ScaleCheckCounts = %#v, want none for suspended city", dsResult.ScaleCheckCounts)
+	}
+}
+
+func scaleCheckMarkerCommand(marker string, count int) string {
+	return fmt.Sprintf("printf probed > %s; printf %d", strconv.Quote(marker), count)
+}
+
+func assertMarkerExists(t *testing.T, marker string) {
+	t.Helper()
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("expected scale_check marker %s: %v", marker, err)
+	}
+}
+
+func assertMarkerAbsent(t *testing.T, marker string) {
+	t.Helper()
+	if _, err := os.Stat(marker); err == nil {
+		t.Fatalf("scale_check marker %s exists; suspended agent was probed", marker)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("stat scale_check marker %s: %v", marker, err)
 	}
 }
 

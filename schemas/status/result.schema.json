@@ -6,6 +6,7 @@
   "additionalProperties": false,
   "required": [
     "schema_version",
+    "ok",
     "city_name",
     "workspace",
     "city_path",
@@ -18,42 +19,94 @@
     "summary"
   ],
   "properties": {
-    "schema_version": { "type": "string", "description": "Schema version for this command output." },
-    "city_name": { "type": "string", "description": "Configured or inferred city name." },
+    "schema_version": {
+      "type": "string",
+      "description": "Schema version for this command output."
+    },
+    "ok": {
+      "const": true
+    },
+    "city_name": {
+      "type": "string",
+      "description": "Configured or inferred city name."
+    },
     "workspace": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["name", "path"],
+      "required": [
+        "name",
+        "path"
+      ],
       "properties": {
-        "name": { "type": "string", "description": "Workspace display name." },
-        "path": { "type": "string", "description": "Absolute workspace path." }
+        "name": {
+          "type": "string",
+          "description": "Workspace display name."
+        },
+        "path": {
+          "type": "string",
+          "description": "Absolute workspace path."
+        }
       }
     },
-    "city_path": { "type": "string", "description": "Absolute city root path." },
+    "city_path": {
+      "type": "string",
+      "description": "Absolute city root path."
+    },
     "controller": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["running"],
+      "required": [
+        "running"
+      ],
       "properties": {
-        "running": { "type": "boolean", "description": "Whether the city controller appears to be running." },
-        "pid": { "type": "integer", "description": "Controller process ID when known." },
-        "mode": { "type": "string", "description": "Controller operating mode when known." },
-        "status": { "type": "string", "description": "Controller status text when known." }
+        "running": {
+          "type": "boolean",
+          "description": "Whether the city controller appears to be running."
+        },
+        "pid": {
+          "type": "integer",
+          "description": "Controller process ID when known."
+        },
+        "mode": {
+          "type": "string",
+          "description": "Controller operating mode when known."
+        },
+        "status": {
+          "type": "string",
+          "description": "Controller status text when known."
+        }
       }
     },
-    "running": { "type": "boolean", "description": "Whether the city is considered running." },
-    "suspended": { "type": "boolean", "description": "Whether the city is suspended." },
+    "running": {
+      "type": "boolean",
+      "description": "Whether the city is considered running."
+    },
+    "suspended": {
+      "type": "boolean",
+      "description": "Whether the city is suspended."
+    },
     "health": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["usable", "degraded"],
+      "required": [
+        "usable",
+        "degraded"
+      ],
       "properties": {
-        "usable": { "type": "boolean", "description": "Whether agents and software can use the city." },
-        "degraded": { "type": "boolean", "description": "Whether any degraded signal was observed." },
+        "usable": {
+          "type": "boolean",
+          "description": "Whether agents and software can use the city."
+        },
+        "degraded": {
+          "type": "boolean",
+          "description": "Whether any degraded signal was observed."
+        },
         "signals": {
           "type": "array",
           "description": "Human-readable degraded or health signals.",
-          "items": { "type": "string" }
+          "items": {
+            "type": "string"
+          }
         }
       }
     },
@@ -63,20 +116,43 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["name", "qualified_name", "scope", "running", "suspended"],
+        "required": [
+          "name",
+          "qualified_name",
+          "scope",
+          "running",
+          "suspended"
+        ],
         "properties": {
-          "name": { "type": "string" },
-          "qualified_name": { "type": "string" },
-          "scope": { "type": "string" },
-          "running": { "type": "boolean" },
-          "suspended": { "type": "boolean" },
+          "name": {
+            "type": "string"
+          },
+          "qualified_name": {
+            "type": "string"
+          },
+          "scope": {
+            "type": "string"
+          },
+          "running": {
+            "type": "boolean"
+          },
+          "suspended": {
+            "type": "boolean"
+          },
           "pool": {
             "type": "object",
             "additionalProperties": false,
-            "required": ["min", "max"],
+            "required": [
+              "min",
+              "max"
+            ],
             "properties": {
-              "min": { "type": "integer" },
-              "max": { "type": "integer" }
+              "min": {
+                "type": "integer"
+              },
+              "max": {
+                "type": "integer"
+              }
             }
           }
         }
@@ -88,25 +164,50 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["name", "path", "suspended"],
+        "required": [
+          "name",
+          "path",
+          "suspended"
+        ],
         "properties": {
-          "name": { "type": "string" },
-          "path": { "type": "string" },
-          "prefix": { "type": "string" },
-          "suspended": { "type": "boolean" },
-          "default_sling_target": { "type": "string" }
+          "name": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "prefix": {
+            "type": "string"
+          },
+          "suspended": {
+            "type": "boolean"
+          },
+          "default_sling_target": {
+            "type": "string"
+          }
         }
       }
     },
     "summary": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["total_agents", "running_agents"],
+      "required": [
+        "total_agents",
+        "running_agents"
+      ],
       "properties": {
-        "total_agents": { "type": "integer" },
-        "running_agents": { "type": "integer" },
-        "active_sessions": { "type": "integer" },
-        "suspended_sessions": { "type": "integer" }
+        "total_agents": {
+          "type": "integer"
+        },
+        "running_agents": {
+          "type": "integer"
+        },
+        "active_sessions": {
+          "type": "integer"
+        },
+        "suspended_sessions": {
+          "type": "integer"
+        }
       }
     }
   }

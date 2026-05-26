@@ -9,6 +9,7 @@ import (
 	"strings"
 	"text/template"
 
+	"github.com/gastownhall/gascity/internal/agent"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/pathutil"
 )
@@ -70,9 +71,36 @@ func RigRootForName(rigName string, rigs []config.Rig) string {
 	return ""
 }
 
+// rigNameForQualifiedAgent resolves the rig an agent belongs to. It prefers
+// the dir-based association used by ConfiguredRigName, then falls back to the
+// qualified-name prefix for explicitly rig-scoped agents whose Dir is not
+// stamped or points outside any configured rig path. This keeps
+// GC_RIG/GC_RIG_ROOT populated for rig-scoped agents whose work_dir lands
+// outside the rig filesystem (e.g. a city-level worktree), where the
+// dir heuristic alone returns "" and the rig keys would otherwise leak
+// through as empty values — gascity#2070.
+func rigNameForQualifiedAgent(cityPath, qualifiedName string, a config.Agent, rigs []config.Rig) string {
+	if name := ConfiguredRigName(cityPath, a, rigs); name != "" {
+		return name
+	}
+	if a.Scope != "rig" {
+		return ""
+	}
+	dir, _ := config.ParseQualifiedName(qualifiedName)
+	if dir == "" {
+		return ""
+	}
+	for _, rig := range rigs {
+		if dir == rig.Name {
+			return rig.Name
+		}
+	}
+	return ""
+}
+
 // PathContextForQualifiedName builds template context for work_dir expansion.
 func PathContextForQualifiedName(cityPath, cityName, qualifiedName string, a config.Agent, rigs []config.Rig) PathContext {
-	rigName := ConfiguredRigName(cityPath, a, rigs)
+	rigName := rigNameForQualifiedAgent(cityPath, qualifiedName, a, rigs)
 	_, agentBase := config.ParseQualifiedName(qualifiedName)
 	return PathContext{
 		Agent:     qualifiedName,
@@ -99,18 +127,32 @@ func ExpandCommandTemplate(command, cityPath, cityName string, a config.Agent, r
 }
 
 // SessionQualifiedName returns the canonical work_dir identity for a concrete
-// session instance. Single-session agents keep their template identity; pooled
-// agents use the alias or generated explicit name.
+// session instance. Single-session agents keep their template identity unless
+// an explicit name, such as a resolved tmux_alias, supplies the concrete
+// session identity; pooled agents use the alias or generated explicit name.
 func SessionQualifiedName(cityPath string, a config.Agent, rigs []config.Rig, alias, explicitName string) string {
 	if !a.SupportsMultipleSessions() {
+		if strings.TrimSpace(alias) == "" {
+			if qualified := sessionQualifiedNameFromIdentity(cityPath, a, rigs, explicitName); qualified != "" {
+				return qualified
+			}
+		}
 		return a.QualifiedName()
 	}
 	identity := strings.TrimSpace(alias)
 	if identity == "" {
 		identity = strings.TrimSpace(explicitName)
 	}
+	if qualified := sessionQualifiedNameFromIdentity(cityPath, a, rigs, identity); qualified != "" {
+		return qualified
+	}
+	return a.QualifiedName()
+}
+
+func sessionQualifiedNameFromIdentity(cityPath string, a config.Agent, rigs []config.Rig, identity string) string {
+	identity = strings.TrimSpace(identity)
 	if identity == "" {
-		return a.QualifiedName()
+		return ""
 	}
 
 	_, instanceName := config.ParseQualifiedName(identity)
@@ -156,6 +198,27 @@ func ExpandTemplate(spec string, ctx PathContext) string {
 		return spec
 	}
 	return expanded
+}
+
+// ResolveTmuxAlias expands the agent's tmux_alias template and sanitizes the
+// result for use as a tmux session name. Returns "" with no error when the
+// agent has no tmux_alias configured. The returned name is suitable for use
+// as a session bead's session_name metadata.
+func ResolveTmuxAlias(cityPath, cityName string, a config.Agent, rigs []config.Rig) (string, error) {
+	spec := strings.TrimSpace(a.TmuxAlias)
+	if spec == "" {
+		return "", nil
+	}
+	ctx := PathContextForQualifiedName(cityPath, cityName, a.QualifiedName(), a, rigs)
+	expanded, err := ExpandTemplateStrict(spec, ctx)
+	if err != nil {
+		return "", fmt.Errorf("expanding tmux_alias %q: %w", spec, err)
+	}
+	resolved := strings.TrimSpace(expanded)
+	if resolved == "" {
+		return "", nil
+	}
+	return agent.SanitizeQualifiedNameForSession(resolved), nil
 }
 
 // ResolveWorkDirPathStrict returns the effective session working directory and

@@ -12,6 +12,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
 // TestResetConfiguredNamedSessionForConfigDrift_PreservesSessionKeyOnContinuationReset
@@ -76,7 +77,7 @@ func TestResetConfiguredNamedSessionForConfigDrift_PreservesSessionKeyOnContinua
 
 	prepared, err := prepareStartCandidateForCity(
 		startCandidate{session: &got, tp: tp, order: 0},
-		"", "", cfg, env.sp, env.store, clk, io.Discard,
+		"", "", cfg, env.sp, env.store, clk, io.Discard, nil,
 	)
 	if err != nil {
 		t.Fatalf("prepareStartCandidateForCity: %v", err)
@@ -186,8 +187,8 @@ func TestReconcileSessionBeads_PreservesSessionKeyWhenNamedRestartDeferred(t *te
 	if env.sp.IsRunning(sessionName) {
 		t.Fatalf("%s should have been stopped for in-place config-drift restart", sessionName)
 	}
-	if got := deferred.Metadata["state"]; got != "creating" {
-		t.Fatalf("state after deferred restart = %q, want creating", got)
+	if got := deferred.Metadata["state"]; got != string(sessionpkg.StateStartPending) {
+		t.Fatalf("state after deferred restart = %q, want start-pending", got)
 	}
 	if got := deferred.Metadata["pending_create_claim"]; got != "true" {
 		t.Fatalf("pending_create_claim after deferred restart = %q, want true", got)

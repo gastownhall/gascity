@@ -182,6 +182,22 @@ func TestProcessRetryEvalRetriesPassMissingRequiredOutputJSON(t *testing.T) {
 	}
 }
 
+func TestClassifyRetryAttemptRetriesInvalidRequiredOutputJSON(t *testing.T) {
+	t.Parallel()
+
+	got := classifyRetryAttempt(beads.Bead{
+		Metadata: map[string]string{
+			"gc.outcome":              "pass",
+			"gc.output_json_required": "true",
+			"gc.output_json":          "/tmp/gc.output_json.pretty.json",
+		},
+	})
+	want := retryEvalResult{Outcome: "transient", Reason: "invalid_required_output_json"}
+	if got != want {
+		t.Fatalf("classifyRetryAttempt() = %+v, want %+v", got, want)
+	}
+}
+
 func TestProcessRetryEvalTransientAppendErrorStaysOpenForRetry(t *testing.T) {
 	t.Parallel()
 

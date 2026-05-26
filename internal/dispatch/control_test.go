@@ -1376,6 +1376,49 @@ func TestFindLatestAttemptMultipleAttempts(t *testing.T) {
 	}
 }
 
+func TestFindLatestAttemptFallsBackToDependenciesWhenRootScanFails(t *testing.T) {
+	t.Parallel()
+	base := beads.NewMemStore()
+
+	root := mustCreate(t, base, beads.Bead{
+		Title:    "workflow",
+		Metadata: map[string]string{"gc.kind": "workflow"},
+	})
+
+	control := mustCreate(t, base, beads.Bead{
+		Title: "rebase retry",
+		Metadata: map[string]string{
+			"gc.kind":         "retry",
+			"gc.root_bead_id": root.ID,
+			"gc.step_ref":     "mol-feature.rebase-check",
+			"gc.step_id":      "rebase-check",
+		},
+	})
+
+	attempt := mustCreate(t, base, beads.Bead{
+		Title: "rebase attempt 1",
+		Metadata: map[string]string{
+			"gc.root_bead_id": root.ID,
+			"gc.step_ref":     "mol-feature.rebase-check.attempt.1",
+			"gc.attempt":      "1",
+		},
+	})
+	mustClose(t, base, attempt.ID)
+	mustDep(t, base, control.ID, attempt.ID, "blocks")
+
+	store := &listFailStore{
+		Store: base,
+		err:   errors.New("search wisps: context canceled"),
+	}
+	found, err := findLatestAttempt(store, mustGet(t, store, control.ID))
+	if err != nil {
+		t.Fatalf("findLatestAttempt: %v", err)
+	}
+	if found.ID != attempt.ID {
+		t.Fatalf("findLatestAttempt returned %q, want dependency attempt %q", found.ID, attempt.ID)
+	}
+}
+
 func TestFindLatestAttemptSkipsMoleculeFailedPartialRoot(t *testing.T) {
 	t.Parallel()
 	store := beads.NewMemStore()
@@ -2120,6 +2163,15 @@ func mustDep(t *testing.T, store beads.Store, from, to, depType string) { //noli
 	if err := store.DepAdd(from, to, depType); err != nil {
 		t.Fatalf("dep %s -> %s: %v", from, to, err)
 	}
+}
+
+type listFailStore struct {
+	beads.Store
+	err error
+}
+
+func (s *listFailStore) List(beads.ListQuery) ([]beads.Bead, error) {
+	return nil, s.err
 }
 
 type controlCloseTrackingStore struct {

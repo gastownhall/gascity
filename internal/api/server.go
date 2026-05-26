@@ -75,6 +75,15 @@ type Server struct {
 	responseCacheMu      sync.Mutex
 	responseCacheEntries map[string]responseCacheEntry
 
+	// storeHealth caches the on-disk size walk and maintenance-log read
+	// for /v0/status's StoreHealth block. Refreshed on expiry; missing
+	// store directories produce a zero-value entry so repeated requests
+	// don't re-walk a fresh city between maintenance runs.
+	storeHealthMu       sync.Mutex
+	storeHealthEntry    *StatusStoreHealth
+	storeHealthExpires  time.Time
+	storeHealthComputer func() *StatusStoreHealth
+
 	// LookPathFunc can be overridden in tests. Defaults to exec.LookPath.
 	LookPathFunc func(string) (string, error)
 

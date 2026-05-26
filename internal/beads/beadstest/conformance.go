@@ -695,6 +695,9 @@ func RunStoreTestsWithOptions(t *testing.T, newStore func() beads.Store, opts Op
 			if err := tx.SetMetadataBatch(b.ID, map[string]string{"tx": "applied"}); err != nil {
 				return err
 			}
+			if err := tx.SetMetadataBatch(b.ID, map[string]string{"close_reason": "conformance tx closed after preserving fields"}); err != nil {
+				return err
+			}
 			return tx.Close(b.ID)
 		})
 		if err != nil {
@@ -711,8 +714,14 @@ func RunStoreTestsWithOptions(t *testing.T, newStore func() beads.Store, opts Op
 		if got.Description != updatedDescription {
 			t.Errorf("Description after Tx = %q, want %q", got.Description, updatedDescription)
 		}
+		if got.Title != "before" {
+			t.Errorf("Title after Tx = %q, want before", got.Title)
+		}
 		if got.Metadata["tx"] != "applied" {
 			t.Errorf("Metadata[tx] after Tx = %q, want applied", got.Metadata["tx"])
+		}
+		if got.Metadata["close_reason"] != "conformance tx closed after preserving fields" {
+			t.Errorf("Metadata[close_reason] after Tx = %q, want conformance tx closed after preserving fields", got.Metadata["close_reason"])
 		}
 		if got.Status != "closed" {
 			t.Errorf("Status after Tx = %q, want closed", got.Status)

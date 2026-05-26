@@ -69,8 +69,11 @@ func buildAwakeInputFromReconciler(
 	for _, wb := range assignedWorkBeads {
 		a := strings.TrimSpace(wb.Assignee)
 		if a != "" && (wb.Status == "open" || wb.Status == "in_progress") {
+			// assignedWorkBeads is the reconciler's actionable snapshot:
+			// in-progress work plus open work that has already passed readiness
+			// and blocker filtering.
 			input.WorkBeads = append(input.WorkBeads, AwakeWorkBead{
-				ID: wb.ID, Assignee: a, Status: wb.Status,
+				ID: wb.ID, Assignee: a, Status: wb.Status, Ready: wb.Status == "open",
 			})
 		}
 	}
@@ -114,7 +117,9 @@ func buildAwakeInputFromReconciler(
 		input.SessionBeads = append(input.SessionBeads, bead)
 	}
 
-	// Runtime state from wakeTargets (already computed, no extra tmux calls)
+	// Runtime liveness comes from wakeTargets. Attachment is probed only when
+	// it can affect the awake decision; the common active desired-session path
+	// is already awake and has no idle reference to suppress.
 	for _, target := range wakeTargets {
 		name := strings.TrimSpace(target.session.Metadata["session_name"])
 		if name == "" {
@@ -123,8 +128,10 @@ func buildAwakeInputFromReconciler(
 		if target.alive {
 			input.RunningSessions[name] = true
 		}
-		if attached, err := workerSessionTargetAttachedWithConfig("", nil, sp, nil, name); err == nil && attached {
-			input.AttachedSessions[name] = true
+		if shouldProbeAttachmentForAwakeInput(target, cfg, poolDesired) {
+			if attached, err := workerSessionTargetAttachedWithConfig("", nil, sp, nil, name); err == nil && attached {
+				input.AttachedSessions[name] = true
+			}
 		}
 		if pendingInteractionReady(sp, name) {
 			input.PendingSessions[name] = true
@@ -132,6 +139,30 @@ func buildAwakeInputFromReconciler(
 	}
 
 	return input
+}
+
+func shouldProbeAttachmentForAwakeInput(target wakeTarget, cfg *config.City, poolDesired map[string]int) bool {
+	if target.session == nil {
+		return false
+	}
+	if !target.alive {
+		return false
+	}
+	state := target.session.Metadata["state"]
+	if state != string(session.StateActive) && state != string(session.StateAwake) {
+		return true
+	}
+	if target.session.Metadata["detached_at"] != "" {
+		return true
+	}
+	template := normalizedSessionTemplate(*target.session, cfg)
+	if template == "" {
+		template = target.session.Metadata["template"]
+	}
+	if template != "" && poolDesired[template] > 0 {
+		return false
+	}
+	return true
 }
 
 // awakeSetToWakeEvals converts ComputeAwakeSet output to wakeEvaluation map
@@ -168,6 +199,7 @@ func awakeSetToWakeEvals(decisions map[string]AwakeDecision, sessionBeads []Awak
 			Reasons:          reasons,
 			Reason:           d.Reason,
 			ConfigSuppressed: d.Reason == "idle-sleep",
+			HasAssignedWork:  d.HasAssignedWork,
 		}
 	}
 	return evals

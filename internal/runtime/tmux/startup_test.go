@@ -61,6 +61,7 @@ type fakeStartOps struct {
 	hasSessionErr            error
 	setRemainOnExitErr       error
 	runSetupCommandErr       error
+	sendKeysErr              error
 }
 
 type errReader struct{}
@@ -156,7 +157,7 @@ func (f *fakeStartOps) sendKeys(name, text string) error {
 	if f.sendKeysHook != nil {
 		f.sendKeysHook()
 	}
-	return nil
+	return f.sendKeysErr
 }
 
 func (f *fakeStartOps) setRemainOnExit(name string) error {
@@ -599,6 +600,36 @@ func TestDoStartSession_KimiSkipsStartupDialogAcceptance(t *testing.T) {
 	})
 }
 
+func TestDoStartSessionReturnsNudgeDeliveryError(t *testing.T) {
+	ops := &fakeStartOps{
+		hasSessionResult: true,
+		sendKeysErr:      errors.New("command too long"),
+	}
+
+	cfg := runtime.Config{
+		Command: "kimi",
+		Nudge:   strings.Repeat("startup prompt\n", 100),
+	}
+
+	err := doStartSession(context.Background(), ops, "test", cfg, DefaultConfig().SetupTimeout)
+	if err == nil {
+		t.Fatal("expected startup nudge delivery error, got nil")
+	}
+	if !strings.Contains(err.Error(), "sending startup nudge") {
+		t.Fatalf("error = %v, want startup nudge context", err)
+	}
+	if !strings.Contains(err.Error(), "command too long") {
+		t.Fatalf("error = %v, want original nudge error", err)
+	}
+
+	assertCallSequence(t, ops, []string{
+		"createSession",
+		"setRemainOnExit",
+		"hasSession",
+		"sendKeys",
+	})
+}
+
 func TestDoStartSession_AcceptStartupDialogsOnly(t *testing.T) {
 	ops := &fakeStartOps{
 		hasSessionResult: true,
@@ -888,6 +919,25 @@ func TestDoStartSession_SetRemainOnExitErrorIgnored(t *testing.T) {
 	err := doStartSession(context.Background(), ops, "test", runtime.Config{
 		WorkDir: "/w",
 		Command: "sleep 300",
+	}, DefaultConfig().SetupTimeout)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	assertCallSequence(t, ops, []string{"createSession", "setRemainOnExit"})
+}
+
+func TestDoStartSession_OneShotLifecycleSkipsPostStartNudgeChecks(t *testing.T) {
+	ops := &fakeStartOps{
+		hasSessionResult:   false,
+		setRemainOnExitErr: ErrNoServer,
+	}
+
+	err := doStartSession(context.Background(), ops, "test", runtime.Config{
+		WorkDir:   "/w",
+		Command:   "true",
+		Lifecycle: runtime.LifecycleOneShot,
+		Nudge:     "start working",
 	}, DefaultConfig().SetupTimeout)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)

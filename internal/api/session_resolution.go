@@ -334,7 +334,7 @@ func (s *Server) materializeNamedSessionWithContext(ctx context.Context, store b
 			workDir,
 			resolved.Name,
 			transport,
-			resolved.Env,
+			cityAnchoredSessionEnv(s.state.CityPath(), resolved.Env),
 			resume,
 			hints,
 			extraMeta,

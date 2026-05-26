@@ -7,7 +7,6 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -102,10 +101,16 @@ type scaleParams struct {
 }
 
 // scaleParamsFor extracts scaling parameters from an Agent's fields.
+//
+// Check is the count-form pool-demand query (EffectivePoolDemandQuery).
+// It shares the bd ready predicate with EffectiveWorkQuery's Tier 3 via
+// bdReadyPoolDemandShell, keeping reconciler spawn decisions and worker
+// claim decisions structurally symmetric. See engdocs/architecture/dispatch.md
+// "scale_check ↔ work_query correspondence".
 func scaleParamsFor(a *config.Agent) scaleParams {
 	sp := scaleParams{
 		Min:   a.EffectiveMinActiveSessions(),
-		Check: a.EffectiveScaleCheck(),
+		Check: a.EffectivePoolDemandQuery(),
 	}
 	if m := a.EffectiveMaxActiveSessions(); m != nil {
 		sp.Max = *m
@@ -209,46 +214,6 @@ func expandSessionSetup(cmds []string, ctx SessionSetupContext) []string {
 	return result
 }
 
-// resolveSetupScript resolves a session_setup_script path for runtime use.
-// Absolute paths pass through unchanged. "//" paths resolve against cityPath.
-// Other relative paths resolve against sourceDir when present; otherwise they
-// resolve against cityPath. City-root-relative strings produced by older
-// composition code remain supported during the transition.
-func resolveSetupScript(script, sourceDir, cityPath string) string {
-	if strings.HasPrefix(script, "//") {
-		return filepath.Join(cityPath, strings.TrimPrefix(script, "//"))
-	}
-	if script == "" || filepath.IsAbs(script) {
-		return script
-	}
-	if sourceDir != "" {
-		relSource, err := filepath.Rel(cityPath, sourceDir)
-		if err == nil {
-			relSource = filepath.Clean(relSource)
-			cleanScript := filepath.Clean(script)
-			if relSource != "." && relSource != "" && !strings.HasPrefix(relSource, "..") &&
-				(cleanScript == relSource || strings.HasPrefix(cleanScript, relSource+string(os.PathSeparator))) {
-				return filepath.Join(cityPath, cleanScript)
-			}
-		}
-		sourceCandidate := filepath.Join(sourceDir, script)
-		cityCandidate := filepath.Join(cityPath, filepath.Clean(script))
-		if fileExists(cityCandidate) && !fileExists(sourceCandidate) {
-			return cityCandidate
-		}
-		return sourceCandidate
-	}
-	return filepath.Join(cityPath, script)
-}
-
-func fileExists(path string) bool {
-	if path == "" {
-		return false
-	}
-	_, err := os.Stat(path)
-	return err == nil
-}
-
 // deepCopyAgent creates a deep copy of a config.Agent with a new name and dir.
 // Slice and map fields are independently allocated so mutations to the copy
 // don't affect the original.
@@ -258,12 +223,14 @@ func deepCopyAgent(src *config.Agent, name, dir string) config.Agent {
 		Description:       src.Description,
 		Dir:               dir,
 		WorkDir:           src.WorkDir,
+		TmuxAlias:         src.TmuxAlias,
 		Scope:             src.Scope,
 		Session:           src.Session,
 		Provider:          src.Provider,
 		PromptTemplate:    src.PromptTemplate,
 		Nudge:             src.Nudge,
 		StartCommand:      src.StartCommand,
+		Lifecycle:         src.Lifecycle,
 		PromptMode:        src.PromptMode,
 		PromptFlag:        src.PromptFlag,
 		ReadyPromptPrefix: src.ReadyPromptPrefix,

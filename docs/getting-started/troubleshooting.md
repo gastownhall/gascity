@@ -286,6 +286,12 @@ Remediation:
 - See docs/getting-started/troubleshooting.md#jsonl-archive-push-failures
 ```
 
+Transient ref-update races are retried before the escalation counter is
+incremented. By default, each retry sleeps for a random delay from 1 to 5
+seconds. Set `GC_JSONL_PUSH_RETRY_DELAY_MIN` to change the lower bound and
+`GC_JSONL_PUSH_RETRY_DELAY_SPAN` to change the random span added above that
+minimum.
+
 The exporter sends one HIGH escalation for a still-unresolved push
 failure. It continues recording `consecutive_push_failures` and
 `pending_archive_push` in state, but does not mail the same failure on
@@ -342,6 +348,21 @@ make build
 
 See [CONTRIBUTING.md](https://github.com/gastownhall/gascity/blob/main/CONTRIBUTING.md)
 for the full contributor setup.
+
+## Slung Beads Not Reaching Agents (managed-city mode)
+
+If `gc sling` accepts work but agents don't process it — especially if
+your supervisor log shows `rigStores=0` or `assignedWorkBeads=0`, or
+your `bd dolt set port` edits keep reverting at the next `gc start` —
+you're likely looking at a rig whose Dolt view has drifted from the
+managed city Dolt. Do **not** edit `.beads/dolt-server.port` or
+`bd dolt set port` directly; both self-revert.
+
+See the
+[Managed-city Dolt endpoints runbook](../runbooks/managed-city-endpoints.md)
+for the mental model, the forbidden edits, the sanctioned escape
+hatches (`gc rig set-endpoint --inherit`/`--self --force`/`--external`),
+and an end-to-end recovery recipe.
 
 ## Still Stuck?
 

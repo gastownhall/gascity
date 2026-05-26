@@ -318,9 +318,13 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	}, p.sessionTemplate, p.stderr, p.packDirs, fragments, p.beadStore)
 	hasHooks := config.AgentHasHooks(cfgAgent, p.workspace, resolved.Name, p.providers)
 	beacon := runtime.FormatBeaconAt(p.cityName, qualifiedName, !hasHooks, p.beaconTime)
-	if prompt != "" {
+	suppressStartupPrompt := suppressStartupPromptForAgent(cfgAgent)
+	switch {
+	case suppressStartupPrompt:
+		prompt = ""
+	case prompt != "":
 		prompt = beacon + "\n\n" + prompt
-	} else {
+	default:
 		prompt = beacon
 	}
 
@@ -342,7 +346,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	// subprocess with WorkDir ≠ scope root — because subprocess
 	// doesn't execute PreStart) get no appendix; we'd be lying to
 	// them. Discovered via the pass-1 Codex review.
-	if effectiveInjectAssignedSkills(cfgAgent) {
+	if !suppressStartupPrompt && effectiveInjectAssignedSkills(cfgAgent) {
 		wsProvider := ""
 		if p.workspace != nil {
 			wsProvider = p.workspace.Provider
@@ -372,8 +376,14 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		}
 	}
 
-	// Step 10: Merge environment layers.
-	env := mergeEnv(passthroughEnv(), expandEnvMap(resolved.Env), expandEnvMap(cfgAgent.Env), agentEnv)
+	// Step 10: Merge environment layers. Workspace.Env sits between
+	// passthrough and provider so a per-provider/agent/patch entry can
+	// still override a workspace-wide default.
+	var workspaceEnv map[string]string
+	if p.workspace != nil {
+		workspaceEnv = p.workspace.Env
+	}
+	env := mergeEnv(passthroughEnv(), expandEnvMap(workspaceEnv), expandEnvMap(resolved.Env), expandEnvMap(cfgAgent.Env), agentEnv)
 	prependGCBinDirToPATH(env, env["GC_BIN"])
 	env = convergence.ScrubTokenEnv(env)
 
@@ -398,7 +408,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		command = expanded[0]
 	}
 	expandedSetup := expandSessionSetup(cfgAgent.SessionSetup, setupCtx)
-	resolvedScript := resolveSetupScript(cfgAgent.SessionSetupScript, cfgAgent.SourceDir, p.cityPath)
+	resolvedScript := config.ResolveSessionSetupScriptPath(p.cityPath, cfgAgent.SourceDir, cfgAgent.SessionSetupScript)
 	expandedPreStart := expandSessionSetup(cfgAgent.PreStart, setupCtx)
 	expandedLive := expandSessionSetup(cfgAgent.SessionLive, setupCtx)
 
@@ -515,13 +525,25 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	}
 
 	// Step 12: Build startup hints.
+	nudge := cfgAgent.Nudge
+	acceptStartupDialogs := resolved.AcceptStartupDialogs
+	if suppressStartupPrompt {
+		// Implicit start-command infrastructure agents are deterministic
+		// subprocesses, not interactive model providers. Keep ProcessNames for
+		// liveness without routing startup through prompt, nudge, or
+		// trust-dialog handling.
+		nudge = ""
+		accept := false
+		acceptStartupDialogs = &accept
+	}
 	hints := agent.StartupHints{
+		Lifecycle:              runtime.Lifecycle(resolved.Lifecycle),
 		ReadyPromptPrefix:      resolved.ReadyPromptPrefix,
 		ReadyDelayMs:           resolved.ReadyDelayMs,
 		ProcessNames:           resolved.ProcessNames,
 		EmitsPermissionWarning: resolved.EmitsPermissionWarning,
-		AcceptStartupDialogs:   resolved.AcceptStartupDialogs,
-		Nudge:                  cfgAgent.Nudge,
+		AcceptStartupDialogs:   acceptStartupDialogs,
+		Nudge:                  nudge,
 		PreStart:               expandedPreStart,
 		SessionSetup:           expandedSetup,
 		SessionSetupScript:     resolvedScript,
@@ -553,6 +575,13 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		HookEnabled:      hasHooks,
 		MCPServers:       mcpServers,
 	}, nil
+}
+
+func suppressStartupPromptForAgent(cfgAgent *config.Agent) bool {
+	return cfgAgent != nil &&
+		cfgAgent.Implicit &&
+		strings.TrimSpace(cfgAgent.StartCommand) != "" &&
+		strings.TrimSpace(cfgAgent.Provider) == ""
 }
 
 func sessionBackendEnvWithError(cityPath, rigRoot string, rigs []config.Rig) (map[string]string, error) {
@@ -659,6 +688,7 @@ func templateParamsToConfig(tp TemplateParams) runtime.Config {
 			return nil
 		}(),
 		WorkDir:                tp.WorkDir,
+		Lifecycle:              tp.Hints.Lifecycle,
 		ReadyPromptPrefix:      tp.Hints.ReadyPromptPrefix,
 		ReadyDelayMs:           tp.Hints.ReadyDelayMs,
 		ProcessNames:           tp.Hints.ProcessNames,

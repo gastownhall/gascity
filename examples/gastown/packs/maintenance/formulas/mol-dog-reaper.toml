@@ -129,8 +129,8 @@ SELECT COUNT(DISTINCT w.id) FROM wisps w
 INNER JOIN dependencies d
   ON d.issue_id = w.id
   AND d.type = 'parent-child'
-LEFT JOIN wisps parent_wisp ON d.depends_on_id = parent_wisp.id
-LEFT JOIN issues parent_issue ON d.depends_on_id = parent_issue.id
+LEFT JOIN wisps parent_wisp ON d.depends_on_wisp_id = parent_wisp.id
+LEFT JOIN issues parent_issue ON d.depends_on_issue_id = parent_issue.id
 WHERE w.status IN ('open', 'hooked', 'in_progress')
 AND w.created_at < DATE_SUB(NOW(), INTERVAL <max_age_hours> HOUR)
 AND (
@@ -145,10 +145,10 @@ SELECT COUNT(*) FROM wisps
 WHERE status = 'closed'
 AND closed_at < DATE_SUB(NOW(), INTERVAL <purge_age_hours> HOUR)
 AND id NOT IN (
-  SELECT DISTINCT d.depends_on_id FROM dependencies d
+  SELECT DISTINCT d.depends_on_wisp_id FROM dependencies d
   INNER JOIN wisps child_wisp ON d.issue_id = child_wisp.id
   WHERE d.type = 'parent-child'
-  AND d.depends_on_id IS NOT NULL
+  AND d.depends_on_wisp_id IS NOT NULL
   AND child_wisp.status IN ('open', 'hooked', 'in_progress')
 );
 
@@ -204,8 +204,8 @@ AND id IN (
     INNER JOIN dependencies d
       ON d.issue_id = w.id
       AND d.type = 'parent-child'
-    LEFT JOIN wisps parent_wisp ON d.depends_on_id = parent_wisp.id
-    LEFT JOIN issues parent_issue ON d.depends_on_id = parent_issue.id
+    LEFT JOIN wisps parent_wisp ON d.depends_on_wisp_id = parent_wisp.id
+    LEFT JOIN issues parent_issue ON d.depends_on_issue_id = parent_issue.id
     WHERE w.status IN ('open', 'hooked', 'in_progress')
     AND w.created_at < DATE_SUB(NOW(), INTERVAL <max_age_hours> HOUR)
     AND (
@@ -240,10 +240,10 @@ DELETE FROM wisps
 WHERE status = 'closed'
 AND closed_at < DATE_SUB(NOW(), INTERVAL <purge_age_hours> HOUR)
 AND id NOT IN (
-  SELECT DISTINCT d.depends_on_id FROM dependencies d
+  SELECT DISTINCT d.depends_on_wisp_id FROM dependencies d
   INNER JOIN wisps child_wisp ON d.issue_id = child_wisp.id
   WHERE d.type = 'parent-child'
-  AND d.depends_on_id IS NOT NULL
+  AND d.depends_on_wisp_id IS NOT NULL
   AND child_wisp.status IN ('open', 'hooked', 'in_progress')
 );
 ```
@@ -285,12 +285,13 @@ AND issue_type != 'epic'
 AND id NOT IN (
   -- Exclude issues with active dependencies
   SELECT DISTINCT d.issue_id FROM dependencies d
-  INNER JOIN issues i ON d.depends_on_id = i.id
+  INNER JOIN issues i ON d.depends_on_issue_id = i.id
   WHERE i.status IN ('open', 'in_progress')
   UNION
-  SELECT DISTINCT d.depends_on_id FROM dependencies d
+  SELECT DISTINCT d.depends_on_issue_id FROM dependencies d
   INNER JOIN issues i ON d.issue_id = i.id
   WHERE i.status IN ('open', 'in_progress')
+  AND d.depends_on_issue_id IS NOT NULL
 )
 ```
 

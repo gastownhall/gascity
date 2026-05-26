@@ -293,7 +293,6 @@ func TestRegression_GastownPackArtifacts(t *testing.T) {
 	t.Run("GtDoneNotBlockedByInfraFiles", func(t *testing.T) {
 		overlayDirs := []string{
 			filepath.Join(c.Dir, "packs", "gastown", "overlays", "default"),
-			filepath.Join(c.Dir, "packs", "gastown", "overlay"),
 			filepath.Join(c.Dir, "packs", "maintenance", "overlays", "default"),
 		}
 

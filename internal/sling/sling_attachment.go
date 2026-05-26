@@ -8,6 +8,7 @@ import (
 	"github.com/gastownhall/gascity/internal/agentutil"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	convoycore "github.com/gastownhall/gascity/internal/convoy"
 	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
 )
@@ -319,9 +320,65 @@ func checkBatchNoMoleculeChildren(q BeadChildQuerier, open []beads.Bead, store b
 	return errors.Join(joined...)
 }
 
+// needsConvoyRecovery reports whether an already-routed bead should re-enter
+// finalize to repair missing or closed auto-convoy membership.
+func needsConvoyRecovery(q BeadQuerier, b beads.Bead, deps SlingDeps, opts BeadCheckOptions) bool {
+	if opts.NoConvoy {
+		return false
+	}
+	if hasLiveTrackingConvoy(deps.Store, b.ID) {
+		return false
+	}
+	parentID := strings.TrimSpace(b.ParentID)
+	if parentID == "" {
+		return true
+	}
+	if q == nil {
+		return false
+	}
+	parent, err := q.Get(parentID)
+	if err != nil {
+		return true
+	}
+	if parent.Type == "convoy" {
+		return convoycore.IsTerminalStatus(parent.Status)
+	}
+	if sourceworkflow.IsWorkflowRoot(parent) {
+		return false
+	}
+	// Ordinary parent beads do not own the routing lifecycle. A routed child
+	// without a live tracking convoy needs finalize to run again so the missing
+	// auto-convoy can be recreated; finalize is idempotent for an already-routed
+	// bead because CheckBeadState preserves the routed metadata and only repairs
+	// the missing tracking attachment.
+	return true
+}
+
+func hasLiveTrackingConvoy(store beads.Store, itemID string) bool {
+	if store == nil {
+		return false
+	}
+	convoys, err := convoycore.TrackingConvoysForItem(store, itemID)
+	if err != nil {
+		return false
+	}
+	for _, convoy := range convoys {
+		if !convoycore.IsTerminalStatus(convoy.Status) {
+			return true
+		}
+	}
+	return false
+}
+
 // CheckBeadState checks whether a bead is already routed and returns a
 // structured result. Best-effort: nil querier or query failure → empty result.
-func CheckBeadState(q BeadQuerier, beadID string, a config.Agent, _ SlingDeps) BeadCheckResult {
+func CheckBeadState(q BeadQuerier, beadID string, a config.Agent, deps SlingDeps) BeadCheckResult {
+	return CheckBeadStateWithOptions(q, beadID, a, deps, BeadCheckOptions{})
+}
+
+// CheckBeadStateWithOptions checks whether a bead is already routed for the
+// requested route options and returns a structured result.
+func CheckBeadStateWithOptions(q BeadQuerier, beadID string, a config.Agent, deps SlingDeps, opts BeadCheckOptions) BeadCheckResult {
 	if q == nil {
 		return BeadCheckResult{}
 	}
@@ -349,6 +406,11 @@ func CheckBeadState(q BeadQuerier, beadID string, a config.Agent, _ SlingDeps) B
 	target := a.QualifiedName()
 	if strings.TrimSpace(b.Metadata["gc.routed_to"]) == target {
 		if b.Assignee == "" || b.Assignee == target {
+			if needsConvoyRecovery(q, b, deps, opts) {
+				// Prior sling set gc.routed_to but left no convoy — let
+				// finalize re-run to create it and poke the controller.
+				return BeadCheckResult{}
+			}
 			return BeadCheckResult{Idempotent: true}
 		}
 		return BeadCheckResult{
@@ -359,6 +421,9 @@ func CheckBeadState(q BeadQuerier, beadID string, a config.Agent, _ SlingDeps) B
 	isMulti := agentutil.IsMultiSessionAgent(&a)
 	if !isMulti {
 		if b.Assignee == target {
+			if needsConvoyRecovery(q, b, deps, opts) {
+				return BeadCheckResult{}
+			}
 			return BeadCheckResult{Idempotent: true}
 		}
 		var warnings []string
@@ -380,6 +445,9 @@ func CheckBeadState(q BeadQuerier, beadID string, a config.Agent, _ SlingDeps) B
 		poolLabel := "pool:" + target
 		for _, l := range b.Labels {
 			if l == poolLabel {
+				if needsConvoyRecovery(q, b, deps, opts) {
+					return BeadCheckResult{}
+				}
 				return BeadCheckResult{Idempotent: true}
 			}
 		}
