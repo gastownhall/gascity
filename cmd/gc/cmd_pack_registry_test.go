@@ -362,6 +362,44 @@ func TestPackCommandTreeKeepsRegistryAndLegacySurfacesSeparate(t *testing.T) {
 	}
 }
 
+func TestPackRegistryLiveGascityPacksCatalog(t *testing.T) {
+	source := strings.TrimSpace(os.Getenv("GC_TEST_GASCITY_PACKS_REGISTRY"))
+	if source == "" {
+		t.Skip("set GC_TEST_GASCITY_PACKS_REGISTRY to a gascity-packs registry.toml source to run this live catalog canary")
+	}
+	home := t.TempDir()
+	t.Setenv("GC_HOME", home)
+
+	var stdout, stderr bytes.Buffer
+	if code := doPackRegistryAdd("main", source, false, false, &stdout, &stderr); code != 0 {
+		t.Fatalf("add gascity-packs registry code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := doPackRegistrySearch("", "main", false, 50, true, false, &stdout, &stderr); code != 0 {
+		t.Fatalf("search gascity-packs registry code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	searchOutput := stdout.String()
+	for _, name := range []string{"gascity", "gastown", "discord", "github-intake", "slack"} {
+		if !strings.Contains(searchOutput, name) {
+			t.Fatalf("search output missing %q:\n%s", name, searchOutput)
+		}
+	}
+
+	for _, name := range []string{"gascity", "gastown", "discord", "github-intake", "slack"} {
+		stdout.Reset()
+		stderr.Reset()
+		if code := doPackRegistryShow("main:"+name, false, false, &stdout, &stderr); code != 0 {
+			t.Fatalf("show %s code=%d stdout=%q stderr=%q", name, code, stdout.String(), stderr.String())
+		}
+		out := stdout.String()
+		if !strings.Contains(out, "Source:") || !strings.Contains(out, "Latest:") || !strings.Contains(out, "Releases:") {
+			t.Fatalf("show %s output missing registry contract fields:\n%s", name, out)
+		}
+	}
+}
+
 func writeRegistryCatalog(t *testing.T, body string) string {
 	t.Helper()
 	dir := t.TempDir()
