@@ -604,11 +604,18 @@ func deliverSessionNudgeWithWorker(target nudgeTarget, store beads.Store, sp run
 }
 
 func shouldQueueManagedNudgeWake(target nudgeTarget, store beads.Store, sp runtime.Provider) bool {
-	if strings.TrimSpace(target.cityPath) == "" || target.sessionID == "" || !nudgeCityUsesManagedReconciler(target.cityPath) {
+	if !canRequestManagedNudgeWake(target, store) {
 		return false
 	}
 	obs, err := workerObserveNudgeTarget(target, store, sp)
 	return err == nil && !obs.Running
+}
+
+func canRequestManagedNudgeWake(target nudgeTarget, store beads.Store) bool {
+	return store != nil &&
+		strings.TrimSpace(target.cityPath) != "" &&
+		target.sessionID != "" &&
+		nudgeCityUsesManagedReconciler(target.cityPath)
 }
 
 func queueManagedSessionNudgeWake(target nudgeTarget, store beads.Store, sp runtime.Provider, message string, mode nudgeDeliveryMode, jsonOutput bool, stdout, stderr io.Writer) int {
@@ -731,6 +738,18 @@ func sendMailNotifyWithWorker(target nudgeTarget, store beads.Store, sp runtime.
 				return nil
 			}
 		}
+	}
+	if !obs.Running && canRequestManagedNudgeWake(target, store) {
+		if err := requestManagedNudgeWake(target, store); err != nil {
+			return err
+		}
+		if err := enqueueQueuedNudge(target.cityPath, newQueuedNudgeWithOptions(target.agentKey(), msg, "mail", now, queuedNudgeOptionsFromTarget(target))); err != nil {
+			return err
+		}
+		if err := nudgePokeController(target.cityPath); err != nil {
+			return fmt.Errorf("poking controller after managed mail notification wake: %w", err)
+		}
+		return nil
 	}
 	if err := enqueueQueuedNudge(target.cityPath, newQueuedNudgeWithOptions(target.agentKey(), msg, "mail", now, queuedNudgeOptionsFromTarget(target))); err != nil {
 		return err
