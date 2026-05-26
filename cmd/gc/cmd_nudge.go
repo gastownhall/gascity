@@ -43,8 +43,10 @@ const (
 var errNudgeSessionFenceMismatch = errors.New("queued nudge session fence mismatch")
 
 var (
-	nudgeCityUsesManagedReconciler = cityUsesManagedReconciler
-	nudgePokeController            = pokeController
+	nudgeCityUsesManagedReconciler           = cityUsesManagedReconciler
+	nudgePokeController                      = pokeController
+	nudgeObserveTarget                       = workerObserveNudgeTarget
+	nudgeWarningWriter             io.Writer = os.Stderr
 )
 
 type nudgeDeliveryMode string
@@ -553,7 +555,12 @@ func deliverSessionNudgeWithWorker(target nudgeTarget, store beads.Store, sp run
 	if mode == nudgeDeliveryQueue {
 		return queueSessionNudgeWithWorker(target, store, sp, message, mode, jsonOutput, stdout, stderr)
 	}
-	if shouldQueueManagedNudgeWake(target, store, sp) {
+	queueManagedWake, err := shouldQueueManagedNudgeWake(target, store, sp)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc session nudge: %v\n", err) //nolint:errcheck
+		return 1
+	}
+	if queueManagedWake {
 		return queueManagedSessionNudgeWake(target, store, sp, message, mode, jsonOutput, stdout, stderr)
 	}
 	delivery, ok := workerNudgeDeliveryForMode(mode)
@@ -603,12 +610,15 @@ func deliverSessionNudgeWithWorker(target nudgeTarget, store beads.Store, sp run
 	return 0
 }
 
-func shouldQueueManagedNudgeWake(target nudgeTarget, store beads.Store, sp runtime.Provider) bool {
+func shouldQueueManagedNudgeWake(target nudgeTarget, store beads.Store, sp runtime.Provider) (bool, error) {
 	if !canRequestManagedNudgeWake(target, store) {
-		return false
+		return false, nil
 	}
-	obs, err := workerObserveNudgeTarget(target, store, sp)
-	return err == nil && !obs.Running
+	obs, err := nudgeObserveTarget(target, store, sp)
+	if err != nil {
+		return false, fmt.Errorf("observing managed session before wake routing: %w", err)
+	}
+	return !obs.Running, nil
 }
 
 func canRequestManagedNudgeWake(target nudgeTarget, store beads.Store) bool {
@@ -747,7 +757,9 @@ func sendMailNotifyWithWorker(target nudgeTarget, store beads.Store, sp runtime.
 			return err
 		}
 		if err := nudgePokeController(target.cityPath); err != nil {
-			return fmt.Errorf("poking controller after managed mail notification wake: %w", err)
+			if nudgeWarningWriter != nil {
+				fmt.Fprintf(nudgeWarningWriter, "gc mail notify: warning: poke failed after managed wake: %v\n", err) //nolint:errcheck
+			}
 		}
 		return nil
 	}
