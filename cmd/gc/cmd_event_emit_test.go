@@ -207,6 +207,71 @@ func TestEventPayloadForEmitFallsBackToStoreBead(t *testing.T) {
 	}
 }
 
+func TestEventPayloadForEmitUsesInheritedBeadsDirOutsideRig(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_DOLT", "skip")
+	t.Setenv("GC_SESSION", "fake")
+	configureIsolatedRuntimeEnv(t)
+
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "frontend")
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(rigDir): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
+name = "demo"
+
+[beads]
+provider = "file"
+
+[[rigs]]
+name = "frontend"
+path = "frontend"
+prefix = "fe"
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile(city.toml): %v", err)
+	}
+	if err := ensureScopedFileStoreLayout(cityDir); err != nil {
+		t.Fatalf("ensureScopedFileStoreLayout(city): %v", err)
+	}
+	if err := ensurePersistedScopeLocalFileStore(cityDir); err != nil {
+		t.Fatalf("ensurePersistedScopeLocalFileStore(city): %v", err)
+	}
+	if err := ensurePersistedScopeLocalFileStore(rigDir); err != nil {
+		t.Fatalf("ensurePersistedScopeLocalFileStore(rig): %v", err)
+	}
+	rigStore, err := openStoreAtForCity(rigDir, cityDir)
+	if err != nil {
+		t.Fatalf("openStoreAtForCity(rig): %v", err)
+	}
+	created, err := rigStore.Create(beads.Bead{Title: "rig hook-created task", Type: "task"})
+	if err != nil {
+		t.Fatalf("Create(rig): %v", err)
+	}
+
+	t.Setenv("GC_CITY_PATH", cityDir)
+	t.Setenv("BEADS_DIR", filepath.Join(rigDir, ".beads"))
+	t.Chdir(t.TempDir())
+
+	var stderr bytes.Buffer
+	payload := eventPayloadForEmit(`{"bead":}`, created.ID, &stderr)
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want none", stderr.String())
+	}
+	var decoded struct {
+		Bead beads.Bead `json:"bead"`
+	}
+	if err := json.Unmarshal([]byte(payload), &decoded); err != nil {
+		t.Fatalf("Unmarshal(payload): %v", err)
+	}
+	if decoded.Bead.ID != created.ID {
+		t.Fatalf("payload bead ID = %q, want %q", decoded.Bead.ID, created.ID)
+	}
+	if decoded.Bead.Title != "rig hook-created task" {
+		t.Fatalf("payload bead title = %q, want rig hook-created task", decoded.Bead.Title)
+	}
+}
+
 // TestEventEmitViaCLI exercises the full `gc event emit` CLI path: flag
 // parsing, city discovery, event-provider open, and local events.jsonl
 // write. The matching read path (`gc events`) now goes through the

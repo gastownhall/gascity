@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -114,7 +115,7 @@ func loadEventBeadPayload(beadID string) (json.RawMessage, error) {
 	if err != nil {
 		return nil, err
 	}
-	scopeRoot, err := os.Getwd()
+	scopeRoot, err := eventBeadPayloadScopeRoot()
 	if err != nil {
 		return nil, fmt.Errorf("resolving current scope: %w", err)
 	}
@@ -131,6 +132,27 @@ func loadEventBeadPayload(beadID string) (json.RawMessage, error) {
 		return nil, fmt.Errorf("marshaling bead payload: %w", err)
 	}
 	return payload, nil
+}
+
+func eventBeadPayloadScopeRoot() (string, error) {
+	if beadsDir := strings.TrimSpace(os.Getenv("BEADS_DIR")); beadsDir != "" {
+		return cleanAbsPath(filepath.Dir(beadsDir))
+	}
+	if rigRoot := strings.TrimSpace(os.Getenv("GC_RIG_ROOT")); rigRoot != "" {
+		return cleanAbsPath(rigRoot)
+	}
+	return os.Getwd()
+}
+
+func cleanAbsPath(path string) (string, error) {
+	if filepath.IsAbs(path) {
+		return filepath.Clean(path), nil
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Clean(abs), nil
 }
 
 // cmdEventEmit records a single event to the city event log. Best-effort:
