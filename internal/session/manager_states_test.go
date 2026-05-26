@@ -258,10 +258,11 @@ func TestConformance_SuspendFailedCreateTearsDownRuntime(t *testing.T) {
 		t.Fatalf("set failed-create state: %v", err)
 	}
 
-	if err := m.Suspend(id); err != nil {
-		t.Fatalf("Suspend(failed-create) = %v, want nil (must not block gc stop)", err)
+	suspendErr := m.Suspend(id)
+	if suspendErr != nil {
+		t.Fatalf("Suspend(failed-create) = %v, want nil (must not block gc stop)", suspendErr)
 	}
-	if errors.Is(err, ErrIllegalTransition) {
+	if errors.Is(suspendErr, ErrIllegalTransition) {
 		t.Fatalf("Suspend(failed-create) returned illegal-transition; want success")
 	}
 	if sp.CountCalls("Stop", sessName) == 0 {

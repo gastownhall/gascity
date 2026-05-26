@@ -777,6 +777,16 @@ func (m *Manager) Suspend(id string) error {
 		// illegal-transition error that blocks `gc stop` city-wide (#2597). The
 		// bead is left in failed-create for the reconciler to reap once the
 		// store is reachable again.
+		//
+		// Limitation: explicit-named beads whose rollback already cleared
+		// session_name (rollbackPendingCreate in
+		// cmd/gc/session_lifecycle_parallel.go) fall back to the synthetic
+		// sessionNameFor(id) here, so this Stop targets the synthetic name
+		// rather than the original explicit name and the leak under the
+		// original name persists. That is a strict improvement over the pre-fix
+		// state (suspend rejected outright, runtime leaked, `gc stop` blocked
+		// city-wide); preserving the original name across rollback for cleanup
+		// is tracked as follow-up.
 		if current == StateFailedCreate {
 			if strings.TrimSpace(sessName) != "" {
 				_ = m.sp.Stop(sessName) // best-effort: tear down any leaked runtime
