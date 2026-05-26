@@ -82,6 +82,31 @@ func (p *blockingLatestEventProvider) LatestSeq() (uint64, error) {
 	return p.Fake.LatestSeq()
 }
 
+type failOnceWatchEventProvider struct {
+	*events.Fake
+	failed chan struct{}
+	once   sync.Once
+}
+
+func newFailOnceWatchEventProvider() *failOnceWatchEventProvider {
+	return &failOnceWatchEventProvider{
+		Fake:   events.NewFake(),
+		failed: make(chan struct{}),
+	}
+}
+
+func (p *failOnceWatchEventProvider) Watch(ctx context.Context, afterSeq uint64) (events.Watcher, error) {
+	var fail bool
+	p.once.Do(func() {
+		fail = true
+		close(p.failed)
+	})
+	if fail {
+		return nil, errors.New("injected watch setup failure")
+	}
+	return p.Fake.Watch(ctx, afterSeq)
+}
+
 type failAgentTomlRenameOSFS struct {
 	fsys.OSFS
 	target string
@@ -2541,6 +2566,57 @@ func TestControllerStateBeadEventWatcherReplaysEventsAfterCachePrime(t *testing.
 	}
 	if got := counts["claude"]; got != 1 {
 		t.Fatalf("defaultScaleCheckCounts[claude] = %d, want 1", got)
+	}
+}
+
+func TestControllerStateBeadEventWatcherRetriesSetupErrors(t *testing.T) {
+	backing := beads.NewMemStore()
+	prevCityStore := newControllerStateOpenCityStore
+	newControllerStateOpenCityStore = func(string) (beads.Store, error) {
+		return backing, nil
+	}
+	t.Cleanup(func() {
+		newControllerStateOpenCityStore = prevCityStore
+	})
+
+	prevRetryDelay := beadEventWatcherRetryDelay
+	beadEventWatcherRetryDelay = time.Millisecond
+	t.Cleanup(func() {
+		beadEventWatcherRetryDelay = prevRetryDelay
+	})
+
+	ep := newFailOnceWatchEventProvider()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cs := newControllerState(ctx, &config.City{Workspace: config.Workspace{Name: "test-city"}}, runtime.NewFake(), ep, "test-city", t.TempDir())
+	cs.pokeCh = make(chan struct{}, 1)
+	cs.startBeadEventWatcher(ctx)
+
+	select {
+	case <-ep.failed:
+	case <-time.After(time.Second):
+		t.Fatal("bead event watcher did not attempt initial watch")
+	}
+
+	created, err := backing.Create(beads.Bead{Title: "queued work", Type: "task"})
+	if err != nil {
+		t.Fatalf("Create backing bead: %v", err)
+	}
+	payload, err := json.Marshal(map[string]beads.Bead{"bead": created})
+	if err != nil {
+		t.Fatalf("marshal bead event: %v", err)
+	}
+	ep.Record(events.Event{
+		Type:    events.BeadCreated,
+		Actor:   "bd-hook",
+		Subject: created.ID,
+		Payload: payload,
+	})
+
+	select {
+	case <-cs.pokeCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("bead event watcher did not recover after setup watch error")
 	}
 }
 

@@ -67,6 +67,8 @@ type controllerState struct {
 
 var controllerStateInitRigDirIfReady = initDirIfReady
 
+var beadEventWatcherRetryDelay = time.Second
+
 // newControllerStateOpenCityStore opens the city-level bead store for
 // newControllerState. Test code can swap this to return an in-memory store
 // and skip spawning managed dolt (~12s per call).
@@ -264,7 +266,16 @@ func (cs *controllerState) startBeadEventWatcher(ctx context.Context) {
 		for {
 			watcher, err := ep.Watch(ctx, seq)
 			if err != nil {
-				return
+				if ctx.Err() != nil {
+					return
+				}
+				fmt.Fprintf(os.Stderr, "api: bead event watcher: watch from seq %d: %v\n", seq, err)
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(beadEventWatcherRetryDelay):
+					continue
+				}
 			}
 			for {
 				evt, err := watcher.Next()
