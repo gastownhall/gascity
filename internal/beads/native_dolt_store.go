@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/events"
 	beadslib "github.com/steveyegge/beads"
 )
 
@@ -17,17 +18,25 @@ const nativeDoltStoreActor = "gascity"
 // library over Dolt. It is constructed by the store factory after native-store
 // preflight gates pass.
 type NativeDoltStore struct {
-	storage beadslib.Storage
-	actor   string
+	storage  beadslib.Storage
+	actor    string
+	recorder events.Recorder
 }
 
 var _ Store = (*NativeDoltStore)(nil)
 
 func newNativeDoltStoreWithStorage(storage beadslib.Storage, actor string) *NativeDoltStore {
+	return newNativeDoltStoreWithStorageAndRecorder(storage, actor, events.Discard)
+}
+
+func newNativeDoltStoreWithStorageAndRecorder(storage beadslib.Storage, actor string, recorder events.Recorder) *NativeDoltStore {
 	if actor == "" {
 		actor = nativeDoltStoreActor
 	}
-	return &NativeDoltStore{storage: storage, actor: actor}
+	if recorder == nil {
+		recorder = events.Discard
+	}
+	return &NativeDoltStore{storage: storage, actor: actor, recorder: recorder}
 }
 
 func newNativeDoltStoreAt(ctx context.Context, scopeRoot string) (*NativeDoltStore, error) {
@@ -51,7 +60,14 @@ func (s *NativeDoltStore) Create(b Bead) (Bead, error) {
 	if err := s.storage.CreateIssue(context.Background(), issue, s.actor); err != nil {
 		return Bead{}, err
 	}
-	return beadFromNativeIssue(issue)
+	created, err := beadFromNativeIssue(issue)
+	if err != nil {
+		return Bead{}, err
+	}
+	if err := s.recordBeadEvent(events.BeadCreated, created); err != nil {
+		return Bead{}, err
+	}
+	return created, nil
 }
 
 // Get retrieves a bead by ID from the upstream beads storage layer.
@@ -70,23 +86,33 @@ func (s *NativeDoltStore) Update(id string, opts UpdateOpts) error {
 	if err != nil {
 		return err
 	}
+	changed := false
 	if len(updates) > 0 {
 		if err := s.storage.UpdateIssue(ctx, id, updates, s.actor); err != nil {
 			return err
 		}
+		changed = true
 	}
 	for _, label := range opts.Labels {
 		if err := s.storage.AddLabel(ctx, id, label, s.actor); err != nil {
 			return err
 		}
+		changed = true
 	}
 	for _, label := range opts.RemoveLabels {
 		if err := s.storage.RemoveLabel(ctx, id, label, s.actor); err != nil {
 			return err
 		}
+		changed = true
 	}
 	if opts.ParentID != nil {
-		return s.updateParent(ctx, id, *opts.ParentID)
+		if err := s.updateParent(ctx, id, *opts.ParentID); err != nil {
+			return err
+		}
+		changed = true
+	}
+	if changed {
+		return s.recordCurrentBeadEvent(ctx, events.BeadUpdated, id)
 	}
 	return nil
 }
@@ -101,7 +127,10 @@ func (s *NativeDoltStore) Close(id string) error {
 	if current.Status == beadslib.StatusClosed {
 		return nil
 	}
-	return s.storage.CloseIssue(ctx, id, "", s.actor, "")
+	if err := s.storage.CloseIssue(ctx, id, "", s.actor, ""); err != nil {
+		return err
+	}
+	return s.recordCurrentBeadEvent(ctx, events.BeadClosed, id)
 }
 
 // Reopen sets a closed bead's status back to open.
@@ -259,7 +288,19 @@ func (s *NativeDoltStore) SetMetadataBatch(id string, kvs map[string]string) err
 
 // Delete permanently removes a bead from the upstream beads storage layer.
 func (s *NativeDoltStore) Delete(id string) error {
-	return s.storage.DeleteIssue(context.Background(), id)
+	ctx := context.Background()
+	issue, err := s.storage.GetIssue(ctx, id)
+	if err != nil {
+		return err
+	}
+	deleted, err := beadFromNativeIssue(issue)
+	if err != nil {
+		return err
+	}
+	if err := s.storage.DeleteIssue(ctx, id); err != nil {
+		return err
+	}
+	return s.recordBeadEvent(events.BeadDeleted, deleted)
 }
 
 // Ping verifies that the upstream storage is reachable.
@@ -380,6 +421,40 @@ func (s *NativeDoltStore) updateParent(ctx context.Context, id, parentID string)
 		DependsOnID: parentID,
 		Type:        beadslib.DepParentChild,
 	}, s.actor)
+}
+
+type nativeDoltBeadEventPayload struct {
+	Bead Bead `json:"bead"`
+}
+
+func (s *NativeDoltStore) recordCurrentBeadEvent(ctx context.Context, eventType, id string) error {
+	issue, err := s.storage.GetIssue(ctx, id)
+	if err != nil {
+		return fmt.Errorf("refreshing bead %q after %s: %w", id, eventType, err)
+	}
+	bead, err := beadFromNativeIssue(issue)
+	if err != nil {
+		return err
+	}
+	return s.recordBeadEvent(eventType, bead)
+}
+
+func (s *NativeDoltStore) recordBeadEvent(eventType string, bead Bead) error {
+	payload, err := json.Marshal(nativeDoltBeadEventPayload{Bead: bead})
+	if err != nil {
+		return fmt.Errorf("marshaling %s payload for bead %q: %w", eventType, bead.ID, err)
+	}
+	recorder := s.recorder
+	if recorder == nil {
+		recorder = events.Discard
+	}
+	recorder.Record(events.Event{
+		Type:    eventType,
+		Actor:   s.actor,
+		Subject: bead.ID,
+		Payload: payload,
+	})
+	return nil
 }
 
 func nativeIssueFromBead(b Bead) (*beadslib.Issue, error) {
