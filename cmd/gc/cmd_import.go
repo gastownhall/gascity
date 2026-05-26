@@ -395,7 +395,6 @@ func collectAllImportsFS(fs fsys.FS, cityPath string) (map[string]config.Import,
 	return all, nil
 }
 
-//nolint:unparam // Keep fs injectable for symmetry with edit helpers and direct command tests.
 func collectInspectableImportsFS(fs fsys.FS, cityPath string, scope *importScopeState) (map[string]config.Import, error) {
 	imports := make(map[string]config.Import, len(scope.imports))
 	for name, imp := range scope.imports {
@@ -468,20 +467,15 @@ func findImportRigIndex(cityPath string, rigs []config.Rig, target string) (int,
 
 //nolint:unparam // keep fs injectable for parity with the other import helpers and direct tests.
 func doImportAdd(fs fsys.FS, cityPath, source, nameOverride, versionFlag string, stdout, stderr io.Writer) int {
-	return doImportAddAs("gc import add", fs, cityPath, source, nameOverride, versionFlag, stdout, stderr)
-}
-
-//nolint:unparam // keep fs injectable for parity with the other import helpers and direct tests.
-func doImportAddAs(command string, fs fsys.FS, cityPath, source, nameOverride, versionFlag string, stdout, stderr io.Writer) int {
 	scope, err := loadImportScopeFS(fs, cityPath)
 	if err != nil {
-		fmt.Fprintf(stderr, "%s: %v\n", command, err) //nolint:errcheck
+		fmt.Fprintf(stderr, "gc import add: %v\n", err) //nolint:errcheck
 		return 1
 	}
 
 	source, gitBacked, err := normalizeImportAddSource(fs, cityPath, source)
 	if err != nil {
-		fmt.Fprintf(stderr, "%s %q: %v\n", command, source, err) //nolint:errcheck
+		fmt.Fprintf(stderr, "gc import add %q: %v\n", source, err) //nolint:errcheck
 		return 1
 	}
 
@@ -490,33 +484,33 @@ func doImportAddAs(command string, fs fsys.FS, cityPath, source, nameOverride, v
 		name = deriveImportName(source)
 	}
 	if name == "" {
-		fmt.Fprintf(stderr, "%s: could not derive import name; use --name\n", command) //nolint:errcheck
+		fmt.Fprintln(stderr, "gc import add: could not derive import name; use --name") //nolint:errcheck
 		return 1
 	}
 	if strings.HasPrefix(name, "default-rig:") {
-		fmt.Fprintf(stderr, "%s: import name %q uses reserved prefix \"default-rig:\"\n", command, name) //nolint:errcheck
+		fmt.Fprintf(stderr, "gc import add: import name %q uses reserved prefix \"default-rig:\"\n", name) //nolint:errcheck
 		return 1
 	}
 	if _, exists := scope.imports[name]; exists {
-		fmt.Fprintf(stderr, "%s: import %q already exists\n", command, name) //nolint:errcheck
+		fmt.Fprintf(stderr, "gc import add: import %q already exists\n", name) //nolint:errcheck
 		return 1
 	}
 
 	version := versionFlag
 	if gitBacked {
 		if hasRepositoryRefInSource(source) {
-			fmt.Fprintf(stderr, "%s %q: embed refs in --version, not in the source URL\n", command, source) //nolint:errcheck
+			fmt.Fprintf(stderr, "gc import add %q: embed refs in --version, not in the source URL\n", source) //nolint:errcheck
 			return 1
 		}
 		if version == "" {
 			version, err = defaultImportVersionForSource(source)
 			if err != nil {
-				fmt.Fprintf(stderr, "%s %q: %v\n", command, source, err) //nolint:errcheck
+				fmt.Fprintf(stderr, "gc import add %q: %v\n", source, err) //nolint:errcheck
 				return 1
 			}
 		}
 	} else if version != "" {
-		fmt.Fprintf(stderr, "%s %q: --version is only valid for git-backed imports\n", command, source) //nolint:errcheck
+		fmt.Fprintf(stderr, "gc import add %q: --version is only valid for git-backed imports\n", source) //nolint:errcheck
 		return 1
 	}
 
@@ -526,51 +520,42 @@ func doImportAddAs(command string, fs fsys.FS, cityPath, source, nameOverride, v
 	}
 	allImports, err := collectAllImportsFS(fs, cityPath)
 	if err != nil {
-		fmt.Fprintf(stderr, "%s %q: %v\n", command, source, err) //nolint:errcheck
+		fmt.Fprintf(stderr, "gc import add %q: %v\n", source, err) //nolint:errcheck
 		return 1
 	}
 	allImports[scope.syntheticKey(name)] = scope.imports[name]
 	lock, err := syncImports(cityPath, allImports, packman.InstallResolveIfNeeded)
 	if err != nil {
-		fmt.Fprintf(stderr, "%s %q: %v\n", command, source, err) //nolint:errcheck
+		fmt.Fprintf(stderr, "gc import add %q: %v\n", source, err) //nolint:errcheck
 		return 1
 	}
 	if err := scope.save(); err != nil {
-		fmt.Fprintf(stderr, "%s %q: %v\n", command, source, err) //nolint:errcheck
+		fmt.Fprintf(stderr, "gc import add %q: %v\n", source, err) //nolint:errcheck
 		return 1
 	}
 	if err := writeImportLockfile(fs, cityPath, lock); err != nil {
-		fmt.Fprintf(stderr, "%s %q: %v\n", command, source, err) //nolint:errcheck
+		fmt.Fprintf(stderr, "gc import add %q: %v\n", source, err) //nolint:errcheck
 		return 1
 	}
-	if strings.HasPrefix(command, "gc import") {
-		fmt.Fprintf(stdout, "Added import %q from %s\n", name, source) //nolint:errcheck
-	} else {
-		fmt.Fprintf(stdout, "Added pack dependency %q from %s\n", name, source) //nolint:errcheck
-	}
+	fmt.Fprintf(stdout, "Added import %q from %s\n", name, source) //nolint:errcheck
 	return 0
 }
 
 //nolint:unparam // FS seam is intentional for command tests and symmetry with doImportAdd.
 func doImportRemove(fs fsys.FS, cityPath, name string, stdout, stderr io.Writer) int {
-	return doImportRemoveAs("gc import remove", fs, cityPath, name, stdout, stderr)
-}
-
-//nolint:unparam // FS seam is intentional for command tests and symmetry with doImportAdd.
-func doImportRemoveAs(command string, fs fsys.FS, cityPath, name string, stdout, stderr io.Writer) int {
 	scope, err := loadImportScopeFS(fs, cityPath)
 	if err != nil {
-		fmt.Fprintf(stderr, "%s: %v\n", command, err) //nolint:errcheck
+		fmt.Fprintf(stderr, "gc import remove: %v\n", err) //nolint:errcheck
 		return 1
 	}
 	if _, exists := scope.imports[name]; !exists {
 		removed, err := removeRootDefaultRigImportFS(fs, cityPath, scope, name)
 		if err != nil {
-			fmt.Fprintf(stderr, "%s: %v\n", command, err) //nolint:errcheck
+			fmt.Fprintf(stderr, "gc import remove: %v\n", err) //nolint:errcheck
 			return 1
 		}
 		if !removed {
-			fmt.Fprintf(stderr, "%s: import %q not found\n", command, name) //nolint:errcheck
+			fmt.Fprintf(stderr, "gc import remove: import %q not found\n", name) //nolint:errcheck
 			return 1
 		}
 	} else {
@@ -579,29 +564,25 @@ func doImportRemoveAs(command string, fs fsys.FS, cityPath, name string, stdout,
 
 	allImports, err := collectAllImportsFS(fs, cityPath)
 	if err != nil {
-		fmt.Fprintf(stderr, "%s %q: %v\n", command, name, err) //nolint:errcheck
+		fmt.Fprintf(stderr, "gc import remove %q: %v\n", name, err) //nolint:errcheck
 		return 1
 	}
 	delete(allImports, scope.syntheticKey(name))
 	delete(allImports, "default-rig:"+strings.TrimPrefix(name, "default-rig:"))
 	lock, err := syncImports(cityPath, allImports, packman.InstallResolveIfNeeded)
 	if err != nil {
-		fmt.Fprintf(stderr, "%s %q: %v\n", command, name, err) //nolint:errcheck
+		fmt.Fprintf(stderr, "gc import remove %q: %v\n", name, err) //nolint:errcheck
 		return 1
 	}
 	if err := scope.save(); err != nil {
-		fmt.Fprintf(stderr, "%s %q: %v\n", command, name, err) //nolint:errcheck
+		fmt.Fprintf(stderr, "gc import remove %q: %v\n", name, err) //nolint:errcheck
 		return 1
 	}
 	if err := writeImportLockfile(fs, cityPath, lock); err != nil {
-		fmt.Fprintf(stderr, "%s %q: %v\n", command, name, err) //nolint:errcheck
+		fmt.Fprintf(stderr, "gc import remove %q: %v\n", name, err) //nolint:errcheck
 		return 1
 	}
-	if strings.HasPrefix(command, "gc import") {
-		fmt.Fprintf(stdout, "Removed import %q\n", name) //nolint:errcheck
-	} else {
-		fmt.Fprintf(stdout, "Removed pack dependency %q\n", name) //nolint:errcheck
-	}
+	fmt.Fprintf(stdout, "Removed import %q\n", name) //nolint:errcheck
 	return 0
 }
 
@@ -636,65 +617,47 @@ func removeRootDefaultRigImportFS(fs fsys.FS, cityPath string, scope *importScop
 }
 
 func doImportInstall(cityPath string, stdout, stderr io.Writer) int {
-	return doImportInstallAs("gc import install", cityPath, stdout, stderr)
-}
-
-func doImportInstallAs(command string, cityPath string, stdout, stderr io.Writer) int {
 	allImports, err := collectAllImportsFS(fsys.OSFS{}, cityPath)
 	if err != nil {
-		fmt.Fprintf(stderr, "%s: %v\n", command, err) //nolint:errcheck
+		fmt.Fprintf(stderr, "gc import install: %v\n", err) //nolint:errcheck
 		return 1
 	}
 	lock, err := syncImports(cityPath, allImports, packman.InstallResolveIfNeeded)
 	if err != nil {
-		fmt.Fprintf(stderr, "%s: %v\n", command, err) //nolint:errcheck
+		fmt.Fprintf(stderr, "gc import install: %v\n", err) //nolint:errcheck
 		return 1
 	}
 	if err := writeImportLockfile(fsys.OSFS{}, cityPath, lock); err != nil {
-		fmt.Fprintf(stderr, "%s: %v\n", command, err) //nolint:errcheck
+		fmt.Fprintf(stderr, "gc import install: %v\n", err) //nolint:errcheck
 		return 1
 	}
 
 	lock, err = installLockedImports(cityPath)
 	if err != nil {
-		fmt.Fprintf(stderr, "%s: %v\n", command, err) //nolint:errcheck
+		fmt.Fprintf(stderr, "gc import install: %v\n", err) //nolint:errcheck
 		return 1
 	}
-	if strings.HasPrefix(command, "gc import") {
-		fmt.Fprintf(stdout, "Installed %d remote import(s)\n", len(lock.Packs)) //nolint:errcheck
-	} else {
-		fmt.Fprintf(stdout, "Synced %d remote pack dependencies\n", len(lock.Packs)) //nolint:errcheck
-	}
+	fmt.Fprintf(stdout, "Installed %d remote import(s)\n", len(lock.Packs)) //nolint:errcheck
 	return 0
 }
 
 func doImportCheck(cityPath string, stdout, stderr io.Writer) int {
-	return doImportCheckAs("gc import check", cityPath, stdout, stderr)
-}
-
-func doImportCheckAs(command string, cityPath string, stdout, stderr io.Writer) int {
 	allImports, err := collectAllImportsFS(fsys.OSFS{}, cityPath)
 	if err != nil {
-		fmt.Fprintf(stderr, "%s: %v\n", command, err) //nolint:errcheck
+		fmt.Fprintf(stderr, "gc import check: %v\n", err) //nolint:errcheck
 		return 1
 	}
 	report, err := checkInstalledImports(cityPath, allImports)
 	if err != nil {
-		fmt.Fprintf(stderr, "%s: %v\n", command, err) //nolint:errcheck
+		fmt.Fprintf(stderr, "gc import check: %v\n", err) //nolint:errcheck
 		return 1
 	}
-	noun := "Import state"
-	checked := "remote import(s)"
-	if !strings.HasPrefix(command, "gc import") {
-		noun = "Pack dependency state"
-		checked = "remote pack dependency source(s)"
-	}
 	if !report.HasIssues() {
-		fmt.Fprintf(stdout, "%s OK: %d %s checked\n", noun, report.CheckedSources, checked) //nolint:errcheck
+		fmt.Fprintf(stdout, "Import state OK: %d remote import(s) checked\n", report.CheckedSources) //nolint:errcheck
 		return 0
 	}
 
-	fmt.Fprintf(stdout, "%s has %d issue(s):\n", noun, len(report.Issues)) //nolint:errcheck
+	fmt.Fprintf(stdout, "Import state has %d issue(s):\n", len(report.Issues)) //nolint:errcheck
 	writeImportCheckIssues(stdout, report.Issues)
 	return 1
 }
@@ -725,19 +688,15 @@ func writeImportCheckIssues(w io.Writer, issues []packman.CheckIssue) {
 }
 
 func doImportUpgrade(cityPath, target string, stdout, stderr io.Writer) int {
-	return doImportUpgradeAs("gc import upgrade", cityPath, target, stdout, stderr)
-}
-
-func doImportUpgradeAs(command string, cityPath, target string, stdout, stderr io.Writer) int {
 	scope, err := loadImportScopeFS(fsys.OSFS{}, cityPath)
 	if err != nil {
-		fmt.Fprintf(stderr, "%s: %v\n", command, err) //nolint:errcheck
+		fmt.Fprintf(stderr, "gc import upgrade: %v\n", err) //nolint:errcheck
 		return 1
 	}
 
 	allImports, collectErr := collectAllImportsFS(fsys.OSFS{}, cityPath)
 	if collectErr != nil {
-		fmt.Fprintf(stderr, "%s: %v\n", command, collectErr) //nolint:errcheck
+		fmt.Fprintf(stderr, "gc import upgrade: %v\n", collectErr) //nolint:errcheck
 		return 1
 	}
 
@@ -747,68 +706,56 @@ func doImportUpgradeAs(command string, cityPath, target string, stdout, stderr i
 	} else {
 		inspectImports, inspectErr := collectInspectableImportsFS(fsys.OSFS{}, cityPath, scope)
 		if inspectErr != nil {
-			fmt.Fprintf(stderr, "%s: %v\n", command, inspectErr) //nolint:errcheck
+			fmt.Fprintf(stderr, "gc import upgrade: %v\n", inspectErr) //nolint:errcheck
 			return 1
 		}
 		targetImp, ok := lookupInspectableImport(target, inspectImports)
 		if !ok {
-			fmt.Fprintf(stderr, "%s: import %q not found\n", command, target) //nolint:errcheck
+			fmt.Fprintf(stderr, "gc import upgrade: import %q not found\n", target) //nolint:errcheck
 			return 1
 		}
 		if !isRemoteImportSource(targetImp.Source) {
-			fmt.Fprintf(stderr, "%s: import %q is a path import and cannot be upgraded\n", command, target) //nolint:errcheck
+			fmt.Fprintf(stderr, "gc import upgrade: import %q is a path import and cannot be upgraded\n", target) //nolint:errcheck
 			return 1
 		}
 		lock, err = syncImportsSelective(cityPath, allImports, map[string]struct{}{
 			targetImp.Source: {},
 		})
 		if err != nil {
-			fmt.Fprintf(stderr, "%s %q: %v\n", command, target, err) //nolint:errcheck
+			fmt.Fprintf(stderr, "gc import upgrade %q: %v\n", target, err) //nolint:errcheck
 			return 1
 		}
 	}
 	if err != nil {
-		fmt.Fprintf(stderr, "%s: %v\n", command, err) //nolint:errcheck
+		fmt.Fprintf(stderr, "gc import upgrade: %v\n", err) //nolint:errcheck
 		return 1
 	}
 	if err := writeImportLockfile(fsys.OSFS{}, cityPath, lock); err != nil {
-		fmt.Fprintf(stderr, "%s: %v\n", command, err) //nolint:errcheck
+		fmt.Fprintf(stderr, "gc import upgrade: %v\n", err) //nolint:errcheck
 		return 1
 	}
 	if target == "" {
-		if strings.HasPrefix(command, "gc import") {
-			fmt.Fprintf(stdout, "Upgraded %d remote import(s)\n", len(lock.Packs)) //nolint:errcheck
-		} else {
-			fmt.Fprintf(stdout, "Upgraded %d remote pack dependencies\n", len(lock.Packs)) //nolint:errcheck
-		}
+		fmt.Fprintf(stdout, "Upgraded %d remote import(s)\n", len(lock.Packs)) //nolint:errcheck
 	} else {
-		if strings.HasPrefix(command, "gc import") {
-			fmt.Fprintf(stdout, "Upgraded import %q\n", target) //nolint:errcheck
-		} else {
-			fmt.Fprintf(stdout, "Upgraded pack dependency %q\n", target) //nolint:errcheck
-		}
+		fmt.Fprintf(stdout, "Upgraded import %q\n", target) //nolint:errcheck
 	}
 	return 0
 }
 
 func doImportList(cityPath string, tree bool, stdout, stderr io.Writer) int {
-	return doImportListAs("gc import list", cityPath, tree, stdout, stderr)
-}
-
-func doImportListAs(command, cityPath string, tree bool, stdout, stderr io.Writer) int {
 	scope, err := loadImportScopeFS(fsys.OSFS{}, cityPath)
 	if err != nil {
-		fmt.Fprintf(stderr, "%s: %v\n", command, err) //nolint:errcheck
+		fmt.Fprintf(stderr, "gc import list: %v\n", err) //nolint:errcheck
 		return 1
 	}
 	lock, err := readImportLockfile(fsys.OSFS{}, cityPath)
 	if err != nil {
-		fmt.Fprintf(stderr, "%s: %v\n", command, err) //nolint:errcheck
+		fmt.Fprintf(stderr, "gc import list: %v\n", err) //nolint:errcheck
 		return 1
 	}
 	inspectImports, err := collectInspectableImportsFS(fsys.OSFS{}, cityPath, scope)
 	if err != nil {
-		fmt.Fprintf(stderr, "%s: %v\n", command, err) //nolint:errcheck
+		fmt.Fprintf(stderr, "gc import list: %v\n", err) //nolint:errcheck
 		return 1
 	}
 	var directNames []string
@@ -818,7 +765,7 @@ func doImportListAs(command, cityPath string, tree bool, stdout, stderr io.Write
 	sort.Strings(directNames)
 	if tree {
 		if err := writeImportTree(stdout, inspectImports, lock); err != nil {
-			fmt.Fprintf(stderr, "%s: %v\n", command, err) //nolint:errcheck
+			fmt.Fprintf(stderr, "gc import list: %v\n", err) //nolint:errcheck
 			return 1
 		}
 		return 0
@@ -826,14 +773,14 @@ func doImportListAs(command, cityPath string, tree bool, stdout, stderr io.Write
 
 	allImports, err := collectAllImportsFS(fsys.OSFS{}, cityPath)
 	if err != nil {
-		fmt.Fprintf(stderr, "%s: %v\n", command, err) //nolint:errcheck
+		fmt.Fprintf(stderr, "gc import list: %v\n", err) //nolint:errcheck
 		return 1
 	}
 	allowLockOnlyFallback := len(allImports) == len(inspectImports)
 
 	graph, graphErr := buildImportGraph(inspectImports, lock)
 	if graphErr != nil && !allowLockOnlyFallback {
-		fmt.Fprintf(stderr, "%s: %v\n", command, graphErr) //nolint:errcheck
+		fmt.Fprintf(stderr, "gc import list: %v\n", graphErr) //nolint:errcheck
 		return 1
 	}
 
@@ -874,45 +821,34 @@ func doImportListAs(command, cityPath string, tree bool, stdout, stderr io.Write
 }
 
 func doImportWhy(cityPath, target string, stdout, stderr io.Writer) int {
-	return doImportWhyAs("gc import why", cityPath, target, false, stdout, stderr)
-}
-
-func doImportWhyAs(command string, cityPath, target string, jsonOutput bool, stdout, stderr io.Writer) int {
 	scope, err := loadImportScopeFS(fsys.OSFS{}, cityPath)
 	if err != nil {
-		fmt.Fprintf(stderr, "%s: %v\n", command, err) //nolint:errcheck
+		fmt.Fprintf(stderr, "gc import why: %v\n", err) //nolint:errcheck
 		return 1
 	}
 	lock, err := readImportLockfile(fsys.OSFS{}, cityPath)
 	if err != nil {
-		fmt.Fprintf(stderr, "%s: %v\n", command, err) //nolint:errcheck
+		fmt.Fprintf(stderr, "gc import why: %v\n", err) //nolint:errcheck
 		return 1
 	}
 	inspectImports, err := collectInspectableImportsFS(fsys.OSFS{}, cityPath, scope)
 	if err != nil {
-		fmt.Fprintf(stderr, "%s: %v\n", command, err) //nolint:errcheck
+		fmt.Fprintf(stderr, "gc import why: %v\n", err) //nolint:errcheck
 		return 1
 	}
 	graph, err := buildImportGraph(inspectImports, lock)
 	if err != nil {
-		fmt.Fprintf(stderr, "%s: %v\n", command, err) //nolint:errcheck
+		fmt.Fprintf(stderr, "gc import why: %v\n", err) //nolint:errcheck
 		return 1
 	}
 
 	matches, err := findImportWhyMatches(graph, target)
 	if err != nil {
-		fmt.Fprintf(stderr, "%s: %v\n", command, err) //nolint:errcheck
+		fmt.Fprintf(stderr, "gc import why: %v\n", err) //nolint:errcheck
 		return 1
 	}
-	if jsonOutput {
-		if err := writeImportWhyJSON(stdout, target, matches); err != nil {
-			fmt.Fprintf(stderr, "%s: %v\n", command, err) //nolint:errcheck
-			return 1
-		}
-		return 0
-	}
 	if err := writeImportWhy(stdout, target, matches); err != nil {
-		fmt.Fprintf(stderr, "%s: %v\n", command, err) //nolint:errcheck
+		fmt.Fprintf(stderr, "gc import why: %v\n", err) //nolint:errcheck
 		return 1
 	}
 	return 0
@@ -962,7 +898,7 @@ func writeImportTreeNode(stdout io.Writer, name string, imp config.Import, lock 
 			return nil
 		}
 
-		children, err := packman.ReadCachedPackImportsLocked(imp.Source, pack)
+		children, err := packman.ReadCachedPackImports(imp.Source, pack.Commit)
 		if err != nil {
 			return err
 		}
@@ -1030,7 +966,7 @@ func buildImportGraphNode(name string, imp config.Import, lock *packman.Lockfile
 		return node, nil
 	}
 
-	children, err := packman.ReadCachedPackImportsLocked(imp.Source, pack)
+	children, err := packman.ReadCachedPackImports(imp.Source, pack.Commit)
 	if err != nil {
 		return nil, err
 	}
@@ -1133,40 +1069,6 @@ func importDisplayName(name string) string {
 	return name
 }
 
-type packWhyJSONResult struct {
-	SchemaVersion string                 `json:"schema_version"`
-	Target        string                 `json:"target"`
-	Direct        bool                   `json:"direct"`
-	Import        packDependencyJSON     `json:"import"`
-	Paths         [][]packDependencyJSON `json:"paths"`
-}
-
-func writeImportWhyJSON(stdout io.Writer, target string, matches [][]*importGraphNode) error {
-	if len(matches) == 0 {
-		return fmt.Errorf("no matches")
-	}
-	primary := matches[0][len(matches[0])-1]
-	paths := make([][]packDependencyJSON, 0, len(matches))
-	direct := false
-	for _, path := range matches {
-		if len(path) == 1 {
-			direct = true
-		}
-		rows := make([]packDependencyJSON, 0, len(path))
-		for _, node := range path {
-			rows = append(rows, packDependencyJSONRow(node))
-		}
-		paths = append(paths, rows)
-	}
-	return writeCLIJSONLine(stdout, packWhyJSONResult{
-		SchemaVersion: "1",
-		Target:        target,
-		Direct:        direct,
-		Import:        packDependencyJSONRow(primary),
-		Paths:         paths,
-	})
-}
-
 func writeImportWhy(stdout io.Writer, target string, matches [][]*importGraphNode) error {
 	if len(matches) == 0 {
 		return fmt.Errorf("no matches")
@@ -1207,20 +1109,6 @@ func writeImportWhy(stdout io.Writer, target string, matches [][]*importGraphNod
 	if primary.HasLock {
 		if _, err := fmt.Fprintf(stdout, "resolved: %s\n", primary.Resolved.Version); err != nil {
 			return err
-		}
-		if primary.Resolved.Registry != "" {
-			registry := primary.Resolved.Registry
-			if primary.Resolved.RegistryPack != "" {
-				registry += ":" + primary.Resolved.RegistryPack
-			}
-			if _, err := fmt.Fprintf(stdout, "registry: %s\n", registry); err != nil {
-				return err
-			}
-			if primary.Resolved.RegistrySource != "" {
-				if _, err := fmt.Fprintf(stdout, "registry source: %s\n", primary.Resolved.RegistrySource); err != nil {
-					return err
-				}
-			}
 		}
 	}
 	for _, path := range matches {
@@ -1405,9 +1293,6 @@ func defaultImportVersionForSource(source string) (string, error) {
 }
 
 func normalizeImportAddSource(fs fsys.FS, cityPath, source string) (string, bool, error) {
-	if strings.HasPrefix(strings.TrimSpace(source), "registry:") {
-		return "", false, fmt.Errorf("registry selectors are command-time locators, not durable import sources")
-	}
 	if isRemoteImportSource(source) {
 		return source, true, nil
 	}

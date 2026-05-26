@@ -11,7 +11,6 @@ import (
 	"github.com/BurntSushi/toml"
 	"github.com/gastownhall/gascity/internal/builtinpacks"
 	"github.com/gastownhall/gascity/internal/citylayout"
-	"github.com/gastownhall/gascity/internal/gchome"
 	gitutil "github.com/gastownhall/gascity/internal/git"
 	"github.com/gastownhall/gascity/internal/remotesource"
 )
@@ -97,9 +96,6 @@ func parseGitHubTreeURL(s string) (source, subpath, ref string) {
 // resolvePackRef resolves a pack reference to a local directory.
 // Handles local paths, GitHub tree URLs, and git source//sub#ref URLs.
 func resolvePackRef(ref, declDir, cityRoot string) (string, error) {
-	if strings.HasPrefix(strings.TrimSpace(ref), "registry:") {
-		return "", fmt.Errorf("registry selectors are command-time locators, not durable pack sources; use the concrete source in pack.toml")
-	}
 	if isGitHubTreeURL(ref) {
 		source, subpath, gitRef := parseGitHubTreeURL(ref)
 		cacheDir, err := fetchRemoteInclude(source, gitRef, cityRoot)
@@ -141,7 +137,6 @@ type remoteImportLockfile struct {
 
 type remoteImportLockEntry struct {
 	Commit string `toml:"commit"`
-	Source string `toml:"source,omitempty"`
 }
 
 func resolveLockedRemoteImport(source, cityRoot string) (string, bool, error) {
@@ -163,14 +158,15 @@ func resolveLockedRemoteImport(source, cityRoot string) (string, bool, error) {
 		return "", false, nil
 	}
 
-	cacheRoot := filepath.Join(gchome.Default(), "cache", "repos")
-	cacheSource := source
-	if entry.Source != "" {
-		cacheSource = entry.Source
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", false, fmt.Errorf("resolving home dir: %w", err)
 	}
-	cacheDir := filepath.Join(cacheRoot, RepoCacheKey(cacheSource, entry.Commit))
+
+	cacheRoot := filepath.Join(home, ".gc", "cache", "repos")
+	cacheDir := filepath.Join(cacheRoot, RepoCacheKey(source, entry.Commit))
 	if err := WithRepoCacheReadLock(cacheRoot, func() error {
-		return validateInstalledRemoteCache(cacheSource, cacheDir, entry.Commit)
+		return validateInstalledRemoteCache(source, cacheDir, entry.Commit)
 	}); err != nil {
 		return "", false, err
 	}
@@ -182,7 +178,7 @@ func resolveInstalledRemoteImport(source, cityRoot string) (string, error) {
 	data, err := os.ReadFile(lockPath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return "", fmt.Errorf("remote import %s is not installed (missing packs.lock); run \"gc pack sync\"", source)
+			return "", fmt.Errorf("remote import %s is not installed (missing packs.lock); run \"gc import install\"", source)
 		}
 		return "", fmt.Errorf("reading packs.lock: %w", err)
 	}
@@ -193,17 +189,18 @@ func resolveInstalledRemoteImport(source, cityRoot string) (string, error) {
 	}
 	entry, ok := lock.Packs[source]
 	if !ok || entry.Commit == "" {
-		return "", fmt.Errorf("remote import %s is not installed (missing packs.lock entry); run \"gc pack sync\"", source)
+		return "", fmt.Errorf("remote import %s is not installed (missing packs.lock entry); run \"gc import install\"", source)
 	}
 
-	cacheRoot := filepath.Join(gchome.Default(), "cache", "repos")
-	cacheSource := source
-	if entry.Source != "" {
-		cacheSource = entry.Source
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("resolving home dir: %w", err)
 	}
-	cacheDir := filepath.Join(cacheRoot, RepoCacheKey(cacheSource, entry.Commit))
+
+	cacheRoot := filepath.Join(home, ".gc", "cache", "repos")
+	cacheDir := filepath.Join(cacheRoot, RepoCacheKey(source, entry.Commit))
 	if err := WithRepoCacheReadLock(cacheRoot, func() error {
-		return validateInstalledRemoteCache(cacheSource, cacheDir, entry.Commit)
+		return validateInstalledRemoteCache(source, cacheDir, entry.Commit)
 	}); err != nil {
 		return "", err
 	}
@@ -219,7 +216,7 @@ func validateInstalledRemoteCache(source, cacheDir, commit string) error {
 			return nil
 		}
 		if gitutil.MissingCheckoutMarker(gitInfo, gitStatErr) {
-			return fmt.Errorf("remote import %s is locked but synthetic cache is invalid at %s: %w; run \"gc pack sync\"", source, cacheDir, err)
+			return fmt.Errorf("remote import %s is locked but synthetic cache is invalid at %s: %w; run \"gc import install\"", source, cacheDir, err)
 		}
 		if gitStatErr != nil {
 			return fmt.Errorf("checking cached import %s: %w; synthetic cache is invalid at %s: %w", source, gitStatErr, cacheDir, err)
@@ -228,7 +225,7 @@ func validateInstalledRemoteCache(source, cacheDir, commit string) error {
 		// path, so validate it with the ordinary remote-cache contract below.
 	}
 	if gitutil.MissingCheckoutMarker(gitInfo, gitStatErr) {
-		return fmt.Errorf("remote import %s is locked but not cached at %s; run \"gc pack sync\"", source, cacheDir)
+		return fmt.Errorf("remote import %s is locked but not cached at %s; run \"gc import install\"", source, cacheDir)
 	}
 	if gitStatErr != nil {
 		return fmt.Errorf("checking cached import %s: %w", source, gitStatErr)
@@ -245,14 +242,14 @@ func validateLockedRemoteCache(source, cacheDir, commit string) error {
 		return fmt.Errorf("reading cached import %s HEAD: %w", source, err)
 	}
 	if !gitutil.SameCommit(head, commit) {
-		return fmt.Errorf("cached import %s is checked out at %s, expected %s; run \"gc pack sync\"", source, strings.TrimSpace(head), commit)
+		return fmt.Errorf("cached import %s is checked out at %s, expected %s; run \"gc import install\"", source, strings.TrimSpace(head), commit)
 	}
 	status, err := runRepoCacheGit(cacheDir, "status", "--porcelain", "--ignored")
 	if err != nil {
 		return fmt.Errorf("checking cached import %s worktree status: %w", source, err)
 	}
 	if strings.TrimSpace(status) != "" {
-		return fmt.Errorf("cached import %s has local worktree changes; run \"gc pack sync\"", source)
+		return fmt.Errorf("cached import %s has local worktree changes; run \"gc import install\"", source)
 	}
 	return nil
 }

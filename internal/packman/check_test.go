@@ -63,28 +63,6 @@ func TestCheckInstalledReportsMissingCache(t *testing.T) {
 	assertSingleIssue(t, report, "missing-cache")
 }
 
-func TestCheckInstalledReportsPackHashMismatch(t *testing.T) {
-	home := t.TempDir()
-	city := t.TempDir()
-	t.Setenv("HOME", home)
-	stubCachedPackGit(t)
-
-	source := "https://example.com/tools.git"
-	commit := "aaaa"
-	writeTestLockfile(t, city, map[string]LockedPack{
-		source: {Version: "1.0.0", Commit: commit, Hash: "sha256:0000000000000000000000000000000000000000000000000000000000000000"},
-	})
-	stageCachedPackAtCommit(t, source, commit, commit, "[pack]\nname = \"tools\"\nschema = 1\n")
-
-	report, err := CheckInstalled(city, map[string]config.Import{
-		"pack:tools": {Source: source, Version: "^1.0"},
-	})
-	if err != nil {
-		t.Fatalf("CheckInstalled: %v", err)
-	}
-	assertSingleIssue(t, report, "pack-hash-mismatch")
-}
-
 func TestCheckInstalledAcceptsBundledSyntheticCache(t *testing.T) {
 	home := t.TempDir()
 	city := t.TempDir()
@@ -514,9 +492,6 @@ func assertSingleIssue(t *testing.T, report *CheckReport, code string) {
 	}
 	if report.Issues[0].Severity != CheckSeverityError {
 		t.Fatalf("issue severity = %q, want error", report.Issues[0].Severity)
-	}
-	if report.Issues[0].RepairHint == `run "gc import install"` {
-		t.Fatalf("issue repair hint = %q, want gc pack sync remediation", report.Issues[0].RepairHint)
 	}
 	if report.ErrorCount() != 1 {
 		t.Fatalf("ErrorCount = %d, want 1", report.ErrorCount())

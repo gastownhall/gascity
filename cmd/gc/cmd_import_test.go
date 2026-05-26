@@ -796,7 +796,7 @@ version = "^1.0"
 				Commit:     "abc123",
 				Path:       filepath.Join(dir, ".gc", "cache", "repos", "abc"),
 				Message:    "locked import is missing from the local repo cache",
-				RepairHint: `run "gc pack sync"`,
+				RepairHint: `run "gc import install"`,
 			}},
 		}, nil
 	}
@@ -811,7 +811,7 @@ version = "^1.0"
 		"Import state has 1 issue(s):",
 		"[error] missing-cache pack:tools",
 		"locked import is missing from the local repo cache",
-		`repair: run "gc pack sync"`,
+		`repair: run "gc import install"`,
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("stdout missing %q:\n%s\nstderr:\n%s", want, out, stderr.String())
@@ -1066,22 +1066,6 @@ func TestDoImportAddRejectsReservedDefaultRigPrefix(t *testing.T) {
 		t.Fatal("expected reserved prefix import add to fail")
 	}
 	if !strings.Contains(stderr.String(), "reserved prefix") {
-		t.Fatalf("stderr = %q", stderr.String())
-	}
-}
-
-func TestDoImportAddRejectsRegistryLocatorAsDurableSource(t *testing.T) {
-	clearGCEnv(t)
-	dir := t.TempDir()
-	writeCityToml(t, dir, "[workspace]\nname = \"demo\"\n")
-	writePackToml(t, dir, "[pack]\nname = \"demo\"\nschema = 1\n")
-
-	var stdout, stderr bytes.Buffer
-	code := doImportAdd(fsys.OSFS{}, dir, "registry:main:lighthouse", "", "^1.0", &stdout, &stderr)
-	if code == 0 {
-		t.Fatal("expected registry locator import add to fail")
-	}
-	if !strings.Contains(stderr.String(), "not durable import sources") {
 		t.Fatalf("stderr = %q", stderr.String())
 	}
 }

@@ -2,10 +2,8 @@ package main
 
 import (
 	"fmt"
-	"sort"
 	"strings"
 
-	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doctor"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/packman"
@@ -14,8 +12,6 @@ import (
 type importStateDoctorCheck struct {
 	cityPath string
 }
-
-const importStateSyncFixHint = `run "gc doctor --fix" or "gc pack sync"`
 
 func newImportStateDoctorCheck(cityPath string) *importStateDoctorCheck {
 	return &importStateDoctorCheck{cityPath: cityPath}
@@ -32,18 +28,11 @@ func (c *importStateDoctorCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult
 		r.Message = fmt.Sprintf("reading declared imports: %v", err)
 		return r
 	}
-	if details := durableRegistryImportDetails(imports); len(details) > 0 {
-		r.Status = doctor.StatusError
-		r.Message = fmt.Sprintf("%d durable import(s) use command-time registry selectors", len(details))
-		r.FixHint = `replace registry: sources with concrete sources by removing the import and re-adding it with "gc pack add <registry>:<pack>"`
-		r.Details = details
-		return r
-	}
 	report, err := checkInstalledImports(c.cityPath, imports)
 	if err != nil {
 		r.Status = doctor.StatusError
 		r.Message = fmt.Sprintf("checking import state: %v", err)
-		r.FixHint = importStateSyncFixHint
+		r.FixHint = `run "gc import install"`
 		return r
 	}
 	if !report.HasIssues() {
@@ -54,50 +43,16 @@ func (c *importStateDoctorCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult
 
 	r.Status = doctor.StatusError
 	r.Message = fmt.Sprintf("%d import state issue(s)", len(report.Issues))
-	r.FixHint = importStateSyncFixHint
+	r.FixHint = `run "gc import install"`
 	for _, issue := range report.Issues {
 		r.Details = append(r.Details, formatImportStateDoctorDetail(issue))
 	}
 	return r
 }
 
-func durableRegistryImportDetails(imports map[string]config.Import) []string {
-	var names []string
-	for name, imp := range imports {
-		if strings.HasPrefix(strings.TrimSpace(imp.Source), "registry:") {
-			names = append(names, name)
-		}
-	}
-	sort.Strings(names)
-	details := make([]string, 0, len(names))
-	for _, name := range names {
-		details = append(details, fmt.Sprintf("registry-selector-source | %s | %s | registry selectors are command-time inputs only; pack.toml must store the concrete pack source", name, imports[name].Source))
-	}
-	return details
-}
+func (c *importStateDoctorCheck) CanFix() bool { return false }
 
-func (c *importStateDoctorCheck) CanFix() bool { return true }
-
-func (c *importStateDoctorCheck) Fix(_ *doctor.CheckContext) error {
-	imports, err := collectAllImportsFS(fsys.OSFS{}, c.cityPath)
-	if err != nil {
-		return fmt.Errorf("reading declared imports: %w", err)
-	}
-	if details := durableRegistryImportDetails(imports); len(details) > 0 {
-		return fmt.Errorf("durable registry selectors require manual remove/re-add with gc pack add")
-	}
-	lock, err := syncImports(c.cityPath, imports, packman.InstallResolveIfNeeded)
-	if err != nil {
-		return err
-	}
-	if err := writeImportLockfile(fsys.OSFS{}, c.cityPath, lock); err != nil {
-		return err
-	}
-	if _, err := installLockedImports(c.cityPath); err != nil {
-		return err
-	}
-	return nil
-}
+func (c *importStateDoctorCheck) Fix(_ *doctor.CheckContext) error { return nil }
 
 func formatImportStateDoctorDetail(issue packman.CheckIssue) string {
 	parts := []string{issue.Code}

@@ -80,6 +80,7 @@ func finalizeInit(cityPath string, stdout, stderr io.Writer, opts initFinalizeOp
 	} else if !opts.showProgress && stdout != nil {
 		fmt.Fprintln(stdout, "Skipping provider readiness checks.") //nolint:errcheck // best-effort stdout
 	}
+
 	// Load config to resolve explicit HQ prefix (workspace.prefix field).
 	// Config must be loadable at this point — using DeriveBeadsPrefix as a
 	// silent fallback would create a prefix mismatch between init and runtime.

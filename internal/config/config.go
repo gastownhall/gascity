@@ -650,15 +650,14 @@ type AgentOverride struct {
 	OptionDefaults map[string]string `toml:"option_defaults,omitempty"`
 }
 
-// PackSource defines a legacy remote pack repository for the old [packs] city
-// config surface. New PackV2 dependency manifests use [imports.*] with source
-// plus optional version instead.
+// PackSource defines a remote pack repository.
+// Referenced by name in rig pack fields and fetched into the cache.
 type PackSource struct {
-	// Source is the legacy git repository URL.
+	// Source is the git repository URL.
 	Source string `toml:"source" jsonschema:"required"`
-	// Ref is legacy [packs] metadata, not a public PackV2 import field.
+	// Ref is the git ref to checkout (branch, tag, or commit). Defaults to HEAD.
 	Ref string `toml:"ref,omitempty"`
-	// Path is legacy [packs] metadata, not a public PackV2 import field.
+	// Path is a subdirectory within the repo containing the pack files.
 	Path string `toml:"path,omitempty"`
 }
 

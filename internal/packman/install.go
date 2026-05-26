@@ -30,20 +30,9 @@ type packConfig struct {
 	Imports map[string]config.Import `toml:"imports,omitempty"`
 }
 
-// SourceHint supplies resolved source metadata for lock synchronization.
-type SourceHint struct {
-	ResolverSource string
-}
-
 // ReadCachedPackImports loads a cached pack's nested imports from pack.toml.
 func ReadCachedPackImports(source, commit string) (map[string]config.Import, error) {
-	return ReadCachedPackImportsLocked(source, LockedPack{Commit: commit})
-}
-
-// ReadCachedPackImportsLocked loads nested imports using an existing lock entry.
-func ReadCachedPackImportsLocked(lockSource string, pack LockedPack) (map[string]config.Import, error) {
-	source := materializedSource(lockSource, pack)
-	cachePath, err := RepoCachePath(source, pack.Commit)
+	cachePath, err := RepoCachePath(source, commit)
 	if err != nil {
 		return nil, err
 	}
@@ -58,7 +47,7 @@ func ReadCachedPackImportsLocked(lockSource string, pack LockedPack) (map[string
 	var imports map[string]config.Import
 	if err := config.WithRepoCacheReadLock(root, func() error {
 		if builtinpacks.IsSource(source) {
-			if err := builtinpacks.ValidateSyntheticRepo(cachePath, pack.Commit); err != nil {
+			if err := builtinpacks.ValidateSyntheticRepo(cachePath, commit); err != nil {
 				gitInfo, gitErr := os.Stat(filepath.Join(cachePath, ".git"))
 				if gitutil.MissingCheckoutMarker(gitInfo, gitErr) {
 					return fmt.Errorf("synthetic cache is invalid: %w", err)
@@ -66,17 +55,14 @@ func ReadCachedPackImportsLocked(lockSource string, pack LockedPack) (map[string
 				if gitErr != nil {
 					return fmt.Errorf("checking bundled repo cache %q: %w; synthetic cache is invalid: %w", cachePath, gitErr, err)
 				}
-				if err := validateCachedRepoCheckout(cachePath, pack.Commit); err != nil {
+				if err := validateCachedRepoCheckout(cachePath, commit); err != nil {
 					return err
 				}
 			}
 		} else {
-			if err := validateCachedRepoCheckout(cachePath, pack.Commit); err != nil {
+			if err := validateCachedRepoCheckout(cachePath, commit); err != nil {
 				return err
 			}
-		}
-		if err := validateLockedPackHash(lockSource, pack, cachePath); err != nil {
-			return err
 		}
 		var readErr error
 		imports, readErr = readPackImports(packPath)
@@ -104,11 +90,7 @@ func InstallLocked(cityRoot string) (*Lockfile, error) {
 		if pack.Commit == "" {
 			return nil, fmt.Errorf("lock entry %q is missing commit", source)
 		}
-		cachePath, err := EnsureRepoInCache(materializedSource(source, pack), pack.Commit)
-		if err != nil {
-			return nil, err
-		}
-		if err := validateLockedPackHash(source, pack, cachePath); err != nil {
+		if _, err := EnsureRepoInCache(source, pack.Commit); err != nil {
 			return nil, err
 		}
 	}
@@ -117,21 +99,16 @@ func InstallLocked(cityRoot string) (*Lockfile, error) {
 
 // SyncLock resolves the reachable remote-import closure and returns the updated lock.
 func SyncLock(cityRoot string, imports map[string]config.Import, mode InstallMode) (*Lockfile, error) {
-	return syncLock(cityRoot, imports, mode, nil, nil)
-}
-
-// SyncLockWithHints resolves imports while preserving caller-provided source hints.
-func SyncLockWithHints(cityRoot string, imports map[string]config.Import, mode InstallMode, hints map[string]SourceHint) (*Lockfile, error) {
-	return syncLock(cityRoot, imports, mode, nil, hints)
+	return syncLock(cityRoot, imports, mode, nil)
 }
 
 // SyncLockSelectiveUpgrade refreshes only the listed remote sources while
 // preserving every other reachable import from the existing lock when possible.
 func SyncLockSelectiveUpgrade(cityRoot string, imports map[string]config.Import, upgradeSources map[string]struct{}) (*Lockfile, error) {
-	return syncLock(cityRoot, imports, InstallResolveIfNeeded, upgradeSources, nil)
+	return syncLock(cityRoot, imports, InstallResolveIfNeeded, upgradeSources)
 }
 
-func syncLock(cityRoot string, imports map[string]config.Import, mode InstallMode, upgradeSources map[string]struct{}, hints map[string]SourceHint) (*Lockfile, error) {
+func syncLock(cityRoot string, imports map[string]config.Import, mode InstallMode, upgradeSources map[string]struct{}) (*Lockfile, error) {
 	existing, err := ReadLockfile(fsys.OSFS{}, cityRoot)
 	if err != nil {
 		return nil, err
@@ -141,7 +118,6 @@ func syncLock(cityRoot string, imports map[string]config.Import, mode InstallMod
 		mode:           mode,
 		existing:       existing,
 		upgradeSources: upgradeSources,
-		sourceHints:    hints,
 		chosen:         make(map[string]LockedPack),
 		refreshed:      make(map[string]bool),
 	}
@@ -179,7 +155,6 @@ type syncState struct {
 	mode           InstallMode
 	existing       *Lockfile
 	upgradeSources map[string]struct{}
-	sourceHints    map[string]SourceHint
 	chosen         map[string]LockedPack
 	refreshed      map[string]bool
 }
@@ -217,14 +192,6 @@ func (s *syncState) resolveSource(source, constraint string) (bool, error) {
 	}
 
 	existing, hasExisting := s.existing.Packs[source]
-	var existingMeta *LockedPack
-	var existingForResolution *LockedPack
-	if hasExisting {
-		existingMeta = &existing
-		if !forceUpgrade {
-			existingForResolution = &existing
-		}
-	}
 	switch s.mode {
 	case InstallFromLock:
 		if !hasExisting {
@@ -244,39 +211,15 @@ func (s *syncState) resolveSource(source, constraint string) (bool, error) {
 		return false, fmt.Errorf("unknown install mode %d", s.mode)
 	}
 
-	resolverSource := s.resolverSource(source, existingMeta)
-	resolved, err := ResolveVersionWithOptions(resolverSource, constraint, ResolveOptions{
-		Existing: existingForResolution,
-	})
+	resolved, err := ResolveVersion(source, constraint)
 	if err != nil {
 		return false, err
 	}
 	return s.storeChosen(source, LockedPack{
-		Version:         resolved.Version,
-		Commit:          resolved.Commit,
-		Fetched:         time.Now().UTC(),
-		Source:          resolved.Source,
-		SourceKind:      resolved.SourceKind,
-		Ref:             resolved.Ref,
-		Hash:            resolved.Hash,
-		Registry:        resolved.Registry,
-		RegistrySource:  resolved.RegistrySource,
-		RegistryPack:    resolved.Pack,
-		Withdrawn:       resolved.Withdrawn,
-		WithdrawnReason: resolved.WithdrawnReason,
+		Version: resolved.Version,
+		Commit:  resolved.Commit,
+		Fetched: time.Now().UTC(),
 	}, true), nil
-}
-
-func (s *syncState) resolverSource(source string, existing *LockedPack) string {
-	if s != nil && s.sourceHints != nil {
-		if hint, ok := s.sourceHints[source]; ok && strings.TrimSpace(hint.ResolverSource) != "" {
-			return hint.ResolverSource
-		}
-	}
-	if existing != nil && existing.Registry != "" && existing.RegistryPack != "" {
-		return "registry:" + existing.Registry + ":" + existing.RegistryPack
-	}
-	return source
 }
 
 func (s *syncState) discoverReachableClosure(imports map[string]config.Import) (map[string]string, map[string]struct{}, bool, error) {
@@ -318,7 +261,7 @@ func (s *syncState) walkImport(_ string, imp config.Import, constraints map[stri
 		return nil
 	}
 
-	if _, err := s.cachedPackPath(imp.Source, chosen); err != nil {
+	if _, err := s.cachedPackPath(imp.Source, chosen.Commit); err != nil {
 		return err
 	}
 	if !imp.ImportIsTransitive() {
@@ -329,7 +272,7 @@ func (s *syncState) walkImport(_ string, imp config.Import, constraints map[stri
 	}
 	seen[imp.Source] = true
 
-	nested, err := ReadCachedPackImportsLocked(imp.Source, chosen)
+	nested, err := ReadCachedPackImports(imp.Source, chosen.Commit)
 	if err != nil {
 		return err
 	}
@@ -346,35 +289,15 @@ func (s *syncState) walkImport(_ string, imp config.Import, constraints map[stri
 	return nil
 }
 
-func (s *syncState) cachedPackPath(source string, pack LockedPack) (string, error) {
-	cacheSource := materializedSource(source, pack)
-	cachePath, err := EnsureRepoInCache(cacheSource, pack.Commit)
+func (s *syncState) cachedPackPath(source, commit string) (string, error) {
+	cachePath, err := EnsureRepoInCache(source, commit)
 	if err != nil {
 		return "", err
 	}
-	if err := validateLockedPackHash(source, pack, cachePath); err != nil {
-		return "", err
-	}
-	if subpath := normalizeRemoteSource(cacheSource).Subpath; subpath != "" {
+	if subpath := normalizeRemoteSource(source).Subpath; subpath != "" {
 		cachePath = filepath.Join(cachePath, subpath)
 	}
 	return cachePath, nil
-}
-
-func validateLockedPackHash(lockSource string, pack LockedPack, cachePath string) error {
-	if pack.Hash == "" {
-		return nil
-	}
-	source := materializedSource(lockSource, pack)
-	packRoot := cachedPackDir(source, cachePath)
-	got, err := HashPackTree(packRoot)
-	if err != nil {
-		return fmt.Errorf("hashing locked pack %q at %s: %w", lockSource, packRoot, err)
-	}
-	if got != pack.Hash {
-		return fmt.Errorf("locked pack %q hash mismatch at %s: got %s, expected %s", lockSource, packRoot, got, pack.Hash)
-	}
-	return nil
 }
 
 func (s *syncState) storeChosen(source string, pack LockedPack, refreshed bool) bool {
@@ -390,12 +313,12 @@ func (s *syncState) storeChosen(source string, pack LockedPack, refreshed bool) 
 
 func (s *syncState) buildLock(reachable map[string]struct{}) *Lockfile {
 	lock := &Lockfile{
-		Packs: make(map[string]LockedPack, len(reachable)),
+		Schema: LockfileSchema,
+		Packs:  make(map[string]LockedPack, len(reachable)),
 	}
 	for source := range reachable {
 		lock.Packs[source] = s.chosen[source]
 	}
-	lock.Schema = lockfileSchema(lock)
 	return lock
 }
 
@@ -455,13 +378,6 @@ func matchesExisting(pack LockedPack, constraint string) bool {
 		return pack.Commit == strings.TrimPrefix(constraint, "sha:")
 	}
 	return matchesConstraint(pack.Version, constraint)
-}
-
-func materializedSource(lockSource string, pack LockedPack) string {
-	if pack.Source != "" {
-		return pack.Source
-	}
-	return lockSource
 }
 
 func mergeConstraints(existing, next string) (string, error) {

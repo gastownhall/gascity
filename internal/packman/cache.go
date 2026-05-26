@@ -10,7 +10,6 @@ import (
 
 	"github.com/gastownhall/gascity/internal/builtinpacks"
 	"github.com/gastownhall/gascity/internal/config"
-	"github.com/gastownhall/gascity/internal/gchome"
 	gitutil "github.com/gastownhall/gascity/internal/git"
 	"github.com/gastownhall/gascity/internal/remotesource"
 )
@@ -22,7 +21,11 @@ var (
 
 // RepoCacheRoot returns the shared machine-local repo cache root.
 func RepoCacheRoot() (string, error) {
-	return filepath.Join(gchome.Default(), "cache", "repos"), nil
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("resolving home dir: %w", err)
+	}
+	return filepath.Join(home, ".gc", "cache", "repos"), nil
 }
 
 // RepoCacheKey returns the canonical source+commit cache key.

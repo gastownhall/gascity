@@ -458,13 +458,13 @@ PackRigDefaults holds the [defaults.rig] block — defaults applied to rigs crea
 
 ## PackSource
 
-PackSource defines a legacy remote pack repository for the old [packs] city config surface.
+PackSource defines a remote pack repository.
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `source` | string | **yes** |  | Source is the legacy git repository URL. |
-| `ref` | string |  |  | Ref is legacy [packs] metadata, not a public PackV2 import field. |
-| `path` | string |  |  | Path is legacy [packs] metadata, not a public PackV2 import field. |
+| `source` | string | **yes** |  | Source is the git repository URL. |
+| `ref` | string |  |  | Ref is the git ref to checkout (branch, tag, or commit). Defaults to HEAD. |
+| `path` | string |  |  | Path is a subdirectory within the repo containing the pack files. |
 
 ## Patches
 

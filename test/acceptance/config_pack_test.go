@@ -94,16 +94,15 @@ func TestPackListCommands(t *testing.T) {
 		if err != nil {
 			t.Fatalf("gc pack list failed: %v\n%s", err, out)
 		}
-		// The canonical dependency view should return a useful status even
-		// when the example has no PackV2 imports.
+		// Gastown city should show pack sources.
 		if strings.TrimSpace(out) == "" {
 			t.Fatal("pack list produced empty output")
 		}
 	})
 
 	t.Run("FetchDoesNotCrash", func(t *testing.T) {
-		// Legacy pack fetch may fail if git remotes are unreachable, but it
-		// remains available as compatibility surface and should not crash.
+		// pack fetch may fail if git remotes are unreachable, but
+		// should not crash. Accept either success or network error.
 		out, _ := c.GC("pack", "fetch")
 		_ = out
 	})

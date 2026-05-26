@@ -117,7 +117,6 @@ A PackV2 directory has this abstract shape:
 ```text
 pack-root/
   pack.toml
-  agents/
   assets/
   formulas/
   overlay/
@@ -137,7 +136,6 @@ The following top-level paths are reserved by PackV2:
 | Path | Kind | Meaning |
 |---|---|---|
 | `pack.toml` | file | Required pack manifest and metadata. |
-| `agents/` | directory | Well-known agent definition directory. Each immediate child may contain `agent.toml`. |
 | `assets/` | directory | Preferred location for private implementation files. |
 | `formulas/` | directory | Well-known formula directory. |
 | `overlay/` | directory | Pack-level overlay directory collected automatically from imported packs. |
@@ -177,6 +175,7 @@ Conceptually, the file has this structure:
 PackToml {
     pack: PackMeta
     imports: map<string, PackImport>
+    agent: list<Agent>
     named_session: list<NamedSession>
     service: list<Service>
     providers: map<string, ProviderSpec>
@@ -278,25 +277,22 @@ source = "../packs/gascity"
 The removed `rigs.includes` field is not a PackV2 import surface. A loader must
 hard-fail if a rig uses `includes`.
 
-### 1.2.4. `agents/<name>/agent.toml`
+### 1.2.4. `[[agent]]`
 
-Each immediate child directory under `agents/` defines an agent template. The
-directory name is the agent's local name. If present, `agent.toml` provides
-per-agent configuration; otherwise the agent exists by convention and uses
-defaults from its directory contents.
+Each `[[agent]]` table defines an agent template.
 
 ```toml
-# agents/reviewer/agent.toml
+[[agent]]
+name = "reviewer"
 scope = "city"
 prompt_template = "assets/prompts/reviewer.md"
 provider = "codex"
 ```
 
-The agent name is inferred from the directory name, not authored inside
-`agent.toml`. Agent directory names must be valid session identifiers: they
-start with an ASCII letter or digit and continue with ASCII letters, digits,
-hyphens, or underscores. Slashes, dots, and spaces are not valid agent name
-characters.
+The `name` field is required. Agent names must be valid session identifiers:
+they start with an ASCII letter or digit and continue with ASCII letters,
+digits, hyphens, or underscores. Slashes, dots, and spaces are not valid agent
+name characters.
 
 The `scope` field controls where a pack-defined agent is instantiated:
 
@@ -311,6 +307,7 @@ Pack authors should treat these fields as public PackV2 agent fields:
 
 | Field | Type | Rule |
 |---|---|---|
+| `name` | string | Required local agent name. |
 | `description` | string | Human-readable description. |
 | `dir` | string | Identity prefix. Reusable packs should usually omit this. |
 | `work_dir` | string | Session working directory without changing identity. |
@@ -357,10 +354,6 @@ Pack authors should treat these fields as public PackV2 agent fields:
 | `wake_mode` | string | `resume` or `fresh`. |
 
 Fields not listed above are not PackV2 agent fields.
-
-Legacy inline `[[agent]]` tables are not the public PackV2 authoring surface.
-Current loader behavior may still consume them for compatibility, but newly
-authored packs must use `agents/<name>/agent.toml`.
 
 ### 1.2.5. `[[named_session]]`
 
@@ -500,7 +493,6 @@ The following fields are not PackV2 `pack.toml` fields:
 
 | Field | Reason |
 |---|---|
-| `[[agent]]` | Legacy inline agent surface. New packs use `agents/<name>/agent.toml`. |
 | `[agent_defaults]` | City-level only. Appears in `city.toml`, not `pack.toml`. |
 | `[agents]` | City-level compatibility alias only. It is not valid in `pack.toml`. |
 | `[defaults.rig.imports]` | City-level only. Appears in `city.toml`, not `pack.toml`. |
@@ -523,7 +515,8 @@ PackV2 does not scan `assets/` directly. Files under `assets/` become relevant
 only when a pack definition references them, for example:
 
 ```toml
-# agents/reviewer/agent.toml
+[[agent]]
+name = "reviewer"
 prompt_template = "assets/prompts/reviewer.md"
 session_setup_script = "assets/scripts/setup-reviewer.sh"
 overlay_dir = "assets/overlays/reviewer"
