@@ -2,6 +2,7 @@ package formula
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -20,6 +21,9 @@ const (
 	FormulaExtJSON       = ".formula.json"
 	FormulaExt           = FormulaExtJSON // Legacy alias for backwards compatibility
 )
+
+// ErrVarValidation reports invalid formula variable input.
+var ErrVarValidation = errors.New("variable validation failed")
 
 // Parser handles loading and resolving formulas.
 //
@@ -610,7 +614,7 @@ func formatVarValidationErrors(errs []string) error {
 	if len(errs) == 0 {
 		return nil
 	}
-	return fmt.Errorf("variable validation failed:\n  - %s", strings.Join(errs, "\n  - "))
+	return fmt.Errorf("%w:\n  - %s", ErrVarValidation, strings.Join(errs, "\n  - "))
 }
 
 // ApplyDefaults returns a new map with default values filled in.
