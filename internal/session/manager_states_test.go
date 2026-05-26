@@ -258,12 +258,12 @@ func TestConformance_SuspendFailedCreateTearsDownRuntime(t *testing.T) {
 		t.Fatalf("set failed-create state: %v", err)
 	}
 
-	suspendErr := m.Suspend(id)
-	if suspendErr != nil {
-		t.Fatalf("Suspend(failed-create) = %v, want nil (must not block gc stop)", suspendErr)
-	}
-	if errors.Is(suspendErr, ErrIllegalTransition) {
-		t.Fatalf("Suspend(failed-create) returned illegal-transition; want success")
+	// Suspend(failed-create) must succeed so `gc stop` is not blocked
+	// city-wide. The pre-fix regression returned a wrapped ErrIllegalTransition;
+	// either symptom (any non-nil) trips this assertion and pinpoints the
+	// regression by quoting the returned error.
+	if err := m.Suspend(id); err != nil {
+		t.Fatalf("Suspend(failed-create) = %v, want nil (must not block gc stop)", err)
 	}
 	if sp.CountCalls("Stop", sessName) == 0 {
 		t.Errorf("Suspend(failed-create) did not tear down the leaked runtime session %q", sessName)
