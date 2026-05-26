@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/fsys"
@@ -11,8 +12,10 @@ import (
 
 // PreflightBDContext is the bd-reported backend state for a beads scope.
 type PreflightBDContext struct {
-	Backend  string
-	DoltMode string
+	Backend       string
+	DoltMode      string
+	BDVersion     string
+	SchemaVersion int
 }
 
 // PreflightChecker evaluates whether a beads scope may use native storage.
@@ -25,6 +28,9 @@ type PreflightChecker struct {
 	BDContext func(scope string) (PreflightBDContext, error)
 	// DatabaseProjectID reads the authoritative database _project_id for the scope.
 	DatabaseProjectID func(scope string) (string, bool, error)
+	// BeadsLibraryVersion is the linked github.com/steveyegge/beads module
+	// version. Empty means infer it from build info.
+	BeadsLibraryVersion string
 }
 
 // Check runs the beads backend preflight for scope and returns typed diagnostics.
@@ -33,12 +39,15 @@ func (c PreflightChecker) Check(scope string) (PreflightResult, error) {
 	if err != nil {
 		return PreflightResult{}, err
 	}
+	bdCtx, bdCtxErr := c.readBDContext(scope)
 
 	checks := []PreflightCheckResult{
 		c.checkProvider(),
 		c.checkMetadataBackend(metadata),
-		c.checkBDContextAgreement(scope, metadata),
+		c.checkBDContextAgreement(metadata, bdCtx, bdCtxErr),
+		c.checkDoltModeSafe(metadata, bdCtx, bdCtxErr),
 		c.checkIdentityMatch(scope, metadata),
+		c.checkVersionCompat(bdCtx, bdCtxErr),
 		c.checkContractShape(metadata),
 	}
 	verdict := preflightVerdictForChecks(checks)
@@ -51,6 +60,7 @@ func (c PreflightChecker) Check(scope string) (PreflightResult, error) {
 	}
 	if verdict != PreflightVerdictEligible {
 		result.Fallback = PreflightFallbackBdStore
+		result.FallbackReason = preflightFallbackReason(checks)
 	}
 	return NewPreflightResult(result), nil
 }
@@ -110,14 +120,20 @@ func (c PreflightChecker) checkMetadataBackend(metadata preflightMetadata) Prefl
 	}
 }
 
-func (c PreflightChecker) checkBDContextAgreement(scope string, metadata preflightMetadata) PreflightCheckResult {
-	details := PreflightDetails{MetadataBackend: metadata.Backend}
+func (c PreflightChecker) readBDContext(scope string) (PreflightBDContext, error) {
 	if c.BDContext == nil {
-		return NewPreflightCheckResult(PreflightCheckBDContextAgreement, PreflightCheckFail, "bd context reader is not configured", details)
+		return PreflightBDContext{}, fmt.Errorf("bd context reader is not configured")
 	}
 	ctx, err := c.BDContext(scope)
-	details.BDContextBackend = strings.TrimSpace(ctx.Backend)
-	details.BDContextDoltMode = strings.TrimSpace(ctx.DoltMode)
+	ctx.Backend = strings.TrimSpace(ctx.Backend)
+	ctx.DoltMode = strings.TrimSpace(ctx.DoltMode)
+	ctx.BDVersion = strings.TrimSpace(ctx.BDVersion)
+	return ctx, err
+}
+
+func (c PreflightChecker) checkBDContextAgreement(metadata preflightMetadata, ctx PreflightBDContext, err error) PreflightCheckResult {
+	details := PreflightDetails{MetadataBackend: metadata.Backend}
+	details.BDContextBackend = ctx.Backend
 	if err != nil {
 		return NewPreflightCheckResult(PreflightCheckBDContextAgreement, PreflightCheckFail, "bd context is unreachable", details)
 	}
@@ -127,16 +143,28 @@ func (c PreflightChecker) checkBDContextAgreement(scope string, metadata preflig
 	if details.MetadataBackend != details.BDContextBackend {
 		return NewPreflightCheckResult(PreflightCheckBDContextAgreement, PreflightCheckFail, fmt.Sprintf("Metadata backend=%s; bd context reports backend=%s", details.MetadataBackend, details.BDContextBackend), details)
 	}
-	if details.BDContextBackend != "dolt" {
-		return NewPreflightCheckResult(PreflightCheckBDContextAgreement, PreflightCheckPass, "bd context agrees with metadata backend", details)
+	return NewPreflightCheckResult(PreflightCheckBDContextAgreement, PreflightCheckPass, "bd context agrees with metadata backend", details)
+}
+
+func (c PreflightChecker) checkDoltModeSafe(metadata preflightMetadata, ctx PreflightBDContext, err error) PreflightCheckResult {
+	details := PreflightDetails{
+		MetadataBackend:   metadata.Backend,
+		BDContextBackend:  ctx.Backend,
+		BDContextDoltMode: ctx.DoltMode,
 	}
-	switch details.BDContextDoltMode {
+	if err != nil {
+		return NewPreflightCheckResult(PreflightCheckDoltModeSafe, PreflightCheckFail, "bd context is unreachable", details)
+	}
+	if metadata.Backend != "dolt" || ctx.Backend != "dolt" {
+		return NewPreflightCheckResult(PreflightCheckDoltModeSafe, PreflightCheckPass, "Dolt mode check is not required for non-dolt backend", details)
+	}
+	switch ctx.DoltMode {
 	case "server":
-		return NewPreflightCheckResult(PreflightCheckBDContextAgreement, PreflightCheckPass, "bd context reports dolt server mode", details)
+		return NewPreflightCheckResult(PreflightCheckDoltModeSafe, PreflightCheckPass, "bd context reports dolt server mode", details)
 	case "embedded":
-		return NewPreflightCheckResult(PreflightCheckBDContextAgreement, PreflightCheckWarn, "bd context reports dolt embedded mode", details)
+		return NewPreflightCheckResult(PreflightCheckDoltModeSafe, PreflightCheckFail, "dolt_mode=embedded requires server mode or native_embedded build tag", details)
 	default:
-		return NewPreflightCheckResult(PreflightCheckBDContextAgreement, PreflightCheckFail, "bd context reports unsupported dolt mode", details)
+		return NewPreflightCheckResult(PreflightCheckDoltModeSafe, PreflightCheckFail, "bd context reports unsupported dolt mode", details)
 	}
 }
 
@@ -157,6 +185,31 @@ func (c PreflightChecker) checkIdentityMatch(scope string, metadata preflightMet
 		return NewPreflightCheckResult(PreflightCheckIdentityMatch, PreflightCheckFail, "project_id mismatch", details)
 	}
 	return NewPreflightCheckResult(PreflightCheckIdentityMatch, PreflightCheckPass, "project_id matches", details)
+}
+
+func (c PreflightChecker) checkVersionCompat(ctx PreflightBDContext, err error) PreflightCheckResult {
+	libraryVersion := strings.TrimPrefix(strings.TrimSpace(c.BeadsLibraryVersion), "v")
+	if libraryVersion == "" {
+		libraryVersion = strings.TrimPrefix(beadsModuleVersion(), "v")
+	}
+	details := PreflightDetails{
+		BDVersion:           ctx.BDVersion,
+		BeadsLibraryVersion: libraryVersion,
+		SchemaVersion:       ctx.SchemaVersion,
+	}
+	if err != nil {
+		return NewPreflightCheckResult(PreflightCheckVersionCompat, PreflightCheckFail, "bd context is unreachable", details)
+	}
+	if ctx.SchemaVersion <= 0 {
+		return NewPreflightCheckResult(PreflightCheckVersionCompat, PreflightCheckFail, "bd context did not report a schema version", details)
+	}
+	if ctx.BDVersion == "" || libraryVersion == "" || libraryVersion == "(devel)" {
+		return NewPreflightCheckResult(PreflightCheckVersionCompat, PreflightCheckWarn, "bd/beads version compatibility could not be confirmed", details)
+	}
+	if strings.TrimPrefix(ctx.BDVersion, "v") != libraryVersion {
+		return NewPreflightCheckResult(PreflightCheckVersionCompat, PreflightCheckFail, "bd version differs from linked beads library version", details)
+	}
+	return NewPreflightCheckResult(PreflightCheckVersionCompat, PreflightCheckPass, "bd and linked beads library versions match", details)
 }
 
 func (c PreflightChecker) checkContractShape(metadata preflightMetadata) PreflightCheckResult {
@@ -195,6 +248,36 @@ func (c PreflightChecker) checkContractShape(metadata preflightMetadata) Preflig
 	default:
 		return NewPreflightCheckResult(PreflightCheckContractShape, PreflightCheckFail, fmt.Sprintf("metadata backend %q has unsupported contract shape", metadata.Backend), details)
 	}
+}
+
+func preflightFallbackReason(checks []PreflightCheckResult) string {
+	for _, check := range checks {
+		if check.State == PreflightCheckFail {
+			return check.Summary
+		}
+	}
+	for _, check := range checks {
+		if check.State == PreflightCheckWarn {
+			return check.Summary
+		}
+	}
+	return ""
+}
+
+func beadsModuleVersion() string {
+	info, ok := debug.ReadBuildInfo()
+	if !ok {
+		return ""
+	}
+	for _, dep := range info.Deps {
+		if dep.Path == "github.com/steveyegge/beads" {
+			if dep.Replace != nil && dep.Replace.Version != "" {
+				return dep.Replace.Version
+			}
+			return dep.Version
+		}
+	}
+	return ""
 }
 
 type preflightMetadata struct {
@@ -274,6 +357,15 @@ func preflightRepairSteps(checks []PreflightCheckResult) []PreflightRepairStep {
 					Note:     "Inspect which .beads scope bd resolves before repairing metadata.",
 				})
 			}
+		case PreflightCheckDoltModeSafe:
+			if check.State == PreflightCheckFail {
+				steps = append(steps, PreflightRepairStep{
+					CheckID:  check.ID,
+					Priority: PreflightRepairRecommended,
+					Command:  "bd context --json",
+					Note:     "Native store activation requires Dolt server mode.",
+				})
+			}
 		case PreflightCheckIdentityMatch:
 			if check.State == PreflightCheckFail {
 				steps = append(steps, PreflightRepairStep{
@@ -281,6 +373,15 @@ func preflightRepairSteps(checks []PreflightCheckResult) []PreflightRepairStep {
 					Priority: PreflightRepairCritical,
 					Command:  "bd doctor --fix",
 					Note:     "Identity mismatch is the highest-severity failure.",
+				})
+			}
+		case PreflightCheckVersionCompat:
+			if check.State == PreflightCheckFail {
+				steps = append(steps, PreflightRepairStep{
+					CheckID:  check.ID,
+					Priority: PreflightRepairRecommended,
+					Command:  "bd doctor",
+					Note:     "Verify the installed bd CLI and linked beads library are compatible.",
 				})
 			}
 		case PreflightCheckContractShape:

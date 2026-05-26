@@ -203,9 +203,8 @@ func computeAutoStagger(agentID string) time.Duration {
 // watchdog reconciliation. The onChange callback (optional) is called for
 // each detected external change with event type and bead JSON.
 //
-// BdStore backings provide an issue prefix for filtering event-hook payloads
-// from other stores. Other Store implementations are wrapped and delegated
-// normally, with foreign-event filtering disabled.
+// BdStore-backed caches filter hook events by issue prefix. Other Store
+// implementations are valid backings, but run without foreign-event filtering.
 func NewCachingStore(backing Store, onChange func(eventType, beadID string, payload json.RawMessage)) *CachingStore {
 	prefix := ""
 	bdBacking := false
@@ -217,6 +216,8 @@ func NewCachingStore(backing Store, onChange func(eventType, beadID string, payl
 		} else {
 			prefix = bd.IDPrefix()
 		}
+	} else if backing, ok := backing.(interface{ IDPrefix() string }); ok {
+		prefix = backing.IDPrefix()
 	}
 	cs := newCachingStore(backing, prefix, onChange)
 	switch {

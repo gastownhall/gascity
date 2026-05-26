@@ -174,10 +174,11 @@ func TestPreflightUnreadableScopeReturnsError(t *testing.T) {
 	fs := fsys.NewFake()
 	fs.Errors[filepath.Join(scope, ".beads", "metadata.json")] = os.ErrPermission
 	checker := PreflightChecker{
-		FS:       fs,
-		Provider: "bd",
+		FS:                  fs,
+		Provider:            "bd",
+		BeadsLibraryVersion: "1.0.4",
 		BDContext: func(string) (PreflightBDContext, error) {
-			return PreflightBDContext{Backend: "dolt", DoltMode: "server"}, nil
+			return PreflightBDContext{Backend: "dolt", DoltMode: "server", BDVersion: "1.0.4", SchemaVersion: 1}, nil
 		},
 		DatabaseProjectID: func(string) (string, bool, error) {
 			return "gc-local", true, nil
@@ -195,9 +196,16 @@ func testPreflightChecker(metadata string, ctx PreflightBDContext, dbProjectID s
 	fs := fsys.NewFake()
 	fs.Dirs[filepath.Join(scope, ".beads")] = true
 	fs.Files[filepath.Join(scope, ".beads", "metadata.json")] = []byte(metadata)
+	if ctx.BDVersion == "" {
+		ctx.BDVersion = "1.0.4"
+	}
+	if ctx.SchemaVersion == 0 {
+		ctx.SchemaVersion = 1
+	}
 	return PreflightChecker{
-		FS:       fs,
-		Provider: "bd",
+		FS:                  fs,
+		Provider:            "bd",
+		BeadsLibraryVersion: "1.0.4",
 		BDContext: func(string) (PreflightBDContext, error) {
 			return ctx, nil
 		},
@@ -227,7 +235,9 @@ func assertCheckOrder(t *testing.T, result PreflightResult) {
 		PreflightCheckProviderContract,
 		PreflightCheckMetadataBackend,
 		PreflightCheckBDContextAgreement,
+		PreflightCheckDoltModeSafe,
 		PreflightCheckIdentityMatch,
+		PreflightCheckVersionCompat,
 		PreflightCheckContractShape,
 	}
 	if len(result.Checks) != len(want) {

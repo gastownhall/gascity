@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -27,6 +28,14 @@ func newNativeDoltStoreWithStorage(storage beadslib.Storage, actor string) *Nati
 		actor = nativeDoltStoreActor
 	}
 	return &NativeDoltStore{storage: storage, actor: actor}
+}
+
+func newNativeDoltStoreAt(ctx context.Context, scopeRoot string) (*NativeDoltStore, error) {
+	storage, err := beadslib.OpenBestAvailable(ctx, filepath.Join(scopeRoot, ".beads"))
+	if err != nil {
+		return nil, err
+	}
+	return newNativeDoltStoreWithStorage(storage, nativeDoltStoreActor), nil
 }
 
 func newNativeDoltStoreForTest(storage beadslib.Storage) *NativeDoltStore {

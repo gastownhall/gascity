@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1160,43 +1161,58 @@ func openStoreAtForCity(storePath, cityPath string) (beads.Store, error) {
 	scopeRoot := resolveStoreScopeRoot(runtimeCityPath, storePath)
 	provider := rawBeadsProviderForScope(scopeRoot, runtimeCityPath)
 	if strings.HasPrefix(provider, "exec:") {
-		target, err := resolveConfiguredExecStoreTarget(runtimeCityPath, scopeRoot)
-		if err != nil {
-			return nil, err
-		}
-		env := gcExecStoreEnv(runtimeCityPath, target, provider)
-		if execProviderNeedsScopedDoltStoreEnv(provider) {
-			if target.ScopeKind == "rig" {
-				cfg, err := loadCityConfig(runtimeCityPath, io.Discard)
-				if err != nil {
-					return nil, err
-				}
-				projected, err := bdRuntimeEnvForRigWithError(runtimeCityPath, cfg, target.ScopeRoot)
-				if err != nil {
-					return nil, err
-				}
-				copyExecProjectedBackendEnv(env, projected)
-			} else {
-				projected, err := bdRuntimeEnvWithError(runtimeCityPath)
-				if err != nil {
-					return nil, err
-				}
-				copyExecProjectedBackendEnv(env, projected)
+		return openExecStoreAtForCity(provider, scopeRoot, runtimeCityPath)
+	}
+	result, err := beads.OpenStoreAtForCity(context.Background(), beads.StoreOpenOptions{
+		ScopeRoot:        scopeRoot,
+		CityPath:         runtimeCityPath,
+		Provider:         provider,
+		PreflightChecker: newBeadsPreflightChecker(runtimeCityPath, provider),
+		Logger:           slog.Default(),
+		OpenFileStore: func() (beads.Store, error) {
+			return openCompatibleFileStore(scopeRoot, runtimeCityPath)
+		},
+		OpenBdStore: func() (beads.Store, error) {
+			if _, err := exec.LookPath("bd"); err != nil {
+				return nil, fmt.Errorf("bd not found in PATH (install beads or set GC_BEADS=file)")
 			}
-		}
-		store := beadsexec.NewStore(strings.TrimPrefix(provider, "exec:"))
-		store.SetEnv(env)
-		return store, nil
+			return openBdStoreAt(scopeRoot, runtimeCityPath)
+		},
+	})
+	if err != nil {
+		return nil, err
 	}
-	switch provider {
-	case "file":
-		return openCompatibleFileStore(scopeRoot, runtimeCityPath)
-	default: // "bd" or unrecognized → use bd
-		if _, err := exec.LookPath("bd"); err != nil {
-			return nil, fmt.Errorf("bd not found in PATH (install beads or set GC_BEADS=file)")
-		}
-		return openBdStoreAt(scopeRoot, runtimeCityPath)
+	return result.Store, nil
+}
+
+func openExecStoreAtForCity(provider, scopeRoot, runtimeCityPath string) (beads.Store, error) {
+	target, err := resolveConfiguredExecStoreTarget(runtimeCityPath, scopeRoot)
+	if err != nil {
+		return nil, err
 	}
+	env := gcExecStoreEnv(runtimeCityPath, target, provider)
+	if execProviderNeedsScopedDoltStoreEnv(provider) {
+		if target.ScopeKind == "rig" {
+			cfg, err := loadCityConfig(runtimeCityPath, io.Discard)
+			if err != nil {
+				return nil, err
+			}
+			projected, err := bdRuntimeEnvForRigWithError(runtimeCityPath, cfg, target.ScopeRoot)
+			if err != nil {
+				return nil, err
+			}
+			copyExecProjectedBackendEnv(env, projected)
+		} else {
+			projected, err := bdRuntimeEnvWithError(runtimeCityPath)
+			if err != nil {
+				return nil, err
+			}
+			copyExecProjectedBackendEnv(env, projected)
+		}
+	}
+	store := beadsexec.NewStore(strings.TrimPrefix(provider, "exec:"))
+	store.SetEnv(env)
+	return store, nil
 }
 
 // resolveStoreScopeRoot resolves a store's scope root under cityPath.

@@ -46,8 +46,12 @@ const (
 	PreflightCheckMetadataBackend PreflightCheckID = "metadata_backend"
 	// PreflightCheckBDContextAgreement validates agreement with bd context.
 	PreflightCheckBDContextAgreement PreflightCheckID = "bd_context_agreement"
+	// PreflightCheckDoltModeSafe validates that Dolt runs in a native-safe mode.
+	PreflightCheckDoltModeSafe PreflightCheckID = "dolt_mode_safe"
 	// PreflightCheckIdentityMatch validates metadata and database project identity.
 	PreflightCheckIdentityMatch PreflightCheckID = "identity_match"
+	// PreflightCheckVersionCompat validates the bd CLI and linked beads library version.
+	PreflightCheckVersionCompat PreflightCheckID = "version_compat"
 	// PreflightCheckContractShape validates backend-specific metadata field shape.
 	PreflightCheckContractShape PreflightCheckID = "contract_shape"
 )
@@ -70,6 +74,7 @@ type PreflightResult struct {
 	RepairSteps         []PreflightRepairStep  `json:"repair_steps,omitempty"`
 	NativeStoreEligible bool                   `json:"native_store_eligible"`
 	Fallback            PreflightFallback      `json:"fallback,omitempty"`
+	FallbackReason      string                 `json:"fallback_reason,omitempty"`
 }
 
 // NewPreflightResult returns result with all nested diagnostic details redacted.
@@ -119,6 +124,9 @@ type PreflightDetails struct {
 	MetadataBackend       string                 `json:"metadata_backend,omitempty"`
 	BDContextBackend      string                 `json:"bd_context_backend,omitempty"`
 	BDContextDoltMode     string                 `json:"bd_context_dolt_mode,omitempty"`
+	BDVersion             string                 `json:"bd_version,omitempty"`
+	BeadsLibraryVersion   string                 `json:"beads_library_version,omitempty"`
+	SchemaVersion         int                    `json:"schema_version,omitempty"`
 	HasPostgresDSN        *bool                  `json:"has_postgres_dsn,omitempty"`
 	HasSplitFields        *bool                  `json:"has_split_fields,omitempty"`
 	PostgresDSNRedacted   string                 `json:"postgres_dsn_redacted,omitempty"`
