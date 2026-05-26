@@ -9,16 +9,13 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 )
 
-// MetadataKeySourceSessionID is the reserved metadata key used to propagate
-// the originating gc session id across the publish wire to adapters.
-//
-// PublishRequest itself does not carry a SessionID field (intentional —
-// keeps the request shape provider-neutral). Adapters that need the
-// session id (e.g. for per-session identity overrides like Slack
-// chat:write.customize) read it from PublishRequest.Metadata using this
-// key. The key is unprefixed because user-supplied metadata is namespaced
-// under "meta." (see metadataPrefix); system-controlled keys live in the
-// bare namespace.
+// MetadataKeySourceSessionID was the reserved metadata key used to
+// propagate the originating gc session id across the publish wire before
+// PublishRequest gained a native SessionID field (gc-kvt). It is no
+// longer written by gc; it is retained here only because some adapter
+// binaries still fall back to it when PublishRequest.SessionID is empty
+// (e.g. an old gc binary publishing through a newer adapter). New code
+// must populate PublishRequest.SessionID directly.
 const MetadataKeySourceSessionID = "source_session_id"
 
 // OutboundRequest specifies what to publish to an external conversation.
@@ -113,26 +110,23 @@ func HandleOutbound(ctx context.Context, deps OutboundDeps, caller Caller, req O
 		return nil, fmt.Errorf("no adapter for %s/%s", req.Conversation.Provider, req.Conversation.AccountID)
 	}
 
-	// Step 4: Publish.
+	// Step 4: Publish. SessionID is propagated to the adapter as a
+	// first-class field on PublishRequest (gc-kvt); adapters that need
+	// per-session behavior (e.g. Slack identity overrides) read it
+	// directly. The caller-supplied metadata flows through unchanged.
 	//
-	// Inject the originating session id into wire metadata so adapters
-	// can route per-session behavior (e.g. Slack identity overrides)
-	// without PublishRequest needing a SessionID field. Done by copying
-	// the caller's metadata onto a new map so we don't mutate it.
-	wireMetadata := req.Metadata
-	if req.SessionID != "" {
-		wireMetadata = make(map[string]string, len(req.Metadata)+1)
-		for k, v := range req.Metadata {
-			wireMetadata[k] = v
-		}
-		wireMetadata[MetadataKeySourceSessionID] = req.SessionID
-	}
-	receipt, err := adapter.Publish(ctx, PublishRequest{
+	// Field-by-field assignment is intentional even though the structs
+	// currently share a shape — OutboundRequest is the API caller's input
+	// surface and PublishRequest is the gc-to-adapter wire contract; any
+	// future divergence (e.g. an internal-only OutboundRequest field)
+	// must not silently leak onto the wire.
+	receipt, err := adapter.Publish(ctx, PublishRequest{ //nolint:staticcheck // documents the wire boundary; see comment above
+		SessionID:        req.SessionID,
 		Conversation:     req.Conversation,
 		Text:             req.Text,
 		ReplyToMessageID: req.ReplyToMessageID,
 		IdempotencyKey:   req.IdempotencyKey,
-		Metadata:         wireMetadata,
+		Metadata:         req.Metadata,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("adapter publish: %w", err)
