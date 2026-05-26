@@ -37,6 +37,7 @@ gc [flags]
 | [gc event](#gc-event) | Event operations |
 | [gc events](#gc-events) | Show events from the GC API |
 | [gc formula](#gc-formula) | Manage and inspect formulas |
+| [gc github](#gc-github) | GitHub integration commands |
 | [gc graph](#gc-graph) | Show dependency graph for beads |
 | [gc handoff](#gc-handoff) | Send handoff mail and restart controller-managed sessions |
 | [gc help](#gc-help) | Help about any command |
@@ -1361,6 +1362,51 @@ gc formula show <formula-name> [flags]
 |------|------|---------|-------------|
 | `--json` | bool |  | emit JSON |
 | `--var` | stringArray |  | variable substitution for preview (key=value) |
+
+## gc github
+
+GitHub integration commands
+
+```
+gc github
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| [gc github pr](#gc-github-pr) | GitHub pull-request monitor commands |
+
+## gc github pr
+
+GitHub pull-request monitor commands
+
+```
+gc github pr
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| [gc github pr backfill](#gc-github-pr-backfill) | Query configured GitHub PR readiness monitors |
+
+## gc github pr backfill
+
+Query configured GitHub PR readiness monitors.
+
+The command reads [[github.pr_monitor]] entries from the resolved city
+configuration, queries open pull requests from GitHub, and reports PRs that
+need repair: failed checks, merge conflicts, blocked mergeability, or branches
+behind their base. By default clean and pending-only PRs are omitted; pass
+--all to include every observed PR.
+
+```
+gc github pr backfill [monitor-name] [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--all` | bool |  | include clean and pending-only PRs |
+| `--create-repair-beads` | bool |  | create deduped repair beads for actionable PRs |
+| `--json` | bool |  | emit JSON |
+| `--timeout` | duration | `45s` | GitHub query timeout |
 
 ## gc graph
 
