@@ -16,6 +16,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/supervisor"
+	"golang.org/x/term"
 )
 
 var (
@@ -52,12 +53,18 @@ var assumeYesForSupervisorCycle bool
 var confirmCrossCitySupervisorImpactStdin io.Reader = os.Stdin
 
 // confirmCrossCitySupervisorImpactStdinIsTerminal reports whether stdin
-// is a terminal. When false (CI, scripts, pipes, `< /dev/null`), the
-// guard cannot meaningfully prompt — it falls through to a silent
-// proceed after printing the warning, matching standard Unix-tool
-// convention for interactive prompts in non-interactive contexts.
-// Tests override this hook.
-var confirmCrossCitySupervisorImpactStdinIsTerminal = func() bool { return isTerminalFunc(os.Stdin) }
+// is an interactive terminal (tty). When false (CI, scripts, pipes,
+// `< /dev/null`), the guard cannot meaningfully prompt — it falls
+// through to a silent proceed after printing the warning, matching
+// standard Unix-tool convention for interactive prompts in
+// non-interactive contexts. Tests override this hook.
+//
+// Uses golang.org/x/term.IsTerminal rather than the file-mode-based
+// `isTerminalFunc` helper because the latter returns true for /dev/null
+// (a character device but not a tty), which gave a false-positive in
+// CI acceptance tests where child processes inherited a /dev/null
+// stdin from `exec.Command` (see PR #2638 first CI run).
+var confirmCrossCitySupervisorImpactStdinIsTerminal = func() bool { return term.IsTerminal(int(os.Stdin.Fd())) }
 
 type supervisorRegistry interface {
 	List() ([]supervisor.CityEntry, error)
@@ -256,20 +263,33 @@ func otherRegisteredCities(targetCityPath string) ([]supervisor.CityEntry, error
 // don't burn a probe call to the alive hook. This keeps the guard's
 // observable side effects scoped to the actual multi-city case it
 // protects against.
-func confirmCrossCitySupervisorImpact(cityPath string, _, stderr io.Writer) bool {
+//
+// Registry read errors are surfaced via stderr but the guard fails open
+// (proceeds without blocking) — blocking on a registry read error would
+// turn an unrelated I/O fault into an unrelated registration failure,
+// which is a worse failure mode than the unguarded reconcile.
+func confirmCrossCitySupervisorImpact(cityPath string, stderr io.Writer) bool {
 	others, err := otherRegisteredCities(cityPath)
-	if err != nil || len(others) == 0 {
+	if err != nil {
+		fmt.Fprintf(stderr, "Warning: unable to read city registry while checking cross-city supervisor impact (%v); proceeding without cross-city check.\n", err) //nolint:errcheck // best-effort stderr
+		return true
+	}
+	if len(others) == 0 {
 		return true
 	}
 	if supervisorAliveHook() == 0 {
 		return true
 	}
-	fmt.Fprintf(stderr, "Warning: this operation reconciles the supervisor managing %d other registered city(ies):\n", len(others)) //nolint:errcheck // best-effort stderr
+	noun := "city"
+	if len(others) != 1 {
+		noun = "cities"
+	}
+	fmt.Fprintf(stderr, "Warning: this operation reconciles the supervisor managing %d other registered %s:\n", len(others), noun) //nolint:errcheck // best-effort stderr
 	for _, e := range others {
 		fmt.Fprintf(stderr, "  - %s (%s)\n", e.EffectiveName(), e.Path) //nolint:errcheck // best-effort stderr
 	}
-	fmt.Fprintln(stderr, "Reload normally uses a graceful socket reload (same supervisor PID), but escalates to a non-graceful kill+respawn") //nolint:errcheck // best-effort stderr
-	fmt.Fprintln(stderr, "if the supervisor is absent, drifted, or in a zombie state — which cycles those cities' in-flight work.")           //nolint:errcheck // best-effort stderr
+	fmt.Fprintln(stderr, "Reload normally uses a graceful socket reload (same supervisor PID), but escalates to a non-graceful kill-and-respawn") //nolint:errcheck // best-effort stderr
+	fmt.Fprintln(stderr, "if the supervisor is absent, drifted, or in a zombie state — which cycles those cities' in-flight work.")               //nolint:errcheck // best-effort stderr
 	if assumeYesForSupervisorCycle {
 		fmt.Fprintln(stderr, "Continuing (--yes).") //nolint:errcheck // best-effort stderr
 		return true
@@ -299,7 +319,7 @@ func supervisorAlreadyManagesCity(cityPath string) bool {
 
 func registerCityWithSupervisorNamed(cityPath, nameOverride string, stdout, stderr io.Writer, commandName string, showProgress bool) int {
 	cityPath = normalizePathForCompare(cityPath)
-	if !confirmCrossCitySupervisorImpact(cityPath, stdout, stderr) {
+	if !confirmCrossCitySupervisorImpact(cityPath, stderr) {
 		fmt.Fprintf(stderr, "%s: aborted by user (pass --yes to bypass the cross-city supervisor cycle check)\n", commandName) //nolint:errcheck // best-effort stderr
 		return 1
 	}

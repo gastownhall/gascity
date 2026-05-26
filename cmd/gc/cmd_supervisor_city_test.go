@@ -2394,8 +2394,8 @@ func TestConfirmCrossCitySupervisorImpactSingleCityProceedsSilently(t *testing.T
 	supervisorAliveHook = func() int { return 1234 }
 	t.Cleanup(func() { supervisorAliveHook = oldAlive })
 
-	var stdout, stderr bytes.Buffer
-	if !confirmCrossCitySupervisorImpact(cityPath, &stdout, &stderr) {
+	var stderr bytes.Buffer
+	if !confirmCrossCitySupervisorImpact(cityPath, &stderr) {
 		t.Errorf("single-city case should proceed; stderr=%q", stderr.String())
 	}
 	if stderr.Len() != 0 {
@@ -2418,8 +2418,8 @@ func TestConfirmCrossCitySupervisorImpactSupervisorDeadProceedsSilently(t *testi
 	supervisorAliveHook = func() int { return 0 } // supervisor absent
 	t.Cleanup(func() { supervisorAliveHook = oldAlive })
 
-	var stdout, stderr bytes.Buffer
-	if !confirmCrossCitySupervisorImpact(cityPath, &stdout, &stderr) {
+	var stderr bytes.Buffer
+	if !confirmCrossCitySupervisorImpact(cityPath, &stderr) {
 		t.Errorf("supervisor-absent case should proceed; stderr=%q", stderr.String())
 	}
 	if stderr.Len() != 0 {
@@ -2446,8 +2446,8 @@ func TestConfirmCrossCitySupervisorImpactAssumeYesProceedsWithWarning(t *testing
 	assumeYesForSupervisorCycle = true
 	t.Cleanup(func() { assumeYesForSupervisorCycle = oldYes })
 
-	var stdout, stderr bytes.Buffer
-	if !confirmCrossCitySupervisorImpact(cityPath, &stdout, &stderr) {
+	var stderr bytes.Buffer
+	if !confirmCrossCitySupervisorImpact(cityPath, &stderr) {
 		t.Errorf("--yes case should proceed; stderr=%q", stderr.String())
 	}
 	if !strings.Contains(stderr.String(), "other-city") {
@@ -2485,8 +2485,8 @@ func TestConfirmCrossCitySupervisorImpactPromptYProceeds(t *testing.T) {
 	confirmCrossCitySupervisorImpactStdinIsTerminal = func() bool { return true }
 	t.Cleanup(func() { confirmCrossCitySupervisorImpactStdinIsTerminal = oldTerm })
 
-	var stdout, stderr bytes.Buffer
-	if !confirmCrossCitySupervisorImpact(cityPath, &stdout, &stderr) {
+	var stderr bytes.Buffer
+	if !confirmCrossCitySupervisorImpact(cityPath, &stderr) {
 		t.Errorf("user-entered y should proceed; stderr=%q", stderr.String())
 	}
 	if !strings.Contains(stderr.String(), "Continue?") {
@@ -2517,8 +2517,8 @@ func TestConfirmCrossCitySupervisorImpactPromptNAborts(t *testing.T) {
 	confirmCrossCitySupervisorImpactStdinIsTerminal = func() bool { return true }
 	t.Cleanup(func() { confirmCrossCitySupervisorImpactStdinIsTerminal = oldTerm })
 
-	var stdout, stderr bytes.Buffer
-	if confirmCrossCitySupervisorImpact(cityPath, &stdout, &stderr) {
+	var stderr bytes.Buffer
+	if confirmCrossCitySupervisorImpact(cityPath, &stderr) {
 		t.Errorf("user-entered n should abort; stderr=%q", stderr.String())
 	}
 	if !strings.Contains(stderr.String(), "Aborted") {
@@ -2549,8 +2549,8 @@ func TestConfirmCrossCitySupervisorImpactPromptEmptyDefaultsToNo(t *testing.T) {
 	confirmCrossCitySupervisorImpactStdinIsTerminal = func() bool { return true }
 	t.Cleanup(func() { confirmCrossCitySupervisorImpactStdinIsTerminal = oldTerm })
 
-	var stdout, stderr bytes.Buffer
-	if confirmCrossCitySupervisorImpact(cityPath, &stdout, &stderr) {
+	var stderr bytes.Buffer
+	if confirmCrossCitySupervisorImpact(cityPath, &stderr) {
 		t.Errorf("empty input should default to abort; stderr=%q", stderr.String())
 	}
 }
@@ -2579,8 +2579,8 @@ func TestConfirmCrossCitySupervisorImpactNonTerminalStdinProceedsSilently(t *tes
 	confirmCrossCitySupervisorImpactStdinIsTerminal = func() bool { return false }
 	t.Cleanup(func() { confirmCrossCitySupervisorImpactStdinIsTerminal = oldTerm })
 
-	var stdout, stderr bytes.Buffer
-	if !confirmCrossCitySupervisorImpact(cityPath, &stdout, &stderr) {
+	var stderr bytes.Buffer
+	if !confirmCrossCitySupervisorImpact(cityPath, &stderr) {
 		t.Errorf("non-terminal stdin should proceed silently; stderr=%q", stderr.String())
 	}
 	if !strings.Contains(stderr.String(), "other-city") {
@@ -2617,8 +2617,8 @@ func TestConfirmCrossCitySupervisorImpactWarnsAboutAllOtherCities(t *testing.T) 
 	assumeYesForSupervisorCycle = true
 	t.Cleanup(func() { assumeYesForSupervisorCycle = oldYes })
 
-	var stdout, stderr bytes.Buffer
-	if !confirmCrossCitySupervisorImpact(cityPath, &stdout, &stderr) {
+	var stderr bytes.Buffer
+	if !confirmCrossCitySupervisorImpact(cityPath, &stderr) {
 		t.Errorf("--yes should proceed; stderr=%q", stderr.String())
 	}
 	out := stderr.String()
@@ -2627,7 +2627,40 @@ func TestConfirmCrossCitySupervisorImpactWarnsAboutAllOtherCities(t *testing.T) 
 			t.Errorf("warning should list %q; stderr=%q", name, out)
 		}
 	}
-	if !strings.Contains(out, "3 other registered city") {
-		t.Errorf("warning should report count of 3; stderr=%q", out)
+	if !strings.Contains(out, "3 other registered cities") {
+		t.Errorf("warning should report count of 3 (plural); stderr=%q", out)
+	}
+}
+
+// erroringSupervisorRegistry is a test double that fails List with a fixed
+// error, used to validate the fail-open-with-warning behavior on registry
+// read errors (PR #2638 review feedback C1).
+type erroringSupervisorRegistry struct{ err error }
+
+func (e *erroringSupervisorRegistry) List() ([]supervisor.CityEntry, error) { return nil, e.err }
+func (e *erroringSupervisorRegistry) Register(_, _ string) error            { return nil }
+func (e *erroringSupervisorRegistry) Unregister(_ string) error             { return nil }
+
+func TestConfirmCrossCitySupervisorImpactRegistryReadErrorFailsOpenWithWarning(t *testing.T) {
+	gcHome := t.TempDir()
+	t.Setenv("GC_HOME", gcHome)
+
+	cityPath := filepath.Join(t.TempDir(), "new-city")
+
+	oldRegistry := newSupervisorRegistry
+	newSupervisorRegistry = func() supervisorRegistry {
+		return &erroringSupervisorRegistry{err: errors.New("simulated registry I/O fault")}
+	}
+	t.Cleanup(func() { newSupervisorRegistry = oldRegistry })
+
+	var stderr bytes.Buffer
+	if !confirmCrossCitySupervisorImpact(cityPath, &stderr) {
+		t.Errorf("registry read error should fail open (proceed); stderr=%q", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "unable to read city registry") {
+		t.Errorf("registry read error should emit warning; stderr=%q", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "simulated registry I/O fault") {
+		t.Errorf("registry read error should include the underlying error message; stderr=%q", stderr.String())
 	}
 }
