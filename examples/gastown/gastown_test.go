@@ -775,7 +775,7 @@ func TestPolecatFormulaHaltsOnAutoPushFalse(t *testing.T) {
 	submit := sectionBetween(t, body, `id = "submit-and-exit"`, "The refinery will pick this up")
 
 	assertContainsInOrder(t, submit,
-		"**2. Push your branch:**",
+		"Push your branch:",
 		`AUTO_PUSH=$(gc bd show {{issue}} --json | jq -r '.[0].metadata | if has("auto_push") then (.auto_push | tostring) else "" end')`,
 		`if [ "$AUTO_PUSH" = "false" ]; then`,
 		`BRANCH=$(git branch --show-current)`,
