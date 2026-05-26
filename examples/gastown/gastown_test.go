@@ -3285,7 +3285,7 @@ func TestRefineryPromptUsesCanonicalAgentIdentity(t *testing.T) {
 	for _, want := range []string{
 		`gc bd list --assignee="$GC_AGENT" --status=in_progress`,
 		`gc bd update "$WISP" --assignee="$GC_AGENT"`,
-		`| Find assigned work | ` + "`" + `gc bd list --assignee="$GC_AGENT" --status=open` + "`" + ` |`,
+		`| Find assigned work | ` + "`" + `gc bd list ${GC_RIG:+--rig "$GC_RIG"} --assignee="$GC_AGENT" --status=open` + "`" + ` |`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("refinery prompt missing canonical $GC_AGENT usage %q", want)
