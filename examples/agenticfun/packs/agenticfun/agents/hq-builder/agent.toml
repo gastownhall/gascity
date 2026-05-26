@@ -1,0 +1,29 @@
+scope = "city"
+provider = "codex"
+wake_mode = "fresh"
+work_dir = "../.."
+work_query = '''sh -c '
+for id in "$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS" "$GC_AGENT" "$GC_TEMPLATE" "$GC_TEMPLATE_SESSION_NAME"; do
+	[ -z "$id" ] && continue
+	r=$(gc bd list --status in_progress --assignee="$id" --exclude-type=epic --json --limit=1 2>/dev/null)
+	[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0
+done
+for id in "$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS" "$GC_AGENT" "$GC_TEMPLATE" "$GC_TEMPLATE_SESSION_NAME"; do
+	[ -z "$id" ] && continue
+	r=$(gc bd ready --assignee="$id" --exclude-type=epic --json --limit=1 2>/dev/null)
+	[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0
+done
+case "$GC_SESSION_ORIGIN" in
+	ephemeral|"") ;;
+	*) [ "$GC_TEMPLATE" = "agenticfun.hq-builder" ] || [ "$GC_AGENT" = "agenticfun.hq-builder" ] || exit 0 ;;
+esac
+r=$(gc bd ready --metadata-field gc.routed_to=agenticfun.hq-builder --unassigned --exclude-type=epic --json --limit=1 2>/dev/null)
+[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0
+printf "[]"
+'
+'''
+nudge = "Run gc hook, claim one Gas City HQ slice, write tests first, implement, and hand off."
+idle_timeout = "2h"
+sleep_after_idle = "5m"
+min_active_sessions = 0
+max_active_sessions = 1

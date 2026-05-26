@@ -1,0 +1,35 @@
+# AgenticFun - project-specific orchestration pack.
+#
+# The shape intentionally borrows Swarmforge's architect/coder/reviewer flow
+# while using Gas City for durable beads, formulas, orders, dispatch, and
+# lifecycle management.
+
+[pack]
+name = "agenticfun"
+schema = 2
+description = "AgenticFunProject orchestration pack"
+
+[[named_session]]
+template = "director"
+scope = "city"
+mode = "always"
+
+[[named_session]]
+template = "hq-builder"
+scope = "city"
+mode = "on_demand"
+
+[[named_session]]
+template = "hq-reviewer"
+scope = "city"
+mode = "on_demand"
+
+[[named_session]]
+template = "hq-integrator"
+scope = "city"
+mode = "on_demand"
+
+[[named_session]]
+template = "ops"
+scope = "city"
+mode = "on_demand"

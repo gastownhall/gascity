@@ -1,0 +1,73 @@
+description = """
+Bounded iteration formula for making an AgenticFunProject slice better than a
+single pass through a regular coding workflow.
+
+Use with `gc converge create --formula mol-agenticfun-fun-converge` when the
+goal needs repeated build, review, and playtest cycles with a manual or hybrid
+gate.
+"""
+formula = "mol-agenticfun-fun-converge"
+version = 2
+contract = "graph.v2"
+convergence = true
+required_vars = ["subject"]
+
+[vars]
+[vars.subject]
+description = "Feature, bead, branch, PR, or artifact being iterated"
+required = true
+
+[vars.repo_url]
+description = "GitHub repository URL for the current AgenticFunProject rig"
+default = ""
+
+[vars.project_kind]
+description = "Project profile for the current rig"
+default = ""
+
+[vars.builder_target]
+description = "Builder target for iteration work"
+default = ""
+
+[vars.review_target]
+description = "Reviewer target for validation"
+default = ""
+
+[vars.playtest_target]
+description = "Playtester target for product-feel validation"
+default = ""
+
+[[steps]]
+id = "inspect-current-state"
+title = "Inspect current state"
+description = """
+Read `{{subject}}`, prior convergence metadata, review notes, playtest notes,
+and the current repository state. Decide the smallest next improvement that
+moves the subject toward approval.
+
+Rig profile: `{{project_kind}}` at `{{repo_url}}`.
+"""
+
+[[steps]]
+id = "apply-next-improvement"
+title = "Apply next improvement"
+needs = ["inspect-current-state"]
+description = """
+Route or perform the next bounded improvement through the builder target. Keep
+the change small enough to review in this iteration.
+"""
+
+[[steps]]
+id = "review-and-playtest"
+title = "Review and playtest the iteration"
+needs = ["apply-next-improvement"]
+description = """
+Run read-only review and product-feel validation. Record the evidence needed by
+the convergence gate:
+
+- reviewer verdict
+- playtester verdict
+- remaining findings
+- commands run
+- recommendation: approve, iterate, or stop
+"""

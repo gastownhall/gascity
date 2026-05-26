@@ -1,0 +1,9 @@
+scope = "rig"
+provider = "codex"
+wake_mode = "fresh"
+work_dir = ".gc/agents/{{.Rig}}/integrator"
+nudge = "Run gc hook; validate reviewed work and merge or reject with structured reason."
+idle_timeout = "2h"
+sleep_after_idle = "5m"
+min_active_sessions = 0
+max_active_sessions = 1

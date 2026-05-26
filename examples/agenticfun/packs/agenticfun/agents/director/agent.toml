@@ -1,0 +1,8 @@
+scope = "city"
+provider = "codex"
+wake_mode = "fresh"
+work_dir = ".gc/agents/director"
+work_query = 'for t in bug feature task; do r=$(bd ready --type "$t" --exclude-type=epic --exclude-type=session --json --limit=10 2>/dev/null); [ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; done; printf "[]"'
+nudge = "Check mail and hook status, then turn ideas into routed AgenticFun work."
+idle_timeout = "1h"
+max_active_sessions = 1

@@ -1,0 +1,6 @@
+[order]
+description = "Report stale local branches for AgenticFunProject rigs"
+trigger = "cooldown"
+interval = "6h"
+exec = "$PACK_DIR/assets/scripts/stale-branch-sweep.sh"
+timeout = "2m"

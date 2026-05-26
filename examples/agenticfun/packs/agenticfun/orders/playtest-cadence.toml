@@ -1,0 +1,6 @@
+[order]
+description = "Periodically dispatch a playtest pass for visible work"
+trigger = "manual"
+formula = "mol-agenticfun-playtest-loop"
+pool = "playtester"
+timeout = "30s"

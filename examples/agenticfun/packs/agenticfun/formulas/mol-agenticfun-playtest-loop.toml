@@ -1,0 +1,79 @@
+description = """
+Run a product-feel validation pass for a user-visible AgenticFunProject slice.
+"""
+formula = "mol-agenticfun-playtest-loop"
+version = 2
+contract = "graph.v2"
+
+[vars]
+[vars.subject]
+description = "Bead, branch, PR, or artifact to playtest. Empty means inspect routed visible work."
+default = ""
+
+[vars.preview_command]
+description = "Command that starts or checks the local preview"
+default = ""
+
+[vars.project_kind]
+description = "Project profile for the current rig"
+default = ""
+
+[vars.builder_target]
+description = "Target builder pool for failed playtests"
+default = ""
+
+[vars.integrator_target]
+description = "Target integrator for passing playtests"
+default = ""
+
+[[steps]]
+id = "start-preview"
+title = "Start or locate the product preview"
+description = """
+Read `{{subject}}`, or inspect your routed hook when subject is empty. Then read
+the README and bead metadata. Start or locate the app using `{{preview_command}}`
+when provided. If no preview path exists, record a blocked verdict with the
+missing command.
+
+Use the rig profile `{{project_kind}}` to choose checks:
+
+- static demos should be checked in a browser-sized flow when possible.
+- service repos should check health/API behavior.
+- spec-first repos should validate generated code against the ordered specs.
+"""
+
+[[steps]]
+id = "exercise-user-paths"
+title = "Exercise user-visible paths"
+needs = ["start-preview"]
+description = """
+Exercise the changed behavior as a user. Check success, empty, error, loading,
+mobile/narrow layout, repeated action, and recovery flows when relevant.
+
+Capture exact reproduction steps for any finding.
+"""
+
+[[steps]]
+id = "record-playtest-verdict"
+title = "Record playtest verdict"
+needs = ["exercise-user-paths"]
+description = """
+Record one verdict on the subject bead:
+
+- `pass`
+- `pass_with_findings`
+- `fail`
+- `blocked`
+
+For `fail` or `blocked`, put the bead back in the builder pool with a precise
+reason. For pass-like verdicts, route it to the integrator target when one is
+configured.
+
+```bash
+if [ "<verdict>" = "pass" ] || [ "<verdict>" = "pass_with_findings" ]; then
+  gc sling "{{integrator_target}}" <bead-id> --on mol-agenticfun-integrate --nudge
+else
+  gc sling "{{builder_target}}" <bead-id> --on mol-agenticfun-slice-build --nudge
+fi
+```
+"""

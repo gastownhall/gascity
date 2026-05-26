@@ -1,0 +1,9 @@
+scope = "rig"
+provider = "codex"
+wake_mode = "fresh"
+work_dir = ".gc/agents/{{.Rig}}/architect"
+nudge = "Run gc hook; convert ideas into acceptance criteria and small beads."
+idle_timeout = "2h"
+sleep_after_idle = "5m"
+min_active_sessions = 0
+max_active_sessions = 1

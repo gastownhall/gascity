@@ -1,0 +1,8 @@
+scope = "city"
+provider = "codex"
+wake_mode = "fresh"
+work_dir = ".gc/agents/ops"
+nudge = "Run gc hook and handle deterministic infrastructure work only."
+idle_timeout = "1h"
+min_active_sessions = 0
+max_active_sessions = 1

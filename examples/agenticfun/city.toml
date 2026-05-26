@@ -1,0 +1,128 @@
+[workspace]
+provider = "codex"
+global_fragments = ["agenticfun-constitution"]
+
+[providers]
+[providers.codex]
+base = "builtin:codex"
+args_append = ["--dangerously-bypass-hook-trust"]
+ready_delay_ms = 0
+
+[[named_session]]
+template = "control-dispatcher"
+mode = "on_demand"
+
+[[named_session]]
+template = "control-dispatcher"
+dir = "equipments"
+mode = "on_demand"
+
+[[named_session]]
+template = "control-dispatcher"
+dir = "quotes"
+mode = "on_demand"
+
+[[named_session]]
+template = "control-dispatcher"
+dir = "web-page"
+mode = "on_demand"
+
+[[named_session]]
+template = "control-dispatcher"
+dir = "booking"
+mode = "on_demand"
+
+[[named_session]]
+template = "control-dispatcher"
+dir = "users"
+mode = "on_demand"
+
+[[rigs]]
+name = "equipments"
+prefix = "eq"
+default_branch = "master"
+default_sling_target = "agenticfun.builder"
+[rigs.imports]
+[rigs.imports.agenticfun]
+source = "packs/agenticfun"
+[rigs.formula_vars]
+build_command = "npm run build"
+preview_command = "npm run dev"
+project_kind = "typescript-service"
+repo_url = "https://github.com/AgenticFunProject/equipments"
+setup_command = "npm install"
+test_command = "npm test"
+
+[[rigs]]
+name = "quotes"
+prefix = "qu"
+default_branch = "main"
+default_sling_target = "agenticfun.builder"
+[rigs.imports]
+[rigs.imports.agenticfun]
+source = "packs/agenticfun"
+[rigs.formula_vars]
+build_command = ". .venv/bin/activate && python -m build"
+preview_command = ". .venv/bin/activate && uvicorn app.main:app --reload"
+project_kind = "python-fastapi-service"
+repo_url = "https://github.com/AgenticFunProject/quotes"
+setup_command = "./scripts/bootstrap-venv.sh"
+test_command = ". .venv/bin/activate && pytest"
+
+[[rigs]]
+name = "web-page"
+prefix = "wp"
+default_branch = "main"
+default_sling_target = "agenticfun.builder"
+[rigs.imports]
+[rigs.imports.agenticfun]
+source = "packs/agenticfun"
+[rigs.formula_vars]
+build_command = "true"
+preview_command = "python3 -m http.server 8080 --directory ."
+project_kind = "static-js-demo"
+repo_url = "https://github.com/AgenticFunProject/web-page"
+setup_command = "true"
+test_command = "true"
+
+[[rigs]]
+name = "booking"
+prefix = "bo"
+default_branch = "master"
+default_sling_target = "agenticfun.builder"
+[rigs.imports]
+[rigs.imports.agenticfun]
+source = "packs/agenticfun"
+[rigs.formula_vars]
+build_command = "./mvnw compile"
+preview_command = "./mvnw spring-boot:run -Dspring-boot.run.profiles=local"
+project_kind = "java-spring-spec-service"
+repo_url = "https://github.com/AgenticFunProject/booking"
+setup_command = "true"
+test_command = "./mvnw test"
+
+[[rigs]]
+name = "users"
+prefix = "us"
+default_branch = "main"
+default_sling_target = "agenticfun.builder"
+[rigs.imports]
+[rigs.imports.agenticfun]
+source = "packs/agenticfun"
+[rigs.formula_vars]
+build_command = "npm run build"
+preview_command = "npm run dev"
+project_kind = "typescript-service"
+repo_url = "https://github.com/AgenticFunProject/users"
+setup_command = "npm install"
+test_command = "npm test"
+
+[session]
+provider = "tmux"
+
+[daemon]
+formula_v2 = true
+patrol_interval = "2m"
+max_restarts = 5
+restart_window = "1h"
+shutdown_timeout = "10s"

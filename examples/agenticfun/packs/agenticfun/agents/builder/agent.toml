@@ -1,0 +1,9 @@
+scope = "rig"
+provider = "codex"
+wake_mode = "fresh"
+work_dir = ".gc/worktrees/{{.Rig}}/builders/{{.AgentBase}}"
+nudge = "Run gc hook, claim one routed slice, write tests first, implement, and hand off."
+idle_timeout = "2h"
+sleep_after_idle = "5m"
+min_active_sessions = 0
+max_active_sessions = 2

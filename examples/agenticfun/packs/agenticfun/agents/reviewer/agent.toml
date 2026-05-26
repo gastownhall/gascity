@@ -1,0 +1,9 @@
+scope = "rig"
+provider = "codex"
+wake_mode = "fresh"
+work_dir = ".gc/agents/{{.Rig}}/reviewer"
+nudge = "Run gc hook and perform read-only review against the accepted slice."
+idle_timeout = "1h"
+sleep_after_idle = "5m"
+min_active_sessions = 0
+max_active_sessions = 2

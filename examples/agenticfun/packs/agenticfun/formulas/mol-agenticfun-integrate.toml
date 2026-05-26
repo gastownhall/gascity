@@ -1,0 +1,81 @@
+description = """
+Validate reviewed AgenticFunProject work and merge or reject it with structured
+metadata.
+"""
+formula = "mol-agenticfun-integrate"
+version = 2
+contract = "graph.v2"
+
+[vars]
+[vars.subject]
+description = "Bead, branch, or PR to integrate"
+required = true
+
+[vars.repo_url]
+description = "GitHub repository URL for the current AgenticFunProject rig"
+default = ""
+
+[vars.project_kind]
+description = "Project profile for the current rig"
+default = ""
+
+[vars.target_branch]
+description = "Target branch"
+default = "main"
+
+[vars.test_command]
+description = "Command to run before merge"
+default = ""
+
+[vars.build_command]
+description = "Build or typecheck command"
+default = ""
+
+[[steps]]
+id = "validate-handoff"
+title = "Validate review and playtest handoff"
+description = """
+Read `{{subject}}` and require:
+
+- repository profile: `{{repo_url}}` / `{{project_kind}}`
+- branch or PR metadata
+- builder verification summary
+- reviewer verdict
+- playtester verdict for user-visible changes
+- target branch, defaulting to `{{target_branch}}`
+
+Reject early if required metadata is missing.
+"""
+
+[[steps]]
+id = "run-final-checks"
+title = "Run final checks"
+needs = ["validate-handoff"]
+description = """
+Fetch the branch or PR and run final checks:
+
+```bash
+if [ -n "{{test_command}}" ]; then {{test_command}}; fi
+if [ -n "{{build_command}}" ]; then {{build_command}}; fi
+```
+
+If checks fail, classify whether the branch regressed behavior or the baseline
+is already broken. Do not fix feature code here.
+"""
+
+[[steps]]
+id = "merge-or-reject"
+title = "Merge or reject"
+needs = ["run-final-checks"]
+description = """
+Merge only when the handoff is complete and checks pass. Record merge metadata
+before closing the bead. If using PR flow, record the PR URL and leave the bead
+open or closed according to the project's convention.
+
+On rejection, reset the bead to the builder pool with a structured reason and
+preserve branch metadata for recovery.
+
+```bash
+gc sling "$GC_RIG/{{binding_prefix}}builder" <bead-id> --on mol-agenticfun-slice-build --nudge
+```
+"""

@@ -1,0 +1,13 @@
+# AgenticFunProject - city pack definition.
+#
+# Portable definition lives here; deployment-local choices live in city.toml.
+
+[pack]
+name = "agenticfun"
+schema = 2
+
+[imports.agenticfun]
+source = "packs/agenticfun"
+
+[defaults.rig.imports.agenticfun]
+source = "packs/agenticfun"

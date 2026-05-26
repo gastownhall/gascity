@@ -1,0 +1,121 @@
+description = """
+Convert a raw AgenticFunProject idea into small, accepted implementation beads.
+
+This is the Swarmforge architect phase expressed as a Gas City formula. The
+architect owns behavior definition, acceptance criteria, scope boundaries, and
+handoff quality. Builders should receive small beads, not vague ideas.
+"""
+formula = "mol-agenticfun-idea-to-slice"
+version = 2
+contract = "graph.v2"
+
+[vars]
+[vars.idea]
+description = "Raw feature idea, problem statement, or product experiment"
+required = true
+
+[vars.context]
+description = "Constraints, prior decisions, links, user notes, or examples"
+default = ""
+
+[vars.repo_url]
+description = "GitHub repository URL for the current AgenticFunProject rig"
+default = ""
+
+[vars.project_kind]
+description = "Project profile for the current rig"
+default = ""
+
+[vars.builder_target]
+description = "Target builder pool, e.g. myrig/agenticfun.builder"
+default = ""
+
+[vars.review_target]
+description = "Target reviewer pool, e.g. myrig/agenticfun.reviewer"
+default = ""
+
+[vars.playtest_target]
+description = "Target playtester pool, e.g. myrig/agenticfun.playtester"
+default = ""
+
+[[steps]]
+id = "read-context"
+title = "Read the idea and project context"
+description = """
+Read the assigned bead, `{{idea}}`, `{{context}}`, README, project rules, and
+current open beads. Identify the owning rig and repository root.
+
+Current rig profile:
+
+- repository: `{{repo_url}}`
+- project kind: `{{project_kind}}`
+
+Write down:
+
+- problem statement
+- user-visible outcome
+- non-goals
+- important constraints
+- likely verification commands
+- unresolved questions
+"""
+
+[[steps]]
+id = "define-first-slice"
+title = "Define the smallest useful behavior slice"
+needs = ["read-context"]
+description = """
+Select the smallest shippable slice that makes the idea testable. Prefer one
+behavior that can be implemented and reviewed independently.
+
+Acceptance criteria must describe observable behavior and failure cases. Avoid
+implementation-specific criteria unless the project already exposes that
+contract.
+"""
+
+[[steps]]
+id = "file-builder-beads"
+title = "Create routed builder beads"
+needs = ["define-first-slice"]
+description = """
+Create one or more implementation beads in the owning rig. Each bead must
+include:
+
+- purpose
+- acceptance criteria
+- expected tests or checks
+- non-goals
+- likely files/modules
+- review requirement
+- playtest requirement when user-visible
+
+Route each bead to the builder target. If `{{builder_target}}` is empty and
+`$GC_RIG` is set, use `$GC_RIG/{{binding_prefix}}builder`.
+
+Example:
+
+```bash
+TARGET="{{builder_target}}"
+if [ -z "$TARGET" ] && [ -n "$GC_RIG" ]; then
+  TARGET="$GC_RIG/{{binding_prefix}}builder"
+fi
+gc bd create --rig "$GC_RIG" "Implement <slice title>" -t task --json
+gc sling "$TARGET" <bead-id> --on mol-agenticfun-slice-build --nudge
+```
+"""
+
+[[steps]]
+id = "record-plan"
+title = "Record plan and handoff"
+needs = ["file-builder-beads"]
+description = """
+Update the source idea bead or planning wisp with:
+
+- created builder bead IDs
+- review and playtest targets
+- open questions
+- deferred follow-up beads
+
+Mail the director with the bead IDs and any decision that still needs human
+input.
+"""

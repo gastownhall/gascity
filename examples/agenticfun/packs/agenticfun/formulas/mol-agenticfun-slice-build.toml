@@ -1,0 +1,115 @@
+description = """
+Implement one accepted AgenticFunProject slice using test-first discipline and
+structured handoff.
+"""
+formula = "mol-agenticfun-slice-build"
+version = 2
+contract = "graph.v2"
+
+[vars]
+[vars.issue]
+description = "Work bead ID"
+default = ""
+
+[vars.repo_url]
+description = "GitHub repository URL for the current AgenticFunProject rig"
+default = ""
+
+[vars.project_kind]
+description = "Project profile for the current rig"
+default = ""
+
+[vars.setup_command]
+description = "Command to install or prepare dependencies"
+default = ""
+
+[vars.test_command]
+description = "Command to run focused tests"
+default = ""
+
+[vars.build_command]
+description = "Command to run build/type checks"
+default = ""
+
+[vars.review_target]
+description = "Target reviewer pool"
+default = ""
+
+[[steps]]
+id = "load-assignment"
+title = "Load assignment and verify scope"
+description = """
+Run `gc prime`, read the assigned bead, and confirm the accepted behavior,
+non-goals, and verification commands. If the bead is vague, stop and ask the
+architect or director instead of guessing.
+
+Rig profile:
+
+- repository: `{{repo_url}}`
+- project kind: `{{project_kind}}`
+"""
+
+[[steps]]
+id = "prepare-branch"
+title = "Prepare focused branch or worktree"
+needs = ["load-assignment"]
+description = """
+Inspect git state and create or reuse a focused branch for this bead. Record
+the branch and work directory in bead metadata as soon as they exist.
+
+Do not edit unrelated dirty files. If the repository is already dirty in a way
+that affects the slice, report the blocker on the bead.
+
+Run setup when configured:
+
+```bash
+if [ -n "{{setup_command}}" ]; then {{setup_command}}; fi
+```
+"""
+
+[[steps]]
+id = "write-failing-test"
+title = "Write or update a focused failing test"
+needs = ["prepare-branch"]
+description = """
+Add the smallest useful failing test or executable spec for the accepted
+behavior. If the project has no test harness for the touched surface, document
+that gap and add the smallest practical verification instead.
+"""
+
+[[steps]]
+id = "implement-slice"
+title = "Implement the slice"
+needs = ["write-failing-test"]
+description = """
+Make the smallest code change that satisfies the accepted behavior. Keep domain
+logic, UI behavior, persistence, and infrastructure changes separated according
+to the repository's existing conventions.
+"""
+
+[[steps]]
+id = "verify-and-handoff"
+title = "Verify and hand off to review"
+needs = ["implement-slice"]
+description = """
+Run the focused test command and build command when configured:
+
+```bash
+if [ -n "{{test_command}}" ]; then {{test_command}}; fi
+if [ -n "{{build_command}}" ]; then {{build_command}}; fi
+```
+
+Record changed files, commands run, outcomes, branch, and residual risk on the
+bead. Commit if the project workflow expects commits.
+
+Route to review. If `{{review_target}}` is empty and `$GC_RIG` is set, use
+`$GC_RIG/{{binding_prefix}}reviewer`.
+
+```bash
+TARGET="{{review_target}}"
+if [ -z "$TARGET" ] && [ -n "$GC_RIG" ]; then
+  TARGET="$GC_RIG/{{binding_prefix}}reviewer"
+fi
+gc sling "$TARGET" <bead-id> --nudge
+```
+"""

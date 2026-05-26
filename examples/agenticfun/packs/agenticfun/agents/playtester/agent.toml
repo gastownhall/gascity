@@ -1,0 +1,9 @@
+scope = "rig"
+provider = "codex"
+wake_mode = "fresh"
+work_dir = ".gc/agents/{{.Rig}}/playtester"
+nudge = "Run gc hook; exercise the product as a user and file concrete fun/UX findings."
+idle_timeout = "1h"
+sleep_after_idle = "5m"
+min_active_sessions = 0
+max_active_sessions = 2
