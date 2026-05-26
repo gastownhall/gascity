@@ -133,8 +133,7 @@ func runFreshInitSlingClaudeWork(t *testing.T, prompt, outputRel string) freshIn
 				continue
 			}
 			spawnedSessionBead = sessionBead
-			running, total, ok := parseRunningAgents(statusOut)
-			return ok && total > 0 && running > 0
+			return state == "active" || state == "awake"
 		}
 		return false
 	})
