@@ -1542,10 +1542,14 @@ name = "demo"
 		t.Fatal(err)
 	}
 
-	rigStore, err := openStoreAtForCity(rigDir, cityDir)
+	rigResult, err := openStoreResultAtForCity(rigDir, cityDir)
 	if err != nil {
 		t.Fatalf("openStoreAtForCity(rig): %v", err)
 	}
+	if rigResult.Diagnostic.Store != "FileStore" {
+		t.Fatalf("rig beads_store = %q, want FileStore", rigResult.Diagnostic.Store)
+	}
+	rigStore := rigResult.Store
 	if _, err := rigStore.Create(beads.Bead{Title: "rig bead", Type: "task"}); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -1597,10 +1601,14 @@ prefix = "fe"
 		t.Fatal(err)
 	}
 
-	store, err := openStoreAtForCity(rigDir, cityDir)
+	result, err := openStoreResultAtForCity(rigDir, cityDir)
 	if err != nil {
 		t.Fatalf("openStoreAtForCity(rig): %v", err)
 	}
+	if result.Diagnostic.Store != "BdStore" {
+		t.Fatalf("beads_store = %q, want BdStore", result.Diagnostic.Store)
+	}
+	store := result.Store
 	if _, ok := store.(*beads.BdStore); !ok {
 		t.Fatalf("openStoreAtForCity(rig) returned %T, want *beads.BdStore", store)
 	}

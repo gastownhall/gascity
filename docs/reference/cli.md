@@ -3364,6 +3364,7 @@ gc status [path] [flags]
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
+| `--format` | string |  | Output format: text or json |
 | `--json` | bool |  | Output in JSON format |
 
 ## gc stop

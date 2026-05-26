@@ -48,6 +48,11 @@ type StoreOpenResult struct {
 	Diagnostic BeadsDiagnostic
 }
 
+// ExecStoreDiagnostic returns the diagnostic for an explicitly configured exec store.
+func ExecStoreDiagnostic() BeadsDiagnostic {
+	return BeadsDiagnostic{Store: storeNameExecStore}
+}
+
 // OpenStoreAtForCity opens the configured Store for a city or rig scope.
 func OpenStoreAtForCity(ctx context.Context, opts StoreOpenOptions) (StoreOpenResult, error) {
 	provider := strings.TrimSpace(opts.Provider)
