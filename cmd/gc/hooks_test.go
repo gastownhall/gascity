@@ -206,6 +206,9 @@ func TestInstallBeadHooksCreatesScripts(t *testing.T) {
 			if !strings.Contains(content, `--payload "$PAYLOAD"`) {
 				t.Errorf("hook %s emits raw DATA instead of wrapped PAYLOAD:\n%s", tc.filename, content)
 			}
+			if !strings.Contains(content, `--bead-payload "$1"`) {
+				t.Errorf("hook %s missing bead payload fallback for empty hook stdin:\n%s", tc.filename, content)
+			}
 			// Best-effort: stderr redirected, || true.
 			if !strings.Contains(content, "|| true") {
 				t.Errorf("hook %s missing '|| true' (best-effort):\n%s", tc.filename, content)

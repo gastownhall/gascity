@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
 )
 
@@ -155,6 +156,54 @@ func TestDoEventEmitPayloadInvalidJSON(t *testing.T) {
 	}
 	if len(evts) != 0 {
 		t.Errorf("len(events) = %d, want 0 (invalid payload skipped)", len(evts))
+	}
+}
+
+func TestEventPayloadForEmitFallsBackToStoreBead(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_DOLT", "skip")
+	t.Setenv("GC_SESSION", "fake")
+	configureIsolatedRuntimeEnv(t)
+
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte("[workspace]\nname = \"demo\"\n\n[beads]\nprovider = \"file\"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(city.toml): %v", err)
+	}
+	if err := ensureScopedFileStoreLayout(dir); err != nil {
+		t.Fatalf("ensureScopedFileStoreLayout: %v", err)
+	}
+	if err := ensurePersistedScopeLocalFileStore(dir); err != nil {
+		t.Fatalf("ensurePersistedScopeLocalFileStore: %v", err)
+	}
+	store, err := openStoreAtForCity(dir, dir)
+	if err != nil {
+		t.Fatalf("openStoreAtForCity: %v", err)
+	}
+	created, err := store.Create(beads.Bead{Title: "hook-created task", Type: "task"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	t.Chdir(dir)
+	var stderr bytes.Buffer
+	payload := eventPayloadForEmit(`{"bead":}`, created.ID, &stderr)
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want none", stderr.String())
+	}
+	if !json.Valid([]byte(payload)) {
+		t.Fatalf("payload is not valid JSON: %q", payload)
+	}
+	var decoded struct {
+		Bead beads.Bead `json:"bead"`
+	}
+	if err := json.Unmarshal([]byte(payload), &decoded); err != nil {
+		t.Fatalf("Unmarshal(payload): %v", err)
+	}
+	if decoded.Bead.ID != created.ID {
+		t.Fatalf("payload bead ID = %q, want %q", decoded.Bead.ID, created.ID)
+	}
+	if decoded.Bead.Title != "hook-created task" {
+		t.Fatalf("payload bead title = %q, want hook-created task", decoded.Bead.Title)
 	}
 }
 
