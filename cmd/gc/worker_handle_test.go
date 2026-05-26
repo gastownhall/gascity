@@ -317,14 +317,23 @@ func TestResolvedWorkerRuntimeWithConfigIncludesProviderAuthPassthrough(t *testi
 		if got := resolved.SessionEnv[key]; got != want {
 			t.Errorf("SessionEnv[%s] = %q, want %q", key, got, want)
 		}
+		if got := resolved.Hints.Env[key]; got != want {
+			t.Errorf("Hints.Env[%s] = %q, want %q", key, got, want)
+		}
 	}
 	for _, key := range []string{"GC_RIG", "GC_SESSION_NAME"} {
 		if got, ok := resolved.SessionEnv[key]; ok {
 			t.Errorf("SessionEnv[%s] = %q, want absent caller context", key, got)
 		}
+		if got, ok := resolved.Hints.Env[key]; ok {
+			t.Errorf("Hints.Env[%s] = %q, want absent caller context", key, got)
+		}
 	}
 	if got := resolved.SessionEnv["GC_CITY"]; got != cityDir {
 		t.Errorf("SessionEnv[GC_CITY] = %q, want %q", got, cityDir)
+	}
+	if got := resolved.Hints.Env["GC_CITY"]; got != cityDir {
+		t.Errorf("Hints.Env[GC_CITY] = %q, want %q", got, cityDir)
 	}
 }
 
@@ -501,6 +510,7 @@ func TestResolvedWorkerSessionConfigWithConfigIncludesProviderAuthPassthrough(t 
 		t.Fatalf("resolvedWorkerSessionConfigWithConfig: %v", err)
 	}
 	env := cfg.Runtime.SessionEnv
+	hintsEnv := cfg.Runtime.Hints.Env
 	for key, want := range map[string]string{
 		"ANTHROPIC_AUTH_TOKEN":           "test-anthropic-auth-token",
 		"ANTHROPIC_BASE_URL":             "https://ollama.example.test",
@@ -511,14 +521,23 @@ func TestResolvedWorkerSessionConfigWithConfigIncludesProviderAuthPassthrough(t 
 		if got := env[key]; got != want {
 			t.Errorf("Runtime.SessionEnv[%s] = %q, want %q", key, got, want)
 		}
+		if got := hintsEnv[key]; got != want {
+			t.Errorf("Runtime.Hints.Env[%s] = %q, want %q", key, got, want)
+		}
 	}
 	for _, key := range []string{"GC_RIG", "GC_SESSION_NAME"} {
 		if got, ok := env[key]; ok {
 			t.Errorf("Runtime.SessionEnv[%s] = %q, want absent caller context", key, got)
 		}
+		if got, ok := hintsEnv[key]; ok {
+			t.Errorf("Runtime.Hints.Env[%s] = %q, want absent caller context", key, got)
+		}
 	}
 	if got := env["GC_CITY"]; got != cityDir {
 		t.Errorf("Runtime.SessionEnv[GC_CITY] = %q, want %q", got, cityDir)
+	}
+	if got := hintsEnv["GC_CITY"]; got != cityDir {
+		t.Errorf("Runtime.Hints.Env[GC_CITY] = %q, want %q", got, cityDir)
 	}
 }
 

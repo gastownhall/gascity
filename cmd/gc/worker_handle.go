@@ -308,6 +308,7 @@ func resolvedWorkerSessionConfigWithConfig(
 			},
 			Hints: func() runtime.Config {
 				hints := workerSessionCreateHints(resolved)
+				hints.Env = sessionEnv
 				hints.MCPServers = mcpServers
 				return hints
 			}(),
@@ -547,6 +548,7 @@ func resolvedWorkerRuntimeWithConfigAndMetadata(cityPath string, cfg *config.Cit
 		SessionEnv: sessionEnv,
 		Hints: runtime.Config{
 			WorkDir:                workDir,
+			Env:                    sessionEnv,
 			Lifecycle:              runtime.Lifecycle(resolved.Lifecycle),
 			ReadyPromptPrefix:      resolved.ReadyPromptPrefix,
 			ReadyDelayMs:           resolved.ReadyDelayMs,
