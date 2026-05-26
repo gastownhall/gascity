@@ -271,9 +271,18 @@ if [ "${GC_HEALTH_SKIP_ZOMBIE_SCAN:-0}" != "1" ]; then
   candidate_pids=" $(pgrep -x dolt 2>/dev/null | tr '\n' ' ' || true)"
   matched_pids=$(ps -eo pid=,stat=,args= 2>/dev/null | awk \
     -v server="$server_pid" -v rigs="$rig_dolt_pids" -v cands="$candidate_pids" '
+    BEGIN {
+      # Build an O(1) lookup set from the pgrep candidates once. The
+      # per-row membership test below was an index() substring scan
+      # re-paid for every process-table row, i.e. O(rows x candidate
+      # string length); the reported incident had ~41k candidate PIDs
+      # (#2618). Splitting into an associative set makes each lookup O(1).
+      n = split(cands, a, " ")
+      for (i = 1; i <= n; i++) if (a[i] != "") cand[a[i]] = 1
+    }
     {
       pid = $1
-      if (index(cands, " " pid " ") == 0) next   # not a pgrep -x dolt match
+      if (!(pid in cand)) next                   # not a pgrep -x dolt match
       if (pid == server) next                     # the managed city server
       if (index(rigs, " " pid " ") != 0) next     # a configured rig-local dolt
       if ($2 ~ /Z/) next                          # Z-state zombie: never a server
