@@ -122,6 +122,8 @@ func AddRegistryWithCache(home string, reg Registry, catalogData []byte) error {
 			if err := WriteCatalogCache(home, reg.Name, catalogData); err != nil {
 				return err
 			}
+		} else if err := RemoveCatalogCache(home, reg.Name); err != nil {
+			return err
 		}
 		return SaveConfig(home, cfg)
 	})

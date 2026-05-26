@@ -300,6 +300,32 @@ func TestImmutableReleaseMetadata(t *testing.T) {
 	}
 }
 
+func TestRefreshRegistryRejectsUnreadablePriorCache(t *testing.T) {
+	home := t.TempDir()
+	sourceDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(sourceDir, "registry.toml"), []byte(validCatalog), 0o644); err != nil {
+		t.Fatalf("WriteFile(source registry): %v", err)
+	}
+	if err := WriteCatalogCache(home, "main", []byte("not = valid = toml")); err != nil {
+		t.Fatalf("WriteCatalogCache(invalid): %v", err)
+	}
+
+	_, err := RefreshRegistry(context.Background(), home, Registry{Name: "main", Source: sourceDir}, FetchOptions{})
+	if err == nil {
+		t.Fatal("RefreshRegistry succeeded with unreadable prior cache")
+	}
+	if !strings.Contains(err.Error(), "previous registry cache") {
+		t.Fatalf("RefreshRegistry err = %v, want previous cache context", err)
+	}
+	got, readErr := os.ReadFile(CachePath(home, "main"))
+	if readErr != nil {
+		t.Fatalf("ReadFile(cache): %v", readErr)
+	}
+	if string(got) != "not = valid = toml" {
+		t.Fatalf("RefreshRegistry overwrote unreadable cache:\n%s", got)
+	}
+}
+
 func TestFreshnessEnv(t *testing.T) {
 	t.Setenv("GC_REGISTRY_FRESHNESS", "2s")
 	d, err := FreshnessFromEnv(time.Hour)

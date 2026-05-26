@@ -211,6 +211,39 @@ func TestPackRegistryAddDuplicateDoesNotPoisonCache(t *testing.T) {
 	}
 }
 
+func TestPackRegistryAddNoValidateInvalidatesReusedNameCache(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("GC_HOME", home)
+	catalogDir := writeRegistryCatalog(t, packRegistryTestCatalog)
+
+	var stdout, stderr bytes.Buffer
+	if code := doPackRegistryAdd("main", catalogDir, false, false, &stdout, &stderr); code != 0 {
+		t.Fatalf("add main: %d %s", code, stderr.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := doPackRegistryRemove("main", false, &stdout, &stderr); code != 0 {
+		t.Fatalf("remove main: %d %s", code, stderr.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := doPackRegistryAdd("main", filepath.Join(t.TempDir(), "missing"), true, false, &stdout, &stderr); code != 0 {
+		t.Fatalf("re-add main --no-validate: %d %s", code, stderr.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := doPackRegistrySearch("light", "", false, 50, false, false, &stdout, &stderr); code == 0 {
+		t.Fatalf("search reused stale cache stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+	if strings.Contains(stdout.String(), "lighthouse") {
+		t.Fatalf("search returned stale pack from previous source: %q", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "no registry caches were available") {
+		t.Fatalf("search stderr=%q, want no-cache failure", stderr.String())
+	}
+}
+
 func TestPackRegistryLatestUsesHighestNonWithdrawnSemver(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("GC_HOME", home)

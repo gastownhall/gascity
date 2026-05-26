@@ -241,6 +241,14 @@ func WriteCatalogCache(home, registryName string, data []byte) error {
 	return fsys.WriteFileAtomic(fsys.OSFS{}, path, data, 0o644)
 }
 
+// RemoveCatalogCache removes the cached catalog for a registry if one exists.
+func RemoveCatalogCache(home, registryName string) error {
+	if err := os.Remove(CachePath(home, registryName)); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("removing registry cache: %w", err)
+	}
+	return nil
+}
+
 // WithCatalogCacheLock serializes access to one registry cache.
 func WithCatalogCacheLock(home, registryName string, fn func() error) error {
 	lockPath := CachePath(home, registryName) + ".lock"
@@ -294,10 +302,15 @@ func RefreshRegistry(ctx context.Context, home string, reg Registry, opts FetchO
 		return Catalog{}, err
 	}
 	if err := WithCatalogCacheLock(home, reg.Name, func() error {
-		if prev, _, err := ReadCachedRegistryCatalog(home, reg); err == nil {
+		prev, _, err := ReadCachedRegistryCatalog(home, reg)
+		switch {
+		case err == nil:
 			if err := CheckImmutable(prev, next); err != nil {
 				return err
 			}
+		case os.IsNotExist(err):
+		default:
+			return fmt.Errorf("reading previous registry cache: %w", err)
 		}
 		return WriteCatalogCache(home, reg.Name, data)
 	}); err != nil {
