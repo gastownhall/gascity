@@ -51,6 +51,14 @@ var assumeYesForSupervisorCycle bool
 // to inject canned responses.
 var confirmCrossCitySupervisorImpactStdin io.Reader = os.Stdin
 
+// confirmCrossCitySupervisorImpactStdinIsTerminal reports whether stdin
+// is a terminal. When false (CI, scripts, pipes, `< /dev/null`), the
+// guard cannot meaningfully prompt — it falls through to a silent
+// proceed after printing the warning, matching standard Unix-tool
+// convention for interactive prompts in non-interactive contexts.
+// Tests override this hook.
+var confirmCrossCitySupervisorImpactStdinIsTerminal = func() bool { return isTerminalFunc(os.Stdin) }
+
 type supervisorRegistry interface {
 	List() ([]supervisor.CityEntry, error)
 	Register(cityPath, effectiveName string) error
@@ -235,7 +243,11 @@ func otherRegisteredCities(targetCityPath string) ([]supervisor.CityEntry, error
 // cities and asks the operator to confirm before any registry mutation or
 // reload command is issued. Single-city and supervisor-absent cases skip
 // the prompt (nothing at risk). The --yes flag bypasses the prompt but
-// still prints the warning for the audit trail.
+// still prints the warning for the audit trail. When stdin is not a
+// terminal (CI, scripts, pipes, `< /dev/null`), the guard cannot
+// meaningfully prompt — it prints the warning and proceeds silently,
+// matching standard Unix-tool convention for interactive prompts in
+// non-interactive contexts.
 //
 // Returns true to proceed, false to abort.
 //
@@ -260,6 +272,10 @@ func confirmCrossCitySupervisorImpact(cityPath string, _, stderr io.Writer) bool
 	fmt.Fprintln(stderr, "if the supervisor is absent, drifted, or in a zombie state — which cycles those cities' in-flight work.")           //nolint:errcheck // best-effort stderr
 	if assumeYesForSupervisorCycle {
 		fmt.Fprintln(stderr, "Continuing (--yes).") //nolint:errcheck // best-effort stderr
+		return true
+	}
+	if !confirmCrossCitySupervisorImpactStdinIsTerminal() {
+		fmt.Fprintln(stderr, "Continuing (stdin is not a terminal; pass --yes to silence this notice in scripted contexts).") //nolint:errcheck // best-effort stderr
 		return true
 	}
 	fmt.Fprint(stderr, "Continue? [y/N]: ") //nolint:errcheck // best-effort stderr

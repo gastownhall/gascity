@@ -2481,6 +2481,10 @@ func TestConfirmCrossCitySupervisorImpactPromptYProceeds(t *testing.T) {
 	confirmCrossCitySupervisorImpactStdin = strings.NewReader("y\n")
 	t.Cleanup(func() { confirmCrossCitySupervisorImpactStdin = oldStdin })
 
+	oldTerm := confirmCrossCitySupervisorImpactStdinIsTerminal
+	confirmCrossCitySupervisorImpactStdinIsTerminal = func() bool { return true }
+	t.Cleanup(func() { confirmCrossCitySupervisorImpactStdinIsTerminal = oldTerm })
+
 	var stdout, stderr bytes.Buffer
 	if !confirmCrossCitySupervisorImpact(cityPath, &stdout, &stderr) {
 		t.Errorf("user-entered y should proceed; stderr=%q", stderr.String())
@@ -2508,6 +2512,10 @@ func TestConfirmCrossCitySupervisorImpactPromptNAborts(t *testing.T) {
 	oldStdin := confirmCrossCitySupervisorImpactStdin
 	confirmCrossCitySupervisorImpactStdin = strings.NewReader("n\n")
 	t.Cleanup(func() { confirmCrossCitySupervisorImpactStdin = oldStdin })
+
+	oldTerm := confirmCrossCitySupervisorImpactStdinIsTerminal
+	confirmCrossCitySupervisorImpactStdinIsTerminal = func() bool { return true }
+	t.Cleanup(func() { confirmCrossCitySupervisorImpactStdinIsTerminal = oldTerm })
 
 	var stdout, stderr bytes.Buffer
 	if confirmCrossCitySupervisorImpact(cityPath, &stdout, &stderr) {
@@ -2537,9 +2545,52 @@ func TestConfirmCrossCitySupervisorImpactPromptEmptyDefaultsToNo(t *testing.T) {
 	confirmCrossCitySupervisorImpactStdin = strings.NewReader("\n")
 	t.Cleanup(func() { confirmCrossCitySupervisorImpactStdin = oldStdin })
 
+	oldTerm := confirmCrossCitySupervisorImpactStdinIsTerminal
+	confirmCrossCitySupervisorImpactStdinIsTerminal = func() bool { return true }
+	t.Cleanup(func() { confirmCrossCitySupervisorImpactStdinIsTerminal = oldTerm })
+
 	var stdout, stderr bytes.Buffer
 	if confirmCrossCitySupervisorImpact(cityPath, &stdout, &stderr) {
 		t.Errorf("empty input should default to abort; stderr=%q", stderr.String())
+	}
+}
+
+func TestConfirmCrossCitySupervisorImpactNonTerminalStdinProceedsSilently(t *testing.T) {
+	// CI, scripts, pipes, `< /dev/null` all give a non-terminal stdin.
+	// In those contexts the guard cannot meaningfully prompt; it must
+	// warn (audit trail) and proceed, not abort. Aborting would break
+	// every scripted `gc init` / `gc register` invocation, including
+	// the acceptance test suite. See PR #2638 CI failure.
+	gcHome := t.TempDir()
+	t.Setenv("GC_HOME", gcHome)
+
+	cityPath := filepath.Join(t.TempDir(), "new-city")
+	otherPath := filepath.Join(t.TempDir(), "other-city")
+	reg := supervisor.NewRegistry(supervisor.RegistryPath())
+	if err := reg.Register(otherPath, "other-city"); err != nil {
+		t.Fatalf("seed register other: %v", err)
+	}
+
+	oldAlive := supervisorAliveHook
+	supervisorAliveHook = func() int { return 1234 }
+	t.Cleanup(func() { supervisorAliveHook = oldAlive })
+
+	oldTerm := confirmCrossCitySupervisorImpactStdinIsTerminal
+	confirmCrossCitySupervisorImpactStdinIsTerminal = func() bool { return false }
+	t.Cleanup(func() { confirmCrossCitySupervisorImpactStdinIsTerminal = oldTerm })
+
+	var stdout, stderr bytes.Buffer
+	if !confirmCrossCitySupervisorImpact(cityPath, &stdout, &stderr) {
+		t.Errorf("non-terminal stdin should proceed silently; stderr=%q", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "other-city") {
+		t.Errorf("warning should still be printed for audit; stderr=%q", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "stdin is not a terminal") {
+		t.Errorf("non-tty notice should be printed; stderr=%q", stderr.String())
+	}
+	if strings.Contains(stderr.String(), "Continue?") {
+		t.Errorf("prompt MUST NOT be emitted on non-tty path; stderr=%q", stderr.String())
 	}
 }
 
