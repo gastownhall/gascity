@@ -1639,11 +1639,11 @@ gc mail
 
 ## gc mail archive
 
-Close one or more message beads without displaying their contents.
+Remove one or more message beads without displaying their contents.
 
-Use this to dismiss messages without reading them. Each message is marked
-as closed and will no longer appear in mail check or inbox results. When
-multiple IDs are passed, they are archived in a single batch round-trip.
+Use this to dismiss messages without reading them. Each message is removed
+and will no longer appear in mail check or inbox results. When multiple IDs
+are passed, they are archived in input order.
 
 For large advisory backlogs, use --to with --subject-prefix, --subject-contains,
 or --from to archive a bounded matching slice without enumerating IDs by hand.

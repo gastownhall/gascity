@@ -2586,6 +2586,9 @@ func TestMailArchiveSelectedIsFilteredAndBounded(t *testing.T) {
 		t.Fatalf("stdout = %q, did not expect second match past limit", stdout.String())
 	}
 
+	if _, err := store.Get(first.ID); !errors.Is(err, beads.ErrNotFound) {
+		t.Fatalf("Get(%s) err = %v, want ErrNotFound", first.ID, err)
+	}
 	status := func(id string) string {
 		t.Helper()
 		b, err := store.Get(id)
@@ -2593,9 +2596,6 @@ func TestMailArchiveSelectedIsFilteredAndBounded(t *testing.T) {
 			t.Fatalf("Get(%s): %v", id, err)
 		}
 		return b.Status
-	}
-	if got := status(first.ID); got != "closed" {
-		t.Fatalf("first status = %q, want closed", got)
 	}
 	for _, id := range []string{second.ID, readMatch.ID, nonMatch.ID, otherRecipient.ID} {
 		if got := status(id); got != "open" {
