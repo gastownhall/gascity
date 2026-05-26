@@ -56,6 +56,7 @@ type controllerState struct {
 	extmsgSvc              *extmsg.Services
 	adapterReg             *extmsg.AdapterRegistry
 	updateMu               sync.Mutex // serializes rebuild+swap so stale reloads cannot overtake newer mutations
+	beadEventStartSeq      uint64
 
 	// True after an API config mutation refreshes controller state ahead of the
 	// runtime reload loop. Runtime reloads from older revisions are ignored
@@ -91,17 +92,24 @@ func newControllerState(
 		ctx = context.Background()
 	}
 	tomlPath := filepath.Join(cityPath, "city.toml")
+	var beadEventStartSeq uint64
+	if ep != nil {
+		if seq, err := ep.LatestSeq(); err == nil {
+			beadEventStartSeq = seq
+		}
+	}
 	cs := &controllerState{
-		cfg:        cfg,
-		sp:         sp,
-		cacheCtx:   ctx,
-		eventProv:  ep,
-		editor:     configedit.NewEditor(fsys.OSFS{}, tomlPath),
-		cityName:   cityName,
-		cityPath:   cityPath,
-		version:    version,
-		startedAt:  time.Now(),
-		adapterReg: extmsg.NewAdapterRegistry(),
+		cfg:               cfg,
+		sp:                sp,
+		cacheCtx:          ctx,
+		eventProv:         ep,
+		editor:            configedit.NewEditor(fsys.OSFS{}, tomlPath),
+		cityName:          cityName,
+		cityPath:          cityPath,
+		version:           version,
+		startedAt:         time.Now(),
+		adapterReg:        extmsg.NewAdapterRegistry(),
+		beadEventStartSeq: beadEventStartSeq,
 	}
 	cs.beadStores = cs.buildStores(cfg)
 	// Open city-level store for session beads and mail (best-effort).
@@ -251,8 +259,8 @@ func (cs *controllerState) startBeadEventWatcher(ctx context.Context) {
 	if ep == nil {
 		return
 	}
+	seq := cs.beadEventStartSeq
 	go func() {
-		seq, _ := ep.LatestSeq()
 		for {
 			watcher, err := ep.Watch(ctx, seq)
 			if err != nil {
