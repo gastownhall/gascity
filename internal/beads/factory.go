@@ -40,6 +40,7 @@ type StoreOpenOptions struct {
 	OpenBdStore      func() (Store, error)
 	OpenFileStore    func() (Store, error)
 	OpenExecStore    func() (Store, error)
+	OpenNativeStore  func() (Store, error)
 }
 
 // StoreOpenResult contains the selected Store plus native-selection diagnostics.
@@ -93,7 +94,7 @@ func OpenStoreAtForCity(ctx context.Context, opts StoreOpenOptions) (StoreOpenRe
 		return opts.openBdFallback(diag)
 	}
 
-	native, err := newNativeDoltStoreAt(ctx, opts.ScopeRoot)
+	native, err := opts.openNativeStore(ctx)
 	if err != nil {
 		diag := BeadsDiagnostic{
 			Store:               storeNameBdStore,
@@ -116,6 +117,13 @@ func OpenStoreAtForCity(ctx context.Context, opts StoreOpenOptions) (StoreOpenRe
 func (opts StoreOpenOptions) openBdFallback(diag BeadsDiagnostic) (StoreOpenResult, error) {
 	store, err := callStoreOpen("bd store", opts.OpenBdStore)
 	return StoreOpenResult{Store: store, Diagnostic: diag}, err
+}
+
+func (opts StoreOpenOptions) openNativeStore(ctx context.Context) (Store, error) {
+	if opts.OpenNativeStore != nil {
+		return opts.OpenNativeStore()
+	}
+	return newNativeDoltStoreAt(ctx, opts.ScopeRoot)
 }
 
 func callStoreOpen(name string, open func() (Store, error)) (Store, error) {
