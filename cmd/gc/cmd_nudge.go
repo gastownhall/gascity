@@ -42,6 +42,11 @@ const (
 
 var errNudgeSessionFenceMismatch = errors.New("queued nudge session fence mismatch")
 
+var (
+	nudgeCityUsesManagedReconciler = cityUsesManagedReconciler
+	nudgePokeController            = pokeController
+)
+
 type nudgeDeliveryMode string
 
 const (
@@ -548,6 +553,9 @@ func deliverSessionNudgeWithWorker(target nudgeTarget, store beads.Store, sp run
 	if mode == nudgeDeliveryQueue {
 		return queueSessionNudgeWithWorker(target, store, sp, message, mode, jsonOutput, stdout, stderr)
 	}
+	if shouldQueueManagedNudgeWake(target, store, sp) {
+		return queueManagedSessionNudgeWake(target, store, sp, message, mode, jsonOutput, stdout, stderr)
+	}
 	delivery, ok := workerNudgeDeliveryForMode(mode)
 	if !ok {
 		fmt.Fprintf(stderr, "gc session nudge: unknown delivery mode %q\n", mode) //nolint:errcheck
@@ -593,6 +601,49 @@ func deliverSessionNudgeWithWorker(target nudgeTarget, store beads.Store, sp run
 	}
 	fmt.Fprintf(stdout, "Nudged %s\n", target.agentKey()) //nolint:errcheck
 	return 0
+}
+
+func shouldQueueManagedNudgeWake(target nudgeTarget, store beads.Store, sp runtime.Provider) bool {
+	if strings.TrimSpace(target.cityPath) == "" || target.sessionID == "" || !nudgeCityUsesManagedReconciler(target.cityPath) {
+		return false
+	}
+	obs, err := workerObserveNudgeTarget(target, store, sp)
+	return err == nil && !obs.Running
+}
+
+func queueManagedSessionNudgeWake(target nudgeTarget, store beads.Store, sp runtime.Provider, message string, mode nudgeDeliveryMode, jsonOutput bool, stdout, stderr io.Writer) int {
+	if err := requestManagedNudgeWake(target, store); err != nil {
+		fmt.Fprintf(stderr, "gc session nudge: %v\n", err) //nolint:errcheck
+		return 1
+	}
+	code := queueSessionNudgeWithWorker(target, store, sp, message, mode, jsonOutput, stdout, stderr)
+	if code != 0 {
+		return code
+	}
+	if err := nudgePokeController(target.cityPath); err != nil {
+		fmt.Fprintf(stderr, "gc session nudge: warning: poke failed: %v\n", err) //nolint:errcheck
+	}
+	return 0
+}
+
+func requestManagedNudgeWake(target nudgeTarget, store beads.Store) error {
+	if store == nil || target.sessionID == "" {
+		return nil
+	}
+	b, err := store.Get(target.sessionID)
+	if err != nil {
+		return err
+	}
+	nudgeIDs, err := session.WakeSession(store, b, time.Now().UTC())
+	if err != nil {
+		return err
+	}
+	if len(nudgeIDs) > 0 {
+		if err := withdrawQueuedWaitNudges(target.cityPath, nudgeIDs); err != nil {
+			return fmt.Errorf("withdrawing queued wait nudges: %w", err)
+		}
+	}
+	return nil
 }
 
 func workerHandleForNudgeTarget(target nudgeTarget, store beads.Store, sp runtime.Provider) (worker.Handle, error) {

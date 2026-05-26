@@ -1280,13 +1280,10 @@ func agentCommandDir(cityPath string, a *config.Agent, rigs []config.Rig) string
 	return resolveAgentDirPath(cityPath, a.Dir)
 }
 
-// passthroughEnv returns environment variables from the parent process that
-// agent sessions should inherit. Agents need PATH to find tools (including gc),
-// GC_BEADS/GC_DOLT so they use the same bead store as the parent,
-// GC_DOLT_HOST/PORT/USER/PASSWORD so agents can connect to remote Dolt servers,
-// and Claude auth/home context so managed sessions can launch reliably under
-// shell and supervisor-driven flows.
-func passthroughEnv() map[string]string {
+// providerProcessPassthroughEnv returns non-GC process context that provider
+// sessions need to start reliably: user/home, provider auth/config, locale,
+// XDG, telemetry, and Claude nesting resets.
+func providerProcessPassthroughEnv() map[string]string {
 	m := make(map[string]string)
 	// Pass through PATH so managed sessions can find tools, and preserve the
 	// minimum user/home context Claude Code needs to resolve stored credentials.
@@ -1347,16 +1344,16 @@ func passthroughEnv() map[string]string {
 	} else if home := os.Getenv("HOME"); home != "" {
 		m["XDG_STATE_HOME"] = filepath.Join(home, ".local", "state")
 	}
-	// Pass through GC_* vars and provider credential env. Agent credentials are
-	// included in the global baseline because the SDK cannot know which
-	// agent uses which provider (zero hardcoded roles); the trust boundary
-	// is the managed session itself.
+	// Pass through provider credential env. Agent credentials are included in
+	// the global baseline because the SDK cannot know which agent uses which
+	// provider (zero hardcoded roles); the trust boundary is the managed
+	// session itself.
 	for _, entry := range os.Environ() {
 		key, val, ok := strings.Cut(entry, "=")
 		if !ok || val == "" {
 			continue
 		}
-		if strings.HasPrefix(key, "GC_") || isProviderCredentialEnv(key) {
+		if isProviderCredentialEnv(key) {
 			m[key] = val
 		}
 	}
@@ -1370,6 +1367,24 @@ func passthroughEnv() map[string]string {
 	// the supervisor or a user shell created the session bead.
 	m["CLAUDECODE"] = ""
 	m["CLAUDE_CODE_ENTRYPOINT"] = ""
+	return m
+}
+
+// passthroughEnv returns environment variables from the parent process that
+// agent sessions should inherit. Agents need PATH to find tools (including gc),
+// GC_BEADS/GC_DOLT so they use the same bead store as the parent,
+// GC_DOLT_HOST/PORT/USER/PASSWORD so agents can connect to remote Dolt servers,
+// and Claude auth/home context so managed sessions can launch reliably under
+// shell and supervisor-driven flows.
+func passthroughEnv() map[string]string {
+	m := providerProcessPassthroughEnv()
+	for _, entry := range os.Environ() {
+		key, val, ok := strings.Cut(entry, "=")
+		if !ok || val == "" || !strings.HasPrefix(key, "GC_") {
+			continue
+		}
+		m[key] = val
+	}
 	return m
 }
 
