@@ -120,7 +120,7 @@ func HandleOutbound(ctx context.Context, deps OutboundDeps, caller Caller, req O
 	// surface and PublishRequest is the gc-to-adapter wire contract; any
 	// future divergence (e.g. an internal-only OutboundRequest field)
 	// must not silently leak onto the wire.
-	receipt, err := adapter.Publish(ctx, PublishRequest{ //nolint:staticcheck // documents the wire boundary; see comment above
+	receipt, err := adapter.Publish(ctx, PublishRequest{ //nolint:staticcheck // S1016: field-by-field copy is intentional, not a struct conversion — see comment above
 		SessionID:        req.SessionID,
 		Conversation:     req.Conversation,
 		Text:             req.Text,
