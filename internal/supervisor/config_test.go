@@ -58,6 +58,8 @@ func TestLoadConfigSeedsIsolatedGCHomeConfig(t *testing.T) {
 }
 
 func TestShouldSeedIsolatedSupervisorConfigFalseForCanonicalDefaultUnderSymlinkedHome(t *testing.T) {
+	setProgramName(t, "gc")
+
 	root := t.TempDir()
 	realHome := filepath.Join(root, "real-home")
 	if err := os.MkdirAll(realHome, 0o755); err != nil {
@@ -70,9 +72,41 @@ func TestShouldSeedIsolatedSupervisorConfigFalseForCanonicalDefaultUnderSymlinke
 
 	t.Setenv("HOME", linkHome)
 	t.Setenv("GC_HOME", filepath.Join(realHome, ".gc"))
+	t.Setenv("GC_ISOLATED", "")
 	if shouldSeedIsolatedSupervisorConfig(ConfigPath()) {
 		t.Fatal("shouldSeedIsolatedSupervisorConfig() = true, want false for canonical default GC_HOME under symlinked HOME")
 	}
+}
+
+func TestShouldSeedIsolatedSupervisorConfigFalseForNonTestBinaryWithoutGCIsolated(t *testing.T) {
+	setProgramName(t, "gc")
+
+	t.Setenv("GC_ISOLATED", "")
+	t.Setenv("GC_HOME", filepath.Join(t.TempDir(), ".gc"))
+
+	if shouldSeedIsolatedSupervisorConfig(ConfigPath()) {
+		t.Fatal("shouldSeedIsolatedSupervisorConfig() = true, want false for non-test binary without GC_ISOLATED=1")
+	}
+}
+
+func TestShouldSeedIsolatedSupervisorConfigTrueForNonTestBinaryWithGCIsolated(t *testing.T) {
+	setProgramName(t, "gc")
+
+	t.Setenv("GC_ISOLATED", "1")
+	t.Setenv("GC_HOME", filepath.Join(t.TempDir(), ".gc"))
+
+	if !shouldSeedIsolatedSupervisorConfig(ConfigPath()) {
+		t.Fatal("shouldSeedIsolatedSupervisorConfig() = false, want true for non-test binary with GC_ISOLATED=1")
+	}
+}
+
+func setProgramName(t *testing.T, name string) {
+	t.Helper()
+	oldArgs := os.Args
+	os.Args = append([]string{name}, oldArgs[1:]...)
+	t.Cleanup(func() {
+		os.Args = oldArgs
+	})
 }
 
 func TestLoadConfigExplicit(t *testing.T) {
