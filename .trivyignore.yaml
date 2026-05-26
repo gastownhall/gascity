@@ -1,6 +1,6 @@
 vulnerabilities:
   # Go stdlib CVEs disclosed 2026-05-12 (Go 1.26.2). Fixed in Go 1.25.10
-  # and 1.26.3 upstream. Our own gc binary builds against Go 1.25.10 (see
+  # and 1.26.3 upstream. Our own gc binary builds against Go 1.26.3 (see
   # go.mod), but the upstream gh and dolt distributions still ship a
   # 1.26.2 stdlib until cli/cli and dolthub/dolt cut new releases.
   - id: CVE-2026-33811
