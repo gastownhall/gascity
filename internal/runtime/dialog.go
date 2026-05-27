@@ -1021,6 +1021,26 @@ func ContainsProviderRateLimitScreen(content string) bool {
 		strings.Contains(content, "Stop")
 }
 
+// ProviderTerminalErrorReason classifies high-confidence provider errors that
+// require operator/config intervention rather than immediate retry.
+func ProviderTerminalErrorReason(content string) string {
+	lower := strings.ToLower(content)
+	switch {
+	case strings.Contains(lower, "model_not_found"):
+		return "model_not_found"
+	case strings.Contains(lower, "model") && strings.Contains(lower, "not found"):
+		return "model_not_found"
+	case strings.Contains(lower, "insufficient_quota"):
+		return "quota_exceeded"
+	case strings.Contains(lower, "quota_exceeded"):
+		return "quota_exceeded"
+	case strings.Contains(lower, "quota exceeded") && !strings.Contains(lower, "disk quota"):
+		return "quota_exceeded"
+	default:
+		return ""
+	}
+}
+
 // containsPromptIndicator checks whether any line in the content looks like a
 // common shell or agent prompt, indicating the session is ready and no dialog is
 // present. Full-screen agent UIs often render placeholder input after the prompt

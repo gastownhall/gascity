@@ -41,6 +41,14 @@ type wakeEvaluation struct {
 
 const sleepReasonRuntimeMissing = "runtime-missing"
 
+const (
+	sessionHealthStateMetadataKey           = "session_health"
+	sessionHealthReasonMetadataKey          = "session_health_reason"
+	sessionDrainableMetadataKey             = "session_drainable"
+	sessionProviderTerminalErrorMetadataKey = "provider_terminal_error"
+	sessionProviderTerminalErrorAtKey       = "provider_terminal_error_at"
+)
+
 // Deprecated: evaluateWakeReasons and wakeReasons are legacy functions
 // superseded by ComputeAwakeSet (compute_awake_set.go). The production
 // reconciler at session_reconciler.go:438 uses ComputeAwakeSet →
@@ -683,6 +691,51 @@ func recordRateLimitQuarantine(session *beads.Bead, store beads.Store, clk clock
 		session.Metadata[k] = v
 	}
 	return nil
+}
+
+func markProviderTerminalError(session *beads.Bead, store beads.Store, clk clock.Clock, reason string) error {
+	if session == nil || store == nil {
+		return nil
+	}
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		return nil
+	}
+	if session.Metadata == nil {
+		session.Metadata = make(map[string]string)
+	}
+	now := time.Now().UTC()
+	if clk != nil {
+		now = clk.Now().UTC()
+	}
+	batch := map[string]string{
+		"state":                                 string(sessionpkg.StateAsleep),
+		"sleep_reason":                          "provider-terminal-error",
+		"last_woke_at":                          "",
+		"pending_create_claim":                  "",
+		"pending_create_started_at":             "",
+		sessionHealthStateMetadataKey:           "unhealthy",
+		sessionHealthReasonMetadataKey:          reason,
+		sessionDrainableMetadataKey:             boolMetadata(true),
+		sessionProviderTerminalErrorMetadataKey: reason,
+		sessionProviderTerminalErrorAtKey:       now.Format(time.RFC3339),
+	}
+	if err := store.SetMetadataBatch(session.ID, batch); err != nil {
+		return err
+	}
+	for k, v := range batch {
+		session.Metadata[k] = v
+	}
+	return nil
+}
+
+func sessionHasProviderTerminalError(session beads.Bead) bool {
+	if strings.TrimSpace(session.Metadata[sessionProviderTerminalErrorMetadataKey]) != "" {
+		return true
+	}
+	return strings.TrimSpace(session.Metadata[sessionHealthStateMetadataKey]) == "unhealthy" &&
+		strings.TrimSpace(session.Metadata[sessionDrainableMetadataKey]) == boolMetadata(true) &&
+		strings.TrimSpace(session.Metadata[sessionHealthReasonMetadataKey]) != ""
 }
 
 // recordWakeFailure increments wake_attempts and quarantines if threshold exceeded.

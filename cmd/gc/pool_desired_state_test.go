@@ -73,6 +73,15 @@ func poolTraceFieldInt(t *testing.T, fields map[string]any, key string) int {
 	return got
 }
 
+func poolTraceFieldStrings(t *testing.T, fields map[string]any, key string) []string {
+	t.Helper()
+	got, ok := fields[key].([]string)
+	if !ok {
+		t.Fatalf("trace field %s = %#v, want []string", key, fields[key])
+	}
+	return got
+}
+
 func newPoolDesiredStateTestTrace(templates ...string) *sessionReconcilerTraceCycle {
 	detail := make(map[string]TraceSource, len(templates))
 	for _, template := range templates {
@@ -333,6 +342,74 @@ func TestComputePoolDesiredStates_MaxCapsTotal(t *testing.T) {
 	// Max=2: only 2 of the 3 requested sessions allowed.
 	if len(result[0].Requests) != 2 {
 		t.Errorf("len(requests) = %d, want 2 (capped by max)", len(result[0].Requests))
+	}
+}
+
+func TestComputePoolDesiredStates_TerminalProviderErrorSessionsDoNotBlockNewDemand(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{poolAgent("claude", "", intPtr(1), 0)},
+	}
+	work := []beads.Bead{
+		workBead("w-stale", "claude", "sess-stale", "in_progress", 5),
+	}
+	stale := sessionBead("sess-stale", "open")
+	stale.Type = sessionBeadType
+	stale.Metadata = map[string]string{
+		"template":                              "claude",
+		"session_name":                          "claude-sess-stale",
+		sessionHealthStateMetadataKey:           "unhealthy",
+		sessionHealthReasonMetadataKey:          "model_not_found",
+		sessionDrainableMetadataKey:             boolMetadata(true),
+		sessionProviderTerminalErrorMetadataKey: "model_not_found",
+	}
+
+	result := ComputePoolDesiredStates(cfg, work, []beads.Bead{stale}, map[string]int{"claude": 1})
+
+	if len(result) != 1 {
+		t.Fatalf("len(result) = %d, want 1", len(result))
+	}
+	reqs := result[0].Requests
+	if len(reqs) != 1 {
+		t.Fatalf("len(requests) = %d, want 1 new request; got %#v", len(reqs), reqs)
+	}
+	if reqs[0].Tier != "new" || reqs[0].SessionBeadID != "" {
+		t.Fatalf("request = %+v, want anonymous new demand replacing unhealthy stale owner", reqs[0])
+	}
+}
+
+func TestComputePoolDesiredStates_TraceListsActiveCapacityBlockers(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{poolAgent("claude", "", intPtr(1), 0)},
+	}
+	work := []beads.Bead{
+		workBead("w-active", "claude", "sess-active", "in_progress", 5),
+	}
+	sessions := []beads.Bead{sessionBead("sess-active", "open")}
+	trace := newPoolDesiredStateTestTrace("claude")
+
+	result := computePoolDesiredStates(cfg, work, sessions, map[string]int{"claude": 1}, nil, trace)
+
+	if len(result) != 1 || len(result[0].Requests) != 1 || result[0].Requests[0].Tier != "resume" {
+		t.Fatalf("result = %#v, want only the active resume request under max_active_sessions=1", result)
+	}
+	if got := trace.decisionCounts[string(TraceSitePoolNewDemandCap)]; got != 1 {
+		t.Fatalf("new-demand cap trace decisions = %d, want 1; records=%#v", got, trace.records)
+	}
+	rec := poolTraceDecision(t, trace, TraceSitePoolNewDemandCap)
+	for key, want := range map[string]int{
+		"scale_check":  1,
+		"accepted_new": 0,
+		"blocked_new":  1,
+	} {
+		if got := poolTraceFieldInt(t, rec.Fields, key); got != want {
+			t.Fatalf("%s = %d, want %d", key, got, want)
+		}
+	}
+	if got := poolTraceFieldStrings(t, rec.Fields, "blocking_sessions"); len(got) != 1 || got[0] != "sess-active" {
+		t.Fatalf("blocking_sessions = %#v, want [sess-active]", got)
+	}
+	if got := poolTraceFieldStrings(t, rec.Fields, "blocking_work_beads"); len(got) != 1 || got[0] != "w-active" {
+		t.Fatalf("blocking_work_beads = %#v, want [w-active]", got)
 	}
 }
 

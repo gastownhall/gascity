@@ -8784,7 +8784,7 @@ func TestReconcileSessionBeads_ZombieDetectedCrashRecordedAndSessionNotAlive(t *
 
 	// Simulate zombie: tmux session exists but process is dead.
 	env.sp.Zombies["worker"] = true
-	env.sp.SetPeekOutput("worker", "Error: quota exceeded")
+	env.sp.SetPeekOutput("worker", "panic: worker process exited unexpectedly")
 
 	env.reconcile([]beads.Bead{session})
 
@@ -8816,6 +8816,44 @@ func TestReconcileSessionBeads_ZombieDetectedCrashRecordedAndSessionNotAlive(t *
 	}
 	if got.Metadata["wake_attempts"] == "" || got.Metadata["wake_attempts"] == "0" {
 		t.Error("expected wake_attempts > 0 (rapid exit recorded for zombie)")
+	}
+}
+
+func TestReconcileSessionBeads_ZombieTerminalProviderErrorMarkedUnhealthy(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+
+	tp := TemplateParams{
+		Command:      "test-cmd",
+		SessionName:  "worker",
+		TemplateName: "worker",
+		Hints:        agent.StartupHints{ProcessNames: []string{"test-cmd"}},
+	}
+	env.desiredState["worker"] = tp
+	_ = env.sp.Start(context.Background(), "worker", runtime.Config{Command: "test-cmd"})
+
+	session := env.createSessionBead("worker", "worker")
+	env.markSessionActive(&session)
+	env.sp.Zombies["worker"] = true
+	env.sp.SetPeekOutput("worker", "model_not_found: gpt-5.3-codex-spark")
+
+	env.reconcile([]beads.Bead{session})
+
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get(session): %v", err)
+	}
+	if got.Metadata[sessionHealthStateMetadataKey] != "unhealthy" {
+		t.Fatalf("session health = %q, want unhealthy", got.Metadata[sessionHealthStateMetadataKey])
+	}
+	if got.Metadata[sessionHealthReasonMetadataKey] != "model_not_found" {
+		t.Fatalf("health reason = %q, want model_not_found", got.Metadata[sessionHealthReasonMetadataKey])
+	}
+	if got.Metadata[sessionDrainableMetadataKey] != boolMetadata(true) {
+		t.Fatalf("drainable = %q, want true", got.Metadata[sessionDrainableMetadataKey])
+	}
+	if got.Metadata[sessionProviderTerminalErrorMetadataKey] != "model_not_found" {
+		t.Fatalf("provider terminal error = %q, want model_not_found", got.Metadata[sessionProviderTerminalErrorMetadataKey])
 	}
 }
 
