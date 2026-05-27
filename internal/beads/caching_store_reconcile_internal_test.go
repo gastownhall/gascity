@@ -378,3 +378,88 @@ func TestCachingStoreReconciliationMergesFreshDataWithConcurrentMutation(t *test
 		t.Fatalf("refreshed title = %q, want %q", gotTitles[refreshed.ID], refreshedTitle)
 	}
 }
+
+// TestRunReconciliationLogsSuccess asserts the per-reconcile success log
+// line surfaces a heartbeat after the cache refreshes. Before this line
+// existed, a reconciler running silently on stale data produced no
+// operator-visible signal — the T7920 incident 2026-05-26 went undetected
+// for 2h 31m.
+func TestRunReconciliationLogsSuccess(t *testing.T) {
+	logBuf := captureLog(t)
+
+	mem := NewMemStore()
+	if _, err := mem.Create(Bead{Title: "heartbeat target"}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	cs := NewCachingStoreForTestWithPrefix(mem, "test-rig", nil)
+	if err := cs.Prime(t.Context()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+
+	cs.runReconciliation()
+
+	out := logBuf.String()
+	if !strings.Contains(out, "beads cache: reconciled") {
+		t.Fatalf("expected reconcile success line, got:\n%s", out)
+	}
+	if !strings.Contains(out, "rig=test-rig") {
+		t.Errorf("missing rig identity in log; out=%q", out)
+	}
+	for _, want := range []string{"beads=", "adds=", "updates=", "removes=", "took=", "cadence="} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing field %q in log; out=%q", want, out)
+		}
+	}
+}
+
+// TestRunReconciliationLogRateLimited asserts the success log line is
+// rate-limited to cacheReconcileSuccessLogWindow (one minute). Two
+// back-to-back reconciles emit exactly one line.
+func TestRunReconciliationLogRateLimited(t *testing.T) {
+	logBuf := captureLog(t)
+
+	mem := NewMemStore()
+	cs := NewCachingStoreForTestWithPrefix(mem, "test-rig", nil)
+	if err := cs.Prime(t.Context()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+
+	cs.runReconciliation()
+	cs.runReconciliation()
+	cs.runReconciliation()
+
+	out := logBuf.String()
+	count := strings.Count(out, "beads cache: reconciled")
+	if count != 1 {
+		t.Errorf("expected 1 reconciled line within rate-limit window, got %d:\n%s", count, out)
+	}
+}
+
+// TestRunReconciliationLogEmitsAgainAfterWindow asserts the success log
+// line is re-emitted once the rate-limit window has elapsed. The test
+// reaches into lastReconcileLogAt to advance the simulated clock without
+// sleeping a real minute.
+func TestRunReconciliationLogEmitsAgainAfterWindow(t *testing.T) {
+	logBuf := captureLog(t)
+
+	mem := NewMemStore()
+	cs := NewCachingStoreForTestWithPrefix(mem, "test-rig", nil)
+	if err := cs.Prime(t.Context()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+
+	cs.runReconciliation()
+
+	// Backdate the rate-limit gate beyond the window so the next emit fires.
+	cs.mu.Lock()
+	cs.lastReconcileLogAt = cs.lastReconcileLogAt.Add(-2 * cacheReconcileSuccessLogWindow)
+	cs.mu.Unlock()
+
+	cs.runReconciliation()
+
+	out := logBuf.String()
+	count := strings.Count(out, "beads cache: reconciled")
+	if count != 2 {
+		t.Errorf("expected 2 reconciled lines after window elapsed, got %d:\n%s", count, out)
+	}
+}
