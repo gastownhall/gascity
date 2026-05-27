@@ -21,9 +21,9 @@ func TestHookScriptsContainStamp(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			var content string
 			if name == "on_close" {
-				content = closeHookScript()
+				content = closeHookScript("")
 			} else {
-				content = hookScript(eventType)
+				content = hookScript(eventType, "")
 			}
 			if !strings.Contains(content, "# gc-hook-stamp: 2026-04-29T10:00:00Z abc1234") {
 				t.Errorf("hook %s missing stamp line:\n%s", name, content)
@@ -53,6 +53,82 @@ func TestParseHookStampDate(t *testing.T) {
 	}
 }
 
+// TestHookScriptEmbedsCityPath verifies that hook scripts generated with an
+// explicit cityPath embed CITY_PATH and pass --city "$CITY_PATH" to
+// gc event emit. This is the fix for sibling-rig topologies where the
+// bd write's cwd is not a descendant of the city: findCity walks up and
+// fails, so gc event emit silently drops the event unless --city is set.
+func TestHookScriptEmbedsCityPath(t *testing.T) {
+	const cityPath = "/some/city"
+	for name, eventType := range beadHooks {
+		t.Run(name, func(t *testing.T) {
+			var content string
+			if name == "on_close" {
+				content = closeHookScript(cityPath)
+			} else {
+				content = hookScript(eventType, cityPath)
+			}
+			if !strings.Contains(content, `CITY_PATH="/some/city"`) {
+				t.Errorf("hook %s missing CITY_PATH definition:\n%s", name, content)
+			}
+			if !strings.Contains(content, `--city "$CITY_PATH"`) {
+				t.Errorf("hook %s does not pass --city \"$CITY_PATH\" to gc event emit:\n%s", name, content)
+			}
+		})
+	}
+}
+
+// TestHookScriptOmitsCityFlagWhenEmpty verifies that an empty cityPath
+// produces a hook script without the --city flag — preserving the
+// original "walk up from cwd" behavior for callers that have not yet
+// been updated to thread the city path.
+func TestHookScriptOmitsCityFlagWhenEmpty(t *testing.T) {
+	for name, eventType := range beadHooks {
+		t.Run(name, func(t *testing.T) {
+			var content string
+			if name == "on_close" {
+				content = closeHookScript("")
+			} else {
+				content = hookScript(eventType, "")
+			}
+			if strings.Contains(content, "--city") {
+				t.Errorf("hook %s emitted --city flag with empty cityPath:\n%s", name, content)
+			}
+			if strings.Contains(content, "CITY_PATH=") {
+				t.Errorf("hook %s emitted CITY_PATH= with empty cityPath:\n%s", name, content)
+			}
+		})
+	}
+}
+
+// TestInstallBeadHooksThreadsCityPath verifies that installBeadHooks
+// passes the cityPath argument through to the generated hook scripts.
+func TestInstallBeadHooksThreadsCityPath(t *testing.T) {
+	dir := t.TempDir()
+	cityPath := filepath.Join(dir, "city")
+	if err := installBeadHooks(dir, cityPath); err != nil {
+		t.Fatalf("installBeadHooks: %v", err)
+	}
+
+	for _, filename := range []string{"on_create", "on_close", "on_update"} {
+		t.Run(filename, func(t *testing.T) {
+			path := filepath.Join(dir, ".beads", "hooks", filename)
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("ReadFile: %v", err)
+			}
+			content := string(data)
+			wantDef := `CITY_PATH="` + cityPath + `"`
+			if !strings.Contains(content, wantDef) {
+				t.Errorf("hook %s missing %q:\n%s", filename, wantDef, content)
+			}
+			if !strings.Contains(content, `--city "$CITY_PATH"`) {
+				t.Errorf("hook %s does not pass --city \"$CITY_PATH\":\n%s", filename, content)
+			}
+		})
+	}
+}
+
 func TestInstallBeadHooksForwardOnly(t *testing.T) {
 	oldDate, oldCommit := date, commit
 	t.Cleanup(func() { date, commit = oldDate, oldCommit })
@@ -62,7 +138,7 @@ func TestInstallBeadHooksForwardOnly(t *testing.T) {
 	// Install with a "newer" binary.
 	date = "2026-06-01T00:00:00Z"
 	commit = "new1111"
-	if err := installBeadHooks(dir); err != nil {
+	if err := installBeadHooks(dir, ""); err != nil {
 		t.Fatalf("newer install: %v", err)
 	}
 
@@ -78,7 +154,7 @@ func TestInstallBeadHooksForwardOnly(t *testing.T) {
 	// Now run with an "older" binary — should NOT overwrite.
 	date = "2025-01-01T00:00:00Z"
 	commit = "old2222"
-	if err := installBeadHooks(dir); err != nil {
+	if err := installBeadHooks(dir, ""); err != nil {
 		t.Fatalf("older install: %v", err)
 	}
 
@@ -109,7 +185,7 @@ func TestInstallBeadHooksUpgradesLegacyHooks(t *testing.T) {
 
 	date = "2026-01-01T00:00:00Z"
 	commit = "aaa1111"
-	if err := installBeadHooks(dir); err != nil {
+	if err := installBeadHooks(dir, ""); err != nil {
 		t.Fatalf("installBeadHooks: %v", err)
 	}
 
@@ -131,14 +207,14 @@ func TestInstallBeadHooksDevBuildAlwaysWrites(t *testing.T) {
 	// Install with a stamped binary.
 	date = "2099-01-01T00:00:00Z"
 	commit = "future1"
-	if err := installBeadHooks(dir); err != nil {
+	if err := installBeadHooks(dir, ""); err != nil {
 		t.Fatalf("stamped install: %v", err)
 	}
 
 	// Dev build (unknown date) should still overwrite — dev builds always win.
 	date = "unknown"
 	commit = "unknown"
-	if err := installBeadHooks(dir); err != nil {
+	if err := installBeadHooks(dir, ""); err != nil {
 		t.Fatalf("dev install: %v", err)
 	}
 
@@ -154,7 +230,7 @@ func TestInstallBeadHooksDevBuildAlwaysWrites(t *testing.T) {
 
 func TestInstallBeadHooksCreatesScripts(t *testing.T) {
 	dir := t.TempDir()
-	if err := installBeadHooks(dir); err != nil {
+	if err := installBeadHooks(dir, ""); err != nil {
 		t.Fatalf("installBeadHooks: %v", err)
 	}
 
@@ -241,10 +317,10 @@ func TestInstallBeadHooksIdempotent(t *testing.T) {
 	dir := t.TempDir()
 
 	// Install twice — should not error.
-	if err := installBeadHooks(dir); err != nil {
+	if err := installBeadHooks(dir, ""); err != nil {
 		t.Fatalf("first install: %v", err)
 	}
-	if err := installBeadHooks(dir); err != nil {
+	if err := installBeadHooks(dir, ""); err != nil {
 		t.Fatalf("second install: %v", err)
 	}
 
@@ -262,7 +338,7 @@ func TestInstallBeadHooksIdempotent(t *testing.T) {
 func TestInstallBeadHooksDoesNotRewriteUnchangedHooks(t *testing.T) {
 	dir := t.TempDir()
 
-	if err := installBeadHooks(dir); err != nil {
+	if err := installBeadHooks(dir, ""); err != nil {
 		t.Fatalf("first install: %v", err)
 	}
 
@@ -272,7 +348,7 @@ func TestInstallBeadHooksDoesNotRewriteUnchangedHooks(t *testing.T) {
 		t.Fatalf("Chtimes: %v", err)
 	}
 
-	if err := installBeadHooks(dir); err != nil {
+	if err := installBeadHooks(dir, ""); err != nil {
 		t.Fatalf("second install: %v", err)
 	}
 
@@ -288,7 +364,7 @@ func TestInstallBeadHooksDoesNotRewriteUnchangedHooks(t *testing.T) {
 func TestInstallBeadHooksReplacesMatchingSymlink(t *testing.T) {
 	dir := t.TempDir()
 
-	if err := installBeadHooks(dir); err != nil {
+	if err := installBeadHooks(dir, ""); err != nil {
 		t.Fatalf("first install: %v", err)
 	}
 
@@ -308,7 +384,7 @@ func TestInstallBeadHooksReplacesMatchingSymlink(t *testing.T) {
 		t.Skipf("Symlink: %v", err)
 	}
 
-	if err := installBeadHooks(dir); err != nil {
+	if err := installBeadHooks(dir, ""); err != nil {
 		t.Fatalf("second install: %v", err)
 	}
 
@@ -324,7 +400,7 @@ func TestInstallBeadHooksReplacesMatchingSymlink(t *testing.T) {
 func TestInstallBeadHooksCreatesDirectories(t *testing.T) {
 	dir := t.TempDir()
 	// No pre-existing .beads/ directory.
-	if err := installBeadHooks(dir); err != nil {
+	if err := installBeadHooks(dir, ""); err != nil {
 		t.Fatalf("installBeadHooks: %v", err)
 	}
 
@@ -373,7 +449,7 @@ func TestCloseHookLogsFailureDiagnostic(t *testing.T) {
 	}
 
 	dir := t.TempDir()
-	if err := installBeadHooks(dir); err != nil {
+	if err := installBeadHooks(dir, ""); err != nil {
 		t.Fatalf("installBeadHooks: %v", err)
 	}
 	hookPath := filepath.Join(dir, ".beads", "hooks", "on_close")

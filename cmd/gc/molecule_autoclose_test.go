@@ -273,7 +273,7 @@ func TestCloseMoleculeWithReasonTrimsWhitespace(t *testing.T) {
 // autoclose` alongside the existing convoy and wisp autoclose calls.
 // Without this wiring the new code is unreachable in production.
 func TestCloseHookScriptIncludesMoleculeAutoclose(t *testing.T) {
-	script := closeHookScript()
+	script := closeHookScript("")
 	if !strings.Contains(script, "molecule autoclose") {
 		t.Fatalf("close hook script missing 'molecule autoclose' dispatch:\n%s", script)
 	}
