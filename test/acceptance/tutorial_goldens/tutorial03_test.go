@@ -31,9 +31,7 @@ func TestTutorial03Sessions(t *testing.T) {
 		}
 	}
 
-	if out, err := ws.runShell("gc agent add --name reviewer --dir my-project", ""); err != nil {
-		t.Fatalf("seed reviewer scaffold: %v\n%s", err, out)
-	}
+	mustMkdirAll(t, filepath.Join(myCity, "agents", "reviewer"))
 	writeFile(t, filepath.Join(myCity, "agents", "reviewer", "agent.toml"), "dir = \"my-project\"\nprovider = \""+tutorialReviewerProvider()+"\"\n", 0o644)
 	writeFile(t, filepath.Join(myCity, "agents", "reviewer", "prompt.template.md"), "# Reviewer\nReview code.\n", 0o644)
 	writeFile(t, filepath.Join(myProject, "hello.py"), "print(\"Hello, World!\")\n", 0o644)

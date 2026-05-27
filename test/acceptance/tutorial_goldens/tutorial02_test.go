@@ -35,13 +35,10 @@ func TestTutorial02Agents(t *testing.T) {
 
 	var reviewTaskID string
 
-	t.Run("gc agent add --name reviewer --dir my-project", func(t *testing.T) {
-		out, err := ws.runShell("gc agent add --name reviewer --dir my-project", "")
+	t.Run("mkdir -p agents/reviewer", func(t *testing.T) {
+		out, err := ws.runShell("mkdir -p agents/reviewer", "")
 		if err != nil {
-			t.Fatalf("gc agent add --name reviewer --dir my-project: %v\n%s", err, out)
-		}
-		if !strings.Contains(out, "Scaffolded agent 'reviewer'") {
-			t.Fatalf("gc agent add output mismatch:\n%s", out)
+			t.Fatalf("mkdir -p agents/reviewer: %v\n%s", err, out)
 		}
 	})
 
