@@ -191,10 +191,11 @@ type PurgeResult struct {
 // BdStore implements Store by shelling out to the bd CLI (beads v0.55.1+).
 // It delegates all persistence to bd's embedded Dolt database.
 type BdStore struct {
-	dir         string          // city root directory (where .beads/ lives)
-	runner      CommandRunner   // injectable for testing
-	purgeRunner PurgeRunnerFunc // injectable for testing; nil uses exec default
-	idPrefix    string          // bead ID prefix owned by this store, without trailing "-"
+	dir           string          // city root directory (where .beads/ lives)
+	runner        CommandRunner   // injectable for testing
+	purgeRunner   PurgeRunnerFunc // injectable for testing; nil uses exec default
+	idPrefix      string          // bead ID prefix owned by this store, without trailing "-"
+	indexedReader IndexedLister   // optional read-only active list accelerator
 }
 
 const bdTransientWriteAttempts = 3
@@ -207,6 +208,25 @@ func NewBdStore(dir string, runner CommandRunner) *BdStore {
 // NewBdStoreWithPrefix creates a BdStore with an explicit owned bead ID prefix.
 func NewBdStoreWithPrefix(dir string, runner CommandRunner, idPrefix string) *BdStore {
 	return &BdStore{dir: dir, runner: runner, idPrefix: normalizeIDPrefix(idPrefix)}
+}
+
+// WithIndexedReader attaches a read-only active list accelerator. Unsupported
+// queries and reader failures continue to use the Beads CLI path.
+func (s *BdStore) WithIndexedReader(reader IndexedLister) *BdStore {
+	if s != nil {
+		s.indexedReader = reader
+	}
+	return s
+}
+
+// ListIndexed exposes the optional read-only indexed list path without falling
+// back to the Beads CLI. Cache prime/reconcile uses this to avoid recreating
+// broad hydrated scans during SQL degradation.
+func (s *BdStore) ListIndexed(ctx context.Context, query ListQuery) (IndexedListResult, error) {
+	if s == nil || s.indexedReader == nil {
+		return IndexedListResult{}, ErrIndexedListUnsupported
+	}
+	return s.indexedReader.ListIndexed(ctx, query)
 }
 
 // IDPrefix returns the bead ID prefix owned by this store, without trailing "-".
@@ -1371,6 +1391,18 @@ func (s *BdStore) List(query ListQuery) ([]Bead, error) {
 		return nil, fmt.Errorf("bd list: %w", ErrQueryRequiresScan)
 	}
 
+	if s.indexedReader != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), bdReadCommandTimeout)
+		defer cancel()
+		result, err := s.ListIndexed(ctx, query)
+		if err == nil && result.DependencyCoverage {
+			return applyListQuery(result.Beads, query), nil
+		}
+		// Foreground active reads fall through to Beads CLI on unsupported,
+		// incomplete, or transient indexed results. Cache-specific degraded
+		// behavior is handled by CachingStore.
+	}
+
 	switch query.TierMode {
 	case TierWisps:
 		return s.listEphemeral(query)
@@ -1394,6 +1426,9 @@ func (s *BdStore) List(query ListQuery) ([]Bead, error) {
 	}
 	if query.Type != "" {
 		args = append(args, "--type="+query.Type)
+	}
+	if query.ExcludeType != "" {
+		args = append(args, "--exclude-type="+query.ExcludeType)
 	}
 	if query.IncludeClosed || query.Status == "closed" {
 		args = append(args, "--all")

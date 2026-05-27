@@ -56,6 +56,10 @@ func quietLoadCityConfig(cityPath string) (*config.City, error) {
 // silently if not in a city or config fails to load — core commands
 // always work.
 func registerPackCommands(root *cobra.Command, stdout, stderr io.Writer) {
+	if shouldSkipEagerPackCommandDiscovery(root, os.Args[1:]) {
+		return
+	}
+
 	cityPath, err := resolveCity()
 	if err != nil {
 		return
@@ -70,6 +74,37 @@ func registerPackCommands(root *cobra.Command, stdout, stderr io.Writer) {
 	}
 
 	addDiscoveredCommandsToRoot(root, cfg.PackCommands, cityPath, loadedCityName(cfg, cityPath), stdout, stderr, false)
+}
+
+func shouldSkipEagerPackCommandDiscovery(root *cobra.Command, args []string) bool {
+	name, ok := firstCommandArg(args)
+	if !ok {
+		return false
+	}
+	return coreCommandNames(root)[name]
+}
+
+func firstCommandArg(args []string) (string, bool) {
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--" {
+			if i+1 >= len(args) {
+				return "", false
+			}
+			return args[i+1], true
+		}
+		if arg == "-" || !strings.HasPrefix(arg, "-") {
+			return arg, true
+		}
+		if strings.Contains(arg, "=") {
+			continue
+		}
+		switch arg {
+		case "--city", "--rig":
+			i++
+		}
+	}
+	return "", false
 }
 
 // coreCommandNames returns the set of built-in command names that packs

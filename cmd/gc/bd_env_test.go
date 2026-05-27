@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net"
@@ -61,6 +62,39 @@ func requireErrorContains(t *testing.T, err error, want string) {
 	}
 	if !strings.Contains(err.Error(), want) {
 		t.Fatalf("error = %q, want containing %q", err.Error(), want)
+	}
+}
+
+func TestAttachIndexedDoltReaderFlagOffLeavesStoreOnCLIPath(t *testing.T) {
+	t.Setenv("GC_BD_INDEX_READS", "0")
+	store := beads.NewBdStore(t.TempDir(), func(_, _ string, _ ...string) ([]byte, error) {
+		return []byte(`[]`), nil
+	})
+
+	got := attachIndexedDoltReader(store, t.TempDir(), t.TempDir())
+	if got != store {
+		t.Fatal("attachIndexedDoltReader returned a different store with flag off")
+	}
+	_, err := got.ListIndexed(context.Background(), beads.ListQuery{AllowScan: true})
+	if !errors.Is(err, beads.ErrIndexedListUnsupported) {
+		t.Fatalf("ListIndexed error = %v, want ErrIndexedListUnsupported", err)
+	}
+}
+
+func TestAttachIndexedDoltReaderSetupFailureKeepsCLIPath(t *testing.T) {
+	t.Setenv("GC_BD_INDEX_READS", "1")
+	cityPath := t.TempDir()
+	store := beads.NewBdStore(cityPath, func(_, _ string, _ ...string) ([]byte, error) {
+		return []byte(`[]`), nil
+	})
+
+	got := attachIndexedDoltReader(store, cityPath, cityPath)
+	if got != store {
+		t.Fatal("attachIndexedDoltReader returned a different store after setup failure")
+	}
+	_, err := got.ListIndexed(context.Background(), beads.ListQuery{AllowScan: true})
+	if !errors.Is(err, beads.ErrIndexedListUnsupported) {
+		t.Fatalf("ListIndexed error = %v, want ErrIndexedListUnsupported", err)
 	}
 }
 

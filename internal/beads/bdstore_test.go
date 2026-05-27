@@ -1419,6 +1419,19 @@ func TestBdStoreCloseAllWhitespaceCloseReason(t *testing.T) {
 
 // --- List ---
 
+type fakeIndexedListReader struct {
+	result beads.IndexedListResult
+	err    error
+	calls  int
+	query  beads.ListQuery
+}
+
+func (r *fakeIndexedListReader) ListIndexed(_ context.Context, query beads.ListQuery) (beads.IndexedListResult, error) {
+	r.calls++
+	r.query = query
+	return r.result, r.err
+}
+
 func TestBdStoreList(t *testing.T) {
 	runner := fakeRunner(map[string]struct {
 		out []byte
@@ -1441,6 +1454,110 @@ func TestBdStoreList(t *testing.T) {
 	}
 	if got[0].Status != "open" {
 		t.Errorf("got[0].Status = %q, want %q", got[0].Status, "open")
+	}
+}
+
+func TestBdStoreListUsesIndexedReaderWhenCoverageComplete(t *testing.T) {
+	var runnerCalls int
+	runner := func(_, _ string, _ ...string) ([]byte, error) {
+		runnerCalls++
+		return nil, fmt.Errorf("runner should not be called")
+	}
+	indexed := &fakeIndexedListReader{
+		result: beads.IndexedListResult{
+			Beads: []beads.Bead{{
+				ID:     "bd-indexed",
+				Title:  "from indexed reader",
+				Status: "open",
+				Type:   "task",
+				Labels: []string{"ready"},
+			}},
+			DependencyCoverage: true,
+			LabelsCoverage:     true,
+		},
+	}
+	s := beads.NewBdStore("/city", runner).WithIndexedReader(indexed)
+
+	got, err := s.List(beads.ListQuery{Label: "ready"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runnerCalls != 0 {
+		t.Fatalf("runner called %d times, want 0", runnerCalls)
+	}
+	if indexed.calls != 1 {
+		t.Fatalf("indexed calls = %d, want 1", indexed.calls)
+	}
+	if indexed.query.Label != "ready" {
+		t.Fatalf("indexed query label = %q, want ready", indexed.query.Label)
+	}
+	if len(got) != 1 || got[0].ID != "bd-indexed" {
+		t.Fatalf("List() = %+v, want indexed row", got)
+	}
+}
+
+func TestBdStoreListFallsBackWhenIndexedReaderUnsupportedOrIncomplete(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		reader *fakeIndexedListReader
+	}{
+		{
+			name: "unsupported",
+			reader: &fakeIndexedListReader{
+				err: beads.ErrIndexedListUnsupported,
+			},
+		},
+		{
+			name: "missing dependency coverage",
+			reader: &fakeIndexedListReader{
+				result: beads.IndexedListResult{
+					Beads:              []beads.Bead{{ID: "bd-incomplete", Status: "open", Labels: []string{"ready"}}},
+					DependencyCoverage: false,
+				},
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var runnerCalls int
+			runner := func(_, name string, args ...string) ([]byte, error) {
+				runnerCalls++
+				if name != "bd" || strings.Join(args, " ") != "list --json --label=ready --include-infra --include-gates --limit 0" {
+					t.Fatalf("runner command = %s %s", name, strings.Join(args, " "))
+				}
+				return []byte(`[{"id":"bd-cli","title":"from cli","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z","labels":["ready"]}]`), nil
+			}
+			s := beads.NewBdStore("/city", runner).WithIndexedReader(tc.reader)
+
+			got, err := s.List(beads.ListQuery{Label: "ready"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.reader.calls != 1 {
+				t.Fatalf("indexed calls = %d, want 1", tc.reader.calls)
+			}
+			if runnerCalls != 1 {
+				t.Fatalf("runner calls = %d, want 1", runnerCalls)
+			}
+			if len(got) != 1 || got[0].ID != "bd-cli" {
+				t.Fatalf("List() = %+v, want CLI fallback row", got)
+			}
+		})
+	}
+}
+
+func TestBdStoreListForwardsExcludeType(t *testing.T) {
+	var gotArgs []string
+	runner := func(_, _ string, args ...string) ([]byte, error) {
+		gotArgs = args
+		return []byte(`[]`), nil
+	}
+	s := beads.NewBdStore("/city", runner)
+	if _, err := s.List(beads.ListQuery{Assignee: "refinery", Status: "open", ExcludeType: "epic"}); err != nil {
+		t.Fatal(err)
+	}
+	args := strings.Join(gotArgs, " ")
+	if !strings.Contains(args, "--exclude-type=epic") {
+		t.Fatalf("args = %q, want exclude-type flag", args)
 	}
 }
 
