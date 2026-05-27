@@ -263,14 +263,14 @@ func (s *HQStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 
 	candidateIDs := s.readyCandidateIDsLocked(q)
 	candidateSet := make(map[string]bool, len(candidateIDs))
-	snapshot := make([]Bead, 0, len(candidateIDs))
+	raw := make([]Bead, 0, len(candidateIDs))
 	for _, id := range candidateIDs {
 		b, ok := s.main[id]
 		if !ok {
 			continue
 		}
 		candidateSet[id] = true
-		snapshot = append(snapshot, cloneBead(b))
+		raw = append(raw, b)
 	}
 	statusByID := make(map[string]string)
 	deps := make([]Dep, 0, len(s.deps))
@@ -286,7 +286,8 @@ func (s *HQStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 	s.mu.RUnlock()
 
 	var result []Bead
-	for _, b := range snapshot {
+	for _, b := range raw {
+		b = cloneBead(b)
 		if b.Status != "open" {
 			continue
 		}
