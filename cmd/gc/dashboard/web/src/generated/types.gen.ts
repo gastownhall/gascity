@@ -271,6 +271,7 @@ export type Bead = {
     ref?: string;
     status: string;
     title: string;
+    updated_at?: string;
 };
 
 export type BeadAssignInputBody = {
