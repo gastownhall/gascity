@@ -204,16 +204,18 @@ version = "^1.0"
 func TestImportStateDoctorCheckReportsLegacyPublicPackImports(t *testing.T) {
 	clearGCEnv(t)
 	cityDir := t.TempDir()
-	writeCityToml(t, cityDir, "[workspace]\nname = \"demo\"\n")
+	writeCityToml(t, cityDir, `[workspace]
+name = "demo"
+
+[defaults.rig.imports.maintenance]
+source = "examples/gastown/packs/maintenance"
+`)
 	writePackToml(t, cityDir, `[pack]
 name = "demo"
 schema = 1
 
 [imports.gastown]
 source = ".gc/system/packs/gastown"
-
-[defaults.rig.imports.maintenance]
-source = "examples/gastown/packs/maintenance"
 `)
 
 	prevCheck := checkInstalledImports
@@ -247,6 +249,44 @@ source = "examples/gastown/packs/maintenance"
 	}
 }
 
+func TestLegacyPublicPackForSourceDetectsAbsolutePaths(t *testing.T) {
+	cityDir := filepath.Join(string(filepath.Separator), "city")
+	cases := []struct {
+		name   string
+		source string
+		pack   string
+	}{
+		{
+			name:   "absolute materialized gastown",
+			source: filepath.Join(string(filepath.Separator), "other", ".gc", "system", "packs", "gastown"),
+			pack:   "gastown",
+		},
+		{
+			name:   "absolute example maintenance",
+			source: filepath.Join(string(filepath.Separator), "repo", "examples", "gastown", "packs", "maintenance"),
+			pack:   "maintenance",
+		},
+		{
+			name:   "absolute unrelated pack",
+			source: filepath.Join(string(filepath.Separator), "repo", "packs", "custom"),
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := legacyPublicPackForSource(cityDir, tc.source)
+			if tc.pack == "" {
+				if ok {
+					t.Fatalf("legacyPublicPackForSource(%q) = %q, true; want false", tc.source, got)
+				}
+				return
+			}
+			if !ok || got != tc.pack {
+				t.Fatalf("legacyPublicPackForSource(%q) = %q, %v; want %q, true", tc.source, got, ok, tc.pack)
+			}
+		})
+	}
+}
+
 func TestImportStateDoctorCheckFixRewritesLegacyPublicPackImports(t *testing.T) {
 	clearGCEnv(t)
 	cityDir := t.TempDir()
@@ -259,6 +299,9 @@ path = "rigs/main"
 
 [rigs.imports.gastown]
 source = "examples/gastown/packs/gastown"
+
+[defaults.rig.imports.maintenance]
+source = ".gc/system/packs/maintenance"
 `)
 	writePackToml(t, cityDir, `[pack]
 name = "demo"
@@ -270,9 +313,6 @@ source = ".gc/system/packs/gastown"
 [imports.tools]
 source = "https://example.com/tools.git"
 version = "^1.0"
-
-[defaults.rig.imports.maintenance]
-source = ".gc/system/packs/maintenance"
 `)
 
 	prevResolve := resolveWave1PublicPackImports
@@ -381,6 +421,9 @@ source = ".gc/system/packs/maintenance"
 	}
 	if strings.Contains(cityText, ".gc/system/packs") || strings.Contains(cityText, "examples/gastown/packs") {
 		t.Fatalf("city.toml still contains legacy public pack references:\n%s", cityText)
+	}
+	if strings.Contains(cityText, "maintenance") {
+		t.Fatalf("city.toml should remove legacy maintenance default-rig import because maintenance/core is implicit:\n%s", cityText)
 	}
 }
 

@@ -19,9 +19,7 @@ type importStateDoctorCheck struct {
 
 const importStateSyncFixHint = `run "gc doctor --fix" or "gc import install"`
 
-var (
-	resolveWave1PublicPackImports = defaultWave1PublicPackImports
-)
+var resolveWave1PublicPackImports = defaultWave1PublicPackImports
 
 type wave1PublicPackImportTarget struct {
 	Binding string
@@ -110,7 +108,6 @@ func (c *importStateDoctorCheck) Fix(_ *doctor.CheckContext) error {
 	if details := durableRegistryImportDetails(imports); len(details) > 0 {
 		return fmt.Errorf("durable registry selectors require manual replacement with concrete pack sources")
 	}
-	var lock *packman.Lockfile
 	if details := legacyPublicPackImportDetails(c.cityPath, imports); len(details) > 0 {
 		targets, err := resolveWave1PublicPackImports(legacyPublicPackNames(imports, c.cityPath))
 		if err != nil {
@@ -123,10 +120,8 @@ func (c *importStateDoctorCheck) Fix(_ *doctor.CheckContext) error {
 		if err != nil {
 			return fmt.Errorf("reading migrated imports: %w", err)
 		}
-		lock, err = syncImports(c.cityPath, imports, packman.InstallResolveIfNeeded)
-	} else {
-		lock, err = syncImports(c.cityPath, imports, packman.InstallResolveIfNeeded)
 	}
+	lock, err := syncImports(c.cityPath, imports, packman.InstallResolveIfNeeded)
 	if err != nil {
 		return err
 	}
@@ -296,6 +291,11 @@ func rewriteLegacyPublicPackImportsFS(fs fsys.FS, cityPath string, targets map[s
 		}
 		cityChanged = cityChanged || rigChanged
 	}
+	cityDefaultRigChanged, _, err := rewriteLegacyPublicPackImportMap(cityPath, cfg.Defaults.Rig.Imports, targets)
+	if err != nil {
+		return false, fmt.Errorf("city.toml default rig imports: %w", err)
+	}
+	cityChanged = cityChanged || cityDefaultRigChanged
 	if packChanged || defaultRigChanged {
 		if defaultRigChanged {
 			manifest.DefaultRigImportOrder = replaceImportOrderWithTargets(manifest.DefaultRigImportOrder, defaultRigRewrites)
