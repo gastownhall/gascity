@@ -47,6 +47,20 @@ type CheckContext struct {
 	// Checks that need to surface fix-time diagnostics should use this
 	// writer so captured doctor output includes the diagnostics.
 	Output io.Writer
+	// ExplainPostgresAuth, when true, opts checks that implement
+	// Renderer into emitting their per-scope resolution table after
+	// the standard summary line. Today only PostgresAuthCheck honors
+	// this flag.
+	ExplainPostgresAuth bool
+}
+
+// Renderer is implemented by checks that produce additional, optional
+// output controlled by a flag in CheckContext (e.g., the
+// --explain-postgres-auth resolution table). Renderer is opt-in: the
+// doctor runner type-asserts each check and skips the call when the
+// check does not implement it.
+type Renderer interface {
+	RenderExtras(ctx *CheckContext, w io.Writer)
 }
 
 // CheckResult holds the outcome of a single check execution.

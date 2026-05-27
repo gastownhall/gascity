@@ -3395,6 +3395,111 @@ func TestInstallSupervisorLaunchdRestoresPreviousCurrentPlistWhenUpdateFails(t *
 	}
 }
 
+func TestInstallSupervisorLaunchdSkipsReloadWhenUnchangedAndSupervisorAlive(t *testing.T) {
+	homeDir := t.TempDir()
+	gcHome := filepath.Join(t.TempDir(), "isolated-home")
+	t.Setenv("HOME", homeDir)
+	t.Setenv("GC_HOME", gcHome)
+
+	data := &supervisorServiceData{
+		GCPath:        "/tmp/gc-same",
+		LogPath:       filepath.Join(gcHome, "supervisor.log"),
+		GCHome:        gcHome,
+		XDGRuntimeDir: "",
+		LaunchdLabel:  supervisorLaunchdLabel(),
+		Path:          "/usr/local/bin:/usr/bin:/bin",
+	}
+	content, err := renderSupervisorTemplate(supervisorLaunchdTemplate, data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	currentPath := filepath.Join(homeDir, "Library", "LaunchAgents", supervisorLaunchdLabel()+".plist")
+	if err := os.MkdirAll(filepath.Dir(currentPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(currentPath, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	oldRun := supervisorLaunchctlRun
+	oldAlive := supervisorAliveHook
+	var calls []string
+	supervisorLaunchctlRun = func(args ...string) error {
+		calls = append(calls, strings.Join(args, " "))
+		return nil
+	}
+	supervisorAliveHook = func() int { return 4242 }
+	t.Cleanup(func() {
+		supervisorLaunchctlRun = oldRun
+		supervisorAliveHook = oldAlive
+	})
+
+	var stdout, stderr bytes.Buffer
+	if code := installSupervisorLaunchd(data, &stdout, &stderr); code != 0 {
+		t.Fatalf("installSupervisorLaunchd code = %d, want 0; stderr=%q", code, stderr.String())
+	}
+	if len(calls) != 0 {
+		t.Fatalf("launchctl calls = %v, want none for unchanged running service", calls)
+	}
+	if !strings.Contains(stdout.String(), "Installed launchd service: "+currentPath) {
+		t.Fatalf("stdout = %q, want install confirmation for %s", stdout.String(), currentPath)
+	}
+}
+
+func TestInstallSupervisorLaunchdReloadsWhenUnchangedButSupervisorStopped(t *testing.T) {
+	homeDir := t.TempDir()
+	gcHome := filepath.Join(t.TempDir(), "isolated-home")
+	t.Setenv("HOME", homeDir)
+	t.Setenv("GC_HOME", gcHome)
+
+	data := &supervisorServiceData{
+		GCPath:        "/tmp/gc-same",
+		LogPath:       filepath.Join(gcHome, "supervisor.log"),
+		GCHome:        gcHome,
+		XDGRuntimeDir: "",
+		LaunchdLabel:  supervisorLaunchdLabel(),
+		Path:          "/usr/local/bin:/usr/bin:/bin",
+	}
+	content, err := renderSupervisorTemplate(supervisorLaunchdTemplate, data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	currentPath := filepath.Join(homeDir, "Library", "LaunchAgents", supervisorLaunchdLabel()+".plist")
+	if err := os.MkdirAll(filepath.Dir(currentPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(currentPath, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	oldRun := supervisorLaunchctlRun
+	oldAlive := supervisorAliveHook
+	var calls []string
+	supervisorLaunchctlRun = func(args ...string) error {
+		calls = append(calls, strings.Join(args, " "))
+		return nil
+	}
+	supervisorAliveHook = func() int { return 0 }
+	t.Cleanup(func() {
+		supervisorLaunchctlRun = oldRun
+		supervisorAliveHook = oldAlive
+	})
+
+	var stdout, stderr bytes.Buffer
+	if code := installSupervisorLaunchd(data, &stdout, &stderr); code != 0 {
+		t.Fatalf("installSupervisorLaunchd code = %d, want 0; stderr=%q", code, stderr.String())
+	}
+	joined := strings.Join(calls, "\n")
+	for _, want := range []string{
+		"unload " + currentPath,
+		"load " + currentPath,
+	} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("launchctl calls = %v, want %q", calls, want)
+		}
+	}
+}
+
 func TestUninstallSupervisorLaunchdRemovesMatchingLegacyDefaultPlistForIsolatedGCHome(t *testing.T) {
 	homeDir := t.TempDir()
 	gcHome := filepath.Join(t.TempDir(), "isolated-home")

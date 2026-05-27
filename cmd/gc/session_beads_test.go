@@ -1123,6 +1123,69 @@ func TestReopenClosedConfiguredNamedSessionBeadClearsPendingCreateStartedAtWhenA
 	}
 }
 
+func TestReopenClosedConfiguredNamedSessionBeadClearsStaleStartMarkersWhenRecreating(t *testing.T) {
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+	now := time.Date(2026, 5, 1, 10, 0, 0, 0, time.UTC)
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{
+			{Name: "mayor", StartCommand: "true"},
+		},
+		NamedSessions: []config.NamedSession{
+			{Template: "mayor", Mode: "always"},
+		},
+	}
+	sessionName := config.NamedSessionRuntimeName(cfg.Workspace.Name, cfg.Workspace, "mayor")
+	closed, err := store.Create(beads.Bead{
+		Title:  "mayor",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":               sessionName,
+			"alias":                      "mayor",
+			"template":                   "mayor",
+			"state":                      "suspended",
+			"close_reason":               "suspended",
+			"creation_complete_at":       now.Add(-10 * time.Minute).UTC().Format(time.RFC3339),
+			"last_woke_at":               now.Add(-10 * time.Minute).UTC().Format(time.RFC3339),
+			"started_config_hash":        "old-config",
+			"started_live_hash":          "old-live",
+			"live_hash":                  "old-runtime",
+			"startup_dialog_verified":    "true",
+			namedSessionMetadataKey:      "true",
+			namedSessionIdentityMetadata: "mayor",
+			namedSessionModeMetadata:     "always",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create closed canonical bead: %v", err)
+	}
+	if err := store.Close(closed.ID); err != nil {
+		t.Fatalf("close canonical bead: %v", err)
+	}
+
+	var stderr bytes.Buffer
+	reopened, ok := reopenClosedConfiguredNamedSessionBead(
+		cityPath, store, cfg, "test-city", "mayor", sessionName, "creating", now, nil, &stderr,
+	)
+	if !ok {
+		t.Fatalf("reopenClosedConfiguredNamedSessionBead failed: %s", stderr.String())
+	}
+	for _, key := range []string{
+		"creation_complete_at",
+		"last_woke_at",
+		"started_config_hash",
+		"started_live_hash",
+		"live_hash",
+		"startup_dialog_verified",
+	} {
+		if got := reopened.Metadata[key]; got != "" {
+			t.Fatalf("%s = %q, want empty on recreate", key, got)
+		}
+	}
+}
+
 func TestSyncSessionBeads_BackfillsLegacyConcretePoolIdentity(t *testing.T) {
 	store := beads.NewMemStore()
 	clk := &clock.Fake{Time: time.Date(2026, 3, 7, 12, 0, 0, 0, time.UTC)}
@@ -3744,6 +3807,74 @@ func TestSyncSessionBeads_RefreshesStoredCommandOnConfigChange(t *testing.T) {
 	}
 }
 
+func TestSyncSessionBeadsWithSnapshot_RefreshesMissingNamedSessionFromStore(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	clk := &clock.Fake{Time: time.Date(2026, 5, 11, 7, 0, 0, 0, time.UTC)}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{
+			{Name: "mayor", StartCommand: "codex"},
+		},
+		NamedSessions: []config.NamedSession{
+			{Name: "mayor", Template: "mayor", Mode: "always"},
+		},
+	}
+
+	existing, err := store.Create(beads.Bead{
+		Title:  "mayor",
+		Type:   sessionBeadType,
+		Status: "open",
+		Labels: []string{sessionBeadLabel, "agent:mayor"},
+		Metadata: map[string]string{
+			"session_name":               "mayor",
+			"agent_name":                 "mayor",
+			"template":                   "mayor",
+			"state":                      "creating",
+			"pending_create_claim":       "true",
+			namedSessionMetadataKey:      "true",
+			namedSessionIdentityMetadata: "mayor",
+			namedSessionModeMetadata:     "always",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(existing): %v", err)
+	}
+
+	desired := map[string]TemplateParams{
+		"mayor": {
+			TemplateName:            "mayor",
+			SessionName:             "mayor",
+			Command:                 "codex",
+			ConfiguredNamedIdentity: "mayor",
+			ConfiguredNamedMode:     "always",
+		},
+	}
+	staleSnapshot := newSessionBeadSnapshot(nil)
+
+	var stderr bytes.Buffer
+	openIndex, updated := syncSessionBeadsWithSnapshot(
+		"", store, desired, sp, allConfiguredDS(desired), cfg, clk, &stderr, false, staleSnapshot,
+	)
+
+	if got := openIndex["mayor"]; got != existing.ID {
+		t.Fatalf("openIndex[mayor] = %q, want existing bead %q", got, existing.ID)
+	}
+	if updated == nil {
+		t.Fatal("updated snapshot is nil")
+	}
+	open := updated.Open()
+	if len(open) != 1 {
+		t.Fatalf("updated open bead count = %d, want 1", len(open))
+	}
+	if open[0].ID != existing.ID {
+		t.Fatalf("updated open bead = %q, want %q", open[0].ID, existing.ID)
+	}
+	if strings.Contains(stderr.String(), "session name already exists") {
+		t.Fatalf("stderr = %q, want no self-conflict after store refresh", stderr.String())
+	}
+}
+
 func TestSyncSessionBeads_ConfigDrift(t *testing.T) {
 	store := beads.NewMemStore()
 	clk := &clock.Fake{Time: time.Date(2026, 3, 7, 12, 0, 0, 0, time.UTC)}
@@ -5222,6 +5353,43 @@ func TestReapStaleSessionBeads_HonorsRecentWakeGrace(t *testing.T) {
 	recentWake := now.Add(-15 * time.Second).UTC().Format(time.RFC3339)
 	if err := store.SetMetadata(created.ID, "last_woke_at", recentWake); err != nil {
 		t.Fatalf("SetMetadata(last_woke_at): %v", err)
+	}
+
+	var stderr bytes.Buffer
+	got := reapStaleSessionBeads(store, sp, nil, &clock.Fake{Time: now}, &stderr)
+	if got != 0 {
+		t.Fatalf("reapStaleSessionBeads() = %d, want 0\nstderr: %s", got, stderr.String())
+	}
+	open, err := loadSessionBeads(store)
+	if err != nil {
+		t.Fatalf("loadSessionBeads: %v", err)
+	}
+	if len(open) != 1 {
+		t.Fatalf("open beads = %d, want 1", len(open))
+	}
+}
+
+func TestReapStaleSessionBeads_HonorsRecentCreationCompleteProtection(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	now := time.Date(2026, 5, 12, 9, 0, 0, 0, time.UTC)
+	created, err := store.Create(beads.Bead{
+		Title:  "mayor",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":         "mayor",
+			"state":                "active",
+			"state_reason":         "creation_complete",
+			"creation_complete_at": now.Add(-90 * time.Second).UTC().Format(time.RFC3339),
+			"last_woke_at":         now.Add(-90 * time.Second).UTC().Format(time.RFC3339),
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if created.ID == "" {
+		t.Fatal("created bead missing ID")
 	}
 
 	var stderr bytes.Buffer

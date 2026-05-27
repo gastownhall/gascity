@@ -251,6 +251,49 @@ func TestPruneExpiredQueuedNudgesIgnoresMissingTerminalBead(t *testing.T) {
 	}
 }
 
+func TestPruneDeadQueuedNudgesRepairsMissingTerminalBeadRecord(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	store := openNudgeBeadStore(dir)
+	now := time.Now().UTC()
+	item := newQueuedNudgeWithOptions("worker", "stale dead letter", "session", now.Add(-2*time.Minute), queuedNudgeOptions{
+		ID:        "n-dead-repair",
+		SessionID: "gc-worker",
+	})
+	beadID, created, err := ensureQueuedNudgeBead(store, item)
+	if err != nil {
+		t.Fatalf("ensureQueuedNudgeBead: %v", err)
+	}
+	if !created {
+		t.Fatal("expected backing nudge bead to be created")
+	}
+	item.BeadID = beadID
+	item.LastError = "expired"
+	item.DeadAt = now.Add(-30 * time.Minute)
+
+	state := &nudgeQueueState{Dead: []queuedNudge{item}}
+	if err := pruneDeadQueuedNudges(state, store, now); err != nil {
+		t.Fatalf("pruneDeadQueuedNudges: %v", err)
+	}
+	if len(state.Dead) != 1 {
+		t.Fatalf("dead = %d, want 1 before retention cutoff", len(state.Dead))
+	}
+
+	bead, err := store.Get(beadID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", beadID, err)
+	}
+	if bead.Status != "closed" {
+		t.Fatalf("bead.Status = %q, want closed", bead.Status)
+	}
+	if bead.Metadata["state"] != "expired" {
+		t.Fatalf("state = %q, want expired", bead.Metadata["state"])
+	}
+	if bead.Metadata["terminal_reason"] != "expired" {
+		t.Fatalf("terminal_reason = %q, want expired", bead.Metadata["terminal_reason"])
+	}
+}
+
 func TestMarkQueuedNudgeTerminalHandlesAmbiguousBeadID(t *testing.T) {
 	store := &ambiguousNudgeBeadStore{MemStore: beads.NewMemStore(), ambiguousID: "gc-17"}
 	item := queuedNudge{

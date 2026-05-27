@@ -766,6 +766,33 @@ func (m *Manager) Suspend(id string) error {
 		if current == StateSuspended {
 			return nil // idempotent: already suspended
 		}
+		// failed-create is a create-rollback terminal state: the create never
+		// reached creation_complete, so there is no live turn to suspend — only
+		// a possibly-leaked runtime process to tear down. `gc stop` issues
+		// suspend on every session bead (no state pre-filter), and under a
+		// backing-store outage the reconciler cannot reap failed-create beads
+		// (its close path requires a reachable store), so suspend is the only
+		// thing that can clear the leaked process. Tear the runtime down
+		// best-effort and report success rather than rejecting with an
+		// illegal-transition error that blocks `gc stop` city-wide (#2597). The
+		// bead is left in failed-create for the reconciler to reap once the
+		// store is reachable again.
+		//
+		// Limitation: explicit-named beads whose rollback already cleared
+		// session_name (rollbackPendingCreate in
+		// cmd/gc/session_lifecycle_parallel.go) fall back to the synthetic
+		// sessionNameFor(id) here, so this Stop targets the synthetic name
+		// rather than the original explicit name and the leak under the
+		// original name persists. That is a strict improvement over the pre-fix
+		// state (suspend rejected outright, runtime leaked, `gc stop` blocked
+		// city-wide); preserving the original name across rollback for cleanup
+		// is tracked as follow-up.
+		if current == StateFailedCreate {
+			if strings.TrimSpace(sessName) != "" {
+				_ = m.sp.Stop(sessName) // best-effort: tear down any leaked runtime
+			}
+			return nil
+		}
 		// Legacy bead normalization: pre-metadata cities may have empty
 		// state fields. Treat empty as StateActive so the state-machine
 		// transition works during upgrade. Matches what Close and

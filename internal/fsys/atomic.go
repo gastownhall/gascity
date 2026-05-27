@@ -121,9 +121,9 @@ func WriteFileIfChangedAtomic(fs FS, path string, data []byte, perm os.FileMode)
 // and mode. Symlinks and other non-regular entries are replaced without first
 // reading through them. Read or stat errors are ignored and the write proceeds.
 func WriteFileIfContentOrModeChangedAtomic(fs FS, path string, data []byte, perm os.FileMode) error {
-	if info, err := fs.Lstat(path); err == nil && info.Mode().IsRegular() && comparableMode(info.Mode()) == comparableMode(perm) {
+	if info, err := fs.Lstat(path); err == nil && info.Mode().IsRegular() && ComparableMode(info.Mode()) == ComparableMode(perm) {
 		if snapshot, err := readRegularFileSnapshot(fs, path); err == nil && bytes.Equal(snapshot.data, data) {
-			if info, err := fs.Lstat(path); err == nil && info.Mode().IsRegular() && comparableMode(info.Mode()) == comparableMode(perm) {
+			if info, err := fs.Lstat(path); err == nil && info.Mode().IsRegular() && ComparableMode(info.Mode()) == ComparableMode(perm) {
 				if !snapshot.hasID {
 					return WriteFileAtomic(fs, path, data, perm)
 				}
@@ -160,7 +160,10 @@ func readRegularFileSnapshot(fs FS, path string) (regularFileSnapshot, error) {
 	return regularFileSnapshot{}, &os.PathError{Op: "open", Path: path, Err: os.ErrInvalid}
 }
 
-func comparableMode(mode os.FileMode) os.FileMode {
+// ComparableMode returns the portion of a file mode that is significant when
+// deciding whether an on-disk file already matches a desired mode: the
+// permission bits plus the setuid, setgid, and sticky bits.
+func ComparableMode(mode os.FileMode) os.FileMode {
 	return mode & (os.ModePerm | os.ModeSetuid | os.ModeSetgid | os.ModeSticky)
 }
 

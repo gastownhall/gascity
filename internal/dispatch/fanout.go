@@ -145,6 +145,9 @@ func processFanout(store beads.Store, bead beads.Bead, opts ProcessOptions) (Con
 		}
 		fragment, err := formula.CompileExpansionFragment(context.Background(), bead.Metadata["gc.bond"], opts.FormulaSearchPaths, target, itemVars)
 		if err != nil {
+			if errors.Is(err, formula.ErrVarValidation) {
+				return ControlResult{}, fmt.Errorf("%w: %s: compiling fragment %d: %w", ErrControlGraphMalformed, bead.ID, index+1, err)
+			}
 			return ControlResult{}, fmt.Errorf("%s: compiling fragment %d: %w", bead.ID, index+1, err)
 		}
 		if opts.PrepareFragment != nil {

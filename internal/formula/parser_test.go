@@ -1,6 +1,7 @@
 package formula
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -685,6 +686,9 @@ func TestValidateVars(t *testing.T) {
 			err := ValidateVars(formula, tt.values)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("ValidateVars() error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if tt.wantErr && !errors.Is(err, ErrVarValidation) {
+				t.Errorf("ValidateVars() error = %v, want ErrVarValidation", err)
 			}
 		})
 	}

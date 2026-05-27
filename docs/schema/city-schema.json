@@ -1192,6 +1192,10 @@
           "type": "string",
           "description": "StartReadyTimeout is how long `gc start` and `gc register` wait for\nthe supervisor to report the city as Running. Cities with many\nregistered or adopted sessions take longer to start because the\nper-tick wake budget (max_wakes_per_tick) throttles startup: wall\ntime to wake N sessions is roughly ceil(N / max_wakes_per_tick) *\npatrol_interval. At the defaults (5 wakes / 30s), ~40 sessions\nneed ~4 minutes. Duration string (e.g., \"5m\", \"10m\"). Defaults to\nDefaultStartReadyTimeout (5m). When set, this value replaces the\ndefault start/register budget; [session].startup_timeout may still\nextend the effective wait for a slow single session.",
           "default": "5m"
+        },
+        "tick_debounce": {
+          "type": "string",
+          "description": "TickDebounce coalesces bursty event-driven ticks (pokeCh,\ncontrolDispatcherCh) within this window. A first event in a quiet\nperiod arms a timer; subsequent events arriving before the timer\nfires are dropped (the single delayed tick re-reads authoritative\nstate covering all collapsed events). Zero (the default) disables\ndebouncing — each event fires its own tick, matching pre-existing\nbehavior. Duration string (e.g., \"250ms\", \"500ms\"). Trade-off:\nadds tick latency up to this value when set."
         }
       },
       "additionalProperties": false,

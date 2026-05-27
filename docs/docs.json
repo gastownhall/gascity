@@ -70,6 +70,26 @@
       "destination": "/guides/migrating-to-pack-vnext"
     },
     {
+      "source": "/schema/openapi.txt",
+      "destination": "/schema/openapi.json",
+      "permanent": false
+    },
+    {
+      "source": "/schema/events.txt",
+      "destination": "/schema/events.json",
+      "permanent": false
+    },
+    {
+      "source": "/schema/city-schema.txt",
+      "destination": "/schema/city-schema.json",
+      "permanent": false
+    },
+    {
+      "source": "/schema/pack-schema.txt",
+      "destination": "/schema/pack-schema.json",
+      "permanent": false
+    },
+    {
       "source": "/tutorials/01-cities-and-rigs.md",
       "destination": "/tutorials/01-cities-and-rigs"
     },

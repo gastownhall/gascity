@@ -1801,6 +1801,15 @@ type DaemonConfig struct {
 	// default start/register budget; [session].startup_timeout may still
 	// extend the effective wait for a slow single session.
 	StartReadyTimeout string `toml:"start_ready_timeout,omitempty" jsonschema:"default=5m"`
+	// TickDebounce coalesces bursty event-driven ticks (pokeCh,
+	// controlDispatcherCh) within this window. A first event in a quiet
+	// period arms a timer; subsequent events arriving before the timer
+	// fires are dropped (the single delayed tick re-reads authoritative
+	// state covering all collapsed events). Zero (the default) disables
+	// debouncing — each event fires its own tick, matching pre-existing
+	// behavior. Duration string (e.g., "250ms", "500ms"). Trade-off:
+	// adds tick latency up to this value when set.
+	TickDebounce string `toml:"tick_debounce,omitempty"`
 }
 
 // AutoRestartOnDriftEnabled reports whether the supervisor should be
@@ -1824,6 +1833,20 @@ func (d *DaemonConfig) PatrolIntervalDuration() time.Duration {
 	dur, err := time.ParseDuration(d.PatrolInterval)
 	if err != nil {
 		return 30 * time.Second
+	}
+	return dur
+}
+
+// TickDebounceDuration returns the tick-debounce window as a
+// time.Duration. Returns 0 (debouncing disabled) on empty, unparseable,
+// or negative input.
+func (d *DaemonConfig) TickDebounceDuration() time.Duration {
+	if d.TickDebounce == "" {
+		return 0
+	}
+	dur, err := time.ParseDuration(d.TickDebounce)
+	if err != nil || dur < 0 {
+		return 0
 	}
 	return dur
 }

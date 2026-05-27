@@ -725,21 +725,29 @@ func TestStartLongSocketPathUsesShortSocketName(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(root) })
 	const name = "control-dispatcher"
+	// Unix socket sun_path is 104 bytes on macOS / 108 on Linux. Use the
+	// macOS limit so the constructed path binds on either platform.
+	const sockPathLimit = 104
+	// Step by a single byte per iteration: the valid window (legacy too
+	// long, short fits) is only a few bytes wide, so a 10-byte step (as the
+	// original "deep-path-" repeater used) can skip past it entirely
+	// depending on len(root) — root length varies because os.MkdirTemp's
+	// random suffix is a uint32 stringified to a variable number of digits.
 	longDir := ""
-	for i := 1; i <= 32; i++ {
-		candidate := filepath.Join(root, strings.Repeat("deep-path-", i), "acp")
+	for i := 1; i <= 128; i++ {
+		candidate := filepath.Join(root, strings.Repeat("x", i), "acp")
 		p := NewProviderWithDir(candidate, Config{
 			HandshakeTimeout:  5 * time.Second,
 			NudgeBusyTimeout:  2 * time.Second,
 			OutputBufferLines: 100,
 		})
-		if len(p.legacySockPath(name)) > 108 && len(p.sockPath(name)) < 108 {
+		if len(p.legacySockPath(name)) > sockPathLimit && len(p.sockPath(name)) < sockPathLimit {
 			longDir = candidate
 			break
 		}
 	}
 	if longDir == "" {
-		t.Fatal("failed to construct path where legacy socket is too long but short socket fits")
+		t.Skipf("cannot construct path where legacy socket exceeds %d bytes but short socket fits; len(root)=%d (likely TMPDIR=%q too long)", sockPathLimit, len(root), os.TempDir())
 	}
 	if err := os.MkdirAll(longDir, 0o755); err != nil {
 		t.Fatalf("mkdir longDir: %v", err)

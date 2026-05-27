@@ -1587,6 +1587,17 @@ func failedQueuedNudge(item queuedNudge, cause error, now time.Time) (queuedNudg
 	return item, false
 }
 
+func terminalStateForDeadQueuedNudge(item queuedNudge) string {
+	switch strings.TrimSpace(item.LastError) {
+	case "expired":
+		return "expired"
+	case "superseded":
+		return "superseded"
+	default:
+		return "failed"
+	}
+}
+
 func pruneExpiredQueuedNudges(state *nudgeQueueState, store beads.Store, now time.Time) error {
 	filtered := state.Pending[:0]
 	for _, item := range state.Pending {
@@ -1642,7 +1653,7 @@ func pruneDeadQueuedNudges(state *nudgeQueueState, store beads.Store, now time.T
 	cutoff := now.Add(-defaultQueuedNudgeDeadRetention)
 	filtered := state.Dead[:0]
 	for _, item := range state.Dead {
-		if !item.DeadAt.IsZero() && item.DeadAt.Before(cutoff) && item.BeadID != "" {
+		if item.BeadID != "" {
 			if store == nil {
 				// No store available — retain the item to avoid data loss.
 				filtered = append(filtered, item)
@@ -1656,12 +1667,30 @@ func pruneDeadQueuedNudges(state *nudgeQueueState, store beads.Store, now time.T
 				continue
 			}
 			if !ok || !isTerminalNudgeState(b.Metadata["state"]) {
-				// Terminal bead not confirmed — retain the queue entry.
-				filtered = append(filtered, item)
+				// Repair historical dead-letter entries whose queue state was
+				// durable but whose backing bead never received terminal state.
+				reason := strings.TrimSpace(item.LastError)
+				if reason == "" {
+					reason = "failed"
+				}
+				terminalAt := now
+				if !item.DeadAt.IsZero() {
+					terminalAt = item.DeadAt
+				}
+				if err := markQueuedNudgeTerminal(store, item, terminalStateForDeadQueuedNudge(item), reason, "", terminalAt); err != nil {
+					filtered = append(filtered, item)
+					continue
+				}
+				b, ok, err = findAnyQueuedNudgeBead(store, item.ID)
+				if err != nil || !ok || !isTerminalNudgeState(b.Metadata["state"]) {
+					filtered = append(filtered, item)
+					continue
+				}
+			}
+			if !item.DeadAt.IsZero() && item.DeadAt.Before(cutoff) {
+				// Terminal bead confirmed in store — safe to prune once past retention.
 				continue
 			}
-			// Terminal bead confirmed in store — safe to prune.
-			continue
 		}
 		filtered = append(filtered, item)
 	}

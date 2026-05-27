@@ -144,6 +144,7 @@ func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 			patch: SleepPatch(now, "idle-timeout"),
 			want: MetadataPatch{
 				"state":                     string(StateAsleep),
+				"state_reason":              "",
 				"sleep_reason":              "idle-timeout",
 				"last_woke_at":              "",
 				"pending_create_claim":      "",
@@ -727,6 +728,26 @@ func TestReactivatePatchDoesNotForceHistoricalBeadEligible(t *testing.T) {
 	}
 	if merged["continuity_eligible"] != "false" {
 		t.Fatalf("continuity_eligible = %q, want false", merged["continuity_eligible"])
+	}
+}
+
+func TestSleepPatchClearsStaleStateReasonOnApply(t *testing.T) {
+	merged := SleepPatch(time.Date(2026, 5, 14, 16, 0, 0, 0, time.UTC), "idle-timeout").Apply(map[string]string{
+		"state":        string(StateDraining),
+		"state_reason": "creation_complete",
+	})
+	if got := merged["state_reason"]; got != "" {
+		t.Fatalf("state_reason = %q, want cleared", got)
+	}
+}
+
+func TestAcknowledgeDrainPatchClearsStaleStateReasonOnApply(t *testing.T) {
+	merged := AcknowledgeDrainPatch(false).Apply(map[string]string{
+		"state":        string(StateDraining),
+		"state_reason": "creation_complete",
+	})
+	if got := merged["state_reason"]; got != "" {
+		t.Fatalf("state_reason = %q, want cleared", got)
 	}
 }
 

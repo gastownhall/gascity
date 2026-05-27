@@ -880,6 +880,75 @@ func TestProcessFanoutReturnsMalformedForInvalidBondVars(t *testing.T) {
 	}
 }
 
+func TestProcessFanoutReturnsMalformedForMissingRequiredBondVar(t *testing.T) {
+	formulatest.EnableV2ForTest(t)
+
+	dir := t.TempDir()
+	expansion := `
+formula = "expansion-review"
+type = "expansion"
+version = 2
+contract = "graph.v2"
+
+[vars.reviewer]
+required = true
+
+[vars.source_convoy_id]
+required = true
+
+[[template]]
+id = "{target}.review"
+title = "Review {reviewer}"
+description = "Source {source_convoy_id}"
+`
+	if err := os.WriteFile(filepath.Join(dir, "expansion-review.toml"), []byte(expansion), 0o644); err != nil {
+		t.Fatalf("write expansion formula: %v", err)
+	}
+
+	store := beads.NewMemStore()
+	workflow := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+		},
+	})
+	source := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title:  "prepare review items",
+		Type:   "task",
+		Status: "closed",
+		Metadata: map[string]string{
+			"gc.root_bead_id": workflow.ID,
+			"gc.step_ref":     "demo.prepare-review-items",
+			"gc.outcome":      "pass",
+			"gc.output_json":  `{"personas":[{"name":"architect"}]}`,
+		},
+	})
+	fanout := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "Fan out review items",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":         "fanout",
+			"gc.root_bead_id": workflow.ID,
+			"gc.control_for":  "demo.prepare-review-items",
+			"gc.for_each":     "output.personas",
+			"gc.bond":         "expansion-review",
+			"gc.bond_vars":    `{"reviewer":"{item.name}"}`,
+			"gc.fanout_mode":  "parallel",
+		},
+	})
+	mustDepAdd(t, store, fanout.ID, source.ID, "blocks")
+
+	_, err := ProcessControl(store, fanout, ProcessOptions{FormulaSearchPaths: []string{dir}})
+	if !errors.Is(err, ErrControlGraphMalformed) {
+		t.Fatalf("ProcessControl(fanout missing required bond var) err = %v, want %v", err, ErrControlGraphMalformed)
+	}
+	if !strings.Contains(err.Error(), `variable "source_convoy_id" is required`) {
+		t.Fatalf("ProcessControl error = %v, want missing source_convoy_id", err)
+	}
+}
+
 func TestReconcileTerminalScopedMemberReusesResolvedBodyForFailingScope(t *testing.T) {
 	t.Parallel()
 
