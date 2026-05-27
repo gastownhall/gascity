@@ -32,24 +32,28 @@ type deferredRigPatches struct {
 	overrides          []AgentOverride
 }
 
-// PackConfig is the TOML structure of a pack.toml file.
-// It has a [pack] metadata header and agent definitions.
+// PackConfig is the TOML structure of a pack.toml file. PackV2 agent
+// definitions are discovered from agents/<name>/agent.toml; the inline agent
+// list remains schema-visible for migration compatibility with legacy packs.
 type PackConfig struct {
-	Pack           PackMeta                `toml:"pack" jsonschema:"required"`
-	Imports        map[string]Import       `toml:"imports,omitempty"`
-	AgentDefaults  AgentDefaults           `toml:"agent_defaults,omitempty" jsonschema:"-"`
-	AgentsDefaults AgentDefaults           `toml:"agents,omitempty" jsonschema:"-"`
-	Defaults       PackDefaults            `toml:"defaults,omitempty" jsonschema:"-"`
-	Agents         []Agent                 `toml:"agent,omitempty"`
-	NamedSessions  []NamedSession          `toml:"named_session,omitempty"`
-	Services       []Service               `toml:"service,omitempty"`
-	Providers      map[string]ProviderSpec `toml:"providers,omitempty"`
-	Formulas       FormulasConfig          `toml:"formulas,omitempty" jsonschema:"-"`
-	Patches        PackPatches             `toml:"patches,omitempty"`
-	Doctor         []PackDoctorEntry       `toml:"doctor,omitempty"`
-	Commands       []PackCommandEntry      `toml:"commands,omitempty"`
-	Global         PackGlobal              `toml:"global,omitempty"`
-	Pricing        []pricing.ModelPricing  `toml:"pricing,omitempty"`
+	Pack           PackMeta          `toml:"pack" jsonschema:"required"`
+	Imports        map[string]Import `toml:"imports,omitempty"`
+	AgentDefaults  AgentDefaults     `toml:"agent_defaults,omitempty" jsonschema:"-"`
+	AgentsDefaults AgentDefaults     `toml:"agents,omitempty" jsonschema:"-"`
+	Defaults       PackDefaults      `toml:"defaults,omitempty" jsonschema:"-"`
+	// Agents holds legacy inline agent templates accepted by the current
+	// loader. New PackV2 packs should define agents under
+	// agents/<name>/agent.toml instead.
+	Agents        []Agent                 `toml:"agent,omitempty"`
+	NamedSessions []NamedSession          `toml:"named_session,omitempty"`
+	Services      []Service               `toml:"service,omitempty"`
+	Providers     map[string]ProviderSpec `toml:"providers,omitempty"`
+	Formulas      FormulasConfig          `toml:"formulas,omitempty" jsonschema:"-"`
+	Patches       PackPatches             `toml:"patches,omitempty"`
+	Doctor        []PackDoctorEntry       `toml:"doctor,omitempty"`
+	Commands      []PackCommandEntry      `toml:"commands,omitempty"`
+	Global        PackGlobal              `toml:"global,omitempty"`
+	Pricing       []pricing.ModelPricing  `toml:"pricing,omitempty"`
 }
 
 // PackPatches holds the patch operations valid in pack.toml. City

@@ -277,22 +277,36 @@ source = "../packs/gascity"
 The removed `rigs.includes` field is not a PackV2 import surface. A loader must
 hard-fail if a rig uses `includes`.
 
-### 1.2.4. `[[agent]]`
+### 1.2.4. Agent Directories
 
-Each `[[agent]]` table defines an agent template.
+PackV2 agents are authored as immediate child directories under `agents/`.
+Each `agents/<name>/` directory defines one local agent template. The directory
+name is the agent name.
 
-```toml
-[[agent]]
-name = "reviewer"
-scope = "city"
-prompt_template = "assets/prompts/reviewer.md"
-provider = "codex"
+```text
+agents/
+└── reviewer/
+    ├── agent.toml
+    └── prompt.template.md
 ```
 
-The `name` field is required. Agent names must be valid session identifiers:
-they start with an ASCII letter or digit and continue with ASCII letters,
-digits, hyphens, or underscores. Slashes, dots, and spaces are not valid agent
-name characters.
+`agent.toml` is optional. A minimal agent directory may contain only a prompt
+file and inherit every other setting from the surrounding city or pack
+composition.
+
+The agent directory name must be a valid session identifier: it starts with an
+ASCII letter or digit and continues with ASCII letters, digits, hyphens, or
+underscores. Slashes, dots, and spaces are not valid agent name characters.
+
+If `agent.toml` contains a `name` field, the loader ignores it for identity and
+uses the directory name. Authors must not rely on `name` inside `agent.toml` to
+rename an agent.
+
+Prompt file discovery inside an agent directory uses this order:
+
+1. `prompt.template.md`
+2. `prompt.md.tmpl`
+3. `prompt.md`
 
 The `scope` field controls where a pack-defined agent is instantiated:
 
@@ -302,12 +316,12 @@ The `scope` field controls where a pack-defined agent is instantiated:
 | `city` | Agent is kept only during city-level pack loading. |
 | `rig` | Agent is kept only during rig-level pack loading. |
 
-The full set of currently parsed agent fields is shared with `city.toml`.
-Pack authors should treat these fields as public PackV2 agent fields:
+The full set of currently parsed `agent.toml` fields is shared with
+`city.toml`. Pack authors should treat these fields as public PackV2 agent
+fields:
 
 | Field | Type | Rule |
 |---|---|---|
-| `name` | string | Required local agent name. |
 | `description` | string | Human-readable description. |
 | `dir` | string | Identity prefix. Reusable packs should usually omit this. |
 | `work_dir` | string | Session working directory without changing identity. |
@@ -354,6 +368,12 @@ Pack authors should treat these fields as public PackV2 agent fields:
 | `wake_mode` | string | `resume` or `fresh`. |
 
 Fields not listed above are not PackV2 agent fields.
+
+Legacy inline `pack.toml [[agent]]` tables remain loader compatibility for
+existing packs. They are not the PackV2 authoring surface. New packs must use
+`agents/<name>/agent.toml`; existing inline definitions should migrate by
+moving each table's fields into the matching agent directory and moving prompt
+content beside the agent as `prompt.template.md` when the prompt is templated.
 
 ### 1.2.5. `[[named_session]]`
 
@@ -493,6 +513,7 @@ The following fields are not PackV2 `pack.toml` fields:
 
 | Field | Reason |
 |---|---|
+| `[[agent]]` | Legacy compatibility only. Use `agents/<name>/agent.toml` for PackV2 agent authoring. |
 | `[agent_defaults]` | City-level only. Appears in `city.toml`, not `pack.toml`. |
 | `[agents]` | City-level compatibility alias only. It is not valid in `pack.toml`. |
 | `[defaults.rig.imports]` | City-level only. Appears in `city.toml`, not `pack.toml`. |
@@ -512,12 +533,10 @@ The following fields are not PackV2 `pack.toml` fields:
 
 `assets/` is the preferred home for private pack implementation files.
 PackV2 does not scan `assets/` directly. Files under `assets/` become relevant
-only when a pack definition references them, for example:
+only when a pack definition references them, for example from
+`agents/reviewer/agent.toml`:
 
 ```toml
-[[agent]]
-name = "reviewer"
-prompt_template = "assets/prompts/reviewer.md"
 session_setup_script = "assets/scripts/setup-reviewer.sh"
 overlay_dir = "assets/overlays/reviewer"
 ```
@@ -629,6 +648,7 @@ loadPack(packRoot, cityRoot, rigName, seen):
     validate [pack]
     validate imports
     recursively load pack includes/imports
+    discover this pack's agents/ definitions
     copy this pack's own definitions
     stamp agents and named sessions with rigName when applicable
     resolve pack-relative paths
