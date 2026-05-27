@@ -429,7 +429,6 @@ func orderHistoryBeadsAcrossStoreInfosCachedFirst(infos []workflowStoreInfo, sco
 			Limit:         limit,
 			IncludeClosed: true,
 			Sort:          beads.SortCreatedDesc,
-			TierMode:      beads.TierBoth,
 		}
 		var (
 			rows []beads.Bead
@@ -493,7 +492,6 @@ func orderHistoryBeadsAcrossStoreInfos(infos []workflowStoreInfo, scopedName str
 			Limit:         limit,
 			IncludeClosed: true,
 			Sort:          beads.SortCreatedDesc,
-			TierMode:      beads.TierBoth,
 		})
 		if err != nil {
 			if i == 0 && len(rows) == 0 {

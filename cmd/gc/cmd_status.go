@@ -246,11 +246,8 @@ func rigStatusAgentBelongsToRig(a api.StatusAgentView, rigName string) bool {
 	return len(a.QualifiedName) > len(prefix) && a.QualifiedName[:len(prefix)] == prefix
 }
 
-func rigStatusAgentJSONFromAPI(a api.StatusAgentView, dops drainOps) RigStatusAgent {
-	draining := false
-	if a.Running {
-		draining, _ = dops.isDraining(a.SessionName)
-	}
+func rigStatusAgentJSONFromAPI(a api.StatusAgentView, _ drainOps) RigStatusAgent {
+	draining := a.Running && a.Draining
 	status := "stopped"
 	if a.Running {
 		status = "running"
@@ -403,6 +400,19 @@ func agentStatusLine(running bool, dops drainOps, sn string, suspended bool) str
 		return "stopped"
 	}
 	if draining, _ := dops.isDraining(sn); draining {
+		return "running  (draining)"
+	}
+	return "running"
+}
+
+func agentStatusLineFromState(running, suspended, draining bool) string {
+	if !running {
+		if suspended {
+			return "stopped  (suspended)"
+		}
+		return "stopped"
+	}
+	if draining {
 		return "running  (draining)"
 	}
 	return "running"

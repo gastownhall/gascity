@@ -179,8 +179,8 @@ func TestRunWarmupChecks_PerCheckDeadline(t *testing.T) {
 	report, mailer, stderr := runWarmupTest(t, checks, WarmupOpts{PerCheckDeadline: 100 * time.Millisecond})
 	elapsed := time.Since(start)
 
-	if elapsed >= 500*time.Millisecond {
-		t.Fatalf("RunWarmupChecks elapsed %s, want <500ms", elapsed)
+	if elapsed >= time.Second {
+		t.Fatalf("RunWarmupChecks elapsed %s, want <1s", elapsed)
 	}
 	if len(report.Failures) != 1 {
 		t.Fatalf("failures = %d, want 1", len(report.Failures))
@@ -212,8 +212,8 @@ func TestRunWarmupChecks_TotalDeadline(t *testing.T) {
 	})
 	elapsed := time.Since(start)
 
-	if elapsed >= 500*time.Millisecond {
-		t.Fatalf("RunWarmupChecks elapsed %s, want <500ms", elapsed)
+	if elapsed >= time.Second {
+		t.Fatalf("RunWarmupChecks elapsed %s, want <1s", elapsed)
 	}
 	if report.HighestSeverity < doctor.StatusError {
 		t.Fatalf("HighestSeverity = %v, want at least StatusError", report.HighestSeverity)

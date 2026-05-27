@@ -121,6 +121,9 @@ const (
 	cacheReconcileIntervalLarge  = 120 * time.Second
 	cacheProblemLogWindow        = time.Minute
 	cacheReconcileFailureBackoff = time.Minute
+	cacheDegradedBackoffBase     = 5 * time.Second
+	cacheDegradedBackoffMax      = 2 * time.Minute
+	cacheDegradedJitterMax       = time.Second
 )
 
 // StaggerOption configures the deterministic startup stagger applied
@@ -302,7 +305,7 @@ func (c *CachingStore) noteLocalMutationLocked(ids ...string) uint64 {
 	return seq
 }
 
-// PrimeActive loads all non-closed beads (open + in_progress) into the
+// PrimeActive loads all non-closed beads into the
 // cache. These are fast indexed queries that populate enough data for
 // startup paths without waiting for a full scan. The cache enters
 // cachePartial state: filtered active queries and Get hit cache for primed
@@ -312,28 +315,16 @@ func (c *CachingStore) PrimeActive() error {
 	startSeq := c.mutationSeq
 	c.mu.RUnlock()
 
-	var all []Bead
-	var partialErr error
-	for _, status := range []string{"open", "in_progress"} {
-		beads, err := c.backing.List(ListQuery{Status: status})
-		if err != nil {
-			if !IsPartialResult(err) {
-				return fmt.Errorf("prime active (%s): %w", status, err)
-			}
-			partialErr = errors.Join(partialErr, err)
-			c.recordProblem(fmt.Sprintf("prime active (%s)", status), err)
+	all, depMap, depsComplete, partialErr := c.loadActiveSnapshot(ListQuery{AllowScan: true, SkipLabels: true})
+	if partialErr != nil {
+		if !IsPartialResult(partialErr) {
+			return fmt.Errorf("prime active: %w", partialErr)
 		}
-		all = append(all, beads...)
+		c.recordProblem("prime active", partialErr)
 	}
-
 	beadMap := make(map[string]Bead, len(all))
 	for _, b := range all {
 		beadMap[b.ID] = cloneBead(b)
-	}
-	depMap, depsComplete, depErr := c.fetchDepsForIDs(beadIDs(beadMap))
-	if depErr != nil {
-		partialErr = errors.Join(partialErr, depErr)
-		c.recordProblem("prime active dep cache", depErr)
 	}
 
 	c.mu.Lock()
@@ -352,7 +343,7 @@ func (c *CachingStore) PrimeActive() error {
 			continue
 		}
 		c.beads[b.ID] = cloneBead(b)
-		if depsComplete && depErr == nil {
+		if depsComplete {
 			c.deps[b.ID] = cloneDeps(depMap[b.ID])
 		} else {
 			c.deps[b.ID] = depsFromBeadFields(b)
@@ -366,6 +357,7 @@ func (c *CachingStore) PrimeActive() error {
 	if c.state == cacheUninitialized {
 		c.state = cachePartial
 	}
+	c.depsComplete = depsComplete
 	c.primePartialErr = partialErr
 	c.markFreshLocked(now)
 	c.updateStatsLocked()
@@ -381,10 +373,12 @@ func (c *CachingStore) Prime(_ context.Context) error {
 	c.mu.RUnlock()
 
 	var all []Bead
+	var depMap map[string][]Dep
+	var depsComplete bool
 	var err error
 	var partialErr error
 	for attempt := 1; attempt <= 3; attempt++ {
-		all, err = c.backing.List(ListQuery{AllowScan: true, SkipLabels: true}) // active beads only (default)
+		all, depMap, depsComplete, err = c.loadActiveSnapshot(ListQuery{AllowScan: true, SkipLabels: true}) // active beads only (default)
 		if err == nil {
 			break
 		}
@@ -408,17 +402,12 @@ func (c *CachingStore) Prime(_ context.Context) error {
 		beadMap[b.ID] = cloneBead(b)
 	}
 
-	depMap, depsComplete, depErr := c.fetchDepsForIDs(beadIDs(beadMap))
-	if depErr != nil {
-		c.recordProblem("prime dep cache", depErr)
-	}
-
 	now := time.Now()
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.mutationSeq == startSeq {
 		nextBeads := beadMap
-		nextDeps := depsFromBeads(beadMap, depMap, depsComplete && depErr == nil)
+		nextDeps := depsFromBeads(beadMap, depMap, depsComplete)
 		nextDirty := make(map[string]struct{})
 		nextBeadSeq := make(map[string]uint64)
 		nextLocalBeadAt := make(map[string]time.Time)
@@ -445,7 +434,7 @@ func (c *CachingStore) Prime(_ context.Context) error {
 		}
 		c.beads = nextBeads
 		c.deps = nextDeps
-		c.depsComplete = depsComplete && depErr == nil
+		c.depsComplete = depsComplete
 		c.dirty = nextDirty
 		c.beadSeq = nextBeadSeq
 		c.localBeadAt = nextLocalBeadAt
@@ -461,7 +450,7 @@ func (c *CachingStore) Prime(_ context.Context) error {
 			c.beads[id] = b
 			delete(c.deletedSeq, id)
 			delete(c.beadSeq, id)
-			if depsComplete && depErr == nil {
+			if depsComplete {
 				c.deps[id] = cloneDeps(depMap[id])
 			} else {
 				c.deps[id] = depsFromBeadFields(b)
@@ -476,6 +465,59 @@ func (c *CachingStore) Prime(_ context.Context) error {
 	c.markFreshLocked(now)
 	c.updateStatsLocked()
 	return nil
+}
+
+func (c *CachingStore) loadActiveSnapshot(query ListQuery) ([]Bead, map[string][]Dep, bool, error) {
+	if query.IncludeClosed || query.Status == "closed" {
+		return nil, nil, false, fmt.Errorf("active snapshot: %w", ErrIndexedListUnsupported)
+	}
+	query.IncludeClosed = false
+	query.Live = true
+
+	if indexed, ok := c.backing.(IndexedLister); ok {
+		ctx, cancel := context.WithTimeout(context.Background(), bdReadCommandTimeout)
+		defer cancel()
+		result, err := indexed.ListIndexed(ctx, query)
+		if err == nil {
+			depMap := indexedResultDepMap(result)
+			if !result.DependencyCoverage {
+				return result.Beads, depMap, false, fmt.Errorf("%w: dependency coverage incomplete", ErrIndexedListUnsupported)
+			}
+			return result.Beads, depMap, true, nil
+		}
+		if !errors.Is(err, ErrIndexedListUnsupported) {
+			return result.Beads, indexedResultDepMap(result), result.DependencyCoverage, err
+		}
+	}
+
+	all, err := c.backing.List(query)
+	if err != nil && !IsPartialResult(err) {
+		return all, nil, false, err
+	}
+	beadMap := make(map[string]Bead, len(all))
+	for _, b := range all {
+		beadMap[b.ID] = cloneBead(b)
+	}
+	depMap, depsComplete, depErr := c.fetchDepsForIDs(beadIDs(beadMap))
+	if depErr != nil {
+		c.recordProblem("active snapshot dep cache", depErr)
+	}
+	return all, depMap, depsComplete && depErr == nil, err
+}
+
+func indexedResultDepMap(result IndexedListResult) map[string][]Dep {
+	if result.DepsByID != nil {
+		out := make(map[string][]Dep, len(result.DepsByID))
+		for id, deps := range result.DepsByID {
+			out[id] = cloneDeps(deps)
+		}
+		return out
+	}
+	out := make(map[string][]Dep, len(result.Beads))
+	for _, b := range result.Beads {
+		out[b.ID] = depsFromBeadFields(b)
+	}
+	return out
 }
 
 // StartReconciler launches watchdog reconciliation. Cancel ctx to stop.

@@ -1021,8 +1021,8 @@ func TestCachingStorePrimeActiveUsesPartialResultRows(t *testing.T) {
 	t.Parallel()
 
 	backing := &partialListErrorStore{
-		Store:           NewMemStore(),
-		partialStatuses: map[string]bool{"open": true},
+		Store:            NewMemStore(),
+		partialAllowScan: true,
 	}
 	open, err := backing.Create(Bead{Title: "open survivor"})
 	if err != nil {
@@ -1053,7 +1053,7 @@ func TestCachingStorePrimeActiveUsesPartialResultRows(t *testing.T) {
 	if stats.ProblemCount != 1 {
 		t.Fatalf("ProblemCount = %d, want 1", stats.ProblemCount)
 	}
-	if !strings.Contains(stats.LastProblem, "prime active (open)") {
+	if !strings.Contains(stats.LastProblem, "prime active") {
 		t.Fatalf("LastProblem = %q, want prime active context", stats.LastProblem)
 	}
 	if cache.state != cachePartial {
@@ -1391,8 +1391,14 @@ func TestCachingStoreNextReconcileDelayUsesFreshnessWatchdog(t *testing.T) {
 
 	cache.state = cacheDegraded
 	cache.lastFreshAt = time.Unix(109, 0)
+	cache.syncFailures = 1
+	cache.stats.LastProblemAt = time.Unix(109, 0)
+	if got := cache.nextReconcileDelay(time.Unix(110, 0)); got < 4*time.Second || got >= 5*time.Second {
+		t.Fatalf("nextReconcileDelay(degraded) = %s, want 4s plus <1s jitter", got)
+	}
+	cache.stats.LastProblemAt = time.Unix(100, 0)
 	if got := cache.nextReconcileDelay(time.Unix(110, 0)); got != 0 {
-		t.Fatalf("nextReconcileDelay(degraded) = %s, want immediate reconcile", got)
+		t.Fatalf("nextReconcileDelay(degraded elapsed) = %s, want immediate reconcile", got)
 	}
 }
 
@@ -1616,6 +1622,95 @@ func TestCachingStoreCachedListRefusesNonIssuesTierQueries(t *testing.T) {
 	}
 }
 
+func TestCachingStorePrimeUsesIndexedActiveSnapshotDependencies(t *testing.T) {
+	t.Parallel()
+
+	store := &indexedSnapshotStore{
+		Store: NewMemStore(),
+		result: IndexedListResult{
+			Beads: []Bead{{
+				ID:     "bd-indexed",
+				Title:  "indexed",
+				Status: "open",
+				Type:   "task",
+				Dependencies: []Dep{{
+					IssueID:     "bd-indexed",
+					DependsOnID: "bd-root",
+					Type:        "blocks",
+				}},
+			}},
+			DepsByID: map[string][]Dep{
+				"bd-indexed": {{
+					IssueID:     "bd-indexed",
+					DependsOnID: "bd-root",
+					Type:        "blocks",
+				}},
+			},
+			DependencyCoverage: true,
+			LabelsCoverage:     true,
+		},
+	}
+	cache := NewCachingStoreForTest(store, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+
+	if store.indexedCalls != 1 {
+		t.Fatalf("indexed calls = %d, want 1", store.indexedCalls)
+	}
+	if store.listCalls != 0 {
+		t.Fatalf("List calls = %d, want 0", store.listCalls)
+	}
+	cache.mu.RLock()
+	depsComplete := cache.depsComplete
+	deps := cloneDeps(cache.deps["bd-indexed"])
+	cache.mu.RUnlock()
+	if !depsComplete {
+		t.Fatal("depsComplete = false, want true")
+	}
+	if len(deps) != 1 || deps[0].DependsOnID != "bd-root" {
+		t.Fatalf("deps = %+v, want bd-root dependency", deps)
+	}
+}
+
+func TestCachingStorePrimeDoesNotFallbackToListOnIndexedFailure(t *testing.T) {
+	t.Parallel()
+
+	store := &indexedSnapshotStore{
+		Store: NewMemStore(),
+		err:   errors.New("sql unavailable"),
+	}
+	cache := NewCachingStoreForTest(store, nil)
+	if err := cache.Prime(context.Background()); err == nil {
+		t.Fatal("Prime() error = nil, want indexed SQL failure")
+	}
+	if store.indexedCalls != 3 {
+		t.Fatalf("indexed calls = %d, want 3 retry attempts", store.indexedCalls)
+	}
+	if store.listCalls != 0 {
+		t.Fatalf("List calls = %d, want 0 broad fallback scans", store.listCalls)
+	}
+}
+
+func TestCachingStorePrimeRejectsIncompleteIndexedDependencyCoverage(t *testing.T) {
+	t.Parallel()
+
+	store := &indexedSnapshotStore{
+		Store: NewMemStore(),
+		result: IndexedListResult{
+			Beads:              []Bead{{ID: "bd-indexed", Status: "open"}},
+			DependencyCoverage: false,
+		},
+	}
+	cache := NewCachingStoreForTest(store, nil)
+	if err := cache.Prime(context.Background()); err == nil {
+		t.Fatal("Prime() error = nil, want incomplete dependency coverage failure")
+	}
+	if store.listCalls != 0 {
+		t.Fatalf("List calls = %d, want 0 broad fallback scans", store.listCalls)
+	}
+}
+
 type refreshFailingStore struct {
 	Store
 	failNextGet bool
@@ -1638,6 +1733,24 @@ func (s *listFailingStore) List(query ListQuery) ([]Bead, error) {
 	if s.failList {
 		return nil, errors.New("transient list failure")
 	}
+	return s.Store.List(query)
+}
+
+type indexedSnapshotStore struct {
+	Store
+	result       IndexedListResult
+	err          error
+	indexedCalls int
+	listCalls    int
+}
+
+func (s *indexedSnapshotStore) ListIndexed(_ context.Context, _ ListQuery) (IndexedListResult, error) {
+	s.indexedCalls++
+	return s.result, s.err
+}
+
+func (s *indexedSnapshotStore) List(query ListQuery) ([]Bead, error) {
+	s.listCalls++
 	return s.Store.List(query)
 }
 
@@ -1875,14 +1988,11 @@ func TestCachingStoreBdPrimeActiveUsesListDependenciesForCachedReady(t *testing.
 		}
 		if len(args) > 0 && args[0] == "list" {
 			argLine := strings.Join(args, " ")
-			if strings.Contains(argLine, "--status=open") {
+			if !strings.Contains(argLine, "--status=") {
 				return []byte(`[
 					{"id":"bd-blocker","title":"blocker","status":"open","issue_type":"task","created_at":"2026-01-01T00:00:00Z","labels":["task"],"metadata":{}},
 					{"id":"bd-blocked","title":"blocked","status":"open","issue_type":"task","created_at":"2026-01-01T00:00:01Z","labels":["task"],"metadata":{},"dependencies":[{"issue_id":"bd-blocked","depends_on_id":"bd-blocker","type":"blocks"}]}
 				]`), nil
-			}
-			if strings.Contains(argLine, "--status=in_progress") {
-				return []byte(`[]`), nil
 			}
 		}
 		return []byte(`[]`), nil

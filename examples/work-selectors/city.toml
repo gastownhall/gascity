@@ -1,0 +1,16 @@
+# Typed work selectors demo.
+
+[workspace]
+name = "work-selectors"
+provider = "exec"
+isolation = "none"
+
+[beads]
+provider = "bd"
+
+[defaults.rig.imports.work-selectors]
+source = "packs/work-selectors"
+
+[daemon]
+patrol_interval = "10s"
+shutdown_timeout = "10s"

@@ -1,0 +1,26 @@
+provider = "exec"
+scope = "rig"
+lifecycle = "one_shot"
+start_command = "gc work claim --agent {{.Agent}} --json"
+nudge = "Claim one routed task and exit."
+idle_timeout = "5m"
+min_active_sessions = 0
+max_active_sessions = 3
+
+[scale_check_query]
+status = "open"
+type = "task"
+unassigned = true
+sort = "created_asc"
+
+[scale_check_query.metadata]
+"gc.routed_to" = "{{.Rig}}/{{.Agent}}"
+
+[work_selector]
+status = "open"
+type = "task"
+unassigned = true
+sort = "created_asc"
+
+[work_selector.metadata]
+"gc.routed_to" = "{{.Rig}}/{{.Agent}}"

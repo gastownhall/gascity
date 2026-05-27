@@ -11,6 +11,14 @@ import (
 // ErrNotFound is returned when a bead ID does not exist in the store.
 var ErrNotFound = errors.New("bead not found")
 
+// ErrClaimLost is returned when a bead cannot be claimed because another
+// claimant already won or the bead no longer satisfies claimable state.
+var ErrClaimLost = errors.New("bead claim lost")
+
+// ErrClaimUnsupported is returned by stores that cannot offer a linearizable
+// single-winner claim primitive.
+var ErrClaimUnsupported = errors.New("bead claim unsupported")
+
 // ErrParentProjectionSuperseded reports that a parent update was overtaken by a
 // concurrent reparent before the caller's projection wait could converge.
 var ErrParentProjectionSuperseded = errors.New("parent projection superseded by concurrent update")
@@ -52,6 +60,18 @@ type UpdateOpts struct {
 	Labels       []string // append these labels (nil = no change)
 	RemoveLabels []string // remove these labels (nil = no change)
 	Metadata     map[string]string
+}
+
+// ClaimOpts specifies the atomic claim owner and same-write metadata changes.
+type ClaimOpts struct {
+	Assignee string
+	Metadata map[string]string
+}
+
+// ClaimStore is implemented by stores that support an atomic single-winner
+// claim operation.
+type ClaimStore interface {
+	Claim(id string, opts ClaimOpts) (Bead, error)
 }
 
 // Tx is the write surface available inside a Store.Tx callback.

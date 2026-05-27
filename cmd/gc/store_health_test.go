@@ -2,7 +2,9 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -11,6 +13,20 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/storehealth"
 )
+
+type testIndexedRowCounterStore struct {
+	*beads.MemStore
+	count int
+	err   error
+	calls int
+	query beads.ListQuery
+}
+
+func (s *testIndexedRowCounterStore) CountIndexed(_ context.Context, query beads.ListQuery) (int, error) {
+	s.calls++
+	s.query = query
+	return s.count, s.err
+}
 
 func TestStoreHealthSIBytes(t *testing.T) {
 	cases := []struct {
@@ -123,6 +139,38 @@ func TestLiveRowCountCountsBeads(t *testing.T) {
 	}
 	if got := liveRowCount(store); got != 3 {
 		t.Fatalf("liveRowCount = %d, want 3", got)
+	}
+}
+
+func TestLiveRowCountUsesIndexedCounter(t *testing.T) {
+	store := &testIndexedRowCounterStore{
+		MemStore: beads.NewMemStore(),
+		count:    7,
+	}
+	if got := liveRowCount(store); got != 7 {
+		t.Fatalf("liveRowCount = %d, want indexed count 7", got)
+	}
+	if store.calls != 1 {
+		t.Fatalf("CountIndexed calls = %d, want 1", store.calls)
+	}
+	if !store.query.IncludeClosed || !store.query.AllowScan {
+		t.Fatalf("CountIndexed query = %+v, want all-status scan count", store.query)
+	}
+}
+
+func TestLiveRowCountDoesNotFallbackToHydratedListAfterIndexedError(t *testing.T) {
+	store := &testIndexedRowCounterStore{
+		MemStore: beads.NewMemStore(),
+		err:      errors.New("indexed count unavailable"),
+	}
+	if _, err := store.Create(beads.Bead{Title: "would be counted by fallback"}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if got := liveRowCount(store); got != 0 {
+		t.Fatalf("liveRowCount = %d, want 0 after indexed count error", got)
+	}
+	if store.calls != 1 {
+		t.Fatalf("CountIndexed calls = %d, want 1", store.calls)
 	}
 }
 

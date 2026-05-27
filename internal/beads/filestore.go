@@ -225,6 +225,29 @@ func (fs *FileStore) Update(id string, opts UpdateOpts) error {
 	return nil
 }
 
+// Claim atomically claims a bead under the file-store cross-process lock.
+func (fs *FileStore) Claim(id string, opts ClaimOpts) (Bead, error) {
+	fs.fmu.Lock()
+	defer fs.fmu.Unlock()
+	if err := fs.locker.Lock(); err != nil {
+		return Bead{}, err
+	}
+	defer fs.locker.Unlock() //nolint:errcheck // best-effort unlock
+	if err := fs.reloadFromDisk(); err != nil {
+		return Bead{}, err
+	}
+	snap := fs.snapshotLocked()
+	claimed, err := fs.MemStore.Claim(id, opts)
+	if err != nil {
+		return Bead{}, err
+	}
+	if err := fs.save(); err != nil {
+		fs.restoreFrom(snap.seq, snap.beads, snap.deps)
+		return Bead{}, err
+	}
+	return claimed, nil
+}
+
 // Close delegates to MemStore.Close and flushes to disk.
 // If the disk flush fails, the in-memory mutation is rolled back.
 func (fs *FileStore) Close(id string) error {

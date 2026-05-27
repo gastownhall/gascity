@@ -927,15 +927,15 @@ name = "test-city"
 		t.Fatalf("doOrderRun = %d, want 0; stderr: %s", code, stderr.String())
 	}
 
-	results, err := store.ListByLabel("order-run:release-exec", 0, beads.IncludeClosed, beads.WithBothTiers)
+	results, err := store.ListByLabel("order-run:release-exec", 0, beads.IncludeClosed)
 	if err != nil {
 		t.Fatalf("store.ListByLabel(): %v", err)
 	}
 	if len(results) != 1 {
 		t.Fatalf("store.ListByLabel() len = %d, want 1 (%#v)", len(results), results)
 	}
-	if !results[0].Ephemeral {
-		t.Fatalf("tracking bead Ephemeral = false, want true")
+	if results[0].Ephemeral {
+		t.Fatalf("tracking bead Ephemeral = true, want false")
 	}
 	for _, want := range []string{"order:release-exec", fmt.Sprintf("seq:%d", headSeq), "exec"} {
 		if !slicesContain(results[0].Labels, want) {
@@ -991,15 +991,15 @@ on = "bead.closed"
 	if err != nil {
 		t.Fatalf("openStoreAtForCity(): %v", err)
 	}
-	results, err := store.ListByLabel("order-run:release-exec", 0, beads.IncludeClosed, beads.WithBothTiers)
+	results, err := store.ListByLabel("order-run:release-exec", 0, beads.IncludeClosed)
 	if err != nil {
 		t.Fatalf("store.ListByLabel(): %v", err)
 	}
 	if len(results) != 1 {
 		t.Fatalf("store.ListByLabel() len = %d, want 1 (%#v)", len(results), results)
 	}
-	if !results[0].Ephemeral {
-		t.Fatalf("tracking bead Ephemeral = false, want true")
+	if results[0].Ephemeral {
+		t.Fatalf("tracking bead Ephemeral = true, want false")
 	}
 	for _, want := range []string{"order:release-exec", fmt.Sprintf("seq:%d", headSeq), "exec"} {
 		if !slicesContain(results[0].Labels, want) {
@@ -1047,9 +1047,8 @@ prefix = "fe"
 		t.Fatalf("openStoreAtForCity(rig): %v", err)
 	}
 	stale, err := rigStore.Create(beads.Bead{
-		Title:     "order:rig-digest:rig:frontend",
-		Labels:    []string{"order-run:rig-digest:rig:frontend", labelOrderTracking},
-		Ephemeral: true,
+		Title:  "order:rig-digest:rig:frontend",
+		Labels: []string{"order-run:rig-digest:rig:frontend", labelOrderTracking},
 	})
 	if err != nil {
 		t.Fatalf("Create(stale): %v", err)
@@ -1113,9 +1112,8 @@ prefix = "fe"
 		t.Fatalf("openStoreAtForCity(city): %v", err)
 	}
 	stale, err := store.Create(beads.Bead{
-		Title:     "order:cleanup",
-		Labels:    []string{"order-run:cleanup", labelOrderTracking},
-		Ephemeral: true,
+		Title:  "order:cleanup",
+		Labels: []string{"order-run:cleanup", labelOrderTracking},
 	})
 	if err != nil {
 		t.Fatalf("Create(stale): %v", err)

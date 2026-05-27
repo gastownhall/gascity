@@ -375,10 +375,9 @@ func TestHandleOrdersFeedReturnsWorkflowAndScheduledOrderRuns(t *testing.T) {
 	}
 
 	_, err = fs.cityBeadStore.Create(beads.Bead{
-		Title:     "order:nightly-review:rig:myrig",
-		Status:    "closed",
-		Labels:    []string{"order-tracking", "order-run:nightly-review:rig:myrig", "wisp"},
-		Ephemeral: true,
+		Title:  "order:nightly-review:rig:myrig",
+		Status: "closed",
+		Labels: []string{"order-tracking", "order-run:nightly-review:rig:myrig", "wisp"},
 	})
 	if err != nil {
 		t.Fatalf("create tracking bead: %v", err)
@@ -699,10 +698,9 @@ func TestHandleOrdersFeedIncludesRigStoreTrackingBeads(t *testing.T) {
 	}
 
 	tracking, err := rigStore.Create(beads.Bead{
-		Title:     "order:nightly-review:rig:myrig",
-		Status:    "closed",
-		Labels:    []string{"order-tracking", "order-run:nightly-review:rig:myrig", "wisp"},
-		Ephemeral: true,
+		Title:  "order:nightly-review:rig:myrig",
+		Status: "closed",
+		Labels: []string{"order-tracking", "order-run:nightly-review:rig:myrig", "wisp"},
 	})
 	if err != nil {
 		t.Fatalf("create tracking bead: %v", err)
@@ -1184,17 +1182,16 @@ func TestHandleOrderHistoryMarksAdHocOutputMetadata(t *testing.T) {
 	}
 }
 
-func TestHandleOrderHistoryFallsBackToLiveStoreForTierBothCacheQuery(t *testing.T) {
+func TestHandleOrderHistoryReadsIssuesTierCache(t *testing.T) {
 	fs := newFakeState(t)
 	backing := beads.NewMemStore()
 	run, err := backing.Create(beads.Bead{
-		Title:     "nightly-review tracking",
-		Status:    "closed",
-		Labels:    []string{"order-run:nightly-review", "order-tracking"},
-		Ephemeral: true,
+		Title:  "nightly-review tracking",
+		Status: "closed",
+		Labels: []string{"order-run:nightly-review", "order-tracking"},
 	})
 	if err != nil {
-		t.Fatalf("create wisp history bead: %v", err)
+		t.Fatalf("create history bead: %v", err)
 	}
 	cache := beads.NewCachingStoreForTest(backing, nil)
 	if err := cache.Prime(context.Background()); err != nil {
@@ -1223,7 +1220,7 @@ func TestHandleOrderHistoryFallsBackToLiveStoreForTierBothCacheQuery(t *testing.
 		t.Fatalf("unmarshal: %v", err)
 	}
 	if len(resp.Entries) != 1 || resp.Entries[0].BeadID != run.ID {
-		t.Fatalf("entries = %+v, want live ephemeral history bead %s", resp.Entries, run.ID)
+		t.Fatalf("entries = %+v, want history bead %s", resp.Entries, run.ID)
 	}
 }
 

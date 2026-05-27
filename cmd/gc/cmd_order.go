@@ -739,9 +739,8 @@ func doOrderRunExecTracked(a orders.Order, cityPath string, cfg *config.City, st
 		return 1
 	}
 	tracking, err := store.Create(beads.Bead{
-		Title:     "order:" + scoped,
-		Labels:    []string{"order-run:" + scoped, labelOrderTracking},
-		Ephemeral: true,
+		Title:  "order:" + scoped,
+		Labels: orderTrackingLabels(scoped),
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "gc order run: creating exec tracking bead for %s: %v\n", scoped, err) //nolint:errcheck // best-effort stderr
@@ -1320,7 +1319,6 @@ func doOrderHistoryWithStoresResolverJSON(name, rig string, aa []orders.Order, r
 				Label:         label,
 				IncludeClosed: true,
 				Sort:          beads.SortCreatedDesc,
-				TierMode:      beads.TierBoth,
 			})
 			if err != nil {
 				fmt.Fprintf(stderr, "gc order history: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -1584,7 +1582,6 @@ func bdCursor(store beads.Store, orderName string) (uint64, error) {
 		Label:         "order:" + orderName,
 		IncludeClosed: true,
 		Sort:          beads.SortCreatedDesc,
-		TierMode:      beads.TierBoth,
 	})
 	if err != nil {
 		if len(beadList) == 0 {

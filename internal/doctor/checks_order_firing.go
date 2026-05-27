@@ -17,6 +17,12 @@ import (
 const (
 	orderFiringCurrentName    = "order-firing-current"
 	orderFiringInspectHintFmt = "Inspect with: gc order check && gc order history %s"
+
+	// Short-interval cooldown orders can drift while the controller is doing
+	// startup reconciliation or serial order-trigger work. Keep that visible as
+	// a warning, but do not make doctor red unless the gap proves the scheduler
+	// has been stalled for multiple minutes.
+	orderFiringCooldownErrorFloor = 5 * time.Minute
 )
 
 // OrderFiringCurrentCheck reports scheduled orders whose last firing is stale.
@@ -372,26 +378,47 @@ func latestOrderFiredAt(evts []events.Event, subject string) time.Time {
 
 func classifyOrderFiring(order orders.Order, now time.Time, expected time.Duration, lastFired, controllerStarted time.Time) (CheckStatus, string) {
 	name := orderDisplayName(order)
+	errorAfter := orderFiringErrorAfter(order, expected)
 	if lastFired.IsZero() {
 		if controllerStarted.IsZero() {
 			return StatusOK, fmt.Sprintf("%s: never fired (controller start unknown)", name)
 		}
 		uptime := nonNegativeDuration(now.Sub(controllerStarted))
-		if uptime >= expected+expected/2 {
+		neverFiredErrorAfter := orderFiringNeverFiredErrorAfter(order, expected)
+		if uptime >= neverFiredErrorAfter {
 			return StatusError, fmt.Sprintf("%s: never fired since controller start %s ago", name, formatOrderFiringDuration(uptime))
+		}
+		if uptime >= expected+expected/2 {
+			return StatusWarning, fmt.Sprintf("%s: never fired since controller start %s ago (within startup grace)", name, formatOrderFiringDuration(uptime))
 		}
 		return StatusOK, fmt.Sprintf("%s: never fired (controller running %s, within first cycle)", name, formatOrderFiringDuration(uptime))
 	}
 
 	age := nonNegativeDuration(now.Sub(lastFired))
 	switch {
-	case age >= expected*3:
+	case age >= errorAfter:
 		return StatusError, fmt.Sprintf("%s: last fired %s ago, expected every %s (CRITICAL: stale)", name, formatOrderFiringDuration(age), formatOrderFiringDuration(expected))
 	case age >= expected+expected/2:
 		return StatusWarning, fmt.Sprintf("%s: last fired %s ago, expected every %s (overdue)", name, formatOrderFiringDuration(age), formatOrderFiringDuration(expected))
 	default:
 		return StatusOK, fmt.Sprintf("%s: last fired %s ago, expected every %s", name, formatOrderFiringDuration(age), formatOrderFiringDuration(expected))
 	}
+}
+
+func orderFiringErrorAfter(order orders.Order, expected time.Duration) time.Duration {
+	errorAfter := expected * 3
+	if order.Trigger == "cooldown" && errorAfter < orderFiringCooldownErrorFloor {
+		return orderFiringCooldownErrorFloor
+	}
+	return errorAfter
+}
+
+func orderFiringNeverFiredErrorAfter(order orders.Order, expected time.Duration) time.Duration {
+	errorAfter := expected + expected/2
+	if order.Trigger == "cooldown" && errorAfter < orderFiringCooldownErrorFloor {
+		return orderFiringCooldownErrorFloor
+	}
+	return errorAfter
 }
 
 func orderDisplayName(order orders.Order) string {

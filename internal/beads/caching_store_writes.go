@@ -73,6 +73,42 @@ func (c *CachingStore) Update(id string, opts UpdateOpts) error {
 	return nil
 }
 
+// Claim forwards to a backing ClaimStore and refreshes the cache with the
+// claimed bead.
+func (c *CachingStore) Claim(id string, opts ClaimOpts) (Bead, error) {
+	claimer, ok := c.backing.(ClaimStore)
+	if !ok {
+		return Bead{}, fmt.Errorf("claiming bead %q: %w", id, ErrClaimUnsupported)
+	}
+	claimed, err := claimer.Claim(id, opts)
+	if err != nil {
+		return Bead{}, err
+	}
+	if fresh, getErr := c.backing.Get(id); getErr == nil {
+		claimed = fresh
+	} else if !errors.Is(getErr, ErrNotFound) {
+		c.recordProblem("refresh bead after claim", fmt.Errorf("%s: %w", id, getErr))
+	}
+	claimed.Status = "in_progress"
+	if opts.Assignee != "" {
+		claimed.Assignee = opts.Assignee
+	}
+	applyClaimMetadata(&claimed, opts.Metadata)
+
+	c.mu.Lock()
+	c.noteLocalMutationLocked(id)
+	c.beads[id] = cloneBead(claimed)
+	c.deps[id] = depsFromBeadFields(claimed)
+	delete(c.dirty, id)
+	delete(c.deletedSeq, id)
+	c.markFreshLocked(time.Now())
+	c.updateStatsLocked()
+	c.mu.Unlock()
+
+	c.notifyChange("bead.updated", claimed)
+	return claimed, nil
+}
+
 // Close marks a bead as closed in the backing store and cache.
 func (c *CachingStore) Close(id string) error {
 	// Idempotence: if the cached bead status is already "closed" AND the

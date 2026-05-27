@@ -27,6 +27,15 @@ func apiClient(cityPath string) *api.Client {
 	} else if warn != "" {
 		fmt.Fprintln(os.Stderr, "warning: "+warn) //nolint:errcheck // best-effort stderr
 	}
+
+	// Supervisor-managed cities also expose a per-city controller socket for
+	// legacy lifecycle commands. Prefer the supervisor API first so read-path
+	// routing does not misclassify that socket as a standalone controller with
+	// no city-local API port.
+	if client := supervisorCityAPIClient(cityPath); client != nil {
+		return client
+	}
+
 	// Check if controller is alive.
 	if controllerAlive(cityPath) != 0 {
 		// Load config to find API port.
@@ -53,7 +62,7 @@ func apiClient(cityPath string) *api.Client {
 		// serves one city in standalone mode.
 		return api.NewCityScopedClient(baseURL, standaloneControllerCityName(cfg, cityPath))
 	}
-	return supervisorCityAPIClient(cityPath)
+	return nil
 }
 
 // standaloneControllerCityName resolves the effective city name for a

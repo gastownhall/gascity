@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "gc work count --json result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "count"
+  ],
+  "properties": {
+    "count": {
+      "type": "integer",
+      "minimum": 0
+    }
+  }
+}

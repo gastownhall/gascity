@@ -1,0 +1,6 @@
+[pack]
+name = "work-selectors-root"
+schema = 2
+
+[imports.work-selectors]
+source = "packs/work-selectors"

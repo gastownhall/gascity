@@ -150,6 +150,7 @@
           "guides/index",
           "guides/migrating-to-pack-vnext",
           "guides/shareable-packs",
+          "guides/typed-work-selectors",
           "guides/using-json-from-gc"
         ]
       },

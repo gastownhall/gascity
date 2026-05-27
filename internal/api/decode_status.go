@@ -90,6 +90,9 @@ func statusAgentViewFromGen(g genclient.StatusAgentDetail) StatusAgentView {
 		Running:       g.Running,
 		Suspended:     g.Suspended,
 	}
+	if g.Draining != nil {
+		out.Draining = *g.Draining
+	}
 	if g.SessionName != nil {
 		out.SessionName = *g.SessionName
 	}
