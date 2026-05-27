@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/gastownhall/gascity/internal/fsys"
 )
@@ -52,7 +53,11 @@ func hookCityBlock(cityPath string) (def, arg string) {
 	if cityPath == "" {
 		return "", ""
 	}
-	return fmt.Sprintf("CITY_PATH=%q\n", cityPath), ` --city "$CITY_PATH"`
+	return fmt.Sprintf("CITY_PATH=%s\n", shellSingleQuote(cityPath)), ` --city "$CITY_PATH"`
+}
+
+func shellSingleQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
 }
 
 // hookScript returns the shell script content for a bd hook that forwards
@@ -61,8 +66,8 @@ func hookCityBlock(cityPath string) (def, arg string) {
 // PATH, store-resolution errors) is diagnosable after the fact.
 //
 // When cityPath is non-empty it is baked into the script as
-// CITY_PATH="<cityPath>" and gc event emit is invoked with
-// --city "$CITY_PATH". This avoids the findCity walk-up that fails when
+// a shell-quoted CITY_PATH and gc event emit is invoked with --city
+// "$CITY_PATH". This avoids the findCity walk-up that fails when
 // the bd write's cwd is a sibling (not a descendant) of the city.
 func hookScript(eventType, cityPath string) string {
 	cityDef, cityArg := hookCityBlock(cityPath)
@@ -107,7 +112,7 @@ func hookNameFromEventType(eventType string) string {
 // cascade-close of sling scaffolding fails invisibly.
 //
 // When cityPath is non-empty it is baked into the script as
-// CITY_PATH="<cityPath>" and the gc invocations carry --city "$CITY_PATH".
+// a shell-quoted CITY_PATH and the gc invocations carry --city "$CITY_PATH".
 func closeHookScript(cityPath string) string {
 	cityDef, cityArg := hookCityBlock(cityPath)
 	return fmt.Sprintf(`#!/bin/sh

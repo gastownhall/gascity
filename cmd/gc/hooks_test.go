@@ -68,7 +68,7 @@ func TestHookScriptEmbedsCityPath(t *testing.T) {
 			} else {
 				content = hookScript(eventType, cityPath)
 			}
-			if !strings.Contains(content, `CITY_PATH="/some/city"`) {
+			if !strings.Contains(content, `CITY_PATH='/some/city'`) {
 				t.Errorf("hook %s missing CITY_PATH definition:\n%s", name, content)
 			}
 			if !strings.Contains(content, `--city "$CITY_PATH"`) {
@@ -118,7 +118,7 @@ func TestInstallBeadHooksThreadsCityPath(t *testing.T) {
 				t.Fatalf("ReadFile: %v", err)
 			}
 			content := string(data)
-			wantDef := `CITY_PATH="` + cityPath + `"`
+			wantDef := "CITY_PATH='" + cityPath + "'"
 			if !strings.Contains(content, wantDef) {
 				t.Errorf("hook %s missing %q:\n%s", filename, wantDef, content)
 			}
@@ -126,6 +126,77 @@ func TestInstallBeadHooksThreadsCityPath(t *testing.T) {
 				t.Errorf("hook %s does not pass --city \"$CITY_PATH\":\n%s", filename, content)
 			}
 		})
+	}
+}
+
+func TestGeneratedHookPassesLiteralCityPath(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+
+	parent := t.TempDir()
+	runDir := filepath.Join(parent, "external-rig")
+	if err := os.MkdirAll(runDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cityPath := filepath.Join(parent, "city with spaces $HOME $(touch shell-expansion-marker) `touch backtick-expansion-marker` and ' quote")
+	if err := os.MkdirAll(cityPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	recordPath := filepath.Join(parent, "gc-argv.txt")
+	mockGC := writeNamedTestScript(t, "mock-gc.sh", `#!/bin/sh
+{
+  i=0
+  for arg do
+    i=$((i + 1))
+    printf 'arg%d=%s\n' "$i" "$arg"
+  done
+} >> "$GC_ARG_RECORD"
+`)
+
+	if err := installBeadHooks(runDir, cityPath); err != nil {
+		t.Fatalf("installBeadHooks: %v", err)
+	}
+	hookPath := filepath.Join(runDir, ".beads", "hooks", "on_create")
+
+	cmd := exec.Command("sh", hookPath, "bead-1", "bead.created")
+	cmd.Dir = runDir
+	cmd.Stdin = strings.NewReader(`{"title":"hook argv test"}`)
+	cmd.Env = sanitizedBaseEnv(
+		"BEADS_DIR="+filepath.Join(runDir, ".beads"),
+		"GC_ARG_RECORD="+recordPath,
+		"GC_BIN="+mockGC,
+		"HOME=/expanded-home",
+	)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("hook exec failed: %v\nout: %s", err, out)
+	}
+
+	var content string
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		data, err := os.ReadFile(recordPath)
+		if err == nil && len(data) > 0 {
+			content = string(data)
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if content == "" {
+		t.Fatalf("mock gc did not record argv at %s", recordPath)
+	}
+
+	if !strings.Contains(content, "arg1=--city\n") || !strings.Contains(content, "arg2="+cityPath+"\n") {
+		t.Fatalf("hook did not pass literal city path.\nwant arg2=%q\nrecorded:\n%s", cityPath, content)
+	}
+	for _, marker := range []string{"shell-expansion-marker", "backtick-expansion-marker"} {
+		if _, err := os.Stat(filepath.Join(runDir, marker)); err == nil {
+			t.Fatalf("hook executed shell expansion command and created %s", marker)
+		} else if !os.IsNotExist(err) {
+			t.Fatalf("stat marker %s: %v", marker, err)
+		}
 	}
 }
 
