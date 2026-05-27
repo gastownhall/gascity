@@ -115,7 +115,12 @@ Examples:
 			rigVars := rigFormulaVarsForScope(cfg, cityPath)
 			recipe, err := formula.CompileWithoutRuntimeVarValidation(cmd.Context(), name, searchPaths, compileVars)
 			if err != nil {
-				return err
+				// The root command sets SilenceErrors, so a raw error return
+				// here would exit 1 with no diagnostic. Surface the compile
+				// failure (e.g. a graph.v2 formula when [daemon] formula_v2 is
+				// disabled) on stderr and return the already-printed sentinel.
+				fmt.Fprintf(stderr, "gc formula show: %v\n", err) //nolint:errcheck // best-effort stderr
+				return errExit
 			}
 			if len(vars) > 0 {
 				if err := formula.ValidateProvidedVarDefs(recipe.Vars, vars); err != nil {
@@ -610,7 +615,10 @@ bead into a sub-workflow at runtime.`,
 			if attach != "" {
 				recipe, err := formula.CompileWithoutRuntimeVarValidation(cmd.Context(), args[0], scope.searchPaths, cookVars)
 				if err != nil {
-					return fmt.Errorf("compile: %w", err)
+					// SilenceErrors on the root would drop a raw error return,
+					// exiting 1 with no diagnostic. Surface it on stderr.
+					fmt.Fprintf(stderr, "gc formula cook: compile: %v\n", err) //nolint:errcheck // best-effort stderr
+					return errExit
 				}
 
 				result, err := molecule.Attach(cmd.Context(), store, recipe, attach, molecule.AttachOptions{
@@ -651,7 +659,11 @@ bead into a sub-workflow at runtime.`,
 				Vars:  cookVars,
 			})
 			if err != nil {
-				return err
+				// SilenceErrors on the root would drop a raw error return,
+				// exiting 1 with no diagnostic (e.g. a graph.v2 formula when
+				// [daemon] formula_v2 is disabled). Surface it on stderr.
+				fmt.Fprintf(stderr, "gc formula cook: %v\n", err) //nolint:errcheck // best-effort stderr
+				return errExit
 			}
 
 			rootMeta, err := parseMetadataArgs(metadata)
