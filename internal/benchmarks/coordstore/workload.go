@@ -1,6 +1,7 @@
 package coordstore
 
 import (
+	"math"
 	"time"
 )
 
@@ -83,6 +84,28 @@ type WorkloadConfig struct {
 	// Records in terminal statuses with older last-update times are purged.
 	PurgeTerminalOlderThan time.Duration
 
+	// --- Lifecycle / steady-state churn (ga-w08fz, design ga-sftyt) ---
+	// A real coordination store reaches STEADY STATE: creates are balanced by
+	// closes/deletes so the working set stops growing without bound. Without
+	// these, a soak benchmarks each backend's COMPRESSION of an ever-growing
+	// dataset rather than steady-state coordination work. Wisp deletes ≈ wisp
+	// creates so the ephemeral population plateaus; main closes are slow (tasks
+	// are long-lived), so the main population grows modestly but bounded.
+
+	// CloseRate is the rate of closing open main-tier records (task completion).
+	// Live HQ: tasks accumulate over months but have a daily close cadence.
+	// For bounded memory: CloseRate ≈ CreateRate × main_fraction.
+	CloseRate float64
+
+	// WispDeleteRate is the rate of deleting open ephemeral records.
+	// Simulates mail archival (message read → delete) and order cancellation.
+	// Live HQ: ~0.75/s (half of wisp creates ≈ steady-state).
+	WispDeleteRate float64
+
+	// PurgeExpiredRate is the rate of calling PurgeExpired.
+	// Simulates the TTL sweeper cron (fires every ~30s on a live HQ).
+	PurgeExpiredRate float64
+
 	// --- Run parameters ---
 
 	// Duration is how long the workload driver runs.
@@ -91,6 +114,82 @@ type WorkloadConfig struct {
 	// Concurrency is the number of concurrent goroutines issuing requests.
 	// Matches the number of concurrent agents in a typical HQ city (~20).
 	Concurrency int
+}
+
+// SoakPhase identifies a long-running soak benchmark phase.
+type SoakPhase string
+
+const (
+	// SoakPhaseA is the in-process Phase A soak harness.
+	SoakPhaseA SoakPhase = "phase-a"
+	// SoakPhaseB is the subprocess chaos Phase B soak harness.
+	SoakPhaseB SoakPhase = "phase-b"
+)
+
+// SoakConfig configures an in-process coordination-store soak run.
+type SoakConfig struct {
+	// SoakPhase selects the result path phase segment.
+	SoakPhase SoakPhase
+	// SoakDuration overrides the workload duration when non-zero.
+	SoakDuration time.Duration
+	// ChaosDuration overrides the Phase B workload duration when non-zero.
+	ChaosDuration time.Duration
+	// KillCadence is reserved for later chaos phases; Phase A does not kill
+	// processes.
+	KillCadence time.Duration
+	// SampleInterval controls time-series telemetry sampling.
+	SampleInterval time.Duration
+	// ResultsDir is the root directory for soak artifacts.
+	ResultsDir string
+	// DataDir is the backend storage directory measured for store-size
+	// telemetry. It is optional because some callers only need workload scaling.
+	DataDir string
+	// ScaleFactor scales workload populations and rates. 1.0 = today's
+	// single-city scale (v1 default); ~10x for future 100-rig calibration run
+	// (empirical, not hard-coded).
+	ScaleFactor float64
+}
+
+// ScaledWorkload returns a copy of base scaled by ScaleFactor.
+func (c SoakConfig) ScaledWorkload(base WorkloadConfig) WorkloadConfig {
+	scale := c.ScaleFactor
+	if scale <= 0 {
+		scale = 1
+	}
+	wl := base
+	wl.MainOpenCount = scaleCount(base.MainOpenCount, scale)
+	wl.MainClosedCount = scaleCount(base.MainClosedCount, scale)
+	wl.WispOpenCount = scaleCount(base.WispOpenCount, scale)
+	wl.DepEdgeCount = scaleCount(base.DepEdgeCount, scale)
+	wl.MailPollRate = base.MailPollRate * scale
+	wl.PointReadRate = base.PointReadRate * scale
+	wl.FilterScanRate = base.FilterScanRate * scale
+	wl.CreateRate = base.CreateRate * scale
+	wl.UpdateRate = base.UpdateRate * scale
+	wl.SetMetadataRate = base.SetMetadataRate * scale
+	wl.BatchGetRate = base.BatchGetRate * scale
+	wl.ReadyRate = base.ReadyRate * scale
+	wl.DepOpRate = base.DepOpRate * scale
+	wl.RecentScanRate = base.RecentScanRate * scale
+	wl.CloseRate = base.CloseRate * scale
+	wl.WispDeleteRate = base.WispDeleteRate * scale
+	wl.PurgeExpiredRate = base.PurgeExpiredRate * scale
+	wl.Concurrency = scaleCount(base.Concurrency, scale)
+	if c.SoakDuration > 0 {
+		wl.Duration = c.SoakDuration
+	}
+	return wl
+}
+
+func scaleCount(n int, scale float64) int {
+	if n <= 0 {
+		return 0
+	}
+	scaled := int(math.Round(float64(n) * scale))
+	if scaled < 1 {
+		return 1
+	}
+	return scaled
 }
 
 // MailAssignees is the set of assignees used in mail-poll simulation.
@@ -131,6 +230,12 @@ var RealWorldWorkload = WorkloadConfig{
 
 	PurgeTerminalOlderThan: 10 * time.Minute,
 
+	// Steady-state churn (design ga-sftyt): wisp deletes ≈ wisp creates so the
+	// ephemeral population plateaus; main closes are slow (tasks are long-lived).
+	CloseRate:        0.05,  // ~3 closes/min; tasks are long-lived (hours/days)
+	WispDeleteRate:   0.75,  // half of wisp creates → wisp population plateau
+	PurgeExpiredRate: 0.033, // once per ~30s, matches TTL sweeper cadence
+
 	Duration:    30 * time.Second,
 	Concurrency: 20,
 }
@@ -157,6 +262,9 @@ var StressWorkload = WorkloadConfig{
 	DepOpRate:       0.5,
 	RecentScanRate:  0.1,
 
+	// Steady-state churn intentionally left at zero: Stress measures peak
+	// read/write throughput, not memory-bounding under churn (design ga-sftyt).
+
 	Duration:    15 * time.Second,
 	Concurrency: 50,
 }
@@ -181,6 +289,11 @@ var SmokeWorkload = WorkloadConfig{
 	ReadyRate:       0.5,
 	DepOpRate:       0.1,
 	RecentScanRate:  0.1,
+
+	// Steady-state churn (design ga-sftyt).
+	CloseRate:        0.02,
+	WispDeleteRate:   0.3,
+	PurgeExpiredRate: 0.1,
 
 	Duration:    5 * time.Second,
 	Concurrency: 5,

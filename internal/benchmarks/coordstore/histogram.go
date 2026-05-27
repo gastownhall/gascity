@@ -83,6 +83,16 @@ func (h *Histogram) Mean() time.Duration {
 	return time.Duration(sum / int64(len(h.samples)))
 }
 
+func (h *Histogram) clone() *Histogram {
+	if h == nil {
+		return nil
+	}
+	return &Histogram{
+		samples: append([]int64(nil), h.samples...),
+		sorted:  h.sorted,
+	}
+}
+
 // OperationResult holds the latency histogram for a single operation type.
 type OperationResult struct {
 	Op      string
