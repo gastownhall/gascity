@@ -74,6 +74,9 @@ func TestHookScriptEmbedsCityPath(t *testing.T) {
 			if !strings.Contains(content, `--city "$CITY_PATH"`) {
 				t.Errorf("hook %s does not pass --city \"$CITY_PATH\" to gc event emit:\n%s", name, content)
 			}
+			if !strings.Contains(content, `--bead-payload "$1"`) {
+				t.Errorf("hook %s missing bead payload fallback with cityPath:\n%s", name, content)
+			}
 		})
 	}
 }
@@ -124,6 +127,9 @@ func TestInstallBeadHooksThreadsCityPath(t *testing.T) {
 			}
 			if !strings.Contains(content, `--city "$CITY_PATH"`) {
 				t.Errorf("hook %s does not pass --city \"$CITY_PATH\":\n%s", filename, content)
+			}
+			if !strings.Contains(content, `--bead-payload "$1"`) {
+				t.Errorf("hook %s missing bead payload fallback:\n%s", filename, content)
 			}
 		})
 	}
@@ -352,6 +358,9 @@ func TestInstallBeadHooksCreatesScripts(t *testing.T) {
 			}
 			if !strings.Contains(content, `--payload "$PAYLOAD"`) {
 				t.Errorf("hook %s emits raw DATA instead of wrapped PAYLOAD:\n%s", tc.filename, content)
+			}
+			if !strings.Contains(content, `--bead-payload "$1"`) {
+				t.Errorf("hook %s missing bead payload fallback for empty hook stdin:\n%s", tc.filename, content)
 			}
 			// Best-effort: stderr redirected, || true.
 			if !strings.Contains(content, "|| true") {

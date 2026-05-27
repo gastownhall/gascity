@@ -531,6 +531,42 @@ func TestComputePoolDesiredStates_ScaleCheckMerge(t *testing.T) {
 	}
 }
 
+func TestComputePoolDesiredStates_ManualSessionDoesNotConsumeSingletonNewDemand(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{poolAgent("claude", "", intPtr(1), 0)},
+	}
+	manual := beads.Bead{
+		ID:     "manual-claude",
+		Status: "open",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:claude", "template:claude"},
+		Metadata: map[string]string{
+			"template":       "claude",
+			"agent_name":     "claude",
+			"session_name":   "s-manual-claude",
+			"state":          "start-pending",
+			"session_origin": "manual",
+			"manual_session": "true",
+		},
+	}
+
+	result := ComputePoolDesiredStates(cfg, nil, []beads.Bead{manual}, map[string]int{"claude": 1})
+
+	if len(result) != 1 {
+		t.Fatalf("len(result) = %d, want 1", len(result))
+	}
+	reqs := result[0].Requests
+	if len(reqs) != 1 {
+		t.Fatalf("len(requests) = %d, want 1 new pool request despite manual singleton session", len(reqs))
+	}
+	if reqs[0].Tier != "new" {
+		t.Fatalf("request tier = %q, want new", reqs[0].Tier)
+	}
+	if reqs[0].SessionBeadID != "" {
+		t.Fatalf("request SessionBeadID = %q, want anonymous new demand rather than reusing manual session", reqs[0].SessionBeadID)
+	}
+}
+
 // TestComputePoolDesiredStates_NamedSessionBeadSkipsPoolResume verifies that
 // when work is assigned to a configured named session, the pool path does NOT
 // emit a resume request for the named session bead. Without this guard, the
