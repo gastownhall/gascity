@@ -9150,10 +9150,10 @@ func TestResolveResumeCommand(t *testing.T) {
 			Args: []string{
 				"run", "codex", "--",
 				"--dangerously-bypass-approvals-and-sandbox",
-				"-m", "gpt-5.3-codex-spark",
+				"-m", "gpt-5.3-codex",
 				"-c", "model_reasoning_effort=\"medium\"",
 			},
-			ResumeCommand: "aimux run codex -- --dangerously-bypass-approvals-and-sandbox -m gpt-5.3-codex-spark resume {{.SessionKey}}",
+			ResumeCommand: "aimux run codex -- --dangerously-bypass-approvals-and-sandbox -m gpt-5.3-codex resume {{.SessionKey}}",
 		},
 	}, func(name string) (string, error) { return "/usr/bin/" + name, nil })
 	if err != nil {
@@ -9215,10 +9215,10 @@ func TestResolveResumeCommand(t *testing.T) {
 		},
 		{
 			name:       "explicit wrapped codex resume command includes inferred defaults",
-			command:    "aimux run codex -- --dangerously-bypass-approvals-and-sandbox --model gpt-5.3-codex-spark -c model_reasoning_effort=medium",
+			command:    "aimux run codex -- --dangerously-bypass-approvals-and-sandbox --model gpt-5.3-codex -c model_reasoning_effort=medium",
 			sessionKey: "def-456",
 			provider:   codexMini,
-			want:       "aimux run codex -- --dangerously-bypass-approvals-and-sandbox -m gpt-5.3-codex-spark resume -c model_reasoning_effort=medium def-456",
+			want:       "aimux run codex -- --dangerously-bypass-approvals-and-sandbox -m gpt-5.3-codex resume -c model_reasoning_effort=medium def-456",
 		},
 	}
 	for _, tt := range tests {

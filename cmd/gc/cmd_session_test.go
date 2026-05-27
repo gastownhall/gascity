@@ -1098,11 +1098,11 @@ func TestBuildResumeCommandIncludesWrappedCodexResumeDefaults(t *testing.T) {
 				Args: []string{
 					"run", "codex", "--",
 					"--dangerously-bypass-approvals-and-sandbox",
-					"-m", "gpt-5.3-codex-spark",
+					"-m", "gpt-5.3-codex",
 					"-c", "model_reasoning_effort=\"medium\"",
 				},
 				PathCheck:     "true",
-				ResumeCommand: "aimux run codex -- --dangerously-bypass-approvals-and-sandbox -m gpt-5.3-codex-spark resume {{.SessionKey}}",
+				ResumeCommand: "aimux run codex -- --dangerously-bypass-approvals-and-sandbox -m gpt-5.3-codex resume {{.SessionKey}}",
 			},
 		},
 	}
@@ -1115,7 +1115,7 @@ func TestBuildResumeCommandIncludesWrappedCodexResumeDefaults(t *testing.T) {
 	}
 
 	cmd, _ := buildResumeCommand(cityDir, cfg, info, "", nil, io.Discard)
-	want := "aimux run codex -- --dangerously-bypass-approvals-and-sandbox -m gpt-5.3-codex-spark resume -c model_reasoning_effort=medium abc-123"
+	want := "aimux run codex -- --dangerously-bypass-approvals-and-sandbox -m gpt-5.3-codex resume -c model_reasoning_effort=medium abc-123"
 	if cmd != want {
 		t.Fatalf("resume command = %q, want %q", cmd, want)
 	}

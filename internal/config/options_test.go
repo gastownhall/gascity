@@ -1001,7 +1001,7 @@ func TestCompleteResumeCommandDefaultsSubcommandOrdersMultipleMissingDefaults(t 
 		{
 			Key: "model",
 			Choices: []OptionChoice{
-				{Value: "gpt-5.3-codex-spark", FlagArgs: []string{"--model", "gpt-5.3-codex-spark"}},
+				{Value: "gpt-5.3-codex", FlagArgs: []string{"--model", "gpt-5.3-codex"}},
 			},
 		},
 		{
@@ -1012,7 +1012,7 @@ func TestCompleteResumeCommandDefaultsSubcommandOrdersMultipleMissingDefaults(t 
 		},
 	}
 	defaults := map[string]string{
-		"model":  "gpt-5.3-codex-spark",
+		"model":  "gpt-5.3-codex",
 		"effort": "medium",
 	}
 
@@ -1023,7 +1023,7 @@ func TestCompleteResumeCommandDefaultsSubcommandOrdersMultipleMissingDefaults(t 
 		schema,
 		defaults,
 	)
-	want := "codex resume --model gpt-5.3-codex-spark -c model_reasoning_effort=medium {{.SessionKey}}"
+	want := "codex resume --model gpt-5.3-codex -c model_reasoning_effort=medium {{.SessionKey}}"
 	if got != want {
 		t.Fatalf("completeResumeCommandDefaults() = %q, want %q", got, want)
 	}
@@ -1034,11 +1034,11 @@ func TestCompleteResumeCommandDefaultsSubcommandUsesSessionResumeToken(t *testin
 		{
 			Key: "model",
 			Choices: []OptionChoice{
-				{Value: "gpt-5.3-codex-spark", FlagArgs: []string{"--model", "gpt-5.3-codex-spark"}},
+				{Value: "gpt-5.3-codex", FlagArgs: []string{"--model", "gpt-5.3-codex"}},
 			},
 		},
 	}
-	defaults := map[string]string{"model": "gpt-5.3-codex-spark"}
+	defaults := map[string]string{"model": "gpt-5.3-codex"}
 
 	got := completeResumeCommandDefaults(
 		"aimux run resume codex -- resume {{.SessionKey}}",
@@ -1047,7 +1047,7 @@ func TestCompleteResumeCommandDefaultsSubcommandUsesSessionResumeToken(t *testin
 		schema,
 		defaults,
 	)
-	want := "aimux run resume codex -- resume --model gpt-5.3-codex-spark {{.SessionKey}}"
+	want := "aimux run resume codex -- resume --model gpt-5.3-codex {{.SessionKey}}"
 	if got != want {
 		t.Fatalf("completeResumeCommandDefaults() = %q, want %q", got, want)
 	}
