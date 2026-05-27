@@ -153,9 +153,8 @@ func (CityLifecyclePayload) IsEventPayload() {}
 
 // BeadEventPayload is the shape of every bead.* event payload
 // (BeadCreated, BeadUpdated, BeadClosed, BeadDeleted). The payload carries a
-// full snapshot of the bead as of the event; it is emitted by bd hooks, native
-// store writes, and the beads CachingStore's reconcile loop when external
-// changes are detected.
+// full snapshot of the bead as of the event; it is emitted by bd hooks and the
+// beads CachingStore for local writes and reconcile-detected external changes.
 type BeadEventPayload struct {
 	Bead beads.Bead `json:"bead"`
 }

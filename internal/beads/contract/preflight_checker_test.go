@@ -129,6 +129,46 @@ func TestPreflightPassesOnHealthyDolt(t *testing.T) {
 	}
 }
 
+func TestPreflightAcceptsExecGcBeadsBdProviderPath(t *testing.T) {
+	scope := "/city"
+	checker := testPreflightChecker(preflightMetadataJSON(`{
+		"backend": "dolt",
+		"dolt_mode": "server",
+		"dolt_database": "gascity",
+		"project_id": "gc-local"
+	}`), PreflightBDContext{Backend: "dolt", DoltMode: "server"}, "gc-local")
+	checker.Provider = "exec:/tmp/gc-beads-bd.sh"
+
+	result, err := checker.Check(scope)
+	if err != nil {
+		t.Fatalf("Check() error = %v", err)
+	}
+
+	assertPreflightVerdict(t, result, PreflightVerdictEligible, true)
+	assertCheckState(t, result, PreflightCheckProviderContract, PreflightCheckPass)
+}
+
+func TestProviderUsesBDContract(t *testing.T) {
+	tests := []struct {
+		provider string
+		want     bool
+	}{
+		{provider: "", want: true},
+		{provider: "bd", want: true},
+		{provider: " file ", want: false},
+		{provider: "exec:gc-beads-bd", want: true},
+		{provider: "exec:/tmp/gc-beads-bd", want: true},
+		{provider: "exec:/tmp/gc-beads-bd.sh", want: true},
+		{provider: "exec:/tmp/gc-beads-k8s", want: false},
+		{provider: "exec:/tmp/custom", want: false},
+	}
+	for _, tt := range tests {
+		if got := ProviderUsesBDContract(tt.provider); got != tt.want {
+			t.Fatalf("ProviderUsesBDContract(%q) = %v, want %v", tt.provider, got, tt.want)
+		}
+	}
+}
+
 func TestPreflightRespectsSkipOverrideAsRecoveryOnly(t *testing.T) {
 	t.Setenv("BEADS_SKIP_IDENTITY_CHECK", "1")
 	scope := "/city"

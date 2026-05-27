@@ -408,6 +408,21 @@ func TestEnsureSessionNameAvailable_AllowsFailedCreateIdentity(t *testing.T) {
 	}
 }
 
+func TestContinuityIneligibleConfiguredOwnerAllowsFailedCreateIdentity(t *testing.T) {
+	bead := beads.Bead{Metadata: map[string]string{
+		"state":                      string(StateFailedCreate),
+		"configured_named_identity":  "mayor",
+		"continuity_eligible":        "false",
+		"configured_named_session":   "true",
+		"configured_named_mode":      "on_demand",
+		"configured_named_qualifier": "mayor",
+	}}
+
+	if continuityIneligibleConfiguredOwner(bead, "mayor") {
+		t.Fatal("failed-create configured owner was treated as continuity-ineligible")
+	}
+}
+
 func TestEnsureAliasAvailableWithConfig_RejectsConfiguredSingletonAlias(t *testing.T) {
 	store := beads.NewMemStore()
 	cfg := &config.City{

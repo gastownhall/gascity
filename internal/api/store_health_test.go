@@ -196,3 +196,31 @@ func TestBuildStatusBodyIncludesStoreHealth(t *testing.T) {
 		t.Errorf("Path = %q, want .beads/dolt suffix", body.StoreHealth.Path)
 	}
 }
+
+func TestBuildStatusBodyIncludesBeadsDiagnostic(t *testing.T) {
+	state := newFakeState(t)
+	state.cityBeadsDiag = &beads.BeadsDiagnostic{
+		Store:               "BdStore",
+		NativeStoreEligible: false,
+		PreflightGate:       "metadata_backend",
+		PreflightReason:     "metadata backend=file; native store requires dolt",
+	}
+	s := &Server{state: state}
+
+	body := s.buildStatusBody()
+	if body.Beads == nil {
+		t.Fatal("Beads = nil, want diagnostic")
+	}
+	if body.Beads.Store != "BdStore" {
+		t.Fatalf("beads_store = %q, want BdStore", body.Beads.Store)
+	}
+	if body.Beads.NativeStoreEligible {
+		t.Fatal("native_store_eligible = true, want false")
+	}
+	if body.Beads.PreflightGate != "metadata_backend" {
+		t.Fatalf("preflight_gate = %q, want metadata_backend", body.Beads.PreflightGate)
+	}
+	if body.Beads.PreflightReason == "" {
+		t.Fatal("preflight_reason = empty, want fallback reason")
+	}
+}

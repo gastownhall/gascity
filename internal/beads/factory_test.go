@@ -2,6 +2,8 @@ package beads
 
 import (
 	"context"
+	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -10,14 +12,14 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 )
 
-func TestOpenStoreAtForCityEligibleNativeWrapsInjectedNativeStoreInCache(t *testing.T) {
+func TestOpenStoreAtForCityEligibleNativeReturnsInjectedNativeStore(t *testing.T) {
 	scope := "/city"
 	native := NewMemStore()
 
 	result, err := OpenStoreAtForCity(context.Background(), StoreOpenOptions{
 		ScopeRoot:        scope,
 		Provider:         "bd",
-		PreflightChecker: factoryPreflightChecker(scope, factoryPreflightDoltMetadata("gc-local"), contract.PreflightBDContext{Backend: "dolt", DoltMode: "server"}, "gc-local"),
+		PreflightChecker: factoryPreflightChecker(scope, factoryPreflightDoltMetadata(), contract.PreflightBDContext{Backend: "dolt", DoltMode: "server"}),
 		OpenBdStore: func() (Store, error) {
 			t.Fatal("OpenBdStore called for native-eligible scope")
 			return nil, nil
@@ -30,21 +32,42 @@ func TestOpenStoreAtForCityEligibleNativeWrapsInjectedNativeStoreInCache(t *test
 		t.Fatalf("OpenStoreAtForCity() error = %v", err)
 	}
 
-	cache, ok := result.Store.(*CachingStore)
-	if !ok {
-		t.Fatalf("Store = %T, want *CachingStore", result.Store)
+	if result.Store != native {
+		t.Fatalf("Store = %T %#v, want injected native store", result.Store, result.Store)
 	}
-	if cache.Backing() != native {
-		t.Fatalf("CachingStore backing = %T %#v, want injected native store", cache.Backing(), cache.Backing())
-	}
-	if result.Diagnostic.Store != storeNameCachingStore {
-		t.Fatalf("diagnostic store = %q, want %q", result.Diagnostic.Store, storeNameCachingStore)
+	if result.Diagnostic.Store != storeNameNativeDoltStore {
+		t.Fatalf("diagnostic store = %q, want %q", result.Diagnostic.Store, storeNameNativeDoltStore)
 	}
 	if !result.Diagnostic.NativeStoreEligible {
 		t.Fatal("diagnostic native_store_eligible = false, want true")
 	}
 	if result.Diagnostic.PreflightGate != "" || result.Diagnostic.PreflightReason != "" {
 		t.Fatalf("diagnostic preflight failure = (%q, %q), want empty", result.Diagnostic.PreflightGate, result.Diagnostic.PreflightReason)
+	}
+}
+
+func TestOpenStoreAtForCityIneligibleProviderSkipsPreflight(t *testing.T) {
+	result, err := OpenStoreAtForCity(context.Background(), StoreOpenOptions{
+		ScopeRoot: "/city",
+		Provider:  "unknown",
+		// Missing metadata would fail if the preflight checker ran.
+		PreflightChecker: contract.PreflightChecker{FS: fsys.NewFake()},
+		OpenBdStore: func() (Store, error) {
+			return NewMemStore(), nil
+		},
+		OpenNativeStore: func() (Store, error) {
+			t.Fatal("OpenNativeStore called for ineligible provider")
+			return nil, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("OpenStoreAtForCity() error = %v", err)
+	}
+	if result.Diagnostic.Store != storeNameBdStore {
+		t.Fatalf("diagnostic store = %q, want %q", result.Diagnostic.Store, storeNameBdStore)
+	}
+	if result.Diagnostic.PreflightGate != string(contract.PreflightCheckProviderContract) {
+		t.Fatalf("preflight gate = %q, want provider contract", result.Diagnostic.PreflightGate)
 	}
 }
 
@@ -55,7 +78,7 @@ func TestOpenStoreAtForCityContextDriftFallsBackWithPreflightDiagnostic(t *testi
 	result, err := OpenStoreAtForCity(context.Background(), StoreOpenOptions{
 		ScopeRoot:        scope,
 		Provider:         "bd",
-		PreflightChecker: factoryPreflightChecker(scope, factoryPreflightDoltMetadata("gc-local"), contract.PreflightBDContext{Backend: "postgres"}, "gc-local"),
+		PreflightChecker: factoryPreflightChecker(scope, factoryPreflightDoltMetadata(), contract.PreflightBDContext{Backend: "postgres"}),
 		OpenBdStore: func() (Store, error) {
 			bdOpened = true
 			return NewMemStore(), nil
@@ -112,15 +135,131 @@ func TestOpenStoreAtForCityForceFallbackSkipsPreflightAndNativeOpen(t *testing.T
 	if result.Diagnostic.NativeStoreEligible {
 		t.Fatal("diagnostic native_store_eligible = true, want false")
 	}
-	if result.Diagnostic.PreflightGate != string(contract.PreflightCheckProviderContract) {
-		t.Fatalf("diagnostic preflight_gate = %q, want provider_contract", result.Diagnostic.PreflightGate)
+	if result.Diagnostic.PreflightGate != nativeForceFallbackGate {
+		t.Fatalf("diagnostic preflight_gate = %q, want %q", result.Diagnostic.PreflightGate, nativeForceFallbackGate)
 	}
 	if result.Diagnostic.PreflightReason != nativeForceFallbackEnv+"=1" {
 		t.Fatalf("diagnostic preflight_reason = %q, want force fallback reason", result.Diagnostic.PreflightReason)
 	}
 }
 
-func factoryPreflightChecker(scope, metadata string, ctx contract.PreflightBDContext, dbProjectID string) contract.PreflightChecker {
+func TestOpenStoreAtForCityNativeOpenFailureFallsBackWithDiagnostic(t *testing.T) {
+	scope := "/city"
+	fallback := NewMemStore()
+	var bdOpened bool
+
+	result, err := OpenStoreAtForCity(context.Background(), StoreOpenOptions{
+		ScopeRoot:        scope,
+		Provider:         "bd",
+		PreflightChecker: factoryPreflightChecker(scope, factoryPreflightDoltMetadata(), contract.PreflightBDContext{Backend: "dolt", DoltMode: "server"}),
+		OpenBdStore: func() (Store, error) {
+			bdOpened = true
+			return fallback, nil
+		},
+		OpenNativeStore: func() (Store, error) {
+			return nil, errors.New("dial native: failed")
+		},
+	})
+	if err != nil {
+		t.Fatalf("OpenStoreAtForCity() error = %v", err)
+	}
+	if !bdOpened {
+		t.Fatal("OpenBdStore was not called after native open failure")
+	}
+	if result.Store != fallback {
+		t.Fatalf("Store = %T, want fallback store", result.Store)
+	}
+	if result.Diagnostic.Store != storeNameBdStore {
+		t.Fatalf("diagnostic store = %q, want %q", result.Diagnostic.Store, storeNameBdStore)
+	}
+	if result.Diagnostic.NativeStoreEligible {
+		t.Fatal("diagnostic native_store_eligible = true, want false")
+	}
+	if result.Diagnostic.PreflightGate != "native_open" {
+		t.Fatalf("diagnostic preflight_gate = %q, want native_open", result.Diagnostic.PreflightGate)
+	}
+	if !strings.Contains(result.Diagnostic.PreflightReason, "dial native") {
+		t.Fatalf("diagnostic preflight_reason = %q, want native open error", result.Diagnostic.PreflightReason)
+	}
+}
+
+func TestOpenStoreAtForCityExecBdContractFallbackUsesExecStore(t *testing.T) {
+	scope := "/city"
+	provider := "exec:/tmp/gc-beads-bd.sh"
+	execStore := NewMemStore()
+	checker := factoryPreflightChecker(scope, factoryPreflightDoltMetadata(), contract.PreflightBDContext{Backend: "dolt", DoltMode: "server"})
+	checker.Provider = provider
+
+	result, err := OpenStoreAtForCity(context.Background(), StoreOpenOptions{
+		ScopeRoot:        scope,
+		Provider:         provider,
+		PreflightChecker: checker,
+		OpenBdStore: func() (Store, error) {
+			t.Fatal("OpenBdStore called for exec bd-contract fallback")
+			return nil, nil
+		},
+		OpenExecStore: func() (Store, error) {
+			return execStore, nil
+		},
+		OpenNativeStore: func() (Store, error) {
+			return nil, errors.New("native unavailable")
+		},
+	})
+	if err != nil {
+		t.Fatalf("OpenStoreAtForCity() error = %v", err)
+	}
+	if result.Store != execStore {
+		t.Fatalf("Store = %T, want exec fallback store", result.Store)
+	}
+	if result.Diagnostic.Store != storeNameExecStore {
+		t.Fatalf("diagnostic store = %q, want %q", result.Diagnostic.Store, storeNameExecStore)
+	}
+	if result.Diagnostic.PreflightGate != "native_open" {
+		t.Fatalf("diagnostic preflight_gate = %q, want native_open", result.Diagnostic.PreflightGate)
+	}
+}
+
+func TestOpenStoreAtForCityExecutableHooksBlockNativeStore(t *testing.T) {
+	scope := t.TempDir()
+	hooksDir := filepath.Join(scope, ".beads", "hooks")
+	if err := os.MkdirAll(hooksDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(hooksDir, "on_create"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	fallback := NewMemStore()
+
+	result, err := OpenStoreAtForCity(context.Background(), StoreOpenOptions{
+		ScopeRoot:        scope,
+		Provider:         "bd",
+		PreflightChecker: factoryPreflightChecker(scope, factoryPreflightDoltMetadata(), contract.PreflightBDContext{Backend: "dolt", DoltMode: "server"}),
+		OpenBdStore: func() (Store, error) {
+			return fallback, nil
+		},
+		OpenNativeStore: func() (Store, error) {
+			t.Fatal("OpenNativeStore called while bd hooks are installed")
+			return nil, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("OpenStoreAtForCity() error = %v", err)
+	}
+	if result.Store != fallback {
+		t.Fatalf("Store = %T, want fallback store", result.Store)
+	}
+	if result.Diagnostic.Store != storeNameBdStore {
+		t.Fatalf("diagnostic store = %q, want %q", result.Diagnostic.Store, storeNameBdStore)
+	}
+	if result.Diagnostic.PreflightGate != nativeHooksGate {
+		t.Fatalf("diagnostic preflight_gate = %q, want %q", result.Diagnostic.PreflightGate, nativeHooksGate)
+	}
+	if !strings.Contains(result.Diagnostic.PreflightReason, "remove .beads/hooks") {
+		t.Fatalf("diagnostic preflight_reason = %q, want operator migration hint", result.Diagnostic.PreflightReason)
+	}
+}
+
+func factoryPreflightChecker(scope, metadata string, ctx contract.PreflightBDContext) contract.PreflightChecker {
 	files := fsys.NewFake()
 	files.Dirs[filepath.Join(scope, ".beads")] = true
 	files.Files[filepath.Join(scope, ".beads", "metadata.json")] = []byte(metadata)
@@ -138,16 +277,16 @@ func factoryPreflightChecker(scope, metadata string, ctx contract.PreflightBDCon
 			return ctx, nil
 		},
 		DatabaseProjectID: func(string) (string, bool, error) {
-			return dbProjectID, dbProjectID != "", nil
+			return "gc-local", true, nil
 		},
 	}
 }
 
-func factoryPreflightDoltMetadata(projectID string) string {
+func factoryPreflightDoltMetadata() string {
 	return `{
 		"backend": "dolt",
 		"dolt_mode": "server",
 		"dolt_database": "gascity",
-		"project_id": "` + projectID + `"
+		"project_id": "gc-local"
 	}`
 }

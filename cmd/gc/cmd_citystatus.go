@@ -268,6 +268,7 @@ func snapshotFromStatusView(cityPath string, v api.StatusView) cityStatusSnapsho
 		CityPath:   v.CityPath,
 		Suspended:  v.Suspended,
 		Controller: controllerStatusForCity(cityPath),
+		Beads:      v.Beads,
 		Summary: StatusSummaryJSON{
 			TotalAgents:       v.Summary.TotalAgents,
 			RunningAgents:     v.Summary.RunningAgents,

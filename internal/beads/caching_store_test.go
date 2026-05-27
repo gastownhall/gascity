@@ -1806,6 +1806,7 @@ func TestCachingStoreCloseNotifiesWhenBeadIsMissingFromCache(t *testing.T) {
 	if err := cs.Delete(created.ID); err != nil {
 		t.Fatalf("Delete setup: %v", err)
 	}
+	events = nil
 	created, err = mem.Create(beads.Bead{Title: "external"})
 	if err != nil {
 		t.Fatalf("Create second: %v", err)
@@ -1955,6 +1956,15 @@ func TestCachingStoreApplyEvent(t *testing.T) {
 	if got.Metadata["gc.step_ref"] != "" {
 		t.Fatalf("close event should replace stale metadata, got %v", got.Metadata)
 	}
+
+	if err := mem.Delete(b1.ID); err != nil {
+		t.Fatalf("Delete backing: %v", err)
+	}
+	payload, _ = json.Marshal(closed)
+	cs.ApplyEvent("bead.deleted", payload)
+	if _, err := cs.Get(b1.ID); !errors.Is(err, beads.ErrNotFound) {
+		t.Fatalf("Get after delete event error = %v, want ErrNotFound", err)
+	}
 }
 
 func TestCachingStoreApplyEventIgnoresUnknownForeignBead(t *testing.T) {
@@ -1966,7 +1976,7 @@ func TestCachingStoreApplyEventIgnoresUnknownForeignBead(t *testing.T) {
 		t.Fatalf("Prime: %v", err)
 	}
 
-	for _, eventType := range []string{"bead.created", "bead.updated", "bead.closed"} {
+	for _, eventType := range []string{"bead.created", "bead.updated", "bead.closed", "bead.deleted"} {
 		payload, err := json.Marshal(beads.Bead{
 			ID:     "foreign-" + eventType,
 			Title:  "belongs to another store",
@@ -2674,6 +2684,62 @@ func TestStartReconcilerStaggerAutoDifferentAgentsDiffer(t *testing.T) {
 	if off1 == off2 {
 		t.Fatalf("expected different stagger offsets for distinct agents; both got %d", off1)
 	}
+}
+
+func TestStopReconcilerWaitsForPrime(t *testing.T) {
+	mem := beads.NewMemStore()
+	if _, err := mem.Create(beads.Bead{Title: "prime waits"}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	backing := &blockingListStore{
+		Store:   mem,
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	cache := beads.NewCachingStoreForTest(backing, nil)
+	primeDone := make(chan error, 1)
+	go func() {
+		primeDone <- cache.Prime(context.Background())
+	}()
+	select {
+	case <-backing.started:
+	case <-time.After(time.Second):
+		t.Fatal("Prime did not reach backing List")
+	}
+
+	stopDone := make(chan struct{})
+	go func() {
+		cache.StopReconciler()
+		close(stopDone)
+	}()
+	select {
+	case <-stopDone:
+		t.Fatal("StopReconciler returned before in-flight Prime finished")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(backing.release)
+	select {
+	case <-stopDone:
+	case <-time.After(time.Second):
+		t.Fatal("StopReconciler did not return after Prime finished")
+	}
+	if err := <-primeDone; err != nil && !errors.Is(err, context.Canceled) {
+		t.Fatalf("Prime error = %v, want nil or context.Canceled", err)
+	}
+}
+
+type blockingListStore struct {
+	beads.Store
+	started chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (s *blockingListStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	s.once.Do(func() { close(s.started) })
+	<-s.release
+	return s.Store.List(query)
 }
 
 func findTestBead(items []beads.Bead, id string) (beads.Bead, bool) {

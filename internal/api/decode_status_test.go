@@ -19,6 +19,8 @@ func TestStatusViewFromGen_ValidResponse(t *testing.T) {
 	groupName := "mayor"
 	scaleLabel := "scaled (min=0, max=3)"
 	expanded := true
+	preflightGate := "metadata_backend"
+	preflightReason := "metadata backend=file; native store requires dolt"
 	body := &genclient.StatusBody{
 		Name:      "bright-lights",
 		Path:      "/home/u/bright-lights",
@@ -49,6 +51,12 @@ func TestStatusViewFromGen_ValidResponse(t *testing.T) {
 			{Identity: "myrig/worker", Status: "materialized", Mode: "always"},
 		},
 		SessionCountsDetail: &genclient.StatusSessionCountsDetail{Active: 3, Suspended: 1},
+		Beads: &genclient.BeadsDiagnostic{
+			BeadsStore:          "BdStore",
+			NativeStoreEligible: false,
+			PreflightGate:       &preflightGate,
+			PreflightReason:     &preflightReason,
+		},
 	}
 
 	got := statusViewFromGen(body)
@@ -88,6 +96,15 @@ func TestStatusViewFromGen_ValidResponse(t *testing.T) {
 	}
 	if got.SessionCounts.Active != 3 || got.SessionCounts.Suspended != 1 {
 		t.Errorf("SessionCounts = %+v", got.SessionCounts)
+	}
+	if got.Beads == nil {
+		t.Fatal("Beads = nil, want diagnostic")
+	}
+	if got.Beads.Store != "BdStore" {
+		t.Errorf("beads_store = %q, want BdStore", got.Beads.Store)
+	}
+	if got.Beads.PreflightGate != "metadata_backend" || got.Beads.PreflightReason == "" {
+		t.Errorf("Beads diagnostic = %+v, want preflight metadata diagnostic", got.Beads)
 	}
 }
 

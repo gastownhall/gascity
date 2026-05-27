@@ -78,6 +78,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   envelopes for script and dashboard consumers. `gc mail inbox --json` and
   `gc mail count --json` always include the resolved `recipients` array,
   including single-recipient targets.
+- Native `bd` store selection now links the upstream Beads/Dolt Go library
+  stack into `gc` when the default beads provider is built. This intentionally
+  increases binary size and supply-chain surface through the Dolt/Vitess and
+  cloud-provider SDK dependency closure; deployments that do not want that
+  path can keep using `GC_BEADS_FORCE_FALLBACK=1` or `GC_BEADS=file`. CI now
+  runs `make check-native-dependency-surface` to fail on unreviewed native
+  dependency-family growth or `gc` binary-size growth.
 
 ### Fixed
 

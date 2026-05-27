@@ -12,11 +12,22 @@ import (
 )
 
 const (
-	storeNameBdStore         = "BdStore"
-	storeNameCachingStore    = "CachingStore"
-	storeNameFileStore       = "FileStore"
-	storeNameExecStore       = "ExecStore"
+	// BeadsStoreNameBdStore is the diagnostic store name for bd-backed stores.
+	BeadsStoreNameBdStore = "BdStore"
+	// BeadsStoreNameFileStore is the diagnostic store name for file-backed stores.
+	BeadsStoreNameFileStore = "FileStore"
+	// BeadsStoreNameExecStore is the diagnostic store name for exec-backed stores.
+	BeadsStoreNameExecStore = "ExecStore"
+	// BeadsStoreNameNativeDoltStore is the diagnostic store name for native Dolt stores.
+	BeadsStoreNameNativeDoltStore = "NativeDoltStore"
+
+	storeNameBdStore         = BeadsStoreNameBdStore
+	storeNameFileStore       = BeadsStoreNameFileStore
+	storeNameExecStore       = BeadsStoreNameExecStore
+	storeNameNativeDoltStore = BeadsStoreNameNativeDoltStore
 	nativeForceFallbackEnv   = "GC_BEADS_FORCE_FALLBACK"
+	nativeForceFallbackGate  = "force_fallback"
+	nativeHooksGate          = "bd_hooks"
 	nativeUnavailableMessage = "native_store_unavailable"
 )
 
@@ -61,7 +72,7 @@ func OpenStoreAtForCity(ctx context.Context, opts StoreOpenOptions) (StoreOpenRe
 	case provider == "file":
 		store, err := callStoreOpen("file store", opts.OpenFileStore)
 		return StoreOpenResult{Store: store, Diagnostic: BeadsDiagnostic{Store: storeNameFileStore}}, err
-	case strings.HasPrefix(provider, "exec:") && !providerUsesBdContract(provider):
+	case strings.HasPrefix(provider, "exec:") && !contract.ProviderUsesBDContract(provider):
 		store, err := callStoreOpen("exec store", opts.OpenExecStore)
 		return StoreOpenResult{Store: store, Diagnostic: BeadsDiagnostic{Store: storeNameExecStore}}, err
 	}
@@ -70,11 +81,22 @@ func OpenStoreAtForCity(ctx context.Context, opts StoreOpenOptions) (StoreOpenRe
 		diag := BeadsDiagnostic{
 			Store:               storeNameBdStore,
 			NativeStoreEligible: false,
-			PreflightGate:       string(contract.PreflightCheckProviderContract),
+			PreflightGate:       nativeForceFallbackGate,
 			PreflightReason:     nativeForceFallbackEnv + "=1",
 		}
 		logNativeUnavailable(opts.Logger, opts.ScopeRoot, diag.PreflightGate, diag.PreflightReason)
-		return opts.openBdFallback(diag)
+		return opts.openBdFallback(provider, diag)
+	}
+
+	if !contract.ProviderUsesBDContract(provider) {
+		diag := BeadsDiagnostic{
+			Store:               storeNameBdStore,
+			NativeStoreEligible: false,
+			PreflightGate:       string(contract.PreflightCheckProviderContract),
+			PreflightReason:     fmt.Sprintf("provider %q does not use the bd contract", provider),
+		}
+		logNativeUnavailable(opts.Logger, opts.ScopeRoot, diag.PreflightGate, diag.PreflightReason)
+		return opts.openBdFallback(provider, diag)
 	}
 
 	result, err := opts.PreflightChecker.Check(opts.ScopeRoot)
@@ -86,12 +108,23 @@ func OpenStoreAtForCity(ctx context.Context, opts StoreOpenOptions) (StoreOpenRe
 			PreflightReason:     err.Error(),
 		}
 		logNativeUnavailable(opts.Logger, opts.ScopeRoot, diag.PreflightGate, diag.PreflightReason)
-		return opts.openBdFallback(diag)
+		return opts.openBdFallback(provider, diag)
 	}
 	diag := diagnosticFromPreflight(result)
 	if !result.NativeStoreEligible {
 		logNativeUnavailable(opts.Logger, opts.ScopeRoot, diag.PreflightGate, diag.PreflightReason)
-		return opts.openBdFallback(diag)
+		return opts.openBdFallback(provider, diag)
+	}
+
+	if scopeHasExecutableBdHooks(opts.ScopeRoot) {
+		diag := BeadsDiagnostic{
+			Store:               storeNameBdStore,
+			NativeStoreEligible: false,
+			PreflightGate:       nativeHooksGate,
+			PreflightReason:     "bd hooks are installed; remove .beads/hooks/on_create,on_update,on_close after confirming controller cache events cover this deployment",
+		}
+		logNativeUnavailable(opts.Logger, opts.ScopeRoot, diag.PreflightGate, diag.PreflightReason)
+		return opts.openBdFallback(provider, diag)
 	}
 
 	native, err := opts.openNativeStore(ctx)
@@ -103,18 +136,24 @@ func OpenStoreAtForCity(ctx context.Context, opts StoreOpenOptions) (StoreOpenRe
 			PreflightReason:     err.Error(),
 		}
 		logNativeUnavailable(opts.Logger, opts.ScopeRoot, diag.PreflightGate, diag.PreflightReason)
-		return opts.openBdFallback(diag)
+		return opts.openBdFallback(provider, diag)
 	}
 	return StoreOpenResult{
-		Store: NewCachingStore(native, nil),
+		Store: native,
 		Diagnostic: BeadsDiagnostic{
-			Store:               storeNameCachingStore,
+			Store:               storeNameNativeDoltStore,
 			NativeStoreEligible: true,
 		},
 	}, nil
 }
 
-func (opts StoreOpenOptions) openBdFallback(diag BeadsDiagnostic) (StoreOpenResult, error) {
+func (opts StoreOpenOptions) openBdFallback(provider string, diag BeadsDiagnostic) (StoreOpenResult, error) {
+	if strings.HasPrefix(strings.TrimSpace(provider), "exec:") && contract.ProviderUsesBDContract(provider) && opts.OpenExecStore != nil {
+		diag.Store = storeNameExecStore
+		store, err := callStoreOpen("exec store", opts.OpenExecStore)
+		return StoreOpenResult{Store: store, Diagnostic: diag}, err
+	}
+	diag.Store = storeNameBdStore
 	store, err := callStoreOpen("bd store", opts.OpenBdStore)
 	return StoreOpenResult{Store: store, Diagnostic: diag}, err
 }
@@ -123,7 +162,7 @@ func (opts StoreOpenOptions) openNativeStore(ctx context.Context) (Store, error)
 	if opts.OpenNativeStore != nil {
 		return opts.OpenNativeStore()
 	}
-	return newNativeDoltStoreAt(ctx, opts.ScopeRoot)
+	return newNativeDoltStoreAt(ctx, opts.ScopeRoot, nil)
 }
 
 func callStoreOpen(name string, open func() (Store, error)) (Store, error) {
@@ -160,16 +199,14 @@ func diagnosticFromPreflight(result contract.PreflightResult) BeadsDiagnostic {
 	return diag
 }
 
-func providerUsesBdContract(provider string) bool {
-	provider = strings.TrimSpace(provider)
-	if provider == "" || provider == "bd" {
-		return true
+func scopeHasExecutableBdHooks(scopeRoot string) bool {
+	for _, name := range []string{"on_create", "on_update", "on_close"} {
+		info, err := os.Stat(filepath.Join(scopeRoot, ".beads", "hooks", name))
+		if err == nil && !info.IsDir() && info.Mode()&0o111 != 0 {
+			return true
+		}
 	}
-	if !strings.HasPrefix(provider, "exec:") {
-		return false
-	}
-	base := strings.TrimSuffix(filepath.Base(strings.TrimPrefix(provider, "exec:")), ".sh")
-	return base == "gc-beads-bd"
+	return false
 }
 
 func forceNativeFallback() bool {

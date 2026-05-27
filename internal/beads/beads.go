@@ -11,6 +11,10 @@ import (
 // ErrNotFound is returned when a bead ID does not exist in the store.
 var ErrNotFound = errors.New("bead not found")
 
+// ErrStoreClosed is returned when a caller uses a bead store after its backing
+// handle has been closed.
+var ErrStoreClosed = errors.New("bead store closed")
+
 // ErrParentProjectionSuperseded reports that a parent update was overtaken by a
 // concurrent reparent before the caller's projection wait could converge.
 var ErrParentProjectionSuperseded = errors.New("parent projection superseded by concurrent update")

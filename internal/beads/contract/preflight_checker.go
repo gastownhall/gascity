@@ -85,14 +85,28 @@ func (c PreflightChecker) readMetadata(scope string) (preflightMetadata, error) 
 func (c PreflightChecker) checkProvider() PreflightCheckResult {
 	provider := strings.TrimSpace(c.Provider)
 	details := PreflightDetails{Provider: provider}
-	switch provider {
-	case "bd", "exec:gc-beads-bd":
+	switch {
+	case ProviderUsesBDContract(provider):
 		return NewPreflightCheckResult(PreflightCheckProviderContract, PreflightCheckPass, "Provider exposes bd contract", details)
-	case "":
+	case provider == "":
 		return NewPreflightCheckResult(PreflightCheckProviderContract, PreflightCheckFail, "Beads provider is not configured", details)
 	default:
 		return NewPreflightCheckResult(PreflightCheckProviderContract, PreflightCheckFail, fmt.Sprintf("Provider %q does not expose the bd contract", provider), details)
 	}
+}
+
+// ProviderUsesBDContract reports whether provider exposes the bd-compatible
+// store contract needed for native-store preflight and fallback decisions.
+func ProviderUsesBDContract(provider string) bool {
+	provider = strings.TrimSpace(provider)
+	if provider == "" || provider == "bd" {
+		return true
+	}
+	if !strings.HasPrefix(provider, "exec:") {
+		return false
+	}
+	base := strings.TrimSuffix(filepath.Base(strings.TrimPrefix(provider, "exec:")), ".sh")
+	return base == "gc-beads-bd"
 }
 
 func (c PreflightChecker) checkMetadataBackend(metadata preflightMetadata) PreflightCheckResult {

@@ -1176,7 +1176,7 @@ func openStoreResultAtForCity(storePath, cityPath string) (beads.StoreOpenResult
 	}
 	scopeRoot := resolveStoreScopeRoot(runtimeCityPath, storePath)
 	provider := rawBeadsProviderForScope(scopeRoot, runtimeCityPath)
-	if strings.HasPrefix(provider, "exec:") {
+	if strings.HasPrefix(provider, "exec:") && !providerUsesBdStoreContract(provider) {
 		store, err := openExecStoreAtForCity(provider, scopeRoot, runtimeCityPath)
 		return beads.StoreOpenResult{Store: store, Diagnostic: beads.ExecStoreDiagnostic()}, err
 	}
@@ -1194,6 +1194,16 @@ func openStoreResultAtForCity(storePath, cityPath string) (beads.StoreOpenResult
 				return nil, fmt.Errorf("bd not found in PATH (install beads or set GC_BEADS=file)")
 			}
 			return openBdStoreAt(scopeRoot, runtimeCityPath)
+		},
+		OpenExecStore: func() (beads.Store, error) {
+			return openExecStoreAtForCity(provider, scopeRoot, runtimeCityPath)
+		},
+		OpenNativeStore: func() (beads.Store, error) {
+			env, err := nativeDoltOpenEnvForScope(runtimeCityPath, nil, scopeRoot)
+			if err != nil {
+				return nil, fmt.Errorf("project native store env %s: %w", scopeRoot, err)
+			}
+			return beads.OpenNativeDoltStoreAt(context.Background(), scopeRoot, env)
 		},
 	})
 	if err != nil {

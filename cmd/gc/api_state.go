@@ -9,6 +9,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -41,7 +42,8 @@ type controllerState struct {
 	sp                     runtime.Provider
 	cacheCtx               context.Context
 	beadStores             map[string]beads.Store
-	cityBeadStore          beads.Store   // city-level store for session beads
+	cityBeadStore          beads.Store // city-level store for session beads
+	cityBeadsDiagnostic    *beads.BeadsDiagnostic
 	cityMailProv           mail.Provider // city-level mail provider (all mail is city-scoped)
 	eventProv              events.Provider
 	editor                 *configedit.Editor
@@ -74,7 +76,16 @@ var beadEventWatcherRetryDelay = time.Second
 // newControllerStateOpenCityStore opens the city-level bead store for
 // newControllerState. Test code can swap this to return an in-memory store
 // and skip spawning managed dolt (~12s per call).
-var newControllerStateOpenCityStore = openCityStoreAt
+var newControllerStateOpenCityStore = openCityStoreResultAt
+
+// controllerStateOpenRigStoreAtForCity routes controller rig stores through
+// the same native-selection factory as direct city/rig store opens. Tests swap
+// this seam to avoid opening real native Dolt handles.
+var controllerStateOpenRigStoreAtForCity = beads.OpenStoreAtForCity
+
+// controllerStateStoreCloseDelay gives handlers that already captured a store
+// reference a short drain window before reload closes replaced backings.
+var controllerStateStoreCloseDelay = 250 * time.Millisecond
 
 type configMutationSnapshot struct {
 	cityPath  string
@@ -117,10 +128,12 @@ func newControllerState(
 	}
 	cs.beadStores = cs.buildStores(cfg)
 	// Open city-level store for session beads and mail (best-effort).
-	if store, err := newControllerStateOpenCityStore(cityPath); err != nil {
+	if opened, err := newControllerStateOpenCityStore(cityPath); err != nil {
 		fmt.Fprintf(os.Stderr, "api: city bead store: %v (session/mail endpoints disabled)\n", err)
 	} else {
+		store := opened.Store
 		cs.cityBeadStore = wrapWithCachingStore(ctx, store, ep)
+		cs.cityBeadsDiagnostic = diagnosticPtr(opened.Diagnostic)
 		cs.cityMailProv = newMailProvider(cs.cityBeadStore)
 		svc := extmsg.NewServices(cs.cityBeadStore)
 		cs.extmsgSvc = &svc
@@ -225,7 +238,7 @@ func (cs *controllerState) buildStores(cfg *config.City) map[string]beads.Store 
 // openRigStore creates a bead store for a rig path using the given provider.
 func (cs *controllerState) openRigStore(provider, rigName, rigPath, prefix string, cfg *config.City) beads.Store {
 	scopeRoot := resolveStoreScopeRoot(cs.cityPath, rigPath)
-	if strings.HasPrefix(provider, "exec:") {
+	openExecStore := func() (beads.Store, error) {
 		s := beadsexec.NewStore(strings.TrimPrefix(provider, "exec:"))
 		env := gcExecStoreEnv(cs.cityPath, execStoreTarget{
 			ScopeRoot: scopeRoot,
@@ -236,23 +249,55 @@ func (cs *controllerState) openRigStore(provider, rigName, rigPath, prefix strin
 		if execProviderNeedsScopedDoltStoreEnv(provider) {
 			projected, err := bdRuntimeEnvForRigWithError(cs.cityPath, cfg, scopeRoot)
 			if err != nil {
-				return unavailableStore{err: fmt.Errorf("project rig store env %s: %w", scopeRoot, err)}
+				return nil, fmt.Errorf("project rig store env %s: %w", scopeRoot, err)
 			}
 			copyExecProjectedBackendEnv(env, projected)
 		}
 		s.SetEnv(env)
-		return s
+		return s, nil
 	}
-	switch provider {
-	case "file":
+	if strings.HasPrefix(provider, "exec:") && !providerUsesBdStoreContract(provider) {
+		store, err := openExecStore()
+		if err != nil {
+			return unavailableStore{err: fmt.Errorf("open exec rig store %s: %w", scopeRoot, err)}
+		}
+		return store
+	}
+	if provider == "file" {
 		store, err := openCompatibleFileStore(scopeRoot, cs.cityPath)
 		if err != nil {
 			return unavailableStore{err: fmt.Errorf("open file rig store %s: %w", scopeRoot, err)}
 		}
 		return store
-	default: // "bd" or unrecognized
-		return bdStoreForRig(scopeRoot, cs.cityPath, cfg, prefix)
 	}
+	result, err := controllerStateOpenRigStoreAtForCity(context.Background(), beads.StoreOpenOptions{
+		ScopeRoot:        scopeRoot,
+		CityPath:         cs.cityPath,
+		Provider:         provider,
+		PreflightChecker: newBeadsPreflightChecker(cs.cityPath, provider),
+		OpenFileStore: func() (beads.Store, error) {
+			store, err := openCompatibleFileStore(scopeRoot, cs.cityPath)
+			if err != nil {
+				return nil, fmt.Errorf("open file rig store %s: %w", scopeRoot, err)
+			}
+			return store, nil
+		},
+		OpenBdStore: func() (beads.Store, error) {
+			return bdStoreForRig(scopeRoot, cs.cityPath, cfg, prefix), nil
+		},
+		OpenExecStore: openExecStore,
+		OpenNativeStore: func() (beads.Store, error) {
+			env, err := nativeDoltOpenEnvForScope(cs.cityPath, cfg, scopeRoot)
+			if err != nil {
+				return nil, fmt.Errorf("project native rig store env %s: %w", scopeRoot, err)
+			}
+			return beads.OpenNativeDoltStoreAt(context.Background(), scopeRoot, env)
+		},
+	})
+	if err != nil {
+		return unavailableStore{err: fmt.Errorf("open rig store %s: %w", scopeRoot, err)}
+	}
+	return result.Store
 }
 
 // startBeadEventWatcher subscribes to the event bus and feeds bead events
@@ -287,7 +332,7 @@ func (cs *controllerState) startBeadEventWatcher(ctx context.Context) {
 				}
 				seq = evt.Seq
 				switch evt.Type {
-				case events.BeadCreated, events.BeadUpdated, events.BeadClosed:
+				case events.BeadCreated, events.BeadUpdated, events.BeadClosed, events.BeadDeleted:
 					cs.applyBeadEventToStores(evt)
 				}
 			}
@@ -414,10 +459,12 @@ func (cs *controllerState) update(cfg *config.City, sp runtime.Provider) {
 	stores := cs.buildStores(cfg)
 	storeSignature := storeMetadataSignature(cs.cityPath, cfg)
 	// Reopen city-level store for session beads and mail.
-	cityStore, err := openCityStoreAt(cs.cityPath)
+	openedCityStore, err := newControllerStateOpenCityStore(cs.cityPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "api: city bead store reload: %v\n", err) //nolint:errcheck // best-effort stderr
 	}
+	cityStore := openedCityStore.Store
+	cityBeadsDiagnostic := diagnosticPtr(openedCityStore.Diagnostic)
 	var cityMailProv mail.Provider
 	var extSvc *extmsg.Services
 	if cityStore != nil {
@@ -428,12 +475,17 @@ func (cs *controllerState) update(cfg *config.City, sp runtime.Provider) {
 	}
 
 	// Swap under short critical section.
+	var oldCityStore beads.Store
+	var oldRigStores map[string]beads.Store
 	cs.mu.Lock()
 	cs.cfg = cfg
 	cs.sp = sp
+	oldRigStores = cs.beadStores
 	cs.beadStores = stores
 	if cityStore != nil {
+		oldCityStore = cs.cityBeadStore
 		cs.cityBeadStore = cityStore
+		cs.cityBeadsDiagnostic = cityBeadsDiagnostic
 		cs.cityMailProv = cityMailProv
 		cs.storeMetadataSignature = storeSignature
 	}
@@ -442,6 +494,74 @@ func (cs *controllerState) update(cfg *config.City, sp runtime.Provider) {
 	}
 	// Keep prior non-nil store/provider if reopen fails.
 	cs.mu.Unlock()
+	if cityStore != nil && oldCityStore != nil && oldCityStore != cityStore {
+		scheduleCloseBeadStoreHandle("city bead store", oldCityStore)
+	}
+	scheduleCloseReplacedBeadStoreHandles(oldRigStores, stores)
+}
+
+func scheduleCloseBeadStoreHandle(label string, store beads.Store) {
+	if store == nil {
+		return
+	}
+	closeFn := func() {
+		if err := closeBeadStoreHandle(store); err != nil {
+			log.Printf("api: close previous %s: %v", label, err)
+		}
+	}
+	if controllerStateStoreCloseDelay <= 0 {
+		closeFn()
+		return
+	}
+	time.AfterFunc(controllerStateStoreCloseDelay, closeFn)
+}
+
+func closeBeadStoreHandle(store beads.Store) error {
+	if store == nil {
+		return nil
+	}
+	if cached, ok := store.(*beads.CachingStore); ok {
+		cached.StopReconciler()
+		return closeBeadStoreHandle(cached.Backing())
+	}
+	closer, ok := store.(interface{ CloseStore() error })
+	if !ok {
+		return nil
+	}
+	return closer.CloseStore()
+}
+
+func scheduleCloseReplacedBeadStoreHandles(oldStores, newStores map[string]beads.Store) {
+	if len(oldStores) == 0 {
+		return
+	}
+	newKeys := make(map[uintptr]struct{}, len(newStores))
+	for _, store := range newStores {
+		if key, ok := storePointerKey(store); ok {
+			newKeys[key] = struct{}{}
+		}
+	}
+	closed := make(map[uintptr]struct{}, len(oldStores))
+	for name, store := range oldStores {
+		if key, ok := storePointerKey(store); ok {
+			if _, reused := newKeys[key]; reused {
+				continue
+			}
+			if _, seen := closed[key]; seen {
+				continue
+			}
+			closed[key] = struct{}{}
+		}
+		scheduleCloseBeadStoreHandle(fmt.Sprintf("rig bead store %q", name), store)
+	}
+}
+
+func storePointerKey(store beads.Store) (uintptr, bool) {
+	value := reflect.ValueOf(store)
+	if !value.IsValid() || value.Kind() != reflect.Pointer || value.IsNil() {
+		return 0, false
+	}
+	return value.Pointer(), true
 }
 
 func (cs *controllerState) updateFromRuntime(cfg *config.City, sp runtime.Provider, revision string) {
@@ -827,6 +947,17 @@ func (cs *controllerState) CityBeadStore() beads.Store {
 	cs.mu.RLock()
 	defer cs.mu.RUnlock()
 	return cs.cityBeadStore
+}
+
+// CityBeadsDiagnostic returns the city-level bead store selection diagnostic.
+func (cs *controllerState) CityBeadsDiagnostic() *beads.BeadsDiagnostic {
+	cs.mu.RLock()
+	defer cs.mu.RUnlock()
+	if cs.cityBeadsDiagnostic == nil {
+		return nil
+	}
+	diag := *cs.cityBeadsDiagnostic
+	return &diag
 }
 
 // Orders scans formula layers and returns active orders.

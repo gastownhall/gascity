@@ -144,6 +144,8 @@ jobs:
           install-claude-cli: "false"
       - name: Install tools
         run: make install-tools
+      - name: Native dependency surface guard
+        run: make check-native-dependency-surface
       - name: Restore golangci-lint cache
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:

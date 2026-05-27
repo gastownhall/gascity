@@ -1088,6 +1088,28 @@
         },
         "type": "object"
       },
+      "BeadsDiagnostic": {
+        "additionalProperties": false,
+        "properties": {
+          "beads_store": {
+            "type": "string"
+          },
+          "native_store_eligible": {
+            "type": "boolean"
+          },
+          "preflight_gate": {
+            "type": "string"
+          },
+          "preflight_reason": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "beads_store",
+          "native_store_eligible"
+        ],
+        "type": "object"
+      },
       "BindingStatus": {
         "description": "Lifecycle state of a session binding.",
         "enum": [
@@ -6836,6 +6858,10 @@
           "agents": {
             "$ref": "#/components/schemas/StatusAgentCounts",
             "description": "Agent state counts."
+          },
+          "beads": {
+            "$ref": "#/components/schemas/BeadsDiagnostic",
+            "description": "Bead store selection diagnostic. Omitted when unavailable."
           },
           "mail": {
             "$ref": "#/components/schemas/StatusMailCounts",

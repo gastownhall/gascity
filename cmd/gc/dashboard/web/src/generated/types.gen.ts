@@ -382,6 +382,13 @@ export type BeadUpdateBody = {
     type?: string;
 };
 
+export type BeadsDiagnostic = {
+    beads_store: string;
+    native_store_eligible: boolean;
+    preflight_gate?: string;
+    preflight_reason?: string;
+};
+
 /**
  * Lifecycle state of a session binding.
  */
@@ -2915,6 +2922,10 @@ export type StatusBody = {
      * Agent state counts.
      */
     agents: StatusAgentCounts;
+    /**
+     * Bead store selection diagnostic. Omitted when unavailable.
+     */
+    beads?: BeadsDiagnostic;
     /**
      * Mail counts.
      */

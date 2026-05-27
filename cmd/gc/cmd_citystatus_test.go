@@ -378,6 +378,30 @@ name = "bright-lights"
 	}
 }
 
+func TestSnapshotFromStatusViewIncludesBeadsDiagnostic(t *testing.T) {
+	view := api.StatusView{
+		CityName: "bright-lights",
+		CityPath: "/home/user/bright-lights",
+		Beads: &beads.BeadsDiagnostic{
+			Store:               "BdStore",
+			NativeStoreEligible: false,
+			PreflightGate:       "metadata_backend",
+			PreflightReason:     "metadata backend=file; native store requires dolt",
+		},
+	}
+
+	snapshot := snapshotFromStatusView(view.CityPath, view)
+	if snapshot.Beads == nil {
+		t.Fatal("snapshot.Beads = nil, want diagnostic from API status view")
+	}
+	if snapshot.Beads.Store != "BdStore" {
+		t.Fatalf("beads_store = %q, want BdStore", snapshot.Beads.Store)
+	}
+	if snapshot.Beads.PreflightReason == "" {
+		t.Fatal("preflight_reason = empty, want API fallback reason")
+	}
+}
+
 func TestCityStatusJSONWithAgents(t *testing.T) {
 	sp := runtime.NewFake()
 	// Start one agent session (default session name = agent name, no city prefix).
