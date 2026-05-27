@@ -70,7 +70,6 @@ func TestCityTomlParses(t *testing.T) {
 func TestCityDefinesAgenticFunProjectOrgRigs(t *testing.T) {
 	cfg := loadExpanded(t)
 	want := map[string]struct {
-		path          string
 		prefix        string
 		defaultBranch string
 		projectKind   string
@@ -81,7 +80,6 @@ func TestCityDefinesAgenticFunProjectOrgRigs(t *testing.T) {
 		preview       string
 	}{
 		"equipments": {
-			path:          "repos/equipments",
 			prefix:        "eq",
 			defaultBranch: "master",
 			projectKind:   "typescript-service",
@@ -92,7 +90,6 @@ func TestCityDefinesAgenticFunProjectOrgRigs(t *testing.T) {
 			preview:       "npm run dev",
 		},
 		"quotes": {
-			path:          "repos/quotes",
 			prefix:        "qu",
 			defaultBranch: "main",
 			projectKind:   "python-fastapi-service",
@@ -103,7 +100,6 @@ func TestCityDefinesAgenticFunProjectOrgRigs(t *testing.T) {
 			preview:       ". .venv/bin/activate && uvicorn app.main:app --reload",
 		},
 		"web-page": {
-			path:          "repos/web-page",
 			prefix:        "wp",
 			defaultBranch: "main",
 			projectKind:   "static-js-demo",
@@ -114,7 +110,6 @@ func TestCityDefinesAgenticFunProjectOrgRigs(t *testing.T) {
 			preview:       "python3 -m http.server 8080 --directory .",
 		},
 		"booking": {
-			path:          "repos/booking",
 			prefix:        "bo",
 			defaultBranch: "master",
 			projectKind:   "java-spring-spec-service",
@@ -125,7 +120,6 @@ func TestCityDefinesAgenticFunProjectOrgRigs(t *testing.T) {
 			preview:       "./mvnw spring-boot:run -Dspring-boot.run.profiles=local",
 		},
 		"users": {
-			path:          "repos/users",
 			prefix:        "us",
 			defaultBranch: "main",
 			projectKind:   "typescript-service",
@@ -145,9 +139,6 @@ func TestCityDefinesAgenticFunProjectOrgRigs(t *testing.T) {
 		if !ok {
 			t.Errorf("missing rig %q", name)
 			continue
-		}
-		if rig.Path != wantRig.path {
-			t.Errorf("rig %q path = %q, want %q", name, rig.Path, wantRig.path)
 		}
 		if rig.Prefix != wantRig.prefix {
 			t.Errorf("rig %q prefix = %q, want %q", name, rig.Prefix, wantRig.prefix)
@@ -179,6 +170,43 @@ func TestCityDefinesAgenticFunProjectOrgRigs(t *testing.T) {
 	}
 	if len(cfg.Rigs) != len(want) {
 		t.Errorf("got %d rigs, want %d", len(cfg.Rigs), len(want))
+	}
+}
+
+func TestCityTomlLeavesRigPathsToSiteBinding(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join(exampleDir(), "city.toml"))
+	if err != nil {
+		t.Fatalf("reading city.toml: %v", err)
+	}
+	var cfg struct {
+		Rigs []struct {
+			Name string `toml:"name"`
+			Path string `toml:"path"`
+		} `toml:"rigs"`
+	}
+	if _, err := toml.Decode(string(data), &cfg); err != nil {
+		t.Fatalf("parsing city.toml: %v", err)
+	}
+	want := map[string]bool{
+		"booking":    false,
+		"equipments": false,
+		"quotes":     false,
+		"users":      false,
+		"web-page":   false,
+	}
+	for _, rig := range cfg.Rigs {
+		if _, ok := want[rig.Name]; !ok {
+			continue
+		}
+		want[rig.Name] = true
+		if rig.Path != "" {
+			t.Errorf("raw city.toml rig %q path = %q, want site-local path binding", rig.Name, rig.Path)
+		}
+	}
+	for name, found := range want {
+		if !found {
+			t.Errorf("raw city.toml missing rig %q", name)
+		}
 	}
 }
 
