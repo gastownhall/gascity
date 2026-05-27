@@ -256,6 +256,13 @@ func otherRegisteredCities(targetCityPath string) ([]supervisor.CityEntry, error
 // matching standard Unix-tool convention for interactive prompts in
 // non-interactive contexts.
 //
+// promptOnImpact selects the interactive policy. The registry-mutating
+// intent commands (gc init, gc register) pass true: they gate on an
+// interactive [y/N] confirmation. Operational entry points (gc start)
+// pass false: they print the same warning for the audit trail but proceed
+// without blocking, so a multi-city operator's routine start isn't held at
+// an unbypassable prompt.
+//
 // Returns true to proceed, false to abort.
 //
 // The registry is checked BEFORE supervisorAliveHook so that single-city
@@ -268,7 +275,7 @@ func otherRegisteredCities(targetCityPath string) ([]supervisor.CityEntry, error
 // (proceeds without blocking) — blocking on a registry read error would
 // turn an unrelated I/O fault into an unrelated registration failure,
 // which is a worse failure mode than the unguarded reconcile.
-func confirmCrossCitySupervisorImpact(cityPath string, stderr io.Writer) bool {
+func confirmCrossCitySupervisorImpact(cityPath string, promptOnImpact bool, stderr io.Writer) bool {
 	others, err := otherRegisteredCities(cityPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "Warning: unable to read city registry while checking cross-city supervisor impact (%v); proceeding without cross-city check.\n", err) //nolint:errcheck // best-effort stderr
@@ -292,6 +299,10 @@ func confirmCrossCitySupervisorImpact(cityPath string, stderr io.Writer) bool {
 	fmt.Fprintln(stderr, "if the supervisor is absent, drifted, or in a zombie state — which cycles those cities' in-flight work.")               //nolint:errcheck // best-effort stderr
 	if assumeYesForSupervisorCycle {
 		fmt.Fprintln(stderr, "Continuing (--yes).") //nolint:errcheck // best-effort stderr
+		return true
+	}
+	if !promptOnImpact {
+		fmt.Fprintln(stderr, "Proceeding (this command does not gate on cross-city impact; the warning above is recorded for the audit trail).") //nolint:errcheck // best-effort stderr
 		return true
 	}
 	if !confirmCrossCitySupervisorImpactStdinIsTerminal() {
@@ -319,7 +330,13 @@ func supervisorAlreadyManagesCity(cityPath string) bool {
 
 func registerCityWithSupervisorNamed(cityPath, nameOverride string, stdout, stderr io.Writer, commandName string, showProgress bool) int {
 	cityPath = normalizePathForCompare(cityPath)
-	if !confirmCrossCitySupervisorImpact(cityPath, stderr) {
+	// Only the registry-mutating intent commands gate interactively on
+	// cross-city impact. Operational entry points (gc start) and any future
+	// caller warn-and-proceed: the guard still prints the audit warning but
+	// never blocks, so a multi-city operator's routine start isn't held at an
+	// unbypassable prompt. See PR #2638 review.
+	promptOnImpact := commandName == "gc init" || commandName == "gc register"
+	if !confirmCrossCitySupervisorImpact(cityPath, promptOnImpact, stderr) {
 		fmt.Fprintf(stderr, "%s: aborted by user (pass --yes to bypass the cross-city supervisor cycle check)\n", commandName) //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -417,6 +434,15 @@ func registerCityWithSupervisorNamed(cityPath, nameOverride string, stdout, stde
 // intentionally does NOT wait for readiness. Callers are responsible
 // for emitting any lifecycle events they need before waking the
 // reconciler, so event ordering stays deterministic.
+//
+// It also intentionally omits confirmCrossCitySupervisorImpact. That guard
+// is an interactive operator affordance: it warns on stderr and (for
+// gc init / gc register) blocks on a [y/N] prompt. The async API path has
+// neither a tty to prompt nor a per-request stderr to warn on — its audit
+// trail is the city lifecycle event stream (CityCreated, etc.) recorded by
+// the caller, not the guard's stderr notice. Cross-city impact for API
+// registrations is therefore surfaced through those events rather than the
+// interactive guard. See PR #2638 review.
 func registerCityForAPI(cityPath, nameOverride string) error {
 	cityPath = normalizePathForCompare(cityPath)
 	name, err := registeredCityName(cityPath, nameOverride)

@@ -2395,7 +2395,7 @@ func TestConfirmCrossCitySupervisorImpactSingleCityProceedsSilently(t *testing.T
 	t.Cleanup(func() { supervisorAliveHook = oldAlive })
 
 	var stderr bytes.Buffer
-	if !confirmCrossCitySupervisorImpact(cityPath, &stderr) {
+	if !confirmCrossCitySupervisorImpact(cityPath, true, &stderr) {
 		t.Errorf("single-city case should proceed; stderr=%q", stderr.String())
 	}
 	if stderr.Len() != 0 {
@@ -2419,7 +2419,7 @@ func TestConfirmCrossCitySupervisorImpactSupervisorDeadProceedsSilently(t *testi
 	t.Cleanup(func() { supervisorAliveHook = oldAlive })
 
 	var stderr bytes.Buffer
-	if !confirmCrossCitySupervisorImpact(cityPath, &stderr) {
+	if !confirmCrossCitySupervisorImpact(cityPath, true, &stderr) {
 		t.Errorf("supervisor-absent case should proceed; stderr=%q", stderr.String())
 	}
 	if stderr.Len() != 0 {
@@ -2447,7 +2447,7 @@ func TestConfirmCrossCitySupervisorImpactAssumeYesProceedsWithWarning(t *testing
 	t.Cleanup(func() { assumeYesForSupervisorCycle = oldYes })
 
 	var stderr bytes.Buffer
-	if !confirmCrossCitySupervisorImpact(cityPath, &stderr) {
+	if !confirmCrossCitySupervisorImpact(cityPath, true, &stderr) {
 		t.Errorf("--yes case should proceed; stderr=%q", stderr.String())
 	}
 	if !strings.Contains(stderr.String(), "other-city") {
@@ -2486,7 +2486,7 @@ func TestConfirmCrossCitySupervisorImpactPromptYProceeds(t *testing.T) {
 	t.Cleanup(func() { confirmCrossCitySupervisorImpactStdinIsTerminal = oldTerm })
 
 	var stderr bytes.Buffer
-	if !confirmCrossCitySupervisorImpact(cityPath, &stderr) {
+	if !confirmCrossCitySupervisorImpact(cityPath, true, &stderr) {
 		t.Errorf("user-entered y should proceed; stderr=%q", stderr.String())
 	}
 	if !strings.Contains(stderr.String(), "Continue?") {
@@ -2509,6 +2509,10 @@ func TestConfirmCrossCitySupervisorImpactPromptNAborts(t *testing.T) {
 	supervisorAliveHook = func() int { return 1234 }
 	t.Cleanup(func() { supervisorAliveHook = oldAlive })
 
+	oldYes := assumeYesForSupervisorCycle
+	assumeYesForSupervisorCycle = false
+	t.Cleanup(func() { assumeYesForSupervisorCycle = oldYes })
+
 	oldStdin := confirmCrossCitySupervisorImpactStdin
 	confirmCrossCitySupervisorImpactStdin = strings.NewReader("n\n")
 	t.Cleanup(func() { confirmCrossCitySupervisorImpactStdin = oldStdin })
@@ -2518,7 +2522,7 @@ func TestConfirmCrossCitySupervisorImpactPromptNAborts(t *testing.T) {
 	t.Cleanup(func() { confirmCrossCitySupervisorImpactStdinIsTerminal = oldTerm })
 
 	var stderr bytes.Buffer
-	if confirmCrossCitySupervisorImpact(cityPath, &stderr) {
+	if confirmCrossCitySupervisorImpact(cityPath, true, &stderr) {
 		t.Errorf("user-entered n should abort; stderr=%q", stderr.String())
 	}
 	if !strings.Contains(stderr.String(), "Aborted") {
@@ -2541,6 +2545,10 @@ func TestConfirmCrossCitySupervisorImpactPromptEmptyDefaultsToNo(t *testing.T) {
 	supervisorAliveHook = func() int { return 1234 }
 	t.Cleanup(func() { supervisorAliveHook = oldAlive })
 
+	oldYes := assumeYesForSupervisorCycle
+	assumeYesForSupervisorCycle = false
+	t.Cleanup(func() { assumeYesForSupervisorCycle = oldYes })
+
 	oldStdin := confirmCrossCitySupervisorImpactStdin
 	confirmCrossCitySupervisorImpactStdin = strings.NewReader("\n")
 	t.Cleanup(func() { confirmCrossCitySupervisorImpactStdin = oldStdin })
@@ -2550,7 +2558,7 @@ func TestConfirmCrossCitySupervisorImpactPromptEmptyDefaultsToNo(t *testing.T) {
 	t.Cleanup(func() { confirmCrossCitySupervisorImpactStdinIsTerminal = oldTerm })
 
 	var stderr bytes.Buffer
-	if confirmCrossCitySupervisorImpact(cityPath, &stderr) {
+	if confirmCrossCitySupervisorImpact(cityPath, true, &stderr) {
 		t.Errorf("empty input should default to abort; stderr=%q", stderr.String())
 	}
 }
@@ -2580,7 +2588,7 @@ func TestConfirmCrossCitySupervisorImpactNonTerminalStdinProceedsSilently(t *tes
 	t.Cleanup(func() { confirmCrossCitySupervisorImpactStdinIsTerminal = oldTerm })
 
 	var stderr bytes.Buffer
-	if !confirmCrossCitySupervisorImpact(cityPath, &stderr) {
+	if !confirmCrossCitySupervisorImpact(cityPath, true, &stderr) {
 		t.Errorf("non-terminal stdin should proceed silently; stderr=%q", stderr.String())
 	}
 	if !strings.Contains(stderr.String(), "other-city") {
@@ -2618,7 +2626,7 @@ func TestConfirmCrossCitySupervisorImpactWarnsAboutAllOtherCities(t *testing.T) 
 	t.Cleanup(func() { assumeYesForSupervisorCycle = oldYes })
 
 	var stderr bytes.Buffer
-	if !confirmCrossCitySupervisorImpact(cityPath, &stderr) {
+	if !confirmCrossCitySupervisorImpact(cityPath, true, &stderr) {
 		t.Errorf("--yes should proceed; stderr=%q", stderr.String())
 	}
 	out := stderr.String()
@@ -2629,6 +2637,51 @@ func TestConfirmCrossCitySupervisorImpactWarnsAboutAllOtherCities(t *testing.T) 
 	}
 	if !strings.Contains(out, "3 other registered cities") {
 		t.Errorf("warning should report count of 3 (plural); stderr=%q", out)
+	}
+}
+
+func TestConfirmCrossCitySupervisorImpactNoPromptWarnsAndProceeds(t *testing.T) {
+	// promptOnImpact=false models operational entry points (gc start): the
+	// warning is still printed for the audit trail, but the guard proceeds
+	// without blocking — even on an interactive terminal where it otherwise
+	// would prompt. See PR #2638 review (gc start has no --yes bypass).
+	gcHome := t.TempDir()
+	t.Setenv("GC_HOME", gcHome)
+
+	cityPath := filepath.Join(t.TempDir(), "new-city")
+	otherPath := filepath.Join(t.TempDir(), "other-city")
+	reg := supervisor.NewRegistry(supervisor.RegistryPath())
+	if err := reg.Register(otherPath, "other-city"); err != nil {
+		t.Fatalf("seed register other: %v", err)
+	}
+
+	oldAlive := supervisorAliveHook
+	supervisorAliveHook = func() int { return 1234 }
+	t.Cleanup(func() { supervisorAliveHook = oldAlive })
+
+	oldYes := assumeYesForSupervisorCycle
+	assumeYesForSupervisorCycle = false
+	t.Cleanup(func() { assumeYesForSupervisorCycle = oldYes })
+
+	// A real terminal would normally trigger the prompt; promptOnImpact=false
+	// must suppress it regardless.
+	oldTerm := confirmCrossCitySupervisorImpactStdinIsTerminal
+	confirmCrossCitySupervisorImpactStdinIsTerminal = func() bool { return true }
+	t.Cleanup(func() { confirmCrossCitySupervisorImpactStdinIsTerminal = oldTerm })
+
+	var stderr bytes.Buffer
+	if !confirmCrossCitySupervisorImpact(cityPath, false, &stderr) {
+		t.Errorf("non-prompting entry point should proceed; stderr=%q", stderr.String())
+	}
+	out := stderr.String()
+	if !strings.Contains(out, "other-city") {
+		t.Errorf("warning should still list other-city for audit; stderr=%q", out)
+	}
+	if !strings.Contains(out, "does not gate on cross-city impact") {
+		t.Errorf("warn-and-proceed notice should be printed; stderr=%q", out)
+	}
+	if strings.Contains(out, "Continue?") {
+		t.Errorf("prompt MUST NOT be emitted when promptOnImpact is false; stderr=%q", out)
 	}
 }
 
@@ -2654,7 +2707,7 @@ func TestConfirmCrossCitySupervisorImpactRegistryReadErrorFailsOpenWithWarning(t
 	t.Cleanup(func() { newSupervisorRegistry = oldRegistry })
 
 	var stderr bytes.Buffer
-	if !confirmCrossCitySupervisorImpact(cityPath, &stderr) {
+	if !confirmCrossCitySupervisorImpact(cityPath, true, &stderr) {
 		t.Errorf("registry read error should fail open (proceed); stderr=%q", stderr.String())
 	}
 	if !strings.Contains(stderr.String(), "unable to read city registry") {

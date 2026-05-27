@@ -1622,6 +1622,7 @@ gc init
 | `--preserve-existing` | bool |  | keep any pre-authored pack.toml, city.toml, or agent prompt files instead of overwriting them |
 | `--provider` | string |  | built-in workspace provider to use for the default mayor config |
 | `--skip-provider-readiness` | bool |  | skip provider login/readiness checks during init and continue startup |
+| `--yes` | bool |  | bypass the cross-city supervisor cycle confirmation prompt (warning is still printed for the audit trail) |
 
 ## gc lint
 
@@ -2393,6 +2394,7 @@ gc register [path] [flags]
 |------|------|---------|-------------|
 | `--json` | bool |  | emit JSONL summary |
 | `--name` | string |  | machine-local alias for this city registration |
+| `--yes` | bool |  | bypass the cross-city supervisor cycle confirmation prompt (warning is still printed for the audit trail) |
 
 ## gc reload
 
