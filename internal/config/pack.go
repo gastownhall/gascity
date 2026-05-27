@@ -2690,6 +2690,12 @@ func applyAgentOverride(a *Agent, ov *AgentOverride) {
 	if ov.ScaleCheck != nil {
 		a.ScaleCheck = *ov.ScaleCheck
 	}
+	if ov.ScaleCheckQuery != nil {
+		a.ScaleCheckQuery = *ov.ScaleCheckQuery
+	}
+	if ov.WorkSelector != nil {
+		a.WorkSelector = *ov.WorkSelector
+	}
 	// Env: additive merge.
 	if len(ov.Env) > 0 {
 		if a.Env == nil {

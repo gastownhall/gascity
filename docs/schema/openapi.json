@@ -368,6 +368,9 @@
               "null"
             ]
           },
+          "ScaleCheckQuery": {
+            "$ref": "#/components/schemas/WorkSelector"
+          },
           "Scope": {
             "type": [
               "string",
@@ -475,6 +478,9 @@
               "string",
               "null"
             ]
+          },
+          "WorkSelector": {
+            "$ref": "#/components/schemas/WorkSelector"
           }
         },
         "required": [
@@ -524,6 +530,8 @@
           "MaxActiveSessions",
           "MinActiveSessions",
           "ScaleCheck",
+          "ScaleCheckQuery",
+          "WorkSelector",
           "OptionDefaults"
         ],
         "type": "object"
@@ -12947,6 +12955,57 @@
         "required": [
           "session_id",
           "count"
+        ],
+        "type": "object"
+      },
+      "WorkSelector": {
+        "additionalProperties": false,
+        "properties": {
+          "Assignee": {
+            "type": "string"
+          },
+          "ExcludeType": {
+            "type": "string"
+          },
+          "Label": {
+            "type": "string"
+          },
+          "Metadata": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "Parent": {
+            "type": "string"
+          },
+          "Sort": {
+            "type": "string"
+          },
+          "Status": {
+            "type": "string"
+          },
+          "Tier": {
+            "type": "string"
+          },
+          "Type": {
+            "type": "string"
+          },
+          "Unassigned": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "Status",
+          "Type",
+          "ExcludeType",
+          "Label",
+          "Assignee",
+          "Unassigned",
+          "Parent",
+          "Metadata",
+          "Tier",
+          "Sort"
         ],
         "type": "object"
       },

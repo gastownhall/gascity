@@ -77,6 +77,14 @@ type poolEvalWork struct {
 	newDemand bool
 }
 
+type typedPoolEvalWork struct {
+	agentIdx int
+	selector config.WorkSelector
+	storeKey string
+	store    beads.Store
+	err      error
+}
+
 type defaultScaleCheckTarget struct {
 	template string
 	storeKey string
@@ -378,6 +386,7 @@ func buildDesiredStateWithSessionBeads(
 
 	desired := make(map[string]TemplateParams)
 	var pendingPools []poolEvalWork
+	var pendingTypedPools []typedPoolEvalWork
 	var defaultScaleTargets []defaultScaleCheckTarget
 	var defaultNamedScaleTargets []defaultScaleCheckTarget
 
@@ -412,6 +421,13 @@ func buildDesiredStateWithSessionBeads(
 			// routed-work scale_check feeds named demand separately so it does
 			// not create a parallel generic worker for the same backing template.
 			poolDir := agentCommandDir(cityPath, &cfg.Agents[i], cfg.Rigs)
+			if store != nil {
+				if selector, ok := typedDemandSelectorForAgent(&cfg.Agents[i]); ok {
+					selector = expandWorkSelectorTemplates(cityPath, cityName, &cfg.Agents[i], cfg.Rigs, "scale_check_query", selector, stderr)
+					pendingTypedPools = append(pendingTypedPools, typedPoolEvalWorkForAgent(cityPath, cfg, &cfg.Agents[i], selector, store, rigStores))
+					continue
+				}
+			}
 			if store != nil && strings.TrimSpace(cfg.Agents[i].ScaleCheck) == "" {
 				defaultNamedScaleTargets = append(defaultNamedScaleTargets, defaultScaleCheckTargetForAgent(cityPath, cfg, &cfg.Agents[i], store, rigStores))
 				continue
@@ -428,6 +444,13 @@ func buildDesiredStateWithSessionBeads(
 		// them as desired counts; bead-backed mode uses them as authoritative
 		// new unassigned demand while assigned work drives resume requests.
 		poolDir := agentCommandDir(cityPath, &cfg.Agents[i], cfg.Rigs)
+		if store != nil {
+			if selector, ok := typedDemandSelectorForAgent(&cfg.Agents[i]); ok {
+				selector = expandWorkSelectorTemplates(cityPath, cityName, &cfg.Agents[i], cfg.Rigs, "scale_check_query", selector, stderr)
+				pendingTypedPools = append(pendingTypedPools, typedPoolEvalWorkForAgent(cityPath, cfg, &cfg.Agents[i], selector, store, rigStores))
+				continue
+			}
+		}
 		if store != nil && strings.TrimSpace(cfg.Agents[i].ScaleCheck) == "" {
 			defaultScaleTargets = append(defaultScaleTargets, defaultScaleCheckTargetForAgent(cityPath, cfg, &cfg.Agents[i], store, rigStores))
 			continue
@@ -465,7 +488,15 @@ func buildDesiredStateWithSessionBeads(
 		} else {
 			fmt.Fprintf(stderr, "assignedWorkBeads: 0 beads (rigStores=%d)\n", len(rigStores)) //nolint:errcheck
 		}
-		scaleCheckCounts, poolScaleCheckPartialTemplates = evaluatePendingPoolsMap(cfg, pendingPools, stderr, trace)
+		scaleCheckCounts, poolScaleCheckPartialTemplates = evaluateTypedPendingPoolsMap(cfg, pendingTypedPools, stderr, trace)
+		shellCounts, shellPartialTemplates := evaluatePendingPoolsMap(cfg, pendingPools, stderr, trace)
+		if scaleCheckCounts == nil {
+			scaleCheckCounts = make(map[string]int, len(shellCounts))
+		}
+		for template, count := range shellCounts {
+			scaleCheckCounts[template] = count
+		}
+		poolScaleCheckPartialTemplates = mergeScaleCheckPartialTemplates(poolScaleCheckPartialTemplates, shellPartialTemplates)
 		if len(defaultScaleTargets) > 0 {
 			defaultCounts, partialTemplates, errs := defaultScaleCheckCounts(defaultScaleTargets)
 			for _, err := range errs {
@@ -961,6 +992,111 @@ func defaultScaleCheckTargetForAgent(
 	target.store = nil
 	target.err = fmt.Errorf("default scale_check %s: rig store %q unavailable", target.template, rigName)
 	return target
+}
+
+func typedDemandSelectorForAgent(agentCfg *config.Agent) (config.WorkSelector, bool) {
+	if agentCfg == nil {
+		return config.WorkSelector{}, false
+	}
+	if !agentCfg.ScaleCheckQuery.IsZero() {
+		return agentCfg.ScaleCheckQuery, true
+	}
+	if !agentCfg.WorkSelector.IsZero() {
+		return agentCfg.WorkSelector, true
+	}
+	return config.WorkSelector{}, false
+}
+
+func typedPoolEvalWorkForAgent(
+	cityPath string,
+	cfg *config.City,
+	agentCfg *config.Agent,
+	selector config.WorkSelector,
+	cityStore beads.Store,
+	rigStores map[string]beads.Store,
+) typedPoolEvalWork {
+	target := typedPoolEvalWork{
+		agentIdx: agentIndexByQualifiedName(cfg, agentCfg.QualifiedName()),
+		selector: selector,
+		storeKey: "city",
+		store:    cityStore,
+	}
+	rigName := configuredRigName(cityPath, agentCfg, cfg.Rigs)
+	if rigName == "" {
+		return target
+	}
+	target.storeKey = "rig:" + rigName
+	if rigStores != nil {
+		if rigStore := rigStores[rigName]; rigStore != nil {
+			target.store = rigStore
+			return target
+		}
+	}
+	target.store = nil
+	target.err = fmt.Errorf("typed scale_check_query %s: rig store %q unavailable", agentCfg.QualifiedName(), rigName)
+	return target
+}
+
+func agentIndexByQualifiedName(cfg *config.City, qualifiedName string) int {
+	if cfg == nil {
+		return -1
+	}
+	for i := range cfg.Agents {
+		if cfg.Agents[i].QualifiedName() == qualifiedName {
+			return i
+		}
+	}
+	return -1
+}
+
+func evaluateTypedPendingPoolsMap(
+	cfg *config.City,
+	pendingPools []typedPoolEvalWork,
+	stderr io.Writer,
+	trace *sessionReconcilerTraceCycle,
+) (map[string]int, map[string]bool) {
+	counts := make(map[string]int, len(pendingPools))
+	var partialTemplates map[string]bool
+	for _, pw := range pendingPools {
+		if pw.agentIdx < 0 || pw.agentIdx >= len(cfg.Agents) {
+			continue
+		}
+		template := cfg.Agents[pw.agentIdx].QualifiedName()
+		counts[template] = 0
+		if pw.err != nil {
+			fmt.Fprintf(stderr, "buildDesiredState: %v (using new demand=0)\n", pw.err) //nolint:errcheck
+			partialTemplates = markScaleCheckPartialTemplate(partialTemplates, template)
+			continue
+		}
+		if pw.store == nil {
+			fmt.Fprintf(stderr, "buildDesiredState: typed scale_check_query %s: store unavailable (using new demand=0)\n", template) //nolint:errcheck
+			partialTemplates = markScaleCheckPartialTemplate(partialTemplates, template)
+			continue
+		}
+		started := time.Now()
+		count, err := workSelectorCountForController(pw.store, pw.selector)
+		if err != nil {
+			partialTemplates = markScaleCheckPartialTemplate(partialTemplates, template)
+			fmt.Fprintf(stderr, "buildDesiredState: typed scale_check_query %s: %v (using observed demand=%d)\n", template, err, count) //nolint:errcheck
+		}
+		counts[template] = count
+		if trace != nil {
+			outcome := "success"
+			if err != nil {
+				outcome = "failed"
+			}
+			trace.recordOperation("trace.scale_check_exec", template, "", "", "scale_check_query", outcome, traceRecordPayload{
+				"store":          pw.storeKey,
+				"desired":        count,
+				"error":          fmt.Sprint(err),
+				"duration_ms":    time.Since(started).Milliseconds(),
+				"agent_template": template,
+				"agent_index":    pw.agentIdx,
+				"selector":       pw.selector,
+			}, "")
+		}
+	}
+	return counts, partialTemplates
 }
 
 // defaultScaleCheckCounts reports ready, unassigned, routed work as fresh

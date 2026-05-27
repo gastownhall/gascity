@@ -76,13 +76,25 @@ type Server struct {
 	responseCacheEntries map[string]responseCacheEntry
 
 	// storeHealth caches the on-disk size walk and maintenance-log read
-	// for /v0/status's StoreHealth block. Refreshed on expiry; missing
-	// store directories produce a zero-value entry so repeated requests
-	// don't re-walk a fresh city between maintenance runs.
-	storeHealthMu       sync.Mutex
-	storeHealthEntry    *StatusStoreHealth
-	storeHealthExpires  time.Time
-	storeHealthComputer func() *StatusStoreHealth
+	// for /v0/status's StoreHealth block. Expired entries are served stale
+	// while one background refresh recomputes the next snapshot, keeping
+	// status latency bounded after the first synchronous fill.
+	storeHealthMu         sync.Mutex
+	storeHealthEntry      *StatusStoreHealth
+	storeHealthExpires    time.Time
+	storeHealthRefreshing bool
+	storeHealthComputer   func() *StatusStoreHealth
+
+	// statusMailCounts caches /v0/status's aggregate mail count. Global
+	// beadmail counts can take seconds on large stores, so expired values
+	// are served stale while one background refresh recomputes the next
+	// snapshot.
+	statusMailCountsMu         sync.Mutex
+	statusMailCountsEntry      StatusMailCounts
+	statusMailCountsSet        bool
+	statusMailCountsExpires    time.Time
+	statusMailCountsRefreshing bool
+	statusMailCountsComputer   func() StatusMailCounts
 
 	// LookPathFunc can be overridden in tests. Defaults to exec.LookPath.
 	LookPathFunc func(string) (string, error)

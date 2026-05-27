@@ -182,6 +182,10 @@
           "type": "string",
           "description": "ScaleCheck is a shell command template whose output reports new\nunassigned session demand. In bead-backed reconciliation this is\nadditive: assigned work is resumed separately, and ScaleCheck reports\nonly how many new generic sessions to start, still bounded by all cap\nlevels. Legacy no-store evaluation continues to treat the output as\nthe desired session count. If it contains Go template placeholders, gc\nexpands them using the same PathContext fields as work_dir and\nsession_setup (Agent, AgentBase, Rig, RigRoot, CityRoot, CityName)\nbefore running the command."
         },
+        "scale_check_query": {
+          "$ref": "#/$defs/WorkSelector",
+          "description": "ScaleCheckQuery is the typed count-side selector for new session demand.\nIt must be paired with an identical WorkSelector so controller demand and\nworker discovery use the same normalized predicate."
+        },
         "drain_timeout": {
           "type": "string",
           "description": "DrainTimeout is the maximum time to wait for a session to finish its\ncurrent work before force-killing it during scale-down. Duration string\n(e.g., \"5m\", \"30m\", \"1h\"). Defaults to \"5m\".",
@@ -206,6 +210,10 @@
         "sling_query": {
           "type": "string",
           "description": "SlingQuery is the command template to route a bead to this session config.\nIf it contains Go template placeholders, gc expands them using the same\nPathContext fields as work_dir and session_setup (Agent, AgentBase,\nRig, RigRoot, CityRoot, CityName) before replacing {} with the bead\nID. Used by gc sling to make a bead visible to the target's work_query.\nThe placeholder {} is replaced with the bead ID at runtime.\nDefault for all agents:\n\"bd update {} --set-metadata gc.routed_to=\u003cqualified-name\u003e\".\nRouting is metadata-based; sling stamps the target template and the\nreconciler/scale_check paths decide when sessions are created.\nCustom sling_query and work_query can be overridden independently."
+        },
+        "work_selector": {
+          "$ref": "#/$defs/WorkSelector",
+          "description": "WorkSelector is the typed work predicate used by `gc work count` and\n`gc work next`. It is intentionally declarative so controller demand and\ndiscovery can share one compiled selector instead of duplicating shell\npredicates."
         },
         "idle_timeout": {
           "type": "string",
@@ -632,6 +640,14 @@
           "type": "string",
           "description": "ScaleCheck overrides the shell command whose output reports new\nunassigned session demand for bead-backed reconciliation."
         },
+        "scale_check_query": {
+          "$ref": "#/$defs/WorkSelector",
+          "description": "ScaleCheckQuery overrides the typed selector whose count reports new\nunassigned session demand. When set, WorkSelector must be set to the\nsame selector so controller demand and worker discovery stay paired."
+        },
+        "work_selector": {
+          "$ref": "#/$defs/WorkSelector",
+          "description": "WorkSelector overrides the typed selector used by gc work count/next."
+        },
         "option_defaults": {
           "additionalProperties": {
             "type": "string"
@@ -893,6 +909,14 @@
         "scale_check": {
           "type": "string",
           "description": "ScaleCheck overrides the command template whose output reports new\nunassigned session demand for bead-backed reconciliation. Supports the\nsame Go template placeholders as Agent.scale_check."
+        },
+        "scale_check_query": {
+          "$ref": "#/$defs/WorkSelector",
+          "description": "ScaleCheckQuery overrides the typed count-side selector. When set, the\ntarget agent must also have a matching work_selector after composition."
+        },
+        "work_selector": {
+          "$ref": "#/$defs/WorkSelector",
+          "description": "WorkSelector overrides the typed work predicate used by gc work commands."
         },
         "option_defaults": {
           "additionalProperties": {
@@ -2294,6 +2318,74 @@
         "cache_creation_usd_per_1m"
       ],
       "description": "Tier defines per-token-type rates in USD per 1 million tokens."
+    },
+    "WorkSelector": {
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": [
+            "open",
+            "in_progress",
+            "closed"
+          ],
+          "description": "Status selects one bead status. Empty defaults to open at evaluation time."
+        },
+        "type": {
+          "type": "string",
+          "description": "Type selects one bead issue_type. Infrastructure types such as step and\nmolecule are included only when explicitly selected here."
+        },
+        "exclude_type": {
+          "type": "string",
+          "description": "ExcludeType excludes one bead issue_type."
+        },
+        "label": {
+          "type": "string",
+          "description": "Label selects one exact label."
+        },
+        "assignee": {
+          "type": "string",
+          "description": "Assignee selects one exact assignee."
+        },
+        "unassigned": {
+          "type": "boolean",
+          "description": "Unassigned selects beads with an empty assignee."
+        },
+        "ready": {
+          "type": "boolean",
+          "description": "Ready filters to currently unblocked work. Unlike Ready()'s default\nactionable-work view, explicit Type selectors can opt infrastructure\nbeads such as formula steps into this dependency-aware filter."
+        },
+        "parent": {
+          "type": "string",
+          "description": "Parent selects one parent bead ID."
+        },
+        "metadata": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object",
+          "description": "Metadata selects beads whose metadata contains every key/value pair."
+        },
+        "tier": {
+          "type": "string",
+          "enum": [
+            "issues",
+            "wisps",
+            "both"
+          ],
+          "description": "Tier selects the physical bead tier: issues (default), wisps, or both."
+        },
+        "sort": {
+          "type": "string",
+          "enum": [
+            "created_asc",
+            "created_desc"
+          ],
+          "description": "Sort selects deterministic result order."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "WorkSelector is a declarative bead predicate shared by controller demand and worker discovery."
     },
     "Workspace": {
       "properties": {

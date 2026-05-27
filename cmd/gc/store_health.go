@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"time"
@@ -9,6 +10,12 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/storehealth"
 )
+
+const storeHealthRowCountTimeout = 3 * time.Second
+
+type indexedRowCounter interface {
+	CountIndexed(context.Context, beads.ListQuery) (int, error)
+}
 
 // storeHealthFromInputs assembles a CLI-facing *StoreHealth from the raw
 // measurements. LastGCAt is serialized as RFC3339 UTC when present;
@@ -50,7 +57,17 @@ func liveRowCount(store beads.Store) int {
 	if store == nil {
 		return 0
 	}
-	list, err := store.List(beads.ListQuery{AllowScan: true, IncludeClosed: true})
+	query := beads.ListQuery{AllowScan: true, IncludeClosed: true}
+	if counter, ok := store.(indexedRowCounter); ok {
+		ctx, cancel := context.WithTimeout(context.Background(), storeHealthRowCountTimeout)
+		defer cancel()
+		count, err := counter.CountIndexed(ctx, query)
+		if err == nil {
+			return count
+		}
+		return 0
+	}
+	list, err := store.List(query)
 	if err != nil {
 		return 0
 	}

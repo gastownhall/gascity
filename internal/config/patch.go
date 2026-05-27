@@ -140,6 +140,11 @@ type AgentPatch struct {
 	// unassigned session demand for bead-backed reconciliation. Supports the
 	// same Go template placeholders as Agent.scale_check.
 	ScaleCheck *string `toml:"scale_check,omitempty"`
+	// ScaleCheckQuery overrides the typed count-side selector. When set, the
+	// target agent must also have a matching work_selector after composition.
+	ScaleCheckQuery *WorkSelector `toml:"scale_check_query,omitempty"`
+	// WorkSelector overrides the typed work predicate used by gc work commands.
+	WorkSelector *WorkSelector `toml:"work_selector,omitempty"`
 	// OptionDefaults adds or overrides provider option defaults for this agent.
 	// Keys are option keys, values are choice values. Merges additively
 	// (patch keys win over existing agent keys).
@@ -444,6 +449,12 @@ func applyAgentPatchFields(a *Agent, p *AgentPatch) {
 	}
 	if p.ScaleCheck != nil {
 		a.ScaleCheck = *p.ScaleCheck
+	}
+	if p.ScaleCheckQuery != nil {
+		a.ScaleCheckQuery = *p.ScaleCheckQuery
+	}
+	if p.WorkSelector != nil {
+		a.WorkSelector = *p.WorkSelector
 	}
 	// OptionDefaults: additive merge (patch keys win).
 	if len(p.OptionDefaults) > 0 {

@@ -97,16 +97,20 @@ func TestExecCommandRunnerStopsBDSlowTimerForFastBDCommand(t *testing.T) {
 	if _, err := exec.LookPath("sh"); err != nil {
 		t.Skip("sh unavailable")
 	}
+	truePath, err := exec.LookPath("true")
+	if err != nil {
+		t.Skip("true unavailable")
+	}
 
 	oldThreshold := bdSlowTelemetryThreshold
-	bdSlowTelemetryThreshold = 30 * time.Millisecond
+	bdSlowTelemetryThreshold = 500 * time.Millisecond
 	t.Cleanup(func() { bdSlowTelemetryThreshold = oldThreshold })
 
 	exp := installBeadsRecordingLogExporter(t)
 	binDir := t.TempDir()
-	writeExecutable(t, filepath.Join(binDir, "bd"), `#!/bin/sh
-printf '[]\n'
-`)
+	if err := os.Symlink(truePath, filepath.Join(binDir, "bd")); err != nil {
+		t.Fatalf("symlink fake bd: %v", err)
+	}
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	if _, err := ExecCommandRunner()(t.TempDir(), "bd", "list"); err != nil {

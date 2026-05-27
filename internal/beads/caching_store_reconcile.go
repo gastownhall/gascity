@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"log"
 	"math"
 	"sort"
@@ -221,16 +222,20 @@ func (c *CachingStore) nextReconcileDelay(now time.Time) time.Duration {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
-	if c.syncFailures >= maxCacheSyncFailures && !c.stats.LastProblemAt.IsZero() {
-		dueAt := c.stats.LastProblemAt.Add(cacheReconcileFailureBackoff)
+	if c.state == cacheDegraded && !c.stats.LastProblemAt.IsZero() {
+		dueAt := c.stats.LastProblemAt.Add(c.cacheFailureBackoff(c.syncFailures))
 		if !now.Before(dueAt) {
 			return 0
 		}
 		return dueAt.Sub(now)
 	}
 
-	if c.state == cacheDegraded {
-		return 0
+	if c.syncFailures >= maxCacheSyncFailures && !c.stats.LastProblemAt.IsZero() {
+		dueAt := c.stats.LastProblemAt.Add(cacheReconcileFailureBackoff)
+		if !now.Before(dueAt) {
+			return 0
+		}
+		return dueAt.Sub(now)
 	}
 
 	if c.lastFreshAt.IsZero() {
@@ -248,6 +253,37 @@ func (c *CachingStore) nextReconcileDelay(now time.Time) time.Duration {
 	return dueAt.Sub(now)
 }
 
+func (c *CachingStore) cacheFailureBackoff(failures int) time.Duration {
+	base := cacheFailureBackoff(failures)
+	if base <= 0 || cacheDegradedJitterMax <= 0 {
+		return base
+	}
+	h := fnv.New32a()
+	_, _ = fmt.Fprintf(h, "%s:%d", c.idPrefix, failures)
+	maxMs := cacheDegradedJitterMax.Milliseconds()
+	if maxMs <= 0 {
+		return base
+	}
+	return base + time.Duration(int64(h.Sum32())%maxMs)*time.Millisecond
+}
+
+func cacheFailureBackoff(failures int) time.Duration {
+	if failures <= 0 {
+		return 0
+	}
+	backoff := cacheDegradedBackoffBase
+	for i := 1; i < failures; i++ {
+		if backoff >= cacheDegradedBackoffMax/2 {
+			return cacheDegradedBackoffMax
+		}
+		backoff *= 2
+	}
+	if backoff > cacheDegradedBackoffMax {
+		return cacheDegradedBackoffMax
+	}
+	return backoff
+}
+
 func (c *CachingStore) runReconciliation() {
 	start := time.Now()
 
@@ -256,7 +292,7 @@ func (c *CachingStore) runReconciliation() {
 	c.mu.RUnlock()
 
 	bdStart := time.Now()
-	fresh, err := c.backing.List(ListQuery{AllowScan: true, SkipLabels: true})
+	fresh, depMap, depsComplete, err := c.loadActiveSnapshot(ListQuery{AllowScan: true, SkipLabels: true})
 	bdLatency := time.Since(bdStart)
 	if err != nil {
 		c.mu.Lock()
@@ -278,12 +314,7 @@ func (c *CachingStore) runReconciliation() {
 	}
 
 	c.recoverMissingFromList(freshByID)
-
-	depMap, depsComplete, depErr := c.fetchDepsForIDs(beadIDs(freshByID))
-	if depErr != nil {
-		c.recordProblem("refresh dep cache during reconcile", depErr)
-	}
-	useFreshDeps := depsComplete && depErr == nil
+	useFreshDeps := depsComplete
 
 	c.mu.Lock()
 	now := time.Now()

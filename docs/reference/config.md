@@ -91,12 +91,14 @@ Agent defines a configured agent in the city.
 | `max_active_sessions` | integer |  |  | MaxActiveSessions is the agent-level cap on concurrent sessions. Nil means inherit from rig, then workspace, then unlimited. Replaces pool.max. |
 | `min_active_sessions` | integer |  |  | MinActiveSessions is the minimum number of sessions to keep alive. Agent-level only. Counts against rig/workspace caps. Replaces pool.min. |
 | `scale_check` | string |  |  | ScaleCheck is a shell command template whose output reports new unassigned session demand. In bead-backed reconciliation this is additive: assigned work is resumed separately, and ScaleCheck reports only how many new generic sessions to start, still bounded by all cap levels. Legacy no-store evaluation continues to treat the output as the desired session count. If it contains Go template placeholders, gc expands them using the same PathContext fields as work_dir and session_setup (Agent, AgentBase, Rig, RigRoot, CityRoot, CityName) before running the command. |
+| `scale_check_query` | WorkSelector |  |  | ScaleCheckQuery is the typed count-side selector for new session demand. It must be paired with an identical WorkSelector so controller demand and worker discovery use the same normalized predicate. |
 | `drain_timeout` | string |  | `5m` | DrainTimeout is the maximum time to wait for a session to finish its current work before force-killing it during scale-down. Duration string (e.g., "5m", "30m", "1h"). Defaults to "5m". |
 | `on_boot` | string |  |  | OnBoot is a shell command template run once at controller startup for this agent. If it contains Go template placeholders, gc expands them using the same PathContext fields as work_dir and session_setup (Agent, AgentBase, Rig, RigRoot, CityRoot, CityName) before running the command. |
 | `on_death` | string |  |  | OnDeath is a shell command template run when a session dies unexpectedly. If it contains Go template placeholders, gc expands them using the same PathContext fields as work_dir and session_setup (Agent, AgentBase, Rig, RigRoot, CityRoot, CityName) before running the command. |
 | `namepool` | string |  |  | Namepool is the path to a plain text file with one name per line. When set, sessions use names from the file as display aliases. |
 | `work_query` | string |  |  | WorkQuery is the shell command template to find available work for this agent. If it contains Go template placeholders, gc expands them using the same PathContext fields as work_dir and session_setup (Agent, AgentBase, Rig, RigRoot, CityRoot, CityName) before probe, hook, and prompt-context execution. Used by gc hook and available in prompt templates as &#123;&#123;.WorkQuery&#125;&#125;. If unset, Gas City uses a three-tier default query:   1. in_progress work assigned to this session/alias (crash recovery)   2. ready work assigned to this session/alias (pre-assigned work)   3. ready unassigned work with gc.routed_to=&lt;qualified-name&gt; When the controller probes for demand without session context, only the routed_to tier applies. Override to integrate with external task systems. |
 | `sling_query` | string |  |  | SlingQuery is the command template to route a bead to this session config. If it contains Go template placeholders, gc expands them using the same PathContext fields as work_dir and session_setup (Agent, AgentBase, Rig, RigRoot, CityRoot, CityName) before replacing &#123;&#125; with the bead ID. Used by gc sling to make a bead visible to the target's work_query. The placeholder &#123;&#125; is replaced with the bead ID at runtime. Default for all agents: "bd update &#123;&#125; --set-metadata gc.routed_to=&lt;qualified-name&gt;". Routing is metadata-based; sling stamps the target template and the reconciler/scale_check paths decide when sessions are created. Custom sling_query and work_query can be overridden independently. |
+| `work_selector` | WorkSelector |  |  | WorkSelector is the typed work predicate used by `gc work count` and `gc work next`. It is intentionally declarative so controller demand and discovery can share one compiled selector instead of duplicating shell predicates. |
 | `idle_timeout` | string |  |  | IdleTimeout is the maximum time an agent session can be inactive before the controller kills and restarts it. Duration string (e.g., "15m", "1h"). Empty (default) disables idle checking. |
 | `max_session_age` | string |  |  | MaxSessionAge is the maximum wall-clock lifetime of a single runtime session before the controller preemptively restarts it. Duration string (e.g., "5h"). Empty (default) disables preemptive restarts. The restart is idle-gated: sessions with a pending interaction or an in-progress assigned work bead are left alone until they settle.  Motivation: provider SDKs that cache credentials at session start (e.g., Claude Code via Bedrock) can wedge when the underlying token expires if the SDK doesn't re-chain providers. Cycling long-running sessions before the token-expiry window prevents that failure mode without requiring upstream provider fixes. |
 | `max_session_age_jitter` | string |  |  | MaxSessionAgeJitter bounds random jitter added to MaxSessionAge on a per-session basis so a fleet of identically-configured agents doesn't synchronize restarts. Duration string (e.g., "15m"). Empty or 0 disables jitter (every session restarts at exactly MaxSessionAge). Ignored when MaxSessionAge is unset. |
@@ -186,6 +188,8 @@ AgentOverride modifies a pack-stamped agent for a specific rig.
 | `max_active_sessions` | integer |  |  | MaxActiveSessions overrides the agent-level cap on concurrent sessions. |
 | `min_active_sessions` | integer |  |  | MinActiveSessions overrides the minimum number of sessions to keep alive. |
 | `scale_check` | string |  |  | ScaleCheck overrides the shell command whose output reports new unassigned session demand for bead-backed reconciliation. |
+| `scale_check_query` | WorkSelector |  |  | ScaleCheckQuery overrides the typed selector whose count reports new unassigned session demand. When set, WorkSelector must be set to the same selector so controller demand and worker discovery stay paired. |
+| `work_selector` | WorkSelector |  |  | WorkSelector overrides the typed selector used by gc work count/next. |
 | `option_defaults` | map[string]string |  |  | OptionDefaults adds or overrides provider option defaults for this agent. Keys are option keys, values are choice values. Merges additively (override keys win over existing agent keys). Example: option_defaults = &#123; model = "sonnet" &#125; |
 
 ## AgentPatch
@@ -240,6 +244,8 @@ AgentPatch modifies an existing agent identified by (Dir, Name).
 | `max_active_sessions` | integer |  |  | MaxActiveSessions overrides the agent-level cap on concurrent sessions. |
 | `min_active_sessions` | integer |  |  | MinActiveSessions overrides the minimum number of sessions to keep alive. |
 | `scale_check` | string |  |  | ScaleCheck overrides the command template whose output reports new unassigned session demand for bead-backed reconciliation. Supports the same Go template placeholders as Agent.scale_check. |
+| `scale_check_query` | WorkSelector |  |  | ScaleCheckQuery overrides the typed count-side selector. When set, the target agent must also have a matching work_selector after composition. |
+| `work_selector` | WorkSelector |  |  | WorkSelector overrides the typed work predicate used by gc work commands. |
 | `option_defaults` | map[string]string |  |  | OptionDefaults adds or overrides provider option defaults for this agent. Keys are option keys, values are choice values. Merges additively (patch keys win over existing agent keys). Example: option_defaults = &#123; model = "sonnet" &#125; |
 
 ## BeadsConfig
@@ -676,6 +682,24 @@ Tier defines per-token-type rates in USD per 1 million tokens.
 | `completion_usd_per_1m` | number | **yes** |  |  |
 | `cache_read_usd_per_1m` | number | **yes** |  |  |
 | `cache_creation_usd_per_1m` | number | **yes** |  |  |
+
+## WorkSelector
+
+WorkSelector is a declarative bead predicate shared by controller demand and worker discovery.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `status` | string |  |  | Status selects one bead status. Empty defaults to open at evaluation time. Enum: `open`, `in_progress`, `closed` |
+| `type` | string |  |  | Type selects one bead issue_type. Infrastructure types such as step and molecule are included only when explicitly selected here. |
+| `exclude_type` | string |  |  | ExcludeType excludes one bead issue_type. |
+| `label` | string |  |  | Label selects one exact label. |
+| `assignee` | string |  |  | Assignee selects one exact assignee. |
+| `unassigned` | boolean |  |  | Unassigned selects beads with an empty assignee. |
+| `ready` | boolean |  |  | Ready filters to currently unblocked work. Unlike Ready()'s default actionable-work view, explicit Type selectors can opt infrastructure beads such as formula steps into this dependency-aware filter. |
+| `parent` | string |  |  | Parent selects one parent bead ID. |
+| `metadata` | map[string]string |  |  | Metadata selects beads whose metadata contains every key/value pair. |
+| `tier` | string |  |  | Tier selects the physical bead tier: issues (default), wisps, or both. Enum: `issues`, `wisps`, `both` |
+| `sort` | string |  |  | Sort selects deterministic result order. Enum: `created_asc`, `created_desc` |
 
 ## Workspace
 

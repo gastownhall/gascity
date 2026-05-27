@@ -71,6 +71,7 @@ gc [flags]
 | [gc unregister](#gc-unregister) | Remove a city from the machine-wide supervisor |
 | [gc version](#gc-version) | Print gc version |
 | [gc wait](#gc-wait) | Inspect and manage durable session waits |
+| [gc work](#gc-work) | Inspect typed work selectors |
 
 ## gc agent
 
@@ -3684,3 +3685,36 @@ gc wait ready <wait-id> [flags]
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--json` | bool |  | Output in JSONL format |
+
+## gc work
+
+Inspect typed work selectors
+
+```
+gc work
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| [gc work count](#gc-work-count) | Count work matching an agent's typed selector |
+| [gc work next](#gc-work-next) | Print the next work item matching an agent's typed selector |
+
+## gc work count
+
+Count work matching an agent's typed selector
+
+```
+gc work count [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--json` | bool |  | print JSON |
+
+## gc work next
+
+Print the next work item matching an agent's typed selector
+
+```
+gc work next
+```

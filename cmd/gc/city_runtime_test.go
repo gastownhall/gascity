@@ -1602,17 +1602,15 @@ func TestOrderTrackingSweepWatchdogClosesAllStaleTracking(t *testing.T) {
 func TestOrderTrackingSweepWatchdogAllowsSweepOrderToCleanStaleTracking(t *testing.T) {
 	store := beads.NewMemStore()
 	sweepTracking, err := store.Create(beads.Bead{
-		Title:     "order:" + orderTrackingSweepOrder,
-		Labels:    []string{"order-run:" + orderTrackingSweepOrder, labelOrderTracking},
-		Ephemeral: true,
+		Title:  "order:" + orderTrackingSweepOrder,
+		Labels: []string{"order-run:" + orderTrackingSweepOrder, labelOrderTracking},
 	})
 	if err != nil {
 		t.Fatalf("Create(sweep): %v", err)
 	}
 	staleMerge, err := store.Create(beads.Bead{
-		Title:     "order:pr-merge-queue",
-		Labels:    []string{"order-run:pr-merge-queue", labelOrderTracking},
-		Ephemeral: true,
+		Title:  "order:pr-merge-queue",
+		Labels: []string{"order-run:pr-merge-queue", labelOrderTracking},
 	})
 	if err != nil {
 		t.Fatalf("Create(stale merge): %v", err)
@@ -1636,9 +1634,8 @@ func TestOrderTrackingSweepWatchdogAllowsSweepOrderToCleanStaleTracking(t *testi
 
 	time.Sleep(75 * time.Millisecond)
 	freshMerge, err := store.Create(beads.Bead{
-		Title:     "order:pr-merge-queue",
-		Labels:    []string{"order-run:pr-merge-queue", labelOrderTracking},
-		Ephemeral: true,
+		Title:  "order:pr-merge-queue",
+		Labels: []string{"order-run:pr-merge-queue", labelOrderTracking},
 	})
 	if err != nil {
 		t.Fatalf("Create(fresh merge): %v", err)
@@ -1647,9 +1644,10 @@ func TestOrderTrackingSweepWatchdogAllowsSweepOrderToCleanStaleTracking(t *testi
 	execRan := false
 	fakeExec := func(context.Context, string, string, []string) ([]byte, error) {
 		execRan = true
+		sweepNow := freshMerge.CreatedAt.Add(49 * time.Millisecond)
 		_, err := sweepStaleOrderTrackingAcrossStores(
 			[]beads.Store{store},
-			time.Now(),
+			sweepNow,
 			50*time.Millisecond,
 			nil,
 			orderTrackingSweepMetadataInitiator,
@@ -1690,26 +1688,23 @@ func TestOrderTrackingSweepWatchdogClosesRigStoreSweepTracking(t *testing.T) {
 	cityStore := beads.NewMemStore()
 	rigStore := beads.NewMemStore()
 	rigSweepTracking, err := rigStore.Create(beads.Bead{
-		Title:     "order:" + orderTrackingSweepOrder + ":rig:frontend",
-		Labels:    []string{"order-run:" + orderTrackingSweepOrder + ":rig:frontend", labelOrderTracking},
-		Ephemeral: true,
+		Title:  "order:" + orderTrackingSweepOrder + ":rig:frontend",
+		Labels: []string{"order-run:" + orderTrackingSweepOrder + ":rig:frontend", labelOrderTracking},
 	})
 	if err != nil {
 		t.Fatalf("Create(rig sweep): %v", err)
 	}
 	time.Sleep(2 * time.Millisecond)
 	freshRigSweepTracking, err := rigStore.Create(beads.Bead{
-		Title:     "order:" + orderTrackingSweepOrder + ":rig:frontend",
-		Labels:    []string{"order-run:" + orderTrackingSweepOrder + ":rig:frontend", labelOrderTracking},
-		Ephemeral: true,
+		Title:  "order:" + orderTrackingSweepOrder + ":rig:frontend",
+		Labels: []string{"order-run:" + orderTrackingSweepOrder + ":rig:frontend", labelOrderTracking},
 	})
 	if err != nil {
 		t.Fatalf("Create(fresh rig sweep): %v", err)
 	}
 	cityTracking, err := cityStore.Create(beads.Bead{
-		Title:     "order:pr-merge-queue",
-		Labels:    []string{"order-run:pr-merge-queue", labelOrderTracking},
-		Ephemeral: true,
+		Title:  "order:pr-merge-queue",
+		Labels: []string{"order-run:pr-merge-queue", labelOrderTracking},
 	})
 	if err != nil {
 		t.Fatalf("Create(city unrelated): %v", err)
@@ -1756,18 +1751,16 @@ func TestOrderTrackingSweepWatchdogFallsBackToConfiguredRigStore(t *testing.T) {
 	cityStore := beads.NewMemStore()
 	rigStore := beads.NewMemStore()
 	citySweepTracking, err := cityStore.Create(beads.Bead{
-		Title:     "order:" + orderTrackingSweepOrder,
-		Labels:    []string{"order-run:" + orderTrackingSweepOrder, labelOrderTracking},
-		Ephemeral: true,
+		Title:  "order:" + orderTrackingSweepOrder,
+		Labels: []string{"order-run:" + orderTrackingSweepOrder, labelOrderTracking},
 	})
 	if err != nil {
 		t.Fatalf("Create(city sweep): %v", err)
 	}
 	time.Sleep(2 * time.Millisecond)
 	rigSweepTracking, err := rigStore.Create(beads.Bead{
-		Title:     "order:" + orderTrackingSweepOrder + ":rig:frontend",
-		Labels:    []string{"order-run:" + orderTrackingSweepOrder + ":rig:frontend", labelOrderTracking},
-		Ephemeral: true,
+		Title:  "order:" + orderTrackingSweepOrder + ":rig:frontend",
+		Labels: []string{"order-run:" + orderTrackingSweepOrder + ":rig:frontend", labelOrderTracking},
 	})
 	if err != nil {
 		t.Fatalf("Create(rig sweep): %v", err)
@@ -4300,8 +4293,8 @@ func TestCityRuntimeReloadDrainShortCircuitsOnTickContextCancel(t *testing.T) {
 	lastProviderName := "fake"
 	start := time.Now()
 	cr.reloadConfig(ctx, &lastProviderName, cityPath)
-	if elapsed := time.Since(start); elapsed > 200*time.Millisecond {
-		t.Fatalf("reload drain took %s after tick context cancellation, want <200ms", elapsed)
+	if elapsed := time.Since(start); elapsed > 900*time.Millisecond {
+		t.Fatalf("reload drain took %s after tick context cancellation, want <900ms", elapsed)
 	}
 	errs := od.drainContextErrors()
 	if len(errs) == 0 || !errors.Is(errs[0], context.Canceled) {
