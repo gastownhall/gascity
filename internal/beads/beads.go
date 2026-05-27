@@ -25,7 +25,7 @@ type Bead struct {
 	Priority  *int      `json:"priority,omitempty"`
 	CreatedAt time.Time `json:"created_at"`
 	// UpdatedAt is zero for legacy beads; UpdatedBefore falls back to CreatedAt.
-	UpdatedAt    time.Time         `json:"updated_at,omitempty"`
+	UpdatedAt    time.Time         `json:"updated_at,omitempty,omitzero"`
 	Assignee     string            `json:"assignee,omitempty"`
 	From         string            `json:"from,omitempty"`
 	ParentID     string            `json:"parent,omitempty"`      // step → molecule; matches bd wire format
