@@ -92,11 +92,9 @@ func (c *OrderFiringCurrentCheck) Run(ctx *CheckContext) *CheckResult {
 	worst := StatusOK
 	monitored := 0
 	var firstNonOK string
-	// Track severity contributions across the monitored orders. The aggregate
-	// result Severity is Blocking unless every non-OK entry was Advisory —
-	// a single Blocking error must keep the whole check blocking so cooldown
-	// stale failures still gate dispatch consumers.
-	var blockingNonOK, advisoryNonOK int
+	// Track severity contributions across error-level entries. Warnings should
+	// stay visible without converting an advisory error into a blocking gate.
+	var blockingErrors, advisoryErrors int
 
 	for _, order := range allOrders {
 		if order.Trigger != "cron" && order.Trigger != "cooldown" {
@@ -110,7 +108,7 @@ func (c *OrderFiringCurrentCheck) Run(ctx *CheckContext) *CheckResult {
 			if firstNonOK == "" {
 				firstNonOK = orderHistoryHintTarget(order)
 			}
-			blockingNonOK++
+			blockingErrors++
 			continue
 		}
 		status, severity, detail := classifyOrderFiring(order, now, expected, latestOrderFiredAt(firedEvents, order.ScopedName()), startedAt)
@@ -120,10 +118,12 @@ func (c *OrderFiringCurrentCheck) Run(ctx *CheckContext) *CheckResult {
 			if firstNonOK == "" {
 				firstNonOK = orderHistoryHintTarget(order)
 			}
-			if severity == SeverityBlocking {
-				blockingNonOK++
-			} else {
-				advisoryNonOK++
+			if status == StatusError {
+				if severity == SeverityBlocking {
+					blockingErrors++
+				} else {
+					advisoryErrors++
+				}
 			}
 		}
 	}
@@ -143,7 +143,7 @@ func (c *OrderFiringCurrentCheck) Run(ctx *CheckContext) *CheckResult {
 	case StatusError:
 		result.Message = "scheduled orders are stale"
 	}
-	if blockingNonOK == 0 && advisoryNonOK > 0 {
+	if blockingErrors == 0 && advisoryErrors > 0 {
 		result.Severity = SeverityAdvisory
 	}
 	if firstNonOK != "" {
@@ -394,12 +394,14 @@ func classifyOrderFiring(order orders.Order, now time.Time, expected time.Durati
 		}
 		uptime := nonNegativeDuration(now.Sub(controllerStarted))
 		if uptime >= expected+expected/2 {
-			// Advisory: a scheduled order that has never fired since the
-			// controller started may simply be the cron-scheduler bug
-			// (ga-97qngx), not a real outage. Dispatch gates should not
-			// wedge on it. Cooldown overdue/stale paths below remain
-			// blocking because they indicate a true execution gap.
-			return StatusError, SeverityAdvisory, fmt.Sprintf("%s: never fired since controller start %s ago", name, formatOrderFiringDuration(uptime))
+			// Advisory only for cron: a cron order that has never fired since
+			// controller start may be the cron-scheduler bug (ga-97qngx), not
+			// a real outage. Cooldown never-fired/stale paths remain blocking
+			// because they indicate an execution gap.
+			if order.Trigger == "cron" {
+				return StatusError, SeverityAdvisory, fmt.Sprintf("%s: never fired since controller start %s ago", name, formatOrderFiringDuration(uptime))
+			}
+			return StatusError, SeverityBlocking, fmt.Sprintf("%s: never fired since controller start %s ago", name, formatOrderFiringDuration(uptime))
 		}
 		return StatusOK, SeverityBlocking, fmt.Sprintf("%s: never fired (controller running %s, within first cycle)", name, formatOrderFiringDuration(uptime))
 	}

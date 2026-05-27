@@ -82,6 +82,47 @@ func TestOrderFiringCurrent_MixedAdvisoryAndBlocking_AggregatesBlocking(t *testi
 	}
 }
 
+func TestOrderFiringCurrent_MixedAdvisoryAndWarning_AggregatesAdvisory(t *testing.T) {
+	// A warning-level overdue order should stay visible in details without
+	// converting an advisory error into a blocking gate failure.
+	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
+	cityPath, cfg := orderFiringTestCity(t)
+	writeOrderFiringTestOrder(t, cityPath, "mol-dog-stale-db", "cron", "0 */4 * * *")
+	writeOrderFiringTestOrder(t, cityPath, "cleanup-cooldown", "cooldown", "1h")
+	writeOrderFiringTestEvents(t, cityPath,
+		events.Event{Type: events.ControllerStarted, Ts: now.Add(-24 * time.Hour)},
+		events.Event{Type: events.OrderFired, Subject: "cleanup-cooldown", Ts: now.Add(-2 * time.Hour)},
+	)
+
+	result := runOrderFiringCurrentTest(t, cfg, cityPath, now)
+	if result.Status != StatusError {
+		t.Fatalf("status = %v, want error; msg = %s; details = %v", result.Status, result.Message, result.Details)
+	}
+	if result.Severity != SeverityAdvisory {
+		t.Fatalf("Severity = %v, want SeverityAdvisory when only error entries are advisory", result.Severity)
+	}
+}
+
+func TestOrderFiringCurrent_NeverFiredCooldown_StaysBlocking(t *testing.T) {
+	// Never-fired cooldown orders represent the same execution gap as stale
+	// cooldown orders and should continue to gate dispatch consumers.
+	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
+	cityPath, cfg := orderFiringTestCity(t)
+	writeOrderFiringTestOrder(t, cityPath, "cleanup-cooldown", "cooldown", "1h")
+	writeOrderFiringTestEvents(t, cityPath, events.Event{
+		Type: events.ControllerStarted,
+		Ts:   now.Add(-2 * time.Hour),
+	})
+
+	result := runOrderFiringCurrentTest(t, cfg, cityPath, now)
+	if result.Status != StatusError {
+		t.Fatalf("status = %v, want error; msg = %s; details = %v", result.Status, result.Message, result.Details)
+	}
+	if result.Severity != SeverityBlocking {
+		t.Fatalf("Severity = %v, want SeverityBlocking for never-fired cooldown", result.Severity)
+	}
+}
+
 func TestOrderFiringCurrent_NeverFired_WithinFirstCycle(t *testing.T) {
 	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
 	cityPath, cfg := orderFiringTestCity(t)
