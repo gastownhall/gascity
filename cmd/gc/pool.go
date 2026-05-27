@@ -253,6 +253,8 @@ func deepCopyAgent(src *config.Agent, name, dir string) config.Agent {
 		PoolName:             src.QualifiedName(),
 		Implicit:             src.Implicit,
 		ScaleCheck:           src.ScaleCheck,
+		ScaleCheckQuery:      cloneWorkSelector(src.ScaleCheckQuery),
+		WorkSelector:         cloneWorkSelector(src.WorkSelector),
 		BindingName:          src.BindingName,
 		PackName:             src.PackName,
 	}
@@ -358,6 +360,17 @@ func deepCopyAgent(src *config.Agent, name, dir string) config.Agent {
 		dst.OptionDefaults = make(map[string]string, len(src.OptionDefaults))
 		for k, v := range src.OptionDefaults {
 			dst.OptionDefaults[k] = v
+		}
+	}
+	return dst
+}
+
+func cloneWorkSelector(src config.WorkSelector) config.WorkSelector {
+	dst := src
+	if len(src.Metadata) > 0 {
+		dst.Metadata = make(map[string]string, len(src.Metadata))
+		for k, v := range src.Metadata {
+			dst.Metadata[k] = v
 		}
 	}
 	return dst

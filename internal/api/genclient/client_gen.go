@@ -361,6 +361,7 @@ type AgentPatch struct {
 	Provider                *string           `json:"Provider"`
 	ResumeCommand           *string           `json:"ResumeCommand"`
 	ScaleCheck              *string           `json:"ScaleCheck"`
+	ScaleCheckQuery         WorkSelector      `json:"ScaleCheckQuery"`
 	Scope                   *string           `json:"Scope"`
 	Session                 *string           `json:"Session"`
 	SessionLive             *[]string         `json:"SessionLive"`
@@ -376,6 +377,7 @@ type AgentPatch struct {
 	TmuxAlias               *string           `json:"TmuxAlias"`
 	WakeMode                *string           `json:"WakeMode"`
 	WorkDir                 *string           `json:"WorkDir"`
+	WorkSelector            WorkSelector      `json:"WorkSelector"`
 }
 
 // AgentPatchSetInputBody defines model for AgentPatchSetInputBody.
@@ -4420,6 +4422,20 @@ type TypedTaggedEventStreamEnvelopeWorkerOperation struct {
 type UnboundEventPayload struct {
 	Count     int64  `json:"count"`
 	SessionId string `json:"session_id"`
+}
+
+// WorkSelector defines model for WorkSelector.
+type WorkSelector struct {
+	Assignee    string            `json:"Assignee"`
+	ExcludeType string            `json:"ExcludeType"`
+	Label       string            `json:"Label"`
+	Metadata    map[string]string `json:"Metadata"`
+	Parent      string            `json:"Parent"`
+	Sort        string            `json:"Sort"`
+	Status      string            `json:"Status"`
+	Tier        string            `json:"Tier"`
+	Type        string            `json:"Type"`
+	Unassigned  bool              `json:"Unassigned"`
 }
 
 // WorkerOperationEventPayload defines model for WorkerOperationEventPayload.

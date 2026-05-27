@@ -175,6 +175,33 @@ func TestCoreCommandNames(t *testing.T) {
 	}
 }
 
+func TestShouldSkipEagerPackCommandDiscoveryForCoreCommands(t *testing.T) {
+	root := &cobra.Command{Use: "gc"}
+	root.AddCommand(&cobra.Command{Use: "supervisor"})
+	root.AddCommand(&cobra.Command{Use: "start"})
+
+	tests := []struct {
+		name string
+		args []string
+		want bool
+	}{
+		{name: "supervisor", args: []string{"supervisor", "run"}, want: true},
+		{name: "global city flag", args: []string{"--city", "/tmp/city", "supervisor", "run"}, want: true},
+		{name: "global city equals flag", args: []string{"--city=/tmp/city", "start"}, want: true},
+		{name: "pack command", args: []string{"backstage", "hello"}, want: false},
+		{name: "root help", args: nil, want: false},
+		{name: "flag only", args: []string{"--help"}, want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := shouldSkipEagerPackCommandDiscovery(root, tt.args); got != tt.want {
+				t.Fatalf("shouldSkipEagerPackCommandDiscovery(%v) = %v, want %v", tt.args, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestPackCommandTemplateExpansion(t *testing.T) {
 	result := expandScriptTemplate("{{.CityRoot}}/bin/run.sh", "/home/user/city", "mytown", "/packs/p1")
 	if result != "/home/user/city/bin/run.sh" {

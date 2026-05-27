@@ -509,6 +509,12 @@ func Instantiate(ctx context.Context, store beads.Store, recipe *formula.Recipe,
 		}
 
 		b := stepToBead(step, vars, priorityOverride)
+		if b.Metadata == nil {
+			b.Metadata = make(map[string]string, 1)
+		}
+		if b.Metadata["formula"] == "" {
+			b.Metadata["formula"] = recipe.Name
+		}
 		if opts.DeferAssignees {
 			deferBeadRouting(&b)
 		}

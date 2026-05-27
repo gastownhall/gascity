@@ -1,6 +1,7 @@
 package beads
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"time"
@@ -101,6 +102,20 @@ func (c *CachingStore) List(query ListQuery) ([]Bead, error) {
 func liveListQuery(query ListQuery) ListQuery {
 	query.Live = true
 	return query
+}
+
+// CountIndexed delegates cheap aggregate counts to the backing indexed store.
+// The in-memory cache intentionally holds only active rows, so all-status row
+// counts must be answered by the authoritative indexed reader.
+func (c *CachingStore) CountIndexed(ctx context.Context, query ListQuery) (int, error) {
+	if c == nil || c.backing == nil {
+		return 0, ErrIndexedListUnsupported
+	}
+	counter, ok := c.backing.(IndexedCounter)
+	if !ok {
+		return 0, ErrIndexedListUnsupported
+	}
+	return counter.CountIndexed(ctx, liveListQuery(query))
 }
 
 // CachedList returns query results from the in-memory cache only. The boolean

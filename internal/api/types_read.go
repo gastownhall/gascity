@@ -71,6 +71,7 @@ type StatusAgentView struct {
 	Scope         string
 	Running       bool
 	Suspended     bool
+	Draining      bool
 	SessionName   string
 	GroupName     string
 	ScaleLabel    string

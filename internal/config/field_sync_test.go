@@ -164,6 +164,7 @@ func TestApplyAgentPatchCoversAllFields(t *testing.T) {
 	trueVal := true
 	strVal := func(s string) *string { return &s }
 	intVal := func(n int) *int { return &n }
+	selectorVal := &WorkSelector{Type: "task", Unassigned: true, Metadata: map[string]string{"gc.routed_to": "worker"}}
 
 	patch := AgentPatch{
 		Dir:                     "target-dir",
@@ -212,6 +213,8 @@ func TestApplyAgentPatchCoversAllFields(t *testing.T) {
 		MaxActiveSessions:       intVal(5),
 		MinActiveSessions:       intVal(1),
 		ScaleCheck:              strVal("echo 3"),
+		ScaleCheckQuery:         selectorVal,
+		WorkSelector:            selectorVal,
 		OptionDefaults:          map[string]string{"model": "sonnet"},
 	}
 
@@ -315,6 +318,7 @@ func TestApplyAgentOverrideCoversAllFields(t *testing.T) {
 	trueVal := true
 	strVal := func(s string) *string { return &s }
 	intVal := func(n int) *int { return &n }
+	selectorVal := &WorkSelector{Type: "task", Unassigned: true, Metadata: map[string]string{"gc.routed_to": "worker"}}
 
 	override := AgentOverride{
 		Agent:                   "target",
@@ -363,6 +367,8 @@ func TestApplyAgentOverrideCoversAllFields(t *testing.T) {
 		MaxActiveSessions:       intVal(5),
 		MinActiveSessions:       intVal(1),
 		ScaleCheck:              strVal("echo 3"),
+		ScaleCheckQuery:         selectorVal,
+		WorkSelector:            selectorVal,
 		OptionDefaults:          map[string]string{"model": "sonnet"},
 	}
 

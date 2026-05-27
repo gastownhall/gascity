@@ -1958,6 +1958,73 @@ func TestValidateAgentsCustomQueries(t *testing.T) {
 	}
 }
 
+func TestValidateAgentsTypedWorkSelectorPairing(t *testing.T) {
+	selector := WorkSelector{Type: "task", Unassigned: true, Metadata: map[string]string{"gc.routed_to": "worker"}}
+	if err := ValidateAgents([]Agent{{Name: "worker", WorkSelector: selector, ScaleCheckQuery: selector}}); err != nil {
+		t.Fatalf("ValidateAgents paired selector: %v", err)
+	}
+	if err := ValidateAgents([]Agent{{Name: "worker", ScaleCheckQuery: selector}}); err == nil || !strings.Contains(err.Error(), "requires a matching work_selector") {
+		t.Fatalf("ValidateAgents count-only selector err = %v, want matching work_selector error", err)
+	}
+	if err := ValidateAgents([]Agent{{Name: "worker", ScaleCheck: "echo 1", ScaleCheckQuery: selector, WorkSelector: selector}}); err == nil || !strings.Contains(err.Error(), "mutually exclusive") {
+		t.Fatalf("ValidateAgents scale_check+scale_check_query err = %v, want mutually exclusive", err)
+	}
+	mismatched := selector
+	mismatched.Type = "bug"
+	if err := ValidateAgents([]Agent{{Name: "worker", WorkSelector: selector, ScaleCheckQuery: mismatched}}); err == nil || !strings.Contains(err.Error(), "must match work_selector") {
+		t.Fatalf("ValidateAgents mismatched selector err = %v, want match error", err)
+	}
+}
+
+func TestLoadAgentTypedWorkSelectors(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "city.toml")
+	content := `[workspace]
+name = "demo"
+
+[[agent]]
+name = "worker"
+
+[agent.work_selector]
+type = "step"
+unassigned = true
+ready = true
+sort = "created_desc"
+
+[agent.work_selector.metadata]
+"gc.routed_to" = "{{.Rig}}/worker"
+
+[agent.scale_check_query]
+type = "step"
+unassigned = true
+ready = true
+sort = "created_desc"
+
+[agent.scale_check_query.metadata]
+"gc.routed_to" = "{{.Rig}}/worker"
+`
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	cfg, err := Load(fsys.OSFS{}, path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(cfg.Agents) != 1 {
+		t.Fatalf("agents = %d, want 1", len(cfg.Agents))
+	}
+	worker := cfg.Agents[0]
+	if worker.WorkSelector.Type != "step" || !worker.WorkSelector.Unassigned || !worker.WorkSelector.Ready || worker.WorkSelector.Sort != "created_desc" {
+		t.Fatalf("work_selector = %+v, want parsed step/unassigned/ready/created_desc", worker.WorkSelector)
+	}
+	if got := worker.WorkSelector.Metadata["gc.routed_to"]; got != "{{.Rig}}/worker" {
+		t.Fatalf("work_selector metadata = %q", got)
+	}
+	if !worker.ScaleCheckQuery.Equivalent(worker.WorkSelector) {
+		t.Fatalf("scale_check_query = %+v, want equivalent to work_selector %+v", worker.ScaleCheckQuery, worker.WorkSelector)
+	}
+}
+
 func TestValidateAgentsFixedAgentUnpairedOK(t *testing.T) {
 	// Fixed agents don't require matched pairs.
 	agents := []Agent{{

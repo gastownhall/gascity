@@ -58,6 +58,7 @@ type StatusAgentJSON struct {
 	Scope         string    `json:"scope"`
 	Running       bool      `json:"running"`
 	Suspended     bool      `json:"suspended"`
+	Draining      bool      `json:"draining,omitempty"`
 	Pool          *PoolJSON `json:"pool,omitempty"`
 }
 
@@ -273,11 +274,13 @@ func snapshotFromStatusView(cityPath string, v api.StatusView) cityStatusSnapsho
 				Scope:         a.Scope,
 				Running:       a.Running,
 				Suspended:     a.Suspended,
+				Draining:      a.Draining,
 			},
 			SessionName: a.SessionName,
 			GroupName:   a.GroupName,
 			ScaleLabel:  a.ScaleLabel,
 			Expanded:    a.Expanded,
+			DrainKnown:  true,
 		})
 	}
 	for _, r := range v.Rigs {

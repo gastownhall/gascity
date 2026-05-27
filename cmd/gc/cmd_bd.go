@@ -7,8 +7,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"time"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/spf13/cobra"
 )
@@ -169,6 +172,10 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 	reapStaleBdExportJSONL(target.ScopeRoot)
 	warnExternalBdOverrideDrift(stderr, cityPath, target)
 
+	if handled, code := maybeRunIndexedBdList(cityPath, target, bdArgs, stdout, stderr); handled {
+		return code
+	}
+
 	bdPath, err := exec.LookPath("bd")
 	if err != nil {
 		fmt.Fprintln(stderr, "gc bd: bd not found in PATH") //nolint:errcheck // best-effort stderr
@@ -222,6 +229,257 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 	}
 
 	return 0
+}
+
+type indexedBdListQuery struct {
+	Query      beads.ListQuery
+	Unassigned bool
+}
+
+func maybeRunIndexedBdList(cityPath string, target execStoreTarget, args []string, stdout, stderr io.Writer) (bool, int) {
+	parsed, ok, reason := parseIndexedBdListQuery(args)
+	if !ok {
+		if reason != "" {
+			logRoute(stderr, "bd list", "fallback", reason)
+		}
+		return false, 0
+	}
+	store, err := openStoreAtForCity(target.ScopeRoot, cityPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc bd list: %v\n", err) //nolint:errcheck // best-effort stderr
+		return true, 1
+	}
+	query := parsed.Query
+	storeQuery := query
+	if parsed.Unassigned && storeQuery.Limit > 0 {
+		storeQuery.Limit = 0
+	}
+	items, err := store.List(storeQuery)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc bd list: %v\n", err) //nolint:errcheck // best-effort stderr
+		return true, 1
+	}
+	if parsed.Unassigned {
+		items = filterUnassignedBdList(items)
+		if query.Limit > 0 && len(items) > query.Limit {
+			items = items[:query.Limit]
+		}
+	}
+	writeBeadsJSON(items, stdout)
+	logRoute(stderr, "bd list", "indexed", "")
+	return true, 0
+}
+
+func parseIndexedBdListQuery(args []string) (indexedBdListQuery, bool, string) {
+	var parsed indexedBdListQuery
+	query := &parsed.Query
+	if strings.TrimSpace(os.Getenv("GC_BD_INDEX_READS")) != "1" {
+		return parsed, false, ""
+	}
+	if strings.TrimSpace(os.Getenv("GC_BD_LIST_PASSTHROUGH")) == "1" {
+		return parsed, false, "env-passthrough"
+	}
+	if len(args) == 0 || args[0] != "list" {
+		return parsed, false, ""
+	}
+	query.AllowScan = true
+	formatJSON := false
+	for i := 1; i < len(args); i++ {
+		arg := args[i]
+		switch {
+		case arg == "--json":
+			formatJSON = true
+		case arg == "--include-infra" || arg == "--include-gates":
+			// Indexed active reads include infrastructure/gate rows unless the
+			// caller asks for an explicit --exclude-type.
+		case arg == "--all":
+			query.IncludeClosed = true
+		case arg == "--no-assignee":
+			parsed.Unassigned = true
+		case arg == "--status" || arg == "-s":
+			value, ok := nextBdListArg(args, &i)
+			if !ok {
+				return parsed, false, "missing-status"
+			}
+			query.Status = value
+		case strings.HasPrefix(arg, "--status="):
+			query.Status = strings.TrimPrefix(arg, "--status=")
+		case strings.HasPrefix(arg, "-s="):
+			query.Status = strings.TrimPrefix(arg, "-s=")
+		case arg == "--label":
+			value, ok := nextBdListArg(args, &i)
+			if !ok {
+				return parsed, false, "missing-label"
+			}
+			query.Label = value
+		case strings.HasPrefix(arg, "--label="):
+			query.Label = strings.TrimPrefix(arg, "--label=")
+		case arg == "--assignee":
+			value, ok := nextBdListArg(args, &i)
+			if !ok {
+				return parsed, false, "assignee"
+			}
+			if strings.TrimSpace(value) == "" {
+				parsed.Unassigned = true
+				continue
+			}
+			query.Assignee = value
+		case strings.HasPrefix(arg, "--assignee="):
+			value := strings.TrimPrefix(arg, "--assignee=")
+			if strings.TrimSpace(value) == "" {
+				parsed.Unassigned = true
+				continue
+			}
+			query.Assignee = value
+		case arg == "--type" || arg == "-t":
+			value, ok := nextBdListArg(args, &i)
+			if !ok {
+				return parsed, false, "missing-type"
+			}
+			query.Type = value
+		case strings.HasPrefix(arg, "--type="):
+			query.Type = strings.TrimPrefix(arg, "--type=")
+		case strings.HasPrefix(arg, "-t="):
+			query.Type = strings.TrimPrefix(arg, "-t=")
+		case arg == "--exclude-type":
+			value, ok := nextBdListArg(args, &i)
+			if !ok {
+				return parsed, false, "missing-exclude-type"
+			}
+			query.ExcludeType = value
+		case strings.HasPrefix(arg, "--exclude-type="):
+			query.ExcludeType = strings.TrimPrefix(arg, "--exclude-type=")
+		case arg == "--metadata-field":
+			value, ok := nextBdListArg(args, &i)
+			if !ok {
+				return parsed, false, "missing-metadata-field"
+			}
+			if !addBdListMetadataField(query, value) {
+				return parsed, false, "metadata-field"
+			}
+		case strings.HasPrefix(arg, "--metadata-field="):
+			if !addBdListMetadataField(query, strings.TrimPrefix(arg, "--metadata-field=")) {
+				return parsed, false, "metadata-field"
+			}
+		case arg == "--parent":
+			value, ok := nextBdListArg(args, &i)
+			if !ok {
+				return parsed, false, "missing-parent"
+			}
+			query.ParentID = value
+		case strings.HasPrefix(arg, "--parent="):
+			query.ParentID = strings.TrimPrefix(arg, "--parent=")
+		case arg == "--limit":
+			value, ok := nextBdListArg(args, &i)
+			if !ok {
+				return parsed, false, "missing-limit"
+			}
+			limit, err := strconv.Atoi(value)
+			if err != nil || limit < 0 {
+				return parsed, false, "limit"
+			}
+			query.Limit = limit
+		case strings.HasPrefix(arg, "--limit="):
+			limit, err := strconv.Atoi(strings.TrimPrefix(arg, "--limit="))
+			if err != nil || limit < 0 {
+				return parsed, false, "limit"
+			}
+			query.Limit = limit
+		case arg == "--created-before":
+			value, ok := nextBdListArg(args, &i)
+			if !ok {
+				return parsed, false, "missing-created-before"
+			}
+			createdBefore, err := time.Parse(time.RFC3339Nano, value)
+			if err != nil {
+				return parsed, false, "created-before"
+			}
+			query.CreatedBefore = createdBefore
+		case strings.HasPrefix(arg, "--created-before="):
+			createdBefore, err := time.Parse(time.RFC3339Nano, strings.TrimPrefix(arg, "--created-before="))
+			if err != nil {
+				return parsed, false, "created-before"
+			}
+			query.CreatedBefore = createdBefore
+		default:
+			return parsed, false, "unsupported-arg"
+		}
+	}
+	if !formatJSON {
+		return parsed, false, "format"
+	}
+	switch query.Status {
+	case "", "open", "in_progress", "closed":
+	default:
+		return parsed, false, "status"
+	}
+	if query.Type == "wisp" {
+		return parsed, false, "wisp-tier"
+	}
+	if query.Status == "closed" && !isIndexedBdListHistoryQuery(query) {
+		return parsed, false, "status"
+	}
+	if query.IncludeClosed && !isIndexedBdListHistoryQuery(query) {
+		return parsed, false, "all"
+	}
+	if parsed.Unassigned && strings.TrimSpace(query.Assignee) != "" {
+		return parsed, false, "assignee"
+	}
+	return parsed, true, ""
+}
+
+func isIndexedBdListHistoryQuery(query *beads.ListQuery) bool {
+	if query == nil {
+		return false
+	}
+	if len(query.Metadata) > 0 {
+		return true
+	}
+	if query.Type == "session" || query.Label == "gc:session" {
+		return true
+	}
+	if query.ParentID != "" {
+		return true
+	}
+	if query.Limit <= 0 {
+		return false
+	}
+	return query.Label != "" ||
+		query.Type != "" ||
+		query.Assignee != "" ||
+		query.ParentID != "" ||
+		!query.CreatedBefore.IsZero()
+}
+
+func nextBdListArg(args []string, idx *int) (string, bool) {
+	if *idx+1 >= len(args) {
+		return "", false
+	}
+	*idx++
+	return args[*idx], true
+}
+
+func filterUnassignedBdList(items []beads.Bead) []beads.Bead {
+	filtered := items[:0]
+	for _, item := range items {
+		if strings.TrimSpace(item.Assignee) == "" {
+			filtered = append(filtered, item)
+		}
+	}
+	return filtered
+}
+
+func addBdListMetadataField(query *beads.ListQuery, value string) bool {
+	key, val, ok := strings.Cut(value, "=")
+	key = strings.TrimSpace(key)
+	if !ok || key == "" {
+		return false
+	}
+	if query.Metadata == nil {
+		query.Metadata = map[string]string{}
+	}
+	query.Metadata[key] = val
+	return true
 }
 
 func resolveBdCity(cityName string) (string, error) {

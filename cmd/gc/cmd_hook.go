@@ -13,6 +13,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/workselect"
 )
 
 func newHookCmd(stdout, stderr io.Writer) *cobra.Command {
@@ -113,6 +114,24 @@ func cmdHookWithFormat(args []string, inject bool, hookFormat string, stdout, st
 	}
 
 	cityName := loadedCityName(cfg, cityPath)
+	if !a.WorkSelector.IsZero() {
+		selector := expandWorkSelectorTemplates(cityPath, cityName, &a, cfg.Rigs, "work_selector", a.WorkSelector, stderr)
+		store, err := openStoreAtForCity(agentStoreRoot(cityPath, cfg, &a), cityPath)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc hook: %v\n", err) //nolint:errcheck
+			return 1
+		}
+		items, err := workselect.List(store, selector, 1)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc hook: %v\n", err) //nolint:errcheck
+			return 1
+		}
+		writeBeadsJSON(items, stdout)
+		if len(items) == 0 {
+			return 1
+		}
+		return 0
+	}
 	workQuery := a.EffectiveWorkQuery()
 	// Expand {{.Rig}}/{{.AgentBase}} in user-supplied work_query so agent-side
 	// hook invocation sees the same rig substitution as the controller-side

@@ -384,6 +384,108 @@ type NamedSession struct {
 	BindingName string `toml:"-" json:"-"`
 }
 
+// WorkSelector is a declarative bead predicate shared by controller demand,
+// worker discovery, and atomic claim commands.
+type WorkSelector struct {
+	// Status selects one bead status. Empty defaults to open at evaluation time.
+	Status string `toml:"status,omitempty" jsonschema:"enum=open,enum=in_progress,enum=closed"`
+	// Type selects one bead issue_type. Infrastructure types such as step and
+	// molecule are included only when explicitly selected here.
+	Type string `toml:"type,omitempty"`
+	// ExcludeType excludes one bead issue_type.
+	ExcludeType string `toml:"exclude_type,omitempty"`
+	// Label selects one exact label.
+	Label string `toml:"label,omitempty"`
+	// Assignee selects one exact assignee.
+	Assignee string `toml:"assignee,omitempty"`
+	// Unassigned selects beads with an empty assignee.
+	Unassigned bool `toml:"unassigned,omitempty"`
+	// Ready filters to currently unblocked work. Unlike Ready()'s default
+	// actionable-work view, explicit Type selectors can opt infrastructure
+	// beads such as formula steps into this dependency-aware filter.
+	Ready bool `toml:"ready,omitempty"`
+	// Parent selects one parent bead ID.
+	Parent string `toml:"parent,omitempty"`
+	// Metadata selects beads whose metadata contains every key/value pair.
+	Metadata map[string]string `toml:"metadata,omitempty"`
+	// Tier selects the physical bead tier: issues (default), wisps, or both.
+	Tier string `toml:"tier,omitempty" jsonschema:"enum=issues,enum=wisps,enum=both"`
+	// Sort selects deterministic result order.
+	Sort string `toml:"sort,omitempty" jsonschema:"enum=created_asc,enum=created_desc"`
+}
+
+// IsZero reports whether the selector has no configured fields.
+func (s WorkSelector) IsZero() bool {
+	return strings.TrimSpace(s.Status) == "" &&
+		strings.TrimSpace(s.Type) == "" &&
+		strings.TrimSpace(s.ExcludeType) == "" &&
+		strings.TrimSpace(s.Label) == "" &&
+		strings.TrimSpace(s.Assignee) == "" &&
+		!s.Unassigned &&
+		!s.Ready &&
+		strings.TrimSpace(s.Parent) == "" &&
+		len(s.Metadata) == 0 &&
+		strings.TrimSpace(s.Tier) == "" &&
+		strings.TrimSpace(s.Sort) == ""
+}
+
+// Equivalent reports whether two selectors normalize to the same predicate.
+func (s WorkSelector) Equivalent(other WorkSelector) bool {
+	return s.normalized() == other.normalized()
+}
+
+type normalizedWorkSelector struct {
+	status      string
+	typ         string
+	excludeType string
+	label       string
+	assignee    string
+	unassigned  bool
+	ready       bool
+	parent      string
+	metadata    string
+	tier        string
+	sort        string
+}
+
+func (s WorkSelector) normalized() normalizedWorkSelector {
+	return normalizedWorkSelector{
+		status:      strings.TrimSpace(s.Status),
+		typ:         strings.TrimSpace(s.Type),
+		excludeType: strings.TrimSpace(s.ExcludeType),
+		label:       strings.TrimSpace(s.Label),
+		assignee:    strings.TrimSpace(s.Assignee),
+		unassigned:  s.Unassigned,
+		ready:       s.Ready,
+		parent:      strings.TrimSpace(s.Parent),
+		metadata:    normalizedMetadataSelector(s.Metadata),
+		tier:        strings.TrimSpace(s.Tier),
+		sort:        strings.TrimSpace(s.Sort),
+	}
+}
+
+func normalizedMetadataSelector(metadata map[string]string) string {
+	if len(metadata) == 0 {
+		return ""
+	}
+	keys := make([]string, 0, len(metadata))
+	for k := range metadata {
+		keys = append(keys, strings.TrimSpace(k))
+	}
+	sort.Strings(keys)
+	var b strings.Builder
+	for _, k := range keys {
+		if k == "" {
+			continue
+		}
+		b.WriteString(k)
+		b.WriteByte('=')
+		b.WriteString(strings.TrimSpace(metadata[k]))
+		b.WriteByte('\n')
+	}
+	return b.String()
+}
+
 // QualifiedName returns the canonical identity of the named session.
 // For V2 sessions with a binding, the public identity is qualified as
 // "binding.name" or "binding.template".
@@ -643,6 +745,12 @@ type AgentOverride struct {
 	// ScaleCheck overrides the shell command whose output reports new
 	// unassigned session demand for bead-backed reconciliation.
 	ScaleCheck *string `toml:"scale_check,omitempty"`
+	// ScaleCheckQuery overrides the typed selector whose count reports new
+	// unassigned session demand. When set, WorkSelector must be set to the
+	// same selector so controller demand and worker discovery stay paired.
+	ScaleCheckQuery *WorkSelector `toml:"scale_check_query,omitempty"`
+	// WorkSelector overrides the typed selector used by gc work count/next/claim.
+	WorkSelector *WorkSelector `toml:"work_selector,omitempty"`
 	// OptionDefaults adds or overrides provider option defaults for this agent.
 	// Keys are option keys, values are choice values. Merges additively
 	// (override keys win over existing agent keys).
@@ -2244,6 +2352,10 @@ type Agent struct {
 	// session_setup (Agent, AgentBase, Rig, RigRoot, CityRoot, CityName)
 	// before running the command.
 	ScaleCheck string `toml:"scale_check,omitempty"`
+	// ScaleCheckQuery is the typed count-side selector for new session demand.
+	// It must be paired with an identical WorkSelector so the controller,
+	// worker discovery, and claim path use the same normalized predicate.
+	ScaleCheckQuery WorkSelector `toml:"scale_check_query,omitempty"`
 	// DrainTimeout is the maximum time to wait for a session to finish its
 	// current work before force-killing it during scale-down. Duration string
 	// (e.g., "5m", "30m", "1h"). Defaults to "5m".
@@ -2290,6 +2402,11 @@ type Agent struct {
 	// reconciler/scale_check paths decide when sessions are created.
 	// Custom sling_query and work_query can be overridden independently.
 	SlingQuery string `toml:"sling_query,omitempty"`
+	// WorkSelector is the typed work predicate used by `gc work count`,
+	// `gc work next`, and `gc work claim`. It is intentionally declarative so
+	// controller demand, discovery, and claim can share one compiled selector
+	// instead of duplicating shell predicates.
+	WorkSelector WorkSelector `toml:"work_selector,omitempty"`
 	// IdleTimeout is the maximum time an agent session can be inactive before
 	// the controller kills and restarts it. Duration string (e.g., "15m", "1h").
 	// Empty (default) disables idle checking.
@@ -3336,6 +3453,9 @@ func ValidateAgents(agents []Agent) error {
 			return fmt.Errorf("agent %q: min_active_sessions (%d) must be <= max_active_sessions (%d)",
 				a.Name, *a.MinActiveSessions, *a.MaxActiveSessions)
 		}
+		if err := validateAgentWorkSelectors(a); err != nil {
+			return err
+		}
 	}
 
 	// Validate depends_on references and detect cycles.
@@ -3343,6 +3463,67 @@ func ValidateAgents(agents []Agent) error {
 		return err
 	}
 
+	return nil
+}
+
+func validateAgentWorkSelectors(a Agent) error {
+	if err := validateWorkSelector(a.QualifiedName(), "work_selector", a.WorkSelector); err != nil {
+		return err
+	}
+	if err := validateWorkSelector(a.QualifiedName(), "scale_check_query", a.ScaleCheckQuery); err != nil {
+		return err
+	}
+	hasScaleCheck := strings.TrimSpace(a.ScaleCheck) != ""
+	hasScaleCheckQuery := !a.ScaleCheckQuery.IsZero()
+	hasWorkSelector := !a.WorkSelector.IsZero()
+	if hasScaleCheck && hasScaleCheckQuery {
+		return fmt.Errorf("agent %q: scale_check and scale_check_query are mutually exclusive", a.QualifiedName())
+	}
+	if hasScaleCheckQuery && !hasWorkSelector {
+		return fmt.Errorf("agent %q: scale_check_query requires a matching work_selector", a.QualifiedName())
+	}
+	if hasScaleCheckQuery && hasWorkSelector && !a.ScaleCheckQuery.Equivalent(a.WorkSelector) {
+		return fmt.Errorf("agent %q: scale_check_query must match work_selector", a.QualifiedName())
+	}
+	if hasScaleCheck && hasWorkSelector {
+		return fmt.Errorf("agent %q: scale_check cannot be combined with work_selector; use scale_check_query for typed demand", a.QualifiedName())
+	}
+	if hasWorkSelector && strings.TrimSpace(a.WorkQuery) != "" {
+		return fmt.Errorf("agent %q: work_query cannot be combined with work_selector", a.QualifiedName())
+	}
+	return nil
+}
+
+func validateWorkSelector(agentName, field string, selector WorkSelector) error {
+	if selector.IsZero() {
+		return nil
+	}
+	switch strings.TrimSpace(selector.Status) {
+	case "", "open", "in_progress", "closed":
+	default:
+		return fmt.Errorf("agent %q: %s.status must be \"open\", \"in_progress\", \"closed\", or empty, got %q", agentName, field, selector.Status)
+	}
+	switch strings.TrimSpace(selector.Tier) {
+	case "", "issues", "wisps", "both":
+	default:
+		return fmt.Errorf("agent %q: %s.tier must be \"issues\", \"wisps\", \"both\", or empty, got %q", agentName, field, selector.Tier)
+	}
+	switch strings.TrimSpace(selector.Sort) {
+	case "", "created_asc", "created_desc":
+	default:
+		return fmt.Errorf("agent %q: %s.sort must be \"created_asc\", \"created_desc\", or empty, got %q", agentName, field, selector.Sort)
+	}
+	if selector.Unassigned && strings.TrimSpace(selector.Assignee) != "" {
+		return fmt.Errorf("agent %q: %s cannot set both assignee and unassigned", agentName, field)
+	}
+	if typ := strings.TrimSpace(selector.Type); typ != "" && typ == strings.TrimSpace(selector.ExcludeType) {
+		return fmt.Errorf("agent %q: %s cannot set type and exclude_type to the same value %q", agentName, field, typ)
+	}
+	for k := range selector.Metadata {
+		if strings.TrimSpace(k) == "" {
+			return fmt.Errorf("agent %q: %s.metadata contains an empty key", agentName, field)
+		}
+	}
 	return nil
 }
 

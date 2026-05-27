@@ -160,6 +160,47 @@ func (m *MemStore) Update(id string, opts UpdateOpts) error {
 	return fmt.Errorf("updating bead %q: %w", id, ErrNotFound)
 }
 
+// Claim atomically claims an open bead for opts.Assignee and applies metadata.
+func (m *MemStore) Claim(id string, opts ClaimOpts) (Bead, error) {
+	assignee := strings.TrimSpace(opts.Assignee)
+	if assignee == "" {
+		return Bead{}, fmt.Errorf("claiming bead %q: assignee is required", id)
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for i := range m.beads {
+		if m.beads[i].ID != id {
+			continue
+		}
+		switch {
+		case m.beads[i].Status == "in_progress" && m.beads[i].Assignee == assignee:
+			// Idempotent retry by the winner.
+		case m.beads[i].Status != "open":
+			return Bead{}, fmt.Errorf("claiming bead %q: %w", id, ErrClaimLost)
+		case strings.TrimSpace(m.beads[i].Assignee) != "" && m.beads[i].Assignee != assignee:
+			return Bead{}, fmt.Errorf("claiming bead %q: %w", id, ErrClaimLost)
+		default:
+			m.beads[i].Status = "in_progress"
+			m.beads[i].Assignee = assignee
+		}
+		applyClaimMetadata(&m.beads[i], opts.Metadata)
+		return cloneBead(m.beads[i]), nil
+	}
+	return Bead{}, fmt.Errorf("claiming bead %q: %w", id, ErrNotFound)
+}
+
+func applyClaimMetadata(b *Bead, metadata map[string]string) {
+	if b == nil || len(metadata) == 0 {
+		return
+	}
+	if b.Metadata == nil {
+		b.Metadata = make(map[string]string, len(metadata))
+	}
+	for k, v := range metadata {
+		b.Metadata[k] = v
+	}
+}
+
 // Close sets a bead's status to "closed". Returns a wrapped ErrNotFound if
 // the ID does not exist. Closing an already-closed bead is a no-op.
 func (m *MemStore) Close(id string) error {
