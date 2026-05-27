@@ -213,6 +213,10 @@ func (s *HQStore) List(query ListQuery) ([]Bead, error) {
 	if !query.HasFilter() && !query.AllowScan {
 		return nil, fmt.Errorf("listing beads: %w", ErrQueryRequiresScan)
 	}
+	// Keep filtered queries on the full path so Limit cannot hide older matches.
+	if query.Sort == SortCreatedDesc && query.Limit > 0 && query.AllowScan && !query.HasFilter() {
+		return s.listRecentDesc(query), nil
+	}
 	s.mu.RLock()
 
 	candidates := s.candidateIDsLocked(query)
@@ -243,6 +247,44 @@ func (s *HQStore) List(query ListQuery) ([]Bead, error) {
 		result = result[:query.Limit]
 	}
 	return result, nil
+}
+
+func (s *HQStore) listRecentDesc(query ListQuery) []Bead {
+	s.mu.RLock()
+	raw := make([]Bead, 0, query.Limit)
+	for i := len(s.order) - 1; i >= 0 && len(raw) < query.Limit; i-- {
+		var b Bead
+		var ok bool
+		id := s.order[i]
+		switch query.TierMode {
+		case TierWisps:
+			b, ok = s.wisps[id]
+		case TierBoth:
+			b, ok = s.main[id]
+			if !ok {
+				b, ok = s.wisps[id]
+			}
+		default:
+			b, ok = s.main[id]
+		}
+		if !ok {
+			continue
+		}
+		if !query.IncludeClosed && b.Status == "closed" {
+			continue
+		}
+		raw = append(raw, b)
+	}
+	s.mu.RUnlock()
+
+	result := make([]Bead, 0, len(raw))
+	for _, b := range raw {
+		b = cloneBead(b)
+		if query.Matches(b) {
+			result = append(result, b)
+		}
+	}
+	return result
 }
 
 // ListOpen returns non-closed beads in creation order by default.
