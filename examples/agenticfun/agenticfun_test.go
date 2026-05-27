@@ -182,7 +182,7 @@ func TestCityDefinesAgenticFunProjectOrgRigs(t *testing.T) {
 	}
 }
 
-func TestRootPackImportsAgenticFunForCityAndRigs(t *testing.T) {
+func TestRootPackImportsAgenticFunForCityAndRigConfigs(t *testing.T) {
 	data, err := os.ReadFile(filepath.Join(exampleDir(), "pack.toml"))
 	if err != nil {
 		t.Fatalf("reading pack.toml: %v", err)
@@ -200,8 +200,14 @@ func TestRootPackImportsAgenticFunForCityAndRigs(t *testing.T) {
 	if pc.Imports["agenticfun"].Source != "packs/agenticfun" {
 		t.Errorf("imports.agenticfun.source = %q, want packs/agenticfun", pc.Imports["agenticfun"].Source)
 	}
-	if pc.Defaults.Rig.Imports["agenticfun"].Source != "packs/agenticfun" {
-		t.Errorf("defaults.rig.imports.agenticfun.source = %q, want packs/agenticfun", pc.Defaults.Rig.Imports["agenticfun"].Source)
+	if len(pc.Defaults.Rig.Imports) != 0 {
+		t.Errorf("defaults.rig.imports = %v, want rig imports declared in city.toml", pc.Defaults.Rig.Imports)
+	}
+	cfg := loadExpanded(t)
+	for _, rig := range cfg.Rigs {
+		if rig.Imports["agenticfun"].Source != "packs/agenticfun" {
+			t.Errorf("rig %q imports.agenticfun.source = %q, want packs/agenticfun", rig.Name, rig.Imports["agenticfun"].Source)
+		}
 	}
 }
 

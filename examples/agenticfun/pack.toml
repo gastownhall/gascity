@@ -8,6 +8,3 @@ schema = 2
 
 [imports.agenticfun]
 source = "packs/agenticfun"
-
-[defaults.rig.imports.agenticfun]
-source = "packs/agenticfun"
