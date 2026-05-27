@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -217,7 +218,12 @@ func (p *Provider) RunLive(name string, cfg runtime.Config) error {
 // IsRunning calls see the updated state immediately.
 func (p *Provider) Stop(name string) error {
 	p.tm.CloseHiddenAttachClient(name)
-	err := p.tm.KillSessionWithProcesses(name)
+	// Exclude the calling process from the kill set. When `gc session close`
+	// runs from inside the pane it is tearing down (the self-close path), the
+	// caller is a descendant of the pane leader; without exclusion it would be
+	// SIGTERMed mid-cleanup, leaving the agent alive and the bead un-closed.
+	// Excluding a caller that lives outside the pane is a harmless no-op.
+	err := p.tm.KillSessionWithProcessesExcluding(name, []string{strconv.Itoa(os.Getpid())})
 	if err != nil && (errors.Is(err, ErrSessionNotFound) || errors.Is(err, ErrNoServer)) {
 		return nil // idempotent
 	}
