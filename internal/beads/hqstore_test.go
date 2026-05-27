@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -491,5 +492,130 @@ func TestHQStoreConcurrentCreateUpdate(t *testing.T) {
 			t.Fatalf("duplicate ID %q", b.ID)
 		}
 		seen[b.ID] = true
+	}
+}
+
+func TestHQStoreListReadyConcurrentWithWriters(t *testing.T) {
+	store, err := beads.OpenHQStore(t.TempDir(), beads.WithHQStoreSnapshotInterval(0))
+	if err != nil {
+		t.Fatalf("OpenHQStore: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := store.Shutdown(); err != nil {
+			t.Errorf("Shutdown: %v", err)
+		}
+	})
+
+	const seedCount = 1000
+	seedIDs := make([]string, 0, seedCount)
+	for i := range seedCount {
+		created, err := store.Create(beads.Bead{
+			Title:    fmt.Sprintf("seed-%d", i),
+			Assignee: "builder",
+			Metadata: map[string]string{"seed": "true"},
+		})
+		if err != nil {
+			t.Fatalf("Create seed %d: %v", i, err)
+		}
+		seedIDs = append(seedIDs, created.ID)
+	}
+
+	var (
+		listObserved  atomic.Bool
+		readyObserved atomic.Bool
+		metadataOps   atomic.Uint64
+		updateOps     atomic.Uint64
+		createOps     atomic.Uint64
+		wg            sync.WaitGroup
+	)
+	start := make(chan struct{})
+	stop := make(chan struct{})
+	errs := make(chan error, 8)
+	runWorker := func(name string, fn func() error) {
+		t.Helper()
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				if err := fn(); err != nil {
+					select {
+					case errs <- fmt.Errorf("%s: %w", name, err):
+					case <-stop:
+					}
+					return
+				}
+			}
+		}()
+	}
+
+	runWorker("list reader", func() error {
+		got, err := store.List(beads.ListQuery{
+			AllowScan:     true,
+			IncludeClosed: true,
+			TierMode:      beads.TierBoth,
+		})
+		if err != nil {
+			return err
+		}
+		if len(got) == 0 {
+			return errors.New("List returned no beads")
+		}
+		listObserved.Store(true)
+		return nil
+	})
+	runWorker("ready reader", func() error {
+		got, err := store.Ready(beads.ReadyQuery{Assignee: "builder"})
+		if err != nil {
+			return err
+		}
+		if len(got) == 0 {
+			return errors.New("Ready returned no beads")
+		}
+		readyObserved.Store(true)
+		return nil
+	})
+	runWorker("metadata writer", func() error {
+		n := metadataOps.Add(1)
+		id := seedIDs[int(n-1)%len(seedIDs)]
+		return store.SetMetadataBatch(id, map[string]string{"race.metadata": fmt.Sprint(n)})
+	})
+	runWorker("update writer", func() error {
+		n := updateOps.Add(1)
+		id := seedIDs[int(n-1)%len(seedIDs)]
+		title := fmt.Sprintf("updated-%d", n)
+		return store.Update(id, beads.UpdateOpts{Title: &title})
+	})
+	runWorker("create writer", func() error {
+		n := createOps.Add(1)
+		b := beads.Bead{
+			Title:    fmt.Sprintf("created-%d", n),
+			Assignee: "builder",
+		}
+		if n%5 == 0 {
+			b.Ephemeral = true
+		}
+		_, err := store.Create(b)
+		return err
+	})
+
+	close(start)
+	time.Sleep(500 * time.Millisecond)
+	close(stop)
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Fatalf("concurrent worker error: %v", err)
+	}
+	if !listObserved.Load() {
+		t.Fatal("List reader did not observe non-empty results")
+	}
+	if !readyObserved.Load() {
+		t.Fatal("Ready reader did not observe non-empty results")
 	}
 }
