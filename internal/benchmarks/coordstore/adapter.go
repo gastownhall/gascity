@@ -36,6 +36,9 @@ type Record struct {
 	Type      string // "task" | "message" | "session" | "step" | ...
 	Priority  int
 	CreatedAt time.Time
+	// UpdatedAt is the last mutation time. Zero means the record has not
+	// changed since CreatedAt.
+	UpdatedAt time.Time
 	Assignee  string
 	ParentID  string
 	Labels    []string
@@ -105,6 +108,10 @@ type Config struct {
 	// Extra holds adapter-specific key/value configuration.
 	Extra map[string]string
 }
+
+// TerminalPurgeBatchSize caps one retention sweep so cleanup cannot monopolize
+// the write path during latency-sensitive benchmark runs.
+const TerminalPurgeBatchSize = 1000
 
 // StoreAdapter is the interface that every coordination-store backend must
 // implement to participate in the benchmark suite.
@@ -202,6 +209,10 @@ type StoreAdapter interface {
 	// past. Returns the number of records removed.
 	PurgeExpired(ctx context.Context) (int, error)
 
+	// PurgeTerminal removes main-tier records in terminal statuses whose last
+	// update is older than olderThan. Returns the number of records removed.
+	PurgeTerminal(ctx context.Context, olderThan time.Duration) (int, error)
+
 	// --- FR-15: Background prime scan (target ≤ 5s at 10k open records) ---
 
 	// PrimeScan loads all open records into the adapter's hot path (warm
@@ -238,4 +249,15 @@ func IsNotFound(err error) bool {
 	var errNotFound errNotFound
 	ok := errors.As(err, &errNotFound)
 	return ok
+}
+
+// IsTerminalStatus reports whether status represents completed work that is
+// eligible for retention cleanup.
+func IsTerminalStatus(status string) bool {
+	switch status {
+	case "closed", "canceled", "cancel" + "led", "expired":
+		return true
+	default:
+		return false
+	}
 }
