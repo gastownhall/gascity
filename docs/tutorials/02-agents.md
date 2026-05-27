@@ -20,7 +20,8 @@ creating a rig-scoped reviewer:
 
 ```shell
 ~/my-city
-$ mkdir -p agents/reviewer
+$ gc agent add --name reviewer
+Scaffolded agent 'reviewer'
 
 ~/my-city
 $ cat > agents/reviewer/agent.toml << 'EOF'
@@ -29,8 +30,8 @@ provider = "codex"
 EOF
 ```
 
-This creates `agents/reviewer/agent.toml`, scopes the reviewer to
-`my-project`, and switches the reviewer from the city's default `claude`
+This creates the `agents/reviewer/` scaffold. The `agent.toml` file scopes the
+reviewer to `my-project` and switches it from the city's default `claude`
 provider to `codex`.
 
 <Note>

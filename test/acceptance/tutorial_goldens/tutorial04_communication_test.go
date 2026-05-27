@@ -33,7 +33,9 @@ func TestTutorial04Communication(t *testing.T) {
 		}
 	}
 
-	mustMkdirAll(t, filepath.Join(myCity, "agents", "reviewer"))
+	if out, err := ws.runShell("gc agent add --name reviewer", ""); err != nil {
+		t.Fatalf("seed reviewer scaffold: %v\n%s", err, out)
+	}
 	writeFile(t, filepath.Join(myCity, "agents", "reviewer", "agent.toml"), "dir = \"my-project\"\nprovider = \""+tutorialReviewerProvider()+"\"\n", 0o644)
 	writeFile(t, filepath.Join(myCity, "agents", "reviewer", "prompt.template.md"), "# Reviewer\nReview code.\n", 0o644)
 	ws.noteWarning("TODO(issue #632): once bare agent names reliably resolve to the enclosing rig in acceptance-style paths, simplify tutorial 04's rig-local reviewer references from `my-project/reviewer` to bare `reviewer` where the shell is already in the rig")

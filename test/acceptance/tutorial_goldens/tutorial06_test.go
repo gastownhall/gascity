@@ -31,12 +31,12 @@ func TestTutorial06Beads(t *testing.T) {
 	for _, cmd := range []string{
 		"gc agent add --name helper",
 		"gc agent add --name worker",
+		"gc agent add --name reviewer",
 	} {
 		if out, err := ws.runShell(cmd, ""); err != nil {
 			t.Fatalf("seed agent scaffold %q: %v\n%s", cmd, err, out)
 		}
 	}
-	mustMkdirAll(t, filepath.Join(myCity, "agents", "reviewer"))
 	writeFile(t, filepath.Join(myCity, "agents", "helper", "prompt.template.md"), "# Helper Agent\nHandle supporting work.\n", 0o644)
 	writeFile(t, filepath.Join(myCity, "agents", "worker", "prompt.template.md"), "# Worker Agent\nHandle general work.\n", 0o644)
 	writeFile(t, filepath.Join(myCity, "agents", "reviewer", "agent.toml"), "dir = \"my-project\"\nprovider = \""+tutorialReviewerProvider()+"\"\n", 0o644)

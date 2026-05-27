@@ -38,7 +38,7 @@ var tutorialPageManifests = []pageManifest{
 	{
 		path: "docs/tutorials/02-agents.md",
 		commands: []string{
-			"mkdir -p agents/reviewer",
+			"gc agent add --name reviewer",
 			"cat > agents/reviewer/agent.toml << 'EOF'",
 			"gc prime",
 			"cat > agents/reviewer/prompt.template.md << 'EOF'",
