@@ -4748,3 +4748,73 @@ depends_on = ["db"]
 		t.Errorf("ValidateAgents failed after pack expansion: %v", err)
 	}
 }
+
+// TestMergeHoistedCityAgents_DedupAcrossBindings covers the topology where a
+// pack (here "maintenance") is imported at the city level under one binding
+// (e.g. "gastown") and ALSO transitively pulled in via rig includes that
+// restamp the binding to something else (e.g. "atlas"). The same underlying
+// agent — same (Dir, Name) — then appears twice with different binding
+// prefixes. Hoist dedup must collapse these by (Dir, Name) because
+// ValidateAgents keys collisions on (Dir, Name), not on QualifiedName.
+//
+// Before the fix, hoist dedup only checked QualifiedName, so "gastown.dog"
+// and "atlas.dog" both survived and ValidateAgents reported a duplicate.
+func TestMergeHoistedCityAgents_DedupAcrossBindings(t *testing.T) {
+	agents := []Agent{
+		{Name: "dog", Dir: "", BindingName: "gastown", Scope: "city"},
+	}
+	hoisted := []Agent{
+		{Name: "dog", Dir: "", BindingName: "atlas", Scope: "city"},
+	}
+
+	merged := mergeHoistedCityAgents(agents, hoisted)
+	if len(merged) != 1 {
+		t.Fatalf("merged length = %d, want 1 (city-scope dog should only appear once)", len(merged))
+	}
+	if merged[0].BindingName != "gastown" {
+		t.Errorf("first-occurrence-wins: BindingName = %q, want %q", merged[0].BindingName, "gastown")
+	}
+
+	if err := ValidateAgents(merged); err != nil {
+		t.Errorf("ValidateAgents failed after dedup: %v", err)
+	}
+}
+
+// TestMergeHoistedCityAgents_DistinctNamesPreserved guards against
+// over-aggressive dedup: hoisted agents with the same binding but different
+// names must all survive.
+func TestMergeHoistedCityAgents_DistinctNamesPreserved(t *testing.T) {
+	agents := []Agent{
+		{Name: "mayor", Dir: "", BindingName: "gastown", Scope: "city"},
+	}
+	hoisted := []Agent{
+		{Name: "deacon", Dir: "", BindingName: "atlas", Scope: "city"},
+		{Name: "boot", Dir: "", BindingName: "atlas", Scope: "city"},
+	}
+
+	merged := mergeHoistedCityAgents(agents, hoisted)
+	if len(merged) != 3 {
+		t.Fatalf("merged length = %d, want 3", len(merged))
+	}
+}
+
+// TestMergeHoistedCityNamedSessions_DedupAcrossBindings mirrors the agent
+// case for named sessions. ValidateNamedSessions does not currently key on
+// BindingName, so a duplicate (Dir, Template) under different bindings
+// would still wedge city startup once the hoist re-introduced the conflict.
+func TestMergeHoistedCityNamedSessions_DedupAcrossBindings(t *testing.T) {
+	sessions := []NamedSession{
+		{Template: "mayor", Dir: "", BindingName: "gastown", Scope: "city"},
+	}
+	hoisted := []NamedSession{
+		{Template: "mayor", Dir: "", BindingName: "atlas", Scope: "city"},
+	}
+
+	merged := mergeHoistedCityNamedSessions(sessions, hoisted)
+	if len(merged) != 1 {
+		t.Fatalf("merged length = %d, want 1", len(merged))
+	}
+	if merged[0].BindingName != "gastown" {
+		t.Errorf("first-occurrence-wins: BindingName = %q, want %q", merged[0].BindingName, "gastown")
+	}
+}
