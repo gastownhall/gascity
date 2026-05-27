@@ -14,7 +14,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/telemetry"
@@ -159,6 +158,13 @@ func BdSubprocessEnvForCommand(name string, args []string, env map[string]string
 	return bdSubprocessEnvForCommand(name, args, env)
 }
 
+// BdSubprocessEnvSlice returns environ with the bd subprocess guard env applied
+// on top, suitable for exec.Cmd.Env. Use when the caller is constructing a bd
+// subprocess outside the BdStore runner (e.g. doctor checks, Purge).
+func BdSubprocessEnvSlice(environ []string, name string, args []string) []string {
+	return mergeEnv(environ, bdSubprocessEnvForCommand(name, args, nil))
+}
+
 // bdSubprocessEnvForCommand applies process-level guards around bd subprocesses
 // so GC callers do not depend solely on per-store bd config to suppress
 // expensive write-side effects.
@@ -174,7 +180,6 @@ func bdSubprocessEnvForCommand(name string, args []string, env map[string]string
 		key   string
 		value string
 	}{
-		{"BEADS_NO_AUTO_IMPORT", "1"},
 		{"BD_EXPORT_AUTO", "false"},
 		{"BD_BACKUP_ENABLED", "false"},
 		{"BD_DOLT_AUTO_PUSH", "false"},
@@ -194,7 +199,8 @@ func bdCommandTimeoutFor(name string, args []string) time.Duration {
 	if name != "bd" || len(args) == 0 {
 		return bdCommandTimeout
 	}
-	if len(args) >= 2 && args[0] == "create" && args[1] == "--graph" {
+	sub, subArgs := bdSubcommand(args)
+	if sub == "create" && len(subArgs) >= 1 && subArgs[0] == "--graph" {
 		return bdGraphApplyCommandTimeout
 	}
 	if bdCommandReadOnly(args) {
@@ -204,21 +210,43 @@ func bdCommandTimeoutFor(name string, args []string) time.Duration {
 }
 
 func bdCommandReadOnly(args []string) bool {
-	if len(args) == 0 {
-		return false
-	}
-	switch args[0] {
+	sub, subArgs := bdSubcommand(args)
+	switch sub {
 	case "count", "list", "query", "ready", "show", "stats":
 		return true
 	case "dep":
-		return len(args) >= 2 && args[1] == "list"
+		return len(subArgs) >= 1 && subArgs[0] == "list"
 	default:
 		return false
 	}
 }
 
 func bdCommandThrottleList(args []string) bool {
-	return len(args) > 0 && args[0] == "list"
+	sub, _ := bdSubcommand(args)
+	return sub == "list"
+}
+
+// bdSubcommand returns the first non-flag positional token in args together
+// with the args after it. Global flags like `-C <dir>`, `--json`, or `-h` are
+// skipped so classification matches the documented bd CLI surface rather than
+// the raw argv slot 0. Flags that take a separate value (currently `-C` /
+// `--directory`) consume the following token; `--key=value` forms are kept
+// in a single arg so no follow-up skip is needed.
+func bdSubcommand(args []string) (string, []string) {
+	skipNext := false
+	for i, a := range args {
+		if skipNext {
+			skipNext = false
+			continue
+		}
+		if !strings.HasPrefix(a, "-") {
+			return a, args[i+1:]
+		}
+		if a == "-C" || a == "--directory" {
+			skipNext = true
+		}
+	}
+	return "", nil
 }
 
 // AcquireBdListReadLock serializes top-level bd list calls for the target
@@ -248,16 +276,16 @@ func acquireBDListReadLock(ctx context.Context, dir, name string, args []string,
 	}()
 
 	for {
-		err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
-		if err == nil {
+		acquired, retryable, lockErr := tryBdListReadFileLock(lockFile)
+		if acquired {
 			locked = true
 			return func() {
-				_ = syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
+				releaseBdListReadFileLock(lockFile)
 				_ = lockFile.Close()
 			}, nil
 		}
-		if err != syscall.EWOULDBLOCK && err != syscall.EAGAIN {
-			return nil, fmt.Errorf("bd list lock %s: %w", lockPath, err)
+		if !retryable {
+			return nil, fmt.Errorf("bd list lock %s: %w", lockPath, lockErr)
 		}
 		select {
 		case <-ctx.Done():
@@ -460,7 +488,7 @@ func execPurge(dir string, env, args []string) ([]byte, error) {
 
 	cmd := exec.CommandContext(ctx, "bd", args...)
 	cmd.Dir = dir
-	cmd.Env = env
+	cmd.Env = mergeEnv(env, bdSubprocessEnvForCommand("bd", args, nil))
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout

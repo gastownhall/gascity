@@ -583,8 +583,7 @@ for kv in \
   "BD_DOLT_AUTO_PUSH=false" \
   "BD_BACKUP_ENABLED=false" \
   "BD_NO_PUSH=true" \
-  "BD_NO_GIT_OPS=true" \
-  "BEADS_NO_AUTO_IMPORT=1"
+  "BD_NO_GIT_OPS=true"
 do
   key=${kv%%=*}
   want=${kv#*=}
@@ -619,7 +618,6 @@ esac
 	t.Setenv("BD_BACKUP_ENABLED", "true")
 	t.Setenv("BD_NO_PUSH", "false")
 	t.Setenv("BD_NO_GIT_OPS", "false")
-	t.Setenv("BEADS_NO_AUTO_IMPORT", "0")
 	t.Setenv("BD_DOLT_AUTO_COMMIT", "on")
 	t.Setenv("BD_READONLY", "false")
 

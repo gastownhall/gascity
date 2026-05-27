@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -203,7 +204,14 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 	}
 	env := mergeRuntimeEnv(os.Environ(), overrides)
 	cmd.Env = workQueryEnvForDir(env, cmd.Dir)
-	unlockBDList, lockErr := beads.AcquireBdListReadLock(context.Background(), cmd.Dir, "bd", bdArgs, overrides)
+	// 30s caps the wait on a wedged flock holder. The retry loop inside
+	// AcquireBdListReadLock polls at 50ms, so under normal contention this is
+	// effectively unbounded; the deadline only fires when something else has
+	// genuinely hung holding the lock — at which point failing visibly beats
+	// blocking gc bd list forever.
+	lockCtx, lockCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer lockCancel()
+	unlockBDList, lockErr := beads.AcquireBdListReadLock(lockCtx, cmd.Dir, "bd", bdArgs, overrides)
 	if lockErr != nil {
 		fmt.Fprintf(stderr, "gc bd: %v\n", lockErr) //nolint:errcheck // best-effort stderr
 		return 1

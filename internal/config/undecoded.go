@@ -71,20 +71,13 @@ func validateCityAuthoringSurface(md toml.MetaData) error {
 }
 
 func validatePackAuthoringSurface(md toml.MetaData, source string) error {
-	return validatePackAuthoringSurfaceWithOptions(md, source, false)
-}
-
-// validatePackAuthoringSurfaceWithOptions keeps nested/imported packs on the
-// strict PackV2 surface while allowing the root city pack loader to tolerate
-// legacy default rig imports long enough to emit a migration warning.
-func validatePackAuthoringSurfaceWithOptions(md toml.MetaData, source string, allowDefaultRigImports bool) error {
 	if md.IsDefined("agent_defaults") {
 		return fmt.Errorf("%s: [agent_defaults] is a city.toml table, not a pack.toml field", source)
 	}
 	if md.IsDefined("agents") {
 		return fmt.Errorf("%s: [agents] is a city.toml compatibility alias for [agent_defaults], not a pack.toml field", source)
 	}
-	if md.IsDefined("defaults", "rig", "imports") && !allowDefaultRigImports {
+	if md.IsDefined("defaults", "rig", "imports") {
 		return fmt.Errorf("%s: [defaults.rig.imports] belongs in city.toml, not pack.toml", source)
 	}
 	if md.IsDefined("formulas", "dir") {

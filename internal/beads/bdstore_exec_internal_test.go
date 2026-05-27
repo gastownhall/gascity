@@ -62,6 +62,37 @@ func TestBDCommandTimeoutForReadCommands(t *testing.T) {
 	}
 }
 
+func TestBDCommandClassificationSkipsGlobalFlags(t *testing.T) {
+	cases := []struct {
+		name      string
+		args      []string
+		readOnly  bool
+		throttled bool
+		timeout   time.Duration
+	}{
+		{"bare list", []string{"list", "--json"}, true, true, bdReadCommandTimeout},
+		{"flag-prefixed list", []string{"--json", "list"}, true, true, bdReadCommandTimeout},
+		{"directory-prefixed list", []string{"-C", "/tmp/x", "list", "--json"}, true, true, bdReadCommandTimeout},
+		{"--directory= form", []string{"--directory=/tmp/x", "list"}, true, true, bdReadCommandTimeout},
+		{"show with -C", []string{"-C", "/tmp/x", "show", "gc-1"}, true, false, bdReadCommandTimeout},
+		{"update with -C is not read-only", []string{"-C", "/tmp/x", "update", "gc-1", "--status", "open"}, false, false, bdCommandTimeout},
+		{"--graph survives -C prefix", []string{"-C", "/tmp/x", "create", "--graph", "/tmp/p.json"}, false, false, bdGraphApplyCommandTimeout},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := bdCommandReadOnly(tc.args); got != tc.readOnly {
+				t.Errorf("bdCommandReadOnly(%q) = %v, want %v", tc.args, got, tc.readOnly)
+			}
+			if got := bdCommandThrottleList(tc.args); got != tc.throttled {
+				t.Errorf("bdCommandThrottleList(%q) = %v, want %v", tc.args, got, tc.throttled)
+			}
+			if got := bdCommandTimeoutFor("bd", tc.args); got != tc.timeout {
+				t.Errorf("bdCommandTimeoutFor(%q) = %s, want %s", tc.args, got, tc.timeout)
+			}
+		})
+	}
+}
+
 func TestBDCommandTimeoutForGraphApply(t *testing.T) {
 	if got := bdCommandTimeoutFor("bd", []string{"create", "--graph", "/tmp/plan.json", "--json"}); got != bdGraphApplyCommandTimeout {
 		t.Fatalf("bd create --graph timeout = %s, want %s", got, bdGraphApplyCommandTimeout)
@@ -77,21 +108,19 @@ func TestBDSubprocessEnvSuppressesSideEffectsForReadCommands(t *testing.T) {
 		"BD_NO_GIT_OPS":         "false",
 		"BD_NO_PUSH":            "false",
 		"BD_READONLY":           "false",
-		"BEADS_NO_AUTO_IMPORT":  "0",
 		"GC_CITY_RUNTIME_DIR":   "/city/.gc/runtime",
 		"UNRELATED_TEST_MARKER": "keep",
 	}
 
 	got := bdSubprocessEnvForCommand("bd", []string{"list", "--json"}, base)
 	want := map[string]string{
-		"BD_BACKUP_ENABLED":    "false",
-		"BD_DOLT_AUTO_COMMIT":  "off",
-		"BD_DOLT_AUTO_PUSH":    "false",
-		"BD_EXPORT_AUTO":       "false",
-		"BD_NO_GIT_OPS":        "true",
-		"BD_NO_PUSH":           "true",
-		"BD_READONLY":          "true",
-		"BEADS_NO_AUTO_IMPORT": "1",
+		"BD_BACKUP_ENABLED":   "false",
+		"BD_DOLT_AUTO_COMMIT": "off",
+		"BD_DOLT_AUTO_PUSH":   "false",
+		"BD_EXPORT_AUTO":      "false",
+		"BD_NO_GIT_OPS":       "true",
+		"BD_NO_PUSH":          "true",
+		"BD_READONLY":         "true",
 	}
 	for key, wantValue := range want {
 		if got[key] != wantValue {
@@ -106,16 +135,147 @@ func TestBDSubprocessEnvSuppressesSideEffectsForReadCommands(t *testing.T) {
 	}
 }
 
-func TestBDSubprocessEnvLeavesMutationAutoCommitPolicyUnset(t *testing.T) {
-	got := bdSubprocessEnvForCommand("bd", []string{"update", "gc-1", "--status", "closed"}, nil)
-	if _, ok := got["BD_DOLT_AUTO_COMMIT"]; ok {
-		t.Fatalf("BD_DOLT_AUTO_COMMIT set for mutation command: %#v", got)
+// Per bd v1.0.x docs and source: BD_NO_GIT_OPS / BD_NO_PUSH are git-layer
+// controls (no auto-export, no backup push); BD_DOLT_AUTO_COMMIT gates the
+// dolt-side write commit. Mutation commands (create / update / close) must
+// keep BD_DOLT_AUTO_COMMIT and BD_READONLY at bd's default so dolt writes
+// still land. This is the persistence contract — if anyone tightens the
+// mutation guard set to include those keys, writes would silently not
+// persist to the dolt working set and this test will catch it.
+func TestBDSubprocessEnvPreservesWritePersistenceForMutations(t *testing.T) {
+	cases := [][]string{
+		{"create", "--type", "task", "--title", "x", "--json"},
+		{"update", "gc-1", "--status", "closed"},
+		{"close", "gc-1"},
 	}
-	if _, ok := got["BD_READONLY"]; ok {
-		t.Fatalf("BD_READONLY set for mutation command: %#v", got)
+	for _, args := range cases {
+		t.Run(args[0], func(t *testing.T) {
+			got := bdSubprocessEnvForCommand("bd", args, nil)
+			if _, ok := got["BD_DOLT_AUTO_COMMIT"]; ok {
+				t.Fatalf("BD_DOLT_AUTO_COMMIT set for mutation command %q: %#v", args, got)
+			}
+			if _, ok := got["BD_READONLY"]; ok {
+				t.Fatalf("BD_READONLY set for mutation command %q: %#v", args, got)
+			}
+			if got["BD_EXPORT_AUTO"] != "false" || got["BD_DOLT_AUTO_PUSH"] != "false" || got["BD_NO_PUSH"] != "true" || got["BD_NO_GIT_OPS"] != "true" {
+				t.Fatalf("side-effect suppression missing for mutation command %q: %#v", args, got)
+			}
+		})
 	}
-	if got["BD_EXPORT_AUTO"] != "false" || got["BD_DOLT_AUTO_PUSH"] != "false" || got["BD_NO_PUSH"] != "true" {
-		t.Fatalf("side-effect suppression missing for mutation command: %#v", got)
+}
+
+// TestExecCommandRunnerWriteCommandRoundTripsThroughFakeBd asserts that under
+// the runner's full guard env (BD_NO_PUSH=true, BD_NO_GIT_OPS=true,
+// BD_EXPORT_AUTO=false, BD_BACKUP_ENABLED=false, BD_DOLT_AUTO_PUSH=false), a
+// bd write command's side effects still land — a follow-up read sees what the
+// write created. This is the regression guard for bd's documented
+// no-git-ops/no-push semantics (git-layer controls, not dolt-layer): if a
+// future change accidentally adds a write-blocking env key, the round-trip
+// fails. A real bd integration round-trip would need CGO bd, which is not
+// portable across CI hosts; the fake bd simulates persistence via a state
+// file in cmd.Dir, exercising the same runner/guard path as production.
+func TestExecCommandRunnerWriteCommandRoundTripsThroughFakeBd(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh unavailable")
+	}
+
+	binDir := t.TempDir()
+	// Ambient hostile env: every BD_* knob set to "auto-everything", to make
+	// sure the runner's guard supplants the caller env. If the guard fails
+	// to strip these, the fake bd refuses with exit 73.
+	t.Setenv("BD_EXPORT_AUTO", "true")
+	t.Setenv("BD_DOLT_AUTO_PUSH", "true")
+	t.Setenv("BD_BACKUP_ENABLED", "true")
+	t.Setenv("BD_NO_PUSH", "false")
+	t.Setenv("BD_NO_GIT_OPS", "false")
+	t.Setenv("BD_DOLT_AUTO_COMMIT", "on")
+	t.Setenv("BD_READONLY", "false")
+
+	writeExecutable(t, filepath.Join(binDir, "bd"), `#!/bin/sh
+set -eu
+# Refuse if write-side guard env didn't apply.
+for kv in \
+  "BD_EXPORT_AUTO=false" \
+  "BD_DOLT_AUTO_PUSH=false" \
+  "BD_BACKUP_ENABLED=false" \
+  "BD_NO_PUSH=true" \
+  "BD_NO_GIT_OPS=true"
+do
+  key=${kv%%=*}
+  want=${kv#*=}
+  eval "got=\${$key:-}"
+  if [ "$got" != "$want" ]; then
+    echo "$key=$got want $want" >&2
+    exit 73
+  fi
+done
+# Refuse if read-only guard leaked into a write command (would block persistence).
+case "${1:-}" in
+  create|update|close)
+    if [ "${BD_DOLT_AUTO_COMMIT:-on}" = "off" ] || [ "${BD_READONLY:-false}" = "true" ]; then
+      echo "write-blocking guard leaked: BD_DOLT_AUTO_COMMIT=${BD_DOLT_AUTO_COMMIT:-} BD_READONLY=${BD_READONLY:-}" >&2
+      exit 74
+    fi
+    ;;
+esac
+
+state="${BEADS_DIR:?}/state.json"
+mkdir -p "$(dirname "$state")"
+case "${1:-}" in
+  create)
+    printf '{"id":"gc-1","status":"open","title":"persisted"}\n' > "$state"
+    cat "$state"
+    ;;
+  update)
+    printf '{"id":"gc-1","status":"in_progress","title":"persisted"}\n' > "$state"
+    cat "$state"
+    ;;
+  show)
+    if [ ! -f "$state" ]; then
+      echo "show: state missing" >&2
+      exit 75
+    fi
+    cat "$state"
+    ;;
+  *)
+    exit 2
+    ;;
+esac
+`)
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	dir := t.TempDir()
+	beadsDir := filepath.Join(dir, ".beads")
+	runner := ExecCommandRunnerWithEnv(map[string]string{
+		"BEADS_DIR":           beadsDir,
+		"GC_CITY_RUNTIME_DIR": filepath.Join(dir, ".gc", "runtime"),
+	})
+
+	createOut, err := runner(dir, "bd", "create", "--type", "task", "--title", "persisted", "--json")
+	if err != nil {
+		t.Fatalf("create: %v (stderr in error)", err)
+	}
+	if !strings.Contains(string(createOut), `"id":"gc-1"`) || !strings.Contains(string(createOut), `"status":"open"`) {
+		t.Fatalf("create output missing expected fields: %s", createOut)
+	}
+
+	showOut, err := runner(dir, "bd", "show", "gc-1", "--json")
+	if err != nil {
+		t.Fatalf("post-create show: %v", err)
+	}
+	if !strings.Contains(string(showOut), `"id":"gc-1"`) || !strings.Contains(string(showOut), `"status":"open"`) {
+		t.Fatalf("post-create show does not reflect created bead: %s", showOut)
+	}
+
+	if _, err := runner(dir, "bd", "update", "gc-1", "--status", "in_progress"); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	showOut, err = runner(dir, "bd", "show", "gc-1", "--json")
+	if err != nil {
+		t.Fatalf("post-update show: %v", err)
+	}
+	if !strings.Contains(string(showOut), `"status":"in_progress"`) {
+		t.Fatalf("post-update show does not reflect update: %s", showOut)
 	}
 }
 
@@ -131,7 +291,6 @@ printf 'BD_DOLT_AUTO_PUSH=%s\n' "${BD_DOLT_AUTO_PUSH:-}"
 printf 'BD_BACKUP_ENABLED=%s\n' "${BD_BACKUP_ENABLED:-}"
 printf 'BD_NO_PUSH=%s\n' "${BD_NO_PUSH:-}"
 printf 'BD_NO_GIT_OPS=%s\n' "${BD_NO_GIT_OPS:-}"
-printf 'BEADS_NO_AUTO_IMPORT=%s\n' "${BEADS_NO_AUTO_IMPORT:-}"
 printf 'BD_DOLT_AUTO_COMMIT=%s\n' "${BD_DOLT_AUTO_COMMIT:-}"
 printf 'BD_READONLY=%s\n' "${BD_READONLY:-}"
 `)
@@ -153,14 +312,13 @@ printf 'BD_READONLY=%s\n' "${BD_READONLY:-}"
 	}
 	got := parseEnvOutput(string(out))
 	want := map[string]string{
-		"BD_BACKUP_ENABLED":    "false",
-		"BD_DOLT_AUTO_COMMIT":  "off",
-		"BD_DOLT_AUTO_PUSH":    "false",
-		"BD_EXPORT_AUTO":       "false",
-		"BD_NO_GIT_OPS":        "true",
-		"BD_NO_PUSH":           "true",
-		"BD_READONLY":          "true",
-		"BEADS_NO_AUTO_IMPORT": "1",
+		"BD_BACKUP_ENABLED":   "false",
+		"BD_DOLT_AUTO_COMMIT": "off",
+		"BD_DOLT_AUTO_PUSH":   "false",
+		"BD_EXPORT_AUTO":      "false",
+		"BD_NO_GIT_OPS":       "true",
+		"BD_NO_PUSH":          "true",
+		"BD_READONLY":         "true",
 	}
 	for key, wantValue := range want {
 		if got[key] != wantValue {

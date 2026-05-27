@@ -174,7 +174,7 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 		if decErr != nil {
 			return nil, nil, fmt.Errorf("parsing city pack.toml: %w", decErr)
 		}
-		if err := validatePackAuthoringSurfaceWithOptions(md, packPath, true); err != nil {
+		if err := validatePackAuthoringSurface(md, packPath); err != nil {
 			return nil, nil, fmt.Errorf("parsing city pack.toml: %w", err)
 		}
 		if fatalWarnings := fatalUndecodedWarnings(md, packPath); len(fatalWarnings) > 0 {
@@ -183,28 +183,6 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 		prov.Warnings = append(prov.Warnings, packWarnings...)
 		if err := validatePackMeta(&pc.Pack); err != nil {
 			return nil, nil, fmt.Errorf("city pack.toml: %w", err)
-		}
-		packDefaultRigImports, err := defaultRigImportsFromPackDefaults(pc.Defaults, md)
-		if err != nil {
-			return nil, nil, fmt.Errorf("city pack.toml: %w", err)
-		}
-		if len(packDefaultRigImports) > 0 {
-			prov.Warnings = append(prov.Warnings,
-				fmt.Sprintf("%s: [defaults.rig.imports] in root pack.toml is deprecated; move these entries to city.toml", packPath))
-			if root.DefaultRigImports == nil {
-				root.DefaultRigImports = make(map[string]Import, len(packDefaultRigImports))
-			}
-			if defaultBindings == nil {
-				defaultBindings = make(map[string]bool, len(packDefaultRigImports))
-			}
-			for _, bound := range packDefaultRigImports {
-				if _, exists := root.DefaultRigImports[bound.Binding]; exists {
-					continue
-				}
-				root.DefaultRigImports[bound.Binding] = bound.Import
-				root.DefaultRigImportOrder = append(root.DefaultRigImportOrder, bound.Binding)
-				defaultBindings[bound.Binding] = true
-			}
 		}
 		legacyV1SurfaceWarningsEnabled = pc.Pack.Schema >= 2
 		if legacyV1SurfaceWarningsEnabled {
