@@ -140,6 +140,198 @@ func TestExtractBdScopeFlags(t *testing.T) {
 	}
 }
 
+func enableIndexedBdListTestEnv(t *testing.T) {
+	t.Helper()
+	t.Setenv("GC_BD_INDEX_READS", "1")
+	t.Setenv("GC_BD_LIST_PASSTHROUGH", "")
+}
+
+func TestParseIndexedBdListQueryRoutesSupportedActiveJSON(t *testing.T) {
+	enableIndexedBdListTestEnv(t)
+
+	const createdBefore = "2026-05-25T12:34:56.789Z"
+	got, ok, reason := parseIndexedBdListQuery([]string{
+		"list",
+		"--assignee=rig/agent",
+		"--status=in_progress",
+		"--json",
+		"--limit", "5",
+		"--metadata-field", "gc.routed_to=rig/agent",
+		"--label=ready",
+		"--type=task",
+		"--exclude-type=epic",
+		"--parent=parent-1",
+		"--created-before=" + createdBefore,
+		"--include-infra",
+		"--include-gates",
+	})
+	if !ok {
+		t.Fatalf("parseIndexedBdListQuery() ok = false, reason=%q", reason)
+	}
+	q := got.Query
+	if !q.AllowScan {
+		t.Fatalf("AllowScan = false, want true")
+	}
+	if q.Assignee != "rig/agent" || q.Status != "in_progress" || q.Limit != 5 ||
+		q.Label != "ready" || q.Type != "task" || q.ExcludeType != "epic" ||
+		q.ParentID != "parent-1" {
+		t.Fatalf("query = %+v, want parsed active list fields", q)
+	}
+	if q.Metadata["gc.routed_to"] != "rig/agent" {
+		t.Fatalf("metadata = %#v, want gc.routed_to=rig/agent", q.Metadata)
+	}
+	wantTime, err := time.Parse(time.RFC3339Nano, createdBefore)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !q.CreatedBefore.Equal(wantTime) {
+		t.Fatalf("CreatedBefore = %s, want %s", q.CreatedBefore.Format(time.RFC3339Nano), createdBefore)
+	}
+}
+
+func TestParseIndexedBdListQuerySupportsUnassignedShapes(t *testing.T) {
+	enableIndexedBdListTestEnv(t)
+
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{
+			name: "no-assignee",
+			args: []string{"list", "--metadata-field", "gc.routed_to=rig/dog", "--status=in_progress", "--no-assignee", "--json"},
+		},
+		{
+			name: "empty assignee equals",
+			args: []string{"list", "--status=open", "--assignee=", "--json"},
+		},
+		{
+			name: "empty assignee value",
+			args: []string{"list", "--status", "open", "--assignee", "", "--json"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok, reason := parseIndexedBdListQuery(tt.args)
+			if !ok {
+				t.Fatalf("parseIndexedBdListQuery() ok = false, reason=%q", reason)
+			}
+			if !got.Unassigned {
+				t.Fatalf("Unassigned = false, want true")
+			}
+			if got.Query.Assignee != "" {
+				t.Fatalf("Assignee = %q, want empty", got.Query.Assignee)
+			}
+		})
+	}
+}
+
+func TestParseIndexedBdListQuerySupportsSessionHistoryShapes(t *testing.T) {
+	enableIndexedBdListTestEnv(t)
+
+	tests := []struct {
+		name       string
+		args       []string
+		wantType   string
+		wantLabel  string
+		wantLimit  int
+		wantAll    bool
+		wantStatus string
+		wantParent string
+	}{
+		{
+			name:     "type session all",
+			args:     []string{"list", "--json", "--type=session", "--all", "--include-infra", "--include-gates", "--limit=0"},
+			wantType: "session",
+			wantAll:  true,
+		},
+		{
+			name:      "label session all",
+			args:      []string{"list", "--json", "--label=gc:session", "--all", "--include-infra", "--include-gates", "--limit=0"},
+			wantLabel: "gc:session",
+			wantAll:   true,
+		},
+		{
+			name:      "bounded label history",
+			args:      []string{"list", "--json", "--label=order-run:blocker-unblock-sweep", "--all", "--include-infra", "--include-gates", "--limit=1"},
+			wantLabel: "order-run:blocker-unblock-sweep",
+			wantLimit: 1,
+			wantAll:   true,
+		},
+		{
+			name:       "bounded closed label history",
+			args:       []string{"list", "--json", "--status=closed", "--label=order-tracking", "--limit=5"},
+			wantLabel:  "order-tracking",
+			wantLimit:  5,
+			wantStatus: "closed",
+		},
+		{
+			name:       "exact parent history",
+			args:       []string{"list", "--json", "--all", "--include-infra", "--include-gates", "--limit=0", "--parent=vgc-parent"},
+			wantAll:    true,
+			wantParent: "vgc-parent",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok, reason := parseIndexedBdListQuery(tt.args)
+			if !ok {
+				t.Fatalf("parseIndexedBdListQuery() ok = false, reason=%q", reason)
+			}
+			if got.Query.IncludeClosed != tt.wantAll {
+				t.Fatalf("IncludeClosed = %v, want %v", got.Query.IncludeClosed, tt.wantAll)
+			}
+			if got.Query.Type != tt.wantType || got.Query.Label != tt.wantLabel {
+				t.Fatalf("query = %+v, want type=%q label=%q", got.Query, tt.wantType, tt.wantLabel)
+			}
+			if got.Query.Limit != tt.wantLimit {
+				t.Fatalf("Limit = %d, want %d", got.Query.Limit, tt.wantLimit)
+			}
+			if got.Query.Status != tt.wantStatus {
+				t.Fatalf("Status = %q, want %q", got.Query.Status, tt.wantStatus)
+			}
+			if got.Query.ParentID != tt.wantParent {
+				t.Fatalf("ParentID = %q, want %q", got.Query.ParentID, tt.wantParent)
+			}
+		})
+	}
+}
+
+func TestParseIndexedBdListQueryFallsBackForUnsupportedShapes(t *testing.T) {
+	tests := []struct {
+		name       string
+		args       []string
+		envValue   string
+		passthru   string
+		wantReason string
+	}{
+		{name: "env disabled", envValue: "", args: []string{"list", "--json"}, wantReason: ""},
+		{name: "non list", envValue: "1", args: []string{"show", "bd-1", "--json"}, wantReason: ""},
+		{name: "passthrough", envValue: "1", passthru: "1", args: []string{"list", "--json"}, wantReason: "env-passthrough"},
+		{name: "text output", envValue: "1", args: []string{"list", "--status=open"}, wantReason: "format"},
+		{name: "all", envValue: "1", args: []string{"list", "--all", "--json"}, wantReason: "all"},
+		{name: "closed status", envValue: "1", args: []string{"list", "--status=closed", "--json"}, wantReason: "status"},
+		{name: "blocked status", envValue: "1", args: []string{"list", "--status=blocked", "--json"}, wantReason: "status"},
+		{name: "wisp tier", envValue: "1", args: []string{"list", "--type=wisp", "--json"}, wantReason: "wisp-tier"},
+		{name: "search", envValue: "1", args: []string{"list", "--search", "panic", "--json"}, wantReason: "unsupported-arg"},
+		{name: "created after", envValue: "1", args: []string{"list", "--created-after=2026-05-25T12:00:00Z", "--json"}, wantReason: "unsupported-arg"},
+		{name: "negative limit", envValue: "1", args: []string{"list", "--limit=-1", "--json"}, wantReason: "limit"},
+		{name: "conflicting assignee filters", envValue: "1", args: []string{"list", "--assignee=worker", "--no-assignee", "--json"}, wantReason: "assignee"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("GC_BD_INDEX_READS", tt.envValue)
+			t.Setenv("GC_BD_LIST_PASSTHROUGH", tt.passthru)
+			_, ok, reason := parseIndexedBdListQuery(tt.args)
+			if ok {
+				t.Fatalf("parseIndexedBdListQuery() ok = true, want false")
+			}
+			if reason != tt.wantReason {
+				t.Fatalf("reason = %q, want %q", reason, tt.wantReason)
+			}
+		})
+	}
+}
+
 func TestResolveBdScopeTarget(t *testing.T) {
 	// Isolate cwd from any ambient `.beads/redirect` in the working tree
 	// (e.g. when `make test` runs from a polecat/crew worktree, the worktree's

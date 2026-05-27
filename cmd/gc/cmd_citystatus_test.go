@@ -728,6 +728,83 @@ func TestControllerStatusForCityPrefersRegisteredSupervisorState(t *testing.T) {
 	}
 }
 
+func TestAPIClientPrefersSupervisorForRegisteredCity(t *testing.T) {
+	t.Setenv("GC_HOME", filepath.Join(t.TempDir(), "gc-home"))
+
+	root := shortSocketTempDir(t, "gc-status-")
+	cityPath := filepath.Join(root, "bright-lights")
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[workspace]\nname = \"bright-lights\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := supervisor.NewRegistry(supervisor.RegistryPath()).Register(cityPath, "bright-lights"); err != nil {
+		t.Fatalf("register city: %v", err)
+	}
+
+	accepted := startFakeControllerSocket(t, cityPath, "1234\n")
+
+	oldAlive := supervisorAliveHook
+	oldRunning := supervisorCityRunningHook
+	supervisorAliveHook = func() int { return 4321 }
+	supervisorCityRunningHook = func(string) (bool, string, bool) { return true, "", true }
+	t.Cleanup(func() {
+		supervisorAliveHook = oldAlive
+		supervisorCityRunningHook = oldRunning
+	})
+
+	if client := apiClient(cityPath); client == nil {
+		t.Fatal("apiClient returned nil, want supervisor-scoped client")
+	}
+	select {
+	case <-accepted:
+		t.Fatal("apiClient consulted standalone socket before supervisor routing")
+	case <-time.After(10 * time.Millisecond):
+	}
+}
+
+type countingDrainOps struct {
+	*fakeDrainOps
+	isDrainingCalls int
+}
+
+func (d *countingDrainOps) isDraining(sessionName string) (bool, error) {
+	d.isDrainingCalls++
+	return d.fakeDrainOps.isDraining(sessionName)
+}
+
+func TestRenderCityStatusFromAPIUsesCachedDrainingState(t *testing.T) {
+	cr := api.CachedRead[api.StatusView]{
+		Body: api.StatusView{
+			CityName: "bright-lights",
+			CityPath: "/tmp/bright-lights",
+			Agents: []api.StatusAgentView{{
+				Name:          "mayor",
+				QualifiedName: "mayor",
+				Scope:         "city",
+				Running:       true,
+				Draining:      true,
+				SessionName:   "bright-lights--mayor",
+				GroupName:     "mayor",
+			}},
+			Summary: api.StatusSummaryView{TotalAgents: 1, RunningAgents: 1},
+		},
+	}
+	dops := &countingDrainOps{fakeDrainOps: newFakeDrainOps()}
+
+	var stdout bytes.Buffer
+	if code := renderCityStatusFromAPI("/tmp/bright-lights", cr, dops, false, &stdout); code != 0 {
+		t.Fatalf("renderCityStatusFromAPI = %d, want 0", code)
+	}
+	if !strings.Contains(stdout.String(), "running  (draining)") {
+		t.Fatalf("stdout = %q, want cached draining status", stdout.String())
+	}
+	if dops.isDrainingCalls != 0 {
+		t.Fatalf("isDraining calls = %d, want 0 on API-rendered status", dops.isDrainingCalls)
+	}
+}
+
 func TestControllerStatusForCityFallsBackToStandaloneWhenRegisteredSupervisorDown(t *testing.T) {
 	t.Setenv("GC_HOME", filepath.Join(t.TempDir(), "gc-home"))
 

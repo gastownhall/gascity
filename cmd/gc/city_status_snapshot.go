@@ -71,6 +71,7 @@ type cityStatusAgentRow struct {
 	GroupName   string
 	ScaleLabel  string
 	Expanded    bool
+	DrainKnown  bool
 }
 
 type cityStatusNamedSession struct {
@@ -476,7 +477,12 @@ func renderCityStatusText(snapshot cityStatusSnapshot, dops drainOps, stdout io.
 			if row.ScaleLabel != "" {
 				fmt.Fprintf(stdout, "  %-24s%s\n", row.GroupName, row.ScaleLabel) //nolint:errcheck // best-effort stdout
 			}
-			status := agentStatusLine(row.Agent.Running, dops, row.SessionName, row.Agent.Suspended)
+			var status string
+			if row.DrainKnown {
+				status = agentStatusLineFromState(row.Agent.Running, row.Agent.Suspended, row.Agent.Draining)
+			} else {
+				status = agentStatusLine(row.Agent.Running, dops, row.SessionName, row.Agent.Suspended)
+			}
 			if row.Expanded {
 				fmt.Fprintf(stdout, "    %-22s%s\n", row.Agent.QualifiedName, status) //nolint:errcheck // best-effort stdout
 			} else {

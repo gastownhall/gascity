@@ -63,6 +63,7 @@ func TierModeFromOpts(opts []QueryOpt) TierMode {
 type ListQuery struct {
 	Status        string
 	Type          string
+	ExcludeType   string
 	Label         string
 	Assignee      string
 	ParentID      string
@@ -104,6 +105,7 @@ func readyQueryFromArgs(queries []ReadyQuery) ReadyQuery {
 func (q ListQuery) HasFilter() bool {
 	return q.Status != "" ||
 		q.Type != "" ||
+		q.ExcludeType != "" ||
 		q.Label != "" ||
 		q.Assignee != "" ||
 		q.ParentID != "" ||
@@ -138,6 +140,9 @@ func (q ListQuery) Matches(b Bead) bool {
 		return false
 	}
 	if q.Type != "" && b.Type != q.Type {
+		return false
+	}
+	if q.ExcludeType != "" && b.Type == q.ExcludeType {
 		return false
 	}
 	if q.Label != "" && !beadHasLabel(b, q.Label) {

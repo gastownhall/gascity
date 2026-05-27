@@ -1,7 +1,9 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -10,6 +12,20 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/storehealth"
 )
+
+type testIndexedRowCounterStore struct {
+	*beads.MemStore
+	count int
+	err   error
+	calls int
+	query beads.ListQuery
+}
+
+func (s *testIndexedRowCounterStore) CountIndexed(_ context.Context, query beads.ListQuery) (int, error) {
+	s.calls++
+	s.query = query
+	return s.count, s.err
+}
 
 func TestCachedStoreHealthServesMemoized(t *testing.T) {
 	var calls int
@@ -39,23 +55,57 @@ func TestCachedStoreHealthServesMemoized(t *testing.T) {
 	}
 }
 
-func TestCachedStoreHealthRefreshesAfterTTL(t *testing.T) {
+func TestCachedStoreHealthReturnsStaleWhileRefreshingAfterTTL(t *testing.T) {
 	var calls int
+	refreshStarted := make(chan struct{})
+	allowRefresh := make(chan struct{})
 	s := &Server{}
 	s.storeHealthComputer = func() *StatusStoreHealth {
 		calls++
+		if calls == 2 {
+			close(refreshStarted)
+			<-allowRefresh
+		}
 		return &StatusStoreHealth{SizeBytes: int64(calls)}
 	}
 
 	now := time.Unix(1_000_000, 0)
 	_ = s.cachedStoreHealth(now)
 	later := now.Add(storeHealthCacheTTL + time.Second)
-	got := s.cachedStoreHealth(later)
-	if calls != 2 {
-		t.Fatalf("computer calls = %d, want 2", calls)
+	returned := make(chan *StatusStoreHealth, 1)
+	go func() {
+		returned <- s.cachedStoreHealth(later)
+	}()
+
+	select {
+	case got := <-returned:
+		if got.SizeBytes != 1 {
+			t.Fatalf("expired cachedStoreHealth SizeBytes = %d, want stale 1", got.SizeBytes)
+		}
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("expired cachedStoreHealth blocked on refresh")
 	}
-	if got.SizeBytes != 2 {
-		t.Fatalf("refreshed entry SizeBytes = %d, want 2", got.SizeBytes)
+
+	select {
+	case <-refreshStarted:
+	case <-time.After(time.Second):
+		t.Fatal("background refresh did not start")
+	}
+	close(allowRefresh)
+
+	deadline := time.After(time.Second)
+	for {
+		s.storeHealthMu.Lock()
+		refreshed := s.storeHealthEntry != nil && s.storeHealthEntry.SizeBytes == 2 && !s.storeHealthRefreshing
+		s.storeHealthMu.Unlock()
+		if refreshed {
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatal("background refresh did not update cached entry")
+		case <-time.After(10 * time.Millisecond):
+		}
 	}
 }
 
@@ -178,6 +228,38 @@ func TestCountBeadStoreRowsIncludesClosedBeads(t *testing.T) {
 	}
 	if got := countBeadStoreRows(store); got != 2 {
 		t.Fatalf("countBeadStoreRows = %d, want 2 including closed bead %s and open bead %s", got, closed.ID, open.ID)
+	}
+}
+
+func TestCountBeadStoreRowsUsesIndexedCounter(t *testing.T) {
+	store := &testIndexedRowCounterStore{
+		MemStore: beads.NewMemStore(),
+		count:    9,
+	}
+	if got := countBeadStoreRows(store); got != 9 {
+		t.Fatalf("countBeadStoreRows = %d, want indexed count 9", got)
+	}
+	if store.calls != 1 {
+		t.Fatalf("CountIndexed calls = %d, want 1", store.calls)
+	}
+	if !store.query.IncludeClosed || !store.query.AllowScan {
+		t.Fatalf("CountIndexed query = %+v, want all-status scan count", store.query)
+	}
+}
+
+func TestCountBeadStoreRowsDoesNotFallbackToHydratedListAfterIndexedError(t *testing.T) {
+	store := &testIndexedRowCounterStore{
+		MemStore: beads.NewMemStore(),
+		err:      errors.New("indexed count unavailable"),
+	}
+	if _, err := store.Create(beads.Bead{Title: "would be counted by fallback"}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if got := countBeadStoreRows(store); got != 0 {
+		t.Fatalf("countBeadStoreRows = %d, want 0 after indexed count error", got)
+	}
+	if store.calls != 1 {
+		t.Fatalf("CountIndexed calls = %d, want 1", store.calls)
 	}
 }
 

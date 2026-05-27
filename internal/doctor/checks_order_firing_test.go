@@ -107,6 +107,46 @@ func TestOrderFiringCurrent_Stale(t *testing.T) {
 	}
 }
 
+func TestOrderFiringCurrent_ShortCooldownDriftWarnsBeforeFloor(t *testing.T) {
+	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
+	cityPath, cfg := orderFiringTestCity(t)
+	writeOrderFiringTestOrder(t, cityPath, "beads-health", "cooldown", "30s")
+	writeOrderFiringTestEvents(t, cityPath,
+		events.Event{Type: events.ControllerStarted, Ts: now.Add(-10 * time.Minute)},
+		events.Event{Type: events.OrderFired, Subject: "beads-health", Ts: now.Add(-2 * time.Minute)},
+	)
+
+	result := runOrderFiringCurrentTest(t, cfg, cityPath, now)
+	if result.Status != StatusWarning {
+		t.Fatalf("status = %v, want warning; msg = %s; details = %v", result.Status, result.Message, result.Details)
+	}
+	details := strings.Join(result.Details, "\n")
+	if !strings.Contains(details, "expected every 1m") {
+		t.Fatalf("details = %v, want short-cooldown detail", result.Details)
+	}
+	if !strings.Contains(details, "(overdue)") {
+		t.Fatalf("details = %v, want overdue detail", result.Details)
+	}
+}
+
+func TestOrderFiringCurrent_ShortCooldownStaleAfterFloor(t *testing.T) {
+	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
+	cityPath, cfg := orderFiringTestCity(t)
+	writeOrderFiringTestOrder(t, cityPath, "beads-health", "cooldown", "30s")
+	writeOrderFiringTestEvents(t, cityPath,
+		events.Event{Type: events.ControllerStarted, Ts: now.Add(-10 * time.Minute)},
+		events.Event{Type: events.OrderFired, Subject: "beads-health", Ts: now.Add(-6 * time.Minute)},
+	)
+
+	result := runOrderFiringCurrentTest(t, cfg, cityPath, now)
+	if result.Status != StatusError {
+		t.Fatalf("status = %v, want error; msg = %s; details = %v", result.Status, result.Message, result.Details)
+	}
+	if !strings.Contains(strings.Join(result.Details, "\n"), "(CRITICAL: stale)") {
+		t.Fatalf("details = %v, want stale detail", result.Details)
+	}
+}
+
 func TestOrderFiringCurrent_IgnoresManualAndEventTriggers(t *testing.T) {
 	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
 	cityPath, cfg := orderFiringTestCity(t)

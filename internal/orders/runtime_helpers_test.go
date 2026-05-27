@@ -2,8 +2,6 @@ package orders
 
 import (
 	"errors"
-	"fmt"
-	"strings"
 	"testing"
 	"time"
 
@@ -67,51 +65,40 @@ func TestLastRunFuncForStoreReturnsZeroWhenNoRunsExist(t *testing.T) {
 	}
 }
 
-func TestLastRunFuncForStoreUsesRowsFromPartialTierError(t *testing.T) {
-	want := time.Date(2026, 5, 15, 7, 0, 0, 0, time.UTC)
+func TestLastRunFuncForStoreReturnsListError(t *testing.T) {
+	wantErr := errors.New("store unavailable")
 	store := &rowsErrorStore{
 		MemStore: beads.NewMemStore(),
 		rows: []beads.Bead{{
 			ID:        "run-1",
 			Title:     "digest",
-			CreatedAt: want,
+			CreatedAt: time.Date(2026, 5, 15, 7, 0, 0, 0, time.UTC),
 			Labels:    []string{"order-run:digest"},
 		}},
-		err: errors.New("wisps tier unavailable"),
+		err: wantErr,
 	}
 
 	got, err := LastRunFuncForStore(store)("digest")
-	if err != nil {
-		t.Fatalf("LastRunFuncForStore(): %v", err)
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("LastRunFuncForStore() err = %v, want %v", err, wantErr)
 	}
-	if !got.Equal(want) {
-		t.Fatalf("LastRunFuncForStore() = %s, want %s from surviving rows", got, want)
+	if !got.IsZero() {
+		t.Fatalf("LastRunFuncForStore() = %s, want zero time on list error", got)
 	}
 }
 
-func TestCursorFuncForStoreUsesRowsAndLogsPartialTierError(t *testing.T) {
-	oldLogf := runtimeHelpersLogf
-	var logs []string
-	runtimeHelpersLogf = func(format string, args ...any) {
-		logs = append(logs, fmt.Sprintf(format, args...))
-	}
-	t.Cleanup(func() {
-		runtimeHelpersLogf = oldLogf
-	})
+func TestCursorFuncForStoreReturnsZeroOnListError(t *testing.T) {
 	store := &rowsErrorStore{
 		MemStore: beads.NewMemStore(),
 		rows: []beads.Bead{{
 			ID:     "run-1",
 			Labels: []string{"order-run:digest", "seq:42"},
 		}},
-		err: errors.New("wisps tier unavailable"),
+		err: errors.New("store unavailable"),
 	}
 
 	got := CursorFuncForStore(store)("digest")
-	if got != 42 {
-		t.Fatalf("CursorFuncForStore() = %d, want 42 from surviving rows", got)
-	}
-	if len(logs) == 0 || !strings.Contains(logs[0], "partially failed") {
-		t.Fatalf("logs = %#v, want partial failure log", logs)
+	if got != 0 {
+		t.Fatalf("CursorFuncForStore() = %d, want 0 on list error", got)
 	}
 }
