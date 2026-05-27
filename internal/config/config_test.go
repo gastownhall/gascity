@@ -6173,3 +6173,98 @@ printf 'TRACE=%%s\nARGS=%%s\n' "$GC_WORKFLOW_TRACE" "$*" > %q
 	}
 	return tracePath, args
 }
+
+// TestAllPackDirs covers (*City).AllPackDirs() — the union of PackDirs and
+// RigPackDirs that the prompt renderer relies on. Regression: rig-imported
+// pack template fragments were silently dropped before gascity#2676.
+func TestAllPackDirs(t *testing.T) {
+	cases := []struct {
+		name        string
+		packDirs    []string
+		rigPackDirs map[string][]string
+		want        []string
+	}{
+		{
+			name: "empty",
+		},
+		{
+			name:     "city only",
+			packDirs: []string{"/city/packs/a", "/city/packs/b"},
+			want:     []string{"/city/packs/a", "/city/packs/b"},
+		},
+		{
+			name:        "rig only",
+			rigPackDirs: map[string][]string{"alpha": {"/rig/alpha/packs/x"}},
+			want:        []string{"/rig/alpha/packs/x"},
+		},
+		{
+			name:        "both city and rig",
+			packDirs:    []string{"/city/packs/a"},
+			rigPackDirs: map[string][]string{"alpha": {"/rig/alpha/packs/x"}},
+			want:        []string{"/city/packs/a", "/rig/alpha/packs/x"},
+		},
+		{
+			name:     "multiple rigs sorted by rig name",
+			packDirs: []string{"/city/packs/a"},
+			rigPackDirs: map[string][]string{
+				"zulu":  {"/rig/zulu/packs/z"},
+				"alpha": {"/rig/alpha/packs/x"},
+				"mike":  {"/rig/mike/packs/m"},
+			},
+			want: []string{
+				"/city/packs/a",
+				"/rig/alpha/packs/x",
+				"/rig/mike/packs/m",
+				"/rig/zulu/packs/z",
+			},
+		},
+		{
+			name:     "dedup across city and rig keeps first occurrence",
+			packDirs: []string{"/shared/packs/common", "/city/packs/a"},
+			rigPackDirs: map[string][]string{
+				"alpha": {"/shared/packs/common", "/rig/alpha/packs/x"},
+			},
+			want: []string{"/shared/packs/common", "/city/packs/a", "/rig/alpha/packs/x"},
+		},
+		{
+			name: "dedup within a single rig list",
+			rigPackDirs: map[string][]string{
+				"alpha": {"/rig/alpha/packs/x", "/rig/alpha/packs/x", "/rig/alpha/packs/y"},
+			},
+			want: []string{"/rig/alpha/packs/x", "/rig/alpha/packs/y"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := &City{PackDirs: tc.packDirs, RigPackDirs: tc.rigPackDirs}
+			got := c.AllPackDirs()
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("AllPackDirs() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestAllPackDirs_DeterministicAcrossCalls guards against a Go map-iteration
+// regression: two consecutive calls must return byte-identical ordering even
+// when RigPackDirs has multiple entries.
+func TestAllPackDirs_DeterministicAcrossCalls(t *testing.T) {
+	c := &City{
+		PackDirs: []string{"/city/packs/a"},
+		RigPackDirs: map[string][]string{
+			"zulu":    {"/rig/zulu/packs/z"},
+			"alpha":   {"/rig/alpha/packs/x"},
+			"mike":    {"/rig/mike/packs/m"},
+			"bravo":   {"/rig/bravo/packs/b"},
+			"yankee":  {"/rig/yankee/packs/y"},
+			"charlie": {"/rig/charlie/packs/c"},
+		},
+	}
+	first := c.AllPackDirs()
+	for i := 0; i < 20; i++ {
+		got := c.AllPackDirs()
+		if !reflect.DeepEqual(got, first) {
+			t.Fatalf("AllPackDirs() not deterministic across calls:\n iter %d = %v\n first   = %v", i, got, first)
+		}
+	}
+}
