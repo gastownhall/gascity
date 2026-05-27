@@ -104,7 +104,7 @@ func newAgentBuildParams(cityName, cityPath string, cfg *config.City, sp runtime
 		rigs:            cfg.Rigs,
 		sessionTemplate: cfg.Workspace.SessionTemplate,
 		beaconTime:      beaconTime,
-		packDirs:        cfg.PackDirs,
+		packDirs:        cfg.AllPackDirs(),
 		packOverlayDirs: cfg.PackOverlayDirs,
 		rigOverlayDirs:  cfg.RigOverlayDirs,
 		globalFragments: cfg.Workspace.GlobalFragments,

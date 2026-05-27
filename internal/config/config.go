@@ -2157,6 +2157,27 @@ func (c *City) FormulasDir() string {
 	return citylayout.FormulasRoot
 }
 
+// AllPackDirs returns the union of city-level and rig-level pack directories
+// (city dirs first, then sorted-by-rig-name dirs), deduplicated. Use this when
+// rendering prompts or scanning the full pack-fragment universe — a rig-imported
+// agent's prompt template can reference fragments declared in a rig-level pack,
+// so both sets must be in the parse context. Without this merge, rig-imported
+// template fragments silently fail to resolve and the renderer falls back to
+// emitting the raw `{{ ... }}` text, degrading every imported agent's prompt.
+func (c *City) AllPackDirs() []string {
+	var dirs []string
+	dirs = appendUnique(dirs, c.PackDirs...)
+	rigNames := make([]string, 0, len(c.RigPackDirs))
+	for name := range c.RigPackDirs {
+		rigNames = append(rigNames, name)
+	}
+	sort.Strings(rigNames)
+	for _, name := range rigNames {
+		dirs = appendUnique(dirs, c.RigPackDirs[name]...)
+	}
+	return dirs
+}
+
 // AgentDefaults provides city-level agent defaults declared via
 // [agent_defaults] in city.toml. The runtime currently applies
 // default_sling_formula and append_fragments; the remaining fields are
