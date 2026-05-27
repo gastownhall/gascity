@@ -216,23 +216,24 @@ func (s *HQStore) List(query ListQuery) ([]Bead, error) {
 	s.mu.RLock()
 
 	candidates := s.candidateIDsLocked(query)
-	snapshot := make([]Bead, 0, len(candidates))
+	raw := make([]Bead, 0, len(candidates))
 	for _, id := range s.iterationIDsLocked(query, candidates) {
 		if _, ok := candidates[id]; !ok {
 			continue
 		}
 		if b, ok := s.main[id]; ok {
-			snapshot = append(snapshot, cloneBead(b))
+			raw = append(raw, b)
 			continue
 		}
 		if b, ok := s.wisps[id]; ok {
-			snapshot = append(snapshot, cloneBead(b))
+			raw = append(raw, b)
 		}
 	}
 	s.mu.RUnlock()
 
-	result := make([]Bead, 0, len(snapshot))
-	for _, b := range snapshot {
+	result := make([]Bead, 0, len(raw))
+	for _, b := range raw {
+		b = cloneBead(b)
 		if query.Matches(b) {
 			result = append(result, b)
 		}
@@ -579,6 +580,9 @@ func (s *HQStore) upsertLocked(b Bead) {
 }
 
 func (s *HQStore) upsertOwnedLocked(b Bead) {
+	// Write-invariant: stored bead reference fields must not be mutated in
+	// place. Mutations go through clone-and-replace so readers can safely
+	// clone shallow struct copies after releasing s.mu.
 	if old, ok := s.main[b.ID]; ok {
 		s.mainIdx.remove(old)
 		delete(s.main, b.ID)
