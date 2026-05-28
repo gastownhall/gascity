@@ -63,6 +63,8 @@ type fakeStartOps struct {
 	disableMouseAndActivityErr error
 	runSetupCommandErr         error
 	sendKeysErr                error
+	capturePaneText            string
+	capturePaneErr             error
 }
 
 type errReader struct{}
@@ -169,6 +171,11 @@ func (f *fakeStartOps) setRemainOnExit(name string) error {
 func (f *fakeStartOps) disableMouseAndActivity(name string) error {
 	f.calls = append(f.calls, startCall{method: "disableMouseAndActivity", name: name})
 	return f.disableMouseAndActivityErr
+}
+
+func (f *fakeStartOps) capturePane(name string, lines int) (string, error) {
+	f.calls = append(f.calls, startCall{method: "capturePane", name: name})
+	return f.capturePaneText, f.capturePaneErr
 }
 
 func (f *fakeStartOps) runSetupCommand(_ context.Context, cmd string, env map[string]string, timeout time.Duration) error {
@@ -579,6 +586,47 @@ func TestDoStartSession_SessionDiesDuringStartup(t *testing.T) {
 	if !errors.Is(err, runtime.ErrSessionDiedDuringStartup) {
 		t.Errorf("error = %v, want ErrSessionDiedDuringStartup", err)
 	}
+}
+
+func TestDoStartSession_ReadyDeadlineWithDeadPaneReportsProviderCrash(t *testing.T) {
+	ops := &fakeStartOps{
+		waitReadyErr:     context.DeadlineExceeded,
+		hasSessionResult: false,
+		capturePaneText: "WARNING: proceeding, even though we could not update PATH: Operation not permitted (os error 1)\n" +
+			"Error: Operation not permitted (os error 1)\n" +
+			"Pane is dead",
+	}
+
+	cfg := runtime.Config{
+		Command:           "codex",
+		ProcessNames:      []string{"codex"},
+		ReadyPromptPrefix: "› ",
+	}
+
+	err := doStartSession(context.Background(), ops, "mayor", cfg, DefaultConfig().SetupTimeout)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !errors.Is(err, runtime.ErrSessionDiedDuringStartup) {
+		t.Fatalf("error = %v, want ErrSessionDiedDuringStartup", err)
+	}
+	if strings.Contains(err.Error(), context.DeadlineExceeded.Error()) {
+		t.Fatalf("error = %v, should not surface generic deadline after pane died", err)
+	}
+	for _, want := range []string{"session \"mayor\"", "Operation not permitted", "Pane is dead"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error = %v, want substring %q", err, want)
+		}
+	}
+	assertCallSequence(t, ops, []string{
+		"createSession",
+		"setRemainOnExit",
+		"waitForCommand",
+		"acceptStartupDialogs",
+		"waitForReady",
+		"hasSession",
+		"capturePane",
+	})
 }
 
 func TestDoStartSession_HasSessionError(t *testing.T) {
