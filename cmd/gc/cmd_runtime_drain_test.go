@@ -445,7 +445,7 @@ func TestDoRuntimeDrainCheckJSONNotDrainingWritesFalseResult(t *testing.T) {
 func TestDoRuntimeDrainAck(t *testing.T) {
 	dops := newFakeDrainOps()
 	var stdout, stderr bytes.Buffer
-	code := doRuntimeDrainAck(dops, "worker", "worker", false, &stdout, &stderr)
+	code := doRuntimeDrainAck(dops, "", "worker", "worker", false, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -461,7 +461,7 @@ func TestDoRuntimeDrainAckError(t *testing.T) {
 	dops := newFakeDrainOps()
 	dops.err = errors.New("tmux borked")
 	var stdout, stderr bytes.Buffer
-	code := doRuntimeDrainAck(dops, "worker", "worker", false, &stdout, &stderr)
+	code := doRuntimeDrainAck(dops, "", "worker", "worker", false, &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("code = %d, want 1", code)
 	}
@@ -471,9 +471,13 @@ func TestDoRuntimeDrainAckError(t *testing.T) {
 }
 
 func TestDoRuntimeDrainAckJSON(t *testing.T) {
+	old := drainAckPokeController
+	drainAckPokeController = func(string) error { return nil }
+	t.Cleanup(func() { drainAckPokeController = old })
+
 	dops := newFakeDrainOps()
 	var stdout, stderr bytes.Buffer
-	code := doRuntimeDrainAck(dops, "worker", "worker", true, &stdout, &stderr)
+	code := doRuntimeDrainAck(dops, "", "worker", "worker", true, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -486,6 +490,76 @@ func TestDoRuntimeDrainAckJSON(t *testing.T) {
 	}
 	if result.SchemaVersion != "1" || result.Command != "runtime drain-ack" || result.Session != "worker" || result.Status != "acknowledged" {
 		t.Fatalf("unexpected JSON result: %+v", result)
+	}
+}
+
+func TestDoRuntimeDrainAckPokesController(t *testing.T) {
+	var gotCityPath string
+	calls := 0
+	old := drainAckPokeController
+	drainAckPokeController = func(cityPath string) error {
+		calls++
+		gotCityPath = cityPath
+		return nil
+	}
+	t.Cleanup(func() { drainAckPokeController = old })
+
+	// Distinct, non-overlapping cityPath/targetName/sn catch a transposition
+	// of the three adjacent string params in the new signature.
+	dops := newFakeDrainOps()
+	var stdout, stderr bytes.Buffer
+	code := doRuntimeDrainAck(dops, "/city/path", "display-name", "session-name", false, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if calls != 1 {
+		t.Fatalf("poke called %d times, want 1", calls)
+	}
+	if gotCityPath != "/city/path" {
+		t.Errorf("poke cityPath = %q, want %q", gotCityPath, "/city/path")
+	}
+	if !dops.acked["session-name"] {
+		t.Error("drain ack flag not set")
+	}
+}
+
+func TestDoRuntimeDrainAckErrorDoesNotPoke(t *testing.T) {
+	calls := 0
+	old := drainAckPokeController
+	drainAckPokeController = func(string) error {
+		calls++
+		return nil
+	}
+	t.Cleanup(func() { drainAckPokeController = old })
+
+	dops := newFakeDrainOps()
+	dops.err = errors.New("tmux borked")
+	var stdout, stderr bytes.Buffer
+	code := doRuntimeDrainAck(dops, "/city/path", "worker", "worker", false, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("code = %d, want 1", code)
+	}
+	if calls != 0 {
+		t.Fatalf("poke called %d times, want 0 (setDrainAck failed)", calls)
+	}
+}
+
+func TestDoRuntimeDrainAckPokeFailureWarns(t *testing.T) {
+	old := drainAckPokeController
+	drainAckPokeController = func(string) error { return errors.New("dial failed") }
+	t.Cleanup(func() { drainAckPokeController = old })
+
+	dops := newFakeDrainOps()
+	var stdout, stderr bytes.Buffer
+	code := doRuntimeDrainAck(dops, "/city/path", "worker", "worker", false, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code = %d, want 0 (poke failure is best-effort)", code)
+	}
+	if got, want := stderr.String(), "gc runtime drain-ack: warning: poke failed: dial failed\n"; got != want {
+		t.Errorf("stderr = %q, want %q", got, want)
+	}
+	if !strings.Contains(stdout.String(), "Drain acknowledged.") {
+		t.Errorf("stdout = %q, want it to contain %q", stdout.String(), "Drain acknowledged.")
 	}
 }
 
@@ -1058,6 +1132,10 @@ func TestDrainAckNoArgsErrorMessage(t *testing.T) {
 }
 
 func TestDrainAckNoArgsFallsBackToCityPathEnv(t *testing.T) {
+	old := drainAckPokeController
+	drainAckPokeController = func(string) error { return nil }
+	t.Cleanup(func() { drainAckPokeController = old })
+
 	cityDir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
 		t.Fatal(err)
