@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"os"
+	"path/filepath"
 	"runtime/debug"
 	"strconv"
 	"strings"
@@ -805,6 +807,20 @@ func buildPreparedStartWithWorkDirResolver(
 	} else if wd := session.Metadata["work_dir"]; wd != "" {
 		agentCfg.WorkDir = wd
 	}
+	// Pre-flight stale-resume guard: if the bead carries a session_key whose
+	// claude JSONL file is no longer on disk (provider session retention
+	// disabled, manual cleanup, worktree rebuild), --resume would hard-fail
+	// with "No conversation found" and the pane would die ~2s after spawn.
+	// Post-start observation can miss the death (tmux state cache TTL race),
+	// so the bead stays asleep and every subsequent wake re-fires the same
+	// broken command. Clear the stale key here so the regen block below mints
+	// a fresh one and resolveSessionCommand uses --session-id (which creates
+	// a new conversation) instead of --resume (which can't).
+	if sk := strings.TrimSpace(session.Metadata["session_key"]); sk != "" &&
+		providerUsesClaudeJSONL(tp.ResolvedProvider, session.Metadata["provider"]) &&
+		agentCfg.WorkDir != "" && !claudeSessionFileExists(agentCfg.WorkDir, sk) {
+		clearStaleResumeKeyMetadata(session, store)
+	}
 	if session.Metadata["session_key"] == "" && tp.ResolvedProvider != nil && tp.ResolvedProvider.SessionIDFlag != "" {
 		sessionKey, err := sessionpkg.GenerateSessionKey()
 		if err != nil {
@@ -1497,6 +1513,117 @@ func observeRuntimeProviderLiveness(sp runtime.Provider, name string, processNam
 	}
 	obs := runtime.ObserveLiveness(sp, name, processNames)
 	return obs.Running, obs.Alive
+}
+
+// providerUsesClaudeJSONL reports whether resume for this provider depends on
+// claude's per-session JSONL file (the only artifact we currently know how to
+// probe on disk). Other providers store resume state elsewhere; we leave them
+// alone to avoid false-positive clears.
+func providerUsesClaudeJSONL(rp *config.ResolvedProvider, providerMetadata string) bool {
+	if rp != nil {
+		// Builtin claude profiles set Command to "claude" and use --resume
+		// with --session-id. The base name survives through extension/override.
+		if base := strings.ToLower(strings.TrimSpace(claudeProviderBaseName(rp))); base != "" {
+			return base == "claude"
+		}
+	}
+	switch strings.ToLower(strings.TrimSpace(providerMetadata)) {
+	case "claude", "claude-eco":
+		return true
+	}
+	return false
+}
+
+// claudeProviderBaseName returns the first token of the provider's start
+// command (e.g. "claude" from "claude --dangerously-skip-permissions ..."),
+// stripped of quoting and path prefix.
+func claudeProviderBaseName(rp *config.ResolvedProvider) string {
+	if rp == nil {
+		return ""
+	}
+	cmd := strings.TrimSpace(rp.Command)
+	if cmd == "" {
+		return ""
+	}
+	parts := shellquote.Split(cmd)
+	if len(parts) == 0 {
+		return ""
+	}
+	return filepath.Base(parts[0])
+}
+
+// workDirToClaudeProjectSlug converts an absolute work_dir into the slug
+// claude uses for its per-project storage directory under
+// ~/.claude/projects/. The rule is to replace every '/', '_', and '.' with
+// '-'.
+func workDirToClaudeProjectSlug(workDir string) string {
+	if workDir == "" {
+		return ""
+	}
+	return strings.Map(func(r rune) rune {
+		if r == '/' || r == '_' || r == '.' {
+			return '-'
+		}
+		return r
+	}, workDir)
+}
+
+// claudeSessionFile returns the on-disk path where claude would store the
+// JSONL transcript for the given work_dir + session key. Returns "" when
+// the home directory cannot be resolved or the inputs are empty.
+func claudeSessionFile(workDir, sessionKey string) string {
+	workDir = strings.TrimSpace(workDir)
+	sessionKey = strings.TrimSpace(sessionKey)
+	if workDir == "" || sessionKey == "" {
+		return ""
+	}
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return ""
+	}
+	slug := workDirToClaudeProjectSlug(workDir)
+	if slug == "" {
+		return ""
+	}
+	return filepath.Join(home, ".claude", "projects", slug, sessionKey+".jsonl")
+}
+
+// claudeSessionFileExists reports whether the JSONL file claude would resume
+// for the given (work_dir, session_key) is present on disk. Treats any stat
+// error (including ENOENT and permission failures) as "missing" — the caller
+// then falls back to a fresh-start path that doesn't rely on the file.
+func claudeSessionFileExists(workDir, sessionKey string) bool {
+	path := claudeSessionFile(workDir, sessionKey)
+	if path == "" {
+		return false
+	}
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+// clearStaleResumeKeyMetadata wipes the resume-tracking metadata for a bead
+// whose stored session_key references a JSONL that no longer exists. Mirrors
+// the clears performed by recordWakeFailure (cmd/gc/session_reconcile.go) and
+// Manager.clearStaleResumeMetadata (internal/session/chat.go), so downstream
+// breaker / churn logic treats this as the same kind of recovery cycle.
+func clearStaleResumeKeyMetadata(session *beads.Bead, store beads.Store) {
+	if session == nil {
+		return
+	}
+	patch := map[string]string{
+		"session_key":                "",
+		"started_config_hash":        "",
+		"continuation_reset_pending": "true",
+	}
+	if store != nil && strings.TrimSpace(session.ID) != "" {
+		_ = store.SetMetadataBatch(session.ID, patch)
+	}
+	if session.Metadata == nil {
+		session.Metadata = make(map[string]string, len(patch))
+	}
+	for k, v := range patch {
+		session.Metadata[k] = v
+	}
 }
 
 func commitStartResult(

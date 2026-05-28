@@ -6303,3 +6303,198 @@ func TestStopTargetThroughWorkerBoundary_CityStopLeavesSessionAsleep(t *testing.
 		t.Fatalf("suspended_at = %q, want empty", got.Metadata["suspended_at"])
 	}
 }
+
+func TestWorkDirToClaudeProjectSlug(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"empty", "", ""},
+		{
+			"city worktree",
+			"/home/sirwassail/source/city_hy/.gc/worktrees/pringle/kettle",
+			"-home-sirwassail-source-city-hy--gc-worktrees-pringle-kettle",
+		},
+		{
+			"underscores",
+			"/foo/bar_baz/qux",
+			"-foo-bar-baz-qux",
+		},
+		{
+			"dot-prefixed dir",
+			"/a/.b/c",
+			"-a--b-c",
+		},
+		{
+			"no special chars",
+			"alpha",
+			"alpha",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := workDirToClaudeProjectSlug(tc.in)
+			if got != tc.want {
+				t.Fatalf("workDirToClaudeProjectSlug(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestClaudeSessionFileExists(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	// On some systems os.UserHomeDir consults USERPROFILE first; clear it
+	// so the test is reproducible across platforms.
+	t.Setenv("USERPROFILE", "")
+
+	workDir := "/tmp/projects/example_one"
+	slug := workDirToClaudeProjectSlug(workDir) // -tmp-projects-example-one
+	projDir := filepath.Join(home, ".claude", "projects", slug)
+	if err := os.MkdirAll(projDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	key := "11111111-2222-3333-4444-555555555555"
+	jsonl := filepath.Join(projDir, key+".jsonl")
+	if err := os.WriteFile(jsonl, []byte("{}\n"), 0o600); err != nil {
+		t.Fatalf("writefile: %v", err)
+	}
+
+	if !claudeSessionFileExists(workDir, key) {
+		t.Fatalf("expected file %s to be detected as existing", jsonl)
+	}
+
+	missingKey := "99999999-9999-9999-9999-999999999999"
+	if claudeSessionFileExists(workDir, missingKey) {
+		t.Fatalf("expected missing key %q to report not-exists", missingKey)
+	}
+
+	if claudeSessionFileExists("", key) {
+		t.Fatalf("empty workDir should report not-exists")
+	}
+	if claudeSessionFileExists(workDir, "") {
+		t.Fatalf("empty sessionKey should report not-exists")
+	}
+}
+
+func TestClearStaleResumeKeyMetadata(t *testing.T) {
+	store := beads.NewMemStore()
+	seed := beads.Bead{
+		Metadata: map[string]string{
+			"session_key":         "11111111-2222-3333-4444-555555555555",
+			"started_config_hash": "v1:deadbeef",
+			"resume_flag":         "--resume",
+		},
+	}
+	created, err := store.Create(seed)
+	if err != nil {
+		t.Fatalf("create bead: %v", err)
+	}
+	bead := &beads.Bead{
+		ID:       created.ID,
+		Metadata: map[string]string{},
+	}
+	for k, v := range seed.Metadata {
+		bead.Metadata[k] = v
+	}
+	// Seed the same metadata into the store so the read-back assertion isn't
+	// purely about the in-memory bead.
+	if err := store.SetMetadataBatch(bead.ID, bead.Metadata); err != nil {
+		t.Fatalf("seed metadata: %v", err)
+	}
+
+	clearStaleResumeKeyMetadata(bead, store)
+
+	if got := bead.Metadata["session_key"]; got != "" {
+		t.Fatalf("in-memory session_key = %q, want empty", got)
+	}
+	if got := bead.Metadata["started_config_hash"]; got != "" {
+		t.Fatalf("in-memory started_config_hash = %q, want empty", got)
+	}
+	if got := bead.Metadata["continuation_reset_pending"]; got != "true" {
+		t.Fatalf("in-memory continuation_reset_pending = %q, want true", got)
+	}
+	// resume_flag should be untouched — it's a provider property, not stale state.
+	if got := bead.Metadata["resume_flag"]; got != "--resume" {
+		t.Fatalf("in-memory resume_flag = %q, want preserved", got)
+	}
+
+	persisted, err := store.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got := persisted.Metadata["session_key"]; got != "" {
+		t.Fatalf("persisted session_key = %q, want empty", got)
+	}
+	if got := persisted.Metadata["continuation_reset_pending"]; got != "true" {
+		t.Fatalf("persisted continuation_reset_pending = %q, want true", got)
+	}
+}
+
+func TestClearStaleResumeKeyMetadataNilSafety(t *testing.T) {
+	// Should not panic on a nil bead or a bead with nil metadata + nil store.
+	clearStaleResumeKeyMetadata(nil, nil)
+
+	bead := &beads.Bead{ID: "ch-nilmeta"}
+	clearStaleResumeKeyMetadata(bead, nil)
+	if bead.Metadata == nil {
+		t.Fatalf("bead.Metadata should be initialized")
+	}
+	if got := bead.Metadata["continuation_reset_pending"]; got != "true" {
+		t.Fatalf("continuation_reset_pending = %q, want true", got)
+	}
+}
+
+func TestProviderUsesClaudeJSONL(t *testing.T) {
+	cases := []struct {
+		name     string
+		rp       *config.ResolvedProvider
+		metadata string
+		want     bool
+	}{
+		{
+			name: "claude command",
+			rp:   &config.ResolvedProvider{Command: "claude --dangerously-skip-permissions"},
+			want: true,
+		},
+		{
+			name: "claude command with path prefix",
+			rp:   &config.ResolvedProvider{Command: "/usr/local/bin/claude"},
+			want: true,
+		},
+		{
+			name:     "metadata fallback when rp command empty",
+			rp:       &config.ResolvedProvider{},
+			metadata: "claude",
+			want:     true,
+		},
+		{
+			name:     "claude-eco metadata fallback",
+			rp:       &config.ResolvedProvider{},
+			metadata: "claude-eco",
+			want:     true,
+		},
+		{
+			name:     "non-claude provider",
+			rp:       &config.ResolvedProvider{Command: "codex run"},
+			metadata: "codex",
+			want:     false,
+		},
+		{
+			name:     "nil rp + non-claude metadata",
+			rp:       nil,
+			metadata: "openai",
+			want:     false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := providerUsesClaudeJSONL(tc.rp, tc.metadata)
+			if got != tc.want {
+				t.Fatalf("providerUsesClaudeJSONL(rp, %q) = %v, want %v", tc.metadata, got, tc.want)
+			}
+		})
+	}
+}
