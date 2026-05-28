@@ -372,6 +372,7 @@ func TestDoStartSession_FullSequence(t *testing.T) {
 		"waitForReady",
 		"acceptStartupDialogs",
 		"hasSession",
+		"isSessionRunning",
 	})
 
 	// Verify createSession got full config.
@@ -589,9 +590,11 @@ func TestDoStartSession_SessionDiesDuringStartup(t *testing.T) {
 }
 
 func TestDoStartSession_ReadyDeadlineWithDeadPaneReportsProviderCrash(t *testing.T) {
+	running := false
 	ops := &fakeStartOps{
-		waitReadyErr:     context.DeadlineExceeded,
-		hasSessionResult: false,
+		waitReadyErr:           context.DeadlineExceeded,
+		hasSessionResult:       true,
+		isSessionRunningResult: &running,
 		capturePaneText: "WARNING: proceeding, even though we could not update PATH: Operation not permitted (os error 1)\n" +
 			"Error: Operation not permitted (os error 1)\n" +
 			"Pane is dead",
@@ -625,6 +628,7 @@ func TestDoStartSession_ReadyDeadlineWithDeadPaneReportsProviderCrash(t *testing
 		"acceptStartupDialogs",
 		"waitForReady",
 		"hasSession",
+		"isSessionRunning",
 		"capturePane",
 	})
 }
@@ -677,6 +681,7 @@ func TestDoStartSession_ProcessNamesOnly(t *testing.T) {
 		"acceptStartupDialogs",
 		"acceptStartupDialogs",
 		"hasSession",
+		"isSessionRunning",
 	})
 
 	// Verify isRuntimeRunning sees the process names in zombie detection path.
@@ -708,6 +713,7 @@ func TestDoStartSession_KimiSkipsStartupDialogAcceptance(t *testing.T) {
 		"waitForCommand",
 		"waitForReady",
 		"hasSession",
+		"isSessionRunning",
 	})
 }
 
@@ -738,6 +744,7 @@ func TestDoStartSessionReturnsNudgeDeliveryError(t *testing.T) {
 		"setRemainOnExit",
 		"disableMouseAndActivity",
 		"hasSession",
+		"isSessionRunning",
 		"sendKeys",
 	})
 }
@@ -764,6 +771,7 @@ func TestDoStartSession_AcceptStartupDialogsOnly(t *testing.T) {
 		"acceptStartupDialogs",
 		"acceptStartupDialogs",
 		"hasSession",
+		"isSessionRunning",
 	})
 }
 
@@ -845,6 +853,7 @@ func TestDoStartSession_ReadyPromptPrefixOnly(t *testing.T) {
 		"disableMouseAndActivity",
 		"waitForReady",
 		"hasSession",
+		"isSessionRunning",
 	})
 
 	// Verify RuntimeConfig carries the prefix.
@@ -875,6 +884,7 @@ func TestDoStartSession_ReadyDelayOnly(t *testing.T) {
 		"disableMouseAndActivity",
 		"waitForReady",
 		"hasSession",
+		"isSessionRunning",
 	})
 
 	// Verify RuntimeConfig carries the delay.
@@ -916,6 +926,7 @@ func TestDoStartSession_TreatsDeadlineAfterReadyAsSuccessWhenSessionAlive(t *tes
 		"acceptStartupDialogs",
 		"waitForReady",
 		"hasSession",
+		"isSessionRunning",
 	})
 }
 
@@ -956,6 +967,7 @@ func TestDoStartSession_TreatsDeadlineAfterPostReadyAsSuccessWhenSessionAlive(t 
 		"waitForReady",
 		"acceptStartupDialogs",
 		"hasSession",
+		"isSessionRunning",
 	})
 }
 
@@ -983,6 +995,7 @@ func TestDoStartSession_EmitsPermissionWarningOnly(t *testing.T) {
 		"acceptStartupDialogs",
 		"acceptStartupDialogs",
 		"hasSession",
+		"isSessionRunning",
 	})
 }
 
@@ -1012,6 +1025,7 @@ func TestDoStartSession_ProcessNamesAndReadyPrefix(t *testing.T) {
 		"waitForReady",
 		"acceptStartupDialogs",
 		"hasSession",
+		"isSessionRunning",
 	})
 }
 
@@ -1041,6 +1055,7 @@ func TestDoStartSession_CursorReadinessHintsTriggerRuntimeWait(t *testing.T) {
 		"waitForReady",
 		"acceptStartupDialogs",
 		"hasSession",
+		"isSessionRunning",
 	})
 
 	wfr := ops.calls[5]
@@ -1080,6 +1095,7 @@ func TestDoStartSession_ProcessNamesAndReadyDelayRechecksDialogs(t *testing.T) {
 		"waitForReady",
 		"acceptStartupDialogs",
 		"hasSession",
+		"isSessionRunning",
 	})
 }
 
@@ -1195,6 +1211,7 @@ func TestDoStartSession_SessionSetupRunsAfterAlive(t *testing.T) {
 		"acceptStartupDialogs",
 		"acceptStartupDialogs",
 		"hasSession",
+		"isSessionRunning",
 		"runSetupCommand",
 		"runSetupCommand",
 	})
@@ -1242,6 +1259,7 @@ func TestDoStartSession_SessionSetupScriptRunsAfterCommands(t *testing.T) {
 		"acceptStartupDialogs",
 		"acceptStartupDialogs",
 		"hasSession",
+		"isSessionRunning",
 		"runSetupCommand",
 		"runSetupCommand",
 		"sendKeys",
@@ -1386,7 +1404,7 @@ func TestDoStartSession_PreStartRunsBeforeCreate(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	assertCallSequence(t, ops, []string{"runSetupCommand", "createSession", "setRemainOnExit", "disableMouseAndActivity", "hasSession"})
+	assertCallSequence(t, ops, []string{"runSetupCommand", "createSession", "setRemainOnExit", "disableMouseAndActivity", "hasSession", "isSessionRunning"})
 
 	pre := ops.calls[0]
 	if pre.command != "setup-worktree" {
