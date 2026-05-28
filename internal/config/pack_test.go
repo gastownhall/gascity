@@ -4759,12 +4759,18 @@ depends_on = ["db"]
 //
 // Before the fix, hoist dedup only checked QualifiedName, so "gastown.dog"
 // and "atlas.dog" both survived and ValidateAgents reported a duplicate.
+//
+// The shared Dir mirrors the production reproducer literally: both entries
+// resolve to the same on-disk pack (.../packs/maintenance), which is why the
+// original failure rendered the same path twice in its "duplicate name
+// (from X and X)" message.
 func TestMergeHoistedCityAgents_DedupAcrossBindings(t *testing.T) {
+	const maintenanceDir = "/home/user/.gc/packs/maintenance"
 	agents := []Agent{
-		{Name: "dog", Dir: "", BindingName: "gastown", Scope: "city"},
+		{Name: "dog", Dir: maintenanceDir, BindingName: "gastown", Scope: "city"},
 	}
 	hoisted := []Agent{
-		{Name: "dog", Dir: "", BindingName: "atlas", Scope: "city"},
+		{Name: "dog", Dir: maintenanceDir, BindingName: "atlas", Scope: "city"},
 	}
 
 	merged := mergeHoistedCityAgents(agents, hoisted)
@@ -4777,6 +4783,25 @@ func TestMergeHoistedCityAgents_DedupAcrossBindings(t *testing.T) {
 
 	if err := ValidateAgents(merged); err != nil {
 		t.Errorf("ValidateAgents failed after dedup: %v", err)
+	}
+}
+
+// TestMergeHoistedCityAgents_SameNameDifferentDirPreserved locks the dedup key
+// to (Dir, Name) rather than Name alone. Two agents that share a Name but
+// originate from different on-disk packs are genuinely distinct definitions,
+// so both must survive the hoist. This guards against a future regression that
+// collapses the key down to Name and silently drops a legitimate agent.
+func TestMergeHoistedCityAgents_SameNameDifferentDirPreserved(t *testing.T) {
+	agents := []Agent{
+		{Name: "dog", Dir: "/home/user/.gc/packs/maintenance", BindingName: "gastown", Scope: "city"},
+	}
+	hoisted := []Agent{
+		{Name: "dog", Dir: "/home/user/.gc/packs/atlas", BindingName: "atlas", Scope: "city"},
+	}
+
+	merged := mergeHoistedCityAgents(agents, hoisted)
+	if len(merged) != 2 {
+		t.Fatalf("merged length = %d, want 2 (same Name from different Dir are distinct definitions)", len(merged))
 	}
 }
 
