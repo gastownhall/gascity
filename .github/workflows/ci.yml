@@ -133,7 +133,7 @@ jobs:
     needs: runner-policy
     runs-on: ${{ needs.runner-policy.outputs.runner_16vcpu }}
     env:
-      DOLT_VERSION: "2.0.3"
+      DOLT_VERSION: "2.0.7"
       BD_VERSION: "v1.0.4"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -172,7 +172,7 @@ jobs:
     if: github.event_name == 'push'
     runs-on: ${{ needs.runner-policy.outputs.runner_32vcpu }}
     env:
-      DOLT_VERSION: "2.0.3"
+      DOLT_VERSION: "2.0.7"
       BD_VERSION: "v1.0.4"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -198,7 +198,7 @@ jobs:
       - runner-policy
     runs-on: ${{ needs.runner-policy.outputs.runner_32vcpu }}
     env:
-      DOLT_VERSION: "2.0.3"
+      DOLT_VERSION: "2.0.7"
       BD_VERSION: "v1.0.4"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -297,7 +297,7 @@ jobs:
       matrix:
         shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
     env:
-      DOLT_VERSION: "2.0.3"
+      DOLT_VERSION: "2.0.7"
       BD_VERSION: "v1.0.4"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -429,7 +429,7 @@ jobs:
             timeout_minutes: 15
             command: ./scripts/test-integration-shard rest-full-16-of-16
     env:
-      DOLT_VERSION: "2.0.3"
+      DOLT_VERSION: "2.0.7"
       BD_VERSION: "v1.0.4"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -898,7 +898,7 @@ jobs:
       - name: Pack compatibility tests
         run: make test-acceptance
     env:
-      DOLT_VERSION: "2.0.3"
+      DOLT_VERSION: "2.0.7"
       BD_VERSION: "v1.0.4"
 
   # Dashboard SPA typecheck + tests + build. Runs on every push/PR
