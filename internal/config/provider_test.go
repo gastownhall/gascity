@@ -70,6 +70,31 @@ func TestBuiltinProvidersClaude(t *testing.T) {
 	}
 }
 
+func TestBuiltinProvidersClaudeModelChoices(t *testing.T) {
+	p := BuiltinProviders()["claude"]
+	var model OptionChoice
+	var oldOpus OptionChoice
+	for _, opt := range p.OptionsSchema {
+		if opt.Key != "model" {
+			continue
+		}
+		for _, choice := range opt.Choices {
+			switch choice.Value {
+			case "opus":
+				model = choice
+			case "opus-4-7":
+				oldOpus = choice
+			}
+		}
+	}
+	if !reflect.DeepEqual(model.FlagArgs, []string{"--model", "claude-opus-4-8"}) {
+		t.Fatalf("opus FlagArgs = %v, want Opus 4.8", model.FlagArgs)
+	}
+	if !reflect.DeepEqual(oldOpus.FlagArgs, []string{"--model", "claude-opus-4-7"}) {
+		t.Fatalf("opus-4-7 FlagArgs = %v, want Opus 4.7 preserved", oldOpus.FlagArgs)
+	}
+}
+
 func TestBuiltinClaudeCommandString(t *testing.T) {
 	// After migration, claude's Args is nil. CommandString() returns just "claude".
 	// Schema-managed flags come from ResolveDefaultArgs() instead.
