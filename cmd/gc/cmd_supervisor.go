@@ -1759,13 +1759,13 @@ func reconcileCities(
 			recordInitFailure(cityName, fmt.Sprintf("controller state: %v", err))
 			continue
 		}
-	cs.ct = cityRuntime.crashTrack()
-	cs.pokeCh = pokeCh
-	cs.configDirty = configDirty
-	cs.services = cityRuntime.svc
-	cityRuntime.setControllerState(cs)
-	cs.startBeadEventWatcher(cityCtx)
-	cs.startMaintenanceLoop(cityCtx)
+		cs.ct = cityRuntime.crashTrack()
+		cs.pokeCh = pokeCh
+		cs.configDirty = configDirty
+		cs.services = cityRuntime.svc
+		cityRuntime.setControllerState(cs)
+		cs.startBeadEventWatcher(cityCtx)
+		cs.startMaintenanceLoop(cityCtx)
 
 		// Run pool on_boot hooks (same as runController does).
 		if err := runPostPrepareStep("running_pool_on_boot", func() error {
