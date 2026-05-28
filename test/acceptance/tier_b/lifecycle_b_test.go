@@ -325,9 +325,11 @@ exit 0
 	return "bash " + scriptPath, markersPath
 }
 
-// writeRespawnPoolConfig overwrites city.toml with a single city-scoped pool
-// agent (min=0/max=1, wake_mode=fresh) backed by the file beads provider, plus
-// a tuned daemon patrol interval.
+// writeRespawnPoolConfig writes city.toml (workspace + file beads provider +
+// tuned daemon patrol interval) and a single city-scoped pool agent
+// (min=0/max=1, wake_mode=fresh) under the directory-based agents/worker/
+// surface. Inline [[agent]] tables in city.toml are a rejected PackV1 surface
+// under schema-2 enforcement, so the agent must live in agents/<name>/agent.toml.
 func writeRespawnPoolConfig(c *helpers.City, scriptCmd, patrolInterval string) {
 	cityName := filepath.Base(c.Dir)
 	c.WriteConfig(fmt.Sprintf(`[workspace]
@@ -338,14 +340,13 @@ provider = "file"
 
 [daemon]
 patrol_interval = %q
-
-[[agent]]
-name = "worker"
-start_command = %q
-wake_mode = "fresh"
-min_active_sessions = 0
-max_active_sessions = 1
-`, cityName, patrolInterval, scriptCmd))
+`, cityName, patrolInterval))
+	c.WriteV2AgentDir("worker",
+		fmt.Sprintf("start_command = %q", scriptCmd),
+		`wake_mode = "fresh"`,
+		"min_active_sessions = 0",
+		"max_active_sessions = 1",
+	)
 }
 
 // writePrequeuedRoutedBeads seeds the file beads store with n open, unassigned
