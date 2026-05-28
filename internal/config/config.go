@@ -1794,6 +1794,24 @@ type DaemonConfig struct {
 	// that budget can be cut short on that path even though the direct
 	// stop/unregister path always honors the full grace.
 	DoltStopTimeout string `toml:"dolt_stop_timeout,omitempty" jsonschema:"default=30s"`
+	// DoltStartAddressInUseRetryWindow is how long the managed dolt start
+	// path waits on the originally requested port when bind fails with
+	// "address already in use" before falling back to a higher port. The
+	// common cause is a TIME_WAIT socket left by an abrupt stop of a sibling
+	// dolt subprocess (external SIGTERM, supervisor restart, OOM kill); on
+	// Linux the listening-socket slot typically frees within ~30s. Falling
+	// back immediately publishes the rebound port to provider state, after
+	// which `recoverManagedDoltShouldReuseExisting` keeps accepting the
+	// rebound instance as canonical and consumers hardcoded to the original
+	// port stay broken until the orphan is killed. Duration string (e.g.,
+	// "30s", "1m"). Set to "0s" to disable the retry (legacy fall-back-
+	// immediately behavior). Defaults to "30s". Each port is waited on at
+	// most once per startManagedDoltProcessWithOptions invocation, so the
+	// worst-case wall time per startup is bounded by
+	// (DoltStartAddressInUseRetryWindow + per-attempt-startup) × min(5,
+	// distinct-ports-tried) rather than DoltStartAddressInUseRetryWindow × 5.
+	// Negative values are rejected at config load.
+	DoltStartAddressInUseRetryWindow string `toml:"dolt_start_address_in_use_retry_window,omitempty" jsonschema:"default=30s"`
 	// WispGCInterval is how often wisp GC runs. Duration string (e.g., "5m", "1h").
 	// Wisp GC is disabled unless both WispGCInterval and WispTTL are set.
 	WispGCInterval string `toml:"wisp_gc_interval,omitempty"`
@@ -1999,6 +2017,37 @@ func (d *DaemonConfig) DoltStopTimeoutDuration() time.Duration {
 	dur, err := time.ParseDuration(d.DoltStopTimeout)
 	if err != nil {
 		return DefaultDoltStopTimeout
+	}
+	return dur
+}
+
+// DefaultDoltStartAddressInUseRetryWindow is the per-port retry window used
+// when dolt's bind fails with "address already in use" before the start path
+// falls back to the next available port. 30s is roughly half Linux's default
+// TCP TIME_WAIT — the listening-socket slot typically frees well before the
+// full TIME_WAIT elapses because there are no active half-open connections
+// during a clean restart. Values up to 60s are safer for kernels with
+// tcp_fin_timeout raised; values below 10s materially shrink the window for
+// outliving TIME_WAIT.
+const DefaultDoltStartAddressInUseRetryWindow = 30 * time.Second
+
+// DoltStartAddressInUseRetryWindowDuration returns the configured retry
+// window for the managed-dolt address-in-use loop as a time.Duration.
+// Defaults to DefaultDoltStartAddressInUseRetryWindow (30s) when empty or
+// unparseable. Zero disables the retry — callers fall back to a higher port
+// immediately, matching legacy behavior. Negative values pass through
+// unchanged: callers that route through loadCityConfig already reject them
+// via ValidateNonNegativeDurations, so a negative reaching this helper
+// implies a hand-rolled DaemonConfig that bypassed validation — treat zero
+// as a misconfiguration upstream rather than silently overriding it here.
+// Mirrors DoltStopTimeoutDuration's policy.
+func (d *DaemonConfig) DoltStartAddressInUseRetryWindowDuration() time.Duration {
+	if d.DoltStartAddressInUseRetryWindow == "" {
+		return DefaultDoltStartAddressInUseRetryWindow
+	}
+	dur, err := time.ParseDuration(d.DoltStartAddressInUseRetryWindow)
+	if err != nil {
+		return DefaultDoltStartAddressInUseRetryWindow
 	}
 	return dur
 }

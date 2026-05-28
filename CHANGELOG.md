@@ -14,6 +14,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   remains available for cities that need the prior Opus target. Anthropic's
   published regular-usage pricing is unchanged from Opus 4.7: $5/MTok input
   and $25/MTok output.
+- `[daemon].dolt_start_address_in_use_retry_window` configures how long the
+  managed dolt start path waits on the originally requested port when bind
+  fails with "address already in use" before falling back to a higher port.
+  Defaults to `30s`, which roughly covers half of Linux's default TCP
+  TIME_WAIT and prevents an external `kill -TERM` / supervisor restart / OOM
+  kill of the dolt subprocess from perpetuating a rebound orphan on a
+  non-canonical port. Each port gets at most one wait per
+  `startManagedDoltProcessWithOptions` invocation, so the worst-case wall
+  time per startup is bounded by `(retry_window + per-attempt-startup) ×
+  min(5, distinct-ports-tried)` rather than `retry_window × 5`. Set to `0s`
+  to disable the retry (legacy fall-back-immediately behavior). Operators
+  with a recovery-latency monitor may want to raise their alert threshold
+  by ~30s to absorb the new wait under contended port conditions; the
+  worst-case per startup remains well under one minute at defaults.
+  During a same-port retry the managed-dolt state file briefly reports
+  `Running:false, PID:0` for up to `retry_window` while the wait elapses;
+  state-readers (`gc dolt-state status`, rig endpoint port projection,
+  order routing) treat this as transient not-running and recover on the
+  next successful bind. The provider-op timeout for `start` remains `120s`;
+  an operator who raises `dolt_start_address_in_use_retry_window` materially
+  above the default should also raise that timeout to keep headroom for the
+  5-attempt cap.
+- `[daemon].dolt_stop_timeout` typos are now caught by `ValidateDurations`
+  at config load (previously only `ValidateNonNegativeDurations` covered it,
+  so an invalid string like `"30sec"` silently collapsed to zero).
 
 ### Fixed
 

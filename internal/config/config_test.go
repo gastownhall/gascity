@@ -3021,6 +3021,103 @@ func TestValidateNonNegativeDurationsRejectsNegativeDoltStopTimeout(t *testing.T
 	}
 }
 
+func TestDaemonDoltStartAddressInUseRetryDefault(t *testing.T) {
+	d := DaemonConfig{}
+	got := d.DoltStartAddressInUseRetryWindowDuration()
+	if got != DefaultDoltStartAddressInUseRetryWindow {
+		t.Errorf("DoltStartAddressInUseRetryWindowDuration() = %v, want %v", got, DefaultDoltStartAddressInUseRetryWindow)
+	}
+}
+
+func TestDaemonDoltStartAddressInUseRetryCustom(t *testing.T) {
+	d := DaemonConfig{DoltStartAddressInUseRetryWindow: "45s"}
+	got := d.DoltStartAddressInUseRetryWindowDuration()
+	if got != 45*time.Second {
+		t.Errorf("DoltStartAddressInUseRetryWindowDuration() = %v, want 45s", got)
+	}
+}
+
+func TestDaemonDoltStartAddressInUseRetryZero(t *testing.T) {
+	d := DaemonConfig{DoltStartAddressInUseRetryWindow: "0s"}
+	got := d.DoltStartAddressInUseRetryWindowDuration()
+	if got != 0 {
+		t.Errorf("DoltStartAddressInUseRetryWindowDuration() = %v, want 0", got)
+	}
+}
+
+func TestDaemonDoltStartAddressInUseRetryInvalid(t *testing.T) {
+	d := DaemonConfig{DoltStartAddressInUseRetryWindow: "not-a-duration"}
+	got := d.DoltStartAddressInUseRetryWindowDuration()
+	if got != DefaultDoltStartAddressInUseRetryWindow {
+		t.Errorf("DoltStartAddressInUseRetryWindowDuration() = %v, want %v (default for invalid)", got, DefaultDoltStartAddressInUseRetryWindow)
+	}
+}
+
+// TestDaemonDoltStartAddressInUseRetryWindowNegativePassesThrough mirrors
+// DoltStopTimeoutDuration's policy: negatives are rejected at config load by
+// ValidateNonNegativeDurations, so a negative reaching this helper implies a
+// hand-rolled DaemonConfig that bypassed validation. The helper returns the
+// parsed value as-is so the caller surfaces the misconfiguration rather than
+// silently overriding it. The runtime call site
+// (managedDoltStartWaitForPortFree) treats non-positive windows as "no wait",
+// so a negative effectively disables the retry without corrupting other
+// state.
+func TestDaemonDoltStartAddressInUseRetryWindowNegativePassesThrough(t *testing.T) {
+	d := DaemonConfig{DoltStartAddressInUseRetryWindow: "-1s"}
+	got := d.DoltStartAddressInUseRetryWindowDuration()
+	if got != -1*time.Second {
+		t.Errorf("DoltStartAddressInUseRetryWindowDuration() = %v, want -1s (pass-through, mirrors DoltStopTimeout policy)", got)
+	}
+}
+
+func TestParseDoltStartAddressInUseRetryWindow(t *testing.T) {
+	data := []byte(`
+[workspace]
+name = "test"
+
+[daemon]
+dolt_start_address_in_use_retry_window = "45s"
+
+[[agent]]
+name = "mayor"
+`)
+	cfg, err := Parse(data)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if cfg.Daemon.DoltStartAddressInUseRetryWindow != "45s" {
+		t.Errorf("Daemon.DoltStartAddressInUseRetryWindow = %q, want %q", cfg.Daemon.DoltStartAddressInUseRetryWindow, "45s")
+	}
+	got := cfg.Daemon.DoltStartAddressInUseRetryWindowDuration()
+	if got != 45*time.Second {
+		t.Errorf("DoltStartAddressInUseRetryWindowDuration() = %v, want 45s", got)
+	}
+}
+
+func TestValidateNonNegativeDurationsRejectsNegativeDoltStartAddressInUseRetryWindow(t *testing.T) {
+	cfg := &City{}
+	cfg.Daemon.DoltStartAddressInUseRetryWindow = "-2s"
+	err := ValidateNonNegativeDurations(cfg, "city.toml")
+	if err == nil {
+		t.Fatal("ValidateNonNegativeDurations() = nil, want error for negative dolt_start_address_in_use_retry_window")
+	}
+	if !strings.Contains(err.Error(), "dolt_start_address_in_use_retry_window") ||
+		!strings.Contains(err.Error(), "must not be negative") ||
+		!strings.Contains(err.Error(), `"-2s"`) {
+		t.Errorf("ValidateNonNegativeDurations() error = %q, want it to name the field, the constraint, and the value", err)
+	}
+}
+
+func TestValidateNonNegativeDurationsAllowsZeroAndPositiveDoltStartAddressInUseRetryWindow(t *testing.T) {
+	for _, v := range []string{"", "0s", "30s", "1m"} {
+		cfg := &City{}
+		cfg.Daemon.DoltStartAddressInUseRetryWindow = v
+		if err := ValidateNonNegativeDurations(cfg, "city.toml"); err != nil {
+			t.Errorf("ValidateNonNegativeDurations(dolt_start_address_in_use_retry_window=%q) = %v, want nil", v, err)
+		}
+	}
+}
+
 func TestValidateNonNegativeDurationsAllowsZeroAndPositive(t *testing.T) {
 	for _, v := range []string{"", "0s", "30s", "1m"} {
 		cfg := &City{}
