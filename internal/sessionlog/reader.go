@@ -161,6 +161,8 @@ func ReadProviderFile(provider, path string, tailCompactions int) (*Session, err
 		return ReadOpenCodeFile(path, tailCompactions)
 	case "pi":
 		return ReadPiFile(path, tailCompactions)
+	case "antigravity":
+		return ReadAntigravityFile(path, tailCompactions)
 	default:
 		return ReadFile(path, tailCompactions)
 	}
@@ -214,6 +216,8 @@ func ReadProviderFileRaw(provider, path string, tailCompactions int) (*Session, 
 		return ReadOpenCodeFile(path, tailCompactions)
 	case "pi":
 		return ReadPiFile(path, tailCompactions)
+	case "antigravity":
+		return ReadAntigravityFileRaw(path, tailCompactions)
 	default:
 		return ReadFileRaw(path, tailCompactions)
 	}
@@ -291,6 +295,8 @@ func ReadProviderFileOlder(provider, path string, tailCompactions int, beforeMes
 		return ReadOpenCodeFile(path, tailCompactions)
 	case "pi":
 		return ReadPiFile(path, tailCompactions)
+	case "antigravity":
+		return ReadAntigravityFile(path, tailCompactions)
 	default:
 		return ReadFileOlder(path, tailCompactions, beforeMessageID)
 	}
@@ -311,6 +317,8 @@ func ReadProviderFileRawOlder(provider, path string, tailCompactions int, before
 		return ReadOpenCodeFile(path, tailCompactions)
 	case "pi":
 		return ReadPiFile(path, tailCompactions)
+	case "antigravity":
+		return ReadAntigravityFileRaw(path, tailCompactions)
 	default:
 		return ReadFileRawOlder(path, tailCompactions, beforeMessageID)
 	}
@@ -387,6 +395,8 @@ func ReadProviderFileNewer(provider, path string, tailCompactions int, afterMess
 		return ReadOpenCodeFile(path, tailCompactions)
 	case "pi":
 		return ReadPiFile(path, tailCompactions)
+	case "antigravity":
+		return ReadAntigravityFile(path, tailCompactions)
 	default:
 		return ReadFileNewer(path, tailCompactions, afterMessageID)
 	}
@@ -407,6 +417,8 @@ func ReadProviderFileRawNewer(provider, path string, tailCompactions int, afterM
 		return ReadOpenCodeFile(path, tailCompactions)
 	case "pi":
 		return ReadPiFile(path, tailCompactions)
+	case "antigravity":
+		return ReadAntigravityFileRaw(path, tailCompactions)
 	default:
 		return ReadFileRawNewer(path, tailCompactions, afterMessageID)
 	}
@@ -566,6 +578,8 @@ func FindSessionFileForProvider(searchPaths []string, provider, workDir string) 
 		return FindOpenCodeSessionFile(searchPaths, workDir)
 	case "pi":
 		return FindPiSessionFile(searchPaths, workDir)
+	case "antigravity":
+		return FindAntigravitySessionFile(searchPaths, workDir)
 	case "", "auto":
 		return FindSessionFile(searchPaths, workDir)
 	default:
@@ -589,6 +603,8 @@ func FindProviderFallbackSessionFile(searchPaths []string, provider, workDir str
 		return FindOpenCodeSessionFile(searchPaths, workDir)
 	case "pi":
 		return FindPiSessionFile(searchPaths, workDir)
+	case "antigravity":
+		return FindAntigravitySessionFile(searchPaths, workDir)
 	default:
 		return findClaudeLatestSessionFile(searchPaths, workDir)
 	}
@@ -927,6 +943,16 @@ func DefaultKimiSearchPaths() []string {
 	return []string{filepath.Join(home, ".kimi", "sessions")}
 }
 
+// DefaultAntigravitySearchPaths returns the default search paths for Antigravity JSONL
+// session files (~/.gemini/antigravity-cli/brain).
+func DefaultAntigravitySearchPaths() []string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil
+	}
+	return []string{filepath.Join(home, ".gemini", "antigravity-cli", "brain")}
+}
+
 // MergeSearchPaths merges default paths with user-configured extra paths,
 // expanding ~ and deduplicating.
 func MergeSearchPaths(extraPaths []string) []string {
@@ -943,6 +969,10 @@ func mergeGeminiSearchPaths(extraPaths []string) []string {
 
 func mergePiSearchPaths(extraPaths []string) []string {
 	return mergePaths(DefaultPiSearchPaths(), extraPaths)
+}
+
+func mergeAntigravitySearchPaths(extraPaths []string) []string {
+	return mergePaths(DefaultAntigravitySearchPaths(), extraPaths)
 }
 
 func mergePaths(defaults, extras []string) []string {
@@ -981,6 +1011,8 @@ func ProviderFamily(provider string) string {
 		return "kimi"
 	case strings.Contains(p, "opencode"):
 		return "opencode"
+	case strings.Contains(p, "antigravity"):
+		return "antigravity"
 	case p == "pi" || strings.HasPrefix(p, "pi/") || strings.HasSuffix(p, "/pi") || strings.HasSuffix(p, "-pi") || strings.Contains(p, "-pi/"):
 		return "pi"
 	default:

@@ -42,6 +42,8 @@ func DiscoverKeyedPath(searchPaths []string, provider, workDir, gcSessionID stri
 		return sessionlog.FindKimiSessionFileByID(searchPaths, workDir, gcSessionID)
 	case "pi":
 		return sessionlog.FindPiSessionFileByID(searchPaths, workDir, gcSessionID)
+	case "antigravity":
+		return sessionlog.FindAntigravitySessionFileByID(searchPaths, workDir, gcSessionID)
 	}
 	return sessionlog.FindSessionFileByID(searchPaths, workDir, gcSessionID)
 }
@@ -49,7 +51,7 @@ func DiscoverKeyedPath(searchPaths []string, provider, workDir, gcSessionID stri
 // DiscoverFallbackPath resolves the narrow provider-specific fallback path to
 // use when a keyed transcript lookup misses.
 func DiscoverFallbackPath(searchPaths []string, provider, workDir, gcSessionID string) string {
-	if strings.TrimSpace(gcSessionID) != "" && sessionlog.ProviderFamily(provider) == "pi" {
+	if strings.TrimSpace(gcSessionID) != "" && (sessionlog.ProviderFamily(provider) == "pi" || sessionlog.ProviderFamily(provider) == "antigravity") {
 		return ""
 	}
 	if strings.TrimSpace(gcSessionID) != "" && SupportsIDLookup(provider) {
