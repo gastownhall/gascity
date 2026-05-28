@@ -58,11 +58,32 @@ func snapshotOrLoadSessionBeads(store beads.Store, sessionBeads *sessionBeadSnap
 	return loadSessionBeads(store)
 }
 
+func findOpenSessionBeadBySessionName(store beads.Store, sessionName string) (beads.Bead, bool, error) {
+	if store == nil || strings.TrimSpace(sessionName) == "" {
+		return beads.Bead{}, false, nil
+	}
+	open, err := loadSessionBeads(store)
+	if err != nil {
+		return beads.Bead{}, false, err
+	}
+	for _, bead := range open {
+		if bead.Status == "closed" {
+			continue
+		}
+		if strings.TrimSpace(bead.Metadata["session_name"]) == sessionName {
+			return bead, true, nil
+		}
+	}
+	return beads.Bead{}, false, nil
+}
+
 func syncSessionCachedState(sessionName string, existing beads.Bead, exists bool, sp runtime.Provider) string {
 	if exists {
 		switch session.State(strings.TrimSpace(existing.Metadata["state"])) {
 		case "", session.StateActive, session.StateAwake:
 			return string(session.StateActive)
+		case session.StateStartPending:
+			return string(session.StateStartPending)
 		case session.StateCreating:
 			return string(session.StateCreating)
 		case session.StateAsleep, session.StateSuspended, session.StateDraining, session.StateArchived, session.StateQuarantined:
@@ -324,6 +345,7 @@ func reopenClosedConfiguredNamedSessionBead(
 		}
 		batch := map[string]string{
 			"state":                state,
+			"state_reason":         "",
 			"close_reason":         "",
 			"closed_at":            "",
 			"pending_create_claim": pendingCreateClaim,
@@ -336,6 +358,12 @@ func reopenClosedConfiguredNamedSessionBead(
 		// not from CreatedAt.
 		if pendingCreateClaim == "true" {
 			batch["pending_create_started_at"] = pendingCreateStartedAtNow(now)
+			batch["creation_complete_at"] = ""
+			batch["last_woke_at"] = ""
+			batch["started_config_hash"] = ""
+			batch["started_live_hash"] = ""
+			batch["live_hash"] = ""
+			batch["startup_dialog_verified"] = ""
 		} else {
 			batch["pending_create_started_at"] = ""
 		}
@@ -946,6 +974,17 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 		}
 
 		b, exists := bySessionName[sn]
+		if !exists && isConfiguredNamed {
+			if liveBead, ok, freshErr := findOpenSessionBeadBySessionName(store, sn); freshErr != nil {
+				fmt.Fprintf(stderr, "session beads: refreshing open bead for %s: %v\n", sn, freshErr) //nolint:errcheck
+			} else if ok {
+				b = liveBead
+				exists = true
+				bySessionName[sn] = liveBead
+				openBeads = append(openBeads, liveBead)
+				indexBySessionName[sn] = len(openBeads) - 1
+			}
+		}
 		if !exists && isPoolInstance {
 			visible, err := loadVisibleBySessionName()
 			if err != nil {
@@ -984,7 +1023,7 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 			// Create a new session bead.
 			createState := state
 			if createState != "active" {
-				createState = "creating"
+				createState = string(session.StateStartPending)
 			}
 			instanceToken := session.NewInstanceToken()
 			meta := map[string]string{

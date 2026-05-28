@@ -113,9 +113,14 @@ func cmdStopJSON(args []string, stdout, stderr io.Writer, wallClockTimeout time.
 
 	type stopOutcome struct{ code int }
 	doneCh := make(chan stopOutcome, 1)
+	bodyDone := make(chan struct{})
 	go func() {
+		defer close(bodyDone)
 		doneCh <- stopOutcome{code: cmdStopBody(cityPath, cfg, force, stopStdout, stderr)}
 	}()
+	if h := stopBodyLifecycleHook; h != nil {
+		h(bodyDone)
+	}
 
 	select {
 	case out := <-doneCh:
@@ -128,6 +133,13 @@ func cmdStopJSON(args []string, stdout, stderr io.Writer, wallClockTimeout time.
 		return 1
 	}
 }
+
+// stopBodyLifecycleHook receives the cmdStopBody goroutine's done channel
+// when cmdStopJSON spawns it. Tests with providers that block past the
+// wall-clock cap register this hook so they can wait for the body to
+// finish, preventing the leaked goroutine from racing on package-level
+// stop hooks against a later test.
+var stopBodyLifecycleHook func(<-chan struct{})
 
 func writeCityStopSuccess(stdout, stderr io.Writer, cityPath string, force bool) int {
 	return writeLifecycleActionJSONOrExit(stdout, stderr, "gc stop", lifecycleActionJSON{

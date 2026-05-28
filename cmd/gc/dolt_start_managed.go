@@ -31,24 +31,66 @@ type managedDoltStartedProcess struct {
 	WatchdogPID int
 	DisarmFile  string
 	DisarmReady bool
+	// StartTimeTicks is /proc/<pid>/stat field 22 captured at registration;
+	// the test reaper re-reads it before signaling so PID reuse cannot cause
+	// us to terminate an unrelated process that landed on the same PID after
+	// dolt exited. Zero on hosts without /proc; in that case the identity
+	// guard falls back to StartIdentity. Mirrors the production reap
+	// algorithm in cmd_dolt_cleanup.go:sameReapProcessIdentity.
+	StartTimeTicks uint64
+	// StartIdentity is the portable `ps -o lstart=` formatted start timestamp,
+	// used as a fallback when StartTimeTicks is unavailable (macOS, locked-down
+	// /proc). Mirrors the production reap algorithm.
+	StartIdentity string
 }
 
 const (
 	managedDoltTestModeEnv      = "GC_MANAGED_DOLT_TEST_MODE"
 	managedDoltTestParentPIDEnv = "GC_MANAGED_DOLT_TEST_PARENT_PID"
 	managedDoltTestWatchdogArg  = "__gc-managed-dolt-test-watchdog"
+	// The first ExtraFiles entry is exposed to the child as fd 3.
+	managedDoltTestParentPipeFD = 3
 )
 
 var (
-	managedDoltTestMode               = isTestBinary
-	managedDoltTestExecutable         = os.Executable
-	managedDoltTestWatchdogPIDTimeout = 5 * time.Second
-	managedDoltTestProcessRegistry    sync.Map
-	managedDoltTestTerminateProcess   = terminateManagedDoltTestPID
+	managedDoltTestMode                 = isTestBinary
+	managedDoltTestExecutable           = os.Executable
+	managedDoltTestWatchdogPIDTimeout   = 5 * time.Second
+	managedDoltTestProcessRegistry      sync.Map
+	managedDoltTestTerminateProcess     = terminateManagedDoltTestPID
+	managedDoltTestReadStartTimeTicks   = readProcStartTimeTicks
+	managedDoltTestReadStartIdentity    = readProcStartIdentity
+	managedDoltTestProcessGroupKillWait = 2 * time.Second
 )
 
+// init is the re-entry point for the dolt-managed-test watchdog. The watchdog
+// is a sibling process the test framework re-exec's via this binary so the
+// managed `dolt sql-server` outlives the test parent and can be reliably
+// reaped on parent exit (gastownhall/gascity#2306). It lives in init() —
+// not in the cobra command tree — because the binary is re-exec'd as a
+// child of the test parent, not invoked via `gc <subcommand>`. The cobra
+// dispatch never runs in this mode; os.Exit terminates the process so no
+// subsequent dispatch can produce a misleading "unknown command" error.
+//
+// The argv[1] sentinel is the sole, sufficient guard. It is a private
+// re-exec marker (managedDoltTestWatchdogArg) that no production `gc`
+// invocation ever passes, so its presence is itself the authorization to
+// enter the watchdog. Checking it first means the watchdog works whether
+// the re-exec target is a Go test binary OR a real `gc` binary —
+// integration tests (e.g. TestInheritedExternalBdRigStoreConsistent...,
+// TestCmdSessionWait...) start managed dolt through a real `gc` subprocess
+// that re-execs itself as the watchdog, whose argv[0] does not contain
+// ".test". A prior `isTestBinary()` pre-gate blocked that path: the
+// sentinel argv fell through to cobra, which printed usage and exited 1
+// ("dolt server could not start via gc helper") on every CI shard that
+// exercised the real-binary dolt path (gastownhall/gascity#2313 follow-up
+// CI regression).
+//
+// The stray-`GC_MANAGED_DOLT_TEST_MODE=1`-in-production threat is handled
+// at the spawn decision (managedDoltTestWatchdogEnabled), not here — a
+// production process is never re-exec'd with this sentinel, so reaching
+// init() with it set is already proof of an intentional test re-exec.
 func init() {
-	// Test watchdog re-exec runs before normal command dispatch.
 	if len(os.Args) < 2 || os.Args[1] != managedDoltTestWatchdogArg {
 		return
 	}
@@ -210,27 +252,64 @@ func startManagedDoltSQLServerWithTestWatchdog(cityPath, configFile, logFilePath
 		_ = os.Remove(disarmFile)
 		return managedDoltStartedProcess{}, err
 	}
-	cmd := exec.Command(watchdogExecutable, managedDoltTestWatchdogArg, managedDoltTestParentPIDString(), configFile, logFilePath, disarmFile)
+	args := []string{managedDoltTestWatchdogArg, managedDoltTestParentPIDString(), configFile, logFilePath, disarmFile}
+	var parentPipeRead *os.File
+	var parentPipeWrite *os.File
+	if !managedDoltTestHasExternalParent() {
+		parentPipeRead, parentPipeWrite, err = os.Pipe()
+		if err != nil {
+			_ = os.Remove(disarmFile)
+			return managedDoltStartedProcess{}, fmt.Errorf("create dolt test watchdog parent pipe: %w", err)
+		}
+		args = append(args, strconv.Itoa(managedDoltTestParentPipeFD))
+	}
+	cmd := exec.Command(watchdogExecutable, args...)
 	cmd.Stderr = logFile
 	cmd.Stdin = nil
 	cmd.Env = doltServerEnv(os.Environ())
+	if parentPipeRead != nil {
+		cmd.ExtraFiles = []*os.File{parentPipeRead}
+	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
+		if parentPipeRead != nil {
+			_ = parentPipeRead.Close()
+		}
+		if parentPipeWrite != nil {
+			_ = parentPipeWrite.Close()
+		}
 		_ = os.Remove(disarmFile)
 		return managedDoltStartedProcess{}, fmt.Errorf("prepare dolt test watchdog: %w", err)
 	}
 	if err := cmd.Start(); err != nil {
+		if parentPipeRead != nil {
+			_ = parentPipeRead.Close()
+		}
+		if parentPipeWrite != nil {
+			_ = parentPipeWrite.Close()
+		}
 		_ = os.Remove(disarmFile)
 		return managedDoltStartedProcess{}, fmt.Errorf("start dolt test watchdog: %w", err)
+	}
+	if parentPipeRead != nil {
+		_ = parentPipeRead.Close()
 	}
 	pid, err := readManagedDoltTestWatchdogPID(stdout, cmd.Process.Pid)
 	if err != nil {
 		_ = terminateManagedDoltPID(cityPath, cmd.Process.Pid)
 		_ = cmd.Wait()
+		if parentPipeWrite != nil {
+			_ = parentPipeWrite.Close()
+		}
 		_ = os.Remove(disarmFile)
 		return managedDoltStartedProcess{}, err
 	}
-	go func() { _ = cmd.Wait() }()
+	go func() {
+		_ = cmd.Wait()
+		if parentPipeWrite != nil {
+			_ = parentPipeWrite.Close()
+		}
+	}()
 	started := managedDoltStartedProcess{
 		CityPath:    cityPath,
 		PID:         pid,
@@ -369,8 +448,34 @@ func unregisterManagedDoltStartedProcess(started managedDoltStartedProcess) {
 	unregisterManagedDoltTestProcess(started.WatchdogPID)
 }
 
+// terminateManagedDoltTestPID stops a managed dolt test process. When the
+// target is its own process-group leader (Setpgid was applied at spawn — see
+// runManagedDoltTestWatchdog), it signals the entire process group so descendant
+// dolt workers do not outlive the test parent (gastownhall/gascity#2313 follow-up
+// M3). When the target is NOT a group leader (e.g. the watchdog itself, which
+// inherits the test binary's process group), it falls back to leader-only
+// termination so we never accidentally signal the test binary's group.
 func terminateManagedDoltTestPID(pid int) error {
-	return terminateManagedDoltPID("", pid)
+	if pid <= 0 {
+		return nil
+	}
+	pgid, err := syscall.Getpgid(pid)
+	if err != nil || pgid != pid || pgid <= 1 {
+		return terminateManagedDoltPID("", pid)
+	}
+	if killErr := syscall.Kill(-pgid, syscall.SIGTERM); killErr != nil {
+		return terminateManagedDoltPID("", pid)
+	}
+	deadline := time.Now().Add(managedDoltTestProcessGroupKillWait)
+	for time.Now().Before(deadline) {
+		if !pidAlive(pid) {
+			return nil
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	_ = syscall.Kill(-pgid, syscall.SIGKILL)
+	time.Sleep(250 * time.Millisecond)
+	return nil
 }
 
 func disarmManagedDoltStartedProcess(started managedDoltStartedProcess) {
@@ -386,6 +491,19 @@ func disarmManagedDoltStartedProcess(started managedDoltStartedProcess) {
 func registerManagedDoltTestProcess(started managedDoltStartedProcess) {
 	if started.PID <= 0 || !managedDoltTestModeEnabled() {
 		return
+	}
+	// Snapshot the OS-level start identity at registration. We re-read it
+	// just before signaling in reapManagedDoltTestProcesses so PID reuse
+	// (a fresh process landing on the same numeric PID after dolt exited)
+	// cannot cause us to kill an unrelated process. Either field may be
+	// empty/zero depending on the host (no /proc, no usable ps); the reap
+	// path checks both with the same fallback ordering as the production
+	// reaper's sameReapProcessIdentity.
+	if started.StartTimeTicks == 0 {
+		started.StartTimeTicks = managedDoltTestReadStartTimeTicks(started.PID)
+	}
+	if started.StartIdentity == "" {
+		started.StartIdentity = managedDoltTestReadStartIdentity(started.PID)
 	}
 	managedDoltTestProcessRegistry.Store(started.PID, started)
 }
@@ -404,15 +522,42 @@ func reapManagedDoltTestProcesses() {
 			managedDoltTestProcessRegistry.Delete(key)
 			return true
 		}
-		if started.PID > 0 && pidAlive(started.PID) {
+		if started.PID > 0 && pidAlive(started.PID) && managedDoltTestPIDIdentityMatches(started) {
 			_ = managedDoltTestTerminateProcess(started.PID)
 		}
 		if started.WatchdogPID > 0 && pidAlive(started.WatchdogPID) {
+			// Watchdog identity is not snapshotted; the watchdog is short-lived
+			// and exits with the dolt sql-server. Terminate leader-only.
 			_ = managedDoltTestTerminateProcess(started.WatchdogPID)
 		}
 		managedDoltTestProcessRegistry.Delete(key)
 		return true
 	})
+}
+
+// managedDoltTestPIDIdentityMatches re-reads the OS-level start identity for
+// started.PID and compares it against the snapshot taken at registration. If
+// both snapshots are present and disagree, the PID was reused — we must NOT
+// terminate. If neither snapshot is present, we can't verify and fall through
+// to the existing behavior (terminate). This mirrors the production reaper's
+// sameReapProcessIdentity (cmd_dolt_cleanup.go) precedence: ticks first, ps
+// lstart as fallback.
+func managedDoltTestPIDIdentityMatches(started managedDoltStartedProcess) bool {
+	if started.StartTimeTicks != 0 {
+		current := managedDoltTestReadStartTimeTicks(started.PID)
+		if current == 0 {
+			return true
+		}
+		return current == started.StartTimeTicks
+	}
+	if started.StartIdentity != "" {
+		current := managedDoltTestReadStartIdentity(started.PID)
+		if current == "" {
+			return true
+		}
+		return current == started.StartIdentity
+	}
+	return true
 }
 
 func managedDoltStartFields(report managedDoltStartReport) []string {
@@ -507,8 +652,8 @@ func runManagedDoltTestWatchdog(args []string, stdout, stderr *os.File) int {
 		fmt.Fprintln(stderr, "managed dolt test watchdog is only available in managed Dolt test mode") //nolint:errcheck
 		return 2
 	}
-	if len(args) != 4 {
-		fmt.Fprintf(stderr, "usage: %s <parent-pid> <config-file> <log-file> <disarm-file>\n", managedDoltTestWatchdogArg) //nolint:errcheck
+	if len(args) != 4 && len(args) != 5 {
+		fmt.Fprintf(stderr, "usage: %s <parent-pid> <config-file> <log-file> <disarm-file> [parent-pipe-fd]\n", managedDoltTestWatchdogArg) //nolint:errcheck
 		return 2
 	}
 	parentPID, err := strconv.Atoi(args[0])
@@ -519,6 +664,16 @@ func runManagedDoltTestWatchdog(args []string, stdout, stderr *os.File) int {
 	configFile := args[1]
 	logFilePath := args[2]
 	disarmFile := args[3]
+	var parentDone <-chan struct{}
+	if len(args) == 5 {
+		done, closeParentDone, err := managedDoltTestParentDone(args[4])
+		if err != nil {
+			fmt.Fprintf(stderr, "watch parent pipe: %v\n", err) //nolint:errcheck
+			return 2
+		}
+		parentDone = done
+		defer closeParentDone()
+	}
 	logFile, err := os.OpenFile(logFilePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
 		fmt.Fprintf(stderr, "open dolt log: %v\n", err) //nolint:errcheck
@@ -530,7 +685,12 @@ func runManagedDoltTestWatchdog(args []string, stdout, stderr *os.File) int {
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
 	cmd.Stdin = nil
-	cmd.SysProcAttr = nil
+	// Setpgid makes the dolt sql-server the leader of its own process group
+	// so terminateManagedDoltTestPID can kill the entire descendant tree
+	// (kill(-pgid, ...)). Without this, dolt children (e.g. auto_gc helpers,
+	// archive workers) outlive their parent and leak across test runs
+	// (gastownhall/gascity#2313 follow-up M3).
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Env = doltServerEnv(os.Environ())
 	if err := cmd.Start(); err != nil {
 		fmt.Fprintf(stderr, "start dolt sql-server: %v\n", err) //nolint:errcheck
@@ -553,6 +713,14 @@ func runManagedDoltTestWatchdog(args []string, stdout, stderr *os.File) int {
 			_ = terminateManagedDoltPID("", cmd.Process.Pid)
 			<-done
 			return 0
+		case <-parentDone:
+			if _, err := os.Stat(disarmFile); err == nil {
+				_ = os.Remove(disarmFile)
+				return 0
+			}
+			_ = terminateManagedDoltPID("", cmd.Process.Pid)
+			<-done
+			return 0
 		case <-ticker.C:
 			if _, err := os.Stat(disarmFile); err == nil {
 				_ = os.Remove(disarmFile)
@@ -570,6 +738,25 @@ func runManagedDoltTestWatchdog(args []string, stdout, stderr *os.File) int {
 			return 0
 		}
 	}
+}
+
+func managedDoltTestParentDone(rawFD string) (<-chan struct{}, func(), error) {
+	fd, err := strconv.Atoi(strings.TrimSpace(rawFD))
+	if err != nil || fd <= 2 {
+		return nil, nil, fmt.Errorf("invalid parent pipe fd %q", rawFD)
+	}
+	parentPipe := os.NewFile(uintptr(fd), "gc-managed-dolt-test-parent")
+	if parentPipe == nil {
+		return nil, nil, fmt.Errorf("open parent pipe fd %d", fd)
+	}
+	syscall.CloseOnExec(fd)
+	done := make(chan struct{})
+	go func() {
+		var buf [1]byte
+		_, _ = parentPipe.Read(buf[:])
+		close(done)
+	}()
+	return done, func() { _ = parentPipe.Close() }, nil
 }
 
 // doltServerEnv returns the environment applied to every managed dolt

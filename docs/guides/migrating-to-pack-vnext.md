@@ -255,14 +255,42 @@ formulas/
 - stop treating formula location as configurable path wiring
 - move nested orders out of formula space
 
+Formula files may use either `formulas/<name>.toml` or
+`formulas/<name>.formula.toml`. In both cases, Gas City strips the optional
+`.formula` infix when computing the symbolic formula name, so
+`formulas/build-review.formula.toml` is named `build-review`. If both
+spellings exist for the same name in one directory, the plain `.toml` file wins.
+
 ## Orders
 
-Orders belong in top-level `orders/` and use flat files
-`orders/<name>.toml`.
+Orders belong in top-level `orders/` and use flat files. They may use either
+`orders/<name>.toml` or `orders/<name>.order.toml`. In both cases, Gas City
+strips the optional `.order` infix when computing the symbolic order name, so
+`orders/nightly-sync.order.toml` is named `nightly-sync`. If both spellings
+exist for the same name in one directory, the plain `.toml` file wins.
 
 If your city still uses nested PackV1 order layouts such as
-`formulas/orders/.../order.toml`, migrate them now. Those shapes only
-load for compatibility and are headed toward hard deprecation.
+`orders/<name>/order.toml` or `formulas/orders/.../order.toml`, migrate them
+now. Gas City rejects those shapes for all pack schemas, including schema-1
+packs; use flat files under top-level `orders/` instead.
+
+For the Wave 2 hard-error rollout, the maintained pack inventory was checked
+on May 22, 2026 before enabling this behavior:
+
+| Repository or pack set | Legacy nested order paths found | Status |
+|---|---:|---|
+| `gastownhall/gascity` | 0 | In-tree fixtures and built-in packs use flat order files. |
+| `gastownhall/gascity-packs` | 0 | Public Gas City pack collection has no `orders/<name>/order.toml` or `formulas/orders/<name>/order.toml` files. |
+| `gascity/gas-city-inc` pack roots | 0 | Maintained internal workflow and role packs use flat order files. |
+
+If another imported pack still ships nested order files, upgrade that pack or
+vendor it and rename each `orders/<name>/order.toml` file to
+`orders/<name>.toml` before upgrading `gc`.
+
+Flat order files are also treated as load-bearing configuration. If Gas City
+finds `orders/<name>.toml` or `orders/<name>.order.toml` but cannot read it,
+config loading fails instead of silently skipping the file. Fix permissions,
+remove the file, or complete the migration before rerunning normal commands.
 
 ### Old shape
 
@@ -590,6 +618,11 @@ schema, plus the qualified rows that matter most during migration.
 > `workspace.prefix`) and `rigs.path` now live in `.gc/site.toml` for newly
 > written or migrated cities. `rigs.prefix` and `rigs.suspended` remain in
 > `city.toml` in this release.
+>
+> Migrate in two passes when a city uses included fragments: first resolve
+> hard errors in the root `city.toml`, then address fragment warnings. Fragment
+> paths and workspace identity often need a hand edit because their machine-local
+> target is the root city's `.gc/site.toml`.
 
 | 0.14.0 element | What it did | New home or action |
 |---|---|---|
@@ -608,7 +641,7 @@ schema, plus the qualified rows that matter most during migration.
 | `agent.namepool` | Path to names file | Move toward agent-local content such as `agents/<name>/namepool.txt` if retained. |
 | `[[named_session]]` | Named reusable sessions | Move to `[[named_session]]` in the root city `pack.toml`. |
 | `[[rigs]]` | Rig deployment entries | Keep in `city.toml`. |
-| `rigs.path` | Machine-local project binding | With the Phase A rig-binding slice, new writes stop persisting this in authored `city.toml`; older cities may still carry it until migrated. |
+| `rigs.path` | Machine-local project binding | Move to `.gc/site.toml`. Schema-2 root `city.toml` rejects this field; editor/init paths persist copied or edited bindings into `.gc/site.toml` and stop writing it back to authored `city.toml`. |
 | `rigs.prefix` | Derived rig prefix | Keep in `city.toml` in the current release wave. It is deployment state, but not yet extracted into separate site-binding storage. |
 | `rigs.suspended` | Operational toggle | Keep in `city.toml` in the current release wave. It remains deployment/runtime state rather than portable pack definition. |
 | `rigs.includes` | Rig-scoped pack composition | Move to rig-scoped imports in `city.toml`. |

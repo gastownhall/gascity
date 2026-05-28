@@ -10,21 +10,19 @@ import (
 func TestMCPConfigDoctorCheckReportsTemplateExpansionErrors(t *testing.T) {
 	clearGCEnv(t)
 	cityDir := t.TempDir()
-	writeProjectedMCPCity(t, cityDir, `[workspace]
-name = "test-city"
-
+	writeProjectedMCPCity(t, cityDir, `
 [beads]
 provider = "file"
 
 [providers.gemini]
 command = "echo"
 prompt_mode = "none"
-
-[[agent]]
+`, `
 name = "mayor"
 provider = "gemini"
 scope = "city"
 `)
+
 	writeCatalogFile(t, cityDir, "mcp/remote.template.toml", `
 name = "remote"
 url = "https://example.com/{{.Missing}}"
@@ -49,9 +47,7 @@ url = "https://example.com/{{.Missing}}"
 func TestMCPConfigDoctorCheckReportsUndeliverableTargets(t *testing.T) {
 	clearGCEnv(t)
 	cityDir := t.TempDir()
-	writeProjectedMCPCity(t, cityDir, `[workspace]
-name = "test-city"
-
+	writeProjectedMCPCity(t, cityDir, `
 [beads]
 provider = "file"
 
@@ -61,8 +57,7 @@ provider = "subprocess"
 [providers.gemini]
 command = "echo"
 prompt_mode = "none"
-
-[[agent]]
+`, `
 name = "mayor"
 provider = "gemini"
 scope = "city"
@@ -89,9 +84,7 @@ command = "npx"
 func TestMCPSharedTargetDoctorCheckReportsConflicts(t *testing.T) {
 	clearGCEnv(t)
 	cityDir := t.TempDir()
-	writeProjectedMCPCity(t, cityDir, `[workspace]
-name = "test-city"
-
+	writeProjectedMCPCity(t, cityDir, `
 [beads]
 provider = "file"
 
@@ -101,13 +94,13 @@ provider = "tmux"
 [providers.gemini]
 command = "echo"
 prompt_mode = "none"
-
-[[agent]]
+`)
+	writeCatalogFile(t, cityDir, "agents/mayor/agent.toml", `
 name = "mayor"
 provider = "gemini"
 scope = "city"
-
-[[agent]]
+`)
+	writeCatalogFile(t, cityDir, "agents/deputy/agent.toml", `
 name = "deputy"
 provider = "gemini"
 scope = "city"

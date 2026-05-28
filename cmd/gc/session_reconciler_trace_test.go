@@ -608,11 +608,15 @@ func TestSessionReconcilePhaseTraceUsesDistinctSites(t *testing.T) {
 		"session_reconcile.build_deps":                        TraceSiteSessionReconcileBuildDeps,
 		"session_reconcile.heal_and_retire_duplicates":        TraceSiteSessionReconcileHealRetire,
 		"session_reconcile.topo_order":                        TraceSiteSessionReconcileTopoOrder,
+		"session_reconcile.circuit_breaker_restore":           TraceSiteSessionReconcileCircuitBreaker,
 		"session_reconcile.forward_pass":                      TraceSiteSessionReconcileForwardPass,
 		"session_reconcile.compute_awake_set_and_idle_probes": TraceSiteSessionReconcileAwakeSet,
 		"session_reconcile.apply_wake_sleep_decisions":        TraceSiteSessionReconcileWakeSleep,
 		"session_reconcile.execute_planned_starts":            TraceSiteSessionReconcileStartExecution,
 		"session_reconcile.advance_drains":                    TraceSiteSessionReconcileDrainAdvance,
+	}
+	if len(got) != len(want) {
+		t.Fatalf("session_reconcile operation count = %d, want %d; got %#v, want %#v", len(got), len(want), got, want)
 	}
 	for name, site := range want {
 		if got[name] != site {

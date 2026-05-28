@@ -619,9 +619,6 @@ func (t *Tmux) KillSessionWithProcessesExcluding(name string, excludePIDs []stri
 		// Get the process group ID
 		pgid := getProcessGroupID(pid)
 
-		// Collect all PIDs to kill (from multiple sources)
-		toKill := make(map[string]bool)
-
 		// 1. Get all descendant PIDs recursively (catches processes that called setsid())
 		descendants := getAllDescendants(pid)
 
@@ -629,9 +626,6 @@ func (t *Tmux) KillSessionWithProcessesExcluding(name string, excludePIDs []stri
 		knownPIDs := make(map[string]bool, len(descendants)+1)
 		knownPIDs[pid] = true
 		for _, dpid := range descendants {
-			if !exclude[dpid] {
-				toKill[dpid] = true
-			}
 			knownPIDs[dpid] = true
 		}
 
@@ -639,19 +633,16 @@ func (t *Tmux) KillSessionWithProcessesExcluding(name string, excludePIDs []stri
 		// Instead of adding ALL group members — which could include unrelated
 		// processes sharing the same PGID — we only add those that were reparented
 		// to init (PPID == 1), indicating they were likely children in our tree.
+		var reparented []string
 		if pgid != "" && pgid != "0" && pgid != "1" {
-			for _, member := range collectReparentedGroupMembers(pgid, knownPIDs) {
-				if !exclude[member] {
-					toKill[member] = true
-				}
-			}
+			reparented = collectReparentedGroupMembers(pgid, knownPIDs)
 		}
 
-		// Convert to slice for iteration
-		var killList []string
-		for p := range toKill {
-			killList = append(killList, p)
-		}
+		// Partition the discovered process set into the descendant/group PIDs to
+		// terminate and whether the pane leader should be killed, honoring the
+		// exclusion set. This decision is pure so it can be unit-tested without
+		// real processes (see computeExcludingKillSet).
+		killList, killPaneLeader := computeExcludingKillSet(pid, descendants, reparented, exclude)
 
 		// Send SIGTERM to all non-excluded processes
 		for _, dpid := range killList {
@@ -668,7 +659,7 @@ func (t *Tmux) KillSessionWithProcessesExcluding(name string, excludePIDs []stri
 
 		// Kill the pane process itself (may have called setsid() and detached)
 		// Only if not excluded
-		if !exclude[pid] {
+		if killPaneLeader {
 			_ = exec.Command("kill", "-TERM", pid).Run()
 			time.Sleep(processKillGracePeriod)
 			_ = exec.Command("kill", "-KILL", pid).Run()
@@ -683,6 +674,38 @@ func (t *Tmux) KillSessionWithProcessesExcluding(name string, excludePIDs []stri
 		return nil
 	}
 	return err
+}
+
+// computeExcludingKillSet partitions a discovered process set into the
+// descendant/group PIDs that should be terminated and whether the pane leader
+// itself should be terminated, honoring an exclusion set. It performs no I/O,
+// so the self-kill exclusion decision can be unit-tested without real
+// processes.
+//
+// exclude protects the calling process from being signaled before it finishes
+// its own cleanup. This is essential for the self-close path where
+// `gc session close` runs inside the very pane it is tearing down: the caller
+// is a descendant of the pane leader and, without exclusion, would receive
+// SIGTERM mid-cleanup — leaving the agent alive and the session bead un-closed.
+// Excluding a caller that lives outside the pane is a harmless no-op because it
+// is not present in the descendant or reparented sets.
+func computeExcludingKillSet(panePID string, descendants, reparented []string, exclude map[string]bool) (killList []string, killPaneLeader bool) {
+	toKill := make(map[string]bool, len(descendants)+len(reparented))
+	for _, dpid := range descendants {
+		if !exclude[dpid] {
+			toKill[dpid] = true
+		}
+	}
+	for _, member := range reparented {
+		if !exclude[member] {
+			toKill[member] = true
+		}
+	}
+	killList = make([]string, 0, len(toKill))
+	for p := range toKill {
+		killList = append(killList, p)
+	}
+	return killList, !exclude[panePID]
 }
 
 // collectReparentedGroupMembers returns process group members that have been

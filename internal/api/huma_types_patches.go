@@ -152,20 +152,78 @@ type PatchDeletedResponse struct {
 
 // StatusBody is the response body for GET /v0/status.
 type StatusBody struct {
-	Name          string            `json:"name" doc:"City name."`
-	Path          string            `json:"path" doc:"City directory path."`
-	Version       string            `json:"version,omitempty" doc:"Server version."`
-	UptimeSec     int               `json:"uptime_sec" doc:"Server uptime in seconds."`
-	Suspended     bool              `json:"suspended" doc:"Whether the city is suspended."`
-	AgentCount    int               `json:"agent_count" doc:"Total agent count (deprecated, use agents.total)."`
-	RigCount      int               `json:"rig_count" doc:"Total rig count (deprecated, use rigs.total)."`
-	Running       int               `json:"running" doc:"Number of running agent processes."`
-	Agents        StatusAgentCounts `json:"agents" doc:"Agent state counts."`
-	Rigs          StatusRigCounts   `json:"rigs" doc:"Rig state counts."`
-	Work          StatusWorkCounts  `json:"work" doc:"Work item counts."`
-	Mail          StatusMailCounts  `json:"mail" doc:"Mail counts."`
-	Partial       bool              `json:"partial,omitempty" doc:"True when one or more status backing reads returned incomplete data."`
-	PartialErrors []string          `json:"partial_errors,omitempty" doc:"Human-readable errors from incomplete status backing reads."`
+	Name                string                     `json:"name" doc:"City name."`
+	Path                string                     `json:"path" doc:"City directory path."`
+	Version             string                     `json:"version,omitempty" doc:"Server version."`
+	UptimeSec           int                        `json:"uptime_sec" doc:"Server uptime in seconds."`
+	Suspended           bool                       `json:"suspended" doc:"Whether the city is suspended."`
+	AgentCount          int                        `json:"agent_count" doc:"Total agent count (deprecated, use agents.total)."`
+	RigCount            int                        `json:"rig_count" doc:"Total rig count (deprecated, use rigs.total)."`
+	Running             int                        `json:"running" doc:"Number of running agent processes."`
+	Agents              StatusAgentCounts          `json:"agents" doc:"Agent state counts."`
+	Rigs                StatusRigCounts            `json:"rigs" doc:"Rig state counts."`
+	Work                StatusWorkCounts           `json:"work" doc:"Work item counts."`
+	Mail                StatusMailCounts           `json:"mail" doc:"Mail counts."`
+	StoreHealth         *StatusStoreHealth         `json:"store_health,omitempty" doc:"Dolt bead store health summary. Omitted when unavailable."`
+	Partial             bool                       `json:"partial,omitempty" doc:"True when one or more status backing reads returned incomplete data."`
+	PartialErrors       []string                   `json:"partial_errors,omitempty" doc:"Human-readable errors from incomplete status backing reads."`
+	AgentDetails        []StatusAgentDetail        `json:"agent_details,omitempty" doc:"Per-agent state (for CLI status views). Empty when none."`
+	RigDetails          []StatusRigDetail          `json:"rig_details,omitempty" doc:"Per-rig detail (for CLI status views). Empty when none."`
+	NamedSessionDetails []StatusNamedSessionDetail `json:"named_session_details,omitempty" doc:"Per-named-session detail. Empty when none configured."`
+	SessionCountsDetail *StatusSessionCountsDetail `json:"session_counts_detail,omitempty" doc:"Active/suspended session counts. Omitted when unavailable."`
+}
+
+// StatusAgentDetail mirrors the CLI's StatusAgentJSON with the additional
+// display hints (group name, scale label, session name) that the text
+// formatter needs when rendering pool-expanded rows.
+type StatusAgentDetail struct {
+	Name          string `json:"name" doc:"Unqualified agent name (for pool instances, the per-instance short name like 'polecat-1')."`
+	QualifiedName string `json:"qualified_name" doc:"Rig-qualified name when applicable, else the bare agent name."`
+	Scope         string `json:"scope" doc:"city or rig."`
+	Running       bool   `json:"running" doc:"Observed running state of the agent's session."`
+	Suspended     bool   `json:"suspended" doc:"Whether the agent (or its rig) is suspended."`
+	Draining      bool   `json:"draining,omitempty" doc:"True when the pool is draining this instance."`
+	SessionName   string `json:"session_name,omitempty" doc:"tmux session name CLI drain-ops key on."`
+	GroupName     string `json:"group_name,omitempty" doc:"Pool group label for expanded rows; same as QualifiedName for singletons."`
+	ScaleLabel    string `json:"scale_label,omitempty" doc:"'scaled (min=N, max=M)' header emitted once per pool group."`
+	Expanded      bool   `json:"expanded,omitempty" doc:"True when this row is a pool-expanded instance (renderer indents differently)."`
+}
+
+// StatusRigDetail mirrors the CLI's StatusRigJSON (name/path/suspended)
+// so the API path can render the Rigs section without a separate /rigs call.
+type StatusRigDetail struct {
+	Name      string `json:"name" doc:"Rig name."`
+	Path      string `json:"path" doc:"Rig directory path."`
+	Suspended bool   `json:"suspended" doc:"Whether the rig is suspended (either explicitly or because all its agents are suspended)."`
+}
+
+// StatusNamedSessionDetail mirrors the CLI's Named sessions block so the
+// API path can render it without a separate query.
+type StatusNamedSessionDetail struct {
+	Identity string `json:"identity" doc:"Qualified named-session identity."`
+	Status   string `json:"status" doc:"Lifecycle status string (materialized, reserved-unmaterialized, etc.)."`
+	Mode     string `json:"mode" doc:"Named-session mode (on-demand, always, etc.)."`
+}
+
+// StatusSessionCountsDetail mirrors the CLI's Sessions line
+// (N active, M suspended).
+type StatusSessionCountsDetail struct {
+	Active    int `json:"active" doc:"Number of active sessions."`
+	Suspended int `json:"suspended" doc:"Number of suspended sessions."`
+}
+
+// StatusStoreHealth summarizes the Dolt bead store's on-disk footprint
+// and last maintenance run. Surfaced by GET /v0/status for operator
+// dashboards; see ADR 0002 / bead ga-d5y design D9.
+type StatusStoreHealth struct {
+	Path         string  `json:"path" doc:"On-disk path of the Dolt store."`
+	SizeBytes    int64   `json:"size_bytes" doc:"Total bytes of the store directory."`
+	LiveRows     int     `json:"live_rows" doc:"Live bead row count."`
+	RatioMB      float64 `json:"ratio_mb_per_row" doc:"Derived megabytes per row."`
+	Warning      bool    `json:"warning" doc:"True when maintenance is overdue."`
+	ThresholdMB  float64 `json:"threshold_mb_per_row" doc:"Ratio threshold; a ratio above this trips warning."`
+	LastGCAt     string  `json:"last_gc_at,omitempty" doc:"RFC3339 timestamp of last maintenance run."`
+	LastGCStatus string  `json:"last_gc_status,omitempty" doc:"Status of last maintenance run ('success' or 'failed')."`
 }
 
 // Session types moved to huma_types_sessions.go.

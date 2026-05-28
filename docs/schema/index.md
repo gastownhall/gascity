@@ -4,8 +4,8 @@ description: Machine-readable schema artifacts published with the Gas City docs.
 ---
 
 This section publishes generated schema artifacts for tooling. The canonical
-JSON files stay in `docs/schema/`, and the download links below use Mint-served
-text mirrors so local preview and production both offer a working file
+JSON files stay in `docs/schema/`, and the download links below use text mirrors
+with hosted redirects so local preview and production both offer a working file
 download.
 
 ## OpenAPI 3.1

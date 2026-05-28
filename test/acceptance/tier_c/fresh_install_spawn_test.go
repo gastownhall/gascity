@@ -75,6 +75,9 @@ func runFreshInitSlingClaudeWork(t *testing.T, prompt, outputRel string) freshIn
 	c := helpers.NewCity(t, testEnvC)
 	c.Init("claude")
 	applyTierCAcceptanceConfig(c)
+	// The built-in maintenance dog pool is auto-included; this fixture needs
+	// a generic claude pool target for mol-do-work.
+	configureFreshInitClaudePool(t, c)
 
 	initialSessionBeadsOut, err := bdCmd(testEnvC, c.Dir, "list", "--include-infra", "--label", "gc:session", "--json", "--limit=20")
 	require.NoError(t, err, "bd list session beads before sling: %s", initialSessionBeadsOut)
@@ -130,8 +133,7 @@ func runFreshInitSlingClaudeWork(t *testing.T, prompt, outputRel string) freshIn
 				continue
 			}
 			spawnedSessionBead = sessionBead
-			running, total, ok := parseRunningAgents(statusOut)
-			return ok && total > 0 && running > 0
+			return state == "active" || state == "awake"
 		}
 		return false
 	})
@@ -224,6 +226,17 @@ func runFreshInitSlingClaudeWork(t *testing.T, prompt, outputRel string) freshIn
 		OutputPath:         outputPath,
 		OutputContents:     strings.TrimSpace(string(outputContents)),
 	}
+}
+
+func configureFreshInitClaudePool(t *testing.T, c *helpers.City) {
+	t.Helper()
+	c.WriteV2AgentDir("claude",
+		`provider = "claude"`,
+		`prompt_template = ".gc/system/packs/core/assets/prompts/pool-worker.md"`,
+		`default_sling_formula = "mol-do-work"`,
+		`min_active_sessions = 0`,
+		`max_active_sessions = 1`,
+	)
 }
 
 func runGCWithTimeout(timeout time.Duration, env *helpers.Env, dir string, args ...string) (string, error) {

@@ -57,6 +57,10 @@ type adoptionClockAdvanceStore struct {
 	advanced bool
 }
 
+type adoptionSessionNameLookupFailStore struct {
+	beads.Store
+}
+
 func (s *adoptionLockProbeStore) List(query beads.ListQuery) ([]beads.Bead, error) {
 	result, err := s.Store.List(query)
 	if query.Label == sessionBeadLabel {
@@ -82,6 +86,13 @@ func (s *adoptionClockAdvanceStore) List(query beads.ListQuery) ([]beads.Bead, e
 		s.advance()
 	}
 	return result, err
+}
+
+func (s *adoptionSessionNameLookupFailStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	if strings.TrimSpace(query.Label) == "agent:worker" || strings.TrimSpace(query.Metadata["agent_name"]) == "worker" || strings.TrimSpace(query.Metadata["template"]) == "worker" || strings.TrimSpace(query.Metadata["common_name"]) == "worker" {
+		return nil, errors.New("unexpected per-agent session name lookup")
+	}
+	return s.Store.List(query)
 }
 
 func (s *adoptionLockProbeStore) Create(b beads.Bead) (beads.Bead, error) {
@@ -658,6 +669,44 @@ func TestAdoptionBarrier_PoolSlotDetection(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("expected detail with PoolSlot=3, AgentName=worker-3 for worker-3, got %+v", result.Details)
+	}
+}
+
+func TestAdoptionBarrier_PoolSlotResolutionUsesLoadedSnapshot(t *testing.T) {
+	backing := beads.NewMemStore()
+	if _, err := backing.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Status: "open",
+		Labels: []string{sessionBeadLabel, "agent:worker"},
+		Metadata: map[string]string{
+			"agent_name":   "worker",
+			"session_name": "custom-worker",
+			"state":        "awake",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	store := &adoptionSessionNameLookupFailStore{Store: backing}
+	sp := &fakeAdoptionProvider{running: []string{"custom-worker-3"}}
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "worker", MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(5)},
+		},
+	}
+	var stderr bytes.Buffer
+
+	result, _ := runAdoptionBarrier("", store, sp, cfg, "test-city", clock.Real{}, &stderr, true)
+
+	found := false
+	for _, d := range result.Details {
+		if d.SessionName == "custom-worker-3" && d.PoolSlot == 3 && d.AgentName == "worker-3" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected snapshot-backed pool detail for custom-worker-3, got %+v; stderr=%q", result.Details, stderr.String())
 	}
 }
 

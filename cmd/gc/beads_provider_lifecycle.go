@@ -458,7 +458,7 @@ func initAndHookDir(cityPath, dir, prefix string) error {
 	if usesPostgres, err := scopeUsesPostgresBackendForInit(cityPath, dir); err != nil {
 		return err
 	} else if usesPostgres {
-		if err := installBeadHooks(dir); err != nil {
+		if err := installBeadHooks(dir, cityPath); err != nil {
 			return fmt.Errorf("install hooks at %s: %w", dir, err)
 		}
 		return nil
@@ -495,7 +495,7 @@ func initAndHookDir(cityPath, dir, prefix string) error {
 		}
 	}
 	// Non-fatal: hooks are convenience (event forwarding), not critical.
-	if err := installBeadHooks(dir); err != nil {
+	if err := installBeadHooks(dir, cityPath); err != nil {
 		return fmt.Errorf("install hooks at %s: %w", dir, err)
 	}
 	return nil
@@ -1812,9 +1812,16 @@ func providerLifecycleProcessEnvFromBase(cityPath, provider string, env []string
 		env = removeEnvKey(env, "GC_BIN")
 		env = append(env, "GC_BIN="+gcBin)
 	}
-	if managedDoltTestModeEnabled() {
-		env = removeEnvKey(env, managedDoltTestModeEnv)
-		env = removeEnvKey(env, managedDoltTestParentPIDEnv)
+	// Strip any inherited test-mode env unconditionally so a stray
+	// GC_MANAGED_DOLT_TEST_MODE=1 in a production parent shell can never
+	// reach child managed-dolt processes. Only Go test binaries
+	// (managedDoltTestMode()) get the variable re-injected. Gating on
+	// managedDoltTestModeEnabled() — which also honors the env var itself —
+	// would have re-injected the stray value, defeating the guard
+	// (gastownhall/gascity#2313 follow-up M1).
+	env = removeEnvKey(env, managedDoltTestModeEnv)
+	env = removeEnvKey(env, managedDoltTestParentPIDEnv)
+	if managedDoltTestMode() {
 		env = append(env,
 			managedDoltTestModeEnv+"=1",
 			managedDoltTestParentPIDEnv+"="+managedDoltTestParentPIDString(),

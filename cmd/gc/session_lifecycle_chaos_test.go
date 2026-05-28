@@ -1154,8 +1154,8 @@ func (h *sessionChaosHarness) reconcileTickWithReadyWait(readyWaitSet map[string
 
 func (h *sessionChaosHarness) assertCreatingIntent() {
 	b := h.mustBead()
-	if got := b.Metadata["state"]; got != string(sessionpkg.StateCreating) {
-		h.failf("new intent state = %q, want creating", got)
+	if got := b.Metadata["state"]; got != string(sessionpkg.StateStartPending) {
+		h.failf("new intent state = %q, want start-pending", got)
 	}
 	if got := b.Metadata["pending_create_claim"]; got != "true" {
 		h.failf("new intent pending_create_claim = %q, want true", got)

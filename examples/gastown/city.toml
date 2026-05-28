@@ -16,7 +16,8 @@
 # fallback dog shape and shared dog formulas/prompts that gastown reuses.
 # Rig-scoped agents (witness, refinery, polecat) are stamped per-rig.
 #
-# The sibling pack.toml owns the Gastown import and default rig binding.
+# The sibling pack.toml owns the Gastown import. This city owns the default
+# rig binding used by `gc rig add`.
 #
 # To use: gc start examples/gastown/
 # Requires rigs to be registered: gc rig add <path>
@@ -25,6 +26,9 @@
 name = "gastown"
 provider = "claude"
 global_fragments = ["command-glossary", "operational-awareness"]
+
+[defaults.rig.imports.gastown]
+source = "packs/gastown"
 
 [daemon]
 patrol_interval = "30s"

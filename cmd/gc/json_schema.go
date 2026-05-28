@@ -23,7 +23,6 @@ const (
 type jsonSchemaManifest struct {
 	SchemaVersion string                     `json:"schema_version"`
 	Command       []string                   `json:"command"`
-	Transport     string                     `json:"transport"`
 	JSONSupported bool                       `json:"json_supported"`
 	Schemas       map[string]json.RawMessage `json:"schemas"`
 }
@@ -315,7 +314,6 @@ func writeJSONSchemaManifest(stdout io.Writer, cmd *cobra.Command, commandPath [
 	return writeCLIJSONLine(stdout, jsonSchemaManifest{
 		SchemaVersion: "1",
 		Command:       commandPath,
-		Transport:     "jsonl",
 		JSONSupported: resultErr == nil,
 		Schemas:       schemas,
 	})

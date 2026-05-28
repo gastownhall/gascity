@@ -44,9 +44,8 @@ func TestOpenAPISpecInSync(t *testing.T) {
 
 	// Every tracked copy of the spec must match the live server. The internal
 	// copy (internal/api/openapi.json) feeds the Go client generator. The
-	// docs copies (docs/schema/openapi.{json,txt}) are what Mintlify publishes
-	// for external consumers. All three must agree or external readers see a
-	// different contract than the code enforces.
+	// docs/schema/openapi.json is the published docs artifact. The .txt copy is
+	// a compatibility mirror kept in sync with the served JSON contract.
 	tracked := []string{
 		"openapi.json",
 		filepath.Join("..", "..", "docs", "schema", "openapi.json"),

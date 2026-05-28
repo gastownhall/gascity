@@ -6,16 +6,13 @@ import "strings"
 // formulas/ directory (formulas/<name>.toml).
 const CanonicalTOMLExt = ".toml"
 
-// LegacyTOMLExt is the pre-canonicalization extension for formula TOML files
-// (formulas/<name>.formula.toml). Still recognized by discovery so existing
-// cities continue to load.
-//
-// PACKV2-CUTOVER: remove legacy formula filename support after the infix
-// migration window closes.
+// LegacyTOMLExt is the supported infixed extension for formula TOML files
+// (formulas/<name>.formula.toml). The exported name is retained for existing
+// internal callers, but this filename spelling is intentionally accepted.
 const LegacyTOMLExt = ".formula.toml"
 
-// IsTOMLFilename reports whether path names a TOML formula file in either the
-// canonical or legacy infixed form.
+// IsTOMLFilename reports whether path names a TOML formula file in either
+// supported TOML form.
 func IsTOMLFilename(path string) bool {
 	// Check legacy suffix first to stay symmetric with TrimTOMLFilename; the
 	// result is the same either way (both suffixes end in ".toml"), but the
@@ -24,6 +21,7 @@ func IsTOMLFilename(path string) bool {
 }
 
 // TrimTOMLFilename returns the formula name encoded in a TOML filename.
+// The optional ".formula" infix is not part of the symbolic formula name.
 func TrimTOMLFilename(path string) (string, bool) {
 	switch {
 	case strings.HasSuffix(path, LegacyTOMLExt):

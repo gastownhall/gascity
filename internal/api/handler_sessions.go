@@ -130,7 +130,7 @@ func sessionToResponse(info session.Info, cfg *config.City) sessionResponse {
 // sessionResponseWithReason builds a session response that includes the
 // reason field derived from bead metadata. If the bead is nil (not found
 // in the index), the reason is omitted.
-func sessionResponseWithReason(info session.Info, b *beads.Bead, cfg *config.City, hasDeferredQueue bool) sessionResponse {
+func sessionResponseWithReason(info session.Info, b *beads.Bead, cfg *config.City, sp runtime.Provider, hasDeferredQueue bool) sessionResponse {
 	r := sessionToResponse(info, cfg)
 	// Expose effective options: provider EffectiveDefaults merged with
 	// per-session template_overrides. The dashboard uses this to display
@@ -169,7 +169,11 @@ func sessionResponseWithReason(info session.Info, b *beads.Bead, cfg *config.Cit
 	if b == nil || info.Closed {
 		return r
 	}
-	r.Reason = session.LifecycleDisplayReason(b.Status, b.Metadata, time.Now().UTC())
+	var isRunning func(string) bool
+	if sp != nil {
+		isRunning = sp.IsRunning
+	}
+	r.Reason = session.LifecycleDisplayReasonWithLiveness(b.Status, b.Metadata, time.Now().UTC(), info.SessionName, isRunning)
 	r.ConfiguredNamedSession = strings.TrimSpace(b.Metadata[apiNamedSessionMetadataKey]) == "true"
 	r.SubmissionCapabilities = session.SubmissionCapabilitiesForMetadata(b.Metadata, hasDeferredQueue)
 	// Expose only real_world_app_* prefixed metadata keys to API consumers.
@@ -252,8 +256,8 @@ func (s *Server) handleSessionList(w http.ResponseWriter, r *http.Request) {
 	items := make([]sessionResponse, len(sessions))
 	hasDeferredQueue := strings.TrimSpace(s.state.CityPath()) != ""
 	for i, sess := range sessions {
-		items[i] = sessionResponseWithReason(sess, beadIndex[sess.ID], cfg, hasDeferredQueue)
-		s.enrichSessionResponse(&items[i], sess, cfg, s.runtimeSessionResponseHandle(sess), wantPeek, false, false)
+		items[i] = sessionResponseWithReason(sess, beadIndex[sess.ID], cfg, s.state.SessionProvider(), hasDeferredQueue)
+		s.enrichSessionResponse(&items[i], sess, cfg, s.runtimeSessionResponseHandle(sess), wantPeek, false, false, 0)
 	}
 
 	pp := parsePagination(r, maxPaginationLimit)
@@ -307,10 +311,10 @@ func (s *Server) handleSessionGet(w http.ResponseWriter, r *http.Request) {
 	}
 	b, _ := store.Get(id)
 	wantPeek := r.URL.Query().Get("peek") == "true"
-	resp := sessionResponseWithReason(info, &b, cfg, strings.TrimSpace(s.state.CityPath()) != "")
+	resp := sessionResponseWithReason(info, &b, cfg, s.state.SessionProvider(), strings.TrimSpace(s.state.CityPath()) != "")
 	handle, err := s.workerHandleForSession(store, id)
 	if err == nil {
-		s.enrichSessionResponse(&resp, info, cfg, handle, wantPeek, true, true)
+		s.enrichSessionResponse(&resp, info, cfg, handle, wantPeek, true, true, 0)
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -530,13 +534,21 @@ func (s *Server) handleSessionRename(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	updated, _ := store.Get(id)
-	rresp := sessionResponseWithReason(info, &updated, s.state.Config(), strings.TrimSpace(s.state.CityPath()) != "")
+	rresp := sessionResponseWithReason(info, &updated, s.state.Config(), s.state.SessionProvider(), strings.TrimSpace(s.state.CityPath()) != "")
 	writeJSON(w, http.StatusOK, rresp)
 }
 
+// defaultSessionPeekLines is the preview line count used when a caller
+// requests peek=true without specifying peek_lines. Matches the long-standing
+// 5-line dashboard preview.
+const defaultSessionPeekLines = 5
+
 // enrichSessionResponse populates runtime fields on a session response:
 // running state, active bead, peek output, and model/context metadata.
-func (s *Server) enrichSessionResponse(resp *sessionResponse, info session.Info, cfg *config.City, runtimeHandle any, wantPeek, liveActiveBead, allowWorkdirTranscriptDiscovery bool) {
+//
+// peekLines controls the line count for the preview when wantPeek is true.
+// Zero means "use default" (defaultSessionPeekLines).
+func (s *Server) enrichSessionResponse(resp *sessionResponse, info session.Info, cfg *config.City, runtimeHandle any, wantPeek, liveActiveBead, allowWorkdirTranscriptDiscovery bool, peekLines int) {
 	if info.State != session.StateActive {
 		return
 	}
@@ -591,9 +603,15 @@ func (s *Server) enrichSessionResponse(resp *sessionResponse, info session.Info,
 		resp.ActiveBead = s.findActiveBeadForAssignees("", info.ID, info.SessionName, info.Alias, info.Template)
 	}
 
-	// Peek preview (opt-in, only when running).
+	// Peek preview (opt-in, only when running). peekLines=0 means "use
+	// default" so existing callers that omit the query param keep the
+	// historical 5-line preview.
 	if wantPeek && resp.Running && peekHandle != nil {
-		if output, err := peekHandle.Peek(context.Background(), 5); err == nil {
+		lines := peekLines
+		if lines <= 0 {
+			lines = defaultSessionPeekLines
+		}
+		if output, err := peekHandle.Peek(context.Background(), lines); err == nil {
 			resp.LastOutput = output
 		}
 	}
@@ -740,7 +758,7 @@ func (s *Server) handleSessionPatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	updated, _ := store.Get(id)
-	presp := sessionResponseWithReason(info, &updated, s.state.Config(), strings.TrimSpace(s.state.CityPath()) != "")
+	presp := sessionResponseWithReason(info, &updated, s.state.Config(), s.state.SessionProvider(), strings.TrimSpace(s.state.CityPath()) != "")
 	writeJSON(w, http.StatusOK, presp)
 }
 

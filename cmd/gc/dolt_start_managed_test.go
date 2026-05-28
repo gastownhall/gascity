@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -8,6 +9,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -226,6 +228,54 @@ func clearManagedDoltTestProcessRegistry(t *testing.T) {
 	})
 }
 
+func writeFakeDoltSQLServer(t *testing.T) string {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("shell fake requires POSIX sh")
+	}
+	dir := t.TempDir()
+	script := filepath.Join(dir, "dolt")
+	content := "#!/bin/sh\n" +
+		"if [ \"$1\" != \"sql-server\" ]; then\n" +
+		"  echo \"unexpected dolt args: $*\" >&2\n" +
+		"  exit 2\n" +
+		"fi\n" +
+		"exec sleep 60\n"
+	if err := os.WriteFile(script, []byte(content), 0o755); err != nil {
+		t.Fatalf("write fake dolt: %v", err)
+	}
+	return dir
+}
+
+func readManagedDoltTestState(t *testing.T, path string) (int, int) {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read helper state: %v", err)
+	}
+	fields := strings.Fields(string(data))
+	if len(fields) != 2 {
+		t.Fatalf("helper state %q has %d fields, want 2", string(data), len(fields))
+	}
+	doltPID, err := strconv.Atoi(fields[0])
+	if err != nil || doltPID <= 0 {
+		t.Fatalf("helper dolt pid %q invalid", fields[0])
+	}
+	watchdogPID, err := strconv.Atoi(fields[1])
+	if err != nil || watchdogPID <= 0 {
+		t.Fatalf("helper watchdog pid %q invalid", fields[1])
+	}
+	return doltPID, watchdogPID
+}
+
+func cleanupManagedDoltTestPID(t *testing.T, pid int) {
+	t.Helper()
+	if pid <= 0 {
+		return
+	}
+	_ = terminateManagedDoltTestPID(pid)
+}
+
 func TestManagedDoltSQLServerSysProcAttrProductionDetaches(t *testing.T) {
 	withManagedDoltTestMode(t, false)
 	t.Setenv(managedDoltTestModeEnv, "")
@@ -384,6 +434,188 @@ func TestManagedDoltTestDisarmOnReadyForEnvOnlyHelperWithoutParent(t *testing.T)
 	}
 }
 
+func TestManagedDoltTestParentDoneClosesOnPipeEOF(t *testing.T) {
+	parentPipeRead, parentPipeWrite, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	defer parentPipeRead.Close() //nolint:errcheck
+	parentPipeFD, err := syscall.Dup(int(parentPipeRead.Fd()))
+	if err != nil {
+		t.Fatalf("dup parent pipe fd: %v", err)
+	}
+	done, closeDone, err := managedDoltTestParentDone(strconv.Itoa(parentPipeFD))
+	if err != nil {
+		_ = syscall.Close(parentPipeFD)
+		t.Fatalf("managedDoltTestParentDone: %v", err)
+	}
+	defer closeDone()
+
+	if err := parentPipeWrite.Close(); err != nil {
+		t.Fatalf("close parent pipe writer: %v", err)
+	}
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("parent pipe EOF did not close done channel")
+	}
+}
+
+func TestManagedDoltWatchdogExternalParentSurvivesSpawnerExit(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX process semantics required")
+	}
+	dir := t.TempDir()
+	fakeDoltDir := writeFakeDoltSQLServer(t)
+	statePath := filepath.Join(dir, "state")
+	configPath := filepath.Join(dir, "dolt-config.yaml")
+	logPath := filepath.Join(dir, "dolt.log")
+	if err := os.WriteFile(configPath, []byte("log_level: debug\n"), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cmd := exec.Command(os.Args[0], "-test.run=TestManagedDoltWatchdogExternalParentHelper", "-test.v")
+	cmd.Env = sanitizedBaseEnv(
+		"GC_TEST_MANAGED_DOLT_HELPER=external-parent",
+		"GC_TEST_MANAGED_DOLT_HELPER_PARENT_PID="+strconv.Itoa(os.Getpid()),
+		"GC_TEST_MANAGED_DOLT_HELPER_STATE="+statePath,
+		"GC_TEST_MANAGED_DOLT_HELPER_CONFIG="+configPath,
+		"GC_TEST_MANAGED_DOLT_HELPER_LOG="+logPath,
+		"GC_TEST_MANAGED_DOLT_HELPER_FAKE_DOLT_DIR="+fakeDoltDir,
+	)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("helper failed: %v\n%s", err, output)
+	}
+	doltPID, watchdogPID := readManagedDoltTestState(t, statePath)
+	t.Cleanup(func() {
+		cleanupManagedDoltTestPID(t, doltPID)
+		cleanupManagedDoltTestPID(t, watchdogPID)
+	})
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if !pidAlive(doltPID) {
+			logData, _ := os.ReadFile(logPath)
+			t.Fatalf("fake dolt pid %d exited after short-lived spawner exit; helper output:\n%s\nwatchdog log:\n%s", doltPID, output, logData)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+func TestManagedDoltWatchdogExternalParentHelper(t *testing.T) {
+	if os.Getenv("GC_TEST_MANAGED_DOLT_HELPER") != "external-parent" {
+		t.Skip("helper process only")
+	}
+	parentPID := strings.TrimSpace(os.Getenv("GC_TEST_MANAGED_DOLT_HELPER_PARENT_PID"))
+	if parentPID == "" {
+		t.Fatal("missing helper parent pid")
+	}
+	t.Setenv(managedDoltTestModeEnv, "1")
+	t.Setenv(managedDoltTestParentPIDEnv, parentPID)
+	fakeDoltDir := strings.TrimSpace(os.Getenv("GC_TEST_MANAGED_DOLT_HELPER_FAKE_DOLT_DIR"))
+	if fakeDoltDir == "" {
+		t.Fatal("missing fake dolt dir")
+	}
+	t.Setenv("PATH", fakeDoltDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	statePath := strings.TrimSpace(os.Getenv("GC_TEST_MANAGED_DOLT_HELPER_STATE"))
+	configPath := strings.TrimSpace(os.Getenv("GC_TEST_MANAGED_DOLT_HELPER_CONFIG"))
+	logPath := strings.TrimSpace(os.Getenv("GC_TEST_MANAGED_DOLT_HELPER_LOG"))
+	if statePath == "" || configPath == "" || logPath == "" {
+		t.Fatal("missing helper paths")
+	}
+	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		t.Fatalf("open log file: %v", err)
+	}
+	defer logFile.Close() //nolint:errcheck
+
+	started, err := startManagedDoltSQLServerWithTestWatchdog("", configPath, logPath, logFile)
+	if err != nil {
+		t.Fatalf("start managed dolt with watchdog: %v", err)
+	}
+	state := fmt.Sprintf("%d %d\n", started.PID, started.WatchdogPID)
+	if err := os.WriteFile(statePath, []byte(state), 0o644); err != nil {
+		t.Fatalf("write helper state: %v", err)
+	}
+	unregisterManagedDoltStartedProcess(started)
+}
+
+func TestManagedDoltWatchdogParentPipeEOFHonorsDisarm(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX process semantics required")
+	}
+	withManagedDoltTestMode(t, false)
+	t.Setenv(managedDoltTestModeEnv, "1")
+	fakeDoltDir := writeFakeDoltSQLServer(t)
+	t.Setenv("PATH", fakeDoltDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "dolt-config.yaml")
+	logPath := filepath.Join(dir, "dolt.log")
+	disarmFile := filepath.Join(dir, "watchdog.disarm")
+	if err := os.WriteFile(configPath, []byte("log_level: debug\n"), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	if err := os.WriteFile(disarmFile, []byte("ready\n"), 0o644); err != nil {
+		t.Fatalf("write disarm file: %v", err)
+	}
+	parentPipeRead, parentPipeWrite, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("create parent pipe: %v", err)
+	}
+	defer parentPipeRead.Close()  //nolint:errcheck
+	defer parentPipeWrite.Close() //nolint:errcheck
+	watchdogParentPipeFD, err := syscall.Dup(int(parentPipeRead.Fd()))
+	if err != nil {
+		t.Fatalf("dup parent pipe fd for watchdog: %v", err)
+	}
+	stdoutRead, stdoutWrite, err := os.Pipe()
+	if err != nil {
+		_ = syscall.Close(watchdogParentPipeFD)
+		t.Fatalf("create stdout pipe: %v", err)
+	}
+	defer stdoutRead.Close()  //nolint:errcheck
+	defer stdoutWrite.Close() //nolint:errcheck
+	stderrPath := filepath.Join(dir, "watchdog.stderr")
+	stderrFile, err := os.OpenFile(stderrPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		_ = syscall.Close(watchdogParentPipeFD)
+		t.Fatalf("open stderr file: %v", err)
+	}
+	defer stderrFile.Close() //nolint:errcheck
+
+	result := make(chan int, 1)
+	args := []string{strconv.Itoa(os.Getpid()), configPath, logPath, disarmFile, strconv.Itoa(watchdogParentPipeFD)}
+	go func() {
+		result <- runManagedDoltTestWatchdog(args, stdoutWrite, stderrFile)
+	}()
+
+	doltPID, err := readManagedDoltTestWatchdogPID(stdoutRead, os.Getpid())
+	if err != nil {
+		t.Fatalf("read fake dolt pid: %v", err)
+	}
+	t.Cleanup(func() { cleanupManagedDoltTestPID(t, doltPID) })
+	if err := parentPipeWrite.Close(); err != nil {
+		t.Fatalf("close parent pipe writer: %v", err)
+	}
+	select {
+	case code := <-result:
+		if code != 0 {
+			stderrData, _ := os.ReadFile(stderrPath)
+			t.Fatalf("watchdog exit code = %d, want 0; stderr:\n%s", code, stderrData)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("watchdog did not exit after disarm file and parent pipe EOF")
+	}
+	if !pidAlive(doltPID) {
+		t.Fatalf("fake dolt pid %d exited; disarm file should win over parent pipe EOF", doltPID)
+	}
+	if _, err := os.Stat(disarmFile); !os.IsNotExist(err) {
+		t.Fatalf("disarm file still exists after watchdog exit: %v", err)
+	}
+}
+
 func TestDisarmManagedDoltStartedProcessUnregistersReadyProcess(t *testing.T) {
 	withManagedDoltTestMode(t, true)
 	clearManagedDoltTestProcessRegistry(t)
@@ -484,12 +716,29 @@ func TestReapManagedDoltTestProcessesTerminatesRegisteredChildren(t *testing.T) 
 	}
 	t.Cleanup(func() { managedDoltTestTerminateProcess = oldTerminate })
 
-	pid := os.Getpid()
-	registerManagedDoltTestProcess(managedDoltStartedProcess{PID: pid, WatchdogPID: pid})
+	startChild := func(name string) *exec.Cmd {
+		t.Helper()
+		cmd := exec.Command("sleep", "60")
+		if err := cmd.Start(); err != nil {
+			t.Fatalf("start %s child: %v", name, err)
+		}
+		t.Cleanup(func() {
+			if cmd.Process != nil {
+				_ = cmd.Process.Kill()
+			}
+			_ = cmd.Wait()
+		})
+		return cmd
+	}
+	dolt := startChild("dolt")
+	watchdog := startChild("watchdog")
+	started := managedDoltStartedProcess{PID: dolt.Process.Pid, WatchdogPID: watchdog.Process.Pid}
+	registerManagedDoltTestProcess(started)
 	reapManagedDoltTestProcesses()
 
-	if len(terminated) != 2 || terminated[0] != pid || terminated[1] != pid {
-		t.Fatalf("terminated = %v, want child and watchdog pid %d", terminated, pid)
+	want := []int{started.PID, started.WatchdogPID}
+	if fmt.Sprint(terminated) != fmt.Sprint(want) {
+		t.Fatalf("terminated = %v, want %v", terminated, want)
 	}
 	var remaining int
 	managedDoltTestProcessRegistry.Range(func(_, _ any) bool {
@@ -652,5 +901,221 @@ name = "mayor"
 	}
 	if pidAlive(pid) {
 		t.Errorf("pid %d still alive after terminateManagedDoltPID; SIGKILL escalation did not fire", pid)
+	}
+}
+
+// TestReapManagedDoltTestProcessesSkipsReusedPID is the #2313 follow-up M2
+// regression: when the snapshotted StartTimeTicks at registration differs from
+// the value re-read at reap time, the PID has been reused — we must NOT
+// signal it. Validated against the un-patched reap (no identity check) by
+// flipping the seam and asserting terminate was not invoked.
+func TestReapManagedDoltTestProcessesSkipsReusedPID(t *testing.T) {
+	withManagedDoltTestMode(t, true)
+	clearManagedDoltTestProcessRegistry(t)
+	t.Cleanup(func() { clearManagedDoltTestProcessRegistry(t) })
+
+	oldTerminate := managedDoltTestTerminateProcess
+	var terminated []int
+	managedDoltTestTerminateProcess = func(pid int) error {
+		terminated = append(terminated, pid)
+		return nil
+	}
+	t.Cleanup(func() { managedDoltTestTerminateProcess = oldTerminate })
+
+	oldTicks := managedDoltTestReadStartTimeTicks
+	oldIdent := managedDoltTestReadStartIdentity
+	managedDoltTestReadStartTimeTicks = func(int) uint64 { return 2222 }
+	managedDoltTestReadStartIdentity = func(int) string { return "" }
+	t.Cleanup(func() {
+		managedDoltTestReadStartTimeTicks = oldTicks
+		managedDoltTestReadStartIdentity = oldIdent
+	})
+
+	// Snapshot is 1111 at registration (set explicitly so we bypass the
+	// real-time reader at register-time too); the reap seam reports 2222
+	// — different process, must be skipped.
+	livePID := os.Getpid()
+	registerManagedDoltTestProcess(managedDoltStartedProcess{PID: livePID, StartTimeTicks: 1111})
+
+	reapManagedDoltTestProcesses()
+
+	for _, pid := range terminated {
+		if pid == livePID {
+			t.Fatalf("reap signaled PID %d with mismatched start-time ticks; identity guard not enforced", livePID)
+		}
+	}
+}
+
+// TestReapManagedDoltTestProcessesTerminatesWhenTicksMatch asserts the
+// happy-path side of the M2 identity guard: when snapshotted ticks equal
+// re-read ticks, the reap proceeds as before.
+func TestReapManagedDoltTestProcessesTerminatesWhenTicksMatch(t *testing.T) {
+	withManagedDoltTestMode(t, true)
+	clearManagedDoltTestProcessRegistry(t)
+	t.Cleanup(func() { clearManagedDoltTestProcessRegistry(t) })
+
+	oldTerminate := managedDoltTestTerminateProcess
+	var terminated []int
+	managedDoltTestTerminateProcess = func(pid int) error {
+		terminated = append(terminated, pid)
+		return nil
+	}
+	t.Cleanup(func() { managedDoltTestTerminateProcess = oldTerminate })
+
+	oldTicks := managedDoltTestReadStartTimeTicks
+	managedDoltTestReadStartTimeTicks = func(int) uint64 { return 5555 }
+	t.Cleanup(func() { managedDoltTestReadStartTimeTicks = oldTicks })
+
+	livePID := os.Getpid()
+	registerManagedDoltTestProcess(managedDoltStartedProcess{PID: livePID, StartTimeTicks: 5555})
+
+	reapManagedDoltTestProcesses()
+
+	if len(terminated) == 0 || terminated[0] != livePID {
+		t.Fatalf("terminated = %v, want [%d]+; identity guard wrongly skipped matching PID", terminated, livePID)
+	}
+}
+
+// TestTerminateManagedDoltTestPIDKillsProcessGroup is the #2313 follow-up M3
+// regression: when the target is a process-group leader, terminate must
+// signal the whole group so descendant dolt workers do not survive.
+// Demonstration: spawn a shell as group leader, fork a backgrounded sleep
+// child, call terminateManagedDoltTestPID on the shell. Both must die.
+// Without the M3 fix (leader-only kill), the child outlives the shell.
+func TestTerminateManagedDoltTestPIDKillsProcessGroup(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX process-group signal semantics required")
+	}
+	dir := t.TempDir()
+	childFile := filepath.Join(dir, "child.pid")
+	// Shell becomes the new process group leader (Setpgid:true). It forks
+	// a backgrounded sleep that inherits that group, records the child's
+	// PID, then waits.
+	cmd := exec.Command("/bin/sh", "-c", `sleep 90 & echo $! > "$1"; wait`, "sh", childFile)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start shell: %v", err)
+	}
+	shellPID := cmd.Process.Pid
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_, _ = cmd.Process.Wait()
+	})
+
+	// Wait for the child PID to be recorded.
+	var childPID int
+	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
+		data, err := os.ReadFile(childFile)
+		if err == nil {
+			if pid, perr := strconv.Atoi(strings.TrimSpace(string(data))); perr == nil && pid > 0 {
+				childPID = pid
+				break
+			}
+		}
+	}
+	if childPID == 0 {
+		t.Fatalf("child sleep never recorded its PID at %s", childFile)
+	}
+
+	if err := terminateManagedDoltTestPID(shellPID); err != nil {
+		t.Fatalf("terminateManagedDoltTestPID(%d): %v", shellPID, err)
+	}
+
+	// Allow a short window for the kernel to mark both pids dead.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if !pidAlive(shellPID) && !pidAlive(childPID) {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if pidAlive(shellPID) {
+		t.Errorf("shell pid %d still alive after pgid terminate", shellPID)
+	}
+	if pidAlive(childPID) {
+		t.Errorf("child pid %d still alive after pgid terminate; M3 pgid-kill regression", childPID)
+	}
+}
+
+// TestTerminateManagedDoltTestPIDLeaderOnlyForNonGroupLeader asserts the
+// safety guard added in M3: when the target is NOT its own pgid leader (e.g.
+// the watchdog inheriting the test binary's group), terminate must NOT
+// signal the whole group — that would take down the test binary. We pick a
+// child of the test binary that did NOT call Setpgid; it inherits the test
+// binary's group. Terminate must only kill the child.
+func TestTerminateManagedDoltTestPIDLeaderOnlyForNonGroupLeader(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX process-group signal semantics required")
+	}
+	// Spawn a sleep WITHOUT Setpgid — it inherits the test binary's pgid.
+	cmd := exec.Command("sleep", "60")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start sleep: %v", err)
+	}
+	pid := cmd.Process.Pid
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_, _ = cmd.Process.Wait()
+	})
+
+	pgid, err := syscall.Getpgid(pid)
+	if err != nil {
+		t.Fatalf("getpgid(%d): %v", pid, err)
+	}
+	if pgid == pid {
+		t.Skip("sleep happens to be its own group leader; cannot exercise leader-only fallback")
+	}
+
+	if err := terminateManagedDoltTestPID(pid); err != nil {
+		t.Fatalf("terminateManagedDoltTestPID(%d): %v", pid, err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for pidAlive(pid) && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if pidAlive(pid) {
+		t.Errorf("sleep pid %d still alive after terminate", pid)
+	}
+	// Sanity: the test binary itself is still alive (we did not pgid-kill
+	// our own group). If we had, the test process would have died and this
+	// assertion would never run — but if it did, this guards against a
+	// future regression where the fallback path forgets the leader check.
+	if !pidAlive(os.Getpid()) {
+		t.Fatalf("test binary signaled by terminate fallback; pgid safety check failed")
+	}
+}
+
+// TestRegisterManagedDoltTestProcessSnapshotsIdentity ensures the M2
+// snapshot happens at registration when caller leaves identity fields zero.
+func TestRegisterManagedDoltTestProcessSnapshotsIdentity(t *testing.T) {
+	withManagedDoltTestMode(t, true)
+	clearManagedDoltTestProcessRegistry(t)
+	t.Cleanup(func() { clearManagedDoltTestProcessRegistry(t) })
+
+	oldTicks := managedDoltTestReadStartTimeTicks
+	oldIdent := managedDoltTestReadStartIdentity
+	managedDoltTestReadStartTimeTicks = func(int) uint64 { return 9876 }
+	managedDoltTestReadStartIdentity = func(int) string { return "Mon Jan 1 12:34:56 2026" }
+	t.Cleanup(func() {
+		managedDoltTestReadStartTimeTicks = oldTicks
+		managedDoltTestReadStartIdentity = oldIdent
+	})
+
+	registerManagedDoltTestProcess(managedDoltStartedProcess{PID: os.Getpid()})
+
+	v, ok := managedDoltTestProcessRegistry.Load(os.Getpid())
+	if !ok {
+		t.Fatalf("registry missing entry for pid %d", os.Getpid())
+	}
+	got, ok := v.(managedDoltStartedProcess)
+	if !ok {
+		t.Fatalf("registry value type = %T, want managedDoltStartedProcess", v)
+	}
+	if got.StartTimeTicks != 9876 {
+		t.Errorf("StartTimeTicks = %d, want 9876", got.StartTimeTicks)
+	}
+	if got.StartIdentity != "Mon Jan 1 12:34:56 2026" {
+		t.Errorf("StartIdentity = %q, want non-empty snapshot", got.StartIdentity)
 	}
 }

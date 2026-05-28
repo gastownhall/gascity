@@ -8,12 +8,15 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -1378,6 +1381,106 @@ func TestSessionReason_FallsThroughToProviderForSleepingAttachment(t *testing.T)
 	}
 }
 
+func TestSessionReason_ResetPendingLiveRuntimeOverridesOtherReasons(t *testing.T) {
+	provider := runtime.NewFake()
+	if err := provider.Start(context.Background(), "worker-live", runtime.Config{Command: "echo"}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	cfg := &config.City{
+		Agents: []config.Agent{{
+			Name:         "worker",
+			StartCommand: "true",
+		}},
+	}
+	bead := beads.Bead{
+		ID:     "gc-1",
+		Status: "open",
+		Metadata: map[string]string{
+			"template":          "worker",
+			"session_name":      "worker-live",
+			"state":             "asleep",
+			"sleep_reason":      "user-hold",
+			"pin_awake":         "true",
+			"restart_requested": "true",
+		},
+	}
+	before := cloneSessionReasonMetadata(bead.Metadata)
+	info := session.Info{
+		ID:          bead.ID,
+		Template:    "worker",
+		State:       session.StateAsleep,
+		SessionName: "worker-live",
+	}
+
+	reason := sessionReason(
+		info,
+		map[string]beads.Bead{bead.ID: bead},
+		cfg,
+		provider,
+		nil,
+		nil,
+	)
+	if reason != resetPendingReason {
+		t.Fatalf("sessionReason = %q, want %q", reason, resetPendingReason)
+	}
+	assertStringMapEqual(t, bead.Metadata, before)
+}
+
+func TestSessionReason_ResetPendingNotLiveFallsBack(t *testing.T) {
+	provider := runtime.NewFake()
+	bead := beads.Bead{
+		ID:     "gc-1",
+		Status: "open",
+		Metadata: map[string]string{
+			"template":          "worker",
+			"session_name":      "worker-not-live",
+			"state":             "asleep",
+			"sleep_reason":      "user-hold",
+			"restart_requested": "true",
+		},
+	}
+	before := cloneSessionReasonMetadata(bead.Metadata)
+	info := session.Info{
+		ID:          bead.ID,
+		Template:    "worker",
+		State:       session.StateAsleep,
+		SessionName: "worker-not-live",
+	}
+
+	reason := sessionReason(
+		info,
+		map[string]beads.Bead{bead.ID: bead},
+		nil,
+		provider,
+		nil,
+		nil,
+	)
+	if reason != "user-hold" {
+		t.Fatalf("sessionReason = %q, want user-hold for non-live runtime", reason)
+	}
+	assertStringMapEqual(t, bead.Metadata, before)
+}
+
+func cloneSessionReasonMetadata(in map[string]string) map[string]string {
+	out := make(map[string]string, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
+}
+
+func assertStringMapEqual(t *testing.T, got, want map[string]string) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("metadata length = %d, want %d; got=%v want=%v", len(got), len(want), got, want)
+	}
+	for k, wantValue := range want {
+		if got[k] != wantValue {
+			t.Fatalf("metadata[%q] = %q, want %q; got=%v want=%v", k, got[k], wantValue, got, want)
+		}
+	}
+}
+
 func TestSessionReason_OmitsExpiredLifecycleHold(t *testing.T) {
 	bead := beads.Bead{
 		ID:     "gc-1",
@@ -1877,8 +1980,8 @@ func TestCmdSessionNew_AllowsReservedNamedAliasWithController(t *testing.T) {
 	if got := b.Metadata["alias"]; got != "mayor" {
 		t.Fatalf("alias = %q, want mayor", got)
 	}
-	if got := b.Metadata["state"]; got != "creating" {
-		t.Fatalf("state = %q, want creating", got)
+	if got := b.Metadata["state"]; got != string(session.StateStartPending) {
+		t.Fatalf("state = %q, want start-pending", got)
 	}
 }
 
@@ -1970,23 +2073,27 @@ func writeNamedSessionCityTOML(t *testing.T, dir string) {
 	if err := os.MkdirAll(filepath.Join(dir, ".gc"), 0o755); err != nil {
 		t.Fatalf("MkdirAll(.gc): %v", err)
 	}
-	data := []byte(`[workspace]
+	if err := os.WriteFile(filepath.Join(dir, "pack.toml"), []byte(`[pack]
 name = "test-city"
-
-[beads]
-provider = "file"
-
-[[agent]]
-name = "mayor"
-provider = "codex"
-start_command = "echo"
+schema = 2
 
 [[named_session]]
 template = "mayor"
-`)
-	if err := os.WriteFile(filepath.Join(dir, "city.toml"), data, 0o644); err != nil {
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile(pack.toml): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte(`[workspace]
+
+[beads]
+provider = "file"
+`), 0o644); err != nil {
 		t.Fatalf("WriteFile(city.toml): %v", err)
 	}
+	if err := os.WriteFile(filepath.Join(dir, ".gc", "site.toml"), []byte(`workspace_name = "test-city"
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile(.gc/site.toml): %v", err)
+	}
+	writeCatalogFile(t, dir, "agents/mayor/agent.toml", "provider = \"codex\"\nstart_command = \"echo\"\n")
 }
 
 func writePoolSessionCityTOML(t *testing.T, dir string) {
@@ -2435,5 +2542,395 @@ func TestValidateResolvedSessionTransportRejectsRoutedProviderWhenTransportCapab
 	}, "acp", &routedRejectingSessionProvider{Fake: runtime.NewFake()})
 	if err == nil || !strings.Contains(err.Error(), "requires ACP transport") {
 		t.Fatalf("validateResolvedSessionTransport() error = %v, want ACP routing error", err)
+	}
+}
+
+// writeSessionListTestCity sets up a minimal city that the fallback paths
+// (doSessionListFallback, doSessionPeekFallback) can open. Returns the
+// city path.
+func writeSessionListTestCity(t *testing.T) string {
+	t.Helper()
+	cityDir := t.TempDir()
+	writeNamedSessionCityTOML(t, cityDir)
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+	t.Setenv("GC_SESSION", "fake")
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_CITY_PATH", cityDir)
+	return cityDir
+}
+
+// okSessionsHandler serves a session list with one entry matching the test
+// city config. Sets the non-stale X-GC-Cache-Age-S header so happy-path
+// rows exercise the envelope-field wiring without tripping the stale
+// banner threshold.
+func okSessionsHandler(_ *testing.T) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/sessions") {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("X-GC-Cache-Age-S", "2")
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"items": []map[string]any{
+				{
+					"id":           "gc-abc",
+					"template":     "mayor",
+					"state":        "active",
+					"reason":       "config",
+					"title":        "Overseer",
+					"alias":        "mayor",
+					"session_name": "mayor",
+					"provider":     "claude",
+					"created_at":   "2026-04-23T10:00:00Z",
+					"last_active":  "2026-04-23T12:00:00Z",
+					"attached":     true,
+					"running":      true,
+				},
+			},
+			"total": 1,
+		})
+	})
+}
+
+func TestRouteSessionList_SixRowMatrix(t *testing.T) {
+	tests := []struct {
+		name         string
+		handler      rigListMatrixHandler
+		useNilClient bool
+		nilReason    string
+		wantExit     int
+		wantRoute    string
+		wantReason   string
+		wantStderr   string
+		wantStdout   string
+	}{
+		{
+			name:       "api-happy-path",
+			handler:    okSessionsHandler,
+			wantExit:   0,
+			wantRoute:  "api",
+			wantStdout: "mayor",
+		},
+		{
+			name:       "api-cache-not-live",
+			handler:    problemHandler(http.StatusServiceUnavailable, "cache_not_live: supervisor cache is priming"),
+			wantExit:   0,
+			wantRoute:  "fallback",
+			wantReason: "cache-not-live",
+		},
+		{
+			name:       "api-500-fallback",
+			handler:    problemHandler(http.StatusInternalServerError, "internal: something exploded"),
+			wantExit:   0,
+			wantRoute:  "fallback",
+			wantReason: "conn-refused",
+		},
+		{
+			name:       "api-404-error",
+			handler:    problemHandler(http.StatusNotFound, "not_found: city not configured"),
+			wantExit:   1,
+			wantStderr: "not_found",
+		},
+		{
+			name:         "controller-down",
+			useNilClient: true,
+			nilReason:    "controller-down",
+			wantExit:     0,
+			wantRoute:    "fallback",
+			wantReason:   "controller-down",
+		},
+		{
+			name:         "escape-hatch",
+			useNilClient: true,
+			nilReason:    "escape-hatch",
+			wantExit:     0,
+			wantRoute:    "fallback",
+			wantReason:   "escape-hatch",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("GC_DEBUG", "1")
+			cityPath := writeSessionListTestCity(t)
+
+			var c *api.Client
+			if !tc.useNilClient {
+				srv := httptest.NewServer(tc.handler(t))
+				defer srv.Close()
+				c = api.NewCityScopedClient(srv.URL, "test-city")
+			}
+
+			var stdout, stderr bytes.Buffer
+			code := routeSessionList(cityPath, "", "", c, tc.nilReason, false, &stdout, &stderr)
+
+			if code != tc.wantExit {
+				t.Fatalf("exit = %d, want %d; stderr=%q stdout=%q", code, tc.wantExit, stderr.String(), stdout.String())
+			}
+			if tc.wantRoute != "" {
+				want := "route=" + tc.wantRoute
+				if tc.wantReason != "" {
+					want += " reason=" + tc.wantReason
+				}
+				if !strings.Contains(stderr.String(), want) {
+					t.Errorf("stderr missing %q:\n%s", want, stderr.String())
+				}
+				if n := strings.Count(stderr.String(), "route="); n != 1 {
+					t.Errorf("route=... lines = %d, want 1:\n%s", n, stderr.String())
+				}
+			}
+			if tc.wantStderr != "" && !strings.Contains(stderr.String(), tc.wantStderr) {
+				t.Errorf("stderr missing %q:\n%s", tc.wantStderr, stderr.String())
+			}
+			if tc.wantStdout != "" && !strings.Contains(stdout.String(), tc.wantStdout) {
+				t.Errorf("stdout missing %q:\n%s", tc.wantStdout, stdout.String())
+			}
+			// Fallback rows must succeed against the test city — empty list
+			// is the expected shape since no session beads were created.
+			if tc.wantRoute == "fallback" {
+				if !strings.Contains(stdout.String(), "No sessions found") {
+					t.Errorf("fallback stdout missing empty-state message:\n%s", stdout.String())
+				}
+			}
+		})
+	}
+}
+
+func TestRouteSessionList_APIJSONIncludesCacheAge(t *testing.T) {
+	t.Setenv("GC_DEBUG", "0")
+	cityPath := writeSessionListTestCity(t)
+
+	srv := httptest.NewServer(okSessionsHandler(t))
+	defer srv.Close()
+	c := api.NewCityScopedClient(srv.URL, "test-city")
+
+	var stdout, stderr bytes.Buffer
+	if code := routeSessionList(cityPath, "", "", c, "", true, &stdout, &stderr); code != 0 {
+		t.Fatalf("exit = %d, stderr=%q", code, stderr.String())
+	}
+	var out map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &out); err != nil {
+		t.Fatalf("unmarshal stdout: %v\n%s", err, stdout.String())
+	}
+	if _, ok := out["_cache_age_s"]; !ok {
+		t.Errorf("_cache_age_s missing from API --json:\n%s", stdout.String())
+	}
+	sessions, ok := out["sessions"]
+	if !ok {
+		t.Fatalf("sessions key missing from API --json:\n%s", stdout.String())
+	}
+	arr, ok := sessions.([]any)
+	if !ok {
+		t.Fatalf("sessions is not a JSON array: %T", sessions)
+	}
+	if len(arr) != 1 {
+		t.Errorf("sessions len = %d, want 1:\n%s", len(arr), stdout.String())
+	}
+
+	// Fallback path must omit _cache_age_s. The fallback emits the
+	// legacy bare array shape, so json.Unmarshal into map[string]any
+	// fails; that itself proves the envelope is not present.
+	stdout.Reset()
+	stderr.Reset()
+	if code := routeSessionList(cityPath, "", "", nil, "controller-down", true, &stdout, &stderr); code != 0 {
+		t.Fatalf("fallback exit = %d, stderr=%q", code, stderr.String())
+	}
+	out = nil
+	if err := json.Unmarshal(stdout.Bytes(), &out); err == nil {
+		if _, ok := out["_cache_age_s"]; ok {
+			t.Errorf("_cache_age_s must be absent on fallback:\n%s", stdout.String())
+		}
+	}
+}
+
+func TestRouteSessionList_StaleBannerOver30s(t *testing.T) {
+	t.Setenv("GC_DEBUG", "0")
+	cityPath := writeSessionListTestCity(t)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("X-GC-Cache-Age-S", "45")
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"items": []map[string]any{
+				{
+					"id":           "gc-abc",
+					"template":     "mayor",
+					"state":        "active",
+					"title":        "x",
+					"session_name": "mayor",
+					"provider":     "claude",
+					"created_at":   "2026-04-23T10:00:00Z",
+					"attached":     false,
+					"running":      false,
+				},
+			},
+			"total": 1,
+		})
+	}))
+	defer srv.Close()
+	c := api.NewCityScopedClient(srv.URL, "test-city")
+
+	var stdout, stderr bytes.Buffer
+	if code := routeSessionList(cityPath, "", "", c, "", false, &stdout, &stderr); code != 0 {
+		t.Fatalf("exit = %d, stderr=%q", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "cache age: 45s") {
+		t.Errorf("stale banner missing from human output:\n%s", stdout.String())
+	}
+}
+
+// okSessionPeekHandler serves a single-session GET response with a last-
+// output preview, so peek's API path has something to render.
+func okSessionPeekHandler(_ *testing.T) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.Contains(r.URL.Path, "/session/") {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("X-GC-Cache-Age-S", "1")
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id":           "gc-abc",
+			"template":     "mayor",
+			"state":        "active",
+			"title":        "Overseer",
+			"session_name": "mayor",
+			"provider":     "claude",
+			"created_at":   "2026-04-23T10:00:00Z",
+			"attached":     true,
+			"running":      true,
+			"last_output":  "hello from peek\n",
+		})
+	})
+}
+
+func TestRouteSessionPeek_SixRowMatrix(t *testing.T) {
+	tests := []struct {
+		name         string
+		handler      rigListMatrixHandler
+		useNilClient bool
+		nilReason    string
+		wantExit     int
+		wantRoute    string
+		wantReason   string
+		wantStderr   string
+		wantStdout   string
+	}{
+		{
+			name:       "api-happy-path",
+			handler:    okSessionPeekHandler,
+			wantExit:   0,
+			wantRoute:  "api",
+			wantStdout: "hello from peek",
+		},
+		{
+			name:       "api-cache-not-live",
+			handler:    problemHandler(http.StatusServiceUnavailable, "cache_not_live: supervisor cache is priming"),
+			wantExit:   1, // fallback path has no session to resolve → non-zero
+			wantRoute:  "fallback",
+			wantReason: "cache-not-live",
+		},
+		{
+			name:       "api-500-fallback",
+			handler:    problemHandler(http.StatusInternalServerError, "internal: something exploded"),
+			wantExit:   1,
+			wantRoute:  "fallback",
+			wantReason: "conn-refused",
+		},
+		{
+			name:       "api-404-error",
+			handler:    problemHandler(http.StatusNotFound, "not_found: no such session"),
+			wantExit:   1,
+			wantStderr: "not_found",
+		},
+		{
+			name:         "controller-down",
+			useNilClient: true,
+			nilReason:    "controller-down",
+			wantExit:     1,
+			wantRoute:    "fallback",
+			wantReason:   "controller-down",
+		},
+		{
+			name:         "escape-hatch",
+			useNilClient: true,
+			nilReason:    "escape-hatch",
+			wantExit:     1,
+			wantRoute:    "fallback",
+			wantReason:   "escape-hatch",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("GC_DEBUG", "1")
+			cityPath := writeSessionListTestCity(t)
+
+			var c *api.Client
+			if !tc.useNilClient {
+				srv := httptest.NewServer(tc.handler(t))
+				defer srv.Close()
+				c = api.NewCityScopedClient(srv.URL, "test-city")
+			}
+
+			var stdout, stderr bytes.Buffer
+			code := routeSessionPeek(cityPath, "mayor", 50, c, tc.nilReason, false, &stdout, &stderr)
+
+			if code != tc.wantExit {
+				t.Fatalf("exit = %d, want %d; stderr=%q stdout=%q", code, tc.wantExit, stderr.String(), stdout.String())
+			}
+			if tc.wantRoute != "" {
+				want := "route=" + tc.wantRoute
+				if tc.wantReason != "" {
+					want += " reason=" + tc.wantReason
+				}
+				if !strings.Contains(stderr.String(), want) {
+					t.Errorf("stderr missing %q:\n%s", want, stderr.String())
+				}
+				if n := strings.Count(stderr.String(), "route="); n != 1 {
+					t.Errorf("route=... lines = %d, want 1:\n%s", n, stderr.String())
+				}
+			}
+			if tc.wantStderr != "" && !strings.Contains(stderr.String(), tc.wantStderr) {
+				t.Errorf("stderr missing %q:\n%s", tc.wantStderr, stderr.String())
+			}
+			if tc.wantStdout != "" && !strings.Contains(stdout.String(), tc.wantStdout) {
+				t.Errorf("stdout missing %q:\n%s", tc.wantStdout, stdout.String())
+			}
+		})
+	}
+}
+
+func TestRouteSessionPeek_StaleBannerOver30s(t *testing.T) {
+	t.Setenv("GC_DEBUG", "0")
+	cityPath := writeSessionListTestCity(t)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("X-GC-Cache-Age-S", "45")
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id":           "gc-abc",
+			"template":     "mayor",
+			"state":        "active",
+			"title":        "x",
+			"session_name": "mayor",
+			"provider":     "claude",
+			"created_at":   "2026-04-23T10:00:00Z",
+			"attached":     false,
+			"running":      true,
+			"last_output":  "peeked\n",
+		})
+	}))
+	defer srv.Close()
+	c := api.NewCityScopedClient(srv.URL, "test-city")
+
+	var stdout, stderr bytes.Buffer
+	if code := routeSessionPeek(cityPath, "mayor", 50, c, "", false, &stdout, &stderr); code != 0 {
+		t.Fatalf("exit = %d, stderr=%q", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "cache age: 45s") {
+		t.Errorf("stale banner missing from human output:\n%s", stdout.String())
 	}
 }

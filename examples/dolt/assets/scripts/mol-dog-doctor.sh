@@ -71,16 +71,31 @@ append_backup_stale() {
     fi
 }
 
+send_mayor_mail() {
+    local mail_err
+    if ! mail_err=$(gc mail send mayor/ --from controller "$@" 2>&1 >/dev/null); then
+        if [ -n "$mail_err" ]; then
+            echo "doctor: mail send failed: $mail_err" >&2
+        else
+            echo "doctor: mail send failed" >&2
+        fi
+        return 1
+    fi
+}
+
 # --- Step 1: Probe connectivity and measure latency ---
 
 PROBE_START=$(date +%s)
 if ! dolt_sql -q "SELECT active_branch()" >/dev/null 2>&1; then
-    gc mail send mayor/ \
+    if send_mayor_mail \
         -s "ESCALATION: Dolt server unreachable on port $PORT [CRITICAL]" \
-        -m "Doctor probe failed: server did not respond to active_branch() query." \
-        2>/dev/null || true
-    gc session nudge deacon/ "DOG_DONE: doctor — server: UNREACHABLE (escalated)" 2>/dev/null || true
-    echo "doctor: server unreachable on port $PORT (escalated)"
+        -m "Doctor probe failed: server did not respond to active_branch() query."; then
+        gc session nudge deacon/ "DOG_DONE: doctor — server: UNREACHABLE (escalated)" 2>/dev/null || true
+        echo "doctor: server unreachable on port $PORT (escalated)"
+    else
+        gc session nudge deacon/ "DOG_DONE: doctor — server: UNREACHABLE (mail failed)" 2>/dev/null || true
+        echo "doctor: server unreachable on port $PORT (mail failed)"
+    fi
     exit 0
 fi
 PROBE_END=$(date +%s)
@@ -158,13 +173,14 @@ fi
 
 WARNINGS="${LATENCY_WARN}${CONN_WARN}${ORPHAN_WARN}${BACKUP_STALE}"
 if [ -n "$WARNINGS" ]; then
-    gc mail send mayor/ \
+    if ! send_mayor_mail \
         -s "Dolt health advisory [MEDIUM]" \
         -m "Latency: ${LATENCY_S}s${LATENCY_WARN}
 Connections: ${CONN_COUNT}/${CONN_MAX}${CONN_WARN}
 Disk: ${DISK_USAGE}
-Orphan DBs: ${ORPHAN_COUNT}${ORPHAN_WARN}${BACKUP_STALE}" \
-        2>/dev/null || true
+Orphan DBs: ${ORPHAN_COUNT}${ORPHAN_WARN}${BACKUP_STALE}"; then
+        :
+    fi
 fi
 
 SUMMARY="doctor — server: ok, latency: ${LATENCY_S}s, conns: ${CONN_COUNT}/${CONN_MAX}, disk: ${DISK_USAGE}, orphans: ${ORPHAN_COUNT}"

@@ -66,6 +66,7 @@ const (
 	integrationGCDoltCommandTimeout  = 120 * time.Second
 	integrationBDCommandTimeout      = 15 * time.Second
 	integrationSupervisorStopTimeout = 10 * time.Second
+	integrationSupervisorWaitDelay   = 10 * time.Second
 )
 
 const (
@@ -351,6 +352,98 @@ func sweepSubprocessTestProcesses() {
 		return
 	}
 
+	for pid := range killSet {
+		_ = syscall.Kill(pid, syscall.SIGTERM)
+	}
+	time.Sleep(150 * time.Millisecond)
+	for pid := range killSet {
+		if err := syscall.Kill(pid, syscall.Signal(0)); err == nil {
+			_ = syscall.Kill(pid, syscall.SIGKILL)
+		}
+	}
+}
+
+func configureIntegrationSupervisorCommand(cmd *exec.Cmd) {
+	cmd.Cancel = func() error {
+		if cmd.Process == nil {
+			return os.ErrProcessDone
+		}
+		return cmd.Process.Signal(syscall.SIGTERM)
+	}
+	cmd.WaitDelay = integrationSupervisorWaitDelay
+}
+
+func registerIntegrationDoltSQLServerCleanup(t *testing.T, root string) {
+	t.Helper()
+	t.Cleanup(func() {
+		cleanupIntegrationDoltSQLServersUnderRoot(root)
+	})
+}
+
+func cleanupIntegrationDoltSQLServersUnderRoot(root string) {
+	procs := readProcessSnapshot()
+	if len(procs) == 0 {
+		return
+	}
+	terminateIntegrationPIDs(integrationDoltSQLServerKillSet(procs, root))
+}
+
+func integrationDoltSQLServerKillSet(procs map[int]procSnapshot, root string) map[int]bool {
+	killSet := make(map[int]bool)
+	for pid, info := range procs {
+		configPath := integrationDoltSQLServerConfigPath(info.cmd)
+		if configPath == "" || !pathWithinIntegrationRoot(root, configPath) {
+			continue
+		}
+		killSet[pid] = true
+	}
+	return killSet
+}
+
+func integrationDoltSQLServerConfigPath(cmd string) string {
+	fields := strings.Fields(cmd)
+	if !integrationLooksLikeDoltSQLServer(fields) {
+		return ""
+	}
+	for i, field := range fields {
+		if field == "--config" {
+			if i+1 < len(fields) {
+				return fields[i+1]
+			}
+			return ""
+		}
+		if strings.HasPrefix(field, "--config=") {
+			return strings.TrimPrefix(field, "--config=")
+		}
+	}
+	return ""
+}
+
+func integrationLooksLikeDoltSQLServer(fields []string) bool {
+	for i := 0; i+1 < len(fields); i++ {
+		if filepath.Base(fields[i]) == "dolt" && fields[i+1] == "sql-server" {
+			return true
+		}
+	}
+	return false
+}
+
+func pathWithinIntegrationRoot(root, path string) bool {
+	if root == "" || path == "" {
+		return false
+	}
+	cleanRoot := filepath.Clean(root)
+	if cleanRoot == "." || cleanRoot == string(os.PathSeparator) {
+		return false
+	}
+	cleanPath := filepath.Clean(path)
+	return cleanPath == cleanRoot || strings.HasPrefix(cleanPath, cleanRoot+string(os.PathSeparator))
+}
+
+func terminateIntegrationPIDs(killSet map[int]bool) {
+	if len(killSet) == 0 {
+		return
+	}
 	for pid := range killSet {
 		_ = syscall.Kill(pid, syscall.SIGTERM)
 	}
@@ -948,6 +1041,7 @@ func newIsolatedEnvRoot(t *testing.T, useDolt bool) (string, string, []string) {
 	t.Cleanup(func() {
 		_ = os.RemoveAll(root)
 	})
+	registerIntegrationDoltSQLServerCleanup(t, root)
 	gcHome := filepath.Join(root, "gc-home")
 	runtimeDir := filepath.Join(root, "runtime")
 	if err := os.MkdirAll(gcHome, 0o755); err != nil {
@@ -1202,7 +1296,9 @@ func startIsolatedSupervisor(t *testing.T, env []string, gcHome string) {
 		t.Fatalf("creating isolated supervisor log: %v", err)
 	}
 
-	cmd := exec.Command(gcBinary, "supervisor", "run")
+	ctx, cancel := context.WithCancel(context.Background())
+	cmd := exec.CommandContext(ctx, gcBinary, "supervisor", "run")
+	configureIntegrationSupervisorCommand(cmd)
 	cmd.Dir = gcHome
 	cmd.Env = env
 	cmd.Stdout = logFile
@@ -1225,14 +1321,8 @@ func startIsolatedSupervisor(t *testing.T, env []string, gcHome string) {
 				// --wait so runCommand blocks until the supervisor fully
 				// shut down, aligning with the cmd.Wait() synchronization below.
 				_, _ = runCommand("", env, 15*time.Second, gcBinary, "supervisor", "stop", "--wait")
-				select {
-				case <-done:
-				case <-time.After(10 * time.Second):
-					if cmd.Process != nil {
-						_ = cmd.Process.Kill()
-					}
-					<-done
-				}
+				cancel()
+				waitForIntegrationSupervisorDone(cmd, done, integrationSupervisorWaitDelay)
 				_ = logFile.Close()
 			})
 			return
@@ -1250,9 +1340,22 @@ func startIsolatedSupervisor(t *testing.T, env []string, gcHome string) {
 		time.Sleep(100 * time.Millisecond)
 	}
 
+	cancel()
+	waitForIntegrationSupervisorDone(cmd, done, integrationSupervisorWaitDelay)
 	_ = logFile.Close()
 	logData, _ := os.ReadFile(logPath)
 	t.Fatalf("isolated supervisor did not become ready:\n%s", string(logData))
+}
+
+func waitForIntegrationSupervisorDone(cmd *exec.Cmd, done <-chan error, timeout time.Duration) {
+	select {
+	case <-done:
+	case <-time.After(timeout):
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+		<-done
+	}
 }
 
 func restartIsolatedSupervisor(t *testing.T, env []string) {
@@ -1749,6 +1852,41 @@ func TestSubprocessTestKillSetIncludesRootsDescendantsAndLeaves(t *testing.T) {
 	}
 	if got[40] {
 		t.Fatalf("kill set unexpectedly included unrelated pid 40: %#v", got)
+	}
+}
+
+func TestConfigureIntegrationSupervisorCommandUsesGracefulCancel(t *testing.T) {
+	cmd := exec.CommandContext(context.Background(), "gc", "supervisor", "run")
+	configureIntegrationSupervisorCommand(cmd)
+
+	if cmd.Cancel == nil {
+		t.Fatal("supervisor command Cancel is nil, want SIGTERM cancel")
+	}
+	if cmd.WaitDelay != 10*time.Second {
+		t.Fatalf("supervisor command WaitDelay = %s, want 10s", cmd.WaitDelay)
+	}
+}
+
+func TestIntegrationDoltSQLServerKillSetMatchesOnlyRootedConfigs(t *testing.T) {
+	root := "/tmp/gcit-123"
+	procs := map[int]procSnapshot{
+		10: {pid: 10, ppid: 1, cmd: "dolt sql-server --config /tmp/gcit-123/cities/x/.gc/runtime/packs/dolt/dolt-config.yaml"},
+		11: {pid: 11, ppid: 1, cmd: "dolt sql-server --config=/tmp/gcit-123/cities/y/.gc/runtime/packs/dolt/dolt-config.yaml"},
+		12: {pid: 12, ppid: 1, cmd: "dolt sql-server --config /tmp/gcit-1234/cities/z/.gc/runtime/packs/dolt/dolt-config.yaml"},
+		13: {pid: 13, ppid: 1, cmd: "dolt sql-server --config /home/u/projects/foo/.gc/runtime/packs/dolt/dolt-config.yaml"},
+		14: {pid: 14, ppid: 1, cmd: "dolt sql --config /tmp/gcit-123/cities/x/.gc/runtime/packs/dolt/dolt-config.yaml"},
+	}
+
+	got := integrationDoltSQLServerKillSet(procs, root)
+	for _, pid := range []int{10, 11} {
+		if !got[pid] {
+			t.Fatalf("kill set missing pid %d: %#v", pid, got)
+		}
+	}
+	for _, pid := range []int{12, 13, 14} {
+		if got[pid] {
+			t.Fatalf("kill set unexpectedly included pid %d: %#v", pid, got)
+		}
 	}
 }
 

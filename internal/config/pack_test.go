@@ -1219,8 +1219,6 @@ func TestExpandCityPacks_FormulaDirsStacked(t *testing.T) {
 name = "alpha"
 schema = 1
 
-[formulas]
-dir = "formulas"
 
 [[agent]]
 name = "agent-a"
@@ -1231,8 +1229,6 @@ name = "agent-a"
 name = "beta"
 schema = 1
 
-[formulas]
-dir = "formulas"
 
 [[agent]]
 name = "agent-b"
@@ -1421,8 +1417,6 @@ func TestExpandPacks_RigFormulaDirsMultiple(t *testing.T) {
 name = "alpha"
 schema = 1
 
-[formulas]
-dir = "formulas"
 
 [[agent]]
 name = "worker-a"
@@ -1433,8 +1427,6 @@ name = "worker-a"
 name = "beta"
 schema = 1
 
-[formulas]
-dir = "formulas"
 
 [[agent]]
 name = "worker-b"
@@ -1621,8 +1613,6 @@ name = "gastown"
 version = "1.0.0"
 schema = 1
 
-[formulas]
-dir = "formulas"
 
 [[agent]]
 name = "mayor"
@@ -1796,8 +1786,6 @@ name = "gastown"
 version = "1.0.0"
 schema = 1
 
-[formulas]
-dir = "formulas"
 
 [[agent]]
 name = "witness"
@@ -2025,22 +2013,35 @@ scope = "rig"
 		t.Fatalf("ExpandPacks: %v", err)
 	}
 
-	// Should only have rig agents (witness, polecat), not city agents.
-	if len(cfg.Agents) != 2 {
-		t.Fatalf("got %d agents, want 2", len(cfg.Agents))
-	}
-	names := make(map[string]bool)
+	// Rig agents (witness, polecat) are stamped with the rig dir; city-scoped
+	// agents (mayor, deacon) are hoisted to city scope (dir cleared) rather
+	// than dropped.
+	byName := make(map[string]Agent)
 	for _, a := range cfg.Agents {
-		names[a.Name] = true
+		byName[a.Name] = a
+	}
+	if len(cfg.Agents) != 4 {
+		t.Fatalf("got %d agents, want 4 (2 rig + 2 hoisted city): %v", len(cfg.Agents), agentNamesOf(cfg.Agents))
+	}
+	for _, n := range []string{"witness", "polecat"} {
+		a, ok := byName[n]
+		if !ok {
+			t.Errorf("missing rig agent %q", n)
+			continue
+		}
 		if a.Dir != "hw" {
-			t.Errorf("rig agent %q: dir = %q, want %q", a.Name, a.Dir, "hw")
+			t.Errorf("rig agent %q: dir = %q, want %q", n, a.Dir, "hw")
 		}
 	}
-	if !names["witness"] || !names["polecat"] {
-		t.Errorf("agents = %v, want witness and polecat", names)
-	}
-	if names["mayor"] || names["deacon"] {
-		t.Error("city agents should be filtered out of rig pack expansion")
+	for _, n := range []string{"mayor", "deacon"} {
+		a, ok := byName[n]
+		if !ok {
+			t.Errorf("city-scoped agent %q was dropped, want hoisted to city scope", n)
+			continue
+		}
+		if a.Dir != "" {
+			t.Errorf("hoisted city agent %q: dir = %q, want empty (city scope)", n, a.Dir)
+		}
 	}
 }
 
@@ -2410,11 +2411,20 @@ scope = "rig"
 		t.Fatalf("ExpandPacks: %v", err)
 	}
 
-	if len(cfg.NamedSessions) != 1 {
-		t.Fatalf("NamedSessions = %d, want 1", len(cfg.NamedSessions))
+	// The rig-scoped witness session stays rig-qualified; the city-scoped
+	// mayor session is hoisted to city scope rather than dropped.
+	got := make(map[string]bool)
+	for i := range cfg.NamedSessions {
+		got[cfg.NamedSessions[i].QualifiedName()] = true
 	}
-	if got := cfg.NamedSessions[0].QualifiedName(); got != "frontend/witness" {
-		t.Fatalf("NamedSessions[0] = %q, want frontend/witness", got)
+	if len(cfg.NamedSessions) != 2 {
+		t.Fatalf("NamedSessions = %d, want 2 (rig witness + hoisted city mayor): %v", len(cfg.NamedSessions), got)
+	}
+	if !got["frontend/witness"] {
+		t.Errorf("expected rig-scoped named session frontend/witness, got %v", got)
+	}
+	if !got["mayor"] {
+		t.Errorf("expected city-scoped named session mayor to be hoisted, got %v", got)
 	}
 }
 
@@ -2427,8 +2437,6 @@ func TestPackIncludesFormulas(t *testing.T) {
 name = "maintenance"
 schema = 1
 
-[formulas]
-dir = "formulas"
 
 [[agent]]
 name = "dog"
@@ -2442,8 +2450,6 @@ name = "gastown"
 schema = 1
 includes = ["../maintenance"]
 
-[formulas]
-dir = "formulas"
 
 [[agent]]
 name = "mayor"
@@ -2586,8 +2592,6 @@ func TestExpandCityPacksWithIncludes(t *testing.T) {
 name = "maintenance"
 schema = 1
 
-[formulas]
-dir = "formulas"
 
 [[agent]]
 name = "dog"
@@ -2602,8 +2606,6 @@ name = "gastown"
 schema = 1
 includes = ["../maintenance"]
 
-[formulas]
-dir = "formulas"
 
 [[agent]]
 name = "mayor"
@@ -2798,13 +2800,240 @@ scope = "rig"
 		t.Fatalf("ExpandPacks: %v", err)
 	}
 
-	// Only scope="rig" agents should be kept (scope="city" excluded).
-	if len(cfg.Agents) != 1 {
-		t.Fatalf("got %d agents, want 1", len(cfg.Agents))
+	// The rig-scoped polecat is stamped with the rig dir; the city-scoped
+	// mayor is hoisted to city scope (dir cleared) rather than dropped.
+	byName := make(map[string]Agent)
+	for _, a := range cfg.Agents {
+		byName[a.Name] = a
 	}
-	if cfg.Agents[0].Name != "polecat" {
-		t.Errorf("agent name = %q, want polecat", cfg.Agents[0].Name)
+	if len(cfg.Agents) != 2 {
+		t.Fatalf("got %d agents, want 2 (rig polecat + hoisted city mayor)", len(cfg.Agents))
 	}
+	polecat, ok := byName["polecat"]
+	if !ok {
+		t.Fatal("expected rig-scoped polecat agent")
+	}
+	if polecat.Dir != "myrig" {
+		t.Errorf("polecat dir = %q, want myrig", polecat.Dir)
+	}
+	mayor, ok := byName["mayor"]
+	if !ok {
+		t.Fatal("expected city-scoped mayor to be hoisted from rig include")
+	}
+	if mayor.Dir != "" {
+		t.Errorf("hoisted mayor dir = %q, want \"\" (city scope)", mayor.Dir)
+	}
+}
+
+// TestExpandPacks_HoistCityScopedFromSingleRig verifies a city-scoped agent
+// (and named session) that lives in a pack reached only through a single
+// rig include is hoisted to city scope and registers, rather than being
+// silently dropped. This is the root-cause fix for ga-hy0co: a city-scoped
+// routing coordinator (e.g. "deacon") that ships in a rig-included pack must
+// still register, or autonomous routing never starts.
+func TestExpandPacks_HoistCityScopedFromSingleRig(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "packs/supervisor/pack.toml", `
+[pack]
+name = "supervisor"
+schema = 1
+
+[[agent]]
+name = "deacon"
+scope = "city"
+
+[[named_session]]
+template = "deacon"
+scope = "city"
+
+[[agent]]
+name = "polecat"
+scope = "rig"
+`)
+
+	cfg := &City{
+		Rigs: []Rig{
+			{Name: "gascity", Path: "/tmp/gascity", Includes: []string{"packs/supervisor"}},
+		},
+	}
+
+	if err := ExpandPacks(cfg, fsys.OSFS{}, dir, nil); err != nil {
+		t.Fatalf("ExpandPacks: %v", err)
+	}
+
+	var deacon *Agent
+	for i := range cfg.Agents {
+		if cfg.Agents[i].Name == "deacon" {
+			deacon = &cfg.Agents[i]
+		}
+	}
+	if deacon == nil {
+		t.Fatalf("city-scoped deacon was dropped, not hoisted; agents: %v", agentNamesOf(cfg.Agents))
+	}
+	if deacon.Dir != "" {
+		t.Errorf("hoisted deacon dir = %q, want \"\" (city scope)", deacon.Dir)
+	}
+	if deacon.Scope != "city" {
+		t.Errorf("hoisted deacon scope = %q, want city", deacon.Scope)
+	}
+
+	// The city-scoped named session is hoisted too.
+	var sawDeaconSession bool
+	for i := range cfg.NamedSessions {
+		if cfg.NamedSessions[i].QualifiedName() == "deacon" {
+			sawDeaconSession = true
+		}
+	}
+	if !sawDeaconSession {
+		t.Errorf("city-scoped deacon named session was dropped, not hoisted; sessions: %v", cfg.NamedSessions)
+	}
+}
+
+// TestExpandPacks_HoistCityScopedDedupAcrossRigs verifies the same pack
+// included by MULTIPLE rigs registers its city-scoped agent exactly ONCE
+// (dedup), instead of registering one copy per rig and colliding via
+// checkPackAgentCollisions / duplicate_agent_error.go. In this city
+// packs/actual/all is rig-included by four rigs; a naive hoist would
+// register "deacon" four times.
+func TestExpandPacks_HoistCityScopedDedupAcrossRigs(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "packs/supervisor/pack.toml", `
+[pack]
+name = "supervisor"
+schema = 1
+
+[[agent]]
+name = "deacon"
+scope = "city"
+
+[[named_session]]
+template = "deacon"
+scope = "city"
+
+[[agent]]
+name = "polecat"
+scope = "rig"
+`)
+
+	cfg := &City{
+		Rigs: []Rig{
+			{Name: "gascity", Path: "/tmp/gascity", Includes: []string{"packs/supervisor"}},
+			{Name: "mcdclient", Path: "/tmp/mcdclient", Includes: []string{"packs/supervisor"}},
+			{Name: "beads", Path: "/tmp/beads", Includes: []string{"packs/supervisor"}},
+			{Name: "wren", Path: "/tmp/wren", Includes: []string{"packs/supervisor"}},
+		},
+	}
+
+	// Must not error on the multi-rig collision; dedup makes it register once.
+	if err := ExpandPacks(cfg, fsys.OSFS{}, dir, nil); err != nil {
+		t.Fatalf("ExpandPacks (multi-rig dedup): %v", err)
+	}
+
+	var deaconCount int
+	for i := range cfg.Agents {
+		if cfg.Agents[i].Name == "deacon" {
+			deaconCount++
+		}
+	}
+	if deaconCount != 1 {
+		t.Fatalf("deacon registered %d times across 4 rigs, want exactly 1 (dedup); agents: %v", deaconCount, agentNamesOf(cfg.Agents))
+	}
+
+	var deaconSessions int
+	for i := range cfg.NamedSessions {
+		if cfg.NamedSessions[i].QualifiedName() == "deacon" {
+			deaconSessions++
+		}
+	}
+	if deaconSessions != 1 {
+		t.Fatalf("deacon named session registered %d times, want exactly 1 (dedup)", deaconSessions)
+	}
+
+	// Each rig still gets its own rig-scoped polecat.
+	var polecatCount int
+	for i := range cfg.Agents {
+		if cfg.Agents[i].Name == "polecat" {
+			polecatCount++
+		}
+	}
+	if polecatCount != 4 {
+		t.Errorf("polecat (rig-scoped) registered %d times, want 4 (one per rig)", polecatCount)
+	}
+}
+
+// TestExpandPacks_HoistDoesNotDuplicateCityScopeAgent verifies that when a
+// city-scoped agent already exists at city scope (here via city includes),
+// hoisting the same-named agent from a rig include does NOT add a duplicate:
+// the existing city-scope/city-root definition wins.
+func TestExpandPacks_HoistDoesNotDuplicateCityScopeAgent(t *testing.T) {
+	dir := t.TempDir()
+
+	// City pack defines deacon at city scope (the canonical definition).
+	writeFile(t, dir, "packs/citysup/pack.toml", `
+[pack]
+name = "citysup"
+schema = 1
+
+[[agent]]
+name = "deacon"
+scope = "city"
+prompt_template = "prompts/deacon.md"
+`)
+	writeFile(t, dir, "packs/citysup/prompts/deacon.md", "city-scope deacon")
+
+	// Rig pack ALSO defines a city-scoped deacon; reached via a rig include.
+	writeFile(t, dir, "packs/rigsup/pack.toml", `
+[pack]
+name = "rigsup"
+schema = 1
+
+[[agent]]
+name = "deacon"
+scope = "city"
+`)
+
+	writeFile(t, dir, "city.toml", `
+[workspace]
+name = "test"
+includes = ["packs/citysup"]
+
+[[rigs]]
+name = "gascity"
+path = "/tmp/gascity"
+includes = ["packs/rigsup"]
+`)
+
+	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(dir, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+
+	var deacons []Agent
+	for i := range cfg.Agents {
+		if cfg.Agents[i].Name == "deacon" {
+			deacons = append(deacons, cfg.Agents[i])
+		}
+	}
+	if len(deacons) != 1 {
+		t.Fatalf("deacon registered %d times, want exactly 1 (city-scope wins over hoist); agents: %v", len(deacons), agentNamesOf(cfg.Agents))
+	}
+	// The surviving deacon is the city-scope definition (has the prompt
+	// template), not the bare rig-pack one.
+	if !strings.Contains(deacons[0].PromptTemplate, "prompts/deacon.md") {
+		t.Errorf("surviving deacon prompt_template = %q, want the city-scope definition (prompts/deacon.md)", deacons[0].PromptTemplate)
+	}
+	if deacons[0].Dir != "" {
+		t.Errorf("surviving deacon dir = %q, want \"\" (city scope)", deacons[0].Dir)
+	}
+}
+
+// agentNamesOf is a small test helper for readable failure messages.
+func agentNamesOf(agents []Agent) []string {
+	names := make([]string, 0, len(agents))
+	for i := range agents {
+		names = append(names, agents[i].QualifiedName())
+	}
+	return names
 }
 
 // ---------------------------------------------------------------------------
@@ -4341,6 +4570,32 @@ session_live = ["echo global"]
 	for i := range want {
 		if got[i] != want[i] {
 			t.Errorf("SessionLive[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+func TestPackGlobal_DedupesPackAcrossCityAndRigScopes(t *testing.T) {
+	cfg := &City{
+		PackGlobals: []ResolvedPackGlobal{
+			{PackName: "gastown", SessionLive: []string{"theme.sh", "keys.sh"}},
+		},
+		RigPackGlobals: map[string][]ResolvedPackGlobal{
+			"my-rig": {{PackName: "gastown", SessionLive: []string{"theme.sh", "keys.sh"}}},
+		},
+		Agents: []Agent{
+			{Name: "city-agent"},
+			{Name: "rig-agent", Dir: "my-rig"},
+		},
+	}
+
+	applyPackGlobals(cfg)
+
+	for _, a := range cfg.Agents {
+		if len(a.SessionLive) != 2 {
+			t.Fatalf("agent %q SessionLive = %v, want one gastown global application", a.Name, a.SessionLive)
+		}
+		if a.SessionLive[0] != "theme.sh" || a.SessionLive[1] != "keys.sh" {
+			t.Fatalf("agent %q SessionLive = %v, want [theme.sh keys.sh]", a.Name, a.SessionLive)
 		}
 	}
 }

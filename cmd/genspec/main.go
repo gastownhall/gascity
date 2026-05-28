@@ -11,9 +11,9 @@
 //
 //	internal/api/openapi.json   — drift-check source of truth
 //	docs/schema/openapi.json    — committed docs copy
-//	docs/schema/openapi.txt     — Mint-served download mirror
+//	docs/schema/openapi.txt     — compatibility mirror kept in sync
 //	docs/schema/events.json     — gc events JSONL line schema
-//	docs/schema/events.txt      — Mint-served download mirror
+//	docs/schema/events.txt      — compatibility mirror kept in sync
 //
 // Pass -out <path> to write a single file instead, or -stdout to
 // emit to stdout (useful for ad-hoc inspection or legacy tooling).

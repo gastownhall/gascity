@@ -175,17 +175,36 @@ func TestCmdStopWallClockTimeoutBoundsDirectStop(t *testing.T) {
 	}
 
 	sp := newHangingProvider()
-	t.Cleanup(sp.release)
 	sessionName := lookupSessionNameOrLegacy(nil, loadedCityName(cfg, cityDir), cfg.Agents[0].QualifiedName(), cfg.Workspace.SessionTemplate)
 	if err := sp.Start(context.Background(), sessionName, runtime.Config{}); err != nil {
 		t.Fatal(err)
 	}
 
+	// cmdStop's wall-clock cap returns 1 while cmdStopBody is still blocked
+	// in hangingProvider.Stop. The body goroutine eventually calls back into
+	// shutdownBeadsProviderForStop; if it does so after another test has
+	// installed its own override, the global state races. Capture the body's
+	// done channel via stopBodyLifecycleHook and wait for it to close in
+	// teardown so the leaked goroutine cannot outlive this test.
 	oldFactory := sessionProviderForStopCity
-	t.Cleanup(func() { sessionProviderForStopCity = oldFactory })
+	oldHook := stopBodyLifecycleHook
+	var bodyDone <-chan struct{}
+	stopBodyLifecycleHook = func(done <-chan struct{}) { bodyDone = done }
 	sessionProviderForStopCity = func(*config.City, string) runtime.Provider {
 		return sp
 	}
+	t.Cleanup(func() {
+		sp.release()
+		if bodyDone != nil {
+			select {
+			case <-bodyDone:
+			case <-time.After(10 * time.Second):
+				t.Errorf("cmdStopBody goroutine did not exit after hangingProvider release")
+			}
+		}
+		sessionProviderForStopCity = oldFactory
+		stopBodyLifecycleHook = oldHook
+	})
 
 	var stdout, stderr lockedBuffer
 	started := time.Now()

@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-05-25
+
 ### Added
 
 - `gc mail inbox`, `gc mail read`, `gc mail peek`, `gc mail thread`,
@@ -17,6 +19,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `gc --json-schema` manifest output no longer includes the removed
+  `transport` field. Consumers should use each role schema's `x-gc-jsonl`
+  extension, when present, to determine JSONL record-count behavior.
+- `gc session attach` now re-applies `session_live` hooks (status-bar theme,
+  keybindings) when it recreates a session whose tmux runtime had exited.
+  Previously the resume path in `resolvedWorkerRuntimeWithConfigAndMetadata`
+  built the runtime `Hints` without `SessionLive`, so `runSessionLive`
+  early-returned on the empty list and attach-recreated sessions came up
+  unthemed while reconciler-started sessions did not. The setup context is
+  built via the reconciler's own `sessionSetupContextForAgent` so
+  `session_live` templates referencing `{{.Rig}}`/`{{.RigRoot}}`/`{{.AgentBase}}`
+  expand correctly on the resume path.
 - Managed bd provider startup now detects a bd-standalone dolt server running
   against the same `.beads/dolt` database before invoking the managed-bd
   lifecycle script, and refuses with a message naming `bd dolt stop` as the

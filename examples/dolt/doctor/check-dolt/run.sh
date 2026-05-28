@@ -80,11 +80,11 @@ if [ -z "$version" ]; then
     exit 1
 fi
 
-# Require dolt >= 1.86.2 due to upstream GC/writer deadlock fix.
-# Older versions hang sql-server during dolt_backup('sync', ...) under
-# heavy concurrent write load; the watchdog then force-kills the server.
-# See dolthub/dolt commit ccf7bde206 (PR #10876).
-required="1.86.2"
+# Require the managed bd/Dolt compatibility floor. This preserves the
+# original guard for the upstream GC/writer deadlock fixed in dolthub/dolt
+# commit ccf7bde206 (PR #10876) and keeps managed backup sync on the pinned
+# Dolt release line.
+required="2.0.7"
 
 parse_dolt_version() {
     local input="$1"
@@ -140,7 +140,7 @@ if [ "$parse_status" -ne 0 ]; then
 fi
 if version_lt "$ver_str" "$required"; then
     echo "dolt $ver_str is too old (need >= $required) — upgrade required"
-    echo "Reason: <1.86.2 has a GC/writer deadlock that hangs sql-server during dolt_backup sync under heavy commit load. See dolthub/dolt commit ccf7bde206."
+    echo "Reason: Gas City requires final Dolt >= $required for managed bd/Dolt; releases before 1.86.2 also have a GC/writer deadlock that hangs sql-server during dolt_backup sync under heavy commit load. See dolthub/dolt commit ccf7bde206."
     echo "Install: https://github.com/dolthub/dolt/releases"
     exit 2
 fi

@@ -14,8 +14,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"runtime/debug"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/api"
@@ -29,11 +29,6 @@ import (
 )
 
 const maxIdleSleepProbesPerTick = 3
-
-// drainAckAsyncStops deduplicates process-local async stop goroutines. A
-// controller restart can briefly double-stop through a fresh process map; stop
-// providers are idempotent and SessionGone errors are suppressed below.
-var drainAckAsyncStops sync.Map
 
 type wakeTarget struct {
 	session *beads.Bead
@@ -90,15 +85,11 @@ func clearDrainTrackerForStopPending(session *beads.Bead, dt *drainTracker) {
 	dt.remove(session.ID)
 }
 
-func drainAckAsyncStopKey(store beads.Store, cityPath, sessionID, name string) string {
-	scope := strings.TrimSpace(cityPath)
-	if scope == "" {
-		scope = fmt.Sprintf("store:%p", store)
-	}
+func drainAckAsyncStopKey(sessionID, name string) string {
 	if id := strings.TrimSpace(sessionID); id != "" {
-		return fmt.Sprintf("city:%s\x00id:%s", scope, id)
+		return "id:" + id
 	}
-	return fmt.Sprintf("city:%s\x00name:%s", scope, strings.TrimSpace(name))
+	return "name:" + strings.TrimSpace(name)
 }
 
 func queueDrainAckAsyncStop(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, sessionID, name string, tracker *asyncStartTracker, stderr io.Writer) {
@@ -109,27 +100,17 @@ func queueDrainAckAsyncStop(cityPath string, store beads.Store, sp runtime.Provi
 	if stderr == nil {
 		stderr = io.Discard
 	}
-	key := drainAckAsyncStopKey(store, cityPath, sessionID, name)
-	if _, loaded := drainAckAsyncStops.LoadOrStore(key, struct{}{}); loaded {
+	key := drainAckAsyncStopKey(sessionID, name)
+	done, tracking := tracker.startDrainAckStop(key)
+	if !tracking {
 		return
-	}
-	done := func() {}
-	if tracker != nil {
-		var tracking bool
-		done, tracking = tracker.start()
-		if !tracking {
-			drainAckAsyncStops.Delete(key)
-			return
-		}
 	}
 	go func() {
 		defer func() {
-			drainAckAsyncStops.Delete(key)
-			done()
 			if r := recover(); r != nil {
-				fmt.Fprintf(stderr, "session reconciler: async drain-ack stop %s panicked: %v\n", name, r) //nolint:errcheck
-				panic(r)
+				fmt.Fprintf(stderr, "session reconciler: async drain-ack stop %s panicked: %v\n%s", name, r, debug.Stack()) //nolint:errcheck
 			}
+			done()
 		}()
 		if err := workerKillSessionTargetWithConfig(cityPath, store, sp, cfg, name); err != nil && !runtime.IsSessionGone(err) {
 			fmt.Fprintf(stderr, "session reconciler: async drain-ack stop %s: %v\n", name, err) //nolint:errcheck
@@ -495,7 +476,8 @@ func pendingCreateSessionStillLeased(session beads.Bead, cfg *config.City, clk c
 }
 
 func pendingCreateStartInFlight(session beads.Bead, clk clock.Clock, startupTimeout time.Duration) bool {
-	if strings.TrimSpace(session.Metadata["pending_create_claim"]) != "true" {
+	if strings.TrimSpace(session.Metadata["pending_create_claim"]) != "true" &&
+		sessionpkg.State(strings.TrimSpace(session.Metadata["state"])) != sessionpkg.StateCreating {
 		return false
 	}
 	lastWoke := strings.TrimSpace(session.Metadata["last_woke_at"])
@@ -547,7 +529,7 @@ func pendingCreateNeverStartedExpired(session beads.Bead, clk clock.Clock) bool 
 	if strings.TrimSpace(session.Metadata["pending_create_claim"]) != "true" {
 		return false
 	}
-	if strings.TrimSpace(session.Metadata["state"]) != "creating" {
+	if !pendingCreateRollbackState(session.Metadata["state"]) {
 		return false
 	}
 	return pendingCreateNeverStartedLeaseExpired(session, clk)
@@ -578,8 +560,15 @@ func pendingCreateLeaseExpiredForRollback(session beads.Bead, clk clock.Clock, s
 	if strings.TrimSpace(session.Metadata["pending_create_claim"]) != "true" {
 		return false
 	}
-	if strings.TrimSpace(session.Metadata["state"]) != "creating" {
+	state := sessionpkg.State(strings.TrimSpace(session.Metadata["state"]))
+	if !pendingCreateRollbackState(string(state)) {
 		return false
+	}
+	if state == sessionpkg.StateAsleep {
+		if strings.TrimSpace(session.Metadata["last_woke_at"]) == "" {
+			return pendingCreateNeverStartedExpired(session, clk)
+		}
+		return pendingCreateAttemptStale(session, clk)
 	}
 	if pendingCreateStartInFlight(session, clk, startupTimeout) {
 		return false
@@ -587,11 +576,29 @@ func pendingCreateLeaseExpiredForRollback(session beads.Bead, clk clock.Clock, s
 	if strings.TrimSpace(session.Metadata["last_woke_at"]) == "" {
 		return pendingCreateNeverStartedExpired(session, clk)
 	}
-	return staleCreatingState(session, clk)
+	return pendingCreateAttemptStale(session, clk)
+}
+
+func pendingCreateQueuedOrCreatingState(state string) bool {
+	switch sessionpkg.State(strings.TrimSpace(state)) {
+	case sessionpkg.StateStartPending, sessionpkg.StateCreating:
+		return true
+	default:
+		return false
+	}
+}
+
+func pendingCreateRollbackState(state string) bool {
+	if pendingCreateQueuedOrCreatingState(state) {
+		return true
+	}
+	return sessionpkg.State(strings.TrimSpace(state)) == sessionpkg.StateAsleep
 }
 
 func pendingResumePreservingNamedRestart(session beads.Bead, clk clock.Clock, startupTimeout time.Duration) bool {
-	if strings.TrimSpace(session.Metadata["state"]) != string(sessionpkg.StateCreating) {
+	switch sessionpkg.State(strings.TrimSpace(session.Metadata["state"])) {
+	case sessionpkg.StateStartPending, sessionpkg.StateCreating:
+	default:
 		return false
 	}
 	if strings.TrimSpace(session.Metadata["pending_create_claim"]) != "true" {
@@ -1381,6 +1388,73 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			}
 		}
 
+		// Restart-requested: agent asked for a fresh session
+		// (gc runtime request-restart / gc handoff). This runs after
+		// drain-ack handling, but before autonomous rate-limit,
+		// stability, and churn gates so an explicit operator/model reset
+		// is not swallowed by crash heuristics. Use provider-session
+		// liveness (running), not process liveness (alive), so a zombie
+		// tmux/container session is still stopped before the next wake.
+		{
+			runtimeRunning := running || alive
+			tmuxRequested := false
+			if runtimeRunning && dops != nil {
+				tmuxRequested, _ = dops.isRestartRequested(name)
+			}
+			beadRequested := session.Metadata["restart_requested"] == "true"
+			if tmuxRequested || beadRequested {
+				if runtimeRunning {
+					if err := workerKillSessionTargetWithConfig("", store, sp, cfg, name); err != nil {
+						fmt.Fprintf(stderr, "session reconciler: stopping restart-requested %s: %v\n", name, err) //nolint:errcheck
+						continue
+					}
+				}
+				if identity := namedSessionIdentity(*session); identity != "" {
+					if err := resetSessionCircuitBreakerState(store, session.ID, identity, cb); err != nil {
+						fmt.Fprintf(stderr, "session reconciler: clearing session circuit breaker for restart-requested %s: %v\n", name, err) //nolint:errcheck
+						continue
+					}
+				}
+				// Providers that can inject a fresh session ID get a
+				// rotated key here so the next wake starts a brand-new
+				// conversation. Providers without SessionIDFlag must
+				// clear any stored key and wake fresh without resume.
+				// Clearing started_config_hash forces firstStart=true in
+				// resolveSessionCommand. Clearing last_woke_at masks the
+				// intentional death from crash and churn trackers (both
+				// check last_woke_at first).
+				newSessionKey, hasCapability := freshRestartSessionKey(tp, session.Metadata)
+				batch := sessionpkg.RestartRequestPatch(newSessionKey)
+				if hasCapability && newSessionKey == "" {
+					batch["session_key"] = ""
+				}
+				if err := store.SetMetadataBatch(session.ID, batch); err != nil {
+					fmt.Fprintf(stderr, "session reconciler: recording restart handoff for %s: %v\n", name, err) //nolint:errcheck
+					continue
+				}
+				if session.Metadata == nil {
+					session.Metadata = make(map[string]string, len(batch))
+				}
+				for key, value := range batch {
+					session.Metadata[key] = value
+				}
+				if runtimeRunning {
+					if tmuxRequested && dops != nil {
+						_ = dops.clearRestartRequested(name)
+					}
+					fmt.Fprintf(stdout, "Stopped restart-requested session '%s'\n", name) //nolint:errcheck
+					// Yield this tick so the kill and the next wake run
+					// on separate reconciler passes; the new start should
+					// not race the tmux alias release.
+					continue
+				}
+				// Runtime was already dead — no kill happened, no alias
+				// release to wait on. Fall through so the wake decision
+				// can pick up the freshly cleared metadata and emit a
+				// start_candidate on this same tick. See #2345.
+			}
+		}
+
 		policy := resolveSessionSleepPolicy(*session, cfg, sp)
 
 		rateLimitHit, rateLimitErr := checkRateLimitStability(session, cfg, alive, dt, store, clk, peek)
@@ -1433,89 +1507,17 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			clearChurn(session, store)
 		}
 		if alive && shouldRollbackPendingCreate(session) {
-			if stateBeforeHeal == sessionpkg.StateCreating && pendingCreateStartInFlight(*session, clk, startupTimeout) {
-				if trace != nil {
-					trace.recordDecision("reconciler.session.pending_create", tp.TemplateName, name, "pending_create_recovery_in_flight", "deferred", nil, nil, "")
+			switch stateBeforeHeal {
+			case sessionpkg.StateStartPending, sessionpkg.StateCreating:
+				if pendingCreateStartInFlight(*session, clk, startupTimeout) {
+					if trace != nil {
+						trace.recordDecision("reconciler.session.pending_create", tp.TemplateName, name, "pending_create_recovery_in_flight", "deferred", nil, nil, "")
+					}
+					continue
 				}
-				continue
 			}
 			if !recoverRunningPendingCreate(session, tp, cfg, store, clk, trace) {
 				fmt.Fprintf(stderr, "session reconciler: recovering pending create %s: metadata repair incomplete\n", name) //nolint:errcheck
-			}
-		}
-
-		// Restart-requested: agent asked for a fresh session
-		// (gc runtime request-restart / gc handoff). Rotate session_key
-		// to a fresh value and clear started_config_hash so the next wake
-		// builds a first-start command (--session-id <new_key>). Also set
-		// continuation_reset_pending so the next wake bumps the continuation
-		// epoch instead of silently reusing the prior continuation lineage.
-		//
-		// When the runtime is alive, stop it and yield this tick so the
-		// kill and the next wake run on separate reconciler passes; that
-		// keeps the start from racing the tmux alias release. When the
-		// runtime is already dead — for example, a named-always session
-		// whose tmux was killed by `gc handoff --target` before the bead's
-		// restart_requested flag was processed — there is no live runtime
-		// to stop. Apply the patch and fall through to the wake decision
-		// on this same tick instead of waiting for the next reconciler
-		// interval. The yield-a-tick rule existed to protect a live kill;
-		// extending it to the already-dead case is what caused the
-		// patrol_interval-sized post-handoff wake delay in #2345.
-		//
-		// Check both tmux metadata (dops) and bead metadata. The bead
-		// metadata flag survives tmux session death, so this works even
-		// when the session is already dead.
-		{
-			tmuxRequested := false
-			if alive && dops != nil {
-				tmuxRequested, _ = dops.isRestartRequested(name)
-			}
-			beadRequested := session.Metadata["restart_requested"] == "true"
-			if tmuxRequested || beadRequested {
-				if alive {
-					if err := workerKillSessionTargetWithConfig("", store, sp, cfg, name); err != nil {
-						fmt.Fprintf(stderr, "session reconciler: stopping restart-requested %s: %v\n", name, err) //nolint:errcheck
-						continue
-					}
-				}
-				// Providers that can inject a fresh session ID get a
-				// rotated key here so the next wake starts a brand-new
-				// conversation. Providers without SessionIDFlag must
-				// clear any stored key and wake fresh without resume.
-				// Clearing started_config_hash forces firstStart=true in
-				// resolveSessionCommand. Clearing last_woke_at masks the
-				// intentional death from crash and churn trackers (both
-				// check last_woke_at first).
-				newSessionKey, hasCapability := freshRestartSessionKey(tp, session.Metadata)
-				batch := sessionpkg.RestartRequestPatch(newSessionKey)
-				if hasCapability && newSessionKey == "" {
-					batch["session_key"] = ""
-				}
-				if err := store.SetMetadataBatch(session.ID, batch); err != nil {
-					fmt.Fprintf(stderr, "session reconciler: recording restart handoff for %s: %v\n", name, err) //nolint:errcheck
-					continue
-				}
-				if session.Metadata == nil {
-					session.Metadata = make(map[string]string, len(batch))
-				}
-				for key, value := range batch {
-					session.Metadata[key] = value
-				}
-				if alive {
-					if tmuxRequested && dops != nil {
-						_ = dops.clearRestartRequested(name)
-					}
-					fmt.Fprintf(stdout, "Stopped restart-requested session '%s'\n", name) //nolint:errcheck
-					// Yield this tick so the kill and the next wake run
-					// on separate reconciler passes; the new start should
-					// not race the tmux alias release.
-					continue
-				}
-				// Runtime was already dead — no kill happened, no alias
-				// release to wait on. Fall through so the wake decision
-				// can pick up the freshly cleared metadata and emit a
-				// start_candidate on this same tick. See #2345.
 			}
 		}
 
@@ -1619,7 +1621,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 								}
 								continue
 							}
-							resetConfiguredNamedSessionForConfigDrift(session, store, sp, name, alive, "creating", clk.Now().UTC(), stderr)
+							resetConfiguredNamedSessionForConfigDrift(session, store, sp, name, alive, string(sessionpkg.StateStartPending), clk.Now().UTC(), stderr)
 							if trace != nil {
 								trace.recordDecision("reconciler.session.config_drift", tp.TemplateName, name, "config_drift", "restart_in_place", configDriftTracePayload(storedHash, currentHash, driftedFields, nil), nil, "")
 							}
@@ -2133,6 +2135,18 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				hasAssignedWork = true
 			}
 		}
+		if poolFreeable && hasAssignedWork {
+			// The runtime is gone but the session bead still owns
+			// in_progress work — almost always a CLI process that
+			// exited or hung without going through the clean drain
+			// path. The close gate below correctly preserves the
+			// pool slot, but without an event there is no signal
+			// for operators or downstream recovery agents that this
+			// happened. Emit a single diagnostic per session bead
+			// generation; the throttle marker on the bead itself
+			// keeps subsequent reconciler ticks quiet.
+			emitSessionStrandedDiagnostic(cityPath, cfg, store, rigStores, target.session, target.tp.TemplateName, rec, clk, stderr)
+		}
 		if poolFreeable && !hasAssignedWork {
 			// Close directly rather than via closeSessionBeadIfUnassigned.
 			// That helper also runs a live sessionHasOpenAssignedWork query
@@ -2392,6 +2406,167 @@ func firstOpenAssignedWorkBeadInStoreByIdentifiers(store beads.Store, identifier
 		}
 	}
 	return beads.Bead{}, false, nil
+}
+
+// strandedEventEmittedKey is the per-session-bead throttle marker for
+// session.stranded diagnostics. Set after the first emission so the
+// reconciler doesn't re-fire the event on every subsequent tick while
+// the same orphaned condition holds. Cleared implicitly when the bead
+// is closed (and a fresh session bead, with its own generation, gets
+// its own opportunity to emit).
+const strandedEventEmittedKey = "stranded_event_emitted_at"
+
+// strandedWorkIDListLimit caps how many work bead IDs land in the
+// session.stranded message body. Anything beyond that is summarized as
+// "+N more" so a runaway count doesn't produce an unbounded message.
+const strandedWorkIDListLimit = 10
+
+// emitSessionStrandedDiagnostic records a session.stranded event when
+// the reconciler observes a pool-managed session bead that is no
+// longer alive but still has open in_progress work assigned. Throttled
+// per session bead via metadata so repeated reconciler ticks of the
+// same condition only emit once.
+//
+// The in-memory throttle marker on session.Metadata is set BEFORE the
+// durable store write, so a SetMetadata failure (disk pressure,
+// partition, slow remote) cannot cause the next tick to re-read the
+// unmarked bead and emit a duplicate event. SetMetadata is best-effort
+// for cross-restart durability; the in-memory marker is the
+// load-bearing single-emission guarantee within a controller lifetime.
+func emitSessionStrandedDiagnostic(
+	cityPath string,
+	cfg *config.City,
+	store beads.Store,
+	rigStores map[string]beads.Store,
+	session *beads.Bead,
+	template string,
+	rec events.Recorder,
+	clk clock.Clock,
+	stderr io.Writer,
+) {
+	if rec == nil || session == nil {
+		return
+	}
+	if session.Metadata == nil {
+		session.Metadata = make(map[string]string, 1)
+	}
+	if strings.TrimSpace(session.Metadata[strandedEventEmittedKey]) != "" {
+		return
+	}
+	ids, err := collectSessionAssignedWorkIDs(cityPath, cfg, store, rigStores, *session)
+	if err != nil {
+		fmt.Fprintf(stderr, "session reconciler: collecting stranded work ids for %s: %v\n", session.Metadata["session_name"], err) //nolint:errcheck
+	}
+	now := clk.Now().UTC()
+	rec.Record(events.Event{
+		Type:    events.SessionStranded,
+		Ts:      now,
+		Actor:   "gc",
+		Subject: session.ID,
+		Message: formatStrandedMessage(template, session.Metadata["session_name"], ids),
+	})
+	// Set the in-memory marker first so a SetMetadata failure below
+	// can't cause the next tick (still seeing this same *Bead value or
+	// a re-fetch with the durable write missing) to emit again.
+	session.Metadata[strandedEventEmittedKey] = now.Format(time.RFC3339)
+	if err := store.SetMetadata(session.ID, strandedEventEmittedKey, now.Format(time.RFC3339)); err != nil {
+		fmt.Fprintf(stderr, "session reconciler: stamping stranded throttle marker on %s: %v\n", session.ID, err) //nolint:errcheck
+	}
+}
+
+// formatStrandedMessage builds the diagnostic message body for a
+// session.stranded event. Names the agent template and lists the
+// stranded work bead IDs (truncated past strandedWorkIDListLimit).
+func formatStrandedMessage(template, sessionName string, ids []string) string {
+	if template == "" {
+		template = "<unknown-template>"
+	}
+	prefix := fmt.Sprintf("pool session %q (template %q) terminated without clean drain", strings.TrimSpace(sessionName), template)
+	if len(ids) == 0 {
+		return prefix + "; close gate retains slot — work assignee count unavailable"
+	}
+	shown := ids
+	suffix := ""
+	if len(ids) > strandedWorkIDListLimit {
+		shown = ids[:strandedWorkIDListLimit]
+		suffix = fmt.Sprintf(" (+%d more)", len(ids)-strandedWorkIDListLimit)
+	}
+	return fmt.Sprintf("%s; %d in-progress work bead(s) stranded: %s%s",
+		prefix, len(ids), strings.Join(shown, ","), suffix)
+}
+
+// collectSessionAssignedWorkIDs returns the IDs of open/in_progress
+// work beads assigned to the session, excluding session beads
+// themselves. Mirrors the identifier resolution and store routing of
+// sessionHasOpenAssignedWorkForReachableStore so the diagnostic message
+// lists exactly the beads the gate considered when deciding to emit.
+//
+// Without this alignment the gate could see assigned work (via the
+// config-derived named-session identity, or via a rig-store-routed
+// query) while the collector queried only the bare bead identifiers
+// against every store — producing a "0 stranded beads" message in the
+// exact failure mode the diagnostic exists to surface.
+func collectSessionAssignedWorkIDs(cityPath string, cfg *config.City, store beads.Store, rigStores map[string]beads.Store, session beads.Bead) ([]string, error) {
+	identifiers := sessionAssignmentIdentifiersForConfig(session, cfg)
+	seen := make(map[string]struct{})
+	out := make([]string, 0, 4)
+	collect := func(s beads.Store) error {
+		if s == nil {
+			return nil
+		}
+		for _, status := range []string{"open", "in_progress"} {
+			for _, assignee := range identifiers {
+				if assignee == "" {
+					continue
+				}
+				items, err := s.List(beads.ListQuery{Assignee: assignee, Status: status, Live: true})
+				if err != nil {
+					return err
+				}
+				for _, item := range items {
+					if sessionpkg.IsSessionBeadOrRepairable(item) {
+						continue
+					}
+					if _, dup := seen[item.ID]; dup {
+						continue
+					}
+					seen[item.ID] = struct{}{}
+					out = append(out, item.ID)
+				}
+			}
+		}
+		return nil
+	}
+	// Route to the same store the gate routed to.
+	storeRef, ok := assignedWorkStoreRefForSession(cityPath, cfg, session)
+	switch {
+	case !ok:
+		// No agent template resolvable: gate fans out across the
+		// primary store + all rig stores. Mirror that.
+		if err := collect(store); err != nil {
+			return out, err
+		}
+		for _, rs := range rigStores {
+			if err := collect(rs); err != nil {
+				return out, err
+			}
+		}
+	case storeRef == "":
+		// Agent template resolvable but no rig store binding: gate
+		// queries only the primary store.
+		if err := collect(store); err != nil {
+			return out, err
+		}
+	default:
+		rigStore, found := rigStores[storeRef]
+		if !found || rigStore == nil {
+			return out, fmt.Errorf("rig store %q unavailable for session %q", storeRef, session.Metadata["session_name"])
+		}
+		if err := collect(rigStore); err != nil {
+			return out, err
+		}
+	}
+	return out, nil
 }
 
 func sessionHasOpenAssignedWorkInStore(store beads.Store, session beads.Bead) (bool, error) {
@@ -2670,7 +2845,7 @@ func traceHealClearedPendingCreateLease(
 	providerAlive bool,
 	batch map[string]string,
 ) {
-	if trace == nil || strings.TrimSpace(stateBeforeHeal) != string(sessionpkg.StateCreating) {
+	if trace == nil || !pendingCreateQueuedOrCreatingState(stateBeforeHeal) {
 		return
 	}
 	if cleared, ok := batch["pending_create_claim"]; !ok || cleared != "" {
@@ -2794,7 +2969,7 @@ func resetConfiguredNamedSessionForConfigDrift(
 	nextSessionState := sessionpkg.State(nextState)
 	priorSessionKey := strings.TrimSpace(session.Metadata["session_key"])
 	priorStartedConfigHash := strings.TrimSpace(session.Metadata["started_config_hash"])
-	preserveResume := nextSessionState == sessionpkg.StateCreating &&
+	preserveResume := (nextSessionState == sessionpkg.StateStartPending || nextSessionState == sessionpkg.StateCreating) &&
 		priorSessionKey != "" && priorStartedConfigHash != ""
 
 	rotatedSessionKey := ""

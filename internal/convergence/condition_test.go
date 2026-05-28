@@ -19,6 +19,7 @@ func TestConditionEnvEnviron(t *testing.T) {
 		CityPath:             "/home/test/city",
 		WispID:               "wisp-456",
 		DocPath:              "/docs/review.md",
+		MoleculeDir:          "/home/test/city/.gc/molecules/root-xyz",
 		ArtifactDir:          "/tmp/artifacts",
 		IterationDurationMs:  1500,
 		CumulativeDurationMs: 4500,
@@ -48,6 +49,7 @@ func TestConditionEnvEnviron(t *testing.T) {
 		"GC_CITY_RUNTIME_DIR":       "/home/test/city/.gc/runtime",
 		"GC_WISP_ID":                "wisp-456",
 		"GC_DOC_PATH":               "/docs/review.md",
+		"GC_MOLECULE_DIR":           "/home/test/city/.gc/molecules/root-xyz",
 		"GC_ARTIFACT_DIR":           "/tmp/artifacts",
 		"GC_ITERATION_DURATION_MS":  "1500",
 		"GC_CUMULATIVE_DURATION_MS": "4500",
@@ -79,12 +81,11 @@ func TestConditionEnvEnviron(t *testing.T) {
 
 func TestConditionEnvEnvironOptionalEmpty(t *testing.T) {
 	env := ConditionEnv{
-		BeadID:      "bead-789",
-		Iteration:   1,
-		CityPath:    "/city",
-		WispID:      "wisp-abc",
-		ArtifactDir: "/tmp/art",
-		// DocPath, AgentVerdict, AgentProvider, AgentModel all empty.
+		BeadID:    "bead-789",
+		Iteration: 1,
+		CityPath:  "/city",
+		WispID:    "wisp-abc",
+		// ArtifactDir, DocPath, AgentVerdict, AgentProvider, AgentModel all empty.
 	}
 
 	vars := env.Environ()
@@ -96,8 +97,10 @@ func TestConditionEnvEnvironOptionalEmpty(t *testing.T) {
 		}
 	}
 
-	// Optional vars should be absent when empty.
-	for _, key := range []string{"GC_DOC_PATH", "GC_AGENT_VERDICT", "GC_AGENT_PROVIDER", "GC_AGENT_MODEL"} {
+	// Optional vars should be absent when empty. GC_ARTIFACT_DIR is omitted
+	// when ArtifactDir is empty, matching GC_MOLECULE_DIR and the sling-time
+	// contract (a non-molecule bead gets neither var).
+	for _, key := range []string{"GC_DOC_PATH", "GC_AGENT_VERDICT", "GC_AGENT_PROVIDER", "GC_AGENT_MODEL", "GC_MOLECULE_DIR", "GC_ARTIFACT_DIR"} {
 		if _, ok := lookup[key]; ok {
 			t.Errorf("expected %s to be absent for empty value, but it was present", key)
 		}
@@ -335,6 +338,103 @@ func TestResolveConditionPath(t *testing.T) {
 		}
 		if !strings.Contains(err.Error(), "traversal") {
 			t.Errorf("expected path traversal error, got: %v", err)
+		}
+	})
+
+	// Pins gastownhall/gascity#2354: when the rig store is a sibling of
+	// the city (neither a subtree of the other), a relative conditionPath
+	// that resolves under `base` must succeed even though it lands
+	// outside `envelope`. Passing storePath as `base` is the dispatcher's
+	// explicit declaration that storePath is an operator-controlled root
+	// (callers are expected to validate base — see
+	// internal/dispatch/ralph.go).
+	t.Run("sibling layout: relative path under base stays inside base", func(t *testing.T) {
+		parent := t.TempDir()
+		cityDir := filepath.Join(parent, "city")
+		rigDir := filepath.Join(parent, "rig")
+		if err := os.MkdirAll(cityDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		scriptDir := filepath.Join(rigDir, "assets", "pack", "scripts")
+		if err := os.MkdirAll(scriptDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		script := filepath.Join(scriptDir, "check.sh")
+		if err := os.WriteFile(script, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+
+		got, err := ResolveConditionPath(cityDir, rigDir, "assets/pack/scripts/check.sh")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		testutil.AssertSamePath(t, got, script)
+	})
+
+	// Pins the security contract for the sibling layout: a relative path
+	// that escapes BOTH envelope and base must still be rejected.
+	t.Run("sibling layout: traversal outside both envelope and base rejected", func(t *testing.T) {
+		parent := t.TempDir()
+		cityDir := filepath.Join(parent, "city")
+		rigDir := filepath.Join(parent, "rig")
+		if err := os.MkdirAll(cityDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(rigDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		script := filepath.Join(parent, "evil.sh")
+		if err := os.WriteFile(script, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+
+		_, err := ResolveConditionPath(cityDir, rigDir, "../evil.sh")
+		if err == nil {
+			t.Fatal("expected traversal rejection, got nil")
+		}
+		if !strings.Contains(err.Error(), "traversal") {
+			t.Errorf("expected path traversal error, got: %v", err)
+		}
+	})
+
+	// Symlink-escape contract: a script that lives under base (so the
+	// pre-resolution containment check passes) but points via symlink to
+	// a file outside both envelope and base must be rejected by the
+	// post-EvalSymlinks containment check. Pre-fix, the lexical check on
+	// absPath accepted such a path and the resolved target was returned
+	// verbatim. This is the regression test for the symlink half of the
+	// gastownhall/gascity#2354 review.
+	t.Run("symlink under base targeting outside both roots is rejected", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("symlink semantics differ on Windows")
+		}
+		parent := t.TempDir()
+		cityDir := filepath.Join(parent, "city")
+		rigDir := filepath.Join(parent, "rig")
+		if err := os.MkdirAll(cityDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		scriptDir := filepath.Join(rigDir, "scripts")
+		if err := os.MkdirAll(scriptDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		// Real target lives in the common parent, outside both roots.
+		outsideScript := filepath.Join(parent, "outside.sh")
+		if err := os.WriteFile(outsideScript, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		// Symlink under base points to the outside target.
+		link := filepath.Join(scriptDir, "check.sh")
+		if err := os.Symlink(outsideScript, link); err != nil {
+			t.Fatal(err)
+		}
+
+		_, err := ResolveConditionPath(cityDir, rigDir, "scripts/check.sh")
+		if err == nil {
+			t.Fatal("expected symlink-escape rejection, got nil")
+		}
+		if !strings.Contains(err.Error(), "symlink target outside containment") {
+			t.Errorf("expected symlink-escape error, got: %v", err)
 		}
 	})
 

@@ -4,7 +4,7 @@ sidebarTitle: 02 - Agents
 description: Define agents and use them to execute work.
 ---
 
-In [Tutorial 01](/tutorials/01-cities-and-rigs), you created a city, slung work to an
+In [Tutorial 01](./01-cities-and-rigs.md), you created a city, slung work to an
 implicit agent, and added a rig. The implicit agents (`claude`, `codex`, etc.)
 are convenient, but they have no custom prompt — they're just the raw provider.
 In this tutorial, you'll define your own agents with specific roles and use them
@@ -70,7 +70,7 @@ and execute it.
 ```
 
 The `gc prime` command tells you the prompt an agent is running with. In
-[tutorial 01](/tutorials/01-cities-and-rigs) we learned that slinging work to
+[tutorial 01](./01-cities-and-rigs.md) we learned that slinging work to
 an agent created a bead; the agent's prompt is what tells it how to pick up
 and act on that work. Pass an agent name to inspect a specific agent:
 `gc prime mayor` would print the mayor's prompt;
@@ -157,15 +157,15 @@ No findings.
 This is handy for fire-and-forget kind of work. However, if you'd like to see
 the agent in action or even talk to one directly, you're going to need a
 session. And for that, you'll want to check in on [the next
-tutorial](/tutorials/03-sessions).
+tutorial](./03-sessions.md).
 
 ## What's next
 
 You've defined agents with custom prompts, interacted with them through
 sessions and configured different agents with different providers. From here:
 
-- **[Sessions](/tutorials/03-sessions)** — session lifecycle, sleep/wake,
+- **[Sessions](./03-sessions.md)** — session lifecycle, sleep/wake,
   suspension, named sessions
-- **[Formulas](/tutorials/05-formulas)** — multi-step workflow templates with
+- **[Formulas](./05-formulas.md)** — multi-step workflow templates with
   dependencies and variables
-- **[Beads](/tutorials/06-beads)** — the work tracking system underneath it all
+- **[Beads](./06-beads.md)** — the work tracking system underneath it all

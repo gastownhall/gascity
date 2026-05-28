@@ -23,28 +23,17 @@ func TestInternalMaterializeSkillsMaterializesClaude(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
 		t.Fatalf("MkdirAll(.gc): %v", err)
 	}
-	toml := `[workspace]
+	cityToml := `[workspace]
 name = "test-city"
 
 [beads]
 provider = "file"
-
-[[agent]]
-name = "mayor"
-provider = "claude"
-start_command = "echo"
-
-[[named_session]]
-template = "mayor"
 `
-	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(toml), 0o644); err != nil {
-		t.Fatalf("WriteFile(city.toml): %v", err)
-	}
+	writeMaterializeTestCityFile(t, cityDir, "city.toml", cityToml)
+	writeMaterializeTestMayor(t, cityDir, "provider = \"claude\"\nstart_command = \"echo\"\n")
 	// Pack.toml enables PackSkillsDir discovery. Without it, the
 	// materializer sees no shared city catalog and the sink stays empty.
-	if err := os.WriteFile(filepath.Join(cityDir, "pack.toml"), []byte("[pack]\nname = \"test\"\nversion = \"0.1.0\"\nschema = 2\n"), 0o644); err != nil {
-		t.Fatalf("WriteFile(pack.toml): %v", err)
-	}
+	writeMaterializeTestCityFile(t, cityDir, "pack.toml", "[pack]\nname = \"test\"\nversion = \"0.1.0\"\nschema = 2\n")
 	writeSkillSource(t, filepath.Join(cityDir, "skills", "plan"))
 
 	workdir := t.TempDir()
@@ -103,26 +92,15 @@ func TestInternalMaterializeSkillsMaterializesImportedSharedSkills(t *testing.T)
 	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
 		t.Fatalf("MkdirAll(.gc): %v", err)
 	}
-	toml := `[workspace]
+	cityToml := `[workspace]
 name = "test-city"
 
 [beads]
 provider = "file"
-
-[[agent]]
-name = "mayor"
-provider = "claude"
-start_command = "echo"
-
-[[named_session]]
-template = "mayor"
 `
-	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(toml), 0o644); err != nil {
-		t.Fatalf("WriteFile(city.toml): %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(cityDir, "pack.toml"), []byte("[pack]\nname = \"city\"\nversion = \"0.1.0\"\nschema = 2\n\n[imports.helper]\nsource = \"../helper\"\n"), 0o644); err != nil {
-		t.Fatalf("WriteFile(pack.toml): %v", err)
-	}
+	writeMaterializeTestCityFile(t, cityDir, "city.toml", cityToml)
+	writeMaterializeTestMayor(t, cityDir, "provider = \"claude\"\nstart_command = \"echo\"\n")
+	writeMaterializeTestCityFile(t, cityDir, "pack.toml", "[pack]\nname = \"city\"\nversion = \"0.1.0\"\nschema = 2\n\n[imports.helper]\nsource = \"../helper\"\n")
 	if err := os.MkdirAll(packDir, 0o755); err != nil {
 		t.Fatalf("MkdirAll(helper): %v", err)
 	}
@@ -176,7 +154,7 @@ func TestInternalMaterializeSkillsCityScopedDirMatchingRigDoesNotMaterializeRigS
 	if err := os.MkdirAll(helperDir, 0o755); err != nil {
 		t.Fatalf("MkdirAll(helper): %v", err)
 	}
-	cityToml := fmt.Sprintf(`[workspace]
+	cityToml := `[workspace]
 name = "test-city"
 
 [beads]
@@ -184,24 +162,15 @@ provider = "file"
 
 [[rigs]]
 name = "fe"
-path = %q
 
 [rigs.imports.helper]
 source = "./assets/helper"
-
-[[agent]]
-name = "mayor"
-scope = "city"
-dir = "fe"
-provider = "claude"
-start_command = "echo"
-`, rigDir)
-	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
-		t.Fatalf("WriteFile(city.toml): %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(helperDir, "pack.toml"), []byte("[pack]\nname = \"helper\"\nversion = \"0.1.0\"\nschema = 2\n"), 0o644); err != nil {
-		t.Fatalf("WriteFile(helper/pack.toml): %v", err)
-	}
+`
+	writeMaterializeTestCityFile(t, cityDir, "city.toml", cityToml)
+	writeMaterializeTestCityFile(t, cityDir, "pack.toml", "[pack]\nname = \"test\"\nversion = \"0.1.0\"\nschema = 2\n")
+	writeMaterializeTestCityFile(t, filepath.Join(cityDir, ".gc"), "site.toml", fmt.Sprintf("[[rig]]\nname = \"fe\"\npath = %q\n", rigDir))
+	writeMaterializeTestMayor(t, cityDir, "scope = \"city\"\ndir = \"fe\"\nprovider = \"claude\"\nstart_command = \"echo\"\n")
+	writeMaterializeTestCityFile(t, helperDir, "pack.toml", "[pack]\nname = \"helper\"\nversion = \"0.1.0\"\nschema = 2\n")
 	writeSkillSource(t, filepath.Join(helperDir, "skills", "plan"))
 
 	workdir := t.TempDir()
@@ -227,26 +196,15 @@ func TestInternalMaterializeSkillsSharedCatalogFailurePrunesStaleSharedSymlink(t
 	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
 		t.Fatalf("MkdirAll(.gc): %v", err)
 	}
-	toml := `[workspace]
+	cityToml := `[workspace]
 name = "test-city"
 
 [beads]
 provider = "file"
-
-[[agent]]
-name = "mayor"
-provider = "claude"
-start_command = "echo"
-
-[[named_session]]
-template = "mayor"
 `
-	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(toml), 0o644); err != nil {
-		t.Fatalf("WriteFile(city.toml): %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(cityDir, "pack.toml"), []byte("[pack]\nname = \"test\"\nversion = \"0.1.0\"\nschema = 2\n"), 0o644); err != nil {
-		t.Fatalf("WriteFile(pack.toml): %v", err)
-	}
+	writeMaterializeTestCityFile(t, cityDir, "city.toml", cityToml)
+	writeMaterializeTestMayor(t, cityDir, "provider = \"claude\"\nstart_command = \"echo\"\n")
+	writeMaterializeTestCityFile(t, cityDir, "pack.toml", "[pack]\nname = \"test\"\nversion = \"0.1.0\"\nschema = 2\n")
 	skillsDir := filepath.Join(cityDir, "skills")
 	writeSkillSource(t, filepath.Join(skillsDir, "plan"))
 
@@ -299,26 +257,15 @@ func TestInternalMaterializeSkillsUsesSharedCatalogSnapshotEnvWhenLiveCatalogFai
 	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
 		t.Fatalf("MkdirAll(.gc): %v", err)
 	}
-	toml := `[workspace]
+	cityToml := `[workspace]
 name = "test-city"
 
 [beads]
 provider = "file"
-
-[[agent]]
-name = "mayor"
-provider = "claude"
-start_command = "echo"
-
-[[named_session]]
-template = "mayor"
 `
-	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(toml), 0o644); err != nil {
-		t.Fatalf("WriteFile(city.toml): %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(cityDir, "pack.toml"), []byte("[pack]\nname = \"test\"\nversion = \"0.1.0\"\nschema = 2\n"), 0o644); err != nil {
-		t.Fatalf("WriteFile(pack.toml): %v", err)
-	}
+	writeMaterializeTestCityFile(t, cityDir, "city.toml", cityToml)
+	writeMaterializeTestMayor(t, cityDir, "provider = \"claude\"\nstart_command = \"echo\"\n")
+	writeMaterializeTestCityFile(t, cityDir, "pack.toml", "[pack]\nname = \"test\"\nversion = \"0.1.0\"\nschema = 2\n")
 	skillsDir := filepath.Join(cityDir, "skills")
 	writeSkillSource(t, filepath.Join(skillsDir, "plan"))
 	sharedCat, err := materialize.LoadCityCatalog(skillsDir)
@@ -376,26 +323,15 @@ func TestInternalMaterializeSkillsUsesSharedCatalogSnapshotFile(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
 		t.Fatalf("MkdirAll(.gc): %v", err)
 	}
-	toml := `[workspace]
+	cityToml := `[workspace]
 name = "test-city"
 
 [beads]
 provider = "file"
-
-[[agent]]
-name = "mayor"
-provider = "claude"
-start_command = "echo"
-
-[[named_session]]
-template = "mayor"
 `
-	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(toml), 0o644); err != nil {
-		t.Fatalf("WriteFile(city.toml): %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(cityDir, "pack.toml"), []byte("[pack]\nname = \"test\"\nversion = \"0.1.0\"\nschema = 2\n"), 0o644); err != nil {
-		t.Fatalf("WriteFile(pack.toml): %v", err)
-	}
+	writeMaterializeTestCityFile(t, cityDir, "city.toml", cityToml)
+	writeMaterializeTestMayor(t, cityDir, "provider = \"claude\"\nstart_command = \"echo\"\n")
+	writeMaterializeTestCityFile(t, cityDir, "pack.toml", "[pack]\nname = \"test\"\nversion = \"0.1.0\"\nschema = 2\n")
 	skillsDir := filepath.Join(cityDir, "skills")
 	writeSkillSource(t, filepath.Join(skillsDir, "plan"))
 	sharedCat, err := materialize.LoadCityCatalog(skillsDir)
@@ -459,26 +395,15 @@ func TestInternalMaterializeSkillsUsesDefaultSharedCatalogSnapshotFile(t *testin
 	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
 		t.Fatalf("MkdirAll(.gc): %v", err)
 	}
-	toml := `[workspace]
+	cityToml := `[workspace]
 name = "test-city"
 
 [beads]
 provider = "file"
-
-[[agent]]
-name = "mayor"
-provider = "claude"
-start_command = "echo"
-
-[[named_session]]
-template = "mayor"
 `
-	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(toml), 0o644); err != nil {
-		t.Fatalf("WriteFile(city.toml): %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(cityDir, "pack.toml"), []byte("[pack]\nname = \"test\"\nversion = \"0.1.0\"\nschema = 2\n"), 0o644); err != nil {
-		t.Fatalf("WriteFile(pack.toml): %v", err)
-	}
+	writeMaterializeTestCityFile(t, cityDir, "city.toml", cityToml)
+	writeMaterializeTestMayor(t, cityDir, "provider = \"claude\"\nstart_command = \"echo\"\n")
+	writeMaterializeTestCityFile(t, cityDir, "pack.toml", "[pack]\nname = \"test\"\nversion = \"0.1.0\"\nschema = 2\n")
 	skillsDir := filepath.Join(cityDir, "skills")
 	writeSkillSource(t, filepath.Join(skillsDir, "plan"))
 	sharedCat, err := materialize.LoadCityCatalog(skillsDir)
@@ -538,26 +463,15 @@ func TestInternalMaterializeSkillsExplicitSnapshotFileOverridesInlineSnapshot(t 
 	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
 		t.Fatalf("MkdirAll(.gc): %v", err)
 	}
-	toml := `[workspace]
+	cityToml := `[workspace]
 name = "test-city"
 
 [beads]
 provider = "file"
-
-[[agent]]
-name = "mayor"
-provider = "claude"
-start_command = "echo"
-
-[[named_session]]
-template = "mayor"
 `
-	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(toml), 0o644); err != nil {
-		t.Fatalf("WriteFile(city.toml): %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(cityDir, "pack.toml"), []byte("[pack]\nname = \"test\"\nversion = \"0.1.0\"\nschema = 2\n"), 0o644); err != nil {
-		t.Fatalf("WriteFile(pack.toml): %v", err)
-	}
+	writeMaterializeTestCityFile(t, cityDir, "city.toml", cityToml)
+	writeMaterializeTestMayor(t, cityDir, "provider = \"claude\"\nstart_command = \"echo\"\n")
+	writeMaterializeTestCityFile(t, cityDir, "pack.toml", "[pack]\nname = \"test\"\nversion = \"0.1.0\"\nschema = 2\n")
 	skillsDir := filepath.Join(cityDir, "skills")
 	writeSkillSource(t, filepath.Join(skillsDir, "plan"))
 	fileSnapshotCat, err := materialize.LoadCityCatalog(skillsDir)
@@ -615,26 +529,15 @@ func TestInternalMaterializeSkillsSnapshotFileMissingFallsBackToLiveCatalog(t *t
 	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
 		t.Fatalf("MkdirAll(.gc): %v", err)
 	}
-	toml := `[workspace]
+	cityToml := `[workspace]
 name = "test-city"
 
 [beads]
 provider = "file"
-
-[[agent]]
-name = "mayor"
-provider = "claude"
-start_command = "echo"
-
-[[named_session]]
-template = "mayor"
 `
-	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(toml), 0o644); err != nil {
-		t.Fatalf("WriteFile(city.toml): %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(cityDir, "pack.toml"), []byte("[pack]\nname = \"test\"\nversion = \"0.1.0\"\nschema = 2\n"), 0o644); err != nil {
-		t.Fatalf("WriteFile(pack.toml): %v", err)
-	}
+	writeMaterializeTestCityFile(t, cityDir, "city.toml", cityToml)
+	writeMaterializeTestMayor(t, cityDir, "provider = \"claude\"\nstart_command = \"echo\"\n")
+	writeMaterializeTestCityFile(t, cityDir, "pack.toml", "[pack]\nname = \"test\"\nversion = \"0.1.0\"\nschema = 2\n")
 	skillsDir := filepath.Join(cityDir, "skills")
 	writeSkillSource(t, filepath.Join(skillsDir, "plan"))
 
@@ -668,26 +571,15 @@ func TestInternalMaterializeSkillsInvalidSharedCatalogSnapshotFallsBackToLiveCat
 	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
 		t.Fatalf("MkdirAll(.gc): %v", err)
 	}
-	toml := `[workspace]
+	cityToml := `[workspace]
 name = "test-city"
 
 [beads]
 provider = "file"
-
-[[agent]]
-name = "mayor"
-provider = "claude"
-start_command = "echo"
-
-[[named_session]]
-template = "mayor"
 `
-	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(toml), 0o644); err != nil {
-		t.Fatalf("WriteFile(city.toml): %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(cityDir, "pack.toml"), []byte("[pack]\nname = \"test\"\nversion = \"0.1.0\"\nschema = 2\n"), 0o644); err != nil {
-		t.Fatalf("WriteFile(pack.toml): %v", err)
-	}
+	writeMaterializeTestCityFile(t, cityDir, "city.toml", cityToml)
+	writeMaterializeTestMayor(t, cityDir, "provider = \"claude\"\nstart_command = \"echo\"\n")
+	writeMaterializeTestCityFile(t, cityDir, "pack.toml", "[pack]\nname = \"test\"\nversion = \"0.1.0\"\nschema = 2\n")
 	writeSkillSource(t, filepath.Join(cityDir, "skills", "plan"))
 
 	workdir := t.TempDir()
@@ -728,28 +620,17 @@ func TestInternalMaterializeSkillsUnsupportedProvider(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
 		t.Fatalf("MkdirAll(.gc): %v", err)
 	}
-	toml := `[workspace]
+	cityToml := `[workspace]
 name = "test-city"
 
 [beads]
 provider = "file"
-
-[[agent]]
-name = "mayor"
-provider = "copilot"
-start_command = "echo"
-
-[[named_session]]
-template = "mayor"
 `
-	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(toml), 0o644); err != nil {
-		t.Fatalf("WriteFile(city.toml): %v", err)
-	}
+	writeMaterializeTestCityFile(t, cityDir, "city.toml", cityToml)
+	writeMaterializeTestMayor(t, cityDir, "provider = \"copilot\"\nstart_command = \"echo\"\n")
 	// Pack.toml enables PackSkillsDir discovery. Without it, the
 	// materializer sees no shared city catalog and the sink stays empty.
-	if err := os.WriteFile(filepath.Join(cityDir, "pack.toml"), []byte("[pack]\nname = \"test\"\nversion = \"0.1.0\"\nschema = 2\n"), 0o644); err != nil {
-		t.Fatalf("WriteFile(pack.toml): %v", err)
-	}
+	writeMaterializeTestCityFile(t, cityDir, "pack.toml", "[pack]\nname = \"test\"\nversion = \"0.1.0\"\nschema = 2\n")
 
 	workdir := t.TempDir()
 	var stdout, stderr bytes.Buffer
@@ -780,28 +661,17 @@ func TestInternalMaterializeSkillsUnknownAgent(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
 		t.Fatalf("MkdirAll(.gc): %v", err)
 	}
-	toml := `[workspace]
+	cityToml := `[workspace]
 name = "test-city"
 
 [beads]
 provider = "file"
-
-[[agent]]
-name = "mayor"
-provider = "claude"
-start_command = "echo"
-
-[[named_session]]
-template = "mayor"
 `
-	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(toml), 0o644); err != nil {
-		t.Fatalf("WriteFile(city.toml): %v", err)
-	}
+	writeMaterializeTestCityFile(t, cityDir, "city.toml", cityToml)
+	writeMaterializeTestMayor(t, cityDir, "provider = \"claude\"\nstart_command = \"echo\"\n")
 	// Pack.toml enables PackSkillsDir discovery. Without it, the
 	// materializer sees no shared city catalog and the sink stays empty.
-	if err := os.WriteFile(filepath.Join(cityDir, "pack.toml"), []byte("[pack]\nname = \"test\"\nversion = \"0.1.0\"\nschema = 2\n"), 0o644); err != nil {
-		t.Fatalf("WriteFile(pack.toml): %v", err)
-	}
+	writeMaterializeTestCityFile(t, cityDir, "pack.toml", "[pack]\nname = \"test\"\nversion = \"0.1.0\"\nschema = 2\n")
 
 	var stdout, stderr bytes.Buffer
 	code := run([]string{
@@ -855,28 +725,17 @@ func TestInternalMaterializeSkillsSecondRunIsIdempotent(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
 		t.Fatalf("MkdirAll(.gc): %v", err)
 	}
-	toml := `[workspace]
+	cityToml := `[workspace]
 name = "test-city"
 
 [beads]
 provider = "file"
-
-[[agent]]
-name = "mayor"
-provider = "claude"
-start_command = "echo"
-
-[[named_session]]
-template = "mayor"
 `
-	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(toml), 0o644); err != nil {
-		t.Fatalf("WriteFile(city.toml): %v", err)
-	}
+	writeMaterializeTestCityFile(t, cityDir, "city.toml", cityToml)
+	writeMaterializeTestMayor(t, cityDir, "provider = \"claude\"\nstart_command = \"echo\"\n")
 	// Pack.toml enables PackSkillsDir discovery. Without it, the
 	// materializer sees no shared city catalog and the sink stays empty.
-	if err := os.WriteFile(filepath.Join(cityDir, "pack.toml"), []byte("[pack]\nname = \"test\"\nversion = \"0.1.0\"\nschema = 2\n"), 0o644); err != nil {
-		t.Fatalf("WriteFile(pack.toml): %v", err)
-	}
+	writeMaterializeTestCityFile(t, cityDir, "pack.toml", "[pack]\nname = \"test\"\nversion = \"0.1.0\"\nschema = 2\n")
 	writeSkillSource(t, filepath.Join(cityDir, "skills", "plan"))
 	writeSkillSource(t, filepath.Join(cityDir, "skills", "code-review"))
 
@@ -921,5 +780,23 @@ func writeSkillSource(t *testing.T, dir string) {
 	body := "---\nname: " + filepath.Base(dir) + "\ndescription: test\n---\nbody\n"
 	if err := os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte(body), 0o644); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func writeMaterializeTestCityFile(t *testing.T, rootDir, name, body string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(rootDir, name), []byte(body), 0o644); err != nil {
+		t.Fatalf("WriteFile(%s): %v", name, err)
+	}
+}
+
+func writeMaterializeTestMayor(t *testing.T, cityDir, body string) {
+	t.Helper()
+	agentDir := filepath.Join(cityDir, "agents", "mayor")
+	if err := os.MkdirAll(agentDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(%s): %v", agentDir, err)
+	}
+	if err := os.WriteFile(filepath.Join(agentDir, "agent.toml"), []byte(body), 0o644); err != nil {
+		t.Fatalf("WriteFile(%s): %v", filepath.Join("agents", "mayor", "agent.toml"), err)
 	}
 }

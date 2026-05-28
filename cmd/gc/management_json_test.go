@@ -208,6 +208,33 @@ func TestManagementJSONSuccessPayloadsValidateDeclaredSchemas(t *testing.T) {
 	}
 }
 
+func TestAgentManagementJSONMissingNameDoesNotPanic(t *testing.T) {
+	clearGCEnv(t)
+	cityPath := t.TempDir()
+	writeManagementJSONTestCity(t, cityPath, "[workspace]\nname = \"test-city\"\n")
+
+	for _, action := range []string{"suspend", "resume"} {
+		t.Run(action, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			code := run([]string{"--city", cityPath, "agent", action, "--json"}, &stdout, &stderr)
+			if code == 0 {
+				t.Fatalf("run agent %s --json without name = 0, want failure; stdout=%q", action, stdout.String())
+			}
+			payload := decodeOneJSONLine(t, &stdout)
+			if payload["ok"] != false {
+				t.Fatalf("payload ok = %#v, want false in JSON error payload", payload["ok"])
+			}
+			if _, ok := payload["error"].(map[string]any); !ok {
+				t.Fatalf("payload error = %#v, want structured error object", payload["error"])
+			}
+			want := "gc agent " + action + ": missing agent name"
+			if !strings.Contains(stderr.String(), want) {
+				t.Fatalf("stderr = %q, want %q", stderr.String(), want)
+			}
+		})
+	}
+}
+
 func TestAgentSuspendResumeJSONReportsResolvedIdentity(t *testing.T) {
 	tests := []struct {
 		name             string

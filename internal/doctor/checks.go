@@ -2207,7 +2207,7 @@ func duDirBytes(root string) (int64, bool, error) {
 	if ctx.Err() == context.DeadlineExceeded {
 		total, exists, fallbackErr := boundedSumDirBytes(root)
 		if fallbackErr != nil {
-			return 0, true, fmt.Errorf("measure dolt data dir: du -sk timed out after %s; fallback walk: %w", doltDirMeasureTimeout, fallbackErr)
+			return 0, true, fmt.Errorf("measure directory: du -sk timed out after %s; fallback walk: %w", doltDirMeasureTimeout, fallbackErr)
 		}
 		return total, exists, nil
 	}
@@ -2215,16 +2215,16 @@ func duDirBytes(root string) (int64, bool, error) {
 		if errors.Is(err, exec.ErrNotFound) {
 			return boundedSumDirBytes(root)
 		}
-		return 0, true, fmt.Errorf("measure dolt data dir with du -sk: %w", err)
+		return 0, true, fmt.Errorf("measure directory with du -sk: %w", err)
 	}
 
 	fields := strings.Fields(string(out))
 	if len(fields) == 0 {
-		return 0, true, fmt.Errorf("measure dolt data dir with du -sk: empty output")
+		return 0, true, fmt.Errorf("measure directory with du -sk: empty output")
 	}
 	kb, err := strconv.ParseInt(fields[0], 10, 64)
 	if err != nil {
-		return 0, true, fmt.Errorf("measure dolt data dir with du -sk: parse %q: %w", fields[0], err)
+		return 0, true, fmt.Errorf("measure directory with du -sk: parse %q: %w", fields[0], err)
 	}
 	return kb * 1024, true, nil
 }

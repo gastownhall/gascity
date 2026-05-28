@@ -270,7 +270,6 @@ is either command-specific or the shared default:
 {
   "schema_version": "1",
   "command": ["status"],
-  "transport": "jsonl",
   "json_supported": true,
   "schemas": {
     "result": {
@@ -292,7 +291,6 @@ return a manifest with no embedded schemas rather than failing:
 {
   "schema_version": "1",
   "command": ["some", "command"],
-  "transport": "jsonl",
   "json_supported": false,
   "schemas": {}
 }

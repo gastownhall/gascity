@@ -11,6 +11,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
@@ -111,6 +112,36 @@ func cityStatusStorePresent(cityPath string) bool {
 	return false
 }
 
+// openStoreHealthEvents is the hook collectCityStatusSnapshot uses to
+// read the latest gc.store.maintenance.{done,failed} event for the
+// StoreHealth block. Tests replace this with a fake provider; the
+// default opens the city's JSONL event log directly (nil on failure so
+// the block still reports size/row data).
+var openStoreHealthEvents = defaultOpenStoreHealthEvents
+
+func defaultOpenStoreHealthEvents(cityPath string, stderr io.Writer) events.Provider {
+	eventsPath := filepath.Join(cityPath, ".gc", "events.jsonl")
+	providerName := os.Getenv("GC_EVENTS")
+	if providerName == "" {
+		providerName = peekEventsProvider(filepath.Join(cityPath, "city.toml"))
+	}
+	p, err := newEventsProviderForName(providerName, eventsPath, stderr)
+	if err != nil {
+		return nil
+	}
+	return p
+}
+
+func buildCityStoreHealth(cityPath string, store beads.Store, stderr io.Writer) *StoreHealth {
+	ep := openStoreHealthEvents(cityPath, stderr)
+	defer func() {
+		if closer, ok := ep.(io.Closer); ok {
+			_ = closer.Close()
+		}
+	}()
+	return collectStoreHealth(cityPath, store, ep)
+}
+
 func collectCityStatusSnapshot(sp runtime.Provider, cfg *config.City, cityPath string, store beads.Store, stderr io.Writer) cityStatusSnapshot {
 	return collectCityStatusSnapshotFromStoreSnapshot(sp, cfg, cityPath, store, loadStatusSessionSnapshot(store, stderr), stderr)
 }
@@ -135,6 +166,9 @@ func collectCityStatusSnapshotFromStoreSnapshot(
 	}
 	snapshot.CityName = loadedCityName(cfg, cityPath)
 	registerStatusProviderACPRoutes(sp, statusSnapshot, snapshot.CityName, cfg)
+	if snapshot.Controller.Running && cityPath != "" {
+		snapshot.Summary.StoreHealth = buildCityStoreHealth(cityPath, store, stderr)
+	}
 	if cfg == nil {
 		return snapshot
 	}
@@ -470,4 +504,6 @@ func renderCityStatusText(snapshot cityStatusSnapshot, dops drainOps, stdout io.
 			fmt.Fprintf(stdout, "  %-24s%s%s\n", r.Name, r.Path, annotation) //nolint:errcheck // best-effort stdout
 		}
 	}
+
+	renderStoreHealthBlock(stdout, snapshot.Summary.StoreHealth)
 }

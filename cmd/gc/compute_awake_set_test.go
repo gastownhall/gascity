@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/config"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
 var now = time.Date(2026, 3, 31, 12, 0, 0, 0, time.UTC)
@@ -519,6 +520,19 @@ func TestScaled_NewDemandDoesNotUseActiveAssignedSessions(t *testing.T) {
 		assertAwake(t, result, "polecat-new-"+suffix)
 		assertReason(t, result, "polecat-new-"+suffix, "scaled:creating")
 	}
+}
+
+func TestScaled_DemandCountsStartPendingAsCreating(t *testing.T) {
+	result := ComputeAwakeSet(AwakeInput{
+		Agents: []AwakeAgent{{QualifiedName: "hello-world/polecat"}},
+		SessionBeads: []AwakeSessionBead{
+			{ID: "mc-pending-1", SessionName: "polecat-pending-1", Template: "hello-world/polecat", State: string(sessionpkg.StateStartPending)},
+		},
+		ScaleCheckCounts: map[string]int{"hello-world/polecat": 1},
+		Now:              now,
+	})
+	assertAwake(t, result, "polecat-pending-1")
+	assertReason(t, result, "polecat-pending-1", "scaled:creating")
 }
 
 func TestScaled_Demand1_TwoActive(t *testing.T) {
@@ -1540,6 +1554,19 @@ func TestWorkSet_FallsBackToCreating(t *testing.T) {
 		Agents: []AwakeAgent{{QualifiedName: "hello-world/polecat"}},
 		SessionBeads: []AwakeSessionBead{
 			{ID: "mc-1", SessionName: "polecat-mc-1", Template: "hello-world/polecat", State: "creating"},
+		},
+		WorkSet: map[string]bool{"hello-world/polecat": true},
+		Now:     now,
+	})
+	assertAwake(t, result, "polecat-mc-1")
+	assertReason(t, result, "polecat-mc-1", "work-query")
+}
+
+func TestWorkSet_FallsBackToStartPending(t *testing.T) {
+	result := ComputeAwakeSet(AwakeInput{
+		Agents: []AwakeAgent{{QualifiedName: "hello-world/polecat"}},
+		SessionBeads: []AwakeSessionBead{
+			{ID: "mc-1", SessionName: "polecat-mc-1", Template: "hello-world/polecat", State: string(sessionpkg.StateStartPending)},
 		},
 		WorkSet: map[string]bool{"hello-world/polecat": true},
 		Now:     now,

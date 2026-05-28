@@ -117,6 +117,23 @@ func (p *blockingStopProvider) Stop(name string) error {
 	return p.Fake.Stop(name)
 }
 
+type panicStopProvider struct {
+	*runtime.Fake
+	stopStarted chan string
+}
+
+func newPanicStopProvider() *panicStopProvider {
+	return &panicStopProvider{
+		Fake:        runtime.NewFake(),
+		stopStarted: make(chan string, 1),
+	}
+}
+
+func (p *panicStopProvider) Stop(name string) error {
+	p.stopStarted <- name
+	panic("stop exploded")
+}
+
 type shutdownWaitStopProvider struct {
 	*blockingStopProvider
 	listCalled chan struct{}
@@ -826,6 +843,82 @@ func TestQueueDrainAckAsyncStopTracksShutdownWait(t *testing.T) {
 	}
 }
 
+func TestQueueDrainAckAsyncStopDedupScopedToTracker(t *testing.T) {
+	store := beads.NewMemStore()
+	first := newBlockingStopProvider()
+	if err := first.Start(context.Background(), "worker", runtime.Config{Command: "test-cmd"}); err != nil {
+		t.Fatalf("Start(first worker): %v", err)
+	}
+	second := newBlockingStopProvider()
+	if err := second.Start(context.Background(), "worker", runtime.Config{Command: "test-cmd"}); err != nil {
+		t.Fatalf("Start(second worker): %v", err)
+	}
+	firstReleased := false
+	secondReleased := false
+	defer func() {
+		if !firstReleased {
+			close(first.releaseStop)
+		}
+		if !secondReleased {
+			close(second.releaseStop)
+		}
+	}()
+
+	var stderr synchronizedBuffer
+	firstTracker := &asyncStartTracker{}
+	secondTracker := &asyncStartTracker{}
+	queueDrainAckAsyncStop("", store, first, &config.City{}, "gc-worker", "worker", firstTracker, &stderr)
+	select {
+	case <-first.stopStarted:
+	case <-time.After(time.Second):
+		t.Fatal("first async drain-ack stop did not start")
+	}
+
+	queueDrainAckAsyncStop("", store, second, &config.City{}, "gc-worker", "worker", secondTracker, &stderr)
+	select {
+	case <-second.stopStarted:
+	case <-time.After(time.Second):
+		t.Fatal("second async drain-ack stop was suppressed by another tracker scope")
+	}
+	close(first.releaseStop)
+	firstReleased = true
+	close(second.releaseStop)
+	secondReleased = true
+	if !firstTracker.wait(time.Second) {
+		t.Fatal("first async drain-ack stop tracker did not drain after release")
+	}
+	if !secondTracker.wait(time.Second) {
+		t.Fatal("second async drain-ack stop tracker did not drain after release")
+	}
+}
+
+func TestQueueDrainAckAsyncStopRecoversStopPanic(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := newPanicStopProvider()
+	if err := sp.Start(context.Background(), "worker", runtime.Config{Command: "test-cmd"}); err != nil {
+		t.Fatalf("Start(worker): %v", err)
+	}
+	var stderr synchronizedBuffer
+	tracker := &asyncStartTracker{}
+	queueDrainAckAsyncStop(t.TempDir(), store, sp, &config.City{}, "gc-worker", "worker", tracker, &stderr)
+
+	select {
+	case <-sp.stopStarted:
+	case <-time.After(time.Second):
+		t.Fatal("async drain-ack stop did not start")
+	}
+	if !tracker.wait(time.Second) {
+		t.Fatal("async drain-ack stop tracker did not drain after Stop panic")
+	}
+	got := stderr.String()
+	if !strings.Contains(got, "session reconciler: async drain-ack stop worker panicked: stop exploded") {
+		t.Fatalf("stderr = %q, want panic diagnostic", got)
+	}
+	if !strings.Contains(got, "goroutine ") {
+		t.Fatalf("stderr = %q, want stack trace", got)
+	}
+}
+
 func TestCityRuntimeShutdownWaitsForTrackedAsyncDrainAckStopsBeforeStopSnapshot(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := newShutdownWaitStopProvider()
@@ -1453,6 +1546,302 @@ func TestReconcileSessionBeads_AsleepIdlePoolBeadFreesSlot(t *testing.T) {
 	}
 }
 
+// capturingRecorder is an in-memory events.Recorder used in tests that
+// need to assert which events were emitted.
+type capturingRecorder struct {
+	events []events.Event
+}
+
+func (c *capturingRecorder) Record(e events.Event) {
+	c.events = append(c.events, e)
+}
+
+// strandedEvents returns the captured events.SessionStranded events,
+// in emission order. Specialized to the only event type any test in
+// this package currently filters for; add a sibling method (or migrate
+// to events.NewFake()) if a future test needs another type.
+func (c *capturingRecorder) strandedEvents() []events.Event {
+	out := make([]events.Event, 0, len(c.events))
+	for _, e := range c.events {
+		if e.Type == events.SessionStranded {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// TestReconcileSessionBeads_PoolSlotWithStrandedWorkEmitsDiagnostic
+// covers issue #1424: when a pool-managed session is observed
+// asleep + not-alive AND still has open in-progress work assigned, the
+// close gate correctly preserves the slot — but the controller used to
+// fall through silently with no event recorded. Operators had no signal
+// that the session had terminated without a clean drain. This test
+// asserts the diagnostic event fires, names the stranded work, and is
+// throttled across subsequent ticks so we don't get a storm.
+func TestReconcileSessionBeads_PoolSlotWithStrandedWorkEmitsDiagnostic(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{
+		Agents: []config.Agent{{Name: "worker"}},
+	}
+	env.addDesired("worker", "worker", false) // NOT running — runtime is dead
+	session := env.createSessionBead("worker", "worker")
+	env.setSessionMetadata(&session, map[string]string{
+		"state":                "asleep",
+		"sleep_reason":         "idle",
+		poolManagedMetadataKey: boolMetadata(true),
+	})
+
+	work, err := env.store.Create(beads.Bead{
+		Title:    "stranded implementation",
+		Type:     "task",
+		Status:   "open",
+		Assignee: session.ID,
+	})
+	if err != nil {
+		t.Fatalf("Create work bead: %v", err)
+	}
+	inProgress := "in_progress"
+	if err := env.store.Update(work.ID, beads.UpdateOpts{Status: &inProgress}); err != nil {
+		t.Fatalf("Update work bead status: %v", err)
+	}
+
+	rec := &capturingRecorder{}
+	env.rec = rec
+
+	// First tick — diagnostic must fire.
+	reconcileSessionBeadsAtPath(
+		context.Background(),
+		"",
+		[]beads.Bead{session},
+		env.desiredState,
+		map[string]bool{"worker": true},
+		env.cfg,
+		env.sp,
+		env.store,
+		newFakeDrainOps(),
+		nil,
+		nil,
+		nil,
+		env.dt,
+		nil,
+		false,
+		nil,
+		"",
+		nil,
+		env.clk,
+		env.rec,
+		0,
+		0,
+		&env.stdout,
+		&env.stderr,
+	)
+
+	stranded := rec.strandedEvents()
+	if len(stranded) != 1 {
+		t.Fatalf("session.stranded events emitted = %d, want 1; got events: %+v", len(stranded), rec.events)
+	}
+	got := stranded[0]
+	if got.Subject != session.ID {
+		t.Errorf("session.stranded.subject = %q, want session bead ID %q", got.Subject, session.ID)
+	}
+	if !strings.Contains(got.Message, work.ID) {
+		t.Errorf("session.stranded.message = %q, want it to name the stranded work bead %q", got.Message, work.ID)
+	}
+	if !strings.Contains(got.Message, "worker") {
+		t.Errorf("session.stranded.message = %q, want it to name the agent template %q", got.Message, "worker")
+	}
+
+	// Verify the close gate still preserved the slot — the existing
+	// behavior is the load-bearing safety property, not what this PR
+	// changes. The diagnostic is purely an emission addition.
+	postFirst, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get(session) after first tick: %v", err)
+	}
+	if postFirst.Status == "closed" {
+		t.Fatalf("session bead closed on first tick; pool-slot close gate must keep it open while in_progress work is assigned")
+	}
+
+	// Re-fetch the session bead to pick up any throttle-marker metadata
+	// the reconciler may have stamped.
+	updatedSession, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get(session) before second tick: %v", err)
+	}
+
+	// Second tick — diagnostic must NOT fire again (throttled per
+	// session bead generation, mirroring the #855 drain-log throttle).
+	reconcileSessionBeadsAtPath(
+		context.Background(),
+		"",
+		[]beads.Bead{updatedSession},
+		env.desiredState,
+		map[string]bool{"worker": true},
+		env.cfg,
+		env.sp,
+		env.store,
+		newFakeDrainOps(),
+		nil,
+		nil,
+		nil,
+		env.dt,
+		nil,
+		false,
+		nil,
+		"",
+		nil,
+		env.clk,
+		env.rec,
+		0,
+		0,
+		&env.stdout,
+		&env.stderr,
+	)
+
+	stranded = rec.strandedEvents()
+	if len(stranded) != 1 {
+		t.Fatalf("session.stranded events after second tick = %d, want still 1 (throttled); events: %+v", len(stranded), rec.events)
+	}
+}
+
+// throttleKeySetMetadataFailStore wraps a beads.Store and fails any
+// SetMetadata call writing the stranded throttle key. Other writes
+// pass through unmodified. Used by the throttle write-ordering
+// regression test below.
+type throttleKeySetMetadataFailStore struct {
+	beads.Store
+}
+
+func (s *throttleKeySetMetadataFailStore) SetMetadata(id, key, value string) error {
+	if key == strandedEventEmittedKey {
+		return errors.New("simulated store SetMetadata failure on throttle key")
+	}
+	return s.Store.SetMetadata(id, key, value)
+}
+
+// TestReconcileSessionBeads_PoolSlotStrandedThrottleSurvivesSetMetadataFailure
+// is the regression test for the throttle write-ordering bug: the
+// in-memory marker on session.Metadata must be set before the durable
+// SetMetadata write, so a transient store-write failure cannot cause
+// the next tick to re-emit the event and produce a duplicate-emission
+// storm under sustained disk pressure / store partition.
+func TestReconcileSessionBeads_PoolSlotStrandedThrottleSurvivesSetMetadataFailure(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{
+		Agents: []config.Agent{{Name: "worker"}},
+	}
+	env.addDesired("worker", "worker", false) // runtime not running
+	session := env.createSessionBead("worker", "worker")
+	env.setSessionMetadata(&session, map[string]string{
+		"state":                "asleep",
+		"sleep_reason":         "drained", // realistic stranded-worker case: clean drain, crashed before clearing assignee
+		poolManagedMetadataKey: boolMetadata(true),
+	})
+
+	work, err := env.store.Create(beads.Bead{
+		Title:    "stranded implementation",
+		Type:     "task",
+		Status:   "open",
+		Assignee: session.ID,
+	})
+	if err != nil {
+		t.Fatalf("Create work bead: %v", err)
+	}
+	inProgress := "in_progress"
+	if err := env.store.Update(work.ID, beads.UpdateOpts{Status: &inProgress}); err != nil {
+		t.Fatalf("Update work bead status: %v", err)
+	}
+
+	rec := &capturingRecorder{}
+	env.rec = rec
+	// Swap in the failing-SetMetadata wrapper.
+	failingStore := &throttleKeySetMetadataFailStore{Store: env.store}
+
+	// First tick — diagnostic must fire AND SetMetadata fails on the
+	// throttle key. The in-memory marker on the *Bead value passed in
+	// must still be set so subsequent ticks see it.
+	reconcileSessionBeadsAtPath(
+		context.Background(),
+		"",
+		[]beads.Bead{session},
+		env.desiredState,
+		map[string]bool{"worker": true},
+		env.cfg,
+		env.sp,
+		failingStore,
+		newFakeDrainOps(),
+		nil,
+		nil,
+		nil,
+		env.dt,
+		nil,
+		false,
+		nil,
+		"",
+		nil,
+		env.clk,
+		env.rec,
+		0,
+		0,
+		&env.stdout,
+		&env.stderr,
+	)
+
+	stranded := rec.strandedEvents()
+	if len(stranded) != 1 {
+		t.Fatalf("session.stranded events after first tick (SetMetadata failing) = %d, want 1; events: %+v", len(stranded), rec.events)
+	}
+
+	// Crucially: the durable store write failed, so the session bead
+	// on disk does NOT have the throttle marker. Re-fetching it
+	// returns the unmarked bead. The reconciler must still suppress
+	// re-emission — this is what the in-memory-marker-first ordering
+	// is protecting against. Production wouldn't necessarily re-fetch
+	// here (it carries the same *Bead forward across ticks within a
+	// controller lifetime); we test the worst-case explicitly.
+	unmarked, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get(session) before second tick: %v", err)
+	}
+	if strings.TrimSpace(unmarked.Metadata[strandedEventEmittedKey]) != "" {
+		t.Fatalf("durable throttle marker should be absent after SetMetadata failure; got %q", unmarked.Metadata[strandedEventEmittedKey])
+	}
+
+	// Second tick with the same in-memory *Bead the controller would
+	// carry forward — the marker on it should suppress re-emission.
+	reconcileSessionBeadsAtPath(
+		context.Background(),
+		"",
+		[]beads.Bead{session}, // SAME *Bead, with the in-memory marker the first tick set on it
+		env.desiredState,
+		map[string]bool{"worker": true},
+		env.cfg,
+		env.sp,
+		failingStore,
+		newFakeDrainOps(),
+		nil,
+		nil,
+		nil,
+		env.dt,
+		nil,
+		false,
+		nil,
+		"",
+		nil,
+		env.clk,
+		env.rec,
+		0,
+		0,
+		&env.stdout,
+		&env.stderr,
+	)
+
+	stranded = rec.strandedEvents()
+	if len(stranded) != 1 {
+		t.Fatalf("session.stranded events after second tick (durable marker still missing) = %d, want still 1 (in-memory throttle should hold); events: %+v", len(stranded), rec.events)
+	}
+}
+
 // (Removed: TestReconcileSessionBeads_DrainAckPartialOwnershipSnapshotFailsClosed
 // guarded the old snapshot-backed fail-closed path — the sleep_reason
 // "ownership_snapshot_partial" branch. Drain-ack now re-queries the store
@@ -1907,8 +2296,8 @@ func TestReconcileSessionBeads_SuspendedCloseIgnoresUnreachableRigAssignedWork(t
 
 // TestReconcileSessionBeads_CloseGatePreservesSleepReason verifies that the
 // close gate carries the session's existing sleep_reason (idle,
-// idle-timeout, drained) into the closed bead's close reason. Losing this
-// distinction in closed records erases the forensic difference between an
+// idle-timeout, drained, city-stop) into the closed bead's close reason. Losing
+// this distinction in closed records erases the forensic difference between an
 // idle-timeout recycle and an explicit drain.
 func TestReconcileSessionBeads_CloseGatePreservesSleepReason(t *testing.T) {
 	cases := []struct {
@@ -1918,6 +2307,7 @@ func TestReconcileSessionBeads_CloseGatePreservesSleepReason(t *testing.T) {
 	}{
 		{"idle", "idle", "idle"},
 		{"idle-timeout", "idle-timeout", "idle-timeout"},
+		{"city-stop", sleepReasonCityStop, sleepReasonCityStop},
 		{"drained-reason", "drained", "drained"},
 		{"missing-reason", "", "drained"}, // fallback
 	}
@@ -8083,8 +8473,8 @@ func TestReconcileSessionBeads_SyncReplacesFailedCreateNamedSession(t *testing.T
 	if fresh.ID == "" {
 		t.Fatalf("sync did not create a fresh named-session bead; open sessions=%#v stderr:\n%s", sessions, stderr.String())
 	}
-	if fresh.Metadata["state"] != string(sessionpkg.StateCreating) {
-		t.Fatalf("fresh named-session state = %q, want creating", fresh.Metadata["state"])
+	if fresh.Metadata["state"] != string(sessionpkg.StateStartPending) {
+		t.Fatalf("fresh named-session state = %q, want start-pending", fresh.Metadata["state"])
 	}
 
 	poolDesired := PoolDesiredCounts(ComputePoolDesiredStates(cfg, dsResult.AssignedWorkBeads, sessions, dsResult.ScaleCheckCounts))

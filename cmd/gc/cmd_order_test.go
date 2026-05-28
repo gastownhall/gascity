@@ -7,12 +7,15 @@ import (
 	"io"
 	"log"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
@@ -299,7 +302,7 @@ func TestScanAllOrdersCityFlatFile(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(cityDir, "formulas"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(cityDir, "orders", "health-check.order.toml"), []byte(`
+	if err := os.WriteFile(filepath.Join(cityDir, "orders", "health-check.toml"), []byte(`
 [order]
 formula = "health-check"
 trigger = "cron"
@@ -322,8 +325,8 @@ schedule = "*/5 * * * *"
 	if aa[0].Name != "health-check" {
 		t.Fatalf("Name = %q, want %q", aa[0].Name, "health-check")
 	}
-	if aa[0].Source != filepath.Join(cityDir, "orders", "health-check.order.toml") {
-		t.Fatalf("Source = %q, want %q", aa[0].Source, filepath.Join(cityDir, "orders", "health-check.order.toml"))
+	if aa[0].Source != filepath.Join(cityDir, "orders", "health-check.toml") {
+		t.Fatalf("Source = %q, want %q", aa[0].Source, filepath.Join(cityDir, "orders", "health-check.toml"))
 	}
 }
 
@@ -348,7 +351,7 @@ schema = 1
 `), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(repoDir, "orders", "health-check.order.toml"), []byte(`
+	if err := os.WriteFile(filepath.Join(repoDir, "orders", "health-check.toml"), []byte(`
 [order]
 formula = "health-check"
 trigger = "cron"
@@ -420,12 +423,12 @@ fetched = "2026-04-10T00:00:00Z"
 	if imported.Name != "health-check" {
 		t.Fatalf("Name = %q, want %q", imported.Name, "health-check")
 	}
-	if imported.Source != filepath.Join(cacheDir, "orders", "health-check.order.toml") {
-		t.Fatalf("Source = %q, want %q", imported.Source, filepath.Join(cacheDir, "orders", "health-check.order.toml"))
+	if imported.Source != filepath.Join(cacheDir, "orders", "health-check.toml") {
+		t.Fatalf("Source = %q, want %q", imported.Source, filepath.Join(cacheDir, "orders", "health-check.toml"))
 	}
 }
 
-func TestScanAllOrdersCityLegacyFormulaOrdersWarns(t *testing.T) {
+func TestScanAllOrdersCityLegacyFormulaOrdersRejects(t *testing.T) {
 	cityDir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(cityDir, "formulas", "orders", "health-check"), 0o755); err != nil {
 		t.Fatal(err)
@@ -443,21 +446,15 @@ schedule = "*/5 * * * *"
 	cfg.FormulaLayers.City = []string{filepath.Join(cityDir, "formulas")}
 
 	var stderr bytes.Buffer
-	logs := captureCmdOrderLogs(t, func() {
-		aa, err := scanAllOrders(cityDir, cfg, &stderr, "gc order list")
-		if err != nil {
-			t.Fatalf("scanAllOrders: %v", err)
-		}
-		if len(aa) != 1 {
-			t.Fatalf("got %d orders, want 1", len(aa))
-		}
-		if aa[0].Source != filepath.Join(cityDir, "formulas", "orders", "health-check", "order.toml") {
-			t.Fatalf("Source = %q, want %q", aa[0].Source, filepath.Join(cityDir, "formulas", "orders", "health-check", "order.toml"))
-		}
-	})
-
-	if !strings.Contains(logs, "move to orders/health-check.toml") {
-		t.Fatalf("logs = %q, want move warning", logs)
+	_, err := scanAllOrders(cityDir, cfg, &stderr, "gc order list")
+	if err == nil {
+		t.Fatal("scanAllOrders succeeded, want PackV1 order layout rejection")
+	}
+	if !strings.Contains(err.Error(), "unsupported PackV1 order path") {
+		t.Fatalf("scanAllOrders error = %q, want PackV1 path rejection", err)
+	}
+	if !strings.Contains(err.Error(), "move to orders/health-check.toml") {
+		t.Fatalf("scanAllOrders error = %q, want migration hint", err)
 	}
 }
 
@@ -472,7 +469,7 @@ func TestOrderShow(t *testing.T) {
 			Trigger:     "cooldown",
 			Interval:    "24h",
 			Pool:        "dog",
-			Source:      "/city/formulas/orders/digest/order.toml",
+			Source:      "/city/orders/digest.toml",
 		},
 	}
 
@@ -482,7 +479,7 @@ func TestOrderShow(t *testing.T) {
 		t.Fatalf("doOrderShow = %d, want 0; stderr: %s", code, stderr.String())
 	}
 	out := stdout.String()
-	for _, want := range []string{"digest", "Generate daily digest", "mol-digest", "cooldown", "24h", "dog", "order.toml"} {
+	for _, want := range []string{"digest", "Generate daily digest", "mol-digest", "cooldown", "24h", "dog", "digest.toml"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("stdout missing %q:\n%s", want, out)
 		}
@@ -517,7 +514,7 @@ func TestOrderShowExec(t *testing.T) {
 			Exec:        "$ORDER_DIR/scripts/poll.sh",
 			Trigger:     "cooldown",
 			Interval:    "2m",
-			Source:      "/city/formulas/orders/poll/order.toml",
+			Source:      "/city/orders/poll.toml",
 		},
 	}
 
@@ -1011,6 +1008,189 @@ on = "bead.closed"
 	}
 }
 
+func TestCmdOrderSweepTrackingClosesRigScopedTrackingAfterReopen(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "frontend")
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_CITY_PATH", cityDir)
+	t.Setenv("GC_CITY_ROOT", cityDir)
+	t.Setenv("GC_RIG", "")
+	t.Setenv("GC_RIG_ROOT", "")
+	t.Chdir(cityDir)
+
+	writeFile(t, filepath.Join(cityDir, "city.toml"), `[workspace]
+name = "test-city"
+prefix = "ct"
+
+[[rigs]]
+name = "frontend"
+path = "frontend"
+prefix = "fe"
+`)
+	if err := ensureScopedFileStoreLayout(cityDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensurePersistedScopeLocalFileStore(cityDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensurePersistedScopeLocalFileStore(rigDir); err != nil {
+		t.Fatal(err)
+	}
+	rigStore, err := openStoreAtForCity(rigDir, cityDir)
+	if err != nil {
+		t.Fatalf("openStoreAtForCity(rig): %v", err)
+	}
+	stale, err := rigStore.Create(beads.Bead{
+		Title:     "order:rig-digest:rig:frontend",
+		Labels:    []string{"order-run:rig-digest:rig:frontend", labelOrderTracking},
+		Ephemeral: true,
+	})
+	if err != nil {
+		t.Fatalf("Create(stale): %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := cmdOrderSweepTracking(time.Nanosecond, false, false, []string{"rig-digest:rig:frontend"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("cmdOrderSweepTracking = %d, want 0; stderr: %s", code, stderr.String())
+	}
+
+	reopened, err := openStoreAtForCity(rigDir, cityDir)
+	if err != nil {
+		t.Fatalf("openStoreAtForCity(rig reopen): %v", err)
+	}
+	got, err := reopened.Get(stale.ID)
+	if err != nil {
+		t.Fatalf("Get(stale): %v", err)
+	}
+	if got.Status != "closed" {
+		t.Fatalf("stale rig tracking status after reopen = %q, want closed", got.Status)
+	}
+	if !strings.Contains(stdout.String(), "closed 1 stale order-tracking bead") {
+		t.Fatalf("stdout = %q, want one closed tracking bead", stdout.String())
+	}
+}
+
+func TestCmdOrderSweepTrackingClosesCityTrackingWhenRigStoreOpenFails(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "frontend")
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_CITY_PATH", cityDir)
+	t.Setenv("GC_CITY_ROOT", cityDir)
+	t.Setenv("GC_RIG", "")
+	t.Setenv("GC_RIG_ROOT", "")
+	t.Chdir(cityDir)
+
+	writeFile(t, filepath.Join(cityDir, "city.toml"), `[workspace]
+name = "test-city"
+prefix = "ct"
+
+[[rigs]]
+name = "frontend"
+path = "frontend"
+prefix = "fe"
+`)
+	if err := ensureScopedFileStoreLayout(cityDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensurePersistedScopeLocalFileStore(cityDir); err != nil {
+		t.Fatal(err)
+	}
+	store, err := openStoreAtForCity(cityDir, cityDir)
+	if err != nil {
+		t.Fatalf("openStoreAtForCity(city): %v", err)
+	}
+	stale, err := store.Create(beads.Bead{
+		Title:     "order:cleanup",
+		Labels:    []string{"order-run:cleanup", labelOrderTracking},
+		Ephemeral: true,
+	})
+	if err != nil {
+		t.Fatalf("Create(stale): %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := cmdOrderSweepTracking(time.Nanosecond, false, false, []string{"cleanup"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("cmdOrderSweepTracking = %d, want 0; stderr: %s", code, stderr.String())
+	}
+
+	reopened, err := openStoreAtForCity(cityDir, cityDir)
+	if err != nil {
+		t.Fatalf("openStoreAtForCity(city reopen): %v", err)
+	}
+	got, err := reopened.Get(stale.ID)
+	if err != nil {
+		t.Fatalf("Get(stale): %v", err)
+	}
+	if got.Status != "closed" {
+		t.Fatalf("city stale tracking status after reopen = %q, want closed", got.Status)
+	}
+	if !strings.Contains(stderr.String(), "opening rig \"frontend\" order store") {
+		t.Fatalf("stderr = %q, want rig-open warning", stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "closed 1 stale order-tracking bead") {
+		t.Fatalf("stdout = %q, want one closed tracking bead", stdout.String())
+	}
+}
+
+func TestCmdOrderSweepTrackingFailsWhenTargetedRigStoreOpenFails(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "frontend")
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_CITY_PATH", cityDir)
+	t.Setenv("GC_CITY_ROOT", cityDir)
+	t.Setenv("GC_RIG", "")
+	t.Setenv("GC_RIG_ROOT", "")
+	t.Chdir(cityDir)
+
+	writeFile(t, filepath.Join(cityDir, "city.toml"), `[workspace]
+name = "test-city"
+prefix = "ct"
+
+[[rigs]]
+name = "frontend"
+path = "frontend"
+prefix = "fe"
+`)
+	if err := ensureScopedFileStoreLayout(cityDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensurePersistedScopeLocalFileStore(cityDir); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := cmdOrderSweepTracking(time.Nanosecond, false, false, []string{"rig-digest:rig:frontend"}, &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("cmdOrderSweepTracking = 0, want failure; stdout: %s stderr: %s", stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "opening rig \"frontend\" order store") {
+		t.Fatalf("stderr = %q, want rig-open warning", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "target store was not swept for rig-digest:rig:frontend") {
+		t.Fatalf("stderr = %q, want targeted-store failure", stderr.String())
+	}
+}
+
 func TestOrderRunEventFormulaLatestSeqErrorDoesNotInstantiate(t *testing.T) {
 	aa := []orders.Order{{
 		Name:         "release-watch",
@@ -1062,8 +1242,41 @@ func TestOrderRunResolvesPackBindingForPool(t *testing.T) {
 	if got := results[0].Metadata["gc.routed_to"]; got != "maintenance.dog" {
 		t.Fatalf("gc.routed_to = %q, want maintenance.dog", got)
 	}
+	if got := results[0].Metadata[poolDemandMetadataKey]; got != poolDemandMetadataValue {
+		t.Fatalf("%s = %q, want %q (cron pool orders need this flag so defaultScaleCheckCounts can count the molecule wisp despite readyExcludeTypes filtering molecules out of Ready() — see cmd/gc/pool_demand.go for the non-numeric-value rationale)", poolDemandMetadataKey, got, poolDemandMetadataValue)
+	}
 	if !strings.Contains(stdout.String(), "gc.routed_to=maintenance.dog") {
 		t.Fatalf("stdout = %q, want binding-qualified route", stdout.String())
+	}
+}
+
+// TestOrderRunNonPoolDoesNotSetPoolDemand asserts the symmetric: orders
+// without a pool field do NOT get gc.pool_demand stamped. The flag is
+// strictly a cron-pool-order signal.
+func TestOrderRunNonPoolDoesNotSetPoolDemand(t *testing.T) {
+	aa := []orders.Order{
+		{Name: "cleanup", Formula: "mol-cleanup", Trigger: "cron", Schedule: "0 3 * * *", FormulaLayer: sharedTestFormulaDir},
+	}
+	store := beads.NewMemStore()
+
+	var stdout, stderr bytes.Buffer
+	code := doOrderRun(aa, "cleanup", "", "/city", store, nil, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doOrderRun = %d, want 0; stderr: %s", code, stderr.String())
+	}
+
+	results, err := store.ListByLabel("order-run:cleanup", 0)
+	if err != nil {
+		t.Fatalf("store.ListByLabel(): %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("store.ListByLabel() len = %d, want 1 (%#v)", len(results), results)
+	}
+	if got := results[0].Metadata[poolDemandMetadataKey]; got != "" {
+		t.Fatalf("%s = %q, want empty (only pool orders should carry the flag)", poolDemandMetadataKey, got)
+	}
+	if got := results[0].Metadata["gc.routed_to"]; got != "" {
+		t.Fatalf("gc.routed_to = %q, want empty for unrouted order", got)
 	}
 }
 
@@ -1265,7 +1478,7 @@ id = "do-work"
 title = "Do work for {{target_id}}"
 description = "Target: {{target_id}}, workspace: {{workspace}}"
 `
-	if err := os.WriteFile(filepath.Join(dir, "order-required-vars.formula.toml"), []byte(formulaBody), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "order-required-vars.toml"), []byte(formulaBody), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1323,7 +1536,7 @@ contract = "graph.v2"
 id = "step"
 title = "Do work"
 `
-	if err := os.WriteFile(filepath.Join(formulaDir, "graph-work.formula.toml"), []byte(graphFormula), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(formulaDir, "graph-work.toml"), []byte(graphFormula), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -2269,7 +2482,7 @@ func TestOrderCheckWithRig(t *testing.T) {
 
 func TestOrderShowWithRig(t *testing.T) {
 	aa := []orders.Order{
-		{Name: "db-health", Formula: "mol-db-health", Trigger: "cooldown", Interval: "5m", Rig: "demo-repo", Source: "/topo/orders/db-health/order.toml"},
+		{Name: "db-health", Formula: "mol-db-health", Trigger: "cooldown", Interval: "5m", Rig: "demo-repo", Source: "/topo/orders/db-health.toml"},
 	}
 
 	var stdout, stderr bytes.Buffer
@@ -2337,5 +2550,282 @@ func TestOpenCityOrderStoreUsesProviderAwareStore(t *testing.T) {
 	}
 	if len(results) != 1 || results[0].ID != created.ID {
 		t.Fatalf("order history results = %#v, want bead %q", results, created.ID)
+	}
+}
+
+// --- gc order history: API routing (ga-h6w / ga-6q1) ---
+
+// okOrderHistoryHandler serves a non-stale single-entry history matching
+// the test order.
+func okOrderHistoryHandler(_ *testing.T) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/orders/history") {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("X-GC-Cache-Age-S", "2")
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"entries": []map[string]any{
+				{
+					"bead_id":        "ca-1",
+					"name":           "digest",
+					"scoped_name":    "digest",
+					"created_at":     "2026-04-22T12:00:00Z",
+					"labels":         []string{"order-run:digest"},
+					"capture_output": false,
+					"has_output":     false,
+					"store_ref":      "city",
+				},
+			},
+		})
+	})
+}
+
+// writeOrderHistoryTestCity creates a minimal city directory with a
+// city.toml and a single city-level order so both the API-render path
+// and the fallback path have something to format.
+func writeOrderHistoryTestCity(t *testing.T) string {
+	t.Helper()
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cityToml := `[workspace]
+name = "test-city"
+
+[[agent]]
+name = "mayor"
+`
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	formulasDir := filepath.Join(cityPath, "formulas")
+	if err := os.MkdirAll(formulasDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ordersDir := filepath.Join(cityPath, "orders")
+	if err := os.MkdirAll(ordersDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	orderToml := `trigger = "manual"
+formula = "mol-digest"
+`
+	if err := os.WriteFile(filepath.Join(ordersDir, "digest.toml"), []byte(orderToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_DOLT", "skip")
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+	return cityPath
+}
+
+func TestRouteOrderHistory_SixRowMatrix(t *testing.T) {
+	tests := []struct {
+		name         string
+		handler      rigListMatrixHandler
+		useNilClient bool
+		nilReason    string
+		wantExit     int
+		wantRoute    string
+		wantReason   string
+		wantStderr   string
+		wantStdout   string
+	}{
+		{
+			name:       "api-happy-path",
+			handler:    okOrderHistoryHandler,
+			wantExit:   0,
+			wantRoute:  "api",
+			wantStdout: "digest",
+		},
+		{
+			name:       "api-cache-not-live",
+			handler:    problemHandler(http.StatusServiceUnavailable, "cache_not_live: supervisor cache is priming"),
+			wantExit:   0,
+			wantRoute:  "fallback",
+			wantReason: "cache-not-live",
+		},
+		{
+			name:       "api-500-fallback",
+			handler:    problemHandler(http.StatusInternalServerError, "internal: something exploded"),
+			wantExit:   0,
+			wantRoute:  "fallback",
+			wantReason: "conn-refused",
+		},
+		{
+			name:       "api-404-error",
+			handler:    problemHandler(http.StatusNotFound, "not_found: city not configured"),
+			wantExit:   1,
+			wantStderr: "not_found",
+		},
+		{
+			name:         "controller-down",
+			useNilClient: true,
+			nilReason:    "controller-down",
+			wantExit:     0,
+			wantRoute:    "fallback",
+			wantReason:   "controller-down",
+		},
+		{
+			name:         "escape-hatch",
+			useNilClient: true,
+			nilReason:    "escape-hatch",
+			wantExit:     0,
+			wantRoute:    "fallback",
+			wantReason:   "escape-hatch",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("GC_DEBUG", "1") // force route=... lines into stderr buffer
+
+			cityPath := writeOrderHistoryTestCity(t)
+			cfg, err := loadCityConfig(cityPath, &bytes.Buffer{})
+			if err != nil {
+				t.Fatalf("loadCityConfig: %v", err)
+			}
+			aa, code := loadAllOrders(cityPath, cfg, &bytes.Buffer{}, "test")
+			if code != 0 {
+				t.Fatalf("loadAllOrders = %d", code)
+			}
+
+			var c *api.Client
+			if !tc.useNilClient {
+				srv := httptest.NewServer(tc.handler(t))
+				defer srv.Close()
+				c = api.NewCityScopedClient(srv.URL, "test-city")
+			}
+
+			var stdout, stderr bytes.Buffer
+			got := routeOrderHistory(cityPath, cfg, "digest", "", aa, c, tc.nilReason, false, &stdout, &stderr)
+
+			if got != tc.wantExit {
+				t.Fatalf("exit = %d, want %d; stderr=%q stdout=%q", got, tc.wantExit, stderr.String(), stdout.String())
+			}
+			if tc.wantRoute != "" {
+				want := "route=" + tc.wantRoute
+				if tc.wantReason != "" {
+					want += " reason=" + tc.wantReason
+				}
+				if !strings.Contains(stderr.String(), want) {
+					t.Errorf("stderr missing %q:\n%s", want, stderr.String())
+				}
+				if n := strings.Count(stderr.String(), "route="); n != 1 {
+					t.Errorf("route=... lines = %d, want 1:\n%s", n, stderr.String())
+				}
+			}
+			if tc.wantStderr != "" && !strings.Contains(stderr.String(), tc.wantStderr) {
+				t.Errorf("stderr missing %q:\n%s", tc.wantStderr, stderr.String())
+			}
+			if tc.wantStdout != "" && !strings.Contains(stdout.String(), tc.wantStdout) {
+				t.Errorf("stdout missing %q:\n%s", tc.wantStdout, stdout.String())
+			}
+			// Fallback rows must produce the local iterator's rendered output
+			// (same "No order history." header/empty-state as the direct path).
+			if tc.wantRoute == "fallback" {
+				if !strings.Contains(stdout.String(), "No order history") && !strings.Contains(stdout.String(), "ORDER") {
+					t.Errorf("fallback stdout missing history header/empty-state:\n%s", stdout.String())
+				}
+			}
+		})
+	}
+}
+
+// TestRouteOrderHistory_MultiOrderFallback verifies that `gc order history`
+// with no name falls back with reason=multi-order so the deliberate
+// no-API-routing branch is audit-logged.
+func TestRouteOrderHistory_MultiOrderFallback(t *testing.T) {
+	t.Setenv("GC_DEBUG", "1")
+
+	cityPath := writeOrderHistoryTestCity(t)
+	cfg, err := loadCityConfig(cityPath, &bytes.Buffer{})
+	if err != nil {
+		t.Fatalf("loadCityConfig: %v", err)
+	}
+	aa, code := loadAllOrders(cityPath, cfg, &bytes.Buffer{}, "test")
+	if code != 0 {
+		t.Fatalf("loadAllOrders = %d", code)
+	}
+
+	srv := httptest.NewServer(okOrderHistoryHandler(t))
+	defer srv.Close()
+	c := api.NewCityScopedClient(srv.URL, "test-city")
+
+	var stdout, stderr bytes.Buffer
+	// Name empty → should not hit the API.
+	if got := routeOrderHistory(cityPath, cfg, "", "", aa, c, "", false, &stdout, &stderr); got != 0 {
+		t.Fatalf("exit = %d, stderr=%q", got, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "route=fallback reason=multi-order") {
+		t.Errorf("stderr missing multi-order fallback:\n%s", stderr.String())
+	}
+}
+
+// TestRouteOrderHistory_StaleBannerOver30s verifies the > 30 s stale banner
+// on the API render path; matches the rig-list staleness test contract.
+func TestRouteOrderHistory_StaleBannerOver30s(t *testing.T) {
+	t.Setenv("GC_DEBUG", "0")
+
+	cityPath := writeOrderHistoryTestCity(t)
+	cfg, err := loadCityConfig(cityPath, &bytes.Buffer{})
+	if err != nil {
+		t.Fatalf("loadCityConfig: %v", err)
+	}
+	aa, _ := loadAllOrders(cityPath, cfg, &bytes.Buffer{}, "test")
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("X-GC-Cache-Age-S", "45")
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"entries": []map[string]any{
+				{
+					"bead_id":        "ca-1",
+					"name":           "digest",
+					"scoped_name":    "digest",
+					"created_at":     "2026-04-22T12:00:00Z",
+					"labels":         []string{"order-run:digest"},
+					"capture_output": false,
+					"has_output":     false,
+					"store_ref":      "city",
+				},
+			},
+		})
+	}))
+	defer srv.Close()
+	c := api.NewCityScopedClient(srv.URL, "test-city")
+
+	var stdout, stderr bytes.Buffer
+	if code := routeOrderHistory(cityPath, cfg, "digest", "", aa, c, "", false, &stdout, &stderr); code != 0 {
+		t.Fatalf("exit = %d, stderr=%q", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "cache age: 45s") {
+		t.Errorf("stale banner missing from human output:\n%s", stdout.String())
+	}
+}
+
+// TestOrderScopedName verifies city-level vs rig-level scoping matches the
+// server's ScopedName() convention (name alone vs name:rig:<rig>).
+func TestOrderScopedName(t *testing.T) {
+	aa := []orders.Order{
+		{Name: "digest"},
+		{Name: "cleanup", Rig: "frontend"},
+	}
+	cases := []struct {
+		name string
+		rig  string
+		want string
+	}{
+		{"digest", "", "digest"},
+		{"cleanup", "frontend", "cleanup:rig:frontend"},
+		{"unknown", "", "unknown"},
+		{"unknown", "backend", "unknown:rig:backend"},
+	}
+	for _, tc := range cases {
+		got := orderScopedName(tc.name, tc.rig, aa)
+		if got != tc.want {
+			t.Errorf("orderScopedName(%q, %q) = %q, want %q", tc.name, tc.rig, got, tc.want)
+		}
 	}
 }

@@ -6,9 +6,14 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -247,5 +252,224 @@ func TestDoRigStatusReportsObservationErrors(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "gc rig status: observing") {
 		t.Fatalf("stderr = %q, want observation warning", stderr.String())
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Six-row read-path routing matrix for `gc rig status` (ADR 0001, ga-h6w).
+// ---------------------------------------------------------------------------
+
+type rigStatusMatrixHandler func(t *testing.T) http.Handler
+
+func okRigStatusHandler(_ *testing.T) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/status") {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("X-GC-Cache-Age-S", "5")
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"name":        "test-city",
+			"path":        "/tmp/test-city",
+			"uptime_sec":  1,
+			"suspended":   false,
+			"agent_count": 1,
+			"rig_count":   1,
+			"running":     1,
+			"agents":      map[string]any{"total": 1, "running": 1},
+			"rigs":        map[string]any{"total": 1},
+			"work":        map[string]any{},
+			"mail":        map[string]any{},
+			"agent_details": []map[string]any{
+				{
+					"name":           "worker",
+					"qualified_name": "frontend/worker",
+					"scope":          "rig",
+					"running":        true,
+					"suspended":      false,
+					"session_name":   "test-city--frontend--worker",
+					"group_name":     "frontend/worker",
+				},
+			},
+			"rig_details": []map[string]any{
+				{"name": "frontend", "path": "/tmp/frontend", "suspended": false},
+			},
+		})
+	})
+}
+
+func rigStatusProblemHandler(status int, detail string) rigStatusMatrixHandler {
+	return func(_ *testing.T) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/problem+json")
+			w.WriteHeader(status)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"status": status,
+				"title":  http.StatusText(status),
+				"detail": detail,
+			})
+		})
+	}
+}
+
+func writeRigStatusTestCity(t *testing.T) string {
+	t.Helper()
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cityToml := `[workspace]
+name = "test-city"
+
+[[rig]]
+name = "frontend"
+path = "/tmp/frontend"
+
+[[agent]]
+name = "worker"
+dir = "frontend"
+`
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+	return cityPath
+}
+
+func TestRouteRigStatus_SixRowMatrix(t *testing.T) {
+	tests := []struct {
+		name         string
+		handler      rigStatusMatrixHandler
+		useNilClient bool
+		nilReason    string
+		wantExit     int
+		wantRoute    string
+		wantReason   string
+		wantStderr   string
+		wantStdout   string
+	}{
+		{
+			name:       "api-happy-path",
+			handler:    okRigStatusHandler,
+			wantExit:   0,
+			wantRoute:  "api",
+			wantStdout: "frontend/worker",
+		},
+		{
+			name:       "api-cache-not-live",
+			handler:    rigStatusProblemHandler(http.StatusServiceUnavailable, "cache_not_live: priming"),
+			wantExit:   0,
+			wantRoute:  "fallback",
+			wantReason: "cache-not-live",
+		},
+		{
+			name:       "api-500-fallback",
+			handler:    rigStatusProblemHandler(http.StatusInternalServerError, "explode"),
+			wantExit:   0,
+			wantRoute:  "fallback",
+			wantReason: "conn-refused",
+		},
+		{
+			name:       "api-404-error",
+			handler:    rigStatusProblemHandler(http.StatusNotFound, "not_found: city missing"),
+			wantExit:   1,
+			wantStderr: "not_found",
+		},
+		{
+			name:         "controller-down",
+			useNilClient: true,
+			nilReason:    "controller-down",
+			wantExit:     0,
+			wantRoute:    "fallback",
+			wantReason:   "controller-down",
+		},
+		{
+			name:         "escape-hatch",
+			useNilClient: true,
+			nilReason:    "escape-hatch",
+			wantExit:     0,
+			wantRoute:    "fallback",
+			wantReason:   "escape-hatch",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("GC_DEBUG", "1")
+			cityPath := writeRigStatusTestCity(t)
+
+			var c *api.Client
+			if !tc.useNilClient {
+				srv := httptest.NewServer(tc.handler(t))
+				defer srv.Close()
+				c = api.NewCityScopedClient(srv.URL, "test-city")
+			}
+
+			sp := runtime.NewFake()
+			dops := newFakeDrainOps()
+			rig := config.Rig{Name: "frontend", Path: "/tmp/frontend"}
+			rigAgents := []config.Agent{{Name: "worker", Dir: "frontend", MaxActiveSessions: intPtr(1)}}
+			var stdout, stderr bytes.Buffer
+			code := routeRigStatus(cityPath, "test-city", rig, rigAgents, "", nil, nil, nil, sp, dops, c, tc.nilReason, false, &stdout, &stderr)
+
+			if code != tc.wantExit {
+				t.Fatalf("exit = %d, want %d; stderr=%q stdout=%q", code, tc.wantExit, stderr.String(), stdout.String())
+			}
+			if tc.wantRoute != "" {
+				want := "route=" + tc.wantRoute
+				if tc.wantReason != "" {
+					want += " reason=" + tc.wantReason
+				}
+				if !strings.Contains(stderr.String(), want) {
+					t.Errorf("stderr missing %q:\n%s", want, stderr.String())
+				}
+				if n := strings.Count(stderr.String(), "route="); n != 1 {
+					t.Errorf("route=... lines = %d, want 1:\n%s", n, stderr.String())
+				}
+			}
+			if tc.wantStderr != "" && !strings.Contains(stderr.String(), tc.wantStderr) {
+				t.Errorf("stderr missing %q:\n%s", tc.wantStderr, stderr.String())
+			}
+			if tc.wantStdout != "" && !strings.Contains(stdout.String(), tc.wantStdout) {
+				t.Errorf("stdout missing %q:\n%s", tc.wantStdout, stdout.String())
+			}
+		})
+	}
+}
+
+// TestRouteRigStatus_APIStaleBanner verifies the human-output staleness
+// banner appears when the supervisor reports a cache age > 30 s.
+func TestRouteRigStatus_APIStaleBanner(t *testing.T) {
+	cityPath := writeRigStatusTestCity(t)
+	staleHandler := func(_ *testing.T) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("X-GC-Cache-Age-S", "99")
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"name": "test-city", "path": "/tmp",
+				"uptime_sec": 1, "suspended": false,
+				"agent_count": 0, "rig_count": 0, "running": 0,
+				"agents": map[string]any{}, "rigs": map[string]any{},
+				"work": map[string]any{}, "mail": map[string]any{},
+				"rig_details": []map[string]any{
+					{"name": "frontend", "path": "/tmp/frontend", "suspended": false},
+				},
+			})
+		})
+	}
+	srv := httptest.NewServer(staleHandler(t))
+	defer srv.Close()
+	c := api.NewCityScopedClient(srv.URL, "test-city")
+
+	sp := runtime.NewFake()
+	dops := newFakeDrainOps()
+	rig := config.Rig{Name: "frontend", Path: "/tmp/frontend"}
+	var stdout, stderr bytes.Buffer
+	if code := routeRigStatus(cityPath, "test-city", rig, nil, "", nil, nil, nil, sp, dops, c, "", false, &stdout, &stderr); code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "cache age:") {
+		t.Errorf("human output should include stale banner, got:\n%s", stdout.String())
 	}
 }

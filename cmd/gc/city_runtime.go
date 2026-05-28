@@ -2,12 +2,15 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"hash/fnv"
 	"io"
 	"log"
 	"os"
+	"os/exec"
 	"path/filepath"
+	goruntime "runtime"
 	"runtime/debug"
 	"sort"
 	"strings"
@@ -28,9 +31,9 @@ import (
 	"github.com/gastownhall/gascity/internal/workspacesvc"
 )
 
-// newCityRuntimeOpenSweepStore opens the city store used for the orphaned
-// order-tracking sweep in newCityRuntime. Test code can swap this to return
-// an in-memory store and skip spawning managed dolt.
+// newCityRuntimeOpenSweepStore opens stores used by order-tracking sweeps.
+// Test code can swap this to return in-memory stores and skip spawning
+// managed dolt.
 var newCityRuntimeOpenSweepStore = openStoreAtForCity
 
 // reloadOrderDrainTimeout bounds how long config reload will wait for
@@ -375,6 +378,24 @@ func (cr *CityRuntime) run(ctx context.Context) {
 		return
 	}
 
+	// Startup instrumentation: per-phase elapsed timing plus a watchdog
+	// that dumps goroutines if onStarted has not fired by half of
+	// [daemon].start_ready_timeout. Operators previously got a generic
+	// client-side timeout with no breadcrumbs (#gco-4pj); these log lines
+	// surface where startup is spending its budget.
+	startupBegan := time.Now()
+	startupReady := make(chan struct{})
+	var readyOnce sync.Once
+	markReady := func() { readyOnce.Do(func() { close(startupReady) }) }
+	defer markReady()
+	if total := cr.cfg.Daemon.StartReadyTimeoutDuration(); total > 0 {
+		go cr.startupReadinessWatchdog(ctx, startupReady, total/2, total)
+	}
+	logPhaseElapsed := func(name string, start time.Time) {
+		fmt.Fprintf(cr.stderr, "%s: startup phase=%s elapsed=%s\n", //nolint:errcheck // best-effort stderr
+			cr.logPrefix, name, time.Since(start).Round(time.Millisecond))
+	}
+
 	retryDelay := cr.cfg.Daemon.PatrolIntervalDuration()
 	startupRetryLimit := cr.cfg.Daemon.MaxRestartsOrDefault()
 	waitForRetry := func() bool {
@@ -388,6 +409,8 @@ func (cr *CityRuntime) run(ctx context.Context) {
 		}
 	}
 	retryStartupStep := func(trigger string, complete func() bool, run func()) bool {
+		phaseStart := time.Now()
+		defer func() { logPhaseElapsed(trigger, phaseStart) }()
 		for attempt := 1; !complete(); attempt++ {
 			panicked := cr.safeTick(run, trigger)
 			if ctx.Err() != nil {
@@ -448,7 +471,9 @@ func (cr *CityRuntime) run(ctx context.Context) {
 		return
 	}
 
+	configReloadStart := time.Now()
 	cr.applyStartupConfigReload(ctx, dirty, &lastProviderName, cityRoot)
+	logPhaseElapsed("config-reload", configReloadStart)
 	if ctx.Err() != nil {
 		return
 	}
@@ -456,9 +481,11 @@ func (cr *CityRuntime) run(ctx context.Context) {
 	// Dispatch due orders before startup session reconciliation. A cold-start
 	// reconcile can take minutes when it has stale or config-drifted sessions;
 	// due event/condition formulas should not wait behind that maintenance work.
+	startupOrdersStart := time.Now()
 	cr.safeTick(func() {
 		cr.dispatchOrders(ctx, cityRoot)
 	}, "startup-orders")
+	logPhaseElapsed("startup-orders", startupOrdersStart)
 	if ctx.Err() != nil {
 		return
 	}
@@ -565,6 +592,9 @@ func (cr *CityRuntime) run(ctx context.Context) {
 	if cr.onStarted != nil {
 		cr.onStarted()
 	}
+	markReady()
+	fmt.Fprintf(cr.stderr, "%s: startup ready elapsed=%s\n", //nolint:errcheck // best-effort stderr
+		cr.logPrefix, time.Since(startupBegan).Round(time.Millisecond))
 	fmt.Fprintln(cr.stdout, "City started.") //nolint:errcheck // best-effort stdout
 	if ctx.Err() != nil {
 		return
@@ -626,21 +656,42 @@ func (cr *CityRuntime) run(ctx context.Context) {
 		<-acceptDone
 		cr.failActiveReload("Reload canceled because the controller is shutting down.")
 	}()
+	// Debounce event-driven ticks so a burst of pokes / control-dispatcher
+	// signals collapses into a single fire. Each channel gets its own
+	// debouncer so trace-tag identity ("poke" vs "control-dispatcher") is
+	// preserved when the deferred tick eventually runs. With debounce=0
+	// (the default), arm() falls back to non-blocking send and the loop
+	// behaves identically to the pre-debounce implementation.
+	pokeDB := newTickDebouncer()
+	ctrlDB := newTickDebouncer()
+	defer pokeDB.cancelPending()
+	defer ctrlDB.cancelPending()
 
 	for {
+		// Re-read on every iteration so a hot reload of city.toml takes
+		// effect on the next event without disturbing in-flight timers.
+		debounce := cr.cfg.Daemon.TickDebounceDuration()
 		select {
 		case <-ticker.C:
+			// Patrol scans every reconciler state authoritatively, so any
+			// pending event-driven fires are redundant — drop them.
+			pokeDB.cancelPending()
+			ctrlDB.cancelPending()
 			runTick("patrol")
 		case <-cr.pokeCh:
 			// Event-driven wake path: sling or API assigned work to a sleeping
-			// session. Trigger an immediate tick so the reconciler sees the new
-			// work via workSet/poolDesired and wakes the target promptly.
+			// session. Arm the debouncer; the deferred fire runs runTick("poke")
+			// once the burst settles.
+			pokeDB.arm(debounce)
+		case <-pokeDB.fired():
 			runTick("poke")
 		case <-cr.nudgeWakeCh:
 			cr.safeTick(func() {
 				cr.nudgeDispatchTick(ctx)
 			}, "nudge-wake")
 		case <-cr.controlDispatcherCh:
+			ctrlDB.arm(debounce)
+		case <-ctrlDB.fired():
 			cr.safeTick(func() {
 				cr.controlDispatcherTick(ctx)
 			}, "control-dispatcher")
@@ -697,6 +748,101 @@ func (cr *CityRuntime) safeTick(fn func(), trigger string) (panicked bool) {
 	}()
 	fn()
 	return false
+}
+
+// startupReadinessWatchdog emits a warning + goroutine dump to stderr
+// if startup has not signaled ready within delay. delay is normally
+// half of [daemon].start_ready_timeout, giving operators a snapshot of
+// which goroutines are blocked while the client-side probe still has
+// budget left. It exits silently when ready is signaled, when ctx is
+// canceled, or after firing once. Run as its own goroutine.
+func (cr *CityRuntime) startupReadinessWatchdog(ctx context.Context, ready <-chan struct{}, delay, total time.Duration) {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ready:
+		return
+	case <-ctx.Done():
+		return
+	case <-timer.C:
+	}
+	buf := make([]byte, 1<<20)
+	n := goruntime.Stack(buf, true)
+	fmt.Fprintf(cr.stderr, //nolint:errcheck // best-effort stderr
+		"%s: startup watchdog: city %q not ready after %s (half of [daemon].start_ready_timeout=%s); goroutine dump follows:\n%s\n",
+		cr.logPrefix, cr.cityName, delay, total, buf[:n])
+}
+
+// tickDebouncer coalesces bursty event-driven tick signals into a
+// single delayed fire. The first arm() call in a quiet period schedules
+// a timer; subsequent arm() calls while the timer is pending are
+// dropped (the eventual single fire re-reads authoritative state
+// covering all collapsed events). When delay <= 0 it falls back to
+// non-blocking send on fired(), preserving the cap=1 channel-level
+// coalesce semantics the runtime had before debouncing was added.
+//
+// Methods are safe to call from multiple goroutines (time.AfterFunc
+// callbacks run on their own goroutine).
+type tickDebouncer struct {
+	mu     sync.Mutex
+	timer  *time.Timer
+	fireCh chan struct{}
+}
+
+// newTickDebouncer allocates a tickDebouncer with a cap=1 fire channel.
+// The channel buffer matches the existing pokeCh/controlDispatcherCh
+// non-blocking-send pattern so a pending fire collapses with any new
+// arm() call that completes before the receiver drains.
+func newTickDebouncer() *tickDebouncer {
+	return &tickDebouncer{fireCh: make(chan struct{}, 1)}
+}
+
+// arm schedules a fire after delay if no fire is already pending. If
+// delay <= 0 the fire is enqueued immediately (non-blocking) to keep
+// debounce-disabled runtime cost identical to the prior implementation.
+func (d *tickDebouncer) arm(delay time.Duration) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if delay <= 0 {
+		select {
+		case d.fireCh <- struct{}{}:
+		default:
+		}
+		return
+	}
+	if d.timer != nil {
+		return // already pending — burst collapse
+	}
+	d.timer = time.AfterFunc(delay, func() {
+		d.mu.Lock()
+		d.timer = nil
+		d.mu.Unlock()
+		select {
+		case d.fireCh <- struct{}{}:
+		default:
+		}
+	})
+}
+
+// cancelPending stops an armed timer and discards a queued fire, if
+// any. Used when a higher-priority tick (e.g. the periodic patrol)
+// supersedes whatever caused the pending fire.
+func (d *tickDebouncer) cancelPending() {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.timer != nil {
+		d.timer.Stop()
+		d.timer = nil
+	}
+	select {
+	case <-d.fireCh:
+	default:
+	}
+}
+
+// fired returns the channel that emits when a debounced fire is due.
+func (d *tickDebouncer) fired() <-chan struct{} {
+	return d.fireCh
 }
 
 func convergenceStartupComplete(cr *CityRuntime) bool {
@@ -1142,23 +1288,50 @@ func (cr *CityRuntime) runOrderTrackingSweepWatchdog(now time.Time) {
 	}
 	cr.orderSweepWatchdogLast = now
 
-	store := cr.cityBeadStore()
-	if store == nil {
-		return
-	}
-	onlyOrders := map[string]struct{}{
-		orderTrackingSweepOrder: {},
-	}
-	n, err := sweepStaleOrderTracking(store, now, orderTrackingSweepWatchdogStaleAfter, onlyOrders, orderTrackingWatchdogMetadataInitiator)
-	if err != nil {
-		if cr.stderr != nil {
-			fmt.Fprintf(cr.stderr, "%s: order tracking sweep watchdog: %v\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
+	stores, _, storeErr := cr.orderTrackingSweepStores()
+	if len(stores) == 0 {
+		if storeErr != nil && cr.stderr != nil {
+			fmt.Fprintf(cr.stderr, "%s: order tracking sweep watchdog: %v\n", cr.logPrefix, storeErr) //nolint:errcheck // best-effort stderr
 		}
 		return
 	}
+	// Sweep stale tracking beads for ALL orders (nil filter), not just
+	// order-tracking-sweep's own. The old narrow scope only swept the sweep
+	// order's tracking so that order could bootstrap and clean the rest — a
+	// single-point-of-failure: when slow reconciler cycles keep order-tracking-
+	// sweep from firing, every order's tracking jams and no order fires (#2168).
+	// The staleAfter cutoff still protects in-flight dispatches regardless of
+	// which order they belong to, so a direct all-orders sweep is safe and
+	// recovers the jam without depending on any single order being scheduled.
+	result, sweepErr := sweepStaleOrderTrackingAcrossStores(stores, now, orderTrackingSweepWatchdogStaleAfter, nil, orderTrackingWatchdogMetadataInitiator, false)
+	if err := errors.Join(storeErr, sweepErr); err != nil {
+		if cr.stderr != nil {
+			fmt.Fprintf(cr.stderr, "%s: order tracking sweep watchdog: %v\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
+		}
+	}
+	n := result.trackingClosed
 	if n > 0 && cr.stderr != nil {
 		fmt.Fprintf(cr.stderr, "%s: order tracking sweep watchdog closed %d stale tracking bead(s)\n", cr.logPrefix, n) //nolint:errcheck // best-effort stderr
 	}
+}
+
+func (cr *CityRuntime) orderTrackingSweepStores() ([]beads.Store, []orderTrackingSweepTarget, error) {
+	targets := orderTrackingSweepTargetsForConfig(cr.cityPath, cr.cfg)
+	rigStores := cr.rigBeadStores()
+	stores, err := orderTrackingSweepStoresFromTargets(targets, func(sweepTarget orderTrackingSweepTarget) (beads.Store, error) {
+		var store beads.Store
+		switch sweepTarget.target.ScopeKind {
+		case "city":
+			store = cr.cityBeadStore()
+		case "rig":
+			store = rigStores[sweepTarget.target.RigName]
+		}
+		if store == nil {
+			return newCityRuntimeOpenSweepStore(sweepTarget.target.ScopeRoot, cr.cityPath)
+		}
+		return store, nil
+	})
+	return stores, targets, err
 }
 
 func (cr *CityRuntime) handleReloadRequest(req *reloadRequest) {
@@ -2166,7 +2339,8 @@ func sweepUndesiredPoolSessionBeads(
 		if agentCfg == nil || !isEphemeralSessionBead(bead) {
 			continue
 		}
-		if running, err := poolSessionBeadRuntimeRunning(bead, sp); err == nil && running {
+		processNames := config.AgentProcessNames(cfg, *agentCfg, exec.LookPath)
+		if running, err := poolSessionBeadRuntimeRunning(bead, sp, processNames); err == nil && running {
 			continue
 		}
 		candidates = append(candidates, bead)
@@ -2174,7 +2348,7 @@ func sweepUndesiredPoolSessionBeads(
 	return len(GCSweepSessionBeads(store, rigStores, candidates))
 }
 
-func poolSessionBeadRuntimeRunning(bead beads.Bead, sp runtime.Provider) (bool, error) {
+func poolSessionBeadRuntimeRunning(bead beads.Bead, sp runtime.Provider, processNames []string) (bool, error) {
 	if sp == nil {
 		return false, fmt.Errorf("pool session runtime check: %w", runtime.ErrSessionNotFound)
 	}
@@ -2182,10 +2356,10 @@ func poolSessionBeadRuntimeRunning(bead beads.Bead, sp runtime.Provider) (bool, 
 	if name == "" {
 		return false, fmt.Errorf("pool session runtime check missing session name: %w", runtime.ErrSessionNotFound)
 	}
-	// The sweep only needs provider-runtime presence, not process aliveness or
-	// attachment/activity details. ObserveLiveness preserves provider-native
-	// running semantics without the heavier worker observation path.
-	return runtime.ObserveLiveness(sp, name, nil).Running, nil
+	// The sweep only needs provider-runtime/process presence, not attachment or
+	// activity details. Process-name hints preserve the same false-negative
+	// recovery used by worker observation without the heavier handle path.
+	return runtime.ObserveLiveness(sp, name, processNames).Running, nil
 }
 
 // pendingCreateClaimStillLeasedForSweep keeps pending_create_claim protection

@@ -99,9 +99,9 @@ agents/&lt;name&gt;/agent.toml. These files live in the city directory and do
 not append [[agent]] blocks to city.toml.
 
 Use --prompt-template to copy prompt content from an existing file into
-the canonical prompt.template.md location. Use --dir to record a rig or
-working-directory prefix in agent.toml. Use --suspended to scaffold the
-agent in a suspended state.
+the canonical prompt.template.md location. Schema-2 convention agents are
+city-scoped; define rig-scoped agents in pack config or [[patches.agent]].
+Use --suspended to scaffold the agent in a suspended state.
 
 ```
 gc agent add --name <name> [flags]
@@ -111,13 +111,13 @@ gc agent add --name <name> [flags]
 
 ```
 gc agent add --name mayor
-  gc agent add --name polecat --dir my-project
+  gc agent add --name polecat
   gc agent add --name worker --prompt-template ./worker.md --suspended
 ```
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
-| `--dir` | string |  | Working directory for the agent (relative to city root) |
+| `--dir` | string |  | Legacy working directory for schema-1 agents; schema-2 convention agents are city-scoped |
 | `--json` | bool |  | Output in JSONL format |
 | `--name` | string |  | Name of the agent |
 | `--prompt-template` | string |  | Path to prompt template file (relative to city root) |
@@ -273,7 +273,9 @@ gc bd --rig my-project list
 
 Manage the beads provider (backing store for issue tracking).
 
-Subcommands for topology operations, health checking, and diagnostics.
+Subcommands for topology operations, health checking, diagnostics, and
+read-only list/show routed through the supervisor API with transparent
+fallback to direct bd reads.
 
 ```
 gc beads
@@ -283,6 +285,8 @@ gc beads
 |------------|-------------|
 | [gc beads city](#gc-beads-city) | Manage canonical city endpoint topology |
 | [gc beads health](#gc-beads-health) | Check beads provider health |
+| [gc beads list](#gc-beads-list) | List beads (API-routed with bd fallback) |
+| [gc beads show](#gc-beads-show) | Show a single bead (API-routed with bd fallback) |
 
 ## gc beads city
 
@@ -354,6 +358,49 @@ gc beads health
 |------|------|---------|-------------|
 | `--json` | bool |  | emit JSON result |
 | `--quiet` | bool |  | silent on success, stderr on failure |
+
+## gc beads list
+
+List beads across all rigs, routed through the supervisor API when
+the controller is alive and falling back to a direct multi-store read
+otherwise.
+
+Supports --label, --status, --all, and --format flags. --json is an
+alias for --format=json. API-path JSON output includes _cache_age_s;
+fallback-path JSON omits it.
+
+```
+gc beads list
+```
+
+**Example:**
+
+```
+gc beads list
+  gc beads list --label ready-to-build
+  gc beads list --status open --json
+  gc beads list --format=toon
+```
+
+## gc beads show
+
+Show one bead by ID, routed through the supervisor API when the
+controller is alive and falling back to a direct multi-store lookup
+otherwise.
+
+Supports --format and --json. API-path JSON output includes
+_cache_age_s; fallback-path JSON omits it.
+
+```
+gc beads show <bead-id>
+```
+
+**Example:**
+
+```
+gc beads show ga-abc
+  gc beads show ga-abc --json
+```
 
 ## gc build-image
 
@@ -1078,10 +1125,12 @@ gc doctor
   gc doctor --fix
   gc doctor --verbose
   gc doctor --json
+  gc doctor --explain-postgres-auth
 ```
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
+| `--explain-postgres-auth` | bool |  | after running checks, print per-scope Postgres credential resolution table (no values printed) |
 | `--fix` | bool |  | attempt automatic repairs and safe mechanical migrations |
 | `--json` | bool |  | emit structured JSON instead of human-readable output |
 | `-v`, `--verbose` | bool |  | show extra diagnostic details |
@@ -1165,6 +1214,7 @@ gc event emit <type> [flags]
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--actor` | string |  | Actor name (default: $GC_ALIAS, else $GC_AGENT, else $GC_SESSION_ID, else "human") |
+| `--bead-payload` | string |  | Best-effort bead ID fallback for hook payloads |
 | `--json` | bool |  | emit JSON summary |
 | `--message` | string |  | Event message |
 | `--payload` | string |  | JSON payload to attach to the event |
@@ -1598,13 +1648,23 @@ Use this to dismiss messages without reading them. Each message is marked
 as closed and will no longer appear in mail check or inbox results. When
 multiple IDs are passed, they are archived in a single batch round-trip.
 
+For large advisory backlogs, use --to with --subject-prefix, --subject-contains,
+or --from to archive a bounded matching slice without enumerating IDs by hand.
+
 ```
 gc mail archive <id>... [flags]
 ```
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
+| `--dry-run` | bool |  | list matching messages without archiving them |
+| `--from` | string |  | archive matching unread messages from this exact sender |
+| `--include-read` | bool |  | include read-but-open messages when selecting by filter |
 | `--json` | bool |  | emit JSONL result |
+| `--limit` | int | `100` | maximum matching messages to archive in this run |
+| `--subject-contains` | string |  | archive matching unread messages whose subject contains this text |
+| `--subject-prefix` | string |  | archive matching unread messages whose subject starts with this text |
+| `--to` | string |  | archive matching unread messages addressed to this recipient |
 
 ## gc mail check
 
@@ -1996,6 +2056,7 @@ gc pack
 |------------|-------------|
 | [gc pack fetch](#gc-pack-fetch) | Clone missing and update existing remote packs |
 | [gc pack list](#gc-pack-list) | Show remote pack sources and cache status |
+| [gc pack registry](#gc-pack-registry) | Manage pack registries |
 
 ## gc pack fetch
 
@@ -2019,6 +2080,101 @@ and locked commit hash (if available).
 ```
 gc pack list
 ```
+
+## gc pack registry
+
+Manage configured Gas City pack registries and inspect cached catalog entries.
+
+```
+gc pack registry
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| [gc pack registry add](#gc-pack-registry-add) | Add a pack registry |
+| [gc pack registry list](#gc-pack-registry-list) | List configured pack registries |
+| [gc pack registry refresh](#gc-pack-registry-refresh) | Refresh cached pack registry catalogs |
+| [gc pack registry remove](#gc-pack-registry-remove) | Remove a pack registry |
+| [gc pack registry search](#gc-pack-registry-search) | Search cached pack registry catalogs |
+| [gc pack registry show](#gc-pack-registry-show) | Show one pack registry entry |
+
+## gc pack registry add
+
+Add a pack registry
+
+```
+gc pack registry add <registry-name> <source> [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--json` | bool |  | emit JSONL result |
+| `--no-validate` | bool |  | record the registry without fetching its catalog now |
+
+## gc pack registry list
+
+List configured pack registries
+
+```
+gc pack registry list [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--json` | bool |  | emit JSONL result |
+
+## gc pack registry refresh
+
+Refresh cached pack registry catalogs
+
+```
+gc pack registry refresh [registry-name] [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--json` | bool |  | emit JSONL result |
+
+## gc pack registry remove
+
+Remove a pack registry
+
+```
+gc pack registry remove <registry-name> [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--json` | bool |  | emit JSONL result |
+
+## gc pack registry search
+
+Search cached pack registry catalogs
+
+```
+gc pack registry search [query] [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--all` | bool |  | show all results |
+| `--json` | bool |  | emit JSONL result |
+| `--limit` | int | `50` | maximum number of results |
+| `--refresh` | bool |  | refresh catalogs before searching |
+| `--registry` | string |  | search only one registry |
+
+## gc pack registry show
+
+Show one pack registry entry
+
+```
+gc pack registry show <pack-name> [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--json` | bool |  | emit JSONL result |
+| `--refresh` | bool |  | refresh catalogs before showing |
 
 ## gc prime
 

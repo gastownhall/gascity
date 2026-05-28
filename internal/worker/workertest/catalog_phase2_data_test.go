@@ -13,6 +13,8 @@ func TestPhase2CatalogDataIsAuthoritative(t *testing.T) {
 		{Code: RequirementInputInitialMessageFirstStart, Group: "input_delivery", Description: "A configured initial_message is injected into the first start exactly once."},
 		{Code: RequirementInputInitialMessageResume, Group: "input_delivery", Description: "A resumed session does not replay the initial_message after the first start has been recorded."},
 		{Code: RequirementInputOverrideDefaults, Group: "input_delivery", Description: "Schema overrides and initial_message handling preserve provider default launch flags while separating first-input delivery from option overrides."},
+		{Code: RequirementInputInProgressResumeRestart, Group: "input_delivery", Description: "A resumed session with in-progress assigned work receives a restart turn instead of landing idle when no explicit nudge is configured."},
+		{Code: RequirementInputPreClaimResumeRestart, Group: "input_delivery", Description: "A resumed session with pre-claim work demand receives a restart turn instead of landing idle when no explicit nudge is configured."},
 		{Code: RequirementTranscriptDiagnostics, Group: "transcript", Description: "Malformed or torn transcript data is reported as degraded history or a fail-closed load error instead of clean normalized history."},
 		{Code: RequirementInteractionSignal, Group: "interaction", Description: "The standalone fake worker surfaces a blocked structured interaction signal and state."},
 		{Code: RequirementInteractionPending, Group: "interaction", Description: "Required structured interactions surface through the runtime interaction seam."},

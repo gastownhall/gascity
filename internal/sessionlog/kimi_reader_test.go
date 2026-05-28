@@ -232,10 +232,10 @@ func TestFindKimiSessionFileByIDUsesSessionKey(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if got := FindKimiSessionFile([]string{base}, workDir); got != newPath {
+	if got := FindKimiSessionFile([]string{base}, workDir); !samePath(got, newPath) {
 		t.Fatalf("FindKimiSessionFile() = %q, want newest %q", got, newPath)
 	}
-	if got := FindKimiSessionFileByID([]string{base}, workDir, "old-session"); got != oldPath {
+	if got := FindKimiSessionFileByID([]string{base}, workDir, "old-session"); !samePath(got, oldPath) {
 		t.Fatalf("FindKimiSessionFileByID() = %q, want keyed %q", got, oldPath)
 	}
 }
@@ -252,12 +252,21 @@ func TestFindKimiSessionFileFollowsSymlinkedRoots(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if got := FindKimiSessionFile([]string{base}, workDir); got != want {
+	if got := FindKimiSessionFile([]string{base}, workDir); !samePath(got, want) {
 		t.Fatalf("FindKimiSessionFile() = %q, want symlinked root transcript %q", got, want)
 	}
-	if got := FindKimiSessionFileByID([]string{base}, workDir, "session-key"); got != want {
+	if got := FindKimiSessionFileByID([]string{base}, workDir, "session-key"); !samePath(got, want) {
 		t.Fatalf("FindKimiSessionFileByID() = %q, want symlinked root transcript %q", got, want)
 	}
+}
+
+func samePath(a, b string) bool {
+	if a == b {
+		return true
+	}
+	resolvedA, errA := filepath.EvalSymlinks(a)
+	resolvedB, errB := filepath.EvalSymlinks(b)
+	return errA == nil && errB == nil && resolvedA == resolvedB
 }
 
 func TestFindKimiSessionFileLogsMissingWorkDirHashDiagnostic(t *testing.T) {

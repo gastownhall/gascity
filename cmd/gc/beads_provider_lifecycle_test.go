@@ -132,6 +132,35 @@ func TestProviderLifecycleProcessEnvPropagatesManagedDoltTestMode(t *testing.T) 
 	}
 }
 
+// TestProviderLifecycleProcessEnvDoesNotPropagateStrayTestModeEnv verifies the
+// M1 hardening from the #2313 follow-up: a stray GC_MANAGED_DOLT_TEST_MODE=1
+// in the parent shell of a non-test `gc` binary must NOT cause the watchdog
+// test env to be injected into child managed-dolt processes. The seam
+// (managedDoltTestMode) controls whether we behave as a test binary; flipping
+// it false simulates a production binary even though we run inside a Go test.
+func TestProviderLifecycleProcessEnvDoesNotPropagateStrayTestModeEnv(t *testing.T) {
+	cityPath := t.TempDir()
+	withManagedDoltTestMode(t, false)
+	t.Setenv(managedDoltTestModeEnv, "1")
+	t.Setenv(managedDoltTestParentPIDEnv, "424242")
+
+	envEntries := mustProviderLifecycleProcessEnv(t, cityPath, "exec:"+gcBeadsBdScriptPath(cityPath))
+	env := map[string]string{}
+	for _, entry := range envEntries {
+		key, value, ok := strings.Cut(entry, "=")
+		if ok {
+			env[key] = value
+		}
+	}
+
+	if got, ok := env[managedDoltTestModeEnv]; ok {
+		t.Fatalf("providerLifecycleProcessEnv()[%s] = %q, want absent (non-test binary must not propagate stray test env)", managedDoltTestModeEnv, got)
+	}
+	if got, ok := env[managedDoltTestParentPIDEnv]; ok {
+		t.Fatalf("providerLifecycleProcessEnv()[%s] = %q, want absent", managedDoltTestParentPIDEnv, got)
+	}
+}
+
 func TestProviderLifecycleProcessEnvCanonicalizesSymlinkedCityPath(t *testing.T) {
 	root := t.TempDir()
 	realParent := filepath.Join(root, "real")

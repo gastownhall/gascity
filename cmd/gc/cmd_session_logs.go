@@ -293,7 +293,7 @@ func sessionLogFallbackCandidateLive(b beads.Bead) bool {
 		return false
 	}
 	switch sessionpkg.State(strings.TrimSpace(b.Metadata["state"])) {
-	case sessionpkg.StateActive, sessionpkg.StateAwake, sessionpkg.StateCreating, sessionpkg.StateDraining:
+	case sessionpkg.StateActive, sessionpkg.StateAwake, sessionpkg.StateStartPending, sessionpkg.StateCreating, sessionpkg.StateDraining:
 		return true
 	default:
 		return false

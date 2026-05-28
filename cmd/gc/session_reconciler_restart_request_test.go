@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/agent"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
@@ -301,6 +302,204 @@ func TestReconcileSessionBeads_RestartRequestPreservesIntentWhenKillFails(t *tes
 	}
 	if got := env.stderr.String(); !strings.Contains(got, "stopping restart-requested") || !strings.Contains(got, "kill denied") {
 		t.Fatalf("stderr = %q, want kill failure diagnostic", got)
+	}
+}
+
+func TestReconcileSessionBeads_RestartRequestClearsCircuitBreakerForNextWake(t *testing.T) {
+	env := newRestartRequestTestEnv()
+	env.cfg = &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Daemon: config.DaemonConfig{
+			SessionCircuitBreaker:            true,
+			SessionCircuitBreakerMaxRestarts: restartRequestTestIntPtr(3),
+			SessionCircuitBreakerWindow:      "30m",
+		},
+		Agents:        []config.Agent{{Name: "worker", StartCommand: "true", MaxActiveSessions: restartRequestTestIntPtr(1)}},
+		NamedSessions: []config.NamedSession{{Template: "worker", Mode: "always"}},
+	}
+	sessionName := config.NamedSessionRuntimeName(env.cfg.Workspace.Name, env.cfg.Workspace, "worker")
+	env.desiredState[sessionName] = TemplateParams{
+		Command:      "true",
+		SessionName:  sessionName,
+		TemplateName: "worker",
+		ResolvedProvider: &config.ResolvedProvider{
+			SessionIDFlag: "--session-id",
+		},
+	}
+
+	const identity = "worker"
+	cb := breakerAt(30*time.Minute, 3)
+	base := env.clk.Now().UTC()
+	for i := 0; i < 4; i++ {
+		cb.RecordRestart(identity, base.Add(time.Duration(i)*time.Second))
+	}
+	if !cb.IsOpen(identity, base.Add(time.Minute)) {
+		t.Fatalf("precondition: breaker should be OPEN for %q", identity)
+	}
+	restore := setSessionCircuitBreakerForTest(cb)
+	defer restore()
+
+	session := env.createSessionBead(sessionName)
+	env.setSessionMetadata(&session, map[string]string{
+		namedSessionMetadataKey:      "true",
+		namedSessionIdentityMetadata: identity,
+		namedSessionModeMetadata:     "always",
+		"state":                      "active",
+		"restart_requested":          "true",
+		"session_key":                "original-key",
+		"started_config_hash":        "hash-before-restart",
+	})
+	if err := persistSessionCircuitBreakerMetadata(env.store, &session, cb, identity, base); err != nil {
+		t.Fatalf("persist circuit metadata: %v", err)
+	}
+	if err := env.sp.Start(context.Background(), sessionName, runtime.Config{Command: "true"}); err != nil {
+		t.Fatalf("start session: %v", err)
+	}
+	if err := env.sp.SetMeta(sessionName, "GC_SESSION_ID", session.ID); err != nil {
+		t.Fatalf("SetMeta(GC_SESSION_ID): %v", err)
+	}
+
+	env.reconcile([]beads.Bead{session})
+
+	if env.sp.IsRunning(sessionName) {
+		t.Fatalf("session %q still running after restart-requested kill", sessionName)
+	}
+	if cb.IsOpen(identity, base.Add(time.Minute)) {
+		t.Fatalf("breaker still OPEN for %q after restart-requested kill", identity)
+	}
+	stopped, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("store.Get(%s): %v", session.ID, err)
+	}
+	if got := stopped.Metadata[sessionCircuitStateMetadata]; got != "" {
+		t.Fatalf("persisted circuit state = %q, want cleared", got)
+	}
+	if got := stopped.Metadata[sessionCircuitRestartsMetadata]; got != "" {
+		t.Fatalf("persisted restart history = %q, want cleared", got)
+	}
+	if got := stopped.Metadata[sessionCircuitResetGenerationMetadata]; got == "" {
+		t.Fatal("persisted reset generation is empty, want explicit reset generation")
+	}
+
+	env.stdout.Reset()
+	env.stderr.Reset()
+	env.reconcile([]beads.Bead{stopped})
+
+	if !env.sp.IsRunning(sessionName) {
+		t.Fatalf("session %q did not wake after explicit reset cleared the circuit breaker", sessionName)
+	}
+	if got := env.stderr.String(); strings.Contains(got, "CIRCUIT_OPEN") {
+		t.Fatalf("stderr = %q, want no circuit-open block after explicit reset", got)
+	}
+}
+
+func TestReconcileSessionBeads_RestartRequestPreemptsRateLimitGate(t *testing.T) {
+	env, session, sessionName := newRestartRequestedZombieSession(t)
+	env.sp.SetPeekOutput(sessionName, "You've hit your limit, Pro plan\n\n/rate-limit-options")
+	env.setSessionMetadata(&session, map[string]string{
+		"last_woke_at": env.clk.Now().Add(-10 * time.Second).UTC().Format(time.RFC3339),
+	})
+
+	env.reconcile([]beads.Bead{session})
+
+	assertRestartRequestStoppedBeforeAutonomousGate(t, env, session.ID, sessionName)
+	got, _ := env.store.Get(session.ID)
+	if got.Metadata["sleep_reason"] == "rate_limit" {
+		t.Fatalf("sleep_reason = %q, want explicit reset to preempt rate-limit gate", got.Metadata["sleep_reason"])
+	}
+}
+
+func TestReconcileSessionBeads_RestartRequestPreemptsStabilityGate(t *testing.T) {
+	env, session, sessionName := newRestartRequestedZombieSession(t)
+	env.setSessionMetadata(&session, map[string]string{
+		"last_woke_at": env.clk.Now().Add(-10 * time.Second).UTC().Format(time.RFC3339),
+	})
+
+	env.reconcile([]beads.Bead{session})
+
+	assertRestartRequestStoppedBeforeAutonomousGate(t, env, session.ID, sessionName)
+	got, _ := env.store.Get(session.ID)
+	if got.Metadata["last_woke_at"] != "" {
+		t.Fatalf("last_woke_at = %q, want restart patch to clear crash-tracker lease", got.Metadata["last_woke_at"])
+	}
+	if got.Metadata["sleep_reason"] == "rate_limit" {
+		t.Fatalf("sleep_reason = %q, want explicit reset to preempt stability gate", got.Metadata["sleep_reason"])
+	}
+}
+
+func TestReconcileSessionBeads_RestartRequestPreemptsChurnGate(t *testing.T) {
+	env, session, sessionName := newRestartRequestedZombieSession(t)
+	env.setSessionMetadata(&session, map[string]string{
+		"last_woke_at": env.clk.Now().Add(-90 * time.Second).UTC().Format(time.RFC3339),
+	})
+
+	env.reconcile([]beads.Bead{session})
+
+	assertRestartRequestStoppedBeforeAutonomousGate(t, env, session.ID, sessionName)
+	got, _ := env.store.Get(session.ID)
+	if got.Metadata["churn_count"] != "" {
+		t.Fatalf("churn_count = %q, want explicit reset to preempt churn gate", got.Metadata["churn_count"])
+	}
+}
+
+func newRestartRequestedZombieSession(t *testing.T) (*restartRequestTestEnv, beads.Bead, string) {
+	t.Helper()
+	env := newRestartRequestTestEnv()
+	env.cfg = &config.City{
+		Workspace:     config.Workspace{Name: "test-city"},
+		Agents:        []config.Agent{{Name: "worker", StartCommand: "true", MaxActiveSessions: restartRequestTestIntPtr(1)}},
+		NamedSessions: []config.NamedSession{{Template: "worker", Mode: "on_demand"}},
+	}
+	sessionName := config.NamedSessionRuntimeName(env.cfg.Workspace.Name, env.cfg.Workspace, "worker")
+	env.desiredState[sessionName] = TemplateParams{
+		Command:      "true",
+		SessionName:  sessionName,
+		TemplateName: "worker",
+		Hints:        agent.StartupHints{ProcessNames: []string{"agent-cli"}},
+		ResolvedProvider: &config.ResolvedProvider{
+			SessionIDFlag: "--session-id",
+		},
+	}
+	session := env.createSessionBead(sessionName)
+	env.setSessionMetadata(&session, map[string]string{
+		namedSessionMetadataKey:      "true",
+		namedSessionIdentityMetadata: "worker",
+		namedSessionModeMetadata:     "on_demand",
+		"state":                      "active",
+		"restart_requested":          "true",
+		"session_key":                "original-key",
+		"started_config_hash":        "hash-before-restart",
+	})
+	if err := env.sp.Start(context.Background(), sessionName, runtime.Config{Command: "true", ProcessNames: []string{"agent-cli"}}); err != nil {
+		t.Fatalf("start session: %v", err)
+	}
+	if err := env.sp.SetMeta(sessionName, "GC_SESSION_ID", session.ID); err != nil {
+		t.Fatalf("SetMeta(GC_SESSION_ID): %v", err)
+	}
+	env.sp.Zombies[sessionName] = true
+	return env, session, sessionName
+}
+
+func assertRestartRequestStoppedBeforeAutonomousGate(t *testing.T, env *restartRequestTestEnv, sessionID, sessionName string) {
+	t.Helper()
+	if env.sp.IsRunning(sessionName) {
+		t.Fatalf("session %q still running; explicit reset should stop it before autonomous gates", sessionName)
+	}
+	got, _ := env.store.Get(sessionID)
+	if got.Metadata["restart_requested"] != "" {
+		t.Fatalf("restart_requested = %q, want cleared after explicit reset patch", got.Metadata["restart_requested"])
+	}
+	if got.Metadata["session_key"] == "" || got.Metadata["session_key"] == "original-key" {
+		t.Fatalf("session_key = %q, want rotated key", got.Metadata["session_key"])
+	}
+	if got.Metadata["started_config_hash"] != "" {
+		t.Fatalf("started_config_hash = %q, want cleared", got.Metadata["started_config_hash"])
+	}
+	if got.Metadata["continuation_reset_pending"] != "true" {
+		t.Fatalf("continuation_reset_pending = %q, want true", got.Metadata["continuation_reset_pending"])
+	}
+	if got := env.stdout.String(); !strings.Contains(got, "Stopped restart-requested session") {
+		t.Fatalf("stdout = %q, want stop diagnostic", got)
 	}
 }
 

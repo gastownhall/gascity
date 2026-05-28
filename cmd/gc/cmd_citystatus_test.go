@@ -6,12 +6,15 @@ import (
 	"encoding/json"
 	"errors"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -394,6 +397,7 @@ func TestCityStatusJSONWithAgents(t *testing.T) {
 
 func TestCityStatusJSONReportsObservationErrors(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
 
 	sp := runtime.NewFake()
 	if err := sp.Start(context.Background(), "mayor", runtime.Config{Command: "echo"}); err != nil {
@@ -840,6 +844,279 @@ type listErrorStore struct {
 
 func (s *listErrorStore) List(beads.ListQuery) ([]beads.Bead, error) {
 	return nil, errors.New("catalog unavailable")
+}
+
+// ---------------------------------------------------------------------------
+// Six-row read-path routing matrix for `gc status` (ADR 0001, ga-h6w).
+// ---------------------------------------------------------------------------
+//
+// Each row exercises one branch of routeCityStatus:
+//
+//   api-happy-path       API returns 200 with items         route=api, exit 0
+//   api-cache-not-live   API returns 503 cache_not_live     fallback, exit 0
+//   api-500-fallback     API returns generic 500            fallback (conn-refused), exit 0
+//   api-404-error        API returns 404                    no fallback, exit 1
+//   controller-down      apiClient returns nil (no env)     fallback (controller-down), exit 0
+//   escape-hatch         GC_NO_API truthy                   fallback (escape-hatch), exit 0
+
+type cityStatusMatrixHandler func(t *testing.T) http.Handler
+
+func okCityStatusHandler(_ *testing.T) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/status") {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("X-GC-Cache-Age-S", "2")
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"name":        "test-city",
+			"path":        "/tmp/test-city",
+			"uptime_sec":  1,
+			"suspended":   false,
+			"agent_count": 1,
+			"rig_count":   0,
+			"running":     1,
+			"agents":      map[string]any{"total": 1, "running": 1},
+			"rigs":        map[string]any{"total": 0},
+			"work":        map[string]any{},
+			"mail":        map[string]any{},
+			"agent_details": []map[string]any{
+				{
+					"name":           "mayor",
+					"qualified_name": "mayor",
+					"scope":          "city",
+					"running":        true,
+					"suspended":      false,
+					"session_name":   "test-city--mayor",
+					"group_name":     "mayor",
+				},
+			},
+		})
+	})
+}
+
+func cityStatusProblemHandler(status int, detail string) cityStatusMatrixHandler {
+	return func(_ *testing.T) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/problem+json")
+			w.WriteHeader(status)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"status": status,
+				"title":  http.StatusText(status),
+				"detail": detail,
+			})
+		})
+	}
+}
+
+func writeCityStatusTestCity(t *testing.T) string {
+	t.Helper()
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cityToml := `[workspace]
+name = "test-city"
+
+[[agent]]
+name = "mayor"
+`
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+	return cityPath
+}
+
+func TestRouteCityStatus_SixRowMatrix(t *testing.T) {
+	tests := []struct {
+		name         string
+		handler      cityStatusMatrixHandler
+		useNilClient bool
+		nilReason    string
+		wantExit     int
+		wantRoute    string
+		wantReason   string
+		wantStderr   string
+	}{
+		{
+			name:      "api-happy-path",
+			handler:   okCityStatusHandler,
+			wantExit:  0,
+			wantRoute: "api",
+		},
+		{
+			name:       "api-cache-not-live",
+			handler:    cityStatusProblemHandler(http.StatusServiceUnavailable, "cache_not_live: priming"),
+			wantExit:   0,
+			wantRoute:  "fallback",
+			wantReason: "cache-not-live",
+		},
+		{
+			name:       "api-500-fallback",
+			handler:    cityStatusProblemHandler(http.StatusInternalServerError, "explode"),
+			wantExit:   0,
+			wantRoute:  "fallback",
+			wantReason: "conn-refused",
+		},
+		{
+			name:       "api-404-error",
+			handler:    cityStatusProblemHandler(http.StatusNotFound, "not_found: city missing"),
+			wantExit:   1,
+			wantStderr: "not_found",
+		},
+		{
+			name:         "controller-down",
+			useNilClient: true,
+			nilReason:    "controller-down",
+			wantExit:     0,
+			wantRoute:    "fallback",
+			wantReason:   "controller-down",
+		},
+		{
+			name:         "escape-hatch",
+			useNilClient: true,
+			nilReason:    "escape-hatch",
+			wantExit:     0,
+			wantRoute:    "fallback",
+			wantReason:   "escape-hatch",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("GC_DEBUG", "1")
+			cityPath := writeCityStatusTestCity(t)
+			cfg, err := loadCityConfig(cityPath, new(bytes.Buffer))
+			if err != nil {
+				t.Fatalf("loadCityConfig: %v", err)
+			}
+
+			var c *api.Client
+			if !tc.useNilClient {
+				srv := httptest.NewServer(tc.handler(t))
+				defer srv.Close()
+				c = api.NewCityScopedClient(srv.URL, "test-city")
+			}
+
+			sp := runtime.NewFake()
+			dops := newFakeDrainOps()
+			var stdout, stderr bytes.Buffer
+			code := routeCityStatus(cityPath, cfg, sp, dops, c, tc.nilReason, false, &stdout, &stderr)
+
+			if code != tc.wantExit {
+				t.Fatalf("exit = %d, want %d; stderr=%q stdout=%q", code, tc.wantExit, stderr.String(), stdout.String())
+			}
+			if tc.wantRoute != "" {
+				want := "route=" + tc.wantRoute
+				if tc.wantReason != "" {
+					want += " reason=" + tc.wantReason
+				}
+				if !strings.Contains(stderr.String(), want) {
+					t.Errorf("stderr missing %q:\n%s", want, stderr.String())
+				}
+				if n := strings.Count(stderr.String(), "route="); n != 1 {
+					t.Errorf("route=... lines = %d, want 1:\n%s", n, stderr.String())
+				}
+			}
+			if tc.wantStderr != "" && !strings.Contains(stderr.String(), tc.wantStderr) {
+				t.Errorf("stderr missing %q:\n%s", tc.wantStderr, stderr.String())
+			}
+		})
+	}
+}
+
+// TestRouteCityStatus_APIJSONIncludesCacheAge verifies the API-path JSON
+// output carries the _cache_age_s envelope field while the fallback path
+// omits it. Enforces D5 from the gc-read-path design doc.
+func TestRouteCityStatus_APIJSONIncludesCacheAge(t *testing.T) {
+	cityPath := writeCityStatusTestCity(t)
+	cfg, err := loadCityConfig(cityPath, new(bytes.Buffer))
+	if err != nil {
+		t.Fatalf("loadCityConfig: %v", err)
+	}
+
+	srv := httptest.NewServer(okCityStatusHandler(t))
+	defer srv.Close()
+	c := api.NewCityScopedClient(srv.URL, "test-city")
+
+	sp := runtime.NewFake()
+	dops := newFakeDrainOps()
+	var stdout, stderr bytes.Buffer
+	if code := routeCityStatus(cityPath, cfg, sp, dops, c, "", true, &stdout, &stderr); code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	var envelope map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &envelope); err != nil {
+		t.Fatalf("unmarshal: %v; output: %s", err, stdout.String())
+	}
+	age, ok := envelope["_cache_age_s"].(float64)
+	if !ok {
+		t.Fatalf("_cache_age_s missing or wrong type; envelope=%v", envelope)
+	}
+	if age != 2.0 {
+		t.Errorf("_cache_age_s = %v, want 2.0", age)
+	}
+}
+
+func TestRouteCityStatus_FallbackJSONOmitsCacheAge(t *testing.T) {
+	cityPath := writeCityStatusTestCity(t)
+	cfg, err := loadCityConfig(cityPath, new(bytes.Buffer))
+	if err != nil {
+		t.Fatalf("loadCityConfig: %v", err)
+	}
+
+	sp := runtime.NewFake()
+	dops := newFakeDrainOps()
+	var stdout, stderr bytes.Buffer
+	if code := routeCityStatus(cityPath, cfg, sp, dops, nil, "controller-down", true, &stdout, &stderr); code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	var envelope map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &envelope); err != nil {
+		t.Fatalf("unmarshal: %v; output: %s", err, stdout.String())
+	}
+	if _, ok := envelope["_cache_age_s"]; ok {
+		t.Errorf("fallback JSON should omit _cache_age_s, got: %s", stdout.String())
+	}
+}
+
+// TestRouteCityStatus_APIStaleBanner verifies the human-output staleness
+// banner appears when the supervisor reports a cache age > 30 s.
+func TestRouteCityStatus_APIStaleBanner(t *testing.T) {
+	cityPath := writeCityStatusTestCity(t)
+	cfg, err := loadCityConfig(cityPath, new(bytes.Buffer))
+	if err != nil {
+		t.Fatalf("loadCityConfig: %v", err)
+	}
+	staleHandler := func(_ *testing.T) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("X-GC-Cache-Age-S", "123")
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"name": "test-city", "path": "/tmp/test-city",
+				"uptime_sec": 1, "suspended": false,
+				"agent_count": 0, "rig_count": 0, "running": 0,
+				"agents": map[string]any{"total": 0},
+				"rigs":   map[string]any{"total": 0},
+				"work":   map[string]any{}, "mail": map[string]any{},
+			})
+		})
+	}
+	srv := httptest.NewServer(staleHandler(t))
+	defer srv.Close()
+	c := api.NewCityScopedClient(srv.URL, "test-city")
+
+	sp := runtime.NewFake()
+	dops := newFakeDrainOps()
+	var stdout, stderr bytes.Buffer
+	if code := routeCityStatus(cityPath, cfg, sp, dops, c, "", false, &stdout, &stderr); code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "cache age:") {
+		t.Errorf("human output should include stale banner, got:\n%s", stdout.String())
+	}
 }
 
 func TestControllerStatusGuidance(t *testing.T) {

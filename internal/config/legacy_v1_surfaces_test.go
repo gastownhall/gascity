@@ -1,6 +1,7 @@
 package config
 
 import (
+	"os"
 	"strings"
 	"testing"
 
@@ -197,13 +198,30 @@ source = "legacy-pack"
 	}
 }
 
-func TestLoadWithIncludesDetectsLegacyV1SurfacesInSchema2Fragments(t *testing.T) {
+func TestLoadWithIncludesReturnsRootPackReadErrors(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/city.toml"] = []byte(`
+[workspace]
+name = "city"
+`)
+	fs.Errors["/city/pack.toml"] = os.ErrPermission
+
+	_, _, err := LoadWithIncludes(fs, "/city/city.toml")
+	if err == nil {
+		t.Fatal("LoadWithIncludes succeeded, want root pack.toml read error")
+	}
+	if !strings.Contains(err.Error(), "loading city pack.toml") {
+		t.Fatalf("error = %q, want loading context", err)
+	}
+	if !strings.Contains(err.Error(), "permission denied") {
+		t.Fatalf("error = %q, want permission error", err)
+	}
+}
+
+func TestLoadWithIncludesRejectsInlineAgentInSchema2Fragments(t *testing.T) {
 	fs := fsys.NewFake()
 	fs.Files["/city/city.toml"] = []byte(`
 include = ["fragments/legacy.toml"]
-
-[workspace]
-name = "schema2-city"
 `)
 	fs.Files["/city/pack.toml"] = []byte(`
 [pack]
@@ -215,19 +233,92 @@ schema = 2
 name = "fragment-worker"
 `)
 
-	_, prov, err := LoadWithIncludes(fs, "/city/city.toml")
-	if err != nil {
-		t.Fatalf("LoadWithIncludes: %v", err)
+	_, _, err := LoadWithIncludes(fs, "/city/city.toml")
+	if err == nil {
+		t.Fatal("LoadWithIncludes succeeded, want hard error for schema-2 fragment inline agent")
 	}
-	var found bool
-	for _, w := range prov.Warnings {
-		if strings.Contains(w, "/city/fragments/legacy.toml: [[agent]] tables are deprecated") {
-			found = true
-			break
+	for _, want := range []string{
+		"PackV1 config surfaces are no longer supported",
+		"/city/fragments/legacy.toml:2: unsupported PackV1 [[agent]] tables",
+		"move each agent to agents/<name>/agent.toml",
+		packV1MigrationDocsURL,
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error = %v, want substring %q", err, want)
 		}
 	}
-	if !found {
-		t.Fatalf("fragment legacy agent warning missing from %v", prov.Warnings)
+}
+
+func TestLoadWithIncludesRejectsNonAgentLegacyV1SurfacesInSchema2Fragments(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/city.toml"] = []byte(`
+include = ["fragments/legacy.toml"]
+`)
+	fs.Files["/city/pack.toml"] = []byte(`
+[pack]
+name = "schema2-city"
+schema = 2
+`)
+	fs.Files["/city/fragments/legacy.toml"] = []byte(`
+[workspace]
+includes = ["legacy-pack"]
+default_rig_includes = ["default-pack"]
+
+[packs.legacy]
+source = "legacy-pack"
+`)
+
+	_, _, err := LoadWithIncludes(fs, "/city/city.toml")
+	if err == nil {
+		t.Fatal("LoadWithIncludes succeeded, want hard error for schema-2 fragment legacy surfaces")
+	}
+	for _, want := range []string{
+		"PackV1 config surfaces are no longer supported",
+		"/city/fragments/legacy.toml:6: unsupported PackV1 [packs] entries",
+		"/city/fragments/legacy.toml:3: unsupported PackV1 workspace.includes",
+		"/city/fragments/legacy.toml:4: unsupported PackV1 workspace.default_rig_includes",
+		packV1MigrationDocsURL,
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error = %v, want substring %q", err, want)
+		}
+	}
+}
+
+func TestLoadWithIncludesRejectsLegacyV1SurfacesInSchema2City(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/city.toml"] = []byte(`
+[workspace]
+name = "schema2-city"
+includes = ["legacy-pack"]
+default_rig_includes = ["default-pack"]
+
+[[agent]]
+name = "worker"
+
+[packs.legacy]
+source = "legacy-pack"
+`)
+	fs.Files["/city/pack.toml"] = []byte(`
+[pack]
+name = "schema2-city"
+schema = 2
+`)
+
+	_, _, err := LoadWithIncludes(fs, "/city/city.toml")
+	if err == nil {
+		t.Fatal("LoadWithIncludes succeeded, want hard error for schema-2 city legacy surfaces")
+	}
+	for _, want := range []string{
+		"/city/city.toml:7: unsupported PackV1 [[agent]] tables",
+		"/city/city.toml:10: unsupported PackV1 [packs] entries",
+		"/city/city.toml:4: unsupported PackV1 workspace.includes",
+		"/city/city.toml:5: unsupported PackV1 workspace.default_rig_includes",
+		packV1MigrationDocsURL,
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error = %v, want substring %q", err, want)
+		}
 	}
 }
 
@@ -253,7 +344,7 @@ func TestIsLegacyV1SurfaceWarning(t *testing.T) {
 	}
 }
 
-func TestDetectLegacyV1Surfaces_MentionsActionableMigrationCommand(t *testing.T) {
+func TestDetectLegacyV1Surfaces_PointsAtDoctorWithoutPromisingInPlaceUpgrade(t *testing.T) {
 	cfg := &City{
 		Agents: []Agent{{Name: "a"}},
 		Packs:  map[string]PackSource{"p": {}},
@@ -283,5 +374,45 @@ func TestDetectLegacyV1Surfaces_MentionsActionableMigrationCommand(t *testing.T)
 		if strings.Contains(w, "gc import migrate") {
 			t.Errorf("warning %d = %q, should not recommend gc import migrate", i, w)
 		}
+	}
+}
+
+func TestLegacyV1SurfaceErrorAggregatesViolations(t *testing.T) {
+	data := []byte(`[workspace]
+includes = ["./inc"]
+default_rig_includes = ["./drig"]
+
+[[agent]]
+name = "a"
+
+[packs.p]
+source = "./pack"
+`)
+	cfg := &City{
+		Agents: []Agent{{Name: "a"}},
+		Packs:  map[string]PackSource{"p": {}},
+		Workspace: Workspace{
+			Includes:           []string{"./inc"},
+			DefaultRigIncludes: []string{"./drig"},
+		},
+	}
+
+	err := LegacyV1SurfaceError(cfg, "city.toml", data)
+	if err == nil {
+		t.Fatal("LegacyV1SurfaceError returned nil, want aggregated error")
+	}
+	for _, want := range []string{
+		"PackV1 config surfaces are no longer supported",
+		"city.toml:5: unsupported PackV1 [[agent]] tables",
+		"city.toml:8: unsupported PackV1 [packs] entries",
+		"city.toml:2: unsupported PackV1 workspace.includes",
+		"city.toml:3: unsupported PackV1 workspace.default_rig_includes",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error = %v, want substring %q", err, want)
+		}
+	}
+	if got := strings.Count(err.Error(), packV1MigrationDocsURL); got != 1 {
+		t.Fatalf("error = %v, want one docs pointer, got %d", err, got)
 	}
 }

@@ -21,7 +21,7 @@ type FragmentRecipe struct {
 // substitutions. This is used by runtime fan-out to materialize item-specific
 // subgraphs into an existing workflow.
 func CompileExpansionFragment(_ context.Context, name string, searchPaths []string, target *Step, vars map[string]string) (*FragmentRecipe, error) {
-	parser := NewParser(searchPaths...)
+	parser := NewParser(searchPaths...).SetSource(SourceFromEnv())
 
 	f, err := parser.LoadByName(name)
 	if err != nil {

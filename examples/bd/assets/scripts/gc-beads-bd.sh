@@ -2363,25 +2363,21 @@ op_probe() {
     exit 2
 }
 
-# recovery_should_skip_due_to_enospc returns 0 (true) when the recent
-# dolt server log shows disk-exhaustion (ENOSPC) signatures. Restarting
-# dolt under ENOSPC does not free disk space, and the recovery cycle
-# itself amplifies the failure: every restart triggers a fresh conjoin
-# that drops another partial nbs_table_* file in the backup remote,
-# accelerating the disk-full feedback loop. See gastownhall/gascity#2158.
-#
-# Returns 1 (false) when no ENOSPC signature is found in the recent log
-# tail, or when the log file cannot be read.
-recovery_should_skip_due_to_enospc() {
-    [ -n "$LOG_FILE" ] && [ -r "$LOG_FILE" ] || return 1
-    # Scan the recent log tail rather than the whole file; an old transient
-    # ENOSPC error from a since-resolved disk-pressure event should not
-    # block recovery indefinitely.
-    tail -n 1000 "$LOG_FILE" 2>/dev/null \
-        | grep -qE 'no space left on device|copy_file_range:.*no space|ENOSPC' \
-        || return 1
-    return 0
-}
+enospc_helper="$(CDPATH= cd -- "$(dirname "$0")" && pwd)/dolt-enospc.sh"
+if [ -r "$enospc_helper" ]; then
+    . "$enospc_helper"
+else
+    # Some focused shell harnesses execute gc-beads-bd's prelude as a single
+    # temporary file without sibling assets. Keep the production helper as the
+    # canonical copy, but preserve the same detector behavior for those harnesses.
+    recovery_should_skip_due_to_enospc() {
+        [ -n "${LOG_FILE:-}" ] && [ -r "$LOG_FILE" ] || return 1
+        tail -n 1000 "$LOG_FILE" 2>/dev/null \
+            | grep -qE 'no space left on device|copy_file_range:.*no space|ENOSPC' \
+            || return 1
+        return 0
+    }
+fi
 
 # op_recover stops the dolt server, restarts it, and verifies health.
 op_recover() {

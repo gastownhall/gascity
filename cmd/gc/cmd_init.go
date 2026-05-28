@@ -599,9 +599,10 @@ func newInitPackConfig(cityName string) initPackConfig {
 //
 //   - pack.toml owns the portable definition: [pack], explicit [[agent]]
 //     entries when the caller keeps them, [[named_session]], [imports.*],
-//     [providers.*], agent/service patches, formulas, and agent_defaults.
+//     [providers.*], services, and agent patches.
 //   - city.toml keeps only runtime-local deployment settings (e.g.
-//     workspace.provider, workspace.start_command, api, daemon, beads).
+//     workspace.provider, workspace.start_command, agent_defaults,
+//     default-rig imports, rig/provider patches, api, daemon, beads).
 //   - workspace.name and workspace.prefix migrate to .gc/site.toml via
 //     persistInitWorkspaceIdentity, so they are cleared here to avoid
 //     duplicating the city's machine-local identity in city.toml.
@@ -618,9 +619,12 @@ func splitInitConfig(cityName string, cfg *config.City) (initPackConfig, config.
 	cityCfg.Providers = nil
 	cityCfg.Services = nil
 	cityCfg.Formulas = config.FormulasConfig{}
-	cityCfg.Patches = config.Patches{}
-	cityCfg.AgentDefaults = config.AgentDefaults{}
+	cityCfg.Patches = config.Patches{
+		Rigs:      append([]config.RigPatch(nil), cfg.Patches.Rigs...),
+		Providers: append([]config.ProviderPatch(nil), cfg.Patches.Providers...),
+	}
 	cityCfg.AgentsDefaults = config.AgentDefaults{}
+	cityCfg.Defaults = config.PackDefaults{}
 	cityCfg.Workspace.Name = ""
 	cityCfg.Workspace.Prefix = ""
 
@@ -638,12 +642,9 @@ func splitInitConfig(cityName string, cfg *config.City) (initPackConfig, config.
 			packCfg.Providers[name] = spec
 		}
 	}
-	packCfg.AgentDefaults = cfg.AgentDefaults
-	if isZeroValue(packCfg.AgentDefaults) && !isZeroValue(cfg.AgentsDefaults) {
-		packCfg.AgentDefaults = cfg.AgentsDefaults
+	packCfg.Patches = config.Patches{
+		Agents: append([]config.AgentPatch(nil), cfg.Patches.Agents...),
 	}
-	packCfg.Formulas = cfg.Formulas
-	packCfg.Patches = cfg.Patches
 	for _, svc := range cfg.Services {
 		if svc.PublishMode == "direct" {
 			cityCfg.Services = append(cityCfg.Services, svc)
@@ -659,19 +660,30 @@ func splitInitConfig(cityName string, cfg *config.City) (initPackConfig, config.
 		)
 		cityCfg.Workspace.SetLegacyIncludes(nil)
 	}
-	if len(cfg.DefaultRigImports) > 0 {
-		defaults := packDefaults{
-			Rig: packRigDefaults{
-				Imports: make(map[string]config.Import, len(cfg.DefaultRigImports)),
+	defaultRigImports := initDefaultRigImports(cfg)
+	if len(defaultRigImports) > 0 {
+		defaults := config.PackDefaults{
+			Rig: config.PackRigDefaults{
+				Imports: make(map[string]config.Import, len(defaultRigImports)),
 			},
 		}
-		for name, imp := range cfg.DefaultRigImports {
+		for name, imp := range defaultRigImports {
 			defaults.Rig.Imports[name] = imp
 		}
-		packCfg.Defaults = defaults
+		cityCfg.Defaults = defaults
 		cityCfg.Workspace.SetLegacyDefaultRigIncludes(nil)
 	}
 	return packCfg, cityCfg
+}
+
+func initDefaultRigImports(cfg *config.City) map[string]config.Import {
+	if cfg == nil {
+		return nil
+	}
+	if len(cfg.Defaults.Rig.Imports) > 0 {
+		return cfg.Defaults.Rig.Imports
+	}
+	return cfg.DefaultRigImports
 }
 
 func decodeInitPackTemplate(data []byte, cityName string) (initPackConfig, error) {
@@ -757,6 +769,10 @@ func cmdInitFromTOMLFileWithOptions(fs fsys.FS, tomlSrc, cityPath, nameOverride 
 		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	if cfg.Formulas.Dir != "" {
+		fmt.Fprintln(stderr, "gc init: [formulas].dir is no longer supported; use the well-known formulas/ directory") //nolint:errcheck // best-effort stderr
+		return 1
+	}
 
 	// --file creates a new city from a template; default to target dir name.
 	cityName := resolveCityName(nameOverride, "", cityPath)
@@ -804,6 +820,13 @@ func cmdInitFromTOMLFileWithOptions(fs fsys.FS, tomlSrc, cityPath, nameOverride 
 	rewriteInitPromptTemplates(cfg)
 	packCfg, cityCfg := splitInitConfig(cityName, cfg)
 	applyInitPackTemplateExtras(&packCfg, templatePack)
+	var rigSiteBindings []config.Rig
+	if hasInitRigSiteBindings(cityCfg.Rigs) {
+		rigSiteBindings = append([]config.Rig(nil), cityCfg.Rigs...)
+		for i := range cityCfg.Rigs {
+			cityCfg.Rigs[i].Path = ""
+		}
+	}
 	wrotePack, err := writeInitPackTomlOpts(fs, cityPath, packCfg, preserveExisting)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -818,24 +841,46 @@ func cmdInitFromTOMLFileWithOptions(fs fsys.FS, tomlSrc, cityPath, nameOverride 
 		fmt.Fprintf(stderr, "gc init: resolving formulas: %v\n", rfErr) //nolint:errcheck // best-effort stderr
 	}
 
-	// Re-marshal so the name and rewritten prompt paths are updated.
-	content, err := cityCfg.Marshal()
-	if err != nil {
-		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
-
 	// Write city.toml — preserved if --preserve-existing is set and a
 	// committed city.toml is already in place. Persist the workspace identity
 	// regardless so .gc/site.toml agrees with the preserved or newly-written
 	// config.
-	wroteCity, err := writeInitFile(fs, filepath.Join(cityPath, "city.toml"), content, preserveExisting)
-	if err != nil {
-		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
-	if !wroteCity {
-		fmt.Fprintln(stdout, "Preserved existing city.toml.") //nolint:errcheck // best-effort stdout
+	cityTomlPath := filepath.Join(cityPath, "city.toml")
+	if len(rigSiteBindings) > 0 {
+		wroteCity := true
+		if preserveExisting {
+			if _, err := fs.Stat(cityTomlPath); err == nil {
+				wroteCity = false
+			} else if !os.IsNotExist(err) {
+				fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+				return 1
+			}
+		}
+		if wroteCity {
+			writeCfg := cityCfg
+			writeCfg.Rigs = append([]config.Rig(nil), rigSiteBindings...)
+			if err := config.WriteCityAndRigSiteBindingsForEdit(fs, cityTomlPath, &writeCfg); err != nil {
+				fmt.Fprintf(stderr, "gc init: %v\n", initSiteBindingPersistError(err)) //nolint:errcheck // best-effort stderr
+				return 1
+			}
+		} else {
+			fmt.Fprintln(stdout, "Preserved existing city.toml.") //nolint:errcheck // best-effort stdout
+		}
+	} else {
+		// Re-marshal so the name and rewritten prompt paths are updated.
+		content, err := cityCfg.Marshal()
+		if err != nil {
+			fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		wroteCity, err := writeInitFile(fs, cityTomlPath, content, preserveExisting)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		if !wroteCity {
+			fmt.Fprintln(stdout, "Preserved existing city.toml.") //nolint:errcheck // best-effort stdout
+		}
 	}
 	if err := persistInitWorkspaceIdentity(fs, cityPath, filepath.Join(cityPath, "city.toml"), &cityCfg, cityName, cityPrefix); err != nil {
 		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -860,6 +905,15 @@ func cmdInitFromTOMLFileWithOptions(fs fsys.FS, tomlSrc, cityPath, nameOverride 
 		skipProviderReadiness: skipProviderReadiness,
 		commandName:           "gc init",
 	})
+}
+
+func hasInitRigSiteBindings(rigs []config.Rig) bool {
+	for _, rig := range rigs {
+		if strings.TrimSpace(rig.Path) != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // doInit is the pure logic for "gc init". It creates the city directory
@@ -1368,18 +1422,37 @@ func rewriteCopiedInitFromIdentity(fs fsys.FS, cityPath, nameOverride string) (*
 	}
 	cfg.Workspace.Name = ""
 	cfg.Workspace.Prefix = ""
-
-	content, err := cfg.Marshal()
-	if err != nil {
-		return nil, "", "", false, err
+	var rigSiteBindings []config.Rig
+	if hasInitRigSiteBindings(cfg.Rigs) {
+		rigSiteBindings = append([]config.Rig(nil), cfg.Rigs...)
+		for i := range cfg.Rigs {
+			cfg.Rigs[i].Path = ""
+		}
 	}
-	if err := fs.WriteFile(copiedToml, content, 0o644); err != nil {
-		return nil, "", "", false, err
+
+	if len(rigSiteBindings) > 0 {
+		writeCfg := *cfg
+		writeCfg.Rigs = append([]config.Rig(nil), rigSiteBindings...)
+		if err := config.WriteCityAndRigSiteBindingsForEdit(fs, copiedToml, &writeCfg); err != nil {
+			return nil, "", "", false, initSiteBindingPersistError(err)
+		}
+	} else {
+		content, err := cfg.Marshal()
+		if err != nil {
+			return nil, "", "", false, err
+		}
+		if err := fs.WriteFile(copiedToml, content, 0o644); err != nil {
+			return nil, "", "", false, err
+		}
 	}
 	if err := rewriteCopiedInitPackName(fs, cityPath, cityName); err != nil {
 		return nil, "", "", false, err
 	}
 	return cfg, cityName, cityPrefix, true, nil
+}
+
+func initSiteBindingPersistError(err error) error {
+	return fmt.Errorf("writing .gc/site.toml failed while migrating rig paths; city.toml was restored, fix the site binding write error and retry: %w", err)
 }
 
 func rewriteCopiedInitPackName(fs fsys.FS, cityPath, cityName string) error {

@@ -416,6 +416,41 @@ func TestIsStaleCmdGCTestConfigPathSkipsLivePeerOwnerPIDRoot(t *testing.T) {
 	}
 }
 
+func TestIsStaleCmdGCTestConfigPathUsesCurrentGCTOwnerPID(t *testing.T) {
+	ownerPID := 12345
+	root := filepath.Join("/tmp", fmt.Sprintf("%s%d-current", testCmdGCTempRootPrefix, ownerPID))
+	configPath := filepath.Join(root, "TestCase", "001", ".gc", "runtime", "packs", "dolt", "dolt-config.yaml")
+
+	if isStaleCmdGCTestConfigPathWithPIDCheck(configPath, nil, "/tmp", func(pid int) bool {
+		if pid != ownerPID {
+			t.Fatalf("pidAlive called with pid %d, want %d", pid, ownerPID)
+		}
+		return true
+	}) {
+		t.Fatalf("live current gct owner config path %q classified as stale", configPath)
+	}
+	if !isStaleCmdGCTestConfigPathWithPIDCheck(configPath, nil, "/tmp", func(pid int) bool {
+		if pid != ownerPID {
+			t.Fatalf("pidAlive called with pid %d, want %d", pid, ownerPID)
+		}
+		return false
+	}) {
+		t.Fatalf("dead current gct owner config path %q not classified as stale", configPath)
+	}
+}
+
+func TestIsTestConfigPathRetainsLegacyGCTestAllowlistOnly(t *testing.T) {
+	legacyConfig := filepath.Join("/tmp", "gctest-legacy", "TestCase", ".gc", "runtime", "packs", "dolt", "dolt-config.yaml")
+	currentConfig := filepath.Join("/tmp", fmt.Sprintf("%s%d-current", testCmdGCTempRootPrefix, os.Getpid()), "TestCase", ".gc", "runtime", "packs", "dolt", "dolt-config.yaml")
+
+	if !isTestConfigPath(legacyConfig, "/home/u", "/tmp") {
+		t.Fatalf("legacy gctest config path %q should stay in the test allowlist", legacyConfig)
+	}
+	if isTestConfigPath(currentConfig, "/home/u", "/tmp") {
+		t.Fatalf("current gct config path %q must use owner-PID stale-root logic, not the legacy allowlist", currentConfig)
+	}
+}
+
 func TestIsStaleCmdGCTestConfigPathSkipsLegacyUnownedRoot(t *testing.T) {
 	legacyConfig := filepath.Join("/tmp", "gctest-legacy", "TestCase", "001", ".gc", "runtime", "packs", "dolt", "dolt-config.yaml")
 
@@ -495,5 +530,50 @@ func TestDiffDoltProcessSnapshotsReportsOnlyNewPIDsSorted(t *testing.T) {
 	}
 	if got[0].PID != 1001 || got[1].PID != 1003 {
 		t.Fatalf("diff PIDs = [%d %d], want [1001 1003]", got[0].PID, got[1].PID)
+	}
+}
+
+func TestDoltLeakGuardedTestingMFinalSnapshotRunsBeforeRegistryReap(t *testing.T) {
+	tempRoot := filepath.Join(t.TempDir(), "gct12345-current")
+	leaked := DoltProcInfo{
+		PID: 1001,
+		Argv: []string{
+			"dolt",
+			"sql-server",
+			"--config",
+			filepath.Join(tempRoot, "TestCase", ".gc", "runtime", "packs", "dolt", "dolt-config.yaml"),
+		},
+	}
+	var scan int
+	registeredReaped := false
+	var reapedLeaks []DoltProcInfo
+	enumerate := func() ([]DoltProcInfo, error) {
+		scan++
+		if scan == 1 {
+			return nil, nil
+		}
+		if registeredReaped {
+			return nil, nil
+		}
+		return []DoltProcInfo{leaked}, nil
+	}
+	g := newDoltLeakGuardedTestingM(nil, tempRoot)
+
+	code := g.runWith(
+		func() int { return 0 },
+		enumerate,
+		func(string) bool { return false },
+		func() { registeredReaped = true },
+		func(leaked []DoltProcInfo) { reapedLeaks = append(reapedLeaks, leaked...) },
+	)
+
+	if code != 1 {
+		t.Fatalf("guard returned code %d, want 1 for leaked registered process", code)
+	}
+	if len(reapedLeaks) != 1 || reapedLeaks[0].PID != leaked.PID {
+		t.Fatalf("reaped leaks = %#v, want only PID %d through injected reaper", reapedLeaks, leaked.PID)
+	}
+	if !registeredReaped {
+		t.Fatal("registered process reaper was not called after leak detection")
 	}
 }

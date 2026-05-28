@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -77,10 +78,24 @@ type StatusRigJSON struct {
 
 // StatusSummaryJSON is the agent count summary in JSON output.
 type StatusSummaryJSON struct {
-	TotalAgents       int `json:"total_agents"`
-	RunningAgents     int `json:"running_agents"`
-	ActiveSessions    int `json:"active_sessions,omitempty"`
-	SuspendedSessions int `json:"suspended_sessions,omitempty"`
+	TotalAgents       int          `json:"total_agents"`
+	RunningAgents     int          `json:"running_agents"`
+	ActiveSessions    int          `json:"active_sessions,omitempty"`
+	SuspendedSessions int          `json:"suspended_sessions,omitempty"`
+	StoreHealth       *StoreHealth `json:"store_health,omitempty"`
+}
+
+// StoreHealth is the JSON shape of the Dolt bead store health block
+// surfaced by gc status. See ADR 0002 / bead ga-d5y design D9.
+type StoreHealth struct {
+	Path         string  `json:"path"`
+	SizeBytes    int64   `json:"size_bytes"`
+	LiveRows     int     `json:"live_rows"`
+	RatioMB      float64 `json:"ratio_mb_per_row"`
+	Warning      bool    `json:"warning"`
+	ThresholdMB  float64 `json:"threshold_mb_per_row"`
+	LastGCAt     string  `json:"last_gc_at,omitempty"`
+	LastGCStatus string  `json:"last_gc_status,omitempty"`
 }
 
 var (
@@ -115,6 +130,8 @@ all agents with running status, rigs, and a summary count.`,
 }
 
 // cmdCityStatus is the CLI entry point for the city status overview.
+// Routes through the supervisor API when a controller is up and falls
+// back to the local snapshot builder otherwise.
 func cmdCityStatus(args []string, jsonOutput bool, stdout, stderr io.Writer) int {
 	cityPath, err := resolveCommandCity(args)
 	if err != nil {
@@ -152,10 +169,166 @@ func cmdCityStatus(args []string, jsonOutput bool, stdout, stderr io.Writer) int
 	statusSnapshot := loadStatusSessionSnapshot(store, stderr)
 	sp := newStatusSessionProviderForCityWithSnapshot(cfg, cityPath, statusSnapshot)
 	dops := newDrainOps(sp)
+	c, reason := cityStatusAPIClient(cityPath)
+	return routeCityStatus(cityPath, cfg, sp, dops, c, reason, jsonOutput, stdout, stderr)
+}
+
+// cityStatusAPIClient returns (client, "") when the API path is available,
+// or (nil, reason) when the caller should fall back. Indirected through a
+// var so tests inject a client pointed at httptest.Server or force a
+// specific fallback reason without spinning up a real controller.
+var cityStatusAPIClient = func(cityPath string) (*api.Client, string) {
+	if c := apiClient(cityPath); c != nil {
+		return c, ""
+	}
+	return nil, apiClientFallbackReason(cityPath)
+}
+
+// routeCityStatus dispatches `gc status` to the supervisor API when a
+// controller is up; otherwise falls back to the local snapshot builder.
+// Emits exactly one route=... log line per exit path (gated on GC_DEBUG).
+func routeCityStatus(
+	cityPath string,
+	cfg *config.City,
+	sp runtime.Provider,
+	dops drainOps,
+	c *api.Client,
+	nilReason string,
+	jsonOutput bool,
+	stdout, stderr io.Writer,
+) int {
+	const cmdName = "status"
+	if c != nil {
+		cr, err := c.GetStatus()
+		if err == nil {
+			logRoute(stderr, cmdName, "api", "")
+			return renderCityStatusFromAPI(cityPath, cr, dops, jsonOutput, stdout)
+		}
+		if !api.ShouldFallbackForRead(err) {
+			logRoute(stderr, cmdName, "api", "error")
+			fmt.Fprintf(stderr, "gc status: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		logRoute(stderr, cmdName, "fallback", api.FallbackReason(err))
+	} else {
+		logRoute(stderr, cmdName, "fallback", nilReason)
+	}
+	store, code := openCityStatusStore(cityPath, stderr)
+	if code != 0 {
+		return code
+	}
+	statusSnapshot := loadStatusSessionSnapshot(store, stderr)
 	if jsonOutput {
 		return doCityStatusJSONWithStoreAndSnapshot(sp, cfg, cityPath, store, statusSnapshot, stdout, stderr)
 	}
 	return doCityStatusWithStoreAndSnapshot(sp, dops, cfg, cityPath, store, statusSnapshot, stdout, stderr)
+}
+
+// renderCityStatusFromAPI renders the server's StatusView using the same
+// text and JSON formatters as the fallback path. The API path adds
+// _cache_age_s on --json output and a staleness banner on human output
+// when cache age > 30 s.
+//
+// Controller authority is not surfaced through the API response (the
+// server is the controller, so the CLI resolves that locally via
+// controllerStatusForCity — same call the fallback path makes).
+func renderCityStatusFromAPI(cityPath string, cr api.CachedRead[api.StatusView], dops drainOps, jsonOutput bool, stdout io.Writer) int {
+	snapshot := snapshotFromStatusView(cityPath, cr.Body)
+	if jsonOutput {
+		writeCityStatusJSONWithCache(snapshot, snapshot.Summary, cr.AgeSeconds, stdout)
+		return 0
+	}
+	renderCityStatusText(snapshot, dops, stdout)
+	if cr.Body.SessionCounts.Active > 0 || cr.Body.SessionCounts.Suspended > 0 {
+		fmt.Fprintln(stdout)                                                                                                      //nolint:errcheck // best-effort stdout
+		fmt.Fprintf(stdout, "Sessions: %d active, %d suspended\n", cr.Body.SessionCounts.Active, cr.Body.SessionCounts.Suspended) //nolint:errcheck // best-effort stdout
+	}
+	if cr.AgeSeconds > cacheAgeBannerThresholdSeconds {
+		fmt.Fprintf(stdout, "(cache age: %.0fs — reconciler may be lagging)\n", cr.AgeSeconds) //nolint:errcheck // best-effort stdout
+	}
+	return 0
+}
+
+// snapshotFromStatusView builds a cityStatusSnapshot from the API's
+// StatusView so the existing renderCityStatusText + cityStatusJSONFromSnapshot
+// helpers produce identical output on the API path.
+func snapshotFromStatusView(cityPath string, v api.StatusView) cityStatusSnapshot {
+	snapshot := cityStatusSnapshot{
+		CityName:   v.CityName,
+		CityPath:   v.CityPath,
+		Suspended:  v.Suspended,
+		Controller: controllerStatusForCity(cityPath),
+		Summary: StatusSummaryJSON{
+			TotalAgents:       v.Summary.TotalAgents,
+			RunningAgents:     v.Summary.RunningAgents,
+			ActiveSessions:    v.SessionCounts.Active,
+			SuspendedSessions: v.SessionCounts.Suspended,
+		},
+	}
+	for _, a := range v.Agents {
+		snapshot.Agents = append(snapshot.Agents, cityStatusAgentRow{
+			Agent: StatusAgentJSON{
+				Name:          a.Name,
+				QualifiedName: a.QualifiedName,
+				Scope:         a.Scope,
+				Running:       a.Running,
+				Suspended:     a.Suspended,
+			},
+			SessionName: a.SessionName,
+			GroupName:   a.GroupName,
+			ScaleLabel:  a.ScaleLabel,
+			Expanded:    a.Expanded,
+		})
+	}
+	for _, r := range v.Rigs {
+		snapshot.Rigs = append(snapshot.Rigs, StatusRigJSON{
+			Name:      r.Name,
+			Path:      r.Path,
+			Suspended: r.Suspended,
+		})
+	}
+	for _, ns := range v.NamedSessions {
+		snapshot.NamedSessions = append(snapshot.NamedSessions, cityStatusNamedSession{
+			Identity: ns.Identity,
+			Status:   ns.Status,
+			Mode:     ns.Mode,
+		})
+	}
+	if v.StoreHealth != nil {
+		snapshot.Summary.StoreHealth = &StoreHealth{
+			Path:         v.StoreHealth.Path,
+			SizeBytes:    v.StoreHealth.SizeBytes,
+			LiveRows:     v.StoreHealth.LiveRows,
+			RatioMB:      v.StoreHealth.RatioMB,
+			Warning:      v.StoreHealth.Warning,
+			ThresholdMB:  v.StoreHealth.ThresholdMB,
+			LastGCAt:     v.StoreHealth.LastGCAt,
+			LastGCStatus: v.StoreHealth.LastGCStatus,
+		}
+	}
+	return snapshot
+}
+
+// writeCityStatusJSONWithCache writes the snapshot's JSON form with a
+// leading _cache_age_s field inserted at the envelope level. Mirrors the
+// envelope shape other routed read commands emit on the API path.
+func writeCityStatusJSONWithCache(
+	snapshot cityStatusSnapshot,
+	summary StatusSummaryJSON,
+	ageSeconds float64,
+	stdout io.Writer,
+) {
+	status := cityStatusJSONFromSnapshot(snapshot, summary)
+	envelope := struct {
+		CacheAgeS  float64 `json:"_cache_age_s"`
+		StatusJSON         // inline
+	}{CacheAgeS: ageSeconds, StatusJSON: status}
+	data, err := json.MarshalIndent(envelope, "", "  ")
+	if err != nil {
+		fmt.Fprintf(stdout, "{\"error\": %q}\n", err.Error()) //nolint:errcheck // best-effort stdout
+		return
+	}
+	fmt.Fprintln(stdout, string(data)) //nolint:errcheck // best-effort stdout
 }
 
 func observeSessionTargetWithWarning(

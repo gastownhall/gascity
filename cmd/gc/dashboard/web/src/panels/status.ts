@@ -250,22 +250,21 @@ function renderCityScopeBanner(city: string, sessions: SessionSummary[]): void {
     sessions.find((s) => s.configured_named_session && !s.rig) ??
     sessions.find((s) => !s.rig && !s.pool);
 
-  if (!overseer) {
-    banner.classList.remove("attached", "detached");
-    badge.className = "badge badge-cyan";
-    badge.textContent = "City";
-    clear(status);
-    status.append(
-      scopeStat("City", city),
-      scopeStat("Session", "none"),
-    );
-    return;
-  }
-
   banner.classList.remove("attached", "detached");
   badge.className = "badge badge-cyan";
   badge.textContent = "City";
   clear(status);
+
+  if (!overseer) {
+    status.append(
+      scopeStat("City", city),
+      scopeStat("Session", "—"),
+      scopeStat("Activity", "—"),
+      scopeStat("Terminal", "—"),
+      scopeStat("State", "—"),
+    );
+    return;
+  }
 
   const active = overseer.last_active
     ? Date.now() - new Date(overseer.last_active).getTime() < ACTIVE_WINDOW_MS

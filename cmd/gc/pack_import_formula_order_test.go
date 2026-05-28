@@ -18,6 +18,7 @@ func TestPackV2ImportedFormulasAndOrdersVisibleToCityAndRig(t *testing.T) {
 	sidecarPackDir := filepath.Join(cityDir, "packs", "sidecar")
 
 	for _, dir := range []string{
+		filepath.Join(cityDir, ".gc"),
 		rigDir,
 		filepath.Join(opsPackDir, "formulas"),
 		filepath.Join(opsPackDir, "orders"),
@@ -39,14 +40,19 @@ source = "./packs/ops"
 `)
 	writeFile(t, filepath.Join(cityDir, "city.toml"), `
 [workspace]
-name = "testcity"
 
 [[rigs]]
 name = "frontend"
-path = "./frontend"
 
 [rigs.imports.sidecar]
 source = "./packs/sidecar"
+`)
+	writeFile(t, filepath.Join(cityDir, ".gc", "site.toml"), `
+workspace_name = "testcity"
+
+[[rig]]
+name = "frontend"
+path = "./frontend"
 `)
 	writeFile(t, filepath.Join(opsPackDir, "pack.toml"), `
 [pack]
@@ -118,6 +124,9 @@ func TestTransitiveGastownPackDigestOrderResolvesAndRuns(t *testing.T) {
 	if err := os.MkdirAll(wrapperPackDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
 
 	gastownRoot, err := filepath.Abs(filepath.Join("..", "..", "examples", "gastown"))
 	if err != nil {
@@ -129,11 +138,11 @@ func TestTransitiveGastownPackDigestOrderResolvesAndRuns(t *testing.T) {
 	digestFormulaFile := filepath.Join(digestFormulaLayer, "mol-digest-generate.toml")
 
 	writeFile(t, filepath.Join(cityDir, "city.toml"), `
-[workspace]
-name = "wrapper-city"
-
 [daemon]
 formula_v2 = true
+`)
+	writeFile(t, filepath.Join(cityDir, ".gc", "site.toml"), `
+workspace_name = "wrapper-city"
 `)
 	writeFile(t, filepath.Join(cityDir, "pack.toml"), `
 [pack]
@@ -246,6 +255,130 @@ func assertOrderScope(t *testing.T, got []orders.Order, name, rig string) {
 		}
 	}
 	t.Fatalf("missing order %q in %#v", name, got)
+}
+
+// TestPackV2OrdersOnlyPackVisibleToCity reproduces ga-0vfs: a pack with
+// orders/<name>.toml but NO formulas/ directory should still have its orders
+// discovered. Currently the pack contributes no formula layer (because the
+// formulas/ stat fails), and order discovery walks only formula layers, so
+// the pack's orders are silently skipped.
+func TestPackV2OrdersOnlyPackVisibleToCity(t *testing.T) {
+	cityDir := t.TempDir()
+	packDir := filepath.Join(cityDir, "packs", "pr-audit")
+
+	for _, dir := range []string{
+		filepath.Join(packDir, "orders"),
+		filepath.Join(packDir, "scripts"),
+	} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	writeFile(t, filepath.Join(cityDir, "pack.toml"), `
+[pack]
+name = "testcity"
+schema = 2
+
+[imports.pr_audit]
+source = "./packs/pr-audit"
+`)
+	writeFile(t, filepath.Join(cityDir, "city.toml"), `
+[workspace]
+`)
+	writeFile(t, filepath.Join(packDir, "pack.toml"), `
+[pack]
+name = "pr-audit"
+schema = 2
+`)
+	writeFile(t, filepath.Join(packDir, "orders", "pr-audit.toml"), `
+[order]
+description = "Audit open PRs"
+trigger = "cooldown"
+interval = "1h"
+exec = "$PACK_DIR/scripts/pr-audit.sh"
+`)
+	writeFile(t, filepath.Join(packDir, "scripts", "pr-audit.sh"), `#!/bin/sh
+echo "audit"
+`)
+
+	cfg, err := loadCityConfig(cityDir)
+	if err != nil {
+		t.Fatalf("loadCityConfig: %v", err)
+	}
+
+	var stderr bytes.Buffer
+	discovered, err := scanAllOrders(cityDir, cfg, &stderr, "gc order list")
+	if err != nil {
+		t.Fatalf("scanAllOrders: %v; stderr: %s", err, stderr.String())
+	}
+	assertOrderScope(t, discovered, "pr-audit", "")
+}
+
+// TestPackV2OrdersOnlyPackVisibleToRig is the rig-level analog of
+// TestPackV2OrdersOnlyPackVisibleToCity — a rig-imported pack with orders/
+// but no formulas/ should still have its orders discovered.
+func TestPackV2OrdersOnlyPackVisibleToRig(t *testing.T) {
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "frontend")
+	packDir := filepath.Join(cityDir, "packs", "watcher")
+
+	for _, dir := range []string{
+		filepath.Join(cityDir, ".gc"),
+		rigDir,
+		filepath.Join(packDir, "orders"),
+	} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	writeFile(t, filepath.Join(cityDir, "pack.toml"), `
+[pack]
+name = "testcity"
+schema = 2
+`)
+	writeFile(t, filepath.Join(cityDir, "city.toml"), `
+[workspace]
+name = "testcity"
+
+[[rigs]]
+name = "frontend"
+
+[rigs.imports.watcher]
+source = "./packs/watcher"
+`)
+	writeFile(t, filepath.Join(cityDir, ".gc", "site.toml"), `
+workspace_name = "testcity"
+
+[[rig]]
+name = "frontend"
+path = "./frontend"
+`)
+	writeFile(t, filepath.Join(packDir, "pack.toml"), `
+[pack]
+name = "watcher"
+schema = 2
+`)
+	writeFile(t, filepath.Join(packDir, "orders", "watcher-poll.toml"), `
+[order]
+description = "Poll watcher state"
+trigger = "cooldown"
+interval = "5m"
+exec = "$PACK_DIR/scripts/poll.sh"
+`)
+
+	cfg, err := loadCityConfig(cityDir)
+	if err != nil {
+		t.Fatalf("loadCityConfig: %v", err)
+	}
+
+	var stderr bytes.Buffer
+	discovered, err := scanAllOrders(cityDir, cfg, &stderr, "gc order list")
+	if err != nil {
+		t.Fatalf("scanAllOrders: %v; stderr: %s", err, stderr.String())
+	}
+	assertOrderScope(t, discovered, "watcher-poll", "frontend")
 }
 
 func assertSymlinkExists(t *testing.T, path string) {

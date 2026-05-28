@@ -22,6 +22,9 @@ func (s *Server) humaHandleSessionList(_ context.Context, input *SessionListInpu
 	if store == nil {
 		return nil, huma.Error503ServiceUnavailable("no bead store configured")
 	}
+	if err := cacheLiveOr503(store); err != nil {
+		return nil, err
+	}
 	mgr := s.sessionManager(store)
 	cfg := s.state.Config()
 
@@ -42,8 +45,8 @@ func (s *Server) humaHandleSessionList(_ context.Context, input *SessionListInpu
 	hasDeferredQueue := strings.TrimSpace(s.state.CityPath()) != ""
 	items := make([]sessionResponse, len(sessions))
 	for i, sess := range sessions {
-		items[i] = sessionResponseWithReason(sess, beadIndex[sess.ID], cfg, hasDeferredQueue)
-		s.enrichSessionResponse(&items[i], sess, cfg, s.runtimeSessionResponseHandle(sess), wantPeek, false, false)
+		items[i] = sessionResponseWithReason(sess, beadIndex[sess.ID], cfg, s.state.SessionProvider(), hasDeferredQueue)
+		s.enrichSessionResponse(&items[i], sess, cfg, s.runtimeSessionResponseHandle(sess), wantPeek, false, false, 0)
 	}
 
 	// Pagination support.
@@ -69,7 +72,8 @@ func (s *Server) humaHandleSessionList(_ context.Context, input *SessionListInpu
 			items = items[:pp.Limit]
 		}
 		return &ListOutput[sessionResponse]{
-			Index: s.latestIndex(),
+			Index:     s.latestIndex(),
+			CacheAgeS: cacheAgeSeconds(store),
 			Body: ListBody[sessionResponse]{
 				Items:         items,
 				Total:         total,
@@ -84,7 +88,8 @@ func (s *Server) humaHandleSessionList(_ context.Context, input *SessionListInpu
 		page = []sessionResponse{}
 	}
 	return &ListOutput[sessionResponse]{
-		Index: s.latestIndex(),
+		Index:     s.latestIndex(),
+		CacheAgeS: cacheAgeSeconds(store),
 		Body: ListBody[sessionResponse]{
 			Items:         page,
 			Total:         total,
@@ -104,6 +109,9 @@ func (s *Server) humaHandleSessionGet(_ context.Context, input *SessionGetInput)
 	if store == nil {
 		return nil, huma.Error503ServiceUnavailable("no bead store configured")
 	}
+	if err := cacheLiveOr503(store); err != nil {
+		return nil, err
+	}
 	mgr := s.sessionManager(store)
 	cfg := s.state.Config()
 	sp := s.state.SessionProvider()
@@ -118,11 +126,12 @@ func (s *Server) humaHandleSessionGet(_ context.Context, input *SessionGetInput)
 	}
 	b, _ := store.Get(id)
 	wantPeek := input.Peek
-	resp := sessionResponseWithReason(info, &b, cfg, strings.TrimSpace(s.state.CityPath()) != "")
-	s.enrichSessionResponse(&resp, info, cfg, sp, wantPeek, true, true)
+	resp := sessionResponseWithReason(info, &b, cfg, s.state.SessionProvider(), strings.TrimSpace(s.state.CityPath()) != "")
+	s.enrichSessionResponse(&resp, info, cfg, sp, wantPeek, true, true, input.PeekLines)
 	return &IndexOutput[sessionResponse]{
-		Index: s.latestIndex(),
-		Body:  resp,
+		Index:     s.latestIndex(),
+		CacheAgeS: cacheAgeSeconds(store),
+		Body:      resp,
 	}, nil
 }
 

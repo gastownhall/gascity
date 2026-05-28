@@ -2358,13 +2358,11 @@ prompt_flag = "--message"
 	writeTestFile(t, cityDir, "city.toml", `
 [workspace]
 name = "test-city"
-
-[[agent]]
-name = "mayor"
+`)
+	writeTestFile(t, cityDir, filepath.Join("agents", "mayor", "agent.toml"), `
 provider = "claude"
-
-[[agent]]
-name = "worker"
+`)
+	writeTestFile(t, cityDir, filepath.Join("agents", "worker", "agent.toml"), `
 provider = "codex"
 `)
 

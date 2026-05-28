@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -792,6 +793,162 @@ func TestProcessFanoutReturnsMalformedWhenScopeBodyMissing(t *testing.T) {
 	}
 }
 
+func TestProcessFanoutReturnsMalformedForInvalidSourceOutputJSON(t *testing.T) {
+	t.Parallel()
+
+	store := beads.NewMemStore()
+	workflow := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+		},
+	})
+	source := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title:  "prepare review items",
+		Type:   "task",
+		Status: "closed",
+		Metadata: map[string]string{
+			"gc.root_bead_id": workflow.ID,
+			"gc.step_ref":     "demo.prepare-review-items",
+			"gc.outcome":      "pass",
+			"gc.output_json":  "/tmp/gc.output_json.pretty.json",
+		},
+	})
+	fanout := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "Fan out review items",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":         "fanout",
+			"gc.root_bead_id": workflow.ID,
+			"gc.control_for":  "demo.prepare-review-items",
+			"gc.for_each":     "output.personas",
+			"gc.bond":         "expansion-review",
+			"gc.fanout_mode":  "parallel",
+		},
+	})
+	mustDepAdd(t, store, fanout.ID, source.ID, "blocks")
+
+	_, err := ProcessControl(store, fanout, ProcessOptions{})
+	if !errors.Is(err, ErrControlGraphMalformed) {
+		t.Fatalf("ProcessControl(fanout invalid output JSON) err = %v, want %v", err, ErrControlGraphMalformed)
+	}
+}
+
+func TestProcessFanoutReturnsMalformedForInvalidBondVars(t *testing.T) {
+	t.Parallel()
+
+	store := beads.NewMemStore()
+	workflow := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+		},
+	})
+	source := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title:  "prepare review items",
+		Type:   "task",
+		Status: "closed",
+		Metadata: map[string]string{
+			"gc.root_bead_id": workflow.ID,
+			"gc.step_ref":     "demo.prepare-review-items",
+			"gc.outcome":      "pass",
+			"gc.output_json":  `{"personas":[{"name":"architect"}]}`,
+		},
+	})
+	fanout := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "Fan out review items",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":         "fanout",
+			"gc.root_bead_id": workflow.ID,
+			"gc.control_for":  "demo.prepare-review-items",
+			"gc.for_each":     "output.personas",
+			"gc.bond":         "expansion-review",
+			"gc.bond_vars":    "{not-json",
+			"gc.fanout_mode":  "parallel",
+		},
+	})
+	mustDepAdd(t, store, fanout.ID, source.ID, "blocks")
+
+	_, err := ProcessControl(store, fanout, ProcessOptions{FormulaSearchPaths: []string{t.TempDir()}})
+	if !errors.Is(err, ErrControlGraphMalformed) {
+		t.Fatalf("ProcessControl(fanout invalid bond vars) err = %v, want %v", err, ErrControlGraphMalformed)
+	}
+}
+
+func TestProcessFanoutReturnsMalformedForMissingRequiredBondVar(t *testing.T) {
+	formulatest.EnableV2ForTest(t)
+
+	dir := t.TempDir()
+	expansion := `
+formula = "expansion-review"
+type = "expansion"
+version = 2
+contract = "graph.v2"
+
+[vars.reviewer]
+required = true
+
+[vars.source_convoy_id]
+required = true
+
+[[template]]
+id = "{target}.review"
+title = "Review {reviewer}"
+description = "Source {source_convoy_id}"
+`
+	if err := os.WriteFile(filepath.Join(dir, "expansion-review.toml"), []byte(expansion), 0o644); err != nil {
+		t.Fatalf("write expansion formula: %v", err)
+	}
+
+	store := beads.NewMemStore()
+	workflow := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+		},
+	})
+	source := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title:  "prepare review items",
+		Type:   "task",
+		Status: "closed",
+		Metadata: map[string]string{
+			"gc.root_bead_id": workflow.ID,
+			"gc.step_ref":     "demo.prepare-review-items",
+			"gc.outcome":      "pass",
+			"gc.output_json":  `{"personas":[{"name":"architect"}]}`,
+		},
+	})
+	fanout := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "Fan out review items",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":         "fanout",
+			"gc.root_bead_id": workflow.ID,
+			"gc.control_for":  "demo.prepare-review-items",
+			"gc.for_each":     "output.personas",
+			"gc.bond":         "expansion-review",
+			"gc.bond_vars":    `{"reviewer":"{item.name}"}`,
+			"gc.fanout_mode":  "parallel",
+		},
+	})
+	mustDepAdd(t, store, fanout.ID, source.ID, "blocks")
+
+	_, err := ProcessControl(store, fanout, ProcessOptions{FormulaSearchPaths: []string{dir}})
+	if !errors.Is(err, ErrControlGraphMalformed) {
+		t.Fatalf("ProcessControl(fanout missing required bond var) err = %v, want %v", err, ErrControlGraphMalformed)
+	}
+	if !strings.Contains(err.Error(), `variable "source_convoy_id" is required`) {
+		t.Fatalf("ProcessControl error = %v, want missing source_convoy_id", err)
+	}
+}
+
 func TestReconcileTerminalScopedMemberReusesResolvedBodyForFailingScope(t *testing.T) {
 	t.Parallel()
 
@@ -1329,8 +1486,9 @@ func TestProcessWorkflowFinalizeOrphanedRootClosesFinalizerWithoutError(t *testi
 		Title: "Finalize workflow",
 		Type:  "task",
 		Metadata: map[string]string{
-			"gc.kind":         "workflow-finalize",
-			"gc.root_bead_id": "missing-root-id",
+			"gc.kind":           "workflow-finalize",
+			"gc.root_bead_id":   "missing-root-id",
+			"gc.root_store_ref": "rig:gascity",
 		},
 	})
 
@@ -6966,6 +7124,205 @@ func TestRunRalphCheckRejectsPathTraversalAboveCityPath(t *testing.T) {
 	}
 }
 
+// TestRunRalphCheckRejectsAbsoluteCheckPath pins the contract that
+// gc.check_path must be relative. Sling API vars
+// (internal/api/handler_sling.go → internal/molecule → bead metadata)
+// can flow through formula variable substitution
+// (internal/formula/expand.go) and synthesize an absolute string into
+// gc.check_path. convergence.ResolveConditionPath intentionally skips
+// containment for absolute conditionPath values (callers vouch), so
+// ralph.go must reject the absolute form at the metadata boundary or
+// the OR-containment relaxation in gastownhall/gascity#2354 becomes a
+// full bypass for callers who can influence vars.
+func TestRunRalphCheckRejectsAbsoluteCheckPath(t *testing.T) {
+	parent := t.TempDir()
+	cityPath := filepath.Join(parent, "city")
+	storePath := filepath.Join(parent, "rig")
+	if err := os.MkdirAll(cityPath, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.MkdirAll(storePath, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	outside := filepath.Join(parent, "outside.sh")
+	if err := os.WriteFile(outside, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write outside: %v", err)
+	}
+
+	store := beads.NewMemStore()
+	check := beads.Bead{
+		ID:   "check-abs",
+		Type: "task",
+		Metadata: map[string]string{
+			"gc.check_path":    outside,
+			"gc.check_timeout": "30s",
+		},
+	}
+	subject := beads.Bead{ID: "run-abs", Type: "task"}
+
+	_, err := runRalphCheck(store, check, subject, 1, ProcessOptions{
+		CityPath:  cityPath,
+		StorePath: storePath,
+	})
+	if err == nil {
+		t.Fatal("expected absolute-path rejection, got nil")
+	}
+	if !strings.Contains(err.Error(), "must be relative") {
+		t.Errorf("expected absolute-path error, got: %v", err)
+	}
+}
+
+// TestRunRalphCheckRejectsAbsoluteWorkDirOutsideRoots pins the
+// gastownhall/gascity#2354 review fix: work_dir is the only path on
+// runRalphCheck's hot path that comes from caller-influenceable
+// metadata (sling API vars → bead metadata). If work_dir resolves
+// outside both cityPath and storePath, it must be rejected before it
+// becomes the `base` argument to convergence.ResolveConditionPath —
+// otherwise the OR-containment relaxation lets a relative gc.check_path
+// land anywhere the caller controls.
+func TestRunRalphCheckRejectsAbsoluteWorkDirOutsideRoots(t *testing.T) {
+	parent := t.TempDir()
+	cityPath := filepath.Join(parent, "city")
+	storePath := filepath.Join(parent, "rig")
+	attackerDir := filepath.Join(parent, "attacker")
+	if err := os.MkdirAll(cityPath, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.MkdirAll(storePath, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.MkdirAll(attackerDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	// Plant a real script in attackerDir so the rejection cannot be
+	// blamed on a missing file — the failure must be the work_dir guard.
+	if err := os.WriteFile(filepath.Join(attackerDir, "check.sh"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write attacker script: %v", err)
+	}
+
+	store := beads.NewMemStore()
+	check := beads.Bead{
+		ID:   "check-abs-workdir",
+		Type: "task",
+		Metadata: map[string]string{
+			"gc.check_path":    "check.sh",
+			"gc.work_dir":      attackerDir, // absolute, outside both roots
+			"gc.check_timeout": "30s",
+		},
+	}
+	subject := beads.Bead{ID: "run-abs-workdir", Type: "task"}
+
+	_, err := runRalphCheck(store, check, subject, 1, ProcessOptions{
+		CityPath:  cityPath,
+		StorePath: storePath,
+	})
+	if err == nil {
+		t.Fatal("expected work_dir escape rejection, got nil")
+	}
+	if !strings.Contains(err.Error(), "work_dir") || !strings.Contains(err.Error(), "escapes") {
+		t.Errorf("expected work_dir escape error, got: %v", err)
+	}
+}
+
+// TestRunRalphCheckRejectsRelativeWorkDirOutsideRoots pins the
+// companion case for relative work_dir values that traverse upward
+// out of storePath. The pre-2354 envelope-only check would still
+// reject because the resolved path escaped envelope; with the
+// OR-containment relaxation, the new ralph.go guard is what closes
+// this vector.
+func TestRunRalphCheckRejectsRelativeWorkDirOutsideRoots(t *testing.T) {
+	parent := t.TempDir()
+	cityPath := filepath.Join(parent, "city")
+	storePath := filepath.Join(parent, "rig")
+	attackerDir := filepath.Join(parent, "attacker")
+	if err := os.MkdirAll(cityPath, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.MkdirAll(storePath, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.MkdirAll(attackerDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(attackerDir, "check.sh"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write attacker script: %v", err)
+	}
+
+	store := beads.NewMemStore()
+	check := beads.Bead{
+		ID:   "check-rel-workdir",
+		Type: "task",
+		Metadata: map[string]string{
+			"gc.check_path":    "check.sh",
+			"gc.work_dir":      "../attacker", // joins under storePath, escapes both roots
+			"gc.check_timeout": "30s",
+		},
+	}
+	subject := beads.Bead{ID: "run-rel-workdir", Type: "task"}
+
+	_, err := runRalphCheck(store, check, subject, 1, ProcessOptions{
+		CityPath:  cityPath,
+		StorePath: storePath,
+	})
+	if err == nil {
+		t.Fatal("expected work_dir traversal rejection, got nil")
+	}
+	if !strings.Contains(err.Error(), "work_dir") || !strings.Contains(err.Error(), "escapes") {
+		t.Errorf("expected work_dir escape error, got: %v", err)
+	}
+}
+
+// TestRunRalphCheckRejectsSymlinkEscapeViaStore pins the symlink half
+// of the gastownhall/gascity#2354 review: a script that lives under
+// storePath (so the pre-resolution containment check passes) but
+// symlinks to a location outside both roots must be rejected by the
+// post-EvalSymlinks containment check in convergence.ResolveConditionPath.
+func TestRunRalphCheckRejectsSymlinkEscapeViaStore(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink semantics differ on Windows")
+	}
+	parent := t.TempDir()
+	cityPath := filepath.Join(parent, "city")
+	storePath := filepath.Join(parent, "rig")
+	if err := os.MkdirAll(cityPath, 0o755); err != nil {
+		t.Fatalf("mkdir city: %v", err)
+	}
+	scriptDir := filepath.Join(storePath, "scripts")
+	if err := os.MkdirAll(scriptDir, 0o755); err != nil {
+		t.Fatalf("mkdir scripts: %v", err)
+	}
+	outside := filepath.Join(parent, "outside.sh")
+	if err := os.WriteFile(outside, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write outside: %v", err)
+	}
+	link := filepath.Join(scriptDir, "check.sh")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	store := beads.NewMemStore()
+	check := beads.Bead{
+		ID:   "check-symlink-escape",
+		Type: "task",
+		Metadata: map[string]string{
+			"gc.check_path":    "scripts/check.sh",
+			"gc.check_timeout": "30s",
+		},
+	}
+	subject := beads.Bead{ID: "run-symlink-escape", Type: "task"}
+
+	_, err := runRalphCheck(store, check, subject, 1, ProcessOptions{
+		CityPath:  cityPath,
+		StorePath: storePath,
+	})
+	if err == nil {
+		t.Fatal("expected symlink-escape rejection, got nil")
+	}
+	if !strings.Contains(err.Error(), "symlink target outside containment") {
+		t.Errorf("expected symlink-escape error, got: %v", err)
+	}
+}
+
 func writeCheckScript(t *testing.T, cityPath, name, contents string) string {
 	t.Helper()
 	scriptDir := filepath.Join(cityPath, ".gc", "scripts")
@@ -7645,6 +8002,62 @@ func TestProcessControlEmitsSkipReasonWhenNotOpen(t *testing.T) {
 	}
 	if !strings.Contains(traced, "status=in_progress") {
 		t.Fatalf("trace missing the actual status; got:\n%s", traced)
+	}
+}
+
+func TestProcessControlClosesControlWhenWorkflowRootMissing(t *testing.T) {
+	t.Parallel()
+
+	store := beads.NewMemStore()
+	control, err := store.Create(beads.Bead{
+		Title:  "orphaned retry control",
+		Type:   "task",
+		Status: "open",
+		Metadata: map[string]string{
+			"gc.kind":           "retry",
+			"gc.max_attempts":   "3",
+			"gc.root_bead_id":   "missing-root",
+			"gc.root_store_ref": "rig:gascity",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create control: %v", err)
+	}
+
+	var traceBuf bytes.Buffer
+	opts := ProcessOptions{
+		Tracef: func(format string, args ...any) {
+			fmt.Fprintf(&traceBuf, format, args...)
+			traceBuf.WriteByte('\n')
+		},
+	}
+
+	result, err := ProcessControl(store, control, opts)
+	if err != nil {
+		t.Fatalf("ProcessControl: %v", err)
+	}
+	if !result.Processed || result.Action != "orphaned-workflow" {
+		t.Fatalf("result = %+v, want processed orphaned-workflow", result)
+	}
+	after := mustGetBead(t, store, control.ID)
+	if after.Status != "closed" {
+		t.Fatalf("status = %q, want closed", after.Status)
+	}
+	if after.Metadata["gc.outcome"] != "fail" {
+		t.Fatalf("gc.outcome = %q, want fail", after.Metadata["gc.outcome"])
+	}
+	if after.Metadata["gc.failure_reason"] != "missing_workflow_root" {
+		t.Fatalf("gc.failure_reason = %q, want missing_workflow_root", after.Metadata["gc.failure_reason"])
+	}
+	if after.Metadata["gc.final_disposition"] != "orphaned_workflow" {
+		t.Fatalf("gc.final_disposition = %q, want orphaned_workflow", after.Metadata["gc.final_disposition"])
+	}
+	if after.Metadata["gc.missing_root_bead_id"] != "missing-root" {
+		t.Fatalf("gc.missing_root_bead_id = %q, want missing-root", after.Metadata["gc.missing_root_bead_id"])
+	}
+	traced := traceBuf.String()
+	if !strings.Contains(traced, "close reason=missing_workflow_root") {
+		t.Fatalf("trace missing missing-root close reason; got:\n%s", traced)
 	}
 }
 

@@ -62,7 +62,8 @@ type ConditionEnv struct {
 	WorkDir              string
 	WispID               string
 	DocPath              string // from var.doc_path, may be empty
-	ArtifactDir          string
+	MoleculeDir          string // molecule.Dir(CityPath, rootID); may be empty for non-molecule beads
+	ArtifactDir          string // per-step artifact dir; GC_ARTIFACT_DIR is omitted when empty (matches the sling-time contract)
 	IterationDurationMs  int64
 	CumulativeDurationMs int64
 	MaxIterations        int
@@ -94,7 +95,6 @@ func (ce ConditionEnv) Environ() []string {
 		"GC_BEAD_ID=" + ce.BeadID,
 		"GC_ITERATION=" + strconv.Itoa(ce.Iteration),
 		"GC_WISP_ID=" + ce.WispID,
-		"GC_ARTIFACT_DIR=" + ce.ArtifactDir,
 		"GC_ITERATION_DURATION_MS=" + strconv.FormatInt(ce.IterationDurationMs, 10),
 		"GC_CUMULATIVE_DURATION_MS=" + strconv.FormatInt(ce.CumulativeDurationMs, 10),
 		"GC_MAX_ITERATIONS=" + strconv.Itoa(ce.MaxIterations),
@@ -119,6 +119,12 @@ func (ce ConditionEnv) Environ() []string {
 	}
 	if ce.StorePath != "" {
 		env = append(env, "GC_STORE_PATH="+ce.StorePath)
+	}
+	if ce.ArtifactDir != "" {
+		env = append(env, "GC_ARTIFACT_DIR="+ce.ArtifactDir)
+	}
+	if ce.MoleculeDir != "" {
+		env = append(env, "GC_MOLECULE_DIR="+ce.MoleculeDir)
 	}
 	if realBD := os.Getenv("GC_INTEGRATION_REAL_BD"); realBD != "" {
 		env = append(env, "GC_INTEGRATION_REAL_BD="+realBD)
@@ -145,7 +151,8 @@ func (ce ConditionEnv) Environ() []string {
 
 // containedIn reports whether absPath is the same as or nested under root.
 // Both arguments must already be cleaned/absolute; the comparison is lexical
-// (no further symlink resolution), matching the existing traversal check.
+// (no further symlink resolution) and is intended to be combined with
+// pre-resolved (EvalSymlinks'd) inputs at the call site.
 func containedIn(absPath, root string) bool {
 	rel, err := filepath.Rel(root, absPath)
 	if err != nil {
@@ -163,19 +170,23 @@ func containedIn(absPath, root string) bool {
 //     may point at a rig subtree. Must be non-empty — an empty envelope
 //     would silently disable the traversal check, so it is rejected.
 //   - base: the directory that relative conditionPath values are joined
-//     against, AND a second permitted security boundary: passing a non-empty
-//     base is an explicit declaration that base is a legitimate root, so
-//     paths that stay under base are accepted even when base is not a
-//     subtree of envelope (gastownhall/gascity#2354 — sibling rig/city
-//     layouts). Pass the same value as `envelope` for callers with no
-//     rig/city distinction. When empty, falls back to `envelope` to preserve
-//     historical single-arg behavior.
+//     against, AND a second permitted security boundary used in addition
+//     to envelope: paths that stay under base are accepted even when base
+//     is not a subtree of envelope (gastownhall/gascity#2354 — sibling
+//     rig/city layouts). Callers MUST ensure base is an operator-controlled
+//     path; this function performs no validation of base itself. When
+//     empty, falls back to envelope to preserve historical single-arg
+//     behavior.
 //   - conditionPath: the path declared by the gate. May be absolute or
 //     relative to `base`.
 //
-// Resolves relative paths against `base`, validates traversal against the
-// union of `envelope` and `base`, resolves symlinks, and requires a regular
-// executable file. Returns the canonical absolute path.
+// For relative paths, both the lexically-joined and the symlink-resolved
+// targets must land inside envelope OR base — defending against both
+// `../`-style traversal and symlinks that escape containment after
+// resolution. Absolute paths skip containment in this function; callers
+// (e.g. internal/dispatch/ralph.go) must validate absolute-string inputs
+// before passing them in. Returns the canonical absolute path after
+// symlink resolution and an exec-eligible file check.
 func ResolveConditionPath(envelope, base, conditionPath string) (string, error) {
 	if conditionPath == "" {
 		return "", fmt.Errorf("resolving gate condition path: empty path")
@@ -187,8 +198,10 @@ func ResolveConditionPath(envelope, base, conditionPath string) (string, error) 
 		base = envelope
 	}
 
-	// Canonicalize envelope first so that symlinked workspace roots
-	// (e.g., /tmp → /private/tmp on macOS) don't cause false rejections.
+	// Canonicalize envelope and base first so that symlinked workspace
+	// roots (e.g., /tmp → /private/tmp on macOS) don't cause false
+	// rejections and so the post-resolution containment check below
+	// compares like with like.
 	canonEnvelope, err := filepath.EvalSymlinks(envelope)
 	if err != nil {
 		canonEnvelope = filepath.Clean(envelope) // best-effort if envelope doesn't exist yet
@@ -205,13 +218,10 @@ func ResolveConditionPath(envelope, base, conditionPath string) (string, error) 
 		absPath = filepath.Clean(filepath.Join(canonBase, conditionPath))
 	}
 
-	// Reject path traversal: for relative paths the resolved path must
-	// be under envelope OR under base. Both are roots the caller has
-	// explicitly declared legitimate; requiring containment in only
-	// envelope breaks sibling rig/city layouts where base is outside
-	// envelope (gastownhall/gascity#2354). Absolute paths skip the
-	// containment check — unchanged from the pre-split behavior;
-	// callers must not pass attacker-influenced absolute paths.
+	// Pre-resolution containment: for relative paths the lexical join
+	// must stay under envelope OR base (gastownhall/gascity#2354). This
+	// rejects `../../foo` style traversal before any filesystem access.
+	// Absolute paths skip the check here; callers vouch for them.
 	if !filepath.IsAbs(conditionPath) {
 		if !containedIn(absPath, canonEnvelope) && !containedIn(absPath, canonBase) {
 			return "", fmt.Errorf("resolving gate condition path: path traversal not allowed: %s", conditionPath)
@@ -223,6 +233,17 @@ func ResolveConditionPath(envelope, base, conditionPath string) (string, error) 
 	resolved, err := filepath.EvalSymlinks(absPath)
 	if err != nil {
 		return "", fmt.Errorf("resolving gate condition path: %w", err)
+	}
+
+	// Post-resolution containment: a symlink under envelope or base can
+	// point outside both trees (e.g. `base/scripts/check.sh -> /etc/passwd`).
+	// Re-validate the symlink-resolved path against the same envelope-OR-base
+	// rule to close the symlink-escape gap (gastownhall/gascity#2354 review).
+	// Absolute paths still skip — same rationale as the pre-resolution check.
+	if !filepath.IsAbs(conditionPath) {
+		if !containedIn(resolved, canonEnvelope) && !containedIn(resolved, canonBase) {
+			return "", fmt.Errorf("resolving gate condition path: symlink target outside containment: %s", conditionPath)
+		}
 	}
 
 	// Check the resolved file exists and is a regular executable.
