@@ -463,7 +463,8 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 		OptionDefaults: map[string]string{
 			"permission_mode": "unrestricted",
 		},
-		PromptMode:        "arg",
+		PromptMode:        "flag",
+		PromptFlag:        "--prompt-interactive",
 		ReadyPromptPrefix: "> ",
 		ReadyDelayMs:      5000,
 		ProcessNames:      []string{"agy"},
