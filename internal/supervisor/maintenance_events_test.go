@@ -11,9 +11,9 @@ import (
 )
 
 // TestRunOnce_SuccessEmitsExactlyOneDoneEvent covers the happy path:
-// a single placeholder runOnce must record exactly one event on the
-// supplied recorder, and that event must be gc.store.maintenance.done
-// with a decodable StoreMaintenanceDonePayload envelope.
+// a single successful runOnce must record exactly one event on the
+// supplied recorder, and that event must be gc.store.maintenance.done with
+// a decodable StoreMaintenanceDonePayload envelope.
 func TestRunOnce_SuccessEmitsExactlyOneDoneEvent(t *testing.T) {
 	t.Parallel()
 	cfg := config.DoltMaintenance{Enabled: true, Interval: "1h"}

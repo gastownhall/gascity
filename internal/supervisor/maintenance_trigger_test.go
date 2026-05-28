@@ -3,6 +3,7 @@ package supervisor
 import (
 	"context"
 	"errors"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -35,6 +36,45 @@ func TestTriggerNow_Success(t *testing.T) {
 	}
 	if hist := loop.History(); len(hist) != 1 {
 		t.Fatalf("History length = %d; want 1", len(hist))
+	}
+}
+
+func TestTriggerNow_RunsSnapshotThenGC(t *testing.T) {
+	cfg := config.DoltMaintenance{Enabled: true, Interval: "1h", GCTimeout: "1s"}
+	now := time.Date(2026, 4, 22, 12, 0, 0, 0, time.UTC)
+	var calls []string
+	runner := &fakeDoltBackupRunner{writeOnSync: true, calls: &calls}
+	ops := &fakeDoltOps{smokeCount: 5, calls: &calls}
+
+	loop := NewStoreMaintenanceLoop(StoreMaintenanceLoopDeps{
+		Cfg:      cfg,
+		CityPath: t.TempDir(),
+		Clock:    func() time.Time { return now },
+		Rand:     func() float64 { return 0.5 },
+		OpenDoltBackup: func(context.Context) (DoltBackupRunner, error) {
+			return runner, nil
+		},
+		OpenDoltOps: func(context.Context) (DoltOps, error) {
+			return ops, nil
+		},
+	})
+
+	run, err := loop.TriggerNow(context.Background())
+	if err != nil {
+		t.Fatalf("TriggerNow = %v; want nil", err)
+	}
+	if run.Stage != "done" || run.Err != "" {
+		t.Fatalf("run Stage=%q Err=%q; want done with no error", run.Stage, run.Err)
+	}
+	if run.SnapshotPath == "" {
+		t.Fatal("run.SnapshotPath is empty; want snapshot path recorded")
+	}
+	wantCalls := []string{"backup.add", "backup.sync", "gc.exec", "gc.smoke"}
+	if !slices.Equal(calls, wantCalls) {
+		t.Fatalf("calls = %v; want %v", calls, wantCalls)
+	}
+	if !ops.closed {
+		t.Fatal("DoltOps.Close not called")
 	}
 }
 
@@ -96,20 +136,22 @@ func TestTriggerNow_ReleasesLease(t *testing.T) {
 
 // TestInFlightStart_TracksRunOnce verifies that scheduled runs (not just
 // manual triggers) set runStartedAt so the 409 body still reports a
-// timestamp when contention comes from the scheduler. Uses a blocking gate
-// injected via Stderr.Write to stall inside runOnce just long enough to
+// timestamp when contention comes from the scheduler. Uses blocking DoltOps
+// to stall inside runOnce just long enough to
 // observe InFlightStart() from a second goroutine.
 func TestInFlightStart_TracksRunOnce(t *testing.T) {
 	t.Parallel()
 	cfg := config.DoltMaintenance{Enabled: true, Interval: "1h"}
 	now := time.Date(2026, 4, 22, 12, 0, 0, 0, time.UTC)
-	gate := &gatedWriter{opened: make(chan struct{}), proceed: make(chan struct{})}
+	gate := &gatedDoltOps{opened: make(chan struct{}), proceed: make(chan struct{})}
 	loop := NewStoreMaintenanceLoop(StoreMaintenanceLoopDeps{
 		Cfg:      cfg,
 		CityPath: t.TempDir(),
 		Clock:    func() time.Time { return now },
 		Rand:     func() float64 { return 0.5 },
-		Stderr:   gate,
+		OpenDoltOps: func(context.Context) (DoltOps, error) {
+			return gate, nil
+		},
 	})
 
 	var wg sync.WaitGroup
@@ -136,17 +178,26 @@ func TestInFlightStart_TracksRunOnce(t *testing.T) {
 	}
 }
 
-// gatedWriter stalls the first Write call until proceed is closed. Signals
-// opened the first time Write is entered so the test can synchronize with
-// runOnce reaching its inside-the-lease code path.
-type gatedWriter struct {
+type gatedDoltOps struct {
 	once    sync.Once
 	opened  chan struct{}
 	proceed chan struct{}
 }
 
-func (g *gatedWriter) Write(p []byte) (int, error) {
+func (g *gatedDoltOps) ExecGC(ctx context.Context) error {
 	g.once.Do(func() { close(g.opened) })
-	<-g.proceed
-	return len(p), nil
+	select {
+	case <-g.proceed:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (g *gatedDoltOps) SmokeCount(context.Context) (int, error) {
+	return 1, nil
+}
+
+func (g *gatedDoltOps) Close() error {
+	return nil
 }

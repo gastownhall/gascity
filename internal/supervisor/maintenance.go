@@ -53,8 +53,8 @@ var maintenanceSmokeTimeout = 5 * time.Second
 // Stage is "done" for successful runs and names the failing phase
 // ("backup" | "gc" | "smoke-test" | "prune") for failed runs. Err is
 // empty on success. BeforeBytes / AfterBytes / SnapshotPath are
-// populated by the work stages (beads ga-74d, ga-zoj); they are zero
-// when the placeholder path runs without real maintenance.
+// populated by the stages that can measure them; they remain zero when
+// a dependency is not wired or a stage has no size metric.
 type MaintenanceRun struct {
 	StartedAt    time.Time
 	FinishedAt   time.Time
@@ -127,9 +127,9 @@ type StoreMaintenanceLoopDeps struct {
 	LastRunAt time.Time      // seeded from the event log by the caller
 
 	// OpenDoltOps opens a SQL connection to the managed Dolt store for
-	// one maintenance cycle. Nil leaves runDoltGC a no-op — the existing
-	// placeholder runOnce path and tests that don't exercise SQL keep
-	// working unchanged. Production wires this to NewSQLDoltOps.
+	// one maintenance cycle. Nil leaves runDoltGC a no-op so deployments
+	// can wire maintenance dependencies incrementally. Production wires
+	// this to NewSQLDoltOps.
 	OpenDoltOps DoltOpsFactory
 
 	// OpenDoltBackup opens a DoltBackupRunner for one snapshot cycle.
@@ -318,11 +318,6 @@ func (m *StoreMaintenanceLoop) applyJitter(interval time.Duration) time.Duration
 // duration. If the lease is already held (manual override in flight, or
 // a previous tick has not finished), it returns without doing work —
 // lease contention is a normal, silent condition.
-//
-// The current body is a placeholder: it logs, records a success run,
-// and emits a gc.store.maintenance.done event so SeedLastRunAt recovers
-// the schedule across restarts. Real work (dolt backup, CALL DOLT_GC(),
-// smoke test) lands with beads ga-74d, ga-zoj.
 func (m *StoreMaintenanceLoop) runOnce(ctx context.Context) {
 	if !m.mu.TryLock() {
 		return
@@ -374,16 +369,36 @@ func (m *StoreMaintenanceLoop) InFlightStart() (time.Time, bool) {
 // held. Callers are responsible for acquiring/releasing the lease and for
 // the context-cancellation pre-check; this method focuses on the cycle
 // body so runOnce and TriggerNow share exactly one code path.
-func (m *StoreMaintenanceLoop) executeCycleLocked(_ context.Context) MaintenanceRun {
+func (m *StoreMaintenanceLoop) executeCycleLocked(ctx context.Context) MaintenanceRun {
 	started := m.clock()
 	m.runStartedAt.Store(&started)
 	defer m.runStartedAt.Store(nil)
-	fmt.Fprintf(m.stderr, "store-maintenance: would run maintenance for %q\n", m.cityPath) //nolint:errcheck // best-effort stderr
-	finished := m.clock()
+
+	snapshotPath, err := m.runSnapshot(ctx)
+	if err != nil {
+		return m.finishCycleLocked(started, snapshotPath, err)
+	}
+	if err := m.runDoltGC(ctx); err != nil {
+		return m.finishCycleLocked(started, snapshotPath, err)
+	}
+	return m.finishCycleLocked(started, snapshotPath, nil)
+}
+
+func (m *StoreMaintenanceLoop) finishCycleLocked(started time.Time, snapshotPath string, err error) MaintenanceRun {
 	run := MaintenanceRun{
-		StartedAt:  started,
-		FinishedAt: finished,
-		Stage:      "done",
+		StartedAt:    started,
+		FinishedAt:   m.clock(),
+		SnapshotPath: snapshotPath,
+	}
+	if err != nil {
+		run.Stage = "maintenance"
+		var maintenanceErr *MaintenanceError
+		if errors.As(err, &maintenanceErr) {
+			run.Stage = maintenanceErr.Stage
+		}
+		run.Err = err.Error()
+	} else {
+		run.Stage = "done"
 	}
 	m.lastRunAt = started
 	m.appendHistoryLocked(run)
@@ -494,9 +509,7 @@ func (m *StoreMaintenanceLoop) appendHistoryLocked(r MaintenanceRun) {
 //     either a corrupted schema or a wiped table and is never a
 //     healthy post-gc state for a running city).
 //
-// When openDoltOps is nil, runDoltGC returns nil. This keeps the
-// existing placeholder runOnce path working while upstream wiring
-// (bead ga-zn8 / cmd/gc) lands in a follow-up.
+// When openDoltOps is nil, runDoltGC returns nil.
 func (m *StoreMaintenanceLoop) runDoltGC(ctx context.Context) error {
 	if m.openDoltOps == nil {
 		return nil

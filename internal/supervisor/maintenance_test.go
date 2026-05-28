@@ -1,9 +1,7 @@
 package supervisor
 
 import (
-	"bytes"
 	"context"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -119,17 +117,15 @@ func TestRunOnce_LeaseContention_ReturnsWithoutUpdatingState(t *testing.T) {
 	}
 }
 
-func TestRunOnce_PlaceholderUpdatesStateAndLogs(t *testing.T) {
+func TestRunOnce_NoOpCycleUpdatesState(t *testing.T) {
 	t.Parallel()
 	cfg := config.DoltMaintenance{Enabled: true, Interval: "1h"}
 	now := time.Date(2026, 4, 22, 12, 0, 0, 0, time.UTC)
-	var stderr bytes.Buffer
 	loop := NewStoreMaintenanceLoop(StoreMaintenanceLoopDeps{
 		Cfg:      cfg,
 		CityPath: "/tmp/city",
 		Clock:    func() time.Time { return now },
 		Rand:     func() float64 { return 0.5 },
-		Stderr:   &stderr,
 	})
 
 	loop.runOnce(context.Background())
@@ -140,8 +136,8 @@ func TestRunOnce_PlaceholderUpdatesStateAndLogs(t *testing.T) {
 	if hist := loop.History(); len(hist) != 1 {
 		t.Fatalf("History length = %d; want 1", len(hist))
 	}
-	if !strings.Contains(stderr.String(), "would run maintenance") {
-		t.Fatalf("stderr = %q; want it to contain 'would run maintenance'", stderr.String())
+	if hist := loop.History(); hist[0].Stage != "done" || hist[0].Err != "" {
+		t.Fatalf("History[0] Stage=%q Err=%q; want done with no error", hist[0].Stage, hist[0].Err)
 	}
 }
 

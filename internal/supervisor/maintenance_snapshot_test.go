@@ -32,10 +32,14 @@ type fakeDoltBackupRunner struct {
 	addedName  string
 	addedURL   string
 	syncedName string
+	calls      *[]string
 }
 
 func (f *fakeDoltBackupRunner) Add(_ context.Context, name, url string) error {
 	f.addCalls++
+	if f.calls != nil {
+		*f.calls = append(*f.calls, "backup.add")
+	}
 	f.addedName = name
 	f.addedURL = url
 	return f.addErr
@@ -43,6 +47,9 @@ func (f *fakeDoltBackupRunner) Add(_ context.Context, name, url string) error {
 
 func (f *fakeDoltBackupRunner) Sync(_ context.Context, name string) error {
 	f.syncCalls++
+	if f.calls != nil {
+		*f.calls = append(*f.calls, "backup.sync")
+	}
 	f.syncedName = name
 	if f.syncErr != nil {
 		return f.syncErr

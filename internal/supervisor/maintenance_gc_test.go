@@ -22,10 +22,14 @@ type fakeDoltOps struct {
 	gcCalls    int
 	smokeCalls int
 	closed     bool
+	calls      *[]string
 }
 
 func (f *fakeDoltOps) ExecGC(ctx context.Context) error {
 	f.gcCalls++
+	if f.calls != nil {
+		*f.calls = append(*f.calls, "gc.exec")
+	}
 	if f.execGCDelay > 0 {
 		select {
 		case <-time.After(f.execGCDelay):
@@ -38,6 +42,9 @@ func (f *fakeDoltOps) ExecGC(ctx context.Context) error {
 
 func (f *fakeDoltOps) SmokeCount(ctx context.Context) (int, error) {
 	f.smokeCalls++
+	if f.calls != nil {
+		*f.calls = append(*f.calls, "gc.smoke")
+	}
 	if err := ctx.Err(); err != nil {
 		return 0, err
 	}
@@ -205,8 +212,7 @@ func TestRunDoltGC_OpenError_ReturnsStageGC(t *testing.T) {
 func TestRunDoltGC_NilFactoryReturnsNil(t *testing.T) {
 	t.Parallel()
 	// No OpenDoltOps injected — loop should treat runDoltGC as a no-op
-	// so the existing placeholder path (and SeedLastRunAt tests) keep
-	// working unchanged.
+	// so deployments can wire maintenance dependencies incrementally.
 	loop := NewStoreMaintenanceLoop(StoreMaintenanceLoopDeps{
 		Cfg:      config.DoltMaintenance{Enabled: true, GCTimeout: "1s"},
 		CityPath: t.TempDir(),
