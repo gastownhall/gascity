@@ -1092,7 +1092,7 @@ path = "`+orphanPath+`"
 	}
 }
 
-func TestV2DeprecationChecksWarnOnDeferredPackAgentFormat(t *testing.T) {
+func TestV2DeprecationChecksErrorsOnRootPackAgentFormat(t *testing.T) {
 	t.Parallel()
 
 	cityDir := t.TempDir()
@@ -1115,14 +1115,57 @@ name = "helper"
 	d.Run(&doctor.CheckContext{CityPath: cityDir, Verbose: true}, &buf, false)
 
 	out := buf.String()
-	if !strings.Contains(out, "⚠ v2-agent-format") {
-		t.Fatalf("doctor output missing deferred pack agent warning:\n%s", out)
+	if !strings.Contains(out, "✗ v2-agent-format") {
+		t.Fatalf("doctor output missing pack agent error:\n%s", out)
 	}
 	if !strings.Contains(out, "pack.toml") {
 		t.Fatalf("doctor output missing pack.toml detail:\n%s", out)
 	}
-	if !strings.Contains(out, "enforcement is deferred") {
-		t.Fatalf("doctor output missing deferral guidance:\n%s", out)
+	if !strings.Contains(out, "gc doctor --fix") || !strings.Contains(out, "agents/<name>/agent.toml") {
+		t.Fatalf("doctor output missing root pack remediation guidance:\n%s", out)
+	}
+}
+
+func TestDoctorFixMigratesRootPackAgentFormat(t *testing.T) {
+	cityDir := t.TempDir()
+	writeDoctorFile(t, cityDir, "city.toml", `
+[workspace]
+name = "legacy-city"
+`)
+	writeDoctorFile(t, cityDir, "pack.toml", `
+[pack]
+name = "legacy-city"
+schema = 2
+
+[[agent]]
+name = "helper"
+provider = "claude"
+prompt_template = "prompts/helper.md"
+`)
+	writeDoctorFile(t, cityDir, "prompts/helper.md", "You are helper.\n")
+	t.Setenv("GC_CITY_PATH", cityDir)
+	t.Setenv("GC_BEADS", "file")
+	prependDoctorJSONStubBinaries(t, "tmux", "git", "jq", "pgrep", "lsof")
+
+	var stdout, stderr bytes.Buffer
+	code := doDoctor(true, false, false, false, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("gc doctor --fix = %d, want 0; stdout:\n%s\nstderr:\n%s", code, stdout.String(), stderr.String())
+	}
+
+	packToml, err := os.ReadFile(filepath.Join(cityDir, "pack.toml"))
+	if err != nil {
+		t.Fatalf("ReadFile(pack.toml): %v", err)
+	}
+	if strings.Contains(string(packToml), "[[agent]]") {
+		t.Fatalf("pack.toml still contains inline agent after doctor --fix:\n%s", packToml)
+	}
+	agentToml, err := os.ReadFile(filepath.Join(cityDir, "agents", "helper", "agent.toml"))
+	if err != nil {
+		t.Fatalf("ReadFile(agents/helper/agent.toml): %v", err)
+	}
+	if !strings.Contains(string(agentToml), `provider = "claude"`) {
+		t.Fatalf("agent.toml missing migrated provider:\n%s", agentToml)
 	}
 }
 
@@ -1157,6 +1200,16 @@ includes = ["legacy-pack"]
 	} {
 		if !strings.Contains(got.Message, want) {
 			t.Fatalf("message = %q, want substring %q", got.Message, want)
+		}
+	}
+	for _, want := range []string{
+		"fragment-authored legacy surfaces",
+		"by hand",
+		"gc doctor --fix",
+		"root city.toml/pack.toml",
+	} {
+		if !strings.Contains(got.FixHint, want) {
+			t.Fatalf("fix hint = %q, want substring %q", got.FixHint, want)
 		}
 	}
 }
