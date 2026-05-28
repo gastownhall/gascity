@@ -1,6 +1,7 @@
 package k8s
 
 import (
+	"strings"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -139,5 +140,21 @@ func TestBuildPod_ClonesSchedulingFields(t *testing.T) {
 	values := p.affinity.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution.NodeSelectorTerms[0].MatchExpressions[0].Values
 	if values[0] != "gpu" {
 		t.Fatalf("provider affinity value mutated to %q", values[0])
+	}
+}
+
+func TestBuildPod_WaitsForEitherWorkspaceReadyMarker(t *testing.T) {
+	p := newProviderWithOps(newFakeK8sOps())
+	pod, err := buildPod("test-session", runtime.Config{Command: "/bin/bash"}, p)
+	if err != nil {
+		t.Fatalf("buildPod: %v", err)
+	}
+
+	args := pod.Spec.Containers[0].Args
+	if len(args) != 1 {
+		t.Fatalf("container args = %v, want one shell command", args)
+	}
+	if !strings.Contains(args[0], `/workspace/.gc-workspace-ready ] && [ ! -f /workspace/.gc-ready`) {
+		t.Fatalf("entrypoint does not accept both workspace ready markers: %s", args[0])
 	}
 }
