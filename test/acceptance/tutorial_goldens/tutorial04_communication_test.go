@@ -143,11 +143,12 @@ func TestTutorial04Communication(t *testing.T) {
 	})
 
 	communicationNudge := `Check mail and hook status, then act accordingly`
+	mailFocusedRecoveryNudge := `Prioritize the unread mail with subject Review needed: sling reviewer work for the auth module changes to my-project/reviewer. Ignore unrelated health/order work for this turn.`
 	communicationPeekTimeout := 90 * time.Second
 	communicationRetryTimeout := 90 * time.Second
 	communicationRecordedLines := 100
-	nudgeMayor := func(context string) {
-		out, err := ws.runShell(`gc session nudge mayor "`+communicationNudge+`"`, "")
+	nudgeMayor := func(context, message string) {
+		out, err := ws.runShell(`gc session nudge mayor "`+message+`"`, "")
 		if err != nil {
 			t.Fatalf("%s: %v\n%s", context, err, out)
 		}
@@ -178,7 +179,7 @@ func TestTutorial04Communication(t *testing.T) {
 	}
 
 	t.Run(`gc session nudge mayor "Check mail and hook status, then act accordingly"`, func(t *testing.T) {
-		nudgeMayor("gc session nudge mayor")
+		nudgeMayor("gc session nudge mayor", communicationNudge)
 	})
 
 	t.Run("gc session peek mayor --lines 6", func(t *testing.T) {
@@ -216,9 +217,9 @@ func TestTutorial04Communication(t *testing.T) {
 		if waitForRecordedCommunication("after initial peek timeout") {
 			return
 		}
-		ws.noteWarning("tutorial 04 runtime workaround: the visible nudge can leave mayor with injected mail but no proven reviewer handoff yet, so the page driver explicitly wakes mayor and requeues the same mail-driven nudge before retrying the visible peek step")
+		ws.noteWarning("tutorial 04 runtime workaround: the visible nudge can leave mayor with injected mail but no proven reviewer handoff yet, or can let unrelated health/order hook work distract the model, so the page driver explicitly wakes mayor and requeues a mail-specific hidden nudge before retrying the visible peek step")
 		wakeMayor("wake mayor before communication retry")
-		nudgeMayor("re-nudge mayor before communication retry")
+		nudgeMayor("re-nudge mayor before communication retry", mailFocusedRecoveryNudge)
 		if waitForCondition(t, communicationRetryTimeout, 2*time.Second, mayorCommunicationVisible) {
 			return
 		}
@@ -228,7 +229,7 @@ func TestTutorial04Communication(t *testing.T) {
 		ws.noteWarning("tutorial 04 runtime workaround: wake-only recovery can still leave mayor runtime state wedged, so the page driver force-kills just the mayor session and lets the named-session reconciler recreate it without restarting the whole city")
 		killMayor("kill mayor before final communication retry")
 		waitForMayorReady("after tutorial 04 session recycle")
-		nudgeMayor("re-nudge mayor after final communication recycle")
+		nudgeMayor("re-nudge mayor after final communication recycle", mailFocusedRecoveryNudge)
 		if waitForCondition(t, communicationRetryTimeout, 2*time.Second, mayorCommunicationVisible) {
 			return
 		}
