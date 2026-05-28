@@ -39,7 +39,7 @@ func (c *CachingStore) ApplyEvent(eventType string, payload json.RawMessage) {
 		depsKnown = true
 	}
 	currentDeps = cloneDeps(currentDeps)
-	_, locallyMutated := c.beadSeq[patch.ID]
+	seqBase, locallyMutated := c.beadSeq[patch.ID]
 	localBeadAt := c.localBeadAt[patch.ID]
 	recentlyLocal := recentLocalMutation(localBeadAt, now)
 	_, locallyDeleted := c.deletedSeq[patch.ID]
@@ -150,20 +150,29 @@ func (c *CachingStore) ApplyEvent(eventType string, payload json.RawMessage) {
 				}
 			} else {
 				_, locallyMutated := c.beadSeq[patch.ID]
+				// A concurrent local write can land in the RUnlock->Lock window.
+				// beadChanged compares only the cached Bead, but DepAdd/DepRemove
+				// mutate c.deps and bump the mutation seq without touching
+				// c.beads[id], so a dep-only write slips that guard. The mutation
+				// seq advancing past the read-phase snapshot is the reliable
+				// signal that some local write intervened since the backing
+				// verification (gastownhall/gascity#2210).
+				changedSinceVerify := beadChanged(current, verifiedRecentLocalBase, false) ||
+					c.beadSeq[patch.ID] != seqBase
 				// Re-check a genuine recent local write under the write lock to
 				// catch a write that landed between the read-lock verification
 				// and here; it wins unconditionally.
 				if recentLocalMutation(c.localBeadAt[patch.ID], time.Now()) &&
-					(!verifiedRecentLocal || beadChanged(current, verifiedRecentLocalBase, false)) {
+					(!verifiedRecentLocal || changedSinceVerify) {
 					return
 				}
 				// For a bead flagged locally mutated only by a prior event,
 				// apply the conflict only if it was verified against the
-				// backing store under the read lock and the cached bead has not
-				// changed since (no concurrent local write); otherwise drop and
-				// let reconciliation reconverge (gastownhall/gascity#2210).
+				// backing store under the read lock and nothing changed since
+				// (no concurrent local write); otherwise drop and let
+				// reconciliation reconverge (gastownhall/gascity#2210).
 				if locallyMutated &&
-					(!verifiedRecentLocal || beadChanged(current, verifiedRecentLocalBase, false)) {
+					(!verifiedRecentLocal || changedSinceVerify) {
 					return
 				}
 			}
