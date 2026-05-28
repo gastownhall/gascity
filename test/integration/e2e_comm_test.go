@@ -40,7 +40,11 @@ func TestE2E_Drain_SetAndCheck(t *testing.T) {
 }
 
 // TestE2E_Drain_Ack verifies that gc runtime drain-ack sets the GC_DRAIN_ACK
-// metadata flag.
+// metadata flag. It is not a respawn-timing venue: there is no running
+// controller/reconciler here, so drain-ack's controller-socket poke (#2364)
+// has no listener and emits a best-effort "poke failed" WARN to stderr that
+// does not affect exit status. Respawn timing is covered in tier B by
+// TestLifecycle_DrainAckResponsiveRespawn.
 func TestE2E_Drain_Ack(t *testing.T) {
 	city := e2eCity{
 		Agents: []e2eAgent{
