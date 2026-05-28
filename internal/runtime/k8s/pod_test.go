@@ -141,3 +141,81 @@ func TestBuildPod_ClonesSchedulingFields(t *testing.T) {
 		t.Fatalf("provider affinity value mutated to %q", values[0])
 	}
 }
+
+func TestBuildPod_MountsGitCredentialSecret(t *testing.T) {
+	p := newProviderWithOps(newFakeK8sOps())
+	pod, err := buildPod("test-session", runtime.Config{Command: "/bin/bash"}, p)
+	if err != nil {
+		t.Fatalf("buildPod: %v", err)
+	}
+
+	mount, ok := volumeMountByName(pod.Spec.Containers[0].VolumeMounts, "git-credentials")
+	if !ok {
+		t.Fatal("missing git-credentials volume mount")
+	}
+	if mount.MountPath != "/tmp/git-secret" || !mount.ReadOnly {
+		t.Fatalf("git-credentials mount = %#v, want readonly /tmp/git-secret", mount)
+	}
+
+	volume, ok := volumeByName(pod.Spec.Volumes, "git-credentials")
+	if !ok || volume.Secret == nil {
+		t.Fatalf("missing git-credentials secret volume: %#v", volume)
+	}
+	if volume.Secret.SecretName != "git-credentials" {
+		t.Fatalf("git secret name = %q, want git-credentials", volume.Secret.SecretName)
+	}
+	if volume.Secret.Optional == nil || !*volume.Secret.Optional {
+		t.Fatal("git secret should be optional")
+	}
+}
+
+func TestBuildPodEnv_GitHubTokenEnvSupportsGitAndGHCLI(t *testing.T) {
+	env, err := buildPodEnv(map[string]string{}, "/workspace", podManagedDoltHost, podManagedDoltPort)
+	if err != nil {
+		t.Fatalf("buildPodEnv: %v", err)
+	}
+
+	for _, name := range []string{"GITHUB_TOKEN", "GH_TOKEN"} {
+		v, ok := envByName(env, name)
+		if !ok {
+			t.Fatalf("missing %s env", name)
+		}
+		if v.ValueFrom == nil || v.ValueFrom.SecretKeyRef == nil {
+			t.Fatalf("%s does not come from a secret: %#v", name, v)
+		}
+		ref := v.ValueFrom.SecretKeyRef
+		if ref.Name != "git-credentials" || ref.Key != "token" {
+			t.Fatalf("%s secret ref = %s/%s, want git-credentials/token", name, ref.Name, ref.Key)
+		}
+		if ref.Optional == nil || !*ref.Optional {
+			t.Fatalf("%s secret ref should be optional", name)
+		}
+	}
+}
+
+func volumeMountByName(mounts []corev1.VolumeMount, name string) (corev1.VolumeMount, bool) {
+	for _, mount := range mounts {
+		if mount.Name == name {
+			return mount, true
+		}
+	}
+	return corev1.VolumeMount{}, false
+}
+
+func volumeByName(volumes []corev1.Volume, name string) (corev1.Volume, bool) {
+	for _, volume := range volumes {
+		if volume.Name == name {
+			return volume, true
+		}
+	}
+	return corev1.Volume{}, false
+}
+
+func envByName(env []corev1.EnvVar, name string) (corev1.EnvVar, bool) {
+	for _, v := range env {
+		if v.Name == name {
+			return v, true
+		}
+	}
+	return corev1.EnvVar{}, false
+}

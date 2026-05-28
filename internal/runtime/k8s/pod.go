@@ -20,6 +20,7 @@ import (
 const (
 	podManagedDoltHost = "dolt.gc.svc.cluster.local"
 	podManagedDoltPort = "3307"
+	gitSecretName      = "git-credentials"
 )
 
 func controllerCityPath(cfgEnv map[string]string) string {
@@ -271,6 +272,17 @@ func buildPod(name string, cfg runtime.Config, p *Provider) (*corev1.Pod, error)
 			},
 		},
 	})
+	mainVolMounts = append(mainVolMounts, corev1.VolumeMount{
+		Name: "git-credentials", MountPath: "/tmp/git-secret", ReadOnly: true,
+	})
+	volumes = append(volumes, corev1.Volume{
+		Name: "git-credentials", VolumeSource: corev1.VolumeSource{
+			Secret: &corev1.SecretVolumeSource{
+				SecretName: gitSecretName,
+				Optional:   boolPtr(true),
+			},
+		},
+	})
 
 	// If GC_CITY differs from work_dir, add a city volume (not needed when prebaked).
 	if !p.prebaked && ctrlCity != "" && ctrlCity != cfg.WorkDir {
@@ -451,18 +463,23 @@ func buildPodEnv(cfgEnv map[string]string, podWorkDir, managedServiceHost, manag
 	}
 
 	// Inject GITHUB_TOKEN from optional K8s secret for git push in pods.
-	env = append(env, corev1.EnvVar{
-		Name: "GITHUB_TOKEN",
+	env = append(env, gitTokenEnv("GITHUB_TOKEN"))
+	env = append(env, gitTokenEnv("GH_TOKEN"))
+
+	return env, nil
+}
+
+func gitTokenEnv(name string) corev1.EnvVar {
+	return corev1.EnvVar{
+		Name: name,
 		ValueFrom: &corev1.EnvVarSource{
 			SecretKeyRef: &corev1.SecretKeySelector{
-				LocalObjectReference: corev1.LocalObjectReference{Name: "git-credentials"},
+				LocalObjectReference: corev1.LocalObjectReference{Name: gitSecretName},
 				Key:                  "token",
 				Optional:             boolPtr(true),
 			},
 		},
-	})
-
-	return env, nil
+	}
 }
 
 // needsStaging returns true if the session config requires file staging
