@@ -886,9 +886,15 @@ func (m *Manager) CloseDetailed(id string) (CloseResult, error) {
 			return err
 		}
 
-		// Best-effort stop cleans up any live runtime and allows auto.Provider
-		// to discard stale ACP route entries for suspended sessions as well.
-		_ = m.sp.Stop(sessName)
+		// Stop the live runtime before marking the bead closed. Stop is
+		// idempotent for an already-gone session (returns nil), which also lets
+		// auto.Provider discard stale ACP route entries for suspended sessions.
+		// A genuine terminate failure must propagate and leave the bead open
+		// rather than report a "closed but still running" session — swallowing
+		// it here previously masked exactly that wedge.
+		if err := m.sp.Stop(sessName); err != nil {
+			return fmt.Errorf("stopping runtime for session %s: %w", id, err)
+		}
 		nudgeIDs, capped, err := CancelWaitsAndCollectNudgeIDs(m.store, id, time.Now().UTC())
 		if err != nil {
 			log.Printf("session %s: closing after wait cancellation lookup failed: %v", id, err)

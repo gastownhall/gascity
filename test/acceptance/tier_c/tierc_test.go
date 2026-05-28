@@ -95,15 +95,14 @@ func TestMain(m *testing.M) {
 		panic("acceptance-c: " + err.Error())
 	}
 
-	// Force a token refresh before staging credentials. Claude Code
+	// Force a token refresh before staging OAuth credentials. Claude Code
 	// refreshes tokens in-memory but may not persist to .credentials.json,
 	// leaving the on-disk token expired. A quick --print call forces the
 	// refresh and (in newer versions) persists it.
-	if refreshOut, err := exec.Command("claude", "--print", "ok").CombinedOutput(); err != nil {
-		if hasEnvAuth {
-			panic(fmt.Sprintf("acceptance-c: provider preflight failed: %v\n%s", err, refreshOut))
+	if !hasEnvAuth {
+		if refreshOut, err := exec.Command("claude", "--print", "ok").CombinedOutput(); err != nil {
+			fmt.Fprintf(os.Stderr, "acceptance-c: OAuth preflight refresh failed: %v\n%s\n", err, refreshOut)
 		}
-		fmt.Fprintf(os.Stderr, "acceptance-c: OAuth preflight refresh failed: %v\n%s\n", err, refreshOut)
 	}
 
 	realHome, _ := os.UserHomeDir()
@@ -145,6 +144,12 @@ func TestMain(m *testing.M) {
 		}
 	}
 	testEnvC = testEnvC.With("DOLT_ROOT_PATH", gcHome) // dolt reads config from $DOLT_ROOT_PATH/.dolt/
+
+	if hasEnvAuth {
+		if err := preflightTierCClaudeEnvAuth(tmpDir, testEnvC); err != nil {
+			panic(err.Error())
+		}
+	}
 
 	// Ensure tmux is available.
 	if _, err := exec.LookPath("tmux"); err != nil {
@@ -673,6 +678,128 @@ func tierCEnvAuth() (apiKey, authToken string, hasEnvAuth bool) {
 	authToken = strings.TrimSpace(os.Getenv("ANTHROPIC_AUTH_TOKEN"))
 	hasEnvAuth = apiKey != "" || authToken != ""
 	return apiKey, authToken, hasEnvAuth
+}
+
+func preflightTierCClaudeEnvAuth(tmpDir string, env *helpers.Env) error {
+	projectPath := filepath.Join(tmpDir, "refinery-preflight")
+	if err := os.MkdirAll(projectPath, 0o755); err != nil {
+		return fmt.Errorf("acceptance-c: creating refinery preflight project: %w", err)
+	}
+	if err := helpers.EnsureClaudeProjectState(env, projectPath); err != nil {
+		return fmt.Errorf("acceptance-c: seeding Claude state for refinery preflight: %w", err)
+	}
+
+	model := tierCClaudePreflightModel(env)
+	baseURL := strings.TrimRight(strings.TrimSpace(env.Get("ANTHROPIC_BASE_URL")), "/")
+	if strings.EqualFold(baseURL, "https://ollama.com") && model == "" {
+		return fmt.Errorf("acceptance-c: Ollama Claude preflight requires CLAUDE_CODE_SUBAGENT_MODEL or an ANTHROPIC_DEFAULT_* model")
+	}
+
+	const want = "refinery-kimi-ok"
+	args := make([]string, 0, 4)
+	if model != "" {
+		args = append(args, "--model", model)
+	}
+	args = append(args, "--print", "Reply exactly "+want)
+
+	claudePath, err := tierCLookPath(env.Get("PATH"), "claude")
+	if err != nil {
+		return fmt.Errorf("acceptance-c: resolving staged Claude provider: %w", err)
+	}
+	cmd := exec.Command(claudePath, args...)
+	cmd.Dir = projectPath
+	cmd.Env = env.List()
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("acceptance-c: Claude env-auth preflight failed (project=refinery-preflight, base_url=%q, model=%q, auth_token_set=%t, api_key_set=%t, ollama_key_set=%t): %w\n%s",
+			baseURL,
+			model,
+			strings.TrimSpace(env.Get("ANTHROPIC_AUTH_TOKEN")) != "",
+			strings.TrimSpace(env.Get("ANTHROPIC_API_KEY")) != "",
+			strings.TrimSpace(env.Get("OLLAMA_API_KEY")) != "",
+			err,
+			tierCPreflightStreams(stdout.String(), stderr.String()),
+		)
+	}
+
+	if got := strings.TrimSpace(stdout.String()); got != want {
+		return fmt.Errorf("acceptance-c: Claude env-auth preflight returned %q, want %q (project=refinery-preflight, base_url=%q, model=%q)\n%s",
+			got,
+			want,
+			baseURL,
+			model,
+			tierCPreflightStreams(stdout.String(), stderr.String()),
+		)
+	}
+
+	displayModel := model
+	if displayModel == "" {
+		displayModel = "<provider default>"
+	}
+	displayBaseURL := baseURL
+	if displayBaseURL == "" {
+		displayBaseURL = "<provider default>"
+	}
+	fmt.Fprintf(os.Stderr, "acceptance-c: Claude env-auth preflight ok (project=refinery-preflight, base_url=%s, model=%s)\n", displayBaseURL, displayModel)
+	return nil
+}
+
+func tierCClaudePreflightModel(env *helpers.Env) string {
+	for _, key := range []string{
+		"CLAUDE_CODE_SUBAGENT_MODEL",
+		"ANTHROPIC_DEFAULT_SONNET_MODEL",
+		"ANTHROPIC_DEFAULT_OPUS_MODEL",
+		"ANTHROPIC_DEFAULT_HAIKU_MODEL",
+	} {
+		if v := strings.TrimSpace(env.Get(key)); v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+func tierCPreflightStreams(stdout, stderr string) string {
+	var b strings.Builder
+	if strings.TrimSpace(stdout) != "" {
+		b.WriteString("stdout:\n")
+		b.WriteString(stdout)
+		if !strings.HasSuffix(stdout, "\n") {
+			b.WriteString("\n")
+		}
+	}
+	if strings.TrimSpace(stderr) != "" {
+		b.WriteString("stderr:\n")
+		b.WriteString(stderr)
+		if !strings.HasSuffix(stderr, "\n") {
+			b.WriteString("\n")
+		}
+	}
+	out := b.String()
+	const limit = 4000
+	if len(out) <= limit {
+		return out
+	}
+	return out[:limit] + "\n... [preflight output truncated]\n"
+}
+
+func tierCLookPath(pathEnv, name string) (string, error) {
+	if strings.ContainsRune(name, os.PathSeparator) {
+		return name, nil
+	}
+	for _, dir := range filepath.SplitList(pathEnv) {
+		if dir == "" {
+			dir = "."
+		}
+		candidate := filepath.Join(dir, name)
+		info, err := os.Stat(candidate)
+		if err != nil || info.IsDir() || info.Mode()&0o111 == 0 {
+			continue
+		}
+		return candidate, nil
+	}
+	return "", exec.ErrNotFound
 }
 
 func stageTierCAcceptanceProviders(binDir, apiKey string) error {

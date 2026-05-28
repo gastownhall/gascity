@@ -24,6 +24,7 @@ type AwakeInput struct {
 	WorkBeads          []AwakeWorkBead // in_progress assigned work plus ready open assigned work
 	ScaleCheckCounts   map[string]int  // agent template → scale_check count
 	NamedSessionDemand map[string]bool // named-session identity → routed/assigned work demand
+	NamedSessionWorkQ  map[string]bool // named-session identity → bridge-carried work_query demand
 	WorkSet            map[string]bool // agent template → work_query found pending work
 	RunningSessions    map[string]bool // session name → tmux exists
 	AttachedSessions   map[string]bool // session name → user attached
@@ -98,8 +99,29 @@ type AwakeDecision struct {
 // executePlannedStarts handles it via wave-based starts.
 func ComputeAwakeSet(input AwakeInput) map[string]AwakeDecision {
 	agentsByName := make(map[string]AwakeAgent, len(input.Agents))
+	agentsByBaseName := make(map[string]AwakeAgent, len(input.Agents))
+	duplicateBaseNames := make(map[string]bool)
 	for _, a := range input.Agents {
 		agentsByName[a.QualifiedName] = a
+		base := awakeAgentBaseName(a.QualifiedName)
+		if existing, ok := agentsByBaseName[base]; ok && existing.QualifiedName != a.QualifiedName {
+			duplicateBaseNames[base] = true
+			continue
+		}
+		if !duplicateBaseNames[base] {
+			agentsByBaseName[base] = a
+		}
+	}
+	lookupAgent := func(name string) (AwakeAgent, bool) {
+		if agent, ok := agentsByName[name]; ok {
+			return agent, true
+		}
+		base := awakeAgentBaseName(name)
+		if duplicateBaseNames[base] {
+			return AwakeAgent{}, false
+		}
+		agent, ok := agentsByBaseName[base]
+		return agent, ok
 	}
 
 	// Step 1: Build desired set.
@@ -128,7 +150,7 @@ func ComputeAwakeSet(input AwakeInput) map[string]AwakeDecision {
 
 	// Named sessions
 	for _, ns := range input.NamedSessions {
-		if agent, ok := agentsByName[ns.Identity]; ok && agent.Suspended {
+		if agent, ok := lookupAgent(ns.Identity); ok && agent.Suspended {
 			continue
 		}
 		switch ns.Mode {
@@ -142,9 +164,13 @@ func ComputeAwakeSet(input AwakeInput) map[string]AwakeDecision {
 				desired[ns.Identity] = "named-always"
 			}
 		case "on_demand":
-			// On-demand named sessions wake only from named demand that was
-			// resolved by the desired-state pass, not generic template demand.
-			if !input.NamedSessionDemand[ns.Identity] {
+			reason := ""
+			switch {
+			case input.NamedSessionDemand[ns.Identity]:
+				reason = "named-demand"
+			case input.NamedSessionWorkQ[ns.Identity]:
+				reason = "work-query"
+			default:
 				continue
 			}
 			if agent, ok := agentsByName[ns.Template]; ok && agent.Suspended {
@@ -153,10 +179,10 @@ func ComputeAwakeSet(input AwakeInput) map[string]AwakeDecision {
 			if sn := resolveNamedSessionBeadName(input.SessionBeads, ns); sn != "" {
 				bead := findBeadBySessionName(input.SessionBeads, sn)
 				if bead != nil && !bead.DependencyOnly && !bead.Drained && bead.State != "closed" {
-					desired[sn] = "named-demand"
+					desired[sn] = reason
 				}
 			} else {
-				desired[ns.Identity] = "named-demand"
+				desired[ns.Identity] = reason
 			}
 		}
 	}
@@ -166,7 +192,7 @@ func ComputeAwakeSet(input AwakeInput) map[string]AwakeDecision {
 		if count <= 0 {
 			continue
 		}
-		agent, ok := agentsByName[template]
+		agent, ok := lookupAgent(template)
 		if !ok || agent.Suspended {
 			continue
 		}
@@ -206,7 +232,7 @@ func ComputeAwakeSet(input AwakeInput) map[string]AwakeDecision {
 		if input.ScaleCheckCounts[template] > 0 {
 			continue // ScaleCheck already covers this template
 		}
-		agent, ok := agentsByName[template]
+		agent, ok := lookupAgent(template)
 		if !ok || agent.Suspended {
 			continue
 		}
@@ -241,7 +267,7 @@ func ComputeAwakeSet(input AwakeInput) map[string]AwakeDecision {
 		if bead.State == "closed" {
 			continue
 		}
-		if agent, ok := agentsByName[bead.Template]; ok && agent.Suspended {
+		if agent, ok := lookupAgent(bead.Template); ok && agent.Suspended {
 			continue
 		}
 		for _, wb := range input.WorkBeads {
@@ -313,7 +339,7 @@ func ComputeAwakeSet(input AwakeInput) map[string]AwakeDecision {
 		// still respecting hard blockers applied below.
 		pinBlockedByState := bead.State == "suspended" || bead.State == "closed" || bead.Drained
 		if !decision.ShouldWake && bead.Pinned && !pinBlockedByState && !bead.DependencyOnly && !bead.WaitHold {
-			if agent, ok := agentsByName[bead.Template]; ok && !agent.Suspended {
+			if agent, ok := lookupAgent(bead.Template); ok && !agent.Suspended {
 				decision.ShouldWake = true
 				decision.Reason = "pin"
 			}
@@ -327,7 +353,7 @@ func ComputeAwakeSet(input AwakeInput) map[string]AwakeDecision {
 		if decision.ShouldWake && !input.AttachedSessions[name] && !input.PendingSessions[name] && !bead.Pinned && !bead.IdleSince.IsZero() &&
 			!isAlwaysNamedSession(input.NamedSessions, bead) &&
 			desired[name] != "assigned-work" {
-			agent, hasAgent := agentsByName[bead.Template]
+			agent, hasAgent := lookupAgent(bead.Template)
 			var idleTimeout time.Duration
 			switch {
 			case bead.ManualSession && input.ChatIdleTimeout > 0:
@@ -366,6 +392,13 @@ func ComputeAwakeSet(input AwakeInput) map[string]AwakeDecision {
 	}
 
 	return result
+}
+
+func awakeAgentBaseName(name string) string {
+	if idx := strings.LastIndex(name, "/"); idx >= 0 {
+		return name[idx+1:]
+	}
+	return name
 }
 
 func findNamedSessionName(beads []AwakeSessionBead, identity string) string {

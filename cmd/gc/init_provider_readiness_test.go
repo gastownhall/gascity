@@ -793,7 +793,7 @@ func TestCheckHardDependenciesRejectsDoltPreReleaseAtFloor(t *testing.T) {
 	initRunVersion = func(binary string) (string, error) {
 		switch binary {
 		case "dolt":
-			return "dolt version 1.86.2-rc1", nil
+			return "dolt version 2.0.7-rc1", nil
 		case "bd":
 			return "bd version " + bdMinVersion, nil
 		case "flock", "tmux", "jq", "git", "pgrep", "lsof":
@@ -808,7 +808,7 @@ func TestCheckHardDependenciesRejectsDoltPreReleaseAtFloor(t *testing.T) {
 	if len(missing) != 1 {
 		t.Fatalf("missing deps = %#v, want only dolt prerelease rejection", missing)
 	}
-	if !strings.Contains(missing[0].name, "dolt") || !strings.Contains(missing[0].name, "1.86.2-rc1") {
+	if !strings.Contains(missing[0].name, "dolt") || !strings.Contains(missing[0].name, "2.0.7-rc1") {
 		t.Fatalf("missing dep = %#v, want dolt prerelease version in dependency name", missing[0])
 	}
 }

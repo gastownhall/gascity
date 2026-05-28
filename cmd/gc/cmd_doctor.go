@@ -374,7 +374,7 @@ func doDoctor(fix, verbose, jsonOut, explainPostgresAuth bool, stdout, stderr io
 		doctor.PrintSummary(stdout, report)
 	}
 
-	if report.Failed > 0 {
+	if report.BlockingFailed > 0 {
 		return 1
 	}
 	return 0
@@ -406,6 +406,7 @@ func (expandedConfigLoadCheck) Run(ctx *doctor.CheckContext) *doctor.CheckResult
 type doctorJSONResult struct {
 	Name         string   `json:"name"`
 	Status       string   `json:"status"`
+	Severity     string   `json:"severity"`
 	Message      string   `json:"message"`
 	FixHint      string   `json:"fix_hint,omitempty"`
 	Details      []string `json:"details,omitempty"`
@@ -415,12 +416,13 @@ type doctorJSONResult struct {
 }
 
 type doctorJSONReport struct {
-	Passed  int                `json:"passed"`
-	Warned  int                `json:"warned"`
-	Failed  int                `json:"failed"`
-	Fixed   int                `json:"fixed"`
-	Results []doctorJSONResult `json:"results"`
-	Error   string             `json:"error,omitempty"`
+	Passed         int                `json:"passed"`
+	Warned         int                `json:"warned"`
+	Failed         int                `json:"failed"`
+	BlockingFailed int                `json:"blocking_failed"`
+	Fixed          int                `json:"fixed"`
+	Results        []doctorJSONResult `json:"results"`
+	Error          string             `json:"error,omitempty"`
 }
 
 func doctorStatusString(s doctor.CheckStatus) string {
@@ -435,18 +437,30 @@ func doctorStatusString(s doctor.CheckStatus) string {
 	return "unknown"
 }
 
+func doctorSeverityString(s doctor.CheckSeverity) string {
+	switch s {
+	case doctor.SeverityAdvisory:
+		return "advisory"
+	case doctor.SeverityBlocking:
+		return "blocking"
+	}
+	return "blocking"
+}
+
 func writeDoctorJSON(w io.Writer, report *doctor.Report) error {
 	out := doctorJSONReport{
-		Passed:  report.Passed,
-		Warned:  report.Warned,
-		Failed:  report.Failed,
-		Fixed:   report.Fixed,
-		Results: make([]doctorJSONResult, 0, len(report.Results)),
+		Passed:         report.Passed,
+		Warned:         report.Warned,
+		Failed:         report.Failed,
+		BlockingFailed: report.BlockingFailed,
+		Fixed:          report.Fixed,
+		Results:        make([]doctorJSONResult, 0, len(report.Results)),
 	}
 	for _, r := range report.Results {
 		out.Results = append(out.Results, doctorJSONResult{
 			Name:         r.Name,
 			Status:       doctorStatusString(r.Status),
+			Severity:     doctorSeverityString(r.Severity),
 			Message:      r.Message,
 			FixHint:      r.FixHint,
 			Details:      r.Details,

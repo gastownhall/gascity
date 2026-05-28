@@ -221,6 +221,30 @@ func TestHQStorePeriodicSnapshotFlushes(t *testing.T) {
 	}
 }
 
+func makeHQSnapshotDirReadOnly(t *testing.T, dir string) func() {
+	t.Helper()
+	info, err := os.Stat(dir)
+	if err != nil {
+		t.Fatalf("stat snapshot dir: %v", err)
+	}
+	originalMode := info.Mode().Perm()
+	restored := false
+	restore := func() {
+		if restored {
+			return
+		}
+		restored = true
+		if err := os.Chmod(dir, originalMode); err != nil {
+			t.Fatalf("restore snapshot dir permissions: %v", err)
+		}
+	}
+	if err := os.Chmod(dir, 0o555); err != nil {
+		t.Fatalf("make snapshot dir read-only: %v", err)
+	}
+	t.Cleanup(restore)
+	return restore
+}
+
 func TestHQStorePurgeExpired(t *testing.T) {
 	store, err := beads.OpenHQStore(t.TempDir())
 	if err != nil {

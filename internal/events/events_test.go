@@ -1064,6 +1064,70 @@ func TestFileRecorderLatestSeq(t *testing.T) {
 	}
 }
 
+func TestFileRecorderLatestSeqSeesExternalAppend(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events.jsonl")
+	var stderr bytes.Buffer
+	rec, err := NewFileRecorder(path, &stderr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rec.Close() //nolint:errcheck // test cleanup
+
+	external, err := NewFileRecorder(path, &stderr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	external.Record(Event{Type: BeadCreated, Actor: "hook", Subject: "gc-1"})
+	if err := external.Close(); err != nil {
+		t.Fatalf("close external recorder: %v", err)
+	}
+
+	seq, err := rec.LatestSeq()
+	if err != nil {
+		t.Fatalf("LatestSeq: %v", err)
+	}
+	if seq != 1 {
+		t.Fatalf("LatestSeq after external append = %d, want 1", seq)
+	}
+}
+
+func TestFileRecorderWatchSeesExternalAppendAfterRecorderOpen(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events.jsonl")
+	var stderr bytes.Buffer
+	rec, err := NewFileRecorder(path, &stderr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rec.Close() //nolint:errcheck // test cleanup
+
+	external, err := NewFileRecorder(path, &stderr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	external.Record(Event{Type: BeadCreated, Actor: "hook", Subject: "gc-1"})
+	if err := external.Close(); err != nil {
+		t.Fatalf("close external recorder: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	w, err := rec.Watch(ctx, 0)
+	if err != nil {
+		t.Fatalf("Watch: %v", err)
+	}
+	defer w.Close() //nolint:errcheck // test cleanup
+
+	e, err := w.Next()
+	if err != nil {
+		t.Fatalf("Next: %v", err)
+	}
+	if e.Seq != 1 || e.Subject != "gc-1" {
+		t.Fatalf("event = seq %d subject %q, want seq 1 subject gc-1", e.Seq, e.Subject)
+	}
+}
+
 func TestFileRecorderWatch(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "events.jsonl")

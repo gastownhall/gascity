@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -635,6 +636,66 @@ func TestBeadGetUsesRoutePrefixStore(t *testing.T) {
 	}
 	if betaStore.getCalls != 1 {
 		t.Fatalf("betaStore.getCalls = %d, want 1", betaStore.getCalls)
+	}
+}
+
+func TestBeadGetIncludesUpdatedAtWhenPopulated(t *testing.T) {
+	createdAt := time.Date(2026, 5, 27, 12, 0, 0, 0, time.UTC)
+	updatedAt := createdAt.Add(5 * time.Minute)
+	state := newFakeState(t)
+	state.stores["myrig"] = beads.NewMemStoreFrom(0, []beads.Bead{{
+		ID:        "gc-updated",
+		Title:     "Updated bead",
+		Status:    "open",
+		Type:      "task",
+		CreatedAt: createdAt,
+		UpdatedAt: updatedAt,
+	}}, nil)
+	h := newTestCityHandler(t, state)
+
+	req := httptest.NewRequest("GET", cityURL(state, "/bead/gc-updated"), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var got map[string]any
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatalf("Decode(): %v", err)
+	}
+	if got["updated_at"] != updatedAt.Format(time.RFC3339Nano) {
+		t.Fatalf("updated_at = %v, want %q", got["updated_at"], updatedAt.Format(time.RFC3339Nano))
+	}
+}
+
+func TestBeadGetOmitsUpdatedAtWhenZero(t *testing.T) {
+	createdAt := time.Date(2026, 5, 27, 12, 0, 0, 0, time.UTC)
+	state := newFakeState(t)
+	state.stores["myrig"] = beads.NewMemStoreFrom(0, []beads.Bead{{
+		ID:        "gc-legacy",
+		Title:     "Legacy bead",
+		Status:    "open",
+		Type:      "task",
+		CreatedAt: createdAt,
+	}}, nil)
+	h := newTestCityHandler(t, state)
+
+	req := httptest.NewRequest("GET", cityURL(state, "/bead/gc-legacy"), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var got map[string]any
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatalf("Decode(): %v", err)
+	}
+	if updatedAt, ok := got["updated_at"]; ok {
+		t.Fatalf("updated_at = %v, want omitted", updatedAt)
 	}
 }
 

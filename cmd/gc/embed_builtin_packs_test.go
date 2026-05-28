@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"testing/fstest"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/builtinpacks"
@@ -260,7 +261,7 @@ func TestBuiltinDoltDoctorAllowsAtMinimumVersionWhenProbeSucceeds(t *testing.T) 
 		name string
 		body string
 	}{
-		{name: "dolt", body: "#!/bin/sh\nprintf 'dolt version 1.86.2\\n'\n"},
+		{name: "dolt", body: "#!/bin/sh\nprintf 'dolt version 2.0.7\\n'\n"},
 		{name: "flock", body: "#!/bin/sh\nexit 0\n"},
 		{name: "lsof", body: "#!/bin/sh\nexit 0\n"},
 	} {
@@ -276,7 +277,7 @@ func TestBuiltinDoltDoctorAllowsAtMinimumVersionWhenProbeSucceeds(t *testing.T) 
 	if err != nil {
 		t.Fatalf("check-dolt unexpectedly rejected Dolt probe at minimum: %v\n%s", err, out)
 	}
-	if !strings.Contains(string(out), "dolt available (dolt version 1.86.2)") {
+	if !strings.Contains(string(out), "dolt available (dolt version 2.0.7)") {
 		t.Fatalf("check-dolt output = %s, want successful version probe", out)
 	}
 }
@@ -301,7 +302,7 @@ func TestBuiltinDoltDoctorBoundsVersionProbe(t *testing.T) {
 			name: "gtimeout",
 			body: "#!/bin/sh\nprintf '%s\\n' \"$*\" > \"$TIMEOUT_CAPTURE\"\nif [ \"$1\" = \"--kill-after=2\" ]; then\n  shift\nfi\nshift\nexec \"$@\"\n",
 		},
-		{name: "dolt", body: "#!/bin/sh\nprintf 'dolt version 1.86.10\\n'\n"},
+		{name: "dolt", body: "#!/bin/sh\nprintf 'dolt version 2.0.10\\n'\n"},
 		{name: "flock", body: "#!/bin/sh\nexit 0\n"},
 		{name: "lsof", body: "#!/bin/sh\nexit 0\n"},
 	} {
@@ -461,6 +462,15 @@ func TestMaterializeBuiltinPacksPiHookUsesCurrentExtensionAPI(t *testing.T) {
 	}
 }
 
+// TestMaterializeBuiltinPacksReplacesStaleMaterializedPiHook pins the
+// canonical-sync contract for required packs under Option B
+// (gastownhall/gascity#2429): the operator-edit-protection introduced for
+// that issue is scoped to non-required packs, so a stale correct-mode file in
+// the required core pack is refreshed to the embedded content rather than
+// preserved. This keeps required packs (core, maintenance, bd/dolt) in
+// lockstep with the binary while still protecting operator-authored formula
+// TOMLs and command scripts in non-required packs (covered by
+// TestMaterializeFS_PreservesExistingFiles).
 func TestMaterializeBuiltinPacksReplacesStaleMaterializedPiHook(t *testing.T) {
 	dir := t.TempDir()
 	hookPath := materializedPiHookPath(dir)
@@ -482,12 +492,17 @@ module.exports = {
 		t.Fatalf("MaterializeBuiltinPacks() error: %v", err)
 	}
 
+	// The Pi hook lives in the required core pack. Under Option B
+	// (gastownhall/gascity#2429) operator-edit preservation is scoped to
+	// non-required packs; required packs are kept in lockstep with the binary,
+	// so a stale correct-mode hook is refreshed to the embedded content rather
+	// than preserved.
 	data := readMaterializedPiHook(t, dir)
 	if data == string(stale) {
-		t.Fatal("stale materialized Pi hook was preserved; expected core pack materialization to repair it")
+		t.Fatalf("stale Pi hook in required core pack was preserved — required packs must be refreshed.\ngot:\n%s", data)
 	}
 	if !strings.Contains(data, `pi.on("session_start"`) {
-		t.Fatalf("repaired materialized Pi hook does not use current extension API:\n%s", data)
+		t.Fatalf("refreshed Pi hook does not use current extension API:\n%s", data)
 	}
 }
 
@@ -909,15 +924,20 @@ func TestLoadCityConfigFallsBackToExistingBuiltinPacksWhenRefreshFails(t *testin
 		t.Fatalf("MaterializeBuiltinPacks() error: %v", err)
 	}
 
+	// dolt is a non-required pack, so a failed refresh is non-fatal:
+	// loadCityConfig falls back to the existing materialized packs and emits a
+	// warning. Under Option B (gastownhall/gascity#2429) a correct-mode edited
+	// file is preserved with no write attempt, so the refresh failure is driven
+	// by a missing file the materializer must rewrite (scaffolding) while the
+	// directory is read-only.
 	targetDir := filepath.Join(dir, citylayout.SystemPacksRoot, "dolt", "commands", "compact")
 	targetFile := filepath.Join(targetDir, "run.sh")
 	wantContent, err := os.ReadFile(targetFile)
 	if err != nil {
 		t.Fatalf("ReadFile(initial run.sh): %v", err)
 	}
-	staleContent := []byte("#!/bin/sh\necho stale\n")
-	if err := os.WriteFile(targetFile, staleContent, 0o755); err != nil {
-		t.Fatalf("WriteFile(stale run.sh): %v", err)
+	if err := os.Remove(targetFile); err != nil {
+		t.Fatalf("Remove(run.sh): %v", err)
 	}
 	if err := os.Chmod(targetDir, 0o555); err != nil {
 		t.Fatalf("Chmod(%s): %v", targetDir, err)
@@ -934,12 +954,8 @@ func TestLoadCityConfigFallsBackToExistingBuiltinPacksWhenRefreshFails(t *testin
 		t.Fatalf("expected suppressed refresh warning, got %q", stderr.String())
 	}
 
-	got, err := os.ReadFile(targetFile)
-	if err != nil {
-		t.Fatalf("ReadFile(run.sh): %v", err)
-	}
-	if !bytes.Equal(got, staleContent) {
-		t.Fatalf("run.sh changed during read-only fallback; got %q", got)
+	if _, err := os.Stat(targetFile); !os.IsNotExist(err) {
+		t.Fatalf("run.sh should remain missing during read-only fallback; stat err=%v", err)
 	}
 
 	if err := os.Chmod(targetDir, 0o755); err != nil {
@@ -949,7 +965,7 @@ func TestLoadCityConfigFallsBackToExistingBuiltinPacksWhenRefreshFails(t *testin
 	if _, err := loadCityConfig(dir, &stderr); err != nil {
 		t.Fatalf("loadCityConfig() retry error: %v", err)
 	}
-	got, err = os.ReadFile(targetFile)
+	got, err := os.ReadFile(targetFile)
 	if err != nil {
 		t.Fatalf("ReadFile(run.sh) after retry: %v", err)
 	}
@@ -970,10 +986,13 @@ func TestLoadCityConfigDeduplicatesBuiltinPackRefreshWarningsPerProcess(t *testi
 		t.Fatalf("MaterializeBuiltinPacks() error: %v", err)
 	}
 
+	// Missing non-required file forces a scaffolding write that fails while the
+	// directory is read-only (see Option B note in
+	// TestLoadCityConfigFallsBackToExistingBuiltinPacksWhenRefreshFails).
 	targetDir := filepath.Join(dir, citylayout.SystemPacksRoot, "dolt", "commands", "compact")
 	targetFile := filepath.Join(targetDir, "run.sh")
-	if err := os.WriteFile(targetFile, []byte("#!/bin/sh\necho stale\n"), 0o755); err != nil {
-		t.Fatalf("WriteFile(stale run.sh): %v", err)
+	if err := os.Remove(targetFile); err != nil {
+		t.Fatalf("Remove(run.sh): %v", err)
 	}
 	if err := os.Chmod(targetDir, 0o555); err != nil {
 		t.Fatalf("Chmod(%s): %v", targetDir, err)
@@ -1003,10 +1022,13 @@ func TestLoadCityConfigForRegistryDoesNotSuppressBuiltinPackRefreshWarnings(t *t
 		t.Fatalf("MaterializeBuiltinPacks() error: %v", err)
 	}
 
+	// Missing non-required file forces a scaffolding write that fails while the
+	// directory is read-only (see Option B note in
+	// TestLoadCityConfigFallsBackToExistingBuiltinPacksWhenRefreshFails).
 	targetDir := filepath.Join(dir, citylayout.SystemPacksRoot, "dolt", "commands", "compact")
 	targetFile := filepath.Join(targetDir, "run.sh")
-	if err := os.WriteFile(targetFile, []byte("#!/bin/sh\necho stale\n"), 0o755); err != nil {
-		t.Fatalf("WriteFile(stale run.sh): %v", err)
+	if err := os.Remove(targetFile); err != nil {
+		t.Fatalf("Remove(run.sh): %v", err)
 	}
 	if err := os.Chmod(targetDir, 0o555); err != nil {
 		t.Fatalf("Chmod(%s): %v", targetDir, err)
@@ -1460,5 +1482,88 @@ func TestBuiltinPackIncludes_AlwaysIncludesMaintenance(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("maintenance pack not found in bd includes: %v", includes)
+	}
+}
+
+// TestMaterializeFS_PreservesExistingFiles asserts that an existing on-disk
+// file is not overwritten by a subsequent materialize call. This is the
+// regression guard for gastownhall/gascity#2429 — `gc bd …` subcommands
+// were silently reverting operator-edited pack files via materializeFS's
+// blind overwrite on every invocation.
+//
+// Without the fix, the second materializeFS call rewrites b.txt back to
+// the embedded "embedded-b" bytes and the assertion fails.
+func TestMaterializeFS_PreservesExistingFiles(t *testing.T) {
+	dst := t.TempDir()
+	embedded := fstest.MapFS{
+		"a.txt":     {Data: []byte("embedded-a"), Mode: 0o644},
+		"b.txt":     {Data: []byte("embedded-b"), Mode: 0o644},
+		"sub/c.txt": {Data: []byte("embedded-c"), Mode: 0o644},
+	}
+
+	// Initial materialize: writes all three files since dst is empty.
+	desired, err := materializeFS(embedded, dst, true)
+	if err != nil {
+		t.Fatalf("first materializeFS: %v", err)
+	}
+	for _, wantPath := range []string{"a.txt", "b.txt", "sub/c.txt"} {
+		if _, ok := desired[wantPath]; !ok {
+			t.Fatalf("desired set missing %q", wantPath)
+		}
+		got, err := os.ReadFile(filepath.Join(dst, filepath.FromSlash(wantPath)))
+		if err != nil {
+			t.Fatalf("read %s after first materialize: %v", wantPath, err)
+		}
+		wantBytes := []byte("embedded-" + strings.TrimSuffix(filepath.Base(wantPath), ".txt"))
+		if !bytes.Equal(got, wantBytes) {
+			t.Fatalf("first materialize content %s = %q, want %q", wantPath, got, wantBytes)
+		}
+	}
+
+	// Operator edits b.txt — the data-loss scenario in the bug report.
+	const operatorBytes = "OPERATOR EDIT — must survive next materializeFS"
+	if err := os.WriteFile(filepath.Join(dst, "b.txt"), []byte(operatorBytes), 0o644); err != nil {
+		t.Fatalf("operator edit: %v", err)
+	}
+
+	// Second materialize: should NOT overwrite the operator's edit.
+	if _, err := materializeFS(embedded, dst, true); err != nil {
+		t.Fatalf("second materializeFS: %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(dst, "b.txt"))
+	if err != nil {
+		t.Fatalf("read b.txt after second materialize: %v", err)
+	}
+	if !bytes.Equal(got, []byte(operatorBytes)) {
+		t.Fatalf("operator edit lost: got %q, want %q", got, operatorBytes)
+	}
+
+	// Unchanged files (a.txt, sub/c.txt) remain present and intact.
+	for _, want := range []string{"a.txt", "sub/c.txt"} {
+		got, err := os.ReadFile(filepath.Join(dst, filepath.FromSlash(want)))
+		if err != nil {
+			t.Fatalf("read %s after second materialize: %v", want, err)
+		}
+		expected := []byte("embedded-" + strings.TrimSuffix(filepath.Base(want), ".txt"))
+		if !bytes.Equal(got, expected) {
+			t.Fatalf("unrelated file %s content drifted: got %q, want %q", want, got, expected)
+		}
+	}
+
+	// Delete the operator-edited file; the next materialize should rewrite
+	// the embedded content (initial-scaffolding semantics still apply when
+	// a file is missing).
+	if err := os.Remove(filepath.Join(dst, "b.txt")); err != nil {
+		t.Fatalf("remove b.txt: %v", err)
+	}
+	if _, err := materializeFS(embedded, dst, true); err != nil {
+		t.Fatalf("third materializeFS: %v", err)
+	}
+	got, err = os.ReadFile(filepath.Join(dst, "b.txt"))
+	if err != nil {
+		t.Fatalf("read b.txt after third materialize: %v", err)
+	}
+	if !bytes.Equal(got, []byte("embedded-b")) {
+		t.Fatalf("missing-file rescaffold failed: got %q, want %q", got, "embedded-b")
 	}
 }

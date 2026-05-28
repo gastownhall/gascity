@@ -2807,14 +2807,21 @@ func TestMaterializeNamedSessionStampsProviderFamilyMetadata(t *testing.T) {
 }
 
 func TestMaterializeNamedSessionSeedsCityRuntimeEnv(t *testing.T) {
+	t.Setenv("ANTHROPIC_AUTH_TOKEN", "named-anthropic-token")
+	t.Setenv("ANTHROPIC_BASE_URL", "https://process.example.test")
+	t.Setenv("OLLAMA_API_KEY", "named-ollama-token")
+	t.Setenv("GC_RIG", "caller-rig")
+	t.Setenv("GC_SESSION_NAME", "caller-session")
+
 	fs := newSessionFakeState(t)
 	fs.cfg.Providers["test-agent"] = config.ProviderSpec{
 		DisplayName: "Test Agent",
 		Command:     "/bin/echo",
 		Env: map[string]string{
-			"GC_CITY":        "/wrong/city",
-			"GC_CITY_PATH":   "/wrong/city",
-			"PROVIDER_TOKEN": "ok",
+			"ANTHROPIC_BASE_URL": "https://resolved.example.test",
+			"GC_CITY":            "/wrong/city",
+			"GC_CITY_PATH":       "/wrong/city",
+			"PROVIDER_TOKEN":     "ok",
 		},
 	}
 	srv := New(fs)
@@ -2850,6 +2857,21 @@ func TestMaterializeNamedSessionSeedsCityRuntimeEnv(t *testing.T) {
 	}
 	if got := cfg.Env["PROVIDER_TOKEN"]; got != "ok" {
 		t.Errorf("Env[PROVIDER_TOKEN] = %q, want ok", got)
+	}
+	for key, want := range map[string]string{
+		"ANTHROPIC_AUTH_TOKEN": "named-anthropic-token",
+		"ANTHROPIC_BASE_URL":   "https://resolved.example.test",
+		"OLLAMA_API_KEY":       "named-ollama-token",
+	} {
+		if got := cfg.Env[key]; got != want {
+			t.Errorf("Env[%s] = %q, want %q", key, got, want)
+		}
+	}
+	if got, present := cfg.Env["GC_RIG"]; present {
+		t.Errorf("Env[GC_RIG] = %q present, want absent caller context", got)
+	}
+	if got := cfg.Env["GC_SESSION_NAME"]; got == "caller-session" {
+		t.Errorf("Env[GC_SESSION_NAME] = %q, want runtime session name not caller context", got)
 	}
 	if got, present := cfg.Env["GC_CONTROL_DISPATCHER_TRACE_DEFAULT"]; present {
 		t.Errorf("Env[GC_CONTROL_DISPATCHER_TRACE_DEFAULT] = %q present, want absent", got)

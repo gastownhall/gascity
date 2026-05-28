@@ -436,6 +436,27 @@ func (s *NamedSession) ModeOrDefault() string {
 	return s.Mode
 }
 
+// ExpandGenericRigNamedSessions stamps inline scope="rig" named sessions that
+// omit Dir into one concrete identity per configured rig.
+func ExpandGenericRigNamedSessions(cfg *City) {
+	if cfg == nil || len(cfg.NamedSessions) == 0 {
+		return
+	}
+	expanded := make([]NamedSession, 0, len(cfg.NamedSessions))
+	for _, ns := range cfg.NamedSessions {
+		if ns.Scope == "rig" && ns.Dir == "" {
+			for _, rig := range cfg.Rigs {
+				stamped := ns
+				stamped.Dir = rig.Name
+				expanded = append(expanded, stamped)
+			}
+			continue
+		}
+		expanded = append(expanded, ns)
+	}
+	cfg.NamedSessions = expanded
+}
+
 // FormulaLayers holds resolved formula directories for symlink materialization.
 // Each slice is ordered lowest→highest priority; later entries shadow earlier
 // ones by filename.
@@ -3362,10 +3383,6 @@ func validateNamedSessions(cfg *City, requireBackingTemplate bool) error {
 	seen := make(map[sessionKey]bool, len(cfg.NamedSessions))
 	reservedAliases := make(map[string]string, len(cfg.NamedSessions))
 	reservedSessionNames := make(map[string]string, len(cfg.NamedSessions))
-	agentsByTemplate := make(map[string]*Agent, len(cfg.Agents))
-	for i := range cfg.Agents {
-		agentsByTemplate[cfg.Agents[i].QualifiedName()] = &cfg.Agents[i]
-	}
 	alwaysByTemplate := make(map[string]int)
 	for i := range cfg.NamedSessions {
 		s := &cfg.NamedSessions[i]
@@ -3395,7 +3412,7 @@ func validateNamedSessions(cfg *City, requireBackingTemplate bool) error {
 			return fmt.Errorf("named_session %q: duplicate identity", s.QualifiedName())
 		}
 		seen[key] = true
-		agent := agentsByTemplate[s.TemplateQualifiedName()]
+		agent := FindAgent(cfg, s.TemplateQualifiedName())
 		if agent == nil {
 			if requireBackingTemplate {
 				return fmt.Errorf("named_session %q: referenced template not found after pack expansion", s.QualifiedName())

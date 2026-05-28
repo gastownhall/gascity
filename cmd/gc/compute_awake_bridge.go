@@ -117,6 +117,23 @@ func buildAwakeInputFromReconciler(
 		input.SessionBeads = append(input.SessionBeads, bead)
 	}
 
+	// Preserve the reconciler's existing wake continuity for already-materialized
+	// on-demand named sessions: when work_query matched the backing template and
+	// the canonical bead still exists, carry an explicit named-session work-query
+	// signal rather than waking ordinary siblings from the generic WorkSet path.
+	for _, ns := range input.NamedSessions {
+		if ns.Mode != "on_demand" || !input.WorkSet[ns.Template] {
+			continue
+		}
+		if resolveNamedSessionBeadName(input.SessionBeads, ns) == "" {
+			continue
+		}
+		if input.NamedSessionWorkQ == nil {
+			input.NamedSessionWorkQ = make(map[string]bool)
+		}
+		input.NamedSessionWorkQ[ns.Identity] = true
+	}
+
 	// Runtime liveness comes from wakeTargets. Attachment is probed only when
 	// it can affect the awake decision; the common active desired-session path
 	// is already awake and has no idle reference to suppress.

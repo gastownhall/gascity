@@ -334,8 +334,8 @@ func TestDoStartSession_FullSequence(t *testing.T) {
 
 	// Verify waitForReady got correct RuntimeConfig and timeout.
 	wfr := ops.calls[4]
-	if wfr.timeout != 60*time.Second {
-		t.Errorf("waitForReady timeout = %v, want %v", wfr.timeout, 60*time.Second)
+	if wfr.timeout != 10*time.Second {
+		t.Errorf("waitForReady timeout = %v, want %v", wfr.timeout, 10*time.Second)
 	}
 	if wfr.rc == nil || wfr.rc.Tmux == nil {
 		t.Fatal("waitForReady rc is nil")
@@ -769,6 +769,79 @@ func TestDoStartSession_ReadyDelayOnly(t *testing.T) {
 	}
 }
 
+func TestDoStartSession_TreatsDeadlineAfterReadyAsSuccessWhenSessionAlive(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond)
+	defer cancel()
+	ops := &fakeStartOps{
+		hasSessionResult: true,
+		waitReadyHook: func() {
+			time.Sleep(5 * time.Millisecond)
+		},
+	}
+
+	cfg := runtime.Config{
+		WorkDir:                "/proj",
+		Command:                "claude",
+		ReadyPromptPrefix:      "> ",
+		ReadyDelayMs:           5000,
+		ProcessNames:           []string{"claude"},
+		EmitsPermissionWarning: true,
+	}
+
+	err := doStartSession(ctx, ops, "gc-city-mayor", cfg, DefaultConfig().SetupTimeout)
+	if err != nil {
+		t.Fatalf("err = %v, want nil", err)
+	}
+
+	assertCallSequence(t, ops, []string{
+		"createSession",
+		"setRemainOnExit",
+		"waitForCommand",
+		"acceptStartupDialogs",
+		"waitForReady",
+		"hasSession",
+	})
+}
+
+func TestDoStartSession_TreatsDeadlineAfterPostReadyAsSuccessWhenSessionAlive(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond)
+	defer cancel()
+	postReadyCalls := 0
+	ops := &fakeStartOps{
+		hasSessionResult: true,
+		acceptStartupDialogsHook: func() {
+			postReadyCalls++
+			if postReadyCalls == 2 {
+				time.Sleep(5 * time.Millisecond)
+			}
+		},
+	}
+
+	cfg := runtime.Config{
+		WorkDir:                "/proj",
+		Command:                "claude",
+		ReadyPromptPrefix:      "> ",
+		ReadyDelayMs:           5000,
+		ProcessNames:           []string{"claude"},
+		EmitsPermissionWarning: true,
+	}
+
+	err := doStartSession(ctx, ops, "gc-city-mayor", cfg, DefaultConfig().SetupTimeout)
+	if err != nil {
+		t.Fatalf("err = %v, want nil", err)
+	}
+
+	assertCallSequence(t, ops, []string{
+		"createSession",
+		"setRemainOnExit",
+		"waitForCommand",
+		"acceptStartupDialogs",
+		"waitForReady",
+		"acceptStartupDialogs",
+		"hasSession",
+	})
+}
+
 func TestDoStartSession_EmitsPermissionWarningOnly(t *testing.T) {
 	ops := &fakeStartOps{
 		hasSessionResult: true,
@@ -925,6 +998,25 @@ func TestDoStartSession_SetRemainOnExitErrorIgnored(t *testing.T) {
 	}
 
 	assertCallSequence(t, ops, []string{"createSession", "setRemainOnExit"})
+}
+
+func TestStartupReadyProbeTimeoutUsesReadyDelayBudget(t *testing.T) {
+	cfg := runtime.Config{
+		ReadyPromptPrefix: "> ",
+		ReadyDelayMs:      2500,
+	}
+	if got, want := startupReadyProbeTimeout(cfg), 7500*time.Millisecond; got != want {
+		t.Fatalf("startupReadyProbeTimeout() = %v, want %v", got, want)
+	}
+}
+
+func TestStartupReadyProbeTimeoutFallsBackForPromptOnly(t *testing.T) {
+	cfg := runtime.Config{
+		ReadyPromptPrefix: "> ",
+	}
+	if got, want := startupReadyProbeTimeout(cfg), 15*time.Second; got != want {
+		t.Fatalf("startupReadyProbeTimeout() = %v, want %v", got, want)
+	}
 }
 
 func TestDoStartSession_OneShotLifecycleSkipsPostStartNudgeChecks(t *testing.T) {

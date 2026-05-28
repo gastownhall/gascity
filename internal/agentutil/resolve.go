@@ -53,6 +53,9 @@ func ResolveAgent(cfg *config.City, input string, opts ResolveOpts) (config.Agen
 	if a, ok := findAgentByQualified(cfg, input); ok {
 		return a, true
 	}
+	if a, ok := ResolveQualifiedRigScopedTemplate(cfg, input); ok {
+		return a, true
+	}
 
 	// Step 2b: qualified pool instance — "rig/polecat-2" or
 	// "binding.polecat-2" matches the corresponding pool template.
@@ -91,6 +94,9 @@ func resolveTemplate(cfg *config.City, input string) (config.Agent, bool) {
 	if a, ok := findAgentByQualified(cfg, input); ok {
 		return a, true
 	}
+	if a, ok := ResolveQualifiedRigScopedTemplate(cfg, input); ok {
+		return a, true
+	}
 	if strings.Contains(input, "/") {
 		return config.Agent{}, false
 	}
@@ -114,6 +120,44 @@ func findAgentByQualified(cfg *config.City, identity string) (config.Agent, bool
 		}
 	}
 	return config.Agent{}, false
+}
+
+// ResolveQualifiedRigScopedTemplate resolves "rig/name" against a generic
+// scope="rig" template that applies to every configured rig. It returns a
+// synthetic rig-bound copy so downstream code sees the concrete identity.
+func ResolveQualifiedRigScopedTemplate(cfg *config.City, identity string) (config.Agent, bool) {
+	if cfg == nil || !strings.Contains(identity, "/") {
+		return config.Agent{}, false
+	}
+	dir, name := config.ParseQualifiedName(identity)
+	if dir == "" || name == "" || !hasRig(cfg, dir) {
+		return config.Agent{}, false
+	}
+
+	var match *config.Agent
+	for i := range cfg.Agents {
+		a := &cfg.Agents[i]
+		if a.Name != name || a.Dir != "" || a.Scope != "rig" {
+			continue
+		}
+		if match != nil {
+			return config.Agent{}, false
+		}
+		match = a
+	}
+	if match == nil {
+		return config.Agent{}, false
+	}
+	return DeepCopyAgent(match, match.Name, dir), true
+}
+
+func hasRig(cfg *config.City, name string) bool {
+	for _, rig := range cfg.Rigs {
+		if rig.Name == name {
+			return true
+		}
+	}
+	return false
 }
 
 // resolvePoolInstanceQualified handles qualified pool instance names like
