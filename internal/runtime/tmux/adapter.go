@@ -694,6 +694,7 @@ const (
 	minReadyProbeTimeout     = 5 * time.Second
 	maxReadyProbeTimeout     = 60 * time.Second
 	readyProbeSlack          = 5 * time.Second
+	startupPaneCaptureLines  = 80
 )
 
 func (o *tmuxStartOps) createSession(name, workDir, command string, env map[string]string) error {
@@ -813,15 +814,19 @@ func ignoreDeadlineIfSessionAlive(ops startOps, name string, err error) error {
 }
 
 func startupDeadSessionError(ops startOps, name string) error {
-	pane, err := ops.capturePane(name, 80)
+	pane, err := ops.capturePane(name, startupPaneCaptureLines)
 	if err != nil {
-		return fmt.Errorf("%w: session %q", runtime.ErrSessionDiedDuringStartup, name)
+		return startupSessionDiedError(name)
 	}
 	pane = strings.TrimSpace(pane)
 	if pane == "" {
-		return fmt.Errorf("%w: session %q", runtime.ErrSessionDiedDuringStartup, name)
+		return startupSessionDiedError(name)
 	}
 	return fmt.Errorf("%w: session %q; last pane output:\n%s", runtime.ErrSessionDiedDuringStartup, name, pane)
+}
+
+func startupSessionDiedError(name string) error {
+	return fmt.Errorf("%w: session %q", runtime.ErrSessionDiedDuringStartup, name)
 }
 
 func failIfSessionDiedDuringStartupProbe(ops startOps, name string) error {
@@ -934,7 +939,10 @@ func doStartSession(ctx context.Context, ops startOps, name string, cfg runtime.
 	if err != nil {
 		return fmt.Errorf("verifying session: %w", err)
 	}
-	if !alive || !ops.isSessionRunning(name) {
+	if !alive {
+		return startupSessionDiedError(name)
+	}
+	if !ops.isSessionRunning(name) {
 		return startupDeadSessionError(ops, name)
 	}
 

@@ -173,7 +173,7 @@ func (f *fakeStartOps) disableMouseAndActivity(name string) error {
 	return f.disableMouseAndActivityErr
 }
 
-func (f *fakeStartOps) capturePane(name string, lines int) (string, error) {
+func (f *fakeStartOps) capturePane(name string, _ int) (string, error) {
 	f.calls = append(f.calls, startCall{method: "capturePane", name: name})
 	return f.capturePaneText, f.capturePaneErr
 }
@@ -228,6 +228,20 @@ func methodIndex(methods []string, method string) int {
 		}
 	}
 	return -1
+}
+
+func callsByMethod(t *testing.T, ops *fakeStartOps, method string, wantCount int) []startCall {
+	t.Helper()
+	var matches []startCall
+	for _, call := range ops.calls {
+		if call.method == method {
+			matches = append(matches, call)
+		}
+	}
+	if len(matches) != wantCount {
+		t.Fatalf("%s calls = %d, want %d; all calls = %v", method, len(matches), wantCount, ops.callMethods())
+	}
+	return matches
 }
 
 // ---------------------------------------------------------------------------
@@ -589,6 +603,41 @@ func TestDoStartSession_SessionDiesDuringStartup(t *testing.T) {
 	}
 }
 
+func TestDoStartSession_MissingFinalSessionDoesNotCapturePrefixSibling(t *testing.T) {
+	ops := &fakeStartOps{
+		hasSessionResult: false,
+		capturePaneText:  "prefix sibling output must not leak",
+	}
+
+	cfg := runtime.Config{
+		Command:      "codex",
+		ProcessNames: []string{"codex"},
+	}
+
+	err := doStartSession(context.Background(), ops, "mayor", cfg, DefaultConfig().SetupTimeout)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !errors.Is(err, runtime.ErrSessionDiedDuringStartup) {
+		t.Fatalf("error = %v, want ErrSessionDiedDuringStartup", err)
+	}
+	if !strings.Contains(err.Error(), "session \"mayor\"") {
+		t.Fatalf("error = %v, want session name", err)
+	}
+	if strings.Contains(err.Error(), "prefix sibling output") || strings.Contains(err.Error(), "last pane output") {
+		t.Fatalf("error = %v, should not include pane output for missing exact session", err)
+	}
+	assertCallSequence(t, ops, []string{
+		"createSession",
+		"setRemainOnExit",
+		"disableMouseAndActivity",
+		"waitForCommand",
+		"acceptStartupDialogs",
+		"acceptStartupDialogs",
+		"hasSession",
+	})
+}
+
 func TestDoStartSession_ReadyDeadlineWithDeadPaneReportsProviderCrash(t *testing.T) {
 	running := false
 	ops := &fakeStartOps{
@@ -624,9 +673,87 @@ func TestDoStartSession_ReadyDeadlineWithDeadPaneReportsProviderCrash(t *testing
 	assertCallSequence(t, ops, []string{
 		"createSession",
 		"setRemainOnExit",
+		"disableMouseAndActivity",
 		"waitForCommand",
 		"acceptStartupDialogs",
 		"waitForReady",
+		"hasSession",
+		"isSessionRunning",
+		"capturePane",
+	})
+}
+
+func TestDoStartSession_FinalDeadPaneReportsProviderCrash(t *testing.T) {
+	running := false
+	ops := &fakeStartOps{
+		hasSessionResult:       true,
+		isSessionRunningResult: &running,
+		capturePaneText:        "panic: startup failed\nPane is dead",
+	}
+
+	cfg := runtime.Config{
+		Command:      "codex",
+		ProcessNames: []string{"codex"},
+	}
+
+	err := doStartSession(context.Background(), ops, "mayor", cfg, DefaultConfig().SetupTimeout)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !errors.Is(err, runtime.ErrSessionDiedDuringStartup) {
+		t.Fatalf("error = %v, want ErrSessionDiedDuringStartup", err)
+	}
+	for _, want := range []string{"session \"mayor\"", "startup failed", "Pane is dead"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error = %v, want substring %q", err, want)
+		}
+	}
+	assertCallSequence(t, ops, []string{
+		"createSession",
+		"setRemainOnExit",
+		"disableMouseAndActivity",
+		"waitForCommand",
+		"acceptStartupDialogs",
+		"acceptStartupDialogs",
+		"hasSession",
+		"isSessionRunning",
+		"capturePane",
+	})
+}
+
+func TestDoStartSession_FinalDeadPaneCaptureErrorFallsBack(t *testing.T) {
+	running := false
+	ops := &fakeStartOps{
+		hasSessionResult:       true,
+		isSessionRunningResult: &running,
+		capturePaneErr:         errors.New("capture failed"),
+	}
+
+	cfg := runtime.Config{
+		Command:      "codex",
+		ProcessNames: []string{"codex"},
+	}
+
+	err := doStartSession(context.Background(), ops, "mayor", cfg, DefaultConfig().SetupTimeout)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !errors.Is(err, runtime.ErrSessionDiedDuringStartup) {
+		t.Fatalf("error = %v, want ErrSessionDiedDuringStartup", err)
+	}
+	if !strings.Contains(err.Error(), "session \"mayor\"") {
+		t.Fatalf("error = %v, want session name", err)
+	}
+	if strings.Contains(err.Error(), "last pane output") || strings.Contains(err.Error(), "capture failed") {
+		t.Fatalf("error = %v, want fallback without pane/capture detail", err)
+	}
+	assertCallSequence(t, ops, []string{
+		"createSession",
+		"setRemainOnExit",
+		"disableMouseAndActivity",
+		"waitForCommand",
+		"acceptStartupDialogs",
+		"acceptStartupDialogs",
 		"hasSession",
 		"isSessionRunning",
 		"capturePane",
@@ -1216,12 +1343,12 @@ func TestDoStartSession_SessionSetupRunsAfterAlive(t *testing.T) {
 		"runSetupCommand",
 	})
 
-	// Verify both commands were recorded.
-	cmd1 := ops.calls[7]
+	setupCalls := callsByMethod(t, ops, "runSetupCommand", 2)
+	cmd1 := setupCalls[0]
 	if cmd1.command != "tmux set-option -t test status-style 'bg=blue'" {
 		t.Errorf("setup cmd[0] = %q, want status-style command", cmd1.command)
 	}
-	cmd2 := ops.calls[8]
+	cmd2 := setupCalls[1]
 	if cmd2.command != "tmux set-option -t test mouse on" {
 		t.Errorf("setup cmd[1] = %q, want mouse command", cmd2.command)
 	}
@@ -1265,17 +1392,20 @@ func TestDoStartSession_SessionSetupScriptRunsAfterCommands(t *testing.T) {
 		"sendKeys",
 	})
 
+	setupCalls := callsByMethod(t, ops, "runSetupCommand", 2)
+	nudgeCalls := callsByMethod(t, ops, "sendKeys", 1)
+
 	// First runSetupCommand = inline command.
-	if ops.calls[7].command != "tmux set mouse on" {
-		t.Errorf("setup[0] = %q, want inline command", ops.calls[7].command)
+	if setupCalls[0].command != "tmux set mouse on" {
+		t.Errorf("setup[0] = %q, want inline command", setupCalls[0].command)
 	}
 	// Second runSetupCommand = script.
-	if ops.calls[8].command != "/city/scripts/setup.sh" {
-		t.Errorf("setup[1] = %q, want script", ops.calls[8].command)
+	if setupCalls[1].command != "/city/scripts/setup.sh" {
+		t.Errorf("setup[1] = %q, want script", setupCalls[1].command)
 	}
 	// sendKeys = nudge.
-	if ops.calls[9].command != "start working" {
-		t.Errorf("nudge = %q, want %q", ops.calls[9].command, "start working")
+	if nudgeCalls[0].command != "start working" {
+		t.Errorf("nudge = %q, want %q", nudgeCalls[0].command, "start working")
 	}
 }
 
