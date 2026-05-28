@@ -26,7 +26,7 @@ jobs:
   rc-release:
     name: Draft RC release
     if: ${{ github.repository == 'gastownhall/gascity' }}
-    runs-on: blacksmith-32vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
