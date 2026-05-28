@@ -622,6 +622,113 @@ exit 1
 	}
 }
 
+func TestOrphanSweepPreservesPascalCaseLiveSessionIdentities(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+
+	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+if [ "$1" = "--rig" ]; then
+  rig="$2"
+  shift 2
+else
+  rig=""
+fi
+case "$1" in
+  config)
+    if [ "$2" = "explain" ]; then
+      cat <<'EOF'
+Agent: project/worker
+  source: pack
+EOF
+      exit 0
+    fi
+    ;;
+  rig)
+    if [ "$2" = "list" ] && [ "$3" = "--json" ]; then
+      printf '{"rigs":[{"name":"hq","hq":true},{"name":"project","hq":false}]}\n'
+      exit 0
+    fi
+    ;;
+  session)
+    if [ "$2" = "list" ] && [ "$3" = "--json" ]; then
+      if [ "$rig" = "project" ]; then
+        cat <<'EOF'
+{"sessions":[
+  {"ID":"vgc-live-id","SessionName":"project__worker-vgc-live-name","Alias":"project/worker-1","Template":"project/worker","State":"active","Closed":false},
+  {"ID":"vgc-stopped","SessionName":"project__worker-vgc-stopped","State":"stopped","Closed":false},
+  {"ID":"vgc-swept","SessionName":"project__worker-vgc-swept","State":"gc_swept","Closed":false},
+  {"ID":"vgc-closed","SessionName":"project__worker-vgc-closed","State":"closed","Closed":true}
+],"summary":{},"filters":{},"schema_version":"1"}
+EOF
+        exit 0
+      fi
+      printf '{"sessions":[],"summary":{},"filters":{},"schema_version":"1"}\n'
+      exit 0
+    fi
+    ;;
+  bd)
+    if [ "$2" = "list" ]; then
+      if [ "$3" = "--rig" ] && [ "$4" = "project" ]; then
+        cat <<'EOF'
+[
+  {"id":"ga-live-by-id","status":"in_progress","assignee":"vgc-live-id"},
+  {"id":"ga-live-by-session-name","status":"in_progress","assignee":"project__worker-vgc-live-name"},
+  {"id":"ga-stopped-session","status":"in_progress","assignee":"vgc-stopped"},
+  {"id":"ga-swept-session","status":"in_progress","assignee":"project__worker-vgc-swept"},
+  {"id":"ga-closed-session","status":"in_progress","assignee":"vgc-closed"},
+  {"id":"ga-missing-session","status":"in_progress","assignee":"missing-session"}
+]
+EOF
+      else
+        printf '[]\n'
+      fi
+      exit 0
+    fi
+    if [ "$2" = "update" ]; then
+      exit 0
+    fi
+    ;;
+esac
+exit 1
+`)
+
+	env := map[string]string{
+		"GC_CITY":      cityDir,
+		"GC_CITY_PATH": cityDir,
+		"GC_CALL_LOG":  gcLog,
+		"PATH":         binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+
+	script := filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "orphan-sweep.sh")
+	cmd := exec.Command(script)
+	cmd.Env = mergeTestEnv(env)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("%s failed: %v\n%s", filepath.Base(script), err, out)
+	}
+	if !strings.Contains(string(out), "orphan-sweep: reset 4 orphaned beads") {
+		t.Fatalf("unexpected orphan-sweep output:\n%s", out)
+	}
+
+	logData, err := os.ReadFile(gcLog)
+	if err != nil {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	log := string(logData)
+	for _, preserved := range []string{"ga-live-by-id", "ga-live-by-session-name"} {
+		if strings.Contains(log, "bd update "+preserved+" ") {
+			t.Fatalf("live PascalCase session assignee %s was reset:\n%s", preserved, log)
+		}
+	}
+	for _, reset := range []string{"ga-stopped-session", "ga-swept-session", "ga-closed-session", "ga-missing-session"} {
+		if !strings.Contains(log, "bd update "+reset+" --status=open --assignee=") {
+			t.Fatalf("expected %s to be reset:\n%s", reset, log)
+		}
+	}
+}
+
 func TestOrphanSweepContinuesAfterSingleRigSessionListFailure(t *testing.T) {
 	cityDir := t.TempDir()
 	binDir := t.TempDir()
