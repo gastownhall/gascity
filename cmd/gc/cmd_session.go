@@ -1699,6 +1699,15 @@ func cmdSessionClose(args []string, stdout, stderr io.Writer, jsonOutput ...bool
 		fmt.Fprintf(stderr, "gc session close: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	// Capture the session bead state BEFORE close so we have its assignment
+	// identifiers (session_name, alias, etc.) for the post-close work-release
+	// pass. Lookup is best-effort: if the session bead is already missing we
+	// fall back to a synthetic shell carrying only the resolved session ID.
+	closedSessionBead, sessionBeadErr := store.Get(sessionID)
+	if sessionBeadErr != nil {
+		closedSessionBead = beads.Bead{ID: sessionID}
+	}
+
 	closeResult, err := handle.CloseDetailed(context.Background())
 	if err != nil {
 		fmt.Fprintf(stderr, "gc session close: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -1709,6 +1718,17 @@ func cmdSessionClose(args []string, stdout, stderr io.Writer, jsonOutput ...bool
 			fmt.Fprintf(stderr, "gc session close: warning: withdrawing queued wait nudges: %v\n", err) //nolint:errcheck // best-effort stderr
 		}
 	}
+
+	// Release any work beads still assigned to the closed session so the
+	// pool scale-check picks up the freed demand on the next reconcile tick.
+	// Each Update fires the bd on_update hook, which emits a bead.updated
+	// event the supervisor's CachingStore absorbs — the cache-update event
+	// the close path was previously missing (gastownhall/gascity#2625).
+	var rigStores map[string]beads.Store
+	if cityErr == nil && cfg != nil {
+		rigStores = buildStandaloneRigStores(cfg, cityPath, stderr)
+	}
+	unclaimWorkAssignedToRetiredSessionBead(store, rigStores, closedSessionBead, "", stderr)
 
 	if asJSON {
 		if err := writeSessionActionJSON(stdout, sessionActionResult{
