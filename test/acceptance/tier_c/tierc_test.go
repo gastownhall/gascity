@@ -41,6 +41,7 @@ startup_timeout = "3m"
 # Keep tool approvals non-interactive even if the provider surfaces an edit
 # prompt despite the unrestricted permission-mode default.
 [providers.claude]
+base = "builtin:claude"
 args_append = ["--allowedTools", "Bash,Edit,MultiEdit,Write"]
 `
 
