@@ -608,6 +608,11 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 	}
 	prov.Warnings = append(prov.Warnings, siteBindingWarnings...)
 
+	// Inline scope="rig" named sessions are generic declarations until the
+	// city's rig set is finalized. Stamp them after site bindings so the
+	// controller sees one concrete identity per rig.
+	ExpandGenericRigNamedSessions(root)
+
 	// Validate named session declarations after pack expansion and site
 	// binding resolution so stamped identities and deterministic runtime
 	// names reflect the effective workspace identity.

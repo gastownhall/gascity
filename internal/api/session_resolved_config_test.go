@@ -110,6 +110,23 @@ func TestResolvedSessionConfigForProviderRejectsNilProvider(t *testing.T) {
 	}
 }
 
+func TestSessionCreateHintsSeedsRuntimeEnv(t *testing.T) {
+	sessionEnv := map[string]string{
+		"ANTHROPIC_AUTH_TOKEN": "api-create-anthropic-token",
+		"ANTHROPIC_BASE_URL":   "https://resolved.example.test",
+		"OLLAMA_API_KEY":       "api-create-ollama-token",
+		"GC_CITY":              "/tmp/test-city",
+	}
+
+	hints := sessionCreateHints(&config.ResolvedProvider{Name: "stub"}, sessionEnv, nil)
+
+	for key, want := range sessionEnv {
+		if got := hints.Env[key]; got != want {
+			t.Errorf("Hints.Env[%s] = %q, want %q", key, got, want)
+		}
+	}
+}
+
 // TestResolvedSessionConfigForProviderSeedsCityRuntimeEnv is a
 // regression test for upstream gastownhall/gascity#101 (re-opened):
 // session-create paths through the API resolver dropped the
@@ -119,6 +136,12 @@ func TestResolvedSessionConfigForProviderRejectsNilProvider(t *testing.T) {
 // related tooling failed. Non-conflicting provider env vars are
 // preserved; this test documents the merge contract.
 func TestResolvedSessionConfigForProviderSeedsCityRuntimeEnv(t *testing.T) {
+	t.Setenv("ANTHROPIC_AUTH_TOKEN", "api-anthropic-token")
+	t.Setenv("ANTHROPIC_BASE_URL", "https://process.example.test")
+	t.Setenv("OLLAMA_API_KEY", "api-ollama-token")
+	t.Setenv("GC_RIG", "caller-rig")
+	t.Setenv("GC_SESSION_NAME", "caller-session")
+
 	cityPath := t.TempDir()
 	cfg, err := resolvedSessionConfigForProvider(
 		cityPath,
@@ -131,7 +154,10 @@ func TestResolvedSessionConfigForProviderSeedsCityRuntimeEnv(t *testing.T) {
 		&config.ResolvedProvider{
 			Name:    "stub",
 			Command: "/bin/echo",
-			Env:     map[string]string{"PROVIDER_TOKEN": "ok"},
+			Env: map[string]string{
+				"ANTHROPIC_BASE_URL": "https://resolved.example.test",
+				"PROVIDER_TOKEN":     "ok",
+			},
 		},
 		"",
 		cityPath,
@@ -153,6 +179,26 @@ func TestResolvedSessionConfigForProviderSeedsCityRuntimeEnv(t *testing.T) {
 	if got := cfg.Runtime.SessionEnv["PROVIDER_TOKEN"]; got != "ok" {
 		t.Errorf("SessionEnv[PROVIDER_TOKEN] = %q, want %q (provider env preserved)", got, "ok")
 	}
+	for key, want := range map[string]string{
+		"ANTHROPIC_AUTH_TOKEN": "api-anthropic-token",
+		"ANTHROPIC_BASE_URL":   "https://resolved.example.test",
+		"OLLAMA_API_KEY":       "api-ollama-token",
+	} {
+		if got := cfg.Runtime.SessionEnv[key]; got != want {
+			t.Errorf("SessionEnv[%s] = %q, want %q", key, got, want)
+		}
+		if got := cfg.Runtime.Hints.Env[key]; got != want {
+			t.Errorf("Hints.Env[%s] = %q, want %q", key, got, want)
+		}
+	}
+	for _, key := range []string{"GC_RIG", "GC_SESSION_NAME"} {
+		if got, present := cfg.Runtime.SessionEnv[key]; present {
+			t.Errorf("SessionEnv[%s] = %q present, want absent caller context", key, got)
+		}
+		if got, present := cfg.Runtime.Hints.Env[key]; present {
+			t.Errorf("Hints.Env[%s] = %q present, want absent caller context", key, got)
+		}
+	}
 	// Identity-only contract (per Copilot review): GC_CONTROL_DISPATCHER_TRACE_DEFAULT
 	// must NOT be seeded by the city-anchor reseed because it has to stay
 	// per-dispatcher-qualified. template_resolve.go owns the qualified
@@ -160,6 +206,21 @@ func TestResolvedSessionConfigForProviderSeedsCityRuntimeEnv(t *testing.T) {
 	// not clobber it with the city-uniform default.
 	if got, present := cfg.Runtime.SessionEnv["GC_CONTROL_DISPATCHER_TRACE_DEFAULT"]; present {
 		t.Errorf("SessionEnv[GC_CONTROL_DISPATCHER_TRACE_DEFAULT] = %q present, want absent (identity-only)", got)
+	}
+	if got, present := cfg.Runtime.Hints.Env["GC_CONTROL_DISPATCHER_TRACE_DEFAULT"]; present {
+		t.Errorf("Hints.Env[GC_CONTROL_DISPATCHER_TRACE_DEFAULT] = %q present, want absent (identity-only)", got)
+	}
+	if got := cfg.Runtime.Hints.Env["GC_CITY"]; got != cityPath {
+		t.Errorf("Hints.Env[GC_CITY] = %q, want %q", got, cityPath)
+	}
+	if got := cfg.Runtime.Hints.Env["GC_CITY_PATH"]; got != cityPath {
+		t.Errorf("Hints.Env[GC_CITY_PATH] = %q, want %q", got, cityPath)
+	}
+	if got := cfg.Runtime.Hints.Env["GC_CITY_RUNTIME_DIR"]; got != wantRuntimeDir {
+		t.Errorf("Hints.Env[GC_CITY_RUNTIME_DIR] = %q, want %q", got, wantRuntimeDir)
+	}
+	if got := cfg.Runtime.Hints.Env["PROVIDER_TOKEN"]; got != "ok" {
+		t.Errorf("Hints.Env[PROVIDER_TOKEN] = %q, want %q (provider env preserved)", got, "ok")
 	}
 }
 

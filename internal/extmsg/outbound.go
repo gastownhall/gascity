@@ -9,6 +9,15 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 )
 
+// MetadataKeySourceSessionID was the reserved metadata key used to
+// propagate the originating gc session id across the publish wire before
+// PublishRequest gained a native SessionID field (gc-kvt). It is no
+// longer written by gc; it is retained here only because some adapter
+// binaries still fall back to it when PublishRequest.SessionID is empty
+// (e.g. an old gc binary publishing through a newer adapter). New code
+// must populate PublishRequest.SessionID directly.
+const MetadataKeySourceSessionID = "source_session_id"
+
 // OutboundRequest specifies what to publish to an external conversation.
 type OutboundRequest struct {
 	SessionID        string
@@ -101,8 +110,18 @@ func HandleOutbound(ctx context.Context, deps OutboundDeps, caller Caller, req O
 		return nil, fmt.Errorf("no adapter for %s/%s", req.Conversation.Provider, req.Conversation.AccountID)
 	}
 
-	// Step 4: Publish.
-	receipt, err := adapter.Publish(ctx, PublishRequest{
+	// Step 4: Publish. SessionID is propagated to the adapter as a
+	// first-class field on PublishRequest (gc-kvt); adapters that need
+	// per-session behavior (e.g. Slack identity overrides) read it
+	// directly. The caller-supplied metadata flows through unchanged.
+	//
+	// Field-by-field assignment is intentional even though the structs
+	// currently share a shape — OutboundRequest is the API caller's input
+	// surface and PublishRequest is the gc-to-adapter wire contract; any
+	// future divergence (e.g. an internal-only OutboundRequest field)
+	// must not silently leak onto the wire.
+	receipt, err := adapter.Publish(ctx, PublishRequest{ //nolint:staticcheck // S1016: field-by-field copy is intentional, not a struct conversion — see comment above
+		SessionID:        req.SessionID,
 		Conversation:     req.Conversation,
 		Text:             req.Text,
 		ReplyToMessageID: req.ReplyToMessageID,

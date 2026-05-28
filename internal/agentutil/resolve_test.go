@@ -172,6 +172,34 @@ func TestResolveAgentTemplateOnlyAcceptsTemplate(t *testing.T) {
 	}
 }
 
+func TestResolveAgentQualifiedGenericRigScopedTemplate(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "reviewer", Scope: "rig"},
+		},
+		Rigs: []config.Rig{
+			{Name: "alpha"},
+			{Name: "beta"},
+		},
+	}
+
+	a, ok := ResolveAgent(cfg, "alpha/reviewer", ResolveOpts{AllowPoolMembers: true})
+	if !ok {
+		t.Fatal("expected to resolve alpha/reviewer")
+	}
+	if got := a.QualifiedName(); got != "alpha/reviewer" {
+		t.Fatalf("QualifiedName() = %q, want %q", got, "alpha/reviewer")
+	}
+
+	template, ok := ResolveAgent(cfg, "beta/reviewer", ResolveOpts{TemplateOnly: true})
+	if !ok {
+		t.Fatal("expected TemplateOnly to resolve beta/reviewer")
+	}
+	if got := template.QualifiedName(); got != "beta/reviewer" {
+		t.Fatalf("TemplateOnly QualifiedName() = %q, want %q", got, "beta/reviewer")
+	}
+}
+
 func TestResolveAgentNotFound(t *testing.T) {
 	cfg := &config.City{
 		Agents: []config.Agent{

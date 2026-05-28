@@ -588,12 +588,11 @@ func supervisorServiceEnvMap(vars []supervisorServiceEnvVar) map[string]string {
 	return m
 }
 
-// TestBuildSupervisorServiceDataForwardsAllKnownProviderPrefixes asserts that
-// a canonical env var for every prefix in providerCredentialEnvPrefixes is
-// forwarded into the supervisor's persistent env. This is the regression
-// protection for the curated provider-prefix list: if a prefix is removed,
-// the corresponding probe key here fails and surfaces the omission.
-func TestBuildSupervisorServiceDataForwardsAllKnownProviderPrefixes(t *testing.T) {
+// TestBuildSupervisorServiceDataForwardsRepresentativeProviderPrefixes asserts
+// that representative provider-prefix credentials are forwarded into the
+// supervisor's persistent env. internal/processenv owns complete allowlist
+// coverage; this test covers the supervisor integration boundary.
+func TestBuildSupervisorServiceDataForwardsRepresentativeProviderPrefixes(t *testing.T) {
 	homeDir := t.TempDir()
 	t.Setenv("HOME", homeDir)
 	t.Setenv("GC_HOME", filepath.Join(homeDir, ".gc"))
@@ -619,10 +618,6 @@ func TestBuildSupervisorServiceDataForwardsAllKnownProviderPrefixes(t *testing.T
 		"VERTEX_PROJECT_ID":    "vertex-probe-project",
 		"XAI_API_KEY":          "xai-probe",
 	}
-	if len(probes) != len(providerCredentialEnvPrefixes) {
-		t.Fatalf("probe set size %d does not match prefix list size %d; update the test when prefixes change",
-			len(probes), len(providerCredentialEnvPrefixes))
-	}
 	for k, v := range probes {
 		t.Setenv(k, v)
 	}
@@ -634,7 +629,7 @@ func TestBuildSupervisorServiceDataForwardsAllKnownProviderPrefixes(t *testing.T
 	got := supervisorServiceEnvMap(data.ExtraEnv)
 	for k, want := range probes {
 		if got[k] != want {
-			t.Errorf("ExtraEnv[%s] = %q, want %q — prefix may be missing from providerCredentialEnvPrefixes", k, got[k], want)
+			t.Errorf("ExtraEnv[%s] = %q, want %q", k, got[k], want)
 		}
 	}
 }
@@ -668,10 +663,6 @@ func TestBuildSupervisorServiceDataForwardsCuratedProviderCredentialEnvKeys(t *t
 		"AWS_USE_DUALSTACK_ENDPOINT":             "true",
 		"AWS_USE_FIPS_ENDPOINT":                  "true",
 		"AWS_WEB_IDENTITY_TOKEN_FILE":            "/tmp/aws-web-identity-token",
-	}
-	if len(probes) != len(providerCredentialEnvKeys) {
-		t.Fatalf("probe set size %d does not match exact provider key set size %d; update the test when exact keys change",
-			len(probes), len(providerCredentialEnvKeys))
 	}
 	for k, v := range probes {
 		t.Setenv(k, v)

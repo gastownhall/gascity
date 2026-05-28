@@ -516,6 +516,7 @@ type Bead struct {
 	Ref          *string            `json:"ref,omitempty"`
 	Status       string             `json:"status"`
 	Title        string             `json:"title"`
+	UpdatedAt    *time.Time         `json:"updated_at,omitempty"`
 }
 
 // BeadAssignInputBody defines model for BeadAssignInputBody.

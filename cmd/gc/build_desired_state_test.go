@@ -4695,6 +4695,10 @@ func TestBuildDesiredState_RigOnDemandNamedSessionAssigneeWithRouteMaterializesN
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("ANTHROPIC_AUTH_TOKEN", "test-anthropic-auth-token")
+			t.Setenv("ANTHROPIC_BASE_URL", "https://ollama.example.test")
+			t.Setenv("CLAUDE_CODE_SUBAGENT_MODEL", "kimi-k2.5")
+			t.Setenv("OLLAMA_API_KEY", "test-ollama-token")
 			cityPath := t.TempDir()
 			rigPath := filepath.Join(cityPath, "riga")
 			if err := os.MkdirAll(rigPath, 0o755); err != nil {
@@ -4728,8 +4732,10 @@ func TestBuildDesiredState_RigOnDemandNamedSessionAssigneeWithRouteMaterializesN
 				}},
 			}
 
+			sp := runtime.NewFake()
+			clk := &clock.Fake{Time: time.Date(2026, 5, 26, 15, 0, 0, 0, time.UTC)}
 			dsResult := buildDesiredStateWithSessionBeads(
-				"test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(),
+				"test-city", cityPath, clk.Now().UTC(), cfg, sp,
 				cityStore, map[string]beads.Store{"riga": rigStore}, nil, nil, io.Discard,
 			)
 			if !dsResult.NamedSessionDemand["riga/refinery"] {
@@ -4759,6 +4765,52 @@ func TestBuildDesiredState_RigOnDemandNamedSessionAssigneeWithRouteMaterializesN
 			}
 			if got := refinery.Env["GC_TEMPLATE"]; got != "riga/refinery" {
 				t.Fatalf("GC_TEMPLATE = %q, want riga/refinery", got)
+			}
+			for key, want := range map[string]string{
+				"ANTHROPIC_AUTH_TOKEN":       "test-anthropic-auth-token",
+				"ANTHROPIC_BASE_URL":         "https://ollama.example.test",
+				"CLAUDE_CODE_SUBAGENT_MODEL": "kimi-k2.5",
+				"OLLAMA_API_KEY":             "test-ollama-token",
+			} {
+				if got := refinery.Env[key]; got != want {
+					t.Fatalf("refinery Env[%s] = %q, want %q", key, got, want)
+				}
+			}
+
+			var stdout, stderr bytes.Buffer
+			cfgNames := configuredSessionNames(cfg, cfg.EffectiveCityName(), cityStore)
+			syncSessionBeads(cityPath, cityStore, dsResult.State, sp, cfgNames, cfg, clk, &stderr, true)
+			sessions, err := loadSessionBeads(cityStore)
+			if err != nil {
+				t.Fatalf("loadSessionBeads: %v", err)
+			}
+			poolDesired := PoolDesiredCounts(ComputePoolDesiredStates(cfg, dsResult.AssignedWorkBeads, sessions, dsResult.ScaleCheckCounts))
+			if poolDesired == nil {
+				poolDesired = map[string]int{}
+			}
+			mergeNamedSessionDemand(poolDesired, dsResult.NamedSessionDemand, cfg)
+			woken := reconcileSessionBeadsAtPath(
+				context.Background(), cityPath, sessions, dsResult.State, cfgNames,
+				cfg, sp, cityStore, nil, dsResult.AssignedWorkBeads, map[string]beads.Store{"riga": rigStore},
+				nil, newDrainTracker(), poolDesired, dsResult.StoreQueryPartial, nil, cfg.EffectiveCityName(),
+				nil, clk, events.Discard, 0, 0, &stdout, &stderr,
+			)
+			if woken != 1 {
+				t.Fatalf("woken = %d, want 1 for refinery named session; stdout:\n%s\nstderr:\n%s", woken, stdout.String(), stderr.String())
+			}
+			startCfg := sp.LastStartConfig(refinery.SessionName)
+			if startCfg == nil {
+				t.Fatalf("LastStartConfig(%q) = nil; stdout:\n%s\nstderr:\n%s", refinery.SessionName, stdout.String(), stderr.String())
+			}
+			for key, want := range map[string]string{
+				"ANTHROPIC_AUTH_TOKEN":       "test-anthropic-auth-token",
+				"ANTHROPIC_BASE_URL":         "https://ollama.example.test",
+				"CLAUDE_CODE_SUBAGENT_MODEL": "kimi-k2.5",
+				"OLLAMA_API_KEY":             "test-ollama-token",
+			} {
+				if got := startCfg.Env[key]; got != want {
+					t.Fatalf("start Env[%s] = %q, want %q", key, got, want)
+				}
 			}
 		})
 	}

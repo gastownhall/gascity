@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/citylayout"
+	"github.com/gastownhall/gascity/internal/processenv"
 	"github.com/gastownhall/gascity/internal/processgroup"
 	"github.com/gastownhall/gascity/internal/searchpath"
 	"github.com/gastownhall/gascity/internal/supervisor"
@@ -808,93 +809,6 @@ var supervisorServiceEnvKeys = map[string]bool{
 	"XDG_STATE_HOME":                           true,
 }
 
-// providerCredentialEnvPrefixes lists provider-specific env-var name prefixes
-// whose values are treated as agent-provider credentials and forwarded into
-// the supervisor's persistent env (launchd plist / systemd unit) and into
-// spawned agent processes. The same predicate gates the global baseline in
-// cmd_start.go: the SDK cannot know which agent uses which provider (zero
-// hardcoded roles), so credentials for any known provider are passed through,
-// and the trust boundary is the managed session itself.
-//
-// The list is curated, not auto-discovered: the supervisor's persistent env has
-// a bounded size (launchd plists in particular), so we only forward prefixes
-// belonging to provider-owned namespaces. Broad ecosystems such as AWS use
-// exact names in providerCredentialEnvKeys to avoid persisting unrelated
-// tooling/runtime state. Users with niche or in-house providers can opt in via
-// GC_SUPERVISOR_ENV.
-//
-// Keep alphabetised. Documented providers (with the env vars they typically
-// use):
-//
-//	ANTHROPIC_   Anthropic / Claude (ANTHROPIC_API_KEY, ANTHROPIC_BASE_URL, ...)
-//	AZURE_       Azure OpenAI (AZURE_OPENAI_API_KEY, AZURE_OPENAI_BASE_URL,
-//	             AZURE_OPENAI_API_VERSION, AZURE_OPENAI_ENDPOINT, ...)
-//	CEREBRAS_    Cerebras (CEREBRAS_API_KEY)
-//	COHERE_      Cohere (COHERE_API_KEY)
-//	DEEPSEEK_    DeepSeek (DEEPSEEK_API_KEY)
-//	FIREWORKS_   Fireworks AI (FIREWORKS_API_KEY)
-//	GEMINI_      Google Gemini direct API (GEMINI_API_KEY)
-//	GOOGLE_      Google Cloud / Vertex (GOOGLE_API_KEY,
-//	             GOOGLE_APPLICATION_CREDENTIALS, GOOGLE_CLOUD_PROJECT, ...)
-//	GROQ_        Groq (GROQ_API_KEY)
-//	MISTRAL_     Mistral (MISTRAL_API_KEY)
-//	OLLAMA_      Ollama local (OLLAMA_API_KEY, OLLAMA_HOST, OLLAMA_BASE_URL)
-//	OPENAI_      OpenAI (OPENAI_API_KEY, OPENAI_BASE_URL, OPENAI_API_VERSION)
-//	OPENROUTER_  OpenRouter (OPENROUTER_API_KEY)
-//	TOGETHER_    Together AI (TOGETHER_API_KEY)
-//	VERTEX_      Vertex AI direct (VERTEX_PROJECT_ID, VERTEX_LOCATION, ...)
-//	XAI_         xAI / Grok (XAI_API_KEY)
-var providerCredentialEnvPrefixes = []string{
-	"ANTHROPIC_",
-	"AZURE_",
-	"CEREBRAS_",
-	"COHERE_",
-	"DEEPSEEK_",
-	"FIREWORKS_",
-	"GEMINI_",
-	"GOOGLE_",
-	"GROQ_",
-	"MISTRAL_",
-	"OLLAMA_",
-	"OPENAI_",
-	"OPENROUTER_",
-	"TOGETHER_",
-	"VERTEX_",
-	"XAI_",
-}
-
-// providerCredentialEnvKeys lists exact provider credential/config env vars for
-// providers whose common env namespace is broader than provider auth.
-//
-// AWS Bedrock uses standard AWS SDK credential and configuration env vars, but
-// the AWS_ prefix also covers unrelated CLI, CI, pager, runtime, and container
-// metadata state. Keep this exact list bounded to the keys agents need for
-// Bedrock auth/config; users can opt in additional keys through
-// GC_SUPERVISOR_ENV.
-var providerCredentialEnvKeys = map[string]bool{
-	"AWS_ACCESS_KEY_ID":                      true,
-	"AWS_BEARER_TOKEN_BEDROCK":               true,
-	"AWS_CA_BUNDLE":                          true,
-	"AWS_CONFIG_FILE":                        true,
-	"AWS_CONTAINER_AUTHORIZATION_TOKEN":      true,
-	"AWS_CONTAINER_CREDENTIALS_FULL_URI":     true,
-	"AWS_CONTAINER_CREDENTIALS_RELATIVE_URI": true,
-	"AWS_DEFAULT_REGION":                     true,
-	"AWS_EC2_METADATA_DISABLED":              true,
-	"AWS_ENDPOINT_URL":                       true,
-	"AWS_ENDPOINT_URL_BEDROCK":               true,
-	"AWS_PROFILE":                            true,
-	"AWS_REGION":                             true,
-	"AWS_ROLE_ARN":                           true,
-	"AWS_SDK_LOAD_CONFIG":                    true,
-	"AWS_SECRET_ACCESS_KEY":                  true,
-	"AWS_SESSION_TOKEN":                      true,
-	"AWS_SHARED_CREDENTIALS_FILE":            true,
-	"AWS_USE_DUALSTACK_ENDPOINT":             true,
-	"AWS_USE_FIPS_ENDPOINT":                  true,
-	"AWS_WEB_IDENTITY_TOKEN_FILE":            true,
-}
-
 var supervisorServiceFixedEnvKeys = map[string]bool{
 	"GC_HOME":                             true,
 	supervisorPreserveSessionsOnSignalEnv: true,
@@ -972,15 +886,7 @@ func shouldPersistSupervisorEnv(key string) bool {
 }
 
 func isProviderCredentialEnv(key string) bool {
-	if providerCredentialEnvKeys[key] {
-		return true
-	}
-	for _, prefix := range providerCredentialEnvPrefixes {
-		if strings.HasPrefix(key, prefix) {
-			return true
-		}
-	}
-	return false
+	return processenv.IsProviderCredentialEnv(key)
 }
 
 func supervisorServiceExplicitEnvKeys(raw string) []string {

@@ -314,7 +314,8 @@ func (s *Server) materializeNamedSessionWithContext(ctx context.Context, store b
 			return "", err
 		}
 	}
-	hints := sessionCreateHints(resolved, mcpServers)
+	sessionEnv := cityAnchoredSessionEnv(s.state.CityPath(), resolved.Env)
+	hints := sessionCreateHints(resolved, sessionEnv, mcpServers)
 	var info session.Info
 	err = session.WithCitySessionIdentifierLocks(s.state.CityPath(), []string{spec.Identity, spec.SessionName}, func() error {
 		if err := session.EnsureAliasAvailableWithConfigForOwner(store, s.state.Config(), spec.Identity, "", spec.Identity); err != nil {
@@ -334,7 +335,7 @@ func (s *Server) materializeNamedSessionWithContext(ctx context.Context, store b
 			workDir,
 			resolved.Name,
 			transport,
-			cityAnchoredSessionEnv(s.state.CityPath(), resolved.Env),
+			sessionEnv,
 			resume,
 			hints,
 			extraMeta,

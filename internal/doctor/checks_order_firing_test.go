@@ -25,11 +25,101 @@ func TestOrderFiringCurrent_NeverFired_BeyondUptime(t *testing.T) {
 	if result.Status != StatusError {
 		t.Fatalf("status = %v, want error; msg = %s; details = %v", result.Status, result.Message, result.Details)
 	}
+	// The "never fired beyond uptime" path is advisory — it most often
+	// reflects the cron-scheduler bug (ga-97qngx) rather than a real
+	// outage, so it must not wedge dispatch gates that read BlockingFailed.
+	if result.Severity != SeverityAdvisory {
+		t.Fatalf("Severity = %v, want SeverityAdvisory for never-fired-beyond-uptime path", result.Severity)
+	}
 	if !strings.Contains(strings.Join(result.Details, "\n"), "never fired since controller start") {
 		t.Fatalf("details = %v, want never-fired controller-start message", result.Details)
 	}
 	if result.FixHint != "Inspect with: gc order check && gc order history mol-dog-stale-db" {
 		t.Fatalf("FixHint = %q, want inspect hint for order", result.FixHint)
+	}
+}
+
+func TestOrderFiringCurrent_Stale_StaysBlocking(t *testing.T) {
+	// Cooldown stale (CRITICAL) must remain blocking even though the
+	// sibling "never fired" path was demoted to advisory; the stale
+	// signal reflects a real execution gap consumers should gate on.
+	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
+	cityPath, cfg := orderFiringTestCity(t)
+	writeOrderFiringTestOrder(t, cityPath, "cleanup-cooldown", "cooldown", "1h")
+	writeOrderFiringTestEvents(t, cityPath,
+		events.Event{Type: events.ControllerStarted, Ts: now.Add(-24 * time.Hour)},
+		events.Event{Type: events.OrderFired, Subject: "cleanup-cooldown", Ts: now.Add(-6 * time.Hour)},
+	)
+
+	result := runOrderFiringCurrentTest(t, cfg, cityPath, now)
+	if result.Status != StatusError {
+		t.Fatalf("status = %v, want error; msg = %s; details = %v", result.Status, result.Message, result.Details)
+	}
+	if result.Severity != SeverityBlocking {
+		t.Fatalf("Severity = %v, want SeverityBlocking for cooldown stale", result.Severity)
+	}
+}
+
+func TestOrderFiringCurrent_MixedAdvisoryAndBlocking_AggregatesBlocking(t *testing.T) {
+	// One advisory (never-fired cron) + one blocking (cooldown stale) →
+	// aggregate severity must be Blocking so the presence of any real
+	// outage keeps gates closed even if other entries are merely advisory.
+	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
+	cityPath, cfg := orderFiringTestCity(t)
+	writeOrderFiringTestOrder(t, cityPath, "mol-dog-stale-db", "cron", "0 */4 * * *")
+	writeOrderFiringTestOrder(t, cityPath, "cleanup-cooldown", "cooldown", "1h")
+	writeOrderFiringTestEvents(t, cityPath,
+		events.Event{Type: events.ControllerStarted, Ts: now.Add(-24 * time.Hour)},
+		events.Event{Type: events.OrderFired, Subject: "cleanup-cooldown", Ts: now.Add(-6 * time.Hour)},
+	)
+
+	result := runOrderFiringCurrentTest(t, cfg, cityPath, now)
+	if result.Status != StatusError {
+		t.Fatalf("status = %v, want error; msg = %s; details = %v", result.Status, result.Message, result.Details)
+	}
+	if result.Severity != SeverityBlocking {
+		t.Fatalf("Severity = %v, want SeverityBlocking when any non-OK entry is blocking", result.Severity)
+	}
+}
+
+func TestOrderFiringCurrent_MixedAdvisoryAndWarning_AggregatesAdvisory(t *testing.T) {
+	// A warning-level overdue order should stay visible in details without
+	// converting an advisory error into a blocking gate failure.
+	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
+	cityPath, cfg := orderFiringTestCity(t)
+	writeOrderFiringTestOrder(t, cityPath, "mol-dog-stale-db", "cron", "0 */4 * * *")
+	writeOrderFiringTestOrder(t, cityPath, "cleanup-cooldown", "cooldown", "1h")
+	writeOrderFiringTestEvents(t, cityPath,
+		events.Event{Type: events.ControllerStarted, Ts: now.Add(-24 * time.Hour)},
+		events.Event{Type: events.OrderFired, Subject: "cleanup-cooldown", Ts: now.Add(-2 * time.Hour)},
+	)
+
+	result := runOrderFiringCurrentTest(t, cfg, cityPath, now)
+	if result.Status != StatusError {
+		t.Fatalf("status = %v, want error; msg = %s; details = %v", result.Status, result.Message, result.Details)
+	}
+	if result.Severity != SeverityAdvisory {
+		t.Fatalf("Severity = %v, want SeverityAdvisory when only error entries are advisory", result.Severity)
+	}
+}
+
+func TestOrderFiringCurrent_NeverFiredCooldown_StaysBlocking(t *testing.T) {
+	// Never-fired cooldown orders represent the same execution gap as stale
+	// cooldown orders and should continue to gate dispatch consumers.
+	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
+	cityPath, cfg := orderFiringTestCity(t)
+	writeOrderFiringTestOrder(t, cityPath, "cleanup-cooldown", "cooldown", "1h")
+	writeOrderFiringTestEvents(t, cityPath, events.Event{
+		Type: events.ControllerStarted,
+		Ts:   now.Add(-2 * time.Hour),
+	})
+
+	result := runOrderFiringCurrentTest(t, cfg, cityPath, now)
+	if result.Status != StatusError {
+		t.Fatalf("status = %v, want error; msg = %s; details = %v", result.Status, result.Message, result.Details)
+	}
+	if result.Severity != SeverityBlocking {
+		t.Fatalf("Severity = %v, want SeverityBlocking for never-fired cooldown", result.Severity)
 	}
 }
 
