@@ -2661,9 +2661,10 @@ gc runtime drain <name> [flags]
 
 Acknowledge a drain signal — tell the controller to stop this session.
 
-Sets GC_DRAIN_ACK metadata on the session. The controller will stop
-the session on its next reconcile tick. Call this after the session has
-finished its current work in response to a drain signal.
+Sets GC_DRAIN_ACK metadata on the session, then pokes the controller
+socket so the reconciler stops the session immediately rather than on
+its next patrol tick. Call this after the session has finished its
+current work in response to a drain signal.
 
 ```
 gc runtime drain-ack [name] [flags]

@@ -61,6 +61,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `gc runtime drain-ack` now pokes the city controller socket after setting
+  the drain-ack flag, so the reconciler stops and respawns a drained pool
+  worker on the current patrol tick instead of waiting up to four ticks
+  (~120 s/step → ~30–90 s/step). Closes #2364 (pre-queued work) and #2251
+  (cold-pool arrival after drain-ack), which shared the same missing-poke
+  root cause.
 - `gc --json-schema` manifest output no longer includes the removed
   `transport` field. Consumers should use each role schema's `x-gc-jsonl`
   extension, when present, to determine JSONL record-count behavior.

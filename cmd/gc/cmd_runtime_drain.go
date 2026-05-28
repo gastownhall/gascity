@@ -417,9 +417,10 @@ func newRuntimeDrainAckCmd(stdout, stderr io.Writer) *cobra.Command {
 		Short: "Acknowledge drain — signal the controller to stop this session",
 		Long: `Acknowledge a drain signal — tell the controller to stop this session.
 
-Sets GC_DRAIN_ACK metadata on the session. The controller will stop
-the session on its next reconcile tick. Call this after the session has
-finished its current work in response to a drain signal.`,
+Sets GC_DRAIN_ACK metadata on the session, then pokes the controller
+socket so the reconciler stops the session immediately rather than on
+its next patrol tick. Call this after the session has finished its
+current work in response to a drain signal.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			if cmdRuntimeDrainAck(args, jsonOutput, stdout, stderr) != 0 {
