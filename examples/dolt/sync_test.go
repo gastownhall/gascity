@@ -1,6 +1,7 @@
 package dolt_test
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -123,7 +124,7 @@ exit 0
 // failure case (timeout exit 124, transport exit 7, stderr replay, etc.) rather
 // than N hardcoded-exit functions. The remotes-lookup query must still succeed
 // or the push site is never reached.
-func writeSyncFakeDoltPushFails(t *testing.T, dir string, exitCode int, stderr string) string {
+func writeSyncFakeDoltPushFails(t *testing.T, dir string, exitCode int, stderr string) {
 	t.Helper()
 	logPath := filepath.Join(dir, "dolt.log")
 	stderrEmit := ""
@@ -151,14 +152,13 @@ exit 0
 	if err := os.WriteFile(filepath.Join(dir, "dolt"), []byte(body), 0o755); err != nil {
 		t.Fatalf("write fake dolt: %v", err)
 	}
-	return logPath
 }
 
 // writeSyncFakeDoltCLIPushFails installs a fake dolt for CLI-mode tests that
 // fails the `dolt push` invocation with the given exit code (writing a stderr
 // line). CLI mode resolves remotes/refspec from disk, so the push is the only
 // dolt call.
-func writeSyncFakeDoltCLIPushFails(t *testing.T, dir string, exitCode int) string {
+func writeSyncFakeDoltCLIPushFails(t *testing.T, dir string, exitCode int) {
 	t.Helper()
 	logPath := filepath.Join(dir, "dolt.log")
 	body := `#!/bin/sh
@@ -174,7 +174,6 @@ exit 0
 	if err := os.WriteFile(filepath.Join(dir, "dolt"), []byte(body), 0o755); err != nil {
 		t.Fatalf("write fake dolt: %v", err)
 	}
-	return logPath
 }
 
 func writeSyncFakeBeadsBD(t *testing.T, cityPath string) string {
@@ -999,7 +998,7 @@ func TestSyncSQLPushTimeoutReportsTimeout(t *testing.T) {
 	}
 
 	binDir := t.TempDir()
-	_ = writeSyncFakeDoltPushFails(t, binDir, 124, "")
+	writeSyncFakeDoltPushFails(t, binDir, 124, "")
 	_ = writeSyncFakeBeadsBD(t, cityPath)
 
 	cmd := exec.Command("sh", script, "--db", "app")
@@ -1047,7 +1046,7 @@ func TestSyncSQLPushReportsExitCode(t *testing.T) {
 	}
 
 	binDir := t.TempDir()
-	_ = writeSyncFakeDoltPushFails(t, binDir, 7, "")
+	writeSyncFakeDoltPushFails(t, binDir, 7, "")
 	_ = writeSyncFakeBeadsBD(t, cityPath)
 
 	cmd := exec.Command("sh", script, "--db", "app")
@@ -1093,7 +1092,7 @@ func TestSyncSQLPushReplaysStderr(t *testing.T) {
 	}
 
 	binDir := t.TempDir()
-	_ = writeSyncFakeDoltPushFails(t, binDir, 1, "fatal: authentication required")
+	writeSyncFakeDoltPushFails(t, binDir, 1, "fatal: authentication required")
 	_ = writeSyncFakeBeadsBD(t, cityPath)
 
 	cmd := exec.Command("sh", script, "--db", "app")
@@ -1139,7 +1138,7 @@ func TestSyncSQLPushEmptyStderrNoBlankLines(t *testing.T) {
 	}
 
 	binDir := t.TempDir()
-	_ = writeSyncFakeDoltPushFails(t, binDir, 9, "")
+	writeSyncFakeDoltPushFails(t, binDir, 9, "")
 	_ = writeSyncFakeBeadsBD(t, cityPath)
 
 	cmd := exec.Command("sh", script, "--db", "app")
@@ -1184,7 +1183,7 @@ func TestSyncSQLPushTimeoutHonorsConfiguredCeiling(t *testing.T) {
 	}
 
 	binDir := t.TempDir()
-	_ = writeSyncFakeDoltPushFails(t, binDir, 124, "")
+	writeSyncFakeDoltPushFails(t, binDir, 124, "")
 	_ = writeSyncFakeBeadsBD(t, cityPath)
 
 	cmd := exec.Command("sh", script, "--db", "app")
@@ -1260,7 +1259,8 @@ func TestSyncRejectsInvalidPushTimeout(t *testing.T) {
 			if err == nil {
 				t.Fatalf("expected exit 2 for invalid timeout %q, output:\n%s", bad, out)
 			}
-			if ee, ok := err.(*exec.ExitError); !ok || ee.ExitCode() != 2 {
+			var ee *exec.ExitError
+			if !errors.As(err, &ee) || ee.ExitCode() != 2 {
 				t.Fatalf("expected exit code 2 for invalid timeout %q, got %v:\n%s", bad, err, out)
 			}
 			if !strings.Contains(string(out), "invalid GC_DOLT_SYNC_PUSH_TIMEOUT_SECS") {
@@ -1291,7 +1291,7 @@ func TestSyncCLIPushReportsExitCode(t *testing.T) {
 	}
 
 	binDir := t.TempDir()
-	_ = writeSyncFakeDoltCLIPushFails(t, binDir, 3)
+	writeSyncFakeDoltCLIPushFails(t, binDir, 3)
 	_ = writeSyncFakeBeadsBD(t, cityPath)
 
 	cmd := exec.Command("sh", script, "--db", "app")
@@ -1336,7 +1336,7 @@ func TestSyncCLIForcePushReportsExitCode(t *testing.T) {
 	}
 
 	binDir := t.TempDir()
-	_ = writeSyncFakeDoltCLIPushFails(t, binDir, 5)
+	writeSyncFakeDoltCLIPushFails(t, binDir, 5)
 	_ = writeSyncFakeBeadsBD(t, cityPath)
 
 	cmd := exec.Command("sh", script, "--db", "app", "--force")
