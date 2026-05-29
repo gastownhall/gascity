@@ -287,6 +287,24 @@ func TestLegacyPublicPackForSourceDetectsAbsolutePaths(t *testing.T) {
 	}
 }
 
+func TestLegacyPublicPackForSourceIgnoresRemoteSubdirectorySources(t *testing.T) {
+	cityDir := filepath.Join(string(filepath.Separator), "city")
+	cases := []string{
+		"https://example.com/repo.git//examples/gastown/packs/gastown",
+		"ssh://example.com/repo.git//.gc/system/packs/gastown",
+		"git@example.com:org/repo.git//examples/gastown/packs/maintenance",
+		"github.com/org/repo//examples/gastown/packs/maintenance",
+		"file:///repo/examples/gastown/packs/gastown",
+	}
+	for _, source := range cases {
+		t.Run(source, func(t *testing.T) {
+			if got, ok := legacyPublicPackForSource(cityDir, source); ok {
+				t.Fatalf("legacyPublicPackForSource(%q) = %q, true; want false", source, got)
+			}
+		})
+	}
+}
+
 func TestImportStateDoctorCheckFixRewritesLegacyPublicPackImports(t *testing.T) {
 	clearGCEnv(t)
 	cityDir := t.TempDir()

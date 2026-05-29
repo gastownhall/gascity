@@ -61,6 +61,10 @@ func finalizeInit(cityPath string, stdout, stderr io.Writer, opts initFinalizeOp
 		printDoltAuthorIdentityBlock(stderr, opts.commandName, status)
 		return 1
 	}
+	if err := ensureLegacyNamedPacksCached(cityPath); err != nil {
+		fmt.Fprintf(stderr, "%s: fetching packs: %v\n", opts.commandName, err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 
 	if opts.showProgress {
 		if opts.skipProviderReadiness {
@@ -76,12 +80,13 @@ func finalizeInit(cityPath string, stdout, stderr io.Writer, opts initFinalizeOp
 	} else if !opts.showProgress && stdout != nil {
 		fmt.Fprintln(stdout, "Skipping provider readiness checks.") //nolint:errcheck // best-effort stdout
 	}
-	if err := ensureLegacyNamedPacksCached(cityPath); err != nil {
-		fmt.Fprintf(stderr, "%s: fetching packs: %v\n", opts.commandName, err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
 	if err := ensureInitRemoteImportsInstalled(cityPath); err != nil {
 		fmt.Fprintf(stderr, "%s: installing imports: %v\n", opts.commandName, err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	hasRemoteImports, err := initHasRemoteImports(cityPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "%s: reading imports for provider readiness: %v\n", opts.commandName, err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
@@ -92,6 +97,11 @@ func finalizeInit(cityPath string, stdout, stderr io.Writer, opts initFinalizeOp
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: loading config for prefix resolution: %v\n", opts.commandName, err) //nolint:errcheck // best-effort stderr
 		return 1
+	}
+	if !opts.skipProviderReadiness && hasRemoteImports {
+		if err := runInitProviderPreflightForConfig(cityPath, cfg, stdout, stderr, opts.commandName); err != nil {
+			return 1
+		}
 	}
 	prefix := config.EffectiveHQPrefix(cfg)
 	if _, err := initDirIfReady(cityPath, cityPath, prefix); err != nil {
@@ -153,6 +163,10 @@ func runInitProviderPreflight(cityPath string, stdout, stderr io.Writer, command
 		fmt.Fprintf(stderr, "%s: fix the config issue, then run 'gc start'\n", commandName)                     //nolint:errcheck // best-effort stderr
 		return errInitProviderPreflight
 	}
+	return runInitProviderPreflightForConfig(cityPath, cfg, stdout, stderr, commandName)
+}
+
+func runInitProviderPreflightForConfig(cityPath string, cfg *config.City, stdout, stderr io.Writer, commandName string) error {
 	ensureInitArtifacts(cityPath, stderr, commandName)
 	if err := seedDeferredManagedBeadsBeforeProviderReadiness(cityPath, cfg); err != nil {
 		fmt.Fprintf(stderr, "%s: city created, but startup is blocked by bead store initialization\n", commandName) //nolint:errcheck // best-effort stderr
@@ -209,6 +223,14 @@ func runInitProviderPreflight(cityPath string, stdout, stderr io.Writer, command
 	fmt.Fprintf(stderr, "Next: cd %s && gc start\n", shellQuotePath(cityPath))                        //nolint:errcheck // best-effort stderr
 	fmt.Fprintf(stderr, "Override: gc init --skip-provider-readiness %s\n", shellQuotePath(cityPath)) //nolint:errcheck // best-effort stderr
 	return errInitProviderPreflight
+}
+
+func initHasRemoteImports(cityPath string) (bool, error) {
+	allImports, err := collectAllImportsFS(fsys.OSFS{}, cityPath)
+	if err != nil {
+		return false, err
+	}
+	return hasRemoteImport(allImports), nil
 }
 
 func loadInitProviderPreflightConfig(cityPath string) (*config.City, error) {

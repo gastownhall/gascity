@@ -214,6 +214,10 @@ func legacyPublicPackNames(imports map[string]config.Import, cityPath string) []
 }
 
 func legacyPublicPackForSource(cityPath, source string) (string, bool) {
+	source = strings.TrimSpace(source)
+	if isRemoteImportSource(source) {
+		return "", false
+	}
 	source = strings.TrimSpace(filepath.Clean(source))
 	if source == "." || source == "" {
 		return "", false

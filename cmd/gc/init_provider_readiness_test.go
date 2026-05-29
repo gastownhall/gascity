@@ -273,8 +273,10 @@ func TestFinalizeInitFetchesRemotePacksBeforeProviderReadiness(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	probeCalls := 0
 	oldProbe := initProbeProvidersReadiness
 	initProbeProvidersReadiness = func(_ context.Context, providers []string, fresh bool) (map[string]api.ReadinessItem, error) {
+		probeCalls++
 		if !fresh {
 			t.Fatal("finalizeInit should force a fresh readiness probe")
 		}
@@ -305,10 +307,98 @@ func TestFinalizeInitFetchesRemotePacksBeforeProviderReadiness(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("finalizeInit = %d, want 0: %s", code, stderr.String())
 	}
+	if probeCalls != 1 {
+		t.Fatalf("readiness probe calls = %d, want 1", probeCalls)
+	}
 
 	cacheDir := config.PackCachePath(cityPath, "remote-pack", config.PackSource{Source: remote})
 	if _, err := os.Stat(filepath.Join(cacheDir, "pack.toml")); err != nil {
 		t.Fatalf("expected fetched pack cache at %s: %v", cacheDir, err)
+	}
+}
+
+func TestFinalizeInitChecksRemoteImportProvidersAfterInstall(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_DOLT", "skip")
+	t.Setenv("HOME", t.TempDir())
+	configureIsolatedRuntimeEnv(t)
+	disableBootstrapForTests(t)
+	stubInitDependencyChecks(t)
+
+	remote := initImportBarePackRepo(t, "remote-pack", "", strings.Join([]string{
+		"[pack]",
+		`name = "remote-pack"`,
+		`version = "1.0.0"`,
+		"schema = 1",
+		"",
+		"[[agent]]",
+		`name = "worker"`,
+		`provider = "claude"`,
+		"",
+	}, "\n"))
+	commit := gitOutputImport(t, remote, "rev-parse", "HEAD")
+
+	cityPath := filepath.Join(t.TempDir(), "bright-lights")
+	if err := os.MkdirAll(cityPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureCityScaffold(cityPath); err != nil {
+		t.Fatal(err)
+	}
+	writeCityToml(t, cityPath, `[workspace]
+name = "bright-lights"
+`)
+	writePackToml(t, cityPath, strings.Join([]string{
+		"[pack]",
+		`name = "bright-lights"`,
+		"schema = 1",
+		"",
+		"[imports.remote]",
+		`source = "file://` + filepath.ToSlash(remote) + `"`,
+		`version = "sha:` + commit + `"`,
+		"",
+	}, "\n"))
+
+	probeCalls := 0
+	oldProbe := initProbeProvidersReadiness
+	initProbeProvidersReadiness = func(_ context.Context, providers []string, fresh bool) (map[string]api.ReadinessItem, error) {
+		probeCalls++
+		if !fresh {
+			t.Fatal("finalizeInit should force a fresh readiness probe")
+		}
+		if len(providers) != 1 || providers[0] != "claude" {
+			t.Fatalf("providers = %v, want [claude]", providers)
+		}
+		return map[string]api.ReadinessItem{
+			"claude": {
+				Name:        "claude",
+				Kind:        api.ProbeKindProvider,
+				DisplayName: "Claude Code",
+				Status:      api.ProbeStatusNeedsAuth,
+			},
+		}, nil
+	}
+	t.Cleanup(func() { initProbeProvidersReadiness = oldProbe })
+
+	oldRegister := registerCityWithSupervisorTestHook
+	registerCityWithSupervisorTestHook = func(_ string, _ string, _ io.Writer, _ io.Writer) (bool, int) {
+		t.Fatal("registerCityWithSupervisor should not run when imported provider readiness blocks init")
+		return true, 0
+	}
+	t.Cleanup(func() { registerCityWithSupervisorTestHook = oldRegister })
+
+	var stdout, stderr bytes.Buffer
+	code := finalizeInit(cityPath, &stdout, &stderr, initFinalizeOptions{
+		commandName: "gc init",
+	})
+	if code != 1 {
+		t.Fatalf("finalizeInit = %d, want 1; stderr=%s", code, stderr.String())
+	}
+	if probeCalls != 1 {
+		t.Fatalf("readiness probe calls = %d, want 1", probeCalls)
+	}
+	if !strings.Contains(stderr.String(), "startup is blocked by provider readiness") {
+		t.Fatalf("stderr = %q, want provider readiness block", stderr.String())
 	}
 }
 
