@@ -279,13 +279,10 @@ func TestCheckDoesNotUseMessageLabelSupplement(t *testing.T) {
 			return []byte(`[]`), nil
 		}
 		if strings.Contains(cmd, "bd query --json") {
-			if !strings.Contains(cmd, "ephemeral=true") || !strings.Contains(cmd, "type=message") {
-				t.Fatalf("mail check used unexpected wisp query: %s", cmd)
-			}
-			return []byte(`[]`), nil
+			t.Fatalf("mail check used supplemental wisp query: %s", cmd)
 		}
 		if strings.Contains(cmd, "bd list --json") && strings.Contains(cmd, "--type=message") && strings.Contains(cmd, "--status=open") {
-			return []byte(`[{"id":"msg-1","title":"hello","description":"body","status":"open","issue_type":"message","assignee":"mayor","from":"human","created_at":"2026-01-02T03:04:05Z","labels":["gc:message"]}]`), nil
+			return []byte(`[{"id":"msg-1","title":"hello","description":"body","status":"open","issue_type":"message","assignee":"mayor","from":"human","created_at":"2026-01-02T03:04:05Z","ephemeral":true,"labels":["gc:message"]}]`), nil
 		}
 		return nil, errors.New("unexpected command: " + cmd)
 	}
@@ -300,9 +297,9 @@ func TestCheckDoesNotUseMessageLabelSupplement(t *testing.T) {
 	}
 }
 
-func TestCheckSupportsSlashRecipientWithWispTier(t *testing.T) {
+func TestCheckUsesSingleBothTierScanForSlashRecipient(t *testing.T) {
 	recipient := "gascity/workflows.codex-max"
-	sawWispQuery := false
+	var messageListCalls int
 	runner := func(_ string, name string, args ...string) ([]byte, error) {
 		cmd := name + " " + strings.Join(args, " ")
 		switch {
@@ -313,16 +310,13 @@ func TestCheckSupportsSlashRecipientWithWispTier(t *testing.T) {
 		case strings.Contains(cmd, "bd list --json") && strings.Contains(cmd, "--type=session"):
 			return []byte(`[]`), nil
 		case strings.Contains(cmd, "bd list --json") && strings.Contains(cmd, "--type=message") && strings.Contains(cmd, "--status=open"):
-			return []byte(`[]`), nil
-		case strings.Contains(cmd, "bd query --json"):
-			if strings.Contains(cmd, "assignee=") {
-				t.Fatalf("slash recipient used per-assignee wisp query: %s", cmd)
+			if strings.Contains(cmd, "--assignee=") {
+				t.Fatalf("slash recipient used per-assignee message query: %s", cmd)
 			}
-			if !strings.Contains(cmd, "ephemeral=true") || !strings.Contains(cmd, "type=message") {
-				t.Fatalf("mail check used unexpected wisp query: %s", cmd)
-			}
-			sawWispQuery = true
+			messageListCalls++
 			return []byte(`[{"id":"msg-w","title":"hello","description":"body","status":"open","issue_type":"message","assignee":"gascity/workflows.codex-max","from":"human","created_at":"2026-01-02T03:04:05Z","ephemeral":true}]`), nil
+		case strings.Contains(cmd, "bd query --json"):
+			t.Fatalf("slash recipient used supplemental wisp query: %s", cmd)
 		}
 		return nil, errors.New("unexpected command: " + cmd)
 	}
@@ -332,11 +326,44 @@ func TestCheckSupportsSlashRecipientWithWispTier(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Check: %v", err)
 	}
-	if !sawWispQuery {
-		t.Fatal("Check did not query wisps tier")
+	if messageListCalls != 1 {
+		t.Fatalf("message list calls = %d, want 1", messageListCalls)
 	}
 	if len(msgs) != 1 || msgs[0].ID != "msg-w" {
 		t.Fatalf("Check = %#v, want msg-w", msgs)
+	}
+}
+
+func TestCheckUsesSingleBothTierBdMessageScan(t *testing.T) {
+	var messageListCalls int
+	runner := func(_ string, name string, args ...string) ([]byte, error) {
+		cmd := name + " " + strings.Join(args, " ")
+		switch {
+		case strings.Contains(cmd, "bd show --json mayor"):
+			return nil, errors.New("not found")
+		case strings.Contains(cmd, "bd list --json") && strings.Contains(cmd, "--metadata-field"):
+			return []byte(`[]`), nil
+		case strings.Contains(cmd, "bd list --json") && strings.Contains(cmd, "--type=session"):
+			return []byte(`[]`), nil
+		case strings.Contains(cmd, "bd query --json"):
+			t.Fatalf("mail check used supplemental bd query: %s", cmd)
+		case strings.Contains(cmd, "bd list --json") && strings.Contains(cmd, "--type=message") && strings.Contains(cmd, "--status=open"):
+			messageListCalls++
+			return []byte(`[{"id":"msg-1","title":"hello","description":"body","status":"open","issue_type":"message","assignee":"mayor","from":"human","created_at":"2026-01-02T03:04:05Z","ephemeral":true}]`), nil
+		}
+		return nil, errors.New("unexpected command: " + cmd)
+	}
+	p := New(beads.NewBdStore(t.TempDir(), runner))
+
+	msgs, err := p.Check("mayor")
+	if err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	if messageListCalls != 1 {
+		t.Fatalf("message list calls = %d, want 1", messageListCalls)
+	}
+	if len(msgs) != 1 || msgs[0].ID != "msg-1" {
+		t.Fatalf("Check = %#v, want msg-1", msgs)
 	}
 }
 

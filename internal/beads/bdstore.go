@@ -1396,7 +1396,7 @@ func (s *BdStore) Delete(id string) error {
 	return nil
 }
 
-// List returns beads matching the query via bd list.
+// List returns beads matching the query via bd list and bd query.
 func (s *BdStore) List(query ListQuery) ([]Bead, error) {
 	if !query.HasFilter() && !query.AllowScan {
 		return nil, fmt.Errorf("bd list: %w", ErrQueryRequiresScan)
@@ -1406,9 +1406,20 @@ func (s *BdStore) List(query ListQuery) ([]Bead, error) {
 	case TierWisps:
 		return s.listEphemeral(query)
 	case TierBoth:
+		if bdListCoversBothTiers(query) {
+			return s.listViaBDList(query)
+		}
 		return s.listBothTiers(query)
 	}
 
+	return s.listViaBDList(query)
+}
+
+func bdListCoversBothTiers(query ListQuery) bool {
+	return query.Type == "message"
+}
+
+func (s *BdStore) listViaBDList(query ListQuery) ([]Bead, error) {
 	limit := query.Limit
 	if query.Sort == SortCreatedAsc {
 		limit = 0
@@ -1472,9 +1483,8 @@ func (s *BdStore) List(query ListQuery) ([]Bead, error) {
 }
 
 // listEphemeral reads only the wisps tier using `bd query "ephemeral=true AND
-// <filters>"`. bd list only scans the issues table; bd query is the canonical
-// way to reach the wisps table (mirrors gastown's internal/beads/beads.go
-// listEphemeral path).
+// <filters>"`. For most bead types, bd query is the canonical way to reach the
+// wisps table (mirrors gastown's internal/beads/beads.go listEphemeral path).
 func (s *BdStore) listEphemeral(query ListQuery) ([]Bead, error) {
 	clauses := []string{"ephemeral=true"}
 	serverFilteredOnly := true

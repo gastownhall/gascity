@@ -792,9 +792,9 @@ func (p *Provider) messageCandidatesForRoutes(routes []string) ([]beads.Bead, er
 }
 
 // messageCandidatesAll returns all open message beads matching any route.
-// Empty routes return all open messages. bd stores message beads as wisps, but
-// older stores can still have issue-tier messages, so mail reads must union
-// both tiers.
+// Empty routes return all open messages. Message reads need TierBoth because
+// bd stores current message beads as wisps while older stores can still have
+// issue-tier messages.
 func (p *Provider) messageCandidatesAll(routes []string) ([]beads.Bead, error) {
 	all, err := p.store.List(beads.ListQuery{
 		Type:      "message",
