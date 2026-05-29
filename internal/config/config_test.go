@@ -1739,6 +1739,38 @@ esac
 	}
 }
 
+// TestEffectiveWorkQueryPersistentSessionFindsRoutedWork verifies that
+// persistent sessions (origin=manual, origin=pool) can consume Tier 3
+// routed-to demand. Previously the default work query gated Tier 3 on
+// $GC_SESSION_ORIGIN, rejecting non-ephemeral sessions. Since the default
+// sling query routes via gc.routed_to metadata, persistent sessions must
+// also read from that queue.
+func TestEffectiveWorkQueryPersistentSessionFindsRoutedWork(t *testing.T) {
+	a := Agent{Name: "tomoko", Dir: "hello-world"}
+	for _, origin := range []string{"manual", "pool", "ephemeral", ""} {
+		t.Run("origin="+origin, func(t *testing.T) {
+			env := map[string]string{}
+			if origin != "" {
+				env["GC_SESSION_ORIGIN"] = origin
+			}
+			out := runEffectiveWorkQuery(t, a, env, `#!/bin/sh
+set -eu
+case "$*" in
+  *"ready --metadata-field gc.routed_to=hello-world/tomoko --unassigned --exclude-type=epic"*)
+    printf '[{"id":"routed-bead"}]'
+    ;;
+  *)
+    printf '[]'
+    ;;
+esac
+`)
+			if !strings.Contains(out, "routed-bead") {
+				t.Errorf("EffectiveWorkQuery() with GC_SESSION_ORIGIN=%q did not find routed bead: %q", origin, out)
+			}
+		})
+	}
+}
+
 func TestDefaultPoolCheckUsesPoolName(t *testing.T) {
 	a := Agent{
 		Name:              "dog-1",
