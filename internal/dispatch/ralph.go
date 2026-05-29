@@ -154,15 +154,6 @@ func runRalphCheck(store beads.Store, bead, subject beads.Bead, attempt int, opt
 	if checkPath == "" {
 		return convergence.GateResult{}, fmt.Errorf("%s: missing gc.check_path", bead.ID)
 	}
-	// gc.check_path comes from formula metadata after variable substitution
-	// (internal/formula/expand.go), and sling API `vars` can flow into that
-	// substitution. Enforce the relative-path contract at this boundary so
-	// an absolute string synthesized via vars cannot bypass containment in
-	// convergence.ResolveConditionPath (which intentionally trusts callers
-	// to vouch for absolute inputs).
-	if filepath.IsAbs(checkPath) {
-		return convergence.GateResult{}, fmt.Errorf("%s: gc.check_path must be relative, got absolute %q", bead.ID, checkPath)
-	}
 	cityPath := opts.CityPath
 	if cityPath == "" {
 		cityPath = resolveInheritedMetadata(store, bead, "gc.city_path")

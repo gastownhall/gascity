@@ -7268,17 +7268,10 @@ func TestRunRalphCheckRejectsPathTraversalAboveCityPath(t *testing.T) {
 	}
 }
 
-// TestRunRalphCheckRejectsAbsoluteCheckPath pins the contract that
-// gc.check_path must be relative. Sling API vars
-// (internal/api/handler_sling.go → internal/molecule → bead metadata)
-// can flow through formula variable substitution
-// (internal/formula/expand.go) and synthesize an absolute string into
-// gc.check_path. convergence.ResolveConditionPath intentionally skips
-// containment for absolute conditionPath values (callers vouch), so
-// ralph.go must reject the absolute form at the metadata boundary or
-// the OR-containment relaxation in gastownhall/gascity#2354 becomes a
-// full bypass for callers who can influence vars.
-func TestRunRalphCheckRejectsAbsoluteCheckPath(t *testing.T) {
+// TestRunRalphCheckAllowsAbsoluteCheckPath pins the registry/import-pack
+// behavior: packs can be installed outside the city/store roots, so formula
+// expansion may produce an absolute gc.check_path.
+func TestRunRalphCheckAllowsAbsoluteCheckPath(t *testing.T) {
 	parent := t.TempDir()
 	cityPath := filepath.Join(parent, "city")
 	storePath := filepath.Join(parent, "rig")
@@ -7288,9 +7281,13 @@ func TestRunRalphCheckRejectsAbsoluteCheckPath(t *testing.T) {
 	if err := os.MkdirAll(storePath, 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
-	outside := filepath.Join(parent, "outside.sh")
-	if err := os.WriteFile(outside, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
-		t.Fatalf("write outside: %v", err)
+	packDir := filepath.Join(parent, "registry-cache", "packs", "workflows")
+	if err := os.MkdirAll(packDir, 0o755); err != nil {
+		t.Fatalf("mkdir pack dir: %v", err)
+	}
+	checkScript := filepath.Join(packDir, "check.sh")
+	if err := os.WriteFile(checkScript, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write check script: %v", err)
 	}
 
 	store := beads.NewMemStore()
@@ -7298,21 +7295,21 @@ func TestRunRalphCheckRejectsAbsoluteCheckPath(t *testing.T) {
 		ID:   "check-abs",
 		Type: "task",
 		Metadata: map[string]string{
-			"gc.check_path":    outside,
+			"gc.check_path":    checkScript,
 			"gc.check_timeout": "30s",
 		},
 	}
 	subject := beads.Bead{ID: "run-abs", Type: "task"}
 
-	_, err := runRalphCheck(store, check, subject, 1, ProcessOptions{
+	result, err := runRalphCheck(store, check, subject, 1, ProcessOptions{
 		CityPath:  cityPath,
 		StorePath: storePath,
 	})
-	if err == nil {
-		t.Fatal("expected absolute-path rejection, got nil")
+	if err != nil {
+		t.Fatalf("absolute check path should be accepted: %v", err)
 	}
-	if !strings.Contains(err.Error(), "must be relative") {
-		t.Errorf("expected absolute-path error, got: %v", err)
+	if result.Outcome != convergence.GatePass {
+		t.Fatalf("outcome = %q, want %q; stdout=%q stderr=%q", result.Outcome, convergence.GatePass, result.Stdout, result.Stderr)
 	}
 }
 
