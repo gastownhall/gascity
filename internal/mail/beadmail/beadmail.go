@@ -164,6 +164,12 @@ func (p *Provider) Inbox(recipient string) ([]mail.Message, error) {
 	return p.filterMessages(recipient, false)
 }
 
+// InboxRecipients returns all unread messages matching any recipient route in
+// one message-bead scan.
+func (p *Provider) InboxRecipients(recipients []string) ([]mail.Message, error) {
+	return p.filterMessagesForRecipients(recipients, false)
+}
+
 // Get retrieves a message by ID without marking it read.
 // Returns an error if the bead is not a message type.
 func (p *Provider) Get(id string) (mail.Message, error) {
@@ -556,7 +562,13 @@ func (p *Provider) CountRecipients(recipients []string) (int, int, error) {
 // filterMessages returns open message beads assigned to the recipient.
 // When includeRead is false, messages with the "read" label are excluded.
 func (p *Provider) filterMessages(recipient string, includeRead bool) ([]mail.Message, error) {
-	routes := p.recipientRoutes(recipient)
+	return p.filterMessagesForRecipients([]string{recipient}, includeRead)
+}
+
+// filterMessagesForRecipients returns open message beads assigned to any
+// recipient route represented by recipients. Empty recipients mean all routes.
+func (p *Provider) filterMessagesForRecipients(recipients []string, includeRead bool) ([]mail.Message, error) {
+	routes := p.recipientRoutesForAll(recipients)
 	candidates, err := p.messageCandidatesForRoutes(routes)
 	if err != nil {
 		return nil, fmt.Errorf("beadmail: listing beads: %w", err)
@@ -577,16 +589,8 @@ func (p *Provider) filterMessages(recipient string, includeRead bool) ([]mail.Me
 	return msgs, nil
 }
 
-// messageCandidates returns message beads relevant to a recipient using
-// targeted queries instead of a broad store scan. This avoids timeouts
-// on stores with many beads.
-//
-// For per-recipient queries, list by assignee+type+status — targeted to the
-// recipient's open messages. For global queries (recipient==""), falls back
-// to type-based listing since no assignee filter can be applied.
-//
-// Type="message" is the authoritative discriminator; the legacy gc:message
-// label supplement was removed in #862 along with writes to that label.
+// Recipient route helpers expand an operator-facing recipient into every
+// stable mailbox address that might hold mail for that recipient.
 func (p *Provider) recipientRoutes(recipient string) []string {
 	recipient = strings.TrimSpace(recipient)
 	if recipient == "" {
@@ -780,54 +784,31 @@ func matchesRecipientRoute(routes []string, assignee string) bool {
 }
 
 func (p *Provider) messageCandidatesForRoutes(routes []string) ([]beads.Bead, error) {
-	seen := make(map[string]beads.Bead)
-	order := make([]string, 0)
-	add := func(bs []beads.Bead) {
-		for _, b := range bs {
-			if !isMessage(b) {
-				continue
-			}
-			if _, ok := seen[b.ID]; !ok {
-				order = append(order, b.ID)
-			}
-			seen[b.ID] = b
-		}
-	}
-
-	// Primary: targeted query scoped to recipient.
-	if len(routes) > 0 {
-		for _, route := range routes {
-			assigned, err := p.store.List(beads.ListQuery{
-				Assignee: route,
-				Type:     "message",
-				Status:   "open",
-				TierMode: beads.TierBoth,
-			})
-			if err != nil {
-				return nil, fmt.Errorf("listing by assignee %q: %w", route, err)
-			}
-			add(assigned)
-		}
-	} else {
-		// No recipient filter — use type-based query for global discovery.
-		all, err := p.store.List(beads.ListQuery{Type: "message", TierMode: beads.TierBoth})
-		if err != nil {
-			return nil, fmt.Errorf("listing message beads: %w", err)
-		}
-		add(all)
-	}
-
-	result := make([]beads.Bead, 0, len(order))
-	for _, id := range order {
-		result = append(result, seen[id])
-	}
-	return result, nil
+	return p.messageCandidatesAll(routes)
 }
 
-// isMessage reports whether the bead is a message. Type="message" is the
-// authoritative discriminator; the legacy gc:message label is no longer read.
-func isMessage(b beads.Bead) bool {
-	return b.Type == "message"
+// messageCandidatesAll returns all open issue-tier message beads matching any
+// route in a single store scan. Empty routes return all open messages.
+func (p *Provider) messageCandidatesAll(routes []string) ([]beads.Bead, error) {
+	all, err := p.store.List(beads.ListQuery{
+		Type:      "message",
+		Status:    "open",
+		TierMode:  beads.TierIssues,
+		AllowScan: true,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("scanning message beads: %w", err)
+	}
+	if len(routes) == 0 {
+		return all, nil
+	}
+	out := make([]beads.Bead, 0, len(all))
+	for _, b := range all {
+		if matchesRecipientRoute(routes, b.Assignee) {
+			out = append(out, b)
+		}
+	}
+	return out, nil
 }
 
 // beadToMessage converts a bead to a mail.Message.

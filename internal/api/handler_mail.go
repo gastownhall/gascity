@@ -323,6 +323,10 @@ func (s *Server) configuredMailRecipientAddress(store beads.Store, identifier st
 }
 
 func mailInboxForRecipients(mp mail.Provider, recipients []string) ([]mail.Message, error) {
+	recipients = uniqueMailRecipients(recipients)
+	if inboxer, ok := mp.(mail.MultiRecipientInboxer); ok {
+		return inboxer.InboxRecipients(recipients)
+	}
 	return mailMessagesForRecipients(mp.Inbox, recipients)
 }
 

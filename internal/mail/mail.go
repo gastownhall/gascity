@@ -115,3 +115,9 @@ type Provider interface {
 	// Count returns (total, unread) message counts for a recipient.
 	Count(recipient string) (total int, unread int, err error)
 }
+
+// MultiRecipientInboxer is an optional extension for providers that can return
+// unread inbox messages for multiple recipients in one backend pass.
+type MultiRecipientInboxer interface {
+	InboxRecipients(recipients []string) ([]Message, error)
+}

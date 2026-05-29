@@ -86,6 +86,54 @@ func (p *exactRecipientMailProvider) unread(recipient string) []mail.Message {
 	return out
 }
 
+type multiRecipientInboxMailProvider struct {
+	exactRecipientMailProvider
+	calls [][]string
+}
+
+func (p *multiRecipientInboxMailProvider) Inbox(recipient string) ([]mail.Message, error) {
+	return nil, fmt.Errorf("fallback Inbox(%q) should not be called", recipient)
+}
+
+func (p *multiRecipientInboxMailProvider) InboxRecipients(recipients []string) ([]mail.Message, error) {
+	p.calls = append(p.calls, append([]string(nil), recipients...))
+	return []mail.Message{{ID: "multi-1", To: strings.Join(recipients, ",")}}, nil
+}
+
+func TestMailInboxForRecipientsUsesMultiRecipientProvider(t *testing.T) {
+	mp := &multiRecipientInboxMailProvider{}
+
+	msgs, err := mailInboxForRecipients(mp, []string{"sky", "mayor", "sky"})
+	if err != nil {
+		t.Fatalf("mailInboxForRecipients: %v", err)
+	}
+	if len(msgs) != 1 || msgs[0].ID != "multi-1" {
+		t.Fatalf("messages = %#v, want multi-recipient result", msgs)
+	}
+	if len(mp.calls) != 1 {
+		t.Fatalf("InboxRecipients calls = %d, want 1", len(mp.calls))
+	}
+	want := []string{"sky", "mayor"}
+	if fmt.Sprint(mp.calls[0]) != fmt.Sprint(want) {
+		t.Fatalf("InboxRecipients recipients = %#v, want %#v", mp.calls[0], want)
+	}
+}
+
+func TestMailInboxForRecipientsFallbackDedupesMessages(t *testing.T) {
+	mp := &exactRecipientMailProvider{messages: map[string][]mail.Message{
+		"sky":   {{ID: "msg-1", To: "sky"}, {ID: "shared", To: "sky"}},
+		"mayor": {{ID: "shared", To: "mayor"}, {ID: "msg-2", To: "mayor"}},
+	}}
+
+	msgs, err := mailInboxForRecipients(mp, []string{"sky", "mayor", "sky"})
+	if err != nil {
+		t.Fatalf("mailInboxForRecipients: %v", err)
+	}
+	if len(msgs) != 3 {
+		t.Fatalf("messages = %#v, want 3 deduped fallback messages", msgs)
+	}
+}
+
 func TestMailLifecycle(t *testing.T) {
 	state := newFakeState(t)
 	h := newTestCityHandler(t, state)
