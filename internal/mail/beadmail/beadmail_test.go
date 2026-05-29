@@ -3,6 +3,7 @@ package beadmail
 import (
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -1886,14 +1887,23 @@ func TestCheck(t *testing.T) {
 // across multiple Inbox calls in a single command invocation.
 type countingSessionListStore struct {
 	*beads.MemStore
+	mu               sync.Mutex
 	sessionListCalls int
 }
 
 func (s *countingSessionListStore) List(query beads.ListQuery) ([]beads.Bead, error) {
 	if query.Label == session.LabelSession && len(query.Metadata) == 0 {
+		s.mu.Lock()
 		s.sessionListCalls++
+		s.mu.Unlock()
 	}
 	return s.MemStore.List(query)
+}
+
+func (s *countingSessionListStore) sessionListCallCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.sessionListCalls
 }
 
 func TestProvider_DefaultProviderSeesNewHistoricalAliasSessionAcrossCalls(t *testing.T) {
@@ -1933,8 +1943,8 @@ func TestProvider_DefaultProviderSeesNewHistoricalAliasSessionAcrossCalls(t *tes
 	if msgs[0].Body != "for old route" {
 		t.Fatalf("Inbox(old-route) body = %q, want %q", msgs[0].Body, "for old route")
 	}
-	if store.sessionListCalls != 2 {
-		t.Errorf("broad gc:session List calls = %d, want 2 (default provider must refetch per call to avoid stale shared state)", store.sessionListCalls)
+	if got := store.sessionListCallCount(); got != 2 {
+		t.Errorf("broad gc:session List calls = %d, want 2 (default provider must refetch per call to avoid stale shared state)", got)
 	}
 }
 
@@ -1979,8 +1989,46 @@ func TestProviderCached_BroadSessionListCachedAcrossInboxCalls(t *testing.T) {
 		}
 	}
 
-	if store.sessionListCalls != 1 {
-		t.Errorf("broad gc:session List calls = %d, want 1 (Provider must cache the enumeration)", store.sessionListCalls)
+	if got := store.sessionListCallCount(); got != 1 {
+		t.Errorf("broad gc:session List calls = %d, want 1 (Provider must cache the enumeration)", got)
+	}
+}
+
+func TestProviderCached_BroadSessionListCacheConcurrentAccess(t *testing.T) {
+	store := &countingSessionListStore{MemStore: beads.NewMemStore()}
+	if _, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"alias":         "worker-a",
+			"alias_history": "old-route",
+			"session_name":  "wf__a",
+		},
+	}); err != nil {
+		t.Fatalf("Create session: %v", err)
+	}
+	p := NewCached(store)
+
+	const workers = 16
+	errs := make(chan error, workers)
+	var wg sync.WaitGroup
+	wg.Add(workers)
+	for i := 0; i < workers; i++ {
+		go func() {
+			defer wg.Done()
+			_, err := p.Inbox("old-route")
+			errs <- err
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("Inbox(old-route): %v", err)
+		}
+	}
+	if got := store.sessionListCallCount(); got != 1 {
+		t.Errorf("broad gc:session List calls = %d, want 1 under concurrent access", got)
 	}
 }
 

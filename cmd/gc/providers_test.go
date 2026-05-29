@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/agent"
@@ -13,6 +14,7 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessiont3bridge "github.com/gastownhall/gascity/internal/runtime/t3bridge"
+	"github.com/gastownhall/gascity/internal/session"
 )
 
 func TestTmuxConfigFromSessionDefaultsSocketToCityName(t *testing.T) {
@@ -74,6 +76,52 @@ func TestRawBeadsProviderNormalizesManagedExecEnv(t *testing.T) {
 
 	if got := rawBeadsProvider(cityPath); got != "bd" {
 		t.Fatalf("rawBeadsProvider() = %q, want bd", got)
+	}
+}
+
+type apiMailCacheCountingStore struct {
+	*beads.MemStore
+	mu               sync.Mutex
+	sessionListCalls int
+}
+
+func (s *apiMailCacheCountingStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	if query.Label == session.LabelSession && len(query.Metadata) == 0 {
+		s.mu.Lock()
+		s.sessionListCalls++
+		s.mu.Unlock()
+	}
+	return s.MemStore.List(query)
+}
+
+func (s *apiMailCacheCountingStore) sessionListCallCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.sessionListCalls
+}
+
+func TestNewMailProviderUsesCachedBeadmailProvider(t *testing.T) {
+	t.Setenv("GC_MAIL", "")
+	store := &apiMailCacheCountingStore{MemStore: beads.NewMemStore()}
+	if _, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"alias":         "worker-a",
+			"alias_history": "old-route",
+			"session_name":  "wf__a",
+		},
+	}); err != nil {
+		t.Fatalf("Create session: %v", err)
+	}
+	provider := newMailProvider(store)
+	for _, recipient := range []string{"old-route", "old-route", "old-route"} {
+		if _, err := provider.Inbox(recipient); err != nil {
+			t.Fatalf("Inbox(%q): %v", recipient, err)
+		}
+	}
+	if got := store.sessionListCallCount(); got != 1 {
+		t.Fatalf("broad gc:session List calls = %d, want 1 from cached API mail provider", got)
 	}
 }
 

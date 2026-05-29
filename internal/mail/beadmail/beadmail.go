@@ -45,7 +45,10 @@ func New(store beads.Store) *Provider {
 }
 
 // NewCached returns a beadmail provider backed by the given store with a
-// provider-local session enumeration cache for command-scoped reuse.
+// provider-local session enumeration cache. Command-scoped callers use this to
+// avoid repeated session scans during one command. Long-lived API providers use
+// it to keep steady-state mail reads cheap; they observe session-topology
+// changes when their owning controller rebuilds the provider.
 func NewCached(store beads.Store) *Provider {
 	return &Provider{
 		store:        store,
