@@ -3,6 +3,7 @@ package beadmail
 import (
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -35,6 +36,18 @@ func (s noBroadSessionRouteStore) List(query beads.ListQuery) ([]beads.Bead, err
 	return s.MemStore.List(query)
 }
 
+type messageListProbeStore struct {
+	*beads.MemStore
+	messageQueries []beads.ListQuery
+}
+
+func (s *messageListProbeStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	if query.Type == "message" {
+		s.messageQueries = append(s.messageQueries, query)
+	}
+	return s.MemStore.List(query)
+}
+
 type noCloseAllStore struct {
 	*beads.MemStore
 	t *testing.T
@@ -62,6 +75,138 @@ func TestInboxDoesNotCallBroadList(t *testing.T) {
 	}
 }
 
+func TestMessageCreatedInIssuesTier(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+
+	sent, err := p.Send("human", "mayor", "hello", "body")
+	if err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+
+	items, err := store.List(beads.ListQuery{
+		Type:      "message",
+		TierMode:  beads.TierIssues,
+		AllowScan: true,
+	})
+	if err != nil {
+		t.Fatalf("List issues-tier messages: %v", err)
+	}
+	if len(items) != 1 || items[0].ID != sent.ID {
+		t.Fatalf("issues-tier messages = %#v, want sent message %s", items, sent.ID)
+	}
+}
+
+func TestInboxUsesSingleBothTierMessageScanAcrossRoutes(t *testing.T) {
+	store := &messageListProbeStore{MemStore: beads.NewMemStore()}
+	p := New(store)
+
+	sessionBead, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"alias":         "sky",
+			"alias_history": "mayor,witness",
+			"session_name":  "runtime-sky",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create session: %v", err)
+	}
+	for _, to := range []string{"sky", sessionBead.ID, "mayor", "runtime-sky"} {
+		if _, err := p.Send("human", to, "", "for "+to); err != nil {
+			t.Fatalf("Send(%q): %v", to, err)
+		}
+	}
+	if _, err := p.Send("human", "other", "", "not for sky"); err != nil {
+		t.Fatalf("Send(other): %v", err)
+	}
+
+	msgs, err := p.Inbox("sky")
+	if err != nil {
+		t.Fatalf("Inbox: %v", err)
+	}
+	if len(msgs) != 4 {
+		t.Fatalf("Inbox = %#v, want four routed messages", msgs)
+	}
+	if len(store.messageQueries) != 1 {
+		t.Fatalf("message query count = %d, want 1; queries=%+v", len(store.messageQueries), store.messageQueries)
+	}
+	query := store.messageQueries[0]
+	if query.TierMode != beads.TierBoth || !query.AllowScan || query.Type != "message" || query.Status != "open" || query.Assignee != "" {
+		t.Fatalf("message query = %+v, want one both-tier message scan without per-route assignee", query)
+	}
+}
+
+func TestInboxRecipientsDedupesRoutesAndReadFiltering(t *testing.T) {
+	store := &messageListProbeStore{MemStore: beads.NewMemStore()}
+	p := New(store)
+
+	sessionBead, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"alias":         "sky",
+			"alias_history": "mayor",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create session: %v", err)
+	}
+	msg1, err := p.Send("human", "sky", "", "current alias")
+	if err != nil {
+		t.Fatalf("Send sky: %v", err)
+	}
+	if _, err := p.Send("human", sessionBead.ID, "", "session id"); err != nil {
+		t.Fatalf("Send session ID: %v", err)
+	}
+	readMsg, err := p.Send("human", "mayor", "", "read historical alias")
+	if err != nil {
+		t.Fatalf("Send mayor: %v", err)
+	}
+	if _, err := p.Read(readMsg.ID); err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+
+	msgs, err := p.InboxRecipients([]string{"sky", "mayor", "sky"})
+	if err != nil {
+		t.Fatalf("InboxRecipients: %v", err)
+	}
+	if len(msgs) != 2 {
+		t.Fatalf("InboxRecipients = %#v, want two unread messages", msgs)
+	}
+	if msgs[0].ID != msg1.ID && msgs[1].ID != msg1.ID {
+		t.Fatalf("InboxRecipients = %#v, want current-alias message %s", msgs, msg1.ID)
+	}
+	if len(store.messageQueries) != 1 {
+		t.Fatalf("message query count = %d, want 1; queries=%+v", len(store.messageQueries), store.messageQueries)
+	}
+}
+
+func TestInboxRecipientsEmptyReturnsAllUnreadMessages(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+
+	if _, err := p.Send("human", "mayor", "", "one"); err != nil {
+		t.Fatalf("Send mayor: %v", err)
+	}
+	readMsg, err := p.Send("human", "worker", "", "read")
+	if err != nil {
+		t.Fatalf("Send worker: %v", err)
+	}
+	if _, err := p.Read(readMsg.ID); err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+
+	msgs, err := p.InboxRecipients(nil)
+	if err != nil {
+		t.Fatalf("InboxRecipients(nil): %v", err)
+	}
+	if len(msgs) != 1 || msgs[0].Body != "one" {
+		t.Fatalf("InboxRecipients(nil) = %#v, want one unread message", msgs)
+	}
+}
+
 func TestCheckDoesNotUseMessageLabelSupplement(t *testing.T) {
 	runner := func(_ string, name string, args ...string) ([]byte, error) {
 		cmd := name + " " + strings.Join(args, " ")
@@ -80,7 +225,7 @@ func TestCheckDoesNotUseMessageLabelSupplement(t *testing.T) {
 			}
 			return []byte(`[]`), nil
 		}
-		if strings.Contains(cmd, "--assignee=mayor") && strings.Contains(cmd, "--type=message") && strings.Contains(cmd, "--status=open") {
+		if strings.Contains(cmd, "bd list --json") && strings.Contains(cmd, "--type=message") && strings.Contains(cmd, "--status=open") {
 			return []byte(`[{"id":"msg-1","title":"hello","description":"body","status":"open","issue_type":"message","assignee":"mayor","from":"human","created_at":"2026-01-02T03:04:05Z","labels":["gc:message"]}]`), nil
 		}
 		return nil, errors.New("unexpected command: " + cmd)
@@ -96,9 +241,8 @@ func TestCheckDoesNotUseMessageLabelSupplement(t *testing.T) {
 	}
 }
 
-func TestCheckSupportsSlashRecipientWithWispTier(t *testing.T) {
+func TestCheckUsesBothTiersForSlashRecipient(t *testing.T) {
 	recipient := "gascity/workflows.codex-max"
-	sawWispQuery := false
 	runner := func(_ string, name string, args ...string) ([]byte, error) {
 		cmd := name + " " + strings.Join(args, " ")
 		switch {
@@ -108,17 +252,16 @@ func TestCheckSupportsSlashRecipientWithWispTier(t *testing.T) {
 			return []byte(`[]`), nil
 		case strings.Contains(cmd, "bd list --json") && strings.Contains(cmd, "--type=session"):
 			return []byte(`[]`), nil
-		case strings.Contains(cmd, "bd list --json") && strings.Contains(cmd, "--assignee="+recipient):
-			return []byte(`[]`), nil
+		case strings.Contains(cmd, "bd list --json") && strings.Contains(cmd, "--type=message") && strings.Contains(cmd, "--status=open"):
+			if strings.Contains(cmd, "--assignee=") {
+				t.Fatalf("slash recipient used per-assignee message query: %s", cmd)
+			}
+			return []byte(`[{"id":"msg-1","title":"hello","description":"body","status":"open","issue_type":"message","assignee":"gascity/workflows.codex-max","from":"human","created_at":"2026-01-02T03:04:05Z"}]`), nil
 		case strings.Contains(cmd, "bd query --json"):
-			sawWispQuery = true
-			if strings.Contains(cmd, "assignee="+recipient) {
-				t.Fatalf("slash recipient leaked into bd query: %s", cmd)
+			if strings.Contains(cmd, "assignee=") {
+				t.Fatalf("slash recipient used per-assignee wisp query: %s", cmd)
 			}
-			if !strings.Contains(cmd, "ephemeral=true") || !strings.Contains(cmd, "type=message") {
-				t.Fatalf("unexpected wisp query: %s", cmd)
-			}
-			return []byte(`[{"id":"msg-w","title":"hello","description":"body","status":"open","issue_type":"message","assignee":"gascity/workflows.codex-max","from":"human","created_at":"2026-01-02T03:04:05Z","ephemeral":true}]`), nil
+			return []byte(`[]`), nil
 		}
 		return nil, errors.New("unexpected command: " + cmd)
 	}
@@ -128,19 +271,16 @@ func TestCheckSupportsSlashRecipientWithWispTier(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Check: %v", err)
 	}
-	if !sawWispQuery {
-		t.Fatal("Check did not query wisps tier")
-	}
-	if len(msgs) != 1 || msgs[0].ID != "msg-w" {
-		t.Fatalf("Check = %#v, want msg-w", msgs)
+	if len(msgs) != 1 || msgs[0].ID != "msg-1" {
+		t.Fatalf("Check = %#v, want msg-1", msgs)
 	}
 }
 
-func TestMessageQueriesIncludeWispTier(t *testing.T) {
+func TestMessageQueriesUseBothTiers(t *testing.T) {
 	store := beads.NewMemStore()
 	p := New(store)
 
-	msg, err := store.Create(beads.Bead{
+	wisp, err := store.Create(beads.Bead{
 		Title:       "wisp status",
 		Type:        "message",
 		Assignee:    "mayor",
@@ -152,38 +292,51 @@ func TestMessageQueriesIncludeWispTier(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create ephemeral message: %v", err)
 	}
+	msg, err := p.Send("human", "mayor", "issues", "issues body")
+	if err != nil {
+		t.Fatalf("Send issues-tier message: %v", err)
+	}
 
 	inbox, err := p.Check("mayor")
 	if err != nil {
 		t.Fatalf("Check: %v", err)
 	}
-	if len(inbox) != 1 || inbox[0].ID != msg.ID {
-		t.Fatalf("Check = %#v, want ephemeral message %s", inbox, msg.ID)
+	if len(inbox) != 2 || !messagesContain(inbox, wisp.ID) || !messagesContain(inbox, msg.ID) {
+		t.Fatalf("Check = %#v, want wisp %s and issue %s", inbox, wisp.ID, msg.ID)
 	}
 
 	all, err := p.All("")
 	if err != nil {
 		t.Fatalf("All: %v", err)
 	}
-	if len(all) != 1 || all[0].ID != msg.ID {
-		t.Fatalf("All = %#v, want ephemeral message %s", all, msg.ID)
+	if len(all) != 2 || !messagesContain(all, wisp.ID) || !messagesContain(all, msg.ID) {
+		t.Fatalf("All = %#v, want wisp %s and issue %s", all, wisp.ID, msg.ID)
 	}
 
 	total, unread, err := p.Count("mayor")
 	if err != nil {
 		t.Fatalf("Count: %v", err)
 	}
-	if total != 1 || unread != 1 {
-		t.Fatalf("Count = (%d, %d), want (1, 1)", total, unread)
+	if total != 2 || unread != 2 {
+		t.Fatalf("Count = (%d, %d), want (2, 2)", total, unread)
 	}
 
 	thread, err := p.Thread("t1")
 	if err != nil {
 		t.Fatalf("Thread: %v", err)
 	}
-	if len(thread) != 1 || thread[0].ID != msg.ID {
-		t.Fatalf("Thread = %#v, want ephemeral message %s", thread, msg.ID)
+	if len(thread) != 1 {
+		t.Fatalf("Thread = %#v, want one thread message", thread)
 	}
+}
+
+func messagesContain(messages []mail.Message, id string) bool {
+	for _, msg := range messages {
+		if msg.ID == id {
+			return true
+		}
+	}
+	return false
 }
 
 func TestCountDoesNotCallBroadList(t *testing.T) {
@@ -1886,14 +2039,23 @@ func TestCheck(t *testing.T) {
 // across multiple Inbox calls in a single command invocation.
 type countingSessionListStore struct {
 	*beads.MemStore
+	mu               sync.Mutex
 	sessionListCalls int
 }
 
 func (s *countingSessionListStore) List(query beads.ListQuery) ([]beads.Bead, error) {
 	if query.Label == session.LabelSession && len(query.Metadata) == 0 {
+		s.mu.Lock()
 		s.sessionListCalls++
+		s.mu.Unlock()
 	}
 	return s.MemStore.List(query)
+}
+
+func (s *countingSessionListStore) sessionListCallCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.sessionListCalls
 }
 
 func TestProvider_DefaultProviderSeesNewHistoricalAliasSessionAcrossCalls(t *testing.T) {
@@ -1933,8 +2095,8 @@ func TestProvider_DefaultProviderSeesNewHistoricalAliasSessionAcrossCalls(t *tes
 	if msgs[0].Body != "for old route" {
 		t.Fatalf("Inbox(old-route) body = %q, want %q", msgs[0].Body, "for old route")
 	}
-	if store.sessionListCalls != 2 {
-		t.Errorf("broad gc:session List calls = %d, want 2 (default provider must refetch per call to avoid stale shared state)", store.sessionListCalls)
+	if got := store.sessionListCallCount(); got != 2 {
+		t.Errorf("broad gc:session List calls = %d, want 2 (default provider must refetch per call to avoid stale shared state)", got)
 	}
 }
 
@@ -1979,8 +2141,46 @@ func TestProviderCached_BroadSessionListCachedAcrossInboxCalls(t *testing.T) {
 		}
 	}
 
-	if store.sessionListCalls != 1 {
-		t.Errorf("broad gc:session List calls = %d, want 1 (Provider must cache the enumeration)", store.sessionListCalls)
+	if got := store.sessionListCallCount(); got != 1 {
+		t.Errorf("broad gc:session List calls = %d, want 1 (Provider must cache the enumeration)", got)
+	}
+}
+
+func TestProviderCached_BroadSessionListCacheConcurrentAccess(t *testing.T) {
+	store := &countingSessionListStore{MemStore: beads.NewMemStore()}
+	if _, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"alias":         "worker-a",
+			"alias_history": "old-route",
+			"session_name":  "wf__a",
+		},
+	}); err != nil {
+		t.Fatalf("Create session: %v", err)
+	}
+	p := NewCached(store)
+
+	const workers = 16
+	errs := make(chan error, workers)
+	var wg sync.WaitGroup
+	wg.Add(workers)
+	for i := 0; i < workers; i++ {
+		go func() {
+			defer wg.Done()
+			_, err := p.Inbox("old-route")
+			errs <- err
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("Inbox(old-route): %v", err)
+		}
+	}
+	if got := store.sessionListCallCount(); got != 1 {
+		t.Errorf("broad gc:session List calls = %d, want 1 under concurrent access", got)
 	}
 }
 

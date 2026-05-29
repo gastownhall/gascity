@@ -11,6 +11,8 @@ import (
 )
 
 const (
+	// detachedProbeMetadataKey is a work-bead metadata contract documented in
+	// engdocs/architecture/health-patrol.md. Values use tmux:<socket>:<session>.
 	detachedProbeMetadataKey    = "gc.detached"
 	detachedProbeDefaultTimeout = time.Second
 	detachedProbeErrorThreshold = 3
