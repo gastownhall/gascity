@@ -1598,6 +1598,26 @@ func (c ChatSessionsConfig) IdleTimeoutDuration() time.Duration {
 	return d
 }
 
+// LocalDoctorCheck is a city-local doctor check declared inline in city.toml
+// via [[doctor.check]]. Scripts use the same exit-code protocol as pack
+// doctor scripts: 0=OK, 1=Warning, 2+=Error.
+type LocalDoctorCheck struct {
+	// Name is the bare check name. The SDK injects the "local:" prefix;
+	// do not include it here.
+	Name string `toml:"name"`
+
+	// Script is the path to the check script, relative to the city root.
+	// Execution registration enforces containment within the city directory.
+	Script string `toml:"script"`
+
+	// Description is optional human-readable text shown in verbose output.
+	Description string `toml:"description,omitempty"`
+
+	// Fix is the optional path to a remediation script, relative to the
+	// city root.
+	Fix string `toml:"fix,omitempty"`
+}
+
 // DoctorConfig holds settings for the gc doctor surface. Operator-tunable
 // thresholds and policy toggles live here; mechanical structural checks
 // (broken-worktree pointers, missing files) remain hardcoded since they
@@ -1623,6 +1643,10 @@ type DoctorConfig struct {
 	// enforced by mechanical checks (no uncommitted changes, no
 	// unpushed commits, no stashes) — never by role identity.
 	NestedWorktreePrune bool `toml:"nested_worktree_prune,omitempty" jsonschema:"default=false"`
+
+	// Checks holds city-local inline doctor checks declared via
+	// [[doctor.check]] in city.toml.
+	Checks []LocalDoctorCheck `toml:"check,omitempty"`
 }
 
 const (

@@ -123,7 +123,15 @@ func computePoolDesiredStates(
 		// Resume tier: actionable assigned work beads whose assignee resolves
 		// to a non-closed session bead. These sessions must stay alive.
 		for _, wb := range assignedWorkBeads {
-			routedTo := wb.Metadata["gc.routed_to"]
+			// Prefer gc.run_target (per-step target stamped by the cooker
+			// from formula step metadata) over gc.routed_to (convoy entry
+			// agent), mirroring the precedence in dispatch/fanout.go and
+			// dispatch/control.go. Falls back to gc.routed_to for beads
+			// authored before the gc.run_target migration (commit adaf6ec).
+			routedTo := strings.TrimSpace(wb.Metadata["gc.run_target"])
+			if routedTo == "" {
+				routedTo = strings.TrimSpace(wb.Metadata["gc.routed_to"])
+			}
 			if wb.Status != "in_progress" && wb.Status != "open" {
 				continue
 			}

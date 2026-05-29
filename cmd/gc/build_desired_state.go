@@ -460,7 +460,7 @@ func buildDesiredStateWithSessionBeads(
 		if len(assignedWorkBeads) > 0 {
 			fmt.Fprintf(stderr, "assignedWorkBeads: %d beads found\n", len(assignedWorkBeads)) //nolint:errcheck
 			for _, wb := range assignedWorkBeads {
-				fmt.Fprintf(stderr, "  %s assignee=%s routed=%s status=%s\n", wb.ID, wb.Assignee, wb.Metadata["gc.routed_to"], wb.Status) //nolint:errcheck
+				fmt.Fprintf(stderr, "  %s assignee=%s routed=%s run_target=%s status=%s\n", wb.ID, wb.Assignee, wb.Metadata["gc.routed_to"], wb.Metadata["gc.run_target"], wb.Status) //nolint:errcheck
 			}
 		} else {
 			fmt.Fprintf(stderr, "assignedWorkBeads: 0 beads (rigStores=%d)\n", len(rigStores)) //nolint:errcheck
@@ -1032,7 +1032,12 @@ func defaultScaleCheckCounts(targets []defaultScaleCheckTarget) (map[string]int,
 			if strings.TrimSpace(b.Assignee) != "" {
 				continue
 			}
-			template := strings.TrimSpace(b.Metadata["gc.routed_to"])
+			// gc.run_target (per-step) takes precedence over gc.routed_to
+			// (convoy-wide default). See dispatch/fanout.go and adaf6ec.
+			template := strings.TrimSpace(b.Metadata["gc.run_target"])
+			if template == "" {
+				template = strings.TrimSpace(b.Metadata["gc.routed_to"])
+			}
 			if _, ok := group.templates[template]; !ok {
 				continue
 			}
@@ -1176,7 +1181,15 @@ func defaultNamedSessionDemand(targets []defaultScaleCheckTarget, cfg *config.Ci
 			if strings.TrimSpace(b.Assignee) != "" {
 				continue
 			}
-			routedTo := strings.TrimSpace(b.Metadata["gc.routed_to"])
+			// gc.run_target (per-step) takes precedence over gc.routed_to
+			// (convoy-wide default). Without this, every child of a
+			// tellus-dev convoy looks routed to the convoy entry agent
+			// and named-singleton demand (architect/product-owner/...)
+			// is never computed. See dispatch/fanout.go and adaf6ec.
+			routedTo := strings.TrimSpace(b.Metadata["gc.run_target"])
+			if routedTo == "" {
+				routedTo = strings.TrimSpace(b.Metadata["gc.routed_to"])
+			}
 			if routedTo == "" {
 				continue
 			}

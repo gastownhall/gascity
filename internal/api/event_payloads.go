@@ -317,7 +317,7 @@ type WorkerOperationEventPayload struct {
 	// best-effort. See the consumer contract on the type doc above.
 
 	// Model is the LLM model identifier observed in this operation
-	// (e.g. "claude-opus-4-7"). Sourced from session metadata.
+	// (e.g. "claude-opus-4-8"). Sourced from session metadata.
 	//
 	// Wired: TODO — follow-up will tail sessionlog at finish() to
 	// extract msg.Model.

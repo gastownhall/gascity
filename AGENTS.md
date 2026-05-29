@@ -86,16 +86,16 @@ mechanism is provably composable from the primitives.
 
 Capabilities activate progressively via config presence.
 
-| Level | Adds                    |
-| ----- | ----------------------- |
-| 0-1   | Session + tasks         |
-| 2     | Task loop               |
-| 3     | Multiple agents + pool  |
-| 4     | Messaging               |
-| 5     | Formulas & molecules    |
-| 6     | Health monitoring       |
-| 7     | Orders                  |
-| 8     | Full orchestration      |
+| Level | Adds                   |
+| ----- | ---------------------- |
+| 0-1   | Session + tasks        |
+| 2     | Task loop              |
+| 3     | Multiple agents + pool |
+| 4     | Messaging              |
+| 5     | Formulas & molecules   |
+| 6     | Health monitoring      |
+| 7     | Orders                 |
+| 8     | Full orchestration     |
 
 ## Architecture docs
 
@@ -342,10 +342,12 @@ bd close <id>         # Complete work
 4. **PUSH TO REMOTE** - This is MANDATORY:
    ```bash
    git pull --rebase
-   bd dolt push
    git push
    git status  # MUST show "up to date with origin"
    ```
+   NOTE: gascity Dolt is LOCAL-ONLY (no remote). Do NOT run `bd dolt push`,
+   `bd dolt pull`, or `bd dolt remote add` here -- they fail and re-introduce
+   a doomed `origin` remote (ga-9wsri). Use `git push` only.
 5. **Clean up** - Clear stashes, prune remote branches
 6. **Verify** - All changes committed AND pushed
 7. **Hand off** - Provide context for next session
@@ -398,8 +400,8 @@ These apply to all code in this project — frontend and server:
   requirements only.
 - **Layered Architecture** - organize code into clear tiers where each layer
   depends only on the one(s) below it, keeping logic cleanly separated.
-- **Use Non-Nullable Variables** when possible; use nullability only when
-  there is NO other possiblity.
+- **Use Non-Nullable Variables** when possible; use nullability only when there
+  is NO other possibility.
 - **Use Async Notifications** when possible over inefficient polling.
 - **Eliminate Race Conditions** that might cause dropped or corrupted data
 - **Write for Maintainability** so that the code is clear and readable and easy
@@ -417,3 +419,5 @@ These apply to all code in this project — frontend and server:
   static checking (linting, compilers, etc) is that they surface issues at
   build-time so that they can be fixed now instead of lead to errors at runtime.
   Take advantage of that feedback to fix those errors!
+- **Use Centralized Semantic Constant Values** using enums and constants instead
+  of spreading magic numbers throughout the code.
