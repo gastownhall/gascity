@@ -729,7 +729,8 @@
           "items": {
             "$ref": "#/$defs/Agent"
           },
-          "type": "array"
+          "type": "array",
+          "description": "Agents holds legacy inline agent templates accepted by the current\nloader. New PackV2 packs should define agents under\nagents/\u003cname\u003e/agent.toml instead."
         },
         "named_session": {
           "items": {
@@ -1264,5 +1265,5 @@
     }
   },
   "title": "Gas City Pack Manifest",
-  "description": "Schema for pack.toml — the PackV2 manifest that declares a pack's metadata, agents, providers, services, commands, and import surface. Cities and rigs compose packs via [imports.*]."
+  "description": "Schema for pack.toml — the PackV2 manifest that declares a pack's metadata, providers, services, commands, and import surface. PackV2 agent authoring uses agents/\u003cname\u003e/agent.toml; inline [[agent]] tables remain schema-visible for migration compatibility. Cities and rigs compose packs via [imports.*]."
 }

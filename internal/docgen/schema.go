@@ -89,7 +89,9 @@ func GeneratePackSchema() (*jsonschema.Schema, error) {
 	s := r.Reflect(&config.PackConfig{})
 	s.Title = "Gas City Pack Manifest"
 	s.Description = "Schema for pack.toml — the PackV2 manifest that declares " +
-		"a pack's metadata, agents, providers, services, commands, and import surface. " +
-		"Cities and rigs compose packs via [imports.*]."
+		"a pack's metadata, providers, services, commands, and import surface. " +
+		"PackV2 agent authoring uses agents/<name>/agent.toml; inline [[agent]] " +
+		"tables remain schema-visible for migration compatibility. Cities and rigs " +
+		"compose packs via [imports.*]."
 	return s, nil
 }
