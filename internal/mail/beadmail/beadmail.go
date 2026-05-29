@@ -801,6 +801,7 @@ func (p *Provider) messageCandidatesAll(routes []string) ([]beads.Bead, error) {
 		Status:    "open",
 		TierMode:  beads.TierBoth,
 		AllowScan: true,
+		Live:      true,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("scanning message beads: %w", err)

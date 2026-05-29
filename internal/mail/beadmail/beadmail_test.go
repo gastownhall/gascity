@@ -139,6 +139,35 @@ func TestInboxUsesSingleBothTierMessageScanAcrossRoutes(t *testing.T) {
 	if query.TierMode != beads.TierBoth || !query.AllowScan || query.Type != "message" || query.Status != "open" || query.Assignee != "" {
 		t.Fatalf("message query = %+v, want one both-tier message scan without per-route assignee", query)
 	}
+	if !query.Live {
+		t.Fatalf("message query = %+v, want live read for command-visible mail freshness", query)
+	}
+}
+
+func TestInboxBypassesPrimedCacheForFreshMessages(t *testing.T) {
+	backing := beads.NewMemStore()
+	cache := beads.NewCachingStoreForTest(backing, nil)
+	if err := cache.PrimeActive(); err != nil {
+		t.Fatalf("PrimeActive: %v", err)
+	}
+
+	if _, err := backing.Create(beads.Bead{
+		Type:        "message",
+		Assignee:    "mayor",
+		From:        "human",
+		Title:       "fresh",
+		Description: "created after cache prime",
+	}); err != nil {
+		t.Fatalf("Create message in backing store: %v", err)
+	}
+
+	msgs, err := New(cache).Inbox("mayor")
+	if err != nil {
+		t.Fatalf("Inbox: %v", err)
+	}
+	if len(msgs) != 1 || msgs[0].Subject != "fresh" {
+		t.Fatalf("Inbox = %#v, want fresh message from backing store", msgs)
+	}
 }
 
 func TestInboxRecipientsDedupesRoutesAndReadFiltering(t *testing.T) {
