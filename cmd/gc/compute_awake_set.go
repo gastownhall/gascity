@@ -491,10 +491,13 @@ func findBeadBySessionName(beads []AwakeSessionBead, name string) *AwakeSessionB
 // template that may participate in the min_active_sessions guarantee. Named
 // and manual sessions are excluded (they carry their own keep-awake rules),
 // as are drained and closed beads (not live, not revivable here).
+// Dependency-only beads are excluded too: they wake exclusively via the
+// dependency gate, so they neither count toward the min nor are eligible for
+// min-active revival — matching collectActiveBeads.
 func isMinActivePoolBead(b AwakeSessionBead, template string) bool {
 	return b.Template == template &&
 		b.NamedIdentity == "" && !b.ConfiguredNamedSession &&
-		!b.ManualSession && !b.Drained && b.State != "closed"
+		!b.ManualSession && !b.Drained && !b.DependencyOnly && b.State != "closed"
 }
 
 // countMinActiveCovered counts pool session beads for template that already
@@ -514,7 +517,14 @@ func countMinActiveCovered(beads []AwakeSessionBead, desired map[string]string, 
 			}
 			continue
 		}
-		n++
+		// Only live beads (active/creating) count as covering the guarantee.
+		// Transitional or non-runnable states (suspended, draining,
+		// quarantined, failed-create, stopped, ...) do not — counting them
+		// would mask a real deficit and leave the pool cold when there are
+		// zero live sessions.
+		if b.State == "active" || b.State == "creating" {
+			n++
+		}
 	}
 	return n
 }

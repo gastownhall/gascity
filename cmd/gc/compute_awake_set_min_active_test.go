@@ -184,3 +184,70 @@ func TestMinActive_HeldBeadNotWoken(t *testing.T) {
 	})
 	assertAsleep(t, result, "rig--pl")
 }
+
+// TestMinActive_DependencyOnlyDoesNotCount verifies a dependency-only session
+// does not satisfy the min_active_sessions guarantee even while live: it is
+// excluded from the min-active pool (it wakes only via dependency gating), so
+// a coexisting asleep city-stop pool bead must still be revived to cover the
+// min. Without excluding dependency-only beads from the coverage count, the
+// live dependency-only bead would mask the deficit and leave the pool cold.
+func TestMinActive_DependencyOnlyDoesNotCount(t *testing.T) {
+	result := ComputeAwakeSet(AwakeInput{
+		Agents: []AwakeAgent{{QualifiedName: "rig/pl", MinActiveSessions: 1}},
+		SessionBeads: []AwakeSessionBead{
+			{ID: "s-dep", SessionName: "rig--pl-dep", Template: "rig/pl", State: "active", DependencyOnly: true},
+			{ID: "s-cold", SessionName: "rig--pl-pool", Template: "rig/pl", State: "asleep", SleepReason: "city-stop"},
+		},
+		Now: now,
+	})
+	assertAwake(t, result, "rig--pl-pool")
+	assertReason(t, result, "rig--pl-pool", "min-active")
+}
+
+// TestMinActive_DependencyOnlyNotRevived verifies the min-active pass never
+// revives a dependency-only bead: when the only city-stop pool candidate is
+// dependency-only, the deficit cannot be filled by it (dependency-only
+// sessions wake exclusively via dependency gating).
+func TestMinActive_DependencyOnlyNotRevived(t *testing.T) {
+	result := ComputeAwakeSet(AwakeInput{
+		Agents: []AwakeAgent{{QualifiedName: "rig/pl", MinActiveSessions: 1}},
+		SessionBeads: []AwakeSessionBead{{
+			ID: "s-1", SessionName: "rig--pl", Template: "rig/pl",
+			State: "asleep", SleepReason: "city-stop", DependencyOnly: true,
+		}},
+		Now: now,
+	})
+	assertAsleep(t, result, "rig--pl")
+}
+
+// TestMinActive_SuspendedDoesNotCount verifies that a non-live, non-asleep
+// state (here: suspended) does NOT satisfy the min_active_sessions guarantee.
+// Only active/creating beads count as covered; a suspended sibling must not
+// mask the deficit, so the asleep city-stop pool bead is still revived.
+func TestMinActive_SuspendedDoesNotCount(t *testing.T) {
+	result := ComputeAwakeSet(AwakeInput{
+		Agents: []AwakeAgent{{QualifiedName: "rig/pl", MinActiveSessions: 1}},
+		SessionBeads: []AwakeSessionBead{
+			{ID: "s-susp", SessionName: "rig--pl-susp", Template: "rig/pl", State: "suspended"},
+			{ID: "s-cold", SessionName: "rig--pl-pool", Template: "rig/pl", State: "asleep", SleepReason: "city-stop"},
+		},
+		Now: now,
+	})
+	assertAwake(t, result, "rig--pl-pool")
+	assertReason(t, result, "rig--pl-pool", "min-active")
+}
+
+// TestMinActive_CreatingCounts verifies a creating bead counts as live toward
+// the min (a session mid-spawn is on its way to active), so a coexisting
+// asleep city-stop bead is not additionally woken.
+func TestMinActive_CreatingCounts(t *testing.T) {
+	result := ComputeAwakeSet(AwakeInput{
+		Agents: []AwakeAgent{{QualifiedName: "rig/pl", MinActiveSessions: 1}},
+		SessionBeads: []AwakeSessionBead{
+			{ID: "s-new", SessionName: "rig--pl-1", Template: "rig/pl", State: "creating"},
+			{ID: "s-cold", SessionName: "rig--pl-2", Template: "rig/pl", State: "asleep", SleepReason: "city-stop"},
+		},
+		Now: now,
+	})
+	assertAsleep(t, result, "rig--pl-2")
+}
