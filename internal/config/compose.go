@@ -1094,6 +1094,16 @@ func deepMergeProvider(base, frag ProviderSpec, name string, fragMeta toml.MetaD
 			func() { result.ReadyPromptPrefix = frag.ReadyPromptPrefix },
 		},
 		{
+			"continuation_integrity",
+			func() bool { return base.ContinuationIntegrity != "" },
+			func() { result.ContinuationIntegrity = frag.ContinuationIntegrity },
+		},
+		{
+			"private_history_policy",
+			func() bool { return base.PrivateHistoryPolicy != "" },
+			func() { result.PrivateHistoryPolicy = frag.PrivateHistoryPolicy },
+		},
+		{
 			"emits_permission_warning",
 			func() bool { return base.EmitsPermissionWarning != nil },
 			func() { result.EmitsPermissionWarning = frag.EmitsPermissionWarning },
@@ -1130,6 +1140,13 @@ func deepMergeProvider(base, frag ProviderSpec, name string, fragMeta toml.MetaD
 		}
 		result.ProcessNames = make([]string, len(frag.ProcessNames))
 		copy(result.ProcessNames, frag.ProcessNames)
+	}
+	if fragMeta.IsDefined("providers", name, "fatal_resume_errors") {
+		if len(base.FatalResumeErrors) > 0 {
+			prov.Warnings = append(prov.Warnings,
+				fmt.Sprintf("provider %q.fatal_resume_errors redefined by %q", name, fragPath))
+		}
+		result.FatalResumeErrors = append([]ProviderFatalResumeError(nil), frag.FatalResumeErrors...)
 	}
 
 	// Env merges additively (individual keys override).

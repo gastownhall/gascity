@@ -143,7 +143,7 @@ func (c *SessionReconcilerTraceCycle) recordOperation(siteCode, template, sessio
 	c.RecordOperation(normSite, normReason, normOutcome, "", template, sessionName, duration, fields)
 }
 
-func (c *SessionReconcilerTraceCycle) recordMutation(siteCode, template, _ string, targetKind, targetID, writeMethod string, before, after any, outcome string, data traceRecordPayload, _ string) {
+func (c *SessionReconcilerTraceCycle) recordMutation(siteCode, template, _ string, targetKind, targetID, writeMethod string, after any, outcome string, data traceRecordPayload, _ string) {
 	if c == nil {
 		return
 	}
@@ -152,7 +152,7 @@ func (c *SessionReconcilerTraceCycle) recordMutation(siteCode, template, _ strin
 		fields[k] = v
 	}
 	fields["template"] = template
-	fields["before"] = before
+	fields["before"] = ""
 	fields["after"] = after
 	fields["field"] = writeMethod
 	normSite, rawSite := normalizeTraceSiteCode(siteCode)

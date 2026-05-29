@@ -531,6 +531,9 @@ ProviderPatch modifies an existing provider identified by Name.
 | `prompt_mode` | string |  |  | PromptMode overrides prompt delivery mode. Enum: `arg`, `flag`, `none` |
 | `prompt_flag` | string |  |  | PromptFlag overrides the prompt flag. |
 | `ready_delay_ms` | integer |  |  | ReadyDelayMs overrides the ready delay in milliseconds. |
+| `continuation_integrity` | string |  |  | ContinuationIntegrity overrides the provider continuation reuse policy. Enum: `any_stop`, `boundary_or_fresh`, `fresh_only` |
+| `private_history_policy` | string |  |  | PrivateHistoryPolicy overrides opaque provider-private transcript handling. Enum: `preserve_exact`, `omit_when_allowed`, `fresh_required` |
+| `fatal_resume_errors` | []string |  |  | FatalResumeErrors replaces the fatal resume error classifier list. |
 | `accept_startup_dialogs` | boolean |  |  | AcceptStartupDialogs overrides startup dialog acceptance behavior. |
 | `env` | map[string]string |  |  | Env adds or overrides environment variables. |
 | `env_remove` | []string |  |  | EnvRemove lists env var keys to remove. |
@@ -564,6 +567,9 @@ ProviderSpec defines a named provider's startup parameters.
 | `resume_style` | string |  |  | ResumeStyle controls how ResumeFlag is applied:   "flag"       → command --resume &lt;key&gt;              (default)   "subcommand" → command resume &lt;key&gt; |
 | `resume_command` | string |  |  | ResumeCommand is the full shell command to run when resuming a session. Supports only the &#123;&#123;.SessionKey&#125;&#125; template variable. When set, takes precedence over ResumeFlag/ResumeStyle. When schema-managed defaults are inserted, the resolver tokenizes and re-emits the command; for subcommand-style resume it inserts after the ResumeFlag token that precedes &#123;&#123;.SessionKey&#125;&#125;. Example:   "claude --resume &#123;&#123;.SessionKey&#125;&#125; --dangerously-skip-permissions" Schema-managed defaults missing from a subcommand-style resume command are inserted before &#123;&#123;.SessionKey&#125;&#125; during provider resolution. |
 | `session_id_flag` | string |  |  | SessionIDFlag is the CLI flag for creating a session with a specific ID. Enables the Generate & Pass strategy for session key management. Example: "--session-id" (claude) |
+| `continuation_integrity` | string |  | `any_stop` | ContinuationIntegrity controls when GasCity may resume a provider-owned continuation handle after stopping the runtime. Enum: `any_stop`, `boundary_or_fresh`, `fresh_only` |
+| `private_history_policy` | string |  | `preserve_exact` | PrivateHistoryPolicy controls handling for opaque provider-private transcript blocks such as signed thinking payloads. Enum: `preserve_exact`, `omit_when_allowed`, `fresh_required` |
+| `fatal_resume_errors` | []string |  |  | FatalResumeErrors lists provider-specific output signatures that require a fresh continuation on the next wake. |
 | `permission_modes` | map[string]string |  |  | PermissionModes maps permission mode names to CLI flags. Example: &#123;"unrestricted": "--dangerously-skip-permissions", "plan": "--permission-mode plan"&#125; This is a config-only lookup table consumed by external clients (e.g., real-world app) to populate permission mode dropdowns. Launch-time flag substitution is planned for a follow-up PR — currently no runtime code reads this field. |
 | `option_defaults` | map[string]string |  |  | OptionDefaults overrides the Default value in OptionsSchema entries without redefining the schema itself. Keys are option keys (e.g., "permission_mode"), values are choice values (e.g., "unrestricted"). city.toml users set this to customize provider behavior without touching Args or OptionsSchema. |
 | `options_schema` | []ProviderOption |  |  | OptionsSchema declares the configurable options this provider supports. Each option maps to CLI args via its Choices[].FlagArgs field. Serialized via a dedicated DTO (not directly to JSON) so FlagArgs stays server-side. |

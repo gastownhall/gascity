@@ -1648,7 +1648,7 @@ func commitStartResultTraced(
 		clearPendingStartInFlightLease(session, store, stderr)
 		fmt.Fprintf(stderr, "session reconciler: storing hashes for %s: %v\n", name, err) //nolint:errcheck
 		if trace != nil {
-			trace.recordMutation("bead_metadata", tp.TemplateName, name, "metadata_batch", session.ID, "started_config_hash", "", result.prepared.coreHash, "failed", traceRecordPayload{
+			trace.recordMutation("bead_metadata", tp.TemplateName, name, "metadata_batch", session.ID, "started_config_hash", result.prepared.coreHash, "failed", traceRecordPayload{
 				"wave":  wave,
 				"error": err.Error(),
 			}, "")
@@ -1667,7 +1667,7 @@ func commitStartResultTraced(
 		session.Metadata[key] = value
 	}
 	if trace != nil {
-		trace.recordMutation("bead_metadata", tp.TemplateName, name, "metadata_batch", session.ID, "started_config_hash", "", result.prepared.coreHash, "success", traceRecordPayload{
+		trace.recordMutation("bead_metadata", tp.TemplateName, name, "metadata_batch", session.ID, "started_config_hash", result.prepared.coreHash, "success", traceRecordPayload{
 			"wave": wave,
 		}, "")
 	}
@@ -2490,7 +2490,33 @@ func stopTargetThroughWorkerBoundary(target stopTarget, store beads.Store, sp ru
 		markCityStopSessionAsAsleep(store, target.sessionID, nil)
 		return nil
 	}
+	if !stopTargetHasVerifiedBoundary(store, target) {
+		markStopTargetContinuation(store, target, "stop", sessionpkg.StopBoundaryForce)
+	}
 	return workerStopSessionTargetWithConfig("", store, sp, cfg, targetID)
+}
+
+func markStopTargetContinuation(store beads.Store, target stopTarget, reason string, boundary sessionpkg.StopBoundary) {
+	if store == nil || strings.TrimSpace(target.sessionID) == "" {
+		return
+	}
+	session, err := store.Get(target.sessionID)
+	if err != nil {
+		return
+	}
+	stop := stopContinuationInputForSession(session, nil, reason, boundary)
+	_ = setStopContinuationMetadata(store, &session, time.Now().UTC(), stop)
+}
+
+func stopTargetHasVerifiedBoundary(store beads.Store, target stopTarget) bool {
+	if store == nil || strings.TrimSpace(target.sessionID) == "" {
+		return false
+	}
+	session, err := store.Get(target.sessionID)
+	if err != nil {
+		return false
+	}
+	return sessionpkg.StopBoundaryVerified(sessionpkg.StopBoundary(strings.TrimSpace(session.Metadata["last_stop_boundary"])))
 }
 
 func cityStopSessionMarked(store beads.Store, sessionID string) bool {
@@ -2540,10 +2566,15 @@ func interruptTargetsBoundedWithForceSignal(targets []stopTarget, cfg *config.Ci
 	// them forever. Stop them immediately instead of interrupting —
 	// no metadata to go stale if shutdown is aborted.
 	poolManaged := make([]stopTarget, 0, len(targets))
+	boundaryRequired := make([]stopTarget, 0, len(targets))
 	interruptable := make([]stopTarget, 0, len(targets))
 	for _, t := range targets {
 		if t.poolManaged {
 			poolManaged = append(poolManaged, t)
+			continue
+		}
+		if stopTargetRequiresCleanBoundary(store, t) {
+			boundaryRequired = append(boundaryRequired, t)
 			continue
 		}
 		interruptable = append(interruptable, t)
@@ -2562,6 +2593,31 @@ func interruptTargetsBoundedWithForceSignal(targets []stopTarget, cfg *config.Ci
 			logLifecycleOutcome(stderr, "interrupt", 0, result.target.name, result.target.template, outcome, result.started, result.finished, result.err)
 		}
 		logLifecycleWave(stderr, "interrupt", 0, waveStarted, len(poolManaged))
+	}
+
+	if len(boundaryRequired) > 0 {
+		waveStarted := time.Now()
+		results := executeTargetWaveUntil(boundaryRequired, min(len(boundaryRequired), defaultMaxParallelStopsPerWave), stopPerTargetTimeoutDefault, shouldStop, func(target stopTarget) error {
+			if stopForceRequested(shouldStop) {
+				markStopTargetContinuation(store, target, "force-stop", sessionpkg.StopBoundaryForce)
+				return stopTargetThroughWorkerBoundary(target, store, sp, cfg)
+			}
+			boundary := waitForStopBoundary(context.Background(), sp, target.name, idleSleepProbeTimeout)
+			reason := "stop"
+			if !sessionpkg.StopBoundaryVerified(boundary) {
+				reason = "interrupt"
+			}
+			markStopTargetContinuation(store, target, reason, boundary)
+			return stopTargetThroughWorkerBoundary(target, store, sp, cfg)
+		})
+		for _, result := range results {
+			outcome := result.outcome
+			if result.err == nil && outcome == "success" {
+				outcome = "stopped_boundary_required"
+			}
+			logLifecycleOutcome(stderr, "interrupt", 0, result.target.name, result.target.template, outcome, result.started, result.finished, result.err)
+		}
+		logLifecycleWave(stderr, "interrupt", 0, waveStarted, len(boundaryRequired))
 	}
 
 	sent := 0
@@ -2584,6 +2640,17 @@ func interruptTargetsBoundedWithForceSignal(targets []stopTarget, cfg *config.Ci
 	}
 	logLifecycleWave(stderr, "interrupt", 0, waveStarted, len(interruptable))
 	return sent
+}
+
+func stopTargetRequiresCleanBoundary(store beads.Store, target stopTarget) bool {
+	if store == nil || strings.TrimSpace(target.sessionID) == "" {
+		return false
+	}
+	session, err := store.Get(target.sessionID)
+	if err != nil {
+		return false
+	}
+	return providerContinuationIntegrityForSession(session, nil) != sessionpkg.ContinuationIntegrityAnyStop
 }
 
 func interruptSessionsBounded(names []string, cfg *config.City, store beads.Store, sp runtime.Provider, stderr io.Writer) int {

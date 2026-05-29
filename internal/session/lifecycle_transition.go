@@ -2,6 +2,7 @@ package session
 
 import (
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -11,6 +12,53 @@ var freshWakeConversationResetKeys = []string{
 	"started_live_hash",
 	"live_hash",
 	startupDialogVerifiedKey,
+}
+
+// Provider runtime metadata keys record the substrate identity that created the
+// currently running session.
+const (
+	ProviderContinuationIntegrityMetadataKey = "provider_continuation_integrity"
+	ProviderPrivateHistoryPolicyMetadataKey  = "provider_private_history_policy"
+	ProviderFatalResumeErrorsMetadataKey     = "provider_fatal_resume_errors"
+)
+
+// StopBoundary records the evidence available at a provider stop point.
+type StopBoundary string
+
+const (
+	// StopBoundaryAgentAck means the agent explicitly acknowledged drain completion.
+	StopBoundaryAgentAck StopBoundary = "agent_ack"
+	// StopBoundaryIdleVerified means the runtime proved the provider was idle.
+	StopBoundaryIdleVerified StopBoundary = "idle_verified"
+	// StopBoundaryTimeout means the stop exceeded its bounded wait.
+	StopBoundaryTimeout StopBoundary = "timeout"
+	// StopBoundaryInterrupt means the provider received an interrupt without verified idle.
+	StopBoundaryInterrupt StopBoundary = "interrupt"
+	// StopBoundaryForce means the provider was force-stopped.
+	StopBoundaryForce StopBoundary = "force"
+	// StopBoundaryRuntimeMissing means the expected runtime disappeared.
+	StopBoundaryRuntimeMissing StopBoundary = "runtime_missing"
+	// StopBoundaryUnknown means no clean boundary proof was available.
+	StopBoundaryUnknown StopBoundary = "unknown"
+)
+
+const (
+	// ContinuationIntegrityAnyStop allows continuation reuse after any stop.
+	ContinuationIntegrityAnyStop = "any_stop"
+	// ContinuationIntegrityBoundaryOrFresh requires a verified clean boundary or fresh continuation.
+	ContinuationIntegrityBoundaryOrFresh = "boundary_or_fresh"
+	// ContinuationIntegrityFreshOnly always starts a fresh continuation after stop.
+	ContinuationIntegrityFreshOnly = "fresh_only"
+)
+
+// StopContinuationInput describes the provider policy and stop evidence for one stop.
+type StopContinuationInput struct {
+	Provider    string
+	Integrity   string
+	Reason      string
+	Boundary    StopBoundary
+	VerifiedAt  time.Time
+	ResetReason string
 }
 
 // MetadataPatch is an atomic set of metadata key updates for one lifecycle
@@ -46,6 +94,97 @@ func applyFreshWakeConversationReset(patch MetadataPatch) {
 	patch["started_live_hash"] = ""
 	patch["live_hash"] = ""
 	patch[startupDialogVerifiedKey] = ""
+}
+
+// NormalizeStopContinuationIntegrity returns the default continuation policy for empty values.
+func NormalizeStopContinuationIntegrity(integrity string) string {
+	switch strings.TrimSpace(integrity) {
+	case ContinuationIntegrityBoundaryOrFresh:
+		return ContinuationIntegrityBoundaryOrFresh
+	case ContinuationIntegrityFreshOnly:
+		return ContinuationIntegrityFreshOnly
+	default:
+		return ContinuationIntegrityAnyStop
+	}
+}
+
+// StopBoundaryVerified reports whether boundary proves a clean provider stop.
+func StopBoundaryVerified(boundary StopBoundary) bool {
+	switch boundary {
+	case StopBoundaryAgentAck, StopBoundaryIdleVerified:
+		return true
+	default:
+		return false
+	}
+}
+
+// StopContinuationPatch records stop evidence and marks fresh continuation when policy requires it.
+func StopContinuationPatch(now time.Time, in StopContinuationInput) MetadataPatch {
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	now = now.UTC()
+	boundary := in.Boundary
+	if boundary == "" {
+		boundary = StopBoundaryUnknown
+	}
+	reason := strings.TrimSpace(in.Reason)
+	if reason == "" {
+		reason = "unknown"
+	}
+	patch := MetadataPatch{
+		"last_stop_reason":            reason,
+		"last_stop_boundary":          string(boundary),
+		"last_stop_boundary_provider": strings.TrimSpace(in.Provider),
+	}
+	if StopBoundaryVerified(boundary) {
+		verifiedAt := in.VerifiedAt
+		if verifiedAt.IsZero() {
+			verifiedAt = now
+		}
+		patch["last_stop_boundary_verified_at"] = verifiedAt.UTC().Format(time.RFC3339)
+	} else {
+		patch["last_stop_boundary_verified_at"] = ""
+	}
+	if stopRequiresFreshContinuation(NormalizeStopContinuationIntegrity(in.Integrity), boundary) {
+		patch["continuation_reset_pending"] = "true"
+		patch["continuation_reset_reason"] = stopContinuationResetReason(in, boundary)
+	}
+	return patch
+}
+
+func stopRequiresFreshContinuation(integrity string, boundary StopBoundary) bool {
+	switch integrity {
+	case ContinuationIntegrityFreshOnly:
+		return true
+	case ContinuationIntegrityBoundaryOrFresh:
+		return !StopBoundaryVerified(boundary)
+	default:
+		return false
+	}
+}
+
+func stopContinuationResetReason(in StopContinuationInput, boundary StopBoundary) string {
+	if reason := strings.TrimSpace(in.ResetReason); reason != "" {
+		return reason
+	}
+	if NormalizeStopContinuationIntegrity(in.Integrity) == ContinuationIntegrityFreshOnly {
+		return "provider-fresh-only"
+	}
+	switch boundary {
+	case StopBoundaryTimeout:
+		return "stop-timeout"
+	case StopBoundaryInterrupt:
+		return "interrupted-stop"
+	case StopBoundaryForce:
+		return "force-stop"
+	case StopBoundaryRuntimeMissing:
+		return "runtime-missing"
+	case StopBoundaryUnknown:
+		return "unknown-stop"
+	default:
+		return "unsafe-stop"
+	}
 }
 
 func pendingCreateStartedAt(now time.Time) string {
@@ -312,6 +451,15 @@ func AcknowledgeDrainPatch(freshWake bool) MetadataPatch {
 	return patch
 }
 
+// AcknowledgeDrainContinuationPatch records agent drain acknowledgement with stop evidence.
+func AcknowledgeDrainContinuationPatch(now time.Time, freshWake bool, stop StopContinuationInput) MetadataPatch {
+	patch := AcknowledgeDrainPatch(freshWake)
+	for key, value := range StopContinuationPatch(now, stop) {
+		patch[key] = value
+	}
+	return patch
+}
+
 // CompleteDrainPatch records a completed controller drain as ordinary asleep.
 func CompleteDrainPatch(now time.Time, reason string, freshWake bool) MetadataPatch {
 	patch := SleepPatch(now, reason)
@@ -320,6 +468,18 @@ func CompleteDrainPatch(now time.Time, reason string, freshWake bool) MetadataPa
 		patch["session_key"] = ""
 		applyFreshWakeConversationReset(patch)
 		patch["continuation_reset_pending"] = "true"
+	}
+	return patch
+}
+
+// CompleteDrainContinuationPatch records controller drain completion with stop evidence.
+func CompleteDrainContinuationPatch(now time.Time, reason string, freshWake bool, stop StopContinuationInput) MetadataPatch {
+	patch := CompleteDrainPatch(now, reason, freshWake)
+	if strings.TrimSpace(stop.Reason) == "" {
+		stop.Reason = reason
+	}
+	for key, value := range StopContinuationPatch(now, stop) {
+		patch[key] = value
 	}
 	return patch
 }

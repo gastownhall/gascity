@@ -1,5 +1,7 @@
 package api
 
+import "github.com/gastownhall/gascity/internal/config"
+
 // Per-domain Huma input/output types for the providers handler
 // group. Split out of the original huma_types.go; mirrors the layout
 // of huma_handlers_providers.go.
@@ -57,19 +59,22 @@ type ProviderGetInput struct {
 type ProviderCreateInput struct {
 	CityScope
 	Body struct {
-		Name               string            `json:"name" doc:"Provider name." minLength:"1"`
-		DisplayName        string            `json:"display_name,omitempty" doc:"Human-readable display name."`
-		Base               *string           `json:"base,omitempty" doc:"Optional provider base for inheritance."`
-		Command            string            `json:"command,omitempty" doc:"Provider command binary. Omit for base-only descendants."`
-		ACPCommand         string            `json:"acp_command,omitempty" doc:"ACP transport command binary override."`
-		Args               []string          `json:"args,omitempty" doc:"Command arguments."`
-		ACPArgs            []string          `json:"acp_args,omitempty" doc:"ACP transport command arguments override."`
-		ArgsAppend         []string          `json:"args_append,omitempty" doc:"Arguments appended after inherited/base args."`
-		PromptMode         string            `json:"prompt_mode,omitempty" doc:"Prompt delivery mode."`
-		PromptFlag         string            `json:"prompt_flag,omitempty" doc:"Flag for prompt delivery."`
-		ReadyDelayMs       int               `json:"ready_delay_ms,omitempty" doc:"Milliseconds to wait before probing readiness."`
-		Env                map[string]string `json:"env,omitempty" doc:"Environment variables."`
-		OptionsSchemaMerge *string           `json:"options_schema_merge,omitempty" doc:"Options schema merge mode across inheritance chain."`
+		Name                  string                              `json:"name" doc:"Provider name." minLength:"1"`
+		DisplayName           string                              `json:"display_name,omitempty" doc:"Human-readable display name."`
+		Base                  *string                             `json:"base,omitempty" doc:"Optional provider base for inheritance."`
+		Command               string                              `json:"command,omitempty" doc:"Provider command binary. Omit for base-only descendants."`
+		ACPCommand            string                              `json:"acp_command,omitempty" doc:"ACP transport command binary override."`
+		Args                  []string                            `json:"args,omitempty" doc:"Command arguments."`
+		ACPArgs               []string                            `json:"acp_args,omitempty" doc:"ACP transport command arguments override."`
+		ArgsAppend            []string                            `json:"args_append,omitempty" doc:"Arguments appended after inherited/base args."`
+		PromptMode            string                              `json:"prompt_mode,omitempty" doc:"Prompt delivery mode."`
+		PromptFlag            string                              `json:"prompt_flag,omitempty" doc:"Flag for prompt delivery."`
+		ReadyDelayMs          int                                 `json:"ready_delay_ms,omitempty" doc:"Milliseconds to wait before probing readiness."`
+		ContinuationIntegrity config.ContinuationIntegrity        `json:"continuation_integrity,omitempty" doc:"Provider continuation reuse policy."`
+		PrivateHistoryPolicy  config.ProviderPrivateHistoryPolicy `json:"private_history_policy,omitempty" doc:"Opaque provider-private transcript handling policy."`
+		FatalResumeErrors     []config.ProviderFatalResumeError   `json:"fatal_resume_errors,omitempty" doc:"Provider output classifiers that force fresh continuation."`
+		Env                   map[string]string                   `json:"env,omitempty" doc:"Environment variables."`
+		OptionsSchemaMerge    *string                             `json:"options_schema_merge,omitempty" doc:"Options schema merge mode across inheritance chain."`
 	}
 }
 
@@ -78,18 +83,21 @@ type ProviderUpdateInput struct {
 	CityScope
 	Name string `path:"name" doc:"Provider name."`
 	Body struct {
-		DisplayName        *string           `json:"display_name,omitempty" doc:"Human-readable display name."`
-		Base               *string           `json:"base,omitempty" doc:"Provider base for inheritance."`
-		Command            *string           `json:"command,omitempty" doc:"Provider command binary."`
-		ACPCommand         *string           `json:"acp_command,omitempty" doc:"ACP transport command binary override."`
-		Args               []string          `json:"args,omitempty" doc:"Command arguments."`
-		ACPArgs            []string          `json:"acp_args,omitempty" doc:"ACP transport command arguments override."`
-		ArgsAppend         []string          `json:"args_append,omitempty" doc:"Arguments appended after inherited/base args."`
-		PromptMode         *string           `json:"prompt_mode,omitempty" doc:"Prompt delivery mode."`
-		PromptFlag         *string           `json:"prompt_flag,omitempty" doc:"Flag for prompt delivery."`
-		ReadyDelayMs       *int              `json:"ready_delay_ms,omitempty" doc:"Milliseconds to wait before probing readiness."`
-		Env                map[string]string `json:"env,omitempty" doc:"Environment variables."`
-		OptionsSchemaMerge *string           `json:"options_schema_merge,omitempty" doc:"Options schema merge mode across inheritance chain."`
+		DisplayName           *string                              `json:"display_name,omitempty" doc:"Human-readable display name."`
+		Base                  *string                              `json:"base,omitempty" doc:"Provider base for inheritance."`
+		Command               *string                              `json:"command,omitempty" doc:"Provider command binary."`
+		ACPCommand            *string                              `json:"acp_command,omitempty" doc:"ACP transport command binary override."`
+		Args                  []string                             `json:"args,omitempty" doc:"Command arguments."`
+		ACPArgs               []string                             `json:"acp_args,omitempty" doc:"ACP transport command arguments override."`
+		ArgsAppend            []string                             `json:"args_append,omitempty" doc:"Arguments appended after inherited/base args."`
+		PromptMode            *string                              `json:"prompt_mode,omitempty" doc:"Prompt delivery mode."`
+		PromptFlag            *string                              `json:"prompt_flag,omitempty" doc:"Flag for prompt delivery."`
+		ReadyDelayMs          *int                                 `json:"ready_delay_ms,omitempty" doc:"Milliseconds to wait before probing readiness."`
+		ContinuationIntegrity *config.ContinuationIntegrity        `json:"continuation_integrity,omitempty" doc:"Provider continuation reuse policy."`
+		PrivateHistoryPolicy  *config.ProviderPrivateHistoryPolicy `json:"private_history_policy,omitempty" doc:"Opaque provider-private transcript handling policy."`
+		FatalResumeErrors     []config.ProviderFatalResumeError    `json:"fatal_resume_errors,omitempty" doc:"Provider output classifiers that force fresh continuation."`
+		Env                   map[string]string                    `json:"env,omitempty" doc:"Environment variables."`
+		OptionsSchemaMerge    *string                              `json:"options_schema_merge,omitempty" doc:"Options schema merge mode across inheritance chain."`
 	}
 }
 

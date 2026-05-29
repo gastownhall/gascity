@@ -125,19 +125,22 @@ type RigUpdate struct {
 //   - &(&"")           → set explicit empty (standalone opt-out)
 //   - &(&"<name>")     → set concrete value
 type ProviderUpdate struct {
-	DisplayName        *string
-	Base               **string
-	Command            *string
-	ACPCommand         *string
-	Args               []string // nil = not set, non-nil = replace
-	ACPArgs            []string // nil = not set, non-nil = replace
-	ArgsAppend         []string // nil = not set, non-nil = replace
-	PromptMode         *string
-	PromptFlag         *string
-	ReadyDelayMs       *int
-	Env                map[string]string // nil = not set, non-nil = additive merge
-	OptionsSchemaMerge *string
-	OptionsSchema      []config.ProviderOption // nil = not set, non-nil = replace
+	DisplayName           *string
+	Base                  **string
+	Command               *string
+	ACPCommand            *string
+	Args                  []string // nil = not set, non-nil = replace
+	ACPArgs               []string // nil = not set, non-nil = replace
+	ArgsAppend            []string // nil = not set, non-nil = replace
+	PromptMode            *string
+	PromptFlag            *string
+	ReadyDelayMs          *int
+	ContinuationIntegrity *config.ContinuationIntegrity
+	PrivateHistoryPolicy  *config.ProviderPrivateHistoryPolicy
+	FatalResumeErrors     []config.ProviderFatalResumeError
+	Env                   map[string]string // nil = not set, non-nil = additive merge
+	OptionsSchemaMerge    *string
+	OptionsSchema         []config.ProviderOption // nil = not set, non-nil = replace
 }
 
 // RawConfigProvider is optionally implemented by State to provide the

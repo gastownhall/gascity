@@ -71,6 +71,26 @@ func TestContentBlocks(t *testing.T) {
 	}
 }
 
+func TestContentBlocksPreserveProviderPrivateRaw(t *testing.T) {
+	rawBlock := `{"type":"redacted_thinking","thinking":"private","signature":"sig","extra":{"b":2,"a":1}}`
+	msg := `{"role":"assistant","content":[` + rawBlock + `,{"type":"text","text":"visible"}]}`
+	e := &Entry{Message: json.RawMessage(msg)}
+	blocks := e.ContentBlocks()
+	if len(blocks) != 2 {
+		t.Fatalf("got %d blocks, want 2", len(blocks))
+	}
+	if !IsProviderPrivateBlockType(blocks[0].Type) {
+		t.Fatalf("block type %q not classified as provider-private", blocks[0].Type)
+	}
+	roundTrip, err := json.Marshal(blocks[0])
+	if err != nil {
+		t.Fatalf("marshal private block: %v", err)
+	}
+	if string(roundTrip) != rawBlock {
+		t.Fatalf("private block round-trip = %s, want %s", roundTrip, rawBlock)
+	}
+}
+
 func TestContentBlocksInteractionPreservesFields(t *testing.T) {
 	msg := `{"role":"assistant","content":[{"type":"interaction","request_id":"req-1","kind":"approval","state":"blocked","prompt":"Proceed?","options":["approve","reject"],"action":"respond","metadata":{"source":"claude"}}]}`
 	e := &Entry{Message: json.RawMessage(msg)}

@@ -137,5 +137,25 @@ func ValidateSemantics(cfg *City, source string) []string {
 		}
 	}
 
+	for name, spec := range cfg.Providers {
+		if !IsValidContinuationIntegrity(spec.ContinuationIntegrity) {
+			warnings = append(warnings, fmt.Sprintf(
+				"%s: [providers.%s] continuation_integrity must be \"any_stop\", \"boundary_or_fresh\", \"fresh_only\", or empty, got %q",
+				source, name, spec.ContinuationIntegrity))
+		}
+		if !IsValidPrivateHistoryPolicy(spec.PrivateHistoryPolicy) {
+			warnings = append(warnings, fmt.Sprintf(
+				"%s: [providers.%s] private_history_policy must be \"preserve_exact\", \"omit_when_allowed\", \"fresh_required\", or empty, got %q",
+				source, name, spec.PrivateHistoryPolicy))
+		}
+		for _, fatal := range spec.FatalResumeErrors {
+			if !IsValidProviderFatalResumeError(fatal) {
+				warnings = append(warnings, fmt.Sprintf(
+					"%s: [providers.%s] fatal_resume_errors contains unknown classifier %q",
+					source, name, fatal))
+			}
+		}
+	}
+
 	return warnings
 }

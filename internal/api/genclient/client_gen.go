@@ -463,18 +463,21 @@ type AnnotatedAgentResponse struct {
 
 // AnnotatedProviderResponse defines model for AnnotatedProviderResponse.
 type AnnotatedProviderResponse struct {
-	AcpArgs     *[]string          `json:"acp_args,omitempty"`
-	AcpCommand  *string            `json:"acp_command,omitempty"`
-	Args        *[]string          `json:"args,omitempty"`
-	Command     *string            `json:"command,omitempty"`
-	DisplayName *string            `json:"display_name,omitempty"`
-	Env         *map[string]string `json:"env,omitempty"`
+	AcpArgs               *[]string          `json:"acp_args,omitempty"`
+	AcpCommand            *string            `json:"acp_command,omitempty"`
+	Args                  *[]string          `json:"args,omitempty"`
+	Command               *string            `json:"command,omitempty"`
+	ContinuationIntegrity *string            `json:"continuation_integrity,omitempty"`
+	DisplayName           *string            `json:"display_name,omitempty"`
+	Env                   *map[string]string `json:"env,omitempty"`
+	FatalResumeErrors     *[]string          `json:"fatal_resume_errors,omitempty"`
 
 	// Origin Provider origin: builtin, city, or builtin+city.
-	Origin       string  `json:"origin"`
-	PromptFlag   *string `json:"prompt_flag,omitempty"`
-	PromptMode   *string `json:"prompt_mode,omitempty"`
-	ReadyDelayMs *int64  `json:"ready_delay_ms,omitempty"`
+	Origin               string  `json:"origin"`
+	PrivateHistoryPolicy *string `json:"private_history_policy,omitempty"`
+	PromptFlag           *string `json:"prompt_flag,omitempty"`
+	PromptMode           *string `json:"prompt_mode,omitempty"`
+	ReadyDelayMs         *int64  `json:"ready_delay_ms,omitempty"`
 }
 
 // AsyncAcceptedBody defines model for AsyncAcceptedBody.
@@ -1958,17 +1961,26 @@ type ProviderCreateInputBody struct {
 	// Command Provider command binary. Omit for base-only descendants.
 	Command *string `json:"command,omitempty"`
 
+	// ContinuationIntegrity Provider continuation reuse policy.
+	ContinuationIntegrity *string `json:"continuation_integrity,omitempty"`
+
 	// DisplayName Human-readable display name.
 	DisplayName *string `json:"display_name,omitempty"`
 
 	// Env Environment variables.
 	Env *map[string]string `json:"env,omitempty"`
 
+	// FatalResumeErrors Provider output classifiers that force fresh continuation.
+	FatalResumeErrors *[]string `json:"fatal_resume_errors,omitempty"`
+
 	// Name Provider name.
 	Name string `json:"name"`
 
 	// OptionsSchemaMerge Options schema merge mode across inheritance chain.
 	OptionsSchemaMerge *string `json:"options_schema_merge,omitempty"`
+
+	// PrivateHistoryPolicy Opaque provider-private transcript handling policy.
+	PrivateHistoryPolicy *string `json:"private_history_policy,omitempty"`
 
 	// PromptFlag Flag for prompt delivery.
 	PromptFlag *string `json:"prompt_flag,omitempty"`
@@ -2000,21 +2012,24 @@ type ProviderOptionDTO struct {
 
 // ProviderPatch defines model for ProviderPatch.
 type ProviderPatch struct {
-	ACPArgs              *[]string         `json:"ACPArgs"`
-	ACPCommand           *string           `json:"ACPCommand"`
-	AcceptStartupDialogs *bool             `json:"AcceptStartupDialogs"`
-	Args                 *[]string         `json:"Args"`
-	ArgsAppend           *[]string         `json:"ArgsAppend"`
-	Base                 *string           `json:"Base"`
-	Command              *string           `json:"Command"`
-	Env                  map[string]string `json:"Env"`
-	EnvRemove            *[]string         `json:"EnvRemove"`
-	Name                 string            `json:"Name"`
-	OptionsSchemaMerge   *string           `json:"OptionsSchemaMerge"`
-	PromptFlag           *string           `json:"PromptFlag"`
-	PromptMode           *string           `json:"PromptMode"`
-	ReadyDelayMs         *int64            `json:"ReadyDelayMs"`
-	Replace              bool              `json:"Replace"`
+	ACPArgs               *[]string         `json:"ACPArgs"`
+	ACPCommand            *string           `json:"ACPCommand"`
+	AcceptStartupDialogs  *bool             `json:"AcceptStartupDialogs"`
+	Args                  *[]string         `json:"Args"`
+	ArgsAppend            *[]string         `json:"ArgsAppend"`
+	Base                  *string           `json:"Base"`
+	Command               *string           `json:"Command"`
+	ContinuationIntegrity *string           `json:"ContinuationIntegrity"`
+	Env                   map[string]string `json:"Env"`
+	EnvRemove             *[]string         `json:"EnvRemove"`
+	FatalResumeErrors     *[]string         `json:"FatalResumeErrors"`
+	Name                  string            `json:"Name"`
+	OptionsSchemaMerge    *string           `json:"OptionsSchemaMerge"`
+	PrivateHistoryPolicy  *string           `json:"PrivateHistoryPolicy"`
+	PromptFlag            *string           `json:"PromptFlag"`
+	PromptMode            *string           `json:"PromptMode"`
+	ReadyDelayMs          *int64            `json:"ReadyDelayMs"`
+	Replace               bool              `json:"Replace"`
 }
 
 // ProviderPatchSetInputBody defines model for ProviderPatchSetInputBody.
@@ -2102,15 +2117,18 @@ type ProviderResponse struct {
 
 // ProviderSpecJSON defines model for ProviderSpecJSON.
 type ProviderSpecJSON struct {
-	AcpArgs      *[]string          `json:"acp_args,omitempty"`
-	AcpCommand   *string            `json:"acp_command,omitempty"`
-	Args         *[]string          `json:"args,omitempty"`
-	Command      *string            `json:"command,omitempty"`
-	DisplayName  *string            `json:"display_name,omitempty"`
-	Env          *map[string]string `json:"env,omitempty"`
-	PromptFlag   *string            `json:"prompt_flag,omitempty"`
-	PromptMode   *string            `json:"prompt_mode,omitempty"`
-	ReadyDelayMs *int64             `json:"ready_delay_ms,omitempty"`
+	AcpArgs               *[]string          `json:"acp_args,omitempty"`
+	AcpCommand            *string            `json:"acp_command,omitempty"`
+	Args                  *[]string          `json:"args,omitempty"`
+	Command               *string            `json:"command,omitempty"`
+	ContinuationIntegrity *string            `json:"continuation_integrity,omitempty"`
+	DisplayName           *string            `json:"display_name,omitempty"`
+	Env                   *map[string]string `json:"env,omitempty"`
+	FatalResumeErrors     *[]string          `json:"fatal_resume_errors,omitempty"`
+	PrivateHistoryPolicy  *string            `json:"private_history_policy,omitempty"`
+	PromptFlag            *string            `json:"prompt_flag,omitempty"`
+	PromptMode            *string            `json:"prompt_mode,omitempty"`
+	ReadyDelayMs          *int64             `json:"ready_delay_ms,omitempty"`
 }
 
 // ProviderUpdateInputBody defines model for ProviderUpdateInputBody.
@@ -2133,14 +2151,23 @@ type ProviderUpdateInputBody struct {
 	// Command Provider command binary.
 	Command *string `json:"command,omitempty"`
 
+	// ContinuationIntegrity Provider continuation reuse policy.
+	ContinuationIntegrity *string `json:"continuation_integrity,omitempty"`
+
 	// DisplayName Human-readable display name.
 	DisplayName *string `json:"display_name,omitempty"`
 
 	// Env Environment variables.
 	Env *map[string]string `json:"env,omitempty"`
 
+	// FatalResumeErrors Provider output classifiers that force fresh continuation.
+	FatalResumeErrors *[]string `json:"fatal_resume_errors,omitempty"`
+
 	// OptionsSchemaMerge Options schema merge mode across inheritance chain.
 	OptionsSchemaMerge *string `json:"options_schema_merge,omitempty"`
+
+	// PrivateHistoryPolicy Opaque provider-private transcript handling policy.
+	PrivateHistoryPolicy *string `json:"private_history_policy,omitempty"`
 
 	// PromptFlag Flag for prompt delivery.
 	PromptFlag *string `json:"prompt_flag,omitempty"`

@@ -14,6 +14,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/spf13/cobra"
 )
 
@@ -326,7 +327,10 @@ func markCityStopSessionSleepReason(store beads.Store, stderr io.Writer) {
 		if strings.TrimSpace(session.Metadata["sleep_reason"]) != "" {
 			continue
 		}
-		if err := store.SetMetadata(session.ID, "sleep_reason", sleepReasonCityStop); err != nil {
+		stop := stopContinuationInputForSession(session, nil, sleepReasonCityStop, sessionpkg.StopBoundaryUnknown)
+		batch := sessionpkg.StopContinuationPatch(time.Now().UTC(), stop)
+		batch["sleep_reason"] = sleepReasonCityStop
+		if err := store.SetMetadataBatch(session.ID, batch); err != nil {
 			fmt.Fprintf(stderr, "gc stop: marking session %s: %v\n", session.ID, err) //nolint:errcheck // best-effort warning
 		}
 	}

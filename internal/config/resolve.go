@@ -60,6 +60,8 @@ func ResolveProvider(agent *Agent, ws *Workspace, cityProviders map[string]Provi
 		if agent.ResumeCommand != "" {
 			resolved.ResumeCommand = agent.ResumeCommand
 		}
+		resolved.ContinuationIntegrity = ContinuationIntegrityAnyStop
+		resolved.PrivateHistoryPolicy = ProviderPrivateHistoryPreserveExact
 		return resolved, nil
 	}
 
@@ -71,7 +73,12 @@ func ResolveProvider(agent *Agent, ws *Workspace, cityProviders map[string]Provi
 	if name == "" {
 		// No provider name — check workspace start_command escape hatch.
 		if ws != nil && ws.StartCommand != "" {
-			return &ResolvedProvider{Command: ws.StartCommand, PromptMode: "none"}, nil
+			return &ResolvedProvider{
+				Command:               ws.StartCommand,
+				PromptMode:            "none",
+				ContinuationIntegrity: ContinuationIntegrityAnyStop,
+				PrivateHistoryPolicy:  ProviderPrivateHistoryPreserveExact,
+			}, nil
 		}
 		// Auto-detect: scan PATH for known binaries.
 		detected, err := detectProviderName(lookPath)
@@ -295,6 +302,12 @@ func MergeProviderOverBuiltin(base, city ProviderSpec) ProviderSpec {
 	if city.SessionIDFlag != "" {
 		result.SessionIDFlag = city.SessionIDFlag
 	}
+	if city.ContinuationIntegrity != "" {
+		result.ContinuationIntegrity = city.ContinuationIntegrity
+	}
+	if city.PrivateHistoryPolicy != "" {
+		result.PrivateHistoryPolicy = city.PrivateHistoryPolicy
+	}
 
 	if city.TitleModel != "" {
 		result.TitleModel = city.TitleModel
@@ -328,6 +341,9 @@ func MergeProviderOverBuiltin(base, city ProviderSpec) ProviderSpec {
 	}
 	if city.ACPArgs != nil {
 		result.ACPArgs = city.ACPArgs
+	}
+	if city.FatalResumeErrors != nil {
+		result.FatalResumeErrors = append([]ProviderFatalResumeError(nil), city.FatalResumeErrors...)
 	}
 
 	// Map fields: merge additively (city keys win).
@@ -576,6 +592,9 @@ func specToResolved(name string, spec *ProviderSpec) *ResolvedProvider {
 		ResumeStyle:            spec.ResumeStyle,
 		ResumeCommand:          spec.ResumeCommand,
 		SessionIDFlag:          spec.SessionIDFlag,
+		ContinuationIntegrity:  NormalizeContinuationIntegrity(spec.ContinuationIntegrity),
+		PrivateHistoryPolicy:   NormalizePrivateHistoryPolicy(spec.PrivateHistoryPolicy),
+		FatalResumeErrors:      append([]ProviderFatalResumeError(nil), spec.FatalResumeErrors...),
 		TitleModel:             spec.TitleModel,
 		ACPCommand:             spec.ACPCommand,
 	}
@@ -805,6 +824,15 @@ func resolvedChainToSpec(r ResolvedProvider, leaf ProviderSpec) ProviderSpec {
 	}
 	if r.SessionIDFlag != "" {
 		out.SessionIDFlag = r.SessionIDFlag
+	}
+	if r.ContinuationIntegrity != "" {
+		out.ContinuationIntegrity = r.ContinuationIntegrity
+	}
+	if r.PrivateHistoryPolicy != "" {
+		out.PrivateHistoryPolicy = r.PrivateHistoryPolicy
+	}
+	if r.FatalResumeErrors != nil {
+		out.FatalResumeErrors = append([]ProviderFatalResumeError(nil), r.FatalResumeErrors...)
 	}
 	if r.TitleModel != "" {
 		out.TitleModel = r.TitleModel

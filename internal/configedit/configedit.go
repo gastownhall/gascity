@@ -1131,19 +1131,22 @@ func (e *Editor) DeleteRig(name string) error {
 //   - &(&"")           → set explicit empty (standalone opt-out)
 //   - &(&"<name>")     → set concrete value
 type ProviderUpdate struct {
-	DisplayName        *string
-	Base               **string
-	Command            *string
-	ACPCommand         *string
-	Args               []string // nil = not set, non-nil = replace
-	ACPArgs            []string // nil = not set, non-nil = replace
-	ArgsAppend         []string // nil = not set, non-nil = replace
-	PromptMode         *string
-	PromptFlag         *string
-	ReadyDelayMs       *int
-	Env                map[string]string // nil = not set, non-nil = additive merge
-	OptionsSchemaMerge *string
-	OptionsSchema      []config.ProviderOption // nil = not set, non-nil = replace
+	DisplayName           *string
+	Base                  **string
+	Command               *string
+	ACPCommand            *string
+	Args                  []string // nil = not set, non-nil = replace
+	ACPArgs               []string // nil = not set, non-nil = replace
+	ArgsAppend            []string // nil = not set, non-nil = replace
+	PromptMode            *string
+	PromptFlag            *string
+	ReadyDelayMs          *int
+	ContinuationIntegrity *config.ContinuationIntegrity
+	PrivateHistoryPolicy  *config.ProviderPrivateHistoryPolicy
+	FatalResumeErrors     []config.ProviderFatalResumeError
+	Env                   map[string]string // nil = not set, non-nil = additive merge
+	OptionsSchemaMerge    *string
+	OptionsSchema         []config.ProviderOption // nil = not set, non-nil = replace
 }
 
 // CreateProvider adds a new city-level provider to the config.
@@ -1208,6 +1211,15 @@ func (e *Editor) UpdateProvider(name string, patch ProviderUpdate) error {
 		}
 		if patch.ReadyDelayMs != nil {
 			spec.ReadyDelayMs = *patch.ReadyDelayMs
+		}
+		if patch.ContinuationIntegrity != nil {
+			spec.ContinuationIntegrity = *patch.ContinuationIntegrity
+		}
+		if patch.PrivateHistoryPolicy != nil {
+			spec.PrivateHistoryPolicy = *patch.PrivateHistoryPolicy
+		}
+		if patch.FatalResumeErrors != nil {
+			spec.FatalResumeErrors = append([]config.ProviderFatalResumeError(nil), patch.FatalResumeErrors...)
 		}
 		if len(patch.Env) > 0 {
 			if spec.Env == nil {
@@ -1435,15 +1447,36 @@ func (e *Editor) DeleteOrderOverride(name, rig string) error {
 func validateProviders(providers map[string]config.ProviderSpec) error {
 	for name, spec := range providers {
 		if spec.Command != "" {
+			if err := validateProviderContinuationFields(name, spec); err != nil {
+				return err
+			}
 			continue
 		}
 		if spec.Base != nil {
+			if err := validateProviderContinuationFields(name, spec); err != nil {
+				return err
+			}
 			continue
 		}
 		return fmt.Errorf("provider %q: command is required (or set base to inherit)", name)
 	}
 	if err := config.ValidateCustomProviderOptions(providers); err != nil {
 		return err
+	}
+	return nil
+}
+
+func validateProviderContinuationFields(name string, spec config.ProviderSpec) error {
+	if !config.IsValidContinuationIntegrity(spec.ContinuationIntegrity) {
+		return fmt.Errorf("provider %q: invalid continuation_integrity %q", name, spec.ContinuationIntegrity)
+	}
+	if !config.IsValidPrivateHistoryPolicy(spec.PrivateHistoryPolicy) {
+		return fmt.Errorf("provider %q: invalid private_history_policy %q", name, spec.PrivateHistoryPolicy)
+	}
+	for _, fatal := range spec.FatalResumeErrors {
+		if !config.IsValidProviderFatalResumeError(fatal) {
+			return fmt.Errorf("provider %q: invalid fatal_resume_errors classifier %q", name, fatal)
+		}
 	}
 	return nil
 }

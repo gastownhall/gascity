@@ -52,6 +52,9 @@ type BuiltinProviderSpec struct {
 	ResumeStyle            string
 	ResumeCommand          string
 	SessionIDFlag          string
+	ContinuationIntegrity  string
+	PrivateHistoryPolicy   string
+	FatalResumeErrors      []string
 	PermissionModes        map[string]string
 	OptionDefaults         map[string]string
 	OptionsSchema          []BuiltinProviderOption
@@ -104,6 +107,9 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 		ResumeFlag:             "--resume",
 		ResumeStyle:            "flag",
 		SessionIDFlag:          "--session-id",
+		ContinuationIntegrity:  "boundary_or_fresh",
+		PrivateHistoryPolicy:   "preserve_exact",
+		FatalResumeErrors:      []string{"claude_thinking_block_mutation"},
 		PrintArgs:              []string{"-p"},
 		TitleModel:             "haiku",
 		PermissionModes: map[string]string{
@@ -521,6 +527,7 @@ func cloneBuiltinProviderSpec(spec BuiltinProviderSpec) BuiltinProviderSpec {
 	spec.PermissionModes = cloneStringMap(spec.PermissionModes)
 	spec.OptionDefaults = cloneStringMap(spec.OptionDefaults)
 	spec.PrintArgs = cloneStrings(spec.PrintArgs)
+	spec.FatalResumeErrors = cloneStrings(spec.FatalResumeErrors)
 	spec.OptionsSchema = cloneBuiltinOptions(spec.OptionsSchema)
 	spec.ACPArgs = cloneStrings(spec.ACPArgs)
 	return spec

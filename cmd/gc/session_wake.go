@@ -15,7 +15,7 @@ import (
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
-	sessions "github.com/gastownhall/gascity/internal/session"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/telemetry"
 	"github.com/gastownhall/gascity/internal/worker"
 )
@@ -34,16 +34,16 @@ func preWakeCommit(
 	clk clock.Clock,
 ) (newGen int, token string, err error) {
 	name := session.Metadata["session_name"]
-	if !sessions.IsSessionNameSyntaxValid(name) {
+	if !sessionpkg.IsSessionNameSyntaxValid(name) {
 		return 0, "", fmt.Errorf("invalid session_name %q", name)
 	}
 
 	gen, _ := strconv.Atoi(session.Metadata["generation"])
 	newGen = gen + 1
-	token = sessions.NewInstanceToken()
+	token = sessionpkg.NewInstanceToken()
 	continuationEpoch, _ := strconv.Atoi(session.Metadata["continuation_epoch"])
 	if continuationEpoch <= 0 {
-		continuationEpoch = sessions.DefaultContinuationEpoch
+		continuationEpoch = sessionpkg.DefaultContinuationEpoch
 	}
 	if shouldBumpContinuationEpoch(session.Metadata) {
 		continuationEpoch++
@@ -57,7 +57,7 @@ func preWakeCommit(
 	}
 
 	freshWake := session.Metadata["wake_mode"] == "fresh" || pendingContinuationResetNeedsFreshStart(session.Metadata)
-	batch := sessions.PreWakePatch(sessions.PreWakePatchInput{
+	batch := sessionpkg.PreWakePatch(sessionpkg.PreWakePatchInput{
 		Generation:        newGen,
 		InstanceToken:     token,
 		ContinuationEpoch: continuationEpoch,
@@ -79,12 +79,12 @@ func preWakeCommit(
 	return newGen, token, nil
 }
 
-func traceFreshWakeMetadataReset(name string, before map[string]string, batch sessions.MetadataPatch, freshWake bool) {
+func traceFreshWakeMetadataReset(name string, before map[string]string, batch sessionpkg.MetadataPatch, freshWake bool) {
 	if !freshWake || os.Getenv("GC_TMUX_TRACE") != "1" {
 		return
 	}
-	cleared := make([]string, 0, len(sessions.FreshWakeConversationResetKeys()))
-	for _, key := range sessions.FreshWakeConversationResetKeys() {
+	cleared := make([]string, 0, len(sessionpkg.FreshWakeConversationResetKeys()))
+	for _, key := range sessionpkg.FreshWakeConversationResetKeys() {
 		if strings.TrimSpace(before[key]) == "" || batch[key] != "" {
 			continue
 		}
@@ -114,8 +114,8 @@ func pendingContinuationResetNeedsFreshStart(meta map[string]string) bool {
 	if meta == nil {
 		return false
 	}
-	switch sessions.State(strings.TrimSpace(meta["state"])) {
-	case sessions.StateStartPending, sessions.StateCreating:
+	switch sessionpkg.State(strings.TrimSpace(meta["state"])) {
+	case sessionpkg.StateStartPending, sessionpkg.StateCreating:
 		return false
 	}
 	return strings.TrimSpace(meta["continuation_reset_pending"]) != "" &&
@@ -471,7 +471,7 @@ func advanceSessionDrainsWithSessionsTraced(
 		}
 		if !running {
 			// Process exited — drain complete.
-			completeDrain(session, store, ds, clk)
+			completeDrain(session, store, ds, clk, sessionpkg.StopBoundaryUnknown)
 			dt.clearIdleProbe(id)
 			dt.remove(id)
 			telemetry.RecordDrainTransition(context.Background(), name, ds.reason, "complete")
@@ -539,6 +539,15 @@ func advanceSessionDrainsWithSessionsTraced(
 			if os.Getenv("GC_TMUX_TRACE") == "1" {
 				log.Printf("[DRAIN-TRACE] advanceSessionDrains: setting GC_DRAIN_ACK session=%s reason=%s", name, ds.reason)
 			}
+			if providerContinuationIntegrityForSession(*session, nil) != sessionpkg.ContinuationIntegrityAnyStop {
+				timeout := time.Until(ds.deadline)
+				if timeout > idleSleepProbeTimeout {
+					timeout = idleSleepProbeTimeout
+				}
+				boundary := waitForStopBoundary(context.Background(), sp, name, timeout)
+				stop := stopContinuationInputForSession(*session, nil, ds.reason, boundary)
+				_ = setStopContinuationMetadata(store, session, clk.Now().UTC(), stop)
+			}
 			err := setReconcilerDrainAckMetadata(sp, name, ds)
 			if err == nil {
 				ds.ackSet = true
@@ -554,7 +563,7 @@ func advanceSessionDrainsWithSessionsTraced(
 					outcome = "failed"
 					fields["error"] = err.Error()
 				}
-				trace.recordMutation("runtime_meta", normalizedSessionTemplate(*session, cfg), name, "provider_meta", name, "GC_DRAIN_ACK", "", "1", outcome, fields, "")
+				trace.recordMutation("runtime_meta", normalizedSessionTemplate(*session, cfg), name, "provider_meta", name, "GC_DRAIN_ACK", "1", outcome, fields, "")
 			}
 		}
 
@@ -585,7 +594,7 @@ func advanceSessionDrainsWithSessionsTraced(
 				running = false
 			}
 			if !running {
-				completeDrain(session, store, ds, clk)
+				completeDrain(session, store, ds, clk, sessionpkg.StopBoundaryTimeout)
 				dt.clearIdleProbe(id)
 				dt.remove(id)
 				telemetry.RecordDrainTransition(context.Background(), name, ds.reason, "timeout")
@@ -600,8 +609,10 @@ func advanceSessionDrainsWithSessionsTraced(
 }
 
 // completeDrain writes drain-complete metadata to the bead.
-func completeDrain(session *beads.Bead, store beads.Store, ds *drainState, clk clock.Clock) {
-	batch := sessions.CompleteDrainPatch(clk.Now(), ds.reason, session.Metadata["wake_mode"] == "fresh")
+func completeDrain(session *beads.Bead, store beads.Store, ds *drainState, clk clock.Clock, boundary sessionpkg.StopBoundary) {
+	now := clk.Now()
+	stop := stopContinuationInputForSession(*session, nil, ds.reason, boundary)
+	batch := sessionpkg.CompleteDrainContinuationPatch(now, ds.reason, session.Metadata["wake_mode"] == "fresh", stop)
 	if store != nil {
 		if err := store.SetMetadataBatch(session.ID, batch); err != nil {
 			return

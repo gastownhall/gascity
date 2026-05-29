@@ -16,6 +16,7 @@ package sessionlog
 
 import (
 	"encoding/json"
+	"strings"
 	"time"
 )
 
@@ -59,6 +60,7 @@ type CompactMeta struct {
 
 // ContentBlock is a block within a message's content array.
 type ContentBlock struct {
+	Raw       json.RawMessage `json:"-"`
 	Type      string          `json:"type"` // text, tool_use, tool_result, interaction, thinking, image
 	ID        string          `json:"id,omitempty"`
 	RequestID string          `json:"request_id,omitempty"`
@@ -74,6 +76,37 @@ type ContentBlock struct {
 	ToolUseID string          `json:"tool_use_id,omitempty"`
 	Content   json.RawMessage `json:"content,omitempty"` // tool_result content
 	IsError   bool            `json:"is_error,omitempty"`
+}
+
+// UnmarshalJSON decodes a content block and preserves its exact raw bytes.
+func (b *ContentBlock) UnmarshalJSON(data []byte) error {
+	type contentBlock ContentBlock
+	var parsed contentBlock
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		return err
+	}
+	*b = ContentBlock(parsed)
+	b.Raw = append([]byte(nil), data...)
+	return nil
+}
+
+// MarshalJSON emits preserved raw bytes when available.
+func (b ContentBlock) MarshalJSON() ([]byte, error) {
+	if len(b.Raw) > 0 && json.Valid(b.Raw) {
+		return append([]byte(nil), b.Raw...), nil
+	}
+	type contentBlock ContentBlock
+	return json.Marshal(contentBlock(b))
+}
+
+// IsProviderPrivateBlockType reports whether a block is provider-private history.
+func IsProviderPrivateBlockType(kind string) bool {
+	switch strings.ToLower(strings.TrimSpace(kind)) {
+	case "thinking", "redacted_thinking":
+		return true
+	default:
+		return false
+	}
 }
 
 // MessageContent is the structure inside a user or assistant message.

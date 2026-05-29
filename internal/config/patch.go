@@ -216,6 +216,12 @@ type ProviderPatch struct {
 	PromptFlag *string `toml:"prompt_flag,omitempty"`
 	// ReadyDelayMs overrides the ready delay in milliseconds.
 	ReadyDelayMs *int `toml:"ready_delay_ms,omitempty" jsonschema:"minimum=0"`
+	// ContinuationIntegrity overrides the provider continuation reuse policy.
+	ContinuationIntegrity *ContinuationIntegrity `toml:"continuation_integrity,omitempty" jsonschema:"enum=any_stop,enum=boundary_or_fresh,enum=fresh_only"`
+	// PrivateHistoryPolicy overrides opaque provider-private transcript handling.
+	PrivateHistoryPolicy *ProviderPrivateHistoryPolicy `toml:"private_history_policy,omitempty" jsonschema:"enum=preserve_exact,enum=omit_when_allowed,enum=fresh_required"`
+	// FatalResumeErrors replaces the fatal resume error classifier list.
+	FatalResumeErrors []ProviderFatalResumeError `toml:"fatal_resume_errors,omitempty"`
 	// AcceptStartupDialogs overrides startup dialog acceptance behavior.
 	AcceptStartupDialogs *bool `toml:"accept_startup_dialogs,omitempty"`
 	// Env adds or overrides environment variables.
@@ -565,6 +571,15 @@ func applyProviderPatch(cfg *City, patch *ProviderPatch) error {
 		if patch.ReadyDelayMs != nil {
 			newSpec.ReadyDelayMs = *patch.ReadyDelayMs
 		}
+		if patch.ContinuationIntegrity != nil {
+			newSpec.ContinuationIntegrity = *patch.ContinuationIntegrity
+		}
+		if patch.PrivateHistoryPolicy != nil {
+			newSpec.PrivateHistoryPolicy = *patch.PrivateHistoryPolicy
+		}
+		if patch.FatalResumeErrors != nil {
+			newSpec.FatalResumeErrors = append([]ProviderFatalResumeError(nil), patch.FatalResumeErrors...)
+		}
 		if patch.AcceptStartupDialogs != nil {
 			newSpec.AcceptStartupDialogs = cloneBoolPtr(patch.AcceptStartupDialogs)
 		}
@@ -610,6 +625,15 @@ func applyProviderPatch(cfg *City, patch *ProviderPatch) error {
 	}
 	if patch.ReadyDelayMs != nil {
 		spec.ReadyDelayMs = *patch.ReadyDelayMs
+	}
+	if patch.ContinuationIntegrity != nil {
+		spec.ContinuationIntegrity = *patch.ContinuationIntegrity
+	}
+	if patch.PrivateHistoryPolicy != nil {
+		spec.PrivateHistoryPolicy = *patch.PrivateHistoryPolicy
+	}
+	if patch.FatalResumeErrors != nil {
+		spec.FatalResumeErrors = append([]ProviderFatalResumeError(nil), patch.FatalResumeErrors...)
 	}
 	if patch.AcceptStartupDialogs != nil {
 		spec.AcceptStartupDialogs = cloneBoolPtr(patch.AcceptStartupDialogs)

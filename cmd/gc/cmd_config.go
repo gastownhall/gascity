@@ -698,6 +698,15 @@ func renderProviderExplainText(w io.Writer, r config.ResolvedProvider, name stri
 	explainProviderField(w, "resume_flag", r.ResumeFlag, r.Provenance.FieldLayer["resume_flag"])
 	explainProviderField(w, "resume_style", r.ResumeStyle, r.Provenance.FieldLayer["resume_style"])
 	explainProviderField(w, "session_id_flag", r.SessionIDFlag, r.Provenance.FieldLayer["session_id_flag"])
+	explainProviderField(w, "continuation_integrity", string(r.ContinuationIntegrity), r.Provenance.FieldLayer["continuation_integrity"])
+	explainProviderField(w, "private_history_policy", string(r.PrivateHistoryPolicy), r.Provenance.FieldLayer["private_history_policy"])
+	if len(r.FatalResumeErrors) > 0 {
+		values := make([]string, 0, len(r.FatalResumeErrors))
+		for _, fatal := range r.FatalResumeErrors {
+			values = append(values, string(fatal))
+		}
+		explainProviderField(w, "fatal_resume_errors", strings.Join(values, ","), r.Provenance.FieldLayer["fatal_resume_errors"])
+	}
 	explainProviderField(w, "title_model", r.TitleModel, r.Provenance.FieldLayer["title_model"])
 
 	explainResolvedBool(w, "supports_hooks", r.SupportsHooks, r.Provenance.FieldLayer["supports_hooks"])
@@ -805,6 +814,9 @@ func renderProviderExplainJSON(r config.ResolvedProvider, name string, stdout, s
 			"resume_flag":              r.ResumeFlag,
 			"resume_style":             r.ResumeStyle,
 			"session_id_flag":          r.SessionIDFlag,
+			"continuation_integrity":   r.ContinuationIntegrity,
+			"private_history_policy":   r.PrivateHistoryPolicy,
+			"fatal_resume_errors":      r.FatalResumeErrors,
 			"title_model":              r.TitleModel,
 			"supports_hooks":           triStateFromProvenance("supports_hooks", r.SupportsHooks),
 			"supports_acp":             triStateFromProvenance("supports_acp", r.SupportsACP),

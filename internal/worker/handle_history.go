@@ -330,6 +330,7 @@ func cloneHistoryBlocks(blocks []HistoryBlock) []HistoryBlock {
 	cloned := make([]HistoryBlock, len(blocks))
 	for idx, block := range blocks {
 		cloned[idx] = block
+		cloned[idx].Raw = cloneHistoryRaw(block.Raw)
 		cloned[idx].Input = cloneHistoryRaw(block.Input)
 		cloned[idx].Content = cloneHistoryRaw(block.Content)
 		if block.Interaction != nil {

@@ -57,13 +57,14 @@ type BlockKind string
 
 const ( //nolint:revive // exported enum values are documented by the enclosing type.
 	// BlockKind* classify normalized transcript blocks.
-	BlockKindText        BlockKind = "text"
-	BlockKindThinking    BlockKind = "thinking"
-	BlockKindToolUse     BlockKind = "tool_use"
-	BlockKindToolResult  BlockKind = "tool_result"
-	BlockKindInteraction BlockKind = "interaction"
-	BlockKindImage       BlockKind = "image"
-	BlockKindUnknown     BlockKind = "unknown"
+	BlockKindText             BlockKind = "text"
+	BlockKindThinking         BlockKind = "thinking"
+	BlockKindRedactedThinking BlockKind = "redacted_thinking"
+	BlockKindToolUse          BlockKind = "tool_use"
+	BlockKindToolResult       BlockKind = "tool_result"
+	BlockKindInteraction      BlockKind = "interaction"
+	BlockKindImage            BlockKind = "image"
+	BlockKindUnknown          BlockKind = "unknown"
 )
 
 // InteractionState captures the durable lifecycle state for a required
@@ -196,13 +197,15 @@ type HistoryEntry struct {
 
 // HistoryBlock carries normalized content/tool payload.
 type HistoryBlock struct {
-	Kind        BlockKind           `json:"kind"`
-	Text        string              `json:"text,omitempty"`
-	ToolUseID   string              `json:"tool_use_id,omitempty"`
-	Name        string              `json:"name,omitempty"`
-	Input       json.RawMessage     `json:"input,omitempty"`
-	Content     json.RawMessage     `json:"content,omitempty"`
-	IsError     bool                `json:"is_error,omitempty"`
-	Interaction *HistoryInteraction `json:"interaction,omitempty"`
-	Derived     bool                `json:"derived,omitempty"`
+	Kind            BlockKind           `json:"kind"`
+	Text            string              `json:"text,omitempty"`
+	Raw             json.RawMessage     `json:"raw,omitempty"`
+	ProviderPrivate bool                `json:"provider_private,omitempty"`
+	ToolUseID       string              `json:"tool_use_id,omitempty"`
+	Name            string              `json:"name,omitempty"`
+	Input           json.RawMessage     `json:"input,omitempty"`
+	Content         json.RawMessage     `json:"content,omitempty"`
+	IsError         bool                `json:"is_error,omitempty"`
+	Interaction     *HistoryInteraction `json:"interaction,omitempty"`
+	Derived         bool                `json:"derived,omitempty"`
 }

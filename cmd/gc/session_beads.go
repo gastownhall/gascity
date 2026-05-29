@@ -197,6 +197,11 @@ func stampResolvedProviderSessionMetadata(meta map[string]string, resolved *conf
 	if ancestor := strings.TrimSpace(resolved.BuiltinAncestor); ancestor != "" && ancestor != name {
 		meta["builtin_ancestor"] = ancestor
 	}
+	meta[session.ProviderContinuationIntegrityMetadataKey] = string(config.NormalizeContinuationIntegrity(resolved.ContinuationIntegrity))
+	meta[session.ProviderPrivateHistoryPolicyMetadataKey] = string(config.NormalizePrivateHistoryPolicy(resolved.PrivateHistoryPolicy))
+	if len(resolved.FatalResumeErrors) > 0 {
+		meta[session.ProviderFatalResumeErrorsMetadataKey] = joinProviderFatalResumeErrors(resolved.FatalResumeErrors)
+	}
 }
 
 func queueMissingResolvedProviderSessionMetadata(existing map[string]string, queue func(string, string), resolved *config.ResolvedProvider) {
@@ -213,6 +218,28 @@ func queueMissingResolvedProviderSessionMetadata(existing map[string]string, que
 	if ancestor := strings.TrimSpace(resolved.BuiltinAncestor); existing["builtin_ancestor"] == "" && ancestor != "" && ancestor != name {
 		queue("builtin_ancestor", ancestor)
 	}
+	if existing[session.ProviderContinuationIntegrityMetadataKey] == "" {
+		queue(session.ProviderContinuationIntegrityMetadataKey, string(config.NormalizeContinuationIntegrity(resolved.ContinuationIntegrity)))
+	}
+	if existing[session.ProviderPrivateHistoryPolicyMetadataKey] == "" {
+		queue(session.ProviderPrivateHistoryPolicyMetadataKey, string(config.NormalizePrivateHistoryPolicy(resolved.PrivateHistoryPolicy)))
+	}
+	if existing[session.ProviderFatalResumeErrorsMetadataKey] == "" && len(resolved.FatalResumeErrors) > 0 {
+		queue(session.ProviderFatalResumeErrorsMetadataKey, joinProviderFatalResumeErrors(resolved.FatalResumeErrors))
+	}
+}
+
+func joinProviderFatalResumeErrors(values []config.ProviderFatalResumeError) string {
+	if len(values) == 0 {
+		return ""
+	}
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		if s := strings.TrimSpace(string(value)); s != "" {
+			out = append(out, s)
+		}
+	}
+	return strings.Join(out, ",")
 }
 
 func canRebindConfiguredNamedSession(b beads.Bead, identity, sessionName, backingTemplate string) bool {

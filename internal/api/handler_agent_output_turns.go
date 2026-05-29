@@ -43,7 +43,7 @@ func entryToTurn(e *worker.TranscriptEntry) outputTurn {
 					}
 					parts = append(parts, "[result] "+text)
 				}
-			case "thinking":
+			case "thinking", "redacted_thinking":
 				// Redact thinking blocks — internal model reasoning
 				// should not be surfaced to the UI.
 				parts = append(parts, "[thinking]")
@@ -90,7 +90,7 @@ func historyEntryToTurn(entry worker.HistoryEntry) outputTurn {
 					}
 					parts = append(parts, "[result] "+text)
 				}
-			case worker.BlockKindThinking:
+			case worker.BlockKindThinking, worker.BlockKindRedactedThinking:
 				parts = append(parts, "[thinking]")
 			}
 		}

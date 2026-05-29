@@ -42,15 +42,18 @@ func (s *Server) humaHandleConfigGet(_ context.Context, _ *ConfigGetInput) (*Ind
 	providers := make(map[string]providerSpecJSON, len(cfg.Providers))
 	for name, spec := range cfg.Providers {
 		providers[name] = providerSpecJSON{
-			DisplayName:  spec.DisplayName,
-			Command:      spec.Command,
-			ACPCommand:   spec.ACPCommand,
-			Args:         spec.Args,
-			ACPArgs:      optionalStringSlice(spec.ACPArgs),
-			PromptMode:   spec.PromptMode,
-			PromptFlag:   spec.PromptFlag,
-			ReadyDelayMs: spec.ReadyDelayMs,
-			Env:          spec.Env,
+			DisplayName:           spec.DisplayName,
+			Command:               spec.Command,
+			ACPCommand:            spec.ACPCommand,
+			Args:                  spec.Args,
+			ACPArgs:               optionalStringSlice(spec.ACPArgs),
+			PromptMode:            spec.PromptMode,
+			PromptFlag:            spec.PromptFlag,
+			ReadyDelayMs:          spec.ReadyDelayMs,
+			ContinuationIntegrity: spec.ContinuationIntegrity,
+			PrivateHistoryPolicy:  spec.PrivateHistoryPolicy,
+			FatalResumeErrors:     spec.FatalResumeErrors,
+			Env:                   spec.Env,
 		}
 	}
 
@@ -129,32 +132,38 @@ func (s *Server) humaHandleConfigExplain(_ context.Context, _ *ConfigExplainInpu
 			origin = "builtin+city"
 		}
 		provMap[name] = annotatedProviderResponse{
-			DisplayName:  spec.DisplayName,
-			Command:      spec.Command,
-			ACPCommand:   spec.ACPCommand,
-			Args:         spec.Args,
-			ACPArgs:      optionalStringSlice(spec.ACPArgs),
-			PromptMode:   spec.PromptMode,
-			PromptFlag:   spec.PromptFlag,
-			ReadyDelayMs: spec.ReadyDelayMs,
-			Env:          spec.Env,
-			Origin:       origin,
+			DisplayName:           spec.DisplayName,
+			Command:               spec.Command,
+			ACPCommand:            spec.ACPCommand,
+			Args:                  spec.Args,
+			ACPArgs:               optionalStringSlice(spec.ACPArgs),
+			PromptMode:            spec.PromptMode,
+			PromptFlag:            spec.PromptFlag,
+			ReadyDelayMs:          spec.ReadyDelayMs,
+			ContinuationIntegrity: spec.ContinuationIntegrity,
+			PrivateHistoryPolicy:  spec.PrivateHistoryPolicy,
+			FatalResumeErrors:     spec.FatalResumeErrors,
+			Env:                   spec.Env,
+			Origin:                origin,
 		}
 	}
 	// Builtins not overridden.
 	for name, spec := range builtins {
 		if _, ok := provMap[name]; !ok {
 			provMap[name] = annotatedProviderResponse{
-				DisplayName:  spec.DisplayName,
-				Command:      spec.Command,
-				ACPCommand:   spec.ACPCommand,
-				Args:         spec.Args,
-				ACPArgs:      optionalStringSlice(spec.ACPArgs),
-				PromptMode:   spec.PromptMode,
-				PromptFlag:   spec.PromptFlag,
-				ReadyDelayMs: spec.ReadyDelayMs,
-				Env:          spec.Env,
-				Origin:       "builtin",
+				DisplayName:           spec.DisplayName,
+				Command:               spec.Command,
+				ACPCommand:            spec.ACPCommand,
+				Args:                  spec.Args,
+				ACPArgs:               optionalStringSlice(spec.ACPArgs),
+				PromptMode:            spec.PromptMode,
+				PromptFlag:            spec.PromptFlag,
+				ReadyDelayMs:          spec.ReadyDelayMs,
+				ContinuationIntegrity: spec.ContinuationIntegrity,
+				PrivateHistoryPolicy:  spec.PrivateHistoryPolicy,
+				FatalResumeErrors:     spec.FatalResumeErrors,
+				Env:                   spec.Env,
+				Origin:                "builtin",
 			}
 		}
 	}
@@ -224,16 +233,19 @@ type annotatedAgentResponse struct {
 // Defined as a flat struct so the OpenAPI spec and the wire shape match
 // exactly (no custom MarshalJSON needed).
 type annotatedProviderResponse struct {
-	DisplayName  string            `json:"display_name,omitempty"`
-	Command      string            `json:"command,omitempty"`
-	ACPCommand   string            `json:"acp_command,omitempty"`
-	Args         []string          `json:"args,omitempty"`
-	ACPArgs      *[]string         `json:"acp_args,omitempty"`
-	PromptMode   string            `json:"prompt_mode,omitempty"`
-	PromptFlag   string            `json:"prompt_flag,omitempty"`
-	ReadyDelayMs int               `json:"ready_delay_ms,omitempty"`
-	Env          map[string]string `json:"env,omitempty"`
-	Origin       string            `json:"origin" doc:"Provider origin: builtin, city, or builtin+city."`
+	DisplayName           string                              `json:"display_name,omitempty"`
+	Command               string                              `json:"command,omitempty"`
+	ACPCommand            string                              `json:"acp_command,omitempty"`
+	Args                  []string                            `json:"args,omitempty"`
+	ACPArgs               *[]string                           `json:"acp_args,omitempty"`
+	PromptMode            string                              `json:"prompt_mode,omitempty"`
+	PromptFlag            string                              `json:"prompt_flag,omitempty"`
+	ReadyDelayMs          int                                 `json:"ready_delay_ms,omitempty"`
+	ContinuationIntegrity config.ContinuationIntegrity        `json:"continuation_integrity,omitempty"`
+	PrivateHistoryPolicy  config.ProviderPrivateHistoryPolicy `json:"private_history_policy,omitempty"`
+	FatalResumeErrors     []config.ProviderFatalResumeError   `json:"fatal_resume_errors,omitempty"`
+	Env                   map[string]string                   `json:"env,omitempty"`
+	Origin                string                              `json:"origin" doc:"Provider origin: builtin, city, or builtin+city."`
 }
 
 // configExplainResponse is the full response for GET /v0/config/explain.

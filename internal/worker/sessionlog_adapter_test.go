@@ -70,6 +70,40 @@ func TestSessionLogAdapterLoadHistoryClaude(t *testing.T) {
 	}
 }
 
+func TestSessionLogAdapterPreservesProviderPrivateRawBlocks(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "sess-claude.jsonl")
+	rawBlock := `{"type":"redacted_thinking","thinking":"private","signature":"sig","extra":{"b":2,"a":1}}`
+	writeLines(t, path,
+		`{"uuid":"u1","type":"user","message":{"role":"user","content":"hello"},"timestamp":"2025-01-01T00:00:00Z","sessionId":"provider-claude"}`,
+		`{"uuid":"a1","parentUuid":"u1","type":"assistant","message":{"role":"assistant","content":[`+rawBlock+`,{"type":"text","text":"visible"}]},"timestamp":"2025-01-01T00:00:01Z","sessionId":"provider-claude"}`,
+	)
+
+	snapshot, err := (SessionLogAdapter{}).LoadHistory(LoadRequest{
+		Provider:       "claude/tmux-cli",
+		TranscriptPath: path,
+		GCSessionID:    "gc-private",
+	})
+	if err != nil {
+		t.Fatalf("LoadHistory() error = %v", err)
+	}
+	if len(snapshot.Entries) != 2 || len(snapshot.Entries[1].Blocks) < 1 {
+		t.Fatalf("snapshot entries = %#v", snapshot.Entries)
+	}
+	block := snapshot.Entries[1].Blocks[0]
+	if block.Kind != BlockKindRedactedThinking {
+		t.Fatalf("block kind = %q, want %q", block.Kind, BlockKindRedactedThinking)
+	}
+	if !block.ProviderPrivate {
+		t.Fatal("provider-private block was not marked")
+	}
+	if string(block.Raw) != rawBlock {
+		t.Fatalf("private raw = %s, want %s", block.Raw, rawBlock)
+	}
+}
+
 func TestSessionLogAdapterDiscoverTranscriptExplicitIDFailsClosed(t *testing.T) {
 	t.Parallel()
 

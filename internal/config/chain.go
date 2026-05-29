@@ -403,6 +403,13 @@ func recordScalarProvenance(spec ProviderSpec, layer string, into map[string]str
 	set("resume_style", spec.ResumeStyle)
 	set("resume_command", spec.ResumeCommand)
 	set("session_id_flag", spec.SessionIDFlag)
+	set("continuation_integrity", string(spec.ContinuationIntegrity))
+	set("private_history_policy", string(spec.PrivateHistoryPolicy))
+	if spec.FatalResumeErrors != nil {
+		if _, already := into["fatal_resume_errors"]; !already {
+			into["fatal_resume_errors"] = layer
+		}
+	}
 	set("acp_command", spec.ACPCommand)
 	setSlice("acp_args", spec.ACPArgs)
 	set("title_model", spec.TitleModel)

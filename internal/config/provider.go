@@ -7,6 +7,41 @@ import (
 	workerbuiltin "github.com/gastownhall/gascity/internal/worker/builtin"
 )
 
+// ContinuationIntegrity declares when GasCity may reuse a provider-managed
+// continuation handle after a runtime stop.
+type ContinuationIntegrity string
+
+const (
+	// ContinuationIntegrityAnyStop allows continuation reuse after any stop.
+	ContinuationIntegrityAnyStop ContinuationIntegrity = "any_stop"
+	// ContinuationIntegrityBoundaryOrFresh requires a verified clean boundary or fresh continuation.
+	ContinuationIntegrityBoundaryOrFresh ContinuationIntegrity = "boundary_or_fresh"
+	// ContinuationIntegrityFreshOnly always starts a fresh continuation after stop.
+	ContinuationIntegrityFreshOnly ContinuationIntegrity = "fresh_only"
+)
+
+// ProviderPrivateHistoryPolicy declares how opaque provider-private transcript
+// blocks must be handled by adapters and compaction/replay surfaces.
+type ProviderPrivateHistoryPolicy string
+
+const (
+	// ProviderPrivateHistoryPreserveExact preserves provider-private blocks byte-for-byte.
+	ProviderPrivateHistoryPreserveExact ProviderPrivateHistoryPolicy = "preserve_exact"
+	// ProviderPrivateHistoryOmitWhenAllowed omits provider-private blocks only when provider policy allows.
+	ProviderPrivateHistoryOmitWhenAllowed ProviderPrivateHistoryPolicy = "omit_when_allowed"
+	// ProviderPrivateHistoryFreshRequired requires fresh continuation instead of replaying private blocks.
+	ProviderPrivateHistoryFreshRequired ProviderPrivateHistoryPolicy = "fresh_required"
+)
+
+// ProviderFatalResumeError names provider output signatures that prove the
+// current continuation handle is no longer safe to reuse.
+type ProviderFatalResumeError string
+
+const (
+	// ProviderFatalResumeClaudeThinkingBlockMutation detects Claude thinking-block mutation errors.
+	ProviderFatalResumeClaudeThinkingBlockMutation ProviderFatalResumeError = "claude_thinking_block_mutation"
+)
+
 // ProviderOption declares a single configurable option for a provider.
 // Options are rendered as UI controls in a dashboard's session creation form.
 type ProviderOption struct {
@@ -117,6 +152,15 @@ type ProviderSpec struct {
 	// Enables the Generate & Pass strategy for session key management.
 	// Example: "--session-id" (claude)
 	SessionIDFlag string `toml:"session_id_flag,omitempty"`
+	// ContinuationIntegrity controls when GasCity may resume a provider-owned
+	// continuation handle after stopping the runtime.
+	ContinuationIntegrity ContinuationIntegrity `toml:"continuation_integrity,omitempty" jsonschema:"enum=any_stop,enum=boundary_or_fresh,enum=fresh_only,default=any_stop"`
+	// PrivateHistoryPolicy controls handling for opaque provider-private
+	// transcript blocks such as signed thinking payloads.
+	PrivateHistoryPolicy ProviderPrivateHistoryPolicy `toml:"private_history_policy,omitempty" jsonschema:"enum=preserve_exact,enum=omit_when_allowed,enum=fresh_required,default=preserve_exact"`
+	// FatalResumeErrors lists provider-specific output signatures that require
+	// a fresh continuation on the next wake.
+	FatalResumeErrors []ProviderFatalResumeError `toml:"fatal_resume_errors,omitempty"`
 	// PermissionModes maps permission mode names to CLI flags.
 	// Example: {"unrestricted": "--dangerously-skip-permissions", "plan": "--permission-mode plan"}
 	// This is a config-only lookup table consumed by external clients
@@ -208,6 +252,9 @@ type ResolvedProvider struct {
 	ResumeStyle            string
 	ResumeCommand          string
 	SessionIDFlag          string
+	ContinuationIntegrity  ContinuationIntegrity
+	PrivateHistoryPolicy   ProviderPrivateHistoryPolicy
+	FatalResumeErrors      []ProviderFatalResumeError
 	PermissionModes        map[string]string
 	OptionsSchema          []ProviderOption
 	PrintArgs              []string
@@ -233,6 +280,57 @@ const (
 func IsValidSessionTransport(transport string) bool {
 	switch strings.TrimSpace(transport) {
 	case "", SessionTransportACP, SessionTransportTmux:
+		return true
+	default:
+		return false
+	}
+}
+
+// NormalizeContinuationIntegrity returns the default continuation policy for
+// empty provider fields.
+func NormalizeContinuationIntegrity(value ContinuationIntegrity) ContinuationIntegrity {
+	switch value {
+	case ContinuationIntegrityBoundaryOrFresh, ContinuationIntegrityFreshOnly:
+		return value
+	default:
+		return ContinuationIntegrityAnyStop
+	}
+}
+
+// IsValidContinuationIntegrity reports whether value is a known continuation policy.
+func IsValidContinuationIntegrity(value ContinuationIntegrity) bool {
+	switch value {
+	case "", ContinuationIntegrityAnyStop, ContinuationIntegrityBoundaryOrFresh, ContinuationIntegrityFreshOnly:
+		return true
+	default:
+		return false
+	}
+}
+
+// NormalizePrivateHistoryPolicy returns the default private-history policy for empty values.
+func NormalizePrivateHistoryPolicy(value ProviderPrivateHistoryPolicy) ProviderPrivateHistoryPolicy {
+	switch value {
+	case ProviderPrivateHistoryOmitWhenAllowed, ProviderPrivateHistoryFreshRequired:
+		return value
+	default:
+		return ProviderPrivateHistoryPreserveExact
+	}
+}
+
+// IsValidPrivateHistoryPolicy reports whether value is a known private-history policy.
+func IsValidPrivateHistoryPolicy(value ProviderPrivateHistoryPolicy) bool {
+	switch value {
+	case "", ProviderPrivateHistoryPreserveExact, ProviderPrivateHistoryOmitWhenAllowed, ProviderPrivateHistoryFreshRequired:
+		return true
+	default:
+		return false
+	}
+}
+
+// IsValidProviderFatalResumeError reports whether value is a known fatal resume classifier.
+func IsValidProviderFatalResumeError(value ProviderFatalResumeError) bool {
+	switch value {
+	case ProviderFatalResumeClaudeThinkingBlockMutation:
 		return true
 	default:
 		return false
@@ -431,6 +529,9 @@ func providerSpecFromWorker(spec workerbuiltin.BuiltinProviderSpec) ProviderSpec
 		ResumeStyle:            spec.ResumeStyle,
 		ResumeCommand:          spec.ResumeCommand,
 		SessionIDFlag:          spec.SessionIDFlag,
+		ContinuationIntegrity:  ContinuationIntegrity(spec.ContinuationIntegrity),
+		PrivateHistoryPolicy:   ProviderPrivateHistoryPolicy(spec.PrivateHistoryPolicy),
+		FatalResumeErrors:      providerFatalResumeErrorsFromWorker(spec.FatalResumeErrors),
 		PermissionModes:        cloneStringMap(spec.PermissionModes),
 		OptionDefaults:         cloneStringMap(spec.OptionDefaults),
 		OptionsSchema:          providerOptionsFromWorker(spec.OptionsSchema),
@@ -439,6 +540,17 @@ func providerSpecFromWorker(spec workerbuiltin.BuiltinProviderSpec) ProviderSpec
 		ACPCommand:             spec.ACPCommand,
 		ACPArgs:                cloneStrings(spec.ACPArgs),
 	}
+}
+
+func providerFatalResumeErrorsFromWorker(values []string) []ProviderFatalResumeError {
+	if values == nil {
+		return nil
+	}
+	out := make([]ProviderFatalResumeError, len(values))
+	for i, value := range values {
+		out[i] = ProviderFatalResumeError(value)
+	}
+	return out
 }
 
 func providerOptionsFromWorker(options []workerbuiltin.BuiltinProviderOption) []ProviderOption {

@@ -45,6 +45,17 @@ func TestBuiltinProviders(t *testing.T) {
 			t.Errorf("provider %q not in BuiltinProviderOrder()", name)
 		}
 	}
+
+	claude := providers["claude"]
+	if claude.ContinuationIntegrity != ContinuationIntegrityBoundaryOrFresh {
+		t.Fatalf("claude continuation_integrity = %q, want %q", claude.ContinuationIntegrity, ContinuationIntegrityBoundaryOrFresh)
+	}
+	if claude.PrivateHistoryPolicy != ProviderPrivateHistoryPreserveExact {
+		t.Fatalf("claude private_history_policy = %q, want %q", claude.PrivateHistoryPolicy, ProviderPrivateHistoryPreserveExact)
+	}
+	if !reflect.DeepEqual(claude.FatalResumeErrors, []ProviderFatalResumeError{ProviderFatalResumeClaudeThinkingBlockMutation}) {
+		t.Fatalf("claude fatal_resume_errors = %#v", claude.FatalResumeErrors)
+	}
 }
 
 func TestBuiltinProvidersClaude(t *testing.T) {

@@ -426,6 +426,44 @@ func TestProjectLifecycleRuntimeLivenessProjection(t *testing.T) {
 			wantReconciledState: StateAsleep,
 		},
 		{
+			name: "boundary-or-fresh runtime missing resets resume identity without verified boundary",
+			input: LifecycleInput{
+				Status: "open",
+				Metadata: map[string]string{
+					"state":                                  "active",
+					"session_name":                           "s-worker",
+					"session_key":                            "provider-conversation",
+					"started_config_hash":                    "config",
+					"sleep_reason":                           "runtime-missing",
+					ProviderContinuationIntegrityMetadataKey: ContinuationIntegrityBoundaryOrFresh,
+				},
+				Runtime: RuntimeFacts{Observed: true, Alive: false},
+				Now:     now,
+			},
+			wantRuntime:         RuntimeProjectionMissing,
+			wantReconciledState: StateAsleep,
+			wantReset:           true,
+		},
+		{
+			name: "boundary-or-fresh verified idle preserves resume identity",
+			input: LifecycleInput{
+				Status: "open",
+				Metadata: map[string]string{
+					"state":                                  "active",
+					"session_name":                           "s-worker",
+					"session_key":                            "provider-conversation",
+					"started_config_hash":                    "config",
+					"sleep_reason":                           "runtime-missing",
+					ProviderContinuationIntegrityMetadataKey: ContinuationIntegrityBoundaryOrFresh,
+					"last_stop_boundary":                     string(StopBoundaryIdleVerified),
+				},
+				Runtime: RuntimeFacts{Observed: true, Alive: false},
+				Now:     now,
+			},
+			wantRuntime:         RuntimeProjectionMissing,
+			wantReconciledState: StateAsleep,
+		},
+		{
 			name: "fresh creating state stays creating after restart",
 			input: LifecycleInput{
 				Status: "open",

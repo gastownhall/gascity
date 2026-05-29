@@ -1807,6 +1807,31 @@
           "minimum": 0,
           "description": "ReadyDelayMs overrides the ready delay in milliseconds."
         },
+        "continuation_integrity": {
+          "type": "string",
+          "enum": [
+            "any_stop",
+            "boundary_or_fresh",
+            "fresh_only"
+          ],
+          "description": "ContinuationIntegrity overrides the provider continuation reuse policy."
+        },
+        "private_history_policy": {
+          "type": "string",
+          "enum": [
+            "preserve_exact",
+            "omit_when_allowed",
+            "fresh_required"
+          ],
+          "description": "PrivateHistoryPolicy overrides opaque provider-private transcript handling."
+        },
+        "fatal_resume_errors": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "FatalResumeErrors replaces the fatal resume error classifier list."
+        },
         "accept_startup_dialogs": {
           "type": "boolean",
           "description": "AcceptStartupDialogs overrides startup dialog acceptance behavior."
@@ -1949,6 +1974,33 @@
         "session_id_flag": {
           "type": "string",
           "description": "SessionIDFlag is the CLI flag for creating a session with a specific ID.\nEnables the Generate \u0026 Pass strategy for session key management.\nExample: \"--session-id\" (claude)"
+        },
+        "continuation_integrity": {
+          "type": "string",
+          "enum": [
+            "any_stop",
+            "boundary_or_fresh",
+            "fresh_only"
+          ],
+          "description": "ContinuationIntegrity controls when GasCity may resume a provider-owned\ncontinuation handle after stopping the runtime.",
+          "default": "any_stop"
+        },
+        "private_history_policy": {
+          "type": "string",
+          "enum": [
+            "preserve_exact",
+            "omit_when_allowed",
+            "fresh_required"
+          ],
+          "description": "PrivateHistoryPolicy controls handling for opaque provider-private\ntranscript blocks such as signed thinking payloads.",
+          "default": "preserve_exact"
+        },
+        "fatal_resume_errors": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "FatalResumeErrors lists provider-specific output signatures that require\na fresh continuation on the next wake."
         },
         "permission_modes": {
           "additionalProperties": {

@@ -6303,3 +6303,49 @@ func TestStopTargetThroughWorkerBoundary_CityStopLeavesSessionAsleep(t *testing.
 		t.Fatalf("suspended_at = %q, want empty", got.Metadata["suspended_at"])
 	}
 }
+
+func TestStopTargetThroughWorkerBoundaryPreservesVerifiedBoundary(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	session, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":        "worker",
+			"template":            "worker",
+			"state":               "active",
+			"session_key":         "provider-conversation",
+			"started_config_hash": "config",
+			sessionpkg.ProviderContinuationIntegrityMetadataKey: sessionpkg.ContinuationIntegrityBoundaryOrFresh,
+			"last_stop_boundary":             string(sessionpkg.StopBoundaryIdleVerified),
+			"last_stop_boundary_verified_at": time.Now().UTC().Format(time.RFC3339),
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := sp.Start(context.Background(), "worker", runtime.Config{}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	err = stopTargetThroughWorkerBoundary(stopTarget{
+		sessionID: session.ID,
+		name:      "worker",
+		resolved:  true,
+	}, store, sp, &config.City{})
+	if err != nil {
+		t.Fatalf("stopTargetThroughWorkerBoundary: %v", err)
+	}
+
+	got, err := store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Metadata["last_stop_boundary"] != string(sessionpkg.StopBoundaryIdleVerified) {
+		t.Fatalf("last_stop_boundary = %q, want idle_verified", got.Metadata["last_stop_boundary"])
+	}
+	if got.Metadata["continuation_reset_pending"] == "true" {
+		t.Fatal("verified stop boundary was overwritten with a pending reset")
+	}
+}

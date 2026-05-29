@@ -1694,6 +1694,7 @@ func deepCopyProviderSpec(in ProviderSpec) ProviderSpec {
 	out.PermissionModes = deepCopyStringMap(in.PermissionModes)
 	out.OptionDefaults = deepCopyStringMap(in.OptionDefaults)
 	out.OptionsSchema = deepCopyProviderOptions(in.OptionsSchema)
+	out.FatalResumeErrors = append([]ProviderFatalResumeError(nil), in.FatalResumeErrors...)
 	out.PrintArgs = append([]string(nil), in.PrintArgs...)
 	if in.ACPArgs != nil {
 		out.ACPArgs = make([]string, len(in.ACPArgs))

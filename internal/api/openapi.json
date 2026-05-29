@@ -727,6 +727,9 @@
           "command": {
             "type": "string"
           },
+          "continuation_integrity": {
+            "type": "string"
+          },
           "display_name": {
             "type": "string"
           },
@@ -736,8 +739,20 @@
             },
             "type": "object"
           },
+          "fatal_resume_errors": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
           "origin": {
             "description": "Provider origin: builtin, city, or builtin+city.",
+            "type": "string"
+          },
+          "private_history_policy": {
             "type": "string"
           },
           "prompt_flag": {
@@ -4798,6 +4813,10 @@
             "description": "Provider command binary. Omit for base-only descendants.",
             "type": "string"
           },
+          "continuation_integrity": {
+            "description": "Provider continuation reuse policy.",
+            "type": "string"
+          },
           "display_name": {
             "description": "Human-readable display name.",
             "type": "string"
@@ -4809,6 +4828,16 @@
             "description": "Environment variables.",
             "type": "object"
           },
+          "fatal_resume_errors": {
+            "description": "Provider output classifiers that force fresh continuation.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
           "name": {
             "description": "Provider name.",
             "minLength": 1,
@@ -4816,6 +4845,10 @@
           },
           "options_schema_merge": {
             "description": "Options schema merge mode across inheritance chain.",
+            "type": "string"
+          },
+          "private_history_policy": {
+            "description": "Opaque provider-private transcript handling policy.",
             "type": "string"
           },
           "prompt_flag": {
@@ -4946,6 +4979,12 @@
               "null"
             ]
           },
+          "ContinuationIntegrity": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "Env": {
             "additionalProperties": {
               "type": "string"
@@ -4961,10 +5000,25 @@
               "null"
             ]
           },
+          "FatalResumeErrors": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
           "Name": {
             "type": "string"
           },
           "OptionsSchemaMerge": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "PrivateHistoryPolicy": {
             "type": [
               "string",
               "null"
@@ -5005,6 +5059,9 @@
           "PromptMode",
           "PromptFlag",
           "ReadyDelayMs",
+          "ContinuationIntegrity",
+          "PrivateHistoryPolicy",
+          "FatalResumeErrors",
           "AcceptStartupDialogs",
           "Env",
           "EnvRemove",
@@ -5259,6 +5316,9 @@
           "command": {
             "type": "string"
           },
+          "continuation_integrity": {
+            "type": "string"
+          },
           "display_name": {
             "type": "string"
           },
@@ -5267,6 +5327,18 @@
               "type": "string"
             },
             "type": "object"
+          },
+          "fatal_resume_errors": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "private_history_policy": {
+            "type": "string"
           },
           "prompt_flag": {
             "type": "string"
@@ -5326,6 +5398,10 @@
             "description": "Provider command binary.",
             "type": "string"
           },
+          "continuation_integrity": {
+            "description": "Provider continuation reuse policy.",
+            "type": "string"
+          },
           "display_name": {
             "description": "Human-readable display name.",
             "type": "string"
@@ -5337,8 +5413,22 @@
             "description": "Environment variables.",
             "type": "object"
           },
+          "fatal_resume_errors": {
+            "description": "Provider output classifiers that force fresh continuation.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
           "options_schema_merge": {
             "description": "Options schema merge mode across inheritance chain.",
+            "type": "string"
+          },
+          "private_history_policy": {
+            "description": "Opaque provider-private transcript handling policy.",
             "type": "string"
           },
           "prompt_flag": {

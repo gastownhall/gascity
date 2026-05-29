@@ -436,6 +436,36 @@ func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 	}
 }
 
+func TestStopContinuationPatchBoundaryOrFresh(t *testing.T) {
+	now := time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)
+
+	safe := StopContinuationPatch(now, StopContinuationInput{
+		Provider:  "claude",
+		Integrity: ContinuationIntegrityBoundaryOrFresh,
+		Reason:    "drain-ack",
+		Boundary:  StopBoundaryAgentAck,
+	})
+	if safe["continuation_reset_pending"] != "" {
+		t.Fatalf("safe boundary set continuation_reset_pending = %q", safe["continuation_reset_pending"])
+	}
+	if safe["last_stop_boundary"] != string(StopBoundaryAgentAck) || safe["last_stop_boundary_verified_at"] == "" {
+		t.Fatalf("safe boundary metadata = %#v", safe)
+	}
+
+	unsafe := StopContinuationPatch(now, StopContinuationInput{
+		Provider:  "claude",
+		Integrity: ContinuationIntegrityBoundaryOrFresh,
+		Reason:    "city-stop",
+		Boundary:  StopBoundaryUnknown,
+	})
+	if unsafe["continuation_reset_pending"] != "true" {
+		t.Fatalf("unsafe boundary continuation_reset_pending = %q, want true", unsafe["continuation_reset_pending"])
+	}
+	if unsafe["continuation_reset_reason"] != "unknown-stop" {
+		t.Fatalf("unsafe boundary reset reason = %q", unsafe["continuation_reset_reason"])
+	}
+}
+
 func TestMetadataPatchApplyReturnsMergedCopy(t *testing.T) {
 	original := map[string]string{
 		"state":        string(StateAsleep),

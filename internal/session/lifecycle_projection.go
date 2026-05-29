@@ -615,6 +615,12 @@ func shouldResetContinuation(base BaseState, meta map[string]string, sleepReason
 	if strings.TrimSpace(meta["session_key"]) == "" && strings.TrimSpace(meta["started_config_hash"]) == "" {
 		return false
 	}
+	switch NormalizeStopContinuationIntegrity(meta[ProviderContinuationIntegrityMetadataKey]) {
+	case ContinuationIntegrityFreshOnly:
+		return true
+	case ContinuationIntegrityBoundaryOrFresh:
+		return !StopBoundaryVerified(StopBoundary(strings.TrimSpace(meta["last_stop_boundary"])))
+	}
 	switch strings.TrimSpace(sleepReason) {
 	case "idle", "idle-timeout", "no-wake-reason", "config-drift", "drained", "city-stop", "user-hold", "wait-hold", "rate_limit", "runtime-missing":
 		return false
