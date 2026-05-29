@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/mail"
@@ -22,6 +23,8 @@ const (
 	fromDisplayMetadataKey   = mail.FromDisplayMetadataKey
 	toSessionIDMetadataKey   = mail.ToSessionIDMetadataKey
 	toDisplayMetadataKey     = mail.ToDisplayMetadataKey
+
+	cachedSessionBeadRefreshInterval = 30 * time.Second
 )
 
 // Provider implements [mail.Provider] using [beads.Store] as the backend.
@@ -31,9 +34,12 @@ type Provider struct {
 }
 
 type sessionBeadCache struct {
-	mu      sync.Mutex
-	list    []beads.Bead
-	fetched bool
+	mu              sync.Mutex
+	list            []beads.Bead
+	fetchedAt       time.Time
+	refreshInterval time.Duration
+	now             func() time.Time
+	fetched         bool
 }
 
 // New returns a beadmail provider backed by the given store.
@@ -47,12 +53,13 @@ func New(store beads.Store) *Provider {
 // NewCached returns a beadmail provider backed by the given store with a
 // provider-local session enumeration cache. Command-scoped callers use this to
 // avoid repeated session scans during one command. Long-lived API providers use
-// it to keep steady-state mail reads cheap; they observe session-topology
-// changes when their owning controller rebuilds the provider.
+// it to keep steady-state mail reads cheap; they refresh session topology after
+// a bounded interval so new and closed sessions are observed without controller
+// restart.
 func NewCached(store beads.Store) *Provider {
 	return &Provider{
 		store:        store,
-		sessionCache: &sessionBeadCache{},
+		sessionCache: &sessionBeadCache{refreshInterval: cachedSessionBeadRefreshInterval},
 	}
 }
 
@@ -72,7 +79,8 @@ func (p *Provider) cachedSessionBeads() ([]beads.Bead, error) {
 func (c *sessionBeadCache) get(store beads.Store) ([]beads.Bead, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.fetched {
+	now := c.currentTime()
+	if c.fetched && c.isFresh(now) {
 		return c.list, nil
 	}
 	list, err := session.ListAllSessionBeads(store, beads.ListQuery{IncludeClosed: true})
@@ -80,8 +88,20 @@ func (c *sessionBeadCache) get(store beads.Store) ([]beads.Bead, error) {
 		return nil, err
 	}
 	c.list = list
+	c.fetchedAt = now
 	c.fetched = true
 	return list, nil
+}
+
+func (c *sessionBeadCache) currentTime() time.Time {
+	if c.now != nil {
+		return c.now()
+	}
+	return time.Now()
+}
+
+func (c *sessionBeadCache) isFresh(now time.Time) bool {
+	return c.refreshInterval > 0 && now.Sub(c.fetchedAt) < c.refreshInterval
 }
 
 // Send creates a message bead with subject in Title and body in Description.
