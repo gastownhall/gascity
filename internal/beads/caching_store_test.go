@@ -2695,3 +2695,67 @@ func containsString(values []string, want string) bool {
 	}
 	return false
 }
+
+// TestCachingStoreAppliesRoutedMetadataEventAfterPriorEventMutation reproduces
+// gastownhall/gascity#2210: a bead.updated event that stamps gc.routed_to
+// (written to the backing store by `gc sling` in another process) must be
+// applied to the cache even when the bead is already "locally mutated" by a
+// PRIOR applied event. ApplyEvent marks every applied event with a mutation
+// seq (noteMutationLocked), so a bead the controller learned about via an
+// earlier bead.created event is flagged locallyMutated without any pending
+// local write. Previously a metadata-changing event on such a bead was dropped
+// outright as a conflict, so the controller cache never learned gc.routed_to,
+// pool demand stayed at 0, and no session spawned until an unrelated later
+// event arrived after a reconcile cleared the mutation seq.
+//
+// The drop must still protect genuine recent local writes (those go through
+// noteLocalMutationLocked and set localBeadAt); this test only covers the
+// prior-event case, where the backing store already reflects the event and a
+// verification read is reliable.
+func TestCachingStoreAppliesRoutedMetadataEventAfterPriorEventMutation(t *testing.T) {
+	t.Parallel()
+	backing := beads.NewMemStore()
+
+	cs := beads.NewCachingStoreForTest(backing, nil)
+	if err := cs.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+
+	// `gc bd create` writes the bead to the backing store (dolt) in another
+	// process; the controller learns about it via a bead.created event. Create
+	// after Prime so the event is the cache's first sight of the bead and its
+	// apply sets the mutation seq (locallyMutated) without any local write.
+	created, err := backing.Create(beads.Bead{Title: "route me"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	createdJSON, err := json.Marshal(created)
+	if err != nil {
+		t.Fatalf("marshal created: %v", err)
+	}
+	cs.ApplyEvent("bead.created", json.RawMessage(createdJSON))
+
+	// `gc sling <pool> <bead>` stamps gc.routed_to in the backing store and
+	// emits a bead.updated event carrying the full bead (now routed).
+	if err := backing.SetMetadata(created.ID, "gc.routed_to", "pool/polecat"); err != nil {
+		t.Fatalf("SetMetadata: %v", err)
+	}
+	routed, err := backing.Get(created.ID)
+	if err != nil {
+		t.Fatalf("Get backing: %v", err)
+	}
+	routedJSON, err := json.Marshal(routed)
+	if err != nil {
+		t.Fatalf("marshal routed: %v", err)
+	}
+	cs.ApplyEvent("bead.updated", json.RawMessage(routedJSON))
+
+	got, err := cs.Get(created.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Metadata["gc.routed_to"] != "pool/polecat" {
+		t.Fatalf("gc.routed_to after sling-stamp event = %q, want %q (event dropped; pool demand stranded — #2210)",
+			got.Metadata["gc.routed_to"], "pool/polecat")
+	}
+}

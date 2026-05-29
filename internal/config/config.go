@@ -436,6 +436,27 @@ func (s *NamedSession) ModeOrDefault() string {
 	return s.Mode
 }
 
+// ExpandGenericRigNamedSessions stamps inline scope="rig" named sessions that
+// omit Dir into one concrete identity per configured rig.
+func ExpandGenericRigNamedSessions(cfg *City) {
+	if cfg == nil || len(cfg.NamedSessions) == 0 {
+		return
+	}
+	expanded := make([]NamedSession, 0, len(cfg.NamedSessions))
+	for _, ns := range cfg.NamedSessions {
+		if ns.Scope == "rig" && ns.Dir == "" {
+			for _, rig := range cfg.Rigs {
+				stamped := ns
+				stamped.Dir = rig.Name
+				expanded = append(expanded, stamped)
+			}
+			continue
+		}
+		expanded = append(expanded, ns)
+	}
+	cfg.NamedSessions = expanded
+}
+
 // FormulaLayers holds resolved formula directories for symlink materialization.
 // Each slice is ordered lowest→highest priority; later entries shadow earlier
 // ones by filename.
@@ -1577,6 +1598,26 @@ func (c ChatSessionsConfig) IdleTimeoutDuration() time.Duration {
 	return d
 }
 
+// LocalDoctorCheck is a city-local doctor check declared inline in city.toml
+// via [[doctor.check]]. Scripts use the same exit-code protocol as pack
+// doctor scripts: 0=OK, 1=Warning, 2+=Error.
+type LocalDoctorCheck struct {
+	// Name is the bare check name. The SDK injects the "local:" prefix;
+	// do not include it here.
+	Name string `toml:"name"`
+
+	// Script is the path to the check script, relative to the city root.
+	// Execution registration enforces containment within the city directory.
+	Script string `toml:"script"`
+
+	// Description is optional human-readable text shown in verbose output.
+	Description string `toml:"description,omitempty"`
+
+	// Fix is the optional path to a remediation script, relative to the
+	// city root.
+	Fix string `toml:"fix,omitempty"`
+}
+
 // DoctorConfig holds settings for the gc doctor surface. Operator-tunable
 // thresholds and policy toggles live here; mechanical structural checks
 // (broken-worktree pointers, missing files) remain hardcoded since they
@@ -1602,6 +1643,10 @@ type DoctorConfig struct {
 	// enforced by mechanical checks (no uncommitted changes, no
 	// unpushed commits, no stashes) — never by role identity.
 	NestedWorktreePrune bool `toml:"nested_worktree_prune,omitempty" jsonschema:"default=false"`
+
+	// Checks holds city-local inline doctor checks declared via
+	// [[doctor.check]] in city.toml.
+	Checks []LocalDoctorCheck `toml:"check,omitempty"`
 }
 
 const (
@@ -1801,6 +1846,15 @@ type DaemonConfig struct {
 	// default start/register budget; [session].startup_timeout may still
 	// extend the effective wait for a slow single session.
 	StartReadyTimeout string `toml:"start_ready_timeout,omitempty" jsonschema:"default=5m"`
+	// TickDebounce coalesces bursty event-driven ticks (pokeCh,
+	// controlDispatcherCh) within this window. A first event in a quiet
+	// period arms a timer; subsequent events arriving before the timer
+	// fires are dropped (the single delayed tick re-reads authoritative
+	// state covering all collapsed events). Zero (the default) disables
+	// debouncing — each event fires its own tick, matching pre-existing
+	// behavior. Duration string (e.g., "250ms", "500ms"). Trade-off:
+	// adds tick latency up to this value when set.
+	TickDebounce string `toml:"tick_debounce,omitempty"`
 }
 
 // AutoRestartOnDriftEnabled reports whether the supervisor should be
@@ -1824,6 +1878,20 @@ func (d *DaemonConfig) PatrolIntervalDuration() time.Duration {
 	dur, err := time.ParseDuration(d.PatrolInterval)
 	if err != nil {
 		return 30 * time.Second
+	}
+	return dur
+}
+
+// TickDebounceDuration returns the tick-debounce window as a
+// time.Duration. Returns 0 (debouncing disabled) on empty, unparseable,
+// or negative input.
+func (d *DaemonConfig) TickDebounceDuration() time.Duration {
+	if d.TickDebounce == "" {
+		return 0
+	}
+	dur, err := time.ParseDuration(d.TickDebounce)
+	if err != nil || dur < 0 {
+		return 0
 	}
 	return dur
 }
@@ -3339,10 +3407,6 @@ func validateNamedSessions(cfg *City, requireBackingTemplate bool) error {
 	seen := make(map[sessionKey]bool, len(cfg.NamedSessions))
 	reservedAliases := make(map[string]string, len(cfg.NamedSessions))
 	reservedSessionNames := make(map[string]string, len(cfg.NamedSessions))
-	agentsByTemplate := make(map[string]*Agent, len(cfg.Agents))
-	for i := range cfg.Agents {
-		agentsByTemplate[cfg.Agents[i].QualifiedName()] = &cfg.Agents[i]
-	}
 	alwaysByTemplate := make(map[string]int)
 	for i := range cfg.NamedSessions {
 		s := &cfg.NamedSessions[i]
@@ -3372,7 +3436,7 @@ func validateNamedSessions(cfg *City, requireBackingTemplate bool) error {
 			return fmt.Errorf("named_session %q: duplicate identity", s.QualifiedName())
 		}
 		seen[key] = true
-		agent := agentsByTemplate[s.TemplateQualifiedName()]
+		agent := FindAgent(cfg, s.TemplateQualifiedName())
 		if agent == nil {
 			if requireBackingTemplate {
 				return fmt.Errorf("named_session %q: referenced template not found after pack expansion", s.QualifiedName())

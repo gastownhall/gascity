@@ -106,7 +106,7 @@ schema = 2
 	prependDoctorJSONStubBinaries(t, "tmux", "git", "jq", "pgrep", "lsof")
 
 	var stdout, stderr bytes.Buffer
-	code := doDoctor(true, false, false, &stdout, &stderr)
+	code := doDoctor(true, false, false, false, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("gc doctor --fix = %d, want 0; stdout:\n%s\nstderr:\n%s", code, stdout.String(), stderr.String())
 	}
@@ -148,7 +148,7 @@ dir = "formulas"
 	prependDoctorJSONStubBinaries(t, "tmux", "git", "jq", "pgrep", "lsof")
 
 	var stdout, stderr bytes.Buffer
-	code := doDoctor(true, false, false, &stdout, &stderr)
+	code := doDoctor(true, false, false, false, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("gc doctor --fix = %d, want 0; stdout:\n%s\nstderr:\n%s", code, stdout.String(), stderr.String())
 	}
@@ -195,7 +195,7 @@ dir = "custom-formulas"
 	prependDoctorJSONStubBinaries(t, "tmux", "git", "jq", "pgrep", "lsof")
 
 	var stdout, stderr bytes.Buffer
-	code := doDoctor(true, false, false, &stdout, &stderr)
+	code := doDoctor(true, false, false, false, &stdout, &stderr)
 	if code == 0 {
 		t.Fatalf("gc doctor --fix unexpectedly passed with custom formulas dir; stdout:\n%s\nstderr:\n%s", stdout.String(), stderr.String())
 	}

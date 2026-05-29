@@ -102,3 +102,100 @@ func TestListQueryCreatedBeforeFiltersBeforeLimit(t *testing.T) {
 		t.Fatalf("got[0].ID = %q, want older-1", got[0].ID)
 	}
 }
+
+func TestListQueryHasFilterIncludesUpdatedBefore(t *testing.T) {
+	query := ListQuery{UpdatedBefore: time.Date(2026, 4, 20, 12, 0, 0, 0, time.UTC)}
+
+	if !query.HasFilter() {
+		t.Fatal("HasFilter() = false, want true for UpdatedBefore")
+	}
+}
+
+func TestListQueryUpdatedBeforeMatchesReferenceTimestampBoundaries(t *testing.T) {
+	cutoff := time.Date(2026, 4, 20, 12, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name string
+		bead Bead
+		want bool
+	}{
+		{
+			name: "updated before cutoff matches",
+			bead: Bead{
+				ID:        "updated-before",
+				Status:    "open",
+				CreatedAt: cutoff.Add(-time.Hour),
+				UpdatedAt: cutoff.Add(-time.Nanosecond),
+			},
+			want: true,
+		},
+		{
+			name: "updated equal cutoff is excluded",
+			bead: Bead{
+				ID:        "updated-equal",
+				Status:    "open",
+				CreatedAt: cutoff.Add(-time.Hour),
+				UpdatedAt: cutoff,
+			},
+			want: false,
+		},
+		{
+			name: "updated after cutoff is excluded even when created before",
+			bead: Bead{
+				ID:        "updated-after",
+				Status:    "open",
+				CreatedAt: cutoff.Add(-time.Hour),
+				UpdatedAt: cutoff.Add(time.Nanosecond),
+			},
+			want: false,
+		},
+		{
+			name: "zero updated falls back to created before cutoff",
+			bead: Bead{
+				ID:        "created-before",
+				Status:    "open",
+				CreatedAt: cutoff.Add(-time.Nanosecond),
+			},
+			want: true,
+		},
+		{
+			name: "zero updated falls back to created equal cutoff",
+			bead: Bead{
+				ID:        "created-equal",
+				Status:    "open",
+				CreatedAt: cutoff,
+			},
+			want: false,
+		},
+		{
+			name: "zero updated falls back to created after cutoff",
+			bead: Bead{
+				ID:        "created-after",
+				Status:    "open",
+				CreatedAt: cutoff.Add(time.Nanosecond),
+			},
+			want: false,
+		},
+	}
+
+	query := ListQuery{UpdatedBefore: cutoff}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := query.Matches(tt.bead); got != tt.want {
+				t.Fatalf("Matches() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestListQueryMatchesIgnoresUpdatedAtWhenUpdatedBeforeZero(t *testing.T) {
+	bead := Bead{
+		ID:        "future-update",
+		Status:    "open",
+		CreatedAt: time.Date(2026, 4, 20, 12, 0, 0, 0, time.UTC),
+		UpdatedAt: time.Date(2026, 4, 21, 12, 0, 0, 0, time.UTC),
+	}
+
+	if !(ListQuery{}).Matches(bead) {
+		t.Fatal("Matches() = false, want true when UpdatedBefore is zero")
+	}
+}

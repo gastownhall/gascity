@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "description": "Result payload for gc pack registry list.",
+  "required": ["schema_version", "ok", "count", "registries"],
+  "properties": {
+    "schema_version": {
+      "const": "1",
+      "description": "Version of this command result schema."
+    },
+    "ok": {
+      "const": true,
+      "description": "Whether the command completed successfully."
+    },
+    "count": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Number of configured registries returned."
+    },
+    "registries": {
+      "type": "array",
+      "description": "Configured pack registries known to this machine.",
+      "items": {
+        "type": "object",
+        "description": "One configured pack registry.",
+        "required": ["name", "source"],
+        "properties": {
+          "name": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9-]*$",
+            "maxLength": 64,
+            "description": "Registry name used in qualified pack references."
+          },
+          "source": {
+            "type": "string",
+            "description": "Catalog source recorded for this registry."
+          }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

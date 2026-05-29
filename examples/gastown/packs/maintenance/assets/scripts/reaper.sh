@@ -8,6 +8,11 @@
 # Runs as an exec order (no LLM, no agent, no wisp).
 set -euo pipefail
 
+# Trace bd invocations to $GC_BD_TRACE when set (no-op otherwise).
+__SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck disable=SC1091
+. "$__SCRIPT_DIR/_bd_trace.sh" "reaper"
+
 CITY="${GC_CITY_PATH:-${GC_CITY:-.}}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$SCRIPT_DIR/dolt-target.sh"

@@ -39,9 +39,9 @@ template = "reviewer"
 		t.Fatalf("WriteFile(city.toml): %v", err)
 	}
 
-	cfg, err := Load(fsys.OSFS{}, cityPath)
+	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, cityPath)
 	if err != nil {
-		t.Fatalf("Load(city.toml): %v", err)
+		t.Fatalf("LoadWithIncludes(city.toml): %v", err)
 	}
 	if len(cfg.NamedSessions) != 2 {
 		t.Fatalf("len(NamedSessions) = %d, want 2", len(cfg.NamedSessions))
@@ -198,14 +198,61 @@ template = "reviewer"
 		t.Fatalf("WriteFile(city.toml): %v", err)
 	}
 
-	cfg, err := Load(fsys.OSFS{}, cityPath)
+	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, cityPath)
 	if err != nil {
-		t.Fatalf("Load(city.toml): %v", err)
+		t.Fatalf("LoadWithIncludes(city.toml): %v", err)
 	}
 	if len(cfg.NamedSessions) != 1 {
 		t.Fatalf("len(NamedSessions) = %d, want 1", len(cfg.NamedSessions))
 	}
 	if got := cfg.NamedSessions[0].QualifiedName(); got != "reviewer" {
 		t.Fatalf("QualifiedName = %q, want compatibility default reviewer", got)
+	}
+}
+
+func TestPhase0NamedSessionConfig_ExpandsGenericRigScopedNamedSessionsPerRig(t *testing.T) {
+	cityPath := filepath.Join(t.TempDir(), "city.toml")
+	configText := `[workspace]
+name = "test-city"
+
+[[agent]]
+name = "reviewer"
+scope = "rig"
+start_command = "true"
+
+[[named_session]]
+template = "reviewer"
+scope = "rig"
+
+[[rigs]]
+name = "alpha"
+path = "/tmp/alpha"
+
+[[rigs]]
+name = "beta"
+path = "/tmp/beta"
+`
+	if err := os.WriteFile(cityPath, []byte(configText), 0o644); err != nil {
+		t.Fatalf("WriteFile(city.toml): %v", err)
+	}
+
+	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, cityPath)
+	if err != nil {
+		t.Fatalf("LoadWithIncludes(city.toml): %v", err)
+	}
+	if len(cfg.NamedSessions) != 2 {
+		t.Fatalf("len(NamedSessions) = %d, want 2", len(cfg.NamedSessions))
+	}
+	if got := cfg.NamedSessions[0].QualifiedName(); got != "alpha/reviewer" {
+		t.Fatalf("NamedSessions[0] = %q, want alpha/reviewer", got)
+	}
+	if got := cfg.NamedSessions[1].QualifiedName(); got != "beta/reviewer" {
+		t.Fatalf("NamedSessions[1] = %q, want beta/reviewer", got)
+	}
+	if got := cfg.NamedSessions[0].TemplateQualifiedName(); got != "alpha/reviewer" {
+		t.Fatalf("TemplateQualifiedName() = %q, want alpha/reviewer", got)
+	}
+	if agent := FindAgent(cfg, "alpha/reviewer"); agent == nil {
+		t.Fatal("FindAgent(alpha/reviewer) = nil, want backing template")
 	}
 }

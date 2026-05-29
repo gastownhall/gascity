@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"log"
 	"path"
 	"strings"
@@ -138,7 +139,10 @@ func releaseOrphanedPoolAssignments(
 			continue
 		}
 		assignee := strings.TrimSpace(wb.Assignee)
-		template := strings.TrimSpace(wb.Metadata["gc.routed_to"])
+		template := strings.TrimSpace(wb.Metadata["gc.run_target"])
+		if template == "" {
+			template = strings.TrimSpace(wb.Metadata["gc.routed_to"])
+		}
 		if template == "" {
 			continue
 		}
@@ -182,12 +186,64 @@ func releaseOrphanedPoolAssignments(
 		if !liveWorkAssignmentStillReleasable(ownerStore, wb.ID, assignee) {
 			continue
 		}
+		if !detachedProbeAllowsOrphanRelease(ownerStore, wb) {
+			continue
+		}
 		if !releaseOrphanedPoolAssignment(ownerStore, wb.ID) {
 			continue
 		}
 		released = append(released, releasedPoolAssignment{ID: wb.ID, Index: i})
 	}
 	return released
+}
+
+func detachedProbeAllowsOrphanRelease(store beads.Store, wb beads.Bead) bool {
+	spec := strings.TrimSpace(wb.Metadata[detachedProbeMetadataKey])
+	if spec == "" {
+		clearDetachedProbeErrorCount(wb.ID)
+		return true
+	}
+
+	result := probeDetachedWork(context.Background(), spec)
+	switch result.Status {
+	case detachedProbeAlive:
+		clearDetachedProbeErrorCount(wb.ID)
+		log.Printf("releaseOrphanedPoolAssignments: skipping release: detached probe alive for %s: %s", wb.ID, spec)
+		return false
+	case detachedProbeDead:
+		clearDetachedProbeErrorCount(wb.ID)
+		log.Printf("releaseOrphanedPoolAssignments: releasing %s: detached probe dead: %s", wb.ID, spec)
+		clearDetachedProbeMetadata(store, wb.ID)
+		return true
+	case detachedProbeError, detachedProbeTimeout:
+		count := incrementDetachedProbeErrorCount(wb.ID)
+		if count < detachedProbeErrorThreshold {
+			log.Printf("releaseOrphanedPoolAssignments: detached probe %s for %s: %v (error %d/%d)", result.Status, wb.ID, result.Err, count, detachedProbeErrorThreshold)
+			return false
+		}
+		clearDetachedProbeErrorCount(wb.ID)
+		log.Printf("releaseOrphanedPoolAssignments: releasing %s: detached probe %s after %d errors: %v", wb.ID, result.Status, count, result.Err)
+		clearDetachedProbeMetadata(store, wb.ID)
+		return true
+	default:
+		count := incrementDetachedProbeErrorCount(wb.ID)
+		if count < detachedProbeErrorThreshold {
+			log.Printf("releaseOrphanedPoolAssignments: detached probe unknown result for %s: %q (error %d/%d)", wb.ID, result.Status, count, detachedProbeErrorThreshold)
+			return false
+		}
+		clearDetachedProbeErrorCount(wb.ID)
+		clearDetachedProbeMetadata(store, wb.ID)
+		return true
+	}
+}
+
+func clearDetachedProbeMetadata(store beads.Store, id string) {
+	if store == nil || id == "" {
+		return
+	}
+	if err := store.SetMetadata(id, detachedProbeMetadataKey, ""); err != nil {
+		log.Printf("releaseOrphanedPoolAssignments: clearing detached probe metadata for %s: %v", id, err)
+	}
 }
 
 const unresolvedOpenSessionStoreRef = "\x00unresolved"
@@ -245,7 +301,11 @@ func storeForPoolAssignment(cfg *config.City, cityStore beads.Store, rigStores m
 	if cfg == nil || len(rigStores) == 0 {
 		return cityStore
 	}
-	if routed := strings.TrimSpace(wb.Metadata["gc.routed_to"]); routed != "" {
+	routed := strings.TrimSpace(wb.Metadata["gc.run_target"])
+	if routed == "" {
+		routed = strings.TrimSpace(wb.Metadata["gc.routed_to"])
+	}
+	if routed != "" {
 		if slash := strings.IndexByte(routed, '/'); slash > 0 {
 			if store := rigStores[routed[:slash]]; store != nil {
 				return store
@@ -267,7 +327,10 @@ func isRecoverableUnassignedInProgressPoolWork(cfg *config.City, wb beads.Bead) 
 	if wb.Status != "in_progress" || strings.TrimSpace(wb.Assignee) != "" {
 		return false
 	}
-	template := strings.TrimSpace(wb.Metadata["gc.routed_to"])
+	template := strings.TrimSpace(wb.Metadata["gc.run_target"])
+	if template == "" {
+		template = strings.TrimSpace(wb.Metadata["gc.routed_to"])
+	}
 	if template == "" {
 		return false
 	}

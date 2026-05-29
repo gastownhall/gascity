@@ -1351,7 +1351,6 @@ func TestSessionReason_FallsThroughToProviderForSleepingAttachment(t *testing.T)
 			"template":     "worker",
 			"session_name": "sleeping-worker",
 			"state":        "asleep",
-			"sleep_reason": "idle-timeout",
 		},
 	}
 	info := session.Info{
@@ -1381,6 +1380,49 @@ func TestSessionReason_FallsThroughToProviderForSleepingAttachment(t *testing.T)
 	}
 }
 
+func TestSessionReason_SleepReasonOverridesWakeReason(t *testing.T) {
+	provider := runtime.NewFake()
+	if err := provider.Start(context.Background(), "sleeping-worker", runtime.Config{Command: "echo"}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	cfg := &config.City{}
+	bead := beads.Bead{
+		ID:     "gc-1",
+		Status: "open",
+		Metadata: map[string]string{
+			"template":     "worker",
+			"session_name": "sleeping-worker",
+			"state":        "asleep",
+			"sleep_reason": "idle-timeout",
+		},
+	}
+	info := session.Info{
+		ID:          "gc-1",
+		Template:    "worker",
+		State:       session.StateAsleep,
+		SessionName: "sleeping-worker",
+		Attached:    false,
+	}
+	wrapped := &attachmentCachingProvider{
+		Provider: provider,
+		cache: buildAttachmentCache([]session.Info{info}, func(info session.Info) (bool, error) {
+			return info.SessionName == "sleeping-worker", nil
+		}),
+	}
+
+	reason := sessionReason(
+		info,
+		map[string]beads.Bead{bead.ID: bead},
+		cfg,
+		wrapped,
+		nil,
+		nil,
+	)
+	if reason != "idle-timeout" {
+		t.Fatalf("sessionReason = %q, want idle-timeout before wake reasons", reason)
+	}
+}
+
 func TestSessionReason_ResetPendingLiveRuntimeOverridesOtherReasons(t *testing.T) {
 	provider := runtime.NewFake()
 	if err := provider.Start(context.Background(), "worker-live", runtime.Config{Command: "echo"}); err != nil {
@@ -1396,12 +1438,13 @@ func TestSessionReason_ResetPendingLiveRuntimeOverridesOtherReasons(t *testing.T
 		ID:     "gc-1",
 		Status: "open",
 		Metadata: map[string]string{
-			"template":          "worker",
-			"session_name":      "worker-live",
-			"state":             "asleep",
-			"sleep_reason":      "user-hold",
-			"pin_awake":         "true",
-			"restart_requested": "true",
+			"template":                  "worker",
+			"session_name":              "worker-live",
+			"state":                     "asleep",
+			"sleep_reason":              "user-hold",
+			"pin_awake":                 "true",
+			"restart_requested":         "true",
+			sessionCircuitStateMetadata: circuitOpen.String(),
 		},
 	}
 	before := cloneSessionReasonMetadata(bead.Metadata)
@@ -1459,6 +1502,198 @@ func TestSessionReason_ResetPendingNotLiveFallsBack(t *testing.T) {
 		t.Fatalf("sessionReason = %q, want user-hold for non-live runtime", reason)
 	}
 	assertStringMapEqual(t, bead.Metadata, before)
+}
+
+func TestSessionReason_CircuitOpenMetadataVisible(t *testing.T) {
+	bead := beads.Bead{
+		ID:     "gc-1",
+		Status: "open",
+		Metadata: map[string]string{
+			"template":                     "worker",
+			"session_name":                 "worker-circuit",
+			"state":                        "asleep",
+			"sleep_reason":                 "user-hold",
+			sessionCircuitStateMetadata:    circuitOpen.String(),
+			sessionCircuitRestartsMetadata: `["2026-04-10T12:00:00Z"]`,
+		},
+	}
+	before := cloneSessionReasonMetadata(bead.Metadata)
+	info := session.Info{
+		ID:          bead.ID,
+		Template:    "worker",
+		State:       session.StateAsleep,
+		SessionName: "worker-circuit",
+	}
+
+	reason := sessionReason(
+		info,
+		map[string]beads.Bead{bead.ID: bead},
+		nil,
+		runtime.NewFake(),
+		nil,
+		nil,
+	)
+	if reason != "circuit-open" {
+		t.Fatalf("sessionReason = %q, want circuit-open", reason)
+	}
+	assertStringMapEqual(t, bead.Metadata, before)
+}
+
+func TestSessionReason_CircuitOpenNonMatchingMetadataFallsBack(t *testing.T) {
+	bead := beads.Bead{
+		ID:     "gc-1",
+		Status: "open",
+		Metadata: map[string]string{
+			"template":                  "worker",
+			"session_name":              "worker-circuit",
+			"state":                     "asleep",
+			"sleep_reason":              "user-hold",
+			sessionCircuitStateMetadata: "open",
+		},
+	}
+	before := cloneSessionReasonMetadata(bead.Metadata)
+	info := session.Info{
+		ID:          bead.ID,
+		Template:    "worker",
+		State:       session.StateAsleep,
+		SessionName: "worker-circuit",
+	}
+
+	reason := sessionReason(
+		info,
+		map[string]beads.Bead{bead.ID: bead},
+		nil,
+		runtime.NewFake(),
+		nil,
+		nil,
+	)
+	if reason != "user-hold" {
+		t.Fatalf("sessionReason = %q, want user-hold for non-matching circuit metadata", reason)
+	}
+	assertStringMapEqual(t, bead.Metadata, before)
+}
+
+func TestSessionReason_PriorityMatrix(t *testing.T) {
+	const agentName = "worker"
+	cfg := &config.City{
+		Agents: []config.Agent{{
+			Name:              agentName,
+			MinActiveSessions: intPtr(0),
+			MaxActiveSessions: intPtr(3),
+		}},
+	}
+	poolDesired := map[string]int{agentName: 1}
+
+	newBead := func(metadata map[string]string) beads.Bead {
+		base := map[string]string{
+			"template":     agentName,
+			"session_name": "worker-session",
+			"state":        "asleep",
+		}
+		for k, v := range metadata {
+			base[k] = v
+		}
+		return beads.Bead{
+			ID:       "gc-1",
+			Status:   "open",
+			Metadata: base,
+		}
+	}
+	newInfo := func(sessionName string) session.Info {
+		return session.Info{
+			ID:          "gc-1",
+			Template:    agentName,
+			State:       session.StateAsleep,
+			SessionName: sessionName,
+		}
+	}
+
+	tests := []struct {
+		name        string
+		metadata    map[string]string
+		cfg         *config.City
+		poolDesired map[string]int
+		live        bool
+		want        string
+	}{
+		{
+			name: "reset-pending beats circuit open and sleep",
+			metadata: map[string]string{
+				"restart_requested":         "true",
+				sessionCircuitStateMetadata: circuitOpen.String(),
+				"sleep_reason":              "idle-timeout",
+				"pool_slot":                 "1",
+			},
+			cfg:         cfg,
+			poolDesired: poolDesired,
+			live:        true,
+			want:        resetPendingReason,
+		},
+		{
+			name: "circuit-open beats sleep reason",
+			metadata: map[string]string{
+				sessionCircuitStateMetadata: circuitOpen.String(),
+				"sleep_reason":              "idle-timeout",
+				"pool_slot":                 "1",
+			},
+			cfg:         cfg,
+			poolDesired: poolDesired,
+			want:        circuitOpenReason,
+		},
+		{
+			name: "sleep reason beats wake config",
+			metadata: map[string]string{
+				"sleep_reason": "idle-timeout",
+				"pool_slot":    "1",
+			},
+			cfg:         cfg,
+			poolDesired: poolDesired,
+			want:        "idle-timeout",
+		},
+		{
+			name: "wake config falls through after blocking states",
+			metadata: map[string]string{
+				"pool_slot": "1",
+			},
+			cfg:         cfg,
+			poolDesired: poolDesired,
+			want:        string(WakeConfig),
+		},
+		{
+			name: "no config fallback remains empty reason",
+			metadata: map[string]string{
+				"pool_slot": "1",
+			},
+			want: "-",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			provider := runtime.NewFake()
+			sessionName := "worker-session"
+			if tt.live {
+				if err := provider.Start(context.Background(), sessionName, runtime.Config{Command: "echo"}); err != nil {
+					t.Fatalf("Start: %v", err)
+				}
+			}
+			bead := newBead(tt.metadata)
+			before := cloneSessionReasonMetadata(bead.Metadata)
+
+			reason := sessionReason(
+				newInfo(sessionName),
+				map[string]beads.Bead{bead.ID: bead},
+				tt.cfg,
+				provider,
+				tt.poolDesired,
+				nil,
+			)
+			if reason != tt.want {
+				t.Fatalf("sessionReason = %q, want %q", reason, tt.want)
+			}
+			assertStringMapEqual(t, bead.Metadata, before)
+		})
+	}
 }
 
 func cloneSessionReasonMetadata(in map[string]string) map[string]string {

@@ -117,6 +117,13 @@ const (
 	// each scheduled maintenance cycle completes or fails.
 	StoreMaintenanceDone   = "gc.store.maintenance.done"
 	StoreMaintenanceFailed = "gc.store.maintenance.failed"
+
+	// Postgres credential resolution. Emitted by the bd-env projection
+	// path on every successful pgauth resolve. The payload identifies
+	// the scope and the resolution tier that supplied the value; it
+	// MUST NOT carry the password value (asserted by
+	// TestPostgresEventOmitsPassword).
+	PostgresCredentialResolved = "pg.credential_resolved"
 )
 
 // KnownEventTypes lists every event-type constant this package defines.
@@ -148,6 +155,7 @@ var KnownEventTypes = []string{
 	ExtMsgInbound, ExtMsgOutbound,
 	EventsRotated,
 	StoreMaintenanceDone, StoreMaintenanceFailed,
+	PostgresCredentialResolved,
 }
 
 // Event is a single recorded occurrence in the system.

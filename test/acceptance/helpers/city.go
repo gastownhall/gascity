@@ -122,6 +122,20 @@ func (c *City) AppendToConfig(extra string) {
 	c.WriteConfig(existing + extra)
 }
 
+// AppendToPack appends raw TOML content to the city root pack.toml.
+func (c *City) AppendToPack(extra string) {
+	c.t.Helper()
+	packPath := filepath.Join(c.Dir, "pack.toml")
+	f, err := os.OpenFile(packPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		c.t.Fatalf("opening pack.toml: %v", err)
+	}
+	defer f.Close() //nolint:errcheck // test helper failure is already captured on write
+	if _, err := f.WriteString(extra); err != nil {
+		c.t.Fatalf("appending to pack.toml: %v", err)
+	}
+}
+
 // WriteConfig overwrites city.toml with the given content.
 func (c *City) WriteConfig(toml string) {
 	c.t.Helper()
@@ -141,15 +155,7 @@ func (c *City) WriteV1AgentBlock(name string, fields ...string) {
 	}
 	writeTOMLFields(&b, fields)
 
-	packPath := filepath.Join(c.Dir, "pack.toml")
-	f, err := os.OpenFile(packPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
-	if err != nil {
-		c.t.Fatalf("opening pack.toml: %v", err)
-	}
-	defer f.Close() //nolint:errcheck // test helper failure is already captured on write
-	if _, err := f.WriteString(b.String()); err != nil {
-		c.t.Fatalf("appending v1 agent block to pack.toml: %v", err)
-	}
+	c.AppendToPack(b.String())
 }
 
 // WriteV2AgentDir writes a convention-discovered agent under the city root pack.

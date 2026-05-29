@@ -283,6 +283,7 @@ func DrainAckStopPendingPatch(now time.Time) MetadataPatch {
 func SleepPatch(now time.Time, reason string) MetadataPatch {
 	return MetadataPatch{
 		"state":                     string(StateAsleep),
+		"state_reason":              "",
 		"sleep_reason":              reason,
 		"last_woke_at":              "",
 		"pending_create_claim":      "",

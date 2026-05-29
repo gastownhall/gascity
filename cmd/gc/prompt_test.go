@@ -1049,6 +1049,120 @@ func TestEmbeddedMayorPromptRendersProviderSpecificSlashNote(t *testing.T) {
 	}
 }
 
+func TestInstructionsFileForAgentClaudeReturnsCLAUDEMD(t *testing.T) {
+	ws := &config.Workspace{Provider: "claude"}
+	got := instructionsFileForAgent(&config.Agent{}, ws, nil)
+	if got != "CLAUDE.md" {
+		t.Errorf("InstructionsFile = %q, want %q", got, "CLAUDE.md")
+	}
+}
+
+func TestInstructionsFileForAgentCodexReturnsAGENTSMD(t *testing.T) {
+	ws := &config.Workspace{Provider: "codex"}
+	got := instructionsFileForAgent(&config.Agent{}, ws, nil)
+	if got != "AGENTS.md" {
+		t.Errorf("InstructionsFile = %q, want %q", got, "AGENTS.md")
+	}
+}
+
+func TestInstructionsFileForAgentDefaultsToAGENTSMDWhenUnset(t *testing.T) {
+	got := instructionsFileForAgent(&config.Agent{}, &config.Workspace{}, nil)
+	if got != "AGENTS.md" {
+		t.Errorf("InstructionsFile = %q, want %q (default)", got, "AGENTS.md")
+	}
+}
+
+func TestInstructionsFileForAgentResolvesAgentOverWorkspace(t *testing.T) {
+	ws := &config.Workspace{Provider: "codex"}
+	a := &config.Agent{Provider: "claude"}
+	got := instructionsFileForAgent(a, ws, nil)
+	if got != "CLAUDE.md" {
+		t.Errorf("InstructionsFile = %q, want %q (agent.Provider beats workspace.Provider)", got, "CLAUDE.md")
+	}
+}
+
+func TestInstructionsFileForAgentUsesCityOverride(t *testing.T) {
+	// A custom provider declared in city.toml with InstructionsFile set
+	// takes precedence over its builtin family default.
+	cityProviders := map[string]config.ProviderSpec{
+		"custom-claude": {
+			Command:          "claude-fork",
+			InstructionsFile: "INSTRUCTIONS.md",
+		},
+	}
+	ws := &config.Workspace{Provider: "custom-claude"}
+	got := instructionsFileForAgent(&config.Agent{}, ws, cityProviders)
+	if got != "INSTRUCTIONS.md" {
+		t.Errorf("InstructionsFile = %q, want %q (city override)", got, "INSTRUCTIONS.md")
+	}
+}
+
+func TestInstructionsFileForAgentFallsBackToBuiltinFamily(t *testing.T) {
+	// A custom provider with empty InstructionsFile but a builtin family
+	// inherits the family's filename. `kiro` (a claude-family fork) is the
+	// canonical case from internal/config/chain_test.go; here we mimic that
+	// pattern with a synthetic provider whose Base points at "claude".
+	base := "claude"
+	cityProviders := map[string]config.ProviderSpec{
+		"my-fork": {
+			Base:    &base,
+			Command: "my-fork",
+		},
+	}
+	ws := &config.Workspace{Provider: "my-fork"}
+	got := instructionsFileForAgent(&config.Agent{}, ws, cityProviders)
+	if got != "CLAUDE.md" {
+		t.Errorf("InstructionsFile = %q, want %q (inherited from claude family)", got, "CLAUDE.md")
+	}
+}
+
+func TestRenderedCrewPromptShowsProviderSpecificInstructionsFile(t *testing.T) {
+	// Regression test for Wasteland w-d4dba7b056: the Gastown pack's crew
+	// prompt should reference the provider-specific instruction filename as
+	// the fallback for missing/empty quality-gate guidance.
+	//
+	// Two assertions: (a) the shipped crew.template.md references the
+	// {{ .InstructionsFile }} placeholder in the expected backtick pattern,
+	// and (b) renderPrompt substitutes that placeholder to the right value
+	// for each provider via buildTemplateData. Asserting (a)+(b)
+	// independently keeps the test stable when crew.template.md gains new
+	// fragment includes that would otherwise break a full-render assertion.
+	crewPath := filepath.Join("..", "..", "examples", "gastown", "packs", "gastown", "assets", "prompts", "crew.template.md")
+	source, err := os.ReadFile(crewPath)
+	if err != nil {
+		t.Skipf("crew.template.md not readable at %s: %v", crewPath, err)
+	}
+	if !strings.Contains(string(source), "`{{ .InstructionsFile }}`") {
+		t.Fatalf("crew.template.md missing fallback marker `{{ .InstructionsFile }}` (w-d4dba7b056 regression)")
+	}
+
+	cases := []struct {
+		providerKey string
+		wantFile    string
+	}{
+		{"claude", "CLAUDE.md"},
+		{"codex", "AGENTS.md"},
+		{"", "AGENTS.md"},
+	}
+
+	const tmplBody = "fallback: (`{{ .InstructionsFile }}`)"
+	for _, tc := range cases {
+		f := fsys.NewFake()
+		f.Files["/city/prompts/p.template.md"] = []byte(tmplBody)
+		ws := &config.Workspace{Provider: tc.providerKey}
+		got := renderPrompt(f, "/city", "test-city", "prompts/p.template.md",
+			PromptContext{
+				ProviderKey:      tc.providerKey,
+				InstructionsFile: instructionsFileForAgent(&config.Agent{}, ws, nil),
+			},
+			"", io.Discard, nil, nil, nil)
+		want := "fallback: (`" + tc.wantFile + "`)"
+		if got != want {
+			t.Errorf("ProviderKey=%q: rendered = %q, want %q", tc.providerKey, got, want)
+		}
+	}
+}
+
 func TestProviderDisplayNameFallsBackToKeyForUnknownProvider(t *testing.T) {
 	ws := &config.Workspace{Provider: "totally-unknown"}
 	a := &config.Agent{}

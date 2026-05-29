@@ -94,7 +94,10 @@ for line in sys.stdin:
         # Send update notification with echoed text
         notify("session/update", {
             "sessionId": session_id,
-            "content": [{"type": "text", "text": "echo: " + text}]
+            "update": {
+                "sessionUpdate": "agent_message_chunk",
+                "content": {"type": "text", "text": "echo: " + text}
+            }
         })
         # Send prompt response
         respond(msg_id, {})
@@ -619,9 +622,13 @@ func TestDispatch_RoutesUpdateNotification(t *testing.T) {
 		pending:      make(map[int64]chan JSONRPCMessage),
 	}
 
+	contentJSON, _ := json.Marshal(ContentBlock{Type: "text", Text: "hello"})
 	params, _ := json.Marshal(SessionUpdateParams{
 		SessionID: "s1",
-		Content:   []ContentBlock{{Type: "text", Text: "hello"}},
+		Update: SessionUpdateContent{
+			Type:    "agent_message_chunk",
+			Content: contentJSON,
+		},
 	})
 	sc.dispatch(JSONRPCMessage{
 		JSONRPC: "2.0",
@@ -636,6 +643,158 @@ func TestDispatch_RoutesUpdateNotification(t *testing.T) {
 
 	if sc.getLastActivity().IsZero() {
 		t.Error("lastActivity should be set after update")
+	}
+}
+
+func TestHandleUpdate_Variants(t *testing.T) {
+	tests := []struct {
+		name       string
+		update     map[string]any
+		wantOutput string
+		wantActive bool
+	}{
+		{
+			name: "agent_message_chunk with text",
+			update: map[string]any{
+				"sessionUpdate": "agent_message_chunk",
+				"content":       map[string]any{"type": "text", "text": "hello"},
+			},
+			wantOutput: "hello",
+			wantActive: true,
+		},
+		{
+			name: "tool_call with title",
+			update: map[string]any{
+				"sessionUpdate": "tool_call",
+				"title":         "Read",
+			},
+			wantOutput: "[tool: Read]",
+			wantActive: true,
+		},
+		{
+			name: "agent_message_chunk with multiline text",
+			update: map[string]any{
+				"sessionUpdate": "agent_message_chunk",
+				"content":       map[string]any{"type": "text", "text": "line1\nline2\nline3"},
+			},
+			wantOutput: "line1\nline2\nline3",
+			wantActive: true,
+		},
+		{
+			name: "tool_call_update with title and content",
+			update: map[string]any{
+				"sessionUpdate": "tool_call_update",
+				"title":         "Bash",
+				"content": []map[string]any{{
+					"type":    "content",
+					"content": map[string]any{"type": "text", "text": "output"},
+				}},
+			},
+			wantOutput: "[tool: Bash]\noutput",
+			wantActive: true,
+		},
+		{
+			name: "tool_call content without title",
+			update: map[string]any{
+				"sessionUpdate": "tool_call",
+				"content": []map[string]any{{
+					"type":    "content",
+					"content": map[string]any{"type": "text", "text": "first\nsecond"},
+				}},
+			},
+			wantOutput: "first\nsecond",
+			wantActive: true,
+		},
+		{
+			name: "unknown variant still updates lastActivity",
+			update: map[string]any{
+				"sessionUpdate": "usage_update",
+			},
+			wantOutput: "",
+			wantActive: true,
+		},
+		{
+			name: "agent_thought_chunk",
+			update: map[string]any{
+				"sessionUpdate": "agent_thought_chunk",
+				"content":       map[string]any{"type": "text", "text": "thinking..."},
+			},
+			wantOutput: "thinking...",
+			wantActive: true,
+		},
+		{
+			name: "non-text content block ignored",
+			update: map[string]any{
+				"sessionUpdate": "agent_message_chunk",
+				"content":       map[string]any{"type": "image", "data": "base64..."},
+			},
+			wantOutput: "",
+			wantActive: true,
+		},
+		{
+			name: "null content on chunk type",
+			update: map[string]any{
+				"sessionUpdate": "agent_message_chunk",
+			},
+			wantOutput: "",
+			wantActive: true,
+		},
+		{
+			name: "user_message_chunk with text",
+			update: map[string]any{
+				"sessionUpdate": "user_message_chunk",
+				"content":       map[string]any{"type": "text", "text": "user input"},
+			},
+			wantOutput: "user input",
+			wantActive: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sc := &sessionConn{outputBufMax: 100}
+			params, _ := json.Marshal(map[string]any{
+				"sessionId": "s1",
+				"update":    tt.update,
+			})
+			sc.dispatch(JSONRPCMessage{
+				JSONRPC: "2.0",
+				Method:  "session/update",
+				Params:  params,
+			})
+
+			output := sc.peekLines(0)
+			if output != tt.wantOutput {
+				t.Errorf("output = %q, want %q", output, tt.wantOutput)
+			}
+			if tt.wantActive && sc.getLastActivity().IsZero() {
+				t.Error("lastActivity should be set")
+			}
+		})
+	}
+}
+
+func TestHandleUpdate_LegacyContentFallback(t *testing.T) {
+	sc := &sessionConn{outputBufMax: 100}
+	params, _ := json.Marshal(map[string]any{
+		"sessionId": "s1",
+		"content": []map[string]any{{
+			"type": "text",
+			"text": "legacy line1\nlegacy line2",
+		}},
+	})
+	sc.dispatch(JSONRPCMessage{
+		JSONRPC: "2.0",
+		Method:  "session/update",
+		Params:  params,
+	})
+
+	output := sc.peekLines(0)
+	if output != "legacy line1\nlegacy line2" {
+		t.Errorf("output = %q, want %q", output, "legacy line1\nlegacy line2")
+	}
+	if sc.getLastActivity().IsZero() {
+		t.Error("lastActivity should be set")
 	}
 }
 
@@ -725,21 +884,29 @@ func TestStartLongSocketPathUsesShortSocketName(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(root) })
 	const name = "control-dispatcher"
+	// Unix socket sun_path is 104 bytes on macOS / 108 on Linux. Use the
+	// macOS limit so the constructed path binds on either platform.
+	const sockPathLimit = 104
+	// Step by a single byte per iteration: the valid window (legacy too
+	// long, short fits) is only a few bytes wide, so a 10-byte step (as the
+	// original "deep-path-" repeater used) can skip past it entirely
+	// depending on len(root) — root length varies because os.MkdirTemp's
+	// random suffix is a uint32 stringified to a variable number of digits.
 	longDir := ""
-	for i := 1; i <= 32; i++ {
-		candidate := filepath.Join(root, strings.Repeat("deep-path-", i), "acp")
+	for i := 1; i <= 128; i++ {
+		candidate := filepath.Join(root, strings.Repeat("x", i), "acp")
 		p := NewProviderWithDir(candidate, Config{
 			HandshakeTimeout:  5 * time.Second,
 			NudgeBusyTimeout:  2 * time.Second,
 			OutputBufferLines: 100,
 		})
-		if len(p.legacySockPath(name)) > 108 && len(p.sockPath(name)) < 108 {
+		if len(p.legacySockPath(name)) > sockPathLimit && len(p.sockPath(name)) < sockPathLimit {
 			longDir = candidate
 			break
 		}
 	}
 	if longDir == "" {
-		t.Fatal("failed to construct path where legacy socket is too long but short socket fits")
+		t.Skipf("cannot construct path where legacy socket exceeds %d bytes but short socket fits; len(root)=%d (likely TMPDIR=%q too long)", sockPathLimit, len(root), os.TempDir())
 	}
 	if err := os.MkdirAll(longDir, 0o755); err != nil {
 		t.Fatalf("mkdir longDir: %v", err)

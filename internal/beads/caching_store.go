@@ -50,6 +50,13 @@ type CachingStore struct {
 	problemf     func(string)
 	problemLog   map[string]cacheProblemLogState
 
+	// lastReconcileLogAt rate-limits the per-reconcile success log line
+	// emitted by runReconciliation. Without this, a busy cache at SMALL
+	// cadence (30 s) would still produce 2 lines/min — and at faster test
+	// cadences would flood logs. cacheReconcileSuccessLogWindow caps the
+	// rate at one line per minute, matching cacheProblemLogWindow.
+	lastReconcileLogAt time.Time
+
 	// latencyWindow holds the most recent reconciliation bd-list
 	// durations for adaptive cadence decisions. Bounded at
 	// cacheLatencyWindowSize.
@@ -121,6 +128,11 @@ const (
 	cacheReconcileIntervalLarge  = 120 * time.Second
 	cacheProblemLogWindow        = time.Minute
 	cacheReconcileFailureBackoff = time.Minute
+	// cacheReconcileSuccessLogWindow rate-limits the per-reconcile success
+	// log line. Reuses the one-minute pattern from cacheProblemLogWindow so
+	// the reconciler's footprint in the operator-visible log stays bounded
+	// regardless of cadence.
+	cacheReconcileSuccessLogWindow = time.Minute
 )
 
 // StaggerOption configures the deterministic startup stagger applied

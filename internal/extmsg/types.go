@@ -153,7 +153,15 @@ type AdapterCapabilities struct {
 // and case-insensitive matching on the receiver does not bridge the
 // underscore difference (so `ReplyToMessageID` would not match the
 // adapter's `reply_to_message_id` tag and the field would silently zero).
+//
+// SessionID is the originating gc session id. Adapters that need it for
+// per-session behavior (e.g. Slack `chat:write.customize` identity
+// overrides) read this field directly. Until gc-kvt landed, gc forwarded
+// the session id under `Metadata["source_session_id"]` instead;
+// adapters may still honor that key as a legacy fallback for old gc
+// binaries, but new code should rely on SessionID.
 type PublishRequest struct {
+	SessionID        string            `json:"session_id,omitempty"`
 	Conversation     ConversationRef   `json:"conversation"`
 	Text             string            `json:"text"`
 	ReplyToMessageID string            `json:"reply_to_message_id,omitempty"`

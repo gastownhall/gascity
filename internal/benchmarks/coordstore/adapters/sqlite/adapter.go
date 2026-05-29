@@ -18,6 +18,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -64,6 +65,10 @@ func (a *Adapter) Open(ctx context.Context, cfg coordstore.Config) error {
 	if _, err := writeDB.ExecContext(ctx, schema); err != nil {
 		writeDB.Close() //nolint:errcheck
 		return fmt.Errorf("sqlite: apply schema: %w", err)
+	}
+	if err := a.recoverSequence(ctx, writeDB); err != nil {
+		writeDB.Close() //nolint:errcheck
+		return err
 	}
 
 	// Read connection pool: WAL allows concurrent reads even during writes.
@@ -153,6 +158,37 @@ func (a *Adapter) Reset(ctx context.Context) error {
 // nextID generates a unique record ID.
 func (a *Adapter) nextID() string {
 	return fmt.Sprintf("sq-%d", a.seq.Add(1))
+}
+
+func (a *Adapter) recoverSequence(ctx context.Context, db *sql.DB) error {
+	rows, err := db.QueryContext(ctx, `
+SELECT id FROM records WHERE id LIKE ?
+UNION ALL
+SELECT id FROM ephemeral WHERE id LIKE ?`, "sq-%", "sq-%")
+	if err != nil {
+		return fmt.Errorf("sqlite: recover id sequence: %w", err)
+	}
+	defer rows.Close() //nolint:errcheck
+	var maxSeq int64
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return fmt.Errorf("sqlite: recover id sequence scan: %w", err)
+		}
+		raw := strings.TrimPrefix(id, "sq-")
+		value, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil {
+			continue
+		}
+		if value > maxSeq {
+			maxSeq = value
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("sqlite: recover id sequence rows: %w", err)
+	}
+	a.seq.Store(maxSeq)
+	return nil
 }
 
 // --- FR-1: CRUD ---

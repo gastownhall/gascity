@@ -458,7 +458,7 @@ func initAndHookDir(cityPath, dir, prefix string) error {
 	if usesPostgres, err := scopeUsesPostgresBackendForInit(cityPath, dir); err != nil {
 		return err
 	} else if usesPostgres {
-		if err := installBeadHooks(dir); err != nil {
+		if err := installBeadHooks(dir, cityPath); err != nil {
 			return fmt.Errorf("install hooks at %s: %w", dir, err)
 		}
 		return nil
@@ -495,7 +495,7 @@ func initAndHookDir(cityPath, dir, prefix string) error {
 		}
 	}
 	// Non-fatal: hooks are convenience (event forwarding), not critical.
-	if err := installBeadHooks(dir); err != nil {
+	if err := installBeadHooks(dir, cityPath); err != nil {
 		return fmt.Errorf("install hooks at %s: %w", dir, err)
 	}
 	return nil

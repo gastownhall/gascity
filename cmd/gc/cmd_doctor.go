@@ -12,6 +12,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doctor"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/pathutil"
 	"github.com/spf13/cobra"
 )
 
@@ -19,10 +20,11 @@ var (
 	newDoctorDoltServerCheck    = doctor.NewDoltServerCheck
 	newDoctorRigDoltServerCheck = doctor.NewRigDoltServerCheck
 	newDoctorDoltBackupCheck    = doctor.NewDoltBackupCheck
+	newDoctorDoltLocalOnlyCheck = doctor.NewDoltLocalOnlyRemoteCheck
 )
 
 func newDoctorCmd(stdout, stderr io.Writer) *cobra.Command {
-	var fix, verbose, jsonOut bool
+	var fix, verbose, jsonOut, explainPostgresAuth bool
 	cmd := &cobra.Command{
 		Use:   "doctor",
 		Short: "Check workspace health",
@@ -37,10 +39,11 @@ branch.`,
 		Example: `  gc doctor
   gc doctor --fix
   gc doctor --verbose
-  gc doctor --json`,
+  gc doctor --json
+  gc doctor --explain-postgres-auth`,
 		Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
-			if doDoctor(fix, verbose, jsonOut, stdout, stderr) != 0 {
+			if doDoctor(fix, verbose, jsonOut, explainPostgresAuth, stdout, stderr) != 0 {
 				return errExit
 			}
 			return nil
@@ -49,7 +52,38 @@ branch.`,
 	cmd.Flags().BoolVar(&fix, "fix", false, "attempt automatic repairs and safe mechanical migrations")
 	cmd.Flags().BoolVarP(&verbose, "verbose", "v", false, "show extra diagnostic details")
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit structured JSON instead of human-readable output")
+	cmd.Flags().BoolVar(&explainPostgresAuth, "explain-postgres-auth", false,
+		"after running checks, print per-scope Postgres credential resolution table (no values printed)")
 	return cmd
+}
+
+// doctorWorkspaceHasPostgresScope reports whether at least one scope
+// (city or any rig) has MetadataState.Backend == "postgres". Used to
+// gate registration of PostgresAuthCheck so pure-Dolt cities never see
+// a "skipped postgres-auth" line.
+func doctorWorkspaceHasPostgresScope(cityPath string, cfg *config.City) bool {
+	if scopeBackendIsPostgres(cityPath, cityPath) {
+		return true
+	}
+	if cfg == nil {
+		return false
+	}
+	for _, rig := range cfg.Rigs {
+		if rig.Suspended {
+			continue
+		}
+		rigPath := strings.TrimSpace(rig.Path)
+		if rigPath == "" {
+			continue
+		}
+		if !filepath.IsAbs(rigPath) {
+			rigPath = filepath.Join(cityPath, rigPath)
+		}
+		if scopeBackendIsPostgres(cityPath, rigPath) {
+			return true
+		}
+	}
+	return false
 }
 
 // doDoctor runs all health checks and prints results.
@@ -226,6 +260,9 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 		register(&sessionModelDoctorCheck{cfg: cfg, cityPath: cityPath, newStore: storeFactory})
 	}
 	register(newDoctorDoltServerCheck(cityPath, opts.SkipCityDoltCheck))
+	if cfgErr == nil && doctorWorkspaceHasPostgresScope(cityPath, cfg) {
+		register(doctor.NewPostgresAuthCheck(cityPath, cfg))
+	}
 	// Managed Dolt ops checks (PR 3). Size + config drift are only
 	// meaningful when the workspace uses the managed bd/Dolt backend; rigs
 	// can inherit the city-managed server even when the city itself is not a
@@ -278,6 +315,7 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 			// skip non-managed-bdstore rigs and GC_DOLT=skip environments.
 			if rigUsesManagedBdStoreContract(cityPath, rig) && !gcDoltSkip() {
 				register(newDoctorDoltBackupCheck(cityPath, rig, managedDoltDataDir))
+				register(newDoctorDoltLocalOnlyCheck(cityPath, rig, managedDoltDataDir))
 			}
 		}
 	}
@@ -297,12 +335,13 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 				Warmup:    entry.Warmup,
 			})
 		}
+		registerLocalDoctorChecksTo(register, cityPath, cfg.Doctor.Checks)
 	}
 
 	return checks
 }
 
-func doDoctor(fix, verbose, jsonOut bool, stdout, stderr io.Writer) int {
+func doDoctor(fix, verbose, jsonOut, explainPostgresAuth bool, stdout, stderr io.Writer) int {
 	cityPath, err := resolveCity()
 	if err != nil {
 		fmt.Fprintf(stderr, "gc doctor: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -310,7 +349,7 @@ func doDoctor(fix, verbose, jsonOut bool, stdout, stderr io.Writer) int {
 	}
 
 	d := &doctor.Doctor{}
-	ctx := &doctor.CheckContext{CityPath: cityPath, Verbose: verbose}
+	ctx := &doctor.CheckContext{CityPath: cityPath, Verbose: verbose, ExplainPostgresAuth: explainPostgresAuth}
 	cfg, cfgErr := loadCityConfig(cityPath, stderr)
 	if cfgErr == nil {
 		resolveRigPaths(cityPath, cfg.Rigs)
@@ -339,7 +378,7 @@ func doDoctor(fix, verbose, jsonOut bool, stdout, stderr io.Writer) int {
 		doctor.PrintSummary(stdout, report)
 	}
 
-	if report.Failed > 0 {
+	if report.BlockingFailed > 0 {
 		return 1
 	}
 	return 0
@@ -365,12 +404,78 @@ func (expandedConfigLoadCheck) Run(ctx *doctor.CheckContext) *doctor.CheckResult
 	return okCheck("expanded-config-load", "expanded config loaded")
 }
 
+func registerLocalDoctorChecks(d *doctor.Doctor, cityPath string, checks []config.LocalDoctorCheck) {
+	registerLocalDoctorChecksTo(d.Register, cityPath, checks)
+}
+
+func registerLocalDoctorChecksTo(register func(doctor.Check), cityPath string, checks []config.LocalDoctorCheck) {
+	for _, check := range checks {
+		checkName := "local:" + check.Name
+		script, err := resolveLocalDoctorScript(cityPath, check.Script)
+		if err != nil {
+			register(doctor.ErrorCheck(checkName, err.Error()))
+			continue
+		}
+
+		packCheck := &doctor.PackScriptCheck{
+			CheckName: checkName,
+			Script:    script,
+			PackDir:   cityPath,
+		}
+		if check.Fix != "" {
+			fixScript, err := resolveLocalDoctorFixScript(cityPath, check.Fix)
+			if err != nil {
+				register(doctor.ErrorCheck(checkName, err.Error()))
+				continue
+			}
+			packCheck.FixScript = fixScript
+		}
+		register(packCheck)
+	}
+}
+
+func resolveLocalDoctorScript(cityPath, scriptPath string) (string, error) {
+	return resolveLocalDoctorPath("script", cityPath, scriptPath)
+}
+
+func resolveLocalDoctorFixScript(cityPath, fixPath string) (string, error) {
+	return resolveLocalDoctorPath("fix path", cityPath, fixPath)
+}
+
+func resolveLocalDoctorPath(kind, cityPath, relPath string) (string, error) {
+	if relPath == "" {
+		return "", fmt.Errorf("%s must not be empty", kind)
+	}
+	if filepath.IsAbs(relPath) {
+		return "", fmt.Errorf("%s %q must be relative to the city root", kind, relPath)
+	}
+
+	candidate := filepath.Clean(filepath.Join(cityPath, relPath))
+	absCityPath, err := filepath.Abs(cityPath)
+	if err != nil {
+		return "", err
+	}
+	absCandidate, err := filepath.Abs(candidate)
+	if err != nil {
+		return "", err
+	}
+	rel, err := filepath.Rel(absCityPath, absCandidate)
+	if err != nil {
+		return "", err
+	}
+	if pathutil.IsOutsideDir(rel) {
+		return "", fmt.Errorf("%s %q escapes the city directory", kind, relPath)
+	}
+	return candidate, nil
+}
+
 // doctorJSONResult mirrors doctor.CheckResult for JSON output. Keeping the
 // shape separate from the internal type keeps the wire format stable if the
 // internal struct grows new fields that shouldn't leak out.
 type doctorJSONResult struct {
 	Name         string   `json:"name"`
 	Status       string   `json:"status"`
+	Severity     string   `json:"severity"`
 	Message      string   `json:"message"`
 	FixHint      string   `json:"fix_hint,omitempty"`
 	Details      []string `json:"details,omitempty"`
@@ -380,12 +485,13 @@ type doctorJSONResult struct {
 }
 
 type doctorJSONReport struct {
-	Passed  int                `json:"passed"`
-	Warned  int                `json:"warned"`
-	Failed  int                `json:"failed"`
-	Fixed   int                `json:"fixed"`
-	Results []doctorJSONResult `json:"results"`
-	Error   string             `json:"error,omitempty"`
+	Passed         int                `json:"passed"`
+	Warned         int                `json:"warned"`
+	Failed         int                `json:"failed"`
+	BlockingFailed int                `json:"blocking_failed"`
+	Fixed          int                `json:"fixed"`
+	Results        []doctorJSONResult `json:"results"`
+	Error          string             `json:"error,omitempty"`
 }
 
 func doctorStatusString(s doctor.CheckStatus) string {
@@ -400,18 +506,30 @@ func doctorStatusString(s doctor.CheckStatus) string {
 	return "unknown"
 }
 
+func doctorSeverityString(s doctor.CheckSeverity) string {
+	switch s {
+	case doctor.SeverityAdvisory:
+		return "advisory"
+	case doctor.SeverityBlocking:
+		return "blocking"
+	}
+	return "blocking"
+}
+
 func writeDoctorJSON(w io.Writer, report *doctor.Report) error {
 	out := doctorJSONReport{
-		Passed:  report.Passed,
-		Warned:  report.Warned,
-		Failed:  report.Failed,
-		Fixed:   report.Fixed,
-		Results: make([]doctorJSONResult, 0, len(report.Results)),
+		Passed:         report.Passed,
+		Warned:         report.Warned,
+		Failed:         report.Failed,
+		BlockingFailed: report.BlockingFailed,
+		Fixed:          report.Fixed,
+		Results:        make([]doctorJSONResult, 0, len(report.Results)),
 	}
 	for _, r := range report.Results {
 		out.Results = append(out.Results, doctorJSONResult{
 			Name:         r.Name,
 			Status:       doctorStatusString(r.Status),
+			Severity:     doctorSeverityString(r.Severity),
 			Message:      r.Message,
 			FixHint:      r.FixHint,
 			Details:      r.Details,

@@ -38,19 +38,20 @@ default = ""
 id = "preflight"
 title = "Verify dolt version compatible with backup sync"
 description = """
-**Required:** dolt >= 1.86.2.
+**Required:** dolt >= 2.0.7.
 
-Older dolt versions have a GC/writer deadlock that hangs the sql-server
-during dolt_backup sync against databases under heavy concurrent write
-load (e.g. the gm bead store). The watchdog will kill the hung server
-and disrupt every dependent agent.
+Older dolt versions are below Gas City's managed bd/Dolt compatibility floor.
+Releases before 1.86.2 also have a GC/writer deadlock that hangs the
+sql-server during dolt_backup sync against databases under heavy concurrent
+write load. The watchdog will kill the hung server and disrupt every
+dependent agent.
 
 Run:
 ```bash
 dolt version | head -1
 ```
 
-If the version is < 1.86.2, abort the molecule and nudge the mayor to
+If the version is < 2.0.7, abort the molecule and nudge the mayor to
 upgrade dolt. Do NOT proceed to the sync step or close it as successful.
 
 Close this bead with:

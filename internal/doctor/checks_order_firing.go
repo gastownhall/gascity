@@ -92,6 +92,9 @@ func (c *OrderFiringCurrentCheck) Run(ctx *CheckContext) *CheckResult {
 	worst := StatusOK
 	monitored := 0
 	var firstNonOK string
+	// Track severity contributions across error-level entries. Warnings should
+	// stay visible without converting an advisory error into a blocking gate.
+	var blockingErrors, advisoryErrors int
 
 	for _, order := range allOrders {
 		if order.Trigger != "cron" && order.Trigger != "cooldown" {
@@ -105,13 +108,23 @@ func (c *OrderFiringCurrentCheck) Run(ctx *CheckContext) *CheckResult {
 			if firstNonOK == "" {
 				firstNonOK = orderHistoryHintTarget(order)
 			}
+			blockingErrors++
 			continue
 		}
-		status, detail := classifyOrderFiring(order, now, expected, latestOrderFiredAt(firedEvents, order.ScopedName()), startedAt)
+		status, severity, detail := classifyOrderFiring(order, now, expected, latestOrderFiredAt(firedEvents, order.ScopedName()), startedAt)
 		worst = worseStatus(worst, status)
 		result.Details = append(result.Details, detail)
-		if status != StatusOK && firstNonOK == "" {
-			firstNonOK = orderHistoryHintTarget(order)
+		if status != StatusOK {
+			if firstNonOK == "" {
+				firstNonOK = orderHistoryHintTarget(order)
+			}
+			if status == StatusError {
+				if severity == SeverityBlocking {
+					blockingErrors++
+				} else {
+					advisoryErrors++
+				}
+			}
 		}
 	}
 
@@ -129,6 +142,9 @@ func (c *OrderFiringCurrentCheck) Run(ctx *CheckContext) *CheckResult {
 		result.Message = "scheduled orders are overdue"
 	case StatusError:
 		result.Message = "scheduled orders are stale"
+	}
+	if blockingErrors == 0 && advisoryErrors > 0 {
+		result.Severity = SeverityAdvisory
 	}
 	if firstNonOK != "" {
 		result.FixHint = fmt.Sprintf(orderFiringInspectHintFmt, firstNonOK)
@@ -370,27 +386,34 @@ func latestOrderFiredAt(evts []events.Event, subject string) time.Time {
 	return latest
 }
 
-func classifyOrderFiring(order orders.Order, now time.Time, expected time.Duration, lastFired, controllerStarted time.Time) (CheckStatus, string) {
+func classifyOrderFiring(order orders.Order, now time.Time, expected time.Duration, lastFired, controllerStarted time.Time) (CheckStatus, CheckSeverity, string) {
 	name := orderDisplayName(order)
 	if lastFired.IsZero() {
 		if controllerStarted.IsZero() {
-			return StatusOK, fmt.Sprintf("%s: never fired (controller start unknown)", name)
+			return StatusOK, SeverityBlocking, fmt.Sprintf("%s: never fired (controller start unknown)", name)
 		}
 		uptime := nonNegativeDuration(now.Sub(controllerStarted))
 		if uptime >= expected+expected/2 {
-			return StatusError, fmt.Sprintf("%s: never fired since controller start %s ago", name, formatOrderFiringDuration(uptime))
+			// Advisory only for cron: a cron order that has never fired since
+			// controller start may be the cron-scheduler bug (ga-97qngx), not
+			// a real outage. Cooldown never-fired/stale paths remain blocking
+			// because they indicate an execution gap.
+			if order.Trigger == "cron" {
+				return StatusError, SeverityAdvisory, fmt.Sprintf("%s: never fired since controller start %s ago", name, formatOrderFiringDuration(uptime))
+			}
+			return StatusError, SeverityBlocking, fmt.Sprintf("%s: never fired since controller start %s ago", name, formatOrderFiringDuration(uptime))
 		}
-		return StatusOK, fmt.Sprintf("%s: never fired (controller running %s, within first cycle)", name, formatOrderFiringDuration(uptime))
+		return StatusOK, SeverityBlocking, fmt.Sprintf("%s: never fired (controller running %s, within first cycle)", name, formatOrderFiringDuration(uptime))
 	}
 
 	age := nonNegativeDuration(now.Sub(lastFired))
 	switch {
 	case age >= expected*3:
-		return StatusError, fmt.Sprintf("%s: last fired %s ago, expected every %s (CRITICAL: stale)", name, formatOrderFiringDuration(age), formatOrderFiringDuration(expected))
+		return StatusError, SeverityBlocking, fmt.Sprintf("%s: last fired %s ago, expected every %s (CRITICAL: stale)", name, formatOrderFiringDuration(age), formatOrderFiringDuration(expected))
 	case age >= expected+expected/2:
-		return StatusWarning, fmt.Sprintf("%s: last fired %s ago, expected every %s (overdue)", name, formatOrderFiringDuration(age), formatOrderFiringDuration(expected))
+		return StatusWarning, SeverityBlocking, fmt.Sprintf("%s: last fired %s ago, expected every %s (overdue)", name, formatOrderFiringDuration(age), formatOrderFiringDuration(expected))
 	default:
-		return StatusOK, fmt.Sprintf("%s: last fired %s ago, expected every %s", name, formatOrderFiringDuration(age), formatOrderFiringDuration(expected))
+		return StatusOK, SeverityBlocking, fmt.Sprintf("%s: last fired %s ago, expected every %s", name, formatOrderFiringDuration(age), formatOrderFiringDuration(expected))
 	}
 }
 

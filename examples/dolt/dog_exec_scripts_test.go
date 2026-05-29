@@ -3019,7 +3019,7 @@ func TestBackupScriptDiscoversNamedBackupsAndSyncsArtifactsOffsite(t *testing.T)
 	}
 	binDir := t.TempDir()
 	_ = writeDogFakeGC(t, binDir)
-	doltLogPath := writeBackupFakeDolt(t, binDir, "1.86.2", 0, "prod")
+	doltLogPath := writeBackupFakeDolt(t, binDir, "2.0.7", 0, "prod")
 	rsyncLogPath := writeBackupFakeRsync(t, binDir)
 
 	out := runDogScript(t, "mol-dog-backup.sh", binDir, cityPath, dataDir, "GC_BACKUP_OFFSITE_PATH="+offsiteDir)
@@ -3061,7 +3061,7 @@ func TestBackupScriptIgnoresDocumentedSystemSchemasForAutoDiscoveryWithBSDGrep(t
 	binDir := t.TempDir()
 	_ = writeDogFakeGC(t, binDir)
 	writeBSDLikeGrep(t, binDir)
-	doltLogPath := writeBackupFakeDolt(t, binDir, "1.86.2", 0, "prod", "performance_schema", "sys")
+	doltLogPath := writeBackupFakeDolt(t, binDir, "2.0.7", 0, "prod", "performance_schema", "sys")
 
 	out := runDogScript(t, "mol-dog-backup.sh", binDir, cityPath, dataDir)
 	if !strings.Contains(out, "synced: 1/1") {
@@ -3086,7 +3086,7 @@ func TestBackupScriptCountsFailedDatabasesByDatabase(t *testing.T) {
 	}
 	binDir := t.TempDir()
 	gcLogPath := writeDogFakeGC(t, binDir)
-	_ = writeBackupFakeDolt(t, binDir, "1.86.2", 1)
+	_ = writeBackupFakeDolt(t, binDir, "2.0.7", 1)
 
 	out := runDogScript(t, "mol-dog-backup.sh", binDir, cityPath, dataDir, "GC_BACKUP_DATABASES=prod")
 	if !strings.Contains(out, "synced: 0/1") {

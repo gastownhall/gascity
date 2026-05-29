@@ -42,6 +42,16 @@ const (
 
 var errNudgeSessionFenceMismatch = errors.New("queued nudge session fence mismatch")
 
+var (
+	// Test seams for cmd_nudge_test.go. Tests that replace these package
+	// variables must stay serial; do not use t.Parallel in those tests.
+	nudgeCityUsesManagedReconciler           = cityUsesManagedReconciler
+	nudgePokeController                      = pokeController
+	nudgeObserveTarget                       = workerObserveNudgeTarget
+	nudgeWithdrawQueuedWaitNudges            = withdrawQueuedWaitNudges
+	nudgeWarningWriter             io.Writer = os.Stderr
+)
+
 type nudgeDeliveryMode string
 
 const (
@@ -548,6 +558,14 @@ func deliverSessionNudgeWithWorker(target nudgeTarget, store beads.Store, sp run
 	if mode == nudgeDeliveryQueue {
 		return queueSessionNudgeWithWorker(target, store, sp, message, mode, jsonOutput, stdout, stderr)
 	}
+	queueManagedWake, err := shouldQueueManagedNudgeWake(target, store, sp)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc session nudge: %v\n", err) //nolint:errcheck
+		return 1
+	}
+	if queueManagedWake {
+		return queueManagedSessionNudgeWake(target, store, message, mode, jsonOutput, stdout, stderr)
+	}
 	delivery, ok := workerNudgeDeliveryForMode(mode)
 	if !ok {
 		fmt.Fprintf(stderr, "gc session nudge: unknown delivery mode %q\n", mode) //nolint:errcheck
@@ -595,6 +613,71 @@ func deliverSessionNudgeWithWorker(target nudgeTarget, store beads.Store, sp run
 	return 0
 }
 
+func shouldQueueManagedNudgeWake(target nudgeTarget, store beads.Store, sp runtime.Provider) (bool, error) {
+	if !canRequestManagedNudgeWake(target, store) {
+		return false, nil
+	}
+	obs, err := nudgeObserveTarget(target, store, sp)
+	if err != nil {
+		return false, fmt.Errorf("observing managed session before wake routing: %w", err)
+	}
+	return !obs.Running, nil
+}
+
+func canRequestManagedNudgeWake(target nudgeTarget, store beads.Store) bool {
+	return store != nil &&
+		strings.TrimSpace(target.cityPath) != "" &&
+		target.sessionID != "" &&
+		nudgeCityUsesManagedReconciler(target.cityPath)
+}
+
+func queueManagedSessionNudgeWake(target nudgeTarget, store beads.Store, message string, mode nudgeDeliveryMode, jsonOutput bool, stdout, stderr io.Writer) int {
+	item := newQueuedNudgeWithOptions(target.agentKey(), message, "session", time.Now(), queuedNudgeOptionsFromTarget(target))
+	if err := enqueueManagedNudgeThenWake(target, store, item); err != nil {
+		fmt.Fprintf(stderr, "gc session nudge: %v\n", err) //nolint:errcheck
+		return 1
+	}
+	if err := nudgePokeController(target.cityPath); err != nil {
+		fmt.Fprintf(stderr, "gc session nudge: warning: poke failed: %v\n", err) //nolint:errcheck
+	}
+	return writeQueuedSessionNudgeResult(target, mode, jsonOutput, stdout, stderr)
+}
+
+func enqueueManagedNudgeThenWake(target nudgeTarget, store beads.Store, item queuedNudge) error {
+	if err := enqueueQueuedNudgeWithStore(target.cityPath, store, item); err != nil {
+		return err
+	}
+	if err := requestManagedNudgeWake(target, store); err != nil {
+		if rollbackErr := rollbackQueuedNudge(target.cityPath, store, item, "managed wake failed: "+err.Error()); rollbackErr != nil {
+			return errors.Join(err, fmt.Errorf("rolling back queued nudge %q after managed wake failure: %w", item.ID, rollbackErr))
+		}
+		return err
+	}
+	return nil
+}
+
+func requestManagedNudgeWake(target nudgeTarget, store beads.Store) error {
+	if store == nil || target.sessionID == "" {
+		return nil
+	}
+	b, err := store.Get(target.sessionID)
+	if err != nil {
+		return err
+	}
+	nudgeIDs, err := session.WakeSession(store, b, time.Now().UTC())
+	if err != nil {
+		return err
+	}
+	if len(nudgeIDs) > 0 {
+		if err := nudgeWithdrawQueuedWaitNudges(target.cityPath, nudgeIDs); err != nil {
+			if nudgeWarningWriter != nil {
+				fmt.Fprintf(nudgeWarningWriter, "gc session wake: warning: withdrawing queued wait nudges after managed wake: %v\n", err) //nolint:errcheck
+			}
+		}
+	}
+	return nil
+}
+
 func workerHandleForNudgeTarget(target nudgeTarget, store beads.Store, sp runtime.Provider) (worker.Handle, error) {
 	if target.sessionID != "" {
 		return workerHandleForSessionWithConfig(target.cityPath, store, sp, target.cfg, target.sessionID)
@@ -630,6 +713,10 @@ func queueSessionNudgeWithWorker(target nudgeTarget, store beads.Store, sp runti
 	if obs, err := workerObserveNudgeTarget(target, store, sp); err == nil && obs.Running {
 		maybeStartNudgePoller(target)
 	}
+	return writeQueuedSessionNudgeResult(target, mode, jsonOutput, stdout, stderr)
+}
+
+func writeQueuedSessionNudgeResult(target nudgeTarget, mode nudgeDeliveryMode, jsonOutput bool, stdout, stderr io.Writer) int {
 	if jsonOutput {
 		return writeCLIJSONLineOrExit(stdout, stderr, "gc session nudge", sessionNudgeJSON{
 			SchemaVersion: "1",
@@ -680,6 +767,18 @@ func sendMailNotifyWithWorker(target nudgeTarget, store beads.Store, sp runtime.
 				return nil
 			}
 		}
+	}
+	if !obs.Running && canRequestManagedNudgeWake(target, store) {
+		item := newQueuedNudgeWithOptions(target.agentKey(), msg, "mail", now, queuedNudgeOptionsFromTarget(target))
+		if err := enqueueManagedNudgeThenWake(target, store, item); err != nil {
+			return err
+		}
+		if err := nudgePokeController(target.cityPath); err != nil {
+			if nudgeWarningWriter != nil {
+				fmt.Fprintf(nudgeWarningWriter, "gc mail notify: warning: poke failed after managed wake: %v\n", err) //nolint:errcheck
+			}
+		}
+		return nil
 	}
 	if err := enqueueQueuedNudge(target.cityPath, newQueuedNudgeWithOptions(target.agentKey(), msg, "mail", now, queuedNudgeOptionsFromTarget(target))); err != nil {
 		return err
@@ -1319,6 +1418,53 @@ func enqueueQueuedNudge(cityPath string, item queuedNudge) error {
 	return enqueueQueuedNudgeWithStore(cityPath, nil, item)
 }
 
+func rollbackQueuedNudge(cityPath string, store beads.Store, item queuedNudge, reason string) error {
+	if cityPath == "" || item.ID == "" {
+		return nil
+	}
+	now := time.Now()
+	found := false
+	err := withNudgeQueueState(cityPath, func(state *nudgeQueueState) error {
+		removed := []queuedNudge(nil)
+		state.Pending, removed = takeQueuedNudgesByID(state.Pending, item.ID, removed)
+		state.InFlight, removed = takeQueuedNudgesByID(state.InFlight, item.ID, removed)
+		for _, queued := range removed {
+			found = true
+			queued.LastError = reason
+			queued.DeadAt = now.UTC()
+			state.Dead = append(state.Dead, queued)
+			if err := markQueuedNudgeTerminal(store, queued, "failed", reason, "", now); err != nil {
+				return err
+			}
+		}
+		sortQueuedNudges(state)
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	if found {
+		return nil
+	}
+	item.LastError = reason
+	return markQueuedNudgeTerminal(store, item, "failed", reason, "", now)
+}
+
+func takeQueuedNudgesByID(items []queuedNudge, id string, removed []queuedNudge) ([]queuedNudge, []queuedNudge) {
+	if len(items) == 0 {
+		return items, removed
+	}
+	filtered := make([]queuedNudge, 0, len(items))
+	for _, item := range items {
+		if item.ID == id {
+			removed = append(removed, item)
+			continue
+		}
+		filtered = append(filtered, item)
+	}
+	return filtered, removed
+}
+
 func enqueueQueuedNudgeWithStore(cityPath string, store beads.Store, item queuedNudge) error {
 	if store == nil {
 		store = openNudgeBeadStore(cityPath)
@@ -1587,6 +1733,17 @@ func failedQueuedNudge(item queuedNudge, cause error, now time.Time) (queuedNudg
 	return item, false
 }
 
+func terminalStateForDeadQueuedNudge(item queuedNudge) string {
+	switch strings.TrimSpace(item.LastError) {
+	case "expired":
+		return "expired"
+	case "superseded":
+		return "superseded"
+	default:
+		return "failed"
+	}
+}
+
 func pruneExpiredQueuedNudges(state *nudgeQueueState, store beads.Store, now time.Time) error {
 	filtered := state.Pending[:0]
 	for _, item := range state.Pending {
@@ -1642,7 +1799,7 @@ func pruneDeadQueuedNudges(state *nudgeQueueState, store beads.Store, now time.T
 	cutoff := now.Add(-defaultQueuedNudgeDeadRetention)
 	filtered := state.Dead[:0]
 	for _, item := range state.Dead {
-		if !item.DeadAt.IsZero() && item.DeadAt.Before(cutoff) && item.BeadID != "" {
+		if item.BeadID != "" {
 			if store == nil {
 				// No store available — retain the item to avoid data loss.
 				filtered = append(filtered, item)
@@ -1656,12 +1813,30 @@ func pruneDeadQueuedNudges(state *nudgeQueueState, store beads.Store, now time.T
 				continue
 			}
 			if !ok || !isTerminalNudgeState(b.Metadata["state"]) {
-				// Terminal bead not confirmed — retain the queue entry.
-				filtered = append(filtered, item)
+				// Repair historical dead-letter entries whose queue state was
+				// durable but whose backing bead never received terminal state.
+				reason := strings.TrimSpace(item.LastError)
+				if reason == "" {
+					reason = "failed"
+				}
+				terminalAt := now
+				if !item.DeadAt.IsZero() {
+					terminalAt = item.DeadAt
+				}
+				if err := markQueuedNudgeTerminal(store, item, terminalStateForDeadQueuedNudge(item), reason, "", terminalAt); err != nil {
+					filtered = append(filtered, item)
+					continue
+				}
+				b, ok, err = findAnyQueuedNudgeBead(store, item.ID)
+				if err != nil || !ok || !isTerminalNudgeState(b.Metadata["state"]) {
+					filtered = append(filtered, item)
+					continue
+				}
+			}
+			if !item.DeadAt.IsZero() && item.DeadAt.Before(cutoff) {
+				// Terminal bead confirmed in store — safe to prune once past retention.
 				continue
 			}
-			// Terminal bead confirmed in store — safe to prune.
-			continue
 		}
 		filtered = append(filtered, item)
 	}

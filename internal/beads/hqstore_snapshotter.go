@@ -14,8 +14,8 @@ import (
 const (
 	// hqSnapshotFileName is the published snapshot, relative to the store dir.
 	hqSnapshotFileName = "snapshot.jsonl.gz"
-	// hqSnapshotTmpSuffix is appended to the snapshot path for the in-flight
-	// temp file before the atomic rename.
+	// hqSnapshotTmpSuffix is included in in-flight temp file names before the
+	// atomic rename.
 	hqSnapshotTmpSuffix = ".tmp"
 	// hqDefaultSnapshotInterval is the background snapshot cadence.
 	hqDefaultSnapshotInterval = 5 * time.Second
@@ -123,18 +123,23 @@ func (s *HQStore) writeSnapshot() (err error) {
 	exp := s.ExportAll()
 
 	path := s.snapshotPath()
-	tmpPath := path + hqSnapshotTmpSuffix
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("creating hqstore snapshot dir: %w", err)
 	}
-	f, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
+	f, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+hqSnapshotTmpSuffix+".")
 	if err != nil {
 		return fmt.Errorf("creating hqstore snapshot temp file: %w", err)
 	}
+	tmpPath := f.Name()
 	if err := writeSnapshotStream(f, exp); err != nil {
 		_ = f.Close()
 		_ = os.Remove(tmpPath)
 		return err
+	}
+	if err := f.Chmod(0o644); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("setting hqstore snapshot permissions: %w", err)
 	}
 	if err := f.Sync(); err != nil {
 		_ = f.Close()

@@ -259,8 +259,7 @@ const supervisorPreserveSessionsOnSignalEnv = "GC_SUPERVISOR_PRESERVE_SESSIONS_O
 // supervisorOmitProviderCredsEnv, when set to "1" at the time the supervisor
 // service file is generated, causes env vars matched by the shared
 // provider-credential predicate to be excluded from the generated launchd
-// plist or systemd unit. The source of truth is providerCredentialEnvPrefixes
-// and providerCredentialEnvKeys in cmd_supervisor_lifecycle.go. Default
+// plist or systemd unit. The source of truth is internal/processenv. Default
 // behavior is unchanged.
 // When opted out, the user is responsible for delivering provider creds to
 // the supervisor's environment via some other mechanism (e.g. a wrapper
@@ -1764,8 +1763,8 @@ func reconcileCities(
 		cs.pokeCh = pokeCh
 		cs.configDirty = configDirty
 		cs.services = cityRuntime.svc
-		cs.startBeadEventWatcher(cityCtx)
 		cityRuntime.setControllerState(cs)
+		cs.startBeadEventWatcher(cityCtx)
 
 		// Run pool on_boot hooks (same as runController does).
 		if err := runPostPrepareStep("running_pool_on_boot", func() error {
