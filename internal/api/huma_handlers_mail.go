@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -10,6 +11,71 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/mail"
 )
+
+// mailReadDeadline is shorter than the API client's 10s timeout so typed
+// store_slow problem details can reach the CLI before transport timeout.
+var mailReadDeadline = 8 * time.Second
+
+type mailReadTimeoutError struct {
+	d time.Duration
+}
+
+func (e *mailReadTimeoutError) Error() string {
+	return fmt.Sprintf("store_slow: mail read timed out after %s", e.d)
+}
+
+type mailReadResult[T any] struct {
+	value T
+	err   error
+}
+
+type mailReadCounts struct {
+	Total  int
+	Unread int
+}
+
+// withMailReadDeadline bounds mail store reads whose provider interface has
+// no context parameter. If the deadline fires, the provider goroutine may keep
+// running until the store call returns; its result is discarded through the
+// buffered channel.
+func withMailReadDeadline[T any](ctx context.Context, fn func() (T, error)) (T, error) {
+	var zero T
+	deadline := mailReadDeadline
+	if deadline <= 0 {
+		return fn()
+	}
+	ch := make(chan mailReadResult[T], 1)
+	go func() {
+		value, err := fn()
+		ch <- mailReadResult[T]{value: value, err: err}
+	}()
+	timer := time.NewTimer(deadline)
+	defer timer.Stop()
+	select {
+	case res := <-ch:
+		return res.value, res.err
+	case <-ctx.Done():
+		return zero, ctx.Err()
+	case <-timer.C:
+		return zero, &mailReadTimeoutError{d: deadline}
+	}
+}
+
+func mailReadAPIError(err error) error {
+	var timeoutErr *mailReadTimeoutError
+	if errors.As(err, &timeoutErr) {
+		return huma.Error503ServiceUnavailable(timeoutErr.Error())
+	}
+	return huma.Error500InternalServerError(err.Error())
+}
+
+func allMailProvidersFailedError(partialErrs []string, storeSlow bool) error {
+	detail := "all mail providers failed: " + strings.Join(partialErrs, "; ")
+	if storeSlow {
+		detail = "store_slow: " + detail
+	}
+	return huma.Error503ServiceUnavailable(detail)
+}
 
 // humaHandleMailList is the Huma-typed handler for GET /v0/mail.
 func (s *Server) humaHandleMailList(ctx context.Context, input *MailListInput) (*MailListOutput, error) {
@@ -52,9 +118,11 @@ func (s *Server) humaHandleMailList(ctx context.Context, input *MailListInput) (
 					Body:      MailListBody{Items: []mail.Message{}, Total: 0},
 				}, nil
 			}
-			msgs, err := mailInboxForRecipients(mp, agents)
+			msgs, err := withMailReadDeadline(ctx, func() ([]mail.Message, error) {
+				return mailInboxForRecipients(mp, agents)
+			})
 			if err != nil {
-				return nil, huma.Error500InternalServerError(err.Error())
+				return nil, mailReadAPIError(err)
 			}
 			if msgs == nil {
 				msgs = []mail.Message{}
@@ -85,16 +153,21 @@ func (s *Server) humaHandleMailList(ctx context.Context, input *MailListInput) (
 		providers := s.state.MailProviders()
 		var allMsgs []mail.Message
 		var partialErrs []string
+		partialStoreSlow := false
 		for _, name := range sortedProviderNames(providers) {
-			msgs, err := mailInboxForRecipients(providers[name], agents)
+			msgs, err := withMailReadDeadline(ctx, func() ([]mail.Message, error) {
+				return mailInboxForRecipients(providers[name], agents)
+			})
 			if err != nil {
+				var timeoutErr *mailReadTimeoutError
+				partialStoreSlow = partialStoreSlow || errors.As(err, &timeoutErr)
 				partialErrs = append(partialErrs, "mail provider "+name+": "+err.Error())
 				continue
 			}
 			allMsgs = append(allMsgs, tagRig(msgs, name)...)
 		}
 		if len(partialErrs) == len(providers) && len(providers) > 0 {
-			return nil, huma.Error503ServiceUnavailable("all mail providers failed: " + strings.Join(partialErrs, "; "))
+			return nil, allMailProvidersFailedError(partialErrs, partialStoreSlow)
 		}
 		if allMsgs == nil {
 			allMsgs = []mail.Message{}
@@ -131,9 +204,11 @@ func (s *Server) humaHandleMailList(ctx context.Context, input *MailListInput) (
 					Body:      MailListBody{Items: []mail.Message{}, Total: 0},
 				}, nil
 			}
-			msgs, err := mailAllForRecipients(mp, agents)
+			msgs, err := withMailReadDeadline(ctx, func() ([]mail.Message, error) {
+				return mailAllForRecipients(mp, agents)
+			})
 			if err != nil {
-				return nil, huma.Error500InternalServerError(err.Error())
+				return nil, mailReadAPIError(err)
 			}
 			if msgs == nil {
 				msgs = []mail.Message{}
@@ -164,16 +239,21 @@ func (s *Server) humaHandleMailList(ctx context.Context, input *MailListInput) (
 		providers := s.state.MailProviders()
 		var allMsgs []mail.Message
 		var partialErrs []string
+		partialStoreSlow := false
 		for _, name := range sortedProviderNames(providers) {
-			msgs, err := mailAllForRecipients(providers[name], agents)
+			msgs, err := withMailReadDeadline(ctx, func() ([]mail.Message, error) {
+				return mailAllForRecipients(providers[name], agents)
+			})
 			if err != nil {
+				var timeoutErr *mailReadTimeoutError
+				partialStoreSlow = partialStoreSlow || errors.As(err, &timeoutErr)
 				partialErrs = append(partialErrs, "mail provider "+name+": "+err.Error())
 				continue
 			}
 			allMsgs = append(allMsgs, tagRig(msgs, name)...)
 		}
 		if len(partialErrs) == len(providers) && len(providers) > 0 {
-			return nil, huma.Error503ServiceUnavailable("all mail providers failed: " + strings.Join(partialErrs, "; "))
+			return nil, allMailProvidersFailedError(partialErrs, partialStoreSlow)
 		}
 		if allMsgs == nil {
 			allMsgs = []mail.Message{}
@@ -310,13 +390,16 @@ func (s *Server) humaHandleMailCount(ctx context.Context, input *MailCountInput)
 			resp.Body.Unread = 0
 			return resp, nil
 		}
-		total, unread, err := mailCountForRecipients(mp, agents)
+		counts, err := withMailReadDeadline(ctx, func() (mailReadCounts, error) {
+			total, unread, err := mailCountForRecipients(mp, agents)
+			return mailReadCounts{Total: total, Unread: unread}, err
+		})
 		if err != nil {
-			return nil, huma.Error500InternalServerError(err.Error())
+			return nil, mailReadAPIError(err)
 		}
 		resp := &MailCountOutput{CacheAgeS: cacheAge}
-		resp.Body.Total = total
-		resp.Body.Unread = unread
+		resp.Body.Total = counts.Total
+		resp.Body.Unread = counts.Unread
 		return resp, nil
 	}
 
@@ -326,17 +409,23 @@ func (s *Server) humaHandleMailCount(ctx context.Context, input *MailCountInput)
 	providers := s.state.MailProviders()
 	var totalAll, unreadAll int
 	var partialErrs []string
+	partialStoreSlow := false
 	for _, name := range sortedProviderNames(providers) {
-		total, unread, err := mailCountForRecipients(providers[name], agents)
+		counts, err := withMailReadDeadline(ctx, func() (mailReadCounts, error) {
+			total, unread, err := mailCountForRecipients(providers[name], agents)
+			return mailReadCounts{Total: total, Unread: unread}, err
+		})
 		if err != nil {
+			var timeoutErr *mailReadTimeoutError
+			partialStoreSlow = partialStoreSlow || errors.As(err, &timeoutErr)
 			partialErrs = append(partialErrs, "mail provider "+name+": "+err.Error())
 			continue
 		}
-		totalAll += total
-		unreadAll += unread
+		totalAll += counts.Total
+		unreadAll += counts.Unread
 	}
 	if len(partialErrs) == len(providers) && len(providers) > 0 {
-		return nil, huma.Error503ServiceUnavailable("all mail providers failed: " + strings.Join(partialErrs, "; "))
+		return nil, allMailProvidersFailedError(partialErrs, partialStoreSlow)
 	}
 	resp := &MailCountOutput{CacheAgeS: cacheAge}
 	resp.Body.Total = totalAll

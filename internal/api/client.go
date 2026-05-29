@@ -87,8 +87,29 @@ func (e *cacheNotLiveError) Error() string {
 	return e.msg
 }
 
+// storeSlowError indicates the supervisor returned 503 because a mail read
+// exceeded its internal store deadline. It is intentionally not fallbackable:
+// the local store path is affected by the same contention.
+type storeSlowError struct {
+	msg string
+}
+
+func (e *storeSlowError) Error() string {
+	if e.msg == "" {
+		return "store slow: try again when load drops"
+	}
+	return e.msg
+}
+
+// IsStoreSlowError reports whether err originated from an API mail store
+// timeout. Callers must not fall back to the local store for this error.
+func IsStoreSlowError(err error) bool {
+	var sse *storeSlowError
+	return errors.As(err, &sse)
+}
+
 // serverError indicates a generic 5xx API response without a recognized
-// detail prefix (cache_not_live / read_only / not_found). Read-path callers
+// 503 detail prefix such as cache_not_live or store_slow. Read-path callers
 // classify it as fallbackable via ShouldFallbackForRead so the CLI lands on
 // direct bd when the supervisor is unhealthy. Mutation callers continue to
 // surface it as a hard error (ShouldFallback returns false) because writes
@@ -1139,12 +1160,21 @@ func apiErrorFromResponse(status int, pd *genclient.ErrorModel) error {
 		}
 		return &readOnlyError{msg: msg}
 	}
-	if status == http.StatusServiceUnavailable && strings.HasPrefix(detail, "cache_not_live") {
-		msg := detail
-		if msg == "" {
-			msg = "cache not yet live"
+	if status == http.StatusServiceUnavailable {
+		if strings.HasPrefix(detail, "cache_not_live") {
+			msg := detail
+			if msg == "" {
+				msg = "cache not yet live"
+			}
+			return &cacheNotLiveError{msg: msg}
 		}
-		return &cacheNotLiveError{msg: msg}
+		if strings.HasPrefix(detail, "store_slow") {
+			msg := detail
+			if msg == "" {
+				msg = "store slow: try again when load drops"
+			}
+			return &storeSlowError{msg: msg}
+		}
 	}
 	// Generic 5xx (500/501/502/504/... plus 503 without a cache_not_live
 	// prefix) wraps into a serverError so read-path callers can classify it

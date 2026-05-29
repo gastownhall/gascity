@@ -35,6 +35,7 @@ const (
 	mailInjectMaxMessages     = 3
 	mailInjectBodyPreviewSize = 240
 	mailInjectPreviewScanSize = 4096
+	mailCheckDegradedNotice   = "[mail check degraded — store slow; run 'gc mail inbox' when the factory load drops]"
 )
 
 type mailInboxJSONResult struct {
@@ -544,6 +545,9 @@ func routeMailCheck(_ string, args []string, inject bool, hookFormat string, c *
 		if !api.ShouldFallbackForRead(err) {
 			logRoute(stderr, cmdName, "api", "error")
 			if inject {
+				if api.IsStoreSlowError(err) {
+					_ = writeProviderHookContextForEvent(stdout, hookFormat, "UserPromptSubmit", mailCheckDegradedNotice)
+				}
 				return 0
 			}
 			fmt.Fprintf(stderr, "gc mail check: %v\n", err) //nolint:errcheck // best-effort stderr
