@@ -11,6 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `GC_DOLT_SYNC_PUSH_TIMEOUT_SECS` configures the SQL-mode push wall-clock
+  ceiling for `gc dolt sync` (default 1800s, replacing the prior fixed 120s
+  that SIGKILLed large first pushes). Metadata queries keep their own 120s
+  bound.
 - Claude Opus 4.8 is now listed in built-in Claude model choices and default
   pricing. The `opus` model choice targets `claude-opus-4-8`; `opus-4-7`
   remains available for cities that need the prior Opus target. Anthropic's
@@ -48,6 +52,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   matching `gc mail send`. Operators should use `gc mail` commands or
   explicit both-tier/wisp-aware bead queries for mail visibility; default
   issue-tier `bd list` output and git sync do not include wisp-tier messages.
+
+### Fixed
+
+- `gc dolt sync` now emits per-mode diagnostics on push failure instead of a
+  generic "push failed": a TIMEOUT message naming the ceiling and
+  `GC_DOLT_SYNC_PUSH_TIMEOUT_SECS` on exit 124, the underlying exit code on
+  other failures, and the underlying dolt stderr.
 
 ## [1.2.0] - 2026-05-25
 
