@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -115,6 +116,67 @@ exit 0
 	return logPath
 }
 
+// writeSyncFakeDoltPushFails installs a fake dolt that answers the SQL-mode
+// remote-lookup and active-branch queries normally but fails the DOLT_PUSH call
+// with the given exit code, writing stderr (when non-empty) to its own stderr.
+// It is parameterized by (exitCode, stderr) so one helper covers every SQL push
+// failure case (timeout exit 124, transport exit 7, stderr replay, etc.) rather
+// than N hardcoded-exit functions. The remotes-lookup query must still succeed
+// or the push site is never reached.
+func writeSyncFakeDoltPushFails(t *testing.T, dir string, exitCode int, stderr string) string {
+	t.Helper()
+	logPath := filepath.Join(dir, "dolt.log")
+	stderrEmit := ""
+	if stderr != "" {
+		stderrEmit = "printf '%s\\n' '" + stderr + "' >&2"
+	}
+	body := `#!/bin/sh
+printf '%s\n' "$*" >> "` + logPath + `"
+case "$*" in
+  *"SELECT name, url FROM dolt_remotes LIMIT 1"*)
+    printf 'name,url\norigin,https://example.invalid/repo\n'
+    exit 0
+    ;;
+  *"SELECT active_branch()"*)
+    printf 'active_branch()\nmain\n'
+    exit 0
+    ;;
+  *DOLT_PUSH*)
+    ` + stderrEmit + `
+    exit ` + strconv.Itoa(exitCode) + `
+    ;;
+esac
+exit 0
+`
+	if err := os.WriteFile(filepath.Join(dir, "dolt"), []byte(body), 0o755); err != nil {
+		t.Fatalf("write fake dolt: %v", err)
+	}
+	return logPath
+}
+
+// writeSyncFakeDoltCLIPushFails installs a fake dolt for CLI-mode tests that
+// fails the `dolt push` invocation with the given exit code (writing a stderr
+// line). CLI mode resolves remotes/refspec from disk, so the push is the only
+// dolt call.
+func writeSyncFakeDoltCLIPushFails(t *testing.T, dir string, exitCode int) string {
+	t.Helper()
+	logPath := filepath.Join(dir, "dolt.log")
+	body := `#!/bin/sh
+printf '%s\n' "$*" >> "` + logPath + `"
+case "$*" in
+  *"push "*)
+    printf 'remote rejected push\n' >&2
+    exit ` + strconv.Itoa(exitCode) + `
+    ;;
+esac
+exit 0
+`
+	if err := os.WriteFile(filepath.Join(dir, "dolt"), []byte(body), 0o755); err != nil {
+		t.Fatalf("write fake dolt: %v", err)
+	}
+	return logPath
+}
+
 func writeSyncFakeBeadsBD(t *testing.T, cityPath string) string {
 	t.Helper()
 	scriptDir := filepath.Join(cityPath, ".gc", "system", "packs", "bd", "assets", "scripts")
@@ -165,6 +227,12 @@ func TestSyncUsesLiveSQLWhenManagedServerReachable(t *testing.T) {
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("gc dolt sync failed: %v\n%s", err, out)
+	}
+
+	// The success line is a parsed contract — assert it byte-for-byte so a
+	// format change is caught here rather than breaking downstream consumers.
+	if !strings.Contains(string(out), "  app: pushed main -> origin:main (https://example.invalid/repo)") {
+		t.Fatalf("output missing byte-for-byte success line:\n%s", out)
 	}
 
 	if data, err := os.ReadFile(bdLog); err == nil && strings.TrimSpace(string(data)) != "" {
@@ -911,5 +979,385 @@ func TestSyncWarnsWhenActiveBranchFallbacksToMain(t *testing.T) {
 	log := string(data)
 	if !strings.Contains(log, "CALL DOLT_PUSH('origin', 'main')") {
 		t.Fatalf("fallback should push main after warning\nlog:\n%s\noutput:\n%s", log, out)
+	}
+}
+
+// TestSyncSQLPushTimeoutReportsTimeout verifies that an exit-124 push (the
+// run_bounded timeout convention) is reported as a TIMEOUT naming the ceiling
+// and env var, and is NOT collapsed into the generic non-timeout error (R1).
+func TestSyncSQLPushTimeoutReportsTimeout(t *testing.T) {
+	root := repoRoot(t)
+	script := filepath.Join(root, syncScript)
+
+	port, cleanup := startReachableTCPListener(t)
+	defer cleanup()
+
+	cityPath := t.TempDir()
+	dataDir := filepath.Join(cityPath, "data")
+	if err := os.MkdirAll(filepath.Join(dataDir, "app", ".dolt"), 0o755); err != nil {
+		t.Fatalf("mkdir db: %v", err)
+	}
+
+	binDir := t.TempDir()
+	_ = writeSyncFakeDoltPushFails(t, binDir, 124, "")
+	_ = writeSyncFakeBeadsBD(t, cityPath)
+
+	cmd := exec.Command("sh", script, "--db", "app")
+	cmd.Env = append(filteredEnv(
+		"PATH", "GC_DOLT_HOST", "GC_DOLT_PORT", "GC_DOLT_USER",
+		"GC_DOLT_PASSWORD", "GC_DOLT_DATA_DIR", "GC_CITY_PATH", "GC_PACK_DIR",
+		"GC_DOLT_SYNC_PUSH_TIMEOUT_SECS",
+	),
+		"PATH="+binDir+":"+os.Getenv("PATH"),
+		"GC_CITY_PATH="+cityPath,
+		"GC_PACK_DIR="+root,
+		"GC_DOLT_DATA_DIR="+dataDir,
+		fmt.Sprintf("GC_DOLT_PORT=%d", port),
+		"GC_DOLT_USER=root",
+		"GC_DOLT_PASSWORD=",
+	)
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("expected push failure, output:\n%s", out)
+	}
+	if !strings.Contains(string(out), "TIMEOUT after 1800s") {
+		t.Fatalf("expected TIMEOUT message naming the 1800s ceiling, got:\n%s", out)
+	}
+	if !strings.Contains(string(out), "GC_DOLT_SYNC_PUSH_TIMEOUT_SECS") {
+		t.Fatalf("expected TIMEOUT message to name the env var, got:\n%s", out)
+	}
+	if strings.Contains(string(out), "ERROR: push failed (exit") {
+		t.Fatalf("timeout must not be reported as a generic exit-code failure:\n%s", out)
+	}
+}
+
+// TestSyncSQLPushReportsExitCode verifies a non-124 SQL push failure reports the
+// underlying exit code and is distinguishable from a timeout (R3).
+func TestSyncSQLPushReportsExitCode(t *testing.T) {
+	root := repoRoot(t)
+	script := filepath.Join(root, syncScript)
+
+	port, cleanup := startReachableTCPListener(t)
+	defer cleanup()
+
+	cityPath := t.TempDir()
+	dataDir := filepath.Join(cityPath, "data")
+	if err := os.MkdirAll(filepath.Join(dataDir, "app", ".dolt"), 0o755); err != nil {
+		t.Fatalf("mkdir db: %v", err)
+	}
+
+	binDir := t.TempDir()
+	_ = writeSyncFakeDoltPushFails(t, binDir, 7, "")
+	_ = writeSyncFakeBeadsBD(t, cityPath)
+
+	cmd := exec.Command("sh", script, "--db", "app")
+	cmd.Env = append(filteredEnv(
+		"PATH", "GC_DOLT_HOST", "GC_DOLT_PORT", "GC_DOLT_USER",
+		"GC_DOLT_PASSWORD", "GC_DOLT_DATA_DIR", "GC_CITY_PATH", "GC_PACK_DIR",
+		"GC_DOLT_SYNC_PUSH_TIMEOUT_SECS",
+	),
+		"PATH="+binDir+":"+os.Getenv("PATH"),
+		"GC_CITY_PATH="+cityPath,
+		"GC_PACK_DIR="+root,
+		"GC_DOLT_DATA_DIR="+dataDir,
+		fmt.Sprintf("GC_DOLT_PORT=%d", port),
+		"GC_DOLT_USER=root",
+		"GC_DOLT_PASSWORD=",
+	)
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("expected push failure, output:\n%s", out)
+	}
+	if !strings.Contains(string(out), "ERROR: push failed (exit 7)") {
+		t.Fatalf("expected exit-code-7 failure message, got:\n%s", out)
+	}
+	if strings.Contains(string(out), "TIMEOUT") {
+		t.Fatalf("non-124 failure must not be reported as a timeout:\n%s", out)
+	}
+}
+
+// TestSyncSQLPushReplaysStderr verifies the underlying dolt stderr is surfaced
+// on push failure (R2). Runs on the empty-password harness so the assertion is
+// non-vacuous (RB6 — the credential-safe replay actually emits the line).
+func TestSyncSQLPushReplaysStderr(t *testing.T) {
+	root := repoRoot(t)
+	script := filepath.Join(root, syncScript)
+
+	port, cleanup := startReachableTCPListener(t)
+	defer cleanup()
+
+	cityPath := t.TempDir()
+	dataDir := filepath.Join(cityPath, "data")
+	if err := os.MkdirAll(filepath.Join(dataDir, "app", ".dolt"), 0o755); err != nil {
+		t.Fatalf("mkdir db: %v", err)
+	}
+
+	binDir := t.TempDir()
+	_ = writeSyncFakeDoltPushFails(t, binDir, 1, "fatal: authentication required")
+	_ = writeSyncFakeBeadsBD(t, cityPath)
+
+	cmd := exec.Command("sh", script, "--db", "app")
+	cmd.Env = append(filteredEnv(
+		"PATH", "GC_DOLT_HOST", "GC_DOLT_PORT", "GC_DOLT_USER",
+		"GC_DOLT_PASSWORD", "GC_DOLT_DATA_DIR", "GC_CITY_PATH", "GC_PACK_DIR",
+		"GC_DOLT_SYNC_PUSH_TIMEOUT_SECS",
+	),
+		"PATH="+binDir+":"+os.Getenv("PATH"),
+		"GC_CITY_PATH="+cityPath,
+		"GC_PACK_DIR="+root,
+		"GC_DOLT_DATA_DIR="+dataDir,
+		fmt.Sprintf("GC_DOLT_PORT=%d", port),
+		"GC_DOLT_USER=root",
+		"GC_DOLT_PASSWORD=",
+	)
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("expected push failure, output:\n%s", out)
+	}
+	if !strings.Contains(string(out), "fatal: authentication required") {
+		t.Fatalf("expected underlying dolt stderr to be surfaced, got:\n%s", out)
+	}
+	if !strings.Contains(string(out), "app: fatal: authentication required") {
+		t.Fatalf("replayed stderr should be prefixed with the db name, got:\n%s", out)
+	}
+}
+
+// TestSyncSQLPushEmptyStderrNoBlankLines verifies a failure with empty stderr
+// emits exactly one structured error line and no spurious db-prefixed blank
+// lines (AC4 — guards the replay-loop no-op).
+func TestSyncSQLPushEmptyStderrNoBlankLines(t *testing.T) {
+	root := repoRoot(t)
+	script := filepath.Join(root, syncScript)
+
+	port, cleanup := startReachableTCPListener(t)
+	defer cleanup()
+
+	cityPath := t.TempDir()
+	dataDir := filepath.Join(cityPath, "data")
+	if err := os.MkdirAll(filepath.Join(dataDir, "app", ".dolt"), 0o755); err != nil {
+		t.Fatalf("mkdir db: %v", err)
+	}
+
+	binDir := t.TempDir()
+	_ = writeSyncFakeDoltPushFails(t, binDir, 9, "")
+	_ = writeSyncFakeBeadsBD(t, cityPath)
+
+	cmd := exec.Command("sh", script, "--db", "app")
+	cmd.Env = append(filteredEnv(
+		"PATH", "GC_DOLT_HOST", "GC_DOLT_PORT", "GC_DOLT_USER",
+		"GC_DOLT_PASSWORD", "GC_DOLT_DATA_DIR", "GC_CITY_PATH", "GC_PACK_DIR",
+		"GC_DOLT_SYNC_PUSH_TIMEOUT_SECS",
+	),
+		"PATH="+binDir+":"+os.Getenv("PATH"),
+		"GC_CITY_PATH="+cityPath,
+		"GC_PACK_DIR="+root,
+		"GC_DOLT_DATA_DIR="+dataDir,
+		fmt.Sprintf("GC_DOLT_PORT=%d", port),
+		"GC_DOLT_USER=root",
+		"GC_DOLT_PASSWORD=",
+	)
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("expected push failure, output:\n%s", out)
+	}
+	if n := strings.Count(string(out), "ERROR: push failed (exit 9)"); n != 1 {
+		t.Fatalf("expected exactly one structured error line, got %d:\n%s", n, out)
+	}
+	if strings.Contains(string(out), "  app: \n") {
+		t.Fatalf("empty stderr must not produce a db-prefixed blank line:\n%s", out)
+	}
+}
+
+// TestSyncSQLPushTimeoutHonorsConfiguredCeiling verifies the TIMEOUT message
+// names the configured ceiling, not a hardcoded default (R1/R5, AC2).
+func TestSyncSQLPushTimeoutHonorsConfiguredCeiling(t *testing.T) {
+	root := repoRoot(t)
+	script := filepath.Join(root, syncScript)
+
+	port, cleanup := startReachableTCPListener(t)
+	defer cleanup()
+
+	cityPath := t.TempDir()
+	dataDir := filepath.Join(cityPath, "data")
+	if err := os.MkdirAll(filepath.Join(dataDir, "app", ".dolt"), 0o755); err != nil {
+		t.Fatalf("mkdir db: %v", err)
+	}
+
+	binDir := t.TempDir()
+	_ = writeSyncFakeDoltPushFails(t, binDir, 124, "")
+	_ = writeSyncFakeBeadsBD(t, cityPath)
+
+	cmd := exec.Command("sh", script, "--db", "app")
+	cmd.Env = append(filteredEnv(
+		"PATH", "GC_DOLT_HOST", "GC_DOLT_PORT", "GC_DOLT_USER",
+		"GC_DOLT_PASSWORD", "GC_DOLT_DATA_DIR", "GC_CITY_PATH", "GC_PACK_DIR",
+		"GC_DOLT_SYNC_PUSH_TIMEOUT_SECS",
+	),
+		"PATH="+binDir+":"+os.Getenv("PATH"),
+		"GC_CITY_PATH="+cityPath,
+		"GC_PACK_DIR="+root,
+		"GC_DOLT_DATA_DIR="+dataDir,
+		fmt.Sprintf("GC_DOLT_PORT=%d", port),
+		"GC_DOLT_USER=root",
+		"GC_DOLT_PASSWORD=",
+		"GC_DOLT_SYNC_PUSH_TIMEOUT_SECS=3600",
+	)
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("expected push failure, output:\n%s", out)
+	}
+	if !strings.Contains(string(out), "TIMEOUT after 3600s") {
+		t.Fatalf("expected TIMEOUT message to name the configured 3600s ceiling, got:\n%s", out)
+	}
+	if strings.Contains(string(out), "1800s") {
+		t.Fatalf("TIMEOUT message must not name the hardcoded default when overridden:\n%s", out)
+	}
+}
+
+// TestSyncRejectsInvalidPushTimeout verifies that an invalid
+// GC_DOLT_SYNC_PUSH_TIMEOUT_SECS aborts with exit 2 and a stderr diagnostic
+// before any database is touched — dolt is never invoked (R5 input validation).
+func TestSyncRejectsInvalidPushTimeout(t *testing.T) {
+	for _, bad := range []string{"abc", "0", ""} {
+		bad := bad
+		name := bad
+		if name == "" {
+			name = "empty"
+		}
+		t.Run(name, func(t *testing.T) {
+			root := repoRoot(t)
+			script := filepath.Join(root, syncScript)
+
+			port, cleanup := startReachableTCPListener(t)
+			defer cleanup()
+
+			cityPath := t.TempDir()
+			dataDir := filepath.Join(cityPath, "data")
+			if err := os.MkdirAll(filepath.Join(dataDir, "app", ".dolt"), 0o755); err != nil {
+				t.Fatalf("mkdir db: %v", err)
+			}
+
+			binDir := t.TempDir()
+			doltLog := writeSyncFakeDolt(t, binDir)
+			_ = writeSyncFakeBeadsBD(t, cityPath)
+
+			cmd := exec.Command("sh", script, "--db", "app")
+			cmd.Env = append(filteredEnv(
+				"PATH", "GC_DOLT_HOST", "GC_DOLT_PORT", "GC_DOLT_USER",
+				"GC_DOLT_PASSWORD", "GC_DOLT_DATA_DIR", "GC_CITY_PATH", "GC_PACK_DIR",
+				"GC_DOLT_SYNC_PUSH_TIMEOUT_SECS",
+			),
+				"PATH="+binDir+":"+os.Getenv("PATH"),
+				"GC_CITY_PATH="+cityPath,
+				"GC_PACK_DIR="+root,
+				"GC_DOLT_DATA_DIR="+dataDir,
+				fmt.Sprintf("GC_DOLT_PORT=%d", port),
+				"GC_DOLT_USER=root",
+				"GC_DOLT_PASSWORD=",
+				"GC_DOLT_SYNC_PUSH_TIMEOUT_SECS="+bad,
+			)
+			out, err := cmd.CombinedOutput()
+			if err == nil {
+				t.Fatalf("expected exit 2 for invalid timeout %q, output:\n%s", bad, out)
+			}
+			if ee, ok := err.(*exec.ExitError); !ok || ee.ExitCode() != 2 {
+				t.Fatalf("expected exit code 2 for invalid timeout %q, got %v:\n%s", bad, err, out)
+			}
+			if !strings.Contains(string(out), "invalid GC_DOLT_SYNC_PUSH_TIMEOUT_SECS") {
+				t.Fatalf("expected validation diagnostic for %q, got:\n%s", bad, out)
+			}
+			if data, rerr := os.ReadFile(doltLog); rerr == nil && strings.TrimSpace(string(data)) != "" {
+				t.Fatalf("dolt must not be invoked when the timeout is invalid (%q), log:\n%s", bad, data)
+			}
+		})
+	}
+}
+
+// TestSyncCLIPushReportsExitCode verifies the CLI-mode plain push surfaces the
+// underlying exit code instead of a generic message (R4).
+func TestSyncCLIPushReportsExitCode(t *testing.T) {
+	root := repoRoot(t)
+	script := filepath.Join(root, syncScript)
+
+	cityPath := t.TempDir()
+	dataDir := filepath.Join(cityPath, "data")
+	dbDir := filepath.Join(dataDir, "app")
+	if err := os.MkdirAll(filepath.Join(dbDir, ".dolt"), 0o755); err != nil {
+		t.Fatalf("mkdir db: %v", err)
+	}
+	remotes := `{"remotes":[{"name":"origin","url":"https://example.invalid/repo"}]}`
+	if err := os.WriteFile(filepath.Join(dbDir, ".dolt", "remotes.json"), []byte(remotes), 0o644); err != nil {
+		t.Fatalf("write remotes: %v", err)
+	}
+
+	binDir := t.TempDir()
+	_ = writeSyncFakeDoltCLIPushFails(t, binDir, 3)
+	_ = writeSyncFakeBeadsBD(t, cityPath)
+
+	cmd := exec.Command("sh", script, "--db", "app")
+	cmd.Env = append(filteredEnv(
+		"PATH", "GC_DOLT_HOST", "GC_DOLT_PORT", "GC_DOLT_USER",
+		"GC_DOLT_PASSWORD", "GC_DOLT_DATA_DIR", "GC_CITY_PATH", "GC_PACK_DIR",
+		"GC_DOLT_SYNC_PUSH_TIMEOUT_SECS",
+	),
+		"PATH="+binDir+":"+os.Getenv("PATH"),
+		"GC_CITY_PATH="+cityPath,
+		"GC_PACK_DIR="+root,
+		"GC_DOLT_DATA_DIR="+dataDir,
+		"GC_DOLT_PORT=1",
+		"GC_DOLT_USER=root",
+		"GC_DOLT_PASSWORD=",
+	)
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("expected CLI push failure, output:\n%s", out)
+	}
+	if !strings.Contains(string(out), "ERROR: push failed (exit 3)") {
+		t.Fatalf("expected CLI exit-code-3 failure message, got:\n%s", out)
+	}
+}
+
+// TestSyncCLIForcePushReportsExitCode verifies the CLI-mode --force branch
+// independently captures and reports its exit code — it could otherwise ship
+// still swallowing $? (R4; observability force-branch coverage).
+func TestSyncCLIForcePushReportsExitCode(t *testing.T) {
+	root := repoRoot(t)
+	script := filepath.Join(root, syncScript)
+
+	cityPath := t.TempDir()
+	dataDir := filepath.Join(cityPath, "data")
+	dbDir := filepath.Join(dataDir, "app")
+	if err := os.MkdirAll(filepath.Join(dbDir, ".dolt"), 0o755); err != nil {
+		t.Fatalf("mkdir db: %v", err)
+	}
+	remotes := `{"remotes":[{"name":"origin","url":"https://example.invalid/repo"}]}`
+	if err := os.WriteFile(filepath.Join(dbDir, ".dolt", "remotes.json"), []byte(remotes), 0o644); err != nil {
+		t.Fatalf("write remotes: %v", err)
+	}
+
+	binDir := t.TempDir()
+	_ = writeSyncFakeDoltCLIPushFails(t, binDir, 5)
+	_ = writeSyncFakeBeadsBD(t, cityPath)
+
+	cmd := exec.Command("sh", script, "--db", "app", "--force")
+	cmd.Env = append(filteredEnv(
+		"PATH", "GC_DOLT_HOST", "GC_DOLT_PORT", "GC_DOLT_USER",
+		"GC_DOLT_PASSWORD", "GC_DOLT_DATA_DIR", "GC_CITY_PATH", "GC_PACK_DIR",
+		"GC_DOLT_SYNC_PUSH_TIMEOUT_SECS",
+	),
+		"PATH="+binDir+":"+os.Getenv("PATH"),
+		"GC_CITY_PATH="+cityPath,
+		"GC_PACK_DIR="+root,
+		"GC_DOLT_DATA_DIR="+dataDir,
+		"GC_DOLT_PORT=1",
+		"GC_DOLT_USER=root",
+		"GC_DOLT_PASSWORD=",
+	)
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("expected CLI --force push failure, output:\n%s", out)
+	}
+	if !strings.Contains(string(out), "ERROR: push failed (exit 5)") {
+		t.Fatalf("expected CLI --force exit-code-5 failure message, got:\n%s", out)
 	}
 }
