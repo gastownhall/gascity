@@ -796,7 +796,7 @@ func (p *Provider) messageCandidatesAll(routes []string) ([]beads.Bead, error) {
 	all, err := p.store.List(beads.ListQuery{
 		Type:      "message",
 		Status:    "open",
-		TierMode:  beads.TierIssues,
+		TierMode:  beads.TierBoth,
 		AllowScan: true,
 	})
 	if err != nil {

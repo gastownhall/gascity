@@ -97,7 +97,7 @@ func TestMessageCreatedInIssuesTier(t *testing.T) {
 	}
 }
 
-func TestInboxUsesSingleIssuesTierMessageScanAcrossRoutes(t *testing.T) {
+func TestInboxUsesSingleBothTierMessageScanAcrossRoutes(t *testing.T) {
 	store := &messageListProbeStore{MemStore: beads.NewMemStore()}
 	p := New(store)
 
@@ -133,8 +133,35 @@ func TestInboxUsesSingleIssuesTierMessageScanAcrossRoutes(t *testing.T) {
 		t.Fatalf("message query count = %d, want 1; queries=%+v", len(store.messageQueries), store.messageQueries)
 	}
 	query := store.messageQueries[0]
-	if query.TierMode != beads.TierIssues || !query.AllowScan || query.Type != "message" || query.Status != "open" || query.Assignee != "" {
-		t.Fatalf("message query = %+v, want one issues-tier message scan without per-route assignee", query)
+	if query.TierMode != beads.TierBoth || !query.AllowScan || query.Type != "message" || query.Status != "open" || query.Assignee != "" {
+		t.Fatalf("message query = %+v, want one both-tier message scan without per-route assignee", query)
+	}
+}
+
+func TestInboxIncludesEphemeralMessages(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+	recipient := "agent-a"
+
+	ephemeral, err := store.Create(beads.Bead{
+		Title:       "status",
+		Type:        "message",
+		Status:      "open",
+		Assignee:    recipient,
+		From:        "human",
+		Description: "stored in wisps tier",
+		Ephemeral:   true,
+	})
+	if err != nil {
+		t.Fatalf("Create ephemeral message: %v", err)
+	}
+
+	msgs, err := p.Inbox(recipient)
+	if err != nil {
+		t.Fatalf("Inbox: %v", err)
+	}
+	if len(msgs) != 1 || msgs[0].ID != ephemeral.ID {
+		t.Fatalf("Inbox = %#v, want ephemeral message %s", msgs, ephemeral.ID)
 	}
 }
 
@@ -241,7 +268,7 @@ func TestCheckDoesNotUseMessageLabelSupplement(t *testing.T) {
 	}
 }
 
-func TestCheckUsesIssuesTierForSlashRecipient(t *testing.T) {
+func TestCheckUsesBothTiersForSlashRecipient(t *testing.T) {
 	recipient := "gascity/workflows.codex-max"
 	runner := func(_ string, name string, args ...string) ([]byte, error) {
 		cmd := name + " " + strings.Join(args, " ")
@@ -258,7 +285,10 @@ func TestCheckUsesIssuesTierForSlashRecipient(t *testing.T) {
 			}
 			return []byte(`[{"id":"msg-1","title":"hello","description":"body","status":"open","issue_type":"message","assignee":"gascity/workflows.codex-max","from":"human","created_at":"2026-01-02T03:04:05Z"}]`), nil
 		case strings.Contains(cmd, "bd query --json"):
-			t.Fatalf("slash recipient should not query wisp tier: %s", cmd)
+			if !strings.Contains(cmd, "ephemeral=true") || !strings.Contains(cmd, "type=message") {
+				t.Fatalf("slash recipient used unexpected wisp query: %s", cmd)
+			}
+			return []byte(`[]`), nil
 		}
 		return nil, errors.New("unexpected command: " + cmd)
 	}
@@ -273,11 +303,11 @@ func TestCheckUsesIssuesTierForSlashRecipient(t *testing.T) {
 	}
 }
 
-func TestMessageQueriesUseIssuesTier(t *testing.T) {
+func TestMessageQueriesUseBothTiers(t *testing.T) {
 	store := beads.NewMemStore()
 	p := New(store)
 
-	if _, err := store.Create(beads.Bead{
+	wispMsg, err := store.Create(beads.Bead{
 		Title:       "wisp status",
 		Type:        "message",
 		Assignee:    "mayor",
@@ -285,7 +315,8 @@ func TestMessageQueriesUseIssuesTier(t *testing.T) {
 		Description: "wisp body",
 		Labels:      []string{"thread:t1"},
 		Ephemeral:   true,
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatalf("Create ephemeral message: %v", err)
 	}
 	msg, err := p.Send("human", "mayor", "issues", "issues body")
@@ -297,24 +328,24 @@ func TestMessageQueriesUseIssuesTier(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Check: %v", err)
 	}
-	if len(inbox) != 1 || inbox[0].ID != msg.ID {
-		t.Fatalf("Check = %#v, want issues-tier message %s", inbox, msg.ID)
+	if len(inbox) != 2 || !mailIDsContain(inbox, wispMsg.ID) || !mailIDsContain(inbox, msg.ID) {
+		t.Fatalf("Check = %#v, want messages %s and %s", inbox, wispMsg.ID, msg.ID)
 	}
 
 	all, err := p.All("")
 	if err != nil {
 		t.Fatalf("All: %v", err)
 	}
-	if len(all) != 1 || all[0].ID != msg.ID {
-		t.Fatalf("All = %#v, want issues-tier message %s", all, msg.ID)
+	if len(all) != 2 || !mailIDsContain(all, wispMsg.ID) || !mailIDsContain(all, msg.ID) {
+		t.Fatalf("All = %#v, want messages %s and %s", all, wispMsg.ID, msg.ID)
 	}
 
 	total, unread, err := p.Count("mayor")
 	if err != nil {
 		t.Fatalf("Count: %v", err)
 	}
-	if total != 1 || unread != 1 {
-		t.Fatalf("Count = (%d, %d), want (1, 1)", total, unread)
+	if total != 2 || unread != 2 {
+		t.Fatalf("Count = (%d, %d), want (2, 2)", total, unread)
 	}
 
 	thread, err := p.Thread("t1")
@@ -324,6 +355,15 @@ func TestMessageQueriesUseIssuesTier(t *testing.T) {
 	if len(thread) != 1 {
 		t.Fatalf("Thread = %#v, want one thread message", thread)
 	}
+}
+
+func mailIDsContain(messages []mail.Message, id string) bool {
+	for _, message := range messages {
+		if message.ID == id {
+			return true
+		}
+	}
+	return false
 }
 
 func TestCountDoesNotCallBroadList(t *testing.T) {
