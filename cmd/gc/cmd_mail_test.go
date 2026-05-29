@@ -572,9 +572,13 @@ func TestCmdMailSendDefaultSenderFallsBackToGCAliasWhenSessionIDMissing(t *testi
 	if err != nil {
 		t.Fatalf("openCityStoreAt after send: %v", err)
 	}
-	all, err := storeAfter.ListOpen()
+	all, err := storeAfter.List(beads.ListQuery{
+		Type:     "message",
+		Status:   "open",
+		TierMode: beads.TierBoth,
+	})
 	if err != nil {
-		t.Fatalf("ListOpen: %v", err)
+		t.Fatalf("List messages: %v", err)
 	}
 	var msg beads.Bead
 	found := false
@@ -640,9 +644,13 @@ func TestCmdMailSendFromControllerCreatesMessage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("openCityStoreAt after send: %v", err)
 	}
-	all, err := storeAfter.ListOpen()
+	all, err := storeAfter.List(beads.ListQuery{
+		Type:     "message",
+		Status:   "open",
+		TierMode: beads.TierBoth,
+	})
 	if err != nil {
-		t.Fatalf("ListOpen: %v", err)
+		t.Fatalf("List messages: %v", err)
 	}
 	var msg beads.Bead
 	found := false

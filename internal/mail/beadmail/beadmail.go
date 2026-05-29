@@ -114,6 +114,7 @@ func (p *Provider) Send(from, to, subject, body string) (mail.Message, error) {
 		From:        from,
 		Labels:      labels,
 		Metadata:    metadata,
+		Ephemeral:   true,
 	})
 	if err != nil {
 		return mail.Message{}, fmt.Errorf("beadmail send: %w", err)

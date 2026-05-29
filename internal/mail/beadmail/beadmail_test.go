@@ -75,7 +75,7 @@ func TestInboxDoesNotCallBroadList(t *testing.T) {
 	}
 }
 
-func TestMessageCreatedInIssuesTier(t *testing.T) {
+func TestMessageCreatedInWispTier(t *testing.T) {
 	store := beads.NewMemStore()
 	p := New(store)
 
@@ -86,14 +86,17 @@ func TestMessageCreatedInIssuesTier(t *testing.T) {
 
 	items, err := store.List(beads.ListQuery{
 		Type:      "message",
-		TierMode:  beads.TierIssues,
+		TierMode:  beads.TierWisps,
 		AllowScan: true,
 	})
 	if err != nil {
-		t.Fatalf("List issues-tier messages: %v", err)
+		t.Fatalf("List wisp-tier messages: %v", err)
 	}
 	if len(items) != 1 || items[0].ID != sent.ID {
-		t.Fatalf("issues-tier messages = %#v, want sent message %s", items, sent.ID)
+		t.Fatalf("wisp-tier messages = %#v, want sent message %s", items, sent.ID)
+	}
+	if !items[0].Ephemeral {
+		t.Fatalf("sent message Ephemeral = false, want true")
 	}
 }
 
@@ -241,8 +244,9 @@ func TestCheckDoesNotUseMessageLabelSupplement(t *testing.T) {
 	}
 }
 
-func TestCheckUsesBothTiersForSlashRecipient(t *testing.T) {
+func TestCheckSupportsSlashRecipientWithWispTier(t *testing.T) {
 	recipient := "gascity/workflows.codex-max"
+	sawWispQuery := false
 	runner := func(_ string, name string, args ...string) ([]byte, error) {
 		cmd := name + " " + strings.Join(args, " ")
 		switch {
@@ -253,15 +257,16 @@ func TestCheckUsesBothTiersForSlashRecipient(t *testing.T) {
 		case strings.Contains(cmd, "bd list --json") && strings.Contains(cmd, "--type=session"):
 			return []byte(`[]`), nil
 		case strings.Contains(cmd, "bd list --json") && strings.Contains(cmd, "--type=message") && strings.Contains(cmd, "--status=open"):
-			if strings.Contains(cmd, "--assignee=") {
-				t.Fatalf("slash recipient used per-assignee message query: %s", cmd)
-			}
-			return []byte(`[{"id":"msg-1","title":"hello","description":"body","status":"open","issue_type":"message","assignee":"gascity/workflows.codex-max","from":"human","created_at":"2026-01-02T03:04:05Z"}]`), nil
+			return []byte(`[]`), nil
 		case strings.Contains(cmd, "bd query --json"):
 			if strings.Contains(cmd, "assignee=") {
 				t.Fatalf("slash recipient used per-assignee wisp query: %s", cmd)
 			}
-			return []byte(`[]`), nil
+			if !strings.Contains(cmd, "ephemeral=true") || !strings.Contains(cmd, "type=message") {
+				t.Fatalf("mail check used unexpected wisp query: %s", cmd)
+			}
+			sawWispQuery = true
+			return []byte(`[{"id":"msg-w","title":"hello","description":"body","status":"open","issue_type":"message","assignee":"gascity/workflows.codex-max","from":"human","created_at":"2026-01-02T03:04:05Z","ephemeral":true}]`), nil
 		}
 		return nil, errors.New("unexpected command: " + cmd)
 	}
@@ -271,8 +276,11 @@ func TestCheckUsesBothTiersForSlashRecipient(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Check: %v", err)
 	}
-	if len(msgs) != 1 || msgs[0].ID != "msg-1" {
-		t.Fatalf("Check = %#v, want msg-1", msgs)
+	if !sawWispQuery {
+		t.Fatal("Check did not query wisps tier")
+	}
+	if len(msgs) != 1 || msgs[0].ID != "msg-w" {
+		t.Fatalf("Check = %#v, want msg-w", msgs)
 	}
 }
 
@@ -292,9 +300,16 @@ func TestMessageQueriesUseBothTiers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create ephemeral message: %v", err)
 	}
-	msg, err := p.Send("human", "mayor", "issues", "issues body")
+	msg, err := store.Create(beads.Bead{
+		Title:       "issue status",
+		Type:        "message",
+		Assignee:    "mayor",
+		From:        "human",
+		Description: "issue body",
+		Labels:      []string{"thread:t2"},
+	})
 	if err != nil {
-		t.Fatalf("Send issues-tier message: %v", err)
+		t.Fatalf("Create issue-tier message: %v", err)
 	}
 
 	inbox, err := p.Check("mayor")
