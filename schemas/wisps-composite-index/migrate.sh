@@ -42,7 +42,6 @@ fi
 indexes=$(show_wisps_indexes)
 verify_index_definition "$indexes"
 
-indexes=$(show_wisps_indexes)
 rows=$(status_index_rows "$indexes")
 if [ "$rows" -gt 0 ]; then
     verify_status_index_definition "$indexes"
