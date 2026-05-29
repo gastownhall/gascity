@@ -129,7 +129,10 @@ func writeSyncFakeDoltPushFails(t *testing.T, dir string, exitCode int, stderr s
 	logPath := filepath.Join(dir, "dolt.log")
 	stderrEmit := ""
 	if stderr != "" {
-		stderrEmit = "printf '%s\\n' '" + stderr + "' >&2"
+		// Escape single quotes so an arbitrary stderr value cannot break out
+		// of the single-quoted shell literal: ' becomes '\''.
+		escaped := strings.ReplaceAll(stderr, "'", `'\''`)
+		stderrEmit = "printf '%s\\n' '" + escaped + "' >&2"
 	}
 	body := `#!/bin/sh
 printf '%s\n' "$*" >> "` + logPath + `"
@@ -1213,64 +1216,77 @@ func TestSyncSQLPushTimeoutHonorsConfiguredCeiling(t *testing.T) {
 	}
 }
 
-// TestSyncRejectsInvalidPushTimeout verifies that an invalid
-// GC_DOLT_SYNC_PUSH_TIMEOUT_SECS aborts with exit 2 and a stderr diagnostic
-// before any database is touched — dolt is never invoked (R5 input validation).
-func TestSyncRejectsInvalidPushTimeout(t *testing.T) {
-	for _, bad := range []string{"abc", "0", ""} {
-		bad := bad
-		name := bad
-		if name == "" {
-			name = "empty"
-		}
-		t.Run(name, func(t *testing.T) {
-			root := repoRoot(t)
-			script := filepath.Join(root, syncScript)
+// assertSyncRejectsInvalidPushTimeout drives one invalid-timeout scenario: it
+// runs sync with GC_DOLT_SYNC_PUSH_TIMEOUT_SECS=bad and asserts the script
+// aborts with exit 2 and a stderr diagnostic before any database is touched —
+// dolt is never invoked (R5 input validation). Parameterized by the bad value
+// so each scenario keeps its own standalone test func (no table-driven block).
+func assertSyncRejectsInvalidPushTimeout(t *testing.T, bad string) {
+	t.Helper()
+	root := repoRoot(t)
+	script := filepath.Join(root, syncScript)
 
-			port, cleanup := startReachableTCPListener(t)
-			defer cleanup()
+	port, cleanup := startReachableTCPListener(t)
+	defer cleanup()
 
-			cityPath := t.TempDir()
-			dataDir := filepath.Join(cityPath, "data")
-			if err := os.MkdirAll(filepath.Join(dataDir, "app", ".dolt"), 0o755); err != nil {
-				t.Fatalf("mkdir db: %v", err)
-			}
-
-			binDir := t.TempDir()
-			doltLog := writeSyncFakeDolt(t, binDir)
-			_ = writeSyncFakeBeadsBD(t, cityPath)
-
-			cmd := exec.Command("sh", script, "--db", "app")
-			cmd.Env = append(filteredEnv(
-				"PATH", "GC_DOLT_HOST", "GC_DOLT_PORT", "GC_DOLT_USER",
-				"GC_DOLT_PASSWORD", "GC_DOLT_DATA_DIR", "GC_CITY_PATH", "GC_PACK_DIR",
-				"GC_DOLT_SYNC_PUSH_TIMEOUT_SECS",
-			),
-				"PATH="+binDir+":"+os.Getenv("PATH"),
-				"GC_CITY_PATH="+cityPath,
-				"GC_PACK_DIR="+root,
-				"GC_DOLT_DATA_DIR="+dataDir,
-				fmt.Sprintf("GC_DOLT_PORT=%d", port),
-				"GC_DOLT_USER=root",
-				"GC_DOLT_PASSWORD=",
-				"GC_DOLT_SYNC_PUSH_TIMEOUT_SECS="+bad,
-			)
-			out, err := cmd.CombinedOutput()
-			if err == nil {
-				t.Fatalf("expected exit 2 for invalid timeout %q, output:\n%s", bad, out)
-			}
-			var ee *exec.ExitError
-			if !errors.As(err, &ee) || ee.ExitCode() != 2 {
-				t.Fatalf("expected exit code 2 for invalid timeout %q, got %v:\n%s", bad, err, out)
-			}
-			if !strings.Contains(string(out), "invalid GC_DOLT_SYNC_PUSH_TIMEOUT_SECS") {
-				t.Fatalf("expected validation diagnostic for %q, got:\n%s", bad, out)
-			}
-			if data, rerr := os.ReadFile(doltLog); rerr == nil && strings.TrimSpace(string(data)) != "" {
-				t.Fatalf("dolt must not be invoked when the timeout is invalid (%q), log:\n%s", bad, data)
-			}
-		})
+	cityPath := t.TempDir()
+	dataDir := filepath.Join(cityPath, "data")
+	if err := os.MkdirAll(filepath.Join(dataDir, "app", ".dolt"), 0o755); err != nil {
+		t.Fatalf("mkdir db: %v", err)
 	}
+
+	binDir := t.TempDir()
+	doltLog := writeSyncFakeDolt(t, binDir)
+	_ = writeSyncFakeBeadsBD(t, cityPath)
+
+	cmd := exec.Command("sh", script, "--db", "app")
+	cmd.Env = append(filteredEnv(
+		"PATH", "GC_DOLT_HOST", "GC_DOLT_PORT", "GC_DOLT_USER",
+		"GC_DOLT_PASSWORD", "GC_DOLT_DATA_DIR", "GC_CITY_PATH", "GC_PACK_DIR",
+		"GC_DOLT_SYNC_PUSH_TIMEOUT_SECS",
+	),
+		"PATH="+binDir+":"+os.Getenv("PATH"),
+		"GC_CITY_PATH="+cityPath,
+		"GC_PACK_DIR="+root,
+		"GC_DOLT_DATA_DIR="+dataDir,
+		fmt.Sprintf("GC_DOLT_PORT=%d", port),
+		"GC_DOLT_USER=root",
+		"GC_DOLT_PASSWORD=",
+		"GC_DOLT_SYNC_PUSH_TIMEOUT_SECS="+bad,
+	)
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("expected exit 2 for invalid timeout %q, output:\n%s", bad, out)
+	}
+	var ee *exec.ExitError
+	if !errors.As(err, &ee) || ee.ExitCode() != 2 {
+		t.Fatalf("expected exit code 2 for invalid timeout %q, got %v:\n%s", bad, err, out)
+	}
+	if !strings.Contains(string(out), "invalid GC_DOLT_SYNC_PUSH_TIMEOUT_SECS") {
+		t.Fatalf("expected validation diagnostic for %q, got:\n%s", bad, out)
+	}
+	if data, rerr := os.ReadFile(doltLog); rerr == nil && strings.TrimSpace(string(data)) != "" {
+		t.Fatalf("dolt must not be invoked when the timeout is invalid (%q), log:\n%s", bad, data)
+	}
+}
+
+// TestSyncRejectsNonNumericPushTimeout verifies a non-numeric
+// GC_DOLT_SYNC_PUSH_TIMEOUT_SECS is rejected with exit 2 (R5 input validation).
+func TestSyncRejectsNonNumericPushTimeout(t *testing.T) {
+	assertSyncRejectsInvalidPushTimeout(t, "abc")
+}
+
+// TestSyncRejectsZeroPushTimeout verifies a zero GC_DOLT_SYNC_PUSH_TIMEOUT_SECS
+// is rejected with exit 2 — a 0s ceiling would SIGKILL the push immediately and
+// emit a misleading TIMEOUT message (R5 input validation).
+func TestSyncRejectsZeroPushTimeout(t *testing.T) {
+	assertSyncRejectsInvalidPushTimeout(t, "0")
+}
+
+// TestSyncRejectsEmptyPushTimeout verifies an empty GC_DOLT_SYNC_PUSH_TIMEOUT_SECS
+// is rejected with exit 2 (R5 input validation).
+func TestSyncRejectsEmptyPushTimeout(t *testing.T) {
+	assertSyncRejectsInvalidPushTimeout(t, "")
 }
 
 // TestSyncCLIPushReportsExitCode verifies the CLI-mode plain push surfaces the
