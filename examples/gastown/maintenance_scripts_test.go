@@ -800,7 +800,7 @@ func TestOrphanSweepPreservesProtectedInProgressEphemeralMoleculeWisp(t *testing
 			if err := os.MkdirAll(binDir, 0o755); err != nil {
 				t.Fatalf("MkdirAll(%s): %v", binDir, err)
 			}
-			for _, name := range []string{"bash", "cat", "mktemp", "jq", "awk", "grep", "sed", "rm"} {
+			for _, name := range []string{"bash", "cat", "dirname", "mktemp", "jq", "awk", "grep", "sed", "rm"} {
 				linkTestPathTool(t, binDir, name)
 			}
 
