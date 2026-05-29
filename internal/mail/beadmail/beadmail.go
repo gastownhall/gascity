@@ -813,9 +813,10 @@ func (p *Provider) messageCandidatesForRoutes(routes []string) ([]beads.Bead, er
 }
 
 // messageCandidatesAll returns all open message beads matching any route.
-// Empty routes return all open messages. Message reads need TierBoth because
-// bd stores current message beads as wisps while older stores can still have
-// issue-tier messages.
+// TierBoth is one logical query; BdStore may satisfy it with separate
+// issue-tier and wisp-tier reads before deduping. Empty routes return all open
+// messages. Live reads are required so command-visible mail sees fresh wisps
+// even when the active store cache was primed earlier.
 func (p *Provider) messageCandidatesAll(routes []string) ([]beads.Bead, error) {
 	all, err := p.store.List(beads.ListQuery{
 		Type:      "message",

@@ -7273,6 +7273,8 @@ func TestRunRalphCheckRejectsPathTraversalAboveCityPath(t *testing.T) {
 // expansion may produce an absolute gc.check_path.
 func TestRunRalphCheckAllowsAbsoluteCheckPath(t *testing.T) {
 	parent := t.TempDir()
+	home := filepath.Join(parent, "home")
+	t.Setenv("HOME", home)
 	cityPath := filepath.Join(parent, "city")
 	storePath := filepath.Join(parent, "rig")
 	if err := os.MkdirAll(cityPath, 0o755); err != nil {
@@ -7281,9 +7283,9 @@ func TestRunRalphCheckAllowsAbsoluteCheckPath(t *testing.T) {
 	if err := os.MkdirAll(storePath, 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
-	packDir := filepath.Join(parent, "registry-cache", "packs", "workflows")
-	if err := os.MkdirAll(packDir, 0o755); err != nil {
-		t.Fatalf("mkdir pack dir: %v", err)
+	packDir := filepath.Join(home, ".gc", "cache", "repos", "pack-key", "packs", "workflows")
+	if err := os.MkdirAll(filepath.Join(packDir, "formulas"), 0o755); err != nil {
+		t.Fatalf("mkdir pack formulas: %v", err)
 	}
 	checkScript := filepath.Join(packDir, "check.sh")
 	if err := os.WriteFile(checkScript, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
@@ -7302,14 +7304,189 @@ func TestRunRalphCheckAllowsAbsoluteCheckPath(t *testing.T) {
 	subject := beads.Bead{ID: "run-abs", Type: "task"}
 
 	result, err := runRalphCheck(store, check, subject, 1, ProcessOptions{
-		CityPath:  cityPath,
-		StorePath: storePath,
+		CityPath:           cityPath,
+		StorePath:          storePath,
+		FormulaSearchPaths: []string{filepath.Join(packDir, "formulas")},
 	})
 	if err != nil {
 		t.Fatalf("absolute check path should be accepted: %v", err)
 	}
 	if result.Outcome != convergence.GatePass {
 		t.Fatalf("outcome = %q, want %q; stdout=%q stderr=%q", result.Outcome, convergence.GatePass, result.Stdout, result.Stderr)
+	}
+}
+
+func TestRunRalphCheckAllowsAbsoluteCheckPathUnderFormulaPackRoot(t *testing.T) {
+	parent := t.TempDir()
+	t.Setenv("HOME", filepath.Join(parent, "home"))
+	cityPath := filepath.Join(parent, "city")
+	storePath := filepath.Join(parent, "rig")
+	localPackRoot := filepath.Join(parent, "local-workflows-pack")
+	for _, dir := range []string{cityPath, storePath, filepath.Join(localPackRoot, "formulas"), filepath.Join(localPackRoot, "assets", "scripts", "checks")} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+	checkScript := filepath.Join(localPackRoot, "assets", "scripts", "checks", "review-approved.sh")
+	if err := os.WriteFile(checkScript, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write check script: %v", err)
+	}
+
+	store := beads.NewMemStore()
+	check := beads.Bead{
+		ID:   "check-local-pack",
+		Type: "task",
+		Metadata: map[string]string{
+			"gc.check_path":    checkScript,
+			"gc.check_timeout": "30s",
+		},
+	}
+	subject := beads.Bead{ID: "run-local-pack", Type: "task"}
+
+	result, err := runRalphCheck(store, check, subject, 1, ProcessOptions{
+		CityPath:           cityPath,
+		StorePath:          storePath,
+		FormulaSearchPaths: []string{filepath.Join(localPackRoot, "formulas")},
+	})
+	if err != nil {
+		t.Fatalf("absolute check path under formula pack root should be accepted: %v", err)
+	}
+	if result.Outcome != convergence.GatePass {
+		t.Fatalf("outcome = %q, want %q; stdout=%q stderr=%q", result.Outcome, convergence.GatePass, result.Stdout, result.Stderr)
+	}
+}
+
+func TestRunRalphCheckRejectsAbsoluteCheckPathUnderUnrelatedCachedPack(t *testing.T) {
+	parent := t.TempDir()
+	home := filepath.Join(parent, "home")
+	t.Setenv("HOME", home)
+	cityPath := filepath.Join(parent, "city")
+	storePath := filepath.Join(parent, "rig")
+	activePackRoot := filepath.Join(home, ".gc", "cache", "repos", "active-key", "packs", "workflows")
+	otherPackRoot := filepath.Join(home, ".gc", "cache", "repos", "other-key", "packs", "workflows")
+	for _, dir := range []string{cityPath, storePath, filepath.Join(activePackRoot, "formulas"), filepath.Join(otherPackRoot, "assets", "scripts")} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+	checkScript := filepath.Join(otherPackRoot, "assets", "scripts", "check.sh")
+	if err := os.WriteFile(checkScript, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write check script: %v", err)
+	}
+
+	store := beads.NewMemStore()
+	check := beads.Bead{
+		ID:   "check-other-pack",
+		Type: "task",
+		Metadata: map[string]string{
+			"gc.check_path":    checkScript,
+			"gc.check_timeout": "30s",
+		},
+	}
+	subject := beads.Bead{ID: "run-other-pack", Type: "task"}
+
+	result, err := runRalphCheck(store, check, subject, 1, ProcessOptions{
+		CityPath:           cityPath,
+		StorePath:          storePath,
+		FormulaSearchPaths: []string{filepath.Join(activePackRoot, "formulas")},
+	})
+	if err == nil {
+		t.Fatalf("expected unrelated cached pack rejection, got outcome=%q stdout=%q", result.Outcome, result.Stdout)
+	}
+	if !strings.Contains(err.Error(), "trusted roots") {
+		t.Errorf("expected trusted roots error, got: %v", err)
+	}
+}
+
+func TestRunRalphCheckRejectsAbsoluteCheckPathOutsideTrustedRoots(t *testing.T) {
+	parent := t.TempDir()
+	home := filepath.Join(parent, "home")
+	t.Setenv("HOME", home)
+	cityPath := filepath.Join(parent, "city")
+	storePath := filepath.Join(parent, "rig")
+	outsideDir := filepath.Join(parent, "outside")
+	if err := os.MkdirAll(cityPath, 0o755); err != nil {
+		t.Fatalf("mkdir city: %v", err)
+	}
+	if err := os.MkdirAll(storePath, 0o755); err != nil {
+		t.Fatalf("mkdir store: %v", err)
+	}
+	if err := os.MkdirAll(outsideDir, 0o755); err != nil {
+		t.Fatalf("mkdir outside: %v", err)
+	}
+	checkScript := filepath.Join(outsideDir, "check.sh")
+	if err := os.WriteFile(checkScript, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write check script: %v", err)
+	}
+
+	store := beads.NewMemStore()
+	check := beads.Bead{
+		ID:   "check-abs-outside",
+		Type: "task",
+		Metadata: map[string]string{
+			"gc.check_path":    checkScript,
+			"gc.check_timeout": "30s",
+		},
+	}
+	subject := beads.Bead{ID: "run-abs-outside", Type: "task"}
+
+	result, err := runRalphCheck(store, check, subject, 1, ProcessOptions{
+		CityPath:  cityPath,
+		StorePath: storePath,
+	})
+	if err == nil {
+		t.Fatalf("expected absolute check path rejection, got outcome=%q stdout=%q", result.Outcome, result.Stdout)
+	}
+	if !strings.Contains(err.Error(), "trusted roots") {
+		t.Errorf("expected trusted roots error, got: %v", err)
+	}
+}
+
+func TestRunRalphCheckRejectsAbsoluteCheckPathSymlinkOutsideTrustedRoots(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink semantics differ on Windows")
+	}
+	parent := t.TempDir()
+	home := filepath.Join(parent, "home")
+	t.Setenv("HOME", home)
+	cityPath := filepath.Join(parent, "city")
+	storePath := filepath.Join(parent, "rig")
+	packDir := filepath.Join(home, ".gc", "cache", "repos", "pack-key")
+	outsideDir := filepath.Join(parent, "outside")
+	for _, dir := range []string{cityPath, storePath, packDir, outsideDir} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+	outsideScript := filepath.Join(outsideDir, "check.sh")
+	if err := os.WriteFile(outsideScript, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write outside check script: %v", err)
+	}
+	checkLink := filepath.Join(packDir, "check.sh")
+	if err := os.Symlink(outsideScript, checkLink); err != nil {
+		t.Fatalf("symlink check script: %v", err)
+	}
+
+	store := beads.NewMemStore()
+	check := beads.Bead{
+		ID:   "check-abs-symlink-outside",
+		Type: "task",
+		Metadata: map[string]string{
+			"gc.check_path":    checkLink,
+			"gc.check_timeout": "30s",
+		},
+	}
+	subject := beads.Bead{ID: "run-abs-symlink-outside", Type: "task"}
+
+	result, err := runRalphCheck(store, check, subject, 1, ProcessOptions{
+		CityPath:  cityPath,
+		StorePath: storePath,
+	})
+	if err == nil {
+		t.Fatalf("expected symlinked absolute check path rejection, got outcome=%q stdout=%q", result.Outcome, result.Stdout)
+	}
+	if !strings.Contains(err.Error(), "trusted roots") {
+		t.Errorf("expected trusted roots error, got: %v", err)
 	}
 }
 
