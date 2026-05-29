@@ -1750,6 +1750,113 @@ func TestOrderDispatchLimitRotatesProductionStartAcrossTicks(t *testing.T) {
 	}
 }
 
+// TestOrderDispatchRoundRobinDoesNotStarveFrontOrders proves the round-robin
+// cursor sweeps every position so front-of-list orders fire on cadence even
+// when the per-tick create cap is smaller than the number of due orders. This
+// is the regression guard for the rotation-fairness bug: the old fixed-index
+// step advanced the cursor faster than the loop dispatched, so index-0/1 orders
+// (beads-health/dolt-health on the live city) only fired once per ~19 ticks.
+func TestOrderDispatchRoundRobinDoesNotStarveFrontOrders(t *testing.T) {
+	oldMax := orderDispatchMaxCreatesPerTick
+	orderDispatchMaxCreatesPerTick = 4
+	t.Cleanup(func() {
+		orderDispatchMaxCreatesPerTick = oldMax
+	})
+
+	store := beads.NewMemStore()
+	fakeExec := func(_ context.Context, _, _ string, _ []string) ([]byte, error) {
+		return []byte("ok\n"), nil
+	}
+	// 10 always-due orders, cap 4 → demand exceeds budget every tick, forcing
+	// rotation to do the work of spreading dispatches across ticks.
+	const orderCount = 10
+	aa := make([]orders.Order, 0, orderCount)
+	names := make([]string, 0, orderCount)
+	for i := 0; i < orderCount; i++ {
+		name := fmt.Sprintf("order-%02d", i)
+		names = append(names, name)
+		aa = append(aa, orders.Order{Name: name, Trigger: "cooldown", Interval: "1s", Exec: name})
+	}
+	ad := buildOrderDispatcherFromListExec(aa, store, nil, fakeExec, nil)
+	md, ok := ad.(*memoryOrderDispatcher)
+	if !ok {
+		t.Fatalf("dispatcher type = %T, want *memoryOrderDispatcher", ad)
+	}
+	md.cfg = &config.City{}
+
+	// Run enough ticks that every order should fire several times if no
+	// position is starved. With cap 4 and 10 orders, a fair cursor visits all
+	// positions within ceil(10/4)=3 ticks; 30 ticks gives ample margin.
+	fires := make(map[string]int)
+	// MemStore stamps tracking-bead CreatedAt with the real wall clock, which
+	// becomes each order's lastRun. Base the simulated tick clock on time.Now()
+	// and advance it well past the 1s cooldown each tick so every order is due
+	// again on every tick; rotation alone decides which 4 actually fire.
+	base := time.Now()
+	for tick := 0; tick < 30; tick++ {
+		// Each order's tracking bead is closed by drain, so the open-work gate
+		// clears between ticks; the advancing clock keeps every order due.
+		now := base.Add(time.Duration(tick+1) * 10 * time.Second)
+		md.dispatch(context.Background(), t.TempDir(), now)
+		md.drain(context.Background())
+	}
+	for _, name := range names {
+		fires[name] = len(trackingBeads(t, store, "order-run:"+name))
+	}
+
+	// Every order — including the front ones — must have fired multiple times.
+	// A starved front order would sit far below this floor.
+	for _, name := range names {
+		if fires[name] < 5 {
+			t.Fatalf("order %s fired %d times across 30 ticks, want >=5 (starvation); all fires=%v", name, fires[name], fires)
+		}
+	}
+}
+
+// TestOrderDispatchUncappedAfterStartupWindow proves the create cap is a
+// startup throttle, not an always-on limit: once now is past the startup grace
+// window from startedAt, all due orders fire in a single tick.
+func TestOrderDispatchUncappedAfterStartupWindow(t *testing.T) {
+	oldMax := orderDispatchMaxCreatesPerTick
+	orderDispatchMaxCreatesPerTick = 4
+	t.Cleanup(func() {
+		orderDispatchMaxCreatesPerTick = oldMax
+	})
+
+	store := beads.NewMemStore()
+	fakeExec := func(_ context.Context, _, _ string, _ []string) ([]byte, error) {
+		return []byte("ok\n"), nil
+	}
+	const orderCount = 10
+	aa := make([]orders.Order, 0, orderCount)
+	names := make([]string, 0, orderCount)
+	for i := 0; i < orderCount; i++ {
+		name := fmt.Sprintf("order-%02d", i)
+		names = append(names, name)
+		aa = append(aa, orders.Order{Name: name, Trigger: "cooldown", Interval: "1s", Exec: name})
+	}
+	ad := buildOrderDispatcherFromListExec(aa, store, nil, fakeExec, nil)
+	md, ok := ad.(*memoryOrderDispatcher)
+	if !ok {
+		t.Fatalf("dispatcher type = %T, want *memoryOrderDispatcher", ad)
+	}
+	md.cfg = &config.City{}
+
+	// Controller started well before the throttle window elapsed → steady state.
+	start := time.Date(2026, 5, 28, 1, 0, 0, 0, time.UTC)
+	md.startedAt = start
+	now := start.Add(orderDispatchStartupThrottleWindow + time.Minute)
+
+	md.dispatch(context.Background(), t.TempDir(), now)
+	md.drain(context.Background())
+
+	for _, name := range names {
+		if got := len(trackingBeads(t, store, "order-run:"+name)); got != 1 {
+			t.Fatalf("order %s tracking beads = %d after one steady-state tick, want 1 (uncapped)", name, got)
+		}
+	}
+}
+
 func TestOrderDispatchRecordsTickTelemetry(t *testing.T) {
 	store := beads.NewMemStore()
 	var rec memRecorder

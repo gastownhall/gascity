@@ -81,6 +81,14 @@ var (
 	orderDispatchMaxCreatesPerTick   = 4
 )
 
+// orderDispatchStartupThrottleWindow bounds how long after controller start the
+// per-tick create cap (orderDispatchMaxCreatesPerTick) is enforced. The cap
+// exists to spread the startup tracking-bead write burst; once the city reaches
+// steady state the bounded set of due orders must fire on cadence, so the cap is
+// lifted after this window. Backpressure on Dolt contention is still provided by
+// the tracking write budget and return-on-write-failure paths.
+var orderDispatchStartupThrottleWindow = 2 * time.Minute
+
 func orderRunLabel(scopedName string) string {
 	return "order-run:" + scopedName
 }
@@ -283,6 +291,7 @@ type memoryOrderDispatcher struct {
 	cacheMu            sync.Mutex
 	lastRunCache       map[string]time.Time
 	nextCandidateStart int
+	startedAt          time.Time
 
 	dispatchCtx    context.Context
 	dispatchCancel context.CancelFunc
@@ -433,6 +442,7 @@ func buildOrderDispatcherFromOrderSet(cityPath string, cfg *config.City, allAA [
 		maxTimeout:     cfg.Orders.MaxTimeoutDuration(),
 		cfg:            cfg,
 		cityName:       loadedCityName(cfg, cityPath),
+		startedAt:      time.Now(),
 		dispatchCtx:    dispatchCtx,
 		dispatchCancel: dispatchCancel,
 	}
@@ -545,8 +555,11 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 	snapshots := buildOrderDispatchSnapshots(snapshotCtx, snapshotInputs, now)
 	cancel()
 
-	candidates = m.rotateDispatchCandidates(candidates)
-	for _, candidate := range candidates {
+	limit := m.effectiveCreateCap(now)
+	candidates, rotateStart := m.rotateDispatchCandidates(candidates, limit)
+	candidateCount := len(candidates)
+	advanceTo := rotateStart
+	for j, candidate := range candidates {
 		a := candidate.order
 		scoped := a.ScopedName()
 		if err := snapshots.degradation(scoped, candidate.gateStoreKeys); err != nil {
@@ -611,7 +624,14 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 		if !result.Due {
 			continue
 		}
-		if m.dispatchCreateLimitReached(stats) {
+		if m.dispatchCreateLimitReached(stats, limit) {
+			// Cap reached before dispatching this due candidate. Resume the
+			// round-robin here next tick so this order — and the ones after
+			// it — get first crack at the budget, instead of being starved
+			// by front-of-list orders.
+			if candidateCount > 0 {
+				m.nextCandidateStart = (rotateStart + j) % candidateCount
+			}
 			return
 		}
 
@@ -629,6 +649,9 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 		}
 		m.rememberLastRun(scoped, candidate.gateStoreKeys, trackingBead.CreatedAt)
 		stats.dispatchesCreated++
+		if candidateCount > 0 {
+			advanceTo = (rotateStart + j + 1) % candidateCount
+		}
 
 		// Fire with timeout; inflight tracks the spawned goroutine so
 		// drain can wait for tracking-bead outcome persistence before
@@ -637,35 +660,63 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 		m.addInflight()
 		m.launchDispatchOne(ctx, candidate.store, candidate.target, orderToDispatch, cityPath, trackingBead.ID)
 	}
+
+	// Loop completed without hitting the cap. If anything dispatched, resume
+	// the round-robin after the last dispatched candidate next tick.
+	if stats.dispatchesCreated > 0 {
+		m.nextCandidateStart = advanceTo
+	}
 }
 
-func (m *memoryOrderDispatcher) rotateDispatchCandidates(candidates []orderDispatchCandidate) []orderDispatchCandidate {
-	if m == nil || m.cfg == nil || len(candidates) <= 1 || orderDispatchMaxCreatesPerTick <= 0 {
-		return candidates
+// effectiveCreateCap returns the per-tick tracking-bead create cap that
+// applies right now. The cap is a STARTUP throttle, not an always-on limit:
+// it spreads the boot-time write burst, then lifts once the city reaches
+// steady state so the bounded set of due orders fires on cadence.
+//
+//   - cap disabled (<= 0): always 0 (no throttle).
+//   - within the startup grace window after construction: the configured cap.
+//   - after the window (steady state): 0 (uncapped).
+//
+// A zero startedAt (test dispatchers that don't set it) is treated as "still
+// in startup" so the cap stays enforced — preserving deterministic test
+// behavior and erring toward throttling when the start time is unknown.
+func (m *memoryOrderDispatcher) effectiveCreateCap(now time.Time) int {
+	if orderDispatchMaxCreatesPerTick <= 0 {
+		return 0
 	}
-	start := m.nextCandidateStart % len(candidates)
-	if start < 0 {
-		start = 0
+	if !m.startedAt.IsZero() && now.Sub(m.startedAt) >= orderDispatchStartupThrottleWindow {
+		return 0
 	}
-	step := orderDispatchMaxCreatesPerTick
-	if step > len(candidates) {
-		step = len(candidates)
+	return orderDispatchMaxCreatesPerTick
+}
+
+// rotateDispatchCandidates rotates candidates so the order at the persistent
+// round-robin cursor (nextCandidateStart) leads, returning the rotated slice
+// and the original index that now leads (rotateStart). It does NOT advance the
+// cursor — the dispatch loop owns cursor bookkeeping so it can resume exactly
+// after the last candidate that consumed budget (or at the one blocked by the
+// cap), which is what keeps front-of-list orders from starving. When the cap
+// is disabled (limit <= 0) rotation is a no-op.
+func (m *memoryOrderDispatcher) rotateDispatchCandidates(candidates []orderDispatchCandidate, limit int) ([]orderDispatchCandidate, int) {
+	if m == nil || m.cfg == nil || len(candidates) <= 1 || limit <= 0 {
+		return candidates, 0
 	}
-	m.nextCandidateStart = (start + step) % len(candidates)
+	n := len(candidates)
+	start := ((m.nextCandidateStart % n) + n) % n
 	if start == 0 {
-		return candidates
+		return candidates, 0
 	}
-	rotated := make([]orderDispatchCandidate, 0, len(candidates))
+	rotated := make([]orderDispatchCandidate, 0, n)
 	rotated = append(rotated, candidates[start:]...)
 	rotated = append(rotated, candidates[:start]...)
-	return rotated
+	return rotated, start
 }
 
-func (m *memoryOrderDispatcher) dispatchCreateLimitReached(stats *orderDispatchTickStats) bool {
-	if m == nil || m.cfg == nil || stats == nil || orderDispatchMaxCreatesPerTick <= 0 {
+func (m *memoryOrderDispatcher) dispatchCreateLimitReached(stats *orderDispatchTickStats, limit int) bool {
+	if m == nil || stats == nil || limit <= 0 {
 		return false
 	}
-	return stats.dispatchesCreated >= orderDispatchMaxCreatesPerTick
+	return stats.dispatchesCreated >= limit
 }
 
 func (s *orderDispatchTickStats) touchStore(key string) {
