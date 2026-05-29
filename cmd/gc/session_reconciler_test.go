@@ -4003,6 +4003,84 @@ func TestReconcileSessionBeads_ConfigDriftDeferredOnLiveAssignedWork(t *testing.
 	}
 }
 
+func TestReconcileSessionBeads_DrainAckedConfigDriftCanceledForAssignedWork(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	env.addDesired("worker", "worker", true)
+	session := env.createSessionBead("worker", "worker")
+	env.markSessionActive(&session)
+
+	work, err := env.store.Create(beads.Bead{
+		Title:    "assigned work",
+		Type:     "task",
+		Status:   "in_progress",
+		Assignee: session.ID,
+	})
+	if err != nil {
+		t.Fatalf("Create work bead: %v", err)
+	}
+
+	ds := &drainState{
+		startedAt:  env.clk.Now().Add(-defaultDrainTimeout),
+		deadline:   env.clk.Now().Add(30 * time.Second),
+		reason:     "config-drift",
+		generation: 1,
+		ackSet:     true,
+	}
+	env.dt.set(session.ID, ds)
+	if err := setReconcilerDrainAckMetadata(env.sp, "worker", ds); err != nil {
+		t.Fatalf("setReconcilerDrainAckMetadata: %v", err)
+	}
+	dops := newFakeDrainOps()
+	if err := dops.setDrainAck("worker"); err != nil {
+		t.Fatalf("setDrainAck: %v", err)
+	}
+
+	reconcileSessionBeadsAtPath(
+		context.Background(),
+		"",
+		[]beads.Bead{session},
+		env.desiredState,
+		map[string]bool{"worker": true},
+		env.cfg,
+		env.sp,
+		env.store,
+		dops,
+		[]beads.Bead{work},
+		nil,
+		nil,
+		env.dt,
+		map[string]int{"worker": 1},
+		false,
+		nil,
+		"",
+		nil,
+		env.clk,
+		env.rec,
+		0,
+		0,
+		&env.stdout,
+		&env.stderr,
+	)
+
+	if !env.sp.IsRunning("worker") {
+		t.Fatal("assigned-work config-drift drain should be canceled before stopping the running session")
+	}
+	if ds := env.dt.get(session.ID); ds != nil {
+		t.Fatalf("drain = %+v, want canceled", ds)
+	}
+	if ack, _ := env.sp.GetMeta("worker", "GC_DRAIN_ACK"); ack != "" {
+		t.Fatalf("GC_DRAIN_ACK = %q, want cleared", ack)
+	}
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", session.ID, err)
+	}
+	if got.Metadata["state_reason"] == sessionpkg.DrainAckStopPendingReason {
+		t.Fatalf("state_reason = %q, want no drain-ack stop pending", got.Metadata["state_reason"])
+	}
+}
+
 func TestReconcileSessionBeads_NoDriftWhenHashMatches(t *testing.T) {
 	env := newReconcilerTestEnv()
 	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
