@@ -1242,8 +1242,41 @@ func TestOrderRunResolvesPackBindingForPool(t *testing.T) {
 	if got := results[0].Metadata["gc.routed_to"]; got != "maintenance.dog" {
 		t.Fatalf("gc.routed_to = %q, want maintenance.dog", got)
 	}
+	if got := results[0].Metadata[poolDemandMetadataKey]; got != poolDemandMetadataValue {
+		t.Fatalf("%s = %q, want %q (cron pool orders need this flag so defaultScaleCheckCounts can count the molecule wisp despite readyExcludeTypes filtering molecules out of Ready() — see cmd/gc/pool_demand.go for the non-numeric-value rationale)", poolDemandMetadataKey, got, poolDemandMetadataValue)
+	}
 	if !strings.Contains(stdout.String(), "gc.routed_to=maintenance.dog") {
 		t.Fatalf("stdout = %q, want binding-qualified route", stdout.String())
+	}
+}
+
+// TestOrderRunNonPoolDoesNotSetPoolDemand asserts the symmetric: orders
+// without a pool field do NOT get gc.pool_demand stamped. The flag is
+// strictly a cron-pool-order signal.
+func TestOrderRunNonPoolDoesNotSetPoolDemand(t *testing.T) {
+	aa := []orders.Order{
+		{Name: "cleanup", Formula: "mol-cleanup", Trigger: "cron", Schedule: "0 3 * * *", FormulaLayer: sharedTestFormulaDir},
+	}
+	store := beads.NewMemStore()
+
+	var stdout, stderr bytes.Buffer
+	code := doOrderRun(aa, "cleanup", "", "/city", store, nil, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doOrderRun = %d, want 0; stderr: %s", code, stderr.String())
+	}
+
+	results, err := store.ListByLabel("order-run:cleanup", 0)
+	if err != nil {
+		t.Fatalf("store.ListByLabel(): %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("store.ListByLabel() len = %d, want 1 (%#v)", len(results), results)
+	}
+	if got := results[0].Metadata[poolDemandMetadataKey]; got != "" {
+		t.Fatalf("%s = %q, want empty (only pool orders should carry the flag)", poolDemandMetadataKey, got)
+	}
+	if got := results[0].Metadata["gc.routed_to"]; got != "" {
+		t.Fatalf("gc.routed_to = %q, want empty for unrouted order", got)
 	}
 }
 

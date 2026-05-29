@@ -855,6 +855,70 @@ func TestArchiveManyStampsCloseReason(t *testing.T) {
 	}
 }
 
+func TestArchiveMatchingSkipsPerMessageGet(t *testing.T) {
+	base := beads.NewMemStore()
+	store := noMessageGetStore{MemStore: base}
+	p := New(store)
+
+	matchingA, err := p.Send("human", "human", "Dolt health advisory one", "first")
+	if err != nil {
+		t.Fatal(err)
+	}
+	matchingB, err := p.Send("human", "human", "Dolt health advisory two", "second")
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, err := p.Send("human", "human", "Operator handoff", "leave open")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	matches, results, err := p.ArchiveMatching(ArchiveFilter{
+		Recipients:      []string{"human"},
+		SubjectPrefix:   "Dolt health",
+		Limit:           10,
+		CaseInsensitive: true,
+	})
+	if err != nil {
+		t.Fatalf("ArchiveMatching: %v", err)
+	}
+	if len(matches) != 2 || len(results) != 2 {
+		t.Fatalf("ArchiveMatching returned %d matches/%d results, want 2/2", len(matches), len(results))
+	}
+	for i, r := range results {
+		if r.Err != nil {
+			t.Fatalf("results[%d].Err = %v", i, r.Err)
+		}
+	}
+	for _, id := range []string{matchingA.ID, matchingB.ID} {
+		got, err := base.Get(id)
+		if err != nil {
+			t.Fatalf("Get(%s): %v", id, err)
+		}
+		if got.Status != "closed" {
+			t.Fatalf("message %s status = %q, want closed", id, got.Status)
+		}
+	}
+	got, err := base.Get(other.ID)
+	if err != nil {
+		t.Fatalf("Get(other): %v", err)
+	}
+	if got.Status != "open" {
+		t.Fatalf("nonmatching message status = %q, want open", got.Status)
+	}
+}
+
+type noMessageGetStore struct {
+	*beads.MemStore
+}
+
+func (s noMessageGetStore) Get(id string) (beads.Bead, error) {
+	if strings.HasPrefix(id, "gc-") {
+		return beads.Bead{}, errors.New("per-message Get must not be used")
+	}
+	return s.MemStore.Get(id)
+}
+
 // --- Delete ---
 
 func TestDelete(t *testing.T) {

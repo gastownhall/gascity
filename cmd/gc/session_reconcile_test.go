@@ -1592,11 +1592,8 @@ func TestHealState_PreservesCreatingWhileStartRequested(t *testing.T) {
 	session := makeBead("b1", map[string]string{
 		"state":                "creating",
 		"pending_create_claim": "true",
+		"last_woke_at":         clk.Now().Add(-30 * time.Second).Format(time.RFC3339),
 	})
-	// #1460: pending_create_claim only short-circuits while the create
-	// lease is fresh. Pin CreatedAt to "now" so the bead is within the
-	// lease window — without this the zero CreatedAt is treated as stale
-	// and the bead correctly heals to asleep (covered by the test below).
 	session.CreatedAt = clk.Now().Add(-30 * time.Second)
 
 	healState(&session, false, store, clk)
@@ -1605,8 +1602,8 @@ func TestHealState_PreservesCreatingWhileStartRequested(t *testing.T) {
 	}
 }
 
-// #1460: stale-creating + pending_create_claim must heal to asleep so a
-// crashed creator does not strand the pool slot indefinitely.
+// #1460: stale provider-start creating + pending_create_claim must heal to
+// asleep so a crashed creator does not strand the pool slot indefinitely.
 func TestHealState_StaleCreatingWithPendingClaimHealsToAsleep(t *testing.T) {
 	store := newTestStore()
 	clk := &clock.Fake{Time: time.Date(2026, 3, 29, 4, 0, 0, 0, time.UTC)}
@@ -1614,12 +1611,34 @@ func TestHealState_StaleCreatingWithPendingClaimHealsToAsleep(t *testing.T) {
 	session := makeBead("b1", map[string]string{
 		"state":                "creating",
 		"pending_create_claim": "true",
+		"last_woke_at":         clk.Now().Add(-2 * time.Minute).Format(time.RFC3339),
 	})
 	session.CreatedAt = clk.Now().Add(-2 * time.Minute)
 
 	healState(&session, false, store, clk)
 	if session.Metadata["state"] != "asleep" {
 		t.Fatalf("state = %q, want asleep", session.Metadata["state"])
+	}
+}
+
+func TestHealState_NeverStartedPendingCreateMigratesToStartPendingUntilRollbackLeaseExpires(t *testing.T) {
+	store := newTestStore()
+	clk := &clock.Fake{Time: time.Date(2026, 5, 18, 20, 0, 0, 0, time.UTC)}
+
+	startedAt := clk.Now().Add(-2 * time.Minute)
+	session := makeBead("b1", map[string]string{
+		"state":                     "creating",
+		"pending_create_claim":      "true",
+		"pending_create_started_at": pendingCreateStartedAtNow(startedAt),
+	})
+	session.CreatedAt = startedAt
+
+	healState(&session, false, store, clk)
+	if session.Metadata["state"] != string(sessionpkg.StateStartPending) {
+		t.Fatalf("state = %q, want start-pending while pending-create lease is active", session.Metadata["state"])
+	}
+	if got := len(store.metadata["b1"]); got != 1 {
+		t.Fatalf("healState wrote %d metadata entries for active pending-create lease; want state migration only", got)
 	}
 }
 
@@ -1805,13 +1824,13 @@ func TestHealStatePatchProjectsRuntimeLiveness(t *testing.T) {
 			want: map[string]string{"state": "asleep"},
 		},
 		{
-			name:  "dead blank legacy state with create claim heals to creating",
+			name:  "dead blank legacy state with create claim heals to start-pending",
 			alive: false,
 			session: makeBead("b1", map[string]string{
 				"state":                "",
 				"pending_create_claim": "true",
 			}),
-			want: map[string]string{"state": "creating"},
+			want: map[string]string{"state": string(sessionpkg.StateStartPending)},
 		},
 		{
 			name:  "stale creating heals to asleep and resets stale resume identity",

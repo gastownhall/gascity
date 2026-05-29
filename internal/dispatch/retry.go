@@ -1,6 +1,7 @@
 package dispatch
 
 import (
+	"encoding/json"
 	"fmt"
 	"strconv"
 	"strings"
@@ -243,8 +244,14 @@ func classifyRetryAttempt(subject beads.Bead) retryEvalResult {
 		if strings.TrimSpace(subject.Metadata["gc.failure_class"]) != "" || strings.TrimSpace(subject.Metadata["gc.failure_reason"]) != "" {
 			return retryEvalResult{Outcome: "transient", Reason: "pass_with_failure_metadata"}
 		}
-		if strings.TrimSpace(subject.Metadata["gc.output_json_required"]) == "true" && strings.TrimSpace(subject.Metadata["gc.output_json"]) == "" {
-			return retryEvalResult{Outcome: "transient", Reason: "missing_required_output_json"}
+		if strings.TrimSpace(subject.Metadata["gc.output_json_required"]) == "true" {
+			rawOutput := strings.TrimSpace(subject.Metadata["gc.output_json"])
+			if rawOutput == "" {
+				return retryEvalResult{Outcome: "transient", Reason: "missing_required_output_json"}
+			}
+			if !json.Valid([]byte(rawOutput)) {
+				return retryEvalResult{Outcome: "transient", Reason: "invalid_required_output_json"}
+			}
 		}
 		return retryEvalResult{Outcome: "pass"}
 	case "fail":

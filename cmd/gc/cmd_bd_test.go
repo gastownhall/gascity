@@ -141,6 +141,13 @@ func TestExtractBdScopeFlags(t *testing.T) {
 }
 
 func TestResolveBdScopeTarget(t *testing.T) {
+	// Isolate cwd from any ambient `.beads/redirect` in the working tree
+	// (e.g. when `make test` runs from a polecat/crew worktree, the worktree's
+	// redirect resolves to a path outside the synthetic rig config below and
+	// `rigFromRedirectedBeadsDir` rejects it). t.TempDir's ancestry is /tmp,
+	// which is guaranteed to be free of city redirects.
+	setCwd(t, t.TempDir())
+
 	origProbe := bdBeadExists
 	defer func() { bdBeadExists = origProbe }()
 	bdBeadExists = func(_ string, _ execStoreTarget, beadID string) bool {
@@ -568,6 +575,9 @@ func TestGcBdSuppressesBdAutoExportInChildEnv(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o700); err != nil {
 		t.Fatal(err)
 	}
+	// See TestResolveBdScopeTarget for rationale: isolate cwd so any
+	// `.beads/redirect` in the ambient working tree doesn't surface here.
+	setCwd(t, cityDir)
 	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
 name = "demo"
 `), 0o644); err != nil {
@@ -700,6 +710,9 @@ prefix = "repo"
 `), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	// See TestResolveBdScopeTarget for rationale: isolate cwd so any
+	// `.beads/redirect` in the ambient working tree doesn't surface here.
+	setCwd(t, cityDir)
 
 	binDir := t.TempDir()
 	capture := filepath.Join(t.TempDir(), "gc-bd-city-env.txt")
@@ -780,6 +793,9 @@ name = "demo"
 `), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	// See TestResolveBdScopeTarget for rationale: isolate cwd so any
+	// `.beads/redirect` in the ambient working tree doesn't surface here.
+	setCwd(t, cityDir)
 	t.Setenv("GC_CITY_PATH", cityDir)
 	t.Setenv("GC_BEADS", "file")
 	// Clear any inherited scope pin so the GC_BEADS override applies to
@@ -816,6 +832,9 @@ provider = "file"
 `), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	// See TestResolveBdScopeTarget for rationale: isolate cwd so any
+	// `.beads/redirect` in the ambient working tree doesn't surface here.
+	setCwd(t, cityDir)
 	t.Setenv("GC_CITY_PATH", cityDir)
 
 	var stdout, stderr bytes.Buffer

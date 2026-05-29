@@ -1,0 +1,28 @@
+# Minimal, self-contained Gas Town-style pack for the t3bridge example.
+#
+# This is deliberately standalone — no maintenance import and no asset
+# scripts — so the city initializes cleanly via `gc init --from` without
+# reaching outside the example directory. It exists to exercise the native
+# T3 bridge provider against a Gas-Town-shaped roster (mayor + witness,
+# refinery, polecat), not to mirror the full-featured pack.
+#
+# For the complete Gas Town pack, see examples/gastown/packs/gastown.
+
+[pack]
+name = "t3demo"
+schema = 2
+
+[[named_session]]
+template = "mayor"
+scope = "city"
+mode = "always"
+
+[[named_session]]
+template = "witness"
+scope = "rig"
+mode = "always"
+
+[[named_session]]
+template = "refinery"
+scope = "rig"
+mode = "on_demand"

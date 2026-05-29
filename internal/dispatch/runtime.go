@@ -108,6 +108,9 @@ func ProcessControl(store beads.Store, bead beads.Bead, opts ProcessOptions) (Co
 			bead.ID, bead.Metadata["gc.kind"], bead.Status)
 		return ControlResult{}, nil
 	}
+	if result, handled, err := closeOrphanedControl(store, bead, opts); handled || err != nil {
+		return result, err
+	}
 
 	switch bead.Metadata["gc.kind"] {
 	case "retry":
@@ -127,6 +130,37 @@ func ProcessControl(store beads.Store, bead beads.Bead, opts ProcessOptions) (Co
 	default:
 		return ControlResult{}, fmt.Errorf("%s: unsupported control bead kind %q", bead.ID, bead.Metadata["gc.kind"])
 	}
+}
+
+func closeOrphanedControl(store beads.Store, bead beads.Bead, opts ProcessOptions) (ControlResult, bool, error) {
+	if bead.Metadata["gc.kind"] == "workflow-finalize" {
+		return ControlResult{}, false, nil
+	}
+	rootID := strings.TrimSpace(bead.Metadata["gc.root_bead_id"])
+	rootStoreRef := strings.TrimSpace(bead.Metadata["gc.root_store_ref"])
+	if rootID == "" || rootStoreRef == "" || rootID == bead.ID {
+		return ControlResult{}, false, nil
+	}
+	if _, err := store.Get(rootID); err == nil {
+		return ControlResult{}, false, nil
+	} else if !errors.Is(err, beads.ErrNotFound) {
+		return ControlResult{}, false, fmt.Errorf("%s: loading workflow root %s: %w", bead.ID, rootID, err)
+	}
+
+	opts.tracef("process-control bead=%s kind=%s close reason=missing_workflow_root root=%s store_ref=%s",
+		bead.ID, bead.Metadata["gc.kind"], rootID, rootStoreRef)
+	closeMetadata := map[string]string{
+		"gc.outcome":              "fail",
+		"gc.failure_class":        "hard",
+		"gc.failure_reason":       "missing_workflow_root",
+		"gc.final_disposition":    "orphaned_workflow",
+		"gc.missing_root_bead_id": rootID,
+	}
+	clearControllerSpawnErrorMetadata(closeMetadata)
+	if err := updateMetadataAndClose(store, bead.ID, closeMetadata); err != nil {
+		return ControlResult{}, true, fmt.Errorf("%s: closing orphaned control: %w", bead.ID, err)
+	}
+	return ControlResult{Processed: true, Action: "orphaned-workflow"}, true, nil
 }
 
 func (opts ProcessOptions) tracef(format string, args ...any) {

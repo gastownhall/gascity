@@ -1169,6 +1169,7 @@ func controllerLoop(
 		stdout:              stdout,
 		stderr:              stderr,
 	}
+	cr.setControllerState(cs)
 	cr.run(ctx)
 }
 
@@ -1313,8 +1314,8 @@ func runController(
 	cs.pokeCh = pokeCh
 	cs.configDirty = configDirty
 	cs.services = cr.svc
-	cs.startBeadEventWatcher(ctx)
 	cr.setControllerState(cs)
+	cs.startBeadEventWatcher(ctx)
 
 	// Start API server if configured. Standalone city mode wraps the
 	// single city in a SupervisorMux so every endpoint is served at its

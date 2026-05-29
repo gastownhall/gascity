@@ -7,7 +7,10 @@ import (
 func TestBuildRegistry_DefaultsOnly(t *testing.T) {
 	r := BuildRegistry(nil, nil)
 	if _, ok := r.Lookup("claude", "claude-opus-4-7"); !ok {
-		t.Fatal("expected default Claude pricing in registry")
+		t.Fatal("expected Opus 4.7 Claude pricing in registry")
+	}
+	if _, ok := r.Lookup("claude", "claude-opus-4-8"); !ok {
+		t.Fatal("expected Opus 4.8 Claude pricing in registry")
 	}
 }
 

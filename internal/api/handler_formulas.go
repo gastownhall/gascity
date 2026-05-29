@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -57,8 +56,8 @@ func buildFormulaCatalog(paths []string) ([]formulaSummaryResponse, error) {
 	if len(paths) == 0 {
 		return []formulaSummaryResponse{}, nil
 	}
-	names := discoverFormulaNames(paths)
-	parser := formula.NewParser(paths...)
+	parser := formula.NewParser(paths...).SetSource(formula.SourceFromEnv())
+	names := discoverFormulaNamesFromSource(parser.Source(), paths)
 	items := make([]formulaSummaryResponse, 0, len(names))
 	for _, name := range names {
 		resolved, err := loadResolvedWorkflowFormula(parser, name)
@@ -175,7 +174,7 @@ func buildFormulaDetail(ctx context.Context, name string, paths []string, _ stri
 	if len(paths) == 0 {
 		return nil, fmt.Errorf("%w: %q not in search paths", errFormulaNotFound, name)
 	}
-	parser := formula.NewParser(paths...)
+	parser := formula.NewParser(paths...).SetSource(formula.SourceFromEnv())
 	resolved, err := loadResolvedWorkflowFormula(parser, name)
 	if err != nil {
 		return nil, err
@@ -259,18 +258,24 @@ func buildFormulaDetail(ctx context.Context, name string, paths []string, _ stri
 	return resp, nil
 }
 
-func discoverFormulaNames(paths []string) []string {
+// discoverFormulaNamesFromSource lists formula names through the same
+// Source the parser uses for loading. Keeps catalog discovery
+// consistent with ref-stable resolution (#2030 / PR #2537 Copilot
+// finding): a name visible in the working tree but absent at the
+// configured ref otherwise produces hard load errors during catalog
+// build under opt-in GC_FORMULA_REF.
+func discoverFormulaNamesFromSource(src formula.Source, paths []string) []string {
+	if src == nil {
+		src = formula.FSSource{}
+	}
 	winners := make(map[string]struct{})
 	for _, dir := range paths {
-		entries, err := os.ReadDir(dir)
+		entries, err := src.ListDir(dir)
 		if err != nil {
 			continue
 		}
 		for _, entry := range entries {
-			if entry.IsDir() {
-				continue
-			}
-			name, ok := formula.TrimTOMLFilename(entry.Name())
+			name, ok := formula.TrimTOMLFilename(entry)
 			if !ok {
 				continue
 			}

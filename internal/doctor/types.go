@@ -17,6 +17,20 @@ const (
 	StatusError
 )
 
+// CheckSeverity tells consumers (e.g. dispatch gates) whether a failing check
+// should be treated as blocking or merely informational. The zero value is
+// SeverityBlocking so existing checks remain blocking without modification.
+type CheckSeverity int
+
+const (
+	// SeverityBlocking means a failing result should gate consumers
+	// (dispatch, automation, exit codes). This is the default.
+	SeverityBlocking CheckSeverity = iota
+	// SeverityAdvisory means a failing result is informational only;
+	// consumers may proceed past it without remediation.
+	SeverityAdvisory
+)
+
 // Check is a single diagnostic check. Implementations are registered with
 // a Doctor and executed sequentially during Run.
 type Check interface {
@@ -47,6 +61,20 @@ type CheckContext struct {
 	// Checks that need to surface fix-time diagnostics should use this
 	// writer so captured doctor output includes the diagnostics.
 	Output io.Writer
+	// ExplainPostgresAuth, when true, opts checks that implement
+	// Renderer into emitting their per-scope resolution table after
+	// the standard summary line. Today only PostgresAuthCheck honors
+	// this flag.
+	ExplainPostgresAuth bool
+}
+
+// Renderer is implemented by checks that produce additional, optional
+// output controlled by a flag in CheckContext (e.g., the
+// --explain-postgres-auth resolution table). Renderer is opt-in: the
+// doctor runner type-asserts each check and skips the call when the
+// check does not implement it.
+type Renderer interface {
+	RenderExtras(ctx *CheckContext, w io.Writer)
 }
 
 // CheckResult holds the outcome of a single check execution.
@@ -55,6 +83,11 @@ type CheckResult struct {
 	Name string
 	// Status is the outcome: OK, Warning, or Error.
 	Status CheckStatus
+	// Severity classifies a failing Status for gate consumers. Zero
+	// value (SeverityBlocking) preserves the legacy "every error gates"
+	// behavior; checks that opt in to SeverityAdvisory let callers
+	// proceed past their failures.
+	Severity CheckSeverity
 	// Message is a human-readable summary of the result.
 	Message string
 	// Details holds extra lines shown only in verbose mode.

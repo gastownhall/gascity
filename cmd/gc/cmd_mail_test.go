@@ -602,6 +602,126 @@ func TestCmdMailSendDefaultSenderFallsBackToGCAliasWhenSessionIDMissing(t *testi
 	}
 }
 
+func TestCmdMailSendFromControllerCreatesMessage(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_MAIL", "")
+	t.Setenv("GC_ALIAS", "")
+	t.Setenv("GC_SESSION_ID", "")
+	t.Setenv("GC_AGENT", "")
+
+	cityPath := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(city.toml): %v", err)
+	}
+	t.Setenv("GC_CITY", cityPath)
+
+	store, err := openCityStoreAt(cityPath)
+	if err != nil {
+		t.Fatalf("openCityStoreAt: %v", err)
+	}
+	if _, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			namedSessionIdentityMetadata: "test-city/mayor",
+			"alias":                      "mayor",
+			"session_name":               "mayor-session",
+		},
+	}); err != nil {
+		t.Fatalf("Create recipient: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := cmdMailSend([]string{"mayor/"}, false, false, "controller", "", "Dolt health advisory [MEDIUM]", "Latency warning", &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("cmdMailSend() = %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	storeAfter, err := openCityStoreAt(cityPath)
+	if err != nil {
+		t.Fatalf("openCityStoreAt after send: %v", err)
+	}
+	all, err := storeAfter.ListOpen()
+	if err != nil {
+		t.Fatalf("ListOpen: %v", err)
+	}
+	var msg beads.Bead
+	found := false
+	for _, b := range all {
+		if b.Type == "message" {
+			msg = b
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("message bead not found; beads=%#v", all)
+	}
+	if msg.From != "controller" {
+		t.Fatalf("message From = %q, want controller", msg.From)
+	}
+	if msg.Assignee != "mayor" {
+		t.Fatalf("message Assignee = %q, want mayor", msg.Assignee)
+	}
+	if msg.Title != "Dolt health advisory [MEDIUM]" {
+		t.Fatalf("message Title = %q, want advisory subject", msg.Title)
+	}
+	if msg.Description != "Latency warning" {
+		t.Fatalf("message Description = %q, want body", msg.Description)
+	}
+}
+
+func TestCmdMailSendToControllerRecipientIsRejected(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_MAIL", "")
+	t.Setenv("GC_ALIAS", "")
+	t.Setenv("GC_SESSION_ID", "")
+	t.Setenv("GC_AGENT", "")
+
+	cityPath := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(city.toml): %v", err)
+	}
+	t.Setenv("GC_CITY", cityPath)
+
+	store, err := openCityStoreAt(cityPath)
+	if err != nil {
+		t.Fatalf("openCityStoreAt: %v", err)
+	}
+	if _, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			namedSessionIdentityMetadata: "test-city/mayor",
+			"alias":                      "mayor",
+			"session_name":               "mayor-session",
+		},
+	}); err != nil {
+		t.Fatalf("Create recipient: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := cmdMailSend([]string{"controller/"}, false, false, "human", "", "Subject", "Body", &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("cmdMailSend() = 0, want failure; stdout=%s stderr=%s", stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), `unknown recipient "controller/"`) {
+		t.Fatalf("stderr = %q, want unknown controller recipient", stderr.String())
+	}
+	storeAfter, err := openCityStoreAt(cityPath)
+	if err != nil {
+		t.Fatalf("openCityStoreAt after send: %v", err)
+	}
+	all, err := storeAfter.ListOpen()
+	if err != nil {
+		t.Fatalf("ListOpen: %v", err)
+	}
+	for _, b := range all {
+		if b.Type == "message" {
+			t.Fatalf("message bead should not be created for reserved controller recipient: %#v", b)
+		}
+	}
+}
+
 func TestResolveDefaultMailTargetsForCommand_HumanDefaultWhenNoEnv(t *testing.T) {
 	t.Setenv("GC_MAIL", "fake")
 	_ = os.Unsetenv("GC_ALIAS")
@@ -2424,6 +2544,68 @@ func TestMailArchiveMultiPartialFailure(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "gc mail archive ghost") {
 		t.Errorf("stderr missing per-id error for ghost:\n%s", stderr.String())
+	}
+}
+
+func TestMailArchiveSelectedIsFilteredAndBounded(t *testing.T) {
+	store := beads.NewMemStore()
+	mp := beadmail.New(store)
+	first, err := mp.Send("human", "operator", "Dolt health advisory one", "archive me")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := mp.Send("human", "operator", "Dolt health advisory two", "archive later")
+	if err != nil {
+		t.Fatal(err)
+	}
+	readMatch, err := mp.Send("human", "operator", "Dolt health advisory read", "leave read")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := mp.MarkRead(readMatch.ID); err != nil {
+		t.Fatal(err)
+	}
+	nonMatch, err := mp.Send("human", "operator", "Human handoff", "preserve")
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherRecipient, err := mp.Send("human", "other", "Dolt health advisory other", "preserve")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doMailArchiveSelected(mp, events.Discard, mailArchiveSelectOptions{
+		Recipient:       "operator",
+		SubjectPrefix:   "Dolt health",
+		Limit:           1,
+		CaseInsensitive: true,
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doMailArchiveSelected = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Archived message "+first.ID) {
+		t.Fatalf("stdout = %q, want archive confirmation for %s", stdout.String(), first.ID)
+	}
+	if strings.Contains(stdout.String(), second.ID) {
+		t.Fatalf("stdout = %q, did not expect second match past limit", stdout.String())
+	}
+
+	status := func(id string) string {
+		t.Helper()
+		b, err := store.Get(id)
+		if err != nil {
+			t.Fatalf("Get(%s): %v", id, err)
+		}
+		return b.Status
+	}
+	if got := status(first.ID); got != "closed" {
+		t.Fatalf("first status = %q, want closed", got)
+	}
+	for _, id := range []string{second.ID, readMatch.ID, nonMatch.ID, otherRecipient.ID} {
+		if got := status(id); got != "open" {
+			t.Fatalf("message %s status = %q, want open", id, got)
+		}
 	}
 }
 

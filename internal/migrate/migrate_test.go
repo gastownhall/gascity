@@ -61,21 +61,17 @@ prompt_template = "prompts/worker.md"
 	if !strings.Contains(packToml, "source = \"../packs/gastown\"") {
 		t.Fatalf("pack.toml missing gastown source:\n%s", packToml)
 	}
+	cityToml := readFile(t, filepath.Join(cityDir, "city.toml"))
 	for _, line := range []string{
-		"[defaults.rig.imports.z-pack]",
-		"source = \"../packs/z-pack\"",
 		"[defaults.rig.imports.a-pack]",
 		"source = \"../packs/a-pack\"",
+		"[defaults.rig.imports.z-pack]",
+		"source = \"../packs/z-pack\"",
 	} {
-		if !strings.Contains(packToml, line) {
-			t.Fatalf("pack.toml missing migrated default-rig imports %q:\n%s", line, packToml)
+		if !strings.Contains(cityToml, line) {
+			t.Fatalf("city.toml missing migrated default-rig imports %q:\n%s", line, cityToml)
 		}
 	}
-	if strings.Index(packToml, "[defaults.rig.imports.z-pack]") > strings.Index(packToml, "[defaults.rig.imports.a-pack]") {
-		t.Fatalf("pack.toml reordered migrated default-rig imports:\n%s", packToml)
-	}
-
-	cityToml := readFile(t, filepath.Join(cityDir, "city.toml"))
 	if strings.Contains(cityToml, "[[agent]]") {
 		t.Fatalf("city.toml still contains [[agent]]:\n%s", cityToml)
 	}
@@ -144,18 +140,17 @@ default_rig_includes = ["../packs/z-pack", "../packs/a-pack"]
 		t.Fatalf("Apply: %v", err)
 	}
 
-	packToml := readFile(t, filepath.Join(cityDir, "pack.toml"))
+	cityToml := readFile(t, filepath.Join(cityDir, "city.toml"))
 	for _, line := range []string{
-		"[defaults.rig.imports.z-pack]",
-		`source = "../packs/z-pack"`,
 		"[defaults.rig.imports.a-pack]",
 		`source = "../packs/a-pack"`,
+		"[defaults.rig.imports.z-pack]",
+		`source = "../packs/z-pack"`,
 	} {
-		if !strings.Contains(packToml, line) {
-			t.Fatalf("pack.toml missing migrated default-rig imports %q:\n%s", line, packToml)
+		if !strings.Contains(cityToml, line) {
+			t.Fatalf("city.toml missing migrated default-rig imports %q:\n%s", line, cityToml)
 		}
 	}
-	cityToml := readFile(t, filepath.Join(cityDir, "city.toml"))
 	if strings.Contains(cityToml, "default_rig_includes") {
 		t.Fatalf("city.toml should drop legacy workspace.default_rig_includes:\n%s", cityToml)
 	}
@@ -164,14 +159,14 @@ default_rig_includes = ["../packs/z-pack", "../packs/a-pack"]
 	if err != nil {
 		t.Fatalf("LoadWithIncludes after migration: %v", err)
 	}
-	if len(cfg.Workspace.LegacyDefaultRigIncludes()) != 2 {
-		t.Fatalf("len(DefaultRigIncludes) = %d, want 2", len(cfg.Workspace.LegacyDefaultRigIncludes()))
+	if len(cfg.DefaultRigImports) != 2 {
+		t.Fatalf("len(DefaultRigImports) = %d, want 2", len(cfg.DefaultRigImports))
 	}
-	if cfg.Workspace.LegacyDefaultRigIncludes()[0] != "../packs/z-pack" {
-		t.Fatalf("DefaultRigIncludes[0] = %q, want %q", cfg.Workspace.LegacyDefaultRigIncludes()[0], "../packs/z-pack")
+	if cfg.DefaultRigImports["z-pack"].Source != "../packs/z-pack" {
+		t.Fatalf("DefaultRigImports[z-pack].Source = %q, want %q", cfg.DefaultRigImports["z-pack"].Source, "../packs/z-pack")
 	}
-	if cfg.Workspace.LegacyDefaultRigIncludes()[1] != "../packs/a-pack" {
-		t.Fatalf("DefaultRigIncludes[1] = %q, want %q", cfg.Workspace.LegacyDefaultRigIncludes()[1], "../packs/a-pack")
+	if cfg.DefaultRigImports["a-pack"].Source != "../packs/a-pack" {
+		t.Fatalf("DefaultRigImports[a-pack].Source = %q, want %q", cfg.DefaultRigImports["a-pack"].Source, "../packs/a-pack")
 	}
 }
 
@@ -202,8 +197,6 @@ source = "../packs/ops"
 	for _, want := range []string{
 		"[imports.team]",
 		`source = "https://example.com/team.git//pack#v1"`,
-		"[defaults.rig.imports.ops]",
-		`source = "../packs/ops"`,
 	} {
 		if !strings.Contains(packToml, want) {
 			t.Fatalf("pack.toml missing %q after named pack migration:\n%s", want, packToml)
@@ -211,6 +204,15 @@ source = "../packs/ops"
 	}
 
 	cityToml := readFile(t, filepath.Join(cityDir, "city.toml"))
+	for _, want := range []string{
+		"[defaults.rig.imports.ops]",
+		`source = "../packs/ops"`,
+	} {
+		if !strings.Contains(cityToml, want) {
+			t.Fatalf("city.toml missing %q after named pack migration:\n%s", want, cityToml)
+		}
+	}
+
 	if strings.Contains(cityToml, "[packs.") || strings.Contains(cityToml, "[packs]") {
 		t.Fatalf("city.toml still contains migrated [packs] entries:\n%s", cityToml)
 	}
@@ -307,7 +309,7 @@ legacy_unknown = "silently dropped before strict migration validation"
 	}
 }
 
-func TestMigratePreservesExistingRootDefaultRigImportOrder(t *testing.T) {
+func TestMigrateMovesExistingRootDefaultRigImportsToCityToml(t *testing.T) {
 	t.Parallel()
 
 	cityDir := t.TempDir()
@@ -336,13 +338,112 @@ source = "../packs/a-pack"
 	if !strings.Contains(packToml, "[imports.new-pack]") {
 		t.Fatalf("pack.toml missing migrated workspace include:\n%s", packToml)
 	}
-	zIndex := strings.Index(packToml, "[defaults.rig.imports.z-pack]")
-	aIndex := strings.Index(packToml, "[defaults.rig.imports.a-pack]")
-	if zIndex < 0 || aIndex < 0 {
-		t.Fatalf("pack.toml missing root default rig imports:\n%s", packToml)
+	if strings.Contains(packToml, "[defaults.rig.imports.") {
+		t.Fatalf("pack.toml should not retain default rig imports:\n%s", packToml)
 	}
-	if zIndex > aIndex {
-		t.Fatalf("pack.toml reordered default rig imports:\n%s", packToml)
+	cityToml := readFile(t, filepath.Join(cityDir, "city.toml"))
+	for _, want := range []string{
+		"[defaults.rig.imports.a-pack]",
+		`source = "../packs/a-pack"`,
+		"[defaults.rig.imports.z-pack]",
+		`source = "../packs/z-pack"`,
+	} {
+		if !strings.Contains(cityToml, want) {
+			t.Fatalf("city.toml missing migrated root default rig import %q:\n%s", want, cityToml)
+		}
+	}
+}
+
+func TestMigrateMovesPackV2RejectedSurfacesThenLoads(t *testing.T) {
+	t.Parallel()
+
+	cityDir := t.TempDir()
+	writeFile(t, cityDir, "city.toml", `
+[workspace]
+name = "legacy-city"
+
+[[rigs]]
+name = "app"
+
+[formulas]
+dir = "city-formulas"
+
+[providers.local]
+command = "true"
+`)
+	writeFile(t, cityDir, "pack.toml", `
+[pack]
+name = "legacy-city"
+schema = 2
+
+[agent_defaults]
+default_sling_formula = "mol-canonical"
+
+[agents]
+append_fragments = ["legacy-footer"]
+
+[formulas]
+dir = "legacy-formulas"
+
+[defaults.rig.imports.ops]
+source = "../packs/ops"
+
+[[patches.rigs]]
+name = "app"
+prefix = "ga"
+
+[[patches.providers]]
+name = "local"
+command = "false"
+
+[[agent]]
+name = "worker"
+provider = "local"
+`)
+
+	report, err := Apply(cityDir, Options{})
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+
+	packToml := readFile(t, filepath.Join(cityDir, "pack.toml"))
+	for _, forbidden := range []string{
+		"[agent_defaults]",
+		"[agents]",
+		"[formulas]",
+		"[defaults.rig.imports.",
+		"[[patches.rigs]]",
+		"[[patches.providers]]",
+	} {
+		if strings.Contains(packToml, forbidden) {
+			t.Fatalf("pack.toml still contains rejected surface %q:\n%s", forbidden, packToml)
+		}
+	}
+
+	cityToml := readFile(t, filepath.Join(cityDir, "city.toml"))
+	for _, want := range []string{
+		"[agent_defaults]",
+		`default_sling_formula = "mol-canonical"`,
+		`append_fragments = ["legacy-footer"]`,
+		"[defaults.rig.imports.ops]",
+		"[[patches.rigs]]",
+		`prefix = "ga"`,
+		"[[patches.providers]]",
+		`command = "false"`,
+	} {
+		if !strings.Contains(cityToml, want) {
+			t.Fatalf("city.toml missing migrated surface %q:\n%s", want, cityToml)
+		}
+	}
+	if strings.Contains(cityToml, "[formulas]") {
+		t.Fatalf("city.toml should not gain unsupported [formulas].dir:\n%s", cityToml)
+	}
+	if len(report.Warnings) == 0 || !strings.Contains(strings.Join(report.Warnings, "\n"), "formulas.dir") {
+		t.Fatalf("expected formulas.dir migration warning, got %v", report.Warnings)
+	}
+
+	if _, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityDir, "city.toml")); err != nil {
+		t.Fatalf("LoadWithIncludes after migration: %v", err)
 	}
 }
 
@@ -401,12 +502,12 @@ shadow = "silent"
 		t.Fatalf("Apply: %v", err)
 	}
 
-	packToml := readFile(t, filepath.Join(cityDir, "pack.toml"))
-	if !strings.Contains(packToml, "[defaults.rig.imports.gastown]") || !strings.Contains(packToml, `shadow = "silent"`) {
-		t.Fatalf("pack.toml should preserve the existing non-default default-rig binding:\n%s", packToml)
+	cityToml := readFile(t, filepath.Join(cityDir, "city.toml"))
+	if !strings.Contains(cityToml, "[defaults.rig.imports.gastown]") || !strings.Contains(cityToml, `shadow = "silent"`) {
+		t.Fatalf("city.toml should preserve the existing non-default default-rig binding:\n%s", cityToml)
 	}
-	if !strings.Contains(packToml, "[defaults.rig.imports.gastown-2]") {
-		t.Fatalf("pack.toml should add a fresh default-rig binding instead of reusing the non-default one:\n%s", packToml)
+	if !strings.Contains(cityToml, "[defaults.rig.imports.gastown-2]") {
+		t.Fatalf("city.toml should add a fresh default-rig binding instead of reusing the non-default one:\n%s", cityToml)
 	}
 }
 
@@ -432,13 +533,12 @@ source = "../packs/z-pack"
 source = "../packs/a-pack"
 `)
 
-	beforePack := readFile(t, filepath.Join(cityDir, "pack.toml"))
 	beforeCity := readFile(t, filepath.Join(cityDir, "city.toml"))
 	if _, err := Apply(cityDir, Options{}); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
-	if got := readFile(t, filepath.Join(cityDir, "pack.toml")); got != beforePack {
-		t.Fatalf("pack.toml changed without pack migration changes:\n%s", got)
+	if got := readFile(t, filepath.Join(cityDir, "pack.toml")); strings.Contains(got, "[defaults.rig.imports.") {
+		t.Fatalf("pack.toml should drop default rig imports:\n%s", got)
 	}
 	afterCity := readFile(t, filepath.Join(cityDir, "city.toml"))
 	if afterCity == beforeCity {

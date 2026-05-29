@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/BurntSushi/toml"
+	"github.com/gastownhall/gascity/internal/agentutil"
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/configedit"
@@ -351,6 +352,9 @@ func findAgentByQualified(cfg *config.City, identity string) (config.Agent, bool
 		if config.AgentMatchesIdentity(&a, identity) {
 			return a, true
 		}
+	}
+	if a, ok := agentutil.ResolveQualifiedRigScopedTemplate(cfg, identity); ok {
+		return a, true
 	}
 	return config.Agent{}, false
 }

@@ -670,3 +670,43 @@ func TestWorkflowExecutionRouteFromMeta_PrefersExecutionKey(t *testing.T) {
 		t.Errorf("got %q, want executor (execution key takes precedence)", got)
 	}
 }
+
+// TestStampLegacyRecipeRouting_RespectsPerStepRunTarget locks in the writer-side
+// invariant: a step that already declares a per-step gc.run_target must have
+// its gc.routed_to stamped to match that target, not the blanket convoy entry
+// agent. Without this, work_query-keyed readers (which still index gc.routed_to)
+// would resolve every child to the convoy entry, even after the reader-side
+// fallback honors gc.run_target. See PR #2386 + adaf6ec.
+func TestStampLegacyRecipeRouting_RespectsPerStepRunTarget(t *testing.T) {
+	recipe := &formula.Recipe{
+		Steps: []formula.RecipeStep{
+			{IsRoot: true, Metadata: map[string]string{"gc.run_target": "root-only"}},
+			{Metadata: map[string]string{"gc.run_target": "architect"}},
+			{Metadata: map[string]string{"gc.run_target": "tech-lead"}},
+			{Metadata: nil}, // no per-step target — gets blanket
+			{Metadata: map[string]string{"gc.kind": "scope"}},                   // topology — skipped
+			{Metadata: map[string]string{"gc.run_target": "  reviewer-code  "}}, // whitespace-tolerant
+		},
+	}
+	stampLegacyRecipeRouting(recipe, "product-owner")
+
+	// Root is excluded — InstantiateSlingFormula stamps the root via SlingResult.
+	if got := recipe.Steps[0].Metadata["gc.routed_to"]; got != "" {
+		t.Errorf("root step: gc.routed_to = %q, want empty (root excluded)", got)
+	}
+	if got := recipe.Steps[1].Metadata["gc.routed_to"]; got != "architect" {
+		t.Errorf("step 1 (architect): gc.routed_to = %q, want architect (per-step target wins)", got)
+	}
+	if got := recipe.Steps[2].Metadata["gc.routed_to"]; got != "tech-lead" {
+		t.Errorf("step 2 (tech-lead): gc.routed_to = %q, want tech-lead (per-step target wins)", got)
+	}
+	if got := recipe.Steps[3].Metadata["gc.routed_to"]; got != "product-owner" {
+		t.Errorf("step 3 (no per-step): gc.routed_to = %q, want product-owner (blanket fallback)", got)
+	}
+	if got := recipe.Steps[4].Metadata["gc.routed_to"]; got != "" {
+		t.Errorf("step 4 (topology): gc.routed_to = %q, want empty (topology excluded)", got)
+	}
+	if got := recipe.Steps[5].Metadata["gc.routed_to"]; got != "reviewer-code" {
+		t.Errorf("step 5 (whitespace target): gc.routed_to = %q, want reviewer-code (trimmed)", got)
+	}
+}

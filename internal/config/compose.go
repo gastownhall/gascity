@@ -92,12 +92,12 @@ type Provenance struct {
 
 // LoadOptions controls optional config-loading behavior.
 type LoadOptions struct {
-	// AllowRootDefaultRigImports permits [defaults.rig.imports] only on the
-	// root pack.toml being loaded. Normal pack imports still reject it.
-	AllowRootDefaultRigImports bool
-	deferRigPatches            bool
-	deferredRigPatches         *[]deferredRigPatches
-	allowLegacyOrderLayouts    bool
+	// SuppressDeprecatedOrderWarnings suppresses only legacy order-path
+	// migration warnings produced while discovering pack orders.
+	SuppressDeprecatedOrderWarnings bool
+	deferRigPatches                 bool
+	deferredRigPatches              *[]deferredRigPatches
+	allowLegacyOrderLayouts         bool
 }
 
 // LoadWithIncludes loads a city.toml and merges all included fragments.
@@ -127,12 +127,30 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 	cityAgentsForProvenance := root.Agents
 	root.Pricing = dedupePricingByKey(root.Pricing)
 	root.CityPricing = append([]pricing.ModelPricing(nil), root.Pricing...)
+	defaultRigImports, err := defaultRigImportsFromPackDefaults(root.Defaults, rootMeta)
+	if err != nil {
+		return nil, nil, fmt.Errorf("city.toml: %w", err)
+	}
+	if len(defaultRigImports) > 0 {
+		root.DefaultRigImports = make(map[string]Import, len(defaultRigImports))
+		root.DefaultRigImportOrder = make([]string, 0, len(defaultRigImports))
+		for _, bound := range defaultRigImports {
+			root.DefaultRigImports[bound.Binding] = bound.Import
+			root.DefaultRigImportOrder = append(root.DefaultRigImportOrder, bound.Binding)
+		}
+	}
 	// defaultBindings names the [defaults.rig.imports] bindings declared
-	// by the city's pack.toml. After expansion, agents whose BindingName
+	// by city.toml. After expansion, agents whose BindingName
 	// matches one of these names are auto-imports (the user did not
 	// write the [imports.<name>] entry; gc init auto-added it). See
 	// ga-tpfc and the source enum.
 	var defaultBindings map[string]bool
+	if len(root.Defaults.Rig.Imports) > 0 {
+		defaultBindings = make(map[string]bool, len(root.Defaults.Rig.Imports))
+		for name := range root.Defaults.Rig.Imports {
+			defaultBindings[name] = true
+		}
+	}
 
 	// V2: if a pack.toml exists alongside city.toml, it is the city's
 	// definition layer. Parse it and merge its content (imports, agents,
@@ -155,6 +173,9 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 		pc, md, packWarnings, decErr := parsePackConfigWithMetadata(packData, packPath)
 		if decErr != nil {
 			return nil, nil, fmt.Errorf("parsing city pack.toml: %w", decErr)
+		}
+		if err := validatePackAuthoringSurface(md, packPath); err != nil {
+			return nil, nil, fmt.Errorf("parsing city pack.toml: %w", err)
 		}
 		if fatalWarnings := fatalUndecodedWarnings(md, packPath); len(fatalWarnings) > 0 {
 			return nil, nil, fmt.Errorf("parsing city pack.toml: %s", strings.Join(fatalWarnings, "; "))
@@ -213,27 +234,6 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 				}
 			}
 		}
-		defaultRigImports, err := defaultRigImportsFromPackDefaults(pc.Defaults, md)
-		if err != nil {
-			return nil, nil, fmt.Errorf("city pack.toml: %w", err)
-		}
-		if len(defaultRigImports) > 0 {
-			root.DefaultRigImports = make(map[string]Import, len(defaultRigImports))
-			root.DefaultRigImportOrder = make([]string, 0, len(defaultRigImports))
-			defaultRigIncludes := make([]string, 0, len(defaultRigImports))
-			for _, bound := range defaultRigImports {
-				root.DefaultRigImports[bound.Binding] = bound.Import
-				root.DefaultRigImportOrder = append(root.DefaultRigImportOrder, bound.Binding)
-				defaultRigIncludes = append(defaultRigIncludes, bound.Import.Source)
-			}
-			root.Workspace.SetLegacyDefaultRigIncludes(append(defaultRigIncludes, root.Workspace.LegacyDefaultRigIncludes()...))
-		}
-		if len(pc.Defaults.Rig.Imports) > 0 {
-			defaultBindings = make(map[string]bool, len(pc.Defaults.Rig.Imports))
-			for name := range pc.Defaults.Rig.Imports {
-				defaultBindings[name] = true
-			}
-		}
 		// Merge pack.toml providers (pack is base, city wins).
 		if len(pc.Providers) > 0 {
 			if root.Providers == nil {
@@ -266,20 +266,8 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 			}
 			root.Services = append(packServices, root.Services...)
 		}
-		// Merge patches (accumulated, applied later).
+		// Merge pack agent patches (accumulated, applied later).
 		root.Patches.Agents = append(pc.Patches.Agents, root.Patches.Agents...)
-		root.Patches.Rigs = append(pc.Patches.Rigs, root.Patches.Rigs...)
-		root.Patches.Providers = append(pc.Patches.Providers, root.Patches.Providers...)
-		// Merge formulas config with pack.toml as the base and city.toml as
-		// the more local override.
-		if root.Formulas.Dir == "" {
-			root.Formulas = pc.Formulas
-		}
-		// Merge pack-level agent defaults before city fragments so the
-		// city layer can append on top of the portable baseline.
-		mergedAgentDefaults := pc.AgentDefaults
-		mergeAgentDefaults(&mergedAgentDefaults, root.AgentDefaults, packPath, nil)
-		root.AgentDefaults = mergedAgentDefaults
 		if len(pc.Global.SessionLive) > 0 {
 			rootPackGlobals = append(rootPackGlobals, ResolvedPackGlobal{
 				SessionLive: resolveConfigDirInCommands(pc.Global.SessionLive, cityRoot),
@@ -619,6 +607,11 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 		return nil, nil, err
 	}
 	prov.Warnings = append(prov.Warnings, siteBindingWarnings...)
+
+	// Inline scope="rig" named sessions are generic declarations until the
+	// city's rig set is finalized. Stamp them after site bindings so the
+	// controller sees one concrete identity per rig.
+	ExpandGenericRigNamedSessions(root)
 
 	// Validate named session declarations after pack expansion and site
 	// binding resolution so stamped identities and deterministic runtime
@@ -1322,6 +1315,9 @@ func parseWithMeta(data []byte, source string) (*City, toml.MetaData, []string, 
 	if err != nil {
 		return nil, md, nil, fmt.Errorf("parsing config: %w", err)
 	}
+	if err := validateCityAuthoringSurface(md); err != nil {
+		return nil, md, nil, fmt.Errorf("parsing config: %w", err)
+	}
 	normalizeAgentDefaultsAlias(&cfg, md)
 	warnings := agentDefaultsCompatibilityWarnings(md, source)
 	normalizeLegacyOrderOverrideAliases(&cfg)
@@ -1336,9 +1332,36 @@ func parseWithMeta(data []byte, source string) (*City, toml.MetaData, []string, 
 	return &cfg, md, warnings, nil
 }
 
-// LoadRootPackDefaultRigImports loads the canonical [defaults.rig.imports]
-// entries from the root pack without expanding the full config.
+// LoadRootPackDefaultRigImports loads the canonical city.toml
+// [defaults.rig.imports] entries without expanding the full config.
+//
+// Deprecated name retained for callers in the #2126 wave; the default-rig
+// import table is no longer a root pack.toml surface.
 func LoadRootPackDefaultRigImports(fs fsys.FS, cityRoot string) ([]BoundImport, error) {
+	cityPath := filepath.Join(cityRoot, "city.toml")
+	data, err := fs.ReadFile(cityPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("loading city.toml: %w", err)
+	}
+	var cfg City
+	md, err := toml.Decode(string(data), &cfg)
+	if err != nil {
+		return nil, fmt.Errorf("parsing city.toml: %w", err)
+	}
+	if err := validateCityAuthoringSurface(md); err != nil {
+		return nil, fmt.Errorf("parsing city.toml: %w", err)
+	}
+	imports, err := defaultRigImportsFromPackDefaults(cfg.Defaults, md)
+	if err != nil || len(imports) > 0 {
+		return imports, err
+	}
+
+	// Compatibility for CLI migration helpers that need to read older root
+	// pack defaults without performing a full config load. Normal PackV2
+	// loading rejects this surface via validatePackAuthoringSurface.
 	packPath := filepath.Join(cityRoot, packFile)
 	packData, err := fs.ReadFile(packPath)
 	if err != nil {
@@ -1348,14 +1371,11 @@ func LoadRootPackDefaultRigImports(fs fsys.FS, cityRoot string) ([]BoundImport, 
 		return nil, fmt.Errorf("loading city pack.toml: %w", err)
 	}
 	var pc PackConfig
-	md, err := toml.Decode(string(packData), &pc)
+	packMD, err := toml.Decode(string(packData), &pc)
 	if err != nil {
 		return nil, fmt.Errorf("parsing city pack.toml: %w", err)
 	}
-	if warnings := fatalUndecodedWarnings(md, packPath); len(warnings) > 0 {
-		return nil, fmt.Errorf("parsing city pack.toml: %s", strings.Join(warnings, "; "))
-	}
-	return defaultRigImportsFromPackDefaults(pc.Defaults, md)
+	return defaultRigImportsFromPackDefaults(pc.Defaults, packMD)
 }
 
 // LoadPackGraphDirsForDoctor returns the pack directories the canonical city

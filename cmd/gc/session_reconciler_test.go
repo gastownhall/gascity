@@ -2296,8 +2296,8 @@ func TestReconcileSessionBeads_SuspendedCloseIgnoresUnreachableRigAssignedWork(t
 
 // TestReconcileSessionBeads_CloseGatePreservesSleepReason verifies that the
 // close gate carries the session's existing sleep_reason (idle,
-// idle-timeout, drained) into the closed bead's close reason. Losing this
-// distinction in closed records erases the forensic difference between an
+// idle-timeout, drained, city-stop) into the closed bead's close reason. Losing
+// this distinction in closed records erases the forensic difference between an
 // idle-timeout recycle and an explicit drain.
 func TestReconcileSessionBeads_CloseGatePreservesSleepReason(t *testing.T) {
 	cases := []struct {
@@ -2307,6 +2307,7 @@ func TestReconcileSessionBeads_CloseGatePreservesSleepReason(t *testing.T) {
 	}{
 		{"idle", "idle", "idle"},
 		{"idle-timeout", "idle-timeout", "idle-timeout"},
+		{"city-stop", sleepReasonCityStop, sleepReasonCityStop},
 		{"drained-reason", "drained", "drained"},
 		{"missing-reason", "", "drained"}, // fallback
 	}
@@ -8472,8 +8473,8 @@ func TestReconcileSessionBeads_SyncReplacesFailedCreateNamedSession(t *testing.T
 	if fresh.ID == "" {
 		t.Fatalf("sync did not create a fresh named-session bead; open sessions=%#v stderr:\n%s", sessions, stderr.String())
 	}
-	if fresh.Metadata["state"] != string(sessionpkg.StateCreating) {
-		t.Fatalf("fresh named-session state = %q, want creating", fresh.Metadata["state"])
+	if fresh.Metadata["state"] != string(sessionpkg.StateStartPending) {
+		t.Fatalf("fresh named-session state = %q, want start-pending", fresh.Metadata["state"])
 	}
 
 	poolDesired := PoolDesiredCounts(ComputePoolDesiredStates(cfg, dsResult.AssignedWorkBeads, sessions, dsResult.ScaleCheckCounts))

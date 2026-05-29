@@ -530,6 +530,14 @@ func ApplyGraphRouting(recipe *formula.Recipe, a *config.Agent, routedTo string,
 // routing is set unconditionally on every non-root, non-topology step. The
 // root bead is excluded because InstantiateSlingFormula stamps it via the
 // SlingResult path.
+//
+// Per-step gc.run_target wins: when a step already declares a target via
+// gc.run_target, the stamper uses that value for gc.routed_to instead of the
+// convoy-wide default. This keeps the two metadata keys in sync so the
+// gc.routed_to-keyed work_query path resolves to the same agent the
+// gc.run_target-aware reader path picks. Without this, the blanket routedTo
+// clobbers per-step targets and every child looks routed to the convoy entry
+// agent (see adaf6ec / PR #2386 reader fix).
 func stampLegacyRecipeRouting(recipe *formula.Recipe, routedTo string) {
 	routedTo = strings.TrimSpace(routedTo)
 	if recipe == nil || routedTo == "" {
@@ -546,6 +554,10 @@ func stampLegacyRecipeRouting(recipe *formula.Recipe, routedTo string) {
 		if step.Metadata == nil {
 			step.Metadata = make(map[string]string, 1)
 		}
-		step.Metadata["gc.routed_to"] = routedTo
+		target := routedTo
+		if perStep := strings.TrimSpace(step.Metadata["gc.run_target"]); perStep != "" {
+			target = perStep
+		}
+		step.Metadata["gc.routed_to"] = target
 	}
 }

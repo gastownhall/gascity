@@ -14,6 +14,7 @@ import (
 // This test fails loudly if the tags are removed or renamed.
 func TestPublishRequestSnakeCaseWire(t *testing.T) {
 	req := PublishRequest{
+		SessionID: "gc-1",
 		Conversation: ConversationRef{
 			Provider:       "slack",
 			ConversationID: "C123",
@@ -31,6 +32,7 @@ func TestPublishRequestSnakeCaseWire(t *testing.T) {
 	}
 
 	mustContain := []string{
+		`"session_id":"gc-1"`,
 		`"conversation":`,
 		`"text":"hello"`,
 		`"reply_to_message_id":"1700000000.000100"`,
@@ -44,6 +46,7 @@ func TestPublishRequestSnakeCaseWire(t *testing.T) {
 	}
 
 	mustNotContain := []string{
+		`"SessionID"`,
 		`"ReplyToMessageID"`,
 		`"IdempotencyKey"`,
 		`"Metadata"`,
@@ -54,6 +57,44 @@ func TestPublishRequestSnakeCaseWire(t *testing.T) {
 		if bytes.Contains(body, []byte(banned)) {
 			t.Errorf("PublishRequest JSON contains PascalCase key %q (tags missing or wrong)\nfull body: %s", banned, body)
 		}
+	}
+}
+
+// TestPublishRequestSessionIDOmitemptyWhenBlank asserts the gc-kvt native
+// SessionID field is omitted from the wire when empty, so direct
+// adapter-publish callers (smoke tests, raw curl, pack helpers) that
+// don't supply a session id produce the same wire shape they did before
+// the field was added.
+func TestPublishRequestSessionIDOmitemptyWhenBlank(t *testing.T) {
+	req := PublishRequest{
+		Conversation: ConversationRef{Provider: "slack", AccountID: "T0", ConversationID: "C0"},
+		Text:         "hi",
+	}
+	body, err := json.Marshal(req)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if bytes.Contains(body, []byte(`"session_id"`)) {
+		t.Errorf("PublishRequest with empty SessionID should omit session_id key, got: %s", body)
+	}
+}
+
+// TestPublishRequestSessionIDRoundTrip asserts the gc-kvt SessionID
+// field decodes into the Go struct from a snake_case wire body — the
+// native path the slack adapter prefers over the legacy
+// metadata["source_session_id"] fallback.
+func TestPublishRequestSessionIDRoundTrip(t *testing.T) {
+	wire := []byte(`{
+		"session_id":"gc-pl-7",
+		"conversation":{"provider":"slack","account_id":"T0","conversation_id":"C0","kind":"room"},
+		"text":"hi"
+	}`)
+	var req PublishRequest
+	if err := json.Unmarshal(wire, &req); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if req.SessionID != "gc-pl-7" {
+		t.Errorf("SessionID = %q, want %q", req.SessionID, "gc-pl-7")
 	}
 }
 

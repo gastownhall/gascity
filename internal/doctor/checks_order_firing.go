@@ -92,6 +92,9 @@ func (c *OrderFiringCurrentCheck) Run(ctx *CheckContext) *CheckResult {
 	worst := StatusOK
 	monitored := 0
 	var firstNonOK string
+	// Track severity contributions across error-level entries. Warnings should
+	// stay visible without converting an advisory error into a blocking gate.
+	var blockingErrors, advisoryErrors int
 
 	for _, order := range allOrders {
 		if order.Trigger != "cron" && order.Trigger != "cooldown" {
@@ -105,13 +108,23 @@ func (c *OrderFiringCurrentCheck) Run(ctx *CheckContext) *CheckResult {
 			if firstNonOK == "" {
 				firstNonOK = orderHistoryHintTarget(order)
 			}
+			blockingErrors++
 			continue
 		}
-		status, detail := classifyOrderFiring(order, now, expected, latestOrderFiredAt(firedEvents, order.ScopedName()), startedAt)
+		status, severity, detail := classifyOrderFiring(order, now, expected, latestOrderFiredAt(firedEvents, order.ScopedName()), startedAt)
 		worst = worseStatus(worst, status)
 		result.Details = append(result.Details, detail)
-		if status != StatusOK && firstNonOK == "" {
-			firstNonOK = orderHistoryHintTarget(order)
+		if status != StatusOK {
+			if firstNonOK == "" {
+				firstNonOK = orderHistoryHintTarget(order)
+			}
+			if status == StatusError {
+				if severity == SeverityBlocking {
+					blockingErrors++
+				} else {
+					advisoryErrors++
+				}
+			}
 		}
 	}
 
@@ -129,6 +142,9 @@ func (c *OrderFiringCurrentCheck) Run(ctx *CheckContext) *CheckResult {
 		result.Message = "scheduled orders are overdue"
 	case StatusError:
 		result.Message = "scheduled orders are stale"
+	}
+	if blockingErrors == 0 && advisoryErrors > 0 {
+		result.Severity = SeverityAdvisory
 	}
 	if firstNonOK != "" {
 		result.FixHint = fmt.Sprintf(orderFiringInspectHintFmt, firstNonOK)
@@ -176,38 +192,72 @@ func computeExpectedIntervalForCronSchedule(schedule string) (time.Duration, err
 		return 0, fmt.Errorf("invalid cron schedule: want 5 fields, got %d", len(fields))
 	}
 
-	const day = 24 * time.Hour
-	base := time.Date(2026, 5, 12, 0, 0, 0, 0, time.UTC)
-	matches := make([]time.Time, 0, 1440)
-	for i := 0; i < 1440; i++ {
-		ts := base.Add(time.Duration(i) * time.Minute)
-		matched, err := cronScheduleMatchesAt(fields, ts)
-		if err != nil {
-			return 0, err
+	// Scan minute-by-minute from a fixed base so the result is deterministic
+	// and independent of when the check runs. Widen the scan progressively so
+	// weekly, monthly, and yearly schedules are computed honestly instead of
+	// erroring out: the typical 24h window has zero matches for any schedule
+	// coarser than daily (#2499). The 24h fast-path stays cheap for the
+	// common case; coarser schedules pay the larger scan once per unique
+	// schedule (results are cached at the caller).
+	//
+	// Base is the start of a leap year so the 366d window can include a
+	// Feb 29 occurrence — `0 0 29 2 *` (leap-day schedules) would otherwise
+	// produce a permanent doctor-red on cities whose check started outside
+	// a leap-year window (Copilot review on #2525).
+	base := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	windowsMinutes := []int{
+		1440,       // 24h — covers sub-daily and daily schedules
+		7 * 1440,   // 7d  — covers weekly and weekday-set schedules
+		31 * 1440,  // 31d — covers monthly schedules (longest month)
+		366 * 1440, // 366d — covers yearly + leap-year (Feb 29) schedules
+	}
+	lastWindowIndex := len(windowsMinutes) - 1
+	for windowIndex, windowMinutes := range windowsMinutes {
+		matches := make([]time.Time, 0, 16)
+		for i := 0; i < windowMinutes; i++ {
+			ts := base.Add(time.Duration(i) * time.Minute)
+			matched, err := cronScheduleMatchesAt(fields, ts)
+			if err != nil {
+				return 0, err
+			}
+			if matched {
+				matches = append(matches, ts)
+			}
 		}
-		if matched {
-			matches = append(matches, ts)
+		if len(matches) == 0 {
+			continue
 		}
-	}
-	switch len(matches) {
-	case 0:
-		return 0, fmt.Errorf("cron schedule %q has no firing minutes in a 24h window", schedule)
-	case 1:
-		return day, nil
-	}
-
-	minGap := day
-	for i := 1; i < len(matches); i++ {
-		gap := matches[i].Sub(matches[i-1])
-		if gap < minGap {
-			minGap = gap
+		window := time.Duration(windowMinutes) * time.Minute
+		if len(matches) == 1 {
+			// Don't fix the interval on the first window that happens to
+			// catch one match: a yearly schedule whose firing minute
+			// coincidentally falls inside the 24h or 7d window (e.g.
+			// `0 0 12 5 *` from a base near May 5) would otherwise be
+			// mis-classified as sub-daily. Keep widening until either a
+			// second match lands (use the real minGap) or we exhaust the
+			// horizon — only then is the window length a defensible
+			// conservative interval (Copilot review on #2525).
+			if windowIndex < lastWindowIndex {
+				continue
+			}
+			return window, nil
 		}
+		minGap := window
+		for i := 1; i < len(matches); i++ {
+			gap := matches[i].Sub(matches[i-1])
+			if gap < minGap {
+				minGap = gap
+			}
+		}
+		// Do not include a wrap-around gap (matches[0]+window - matches[last]).
+		// It is only meaningful when the schedule's natural period divides the
+		// window evenly, and produces wrong results for schedules whose period
+		// does not — e.g. a weekly schedule in the 31d window would report a
+		// bogus 3d "wrap" from Mon to Mon-of-next-month-mod-31d, drowning out
+		// the real 7d gap from the loop above.
+		return minGap, nil
 	}
-	wrapGap := matches[0].Add(day).Sub(matches[len(matches)-1])
-	if wrapGap < minGap {
-		minGap = wrapGap
-	}
-	return minGap, nil
+	return 0, fmt.Errorf("cron schedule %q has no firing minutes in a 366-day window", schedule)
 }
 
 func cronScheduleMatchesAt(fields []string, ts time.Time) (bool, error) {
@@ -336,27 +386,34 @@ func latestOrderFiredAt(evts []events.Event, subject string) time.Time {
 	return latest
 }
 
-func classifyOrderFiring(order orders.Order, now time.Time, expected time.Duration, lastFired, controllerStarted time.Time) (CheckStatus, string) {
+func classifyOrderFiring(order orders.Order, now time.Time, expected time.Duration, lastFired, controllerStarted time.Time) (CheckStatus, CheckSeverity, string) {
 	name := orderDisplayName(order)
 	if lastFired.IsZero() {
 		if controllerStarted.IsZero() {
-			return StatusOK, fmt.Sprintf("%s: never fired (controller start unknown)", name)
+			return StatusOK, SeverityBlocking, fmt.Sprintf("%s: never fired (controller start unknown)", name)
 		}
 		uptime := nonNegativeDuration(now.Sub(controllerStarted))
 		if uptime >= expected+expected/2 {
-			return StatusError, fmt.Sprintf("%s: never fired since controller start %s ago", name, formatOrderFiringDuration(uptime))
+			// Advisory only for cron: a cron order that has never fired since
+			// controller start may be the cron-scheduler bug (ga-97qngx), not
+			// a real outage. Cooldown never-fired/stale paths remain blocking
+			// because they indicate an execution gap.
+			if order.Trigger == "cron" {
+				return StatusError, SeverityAdvisory, fmt.Sprintf("%s: never fired since controller start %s ago", name, formatOrderFiringDuration(uptime))
+			}
+			return StatusError, SeverityBlocking, fmt.Sprintf("%s: never fired since controller start %s ago", name, formatOrderFiringDuration(uptime))
 		}
-		return StatusOK, fmt.Sprintf("%s: never fired (controller running %s, within first cycle)", name, formatOrderFiringDuration(uptime))
+		return StatusOK, SeverityBlocking, fmt.Sprintf("%s: never fired (controller running %s, within first cycle)", name, formatOrderFiringDuration(uptime))
 	}
 
 	age := nonNegativeDuration(now.Sub(lastFired))
 	switch {
 	case age >= expected*3:
-		return StatusError, fmt.Sprintf("%s: last fired %s ago, expected every %s (CRITICAL: stale)", name, formatOrderFiringDuration(age), formatOrderFiringDuration(expected))
+		return StatusError, SeverityBlocking, fmt.Sprintf("%s: last fired %s ago, expected every %s (CRITICAL: stale)", name, formatOrderFiringDuration(age), formatOrderFiringDuration(expected))
 	case age >= expected+expected/2:
-		return StatusWarning, fmt.Sprintf("%s: last fired %s ago, expected every %s (overdue)", name, formatOrderFiringDuration(age), formatOrderFiringDuration(expected))
+		return StatusWarning, SeverityBlocking, fmt.Sprintf("%s: last fired %s ago, expected every %s (overdue)", name, formatOrderFiringDuration(age), formatOrderFiringDuration(expected))
 	default:
-		return StatusOK, fmt.Sprintf("%s: last fired %s ago, expected every %s", name, formatOrderFiringDuration(age), formatOrderFiringDuration(expected))
+		return StatusOK, SeverityBlocking, fmt.Sprintf("%s: last fired %s ago, expected every %s", name, formatOrderFiringDuration(age), formatOrderFiringDuration(expected))
 	}
 }
 

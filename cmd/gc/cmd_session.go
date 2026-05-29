@@ -1226,6 +1226,8 @@ func buildAttachmentCache(sessions []session.Info, observe ...func(session.Info)
 	return cache
 }
 
+const resetPendingReason = "reset-pending"
+
 // sessionReason computes the REASON column for a session in gc session list.
 // For awake sessions, shows wake reasons (e.g., "config", "attached").
 // For asleep sessions, shows the sleep reason (e.g., "user-hold", "quarantine").
@@ -1249,6 +1251,9 @@ func sessionReason(s session.Info, beadIndex map[string]beads.Bead, cfg *config.
 	if lifecycle.BaseState == session.BaseStateArchived && !lifecycle.ContinuityEligible {
 		return "-"
 	}
+	if resetPendingReasonVisible(s, b, sp, now) {
+		return resetPendingReason
+	}
 
 	// If config is available, compute full wake reasons (including WakeConfig).
 	// Otherwise, only bead metadata (sleep/hold/quarantine) is shown.
@@ -1271,6 +1276,16 @@ func sessionReason(s session.Info, beadIndex map[string]beads.Bead, cfg *config.
 		return reason
 	}
 	return "-"
+}
+
+// resetPendingReasonVisible keeps the fallback renderer aligned with the API
+// lifecycle reason rules for live reset requests.
+func resetPendingReasonVisible(s session.Info, b beads.Bead, sp runtime.Provider, now time.Time) bool {
+	var isRunning func(string) bool
+	if sp != nil {
+		isRunning = sp.IsRunning
+	}
+	return session.LifecycleResetPendingReasonVisible(b.Status, b.Metadata, now, s.SessionName, isRunning)
 }
 
 func pinAwakeWakeReasonVisible(b beads.Bead, cfg *config.City, now time.Time) bool {
@@ -2159,15 +2174,39 @@ func cmdSessionKill(args []string, stdout, stderr io.Writer, jsonOutput ...bool)
 	}
 
 	sp := newSessionProvider()
+	bead, beadErr := store.Get(sessionID)
+	identity := ""
+	runtimeAlreadyInactive := false
+	if beadErr == nil {
+		identity = namedSessionIdentity(bead)
+		runtimeAlreadyInactive = sessionKillRuntimeAlreadyInactive(bead, sp)
+	}
+
 	handle, err := workerHandleForSessionWithConfig(cityPath, store, sp, cfg, sessionID)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc session kill: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
-	if err := handle.Kill(context.Background()); err != nil {
-		fmt.Fprintf(stderr, "gc session kill: %v\n", err) //nolint:errcheck // best-effort stderr
+	killErr := handle.Kill(context.Background())
+	if killErr != nil && (identity == "" || !runtimeAlreadyInactive) {
+		fmt.Fprintf(stderr, "gc session kill: %v\n", killErr) //nolint:errcheck // best-effort stderr
 		return 1
+	}
+
+	if beadErr != nil {
+		fmt.Fprintf(stderr, "gc session kill: warning: loading session %s for circuit breaker clear: %v\n", sessionID, beadErr) //nolint:errcheck // best-effort stderr
+	} else if identity != "" {
+		if err := resetSessionCircuitBreakerAfterExplicitKill(cityPath, store, sessionID, identity); err != nil {
+			fmt.Fprintf(stderr, "gc session kill: warning: clearing session circuit breaker for %q: %v\n", identity, err) //nolint:errcheck // best-effort stderr
+			if killErr != nil {
+				fmt.Fprintf(stderr, "gc session kill: %v\n", killErr) //nolint:errcheck // best-effort stderr
+				return 1
+			}
+		}
+	}
+	if killErr != nil {
+		fmt.Fprintf(stderr, "gc session kill: warning: session %s runtime was already inactive; cleared named-session circuit breaker\n", sessionID) //nolint:errcheck // best-effort stderr
 	}
 
 	// Use the resolved session ID as the canonical Subject for event
@@ -2181,7 +2220,6 @@ func cmdSessionKill(args []string, stdout, stderr io.Writer, jsonOutput ...bool)
 		Message: "killed",
 		Payload: api.SessionLifecyclePayloadJSON(sessionID, "", "killed"),
 	})
-
 	if asJSON {
 		if err := writeSessionActionJSON(stdout, sessionActionResult{
 			Action:    "kill",
@@ -2194,6 +2232,15 @@ func cmdSessionKill(args []string, stdout, stderr io.Writer, jsonOutput ...bool)
 	}
 	fmt.Fprintf(stdout, "Session %s killed.\n", sessionID) //nolint:errcheck // best-effort stdout
 	return 0
+}
+
+func sessionKillRuntimeAlreadyInactive(bead beads.Bead, sp runtime.Provider) bool {
+	switch session.State(strings.TrimSpace(bead.Metadata["state"])) {
+	case session.StateActive, session.StateStartPending, session.StateCreating, session.StateDraining, session.StateAwake:
+		return false
+	}
+	sessionName := strings.TrimSpace(bead.Metadata["session_name"])
+	return sp != nil && sessionName != "" && !sp.IsRunning(sessionName)
 }
 
 // newSessionNudgeCmd creates the "gc session nudge <id-or-alias> <message>" command.

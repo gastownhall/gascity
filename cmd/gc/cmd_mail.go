@@ -20,6 +20,7 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/extmsg"
 	"github.com/gastownhall/gascity/internal/mail"
+	"github.com/gastownhall/gascity/internal/mail/beadmail"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/telemetry"
 	"github.com/spf13/cobra"
@@ -74,6 +75,7 @@ type mailActionResult struct {
 	Count         *int                 `json:"count,omitempty"`
 	AlreadyDone   bool                 `json:"already_done,omitempty"`
 	Notified      bool                 `json:"notified,omitempty"`
+	DryRun        bool                 `json:"dry_run,omitempty"`
 }
 
 type mailMessageSummary struct {
@@ -83,6 +85,17 @@ type mailMessageSummary struct {
 	Subject  string `json:"subject,omitempty"`
 	ThreadID string `json:"thread_id,omitempty"`
 	ReplyTo  string `json:"reply_to,omitempty"`
+}
+
+type mailArchiveSelectOptions struct {
+	Recipient       string
+	From            string
+	SubjectPrefix   string
+	SubjectContains string
+	Limit           int
+	IncludeRead     bool
+	DryRun          bool
+	CaseInsensitive bool
 }
 
 func summarizeMailMessage(m mail.Message) mailMessageSummary {
@@ -144,6 +157,7 @@ hooks to deliver mail notifications into agent prompts.`,
 
 func newMailArchiveCmd(stdout, stderr io.Writer) *cobra.Command {
 	var jsonOut bool
+	opts := mailArchiveSelectOptions{Limit: 100, CaseInsensitive: true}
 	cmd := &cobra.Command{
 		Use:   "archive <id>...",
 		Short: "Archive one or more messages without reading them",
@@ -151,13 +165,23 @@ func newMailArchiveCmd(stdout, stderr io.Writer) *cobra.Command {
 
 Use this to dismiss messages without reading them. Each message is marked
 as closed and will no longer appear in mail check or inbox results. When
-multiple IDs are passed, they are archived in a single batch round-trip.`,
+multiple IDs are passed, they are archived in a single batch round-trip.
+
+For large advisory backlogs, use --to with --subject-prefix, --subject-contains,
+or --from to archive a bounded matching slice without enumerating IDs by hand.`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
 			code := 0
-			if jsonOut {
+			switch {
+			case opts.hasSelector():
+				if jsonOut {
+					code = cmdMailArchiveSelectedJSON(args, opts, true, stdout, stderr)
+				} else {
+					code = cmdMailArchiveSelectedJSON(args, opts, false, stdout, stderr)
+				}
+			case jsonOut:
 				code = cmdMailArchiveJSON(args, true, stdout, stderr)
-			} else {
+			default:
 				code = cmdMailArchive(args, stdout, stderr)
 			}
 			if code != 0 {
@@ -167,6 +191,13 @@ multiple IDs are passed, they are archived in a single batch round-trip.`,
 		},
 	}
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit JSONL result")
+	cmd.Flags().StringVar(&opts.Recipient, "to", "", "archive matching unread messages addressed to this recipient")
+	cmd.Flags().StringVar(&opts.From, "from", "", "archive matching unread messages from this exact sender")
+	cmd.Flags().StringVar(&opts.SubjectPrefix, "subject-prefix", "", "archive matching unread messages whose subject starts with this text")
+	cmd.Flags().StringVar(&opts.SubjectContains, "subject-contains", "", "archive matching unread messages whose subject contains this text")
+	cmd.Flags().IntVar(&opts.Limit, "limit", opts.Limit, "maximum matching messages to archive in this run")
+	cmd.Flags().BoolVar(&opts.IncludeRead, "include-read", false, "include read-but-open messages when selecting by filter")
+	cmd.Flags().BoolVar(&opts.DryRun, "dry-run", false, "list matching messages without archiving them")
 	return cmd
 }
 
@@ -184,12 +215,121 @@ func cmdMailArchiveJSON(args []string, jsonOut bool, stdout, stderr io.Writer) i
 	return doMailArchiveJSON(mp, rec, args, jsonOut, stdout, stderr)
 }
 
+func (o mailArchiveSelectOptions) hasSelector() bool {
+	return strings.TrimSpace(o.Recipient) != "" ||
+		strings.TrimSpace(o.From) != "" ||
+		strings.TrimSpace(o.SubjectPrefix) != "" ||
+		strings.TrimSpace(o.SubjectContains) != "" ||
+		o.IncludeRead ||
+		o.DryRun
+}
+
+func (o mailArchiveSelectOptions) hasContentFilter() bool {
+	return strings.TrimSpace(o.From) != "" ||
+		strings.TrimSpace(o.SubjectPrefix) != "" ||
+		strings.TrimSpace(o.SubjectContains) != ""
+}
+
+func cmdMailArchiveSelectedJSON(args []string, opts mailArchiveSelectOptions, jsonOut bool, stdout, stderr io.Writer) int {
+	mp, code := openCityMailProvider(stderr, "gc mail archive")
+	if mp == nil {
+		return code
+	}
+	rec := openCityRecorder(stderr)
+	return doMailArchiveSelectedJSON(mp, rec, args, opts, jsonOut, stdout, stderr)
+}
+
 // doMailArchive closes one or more message beads. For a single ID the
 // behavior matches the pre-batch CLI byte-for-byte; for two or more IDs it
 // delegates to mp.ArchiveMany for a single-round-trip close and prints one
 // result line per id.
 func doMailArchive(mp mail.Provider, rec events.Recorder, args []string, stdout, stderr io.Writer) int {
 	return doMailArchiveJSON(mp, rec, args, false, stdout, stderr)
+}
+
+func doMailArchiveSelected(mp mail.Provider, rec events.Recorder, opts mailArchiveSelectOptions, stdout, stderr io.Writer) int {
+	return doMailArchiveSelectedJSON(mp, rec, nil, opts, false, stdout, stderr)
+}
+
+type archiveMatchingProvider interface {
+	ArchiveCandidates(beadmail.ArchiveFilter) ([]mail.Message, error)
+	ArchiveMatching(beadmail.ArchiveFilter) ([]mail.Message, []mail.ArchiveResult, error)
+}
+
+func doMailArchiveSelectedJSON(mp mail.Provider, rec events.Recorder, args []string, opts mailArchiveSelectOptions, jsonOut bool, stdout, stderr io.Writer) int {
+	if len(args) > 0 {
+		fmt.Fprintln(stderr, "gc mail archive: message IDs cannot be combined with --to/--from/--subject filters") //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	opts.Recipient = strings.TrimSpace(opts.Recipient)
+	if opts.Recipient == "" {
+		fmt.Fprintln(stderr, "gc mail archive: --to is required when using archive filters") //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if !opts.hasContentFilter() {
+		fmt.Fprintln(stderr, "gc mail archive: use --from, --subject-prefix, or --subject-contains to avoid archiving unrelated mail") //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if opts.Limit <= 0 {
+		fmt.Fprintln(stderr, "gc mail archive: --limit must be greater than zero") //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	archiver, ok := mp.(archiveMatchingProvider)
+	if !ok {
+		fmt.Fprintln(stderr, "gc mail archive: filtered archive requires the beadmail provider") //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	filter := beadmail.ArchiveFilter{
+		Recipients:      []string{opts.Recipient},
+		From:            opts.From,
+		SubjectPrefix:   opts.SubjectPrefix,
+		SubjectContains: opts.SubjectContains,
+		IncludeRead:     opts.IncludeRead,
+		CaseInsensitive: opts.CaseInsensitive,
+		Limit:           opts.Limit,
+	}
+	if opts.DryRun {
+		matches, err := archiver.ArchiveCandidates(filter)
+		if err != nil {
+			telemetry.RecordMailOp(context.Background(), "archive", err)
+			fmt.Fprintf(stderr, "gc mail archive: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		return renderMailArchiveSelection(matches, nil, opts, jsonOut, stdout, stderr)
+	}
+	matches, results, err := archiver.ArchiveMatching(filter)
+	if err != nil {
+		telemetry.RecordMailOp(context.Background(), "archive", err)
+		fmt.Fprintf(stderr, "gc mail archive: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	exit := 0
+	for _, r := range results {
+		switch {
+		case r.Err == nil:
+			telemetry.RecordMailOp(context.Background(), "archive", nil)
+			rec.Record(events.Event{
+				Type:    events.MailArchived,
+				Actor:   eventActor(),
+				Subject: r.ID,
+				Payload: mailEventPayload(nil),
+			})
+		case errors.Is(r.Err, mail.ErrAlreadyArchived):
+			// Candidate selection returns open messages, but preserve the
+			// idempotent batch contract if a concurrent archive wins the race.
+		default:
+			telemetry.RecordMailOp(context.Background(), "archive", r.Err)
+			fmt.Fprintf(stderr, "gc mail archive %s: %v\n", r.ID, r.Err) //nolint:errcheck // best-effort stderr
+			exit = 1
+		}
+	}
+	if jsonOut && exit != 0 {
+		return exit
+	}
+	if renderExit := renderMailArchiveSelection(matches, results, opts, jsonOut, stdout, stderr); renderExit != 0 && exit == 0 {
+		exit = renderExit
+	}
+	return exit
 }
 
 func doMailArchiveJSON(mp mail.Provider, rec events.Recorder, args []string, jsonOut bool, stdout, stderr io.Writer) int {
@@ -283,6 +423,51 @@ func doMailArchiveManyJSON(mp mail.Provider, rec events.Recorder, ids []string, 
 		return writeCLIJSONLineOrExit(stdout, stderr, "gc mail archive", mailActionResult{SchemaVersion: "1", OK: true, Command: "mail.archive", Action: "archive", IDs: ids, Count: intRef(archived), AlreadyDone: already == len(ids)})
 	}
 	return exit
+}
+
+func renderMailArchiveSelection(matches []mail.Message, results []mail.ArchiveResult, opts mailArchiveSelectOptions, jsonOut bool, stdout, stderr io.Writer) int {
+	ids := make([]string, 0, len(matches))
+	summaries := make([]mailMessageSummary, 0, len(matches))
+	for _, msg := range matches {
+		ids = append(ids, msg.ID)
+		summaries = append(summaries, summarizeMailMessage(msg))
+	}
+	if opts.DryRun {
+		if jsonOut {
+			return writeCLIJSONLineOrExit(stdout, stderr, "gc mail archive", mailActionResult{SchemaVersion: "1", OK: true, Command: "mail.archive", Action: "archive", IDs: ids, Messages: summaries, Count: intRef(len(matches)), DryRun: true})
+		}
+		if len(matches) == 0 {
+			fmt.Fprintln(stdout, "No matching messages") //nolint:errcheck // best-effort stdout
+			return 0
+		}
+		for _, msg := range matches {
+			fmt.Fprintf(stdout, "Would archive message %s\t%s\n", msg.ID, msg.Subject) //nolint:errcheck // best-effort stdout
+		}
+		return 0
+	}
+	archived := 0
+	already := 0
+	for _, r := range results {
+		switch {
+		case r.Err == nil:
+			archived++
+			if !jsonOut {
+				fmt.Fprintf(stdout, "Archived message %s\n", r.ID) //nolint:errcheck // best-effort stdout
+			}
+		case errors.Is(r.Err, mail.ErrAlreadyArchived):
+			already++
+			if !jsonOut {
+				fmt.Fprintf(stdout, "Already archived %s\n", r.ID) //nolint:errcheck // best-effort stdout
+			}
+		}
+	}
+	if len(matches) == 0 && !jsonOut {
+		fmt.Fprintln(stdout, "No matching messages") //nolint:errcheck // best-effort stdout
+	}
+	if jsonOut {
+		return writeCLIJSONLineOrExit(stdout, stderr, "gc mail archive", mailActionResult{SchemaVersion: "1", OK: true, Command: "mail.archive", Action: "archive", IDs: ids, Messages: summaries, Count: intRef(archived), AlreadyDone: already == len(results) && len(results) > 0})
+	}
+	return 0
 }
 
 func newMailCheckCmd(stdout, stderr io.Writer) *cobra.Command {
@@ -552,6 +737,19 @@ func defaultMailIdentity() string {
 	return defaultMailIdentityCandidates()[0]
 }
 
+const controllerMailIdentity = "controller"
+
+func reservedMailSenderIdentity(identifier string) (string, bool) {
+	switch strings.TrimSpace(identifier) {
+	case "", "human":
+		return "human", true
+	case controllerMailIdentity:
+		return controllerMailIdentity, true
+	default:
+		return "", false
+	}
+}
+
 // defaultMailIdentityCandidates returns ordered non-empty identity candidates
 // (GC_SESSION_ID, GC_ALIAS, GC_AGENT), falling back to ["human"] when all are
 // unset. Multiple candidates preserve compatibility for sessions whose concrete
@@ -616,8 +814,8 @@ func sessionMailboxAddresses(b beads.Bead) []string {
 }
 
 func resolveMailIdentityCached(store beads.Store, identifier string, cache *mailIdentitySessionCache) (string, error) {
-	if identifier == "" || identifier == "human" {
-		return "human", nil
+	if sender, ok := reservedMailSenderIdentity(identifier); ok {
+		return sender, nil
 	}
 	sessionID, err := resolveSessionID(store, identifier)
 	if err != nil {
@@ -649,8 +847,8 @@ func resolveMailIdentityWithConfig(cityPath string, cfg *config.City, store bead
 }
 
 func resolveMailIdentityWithConfigCached(cityPath string, cfg *config.City, store beads.Store, identifier string, cache *mailIdentitySessionCache) (string, error) {
-	if identifier == "" || identifier == "human" {
-		return "human", nil
+	if sender, ok := reservedMailSenderIdentity(identifier); ok {
+		return sender, nil
 	}
 	if store != nil && cfg != nil {
 		sessionID, err := resolveSessionIDWithConfig(cityPath, cfg, store, identifier)
@@ -692,6 +890,9 @@ func resolveMailRecipientIdentityCached(cityPath string, cfg *config.City, store
 		return "", targetErr
 	} else if matched {
 		return target.display, nil
+	}
+	if normalizeNamedSessionTarget(identifier) == controllerMailIdentity {
+		return "", session.ErrSessionNotFound
 	}
 	return resolveMailIdentityWithConfigCached(cityPath, cfg, store, identifier, cache)
 }

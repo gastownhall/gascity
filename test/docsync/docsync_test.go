@@ -24,7 +24,11 @@ func repoRoot() string {
 	return filepath.Join(filepath.Dir(filename), "..", "..")
 }
 
-var markdownLinkRE = regexp.MustCompile(`\[[^][]+\]\(([^)]+)\)`)
+var (
+	markdownLinkRE    = regexp.MustCompile(`\[[^][]+\]\(([^)]+)\)`)
+	schemaHrefRE      = regexp.MustCompile(`href="[^"]*?/schema/([^"#?]+)"`)
+	schemaGitHubRawRE = regexp.MustCompile(`href="https://raw\.githubusercontent\.com/gastownhall/gascity/main/docs/schema/([^"#?]+)"`)
+)
 
 // docTreeDirs lists the top-level directories that are documentation trees
 // and should be link-checked. Update this list when adding or removing doc
@@ -44,6 +48,39 @@ var docTreeIgnored = []string{"cmd", "examples", "internal", "plans", "scripts",
 var knownBrokenLinks = map[string]bool{
 	"contrib/events-scripts/README.md -> ../../docs/k8s-guide.md":  true,
 	"contrib/session-scripts/README.md -> ../../docs/k8s-guide.md": true,
+}
+
+func TestSchemaDownloadLinksUseGitHubRaw(t *testing.T) {
+	root := repoRoot()
+	docs := []string{
+		"docs/reference/api.md",
+		"docs/reference/events.md",
+		"docs/schema/index.md",
+	}
+
+	for _, rel := range docs {
+		path := filepath.Join(root, rel)
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", rel, err)
+		}
+		for _, match := range schemaHrefRE.FindAllStringSubmatch(string(data), -1) {
+			target := match[1]
+			if filepath.Ext(target) != ".json" {
+				t.Errorf("%s links /schema/%s; schema downloads must use .json", rel, target)
+				continue
+			}
+			ghMatch := schemaGitHubRawRE.FindStringSubmatch(match[0])
+			if ghMatch == nil {
+				t.Errorf("%s links /schema/%s via relative path; use GitHub raw URL so downloads work in both local preview and production", rel, target)
+				continue
+			}
+			artifact := filepath.Join(root, "docs", "schema", filepath.FromSlash(target))
+			if _, err := os.Stat(artifact); err != nil {
+				t.Errorf("%s links /schema/%s but %s is not committed: %v", rel, target, artifact, err)
+			}
+		}
+	}
 }
 
 func allDocsMarkdownFiles(root string) ([]string, error) {

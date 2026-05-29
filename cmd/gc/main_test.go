@@ -2758,13 +2758,13 @@ func TestDoInitGastownWritesCanonicalPackV2Shape(t *testing.T) {
 	if strings.Contains(cityToml, "default_rig_includes") {
 		t.Fatalf("city.toml should not keep legacy default_rig_includes in fresh init:\n%s", cityToml)
 	}
+	if !strings.Contains(cityToml, "[defaults.rig.imports.gastown]") {
+		t.Fatalf("city.toml missing canonical default-rig import:\n%s", cityToml)
+	}
 
 	packToml := string(f.Files[filepath.Join("/bright-lights", "pack.toml")])
 	if !strings.Contains(packToml, "[imports.gastown]") || !strings.Contains(packToml, `source = ".gc/system/packs/gastown"`) {
 		t.Fatalf("pack.toml missing gastown import:\n%s", packToml)
-	}
-	if !strings.Contains(packToml, "[defaults.rig.imports.gastown]") {
-		t.Fatalf("pack.toml missing canonical default-rig import:\n%s", packToml)
 	}
 	if strings.Contains(packToml, `append_fragments = ["command-glossary", "operational-awareness"]`) {
 		t.Fatalf("pack.toml should not rewrite workspace.global_fragments into append_fragments:\n%s", packToml)
@@ -3373,7 +3373,7 @@ func TestDoInitWithGastownTemplate(t *testing.T) {
 		t.Errorf("len(Agents) = %d, want 0 (agents come from pack)", len(cfg.Agents))
 	}
 	packToml := string(f.Files[filepath.Join("/bright-lights", "pack.toml")])
-	if !strings.Contains(packToml, "[imports.gastown]") || !strings.Contains(packToml, "[defaults.rig.imports.gastown]") {
+	if !strings.Contains(packToml, "[imports.gastown]") || !strings.Contains(string(data), "[defaults.rig.imports.gastown]") {
 		t.Errorf("pack.toml missing gastown pack wiring:\n%s", packToml)
 	}
 	// Daemon config.
@@ -4486,7 +4486,7 @@ func TestInitFromDefaultsToTargetDirBasename(t *testing.T) {
 	}
 }
 
-func TestInitFromPreservesCopiedPackDefaultRigImportOrder(t *testing.T) {
+func TestInitFromCopiesDefaultRigImportsToCityToml(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_DOLT", "skip")
 	configureIsolatedRuntimeEnv(t)
@@ -4497,12 +4497,66 @@ func TestInitFromPreservesCopiedPackDefaultRigImportOrder(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(srcDir, "city.toml"),
-		[]byte("[workspace]\nprovider = \"claude\"\n"), 0o644); err != nil {
+		[]byte(`[workspace]
+provider = "claude"
+
+[defaults.rig.imports.zeta]
+source = "./packs/zeta"
+
+[defaults.rig.imports.alpha]
+source = "./packs/alpha"
+`), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(srcDir, "pack.toml"), []byte(`[pack]
 name = "template"
 schema = 2
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cityPath := filepath.Join(dir, "bright-lights")
+	var stdout, stderr bytes.Buffer
+	code := doInitFromDirWithOptions(srcDir, cityPath, "", &stdout, &stderr, true)
+	if code != 0 {
+		t.Fatalf("doInitFromDirWithOptions = %d, want 0; stderr: %s", code, stderr.String())
+	}
+
+	cityData, err := os.ReadFile(filepath.Join(cityPath, "city.toml"))
+	if err != nil {
+		t.Fatalf("reading city.toml: %v", err)
+	}
+	cityText := string(cityData)
+	zetaIdx := strings.Index(cityText, "[defaults.rig.imports.zeta]")
+	alphaIdx := strings.Index(cityText, "[defaults.rig.imports.alpha]")
+	if zetaIdx == -1 || alphaIdx == -1 {
+		t.Fatalf("city.toml missing copied default rig imports:\n%s", cityText)
+	}
+
+	defaultRigImports, err := config.LoadRootPackDefaultRigImports(fsys.OSFS{}, cityPath)
+	if err != nil {
+		t.Fatalf("LoadRootPackDefaultRigImports: %v", err)
+	}
+	if len(defaultRigImports) != 2 {
+		t.Fatalf("LoadRootPackDefaultRigImports len = %d, want 2", len(defaultRigImports))
+	}
+	if defaultRigImports[0].Binding != "alpha" || defaultRigImports[1].Binding != "zeta" {
+		t.Fatalf("LoadRootPackDefaultRigImports = %v, want [alpha zeta]", []string{
+			defaultRigImports[0].Binding,
+			defaultRigImports[1].Binding,
+		})
+	}
+}
+
+func TestInitFilePreservesDefaultRigImportsInCityToml(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_DOLT", "skip")
+	configureIsolatedRuntimeEnv(t)
+
+	dir := t.TempDir()
+	src := filepath.Join(dir, "source.toml")
+	if err := os.WriteFile(src, []byte(`[workspace]
+provider = "claude"
 
 [defaults.rig.imports.zeta]
 source = "./packs/zeta"
@@ -4515,41 +4569,130 @@ source = "./packs/alpha"
 
 	cityPath := filepath.Join(dir, "bright-lights")
 	var stdout, stderr bytes.Buffer
-	code := doInitFromDirWithOptions(srcDir, cityPath, "", &stdout, &stderr, true)
+	code := cmdInitFromTOMLFileWithOptions(fsys.OSFS{}, src, cityPath, "", &stdout, &stderr, true, false)
 	if code != 0 {
-		t.Fatalf("doInitFromDirWithOptions = %d, want 0; stderr: %s", code, stderr.String())
+		t.Fatalf("cmdInitFromTOMLFileWithOptions = %d, want 0; stderr: %s", code, stderr.String())
 	}
 
-	packData, err := os.ReadFile(filepath.Join(cityPath, "pack.toml"))
-	if err != nil {
-		t.Fatalf("reading pack.toml: %v", err)
-	}
-	packText := string(packData)
-	zetaIdx := strings.Index(packText, "[defaults.rig.imports.zeta]")
-	alphaIdx := strings.Index(packText, "[defaults.rig.imports.alpha]")
-	if zetaIdx == -1 || alphaIdx == -1 {
-		t.Fatalf("pack.toml missing copied default rig imports:\n%s", packText)
-	}
-	if zetaIdx > alphaIdx {
-		t.Fatalf("pack.toml reordered copied default rig imports:\n%s", packText)
+	packText := string(mustReadFile(t, filepath.Join(cityPath, "pack.toml")))
+	if strings.Contains(packText, "[defaults.rig.imports.") {
+		t.Fatalf("pack.toml should not contain default-rig imports:\n%s", packText)
 	}
 
-	defaultRigImports, err := config.LoadRootPackDefaultRigImports(fsys.OSFS{}, cityPath)
-	if err != nil {
-		t.Fatalf("LoadRootPackDefaultRigImports: %v", err)
+	cityText := string(mustReadFile(t, filepath.Join(cityPath, "city.toml")))
+	for _, want := range []string{
+		"[defaults.rig.imports.alpha]",
+		`source = "./packs/alpha"`,
+		"[defaults.rig.imports.zeta]",
+		`source = "./packs/zeta"`,
+	} {
+		if !strings.Contains(cityText, want) {
+			t.Fatalf("city.toml missing default-rig import %q:\n%s", want, cityText)
+		}
 	}
-	if len(defaultRigImports) != 2 {
-		t.Fatalf("LoadRootPackDefaultRigImports len = %d, want 2", len(defaultRigImports))
-	}
-	if defaultRigImports[0].Binding != "zeta" || defaultRigImports[1].Binding != "alpha" {
-		t.Fatalf("LoadRootPackDefaultRigImports = %v, want [zeta alpha]", []string{
-			defaultRigImports[0].Binding,
-			defaultRigImports[1].Binding,
-		})
+	if _, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml")); err != nil {
+		t.Fatalf("LoadWithIncludes written city: %v", err)
 	}
 }
 
-func TestInitFromPreservesCopiedPackLegacyAgentDefaultsAlias(t *testing.T) {
+func TestInitFileKeepsCityOnlyPatchesOutOfPackToml(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_DOLT", "skip")
+	configureIsolatedRuntimeEnv(t)
+
+	dir := t.TempDir()
+	src := filepath.Join(dir, "source.toml")
+	if err := os.WriteFile(src, []byte(`[workspace]
+provider = "claude"
+
+[providers.local]
+command = "true"
+
+[[agent]]
+name = "worker"
+provider = "local"
+
+[[rigs]]
+name = "app"
+path = "app"
+
+[[patches.agent]]
+name = "worker"
+suspended = true
+
+[[patches.rigs]]
+name = "app"
+prefix = "ga"
+
+[[patches.providers]]
+name = "local"
+command = "false"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cityPath := filepath.Join(dir, "bright-lights")
+	var stdout, stderr bytes.Buffer
+	code := cmdInitFromTOMLFileWithOptions(fsys.OSFS{}, src, cityPath, "", &stdout, &stderr, true, false)
+	if code != 0 {
+		t.Fatalf("cmdInitFromTOMLFileWithOptions = %d, want 0; stderr: %s", code, stderr.String())
+	}
+
+	packText := string(mustReadFile(t, filepath.Join(cityPath, "pack.toml")))
+	if !strings.Contains(packText, "[[patches.agent]]") {
+		t.Fatalf("pack.toml missing pack-supported agent patch:\n%s", packText)
+	}
+	for _, forbidden := range []string{"[[patches.rigs]]", "[[patches.providers]]"} {
+		if strings.Contains(packText, forbidden) {
+			t.Fatalf("pack.toml contains city-only patch %q:\n%s", forbidden, packText)
+		}
+	}
+
+	cityText := string(mustReadFile(t, filepath.Join(cityPath, "city.toml")))
+	for _, want := range []string{"[[patches.rigs]]", `prefix = "ga"`, "[[patches.providers]]", `command = "false"`} {
+		if !strings.Contains(cityText, want) {
+			t.Fatalf("city.toml missing city-only patch %q:\n%s", want, cityText)
+		}
+	}
+	if strings.Contains(cityText, "[[patches.agent]]") {
+		t.Fatalf("city.toml should not contain pack-supported agent patch:\n%s", cityText)
+	}
+	if _, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml")); err != nil {
+		t.Fatalf("LoadWithIncludes written city: %v", err)
+	}
+}
+
+func TestInitFileRejectsLegacyFormulasDir(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_DOLT", "skip")
+	configureIsolatedRuntimeEnv(t)
+
+	dir := t.TempDir()
+	src := filepath.Join(dir, "source.toml")
+	if err := os.WriteFile(src, []byte(`[workspace]
+provider = "claude"
+
+[formulas]
+dir = "legacy-formulas"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cityPath := filepath.Join(dir, "bright-lights")
+	var stdout, stderr bytes.Buffer
+	code := cmdInitFromTOMLFileWithOptions(fsys.OSFS{}, src, cityPath, "", &stdout, &stderr, true, false)
+	if code == 0 {
+		t.Fatalf("cmdInitFromTOMLFileWithOptions succeeded, want formulas.dir rejection; stdout: %s", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "[formulas].dir is no longer supported") {
+		t.Fatalf("stderr missing formulas.dir rejection:\n%s", stderr.String())
+	}
+	if _, err := os.Stat(filepath.Join(cityPath, "pack.toml")); !os.IsNotExist(err) {
+		t.Fatalf("pack.toml should not be written after formulas.dir rejection, err=%v", err)
+	}
+}
+
+func TestInitFromCopiesLegacyAgentDefaultsAliasToCityToml(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_DOLT", "skip")
 	configureIsolatedRuntimeEnv(t)
@@ -4560,15 +4703,17 @@ func TestInitFromPreservesCopiedPackLegacyAgentDefaultsAlias(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(srcDir, "city.toml"),
-		[]byte("[workspace]\nprovider = \"claude\"\n"), 0o644); err != nil {
+		[]byte(`[workspace]
+provider = "claude"
+
+[agents]
+append_fragments = ["legacy-footer"]
+`), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(srcDir, "pack.toml"), []byte(`[pack]
 name = "template"
 schema = 2
-
-[agents]
-append_fragments = ["legacy-footer"]
 `), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -4580,13 +4725,13 @@ append_fragments = ["legacy-footer"]
 		t.Fatalf("doInitFromDirWithOptions = %d, want 0; stderr: %s", code, stderr.String())
 	}
 
-	packData, err := os.ReadFile(filepath.Join(cityPath, "pack.toml"))
+	cityData, err := os.ReadFile(filepath.Join(cityPath, "city.toml"))
 	if err != nil {
-		t.Fatalf("reading pack.toml: %v", err)
+		t.Fatalf("reading city.toml: %v", err)
 	}
-	packText := string(packData)
-	if !strings.Contains(packText, "[agents]") {
-		t.Fatalf("pack.toml dropped copied [agents] alias:\n%s", packText)
+	cityText := string(cityData)
+	if !strings.Contains(cityText, "[agent_defaults]") {
+		t.Fatalf("city.toml missing canonical [agent_defaults]:\n%s", cityText)
 	}
 
 	cfg, err := loadCityConfigFS(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
@@ -6634,6 +6779,81 @@ prompt_template = "prompts/probe.md"
 	}
 	if got := strings.TrimSpace(updated.Metadata["session_key"]); got != "gemini-provider-session" {
 		t.Fatalf("session_key = %q, want Gemini provider session id", got)
+	}
+}
+
+func TestDoPrimeHookPersistsGenericProviderSessionKey(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	promptsDir := filepath.Join(dir, "prompts")
+	if err := os.MkdirAll(promptsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(promptsDir, "probe.md"), []byte("probe prompt\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	toml := `[workspace]
+name = "test-city"
+provider = "omp"
+
+[[agent]]
+name = "probe"
+prompt_template = "prompts/probe.md"
+`
+	if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte(toml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	store, err := openCityStoreAt(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessionBead, err := store.Create(beads.Bead{
+		Title: "probe",
+		Type:  "task",
+		Labels: []string{
+			"gc:session",
+			"template:probe",
+		},
+		Metadata: map[string]string{
+			"template":     "probe",
+			"provider":     "omp",
+			"session_name": "probe",
+			"state":        "active",
+			"work_dir":     dir,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	orig, _ := os.Getwd()
+	t.Cleanup(func() { _ = os.Chdir(orig) })
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_AGENT", "probe")
+	t.Setenv("GC_SESSION_ID", sessionBead.ID)
+	t.Setenv("GC_PROVIDER_SESSION_ID", "omp-provider-session")
+
+	var stdout, stderr bytes.Buffer
+	code := doPrimeWithMode(nil, &stdout, &stderr, true, false)
+	if code != 0 {
+		t.Fatalf("doPrimeWithMode = %d, want 0; stderr: %s", code, stderr.String())
+	}
+
+	updatedStore, err := openCityStoreAt(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	updated, err := updatedStore.Get(sessionBead.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.TrimSpace(updated.Metadata["session_key"]); got != "omp-provider-session" {
+		t.Fatalf("session_key = %q, want generic provider session id", got)
 	}
 }
 

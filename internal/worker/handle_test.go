@@ -242,8 +242,8 @@ func TestSessionHandleCreateDeferred(t *testing.T) {
 	if err != nil {
 		t.Fatalf("store.Get(%q): %v", info.ID, err)
 	}
-	if bead.Metadata["state"] != string(sessionpkg.StateCreating) {
-		t.Fatalf("bead state = %q, want %q", bead.Metadata["state"], sessionpkg.StateCreating)
+	if bead.Metadata["state"] != string(sessionpkg.StateStartPending) {
+		t.Fatalf("bead state = %q, want %q", bead.Metadata["state"], sessionpkg.StateStartPending)
 	}
 	if bead.Metadata["pending_create_claim"] != "true" {
 		t.Fatalf("pending_create_claim = %q, want true", bead.Metadata["pending_create_claim"])

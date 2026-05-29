@@ -68,31 +68,27 @@ command = "bad"
 func TestLoadWithIncludes_RootPackDefaultRigImportsPreserveOrder(t *testing.T) {
 	fs := fsys.NewFake()
 	fs.Files["/city/city.toml"] = []byte(`
-[workspace]
-name = "test"
-`)
-	fs.Files["/city/pack.toml"] = []byte(`
-[pack]
-name = "test"
-schema = 2
-
 [defaults.rig.imports.z-pack]
 source = "packs/z-pack"
 
 [defaults.rig.imports.a-pack]
 source = "packs/a-pack"
+
+[defaults.rig.imports.city-local]
+source = "packs/city-local"
+`)
+	fs.Files["/city/pack.toml"] = []byte(`
+[pack]
+name = "test"
+schema = 2
 `)
 
 	cfg, _, err := LoadWithIncludes(fs, "/city/city.toml")
 	if err != nil {
 		t.Fatalf("LoadWithIncludes: %v", err)
 	}
-	want := []string{"packs/z-pack", "packs/a-pack"}
-	if got := cfg.Workspace.LegacyDefaultRigIncludes(); !reflect.DeepEqual(got, want) {
-		t.Fatalf("DefaultRigIncludes = %v, want %v", got, want)
-	}
-	if got := cfg.DefaultRigImportOrder; !reflect.DeepEqual(got, []string{"z-pack", "a-pack"}) {
-		t.Fatalf("DefaultRigImportOrder = %v, want [z-pack a-pack]", got)
+	if got := cfg.DefaultRigImportOrder; !reflect.DeepEqual(got, []string{"z-pack", "a-pack", "city-local"}) {
+		t.Fatalf("DefaultRigImportOrder = %v, want [z-pack a-pack city-local]", got)
 	}
 	if got := cfg.DefaultRigImports["z-pack"].Source; got != "packs/z-pack" {
 		t.Fatalf("DefaultRigImports[z-pack].Source = %q, want packs/z-pack", got)
@@ -297,341 +293,86 @@ mcp = ["shared-mcp", "common-mcp"]
 	}
 }
 
-func TestLoadWithIncludes_WarnsOnPackAgentDefaultsCompatibilityAndMigrationKeys(t *testing.T) {
-	fs := fsys.NewFake()
-	fs.Files["/city/city.toml"] = []byte(`
-[workspace]
-name = "test"
-
-[[rigs]]
-name = "hw"
-includes = ["packs/rigpack"]
-`)
-	fs.Files["/city/.gc/site.toml"] = []byte(`
-[[rig]]
-name = "hw"
-path = "/tmp/hw"
-`)
-	fs.Files["/city/pack.toml"] = []byte(`
-[pack]
-name = "test"
-schema = 2
-
-[agents]
-append_fragments = ["root-footer"]
-`)
-	fs.Files["/city/packs/rigpack/pack.toml"] = []byte(`
-[pack]
-name = "rigpack"
-schema = 2
-
-[agent_defaults]
-provider = "claude"
-`)
-	fs.Files["/city/packs/rigpack/agents/worker/agent.toml"] = []byte(`
-scope = "rig"
-`)
-
-	cfg, prov, err := LoadWithIncludes(fs, "/city/city.toml")
-	if err != nil {
-		t.Fatalf("LoadWithIncludes: %v", err)
-	}
-	if got := cfg.AgentDefaults.AppendFragments; len(got) != 1 || got[0] != "root-footer" {
-		t.Fatalf("AgentDefaults.AppendFragments = %v, want [root-footer]", got)
-	}
-	warnings := strings.Join(prov.Warnings, "\n")
-	if !strings.Contains(warnings, "/city/pack.toml: "+agentsAliasWarning) {
-		t.Fatalf("expected root pack alias warning, got: %v", prov.Warnings)
-	}
-	if !strings.Contains(warnings, `/city/packs/rigpack/pack.toml: "agent_defaults.provider" is not supported`) {
-		t.Fatalf("expected rig pack migration warning, got: %v", prov.Warnings)
-	}
-}
-
-func TestLoadWithIncludes_ImportedPackAgentDefaultsLayerIntoEffectiveFormula(t *testing.T) {
+func TestLoadWithIncludesRejectsPackAuthoringSurfaces(t *testing.T) {
 	tests := []struct {
-		name        string
-		cityDefault string
-		nested      bool
-		want        string
+		name     string
+		packBody string
+		want     string
 	}{
-		{name: "pack default only", want: "mol-pack"},
-		{name: "city override wins", cityDefault: "mol-city", want: "mol-city"},
-		{name: "nested pack include inherits default", nested: true, want: "mol-pack"},
-		{name: "city override wins for nested pack include", cityDefault: "mol-city", nested: true, want: "mol-city"},
+		{
+			name: "agent_defaults",
+			packBody: `
+[agent_defaults]
+default_sling_formula = "mol-pack"
+`,
+			want: "[agent_defaults] is a city.toml table, not a pack.toml field",
+		},
+		{
+			name: "agents_alias",
+			packBody: `
+[agents]
+append_fragments = ["footer"]
+`,
+			want: "[agents] is a city.toml compatibility alias for [agent_defaults], not a pack.toml field",
+		},
+		{
+			name: "default_rig_imports",
+			packBody: `
+[defaults.rig.imports.ops]
+source = "../ops"
+`,
+			want: "[defaults.rig.imports] belongs in city.toml, not pack.toml",
+		},
+		{
+			name: "formulas_dir",
+			packBody: `
+[formulas]
+dir = "legacy-formulas"
+`,
+			want: "[formulas].dir is no longer supported; use the well-known formulas/ directory",
+		},
+		{
+			name: "rig_patches",
+			packBody: `
+[[patches.rigs]]
+name = "app"
+prefix = "ga"
+`,
+			want: "[[patches.rigs]] is only valid in city.toml; pack.toml supports [[patches.agent]] only",
+		},
+		{
+			name: "provider_patches",
+			packBody: `
+[[patches.providers]]
+name = "local"
+command = "false"
+`,
+			want: "[[patches.providers]] is only valid in city.toml; pack.toml supports [[patches.agent]] only",
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			fs := fsys.NewFake()
-			cityDefaults := ""
-			if tt.cityDefault != "" {
-				cityDefaults = "\n[agent_defaults]\ndefault_sling_formula = \"" + tt.cityDefault + "\"\n"
-			}
 			fs.Files["/city/city.toml"] = []byte(`
 [workspace]
 name = "test"
-includes = ["packs/imported"]
-` + cityDefaults)
-			if tt.nested {
-				fs.Files["/city/packs/imported/pack.toml"] = []byte(`
-[pack]
-name = "imported"
-schema = 2
-includes = ["../base"]
-
-[agent_defaults]
-default_sling_formula = "mol-pack"
 `)
-				fs.Files["/city/packs/base/pack.toml"] = []byte(`
+			fs.Files["/city/pack.toml"] = []byte(`
 [pack]
-name = "base"
+name = "test"
 schema = 2
+` + tt.packBody)
 
-[[agent]]
-name = "mayor"
-provider = "claude"
-scope = "city"
-`)
-			} else {
-				fs.Files["/city/packs/imported/pack.toml"] = []byte(`
-[pack]
-name = "imported"
-schema = 2
-
-[agent_defaults]
-default_sling_formula = "mol-pack"
-
-[[agent]]
-name = "mayor"
-provider = "claude"
-scope = "city"
-`)
+			_, _, err := LoadWithIncludes(fs, "/city/city.toml")
+			if err == nil {
+				t.Fatal("expected LoadWithIncludes to reject pack authoring surface")
 			}
-
-			cfg, _, err := LoadWithIncludes(fs, "/city/city.toml")
-			if err != nil {
-				t.Fatalf("LoadWithIncludes: %v", err)
-			}
-			if len(explicitAgents(cfg.Agents)) != 1 {
-				t.Fatalf("len(explicit agents) = %d, want 1", len(explicitAgents(cfg.Agents)))
-			}
-			got := explicitAgents(cfg.Agents)[0].EffectiveDefaultSlingFormula()
-			if got != tt.want {
-				t.Fatalf("EffectiveDefaultSlingFormula = %q, want %q", got, tt.want)
+			if !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("error = %v, want %q", err, tt.want)
 			}
 		})
 	}
-}
-
-func TestLoadWithIncludes_PackAgentDefaultsMergesNonOverlappingAgentsAliasFields(t *testing.T) {
-	fs := fsys.NewFake()
-	fs.Files["/city/city.toml"] = []byte(`
-[workspace]
-name = "test"
-includes = ["packs/imported"]
-`)
-	fs.Files["/city/packs/imported/pack.toml"] = []byte(`
-[pack]
-name = "imported"
-schema = 2
-
-[agent_defaults]
-append_fragments = ["canonical-footer"]
-
-[agents]
-default_sling_formula = "mol-legacy"
-
-[[agent]]
-name = "mayor"
-provider = "claude"
-scope = "city"
-`)
-
-	cfg, _, err := LoadWithIncludes(fs, "/city/city.toml")
-	if err != nil {
-		t.Fatalf("LoadWithIncludes: %v", err)
-	}
-	if len(explicitAgents(cfg.Agents)) != 1 {
-		t.Fatalf("len(explicit agents) = %d, want 1", len(explicitAgents(cfg.Agents)))
-	}
-	agent := explicitAgents(cfg.Agents)[0]
-	if got := agent.EffectiveDefaultSlingFormula(); got != "mol-legacy" {
-		t.Fatalf("EffectiveDefaultSlingFormula = %q, want %q", got, "mol-legacy")
-	}
-	if !reflect.DeepEqual(agent.InheritedAppendFragments, []string{"canonical-footer"}) {
-		t.Fatalf("InheritedAppendFragments = %v, want %v", agent.InheritedAppendFragments, []string{"canonical-footer"})
-	}
-}
-
-func TestLoadWithIncludes_ImportedPackWarningsSurfaceInProvenanceWithoutRigPacks(t *testing.T) {
-	fs := fsys.NewFake()
-	fs.Files["/city/city.toml"] = []byte(`
-[workspace]
-name = "test"
-includes = ["packs/imported"]
-`)
-	fs.Files["/city/packs/imported/pack.toml"] = []byte(`
-[pack]
-name = "imported"
-schema = 2
-
-[agents]
-append_fragments = ["footer"]
-`)
-
-	_, prov, err := LoadWithIncludes(fs, "/city/city.toml")
-	if err != nil {
-		t.Fatalf("LoadWithIncludes: %v", err)
-	}
-	warnings := strings.Join(prov.Warnings, "\n")
-	if !strings.Contains(warnings, "/city/packs/imported/pack.toml: "+agentsAliasWarning) {
-		t.Fatalf("expected imported-pack alias warning in provenance, got: %v", prov.Warnings)
-	}
-}
-
-func TestLoadWithIncludes_WrapperPackDefaultsDoNotBleedAcrossImports(t *testing.T) {
-	fs := fsys.NewFake()
-	fs.Files["/city/city.toml"] = []byte(`
-[workspace]
-name = "test"
-includes = ["packs/wrapper"]
-`)
-	fs.Files["/city/packs/wrapper/pack.toml"] = []byte(`
-[pack]
-name = "wrapper"
-schema = 2
-
-[agent_defaults]
-default_sling_formula = "mol-wrapper"
-
-[imports.dep]
-source = "../dep"
-`)
-	fs.Files["/city/packs/dep/pack.toml"] = []byte(`
-[pack]
-name = "dep"
-schema = 2
-
-[agent_defaults]
-default_sling_formula = "mol-dep"
-
-[[agent]]
-name = "mayor"
-provider = "claude"
-scope = "city"
-`)
-
-	cfg, _, err := LoadWithIncludes(fs, "/city/city.toml")
-	if err != nil {
-		t.Fatalf("LoadWithIncludes: %v", err)
-	}
-	for _, a := range explicitAgents(cfg.Agents) {
-		if a.BindingName != "dep" || a.Name != "mayor" {
-			continue
-		}
-		if got := a.EffectiveDefaultSlingFormula(); got != "mol-dep" {
-			t.Fatalf("dep.mayor EffectiveDefaultSlingFormula = %q, want %q", got, "mol-dep")
-		}
-		return
-	}
-	t.Fatalf("expected dep.mayor agent, got %v", explicitAgents(cfg.Agents))
-}
-
-func TestLoadWithIncludes_IncludingPackDefaultsKeepInnermostScalarDefault(t *testing.T) {
-	fs := fsys.NewFake()
-	fs.Files["/city/city.toml"] = []byte(`
-[workspace]
-name = "test"
-includes = ["packs/outer"]
-`)
-	fs.Files["/city/packs/outer/pack.toml"] = []byte(`
-[pack]
-name = "outer"
-schema = 2
-includes = ["../base"]
-
-[agent_defaults]
-default_sling_formula = "mol-outer"
-`)
-	fs.Files["/city/packs/base/pack.toml"] = []byte(`
-[pack]
-name = "base"
-schema = 2
-
-[agent_defaults]
-default_sling_formula = "mol-base"
-
-[[agent]]
-name = "mayor"
-provider = "claude"
-scope = "city"
-`)
-
-	cfg, _, err := LoadWithIncludes(fs, "/city/city.toml")
-	if err != nil {
-		t.Fatalf("LoadWithIncludes: %v", err)
-	}
-	if len(explicitAgents(cfg.Agents)) != 1 {
-		t.Fatalf("len(explicit agents) = %d, want 1", len(explicitAgents(cfg.Agents)))
-	}
-	if got := explicitAgents(cfg.Agents)[0].EffectiveDefaultSlingFormula(); got != "mol-base" {
-		t.Fatalf("EffectiveDefaultSlingFormula = %q, want %q", got, "mol-base")
-	}
-}
-
-func TestLoadWithIncludes_IncludingPackDefaultsDoNotBleedAcrossNestedImportBoundaries(t *testing.T) {
-	fs := fsys.NewFake()
-	fs.Files["/city/city.toml"] = []byte(`
-[workspace]
-name = "test"
-includes = ["packs/outer"]
-`)
-	fs.Files["/city/packs/outer/pack.toml"] = []byte(`
-[pack]
-name = "outer"
-schema = 2
-includes = ["../mid"]
-
-[agent_defaults]
-default_sling_formula = "mol-outer"
-`)
-	fs.Files["/city/packs/mid/pack.toml"] = []byte(`
-[pack]
-name = "mid"
-schema = 2
-
-[imports.dep]
-source = "../dep"
-`)
-	fs.Files["/city/packs/dep/pack.toml"] = []byte(`
-[pack]
-name = "dep"
-schema = 2
-
-[agent_defaults]
-default_sling_formula = "mol-dep"
-
-[[agent]]
-name = "mayor"
-provider = "claude"
-scope = "city"
-`)
-
-	cfg, _, err := LoadWithIncludes(fs, "/city/city.toml")
-	if err != nil {
-		t.Fatalf("LoadWithIncludes: %v", err)
-	}
-	for _, a := range explicitAgents(cfg.Agents) {
-		if a.BindingName != "dep" || a.Name != "mayor" {
-			continue
-		}
-		if got := a.EffectiveDefaultSlingFormula(); got != "mol-dep" {
-			t.Fatalf("dep.mayor EffectiveDefaultSlingFormula = %q, want %q", got, "mol-dep")
-		}
-		return
-	}
-	t.Fatalf("expected dep.mayor agent, got %v", explicitAgents(cfg.Agents))
 }
 
 func TestLoadWithIncludes_ConcatRigs(t *testing.T) {

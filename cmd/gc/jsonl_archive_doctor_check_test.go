@@ -281,7 +281,7 @@ schema = 1
 	}
 
 	var stdout, stderr strings.Builder
-	_ = doDoctor(false, true, false, &stdout, &stderr)
+	_ = doDoctor(false, true, false, false, &stdout, &stderr)
 	out := stdout.String() + stderr.String()
 	if !strings.Contains(out, "jsonl-archive") {
 		t.Fatalf("doctor output missing jsonl-archive check:\n%s", out)
@@ -328,7 +328,7 @@ schema = 1
 	}
 
 	var stdout, stderr strings.Builder
-	_ = doDoctor(false, false, true, &stdout, &stderr)
+	_ = doDoctor(false, false, true, false, &stdout, &stderr)
 
 	out := stdout.String()
 	if !strings.HasPrefix(strings.TrimSpace(out), "{") {

@@ -75,7 +75,7 @@ func DetectLegacyV1Surfaces(cfg *City, source string) []string {
 	if len(cfg.Workspace.DefaultRigIncludes) > 0 {
 		warnings = append(warnings, fmt.Sprintf(
 			"%s: workspace.default_rig_includes is deprecated in v2; use "+
-				"root pack.toml [defaults.rig.imports.<binding>]. Run "+
+				"city.toml [defaults.rig.imports.<binding>]. Run "+
 				"`gc doctor` to inspect; `gc doctor --fix` handles the safe mechanical rewrites available in this wave.",
 			source))
 	}
@@ -111,7 +111,7 @@ func LegacyV1SurfaceErrors(cfg *City, source string, data ...[]byte) []string {
 	}
 	if len(cfg.Workspace.DefaultRigIncludes) > 0 {
 		errors = append(errors, fmt.Sprintf(
-			"%s: unsupported PackV1 workspace.default_rig_includes; move defaults into root pack.toml [defaults.rig.imports.<binding>]",
+			"%s: unsupported PackV1 workspace.default_rig_includes; move defaults into city.toml [defaults.rig.imports.<binding>]",
 			sourceWithDiagnosticLine(source, locator.lineForKey("workspace", "default_rig_includes"))))
 	}
 	return errors

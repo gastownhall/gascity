@@ -416,6 +416,81 @@ name = "worker"
 	}
 }
 
+func TestCmdHookExplicitTargetDoesNotInheritCallerSessionOrigin(t *testing.T) {
+	disableManagedDoltRecoveryForTest(t)
+	clearInheritedCityRoutingEnv(t)
+	cityDir := t.TempDir()
+	fakeBin := t.TempDir()
+	logPath := filepath.Join(t.TempDir(), "bd.log")
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cityToml := `[workspace]
+name = "test-city"
+
+[[agent]]
+name = "worker"
+`
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	fakeBD := filepath.Join(fakeBin, "bd")
+	script := fmt.Sprintf(`#!/bin/sh
+printf 'origin=%%s alias=%%s session_id=%%s template=%%s args=%%s\n' "${GC_SESSION_ORIGIN:-}" "${GC_ALIAS:-}" "${GC_SESSION_ID:-}" "${GC_TEMPLATE:-}" "$*" >> %q
+case "$*" in
+  *"--metadata-field gc.routed_to=worker"*) printf '[{"id":"hw-1","title":"routed work"}]' ;;
+  *) printf '[]' ;;
+esac
+`, logPath)
+	if err := os.WriteFile(fakeBD, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_ALIAS", "gastown.mayor")
+	t.Setenv("GC_AGENT", "gastown.mayor")
+	t.Setenv("GC_SESSION_ID", "mayor-session-id")
+	t.Setenv("GC_SESSION_NAME", "mayor-session")
+	t.Setenv("GC_SESSION_ORIGIN", "attached")
+	t.Setenv("GC_TEMPLATE", "gastown.mayor")
+
+	var stdout, stderr bytes.Buffer
+	code := cmdHook([]string{"worker"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("cmdHook(explicit target) = %d, want 0; stdout=%q stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), `"hw-1"`) {
+		t.Fatalf("stdout = %q, want routed work", stdout.String())
+	}
+	logData, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("ReadFile(%s): %v", logPath, err)
+	}
+	logText := string(logData)
+	var workQueryLog strings.Builder
+	for _, line := range strings.Split(logText, "\n") {
+		if strings.Contains(line, "args=list --status") || strings.Contains(line, "args=ready ") {
+			workQueryLog.WriteString(line)
+			workQueryLog.WriteByte('\n')
+		}
+	}
+	workQueryText := workQueryLog.String()
+	if !strings.Contains(workQueryText, "--metadata-field gc.routed_to=worker") {
+		t.Fatalf("explicit hook target did not reach routed queue tier; bd log:\n%s", workQueryText)
+	}
+	for _, leaked := range []string{
+		"origin=attached",
+		"alias=gastown.mayor",
+		"session_id=mayor-session-id",
+		"template=gastown.mayor",
+	} {
+		if strings.Contains(workQueryText, leaked) {
+			t.Fatalf("caller session env leaked into explicit hook target (%s):\n%s", leaked, workQueryText)
+		}
+	}
+}
+
 func TestHookInjectAlwaysExitsZero(t *testing.T) {
 	// Even on command failure, inject mode exits 0.
 	runner := func(string, string) (string, error) { return "", fmt.Errorf("command failed") }
