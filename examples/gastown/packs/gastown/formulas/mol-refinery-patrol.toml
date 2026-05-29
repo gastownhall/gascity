@@ -19,9 +19,13 @@ No separate MR beads. The polecat sets metadata (branch, target) on
 the work bead and assigns it to the refinery. On rejection, the
 refinery puts the bead back in the pool with rejection metadata.
 
-Merge strategy is per-work-bead metadata:
-- `direct` (default): fast-forward merge to target and push
-- `mr` / `pr`: publish a GitHub pull request instead of landing directly
+Merge strategy is auto-picked from the work bead's `target` (override with
+`metadata.merge_strategy`):
+- target is the repo default branch (`main`) → `mr`: publish a GitHub pull
+  request so CI + review gate the change
+- any other target (integration/convoy branch whose own PR is the gate) →
+  `direct`: fast-forward merge to target and push
+- `metadata.merge_strategy=direct|mr` overrides the auto-pick (`pr` aliases `mr`)
 
 In `mr` mode, refinery treats PR publication as the terminal handoff for
 the direct-bead workflow: it records the PR URL on the work bead and
@@ -29,7 +33,7 @@ closes the bead once the PR is verified.
 
 Read each step's description before acting — Config values override defaults."""
 formula = "mol-refinery-patrol"
-version = 4
+version = 5
 contract = "graph.v2"
 
 [vars]
@@ -386,7 +390,21 @@ Read the merge target and merge strategy from the work bead metadata:
 ```bash
 BRANCH=$(gc bd show $WORK --json | jq -r '.[0].metadata.branch')
 TARGET=$(gc bd show $WORK --json | jq -r '.[0].metadata.target // "{{target_branch}}"')
-MERGE_STRATEGY=$(gc bd show $WORK --json | jq -r '.[0].metadata.merge_strategy // "direct"')
+MERGE_STRATEGY_RAW=$(gc bd show $WORK --json | jq -r '.[0].metadata.merge_strategy // empty')
+if [ -z "$MERGE_STRATEGY_RAW" ] || [ "$MERGE_STRATEGY_RAW" = "null" ]; then
+  # No explicit override — auto-pick from the target. The repo default
+  # branch (main) gets a PR so CI + review gate the change. Any other
+  # target is an integration/convoy branch whose own PR into main is the
+  # gate, so children fast-forward directly into it.
+  DEFAULT_BRANCH=$(gh repo view --json defaultBranchRef -q .defaultBranchRef.name 2>/dev/null || echo "main")
+  if [ "$TARGET" = "$DEFAULT_BRANCH" ] || [ "$TARGET" = "main" ]; then
+    MERGE_STRATEGY="mr"
+  else
+    MERGE_STRATEGY="direct"
+  fi
+else
+  MERGE_STRATEGY="$MERGE_STRATEGY_RAW"
+fi
 EXISTING_PR=$(gc bd show $WORK --json | jq -r '.[0].metadata.existing_pr // empty')
 ORIGIN_REPO_ERROR=""
 if command -v gh >/dev/null 2>&1; then

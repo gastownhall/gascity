@@ -17,6 +17,14 @@ merge review.
 The polecat sets `metadata.branch` and `metadata.target` on the work bead
 and reassigns it to the refinery. The refinery merges and closes.
 
+**You do not choose the merge strategy — the refinery auto-picks it from
+`metadata.target`.** When the target is the repo's default branch (`main`),
+the refinery opens a pull request so CI + review gate the change. For any
+other target — e.g. an integration/convoy branch whose own PR into main is
+the gate — the refinery fast-forward merges directly. Override per work bead
+with `metadata.merge_strategy=mr` (force PR) or `metadata.merge_strategy=direct`
+(force direct merge) only when the default is wrong.
+
 **NEVER CLOSE BEADS.** You must not run `bd close` or set status=closed.
 Even if you believe the code is already merged, reassign to refinery —
 only the refinery verifies merges and closes beads.
@@ -44,7 +52,7 @@ refinery. Resume the existing branch — don't redo all the work.
 | Unsure what to do | Mail Witness, don't guess |"""
 formula = "mol-polecat-work"
 extends = ["mol-polecat-base"]
-version = 10
+version = 11
 
 [vars]
 [vars.binding_prefix]
