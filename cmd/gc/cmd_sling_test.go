@@ -3544,7 +3544,6 @@ func TestCheckBeadStateForceSkipsCheck(t *testing.T) {
 
 func TestCheckBeadStateFormulaChecksResolvedBead(t *testing.T) {
 	runner := newFakeRunner()
-	runner.on("bd mol cook", "WP-99\n", nil)
 	sp := runtime.NewFake()
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
 	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
@@ -3730,7 +3729,6 @@ func TestDoSlingBatchRegularBeadPassthrough(t *testing.T) {
 
 func TestDoSlingBatchFormulaPassthrough(t *testing.T) {
 	runner := newFakeRunner()
-	runner.on("bd mol cook", "WP-1\n", nil)
 	sp := runtime.NewFake()
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
 	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
@@ -5275,7 +5273,6 @@ func TestOnFormulaCleanBead(t *testing.T) {
 
 func TestOnFormulaNilQuerier(t *testing.T) {
 	runner := newFakeRunner()
-	runner.on("bd mol cook", "WP-1\n", nil)
 	sp := runtime.NewFake()
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
 	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
@@ -5765,7 +5762,6 @@ func TestBatchOnPartialCookFailure(t *testing.T) {
 
 func TestBatchOnNudgeOnce(t *testing.T) {
 	runner := newFakeRunner()
-	runner.on("bd mol cook", "WP-1\n", nil)
 	sp := runtime.NewFake()
 	_ = sp.Start(context.Background(), "mayor", runtime.Config{})
 	sp.Calls = nil
@@ -5946,7 +5942,7 @@ func TestDryRunFormula(t *testing.T) {
 	if !strings.Contains(out, "Name: code-review") {
 		t.Errorf("stdout missing formula name: %s", out)
 	}
-	if !strings.Contains(out, "Would run: bd mol cook --formula=code-review") {
+	if !strings.Contains(out, "Would run: gc formula cook code-review") {
 		t.Errorf("stdout missing cook command: %s", out)
 	}
 	if !strings.Contains(out, "'<wisp-root>'") {
@@ -5980,7 +5976,7 @@ func TestDryRunOnFormula(t *testing.T) {
 	if !strings.Contains(out, "Attach formula:") {
 		t.Errorf("stdout missing attach section: %s", out)
 	}
-	if !strings.Contains(out, "Would run: bd mol cook --formula=code-review --on=BL-42") {
+	if !strings.Contains(out, "Would run: gc formula cook code-review --attach BL-42") {
 		t.Errorf("stdout missing cook command: %s", out)
 	}
 	if !strings.Contains(out, "Pre-check: BL-42 has no existing molecule/wisp children") {
@@ -6190,7 +6186,7 @@ func TestDryRunLeafTaskViaBatchDispatchOnFormula(t *testing.T) {
 	if !strings.Contains(out, "Attach formula:") {
 		t.Errorf("stdout missing single-bead attach section: %s", out)
 	}
-	if !strings.Contains(out, "Would run: bd mol cook --formula=code-review --on=BL-42") {
+	if !strings.Contains(out, "Would run: gc formula cook code-review --attach BL-42") {
 		t.Errorf("stdout missing cook command: %s", out)
 	}
 	if !strings.Contains(out, "bd update 'BL-42' --set-metadata gc.routed_to=hw/polecat") {
@@ -6229,13 +6225,13 @@ func TestDryRunBatchOnFormula(t *testing.T) {
 	}
 	out := stdout.String()
 	// Per-child cook commands.
-	if !strings.Contains(out, "bd mol cook --formula=code-review --on=BL-1") {
+	if !strings.Contains(out, "gc formula cook code-review --attach BL-1") {
 		t.Errorf("stdout missing BL-1 cook command: %s", out)
 	}
-	if !strings.Contains(out, "bd mol cook --formula=code-review --on=BL-3") {
+	if !strings.Contains(out, "gc formula cook code-review --attach BL-3") {
 		t.Errorf("stdout missing BL-3 cook command: %s", out)
 	}
-	if strings.Contains(out, "bd mol cook --formula=code-review --on=BL-2") {
+	if strings.Contains(out, "gc formula cook code-review --attach BL-2") {
 		t.Errorf("stdout should not cook for closed BL-2: %s", out)
 	}
 	// Route commands.
@@ -6771,7 +6767,6 @@ func TestDoSlingIdempotentForceOverrides(t *testing.T) {
 
 func TestDoSlingIdempotentWithOnFormula(t *testing.T) {
 	runner := newFakeRunner()
-	runner.on("bd mol cook", "WP-1\n", nil)
 	sp := runtime.NewFake()
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
 	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
@@ -7191,7 +7186,6 @@ func TestDryRunBatchCrossRigSection(t *testing.T) {
 
 func TestDoSlingCrossRigFormulaExempt(t *testing.T) {
 	runner := newFakeRunner()
-	runner.on("bd mol cook", "WP-1\n", nil)
 	sp := runtime.NewFake()
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "test-city"},
@@ -7273,7 +7267,6 @@ func TestDoSlingOnFormulaCrossRigBlocked(t *testing.T) {
 
 func TestDoSlingOnFormulaCrossRigForceOverrides(t *testing.T) {
 	runner := newFakeRunner()
-	runner.on("bd mol cook", "WP-1\n", nil)
 	sp := runtime.NewFake()
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "test-city"},
