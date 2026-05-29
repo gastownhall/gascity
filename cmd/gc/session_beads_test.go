@@ -3549,6 +3549,150 @@ func TestSyncSessionBeads_ClearsStaleWrongPoolAliasWhenRepairFails(t *testing.T)
 	}
 }
 
+func TestSyncSessionBeads_RebaselinesDriftHashOnPoolAliasChange(t *testing.T) {
+	store := beads.NewMemStore()
+	clk := &clock.Fake{Time: time.Date(2026, 5, 21, 12, 0, 0, 0, time.UTC)}
+	sp := runtime.NewFake()
+	cfg := &config.City{
+		Agents: []config.Agent{{
+			Name:              "worker",
+			Dir:               "pack",
+			MaxActiveSessions: intPtr(10),
+		}},
+	}
+	template := "pack/worker"
+
+	startedTP := TemplateParams{
+		TemplateName: template,
+		InstanceName: "pack/worker-2",
+		Alias:        "pack/worker-2",
+		Command:      "claude",
+		PoolSlot:     2,
+		Hints: agent.StartupHints{
+			PreStart: []string{"worktree-setup.sh /rig /wt/pack.worker-2 pack.worker-2 --sync"},
+		},
+	}
+	startedCore := runtime.CoreFingerprint(sessionCoreConfigForHash(startedTP, beads.Bead{}))
+
+	live, err := store.Create(beads.Bead{
+		Title:  "pool worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:" + template},
+		Metadata: map[string]string{
+			"template":             template,
+			"session_name":         "pack-worker-live",
+			"agent_name":           "pack/worker-2",
+			"command":              "claude",
+			"alias":                "pack/worker-2",
+			"pool_slot":            "2",
+			"state":                "awake",
+			"session_origin":       "ephemeral",
+			"started_config_hash":  startedCore,
+			poolManagedMetadataKey: boolMetadata(true),
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	repairedTP := TemplateParams{
+		TemplateName: template,
+		InstanceName: "pack/worker-2",
+		Alias:        "pack/worker-1",
+		Command:      "claude",
+		PoolSlot:     2,
+		Hints: agent.StartupHints{
+			PreStart: []string{"worktree-setup.sh /rig /wt/pack.worker-1 pack.worker-1 --sync"},
+		},
+	}
+	wantCore := runtime.CoreFingerprint(sessionCoreConfigForHash(repairedTP, beads.Bead{}))
+	if wantCore == startedCore {
+		t.Fatal("test setup: alias-driven pre_start change must alter CoreFingerprint")
+	}
+
+	desired := map[string]TemplateParams{"pack-worker-live": repairedTP}
+
+	var stderr bytes.Buffer
+	syncSessionBeads("", store, desired, sp, allConfiguredDS(desired), cfg, clk, &stderr, false)
+
+	got, err := store.Get(live.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Metadata["alias"] != "pack/worker-1" {
+		t.Fatalf("alias = %q, want pack/worker-1", got.Metadata["alias"])
+	}
+	if got.Metadata["started_config_hash"] == startedCore {
+		t.Fatalf("started_config_hash still at stale pre-rename baseline %q; reconciler would drain as config-drift", startedCore)
+	}
+	if got.Metadata["started_config_hash"] != wantCore {
+		t.Fatalf("started_config_hash = %q, want %q (rebaselined to post-rename config)", got.Metadata["started_config_hash"], wantCore)
+	}
+	if got.Metadata["core_hash_breakdown"] == "" {
+		t.Fatal("core_hash_breakdown not refreshed alongside the rebaselined hash")
+	}
+}
+
+func TestSyncSessionBeads_SkipsDriftRebaselineForUnstartedPoolSession(t *testing.T) {
+	store := beads.NewMemStore()
+	clk := &clock.Fake{Time: time.Date(2026, 5, 21, 12, 5, 0, 0, time.UTC)}
+	sp := runtime.NewFake()
+	cfg := &config.City{
+		Agents: []config.Agent{{
+			Name:              "worker",
+			Dir:               "pack",
+			MaxActiveSessions: intPtr(10),
+		}},
+	}
+	template := "pack/worker"
+
+	live, err := store.Create(beads.Bead{
+		Title:  "pool worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:" + template},
+		Metadata: map[string]string{
+			"template":             template,
+			"session_name":         "pack-worker-live",
+			"agent_name":           "pack/worker-2",
+			"command":              "claude",
+			"alias":                "pack/worker-2",
+			"pool_slot":            "2",
+			"state":                "creating",
+			"session_origin":       "ephemeral",
+			poolManagedMetadataKey: boolMetadata(true),
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	repairedTP := TemplateParams{
+		TemplateName: template,
+		InstanceName: "pack/worker-2",
+		Alias:        "pack/worker-1",
+		Command:      "claude",
+		PoolSlot:     2,
+		Hints: agent.StartupHints{
+			PreStart: []string{"worktree-setup.sh /rig /wt/pack.worker-1 pack.worker-1 --sync"},
+		},
+	}
+	desired := map[string]TemplateParams{"pack-worker-live": repairedTP}
+
+	var stderr bytes.Buffer
+	syncSessionBeads("", store, desired, sp, allConfiguredDS(desired), cfg, clk, &stderr, false)
+
+	got, err := store.Get(live.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Metadata["alias"] != "pack/worker-1" {
+		t.Fatalf("alias = %q, want pack/worker-1", got.Metadata["alias"])
+	}
+	if got.Metadata["started_config_hash"] != "" {
+		t.Fatalf("started_config_hash = %q, want empty for a session that never started", got.Metadata["started_config_hash"])
+	}
+}
+
 func TestSyncSessionBeads_ManagedPoolAliasValidationKeepsCleanAlias(t *testing.T) {
 	store := beads.NewMemStore()
 	clk := &clock.Fake{Time: time.Date(2026, 5, 6, 2, 14, 0, 0, time.UTC)}

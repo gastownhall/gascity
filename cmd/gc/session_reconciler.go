@@ -3253,6 +3253,24 @@ func rebaselineLegacyHashOutcome(stored string) TraceOutcomeCode {
 	return TraceOutcomeRebaselinedUnversioned
 }
 
+// sessionHashRebaselineMetadata builds the four fingerprint metadata fields
+// — started_config_hash, started_live_hash, live_hash, core_hash_breakdown —
+// from a resolved agent config. Callers merge the result into a session
+// bead's metadata batch to move its config-drift baseline to agentCfg.
+func sessionHashRebaselineMetadata(agentCfg runtime.Config) (map[string]string, error) {
+	breakdownJSON, err := json.Marshal(runtime.CoreFingerprintBreakdown(agentCfg))
+	if err != nil {
+		return nil, fmt.Errorf("marshaling core_hash_breakdown: %w", err)
+	}
+	liveHash := runtime.LiveFingerprint(agentCfg)
+	return map[string]string{
+		"started_config_hash": runtime.CoreFingerprint(agentCfg),
+		"started_live_hash":   liveHash,
+		"live_hash":           liveHash,
+		"core_hash_breakdown": string(breakdownJSON),
+	}, nil
+}
+
 // silentRebaselineSessionHashes overwrites the four fingerprint metadata
 // fields (started_config_hash, started_live_hash, live_hash,
 // core_hash_breakdown) with values produced by the current binary. Used
@@ -3264,18 +3282,9 @@ func silentRebaselineSessionHashes(session *beads.Bead, store beads.Store, agent
 	if session == nil || store == nil {
 		return nil
 	}
-	coreHash := runtime.CoreFingerprint(agentCfg)
-	liveHash := runtime.LiveFingerprint(agentCfg)
-	breakdown := runtime.CoreFingerprintBreakdown(agentCfg)
-	breakdownJSON, err := json.Marshal(breakdown)
+	patch, err := sessionHashRebaselineMetadata(agentCfg)
 	if err != nil {
-		return fmt.Errorf("marshaling core_hash_breakdown: %w", err)
-	}
-	patch := map[string]string{
-		"started_config_hash": coreHash,
-		"started_live_hash":   liveHash,
-		"live_hash":           liveHash,
-		"core_hash_breakdown": string(breakdownJSON),
+		return err
 	}
 	if err := store.SetMetadataBatch(session.ID, patch); err != nil {
 		return fmt.Errorf("rebaselining hashes: %w", err)

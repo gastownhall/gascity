@@ -1450,6 +1450,7 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 						for key, value := range session.UpdatedAliasMetadata(b.Metadata, managedAlias) {
 							queueMeta(key, value)
 						}
+						queueAliasChangeDriftRebaseline(b, tp, queueMeta, stderr)
 					}
 					mergeAliasGuardedBatch()
 				}
@@ -1540,6 +1541,26 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 	}
 
 	return openIndex, newSessionBeadSnapshot(openBeads)
+}
+
+// queueAliasChangeDriftRebaseline moves a started pool session's config-drift
+// baseline onto its post-rename config. A pool alias change re-renders the
+// alias-derived pre_start, which would otherwise trip the reconciler's
+// CoreFingerprint drift check and drain the session. Unstarted sessions (no
+// started_config_hash) are skipped — the start path baselines them.
+// See gastownhall/gascity#2234.
+func queueAliasChangeDriftRebaseline(b beads.Bead, tp TemplateParams, queueMeta func(key, value string), stderr io.Writer) {
+	if strings.TrimSpace(b.Metadata["started_config_hash"]) == "" {
+		return
+	}
+	rebaseline, err := sessionHashRebaselineMetadata(sessionCoreConfigForHash(tp, b))
+	if err != nil {
+		fmt.Fprintf(stderr, "session beads: rebaselining drift baseline after alias change for %s: %v\n", b.ID, err) //nolint:errcheck
+		return
+	}
+	for key, value := range rebaseline {
+		queueMeta(key, value)
+	}
 }
 
 func syncDesiredPoolSlots(

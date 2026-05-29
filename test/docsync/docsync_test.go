@@ -25,8 +25,9 @@ func repoRoot() string {
 }
 
 var (
-	markdownLinkRE = regexp.MustCompile(`\[[^][]+\]\(([^)]+)\)`)
-	schemaHrefRE   = regexp.MustCompile(`href="/schema/([^"#?]+)"`)
+	markdownLinkRE    = regexp.MustCompile(`\[[^][]+\]\(([^)]+)\)`)
+	schemaHrefRE      = regexp.MustCompile(`href="[^"]*?/schema/([^"#?]+)"`)
+	schemaGitHubRawRE = regexp.MustCompile(`href="https://raw\.githubusercontent\.com/gastownhall/gascity/main/docs/schema/([^"#?]+)"`)
 )
 
 // docTreeDirs lists the top-level directories that are documentation trees
@@ -49,9 +50,8 @@ var knownBrokenLinks = map[string]bool{
 	"contrib/session-scripts/README.md -> ../../docs/k8s-guide.md": true,
 }
 
-func TestSchemaDownloadLinksUseTxtMirrorsWithHostedRedirects(t *testing.T) {
+func TestSchemaDownloadLinksUseGitHubRaw(t *testing.T) {
 	root := repoRoot()
-	redirects := schemaRedirects(t, root)
 	docs := []string{
 		"docs/reference/api.md",
 		"docs/reference/events.md",
@@ -66,77 +66,21 @@ func TestSchemaDownloadLinksUseTxtMirrorsWithHostedRedirects(t *testing.T) {
 		}
 		for _, match := range schemaHrefRE.FindAllStringSubmatch(string(data), -1) {
 			target := match[1]
-			if filepath.Ext(target) != ".txt" {
-				t.Errorf("%s links /schema/%s; local Mintlify preview serves schema downloads through .txt mirrors", rel, target)
+			if filepath.Ext(target) != ".json" {
+				t.Errorf("%s links /schema/%s; schema downloads must use .json", rel, target)
 				continue
 			}
-			txtArtifact := filepath.Join(root, "docs", "schema", filepath.FromSlash(target))
-			if _, err := os.Stat(txtArtifact); err != nil {
-				t.Errorf("%s links /schema/%s but %s is not committed: %v", rel, target, txtArtifact, err)
+			ghMatch := schemaGitHubRawRE.FindStringSubmatch(match[0])
+			if ghMatch == nil {
+				t.Errorf("%s links /schema/%s via relative path; use GitHub raw URL so downloads work in both local preview and production", rel, target)
+				continue
 			}
-
-			jsonTarget := strings.TrimSuffix(target, ".txt") + ".json"
-			jsonArtifact := filepath.Join(root, "docs", "schema", filepath.FromSlash(jsonTarget))
-			if _, err := os.Stat(jsonArtifact); err != nil {
-				t.Errorf("%s links /schema/%s but hosted redirect target %s is not committed: %v", rel, target, jsonArtifact, err)
-			}
-
-			source := "/schema/" + target
-			destination := "/schema/" + jsonTarget
-			if redirects[source] != destination {
-				t.Errorf("docs.json redirects[%q] = %q, want %q", source, redirects[source], destination)
+			artifact := filepath.Join(root, "docs", "schema", filepath.FromSlash(target))
+			if _, err := os.Stat(artifact); err != nil {
+				t.Errorf("%s links /schema/%s but %s is not committed: %v", rel, target, artifact, err)
 			}
 		}
 	}
-}
-
-func TestSchemaTxtMirrorsRedirectToHostedJSONArtifacts(t *testing.T) {
-	root := repoRoot()
-	redirects := schemaRedirects(t, root)
-	entries, err := os.ReadDir(filepath.Join(root, "docs", "schema"))
-	if err != nil {
-		t.Fatalf("read docs/schema: %v", err)
-	}
-	for _, entry := range entries {
-		name := entry.Name()
-		if entry.IsDir() || filepath.Ext(name) != ".txt" {
-			continue
-		}
-		jsonName := strings.TrimSuffix(name, ".txt") + ".json"
-		jsonPath := filepath.Join(root, "docs", "schema", jsonName)
-		if _, err := os.Stat(jsonPath); err != nil {
-			t.Errorf("docs/schema/%s has no JSON artifact for hosted redirect: %v", name, err)
-			continue
-		}
-
-		source := "/schema/" + name
-		destination := "/schema/" + jsonName
-		if redirects[source] != destination {
-			t.Errorf("docs.json redirects[%q] = %q, want %q", source, redirects[source], destination)
-		}
-	}
-}
-
-func schemaRedirects(t *testing.T, root string) map[string]string {
-	t.Helper()
-	data, err := os.ReadFile(filepath.Join(root, "docs", "docs.json"))
-	if err != nil {
-		t.Fatalf("read docs/docs.json: %v", err)
-	}
-	var docs struct {
-		Redirects []struct {
-			Source      string `json:"source"`
-			Destination string `json:"destination"`
-		} `json:"redirects"`
-	}
-	if err := json.Unmarshal(data, &docs); err != nil {
-		t.Fatalf("parse docs/docs.json: %v", err)
-	}
-	redirects := make(map[string]string, len(docs.Redirects))
-	for _, redirect := range docs.Redirects {
-		redirects[redirect.Source] = redirect.Destination
-	}
-	return redirects
 }
 
 func allDocsMarkdownFiles(root string) ([]string, error) {

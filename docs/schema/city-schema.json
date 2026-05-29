@@ -1395,7 +1395,7 @@
         },
         "model": {
           "type": "string",
-          "description": "Model is the provider-specific model identifier (e.g. \"claude-opus-4-7\")."
+          "description": "Model is the provider-specific model identifier (e.g. \"claude-opus-4-8\")."
         },
         "tier": {
           "$ref": "#/$defs/Tier",
