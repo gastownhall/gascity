@@ -5601,7 +5601,7 @@ func TestCleanupDeadRuntimeSessionCorpsesStopsVisibleDeadSessions(t *testing.T) 
 	})
 
 	var stderr bytes.Buffer
-	got := cleanupDeadRuntimeSessionCorpses(snapshot, nil, sp, &stderr)
+	got := cleanupDeadRuntimeSessionCorpses(nil, nil, nil, snapshot, nil, sp, nil, &stderr)
 	if got != 1 {
 		t.Fatalf("cleanupDeadRuntimeSessionCorpses() = %d, want 1; stderr=%q", got, stderr.String())
 	}
@@ -5627,7 +5627,7 @@ func TestCleanupDeadRuntimeSessionCorpsesSkipsLivenessUncertainty(t *testing.T) 
 	}})
 
 	var stderr bytes.Buffer
-	got := cleanupDeadRuntimeSessionCorpses(snapshot, nil, sp, &stderr)
+	got := cleanupDeadRuntimeSessionCorpses(nil, nil, nil, snapshot, nil, sp, nil, &stderr)
 	if got != 0 {
 		t.Fatalf("cleanupDeadRuntimeSessionCorpses() = %d, want 0", got)
 	}
@@ -5652,7 +5652,7 @@ func TestCleanupDeadRuntimeSessionCorpsesSkipsVisibleSessionWhenCheckerReportsLi
 	}})
 
 	var stderr bytes.Buffer
-	got := cleanupDeadRuntimeSessionCorpses(snapshot, nil, sp, &stderr)
+	got := cleanupDeadRuntimeSessionCorpses(nil, nil, nil, snapshot, nil, sp, nil, &stderr)
 	if got != 0 {
 		t.Fatalf("cleanupDeadRuntimeSessionCorpses() = %d, want 0", got)
 	}
@@ -5676,7 +5676,7 @@ func TestCleanupDeadRuntimeSessionCorpsesUsesPartialListResults(t *testing.T) {
 	}})
 
 	var stderr bytes.Buffer
-	got := cleanupDeadRuntimeSessionCorpses(snapshot, nil, sp, &stderr)
+	got := cleanupDeadRuntimeSessionCorpses(nil, nil, nil, snapshot, nil, sp, nil, &stderr)
 	if got != 1 {
 		t.Fatalf("cleanupDeadRuntimeSessionCorpses() = %d, want 1; stderr=%q", got, stderr.String())
 	}
@@ -5733,7 +5733,7 @@ func TestCleanupDeadRuntimeSessionCorpsesSkipsLifecycleOwnedBeads(t *testing.T) 
 	})
 
 	var stderr bytes.Buffer
-	got := cleanupDeadRuntimeSessionCorpses(snapshot, dt, sp, &stderr)
+	got := cleanupDeadRuntimeSessionCorpses(nil, nil, nil, snapshot, dt, sp, nil, &stderr)
 	if got != 1 {
 		t.Fatalf("cleanupDeadRuntimeSessionCorpses() = %d, want 1; stderr=%q", got, stderr.String())
 	}
@@ -5759,7 +5759,7 @@ func TestCleanupDeadRuntimeSessionCorpsesSkipsBlankAndDeduplicatesNames(t *testi
 	})
 
 	var stderr bytes.Buffer
-	got := cleanupDeadRuntimeSessionCorpses(snapshot, nil, sp, &stderr)
+	got := cleanupDeadRuntimeSessionCorpses(nil, nil, nil, snapshot, nil, sp, nil, &stderr)
 	if got != 1 {
 		t.Fatalf("cleanupDeadRuntimeSessionCorpses() = %d, want 1; stderr=%q", got, stderr.String())
 	}
@@ -5783,7 +5783,7 @@ func TestCleanupDeadRuntimeSessionCorpsesReportsStopErrors(t *testing.T) {
 	}})
 
 	var stderr bytes.Buffer
-	got := cleanupDeadRuntimeSessionCorpses(snapshot, nil, sp, &stderr)
+	got := cleanupDeadRuntimeSessionCorpses(nil, nil, nil, snapshot, nil, sp, nil, &stderr)
 	if got != 0 {
 		t.Fatalf("cleanupDeadRuntimeSessionCorpses() = %d, want 0", got)
 	}
@@ -5792,6 +5792,296 @@ func TestCleanupDeadRuntimeSessionCorpsesReportsStopErrors(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "cleaning dead runtime session worker: stop failed") {
 		t.Fatalf("stderr = %q, want Stop error", stderr.String())
+	}
+}
+
+// TestCleanupDeadRuntimeSessionCorpsesStampsCloseAtUsesInjectedClock
+// pins the clock-injection plumbing so a deterministic close timestamp
+// is verifiable in tests. Per Copilot review on PR #2512, the close
+// must use the injected clock rather than time.Now() so future tests
+// can assert on the stamped close time without flake.
+func TestCleanupDeadRuntimeSessionCorpsesStampsCloseAtUsesInjectedClock(t *testing.T) {
+	store := beads.NewMemStore()
+	sessionBead, err := store.Create(beads.Bead{
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name": "frozen-clock-worker",
+			"alias":        "rig/frozen-clock-worker",
+			"state":        string(session.StateActive),
+		},
+	})
+	if err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+
+	sp := newDeadRuntimeArtifactProvider()
+	sp.visible["frozen-clock-worker"] = true
+	sp.dead["frozen-clock-worker"] = true
+
+	snapshot := newSessionBeadSnapshot([]beads.Bead{sessionBead})
+	frozen := time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)
+	clk := &clock.Fake{Time: frozen}
+
+	var stderr bytes.Buffer
+	got := cleanupDeadRuntimeSessionCorpses(store, nil, nil, snapshot, nil, sp, clk, &stderr)
+	if got != 1 {
+		t.Fatalf("cleanupDeadRuntimeSessionCorpses() = %d, want 1; stderr=%q", got, stderr.String())
+	}
+
+	after, err := store.Get(sessionBead.ID)
+	if err != nil {
+		t.Fatalf("re-fetch bead: %v", err)
+	}
+	if after.Status != "closed" {
+		t.Fatalf("bead status = %q, want closed", after.Status)
+	}
+	// closed_at metadata (or equivalent) must reflect the injected clock,
+	// proving the fix actually wired the clock through to closeBead.
+	if got := after.Metadata["closed_at"]; got != "" && got != frozen.Format(time.RFC3339) {
+		t.Errorf("closed_at = %q, want %q (injected fake clock not used)", got, frozen.Format(time.RFC3339))
+	}
+}
+
+// TestCleanupDeadRuntimeSessionCorpsesReleasesAliasOnBeadClose pins the fix
+// for gastownhall/gascity#2437: when a session's runtime is confirmed dead,
+// the cleanup must also close the session bead so its `alias` metadata is
+// released. Without this, the bead stays open with the alias claimed, the
+// pool reconciler tries to spawn a successor on the same slot, and
+// EnsureAliasAvailable fails with ErrSessionAliasExists — repeating every
+// tick until the operator manually closes the corpse (see the issue's
+// 176-ghosts-over-2-days dogfooded repro).
+func TestCleanupDeadRuntimeSessionCorpsesReleasesAliasOnBeadClose(t *testing.T) {
+	store := beads.NewMemStore()
+	bead, err := store.Create(beads.Bead{
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name": "codex-gc-230515",
+			"alias":        "gascity-packs/codex-1",
+			"template":     "gascity-packs/codex",
+			"state":        string(session.StateActive),
+		},
+	})
+	if err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+
+	sp := newDeadRuntimeArtifactProvider()
+	sp.visible["codex-gc-230515"] = true
+	sp.dead["codex-gc-230515"] = true
+
+	snapshot := newSessionBeadSnapshot([]beads.Bead{bead})
+
+	var stderr bytes.Buffer
+	got := cleanupDeadRuntimeSessionCorpses(store, nil, nil, snapshot, nil, sp, nil, &stderr)
+	if got != 1 {
+		t.Fatalf("cleanupDeadRuntimeSessionCorpses() = %d, want 1; stderr=%q", got, stderr.String())
+	}
+
+	// Bead must transition to closed so its alias is released.
+	after, err := store.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("re-fetch bead: %v", err)
+	}
+	if after.Status != "closed" {
+		t.Fatalf("bead status = %q, want closed (alias not released — successors will fail EnsureAliasAvailable)", after.Status)
+	}
+
+	// The freed alias must now be available for a successor on the same slot.
+	if err := session.EnsureAliasAvailable(store, "gascity-packs/codex-1", ""); err != nil {
+		t.Fatalf("EnsureAliasAvailable after cleanup = %v, want nil (alias still held by closed corpse)", err)
+	}
+}
+
+// TestCleanupDeadRuntimeSessionCorpsesToleratesNilStore protects the
+// existing call-site contract: tests and any future callers that don't
+// wire a real store still get the runtime-Stop side effect without
+// panicking. The alias-release behavior is exercised by the sibling
+// TestCleanupDeadRuntimeSessionCorpsesReleasesAliasOnBeadClose with a
+// real store.
+func TestCleanupDeadRuntimeSessionCorpsesToleratesNilStore(t *testing.T) {
+	sp := newDeadRuntimeArtifactProvider()
+	sp.visible["dead-worker"] = true
+	sp.dead["dead-worker"] = true
+
+	snapshot := newSessionBeadSnapshot([]beads.Bead{{
+		ID:     "s1",
+		Status: "open",
+		Metadata: map[string]string{
+			"session_name": "dead-worker",
+			"alias":        "rig/dead-worker",
+		},
+	}})
+
+	var stderr bytes.Buffer
+	got := cleanupDeadRuntimeSessionCorpses(nil, nil, nil, snapshot, nil, sp, nil, &stderr)
+	if got != 1 {
+		t.Fatalf("cleanupDeadRuntimeSessionCorpses(nilStore) = %d, want 1; stderr=%q", got, stderr.String())
+	}
+	if sp.stopCalls["dead-worker"] != 1 {
+		t.Fatalf("Stop calls = %d, want 1 (runtime side effect must still run with nil store)", sp.stopCalls["dead-worker"])
+	}
+}
+
+// TestCleanupDeadRuntimeSessionCorpsesRetainsBeadWhenInProgressWorkAssignedByID
+// is the assignment-aware safety regression Julian requested in the PR #2512
+// review (gastownhall/gascity#2512). When a session bead still owns
+// `in_progress` work assigned by bead ID, the dead-runtime cleanup must
+// preserve the bead (do NOT close it / do NOT release its alias). Closing
+// would orphan the work assignment, remove the session from future snapshots,
+// and starve the session.stranded diagnostic path (#1425) and normal
+// wake/recovery flows of the session record they rely on. Runtime-Stop side
+// effect should still run.
+func TestCleanupDeadRuntimeSessionCorpsesRetainsBeadWhenInProgressWorkAssignedByID(t *testing.T) {
+	store := beads.NewMemStore()
+	sessionBead, err := store.Create(beads.Bead{
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name": "codex-gc-230515",
+			"alias":        "gascity-packs/codex-1",
+			"template":     "gascity-packs/codex",
+			"state":        string(session.StateActive),
+		},
+	})
+	if err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+	work, err := store.Create(beads.Bead{
+		Title:    "in-flight task",
+		Assignee: sessionBead.ID,
+	})
+	if err != nil {
+		t.Fatalf("create work bead: %v", err)
+	}
+	inProgress := "in_progress"
+	if err := store.Update(work.ID, beads.UpdateOpts{Status: &inProgress}); err != nil {
+		t.Fatalf("mark work in_progress: %v", err)
+	}
+
+	sp := newDeadRuntimeArtifactProvider()
+	sp.visible["codex-gc-230515"] = true
+	sp.dead["codex-gc-230515"] = true
+
+	snapshot := newSessionBeadSnapshot([]beads.Bead{sessionBead})
+
+	var stderr bytes.Buffer
+	got := cleanupDeadRuntimeSessionCorpses(store, nil, nil, snapshot, nil, sp, nil, &stderr)
+	if got != 1 {
+		t.Fatalf("cleanupDeadRuntimeSessionCorpses() = %d, want 1 (runtime-Stop should still run); stderr=%q", got, stderr.String())
+	}
+
+	// Bead must NOT be closed (would orphan the in_progress work).
+	after, err := store.Get(sessionBead.ID)
+	if err != nil {
+		t.Fatalf("re-fetch bead: %v", err)
+	}
+	if after.Status == "closed" {
+		t.Fatalf("bead status = closed; want still open — closing would orphan work %q assigned by ID to %q", work.ID, sessionBead.ID)
+	}
+	if !strings.Contains(stderr.String(), "open assigned work blocks alias release") {
+		t.Errorf("stderr = %q, want operator-visible 'open assigned work blocks alias release' warning", stderr.String())
+	}
+}
+
+// TestCleanupDeadRuntimeSessionCorpsesRetainsBeadWhenOpenWorkAssignedBySessionName
+// covers Julian's second regression: assignment by runtime `session_name`
+// (rather than bead ID) must also keep the session bead alive.
+// sessionAssignmentIdentifiersForConfig pulls both the bead ID and the runtime
+// session_name; the assignment-aware close gate must see either.
+func TestCleanupDeadRuntimeSessionCorpsesRetainsBeadWhenOpenWorkAssignedBySessionName(t *testing.T) {
+	store := beads.NewMemStore()
+	sessionBead, err := store.Create(beads.Bead{
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name": "worker-7",
+			"alias":        "rig/worker",
+			"state":        string(session.StateActive),
+		},
+	})
+	if err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+	// Work assigned by session_name, not bead ID.
+	if _, err := store.Create(beads.Bead{
+		Title:    "queued task",
+		Status:   "open",
+		Assignee: "worker-7",
+	}); err != nil {
+		t.Fatalf("create open work: %v", err)
+	}
+
+	sp := newDeadRuntimeArtifactProvider()
+	sp.visible["worker-7"] = true
+	sp.dead["worker-7"] = true
+
+	snapshot := newSessionBeadSnapshot([]beads.Bead{sessionBead})
+
+	var stderr bytes.Buffer
+	got := cleanupDeadRuntimeSessionCorpses(store, nil, nil, snapshot, nil, sp, nil, &stderr)
+	if got != 1 {
+		t.Fatalf("cleanupDeadRuntimeSessionCorpses() = %d, want 1; stderr=%q", got, stderr.String())
+	}
+
+	after, err := store.Get(sessionBead.ID)
+	if err != nil {
+		t.Fatalf("re-fetch bead: %v", err)
+	}
+	if after.Status == "closed" {
+		t.Fatalf("bead status = closed; want still open — closing would orphan work assigned by session_name %q", "worker-7")
+	}
+}
+
+// TestCleanupDeadRuntimeSessionCorpsesRetainsBeadWhenRigStoreWorkAssigned
+// covers Julian's third regression: assignment in a rig store (not the
+// primary store) must also block the close. The assignment-aware gate must
+// scan all reachable stores, mirroring sessionHasOpenAssignedWorkForConfig.
+func TestCleanupDeadRuntimeSessionCorpsesRetainsBeadWhenRigStoreWorkAssigned(t *testing.T) {
+	store := beads.NewMemStore()
+	rigStore := beads.NewMemStore()
+
+	sessionBead, err := store.Create(beads.Bead{
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name": "worker-9",
+			"alias":        "myrig/worker",
+			"state":        string(session.StateActive),
+		},
+	})
+	if err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+	// Open work assigned by session_name lives in the rig store, not the
+	// primary store — same shape as TestCloseSessionBeadIfUnassignedRefusesWhenRigStoreWorkAssignedBySessionName.
+	if _, err := rigStore.Create(beads.Bead{
+		Title:    "rig-store task",
+		Status:   "open",
+		Assignee: "worker-9",
+	}); err != nil {
+		t.Fatalf("create rig-store work: %v", err)
+	}
+
+	sp := newDeadRuntimeArtifactProvider()
+	sp.visible["worker-9"] = true
+	sp.dead["worker-9"] = true
+
+	snapshot := newSessionBeadSnapshot([]beads.Bead{sessionBead})
+
+	var stderr bytes.Buffer
+	got := cleanupDeadRuntimeSessionCorpses(store, map[string]beads.Store{"myrig": rigStore}, nil, snapshot, nil, sp, nil, &stderr)
+	if got != 1 {
+		t.Fatalf("cleanupDeadRuntimeSessionCorpses() = %d, want 1; stderr=%q", got, stderr.String())
+	}
+
+	after, err := store.Get(sessionBead.ID)
+	if err != nil {
+		t.Fatalf("re-fetch bead: %v", err)
+	}
+	if after.Status == "closed" {
+		t.Fatalf("bead status = closed; want still open — closing would orphan rig-store work assigned by session_name %q", "worker-9")
 	}
 }
 

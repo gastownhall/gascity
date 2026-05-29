@@ -120,10 +120,10 @@ exec gc mail send mayor 'count msg 2'
 exec gc mail count mayor
 stdout '3 total, 2 unread for mayor'
 
-# --- Error: archive nonexistent message ---
+# --- Archive nonexistent message is idempotent ---
 
-! exec gc mail archive gc-999
-stderr 'bead not found'
+exec gc mail archive gc-999
+stdout 'Already archived gc-999'
 
 # --- Error: archive with no args ---
 

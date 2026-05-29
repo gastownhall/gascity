@@ -56,6 +56,14 @@ func ExecCommandRunnerWithEnv(env map[string]string) CommandRunner {
 	return func(dir, name string, args ...string) ([]byte, error) {
 		start := time.Now()
 		trace := func(status string, err error) {
+			// GC_BD_TRACE_JSON wins: when the structured JSONL trace
+			// (via TraceBDCall in bdtrace.go) is enabled, suppress the
+			// legacy line-format trace so the two don't interleave
+			// incompatible records in the same file when an operator
+			// points both env vars at the same path.
+			if strings.TrimSpace(os.Getenv("GC_BD_TRACE_JSON")) != "" {
+				return
+			}
 			path := strings.TrimSpace(os.Getenv("GC_BD_TRACE"))
 			if path == "" {
 				return
@@ -99,6 +107,18 @@ func ExecCommandRunnerWithEnv(env map[string]string) CommandRunner {
 		cmd.Stderr = &stderr
 		out, err := cmd.Output()
 		if name == "bd" {
+			// Structured JSONL trace — independent of the legacy line-format
+			// trace above (gated by GC_BD_TRACE_JSON, not GC_BD_TRACE).
+			traceExit := 0
+			if err != nil {
+				var exitErr *exec.ExitError
+				if errors.As(err, &exitErr) {
+					traceExit = exitErr.ExitCode()
+				} else {
+					traceExit = -1
+				}
+			}
+			TraceBDCall("go:bdstore.runner", dir, args, start, traceExit, err)
 			telemetry.RecordBDCall(context.Background(),
 				args, float64(time.Since(start).Milliseconds()),
 				err, out, stderr.String())
@@ -293,6 +313,7 @@ func (s *BdStore) Purge(beadsDir string, dryRun bool) (PurgeResult, error) {
 
 // execPurge runs bd purge via exec.CommandContext with a 60-second timeout.
 func execPurge(dir string, env, args []string) ([]byte, error) {
+	start := time.Now()
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
@@ -305,6 +326,16 @@ func execPurge(dir string, env, args []string) ([]byte, error) {
 	cmd.Stderr = &stderr
 
 	err := cmd.Run()
+	traceExit := 0
+	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			traceExit = exitErr.ExitCode()
+		} else {
+			traceExit = -1
+		}
+	}
+	TraceBDCall("go:bdstore.execPurge", dir, args, start, traceExit, err)
 	if ctx.Err() == context.DeadlineExceeded {
 		return nil, fmt.Errorf("timed out after 60s")
 	}

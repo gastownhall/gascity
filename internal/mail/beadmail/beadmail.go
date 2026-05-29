@@ -219,13 +219,6 @@ func (p *Provider) MarkUnread(id string) error {
 	})
 }
 
-// MailArchivedCloseReason is the canonical close_reason stamped on
-// message beads when they are archived (or deleted, which has the same
-// storage semantics — see DeleteMany). Without an explicit reason of
-// >=20 chars, bd's validation.on-close=error rejects the close, the
-// message stays open, and the archive operation silently fails.
-const MailArchivedCloseReason = "beadmail: message archived without read"
-
 // ArchiveFilter selects open message beads for bounded archive cleanup.
 type ArchiveFilter struct {
 	Recipients      []string
@@ -237,30 +230,37 @@ type ArchiveFilter struct {
 	Limit           int
 }
 
-// Archive closes a message bead without reading it.
+// Archive deletes a message bead without reading it.
 func (p *Provider) Archive(id string) error {
 	b, err := p.store.Get(id)
 	if err != nil {
+		if errors.Is(err, beads.ErrNotFound) {
+			return mail.ErrAlreadyArchived
+		}
 		return fmt.Errorf("beadmail archive: %w", err)
 	}
 	if b.Type != "message" {
 		return fmt.Errorf("beadmail archive: bead %s is not a message", id)
 	}
 	if b.Status == "closed" {
+		if err := p.store.Delete(id); err != nil {
+			if errors.Is(err, beads.ErrNotFound) {
+				return mail.ErrAlreadyArchived
+			}
+			return fmt.Errorf("beadmail archive: %w", err)
+		}
 		return mail.ErrAlreadyArchived
 	}
-	// Stamp close_reason before Close so validation.on-close=error sees
-	// it on the close that follows. Best-effort: an error here is not
-	// fatal — Close still proceeds and any pre-existing close_reason is
-	// preserved.
-	_ = p.store.SetMetadata(id, "close_reason", MailArchivedCloseReason)
-	if err := p.store.Close(id); err != nil {
+	if err := p.store.Delete(id); err != nil {
+		if errors.Is(err, beads.ErrNotFound) {
+			return mail.ErrAlreadyArchived
+		}
 		return fmt.Errorf("beadmail archive: %w", err)
 	}
 	return nil
 }
 
-// ArchiveCandidates returns open messages that match filter without closing
+// ArchiveCandidates returns open messages that match filter without archiving
 // them.
 func (p *Provider) ArchiveCandidates(filter ArchiveFilter) ([]mail.Message, error) {
 	routes := p.recipientRoutesForAll(filter.Recipients)
@@ -297,7 +297,7 @@ func (p *Provider) ArchiveCandidates(filter ArchiveFilter) ([]mail.Message, erro
 	return matches, nil
 }
 
-// ArchiveMatching closes open messages selected by filter without per-message
+// ArchiveMatching deletes open messages selected by filter without per-message
 // lookups after the candidate list has already verified them.
 func (p *Provider) ArchiveMatching(filter ArchiveFilter) ([]mail.Message, []mail.ArchiveResult, error) {
 	candidates, err := p.ArchiveCandidates(filter)
@@ -313,32 +313,16 @@ func (p *Provider) ArchiveMatching(filter ArchiveFilter) ([]mail.Message, []mail
 	if len(ids) == 0 {
 		return candidates, results, nil
 	}
-	if err := p.closeKnownOpenMessages(ids); err != nil {
-		retryResults, retryErr := p.ArchiveMany(ids)
-		if retryErr != nil {
-			return candidates, retryResults, errors.Join(err, retryErr)
+	for i, id := range ids {
+		if err := p.store.Delete(id); err != nil {
+			if errors.Is(err, beads.ErrNotFound) {
+				results[i].Err = mail.ErrAlreadyArchived
+				continue
+			}
+			results[i].Err = fmt.Errorf("beadmail archive: %w", err)
 		}
-		return candidates, retryResults, nil
 	}
 	return candidates, results, nil
-}
-
-type reasonedBatchCloser interface {
-	CloseAllWithReason([]string, string) (int, error)
-}
-
-func (p *Provider) closeKnownOpenMessages(ids []string) error {
-	if p.store == nil {
-		return fmt.Errorf("beadmail archive matching: nil store")
-	}
-	if closer, ok := p.store.(reasonedBatchCloser); ok {
-		_, err := closer.CloseAllWithReason(ids, MailArchivedCloseReason)
-		return err
-	}
-	_, err := p.store.CloseAll(ids, map[string]string{
-		"close_reason": MailArchivedCloseReason,
-	})
-	return err
 }
 
 func archiveExactMatches(value, exact string, insensitive bool) bool {
@@ -377,64 +361,26 @@ func archiveContainsMatches(value, partial string, insensitive bool) bool {
 	return strings.Contains(value, partial)
 }
 
-// Delete is an alias for Archive (closes the bead).
+// Delete is an alias for Archive.
 func (p *Provider) Delete(id string) error {
 	return p.Archive(id)
 }
 
-// ArchiveMany archives a batch of messages, preserving per-id error
-// reporting that matches [Provider.Archive]: [mail.ErrAlreadyArchived] for
-// beads that were already closed, a wrapped store error for unknown ids,
-// and a non-message error for beads of the wrong type. Ids that need an
-// actual state transition are closed in a single [beads.Store.CloseAll]
-// round-trip; on batch failure the open subset falls back to per-id
-// [beads.Store.Close].
+// ArchiveMany archives a batch of messages by deleting each bead eagerly,
+// preserving per-id error reporting that matches [Provider.Archive].
 func (p *Provider) ArchiveMany(ids []string) ([]mail.ArchiveResult, error) {
 	if len(ids) == 0 {
 		return nil, nil
 	}
 	results := make([]mail.ArchiveResult, len(ids))
-	openIdx := make([]int, 0, len(ids))
-	openIDs := make([]string, 0, len(ids))
 	for i, id := range ids {
-		results[i].ID = id
-		b, err := p.store.Get(id)
-		if err != nil {
-			results[i].Err = fmt.Errorf("beadmail archive: %w", err)
-			continue
-		}
-		if b.Type != "message" {
-			results[i].Err = fmt.Errorf("beadmail archive: bead %s is not a message", id)
-			continue
-		}
-		if b.Status == "closed" {
-			results[i].Err = mail.ErrAlreadyArchived
-			continue
-		}
-		openIdx = append(openIdx, i)
-		openIDs = append(openIDs, id)
-	}
-	if len(openIDs) == 0 {
-		return results, nil
-	}
-	if _, err := p.store.CloseAll(openIDs, map[string]string{
-		"close_reason": MailArchivedCloseReason,
-	}); err != nil {
-		for k, id := range openIDs {
-			// Per-id fallback also stamps the canonical reason so the
-			// retry path is validation-safe under on-close=error.
-			_ = p.store.SetMetadata(id, "close_reason", MailArchivedCloseReason)
-			if closeErr := p.store.Close(id); closeErr != nil {
-				results[openIdx[k]].Err = fmt.Errorf("beadmail archive: %w", closeErr)
-			}
-		}
+		results[i] = mail.ArchiveResult{ID: id, Err: p.Archive(id)}
 	}
 	return results, nil
 }
 
-// DeleteMany deletes a batch of messages by closing message beads. Beadmail
-// delete and archive have the same storage semantics, so this preserves the
-// batched [beads.Store.CloseAll] path from [Provider.ArchiveMany].
+// DeleteMany deletes a batch of messages with the same storage semantics as
+// [Provider.ArchiveMany].
 func (p *Provider) DeleteMany(ids []string) ([]mail.ArchiveResult, error) {
 	return p.ArchiveMany(ids)
 }

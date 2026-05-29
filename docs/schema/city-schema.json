@@ -1218,6 +1218,13 @@
           "type": "boolean",
           "description": "NestedWorktreePrune escalates the nested-worktree-prune check\nfrom warning to error severity when safely-prunable nested\nworktrees are present, so CI / scripted doctor runs fail until\nthe operator runs `gc doctor --fix`. Actual removal still\nrequires --fix; this flag does not auto-prune. Safety is\nenforced by mechanical checks (no uncommitted changes, no\nunpushed commits, no stashes) — never by role identity.",
           "default": false
+        },
+        "check": {
+          "items": {
+            "$ref": "#/$defs/LocalDoctorCheck"
+          },
+          "type": "array",
+          "description": "Checks holds city-local inline doctor checks declared via\n[[doctor.check]] in city.toml."
         }
       },
       "additionalProperties": false,
@@ -1375,6 +1382,33 @@
       "additionalProperties": false,
       "type": "object",
       "description": "K8sConfig holds native K8s session provider settings."
+    },
+    "LocalDoctorCheck": {
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Name is the bare check name. The SDK injects the \"local:\" prefix;\ndo not include it here."
+        },
+        "script": {
+          "type": "string",
+          "description": "Script is the path to the check script, relative to the city root.\nExecution registration enforces containment within the city directory."
+        },
+        "description": {
+          "type": "string",
+          "description": "Description is optional human-readable text shown in verbose output."
+        },
+        "fix": {
+          "type": "string",
+          "description": "Fix is the optional path to a remediation script, relative to the\ncity root."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "name",
+        "script"
+      ],
+      "description": "LocalDoctorCheck is a city-local doctor check declared inline in city.toml via [[doctor.check]]."
     },
     "MailConfig": {
       "properties": {

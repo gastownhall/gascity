@@ -2101,12 +2101,8 @@ func TestMailDeleteMultiSuccess(t *testing.T) {
 		t.Errorf("recorded events = %d, want 3", n)
 	}
 	for _, id := range []string{"gc-1", "gc-2", "gc-3"} {
-		b, err := store.Get(id)
-		if err != nil {
-			t.Fatalf("Get(%s): %v", id, err)
-		}
-		if b.Status != "closed" {
-			t.Errorf("bead %s Status = %q, want closed", id, b.Status)
+		if _, err := store.Get(id); !errors.Is(err, beads.ErrNotFound) {
+			t.Fatalf("Get(%s) err = %v, want ErrNotFound", id, err)
 		}
 	}
 }
@@ -2426,13 +2422,9 @@ func TestMailArchiveSuccess(t *testing.T) {
 		t.Errorf("stdout = %q, want archived confirmation", stdout.String())
 	}
 
-	// Verify bead is now closed.
-	b, err := store.Get("gc-1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if b.Status != "closed" {
-		t.Errorf("bead Status = %q, want %q", b.Status, "closed")
+	// Verify bead is now gone.
+	if _, err := store.Get("gc-1"); !errors.Is(err, beads.ErrNotFound) {
+		t.Fatalf("store.Get(gc-1) err = %v, want ErrNotFound", err)
 	}
 }
 
@@ -2450,17 +2442,20 @@ func TestMailArchiveMissingID(t *testing.T) {
 	}
 }
 
-func TestMailArchiveNotFound(t *testing.T) {
+func TestMailArchiveMissingBeadAlreadyArchived(t *testing.T) {
 	store := beads.NewMemStore()
 	mp := beadmail.New(store)
 
-	var stderr bytes.Buffer
-	code := doMailArchive(mp, events.Discard, []string{"gc-999"}, &bytes.Buffer{}, &stderr)
-	if code != 1 {
-		t.Errorf("doMailArchive = %d, want 1", code)
+	var stdout, stderr bytes.Buffer
+	code := doMailArchive(mp, events.Discard, []string{"gc-999"}, &stdout, &stderr)
+	if code != 0 {
+		t.Errorf("doMailArchive = %d, want 0; stderr: %s", code, stderr.String())
 	}
-	if !strings.Contains(stderr.String(), "bead not found") {
-		t.Errorf("stderr = %q, want 'bead not found'", stderr.String())
+	if stderr.Len() > 0 {
+		t.Errorf("unexpected stderr: %q", stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Already archived gc-999") {
+		t.Errorf("stdout = %q, want already archived confirmation", stdout.String())
 	}
 }
 
@@ -2490,7 +2485,7 @@ func TestMailArchiveAlreadyClosed(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("doMailArchive = %d, want 0; stderr: %s", code, stderr.String())
 	}
-	// Already-closed messages report as already archived.
+	// Already-deleted messages report as already archived.
 	if !strings.Contains(stdout.String(), "Already archived gc-1") {
 		t.Errorf("stdout = %q, want 'Already archived'", stdout.String())
 	}
@@ -2591,6 +2586,9 @@ func TestMailArchiveSelectedIsFilteredAndBounded(t *testing.T) {
 		t.Fatalf("stdout = %q, did not expect second match past limit", stdout.String())
 	}
 
+	if _, err := store.Get(first.ID); !errors.Is(err, beads.ErrNotFound) {
+		t.Fatalf("Get(%s) err = %v, want ErrNotFound", first.ID, err)
+	}
 	status := func(id string) string {
 		t.Helper()
 		b, err := store.Get(id)
@@ -2598,9 +2596,6 @@ func TestMailArchiveSelectedIsFilteredAndBounded(t *testing.T) {
 			t.Fatalf("Get(%s): %v", id, err)
 		}
 		return b.Status
-	}
-	if got := status(first.ID); got != "closed" {
-		t.Fatalf("first status = %q, want closed", got)
 	}
 	for _, id := range []string{second.ID, readMatch.ID, nonMatch.ID, otherRecipient.ID} {
 		if got := status(id); got != "open" {

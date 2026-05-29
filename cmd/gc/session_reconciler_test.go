@@ -1570,6 +1570,127 @@ func (c *capturingRecorder) strandedEvents() []events.Event {
 	return out
 }
 
+func TestEmitSessionStrandedDiagnostic_DetachedProbeAliveSuppressesEvent(t *testing.T) {
+	store := beads.NewMemStore()
+	session, work := createDetachedStrandedWork(t, store, "tmux:gctest-stranded:soak-loop")
+	installFakeTmux(t, "exit 0")
+	rec := emitStrandedDiagnosticForTest(t, store, &session)
+
+	if stranded := rec.strandedEvents(); len(stranded) != 0 {
+		t.Fatalf("session.stranded events = %d, want 0 while detached probe is alive; events: %+v", len(stranded), rec.events)
+	}
+	got, err := store.Get(work.ID)
+	if err != nil {
+		t.Fatalf("Get work bead: %v", err)
+	}
+	if got.Metadata[detachedProbeMetadataKey] != "tmux:gctest-stranded:soak-loop" {
+		t.Fatalf("gc.detached = %q, want preserved", got.Metadata[detachedProbeMetadataKey])
+	}
+	if session.Metadata[strandedEventEmittedKey] != "" {
+		t.Fatalf("session in-memory throttle marker = %q, want unset when event suppressed", session.Metadata[strandedEventEmittedKey])
+	}
+}
+
+func TestEmitSessionStrandedDiagnostic_DetachedProbeDeadClearsAndEmits(t *testing.T) {
+	store := beads.NewMemStore()
+	session, work := createDetachedStrandedWork(t, store, "tmux:gctest-stranded:soak-loop")
+	installFakeTmux(t, "exit 1")
+	rec := emitStrandedDiagnosticForTest(t, store, &session)
+
+	stranded := rec.strandedEvents()
+	if len(stranded) != 1 {
+		t.Fatalf("session.stranded events = %d, want 1 for dead detached probe; events: %+v", len(stranded), rec.events)
+	}
+	if !strings.Contains(stranded[0].Message, work.ID) {
+		t.Fatalf("session.stranded message = %q, want work bead %q", stranded[0].Message, work.ID)
+	}
+	got, err := store.Get(work.ID)
+	if err != nil {
+		t.Fatalf("Get work bead: %v", err)
+	}
+	if got.Metadata[detachedProbeMetadataKey] != "" {
+		t.Fatalf("gc.detached = %q, want cleared before diagnostic emit", got.Metadata[detachedProbeMetadataKey])
+	}
+}
+
+func TestEmitSessionStrandedDiagnostic_DetachedProbeErrorEmitsNormally(t *testing.T) {
+	store := beads.NewMemStore()
+	session, work := createDetachedStrandedWork(t, store, "tmux:gctest-stranded:soak-loop")
+	installFakeTmux(t, "exit 2")
+	rec := emitStrandedDiagnosticForTest(t, store, &session)
+
+	stranded := rec.strandedEvents()
+	if len(stranded) != 1 {
+		t.Fatalf("session.stranded events = %d, want 1 when detached probe errors; events: %+v", len(stranded), rec.events)
+	}
+	if !strings.Contains(stranded[0].Message, work.ID) {
+		t.Fatalf("session.stranded message = %q, want work bead %q", stranded[0].Message, work.ID)
+	}
+	got, err := store.Get(work.ID)
+	if err != nil {
+		t.Fatalf("Get work bead: %v", err)
+	}
+	if got.Metadata[detachedProbeMetadataKey] != "tmux:gctest-stranded:soak-loop" {
+		t.Fatalf("gc.detached = %q, want preserved after probe error", got.Metadata[detachedProbeMetadataKey])
+	}
+}
+
+func createDetachedStrandedWork(t *testing.T, store beads.Store, detachedSpec string) (beads.Bead, beads.Bead) {
+	t.Helper()
+	session, err := store.Create(beads.Bead{
+		Title:  "worker session",
+		Type:   sessionBeadType,
+		Status: "open",
+		Metadata: map[string]string{
+			"session_name": "worker-mc-dead",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create session bead: %v", err)
+	}
+	work, err := store.Create(beads.Bead{
+		Title:    "stranded work",
+		Type:     "task",
+		Assignee: session.ID,
+		Metadata: map[string]string{
+			detachedProbeMetadataKey: detachedSpec,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create work bead: %v", err)
+	}
+	status := "in_progress"
+	if err := store.Update(work.ID, beads.UpdateOpts{Status: &status}); err != nil {
+		t.Fatalf("Update work bead status: %v", err)
+	}
+	work, err = store.Get(work.ID)
+	if err != nil {
+		t.Fatalf("Reload work bead: %v", err)
+	}
+	return session, work
+}
+
+func emitStrandedDiagnosticForTest(t *testing.T, store beads.Store, session *beads.Bead) *capturingRecorder {
+	t.Helper()
+	rec := &capturingRecorder{}
+	var stderr bytes.Buffer
+	emitSessionStrandedDiagnostic(
+		"",
+		nil,
+		store,
+		nil,
+		session,
+		"worker",
+		rec,
+		&clock.Fake{Time: time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)},
+		&stderr,
+	)
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want empty", stderr.String())
+	}
+	return rec
+}
+
 // TestReconcileSessionBeads_PoolSlotWithStrandedWorkEmitsDiagnostic
 // covers issue #1424: when a pool-managed session is observed
 // asleep + not-alive AND still has open in-progress work assigned, the

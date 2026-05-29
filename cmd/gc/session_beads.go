@@ -1838,13 +1838,20 @@ func reapStaleSessionBeads(
 }
 
 func cleanupDeadRuntimeSessionCorpses(
+	store beads.Store,
+	rigStores map[string]beads.Store,
+	cfg *config.City,
 	sessionBeads *sessionBeadSnapshot,
 	dt *drainTracker,
 	sp runtime.Provider,
+	clk clock.Clock,
 	stderr io.Writer,
 ) int {
 	if sessionBeads == nil || sp == nil {
 		return 0
+	}
+	if clk == nil {
+		clk = clock.Real{}
 	}
 	deadChecker, ok := sp.(runtime.DeadRuntimeSessionChecker)
 	if !ok {
@@ -1901,6 +1908,37 @@ func cleanupDeadRuntimeSessionCorpses(
 			continue
 		}
 		fmt.Fprintf(stderr, "session reconciler: cleaned dead runtime session %s\n", name) //nolint:errcheck
+		// Close the bead so its `alias` metadata (and session_name) is
+		// released. Otherwise the slot stays claimed by a dead session
+		// and the next reconciler tick spawns a successor that fails
+		// EnsureAliasAvailable with ErrSessionAliasExists, accumulating
+		// asleep/runtime-missing ghosts on the same slot indefinitely
+		// (gastownhall/gascity#2437).
+		//
+		// Gate the close on a live assigned-work check using the same
+		// predicate as closeSessionBeadIfRuntimeStoppedAndUnassigned —
+		// snapshots can be stale and work can be assigned by bead ID,
+		// runtime session_name, or configured named-session identity
+		// across the primary store and any rig stores. Closing while a
+		// session bead still owns open or in-progress work would
+		// orphan the assignment, remove the session from future
+		// snapshots, and starve the session.stranded diagnostic path
+		// (#1425) and normal wake/recovery flows of the session record
+		// they rely on. The outer `if store != nil` guard tolerates a
+		// nil store so the runtime-Stop side effect still runs in
+		// test contexts that don't wire a real store; closeBead is
+		// idempotent against repeated calls on the same bead.
+		if store != nil {
+			hasAssignedWork, err := sessionHasOpenAssignedWorkForConfig(store, rigStores, b, cfg)
+			switch {
+			case err != nil:
+				fmt.Fprintf(stderr, "session reconciler: dead-runtime close guard for %s: %v\n", b.ID, err) //nolint:errcheck
+			case !hasAssignedWork:
+				closeBead(store, b.ID, "dead-runtime", clk.Now().UTC(), stderr)
+			default:
+				fmt.Fprintf(stderr, "session reconciler: dead runtime session %s retained — open assigned work blocks alias release\n", name) //nolint:errcheck
+			}
+		}
 		cleaned++
 	}
 	return cleaned
