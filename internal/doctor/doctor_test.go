@@ -9,12 +9,13 @@ import (
 
 // mockCheck is a configurable Check for testing the runner.
 type mockCheck struct {
-	name   string
-	status CheckStatus
-	msg    string
-	canFix bool
-	fixErr error
-	fixed  bool // set by Fix
+	name     string
+	status   CheckStatus
+	severity CheckSeverity
+	msg      string
+	canFix   bool
+	fixErr   error
+	fixed    bool // set by Fix
 }
 
 func (m *mockCheck) Name() string { return m.name }
@@ -24,9 +25,10 @@ func (m *mockCheck) Run(_ *CheckContext) *CheckResult {
 		st = StatusOK
 	}
 	return &CheckResult{
-		Name:    m.name,
-		Status:  st,
-		Message: m.msg,
+		Name:     m.name,
+		Status:   st,
+		Severity: m.severity,
+		Message:  m.msg,
 	}
 }
 func (m *mockCheck) CanFix() bool { return m.canFix }
@@ -390,3 +392,101 @@ func (c *unchangedFixCheck) Fix(_ *CheckContext) error { return nil }
 // WarmupEligible returns false; this check is not part of the
 // `gc start` warm-up scan.
 func (c *unchangedFixCheck) WarmupEligible() bool { return false }
+
+// TestDoctor_BlockingFailedSeverityAccounting exercises the per-severity
+// counters added so dispatch gates can ignore advisory failures.
+func TestDoctor_BlockingFailedSeverityAccounting(t *testing.T) {
+	tests := []struct {
+		name              string
+		checks            []Check
+		wantPassed        int
+		wantFailed        int
+		wantBlockingFails int
+	}{
+		{
+			name:              "pure-ok",
+			checks:            []Check{&mockCheck{name: "a", status: StatusOK, msg: "ok"}},
+			wantPassed:        1,
+			wantFailed:        0,
+			wantBlockingFails: 0,
+		},
+		{
+			name:              "blocking-error",
+			checks:            []Check{&mockCheck{name: "blocker", status: StatusError, severity: SeverityBlocking, msg: "blocked"}},
+			wantPassed:        0,
+			wantFailed:        1,
+			wantBlockingFails: 1,
+		},
+		{
+			name:              "advisory-error",
+			checks:            []Check{&mockCheck{name: "advisor", status: StatusError, severity: SeverityAdvisory, msg: "info"}},
+			wantPassed:        0,
+			wantFailed:        1,
+			wantBlockingFails: 0,
+		},
+		{
+			name: "mixed-blocking-advisory",
+			checks: []Check{
+				&mockCheck{name: "ok", status: StatusOK, msg: "fine"},
+				&mockCheck{name: "blocker", status: StatusError, severity: SeverityBlocking, msg: "blocked"},
+				&mockCheck{name: "advisor", status: StatusError, severity: SeverityAdvisory, msg: "info"},
+			},
+			wantPassed:        1,
+			wantFailed:        2,
+			wantBlockingFails: 1,
+		},
+		{
+			name: "default-severity-is-blocking",
+			checks: []Check{
+				// Severity field omitted; zero value must count as Blocking
+				// so existing checks remain gate-relevant.
+				&mockCheck{name: "legacy", status: StatusError, msg: "bad"},
+			},
+			wantPassed:        0,
+			wantFailed:        1,
+			wantBlockingFails: 1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			d := &Doctor{}
+			for _, c := range tt.checks {
+				d.Register(c)
+			}
+			var buf bytes.Buffer
+			r := d.Run(&CheckContext{CityPath: "/tmp"}, &buf, false)
+
+			if r.Passed != tt.wantPassed {
+				t.Errorf("Passed = %d, want %d", r.Passed, tt.wantPassed)
+			}
+			if r.Failed != tt.wantFailed {
+				t.Errorf("Failed = %d, want %d", r.Failed, tt.wantFailed)
+			}
+			if r.BlockingFailed != tt.wantBlockingFails {
+				t.Errorf("BlockingFailed = %d, want %d", r.BlockingFailed, tt.wantBlockingFails)
+			}
+		})
+	}
+}
+
+// TestPrintSummary_AdvisoryRenderedSeparately confirms advisory failures get
+// their own component in the summary line so operators can tell at a glance
+// that a doctor pass had non-blocking findings.
+func TestPrintSummary_AdvisoryRenderedSeparately(t *testing.T) {
+	var buf bytes.Buffer
+	PrintSummary(&buf, &Report{Passed: 1, Failed: 2, BlockingFailed: 1})
+	out := buf.String()
+	if !strings.Contains(out, "2 failed") {
+		t.Errorf("summary = %q, want '2 failed'", out)
+	}
+	if !strings.Contains(out, "1 advisory") {
+		t.Errorf("summary = %q, want '1 advisory'", out)
+	}
+
+	buf.Reset()
+	PrintSummary(&buf, &Report{Passed: 3, Failed: 1, BlockingFailed: 1})
+	if got := buf.String(); strings.Contains(got, "advisory") {
+		t.Errorf("summary = %q, must not include 'advisory' when all failures are blocking", got)
+	}
+}

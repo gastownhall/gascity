@@ -111,7 +111,7 @@ func (m *Manager) submit(ctx context.Context, id, message, resumeCommand string,
 			return m.interruptAndSubmitLocked(ctx, id, b, sessName, message, resumeCommand, hints)
 		default:
 			running := m.sp.IsRunning(sessName)
-			if State(b.Metadata["state"]) == StateCreating && !running {
+			if (State(b.Metadata["state"]) == StateStartPending || State(b.Metadata["state"]) == StateCreating) && !running {
 				if err := m.enqueueDeferredSubmitLocked(b, sessName, message); err != nil {
 					return err
 				}

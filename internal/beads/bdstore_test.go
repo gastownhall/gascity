@@ -106,6 +106,27 @@ func TestBdStoreCreatePreservesExplicitType(t *testing.T) {
 	}
 }
 
+func TestBdStoreCreatePassesExplicitID(t *testing.T) {
+	var gotArgs []string
+	runner := func(_, _ string, args ...string) ([]byte, error) {
+		gotArgs = args
+		return []byte(`{"id":"mc-session-abc123","title":"test","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z"}`), nil
+	}
+	s := beads.NewBdStore("/city", runner)
+
+	created, err := s.Create(beads.Bead{ID: "mc-session-abc123", Title: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	args := strings.Join(gotArgs, " ")
+	if !strings.Contains(args, "--id mc-session-abc123") {
+		t.Fatalf("args = %q, want explicit --id", args)
+	}
+	if created.ID != "mc-session-abc123" {
+		t.Fatalf("created.ID = %q, want mc-session-abc123", created.ID)
+	}
+}
+
 func TestBdStoreCreatePassesDeps(t *testing.T) {
 	var gotArgs []string
 	runner := func(_, _ string, args ...string) ([]byte, error) {
@@ -343,15 +364,21 @@ func TestBdStoreClose(t *testing.T) {
 func TestBdStoreCloseForwardsStampedCloseReason(t *testing.T) {
 	const reason = "nudge failed: queue terminalization rejected delivery"
 	var closeArgs []string
+	var closed bool
 	runner := func(_, name string, args ...string) ([]byte, error) {
 		if name != "bd" {
 			return nil, fmt.Errorf("unexpected command name: %s", name)
 		}
 		switch strings.Join(args, " ") {
 		case "show --json bd-abc-123":
-			return []byte(`[{"id":"bd-abc-123","title":"test","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z","metadata":{"close_reason":"` + reason + `"}}]`), nil
+			status := "open"
+			if closed {
+				status = "closed"
+			}
+			return []byte(`[{"id":"bd-abc-123","title":"test","status":"` + status + `","issue_type":"task","created_at":"2025-01-15T10:30:00Z","metadata":{"close_reason":"` + reason + `"}}]`), nil
 		case "close --force --json --reason " + reason + " bd-abc-123":
 			closeArgs = append([]string(nil), args...)
+			closed = true
 			return []byte(`[{"id":"bd-abc-123","title":"test","status":"closed","issue_type":"task","created_at":"2025-01-15T10:30:00Z"}]`), nil
 		default:
 			return nil, fmt.Errorf("unexpected command: bd %s", strings.Join(args, " "))
@@ -455,12 +482,18 @@ func TestBdStoreCloseCLINotFound(t *testing.T) {
 func TestBdStoreCloseForwardsMetadataReason(t *testing.T) {
 	const reason = "convoy autoclose: all children closed"
 	var closeArgs []string
+	var closed bool
 	runner := func(_, _ string, args ...string) ([]byte, error) {
 		switch args[0] {
 		case "show":
-			return []byte(`[{"id":"bd-x","title":"t","status":"open","issue_type":"convoy","created_at":"2025-01-15T10:30:00Z","metadata":{"close_reason":"convoy autoclose: all children closed"}}]`), nil
+			status := "open"
+			if closed {
+				status = "closed"
+			}
+			return []byte(`[{"id":"bd-x","title":"t","status":"` + status + `","issue_type":"convoy","created_at":"2025-01-15T10:30:00Z","metadata":{"close_reason":"convoy autoclose: all children closed"}}]`), nil
 		case "close":
 			closeArgs = append([]string{}, args...)
+			closed = true
 			return []byte(`[{"id":"bd-x","title":"t","status":"closed","issue_type":"convoy","created_at":"2025-01-15T10:30:00Z"}]`), nil
 		}
 		return nil, fmt.Errorf("unexpected command: %v", args)
@@ -482,12 +515,18 @@ func TestBdStoreCloseForwardsMetadataReason(t *testing.T) {
 // compatibility for callers that don't pre-stamp a reason.
 func TestBdStoreCloseOmitsReasonWhenMetadataAbsent(t *testing.T) {
 	var closeArgs []string
+	var closed bool
 	runner := func(_, _ string, args ...string) ([]byte, error) {
 		switch args[0] {
 		case "show":
-			return []byte(`[{"id":"bd-x","title":"t","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z"}]`), nil
+			status := "open"
+			if closed {
+				status = "closed"
+			}
+			return []byte(`[{"id":"bd-x","title":"t","status":"` + status + `","issue_type":"task","created_at":"2025-01-15T10:30:00Z"}]`), nil
 		case "close":
 			closeArgs = append([]string{}, args...)
+			closed = true
 			return []byte(`[{"id":"bd-x","title":"t","status":"closed","issue_type":"task","created_at":"2025-01-15T10:30:00Z"}]`), nil
 		}
 		return nil, fmt.Errorf("unexpected command: %v", args)
@@ -509,12 +548,18 @@ func TestBdStoreCloseOmitsReasonWhenMetadataAbsent(t *testing.T) {
 // pass through to bd's validator.
 func TestBdStoreCloseTrimsMetadataReason(t *testing.T) {
 	var closeArgs []string
+	var closed bool
 	runner := func(_, _ string, args ...string) ([]byte, error) {
 		switch args[0] {
 		case "show":
-			return []byte(`[{"id":"bd-x","title":"t","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z","metadata":{"close_reason":"  convoy autoclose: all children closed  \n"}}]`), nil
+			status := "open"
+			if closed {
+				status = "closed"
+			}
+			return []byte(`[{"id":"bd-x","title":"t","status":"` + status + `","issue_type":"task","created_at":"2025-01-15T10:30:00Z","metadata":{"close_reason":"  convoy autoclose: all children closed  \n"}}]`), nil
 		case "close":
 			closeArgs = append([]string{}, args...)
+			closed = true
 			return []byte(`[{"id":"bd-x","title":"t","status":"closed","issue_type":"task","created_at":"2025-01-15T10:30:00Z"}]`), nil
 		}
 		return nil, fmt.Errorf("unexpected command: %v", args)
@@ -541,12 +586,18 @@ func TestBdStoreCloseTrimsMetadataReason(t *testing.T) {
 // --reason is forwarded. Mirrors the trim-then-empty-check pattern.
 func TestBdStoreCloseWhitespaceMetadataReason(t *testing.T) {
 	var closeArgs []string
+	var closed bool
 	runner := func(_, _ string, args ...string) ([]byte, error) {
 		switch args[0] {
 		case "show":
-			return []byte(`[{"id":"bd-x","title":"t","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z","metadata":{"close_reason":"   "}}]`), nil
+			status := "open"
+			if closed {
+				status = "closed"
+			}
+			return []byte(`[{"id":"bd-x","title":"t","status":"` + status + `","issue_type":"task","created_at":"2025-01-15T10:30:00Z","metadata":{"close_reason":"   "}}]`), nil
 		case "close":
 			closeArgs = append([]string{}, args...)
+			closed = true
 			return []byte(`[{"id":"bd-x","title":"t","status":"closed","issue_type":"task","created_at":"2025-01-15T10:30:00Z"}]`), nil
 		}
 		return nil, fmt.Errorf("unexpected command: %v", args)
@@ -561,6 +612,69 @@ func TestBdStoreCloseWhitespaceMetadataReason(t *testing.T) {
 			t.Errorf("close args contain --reason for whitespace-only metadata: %v", closeArgs)
 			return
 		}
+	}
+}
+
+// TestBdStoreCloseHonestyGuardRejectsUnclosedAfterSuccess pins the honesty
+// guard: when bd close exits 0 but a re-read shows the bead is still open,
+// close must NOT report success. bd's import-revert race
+// (gastownhall/beads#3948) can roll a committed close back to open after the
+// CLI has already returned 0, so the exit code alone is not trustworthy.
+func TestBdStoreCloseHonestyGuardRejectsUnclosedAfterSuccess(t *testing.T) {
+	runner := func(_, _ string, args ...string) ([]byte, error) {
+		switch args[0] {
+		case "close":
+			// bd reports success...
+			return []byte(`[{"id":"bd-x","title":"t","status":"closed","issue_type":"task","created_at":"2025-01-15T10:30:00Z"}]`), nil
+		case "show":
+			// ...but the bead is actually still open (race reverted it).
+			return []byte(`[{"id":"bd-x","title":"t","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z"}]`), nil
+		}
+		return nil, fmt.Errorf("unexpected command: %v", args)
+	}
+	s := beads.NewBdStore("/city", runner)
+	err := s.CloseWithReason("bd-x", "deterministic test reason value")
+	if err == nil {
+		t.Fatal("expected error when bd close exits 0 but status stays open")
+	}
+	if !strings.Contains(err.Error(), "gastownhall/beads#3948") {
+		t.Errorf("error %q must name gastownhall/beads#3948", err)
+	}
+}
+
+// TestBdStoreCloseHonestyGuardAcceptsConfirmedClose verifies the guard does
+// not reject a close that genuinely landed: bd exits 0 and the re-read
+// confirms status closed.
+func TestBdStoreCloseHonestyGuardAcceptsConfirmedClose(t *testing.T) {
+	runner := func(_, _ string, args ...string) ([]byte, error) {
+		switch args[0] {
+		case "close", "show":
+			return []byte(`[{"id":"bd-x","title":"t","status":"closed","issue_type":"task","created_at":"2025-01-15T10:30:00Z"}]`), nil
+		}
+		return nil, fmt.Errorf("unexpected command: %v", args)
+	}
+	s := beads.NewBdStore("/city", runner)
+	if err := s.CloseWithReason("bd-x", "deterministic test reason value"); err != nil {
+		t.Fatalf("confirmed close should succeed, got %v", err)
+	}
+}
+
+// TestBdStoreCloseHonestyGuardToleratesReadFailure verifies the guard does not
+// convert a transient post-close read failure into a close failure: bd
+// reported success, so absent positive evidence of a revert we trust it.
+func TestBdStoreCloseHonestyGuardToleratesReadFailure(t *testing.T) {
+	runner := func(_, _ string, args ...string) ([]byte, error) {
+		switch args[0] {
+		case "close":
+			return []byte(`[{"id":"bd-x","title":"t","status":"closed","issue_type":"task","created_at":"2025-01-15T10:30:00Z"}]`), nil
+		case "show":
+			return nil, fmt.Errorf("exit status 1: transient backend error")
+		}
+		return nil, fmt.Errorf("unexpected command: %v", args)
+	}
+	s := beads.NewBdStore("/city", runner)
+	if err := s.CloseWithReason("bd-x", "deterministic test reason value"); err != nil {
+		t.Fatalf("close should succeed when post-close read fails, got %v", err)
 	}
 }
 
@@ -691,6 +805,7 @@ func TestBdStoreTxCombinesWritesForSameBead(t *testing.T) {
 		"bd update --json bd-42 --title before --type task --priority 2 --description after --set-metadata close_reason=completed during transaction --set-metadata existing=kept --set-metadata tx=applied",
 		"bd show --json bd-42",
 		"bd close --force --json --reason completed during transaction bd-42",
+		"bd show --json bd-42",
 		"bd update --json bd-42 --title before --status closed --type task --priority 2 --description after --set-metadata close_reason=completed during transaction --set-metadata existing=kept --set-metadata tx=applied",
 		"bd show --json bd-42",
 		"bd show --json bd-42",
@@ -702,12 +817,18 @@ func TestBdStoreTxCombinesWritesForSameBead(t *testing.T) {
 
 func TestBdStoreTxCloseOnlyUsesCloseCommand(t *testing.T) {
 	var commands []string
+	var closed bool
 	runner := func(_, name string, args ...string) ([]byte, error) {
 		commands = append(commands, name+" "+strings.Join(args, " "))
 		switch strings.Join(args, " ") {
 		case "show --json bd-42":
-			return []byte(`[{"id":"bd-42","title":"before","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z","metadata":{"close_reason":"completed during transaction"}}]`), nil
+			status := "open"
+			if closed {
+				status = "closed"
+			}
+			return []byte(`[{"id":"bd-42","title":"before","status":"` + status + `","issue_type":"task","created_at":"2025-01-15T10:30:00Z","metadata":{"close_reason":"completed during transaction"}}]`), nil
 		case "close --force --json --reason completed during transaction bd-42":
+			closed = true
 			return []byte(`[{"id":"bd-42","title":"before","status":"closed","issue_type":"task","created_at":"2025-01-15T10:30:00Z"}]`), nil
 		default:
 			return nil, fmt.Errorf("unexpected command: bd %s", strings.Join(args, " "))
@@ -724,6 +845,7 @@ func TestBdStoreTxCloseOnlyUsesCloseCommand(t *testing.T) {
 	want := []string{
 		"bd show --json bd-42",
 		"bd close --force --json --reason completed during transaction bd-42",
+		"bd show --json bd-42",
 	}
 	if !reflect.DeepEqual(commands, want) {
 		t.Fatalf("commands = %#v, want %#v", commands, want)
@@ -1051,6 +1173,7 @@ func TestBdStoreCloseAllFallbackForwardsCloseReason(t *testing.T) {
 	const reason = "order-tracking sweep: stale beyond watchdog window"
 	batchErr := errors.New("batch close failed")
 	var closeCalls [][]string
+	closedIDs := map[string]bool{}
 	runner := func(_, _ string, args ...string) ([]byte, error) {
 		switch args[0] {
 		case "update":
@@ -1063,14 +1186,21 @@ func TestBdStoreCloseAllFallbackForwardsCloseReason(t *testing.T) {
 			case "close --force --json --reason " + reason + " bd-1 bd-2":
 				return nil, batchErr
 			case "close --force --json --reason " + reason + " bd-1":
+				closedIDs["bd-1"] = true
 				return []byte(`[{"id":"bd-1","title":"one","status":"closed","issue_type":"task","created_at":"2025-01-15T10:30:00Z"}]`), nil
 			case "close --force --json --reason " + reason + " bd-2":
+				closedIDs["bd-2"] = true
 				return []byte(`[{"id":"bd-2","title":"two","status":"closed","issue_type":"task","created_at":"2025-01-15T10:30:00Z"}]`), nil
 			default:
 				return nil, fmt.Errorf("unexpected close args: %v", args)
 			}
 		case "show":
-			return []byte(`[{"id":"` + args[len(args)-1] + `","title":"open","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z"}]`), nil
+			id := args[len(args)-1]
+			status := "open"
+			if closedIDs[id] {
+				status = "closed"
+			}
+			return []byte(`[{"id":"` + id + `","title":"open","status":"` + status + `","issue_type":"task","created_at":"2025-01-15T10:30:00Z"}]`), nil
 		default:
 			return nil, fmt.Errorf("unexpected command: %v", args)
 		}
@@ -1160,6 +1290,37 @@ func TestBdStoreCloseAllForwardsCloseReason(t *testing.T) {
 		if closeArgs[i] != want[i] {
 			t.Errorf("close args[%d] = %q, want %q\nfull args: %v", i, closeArgs[i], want[i], closeArgs)
 		}
+	}
+}
+
+func TestBdStoreCloseAllWithReasonSkipsMetadataWrites(t *testing.T) {
+	const reason = "mail archive: bounded advisory cleanup"
+	commands := make([]string, 0, 1)
+	runner := func(_ string, name string, args ...string) ([]byte, error) {
+		cmd := name + " " + strings.Join(args, " ")
+		commands = append(commands, cmd)
+		if strings.HasPrefix(cmd, "bd update ") {
+			t.Fatalf("CloseAllWithReason must not pre-write metadata: %s", cmd)
+		}
+		if cmd != "bd close --force --json --reason "+reason+" bd-1 bd-2" {
+			return nil, fmt.Errorf("unexpected command: %s", cmd)
+		}
+		return []byte(`[
+			{"id":"bd-1","title":"one","status":"closed","issue_type":"message","created_at":"2025-01-15T10:30:00Z"},
+			{"id":"bd-2","title":"two","status":"closed","issue_type":"message","created_at":"2025-01-15T10:30:00Z"}
+		]`), nil
+	}
+
+	s := beads.NewBdStore("/city", runner)
+	closed, err := s.CloseAllWithReason([]string{"bd-1", "bd-2"}, reason)
+	if err != nil {
+		t.Fatalf("CloseAllWithReason: %v", err)
+	}
+	if closed != 2 {
+		t.Fatalf("closed = %d, want 2", closed)
+	}
+	if len(commands) != 1 {
+		t.Fatalf("commands = %v, want exactly one close command", commands)
 	}
 }
 

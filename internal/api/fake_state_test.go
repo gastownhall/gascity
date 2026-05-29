@@ -214,6 +214,9 @@ func (f *fakeMutatorState) ResumeRig(name string) error {
 func (f *fakeMutatorState) SuspendCity() error { f.cfg.Workspace.Suspended = true; return nil }
 func (f *fakeMutatorState) ResumeCity() error  { f.cfg.Workspace.Suspended = false; return nil }
 func (f *fakeMutatorState) CreateAgent(a config.Agent) error {
+	if err := config.ValidateAgents([]config.Agent{a}); err != nil {
+		return fmt.Errorf("%w: agent: %w", configedit.ErrValidation, err)
+	}
 	f.cfg.Agents = append(f.cfg.Agents, a)
 	return nil
 }

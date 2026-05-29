@@ -154,6 +154,11 @@ func cmdHookWithFormat(args []string, inject bool, hookFormat string, stdout, st
 		overrides["GC_SESSION_ID"] = os.Getenv("GC_SESSION_ID")
 		overrides["GC_SESSION_ORIGIN"] = os.Getenv("GC_SESSION_ORIGIN")
 		overrides["GC_TEMPLATE"] = os.Getenv("GC_TEMPLATE")
+	} else {
+		overrides["GC_ALIAS"] = resolvedAgentName
+		overrides["GC_SESSION_ID"] = ""
+		overrides["GC_SESSION_ORIGIN"] = ""
+		overrides["GC_TEMPLATE"] = ""
 	}
 	queryEnv := mergeRuntimeEnv(os.Environ(), overrides)
 	failureTemplate, emitFailureEvent := hookWorkQueryFailureTemplate(len(args) > 0, sessionTemplateContext, a.QualifiedName())

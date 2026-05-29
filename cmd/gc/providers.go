@@ -27,6 +27,7 @@ import (
 	sessionhybrid "github.com/gastownhall/gascity/internal/runtime/hybrid"
 	sessionk8s "github.com/gastownhall/gascity/internal/runtime/k8s"
 	sessionsubprocess "github.com/gastownhall/gascity/internal/runtime/subprocess"
+	sessiont3bridge "github.com/gastownhall/gascity/internal/runtime/t3bridge"
 	sessiontmux "github.com/gastownhall/gascity/internal/runtime/tmux"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/supervisor"
@@ -119,7 +120,11 @@ func providerStateDir(providerName, cityPath string) string {
 //   - default → real tmux provider
 func newSessionProviderByName(name string, sc config.SessionConfig, cityName, cityPath string) (runtime.Provider, error) {
 	if strings.HasPrefix(name, "exec:") {
-		return sessionexec.NewProvider(strings.TrimPrefix(name, "exec:")), nil
+		script := strings.TrimPrefix(name, "exec:")
+		if isLegacyT3BridgeExecScript(script) {
+			return sessiont3bridge.NewProvider(), nil
+		}
+		return sessionexec.NewProvider(script), nil
 	}
 	switch name {
 	case "fake":
@@ -141,6 +146,8 @@ func newSessionProviderByName(name string, sc config.SessionConfig, cityName, ci
 			return sessionacp.NewProviderWithDir(providerStateDir("acp", cityPath), cfg), nil
 		}
 		return sessionacp.NewProvider(cfg), nil
+	case "t3bridge":
+		return sessiont3bridge.NewProvider(), nil
 	case "k8s":
 		return sessionk8s.NewProvider()
 	case "hybrid":
@@ -148,6 +155,10 @@ func newSessionProviderByName(name string, sc config.SessionConfig, cityName, ci
 	default:
 		return sessiontmux.NewProviderWithConfig(tmuxConfigFromSession(sc, cityName, cityPath)), nil
 	}
+}
+
+func isLegacyT3BridgeExecScript(script string) bool {
+	return filepath.Base(strings.TrimSpace(script)) == "gc-session-t3"
 }
 
 // newSessionProvider returns a runtime.Provider based on the session provider
@@ -483,7 +494,7 @@ func normalizeRawBeadsProvider(cityPath, provider string) string {
 		return provider
 	}
 	script := strings.TrimSpace(strings.TrimPrefix(provider, "exec:"))
-	if samePath(script, gcBeadsBdScriptPath(cityPath)) {
+	if samePath(script, gcBeadsBdScriptPath(cityPath)) || samePath(script, legacyGcBeadsBdScriptPath(cityPath)) {
 		return "bd"
 	}
 	return provider
@@ -634,6 +645,10 @@ func gcBeadsBdScriptPath(cityPath string) string {
 	return filepath.Join(cityPath, citylayout.SystemPacksRoot, "bd", "assets", "scripts", "gc-beads-bd.sh")
 }
 
+func legacyGcBeadsBdScriptPath(cityPath string) string {
+	return filepath.Join(cityPath, ".gc", "scripts", "gc-beads-bd.sh")
+}
+
 // mailProviderName returns the mail provider name.
 // Priority: GC_MAIL env var → city.toml [mail].provider → "" (default: beadmail).
 func mailProviderName() string {
@@ -641,9 +656,14 @@ func mailProviderName() string {
 		return v
 	}
 	if cp, err := resolveCity(); err == nil {
-		if cfg, err := loadCityConfig(cp, io.Discard); err == nil && cfg.Mail.Provider != "" {
-			return cfg.Mail.Provider
-		}
+		return mailProviderNameForCity(cp)
+	}
+	return ""
+}
+
+func mailProviderNameForCity(cityPath string) string {
+	if cfg, err := loadCityConfig(cityPath, io.Discard); err == nil && cfg.Mail.Provider != "" {
+		return cfg.Mail.Provider
 	}
 	return ""
 }
@@ -658,22 +678,18 @@ func mailProviderName() string {
 //   - "exec:<script>" → user-supplied script (absolute path or PATH lookup)
 //   - default → beadmail (backed by beads.Store, no subprocess)
 func newMailProvider(store beads.Store) mail.Provider {
-	v := mailProviderName()
-	if strings.HasPrefix(v, "exec:") {
-		return mailexec.NewProvider(strings.TrimPrefix(v, "exec:"))
-	}
-	switch v {
-	case "fake":
-		return mail.NewFake()
-	case "fail":
-		return mail.NewFailFake()
-	default:
-		return beadmail.New(store)
-	}
+	return newMailProviderNamed(mailProviderName(), store, false)
 }
 
 func newCommandMailProvider(store beads.Store) mail.Provider {
-	v := mailProviderName()
+	return newMailProviderNamed(mailProviderName(), store, true)
+}
+
+func newCommandMailProviderNamed(v string, store beads.Store) mail.Provider {
+	return newMailProviderNamed(v, store, true)
+}
+
+func newMailProviderNamed(v string, store beads.Store, cached bool) mail.Provider {
 	if strings.HasPrefix(v, "exec:") {
 		return mailexec.NewProvider(strings.TrimPrefix(v, "exec:"))
 	}
@@ -683,7 +699,10 @@ func newCommandMailProvider(store beads.Store) mail.Provider {
 	case "fail":
 		return mail.NewFailFake()
 	default:
-		return beadmail.NewCached(store)
+		if cached {
+			return beadmail.NewCached(store)
+		}
+		return beadmail.New(store)
 	}
 }
 

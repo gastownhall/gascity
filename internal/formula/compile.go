@@ -46,7 +46,7 @@ func CompileWithoutRuntimeVarValidation(_ context.Context, name string, searchPa
 }
 
 func compileFormula(name string, searchPaths []string, vars map[string]string, validateRuntimeVars bool) (*Recipe, error) {
-	parser := NewParser(searchPaths...)
+	parser := NewParser(searchPaths...).SetSource(SourceFromEnv())
 
 	// Stage 1: Load formula by name
 	f, err := parser.LoadByName(name)

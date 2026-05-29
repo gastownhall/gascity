@@ -632,9 +632,9 @@ func TestCreateBeadOnly(t *testing.T) {
 		t.Error("runtime session should not be started in bead-only mode")
 	}
 
-	// Verify bead was created with state "creating" (not "active").
-	if b.Metadata["state"] != "creating" {
-		t.Errorf("bead state = %q, want %q", b.Metadata["state"], "creating")
+	// Verify bead was created with state "start-pending" (not "active").
+	if b.Metadata["state"] != string(StateStartPending) {
+		t.Errorf("bead state = %q, want %q", b.Metadata["state"], StateStartPending)
 	}
 	if b.Metadata["session_name"] == "" {
 		t.Error("bead missing session_name metadata")
@@ -4197,5 +4197,61 @@ func TestEnsureRunning_StartupDeathClearMetadataFailurePropagates(t *testing.T) 
 	}
 	if b.Metadata["session_key"] == "" {
 		t.Fatal("session_key should remain set after failed metadata clear")
+	}
+}
+
+// TestCloseDetailed_StopErrorLeavesBeadOpen verifies the secondary fix for the
+// self-close wedge: when the runtime terminate genuinely fails, CloseDetailed
+// must propagate the error and leave the bead open rather than reporting a
+// "closed but still running" session. The previous code discarded the Stop
+// error and closed the bead unconditionally.
+func TestCloseDetailed_StopErrorLeavesBeadOpen(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManager(store, sp)
+
+	info, err := mgr.Create(context.Background(), "helper", "chat", "claude", "/tmp", "claude", nil, ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	// Arm a non-idempotent terminate failure (not "session gone").
+	sp.StopErrors[info.SessionName] = errors.New("kill failed")
+
+	if _, err := mgr.CloseDetailed(info.ID); err == nil {
+		t.Fatal("CloseDetailed: expected error when runtime Stop fails, got nil")
+	}
+
+	b, err := store.Get(info.ID)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	if b.Status == "closed" {
+		t.Error("bead was closed despite the runtime Stop failing")
+	}
+}
+
+// TestCloseDetailed_StopSuccessClosesBead is the happy-path companion: when the
+// runtime terminate succeeds, the bead closes normally.
+func TestCloseDetailed_StopSuccessClosesBead(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManager(store, sp)
+
+	info, err := mgr.Create(context.Background(), "helper", "chat", "claude", "/tmp", "claude", nil, ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	if _, err := mgr.CloseDetailed(info.ID); err != nil {
+		t.Fatalf("CloseDetailed: %v", err)
+	}
+
+	b, err := store.Get(info.ID)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	if b.Status != "closed" {
+		t.Errorf("bead Status = %q, want closed", b.Status)
 	}
 }

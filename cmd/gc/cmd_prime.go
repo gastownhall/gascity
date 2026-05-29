@@ -307,6 +307,7 @@ func doPrimeWithHookFormat(args []string, stdout, stderr io.Writer, hookMode boo
 		if a.PromptTemplate != "" || hookMode || sessionTemplateContext {
 			ctx = buildPrimeContext(cityPath, cityName, &a, cfg.Rigs, stderr)
 			ctx.ProviderKey, ctx.ProviderDisplayName = providerInfoForAgent(&a, &cfg.Workspace, cfg.Providers)
+			ctx.InstructionsFile = instructionsFileForAgent(&a, &cfg.Workspace, cfg.Providers)
 		}
 		if a.PromptTemplate != "" {
 			fragments := effectivePromptFragments(
@@ -557,7 +558,10 @@ func persistPrimeHookSessionID(sessionID string) {
 
 func persistPrimeHookProviderSessionKey() {
 	gcSessionID := strings.TrimSpace(os.Getenv("GC_SESSION_ID"))
-	providerSessionID := strings.TrimSpace(os.Getenv("GEMINI_SESSION_ID"))
+	providerSessionID := strings.TrimSpace(os.Getenv("GC_PROVIDER_SESSION_ID"))
+	if providerSessionID == "" {
+		providerSessionID = strings.TrimSpace(os.Getenv("GEMINI_SESSION_ID"))
+	}
 	if gcSessionID == "" || providerSessionID == "" || gcSessionID == providerSessionID {
 		return
 	}

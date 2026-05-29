@@ -39,7 +39,7 @@ func (c *CachingStore) ApplyEvent(eventType string, payload json.RawMessage) {
 		depsKnown = true
 	}
 	currentDeps = cloneDeps(currentDeps)
-	_, locallyMutated := c.beadSeq[patch.ID]
+	seqBase, locallyMutated := c.beadSeq[patch.ID]
 	localBeadAt := c.localBeadAt[patch.ID]
 	recentlyLocal := recentLocalMutation(localBeadAt, now)
 	_, locallyDeleted := c.deletedSeq[patch.ID]
@@ -70,11 +70,35 @@ func (c *CachingStore) ApplyEvent(eventType string, payload json.RawMessage) {
 		verifiedConflict = true
 		verifiedClosedBase = conflictBase
 	}
-	if fieldConflictCached && eventType != "bead.closed" && locallyMutated && !verifiedConflict {
-		return
-	}
-	if dependencyConflictCached && eventType != "bead.closed" && locallyMutated && !verifiedConflict {
-		return
+	if conflictsCached && eventType != "bead.closed" && locallyMutated && !recentlyLocal && !verifiedConflict {
+		// The bead is flagged locally mutated only because a prior applied
+		// event set its mutation seq (noteMutationLocked sets beadSeq on every
+		// applied event), or because of a local write older than the recency
+		// window. Backing reads are reliable here (no in-flight write-through),
+		// so verify the conflicting event against the backing store instead of
+		// dropping it outright: drop only genuinely stale events (which would
+		// clobber an unflushed local write); apply when the backing store
+		// already reflects the event — e.g. a gc.routed_to stamp written by
+		// `gc sling` in another process. Dropping unconditionally here stranded
+		// pool demand until an unrelated later event arrived after a reconcile
+		// cleared the mutation seq (gastownhall/gascity#2210).
+		matchesBacking, verifyErr := c.cacheEventMatchesBacking(patch.ID, patch, fields)
+		if verifyErr != nil {
+			c.recordProblem(fmt.Sprintf("verify %s event", eventType), verifyErr)
+			return
+		}
+		if !matchesBacking {
+			return
+		}
+		verifiedRecentLocal = true
+		verifiedRecentLocalBase = conflictBase
+	} else {
+		if fieldConflictCached && eventType != "bead.closed" && locallyMutated && !verifiedConflict {
+			return
+		}
+		if dependencyConflictCached && eventType != "bead.closed" && locallyMutated && !verifiedConflict {
+			return
+		}
 	}
 	if conflictsCached && recentlyLocal && !verifiedConflict {
 		verifiedRecentLocal = true
@@ -125,14 +149,30 @@ func (c *CachingStore) ApplyEvent(eventType string, payload json.RawMessage) {
 					return
 				}
 			} else {
-				if _, locallyMutated := c.beadSeq[patch.ID]; fieldConflict && locallyMutated {
-					return
-				}
-				if _, locallyMutated := c.beadSeq[patch.ID]; dependencyConflict && locallyMutated {
-					return
-				}
+				_, locallyMutated := c.beadSeq[patch.ID]
+				// A concurrent local write can land in the RUnlock->Lock window.
+				// beadChanged compares only the cached Bead, but DepAdd/DepRemove
+				// mutate c.deps and bump the mutation seq without touching
+				// c.beads[id], so a dep-only write slips that guard. The mutation
+				// seq advancing past the read-phase snapshot is the reliable
+				// signal that some local write intervened since the backing
+				// verification (gastownhall/gascity#2210).
+				changedSinceVerify := beadChanged(current, verifiedRecentLocalBase, false) ||
+					c.beadSeq[patch.ID] != seqBase
+				// Re-check a genuine recent local write under the write lock to
+				// catch a write that landed between the read-lock verification
+				// and here; it wins unconditionally.
 				if recentLocalMutation(c.localBeadAt[patch.ID], time.Now()) &&
-					(!verifiedRecentLocal || beadChanged(current, verifiedRecentLocalBase, false)) {
+					(!verifiedRecentLocal || changedSinceVerify) {
+					return
+				}
+				// For a bead flagged locally mutated only by a prior event,
+				// apply the conflict only if it was verified against the
+				// backing store under the read lock and nothing changed since
+				// (no concurrent local write); otherwise drop and let
+				// reconciliation reconverge (gastownhall/gascity#2210).
+				if locallyMutated &&
+					(!verifiedRecentLocal || changedSinceVerify) {
 					return
 				}
 			}

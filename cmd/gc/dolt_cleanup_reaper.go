@@ -101,6 +101,8 @@ func isTestConfigPath(p, homeDir, tempDir string) bool {
 func testConfigPathPrefixes() []string {
 	return []string{
 		"Test",
+		// Legacy pre-owner-PID cmd/gc test roots. Current cmd/gc roots use
+		// the gct<PID>-* prefix and are handled by stale-root owner PID logic.
 		"gctest-",
 		"gc-state-runtime-builtin-",
 		"gc-state-mutation-builtin-",

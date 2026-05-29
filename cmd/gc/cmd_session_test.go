@@ -1381,6 +1381,106 @@ func TestSessionReason_FallsThroughToProviderForSleepingAttachment(t *testing.T)
 	}
 }
 
+func TestSessionReason_ResetPendingLiveRuntimeOverridesOtherReasons(t *testing.T) {
+	provider := runtime.NewFake()
+	if err := provider.Start(context.Background(), "worker-live", runtime.Config{Command: "echo"}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	cfg := &config.City{
+		Agents: []config.Agent{{
+			Name:         "worker",
+			StartCommand: "true",
+		}},
+	}
+	bead := beads.Bead{
+		ID:     "gc-1",
+		Status: "open",
+		Metadata: map[string]string{
+			"template":          "worker",
+			"session_name":      "worker-live",
+			"state":             "asleep",
+			"sleep_reason":      "user-hold",
+			"pin_awake":         "true",
+			"restart_requested": "true",
+		},
+	}
+	before := cloneSessionReasonMetadata(bead.Metadata)
+	info := session.Info{
+		ID:          bead.ID,
+		Template:    "worker",
+		State:       session.StateAsleep,
+		SessionName: "worker-live",
+	}
+
+	reason := sessionReason(
+		info,
+		map[string]beads.Bead{bead.ID: bead},
+		cfg,
+		provider,
+		nil,
+		nil,
+	)
+	if reason != resetPendingReason {
+		t.Fatalf("sessionReason = %q, want %q", reason, resetPendingReason)
+	}
+	assertStringMapEqual(t, bead.Metadata, before)
+}
+
+func TestSessionReason_ResetPendingNotLiveFallsBack(t *testing.T) {
+	provider := runtime.NewFake()
+	bead := beads.Bead{
+		ID:     "gc-1",
+		Status: "open",
+		Metadata: map[string]string{
+			"template":          "worker",
+			"session_name":      "worker-not-live",
+			"state":             "asleep",
+			"sleep_reason":      "user-hold",
+			"restart_requested": "true",
+		},
+	}
+	before := cloneSessionReasonMetadata(bead.Metadata)
+	info := session.Info{
+		ID:          bead.ID,
+		Template:    "worker",
+		State:       session.StateAsleep,
+		SessionName: "worker-not-live",
+	}
+
+	reason := sessionReason(
+		info,
+		map[string]beads.Bead{bead.ID: bead},
+		nil,
+		provider,
+		nil,
+		nil,
+	)
+	if reason != "user-hold" {
+		t.Fatalf("sessionReason = %q, want user-hold for non-live runtime", reason)
+	}
+	assertStringMapEqual(t, bead.Metadata, before)
+}
+
+func cloneSessionReasonMetadata(in map[string]string) map[string]string {
+	out := make(map[string]string, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
+}
+
+func assertStringMapEqual(t *testing.T, got, want map[string]string) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("metadata length = %d, want %d; got=%v want=%v", len(got), len(want), got, want)
+	}
+	for k, wantValue := range want {
+		if got[k] != wantValue {
+			t.Fatalf("metadata[%q] = %q, want %q; got=%v want=%v", k, got[k], wantValue, got, want)
+		}
+	}
+}
+
 func TestSessionReason_OmitsExpiredLifecycleHold(t *testing.T) {
 	bead := beads.Bead{
 		ID:     "gc-1",
@@ -1880,8 +1980,8 @@ func TestCmdSessionNew_AllowsReservedNamedAliasWithController(t *testing.T) {
 	if got := b.Metadata["alias"]; got != "mayor" {
 		t.Fatalf("alias = %q, want mayor", got)
 	}
-	if got := b.Metadata["state"]; got != "creating" {
-		t.Fatalf("state = %q, want creating", got)
+	if got := b.Metadata["state"]; got != string(session.StateStartPending) {
+		t.Fatalf("state = %q, want start-pending", got)
 	}
 }
 
@@ -1973,23 +2073,27 @@ func writeNamedSessionCityTOML(t *testing.T, dir string) {
 	if err := os.MkdirAll(filepath.Join(dir, ".gc"), 0o755); err != nil {
 		t.Fatalf("MkdirAll(.gc): %v", err)
 	}
-	data := []byte(`[workspace]
+	if err := os.WriteFile(filepath.Join(dir, "pack.toml"), []byte(`[pack]
 name = "test-city"
-
-[beads]
-provider = "file"
-
-[[agent]]
-name = "mayor"
-provider = "codex"
-start_command = "echo"
+schema = 2
 
 [[named_session]]
 template = "mayor"
-`)
-	if err := os.WriteFile(filepath.Join(dir, "city.toml"), data, 0o644); err != nil {
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile(pack.toml): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte(`[workspace]
+
+[beads]
+provider = "file"
+`), 0o644); err != nil {
 		t.Fatalf("WriteFile(city.toml): %v", err)
 	}
+	if err := os.WriteFile(filepath.Join(dir, ".gc", "site.toml"), []byte(`workspace_name = "test-city"
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile(.gc/site.toml): %v", err)
+	}
+	writeCatalogFile(t, dir, "agents/mayor/agent.toml", "provider = \"codex\"\nstart_command = \"echo\"\n")
 }
 
 func writePoolSessionCityTOML(t *testing.T, dir string) {

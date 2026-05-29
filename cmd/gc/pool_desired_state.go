@@ -6,6 +6,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
 // SessionRequest represents a single session the reconciler should start.
@@ -122,7 +123,15 @@ func computePoolDesiredStates(
 		// Resume tier: actionable assigned work beads whose assignee resolves
 		// to a non-closed session bead. These sessions must stay alive.
 		for _, wb := range assignedWorkBeads {
-			routedTo := wb.Metadata["gc.routed_to"]
+			// Prefer gc.run_target (per-step target stamped by the cooker
+			// from formula step metadata) over gc.routed_to (convoy entry
+			// agent), mirroring the precedence in dispatch/fanout.go and
+			// dispatch/control.go. Falls back to gc.routed_to for beads
+			// authored before the gc.run_target migration (commit adaf6ec).
+			routedTo := strings.TrimSpace(wb.Metadata["gc.run_target"])
+			if routedTo == "" {
+				routedTo = strings.TrimSpace(wb.Metadata["gc.routed_to"])
+			}
 			if wb.Status != "in_progress" && wb.Status != "open" {
 				continue
 			}
@@ -275,7 +284,8 @@ func poolSessionConsumesNewDemand(session beads.Bead) bool {
 	// This pure desired-state pass has no reconciler clock. Creating sessions
 	// still represent already-spent new demand; lifecycle code owns stale
 	// creating recovery with its clock-aware predicate.
-	return strings.TrimSpace(session.Metadata["state"]) == "creating"
+	state := strings.TrimSpace(session.Metadata["state"])
+	return state == "creating" || state == string(sessionpkg.StateStartPending)
 }
 
 // applyNestedCaps enforces workspace, rig, and agent max_active_sessions caps.

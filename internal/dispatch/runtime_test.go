@@ -793,6 +793,162 @@ func TestProcessFanoutReturnsMalformedWhenScopeBodyMissing(t *testing.T) {
 	}
 }
 
+func TestProcessFanoutReturnsMalformedForInvalidSourceOutputJSON(t *testing.T) {
+	t.Parallel()
+
+	store := beads.NewMemStore()
+	workflow := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+		},
+	})
+	source := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title:  "prepare review items",
+		Type:   "task",
+		Status: "closed",
+		Metadata: map[string]string{
+			"gc.root_bead_id": workflow.ID,
+			"gc.step_ref":     "demo.prepare-review-items",
+			"gc.outcome":      "pass",
+			"gc.output_json":  "/tmp/gc.output_json.pretty.json",
+		},
+	})
+	fanout := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "Fan out review items",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":         "fanout",
+			"gc.root_bead_id": workflow.ID,
+			"gc.control_for":  "demo.prepare-review-items",
+			"gc.for_each":     "output.personas",
+			"gc.bond":         "expansion-review",
+			"gc.fanout_mode":  "parallel",
+		},
+	})
+	mustDepAdd(t, store, fanout.ID, source.ID, "blocks")
+
+	_, err := ProcessControl(store, fanout, ProcessOptions{})
+	if !errors.Is(err, ErrControlGraphMalformed) {
+		t.Fatalf("ProcessControl(fanout invalid output JSON) err = %v, want %v", err, ErrControlGraphMalformed)
+	}
+}
+
+func TestProcessFanoutReturnsMalformedForInvalidBondVars(t *testing.T) {
+	t.Parallel()
+
+	store := beads.NewMemStore()
+	workflow := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+		},
+	})
+	source := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title:  "prepare review items",
+		Type:   "task",
+		Status: "closed",
+		Metadata: map[string]string{
+			"gc.root_bead_id": workflow.ID,
+			"gc.step_ref":     "demo.prepare-review-items",
+			"gc.outcome":      "pass",
+			"gc.output_json":  `{"personas":[{"name":"architect"}]}`,
+		},
+	})
+	fanout := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "Fan out review items",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":         "fanout",
+			"gc.root_bead_id": workflow.ID,
+			"gc.control_for":  "demo.prepare-review-items",
+			"gc.for_each":     "output.personas",
+			"gc.bond":         "expansion-review",
+			"gc.bond_vars":    "{not-json",
+			"gc.fanout_mode":  "parallel",
+		},
+	})
+	mustDepAdd(t, store, fanout.ID, source.ID, "blocks")
+
+	_, err := ProcessControl(store, fanout, ProcessOptions{FormulaSearchPaths: []string{t.TempDir()}})
+	if !errors.Is(err, ErrControlGraphMalformed) {
+		t.Fatalf("ProcessControl(fanout invalid bond vars) err = %v, want %v", err, ErrControlGraphMalformed)
+	}
+}
+
+func TestProcessFanoutReturnsMalformedForMissingRequiredBondVar(t *testing.T) {
+	formulatest.EnableV2ForTest(t)
+
+	dir := t.TempDir()
+	expansion := `
+formula = "expansion-review"
+type = "expansion"
+version = 2
+contract = "graph.v2"
+
+[vars.reviewer]
+required = true
+
+[vars.source_convoy_id]
+required = true
+
+[[template]]
+id = "{target}.review"
+title = "Review {reviewer}"
+description = "Source {source_convoy_id}"
+`
+	if err := os.WriteFile(filepath.Join(dir, "expansion-review.toml"), []byte(expansion), 0o644); err != nil {
+		t.Fatalf("write expansion formula: %v", err)
+	}
+
+	store := beads.NewMemStore()
+	workflow := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+		},
+	})
+	source := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title:  "prepare review items",
+		Type:   "task",
+		Status: "closed",
+		Metadata: map[string]string{
+			"gc.root_bead_id": workflow.ID,
+			"gc.step_ref":     "demo.prepare-review-items",
+			"gc.outcome":      "pass",
+			"gc.output_json":  `{"personas":[{"name":"architect"}]}`,
+		},
+	})
+	fanout := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "Fan out review items",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":         "fanout",
+			"gc.root_bead_id": workflow.ID,
+			"gc.control_for":  "demo.prepare-review-items",
+			"gc.for_each":     "output.personas",
+			"gc.bond":         "expansion-review",
+			"gc.bond_vars":    `{"reviewer":"{item.name}"}`,
+			"gc.fanout_mode":  "parallel",
+		},
+	})
+	mustDepAdd(t, store, fanout.ID, source.ID, "blocks")
+
+	_, err := ProcessControl(store, fanout, ProcessOptions{FormulaSearchPaths: []string{dir}})
+	if !errors.Is(err, ErrControlGraphMalformed) {
+		t.Fatalf("ProcessControl(fanout missing required bond var) err = %v, want %v", err, ErrControlGraphMalformed)
+	}
+	if !strings.Contains(err.Error(), `variable "source_convoy_id" is required`) {
+		t.Fatalf("ProcessControl error = %v, want missing source_convoy_id", err)
+	}
+}
+
 func TestReconcileTerminalScopedMemberReusesResolvedBodyForFailingScope(t *testing.T) {
 	t.Parallel()
 
@@ -1330,8 +1486,9 @@ func TestProcessWorkflowFinalizeOrphanedRootClosesFinalizerWithoutError(t *testi
 		Title: "Finalize workflow",
 		Type:  "task",
 		Metadata: map[string]string{
-			"gc.kind":         "workflow-finalize",
-			"gc.root_bead_id": "missing-root-id",
+			"gc.kind":           "workflow-finalize",
+			"gc.root_bead_id":   "missing-root-id",
+			"gc.root_store_ref": "rig:gascity",
 		},
 	})
 
@@ -7845,6 +8002,62 @@ func TestProcessControlEmitsSkipReasonWhenNotOpen(t *testing.T) {
 	}
 	if !strings.Contains(traced, "status=in_progress") {
 		t.Fatalf("trace missing the actual status; got:\n%s", traced)
+	}
+}
+
+func TestProcessControlClosesControlWhenWorkflowRootMissing(t *testing.T) {
+	t.Parallel()
+
+	store := beads.NewMemStore()
+	control, err := store.Create(beads.Bead{
+		Title:  "orphaned retry control",
+		Type:   "task",
+		Status: "open",
+		Metadata: map[string]string{
+			"gc.kind":           "retry",
+			"gc.max_attempts":   "3",
+			"gc.root_bead_id":   "missing-root",
+			"gc.root_store_ref": "rig:gascity",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create control: %v", err)
+	}
+
+	var traceBuf bytes.Buffer
+	opts := ProcessOptions{
+		Tracef: func(format string, args ...any) {
+			fmt.Fprintf(&traceBuf, format, args...)
+			traceBuf.WriteByte('\n')
+		},
+	}
+
+	result, err := ProcessControl(store, control, opts)
+	if err != nil {
+		t.Fatalf("ProcessControl: %v", err)
+	}
+	if !result.Processed || result.Action != "orphaned-workflow" {
+		t.Fatalf("result = %+v, want processed orphaned-workflow", result)
+	}
+	after := mustGetBead(t, store, control.ID)
+	if after.Status != "closed" {
+		t.Fatalf("status = %q, want closed", after.Status)
+	}
+	if after.Metadata["gc.outcome"] != "fail" {
+		t.Fatalf("gc.outcome = %q, want fail", after.Metadata["gc.outcome"])
+	}
+	if after.Metadata["gc.failure_reason"] != "missing_workflow_root" {
+		t.Fatalf("gc.failure_reason = %q, want missing_workflow_root", after.Metadata["gc.failure_reason"])
+	}
+	if after.Metadata["gc.final_disposition"] != "orphaned_workflow" {
+		t.Fatalf("gc.final_disposition = %q, want orphaned_workflow", after.Metadata["gc.final_disposition"])
+	}
+	if after.Metadata["gc.missing_root_bead_id"] != "missing-root" {
+		t.Fatalf("gc.missing_root_bead_id = %q, want missing-root", after.Metadata["gc.missing_root_bead_id"])
+	}
+	traced := traceBuf.String()
+	if !strings.Contains(traced, "close reason=missing_workflow_root") {
+		t.Fatalf("trace missing missing-root close reason; got:\n%s", traced)
 	}
 }
 

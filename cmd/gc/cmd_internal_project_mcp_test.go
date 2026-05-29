@@ -17,9 +17,11 @@ func TestInternalProjectMCPProjectsGeminiConfigWithIdentityExpansion(t *testing.
 	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
 		t.Fatalf("MkdirAll(.gc): %v", err)
 	}
+	if err := os.MkdirAll(filepath.Join(cityDir, "agents", "mayor"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(agents/mayor): %v", err)
+	}
 
 	cityToml := `[workspace]
-name = "test-city"
 provider = "gemini"
 
 [beads]
@@ -28,16 +30,18 @@ provider = "file"
 [providers.gemini]
 command = "echo"
 prompt_mode = "none"
-
-[[agent]]
-name = "mayor"
-provider = "gemini"
 `
 	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
 		t.Fatalf("WriteFile(city.toml): %v", err)
 	}
 	if err := os.WriteFile(filepath.Join(cityDir, "pack.toml"), []byte("[pack]\nname = \"test\"\nversion = \"0.1.0\"\nschema = 2\n"), 0o644); err != nil {
 		t.Fatalf("WriteFile(pack.toml): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, ".gc", "site.toml"), []byte("workspace_name = \"test-city\"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(site.toml): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "agents", "mayor", "agent.toml"), []byte("provider = \"gemini\"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(agent.toml): %v", err)
 	}
 	writeMCPSource(t, filepath.Join(cityDir, "mcp", "notes.template.toml"), `
 name = "notes"
@@ -106,9 +110,11 @@ func TestInternalProjectMCPProjectsCursorConfig(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
 		t.Fatalf("MkdirAll(.gc): %v", err)
 	}
+	if err := os.MkdirAll(filepath.Join(cityDir, "agents", "worker"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(agents/worker): %v", err)
+	}
 
 	cityToml := `[workspace]
-name = "test-city"
 provider = "cursor"
 
 [beads]
@@ -117,16 +123,18 @@ provider = "file"
 [providers.cursor]
 command = "echo"
 prompt_mode = "none"
-
-[[agent]]
-name = "worker"
-provider = "cursor"
 `
 	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
 		t.Fatalf("WriteFile(city.toml): %v", err)
 	}
 	if err := os.WriteFile(filepath.Join(cityDir, "pack.toml"), []byte("[pack]\nname = \"test\"\nversion = \"0.1.0\"\nschema = 2\n"), 0o644); err != nil {
 		t.Fatalf("WriteFile(pack.toml): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, ".gc", "site.toml"), []byte("workspace_name = \"test-city\"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(site.toml): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "agents", "worker", "agent.toml"), []byte("provider = \"cursor\"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(agent.toml): %v", err)
 	}
 	writeMCPSource(t, filepath.Join(cityDir, "mcp", "notes.toml"), `
 name = "notes"

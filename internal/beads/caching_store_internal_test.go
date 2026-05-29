@@ -934,6 +934,113 @@ func TestCachingStoreApplyEventRechecksRecentLocalAfterGetRefresh(t *testing.T) 
 	}
 }
 
+func TestCachingStoreApplyEventDropsRoutedEventOnConcurrentDepWrite(t *testing.T) {
+	// Regression for gastownhall/gascity#2210 follow-up: the verified-backing
+	// path applies a conflicting metadata event for a bead flagged locally
+	// mutated only by a prior event. DepAdd/DepRemove mutate c.deps and bump the
+	// mutation seq WITHOUT touching c.beads[id], so a concurrent dep write that
+	// lands in the RUnlock->Lock window is invisible to the beadChanged guard
+	// (which compares only the cached Bead) and gets clobbered by
+	// updateEventDepsLocked. Snapshotting the mutation seq closes that hole: the
+	// event must drop and let reconciliation reconverge, leaving the concurrent
+	// dep write intact. Cover both the structured "dependencies" and the legacy
+	// "needs" payload representations.
+	cases := []struct {
+		name         string
+		created      Bead   // bead as the backing store first sees it (with deps)
+		newDependsOn string // the dependency a concurrent DepAdd installs in the window
+	}{
+		{
+			name:         "dependencies",
+			created:      Bead{Title: "route me", Dependencies: []Dep{{DependsOnID: "dep-1", Type: "blocks"}}},
+			newDependsOn: "dep-2",
+		},
+		{
+			name:         "needs",
+			created:      Bead{Title: "route me", Needs: []string{"need-1"}},
+			newDependsOn: "need-2",
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			backing := NewMemStore()
+
+			cache := NewCachingStoreForTest(backing, nil)
+			if err := cache.Prime(context.Background()); err != nil {
+				t.Fatalf("Prime: %v", err)
+			}
+
+			// `gc bd create` writes the bead (with its deps) to the backing store
+			// in another process; the controller learns it via a bead.created
+			// event. Create after Prime so the apply sets the mutation seq
+			// (locallyMutated) with no local write and seeds c.deps.
+			created, err := backing.Create(tc.created)
+			if err != nil {
+				t.Fatalf("Create: %v", err)
+			}
+			createdJSON, err := json.Marshal(created)
+			if err != nil {
+				t.Fatalf("marshal created: %v", err)
+			}
+			cache.ApplyEvent("bead.created", json.RawMessage(createdJSON))
+
+			// `gc sling` stamps gc.routed_to in the backing store and emits a
+			// bead.updated event carrying the full bead (same deps, now routed).
+			if err := backing.SetMetadata(created.ID, "gc.routed_to", "pool/polecat"); err != nil {
+				t.Fatalf("SetMetadata: %v", err)
+			}
+			routed, err := backing.Get(created.ID)
+			if err != nil {
+				t.Fatalf("Get backing: %v", err)
+			}
+			routedJSON, err := json.Marshal(routed)
+			if err != nil {
+				t.Fatalf("marshal routed: %v", err)
+			}
+
+			beforeCommit := make(chan struct{})
+			releaseCommit := make(chan struct{})
+			cache.applyEventBeforeCommitForTest = func() {
+				close(beforeCommit)
+				<-releaseCommit
+			}
+
+			done := make(chan struct{})
+			go func() {
+				cache.ApplyEvent("bead.updated", json.RawMessage(routedJSON))
+				close(done)
+			}()
+
+			// A concurrent dep write lands after the routed event verified
+			// against the backing store but before it commits.
+			<-beforeCommit
+			if err := cache.DepAdd(created.ID, tc.newDependsOn, "blocks"); err != nil {
+				t.Fatalf("concurrent DepAdd: %v", err)
+			}
+			close(releaseCommit)
+			<-done
+
+			cache.mu.RLock()
+			deps := cloneDeps(cache.deps[created.ID])
+			cache.mu.RUnlock()
+
+			found := false
+			for _, d := range deps {
+				if d.DependsOnID == tc.newDependsOn {
+					found = true
+					break
+				}
+			}
+			if !found {
+				t.Fatalf("concurrent dep %q clobbered by routed event; cached deps=%+v (event must drop and let reconciliation reconverge — #2210)",
+					tc.newDependsOn, deps)
+			}
+		})
+	}
+}
+
 func TestCachingStoreRunReconciliationRecordsProblemAndDegrades(t *testing.T) {
 	t.Parallel()
 

@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Claude Opus 4.8 is now listed in built-in Claude model choices and default
+  pricing. The `opus` model choice targets `claude-opus-4-8`; `opus-4-7`
+  remains available for cities that need the prior Opus target. Anthropic's
+  published regular-usage pricing is unchanged from Opus 4.7: $5/MTok input
+  and $25/MTok output.
+
+## [1.2.0] - 2026-05-25
+
+### Added
+
 - `gc mail inbox`, `gc mail read`, `gc mail peek`, `gc mail thread`,
   and `gc mail count` now accept `--json` and emit schema-versioned result
   envelopes for script and dashboard consumers. `gc mail inbox --json` and

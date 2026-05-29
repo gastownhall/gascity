@@ -3,6 +3,7 @@ package api
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -13,6 +14,77 @@ import (
 	"github.com/gastownhall/gascity/internal/mail"
 	"github.com/gastownhall/gascity/internal/session"
 )
+
+type exactRecipientMailProvider struct {
+	messages map[string][]mail.Message
+}
+
+func (p *exactRecipientMailProvider) Send(from, to, subject, body string) (mail.Message, error) {
+	return mail.Message{}, fmt.Errorf("unexpected Send(%q, %q, %q, %q)", from, to, subject, body)
+}
+
+func (p *exactRecipientMailProvider) Inbox(recipient string) ([]mail.Message, error) {
+	return p.unread(recipient), nil
+}
+
+func (p *exactRecipientMailProvider) Get(string) (mail.Message, error) {
+	return mail.Message{}, mail.ErrNotFound
+}
+
+func (p *exactRecipientMailProvider) Read(string) (mail.Message, error) {
+	return mail.Message{}, mail.ErrNotFound
+}
+
+func (p *exactRecipientMailProvider) MarkRead(string) error { return nil }
+
+func (p *exactRecipientMailProvider) MarkUnread(string) error { return nil }
+
+func (p *exactRecipientMailProvider) Archive(string) error { return nil }
+
+func (p *exactRecipientMailProvider) ArchiveMany(ids []string) ([]mail.ArchiveResult, error) {
+	return make([]mail.ArchiveResult, len(ids)), nil
+}
+
+func (p *exactRecipientMailProvider) Delete(string) error { return nil }
+
+func (p *exactRecipientMailProvider) DeleteMany(ids []string) ([]mail.ArchiveResult, error) {
+	return make([]mail.ArchiveResult, len(ids)), nil
+}
+
+func (p *exactRecipientMailProvider) Check(recipient string) ([]mail.Message, error) {
+	return p.unread(recipient), nil
+}
+
+func (p *exactRecipientMailProvider) Reply(string, string, string, string) (mail.Message, error) {
+	return mail.Message{}, mail.ErrNotFound
+}
+
+func (p *exactRecipientMailProvider) Thread(string) ([]mail.Message, error) { return nil, nil }
+
+func (p *exactRecipientMailProvider) All(recipient string) ([]mail.Message, error) {
+	return append([]mail.Message(nil), p.messages[recipient]...), nil
+}
+
+func (p *exactRecipientMailProvider) Count(recipient string) (int, int, error) {
+	msgs := p.messages[recipient]
+	var unread int
+	for _, msg := range msgs {
+		if !msg.Read {
+			unread++
+		}
+	}
+	return len(msgs), unread, nil
+}
+
+func (p *exactRecipientMailProvider) unread(recipient string) []mail.Message {
+	var out []mail.Message
+	for _, msg := range p.messages[recipient] {
+		if !msg.Read {
+			out = append(out, msg)
+		}
+	}
+	return out
+}
 
 func TestMailLifecycle(t *testing.T) {
 	state := newFakeState(t)
@@ -201,6 +273,124 @@ func TestMailCount(t *testing.T) {
 	json.NewDecoder(rec.Body).Decode(&resp) //nolint:errcheck
 	if resp["unread"] != 2 {
 		t.Errorf("unread = %d, want 2", resp["unread"])
+	}
+}
+
+func TestMailInboxAndCountResolveSessionMailboxAddresses(t *testing.T) {
+	state := newFakeState(t)
+	state.cityBeadStore = state.stores["myrig"]
+	sessionBead, err := state.cityBeadStore.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"alias":         "sky",
+			"alias_history": "mayor,witness",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create session: %v", err)
+	}
+	for _, msg := range []struct {
+		to   string
+		body string
+	}{
+		{to: "sky", body: "current alias"},
+		{to: sessionBead.ID, body: "session id"},
+		{to: "mayor", body: "historical alias"},
+	} {
+		if _, err := state.cityMailProv.Send("human", msg.to, "", msg.body); err != nil {
+			t.Fatalf("Send(%q): %v", msg.to, err)
+		}
+	}
+	h := newTestCityHandler(t, state)
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("GET", cityURL(state, "/mail?agent=sky"), nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("inbox status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var inbox struct {
+		Items []mail.Message `json:"items"`
+		Total int            `json:"total"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&inbox); err != nil {
+		t.Fatalf("decode inbox: %v", err)
+	}
+	if inbox.Total != 3 {
+		t.Fatalf("inbox Total = %d, want 3; items=%#v", inbox.Total, inbox.Items)
+	}
+
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("GET", cityURL(state, "/mail/count?agent=sky"), nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("count status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var count struct {
+		Total  int `json:"total"`
+		Unread int `json:"unread"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&count); err != nil {
+		t.Fatalf("decode count: %v", err)
+	}
+	if count.Total != 3 || count.Unread != 3 {
+		t.Fatalf("count = (%d total, %d unread), want (3 total, 3 unread)", count.Total, count.Unread)
+	}
+}
+
+func TestMailAPIQueriesAllResolvedSessionMailboxAddresses(t *testing.T) {
+	state := newFakeState(t)
+	state.cityBeadStore = state.stores["myrig"]
+	sessionBead, err := state.cityBeadStore.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"alias":         "sky",
+			"alias_history": "mayor,witness",
+			"session_name":  "runtime-sky",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create session: %v", err)
+	}
+	state.cityMailProv = &exactRecipientMailProvider{messages: map[string][]mail.Message{
+		"sky":            {{ID: "msg-current", From: "human", To: "sky", Body: "current alias"}},
+		sessionBead.ID:   {{ID: "msg-id", From: "human", To: sessionBead.ID, Body: "session id"}},
+		"mayor":          {{ID: "msg-history", From: "human", To: "mayor", Body: "historical alias"}},
+		"runtime-sky":    {{ID: "msg-runtime", From: "human", To: "runtime-sky", Body: "runtime session name"}},
+		"unrelated-user": {{ID: "msg-other", From: "human", To: "unrelated-user", Body: "other"}},
+	}}
+	h := newTestCityHandler(t, state)
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("GET", cityURL(state, "/mail?agent=sky"), nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("inbox status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var inbox struct {
+		Items []mail.Message `json:"items"`
+		Total int            `json:"total"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&inbox); err != nil {
+		t.Fatalf("decode inbox: %v", err)
+	}
+	if inbox.Total != 4 {
+		t.Fatalf("inbox Total = %d, want 4 resolved mailbox addresses; items=%#v", inbox.Total, inbox.Items)
+	}
+
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("GET", cityURL(state, "/mail/count?agent=sky"), nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("count status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var count struct {
+		Total  int `json:"total"`
+		Unread int `json:"unread"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&count); err != nil {
+		t.Fatalf("decode count: %v", err)
+	}
+	if count.Total != 4 || count.Unread != 4 {
+		t.Fatalf("count = (%d total, %d unread), want (4 total, 4 unread)", count.Total, count.Unread)
 	}
 }
 

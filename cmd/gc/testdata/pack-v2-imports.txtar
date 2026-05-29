@@ -43,6 +43,12 @@ stdout 'sidecar:rig-check'
 stdout 'passed'
 
 -- city/.gc/.keep --
+-- city/.gc/site.toml --
+workspace_name = "testcity"
+
+[[rig]]
+name = "frontend"
+path = "./frontend"
 -- city/frontend/.keep --
 -- city/pack.toml --
 [pack]
@@ -53,11 +59,9 @@ schema = 2
 source = "./assets/ops"
 -- city/city.toml --
 [workspace]
-name = "testcity"
 
 [[rigs]]
 name = "frontend"
-path = "./frontend"
 
 [rigs.imports.sidecar]
 source = "./assets/sidecar"

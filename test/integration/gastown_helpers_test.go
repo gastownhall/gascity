@@ -49,14 +49,22 @@ func setupGasTownCity(t *testing.T, guard *tmuxtest.Guard, agents []gasTownAgent
 	}
 
 	cityDir := filepath.Join(t.TempDir(), cityName)
-	configPath := filepath.Join(t.TempDir(), cityName+".toml")
-	if err := os.WriteFile(configPath, []byte(renderGasTownToml(cityName, agents)), 0o644); err != nil {
+	sourceDir := filepath.Join(t.TempDir(), cityName+"-source")
+	if err := os.MkdirAll(sourceDir, 0o755); err != nil {
+		t.Fatalf("creating init source: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(sourceDir, "city.toml"), []byte(renderGasTownToml(cityName, agents)), 0o644); err != nil {
 		t.Fatalf("writing init config: %v", err)
 	}
+	pack := fmt.Sprintf("[pack]\nname = %s\nschema = 2\n", quote(cityName))
+	if err := os.WriteFile(filepath.Join(sourceDir, "pack.toml"), []byte(pack), 0o644); err != nil {
+		t.Fatalf("writing init pack: %v", err)
+	}
+	writeGasTownAgentFiles(t, sourceDir, agents)
 
-	out, err := runGCWithEnv(env, "", "init", "--skip-provider-readiness", "--file", configPath, cityDir)
+	out, err := runGCWithEnv(env, "", "init", "--skip-provider-readiness", "--from", sourceDir, cityDir)
 	if err != nil {
-		t.Fatalf("gc init --file failed: %v\noutput: %s", err, out)
+		t.Fatalf("gc init --from failed: %v\noutput: %s", err, out)
 	}
 	registerCityCommandEnv(cityDir, env)
 	waitForExpectedTmuxSessions(t, cityDir, gasTownExpectedSessions(agents))
@@ -106,28 +114,6 @@ func renderGasTownToml(cityName string, agents []gasTownAgent) string {
 	fmt.Fprintf(&b, "\n[daemon]\npatrol_interval = \"100ms\"\n")
 
 	for _, a := range agents {
-		fmt.Fprintf(&b, "\n[[agent]]\nname = %s\n", quote(a.Name))
-		fmt.Fprintf(&b, "start_command = %s\n", quote(a.StartCommand))
-		if a.Dir != "" {
-			fmt.Fprintf(&b, "dir = %s\n", quote(a.Dir))
-		}
-		if a.Suspended {
-			fmt.Fprintf(&b, "suspended = true\n")
-		}
-		if a.Pool != nil {
-			fmt.Fprintf(&b, "min_active_sessions = %d\n", a.Pool.Min)
-			fmt.Fprintf(&b, "max_active_sessions = %d\n", a.Pool.Max)
-			fmt.Fprintf(&b, "scale_check = %s\n", quote(a.Pool.Check))
-		}
-		if len(a.Env) > 0 {
-			b.WriteString("\n[agent.env]\n")
-			for k, v := range a.Env {
-				fmt.Fprintf(&b, "%s = %s\n", k, quote(v))
-			}
-		}
-	}
-
-	for _, a := range agents {
 		if a.Pool != nil {
 			continue
 		}
@@ -138,6 +124,41 @@ func renderGasTownToml(cityName string, agents []gasTownAgent) string {
 	}
 
 	return b.String()
+}
+
+func writeGasTownAgentFiles(t *testing.T, cityDir string, agents []gasTownAgent) {
+	t.Helper()
+	for _, a := range agents {
+		agentDir := filepath.Join(cityDir, "agents", a.Name)
+		if err := os.MkdirAll(agentDir, 0o755); err != nil {
+			t.Fatalf("creating agent dir %s: %v", a.Name, err)
+		}
+
+		var b strings.Builder
+		if a.StartCommand != "" {
+			fmt.Fprintf(&b, "start_command = %s\n", quote(a.StartCommand))
+		}
+		if a.Dir != "" {
+			fmt.Fprintf(&b, "dir = %s\n", quote(a.Dir))
+		}
+		if a.Suspended {
+			b.WriteString("suspended = true\n")
+		}
+		if a.Pool != nil {
+			fmt.Fprintf(&b, "min_active_sessions = %d\n", a.Pool.Min)
+			fmt.Fprintf(&b, "max_active_sessions = %d\n", a.Pool.Max)
+			fmt.Fprintf(&b, "scale_check = %s\n", quote(a.Pool.Check))
+		}
+		if len(a.Env) > 0 {
+			b.WriteString("\n[env]\n")
+			for k, v := range a.Env {
+				fmt.Fprintf(&b, "%s = %s\n", k, quote(v))
+			}
+		}
+		if err := os.WriteFile(filepath.Join(agentDir, "agent.toml"), []byte(b.String()), 0o644); err != nil {
+			t.Fatalf("writing agent.toml for %s: %v", a.Name, err)
+		}
+	}
 }
 
 // waitForBeadStatus polls until a bead reaches the expected status or times out.

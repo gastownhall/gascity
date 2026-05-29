@@ -384,7 +384,11 @@ func (c *CachingStore) runReconciliation() {
 		c.recordReconcileLatencyLocked(bdLatency)
 		c.recomputeCadenceLocked()
 		c.updateStatsLocked()
+		logLine, emit := c.reconcileSuccessLogLocked(now, time.Since(start), adds, removes, updates)
 		c.mu.Unlock()
+		if emit {
+			log.Print(logLine)
+		}
 		c.notifyChanges(notifications)
 		return
 	}
@@ -480,8 +484,42 @@ func (c *CachingStore) runReconciliation() {
 	c.recordReconcileLatencyLocked(bdLatency)
 	c.recomputeCadenceLocked()
 	c.updateStatsLocked()
+	logLine, emit := c.reconcileSuccessLogLocked(now, time.Since(start), adds, removes, updates)
 	c.mu.Unlock()
+	if emit {
+		log.Print(logLine)
+	}
 	c.notifyChanges(notifications)
+}
+
+// reconcileSuccessLogLocked composes the per-reconcile success log line
+// and returns (line, true) when emission is permitted by the
+// cacheReconcileSuccessLogWindow rate limiter, or ("", false) otherwise.
+// Updates lastReconcileLogAt on emit. Caller must hold c.mu.
+//
+// Gap context: runReconciliation previously emitted no log line on
+// successful cache refresh. Cadence transitions and errors were logged,
+// but a reconciler ticking quietly with stale data produced no operator-
+// visible signal. On a T7920 incident 2026-05-26 a stale cache went
+// undetected for 2h 31m. This line gives the operator a heartbeat plus
+// diff counts and bd-list duration without flooding the log.
+func (c *CachingStore) reconcileSuccessLogLocked(now time.Time, elapsed time.Duration, adds, removes, updates int64) (string, bool) {
+	if !c.lastReconcileLogAt.IsZero() && now.Sub(c.lastReconcileLogAt) < cacheReconcileSuccessLogWindow {
+		return "", false
+	}
+	c.lastReconcileLogAt = now
+	rig := c.idPrefix
+	if rig == "" {
+		rig = "(no-prefix)"
+	}
+	cadence := c.stats.CadenceDriver
+	if cadence == "" {
+		cadence = "default"
+	}
+	return fmt.Sprintf(
+		"beads cache: reconciled rig=%s beads=%d adds=%d updates=%d removes=%d took=%s cadence=%s",
+		rig, len(c.beads), adds, updates, removes, elapsed.Round(time.Millisecond), cadence,
+	), true
 }
 
 func (c *CachingStore) depsForReconcileLocked(id string, freshBead Bead, depMap map[string][]Dep, useFreshDeps bool) []Dep {

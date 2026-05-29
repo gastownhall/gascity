@@ -130,7 +130,7 @@ func sessionToResponse(info session.Info, cfg *config.City) sessionResponse {
 // sessionResponseWithReason builds a session response that includes the
 // reason field derived from bead metadata. If the bead is nil (not found
 // in the index), the reason is omitted.
-func sessionResponseWithReason(info session.Info, b *beads.Bead, cfg *config.City, hasDeferredQueue bool) sessionResponse {
+func sessionResponseWithReason(info session.Info, b *beads.Bead, cfg *config.City, sp runtime.Provider, hasDeferredQueue bool) sessionResponse {
 	r := sessionToResponse(info, cfg)
 	// Expose effective options: provider EffectiveDefaults merged with
 	// per-session template_overrides. The dashboard uses this to display
@@ -169,7 +169,11 @@ func sessionResponseWithReason(info session.Info, b *beads.Bead, cfg *config.Cit
 	if b == nil || info.Closed {
 		return r
 	}
-	r.Reason = session.LifecycleDisplayReason(b.Status, b.Metadata, time.Now().UTC())
+	var isRunning func(string) bool
+	if sp != nil {
+		isRunning = sp.IsRunning
+	}
+	r.Reason = session.LifecycleDisplayReasonWithLiveness(b.Status, b.Metadata, time.Now().UTC(), info.SessionName, isRunning)
 	r.ConfiguredNamedSession = strings.TrimSpace(b.Metadata[apiNamedSessionMetadataKey]) == "true"
 	r.SubmissionCapabilities = session.SubmissionCapabilitiesForMetadata(b.Metadata, hasDeferredQueue)
 	// Expose only real_world_app_* prefixed metadata keys to API consumers.
@@ -252,7 +256,7 @@ func (s *Server) handleSessionList(w http.ResponseWriter, r *http.Request) {
 	items := make([]sessionResponse, len(sessions))
 	hasDeferredQueue := strings.TrimSpace(s.state.CityPath()) != ""
 	for i, sess := range sessions {
-		items[i] = sessionResponseWithReason(sess, beadIndex[sess.ID], cfg, hasDeferredQueue)
+		items[i] = sessionResponseWithReason(sess, beadIndex[sess.ID], cfg, s.state.SessionProvider(), hasDeferredQueue)
 		s.enrichSessionResponse(&items[i], sess, cfg, s.runtimeSessionResponseHandle(sess), wantPeek, false, false, 0)
 	}
 
@@ -307,7 +311,7 @@ func (s *Server) handleSessionGet(w http.ResponseWriter, r *http.Request) {
 	}
 	b, _ := store.Get(id)
 	wantPeek := r.URL.Query().Get("peek") == "true"
-	resp := sessionResponseWithReason(info, &b, cfg, strings.TrimSpace(s.state.CityPath()) != "")
+	resp := sessionResponseWithReason(info, &b, cfg, s.state.SessionProvider(), strings.TrimSpace(s.state.CityPath()) != "")
 	handle, err := s.workerHandleForSession(store, id)
 	if err == nil {
 		s.enrichSessionResponse(&resp, info, cfg, handle, wantPeek, true, true, 0)
@@ -530,7 +534,7 @@ func (s *Server) handleSessionRename(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	updated, _ := store.Get(id)
-	rresp := sessionResponseWithReason(info, &updated, s.state.Config(), strings.TrimSpace(s.state.CityPath()) != "")
+	rresp := sessionResponseWithReason(info, &updated, s.state.Config(), s.state.SessionProvider(), strings.TrimSpace(s.state.CityPath()) != "")
 	writeJSON(w, http.StatusOK, rresp)
 }
 
@@ -754,7 +758,7 @@ func (s *Server) handleSessionPatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	updated, _ := store.Get(id)
-	presp := sessionResponseWithReason(info, &updated, s.state.Config(), strings.TrimSpace(s.state.CityPath()) != "")
+	presp := sessionResponseWithReason(info, &updated, s.state.Config(), s.state.SessionProvider(), strings.TrimSpace(s.state.CityPath()) != "")
 	writeJSON(w, http.StatusOK, presp)
 }
 

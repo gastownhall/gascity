@@ -268,6 +268,75 @@ func TestResolvedWorkerRuntimeWithConfigSeedsCityRuntimeEnv(t *testing.T) {
 	}
 }
 
+func TestResolvedWorkerRuntimeWithConfigIncludesProviderAuthPassthrough(t *testing.T) {
+	cityDir := t.TempDir()
+	gcDir := filepath.Join(cityDir, ".gc")
+	if err := os.MkdirAll(gcDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(gcDir, "settings.json"), []byte(`{}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ANTHROPIC_AUTH_TOKEN", "test-anthropic-auth-token")
+	t.Setenv("ANTHROPIC_BASE_URL", "https://ollama.example.test")
+	t.Setenv("ANTHROPIC_DEFAULT_SONNET_MODEL", "kimi-k2.5")
+	t.Setenv("CLAUDE_CODE_SUBAGENT_MODEL", "kimi-k2.5")
+	t.Setenv("OLLAMA_API_KEY", "test-ollama-token")
+	t.Setenv("GC_RIG", "caller-rig")
+	t.Setenv("GC_SESSION_NAME", "caller-session")
+
+	claude := config.BuiltinProviders()["claude"]
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:     "worker",
+			Provider: "claude",
+		}},
+		Providers: map[string]config.ProviderSpec{
+			"claude": claude,
+		},
+	}
+
+	resolved, err := resolvedWorkerRuntimeWithConfig(cityDir, cfg, session.Info{
+		Template: "worker",
+		WorkDir:  cityDir,
+	}, "")
+	if err != nil {
+		t.Fatalf("resolvedWorkerRuntimeWithConfig: %v", err)
+	}
+	if resolved == nil {
+		t.Fatal("resolvedWorkerRuntimeWithConfig() = nil")
+	}
+	for key, want := range map[string]string{
+		"ANTHROPIC_AUTH_TOKEN":           "test-anthropic-auth-token",
+		"ANTHROPIC_BASE_URL":             "https://ollama.example.test",
+		"ANTHROPIC_DEFAULT_SONNET_MODEL": "kimi-k2.5",
+		"CLAUDE_CODE_SUBAGENT_MODEL":     "kimi-k2.5",
+		"OLLAMA_API_KEY":                 "test-ollama-token",
+	} {
+		if got := resolved.SessionEnv[key]; got != want {
+			t.Errorf("SessionEnv[%s] = %q, want %q", key, got, want)
+		}
+		if got := resolved.Hints.Env[key]; got != want {
+			t.Errorf("Hints.Env[%s] = %q, want %q", key, got, want)
+		}
+	}
+	for _, key := range []string{"GC_RIG", "GC_SESSION_NAME"} {
+		if got, ok := resolved.SessionEnv[key]; ok {
+			t.Errorf("SessionEnv[%s] = %q, want absent caller context", key, got)
+		}
+		if got, ok := resolved.Hints.Env[key]; ok {
+			t.Errorf("Hints.Env[%s] = %q, want absent caller context", key, got)
+		}
+	}
+	if got := resolved.SessionEnv["GC_CITY"]; got != cityDir {
+		t.Errorf("SessionEnv[GC_CITY] = %q, want %q", got, cityDir)
+	}
+	if got := resolved.Hints.Env["GC_CITY"]; got != cityDir {
+		t.Errorf("Hints.Env[GC_CITY] = %q, want %q", got, cityDir)
+	}
+}
+
 // TestResolvedWorkerRuntimeWithConfigCityAnchorsBeatConflictingProviderEnv
 // pins the precedence contract: when the resolved provider env carries
 // its own GC_CITY (e.g. left over from a stale pool entry, or a
@@ -406,6 +475,69 @@ func TestResolvedWorkerSessionConfigWithConfigSeedsCityAnchorsOnCreatePath(t *te
 	}
 	if got, present := env["GC_CONTROL_DISPATCHER_TRACE_DEFAULT"]; present {
 		t.Errorf("Runtime.SessionEnv[GC_CONTROL_DISPATCHER_TRACE_DEFAULT] = %q present, want absent (identity-only)", got)
+	}
+}
+
+func TestResolvedWorkerSessionConfigWithConfigIncludesProviderAuthPassthrough(t *testing.T) {
+	cityDir := t.TempDir()
+	gcDir := filepath.Join(cityDir, ".gc")
+	if err := os.MkdirAll(gcDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ANTHROPIC_AUTH_TOKEN", "test-anthropic-auth-token")
+	t.Setenv("ANTHROPIC_BASE_URL", "https://ollama.example.test")
+	t.Setenv("ANTHROPIC_DEFAULT_SONNET_MODEL", "kimi-k2.5")
+	t.Setenv("CLAUDE_CODE_SUBAGENT_MODEL", "kimi-k2.5")
+	t.Setenv("OLLAMA_API_KEY", "test-ollama-token")
+	t.Setenv("GC_RIG", "caller-rig")
+	t.Setenv("GC_SESSION_NAME", "caller-session")
+
+	cfg, err := resolvedWorkerSessionConfigWithConfig(
+		cityDir,
+		"",
+		"",
+		cityDir,
+		"worker",
+		"",
+		"worker",
+		"Worker",
+		"",
+		&config.ResolvedProvider{Name: "claude"},
+		map[string]string{"session_origin": "test"},
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("resolvedWorkerSessionConfigWithConfig: %v", err)
+	}
+	env := cfg.Runtime.SessionEnv
+	hintsEnv := cfg.Runtime.Hints.Env
+	for key, want := range map[string]string{
+		"ANTHROPIC_AUTH_TOKEN":           "test-anthropic-auth-token",
+		"ANTHROPIC_BASE_URL":             "https://ollama.example.test",
+		"ANTHROPIC_DEFAULT_SONNET_MODEL": "kimi-k2.5",
+		"CLAUDE_CODE_SUBAGENT_MODEL":     "kimi-k2.5",
+		"OLLAMA_API_KEY":                 "test-ollama-token",
+	} {
+		if got := env[key]; got != want {
+			t.Errorf("Runtime.SessionEnv[%s] = %q, want %q", key, got, want)
+		}
+		if got := hintsEnv[key]; got != want {
+			t.Errorf("Runtime.Hints.Env[%s] = %q, want %q", key, got, want)
+		}
+	}
+	for _, key := range []string{"GC_RIG", "GC_SESSION_NAME"} {
+		if got, ok := env[key]; ok {
+			t.Errorf("Runtime.SessionEnv[%s] = %q, want absent caller context", key, got)
+		}
+		if got, ok := hintsEnv[key]; ok {
+			t.Errorf("Runtime.Hints.Env[%s] = %q, want absent caller context", key, got)
+		}
+	}
+	if got := env["GC_CITY"]; got != cityDir {
+		t.Errorf("Runtime.SessionEnv[GC_CITY] = %q, want %q", got, cityDir)
+	}
+	if got := hintsEnv["GC_CITY"]; got != cityDir {
+		t.Errorf("Runtime.Hints.Env[GC_CITY] = %q, want %q", got, cityDir)
 	}
 }
 

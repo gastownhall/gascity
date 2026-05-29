@@ -55,15 +55,17 @@ Each is provably composable from the primitives.
     reconciliation tick, order dispatch
 14. **[Orders](./orders.md)** — trigger-conditioned formula/exec
     dispatch, rig-scoped labels
+15. **[Gas City Pack Specification (2.0)](../../docs/specs/pack-spec.md)** —
+    authoritative pack data model, file format, and loader semantics
 
 ### End-to-End Traces
 
 These trace a concrete operation through all layers. The most effective
 way to understand how the system fits together.
 
-15. **[Life of a Bead](./life-of-a-bead.md)** — create → hook → claim →
+16. **[Life of a Bead](./life-of-a-bead.md)** — create → hook → claim →
     execute → close
-16. **[Life of a Molecule](./life-of-a-molecule.md)** — formula parse →
+17. **[Life of a Molecule](./life-of-a-molecule.md)** — formula parse →
     dispatch → molecule create → step execution → completion
 
 ## Document Types

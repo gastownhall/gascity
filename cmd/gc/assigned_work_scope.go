@@ -58,7 +58,14 @@ func filterAssignedWorkBeadsForPoolDemand(
 	}
 	filtered := make([]beads.Bead, 0, len(assignedWorkBeads))
 	for i, wb := range assignedWorkBeads {
-		template := strings.TrimSpace(wb.Metadata["gc.routed_to"])
+		// gc.run_target (per-step) takes precedence over gc.routed_to
+		// (convoy-wide default). See dispatch/fanout.go for the original
+		// precedence and adaf6ec for the formula migration that introduced
+		// gc.run_target.
+		template := strings.TrimSpace(wb.Metadata["gc.run_target"])
+		if template == "" {
+			template = strings.TrimSpace(wb.Metadata["gc.routed_to"])
+		}
 		if template == "" {
 			if sessionBeadID := assigneeToSessionBeadID[strings.TrimSpace(wb.Assignee)]; sessionBeadID != "" {
 				template = sessionBeadTemplate[sessionBeadID]

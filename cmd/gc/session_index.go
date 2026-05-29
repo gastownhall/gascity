@@ -112,7 +112,7 @@ func (idx *sessionIndex) occupancy(template string) int {
 			continue
 		}
 		switch e.state {
-		case "creating", "active", "awake", "asleep", "suspended", "quarantined":
+		case "start-pending", "creating", "active", "awake", "asleep", "suspended", "quarantined":
 			count++
 		}
 	}

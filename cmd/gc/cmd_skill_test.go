@@ -215,29 +215,10 @@ func TestSkillListAgentShowsFullCityCatalog(t *testing.T) {
 	clearGCEnv(t)
 	cityDir := t.TempDir()
 	t.Setenv("GC_CITY", cityDir)
-	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
-		t.Fatalf("MkdirAll(.gc): %v", err)
-	}
+	writeNamedSessionCityTOML(t, cityDir)
 	// mayor declares an attachment list — this is a v0.15.0 tombstone and
 	// must be ignored; other-skill should still appear in the agent's view.
-	toml := `[workspace]
-name = "test-city"
-
-[beads]
-provider = "file"
-
-[[agent]]
-name = "mayor"
-provider = "codex"
-start_command = "echo"
-skills = ["attached-skill"]
-
-[[named_session]]
-template = "mayor"
-`
-	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(toml), 0o644); err != nil {
-		t.Fatalf("WriteFile(city.toml): %v", err)
-	}
+	writeCatalogFile(t, cityDir, "agents/mayor/agent.toml", "provider = \"codex\"\nstart_command = \"echo\"\nskills = [\"attached-skill\"]\n")
 	writeCatalogFile(t, cityDir, "skills/attached-skill/SKILL.md", "attached")
 	writeCatalogFile(t, cityDir, "skills/other-skill/SKILL.md", "other")
 	writeCatalogFile(t, cityDir, "agents/mayor/skills/private-workflow/SKILL.md", "agent-local")

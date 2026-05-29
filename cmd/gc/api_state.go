@@ -56,6 +56,7 @@ type controllerState struct {
 	extmsgSvc              *extmsg.Services
 	adapterReg             *extmsg.AdapterRegistry
 	updateMu               sync.Mutex // serializes rebuild+swap so stale reloads cannot overtake newer mutations
+	beadEventStartSeq      uint64
 
 	// True after an API config mutation refreshes controller state ahead of the
 	// runtime reload loop. Runtime reloads from older revisions are ignored
@@ -66,16 +67,18 @@ type controllerState struct {
 
 var controllerStateInitRigDirIfReady = initDirIfReady
 
+var beadEventWatcherRetryDelay = time.Second
+
 // newControllerStateOpenCityStore opens the city-level bead store for
 // newControllerState. Test code can swap this to return an in-memory store
 // and skip spawning managed dolt (~12s per call).
 var newControllerStateOpenCityStore = openCityStoreAt
 
 type configMutationSnapshot struct {
-	cityPath   string
-	files      map[string][]byte
-	existed    map[string]bool
-	agentFiles map[string]struct{}
+	cityPath  string
+	files     map[string][]byte
+	existed   map[string]bool
+	agentTree *fsys.TreeSnapshot
 }
 
 // newControllerState creates a controllerState with per-rig stores.
@@ -91,17 +94,24 @@ func newControllerState(
 		ctx = context.Background()
 	}
 	tomlPath := filepath.Join(cityPath, "city.toml")
+	var beadEventStartSeq uint64
+	if ep != nil {
+		if seq, err := ep.LatestSeq(); err == nil {
+			beadEventStartSeq = seq
+		}
+	}
 	cs := &controllerState{
-		cfg:        cfg,
-		sp:         sp,
-		cacheCtx:   ctx,
-		eventProv:  ep,
-		editor:     configedit.NewEditor(fsys.OSFS{}, tomlPath),
-		cityName:   cityName,
-		cityPath:   cityPath,
-		version:    version,
-		startedAt:  time.Now(),
-		adapterReg: extmsg.NewAdapterRegistry(),
+		cfg:               cfg,
+		sp:                sp,
+		cacheCtx:          ctx,
+		eventProv:         ep,
+		editor:            configedit.NewEditor(fsys.OSFS{}, tomlPath),
+		cityName:          cityName,
+		cityPath:          cityPath,
+		version:           version,
+		startedAt:         time.Now(),
+		adapterReg:        extmsg.NewAdapterRegistry(),
+		beadEventStartSeq: beadEventStartSeq,
 	}
 	cs.beadStores = cs.buildStores(cfg)
 	// Open city-level store for session beads and mail (best-effort).
@@ -251,12 +261,21 @@ func (cs *controllerState) startBeadEventWatcher(ctx context.Context) {
 	if ep == nil {
 		return
 	}
+	seq := cs.beadEventStartSeq
 	go func() {
-		seq, _ := ep.LatestSeq()
 		for {
 			watcher, err := ep.Watch(ctx, seq)
 			if err != nil {
-				return
+				if ctx.Err() != nil {
+					return
+				}
+				fmt.Fprintf(os.Stderr, "api: bead event watcher: watch from seq %d: %v\n", seq, err)
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(beadEventWatcherRetryDelay):
+					continue
+				}
 			}
 			for {
 				evt, err := watcher.Next()
@@ -1040,10 +1059,9 @@ func (cs *controllerState) DeleteProviderPatch(name string) error {
 
 func captureConfigMutationSnapshot(cityPath string) (*configMutationSnapshot, error) {
 	snapshot := &configMutationSnapshot{
-		cityPath:   cityPath,
-		files:      make(map[string][]byte),
-		existed:    make(map[string]bool),
-		agentFiles: make(map[string]struct{}),
+		cityPath: cityPath,
+		files:    make(map[string][]byte),
+		existed:  make(map[string]bool),
 	}
 
 	capture := func(path string) error {
@@ -1069,16 +1087,11 @@ func captureConfigMutationSnapshot(cityPath string) (*configMutationSnapshot, er
 		}
 	}
 
-	agentFiles, err := filepath.Glob(filepath.Join(cityPath, "agents", "*", "agent.toml"))
+	agentTree, err := fsys.SnapshotTree(fsys.OSFS{}, filepath.Join(cityPath, "agents"))
 	if err != nil {
-		return nil, fmt.Errorf("listing agent overrides: %w", err)
+		return nil, fmt.Errorf("snapshotting agent scaffolds: %w", err)
 	}
-	for _, path := range agentFiles {
-		snapshot.agentFiles[path] = struct{}{}
-		if err := capture(path); err != nil {
-			return nil, err
-		}
-	}
+	snapshot.agentTree = agentTree
 
 	return snapshot, nil
 }
@@ -1086,17 +1099,9 @@ func captureConfigMutationSnapshot(cityPath string) (*configMutationSnapshot, er
 func (s *configMutationSnapshot) restore() error {
 	var restoreErr error
 
-	currentAgentFiles, err := filepath.Glob(filepath.Join(s.cityPath, "agents", "*", "agent.toml"))
-	if err != nil {
-		restoreErr = errors.Join(restoreErr, fmt.Errorf("listing current agent overrides: %w", err))
-	} else {
-		for _, path := range currentAgentFiles {
-			if _, existed := s.agentFiles[path]; existed {
-				continue
-			}
-			if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-				restoreErr = errors.Join(restoreErr, fmt.Errorf("removing %s: %w", path, err))
-			}
+	if s.agentTree != nil {
+		if err := s.agentTree.Restore(fsys.OSFS{}); err != nil {
+			restoreErr = errors.Join(restoreErr, fmt.Errorf("restoring agent scaffolds: %w", err))
 		}
 	}
 
@@ -1214,7 +1219,7 @@ func (cs *controllerState) WaitForSessionCommandable(ctx context.Context, sessio
 		switch info.State {
 		case session.StateActive, session.StateAwake, session.StateAsleep, session.StateSuspended, session.StateQuarantined:
 			return info, nil
-		case session.StateCreating, "":
+		case session.StateStartPending, session.StateCreating, "":
 		default:
 			return session.Info{}, fmt.Errorf("session %s reached non-commandable state %q", sessionID, info.State)
 		}

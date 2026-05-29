@@ -257,8 +257,8 @@ func TestCityInitServiceScaffoldPreservesExistingDirectoryWhenRegisterFails(t *t
 
 func TestCityInitServiceInitScaffoldsAndFinalizes(t *testing.T) {
 	skipSlowCmdGCTest(t, "runs the full local init scaffold/finalize path; run make test-cmd-gc-process for full coverage")
-	configureTestDoltIdentityEnv(t)
-	configureRealBdAndDoltPath(t)
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_DOLT", "skip")
 	cityPath := filepath.Join(t.TempDir(), "init-city")
 	cleanupManagedDoltTestCity(t, cityPath)
 

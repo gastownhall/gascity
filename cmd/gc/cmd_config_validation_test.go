@@ -56,7 +56,7 @@ func TestValidateLegacyFormulaConfigRoutes_RejectsTemplateAssignee(t *testing.T)
 	if err := os.MkdirAll(formulasDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	writeFile(t, filepath.Join(formulasDir, "legacy.formula.toml"), `
+	writeFile(t, filepath.Join(formulasDir, "legacy.toml"), `
 formula = "legacy"
 version = 2
 
@@ -92,7 +92,7 @@ func TestValidateLegacyFormulaConfigRoutes_AllowsNamedSessionAssignee(t *testing
 	if err := os.MkdirAll(formulasDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	writeFile(t, filepath.Join(formulasDir, "named.formula.toml"), `
+	writeFile(t, filepath.Join(formulasDir, "named.toml"), `
 formula = "named"
 version = 2
 

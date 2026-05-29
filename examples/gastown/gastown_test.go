@@ -86,6 +86,63 @@ func assertCurrentWispBurnsGuarded(t *testing.T, name, body string) {
 	}
 }
 
+func refineryMergePushDescription(t *testing.T) string {
+	t.Helper()
+	parser := formula.NewParser(gastownFormulaSearchPaths()...)
+	f, err := parser.ParseFile(filepath.Join(exampleDir(), "packs", "gastown", "formulas", "mol-refinery-patrol.toml"))
+	if err != nil {
+		t.Fatalf("parsing refinery formula: %v", err)
+	}
+	for _, step := range f.Steps {
+		if step.ID == "merge-push" {
+			return step.Description
+		}
+	}
+	t.Fatal("refinery formula missing merge-push step")
+	return ""
+}
+
+func extractBetween(t *testing.T, body, startMarker, endMarker string) string {
+	t.Helper()
+	start := strings.Index(body, startMarker)
+	if start == -1 {
+		t.Fatalf("missing start marker %q", startMarker)
+	}
+	end := strings.Index(body[start:], endMarker)
+	if end == -1 {
+		t.Fatalf("missing end marker %q after %q", endMarker, startMarker)
+	}
+	return body[start : start+end]
+}
+
+func refineryPRHelpers(t *testing.T) string {
+	t.Helper()
+	return extractBetween(t, refineryMergePushDescription(t), "pr_lookup_missing() {", "\nif [ \"$MERGE_STRATEGY\" = \"mr\" ]")
+}
+
+func refineryPRSetupHelpers(t *testing.T) string {
+	t.Helper()
+	return extractBetween(t, refineryMergePushDescription(t), "block_existing_pr() {", "\nif [ \"$MERGE_STRATEGY\" = \"mr\" ]")
+}
+
+func refineryExistingPRValidationBlock(t *testing.T) string {
+	t.Helper()
+	return extractBetween(t, refineryMergePushDescription(t), `if [ "$MERGE_STRATEGY" = "mr" ] && [ -n "$EXISTING_PR" ]; then`, "\n```\n\n**If MERGE_STRATEGY")
+}
+
+func linkTestCommands(t *testing.T, binDir string, names ...string) {
+	t.Helper()
+	for _, name := range names {
+		path, err := exec.LookPath(name)
+		if err != nil {
+			t.Fatalf("finding %s: %v", name, err)
+		}
+		if err := os.Symlink(path, filepath.Join(binDir, name)); err != nil {
+			t.Fatalf("linking %s: %v", name, err)
+		}
+	}
+}
+
 func assertCurrentWispBurnsRequireSuccessor(t *testing.T, name, body string) {
 	t.Helper()
 	lines := strings.Split(body, "\n")
@@ -247,12 +304,20 @@ func TestCityPackTomlParses(t *testing.T) {
 	if gastownImp.Source != "packs/gastown" {
 		t.Errorf("pack.toml imports[\"gastown\"].Source = %q, want %q", gastownImp.Source, "packs/gastown")
 	}
-	gastownDefault, ok := tc.Defaults.Rig.Imports["gastown"]
+	cityData, err := os.ReadFile(filepath.Join(dir, "city.toml"))
+	if err != nil {
+		t.Fatalf("reading city.toml: %v", err)
+	}
+	var cityCfg config.City
+	if _, err := toml.Decode(string(cityData), &cityCfg); err != nil {
+		t.Fatalf("parsing city.toml: %v", err)
+	}
+	gastownDefault, ok := cityCfg.Defaults.Rig.Imports["gastown"]
 	if !ok {
-		t.Fatalf("pack.toml defaults.rig.imports = %v, want entry for \"gastown\"", tc.Defaults.Rig.Imports)
+		t.Fatalf("city.toml defaults.rig.imports = %v, want entry for \"gastown\"", cityCfg.Defaults.Rig.Imports)
 	}
 	if gastownDefault.Source != "packs/gastown" {
-		t.Errorf("pack.toml defaults.rig.imports[\"gastown\"].Source = %q, want %q", gastownDefault.Source, "packs/gastown")
+		t.Errorf("city.toml defaults.rig.imports[\"gastown\"].Source = %q, want %q", gastownDefault.Source, "packs/gastown")
 	}
 }
 
@@ -316,6 +381,8 @@ func TestRefineryFormulaSupportsMergeStrategies(t *testing.T) {
 	for _, want := range []string{
 		".metadata.merge_strategy // \"direct\"",
 		"gh pr create",
+		"git credential fill",
+		"https://api.github.com/repos/$OWNER/$REPO",
 		"Pull request ready:",
 		"merge_strategy=local",
 	} {
@@ -468,14 +535,14 @@ func TestPolecatFormulaSignalsRefineryAfterReassign(t *testing.T) {
 	nudge := `gc session nudge "$REFINERY_TARGET" "Run 'gc prime' to check merge queue and begin processing." || true`
 
 	assertContainsInOrder(t, body,
-		"**5. Reassign to refinery:**",
+		"**6. Reassign to refinery:**",
 		refineryTarget,
-		`gc bd update {{issue}} --status=open --assignee="$REFINERY_TARGET" --set-metadata gc.routed_to="$REFINERY_TARGET"`,
-		"**6. Signal refinery to check for work immediately",
+		`gc bd update {{issue}} --status=open --assignee="$REFINERY_TARGET" --set-metadata gc.routed_to=""`,
+		"**7. Signal refinery to check for work immediately",
 		refineryTarget,
 		`gc session wake "$REFINERY_TARGET" || true`,
 		nudge,
-		"**7. Signal reconciler and exit.**",
+		"**8. Signal reconciler and exit.**",
 	)
 
 	for _, bad := range []string{
@@ -487,6 +554,73 @@ func TestPolecatFormulaSignalsRefineryAfterReassign(t *testing.T) {
 			t.Fatalf("polecat formula must preserve refinery handoff diagnostics and pass a nudge message; found %q", bad)
 		}
 	}
+	if strings.Contains(body, `--assignee="$REFINERY_TARGET" --set-metadata gc.routed_to="$REFINERY_TARGET"`) {
+		t.Fatal("polecat formula must clear gc.routed_to instead of routing to the refinery named session")
+	}
+}
+
+// TestPolecatFormulaSubmitHasBranchShapeGate is the regression test
+// for gastownhall/gascity#2082: the submit-and-exit step must include
+// a fail-closed gate that refuses to reassign to refinery when the
+// current branch isn't `polecat/<bead-id>`. Without this gate, a
+// provider that skipped workspace-setup (observed with codex)
+// silently strands work on its agent home branch — metadata.branch
+// never points at a valid polecat/<bead-id> merge target, so the
+// refinery's bead-driven handoff finds nothing to merge.
+func TestPolecatFormulaSubmitHasBranchShapeGate(t *testing.T) {
+	dir := exampleDir()
+	path := filepath.Join(dir, "packs", "gastown", "formulas", "mol-polecat-work.toml")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading polecat formula: %v", err)
+	}
+	body := string(data)
+
+	// The gate body must appear before the push (so a divergent
+	// branch never reaches origin) and before the refinery reassign
+	// (so a divergent branch never advances the bead state).
+	assertContainsInOrder(t, body,
+		"**1. Branch-shape gate (fails closed",
+		`CURRENT_BRANCH=$(git branch --show-current)`,
+		`EXPECTED_BRANCH="polecat/{{issue}}"`,
+		`if [ "$CURRENT_BRANCH" != "$EXPECTED_BRANCH" ]; then`,
+		`BRANCH SHAPE GATE FAILED`,
+		`gc runtime drain-ack`,
+		`exit 1`,
+		"**2. Final clean-state verification (safeguard):**",
+		"**3. Push your branch:**",
+		"**6. Reassign to refinery:**",
+	)
+
+	// The metadata.branch reconciliation must also be present so a
+	// workspace-setup step that ran but failed to record the branch
+	// is repaired before refinery handoff.
+	assertContainsInOrder(t, body,
+		`METADATA_BRANCH=$(gc bd show {{issue}} --json | jq -r '.[0].metadata.branch // empty')`,
+		`gc bd update {{issue}} --set-metadata branch="$EXPECTED_BRANCH"`,
+	)
+}
+
+// TestPolecatPromptInlinesBranchConvention asserts the polecat agent
+// prompt embeds the polecat/<bead-id> convention verbatim in a
+// CRITICAL section, so a provider that skips reading the formula
+// (observed with codex on #2082) still sees the rule inline.
+func TestPolecatPromptInlinesBranchConvention(t *testing.T) {
+	dir := exampleDir()
+	path := filepath.Join(dir, "packs", "gastown", "agents", "polecat", "prompt.template.md")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading polecat prompt: %v", err)
+	}
+	body := string(data)
+
+	assertContainsInOrder(t, body,
+		"## CRITICAL: Branch Convention",
+		"`polecat/<bead-id>`",
+		"`metadata.branch`",
+		"handoff contract is broken",
+		"gastownhall/gascity#2082",
+	)
 }
 
 func TestPolecatFormulaSelfReviewRendersAffectedTestModes(t *testing.T) {
@@ -554,14 +688,109 @@ func TestPolecatPromptDoneSequenceSignalsRefinery(t *testing.T) {
 	assertContainsInOrder(t, body,
 		"## FINAL REMINDER: RUN THE DONE SEQUENCE",
 		`REFINERY_TARGET="${GC_RIG:+$GC_RIG/}{{ .BindingPrefix }}refinery"`,
-		`gc bd update <work-bead> --status=open --assignee="$REFINERY_TARGET" --set-metadata gc.routed_to="$REFINERY_TARGET"`,
+		`gc bd update <work-bead> --status=open --assignee="$REFINERY_TARGET" --set-metadata gc.routed_to=""`,
 		`gc session wake "$REFINERY_TARGET" || true`,
 		`gc session nudge "$REFINERY_TARGET" "Run 'gc prime' to check merge queue and begin processing." || true`,
 		`gc runtime drain-ack`,
 	)
+	if strings.Contains(body, `--assignee="$REFINERY_TARGET" --set-metadata gc.routed_to="$REFINERY_TARGET"`) {
+		t.Fatal("polecat prompt must clear gc.routed_to instead of routing to the refinery named session")
+	}
 	if !strings.Contains(body, "Done sequence (push, set metadata, reassign, wake refinery, nudge refinery, `gc runtime drain-ack`, exit)") {
 		t.Fatalf("polecat quick reference must include the refinery wake+nudge handoff")
 	}
+}
+
+// TestPolecatPromptHaltsOnAutoPushFalse asserts the done sequence respects
+// mol-pr-from-issue's auto_push=false halt-at-branch-ready contract. The
+// gate must run BEFORE `git push origin HEAD` so a false signal prevents
+// the push and refinery handoff entirely. Regression for gco-ded / gc-m3j:
+// prompt's done sequence was structurally overriding the formula's
+// auto_push gate (BYPASS rate hit 75%).
+func TestPolecatPromptHaltsOnAutoPushFalse(t *testing.T) {
+	dir := exampleDir()
+	path := filepath.Join(dir, "packs", "gastown", "agents", "polecat", "prompt.template.md")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading polecat prompt: %v", err)
+	}
+	body := string(data)
+
+	assertContainsInOrder(t, body,
+		"## FINAL REMINDER: RUN THE DONE SEQUENCE",
+		`AUTO_PUSH=$(gc bd show <work-bead> --json | jq -r '.[0].metadata | if has("auto_push") then (.auto_push | tostring) else "" end')`,
+		`if [ "$AUTO_PUSH" = "false" ]; then`,
+		`BRANCH=$(git branch --show-current)`,
+		`gc bd update <work-bead> \`,
+		`--status=open --assignee=""`,
+		`--set-metadata branch="$BRANCH"`,
+		`--set-metadata target={{ .DefaultBranch }}`,
+		`--set-metadata branch_ready=true`,
+		`--set-metadata halt_reason=auto_push_false`,
+		`--set-metadata gc.routed_to=""`,
+		`gc runtime drain-ack`,
+		"exit 0",
+		"fi",
+		"git push origin HEAD",
+	)
+}
+
+func TestPolecatRenderedApprovalFallacyHaltsOnAutoPushFalse(t *testing.T) {
+	body := renderGastownPromptForPack(t,
+		"packs/gastown/agents/polecat/prompt.template.md",
+		"polecat",
+		"polecat",
+		"gascity",
+		"gastown",
+		"gastown.",
+	)
+	doneSequence := sectionBetween(t, body, "### The Done Sequence", "This pushes your branch")
+
+	assertContainsInOrder(t, doneSequence,
+		`AUTO_PUSH=$(gc bd show <work-bead> --json | jq -r '.[0].metadata | if has("auto_push") then (.auto_push | tostring) else "" end')`,
+		`if [ "$AUTO_PUSH" = "false" ]; then`,
+		`BRANCH=$(git branch --show-current)`,
+		`gc bd update <work-bead> \`,
+		`--status=open --assignee=""`,
+		`--set-metadata branch="$BRANCH"`,
+		`--set-metadata target=main`,
+		`--set-metadata branch_ready=true`,
+		`--set-metadata halt_reason=auto_push_false`,
+		`--set-metadata gc.routed_to=""`,
+		`gc runtime drain-ack`,
+		"exit 0",
+		"fi",
+		"git push origin HEAD",
+	)
+}
+
+func TestPolecatFormulaHaltsOnAutoPushFalse(t *testing.T) {
+	dir := exampleDir()
+	path := filepath.Join(dir, "packs", "gastown", "formulas", "mol-polecat-work.toml")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading polecat formula: %v", err)
+	}
+	body := string(data)
+	submit := sectionBetween(t, body, `id = "submit-and-exit"`, "The refinery will pick this up")
+
+	assertContainsInOrder(t, submit,
+		"Push your branch:",
+		`AUTO_PUSH=$(gc bd show {{issue}} --json | jq -r '.[0].metadata | if has("auto_push") then (.auto_push | tostring) else "" end')`,
+		`if [ "$AUTO_PUSH" = "false" ]; then`,
+		`BRANCH=$(git branch --show-current)`,
+		`gc bd update {{issue}} \`,
+		`--status=open --assignee=""`,
+		`--set-metadata branch="$BRANCH"`,
+		`--set-metadata target={{base_branch}}`,
+		`--set-metadata branch_ready=true`,
+		`--set-metadata halt_reason=auto_push_false`,
+		`--set-metadata gc.routed_to=""`,
+		`gc runtime drain-ack`,
+		"exit 0",
+		"fi",
+		"git push origin HEAD",
+	)
 }
 
 func TestRefineryFormulaRespectsExistingPRMetadata(t *testing.T) {
@@ -574,7 +803,11 @@ func TestRefineryFormulaRespectsExistingPRMetadata(t *testing.T) {
 	body := string(data)
 	for _, want := range []string{
 		`EXISTING_PR=$(gc bd show $WORK --json | jq -r '.[0].metadata.existing_pr // empty')`,
-		`ORIGIN_REPO=$(gh repo view --json nameWithOwner -q '.nameWithOwner')`,
+		`if command -v gh >/dev/null 2>&1; then`,
+		`ORIGIN_REPO=$(gh repo view --json nameWithOwner -q '.nameWithOwner' 2>&1)`,
+		`ORIGIN_REPO_ERROR="gh repo view failed while resolving origin repository: $ORIGIN_REPO"`,
+		`ORIGIN_REPO=$(printf '%s\n' "$ORIGIN_URL"`,
+		`GitHub REST fallback supports only github.com origin remotes`,
 		`metadata.existing_pr requires pull-request handoff; using merge_strategy=mr`,
 		`block_existing_pr()`,
 		`--assignee=""`,
@@ -587,9 +820,17 @@ func TestRefineryFormulaRespectsExistingPRMetadata(t *testing.T) {
 		`if [ -n "$CURRENT_WISP" ]; then`,
 		`gc bd mol burn "$CURRENT_WISP" --force`,
 		`pr_lookup_missing()`,
+		`pr_lookup_repo_mismatch()`,
+		`resolve_github_token()`,
+		`TOKEN="${GH_TOKEN:-${GITHUB_TOKEN:-${GIT_TOKEN:-}}}"`,
+		`init_github_rest()`,
+		`curl_gh_api()`,
+		`-H "Content-Type: application/json"`,
+		`lookup_pr_info()`,
 		`EXISTING_PR_ERR=$(mktemp)`,
-		`EXISTING_PR_INFO=$(gh pr view --json url,number,state,headRefName,baseRefName,headRepositoryOwner,headRepository -- "$EXISTING_PR" 2>"$EXISTING_PR_ERR")`,
+		`EXISTING_PR_INFO=$(lookup_pr_info "$EXISTING_PR" "$EXISTING_PR_ERR")`,
 		`EXISTING_PR_STATUS=$?`,
+		`if pr_lookup_repo_mismatch "$EXISTING_PR_ERROR"; then`,
 		`if pr_lookup_missing "$EXISTING_PR_ERROR"; then`,
 		`Existing PR $EXISTING_PR was not found or is not accessible.`,
 		`Could not resolve existing PR $EXISTING_PR. STOP. Debug and retry without mutating bead state.`,
@@ -607,6 +848,16 @@ func TestRefineryFormulaRespectsExistingPRMetadata(t *testing.T) {
 		`PR_REF="$EXISTING_PR"`,
 		`PR_STATUS=$?`,
 		`if [ -n "$EXISTING_PR" ] && pr_lookup_missing "$PR_ERROR"; then`,
+		`command -v gh >/dev/null 2>&1`,
+		`printf 'protocol=https\nhost=github.com\n\n'`,
+		`git credential fill 2>/dev/null`,
+		`PR_NUMBER=$(printf '%s\n' "$ref" | sed -nE`,
+		`--data-urlencode "head=$OWNER:$BRANCH"`,
+		`-X POST "$API/pulls"`,
+		`PR_NUMBER=$(printf '%s\n' "$CREATED" | jq -r '.number // empty')`,
+		`GitHub API request failed while creating a PR for $BRANCH.`,
+		`state:(.state | ascii_upcase)`,
+		`headRepositoryOwner:{login:.head.repo.owner.login}`,
 		`PR_REPO=$(printf '%s\n' "$PR_URL" | sed -E 's#^https://github.com/([^/]+/[^/]+)/pull/[0-9]+$#\\1#')`,
 		`Existing PR $EXISTING_PR belongs to repo $PR_REPO, want $ORIGIN_REPO`,
 		`if [ -n "$EXISTING_PR" ]; then`,
@@ -617,10 +868,327 @@ func TestRefineryFormulaRespectsExistingPRMetadata(t *testing.T) {
 	}
 	assertContainsInOrder(t, body,
 		`EXISTING_PR=$(gc bd show $WORK --json | jq -r '.[0].metadata.existing_pr // empty')`,
-		`EXISTING_PR_INFO=$(gh pr view --json url,number,state,headRefName,baseRefName,headRepositoryOwner,headRepository -- "$EXISTING_PR" 2>"$EXISTING_PR_ERR")`,
+		`EXISTING_PR_INFO=$(lookup_pr_info "$EXISTING_PR" "$EXISTING_PR_ERR")`,
 		`git push origin HEAD:$BRANCH --force-with-lease`,
 		`gh pr create`,
+		`PR_INFO=$(lookup_pr_info "$PR_REF" "$PR_ERR")`,
 	)
+}
+
+func TestRefineryFormulaExistingPRNoGhUsesSharedRESTLookup(t *testing.T) {
+	dir := exampleDir()
+	path := filepath.Join(dir, "packs", "gastown", "formulas", "mol-refinery-patrol.toml")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading refinery formula: %v", err)
+	}
+	body := string(data)
+
+	assertContainsInOrder(t, body,
+		`lookup_pr_info() {`,
+		`if command -v gh >/dev/null 2>&1; then`,
+		`gh pr view --json url,number,state,headRefName,baseRefName,headRepositoryOwner,headRepository -- "$ref"`,
+		`if ! init_github_rest 2>"$err_file"; then`,
+		`PR_NUMBER=$(printf '%s\n' "$ref" | sed -nE`,
+		`--data-urlencode "head=$OWNER:$ref"`,
+		`PR_RAW=$(curl_gh_api "$err_file" "$API/pulls/$PR_NUMBER") || return 1`,
+		`jq '{url:.html_url, number, state:(.state | ascii_upcase), headRefName:.head.ref, baseRefName:.base.ref, headRepositoryOwner:{login:.head.repo.owner.login}, headRepository:{name:.head.repo.name}}'`,
+	)
+	assertContainsInOrder(t, body,
+		`if [ "$MERGE_STRATEGY" = "mr" ] && [ -n "$EXISTING_PR" ]; then`,
+		`EXISTING_PR_INFO=$(lookup_pr_info "$EXISTING_PR" "$EXISTING_PR_ERR")`,
+		`git push origin HEAD:$BRANCH --force-with-lease`,
+		`PR_INFO=$(lookup_pr_info "$PR_REF" "$PR_ERR")`,
+	)
+	if strings.Contains(body, `EXISTING_PR_INFO=$(gh pr view`) {
+		t.Fatal("existing_pr validation must go through lookup_pr_info so the no-gh REST fallback is reachable")
+	}
+	if strings.Contains(body, `eval value=`) {
+		t.Fatal("GitHub token discovery should avoid eval-based env indirection")
+	}
+}
+
+func TestRefineryFormulaExistingPRNoGhRejectsCrossRepoFullURL(t *testing.T) {
+	helpers := refineryPRHelpers(t)
+
+	tmp := t.TempDir()
+	binDir := filepath.Join(tmp, "bin")
+	if err := os.Mkdir(binDir, 0o755); err != nil {
+		t.Fatalf("creating bin dir: %v", err)
+	}
+	linkTestCommands(t, binDir, "cat", "grep", "head", "jq", "sed")
+	curlPath := filepath.Join(binDir, "curl")
+	curlStub := `#!/bin/sh
+case "$*" in
+  *"/repos/origin/repo/pulls/42"*)
+    cat <<'JSON'
+{"html_url":"https://github.com/origin/repo/pull/42","number":42,"state":"open","head":{"ref":"feature","repo":{"owner":{"login":"origin"},"name":"repo"}},"base":{"ref":"main"}}
+JSON
+    ;;
+  *)
+    echo "unexpected curl arguments: $*" >&2
+    exit 2
+    ;;
+esac
+`
+	if err := os.WriteFile(curlPath, []byte(curlStub), 0o755); err != nil {
+		t.Fatalf("writing curl stub: %v", err)
+	}
+
+	script := `set -eu
+ORIGIN_REPO="origin/repo"
+ORIGIN_REPO_ERROR=""
+GH_TOKEN="test-token"
+TARGET="main"
+` + helpers + `
+err_file="$PWD/lookup.err"
+if out=$(lookup_pr_info "https://github.com/other/repo/pull/42" "$err_file"); then
+  echo "lookup_pr_info unexpectedly resolved cross-repo URL: $out"
+  exit 1
+fi
+if ! grep -q "belongs to repo other/repo, want origin/repo" "$err_file"; then
+  cat "$err_file"
+  exit 1
+fi
+`
+	cmd := exec.Command("sh", "-c", script)
+	cmd.Dir = tmp
+	cmd.Env = []string{"PATH=" + binDir, "HOME=" + tmp}
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("cross-repo full URL lookup should fail before origin REST lookup: %v\n%s", err, out)
+	}
+}
+
+func TestRefineryFormulaNoGhRESTLookupExecutesNumberAndBranchPaths(t *testing.T) {
+	helpers := refineryPRHelpers(t)
+
+	tmp := t.TempDir()
+	binDir := filepath.Join(tmp, "bin")
+	if err := os.Mkdir(binDir, 0o755); err != nil {
+		t.Fatalf("creating bin dir: %v", err)
+	}
+	linkTestCommands(t, binDir, "cat", "head", "jq", "sed")
+	curlPath := filepath.Join(binDir, "curl")
+	curlStub := `#!/bin/sh
+case "$*" in
+  *"/repos/origin/repo/pulls/42"*)
+    cat <<'JSON'
+{"html_url":"https://github.com/origin/repo/pull/42","number":42,"state":"open","head":{"ref":"feature","repo":{"owner":{"login":"origin"},"name":"repo"}},"base":{"ref":"main"}}
+JSON
+    ;;
+  *"--get https://api.github.com/repos/origin/repo/pulls"*head=origin:feature*base=main*)
+    cat <<'JSON'
+[{"number":43}]
+JSON
+    ;;
+  *"/repos/origin/repo/pulls/43"*)
+    cat <<'JSON'
+{"html_url":"https://github.com/origin/repo/pull/43","number":43,"state":"open","head":{"ref":"feature","repo":{"owner":{"login":"origin"},"name":"repo"}},"base":{"ref":"main"}}
+JSON
+    ;;
+  *)
+    echo "unexpected curl arguments: $*" >&2
+    exit 2
+    ;;
+esac
+`
+	if err := os.WriteFile(curlPath, []byte(curlStub), 0o755); err != nil {
+		t.Fatalf("writing curl stub: %v", err)
+	}
+
+	script := `set -eu
+ORIGIN_REPO="origin/repo"
+ORIGIN_REPO_ERROR=""
+GH_TOKEN="test-token"
+TARGET="main"
+` + helpers + `
+err_file="$PWD/lookup.err"
+number_out=$(lookup_pr_info "42" "$err_file")
+printf '%s\n' "$number_out" | jq -e '.url == "https://github.com/origin/repo/pull/42" and .state == "OPEN"' >/dev/null
+branch_out=$(lookup_pr_info "feature" "$err_file")
+printf '%s\n' "$branch_out" | jq -e '.url == "https://github.com/origin/repo/pull/43" and .headRefName == "feature"' >/dev/null
+`
+	cmd := exec.Command("sh", "-c", script)
+	cmd.Dir = tmp
+	cmd.Env = []string{"PATH=" + binDir, "HOME=" + tmp}
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("REST lookup should resolve numeric and branch refs: %v\n%s", err, out)
+	}
+}
+
+func TestRefineryFormulaNoGhPRCreateSendsJSONContentType(t *testing.T) {
+	helpers := refineryPRHelpers(t)
+
+	tmp := t.TempDir()
+	binDir := filepath.Join(tmp, "bin")
+	if err := os.Mkdir(binDir, 0o755); err != nil {
+		t.Fatalf("creating bin dir: %v", err)
+	}
+	linkTestCommands(t, binDir, "cat", "head", "jq", "sed")
+	curlPath := filepath.Join(binDir, "curl")
+	curlStub := `#!/bin/sh
+saw_content_type=0
+for arg in "$@"; do
+  if [ "$arg" = "Content-Type: application/json" ]; then
+    saw_content_type=1
+  fi
+done
+if [ "$saw_content_type" -ne 1 ]; then
+  echo "missing JSON content type: $*" >&2
+  exit 2
+fi
+case "$*" in
+  *"-X POST https://api.github.com/repos/origin/repo/pulls"*)
+    cat <<'JSON'
+{"number":44}
+JSON
+    ;;
+  *)
+    echo "unexpected curl arguments: $*" >&2
+    exit 2
+    ;;
+esac
+`
+	if err := os.WriteFile(curlPath, []byte(curlStub), 0o755); err != nil {
+		t.Fatalf("writing curl stub: %v", err)
+	}
+
+	script := `set -eu
+ORIGIN_REPO="origin/repo"
+ORIGIN_REPO_ERROR=""
+GH_TOKEN="test-token"
+TARGET="main"
+` + helpers + `
+err_file="$PWD/create.err"
+init_github_rest 2>"$err_file"
+CREATE_PAYLOAD=$(jq -n \
+  --arg title "Demo (ga-test)" \
+  --arg head "feature" \
+  --arg base "main" \
+  --arg body "body" \
+  '{title:$title, head:$head, base:$base, body:$body}')
+created=$(curl_gh_api "$err_file" -X POST "$API/pulls" -d "$CREATE_PAYLOAD")
+[ "$(printf '%s\n' "$created" | jq -r '.number')" = "44" ]
+`
+	cmd := exec.Command("sh", "-c", script)
+	cmd.Dir = tmp
+	cmd.Env = []string{"PATH=" + binDir, "HOME=" + tmp}
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("REST create should send JSON content type: %v\n%s", err, out)
+	}
+}
+
+func TestRefineryFormulaResolveGithubTokenUsesNonInteractiveCredentialFill(t *testing.T) {
+	helpers := refineryPRHelpers(t)
+
+	tmp := t.TempDir()
+	binDir := filepath.Join(tmp, "bin")
+	if err := os.Mkdir(binDir, 0o755); err != nil {
+		t.Fatalf("creating bin dir: %v", err)
+	}
+	linkTestCommands(t, binDir, "cat", "head", "sed")
+	gitPath := filepath.Join(binDir, "git")
+	gitStub := `#!/bin/sh
+if [ "$1" != "credential" ] || [ "$2" != "fill" ]; then
+  echo "unexpected git arguments: $*" >&2
+  exit 2
+fi
+if [ "${GIT_TERMINAL_PROMPT:-}" != "0" ]; then
+  echo "GIT_TERMINAL_PROMPT was not disabled" >&2
+  exit 2
+fi
+input=$(cat)
+case "$input" in
+  *"protocol=https"*host=github.com*)
+    printf 'protocol=https\nhost=github.com\nusername=test\npassword=credential-token\n\n'
+    ;;
+  *)
+    echo "unexpected credential input: $input" >&2
+    exit 2
+    ;;
+esac
+`
+	if err := os.WriteFile(gitPath, []byte(gitStub), 0o755); err != nil {
+		t.Fatalf("writing git stub: %v", err)
+	}
+
+	script := `set -eu
+ORIGIN_REPO="origin/repo"
+ORIGIN_REPO_ERROR=""
+TARGET="main"
+unset GH_TOKEN GITHUB_TOKEN GIT_TOKEN
+` + helpers + `
+[ "$(resolve_github_token)" = "credential-token" ]
+`
+	cmd := exec.Command("sh", "-c", script)
+	cmd.Dir = tmp
+	cmd.Env = []string{"PATH=" + binDir, "HOME=" + tmp}
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("credential fallback should be non-interactive: %v\n%s", err, out)
+	}
+}
+
+func TestRefineryFormulaExistingPRNoGhCrossRepoEscalatesToHuman(t *testing.T) {
+	helpers := refineryPRSetupHelpers(t)
+	existingPRBlock := refineryExistingPRValidationBlock(t)
+
+	tmp := t.TempDir()
+	binDir := filepath.Join(tmp, "bin")
+	if err := os.Mkdir(binDir, 0o755); err != nil {
+		t.Fatalf("creating bin dir: %v", err)
+	}
+	linkTestCommands(t, binDir, "cat", "grep", "head", "jq", "mktemp", "rm", "sed")
+	gcPath := filepath.Join(binDir, "gc")
+	gcStub := `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_LOG"
+if [ "$1" = "bd" ] && [ "$2" = "mol" ] && [ "$3" = "wisp" ]; then
+  printf '{"new_epic_id":"next-wisp"}\n'
+fi
+exit 0
+`
+	if err := os.WriteFile(gcPath, []byte(gcStub), 0o755); err != nil {
+		t.Fatalf("writing gc stub: %v", err)
+	}
+	curlPath := filepath.Join(binDir, "curl")
+	if err := os.WriteFile(curlPath, []byte("#!/bin/sh\necho unexpected curl >&2\nexit 2\n"), 0o755); err != nil {
+		t.Fatalf("writing curl stub: %v", err)
+	}
+
+	script := `set +e
+ORIGIN_REPO="origin/repo"
+ORIGIN_REPO_ERROR=""
+GH_TOKEN="test-token"
+TARGET="main"
+BRANCH="feature"
+MERGE_STRATEGY="mr"
+EXISTING_PR="https://github.com/other/repo/pull/42"
+WORK="ga-work"
+GC_AGENT="refinery-agent"
+GC_BEAD_ID="current-wisp"
+` + helpers + `
+(
+` + existingPRBlock + `
+)
+status=$?
+if [ "$status" -eq 0 ]; then
+  echo "expected validation block to stop after human escalation"
+  exit 1
+fi
+grep -q -- "--set-metadata gc.routed_to=human" "$GC_LOG" || exit 1
+grep -q -- "ESCALATION: invalid existing_pr" "$GC_LOG" || exit 1
+grep -q -- "runtime drain-ack" "$GC_LOG" || exit 1
+`
+	cmd := exec.Command("sh", "-c", script)
+	cmd.Dir = tmp
+	cmd.Env = []string{"PATH=" + binDir, "HOME=" + tmp, "GC_LOG=" + filepath.Join(tmp, "gc.log")}
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("cross-repo existing_pr should route to human on no-gh hosts: %v\n%s", err, out)
+	}
 }
 
 func TestWorktreeSetupKeepsIgnoresLocal(t *testing.T) {
@@ -1766,9 +2334,7 @@ func TestGastownPromptRoutedToHandoffIsFullyQualifiedUnderBinding(t *testing.T) 
 			rel:          "packs/gastown/agents/polecat/prompt.template.md",
 			agentName:    rigName + "/" + bindingPrefix + "furiosa",
 			templateName: "polecat",
-			wantRoutes: map[string]string{
-				`"${GC_RIG:+$GC_RIG/}gastown.refinery"`: rigName + "/" + bindingPrefix + "refinery",
-			},
+			wantRoutes:   map[string]string{},
 		},
 		{
 			rel:          "packs/gastown/agents/witness/prompt.template.md",

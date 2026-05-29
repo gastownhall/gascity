@@ -1,6 +1,7 @@
 package configedit_test
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,6 +11,32 @@ import (
 	"github.com/gastownhall/gascity/internal/configedit"
 	"github.com/gastownhall/gascity/internal/fsys"
 )
+
+type failRenameFS struct {
+	fsys.OSFS
+	target string
+	failed bool
+}
+
+func (f *failRenameFS) Rename(oldpath, newpath string) error {
+	if !f.failed && filepath.Clean(newpath) == filepath.Clean(f.target) {
+		f.failed = true
+		return errors.New("injected rename failure")
+	}
+	return f.OSFS.Rename(oldpath, newpath)
+}
+
+type failRemoveFakeFS struct {
+	*fsys.Fake
+	target string
+}
+
+func (f *failRemoveFakeFS) Remove(name string) error {
+	if filepath.Clean(name) == filepath.Clean(f.target) {
+		return errors.New("permission denied")
+	}
+	return f.Fake.Remove(name)
+}
 
 // minimalCity returns a minimal valid city.toml with one agent.
 func minimalCity() string {
@@ -697,7 +724,11 @@ schema = 2
 		Name:           "worker",
 		PromptTemplate: filepath.Join(dir, "agents", "worker", "prompt.template.md"),
 	}
-	if configedit.LocalDiscoveredAgent(fsys.OSFS{}, dir, rigAgent) {
+	local, err := configedit.LocalDiscoveredAgent(fsys.OSFS{}, dir, rigAgent)
+	if err != nil {
+		t.Fatalf("LocalDiscoveredAgent rig-scoped: %v", err)
+	}
+	if local {
 		t.Fatal("rig-scoped agent must not be classified as local-discovered even when prompt_template points at the city's agents/<name>/ tree")
 	}
 
@@ -706,8 +737,104 @@ schema = 2
 		Name:           "worker",
 		PromptTemplate: filepath.Join(dir, "agents", "worker", "prompt.template.md"),
 	}
-	if !configedit.LocalDiscoveredAgent(fsys.OSFS{}, dir, cityAgent) {
+	local, err = configedit.LocalDiscoveredAgent(fsys.OSFS{}, dir, cityAgent)
+	if err != nil {
+		t.Fatalf("LocalDiscoveredAgent city-scoped: %v", err)
+	}
+	if !local {
 		t.Fatal("city-scoped scaffolded agent should be classified as local-discovered")
+	}
+}
+
+func TestLocalDiscoveredAgent_AgentTOMLDefinesCityScopedConventionContract(t *testing.T) {
+	dir := t.TempDir()
+	agentDir := filepath.Join(dir, "agents", "worker")
+	if err := os.MkdirAll(agentDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cityAgent := config.Agent{
+		Name:           "worker",
+		PromptTemplate: filepath.Join(dir, "custom", "worker.md"),
+	}
+	local, err := configedit.LocalDiscoveredAgent(fsys.OSFS{}, dir, cityAgent)
+	if err != nil {
+		t.Fatalf("LocalDiscoveredAgent without agent.toml: %v", err)
+	}
+	if local {
+		t.Fatal("custom prompt path without agent.toml should not be classified as local-discovered")
+	}
+	if err := os.WriteFile(filepath.Join(agentDir, "agent.toml"), []byte("provider = \"claude\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	local, err = configedit.LocalDiscoveredAgent(fsys.OSFS{}, dir, cityAgent)
+	if err != nil {
+		t.Fatalf("LocalDiscoveredAgent with agent.toml: %v", err)
+	}
+	if !local {
+		t.Fatal("agents/<name>/agent.toml should classify a city-scoped agent as local-discovered even with a custom prompt path")
+	}
+}
+
+func TestLocalDiscoveredAgent_StatErrorIsNotPositiveEvidence(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Dirs["/city"] = true
+	fs.Dirs["/city/agents"] = true
+	fs.Dirs["/city/agents/worker"] = true
+	fs.Files["/city/pack.toml"] = []byte("[pack]\nname = \"test-city\"\nschema = 2\n")
+	fs.Errors["/city/agents/worker/agent.toml"] = errors.New("injected stat failure")
+
+	agent := config.Agent{
+		Name:           "worker",
+		PromptTemplate: "/city/custom/worker.md",
+	}
+	local, err := configedit.LocalDiscoveredAgent(fs, "/city", agent)
+	if err != nil {
+		t.Fatalf("LocalDiscoveredAgent: %v", err)
+	}
+	if local {
+		t.Fatal("agent.toml stat errors must not classify an agent as local-discovered")
+	}
+}
+
+func TestLocalDiscoveredAgent_PackTOMLReadErrorSurfacesError(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Dirs["/city"] = true
+	fs.Dirs["/city/agents"] = true
+	fs.Dirs["/city/agents/worker"] = true
+	fs.Files["/city/agents/worker/agent.toml"] = []byte("provider = \"claude\"\n")
+	fs.Errors["/city/pack.toml"] = os.ErrPermission
+
+	agent := config.Agent{Name: "worker"}
+	ok, err := configedit.LocalDiscoveredAgent(fs, "/city", agent)
+	if err == nil {
+		t.Fatal("LocalDiscoveredAgent error = nil, want pack.toml read error")
+	}
+	if ok {
+		t.Fatal("LocalDiscoveredAgent classified agent as local-discovered despite pack.toml read error")
+	}
+	if !strings.Contains(err.Error(), "reading /city/pack.toml") {
+		t.Fatalf("LocalDiscoveredAgent error = %v, want pack.toml read context", err)
+	}
+}
+
+func TestLocalDiscoveredAgent_MalformedPackTOMLSurfacesError(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Dirs["/city"] = true
+	fs.Dirs["/city/agents"] = true
+	fs.Dirs["/city/agents/worker"] = true
+	fs.Files["/city/pack.toml"] = []byte("[[agent]\nname = \"worker\"\n")
+	fs.Files["/city/agents/worker/agent.toml"] = []byte("provider = \"claude\"\n")
+
+	agent := config.Agent{Name: "worker"}
+	ok, err := configedit.LocalDiscoveredAgent(fs, "/city", agent)
+	if err == nil {
+		t.Fatal("LocalDiscoveredAgent error = nil, want pack.toml parse error")
+	}
+	if ok {
+		t.Fatal("LocalDiscoveredAgent classified agent as local-discovered despite malformed pack.toml")
+	}
+	if !strings.Contains(err.Error(), "parsing /city/pack.toml") {
+		t.Fatalf("LocalDiscoveredAgent error = %v, want pack.toml parse context", err)
 	}
 }
 
@@ -815,7 +942,167 @@ suspended = true
 
 func TestCreateAgent(t *testing.T) {
 	dir := t.TempDir()
-	path := writeTOML(t, dir, minimalCity())
+	path := writeTOML(t, dir, "[workspace]\n")
+	if err := os.WriteFile(filepath.Join(dir, "pack.toml"), []byte("[pack]\nname = \"test-city\"\nschema = 2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ed := configedit.NewEditor(fsys.OSFS{}, path)
+
+	err := ed.CreateAgent(config.Agent{Name: "coder", Provider: "claude"})
+	if err != nil {
+		t.Fatalf("CreateAgent: %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(dir, "agents", "coder", "agent.toml")); err != nil {
+		t.Fatalf("agent.toml stat: %v", err)
+	}
+	cfg := readExpandedTOML(t, path)
+	found := false
+	for _, a := range cfg.Agents {
+		if a.Name == "coder" && a.Provider == "claude" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("agent 'coder' not found after create")
+	}
+}
+
+func TestCreateAgentSchema2RollsBackFreshConventionScaffoldWhenAgentTOMLWriteFails(t *testing.T) {
+	dir := t.TempDir()
+	path := writeTOML(t, dir, "[workspace]\n")
+	if err := os.WriteFile(filepath.Join(dir, "pack.toml"), []byte("[pack]\nname = \"test-city\"\nschema = 2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	agentDir := filepath.Join(dir, "agents", "coder")
+	ed := configedit.NewEditor(&failRenameFS{target: filepath.Join(agentDir, "agent.toml")}, path)
+
+	err := ed.CreateAgent(config.Agent{Name: "coder", Provider: "claude", Scope: "city"})
+	if err == nil {
+		t.Fatal("CreateAgent succeeded, want injected agent.toml write failure")
+	}
+	if _, statErr := os.Stat(agentDir); !os.IsNotExist(statErr) {
+		t.Fatalf("agent dir stat err = %v, want fresh scaffold removed", statErr)
+	}
+	for _, agent := range readExpandedTOML(t, path).Agents {
+		if agent.Name == "coder" {
+			t.Fatalf("expanded agents include ghost coder after failed create: %+v", agent)
+		}
+	}
+}
+
+func TestWriteLocalDiscoveredAgentConfigWritesConventionFields(t *testing.T) {
+	fs := fsys.NewFake()
+
+	err := configedit.WriteLocalDiscoveredAgentConfig(fs, "/city", config.Agent{
+		Name:        "coder",
+		Description: "Writes code.",
+		Provider:    "claude",
+		Scope:       "city",
+		Suspended:   true,
+	})
+	if err != nil {
+		t.Fatalf("WriteLocalDiscoveredAgentConfig: %v", err)
+	}
+
+	got := string(fs.Files["/city/agents/coder/agent.toml"])
+	for _, want := range []string{
+		`description = "Writes code."`,
+		`provider = "claude"`,
+		`scope = "city"`,
+		`suspended = true`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("agent.toml = %q, want %q", got, want)
+		}
+	}
+}
+
+func TestLocalDiscoveredAgentDirRejectsEscapes(t *testing.T) {
+	got, err := configedit.LocalDiscoveredAgentDir("/city", "coder")
+	if err != nil {
+		t.Fatalf("LocalDiscoveredAgentDir valid name: %v", err)
+	}
+	if got != filepath.Join("/city", "agents", "coder") {
+		t.Fatalf("LocalDiscoveredAgentDir = %q, want /city/agents/coder", got)
+	}
+
+	if _, err := configedit.LocalDiscoveredAgentDir("/city", "../escape"); !errors.Is(err, configedit.ErrValidation) {
+		t.Fatalf("LocalDiscoveredAgentDir escape error = %v, want ErrValidation", err)
+	}
+}
+
+func TestCreateAgentSchema2RejectsInvalidNameBeforeWrite(t *testing.T) {
+	dir := t.TempDir()
+	path := writeTOML(t, dir, "[workspace]\n")
+	if err := os.WriteFile(filepath.Join(dir, "pack.toml"), []byte("[pack]\nname = \"test-city\"\nschema = 2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ed := configedit.NewEditor(fsys.OSFS{}, path)
+
+	err := ed.CreateAgent(config.Agent{Name: "..", Provider: "claude"})
+	if !errors.Is(err, configedit.ErrValidation) {
+		t.Fatalf("CreateAgent error = %v, want ErrValidation", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, "agent.toml")); !os.IsNotExist(statErr) {
+		t.Fatalf("escaped agent.toml stat err = %v, want not exist", statErr)
+	}
+}
+
+func TestCreateAgentSchema2RejectsInvalidScopeBeforeWrite(t *testing.T) {
+	dir := t.TempDir()
+	path := writeTOML(t, dir, "[workspace]\n")
+	if err := os.WriteFile(filepath.Join(dir, "pack.toml"), []byte("[pack]\nname = \"test-city\"\nschema = 2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ed := configedit.NewEditor(fsys.OSFS{}, path)
+
+	err := ed.CreateAgent(config.Agent{Name: "coder", Provider: "claude", Scope: "global"})
+	if !errors.Is(err, configedit.ErrValidation) {
+		t.Fatalf("CreateAgent error = %v, want ErrValidation", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, "agents", "coder", "agent.toml")); !os.IsNotExist(statErr) {
+		t.Fatalf("agent.toml stat err = %v, want not exist", statErr)
+	}
+}
+
+func TestCreateAgentSchema2RejectsRigScopedConventionAgentBeforeWrite(t *testing.T) {
+	dir := t.TempDir()
+	path := writeTOML(t, dir, "[workspace]\n")
+	if err := os.WriteFile(filepath.Join(dir, "pack.toml"), []byte("[pack]\nname = \"test-city\"\nschema = 2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ed := configedit.NewEditor(fsys.OSFS{}, path)
+
+	err := ed.CreateAgent(config.Agent{Name: "coder", Dir: "rig-a", Provider: "claude", Scope: "city"})
+	if !errors.Is(err, configedit.ErrValidation) {
+		t.Fatalf("CreateAgent error = %v, want ErrValidation", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, "agents", "coder", "agent.toml")); !os.IsNotExist(statErr) {
+		t.Fatalf("agent.toml stat err = %v, want not exist", statErr)
+	}
+}
+
+func TestCreateAgentSchema2RejectsRigScopeConventionAgentBeforeWrite(t *testing.T) {
+	dir := t.TempDir()
+	path := writeTOML(t, dir, "[workspace]\n")
+	if err := os.WriteFile(filepath.Join(dir, "pack.toml"), []byte("[pack]\nname = \"test-city\"\nschema = 2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ed := configedit.NewEditor(fsys.OSFS{}, path)
+
+	err := ed.CreateAgent(config.Agent{Name: "coder", Provider: "claude", Scope: "rig"})
+	if !errors.Is(err, configedit.ErrValidation) {
+		t.Fatalf("CreateAgent error = %v, want ErrValidation", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, "agents", "coder", "agent.toml")); !os.IsNotExist(statErr) {
+		t.Fatalf("agent.toml stat err = %v, want not exist", statErr)
+	}
+}
+
+func TestCreateAgentLegacyNoPackAppendsInline(t *testing.T) {
+	dir := t.TempDir()
+	path := writeTOML(t, dir, "[workspace]\n")
 	ed := configedit.NewEditor(fsys.OSFS{}, path)
 
 	err := ed.CreateAgent(config.Agent{Name: "coder", Provider: "claude"})
@@ -824,14 +1111,8 @@ func TestCreateAgent(t *testing.T) {
 	}
 
 	cfg := readTOML(t, path)
-	found := false
-	for _, a := range cfg.Agents {
-		if a.Name == "coder" {
-			found = true
-		}
-	}
-	if !found {
-		t.Error("agent 'coder' not found after create")
+	if len(cfg.Agents) != 1 || cfg.Agents[0].Name != "coder" || cfg.Agents[0].Provider != "claude" {
+		t.Fatalf("agents = %+v, want inline legacy coder", cfg.Agents)
 	}
 }
 
@@ -890,6 +1171,145 @@ suspended = true
 	}
 }
 
+func TestUpdateAgentSchema2LocalConventionAgentWritesAgentTOML(t *testing.T) {
+	dir := t.TempDir()
+	path := writeTOML(t, dir, "[workspace]\n")
+	if err := os.WriteFile(filepath.Join(dir, "pack.toml"), []byte("[pack]\nname = \"test-city\"\nschema = 2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ed := configedit.NewEditor(fsys.OSFS{}, path)
+
+	if err := ed.CreateAgent(config.Agent{Name: "coder", Provider: "claude", Scope: "city"}); err != nil {
+		t.Fatalf("CreateAgent: %v", err)
+	}
+	if err := ed.UpdateAgent("coder", configedit.AgentUpdate{
+		Provider:  "gemini",
+		Scope:     "city",
+		Suspended: boolPtrTest(true),
+	}); err != nil {
+		t.Fatalf("UpdateAgent: %v", err)
+	}
+
+	raw := readTOML(t, path)
+	if len(raw.Agents) != 0 {
+		t.Fatalf("raw city.toml agents = %+v, want schema-2 convention agent outside city.toml", raw.Agents)
+	}
+	data := string(mustReadFile(t, filepath.Join(dir, "agents", "coder", "agent.toml")))
+	for _, want := range []string{
+		`provider = "gemini"`,
+		`scope = "city"`,
+		`suspended = true`,
+	} {
+		if !strings.Contains(data, want) {
+			t.Fatalf("agent.toml = %q, want %s", data, want)
+		}
+	}
+	agent := findAgent(t, readExpandedTOML(t, path), "coder")
+	if agent.Provider != "gemini" || agent.Scope != "city" || !agent.Suspended {
+		t.Fatalf("expanded agent = %+v, want updated provider/scope/suspended", agent)
+	}
+}
+
+func TestUpdateAgentSchema2RejectsRigScopeConventionAgentBeforeWrite(t *testing.T) {
+	dir := t.TempDir()
+	path := writeTOML(t, dir, "[workspace]\n")
+	if err := os.WriteFile(filepath.Join(dir, "pack.toml"), []byte("[pack]\nname = \"test-city\"\nschema = 2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ed := configedit.NewEditor(fsys.OSFS{}, path)
+
+	if err := ed.CreateAgent(config.Agent{Name: "coder", Provider: "claude", Scope: "city"}); err != nil {
+		t.Fatalf("CreateAgent: %v", err)
+	}
+	agentTomlPath := filepath.Join(dir, "agents", "coder", "agent.toml")
+	before := string(mustReadFile(t, agentTomlPath))
+
+	err := ed.UpdateAgent("coder", configedit.AgentUpdate{Scope: "rig"})
+	if !errors.Is(err, configedit.ErrValidation) {
+		t.Fatalf("UpdateAgent error = %v, want ErrValidation", err)
+	}
+	after := string(mustReadFile(t, agentTomlPath))
+	if after != before {
+		t.Fatalf("agent.toml changed after rejected rig scope:\nbefore:\n%s\nafter:\n%s", before, after)
+	}
+}
+
+func TestUpdateAgentSchema2LocalConventionRollsBackAgentTOMLWhenCityWriteFails(t *testing.T) {
+	dir := t.TempDir()
+	path := writeTOML(t, dir, `[workspace]
+name = "test-city"
+
+[[patches.agent]]
+name = "coder"
+provider = "legacy"
+`)
+	if err := os.WriteFile(filepath.Join(dir, "pack.toml"), []byte("[pack]\nname = \"test-city\"\nschema = 2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	agentDir := filepath.Join(dir, "agents", "coder")
+	if err := os.MkdirAll(agentDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(agentDir, "prompt.template.md"), []byte("You are the coder.\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	agentTomlPath := filepath.Join(agentDir, "agent.toml")
+	if err := os.WriteFile(agentTomlPath, []byte("provider = \"claude\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ed := configedit.NewEditor(&failRenameFS{target: path}, path)
+
+	err := ed.UpdateAgent("coder", configedit.AgentUpdate{Provider: "gemini"})
+	if err == nil {
+		t.Fatal("UpdateAgent succeeded, want injected city write failure")
+	}
+	agentToml := string(mustReadFile(t, agentTomlPath))
+	if agentToml != "provider = \"claude\"\n" {
+		t.Fatalf("agent.toml = %q, want original after rollback", agentToml)
+	}
+	raw := string(mustReadFile(t, path))
+	if !strings.Contains(raw, `provider = "legacy"`) {
+		t.Fatalf("city.toml patch was stripped despite failed write:\n%s", raw)
+	}
+}
+
+func TestUpdateAgentSchema2LocalConventionValidatesRawBeforeWritingAgentTOML(t *testing.T) {
+	dir := t.TempDir()
+	path := writeTOML(t, dir, `[workspace]
+
+[[rigs]]
+name = "frontend"
+
+[[patches.agent]]
+name = "coder"
+provider = "legacy"
+`)
+	if err := os.WriteFile(filepath.Join(dir, "pack.toml"), []byte("[pack]\nname = \"test-city\"\nschema = 2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	agentDir := filepath.Join(dir, "agents", "coder")
+	if err := os.MkdirAll(agentDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(agentDir, "prompt.template.md"), []byte("You are the coder.\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	agentTomlPath := filepath.Join(agentDir, "agent.toml")
+	if err := os.WriteFile(agentTomlPath, []byte("provider = \"claude\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ed := configedit.NewEditor(fsys.OSFS{}, path)
+
+	err := ed.UpdateAgent("coder", configedit.AgentUpdate{Provider: "gemini"})
+	if !errors.Is(err, configedit.ErrValidation) {
+		t.Fatalf("UpdateAgent error = %v, want ErrValidation", err)
+	}
+	agentToml := string(mustReadFile(t, agentTomlPath))
+	if strings.Contains(agentToml, "gemini") || !strings.Contains(agentToml, `provider = "claude"`) {
+		t.Fatalf("agent.toml = %q, want original provider preserved after validation failure", agentToml)
+	}
+}
+
 func TestUpdateAgent_NotFound(t *testing.T) {
 	dir := t.TempDir()
 	path := writeTOML(t, dir, minimalCity())
@@ -915,6 +1335,282 @@ func TestDeleteAgent(t *testing.T) {
 		if a.Name == "mayor" {
 			t.Error("agent 'mayor' still exists after delete")
 		}
+	}
+}
+
+func TestDeleteAgentSchema2LocalConventionAgentRemovesAgentTOML(t *testing.T) {
+	dir := t.TempDir()
+	path := writeTOML(t, dir, "[workspace]\n")
+	if err := os.WriteFile(filepath.Join(dir, "pack.toml"), []byte("[pack]\nname = \"test-city\"\nschema = 2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ed := configedit.NewEditor(fsys.OSFS{}, path)
+
+	if err := ed.CreateAgent(config.Agent{Name: "coder", Provider: "claude", Scope: "city"}); err != nil {
+		t.Fatalf("CreateAgent: %v", err)
+	}
+	if err := ed.DeleteAgent("coder"); err != nil {
+		t.Fatalf("DeleteAgent: %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(dir, "agents", "coder", "agent.toml")); !os.IsNotExist(err) {
+		t.Fatalf("agent.toml stat err = %v, want removed file", err)
+	}
+	raw := readTOML(t, path)
+	if len(raw.Agents) != 0 {
+		t.Fatalf("raw city.toml agents = %+v, want schema-2 convention agent outside city.toml", raw.Agents)
+	}
+	for _, agent := range readExpandedTOML(t, path).Agents {
+		if agent.Name == "coder" {
+			t.Fatalf("expanded agents still include deleted coder: %+v", agent)
+		}
+	}
+}
+
+func TestDeleteAgentSchema2PromptBackedConventionAgentRemovesScaffold(t *testing.T) {
+	dir := t.TempDir()
+	path := writeTOML(t, dir, "[workspace]\n")
+	if err := os.WriteFile(filepath.Join(dir, "pack.toml"), []byte("[pack]\nname = \"test-city\"\nschema = 2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	agentDir := filepath.Join(dir, "agents", "coder")
+	if err := os.MkdirAll(agentDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(agentDir, "prompt.template.md"), []byte("You are the coder.\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ed := configedit.NewEditor(fsys.OSFS{}, path)
+
+	if err := ed.DeleteAgent("coder"); err != nil {
+		t.Fatalf("DeleteAgent: %v", err)
+	}
+
+	if _, err := os.Stat(agentDir); !os.IsNotExist(err) {
+		t.Fatalf("agent scaffold stat err = %v, want removed directory", err)
+	}
+	for _, agent := range readExpandedTOML(t, path).Agents {
+		if agent.Name == "coder" {
+			t.Fatalf("expanded agents still include deleted coder: %+v", agent)
+		}
+	}
+}
+
+func TestDeleteAgentSchema2LocalConventionRollsBackScaffoldWhenCityWriteFails(t *testing.T) {
+	dir := t.TempDir()
+	path := writeTOML(t, dir, `[workspace]
+name = "test-city"
+
+[[patches.agent]]
+name = "coder"
+provider = "legacy"
+`)
+	if err := os.WriteFile(filepath.Join(dir, "pack.toml"), []byte("[pack]\nname = \"test-city\"\nschema = 2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	agentDir := filepath.Join(dir, "agents", "coder")
+	if err := os.MkdirAll(filepath.Join(agentDir, "skills"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for rel, data := range map[string]string{
+		"agent.toml":         "provider = \"claude\"\n",
+		"prompt.template.md": "You are the coder.\n",
+		"skills/local.md":    "skill notes\n",
+	} {
+		if err := os.WriteFile(filepath.Join(agentDir, rel), []byte(data), 0o644); err != nil {
+			t.Fatalf("write %s: %v", rel, err)
+		}
+	}
+	ed := configedit.NewEditor(&failRenameFS{target: path}, path)
+
+	err := ed.DeleteAgent("coder")
+	if err == nil {
+		t.Fatal("DeleteAgent succeeded, want injected city write failure")
+	}
+	for rel, want := range map[string]string{
+		"agent.toml":         "provider = \"claude\"\n",
+		"prompt.template.md": "You are the coder.\n",
+		"skills/local.md":    "skill notes\n",
+	} {
+		got := string(mustReadFile(t, filepath.Join(agentDir, rel)))
+		if got != want {
+			t.Fatalf("%s = %q, want restored %q", rel, got, want)
+		}
+	}
+	raw := string(mustReadFile(t, path))
+	if !strings.Contains(raw, `provider = "legacy"`) {
+		t.Fatalf("city.toml patch was removed despite failed write:\n%s", raw)
+	}
+}
+
+func TestDeleteAgentSchema2LocalConventionRollsBackScaffoldWhenRemoveFails(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/city.toml"] = []byte(`[workspace]
+
+[[patches.agent]]
+name = "coder"
+provider = "legacy"
+`)
+	fs.Files["/city/pack.toml"] = []byte("[pack]\nname = \"test-city\"\nschema = 2\n")
+	if err := fs.MkdirAll("/city/agents/coder", 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	fs.Files["/city/agents/coder/agent.toml"] = []byte("suspended = true\n")
+	fs.Files["/city/agents/coder/prompt.template.md"] = []byte("You are the coder.\n")
+	fs.Files["/city/agents/coder/zz-blocked"] = []byte("keep me\n")
+	ed := configedit.NewEditor(&failRemoveFakeFS{
+		Fake:   fs,
+		target: "/city/agents/coder/zz-blocked",
+	}, "/city/city.toml")
+
+	err := ed.DeleteAgent("coder")
+	if err == nil {
+		t.Fatal("DeleteAgent succeeded, want removal error")
+	}
+	if !strings.Contains(err.Error(), "permission denied") {
+		t.Fatalf("DeleteAgent error = %v, want permission denied", err)
+	}
+	if _, ok := fs.Files["/city/agents/coder/zz-blocked"]; !ok {
+		t.Fatal("blocked file was removed despite injected error")
+	}
+	for path, want := range map[string]string{
+		"/city/agents/coder/agent.toml":         "suspended = true\n",
+		"/city/agents/coder/prompt.template.md": "You are the coder.\n",
+	} {
+		if got, ok := fs.Files[path]; !ok || string(got) != want {
+			t.Fatalf("%s = %q, want restored %q", path, got, want)
+		}
+	}
+	if raw := string(fs.Files["/city/city.toml"]); !strings.Contains(raw, `provider = "legacy"`) {
+		t.Fatalf("city.toml patch was removed despite failed local mutation:\n%s", raw)
+	}
+}
+
+func TestDeleteAgentSchema2LocalConventionWithoutPatchRollsBackScaffoldWhenRemoveFails(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/city.toml"] = []byte("[workspace]\n")
+	fs.Files["/city/pack.toml"] = []byte("[pack]\nname = \"test-city\"\nschema = 2\n")
+	if err := fs.MkdirAll("/city/agents/coder", 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	fs.Files["/city/agents/coder/agent.toml"] = []byte("provider = \"claude\"\n")
+	fs.Files["/city/agents/coder/prompt.template.md"] = []byte("You are the coder.\n")
+	fs.Files["/city/agents/coder/zz-blocked"] = []byte("keep me\n")
+	ed := configedit.NewEditor(&failRemoveFakeFS{
+		Fake:   fs,
+		target: "/city/agents/coder/zz-blocked",
+	}, "/city/city.toml")
+
+	err := ed.DeleteAgent("coder")
+	if err == nil {
+		t.Fatal("DeleteAgent succeeded, want removal error")
+	}
+	if !strings.Contains(err.Error(), "permission denied") {
+		t.Fatalf("DeleteAgent error = %v, want permission denied", err)
+	}
+	for path, want := range map[string]string{
+		"/city/agents/coder/agent.toml":         "provider = \"claude\"\n",
+		"/city/agents/coder/prompt.template.md": "You are the coder.\n",
+		"/city/agents/coder/zz-blocked":         "keep me\n",
+	} {
+		if got, ok := fs.Files[path]; !ok || string(got) != want {
+			t.Fatalf("%s = %q, want restored %q", path, got, want)
+		}
+	}
+	if got := string(fs.Files["/city/city.toml"]); got != "[workspace]\n" {
+		t.Fatalf("city.toml = %q, want unchanged", got)
+	}
+}
+
+func TestWriteLocalDiscoveredAgentConfigRejectsUnsupportedRichFields(t *testing.T) {
+	fs := fsys.NewFake()
+
+	err := configedit.WriteLocalDiscoveredAgentConfig(fs, "/city", config.Agent{
+		Name:           "worker",
+		Provider:       "claude",
+		Scope:          "city",
+		PromptTemplate: "custom.md",
+		Args:           []string{"--danger"},
+	})
+
+	if !errors.Is(err, configedit.ErrValidation) {
+		t.Fatalf("WriteLocalDiscoveredAgentConfig error = %v, want ErrValidation", err)
+	}
+	for _, want := range []string{"PromptTemplate", "Args"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error = %v, want unsupported field %s", err, want)
+		}
+	}
+	if len(fs.Files) != 0 {
+		t.Fatalf("files were written despite validation failure: %+v", fs.Files)
+	}
+}
+
+func TestWriteLocalDiscoveredAgentConfigRejectsUnsafeScaffoldPaths(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		setup     func(*fsys.Fake)
+		wantError string
+	}{
+		{
+			name: "agents root symlink",
+			setup: func(fs *fsys.Fake) {
+				fs.Dirs["/outside/agents"] = true
+				fs.Symlinks["/city/agents"] = "/outside/agents"
+			},
+			wantError: "not a symlink",
+		},
+		{
+			name: "agents root file",
+			setup: func(fs *fsys.Fake) {
+				fs.Files["/city/agents"] = []byte("not a directory")
+			},
+			wantError: "must be a directory",
+		},
+		{
+			name: "agent dir symlink",
+			setup: func(fs *fsys.Fake) {
+				fs.Dirs["/city/agents"] = true
+				fs.Dirs["/outside/worker"] = true
+				fs.Symlinks["/city/agents/worker"] = "/outside/worker"
+			},
+			wantError: "not a symlink",
+		},
+		{
+			name: "agent dir file",
+			setup: func(fs *fsys.Fake) {
+				fs.Dirs["/city/agents"] = true
+				fs.Files["/city/agents/worker"] = []byte("not a directory")
+			},
+			wantError: "must be a directory",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fs := fsys.NewFake()
+			tc.setup(fs)
+
+			err := configedit.WriteLocalDiscoveredAgentConfig(fs, "/city", config.Agent{Name: "worker", Provider: "claude"})
+			if !errors.Is(err, configedit.ErrValidation) {
+				t.Fatalf("WriteLocalDiscoveredAgentConfig error = %v, want ErrValidation", err)
+			}
+			if !strings.Contains(err.Error(), tc.wantError) {
+				t.Fatalf("WriteLocalDiscoveredAgentConfig error = %v, want %q", err, tc.wantError)
+			}
+			for _, path := range []string{
+				"/city/agents/worker/agent.toml",
+				"/outside/agents/worker/agent.toml",
+				"/outside/worker/agent.toml",
+			} {
+				if _, ok := fs.Files[path]; ok {
+					t.Fatalf("%s was written through rejected scaffold path", path)
+				}
+			}
+			for _, call := range fs.Calls {
+				if call.Method == "WriteFile" || call.Method == "Rename" {
+					t.Fatalf("unexpected write call after scaffold path rejection: %+v", call)
+				}
+			}
+		})
 	}
 }
 
@@ -982,6 +1678,54 @@ func TestUpdateRig(t *testing.T) {
 	binding := readSiteBinding(t, dir)
 	if len(binding.Rigs) != 1 || binding.Rigs[0].Path != "/tmp/updated" {
 		t.Errorf("site binding = %+v, want updated path", binding.Rigs)
+	}
+}
+
+func TestUpdateRigPreservesOrphanSiteBinding(t *testing.T) {
+	dir := t.TempDir()
+	path := writeTOML(t, dir, `[workspace]
+name = "test-city"
+
+[[agent]]
+name = "test-agent"
+provider = "claude"
+
+[[rigs]]
+name = "frontend"
+path = "/tmp/frontend"
+`)
+	if err := os.MkdirAll(filepath.Join(dir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(config.SiteBindingPath(dir), []byte(`[[rig]]
+name = "frontend"
+path = "/site/frontend"
+
+[[rig]]
+name = "archived"
+path = "/site/archived"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ed := configedit.NewEditor(fsys.OSFS{}, path)
+
+	if err := ed.UpdateRig("frontend", configedit.RigUpdate{Path: "/site/updated"}); err != nil {
+		t.Fatalf("UpdateRig: %v", err)
+	}
+
+	binding := readSiteBinding(t, dir)
+	if len(binding.Rigs) != 2 {
+		t.Fatalf("site binding rigs = %+v, want frontend and archived", binding.Rigs)
+	}
+	got := map[string]string{}
+	for _, rig := range binding.Rigs {
+		got[rig.Name] = rig.Path
+	}
+	if got["frontend"] != "/site/updated" {
+		t.Fatalf("frontend binding = %q, want updated path", got["frontend"])
+	}
+	if got["archived"] != "/site/archived" {
+		t.Fatalf("archived binding = %q, want orphan preserved", got["archived"])
 	}
 }
 
@@ -1063,6 +1807,69 @@ path = "/tmp/my-rig"
 	}
 	if !found {
 		t.Error("city-scoped agent 'mayor' was incorrectly removed")
+	}
+}
+
+func TestDeleteRigRemovesDeletedSiteBindingAndPreservesOrphan(t *testing.T) {
+	dir := t.TempDir()
+	city := `[workspace]
+name = "test-city"
+
+[[agent]]
+name = "city-agent"
+provider = "claude"
+
+[[agent]]
+name = "rig-agent"
+dir = "frontend"
+provider = "claude"
+
+[[rigs]]
+name = "frontend"
+path = "/tmp/frontend"
+`
+	path := writeTOML(t, dir, city)
+	if err := os.MkdirAll(filepath.Join(dir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(config.SiteBindingPath(dir), []byte(`[[rig]]
+name = "frontend"
+path = "/site/frontend"
+
+[[rig]]
+name = "archived"
+path = "/site/archived"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ed := configedit.NewEditor(fsys.OSFS{}, path)
+
+	if err := ed.DeleteRig("frontend"); err != nil {
+		t.Fatalf("DeleteRig: %v", err)
+	}
+
+	raw := readTOML(t, path)
+	for _, rig := range raw.Rigs {
+		if rig.Name == "frontend" {
+			t.Fatalf("deleted rig %q still exists in city.toml", rig.Name)
+		}
+	}
+	for _, agent := range raw.Agents {
+		if agent.Dir == "frontend" {
+			t.Fatalf("rig-scoped agent %q still exists in city.toml", agent.QualifiedName())
+		}
+	}
+
+	binding := readSiteBinding(t, dir)
+	got := map[string]string{}
+	for _, rig := range binding.Rigs {
+		got[rig.Name] = rig.Path
+	}
+	if _, ok := got["frontend"]; ok {
+		t.Fatalf("deleted rig site binding was preserved: %+v", binding.Rigs)
+	}
+	if got["archived"] != "/site/archived" {
+		t.Fatalf("orphan binding = %q, want preserved path %q", got["archived"], "/site/archived")
 	}
 }
 

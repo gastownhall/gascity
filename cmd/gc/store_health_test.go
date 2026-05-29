@@ -126,6 +126,25 @@ func TestLiveRowCountCountsBeads(t *testing.T) {
 	}
 }
 
+func TestLiveRowCountIncludesClosedBeads(t *testing.T) {
+	store := beads.NewMemStore()
+	open, err := store.Create(beads.Bead{Title: "open"})
+	if err != nil {
+		t.Fatalf("Create open: %v", err)
+	}
+	closed, err := store.Create(beads.Bead{Title: "closed"})
+	if err != nil {
+		t.Fatalf("Create closed: %v", err)
+	}
+	if err := store.Close(closed.ID); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	if got := liveRowCount(store); got != 2 {
+		t.Fatalf("liveRowCount = %d, want 2 including closed bead %s and open bead %s", got, closed.ID, open.ID)
+	}
+}
+
 func TestCollectStoreHealthReadsEvents(t *testing.T) {
 	store := beads.NewMemStore()
 	if _, err := store.Create(beads.Bead{Title: "x"}); err != nil {

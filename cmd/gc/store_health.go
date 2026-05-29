@@ -50,7 +50,7 @@ func liveRowCount(store beads.Store) int {
 	if store == nil {
 		return 0
 	}
-	list, err := store.List(beads.ListQuery{AllowScan: true})
+	list, err := store.List(beads.ListQuery{AllowScan: true, IncludeClosed: true})
 	if err != nil {
 		return 0
 	}

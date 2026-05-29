@@ -56,6 +56,14 @@ func ExecCommandRunnerWithEnv(env map[string]string) CommandRunner {
 	return func(dir, name string, args ...string) ([]byte, error) {
 		start := time.Now()
 		trace := func(status string, err error) {
+			// GC_BD_TRACE_JSON wins: when the structured JSONL trace
+			// (via TraceBDCall in bdtrace.go) is enabled, suppress the
+			// legacy line-format trace so the two don't interleave
+			// incompatible records in the same file when an operator
+			// points both env vars at the same path.
+			if strings.TrimSpace(os.Getenv("GC_BD_TRACE_JSON")) != "" {
+				return
+			}
 			path := strings.TrimSpace(os.Getenv("GC_BD_TRACE"))
 			if path == "" {
 				return
@@ -99,6 +107,18 @@ func ExecCommandRunnerWithEnv(env map[string]string) CommandRunner {
 		cmd.Stderr = &stderr
 		out, err := cmd.Output()
 		if name == "bd" {
+			// Structured JSONL trace — independent of the legacy line-format
+			// trace above (gated by GC_BD_TRACE_JSON, not GC_BD_TRACE).
+			traceExit := 0
+			if err != nil {
+				var exitErr *exec.ExitError
+				if errors.As(err, &exitErr) {
+					traceExit = exitErr.ExitCode()
+				} else {
+					traceExit = -1
+				}
+			}
+			TraceBDCall("go:bdstore.runner", dir, args, start, traceExit, err)
 			telemetry.RecordBDCall(context.Background(),
 				args, float64(time.Since(start).Milliseconds()),
 				err, out, stderr.String())
@@ -293,6 +313,7 @@ func (s *BdStore) Purge(beadsDir string, dryRun bool) (PurgeResult, error) {
 
 // execPurge runs bd purge via exec.CommandContext with a 60-second timeout.
 func execPurge(dir string, env, args []string) ([]byte, error) {
+	start := time.Now()
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
@@ -305,6 +326,16 @@ func execPurge(dir string, env, args []string) ([]byte, error) {
 	cmd.Stderr = &stderr
 
 	err := cmd.Run()
+	traceExit := 0
+	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			traceExit = exitErr.ExitCode()
+		} else {
+			traceExit = -1
+		}
+	}
+	TraceBDCall("go:bdstore.execPurge", dir, args, start, traceExit, err)
 	if ctx.Err() == context.DeadlineExceeded {
 		return nil, fmt.Errorf("timed out after 60s")
 	}
@@ -617,6 +648,9 @@ func (s *BdStore) Create(b Bead) (Bead, error) {
 		typ = "task"
 	}
 	args := []string{"create", "--json", b.Title, "-t", typ}
+	if id := strings.TrimSpace(b.ID); id != "" {
+		args = append(args, "--id", id)
+	}
 	if b.Priority != nil {
 		args = append(args, "--priority", strconv.Itoa(*b.Priority))
 	}
@@ -1248,6 +1282,32 @@ func (s *BdStore) CloseAll(ids []string, metadata map[string]string) (int, error
 	return len(ids), nil
 }
 
+// CloseAllWithReason closes multiple beads with one reasoned bd close command
+// without pre-writing metadata on each bead.
+func (s *BdStore) CloseAllWithReason(ids []string, reason string) (int, error) {
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	reason = strings.TrimSpace(reason)
+	_, err := s.runner(s.dir, "bd", bdCloseArgs(reason, ids...)...)
+	if err != nil {
+		closed := 0
+		var fallbackErr error
+		for _, id := range ids {
+			if closeErr := s.close(id, reason); closeErr == nil {
+				closed++
+			} else {
+				fallbackErr = errors.Join(fallbackErr, closeErr)
+			}
+		}
+		if fallbackErr != nil {
+			return closed, errors.Join(fmt.Errorf("bd close batch: %w", err), fallbackErr)
+		}
+		return closed, nil
+	}
+	return len(ids), nil
+}
+
 // Close sets a bead's status to closed via bd close. If the bead already has
 // metadata.close_reason, the trimmed value is forwarded as bd close --reason.
 // Idempotent: closing an already-closed bead returns nil.
@@ -1299,6 +1359,15 @@ func (s *BdStore) close(id, reason string) error {
 			return fmt.Errorf("closing bead %q: %w", id, ErrNotFound)
 		}
 		return fmt.Errorf("closing bead %q: %w", id, err)
+	}
+	// Honesty guard: bd close can exit 0 yet leave the bead un-closed when an
+	// import-revert race (gastownhall/beads#3948) rolls the committed close
+	// back to open after the CLI has already returned. Trust the store, not the
+	// exit code — re-read and confirm the status landed. A failed re-read is
+	// not positive evidence of a revert, so we keep trusting the reported
+	// success in that case rather than masking it with a synthetic failure.
+	if b, getErr := s.Get(id); getErr == nil && b.Status != "closed" {
+		return fmt.Errorf("closing bead %q: bd close exited 0 but status is %q, not closed; suspected gastownhall/beads#3948 import-revert race", id, b.Status)
 	}
 	return nil
 }

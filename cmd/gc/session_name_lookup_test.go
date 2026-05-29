@@ -1,6 +1,8 @@
 package main
 
 import (
+	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -35,6 +37,177 @@ func TestCreatePoolSessionBead_SetsPendingCreateClaim(t *testing.T) {
 	if got, want := stored.Metadata["pending_create_started_at"], pendingCreateStartedAtNow(now); got != want {
 		t.Fatalf("stored pending_create_started_at = %q, want %q", got, want)
 	}
+}
+
+func TestCreatePoolSessionBead_UsesExplicitIDThroughCachingStore(t *testing.T) {
+	var created beads.Bead
+	runner := func(_, name string, args ...string) ([]byte, error) {
+		if name != "bd" {
+			return nil, fmt.Errorf("unexpected command %q", name)
+		}
+		switch args[0] {
+		case "create":
+			id := testFlagValue(args, "--id")
+			if id == "" {
+				return nil, fmt.Errorf("bd create missing explicit --id: %v", args)
+			}
+			var metadata map[string]string
+			if raw := testFlagValue(args, "--metadata"); raw != "" {
+				if err := json.Unmarshal([]byte(raw), &metadata); err != nil {
+					return nil, err
+				}
+			}
+			created = beads.Bead{
+				ID:        id,
+				Title:     args[2],
+				Status:    "open",
+				Type:      "task",
+				CreatedAt: nowForBDJSONTest(),
+				Metadata:  metadata,
+			}
+			return mustMarshalBDIssueJSON(t, created, false), nil
+		case "show":
+			return mustMarshalBDIssueJSON(t, created, true), nil
+		case "update":
+			return nil, fmt.Errorf("unexpected bd update after explicit create: %v", args)
+		default:
+			return nil, fmt.Errorf("unexpected bd args: %v", args)
+		}
+	}
+	backing := beads.NewBdStoreWithPrefix(t.TempDir(), runner, "mc")
+	store := beads.NewCachingStore(backing, nil)
+	now := time.Date(2026, 5, 1, 9, 15, 0, 0, time.UTC)
+
+	bead, err := createPoolSessionBead(store, "gascity/claude", now, poolSessionCreateIdentity{})
+	if err != nil {
+		t.Fatalf("createPoolSessionBead: %v", err)
+	}
+	if !strings.HasPrefix(bead.ID, "mc-session-") {
+		t.Fatalf("bead.ID = %q, want explicit mc-session-* ID", bead.ID)
+	}
+	wantSessionName := PoolSessionName("gascity/claude", bead.ID)
+	if got := bead.Metadata["session_name"]; got != wantSessionName {
+		t.Fatalf("session_name = %q, want %q", got, wantSessionName)
+	}
+
+	stored, err := backing.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("backing.Get(%s): %v", bead.ID, err)
+	}
+	if got := stored.Metadata["session_name"]; got != wantSessionName {
+		t.Fatalf("stored session_name = %q, want %q", got, wantSessionName)
+	}
+}
+
+func TestCreatePoolSessionBeadWithAlias_UpdatesExplicitIDBeadToResolvedAlias(t *testing.T) {
+	var created beads.Bead
+	var updatedMetadata string
+	runner := func(_, name string, args ...string) ([]byte, error) {
+		if name != "bd" {
+			return nil, fmt.Errorf("unexpected command %q", name)
+		}
+		switch args[0] {
+		case "create":
+			id := testFlagValue(args, "--id")
+			if id == "" {
+				return nil, fmt.Errorf("bd create missing explicit --id: %v", args)
+			}
+			var metadata map[string]string
+			if raw := testFlagValue(args, "--metadata"); raw != "" {
+				if err := json.Unmarshal([]byte(raw), &metadata); err != nil {
+					return nil, err
+				}
+			}
+			created = beads.Bead{
+				ID:        id,
+				Title:     args[2],
+				Status:    "open",
+				Type:      "task",
+				CreatedAt: nowForBDJSONTest(),
+				Metadata:  metadata,
+			}
+			return mustMarshalBDIssueJSON(t, created, false), nil
+		case "show":
+			return mustMarshalBDIssueJSON(t, created, true), nil
+		case "list":
+			return []byte(`[]`), nil
+		case "update":
+			if got := args[2]; got != created.ID {
+				return nil, fmt.Errorf("bd update id = %q, want %q", got, created.ID)
+			}
+			updatedMetadata = testFlagValue(args, "--set-metadata")
+			if updatedMetadata == "" {
+				return nil, fmt.Errorf("bd update missing --set-metadata: %v", args)
+			}
+			key, value, ok := strings.Cut(updatedMetadata, "=")
+			if !ok || key != "session_name" {
+				return nil, fmt.Errorf("bd update metadata = %q, want session_name=<alias>", updatedMetadata)
+			}
+			created.Metadata[key] = value
+			return []byte(`{"id":"` + created.ID + `"}`), nil
+		default:
+			return nil, fmt.Errorf("unexpected bd args: %v", args)
+		}
+	}
+	backing := beads.NewBdStoreWithPrefix(t.TempDir(), runner, "mc")
+	store := beads.NewCachingStore(backing, nil)
+	now := time.Date(2026, 5, 1, 9, 15, 0, 0, time.UTC)
+
+	bead, err := createPoolSessionBeadWithAlias(store, "crew-gastown", nil, nil, now, poolSessionCreateIdentity{}, "crew--gastown")
+	if err != nil {
+		t.Fatalf("createPoolSessionBeadWithAlias: %v", err)
+	}
+	if !strings.HasPrefix(bead.ID, "mc-session-") {
+		t.Fatalf("bead.ID = %q, want explicit mc-session-* ID", bead.ID)
+	}
+	if updatedMetadata != "session_name=crew--gastown" {
+		t.Fatalf("updated metadata = %q, want session_name=crew--gastown", updatedMetadata)
+	}
+	if got := bead.Metadata["session_name"]; got != "crew--gastown" {
+		t.Fatalf("session_name = %q, want resolved alias", got)
+	}
+
+	stored, err := backing.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("backing.Get(%s): %v", bead.ID, err)
+	}
+	if got := stored.Metadata["session_name"]; got != "crew--gastown" {
+		t.Fatalf("stored session_name = %q, want resolved alias", got)
+	}
+}
+
+func testFlagValue(args []string, flag string) string {
+	for i := 0; i+1 < len(args); i++ {
+		if args[i] == flag {
+			return args[i+1]
+		}
+	}
+	return ""
+}
+
+func nowForBDJSONTest() time.Time {
+	return time.Date(2026, 5, 1, 9, 15, 0, 0, time.UTC)
+}
+
+func mustMarshalBDIssueJSON(t *testing.T, bead beads.Bead, list bool) []byte {
+	t.Helper()
+	item := map[string]any{
+		"id":         bead.ID,
+		"title":      bead.Title,
+		"status":     bead.Status,
+		"issue_type": bead.Type,
+		"created_at": bead.CreatedAt.Format(time.RFC3339),
+		"metadata":   bead.Metadata,
+	}
+	var v any = item
+	if list {
+		v = []any{item}
+	}
+	data, err := json.Marshal(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data
 }
 
 func TestResolvedTemplateForIdentity_ResolvesUniqueInBoundsLegacyLocalPoolIdentity(t *testing.T) {

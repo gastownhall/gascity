@@ -59,6 +59,16 @@ passed since the last run, it instantiates the `pancakes` formula as a wisp and
 routes it to the `worker` pool. The order name comes from the file basename
 (`pancakes-check.toml` → `pancakes-check`), not from anything in the TOML.
 
+When the dispatcher stamps the wisp for a pool target it writes two metadata
+keys: `gc.routed_to=<pool>` so the worker's `bd ready` query finds it via the
+shared routed queue, and `gc.pool_demand=order` so the supervisor's default
+`scale_check` counts the wisp as pool demand even though the wisp itself is a
+`molecule` (which `bd ready` filters out as a workflow container). Both keys
+come from the same dispatcher write and you don't need to set them by hand;
+wisps that pre-date this dispatcher version won't carry the second key and
+won't generate demand from the in-process default `scale_check` until they
+close or are re-created.
+
 Orders are discovered when the city starts and whenever the controller reloads
 config. You don't need to restart anything if the city is already watching the
 orders directory.

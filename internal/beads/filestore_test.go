@@ -495,7 +495,7 @@ func TestFileStoreRefreshesSameSizeExternalRewrite(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	created, err := s1.Create(beads.Bead{Title: "alpha"})
+	created, err := s1.Create(beads.Bead{Title: strings.Repeat("a", 32)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -504,9 +504,7 @@ func TestFileStoreRefreshesSameSizeExternalRewrite(t *testing.T) {
 	}
 
 	beforeLen := len(f.Files[path])
-	if err := s1.Update(created.ID, beads.UpdateOpts{Title: ptr("bravo")}); err != nil {
-		t.Fatal(err)
-	}
+	updatedTitle := updateTitleKeepingFileSize(t, s1, f, path, created.ID, beforeLen)
 	afterLen := len(f.Files[path])
 	if beforeLen != afterLen {
 		t.Fatalf("expected same-size rewrite, got %d -> %d bytes", beforeLen, afterLen)
@@ -517,8 +515,8 @@ func TestFileStoreRefreshesSameSizeExternalRewrite(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get(%q) after same-size update: %v", created.ID, err)
 	}
-	if got.Title != "bravo" {
-		t.Fatalf("Title after same-size update = %q, want bravo", got.Title)
+	if got.Title != updatedTitle {
+		t.Fatalf("Title after same-size update = %q, want %q", got.Title, updatedTitle)
 	}
 
 	var readCalls int
@@ -545,16 +543,14 @@ func TestFileStoreMutatorReloadsSameSizeExternalRewriteWithUnchangedFreshness(t 
 		t.Fatal(err)
 	}
 
-	created, err := stale.Create(beads.Bead{Title: "alpha"})
+	created, err := stale.Create(beads.Bead{Title: strings.Repeat("a", 32)})
 	if err != nil {
 		t.Fatal(err)
 	}
 	originalModTime := f.ModTimes[path]
 	originalLen := len(f.Files[path])
 
-	if err := writer.Update(created.ID, beads.UpdateOpts{Title: ptr("bravo")}); err != nil {
-		t.Fatalf("Update(%q) from second handle: %v", created.ID, err)
-	}
+	updatedTitle := updateTitleKeepingFileSize(t, writer, f, path, created.ID, originalLen)
 	if gotLen := len(f.Files[path]); gotLen != originalLen {
 		t.Fatalf("expected same-size external rewrite, got %d -> %d bytes", originalLen, gotLen)
 	}
@@ -572,12 +568,27 @@ func TestFileStoreMutatorReloadsSameSizeExternalRewriteWithUnchangedFreshness(t 
 	if err != nil {
 		t.Fatalf("Get(%q) after stale-handle mutator: %v", created.ID, err)
 	}
-	if got.Title != "bravo" {
-		t.Fatalf("Title after stale-handle mutator = %q, want bravo", got.Title)
+	if got.Title != updatedTitle {
+		t.Fatalf("Title after stale-handle mutator = %q, want %q", got.Title, updatedTitle)
 	}
 	if got.Metadata["owner"] != "controller" {
 		t.Fatalf("metadata[owner] after stale-handle mutator = %q, want controller", got.Metadata["owner"])
 	}
+}
+
+func updateTitleKeepingFileSize(t *testing.T, store beads.Store, f *fsys.Fake, path, id string, targetLen int) string {
+	t.Helper()
+	for pad := 0; pad <= 64; pad++ {
+		title := "bravo" + strings.Repeat("x", pad)
+		if err := store.Update(id, beads.UpdateOpts{Title: &title}); err != nil {
+			t.Fatalf("Update(%q) to same-size title: %v", id, err)
+		}
+		if len(f.Files[path]) == targetLen {
+			return title
+		}
+	}
+	t.Fatalf("could not produce same-size rewrite for %s: target=%d last=%d", path, targetLen, len(f.Files[path]))
+	return ""
 }
 
 func TestFileStoreRefreshFallbackReloadsWhenStatFails(t *testing.T) {

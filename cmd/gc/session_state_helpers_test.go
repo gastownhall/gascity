@@ -20,6 +20,7 @@ func TestIsPoolSessionSlotFreeable_Matrix(t *testing.T) {
 		{"asleep+drained-reason", map[string]string{"state": "asleep", "sleep_reason": "drained"}, true},
 		{"asleep+idle", map[string]string{"state": "asleep", "sleep_reason": "idle"}, true},
 		{"asleep+idle-timeout", map[string]string{"state": "asleep", "sleep_reason": "idle-timeout"}, true},
+		{"asleep+city-stop", map[string]string{"state": "asleep", "sleep_reason": sleepReasonCityStop}, true},
 		{"asleep+failed-create", map[string]string{"state": "asleep", "sleep_reason": "failed-create"}, true},
 		{"asleep+runtime-missing", map[string]string{"state": "asleep", "sleep_reason": sleepReasonRuntimeMissing}, true},
 		{"asleep+empty-reason", map[string]string{"state": "asleep", "sleep_reason": ""}, false},

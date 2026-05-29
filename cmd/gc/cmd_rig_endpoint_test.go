@@ -1639,7 +1639,16 @@ func writeRigEndpointCityConfig(t *testing.T, cityDir, rigDir string) {
 	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	content := fmt.Sprintf("[workspace]\nname = \"test-city\"\n\n[[rigs]]\nname = \"frontend\"\npath = %q\nprefix = \"fe\"\n", rigDir)
+	if err := os.WriteFile(filepath.Join(cityDir, "pack.toml"), []byte("[pack]\nname = \"test-city\"\nschema = 2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := config.PersistWorkspaceSiteBinding(fsys.OSFS{}, cityDir, "test-city", ""); err != nil {
+		t.Fatalf("PersistWorkspaceSiteBinding: %v", err)
+	}
+	if err := config.PersistRigSiteBindings(fsys.OSFS{}, cityDir, []config.Rig{{Name: "frontend", Path: rigDir}}); err != nil {
+		t.Fatalf("PersistRigSiteBindings: %v", err)
+	}
+	content := "[workspace]\n\n[[rigs]]\nname = \"frontend\"\nprefix = \"fe\"\n"
 	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}

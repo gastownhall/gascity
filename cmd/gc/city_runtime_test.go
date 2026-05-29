@@ -504,6 +504,112 @@ func TestCityRuntimeRequestDeferredDrainFollowUpTick_PokesOnce(t *testing.T) {
 	}
 }
 
+func TestTickDebouncer_ZeroFiresImmediately(t *testing.T) {
+	d := newTickDebouncer()
+	d.arm(0)
+	select {
+	case <-d.fired():
+	default:
+		t.Fatal("debounce=0 should enqueue an immediate fire")
+	}
+}
+
+func TestTickDebouncer_ZeroPreservesCapOneCoalesce(t *testing.T) {
+	d := newTickDebouncer()
+	d.arm(0)
+	d.arm(0)
+	d.arm(0)
+	// Three arms should still produce exactly one queued fire — the
+	// cap=1 channel collapses the rest, matching the pre-debounce
+	// pokeCh non-blocking-send semantics.
+	if got := drainFiredCount(d, 5*time.Millisecond); got != 1 {
+		t.Fatalf("fired count = %d, want 1 (cap=1 coalesce)", got)
+	}
+}
+
+func TestTickDebouncer_CoalescesBurstyArms(t *testing.T) {
+	d := newTickDebouncer()
+	debounce := 200 * time.Millisecond
+	// Burst of arms with no inter-arm sleep so the entire burst fits well
+	// inside the debounce window even on a slow CI runner.
+	for i := 0; i < 5; i++ {
+		d.arm(debounce)
+	}
+	// Burst should produce exactly one fire after the window. The total
+	// observation window includes a generous tail to absorb GC pauses
+	// and CI scheduler jitter.
+	if got := drainFiredCount(d, debounce+200*time.Millisecond); got != 1 {
+		t.Fatalf("fired count = %d, want 1 after burst", got)
+	}
+}
+
+func TestTickDebouncer_CancelPendingDropsTimer(t *testing.T) {
+	d := newTickDebouncer()
+	d.arm(30 * time.Millisecond)
+	d.cancelPending()
+	// Wait past the original window — nothing should fire.
+	if got := drainFiredCount(d, 60*time.Millisecond); got != 0 {
+		t.Fatalf("fired count = %d, want 0 after cancelPending", got)
+	}
+}
+
+func TestTickDebouncer_CancelPendingDrainsQueuedFire(t *testing.T) {
+	d := newTickDebouncer()
+	d.arm(0) // queue a fire on fireCh
+	d.cancelPending()
+	// cancelPending should drain the already-queued fire, not just stop
+	// the timer — otherwise a debounce=0 "ticker absorbs poke" path would
+	// still receive on fired() in the next select iteration.
+	if got := drainFiredCount(d, 5*time.Millisecond); got != 0 {
+		t.Fatalf("fired count = %d, want 0 after cancelPending drains queued fire", got)
+	}
+}
+
+func TestTickDebouncer_RearmsAfterFire(t *testing.T) {
+	d := newTickDebouncer()
+	debounce := 20 * time.Millisecond
+	d.arm(debounce)
+	if got := drainFiredCount(d, debounce+50*time.Millisecond); got != 1 {
+		t.Fatalf("first burst fired count = %d, want 1", got)
+	}
+	// Second burst should arm a fresh timer — the AfterFunc callback must
+	// have cleared the internal timer pointer.
+	d.arm(debounce)
+	if got := drainFiredCount(d, debounce+50*time.Millisecond); got != 1 {
+		t.Fatalf("second burst fired count = %d, want 1", got)
+	}
+}
+
+func TestTickDebouncer_IndependentInstances(t *testing.T) {
+	a := newTickDebouncer()
+	b := newTickDebouncer()
+	debounce := 20 * time.Millisecond
+	a.arm(debounce)
+	b.arm(debounce)
+	if got := drainFiredCount(a, debounce+50*time.Millisecond); got != 1 {
+		t.Fatalf("a fired count = %d, want 1", got)
+	}
+	if got := drainFiredCount(b, 5*time.Millisecond); got != 1 {
+		t.Fatalf("b fired count = %d, want 1 (independent timer state)", got)
+	}
+}
+
+// drainFiredCount counts how many fires are available on the debouncer's
+// channel within window. It returns once window elapses with no further
+// fires for at least a short tail, so the count is stable.
+func drainFiredCount(d *tickDebouncer, window time.Duration) int {
+	deadline := time.After(window)
+	count := 0
+	for {
+		select {
+		case <-d.fired():
+			count++
+		case <-deadline:
+			return count
+		}
+	}
+}
+
 func TestCityRuntimeShutdownMarksCityStopSleepReason(t *testing.T) {
 	store := beads.NewMemStore()
 	session, err := store.Create(beads.Bead{
@@ -1444,7 +1550,13 @@ func TestCityRuntimeRunStartupOrderDispatchPanicIsRecovered(t *testing.T) {
 	}
 }
 
-func TestOrderTrackingSweepWatchdogOnlyClosesSweepOrderTracking(t *testing.T) {
+func TestOrderTrackingSweepWatchdogClosesAllStaleTracking(t *testing.T) {
+	// #2168: the watchdog must clear stale tracking beads for EVERY order, not
+	// just order-tracking-sweep's own. The old narrow scope only swept the
+	// sweep order's tracking to bootstrap it, relying on order-tracking-sweep
+	// to then clean the rest — a single-point-of-failure that jammed every
+	// order when slow reconciler cycles kept that one order from firing. The
+	// staleAfter cutoff still protects in-flight dispatches regardless of order.
 	store := beads.NewMemStore()
 	sweepTracking, err := store.Create(beads.Bead{
 		Title:  "order:" + orderTrackingSweepOrder,
@@ -1482,8 +1594,229 @@ func TestOrderTrackingSweepWatchdogOnlyClosesSweepOrderTracking(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get(merge): %v", err)
 	}
-	if gotMerge.Status != "open" {
-		t.Fatalf("merge tracking status = %s, want open", gotMerge.Status)
+	if gotMerge.Status != "closed" {
+		t.Fatalf("merge tracking status = %s, want closed (watchdog now sweeps all orders, not just order-tracking-sweep)", gotMerge.Status)
+	}
+}
+
+func TestOrderTrackingSweepWatchdogAllowsSweepOrderToCleanStaleTracking(t *testing.T) {
+	store := beads.NewMemStore()
+	sweepTracking, err := store.Create(beads.Bead{
+		Title:     "order:" + orderTrackingSweepOrder,
+		Labels:    []string{"order-run:" + orderTrackingSweepOrder, labelOrderTracking},
+		Ephemeral: true,
+	})
+	if err != nil {
+		t.Fatalf("Create(sweep): %v", err)
+	}
+	staleMerge, err := store.Create(beads.Bead{
+		Title:     "order:pr-merge-queue",
+		Labels:    []string{"order-run:pr-merge-queue", labelOrderTracking},
+		Ephemeral: true,
+	})
+	if err != nil {
+		t.Fatalf("Create(stale merge): %v", err)
+	}
+
+	cr := &CityRuntime{
+		cityName:            "test-city",
+		cfg:                 &config.City{Workspace: config.Workspace{Name: "test-city"}},
+		standaloneCityStore: store,
+		stdout:              io.Discard,
+		stderr:              io.Discard,
+		logPrefix:           "gc test",
+	}
+	cr.runOrderTrackingSweepWatchdog(sweepTracking.CreatedAt.Add(orderTrackingSweepWatchdogStaleAfter + time.Second))
+
+	if got, err := store.Get(sweepTracking.ID); err != nil {
+		t.Fatalf("Get(sweep): %v", err)
+	} else if got.Status != "closed" {
+		t.Fatalf("sweep tracking status = %s, want closed before dispatch", got.Status)
+	}
+
+	time.Sleep(75 * time.Millisecond)
+	freshMerge, err := store.Create(beads.Bead{
+		Title:     "order:pr-merge-queue",
+		Labels:    []string{"order-run:pr-merge-queue", labelOrderTracking},
+		Ephemeral: true,
+	})
+	if err != nil {
+		t.Fatalf("Create(fresh merge): %v", err)
+	}
+
+	execRan := false
+	fakeExec := func(context.Context, string, string, []string) ([]byte, error) {
+		execRan = true
+		_, err := sweepStaleOrderTrackingAcrossStores(
+			[]beads.Store{store},
+			time.Now(),
+			50*time.Millisecond,
+			nil,
+			orderTrackingSweepMetadataInitiator,
+			false,
+		)
+		return nil, err
+	}
+	ad := buildOrderDispatcherFromListExec([]orders.Order{{
+		Name:     orderTrackingSweepOrder,
+		Trigger:  "cooldown",
+		Interval: "1ms",
+		Exec:     "gc order sweep-tracking",
+	}}, store, nil, fakeExec, nil)
+
+	ad.dispatch(context.Background(), t.TempDir(), time.Now().Add(time.Hour))
+	ad.drain(context.Background())
+	if !execRan {
+		t.Fatal("sweep order did not dispatch after watchdog closed its stale tracking bead")
+	}
+
+	gotStale, err := store.Get(staleMerge.ID)
+	if err != nil {
+		t.Fatalf("Get(stale merge): %v", err)
+	}
+	if gotStale.Status != "closed" {
+		t.Fatalf("stale merge tracking status = %s, want closed", gotStale.Status)
+	}
+	gotFresh, err := store.Get(freshMerge.ID)
+	if err != nil {
+		t.Fatalf("Get(fresh merge): %v", err)
+	}
+	if gotFresh.Status != "open" {
+		t.Fatalf("fresh merge tracking status = %s, want open", gotFresh.Status)
+	}
+}
+
+func TestOrderTrackingSweepWatchdogClosesRigStoreSweepTracking(t *testing.T) {
+	cityStore := beads.NewMemStore()
+	rigStore := beads.NewMemStore()
+	rigSweepTracking, err := rigStore.Create(beads.Bead{
+		Title:     "order:" + orderTrackingSweepOrder + ":rig:frontend",
+		Labels:    []string{"order-run:" + orderTrackingSweepOrder + ":rig:frontend", labelOrderTracking},
+		Ephemeral: true,
+	})
+	if err != nil {
+		t.Fatalf("Create(rig sweep): %v", err)
+	}
+	time.Sleep(2 * time.Millisecond)
+	freshRigSweepTracking, err := rigStore.Create(beads.Bead{
+		Title:     "order:" + orderTrackingSweepOrder + ":rig:frontend",
+		Labels:    []string{"order-run:" + orderTrackingSweepOrder + ":rig:frontend", labelOrderTracking},
+		Ephemeral: true,
+	})
+	if err != nil {
+		t.Fatalf("Create(fresh rig sweep): %v", err)
+	}
+	cityTracking, err := cityStore.Create(beads.Bead{
+		Title:     "order:pr-merge-queue",
+		Labels:    []string{"order-run:pr-merge-queue", labelOrderTracking},
+		Ephemeral: true,
+	})
+	if err != nil {
+		t.Fatalf("Create(city unrelated): %v", err)
+	}
+
+	cityPath := t.TempDir()
+	rigPath := filepath.Join(cityPath, "frontend")
+	cr := &CityRuntime{
+		cityPath:            cityPath,
+		cityName:            "test-city",
+		cfg:                 &config.City{Workspace: config.Workspace{Name: "test-city"}, Rigs: []config.Rig{{Name: "frontend", Path: rigPath}}},
+		standaloneCityStore: cityStore,
+		standaloneRigStores: map[string]beads.Store{"frontend": rigStore},
+		stdout:              io.Discard,
+		stderr:              io.Discard,
+		logPrefix:           "gc test",
+	}
+	cr.runOrderTrackingSweepWatchdog(rigSweepTracking.CreatedAt.Add(orderTrackingSweepWatchdogStaleAfter + time.Millisecond))
+
+	gotRig, err := rigStore.Get(rigSweepTracking.ID)
+	if err != nil {
+		t.Fatalf("Get(rig sweep): %v", err)
+	}
+	if gotRig.Status != "closed" {
+		t.Fatalf("rig sweep tracking status = %s, want closed", gotRig.Status)
+	}
+	gotFresh, err := rigStore.Get(freshRigSweepTracking.ID)
+	if err != nil {
+		t.Fatalf("Get(fresh rig sweep): %v", err)
+	}
+	if gotFresh.Status != "open" {
+		t.Fatalf("fresh rig sweep tracking status = %s, want open", gotFresh.Status)
+	}
+	gotCity, err := cityStore.Get(cityTracking.ID)
+	if err != nil {
+		t.Fatalf("Get(city unrelated): %v", err)
+	}
+	if gotCity.Status != "open" {
+		t.Fatalf("city unrelated tracking status = %s, want open", gotCity.Status)
+	}
+}
+
+func TestOrderTrackingSweepWatchdogFallsBackToConfiguredRigStore(t *testing.T) {
+	cityStore := beads.NewMemStore()
+	rigStore := beads.NewMemStore()
+	citySweepTracking, err := cityStore.Create(beads.Bead{
+		Title:     "order:" + orderTrackingSweepOrder,
+		Labels:    []string{"order-run:" + orderTrackingSweepOrder, labelOrderTracking},
+		Ephemeral: true,
+	})
+	if err != nil {
+		t.Fatalf("Create(city sweep): %v", err)
+	}
+	time.Sleep(2 * time.Millisecond)
+	rigSweepTracking, err := rigStore.Create(beads.Bead{
+		Title:     "order:" + orderTrackingSweepOrder + ":rig:frontend",
+		Labels:    []string{"order-run:" + orderTrackingSweepOrder + ":rig:frontend", labelOrderTracking},
+		Ephemeral: true,
+	})
+	if err != nil {
+		t.Fatalf("Create(rig sweep): %v", err)
+	}
+	cityPath := t.TempDir()
+	rigPath := filepath.Join(cityPath, "frontend")
+	prevOpenSweepStore := newCityRuntimeOpenSweepStore
+	newCityRuntimeOpenSweepStore = func(scopeRoot, gotCityPath string) (beads.Store, error) {
+		if gotCityPath != cityPath {
+			return nil, fmt.Errorf("city path = %q, want %q", gotCityPath, cityPath)
+		}
+		switch filepath.Clean(scopeRoot) {
+		case filepath.Clean(cityPath):
+			return cityStore, nil
+		case filepath.Clean(rigPath):
+			return rigStore, nil
+		default:
+			return nil, fmt.Errorf("unexpected store path %q", scopeRoot)
+		}
+	}
+	t.Cleanup(func() {
+		newCityRuntimeOpenSweepStore = prevOpenSweepStore
+	})
+
+	cr := &CityRuntime{
+		cityPath:            cityPath,
+		cityName:            "test-city",
+		cfg:                 &config.City{Workspace: config.Workspace{Name: "test-city"}, Rigs: []config.Rig{{Name: "frontend", Path: rigPath}}},
+		standaloneCityStore: cityStore,
+		standaloneRigStores: map[string]beads.Store{},
+		stdout:              io.Discard,
+		stderr:              io.Discard,
+		logPrefix:           "gc test",
+	}
+	cr.runOrderTrackingSweepWatchdog(rigSweepTracking.CreatedAt.Add(orderTrackingSweepWatchdogStaleAfter + time.Millisecond))
+
+	gotRig, err := rigStore.Get(rigSweepTracking.ID)
+	if err != nil {
+		t.Fatalf("Get(rig sweep): %v", err)
+	}
+	if gotRig.Status != "closed" {
+		t.Fatalf("rig sweep tracking status = %s, want closed", gotRig.Status)
+	}
+	gotCity, err := cityStore.Get(citySweepTracking.ID)
+	if err != nil {
+		t.Fatalf("Get(city sweep): %v", err)
+	}
+	if gotCity.Status != "closed" {
+		t.Fatalf("city sweep tracking status = %s, want closed", gotCity.Status)
 	}
 }
 
@@ -2783,7 +3116,8 @@ func TestCityRuntimeTick_PrefixesEachJoinedWispGCErrorLine(t *testing.T) {
 		cfg:                 &config.City{},
 		sp:                  runtime.NewFake(),
 		standaloneCityStore: store,
-		wg: fixedWispGC{err: fmt.Errorf("%s\n%s",
+		wg: fixedWispGC{err: fmt.Errorf(
+			"%s\n%s",
 			"deleting expired bead \"mol-1\": delete failed",
 			"listing closed order-tracking beads: list failed",
 		)},

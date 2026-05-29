@@ -335,6 +335,11 @@ you are!" - that is a FAILURE. YOU must push, not the user.
    go test ./...             # or: make test
    golangci-lint run ./...   # or: make lint
    ```
+   If these don't apply to this repo (non-Go project) or no commands are
+   configured for your wisp, fall back to the repo's instruction file
+   (`{{ .InstructionsFile }}`) for the project-specific quality gates and
+   run those instead. Do not skip the gates — the fallback preserves the
+   intent even when pack-specific guidance is missing or empty.
    File P0 beads if quality gates are broken.
 
 3. **Update beads** - close finished work, update status:

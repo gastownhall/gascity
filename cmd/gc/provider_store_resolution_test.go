@@ -135,10 +135,10 @@ func TestCmdOrderHistoryUsesProviderAwareCityStore(t *testing.T) {
 	writeProviderAwareTestCity(t, cityDir, `[workspace]
 name = "demo"
 `)
-	if err := os.MkdirAll(filepath.Join(cityDir, "orders", "digest"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(cityDir, "orders"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(cityDir, "orders", "digest", "order.toml"), []byte(`[order]
+	if err := os.WriteFile(filepath.Join(cityDir, "orders", "digest.toml"), []byte(`[order]
 formula = "mol-digest"
 trigger = "manual"
 `), 0o644); err != nil {
@@ -249,10 +249,10 @@ func TestCmdOrderRunExecSkipsStoreOpenForScopedFileProvider(t *testing.T) {
 	writeProviderAwareTestCity(t, cityDir, `[workspace]
 name = "demo"
 `)
-	if err := os.MkdirAll(filepath.Join(cityDir, "orders", "poll"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(cityDir, "orders"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(cityDir, "orders", "poll", "order.toml"), []byte(`[order]
+	if err := os.WriteFile(filepath.Join(cityDir, "orders", "poll.toml"), []byte(`[order]
 exec = "printf 'exec ok\\n'"
 trigger = "manual"
 `), 0o644); err != nil {
@@ -281,10 +281,10 @@ func TestCmdOrderRunFormulaUsesProviderAwareCityStore(t *testing.T) {
 	writeProviderAwareTestCity(t, cityDir, `[workspace]
 name = "demo"
 `)
-	if err := os.MkdirAll(filepath.Join(cityDir, "orders", "digest"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(cityDir, "orders"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(cityDir, "orders", "digest", "order.toml"), []byte(`[order]
+	if err := os.WriteFile(filepath.Join(cityDir, "orders", "digest.toml"), []byte(`[order]
 formula = "mol-digest"
 trigger = "manual"
 pool = "dog"
@@ -294,11 +294,11 @@ pool = "dog"
 	if err := os.MkdirAll(filepath.Join(cityDir, "formulas"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	formulaText, err := os.ReadFile(filepath.Join(sharedTestFormulaDir, "mol-digest.formula.toml"))
+	formulaText, err := os.ReadFile(filepath.Join(sharedTestFormulaDir, "mol-digest.toml"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(cityDir, "formulas", "mol-digest.formula.toml"), formulaText, 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(cityDir, "formulas", "mol-digest.toml"), formulaText, 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if err := ensurePersistedScopeLocalFileStore(cityDir); err != nil {
