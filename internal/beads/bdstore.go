@@ -463,6 +463,7 @@ type bdIssue struct {
 	Metadata     StringMap    `json:"metadata,omitempty"`
 	Dependencies []bdIssueDep `json:"dependencies,omitempty"`
 	Ephemeral    bool         `json:"ephemeral,omitempty"`
+	DeferUntil   *time.Time   `json:"defer_until,omitempty"`
 }
 
 type bdIssueDep struct {
@@ -589,6 +590,7 @@ func (b *bdIssue) toBead() Bead {
 		Metadata:     b.Metadata,
 		Dependencies: deps,
 		Ephemeral:    b.Ephemeral,
+		DeferUntil:   cloneTimePtr(b.DeferUntil),
 	}
 }
 

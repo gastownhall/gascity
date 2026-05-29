@@ -48,6 +48,11 @@ type Bead struct {
 	// garbage collection. Reads must opt in via ListQuery.TierMode (or the
 	// WithEphemeral/WithBothTiers QueryOpts on the legacy label helpers).
 	Ephemeral bool `json:"ephemeral,omitempty"`
+	// DeferUntil hides the bead from ready/claimable views until this time,
+	// mirroring bd's defer_until column (a future value means "not yet ready";
+	// nil or past means ready). Carried so the in-memory cached read model can
+	// apply the same defer gate that bd ready applies server-side.
+	DeferUntil *time.Time `json:"defer_until,omitempty"`
 }
 
 // UpdateOpts specifies which fields to change. Nil pointers are skipped.
@@ -81,6 +86,14 @@ func runSequentialTx(tx Tx, fn func(Tx) error) error {
 }
 
 func cloneIntPtr(v *int) *int {
+	if v == nil {
+		return nil
+	}
+	cloned := *v
+	return &cloned
+}
+
+func cloneTimePtr(v *time.Time) *time.Time {
 	if v == nil {
 		return nil
 	}

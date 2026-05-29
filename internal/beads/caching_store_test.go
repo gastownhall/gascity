@@ -1169,6 +1169,52 @@ func TestCachingStoreCachedReadyUsesPrimedDependencies(t *testing.T) {
 	}
 }
 
+// TestCachingStoreCachedReadyExcludesFutureDeferredBead pins that the cached
+// read model honors defer_until the same way bd ready does: a bead deferred
+// into the future is not "ready" even though it is open with no blocking deps,
+// while a past/nil defer is ready. Regression guard for the cross-batch defer
+// being bypassed by the scale-check's CachedReady path.
+func TestCachingStoreCachedReadyExcludesFutureDeferredBead(t *testing.T) {
+	t.Parallel()
+	mem := beads.NewMemStore()
+	ready, err := mem.Create(beads.Bead{Title: "Ready"})
+	if err != nil {
+		t.Fatalf("Create(ready): %v", err)
+	}
+	future := time.Now().UTC().Add(24 * time.Hour)
+	deferred, err := mem.Create(beads.Bead{Title: "Deferred", DeferUntil: &future})
+	if err != nil {
+		t.Fatalf("Create(deferred): %v", err)
+	}
+	past := time.Now().UTC().Add(-24 * time.Hour)
+	pastDeferred, err := mem.Create(beads.Bead{Title: "PastDeferred", DeferUntil: &past})
+	if err != nil {
+		t.Fatalf("Create(pastDeferred): %v", err)
+	}
+
+	cache := beads.NewCachingStoreForTest(mem, nil)
+	if err := cache.PrimeActive(); err != nil {
+		t.Fatalf("PrimeActive: %v", err)
+	}
+	got, ok := cache.CachedReady()
+	if !ok {
+		t.Fatal("CachedReady reported cache unavailable")
+	}
+	ids := map[string]bool{}
+	for _, b := range got {
+		ids[b.ID] = true
+	}
+	if !ids[ready.ID] {
+		t.Errorf("CachedReady omitted non-deferred bead %s; ids=%v", ready.ID, ids)
+	}
+	if ids[deferred.ID] {
+		t.Errorf("CachedReady included future-deferred bead %s; ids=%v", deferred.ID, ids)
+	}
+	if !ids[pastDeferred.ID] {
+		t.Errorf("CachedReady omitted past-deferred (ready) bead %s; ids=%v", pastDeferred.ID, ids)
+	}
+}
+
 func TestCachingStoreCachedReadyUsesWriteThroughDependencies(t *testing.T) {
 	t.Parallel()
 	mem := beads.NewMemStore()
