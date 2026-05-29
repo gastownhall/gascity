@@ -285,6 +285,9 @@ func TestCheckUsesBothTiersForSlashRecipient(t *testing.T) {
 			}
 			return []byte(`[{"id":"msg-1","title":"hello","description":"body","status":"open","issue_type":"message","assignee":"gascity/workflows.codex-max","from":"human","created_at":"2026-01-02T03:04:05Z"}]`), nil
 		case strings.Contains(cmd, "bd query --json"):
+			if strings.Contains(cmd, "assignee=") {
+				t.Fatalf("slash recipient used per-assignee wisp query: %s", cmd)
+			}
 			if !strings.Contains(cmd, "ephemeral=true") || !strings.Contains(cmd, "type=message") {
 				t.Fatalf("slash recipient used unexpected wisp query: %s", cmd)
 			}
@@ -307,7 +310,7 @@ func TestMessageQueriesUseBothTiers(t *testing.T) {
 	store := beads.NewMemStore()
 	p := New(store)
 
-	wispMsg, err := store.Create(beads.Bead{
+	wisp, err := store.Create(beads.Bead{
 		Title:       "wisp status",
 		Type:        "message",
 		Assignee:    "mayor",
@@ -328,16 +331,16 @@ func TestMessageQueriesUseBothTiers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Check: %v", err)
 	}
-	if len(inbox) != 2 || !mailIDsContain(inbox, wispMsg.ID) || !mailIDsContain(inbox, msg.ID) {
-		t.Fatalf("Check = %#v, want messages %s and %s", inbox, wispMsg.ID, msg.ID)
+	if len(inbox) != 2 || !messagesContain(inbox, wisp.ID) || !messagesContain(inbox, msg.ID) {
+		t.Fatalf("Check = %#v, want wisp %s and issue %s", inbox, wisp.ID, msg.ID)
 	}
 
 	all, err := p.All("")
 	if err != nil {
 		t.Fatalf("All: %v", err)
 	}
-	if len(all) != 2 || !mailIDsContain(all, wispMsg.ID) || !mailIDsContain(all, msg.ID) {
-		t.Fatalf("All = %#v, want messages %s and %s", all, wispMsg.ID, msg.ID)
+	if len(all) != 2 || !messagesContain(all, wisp.ID) || !messagesContain(all, msg.ID) {
+		t.Fatalf("All = %#v, want wisp %s and issue %s", all, wisp.ID, msg.ID)
 	}
 
 	total, unread, err := p.Count("mayor")
@@ -357,9 +360,9 @@ func TestMessageQueriesUseBothTiers(t *testing.T) {
 	}
 }
 
-func mailIDsContain(messages []mail.Message, id string) bool {
-	for _, message := range messages {
-		if message.ID == id {
+func messagesContain(messages []mail.Message, id string) bool {
+	for _, msg := range messages {
+		if msg.ID == id {
 			return true
 		}
 	}
