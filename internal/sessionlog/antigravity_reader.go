@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -27,11 +28,18 @@ type agyLogEntry struct {
 	Thinking     string           `json:"thinking"`
 	ToolCalls    []agyToolCall    `json:"tool_calls"`
 	Interactions []agyInteraction `json:"interactions"`
+	ToolCallID   string           `json:"tool_call_id"`
+	ToolCallIDJS string           `json:"toolCallId"`
+	CallID       string           `json:"call_id"`
 }
 
 type agyToolCall struct {
-	Name string          `json:"name"`
-	Args json.RawMessage `json:"args"`
+	ID           string          `json:"id"`
+	ToolCallID   string          `json:"tool_call_id"`
+	ToolCallIDJS string          `json:"toolCallId"`
+	CallID       string          `json:"call_id"`
+	Name         string          `json:"name"`
+	Args         json.RawMessage `json:"args"`
 }
 
 // agyInteraction mirrors the gemini-family interaction record carried on agy
@@ -90,7 +98,8 @@ func readAntigravityFile(path string, rawMode bool) (*Session, error) {
 	scanner.Buffer(make([]byte, 0, 256*1024), 50*1024*1024)
 
 	var lastNonEmptyLineMalformed bool
-	var lastCallID string
+	var lastUUID string
+	var pendingCallIDs []string
 
 	for scanner.Scan() {
 		line := scanner.Bytes()
@@ -105,13 +114,17 @@ func readAntigravityFile(path string, rawMode bool) (*Session, error) {
 		}
 		lastNonEmptyLineMalformed = false
 
-		entry := convertAgyEntry(raw, line, &lastCallID)
+		entry := convertAgyEntry(raw, line, &pendingCallIDs)
 		if entry == nil {
 			continue
 		}
 		if !rawMode && !displayTypes[entry.Type] {
 			continue
 		}
+		if entry.ParentUUID == "" {
+			entry.ParentUUID = lastUUID
+		}
+		lastUUID = entry.UUID
 		messages = append(messages, entry)
 	}
 
@@ -121,16 +134,20 @@ func readAntigravityFile(path string, rawMode bool) (*Session, error) {
 	diagnostics.MalformedTail = lastNonEmptyLineMalformed
 
 	sessionID := antigravitySessionID(path)
+	orphanedToolUseIDs := findOrphanedToolUses(messages, collectAllToolResultIDs(messages))
+	if len(orphanedToolUseIDs) == 0 {
+		orphanedToolUseIDs = nil
+	}
 
 	return &Session{
 		ID:                 sessionID,
 		Messages:           messages,
-		OrphanedToolUseIDs: nil,
+		OrphanedToolUseIDs: orphanedToolUseIDs,
 		Diagnostics:        diagnostics,
 	}, nil
 }
 
-func convertAgyEntry(raw agyLogEntry, rawLine []byte, lastCallID *string) *Entry {
+func convertAgyEntry(raw agyLogEntry, rawLine []byte, pendingCallIDs *[]string) *Entry {
 	ts, _ := time.Parse(time.RFC3339, raw.CreatedAt)
 	uuid := fmt.Sprintf("agy-%d", raw.StepIndex)
 
@@ -172,9 +189,10 @@ func convertAgyEntry(raw agyLogEntry, rawLine []byte, lastCallID *string) *Entry
 		if raw.Thinking != "" {
 			blocks = append(blocks, ContentBlock{Type: "thinking", Text: raw.Thinking})
 		}
+		*pendingCallIDs = (*pendingCallIDs)[:0]
 		for i, tc := range raw.ToolCalls {
-			callID := fmt.Sprintf("call-%d-%d", raw.StepIndex, i)
-			*lastCallID = callID
+			callID := agyToolCallID(tc, fmt.Sprintf("call-%d-%d", raw.StepIndex, i))
+			*pendingCallIDs = append(*pendingCallIDs, callID)
 			blocks = append(blocks, ContentBlock{
 				Type:  "tool_use",
 				ID:    callID,
@@ -195,9 +213,9 @@ func convertAgyEntry(raw agyLogEntry, rawLine []byte, lastCallID *string) *Entry
 		}
 	case "GENERIC", "RUN_COMMAND", "READ_FILE", "WRITE_FILE", "BROWSE_WEB", "SEARCH_WEB":
 		// Standard executions and generic models results translate to tool results.
-		callID := *lastCallID
+		callID := consumeAgyPendingCallID(pendingCallIDs, agyResultCallID(raw))
 		if callID == "" {
-			callID = fmt.Sprintf("call-%d-0", raw.StepIndex-1)
+			return agySystemEntry(raw, rawLine, ts, uuid)
 		}
 		block := ContentBlock{
 			Type:      "tool_result",
@@ -229,19 +247,58 @@ func convertAgyEntry(raw agyLogEntry, rawLine []byte, lastCallID *string) *Entry
 		}
 	default:
 		// Default system logs fallback to system turns.
-		if raw.Content == "" {
-			return nil
+		return agySystemEntry(raw, rawLine, ts, uuid)
+	}
+}
+
+func agyToolCallID(tc agyToolCall, fallback string) string {
+	return firstTrimmedNonEmpty(tc.ID, tc.ToolCallID, tc.ToolCallIDJS, tc.CallID, fallback)
+}
+
+func agyResultCallID(raw agyLogEntry) string {
+	return firstTrimmedNonEmpty(raw.ToolCallID, raw.ToolCallIDJS, raw.CallID)
+}
+
+func consumeAgyPendingCallID(pendingCallIDs *[]string, preferred string) string {
+	if preferred != "" {
+		for i, callID := range *pendingCallIDs {
+			if callID == preferred {
+				*pendingCallIDs = append((*pendingCallIDs)[:i], (*pendingCallIDs)[i+1:]...)
+				return preferred
+			}
 		}
-		return &Entry{
-			UUID:      uuid,
-			Type:      "system",
-			Timestamp: ts,
-			Message: mustMarshal(MessageContent{
-				Role:    "system",
-				Content: mustMarshal(raw.Content),
-			}),
-			Raw: append(json.RawMessage(nil), rawLine...),
+		return preferred
+	}
+	if len(*pendingCallIDs) == 0 {
+		return ""
+	}
+	callID := (*pendingCallIDs)[0]
+	*pendingCallIDs = (*pendingCallIDs)[1:]
+	return callID
+}
+
+func firstTrimmedNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value = strings.TrimSpace(value); value != "" {
+			return value
 		}
+	}
+	return ""
+}
+
+func agySystemEntry(raw agyLogEntry, rawLine []byte, ts time.Time, uuid string) *Entry {
+	if raw.Content == "" {
+		return nil
+	}
+	return &Entry{
+		UUID:      uuid,
+		Type:      "system",
+		Timestamp: ts,
+		Message: mustMarshal(MessageContent{
+			Role:    "system",
+			Content: mustMarshal(raw.Content),
+		}),
+		Raw: append(json.RawMessage(nil), rawLine...),
 	}
 }
 
@@ -303,7 +360,7 @@ func antigravitySessionID(path string) string {
 // other provider keyed lookups; the agy conversation id is globally unique, so
 // it is not needed to disambiguate the transcript path.
 func FindAntigravitySessionFileByID(searchPaths []string, _, sessionID string) string {
-	sessionID = strings.TrimSpace(sessionID)
+	sessionID = safeAntigravitySessionDirName(sessionID)
 	if sessionID == "" {
 		return ""
 	}
@@ -354,6 +411,7 @@ func scanAntigravityHistory(historyPath, workDir, bestID string, bestTime int64)
 	defer f.Close() //nolint:errcheck // read-only file
 
 	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 0, 256*1024), 50*1024*1024)
 	for scanner.Scan() {
 		var entry AntigravityHistoryEntry
 		if err := json.Unmarshal(scanner.Bytes(), &entry); err != nil {
@@ -364,5 +422,16 @@ func scanAntigravityHistory(historyPath, workDir, bestID string, bestTime int64)
 			bestID = entry.ConversationID
 		}
 	}
+	if err := scanner.Err(); err != nil {
+		log.Printf("sessionlog: antigravity history scan failed path=%q err=%v", historyPath, err)
+	}
 	return bestID, bestTime
+}
+
+func safeAntigravitySessionDirName(sessionID string) string {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" || strings.Contains(sessionID, "..") || strings.ContainsAny(sessionID, `/\`) {
+		return ""
+	}
+	return filepath.Base(sessionID)
 }

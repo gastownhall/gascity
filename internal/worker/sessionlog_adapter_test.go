@@ -70,6 +70,49 @@ func TestSessionLogAdapterLoadHistoryClaude(t *testing.T) {
 	}
 }
 
+func TestSessionLogAdapterLoadHistoryAntigravityOpenToolUseIDs(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "transcript.jsonl")
+	writeLines(t, path,
+		`{"step_index":1,"type":"PLANNER_RESPONSE","created_at":"2026-04-04T09:00:01Z","content":"checking","tool_calls":[{"id":"call-open","name":"Read","args":{"path":"README.md"}}]}`,
+	)
+
+	snapshot, err := SessionLogAdapter{}.LoadHistory(LoadRequest{
+		Provider:       "antigravity/tmux-cli",
+		TranscriptPath: path,
+	})
+	if err != nil {
+		t.Fatalf("LoadHistory() error = %v", err)
+	}
+
+	if len(snapshot.TailState.OpenToolUseIDs) != 1 || snapshot.TailState.OpenToolUseIDs[0] != "call-open" {
+		t.Fatalf("OpenToolUseIDs = %#v, want [call-open]", snapshot.TailState.OpenToolUseIDs)
+	}
+}
+
+func TestSessionLogAdapterLoadHistoryAntigravityCompletedToolUseIDs(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "transcript.jsonl")
+	writeLines(t, path,
+		`{"step_index":1,"type":"PLANNER_RESPONSE","created_at":"2026-04-04T09:00:01Z","content":"checking","tool_calls":[{"id":"call-done","name":"Read","args":{"path":"README.md"}}]}`,
+		`{"step_index":2,"type":"READ_FILE","created_at":"2026-04-04T09:00:02Z","tool_call_id":"call-done","content":"file data"}`,
+	)
+
+	snapshot, err := SessionLogAdapter{}.LoadHistory(LoadRequest{
+		Provider:       "antigravity/tmux-cli",
+		TranscriptPath: path,
+	})
+	if err != nil {
+		t.Fatalf("LoadHistory() error = %v", err)
+	}
+
+	if len(snapshot.TailState.OpenToolUseIDs) != 0 {
+		t.Fatalf("OpenToolUseIDs = %#v, want none for completed tool use", snapshot.TailState.OpenToolUseIDs)
+	}
+}
+
 func TestSessionLogAdapterDiscoverTranscriptExplicitIDFailsClosed(t *testing.T) {
 	t.Parallel()
 

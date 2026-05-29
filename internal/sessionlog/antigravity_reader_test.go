@@ -47,6 +47,25 @@ func TestFindAntigravitySessionFileByID(t *testing.T) {
 	}
 }
 
+func TestFindAntigravitySessionFileByIDRejectsTraversalSessionID(t *testing.T) {
+	parent := t.TempDir()
+	base := filepath.Join(parent, "brain")
+	workDir := "/tmp/gascity/phase1/antigravity"
+	for _, sessionID := range []string{"../escape", `nested\escape`, "nested/escape"} {
+		logDir := filepath.Join(base, sessionID, ".system_generated", "logs")
+		if err := os.MkdirAll(logDir, 0o755); err != nil {
+			t.Fatalf("mkdir escaped setup for %q: %v", sessionID, err)
+		}
+		transcriptPath := filepath.Join(logDir, "transcript.jsonl")
+		if err := os.WriteFile(transcriptPath, []byte("escaped\n"), 0o644); err != nil {
+			t.Fatalf("write escaped setup for %q: %v", sessionID, err)
+		}
+		if got := FindAntigravitySessionFileByID([]string{base}, workDir, sessionID); got != "" {
+			t.Fatalf("FindAntigravitySessionFileByID(%q) = %q, want empty", sessionID, got)
+		}
+	}
+}
+
 func TestFindAntigravitySessionFile(t *testing.T) {
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)
@@ -125,6 +144,49 @@ func TestFindAntigravitySessionFile(t *testing.T) {
 	}
 }
 
+func TestFindAntigravitySessionFileScansPastLargeHistoryRows(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+
+	cliDir := filepath.Join(tmpHome, ".gemini", "antigravity-cli")
+	brainRoot := filepath.Join(cliDir, "brain")
+	historyPath := filepath.Join(cliDir, "history.jsonl")
+	workDir := "/Users/kevmoo/github/gascity"
+	sessionID := "18e4eb9f-1b1d-4dbc-966b-c06e3646f3c4"
+	logDir := filepath.Join(brainRoot, sessionID, ".system_generated", "logs")
+	if err := os.MkdirAll(logDir, 0o755); err != nil {
+		t.Fatalf("mkdir setup: %v", err)
+	}
+	transcriptPath := filepath.Join(logDir, "transcript.jsonl")
+	if err := os.WriteFile(transcriptPath, []byte("fake history turns\n"), 0o644); err != nil {
+		t.Fatalf("write transcript: %v", err)
+	}
+
+	entry := AntigravityHistoryEntry{Workspace: workDir, ConversationID: sessionID, Timestamp: 3000}
+	row, err := json.Marshal(entry)
+	if err != nil {
+		t.Fatalf("marshal history: %v", err)
+	}
+	longMalformedRow := append([]byte(`{"ignored":"`), make([]byte, 128*1024)...)
+	for i := range longMalformedRow {
+		if longMalformedRow[i] == 0 {
+			longMalformedRow[i] = 'x'
+		}
+	}
+	historyBody := make([]byte, 0, len(longMalformedRow)+len(row)+2)
+	historyBody = append(historyBody, longMalformedRow...)
+	historyBody = append(historyBody, '\n')
+	historyBody = append(historyBody, row...)
+	historyBody = append(historyBody, '\n')
+	if err := os.WriteFile(historyPath, historyBody, 0o644); err != nil {
+		t.Fatalf("write history: %v", err)
+	}
+
+	if got := FindAntigravitySessionFile(nil, workDir); got != transcriptPath {
+		t.Fatalf("FindAntigravitySessionFile() = %q, want %q", got, transcriptPath)
+	}
+}
+
 func TestReadAntigravityFileDerivesConversationSessionID(t *testing.T) {
 	convID := "agy-conv-7f1c"
 	logDir := filepath.Join(t.TempDir(), convID, ".system_generated", "logs")
@@ -155,6 +217,105 @@ func TestReadAntigravityFileDerivesConversationSessionID(t *testing.T) {
 	}
 	if flat.ID != "rollout-123" {
 		t.Fatalf("flat session id = %q, want file base %q", flat.ID, "rollout-123")
+	}
+}
+
+func TestReadAntigravityFileCorrelatesMultipleToolResults(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "transcript.jsonl")
+	body := `{"step_index":1,"type":"PLANNER_RESPONSE","created_at":"2026-04-04T09:00:01Z","content":"checking","tool_calls":[{"name":"Read","args":{"path":"a.txt"}},{"name":"Write","args":{"path":"b.txt"}}]}` + "\n" +
+		`{"step_index":2,"type":"READ_FILE","created_at":"2026-04-04T09:00:02Z","content":"contents of a"}` + "\n" +
+		`{"step_index":3,"type":"WRITE_FILE","created_at":"2026-04-04T09:00:03Z","content":"wrote b"}` + "\n"
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatalf("write transcript: %v", err)
+	}
+
+	sess, err := ReadAntigravityFileRaw(path, 0)
+	if err != nil {
+		t.Fatalf("ReadAntigravityFileRaw: %v", err)
+	}
+	if len(sess.Messages) != 3 {
+		t.Fatalf("messages = %d, want 3", len(sess.Messages))
+	}
+	assistantBlocks := sess.Messages[0].ContentBlocks()
+	if len(assistantBlocks) != 3 {
+		t.Fatalf("assistant blocks = %#v, want text plus two tool uses", assistantBlocks)
+	}
+	if assistantBlocks[1].Type != "tool_use" || assistantBlocks[1].ID != "call-1-0" {
+		t.Fatalf("first tool_use = %#v, want call-1-0", assistantBlocks[1])
+	}
+	if assistantBlocks[2].Type != "tool_use" || assistantBlocks[2].ID != "call-1-1" {
+		t.Fatalf("second tool_use = %#v, want call-1-1", assistantBlocks[2])
+	}
+	firstResult := sess.Messages[1].ContentBlocks()
+	if len(firstResult) != 1 || firstResult[0].Type != "tool_result" || firstResult[0].ToolUseID != "call-1-0" {
+		t.Fatalf("first result blocks = %#v, want tool_result call-1-0", firstResult)
+	}
+	secondResult := sess.Messages[2].ContentBlocks()
+	if len(secondResult) != 1 || secondResult[0].Type != "tool_result" || secondResult[0].ToolUseID != "call-1-1" {
+		t.Fatalf("second result blocks = %#v, want tool_result call-1-1", secondResult)
+	}
+}
+
+func TestReadAntigravityFileCorrelatesExplicitOutOfOrderToolResults(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "transcript.jsonl")
+	body := `{"step_index":1,"type":"PLANNER_RESPONSE","created_at":"2026-04-04T09:00:01Z","content":"checking","tool_calls":[{"id":"call-a","name":"Read","args":{"path":"a.txt"}},{"id":"call-b","name":"Write","args":{"path":"b.txt"}}]}` + "\n" +
+		`{"step_index":2,"type":"WRITE_FILE","created_at":"2026-04-04T09:00:02Z","tool_call_id":"call-b","content":"wrote b"}` + "\n" +
+		`{"step_index":3,"type":"READ_FILE","created_at":"2026-04-04T09:00:03Z","call_id":"call-a","content":"contents of a"}` + "\n"
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatalf("write transcript: %v", err)
+	}
+
+	sess, err := ReadAntigravityFileRaw(path, 0)
+	if err != nil {
+		t.Fatalf("ReadAntigravityFileRaw: %v", err)
+	}
+	if len(sess.Messages) != 3 {
+		t.Fatalf("messages = %d, want 3", len(sess.Messages))
+	}
+	firstResult := sess.Messages[1].ContentBlocks()
+	if len(firstResult) != 1 || firstResult[0].Type != "tool_result" || firstResult[0].ToolUseID != "call-b" {
+		t.Fatalf("first result blocks = %#v, want tool_result call-b", firstResult)
+	}
+	secondResult := sess.Messages[2].ContentBlocks()
+	if len(secondResult) != 1 || secondResult[0].Type != "tool_result" || secondResult[0].ToolUseID != "call-a" {
+		t.Fatalf("second result blocks = %#v, want tool_result call-a", secondResult)
+	}
+	if sess.Messages[1].ParentUUID != sess.Messages[0].UUID || sess.Messages[2].ParentUUID != sess.Messages[1].UUID {
+		t.Fatalf("parent links = [%q, %q], want linear chain through %q then %q",
+			sess.Messages[1].ParentUUID, sess.Messages[2].ParentUUID, sess.Messages[0].UUID, sess.Messages[1].UUID)
+	}
+}
+
+func TestReadAntigravityFileReportsOpenToolUseTail(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "transcript.jsonl")
+	body := `{"step_index":1,"type":"PLANNER_RESPONSE","created_at":"2026-04-04T09:00:01Z","content":"checking","tool_calls":[{"id":"call-open","name":"Read","args":{"path":"README.md"}}]}` + "\n"
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatalf("write transcript: %v", err)
+	}
+
+	sess, err := ReadAntigravityFileRaw(path, 0)
+	if err != nil {
+		t.Fatalf("ReadAntigravityFileRaw: %v", err)
+	}
+	if !sess.OrphanedToolUseIDs["call-open"] {
+		t.Fatalf("OrphanedToolUseIDs = %#v, want call-open", sess.OrphanedToolUseIDs)
+	}
+}
+
+func TestReadAntigravityFileNormalizesCompletedToolUseTail(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "transcript.jsonl")
+	body := `{"step_index":1,"type":"PLANNER_RESPONSE","created_at":"2026-04-04T09:00:01Z","content":"checking","tool_calls":[{"id":"call-done","name":"Read","args":{"path":"README.md"}}]}` + "\n" +
+		`{"step_index":2,"type":"READ_FILE","created_at":"2026-04-04T09:00:02Z","tool_call_id":"call-done","content":"file data"}` + "\n"
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatalf("write transcript: %v", err)
+	}
+
+	sess, err := ReadAntigravityFileRaw(path, 0)
+	if err != nil {
+		t.Fatalf("ReadAntigravityFileRaw: %v", err)
+	}
+	if sess.OrphanedToolUseIDs != nil {
+		t.Fatalf("OrphanedToolUseIDs = %#v, want nil for completed tool use", sess.OrphanedToolUseIDs)
 	}
 }
 
