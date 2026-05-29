@@ -308,6 +308,9 @@ Prompt file discovery inside an agent directory uses this order:
 2. `prompt.md.tmpl`
 3. `prompt.md`
 
+New agents should use `prompt.template.md`. The `prompt.md.tmpl` name remains
+recognized for transitional compatibility.
+
 The `scope` field controls where a pack-defined agent is instantiated:
 
 | `scope` | Loader meaning |
@@ -316,9 +319,10 @@ The `scope` field controls where a pack-defined agent is instantiated:
 | `city` | Agent is kept only during city-level pack loading. |
 | `rig` | Agent is kept only during rig-level pack loading. |
 
-The full set of currently parsed `agent.toml` fields is shared with
-`city.toml`. Pack authors should treat these fields as public PackV2 agent
-fields:
+The following table is a curated PackV2 authoring reference for
+`agent.toml`. It is not an exhaustive decoder inventory: the generated schema
+at `docs/schema/pack-schema.json` is the authoritative list of every key the
+current loader accepts, including legacy and migration-visibility fields.
 
 | Field | Type | Rule |
 |---|---|---|
@@ -367,13 +371,15 @@ fields:
 | `resume_command` | string | Provider resume command template. |
 | `wake_mode` | string | `resume` or `fresh`. |
 
-Fields not listed above are not PackV2 agent fields.
-
 Legacy inline `pack.toml [[agent]]` tables remain loader compatibility for
 existing packs. They are not the PackV2 authoring surface. New packs must use
 `agents/<name>/agent.toml`; existing inline definitions should migrate by
 moving each table's fields into the matching agent directory and moving prompt
 content beside the agent as `prompt.template.md` when the prompt is templated.
+During an incremental same-pack migration, an inline `[[agent]]` with the same
+name takes precedence and the matching directory agent is ignored. A v1 inline
+agent and a v2 directory agent with the same name across composition layers is
+a migration error rather than a precedence rule.
 
 ### 1.2.5. `[[named_session]]`
 
