@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
@@ -84,6 +85,21 @@ func (p *exactRecipientMailProvider) unread(recipient string) []mail.Message {
 		}
 	}
 	return out
+}
+
+type blockingMailProvider struct {
+	exactRecipientMailProvider
+	release <-chan struct{}
+}
+
+func (p *blockingMailProvider) Inbox(string) ([]mail.Message, error) {
+	<-p.release
+	return nil, nil
+}
+
+func (p *blockingMailProvider) Count(string) (int, int, error) {
+	<-p.release
+	return 0, 0, nil
 }
 
 type multiRecipientInboxMailProvider struct {
@@ -321,6 +337,64 @@ func TestMailCount(t *testing.T) {
 	json.NewDecoder(rec.Body).Decode(&resp) //nolint:errcheck
 	if resp["unread"] != 2 {
 		t.Errorf("unread = %d, want 2", resp["unread"])
+	}
+}
+
+func TestMailListRigStoreSlowReturnsTyped503(t *testing.T) {
+	state := newFakeState(t)
+	release := make(chan struct{})
+	state.cityMailProv = &blockingMailProvider{release: release}
+	oldDeadline := mailReadDeadline
+	mailReadDeadline = 5 * time.Millisecond
+	t.Cleanup(func() {
+		mailReadDeadline = oldDeadline
+		close(release)
+	})
+	h := newTestCityHandler(t, state)
+
+	req := httptest.NewRequest("GET", cityURL(state, "/mail?agent=worker&rig=myrig"), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	assertStoreSlowProblem(t, rec)
+}
+
+func TestMailCountRigStoreSlowReturnsTyped503(t *testing.T) {
+	state := newFakeState(t)
+	release := make(chan struct{})
+	state.cityMailProv = &blockingMailProvider{release: release}
+	oldDeadline := mailReadDeadline
+	mailReadDeadline = 5 * time.Millisecond
+	t.Cleanup(func() {
+		mailReadDeadline = oldDeadline
+		close(release)
+	})
+	h := newTestCityHandler(t, state)
+
+	req := httptest.NewRequest("GET", cityURL(state, "/mail/count?agent=worker&rig=myrig"), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	assertStoreSlowProblem(t, rec)
+}
+
+func assertStoreSlowProblem(t *testing.T, rec *httptest.ResponseRecorder) {
+	t.Helper()
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusServiceUnavailable, rec.Body.String())
+	}
+	var problem struct {
+		Detail string `json:"detail"`
+		Status int    `json:"status"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&problem); err != nil {
+		t.Fatalf("decode problem: %v; body: %s", err, rec.Body.String())
+	}
+	if problem.Status != http.StatusServiceUnavailable {
+		t.Fatalf("problem status = %d, want %d", problem.Status, http.StatusServiceUnavailable)
+	}
+	if !strings.HasPrefix(problem.Detail, "store_slow:") {
+		t.Fatalf("detail = %q, want store_slow prefix", problem.Detail)
 	}
 }
 

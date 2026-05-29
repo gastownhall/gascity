@@ -3571,6 +3571,48 @@ func TestRouteMailCheck_SixRowMatrix(t *testing.T) {
 	}
 }
 
+func TestRouteMailCheckInjectStoreSlowEmitsDegradedNotice(t *testing.T) {
+	cityPath := writeMailTestCity(t)
+	t.Setenv("GC_DEBUG", "1")
+	srv := httptest.NewServer(mailProblemHandler(http.StatusServiceUnavailable, "store_slow: mail read timed out after 8s")(t))
+	defer srv.Close()
+	c := api.NewCityScopedClient(srv.URL, "test-city")
+
+	var stdout, stderr bytes.Buffer
+	code := routeMailCheck(cityPath, []string{"mayor"}, true, "", c, "", &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr=%q stdout=%q", code, stderr.String(), stdout.String())
+	}
+	if got, want := stdout.String(), mailCheckDegradedNotice; got != want {
+		t.Fatalf("stdout = %q, want exact degraded notice %q", got, want)
+	}
+	assertMailRouteLog(t, stderr.String(), "api", "error")
+	if strings.Contains(stderr.String(), "gc mail check:") {
+		t.Fatalf("inject mode surfaced store_slow as stderr error:\n%s", stderr.String())
+	}
+}
+
+func TestRouteMailCheckStoreSlowNonInjectReturnsError(t *testing.T) {
+	cityPath := writeMailTestCity(t)
+	t.Setenv("GC_DEBUG", "1")
+	srv := httptest.NewServer(mailProblemHandler(http.StatusServiceUnavailable, "store_slow: mail read timed out after 8s")(t))
+	defer srv.Close()
+	c := api.NewCityScopedClient(srv.URL, "test-city")
+
+	var stdout, stderr bytes.Buffer
+	code := routeMailCheck(cityPath, []string{"mayor"}, false, "", c, "", &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1; stderr=%q stdout=%q", code, stderr.String(), stdout.String())
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout = %q, want empty", stdout.String())
+	}
+	assertMailRouteLog(t, stderr.String(), "api", "error")
+	if !strings.Contains(stderr.String(), "store_slow: mail read timed out after 8s") {
+		t.Fatalf("stderr missing store_slow detail:\n%s", stderr.String())
+	}
+}
+
 func TestRouteMailPeek_SixRowMatrix(t *testing.T) {
 	tests := []struct {
 		name         string

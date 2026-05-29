@@ -1265,6 +1265,34 @@ func TestClientListMailInbox_CacheNotLiveFallback(t *testing.T) {
 	}
 }
 
+func TestClientListMailInbox_StoreSlowDoesNotFallback(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/problem+json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			"title":  "Service Unavailable",
+			"status": http.StatusServiceUnavailable,
+			"detail": "store_slow: mail read timed out after 8s",
+		})
+	}))
+	defer ts.Close()
+
+	c := NewCityScopedClient(ts.URL, "alpha")
+	_, err := c.ListMailInbox("mayor", "")
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !IsStoreSlowError(err) {
+		t.Fatalf("IsStoreSlowError = false for store_slow response: %v", err)
+	}
+	if ShouldFallbackForRead(err) {
+		t.Errorf("ShouldFallbackForRead = true for store_slow: %v", err)
+	}
+	if ShouldFallback(err) {
+		t.Errorf("ShouldFallback = true for store_slow: %v", err)
+	}
+}
+
 func TestClientListMailInbox_ConnErrorFallback(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 	ts.Close()
@@ -1395,6 +1423,34 @@ func TestClientCountMail_CacheNotLiveFallback(t *testing.T) {
 	}
 	if !ShouldFallback(err) {
 		t.Errorf("ShouldFallback = false for cache-not-live: %v", err)
+	}
+}
+
+func TestClientCountMail_StoreSlowDoesNotFallback(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/problem+json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			"title":  "Service Unavailable",
+			"status": http.StatusServiceUnavailable,
+			"detail": "store_slow: mail read timed out after 8s",
+		})
+	}))
+	defer ts.Close()
+
+	c := NewCityScopedClient(ts.URL, "alpha")
+	_, err := c.CountMail("mayor", "")
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !IsStoreSlowError(err) {
+		t.Fatalf("IsStoreSlowError = false for store_slow response: %v", err)
+	}
+	if ShouldFallbackForRead(err) {
+		t.Errorf("ShouldFallbackForRead = true for store_slow: %v", err)
+	}
+	if ShouldFallback(err) {
+		t.Errorf("ShouldFallback = true for store_slow: %v", err)
 	}
 }
 
