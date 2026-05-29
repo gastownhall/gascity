@@ -140,35 +140,44 @@ func PollReady(client SupervisorClient, timeout time.Duration) error {
 }
 
 // restartSpec describes a single supervisor restart attempt. Built by
-// the drift-detection caller from the live state (PID from
-// /proc/<pid>/exe + supervisorAlive, ExePath/Argv from os.Executable
-// and os.Args, ServiceName from supervisorSystemdServiceName, and
-// SystemdManaged from supervisorSystemctlActive).
+// the drift-detection caller from the live state (PID from supervisorAlive,
+// ExePath from /proc/<pid>/exe when direct restart needs it, ServiceName from
+// supervisorSystemdServiceName, and LaunchdLabel from supervisorLaunchdLabel).
 type restartSpec struct {
 	// SystemdManaged is true when the supervisor was started via
 	// `systemctl --user start`. In that mode the kernel's service
 	// manager owns the lifecycle; we delegate the restart to it.
 	SystemdManaged bool
 
+	// LaunchdManaged is true when the supervisor is running under macOS
+	// launchd. In that mode launchd owns the lifecycle and can restart the
+	// service without reading /proc/<pid>/exe, which Darwin does not expose.
+	LaunchdManaged bool
+
 	// PID is the running supervisor's process id. Used by the direct
 	// branch to send SIGTERM before respawning. Ignored when
-	// SystemdManaged is true.
+	// SystemdManaged or LaunchdManaged is true.
 	PID int
 
 	// ExePath is the resolved /proc/<pid>/exe target — the actual
 	// binary on disk, not a symlink. Used by the direct branch as
-	// the spawned executable. Ignored when SystemdManaged is true.
+	// the spawned executable. Ignored when SystemdManaged or
+	// LaunchdManaged is true.
 	ExePath string
 
 	// Argv is the argument vector to pass to the new supervisor
-	// (e.g. {"supervisor", "run"}). Ignored when SystemdManaged is
-	// true.
+	// (e.g. {"supervisor", "run"}). Ignored when SystemdManaged or
+	// LaunchdManaged is true.
 	Argv []string
 
 	// ServiceName is the systemd unit name (e.g.
 	// "gascity-supervisor.service"). Used by the systemd branch.
 	// Ignored when SystemdManaged is false.
 	ServiceName string
+
+	// LaunchdLabel is the macOS launchd label. Used by the launchd branch.
+	// Empty falls back to supervisorLaunchdLabel().
+	LaunchdLabel string
 }
 
 // restartHelpers abstracts the side-effecting operations
@@ -178,6 +187,10 @@ type restartHelpers struct {
 	// Systemctl invokes systemctl with the given args. Production
 	// uses supervisorSystemctlRun (which targets `systemctl ...`).
 	Systemctl func(args ...string) error
+
+	// Launchctl invokes launchctl with the given args. Production
+	// uses supervisorLaunchctlRun.
+	Launchctl func(args ...string) error
 
 	// Kill sends SIGTERM to pid. Production uses syscall.Kill.
 	Kill func(pid int) error
@@ -195,12 +208,16 @@ type restartHelpers struct {
 }
 
 // restartSupervisor restarts the gascity-supervisor process. Behavior
-// depends on whether systemd manages the supervisor's lifecycle:
+// depends on whether a platform service manager owns the lifecycle:
 //
 //   - SystemdManaged: a single `systemctl --user restart <unit>` call
 //     hands the restart to the service manager. The kill+respawn is
 //     systemd's responsibility; attempting to kill the PID ourselves
 //     would race with systemd's own respawn.
+//
+//   - LaunchdManaged: a single `launchctl kickstart -k <target>` call
+//     restarts the launchd service. This is the macOS production upgrade
+//     path and does not require /proc/<pid>/exe.
 //
 //   - Direct: we kill the process by PID and spawn a new instance from
 //     ExePath. Kill failures abort the restart so we never run two
@@ -209,12 +226,25 @@ type restartHelpers struct {
 // The helpers allow unit tests to substitute fakes; production wires
 // real systemctl/syscall.Kill/exec invocations.
 func restartSupervisor(spec restartSpec, h restartHelpers) error {
+	if spec.SystemdManaged && spec.LaunchdManaged {
+		return fmt.Errorf("restartSupervisor: supervisor cannot be both systemd- and launchd-managed")
+	}
 	if spec.SystemdManaged {
 		if h.Systemctl == nil {
 			return fmt.Errorf("restartSupervisor: nil Systemctl helper")
 		}
 		if err := h.Systemctl("--user", "restart", spec.ServiceName); err != nil {
 			return fmt.Errorf("systemctl --user restart %s: %w", spec.ServiceName, err)
+		}
+		return nil
+	}
+	if spec.LaunchdManaged {
+		if h.Launchctl == nil {
+			return fmt.Errorf("restartSupervisor: nil Launchctl helper")
+		}
+		target := supervisorLaunchdServiceTarget(spec.LaunchdLabel)
+		if err := h.Launchctl("kickstart", "-k", target); err != nil {
+			return fmt.Errorf("launchctl kickstart -k %s: %w", target, err)
 		}
 		return nil
 	}
