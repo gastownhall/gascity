@@ -1174,7 +1174,7 @@ func TestExpandedConfigLoadCheckReportsSchema2FragmentErrors(t *testing.T) {
 
 	cityDir := t.TempDir()
 	writeDoctorFile(t, cityDir, "city.toml", `
-include = ["fragments/legacy.toml"]
+include = ["conf/legacy.toml"]
 
 [workspace]
 name = "fragment-city"
@@ -1184,7 +1184,7 @@ name = "fragment-city"
 name = "fragment-city"
 schema = 2
 `)
-	writeDoctorFile(t, cityDir, "fragments/legacy.toml", `
+	writeDoctorFile(t, cityDir, "conf/legacy.toml", `
 [workspace]
 includes = ["legacy-pack"]
 `)
@@ -1195,7 +1195,7 @@ includes = ["legacy-pack"]
 	}
 	for _, want := range []string{
 		"expanded config load error",
-		"fragments/legacy.toml",
+		"conf/legacy.toml",
 		"unsupported PackV1 workspace.includes",
 	} {
 		if !strings.Contains(got.Message, want) {
@@ -1211,6 +1211,36 @@ includes = ["legacy-pack"]
 		if !strings.Contains(got.FixHint, want) {
 			t.Fatalf("fix hint = %q, want substring %q", got.FixHint, want)
 		}
+	}
+}
+
+func TestExpandedConfigLoadCheckDoesNotInferFragmentFromRootPath(t *testing.T) {
+	t.Parallel()
+
+	cityDir := filepath.Join(t.TempDir(), "fragment-root-city")
+	if err := os.MkdirAll(cityDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	writeDoctorFile(t, cityDir, "city.toml", `
+[workspace]
+name = "root-city"
+includes = ["legacy-pack"]
+`)
+	writeDoctorFile(t, cityDir, "pack.toml", `
+[pack]
+name = "root-city"
+schema = 2
+`)
+
+	got := expandedConfigLoadCheck{}.Run(&doctor.CheckContext{CityPath: cityDir})
+	if got.Status != doctor.StatusError {
+		t.Fatalf("status = %v, want error; message=%q", got.Status, got.Message)
+	}
+	if !strings.Contains(got.Message, "unsupported PackV1 workspace.includes") {
+		t.Fatalf("message = %q, want root legacy workspace.includes error", got.Message)
+	}
+	if strings.Contains(got.FixHint, "fragment-authored legacy surfaces") || strings.Contains(got.FixHint, "by hand") {
+		t.Fatalf("fix hint = %q, want generic root guidance", got.FixHint)
 	}
 }
 

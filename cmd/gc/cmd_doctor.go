@@ -405,11 +405,8 @@ func (expandedConfigLoadCheck) Run(ctx *doctor.CheckContext) *doctor.CheckResult
 }
 
 func expandedConfigLoadFixHint(err error) string {
-	if err != nil {
-		msg := err.Error()
-		if strings.Contains(msg, "unsupported PackV1") && strings.Contains(msg, "fragment") {
-			return "move fragment-authored legacy surfaces by hand; `gc doctor --fix` only rewrites root city.toml/pack.toml surfaces"
-		}
+	if config.IsFragmentLegacyV1SurfaceError(err) {
+		return "move fragment-authored legacy surfaces by hand; `gc doctor --fix` only rewrites root city.toml/pack.toml surfaces"
 	}
 	return "fix the reported config, include, import, or pack-layout error and rerun gc doctor"
 }
