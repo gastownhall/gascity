@@ -817,6 +817,10 @@
             "format": "date-time",
             "type": "string"
           },
+          "defer_until": {
+            "format": "date-time",
+            "type": "string"
+          },
           "dependencies": {
             "items": {
               "$ref": "#/components/schemas/Dep"

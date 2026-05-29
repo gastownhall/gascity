@@ -2188,6 +2188,8 @@ export interface components {
             assignee?: string;
             /** Format: date-time */
             created_at: string;
+            /** Format: date-time */
+            defer_until?: string;
             dependencies?: components["schemas"]["Dep"][] | null;
             description?: string;
             ephemeral?: boolean;

@@ -503,6 +503,7 @@ type AsyncAcceptedResponse struct {
 type Bead struct {
 	Assignee     *string            `json:"assignee,omitempty"`
 	CreatedAt    time.Time          `json:"created_at"`
+	DeferUntil   *time.Time         `json:"defer_until,omitempty"`
 	Dependencies *[]Dep             `json:"dependencies,omitempty"`
 	Description  *string            `json:"description,omitempty"`
 	Ephemeral    *bool              `json:"ephemeral,omitempty"`

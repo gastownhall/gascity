@@ -256,6 +256,7 @@ export type AsyncAcceptedResponse = {
 export type Bead = {
     assignee?: string;
     created_at: string;
+    defer_until?: string;
     dependencies?: Array<Dep> | null;
     description?: string;
     ephemeral?: boolean;
