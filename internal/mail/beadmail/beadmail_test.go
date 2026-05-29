@@ -5,6 +5,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/mail"
@@ -2192,6 +2193,19 @@ func (s *countingSessionListStore) sessionListCallCount() int {
 	return s.sessionListCalls
 }
 
+func setCachedProviderClock(t *testing.T, p *Provider, start time.Time) func(time.Duration) {
+	t.Helper()
+	if p.sessionCache == nil {
+		t.Fatal("cached provider has nil session cache")
+	}
+	current := start
+	p.sessionCache.refreshInterval = time.Minute
+	p.sessionCache.now = func() time.Time { return current }
+	return func(d time.Duration) {
+		current = current.Add(d)
+	}
+}
+
 func TestProvider_DefaultProviderSeesNewHistoricalAliasSessionAcrossCalls(t *testing.T) {
 	// Pin: the default Provider is safe for long-lived shared use. If a lookup
 	// runs before the matching session exists, later lookups must see newly
@@ -2315,6 +2329,141 @@ func TestProviderCached_BroadSessionListCacheConcurrentAccess(t *testing.T) {
 	}
 	if got := store.sessionListCallCount(); got != 1 {
 		t.Errorf("broad gc:session List calls = %d, want 1 under concurrent access", got)
+	}
+}
+
+func TestProviderCached_RefreshSeesNewHistoricalAliasSession(t *testing.T) {
+	store := &countingSessionListStore{MemStore: beads.NewMemStore()}
+	p := NewCached(store)
+	advance := setCachedProviderClock(t, p, time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC))
+
+	if _, err := p.Inbox("old-route"); err != nil {
+		t.Fatalf("initial Inbox(old-route): %v", err)
+	}
+	sessionBead, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"alias":         "worker-a",
+			"alias_history": "old-route",
+			"session_name":  "wf__a",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create session: %v", err)
+	}
+	if _, err := p.Send("human", sessionBead.Metadata["alias"], "", "visible after refresh"); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	advance(2 * time.Minute)
+
+	msgs, err := p.Inbox("old-route")
+	if err != nil {
+		t.Fatalf("refreshed Inbox(old-route): %v", err)
+	}
+	if len(msgs) != 1 || msgs[0].Body != "visible after refresh" {
+		t.Fatalf("Inbox(old-route) = %#v, want new session mail after refresh", msgs)
+	}
+	if got := store.sessionListCallCount(); got != 2 {
+		t.Errorf("broad gc:session List calls = %d, want initial scan plus refresh", got)
+	}
+}
+
+func TestProviderCached_RefreshRemovesClosedSessionFromLiveHistoricalMatch(t *testing.T) {
+	store := &countingSessionListStore{MemStore: beads.NewMemStore()}
+	p := NewCached(store)
+	advance := setCachedProviderClock(t, p, time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC))
+
+	oldSession, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"alias":         "worker-old",
+			"alias_history": "old-route",
+			"session_name":  "wf__old",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create old session: %v", err)
+	}
+	if _, err := p.Inbox("old-route"); err != nil {
+		t.Fatalf("prime Inbox(old-route): %v", err)
+	}
+	if _, err := p.Send("human", oldSession.Metadata["alias"], "", "stale closed session mail"); err != nil {
+		t.Fatalf("Send old: %v", err)
+	}
+	if err := store.Close(oldSession.ID); err != nil {
+		t.Fatalf("Close old session: %v", err)
+	}
+	newSession, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"alias":         "worker-new",
+			"alias_history": "old-route",
+			"session_name":  "wf__new",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create new session: %v", err)
+	}
+	if _, err := p.Send("human", newSession.Metadata["alias"], "", "live replacement mail"); err != nil {
+		t.Fatalf("Send new: %v", err)
+	}
+	advance(2 * time.Minute)
+
+	msgs, err := p.Inbox("old-route")
+	if err != nil {
+		t.Fatalf("refreshed Inbox(old-route): %v", err)
+	}
+	if len(msgs) != 1 || msgs[0].Body != "live replacement mail" {
+		t.Fatalf("Inbox(old-route) = %#v, want refreshed live replacement only", msgs)
+	}
+	if got := store.sessionListCallCount(); got != 2 {
+		t.Errorf("broad gc:session List calls = %d, want initial scan plus refresh", got)
+	}
+}
+
+func TestProviderCached_ExpiredRefreshConcurrentAccessScansOnce(t *testing.T) {
+	store := &countingSessionListStore{MemStore: beads.NewMemStore()}
+	if _, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"alias":         "worker-a",
+			"alias_history": "old-route",
+			"session_name":  "wf__a",
+		},
+	}); err != nil {
+		t.Fatalf("Create session: %v", err)
+	}
+	p := NewCached(store)
+	advance := setCachedProviderClock(t, p, time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC))
+	if _, err := p.Inbox("old-route"); err != nil {
+		t.Fatalf("prime Inbox(old-route): %v", err)
+	}
+	advance(2 * time.Minute)
+
+	const workers = 16
+	errs := make(chan error, workers)
+	var wg sync.WaitGroup
+	wg.Add(workers)
+	for i := 0; i < workers; i++ {
+		go func() {
+			defer wg.Done()
+			_, err := p.Inbox("old-route")
+			errs <- err
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("Inbox(old-route): %v", err)
+		}
+	}
+	if got := store.sessionListCallCount(); got != 2 {
+		t.Errorf("broad gc:session List calls = %d, want initial scan plus one concurrent refresh", got)
 	}
 }
 
