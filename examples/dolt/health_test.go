@@ -802,16 +802,23 @@ done
 exit 1
 `, mainPort, mainPID, rigPort, rigPID))
 
-	// Fake ps: handles pid_is_running (-o pid=) and zombie scan (-o args=).
-	writeExecutable(t, filepath.Join(fakeBin, "ps"), `#!/bin/sh
-if [ "$1" = "-p" ] && [ "$3" = "-o" ]; then
-  case "$4" in
-    pid=) printf ' %s\n' "$2"; exit 0 ;;
-    args=) echo "dolt sql-server"; exit 0 ;;
-  esac
+	// Fake ps: handles pid_is_running (`-p <pid> -o pid=`) and the zombie
+	// scan's single process-table pass (`ps -eo pid=,stat=,args=`, #2482).
+	// All three dolt PIDs appear as live sql-servers; the script excludes the
+	// city server (server_pid) and the rig-local dolt, leaving the orphan.
+	writeExecutable(t, filepath.Join(fakeBin, "ps"), fmt.Sprintf(`#!/bin/sh
+if [ "$1" = "-eo" ]; then
+  echo "%s Sl dolt sql-server"
+  echo "%s Sl dolt sql-server"
+  echo "%s Sl dolt sql-server"
+  exit 0
+fi
+if [ "$1" = "-p" ] && [ "$3" = "-o" ] && [ "$4" = "pid=" ]; then
+  printf ' %%s\n' "$2"
+  exit 0
 fi
 exit 1
-`)
+`, mainPID, rigPID, zombiePID))
 
 	// Fake nc: unreachable (no real server).
 	writeExecutable(t, filepath.Join(fakeBin, "nc"), "#!/bin/sh\nexit 1\n")
@@ -875,6 +882,118 @@ func TestHealthScriptZombieScanExcludesRigLocalServers(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			runHealthScriptZombieScanExcludesRigLocalServers(t, tc.rigConfig)
 		})
+	}
+}
+
+// TestHealthScriptZombieScanIsBoundedFork is the regression guard for #2482:
+// the zombie scan must enumerate the process table a bounded number of times,
+// independent of how many dolt processes (especially Z-state zombies) exist.
+// The old loop forked one `ps -p <pid> -o args=` per `pgrep -x dolt` match, so
+// under a non-reaping PID 1 it became an O(zombies) `ps` storm re-paid every
+// 30s. We drive the real run.sh with a pgrep that reports many dolt PIDs and a
+// ps shim that logs every invocation, then assert zero per-PID `-o args=`
+// forks while the orphaned sql-servers are still classified.
+func TestHealthScriptZombieScanIsBoundedFork(t *testing.T) {
+	const candidateCount = 50
+	const firstPID = 500000
+
+	cityPath := t.TempDir()
+	fakeBin := t.TempDir()
+	psLog := filepath.Join(t.TempDir(), "ps_calls")
+
+	mainPort := "19901"
+	serverPID := strconv.Itoa(firstPID) // first candidate is the managed city server
+
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "metadata.json"),
+		[]byte(`{"dolt_database":"city"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// pgrep reports candidateCount dolt PIDs — the candidate set the old loop
+	// forked `ps -p <pid> -o args=` over, one per PID.
+	var pgrepBody strings.Builder
+	pgrepBody.WriteString("#!/bin/sh\n")
+	for i := 0; i < candidateCount; i++ {
+		fmt.Fprintf(&pgrepBody, "echo %d\n", firstPID+i)
+	}
+	writeExecutable(t, filepath.Join(fakeBin, "pgrep"), pgrepBody.String())
+
+	// gc fails -> metadata_files falls back to find (no rigs here).
+	writeExecutable(t, filepath.Join(fakeBin, "gc"), "#!/bin/sh\nexit 1\n")
+	// lsof maps the city port to the server PID so server_pid resolves.
+	writeExecutable(t, filepath.Join(fakeBin, "lsof"),
+		fmt.Sprintf("#!/bin/sh\nfor a in \"$@\"; do case \"$a\" in -iTCP:%s) echo %s; exit 0 ;; esac; done\nexit 1\n", mainPort, serverPID))
+	writeExecutable(t, filepath.Join(fakeBin, "nc"), "#!/bin/sh\nexit 1\n")
+	writeExecutable(t, filepath.Join(fakeBin, "dolt"), "#!/bin/sh\nexit 1\n")
+
+	// ps shim: log every invocation, answer the port->pid confirmation
+	// (`-p <pid> -o pid=`) and the single process-table pass (`-eo ...`).
+	psShim := fmt.Sprintf(`#!/bin/sh
+echo "$@" >> %q
+if [ "$1" = "-eo" ]; then
+  i=0
+  while [ "$i" -lt %d ]; do
+    echo "$((%d + i)) Sl dolt sql-server"
+    i=$((i + 1))
+  done
+  exit 0
+fi
+if [ "$1" = "-p" ] && [ "$3" = "-o" ] && [ "$4" = "pid=" ]; then
+  printf ' %%s\n' "$2"
+  exit 0
+fi
+exit 1
+`, psLog, candidateCount, firstPID)
+	writeExecutable(t, filepath.Join(fakeBin, "ps"), psShim)
+
+	root := repoRoot(t)
+	cmd := exec.Command("sh", filepath.Join(root, healthScript), "--json")
+	cmd.Env = append(
+		filteredEnv("GC_CITY_PATH", "GC_PACK_DIR", "GC_DOLT_HOST", "GC_DOLT_PORT",
+			"GC_DOLT_USER", "GC_DOLT_PASSWORD", "GC_HEALTH_SKIP_ZOMBIE_SCAN", "PATH"),
+		"GC_CITY_PATH="+cityPath,
+		"GC_PACK_DIR="+root,
+		"GC_DOLT_HOST=127.0.0.1",
+		"GC_DOLT_PORT="+mainPort,
+		"GC_DOLT_USER=root",
+		"GC_DOLT_PASSWORD=",
+		"PATH="+fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"),
+	)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("health.sh failed: %v\n%s", err, out)
+	}
+
+	callsRaw, readErr := os.ReadFile(psLog)
+	if readErr != nil {
+		t.Fatalf("read ps log: %v", readErr)
+	}
+	calls := strings.Split(strings.TrimSpace(string(callsRaw)), "\n")
+	perPIDForks := 0
+	tableForks := 0
+	for _, line := range calls {
+		switch {
+		case strings.Contains(line, "args=") && strings.Contains(line, "-p "):
+			perPIDForks++
+		case strings.HasPrefix(line, "-eo"):
+			tableForks++
+		}
+	}
+	if perPIDForks != 0 {
+		t.Errorf("zombie scan made %d per-PID `ps -p <pid> -o args=` forks across %d candidates; want 0 (must use a single bounded pass)\nps calls:\n%s",
+			perPIDForks, candidateCount, callsRaw)
+	}
+	if tableForks > 1 {
+		t.Errorf("zombie scan ran %d full `ps -eo` passes; want at most 1\nps calls:\n%s", tableForks, callsRaw)
+	}
+	// All candidates are orphaned sql-servers except the managed city server,
+	// which is excluded by the server_pid check.
+	wantCount := fmt.Sprintf(`"zombie_count": %d`, candidateCount-1)
+	if !strings.Contains(string(out), wantCount) {
+		t.Errorf("expected %s (candidates minus the city server); got:\n%s", wantCount, out)
 	}
 }
 

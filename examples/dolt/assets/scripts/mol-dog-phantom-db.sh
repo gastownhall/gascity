@@ -68,7 +68,7 @@ fi
 
 # --- Step 2: Escalate to operator ---
 
-gc mail send mayor/ \
+gc mail send mayor/ --from controller \
     -s "ESCALATION: Unservable Dolt databases detected [HIGH]" \
     -m "Dolt: detected $UNSERVABLE_COUNT unservable database directories in $DATA_DIR:$UNSERVABLES.
 

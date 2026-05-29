@@ -559,6 +559,41 @@ func TestSlingPoolTarget(t *testing.T) {
 	}
 }
 
+// TestSlingSlotSuffixedPoolTargetNormalizesRoutedTo is the write-side guard for
+// #2592: slinging to a slot-suffixed pool target must record the base pool
+// qualified name in gc.routed_to so the pool's exact-match work_query (which
+// keys on the base template) can see the bead.
+func TestSlingSlotSuffixedPoolTargetNormalizesRoutedTo(t *testing.T) {
+	h, state := newSlingTestServer(t)
+	state.cfg.Agents = []config.Agent{
+		{
+			Name:              "polecat",
+			Dir:               "myrig",
+			MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3),
+		},
+	}
+	store := state.stores["myrig"]
+	b, err := store.Create(beads.Bead{Title: "test task", Type: "task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	body := `{"target":"myrig/polecat-2","bead":"` + b.ID + `"}`
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, newPostRequest(cityURL(state, "/sling"), strings.NewReader(body)))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body = %s", rec.Code, rec.Body.String())
+	}
+	updated, err := store.Get(b.ID)
+	if err != nil {
+		t.Fatalf("Get(%q): %v", b.ID, err)
+	}
+	if got := updated.Metadata["gc.routed_to"]; got != "myrig/polecat" {
+		t.Fatalf("gc.routed_to = %q, want myrig/polecat (slot suffix should be normalized away)", got)
+	}
+}
+
 func TestSlingConflictReturns409ForExistingLiveWorkflow(t *testing.T) {
 	// The Huma migration moved sling to /v0/city/{cityName}/sling and
 	// replaced the old plain-JSON `{code, message, source_bead_id, ...}`

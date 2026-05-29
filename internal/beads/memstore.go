@@ -80,6 +80,7 @@ func (m *MemStore) Create(b Bead) (Bead, error) {
 		b.Type = "task"
 	}
 	b.CreatedAt = time.Now()
+	b.UpdatedAt = b.CreatedAt
 
 	stored := cloneBead(b)
 	m.beads = append(m.beads, stored)
@@ -154,6 +155,7 @@ func (m *MemStore) Update(id string, opts UpdateOpts) error {
 				}
 				m.beads[i].Labels = filtered
 			}
+			m.beads[i].UpdatedAt = time.Now()
 			return nil
 		}
 	}
@@ -167,7 +169,11 @@ func (m *MemStore) Close(id string) error {
 	defer m.mu.Unlock()
 	for i := range m.beads {
 		if m.beads[i].ID == id {
+			if m.beads[i].Status == "closed" {
+				return nil
+			}
 			m.beads[i].Status = "closed"
+			m.beads[i].UpdatedAt = time.Now()
 			return nil
 		}
 	}
@@ -181,7 +187,11 @@ func (m *MemStore) Reopen(id string) error {
 	defer m.mu.Unlock()
 	for i := range m.beads {
 		if m.beads[i].ID == id {
+			if m.beads[i].Status == "open" {
+				return nil
+			}
 			m.beads[i].Status = "open"
+			m.beads[i].UpdatedAt = time.Now()
 			return nil
 		}
 	}
@@ -202,6 +212,7 @@ func (m *MemStore) CloseAll(ids []string, metadata map[string]string) (int, erro
 			continue
 		}
 		m.beads[i].Status = "closed"
+		m.beads[i].UpdatedAt = time.Now()
 		if m.beads[i].Metadata == nil {
 			m.beads[i].Metadata = make(map[string]string, len(metadata))
 		}
@@ -366,6 +377,7 @@ func (m *MemStore) SetMetadata(id, key, value string) error {
 				m.beads[i].Metadata = make(map[string]string)
 			}
 			m.beads[i].Metadata[key] = value
+			m.beads[i].UpdatedAt = time.Now()
 			return nil
 		}
 	}
@@ -374,6 +386,9 @@ func (m *MemStore) SetMetadata(id, key, value string) error {
 
 // SetMetadataBatch atomically sets multiple key-value metadata pairs on a bead.
 func (m *MemStore) SetMetadataBatch(id string, kvs map[string]string) error {
+	if len(kvs) == 0 {
+		return nil
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for i, b := range m.beads {
@@ -384,6 +399,7 @@ func (m *MemStore) SetMetadataBatch(id string, kvs map[string]string) error {
 			for k, v := range kvs {
 				m.beads[i].Metadata[k] = v
 			}
+			m.beads[i].UpdatedAt = time.Now()
 			return nil
 		}
 	}

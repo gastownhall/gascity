@@ -13,6 +13,3 @@ schema = 2
 
 [imports.gastown]
 source = "packs/gastown"
-
-[defaults.rig.imports.gastown]
-source = "packs/gastown"

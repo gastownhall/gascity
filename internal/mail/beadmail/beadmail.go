@@ -226,6 +226,17 @@ func (p *Provider) MarkUnread(id string) error {
 // message stays open, and the archive operation silently fails.
 const MailArchivedCloseReason = "beadmail: message archived without read"
 
+// ArchiveFilter selects open message beads for bounded archive cleanup.
+type ArchiveFilter struct {
+	Recipients      []string
+	From            string
+	SubjectPrefix   string
+	SubjectContains string
+	IncludeRead     bool
+	CaseInsensitive bool
+	Limit           int
+}
+
 // Archive closes a message bead without reading it.
 func (p *Provider) Archive(id string) error {
 	b, err := p.store.Get(id)
@@ -247,6 +258,123 @@ func (p *Provider) Archive(id string) error {
 		return fmt.Errorf("beadmail archive: %w", err)
 	}
 	return nil
+}
+
+// ArchiveCandidates returns open messages that match filter without closing
+// them.
+func (p *Provider) ArchiveCandidates(filter ArchiveFilter) ([]mail.Message, error) {
+	routes := p.recipientRoutesForAll(filter.Recipients)
+	candidates, err := p.messageCandidatesForRoutes(routes)
+	if err != nil {
+		return nil, fmt.Errorf("beadmail archive matching: %w", err)
+	}
+	matches := make([]mail.Message, 0, len(candidates))
+	for _, b := range candidates {
+		if b.Status != "open" {
+			continue
+		}
+		if len(routes) > 0 && !matchesRecipientRoute(routes, b.Assignee) {
+			continue
+		}
+		msg := beadToMessage(b)
+		if !filter.IncludeRead && msg.Read {
+			continue
+		}
+		if !archiveExactMatches(msg.From, filter.From, filter.CaseInsensitive) {
+			continue
+		}
+		if !archivePrefixMatches(msg.Subject, filter.SubjectPrefix, filter.CaseInsensitive) {
+			continue
+		}
+		if !archiveContainsMatches(msg.Subject, filter.SubjectContains, filter.CaseInsensitive) {
+			continue
+		}
+		matches = append(matches, msg)
+		if filter.Limit > 0 && len(matches) >= filter.Limit {
+			break
+		}
+	}
+	return matches, nil
+}
+
+// ArchiveMatching closes open messages selected by filter without per-message
+// lookups after the candidate list has already verified them.
+func (p *Provider) ArchiveMatching(filter ArchiveFilter) ([]mail.Message, []mail.ArchiveResult, error) {
+	candidates, err := p.ArchiveCandidates(filter)
+	if err != nil {
+		return nil, nil, err
+	}
+	results := make([]mail.ArchiveResult, len(candidates))
+	ids := make([]string, len(candidates))
+	for i, msg := range candidates {
+		ids[i] = msg.ID
+		results[i] = mail.ArchiveResult{ID: msg.ID}
+	}
+	if len(ids) == 0 {
+		return candidates, results, nil
+	}
+	if err := p.closeKnownOpenMessages(ids); err != nil {
+		retryResults, retryErr := p.ArchiveMany(ids)
+		if retryErr != nil {
+			return candidates, retryResults, errors.Join(err, retryErr)
+		}
+		return candidates, retryResults, nil
+	}
+	return candidates, results, nil
+}
+
+type reasonedBatchCloser interface {
+	CloseAllWithReason([]string, string) (int, error)
+}
+
+func (p *Provider) closeKnownOpenMessages(ids []string) error {
+	if p.store == nil {
+		return fmt.Errorf("beadmail archive matching: nil store")
+	}
+	if closer, ok := p.store.(reasonedBatchCloser); ok {
+		_, err := closer.CloseAllWithReason(ids, MailArchivedCloseReason)
+		return err
+	}
+	_, err := p.store.CloseAll(ids, map[string]string{
+		"close_reason": MailArchivedCloseReason,
+	})
+	return err
+}
+
+func archiveExactMatches(value, exact string, insensitive bool) bool {
+	exact = strings.TrimSpace(exact)
+	if exact == "" {
+		return true
+	}
+	if insensitive {
+		value = strings.ToLower(value)
+		exact = strings.ToLower(exact)
+	}
+	return value == exact
+}
+
+func archivePrefixMatches(value, prefix string, insensitive bool) bool {
+	prefix = strings.TrimSpace(prefix)
+	if prefix == "" {
+		return true
+	}
+	if insensitive {
+		value = strings.ToLower(value)
+		prefix = strings.ToLower(prefix)
+	}
+	return strings.HasPrefix(value, prefix)
+}
+
+func archiveContainsMatches(value, partial string, insensitive bool) bool {
+	partial = strings.TrimSpace(partial)
+	if partial == "" {
+		return true
+	}
+	if insensitive {
+		value = strings.ToLower(value)
+		partial = strings.ToLower(partial)
+	}
+	return strings.Contains(value, partial)
 }
 
 // Delete is an alias for Archive (closes the bead).

@@ -118,15 +118,15 @@ func TestLintDotHandlesCityRootPackDefaults(t *testing.T) {
 	root := t.TempDir()
 	t.Chdir(root)
 
+	writeLintFile(t, filepath.Join(root, "city.toml"), `[defaults.rig.imports.worker]
+source = "packs/worker"
+`)
 	writeLintFile(t, filepath.Join(root, "pack.toml"), `[pack]
 name = "city-root"
 version = "0.1.0"
 schema = 2
 
 [imports.worker]
-source = "packs/worker"
-
-[defaults.rig.imports.worker]
 source = "packs/worker"
 `)
 	writeLintPack(t, filepath.Join(root, "packs", "worker"), "worker", "builder", "prompts/builder.template.md")
@@ -147,12 +147,12 @@ func TestLintEmitsLoaderWarnings(t *testing.T) {
 
 	var stdout, stderr bytes.Buffer
 	code := run([]string{"lint", packDir}, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("gc lint = %d, want warnings-only success\nstdout:\n%s\nstderr:\n%s", code, stdout.String(), stderr.String())
+	if code == 0 {
+		t.Fatalf("gc lint succeeded, want pack authoring error\nstdout:\n%s\nstderr:\n%s", stdout.String(), stderr.String())
 	}
 	errText := stderr.String()
-	if !strings.Contains(errText, "warning") || !strings.Contains(errText, "deprecated compatibility alias") {
-		t.Fatalf("stderr missing loader warning:\n%s", errText)
+	if !strings.Contains(errText, "[agents] is a city.toml compatibility alias for [agent_defaults], not a pack.toml field") {
+		t.Fatalf("stderr missing pack authoring error:\n%s", errText)
 	}
 }
 

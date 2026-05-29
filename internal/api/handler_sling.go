@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/agentutil"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/execenv"
@@ -432,7 +433,11 @@ func (r apiBeadRouter) Route(_ context.Context, req sling.RouteRequest) error {
 	if r.store == nil {
 		return fmt.Errorf("built-in sling routing requires a store")
 	}
-	if err := r.store.SetMetadata(req.BeadID, "gc.routed_to", req.Target); err != nil {
+	routedTo := req.Target
+	if cfg != nil {
+		routedTo = agentutil.NormalizePoolRouteTarget(cfg, req.Target)
+	}
+	if err := r.store.SetMetadata(req.BeadID, "gc.routed_to", routedTo); err != nil {
 		if req.Force && errors.Is(err, beads.ErrNotFound) {
 			return nil
 		}

@@ -62,7 +62,8 @@ type ConditionEnv struct {
 	WorkDir              string
 	WispID               string
 	DocPath              string // from var.doc_path, may be empty
-	ArtifactDir          string
+	MoleculeDir          string // molecule.Dir(CityPath, rootID); may be empty for non-molecule beads
+	ArtifactDir          string // per-step artifact dir; GC_ARTIFACT_DIR is omitted when empty (matches the sling-time contract)
 	IterationDurationMs  int64
 	CumulativeDurationMs int64
 	MaxIterations        int
@@ -94,7 +95,6 @@ func (ce ConditionEnv) Environ() []string {
 		"GC_BEAD_ID=" + ce.BeadID,
 		"GC_ITERATION=" + strconv.Itoa(ce.Iteration),
 		"GC_WISP_ID=" + ce.WispID,
-		"GC_ARTIFACT_DIR=" + ce.ArtifactDir,
 		"GC_ITERATION_DURATION_MS=" + strconv.FormatInt(ce.IterationDurationMs, 10),
 		"GC_CUMULATIVE_DURATION_MS=" + strconv.FormatInt(ce.CumulativeDurationMs, 10),
 		"GC_MAX_ITERATIONS=" + strconv.Itoa(ce.MaxIterations),
@@ -119,6 +119,12 @@ func (ce ConditionEnv) Environ() []string {
 	}
 	if ce.StorePath != "" {
 		env = append(env, "GC_STORE_PATH="+ce.StorePath)
+	}
+	if ce.ArtifactDir != "" {
+		env = append(env, "GC_ARTIFACT_DIR="+ce.ArtifactDir)
+	}
+	if ce.MoleculeDir != "" {
+		env = append(env, "GC_MOLECULE_DIR="+ce.MoleculeDir)
 	}
 	if realBD := os.Getenv("GC_INTEGRATION_REAL_BD"); realBD != "" {
 		env = append(env, "GC_INTEGRATION_REAL_BD="+realBD)

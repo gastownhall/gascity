@@ -1377,6 +1377,9 @@ func TestInstallClaudeSurfacesMalformedOverride(t *testing.T) {
 	if !strings.Contains(err.Error(), ".claude/settings.json") {
 		t.Errorf("error must name the offending path: %v", err)
 	}
+	if !strings.Contains(err.Error(), "invalid Claude settings override") {
+		t.Errorf("error must identify the bad user-owned Claude settings override: %v", err)
+	}
 	if !strings.Contains(err.Error(), "invalid JSON") {
 		t.Errorf("error must clearly identify the file as invalid JSON (not bury it in a generic merge error): %v", err)
 	}
@@ -1412,8 +1415,11 @@ func TestInstallClaudeSurfacesNonObjectOverride(t *testing.T) {
 			if !strings.Contains(err.Error(), ".claude/settings.json") {
 				t.Errorf("error must name the offending path: %v", err)
 			}
-			if !strings.Contains(err.Error(), "invalid JSON") {
-				t.Errorf("error must clearly identify the file as invalid JSON (not bury it in a generic merge error): %v", err)
+			if !strings.Contains(err.Error(), "Claude settings override is not a JSON object") {
+				t.Errorf("error must identify the top-level shape issue distinctly: %v", err)
+			}
+			if strings.Contains(err.Error(), "invalid JSON") {
+				t.Errorf("error must not describe syntactically valid non-object JSON as invalid JSON: %v", err)
 			}
 			if !strings.Contains(err.Error(), "expected a JSON object") {
 				t.Errorf("error must explain the expected top-level shape: %v", err)
@@ -1649,6 +1655,91 @@ let mirrorTempCounter = 0;
 	}
 	if piHookNeedsUpgrade(future) {
 		t.Fatal("newer Pi hook version requested downgrade")
+	}
+}
+
+func TestInstallOMPHookUpgradesLegacyObjectExport(t *testing.T) {
+	fs := fsys.NewFake()
+	legacy := []byte(`// Gas City hooks for Oh My Pi (OMP).
+export default {
+  name: "gascity",
+  events: {
+    "session.created": () => "",
+    "session.compacted": () => "",
+  },
+  hooks: {
+    "experimental.chat.system.transform": (system: string): string => system,
+  },
+};
+`)
+	fs.Files["/work/.omp/hooks/gc-hook.ts"] = legacy
+
+	if err := Install(fs, "/city", "/work", []string{"omp"}); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	data := string(fs.Files["/work/.omp/hooks/gc-hook.ts"])
+	if data == string(legacy) {
+		t.Fatal("legacy OMP object-export hook was preserved; expected managed upgrade")
+	}
+	for _, want := range []string{
+		"const GC_OMP_HOOK_VERSION = 1",
+		`export default function gascityOmpExtension(pi: ExtensionAPI)`,
+		`pi.on("session_start"`,
+		`pi.on("session_compact"`,
+		`pi.on("before_agent_start"`,
+		"GC_PROVIDER_SESSION_ID",
+		"logRunFailure",
+	} {
+		if !strings.Contains(data, want) {
+			t.Errorf("upgraded OMP hook missing marker %q:\n%s", want, data)
+		}
+	}
+	backup := string(fs.Files["/work/.omp/hooks/gc-hook.ts.bak"])
+	if backup != string(legacy) {
+		t.Fatalf("legacy OMP hook backup = %q, want original legacy content", backup)
+	}
+}
+
+func TestOMPHookNeedsUpgradeComparesParsedVersion(t *testing.T) {
+	current := []byte(`// Gas City hooks for Oh My Pi (OMP).
+const GC_OMP_HOOK_VERSION = 1;
+function logRunFailure(args: string[], cwd: string | undefined, err: unknown) {}
+function providerSessionEnv(ctx: { sessionManager?: { getSessionId?: () => string } }): Record<string, string> {}
+export default function gascityOmpExtension(pi: ExtensionAPI) {
+  pi.on("session_start", () => {});
+  pi.on("session_compact", () => {});
+  pi.on("before_agent_start", () => {});
+}
+GC_PROVIDER_SESSION_ID;
+`)
+	stale := bytes.Replace(current, []byte("GC_OMP_HOOK_VERSION = 1"), []byte("GC_OMP_HOOK_VERSION = 0"), 1)
+	future := bytes.Replace(current, []byte("GC_OMP_HOOK_VERSION = 1"), []byte("GC_OMP_HOOK_VERSION = 2"), 1)
+
+	if !ompHookNeedsUpgrade(stale) {
+		t.Fatal("stale OMP hook version did not request upgrade")
+	}
+	if ompHookNeedsUpgrade(current) {
+		t.Fatal("current OMP hook version requested upgrade")
+	}
+	if ompHookNeedsUpgrade(future) {
+		t.Fatal("newer OMP hook version requested downgrade")
+	}
+}
+
+func TestInstallOMPHookPreservesUserAuthoredFile(t *testing.T) {
+	fs := fsys.NewFake()
+	custom := []byte(`export default function customOmpExtension(pi: ExtensionAPI) {
+  pi.on("session_start", () => {});
+}
+`)
+	fs.Files["/work/.omp/hooks/gc-hook.ts"] = custom
+
+	if err := Install(fs, "/city", "/work", []string{"omp"}); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	if got := string(fs.Files["/work/.omp/hooks/gc-hook.ts"]); got != string(custom) {
+		t.Fatalf("user-authored OMP hook was overwritten:\n%s", got)
 	}
 }
 

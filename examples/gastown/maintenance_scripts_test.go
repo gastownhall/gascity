@@ -327,89 +327,6 @@ exit 1
 	}
 }
 
-func TestOrphanSweepPreservesLiveEphemeralSessionAssignees(t *testing.T) {
-	cityDir := t.TempDir()
-	binDir := t.TempDir()
-	gcLog := filepath.Join(t.TempDir(), "gc.log")
-
-	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
-printf '%s\n' "$*" >> "$GC_CALL_LOG"
-case "$1" in
-  config)
-    if [ "$2" = "explain" ]; then
-      cat <<'EOF'
-Agent: project/worker
-  source: pack
-EOF
-      exit 0
-    fi
-    ;;
-  rig)
-    if [ "$2" = "list" ] && [ "$3" = "--json" ]; then
-      printf '{"rigs":[{"name":"hq","hq":true}]}\n'
-      exit 0
-    fi
-    ;;
-  session)
-    if [ "$2" = "list" ] && [ "$3" = "--json" ]; then
-      cat <<'EOF'
-{"sessions":[
-  {"id":"mc-live","session_name":"project__worker-gc-abc123","alias":"project/worker-1","agent_name":"project/worker","closed":false},
-  {"id":"mc-closed","session_name":"closed-session","closed":true}
-],"summary":{},"filters":{},"schema_version":"1"}
-EOF
-      exit 0
-    fi
-    ;;
-  bd)
-    if [ "$2" = "list" ]; then
-      cat <<'EOF'
-[
-  {"id":"ga-live","status":"in_progress","assignee":"project__worker-gc-abc123"},
-  {"id":"ga-orphan","status":"in_progress","assignee":"missing-session"}
-]
-EOF
-      exit 0
-    fi
-    if [ "$2" = "update" ]; then
-      exit 0
-    fi
-    ;;
-esac
-exit 1
-`)
-
-	env := map[string]string{
-		"GC_CITY":      cityDir,
-		"GC_CITY_PATH": cityDir,
-		"GC_CALL_LOG":  gcLog,
-		"PATH":         binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
-	}
-
-	script := filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "orphan-sweep.sh")
-	cmd := exec.Command(script)
-	cmd.Env = mergeTestEnv(env)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("%s failed: %v\n%s", filepath.Base(script), err, out)
-	}
-	if !strings.Contains(string(out), "orphan-sweep: reset 1 orphaned beads") {
-		t.Fatalf("unexpected orphan-sweep output:\n%s", out)
-	}
-
-	logData, err := os.ReadFile(gcLog)
-	if err != nil {
-		t.Fatalf("ReadFile(gc log): %v", err)
-	}
-	log := string(logData)
-	if !strings.Contains(log, "bd update ga-orphan --status=open --assignee=") {
-		t.Fatalf("orphan bead was not reset:\n%s", log)
-	}
-	if strings.Contains(log, "bd update ga-live ") {
-		t.Fatalf("live ephemeral session assignee was reset:\n%s", log)
-	}
-}
-
 func TestOrphanSweepRefreshesLivenessAfterBeadList(t *testing.T) {
 	cityDir := t.TempDir()
 	binDir := t.TempDir()
@@ -805,6 +722,389 @@ exit 1
 	if strings.Contains(log, "bd update ga-broken-orphan ") {
 		t.Fatalf("bead from rig with unknown session liveness was reset:\n%s", log)
 	}
+}
+
+func TestOrphanSweepPreservesProtectedInProgressEphemeralMoleculeWisp(t *testing.T) {
+	tests := []struct {
+		name               string
+		scope              string
+		configuredIdentity string
+		protectedID        string
+		protectedAssignee  string
+		orphanID           string
+		orphanAssignee     string
+		liveSessionName    string
+	}{
+		{
+			name:               "hq-reported-shape",
+			scope:              "hq",
+			configuredIdentity: "gastown.deacon",
+			protectedID:        "gc-wisp-protected-hq-1578",
+			protectedAssignee:  "gastown.deacon",
+			orphanID:           "gc-wisp-orphan-hq-1578",
+			orphanAssignee:     "ghost.worker-404",
+		},
+		{
+			name:               "rig-neutral-direct",
+			scope:              "project-alpha",
+			configuredIdentity: "project-alpha/custom.worker",
+			protectedID:        "gc-wisp-protected-neutral-1578",
+			protectedAssignee:  "project-alpha/custom.worker",
+			orphanID:           "gc-wisp-orphan-neutral-1578",
+			orphanAssignee:     "project-alpha/missing.worker-404",
+		},
+		{
+			name:               "rig-refinery-direct",
+			scope:              "project-alpha",
+			configuredIdentity: "project-alpha/gastown.refinery",
+			protectedID:        "gc-wisp-protected-refinery-1578",
+			protectedAssignee:  "project-alpha/gastown.refinery",
+			orphanID:           "gc-wisp-orphan-refinery-1578",
+			orphanAssignee:     "project-alpha/gastown.retired-404",
+		},
+		{
+			name:               "rig-witness-direct",
+			scope:              "project-alpha",
+			configuredIdentity: "project-alpha/gastown.witness",
+			protectedID:        "gc-wisp-protected-witness-1578",
+			protectedAssignee:  "project-alpha/gastown.witness",
+			orphanID:           "gc-wisp-orphan-witness-1578",
+			orphanAssignee:     "project-alpha/gastown.missing-404",
+		},
+		{
+			name:               "rig-pool-instance",
+			scope:              "project-alpha",
+			configuredIdentity: "project-alpha/gastown.refinery",
+			protectedID:        "gc-wisp-protected-pool-1578",
+			protectedAssignee:  "project-alpha/gastown.refinery-3",
+			orphanID:           "gc-wisp-orphan-pool-1578",
+			orphanAssignee:     "project-alpha/gastown.retired-3",
+		},
+		{
+			name:               "rig-live-session-only",
+			scope:              "project-alpha",
+			configuredIdentity: "project-alpha/gastown.refinery",
+			protectedID:        "gc-wisp-protected-live-1578",
+			protectedAssignee:  "project-alpha__gastown-refinery-gc-live1578",
+			orphanID:           "gc-wisp-orphan-live-1578",
+			orphanAssignee:     "project-alpha__gastown-retired-gc-live1578",
+			liveSessionName:    "project-alpha__gastown-refinery-gc-live1578",
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			root := t.TempDir()
+			binDir := filepath.Join(root, "bin")
+			if err := os.MkdirAll(binDir, 0o755); err != nil {
+				t.Fatalf("MkdirAll(%s): %v", binDir, err)
+			}
+			for _, name := range []string{"bash", "cat", "mktemp", "jq", "awk", "grep", "sed", "rm"} {
+				linkTestPathTool(t, binDir, name)
+			}
+
+			gcLog := filepath.Join(root, "gc.log")
+			if err := os.WriteFile(gcLog, nil, 0o644); err != nil {
+				t.Fatalf("WriteFile(%s): %v", gcLog, err)
+			}
+			fakeGC := filepath.Join(binDir, "gc")
+			writeStrictOrphanSweepGCStub(t, fakeGC)
+
+			beadsJSON := orphanSweepProtectedWispBeadsJSON(t, tt.protectedID, tt.protectedAssignee, tt.orphanID, tt.orphanAssignee)
+			hqJSON := "[]"
+			rigJSON := "[]"
+			hqSessionsJSON := orphanSweepSessionListJSON(t)
+			rigSessionsJSON := orphanSweepSessionListJSON(t)
+			switch tt.scope {
+			case "hq":
+				hqJSON = beadsJSON
+				if tt.liveSessionName != "" {
+					hqSessionsJSON = orphanSweepSessionListJSON(t, tt.liveSessionName)
+				}
+			case "project-alpha":
+				rigJSON = beadsJSON
+				if tt.liveSessionName != "" {
+					rigSessionsJSON = orphanSweepSessionListJSON(t, tt.liveSessionName)
+				}
+			default:
+				t.Fatalf("unsupported scope %q", tt.scope)
+			}
+
+			env := orphanSweepCleanroomEnv(t, root, binDir, gcLog, orphanSweepCleanroomEnvConfig{
+				hqJSON:             hqJSON,
+				rigJSON:            rigJSON,
+				hqSessionsJSON:     hqSessionsJSON,
+				rigSessionsJSON:    rigSessionsJSON,
+				configuredIdentity: tt.configuredIdentity,
+				orphanID:           tt.orphanID,
+			})
+			assertOrphanSweepFakeGC(t, env, filepath.Join(binDir, "bash"), fakeGC, gcLog)
+
+			script := filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "orphan-sweep.sh")
+			cmd := exec.Command(script)
+			cmd.Env = env
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("%s failed: %v\n%s", filepath.Base(script), err, orphanSweepFailureContext(out, gcLog))
+			}
+			if got, want := strings.TrimSpace(string(out)), "orphan-sweep: reset 1 orphaned beads"; got != want {
+				t.Fatalf("orphan-sweep output = %q, want %q\n%s", got, want, orphanSweepFailureContext(out, gcLog))
+			}
+
+			logData, err := os.ReadFile(gcLog)
+			if err != nil {
+				t.Fatalf("ReadFile(%s): %v", gcLog, err)
+			}
+			log := string(logData)
+			lines := nonEmptyLogLines(log)
+			orphanUpdate := "bd update " + tt.orphanID + " --status=open --assignee="
+			if got := countExactLine(lines, orphanUpdate); got != 1 {
+				t.Fatalf("orphan update count = %d, want 1 for %q\n%s", got, orphanUpdate, orphanSweepFailureContext(out, gcLog))
+			}
+			if strings.Contains(log, "bd update "+tt.protectedID+" ") {
+				t.Fatalf("protected wisp %s was reset\n%s", tt.protectedID, orphanSweepFailureContext(out, gcLog))
+			}
+			if strings.Contains(log, "UNEXPECTED:") {
+				t.Fatalf("unexpected fake gc invocation\n%s", orphanSweepFailureContext(out, gcLog))
+			}
+			if strings.Contains(log, "config show") {
+				t.Fatalf("primary regression must not use config show fallback\n%s", orphanSweepFailureContext(out, gcLog))
+			}
+			if got := countExactLine(lines, "session list --json"); got < 2 {
+				t.Fatalf("HQ session probe count = %d, want at least 2\n%s", got, orphanSweepFailureContext(out, gcLog))
+			}
+			// Keep before/after rig liveness probes covered on the protected-wisp path.
+			if got := countExactLine(lines, "--rig project-alpha session list --json"); got < 2 {
+				t.Fatalf("rig session probe count = %d, want at least 2\n%s", got, orphanSweepFailureContext(out, gcLog))
+			}
+			for _, want := range []string{
+				"bd list --status=in_progress --json --limit=0",
+				"rig list --json",
+				"bd list --rig project-alpha --status=in_progress --json --limit=0",
+				"config explain",
+				orphanUpdate,
+			} {
+				if countExactLine(lines, want) == 0 {
+					t.Fatalf("missing required gc call %q\n%s", want, orphanSweepFailureContext(out, gcLog))
+				}
+			}
+		})
+	}
+}
+
+func writeStrictOrphanSweepGCStub(t *testing.T, path string) {
+	t.Helper()
+	writeExecutable(t, path, `#!/bin/sh
+set -eu
+rig=""
+if [ "${1:-}" = "--rig" ]; then
+  rig="$2"
+  shift 2
+fi
+if [ -n "$rig" ]; then
+  printf '%s %s %s\n' "--rig" "$rig" "$*" >> "$GC_CALL_LOG"
+else
+  printf '%s\n' "$*" >> "$GC_CALL_LOG"
+fi
+if [ "$*" = "bd list --status=in_progress --json --limit=0" ]; then
+  printf '%s\n' "$ORPHAN_SWEEP_HQ_JSON"
+  exit 0
+fi
+if [ "$*" = "rig list --json" ]; then
+  printf '{"rigs":[{"name":"hq","hq":true},{"name":"project-alpha","hq":false}]}\n'
+  exit 0
+fi
+if [ "$*" = "bd list --rig project-alpha --status=in_progress --json --limit=0" ]; then
+  printf '%s\n' "$ORPHAN_SWEEP_RIG_JSON"
+  exit 0
+fi
+if [ "$*" = "config explain" ]; then
+  printf 'Agent: %s\n  source: pack\n' "$ORPHAN_SWEEP_CONFIGURED_IDENTITY"
+  exit 0
+fi
+if [ "$*" = "session list --json" ]; then
+  if [ "$rig" = "project-alpha" ]; then
+    printf '%s\n' "$ORPHAN_SWEEP_RIG_SESSIONS_JSON"
+  else
+    printf '%s\n' "$ORPHAN_SWEEP_HQ_SESSIONS_JSON"
+  fi
+  exit 0
+fi
+if [ "$*" = "bd update $ORPHAN_SWEEP_ORPHAN_ID --status=open --assignee=" ]; then
+  exit 0
+fi
+printf 'UNEXPECTED: %s\n' "$*" >> "$GC_CALL_LOG"
+printf 'UNEXPECTED: %s\n' "$*" >&2
+exit 2
+`)
+}
+
+type orphanSweepCleanroomEnvConfig struct {
+	hqJSON             string
+	rigJSON            string
+	hqSessionsJSON     string
+	rigSessionsJSON    string
+	configuredIdentity string
+	orphanID           string
+}
+
+func orphanSweepProtectedWispBeadsJSON(t *testing.T, protectedID, protectedAssignee, orphanID, orphanAssignee string) string {
+	t.Helper()
+	type bead struct {
+		ID        string `json:"id"`
+		Status    string `json:"status"`
+		Assignee  string `json:"assignee"`
+		Ephemeral bool   `json:"ephemeral"`
+		IssueType string `json:"issue_type"`
+	}
+	data, err := json.Marshal([]bead{
+		{
+			ID:        protectedID,
+			Status:    "in_progress",
+			Assignee:  protectedAssignee,
+			Ephemeral: true,
+			IssueType: "molecule",
+		},
+		{
+			ID:        orphanID,
+			Status:    "in_progress",
+			Assignee:  orphanAssignee,
+			Ephemeral: true,
+			IssueType: "molecule",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Marshal(orphan-sweep beads): %v", err)
+	}
+	return string(data)
+}
+
+func orphanSweepSessionListJSON(t *testing.T, liveSessionNames ...string) string {
+	t.Helper()
+	type session struct {
+		ID          string `json:"id"`
+		SessionName string `json:"session_name"`
+		Alias       string `json:"alias,omitempty"`
+		AgentName   string `json:"agent_name,omitempty"`
+		Closed      bool   `json:"closed"`
+	}
+	type response struct {
+		SchemaVersion string         `json:"schema_version"`
+		Filters       map[string]any `json:"filters"`
+		Sessions      []session      `json:"sessions"`
+		Summary       map[string]any `json:"summary"`
+	}
+	sessions := make([]session, 0, len(liveSessionNames)+1)
+	for i, name := range liveSessionNames {
+		sessions = append(sessions, session{
+			ID:          fmt.Sprintf("mc-live-%d", i),
+			SessionName: name,
+			Closed:      false,
+		})
+	}
+	sessions = append(sessions, session{
+		ID:          "mc-closed",
+		SessionName: "closed-session",
+		Closed:      true,
+	})
+	data, err := json.Marshal(response{
+		SchemaVersion: "1",
+		Filters:       map[string]any{},
+		Sessions:      sessions,
+		Summary:       map[string]any{},
+	})
+	if err != nil {
+		t.Fatalf("Marshal(orphan-sweep sessions): %v", err)
+	}
+	return string(data)
+}
+
+func orphanSweepCleanroomEnv(t *testing.T, root, binDir, gcLog string, cfg orphanSweepCleanroomEnvConfig) []string {
+	t.Helper()
+	rigList := `{"rigs":[{"name":"hq","hq":true},{"name":"project-alpha","hq":false}]}`
+	dirs := map[string]string{
+		"HOME":              filepath.Join(root, "home"),
+		"XDG_CONFIG_HOME":   filepath.Join(root, "xdg-config"),
+		"XDG_CACHE_HOME":    filepath.Join(root, "xdg-cache"),
+		"XDG_STATE_HOME":    filepath.Join(root, "xdg-state"),
+		"TMPDIR":            filepath.Join(root, "tmp"),
+		"GC_CITY":           filepath.Join(root, "city"),
+		"GC_CITY_PATH":      filepath.Join(root, "city"),
+		"BEADS_DIR":         filepath.Join(root, "beads"),
+		"GIT_CONFIG_GLOBAL": filepath.Join(root, "gitconfig"),
+	}
+	for key, path := range dirs {
+		if key == "GIT_CONFIG_GLOBAL" {
+			if err := os.WriteFile(path, nil, 0o644); err != nil {
+				t.Fatalf("WriteFile(%s): %v", path, err)
+			}
+			continue
+		}
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatalf("MkdirAll(%s): %v", path, err)
+		}
+	}
+	return []string{
+		"HOME=" + dirs["HOME"],
+		"XDG_CONFIG_HOME=" + dirs["XDG_CONFIG_HOME"],
+		"XDG_CACHE_HOME=" + dirs["XDG_CACHE_HOME"],
+		"XDG_STATE_HOME=" + dirs["XDG_STATE_HOME"],
+		"TMPDIR=" + dirs["TMPDIR"],
+		"GC_CITY=" + dirs["GC_CITY"],
+		"GC_CITY_PATH=" + dirs["GC_CITY_PATH"],
+		"GC_CALL_LOG=" + gcLog,
+		"BEADS_DIR=" + dirs["BEADS_DIR"],
+		"GIT_CONFIG_GLOBAL=" + dirs["GIT_CONFIG_GLOBAL"],
+		"GIT_CONFIG_NOSYSTEM=1",
+		"ORPHAN_SWEEP_HQ_JSON=" + cfg.hqJSON,
+		"ORPHAN_SWEEP_RIG_JSON=" + cfg.rigJSON,
+		"ORPHAN_SWEEP_RIG_LIST_JSON=" + rigList,
+		"ORPHAN_SWEEP_HQ_SESSIONS_JSON=" + cfg.hqSessionsJSON,
+		"ORPHAN_SWEEP_RIG_SESSIONS_JSON=" + cfg.rigSessionsJSON,
+		"ORPHAN_SWEEP_CONFIGURED_IDENTITY=" + cfg.configuredIdentity,
+		"ORPHAN_SWEEP_ORPHAN_ID=" + cfg.orphanID,
+		"PATH=" + binDir,
+	}
+}
+
+func assertOrphanSweepFakeGC(t *testing.T, env []string, bashPath, fakeGC, gcLog string) {
+	t.Helper()
+	cmd := exec.Command(bashPath, "-c", "command -v gc")
+	cmd.Env = env
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("command -v gc failed: %v\n%s", err, orphanSweepFailureContext(out, gcLog))
+	}
+	if got := strings.TrimSpace(string(out)); got != fakeGC {
+		t.Fatalf("command -v gc = %q, want %q\n%s", got, fakeGC, orphanSweepFailureContext(out, gcLog))
+	}
+}
+
+func orphanSweepFailureContext(output []byte, callLogPath string) string {
+	logData, err := os.ReadFile(callLogPath)
+	if err != nil {
+		return fmt.Sprintf("captured output:\n%s\nrecent GC_CALL_LOG (%s): <read error: %v>", output, callLogPath, err)
+	}
+	return fmt.Sprintf("captured output:\n%s\nrecent GC_CALL_LOG (%s):\n%s", output, callLogPath, logData)
+}
+
+func nonEmptyLogLines(log string) []string {
+	log = strings.TrimSpace(log)
+	if log == "" {
+		return nil
+	}
+	return strings.Split(log, "\n")
+}
+
+func countExactLine(lines []string, want string) int {
+	count := 0
+	for _, line := range lines {
+		if line == want {
+			count++
+		}
+	}
+	return count
 }
 
 func TestMaintenanceDoltScriptsUseManagedRuntimePorts(t *testing.T) {
@@ -4352,21 +4652,23 @@ func mergeTestEnv(overrides map[string]string) []string {
 func jsonlExportEnv(t *testing.T, cityDir, binDir, stateDir, archiveRepo, gcLog, mailLog string) map[string]string {
 	t.Helper()
 	return map[string]string{
-		"GC_CALL_LOG":                gcLog,
-		"GC_MAIL_LOG":                mailLog,
-		"GC_CITY":                    cityDir,
-		"GC_CITY_PATH":               cityDir,
-		"GC_PACK_STATE_DIR":          stateDir,
-		"GC_DOLT_HOST":               "127.0.0.1",
-		"GC_DOLT_PORT":               "3307",
-		"GC_DOLT_USER":               "root",
-		"GC_DOLT_PASSWORD":           "",
-		"GC_JSONL_ARCHIVE_REPO":      archiveRepo,
-		"GC_JSONL_MAX_PUSH_FAILURES": "99",
-		"GC_JSONL_SCRUB":             "false",
-		"GIT_CONFIG_GLOBAL":          filepath.Join(t.TempDir(), "gitconfig"),
-		"GIT_CONFIG_NOSYSTEM":        "1",
-		"PATH":                       binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+		"GC_CALL_LOG":                    gcLog,
+		"GC_MAIL_LOG":                    mailLog,
+		"GC_CITY":                        cityDir,
+		"GC_CITY_PATH":                   cityDir,
+		"GC_PACK_STATE_DIR":              stateDir,
+		"GC_DOLT_HOST":                   "127.0.0.1",
+		"GC_DOLT_PORT":                   "3307",
+		"GC_DOLT_USER":                   "root",
+		"GC_DOLT_PASSWORD":               "",
+		"GC_JSONL_ARCHIVE_REPO":          archiveRepo,
+		"GC_JSONL_MAX_PUSH_FAILURES":     "99",
+		"GC_JSONL_PUSH_RETRY_DELAY_MIN":  "0",
+		"GC_JSONL_PUSH_RETRY_DELAY_SPAN": "0",
+		"GC_JSONL_SCRUB":                 "false",
+		"GIT_CONFIG_GLOBAL":              filepath.Join(t.TempDir(), "gitconfig"),
+		"GIT_CONFIG_NOSYSTEM":            "1",
+		"PATH":                           binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 	}
 }
 
@@ -4449,6 +4751,50 @@ func writeMultiRecordDoltStub(t *testing.T, binDir string, currentCount int) {
 
 func writeIssuesPayloadDoltStub(t *testing.T, binDir, issuesPayload string) {
 	t.Helper()
+	writeIssuesPayloadDoltStubWithPrelude(t, binDir, issuesPayload, "")
+}
+
+func writeOriginRemovingMultiRecordDoltStub(t *testing.T, binDir string, currentCount int) {
+	t.Helper()
+	rows := make([]string, 0, currentCount)
+	for i := 0; i < currentCount; i++ {
+		rows = append(rows, fmt.Sprintf(`{"id":"c%d","title":"cur-%d"}`, i, i))
+	}
+	writeIssuesPayloadDoltStubWithPrelude(t, binDir, `{"rows":[`+strings.Join(rows, ",")+`]}`, `
+if [ -n "${DOLT_REMOVE_ORIGIN_FLAG:-}" ] && [ ! -e "$DOLT_REMOVE_ORIGIN_FLAG" ]; then
+  : > "$DOLT_REMOVE_ORIGIN_FLAG"
+  git -C "$GC_JSONL_ARCHIVE_REPO" remote remove origin 2>/dev/null || true
+fi
+`)
+}
+
+func writeIssuesPayloadDoltStubWithPrelude(t *testing.T, binDir, issuesPayload, prelude string) {
+	t.Helper()
+	body := "#!/bin/sh\n" +
+		"if [ -n \"${DOLT_ARGS_LOG:-}\" ]; then\n" +
+		"  printf '%s\\n' \"$*\" >> \"$DOLT_ARGS_LOG\"\n" +
+		"fi\n" +
+		prelude +
+		"case \"$*\" in\n" +
+		"  *\"SHOW TABLES FROM\"*\"LIKE 'wisps'\"*)\n" +
+		"    printf 'Tables_in_db\\nwisps\\n'\n" +
+		"    ;;\n" +
+		"  *\"SHOW DATABASES\"*)\n" +
+		"    printf 'Database\\nbeads\\n'\n" +
+		"    ;;\n" +
+		"  *\"FROM \\`beads\\`.issues\"*)\n" +
+		"    printf '%s\\n' '" + issuesPayload + "'\n" +
+		"    ;;\n" +
+		"  *\"SELECT *\"*)\n" +
+		"    printf '{\"rows\":[]}\\n'\n" +
+		"    ;;\n" +
+		"esac\n" +
+		"exit 0\n"
+	writeExecutable(t, filepath.Join(binDir, "dolt"), body)
+}
+
+func writeIssuesPayloadWithSourceCountDoltStub(t *testing.T, binDir, issuesPayload string, sourceCount int) {
+	t.Helper()
 	body := "#!/bin/sh\n" +
 		"if [ -n \"${DOLT_ARGS_LOG:-}\" ]; then\n" +
 		"  printf '%s\\n' \"$*\" >> \"$DOLT_ARGS_LOG\"\n" +
@@ -4459,6 +4805,9 @@ func writeIssuesPayloadDoltStub(t *testing.T, binDir, issuesPayload string) {
 		"    ;;\n" +
 		"  *\"SHOW DATABASES\"*)\n" +
 		"    printf 'Database\\nbeads\\n'\n" +
+		"    ;;\n" +
+		"  *\"COUNT(\"*\"FROM \\`beads\\`.issues\"*)\n" +
+		"    printf 'row_count\\n" + strconv.Itoa(sourceCount) + "\\n'\n" +
 		"    ;;\n" +
 		"  *\"FROM \\`beads\\`.issues\"*)\n" +
 		"    printf '%s\\n' '" + issuesPayload + "'\n" +
@@ -4544,6 +4893,89 @@ for arg in "$@"; do
 done
 exec '%s' "$@"
 `, subcommand, subcommand, realGit))
+}
+
+func writeGitPushAttemptStub(t *testing.T, binDir, realGit, mode, logFile string) {
+	t.Helper()
+	countFile := filepath.Join(t.TempDir(), "push-count")
+	writeExecutable(t, filepath.Join(binDir, "git"), fmt.Sprintf(`#!/bin/sh
+count_file=%s
+log_file=%s
+mode=%s
+real_git=%s
+for arg in "$@"; do
+    if [ "$arg" = "push" ]; then
+        count=0
+        if [ -f "$count_file" ]; then
+            count="$(cat "$count_file")"
+        fi
+        count=$((count + 1))
+        printf '%%s\n' "$count" > "$count_file"
+        printf '%%s\n' "$count" >> "$log_file"
+        if [ "$mode" = "fail-first" ] && [ "$count" -eq 1 ]; then
+            echo "simulated git push failure on attempt $count" >&2
+            exit 1
+        fi
+        if [ "$mode" = "always-fail" ]; then
+            echo "simulated git push failure on attempt $count" >&2
+            exit 1
+        fi
+        break
+    fi
+done
+exec "$real_git" "$@"
+`, strconv.Quote(countFile), strconv.Quote(logFile), strconv.Quote(mode), strconv.Quote(realGit)))
+}
+
+func writeGitPushRemoteAdvanceRaceStub(t *testing.T, binDir, realGit, remoteRepo, logFile string) {
+	t.Helper()
+	countFile := filepath.Join(t.TempDir(), "push-count")
+	writeExecutable(t, filepath.Join(binDir, "git"), fmt.Sprintf(`#!/bin/sh
+count_file=%s
+log_file=%s
+remote_repo=%s
+real_git=%s
+advance_dir=""
+cleanup_advance() {
+    if [ -n "$advance_dir" ]; then
+        rm -rf "$advance_dir"
+    fi
+}
+trap cleanup_advance EXIT
+for arg in "$@"; do
+    if [ "$arg" = "push" ]; then
+        count=0
+        if [ -f "$count_file" ]; then
+            count="$(cat "$count_file")"
+        fi
+        count=$((count + 1))
+        printf '%%s\n' "$count" > "$count_file"
+        printf '%%s\n' "$count" >> "$log_file"
+        if [ "$count" -eq 1 ]; then
+            advance_dir="$(mktemp -d)"
+            "$real_git" clone -q "$remote_repo" "$advance_dir" || exit $?
+            "$real_git" -C "$advance_dir" checkout -q main || exit $?
+            "$real_git" -C "$advance_dir" config user.email test@example.invalid || exit $?
+            "$real_git" -C "$advance_dir" config user.name test || exit $?
+            printf 'remote advance during push\n' > "$advance_dir/remote-push-race.txt" || exit $?
+            "$real_git" -C "$advance_dir" add -A || exit $?
+            "$real_git" -C "$advance_dir" commit -q -m "remote advance during push" || exit $?
+            "$real_git" -C "$advance_dir" push -q origin main || exit $?
+        fi
+        break
+    fi
+done
+"$real_git" "$@"
+exit $?
+`, strconv.Quote(countFile), strconv.Quote(logFile), strconv.Quote(remoteRepo), strconv.Quote(realGit)))
+}
+
+func writeSleepLogStub(t *testing.T, binDir, logFile string) {
+	t.Helper()
+	writeExecutable(t, filepath.Join(binDir, "sleep"), fmt.Sprintf(`#!/bin/sh
+printf '%%s\n' "$*" >> %s
+exit 0
+`, strconv.Quote(logFile)))
 }
 
 func initSeedArchiveWithoutLocalIdentity(t *testing.T, archiveRepo string, prevCount int) string {
@@ -4751,6 +5183,75 @@ func TestJsonlExportSkipsSpikeCheckBelowMinPrev(t *testing.T) {
 	}
 	if strings.Contains(string(mailData), "ESCALATION: JSONL spike") {
 		t.Fatalf("spike escalation fired despite prev<MIN_PREV; mail log:\n%s", mailData)
+	}
+}
+
+func TestJsonlExportSuppressesDropSpikeWhenDoltSourceCountHealthy(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	stateDir := t.TempDir()
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+	mailLog := filepath.Join(t.TempDir(), "gc-mail.log")
+	archiveRepo := filepath.Join(cityDir, "archive")
+
+	initSeedArchive(t, archiveRepo, 100)
+	writeIssuesPayloadWithSourceCountDoltStub(t, binDir, `{"rows":[]}`, 120)
+	writeJsonlExportGCStub(t, binDir)
+
+	env := jsonlExportEnv(t, cityDir, binDir, stateDir, archiveRepo, gcLog, mailLog)
+
+	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "jsonl-export.sh"), env)
+
+	mailData, err := os.ReadFile(mailLog)
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatalf("ReadFile(mail log): %v", err)
+	}
+	if strings.Contains(string(mailData), "ESCALATION: JSONL spike") {
+		t.Fatalf("spike escalation fired despite healthy Dolt source-of-truth count; mail log:\n%s", mailData)
+	}
+
+	gcData, err := os.ReadFile(gcLog)
+	if err != nil {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	if strings.Contains(string(gcData), "HALTED on spike detection") {
+		t.Fatalf("healthy Dolt source-of-truth count should suppress HALT; gc log:\n%s", gcData)
+	}
+	if !strings.Contains(string(gcData), "DOG_DONE: jsonl — exported") {
+		t.Fatalf("expected normal export summary after source-of-truth suppression; gc log:\n%s", gcData)
+	}
+}
+
+func TestJsonlExportPreservesDropSpikeWhenDoltSourceCountAlsoShrank(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	stateDir := t.TempDir()
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+	mailLog := filepath.Join(t.TempDir(), "gc-mail.log")
+	archiveRepo := filepath.Join(cityDir, "archive")
+
+	initSeedArchive(t, archiveRepo, 100)
+	writeIssuesPayloadWithSourceCountDoltStub(t, binDir, `{"rows":[]}`, 10)
+	writeJsonlExportGCStub(t, binDir)
+
+	env := jsonlExportEnv(t, cityDir, binDir, stateDir, archiveRepo, gcLog, mailLog)
+
+	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "jsonl-export.sh"), env)
+
+	mailData, err := os.ReadFile(mailLog)
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatalf("ReadFile(mail log): %v", err)
+	}
+	if !strings.Contains(string(mailData), "ESCALATION: JSONL spike") {
+		t.Fatalf("expected spike escalation when Dolt source-of-truth count also shrank; mail log:\n%s", mailData)
+	}
+
+	gcData, err := os.ReadFile(gcLog)
+	if err != nil {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	if !strings.Contains(string(gcData), "HALTED on spike detection") {
+		t.Fatalf("expected HALT when source-of-truth also confirms the drop; gc log:\n%s", gcData)
 	}
 }
 
@@ -5951,6 +6452,7 @@ func TestJsonlExportPushFailureWritesLastPushStderr(t *testing.T) {
 	mailLog := filepath.Join(t.TempDir(), "gc-mail.log")
 	archiveRepo := filepath.Join(cityDir, "archive")
 	stateFile := filepath.Join(stateDir, "jsonl-export-state.json")
+	pushLog := filepath.Join(t.TempDir(), "git-push.log")
 
 	// Must have an origin remote — auto-detect mode skips push (and therefore
 	// the failure path) when origin is unset. An unreachable remote triggers
@@ -5958,10 +6460,29 @@ func TestJsonlExportPushFailureWritesLastPushStderr(t *testing.T) {
 	initSeedArchiveWithUnreachableRemote(t, archiveRepo)
 	writeMultiRecordDoltStub(t, binDir, 5)
 	writeJsonlExportGCStub(t, binDir)
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatalf("LookPath(git): %v", err)
+	}
+	writeGitPushAttemptStub(t, binDir, realGit, "pass-through", pushLog)
 
 	env := jsonlExportEnv(t, cityDir, binDir, stateDir, archiveRepo, gcLog, mailLog)
 
-	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "jsonl-export.sh"), env)
+	out, err := runScriptResult(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "jsonl-export.sh"), env)
+	if err != nil {
+		t.Fatalf("jsonl-export.sh should report push failure in summary without exiting non-zero: %v\n%s", err, out)
+	}
+	if !strings.Contains(string(out), "pushing archive main failed after 3 attempts") {
+		t.Fatalf("expected terminal retry message, got:\n%s", out)
+	}
+
+	pushData, err := os.ReadFile(pushLog)
+	if err != nil {
+		t.Fatalf("ReadFile(push log): %v", err)
+	}
+	if got := strings.Count(string(pushData), "\n"); got != 3 {
+		t.Fatalf("unreachable remote should be retried exactly 3 times, got %d:\n%s", got, pushData)
+	}
 
 	stateData, err := os.ReadFile(stateFile)
 	if err != nil {
@@ -5977,6 +6498,248 @@ func TestJsonlExportPushFailureWritesLastPushStderr(t *testing.T) {
 	stderrVal, ok := state["last_push_stderr"].(string)
 	if !ok || stderrVal == "" {
 		t.Fatalf("last_push_stderr missing from state after push failure:\n%s", stateData)
+	}
+}
+
+func TestJsonlExportPushRetriesAndRecordsSuccessAfterTransientFailure(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	stateDir := t.TempDir()
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+	mailLog := filepath.Join(t.TempDir(), "gc-mail.log")
+	archiveRepo := filepath.Join(cityDir, "archive")
+	stateFile := filepath.Join(stateDir, "jsonl-export-state.json")
+	pushLog := filepath.Join(t.TempDir(), "git-push.log")
+	sleepLog := filepath.Join(t.TempDir(), "sleep.log")
+
+	remoteRepo, priorHead := initSeedArchiveWithRemote(t, archiveRepo)
+	writeMultiRecordDoltStub(t, binDir, 100)
+	writeJsonlExportGCStub(t, binDir)
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatalf("LookPath(git): %v", err)
+	}
+	writeGitPushAttemptStub(t, binDir, realGit, "fail-first", pushLog)
+	writeSleepLogStub(t, binDir, sleepLog)
+
+	env := jsonlExportEnv(t, cityDir, binDir, stateDir, archiveRepo, gcLog, mailLog)
+	env["GC_JSONL_PUSH_RETRY_DELAY_MIN"] = "0"
+	env["GC_JSONL_PUSH_RETRY_DELAY_SPAN"] = "0"
+
+	out, err := runScriptResult(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "jsonl-export.sh"), env)
+	if err != nil {
+		t.Fatalf("jsonl-export.sh: %v\n%s", err, out)
+	}
+	if !strings.Contains(string(out), "push succeeded on retry attempt 2") {
+		t.Fatalf("expected successful retry to be operator-visible, got:\n%s", out)
+	}
+
+	pushData, err := os.ReadFile(pushLog)
+	if err != nil {
+		t.Fatalf("ReadFile(push log): %v", err)
+	}
+	if got := strings.Count(string(pushData), "\n"); got != 2 {
+		t.Fatalf("expected exactly 2 push attempts, got %d:\n%s", got, pushData)
+	}
+	sleepData, err := os.ReadFile(sleepLog)
+	if err != nil {
+		t.Fatalf("ReadFile(sleep log): %v", err)
+	}
+	if got := strings.TrimSpace(string(sleepData)); got != "0.00" {
+		t.Fatalf("retry delay override must produce one zero-second sleep, got %q", got)
+	}
+
+	remoteHeadOut, err := exec.Command("git", "--git-dir", remoteRepo, "rev-parse", "refs/heads/main").CombinedOutput()
+	if err != nil {
+		t.Fatalf("git rev-parse remote main: %v\n%s", err, remoteHeadOut)
+	}
+	if got := strings.TrimSpace(string(remoteHeadOut)); got == priorHead {
+		t.Fatalf("expected retry success to advance remote main from %s", priorHead)
+	}
+
+	stateData, err := os.ReadFile(stateFile)
+	if err != nil {
+		t.Fatalf("ReadFile(state file): %v", err)
+	}
+	var state map[string]any
+	if err := json.Unmarshal(stateData, &state); err != nil {
+		t.Fatalf("Unmarshal(state file): %v\n%s", err, stateData)
+	}
+	if got := state["consecutive_push_failures"]; got != float64(0) {
+		t.Fatalf("consecutive_push_failures = %v, want 0\nstate: %s", got, stateData)
+	}
+	if got := state["pending_archive_push"]; got == true {
+		t.Fatalf("pending_archive_push should clear after retry success\nstate: %s", stateData)
+	}
+	if _, ok := state["last_push_at"].(string); !ok {
+		t.Fatalf("last_push_at should be set after retry success:\n%s", stateData)
+	}
+	if _, has := state["last_push_stderr"]; has {
+		t.Fatalf("last_push_stderr should clear after retry success:\n%s", stateData)
+	}
+}
+
+func TestJsonlExportPushRetryRebasesAfterRemoteAdvanceRace(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	stateDir := t.TempDir()
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+	mailLog := filepath.Join(t.TempDir(), "gc-mail.log")
+	archiveRepo := filepath.Join(cityDir, "archive")
+	stateFile := filepath.Join(stateDir, "jsonl-export-state.json")
+	pushLog := filepath.Join(t.TempDir(), "git-push.log")
+	sleepLog := filepath.Join(t.TempDir(), "sleep.log")
+
+	remoteRepo, priorHead := initSeedArchiveWithRemote(t, archiveRepo)
+	writeMultiRecordDoltStub(t, binDir, 101)
+	writeJsonlExportGCStub(t, binDir)
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatalf("LookPath(git): %v", err)
+	}
+	writeGitPushRemoteAdvanceRaceStub(t, binDir, realGit, remoteRepo, pushLog)
+	writeSleepLogStub(t, binDir, sleepLog)
+
+	env := jsonlExportEnv(t, cityDir, binDir, stateDir, archiveRepo, gcLog, mailLog)
+
+	out, err := runScriptResult(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "jsonl-export.sh"), env)
+	if err != nil {
+		t.Fatalf("jsonl-export.sh: %v\n%s", err, out)
+	}
+	if !strings.Contains(string(out), "push succeeded on retry attempt 2") {
+		t.Fatalf("expected retry success after remote advance, got:\n%s", out)
+	}
+
+	pushData, err := os.ReadFile(pushLog)
+	if err != nil {
+		t.Fatalf("ReadFile(push log): %v", err)
+	}
+	if got := strings.Count(string(pushData), "\n"); got != 2 {
+		t.Fatalf("expected first non-fast-forward push plus one retry, got %d attempts:\n%s", got, pushData)
+	}
+	sleepData, err := os.ReadFile(sleepLog)
+	if err != nil {
+		t.Fatalf("ReadFile(sleep log): %v", err)
+	}
+	if got := strings.TrimSpace(string(sleepData)); got != "0.00" {
+		t.Fatalf("retry delay override must produce one zero-second sleep, got %q", got)
+	}
+
+	remoteHeadOut, err := exec.Command("git", "--git-dir", remoteRepo, "rev-parse", "refs/heads/main").CombinedOutput()
+	if err != nil {
+		t.Fatalf("git rev-parse remote main: %v\n%s", err, remoteHeadOut)
+	}
+	if got := strings.TrimSpace(string(remoteHeadOut)); got == priorHead {
+		t.Fatalf("expected retry success to advance remote main from %s", priorHead)
+	}
+
+	logOut, err := exec.Command("git", "--git-dir", remoteRepo, "log", "--format=%s", "-3", "refs/heads/main").CombinedOutput()
+	if err != nil {
+		t.Fatalf("git log remote main: %v\n%s", err, logOut)
+	}
+	remoteLog := string(logOut)
+	if !strings.Contains(remoteLog, "remote advance during push") || !strings.Contains(remoteLog, "records=101") {
+		t.Fatalf("expected remote history to contain both sibling advance and rebased export commit, got:\n%s", remoteLog)
+	}
+
+	stateData, err := os.ReadFile(stateFile)
+	if err != nil {
+		t.Fatalf("ReadFile(state file): %v", err)
+	}
+	var state map[string]any
+	if err := json.Unmarshal(stateData, &state); err != nil {
+		t.Fatalf("Unmarshal(state file): %v\n%s", err, stateData)
+	}
+	if got := state["consecutive_push_failures"]; got != float64(0) {
+		t.Fatalf("consecutive_push_failures = %v, want 0\nstate: %s", got, stateData)
+	}
+	if got := state["pending_archive_push"]; got == true {
+		t.Fatalf("pending_archive_push should clear after retry success\nstate: %s", stateData)
+	}
+	if _, ok := state["last_push_at"].(string); !ok {
+		t.Fatalf("last_push_at should be set after retry success:\n%s", stateData)
+	}
+	if _, has := state["last_push_stderr"]; has {
+		t.Fatalf("last_push_stderr should clear after retry success:\n%s", stateData)
+	}
+}
+
+func TestJsonlExportPushRetriesThreeTimesBeforeRecordingFailure(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	stateDir := t.TempDir()
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+	mailLog := filepath.Join(t.TempDir(), "gc-mail.log")
+	archiveRepo := filepath.Join(cityDir, "archive")
+	stateFile := filepath.Join(stateDir, "jsonl-export-state.json")
+	pushLog := filepath.Join(t.TempDir(), "git-push.log")
+	sleepLog := filepath.Join(t.TempDir(), "sleep.log")
+
+	remoteRepo, priorHead := initSeedArchiveWithRemote(t, archiveRepo)
+	writeMultiRecordDoltStub(t, binDir, 100)
+	writeJsonlExportGCStub(t, binDir)
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatalf("LookPath(git): %v", err)
+	}
+	writeGitPushAttemptStub(t, binDir, realGit, "always-fail", pushLog)
+	writeSleepLogStub(t, binDir, sleepLog)
+
+	env := jsonlExportEnv(t, cityDir, binDir, stateDir, archiveRepo, gcLog, mailLog)
+	env["GC_JSONL_PUSH_RETRY_DELAY_MIN"] = "0"
+	env["GC_JSONL_PUSH_RETRY_DELAY_SPAN"] = "0"
+
+	out, err := runScriptResult(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "jsonl-export.sh"), env)
+	if err != nil {
+		t.Fatalf("jsonl-export.sh should report push failure in summary without exiting non-zero: %v\n%s", err, out)
+	}
+	if !strings.Contains(string(out), "pushing archive main failed after 3 attempts") {
+		t.Fatalf("expected terminal retry message, got:\n%s", out)
+	}
+
+	pushData, err := os.ReadFile(pushLog)
+	if err != nil {
+		t.Fatalf("ReadFile(push log): %v", err)
+	}
+	if got := strings.Count(string(pushData), "\n"); got != 3 {
+		t.Fatalf("expected exactly 3 push attempts, got %d:\n%s", got, pushData)
+	}
+	sleepData, err := os.ReadFile(sleepLog)
+	if err != nil {
+		t.Fatalf("ReadFile(sleep log): %v", err)
+	}
+	if got := strings.TrimSpace(string(sleepData)); got != "0.00\n0.00" {
+		t.Fatalf("retry delay override must produce two zero-second sleeps, got %q", got)
+	}
+
+	remoteHeadOut, err := exec.Command("git", "--git-dir", remoteRepo, "rev-parse", "refs/heads/main").CombinedOutput()
+	if err != nil {
+		t.Fatalf("git rev-parse remote main: %v\n%s", err, remoteHeadOut)
+	}
+	if got := strings.TrimSpace(string(remoteHeadOut)); got != priorHead {
+		t.Fatalf("terminal push failure must leave remote unchanged: got %s want %s", got, priorHead)
+	}
+
+	stateData, err := os.ReadFile(stateFile)
+	if err != nil {
+		t.Fatalf("ReadFile(state file): %v", err)
+	}
+	var state map[string]any
+	if err := json.Unmarshal(stateData, &state); err != nil {
+		t.Fatalf("Unmarshal(state file): %v\n%s", err, stateData)
+	}
+	if got := state["consecutive_push_failures"]; got != float64(1) {
+		t.Fatalf("consecutive_push_failures = %v, want 1\nstate: %s", got, stateData)
+	}
+	if got := state["pending_archive_push"]; got != true {
+		t.Fatalf("pending_archive_push = %v, want true\nstate: %s", got, stateData)
+	}
+	stderrVal, ok := state["last_push_stderr"].(string)
+	if !ok || !strings.Contains(stderrVal, "simulated git push failure on attempt 3") {
+		t.Fatalf("last_push_stderr should capture final push failure, got %q\nstate: %s", stderrVal, stateData)
+	}
+	if _, has := state["last_push_at"]; has {
+		t.Fatalf("last_push_at should not be set after terminal push failure:\n%s", stateData)
 	}
 }
 
@@ -6337,6 +7100,105 @@ func TestJsonlExportPushModeAttemptsPushWhenOriginConfigured(t *testing.T) {
 	}
 	if got := state["last_logged_mode"]; got != "push" {
 		t.Fatalf("last_logged_mode = %v, want push\nstate: %s", got, stateData)
+	}
+}
+
+func TestJsonlExportPushModeMemoizesOriginForRun(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	stateDir := t.TempDir()
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+	mailLog := filepath.Join(t.TempDir(), "gc-mail.log")
+	archiveRepo := filepath.Join(cityDir, "archive")
+	stateFile := filepath.Join(stateDir, "jsonl-export-state.json")
+	originRemovedFlag := filepath.Join(t.TempDir(), "origin-removed")
+
+	initSeedArchiveWithRemote(t, archiveRepo)
+	writeOriginRemovingMultiRecordDoltStub(t, binDir, 5)
+	writeJsonlExportGCStub(t, binDir)
+
+	env := jsonlExportEnv(t, cityDir, binDir, stateDir, archiveRepo, gcLog, mailLog)
+	env["GC_JSONL_MIN_PREV_FOR_SPIKE"] = "1000"
+	env["DOLT_REMOVE_ORIGIN_FLAG"] = originRemovedFlag
+
+	out, err := runScriptResult(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "jsonl-export.sh"), env)
+	if err != nil {
+		t.Fatalf("jsonl-export.sh: %v\n%s", err, out)
+	}
+
+	if !strings.Contains(string(out), "archive running in push mode") {
+		t.Fatalf("expected first mode probe to log push mode, got:\n%s", out)
+	}
+	if !strings.Contains(string(out), "push: failed") {
+		t.Fatalf("expected cached push mode to still attempt push after origin removal, got:\n%s", out)
+	}
+	if strings.Contains(string(out), "push: skipped (local-only)") {
+		t.Fatalf("cached push mode must not fall back to local-only mid-run, got:\n%s", out)
+	}
+
+	stateData, err := os.ReadFile(stateFile)
+	if err != nil {
+		t.Fatalf("ReadFile(state file): %v", err)
+	}
+	var state map[string]any
+	if err := json.Unmarshal(stateData, &state); err != nil {
+		t.Fatalf("Unmarshal(state file): %v\n%s", err, stateData)
+	}
+	if got := state["last_logged_mode"]; got != "push" {
+		t.Fatalf("last_logged_mode = %v, want push\nstate: %s", got, stateData)
+	}
+	if got, ok := state["consecutive_push_failures"].(float64); !ok || got != 1 {
+		t.Fatalf("consecutive_push_failures = %v, want 1\nstate: %s", state["consecutive_push_failures"], stateData)
+	}
+}
+
+func TestJsonlExportModeRelogIntervalOverrideRelogsSameMode(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	stateDir := t.TempDir()
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+	mailLog := filepath.Join(t.TempDir(), "gc-mail.log")
+	archiveRepo := filepath.Join(cityDir, "archive")
+	stateFile := filepath.Join(stateDir, "jsonl-export-state.json")
+
+	initSeedArchive(t, archiveRepo, 3)
+	writeMultiRecordDoltStub(t, binDir, 3)
+	writeJsonlExportGCStub(t, binDir)
+
+	if err := os.MkdirAll(filepath.Dir(stateFile), 0o755); err != nil {
+		t.Fatalf("MkdirAll(state dir): %v", err)
+	}
+	priorState := `{"last_logged_mode":"local-only","last_logged_at":"2026-05-01T00:00:00Z"}` + "\n"
+	if err := os.WriteFile(stateFile, []byte(priorState), 0o644); err != nil {
+		t.Fatalf("WriteFile(state file): %v", err)
+	}
+
+	env := jsonlExportEnv(t, cityDir, binDir, stateDir, archiveRepo, gcLog, mailLog)
+	env["GC_JSONL_MODE_RELOG_INTERVAL"] = "1"
+	delete(env, "GC_JSONL_MAX_PUSH_FAILURES")
+
+	out, err := runScriptResult(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "jsonl-export.sh"), env)
+	if err != nil {
+		t.Fatalf("jsonl-export.sh: %v\n%s", err, out)
+	}
+
+	if !strings.Contains(string(out), "archive running in local-only mode") {
+		t.Fatalf("expected expired override interval to re-log local-only mode, got:\n%s", out)
+	}
+
+	stateData, err := os.ReadFile(stateFile)
+	if err != nil {
+		t.Fatalf("ReadFile(state file): %v", err)
+	}
+	var state map[string]any
+	if err := json.Unmarshal(stateData, &state); err != nil {
+		t.Fatalf("Unmarshal(state file): %v\n%s", err, stateData)
+	}
+	if got := state["last_logged_mode"]; got != "local-only" {
+		t.Fatalf("last_logged_mode = %v, want local-only\nstate: %s", got, stateData)
+	}
+	if got := state["last_logged_at"]; got == "2026-05-01T00:00:00Z" {
+		t.Fatalf("last_logged_at not refreshed after interval expiry\nstate: %s", stateData)
 	}
 }
 

@@ -11,8 +11,12 @@ type Report struct {
 	Passed int
 	// Warned is the number of checks with StatusWarning.
 	Warned int
-	// Failed is the number of checks with StatusError.
+	// Failed is the number of checks with StatusError (any severity).
 	Failed int
+	// BlockingFailed is the number of failed checks whose Severity is
+	// SeverityBlocking — the subset of Failed that should gate dispatch,
+	// CLI exit codes, and other automation.
+	BlockingFailed int
 	// Fixed is the number of checks remediated by --fix.
 	Fixed int
 	// Results holds the per-check results in the order they ran. Populated
@@ -83,6 +87,9 @@ func (d *Doctor) run(ctx *CheckContext, w io.Writer, fix, stream bool) *Report {
 
 		if stream {
 			printResult(w, result, ctx.Verbose)
+			if r, ok := c.(Renderer); ok {
+				r.RenderExtras(ctx, w)
+			}
 		}
 		r.Results = append(r.Results, result)
 
@@ -96,6 +103,9 @@ func (d *Doctor) run(ctx *CheckContext, w io.Writer, fix, stream bool) *Report {
 			r.Warned++
 		case result.Status == StatusError:
 			r.Failed++
+			if result.Severity == SeverityBlocking {
+				r.BlockingFailed++
+			}
 		}
 	}
 	return r
@@ -146,6 +156,9 @@ func PrintSummary(w io.Writer, r *Report) {
 	}
 	if r.Failed > 0 {
 		parts = append(parts, fmt.Sprintf("%d failed", r.Failed))
+	}
+	if advisory := r.Failed - r.BlockingFailed; advisory > 0 {
+		parts = append(parts, fmt.Sprintf("%d advisory", advisory))
 	}
 	if r.Fixed > 0 {
 		parts = append(parts, fmt.Sprintf("%d fixed", r.Fixed))

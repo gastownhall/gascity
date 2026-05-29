@@ -27,6 +27,7 @@ import (
 	sessionhybrid "github.com/gastownhall/gascity/internal/runtime/hybrid"
 	sessionk8s "github.com/gastownhall/gascity/internal/runtime/k8s"
 	sessionsubprocess "github.com/gastownhall/gascity/internal/runtime/subprocess"
+	sessiont3bridge "github.com/gastownhall/gascity/internal/runtime/t3bridge"
 	sessiontmux "github.com/gastownhall/gascity/internal/runtime/tmux"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/supervisor"
@@ -119,7 +120,11 @@ func providerStateDir(providerName, cityPath string) string {
 //   - default → real tmux provider
 func newSessionProviderByName(name string, sc config.SessionConfig, cityName, cityPath string) (runtime.Provider, error) {
 	if strings.HasPrefix(name, "exec:") {
-		return sessionexec.NewProvider(strings.TrimPrefix(name, "exec:")), nil
+		script := strings.TrimPrefix(name, "exec:")
+		if isLegacyT3BridgeExecScript(script) {
+			return sessiont3bridge.NewProvider(), nil
+		}
+		return sessionexec.NewProvider(script), nil
 	}
 	switch name {
 	case "fake":
@@ -141,6 +146,8 @@ func newSessionProviderByName(name string, sc config.SessionConfig, cityName, ci
 			return sessionacp.NewProviderWithDir(providerStateDir("acp", cityPath), cfg), nil
 		}
 		return sessionacp.NewProvider(cfg), nil
+	case "t3bridge":
+		return sessiont3bridge.NewProvider(), nil
 	case "k8s":
 		return sessionk8s.NewProvider()
 	case "hybrid":
@@ -148,6 +155,10 @@ func newSessionProviderByName(name string, sc config.SessionConfig, cityName, ci
 	default:
 		return sessiontmux.NewProviderWithConfig(tmuxConfigFromSession(sc, cityName, cityPath)), nil
 	}
+}
+
+func isLegacyT3BridgeExecScript(script string) bool {
+	return filepath.Base(strings.TrimSpace(script)) == "gc-session-t3"
 }
 
 // newSessionProvider returns a runtime.Provider based on the session provider
@@ -483,7 +494,7 @@ func normalizeRawBeadsProvider(cityPath, provider string) string {
 		return provider
 	}
 	script := strings.TrimSpace(strings.TrimPrefix(provider, "exec:"))
-	if samePath(script, gcBeadsBdScriptPath(cityPath)) {
+	if samePath(script, gcBeadsBdScriptPath(cityPath)) || samePath(script, legacyGcBeadsBdScriptPath(cityPath)) {
 		return "bd"
 	}
 	return provider
@@ -632,6 +643,10 @@ func beadsProvider(cityPath string) string {
 // inside the materialized bd pack (.gc/system/packs/bd/assets/scripts/).
 func gcBeadsBdScriptPath(cityPath string) string {
 	return filepath.Join(cityPath, citylayout.SystemPacksRoot, "bd", "assets", "scripts", "gc-beads-bd.sh")
+}
+
+func legacyGcBeadsBdScriptPath(cityPath string) string {
+	return filepath.Join(cityPath, ".gc", "scripts", "gc-beads-bd.sh")
 }
 
 // mailProviderName returns the mail provider name.

@@ -260,14 +260,36 @@ if [ "${GC_HEALTH_SKIP_ZOMBIE_SCAN:-0}" != "1" ]; then
     [ -n "$rig_pid" ] && rig_dolt_pids="$rig_dolt_pids $rig_pid "
   done < "$_meta_cache"
 
-  for p in $(pgrep -x dolt 2>/dev/null || true); do
-    [ "$p" = "$server_pid" ] && continue
-    case "$rig_dolt_pids" in *" $p "*) continue ;; esac
-    cmd=$(ps -p "$p" -o args= 2>/dev/null || true)
-    case "$cmd" in
-      *sql-server*) ;;
-      *) continue ;;
-    esac
+  # Enumerate the process table ONCE, not one `ps -p <pid> -o args=` fork per
+  # `pgrep -x dolt` match. pgrep matches every dolt-named process including
+  # Z-state zombies, so under a non-reaping PID 1 the old per-PID fork became
+  # an O(zombies) `ps` storm re-paid on every 30s health tick (#2482). Collect
+  # the candidate PIDs from pgrep, then classify them in a single `ps`+`awk`
+  # pass: keep candidates that are dolt sql-server processes, skip Z-state
+  # zombies (a defunct dolt never carries sql-server args anyway), and exclude
+  # the managed city server and rig-local dolts.
+  candidate_pids=" $(pgrep -x dolt 2>/dev/null | tr '\n' ' ' || true)"
+  matched_pids=$(ps -eo pid=,stat=,args= 2>/dev/null | awk \
+    -v server="$server_pid" -v rigs="$rig_dolt_pids" -v cands="$candidate_pids" '
+    BEGIN {
+      # Build an O(1) lookup set from the pgrep candidates once. The
+      # per-row membership test below was an index() substring scan
+      # re-paid for every process-table row, i.e. O(rows x candidate
+      # string length); the reported incident had ~41k candidate PIDs
+      # (#2618). Splitting into an associative set makes each lookup O(1).
+      n = split(cands, a, " ")
+      for (i = 1; i <= n; i++) if (a[i] != "") cand[a[i]] = 1
+    }
+    {
+      pid = $1
+      if (!(pid in cand)) next                   # not a pgrep -x dolt match
+      if (pid == server) next                     # the managed city server
+      if (index(rigs, " " pid " ") != 0) next     # a configured rig-local dolt
+      if ($2 ~ /Z/) next                          # Z-state zombie: never a server
+      if (index($0, "sql-server") == 0) next      # not a dolt sql-server
+      print pid
+    }' || true)
+  for p in $matched_pids; do
     zombie_count=$((zombie_count + 1))
     zombie_pids="$zombie_pids $p"
   done

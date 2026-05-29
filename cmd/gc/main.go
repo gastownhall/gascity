@@ -264,6 +264,7 @@ func newRootCmd(stdout, stderr io.Writer) *cobra.Command {
 		newSlingCmd(stdout, stderr),
 		newConvoyCmd(stdout, stderr),
 		newWispCmd(stdout, stderr),
+		newMoleculeCmd(stdout, stderr),
 		newPrimeCmd(stdout, stderr),
 		newPromptCmd(stdout, stderr),
 		newHandoffCmd(stdout, stderr),

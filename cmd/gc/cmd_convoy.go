@@ -1340,103 +1340,20 @@ func cmdConvoyCheckJSON(jsonOut bool, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gc convoy check: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	c, reason := convoyCheckAPIClient(cityPath)
-	return routeConvoyCheck(cityPath, c, reason, jsonOut, stdout, stderr)
+	return routeConvoyCheck(cityPath, nil, "requires-live-read", jsonOut, stdout, stderr)
 }
 
-// convoyCheckAPIClient returns (client, "") when the API path is available,
-// or (nil, reason) when the caller should fall back.
-var convoyCheckAPIClient = func(cityPath string) (*api.Client, string) {
-	if c := apiClient(cityPath); c != nil {
-		return c, ""
-	}
-	return nil, apiClientFallbackReason(cityPath)
-}
-
-// routeConvoyCheck dispatches `convoy check` to the supervisor API when a
-// controller is up; otherwise falls back to the all-local iterator. Emits
-// exactly one route=... log line per exit path (gated on GC_DEBUG).
-//
-// The API path queries /convoys then /convoy/{id}/check for each non-owned
-// convoy. Completed convoys are closed via local bd — mutation routing is
-// intentionally outside this read-path migration. A fallbackable error on
-// any check call aborts the whole operation back to the local iterator so
-// the user sees consistent output.
-func routeConvoyCheck(cityPath string, c *api.Client, nilReason string, jsonOut bool, stdout, stderr io.Writer) int {
+// routeConvoyCheck always uses the local live store path because the command
+// may auto-close convoys. The supervisor API is cache-backed, and cached data
+// must not drive state mutations.
+func routeConvoyCheck(cityPath string, _ *api.Client, nilReason string, jsonOut bool, stdout, stderr io.Writer) int {
 	const cmdName = "convoy check"
-	if c != nil {
-		cr, err := c.ListConvoys()
-		switch {
-		case err == nil:
-			progress, progErr := fetchConvoyProgress(c, cr.Body)
-			if progErr == nil {
-				logRoute(stderr, cmdName, "api", "")
-				return autoCloseConvoysFromAPI(cityPath, cr, progress, jsonOut, stdout, stderr)
-			}
-			if !api.ShouldFallbackForRead(progErr) {
-				logRoute(stderr, cmdName, "api", "error")
-				fmt.Fprintf(stderr, "gc convoy check: %v\n", progErr) //nolint:errcheck // best-effort stderr
-				return 1
-			}
-			logRoute(stderr, cmdName, "fallback", api.FallbackReason(progErr))
-		case !api.ShouldFallbackForRead(err):
-			logRoute(stderr, cmdName, "api", "error")
-			fmt.Fprintf(stderr, "gc convoy check: %v\n", err) //nolint:errcheck // best-effort stderr
-			return 1
-		default:
-			logRoute(stderr, cmdName, "fallback", api.FallbackReason(err))
-		}
-	} else {
-		logRoute(stderr, cmdName, "fallback", nilReason)
+	reason := nilReason
+	if reason == "" {
+		reason = "requires-live-read"
 	}
+	logRoute(stderr, cmdName, "fallback", reason)
 	return doConvoyCheckFallback(cityPath, jsonOut, stdout, stderr)
-}
-
-// autoCloseConvoysFromAPI closes non-owned convoys whose API-reported
-// progress is complete. Closure uses local bd stores (resolved per-convoy
-// via openConvoyStoreByID) so mutation routing stays out of scope for the
-// read-path migration. Prints the stale banner when cache age > 30s.
-func autoCloseConvoysFromAPI(cityPath string, cr api.CachedRead[[]beads.Bead], progress []api.ConvoyCheckView, jsonOut bool, stdout, stderr io.Writer) int {
-	rec := openCityRecorderAt(cityPath, stderr)
-	closed := 0
-	for i, convoy := range cr.Body {
-		if hasLabel(convoy.Labels, "owned") {
-			continue
-		}
-		p := progress[i]
-		if !p.Complete {
-			continue
-		}
-		store, code := openConvoyStoreByIDAt(convoy.ID, cityPath, stderr, "gc convoy check")
-		if store == nil {
-			return code
-		}
-		if err := closeConvoyWithReason(store, convoy.ID, convoyAutocloseReason); err != nil {
-			fmt.Fprintf(stderr, "gc convoy check: closing %s: %v\n", convoy.ID, err) //nolint:errcheck // best-effort stderr
-			return 1
-		}
-		rec.Record(events.Event{
-			Type:    events.ConvoyClosed,
-			Actor:   eventActor(),
-			Subject: convoy.ID,
-		})
-		if !jsonOut {
-			fmt.Fprintf(stdout, "Auto-closed convoy %s %q\n", convoy.ID, convoy.Title) //nolint:errcheck // best-effort stdout
-		}
-		closed++
-	}
-	if jsonOut {
-		if err := writeCLIJSONLine(stdout, convoyActionResult{SchemaVersion: "1", OK: true, Command: "convoy.check", Action: "check", Closed: intRef(closed)}); err != nil {
-			fmt.Fprintf(stderr, "gc convoy check: writing JSON result: %v\n", err) //nolint:errcheck // best-effort stderr
-			return 1
-		}
-	} else {
-		fmt.Fprintf(stdout, "%d convoy(s) auto-closed\n", closed) //nolint:errcheck // best-effort stdout
-	}
-	if cr.AgeSeconds > cacheAgeBannerThresholdSeconds {
-		fmt.Fprintf(stdout, "(cache age: %.0fs — reconciler may be lagging)\n", cr.AgeSeconds) //nolint:errcheck
-	}
-	return 0
 }
 
 // doConvoyCheckFallback is the direct-bd path for "gc convoy check".

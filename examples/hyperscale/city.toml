@@ -34,3 +34,8 @@ patrol_interval = "10s"
 max_restarts = 3
 restart_window = "5m"
 shutdown_timeout = "10s"
+# Coalesce bursty event-driven ticks (pokes, control-dispatcher signals)
+# within this window. Zero (default) disables debouncing. Trade reactivity
+# for fewer bd subprocess fans-out when the reconciler is being poked
+# rapidly. Recommended starting value when tuning: 500ms.
+tick_debounce = "500ms"

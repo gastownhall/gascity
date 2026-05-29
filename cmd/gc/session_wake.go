@@ -56,7 +56,7 @@ func preWakeCommit(
 		sleepReason = "idle-timeout"
 	}
 
-	freshWake := session.Metadata["wake_mode"] == "fresh"
+	freshWake := session.Metadata["wake_mode"] == "fresh" || pendingContinuationResetNeedsFreshStart(session.Metadata)
 	batch := sessions.PreWakePatch(sessions.PreWakePatchInput{
 		Generation:        newGen,
 		InstanceToken:     token,
@@ -108,6 +108,18 @@ func shouldBumpContinuationEpoch(meta map[string]string) bool {
 		return true
 	}
 	return meta["wake_mode"] == "fresh" && meta["last_woke_at"] != ""
+}
+
+func pendingContinuationResetNeedsFreshStart(meta map[string]string) bool {
+	if meta == nil {
+		return false
+	}
+	switch sessions.State(strings.TrimSpace(meta["state"])) {
+	case sessions.StateStartPending, sessions.StateCreating:
+		return false
+	}
+	return strings.TrimSpace(meta["continuation_reset_pending"]) != "" &&
+		strings.TrimSpace(meta["started_config_hash"]) != ""
 }
 
 // validateWorkDir ensures the path is safe to use as a working directory.

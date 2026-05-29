@@ -43,6 +43,7 @@ type packFile struct {
 	Agents         []config.Agent                 `toml:"agent"`
 
 	defaultRigImportOrder []string
+	metadata              toml.MetaData
 }
 
 type packDefaults struct {
@@ -182,21 +183,37 @@ func Apply(cityPath string, opts Options) (*Report, error) {
 		cityCfg.Workspace.SetLegacyIncludes(nil)
 	}
 
-	if len(cityCfg.Workspace.LegacyDefaultRigIncludes()) > 0 {
-		if packCfg.Defaults.Rig.Imports == nil {
-			packCfg.Defaults.Rig.Imports = make(map[string]config.Import)
+	if len(packCfg.Defaults.Rig.Imports) > 0 {
+		if cityCfg.Defaults.Rig.Imports == nil {
+			cityCfg.Defaults.Rig.Imports = make(map[string]config.Import, len(packCfg.Defaults.Rig.Imports))
 		}
-		var changed bool
-		packCfg.defaultRigImportOrder, changed = addOrderedImports(
-			packCfg.Defaults.Rig.Imports,
-			packCfg.defaultRigImportOrder,
+		for _, name := range orderedPackDefaultRigImportNames(packCfg.Defaults.Rig.Imports, packCfg.defaultRigImportOrder) {
+			if _, exists := cityCfg.Defaults.Rig.Imports[name]; exists {
+				continue
+			}
+			cityCfg.Defaults.Rig.Imports[name] = packCfg.Defaults.Rig.Imports[name]
+		}
+		packCfg.Defaults.Rig.Imports = nil
+		packCfg.defaultRigImportOrder = nil
+		packChanged = true
+	}
+
+	if len(cityCfg.Workspace.LegacyDefaultRigIncludes()) > 0 {
+		if cityCfg.Defaults.Rig.Imports == nil {
+			cityCfg.Defaults.Rig.Imports = make(map[string]config.Import)
+		}
+		_, changed := addOrderedImports(
+			cityCfg.Defaults.Rig.Imports,
+			nil,
 			cityCfg.Workspace.LegacyDefaultRigIncludes(),
 			cityCfg.Packs,
 		)
-		if changed {
-			packChanged = true
-		}
+		_ = changed
 		cityCfg.Workspace.SetLegacyDefaultRigIncludes(nil)
+	}
+
+	if migratePackAuthoringSurfaces(&packCfg, cityCfg, report) {
+		packChanged = true
 	}
 
 	removeMigratedPackSources(cityCfg, migratedPacks)
@@ -293,10 +310,136 @@ func loadPackFile(path string) (packFile, bool, error) {
 		return packFile{}, true, fmt.Errorf("migrate %q: %w", path, err)
 	}
 	if warnings := config.CheckUndecodedKeys(md, path); len(warnings) > 0 {
-		return packFile{}, true, fmt.Errorf("migrate %q: %s", path, strings.Join(warnings, "; "))
+		if filtered := migrationFatalPackWarnings(warnings); len(filtered) > 0 {
+			return packFile{}, true, fmt.Errorf("migrate %q: %s", path, strings.Join(filtered, "; "))
+		}
 	}
 	cfg.defaultRigImportOrder = packDefaultRigImportOrder(md)
+	cfg.metadata = md
 	return cfg, true, nil
+}
+
+func migrationFatalPackWarnings(warnings []string) []string {
+	var fatal []string
+	for _, warning := range warnings {
+		if strings.Contains(warning, "[agents] is a deprecated compatibility alias for [agent_defaults]") {
+			continue
+		}
+		if strings.Contains(warning, "both [agent_defaults] and [agents] are present") {
+			continue
+		}
+		fatal = append(fatal, warning)
+	}
+	return fatal
+}
+
+func migratePackAuthoringSurfaces(packCfg *packFile, cityCfg *config.City, report *Report) bool {
+	if packCfg == nil || cityCfg == nil {
+		return false
+	}
+
+	packChanged := false
+	defaults := normalizedPackAgentDefaults(*packCfg)
+	if !isZeroAgentDefaults(defaults) {
+		mergeMigratedAgentDefaults(&cityCfg.AgentDefaults, defaults)
+		packCfg.AgentDefaults = config.AgentDefaults{}
+		packCfg.AgentsDefaults = config.AgentDefaults{}
+		packChanged = true
+	}
+
+	if len(packCfg.Patches.Rigs) > 0 {
+		cityCfg.Patches.Rigs = append(cityCfg.Patches.Rigs, packCfg.Patches.Rigs...)
+		packCfg.Patches.Rigs = nil
+		packChanged = true
+	}
+	if len(packCfg.Patches.Providers) > 0 {
+		cityCfg.Patches.Providers = append(cityCfg.Patches.Providers, packCfg.Patches.Providers...)
+		packCfg.Patches.Providers = nil
+		packChanged = true
+	}
+
+	if packCfg.Formulas.Dir != "" {
+		report.Warnings = append(report.Warnings,
+			fmt.Sprintf("dropped pack.toml formulas.dir ([formulas].dir) %q; use the well-known formulas/ directory", packCfg.Formulas.Dir))
+		packCfg.Formulas.Dir = ""
+		packChanged = true
+	}
+	if cityCfg.Formulas.Dir != "" {
+		report.Warnings = append(report.Warnings,
+			fmt.Sprintf("dropped city.toml formulas.dir ([formulas].dir) %q; use the well-known formulas/ directory", cityCfg.Formulas.Dir))
+		cityCfg.Formulas.Dir = ""
+	}
+
+	return packChanged
+}
+
+func normalizedPackAgentDefaults(packCfg packFile) config.AgentDefaults {
+	defaults := packCfg.AgentDefaults
+	if packCfg.metadata.IsDefined("agent_defaults") {
+		if packCfg.metadata.IsDefined("agents") {
+			mergeAgentDefaultsAliasForMigration(&defaults, packCfg.AgentsDefaults, packCfg.metadata)
+		}
+		return defaults
+	}
+	if packCfg.metadata.IsDefined("agents") {
+		return packCfg.AgentsDefaults
+	}
+	return config.AgentDefaults{}
+}
+
+func mergeAgentDefaultsAliasForMigration(dst *config.AgentDefaults, src config.AgentDefaults, meta toml.MetaData) {
+	if !meta.IsDefined("agent_defaults", "model") {
+		dst.Model = src.Model
+	}
+	if !meta.IsDefined("agent_defaults", "wake_mode") {
+		dst.WakeMode = src.WakeMode
+	}
+	if !meta.IsDefined("agent_defaults", "default_sling_formula") {
+		dst.DefaultSlingFormula = src.DefaultSlingFormula
+	}
+	if !meta.IsDefined("agent_defaults", "allow_overlay") {
+		dst.AllowOverlay = append([]string(nil), src.AllowOverlay...)
+	}
+	if !meta.IsDefined("agent_defaults", "allow_env_override") {
+		dst.AllowEnvOverride = append([]string(nil), src.AllowEnvOverride...)
+	}
+	if !meta.IsDefined("agent_defaults", "append_fragments") {
+		dst.AppendFragments = append([]string(nil), src.AppendFragments...)
+	}
+	if !meta.IsDefined("agent_defaults", "skills") {
+		dst.Skills = append([]string(nil), src.Skills...)
+	}
+	if !meta.IsDefined("agent_defaults", "mcp") {
+		dst.MCP = append([]string(nil), src.MCP...)
+	}
+}
+
+func mergeMigratedAgentDefaults(dst *config.AgentDefaults, src config.AgentDefaults) {
+	if dst.Model == "" {
+		dst.Model = src.Model
+	}
+	if dst.WakeMode == "" {
+		dst.WakeMode = src.WakeMode
+	}
+	if dst.DefaultSlingFormula == "" {
+		dst.DefaultSlingFormula = src.DefaultSlingFormula
+	}
+	dst.AllowOverlay = dedupeStrings(append(dst.AllowOverlay, src.AllowOverlay...))
+	dst.AllowEnvOverride = dedupeStrings(append(dst.AllowEnvOverride, src.AllowEnvOverride...))
+	dst.AppendFragments = dedupeStrings(append(dst.AppendFragments, src.AppendFragments...))
+	dst.Skills = dedupeStrings(append(dst.Skills, src.Skills...))
+	dst.MCP = dedupeStrings(append(dst.MCP, src.MCP...))
+}
+
+func isZeroAgentDefaults(defaults config.AgentDefaults) bool {
+	return defaults.Model == "" &&
+		defaults.WakeMode == "" &&
+		defaults.DefaultSlingFormula == "" &&
+		len(defaults.AllowOverlay) == 0 &&
+		len(defaults.AllowEnvOverride) == 0 &&
+		len(defaults.AppendFragments) == 0 &&
+		len(defaults.Skills) == 0 &&
+		len(defaults.MCP) == 0
 }
 
 func packDefaultRigImportOrder(md toml.MetaData) []string {

@@ -588,12 +588,11 @@ func supervisorServiceEnvMap(vars []supervisorServiceEnvVar) map[string]string {
 	return m
 }
 
-// TestBuildSupervisorServiceDataForwardsAllKnownProviderPrefixes asserts that
-// a canonical env var for every prefix in providerCredentialEnvPrefixes is
-// forwarded into the supervisor's persistent env. This is the regression
-// protection for the curated provider-prefix list: if a prefix is removed,
-// the corresponding probe key here fails and surfaces the omission.
-func TestBuildSupervisorServiceDataForwardsAllKnownProviderPrefixes(t *testing.T) {
+// TestBuildSupervisorServiceDataForwardsRepresentativeProviderPrefixes asserts
+// that representative provider-prefix credentials are forwarded into the
+// supervisor's persistent env. internal/processenv owns complete allowlist
+// coverage; this test covers the supervisor integration boundary.
+func TestBuildSupervisorServiceDataForwardsRepresentativeProviderPrefixes(t *testing.T) {
 	homeDir := t.TempDir()
 	t.Setenv("HOME", homeDir)
 	t.Setenv("GC_HOME", filepath.Join(homeDir, ".gc"))
@@ -619,10 +618,6 @@ func TestBuildSupervisorServiceDataForwardsAllKnownProviderPrefixes(t *testing.T
 		"VERTEX_PROJECT_ID":    "vertex-probe-project",
 		"XAI_API_KEY":          "xai-probe",
 	}
-	if len(probes) != len(providerCredentialEnvPrefixes) {
-		t.Fatalf("probe set size %d does not match prefix list size %d; update the test when prefixes change",
-			len(probes), len(providerCredentialEnvPrefixes))
-	}
 	for k, v := range probes {
 		t.Setenv(k, v)
 	}
@@ -634,7 +629,7 @@ func TestBuildSupervisorServiceDataForwardsAllKnownProviderPrefixes(t *testing.T
 	got := supervisorServiceEnvMap(data.ExtraEnv)
 	for k, want := range probes {
 		if got[k] != want {
-			t.Errorf("ExtraEnv[%s] = %q, want %q — prefix may be missing from providerCredentialEnvPrefixes", k, got[k], want)
+			t.Errorf("ExtraEnv[%s] = %q, want %q", k, got[k], want)
 		}
 	}
 }
@@ -668,10 +663,6 @@ func TestBuildSupervisorServiceDataForwardsCuratedProviderCredentialEnvKeys(t *t
 		"AWS_USE_DUALSTACK_ENDPOINT":             "true",
 		"AWS_USE_FIPS_ENDPOINT":                  "true",
 		"AWS_WEB_IDENTITY_TOKEN_FILE":            "/tmp/aws-web-identity-token",
-	}
-	if len(probes) != len(providerCredentialEnvKeys) {
-		t.Fatalf("probe set size %d does not match exact provider key set size %d; update the test when exact keys change",
-			len(probes), len(providerCredentialEnvKeys))
 	}
 	for k, v := range probes {
 		t.Setenv(k, v)
@@ -3395,6 +3386,111 @@ func TestInstallSupervisorLaunchdRestoresPreviousCurrentPlistWhenUpdateFails(t *
 	}
 }
 
+func TestInstallSupervisorLaunchdSkipsReloadWhenUnchangedAndSupervisorAlive(t *testing.T) {
+	homeDir := t.TempDir()
+	gcHome := filepath.Join(t.TempDir(), "isolated-home")
+	t.Setenv("HOME", homeDir)
+	t.Setenv("GC_HOME", gcHome)
+
+	data := &supervisorServiceData{
+		GCPath:        "/tmp/gc-same",
+		LogPath:       filepath.Join(gcHome, "supervisor.log"),
+		GCHome:        gcHome,
+		XDGRuntimeDir: "",
+		LaunchdLabel:  supervisorLaunchdLabel(),
+		Path:          "/usr/local/bin:/usr/bin:/bin",
+	}
+	content, err := renderSupervisorTemplate(supervisorLaunchdTemplate, data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	currentPath := filepath.Join(homeDir, "Library", "LaunchAgents", supervisorLaunchdLabel()+".plist")
+	if err := os.MkdirAll(filepath.Dir(currentPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(currentPath, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	oldRun := supervisorLaunchctlRun
+	oldAlive := supervisorAliveHook
+	var calls []string
+	supervisorLaunchctlRun = func(args ...string) error {
+		calls = append(calls, strings.Join(args, " "))
+		return nil
+	}
+	supervisorAliveHook = func() int { return 4242 }
+	t.Cleanup(func() {
+		supervisorLaunchctlRun = oldRun
+		supervisorAliveHook = oldAlive
+	})
+
+	var stdout, stderr bytes.Buffer
+	if code := installSupervisorLaunchd(data, &stdout, &stderr); code != 0 {
+		t.Fatalf("installSupervisorLaunchd code = %d, want 0; stderr=%q", code, stderr.String())
+	}
+	if len(calls) != 0 {
+		t.Fatalf("launchctl calls = %v, want none for unchanged running service", calls)
+	}
+	if !strings.Contains(stdout.String(), "Installed launchd service: "+currentPath) {
+		t.Fatalf("stdout = %q, want install confirmation for %s", stdout.String(), currentPath)
+	}
+}
+
+func TestInstallSupervisorLaunchdReloadsWhenUnchangedButSupervisorStopped(t *testing.T) {
+	homeDir := t.TempDir()
+	gcHome := filepath.Join(t.TempDir(), "isolated-home")
+	t.Setenv("HOME", homeDir)
+	t.Setenv("GC_HOME", gcHome)
+
+	data := &supervisorServiceData{
+		GCPath:        "/tmp/gc-same",
+		LogPath:       filepath.Join(gcHome, "supervisor.log"),
+		GCHome:        gcHome,
+		XDGRuntimeDir: "",
+		LaunchdLabel:  supervisorLaunchdLabel(),
+		Path:          "/usr/local/bin:/usr/bin:/bin",
+	}
+	content, err := renderSupervisorTemplate(supervisorLaunchdTemplate, data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	currentPath := filepath.Join(homeDir, "Library", "LaunchAgents", supervisorLaunchdLabel()+".plist")
+	if err := os.MkdirAll(filepath.Dir(currentPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(currentPath, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	oldRun := supervisorLaunchctlRun
+	oldAlive := supervisorAliveHook
+	var calls []string
+	supervisorLaunchctlRun = func(args ...string) error {
+		calls = append(calls, strings.Join(args, " "))
+		return nil
+	}
+	supervisorAliveHook = func() int { return 0 }
+	t.Cleanup(func() {
+		supervisorLaunchctlRun = oldRun
+		supervisorAliveHook = oldAlive
+	})
+
+	var stdout, stderr bytes.Buffer
+	if code := installSupervisorLaunchd(data, &stdout, &stderr); code != 0 {
+		t.Fatalf("installSupervisorLaunchd code = %d, want 0; stderr=%q", code, stderr.String())
+	}
+	joined := strings.Join(calls, "\n")
+	for _, want := range []string{
+		"unload " + currentPath,
+		"load " + currentPath,
+	} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("launchctl calls = %v, want %q", calls, want)
+		}
+	}
+}
+
 func TestUninstallSupervisorLaunchdRemovesMatchingLegacyDefaultPlistForIsolatedGCHome(t *testing.T) {
 	homeDir := t.TempDir()
 	gcHome := filepath.Join(t.TempDir(), "isolated-home")
@@ -5699,6 +5795,94 @@ func TestInstallSupervisorSystemdBailsCleanlyWhenUserManagerMissing(t *testing.T
 	}
 }
 
+func TestInstallSupervisorSystemdCreatesLogDirBeforeStartingService(t *testing.T) {
+	if goruntime.GOOS != "linux" {
+		t.Skip("systemd path only applies on linux")
+	}
+	homeDir := t.TempDir()
+	gcHome := filepath.Join(t.TempDir(), "fresh-gc-home")
+	t.Setenv("HOME", homeDir)
+	t.Setenv("GC_HOME", gcHome)
+
+	stubSupervisorSystemctlUserAvailable(t, true)
+	oldRun := supervisorSystemctlRun
+	oldActive := supervisorSystemctlActive
+	var calls []string
+	supervisorSystemctlRun = func(args ...string) error {
+		calls = append(calls, strings.Join(args, " "))
+		if args[len(args)-1] == supervisorSystemdServiceName() {
+			if _, err := os.Stat(filepath.Dir(supervisorLogPath())); err != nil {
+				t.Fatalf("log dir missing before systemctl %s: %v", strings.Join(args, " "), err)
+			}
+		}
+		return nil
+	}
+	supervisorSystemctlActive = func(string) bool { return false }
+	t.Cleanup(func() {
+		supervisorSystemctlRun = oldRun
+		supervisorSystemctlActive = oldActive
+	})
+
+	data := &supervisorServiceData{
+		GCPath:        "/tmp/gc-new",
+		LogPath:       filepath.Join(gcHome, "supervisor.log"),
+		GCHome:        gcHome,
+		XDGRuntimeDir: "",
+		Path:          "/usr/local/bin:/usr/bin:/bin",
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := installSupervisorSystemd(data, &stdout, &stderr); code != 0 {
+		t.Fatalf("installSupervisorSystemd code = %d, want 0; stderr=%q", code, stderr.String())
+	}
+	if _, err := os.Stat(filepath.Dir(data.LogPath)); err != nil {
+		t.Fatalf("log dir was not created: %v", err)
+	}
+	if !slices.Contains(calls, "--user start "+supervisorSystemdServiceName()) {
+		t.Fatalf("systemctl calls = %v, want service start", calls)
+	}
+}
+
+func TestInstallSupervisorLaunchdCreatesLogDirBeforeLoadingService(t *testing.T) {
+	homeDir := t.TempDir()
+	gcHome := filepath.Join(t.TempDir(), "fresh-gc-home")
+	t.Setenv("HOME", homeDir)
+	t.Setenv("GC_HOME", gcHome)
+
+	label := supervisorLaunchdLabel()
+	oldRun := supervisorLaunchctlRun
+	var calls []string
+	supervisorLaunchctlRun = func(args ...string) error {
+		calls = append(calls, strings.Join(args, " "))
+		if args[0] == "load" {
+			if _, err := os.Stat(filepath.Dir(supervisorLogPath())); err != nil {
+				t.Fatalf("log dir missing before launchctl load: %v", err)
+			}
+		}
+		return nil
+	}
+	t.Cleanup(func() { supervisorLaunchctlRun = oldRun })
+
+	data := &supervisorServiceData{
+		GCPath:       "/tmp/gc-new",
+		LogPath:      filepath.Join(gcHome, "supervisor.log"),
+		GCHome:       gcHome,
+		LaunchdLabel: label,
+		Path:         "/usr/local/bin:/usr/bin:/bin",
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := installSupervisorLaunchd(data, &stdout, &stderr); code != 0 {
+		t.Fatalf("installSupervisorLaunchd code = %d, want 0; stderr=%q", code, stderr.String())
+	}
+	if _, err := os.Stat(filepath.Dir(data.LogPath)); err != nil {
+		t.Fatalf("log dir was not created: %v", err)
+	}
+	if !slices.Contains(calls, "load "+supervisorLaunchdPlistPath()) {
+		t.Fatalf("launchctl calls = %v, want plist load", calls)
+	}
+}
+
 // TestCurrentUsernameForSystemdHintFallback covers the fallback branch of
 // currentUsernameForSystemdHint: when osuser.Current returns an error or
 // an empty username, the diagnostic still has a placeholder a user can
@@ -5733,4 +5917,135 @@ func TestCurrentUsernameForSystemdHintFallback(t *testing.T) {
 			t.Fatalf("got %q, want %q", got, "alice")
 		}
 	})
+}
+
+// TestRunSupervisorEnsuresHomeDirAndWritesLog confirms the fix for the
+// "Supervisor logs: log file not found" symptom seen on first start under
+// systemd/launchd/container — where the original `gc supervisor start`
+// mkdir+open codepath is bypassed. runSupervisor now creates ~/.gc/ and
+// opens the log file itself before doing any work.
+func TestRunSupervisorEnsuresHomeDirAndWritesLog(t *testing.T) {
+	gcHome := filepath.Join(t.TempDir(), "fresh-home")
+	t.Setenv("GC_HOME", gcHome)
+
+	// Sanity: the home dir does NOT exist yet — this is the systemd/launchd
+	// fresh-install scenario.
+	if _, err := os.Stat(gcHome); !os.IsNotExist(err) {
+		t.Fatalf("precondition: %s must not exist yet, got err=%v", gcHome, err)
+	}
+
+	oldLoadConfig := supervisorLoadConfig
+	supervisorLoadConfig = func(string) (supervisor.Config, error) {
+		return supervisor.Config{}, errors.New("stop after log setup")
+	}
+	t.Cleanup(func() { supervisorLoadConfig = oldLoadConfig })
+
+	var stdout, stderr bytes.Buffer
+	code := runSupervisor(&stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("runSupervisor code = %d, want 1; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "stop after log setup") {
+		t.Fatalf("stderr = %q, want stubbed config failure", stderr.String())
+	}
+
+	// The home dir must now exist (created by runSupervisor's MkdirAll).
+	if info, err := os.Stat(gcHome); err != nil || !info.IsDir() {
+		t.Fatalf("after runSupervisor, %s should exist as a directory; err=%v", gcHome, err)
+	}
+
+	// The log file must exist (created by runSupervisor's openSupervisorLogForTee).
+	logPath := filepath.Join(gcHome, "supervisor.log")
+	if _, err := os.Stat(logPath); err != nil {
+		t.Fatalf("after runSupervisor, %s should exist; err=%v", logPath, err)
+	}
+	logContent, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read supervisor log: %v", err)
+	}
+	if !strings.Contains(string(logContent), "stop after log setup") {
+		t.Fatalf("supervisor log = %q, want stubbed config failure", string(logContent))
+	}
+}
+
+func TestRunSupervisorWarnsWhenLogTeeOpenFails(t *testing.T) {
+	gcHome := t.TempDir()
+	t.Setenv("GC_HOME", gcHome)
+	if err := os.Mkdir(filepath.Join(gcHome, "supervisor.log"), 0o700); err != nil {
+		t.Fatalf("seed log path as directory: %v", err)
+	}
+
+	oldLoadConfig := supervisorLoadConfig
+	supervisorLoadConfig = func(string) (supervisor.Config, error) {
+		return supervisor.Config{}, errors.New("stop after log setup")
+	}
+	t.Cleanup(func() { supervisorLoadConfig = oldLoadConfig })
+
+	var stdout, stderr bytes.Buffer
+	code := runSupervisor(&stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("runSupervisor code = %d, want 1; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	got := stderr.String()
+	if !strings.Contains(got, "gc supervisor: tee disabled: opening supervisor log") {
+		t.Fatalf("stderr = %q, want tee-open warning", got)
+	}
+	if !strings.Contains(got, "stop after log setup") {
+		t.Fatalf("stderr = %q, want stubbed config failure", got)
+	}
+}
+
+// TestShouldTeeSupervisorLogAvoidsDoubleLoggingForRedirectedFDs confirms the
+// guard that prevents double-writes when stdout/stderr are already the
+// supervisor log file, even when the fd carries a cosmetic /dev/stdout name.
+func TestShouldTeeSupervisorLogAvoidsDoubleLoggingForRedirectedFDs(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "supervisor.log")
+	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		t.Fatalf("open log: %v", err)
+	}
+	defer logFile.Close() //nolint:errcheck
+
+	// A duped fd with a cosmetic name models os.Stdout/os.Stderr after a
+	// service manager or parent process already redirected fd 1/2 to the log.
+	dupFD, err := syscall.Dup(int(logFile.Fd()))
+	if err != nil {
+		t.Fatalf("dup log fd: %v", err)
+	}
+	redirectedStdout := os.NewFile(uintptr(dupFD), "/dev/stdout")
+	if redirectedStdout == nil {
+		t.Fatal("os.NewFile returned nil for duplicated log fd")
+	}
+	defer redirectedStdout.Close() //nolint:errcheck
+	if shouldTeeSupervisorLog(redirectedStdout, logFile) {
+		t.Errorf("redirected stdout fd: shouldTeeSupervisorLog should return false")
+	}
+	if shouldTeeSupervisorLog(&switchableWriter{target: redirectedStdout}, logFile) {
+		t.Errorf("switchable writer wrapping redirected stdout fd: shouldTeeSupervisorLog should return false")
+	}
+
+	// Different file = terminal/container output. Must tee.
+	otherPath := filepath.Join(dir, "other.log")
+	otherFile, err := os.Create(otherPath)
+	if err != nil {
+		t.Fatalf("create other: %v", err)
+	}
+	defer otherFile.Close() //nolint:errcheck
+	if !shouldTeeSupervisorLog(otherFile, logFile) {
+		t.Errorf("different file: shouldTeeSupervisorLog should return true")
+	}
+
+	// Non-file writer (a buffer simulating a journal pipe). Must tee.
+	if !shouldTeeSupervisorLog(&bytes.Buffer{}, logFile) {
+		t.Errorf("non-file writer: shouldTeeSupervisorLog should return true")
+	}
+
+	// Nil safety.
+	if shouldTeeSupervisorLog(nil, logFile) {
+		t.Errorf("nil writer: shouldTeeSupervisorLog should return false")
+	}
+	if shouldTeeSupervisorLog(otherFile, nil) {
+		t.Errorf("nil logFile: shouldTeeSupervisorLog should return false")
+	}
 }

@@ -20,6 +20,37 @@ gc doctor --verbose   # extra detail
 gc doctor --fix       # attempt automatic repairs
 ```
 
+## Add City-Local Doctor Checks
+
+Use `[[doctor.check]]` in `city.toml` for a workspace-specific health check
+that does not need to be packaged as a reusable pack doctor. Provide the bare
+check name; `gc doctor` adds the `local:` prefix in output.
+
+```toml
+[doctor]
+
+[[doctor.check]]
+name = "gopath-symlink"
+description = "Verify the GOPATH symlink used by local build scripts"
+script = "scripts/check-gopath.sh"
+fix = "scripts/fix-gopath.sh"
+```
+
+The `script` and optional `fix` paths are relative to the city root. Absolute
+paths and paths that escape the city directory are rejected and reported as
+named `StatusError` check results.
+
+Local checks reuse the same script protocol as pack doctor checks:
+
+| Exit code | Result |
+|-----------|--------|
+| 0 | OK |
+| 1 | Warning |
+| 2 or higher | Error |
+
+The first stdout line becomes the check message. Additional stdout lines are
+shown by `gc doctor --verbose`.
+
 ## "command not found" After Install
 
 If `gc` is installed but your shell cannot find it, the binary is not on your
@@ -102,7 +133,7 @@ check.
 
 | Tool | Min version | macOS | Linux |
 |------|-------------|-------|-------|
-| dolt | 1.86.2 or newer | `brew install dolt` | [releases](https://github.com/dolthub/dolt/releases) |
+| dolt | 2.0.7 or newer | `brew install dolt` | [releases](https://github.com/dolthub/dolt/releases) |
 | bd | 1.0.0 | [releases](https://github.com/gastownhall/beads/releases) | [releases](https://github.com/gastownhall/beads/releases) |
 | flock | -- | `brew install flock` | `apt install util-linux` |
 
@@ -134,8 +165,9 @@ durable versioned storage and is recommended for real work.
 
 ## Dolt Version Too Old
 
-Gas City requires a final Dolt 1.86.2 or newer. Older and pre-release builds
-can miss the upstream GC/writer deadlock fix in dolthub/dolt commit
+Gas City requires a final Dolt 2.0.7 or newer. Older and pre-release builds
+are below the managed bd/Dolt compatibility floor; releases before 1.86.2 can
+also miss the upstream GC/writer deadlock fix in dolthub/dolt commit
 `ccf7bde206`, which can hang `dolt_backup sync` under heavy write load. Check
 your version:
 
@@ -285,6 +317,12 @@ Remediation:
 - Temporarily suppress: export GC_JSONL_MAX_PUSH_FAILURES=99
 - See docs/getting-started/troubleshooting.md#jsonl-archive-push-failures
 ```
+
+Transient ref-update races are retried before the escalation counter is
+incremented. By default, each retry sleeps for a random delay from 1 to 5
+seconds. Set `GC_JSONL_PUSH_RETRY_DELAY_MIN` to change the lower bound and
+`GC_JSONL_PUSH_RETRY_DELAY_SPAN` to change the random span added above that
+minimum.
 
 The exporter sends one HIGH escalation for a still-unresolved push
 failure. It continues recording `consecutive_push_failures` and

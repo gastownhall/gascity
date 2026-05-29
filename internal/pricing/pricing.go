@@ -52,7 +52,7 @@ func (t Tier) IsZero() bool {
 type ModelPricing struct {
 	// Provider is the LLM provider label (e.g. "claude", "codex", "gemini").
 	Provider string `toml:"provider" json:"provider"`
-	// Model is the provider-specific model identifier (e.g. "claude-opus-4-7").
+	// Model is the provider-specific model identifier (e.g. "claude-opus-4-8").
 	Model string `toml:"model" json:"model"`
 	// Tier holds the per-token-type rates.
 	Tier Tier `toml:"tier" json:"tier"`

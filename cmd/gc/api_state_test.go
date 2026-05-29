@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -56,6 +57,54 @@ func (f *corruptCityAfterRenameFS) Rename(oldpath, newpath string) error {
 		}
 	}
 	return err
+}
+
+type blockingLatestEventProvider struct {
+	*events.Fake
+	latestCalled chan struct{}
+	allowLatest  chan struct{}
+	latestOnce   sync.Once
+}
+
+func newBlockingLatestEventProvider() *blockingLatestEventProvider {
+	return &blockingLatestEventProvider{
+		Fake:         events.NewFake(),
+		latestCalled: make(chan struct{}),
+		allowLatest:  make(chan struct{}),
+	}
+}
+
+func (p *blockingLatestEventProvider) LatestSeq() (uint64, error) {
+	p.latestOnce.Do(func() {
+		close(p.latestCalled)
+	})
+	<-p.allowLatest
+	return p.Fake.LatestSeq()
+}
+
+type failOnceWatchEventProvider struct {
+	*events.Fake
+	failed chan struct{}
+	once   sync.Once
+}
+
+func newFailOnceWatchEventProvider() *failOnceWatchEventProvider {
+	return &failOnceWatchEventProvider{
+		Fake:   events.NewFake(),
+		failed: make(chan struct{}),
+	}
+}
+
+func (p *failOnceWatchEventProvider) Watch(ctx context.Context, afterSeq uint64) (events.Watcher, error) {
+	var fail bool
+	p.once.Do(func() {
+		fail = true
+		close(p.failed)
+	})
+	if fail {
+		return nil, errors.New("injected watch setup failure")
+	}
+	return p.Fake.Watch(ctx, afterSeq)
 }
 
 type failAgentTomlRenameOSFS struct {
@@ -2418,6 +2467,232 @@ func TestControllerStateMutationErrorDoesNotPokeController(t *testing.T) {
 	case <-cs.pokeCh:
 		t.Fatal("failed mutation should not poke reconciler")
 	default:
+	}
+}
+
+func TestControllerStateEstablishesBeadEventCursorBeforePrimingStores(t *testing.T) {
+	ep := newBlockingLatestEventProvider()
+	var storeOpened atomic.Bool
+	prevCityStore := newControllerStateOpenCityStore
+	newControllerStateOpenCityStore = func(string) (beads.Store, error) {
+		storeOpened.Store(true)
+		return beads.NewMemStore(), nil
+	}
+	t.Cleanup(func() {
+		newControllerStateOpenCityStore = prevCityStore
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	returned := make(chan struct{})
+	go func() {
+		_ = newControllerState(ctx, &config.City{Workspace: config.Workspace{Name: "test-city"}}, runtime.NewFake(), ep, "test-city", t.TempDir())
+		close(returned)
+	}()
+
+	select {
+	case <-ep.latestCalled:
+	case <-time.After(time.Second):
+		t.Fatal("event watcher did not establish an initial cursor")
+	}
+	select {
+	case <-returned:
+		t.Fatal("newControllerState returned before the initial event cursor was established")
+	default:
+	}
+	if storeOpened.Load() {
+		t.Fatal("controller opened stores before establishing the initial event cursor")
+	}
+
+	close(ep.allowLatest)
+	select {
+	case <-returned:
+	case <-time.After(time.Second):
+		t.Fatal("newControllerState did not return after the initial event cursor was established")
+	}
+}
+
+func TestControllerStateBeadEventWatcherReplaysEventsAfterCachePrime(t *testing.T) {
+	backing := beads.NewMemStore()
+	prevCityStore := newControllerStateOpenCityStore
+	newControllerStateOpenCityStore = func(string) (beads.Store, error) {
+		return backing, nil
+	}
+	t.Cleanup(func() {
+		newControllerStateOpenCityStore = prevCityStore
+	})
+
+	ep := events.NewFake()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cs := newControllerState(ctx, &config.City{Workspace: config.Workspace{Name: "test-city"}}, runtime.NewFake(), ep, "test-city", t.TempDir())
+	cs.pokeCh = make(chan struct{}, 1)
+
+	created, err := backing.Create(beads.Bead{
+		Title: "queued work",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.routed_to": "claude",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create backing bead: %v", err)
+	}
+	payload, err := json.Marshal(map[string]beads.Bead{"bead": created})
+	if err != nil {
+		t.Fatalf("marshal bead event: %v", err)
+	}
+	ep.Record(events.Event{
+		Type:    events.BeadCreated,
+		Actor:   "bd-hook",
+		Subject: created.ID,
+		Payload: payload,
+	})
+	cs.startBeadEventWatcher(ctx)
+
+	select {
+	case <-cs.pokeCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("bead event written after watcher start did not poke controller")
+	}
+
+	counts, _, errs := defaultScaleCheckCounts([]defaultScaleCheckTarget{{
+		template: "claude",
+		store:    cs.cityBeadStore,
+	}})
+	if len(errs) != 0 {
+		t.Fatalf("defaultScaleCheckCounts errs = %v", errs)
+	}
+	if got := counts["claude"]; got != 1 {
+		t.Fatalf("defaultScaleCheckCounts[claude] = %d, want 1", got)
+	}
+}
+
+func TestControllerStateBeadEventWatcherRetriesSetupErrors(t *testing.T) {
+	backing := beads.NewMemStore()
+	prevCityStore := newControllerStateOpenCityStore
+	newControllerStateOpenCityStore = func(string) (beads.Store, error) {
+		return backing, nil
+	}
+	t.Cleanup(func() {
+		newControllerStateOpenCityStore = prevCityStore
+	})
+
+	prevRetryDelay := beadEventWatcherRetryDelay
+	beadEventWatcherRetryDelay = time.Millisecond
+	t.Cleanup(func() {
+		beadEventWatcherRetryDelay = prevRetryDelay
+	})
+
+	ep := newFailOnceWatchEventProvider()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cs := newControllerState(ctx, &config.City{Workspace: config.Workspace{Name: "test-city"}}, runtime.NewFake(), ep, "test-city", t.TempDir())
+	cs.pokeCh = make(chan struct{}, 1)
+	cs.startBeadEventWatcher(ctx)
+
+	select {
+	case <-ep.failed:
+	case <-time.After(time.Second):
+		t.Fatal("bead event watcher did not attempt initial watch")
+	}
+
+	created, err := backing.Create(beads.Bead{Title: "queued work", Type: "task"})
+	if err != nil {
+		t.Fatalf("Create backing bead: %v", err)
+	}
+	payload, err := json.Marshal(map[string]beads.Bead{"bead": created})
+	if err != nil {
+		t.Fatalf("marshal bead event: %v", err)
+	}
+	ep.Record(events.Event{
+		Type:    events.BeadCreated,
+		Actor:   "bd-hook",
+		Subject: created.ID,
+		Payload: payload,
+	})
+
+	select {
+	case <-cs.pokeCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("bead event watcher did not recover after setup watch error")
+	}
+}
+
+func TestControllerStateBeadEventWatcherConsumesExternalFileEvent(t *testing.T) {
+	backing := beads.NewMemStore()
+	prevCityStore := newControllerStateOpenCityStore
+	newControllerStateOpenCityStore = func(string) (beads.Store, error) {
+		return backing, nil
+	}
+	t.Cleanup(func() {
+		newControllerStateOpenCityStore = prevCityStore
+	})
+
+	eventPath := filepath.Join(t.TempDir(), "events.jsonl")
+	watchRecorder, err := events.NewFileRecorder(eventPath, io.Discard)
+	if err != nil {
+		t.Fatalf("NewFileRecorder(watcher): %v", err)
+	}
+	t.Cleanup(func() {
+		if err := watchRecorder.Close(); err != nil {
+			t.Fatalf("Close(watcher): %v", err)
+		}
+	})
+	writeRecorder, err := events.NewFileRecorder(eventPath, io.Discard)
+	if err != nil {
+		t.Fatalf("NewFileRecorder(writer): %v", err)
+	}
+	t.Cleanup(func() {
+		if err := writeRecorder.Close(); err != nil {
+			t.Fatalf("Close(writer): %v", err)
+		}
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	created, err := backing.Create(beads.Bead{Title: "queued work", Type: "task"})
+	if err != nil {
+		t.Fatalf("Create backing bead: %v", err)
+	}
+	cs := newControllerState(ctx, &config.City{Workspace: config.Workspace{Name: "test-city"}}, runtime.NewFake(), watchRecorder, "test-city", t.TempDir())
+	cs.pokeCh = make(chan struct{}, 1)
+	cs.startBeadEventWatcher(ctx)
+
+	if err := backing.SetMetadata(created.ID, "gc.routed_to", "claude"); err != nil {
+		t.Fatalf("SetMetadata backing bead: %v", err)
+	}
+	fresh, err := backing.Get(created.ID)
+	if err != nil {
+		t.Fatalf("Get backing bead: %v", err)
+	}
+	payload, err := json.Marshal(map[string]beads.Bead{"bead": fresh})
+	if err != nil {
+		t.Fatalf("marshal bead event: %v", err)
+	}
+	writeRecorder.Record(events.Event{
+		Type:    events.BeadUpdated,
+		Actor:   "bd-hook",
+		Subject: created.ID,
+		Payload: payload,
+	})
+
+	select {
+	case <-cs.pokeCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("external file bead event did not poke controller")
+	}
+
+	counts, _, errs := defaultScaleCheckCounts([]defaultScaleCheckTarget{{
+		template: "claude",
+		store:    cs.cityBeadStore,
+	}})
+	if len(errs) != 0 {
+		t.Fatalf("defaultScaleCheckCounts errs = %v", errs)
+	}
+	if got := counts["claude"]; got != 1 {
+		t.Fatalf("defaultScaleCheckCounts[claude] = %d, want 1", got)
 	}
 }
 

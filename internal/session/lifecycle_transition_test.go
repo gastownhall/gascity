@@ -28,7 +28,7 @@ func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 			name:  "request wake",
 			patch: RequestWakePatch("explicit", now),
 			want: MetadataPatch{
-				"state":                     string(StateCreating),
+				"state":                     string(StateStartPending),
 				"state_reason":              "explicit",
 				"pending_create_claim":      "true",
 				"pending_create_started_at": now.UTC().Format(time.RFC3339),
@@ -56,6 +56,8 @@ func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 				"continuation_epoch":         "2",
 				"continuation_reset_pending": "",
 				"detached_at":                "",
+				"state":                      string(StateCreating),
+				"pending_create_started_at":  now.UTC().Format(time.RFC3339),
 				"last_woke_at":               now.UTC().Format(time.RFC3339),
 				"sleep_reason":               "idle-timeout",
 				"sleep_intent":               "",
@@ -78,6 +80,8 @@ func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 				"continuation_epoch":         "5",
 				"continuation_reset_pending": "",
 				"detached_at":                "",
+				"state":                      string(StateCreating),
+				"pending_create_started_at":  now.UTC().Format(time.RFC3339),
 				"last_woke_at":               now.UTC().Format(time.RFC3339),
 				"sleep_reason":               "",
 				"sleep_intent":               "",
@@ -89,6 +93,29 @@ func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 				"started_live_hash":          "",
 				"live_hash":                  "",
 				"startup_dialog_verified":    "",
+			},
+		},
+		{
+			name:  "continuation reset wake",
+			patch: ContinuationResetWakePatch(now),
+			want: MetadataPatch{
+				"state":                      string(StateStartPending),
+				"state_reason":               "continuation-reset",
+				"pending_create_claim":       "true",
+				"pending_create_started_at":  now.UTC().Format(time.RFC3339),
+				"held_until":                 "",
+				"quarantined_until":          "",
+				"sleep_reason":               "",
+				"wait_hold":                  "",
+				"sleep_intent":               "",
+				"wake_attempts":              "0",
+				"churn_count":                "0",
+				"session_key":                "",
+				"started_config_hash":        "",
+				"started_live_hash":          "",
+				"live_hash":                  "",
+				"startup_dialog_verified":    "",
+				"continuation_reset_pending": "true",
 			},
 		},
 		{
@@ -117,6 +144,7 @@ func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 			patch: SleepPatch(now, "idle-timeout"),
 			want: MetadataPatch{
 				"state":                     string(StateAsleep),
+				"state_reason":              "",
 				"sleep_reason":              "idle-timeout",
 				"last_woke_at":              "",
 				"pending_create_claim":      "",
@@ -416,8 +444,8 @@ func TestMetadataPatchApplyReturnsMergedCopy(t *testing.T) {
 	patch := RequestWakePatch("pin", time.Date(2026, 4, 15, 13, 0, 0, 0, time.UTC))
 
 	merged := patch.Apply(original)
-	if merged["state"] != string(StateCreating) {
-		t.Fatalf("merged state = %q, want creating", merged["state"])
+	if merged["state"] != string(StateStartPending) {
+		t.Fatalf("merged state = %q, want start-pending", merged["state"])
 	}
 	if merged["session_name"] != "s-worker" {
 		t.Fatalf("merged session_name = %q, want preserved", merged["session_name"])
@@ -440,16 +468,17 @@ func TestCommitStartedPatchBuildsAtomicStartMetadata(t *testing.T) {
 	})
 
 	want := MetadataPatch{
-		"started_config_hash":       "core-hash",
-		"live_hash":                 "live-hash",
-		"started_live_hash":         "live-hash",
-		"core_hash_breakdown":       `{"command":"core-hash"}`,
-		"state":                     string(StateActive),
-		"state_reason":              "creation_complete",
-		"creation_complete_at":      now.Format(time.RFC3339),
-		"sleep_reason":              "",
-		"pending_create_claim":      "",
-		"pending_create_started_at": "",
+		"started_config_hash":        "core-hash",
+		"live_hash":                  "live-hash",
+		"started_live_hash":          "live-hash",
+		"continuation_reset_pending": "",
+		"core_hash_breakdown":        `{"command":"core-hash"}`,
+		"state":                      string(StateActive),
+		"state_reason":               "creation_complete",
+		"creation_complete_at":       now.Format(time.RFC3339),
+		"sleep_reason":               "",
+		"pending_create_claim":       "",
+		"pending_create_started_at":  "",
 	}
 	if !reflect.DeepEqual(patch, want) {
 		t.Fatalf("patch = %#v, want %#v", patch, want)
@@ -483,6 +512,22 @@ func TestCommitStartedPatchClearsPendingCreateClaimAtomicallyWithStateTransition
 	}
 }
 
+func TestCommitStartedPatchClearsCreateStartedAtWhenConfirmingNoClaimStart(t *testing.T) {
+	now := time.Date(2026, 5, 19, 15, 0, 0, 0, time.UTC)
+	patch := CommitStartedPatch(CommitStartedPatchInput{
+		CoreHash:     "c",
+		LiveHash:     "l",
+		ConfirmState: true,
+		Now:          now,
+	})
+	if got := patch["pending_create_started_at"]; got != "" {
+		t.Fatalf("pending_create_started_at = %q, want cleared", got)
+	}
+	if _, ok := patch["pending_create_claim"]; ok {
+		t.Fatalf("pending_create_claim should not be touched for a no-claim start: %#v", patch)
+	}
+}
+
 func TestCommitStartedPatchCanPersistHashesWithoutRestampingState(t *testing.T) {
 	patch := CommitStartedPatch(CommitStartedPatchInput{
 		CoreHash:         "core-hash",
@@ -491,10 +536,11 @@ func TestCommitStartedPatchCanPersistHashesWithoutRestampingState(t *testing.T) 
 	})
 
 	want := MetadataPatch{
-		"started_config_hash": "core-hash",
-		"live_hash":           "live-hash",
-		"started_live_hash":   "live-hash",
-		"sleep_reason":        "",
+		"started_config_hash":        "core-hash",
+		"live_hash":                  "live-hash",
+		"started_live_hash":          "live-hash",
+		"continuation_reset_pending": "",
+		"sleep_reason":               "",
 	}
 	if !reflect.DeepEqual(patch, want) {
 		t.Fatalf("patch = %#v, want %#v", patch, want)
@@ -682,6 +728,26 @@ func TestReactivatePatchDoesNotForceHistoricalBeadEligible(t *testing.T) {
 	}
 	if merged["continuity_eligible"] != "false" {
 		t.Fatalf("continuity_eligible = %q, want false", merged["continuity_eligible"])
+	}
+}
+
+func TestSleepPatchClearsStaleStateReasonOnApply(t *testing.T) {
+	merged := SleepPatch(time.Date(2026, 5, 14, 16, 0, 0, 0, time.UTC), "idle-timeout").Apply(map[string]string{
+		"state":        string(StateDraining),
+		"state_reason": "creation_complete",
+	})
+	if got := merged["state_reason"]; got != "" {
+		t.Fatalf("state_reason = %q, want cleared", got)
+	}
+}
+
+func TestAcknowledgeDrainPatchClearsStaleStateReasonOnApply(t *testing.T) {
+	merged := AcknowledgeDrainPatch(false).Apply(map[string]string{
+		"state":        string(StateDraining),
+		"state_reason": "creation_complete",
+	})
+	if got := merged["state_reason"]; got != "" {
+		t.Fatalf("state_reason = %q, want cleared", got)
 	}
 }
 

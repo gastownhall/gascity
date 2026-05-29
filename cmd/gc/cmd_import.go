@@ -368,14 +368,12 @@ func collectAllImportsFS(fs fsys.FS, cityPath string) (map[string]config.Import,
 	for name, imp := range packManifest.Imports {
 		all["pack:"+name] = imp
 	}
-	if len(packManifest.Defaults.Rig.Imports) > 0 {
-		defaults, err := config.LoadRootPackDefaultRigImports(fs, cityPath)
-		if err != nil {
-			return nil, err
-		}
-		for _, bound := range defaults {
-			all["default-rig:"+bound.Binding] = bound.Import
-		}
+	defaults, err := config.LoadRootPackDefaultRigImports(fs, cityPath)
+	if err != nil {
+		return nil, err
+	}
+	for _, bound := range defaults {
+		all["default-rig:"+bound.Binding] = bound.Import
 	}
 
 	if _, err := fs.Stat(filepath.Join(cityPath, "city.toml")); err != nil {
@@ -593,16 +591,27 @@ func removeRootDefaultRigImportFS(fs fsys.FS, cityPath string, scope *importScop
 		return false, nil
 	}
 	defaultName := strings.TrimPrefix(name, "default-rig:")
-	manifest, err := loadCityPackManifestFS(fs, cityPath)
+	cfg, err := loadCityImportManifestFS(fs, cityPath)
 	if err != nil {
 		return false, err
 	}
-	if _, ok := manifest.Defaults.Rig.Imports[defaultName]; !ok {
-		return false, nil
+	if _, ok := cfg.Defaults.Rig.Imports[defaultName]; !ok {
+		manifest, err := loadCityPackManifestFS(fs, cityPath)
+		if err != nil {
+			return false, err
+		}
+		if _, ok := manifest.Defaults.Rig.Imports[defaultName]; !ok {
+			return false, nil
+		}
+		delete(manifest.Defaults.Rig.Imports, defaultName)
+		scope.save = func() error {
+			return writeCityPackManifest(fs, cityPath, manifest)
+		}
+		return true, nil
 	}
-	delete(manifest.Defaults.Rig.Imports, defaultName)
+	delete(cfg.Defaults.Rig.Imports, defaultName)
 	scope.save = func() error {
-		return writeCityPackManifest(fs, cityPath, manifest)
+		return writeCityImportManifestFS(fs, cityPath, cfg)
 	}
 	return true, nil
 }

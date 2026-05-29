@@ -53,6 +53,9 @@ func ResolveAgent(cfg *config.City, input string, opts ResolveOpts) (config.Agen
 	if a, ok := findAgentByQualified(cfg, input); ok {
 		return a, true
 	}
+	if a, ok := ResolveQualifiedRigScopedTemplate(cfg, input); ok {
+		return a, true
+	}
 
 	// Step 2b: qualified pool instance — "rig/polecat-2" or
 	// "binding.polecat-2" matches the corresponding pool template.
@@ -91,6 +94,9 @@ func resolveTemplate(cfg *config.City, input string) (config.Agent, bool) {
 	if a, ok := findAgentByQualified(cfg, input); ok {
 		return a, true
 	}
+	if a, ok := ResolveQualifiedRigScopedTemplate(cfg, input); ok {
+		return a, true
+	}
 	if strings.Contains(input, "/") {
 		return config.Agent{}, false
 	}
@@ -114,6 +120,44 @@ func findAgentByQualified(cfg *config.City, identity string) (config.Agent, bool
 		}
 	}
 	return config.Agent{}, false
+}
+
+// ResolveQualifiedRigScopedTemplate resolves "rig/name" against a generic
+// scope="rig" template that applies to every configured rig. It returns a
+// synthetic rig-bound copy so downstream code sees the concrete identity.
+func ResolveQualifiedRigScopedTemplate(cfg *config.City, identity string) (config.Agent, bool) {
+	if cfg == nil || !strings.Contains(identity, "/") {
+		return config.Agent{}, false
+	}
+	dir, name := config.ParseQualifiedName(identity)
+	if dir == "" || name == "" || !hasRig(cfg, dir) {
+		return config.Agent{}, false
+	}
+
+	var match *config.Agent
+	for i := range cfg.Agents {
+		a := &cfg.Agents[i]
+		if a.Name != name || a.Dir != "" || a.Scope != "rig" {
+			continue
+		}
+		if match != nil {
+			return config.Agent{}, false
+		}
+		match = a
+	}
+	if match == nil {
+		return config.Agent{}, false
+	}
+	return DeepCopyAgent(match, match.Name, dir), true
+}
+
+func hasRig(cfg *config.City, name string) bool {
+	for _, rig := range cfg.Rigs {
+		if rig.Name == name {
+			return true
+		}
+	}
+	return false
 }
 
 // resolvePoolInstanceQualified handles qualified pool instance names like
@@ -141,6 +185,50 @@ func resolvePoolInstanceQualified(cfg *config.City, input string) (config.Agent,
 		return DeepCopyAgent(&a, a.Name+"-"+suffix, a.Dir), true
 	}
 	return config.Agent{}, false
+}
+
+// NormalizePoolRouteTarget collapses a slot-suffixed pool target qualified
+// name (e.g. "myrig/polecat-2") back to its base pool qualified name
+// ("myrig/polecat"). Slinging to a slot-suffixed target expresses a
+// load-balancing hint, not a hard pin: every slot in a pool shares the base
+// template, and pool work_query / nudgers key on that base via exact match.
+// Recording the slot-suffixed value in gc.routed_to therefore leaves the bead
+// structurally invisible to the pool. Normalizing at the routing write site
+// keeps slot-suffixed slings reachable by any slot.
+//
+// A target is collapsed only when it is exactly base.QualifiedName()+"-N" for
+// a configured multi-session pool agent and N is a valid slot (>=1, and within
+// the agent's max when bounded) — the inverse of resolvePoolInstanceQualified.
+// Any other target (base names, non-pool agents, out-of-range or non-numeric
+// suffixes, unknown agents) is returned unchanged.
+func NormalizePoolRouteTarget(cfg *config.City, target string) string {
+	if cfg == nil || target == "" {
+		return target
+	}
+	for i := range cfg.Agents {
+		a := cfg.Agents[i]
+		if !IsMultiSessionAgent(&a) {
+			continue
+		}
+		base := a.QualifiedName()
+		prefix := base + "-"
+		if !strings.HasPrefix(target, prefix) {
+			continue
+		}
+		suffix := target[len(prefix):]
+		n, err := strconv.Atoi(suffix)
+		if err != nil || n < 1 {
+			continue
+		}
+		if !a.HasUnlimitedSessionCapacity() {
+			maxSess := a.EffectiveMaxActiveSessions()
+			if maxSess == nil || n > *maxSess {
+				continue
+			}
+		}
+		return base
+	}
+	return target
 }
 
 // matchPoolInstanceBare checks if a bare input matches a multi-session

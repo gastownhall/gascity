@@ -116,7 +116,7 @@ scope = "city"
 	}
 }
 
-func TestImport_AgentDefaultsDefaultSlingFormulaInherited(t *testing.T) {
+func TestImport_RejectsPackAgentDefaultsDefaultSlingFormula(t *testing.T) {
 	dir := t.TempDir()
 	cityDir := filepath.Join(dir, "city")
 	importDir := filepath.Join(dir, "tools")
@@ -148,34 +148,19 @@ name = "worker"
 scope = "city"
 `)
 
-	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityDir, "city.toml"))
-	if err != nil {
-		t.Fatalf("LoadWithIncludes: %v", err)
+	_, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityDir, "city.toml"))
+	if err == nil {
+		t.Fatal("expected LoadWithIncludes to reject imported pack [agent_defaults]")
 	}
-
-	for _, a := range explicitAgents(cfg.Agents) {
-		if a.QualifiedName() != "tools.worker" {
-			continue
-		}
-		if a.DefaultSlingFormula != nil {
-			t.Fatalf("tools.worker DefaultSlingFormula = %v, want nil explicit override", *a.DefaultSlingFormula)
-		}
-		if a.InheritedDefaultSlingFormula == nil || *a.InheritedDefaultSlingFormula != "mol-pack-default" {
-			got := "<nil>"
-			if a.InheritedDefaultSlingFormula != nil {
-				got = *a.InheritedDefaultSlingFormula
-			}
-			t.Fatalf("tools.worker InheritedDefaultSlingFormula = %s, want %q", got, "mol-pack-default")
-		}
-		if got := a.EffectiveDefaultSlingFormula(); got != "mol-pack-default" {
-			t.Fatalf("tools.worker EffectiveDefaultSlingFormula() = %q, want %q", got, "mol-pack-default")
-		}
-		return
+	if !strings.Contains(err.Error(), "[agent_defaults] is a city.toml table, not a pack.toml field") {
+		t.Fatalf("error = %v, want pack authoring surface rejection", err)
 	}
-	t.Fatalf("imported agent tools.worker not found: %+v", explicitAgents(cfg.Agents))
+	if !strings.Contains(err.Error(), filepath.Join(importDir, "pack.toml")) {
+		t.Fatalf("error = %v, want offending imported pack path", err)
+	}
 }
 
-func TestImport_AgentDefaultsDefaultSlingFormulaInheritedBeatsCityDefault(t *testing.T) {
+func TestImport_CityAgentDefaultsDefaultSlingFormulaAppliesToImportedAgent(t *testing.T) {
 	dir := t.TempDir()
 	cityDir := filepath.Join(dir, "city")
 	importDir := filepath.Join(dir, "tools")
@@ -185,11 +170,6 @@ func TestImport_AgentDefaultsDefaultSlingFormulaInheritedBeatsCityDefault(t *tes
 	writeTestFile(t, cityDir, "city.toml", `
 [workspace]
 name = "test"
-`)
-	writeTestFile(t, cityDir, "pack.toml", `
-[pack]
-name = "test"
-schema = 1
 
 [agent_defaults]
 default_sling_formula = "mol-city-default"
@@ -202,9 +182,6 @@ source = "../tools"
 name = "tools"
 schema = 1
 
-[agent_defaults]
-default_sling_formula = "mol-pack-default"
-
 [[agent]]
 name = "worker"
 scope = "city"
@@ -219,11 +196,8 @@ scope = "city"
 		if a.QualifiedName() != "tools.worker" {
 			continue
 		}
-		if got := a.EffectiveDefaultSlingFormula(); got != "mol-pack-default" {
-			t.Fatalf("tools.worker EffectiveDefaultSlingFormula() = %q, want %q", got, "mol-pack-default")
-		}
-		if a.DefaultSlingFormula != nil {
-			t.Fatalf("tools.worker DefaultSlingFormula = %q, want nil when city default should not override imported pack default", *a.DefaultSlingFormula)
+		if got := a.EffectiveDefaultSlingFormula(); got != "mol-city-default" {
+			t.Fatalf("tools.worker EffectiveDefaultSlingFormula() = %q, want %q", got, "mol-city-default")
 		}
 		return
 	}
@@ -1250,9 +1224,14 @@ scope = "city"
 	if !found["proj/gs.polecat"] {
 		t.Errorf("missing proj/gs.polecat; got: %v", found)
 	}
-	// City-scoped agent should NOT appear from rig import.
-	if found["gs.mayor"] || found["proj/gs.mayor"] {
-		t.Error("city-scoped mayor should not appear from rig-level import")
+	// City-scoped agent reached through a rig-level import is hoisted to city
+	// scope (rig dir cleared) rather than dropped, so it registers as the
+	// binding-qualified "gs.mayor" — not under the rig prefix "proj/gs.mayor".
+	if !found["gs.mayor"] {
+		t.Errorf("city-scoped mayor should be hoisted from rig import as gs.mayor; got: %v", found)
+	}
+	if found["proj/gs.mayor"] {
+		t.Errorf("hoisted mayor should not retain rig prefix proj/gs.mayor; got: %v", found)
 	}
 }
 
