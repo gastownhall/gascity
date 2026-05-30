@@ -142,6 +142,13 @@ func TestPackRegistryCommandsPreRegisterDefaultRegistryOnVanillaHome(t *testing.
 	if !strings.Contains(stdout.String(), packregistry.DefaultRegistryName) || !strings.Contains(stdout.String(), packregistry.DefaultRegistrySource) {
 		t.Fatalf("list output = %q, want default main registry", stdout.String())
 	}
+	cfg, err := packregistry.LoadConfig(home)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if len(cfg.Registries) != 1 || cfg.Registries[0] != packregistry.DefaultRegistry() {
+		t.Fatalf("registries = %+v, want default registry", cfg.Registries)
+	}
 
 	if err := packregistry.WriteCatalogCache(home, packregistry.DefaultRegistryName, []byte(packRegistryTestCatalog)); err != nil {
 		t.Fatalf("WriteCatalogCache(default main): %v", err)

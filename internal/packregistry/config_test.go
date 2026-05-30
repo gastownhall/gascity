@@ -99,6 +99,37 @@ func TestLoadConfigExplicitEmptyFileReturnsEmptyConfig(t *testing.T) {
 	}
 }
 
+func TestEnsureDefaultRegistryConfigCreatesFreshConfig(t *testing.T) {
+	home := t.TempDir()
+	if err := EnsureDefaultRegistryConfig(home); err != nil {
+		t.Fatalf("EnsureDefaultRegistryConfig: %v", err)
+	}
+	cfg, err := LoadConfig(home)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if len(cfg.Registries) != 1 || cfg.Registries[0] != DefaultRegistry() {
+		t.Fatalf("registries = %+v, want default registry", cfg.Registries)
+	}
+}
+
+func TestEnsureDefaultRegistryConfigPreservesExistingEmptyConfig(t *testing.T) {
+	home := t.TempDir()
+	if err := SaveConfig(home, Config{}); err != nil {
+		t.Fatalf("SaveConfig: %v", err)
+	}
+	if err := EnsureDefaultRegistryConfig(home); err != nil {
+		t.Fatalf("EnsureDefaultRegistryConfig: %v", err)
+	}
+	cfg, err := LoadConfig(home)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if len(cfg.Registries) != 0 {
+		t.Fatalf("registries = %+v, want none", cfg.Registries)
+	}
+}
+
 func TestLoadConfigPreservesExistingFile(t *testing.T) {
 	home := t.TempDir()
 	if err := os.MkdirAll(filepath.Dir(ConfigPath(home)), 0o755); err != nil {

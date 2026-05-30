@@ -39,6 +39,11 @@ type Registry struct {
 	Source string `toml:"source"`
 }
 
+// DefaultRegistry returns the first-party public pack registry.
+func DefaultRegistry() Registry {
+	return Registry{Name: DefaultRegistryName, Source: DefaultRegistrySource}
+}
+
 // ConfigPath returns the registries.toml path for a Gas City home.
 func ConfigPath(home string) string {
 	return gchome.RegistriesPath(home)
@@ -72,6 +77,19 @@ func LoadConfig(home string) (Config, error) {
 	}
 	cfg.Registries = append([]Registry(nil), cfg.Registry...)
 	return cfg, validateConfig(cfg)
+}
+
+// EnsureDefaultRegistryConfig writes the first-party registry config for a fresh Gas City home.
+func EnsureDefaultRegistryConfig(home string) error {
+	return WithConfigLock(home, func() error {
+		path := ConfigPath(home)
+		if _, err := os.Stat(path); err == nil {
+			return nil
+		} else if !os.IsNotExist(err) {
+			return fmt.Errorf("checking registries.toml: %w", err)
+		}
+		return SaveConfig(home, Config{Registries: []Registry{DefaultRegistry()}})
+	})
 }
 
 // SaveConfig validates and writes registry configuration.

@@ -243,7 +243,12 @@ type packRegistryReleaseJSON struct {
 }
 
 func doPackRegistryList(jsonOutput bool, stdout, stderr io.Writer) int {
-	cfg, err := packregistry.LoadConfig(gchome.Default())
+	home := gchome.Default()
+	if err := packregistry.EnsureDefaultRegistryConfig(home); err != nil {
+		fmt.Fprintf(stderr, "gc pack registry list: %v\n", err) //nolint:errcheck
+		return 1
+	}
+	cfg, err := packregistry.LoadConfig(home)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc pack registry list: %v\n", err) //nolint:errcheck
 		return 1
@@ -339,6 +344,10 @@ func doPackRegistryRemove(name string, jsonOutput bool, stdout, stderr io.Writer
 
 func doPackRegistryRefresh(name string, jsonOutput bool, stdout, stderr io.Writer) int {
 	home := gchome.Default()
+	if err := packregistry.EnsureDefaultRegistryConfig(home); err != nil {
+		fmt.Fprintf(stderr, "gc pack registry refresh: %v\n", err) //nolint:errcheck
+		return 1
+	}
 	cfg, err := packregistry.LoadConfig(home)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc pack registry refresh: %v\n", err) //nolint:errcheck
@@ -414,6 +423,10 @@ type registrySearchResult struct {
 
 func doPackRegistrySearch(query, registry string, refresh bool, limit int, all bool, jsonOutput bool, stdout, stderr io.Writer) int {
 	home := gchome.Default()
+	if err := packregistry.EnsureDefaultRegistryConfig(home); err != nil {
+		fmt.Fprintf(stderr, "gc pack registry search: %v\n", err) //nolint:errcheck
+		return 1
+	}
 	cfg, err := packregistry.LoadConfig(home)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc pack registry search: %v\n", err) //nolint:errcheck
@@ -519,6 +532,10 @@ func doPackRegistrySearch(query, registry string, refresh bool, limit int, all b
 
 func doPackRegistryShow(target string, refresh bool, jsonOutput bool, stdout, stderr io.Writer) int {
 	home := gchome.Default()
+	if err := packregistry.EnsureDefaultRegistryConfig(home); err != nil {
+		fmt.Fprintf(stderr, "gc pack registry show: %v\n", err) //nolint:errcheck
+		return 1
+	}
 	cfg, err := packregistry.LoadConfig(home)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc pack registry show: %v\n", err) //nolint:errcheck
