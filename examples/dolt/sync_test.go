@@ -179,6 +179,55 @@ exit 0
 	}
 }
 
+// writeSyncFakeDoltPushEchoesArgs installs a fake dolt that, on the SQL-mode
+// DOLT_PUSH call, reports whether DOLT_CLI_PASSWORD was delivered via the
+// environment and echoes its own full argv to stderr (mimicking a dolt that
+// prints its command line in a connection diagnostic), then fails. This lets a
+// test prove the password reaches dolt via the env var (non-vacuous: the
+// 'cli-password-was-set' marker only fires when DOLT_CLI_PASSWORD is non-empty)
+// AND never as an argv flag — so the replayed argv cannot leak the secret (RB6).
+func writeSyncFakeDoltPushEchoesArgs(t *testing.T, dir string) {
+	t.Helper()
+	logPath := filepath.Join(dir, "dolt.log")
+	body := `#!/bin/sh
+printf '%s\n' "$*" >> "` + logPath + `"
+case "$*" in
+  *"SELECT name, url FROM dolt_remotes LIMIT 1"*)
+    printf 'name,url\norigin,https://example.invalid/repo\n'
+    exit 0
+    ;;
+  *"SELECT active_branch()"*)
+    printf 'active_branch()\nmain\n'
+    exit 0
+    ;;
+  *DOLT_PUSH*)
+    [ -n "$DOLT_CLI_PASSWORD" ] && printf 'cli-password-was-set\n' >&2
+    printf 'push failed; dolt invoked with args: %s\n' "$*" >&2
+    exit 1
+    ;;
+esac
+exit 0
+`
+	if err := os.WriteFile(filepath.Join(dir, "dolt"), []byte(body), 0o755); err != nil {
+		t.Fatalf("write fake dolt: %v", err)
+	}
+}
+
+// writeSyncFakeFailingMktemp installs a fake `mktemp` on PATH that always fails,
+// reproducing a broken/unwritable TMPDIR. sync only calls mktemp at the SQL push
+// site, so this exercises the per-db temp-file guard without affecting the
+// earlier metadata queries.
+func writeSyncFakeFailingMktemp(t *testing.T, dir string) {
+	t.Helper()
+	body := `#!/bin/sh
+echo "mktemp: failed to create file" >&2
+exit 1
+`
+	if err := os.WriteFile(filepath.Join(dir, "mktemp"), []byte(body), 0o755); err != nil {
+		t.Fatalf("write fake mktemp: %v", err)
+	}
+}
+
 func writeSyncFakeBeadsBD(t *testing.T, cityPath string) string {
 	t.Helper()
 	scriptDir := filepath.Join(cityPath, ".gc", "system", "packs", "bd", "assets", "scripts")
@@ -1216,6 +1265,162 @@ func TestSyncSQLPushTimeoutHonorsConfiguredCeiling(t *testing.T) {
 	}
 }
 
+// TestSyncSQLPushReplayDoesNotLeakPassword exercises credential non-exposure
+// (RB6) with a NON-EMPTY password. The fake dolt confirms it received the
+// password via DOLT_CLI_PASSWORD (the 'cli-password-was-set' marker makes the
+// test non-vacuous: it fires only when the env var is non-empty) and echoes its
+// own full argv to stderr; yet the secret value must never appear in any
+// replayed line because sync passes the password through the environment, never
+// as an argv flag. Converts the by-construction RB6 safety into exercised
+// safety on the security regression boundary.
+func TestSyncSQLPushReplayDoesNotLeakPassword(t *testing.T) {
+	root := repoRoot(t)
+	script := filepath.Join(root, syncScript)
+
+	port, cleanup := startReachableTCPListener(t)
+	defer cleanup()
+
+	cityPath := t.TempDir()
+	dataDir := filepath.Join(cityPath, "data")
+	if err := os.MkdirAll(filepath.Join(dataDir, "app", ".dolt"), 0o755); err != nil {
+		t.Fatalf("mkdir db: %v", err)
+	}
+
+	binDir := t.TempDir()
+	writeSyncFakeDoltPushEchoesArgs(t, binDir)
+	_ = writeSyncFakeBeadsBD(t, cityPath)
+
+	const secret = "s3cr3t-push-token"
+	cmd := exec.Command("sh", script, "--db", "app")
+	cmd.Env = append(filteredEnv(
+		"PATH", "GC_DOLT_HOST", "GC_DOLT_PORT", "GC_DOLT_USER",
+		"GC_DOLT_PASSWORD", "GC_DOLT_DATA_DIR", "GC_CITY_PATH", "GC_PACK_DIR",
+		"GC_DOLT_SYNC_PUSH_TIMEOUT_SECS",
+	),
+		"PATH="+binDir+":"+os.Getenv("PATH"),
+		"GC_CITY_PATH="+cityPath,
+		"GC_PACK_DIR="+root,
+		"GC_DOLT_DATA_DIR="+dataDir,
+		fmt.Sprintf("GC_DOLT_PORT=%d", port),
+		"GC_DOLT_USER=root",
+		"GC_DOLT_PASSWORD="+secret,
+	)
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("expected push failure, output:\n%s", out)
+	}
+	// Non-vacuity guard: the password must actually have reached dolt via the
+	// env var, otherwise the no-leak assertion below proves nothing.
+	if !strings.Contains(string(out), "cli-password-was-set") {
+		t.Fatalf("expected the password to be delivered to dolt via DOLT_CLI_PASSWORD (test is vacuous otherwise), got:\n%s", out)
+	}
+	// The push diagnostic (with dolt's echoed argv) must be surfaced, but the
+	// secret value must not appear anywhere in the replayed output.
+	if !strings.Contains(string(out), "push failed; dolt invoked with args") {
+		t.Fatalf("expected the dolt push diagnostic to be replayed, got:\n%s", out)
+	}
+	if strings.Contains(string(out), secret) {
+		t.Fatalf("password leaked into sync output — it must reach dolt via DOLT_CLI_PASSWORD, never argv:\n%s", out)
+	}
+}
+
+// TestSyncSQLPushTimeoutReplaysNoMechanismMarker verifies the exit-124 branch
+// replays a non-empty captured stderr, surfacing the run_bounded "cannot run
+// bounded command" no-mechanism marker that is otherwise reported under the
+// (deliberately overloaded) TIMEOUT headline. Exercises the S3-on-124 mitigation
+// that disambiguates a real wall-clock timeout from the no-mechanism
+// fall-through.
+func TestSyncSQLPushTimeoutReplaysNoMechanismMarker(t *testing.T) {
+	root := repoRoot(t)
+	script := filepath.Join(root, syncScript)
+
+	port, cleanup := startReachableTCPListener(t)
+	defer cleanup()
+
+	cityPath := t.TempDir()
+	dataDir := filepath.Join(cityPath, "data")
+	if err := os.MkdirAll(filepath.Join(dataDir, "app", ".dolt"), 0o755); err != nil {
+		t.Fatalf("mkdir db: %v", err)
+	}
+
+	binDir := t.TempDir()
+	const marker = "dolt runtime: timeout/gtimeout/python3 not found; cannot run bounded command"
+	writeSyncFakeDoltPushFails(t, binDir, 124, marker)
+	_ = writeSyncFakeBeadsBD(t, cityPath)
+
+	cmd := exec.Command("sh", script, "--db", "app")
+	cmd.Env = append(filteredEnv(
+		"PATH", "GC_DOLT_HOST", "GC_DOLT_PORT", "GC_DOLT_USER",
+		"GC_DOLT_PASSWORD", "GC_DOLT_DATA_DIR", "GC_CITY_PATH", "GC_PACK_DIR",
+		"GC_DOLT_SYNC_PUSH_TIMEOUT_SECS",
+	),
+		"PATH="+binDir+":"+os.Getenv("PATH"),
+		"GC_CITY_PATH="+cityPath,
+		"GC_PACK_DIR="+root,
+		"GC_DOLT_DATA_DIR="+dataDir,
+		fmt.Sprintf("GC_DOLT_PORT=%d", port),
+		"GC_DOLT_USER=root",
+		"GC_DOLT_PASSWORD=",
+	)
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("expected push failure, output:\n%s", out)
+	}
+	if !strings.Contains(string(out), "TIMEOUT after 1800s") {
+		t.Fatalf("expected the TIMEOUT headline on exit 124, got:\n%s", out)
+	}
+	if !strings.Contains(string(out), "app: "+marker) {
+		t.Fatalf("expected the captured no-mechanism marker to be replayed (db-prefixed) on the 124 branch, got:\n%s", out)
+	}
+}
+
+// TestSyncSQLPushTempFileFailureDegradesPerDb verifies that a failure to create
+// the stderr-capture temp file degrades to a per-database error instead of an
+// opaque whole-run abort under `set -e` — the swallowed-failure class this bead
+// targets. A fake `mktemp` on PATH always fails; sync calls mktemp only at the
+// SQL push site, so the metadata queries still succeed and the guard is what is
+// exercised.
+func TestSyncSQLPushTempFileFailureDegradesPerDb(t *testing.T) {
+	root := repoRoot(t)
+	script := filepath.Join(root, syncScript)
+
+	port, cleanup := startReachableTCPListener(t)
+	defer cleanup()
+
+	cityPath := t.TempDir()
+	dataDir := filepath.Join(cityPath, "data")
+	if err := os.MkdirAll(filepath.Join(dataDir, "app", ".dolt"), 0o755); err != nil {
+		t.Fatalf("mkdir db: %v", err)
+	}
+
+	binDir := t.TempDir()
+	_ = writeSyncFakeDolt(t, binDir)
+	writeSyncFakeFailingMktemp(t, binDir)
+	_ = writeSyncFakeBeadsBD(t, cityPath)
+
+	cmd := exec.Command("sh", script, "--db", "app")
+	cmd.Env = append(filteredEnv(
+		"PATH", "GC_DOLT_HOST", "GC_DOLT_PORT", "GC_DOLT_USER",
+		"GC_DOLT_PASSWORD", "GC_DOLT_DATA_DIR", "GC_CITY_PATH", "GC_PACK_DIR",
+		"GC_DOLT_SYNC_PUSH_TIMEOUT_SECS",
+	),
+		"PATH="+binDir+":"+os.Getenv("PATH"),
+		"GC_CITY_PATH="+cityPath,
+		"GC_PACK_DIR="+root,
+		"GC_DOLT_DATA_DIR="+dataDir,
+		fmt.Sprintf("GC_DOLT_PORT=%d", port),
+		"GC_DOLT_USER=root",
+		"GC_DOLT_PASSWORD=",
+	)
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("expected non-zero exit when the temp file cannot be created, output:\n%s", out)
+	}
+	if !strings.Contains(string(out), "app: ERROR: cannot create temp file") {
+		t.Fatalf("expected a per-db temp-file error instead of an opaque abort, got:\n%s", out)
+	}
+}
+
 // assertSyncRejectsInvalidPushTimeout drives one invalid-timeout scenario: it
 // runs sync with GC_DOLT_SYNC_PUSH_TIMEOUT_SECS=bad and asserts the script
 // aborts with exit 2 and a stderr diagnostic before any database is touched —
@@ -1287,6 +1492,22 @@ func TestSyncRejectsZeroPushTimeout(t *testing.T) {
 // is rejected with exit 2 (R5 input validation).
 func TestSyncRejectsEmptyPushTimeout(t *testing.T) {
 	assertSyncRejectsInvalidPushTimeout(t, "")
+}
+
+// TestSyncRejectsLeadingZeroPushTimeout verifies the leading-zero numeric-zero
+// form "00" is rejected with exit 2 before any dolt invocation. A guard matching
+// only the literal "0" lets "00" through, and GNU `timeout` treats a 0 duration
+// as "disable the timeout" — running the push UNBOUNDED and re-opening the
+// anti-hang hole RB2 exists to close (R5 input validation).
+func TestSyncRejectsLeadingZeroPushTimeout(t *testing.T) {
+	assertSyncRejectsInvalidPushTimeout(t, "00")
+}
+
+// TestSyncRejectsTripleZeroPushTimeout verifies a longer all-zeros form "000" is
+// also rejected with exit 2 — the zero-guard must reject every numeric-zero
+// spelling, not just the literal "0" (RB2; R5 input validation).
+func TestSyncRejectsTripleZeroPushTimeout(t *testing.T) {
+	assertSyncRejectsInvalidPushTimeout(t, "000")
 }
 
 // TestSyncCLIPushReportsExitCode verifies the CLI-mode plain push surfaces the
