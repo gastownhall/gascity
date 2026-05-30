@@ -3027,6 +3027,61 @@ includes = ["packs/rigsup"]
 	}
 }
 
+func TestLoadWithIncludes_SkipsExtraIncludeReachableFromRigPackGraph(t *testing.T) {
+	dir := t.TempDir()
+
+	writeFile(t, dir, "packs/maintenance/pack.toml", `
+[pack]
+name = "maintenance"
+schema = 2
+`)
+	writeFile(t, dir, "packs/maintenance/agents/dog/agent.toml", `
+scope = "city"
+fallback = true
+`)
+
+	writeFile(t, dir, "packs/gastown/pack.toml", `
+[pack]
+name = "gastown"
+schema = 2
+
+[imports.maintenance]
+source = "../maintenance"
+`)
+	writeFile(t, dir, "packs/gastown/agents/polecat/agent.toml", `
+scope = "rig"
+`)
+
+	writeFile(t, dir, "city.toml", `
+[workspace]
+name = "test"
+
+[[rigs]]
+name = "gascity"
+path = "/tmp/gascity"
+includes = ["packs/gastown"]
+`)
+
+	cfg, _, err := LoadWithIncludes(
+		fsys.OSFS{},
+		filepath.Join(dir, "city.toml"),
+		filepath.Join(dir, "packs", "maintenance"),
+	)
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+
+	for _, packDir := range cfg.PackDirs {
+		if filepath.Base(packDir) == "maintenance" {
+			t.Fatalf("maintenance was injected at city scope despite being reachable from rig pack graph: PackDirs=%v RigPackDirs=%v",
+				cfg.PackDirs, cfg.RigPackDirs)
+		}
+	}
+	if got := cfg.RigPackDirs["gascity"]; len(got) != 2 {
+		t.Fatalf("rig pack graph dirs = %v, want gastown plus transitive maintenance", got)
+	}
+}
+
 // agentNamesOf is a small test helper for readable failure messages.
 func agentNamesOf(agents []Agent) []string {
 	names := make([]string, 0, len(agents))
