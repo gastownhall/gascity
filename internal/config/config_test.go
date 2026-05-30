@@ -6268,3 +6268,25 @@ func TestAllPackDirs_DeterministicAcrossCalls(t *testing.T) {
 		}
 	}
 }
+
+func TestPackDirsForRig(t *testing.T) {
+	c := &City{
+		PackDirs: []string{"/city/packs/a", "/shared/packs/common"},
+		RigPackDirs: map[string][]string{
+			"alpha": {"/shared/packs/common", "/rig/alpha/packs/x"},
+			"bravo": {"/rig/bravo/packs/y"},
+		},
+	}
+
+	got := c.PackDirsForRig("alpha")
+	want := []string{"/city/packs/a", "/shared/packs/common", "/rig/alpha/packs/x"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("PackDirsForRig(alpha) = %v, want %v", got, want)
+	}
+
+	got = c.PackDirsForRig("missing")
+	want = []string{"/city/packs/a", "/shared/packs/common"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("PackDirsForRig(missing) = %v, want %v", got, want)
+	}
+}

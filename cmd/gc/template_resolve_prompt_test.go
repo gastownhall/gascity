@@ -954,6 +954,68 @@ prompt_template = "agents/mayor/prompt.template.md"
 	}
 }
 
+func TestResolveTemplateScopesRigPackFragmentsByCurrentRig(t *testing.T) {
+	cityPath := t.TempDir()
+	write := func(rel, data string) {
+		path := filepath.Join(cityPath, rel)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("MkdirAll(%s): %v", path, err)
+		}
+		if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+			t.Fatalf("WriteFile(%s): %v", path, err)
+		}
+	}
+
+	write("agents/alpha-worker/prompt.template.md", `{{ template "work-query" . }}`)
+	write("agents/bravo-worker/prompt.template.md", `{{ template "work-query" . }}`)
+	write("packs/alpha/template-fragments/work-query.template.md", `{{ define "work-query" }}alpha-work-query{{ end }}`)
+	write("packs/bravo/template-fragments/work-query.template.md", `{{ define "work-query" }}bravo-work-query{{ end }}`)
+
+	cfg := &config.City{
+		Workspace: config.Workspace{Provider: "stub"},
+		Providers: map[string]config.ProviderSpec{
+			"stub": {Command: "/bin/echo"},
+		},
+		Rigs: []config.Rig{
+			{Name: "alpha", Path: "rigs/alpha"},
+			{Name: "bravo", Path: "rigs/bravo"},
+		},
+		RigPackDirs: map[string][]string{
+			"alpha": {filepath.Join(cityPath, "packs", "alpha")},
+			"bravo": {filepath.Join(cityPath, "packs", "bravo")},
+		},
+	}
+	alphaAgent := config.Agent{
+		Name:           "worker",
+		Dir:            "alpha",
+		Provider:       "stub",
+		PromptTemplate: "agents/alpha-worker/prompt.template.md",
+	}
+	bravoAgent := config.Agent{
+		Name:           "worker",
+		Dir:            "bravo",
+		Provider:       "stub",
+		PromptTemplate: "agents/bravo-worker/prompt.template.md",
+	}
+
+	params := newAgentBuildParams("test", cityPath, cfg, nil, testBeaconTime, nil, io.Discard)
+	alpha, err := resolveTemplate(params, &alphaAgent, alphaAgent.QualifiedName(), nil)
+	if err != nil {
+		t.Fatalf("resolveTemplate(alpha): %v", err)
+	}
+	if !strings.Contains(alpha.Prompt, "alpha-work-query") || strings.Contains(alpha.Prompt, "bravo-work-query") {
+		t.Fatalf("alpha prompt used wrong rig fragment: %q", alpha.Prompt)
+	}
+
+	bravo, err := resolveTemplate(params, &bravoAgent, bravoAgent.QualifiedName(), nil)
+	if err != nil {
+		t.Fatalf("resolveTemplate(bravo): %v", err)
+	}
+	if !strings.Contains(bravo.Prompt, "bravo-work-query") || strings.Contains(bravo.Prompt, "alpha-work-query") {
+		t.Fatalf("bravo prompt used wrong rig fragment: %q", bravo.Prompt)
+	}
+}
+
 func TestResolveTemplateConventionAgentAppendFragments(t *testing.T) {
 	cityPath := t.TempDir()
 	write := func(rel, data string) {

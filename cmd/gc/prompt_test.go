@@ -1229,10 +1229,10 @@ func TestRenderPromptCityRootFragmentsPerAgentWins(t *testing.T) {
 // TestRenderPromptResolvesRigPackFragment is the renderer-level regression
 // test for gascity#2676: a template fragment shipped in a rig-imported pack
 // (i.e. in cfg.RigPackDirs[<rig>], not cfg.PackDirs) must resolve when the
-// renderer is given the union slice via (*City).AllPackDirs(). Before the
-// fix the two callers in agent_build_params.go / cmd_prime.go passed only
-// cfg.PackDirs, so rig-pack fragments silently fell through and the renderer
-// emitted the raw `{{ template ... }}` directive in error fallback.
+// renderer is given that rig's scoped pack directories. Before the fix the
+// two callers in agent_build_params.go / cmd_prime.go passed only cfg.PackDirs,
+// so rig-pack fragments silently fell through and the renderer emitted the raw
+// `{{ template ... }}` directive in error fallback.
 func TestRenderPromptResolvesRigPackFragment(t *testing.T) {
 	f := fsys.NewFake()
 	// Rig-imported pack ships a template fragment.
@@ -1253,11 +1253,12 @@ func TestRenderPromptResolvesRigPackFragment(t *testing.T) {
 		},
 	}
 
-	// Post-fix call: cfg.AllPackDirs() includes the rig dir → fragment resolves.
+	// Post-fix call: cfg.PackDirsForRig includes the current rig dir without
+	// exposing other rigs' pack fragments.
 	got := renderPrompt(f, "/city", "", "agents/polecat/prompt.template.md",
-		PromptContext{AgentName: "polecat"}, "", io.Discard, cfg.AllPackDirs(), nil, nil)
+		PromptContext{AgentName: "polecat"}, "", io.Discard, cfg.PackDirsForRig("gastown"), nil, nil)
 	if got != "rig-pack-work-query" {
-		t.Errorf("renderPrompt(cfg.AllPackDirs()) = %q, want %q",
+		t.Errorf("renderPrompt(cfg.PackDirsForRig()) = %q, want %q",
 			got, "rig-pack-work-query")
 	}
 

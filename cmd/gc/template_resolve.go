@@ -305,6 +305,10 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		p.appendFragments,
 	)
 	providerKey, providerDisplayName := providerInfoForAgent(cfgAgent, p.workspace, p.providers)
+	packDirs := p.packDirs
+	if p.city != nil {
+		packDirs = p.city.PackDirsForRig(rigName)
+	}
 	prompt = renderPrompt(p.fs, p.cityPath, p.cityName, cfgAgent.PromptTemplate, PromptContext{
 		CityRoot:            p.cityPath,
 		AgentName:           qualifiedName,
@@ -322,7 +326,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		ProviderDisplayName: providerDisplayName,
 		InstructionsFile:    instructionsFileForAgent(cfgAgent, p.workspace, p.providers),
 		Env:                 cfgAgent.Env,
-	}, p.sessionTemplate, p.stderr, p.packDirs, fragments, p.beadStore)
+	}, p.sessionTemplate, p.stderr, packDirs, fragments, p.beadStore)
 	hasHooks := config.AgentHasHooks(cfgAgent, p.workspace, resolved.Name, p.providers)
 	beacon := runtime.FormatBeaconAt(p.cityName, qualifiedName, !hasHooks, p.beaconTime)
 	suppressStartupPrompt := suppressStartupPromptForAgent(cfgAgent)
