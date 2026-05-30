@@ -684,6 +684,26 @@ func TestResolvedWorkerRuntimeTransportUsesConfiguredTmuxForCommandOnlyBead(t *t
 	}
 }
 
+func TestResolvedWorkerRuntimeTransportUsesStoredACPCommandBeforeConfiguredTmux(t *testing.T) {
+	resolved := &config.ResolvedProvider{
+		Name:        "kimi",
+		Command:     "aimux",
+		Args:        []string{"run", "kimi"},
+		SupportsACP: true,
+		ACPCommand:  "kimi-acp",
+		ACPArgs:     []string{"run", "kimi"},
+	}
+
+	got := resolvedWorkerRuntimeTransport(session.Info{
+		Template: "gascity/workflows.kimi",
+		Provider: "kimi",
+		Command:  "kimi-acp run kimi --resume session-1",
+	}, resolved, config.SessionTransportTmux, nil)
+	if got != config.SessionTransportACP {
+		t.Fatalf("resolvedWorkerRuntimeTransport() = %q, want acp", got)
+	}
+}
+
 func TestResolvedWorkerRuntimeWithConfigErrorsForAmbiguousLegacyACPTransportWithSameCommand(t *testing.T) {
 	cityDir := t.TempDir()
 	writePhase0InterfaceCity(t, cityDir, `[workspace]
