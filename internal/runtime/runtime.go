@@ -318,6 +318,22 @@ type ProcessTableScanner interface {
 	TerminateRuntime(r LiveRuntime) error
 }
 
+// ServerLifecycleProvider is an optional extension for providers that own
+// server-level lifecycle alongside individual session management.
+//
+// This interface must not be added to [Provider]: providers backed by
+// subprocesses, Kubernetes, fakes, or other non-server runtimes do not have a
+// shared server to configure or tear down.
+type ServerLifecycleProvider interface {
+	// ConfigureServer applies server-level configuration. Implementations must
+	// be idempotent, and callers should treat errors as best-effort warnings.
+	ConfigureServer() error
+
+	// TeardownServer terminates the shared server after all sessions have been
+	// drained. Implementations should return nil when the server is already gone.
+	TeardownServer() error
+}
+
 // CopyEntry describes a file or directory to stage in the session's
 // working directory before the agent command starts.
 type CopyEntry struct {

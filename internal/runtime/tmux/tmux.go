@@ -212,6 +212,7 @@ type Tmux struct {
 	exec                 executor
 	interactionDedup     *approvalDedup
 	interactionDedupOnce sync.Once
+	configureOnce        sync.Once
 	hiddenAttachMu       sync.Mutex
 	hiddenAttachClients  map[string]*hiddenAttachClient
 }
@@ -348,6 +349,7 @@ func (t *Tmux) NewSession(name, workDir string) error {
 	if err != nil {
 		return err
 	}
+	_ = t.ConfigureServer()
 	// tmux 3.3+ sets window-size=manual on detached sessions, locking them
 	// at 80x24 even after a client attaches. Reset to "latest" so the window
 	// adapts to the largest attached client.
@@ -377,6 +379,7 @@ func (t *Tmux) NewSessionWithCommand(name, workDir, command string) error {
 	if err != nil {
 		return err
 	}
+	_ = t.ConfigureServer()
 	// tmux 3.3+: reset window-size from manual to latest (see NewSession).
 	t.run("set-option", "-wt", name, "window-size", "latest") //nolint:errcheck // best-effort
 	return nil
@@ -436,6 +439,7 @@ func (t *Tmux) NewSessionWithCommandAndEnv(name, workDir, command string, env ma
 	if err != nil {
 		return err
 	}
+	_ = t.ConfigureServer()
 	// tmux 3.3+: reset window-size from manual to latest (see NewSession).
 	t.run("set-option", "-wt", name, "window-size", "latest") //nolint:errcheck // best-effort
 	return nil
@@ -897,6 +901,21 @@ func (t *Tmux) KillServer() error {
 		return nil // Already dead
 	}
 	return err
+}
+
+// ConfigureServer sets tmux server options required for Gas City lifecycle
+// ownership. It is idempotent per Tmux instance.
+func (t *Tmux) ConfigureServer() error {
+	var err error
+	t.configureOnce.Do(func() {
+		err = t.SetExitEmpty(false)
+	})
+	return err
+}
+
+// TeardownServer terminates the tmux server after all sessions are drained.
+func (t *Tmux) TeardownServer() error {
+	return t.KillServer()
 }
 
 // SetExitEmpty controls the tmux exit-empty server option.
