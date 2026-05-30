@@ -263,7 +263,8 @@ name = "my-city"
 schema = 2
 
 [imports.gastown]
-source = "./assets/gastown"
+source = "https://github.com/gastownhall/gascity-packs.git//gastown"
+version = "sha:d3617d1319a1206ac85f69ba024ec395c49c6f4b"
 ```
 
 ```toml
@@ -272,7 +273,8 @@ source = "./assets/gastown"
 name = "myproject"
 
 [rigs.imports.gastown]
-source = "./assets/gastown"
+source = "https://github.com/gastownhall/gascity-packs.git//gastown"
+version = "sha:d3617d1319a1206ac85f69ba024ec395c49c6f4b"
 ```
 
 ```bash
@@ -289,7 +291,8 @@ This is the cleanest answer to "I want more or fewer polecats for this rig."
 name = "myproject"
 
 [rigs.imports.gastown]
-source = "./assets/gastown"
+source = "https://github.com/gastownhall/gascity-packs.git//gastown"
+version = "sha:d3617d1319a1206ac85f69ba024ec395c49c6f4b"
 
 [[rigs.patches]]
 agent = "gastown.polecat"
@@ -306,7 +309,8 @@ max = 10
 name = "myproject"
 
 [rigs.imports.gastown]
-source = "./assets/gastown"
+source = "https://github.com/gastownhall/gascity-packs.git//gastown"
+version = "sha:d3617d1319a1206ac85f69ba024ec395c49c6f4b"
 
 [[rigs.patches]]
 agent = "gastown.polecat"
@@ -363,7 +367,8 @@ This is what rig overrides are for:
 name = "myproject"
 
 [rigs.imports.gastown]
-source = "./assets/gastown"
+source = "https://github.com/gastownhall/gascity-packs.git//gastown"
+version = "sha:d3617d1319a1206ac85f69ba024ec395c49c6f4b"
 
 [[rigs.patches]]
 agent = "gastown.refinery"

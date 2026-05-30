@@ -54,6 +54,8 @@ this last-call-before-deprecation wave.
 > **Command ownership note:** In the current product, `gc import` is a
 > built-in Go CLI surface. Older bootstrap-pack experiments are legacy
 > compatibility material, not the target implementation model for PackV2.
+> The `gc pack registry` commands are available for registry discovery, but
+> the current authored import TOML is still `source` plus optional `version`.
 
 This guide stays focused on the high-probability migration work:
 
@@ -173,14 +175,29 @@ source = "../shared/gastown"
 Use the city pack's `pack.toml` for city-wide imports. Use rig-scoped
 imports in `city.toml` when a pack should compose only into one rig.
 
-For remote imports, run `gc import install` after the import declarations
-are in place. That writes or repairs `packs.lock` and materializes the
-local cache. Use `gc import check` when you want a read-only validation
-pass: it reports missing or stale lock/cache state and points back to
-`gc import install` for repair.
+For remote imports that you author by hand, use durable import TOML:
+`source` plus optional `version`. Registry handles such as `main:gastown`
+are lookup shortcuts and should not be written into `pack.toml`.
+
+```toml
+[imports.gastown]
+source = "https://github.com/gastownhall/gascity-packs.git//gastown"
+version = "sha:d3617d1319a1206ac85f69ba024ec395c49c6f4b"
+```
+
+After hand-editing remote imports, run `gc import install` to write or
+repair `packs.lock` and materialize the local cache. Use `gc import check`
+when you want a read-only validation pass: it reports missing or stale
+lock/cache state and points back to `gc import install` for repair.
 
 Those commands are about pack acquisition and cache state, not PackV1 to
 PackV2 migration. Use `gc doctor` for migration work.
+
+For the standard Gas Town city shape, current `gc init` writes a public
+`gastown` import from `gastownhall/gascity-packs` and pins it with a
+`version`. `gc doctor --fix` can also rewrite legacy Gas Town imports to
+that public source. Legacy explicit `maintenance` imports are removed in
+this wave because `core` and `maintenance` remain implicit Gas City packs.
 
 Rigs are the main thing that remain in `city.toml`. As you migrate, the
 usual pattern is:
@@ -196,9 +213,9 @@ mechanical.
 ## Agents
 
 Agents move out of inline TOML inventories and into agent directories.
-The focused `[[agent]]` block split follows the same pattern: move the
-identity into `agents/<name>/agent.toml`, move prompt content beside it, and
-validate with `gc doctor`.
+The focused inline-agent split follows the same pattern: move the identity into
+`agents/<name>/agent.toml`, move prompt content beside it, and validate with
+`gc doctor`.
 
 > **Advanced details:** The historical step-by-step agent split notes now live
 > in the
@@ -206,16 +223,7 @@ validate with `gc doctor`.
 > Treat that page as design history; prefer this guide, `gc doctor`, and the
 > generated config reference when they disagree.
 
-### Old shape
-
-```toml
-[[agent]]
-name = "mayor"
-prompt_template = "prompts/mayor.md"
-overlay_dir = "overlays/default"
-```
-
-### New shape
+### Directory shape
 
 ```text
 agents/
@@ -229,7 +237,7 @@ defaults.
 
 ### Migration notes
 
-- move each `[[agent]]` definition into `agents/<name>/`
+- move each legacy inline agent definition into `agents/<name>/`
 - move templated prompt content to `agents/<name>/prompt.template.md`
 - move agent-local overlay content to `agents/<name>/overlay/`
 - keep shared defaults in `[agent_defaults]` (in `pack.toml` for pack-wide, `city.toml` for city-level overrides)
@@ -531,7 +539,7 @@ The hard constraint is:
 run = "./run.sh"
 help = "./help.md"
 run = "../shared/run.sh"
-source = "./assets/imports/maintenance"
+source = "./assets/imports/review"
 ```
 
 ## Common migration gotchas
@@ -612,12 +620,10 @@ Use TOML when you actually need:
 This is the exhaustive top-level lookup table for the old `city.toml`
 schema, plus the qualified rows that matter most during migration.
 
-> **Current rollout note:** Some rows below describe the target PackV2
-> destination rather than the exact state of every in-flight branch. In
-> the current 15.0 wave, machine-local workspace identity (`workspace.name`,
-> `workspace.prefix`) and `rigs.path` now live in `.gc/site.toml` for newly
-> written or migrated cities. `rigs.prefix` and `rigs.suspended` remain in
-> `city.toml` in this release.
+> **Current rollout note:** Machine-local workspace identity
+> (`workspace.name`, `workspace.prefix`) and `rigs.path` now live in
+> `.gc/site.toml` for newly written or migrated cities. `rigs.prefix` and
+> `rigs.suspended` remain in `city.toml` in this release.
 >
 > Migrate in two passes when a city uses included fragments: first resolve
 > hard errors in the root `city.toml`, then address fragment warnings. Fragment
@@ -631,10 +637,10 @@ schema, plus the qualified rows that matter most during migration.
 | `workspace.name` | Workspace identity | Move to `.gc/site.toml` as `workspace_name`. Runtime identity resolves from registered alias (supervisor-managed flows), then site binding / legacy config, then directory basename. `pack.name` remains the portable definition identity and init-time default only. |
 | `workspace.prefix` | Workspace bead prefix | Move to `.gc/site.toml` as `workspace_prefix`. Runtime/API surfaces use the effective site-bound prefix when present and otherwise derive from the effective city name. |
 | `workspace.includes` | City-level pack composition | Move to `[imports.*]` in the root city `pack.toml`. |
-| `workspace.default_rig_includes` | Default pack composition for newly added rigs | Move each default include to `[defaults.rig.imports.<binding>]` entries in the root city `pack.toml`. |
+| `workspace.default_rig_includes` | Default pack composition for newly added rigs | Move each default include to `[defaults.rig.imports.<binding>]` entries in `city.toml`. |
 | `[providers.*]` | Named provider presets | Usually move to `[providers.*]` in the root city `pack.toml`, unless the setting is truly deployment-only. |
 | `[packs.*]` | Named remote pack sources used by includes | Collapse into `[imports.*]` entries. There should no longer be a separate `[packs.*]` registry in `city.toml`. |
-| `[[agent]]` | Inline agent definitions | Move to `agents/<name>/`, with optional `agent.toml`. |
+| Legacy inline agent definitions | Agent definitions embedded in config TOML | Move to `agents/<name>/`, with optional `agent.toml`. |
 | `agent.prompt_template` | Path to agent prompt | Move to `agents/<name>/prompt.template.md` for templated prompts. Use `prompt.md` only for plain, non-templated Markdown. |
 | `agent.overlay_dir` | Path to overlay content | Move content to `agents/<name>/overlay/` or pack-wide `overlay/`. |
 | `agent.session_setup_script` | Path to setup script | Keep as a path-valued field, but point at a pack-local file, usually next to the thing that uses it or under `assets/`. |
@@ -684,7 +690,7 @@ transitional pack fields that people are likely to have.
 | `pack.includes` | Pack-to-pack composition | Replace with `[imports.*]` in `pack.toml`. |
 | `pack.requires` | Pack requirements | Keep in `[pack]` if the requirement model survives unchanged; otherwise migrate to the current requirement shape in the design docs. |
 | `[imports.*]` | Named imports in transitional configs | Keep in `pack.toml`. This is the new composition surface. |
-| `[[agent]]` | Inline pack agent definitions | Move to `agents/<name>/`, with optional `agent.toml`. |
+| Legacy inline pack agent definitions | Agent definitions embedded in pack TOML | Move to `agents/<name>/`, with optional `agent.toml`. For root `pack.toml`, `gc doctor --fix` performs this mechanical split; fragment-authored legacy agent definitions still require a hand edit. |
 | `agent.prompt_template` | Agent prompt file path | Move to `agents/<name>/prompt.template.md` for templated prompts. Use `prompt.md` only for plain, non-templated Markdown. |
 | `agent.overlay_dir` | Agent overlay path | Move content to `agents/<name>/overlay/` or `overlay/`. |
 | `agent.session_setup_script` | Agent setup script path | Keep as a path-valued field pointing at a pack-local file. |
