@@ -1,6 +1,7 @@
 package orders
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -156,6 +157,39 @@ func TestValidateExecWithPool(t *testing.T) {
 	err := Validate(a)
 	if err == nil {
 		t.Error("Validate should fail: exec with pool")
+	}
+}
+
+func TestValidateFormulaWithEnv(t *testing.T) {
+	a := Order{Name: "bad", Formula: "mol-x", Trigger: "manual", Env: map[string]string{"CUSTOM_ORDER_FLAG": "enabled"}}
+	err := Validate(a)
+	if err == nil {
+		t.Fatal("Validate should fail: formula order with env")
+	}
+	if !strings.Contains(err.Error(), "env") {
+		t.Fatalf("Validate error = %q, want env diagnostic", err)
+	}
+}
+
+func TestValidateEnvKeyShape(t *testing.T) {
+	tests := []struct {
+		name string
+		key  string
+	}{
+		{name: "empty", key: ""},
+		{name: "contains equals", key: "BAD=KEY"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			a := Order{Name: "bad", Exec: "scripts/x.sh", Trigger: "manual", Env: map[string]string{tt.key: "value"}}
+			err := Validate(a)
+			if err == nil {
+				t.Fatal("Validate should fail for invalid env key")
+			}
+			if !strings.Contains(err.Error(), "env") {
+				t.Fatalf("Validate error = %q, want env diagnostic", err)
+			}
+		})
 	}
 }
 

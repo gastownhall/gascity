@@ -298,6 +298,11 @@ func scanOrderSetSnapshotFS(fs fsys.FS, cityPath string, cfg *config.City, stder
 			logDispatchError(stderr, "%s: order overrides: %v", cmdName, err)
 			return nil
 		},
+		OnValidateError: func(orderName string, err error) error {
+			logDispatchError(stderr, "%s: order %s: %v", cmdName, orderName, err)
+			return nil
+		},
+		ValidateOrder: validateOrderExecEnvOverrides,
 	})
 	if err != nil {
 		return orderSetSnapshot{}, err

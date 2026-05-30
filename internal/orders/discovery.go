@@ -12,7 +12,9 @@ import (
 
 // discoverRoot discovers orders for one logical root. Wave 2 requires flat
 // order files and treats selected flat order files as load-bearing config:
-// unreadable files and older PackV1 subdirectory paths are hard errors.
+// unreadable files, TOML parse errors, and older PackV1 subdirectory paths are
+// hard errors. Semantic order validation runs after layering so callers can
+// choose whether to reject or skip one invalid order.
 func discoverRoot(fs fsys.FS, root ScanRoot) ([]Order, error) {
 	found := make(map[string]Order)
 	var names []string

@@ -64,6 +64,34 @@ name = "refinery"
 	}
 }
 
+func TestExpandPacksAllowsSemanticallyInvalidFlatOrder(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "packs/tools/pack.toml", `
+[pack]
+name = "tools"
+version = "1.0.0"
+schema = 1
+`)
+	writeFile(t, dir, "packs/tools/orders/deploy.toml", `
+[order]
+formula = "mol-deploy"
+trigger = "manual"
+
+[order.env]
+CUSTOM_ORDER_FLAG = "enabled"
+`)
+
+	cfg := &City{
+		Rigs: []Rig{
+			{Name: "demo", Path: "/work", Includes: []string{"packs/tools"}},
+		},
+	}
+
+	if err := ExpandPacks(cfg, fsys.OSFS{}, dir, nil); err != nil {
+		t.Fatalf("ExpandPacks: %v", err)
+	}
+}
+
 func TestExpandPacks_MultipleRigs(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, dir, "packs/gastown/pack.toml", `

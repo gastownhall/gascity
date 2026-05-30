@@ -5948,6 +5948,32 @@ interval = "24h"
 	}
 }
 
+func TestParseOrderOverrideEnv(t *testing.T) {
+	cfg, err := Parse([]byte(`
+[workspace]
+name = "test-city"
+
+[orders]
+
+[[orders.overrides]]
+name = "digest"
+
+[orders.overrides.env]
+GC_JSONL_MIN_PREV_FOR_SPIKE = "250"
+CUSTOM_ORDER_FLAG = "enabled"
+`))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if len(cfg.Orders.Overrides) != 1 {
+		t.Fatalf("len(overrides) = %d, want 1", len(cfg.Orders.Overrides))
+	}
+	env := cfg.Orders.Overrides[0].Env
+	if env["GC_JSONL_MIN_PREV_FOR_SPIKE"] != "250" || env["CUSTOM_ORDER_FLAG"] != "enabled" {
+		t.Fatalf("Env = %+v, want parsed override env", env)
+	}
+}
+
 func TestParseOrderOverrideLegacyGateAlias(t *testing.T) {
 	cfg, err := Parse([]byte(`
 [workspace]

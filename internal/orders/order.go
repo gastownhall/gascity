@@ -6,6 +6,7 @@ package orders
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/BurntSushi/toml"
@@ -46,9 +47,8 @@ type Order struct {
 	// order's child process. Use the `[order.env]` TOML table to
 	// override thresholds (e.g. GC_DOCTOR_LATENCY_WARN_S) without
 	// editing the order's shell scripts or the controller's parent
-	// environment. Overrides are applied last and win over the
-	// controller-derived projection. Not currently plumbed for
-	// wisp dispatch.
+	// environment. Env is supported only for exec orders; controller-
+	// owned routing and identity keys are rejected before dispatch.
 	Env map[string]string `toml:"env,omitempty"`
 	// Source is the absolute file path to the discovered order file (set by scanner, not from TOML).
 	Source string `toml:"-"`
@@ -157,9 +157,20 @@ func Validate(a Order) error {
 	if a.Formula != "" && a.Exec != "" {
 		return fmt.Errorf("order %q: formula and exec are mutually exclusive", a.Name)
 	}
+	if len(a.Env) > 0 && a.Exec == "" {
+		return fmt.Errorf("order %q: env is supported only for exec orders", a.Name)
+	}
 	// Exec orders must not have a pool (no agent pipeline).
 	if a.Exec != "" && a.Pool != "" {
 		return fmt.Errorf("order %q: exec orders cannot have a pool", a.Name)
+	}
+	for key := range a.Env {
+		if strings.TrimSpace(key) == "" {
+			return fmt.Errorf("order %q: env key is required", a.Name)
+		}
+		if strings.Contains(key, "=") {
+			return fmt.Errorf("order %q: invalid env key %q: must not contain '='", a.Name, key)
+		}
 	}
 	// Validate timeout if set.
 	if a.Timeout != "" {

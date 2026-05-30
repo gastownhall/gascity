@@ -6429,25 +6429,59 @@ func TestOrderExecEnvAppliesOrderEnvOverrides(t *testing.T) {
 	}
 }
 
-// TestOrderExecEnvOrderEnvOverridesProjectedDefaults verifies that
-// `[order.env]` wins over controller-derived defaults — the whole point
-// of per-order tuning is to override what the projection set up.
-func TestOrderExecEnvOrderEnvOverridesProjectedDefaults(t *testing.T) {
+// TestOrderExecEnvRejectsReservedOrderEnvKeys verifies that `[order.env]`
+// cannot shadow controller-owned routing and identity variables after the
+// store target has already been resolved.
+func TestOrderExecEnvRejectsReservedOrderEnvKeys(t *testing.T) {
 	t.Setenv("GC_BEADS", "bd")
 	t.Setenv("GC_DOLT", "skip")
 
 	cityDir := t.TempDir()
 	target := execStoreTarget{ScopeRoot: cityDir, ScopeKind: "city", Prefix: "pc"}
+	for _, key := range []string{
+		"GC_STORE_SCOPE",
+		"ORDER_DIR",
+		"PACK_DIR",
+		"BD_EXPORT_AUTO",
+		"GC_BEADS",
+		"GC_BEADS_SCOPE_ROOT",
+	} {
+		t.Run(key, func(t *testing.T) {
+			a := orders.Order{
+				Name:     "scoped-order",
+				Trigger:  "cooldown",
+				Interval: "1m",
+				Exec:     "true",
+				Env: map[string]string{
+					key: "overridden",
+				},
+			}
+
+			_, err := orderExecEnvWithError(cityDir, nil, target, a)
+			if err == nil {
+				t.Fatal("orderExecEnvWithError() succeeded; want reserved env key error")
+			}
+			if !strings.Contains(err.Error(), key) || !strings.Contains(err.Error(), "controller-owned") {
+				t.Fatalf("error = %q, want controller-owned %s diagnostic", err, key)
+			}
+		})
+	}
+}
+
+func TestOrderExecEnvReservedKeysCoverProjectedEnv(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("GC_DOLT", "skip")
+
+	cityDir := t.TempDir()
+	packDir := filepath.Join(cityDir, "packs", "maintenance")
+	target := execStoreTarget{ScopeRoot: cityDir, ScopeKind: "city", Prefix: "pc"}
 	a := orders.Order{
-		Name:     "scoped-order",
-		Trigger:  "cooldown",
-		Interval: "1m",
-		Exec:     "true",
-		Env: map[string]string{
-			// GC_STORE_SCOPE is set unconditionally to target.ScopeKind
-			// earlier in orderExecEnv; the override must win.
-			"GC_STORE_SCOPE": "overridden",
-		},
+		Name:         "scoped-order",
+		Trigger:      "cooldown",
+		Interval:     "1m",
+		Exec:         "true",
+		Source:       filepath.Join(packDir, "orders", "scoped-order.toml"),
+		FormulaLayer: filepath.Join(packDir, "formulas"),
 	}
 
 	envSlice, err := orderExecEnvWithError(cityDir, nil, target, a)
@@ -6455,22 +6489,18 @@ func TestOrderExecEnvOrderEnvOverridesProjectedDefaults(t *testing.T) {
 		t.Fatalf("orderExecEnvWithError() error = %v", err)
 	}
 
-	want := "GC_STORE_SCOPE=overridden"
-	bad := "GC_STORE_SCOPE=city"
-	foundWant, foundBad := false, false
+	var unreserved []string
 	for _, entry := range envSlice {
-		switch entry {
-		case want:
-			foundWant = true
-		case bad:
-			foundBad = true
+		key, _, ok := strings.Cut(entry, "=")
+		if !ok {
+			continue
+		}
+		if !isReservedOrderExecEnvKey(key) {
+			unreserved = append(unreserved, key)
 		}
 	}
-	if !foundWant {
-		t.Errorf("orderExecEnv missing override %q; env=%v", want, envSlice)
-	}
-	if foundBad {
-		t.Errorf("orderExecEnv kept default %q despite override; env=%v", bad, envSlice)
+	if len(unreserved) > 0 {
+		t.Fatalf("projected order exec env keys missing from reserved guard: %v", unreserved)
 	}
 }
 
