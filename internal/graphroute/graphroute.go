@@ -440,15 +440,13 @@ func DecorateGraphWorkflowRecipe(recipe *formula.Recipe, routeVars map[string]st
 			step.Metadata["gc.root_store_ref"] = rootStoreRef
 		}
 		if step.IsRoot {
-			// gc.routed_to is the canonical persisted delivery key every runtime
-			// demand/claim/scale reader consults; the workflow root must carry it
-			// to be claimable, exactly like its own child steps and every legacy
-			// bead. Without it a pool-routed root is spawned-for by scale_check
-			// but never claimed by the worker, then idle-reaped (fixes #2763).
-			// gc.run_target is still stamped here pending the reader reversion
-			// that deprecates it as a wire field (ga-eld2x).
+			// gc.routed_to is the canonical (and sole) persisted delivery key
+			// every runtime demand/claim/scale reader consults; the workflow root
+			// must carry it to be claimable, exactly like its own child steps and
+			// every legacy bead. Without it a pool-routed root is spawned-for by
+			// scale_check but never claimed by the worker, then idle-reaped
+			// (fixes #2763; gc.run_target retired as a wire field — ga-eld2x).
 			step.Metadata["gc.routed_to"] = routedTo
-			step.Metadata["gc.run_target"] = routedTo
 			if sourceBeadID != "" {
 				step.Metadata["gc.source_bead_id"] = sourceBeadID
 				if rootStoreRef != "" {
@@ -539,13 +537,12 @@ func ApplyGraphRouting(recipe *formula.Recipe, a *config.Agent, routedTo string,
 // root bead is excluded because InstantiateSlingFormula stamps it via the
 // SlingResult path.
 //
-// Per-step gc.run_target wins: when a step already declares a target via
-// gc.run_target, the stamper uses that value for gc.routed_to instead of the
-// convoy-wide default. This keeps the two metadata keys in sync so the
-// gc.routed_to-keyed work_query path resolves to the same agent the
-// gc.run_target-aware reader path picks. Without this, the blanket routedTo
-// clobbers per-step targets and every child looks routed to the convoy entry
-// agent (see adaf6ec / PR #2386 reader fix).
+// Per-step gc.run_target is the formula author's compile-time routing intent:
+// when a step declares a target via gc.run_target, the stamper resolves it into
+// gc.routed_to (the sole persisted routing key — ga-eld2x) instead of the
+// convoy-wide default. Without this, the blanket routedTo clobbers per-step
+// targets and every child looks routed to the convoy entry agent (see adaf6ec /
+// PR #2386).
 func stampLegacyRecipeRouting(recipe *formula.Recipe, routedTo string) {
 	routedTo = strings.TrimSpace(routedTo)
 	if recipe == nil || routedTo == "" {

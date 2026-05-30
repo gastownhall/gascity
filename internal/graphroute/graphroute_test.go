@@ -248,8 +248,11 @@ func TestDecorateGraphWorkflowRecipe_SetsRootMetadata(t *testing.T) {
 		t.Fatalf("DecorateGraphWorkflowRecipe: %v", err)
 	}
 	root := r.Steps[0]
-	if root.Metadata["gc.run_target"] != "mayor" {
-		t.Errorf("root gc.run_target = %q, want mayor", root.Metadata["gc.run_target"])
+	if root.Metadata["gc.routed_to"] != "mayor" {
+		t.Errorf("root gc.routed_to = %q, want mayor", root.Metadata["gc.routed_to"])
+	}
+	if _, ok := root.Metadata["gc.run_target"]; ok {
+		t.Errorf("root still carries retired gc.run_target = %q", root.Metadata["gc.run_target"])
 	}
 	if root.Metadata["gc.source_bead_id"] != "src-1" {
 		t.Errorf("root gc.source_bead_id = %q, want src-1", root.Metadata["gc.source_bead_id"])

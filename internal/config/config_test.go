@@ -1555,16 +1555,17 @@ func TestPoolRoundTrip(t *testing.T) {
 func TestEffectiveWorkQueryDefault(t *testing.T) {
 	a := Agent{Name: "mayor"}
 	got := a.EffectiveWorkQuery()
-	// Tiered query: check that tier 3 (run_target preferred, routed_to fallback)
-	// and tier 1-2 (assignee resolution) are present.
-	if !strings.Contains(got, "for key in gc.run_target gc.routed_to") {
-		t.Errorf("EffectiveWorkQuery() missing tier 3 routing-key precedence: %q", got)
-	}
-	if !strings.Contains(got, `bd ready --include-ephemeral --metadata-field "$key=$target" --unassigned --exclude-type=epic --json --sort oldest --limit=1`) {
+	// Tiered query: tier 3 routes via gc.routed_to (the sole persisted routing
+	// key; gc.run_target was retired — ga-eld2x) and tiers 1-2 resolve by
+	// assignee.
+	if !strings.Contains(got, `bd ready --include-ephemeral --metadata-field "gc.routed_to=$target" --unassigned --exclude-type=epic --json --sort oldest --limit=1`) {
 		t.Errorf("EffectiveWorkQuery() missing tier 3 pool-demand probe: %q", got)
 	}
 	if !strings.Contains(got, "-- mayor") {
 		t.Errorf("EffectiveWorkQuery() missing tier 3 target argument: %q", got)
+	}
+	if strings.Contains(got, "gc.run_target") {
+		t.Errorf("EffectiveWorkQuery() still references retired gc.run_target: %q", got)
 	}
 	if !strings.Contains(got, `"$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"`) {
 		t.Errorf("EffectiveWorkQuery() missing multi-identifier resolution: %q", got)
@@ -1841,8 +1842,7 @@ func TestEffectiveWorkQueryExcludesEpics(t *testing.T) {
 	wantSnippets := []string{
 		`bd list --include-ephemeral --status in_progress --assignee="$id" --exclude-type=epic --json`,
 		`bd ready --include-ephemeral --assignee="$id" --exclude-type=epic --json`,
-		`bd ready --include-ephemeral --metadata-field "$key=$target" --unassigned --exclude-type=epic --json`,
-		`for key in gc.run_target gc.routed_to`,
+		`bd ready --include-ephemeral --metadata-field "gc.routed_to=$target" --unassigned --exclude-type=epic --json`,
 		`-- hello-world/worker`,
 	}
 	for _, want := range wantSnippets {
@@ -1861,8 +1861,7 @@ func TestEffectiveWorkQueryExcludesEpicsControlDispatcher(t *testing.T) {
 	wantSnippets := []string{
 		`bd list --include-ephemeral --status in_progress --assignee="$cand" --exclude-type=epic --json`,
 		`bd ready --include-ephemeral --assignee="$cand" --exclude-type=epic --json`,
-		`bd ready --include-ephemeral --metadata-field "$key=$target" --unassigned --exclude-type=epic --json`,
-		`for key in gc.run_target gc.routed_to`,
+		`bd ready --include-ephemeral --metadata-field "gc.routed_to=$target" --unassigned --exclude-type=epic --json`,
 		`-- gascity/control-dispatcher gascity/workflow-control`,
 	}
 	for _, want := range wantSnippets {
@@ -1919,88 +1918,32 @@ esac
 	}
 }
 
-// TestEffectiveWorkQueryPrefersRunTarget is the #2763 regression: the worker
-// claim path (EffectiveWorkQuery Tier 3) must return a graph.v2 workflow root
-// that stamps only gc.run_target (gc.routed_to unset). Before the fix the
-// reconciler spawned the worker on gc.run_target demand but the worker's claim
-// query read only gc.routed_to and saw an empty queue, so the root was never
-// claimed and the worker idle-reaped — silently orphaning the work. The fake
-// bd returns work solely for the gc.run_target predicate.
-func TestEffectiveWorkQueryPrefersRunTarget(t *testing.T) {
+// TestEffectiveWorkQueryClaimsRoutedToRoot verifies the worker claim path
+// (EffectiveWorkQuery Tier 3) claims a routed root via gc.routed_to — the sole
+// persisted routing key after gc.run_target was retired as a wire field
+// (ga-eld2x). The fake bd returns work only for the gc.routed_to predicate.
+func TestEffectiveWorkQueryClaimsRoutedToRoot(t *testing.T) {
 	a := Agent{Name: "worker", Dir: "hello-world"}
 	out := runEffectiveWorkQuery(t, a, map[string]string{
 		"GC_SESSION_ORIGIN": "ephemeral",
 	}, `#!/bin/sh
 set -eu
 case "$*" in
-  *"--metadata-field gc.run_target=hello-world/worker"*)
-    printf '[{"id":"graph-root","issue_type":"workflow"}]'
-    ;;
-  *)
-    printf '[]'
-    ;;
-esac
-`)
-	if !strings.Contains(out, "graph-root") {
-		t.Fatalf("EffectiveWorkQuery() did not claim the run_target-only graph root: %q", out)
-	}
-}
-
-// TestEffectiveWorkQueryFallsBackToRoutedTo verifies the gc.routed_to
-// compatibility fallback still claims legacy roots stamped only with
-// gc.routed_to (gc.run_target unset) — e.g. the legacy --formula wisp path
-// that the #2763 reader change must not regress.
-func TestEffectiveWorkQueryFallsBackToRoutedTo(t *testing.T) {
-	a := Agent{Name: "worker", Dir: "hello-world"}
-	out := runEffectiveWorkQuery(t, a, map[string]string{
-		"GC_SESSION_ORIGIN": "ephemeral",
-	}, `#!/bin/sh
-set -eu
-case "$*" in
-  *"--metadata-field gc.run_target=hello-world/worker"*) printf '[]' ;;
   *"--metadata-field gc.routed_to=hello-world/worker"*)
-    printf '[{"id":"legacy-root","issue_type":"wisp"}]'
+    printf '[{"id":"routed-root","issue_type":"workflow"}]'
     ;;
   *) printf '[]' ;;
 esac
 `)
-	if !strings.Contains(out, "legacy-root") {
-		t.Fatalf("EffectiveWorkQuery() did not claim the routed_to-only legacy root: %q", out)
+	if !strings.Contains(out, "routed-root") {
+		t.Fatalf("EffectiveWorkQuery() did not claim the routed_to root: %q", out)
 	}
 }
 
-// TestEffectiveWorkQueryRunTargetWinsOverRoutedTo locks the precedence: when a
-// bead matches both keys, the preferred gc.run_target result is claimed and the
-// gc.routed_to result is not surfaced.
-func TestEffectiveWorkQueryRunTargetWinsOverRoutedTo(t *testing.T) {
-	a := Agent{Name: "worker", Dir: "hello-world"}
-	out := runEffectiveWorkQuery(t, a, map[string]string{
-		"GC_SESSION_ORIGIN": "ephemeral",
-	}, `#!/bin/sh
-set -eu
-case "$*" in
-  *"--metadata-field gc.run_target=hello-world/worker"*)
-    printf '[{"id":"run-target-root","issue_type":"workflow"}]'
-    ;;
-  *"--metadata-field gc.routed_to=hello-world/worker"*)
-    printf '[{"id":"routed-to-root","issue_type":"wisp"}]'
-    ;;
-  *) printf '[]' ;;
-esac
-`)
-	if !strings.Contains(out, "run-target-root") {
-		t.Fatalf("EffectiveWorkQuery() did not prefer the gc.run_target root: %q", out)
-	}
-	if strings.Contains(out, "routed-to-root") {
-		t.Fatalf("EffectiveWorkQuery() surfaced the gc.routed_to root despite a run_target match: %q", out)
-	}
-}
-
-// TestEffectivePoolDemandQueryPrefersRunTarget verifies the spawn-side half of
-// the #2763 symmetry: the reconciler count-form counts gc.run_target demand for
-// a graph.v2 root that stamps only gc.run_target, so it keeps the worker it
-// spawned alive rather than treating the queue as empty.
-func TestEffectivePoolDemandQueryPrefersRunTarget(t *testing.T) {
+// TestEffectivePoolDemandQueryCountsRoutedTo verifies the reconciler count-form
+// counts gc.routed_to demand — the spawn-side counterpart to the worker claim
+// path now that gc.routed_to is the sole persisted routing key (ga-eld2x).
+func TestEffectivePoolDemandQueryCountsRoutedTo(t *testing.T) {
 	if _, err := exec.LookPath("jq"); err != nil {
 		t.Skip("jq not available; count-form exercises a jq pipeline")
 	}
@@ -2008,7 +1951,7 @@ func TestEffectivePoolDemandQueryPrefersRunTarget(t *testing.T) {
 	out := runShellWithFakeBd(t, a.EffectivePoolDemandQuery(), nil, `#!/bin/sh
 set -eu
 case "$*" in
-  *"--metadata-field gc.run_target=hello-world/worker"*)
+  *"--metadata-field gc.routed_to=hello-world/worker"*)
     printf '[{"id":"a"},{"id":"b"}]'
     ;;
   *)
@@ -2017,7 +1960,7 @@ case "$*" in
 esac
 `)
 	if strings.TrimSpace(out) != "2" {
-		t.Fatalf("EffectivePoolDemandQuery() count = %q, want 2 (run_target demand)", strings.TrimSpace(out))
+		t.Fatalf("EffectivePoolDemandQuery() count = %q, want 2 (routed_to demand)", strings.TrimSpace(out))
 	}
 }
 
@@ -2060,9 +2003,10 @@ func TestDefaultPoolCheckUsesBdReady(t *testing.T) {
 // reconciler's pool-demand path (EffectivePoolDemandQuery) and the
 // worker's claim path (EffectiveWorkQuery Tier 3) must derive their
 // "is there work on this routed queue?" predicate from the same
-// bdReadyPoolDemandShell helper and walk the same routing keys
-// (gc.run_target preferred, gc.routed_to fallback; #2763). Adding a tier to
-// one without updating the other re-introduces the spawn-storm bug.
+// bdReadyPoolDemandShell helper. Adding a tier to one without updating
+// the other re-introduces the spawn-storm bug — this test ensures both
+// reference the identical gc.routed_to predicate string (the sole persisted
+// routing key after gc.run_target was retired — ga-eld2x).
 func TestPoolDemandPredicateSharedWithWorkQuery(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -2096,24 +2040,18 @@ func TestPoolDemandPredicateSharedWithWorkQuery(t *testing.T) {
 			if !strings.Contains(demand, countPredicate) {
 				t.Errorf("EffectivePoolDemandQuery() missing shared predicate %q in %q", countPredicate, demand)
 			}
-			keyList := poolDemandKeyListShell()
-			if !strings.Contains(wq, "for key in "+keyList) {
-				t.Errorf("EffectiveWorkQuery() missing shared key order %q in %q", keyList, wq)
-			}
-			if !strings.Contains(demand, "for key in "+keyList) {
-				t.Errorf("EffectivePoolDemandQuery() missing shared key order %q in %q", keyList, demand)
-			}
 			if !strings.Contains(wq, tt.target) {
 				t.Errorf("EffectiveWorkQuery() missing target argument %q in %q", tt.target, wq)
 			}
 			if !strings.Contains(demand, tt.target) {
 				t.Errorf("EffectivePoolDemandQuery() missing target argument %q in %q", tt.target, demand)
 			}
-			for _, key := range poolDemandKeys {
-				embedded := key + "=" + tt.target
-				if strings.Contains(wq, embedded) {
-					t.Errorf("EffectiveWorkQuery() embeds target in predicate %q in %q", embedded, wq)
-				}
+			embedded := "gc.routed_to=" + tt.target
+			if strings.Contains(wq, embedded) {
+				t.Errorf("EffectiveWorkQuery() embeds target in predicate %q in %q", embedded, wq)
+			}
+			if strings.Contains(demand, embedded) {
+				t.Errorf("EffectivePoolDemandQuery() embeds target in predicate %q in %q", embedded, demand)
 			}
 		})
 	}
