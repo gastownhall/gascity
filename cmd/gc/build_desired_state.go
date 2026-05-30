@@ -1556,11 +1556,11 @@ func appendAssignedUnique(dst *[]beads.Bead, stores *[]beads.Store, storeRefs *[
 }
 
 // appendOpenRoutedWorkUnique includes open beads that are still pool-routed
-// AND still carry an assignee. This is the narrow input releaseOrphanedPool
-// Assignments needs to clear step beads abandoned by a dead session
-// (graph.v2 wisps where the root depends on the finalize step, so the
-// root never enters ready and the step assignee remains a long-form
-// dead-session identity invisible to readyAssignedWorkAssignees).
+// AND still carry an assignee. This is the narrow input
+// releaseOrphanedPoolAssignments needs to clear step beads abandoned by a
+// dead session (graph.v2 wisps where the root depends on the finalize
+// step, so the root never enters ready and the step assignee remains a
+// long-form dead-session identity invisible to readyAssignedWorkAssignees).
 func appendOpenRoutedWorkUnique(dst *[]beads.Bead, stores *[]beads.Store, storeRefs *[]string, beadList []beads.Bead, seen map[string]struct{}, store beads.Store, storeRef string) {
 	for _, b := range beadList {
 		if strings.TrimSpace(b.Assignee) == "" {
