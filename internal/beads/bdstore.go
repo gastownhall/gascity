@@ -787,6 +787,64 @@ func (s *BdStore) Update(id string, opts UpdateOpts) error {
 	return nil
 }
 
+// UpdateAll modifies the same fields on multiple beads via one bd update
+// invocation. It is intended for controller hot paths that need the semantics
+// of bd update, not bd close, across a batch of known bead IDs.
+func (s *BdStore) UpdateAll(ids []string, opts UpdateOpts) (int, error) {
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	args := append([]string{"update", "--json"}, ids...)
+	baseLen := len(args)
+	if opts.Title != nil {
+		args = append(args, "--title", *opts.Title)
+	}
+	if opts.Status != nil {
+		args = append(args, "--status", *opts.Status)
+	}
+	if opts.Type != nil {
+		args = append(args, "--type", *opts.Type)
+	}
+	if opts.Priority != nil {
+		args = append(args, "--priority", strconv.Itoa(*opts.Priority))
+	}
+	if opts.Description != nil {
+		args = append(args, "--description", *opts.Description)
+	}
+	if opts.ParentID != nil {
+		args = append(args, "--parent", *opts.ParentID)
+	}
+	if opts.Assignee != nil {
+		args = append(args, "--assignee", *opts.Assignee)
+	}
+	if len(opts.Metadata) > 0 {
+		keys := make([]string, 0, len(opts.Metadata))
+		for k := range opts.Metadata {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			args = append(args, "--set-metadata", k+"="+opts.Metadata[k])
+		}
+	}
+	for _, l := range opts.Labels {
+		args = append(args, "--add-label", l)
+	}
+	for _, l := range opts.RemoveLabels {
+		args = append(args, "--remove-label", l)
+	}
+	if len(args) == baseLen {
+		return 0, nil
+	}
+	if err := s.runBDTransientWrite(args...); err != nil {
+		if isBdNotFound(err) {
+			return 0, fmt.Errorf("batch updating beads %v: %w", ids, ErrNotFound)
+		}
+		return 0, fmt.Errorf("batch updating beads %v: %w", ids, err)
+	}
+	return len(ids), nil
+}
+
 // WaitForParentProjection blocks until bd's parent-child listing projection
 // reflects a successful reparent from oldParentID to newParentID for id.
 func (s *BdStore) WaitForParentProjection(ctx context.Context, id, oldParentID, newParentID string) error {

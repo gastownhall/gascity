@@ -914,6 +914,49 @@ func TestBdStoreTxPreservesAddsAndRemovesLabels(t *testing.T) {
 	}
 }
 
+func TestBdStoreUpdateAllBatchesIDsAndRetriesTransientWrite(t *testing.T) {
+	var calls [][]string
+	runner := func(_, name string, args ...string) ([]byte, error) {
+		if name != "bd" {
+			return nil, fmt.Errorf("unexpected command name %q", name)
+		}
+		calls = append(calls, append([]string(nil), args...))
+		if len(calls) == 1 {
+			return nil, fmt.Errorf("Error 1213 (40001): serialization failure")
+		}
+		return nil, nil
+	}
+	s := beads.NewBdStore("/city", runner)
+	status := "closed"
+	updated, err := s.UpdateAll([]string{"bd-1", "bd-2"}, beads.UpdateOpts{
+		Status: &status,
+		Metadata: map[string]string{
+			"phase":      "abort",
+			"gc.outcome": "skipped",
+		},
+	})
+	if err != nil {
+		t.Fatalf("UpdateAll: %v", err)
+	}
+	if updated != 2 {
+		t.Fatalf("updated = %d, want 2", updated)
+	}
+	want := []string{
+		"update", "--json", "bd-1", "bd-2",
+		"--status", "closed",
+		"--set-metadata", "gc.outcome=skipped",
+		"--set-metadata", "phase=abort",
+	}
+	if len(calls) != 2 {
+		t.Fatalf("calls = %d, want 2 transient retry attempts", len(calls))
+	}
+	for i, got := range calls {
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("call[%d] = %v, want %v", i, got, want)
+		}
+	}
+}
+
 func TestBdStoreWaitForParentProjection(t *testing.T) {
 	var mu sync.Mutex
 	showCalls := 0

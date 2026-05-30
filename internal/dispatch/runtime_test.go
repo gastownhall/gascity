@@ -446,6 +446,113 @@ func TestProcessScopeCheckAbortsScopeOnFailure(t *testing.T) {
 	}
 }
 
+func TestSkipOpenScopeMembersBatchesDependencyChecksAndUpdates(t *testing.T) {
+	t.Parallel()
+
+	store := &scopeSkipBatchStore{MemStore: beads.NewMemStore()}
+	body := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "body",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":         "scope",
+			"gc.scope_role":   "body",
+			"gc.root_bead_id": "wf-1",
+			"gc.step_ref":     "demo.body",
+		},
+	})
+	failed := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title:  "preflight",
+		Type:   "task",
+		Status: "closed",
+		Metadata: map[string]string{
+			"gc.root_bead_id": "wf-1",
+			"gc.scope_ref":    "body",
+			"gc.scope_role":   "member",
+			"gc.outcome":      "fail",
+		},
+	})
+	control := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "Finalize scope for preflight",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":         "scope-check",
+			"gc.root_bead_id": "wf-1",
+			"gc.scope_ref":    "body",
+			"gc.scope_role":   "control",
+		},
+	})
+	futureMember := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "implement",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.root_bead_id": "wf-1",
+			"gc.scope_ref":    "body",
+			"gc.scope_role":   "member",
+		},
+	})
+	futureControl := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "Finalize scope for implement",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":         "scope-check",
+			"gc.root_bead_id": "wf-1",
+			"gc.scope_ref":    "body",
+			"gc.scope_role":   "control",
+		},
+	})
+	independent := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "independent cleanup marker",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.root_bead_id": "wf-1",
+			"gc.scope_ref":    "body",
+			"gc.scope_role":   "member",
+		},
+	})
+
+	mustDepAdd(t, store, futureMember.ID, control.ID, "blocks")
+	mustDepAdd(t, store, futureControl.ID, futureMember.ID, "blocks")
+
+	snapshot := scopeSnapshot{
+		rootID:      "wf-1",
+		scopeRef:    "body",
+		allComplete: true,
+		members:     []beads.Bead{body, failed, control, futureMember, futureControl, independent},
+		body:        body,
+	}
+	skipped, err := snapshot.skipOpenScopeMembers(store, control.ID)
+	if err != nil {
+		t.Fatalf("skipOpenScopeMembers: %v", err)
+	}
+	if skipped != 3 {
+		t.Fatalf("skipped = %d, want 3", skipped)
+	}
+	if store.depListCalls != 0 {
+		t.Fatalf("DepList calls = %d, want 0 when batch dep listing is available", store.depListCalls)
+	}
+	if store.depListBatchCalls != 2 {
+		t.Fatalf("DepListBatch calls = %d, want 2 dependency waves", store.depListBatchCalls)
+	}
+	if store.updateCalls != 0 {
+		t.Fatalf("Update calls = %d, want 0 when batch update is available", store.updateCalls)
+	}
+	if store.updateAllCalls != 2 {
+		t.Fatalf("UpdateAll calls = %d, want 2 dependency waves", store.updateAllCalls)
+	}
+	if got := []int{len(store.updateAllIDs[0]), len(store.updateAllIDs[1])}; !slices.Equal(got, []int{2, 1}) {
+		t.Fatalf("UpdateAll wave sizes = %v, want [2 1]", got)
+	}
+	for _, beadID := range []string{futureMember.ID, futureControl.ID, independent.ID} {
+		member := mustGetBead(t, store, beadID)
+		if member.Status != "closed" {
+			t.Fatalf("%s status = %q, want closed", beadID, member.Status)
+		}
+		if got := member.Metadata["gc.outcome"]; got != "skipped" {
+			t.Fatalf("%s outcome = %q, want skipped", beadID, got)
+		}
+	}
+}
+
 func TestProcessScopeCheckTreatsRetryAttemptFailureAsNonTerminalForScope(t *testing.T) {
 	t.Parallel()
 
@@ -1209,6 +1316,15 @@ type countingListStore struct {
 	queries   []beads.ListQuery
 }
 
+type scopeSkipBatchStore struct {
+	*beads.MemStore
+	depListCalls      int
+	depListBatchCalls int
+	updateCalls       int
+	updateAllCalls    int
+	updateAllIDs      [][]string
+}
+
 type scopeBodyVanishAfterFirstResolveStore struct {
 	*beads.MemStore
 	mu       sync.Mutex
@@ -1234,6 +1350,34 @@ func (s *countingListStore) List(query beads.ListQuery) ([]beads.Bead, error) {
 	s.listCalls++
 	s.queries = append(s.queries, query)
 	return s.MemStore.List(query)
+}
+
+func (s *scopeSkipBatchStore) DepList(id, direction string) ([]beads.Dep, error) {
+	s.depListCalls++
+	return s.MemStore.DepList(id, direction)
+}
+
+func (s *scopeSkipBatchStore) DepListBatch(ids []string) (map[string][]beads.Dep, error) {
+	s.depListBatchCalls++
+	return s.MemStore.DepListBatch(ids)
+}
+
+func (s *scopeSkipBatchStore) Update(id string, opts beads.UpdateOpts) error {
+	s.updateCalls++
+	return s.MemStore.Update(id, opts)
+}
+
+func (s *scopeSkipBatchStore) UpdateAll(ids []string, opts beads.UpdateOpts) (int, error) {
+	s.updateAllCalls++
+	s.updateAllIDs = append(s.updateAllIDs, slices.Clone(ids))
+	updated := 0
+	for _, id := range ids {
+		if err := s.MemStore.Update(id, opts); err != nil {
+			return updated, err
+		}
+		updated++
+	}
+	return updated, nil
 }
 
 func (s *scopeBodyVanishAfterFirstResolveStore) List(query beads.ListQuery) ([]beads.Bead, error) {

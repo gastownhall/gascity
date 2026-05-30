@@ -483,3 +483,20 @@ func (m *MemStore) DepList(id, direction string) ([]Dep, error) {
 	}
 	return result, nil
 }
+
+// DepListBatch returns "down" dependencies for multiple beads from memory.
+func (m *MemStore) DepListBatch(ids []string) (map[string][]Dep, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	idSet := make(map[string]struct{}, len(ids))
+	result := make(map[string][]Dep, len(ids))
+	for _, id := range ids {
+		idSet[id] = struct{}{}
+	}
+	for _, d := range m.deps {
+		if _, ok := idSet[d.IssueID]; ok {
+			result[d.IssueID] = append(result[d.IssueID], d)
+		}
+	}
+	return result, nil
+}
