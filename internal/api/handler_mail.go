@@ -380,7 +380,7 @@ func uniqueMailRecipients(recipients []string) []string {
 		return []string{""}
 	}
 	seen := make(map[string]bool, len(recipients))
-	unique := recipients[:0]
+	unique := make([]string, 0, len(recipients))
 	for _, recipient := range recipients {
 		if seen[recipient] {
 			continue
@@ -396,7 +396,7 @@ func uniqueMailRecipients(recipients []string) []string {
 
 func uniqueNonEmptyMailRecipients(recipients []string) []string {
 	seen := make(map[string]bool, len(recipients))
-	unique := recipients[:0]
+	unique := make([]string, 0, len(recipients))
 	for _, recipient := range recipients {
 		recipient = strings.TrimSpace(recipient)
 		if recipient == "" || seen[recipient] {

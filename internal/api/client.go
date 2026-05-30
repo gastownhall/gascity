@@ -94,6 +94,10 @@ type storeSlowError struct {
 	msg string
 }
 
+// StoreSlowErrorCode is the stable problem-detail prefix for mail read
+// timeouts that must not fall back to the local store path.
+const StoreSlowErrorCode = "store_slow"
+
 func (e *storeSlowError) Error() string {
 	if e.msg == "" {
 		return "store slow: try again when load drops"
@@ -174,8 +178,9 @@ func ShouldFallback(err error) bool {
 // ShouldFallbackForRead(err) is true. The set is closed: "cache-not-live",
 // "read-only", "client-init", "conn-refused". Generic 5xx server errors
 // collapse to "conn-refused" since from the CLI's read-path perspective an
-// unhealthy server is equivalent to an unreachable one. Returns "unknown"
-// for non-fallbackable errors so callers that invoke FallbackReason
+// unhealthy server is equivalent to an unreachable one. Non-fallbackable error
+// types such as store_slow are intentionally absent from this set. Returns
+// "unknown" for non-fallbackable errors so callers that invoke FallbackReason
 // unconditionally produce a token instead of panicking; gate on
 // ShouldFallbackForRead first to avoid that sentinel.
 func FallbackReason(err error) string {
@@ -790,13 +795,15 @@ func (c *Client) GetStatus() (CachedRead[StatusView], error) {
 // ListMailInbox fetches unread messages for the given agent recipient via
 // GET /v0/city/{cityName}/mail. An empty agent lets the server choose the
 // default caller identity (same resolution path the CLI would take locally).
-// rig narrows the query to a single rig's provider when set. The
+// rig narrows the query to a single rig's provider when set. The returned
+// MailListView preserves partial aggregate-read metadata so callers do not
+// silently treat a degraded all-rig read as authoritative. The
 // CachedRead.AgeSeconds field carries the supervisor CachingStore age so
 // callers can surface _cache_age_s on --json output and a staleness banner
 // on human output.
-func (c *Client) ListMailInbox(agent, rig string) (CachedRead[[]mail.Message], error) {
+func (c *Client) ListMailInbox(agent, rig string) (CachedRead[MailListView], error) {
 	if err := c.requireCityScope(); err != nil {
-		return CachedRead[[]mail.Message]{}, err
+		return CachedRead[MailListView]{}, err
 	}
 	params := &genclient.GetV0CityByCityNameMailParams{}
 	if agent != "" {
@@ -807,16 +814,16 @@ func (c *Client) ListMailInbox(agent, rig string) (CachedRead[[]mail.Message], e
 	}
 	resp, err := c.cw.GetV0CityByCityNameMailWithResponse(context.Background(), c.cityName, params)
 	if err != nil {
-		return CachedRead[[]mail.Message]{}, &connError{err: fmt.Errorf("request failed: %w", err)}
+		return CachedRead[MailListView]{}, &connError{err: fmt.Errorf("request failed: %w", err)}
 	}
 	if resp == nil {
-		return CachedRead[[]mail.Message]{}, &connError{err: fmt.Errorf("nil response")}
+		return CachedRead[MailListView]{}, &connError{err: fmt.Errorf("nil response")}
 	}
 	if err := apiErrorFromResponse(resp.StatusCode(), resp.ApplicationproblemJSONDefault); err != nil {
-		return CachedRead[[]mail.Message]{}, err
+		return CachedRead[MailListView]{}, err
 	}
-	return CachedRead[[]mail.Message]{
-		Body:       mailMessagesFromGenList(resp.JSON200),
+	return CachedRead[MailListView]{
+		Body:       mailListFromGen(resp.JSON200),
 		AgeSeconds: cacheAgeFromResponse(resp.HTTPResponse),
 	}, nil
 }
@@ -1168,7 +1175,7 @@ func apiErrorFromResponse(status int, pd *genclient.ErrorModel) error {
 			}
 			return &cacheNotLiveError{msg: msg}
 		}
-		if strings.HasPrefix(detail, "store_slow") {
+		if strings.HasPrefix(detail, StoreSlowErrorCode) {
 			msg := detail
 			if msg == "" {
 				msg = "store slow: try again when load drops"
@@ -1176,10 +1183,10 @@ func apiErrorFromResponse(status int, pd *genclient.ErrorModel) error {
 			return &storeSlowError{msg: msg}
 		}
 	}
-	// Generic 5xx (500/501/502/504/... plus 503 without a cache_not_live
-	// prefix) wraps into a serverError so read-path callers can classify it
-	// as fallbackable via ShouldFallbackForRead. Mutation callers continue
-	// to see it as non-fallbackable (ShouldFallback excludes it).
+	// Generic 5xx (500/501/502/504/... plus 503 without a cache_not_live or
+	// store_slow prefix) wraps into a serverError so read-path callers can
+	// classify it as fallbackable via ShouldFallbackForRead. Mutation callers
+	// continue to see it as non-fallbackable (ShouldFallback excludes it).
 	if status >= 500 {
 		msg := detail
 		if msg == "" {
