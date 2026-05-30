@@ -2665,18 +2665,63 @@ func bdReadyPoolDemandShell(key, target string) string {
 	return `bd ready --metadata-field ` + key + `=` + target + ` --unassigned --exclude-type=epic --json`
 }
 
+// poolDemandFallbackFilter returns a jq program that keeps only the rows for
+// which poolDemandKeys[keyIndex] is the effective routing key — every
+// higher-precedence key is empty or missing. bd ready has no key-absent
+// predicate, so the precedence the other reader sites apply per bead is
+// composed here in jq: a bead stamping both gc.run_target and gc.routed_to with
+// different values belongs to its gc.run_target pool, so the gc.routed_to
+// fallback must not surface (work_query) or count (scale_check) it as demand
+// for the routed_to pool once the preferred query drains empty. The preferred
+// key (index 0) is filter-free and is never passed here.
+func poolDemandFallbackFilter(keyIndex int) string {
+	conds := make([]string, 0, keyIndex)
+	for _, k := range poolDemandKeys[:keyIndex] {
+		conds = append(conds, `(.metadata["`+k+`"] // "") == ""`)
+	}
+	return `[.[] | select(` + strings.Join(conds, " and ") + `)]`
+}
+
 // poolDemandFirstRowProbes emits the work_query Tier 3 body for target: it
-// tries each routing key in poolDemandKeys precedence order at --limit=1,
-// printing the first non-empty JSON array and exiting 0. Used for both the
-// primary and legacy workflow-control targets. The caller appends a terminal
-// fallthrough (e.g. printf "[]") for the all-empty case.
+// tries each routing key in poolDemandKeys precedence order, printing the first
+// non-empty JSON array and exiting 0. Used for both the primary and legacy
+// workflow-control targets. The caller appends a terminal fallthrough (e.g.
+// printf "[]") for the all-empty case.
+//
+// The preferred key lets bd stop at the first row (--limit=1). Fallback keys
+// cannot: a --limit=1 row could be one poolDemandFallbackFilter must drop (it
+// also carries a higher-precedence key) while a valid row is left unreturned,
+// so they fetch the matches, filter, and take the first in jq. The jq program
+// is single-quoted with each embedded quote escaped (the close-escape-reopen
+// idiom) because the whole work_query body is itself single-quoted in the
+// `sh -c '...'` wrapper.
 func poolDemandFirstRowProbes(target string) string {
 	var b strings.Builder
-	for _, key := range poolDemandKeys {
-		b.WriteString(`r=$(` + bdReadyPoolDemandShell(key, target) + ` --limit=1 2>/dev/null); `)
+	for i, key := range poolDemandKeys {
+		if i == 0 {
+			b.WriteString(`r=$(` + bdReadyPoolDemandShell(key, target) + ` --limit=1 2>/dev/null); `)
+		} else {
+			b.WriteString(`r=$(` + bdReadyPoolDemandShell(key, target) +
+				` 2>/dev/null | jq -c '\''` + poolDemandFallbackFilter(i) + `[0:1]'\'' 2>/dev/null); `)
+		}
 		b.WriteString(`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; `)
 	}
 	return b.String()
+}
+
+// poolDemandCountAssign emits a shell snippet assigning the count-form ready
+// JSON for poolDemandKeys[i] into shell variable v. The bd query runs in its
+// own command substitution so a non-zero exit propagates through the caller's
+// && chain (the default scale_check must surface bd failures, never mask them
+// as zero — TestEffectiveScaleCheckUsesReadyOnly). Fallback keys then drop rows
+// whose higher-precedence keys are set, via a second assignment over the
+// already-captured JSON so bd's exit status is preserved.
+func poolDemandCountAssign(v string, i int, target string) string {
+	assign := v + `=$(` + bdReadyPoolDemandShell(poolDemandKeys[i], target) + ` --limit 0)`
+	if i == 0 {
+		return assign
+	}
+	return assign + ` && ` + v + `=$(printf '%s' "$` + v + `" | jq -c '` + poolDemandFallbackFilter(i) + `')`
 }
 
 // poolDemandCountShell emits the reconciler count-form for target: it counts
@@ -2685,7 +2730,9 @@ func poolDemandFirstRowProbes(target string) string {
 // the array length. Precedence mirrors poolDemandFirstRowProbes so the
 // reconciler's spawn decision and the worker's claim decision agree — the
 // worker drains the preferred tier first, then the count surfaces the fallback
-// tier on the next pass.
+// tier on the next pass. Fallback keys drop rows whose higher-precedence keys
+// are set (poolDemandCountAssign) so a bead carrying both keys is counted only
+// as demand for its preferred-key pool.
 //
 // Unlike the work_query probes, this form must NOT redirect bd stderr or
 // default to zero: a failed `bd ready` has to surface as an error rather than
@@ -2697,10 +2744,9 @@ func poolDemandCountShell(target string) string {
 	last := len(keys) - 1
 	// Least-preferred key assigns unconditionally; its bd failure propagates
 	// through the outer &&.
-	expr := `ready_json=$(` + bdReadyPoolDemandShell(keys[last], target) + ` --limit 0)`
+	expr := poolDemandCountAssign("ready_json", last, target)
 	for i := last - 1; i >= 0; i-- {
-		query := bdReadyPoolDemandShell(keys[i], target) + ` --limit 0`
-		expr = `cur=$(` + query + `) && ` +
+		expr = poolDemandCountAssign("cur", i, target) + ` && ` +
 			`if [ "$cur" != "[]" ]; then ready_json="$cur"; else ` + expr + `; fi`
 	}
 	return expr + ` && printf '%s\n' "$ready_json" | jq 'length'`

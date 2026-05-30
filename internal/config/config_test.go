@@ -1484,7 +1484,7 @@ func TestEffectiveWorkQueryDefault(t *testing.T) {
 	if !strings.Contains(got, "bd ready --metadata-field gc.run_target=mayor --unassigned --exclude-type=epic --json --limit=1") {
 		t.Errorf("EffectiveWorkQuery() missing tier 3 run_target: %q", got)
 	}
-	if !strings.Contains(got, "bd ready --metadata-field gc.routed_to=mayor --unassigned --exclude-type=epic --json --limit=1") {
+	if !strings.Contains(got, "bd ready --metadata-field gc.routed_to=mayor --unassigned --exclude-type=epic --json") {
 		t.Errorf("EffectiveWorkQuery() missing tier 3 routed_to fallback: %q", got)
 	}
 	if !strings.Contains(got, `"$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"`) {
@@ -1504,7 +1504,7 @@ func TestEffectiveWorkQueryCustom(t *testing.T) {
 func TestEffectiveWorkQueryWithDir(t *testing.T) {
 	a := Agent{Name: "polecat", Dir: "hello-world"}
 	got := a.EffectiveWorkQuery()
-	if !strings.Contains(got, "bd ready --metadata-field gc.routed_to=hello-world/polecat --unassigned --exclude-type=epic --json --limit=1") {
+	if !strings.Contains(got, "bd ready --metadata-field gc.routed_to=hello-world/polecat --unassigned --exclude-type=epic --json") {
 		t.Errorf("EffectiveWorkQuery() missing tier 3 routed_to: %q", got)
 	}
 }
@@ -1512,7 +1512,7 @@ func TestEffectiveWorkQueryWithDir(t *testing.T) {
 func TestEffectiveWorkQueryPoolDefault(t *testing.T) {
 	a := Agent{Name: "polecat", Dir: "hello-world", MinActiveSessions: ptrInt(1), MaxActiveSessions: ptrInt(3)}
 	got := a.EffectiveWorkQuery()
-	if !strings.Contains(got, "bd ready --metadata-field gc.routed_to=hello-world/polecat --unassigned --exclude-type=epic --json --limit=1") {
+	if !strings.Contains(got, "bd ready --metadata-field gc.routed_to=hello-world/polecat --unassigned --exclude-type=epic --json") {
 		t.Errorf("EffectiveWorkQuery() missing tier 3 routed_to: %q", got)
 	}
 	if strings.Contains(got, "--type=molecule") {
@@ -1565,7 +1565,7 @@ func TestEffectiveWorkQueryPoolNameOverride(t *testing.T) {
 		PoolName: "hello-world/dog",
 	}
 	got := a.EffectiveWorkQuery()
-	if !strings.Contains(got, "bd ready --metadata-field gc.routed_to=hello-world/dog --unassigned --exclude-type=epic --json --limit=1") {
+	if !strings.Contains(got, "bd ready --metadata-field gc.routed_to=hello-world/dog --unassigned --exclude-type=epic --json") {
 		t.Errorf("EffectiveWorkQuery() missing tier 3 routed_to with pool name: %q", got)
 	}
 	if strings.Contains(got, "--type=molecule") {
@@ -1576,7 +1576,7 @@ func TestEffectiveWorkQueryPoolNameOverride(t *testing.T) {
 func TestEffectiveWorkQueryPoolNoPoolName(t *testing.T) {
 	a := Agent{Name: "dog", Dir: "hello-world", MinActiveSessions: ptrInt(1), MaxActiveSessions: ptrInt(3)}
 	got := a.EffectiveWorkQuery()
-	if !strings.Contains(got, "bd ready --metadata-field gc.routed_to=hello-world/dog --unassigned --exclude-type=epic --json --limit=1") {
+	if !strings.Contains(got, "bd ready --metadata-field gc.routed_to=hello-world/dog --unassigned --exclude-type=epic --json") {
 		t.Errorf("EffectiveWorkQuery() missing tier 3 routed_to: %q", got)
 	}
 }
@@ -1627,14 +1627,17 @@ esac
 }
 
 func TestEffectiveWorkQueryControlDispatcherClaimsLegacyUnassignedRoute(t *testing.T) {
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skip("jq not available; the gc.routed_to fallback probe is a jq pipeline")
+	}
 	a := Agent{Name: ControlDispatcherAgentName, Dir: "gascity"}
 	out := runEffectiveWorkQuery(t, a, nil, `#!/bin/sh
 set -eu
 case "$*" in
-  "ready --metadata-field gc.routed_to=gascity/control-dispatcher --unassigned --exclude-type=epic --json --limit=1")
+  "ready --metadata-field gc.routed_to=gascity/control-dispatcher --unassigned --exclude-type=epic --json")
     printf '[]'
     ;;
-  "ready --metadata-field gc.routed_to=gascity/workflow-control --unassigned --exclude-type=epic --json --limit=1")
+  "ready --metadata-field gc.routed_to=gascity/workflow-control --unassigned --exclude-type=epic --json")
     printf '[{"id":"ga-legacy-route"}]'
     ;;
   *)
@@ -1785,6 +1788,9 @@ esac
 // gc.routed_to (gc.run_target unset) — e.g. the legacy --formula wisp path
 // that the #2763 reader change must not regress.
 func TestEffectiveWorkQueryFallsBackToRoutedTo(t *testing.T) {
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skip("jq not available; the gc.routed_to fallback probe is a jq pipeline")
+	}
 	a := Agent{Name: "worker", Dir: "hello-world"}
 	out := runEffectiveWorkQuery(t, a, map[string]string{
 		"GC_SESSION_ORIGIN": "ephemeral",
@@ -1852,6 +1858,83 @@ esac
 `)
 	if strings.TrimSpace(out) != "2" {
 		t.Fatalf("EffectivePoolDemandQuery() count = %q, want 2 (run_target demand)", strings.TrimSpace(out))
+	}
+}
+
+// TestEffectivePoolDemandQueryFallsBackToRoutedTo verifies the count-form still
+// counts a legacy root stamped only with gc.routed_to (no gc.run_target), so
+// the #2769 fallback guard does not regress the compatibility path.
+func TestEffectivePoolDemandQueryFallsBackToRoutedTo(t *testing.T) {
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skip("jq not available; count-form exercises a jq pipeline")
+	}
+	a := Agent{Name: "worker", Dir: "hello-world"}
+	out := runShellWithFakeBd(t, a.EffectivePoolDemandQuery(), nil, `#!/bin/sh
+set -eu
+case "$*" in
+  *"--metadata-field gc.run_target=hello-world/worker"*) printf '[]' ;;
+  *"--metadata-field gc.routed_to=hello-world/worker"*)
+    printf '[{"id":"legacy-a"},{"id":"legacy-b"}]'
+    ;;
+  *) printf '[]' ;;
+esac
+`)
+	if strings.TrimSpace(out) != "2" {
+		t.Fatalf("EffectivePoolDemandQuery() count = %q, want 2 (routed_to fallback demand)", strings.TrimSpace(out))
+	}
+}
+
+// TestEffectivePoolDemandQueryFallbackDropsForeignRunTarget is the count-form
+// half of the #2769 fix the copilot review flagged: a gc.routed_to match that
+// also carries a gc.run_target for another pool belongs to that pool, so it
+// must not be counted as demand here once the preferred query drains empty.
+func TestEffectivePoolDemandQueryFallbackDropsForeignRunTarget(t *testing.T) {
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skip("jq not available; count-form exercises a jq pipeline")
+	}
+	a := Agent{Name: "worker", Dir: "hello-world"}
+	out := runShellWithFakeBd(t, a.EffectivePoolDemandQuery(), nil, `#!/bin/sh
+set -eu
+case "$*" in
+  *"--metadata-field gc.run_target=hello-world/worker"*) printf '[]' ;;
+  *"--metadata-field gc.routed_to=hello-world/worker"*)
+    printf '[{"id":"foreign","metadata":{"gc.run_target":"hello-world/other","gc.routed_to":"hello-world/worker"}}]'
+    ;;
+  *) printf '[]' ;;
+esac
+`)
+	if strings.TrimSpace(out) != "0" {
+		t.Fatalf("EffectivePoolDemandQuery() count = %q, want 0 (foreign gc.run_target excluded)", strings.TrimSpace(out))
+	}
+}
+
+// TestEffectiveWorkQueryFallbackDropsForeignRunTarget is the worker-claim half
+// of the #2769 fix: a bead carrying gc.routed_to=<this pool> but a gc.run_target
+// pointing at a DIFFERENT pool belongs to its gc.run_target pool (per-bead
+// precedence). The gc.routed_to fallback must not surface it here once the
+// preferred query is empty, or the wrong pool claims the work.
+func TestEffectiveWorkQueryFallbackDropsForeignRunTarget(t *testing.T) {
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skip("jq not available; the gc.routed_to fallback probe is a jq pipeline")
+	}
+	a := Agent{Name: "worker", Dir: "hello-world"}
+	out := runEffectiveWorkQuery(t, a, map[string]string{
+		"GC_SESSION_ORIGIN": "ephemeral",
+	}, `#!/bin/sh
+set -eu
+case "$*" in
+  *"--metadata-field gc.run_target=hello-world/worker"*) printf '[]' ;;
+  *"--metadata-field gc.routed_to=hello-world/worker"*)
+    printf '[{"id":"foreign-root","metadata":{"gc.run_target":"hello-world/other","gc.routed_to":"hello-world/worker"}}]'
+    ;;
+  *) printf '[]' ;;
+esac
+`)
+	if strings.Contains(out, "foreign-root") {
+		t.Fatalf("EffectiveWorkQuery() surfaced a bead whose gc.run_target points to another pool: %q", out)
+	}
+	if got := strings.TrimSpace(out); got != "[]" {
+		t.Fatalf("EffectiveWorkQuery() = %q, want terminal [] (no claimable demand)", got)
 	}
 }
 
