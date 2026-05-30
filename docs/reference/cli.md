@@ -1634,8 +1634,9 @@ Create a new Gas City workspace in the given directory (or cwd).
 Runs an interactive wizard to choose a config template and coding agent
 provider. Creates the .gc/ runtime directory plus pack.toml, city.toml,
 the standard top-level directories, and .template.md prompt templates, then
-materializes builtin packs under .gc/system/packs. Use --provider to create the default minimal city
-non-interactively, or --file to initialize from an existing TOML config file.
+materializes builtin packs under .gc/system/packs. Use --template and
+--provider to create a city non-interactively, or --file to initialize from an
+existing TOML config file.
 
 Pass --preserve-existing to keep any pre-authored pack.toml, city.toml, or
 agent prompt files in the target directory (useful when bootstrapping a
@@ -1651,6 +1652,7 @@ gc init [path] [flags]
 gc init
   gc init ~/my-city
   gc init --provider codex ~/my-city
+  gc init --template gastown --provider codex ~/my-city
   gc init --provider codex --bootstrap-profile k8s-cell /city
   gc init --name my-city
   gc init --from ~/elan --name elan /city
@@ -1669,6 +1671,7 @@ gc init
 | `--provider` | string |  | built-in workspace provider to use for the default mayor config |
 | `--skip-provider-readiness` | bool |  | skip provider login/readiness checks during init and continue startup |
 | `--yes` | bool |  | bypass the cross-city supervisor cycle confirmation prompt (warning is still printed for the audit trail) |
+| `--template` | string |  | config template to use non-interactively (minimal, gastown, custom) |
 
 ## gc lint
 

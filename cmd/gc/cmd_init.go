@@ -242,6 +242,7 @@ func newInitCmd(stdout, stderr io.Writer) *cobra.Command {
 	var fileFlag string
 	var fromFlag string
 	var nameFlag string
+	var templateFlag string
 	var providerFlag string
 	var bootstrapProfileFlag string
 	var skipProviderReadiness bool
@@ -255,8 +256,9 @@ func newInitCmd(stdout, stderr io.Writer) *cobra.Command {
 Runs an interactive wizard to choose a config template and coding agent
 provider. Creates the .gc/ runtime directory plus pack.toml, city.toml,
 the standard top-level directories, and .template.md prompt templates, then
-materializes builtin packs under .gc/system/packs. Use --provider to create the default minimal city
-non-interactively, or --file to initialize from an existing TOML config file.
+materializes builtin packs under .gc/system/packs. Use --template and
+--provider to create a city non-interactively, or --file to initialize from an
+existing TOML config file.
 
 Pass --preserve-existing to keep any pre-authored pack.toml, city.toml, or
 agent prompt files in the target directory (useful when bootstrapping a
@@ -264,6 +266,7 @@ committed workspace — e.g. from a bootstrap.sh shipped in the repo).`,
 		Example: `  gc init
   gc init ~/my-city
   gc init --provider codex ~/my-city
+  gc init --template gastown --provider codex ~/my-city
   gc init --provider codex --bootstrap-profile k8s-cell /city
   gc init --name my-city
   gc init --from ~/elan --name elan /city
@@ -279,23 +282,26 @@ committed workspace — e.g. from a bootstrap.sh shipped in the repo).`,
 			if fromFlag != "" {
 				mode = "from"
 				code := cmdInitFromDirWithOptions(fromFlag, args, nameFlag, out, stderr, skipProviderReadiness)
-				return writeInitJSONOrExit(code, jsonOut, args, nameFlag, providerFlag, bootstrapProfileFlag, mode, stdout)
+				return writeInitJSONOrExit(code, jsonOut, args, nameFlag, "", providerFlag, bootstrapProfileFlag, mode, stdout)
 			}
 			if fileFlag != "" {
 				mode = "file"
 				code := cmdInitFromFileWithOptions(fileFlag, args, nameFlag, out, stderr, skipProviderReadiness, preserveExisting)
-				return writeInitJSONOrExit(code, jsonOut, args, nameFlag, providerFlag, bootstrapProfileFlag, mode, stdout)
+				return writeInitJSONOrExit(code, jsonOut, args, nameFlag, "", providerFlag, bootstrapProfileFlag, mode, stdout)
 			}
-			if providerFlag != "" || bootstrapProfileFlag != "" {
+			if templateFlag != "" {
+				mode = "template"
+			} else if providerFlag != "" || bootstrapProfileFlag != "" {
 				mode = "provider"
 			}
-			code := cmdInitWithOptionsInternal(args, providerFlag, bootstrapProfileFlag, nameFlag, out, stderr, skipProviderReadiness, preserveExisting, jsonOut)
-			return writeInitJSONOrExit(code, jsonOut, args, nameFlag, providerFlag, bootstrapProfileFlag, mode, stdout)
+			code := cmdInitWithOptionsInternal(args, templateFlag, providerFlag, bootstrapProfileFlag, nameFlag, out, stderr, skipProviderReadiness, preserveExisting, jsonOut)
+			return writeInitJSONOrExit(code, jsonOut, args, nameFlag, templateFlag, providerFlag, bootstrapProfileFlag, mode, stdout)
 		},
 	}
 	cmd.Flags().StringVar(&fileFlag, "file", "", "path to a TOML file to use as city.toml")
 	cmd.Flags().StringVar(&fromFlag, "from", "", "path to an example city directory to copy")
 	cmd.Flags().StringVar(&nameFlag, "name", "", "workspace name (default: target directory basename)")
+	cmd.Flags().StringVar(&templateFlag, "template", "", "config template to use non-interactively (minimal, gastown, custom)")
 	cmd.Flags().StringVar(&providerFlag, "provider", "", "built-in workspace provider to use for the default mayor config")
 	cmd.Flags().StringVar(&bootstrapProfileFlag, "bootstrap-profile", "", "bootstrap profile to apply for hosted/container defaults")
 	cmd.Flags().BoolVar(&skipProviderReadiness, "skip-provider-readiness", false, "skip provider login/readiness checks during init and continue startup")
@@ -305,6 +311,8 @@ committed workspace — e.g. from a bootstrap.sh shipped in the repo).`,
 	cmd.MarkFlagsMutuallyExclusive("file", "from")
 	cmd.MarkFlagsMutuallyExclusive("provider", "file")
 	cmd.MarkFlagsMutuallyExclusive("provider", "from")
+	cmd.MarkFlagsMutuallyExclusive("template", "file")
+	cmd.MarkFlagsMutuallyExclusive("template", "from")
 	cmd.MarkFlagsMutuallyExclusive("bootstrap-profile", "file")
 	cmd.MarkFlagsMutuallyExclusive("bootstrap-profile", "from")
 	return cmd
@@ -316,11 +324,12 @@ type initJSONResult struct {
 	CityPath         string `json:"city_path"`
 	CityName         string `json:"city_name"`
 	Mode             string `json:"mode"`
+	Template         string `json:"template,omitempty"`
 	Provider         string `json:"provider,omitempty"`
 	BootstrapProfile string `json:"bootstrap_profile,omitempty"`
 }
 
-func writeInitJSONOrExit(code int, jsonOut bool, args []string, nameOverride, provider, bootstrapProfile, mode string, stdout io.Writer) error {
+func writeInitJSONOrExit(code int, jsonOut bool, args []string, nameOverride, templateName, provider, bootstrapProfile, mode string, stdout io.Writer) error {
 	if code != 0 {
 		return exitForCode(code)
 	}
@@ -337,6 +346,7 @@ func writeInitJSONOrExit(code int, jsonOut bool, args []string, nameOverride, pr
 		CityPath:         cityPath,
 		CityName:         resolveCityName(nameOverride, "", cityPath),
 		Mode:             mode,
+		Template:         strings.TrimSpace(templateName),
 		Provider:         strings.TrimSpace(provider),
 		BootstrapProfile: strings.TrimSpace(bootstrapProfile),
 	})
@@ -358,10 +368,10 @@ func cmdInit(args []string, providerFlag, bootstrapProfileFlag string, stdout, s
 }
 
 func cmdInitWithOptions(args []string, providerFlag, bootstrapProfileFlag, nameOverride string, stdout, stderr io.Writer, skipProviderReadiness, preserveExisting bool) int {
-	return cmdInitWithOptionsInternal(args, providerFlag, bootstrapProfileFlag, nameOverride, stdout, stderr, skipProviderReadiness, preserveExisting, false)
+	return cmdInitWithOptionsInternal(args, "", providerFlag, bootstrapProfileFlag, nameOverride, stdout, stderr, skipProviderReadiness, preserveExisting, false)
 }
 
-func cmdInitWithOptionsInternal(args []string, providerFlag, bootstrapProfileFlag, nameOverride string, stdout, stderr io.Writer, skipProviderReadiness, preserveExisting bool, forceDefaultWizard bool) int {
+func cmdInitWithOptionsInternal(args []string, templateFlag, providerFlag, bootstrapProfileFlag, nameOverride string, stdout, stderr io.Writer, skipProviderReadiness, preserveExisting bool, forceDefaultWizard bool) int {
 	var cityPath string
 	if len(args) > 0 {
 		var err error
@@ -383,9 +393,9 @@ func cmdInitWithOptionsInternal(args []string, providerFlag, bootstrapProfileFla
 	}
 	var wiz wizardConfig
 	switch {
-	case providerFlag != "" || bootstrapProfileFlag != "":
+	case templateFlag != "" || providerFlag != "" || bootstrapProfileFlag != "":
 		var err error
-		wiz, err = initWizardConfig(providerFlag, bootstrapProfileFlag)
+		wiz, err = initWizardConfig(providerFlag, bootstrapProfileFlag, templateFlag)
 		if err != nil {
 			fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
@@ -422,7 +432,11 @@ func resumeExistingInitIfPossible(fs fsys.FS, cityPath string, stdout, stderr io
 	})
 }
 
-func initWizardConfig(providerFlag, bootstrapProfileFlag string) (wizardConfig, error) {
+func initWizardConfig(providerFlag, bootstrapProfileFlag, templateFlag string) (wizardConfig, error) {
+	templateName, err := normalizeInitTemplate(templateFlag)
+	if err != nil {
+		return wizardConfig{}, err
+	}
 	provider, err := normalizeInitProvider(providerFlag)
 	if err != nil {
 		return wizardConfig{}, err
@@ -432,10 +446,22 @@ func initWizardConfig(providerFlag, bootstrapProfileFlag string) (wizardConfig, 
 		return wizardConfig{}, err
 	}
 	return wizardConfig{
-		configName:       "minimal",
+		configName:       templateName,
 		provider:         provider,
 		bootstrapProfile: bootstrapProfile,
 	}, nil
+}
+
+func normalizeInitTemplate(templateName string) (string, error) {
+	templateName = strings.TrimSpace(templateName)
+	switch templateName {
+	case "", "minimal", "tutorial":
+		return "minimal", nil
+	case "gastown", "custom":
+		return templateName, nil
+	default:
+		return "", fmt.Errorf("unknown template %q (expected one of: minimal, gastown, custom)", templateName)
+	}
 }
 
 func normalizeInitProvider(provider string) (string, error) {

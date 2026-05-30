@@ -3571,13 +3571,54 @@ func TestDoInitWithClaudeProviderLeavesWorkspaceHooksEmpty(t *testing.T) {
 }
 
 func TestInitWizardConfigRejectsUnknownProvider(t *testing.T) {
-	if _, err := initWizardConfig("not-a-provider", ""); err == nil {
+	if _, err := initWizardConfig("not-a-provider", "", ""); err == nil {
 		t.Fatal("expected error for unknown provider")
 	}
 }
 
+func TestInitWizardConfigRejectsUnknownTemplate(t *testing.T) {
+	if _, err := initWizardConfig("claude", "", "not-a-template"); err == nil {
+		t.Fatal("expected error for unknown template")
+	}
+}
+
+func TestCmdInitTemplateFlagSelectsGastown(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_DOLT", "skip")
+	configureIsolatedRuntimeEnv(t)
+
+	cityPath := filepath.Join(t.TempDir(), "bright-lights")
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"init", "--template", "gastown", "--provider", "claude", "--skip-provider-readiness", cityPath}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("run init --template gastown = %d; stderr=%q stdout=%q", code, stderr.String(), stdout.String())
+	}
+
+	data, err := os.ReadFile(filepath.Join(cityPath, "city.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Parse(data)
+	if err != nil {
+		t.Fatalf("parsing city.toml: %v", err)
+	}
+	if cfg.Workspace.Provider != "claude" {
+		t.Errorf("Workspace.Provider = %q, want claude", cfg.Workspace.Provider)
+	}
+	if _, ok := cfg.Defaults.Rig.Imports["gastown"]; !ok {
+		t.Fatalf("Defaults.Rig.Imports = %v, want gastown import", cfg.Defaults.Rig.Imports)
+	}
+	packToml, err := os.ReadFile(filepath.Join(cityPath, "pack.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(packToml), "[imports.gastown]") {
+		t.Fatalf("pack.toml missing gastown import:\n%s", string(packToml))
+	}
+}
+
 func TestInitWizardConfigNormalizesBootstrapAliases(t *testing.T) {
-	wiz, err := initWizardConfig("codex", "kubernetes")
+	wiz, err := initWizardConfig("codex", "kubernetes", "")
 	if err != nil {
 		t.Fatalf("initWizardConfig returned error: %v", err)
 	}
