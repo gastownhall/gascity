@@ -1227,8 +1227,8 @@ func buildAttachmentCache(sessions []session.Info, observe ...func(session.Info)
 }
 
 const (
-	resetPendingReason = "reset-pending"
-	circuitOpenReason  = "circuit-open"
+	resetPendingReason = session.LifecycleReasonResetPending
+	circuitOpenReason  = session.LifecycleReasonCircuitOpen
 )
 
 // sessionReason computes the REASON column for a session in gc session list.
@@ -1254,14 +1254,11 @@ func sessionReason(s session.Info, beadIndex map[string]beads.Bead, cfg *config.
 	if lifecycle.BaseState == session.BaseStateArchived && !lifecycle.ContinuityEligible {
 		return "-"
 	}
-	if resetPendingReasonVisible(s, b, sp, now) {
-		return resetPendingReason
+	var isRunning func(string) bool
+	if sp != nil {
+		isRunning = sp.IsRunning
 	}
-	if circuitOpenReasonVisible(b) {
-		return circuitOpenReason
-	}
-
-	if reason := session.LifecycleDisplayReason(b.Status, b.Metadata, now); reason != "" {
+	if reason := session.LifecycleDisplayReasonWithLiveness(b.Status, b.Metadata, now, s.SessionName, isRunning); reason != "" {
 		return reason
 	}
 
@@ -1282,20 +1279,6 @@ func sessionReason(s session.Info, beadIndex map[string]beads.Bead, cfg *config.
 	}
 
 	return "-"
-}
-
-// resetPendingReasonVisible keeps the fallback renderer aligned with the API
-// lifecycle reason rules for live reset requests.
-func resetPendingReasonVisible(s session.Info, b beads.Bead, sp runtime.Provider, now time.Time) bool {
-	var isRunning func(string) bool
-	if sp != nil {
-		isRunning = sp.IsRunning
-	}
-	return session.LifecycleResetPendingReasonVisible(b.Status, b.Metadata, now, s.SessionName, isRunning)
-}
-
-func circuitOpenReasonVisible(b beads.Bead) bool {
-	return strings.TrimSpace(b.Metadata[sessionCircuitStateMetadata]) == circuitOpen.String()
 }
 
 func pinAwakeWakeReasonVisible(b beads.Bead, cfg *config.City, now time.Time) bool {
