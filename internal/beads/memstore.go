@@ -268,14 +268,9 @@ func (m *MemStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 	}
 
 	var result []Bead
+	now := time.Now().UTC()
 	for _, b := range m.beads {
-		if b.Status != "open" {
-			continue
-		}
-		if b.Ephemeral {
-			continue
-		}
-		if IsReadyExcludedType(b.Type) {
+		if !IsReadyCandidate(b, now) {
 			continue
 		}
 		if q.Assignee != "" && b.Assignee != q.Assignee {

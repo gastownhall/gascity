@@ -328,15 +328,16 @@ func (s *HQStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 	s.mu.RUnlock()
 
 	var result []Bead
+	now := time.Now().UTC()
 	for _, b := range raw {
 		b = cloneBead(b)
-		if b.Status != "open" {
+		if !IsReadyCandidate(b, now) {
 			continue
 		}
 		if q.Assignee != "" && b.Assignee != q.Assignee {
 			continue
 		}
-		if IsReadyExcludedType(b.Type) || hqBlockedBySnapshot(b.ID, deps, statusByID) {
+		if hqBlockedBySnapshot(b.ID, deps, statusByID) {
 			continue
 		}
 		result = append(result, b)

@@ -2217,6 +2217,11 @@ export interface components {
         BeadCreateInputBody: {
             /** @description Assigned agent. */
             assignee?: string;
+            /**
+             * Format: date-time
+             * @description Hide the bead from ready views until this time.
+             */
+            defer_until?: string;
             /** @description Bead description. */
             description?: string;
             /** @description Bead labels. */

@@ -1213,6 +1213,21 @@ func TestCachingStoreCachedReadyExcludesFutureDeferredBead(t *testing.T) {
 	if !ids[pastDeferred.ID] {
 		t.Errorf("CachedReady omitted past-deferred (ready) bead %s; ids=%v", pastDeferred.ID, ids)
 	}
+
+	gotReady, err := cache.Ready()
+	if err != nil {
+		t.Fatalf("Ready: %v", err)
+	}
+	readyIDs := map[string]bool{}
+	for _, b := range gotReady {
+		readyIDs[b.ID] = true
+	}
+	if !readyIDs[ready.ID] || !readyIDs[pastDeferred.ID] {
+		t.Fatalf("Ready ids = %v, want ready and past-deferred beads", readyIDs)
+	}
+	if readyIDs[deferred.ID] {
+		t.Fatalf("Ready ids = %v, future-deferred bead %s must be hidden", readyIDs, deferred.ID)
+	}
 }
 
 func TestCachingStoreCachedReadyUsesWriteThroughDependencies(t *testing.T) {

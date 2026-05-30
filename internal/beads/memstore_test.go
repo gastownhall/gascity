@@ -3,6 +3,7 @@ package beads_test
 import (
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/beadstest"
@@ -545,6 +546,40 @@ func TestMemStoreReadySkipsEphemeralOpenTasks(t *testing.T) {
 		if bead.ID == ephemeral.ID {
 			t.Fatalf("ephemeral bead %s leaked into Ready(): %+v", ephemeral.ID, got)
 		}
+	}
+}
+
+func TestMemStoreReadyExcludesFutureDeferredBeads(t *testing.T) {
+	s := beads.NewMemStore()
+
+	ready, err := s.Create(beads.Bead{Title: "ready"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	future := time.Now().UTC().Add(24 * time.Hour)
+	futureDeferred, err := s.Create(beads.Bead{Title: "future", DeferUntil: &future})
+	if err != nil {
+		t.Fatal(err)
+	}
+	past := time.Now().UTC().Add(-24 * time.Hour)
+	pastDeferred, err := s.Create(beads.Bead{Title: "past", DeferUntil: &past})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := s.Ready()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids := map[string]bool{}
+	for _, bead := range got {
+		ids[bead.ID] = true
+	}
+	if !ids[ready.ID] || !ids[pastDeferred.ID] {
+		t.Fatalf("Ready() ids = %v, want ready and past-deferred beads", ids)
+	}
+	if ids[futureDeferred.ID] {
+		t.Fatalf("Ready() ids = %v, future-deferred bead %s must be hidden", ids, futureDeferred.ID)
 	}
 }
 

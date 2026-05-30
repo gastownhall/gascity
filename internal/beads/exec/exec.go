@@ -170,7 +170,16 @@ func (w *beadWire) toBead() beads.Bead {
 		Labels:      w.Labels,
 		Metadata:    coerceMetadata(w.Metadata),
 		Ephemeral:   w.Ephemeral,
+		DeferUntil:  cloneTimePtr(w.DeferUntil),
 	}
+}
+
+func cloneTimePtr(v *time.Time) *time.Time {
+	if v == nil {
+		return nil
+	}
+	cloned := *v
+	return &cloned
 }
 
 // coerceMetadata converts raw JSON metadata values to strings. Backing stores
@@ -346,8 +355,9 @@ func (s *Store) Ready(query ...beads.ReadyQuery) ([]beads.Bead, error) {
 		return nil, err
 	}
 	result := all[:0]
+	now := time.Now().UTC()
 	for _, b := range all {
-		if !b.Ephemeral && !beads.IsReadyExcludedType(b.Type) {
+		if beads.IsReadyCandidate(b, now) {
 			result = append(result, b)
 		}
 	}

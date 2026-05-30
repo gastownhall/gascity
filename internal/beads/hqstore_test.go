@@ -36,6 +36,48 @@ func TestHQStoreConformance(t *testing.T) {
 	beadstest.RunCreationOrderTests(t, factory)
 }
 
+func TestHQStoreReadyExcludesFutureDeferredBeads(t *testing.T) {
+	store, err := beads.OpenHQStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("OpenHQStore: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := store.Shutdown(); err != nil {
+			t.Errorf("Shutdown: %v", err)
+		}
+	})
+
+	ready, err := store.Create(beads.Bead{Title: "ready"})
+	if err != nil {
+		t.Fatalf("Create(ready): %v", err)
+	}
+	future := time.Now().UTC().Add(24 * time.Hour)
+	futureDeferred, err := store.Create(beads.Bead{Title: "future", DeferUntil: &future})
+	if err != nil {
+		t.Fatalf("Create(future): %v", err)
+	}
+	past := time.Now().UTC().Add(-24 * time.Hour)
+	pastDeferred, err := store.Create(beads.Bead{Title: "past", DeferUntil: &past})
+	if err != nil {
+		t.Fatalf("Create(past): %v", err)
+	}
+
+	got, err := store.Ready()
+	if err != nil {
+		t.Fatalf("Ready: %v", err)
+	}
+	ids := map[string]bool{}
+	for _, bead := range got {
+		ids[bead.ID] = true
+	}
+	if !ids[ready.ID] || !ids[pastDeferred.ID] {
+		t.Fatalf("Ready() ids = %v, want ready and past-deferred beads", ids)
+	}
+	if ids[futureDeferred.ID] {
+		t.Fatalf("Ready() ids = %v, future-deferred bead %s must be hidden", ids, futureDeferred.ID)
+	}
+}
+
 func TestHQStoreRecoversFlushedSnapshotAfterSIGKILL(t *testing.T) {
 	if os.Getenv("HQSTORE_SIGKILL_HELPER") == "1" {
 		hqStoreSIGKILLHelper(t)

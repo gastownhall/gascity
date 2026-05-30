@@ -532,6 +532,9 @@ type BeadCreateInputBody struct {
 	// Assignee Assigned agent.
 	Assignee *string `json:"assignee,omitempty"`
 
+	// DeferUntil Hide the bead from ready views until this time.
+	DeferUntil *time.Time `json:"defer_until,omitempty"`
+
 	// Description Bead description.
 	Description *string `json:"description,omitempty"`
 

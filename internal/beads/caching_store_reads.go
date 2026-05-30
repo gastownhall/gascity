@@ -345,7 +345,7 @@ func (c *CachingStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 		now := time.Now().UTC()
 		for _, b := range c.beads {
 			statusByID[b.ID] = b.Status
-			if b.Status == "open" && !b.Ephemeral && !IsReadyExcludedType(b.Type) && !beadDeferred(b, now) {
+			if IsReadyCandidate(b, now) {
 				openBeads = append(openBeads, cloneBead(b))
 			}
 		}
@@ -398,7 +398,7 @@ func (c *CachingStore) CachedReady() ([]Bead, bool) {
 	now := time.Now().UTC()
 	for _, b := range c.beads {
 		statusByID[b.ID] = b.Status
-		if b.Status == "open" && !b.Ephemeral && !IsReadyExcludedType(b.Type) && !beadDeferred(b, now) {
+		if IsReadyCandidate(b, now) {
 			openBeads = append(openBeads, cloneBead(b))
 		}
 	}
@@ -432,15 +432,6 @@ func cachedBeadReady(statusByID map[string]string, deps []Dep) bool {
 		}
 	}
 	return true
-}
-
-// beadDeferred reports whether a bead is hidden by a future defer_until,
-// mirroring bd ready's server-side filter (defer_until IS NULL OR <= now is
-// ready) and cmd_hook.isFutureDeferredHookCandidate. The cached read model
-// must apply this because CachedReady/Ready are seeded from bd list, which
-// does not filter defer, unlike the live bd ready path.
-func beadDeferred(b Bead, now time.Time) bool {
-	return b.DeferUntil != nil && b.DeferUntil.After(now)
 }
 
 // Children returns beads with the given parent ID.

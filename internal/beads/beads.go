@@ -50,8 +50,8 @@ type Bead struct {
 	Ephemeral bool `json:"ephemeral,omitempty"`
 	// DeferUntil hides the bead from ready/claimable views until this time,
 	// mirroring bd's defer_until column (a future value means "not yet ready";
-	// nil or past means ready). Carried so the in-memory cached read model can
-	// apply the same defer gate that bd ready applies server-side.
+	// nil or past means ready). Create paths preserve it; UpdateOpts does not
+	// mutate it.
 	DeferUntil *time.Time `json:"defer_until,omitempty"`
 }
 
@@ -146,6 +146,23 @@ var readyExcludeTypes = map[string]bool{
 // Ready() results by default.
 func IsReadyExcludedType(t string) bool {
 	return readyExcludeTypes[t]
+}
+
+// IsReadyCandidate reports whether a bead passes the store-independent Ready
+// filters: open status, main tier, actionable type, and no future defer_until.
+// Dependency and assignee checks are store-specific and happen separately.
+func IsReadyCandidate(b Bead, now time.Time) bool {
+	return b.Status == "open" &&
+		!b.Ephemeral &&
+		!IsReadyExcludedType(b.Type) &&
+		!beadDeferred(b, now)
+}
+
+// beadDeferred reports whether a bead is hidden by a future defer_until,
+// mirroring bd ready's server-side filter (defer_until IS NULL OR <= now is
+// ready) and cmd_hook.isFutureDeferredHookCandidate.
+func beadDeferred(b Bead, now time.Time) bool {
+	return b.DeferUntil != nil && b.DeferUntil.After(now)
 }
 
 // Dep represents a dependency relationship between two beads. The IssueID

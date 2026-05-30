@@ -682,6 +682,9 @@ func (s *BdStore) Create(b Bead) (Bead, error) {
 	if b.Ephemeral {
 		args = append(args, "--ephemeral")
 	}
+	if b.DeferUntil != nil {
+		args = append(args, "--defer", b.DeferUntil.Format(time.RFC3339))
+	}
 	metadata := maps.Clone(b.Metadata)
 	if b.From != "" {
 		if metadata == nil {

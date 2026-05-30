@@ -916,6 +916,11 @@
             "description": "Assigned agent.",
             "type": "string"
           },
+          "defer_until": {
+            "description": "Hide the bead from ready views until this time.",
+            "format": "date-time",
+            "type": "string"
+          },
           "description": {
             "description": "Bead description.",
             "type": "string"

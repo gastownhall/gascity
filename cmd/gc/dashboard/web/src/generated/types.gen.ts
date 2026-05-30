@@ -289,6 +289,10 @@ export type BeadCreateInputBody = {
      */
     assignee?: string;
     /**
+     * Hide the bead from ready views until this time.
+     */
+    defer_until?: string;
+    /**
      * Bead description.
      */
     description?: string;

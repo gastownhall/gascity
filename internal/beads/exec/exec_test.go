@@ -134,6 +134,78 @@ esac
 	}
 }
 
+func TestCreate_deferUntilReachesScript(t *testing.T) {
+	dir := t.TempDir()
+	outFile := filepath.Join(dir, "stdin.json")
+	deferUntil := time.Date(2026, 6, 1, 12, 30, 0, 0, time.UTC)
+
+	script := writeScript(t, dir, `
+op="$1"
+case "$op" in
+  create)
+    cat > "`+outFile+`"
+    echo '{"id":"EX-1","title":"test","status":"open","type":"task","created_at":"2026-02-27T10:00:00Z","defer_until":"`+deferUntil.Format(time.RFC3339)+`"}'
+    ;;
+  *) exit 2 ;;
+esac
+`)
+	s := NewStore(script)
+
+	created, err := s.Create(beads.Bead{Title: "test", DeferUntil: &deferUntil})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	data, err := os.ReadFile(outFile)
+	if err != nil {
+		t.Fatalf("read captured stdin: %v", err)
+	}
+	stdin := string(data)
+	if !strings.Contains(stdin, `"defer_until":"`+deferUntil.Format(time.RFC3339)+`"`) {
+		t.Fatalf("stdin missing defer_until, got: %s", stdin)
+	}
+	if created.DeferUntil == nil || !created.DeferUntil.Equal(deferUntil) {
+		t.Fatalf("created.DeferUntil = %v, want %s", created.DeferUntil, deferUntil.Format(time.RFC3339))
+	}
+}
+
+func TestCreate_deferUntilRoundTripsThroughConformanceScript(t *testing.T) {
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skip("jq not available")
+	}
+	scriptPath, err := filepath.Abs(filepath.Join("testdata", "conformance.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	s := NewStore(scriptPath)
+	s.SetEnv(storeTargetEnv(t.TempDir()))
+	deferUntil := time.Now().UTC().Add(24 * time.Hour).Truncate(time.Second)
+
+	created, err := s.Create(beads.Bead{Title: "deferred", DeferUntil: &deferUntil})
+	if err != nil {
+		t.Fatalf("Create(deferred): %v", err)
+	}
+	if created.DeferUntil == nil || !created.DeferUntil.Equal(deferUntil) {
+		t.Fatalf("created.DeferUntil = %v, want %s", created.DeferUntil, deferUntil.Format(time.RFC3339))
+	}
+	got, err := s.Get(created.ID)
+	if err != nil {
+		t.Fatalf("Get(deferred): %v", err)
+	}
+	if got.DeferUntil == nil || !got.DeferUntil.Equal(deferUntil) {
+		t.Fatalf("Get(%s).DeferUntil = %v, want %s", created.ID, got.DeferUntil, deferUntil.Format(time.RFC3339))
+	}
+	ready, err := s.Ready()
+	if err != nil {
+		t.Fatalf("Ready: %v", err)
+	}
+	for _, bead := range ready {
+		if bead.ID == created.ID {
+			t.Fatalf("Ready() included future-deferred bead %s: %+v", created.ID, ready)
+		}
+	}
+}
+
 func TestCreate_ephemeralRoundTripsThroughConformanceScript(t *testing.T) {
 	if _, err := exec.LookPath("jq"); err != nil {
 		t.Skip("jq not available")
@@ -757,6 +829,36 @@ func TestReady(t *testing.T) {
 	}
 }
 
+func TestReady_excludesFutureDeferredBeads(t *testing.T) {
+	dir := t.TempDir()
+	future := time.Now().UTC().Add(24 * time.Hour)
+	past := time.Now().UTC().Add(-24 * time.Hour)
+	script := writeScript(t, dir, `
+case "$1" in
+  ready)
+    echo '[{"id":"EX-ready","title":"ready","status":"open","type":"task","created_at":"2026-02-27T10:00:00Z"},{"id":"EX-future","title":"future","status":"open","type":"task","created_at":"2026-02-27T10:00:00Z","defer_until":"`+future.Format(time.RFC3339)+`"},{"id":"EX-past","title":"past","status":"open","type":"task","created_at":"2026-02-27T10:00:00Z","defer_until":"`+past.Format(time.RFC3339)+`"}]'
+    ;;
+  *) exit 2 ;;
+esac
+`)
+	s := NewStore(script)
+
+	got, err := s.Ready()
+	if err != nil {
+		t.Fatalf("Ready: %v", err)
+	}
+	ids := map[string]bool{}
+	for _, bead := range got {
+		ids[bead.ID] = true
+	}
+	if !ids["EX-ready"] || !ids["EX-past"] {
+		t.Fatalf("Ready ids = %v, want ready and past-deferred beads", ids)
+	}
+	if ids["EX-future"] {
+		t.Fatalf("Ready ids = %v, future-deferred bead must be hidden", ids)
+	}
+}
+
 func TestChildren(t *testing.T) {
 	dir := t.TempDir()
 	script := writeScript(t, dir, allOpsScript())
@@ -847,6 +949,29 @@ esac
 	}
 	if got.Metadata["name"] != "ok" {
 		t.Errorf("Metadata[name] = %q, want %q", got.Metadata["name"], "ok")
+	}
+}
+
+func TestGet_deferUntilRoundTripsFromScript(t *testing.T) {
+	dir := t.TempDir()
+	deferUntil := time.Date(2026, 6, 1, 12, 30, 0, 0, time.UTC)
+
+	script := writeScript(t, dir, `
+case "$1" in
+  get)
+    echo '{"id":"EX-1","title":"test","status":"open","type":"task","created_at":"2026-01-01T00:00:00Z","defer_until":"`+deferUntil.Format(time.RFC3339)+`"}'
+    ;;
+  *) exit 2 ;;
+esac
+`)
+	s := NewStore(script)
+
+	got, err := s.Get("EX-1")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.DeferUntil == nil || !got.DeferUntil.Equal(deferUntil) {
+		t.Fatalf("DeferUntil = %v, want %s", got.DeferUntil, deferUntil.Format(time.RFC3339))
 	}
 }
 

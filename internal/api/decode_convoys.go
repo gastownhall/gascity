@@ -43,6 +43,13 @@ func beadFromGen(g genclient.Bead) beads.Bead {
 	if g.UpdatedAt != nil {
 		out.UpdatedAt = *g.UpdatedAt
 	}
+	if g.DeferUntil != nil {
+		deferUntil := *g.DeferUntil
+		out.DeferUntil = &deferUntil
+	}
+	if g.Ephemeral != nil {
+		out.Ephemeral = *g.Ephemeral
+	}
 	if g.Priority != nil {
 		p := int(*g.Priority)
 		out.Priority = &p
