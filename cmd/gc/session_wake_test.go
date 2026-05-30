@@ -305,6 +305,9 @@ func TestPreWakeCommit_FreshModeTraceLogsClearedProviderMetadata(t *testing.T) {
 			"started_live_hash":       "old-live-hash",
 			"live_hash":               "old-live-hash",
 			"startup_dialog_verified": "true",
+			sessionpkg.StartedProviderRuntimeHashMetadataKey:   "old-runtime-hash",
+			sessionpkg.ProviderRuntimeHashBreakdownMetadataKey: "old-runtime-breakdown",
+			sessionpkg.ProviderRuntimeHashVersionMetadataKey:   "old-runtime-version",
 		},
 	})
 	if err != nil {

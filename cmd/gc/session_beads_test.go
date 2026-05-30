@@ -114,6 +114,22 @@ func (p *deadRuntimeArtifactProvider) Stop(name string) error {
 	return nil
 }
 
+type runtimeArtifactListProvider struct {
+	*deadRuntimeArtifactProvider
+	artifacts []runtime.RuntimeArtifact
+	listErr   error
+}
+
+func (p *runtimeArtifactListProvider) ListRuntimeArtifacts(prefix string) ([]runtime.RuntimeArtifact, error) {
+	var out []runtime.RuntimeArtifact
+	for _, artifact := range p.artifacts {
+		if prefix == "" || strings.HasPrefix(artifact.Name, prefix) {
+			out = append(out, artifact)
+		}
+	}
+	return out, p.listErr
+}
+
 func (s *failingCloseStore) Close(_ string) error {
 	return errors.New("close failed")
 }
@@ -6127,7 +6143,7 @@ func TestReapRuntimesBoundToClosedBeadsStopsLiveRuntime(t *testing.T) {
 	}})
 
 	var stderr bytes.Buffer
-	got := reapRuntimesBoundToClosedBeads(store, snapshot, nil, sp, &stderr)
+	got := reapRuntimesBoundToClosedBeads(store, snapshot, nil, sp, clock.Real{}, &stderr)
 	if got != 1 {
 		t.Fatalf("reapRuntimesBoundToClosedBeads() = %d, want 1; stderr=%q", got, stderr.String())
 	}
@@ -6136,6 +6152,148 @@ func TestReapRuntimesBoundToClosedBeadsStopsLiveRuntime(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "reaped runtime \"mayor\" bound to closed session bead gm-closed") {
 		t.Fatalf("stderr = %q, want reap message", stderr.String())
+	}
+}
+
+func TestReapRuntimesBoundToClosedBeadsUsesArtifactSessionID(t *testing.T) {
+	sp := &runtimeArtifactListProvider{
+		deadRuntimeArtifactProvider: newDeadRuntimeArtifactProvider(),
+		artifacts: []runtime.RuntimeArtifact{{
+			Name:      "pending-worker",
+			SessionID: "gm-closed",
+		}},
+	}
+	sp.visible["pending-worker"] = true
+
+	store := beads.NewMemStoreFrom(0, []beads.Bead{{ID: "gm-closed", Status: "closed"}}, nil)
+	snapshot := newSessionBeadSnapshot(nil)
+
+	var stderr bytes.Buffer
+	got := reapRuntimesBoundToClosedBeads(store, snapshot, nil, sp, clock.Real{}, &stderr)
+	if got != 1 {
+		t.Fatalf("reapRuntimesBoundToClosedBeads() = %d, want 1; stderr=%q", got, stderr.String())
+	}
+	if sp.stopCalls["pending-worker"] != 1 {
+		t.Fatalf("Stop(pending-worker) calls = %d, want 1", sp.stopCalls["pending-worker"])
+	}
+}
+
+func TestReapRuntimesBoundToClosedBeadsRepairsLiveFailedCreateRuntime(t *testing.T) {
+	now := time.Date(2026, 5, 29, 10, 30, 0, 0, time.UTC)
+	sp := newDeadRuntimeArtifactProvider()
+	sp.visible["pending-worker"] = true
+	sp.live["pending-worker"] = true
+	if err := sp.SetMeta("pending-worker", "GC_SESSION_ID", "gm-closed"); err != nil {
+		t.Fatalf("SetMeta(GC_SESSION_ID): %v", err)
+	}
+	if err := sp.SetMeta("pending-worker", "GC_INSTANCE_TOKEN", "tok-worker"); err != nil {
+		t.Fatalf("SetMeta(GC_INSTANCE_TOKEN): %v", err)
+	}
+	store := beads.NewMemStoreFrom(0, []beads.Bead{{
+		ID:     "gm-closed",
+		Status: "closed",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":   "pending-worker",
+			"state":          string(session.StateFailedCreate),
+			"close_reason":   session.CanonicalCloseReason(string(session.StateFailedCreate)),
+			"closed_at":      now.Add(-time.Second).Format(time.RFC3339),
+			"instance_token": "tok-worker",
+		},
+	}}, nil)
+	snapshot := newSessionBeadSnapshot(nil)
+
+	var stderr bytes.Buffer
+	got := reapRuntimesBoundToClosedBeads(store, snapshot, nil, sp, &clock.Fake{Time: now}, &stderr)
+	if got != 1 {
+		t.Fatalf("reapRuntimesBoundToClosedBeads() = %d, want 1 repaired runtime; stderr=%q", got, stderr.String())
+	}
+	if sp.stopCalls["pending-worker"] != 0 {
+		t.Fatalf("Stop(pending-worker) calls = %d, want 0", sp.stopCalls["pending-worker"])
+	}
+	updated, err := store.Get("gm-closed")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Status != "open" {
+		t.Fatalf("status = %q, want open", updated.Status)
+	}
+	if got := updated.Metadata["state"]; got != string(session.StateActive) {
+		t.Fatalf("state = %q, want active", got)
+	}
+	if got := updated.Metadata["close_reason"]; got != "" {
+		t.Fatalf("close_reason = %q, want cleared", got)
+	}
+	if got := updated.Metadata["closed_at"]; got != "" {
+		t.Fatalf("closed_at = %q, want cleared", got)
+	}
+	if !strings.Contains(stderr.String(), "repaired failed-create runtime") {
+		t.Fatalf("stderr = %q, want repair message", stderr.String())
+	}
+}
+
+func TestReapRuntimesBoundToClosedBeadsDoesNotRepairFailedCreateWhenSuccessorOwnsName(t *testing.T) {
+	now := time.Date(2026, 5, 29, 10, 35, 0, 0, time.UTC)
+	sp := newDeadRuntimeArtifactProvider()
+	sp.visible["pending-worker"] = true
+	sp.live["pending-worker"] = true
+	if err := sp.SetMeta("pending-worker", "GC_SESSION_ID", "gm-closed"); err != nil {
+		t.Fatalf("SetMeta(GC_SESSION_ID): %v", err)
+	}
+	if err := sp.SetMeta("pending-worker", "GC_INSTANCE_TOKEN", "tok-worker"); err != nil {
+		t.Fatalf("SetMeta(GC_INSTANCE_TOKEN): %v", err)
+	}
+	store := beads.NewMemStoreFrom(0, []beads.Bead{
+		{
+			ID:     "gm-closed",
+			Status: "closed",
+			Type:   sessionBeadType,
+			Labels: []string{sessionBeadLabel},
+			Metadata: map[string]string{
+				"session_name":   "pending-worker",
+				"state":          string(session.StateFailedCreate),
+				"close_reason":   session.CanonicalCloseReason(string(session.StateFailedCreate)),
+				"closed_at":      now.Add(-time.Second).Format(time.RFC3339),
+				"instance_token": "tok-worker",
+			},
+		},
+		{
+			ID:     "gm-open",
+			Status: "open",
+			Type:   sessionBeadType,
+			Labels: []string{sessionBeadLabel},
+			Metadata: map[string]string{
+				"session_name": "pending-worker",
+				"state":        string(session.StateCreating),
+			},
+		},
+	}, nil)
+	snapshot := newSessionBeadSnapshot([]beads.Bead{{
+		ID:     "gm-open",
+		Status: "open",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name": "pending-worker",
+			"state":        string(session.StateCreating),
+		},
+	}})
+
+	var stderr bytes.Buffer
+	got := reapRuntimesBoundToClosedBeads(store, snapshot, nil, sp, &clock.Fake{Time: now}, &stderr)
+	if got != 1 {
+		t.Fatalf("reapRuntimesBoundToClosedBeads() = %d, want 1 reaped conflicting runtime; stderr=%q", got, stderr.String())
+	}
+	if sp.stopCalls["pending-worker"] != 1 {
+		t.Fatalf("Stop(pending-worker) calls = %d, want 1", sp.stopCalls["pending-worker"])
+	}
+	closed, err := store.Get("gm-closed")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if closed.Status != "closed" {
+		t.Fatalf("closed bead status = %q, want closed", closed.Status)
 	}
 }
 
@@ -6158,7 +6316,7 @@ func TestReapRuntimesBoundToClosedBeadsSkipsOpenBeadRuntime(t *testing.T) {
 	}})
 
 	var stderr bytes.Buffer
-	got := reapRuntimesBoundToClosedBeads(store, snapshot, nil, sp, &stderr)
+	got := reapRuntimesBoundToClosedBeads(store, snapshot, nil, sp, clock.Real{}, &stderr)
 	if got != 0 || sp.stopCalls["worker"] != 0 {
 		t.Fatalf("reaped open-bead runtime: got=%d stopCalls=%d stderr=%q", got, sp.stopCalls["worker"], stderr.String())
 	}
@@ -6174,7 +6332,7 @@ func TestReapRuntimesBoundToClosedBeadsSkipsRuntimeWithoutSessionID(t *testing.T
 	snapshot := newSessionBeadSnapshot(nil)
 
 	var stderr bytes.Buffer
-	got := reapRuntimesBoundToClosedBeads(store, snapshot, nil, sp, &stderr)
+	got := reapRuntimesBoundToClosedBeads(store, snapshot, nil, sp, clock.Real{}, &stderr)
 	if got != 0 || sp.stopCalls["mystery"] != 0 {
 		t.Fatalf("reaped unattributable runtime: got=%d stopCalls=%d", got, sp.stopCalls["mystery"])
 	}
@@ -6200,7 +6358,7 @@ func TestReapRuntimesBoundToClosedBeadsSkipsUnknownAndNonClosedBeads(t *testing.
 	snapshot := newSessionBeadSnapshot(nil)
 
 	var stderr bytes.Buffer
-	got := reapRuntimesBoundToClosedBeads(store, snapshot, nil, sp, &stderr)
+	got := reapRuntimesBoundToClosedBeads(store, snapshot, nil, sp, clock.Real{}, &stderr)
 	if got != 0 || sp.stopCalls["foreign"] != 0 || sp.stopCalls["still-open"] != 0 {
 		t.Fatalf("reaped a runtime that was not confirmed-closed: got=%d stderr=%q", got, stderr.String())
 	}
@@ -6222,7 +6380,7 @@ func TestReapRuntimesBoundToClosedBeadsSkipsActiveDrain(t *testing.T) {
 	dt.set("gm-closed", &drainState{reason: "user"})
 
 	var stderr bytes.Buffer
-	got := reapRuntimesBoundToClosedBeads(store, snapshot, dt, sp, &stderr)
+	got := reapRuntimesBoundToClosedBeads(store, snapshot, dt, sp, clock.Real{}, &stderr)
 	if got != 0 || sp.stopCalls["mayor"] != 0 {
 		t.Fatalf("reaped a draining runtime: got=%d stopCalls=%d", got, sp.stopCalls["mayor"])
 	}

@@ -113,6 +113,10 @@ get_any_pod_by_label() {
     -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true
 }
 
+shell_single_quote() {
+  printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\"'\"'/g")"
+}
+
 # --- Operations ---
 
 case "$op" in
@@ -190,34 +194,6 @@ case "$op" in
     # relative path (--settings .gc/settings.json) and the .gc directory
     # is staged via copy_files before the agent starts.
 
-    # Build pre-start commands from pre_start array.
-    # These run on the target filesystem before the tmux session is created.
-    pre_start_count=$(echo "$config" | jq -r '.pre_start // [] | length')
-    pre_cmds=""
-    for i in $(seq 0 $(( pre_start_count - 1 ))); do
-      cmd=$(echo "$config" | jq -r ".pre_start[$i]")
-      pre_cmds="${pre_cmds}${cmd}; "
-    done
-
-    # Pod entrypoint: wait for workspace ready → pre_start → tmux → keepalive.
-    # tmux provides a real terminal session — nudge, peek, attach all
-    # work via tmux commands through kubectl exec.
-    # Base64-encode the command to avoid shell quoting issues with tmux.
-    # The sleep infinity keeps the container alive if tmux exits.
-    #
-    # Claude credentials: secret mounted read-only at /tmp/claude-secret.
-    # Copy into writable CLAUDE_CONFIG_DIR so Claude can create runtime
-    # state (cache, backups, debug dirs).
-    #
-    # .gc-workspace-ready sentinel: gc-session-k8s touches this AFTER copying
-    # the city dir and running gc init. Without this wait, Claude starts
-    # before .beads/ is configured and exits immediately.
-    cred_copy="mkdir -p \$HOME/.claude && cp -rL /tmp/claude-secret/. \$HOME/.claude/ 2>/dev/null; "
-    ws_wait="while [ ! -f /workspace/.gc-workspace-ready ]; do sleep 0.5; done; "
-
-    cmd_b64=$(printf '%s' "${command:-/bin/bash}" | base64 -w0)
-    tmux_cmd="${cred_copy}${ws_wait}${pre_cmds}CMD=\$(echo '${cmd_b64}' | base64 -d) && tmux new-session -d -s ${TMUX_SESSION} \"\$CMD\" && sleep infinity"
-
     # Build the pod manifest as JSON using jq.
     # All values are properly JSON-escaped by jq — no injection risk.
     # Tell the agent which tmux session to target for metadata (drain,
@@ -239,6 +215,35 @@ case "$op" in
           ;;
       esac
     fi
+    pod_work_dir_sh=$(printf '%q' "$pod_work_dir")
+
+    # Launch material is staged through a small EmptyDir volume instead of
+    # Kubernetes argv/env. This keeps large commands and pre_start bodies out
+    # of the pod spec and avoids ARG_MAX failures before the container starts.
+    launch_dir=$(mktemp -d)
+    trap 'rm -rf "$launch_dir"' EXIT
+    mkdir -p "$launch_dir/pre-start"
+    pre_start_count=$(echo "$config" | jq -r '.pre_start // [] | length')
+    if [ "$pre_start_count" -gt 0 ]; then
+      for i in $(seq 0 $(( pre_start_count - 1 ))); do
+        cmd=$(echo "$config" | jq -r ".pre_start[$i]")
+        script_name=$(printf '%03d.sh' "$i")
+        printf '#!/bin/sh\n%s\n' "$cmd" > "$launch_dir/pre-start/$script_name"
+        chmod 755 "$launch_dir/pre-start/$script_name"
+      done
+    fi
+    command_quoted=$(shell_single_quote "${command:-/bin/bash}")
+    printf '#!/bin/sh\nexec sh -c %s\n' "$command_quoted" > "$launch_dir/agent-launch.sh"
+    chmod 755 "$launch_dir/agent-launch.sh"
+    cat > "$launch_dir/entrypoint.sh" <<EOF
+#!/bin/sh
+mkdir -p "\$HOME/.claude"
+cp -rL /tmp/claude-secret/. "\$HOME/.claude/" 2>/dev/null || true
+while [ ! -f /workspace/.gc-workspace-ready ]; do sleep 0.5; done
+for __gc_pre_start in /gc-launch/pre-start/*.sh; do [ -f "\$__gc_pre_start" ] || continue; sh "\$__gc_pre_start"; done
+cd ${pod_work_dir_sh} && tmux new-session -d -s ${TMUX_SESSION} 'sh /gc-launch/agent-launch.sh' && sleep infinity
+EOF
+    chmod 755 "$launch_dir/entrypoint.sh"
 
     # Build env array for the pod. Remove controller-only exec providers
     # (GC_BEADS, GC_SESSION, GC_EVENTS) — agents use native bd against dolt.
@@ -303,18 +308,18 @@ case "$op" in
     # GC_DIR=/workspace/... resolve inside the pod. If the controller city path
     # differs from the host work_dir, keep a compatibility mount at the original
     # city path for any remaining absolute-path references in staged files.
-    main_vol_mounts='[{name: "ws", mountPath: "/workspace"}, {name: "claude-config", mountPath: "/tmp/claude-secret", readOnly: true}]'
+    main_vol_mounts='[{name: "launch", mountPath: "/gc-launch"}, {name: "ws", mountPath: "/workspace"}, {name: "claude-config", mountPath: "/tmp/claude-secret", readOnly: true}]'
     if [ -n "$gc_city" ] && [ "$gc_city" != "$work_dir" ]; then
-      main_vol_mounts='[{name: "ws", mountPath: "/workspace"}, {name: "city", mountPath: $city}, {name: "claude-config", mountPath: "/tmp/claude-secret", readOnly: true}]'
+      main_vol_mounts='[{name: "launch", mountPath: "/gc-launch"}, {name: "ws", mountPath: "/workspace"}, {name: "city", mountPath: $city}, {name: "claude-config", mountPath: "/tmp/claude-secret", readOnly: true}]'
     fi
 
     if [ "$needs_staging" = "true" ]; then
       # Build volumes list — always include ws emptyDir + claude-config secret.
       # Add a second emptyDir for GC_CITY when it differs from work_dir.
-      vol_spec='[{name: "ws", emptyDir: {}}, {name: "claude-config", secret: {secretName: "claude-credentials", optional: true}}]'
+      vol_spec='[{name: "launch", emptyDir: {}}, {name: "ws", emptyDir: {}}, {name: "claude-config", secret: {secretName: "claude-credentials", optional: true}}]'
       init_vol_mounts='[{name: "ws", mountPath: "/workspace"}]'
       if [ -n "$gc_city" ] && [ "$gc_city" != "$work_dir" ]; then
-        vol_spec='[{name: "ws", emptyDir: {}}, {name: "city", emptyDir: {}}, {name: "claude-config", secret: {secretName: "claude-credentials", optional: true}}]'
+        vol_spec='[{name: "launch", emptyDir: {}}, {name: "ws", emptyDir: {}}, {name: "city", emptyDir: {}}, {name: "claude-config", secret: {secretName: "claude-credentials", optional: true}}]'
         init_vol_mounts='[{name: "ws", mountPath: "/workspace"}, {name: "city", mountPath: "/city-stage"}]'
       fi
       manifest=$(jq -n \
@@ -324,12 +329,11 @@ case "$op" in
         --arg gc_agent_label "$gc_agent_label" \
         --arg session_name "$name" \
         --arg image "$IMAGE" \
-        --arg cmd "$tmux_cmd" \
         --arg cpu_req "$CPU_REQ" \
         --arg mem_req "$MEM_REQ" \
         --arg cpu_lim "$CPU_LIM" \
         --arg mem_lim "$MEM_LIM" \
-        --arg work_dir "$pod_work_dir" \
+        --arg work_dir "/workspace" \
         --arg sa "$SERVICE_ACCOUNT" \
         --argjson env "$env_array" \
         --arg city "$gc_city" \
@@ -351,21 +355,31 @@ case "$op" in
           spec: {
             serviceAccountName: $sa,
             restartPolicy: "Never",
-            initContainers: [{
-              name: "stage",
-              image: $image,
-              imagePullPolicy: "IfNotPresent",
-              command: ["sh", "-c",
-                "while [ ! -f /workspace/.gc-ready ]; do sleep 0.5; done"],
-              volumeMounts: '"$init_vol_mounts"'
-            }],
+            shareProcessNamespace: true,
+            initContainers: [
+              {
+                name: "launch",
+                image: $image,
+                imagePullPolicy: "IfNotPresent",
+                command: ["sh", "-c",
+                  "while [ ! -f /gc-launch/.gc-launch-ready ]; do sleep 0.5; done"],
+                volumeMounts: [{name: "launch", mountPath: "/gc-launch"}]
+              },
+              {
+                name: "stage",
+                image: $image,
+                imagePullPolicy: "IfNotPresent",
+                command: ["sh", "-c",
+                  "while [ ! -f /workspace/.gc-ready ]; do sleep 0.5; done"],
+                volumeMounts: '"$init_vol_mounts"'
+              }
+            ],
             containers: [{
               name: "agent",
               image: $image,
               imagePullPolicy: "IfNotPresent",
               workingDir: $work_dir,
-              command: ["/bin/sh", "-c"],
-              args: [$cmd],
+              command: ["/bin/sh", "/gc-launch/entrypoint.sh"],
               env: $env,
               stdin: true,
               tty: true,
@@ -379,11 +393,11 @@ case "$op" in
           }
         }')
     else
-      # No staging needed — simpler pod without init container.
+      # No workspace staging needed — only stage bounded launch material.
       # Still mount emptyDir at work_dir for consistent path semantics.
-      vol_spec='[{name: "ws", emptyDir: {}}, {name: "claude-config", secret: {secretName: "claude-credentials", optional: true}}]'
+      vol_spec='[{name: "launch", emptyDir: {}}, {name: "ws", emptyDir: {}}, {name: "claude-config", secret: {secretName: "claude-credentials", optional: true}}]'
       if [ -n "$gc_city" ] && [ "$gc_city" != "$work_dir" ]; then
-        vol_spec='[{name: "ws", emptyDir: {}}, {name: "city", emptyDir: {}}, {name: "claude-config", secret: {secretName: "claude-credentials", optional: true}}]'
+        vol_spec='[{name: "launch", emptyDir: {}}, {name: "ws", emptyDir: {}}, {name: "city", emptyDir: {}}, {name: "claude-config", secret: {secretName: "claude-credentials", optional: true}}]'
       fi
       manifest=$(jq -n \
         --arg pod "$pod" \
@@ -392,12 +406,11 @@ case "$op" in
         --arg gc_agent_label "$gc_agent_label" \
         --arg session_name "$name" \
         --arg image "$IMAGE" \
-        --arg cmd "$tmux_cmd" \
         --arg cpu_req "$CPU_REQ" \
         --arg mem_req "$MEM_REQ" \
         --arg cpu_lim "$CPU_LIM" \
         --arg mem_lim "$MEM_LIM" \
-        --arg work_dir "$pod_work_dir" \
+        --arg work_dir "/workspace" \
         --arg sa "$SERVICE_ACCOUNT" \
         --argjson env "$env_array" \
         --arg city "$gc_city" \
@@ -419,13 +432,21 @@ case "$op" in
           spec: {
             serviceAccountName: $sa,
             restartPolicy: "Never",
+            shareProcessNamespace: true,
+            initContainers: [{
+              name: "launch",
+              image: $image,
+              imagePullPolicy: "IfNotPresent",
+              command: ["sh", "-c",
+                "while [ ! -f /gc-launch/.gc-launch-ready ]; do sleep 0.5; done"],
+              volumeMounts: [{name: "launch", mountPath: "/gc-launch"}]
+            }],
             containers: [{
               name: "agent",
               image: $image,
               imagePullPolicy: "IfNotPresent",
               workingDir: $work_dir,
-              command: ["/bin/sh", "-c"],
-              args: [$cmd],
+              command: ["/bin/sh", "/gc-launch/entrypoint.sh"],
               env: $env,
               stdin: true,
               tty: true,
@@ -442,12 +463,30 @@ case "$op" in
 
     echo "$manifest" | "${KUBECTL[@]}" apply -f - >/dev/null
 
+    # --- Launch material staging via init container ---
+    for i in $(seq 1 60); do
+      phase=$("${KUBECTL[@]}" get pod "$pod" \
+        -o jsonpath='{.status.initContainerStatuses[0].state.running}' 2>/dev/null || true)
+      [ -n "$phase" ] && break
+      if [ "$i" -eq 60 ]; then
+        echo "start: launch init container not running in pod $pod after 60s" >&2
+        exit 1
+      fi
+      sleep 1
+    done
+    "${KUBECTL[@]}" exec "$pod" -c launch -- mkdir -p /gc-launch 2>/dev/null || true
+    "${KUBECTL[@]}" cp "$launch_dir/." "$pod:/gc-launch/" -c launch
+    "${KUBECTL[@]}" exec "$pod" -c launch -- touch /gc-launch/.gc-launch-ready 2>/dev/null || {
+      echo "start: failed to signal launch init container" >&2
+      exit 1
+    }
+
     # --- File staging via init container ---
     if [ "$needs_staging" = "true" ]; then
       # Wait for the init container to be running.
       for i in $(seq 1 60); do
         phase=$("${KUBECTL[@]}" get pod "$pod" \
-          -o jsonpath='{.status.initContainerStatuses[0].state.running}' 2>/dev/null || true)
+          -o jsonpath='{.status.initContainerStatuses[1].state.running}' 2>/dev/null || true)
         [ -n "$phase" ] && break
         if [ "$i" -eq 60 ]; then
           echo "start: init container not running in pod $pod after 60s" >&2

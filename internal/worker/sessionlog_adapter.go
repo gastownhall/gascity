@@ -41,6 +41,35 @@ type TranscriptResult struct {
 	RawMessages    []json.RawMessage
 }
 
+// SessionLogFormat identifies the source shape returned by SessionLog.
+type SessionLogFormat string
+
+const (
+	// SessionLogFormatTranscript reports that structured provider transcript
+	// entries are available.
+	SessionLogFormatTranscript SessionLogFormat = "transcript"
+	// SessionLogFormatText reports that the result contains live provider text
+	// output rather than structured transcript entries.
+	SessionLogFormatText SessionLogFormat = "text"
+)
+
+// SessionLogRequest asks a worker for the best available session log snapshot.
+type SessionLogRequest struct {
+	Transcript TranscriptRequest
+	LiveLines  int
+}
+
+// SessionLogResult is a provider-aware session output snapshot. Transcript
+// results preserve structured provider history; text results carry live output
+// observed through the runtime provider.
+type SessionLogResult struct {
+	Provider       string
+	TranscriptPath string
+	Format         SessionLogFormat
+	Transcript     *TranscriptResult
+	Text           string
+}
+
 // AgentTranscriptResult wraps a provider-native subagent transcript so callers
 // do not depend on sessionlog discovery helpers directly.
 type AgentTranscriptResult struct {

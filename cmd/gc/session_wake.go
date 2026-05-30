@@ -187,7 +187,7 @@ func beginSessionDrain(
 }
 
 func drainReasonCancelable(reason string) bool {
-	return reason != "config-drift" && reason != "orphaned" && reason != "suspended"
+	return reason != "config-drift" && reason != providerRuntimeDriftReason && reason != "orphaned" && reason != "suspended"
 }
 
 func pendingDrainReasonCancelable(reason string) bool {
@@ -264,6 +264,15 @@ func cancelSessionConfigDriftDrain(session beads.Bead, sp runtime.Provider, dt *
 	}
 	return cancelSessionDrainIf(session, sp, dt, func(reason string) bool {
 		return reason == "config-drift"
+	})
+}
+
+func cancelSessionProviderRuntimeDriftDrain(session beads.Bead, sp runtime.Provider, dt *drainTracker) bool {
+	if dt == nil {
+		return false
+	}
+	return cancelSessionDrainIf(session, sp, dt, func(reason string) bool {
+		return reason == providerRuntimeDriftReason
 	})
 }
 

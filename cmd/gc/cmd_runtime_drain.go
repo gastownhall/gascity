@@ -362,15 +362,19 @@ func cmdRuntimeDrainCheck(args []string, jsonOutput bool, stdout, stderr io.Writ
 	if err != nil {
 		return 1 // not in agent context → not draining
 	}
-	sp := newSessionProvider()
+	sp, metadataSessionName := newCurrentSessionRuntimeMetadataProvider(current)
 	dops := newDrainOps(sp)
-	return doRuntimeDrainCheck(dops, current.display, current.sessionName, jsonOutput, stdout, stderr)
+	return doRuntimeDrainCheckWithMetaSession(dops, current.display, current.sessionName, metadataSessionName, jsonOutput, stdout, stderr)
 }
 
 // doRuntimeDrainCheck returns 0 if the session is draining, 1 otherwise.
 // Silent on stdout — designed for `if gc runtime drain-check; then ...`.
 func doRuntimeDrainCheck(dops drainOps, targetName, sn string, jsonOutput bool, stdout, stderr io.Writer) int {
-	draining, err := dops.isDraining(sn)
+	return doRuntimeDrainCheckWithMetaSession(dops, targetName, sn, sn, jsonOutput, stdout, stderr)
+}
+
+func doRuntimeDrainCheckWithMetaSession(dops drainOps, targetName, reportSessionName, metadataSessionName string, jsonOutput bool, stdout, stderr io.Writer) int {
+	draining, err := dops.isDraining(metadataSessionName)
 	if err != nil {
 		return 1
 	}
@@ -380,7 +384,7 @@ func doRuntimeDrainCheck(dops drainOps, targetName, sn string, jsonOutput bool, 
 				SchemaVersion: "1",
 				OK:            true,
 				Command:       "runtime drain-check",
-				Session:       sn,
+				Session:       reportSessionName,
 				Target:        targetName,
 				Draining:      false,
 			}); err != nil {
@@ -395,7 +399,7 @@ func doRuntimeDrainCheck(dops drainOps, targetName, sn string, jsonOutput bool, 
 			SchemaVersion: "1",
 			OK:            true,
 			Command:       "runtime drain-check",
-			Session:       sn,
+			Session:       reportSessionName,
 			Target:        targetName,
 			Draining:      true,
 		}); err != nil {
@@ -449,9 +453,9 @@ func cmdRuntimeDrainAck(args []string, jsonOutput bool, stdout, stderr io.Writer
 		fmt.Fprintf(stderr, "gc runtime drain-ack: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	sp := newSessionProvider()
+	sp, metadataSessionName := newCurrentSessionRuntimeMetadataProvider(current)
 	dops := newDrainOps(sp)
-	return doRuntimeDrainAck(dops, current.display, current.sessionName, jsonOutput, stdout, stderr)
+	return doRuntimeDrainAckWithMetaSession(dops, current.display, current.sessionName, metadataSessionName, jsonOutput, stdout, stderr)
 }
 
 // ---------------------------------------------------------------------------
@@ -501,7 +505,8 @@ func cmdRuntimeRequestRestart(stdout, stderr io.Writer) int {
 	}
 
 	sp := newSessionProvider()
-	dops := newDrainOps(sp)
+	metadataSP, metadataSessionName := newCurrentSessionRuntimeMetadataProvider(current)
+	dops := newDrainOps(metadataSP)
 	store, storeErr := openCityStoreAt(current.cityPath)
 	if storeErr != nil {
 		fmt.Fprintf(stderr, "gc runtime request-restart: opening store: %v\n", storeErr) //nolint:errcheck // best-effort stderr
@@ -513,7 +518,7 @@ func cmdRuntimeRequestRestart(stdout, stderr io.Writer) int {
 			return 1
 		}
 		if !restartable {
-			if err := clearRestartRequest(store, dops, current.sessionName); err != nil {
+			if err := clearRestartRequestForRuntime(store, dops, current.sessionName, metadataSessionName); err != nil {
 				fmt.Fprintf(stderr, "gc runtime request-restart: clearing stale restart request: %v\n", err) //nolint:errcheck // best-effort stderr
 				return 1
 			}
@@ -535,7 +540,7 @@ func cmdRuntimeRequestRestart(stdout, stderr io.Writer) int {
 	}
 	sigCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	return doRuntimeRequestRestart(sigCtx, dops, persistRestart, rec, current.display, current.sessionName,
+	return doRuntimeRequestRestartWithMetaSession(sigCtx, dops, persistRestart, rec, current.display, current.sessionName, metadataSessionName,
 		controllerRestartPollInterval, controllerRestartTimeout(cfg), stdout, stderr)
 }
 
@@ -563,10 +568,10 @@ func controllerRestartTimeout(cfg *config.City) time.Duration {
 // doRuntimeRequestRestart sets the restart-requested flag then polls until the
 // controller accepts the stop handoff (exit 0), the context is canceled by a
 // signal (exit 0), or the bounded timeout expires (exit 1 with diagnostic).
-func doRuntimeRequestRestart(ctx context.Context, dops drainOps, persistRestart func() error, rec events.Recorder,
-	targetName, sn string, pollInterval, timeout time.Duration, stdout, stderr io.Writer,
+func doRuntimeRequestRestartWithMetaSession(ctx context.Context, dops drainOps, persistRestart func() error, rec events.Recorder,
+	targetName, _, metadataSessionName string, pollInterval, timeout time.Duration, stdout, stderr io.Writer,
 ) int {
-	if err := dops.setRestartRequested(sn); err != nil {
+	if err := dops.setRestartRequested(metadataSessionName); err != nil {
 		fmt.Fprintf(stderr, "gc runtime request-restart: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -585,7 +590,7 @@ func doRuntimeRequestRestart(ctx context.Context, dops drainOps, persistRestart 
 	})
 	fmt.Fprintf(stdout, "Restart requested. Waiting up to %s for controller to stop this session...\n", timeout) //nolint:errcheck // best-effort stdout
 
-	return waitForControllerRestart(ctx, dops, sn, "gc runtime request-restart", pollInterval, timeout, stderr)
+	return waitForControllerRestart(ctx, dops, metadataSessionName, "gc runtime request-restart", pollInterval, timeout, stderr)
 }
 
 func waitForControllerRestart(ctx context.Context, dops drainOps, sn, command string, pollInterval, timeout time.Duration, stderr io.Writer) int {
@@ -626,7 +631,11 @@ func waitForControllerRestart(ctx context.Context, dops drainOps, sn, command st
 // doRuntimeDrainAck sets the drain-ack flag on the session. The controller
 // will stop the session on the next tick.
 func doRuntimeDrainAck(dops drainOps, targetName, sn string, jsonOutput bool, stdout, stderr io.Writer) int {
-	if err := dops.setDrainAck(sn); err != nil {
+	return doRuntimeDrainAckWithMetaSession(dops, targetName, sn, sn, jsonOutput, stdout, stderr)
+}
+
+func doRuntimeDrainAckWithMetaSession(dops drainOps, targetName, reportSessionName, metadataSessionName string, jsonOutput bool, stdout, stderr io.Writer) int {
+	if err := dops.setDrainAck(metadataSessionName); err != nil {
 		fmt.Fprintf(stderr, "gc runtime drain-ack: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -636,7 +645,7 @@ func doRuntimeDrainAck(dops drainOps, targetName, sn string, jsonOutput bool, st
 			OK:            true,
 			Command:       "runtime drain-ack",
 			Action:        "drain-ack",
-			Session:       sn,
+			Session:       reportSessionName,
 			Target:        targetName,
 			Status:        "acknowledged",
 		}); err != nil {

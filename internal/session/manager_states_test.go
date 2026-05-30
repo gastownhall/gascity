@@ -84,6 +84,63 @@ func TestConformance_CreatingState(t *testing.T) {
 	}
 }
 
+func TestConfirmLiveSessionStateDoesNotWriteActiveMetadataToClosedSession(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	m := NewManager(store, sp)
+
+	b, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   BeadType,
+		Labels: []string{LabelSession},
+		Metadata: map[string]string{
+			"template":                   "worker",
+			"state":                      string(StateCreating),
+			"pending_create_claim":       "true",
+			"pending_create_started_at":  time.Now().UTC().Format(time.RFC3339),
+			"session_name":               "s-test-worker",
+			"reconciler_start_in_flight": "true",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetMetadataBatch(b.ID, ClosePatch(time.Now().UTC(), string(StateFailedCreate))); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(b.ID); err != nil {
+		t.Fatal(err)
+	}
+	before, err := store.Get(b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = m.confirmLiveSessionState(b.ID, &b)
+	if !errors.Is(err, ErrSessionClosed) {
+		t.Fatalf("confirmLiveSessionState error = %v, want ErrSessionClosed", err)
+	}
+	updated, err := store.Get(b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Status != "closed" {
+		t.Fatalf("status = %q, want closed", updated.Status)
+	}
+	if got := updated.Metadata["state"]; got != string(StateFailedCreate) {
+		t.Fatalf("state = %q, want failed-create", got)
+	}
+	if got := updated.Metadata["state_reason"]; got == "creation_complete" {
+		t.Fatalf("state_reason = %q, must not stamp creation_complete on closed bead", got)
+	}
+	if got, want := updated.Metadata["pending_create_claim"], before.Metadata["pending_create_claim"]; got != want {
+		t.Fatalf("pending_create_claim = %q, want preserved %q", got, want)
+	}
+	if got := updated.Metadata["creation_complete_at"]; got != "" {
+		t.Fatalf("creation_complete_at = %q, want empty", got)
+	}
+}
+
 func TestConformance_DrainState(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()

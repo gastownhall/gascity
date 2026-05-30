@@ -7515,9 +7515,8 @@ func TestReconcileSessionBeads_ZombieCapturesScrollback(t *testing.T) {
 // verifies that when a session is a zombie (tmux exists but agent process
 // dead), the reconciler records a crash event and treats the session as
 // not alive. The alive=false state means downstream logic (config-drift,
-// drain-ack) won't act on it, and when the tmux state cache subsequently
-// reports IsRunning=false (pane_dead=1), the outer reconciler loop will
-// start a fresh session.
+// drain-ack) won't act on it, and the reconciler stops the stale runtime so
+// the next tick starts a fresh session.
 // Regression test for https://github.com/gastownhall/gascity/issues/71
 func TestReconcileSessionBeads_ZombieDetectedCrashRecordedAndSessionNotAlive(t *testing.T) {
 	env := newReconcilerTestEnv()
@@ -7565,12 +7564,16 @@ func TestReconcileSessionBeads_ZombieDetectedCrashRecordedAndSessionNotAlive(t *
 	//  2. Heals bead state from "active" to "asleep" (not alive).
 	//  3. Detects rapid exit (last_woke_at is recent) and records a
 	//     wake failure, preventing immediate restart (crash-loop protection).
+	//  4. Stops the dead runtime so stale provider pods/sessions do not linger.
 	got, _ := env.store.Get(session.ID)
 	if got.Metadata["state"] != "asleep" {
 		t.Errorf("state = %q, want asleep (zombie healed to not-alive)", got.Metadata["state"])
 	}
 	if got.Metadata["wake_attempts"] == "" || got.Metadata["wake_attempts"] == "0" {
 		t.Error("expected wake_attempts > 0 (rapid exit recorded for zombie)")
+	}
+	if env.sp.IsRunning("worker") {
+		t.Error("expected zombie runtime to be stopped")
 	}
 }
 

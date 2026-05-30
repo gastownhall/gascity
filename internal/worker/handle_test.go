@@ -519,6 +519,38 @@ func TestSessionHandlePeekUsesWorkerBoundary(t *testing.T) {
 	}
 }
 
+func TestSessionHandleSessionLogFallsBackToProviderOutput(t *testing.T) {
+	handle, _, sp, mgr := newTestSessionHandle(t, SessionSpec{
+		Template: "probe",
+		Title:    "Probe",
+		Command:  "claude",
+		WorkDir:  t.TempDir(),
+		Provider: "claude",
+	})
+
+	if err := handle.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	info, err := mgr.Get(handle.sessionID)
+	if err != nil {
+		t.Fatalf("manager.Get(%q): %v", handle.sessionID, err)
+	}
+	sp.SetPeekOutput(info.SessionName, "provider-owned output\n")
+	sp.Calls = nil
+
+	result, err := handle.SessionLog(context.Background(), SessionLogRequest{LiveLines: 40})
+	if err != nil {
+		t.Fatalf("SessionLog: %v", err)
+	}
+	if result.Format != SessionLogFormatText || result.Text != "provider-owned output\n" || result.TranscriptPath != "" {
+		t.Fatalf("SessionLog result = %+v, want text live output", result)
+	}
+	peek := firstCall(sp.Calls, "Peek")
+	if peek == nil || peek.Name != info.SessionName {
+		t.Fatalf("runtime calls = %#v, want Peek %q", sp.Calls, info.SessionName)
+	}
+}
+
 func TestCanonicalProfileIdentity(t *testing.T) {
 	identity, ok := CanonicalProfileIdentity(ProfileCodexTmuxCLI)
 	if !ok {

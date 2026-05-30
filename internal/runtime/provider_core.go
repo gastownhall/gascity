@@ -57,6 +57,39 @@ type DeadRuntimeSessionChecker interface {
 	IsDeadRuntimeSession(name string) (bool, error)
 }
 
+// RuntimeArtifact describes a provider-owned runtime artifact. Unlike
+// ListRunning, artifact listing may include non-running resources such as
+// Kubernetes pods that are still initializing or terminating.
+type RuntimeArtifact struct {
+	Name      string
+	SessionID string
+}
+
+// RuntimeArtifactLister is an optional provider capability for cleanup paths
+// that need to inspect non-running runtime artifacts. Providers should populate
+// SessionID from durable artifact configuration when possible, not only from a
+// live process environment.
+type RuntimeArtifactLister interface {
+	ListRuntimeArtifacts(prefix string) ([]RuntimeArtifact, error)
+}
+
+// ListRuntimeArtifacts returns provider runtime artifacts when the provider
+// supports them, otherwise it falls back to running session names.
+func ListRuntimeArtifacts(sp Provider, prefix string) ([]RuntimeArtifact, error) {
+	if sp == nil {
+		return nil, nil
+	}
+	if lister, ok := sp.(RuntimeArtifactLister); ok {
+		return lister.ListRuntimeArtifacts(prefix)
+	}
+	names, err := sp.ListRunning(prefix)
+	artifacts := make([]RuntimeArtifact, 0, len(names))
+	for _, name := range names {
+		artifacts = append(artifacts, RuntimeArtifact{Name: name})
+	}
+	return artifacts, err
+}
+
 // MergeBackendListResults merges provider ListRunning results. On partial
 // backend failure it returns the best-effort merged names plus a
 // [PartialListError] so callers can continue with partial results while still

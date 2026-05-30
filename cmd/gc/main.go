@@ -370,11 +370,10 @@ func printCommandUsage(stderr io.Writer, cmd *cobra.Command) {
 // otherwise falls back to the legacy SessionNameFor function.
 // sessionTemplate is a Go text/template string (empty = default pattern).
 //
-// When running inside a container (Docker/K8s), the tmux session has a
-// fixed name ("agent" or "main") that differs from the controller's
-// session name. GC_TMUX_SESSION overrides the resolved name so agent-side
-// commands (drain-check, drain-ack, request-restart) target the correct
-// tmux session for metadata reads/writes.
+// When resolving a concrete tmux runtime name, GC_TMUX_SESSION overrides the
+// computed name so nested container sessions can address their inner tmux
+// session. Self-directed runtime commands that need the provider-visible
+// session identity use currentSessionRuntimeTarget instead.
 func sessionName(store beads.Store, cityName, agentName, sessionTemplate string) string {
 	if override := os.Getenv("GC_TMUX_SESSION"); override != "" {
 		return override

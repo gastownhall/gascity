@@ -73,3 +73,47 @@ func (h providerSessionResponseHandle) Peek(_ context.Context, lines int) (strin
 	}
 	return h.provider.Peek(h.sessionName, lines)
 }
+
+type inventorySessionResponseHandle struct {
+	provider     runtime.Provider
+	sessionName  string
+	providerName string
+	observation  runtime.InventoryObservation
+}
+
+func newInventorySessionResponseHandle(sp runtime.Provider, sessionName, providerName string, inventory runtime.Inventory) sessionResponseHandle {
+	sessionName = strings.TrimSpace(sessionName)
+	if sp == nil || sessionName == "" {
+		return nil
+	}
+	obs, known := inventory.Observe(sessionName)
+	if !known {
+		return nil
+	}
+	return inventorySessionResponseHandle{
+		provider:     sp,
+		sessionName:  sessionName,
+		providerName: strings.TrimSpace(providerName),
+		observation:  obs,
+	}
+}
+
+func (h inventorySessionResponseHandle) State(context.Context) (worker.State, error) {
+	state := worker.State{
+		SessionName: h.sessionName,
+		Provider:    h.providerName,
+	}
+	if !h.observation.Running {
+		state.Phase = worker.PhaseStopped
+		return state, nil
+	}
+	state.Phase = worker.PhaseReady
+	return state, nil
+}
+
+func (h inventorySessionResponseHandle) Peek(_ context.Context, lines int) (string, error) {
+	if !h.observation.Running {
+		return "", fmt.Errorf("%w: %s", session.ErrSessionInactive, h.sessionName)
+	}
+	return h.provider.Peek(h.sessionName, lines)
+}

@@ -706,6 +706,86 @@ func TestHandleSessionList(t *testing.T) {
 	}
 }
 
+func TestHandleSessionListUsesBatchedRuntimeInventory(t *testing.T) {
+	fs := newSessionFakeState(t)
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+
+	for i := 0; i < 12; i++ {
+		createTestSession(t, fs.cityBeadStore, fs.sp, fmt.Sprintf("Session %02d", i))
+	}
+	fs.sp.Calls = nil
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", cityURL(fs, "/sessions"), nil)
+	h.ServeHTTP(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("got status %d, want %d: %s", w.Code, http.StatusOK, w.Body.String())
+	}
+	var resp struct {
+		Items []sessionResponse `json:"items"`
+		Total int               `json:"total"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Total != 12 || len(resp.Items) != 12 {
+		t.Fatalf("session list count = total %d items %d, want 12", resp.Total, len(resp.Items))
+	}
+
+	inventoryCalls := 0
+	for _, call := range fs.sp.Calls {
+		switch call.Method {
+		case "Inventory":
+			inventoryCalls++
+		case "IsRunning", "IsAttached", "GetLastActivity":
+			t.Fatalf("session list used per-session runtime probe after inventory: %#v", call)
+		}
+	}
+	if inventoryCalls != 1 {
+		t.Fatalf("Inventory calls = %d, want 1; calls=%#v", inventoryCalls, fs.sp.Calls)
+	}
+}
+
+func TestHandleSessionListReturnsPartialWhenRuntimeInventoryFails(t *testing.T) {
+	fs := newSessionFakeState(t)
+	for i := 0; i < 3; i++ {
+		createTestSession(t, fs.cityBeadStore, fs.sp, fmt.Sprintf("Session %02d", i))
+	}
+	fs.sp = runtime.NewFailFake()
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", cityURL(fs, "/sessions"), nil)
+	h.ServeHTTP(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("got status %d, want %d: %s", w.Code, http.StatusOK, w.Body.String())
+	}
+	var resp struct {
+		Items         []sessionResponse `json:"items"`
+		Total         int               `json:"total"`
+		Partial       bool              `json:"partial"`
+		PartialErrors []string          `json:"partial_errors"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Total != 3 || len(resp.Items) != 3 {
+		t.Fatalf("session list count = total %d items %d, want 3", resp.Total, len(resp.Items))
+	}
+	if !resp.Partial || len(resp.PartialErrors) == 0 || !strings.Contains(resp.PartialErrors[0], "runtime inventory") {
+		t.Fatalf("partial = %v errors = %v, want runtime inventory partial error", resp.Partial, resp.PartialErrors)
+	}
+	for _, call := range fs.sp.Calls {
+		if call.Method == "IsRunning" {
+			t.Fatalf("inventory failure fell back to per-session IsRunning: %#v", fs.sp.Calls)
+		}
+	}
+}
+
 func TestHandleSessionListFilterByState(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)

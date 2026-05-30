@@ -173,6 +173,94 @@ func TestStageFilesStagesKiroPackOverlayAtPodWorkDirForRigWorkDir(t *testing.T) 
 	}
 }
 
+func TestStageFilesStagesCityRootRuntimeInputsForNestedWorkDir(t *testing.T) {
+	cityRoot := t.TempDir()
+	workDir := filepath.Join(cityRoot, ".gc", "worktrees", "demo", "cartographer")
+	mustWriteFile(t, filepath.Join(workDir, "task.txt"), "worktree payload")
+	mustWriteFile(t,
+		filepath.Join(cityRoot, ".gc", "system", "packs", "gastown", "assets", "scripts", "worktree-setup.sh"),
+		"system setup",
+	)
+	mustWriteFile(t,
+		filepath.Join(cityRoot, "packs", "vg-support", "assets", "scripts", "sync-worktree-scripts.sh"),
+		"sync scripts",
+	)
+	mustWriteFile(t, filepath.Join(cityRoot, "scripts", "city-tool.sh"), "city script")
+	mustWriteFile(t, filepath.Join(cityRoot, ".gc", "settings.json"), "{}")
+	mustWriteFile(t, filepath.Join(cityRoot, "city.toml"), "[city]\n")
+	mustWriteFile(t, filepath.Join(cityRoot, "pack.toml"), "[pack]\n")
+	mustWriteFile(t,
+		filepath.Join(cityRoot, ".gc", "cache", "packs", "remote", "assets", "scripts", "remote.sh"),
+		"remote script",
+	)
+	mustWriteFile(t, filepath.Join(cityRoot, ".gc", "cache", "packs", "remote", ".git", "HEAD"), "git metadata")
+	rigRoot := filepath.Join(cityRoot, "rigs", "demo")
+	mustWriteFile(t, filepath.Join(rigRoot, ".git", "HEAD"), "ref: refs/heads/main")
+	mustWriteFile(t, filepath.Join(rigRoot, ".beads", "config.yaml"), "issue_prefix: demo\n")
+	mustWriteFile(t, filepath.Join(rigRoot, "README.md"), "rig source")
+	mustWriteFile(t, filepath.Join(cityRoot, "rigs", "other", "README.md"), "other rig")
+
+	mustWriteFile(t, filepath.Join(cityRoot, ".gc", "runtime", "secret.txt"), "runtime state")
+	mustWriteFile(t, filepath.Join(cityRoot, ".gc", "agents", "mayor", "state.txt"), "agent state")
+	mustWriteFile(t, filepath.Join(cityRoot, ".gc", "worktrees", "demo", "other", "state.txt"), "other worktree")
+	mustWriteFile(t, filepath.Join(cityRoot, ".beads", "state.db"), "beads state")
+	mustWriteFile(t, filepath.Join(cityRoot, ".git", "config"), "git state")
+
+	ops := newCapturingStageOps()
+	err := stageFiles(context.Background(), ops, "gc-cartographer", runtime.Config{
+		WorkDir: workDir,
+		Env: map[string]string{
+			"GC_RIG_ROOT":   rigRoot,
+			"GC_STORE_ROOT": rigRoot,
+		},
+	}, cityRoot, io.Discard)
+	if err != nil {
+		t.Fatalf("stageFiles: %v", err)
+	}
+
+	if got := ops.files["/workspace/.gc/system/packs/gastown/assets/scripts/worktree-setup.sh"]; got != "system setup" {
+		t.Fatalf("staged system pack script = %q, want city root system script", got)
+	}
+	if got := ops.files["/workspace/packs/vg-support/assets/scripts/sync-worktree-scripts.sh"]; got != "sync scripts" {
+		t.Fatalf("staged city pack script = %q, want city pack asset", got)
+	}
+	if got := ops.files["/workspace/scripts/city-tool.sh"]; got != "city script" {
+		t.Fatalf("staged city script = %q, want city script", got)
+	}
+	if got := ops.files["/workspace/.gc/settings.json"]; got != "{}" {
+		t.Fatalf("staged settings = %q, want city settings", got)
+	}
+	if got := ops.files["/workspace/.gc/worktrees/demo/cartographer/task.txt"]; got != "worktree payload" {
+		t.Fatalf("staged nested workdir payload = %q, want copied under pod workdir", got)
+	}
+	if got := ops.files["/workspace/.gc/cache/packs/remote/assets/scripts/remote.sh"]; got != "remote script" {
+		t.Fatalf("staged cached pack script = %q, want cached pack asset", got)
+	}
+	if got := ops.files["/workspace/rigs/demo/.git/HEAD"]; got != "ref: refs/heads/main" {
+		t.Fatalf("staged rig git metadata = %q, want active source root git metadata", got)
+	}
+	if got := ops.files["/workspace/rigs/demo/.beads/config.yaml"]; got != "issue_prefix: demo\n" {
+		t.Fatalf("staged rig bead config = %q, want active source root bead config", got)
+	}
+	if got := ops.files["/workspace/rigs/demo/README.md"]; got != "rig source" {
+		t.Fatalf("staged rig source = %q, want active source root payload", got)
+	}
+
+	for _, unexpected := range []string{
+		"/workspace/.gc/runtime/secret.txt",
+		"/workspace/.gc/agents/mayor/state.txt",
+		"/workspace/.gc/worktrees/demo/other/state.txt",
+		"/workspace/.gc/cache/packs/remote/.git/HEAD",
+		"/workspace/rigs/other/README.md",
+		"/workspace/.beads/state.db",
+		"/workspace/.git/config",
+	} {
+		if _, ok := ops.files[unexpected]; ok {
+			t.Fatalf("staged mutable city state %q; want only runtime inputs", unexpected)
+		}
+	}
+}
+
 func TestStageFilesUsesConcreteProviderOverlayName(t *testing.T) {
 	workDir := t.TempDir()
 	packOverlay := t.TempDir()
@@ -285,6 +373,16 @@ func newCapturingStageOps() *capturingStageOps {
 	return &capturingStageOps{files: make(map[string]string)}
 }
 
+func mustWriteFile(t *testing.T, filename string, contents string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(filename), 0o755); err != nil {
+		t.Fatalf("MkdirAll(%q): %v", filepath.Dir(filename), err)
+	}
+	if err := os.WriteFile(filename, []byte(contents), 0o644); err != nil {
+		t.Fatalf("WriteFile(%q): %v", filename, err)
+	}
+}
+
 func (o *capturingStageOps) createPod(context.Context, *corev1.Pod) (*corev1.Pod, error) {
 	return nil, nil
 }
@@ -293,6 +391,7 @@ func (o *capturingStageOps) getPod(context.Context, string) (*corev1.Pod, error)
 	return &corev1.Pod{
 		Status: corev1.PodStatus{
 			InitContainerStatuses: []corev1.ContainerStatus{{
+				Name: "stage",
 				State: corev1.ContainerState{
 					Running: &corev1.ContainerStateRunning{},
 				},

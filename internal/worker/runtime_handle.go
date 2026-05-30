@@ -282,6 +282,19 @@ func (h *RuntimeHandle) Transcript(context.Context, TranscriptRequest) (*Transcr
 	return nil, ErrHistoryUnavailable
 }
 
+// SessionLog returns live provider output for runtime-only sessions.
+func (h *RuntimeHandle) SessionLog(ctx context.Context, req SessionLogRequest) (*SessionLogResult, error) {
+	output, err := h.Peek(ctx, req.LiveLines)
+	if err != nil {
+		return nil, err
+	}
+	return &SessionLogResult{
+		Provider: h.providerName,
+		Format:   SessionLogFormatText,
+		Text:     output,
+	}, nil
+}
+
 // TranscriptPath reports unavailable because runtime-only handles have no transcript path.
 func (h *RuntimeHandle) TranscriptPath(context.Context) (string, error) {
 	return "", ErrHistoryUnavailable

@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
@@ -47,6 +48,12 @@ func (c *SessionCatalog) Get(id string) (SessionInfo, error) {
 // ListFullFromBeads expands a bead set into full session listing results.
 func (c *SessionCatalog) ListFullFromBeads(all []beads.Bead, stateFilter, templateFilter string) *SessionListResult {
 	return c.manager.ListFullFromBeads(all, stateFilter, templateFilter)
+}
+
+// ListFullFromBeadsWithInventory expands a bead set using a batched
+// provider runtime snapshot instead of per-session liveness probes.
+func (c *SessionCatalog) ListFullFromBeadsWithInventory(all []beads.Bead, stateFilter, templateFilter string, inventory runtime.Inventory) *SessionListResult {
+	return c.manager.ListFullFromBeadsWithInventory(all, stateFilter, templateFilter, inventory)
 }
 
 // SubmissionCapabilities reports whether the session can accept submit-style input.

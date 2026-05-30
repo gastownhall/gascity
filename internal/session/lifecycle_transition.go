@@ -10,8 +10,19 @@ var freshWakeConversationResetKeys = []string{
 	"started_config_hash",
 	"started_live_hash",
 	"live_hash",
+	StartedProviderRuntimeHashMetadataKey,
+	ProviderRuntimeHashBreakdownMetadataKey,
+	ProviderRuntimeHashVersionMetadataKey,
 	startupDialogVerifiedKey,
 }
+
+// Provider runtime metadata keys record the substrate identity that created the
+// currently running session.
+const (
+	StartedProviderRuntimeHashMetadataKey   = "started_provider_runtime_hash"
+	ProviderRuntimeHashBreakdownMetadataKey = "provider_runtime_hash_breakdown"
+	ProviderRuntimeHashVersionMetadataKey   = "provider_runtime_hash_version"
+)
 
 // MetadataPatch is an atomic set of metadata key updates for one lifecycle
 // transition. Empty values intentionally clear metadata keys in existing store
@@ -45,6 +56,9 @@ func applyFreshWakeConversationReset(patch MetadataPatch) {
 	patch["started_config_hash"] = ""
 	patch["started_live_hash"] = ""
 	patch["live_hash"] = ""
+	patch[StartedProviderRuntimeHashMetadataKey] = ""
+	patch[ProviderRuntimeHashBreakdownMetadataKey] = ""
+	patch[ProviderRuntimeHashVersionMetadataKey] = ""
 	patch[startupDialogVerifiedKey] = ""
 }
 
@@ -196,6 +210,8 @@ func ConfirmStartedPatch(now time.Time) MetadataPatch {
 		"pending_create_claim":      "",
 		"pending_create_started_at": "",
 		"sleep_reason":              "",
+		"close_reason":              "",
+		"closed_at":                 "",
 	}
 }
 
@@ -210,13 +226,16 @@ func ConfirmStartedPatch(now time.Time) MetadataPatch {
 // readers (e.g. the pool bead sweep) never observe a transient state
 // where the claim is gone but the post-create marker hasn't landed yet.
 type CommitStartedPatchInput struct {
-	CoreHash                string
-	LiveHash                string
-	CoreBreakdown           string
-	ConfirmState            bool
-	ClearSleepReason        bool
-	ClearPendingCreateClaim bool
-	Now                     time.Time
+	CoreHash                 string
+	LiveHash                 string
+	CoreBreakdown            string
+	ProviderRuntimeHash      string
+	ProviderRuntimeVersion   string
+	ProviderRuntimeBreakdown string
+	ConfirmState             bool
+	ClearSleepReason         bool
+	ClearPendingCreateClaim  bool
+	Now                      time.Time
 }
 
 // CommitStartedPatch records a successful runtime start atomically with the
@@ -231,10 +250,19 @@ func CommitStartedPatch(input CommitStartedPatchInput) MetadataPatch {
 	if input.CoreBreakdown != "" {
 		patch["core_hash_breakdown"] = input.CoreBreakdown
 	}
+	if input.ProviderRuntimeHash != "" {
+		patch[StartedProviderRuntimeHashMetadataKey] = input.ProviderRuntimeHash
+		patch[ProviderRuntimeHashVersionMetadataKey] = input.ProviderRuntimeVersion
+		if input.ProviderRuntimeBreakdown != "" {
+			patch[ProviderRuntimeHashBreakdownMetadataKey] = input.ProviderRuntimeBreakdown
+		}
+	}
 	if input.ConfirmState {
 		patch["state"] = string(StateActive)
 		patch["state_reason"] = "creation_complete"
 		patch["pending_create_started_at"] = ""
+		patch["close_reason"] = ""
+		patch["closed_at"] = ""
 	}
 	// creation_complete_at tracks when the runtime was last confirmed started.
 	// Stamp it whenever Now is non-zero — the ConfirmState path marks the
@@ -332,12 +360,15 @@ func CompleteDrainPatch(now time.Time, reason string, freshWake bool) MetadataPa
 // currently running runtime.
 func RestartRequestPatch(sessionKey string) MetadataPatch {
 	patch := MetadataPatch{
-		"restart_requested":          "",
-		"started_config_hash":        "",
-		"continuation_reset_pending": "true",
-		"last_woke_at":               "",
-		"pending_create_claim":       "",
-		"pending_create_started_at":  "",
+		"restart_requested":                     "",
+		"started_config_hash":                   "",
+		StartedProviderRuntimeHashMetadataKey:   "",
+		ProviderRuntimeHashBreakdownMetadataKey: "",
+		ProviderRuntimeHashVersionMetadataKey:   "",
+		"continuation_reset_pending":            "true",
+		"last_woke_at":                          "",
+		"pending_create_claim":                  "",
+		"pending_create_started_at":             "",
 	}
 	if sessionKey != "" {
 		patch["session_key"] = sessionKey

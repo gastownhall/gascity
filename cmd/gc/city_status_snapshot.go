@@ -23,6 +23,47 @@ import (
 // while still cutting wall time on the common 10-30 agent case.
 const statusObservationConcurrency = 8
 
+type statusRunningSnapshotProvider interface {
+	StatusRunningSessions(prefix string) ([]string, error)
+}
+
+func observeStatusTargetsFromRunningSnapshot(
+	sp runtime.Provider,
+	targets []statusObservationTarget,
+	stderr io.Writer,
+) ([]worker.LiveObservation, bool) {
+	snapshotProvider, ok := sp.(statusRunningSnapshotProvider)
+	if !ok {
+		return nil, false
+	}
+	running, err := snapshotProvider.StatusRunningSessions("")
+	if err != nil {
+		if stderr != nil {
+			fmt.Fprintf(stderr, "gc status: listing running sessions: %v; falling back to per-session observations\n", err) //nolint:errcheck // best-effort stderr
+		}
+		return nil, false
+	}
+	runningSet := make(map[string]struct{}, len(running))
+	for _, name := range running {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		runningSet[name] = struct{}{}
+	}
+	out := make([]worker.LiveObservation, len(targets))
+	for i, target := range targets {
+		_, isRunning := runningSet[target.runtimeSessionName]
+		out[i] = worker.LiveObservation{
+			Running:     isRunning,
+			Suspended:   target.suspended,
+			SessionID:   target.sessionID,
+			SessionName: target.runtimeSessionName,
+		}
+	}
+	return out, true
+}
+
 // observeStatusTargetsParallel runs observeSessionTargetWithWarning for each
 // target concurrently with a bounded worker pool. Results are returned in
 // input order. stderr is shared safely across goroutines.
@@ -37,6 +78,9 @@ func observeStatusTargetsParallel(
 	out := make([]worker.LiveObservation, len(targets))
 	if len(targets) == 0 {
 		return out
+	}
+	if observations, ok := observeStatusTargetsFromRunningSnapshot(sp, targets, stderr); ok {
+		return observations
 	}
 	safeStderr := lockedStderr(stderr)
 	sem := make(chan struct{}, statusObservationConcurrency)

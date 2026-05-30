@@ -177,6 +177,13 @@ func newSessionProviderForCity(cfg *config.City, cityPath string) runtime.Provid
 	return newSessionProviderFromContext(ctx, sessionBeads)
 }
 
+func newCurrentSessionRuntimeMetadataProvider(target sessionRuntimeTarget) (runtime.Provider, string) {
+	if strings.TrimSpace(target.localSessionName) != "" {
+		return sessiontmux.NewProvider(), strings.TrimSpace(target.localSessionName)
+	}
+	return newSessionProvider(), strings.TrimSpace(target.sessionName)
+}
+
 func newStatusSessionProviderForCity(cfg *config.City, cityPath string) runtime.Provider {
 	ctx := sessionProviderContextForCity(cfg, cityPath, os.Getenv("GC_SESSION"))
 	return newSessionProviderFromContext(ctx, nil)

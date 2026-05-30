@@ -900,6 +900,10 @@ func doSessionListFallback(stateFilter, templateFilter string, jsonOutput bool, 
 
 	sessionBeads := newSessionBeadSnapshot(allSessionBeads)
 	sp := newSessionProviderFromContext(providerCtx, sessionBeads)
+	inventory, hasInventory, inventoryErr := runtime.ObserveInventory(context.Background(), sp, "")
+	if inventoryErr != nil && !jsonOutput {
+		fmt.Fprintf(stderr, "gc session list: runtime inventory degraded: %v\n", inventoryErr) //nolint:errcheck // best-effort stderr
+	}
 	catalog, err := workerSessionCatalogWithConfig("", store, sp, providerCtx.cfg)
 	if err != nil {
 		if jsonOutput {
@@ -908,7 +912,12 @@ func doSessionListFallback(stateFilter, templateFilter string, jsonOutput bool, 
 		fmt.Fprintf(stderr, "gc session list: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	listResult := catalog.ListFullFromBeads(allSessionBeads, stateFilter, templateFilter)
+	var listResult *session.ListResult
+	if hasInventory {
+		listResult = catalog.ListFullFromBeadsWithInventory(allSessionBeads, stateFilter, templateFilter, inventory)
+	} else {
+		listResult = catalog.ListFullFromBeads(allSessionBeads, stateFilter, templateFilter)
+	}
 	sessions := listResult.Sessions
 
 	if jsonOutput {
@@ -935,6 +944,17 @@ func doSessionListFallback(stateFilter, templateFilter string, jsonOutput bool, 
 	// semantics. Going through workerSessionTargetAttachedWithConfig here
 	// triggered 2-3 extra bd show subprocess lookups per session.
 	attachedSet := buildAttachmentCache(sessions, func(info session.Info) (bool, error) {
+		if hasInventory {
+			if obs, known := inventory.Observe(info.SessionName); known {
+				if obs.AttachedKnown {
+					return obs.Attached, nil
+				}
+				if !obs.Running {
+					return false, nil
+				}
+				return info.Attached, nil
+			}
+		}
 		if info.State == session.StateActive || sp == nil {
 			return info.Attached, nil
 		}
@@ -948,7 +968,10 @@ func doSessionListFallback(stateFilter, templateFilter string, jsonOutput bool, 
 
 	// Wrap sp with an attachment cache to avoid redundant IsAttached calls
 	// in wakeReasons.
-	cachedSP := &attachmentCachingProvider{Provider: sp, cache: attachedSet}
+	var cachedSP runtime.Provider = &attachmentCachingProvider{Provider: sp, cache: attachedSet}
+	if hasInventory {
+		cachedSP = &inventoryCachingProvider{Provider: sp, inventory: inventory, attachments: attachedSet}
+	}
 
 	w := tabwriter.NewWriter(stdout, 0, 4, 2, ' ', 0)
 	fmt.Fprintln(w, "ID\tTEMPLATE\tSTATE\tREASON\tTARGET\tTITLE\tAGE\tLAST ACTIVE\tLAST NUDGE") //nolint:errcheck // best-effort stdout
@@ -1187,6 +1210,55 @@ func (p *attachmentCachingProvider) Respond(name string, response runtime.Intera
 		return ip.Respond(name, response)
 	}
 	return runtime.ErrInteractionUnsupported
+}
+
+type inventoryCachingProvider struct {
+	runtime.Provider
+	inventory   runtime.Inventory
+	attachments map[string]bool
+}
+
+func (p *inventoryCachingProvider) IsRunning(name string) bool {
+	if running, known := p.inventory.RunningKnown(name); known {
+		return running
+	}
+	if p.Provider == nil {
+		return false
+	}
+	return p.Provider.IsRunning(name)
+}
+
+func (p *inventoryCachingProvider) IsAttached(name string) bool {
+	if obs, known := p.inventory.Observe(name); known {
+		if obs.AttachedKnown {
+			return obs.Attached
+		}
+		if !obs.Running {
+			return false
+		}
+	}
+	if v, ok := p.attachments[name]; ok {
+		return v
+	}
+	if p.Provider == nil {
+		return false
+	}
+	return p.Provider.IsAttached(name)
+}
+
+func (p *inventoryCachingProvider) GetLastActivity(name string) (time.Time, error) {
+	if obs, known := p.inventory.Observe(name); known {
+		if obs.LastActivityKnown {
+			return obs.LastActivity, nil
+		}
+		if !obs.Running {
+			return time.Time{}, nil
+		}
+	}
+	if p.Provider == nil {
+		return time.Time{}, nil
+	}
+	return p.Provider.GetLastActivity(name)
 }
 
 func sessionAttachedForWakeReason(sp runtime.Provider, name string) bool {

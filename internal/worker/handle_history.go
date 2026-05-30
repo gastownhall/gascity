@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
@@ -42,6 +43,53 @@ func (h *SessionHandle) Transcript(ctx context.Context, req TranscriptRequest) (
 	readReq.Provider = h.historyProvider(info)
 	readReq.TranscriptPath = path
 	return h.adapter.ReadTranscript(readReq)
+}
+
+// SessionLog returns the best available session output snapshot for the
+// worker. Structured transcripts remain the preferred fast path; when no
+// transcript is discoverable, active provider-backed sessions fall back to
+// live runtime output through Peek.
+func (h *SessionHandle) SessionLog(ctx context.Context, req SessionLogRequest) (*SessionLogResult, error) {
+	id := h.currentSessionID()
+	if id == "" {
+		return nil, ErrHistoryUnavailable
+	}
+	info, err := h.manager.Get(id)
+	if err != nil {
+		return nil, err
+	}
+	provider := h.historyProvider(info)
+	path, pathErr := h.TranscriptPath(ctx)
+	if pathErr == nil && strings.TrimSpace(path) != "" {
+		readReq := req.Transcript
+		readReq.Provider = provider
+		readReq.TranscriptPath = path
+		transcript, err := h.adapter.ReadTranscript(readReq)
+		if err != nil {
+			return nil, err
+		}
+		return &SessionLogResult{
+			Provider:       provider,
+			TranscriptPath: path,
+			Format:         SessionLogFormatTranscript,
+			Transcript:     transcript,
+		}, nil
+	}
+	if pathErr != nil && !errors.Is(pathErr, ErrHistoryUnavailable) {
+		return nil, pathErr
+	}
+	output, peekErr := h.Peek(ctx, req.LiveLines)
+	if peekErr != nil {
+		if pathErr != nil {
+			return nil, pathErr
+		}
+		return nil, peekErr
+	}
+	return &SessionLogResult{
+		Provider: provider,
+		Format:   SessionLogFormatText,
+		Text:     output,
+	}, nil
 }
 
 // AgentMappings returns subagent mappings discovered from the worker's

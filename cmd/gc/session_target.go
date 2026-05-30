@@ -10,9 +10,10 @@ import (
 // sessionRuntimeTarget captures the public identity and runtime session name
 // needed by session-facing CLI commands.
 type sessionRuntimeTarget struct {
-	cityPath    string
-	display     string
-	sessionName string
+	cityPath         string
+	display          string
+	sessionName      string
+	localSessionName string
 }
 
 func defaultSessionDisplayIdentity() string {
@@ -29,9 +30,10 @@ func currentSessionRuntimeTarget() (sessionRuntimeTarget, error) {
 	if display == "" {
 		return sessionRuntimeTarget{}, fmt.Errorf("not in session context (GC_ALIAS/GC_SESSION_ID not set)")
 	}
-	sessionName := strings.TrimSpace(os.Getenv("GC_TMUX_SESSION"))
+	sessionName := strings.TrimSpace(os.Getenv("GC_SESSION_NAME"))
+	localSessionName := strings.TrimSpace(os.Getenv("GC_TMUX_SESSION"))
 	if sessionName == "" {
-		sessionName = strings.TrimSpace(os.Getenv("GC_SESSION_NAME"))
+		sessionName = localSessionName
 	}
 	if sessionName == "" {
 		return sessionRuntimeTarget{}, fmt.Errorf("not in session context (GC_SESSION_NAME not set)")
@@ -46,9 +48,10 @@ func currentSessionRuntimeTarget() (sessionRuntimeTarget, error) {
 		return sessionRuntimeTarget{}, fmt.Errorf("not in session context (city context not set)")
 	}
 	return sessionRuntimeTarget{
-		cityPath:    cityPath,
-		display:     display,
-		sessionName: sessionName,
+		cityPath:         cityPath,
+		display:          display,
+		sessionName:      sessionName,
+		localSessionName: localSessionName,
 	}, nil
 }
 
@@ -66,4 +69,11 @@ func resolveSessionRuntimeTarget(identifier string, warningWriter ...io.Writer) 
 		display:     display,
 		sessionName: target.sessionName,
 	}, nil
+}
+
+func (t sessionRuntimeTarget) runtimeMetadataSessionName() string {
+	if strings.TrimSpace(t.localSessionName) != "" {
+		return strings.TrimSpace(t.localSessionName)
+	}
+	return strings.TrimSpace(t.sessionName)
 }

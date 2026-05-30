@@ -115,11 +115,12 @@ type fakeK8sOps struct {
 }
 
 type fakeCall struct {
-	method    string
-	pod       string
-	container string
-	cmd       []string
-	selector  string
+	method        string
+	pod           string
+	container     string
+	cmd           []string
+	selector      string
+	fieldSelector string
 }
 
 func newFakeK8sOps() *fakeK8sOps {
@@ -141,6 +142,17 @@ func (f *fakeK8sOps) createPod(_ context.Context, pod *corev1.Pod) (*corev1.Pod,
 	}
 	p := pod.DeepCopy()
 	p.Status.Phase = corev1.PodRunning
+	if len(p.Spec.InitContainers) > 0 {
+		p.Status.InitContainerStatuses = make([]corev1.ContainerStatus, 0, len(p.Spec.InitContainers))
+		for _, c := range p.Spec.InitContainers {
+			p.Status.InitContainerStatuses = append(p.Status.InitContainerStatuses, corev1.ContainerStatus{
+				Name: c.Name,
+				State: corev1.ContainerState{
+					Running: &corev1.ContainerStateRunning{},
+				},
+			})
+		}
+	}
 	f.pods[pod.Name] = p
 	return p, nil
 }
@@ -167,7 +179,7 @@ func (f *fakeK8sOps) deletePod(_ context.Context, name string, _ int64) error {
 }
 
 func (f *fakeK8sOps) listPods(_ context.Context, selector string, fieldSelector string) ([]corev1.Pod, error) {
-	f.calls = append(f.calls, fakeCall{method: "listPods", selector: selector})
+	f.calls = append(f.calls, fakeCall{method: "listPods", selector: selector, fieldSelector: fieldSelector})
 	if f.listErr != nil {
 		return nil, f.listErr
 	}

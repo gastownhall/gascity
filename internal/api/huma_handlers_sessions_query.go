@@ -17,7 +17,7 @@ import (
 // agent-get). Split out of huma_handlers_sessions.go to isolate read-side
 // logic from mutations and streaming.
 
-func (s *Server) humaHandleSessionList(_ context.Context, input *SessionListInput) (*ListOutput[sessionResponse], error) {
+func (s *Server) humaHandleSessionList(ctx context.Context, input *SessionListInput) (*ListOutput[sessionResponse], error) {
 	store := s.state.CityBeadStore()
 	if store == nil {
 		return nil, huma.Error503ServiceUnavailable("no bead store configured")
@@ -32,7 +32,14 @@ func (s *Server) humaHandleSessionList(_ context.Context, input *SessionListInpu
 	if err != nil {
 		return nil, huma.Error500InternalServerError(err.Error())
 	}
-	listResult := mgr.ListFullFromBeads(all, input.State, input.Template)
+	inventory, hasInventory, inventoryErrors := s.sessionInventory(ctx)
+	partialErrors = append(partialErrors, inventoryErrors...)
+	var listResult *session.ListResult
+	if hasInventory {
+		listResult = mgr.ListFullFromBeadsWithInventory(all, input.State, input.Template, inventory)
+	} else {
+		listResult = mgr.ListFullFromBeads(all, input.State, input.Template)
+	}
 	sessions := listResult.Sessions
 
 	// Build bead index for reason enrichment.
@@ -44,7 +51,19 @@ func (s *Server) humaHandleSessionList(_ context.Context, input *SessionListInpu
 	wantPeek := input.Peek
 	hasDeferredQueue := strings.TrimSpace(s.state.CityPath()) != ""
 	items := make([]sessionResponse, len(sessions))
+	var inventoryIsRunning func(string) bool
+	if hasInventory {
+		inventoryIsRunning = func(name string) bool {
+			running, _ := inventory.RunningKnown(name)
+			return running
+		}
+	}
 	for i, sess := range sessions {
+		if hasInventory {
+			items[i] = sessionResponseWithReasonUsingLiveness(sess, beadIndex[sess.ID], cfg, hasDeferredQueue, inventoryIsRunning)
+			s.enrichSessionResponse(&items[i], sess, cfg, s.runtimeSessionResponseHandleWithInventory(sess, inventory), wantPeek, false, false, 0)
+			continue
+		}
 		items[i] = sessionResponseWithReason(sess, beadIndex[sess.ID], cfg, s.state.SessionProvider(), hasDeferredQueue)
 		s.enrichSessionResponse(&items[i], sess, cfg, s.runtimeSessionResponseHandle(sess), wantPeek, false, false, 0)
 	}
@@ -139,7 +158,7 @@ func (s *Server) humaHandleSessionGet(_ context.Context, input *SessionGetInput)
 
 // humaHandleSessionCreate is the Huma-typed handler for POST /v0/sessions.
 
-func (s *Server) humaHandleSessionTranscript(_ context.Context, input *SessionTranscriptInput) (*IndexOutput[sessionTranscriptGetResponse], error) {
+func (s *Server) humaHandleSessionTranscript(ctx context.Context, input *SessionTranscriptInput) (*IndexOutput[sessionTranscriptGetResponse], error) {
 	store := s.state.CityBeadStore()
 	if store == nil {
 		return nil, huma.Error503ServiceUnavailable("no bead store configured")
@@ -249,10 +268,18 @@ func (s *Server) humaHandleSessionTranscript(_ context.Context, input *SessionTr
 		}, nil
 	}
 
-	if info.State == session.StateActive && s.state.SessionProvider().IsRunning(info.SessionName) {
-		output, peekErr := s.state.SessionProvider().Peek(info.SessionName, 100)
+	if info.State == session.StateActive {
+		handle, handleErr := s.workerHandleForSession(store, id)
+		if handleErr != nil {
+			return nil, humaSessionManagerError(handleErr)
+		}
+		logResult, peekErr := handle.SessionLog(ctx, worker.SessionLogRequest{LiveLines: 100})
 		if peekErr != nil {
 			return nil, huma.Error500InternalServerError(peekErr.Error())
+		}
+		output := ""
+		if logResult != nil && logResult.Format == worker.SessionLogFormatText {
+			output = logResult.Text
 		}
 		turns := []outputTurn{}
 		if output != "" {

@@ -438,6 +438,24 @@ func TestDoRuntimeDrainCheckJSONNotDrainingWritesFalseResult(t *testing.T) {
 	validateJSONAgainstResultSchema(t, []string{"runtime", "drain-check"}, stdout.Bytes())
 }
 
+func TestDoRuntimeDrainCheckUsesLocalMetadataSessionButReportsProviderSession(t *testing.T) {
+	dops := newFakeDrainOps()
+	dops.draining["main"] = true
+
+	var stdout, stderr bytes.Buffer
+	code := doRuntimeDrainCheckWithMetaSession(dops, "cartographer", "rig--cartographer-gc-session-42", "main", true, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	var result runtimeDrainCheckJSON
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("stdout is not JSON: %v\nraw: %s", err, stdout.String())
+	}
+	if result.Session != "rig--cartographer-gc-session-42" {
+		t.Fatalf("Session = %q, want provider-visible session name", result.Session)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // doRuntimeDrainAck tests
 // ---------------------------------------------------------------------------
@@ -486,6 +504,29 @@ func TestDoRuntimeDrainAckJSON(t *testing.T) {
 	}
 	if result.SchemaVersion != "1" || result.Command != "runtime drain-ack" || result.Session != "worker" || result.Status != "acknowledged" {
 		t.Fatalf("unexpected JSON result: %+v", result)
+	}
+}
+
+func TestDoRuntimeDrainAckUsesLocalMetadataSessionButReportsProviderSession(t *testing.T) {
+	dops := newFakeDrainOps()
+
+	var stdout, stderr bytes.Buffer
+	code := doRuntimeDrainAckWithMetaSession(dops, "cartographer", "rig--cartographer-gc-session-42", "main", true, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if !dops.acked["main"] {
+		t.Fatal("GC_DRAIN_ACK was not written to the local metadata session")
+	}
+	if dops.acked["rig--cartographer-gc-session-42"] {
+		t.Fatal("GC_DRAIN_ACK should not be written through the provider-visible session for self commands")
+	}
+	var result runtimeActionJSON
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("stdout is not JSON: %v\nraw: %s", err, stdout.String())
+	}
+	if result.Session != "rig--cartographer-gc-session-42" {
+		t.Fatalf("Session = %q, want provider-visible session name", result.Session)
 	}
 }
 
@@ -658,7 +699,7 @@ func TestDoRuntimeRequestRestartError(t *testing.T) {
 	dops := newFakeDrainOps()
 	dops.err = errors.New("tmux borked")
 	var stdout, stderr bytes.Buffer
-	code := doRuntimeRequestRestart(context.Background(), dops, nil, events.Discard, "worker", "worker",
+	code := doRuntimeRequestRestartWithMetaSession(context.Background(), dops, nil, events.Discard, "worker", "worker", "worker",
 		time.Millisecond, time.Second, &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("code = %d, want 1", code)
@@ -672,7 +713,7 @@ func TestDoRuntimeRequestRestartFlagCleared(t *testing.T) {
 	dops := &drainOpsWithCountdown{fakeDrainOps: newFakeDrainOps(), remaining: 2}
 
 	var stdout, stderr bytes.Buffer
-	code := doRuntimeRequestRestart(context.Background(), dops, nil, events.Discard, "worker", "worker",
+	code := doRuntimeRequestRestartWithMetaSession(context.Background(), dops, nil, events.Discard, "worker", "worker", "worker",
 		10*time.Millisecond, 5*time.Second, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("code = %d, want 0 when flag cleared; stderr: %s", code, stderr.String())
@@ -688,11 +729,29 @@ func TestDoRuntimeRequestRestartFlagCleared(t *testing.T) {
 	}
 }
 
+func TestDoRuntimeRequestRestartUsesLocalMetadataSessionButReportsProviderSession(t *testing.T) {
+	dops := &drainOpsWithCountdown{fakeDrainOps: newFakeDrainOps(), remaining: 0}
+
+	var stdout, stderr bytes.Buffer
+	code := doRuntimeRequestRestartWithMetaSession(context.Background(), dops, nil, events.Discard,
+		"cartographer", "rig--cartographer-gc-session-42", "main",
+		time.Millisecond, time.Second, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if !dops.cleared {
+		t.Fatal("restart request was not observed on the local metadata session")
+	}
+	if dops.restartRequested["rig--cartographer-gc-session-42"] {
+		t.Fatal("restart request should not be written through the provider-visible session for self commands")
+	}
+}
+
 func TestDoRuntimeRequestRestartTimeout(t *testing.T) {
 	dops := newFakeDrainOps()
 
 	var stdout, stderr bytes.Buffer
-	code := doRuntimeRequestRestart(context.Background(), dops, nil, events.Discard, "worker", "worker",
+	code := doRuntimeRequestRestartWithMetaSession(context.Background(), dops, nil, events.Discard, "worker", "worker", "worker",
 		10*time.Millisecond, 25*time.Millisecond, &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("code = %d, want 1 on timeout", code)
@@ -710,7 +769,7 @@ func TestDoRuntimeRequestRestartTimeoutReportsLastPollError(t *testing.T) {
 	dops.restartReadErr = errors.New("metadata read failed")
 
 	var stdout, stderr bytes.Buffer
-	code := doRuntimeRequestRestart(context.Background(), dops, nil, events.Discard, "worker", "worker",
+	code := doRuntimeRequestRestartWithMetaSession(context.Background(), dops, nil, events.Discard, "worker", "worker", "worker",
 		10*time.Millisecond, 25*time.Millisecond, &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("code = %d, want 1 on timeout", code)
@@ -728,7 +787,7 @@ func TestDoRuntimeRequestRestartContextCancel(t *testing.T) {
 
 	done := make(chan int, 1)
 	go func() {
-		done <- doRuntimeRequestRestart(ctx, dops, nil, events.Discard, "worker", "worker",
+		done <- doRuntimeRequestRestartWithMetaSession(ctx, dops, nil, events.Discard, "worker", "worker", "worker",
 			10*time.Millisecond, 30*time.Second, &stdout, &stderr)
 	}()
 

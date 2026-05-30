@@ -12,6 +12,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sessionlog"
 	"github.com/gastownhall/gascity/internal/worker"
@@ -685,6 +686,132 @@ observe_paths = [%q]
 	}
 	if len(got.Entries) != 1 || got.Entries[0].Text != "newer" || got.Entries[0].Role != "assistant" {
 		t.Fatalf("logs JSON entries = %+v", got.Entries)
+	}
+	validateJSONAgainstResultSchema(t, []string{"session", "logs"}, stdout.Bytes())
+}
+
+func TestCmdSessionLogsProviderBackedActiveSessionUsesLiveOutput(t *testing.T) {
+	clearGCEnv(t)
+	clearInheritedCityRoutingEnv(t)
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_SESSION", "fake")
+
+	cityDir := t.TempDir()
+	searchBase := t.TempDir()
+	workDir := t.TempDir()
+	t.Setenv("GC_CITY", cityDir)
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(fmt.Sprintf(`[workspace]
+name = "test"
+
+[daemon]
+observe_paths = [%q]
+`, searchBase)), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+
+	store, err := openCityStoreAt(cityDir)
+	if err != nil {
+		t.Fatalf("openCityStoreAt(%q): %v", cityDir, err)
+	}
+	b, err := store.Create(beads.Bead{
+		Title:  "provider logs session",
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"session_name": "runtime-session",
+			"provider":     "fake",
+			"template":     "worker",
+			"state":        "active",
+			"work_dir":     workDir,
+		},
+	})
+	if err != nil {
+		t.Fatalf("store.Create(session): %v", err)
+	}
+
+	fakeProvider := runtime.NewFake()
+	fakeProvider.SetPeekOutput("runtime-session", "provider live line 1\nprovider live line 2\n")
+	origBuild := buildSessionProviderByName
+	buildSessionProviderByName = func(string, config.SessionConfig, string, string) (runtime.Provider, error) {
+		return fakeProvider, nil
+	}
+	t.Cleanup(func() { buildSessionProviderByName = origBuild })
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdSessionLogs([]string{b.ID}, false, 80, false, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdSessionLogs(provider live) = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if got := stdout.String(); !strings.Contains(got, "provider live line 1") || !strings.Contains(got, "provider live line 2") {
+		t.Fatalf("stdout = %q, want provider live output", got)
+	}
+	if strings.Contains(stderr.String(), "no session file found") {
+		t.Fatalf("stderr = %q, want no transcript failure", stderr.String())
+	}
+	if got := fakeProvider.CountCalls("Peek", "runtime-session"); got != 1 {
+		t.Fatalf("Peek calls = %d, want 1", got)
+	}
+}
+
+func TestCmdSessionLogsJSONProviderLiveOutputHasTextProvenance(t *testing.T) {
+	clearGCEnv(t)
+	clearInheritedCityRoutingEnv(t)
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_SESSION", "fake")
+
+	cityDir := t.TempDir()
+	searchBase := t.TempDir()
+	workDir := t.TempDir()
+	t.Setenv("GC_CITY", cityDir)
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(fmt.Sprintf(`[workspace]
+name = "test"
+
+[daemon]
+observe_paths = [%q]
+`, searchBase)), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+
+	store, err := openCityStoreAt(cityDir)
+	if err != nil {
+		t.Fatalf("openCityStoreAt(%q): %v", cityDir, err)
+	}
+	b, err := store.Create(beads.Bead{
+		Title:  "provider logs json session",
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"session_name": "runtime-session",
+			"provider":     "fake",
+			"template":     "worker",
+			"state":        "active",
+			"work_dir":     workDir,
+		},
+	})
+	if err != nil {
+		t.Fatalf("store.Create(session): %v", err)
+	}
+
+	fakeProvider := runtime.NewFake()
+	fakeProvider.SetPeekOutput("runtime-session", "provider live json\n")
+	origBuild := buildSessionProviderByName
+	buildSessionProviderByName = func(string, config.SessionConfig, string, string) (runtime.Provider, error) {
+		return fakeProvider, nil
+	}
+	t.Cleanup(func() { buildSessionProviderByName = origBuild })
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdSessionLogs([]string{b.ID}, false, 20, true, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdSessionLogs(provider live --json) = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	var got sessionLogsJSONResult
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatalf("stdout is not parseable JSON: %v\n%s", err, stdout.String())
+	}
+	if got.Format != "text" || got.Source != "provider-live-output" || got.TranscriptPath != "" {
+		t.Fatalf("provider live JSON metadata = %+v", got)
+	}
+	if got.Output != "provider live json\n" || got.EntryCount != 0 || len(got.Entries) != 0 || got.LineCount != 1 {
+		t.Fatalf("provider live JSON payload = %+v", got)
 	}
 	validateJSONAgainstResultSchema(t, []string{"session", "logs"}, stdout.Bytes())
 }

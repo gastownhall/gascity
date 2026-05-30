@@ -87,6 +87,24 @@ func (s *Server) runtimeSessionResponseHandle(info session.Info) sessionResponse
 	return newProviderSessionResponseHandle(s.state.SessionProvider(), info.SessionName, info.Provider)
 }
 
+func (s *Server) runtimeSessionResponseHandleWithInventory(info session.Info, inventory runtime.Inventory) sessionResponseHandle {
+	if info.State != session.StateActive {
+		return nil
+	}
+	return newInventorySessionResponseHandle(s.state.SessionProvider(), info.SessionName, info.Provider, inventory)
+}
+
+func (s *Server) sessionInventory(ctx context.Context) (runtime.Inventory, bool, []string) {
+	inventory, ok, err := runtime.ObserveInventory(ctx, s.state.SessionProvider(), "")
+	if !ok {
+		return runtime.Inventory{}, false, nil
+	}
+	if err != nil {
+		return inventory, true, []string{"runtime inventory: " + err.Error()}
+	}
+	return inventory, true, nil
+}
+
 func sessionToResponse(info session.Info, cfg *config.City) sessionResponse {
 	provider, displayName := info.Provider, ""
 	if cfg != nil {
@@ -131,6 +149,14 @@ func sessionToResponse(info session.Info, cfg *config.City) sessionResponse {
 // reason field derived from bead metadata. If the bead is nil (not found
 // in the index), the reason is omitted.
 func sessionResponseWithReason(info session.Info, b *beads.Bead, cfg *config.City, sp runtime.Provider, hasDeferredQueue bool) sessionResponse {
+	var isRunning func(string) bool
+	if sp != nil {
+		isRunning = sp.IsRunning
+	}
+	return sessionResponseWithReasonUsingLiveness(info, b, cfg, hasDeferredQueue, isRunning)
+}
+
+func sessionResponseWithReasonUsingLiveness(info session.Info, b *beads.Bead, cfg *config.City, hasDeferredQueue bool, isRunning func(string) bool) sessionResponse {
 	r := sessionToResponse(info, cfg)
 	// Expose effective options: provider EffectiveDefaults merged with
 	// per-session template_overrides. The dashboard uses this to display
@@ -168,10 +194,6 @@ func sessionResponseWithReason(info session.Info, b *beads.Bead, cfg *config.Cit
 	}
 	if b == nil || info.Closed {
 		return r
-	}
-	var isRunning func(string) bool
-	if sp != nil {
-		isRunning = sp.IsRunning
 	}
 	r.Reason = session.LifecycleDisplayReasonWithLiveness(b.Status, b.Metadata, time.Now().UTC(), info.SessionName, isRunning)
 	r.ConfiguredNamedSession = strings.TrimSpace(b.Metadata[apiNamedSessionMetadataKey]) == "true"
@@ -244,7 +266,14 @@ func (s *Server) handleSessionList(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal", err.Error())
 		return
 	}
-	listResult := catalog.ListFullFromBeads(all, stateFilter, templateFilter)
+	inventory, hasInventory, inventoryErrors := s.sessionInventory(r.Context())
+	partialErrors = append(partialErrors, inventoryErrors...)
+	var listResult *session.ListResult
+	if hasInventory {
+		listResult = catalog.ListFullFromBeadsWithInventory(all, stateFilter, templateFilter, inventory)
+	} else {
+		listResult = catalog.ListFullFromBeads(all, stateFilter, templateFilter)
+	}
 	sessions := listResult.Sessions
 
 	// Build bead index for reason enrichment.
@@ -255,7 +284,19 @@ func (s *Server) handleSessionList(w http.ResponseWriter, r *http.Request) {
 
 	items := make([]sessionResponse, len(sessions))
 	hasDeferredQueue := strings.TrimSpace(s.state.CityPath()) != ""
+	var inventoryIsRunning func(string) bool
+	if hasInventory {
+		inventoryIsRunning = func(name string) bool {
+			running, _ := inventory.RunningKnown(name)
+			return running
+		}
+	}
 	for i, sess := range sessions {
+		if hasInventory {
+			items[i] = sessionResponseWithReasonUsingLiveness(sess, beadIndex[sess.ID], cfg, hasDeferredQueue, inventoryIsRunning)
+			s.enrichSessionResponse(&items[i], sess, cfg, s.runtimeSessionResponseHandleWithInventory(sess, inventory), wantPeek, false, false, 0)
+			continue
+		}
 		items[i] = sessionResponseWithReason(sess, beadIndex[sess.ID], cfg, s.state.SessionProvider(), hasDeferredQueue)
 		s.enrichSessionResponse(&items[i], sess, cfg, s.runtimeSessionResponseHandle(sess), wantPeek, false, false, 0)
 	}

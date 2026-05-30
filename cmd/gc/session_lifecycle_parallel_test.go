@@ -38,6 +38,16 @@ func (s *failingMetadataBatchStore) SetMetadataBatch(id string, kvs map[string]s
 	return s.MemStore.SetMetadataBatch(id, kvs)
 }
 
+type incompatibleRuntimeObserverProvider struct {
+	*runtime.Fake
+	compat runtime.CompatibilityObservation
+	err    error
+}
+
+func (p *incompatibleRuntimeObserverProvider) ObserveRuntimeCompatibility(context.Context, string, runtime.Config) (runtime.CompatibilityObservation, error) {
+	return p.compat, p.err
+}
+
 type failNthMetadataBatchStore struct {
 	*beads.MemStore
 	failOn int
@@ -2687,6 +2697,168 @@ func TestReconcileSessionBeads_SkipsPendingCreateStartAlreadyInFlight(t *testing
 	sp.ensureNoFurtherStart(t, 100*time.Millisecond)
 }
 
+func TestReconcileSessionBeads_DefersLivePendingCreateRollbackDuringStartupLease(t *testing.T) {
+	store := beads.NewMemStore()
+	clk := &clock.Fake{Time: time.Date(2026, 4, 26, 12, 0, 45, 0, time.UTC)}
+	session, err := store.Create(beads.Bead{
+		ID:     "gc-worker",
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: creatingMeta(map[string]string{
+			"session_name":         "worker",
+			"template":             "worker",
+			"generation":           "2",
+			"continuation_epoch":   "1",
+			"instance_token":       "tok-worker",
+			"pending_create_claim": "true",
+			"last_woke_at":         clk.Now().Add(-10 * time.Second).UTC().Format(time.RFC3339),
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "worker", runtime.Config{}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{
+		Agents: []config.Agent{{Name: "worker"}},
+	}
+	tp := TemplateParams{
+		Command:      "worker",
+		SessionName:  "worker",
+		TemplateName: "worker",
+	}
+
+	woken := reconcileSessionBeads(
+		context.Background(),
+		[]beads.Bead{session},
+		map[string]TemplateParams{"worker": tp},
+		configuredSessionNames(cfg, "", store),
+		cfg,
+		sp,
+		store,
+		nil,
+		nil,
+		nil,
+		newDrainTracker(),
+		map[string]int{"worker": 1},
+		false,
+		map[string]bool{"worker": true},
+		"test-city",
+		nil,
+		clk,
+		events.Discard,
+		time.Minute,
+		0,
+		ioDiscard{},
+		ioDiscard{},
+	)
+	if woken != 0 {
+		t.Fatalf("woken = %d, want 0 while pending-create startup lease is active", woken)
+	}
+	updated, err := store.Get(session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Status == "closed" {
+		t.Fatal("status = closed, want rollback deferred while live startup lease is active")
+	}
+	if updated.Metadata["pending_create_claim"] != "true" {
+		t.Fatalf("pending_create_claim = %q, want true while startup lease is active", updated.Metadata["pending_create_claim"])
+	}
+	if !sp.IsRunning("worker") {
+		t.Fatal("runtime was stopped, want live runtime preserved during startup lease")
+	}
+}
+
+func TestReconcileSessionBeads_SkipsPendingCreateRollbackAfterStoreConverged(t *testing.T) {
+	store := beads.NewMemStore()
+	clk := &clock.Fake{Time: time.Date(2026, 4, 26, 12, 3, 0, 0, time.UTC)}
+	session, err := store.Create(beads.Bead{
+		ID:     "gc-worker",
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: creatingMeta(map[string]string{
+			"session_name":         "worker",
+			"template":             "worker",
+			"generation":           "2",
+			"continuation_epoch":   "1",
+			"instance_token":       "tok-worker",
+			"pending_create_claim": "true",
+			"last_woke_at":         clk.Now().Add(-5 * time.Minute).UTC().Format(time.RFC3339),
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetMetadataBatch(session.ID, map[string]string{
+		"state":                     "active",
+		"state_reason":              "creation_complete",
+		"pending_create_claim":      "",
+		"pending_create_started_at": "",
+		"creation_complete_at":      clk.Now().UTC().Format(time.RFC3339),
+		"started_config_hash":       "hash-current",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "worker", runtime.Config{}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{
+		Agents: []config.Agent{{Name: "worker"}},
+	}
+	tp := TemplateParams{
+		Command:      "worker",
+		SessionName:  "worker",
+		TemplateName: "worker",
+	}
+
+	reconcileSessionBeads(
+		context.Background(),
+		[]beads.Bead{session},
+		map[string]TemplateParams{"worker": tp},
+		configuredSessionNames(cfg, "", store),
+		cfg,
+		sp,
+		store,
+		nil,
+		nil,
+		nil,
+		newDrainTracker(),
+		map[string]int{"worker": 1},
+		false,
+		map[string]bool{"worker": true},
+		"test-city",
+		nil,
+		clk,
+		events.Discard,
+		time.Minute,
+		0,
+		ioDiscard{},
+		ioDiscard{},
+	)
+	updated, err := store.Get(session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Status == "closed" {
+		t.Fatal("status = closed, want rollback skipped after store already converged")
+	}
+	if updated.Metadata["state"] != "active" {
+		t.Fatalf("state = %q, want active", updated.Metadata["state"])
+	}
+	if updated.Metadata["pending_create_claim"] != "" {
+		t.Fatalf("pending_create_claim = %q, want already-cleared claim preserved", updated.Metadata["pending_create_claim"])
+	}
+	if !sp.IsRunning("worker") {
+		t.Fatal("runtime was stopped, want converged runtime preserved")
+	}
+}
+
 func TestCommitAsyncStartResult_IgnoresStaleSessionSnapshot(t *testing.T) {
 	store := beads.NewMemStore()
 	clk := &clock.Fake{Time: time.Date(2026, 4, 26, 12, 2, 0, 0, time.UTC)}
@@ -2802,6 +2974,149 @@ func TestCommitAsyncStartResult_IgnoresClosedSessionSnapshot(t *testing.T) {
 	}
 	if got := updated.Metadata["pending_create_claim"]; got != "true" {
 		t.Fatalf("pending_create_claim = %q, want true", got)
+	}
+}
+
+func TestCommitAsyncStartResult_RepairsClosedFailedCreateWithSameIdentity(t *testing.T) {
+	store := beads.NewMemStore()
+	clk := &clock.Fake{Time: time.Date(2026, 4, 26, 12, 2, 30, 0, time.UTC)}
+	session, err := store.Create(beads.Bead{
+		ID:     "gc-worker",
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: creatingMeta(map[string]string{
+			"session_name":         "worker",
+			"template":             "worker",
+			"generation":           "2",
+			"continuation_epoch":   "1",
+			"instance_token":       "tok-worker",
+			"pending_create_claim": "true",
+			"last_woke_at":         clk.Now().Format(time.RFC3339),
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !closeFailedCreateBead(store, session.ID, clk.Now(), ioDiscard{}) {
+		t.Fatal("closeFailedCreateBead returned false")
+	}
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "worker", runtime.Config{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := sp.SetMeta("worker", "GC_SESSION_ID", session.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := sp.SetMeta("worker", "GC_INSTANCE_TOKEN", "tok-worker"); err != nil {
+		t.Fatal(err)
+	}
+	result := startResult{
+		prepared: preparedStart{
+			candidate: startCandidate{
+				session: &session,
+				tp: TemplateParams{
+					Command:      "worker",
+					SessionName:  "worker",
+					TemplateName: "worker",
+				},
+			},
+			coreHash: "core",
+			liveHash: "live",
+		},
+		outcome:  "success",
+		started:  clk.Now(),
+		finished: clk.Now(),
+	}
+
+	if !commitAsyncStartResultWithContext(context.Background(), result, sp, store, clk, events.Discard, 0, ioDiscard{}, ioDiscard{}, nil) {
+		t.Fatal("closed failed-create async start result should repair and commit")
+	}
+	if !sp.IsRunning("worker") {
+		t.Fatal("matching live runtime should not be stopped during repair")
+	}
+	updated, err := store.Get(session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Status != "open" {
+		t.Fatalf("status = %q, want open", updated.Status)
+	}
+	if got := updated.Metadata["state"]; got != "active" {
+		t.Fatalf("state = %q, want active", got)
+	}
+	if got := updated.Metadata["close_reason"]; got != "" {
+		t.Fatalf("close_reason = %q, want cleared", got)
+	}
+	if got := updated.Metadata["closed_at"]; got != "" {
+		t.Fatalf("closed_at = %q, want cleared", got)
+	}
+	if got := updated.Metadata["pending_create_claim"]; got != "" {
+		t.Fatalf("pending_create_claim = %q, want cleared", got)
+	}
+	if got := updated.Metadata["started_config_hash"]; got != "core" {
+		t.Fatalf("started_config_hash = %q, want core", got)
+	}
+	if got := updated.Metadata["creation_complete_at"]; got == "" {
+		t.Fatal("creation_complete_at is empty")
+	}
+}
+
+func TestRollbackPendingCreateSkipsWhenStartCommitAlreadyWon(t *testing.T) {
+	store := beads.NewMemStore()
+	now := time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)
+	session, err := store.Create(beads.Bead{
+		ID:     "gc-worker",
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: creatingMeta(map[string]string{
+			"session_name":              "worker",
+			"template":                  "worker",
+			"generation":                "2",
+			"continuation_epoch":        "1",
+			"instance_token":            "tok-worker",
+			"pending_create_claim":      "true",
+			"pending_create_started_at": now.Add(-time.Minute).Format(time.RFC3339),
+			"last_woke_at":              now.Add(-time.Minute).Format(time.RFC3339),
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	staleRollbackSnapshot := session
+	metadata := sessionpkg.CommitStartedPatch(sessionpkg.CommitStartedPatchInput{
+		CoreHash:                "core",
+		LiveHash:                "live",
+		ConfirmState:            true,
+		ClearPendingCreateClaim: true,
+		Now:                     now,
+	})
+	committed, err := commitStartedSessionMetadata(&session, store, metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !committed {
+		t.Fatal("commitStartedSessionMetadata returned committed=false")
+	}
+
+	rollbackPendingCreate(&staleRollbackSnapshot, store, now.Add(time.Second), ioDiscard{})
+
+	updated, err := store.Get(session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Status != "open" {
+		t.Fatalf("status = %q, want open", updated.Status)
+	}
+	if got := updated.Metadata["state"]; got != string(sessionpkg.StateActive) {
+		t.Fatalf("state = %q, want active", got)
+	}
+	if got := updated.Metadata["close_reason"]; got != "" {
+		t.Fatalf("close_reason = %q, want empty", got)
+	}
+	if got := updated.Metadata["creation_complete_at"]; got == "" {
+		t.Fatal("creation_complete_at is empty")
 	}
 }
 
@@ -3893,7 +4208,7 @@ func TestRecoverRunningPendingCreate_StampsCreationCompleteAtForAlreadyActive(t 
 	tp := TemplateParams{SessionName: "sky", TemplateName: "helper"}
 	clkTime := time.Date(2026, 3, 18, 12, 0, 1, 0, time.UTC)
 
-	if !recoverRunningPendingCreate(&bead, tp, cfg, store, &clock.Fake{Time: clkTime}, nil) {
+	if !recoverRunningPendingCreate(&bead, tp, cfg, nil, store, &clock.Fake{Time: clkTime}, nil) {
 		t.Fatal("recoverRunningPendingCreate returned false, want true")
 	}
 
@@ -5137,10 +5452,10 @@ func (p *existingProcessAliveSequenceProvider) ProcessAlive(name string, process
 	return current
 }
 
-func fakeRuntimeCallCount(fake *runtime.Fake, method string) int {
+func fakeRuntimeStartCallCount(fake *runtime.Fake) int {
 	count := 0
 	for _, call := range fake.Calls {
-		if call.Method == method {
+		if call.Method == "Start" {
 			count++
 		}
 	}
@@ -5311,7 +5626,7 @@ func TestExecutePreparedStartWave_SkipsStaleKeyProbeWhenSessionAlreadyRunning(t 
 	if r.err != nil {
 		t.Fatalf("already-running session should not fail stale-key detection, got: %v", r.err)
 	}
-	if got := fakeRuntimeCallCount(sp.Fake, "Start"); got != 0 {
+	if got := fakeRuntimeStartCallCount(sp.Fake); got != 0 {
 		t.Fatalf("Start calls = %d, want 0", got)
 	}
 	if remaining := len(sp.isRunning["test-agent"]); remaining != 1 {
@@ -5408,7 +5723,7 @@ func TestExecutePreparedStartWave_AlreadyRunningFalseNegativeUsesProcessAliveFal
 	if r.err != nil {
 		t.Fatalf("process liveness fallback should recover already-running IsRunning false negative, got: %v", r.err)
 	}
-	if got := fakeRuntimeCallCount(sp.Fake, "Start"); got != 1 {
+	if got := fakeRuntimeStartCallCount(sp.Fake); got != 1 {
 		t.Fatalf("Start calls = %d, want 1 existing setup call only", got)
 	}
 }
@@ -5462,8 +5777,53 @@ func TestExecutePreparedStartWave_ErrSessionExistsRecoveryUsesProcessAliveFallba
 	if r.outcome != "session_exists" {
 		t.Fatalf("outcome = %q, want session_exists", r.outcome)
 	}
-	if got := fakeRuntimeCallCount(sp.Fake, "Start"); got != 2 {
+	if got := fakeRuntimeStartCallCount(sp.Fake); got != 2 {
 		t.Fatalf("Start calls = %d, want setup plus recovery attempt", got)
+	}
+}
+
+func TestStartPreparedStartCandidateRejectsIncompatibleLiveRuntime(t *testing.T) {
+	sp := &incompatibleRuntimeObserverProvider{
+		Fake: runtime.NewFake(),
+		compat: runtime.CompatibilityObservation{
+			Supported:  true,
+			Exists:     true,
+			Running:    true,
+			Alive:      true,
+			Compatible: false,
+			Reason:     "runtime-fingerprint-mismatch",
+		},
+	}
+	if err := sp.Start(context.Background(), "test-agent", runtime.Config{}); err != nil {
+		t.Fatalf("Start existing session: %v", err)
+	}
+	item := preparedStart{
+		candidate: startCandidate{
+			session: &beads.Bead{
+				ID: "gc-incompatible",
+				Metadata: map[string]string{
+					"session_name": "test-agent",
+					"template":     "worker",
+				},
+			},
+			tp: TemplateParams{
+				Command:      "claude",
+				SessionName:  "test-agent",
+				TemplateName: "worker",
+			},
+		},
+		cfg: runtime.Config{Command: "claude"},
+	}
+
+	startedFresh, err := startPreparedStartCandidate(context.Background(), item, "", nil, sp, nil)
+	if !errors.Is(err, runtime.ErrRuntimeIncompatible) {
+		t.Fatalf("startPreparedStartCandidate error = %v, want ErrRuntimeIncompatible", err)
+	}
+	if startedFresh {
+		t.Fatal("startedFresh = true, want false for existing incompatible runtime")
+	}
+	if got := fakeRuntimeStartCallCount(sp.Fake); got != 1 {
+		t.Fatalf("Start calls = %d, want existing setup call only", got)
 	}
 }
 
@@ -6198,6 +6558,215 @@ func TestCommitStartResult_TransitionsCreatingToActive(t *testing.T) {
 	}
 	if got.Metadata["opt_permission_mode"] != "plan" {
 		t.Fatalf("opt_permission_mode = %q, want plan", got.Metadata["opt_permission_mode"])
+	}
+}
+
+func TestCommitStartResult_PersistsProviderRuntimeIdentity(t *testing.T) {
+	store := beads.NewMemStore()
+	session, err := store.Create(beads.Bead{
+		Title:  "worker-session",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"template":     "worker",
+			"session_name": "worker-1",
+			"state":        "creating",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := startResult{
+		prepared: preparedStart{
+			candidate: startCandidate{
+				session: &session,
+				tp:      TemplateParams{TemplateName: "worker", InstanceName: "worker-1"},
+			},
+			coreHash: "core-abc",
+			liveHash: "live-xyz",
+			providerRuntime: runtime.ProviderRuntimeIdentity{
+				Fingerprint: "k8s-v1:abc123",
+				Version:     "k8s-v1",
+				Breakdown:   `{"image":"runtime:v2"}`,
+			},
+		},
+		outcome:  "success",
+		started:  time.Unix(100, 0),
+		finished: time.Unix(101, 0),
+	}
+
+	if !commitStartResult(result, store, &clock.Fake{Time: time.Unix(102, 0)}, events.Discard, 0, ioDiscard{}, ioDiscard{}) {
+		t.Fatal("commitStartResult returned false for successful start")
+	}
+	got, err := store.Get(session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Metadata[sessionpkg.StartedProviderRuntimeHashMetadataKey] != "k8s-v1:abc123" {
+		t.Fatalf("started_provider_runtime_hash = %q", got.Metadata[sessionpkg.StartedProviderRuntimeHashMetadataKey])
+	}
+	if got.Metadata[sessionpkg.ProviderRuntimeHashVersionMetadataKey] != "k8s-v1" {
+		t.Fatalf("provider_runtime_hash_version = %q", got.Metadata[sessionpkg.ProviderRuntimeHashVersionMetadataKey])
+	}
+	if got.Metadata[sessionpkg.ProviderRuntimeHashBreakdownMetadataKey] != `{"image":"runtime:v2"}` {
+		t.Fatalf("provider_runtime_hash_breakdown = %q", got.Metadata[sessionpkg.ProviderRuntimeHashBreakdownMetadataKey])
+	}
+}
+
+func TestHandleProviderRuntimeDriftBeginsDrainWithDrainReplacePolicy(t *testing.T) {
+	t.Setenv("GC_K8S_RUNTIME_DRIFT_POLICY", "drain-replace")
+	store := beads.NewMemStore()
+	session, err := store.Create(beads.Bead{
+		Title:  "worker-session",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"template":     "worker",
+			"session_name": "worker-1",
+			"state":        "active",
+			sessionpkg.StartedProviderRuntimeHashMetadataKey: "k8s-v1:old",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sp := &incompatibleRuntimeObserverProvider{
+		Fake: runtime.NewFake(),
+		compat: runtime.CompatibilityObservation{
+			Supported:  true,
+			Exists:     true,
+			Running:    true,
+			Alive:      true,
+			Compatible: false,
+			Reason:     "runtime-fingerprint-mismatch",
+			Current:    runtime.ProviderRuntimeIdentity{Fingerprint: "k8s-v1:old", Version: "k8s-v1"},
+			Desired:    runtime.ProviderRuntimeIdentity{Fingerprint: "k8s-v1:new", Version: "k8s-v1"},
+		},
+	}
+	if err := sp.Start(context.Background(), "worker-1", runtime.Config{}); err != nil {
+		t.Fatalf("Start existing session: %v", err)
+	}
+	dt := newDrainTracker()
+	handled := handleProviderRuntimeDrift(
+		"", &config.City{}, sp, store, nil, &session,
+		TemplateParams{TemplateName: "worker", InstanceName: "worker-1"},
+		"worker-1", dt, &clock.Fake{Time: time.Unix(200, 0)}, defaultDrainTimeout, events.Discard,
+		ioDiscard{}, ioDiscard{}, nil,
+	)
+	if !handled {
+		t.Fatal("handleProviderRuntimeDrift returned false, want handled")
+	}
+	ds := dt.get(session.ID)
+	if ds == nil || ds.reason != providerRuntimeDriftReason {
+		t.Fatalf("drain state = %#v, want provider-runtime-drift", ds)
+	}
+}
+
+func TestHandleProviderRuntimeDriftStopsNonLiveIncompatibleRuntime(t *testing.T) {
+	t.Setenv("GC_K8S_RUNTIME_DRIFT_POLICY", "drain-replace")
+	store := beads.NewMemStore()
+	session, err := store.Create(beads.Bead{
+		Title:  "worker-session",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"template":     "worker",
+			"session_name": "worker-1",
+			"state":        "asleep",
+			sessionpkg.StartedProviderRuntimeHashMetadataKey: "k8s-v1:old",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sp := &incompatibleRuntimeObserverProvider{
+		Fake: runtime.NewFake(),
+		compat: runtime.CompatibilityObservation{
+			Supported:                 true,
+			Exists:                    true,
+			Running:                   true,
+			Alive:                     false,
+			Compatible:                false,
+			SafeToReplaceWithoutDrain: true,
+			Reason:                    "missing-runtime-identity",
+			Current:                   runtime.ProviderRuntimeIdentity{Fingerprint: "k8s-v1:old", Version: "k8s-v1"},
+			Desired:                   runtime.ProviderRuntimeIdentity{Fingerprint: "k8s-v1:new", Version: "k8s-v1"},
+		},
+	}
+	if err := sp.Start(context.Background(), "worker-1", runtime.Config{}); err != nil {
+		t.Fatalf("Start existing session: %v", err)
+	}
+	dt := newDrainTracker()
+	handled := handleProviderRuntimeDrift(
+		"", &config.City{}, sp, store, nil, &session,
+		TemplateParams{TemplateName: "worker", InstanceName: "worker-1"},
+		"worker-1", dt, &clock.Fake{Time: time.Unix(200, 0)}, defaultDrainTimeout, events.Discard,
+		ioDiscard{}, ioDiscard{}, nil,
+	)
+	if !handled {
+		t.Fatal("handleProviderRuntimeDrift returned false, want handled stop")
+	}
+	if sp.IsRunning("worker-1") {
+		t.Fatal("non-live incompatible runtime was not stopped")
+	}
+	if ds := dt.get(session.ID); ds != nil {
+		t.Fatalf("non-live incompatible runtime should stop without drain state, got %#v", ds)
+	}
+}
+
+func TestHandleProviderRuntimeDriftDefersDrainForLiveAssignedWork(t *testing.T) {
+	t.Setenv("GC_K8S_RUNTIME_DRIFT_POLICY", "drain-replace")
+	store := beads.NewMemStore()
+	session, err := store.Create(beads.Bead{
+		Title:  "worker-session",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"template":     "worker",
+			"session_name": "worker-1",
+			"state":        "active",
+			sessionpkg.StartedProviderRuntimeHashMetadataKey: "k8s-v1:old",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Create(beads.Bead{
+		Title:    "assigned work",
+		Status:   "in_progress",
+		Assignee: session.ID,
+		Type:     "task",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	sp := &incompatibleRuntimeObserverProvider{
+		Fake: runtime.NewFake(),
+		compat: runtime.CompatibilityObservation{
+			Supported:  true,
+			Exists:     true,
+			Running:    true,
+			Alive:      true,
+			Compatible: false,
+			Reason:     "runtime-fingerprint-mismatch",
+			Current:    runtime.ProviderRuntimeIdentity{Fingerprint: "k8s-v1:old", Version: "k8s-v1"},
+			Desired:    runtime.ProviderRuntimeIdentity{Fingerprint: "k8s-v1:new", Version: "k8s-v1"},
+		},
+	}
+	if err := sp.Start(context.Background(), "worker-1", runtime.Config{}); err != nil {
+		t.Fatalf("Start existing session: %v", err)
+	}
+	dt := newDrainTracker()
+	handled := handleProviderRuntimeDrift(
+		"", &config.City{}, sp, store, nil, &session,
+		TemplateParams{TemplateName: "worker", InstanceName: "worker-1"},
+		"worker-1", dt, &clock.Fake{Time: time.Unix(200, 0)}, defaultDrainTimeout, events.Discard,
+		ioDiscard{}, ioDiscard{}, nil,
+	)
+	if !handled {
+		t.Fatal("handleProviderRuntimeDrift returned false, want handled deferral")
+	}
+	if ds := dt.get(session.ID); ds != nil {
+		t.Fatalf("assigned work should defer provider runtime drain, got %#v", ds)
 	}
 }
 

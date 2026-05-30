@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"github.com/gastownhall/gascity/internal/api"
@@ -152,11 +153,12 @@ func cmdHandoff(args []string, target string, auto bool, hookFormat string, stdo
 	}
 
 	sp := newSessionProvider()
-	dops := newDrainOps(sp)
+	metadataSP, metadataSessionName := newCurrentSessionRuntimeMetadataProvider(current)
+	dops := newDrainOps(metadataSP)
 	cfg, _ := loadCityConfig(current.cityPath, stderr)
 	persistRestart := sessionRestartPersister(current.cityPath, store, sp, cfg, current.sessionName)
 
-	outcome := doHandoffWithOutcome(store, rec, dops, persistRestart, current.display, current.sessionName, args, stdout, stderr)
+	outcome := doHandoffWithOutcomeRuntime(store, rec, dops, persistRestart, current.display, current.sessionName, metadataSessionName, args, stdout, stderr)
 	if outcome.code != 0 {
 		return outcome.code
 	}
@@ -166,7 +168,7 @@ func cmdHandoff(args []string, target string, auto bool, hookFormat string, stdo
 
 	sigCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	return waitForControllerRestart(sigCtx, dops, current.sessionName, "gc handoff",
+	return waitForControllerRestart(sigCtx, dops, metadataSessionName, "gc handoff",
 		controllerRestartPollInterval, controllerRestartTimeout(cfg), stderr)
 }
 
@@ -228,6 +230,12 @@ func doHandoff(store beads.Store, rec events.Recorder, dops drainOps, persistRes
 func doHandoffWithOutcome(store beads.Store, rec events.Recorder, dops drainOps, persistRestart func() error,
 	sessionAddress, sessionName string, args []string, stdout, stderr io.Writer,
 ) handoffOutcome {
+	return doHandoffWithOutcomeRuntime(store, rec, dops, persistRestart, sessionAddress, sessionName, sessionName, args, stdout, stderr)
+}
+
+func doHandoffWithOutcomeRuntime(store beads.Store, rec events.Recorder, dops drainOps, persistRestart func() error,
+	sessionAddress, sessionName, runtimeMetadataSessionName string, args []string, stdout, stderr io.Writer,
+) handoffOutcome {
 	b, ok := createHandoffMail(store, rec, sessionAddress, sessionAddress, args, "HANDOFF: context cycle", stderr)
 	if !ok {
 		return handoffOutcome{code: 1}
@@ -239,7 +247,7 @@ func doHandoffWithOutcome(store beads.Store, rec events.Recorder, dops drainOps,
 		return handoffOutcome{code: 1}
 	}
 	if !restartable {
-		if err := clearRestartRequest(store, dops, sessionName); err != nil {
+		if err := clearRestartRequestForRuntime(store, dops, sessionName, runtimeMetadataSessionName); err != nil {
 			fmt.Fprintf(stderr, "gc handoff: clearing stale restart request: %v\n", err) //nolint:errcheck // best-effort stderr
 			return handoffOutcome{code: 1}
 		}
@@ -247,7 +255,7 @@ func doHandoffWithOutcome(store beads.Store, rec events.Recorder, dops drainOps,
 		return handoffOutcome{code: 0}
 	}
 
-	if err := dops.setRestartRequested(sessionName); err != nil {
+	if err := dops.setRestartRequested(runtimeMetadataSessionName); err != nil {
 		fmt.Fprintf(stderr, "gc handoff: setting restart flag: %v\n", err) //nolint:errcheck // best-effort stderr
 		return handoffOutcome{code: 1}
 	}
@@ -345,12 +353,19 @@ func sessionRestartableByController(store beads.Store, sessionName string) (bool
 }
 
 func clearRestartRequest(store beads.Store, dops drainOps, sessionName string) error {
+	return clearRestartRequestForRuntime(store, dops, sessionName, sessionName)
+}
+
+func clearRestartRequestForRuntime(store beads.Store, dops drainOps, sessionName, runtimeMetadataSessionName string) error {
 	if sessionName == "" {
 		return nil
 	}
+	if strings.TrimSpace(runtimeMetadataSessionName) == "" {
+		runtimeMetadataSessionName = sessionName
+	}
 	var errs []error
 	if dops != nil {
-		if err := dops.clearRestartRequested(sessionName); err != nil {
+		if err := dops.clearRestartRequested(runtimeMetadataSessionName); err != nil {
 			errs = append(errs, fmt.Errorf("clearing runtime restart flag: %w", err))
 		}
 	}

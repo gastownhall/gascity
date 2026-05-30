@@ -6,6 +6,7 @@
     "schema_version",
     "ok",
     "target",
+    "format",
     "transcript_path",
     "tail",
     "entry_count",
@@ -22,6 +23,13 @@
       "type": "string"
     },
     "provider": {
+      "type": "string"
+    },
+    "format": {
+      "type": "string",
+      "enum": ["transcript", "text"]
+    },
+    "source": {
       "type": "string"
     },
     "transcript_path": {
@@ -125,6 +133,13 @@
         },
         "additionalProperties": true
       }
+    },
+    "line_count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "output": {
+      "type": "string"
     }
   },
   "additionalProperties": true

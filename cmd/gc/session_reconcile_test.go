@@ -1994,6 +1994,7 @@ func TestIsDeliberateSleepReason(t *testing.T) {
 		{"idle-timeout", true},
 		{"no-wake-reason", true},
 		{"config-drift", true},
+		{providerRuntimeDriftReason, true},
 		{"drained", true},
 		{"user-hold", true},
 		{"wait-hold", true},

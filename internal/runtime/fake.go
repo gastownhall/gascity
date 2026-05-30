@@ -486,6 +486,39 @@ func (f *Fake) ListRunning(prefix string) ([]string, error) {
 	return names, nil
 }
 
+// Inventory returns a complete in-memory running snapshot for tests.
+func (f *Fake) Inventory(_ context.Context, prefix string) (Inventory, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.Calls = append(f.Calls, Call{Method: "Inventory"})
+	inventory := Inventory{
+		Complete:     !f.broken,
+		Source:       "fake",
+		Observations: map[string]InventoryObservation{},
+	}
+	if f.broken {
+		return inventory, fmt.Errorf("session unavailable")
+	}
+	for name := range f.sessions {
+		if !strings.HasPrefix(name, prefix) {
+			continue
+		}
+		obs := InventoryObservation{
+			SessionName:   name,
+			Running:       true,
+			Attached:      f.Attached[name],
+			AttachedKnown: true,
+			Source:        "fake",
+		}
+		if t := f.Activity[name]; !t.IsZero() {
+			obs.LastActivity = t
+			obs.LastActivityKnown = true
+		}
+		inventory.Observations[name] = obs
+	}
+	return inventory, nil
+}
+
 // SetActivity sets the canned last activity time for the named session.
 // Used in test setup.
 func (f *Fake) SetActivity(name string, t time.Time) {

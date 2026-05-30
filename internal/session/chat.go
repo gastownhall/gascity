@@ -434,28 +434,37 @@ func (m *Manager) confirmLiveSessionState(id string, b *beads.Bead) error {
 	if b == nil {
 		return nil
 	}
+	current, err := m.store.Get(id)
+	if err != nil {
+		return fmt.Errorf("%w: reloading session state: %w", ErrStateSync, err)
+	}
+	if current.Status == "closed" {
+		return fmt.Errorf("%w: %s", ErrSessionClosed, id)
+	}
+	if current.Metadata == nil {
+		current.Metadata = map[string]string{}
+	}
 	batch := make(map[string]string)
-	switch State(b.Metadata["state"]) {
+	switch State(current.Metadata["state"]) {
 	case "", StateStartPending, StateCreating, StateAsleep, StateSuspended:
 		batch["state"] = string(StateActive)
 		batch["state_reason"] = "creation_complete"
 	}
-	if strings.TrimSpace(b.Metadata["pending_create_claim"]) != "" {
+	if strings.TrimSpace(current.Metadata["pending_create_claim"]) != "" {
 		batch["pending_create_claim"] = ""
 		batch["pending_create_started_at"] = ""
 	}
 	if len(batch) == 0 {
+		*b = current
 		return nil
 	}
 	if err := m.store.SetMetadataBatch(id, batch); err != nil {
 		return fmt.Errorf("%w: updating session state: %w", ErrStateSync, err)
 	}
-	if b.Metadata == nil {
-		b.Metadata = make(map[string]string)
-	}
 	for k, v := range batch {
-		b.Metadata[k] = v
+		current.Metadata[k] = v
 	}
+	*b = current
 	return nil
 }
 

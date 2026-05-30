@@ -184,12 +184,12 @@ func transportFromMetadata(b beads.Bead) string {
 	return normalizeTransport(b.Metadata["provider"], b.Metadata["transport"])
 }
 
-func (m *Manager) resolveConfiguredTransport(template, provider string) (string, bool) {
+func (m *Manager) resolveConfiguredTransport(template, provider string) string {
 	if m.transportResolver == nil {
-		return "", false
+		return ""
 	}
 	resolution := m.transportResolver(strings.TrimSpace(template), strings.TrimSpace(provider))
-	return normalizeTransport(provider, resolution.transport), resolution.allowStoppedFallback
+	return normalizeTransport(provider, resolution.transport)
 }
 
 func (m *Manager) transportForBead(b beads.Bead, sessName string) (string, bool) {
@@ -202,7 +202,7 @@ func (m *Manager) transportForBead(b beads.Bead, sessName string) (string, bool)
 		return "acp", false
 	}
 	if strings.TrimSpace(b.Metadata["pending_create_claim"]) == "true" {
-		transport, _ = m.resolveConfiguredTransport(b.Metadata["template"], b.Metadata["provider"])
+		transport = m.resolveConfiguredTransport(b.Metadata["template"], b.Metadata["provider"])
 		if transport != "" {
 			return transport, true
 		}
@@ -215,6 +215,37 @@ func (m *Manager) transportForBead(b beads.Bead, sessName string) (string, bool)
 		}
 	}
 	if m.sp != nil && m.sp.IsRunning(sessName) {
+		return "", false
+	}
+	return "", false
+}
+
+func (m *Manager) transportForBeadWithInventory(b beads.Bead, sessName string, inventory runtime.Inventory) (string, bool) {
+	transport := transportFromMetadata(b)
+	if transport != "" {
+		return transport, false
+	}
+	if strings.TrimSpace(b.Metadata[MCPIdentityMetadataKey]) != "" ||
+		strings.TrimSpace(b.Metadata[MCPServersSnapshotMetadataKey]) != "" {
+		return "acp", false
+	}
+	if strings.TrimSpace(b.Metadata["pending_create_claim"]) == "true" {
+		transport = m.resolveConfiguredTransport(b.Metadata["template"], b.Metadata["provider"])
+		if transport != "" {
+			return transport, true
+		}
+		return "", false
+	}
+	if detector, ok := m.sp.(transportDetector); ok {
+		transport = normalizeTransport(b.Metadata["provider"], detector.DetectTransport(sessName))
+		if transport != "" {
+			return transport, true
+		}
+	}
+	if running, known := inventory.RunningKnown(sessName); known && running {
+		return "", false
+	}
+	if _, known := inventory.RunningKnown(sessName); known {
 		return "", false
 	}
 	return "", false
@@ -549,16 +580,24 @@ func (m *Manager) createAliasedNamedWithTransport(ctx context.Context, alias, ex
 
 func (m *Manager) confirmStartedRuntimeMetadata(id string, b *beads.Bead) error {
 	metadata := ConfirmStartedPatch(time.Now().UTC())
+	current, err := m.store.Get(id)
+	if err != nil {
+		return fmt.Errorf("reloading session before storing started runtime metadata: %w", err)
+	}
+	if current.Status == "closed" {
+		return fmt.Errorf("%w: %s", ErrSessionClosed, id)
+	}
 	if err := m.store.SetMetadataBatch(id, metadata); err != nil {
 		return fmt.Errorf("storing started runtime metadata: %w", err)
 	}
 	if b != nil {
-		if b.Metadata == nil {
-			b.Metadata = make(map[string]string, len(metadata))
+		if current.Metadata == nil {
+			current.Metadata = make(map[string]string, len(metadata))
 		}
 		for k, v := range metadata {
-			b.Metadata[k] = v
+			current.Metadata[k] = v
 		}
+		*b = current
 	}
 	return nil
 }
@@ -1056,7 +1095,7 @@ func (m *Manager) ConfirmCreation(id string) error {
 		if !cmdLegal {
 			return nil // idempotent: already active
 		}
-		return m.store.SetMetadataBatch(id, ConfirmStartedPatch(time.Now()))
+		return m.confirmStartedRuntimeMetadata(id, nil)
 	})
 }
 
@@ -1426,6 +1465,16 @@ func (m *Manager) ListFull(stateFilter string, templateFilter string) (*ListResu
 // session-labeled beads. Callers that already loaded session beads can avoid
 // a second store scan by passing the same slice here.
 func (m *Manager) ListFullFromBeads(all []beads.Bead, stateFilter string, templateFilter string) *ListResult {
+	return m.listFullFromBeads(all, stateFilter, templateFilter, nil)
+}
+
+// ListFullFromBeadsWithInventory is like ListFullFromBeads but uses a
+// request-scoped provider inventory instead of probing liveness per row.
+func (m *Manager) ListFullFromBeadsWithInventory(all []beads.Bead, stateFilter string, templateFilter string, inventory runtime.Inventory) *ListResult {
+	return m.listFullFromBeads(all, stateFilter, templateFilter, &inventory)
+}
+
+func (m *Manager) listFullFromBeads(all []beads.Bead, stateFilter string, templateFilter string, inventory *runtime.Inventory) *ListResult {
 	result := make([]Info, 0, len(all))
 	for _, b := range all {
 		if !IsSessionBeadOrRepairable(b) {
@@ -1465,7 +1514,11 @@ func (m *Manager) ListFullFromBeads(all []beads.Bead, stateFilter string, templa
 			continue
 		}
 
-		result = append(result, m.infoFromBead(b))
+		if inventory != nil {
+			result = append(result, m.infoFromBeadWithRuntimeInventory(b, *inventory))
+		} else {
+			result = append(result, m.infoFromBead(b))
+		}
 	}
 	return &ListResult{Sessions: result, Beads: all}
 }
@@ -1484,6 +1537,14 @@ func (m *Manager) Peek(id string, lines int) (string, error) {
 
 // infoFromBead converts a bead to an Info struct, enriching with runtime state.
 func (m *Manager) infoFromBead(b beads.Bead) Info {
+	return m.infoFromBeadWithInventory(b, nil)
+}
+
+func (m *Manager) infoFromBeadWithRuntimeInventory(b beads.Bead, inventory runtime.Inventory) Info {
+	return m.infoFromBeadWithInventory(b, &inventory)
+}
+
+func (m *Manager) infoFromBeadWithInventory(b beads.Bead, inventory *runtime.Inventory) Info {
 	sessName := b.Metadata["session_name"]
 	if sessName == "" {
 		sessName = sessionNameFor(b.ID)
@@ -1491,17 +1552,27 @@ func (m *Manager) infoFromBead(b beads.Bead) Info {
 	closed := b.Status == "closed"
 	transport := transportFromMetadata(b)
 	if !closed {
-		transport, _ = m.transportForBead(b, sessName)
+		if inventory != nil {
+			transport, _ = m.transportForBeadWithInventory(b, sessName, *inventory)
+		} else {
+			transport, _ = m.transportForBead(b, sessName)
+		}
 		_ = m.routeACPIfNeeded(b.Metadata["provider"], transport, sessName)
 	}
 
 	state := normalizeInfoState(State(b.Metadata["state"]))
 	if closed {
 		state = "" // closed beads have no runtime state
-	} else if m.sp != nil && state == StateActive && !m.sp.IsRunning(sessName) {
-		// Surface stale "awake" / "active" beads as dormant immediately.
-		// The controller also heals metadata on the next tick.
-		state = StateAsleep
+	} else if state == StateActive {
+		if inventory != nil {
+			if running, known := inventory.RunningKnown(sessName); known && !running {
+				// Surface stale "awake" / "active" beads as dormant immediately.
+				// The controller also heals metadata on the next tick.
+				state = StateAsleep
+			}
+		} else if m.sp != nil && !m.sp.IsRunning(sessName) {
+			state = StateAsleep
+		}
 	}
 
 	info := Info{
@@ -1530,10 +1601,21 @@ func (m *Manager) infoFromBead(b beads.Bead) Info {
 	}
 
 	// Enrich with live runtime state if active.
-	if state == StateActive && m.sp != nil {
-		info.Attached = m.sp.IsAttached(sessName)
-		if t, err := m.sp.GetLastActivity(sessName); err == nil && !t.IsZero() {
-			info.LastActive = t
+	if state == StateActive {
+		if inventory != nil {
+			if obs, known := inventory.Observe(sessName); known {
+				if obs.AttachedKnown {
+					info.Attached = obs.Attached
+				}
+				if obs.LastActivityKnown && !obs.LastActivity.IsZero() {
+					info.LastActive = obs.LastActivity
+				}
+			}
+		} else if m.sp != nil {
+			info.Attached = m.sp.IsAttached(sessName)
+			if t, err := m.sp.GetLastActivity(sessName); err == nil && !t.IsZero() {
+				info.LastActive = t
+			}
 		}
 	}
 

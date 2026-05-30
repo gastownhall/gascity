@@ -31,6 +31,52 @@ func TestCurrentSessionRuntimeTargetUsesAlias(t *testing.T) {
 	}
 }
 
+func TestCurrentSessionRuntimeTargetPrefersProviderSessionNameOverInnerTmux(t *testing.T) {
+	cityDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_ALIAS", "cartographer")
+	t.Setenv("GC_SESSION_ID", "gc-session-42")
+	t.Setenv("GC_SESSION_NAME", "rig--cartographer-gc-session-42")
+	t.Setenv("GC_TMUX_SESSION", "main")
+
+	got, err := currentSessionRuntimeTarget()
+	if err != nil {
+		t.Fatalf("currentSessionRuntimeTarget(): %v", err)
+	}
+	if got.sessionName != "rig--cartographer-gc-session-42" {
+		t.Fatalf("sessionName = %q, want provider session name", got.sessionName)
+	}
+	if got.runtimeMetadataSessionName() != "main" {
+		t.Fatalf("runtimeMetadataSessionName = %q, want inner tmux session", got.runtimeMetadataSessionName())
+	}
+}
+
+func TestCurrentSessionRuntimeTargetFallsBackToTmuxSessionName(t *testing.T) {
+	cityDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_ALIAS", "worker")
+	t.Setenv("GC_SESSION_ID", "gc-session-42")
+	t.Setenv("GC_SESSION_NAME", "")
+	t.Setenv("GC_TMUX_SESSION", "host-session")
+
+	got, err := currentSessionRuntimeTarget()
+	if err != nil {
+		t.Fatalf("currentSessionRuntimeTarget(): %v", err)
+	}
+	if got.sessionName != "host-session" {
+		t.Fatalf("sessionName = %q, want tmux fallback", got.sessionName)
+	}
+	if got.runtimeMetadataSessionName() != "host-session" {
+		t.Fatalf("runtimeMetadataSessionName = %q, want tmux fallback", got.runtimeMetadataSessionName())
+	}
+}
+
 func TestCurrentSessionRuntimeTargetFallsBackToCityPathEnv(t *testing.T) {
 	cityDir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {

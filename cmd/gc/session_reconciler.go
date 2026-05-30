@@ -29,7 +29,10 @@ import (
 	"github.com/gastownhall/gascity/internal/telemetry"
 )
 
-const maxIdleSleepProbesPerTick = 3
+const (
+	maxIdleSleepProbesPerTick  = 3
+	providerRuntimeDriftReason = "provider-runtime-drift"
+)
 
 type wakeTarget struct {
 	session *beads.Bead
@@ -580,6 +583,52 @@ func pendingCreateLeaseExpiredForRollback(session beads.Bead, clk clock.Clock, s
 	return pendingCreateAttemptStale(session, clk)
 }
 
+// Rollback is destructive, so re-read the bead before acting on a possibly
+// stale reconciler snapshot from an older tick or async start window.
+func refreshPendingCreateRollbackSession(session *beads.Bead, store beads.Store) (*beads.Bead, string, bool) {
+	if session == nil {
+		return nil, "missing_session", false
+	}
+	if store == nil {
+		return session, "missing_store", false
+	}
+	current, err := store.Get(session.ID)
+	if err != nil {
+		return session, "store_get_failed: " + err.Error(), false
+	}
+	if current.Status == "closed" {
+		return &current, "session_closed", false
+	}
+	if !isSessionBead(current) {
+		return &current, "not_session_bead", false
+	}
+	if !shouldRollbackPendingCreate(&current) {
+		return &current, "pending_create_already_cleared", false
+	}
+	if !pendingCreateSnapshotMatchesCurrent(*session, current) {
+		return &current, "stale_pending_create_snapshot", false
+	}
+	return &current, "", true
+}
+
+func pendingCreateSnapshotMatchesCurrent(snapshot, current beads.Bead) bool {
+	if strings.TrimSpace(snapshot.ID) == "" || snapshot.ID != current.ID {
+		return false
+	}
+	for _, key := range []string{
+		"session_name",
+		"generation",
+		"instance_token",
+		"pending_create_started_at",
+		"last_woke_at",
+	} {
+		if strings.TrimSpace(snapshot.Metadata[key]) != strings.TrimSpace(current.Metadata[key]) {
+			return false
+		}
+	}
+	return true
+}
+
 func pendingCreateQueuedOrCreatingState(state string) bool {
 	switch sessionpkg.State(strings.TrimSpace(state)) {
 	case sessionpkg.StateStartPending, sessionpkg.StateCreating:
@@ -942,6 +991,16 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 	const maxRollbacksPerTick = 5
 	rollbacksThisTick := 0
 	attemptRollbackPendingCreate := func(session *beads.Bead, templateName, name, action, detail string, clearClaim bool) {
+		currentSession, deferReason, rollbackCurrent := refreshPendingCreateRollbackSession(session, store)
+		if !rollbackCurrent {
+			if trace != nil {
+				trace.recordDecision("reconciler.session.pending_create", templateName, name, action, "rollback_deferred", traceRecordPayload{
+					"reason": deferReason,
+				}, nil, "")
+			}
+			return
+		}
+		session = currentSession
 		if rollbacksThisTick >= maxRollbacksPerTick {
 			fmt.Fprintf(stderr, "session reconciler: deferring rollback of %s (%s): rollback budget exhausted this tick\n", name, detail) //nolint:errcheck
 			if trace != nil {
@@ -1264,9 +1323,12 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		peek := cachedSessionPeek(cityPath, store, sp, cfg, session.ID, tp.Hints.ProcessNames)
 
 		// Zombie capture: session exists but process dead — grab scrollback for forensics.
-		if running && !alive {
+		zombieRuntime := running && !alive
+		zombieRateLimited := false
+		if zombieRuntime {
 			if output, err := peek(rateLimitPeekLines); err == nil && output != "" {
-				if !runtime.ContainsProviderRateLimitScreen(output) {
+				zombieRateLimited = runtime.ContainsProviderRateLimitScreen(output)
+				if !zombieRateLimited {
 					rec.Record(events.Event{
 						Type:    events.SessionCrashed,
 						Actor:   "gc",
@@ -1278,9 +1340,29 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				}
 			}
 		}
-		if alive && shouldRollbackPendingCreate(session) && !runningSessionMatchesPendingCreate(session, name, sp) {
-			attemptRollbackPendingCreate(session, tp.TemplateName, name, "pending_create_rollback", "live runtime belongs to another session", false)
-			continue
+		stopZombieRuntime := func(reason string) bool {
+			if !zombieRuntime || zombieRateLimited {
+				return false
+			}
+			if err := workerKillSessionTargetWithConfig("", store, sp, cfg, name); err != nil {
+				fmt.Fprintf(stderr, "session reconciler: stopping zombie runtime %s: %v\n", name, err) //nolint:errcheck
+				return true
+			}
+			if trace != nil {
+				trace.recordDecision("reconciler.session.zombie", tp.TemplateName, name, reason, "stop", nil, nil, "")
+			}
+			return true
+		}
+		if alive && shouldRollbackPendingCreate(session) {
+			identity := pendingCreateRuntimeIdentity(session, name, sp)
+			if identity == pendingCreateRuntimeIdentityUnknown && pendingCreateStartInFlight(*session, clk, startupTimeout) {
+				if trace != nil {
+					trace.recordDecision("reconciler.session.pending_create", tp.TemplateName, name, "pending_create_recovery_in_flight", "deferred", nil, nil, "")
+				}
+			} else if identity != pendingCreateRuntimeIdentityMatch {
+				attemptRollbackPendingCreate(session, tp.TemplateName, name, "pending_create_rollback", "live runtime belongs to another session", false)
+				continue
+			}
 		}
 		// Desired-branch counterpart to pendingCreateSessionStillLeased: a
 		// session bead in the desired set with pending_create_claim=true but
@@ -1321,36 +1403,39 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						continue
 					}
 					ackReason, reconcilerOwnedAck := reconcilerDrainAckMatchesSession(*session, sp, name)
-					if reconcilerOwnedAck && ackReason == "config-drift" {
+					if reconcilerOwnedAck && (ackReason == "config-drift" || ackReason == providerRuntimeDriftReason) {
 						driftKey := sessionConfigDriftKey(*session, cfg, tp)
+						if ackReason == providerRuntimeDriftReason {
+							driftKey = currentProviderRuntimeDriftKey(*session, sp, tp, name)
+						}
 						attached, attachErr := sessionAttachedForConfigDrift(*session, sp, cityPath, store, cfg, name)
 						if attachErr != nil {
-							fmt.Fprintf(stderr, "session reconciler: observing config-drift attachment for %s: %v\n", name, attachErr) //nolint:errcheck
+							fmt.Fprintf(stderr, "session reconciler: observing %s attachment for %s: %v\n", ackReason, name, attachErr) //nolint:errcheck
 						}
 						if attached {
 							if driftKey != "" {
 								if err := recordSessionAttachedConfigDriftDeferral(*session, store, clk, driftKey); err != nil {
-									fmt.Fprintf(stderr, "session reconciler: recording attached config-drift deferral for %s: %v\n", name, err) //nolint:errcheck
+									fmt.Fprintf(stderr, "session reconciler: recording attached %s deferral for %s: %v\n", ackReason, name, err) //nolint:errcheck
 								}
 							}
-							drainCancelled := cancelSessionConfigDriftDrain(*session, sp, dt)
+							drainCancelled := cancelDriftDrainByReason(*session, sp, dt, ackReason)
 							if !drainCancelled {
 								_ = clearReconcilerDrainAckMetadata(sp, name)
 							}
 							if trace != nil {
-								trace.recordDecision("reconciler.session.drain_ack", tp.TemplateName, name, "config_drift_attached", "cancel_reconciler_ack", traceRecordPayload{
+								trace.recordDecision("reconciler.session.drain_ack", tp.TemplateName, name, ackReason+"_attached", "cancel_reconciler_ack", traceRecordPayload{
 									"drain_canceled": drainCancelled,
 								}, nil, "")
 							}
 							continue
 						}
 						if driftKey != "" && recentlyDeferredSessionAttachedConfigDrift(*session, clk, driftKey) {
-							drainCancelled := cancelSessionConfigDriftDrain(*session, sp, dt)
+							drainCancelled := cancelDriftDrainByReason(*session, sp, dt, ackReason)
 							if !drainCancelled {
 								_ = clearReconcilerDrainAckMetadata(sp, name)
 							}
 							if trace != nil {
-								trace.recordDecision("reconciler.session.drain_ack", tp.TemplateName, name, "config_drift_recently_attached", "cancel_reconciler_ack", traceRecordPayload{
+								trace.recordDecision("reconciler.session.drain_ack", tp.TemplateName, name, ackReason+"_recently_attached", "cancel_reconciler_ack", traceRecordPayload{
 									"drain_canceled": drainCancelled,
 								}, nil, "")
 							}
@@ -1488,6 +1573,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		// Stability check: detect rapid crash after state healing. Rate-limit
 		// detection intentionally ran above before healState.
 		if checkStability(session, cfg, alive, dt, store, clk, nil) {
+			stopZombieRuntime("stability")
 			continue // rapid exit recorded, skip further processing
 		}
 
@@ -1496,7 +1582,16 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		// died before churnProductivityThreshold — alive long enough to
 		// not be a rapid crash, but too short to be productive.
 		if checkChurn(session, cfg, alive, dt, store, clk) {
+			stopZombieRuntime("churn")
 			continue // churn recorded, skip further processing
+		}
+		if stopZombieRuntime("stale_runtime") {
+			continue
+		}
+		if !alive {
+			if handleProviderRuntimeDrift(cityPath, cfg, sp, store, rigStores, session, tp, name, dt, clk, driftDrainTimeout, rec, stdout, stderr, trace) {
+				continue
+			}
 		}
 
 		// Clear wake failures for sessions that have been stable long enough.
@@ -1517,7 +1612,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					continue
 				}
 			}
-			if !recoverRunningPendingCreate(session, tp, cfg, store, clk, trace) {
+			if !recoverRunningPendingCreate(session, tp, cfg, sp, store, clk, trace) {
 				fmt.Fprintf(stderr, "session reconciler: recovering pending create %s: metadata repair incomplete\n", name) //nolint:errcheck
 			}
 		}
@@ -1535,6 +1630,9 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			template := tp.TemplateName
 			if template == "" {
 				template = normalizedSessionTemplate(*session, cfg)
+			}
+			if handleProviderRuntimeDrift(cityPath, cfg, sp, store, rigStores, session, tp, name, dt, clk, driftDrainTimeout, rec, stdout, stderr, trace) {
+				continue
 			}
 			// Use started_config_hash for drift detection — it records
 			// what config the session actually started with. Before it's
@@ -2879,6 +2977,246 @@ func configDriftTracePayload(storedHash, currentHash string, driftedFields []str
 	payload["current_hash"] = currentHash
 	payload["drifted_fields"] = fields
 	return payload
+}
+
+func handleProviderRuntimeDrift(
+	cityPath string,
+	cfg *config.City,
+	sp runtime.Provider,
+	store beads.Store,
+	rigStores map[string]beads.Store,
+	session *beads.Bead,
+	tp TemplateParams,
+	name string,
+	dt *drainTracker,
+	clk clock.Clock,
+	driftDrainTimeout time.Duration,
+	rec events.Recorder,
+	stdout, stderr io.Writer,
+	trace *sessionReconcilerTraceCycle,
+) bool {
+	if session == nil || sp == nil {
+		return false
+	}
+	agentCfg := providerRuntimeConfigForSession(tp, *session)
+	compat, ok, err := runtime.ObserveProviderRuntimeCompatibility(context.Background(), sp, name, agentCfg)
+	if !ok {
+		return false
+	}
+	if err != nil {
+		fmt.Fprintf(stderr, "session reconciler: observing provider runtime compatibility for %s: %v\n", name, err) //nolint:errcheck
+		return false
+	}
+	desiredHash := strings.TrimSpace(compat.Desired.Fingerprint)
+	if desiredHash == "" {
+		return false
+	}
+	storedHash := strings.TrimSpace(session.Metadata[sessionpkg.StartedProviderRuntimeHashMetadataKey])
+	storedVersion := strings.TrimSpace(session.Metadata[sessionpkg.ProviderRuntimeHashVersionMetadataKey])
+	if compat.Compatible {
+		if storedHash != desiredHash || storedVersion != strings.TrimSpace(compat.Desired.Version) {
+			if err := silentRebaselineProviderRuntimeIdentity(session, store, compat.Desired); err != nil {
+				fmt.Fprintf(stderr, "session reconciler: rebaselining provider runtime hash for %s: %v\n", name, err) //nolint:errcheck
+			} else if storedHash != "" {
+				fmt.Fprintf(stderr, "rebaselined provider runtime hash for %s (stored=%s current=%s)\n", name, truncateHashForLog(storedHash), truncateHashForLog(desiredHash)) //nolint:errcheck
+			}
+		}
+		return false
+	}
+	if compat.Exists && !compat.Alive && compat.SafeToReplaceWithoutDrain {
+		if err := workerKillSessionTargetWithConfig("", store, sp, cfg, name); err != nil {
+			fmt.Fprintf(stderr, "session reconciler: stopping non-live provider-runtime-drift %s: %v\n", name, err) //nolint:errcheck
+			return true
+		}
+		if trace != nil {
+			trace.recordDecision("reconciler.session.provider_runtime_drift", tp.TemplateName, name, providerRuntimeDriftReason, "stop_nonlive", providerRuntimeDriftTracePayload(storedHash, compat, nil), nil, "")
+		}
+		fmt.Fprintf(stdout, "Stopped non-live provider-runtime-drift session '%s'\n", name) //nolint:errcheck
+		return true
+	}
+	if !compat.Exists || !compat.Alive {
+		return false
+	}
+
+	driftKey := providerRuntimeDriftKey(storedHash, compat)
+	if providerRuntimeDriftPolicy() != "drain-replace" {
+		if trace != nil {
+			trace.recordDecision("reconciler.session.provider_runtime_drift", tp.TemplateName, name, providerRuntimeDriftReason, "observe", providerRuntimeDriftTracePayload(storedHash, compat, nil), nil, "")
+		}
+		return false
+	}
+
+	attached, attachErr := sessionAttachedForConfigDrift(*session, sp, cityPath, store, cfg, name)
+	if attachErr != nil {
+		fmt.Fprintf(stderr, "session reconciler: observing provider-runtime-drift attachment for %s: %v\n", name, attachErr) //nolint:errcheck
+	}
+	if attached {
+		if err := recordSessionAttachedConfigDriftDeferral(*session, store, clk, driftKey); err != nil {
+			fmt.Fprintf(stderr, "session reconciler: recording attached provider-runtime-drift deferral for %s: %v\n", name, err) //nolint:errcheck
+		}
+		drainCancelled := cancelSessionProviderRuntimeDriftDrain(*session, sp, dt)
+		if trace != nil {
+			trace.recordDecision("reconciler.session.provider_runtime_drift", tp.TemplateName, name, providerRuntimeDriftReason, string(TraceOutcomeDeferredAttached), providerRuntimeDriftTracePayload(storedHash, compat, traceRecordPayload{
+				"active_reason":  "attached",
+				"drain_canceled": drainCancelled,
+			}), nil, "")
+		}
+		return true
+	}
+	if recentlyDeferredSessionAttachedConfigDrift(*session, clk, driftKey) {
+		if trace != nil {
+			trace.recordDecision("reconciler.session.provider_runtime_drift", tp.TemplateName, name, providerRuntimeDriftReason, string(TraceOutcomeDeferredAttached), providerRuntimeDriftTracePayload(storedHash, compat, traceRecordPayload{
+				"active_reason": "attached_recently",
+			}), nil, "")
+		}
+		return true
+	}
+	if isNamedSessionBead(*session) {
+		activeReason, active, deferErr := shouldDeferNamedSessionConfigDrift(*session, store, sp, name, clk, driftKey)
+		if deferErr != nil {
+			fmt.Fprintf(stderr, "session reconciler: recording provider-runtime-drift deferral for %s: %v\n", name, deferErr) //nolint:errcheck
+		}
+		if active {
+			if trace != nil {
+				trace.recordDecision("reconciler.session.provider_runtime_drift", tp.TemplateName, name, providerRuntimeDriftReason, string(TraceOutcomeDeferredActive), providerRuntimeDriftTracePayload(storedHash, compat, traceRecordPayload{
+					"active_reason": activeReason,
+				}), nil, "")
+			}
+			return true
+		}
+	}
+	if pendingInteractionKeepsAwake(*session, sp, name, clk) {
+		drainCancelled := false
+		if dt != nil {
+			drainCancelled = cancelSessionDrainForPending(*session, sp, dt)
+		}
+		if trace != nil {
+			trace.recordDecision("reconciler.session.provider_runtime_drift", tp.TemplateName, name, "pending", "deferred_pending", providerRuntimeDriftTracePayload(storedHash, compat, traceRecordPayload{
+				"drain_canceled": drainCancelled,
+			}), nil, "")
+		}
+		return true
+	}
+	hasAssignedWork, assignedErr := sessionHasOpenAssignedWorkForReachableStore(cityPath, cfg, store, rigStores, *session)
+	if assignedErr != nil {
+		fmt.Fprintf(stderr, "session reconciler: checking assigned work before provider-runtime-drift drain for %s: %v\n", name, assignedErr) //nolint:errcheck
+		return true
+	}
+	if hasAssignedWork {
+		if trace != nil {
+			trace.recordDecision("reconciler.session.provider_runtime_drift", tp.TemplateName, name, providerRuntimeDriftReason, string(TraceOutcomeDeferredActive), providerRuntimeDriftTracePayload(storedHash, compat, traceRecordPayload{
+				"active_reason": "live_assigned_work",
+			}), nil, "")
+		}
+		fmt.Fprintf(stdout, "Skipping provider-runtime-drift drain for '%s': live assigned work found\n", name) //nolint:errcheck
+		return true
+	}
+	ddt := driftDrainTimeout
+	if ddt <= 0 {
+		ddt = defaultDrainTimeout
+	}
+	if beginSessionDrain(*session, sp, dt, providerRuntimeDriftReason, clk, ddt) {
+		fmt.Fprintf(stdout, "Draining session '%s': %s\n", name, providerRuntimeDriftReason) //nolint:errcheck
+		if trace != nil {
+			trace.recordDecision("reconciler.session.provider_runtime_drift", tp.TemplateName, name, providerRuntimeDriftReason, "drain", providerRuntimeDriftTracePayload(storedHash, compat, nil), nil, "")
+		}
+		rec.Record(events.Event{
+			Type:    events.SessionDraining,
+			Actor:   "gc",
+			Subject: tp.DisplayName(),
+			Message: "provider runtime drift detected",
+		})
+	}
+	return true
+}
+
+func providerRuntimeConfigForSession(tp TemplateParams, session beads.Bead) runtime.Config {
+	agentCfg := sessionCoreConfigForHash(tp, session)
+	if gcProvider := sessionProviderFamily(session); gcProvider != "" {
+		agentCfg.Env = mergeEnv(agentCfg.Env, map[string]string{"GC_PROVIDER": gcProvider})
+	}
+	return runtime.SyncWorkDirEnv(agentCfg)
+}
+
+func providerRuntimeDriftPolicy() string {
+	switch strings.TrimSpace(strings.ToLower(os.Getenv("GC_K8S_RUNTIME_DRIFT_POLICY"))) {
+	case "drain-replace":
+		return "drain-replace"
+	default:
+		return "observe-replace-nonlive"
+	}
+}
+
+func providerRuntimeDriftKey(storedHash string, compat runtime.CompatibilityObservation) string {
+	parts := []string{
+		"provider-runtime",
+		strings.TrimSpace(storedHash),
+		strings.TrimSpace(compat.Current.Fingerprint),
+		strings.TrimSpace(compat.Desired.Fingerprint),
+		strings.TrimSpace(compat.Reason),
+	}
+	return strings.Join(parts, ":")
+}
+
+func currentProviderRuntimeDriftKey(session beads.Bead, sp runtime.Provider, tp TemplateParams, name string) string {
+	if sp == nil {
+		return ""
+	}
+	agentCfg := providerRuntimeConfigForSession(tp, session)
+	compat, ok, err := runtime.ObserveProviderRuntimeCompatibility(context.Background(), sp, name, agentCfg)
+	if !ok || err != nil || compat.Compatible {
+		return ""
+	}
+	storedHash := strings.TrimSpace(session.Metadata[sessionpkg.StartedProviderRuntimeHashMetadataKey])
+	return providerRuntimeDriftKey(storedHash, compat)
+}
+
+func cancelDriftDrainByReason(session beads.Bead, sp runtime.Provider, dt *drainTracker, reason string) bool {
+	switch reason {
+	case providerRuntimeDriftReason:
+		return cancelSessionProviderRuntimeDriftDrain(session, sp, dt)
+	case "config-drift":
+		return cancelSessionConfigDriftDrain(session, sp, dt)
+	default:
+		return false
+	}
+}
+
+func providerRuntimeDriftTracePayload(storedHash string, compat runtime.CompatibilityObservation, extra traceRecordPayload) traceRecordPayload {
+	payload := traceRecordPayload{}
+	for k, v := range extra {
+		payload[k] = v
+	}
+	payload["stored_hash"] = storedHash
+	payload["current_hash"] = compat.Current.Fingerprint
+	payload["desired_hash"] = compat.Desired.Fingerprint
+	payload["current_version"] = compat.Current.Version
+	payload["desired_version"] = compat.Desired.Version
+	payload["reason"] = compat.Reason
+	payload["running"] = compat.Running
+	payload["alive"] = compat.Alive
+	return payload
+}
+
+func silentRebaselineProviderRuntimeIdentity(session *beads.Bead, store beads.Store, identity runtime.ProviderRuntimeIdentity) error {
+	if session == nil || store == nil || strings.TrimSpace(identity.Fingerprint) == "" {
+		return nil
+	}
+	patch := map[string]string{
+		sessionpkg.StartedProviderRuntimeHashMetadataKey:   identity.Fingerprint,
+		sessionpkg.ProviderRuntimeHashVersionMetadataKey:   identity.Version,
+		sessionpkg.ProviderRuntimeHashBreakdownMetadataKey: identity.Breakdown,
+	}
+	if err := store.SetMetadataBatch(session.ID, patch); err != nil {
+		return fmt.Errorf("rebaselining provider runtime hash: %w", err)
+	}
+	if session.Metadata == nil {
+		session.Metadata = make(map[string]string, len(patch))
+	}
+	for k, v := range patch {
+		session.Metadata[k] = v
+	}
+	return nil
 }
 
 func traceHealClearedPendingCreateLease(

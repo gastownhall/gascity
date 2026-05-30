@@ -61,6 +61,13 @@ type TranscriptHandle interface {
 	AgentTranscript(context.Context, string) (*AgentTranscriptResult, error)
 }
 
+// SessionLogHandle exposes the best available provider-aware session log
+// snapshot, using structured transcripts when available and live provider
+// output when history is not host-visible.
+type SessionLogHandle interface {
+	SessionLog(context.Context, SessionLogRequest) (*SessionLogResult, error)
+}
+
 // InteractionHandle exposes worker blocking-interaction queries and responses.
 type InteractionHandle interface {
 	Pending(context.Context) (*PendingInteraction, error)
@@ -83,6 +90,7 @@ type Handle interface {
 	LifecycleHandle
 	MessagingHandle
 	TranscriptHandle
+	SessionLogHandle
 	InteractionHandle
 	PeekHandle
 	LiveObservationHandle

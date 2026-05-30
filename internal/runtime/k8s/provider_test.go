@@ -3,6 +3,7 @@ package k8s
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -172,6 +173,68 @@ func TestParseSchedulingEnvEmptyAndNullAffinitySemantics(t *testing.T) {
 	})
 }
 
+func TestParseWorkspaceEnvIsOptInByPVC(t *testing.T) {
+	t.Run("root without pvc is ignored", func(t *testing.T) {
+		clearWorkspaceEnv(t)
+		t.Setenv("GC_K8S_WORKSPACE_ROOT", "/workspace/cities/demo-city")
+
+		workspace, err := parseWorkspaceEnv()
+		if err != nil {
+			t.Fatalf("parseWorkspaceEnv: %v", err)
+		}
+		if workspace.pvc != "" {
+			t.Fatalf("workspace pvc = %q, want empty", workspace.pvc)
+		}
+		if workspace.root != defaultPodWorkspaceRoot {
+			t.Fatalf("workspace root = %q, want default %q", workspace.root, defaultPodWorkspaceRoot)
+		}
+	})
+
+	t.Run("pvc defaults root", func(t *testing.T) {
+		clearWorkspaceEnv(t)
+		t.Setenv("GC_K8S_WORKSPACE_PVC", "demo-city-workspace")
+
+		workspace, err := parseWorkspaceEnv()
+		if err != nil {
+			t.Fatalf("parseWorkspaceEnv: %v", err)
+		}
+		if workspace.pvc != "demo-city-workspace" {
+			t.Fatalf("workspace pvc = %q, want demo-city-workspace", workspace.pvc)
+		}
+		if workspace.root != defaultPodWorkspaceRoot {
+			t.Fatalf("workspace root = %q, want default %q", workspace.root, defaultPodWorkspaceRoot)
+		}
+	})
+
+	t.Run("pvc trims absolute root", func(t *testing.T) {
+		clearWorkspaceEnv(t)
+		t.Setenv("GC_K8S_WORKSPACE_PVC", "demo-city-workspace")
+		t.Setenv("GC_K8S_WORKSPACE_ROOT", "/workspace/cities/demo-city/")
+
+		workspace, err := parseWorkspaceEnv()
+		if err != nil {
+			t.Fatalf("parseWorkspaceEnv: %v", err)
+		}
+		if workspace.root != "/workspace/cities/demo-city" {
+			t.Fatalf("workspace root = %q, want /workspace/cities/demo-city", workspace.root)
+		}
+	})
+
+	t.Run("pvc rejects relative root", func(t *testing.T) {
+		clearWorkspaceEnv(t)
+		t.Setenv("GC_K8S_WORKSPACE_PVC", "demo-city-workspace")
+		t.Setenv("GC_K8S_WORKSPACE_ROOT", "workspace/cities/demo-city")
+
+		_, err := parseWorkspaceEnv()
+		if err == nil {
+			t.Fatal("expected relative workspace root to fail")
+		}
+		if !strings.Contains(err.Error(), "GC_K8S_WORKSPACE_ROOT") {
+			t.Fatalf("error = %q, want GC_K8S_WORKSPACE_ROOT context", err)
+		}
+	})
+}
+
 func clearSchedulingEnv(t *testing.T) {
 	t.Helper()
 	for _, key := range []string{
@@ -179,6 +242,16 @@ func clearSchedulingEnv(t *testing.T) {
 		"GC_K8S_TOLERATIONS",
 		"GC_K8S_AFFINITY",
 		"GC_K8S_PRIORITY_CLASS_NAME",
+	} {
+		t.Setenv(key, "")
+	}
+}
+
+func clearWorkspaceEnv(t *testing.T) {
+	t.Helper()
+	for _, key := range []string{
+		"GC_K8S_WORKSPACE_PVC",
+		"GC_K8S_WORKSPACE_ROOT",
 	} {
 		t.Setenv(key, "")
 	}
@@ -282,6 +355,102 @@ func TestListRunning(t *testing.T) {
 	}
 	if len(names) != 3 {
 		t.Errorf("expected 3 running, got %d", len(names))
+	}
+}
+
+func TestInventoryListsPodsOnceWithoutTmuxProbes(t *testing.T) {
+	fake := newFakeK8sOps()
+	p := newProviderWithOps(fake)
+
+	for i := 0; i < 30; i++ {
+		name := fmt.Sprintf("gc-test-agent-%02d", i)
+		addRunningPodWithAnnotation(fake, name, name, name)
+	}
+	addRunningPodWithAnnotation(fake, "gc-other-agent", "gc-other-agent", "gc-other-agent")
+	addRunningPodWithAnnotation(fake, "gc-test-deleting", "gc-test-deleting", "gc-test-deleting")
+	deleted := fake.pods["gc-test-deleting"]
+	now := metav1.Now()
+	deleted.DeletionTimestamp = &now
+	fake.pods["gc-test-pending"] = &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        "gc-test-pending",
+			Labels:      map[string]string{"app": "gc-agent", "gc-session": "gc-test-pending"},
+			Annotations: map[string]string{"gc-session-name": "gc-test-pending"},
+		},
+		Status: corev1.PodStatus{Phase: corev1.PodPending},
+	}
+
+	inventory, err := p.Inventory(context.Background(), "gc-test-")
+	if err != nil {
+		t.Fatalf("Inventory: %v", err)
+	}
+	if !inventory.Complete {
+		t.Fatal("Inventory.Complete = false, want true")
+	}
+	if len(inventory.Observations) != 30 {
+		t.Fatalf("inventory observations = %d, want 30", len(inventory.Observations))
+	}
+	for i := 0; i < 30; i++ {
+		name := fmt.Sprintf("gc-test-agent-%02d", i)
+		running, known := inventory.RunningKnown(name)
+		if !known || !running {
+			t.Fatalf("RunningKnown(%q) = (%v, %v), want (true, true)", name, running, known)
+		}
+	}
+	if running, known := inventory.RunningKnown("gc-test-deleting"); !known || running {
+		t.Fatalf("RunningKnown(deleting) = (%v, %v), want known stopped", running, known)
+	}
+
+	listCalls := 0
+	for _, c := range fake.calls {
+		switch c.method {
+		case "listPods":
+			listCalls++
+			if c.selector != "app=gc-agent" || c.fieldSelector != "status.phase=Running" {
+				t.Fatalf("listPods selector = (%q, %q), want app=gc-agent/status.phase=Running", c.selector, c.fieldSelector)
+			}
+		case "execInPod":
+			t.Fatalf("Inventory performed tmux exec: %+v", c)
+		}
+	}
+	if listCalls != 1 {
+		t.Fatalf("listPods calls = %d, want 1", listCalls)
+	}
+}
+
+func TestListRuntimeArtifactsIncludesPendingPodsWithSessionID(t *testing.T) {
+	fake := newFakeK8sOps()
+	p := newProviderWithOps(fake)
+
+	addRunningPodWithAnnotation(fake, "gc-test-live", "gc-test-live", "gc-test-live")
+	fake.pods["gc-test-pending"] = &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        "gc-test-pending",
+			Labels:      map[string]string{"app": "gc-agent", "gc-session": "gc-test-pending"},
+			Annotations: map[string]string{"gc-session-name": "gc-test-pending-full"},
+		},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{
+				Name: "agent",
+				Env:  []corev1.EnvVar{{Name: "GC_SESSION_ID", Value: "gc-session-pending"}},
+			}},
+		},
+		Status: corev1.PodStatus{Phase: corev1.PodPending},
+	}
+
+	artifacts, err := p.ListRuntimeArtifacts("gc-test-")
+	if err != nil {
+		t.Fatalf("ListRuntimeArtifacts: %v", err)
+	}
+	got := map[string]string{}
+	for _, artifact := range artifacts {
+		got[artifact.Name] = artifact.SessionID
+	}
+	if _, ok := got["gc-test-live"]; !ok {
+		t.Fatalf("ListRuntimeArtifacts missing running pod: %#v", got)
+	}
+	if got["gc-test-pending-full"] != "gc-session-pending" {
+		t.Fatalf("pending artifact session ID = %q, want gc-session-pending; all=%#v", got["gc-test-pending-full"], got)
 	}
 }
 
@@ -577,6 +746,192 @@ func TestStartCreatesPodsAndWaits(t *testing.T) {
 	if pod.Annotations["gc-session-name"] != "gc-test-agent" {
 		t.Errorf("annotation gc-session-name = %q, want gc-test-agent", pod.Annotations["gc-session-name"])
 	}
+	if pod.Annotations[providerRuntimeProviderAnnotation] != "k8s" {
+		t.Errorf("annotation %s = %q, want k8s", providerRuntimeProviderAnnotation, pod.Annotations[providerRuntimeProviderAnnotation])
+	}
+	if pod.Annotations[providerRuntimeFingerprintAnnotation] == "" {
+		t.Fatalf("missing %s annotation", providerRuntimeFingerprintAnnotation)
+	}
+	if pod.Annotations[providerRuntimeFingerprintVersionAnnotation] != providerRuntimeFingerprintVersion {
+		t.Errorf("annotation %s = %q, want %s", providerRuntimeFingerprintVersionAnnotation, pod.Annotations[providerRuntimeFingerprintVersionAnnotation], providerRuntimeFingerprintVersion)
+	}
+	if pod.Annotations[providerRuntimeImageAnnotation] != p.image {
+		t.Errorf("annotation %s = %q, want %s", providerRuntimeImageAnnotation, pod.Annotations[providerRuntimeImageAnnotation], p.image)
+	}
+}
+
+func TestObserveRuntimeCompatibilityClassifiesCompatibleAndLegacyPods(t *testing.T) {
+	fake := newFakeK8sOps()
+	p := newProviderWithOps(fake)
+	cfg := runtime.Config{
+		Command: "claude",
+		Env:     map[string]string{"GC_AGENT": "mayor", "GC_CITY": "/workspace"},
+	}
+
+	addRunningPod(fake, "gc-test-agent", "gc-test-agent")
+	fake.setExecResult("gc-test-agent",
+		[]string{"tmux", "has-session", "-t", "main"}, "", nil)
+
+	legacy, err := p.ObserveRuntimeCompatibility(context.Background(), "gc-test-agent", cfg)
+	if err != nil {
+		t.Fatalf("ObserveRuntimeCompatibility legacy: %v", err)
+	}
+	if legacy.Compatible || legacy.Reason != "missing-runtime-identity" || !legacy.Alive {
+		t.Fatalf("legacy compatibility = %#v, want alive incompatible missing-runtime-identity", legacy)
+	}
+
+	annotatePodWithDesiredRuntimeIdentity(t, p, "gc-test-agent", cfg)
+	compatible, err := p.ObserveRuntimeCompatibility(context.Background(), "gc-test-agent", cfg)
+	if err != nil {
+		t.Fatalf("ObserveRuntimeCompatibility compatible: %v", err)
+	}
+	if !compatible.Compatible || compatible.Desired.Fingerprint == "" || compatible.Current.Fingerprint != compatible.Desired.Fingerprint {
+		t.Fatalf("compatible observation = %#v", compatible)
+	}
+}
+
+func TestProviderRuntimeFingerprintChangesForSubstrateFields(t *testing.T) {
+	baseProvider := newProviderWithOps(newFakeK8sOps())
+	baseCfg := runtime.Config{
+		Env: map[string]string{"GC_AGENT": "mayor", "GC_CITY": "/workspace"},
+	}
+	base := mustDesiredProviderRuntimeIdentity(t, baseProvider, baseCfg)
+
+	tests := []struct {
+		name   string
+		mutate func(*Provider, *runtime.Config)
+	}{
+		{
+			name: "main image",
+			mutate: func(p *Provider, _ *runtime.Config) {
+				p.image = "test-image:v2"
+			},
+		},
+		{
+			name: "service account",
+			mutate: func(p *Provider, _ *runtime.Config) {
+				p.serviceAccount = "agent-runtime"
+			},
+		},
+		{
+			name: "resources",
+			mutate: func(p *Provider, _ *runtime.Config) {
+				p.cpuRequest = "750m"
+				p.memLimit = "6Gi"
+			},
+		},
+		{
+			name: "prebaked workspace mode",
+			mutate: func(p *Provider, _ *runtime.Config) {
+				p.prebaked = true
+			},
+		},
+		{
+			name: "persistent workspace pvc",
+			mutate: func(p *Provider, _ *runtime.Config) {
+				p.workspacePVC = "demo-city-workspace"
+				p.workspaceRoot = "/workspace/cities/demo-city"
+			},
+		},
+		{
+			name: "linux username home projection",
+			mutate: func(_ *Provider, cfg *runtime.Config) {
+				cfg.Env["LINUX_USERNAME"] = "gascity"
+			},
+		},
+		{
+			name: "scheduling",
+			mutate: func(p *Provider, _ *runtime.Config) {
+				p.nodeSelector = map[string]string{"workload": "gc-agents"}
+				p.priorityClassName = "gc-agent-high"
+			},
+		},
+		{
+			name: "managed dolt service env",
+			mutate: func(_ *Provider, cfg *runtime.Config) {
+				cfg.Env["GC_DOLT_HOST"] = "127.0.0.1"
+				cfg.Env["GC_DOLT_PORT"] = "3307"
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := newProviderWithOps(newFakeK8sOps())
+			cfg := runtime.Config{Env: map[string]string{}}
+			for k, v := range baseCfg.Env {
+				cfg.Env[k] = v
+			}
+			tt.mutate(p, &cfg)
+			got := mustDesiredProviderRuntimeIdentity(t, p, cfg)
+			if got.Fingerprint == base.Fingerprint {
+				t.Fatalf("fingerprint did not change for %s: %s", tt.name, got.Fingerprint)
+			}
+		})
+	}
+}
+
+func TestProviderRuntimeIdentityIncludesSharedProcessNamespace(t *testing.T) {
+	p := newProviderWithOps(newFakeK8sOps())
+	cfg := runtime.Config{
+		Env: map[string]string{"GC_AGENT": "mayor", "GC_CITY": "/workspace"},
+	}
+
+	identity := mustDesiredProviderRuntimeIdentity(t, p, cfg)
+	if identity.Version != "k8s-v3" {
+		t.Fatalf("identity version = %q, want k8s-v3", identity.Version)
+	}
+	var spec runtimeIdentitySpec
+	if err := json.Unmarshal([]byte(identity.Breakdown), &spec); err != nil {
+		t.Fatalf("unmarshal identity breakdown: %v\n%s", err, identity.Breakdown)
+	}
+	if !spec.ShareProcessNamespace {
+		t.Fatalf("ShareProcessNamespace = false in identity breakdown: %s", identity.Breakdown)
+	}
+	if spec.LaunchMaterialMode != "staged-files" {
+		t.Fatalf("LaunchMaterialMode = %q, want staged-files in identity breakdown: %s", spec.LaunchMaterialMode, identity.Breakdown)
+	}
+}
+
+func TestProviderRuntimeIdentityIncludesClaudeOAuthSecretEnv(t *testing.T) {
+	p := newProviderWithOps(newFakeK8sOps())
+	cfg := runtime.Config{Env: map[string]string{"GC_AGENT": "mayor"}}
+
+	identity := mustDesiredProviderRuntimeIdentity(t, p, cfg)
+	var spec runtimeIdentitySpec
+	if err := json.Unmarshal([]byte(identity.Breakdown), &spec); err != nil {
+		t.Fatalf("unmarshal identity breakdown: %v\n%s", err, identity.Breakdown)
+	}
+
+	for _, env := range spec.CredentialEnv {
+		if env.Name == "CLAUDE_CODE_OAUTH_TOKEN" {
+			if env.SecretName != providerRuntimeClaudeSecretName || env.Key != "CLAUDE_CODE_OAUTH_TOKEN" || !env.Optional {
+				t.Fatalf("CLAUDE_CODE_OAUTH_TOKEN credential env = %#v", env)
+			}
+			return
+		}
+	}
+	t.Fatalf("missing CLAUDE_CODE_OAUTH_TOKEN credential env in %#v", spec.CredentialEnv)
+}
+
+func TestProviderRuntimeIdentityPreservesExplicitClaudeOAuthEnv(t *testing.T) {
+	p := newProviderWithOps(newFakeK8sOps())
+	cfg := runtime.Config{Env: map[string]string{
+		"GC_AGENT":                "mayor",
+		"CLAUDE_CODE_OAUTH_TOKEN": "explicit-token",
+	}}
+
+	identity := mustDesiredProviderRuntimeIdentity(t, p, cfg)
+	var spec runtimeIdentitySpec
+	if err := json.Unmarshal([]byte(identity.Breakdown), &spec); err != nil {
+		t.Fatalf("unmarshal identity breakdown: %v\n%s", err, identity.Breakdown)
+	}
+
+	for _, env := range spec.CredentialEnv {
+		if env.Name == "CLAUDE_CODE_OAUTH_TOKEN" {
+			t.Fatalf("explicit CLAUDE_CODE_OAUTH_TOKEN should not be represented as secret env: %#v", env)
+		}
+	}
 }
 
 func TestStartDetectsStalePod(t *testing.T) {
@@ -622,6 +977,72 @@ func TestStartDetectsStalePod(t *testing.T) {
 	}
 }
 
+func TestStartStagesLaunchMaterialWithoutEmbeddingPromptInExecArgs(t *testing.T) {
+	fake := newFakeK8sOps()
+	p := newProviderWithOps(fake)
+	p.postStartSettle = 0
+	prompt := strings.Repeat("large prompt ", 20000)
+	command := "codex --model gpt-5.5 " + strings.Repeat("--flag ", 2000)
+	preStart := "printf %s " + strings.Repeat("x", 20000)
+	cfg := runtime.Config{
+		Command:      command,
+		WorkDir:      "/city/rigs/frontend",
+		PromptSuffix: "'" + prompt + "'",
+		PromptFlag:   "--prompt",
+		PreStart:     []string{preStart},
+		Env: map[string]string{
+			"GC_AGENT": "demo-rig/polecat",
+			"GC_CITY":  "/city",
+		},
+	}
+	fake.setExecResult("gc-test-agent", []string{"tmux", "has-session", "-t", "main"}, "", nil)
+
+	if err := p.Start(context.Background(), "gc-test-agent", cfg); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	pod := fake.pods["gc-test-agent"]
+	if pod == nil {
+		t.Fatal("created pod not recorded")
+	}
+	argv := strings.Join(append(append([]string{}, pod.Spec.Containers[0].Command...), pod.Spec.Containers[0].Args...), "\x00")
+	if len(argv) > 4096 {
+		t.Fatalf("pod argv length = %d, want bounded under 4096", len(argv))
+	}
+	for _, forbidden := range []string{prompt, command, preStart} {
+		if strings.Contains(argv, forbidden) {
+			t.Fatalf("pod argv leaked large launch material")
+		}
+	}
+
+	launchReadyIdx, workspaceReadyIdx := -1, -1
+	for i, c := range fake.calls {
+		if c.method != "execInPod" {
+			continue
+		}
+		joined := strings.Join(c.cmd, " ")
+		for _, forbidden := range []string{prompt, command, preStart} {
+			if strings.Contains(joined, forbidden) {
+				t.Fatalf("exec argv leaked large launch material in call %#v", c)
+			}
+		}
+		if c.container == "launch" && len(c.cmd) == 2 && c.cmd[0] == "touch" && c.cmd[1] == podLaunchReadyMarker {
+			launchReadyIdx = i
+		}
+		if c.container == "stage" && len(c.cmd) == 2 && c.cmd[0] == "touch" && c.cmd[1] == "/workspace/.gc-ready" {
+			workspaceReadyIdx = i
+		}
+	}
+	if launchReadyIdx == -1 {
+		t.Fatal("launch material was not marked ready")
+	}
+	if workspaceReadyIdx == -1 {
+		t.Fatal("workspace staging was not marked ready")
+	}
+	if launchReadyIdx > workspaceReadyIdx {
+		t.Fatalf("workspace was marked ready before launch material: launch=%d workspace=%d", launchReadyIdx, workspaceReadyIdx)
+	}
+}
+
 func TestStartRejectsExistingLiveSession(t *testing.T) {
 	fake := newFakeK8sOps()
 	p := newProviderWithOps(fake)
@@ -636,12 +1057,36 @@ func TestStartRejectsExistingLiveSession(t *testing.T) {
 		ProcessNames: []string{"claude"},
 		Env:          map[string]string{"GC_AGENT": "mayor", "GC_CITY": "/workspace"},
 	}
+	annotatePodWithDesiredRuntimeIdentity(t, p, "gc-test-agent", cfg)
 	err := p.Start(context.Background(), "gc-test-agent", cfg)
 	if err == nil {
 		t.Fatal("Start should fail for existing live session")
 	}
 	if want := "already exists"; !contains(err.Error(), want) {
 		t.Errorf("error = %q, want containing %q", err, want)
+	}
+}
+
+func TestStartRejectsIncompatibleLiveSessionWithoutDeletingPod(t *testing.T) {
+	fake := newFakeK8sOps()
+	p := newProviderWithOps(fake)
+
+	addRunningPod(fake, "gc-test-agent", "gc-test-agent")
+	fake.setExecResult("gc-test-agent",
+		[]string{"tmux", "has-session", "-t", "main"}, "", nil)
+
+	err := p.Start(context.Background(), "gc-test-agent", runtime.Config{
+		Command:      "claude",
+		ProcessNames: []string{"claude"},
+		Env:          map[string]string{"GC_AGENT": "mayor", "GC_CITY": "/workspace"},
+	})
+	if !errors.Is(err, runtime.ErrRuntimeIncompatible) {
+		t.Fatalf("Start error = %v, want ErrRuntimeIncompatible", err)
+	}
+	for _, c := range fake.calls {
+		if c.method == "deletePod" && c.pod == "gc-test-agent" {
+			t.Fatal("incompatible live pod was deleted by Start")
+		}
 	}
 }
 
@@ -668,6 +1113,7 @@ func TestStartTreatsYoungPodWithDeadTmuxAsInitializing(t *testing.T) {
 		ProcessNames: []string{"claude"},
 		Env:          map[string]string{"GC_AGENT": "mayor", "GC_CITY": "/workspace"},
 	}
+	annotatePodWithDesiredRuntimeIdentity(t, p, "gc-test-agent", cfg)
 	err := p.Start(context.Background(), "gc-test-agent", cfg)
 	if err == nil {
 		t.Fatal("Start should return error for initializing pod")
@@ -681,6 +1127,42 @@ func TestStartTreatsYoungPodWithDeadTmuxAsInitializing(t *testing.T) {
 		if c.method == "deletePod" && c.pod == "gc-test-agent" {
 			t.Error("young pod was deleted despite still initializing")
 		}
+	}
+}
+
+func TestStartReplacesYoungIncompatiblePodWithDeadTmux(t *testing.T) {
+	fake := newFakeK8sOps()
+	p := newProviderWithOps(fake)
+
+	fake.pods["gc-test-agent"] = &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "gc-test-agent",
+			Labels:            map[string]string{"app": "gc-agent", "gc-session": "gc-test-agent"},
+			CreationTimestamp: metav1.Now(),
+		},
+		Status: corev1.PodStatus{Phase: corev1.PodRunning},
+	}
+	fake.setExecResult("gc-test-agent",
+		[]string{"tmux", "has-session", "-t", "main"}, "",
+		fmt.Errorf("no server running on /tmp/tmux-1000/default"))
+	fake.createErr = fmt.Errorf("intentional: verify incompatible replacement")
+
+	err := p.Start(context.Background(), "gc-test-agent", runtime.Config{
+		Command:      "claude",
+		ProcessNames: []string{"claude"},
+		Env:          map[string]string{"GC_AGENT": "mayor", "GC_CITY": "/workspace"},
+	})
+	if errors.Is(err, runtime.ErrSessionInitializing) {
+		t.Fatalf("Start error = %v, want replacement attempt, not ErrSessionInitializing", err)
+	}
+	foundDelete := false
+	for _, c := range fake.calls {
+		if c.method == "deletePod" && c.pod == "gc-test-agent" {
+			foundDelete = true
+		}
+	}
+	if !foundDelete {
+		t.Fatal("young incompatible pod with dead tmux was not deleted")
 	}
 }
 
@@ -750,12 +1232,12 @@ func TestPodManifestCompatibility(t *testing.T) {
 		t.Errorf("container name = %q, want %q", pod.Spec.Containers[0].Name, "agent")
 	}
 
-	// Init container name must be "stage" (when staging needed).
-	if len(pod.Spec.InitContainers) == 0 {
-		t.Fatal("expected init container for rig agent")
+	// Init containers must stage launch material first, then workspace files.
+	if len(pod.Spec.InitContainers) < 2 {
+		t.Fatalf("expected launch and stage init containers for rig agent: %#v", pod.Spec.InitContainers)
 	}
-	if pod.Spec.InitContainers[0].Name != "stage" {
-		t.Errorf("init container name = %q, want %q", pod.Spec.InitContainers[0].Name, "stage")
+	if pod.Spec.InitContainers[0].Name != "launch" || pod.Spec.InitContainers[1].Name != "stage" {
+		t.Errorf("init containers = %#v, want launch then stage", pod.Spec.InitContainers)
 	}
 
 	// Labels must match gc-session-k8s format.
@@ -768,15 +1250,16 @@ func TestPodManifestCompatibility(t *testing.T) {
 	for _, v := range pod.Spec.Volumes {
 		volNames[v.Name] = true
 	}
-	for _, name := range []string{"ws", "claude-config", "city"} {
+	for _, name := range []string{"launch", "ws", "claude-config", "city"} {
 		if !volNames[name] {
 			t.Errorf("missing volume %q", name)
 		}
 	}
 
-	// Verify working directory is pod-mapped.
-	if pod.Spec.Containers[0].WorkingDir != "/workspace/demo-rig" {
-		t.Errorf("workingDir = %q, want /workspace/demo-rig",
+	// The shell starts from a stable workspace root; the entrypoint cd's into
+	// the projected agent worktree after pre-start scripts finish.
+	if pod.Spec.Containers[0].WorkingDir != "/workspace" {
+		t.Errorf("workingDir = %q, want /workspace",
 			pod.Spec.Containers[0].WorkingDir)
 	}
 }
@@ -832,6 +1315,55 @@ func mustBuildPodEnv(t *testing.T, cfgEnv map[string]string, podWorkDir, managed
 		t.Fatalf("buildPodEnv: %v", err)
 	}
 	return env
+}
+
+func TestBuildPodEnvClaudeOAuthTokenUsesOptionalSecret(t *testing.T) {
+	env := mustBuildPodEnv(t, map[string]string{}, "/workspace/rig", podManagedDoltHost, podManagedDoltPort)
+
+	for _, v := range env {
+		if v.Name != "CLAUDE_CODE_OAUTH_TOKEN" {
+			continue
+		}
+		if v.Value != "" {
+			t.Fatalf("CLAUDE_CODE_OAUTH_TOKEN literal value = %q, want secret ref", v.Value)
+		}
+		if v.ValueFrom == nil || v.ValueFrom.SecretKeyRef == nil {
+			t.Fatalf("CLAUDE_CODE_OAUTH_TOKEN does not come from a secret: %#v", v)
+		}
+		ref := v.ValueFrom.SecretKeyRef
+		if ref.Name != providerRuntimeClaudeSecretName || ref.Key != "CLAUDE_CODE_OAUTH_TOKEN" {
+			t.Fatalf("CLAUDE_CODE_OAUTH_TOKEN secret ref = %s/%s, want %s/CLAUDE_CODE_OAUTH_TOKEN", ref.Name, ref.Key, providerRuntimeClaudeSecretName)
+		}
+		if ref.Optional == nil || !*ref.Optional {
+			t.Fatal("CLAUDE_CODE_OAUTH_TOKEN secret ref should be optional")
+		}
+		return
+	}
+	t.Fatal("missing CLAUDE_CODE_OAUTH_TOKEN env")
+}
+
+func TestBuildPodEnvClaudeOAuthTokenExplicitEnvTakesPrecedence(t *testing.T) {
+	env := mustBuildPodEnv(
+		t,
+		map[string]string{"CLAUDE_CODE_OAUTH_TOKEN": "explicit-token"},
+		"/workspace/rig",
+		podManagedDoltHost,
+		podManagedDoltPort,
+	)
+
+	for _, v := range env {
+		if v.Name != "CLAUDE_CODE_OAUTH_TOKEN" {
+			continue
+		}
+		if v.Value != "explicit-token" {
+			t.Fatalf("CLAUDE_CODE_OAUTH_TOKEN = %q, want explicit-token", v.Value)
+		}
+		if v.ValueFrom != nil {
+			t.Fatalf("CLAUDE_CODE_OAUTH_TOKEN should preserve explicit env instead of secret ref: %#v", v)
+		}
+		return
+	}
+	t.Fatal("missing CLAUDE_CODE_OAUTH_TOKEN env")
 }
 
 func TestBuildPodEnvRemapsVars(t *testing.T) {
@@ -1246,10 +1778,15 @@ func TestNeedsStaging(t *testing.T) {
 		want     bool
 	}{
 		{
-			name:     "no staging",
+			name: "no controller city",
+			cfg:  runtime.Config{},
+			want: false,
+		},
+		{
+			name:     "city root workdir",
 			cfg:      runtime.Config{WorkDir: "/workspace"},
 			ctrlCity: "/workspace",
-			want:     false,
+			want:     true,
 		},
 		{
 			name: "overlay dir",
@@ -1277,7 +1814,7 @@ func TestNeedsStaging(t *testing.T) {
 			name:     "city agent (same work_dir)",
 			cfg:      runtime.Config{WorkDir: "/city"},
 			ctrlCity: "/city",
-			want:     false,
+			want:     true,
 		},
 	}
 	for _, tt := range tests {
@@ -1309,11 +1846,11 @@ func TestPodManifestAddsInitContainerForPackOverlayCityAgent(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if len(pod.Spec.InitContainers) == 0 {
-		t.Fatal("expected init container for city agent with pack overlay")
+	if len(pod.Spec.InitContainers) < 2 {
+		t.Fatalf("expected launch and stage init containers for city agent with pack overlay: %#v", pod.Spec.InitContainers)
 	}
-	if pod.Spec.InitContainers[0].Name != "stage" {
-		t.Errorf("init container name = %q, want %q", pod.Spec.InitContainers[0].Name, "stage")
+	if pod.Spec.InitContainers[0].Name != "launch" || pod.Spec.InitContainers[1].Name != "stage" {
+		t.Errorf("init containers = %#v, want launch then stage", pod.Spec.InitContainers)
 	}
 }
 
@@ -1336,9 +1873,10 @@ func TestBuildPodPrebaked(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// No init containers when prebaked.
-	if len(pod.Spec.InitContainers) != 0 {
-		t.Errorf("expected 0 init containers when prebaked, got %d", len(pod.Spec.InitContainers))
+	// Prebaked pods still use the bounded launch-material init container, but
+	// skip workspace staging.
+	if len(pod.Spec.InitContainers) != 1 || pod.Spec.InitContainers[0].Name != "launch" {
+		t.Errorf("expected only launch init container when prebaked, got %#v", pod.Spec.InitContainers)
 	}
 
 	// No "ws" EmptyDir volume.
@@ -1370,7 +1908,7 @@ func TestBuildPodPrebaked(t *testing.T) {
 	}
 
 	// Entrypoint should NOT contain workspace-ready wait.
-	entrypoint := pod.Spec.Containers[0].Args[0]
+	entrypoint := buildPodLaunchMaterial(cfg, p).Entrypoint
 	if containsStr(entrypoint, ".gc-workspace-ready") {
 		t.Error("prebaked entrypoint should not wait for .gc-workspace-ready")
 	}
@@ -1389,7 +1927,7 @@ func TestInitBeadsInPodUsesProjectedStoreRootAndPrefix(t *testing.T) {
 		},
 	}
 	podWorkDir := projectedPodWorkDir(cfg)
-	if err := initBeadsInPod(context.Background(), fake, "gc-test-pod", cfg, podWorkDir, podManagedDoltHost, podManagedDoltPort); err != nil {
+	if err := initBeadsInPod(context.Background(), fake, "gc-test-pod", cfg, podWorkDir, defaultPodWorkspaceRoot, podManagedDoltHost, podManagedDoltPort); err != nil {
 		t.Fatalf("initBeadsInPod: %v", err)
 	}
 	wantStoreRootB64 := base64.StdEncoding.EncodeToString([]byte("/workspace/custom-scope"))
@@ -1418,6 +1956,49 @@ func TestInitBeadsInPodUsesProjectedStoreRootAndPrefix(t *testing.T) {
 	if !found {
 		t.Fatal("initBeadsInPod did not use projected store root and prefix")
 	}
+}
+
+func TestInitBeadsInPodUsesPersistentWorkspaceStoreRoot(t *testing.T) {
+	fake := newFakeK8sOps()
+	cfg := runtime.Config{
+		WorkDir: "/host/city/rigs/frontend",
+		Env: map[string]string{
+			"GC_CITY":         "/host/city",
+			"GC_STORE_ROOT":   "/host/city/rigs/frontend",
+			"GC_BEADS_PREFIX": "fe",
+			"GC_DOLT_HOST":    "canonical-dolt.example.com",
+			"GC_DOLT_PORT":    "3308",
+		},
+	}
+
+	err := initBeadsInPod(
+		context.Background(),
+		fake,
+		"gc-test-pod",
+		cfg,
+		"/workspace/cities/demo-city/rigs/frontend",
+		"/workspace/cities/demo-city",
+		podManagedDoltHost,
+		podManagedDoltPort,
+	)
+	if err != nil {
+		t.Fatalf("initBeadsInPod: %v", err)
+	}
+	wantStoreRootB64 := base64.StdEncoding.EncodeToString([]byte("/workspace/cities/demo-city/rigs/frontend"))
+	wrongStoreRootB64 := base64.StdEncoding.EncodeToString([]byte("/workspace/rigs/frontend"))
+	for _, c := range fake.calls {
+		if c.method != "execInPod" || len(c.cmd) < 3 {
+			continue
+		}
+		script := c.cmd[2]
+		if strings.Contains(script, wantStoreRootB64) {
+			if strings.Contains(script, wrongStoreRootB64) {
+				t.Fatalf("repair script included default staged root in persistent mode: %s", script)
+			}
+			return
+		}
+	}
+	t.Fatal("initBeadsInPod did not use persistent workspace store root")
 }
 
 func TestVerifyBeadsInPodChecksCanonicalFiles(t *testing.T) {
@@ -1587,7 +2168,7 @@ func TestInitBeadsInPodBdInitSetsBEADSDIR(t *testing.T) {
 			"GC_BEADS_PREFIX": "demo",
 		},
 	}
-	if err := initBeadsInPod(context.Background(), fake, "gc-test-pod", cfg, "/workspace/demo-repo", podManagedDoltHost, podManagedDoltPort); err != nil {
+	if err := initBeadsInPod(context.Background(), fake, "gc-test-pod", cfg, "/workspace/demo-repo", defaultPodWorkspaceRoot, podManagedDoltHost, podManagedDoltPort); err != nil {
 		t.Fatalf("initBeadsInPod: %v", err)
 	}
 	var script string
@@ -1621,7 +2202,7 @@ func TestInitBeadsInPodStripsProjectIDFromMetadata(t *testing.T) {
 		},
 	}
 
-	if err := initBeadsInPod(context.Background(), fake, "gc-test-pod", cfg, "/workspace/demo-repo", podManagedDoltHost, podManagedDoltPort); err != nil {
+	if err := initBeadsInPod(context.Background(), fake, "gc-test-pod", cfg, "/workspace/demo-repo", defaultPodWorkspaceRoot, podManagedDoltHost, podManagedDoltPort); err != nil {
 		t.Fatalf("initBeadsInPod: %v", err)
 	}
 
@@ -1642,6 +2223,12 @@ func TestInitBeadsInPodStripsProjectIDFromMetadata(t *testing.T) {
 	count := strings.Count(script, want)
 	if count < 2 {
 		t.Errorf("expected %q to appear in both python3 patch invocations (>=2 times), got %d\nscript:\n%s", want, count, script)
+	}
+	if strings.Contains(script, "<<<") {
+		t.Fatalf("repair script uses Bash-only here-string despite running under /bin/sh:\n%s", script)
+	}
+	if !strings.Contains(script, `printf '%s' "$PATCH" | python3 -c`) {
+		t.Fatalf("repair script missing POSIX sh stdin fallback:\n%s", script)
 	}
 }
 
@@ -2000,6 +2587,31 @@ func addRunningPodWithAnnotation(fake *fakeK8sOps, name, sessionLabel, sessionNa
 		},
 		Status: corev1.PodStatus{Phase: corev1.PodRunning},
 	}
+}
+
+func annotatePodWithDesiredRuntimeIdentity(t *testing.T, p *Provider, podName string, cfg runtime.Config) {
+	t.Helper()
+	identity := mustDesiredProviderRuntimeIdentity(t, p, cfg)
+	pod := p.ops.(*fakeK8sOps).pods[podName]
+	if pod == nil {
+		t.Fatalf("pod %q not found", podName)
+	}
+	if pod.Annotations == nil {
+		pod.Annotations = map[string]string{}
+	}
+	pod.Annotations[providerRuntimeFingerprintAnnotation] = identity.Fingerprint
+	pod.Annotations[providerRuntimeFingerprintVersionAnnotation] = identity.Version
+	pod.Annotations[providerRuntimeImageAnnotation] = p.image
+	pod.Annotations[providerRuntimeProviderAnnotation] = "k8s"
+}
+
+func mustDesiredProviderRuntimeIdentity(t *testing.T, p *Provider, cfg runtime.Config) runtime.ProviderRuntimeIdentity {
+	t.Helper()
+	identity, err := p.desiredProviderRuntimeIdentity(cfg)
+	if err != nil {
+		t.Fatalf("desiredProviderRuntimeIdentity: %v", err)
+	}
+	return identity
 }
 
 func contains(s, substr string) bool {

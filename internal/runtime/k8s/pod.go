@@ -1,7 +1,6 @@
 package k8s
 
 import (
-	"encoding/base64"
 	"fmt"
 	"maps"
 	"path/filepath"
@@ -15,12 +14,30 @@ import (
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/pathutil"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/shellquote"
 )
 
 const (
 	podManagedDoltHost = "dolt.gc.svc.cluster.local"
 	podManagedDoltPort = "3307"
+
+	defaultPodWorkspaceRoot = "/workspace"
+	podEntrypointWorkDir    = "/workspace"
+	podLaunchDir            = "/gc-launch"
+	podLaunchEntrypoint     = podLaunchDir + "/entrypoint.sh"
+	podLaunchAgentScript    = podLaunchDir + "/agent-launch.sh"
+	podLaunchPreStartDir    = podLaunchDir + "/pre-start"
+	podLaunchPromptPath     = podLaunchDir + "/prompt.txt"
+	podLaunchReadyMarker    = podLaunchDir + "/.gc-launch-ready"
 )
+
+type podLaunchMaterial struct {
+	Entrypoint string
+	Agent      string
+	PreStart   []string
+	Prompt     string
+	HasPrompt  bool
+}
 
 func controllerCityPath(cfgEnv map[string]string) string {
 	ctrlCity := strings.TrimSpace(cfgEnv["GC_CITY"])
@@ -33,30 +50,43 @@ func controllerCityPath(cfgEnv map[string]string) string {
 	return ctrlCity
 }
 
-func remapControllerPathToPod(val, ctrlCity string) string {
+func remapControllerPathToPodRoot(val, ctrlCity, podCityRoot string) string {
 	val = strings.TrimSpace(val)
 	ctrlCity = strings.TrimSpace(ctrlCity)
+	podCityRoot = strings.TrimRight(strings.TrimSpace(podCityRoot), "/")
+	if podCityRoot == "" {
+		podCityRoot = defaultPodWorkspaceRoot
+	}
 	if val == "" || ctrlCity == "" {
 		return val
 	}
 	if val == ctrlCity || strings.HasPrefix(val, ctrlCity+"/") {
-		return "/workspace" + val[len(ctrlCity):]
+		suffix := val[len(ctrlCity):]
+		if podCityRoot == "/" {
+			if suffix == "" {
+				return "/"
+			}
+			return suffix
+		}
+		return podCityRoot + suffix
 	}
 	return val
 }
 
 func projectedPodWorkDir(cfg runtime.Config) string {
-	podWorkDir := "/workspace"
+	return projectedPodWorkDirForControllerPath(cfg.WorkDir, controllerCityPath(cfg.Env))
+}
+
+func projectedPodWorkDirForProvider(cfg runtime.Config, p *Provider) string {
 	ctrlCity := controllerCityPath(cfg.Env)
-	if ctrlCity != "" && cfg.WorkDir != "" && cfg.WorkDir != ctrlCity {
-		if rel, ok := strings.CutPrefix(cfg.WorkDir, ctrlCity+"/"); ok {
-			podWorkDir = "/workspace/" + rel
-		}
-	}
-	return podWorkDir
+	return projectedPodWorkDirForControllerPathRoot(cfg.WorkDir, ctrlCity, p.podWorkspaceRoot())
 }
 
 func projectedPodStoreRoot(cfg runtime.Config, podWorkDir string) string {
+	return projectedPodStoreRootForRoot(cfg, podWorkDir, defaultPodWorkspaceRoot)
+}
+
+func projectedPodStoreRootForRoot(cfg runtime.Config, podWorkDir, podCityRoot string) string {
 	storeRoot := strings.TrimSpace(cfg.Env["GC_STORE_ROOT"])
 	if storeRoot == "" {
 		storeRoot = strings.TrimSpace(cfg.WorkDir)
@@ -64,32 +94,35 @@ func projectedPodStoreRoot(cfg runtime.Config, podWorkDir string) string {
 	if storeRoot == "" {
 		storeRoot = controllerCityPath(cfg.Env)
 	}
-	storeRoot = remapControllerPathToPod(storeRoot, controllerCityPath(cfg.Env))
+	storeRoot = remapControllerPathToPodRoot(storeRoot, controllerCityPath(cfg.Env), podCityRoot)
 	if storeRoot == "" {
 		return podWorkDir
 	}
 	return storeRoot
 }
 
-func projectedPodRuntimeDir(cfgEnv map[string]string, ctrlCity string) string {
-	podCity := "/workspace"
+func projectedPodRuntimeDirForRoot(cfgEnv map[string]string, ctrlCity, podCityRoot string) string {
+	podCity := strings.TrimRight(strings.TrimSpace(podCityRoot), "/")
+	if podCity == "" {
+		podCity = defaultPodWorkspaceRoot
+	}
 	runtimeDir := strings.TrimSpace(cfgEnv["GC_CITY_RUNTIME_DIR"])
 	if runtimeDir == "" {
 		return citylayout.RuntimeDataDir(podCity)
 	}
-	remapped := remapControllerPathToPod(runtimeDir, ctrlCity)
+	remapped := remapControllerPathToPodRoot(runtimeDir, ctrlCity, podCity)
 	if remapped != runtimeDir {
 		return remapped
 	}
 	return citylayout.RuntimeDataDir(podCity)
 }
 
-func projectControllerRuntimePathToPod(path, ctrlCity, ctrlRuntimeDir, podRuntimeDir string) string {
+func projectControllerRuntimePathToPodRoot(path, ctrlCity, ctrlRuntimeDir, podRuntimeDir, podCityRoot string) string {
 	path = strings.TrimSpace(path)
 	if path == "" {
 		return path
 	}
-	if remapped := remapControllerPathToPod(path, ctrlCity); remapped != path {
+	if remapped := remapControllerPathToPodRoot(path, ctrlCity, podCityRoot); remapped != path {
 		return remapped
 	}
 	if ctrlRuntimeDir != "" && pathutil.PathWithin(ctrlRuntimeDir, path) {
@@ -171,87 +204,45 @@ func buildPod(name string, cfg runtime.Config, p *Provider) (*corev1.Pod, error)
 	agentLabel := SanitizeLabel(agentName)
 
 	// Resolve pod-side working directory.
-	// Controller resolves dirs relative to its city path; pods use /workspace.
-	podWorkDir := projectedPodWorkDir(cfg)
+	// Controller resolves dirs relative to its city path; pods use either the
+	// staged workspace root or an explicitly mounted persistent workspace.
+	podCityRoot := p.podWorkspaceRoot()
+	podWorkDir := projectedPodWorkDirForProvider(cfg, p)
 	ctrlCity := controllerCityPath(cfg.Env)
-
-	// Build the command the agent runs. Base64-encode to avoid quoting issues.
-	agentCmd := cfg.Command
-	if agentCmd == "" {
-		agentCmd = "/bin/bash"
-	}
-	// Remap controller-side city path references to pod-side /workspace.
-	// The controller expands {{.ConfigDir}} templates using its own city path
-	// (e.g. /city/packs/...) but pods have files at /workspace/....
-	if ctrlCity != "" {
-		agentCmd = strings.ReplaceAll(agentCmd, ctrlCity, "/workspace")
-	}
-	cmdB64 := base64.StdEncoding.EncodeToString([]byte(agentCmd))
-
-	// Pod entrypoint: wait for workspace ready → pre_start → tmux → keepalive.
-	// Each pre_start command is base64-encoded and decoded at runtime to prevent
-	// shell metacharacter injection from user-supplied commands.
-	var preStartCmds string
-	for _, cmd := range cfg.PreStart {
-		c := cmd
-		if ctrlCity != "" {
-			c = strings.ReplaceAll(c, ctrlCity, "/workspace")
-		}
-		b64 := base64.StdEncoding.EncodeToString([]byte(c))
-		preStartCmds += fmt.Sprintf("echo '%s' | base64 -d | sh; ", b64)
-	}
 
 	// Dynamic user creation: when LINUX_USERNAME is set, the container starts
 	// as root (see securityContext below), creates the user, sets up workspace
 	// ownership, then drops privileges via su for the tmux session.
 	linuxUsername := cfg.Env["LINUX_USERNAME"]
-	var userSetup string
-	if linuxUsername != "" {
-		userSetup = fmt.Sprintf(
-			`id "%s" >/dev/null 2>&1 || useradd -m -s /bin/bash "%s"; `+
-				`echo "%s ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/"%s" && chmod 0440 /etc/sudoers.d/"%s"; `+
-				`mkdir -p "%s" && chown -R "%s" "%s"; `+
-				`export HOME="/home/%s"; `,
-			linuxUsername, linuxUsername,
-			linuxUsername, linuxUsername, linuxUsername,
-			podWorkDir, linuxUsername, podWorkDir,
-			linuxUsername,
-		)
-	}
-	credCopy := `mkdir -p $HOME/.claude && cp -rL /tmp/claude-secret/. $HOME/.claude/ 2>/dev/null; git config --global --add safe.directory '*' 2>/dev/null; `
-	wsWait := ""
-	if !p.prebaked {
-		wsWait = `while [ ! -f /workspace/.gc-workspace-ready ]; do sleep 0.5; done; `
-	}
-
-	var tmuxCmd string
-	if linuxUsername != "" {
-		// Run tmux session as the dynamic user via su.
-		tmuxCmd = fmt.Sprintf(
-			"%s%s%s%sCMD=$(echo '%s' | base64 -d) && "+
-				`su - %s -c "cd %s && tmux new-session -d -s %s \"$CMD\" && sleep infinity"`,
-			userSetup, credCopy, wsWait, preStartCmds, cmdB64,
-			linuxUsername, podWorkDir, tmuxSession,
-		)
-	} else {
-		tmuxCmd = fmt.Sprintf(
-			"%s%s%sCMD=$(echo '%s' | base64 -d) && tmux new-session -d -s %s \"$CMD\" && sleep infinity",
-			credCopy, wsWait, preStartCmds, cmdB64, tmuxSession,
-		)
-	}
 
 	// Build environment, remapping K8s-specific vars.
-	env, err := buildPodEnv(cfg.Env, podWorkDir, p.managedServiceHost, p.managedServicePort)
+	env, err := buildPodEnvForRoot(cfg.Env, podCityRoot, podWorkDir, p.managedServiceHost, p.managedServicePort)
 	if err != nil {
 		return nil, err
 	}
 
 	// Build volume mounts for the main container.
 	// When prebaked, skip the ws EmptyDir — it would shadow baked image content.
-	var mainVolMounts []corev1.VolumeMount
-	var volumes []corev1.Volume
+	mainVolMounts := []corev1.VolumeMount{{
+		Name: "launch", MountPath: podLaunchDir,
+	}}
+	volumes := []corev1.Volume{{
+		Name: "launch", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
+	}}
 
-	if !p.prebaked {
+	if p.usesPersistentWorkspace() {
+		mainVolMounts = append(mainVolMounts, corev1.VolumeMount{
+			Name: "workspace", MountPath: podCityRoot,
+		})
+		volumes = append(volumes, corev1.Volume{
+			Name: "workspace",
+			VolumeSource: corev1.VolumeSource{
+				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+					ClaimName: p.workspacePVC,
+				},
+			},
+		})
+	} else if !p.prebaked {
 		mainVolMounts = append(mainVolMounts, corev1.VolumeMount{
 			Name: "ws", MountPath: "/workspace",
 		})
@@ -273,7 +264,7 @@ func buildPod(name string, cfg runtime.Config, p *Provider) (*corev1.Pod, error)
 	})
 
 	// If GC_CITY differs from work_dir, add a city volume (not needed when prebaked).
-	if !p.prebaked && ctrlCity != "" && ctrlCity != cfg.WorkDir {
+	if !p.prebaked && !p.usesPersistentWorkspace() && ctrlCity != "" && ctrlCity != cfg.WorkDir {
 		mainVolMounts = append(mainVolMounts, corev1.VolumeMount{
 			Name: "city", MountPath: ctrlCity,
 		})
@@ -288,6 +279,10 @@ func buildPod(name string, cfg runtime.Config, p *Provider) (*corev1.Pod, error)
 	if err != nil {
 		return nil, err
 	}
+	runtimeIdentity, err := p.desiredProviderRuntimeIdentity(cfg)
+	if err != nil {
+		return nil, err
+	}
 
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
@@ -299,19 +294,23 @@ func buildPod(name string, cfg runtime.Config, p *Provider) (*corev1.Pod, error)
 				"gc-agent":   agentLabel,
 			},
 			Annotations: map[string]string{
-				"gc-session-name": name,
+				"gc-session-name":                           name,
+				providerRuntimeFingerprintAnnotation:        runtimeIdentity.Fingerprint,
+				providerRuntimeFingerprintVersionAnnotation: runtimeIdentity.Version,
+				providerRuntimeImageAnnotation:              p.image,
+				providerRuntimeProviderAnnotation:           "k8s",
 			},
 		},
 		Spec: corev1.PodSpec{
-			ServiceAccountName: p.serviceAccount,
-			RestartPolicy:      corev1.RestartPolicyNever,
+			ServiceAccountName:    p.serviceAccount,
+			RestartPolicy:         corev1.RestartPolicyNever,
+			ShareProcessNamespace: boolPtr(true),
 			Containers: []corev1.Container{{
 				Name:            "agent",
 				Image:           p.image,
 				ImagePullPolicy: corev1.PullAlways,
-				WorkingDir:      podWorkDir,
-				Command:         []string{"/bin/sh", "-c"},
-				Args:            []string{tmuxCmd},
+				WorkingDir:      podEntrypointWorkDir,
+				Command:         []string{"/bin/sh", podLaunchEntrypoint},
 				Env:             env,
 				Stdin:           true,
 				TTY:             true,
@@ -323,6 +322,21 @@ func buildPod(name string, cfg runtime.Config, p *Provider) (*corev1.Pod, error)
 		},
 	}
 
+	pod.Spec.InitContainers = []corev1.Container{{
+		Name:            "launch",
+		Image:           p.image,
+		ImagePullPolicy: corev1.PullIfNotPresent,
+		Command: []string{
+			"sh",
+			"-c",
+			fmt.Sprintf("while [ ! -f %s ]; do sleep 0.5; done", shellSingleQuote(podLaunchReadyMarker)),
+		},
+		VolumeMounts: []corev1.VolumeMount{{
+			Name: "launch", MountPath: podLaunchDir,
+		}},
+		SecurityContext: agentSecurityContext(linuxUsername),
+	}}
+
 	// Apply optional scheduling fields.
 	pod.Spec.NodeSelector = maps.Clone(p.nodeSelector)
 	pod.Spec.Tolerations = cloneTolerations(p.tolerations)
@@ -332,7 +346,7 @@ func buildPod(name string, cfg runtime.Config, p *Provider) (*corev1.Pod, error)
 	pod.Spec.PriorityClassName = p.priorityClassName
 
 	// Add init container when staging is needed (skip when prebaked).
-	if !p.prebaked && needsStaging(cfg, ctrlCity) {
+	if !p.prebaked && !p.usesPersistentWorkspace() && needsStaging(cfg, ctrlCity) {
 		initVolMounts := []corev1.VolumeMount{
 			{Name: "ws", MountPath: "/workspace"},
 		}
@@ -341,13 +355,13 @@ func buildPod(name string, cfg runtime.Config, p *Provider) (*corev1.Pod, error)
 				Name: "city", MountPath: "/city-stage",
 			})
 		}
-		pod.Spec.InitContainers = []corev1.Container{{
+		pod.Spec.InitContainers = append(pod.Spec.InitContainers, corev1.Container{
 			Name:            "stage",
 			Image:           p.image,
 			ImagePullPolicy: corev1.PullIfNotPresent,
 			Command:         []string{"sh", "-c", "while [ ! -f /workspace/.gc-ready ]; do sleep 0.5; done"},
 			VolumeMounts:    initVolMounts,
-		}}
+		})
 	}
 
 	return pod, nil
@@ -385,6 +399,10 @@ func agentSecurityContext(linuxUsername string) *corev1.SecurityContext {
 // Removes controller-only vars, strips deprecated K8s compatibility inputs,
 // and remaps pod-visible ones.
 func buildPodEnv(cfgEnv map[string]string, podWorkDir, managedServiceHost, managedServicePort string) ([]corev1.EnvVar, error) {
+	return buildPodEnvForRoot(cfgEnv, defaultPodWorkspaceRoot, podWorkDir, managedServiceHost, managedServicePort)
+}
+
+func buildPodEnvForRoot(cfgEnv map[string]string, podCityRoot, podWorkDir, managedServiceHost, managedServicePort string) ([]corev1.EnvVar, error) {
 	// Start with cfg.Env, removing controller-only vars.
 	// Auth creds (GC_DOLT_USER, GC_DOLT_PASSWORD, BEADS_DOLT_*_USER/PASSWORD) intentionally pass through.
 	skip := map[string]bool{
@@ -401,7 +419,11 @@ func buildPodEnv(cfgEnv map[string]string, podWorkDir, managedServiceHost, manag
 
 	ctrlCity := controllerCityPath(cfgEnv)
 	ctrlRuntimeDir := strings.TrimSpace(cfgEnv["GC_CITY_RUNTIME_DIR"])
-	podRuntimeDir := projectedPodRuntimeDir(cfgEnv, ctrlCity)
+	podCityRoot = strings.TrimRight(strings.TrimSpace(podCityRoot), "/")
+	if podCityRoot == "" {
+		podCityRoot = defaultPodWorkspaceRoot
+	}
+	podRuntimeDir := projectedPodRuntimeDirForRoot(cfgEnv, ctrlCity, podCityRoot)
 
 	var env []corev1.EnvVar
 	for k, v := range cfgEnv {
@@ -412,15 +434,15 @@ func buildPodEnv(cfgEnv map[string]string, podWorkDir, managedServiceHost, manag
 		// Remap city/workdir vars to pod-visible paths.
 		switch k {
 		case "GC_CITY", "GC_CITY_PATH", "GC_CITY_ROOT":
-			val = "/workspace"
+			val = podCityRoot
 		case "GC_DIR":
 			val = podWorkDir
 		case "GC_CITY_RUNTIME_DIR":
 			val = podRuntimeDir
 		case "GC_CONTROL_DISPATCHER_TRACE_DEFAULT", "GC_PACK_STATE_DIR":
-			val = projectControllerRuntimePathToPod(val, ctrlCity, ctrlRuntimeDir, podRuntimeDir)
+			val = projectControllerRuntimePathToPodRoot(val, ctrlCity, ctrlRuntimeDir, podRuntimeDir, podCityRoot)
 		case "GC_STORE_ROOT", "GC_RIG_ROOT", "BEADS_DIR", "GT_ROOT", "GC_PACK_DIR":
-			val = remapControllerPathToPod(val, ctrlCity)
+			val = remapControllerPathToPodRoot(val, ctrlCity, podCityRoot)
 		}
 		env = append(env, corev1.EnvVar{Name: k, Value: val})
 	}
@@ -461,8 +483,24 @@ func buildPodEnv(cfgEnv map[string]string, podWorkDir, managedServiceHost, manag
 			},
 		},
 	})
+	if strings.TrimSpace(cfgEnv["CLAUDE_CODE_OAUTH_TOKEN"]) == "" {
+		env = append(env, claudeOAuthTokenEnv())
+	}
 
 	return env, nil
+}
+
+func claudeOAuthTokenEnv() corev1.EnvVar {
+	return corev1.EnvVar{
+		Name: "CLAUDE_CODE_OAUTH_TOKEN",
+		ValueFrom: &corev1.EnvVarSource{
+			SecretKeyRef: &corev1.SecretKeySelector{
+				LocalObjectReference: corev1.LocalObjectReference{Name: providerRuntimeClaudeSecretName},
+				Key:                  "CLAUDE_CODE_OAUTH_TOKEN",
+				Optional:             boolPtr(true),
+			},
+		},
+	}
 }
 
 // needsStaging returns true if the session config requires file staging
@@ -475,6 +513,9 @@ func needsStaging(cfg runtime.Config, ctrlCity string) bool {
 		return true
 	}
 	if len(cfg.CopyFiles) > 0 {
+		return true
+	}
+	if needsCityRootRuntimeInputStaging(cfg.WorkDir, ctrlCity) {
 		return true
 	}
 	// Rig agents have a work_dir subdirectory.
@@ -527,3 +568,117 @@ func buildResources(p *Provider) (corev1.ResourceRequirements, error) {
 }
 
 func boolPtr(b bool) *bool { return &b }
+
+func buildPodLaunchMaterial(cfg runtime.Config, p *Provider) podLaunchMaterial {
+	podCityRoot := p.podWorkspaceRoot()
+	podWorkDir := projectedPodWorkDirForProvider(cfg, p)
+	ctrlCity := controllerCityPath(cfg.Env)
+	command := cfg.Command
+	if command == "" {
+		command = "/bin/bash"
+	}
+	if ctrlCity != "" {
+		command = strings.ReplaceAll(command, ctrlCity, podCityRoot)
+	}
+
+	preStart := make([]string, 0, len(cfg.PreStart))
+	for _, cmd := range cfg.PreStart {
+		c := cmd
+		if ctrlCity != "" {
+			c = strings.ReplaceAll(c, ctrlCity, podCityRoot)
+		}
+		preStart = append(preStart, c)
+	}
+
+	prompt, hasPrompt := podPromptText(cfg)
+	agent := podAgentLaunchScript(command, cfg.PromptFlag, hasPrompt)
+	entrypoint := podEntrypointScript(cfg, p, podWorkDir)
+	return podLaunchMaterial{
+		Entrypoint: entrypoint,
+		Agent:      agent,
+		PreStart:   preStart,
+		Prompt:     prompt,
+		HasPrompt:  hasPrompt,
+	}
+}
+
+func podEntrypointScript(cfg runtime.Config, p *Provider, podWorkDir string) string {
+	linuxUsername := strings.TrimSpace(cfg.Env["LINUX_USERNAME"])
+	var b strings.Builder
+	b.WriteString("#!/bin/sh\n")
+	if linuxUsername != "" {
+		b.WriteString(fmt.Sprintf(
+			`id %s >/dev/null 2>&1 || useradd -m -s /bin/bash %s; `+"\n"+
+				`echo %s > /etc/sudoers.d/%s && chmod 0440 /etc/sudoers.d/%s; `+"\n"+
+				`mkdir -p %s && chown -R %s %s; `+"\n"+
+				`chown -R %s %s 2>/dev/null || true; `+"\n"+
+				`export HOME=%s USER=%s LOGNAME=%s SHELL="/bin/bash"; `+"\n",
+			shellSingleQuote(linuxUsername), shellSingleQuote(linuxUsername),
+			shellSingleQuote(linuxUsername+" ALL=(ALL) NOPASSWD:ALL"), shellSingleQuote(linuxUsername), shellSingleQuote(linuxUsername),
+			shellSingleQuote(podWorkDir), shellSingleQuote(linuxUsername), shellSingleQuote(podWorkDir),
+			shellSingleQuote(linuxUsername), shellSingleQuote(podLaunchDir),
+			shellSingleQuote("/home/"+linuxUsername), shellSingleQuote(linuxUsername), shellSingleQuote(linuxUsername),
+		))
+	}
+	b.WriteString(`mkdir -p "$HOME/.claude" && ` + "\n")
+	b.WriteString(`cp -rL /tmp/claude-secret/. "$HOME/.claude/" 2>/dev/null || true; ` + "\n")
+	b.WriteString(`git config --global --add safe.directory '*' 2>/dev/null || true; ` + "\n")
+	if !p.prebaked && !p.usesPersistentWorkspace() {
+		b.WriteString(`while [ ! -f /workspace/.gc-workspace-ready ] && [ ! -f /workspace/.gc-ready ]; do sleep 0.5; done; ` + "\n")
+	}
+	b.WriteString(fmt.Sprintf(
+		`for __gc_pre_start in %s/*.sh; do [ -f "$__gc_pre_start" ] || continue; sh "$__gc_pre_start"; done`+"\n",
+		shellSingleQuote(podLaunchPreStartDir),
+	))
+	launchCommand := fmt.Sprintf(
+		"cd %s && tmux new-session -d -s %s %s && sleep infinity",
+		shellSingleQuote(podWorkDir),
+		shellSingleQuote(tmuxSession),
+		shellSingleQuote("sh "+podLaunchAgentScript),
+	)
+	if linuxUsername != "" {
+		b.WriteString(fmt.Sprintf("su -m %s -c %s\n", shellSingleQuote(linuxUsername), shellSingleQuote(launchCommand)))
+	} else {
+		b.WriteString(launchCommand + "\n")
+	}
+	return b.String()
+}
+
+func podAgentLaunchScript(command, promptFlag string, hasPrompt bool) string {
+	var b strings.Builder
+	b.WriteString("#!/bin/sh\n")
+	if hasPrompt {
+		b.WriteString(fmt.Sprintf(
+			`__gc_prompt="$(cat %s && printf .)"`+"\n"+
+				`__gc_status=$?`+"\n"+
+				`rm -f %s`+"\n"+
+				`[ "$__gc_status" -eq 0 ] || exit "$__gc_status"`+"\n"+
+				`__gc_prompt="${__gc_prompt%%.}"`+"\n",
+			shellSingleQuote(podLaunchPromptPath),
+			shellSingleQuote(podLaunchPromptPath),
+		))
+		promptArg := `"$1"`
+		if strings.TrimSpace(promptFlag) != "" {
+			promptArg = promptFlag + " " + promptArg
+		}
+		b.WriteString(fmt.Sprintf("exec sh -c %s sh \"$__gc_prompt\"\n", shellSingleQuote(command+" "+promptArg)))
+	} else {
+		b.WriteString(fmt.Sprintf("exec sh -c %s\n", shellSingleQuote(command)))
+	}
+	return b.String()
+}
+
+func podPromptText(cfg runtime.Config) (string, bool) {
+	if strings.TrimSpace(cfg.PromptSuffix) == "" {
+		return "", false
+	}
+	prompt := cfg.PromptSuffix
+	if parts := shellquote.Split(cfg.PromptSuffix); len(parts) > 0 {
+		prompt = parts[0]
+	}
+	return prompt, true
+}
+
+func shellSingleQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "'\"'\"'") + "'"
+}

@@ -644,3 +644,98 @@ func TestCityStatusObservationsRunInParallel(t *testing.T) {
 		t.Fatalf("elapsed = %v, want < %v (likely serial); maxConcurrent = %d", elapsed, maxAllowed, maxConcurrent)
 	}
 }
+
+type statusSnapshotRuntimeProvider struct {
+	*runtime.Fake
+	running   []string
+	listCalls int
+	listErr   error
+}
+
+func (p *statusSnapshotRuntimeProvider) StatusRunningSessions(prefix string) ([]string, error) {
+	p.listCalls++
+	if p.listErr != nil {
+		return nil, p.listErr
+	}
+	var names []string
+	for _, name := range p.running {
+		if prefix == "" || strings.HasPrefix(name, prefix) {
+			names = append(names, name)
+		}
+	}
+	return names, nil
+}
+
+func TestCityStatusUsesProviderRunningSnapshotWhenAvailable(t *testing.T) {
+	sp := &statusSnapshotRuntimeProvider{
+		Fake:    runtime.NewFake(),
+		running: []string{"mayor"},
+	}
+
+	oldObserve := observeSessionTargetForStatus
+	observeCalls := 0
+	observeSessionTargetForStatus = func(string, beads.Store, runtime.Provider, *config.City, string) (worker.LiveObservation, error) {
+		observeCalls++
+		return worker.LiveObservation{}, errors.New("per-session observation should not run")
+	}
+	t.Cleanup(func() { observeSessionTargetForStatus = oldObserve })
+
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "city"},
+		Agents: []config.Agent{
+			{Name: "mayor", MaxActiveSessions: intPtr(1)},
+			{Name: "refinery", MaxActiveSessions: intPtr(1)},
+		},
+	}
+
+	snapshot := collectCityStatusSnapshot(sp, cfg, "/tmp/city", nil, io.Discard)
+	if sp.listCalls != 1 {
+		t.Fatalf("StatusRunningSessions calls = %d, want 1", sp.listCalls)
+	}
+	if observeCalls != 0 {
+		t.Fatalf("per-session observe calls = %d, want 0 when provider snapshot is available", observeCalls)
+	}
+	if snapshot.Summary.TotalAgents != 2 || snapshot.Summary.RunningAgents != 1 {
+		t.Fatalf("summary = %+v, want total=2 running=1", snapshot.Summary)
+	}
+	if !snapshot.Agents[0].Agent.Running {
+		t.Fatalf("mayor running = false, want true from provider snapshot")
+	}
+	if snapshot.Agents[1].Agent.Running {
+		t.Fatalf("refinery running = true, want false when absent from provider snapshot")
+	}
+}
+
+func TestCityStatusFallsBackWhenProviderRunningSnapshotFails(t *testing.T) {
+	sp := &statusSnapshotRuntimeProvider{
+		Fake:    runtime.NewFake(),
+		listErr: errors.New("api unavailable"),
+	}
+
+	oldObserve := observeSessionTargetForStatus
+	observeCalls := 0
+	observeSessionTargetForStatus = func(string, beads.Store, runtime.Provider, *config.City, string) (worker.LiveObservation, error) {
+		observeCalls++
+		return worker.LiveObservation{Running: true}, nil
+	}
+	t.Cleanup(func() { observeSessionTargetForStatus = oldObserve })
+
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "city"},
+		Agents:    []config.Agent{{Name: "mayor", MaxActiveSessions: intPtr(1)}},
+	}
+	var stderr bytes.Buffer
+	snapshot := collectCityStatusSnapshot(sp, cfg, "/tmp/city", nil, &stderr)
+	if sp.listCalls != 1 {
+		t.Fatalf("StatusRunningSessions calls = %d, want 1", sp.listCalls)
+	}
+	if observeCalls != 1 {
+		t.Fatalf("per-session observe calls = %d, want fallback observe call", observeCalls)
+	}
+	if snapshot.Summary.RunningAgents != 1 {
+		t.Fatalf("running agents = %d, want fallback observation to mark agent running", snapshot.Summary.RunningAgents)
+	}
+	if !strings.Contains(stderr.String(), "falling back to per-session observations") {
+		t.Fatalf("stderr = %q, want fallback warning", stderr.String())
+	}
+}

@@ -7,28 +7,65 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/citylayout"
+	"github.com/gastownhall/gascity/internal/overlay"
+	"github.com/gastownhall/gascity/internal/pathutil"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
-// stageFiles copies overlay, copy_files, and rig workdir into the pod
-// via the init container, then signals it to exit.
+// cityRootRuntimeInputStagePaths are source/config surfaces the K8s provider
+// must preserve when it presents /workspace as the pod-side city root. Mutable
+// runtime state stays out; nested workdirs are staged separately.
+var cityRootRuntimeInputStagePaths = []string{
+	citylayout.CityConfigFile,
+	"pack.toml",
+	"AGENTS.md",
+	"CLAUDE.md",
+	"GEMINI.md",
+	citylayout.PromptsRoot,
+	citylayout.FormulasRoot,
+	citylayout.OrdersRoot,
+	citylayout.HooksRoot,
+	citylayout.ScriptsRoot,
+	"assets",
+	"commands",
+	"doctor",
+	"mcp",
+	"overlay",
+	"overlays",
+	"packs",
+	"skills",
+	"template-fragments",
+	".gc/settings.json",
+	citylayout.SystemRoot,
+	citylayout.CachePacksRoot,
+	citylayout.CacheIncludesRoot,
+}
+
+// stageFiles copies city root runtime inputs, overlay, copy_files, and workdir
+// content into the pod via the init container, then signals it to exit.
 func stageFiles(ctx context.Context, ops k8sOps, podName string, cfg runtime.Config, ctrlCity string, warn io.Writer) error {
 	// Wait for init container to be running (up to 60s).
-	if err := waitForInitContainer(ctx, ops, podName, 60*time.Second); err != nil {
+	if err := waitForInitContainer(ctx, ops, podName, "stage", 60*time.Second); err != nil {
 		return err
 	}
 
-	// Copy rig work_dir into the pod.
-	podWorkDir := "/workspace"
-	if ctrlCity != "" && cfg.WorkDir != "" && cfg.WorkDir != ctrlCity {
-		if rel, ok := strings.CutPrefix(cfg.WorkDir, ctrlCity+"/"); ok {
-			podWorkDir = "/workspace/" + rel
+	podWorkDir := projectedPodWorkDirForControllerPath(cfg.WorkDir, ctrlCity)
+	if needsCityRootRuntimeInputStaging(cfg.WorkDir, ctrlCity) {
+		if err := stageCityRootRuntimeInputsToPod(ctx, ops, podName, ctrlCity); err != nil {
+			return err
+		}
+		if err := stageControllerSourceRootsToPod(ctx, ops, podName, cfg, ctrlCity); err != nil {
+			return err
 		}
 	}
+	// Copy the session work_dir into the pod after city inputs so the active
+	// workdir wins where paths overlap.
 	if cfg.WorkDir != "" && cfg.WorkDir != ctrlCity {
 		if err := copyDirToPod(ctx, ops, podName, "stage", cfg.WorkDir, podWorkDir); err != nil {
 			fmt.Fprintf(warn, "gc: warning: staging workdir %s to %s: %v\n", cfg.WorkDir, podWorkDir, err) //nolint:errcheck
@@ -60,6 +97,217 @@ func stageFiles(ctx context.Context, ops k8sOps, podName string, cfg runtime.Con
 	_, err := ops.execInPod(ctx, podName, "stage",
 		[]string{"touch", "/workspace/.gc-ready"}, nil)
 	return err
+}
+
+// stageLaunchFiles copies bounded launch material into the pod before the
+// agent container starts. Large prompts, command strings, and pre_start bodies
+// live in this EmptyDir-backed filesystem instead of Kubernetes argv/env.
+func stageLaunchFiles(ctx context.Context, ops k8sOps, podName string, cfg runtime.Config, p *Provider) error {
+	if err := waitForInitContainer(ctx, ops, podName, "launch", 60*time.Second); err != nil {
+		return err
+	}
+	stageDir, err := os.MkdirTemp("", "gc-k8s-launch-")
+	if err != nil {
+		return fmt.Errorf("preparing launch material: %w", err)
+	}
+	defer os.RemoveAll(stageDir) //nolint:errcheck
+
+	material := buildPodLaunchMaterial(cfg, p)
+	if err := writePodLaunchMaterial(stageDir, material); err != nil {
+		return err
+	}
+	if err := copyDirToPod(ctx, ops, podName, "launch", stageDir, podLaunchDir); err != nil {
+		return fmt.Errorf("staging launch material: %w", err)
+	}
+	_, err = ops.execInPod(ctx, podName, "launch", []string{"touch", podLaunchReadyMarker}, nil)
+	return err
+}
+
+func writePodLaunchMaterial(root string, material podLaunchMaterial) error {
+	if err := os.MkdirAll(filepath.Join(root, "pre-start"), 0o755); err != nil {
+		return fmt.Errorf("creating launch pre-start dir: %w", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "entrypoint.sh"), []byte(material.Entrypoint), 0o755); err != nil {
+		return fmt.Errorf("writing launch entrypoint: %w", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "agent-launch.sh"), []byte(material.Agent), 0o755); err != nil {
+		return fmt.Errorf("writing agent launch script: %w", err)
+	}
+	if material.HasPrompt {
+		if err := os.WriteFile(filepath.Join(root, "prompt.txt"), []byte(material.Prompt), 0o600); err != nil {
+			return fmt.Errorf("writing launch prompt: %w", err)
+		}
+	}
+	for i, cmd := range material.PreStart {
+		name := fmt.Sprintf("%03d.sh", i)
+		if err := os.WriteFile(filepath.Join(root, "pre-start", name), []byte("#!/bin/sh\n"+cmd+"\n"), 0o755); err != nil {
+			return fmt.Errorf("writing pre_start[%d]: %w", i, err)
+		}
+	}
+	return nil
+}
+
+func projectedPodWorkDirForControllerPath(workDir, ctrlCity string) string {
+	return projectedPodWorkDirForControllerPathRoot(workDir, ctrlCity, defaultPodWorkspaceRoot)
+}
+
+func projectedPodWorkDirForControllerPathRoot(workDir, ctrlCity, podCityRoot string) string {
+	if podPath, ok := projectedPodPathForControllerPathRoot(ctrlCity, workDir, podCityRoot); ok {
+		return podPath
+	}
+	podCityRoot = strings.TrimRight(strings.TrimSpace(podCityRoot), "/")
+	if podCityRoot == "" {
+		return defaultPodWorkspaceRoot
+	}
+	return podCityRoot
+}
+
+func projectedPodPathForControllerPath(ctrlCity, controllerPath string) (string, bool) {
+	return projectedPodPathForControllerPathRoot(ctrlCity, controllerPath, defaultPodWorkspaceRoot)
+}
+
+func projectedPodPathForControllerPathRoot(ctrlCity, controllerPath, podCityRoot string) (string, bool) {
+	ctrlCity = strings.TrimSpace(ctrlCity)
+	controllerPath = strings.TrimSpace(controllerPath)
+	podCityRoot = strings.TrimRight(strings.TrimSpace(podCityRoot), "/")
+	if podCityRoot == "" {
+		podCityRoot = defaultPodWorkspaceRoot
+	}
+	if ctrlCity == "" || controllerPath == "" {
+		return "", false
+	}
+	rel, err := filepath.Rel(filepath.Clean(ctrlCity), filepath.Clean(controllerPath))
+	if err != nil || pathutil.IsOutsideDir(rel) {
+		return "", false
+	}
+	if rel == "." {
+		return podCityRoot, true
+	}
+	return path.Join(podCityRoot, filepath.ToSlash(rel)), true
+}
+
+func needsCityRootRuntimeInputStaging(workDir, ctrlCity string) bool {
+	ctrlCity = strings.TrimSpace(ctrlCity)
+	if ctrlCity == "" {
+		return false
+	}
+	workDir = strings.TrimSpace(workDir)
+	if workDir == "" {
+		return true
+	}
+	_, ok := projectedPodPathForControllerPath(ctrlCity, workDir)
+	return ok
+}
+
+func stageCityRootRuntimeInputsToPod(ctx context.Context, ops k8sOps, podName string, ctrlCity string) error {
+	stageDir, err := os.MkdirTemp("", "gc-k8s-city-root-")
+	if err != nil {
+		return fmt.Errorf("preparing city root runtime inputs: %w", err)
+	}
+	defer os.RemoveAll(stageDir) //nolint:errcheck
+
+	staged := false
+	for _, rel := range cityRootRuntimeInputStagePaths {
+		src := filepath.Join(ctrlCity, filepath.FromSlash(rel))
+		if _, err := os.Stat(src); os.IsNotExist(err) {
+			continue
+		} else if err != nil {
+			return fmt.Errorf("checking city root runtime input %s: %w", rel, err)
+		}
+		dst := filepath.Join(stageDir, filepath.FromSlash(rel))
+		if err := stageCityRootRuntimeInputPath(src, dst); err != nil {
+			return fmt.Errorf("staging city root runtime input %s: %w", rel, err)
+		}
+		staged = true
+	}
+	if !staged {
+		return nil
+	}
+	if err := copyDirToPod(ctx, ops, podName, "stage", stageDir, "/workspace"); err != nil {
+		return fmt.Errorf("staging city root runtime inputs: %w", err)
+	}
+	return nil
+}
+
+func stageCityRootRuntimeInputPath(src, dst string) error {
+	info, err := os.Stat(src)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() {
+		return runtime.StagePath(src, dst)
+	}
+	return overlay.CopyDirWithSkip(src, dst, skipCityRootRuntimeInputPath, io.Discard)
+}
+
+type controllerSourceRootStagePath struct {
+	controllerPath string
+	podPath        string
+}
+
+func controllerSourceRootStagePaths(cfg runtime.Config, ctrlCity string) []controllerSourceRootStagePath {
+	ctrlCity = strings.TrimSpace(ctrlCity)
+	if ctrlCity == "" {
+		return nil
+	}
+
+	seen := map[string]bool{}
+	var paths []controllerSourceRootStagePath
+	for _, key := range []string{"GC_RIG_ROOT", "GC_STORE_ROOT", "GT_ROOT"} {
+		controllerPath := strings.TrimSpace(cfg.Env[key])
+		if controllerPath == "" {
+			continue
+		}
+		cleanControllerPath := filepath.Clean(controllerPath)
+		if seen[cleanControllerPath] {
+			continue
+		}
+		podPath, ok := projectedPodPathForControllerPath(ctrlCity, cleanControllerPath)
+		if !ok || podPath == "/workspace" {
+			continue
+		}
+		rel := strings.TrimPrefix(podPath, "/workspace/")
+		if rel == "" || rel == ".gc" || strings.HasPrefix(rel, ".gc/") {
+			continue
+		}
+		seen[cleanControllerPath] = true
+		paths = append(paths, controllerSourceRootStagePath{
+			controllerPath: cleanControllerPath,
+			podPath:        podPath,
+		})
+	}
+	return paths
+}
+
+func stageControllerSourceRootsToPod(ctx context.Context, ops k8sOps, podName string, cfg runtime.Config, ctrlCity string) error {
+	for _, stagePath := range controllerSourceRootStagePaths(cfg, ctrlCity) {
+		info, err := os.Stat(stagePath.controllerPath)
+		if err != nil {
+			return fmt.Errorf("checking controller source root %s: %w", stagePath.controllerPath, err)
+		}
+		if !info.IsDir() {
+			return fmt.Errorf("checking controller source root %s: not a directory", stagePath.controllerPath)
+		}
+		if err := copyDirToPod(ctx, ops, podName, "stage", stagePath.controllerPath, stagePath.podPath); err != nil {
+			return fmt.Errorf("staging controller source root %s to %s: %w", stagePath.controllerPath, stagePath.podPath, err)
+		}
+	}
+	return nil
+}
+
+func skipCityRootRuntimeInputPath(relPath string, isDir bool) bool {
+	if !isDir {
+		return false
+	}
+	switch filepath.Base(relPath) {
+	case ".git", ".hg", ".svn":
+		return true
+	default:
+		return false
+	}
 }
 
 func stageProviderOverlaysToPod(ctx context.Context, ops k8sOps, podName string, cfg runtime.Config, podWorkDir string, warn io.Writer) error {
@@ -121,8 +369,8 @@ func stageProviderOverlay(srcDir, dstDir string, providers []string, label strin
 	return nil
 }
 
-// waitForInitContainer waits for the init container to be running.
-func waitForInitContainer(ctx context.Context, ops k8sOps, podName string, timeout time.Duration) error {
+// waitForInitContainer waits for the named init container to be running.
+func waitForInitContainer(ctx context.Context, ops k8sOps, podName string, containerName string, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		pod, err := ops.getPod(ctx, podName)
@@ -130,8 +378,11 @@ func waitForInitContainer(ctx context.Context, ops k8sOps, podName string, timeo
 			time.Sleep(time.Second)
 			continue
 		}
-		if len(pod.Status.InitContainerStatuses) > 0 {
-			state := pod.Status.InitContainerStatuses[0].State
+		for _, status := range pod.Status.InitContainerStatuses {
+			if status.Name != containerName {
+				continue
+			}
+			state := status.State
 			if state.Running != nil {
 				return nil
 			}
@@ -142,7 +393,7 @@ func waitForInitContainer(ctx context.Context, ops k8sOps, podName string, timeo
 		}
 		time.Sleep(time.Second)
 	}
-	return fmt.Errorf("init container not running in pod %s after %s", podName, timeout)
+	return fmt.Errorf("init container %s not running in pod %s after %s", containerName, podName, timeout)
 }
 
 // copyDirToPod copies a local directory into the pod via tar-based exec.

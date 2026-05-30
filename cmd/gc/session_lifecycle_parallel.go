@@ -155,11 +155,12 @@ func (c startCandidate) logicalTemplate(cfg *config.City) string {
 }
 
 type preparedStart struct {
-	candidate     startCandidate
-	cfg           runtime.Config
-	coreHash      string
-	coreBreakdown runtime.BreakdownV1
-	liveHash      string
+	candidate       startCandidate
+	cfg             runtime.Config
+	coreHash        string
+	coreBreakdown   runtime.BreakdownV1
+	liveHash        string
+	providerRuntime runtime.ProviderRuntimeIdentity
 }
 
 type startResult struct {
@@ -701,7 +702,7 @@ func prepareStartCandidateForCity(
 		return nil, err
 	}
 	candidate = refreshConfiguredNamedStartCandidate(candidate, cityPath, cityName, cfg, sp, store, clk, stderr)
-	return buildPreparedStartWithWorkDirResolver(candidate, cfg, store, workDirResolver)
+	return buildPreparedStartWithRuntimeProvider(candidate, cfg, store, workDirResolver, sp)
 }
 
 func refreshConfiguredNamedStartCandidate(
@@ -738,19 +739,12 @@ func refreshConfiguredNamedStartCandidate(
 	return candidate
 }
 
-func buildPreparedStart(
-	candidate startCandidate,
-	cfg *config.City,
-	store beads.Store,
-) (*preparedStart, error) {
-	return buildPreparedStartWithWorkDirResolver(candidate, cfg, store, nil)
-}
-
-func buildPreparedStartWithWorkDirResolver(
+func buildPreparedStartWithRuntimeProvider(
 	candidate startCandidate,
 	cfg *config.City,
 	store beads.Store,
 	workDirResolver taskWorkDirResolver,
+	sp runtime.Provider,
 ) (*preparedStart, error) {
 	session := candidate.session
 	tp := candidate.tp
@@ -903,12 +897,23 @@ func buildPreparedStartWithWorkDirResolver(
 		agentCfg.Env = mergeEnv(agentCfg.Env, map[string]string{"GC_PROVIDER": gcProvider})
 	}
 	agentCfg = runtime.SyncWorkDirEnv(agentCfg)
+	var providerRuntime runtime.ProviderRuntimeIdentity
+	if sp != nil {
+		identity, ok, err := runtime.DesiredProviderRuntimeIdentity(context.Background(), sp, candidate.name(), agentCfg)
+		if err != nil {
+			return nil, fmt.Errorf("computing provider runtime identity: %w", err)
+		}
+		if ok {
+			providerRuntime = identity
+		}
+	}
 	return &preparedStart{
-		candidate:     candidate,
-		cfg:           agentCfg,
-		coreHash:      coreHash,
-		coreBreakdown: coreBreakdown,
-		liveHash:      liveHash,
+		candidate:       candidate,
+		cfg:             agentCfg,
+		coreHash:        coreHash,
+		coreBreakdown:   coreBreakdown,
+		liveHash:        liveHash,
+		providerRuntime: providerRuntime,
 	}, nil
 }
 
@@ -1366,7 +1371,7 @@ func stopStaleAsyncStartRuntime(result startResult, sp runtime.Provider, stderr 
 // preserves the prior behavior for callers that pre-date instance_token.
 func asyncStartSessionStillCurrent(prepared, current beads.Bead) bool {
 	if strings.TrimSpace(current.Status) == "closed" {
-		return false
+		return closedFailedCreateStartRepairAllowed(prepared, current)
 	}
 	if !asyncStartIdentityMatches(prepared, current) {
 		return false
@@ -1393,7 +1398,7 @@ func asyncStartSessionStillCurrent(prepared, current beads.Bead) bool {
 
 func asyncStartStaleRuntimeCleanupAllowed(prepared, current beads.Bead) bool {
 	if strings.TrimSpace(current.Status) == "closed" {
-		return true
+		return !closedFailedCreateStartRepairAllowed(prepared, current)
 	}
 	if !asyncStartIdentityMatches(prepared, current) {
 		return true
@@ -1423,6 +1428,200 @@ func asyncStartIdentityMatches(prepared, current beads.Bead) bool {
 		return true
 	}
 	return strings.TrimSpace(current.Metadata["generation"]) == preparedGeneration
+}
+
+func closedFailedCreateStartRepairAllowed(prepared, current beads.Bead) bool {
+	if strings.TrimSpace(current.Status) != "closed" {
+		return false
+	}
+	if !isClosedFailedCreateBead(current) {
+		return false
+	}
+	return asyncStartIdentityMatches(prepared, current)
+}
+
+func isClosedFailedCreateBead(b beads.Bead) bool {
+	if strings.TrimSpace(b.Status) != "closed" {
+		return false
+	}
+	if sessionpkg.State(strings.TrimSpace(b.Metadata["state"])) == sessionpkg.StateFailedCreate {
+		return true
+	}
+	reason := strings.TrimSpace(b.Metadata["close_reason"])
+	return reason == string(sessionpkg.StateFailedCreate) ||
+		reason == sessionpkg.CanonicalCloseReason(string(sessionpkg.StateFailedCreate))
+}
+
+func sessionStartRepairConflict(store beads.Store, current beads.Bead) (bool, error) {
+	if store == nil {
+		return false, nil
+	}
+	for _, key := range []string{"session_name", "alias"} {
+		value := strings.TrimSpace(current.Metadata[key])
+		if value == "" {
+			continue
+		}
+		matches, err := store.ListByMetadata(map[string]string{key: value}, 0)
+		if err != nil {
+			return false, err
+		}
+		for _, match := range matches {
+			if match.ID != current.ID && strings.TrimSpace(match.Status) != "closed" && sessionpkg.IsSessionBeadOrRepairable(match) {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
+}
+
+func cloneStartCommitMetadata(metadata map[string]string) map[string]string {
+	if len(metadata) == 0 {
+		return nil
+	}
+	cp := make(map[string]string, len(metadata))
+	for key, value := range metadata {
+		cp[key] = value
+	}
+	return cp
+}
+
+func repairMetadataForStartedSession(metadata map[string]string) map[string]string {
+	repair := cloneStartCommitMetadata(metadata)
+	if repair == nil {
+		repair = make(map[string]string)
+	}
+	repair["state"] = string(sessionpkg.StateActive)
+	repair["state_reason"] = "creation_complete"
+	repair["pending_create_claim"] = ""
+	repair["pending_create_started_at"] = ""
+	repair["close_reason"] = ""
+	repair["closed_at"] = ""
+	if ts := strings.TrimSpace(repair["creation_complete_at"]); ts != "" {
+		repair["synced_at"] = ts
+	}
+	return repair
+}
+
+func commitStartedSessionMetadata(session *beads.Bead, store beads.Store, metadata map[string]string) (bool, error) {
+	if session == nil || store == nil {
+		return false, nil
+	}
+	var committed bool
+	err := sessionpkg.WithSessionMutationLock(session.ID, func() error {
+		current, err := store.Get(session.ID)
+		if err != nil {
+			return err
+		}
+		if strings.TrimSpace(current.Status) == "closed" {
+			if !closedFailedCreateStartRepairAllowed(*session, current) {
+				return nil
+			}
+			conflict, err := sessionStartRepairConflict(store, current)
+			if err != nil || conflict {
+				return err
+			}
+			open := "open"
+			repair := repairMetadataForStartedSession(metadata)
+			if err := store.Update(session.ID, beads.UpdateOpts{Status: &open, Metadata: repair}); err != nil {
+				return err
+			}
+			current.Status = "open"
+			if current.Metadata == nil {
+				current.Metadata = make(map[string]string, len(repair))
+			}
+			for key, value := range repair {
+				current.Metadata[key] = value
+			}
+			*session = current
+			committed = true
+			return nil
+		}
+		if !asyncStartIdentityMatches(*session, current) {
+			return nil
+		}
+		if err := store.SetMetadataBatch(session.ID, metadata); err != nil {
+			return err
+		}
+		if current.Metadata == nil {
+			current.Metadata = make(map[string]string, len(metadata))
+		}
+		for key, value := range metadata {
+			current.Metadata[key] = value
+		}
+		*session = current
+		committed = true
+		return nil
+	})
+	if err != nil {
+		return false, err
+	}
+	return committed, nil
+}
+
+func repairClosedFailedCreateRuntimeBinding(
+	store beads.Store,
+	sp runtime.Provider,
+	sessionBeads *sessionBeadSnapshot,
+	bead beads.Bead,
+	runtimeName string,
+	processNames []string,
+	clk clock.Clock,
+	stderr io.Writer,
+) bool {
+	if store == nil || sp == nil || strings.TrimSpace(runtimeName) == "" {
+		return false
+	}
+	repaired := false
+	err := sessionpkg.WithSessionMutationLock(bead.ID, func() error {
+		current, err := store.Get(bead.ID)
+		if err != nil {
+			return err
+		}
+		if !isClosedFailedCreateBead(current) {
+			return nil
+		}
+		if pendingCreateRuntimeIdentity(&current, runtimeName, sp) != pendingCreateRuntimeIdentityMatch {
+			return nil
+		}
+		if sessionBeads != nil {
+			for _, open := range sessionBeads.Open() {
+				if open.ID != current.ID && strings.TrimSpace(open.Metadata["session_name"]) == runtimeName {
+					return nil
+				}
+			}
+		}
+		conflict, err := sessionStartRepairConflict(store, current)
+		if err != nil || conflict {
+			return err
+		}
+		obs := runtime.ObserveLiveness(sp, runtimeName, processNames)
+		if !obs.Running || !obs.Alive {
+			return nil
+		}
+		var now time.Time
+		if clk != nil {
+			now = clk.Now()
+		} else {
+			now = time.Now()
+		}
+		metadata := repairMetadataForStartedSession(sessionpkg.ConfirmStartedPatch(now.UTC()))
+		open := "open"
+		if err := store.Update(current.ID, beads.UpdateOpts{Status: &open, Metadata: metadata}); err != nil {
+			return err
+		}
+		repaired = true
+		return nil
+	})
+	if err != nil {
+		if stderr != nil {
+			fmt.Fprintf(stderr, "session reconciler: repairing failed-create runtime %q bound to closed bead %s: %v\n", runtimeName, bead.ID, err) //nolint:errcheck
+		}
+		return false
+	}
+	if repaired && stderr != nil {
+		fmt.Fprintf(stderr, "session reconciler: repaired failed-create runtime %q bound to closed session bead %s\n", runtimeName, bead.ID) //nolint:errcheck
+	}
+	return repaired
 }
 
 func clonePreparedStartForAsync(item preparedStart) preparedStart {
@@ -1459,6 +1658,11 @@ func startPreparedStartCandidate(
 				return false, fmt.Errorf("%w: session %q", runtime.ErrSessionExists, name)
 			}
 			if alive {
+				if compat, ok, err := runtime.ObserveProviderRuntimeCompatibility(ctx, sp, name, item.cfg); err != nil {
+					return false, fmt.Errorf("observing provider runtime compatibility for session %q: %w", name, err)
+				} else if ok && compat.Exists && !compat.Compatible {
+					return false, fmt.Errorf("%w: session %q (%s)", runtime.ErrRuntimeIncompatible, name, compat.Reason)
+				}
 				return false, nil
 			}
 			return false, fmt.Errorf("session %q died during startup", name)
@@ -1608,13 +1812,16 @@ func commitStartResultTraced(
 	// post-create marker hasn't landed yet. See confirmPendingStart for
 	// the state gate.
 	metadata := sessionpkg.CommitStartedPatch(sessionpkg.CommitStartedPatchInput{
-		CoreHash:                result.prepared.coreHash,
-		LiveHash:                result.prepared.liveHash,
-		CoreBreakdown:           coreBreakdown,
-		ConfirmState:            confirmPendingStart(session.Metadata["state"]),
-		ClearSleepReason:        session.Metadata["sleep_reason"] != "",
-		ClearPendingCreateClaim: shouldRollbackPendingCreate(session),
-		Now:                     clk.Now(),
+		CoreHash:                 result.prepared.coreHash,
+		LiveHash:                 result.prepared.liveHash,
+		CoreBreakdown:            coreBreakdown,
+		ProviderRuntimeHash:      result.prepared.providerRuntime.Fingerprint,
+		ProviderRuntimeVersion:   result.prepared.providerRuntime.Version,
+		ProviderRuntimeBreakdown: result.prepared.providerRuntime.Breakdown,
+		ConfirmState:             confirmPendingStart(session.Metadata["state"]),
+		ClearSleepReason:         session.Metadata["sleep_reason"] != "",
+		ClearPendingCreateClaim:  shouldRollbackPendingCreate(session),
+		Now:                      clk.Now(),
 	})
 	storedMCPSnapshot, err := sessionpkg.EncodeMCPServersSnapshot(result.prepared.cfg.MCPServers)
 	if err != nil {
@@ -1644,7 +1851,8 @@ func commitStartResultTraced(
 			metadata[sessionpkg.MCPIdentityMetadataKey] = storedMCPIdentity
 		}
 	}
-	if err := store.SetMetadataBatch(session.ID, metadata); err != nil {
+	committed, err := commitStartedSessionMetadata(session, store, metadata)
+	if err != nil {
 		clearPendingStartInFlightLease(session, store, stderr)
 		fmt.Fprintf(stderr, "session reconciler: storing hashes for %s: %v\n", name, err) //nolint:errcheck
 		if trace != nil {
@@ -1660,11 +1868,15 @@ func commitStartResultTraced(
 		logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, "metadata_batch_failed", result.started, result.finished, err, result.phases)
 		return false
 	}
-	if session.Metadata == nil {
-		session.Metadata = make(map[string]string)
-	}
-	for key, value := range metadata {
-		session.Metadata[key] = value
+	if !committed {
+		fmt.Fprintf(stderr, "session reconciler: skipping stale start commit for %s: session bead changed during startup\n", name) //nolint:errcheck
+		if trace != nil {
+			trace.recordMutation("bead_metadata", tp.TemplateName, name, "metadata_batch", session.ID, "started_config_hash", "", result.prepared.coreHash, "stale", traceRecordPayload{
+				"wave": wave,
+			}, "")
+		}
+		logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, "stale_start_commit", result.started, result.finished, nil, result.phases)
+		return false
 	}
 	if trace != nil {
 		trace.recordMutation("bead_metadata", tp.TemplateName, name, "metadata_batch", session.ID, "started_config_hash", "", result.prepared.coreHash, "success", traceRecordPayload{
@@ -1679,6 +1891,7 @@ func recoverRunningPendingCreate(
 	session *beads.Bead,
 	tp TemplateParams,
 	cfg *config.City,
+	sp runtime.Provider,
 	store beads.Store,
 	clk clock.Clock,
 	trace *sessionReconcilerTraceCycle,
@@ -1686,7 +1899,7 @@ func recoverRunningPendingCreate(
 	if session == nil || store == nil {
 		return false
 	}
-	prepared, err := buildPreparedStart(startCandidate{session: session, tp: tp}, cfg, store)
+	prepared, err := buildPreparedStartWithRuntimeProvider(startCandidate{session: session, tp: tp}, cfg, store, nil, sp)
 	if err != nil {
 		if trace != nil {
 			trace.recordDecision("reconciler.session.pending_create", tp.TemplateName, tp.SessionName, "pending_create_rebuild_failed", "failed", traceRecordPayload{
@@ -1709,9 +1922,12 @@ func recoverRunningPendingCreate(
 		now = time.Now()
 	}
 	metadata := sessionpkg.CommitStartedPatch(sessionpkg.CommitStartedPatchInput{
-		CoreHash:      prepared.coreHash,
-		LiveHash:      prepared.liveHash,
-		CoreBreakdown: coreBreakdown,
+		CoreHash:                 prepared.coreHash,
+		LiveHash:                 prepared.liveHash,
+		CoreBreakdown:            coreBreakdown,
+		ProviderRuntimeHash:      prepared.providerRuntime.Fingerprint,
+		ProviderRuntimeVersion:   prepared.providerRuntime.Version,
+		ProviderRuntimeBreakdown: prepared.providerRuntime.Breakdown,
 		ConfirmState: confirmPendingStart(session.Metadata["state"]) ||
 			sessionpkg.State(strings.TrimSpace(session.Metadata["state"])) == sessionpkg.StateAwake,
 		ClearSleepReason: session.Metadata["sleep_reason"] != "",
@@ -1722,7 +1938,8 @@ func recoverRunningPendingCreate(
 		ClearPendingCreateClaim: true,
 		Now:                     now,
 	})
-	if err := store.SetMetadataBatch(session.ID, metadata); err != nil {
+	committed, err := commitStartedSessionMetadata(session, store, metadata)
+	if err != nil {
 		if trace != nil {
 			trace.recordDecision("reconciler.session.pending_create", tp.TemplateName, tp.SessionName, "pending_create_commit_failed", "failed", traceRecordPayload{
 				"error": err.Error(),
@@ -1730,11 +1947,11 @@ func recoverRunningPendingCreate(
 		}
 		return false
 	}
-	if session.Metadata == nil {
-		session.Metadata = make(map[string]string, len(metadata))
-	}
-	for key, value := range metadata {
-		session.Metadata[key] = value
+	if !committed {
+		if trace != nil {
+			trace.recordDecision("reconciler.session.pending_create", tp.TemplateName, tp.SessionName, "pending_create_commit_stale", "stale", nil, nil, "")
+		}
+		return false
 	}
 	if trace != nil {
 		trace.recordDecision("reconciler.session.pending_create", tp.TemplateName, tp.SessionName, "pending_create_healed", "healed", nil, nil, "")
@@ -1749,82 +1966,144 @@ func shouldRollbackPendingCreate(session *beads.Bead) bool {
 	return strings.TrimSpace(session.Metadata["pending_create_claim"]) == "true"
 }
 
-func runningSessionMatchesPendingCreate(session *beads.Bead, sessionName string, sp runtime.Provider) bool {
+type pendingCreateRuntimeIdentityStatus int
+
+const (
+	pendingCreateRuntimeIdentityUnknown pendingCreateRuntimeIdentityStatus = iota
+	pendingCreateRuntimeIdentityMatch
+	pendingCreateRuntimeIdentityMismatch
+)
+
+// A false match can mean either "belongs elsewhere" or "not readable yet".
+// Keep those distinct so fresh provider starts are not rolled back before
+// their metadata becomes observable.
+func pendingCreateRuntimeIdentity(session *beads.Bead, sessionName string, sp runtime.Provider) pendingCreateRuntimeIdentityStatus {
 	if session == nil || sp == nil {
-		return false
+		return pendingCreateRuntimeIdentityUnknown
 	}
 	liveID := ""
+	liveIDSet := false
 	if value, err := sp.GetMeta(sessionName, "GC_SESSION_ID"); err == nil {
 		liveID = strings.TrimSpace(value)
+		liveIDSet = liveID != ""
 		if liveID != "" && liveID != session.ID {
-			return false
+			return pendingCreateRuntimeIdentityMismatch
 		}
 	}
 	expectedToken := strings.TrimSpace(session.Metadata["instance_token"])
 	liveToken := ""
+	liveTokenSet := false
 	if value, err := sp.GetMeta(sessionName, "GC_INSTANCE_TOKEN"); err == nil {
 		liveToken = value
 		liveToken = strings.TrimSpace(liveToken)
+		liveTokenSet = liveToken != ""
 		if liveToken != "" && liveToken != expectedToken {
 			liveGeneration, _ := sp.GetMeta(sessionName, "GC_RUNTIME_EPOCH")
 			expectedGeneration := strings.TrimSpace(session.Metadata["generation"])
 			if strings.TrimSpace(liveGeneration) != "" && expectedGeneration != "" && strings.TrimSpace(liveGeneration) != expectedGeneration {
-				return false
+				return pendingCreateRuntimeIdentityMismatch
 			}
 			if liveID == "" {
-				return false
+				return pendingCreateRuntimeIdentityMismatch
 			}
 		}
 	}
-	if liveID != "" {
-		return liveID == session.ID
+	if liveIDSet {
+		return pendingCreateRuntimeIdentityMatch
 	}
 	if expectedToken == "" {
-		return false
+		return pendingCreateRuntimeIdentityUnknown
 	}
-	return expectedToken != "" && liveToken == expectedToken
+	if liveTokenSet && liveToken == expectedToken {
+		return pendingCreateRuntimeIdentityMatch
+	}
+	return pendingCreateRuntimeIdentityUnknown
+}
+
+func runningSessionMatchesPendingCreate(session *beads.Bead, sessionName string, sp runtime.Provider) bool {
+	return pendingCreateRuntimeIdentity(session, sessionName, sp) == pendingCreateRuntimeIdentityMatch
 }
 
 func rollbackPendingCreate(session *beads.Bead, store beads.Store, now time.Time, stderr io.Writer) {
 	if session == nil || store == nil {
 		return
 	}
-	clearPendingStartInFlightLease(session, store, stderr)
-	if strings.TrimSpace(session.Metadata["session_name_explicit"]) == "true" {
-		if setMeta(store, session.ID, "session_name", "", stderr) == nil {
-			if session.Metadata == nil {
-				session.Metadata = make(map[string]string)
-			}
-			session.Metadata["session_name"] = ""
+	if err := sessionpkg.WithSessionMutationLock(session.ID, func() error {
+		current, err := store.Get(session.ID)
+		if err != nil {
+			return err
 		}
+		if !pendingCreateRollbackStillCurrent(*session, current) {
+			return nil
+		}
+		clearPendingStartInFlightLease(&current, store, stderr)
+		if strings.TrimSpace(current.Metadata["session_name_explicit"]) == "true" {
+			if setMeta(store, session.ID, "session_name", "", stderr) == nil {
+				if current.Metadata == nil {
+					current.Metadata = make(map[string]string)
+				}
+				current.Metadata["session_name"] = ""
+			}
+		}
+		closeBeadLocked(store, session.ID, string(sessionpkg.StateFailedCreate), now, stderr)
+		*session = current
+		return nil
+	}); err != nil && stderr != nil {
+		fmt.Fprintf(stderr, "session reconciler: locking pending-create rollback for %s: %v\n", session.ID, err) //nolint:errcheck
 	}
-	closeBead(store, session.ID, string(sessionpkg.StateFailedCreate), now, stderr)
 }
 
 func rollbackPendingCreateClearingClaim(session *beads.Bead, store beads.Store, now time.Time, stderr io.Writer) {
 	if session == nil || store == nil {
 		return
 	}
-	clearPendingStartInFlightLease(session, store, stderr)
-	if strings.TrimSpace(session.Metadata["session_name_explicit"]) == "true" {
-		if setMeta(store, session.ID, "session_name", "", stderr) == nil {
-			if session.Metadata == nil {
-				session.Metadata = make(map[string]string)
-			}
-			session.Metadata["session_name"] = ""
+	if err := sessionpkg.WithSessionMutationLock(session.ID, func() error {
+		current, err := store.Get(session.ID)
+		if err != nil {
+			return err
 		}
+		if !pendingCreateRollbackStillCurrent(*session, current) {
+			return nil
+		}
+		clearPendingStartInFlightLease(&current, store, stderr)
+		if strings.TrimSpace(current.Metadata["session_name_explicit"]) == "true" {
+			if setMeta(store, session.ID, "session_name", "", stderr) == nil {
+				if current.Metadata == nil {
+					current.Metadata = make(map[string]string)
+				}
+				current.Metadata["session_name"] = ""
+			}
+		}
+		if !closeFailedCreateBeadLocked(store, session.ID, now, stderr) {
+			return nil
+		}
+		if current.Metadata == nil {
+			current.Metadata = make(map[string]string)
+		}
+		for key, value := range sessionpkg.ClosePatch(now.UTC(), string(sessionpkg.StateFailedCreate)) {
+			current.Metadata[key] = value
+		}
+		current.Metadata["pending_create_claim"] = ""
+		current.Metadata["pending_create_started_at"] = ""
+		*session = current
+		return nil
+	}); err != nil && stderr != nil {
+		fmt.Fprintf(stderr, "session reconciler: locking pending-create rollback for %s: %v\n", session.ID, err) //nolint:errcheck
 	}
-	if !closeFailedCreateBead(store, session.ID, now, stderr) {
-		return
+}
+
+func pendingCreateRollbackStillCurrent(snapshot, current beads.Bead) bool {
+	if strings.TrimSpace(current.Status) == "closed" {
+		return false
 	}
-	if session.Metadata == nil {
-		session.Metadata = make(map[string]string)
+	if !pendingCreateSnapshotMatchesCurrent(snapshot, current) {
+		return false
 	}
-	for key, value := range sessionpkg.ClosePatch(now.UTC(), string(sessionpkg.StateFailedCreate)) {
-		session.Metadata[key] = value
+	state := sessionpkg.State(strings.TrimSpace(current.Metadata["state"]))
+	if state == sessionpkg.StateActive || state == sessionpkg.StateAwake {
+		return false
 	}
-	session.Metadata["pending_create_claim"] = ""
-	session.Metadata["pending_create_started_at"] = ""
+	return shouldRollbackPendingCreate(&current)
 }
 
 func executePlannedStarts(

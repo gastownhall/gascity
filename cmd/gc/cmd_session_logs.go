@@ -102,6 +102,11 @@ func cmdSessionLogs(args []string, follow bool, tail int, jsonOutput bool, stdou
 		path = resolveSessionLogPath(searchPaths, sessionLogContext{workDir: workDir})
 	}
 	if path == "" {
+		if ok && store != nil {
+			if logCtx, found := resolveSessionLogContext(cityPath, cfg, store, identifier); found && strings.TrimSpace(logCtx.sessionID) != "" {
+				return doSessionLogsFromProvider(cityPath, cfg, store, logCtx, identifier, follow, tail, jsonOutput, stdout, stderr)
+			}
+		}
 		fmt.Fprintf(stderr, "gc session logs: no session file found for %q\n", identifier) //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -346,6 +351,71 @@ func resolveConfiguredSessionLogContext(cityPath string, cfg *config.City, ident
 	return "", false
 }
 
+func doSessionLogsFromProvider(cityPath string, cfg *config.City, store beads.Store, logCtx sessionLogContext, target string, follow bool, tail int, jsonOutput bool, stdout, stderr io.Writer) int {
+	if tail < 0 {
+		fmt.Fprintln(stderr, "gc session logs: --tail must be >= 0") //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	handle, err := workerHandleForSessionWithConfig(cityPath, store, newSessionProvider(), cfg, logCtx.sessionID)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc session logs: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	result, err := handle.SessionLog(context.Background(), worker.SessionLogRequest{
+		Transcript: worker.TranscriptRequest{TailCompactions: 0},
+		LiveLines:  providerLiveLogLines(tail),
+	})
+	if err != nil {
+		fmt.Fprintf(stderr, "gc session logs: no session file found for %q\n", target) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	switch result.Format {
+	case worker.SessionLogFormatTranscript:
+		if result.Transcript == nil || result.Transcript.Session == nil || strings.TrimSpace(result.TranscriptPath) == "" {
+			fmt.Fprintf(stderr, "gc session logs: no session file found for %q\n", target) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		if follow {
+			return doSessionLogs(result.TranscriptPath, result.Provider, follow, tail, stdout, stderr)
+		}
+		if jsonOutput {
+			return writeSessionLogsJSONSnapshot(result.Transcript.Session, result.Provider, result.TranscriptPath, target, tail, stdout, stderr)
+		}
+		for _, msg := range tailMessages(result.Transcript.Session.Messages, tail) {
+			printLogEntry(stdout, msg)
+		}
+		return 0
+	case worker.SessionLogFormatText:
+		if follow {
+			fmt.Fprintln(stderr, "gc session logs: --follow is not supported for provider live-output snapshots") //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		output := result.Text
+		if strings.TrimSpace(output) == "" {
+			fmt.Fprintf(stderr, "gc session logs: no session file found for %q\n", target) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		if jsonOutput {
+			return writeSessionLogsTextJSON(result.Provider, target, tail, output, stdout, stderr)
+		}
+		fmt.Fprint(stdout, output) //nolint:errcheck // best-effort stdout
+		if !strings.HasSuffix(output, "\n") {
+			fmt.Fprintln(stdout) //nolint:errcheck // best-effort stdout
+		}
+		return 0
+	default:
+		fmt.Fprintf(stderr, "gc session logs: unsupported session log format %q\n", result.Format) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+}
+
+func providerLiveLogLines(tail int) int {
+	if tail <= 0 {
+		return 0
+	}
+	return tail
+}
+
 // doSessionLogs reads the session file and prints messages. If follow is true,
 // it polls for new messages every 2 seconds.
 //
@@ -372,10 +442,14 @@ type sessionLogsJSONResult struct {
 	SchemaVersion  string                `json:"schema_version"`
 	Target         string                `json:"target"`
 	Provider       string                `json:"provider,omitempty"`
+	Format         string                `json:"format"`
+	Source         string                `json:"source,omitempty"`
 	TranscriptPath string                `json:"transcript_path"`
 	Tail           int                   `json:"tail"`
 	EntryCount     int                   `json:"entry_count"`
 	Entries        []sessionLogEntryJSON `json:"entries"`
+	LineCount      int                   `json:"line_count,omitempty"`
+	Output         string                `json:"output,omitempty"`
 }
 
 type sessionLogEntryJSON struct {
@@ -426,14 +500,11 @@ func doSessionLogsJSON(path, provider, target string, follow bool, tail int, std
 	return runSessionLogsJSON(factory, provider, path, target, tail, stdout, stderr, readSessionFile)
 }
 
-func runSessionLogsJSON(factory *worker.Factory, provider, path, target string, tail int, stdout, stderr io.Writer, read sessionLogsReader) int {
-	sess, readErr := read(factory, provider, path)
-	if readErr != nil {
-		fmt.Fprintf(stderr, "gc session logs: %v\n", readErr) //nolint:errcheck // best-effort stderr
-		return 1
+func writeSessionLogsJSONSnapshot(sess *worker.TranscriptSession, provider, path, target string, tail int, stdout, stderr io.Writer) int {
+	messages := []*worker.TranscriptEntry{}
+	if sess != nil {
+		messages = tailMessages(sess.Messages, tail)
 	}
-
-	messages := tailMessages(sess.Messages, tail)
 	entries := make([]sessionLogEntryJSON, 0, len(messages))
 	for _, msg := range messages {
 		entries = append(entries, sessionLogEntryToJSON(msg))
@@ -442,6 +513,8 @@ func runSessionLogsJSON(factory *worker.Factory, provider, path, target string, 
 		SchemaVersion:  "1",
 		Target:         target,
 		Provider:       provider,
+		Format:         string(worker.SessionLogFormatTranscript),
+		Source:         "transcript",
 		TranscriptPath: path,
 		Tail:           tail,
 		EntryCount:     len(entries),
@@ -451,6 +524,36 @@ func runSessionLogsJSON(factory *worker.Factory, provider, path, target string, 
 		return 1
 	}
 	return 0
+}
+
+func writeSessionLogsTextJSON(provider, target string, tail int, output string, stdout, stderr io.Writer) int {
+	if err := writeCLIJSONLine(stdout, sessionLogsJSONResult{
+		SchemaVersion:  "1",
+		Target:         target,
+		Provider:       provider,
+		Format:         string(worker.SessionLogFormatText),
+		Source:         "provider-live-output",
+		TranscriptPath: "",
+		Tail:           tail,
+		EntryCount:     0,
+		Entries:        []sessionLogEntryJSON{},
+		LineCount:      outputLineCount(output),
+		Output:         output,
+	}); err != nil {
+		fmt.Fprintf(stderr, "gc session logs: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	return 0
+}
+
+func runSessionLogsJSON(factory *worker.Factory, provider, path, target string, tail int, stdout, stderr io.Writer, read sessionLogsReader) int {
+	sess, readErr := read(factory, provider, path)
+	if readErr != nil {
+		fmt.Fprintf(stderr, "gc session logs: %v\n", readErr) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+
+	return writeSessionLogsJSONSnapshot(sess, provider, path, target, tail, stdout, stderr)
 }
 
 func sessionLogEntryToJSON(e *worker.TranscriptEntry) sessionLogEntryJSON {
