@@ -4250,6 +4250,12 @@ title = "Do work"
 	if got := root.Metadata["gc.run_target"]; got != "mayor" {
 		t.Fatalf("root gc.run_target = %q, want mayor", got)
 	}
+	// #2763 / ga-eld2x: the root must also persist gc.routed_to — the canonical
+	// delivery key the worker claim path reads — so a pool-routed root is
+	// actually claimable and not idle-reaped.
+	if got := root.Metadata["gc.routed_to"]; got != "mayor" {
+		t.Fatalf("root gc.routed_to = %q, want mayor", got)
+	}
 	if got := root.Metadata["gc.source_bead_id"]; got != "BL-42" {
 		t.Fatalf("root gc.source_bead_id = %q, want BL-42", got)
 	}

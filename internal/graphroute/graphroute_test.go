@@ -264,6 +264,39 @@ func TestDecorateGraphWorkflowRecipe_SetsRootMetadata(t *testing.T) {
 	}
 }
 
+// TestDecorateGraphWorkflowRecipe_RootStampsRoutedToForClaim locks in the
+// #2763 writer-side fix: a graph.v2 workflow root must persist gc.routed_to —
+// the canonical delivery key every runtime demand/claim/scale reader consults —
+// not gc.run_target alone. Before this, the root stamped only gc.run_target, so
+// a root routed to a pool was spawned-for by scale_check (which reads
+// gc.run_target) but never claimed by the worker (whose query reads
+// gc.routed_to); the work sat unclaimed and was idle-reaped silently. As part of
+// deprecating gc.run_target as a persisted routing field (ga-eld2x), the root is
+// brought onto the same key as every other bead — including its own children.
+func TestDecorateGraphWorkflowRecipe_RootStampsRoutedToForClaim(t *testing.T) {
+	cfg := &config.City{Agents: []config.Agent{
+		{Name: "mayor", MaxActiveSessions: intPtr(1)},
+		{Name: "control-dispatcher", MaxActiveSessions: intPtr(1)},
+	}}
+	r := &formula.Recipe{
+		Name: "wf-test",
+		Steps: []formula.RecipeStep{
+			{ID: "wf-test.root", IsRoot: true, Metadata: map[string]string{
+				"gc.kind": "workflow", "gc.formula_contract": "graph.v2",
+			}},
+			{ID: "wf-test.work", Metadata: map[string]string{}},
+		},
+	}
+	deps := Deps{Resolver: testAgentResolver{}}
+	if err := DecorateGraphWorkflowRecipe(r, nil, "src-1", "city", "test-city", "city:test", "mayor", "test--mayor", nil, "test-city", cfg, deps); err != nil {
+		t.Fatalf("DecorateGraphWorkflowRecipe: %v", err)
+	}
+	root := r.Steps[0]
+	if got := root.Metadata["gc.routed_to"]; got != "mayor" {
+		t.Errorf("root gc.routed_to = %q, want mayor (root must be claimable via the canonical routing key; #2763 / ga-eld2x)", got)
+	}
+}
+
 func TestDecorateGraphWorkflowRecipe_NilRecipe(t *testing.T) {
 	err := DecorateGraphWorkflowRecipe(nil, nil, "", "", "", "", "", "", nil, "", nil, Deps{})
 	if err == nil {

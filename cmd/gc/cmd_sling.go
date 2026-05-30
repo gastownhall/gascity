@@ -1174,6 +1174,12 @@ func decorateGraphWorkflowRecipe(recipe *formula.Recipe, routeVars map[string]st
 			step.Metadata = maps.Clone(step.Metadata)
 		}
 		if step.IsRoot {
+			// Mirror of graphroute.DecorateGraphWorkflowRecipe: the root must
+			// persist gc.routed_to (the canonical key the worker claim path
+			// reads) so a pool-routed root is claimable rather than idle-reaped
+			// (fixes #2763). gc.run_target stays pending its deprecation as a
+			// wire field (ga-eld2x).
+			step.Metadata["gc.routed_to"] = routedTo
 			step.Metadata["gc.run_target"] = routedTo
 			continue
 		}
