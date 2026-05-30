@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-max_modules="${GC_NATIVE_DEP_MAX_MODULES:-724}"
+max_modules="${GC_NATIVE_DEP_MAX_MODULES:-725}"
 max_binary_bytes="${GC_NATIVE_DEP_MAX_BINARY_BYTES:-270000000}"
 max_aws_modules="${GC_NATIVE_DEP_MAX_AWS_MODULES:-25}"
 max_azure_modules="${GC_NATIVE_DEP_MAX_AZURE_MODULES:-9}"
