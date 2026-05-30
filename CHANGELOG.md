@@ -15,6 +15,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   published regular-usage pricing is unchanged from Opus 4.7: $5/MTok input
   and $25/MTok output.
 
+### Fixed
+
+- `gc mail reply` and `gc handoff` now store created mail in the wisp tier,
+  matching `gc mail send`. Operators should use `gc mail` commands or
+  explicit both-tier/wisp-aware bead queries for mail visibility; default
+  issue-tier `bd list` output and git sync do not include wisp-tier messages.
+
 ## [1.2.0] - 2026-05-25
 
 ### Added

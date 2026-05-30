@@ -1286,6 +1286,42 @@ func TestReply(t *testing.T) {
 	if reply.ReplyTo != sent.ID {
 		t.Errorf("Reply ReplyTo = %q, want %q", reply.ReplyTo, sent.ID)
 	}
+
+	wispMessages, err := store.List(beads.ListQuery{
+		Type:     "message",
+		Status:   "open",
+		TierMode: beads.TierWisps,
+	})
+	if err != nil {
+		t.Fatalf("List wisp-tier messages: %v", err)
+	}
+	if len(wispMessages) != 2 {
+		t.Fatalf("wisp-tier messages = %d, want sent message and reply", len(wispMessages))
+	}
+	replyInWisps := false
+	for _, b := range wispMessages {
+		if b.ID == reply.ID {
+			replyInWisps = true
+			if !b.Ephemeral {
+				t.Fatalf("reply Ephemeral = false, want true")
+			}
+		}
+	}
+	if !replyInWisps {
+		t.Fatalf("reply %s not found in wisp-tier messages: %#v", reply.ID, wispMessages)
+	}
+
+	issueMessages, err := store.List(beads.ListQuery{
+		Type:     "message",
+		Status:   "open",
+		TierMode: beads.TierIssues,
+	})
+	if err != nil {
+		t.Fatalf("List issue-tier messages: %v", err)
+	}
+	if len(issueMessages) != 0 {
+		t.Fatalf("issue-tier messages = %#v, want none", issueMessages)
+	}
 }
 
 // TestReplyDerivesSubjectFromOriginal ensures an empty subject is replaced

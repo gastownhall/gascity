@@ -454,6 +454,7 @@ func (p *Provider) Reply(id, from, subject, body string) (mail.Message, error) {
 		From:        from,
 		Labels:      labels,
 		Metadata:    metadata,
+		Ephemeral:   true,
 	})
 	if err != nil {
 		return mail.Message{}, fmt.Errorf("beadmail reply: %w", err)

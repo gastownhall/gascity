@@ -719,9 +719,14 @@ func TestCmdMailSendToControllerRecipientIsRejected(t *testing.T) {
 	if err != nil {
 		t.Fatalf("openCityStoreAt after send: %v", err)
 	}
-	all, err := storeAfter.ListOpen()
+	all, err := storeAfter.List(beads.ListQuery{
+		Type:      "message",
+		Status:    "open",
+		TierMode:  beads.TierBoth,
+		AllowScan: true,
+	})
 	if err != nil {
-		t.Fatalf("ListOpen: %v", err)
+		t.Fatalf("List messages: %v", err)
 	}
 	for _, b := range all {
 		if b.Type == "message" {
