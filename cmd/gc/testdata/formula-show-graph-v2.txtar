@@ -19,12 +19,38 @@ stderr 'graph\.v2'
 stderr 'formula_v2'
 ! stdout 'Formula: graphwf'
 
+# The structured failure contract must retain the specific compile reason for
+# programmatic callers.
+! exec gc formula show graphwf --json
+stdout '"ok":false'
+stdout 'graph\.v2'
+stdout 'formula_v2'
+! stdout 'command failed; see stderr for diagnostics'
+
 # cook must also surface the diagnostic rather than dying silently.
 # (run inside the no-v2 city so the graph.v2 gate is the failure, not a
 # missing-formula lookup).
 ! exec gc formula cook graphwf
 stderr 'graph\.v2'
 stderr 'formula_v2'
+
+! exec gc formula cook graphwf --json
+stdout '"ok":false'
+stdout 'graph\.v2'
+stdout 'formula_v2'
+! stdout 'command failed; see stderr for diagnostics'
+
+# The attach mode has a separate compile branch. Compile happens before attach
+# lookup, so no real bead is needed to cover the diagnostic path.
+! exec gc formula cook graphwf --attach missing-root
+stderr 'graph\.v2'
+stderr 'formula_v2'
+
+! exec gc formula cook graphwf --attach missing-root --json
+stdout '"ok":false'
+stdout 'graph\.v2'
+stdout 'formula_v2'
+! stdout 'command failed; see stderr for diagnostics'
 
 # --- formula_v2 enabled: show compiles and prints the recipe ---
 # (graph.v2 expansion adds synthetic spec/attempt/finalize steps, so the
@@ -37,6 +63,30 @@ stdout 'Formula: graphwf'
 stdout 'Steps \('
 stdout 'Run a lane'
 stdout 'Synthesize'
+
+# Adjacent non-compile errors in the same commands must also surface in text
+# mode instead of returning raw errors that SilenceErrors hides.
+! exec gc formula show graphwf --var mode=bad
+stderr 'gc formula show:'
+stderr 'variable "mode"'
+stderr 'not in allowed values'
+! stdout .
+
+! exec gc formula show graphwf --var mode=bad --json
+stdout '"ok":false'
+stdout 'variable.*mode'
+stdout 'not in allowed values'
+! stderr .
+
+! exec gc formula cook graphwf --attach missing-root
+stderr 'gc formula cook:'
+stderr 'missing-root'
+! stdout .
+
+! exec gc formula cook graphwf --attach missing-root --json
+stdout '"ok":false'
+stdout 'missing-root'
+! stderr .
 
 -- city.toml --
 [workspace]
@@ -52,6 +102,12 @@ formula = "graphwf"
 description = "A graph.v2 workflow"
 version = 2
 contract = "graph.v2"
+
+[vars]
+[vars.mode]
+description = "Mode"
+default = "ok"
+enum = ["ok"]
 
 [[steps]]
 id = "lane"
@@ -80,6 +136,12 @@ formula = "graphwf"
 description = "A graph.v2 workflow"
 version = 2
 contract = "graph.v2"
+
+[vars]
+[vars.mode]
+description = "Mode"
+default = "ok"
+enum = ["ok"]
 
 [[steps]]
 id = "lane"

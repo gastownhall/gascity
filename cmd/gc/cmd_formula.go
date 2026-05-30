@@ -101,30 +101,25 @@ Examples:
 
 			cityPath, err := resolveCity()
 			if err != nil {
-				return err
+				return formulaCommandError(stderr, "gc formula show", jsonOutput, err)
 			}
 			cfg, err := loadCityConfig(cityPath, stderr)
 			if err != nil {
-				return err
+				return formulaCommandError(stderr, "gc formula show", jsonOutput, err)
 			}
 			scope, err := resolveFormulaScope(cfg, cityPath)
 			if err != nil {
-				return err
+				return formulaCommandError(stderr, "gc formula show", jsonOutput, err)
 			}
 			searchPaths := scope.searchPaths
 			rigVars := rigFormulaVarsForScope(cfg, cityPath)
 			recipe, err := formula.CompileWithoutRuntimeVarValidation(cmd.Context(), name, searchPaths, compileVars)
 			if err != nil {
-				// The root command sets SilenceErrors, so a raw error return
-				// here would exit 1 with no diagnostic. Surface the compile
-				// failure (e.g. a graph.v2 formula when [daemon] formula_v2 is
-				// disabled) on stderr and return the already-printed sentinel.
-				fmt.Fprintf(stderr, "gc formula show: %v\n", err) //nolint:errcheck // best-effort stderr
-				return errExit
+				return formulaCommandError(stderr, "gc formula show", jsonOutput, err)
 			}
 			if len(vars) > 0 {
 				if err := formula.ValidateProvidedVarDefs(recipe.Vars, vars); err != nil {
-					return err
+					return formulaCommandError(stderr, "gc formula show", jsonOutput, err)
 				}
 			}
 
@@ -270,15 +265,15 @@ func newFormulaCatalogCmd(stdout, stderr io.Writer) *cobra.Command {
 		RunE: func(_ *cobra.Command, _ []string) error {
 			cityPath, err := resolveCity()
 			if err != nil {
-				return err
+				return formulaCommandError(stderr, "gc formula catalog", jsonOutput, err)
 			}
 			cfg, err := loadCityConfig(cityPath, stderr)
 			if err != nil {
-				return err
+				return formulaCommandError(stderr, "gc formula catalog", jsonOutput, err)
 			}
 			scope, err := resolveFormulaScope(cfg, cityPath)
 			if err != nil {
-				return err
+				return formulaCommandError(stderr, "gc formula catalog", jsonOutput, err)
 			}
 			entries, warnings := formulaCatalogEntries(scope.searchPaths)
 			if jsonOutput {
@@ -497,6 +492,14 @@ func formulaSearchPathsForList(cfg *config.City) []string {
 	return all
 }
 
+func formulaCommandError(stderr io.Writer, command string, jsonOutput bool, err error) error {
+	if err == nil || jsonOutput {
+		return err
+	}
+	fmt.Fprintf(stderr, "%s: %v\n", command, err) //nolint:errcheck // best-effort stderr
+	return errExit
+}
+
 func formulaShowJSONFromRecipe(recipe *formula.Recipe, cityPath string, scope formulaScope, rigVars, providedVars, displayVars map[string]string) formulaShowJSON {
 	out := formulaShowJSON{
 		SchemaVersion: "1",
@@ -595,19 +598,19 @@ bead into a sub-workflow at runtime.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cityPath, err := resolveCity()
 			if err != nil {
-				return err
+				return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
 			}
 			cfg, err := loadCityConfig(cityPath, stderr)
 			if err != nil {
-				return err
+				return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
 			}
 			scope, err := resolveFormulaScope(cfg, cityPath)
 			if err != nil {
-				return err
+				return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
 			}
 			store, err := openStoreAtForCity(scope.storeRoot, cityPath)
 			if err != nil {
-				return err
+				return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
 			}
 
 			cookVars := parseFormulaVars(vars)
@@ -615,10 +618,7 @@ bead into a sub-workflow at runtime.`,
 			if attach != "" {
 				recipe, err := formula.CompileWithoutRuntimeVarValidation(cmd.Context(), args[0], scope.searchPaths, cookVars)
 				if err != nil {
-					// SilenceErrors on the root would drop a raw error return,
-					// exiting 1 with no diagnostic. Surface it on stderr.
-					fmt.Fprintf(stderr, "gc formula cook: compile: %v\n", err) //nolint:errcheck // best-effort stderr
-					return errExit
+					return formulaCommandError(stderr, "gc formula cook: compile", jsonOutput, err)
 				}
 
 				result, err := molecule.Attach(cmd.Context(), store, recipe, attach, molecule.AttachOptions{
@@ -626,7 +626,7 @@ bead into a sub-workflow at runtime.`,
 					Vars:  cookVars,
 				})
 				if err != nil {
-					return err
+					return formulaCommandError(stderr, "gc formula cook: attach", jsonOutput, err)
 				}
 
 				if jsonOutput {
@@ -659,20 +659,17 @@ bead into a sub-workflow at runtime.`,
 				Vars:  cookVars,
 			})
 			if err != nil {
-				// SilenceErrors on the root would drop a raw error return,
-				// exiting 1 with no diagnostic (e.g. a graph.v2 formula when
-				// [daemon] formula_v2 is disabled). Surface it on stderr.
-				fmt.Fprintf(stderr, "gc formula cook: %v\n", err) //nolint:errcheck // best-effort stderr
-				return errExit
+				return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
 			}
 
 			rootMeta, err := parseMetadataArgs(metadata)
 			if err != nil {
-				return err
+				return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
 			}
 			if len(rootMeta) > 0 {
 				if err := store.SetMetadataBatch(result.RootID, rootMeta); err != nil {
-					return fmt.Errorf("setting root metadata on %s: %w", result.RootID, err)
+					err := fmt.Errorf("setting root metadata on %s: %w", result.RootID, err)
+					return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
 				}
 			}
 
