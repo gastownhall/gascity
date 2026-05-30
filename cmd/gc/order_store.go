@@ -168,6 +168,14 @@ func orderExecEnvWithError(cityPath string, cfg *config.City, target execStoreTa
 	applyOrderExecCanonicalDoltEnv(cityPath, target.ScopeRoot, env)
 	ensureProjectedDoltEnvExplicit(env)
 	ensureProjectedPostgresEnvExplicit(env)
+	// Order-supplied [order.env] entries take effect last so they can
+	// override the controller-derived projection. The intended use is
+	// per-order threshold tuning (e.g. raising GC_DOCTOR_LATENCY_WARN_S
+	// for a noisy city) without editing the order's shell scripts or
+	// the parent process environment.
+	for k, v := range a.Env {
+		env[k] = v
+	}
 	return mergeRuntimeEnv(nil, env), nil
 }
 

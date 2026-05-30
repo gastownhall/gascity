@@ -42,6 +42,14 @@ type Order struct {
 	Timeout string `toml:"timeout,omitempty"`
 	// Enabled controls whether the order is active. Defaults to true.
 	Enabled *bool `toml:"enabled,omitempty"`
+	// Env is a map of environment variables exported into an exec
+	// order's child process. Use the `[order.env]` TOML table to
+	// override thresholds (e.g. GC_DOCTOR_LATENCY_WARN_S) without
+	// editing the order's shell scripts or the controller's parent
+	// environment. Overrides are applied last and win over the
+	// controller-derived projection. Not currently plumbed for
+	// wisp dispatch.
+	Env map[string]string `toml:"env,omitempty"`
 	// Source is the absolute file path to the discovered order file (set by scanner, not from TOML).
 	Source string `toml:"-"`
 	// FormulaLayer is the formula layer directory this order was
@@ -62,18 +70,19 @@ func (a *Order) ScopedName() string {
 }
 
 type orderDecode struct {
-	Description string `toml:"description,omitempty"`
-	Formula     string `toml:"formula,omitempty"`
-	Exec        string `toml:"exec,omitempty"`
-	Trigger     string `toml:"trigger,omitempty"`
-	Gate        string `toml:"gate,omitempty"`
-	Interval    string `toml:"interval,omitempty"`
-	Schedule    string `toml:"schedule,omitempty"`
-	Check       string `toml:"check,omitempty"`
-	On          string `toml:"on,omitempty"`
-	Pool        string `toml:"pool,omitempty"`
-	Timeout     string `toml:"timeout,omitempty"`
-	Enabled     *bool  `toml:"enabled,omitempty"`
+	Description string            `toml:"description,omitempty"`
+	Formula     string            `toml:"formula,omitempty"`
+	Exec        string            `toml:"exec,omitempty"`
+	Trigger     string            `toml:"trigger,omitempty"`
+	Gate        string            `toml:"gate,omitempty"`
+	Interval    string            `toml:"interval,omitempty"`
+	Schedule    string            `toml:"schedule,omitempty"`
+	Check       string            `toml:"check,omitempty"`
+	On          string            `toml:"on,omitempty"`
+	Pool        string            `toml:"pool,omitempty"`
+	Timeout     string            `toml:"timeout,omitempty"`
+	Enabled     *bool             `toml:"enabled,omitempty"`
+	Env         map[string]string `toml:"env,omitempty"`
 }
 
 func (d orderDecode) normalized() Order {
@@ -93,6 +102,7 @@ func (d orderDecode) normalized() Order {
 		Pool:        d.Pool,
 		Timeout:     d.Timeout,
 		Enabled:     d.Enabled,
+		Env:         d.Env,
 	}
 }
 

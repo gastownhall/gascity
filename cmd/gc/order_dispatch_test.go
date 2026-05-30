@@ -6383,6 +6383,97 @@ func TestOrderExecEnvSetsBeadsActorToOrderName(t *testing.T) {
 	}
 }
 
+// TestOrderExecEnvAppliesOrderEnvOverrides verifies that env entries
+// declared in `[order.env]` on the order TOML reach the dispatched
+// subprocess. This is the per-order tuning knob for threshold env vars
+// (GC_DOCTOR_LATENCY_WARN_S, GC_JSONL_SPIKE_THRESHOLD, etc.) that would
+// otherwise require editing the controller's parent environment.
+func TestOrderExecEnvAppliesOrderEnvOverrides(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("GC_DOLT", "skip")
+	_ = os.Unsetenv("BEADS_ACTOR")
+
+	cityDir := t.TempDir()
+	target := execStoreTarget{ScopeRoot: cityDir, ScopeKind: "city", Prefix: "pc"}
+	a := orders.Order{
+		Name:     "doctor",
+		Trigger:  "cooldown",
+		Interval: "1m",
+		Exec:     "true",
+		Env: map[string]string{
+			"GC_DOCTOR_LATENCY_WARN_S": "5",
+			"CUSTOM_ORDER_FLAG":        "yes",
+		},
+	}
+
+	envSlice, err := orderExecEnvWithError(cityDir, nil, target, a)
+	if err != nil {
+		t.Fatalf("orderExecEnvWithError() error = %v", err)
+	}
+
+	wants := []string{
+		"GC_DOCTOR_LATENCY_WARN_S=5",
+		"CUSTOM_ORDER_FLAG=yes",
+	}
+	for _, want := range wants {
+		found := false
+		for _, entry := range envSlice {
+			if entry == want {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("orderExecEnv missing %q; env=%v", want, envSlice)
+		}
+	}
+}
+
+// TestOrderExecEnvOrderEnvOverridesProjectedDefaults verifies that
+// `[order.env]` wins over controller-derived defaults — the whole point
+// of per-order tuning is to override what the projection set up.
+func TestOrderExecEnvOrderEnvOverridesProjectedDefaults(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("GC_DOLT", "skip")
+
+	cityDir := t.TempDir()
+	target := execStoreTarget{ScopeRoot: cityDir, ScopeKind: "city", Prefix: "pc"}
+	a := orders.Order{
+		Name:     "scoped-order",
+		Trigger:  "cooldown",
+		Interval: "1m",
+		Exec:     "true",
+		Env: map[string]string{
+			// GC_STORE_SCOPE is set unconditionally to target.ScopeKind
+			// earlier in orderExecEnv; the override must win.
+			"GC_STORE_SCOPE": "overridden",
+		},
+	}
+
+	envSlice, err := orderExecEnvWithError(cityDir, nil, target, a)
+	if err != nil {
+		t.Fatalf("orderExecEnvWithError() error = %v", err)
+	}
+
+	want := "GC_STORE_SCOPE=overridden"
+	bad := "GC_STORE_SCOPE=city"
+	foundWant, foundBad := false, false
+	for _, entry := range envSlice {
+		switch entry {
+		case want:
+			foundWant = true
+		case bad:
+			foundBad = true
+		}
+	}
+	if !foundWant {
+		t.Errorf("orderExecEnv missing override %q; env=%v", want, envSlice)
+	}
+	if foundBad {
+		t.Errorf("orderExecEnv kept default %q despite override; env=%v", bad, envSlice)
+	}
+}
+
 // TestOrderExecEnvSkipsBeadsActorForUnnamedOrder guards against accidentally
 // emitting "BEADS_ACTOR=order:" (empty suffix) when an order has no name.
 // The conditional in orderExecEnv prevents that — verified here so future

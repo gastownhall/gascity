@@ -328,3 +328,41 @@ interval = "24h"
 		t.Fatalf("Trigger = %q, want %q", a.Trigger, "cron")
 	}
 }
+
+func TestParseEnv(t *testing.T) {
+	data := []byte(`
+[order]
+exec = "scripts/doctor.sh"
+trigger = "cooldown"
+interval = "5m"
+
+[order.env]
+GC_DOCTOR_LATENCY_WARN_S = "3"
+GC_JSONL_SPIKE_THRESHOLD = "30"
+`)
+	a, err := Parse(data)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if a.Env["GC_DOCTOR_LATENCY_WARN_S"] != "3" {
+		t.Errorf("Env[GC_DOCTOR_LATENCY_WARN_S] = %q, want %q", a.Env["GC_DOCTOR_LATENCY_WARN_S"], "3")
+	}
+	if a.Env["GC_JSONL_SPIKE_THRESHOLD"] != "30" {
+		t.Errorf("Env[GC_JSONL_SPIKE_THRESHOLD] = %q, want %q", a.Env["GC_JSONL_SPIKE_THRESHOLD"], "30")
+	}
+}
+
+func TestParseEnvAbsent(t *testing.T) {
+	data := []byte(`
+[order]
+formula = "mol-test"
+trigger = "manual"
+`)
+	a, err := Parse(data)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if len(a.Env) != 0 {
+		t.Errorf("Env = %v, want empty when absent", a.Env)
+	}
+}
