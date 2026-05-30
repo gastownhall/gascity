@@ -131,6 +131,7 @@ func TestJSONResultStructsExposeExplicitOKField(t *testing.T) {
 		{name: "handoff", value: handoffJSONResult{}},
 		{name: "build-image", value: buildImageJSONResult{}},
 		{name: "mcp list", value: projectedMCPJSON{}},
+		{name: "formula catalog", value: formulaCatalogJSON{}},
 		{name: "formula list", value: formulaListJSON{}},
 		{name: "formula show", value: formulaShowJSON{}},
 		{name: "event emit", value: eventEmitJSONResult{}},
@@ -157,6 +158,7 @@ func TestFixedResultSchemasPinSchemaVersion(t *testing.T) {
 	for _, command := range [][]string{
 		{"handoff"},
 		{"build-image"},
+		{"formula", "catalog"},
 		{"formula", "list"},
 		{"formula", "show"},
 		{"event", "emit"},

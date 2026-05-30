@@ -23,6 +23,7 @@ func newFormulaCmd(stdout, stderr io.Writer) *cobra.Command {
 
 	cmd.AddCommand(newFormulaListCmd(stdout, stderr))
 	cmd.AddCommand(newFormulaShowCmd(stdout, stderr))
+	cmd.AddCommand(newFormulaCatalogCmd(stdout, stderr))
 	cmd.AddCommand(newFormulaCookCmd(stdout, stderr))
 	return cmd
 }
@@ -256,6 +257,42 @@ Examples:
 	return cmd
 }
 
+func newFormulaCatalogCmd(stdout, stderr io.Writer) *cobra.Command {
+	var jsonOutput bool
+	cmd := &cobra.Command{
+		Use:    "catalog",
+		Short:  "List formulas opted into agent workflow discovery",
+		Hidden: true,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			cityPath, err := resolveCity()
+			if err != nil {
+				return err
+			}
+			cfg, err := loadCityConfig(cityPath, stderr)
+			if err != nil {
+				return err
+			}
+			scope, err := resolveFormulaScope(cfg, cityPath)
+			if err != nil {
+				return err
+			}
+			entries, err := formulaCatalogEntries(scope.searchPaths)
+			if err != nil {
+				return err
+			}
+			if jsonOutput {
+				return writeCLIJSONLine(stdout, formulaCatalogJSONFromEntries(entries))
+			}
+			for _, entry := range entries {
+				_, _ = fmt.Fprintf(stdout, "%s\t%s\n", entry.Name, entry.Description)
+			}
+			return nil
+		},
+	}
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "emit JSON")
+	return cmd
+}
+
 type formulaListJSON struct {
 	SchemaVersion string                 `json:"schema_version"`
 	OK            bool                   `json:"ok"`
@@ -273,6 +310,19 @@ type formulaListRowJSON struct {
 
 type formulaListSummaryJSON struct {
 	Count int `json:"count"`
+}
+
+type formulaCatalogJSON struct {
+	SchemaVersion string                    `json:"schema_version"`
+	OK            bool                      `json:"ok"`
+	Formulas      []formulaCatalogEntryJSON `json:"formulas"`
+	Summary       formulaListSummaryJSON    `json:"summary"`
+	Warnings      []jsonContractWarning     `json:"warnings,omitempty"`
+}
+
+type formulaCatalogEntryJSON struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
 }
 
 type formulaShowJSON struct {
@@ -339,6 +389,11 @@ func listFormulaRows(warningWriter ...io.Writer) (string, []string, []formulaLis
 	}
 	paths := formulaSearchPathsForList(cfg)
 
+	rows := formulaRowsForSearchPaths(paths)
+	return cityPath, paths, rows
+}
+
+func formulaRowsForSearchPaths(paths []string) []formulaListRowJSON {
 	// Scan search paths for canonical and legacy formula TOML files,
 	// deduplicating by name (last path wins, matching formula layer
 	// resolution order).
@@ -370,7 +425,58 @@ func listFormulaRows(warningWriter ...io.Writer) (string, []string, []formulaLis
 	for _, name := range names {
 		rows = append(rows, formulaListRowJSON{Name: name, Source: winners[name]})
 	}
-	return cityPath, paths, rows
+	return rows
+}
+
+func formulaCatalogEntries(searchPaths []string) ([]formulaCatalogEntryJSON, error) {
+	rows := formulaRowsForSearchPaths(searchPaths)
+	parser := formula.NewParser(searchPaths...).SetSource(formula.SourceFromEnv())
+
+	entries := make([]formulaCatalogEntryJSON, 0, len(rows))
+	seen := make(map[string]string)
+	for _, row := range rows {
+		parsed, err := parser.ParseFile(row.Source)
+		if err != nil {
+			return nil, fmt.Errorf("read formula catalog metadata for %q: %w", row.Name, err)
+		}
+		if parsed.Catalog == nil {
+			continue
+		}
+
+		name := strings.TrimSpace(parsed.Catalog.Name)
+		if name == "" {
+			return nil, fmt.Errorf("formula %q: catalog.name is required", row.Name)
+		}
+		if name != row.Name {
+			return nil, fmt.Errorf("formula %q: catalog.name %q must match formula name %q", row.Name, name, row.Name)
+		}
+		description := strings.TrimSpace(parsed.Catalog.Description)
+		if description == "" {
+			return nil, fmt.Errorf("formula %q: catalog.description is required", row.Name)
+		}
+		if previous, ok := seen[name]; ok {
+			return nil, fmt.Errorf("duplicate catalog formula name %q in %q and %q", name, previous, row.Name)
+		}
+		seen[name] = row.Name
+		entries = append(entries, formulaCatalogEntryJSON{
+			Name:        name,
+			Description: description,
+		})
+	}
+
+	slices.SortFunc(entries, func(a, b formulaCatalogEntryJSON) int {
+		return strings.Compare(a.Name, b.Name)
+	})
+	return entries, nil
+}
+
+func formulaCatalogJSONFromEntries(entries []formulaCatalogEntryJSON) formulaCatalogJSON {
+	return formulaCatalogJSON{
+		SchemaVersion: "1",
+		OK:            true,
+		Formulas:      entries,
+		Summary:       formulaListSummaryJSON{Count: len(entries)},
+	}
 }
 
 func formulaSearchPathsForList(cfg *config.City) []string {

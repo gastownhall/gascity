@@ -312,3 +312,148 @@ func TestFormulaShowJSONFromRecipe(t *testing.T) {
 		t.Fatalf("steps = %+v", got.Steps)
 	}
 }
+
+func TestFormulaCatalogEntriesUseResolvedWinnersAndSort(t *testing.T) {
+	cityDir := t.TempDir()
+	rigDir := t.TempDir()
+
+	writeFormulaTestFile(t, cityDir, "build-run", `formula = "build-run"
+description = "city build"
+
+[catalog]
+name = "build-run"
+description = "City build workflow"
+
+[[steps]]
+id = "run"
+title = "Run"
+`)
+	writeFormulaTestFile(t, cityDir, "internal-helper", `formula = "internal-helper"
+description = "not user runnable"
+
+[[steps]]
+id = "run"
+title = "Run"
+`)
+	writeFormulaTestFile(t, rigDir, "review", `formula = "review"
+description = "review"
+
+[catalog]
+name = "review"
+description = "Review a completed implementation."
+
+[[steps]]
+id = "review"
+title = "Review"
+`)
+	writeFormulaTestFile(t, rigDir, "build-run", `formula = "build-run"
+description = "rig build"
+
+[catalog]
+name = "build-run"
+description = "Rig-specific build workflow"
+
+[[steps]]
+id = "run"
+title = "Run"
+`)
+
+	got, err := formulaCatalogEntries([]string{cityDir, rigDir})
+	if err != nil {
+		t.Fatalf("formulaCatalogEntries: %v", err)
+	}
+	want := []formulaCatalogEntryJSON{
+		{Name: "build-run", Description: "Rig-specific build workflow"},
+		{Name: "review", Description: "Review a completed implementation."},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("catalog entries = %+v, want %+v", got, want)
+	}
+}
+
+func TestFormulaCatalogEntriesRejectInvalidMetadata(t *testing.T) {
+	t.Run("name mismatch", func(t *testing.T) {
+		dir := t.TempDir()
+		writeFormulaTestFile(t, dir, "build-run", `formula = "build-run"
+
+[catalog]
+name = "build"
+description = "Build workflow"
+
+[[steps]]
+id = "run"
+title = "Run"
+`)
+
+		_, err := formulaCatalogEntries([]string{dir})
+		if err == nil {
+			t.Fatal("expected catalog name mismatch error")
+		}
+		if !strings.Contains(err.Error(), `catalog.name "build" must match formula name "build-run"`) {
+			t.Fatalf("error = %v", err)
+		}
+	})
+
+	t.Run("missing description", func(t *testing.T) {
+		dir := t.TempDir()
+		writeFormulaTestFile(t, dir, "review", `formula = "review"
+
+[catalog]
+name = "review"
+
+[[steps]]
+id = "run"
+title = "Run"
+`)
+
+		_, err := formulaCatalogEntries([]string{dir})
+		if err == nil {
+			t.Fatal("expected missing catalog description error")
+		}
+		if !strings.Contains(err.Error(), `catalog.description is required`) {
+			t.Fatalf("error = %v", err)
+		}
+	})
+}
+
+func TestFormulaCatalogCommandJSONFromEntries(t *testing.T) {
+	var stdout bytes.Buffer
+	payload := formulaCatalogJSONFromEntries([]formulaCatalogEntryJSON{
+		{Name: "build-run", Description: "Build workflow"},
+	})
+	if err := writeCLIJSONLine(&stdout, payload); err != nil {
+		t.Fatalf("writeCLIJSONLine: %v", err)
+	}
+
+	var got struct {
+		SchemaVersion string `json:"schema_version"`
+		OK            bool   `json:"ok"`
+		Formulas      []struct {
+			Name        string `json:"name"`
+			Description string `json:"description"`
+			Source      string `json:"source"`
+		} `json:"formulas"`
+		Summary struct {
+			Count int `json:"count"`
+		} `json:"summary"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatalf("formula catalog JSON is invalid: %v\n%s", err, stdout.String())
+	}
+	if got.SchemaVersion != "1" || !got.OK || got.Summary.Count != 1 {
+		t.Fatalf("payload = %+v", got)
+	}
+	if len(got.Formulas) != 1 || got.Formulas[0].Name != "build-run" || got.Formulas[0].Description != "Build workflow" {
+		t.Fatalf("formulas = %+v", got.Formulas)
+	}
+	if got.Formulas[0].Source != "" {
+		t.Fatalf("catalog JSON leaked source path: %+v", got.Formulas[0])
+	}
+}
+
+func writeFormulaTestFile(t *testing.T, dir, name, content string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, name+".formula.toml"), []byte(content), 0o644); err != nil {
+		t.Fatalf("write formula %s: %v", name, err)
+	}
+}
