@@ -2633,18 +2633,77 @@ func (a *Agent) AttachEnabled() bool {
 	return a.Attach == nil || *a.Attach
 }
 
+// poolDemandKeys lists the routing metadata keys the pool-demand predicate
+// consults, in precedence order. gc.run_target — the canonical per-step
+// target stamped by the graph.v2 stamper (and, since #2386, the legacy
+// stamper) — is preferred; gc.routed_to is the compatibility fallback for
+// beads authored before the gc.run_target migration. The worker claim path
+// (EffectiveWorkQuery Tier 3) and the reconciler demand path
+// (EffectivePoolDemandQuery) walk these in the same order so that a graph.v2
+// workflow root stamping only gc.run_target is both spawned-for and
+// claimable (#2763 — completes the reader migration #2386 began;
+// bdReadyPoolDemandShell was the one reader site it missed).
+var poolDemandKeys = []string{"gc.run_target", "gc.routed_to"}
+
 // bdReadyPoolDemandShell returns the bd ready predicate for unassigned,
-// non-epic pool demand routed to target. This is the one-source-of-truth for the
-// "is there work on this routed queue?" question that both the worker (via
-// EffectiveWorkQuery Tier 3) and the reconciler (via EffectivePoolDemandQuery,
-// count-form) ask. Diverging the two re-introduces the protocol-mismatch class;
-// see the "scale_check ↔ work_query correspondence" note in
-// engdocs/architecture/dispatch.md.
+// non-epic pool demand matched on metadata field key=target. This is the
+// one-source-of-truth for the "is there work on this routed queue?" question
+// that both the worker (via EffectiveWorkQuery Tier 3) and the reconciler (via
+// EffectivePoolDemandQuery, count-form) ask. Diverging the two re-introduces
+// the protocol-mismatch class; see the "scale_check ↔ work_query
+// correspondence" note in engdocs/architecture/dispatch.md.
+//
+// bd ready cannot express a single "match key A or key B" predicate
+// (--metadata-field is AND-combined and there is no key-absent filter), so the
+// run_target/routed_to precedence is composed at the shell layer by
+// poolDemandFirstRowProbes (work_query) and poolDemandCountShell (count-form),
+// which call this helper once per key in poolDemandKeys order.
 //
 // Callers append their own bd flags (--limit=1 for first-row work_query;
-// piped to jq 'length' for the count-form) and shell handling.
-func bdReadyPoolDemandShell(target string) string {
-	return `bd ready --metadata-field gc.routed_to=` + target + ` --unassigned --exclude-type=epic --json`
+// --limit 0 piped to jq 'length' for the count-form) and shell handling.
+func bdReadyPoolDemandShell(key, target string) string {
+	return `bd ready --metadata-field ` + key + `=` + target + ` --unassigned --exclude-type=epic --json`
+}
+
+// poolDemandFirstRowProbes emits the work_query Tier 3 body for target: it
+// tries each routing key in poolDemandKeys precedence order at --limit=1,
+// printing the first non-empty JSON array and exiting 0. Used for both the
+// primary and legacy workflow-control targets. The caller appends a terminal
+// fallthrough (e.g. printf "[]") for the all-empty case.
+func poolDemandFirstRowProbes(target string) string {
+	var b strings.Builder
+	for _, key := range poolDemandKeys {
+		b.WriteString(`r=$(` + bdReadyPoolDemandShell(key, target) + ` --limit=1 2>/dev/null); `)
+		b.WriteString(`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; `)
+	}
+	return b.String()
+}
+
+// poolDemandCountShell emits the reconciler count-form for target: it counts
+// ready demand under the first routing key in poolDemandKeys that yields a
+// non-empty result (gc.run_target preferred, gc.routed_to fallback) and prints
+// the array length. Precedence mirrors poolDemandFirstRowProbes so the
+// reconciler's spawn decision and the worker's claim decision agree — the
+// worker drains the preferred tier first, then the count surfaces the fallback
+// tier on the next pass.
+//
+// Unlike the work_query probes, this form must NOT redirect bd stderr or
+// default to zero: a failed `bd ready` has to surface as an error rather than
+// masquerade as "no demand", which would silently stop the pool from spawning.
+// Every query is chained with && so any non-zero bd exit short-circuits the
+// whole expression (TestEffectiveScaleCheckUsesReadyOnly).
+func poolDemandCountShell(target string) string {
+	keys := poolDemandKeys
+	last := len(keys) - 1
+	// Least-preferred key assigns unconditionally; its bd failure propagates
+	// through the outer &&.
+	expr := `ready_json=$(` + bdReadyPoolDemandShell(keys[last], target) + ` --limit 0)`
+	for i := last - 1; i >= 0; i-- {
+		query := bdReadyPoolDemandShell(keys[i], target) + ` --limit 0`
+		expr = `cur=$(` + query + `) && ` +
+			`if [ "$cur" != "[]" ]; then ready_json="$cur"; else ` + expr + `; fi`
+	}
+	return expr + ` && printf '%s\n' "$ready_json" | jq 'length'`
 }
 
 func (a *Agent) poolDemandTarget() string {
@@ -2704,13 +2763,13 @@ func (a *Agent) EffectiveWorkQuery() string {
 			`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
 			`done; ` +
 			// Tier 3: ready unassigned routed to this config (shared routed queue).
+			// Prefers gc.run_target, falls back to gc.routed_to (poolDemandKeys).
 			// Only ephemeral sessions and controller probes consume generic config demand.
 			`case "$GC_SESSION_ORIGIN" in ` +
 			`ephemeral|"") ;; ` +
 			`*) exit 0 ;; ` +
 			`esac; ` +
-			`r=$(` + bdReadyPoolDemandShell(target) + ` --limit=1 2>/dev/null); ` +
-			`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
+			poolDemandFirstRowProbes(target) +
 			`printf "[]"'`
 	}
 	return `sh -c '` +
@@ -2737,15 +2796,16 @@ func (a *Agent) EffectiveWorkQuery() string {
 		`done; ` +
 		`done; ` +
 		// Tier 3: ready unassigned routed to this config (shared routed queue),
-		// then the legacy workflow-control route for pre-rename graphs.
+		// then the legacy workflow-control route for pre-rename graphs. Each
+		// target prefers gc.run_target, falling back to gc.routed_to (poolDemandKeys).
 		// Only ephemeral sessions and controller probes consume generic config demand.
 		`case "$GC_SESSION_ORIGIN" in ` +
 		`ephemeral|"") ;; ` +
 		`*) exit 0 ;; ` +
 		`esac; ` +
-		`r=$(` + bdReadyPoolDemandShell(target) + ` --limit=1 2>/dev/null); ` +
-		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
-		bdReadyPoolDemandShell(legacyTarget) + ` --limit=1 2>/dev/null'`
+		poolDemandFirstRowProbes(target) +
+		poolDemandFirstRowProbes(legacyTarget) +
+		`printf "[]"'`
 }
 
 func legacyWorkflowControlQualifiedName(target string) string {
@@ -2827,8 +2887,7 @@ func (a *Agent) EffectivePoolDemandQuery() string {
 		return a.ScaleCheck
 	}
 	target := a.poolDemandTarget()
-	return `ready_json=$(` + bdReadyPoolDemandShell(target) +
-		` --limit 0) && printf '%s\n' "$ready_json" | jq 'length'`
+	return poolDemandCountShell(target)
 }
 
 // EffectiveScaleCheck returns the scale check command for this agent.
