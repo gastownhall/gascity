@@ -384,7 +384,12 @@ sync_database_sql() {
   # dolt's own stderr cannot echo it back. The -s guard skips an empty capture so
   # no spurious blank line is emitted.
   if [ -s "$push_err_tmp" ]; then
-    while IFS= read -r line; do
+    # `|| [ -n "$line" ]` flushes a final line that lacks a trailing newline:
+    # POSIX `read` returns non-zero at an unterminated EOF, so a terse
+    # newline-less dolt diagnostic (e.g. a SIGKILL-truncated `fatal: ...`) would
+    # otherwise be captured but never replayed — re-introducing the swallowed
+    # failure this command set out to surface.
+    while IFS= read -r line || [ -n "$line" ]; do
       printf '  %s: %s\n' "$name" "$line" >&2
     done < "$push_err_tmp"
   fi
