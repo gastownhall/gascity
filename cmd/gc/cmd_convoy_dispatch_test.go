@@ -3145,7 +3145,7 @@ func TestRunWorkflowServeSkipsPendingControlBeadAndProcessesLaterReady(t *testin
 	}
 }
 
-func TestRunControlDispatcherQuarantinesMalformedControlGraphFromPendingScopeBody(t *testing.T) {
+func TestRunControlDispatcherReturnsPendingForOpenScopeSubject(t *testing.T) {
 	clearGCEnv(t)
 	disableManagedDoltRecoveryForTest(t)
 
@@ -3161,29 +3161,38 @@ func TestRunControlDispatcherQuarantinesMalformedControlGraphFromPendingScopeBod
 	if err != nil {
 		t.Fatalf("create workflow: %v", err)
 	}
-	subject, err := store.Create(beads.Bead{
-		Title: "closed subject",
+	body, err := store.Create(beads.Bead{
+		Title: "scope body",
 		Type:  "task",
 		Metadata: map[string]string{
-			"gc.scope_ref":    "missing-scope",
+			"gc.kind":         "scope",
+			"gc.scope_ref":    "pending-scope",
+			"gc.scope_role":   "body",
+			"gc.root_bead_id": workflow.ID,
+		},
+	})
+	if err != nil {
+		t.Fatalf("create scope body: %v", err)
+	}
+	subject, err := store.Create(beads.Bead{
+		Title: "open subject",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.scope_ref":    "pending-scope",
 			"gc.scope_role":   "member",
 			"gc.root_bead_id": workflow.ID,
-			"gc.outcome":      "fail",
 		},
 	})
 	if err != nil {
 		t.Fatalf("create subject: %v", err)
 	}
-	if err := store.Close(subject.ID); err != nil {
-		t.Fatalf("close subject: %v", err)
-	}
 	control, err := store.Create(beads.Bead{
-		Title: "Finalize missing scope",
+		Title: "Finalize pending scope",
 		Type:  "task",
 		Metadata: map[string]string{
 			"gc.kind":         "scope-check",
 			"gc.root_bead_id": workflow.ID,
-			"gc.scope_ref":    "missing-scope",
+			"gc.scope_ref":    "pending-scope",
 			"gc.scope_role":   "control",
 		},
 	})
@@ -3196,37 +3205,33 @@ func TestRunControlDispatcherQuarantinesMalformedControlGraphFromPendingScopeBod
 
 	var stderr bytes.Buffer
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
-	if err := runControlDispatcherWithStoreAndConfig(t.TempDir(), t.TempDir(), store, control, control.ID, cfg, io.Discard, &stderr); err != nil {
-		t.Fatalf("runControlDispatcherWithStoreAndConfig: %v", err)
+	err = runControlDispatcherWithStoreAndConfig(t.TempDir(), t.TempDir(), store, control, control.ID, cfg, io.Discard, &stderr)
+	if !errors.Is(err, dispatch.ErrControlPending) {
+		t.Fatalf("runControlDispatcherWithStoreAndConfig error = %v, want ErrControlPending", err)
 	}
 
 	after, err := store.Get(control.ID)
 	if err != nil {
 		t.Fatalf("get control: %v", err)
 	}
-	if after.Status != "closed" {
-		t.Fatalf("control status = %q, want closed", after.Status)
+	if after.Status != "open" {
+		t.Fatalf("control status = %q, want open", after.Status)
 	}
-	if got := after.Metadata["gc.outcome"]; got != "fail" {
-		t.Fatalf("gc.outcome = %q, want fail", got)
+	if got := after.Metadata["gc.control_quarantined"]; got != "" {
+		t.Fatalf("gc.control_quarantined = %q, want empty", got)
 	}
-	if got := after.Metadata["gc.failure_reason"]; got != "malformed_control_graph" {
-		t.Fatalf("gc.failure_reason = %q, want malformed_control_graph", got)
+	if slices.Contains(after.Labels, "gc:control-quarantined") {
+		t.Fatalf("labels = %#v, want no gc:control-quarantined", after.Labels)
 	}
-	if got := after.Metadata["gc.control_quarantined"]; got != "true" {
-		t.Fatalf("gc.control_quarantined = %q, want true", got)
+	bodyAfter, err := store.Get(body.ID)
+	if err != nil {
+		t.Fatalf("get scope body: %v", err)
 	}
-	if got := after.Metadata["gc.control_quarantined_at"]; got == "" {
-		t.Fatalf("gc.control_quarantined_at is empty")
+	if bodyAfter.Status != "open" {
+		t.Fatalf("body status = %q, want open", bodyAfter.Status)
 	}
-	if got := after.Metadata["gc.control_quarantine_reason"]; !strings.Contains(got, "scope body missing") {
-		t.Fatalf("gc.control_quarantine_reason = %q, want scope body missing", got)
-	}
-	if !slices.Contains(after.Labels, "gc:control-quarantined") {
-		t.Fatalf("labels = %#v, want gc:control-quarantined", after.Labels)
-	}
-	if got := stderr.String(); !strings.Contains(got, "control dispatch: quarantined bead="+control.ID) {
-		t.Fatalf("stderr = %q, want quarantine message", got)
+	if got := stderr.String(); strings.Contains(got, "control dispatch: quarantined bead="+control.ID) {
+		t.Fatalf("stderr = %q, want no quarantine message", got)
 	}
 }
 
