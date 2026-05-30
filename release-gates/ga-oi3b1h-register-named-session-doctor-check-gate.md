@@ -1,11 +1,11 @@
 # Release gate: ga-oi3b1h
 
-**Bead:** ga-oi3b1h - needs-deploy: register named session doctor check  
-**Source review bead:** ga-lxpw04  
-**Branch:** `builder/ga-ihrikr.2-register-named-session-doctor`  
-**Code HEAD before gate:** `2f4aa7371f019d5003d3086023f62098ed8cb549`  
-**Base:** `origin/main` at `fa150384f`  
-**Stack note:** depends on open base PR #2762 (`builder/ga-ihrikr.1-named-session-doctor`)  
+**Bead:** ga-oi3b1h - needs-deploy: register named session doctor check
+**Source review bead:** ga-lxpw04
+**Branch:** `builder/ga-ihrikr.2-register-named-session-doctor`
+**Code HEAD before gate:** `2f4aa7371f019d5003d3086023f62098ed8cb549`
+**Base:** `origin/main` at `fa150384f`
+**Stack note:** depends on open base PR #2762 (`builder/ga-ihrikr.1-named-session-doctor`)
 **Verdict:** **PASS**
 
 ## Criteria
