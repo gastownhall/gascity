@@ -75,18 +75,30 @@ data_dir="$DOLT_DATA_DIR"
 
 # Wall-clock bound for SQL-mode remote push (seconds). Defaults to 1800s; the
 # prior fixed 120s ceiling SIGKILLed large first pushes that succeed when issued
-# directly to the running sql-server. An explicitly-empty / non-numeric / 0
-# value is rejected (not silently defaulted) so a misconfigured bound fails loud
-# instead of producing a misleading "TIMEOUT after 0s". Validated before any
-# per-database logic so an invalid value aborts before any db is touched.
+# directly to the running sql-server. An explicitly-empty / non-numeric / any
+# numeric-zero value is rejected (not silently defaulted) so a misconfigured
+# bound fails loud instead of producing a misleading "TIMEOUT after 0s".
+# Validated before any per-database logic so an invalid value aborts before any
+# db is touched.
+#
+# A valid value is non-empty, all-digit, and has at least one non-zero digit.
+# Matching only the literal "0" would let leading-zero forms ("00", "000")
+# through; GNU `timeout` treats a 0 duration as "disable the timeout", which
+# would run the push UNBOUNDED — the exact anti-hang outcome this bound exists
+# to prevent. The first arm rejects empty/non-digit input; the second accepts
+# any all-digit string containing a non-zero digit; the default arm rejects the
+# remaining all-digit-but-all-zero forms.
 push_timeout="${GC_DOLT_SYNC_PUSH_TIMEOUT_SECS-1800}"
 case "$push_timeout" in
-  ''|*[!0-9]*|0)
-    printf 'gc dolt sync: invalid GC_DOLT_SYNC_PUSH_TIMEOUT_SECS=%s (must be a positive integer)\n' \
-      "$push_timeout" >&2
-    exit 2
-    ;;
+  ''|*[!0-9]*) push_timeout_valid=false ;;
+  *[1-9]*)     push_timeout_valid=true ;;
+  *)           push_timeout_valid=false ;;
 esac
+if [ "$push_timeout_valid" != true ]; then
+  printf 'gc dolt sync: invalid GC_DOLT_SYNC_PUSH_TIMEOUT_SECS=%s (must be a positive integer)\n' \
+    "$push_timeout" >&2
+  exit 2
+fi
 
 # Check if server is running.
 is_running() {
@@ -334,7 +346,15 @@ sync_database_sql() {
     push_query="USE \`$name\`; CALL DOLT_PUSH('$remote_name', '$refspec_arg')"
   fi
   push_rc=0
-  push_err_tmp=$(mktemp)
+  # Guard mktemp: under `set -e` a bare `$(mktemp)` failure (unwritable or
+  # exhausted TMPDIR) would abort the whole multi-db sync run with an opaque
+  # error — itself the swallowed/opaque-failure class this command set out to
+  # eliminate. Degrade to a per-db error so the loop reports this db and moves
+  # on rather than killing the run.
+  push_err_tmp=$(mktemp) || {
+    echo "  $name: ERROR: cannot create temp file for push diagnostics" >&2
+    return 1
+  }
   # Route push under push_timeout (not dolt_sql's 120s metadata ceiling) and
   # capture stderr so the underlying dolt diagnostic survives, preserving the
   # real exit code via `|| push_rc=$?`.
