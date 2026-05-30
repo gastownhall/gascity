@@ -14,6 +14,23 @@ import (
 
 const syncScript = "commands/sync/run.sh"
 
+// syncFilteredEnv returns os.Environ() with every env var the sync script reads
+// stripped, so a test's GC_DOLT_* config is exactly what the test sets and never
+// what the developer/CI happens to export. GC_DOLT_SYNC_PUSH_TIMEOUT_SECS is in
+// the set because its validator (run.sh) now runs unconditionally on every
+// invocation and exits 2 on any invalid value — an ambient invalid value would
+// otherwise flip success-path tests red and make the refspec-failure tests pass
+// for the wrong reason. Centralizing the key list here keeps every sync test
+// hermetic against the same surface and prevents the strip-set from drifting
+// per call site.
+func syncFilteredEnv() []string {
+	return filteredEnv(
+		"PATH", "GC_DOLT_HOST", "GC_DOLT_PORT", "GC_DOLT_USER",
+		"GC_DOLT_PASSWORD", "GC_DOLT_DATA_DIR", "GC_CITY_PATH", "GC_PACK_DIR",
+		"GC_DOLT_SYNC_PUSH_TIMEOUT_SECS",
+	)
+}
+
 func startReachableTCPListener(t *testing.T) (int, func()) {
 	t.Helper()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -157,6 +174,40 @@ exit 0
 	}
 }
 
+// writeSyncFakeDoltPushFailsNoTrailingNewline installs a fake dolt whose
+// SQL-mode DOLT_PUSH failure writes a two-line stderr whose FINAL line lacks a
+// trailing newline (a terse dolt diagnostic or a SIGKILL-truncated write). Every
+// other helper emits via `printf '%s\n'`, so only this one exercises the
+// replay loop's last-line flush: a `while read` without the `|| [ -n "$line" ]`
+// guard would drop the unterminated final line — the swallowed-failure class
+// this command set exists to surface.
+func writeSyncFakeDoltPushFailsNoTrailingNewline(t *testing.T, dir string, exitCode int) {
+	t.Helper()
+	logPath := filepath.Join(dir, "dolt.log")
+	body := `#!/bin/sh
+printf '%s\n' "$*" >> "` + logPath + `"
+case "$*" in
+  *"SELECT name, url FROM dolt_remotes LIMIT 1"*)
+    printf 'name,url\norigin,https://example.invalid/repo\n'
+    exit 0
+    ;;
+  *"SELECT active_branch()"*)
+    printf 'active_branch()\nmain\n'
+    exit 0
+    ;;
+  *DOLT_PUSH*)
+    printf 'error: push diagnostics follow\n' >&2
+    printf '%s' 'fatal: last line no newline' >&2
+    exit ` + strconv.Itoa(exitCode) + `
+    ;;
+esac
+exit 0
+`
+	if err := os.WriteFile(filepath.Join(dir, "dolt"), []byte(body), 0o755); err != nil {
+		t.Fatalf("write fake dolt: %v", err)
+	}
+}
+
 // writeSyncFakeDoltCLIPushFails installs a fake dolt for CLI-mode tests that
 // fails the `dolt push` invocation with the given exit code (writing a stderr
 // line). CLI mode resolves remotes/refspec from disk, so the push is the only
@@ -263,10 +314,7 @@ func TestSyncUsesLiveSQLWhenManagedServerReachable(t *testing.T) {
 	bdLog := writeSyncFakeBeadsBD(t, cityPath)
 
 	cmd := exec.Command("sh", script, "--db", "app")
-	cmd.Env = append(filteredEnv(
-		"PATH", "GC_DOLT_HOST", "GC_DOLT_PORT", "GC_DOLT_USER",
-		"GC_DOLT_PASSWORD", "GC_DOLT_DATA_DIR", "GC_CITY_PATH", "GC_PACK_DIR",
-	),
+	cmd.Env = append(syncFilteredEnv(),
 		"PATH="+binDir+":"+os.Getenv("PATH"),
 		"GC_CITY_PATH="+cityPath,
 		"GC_PACK_DIR="+root,
@@ -331,10 +379,7 @@ func TestSyncForceUsesSetUpstreamWithLiveSQL(t *testing.T) {
 	_ = writeSyncFakeBeadsBD(t, cityPath)
 
 	cmd := exec.Command("sh", script, "--db", "app", "--force")
-	cmd.Env = append(filteredEnv(
-		"PATH", "GC_DOLT_HOST", "GC_DOLT_PORT", "GC_DOLT_USER",
-		"GC_DOLT_PASSWORD", "GC_DOLT_DATA_DIR", "GC_CITY_PATH", "GC_PACK_DIR",
-	),
+	cmd.Env = append(syncFilteredEnv(),
 		"PATH="+binDir+":"+os.Getenv("PATH"),
 		"GC_CITY_PATH="+cityPath,
 		"GC_PACK_DIR="+root,
@@ -377,10 +422,7 @@ func TestSyncForceUsesResolvedActiveBranchWithLiveSQL(t *testing.T) {
 	_ = writeSyncFakeBeadsBD(t, cityPath)
 
 	cmd := exec.Command("sh", script, "--db", "app", "--force")
-	cmd.Env = append(filteredEnv(
-		"PATH", "GC_DOLT_HOST", "GC_DOLT_PORT", "GC_DOLT_USER",
-		"GC_DOLT_PASSWORD", "GC_DOLT_DATA_DIR", "GC_CITY_PATH", "GC_PACK_DIR",
-	),
+	cmd.Env = append(syncFilteredEnv(),
 		"PATH="+binDir+":"+os.Getenv("PATH"),
 		"GC_CITY_PATH="+cityPath,
 		"GC_PACK_DIR="+root,
@@ -423,10 +465,7 @@ func TestSyncForceUsesRefspecEnvOverrideWithLiveSQL(t *testing.T) {
 	_ = writeSyncFakeBeadsBD(t, cityPath)
 
 	cmd := exec.Command("sh", script, "--db", "app", "--force")
-	cmd.Env = append(filteredEnv(
-		"PATH", "GC_DOLT_HOST", "GC_DOLT_PORT", "GC_DOLT_USER",
-		"GC_DOLT_PASSWORD", "GC_DOLT_DATA_DIR", "GC_CITY_PATH", "GC_PACK_DIR",
-	),
+	cmd.Env = append(syncFilteredEnv(),
 		"PATH="+binDir+":"+os.Getenv("PATH"),
 		"GC_CITY_PATH="+cityPath,
 		"GC_PACK_DIR="+root,
@@ -470,10 +509,7 @@ func TestSyncDryRunShowsResolvedActiveBranch(t *testing.T) {
 	_ = writeSyncFakeBeadsBD(t, cityPath)
 
 	cmd := exec.Command("sh", script, "--db", "app", "--dry-run")
-	cmd.Env = append(filteredEnv(
-		"PATH", "GC_DOLT_HOST", "GC_DOLT_PORT", "GC_DOLT_USER",
-		"GC_DOLT_PASSWORD", "GC_DOLT_DATA_DIR", "GC_CITY_PATH", "GC_PACK_DIR",
-	),
+	cmd.Env = append(syncFilteredEnv(),
 		"PATH="+binDir+":"+os.Getenv("PATH"),
 		"GC_CITY_PATH="+cityPath,
 		"GC_PACK_DIR="+root,
@@ -514,10 +550,7 @@ func TestSyncSkipsDatabasesWithNoSyncMarker(t *testing.T) {
 	_ = writeSyncFakeBeadsBD(t, cityPath)
 
 	cmd := exec.Command("sh", script, "--db", "app")
-	cmd.Env = append(filteredEnv(
-		"PATH", "GC_DOLT_HOST", "GC_DOLT_PORT", "GC_DOLT_USER",
-		"GC_DOLT_PASSWORD", "GC_DOLT_DATA_DIR", "GC_CITY_PATH", "GC_PACK_DIR",
-	),
+	cmd.Env = append(syncFilteredEnv(),
 		"PATH="+binDir+":"+os.Getenv("PATH"),
 		"GC_CITY_PATH="+cityPath,
 		"GC_PACK_DIR="+root,
@@ -557,10 +590,7 @@ func TestSyncReportsLiveSQLRemoteLookupFailure(t *testing.T) {
 	_ = writeSyncFakeBeadsBD(t, cityPath)
 
 	cmd := exec.Command("sh", script, "--db", "app")
-	cmd.Env = append(filteredEnv(
-		"PATH", "GC_DOLT_HOST", "GC_DOLT_PORT", "GC_DOLT_USER",
-		"GC_DOLT_PASSWORD", "GC_DOLT_DATA_DIR", "GC_CITY_PATH", "GC_PACK_DIR",
-	),
+	cmd.Env = append(syncFilteredEnv(),
 		"PATH="+binDir+":"+os.Getenv("PATH"),
 		"GC_CITY_PATH="+cityPath,
 		"GC_PACK_DIR="+root,
@@ -613,10 +643,7 @@ func TestSyncCLIFallbackPushesOriginMain(t *testing.T) {
 	_ = writeSyncFakeBeadsBD(t, cityPath)
 
 	cmd := exec.Command("sh", script, "--db", "app")
-	cmd.Env = append(filteredEnv(
-		"PATH", "GC_DOLT_HOST", "GC_DOLT_PORT", "GC_DOLT_USER",
-		"GC_DOLT_PASSWORD", "GC_DOLT_DATA_DIR", "GC_CITY_PATH", "GC_PACK_DIR",
-	),
+	cmd.Env = append(syncFilteredEnv(),
 		"PATH="+binDir+":"+os.Getenv("PATH"),
 		"GC_CITY_PATH="+cityPath,
 		"GC_PACK_DIR="+root,
@@ -661,10 +688,7 @@ func TestSyncPushesActiveBranchWhenSet(t *testing.T) {
 	_ = writeSyncFakeBeadsBD(t, cityPath)
 
 	cmd := exec.Command("sh", script, "--db", "app")
-	cmd.Env = append(filteredEnv(
-		"PATH", "GC_DOLT_HOST", "GC_DOLT_PORT", "GC_DOLT_USER",
-		"GC_DOLT_PASSWORD", "GC_DOLT_DATA_DIR", "GC_CITY_PATH", "GC_PACK_DIR",
-	),
+	cmd.Env = append(syncFilteredEnv(),
 		"PATH="+binDir+":"+os.Getenv("PATH"),
 		"GC_CITY_PATH="+cityPath,
 		"GC_PACK_DIR="+root,
@@ -713,10 +737,7 @@ func TestSyncRefspecEnvOverride(t *testing.T) {
 	_ = writeSyncFakeBeadsBD(t, cityPath)
 
 	cmd := exec.Command("sh", script, "--db", "app")
-	cmd.Env = append(filteredEnv(
-		"PATH", "GC_DOLT_HOST", "GC_DOLT_PORT", "GC_DOLT_USER",
-		"GC_DOLT_PASSWORD", "GC_DOLT_DATA_DIR", "GC_CITY_PATH", "GC_PACK_DIR",
-	),
+	cmd.Env = append(syncFilteredEnv(),
 		"PATH="+binDir+":"+os.Getenv("PATH"),
 		"GC_CITY_PATH="+cityPath,
 		"GC_PACK_DIR="+root,
@@ -762,10 +783,7 @@ func TestSyncRefspecEnvOverrideHyphenInDBName(t *testing.T) {
 	_ = writeSyncFakeBeadsBD(t, cityPath)
 
 	cmd := exec.Command("sh", script, "--db", "my-app")
-	cmd.Env = append(filteredEnv(
-		"PATH", "GC_DOLT_HOST", "GC_DOLT_PORT", "GC_DOLT_USER",
-		"GC_DOLT_PASSWORD", "GC_DOLT_DATA_DIR", "GC_CITY_PATH", "GC_PACK_DIR",
-	),
+	cmd.Env = append(syncFilteredEnv(),
 		"PATH="+binDir+":"+os.Getenv("PATH"),
 		"GC_CITY_PATH="+cityPath,
 		"GC_PACK_DIR="+root,
@@ -817,10 +835,7 @@ func TestSyncCLIFallbackReadsRepoStateForActiveBranch(t *testing.T) {
 	_ = writeSyncFakeBeadsBD(t, cityPath)
 
 	cmd := exec.Command("sh", script, "--db", "app")
-	cmd.Env = append(filteredEnv(
-		"PATH", "GC_DOLT_HOST", "GC_DOLT_PORT", "GC_DOLT_USER",
-		"GC_DOLT_PASSWORD", "GC_DOLT_DATA_DIR", "GC_CITY_PATH", "GC_PACK_DIR",
-	),
+	cmd.Env = append(syncFilteredEnv(),
 		"PATH="+binDir+":"+os.Getenv("PATH"),
 		"GC_CITY_PATH="+cityPath,
 		"GC_PACK_DIR="+root,
@@ -873,10 +888,7 @@ func TestSyncCLIFallbackIgnoresNestedRepoStateHead(t *testing.T) {
 	_ = writeSyncFakeBeadsBD(t, cityPath)
 
 	cmd := exec.Command("sh", script, "--db", "app")
-	cmd.Env = append(filteredEnv(
-		"PATH", "GC_DOLT_HOST", "GC_DOLT_PORT", "GC_DOLT_USER",
-		"GC_DOLT_PASSWORD", "GC_DOLT_DATA_DIR", "GC_CITY_PATH", "GC_PACK_DIR",
-	),
+	cmd.Env = append(syncFilteredEnv(),
 		"PATH="+binDir+":"+os.Getenv("PATH"),
 		"GC_CITY_PATH="+cityPath,
 		"GC_PACK_DIR="+root,
@@ -924,10 +936,7 @@ func TestSyncRefspecInvalidOverrideFails(t *testing.T) {
 	_ = writeSyncFakeBeadsBD(t, cityPath)
 
 	cmd := exec.Command("sh", script, "--db", "app")
-	cmd.Env = append(filteredEnv(
-		"PATH", "GC_DOLT_HOST", "GC_DOLT_PORT", "GC_DOLT_USER",
-		"GC_DOLT_PASSWORD", "GC_DOLT_DATA_DIR", "GC_CITY_PATH", "GC_PACK_DIR",
-	),
+	cmd.Env = append(syncFilteredEnv(),
 		"PATH="+binDir+":"+os.Getenv("PATH"),
 		"GC_CITY_PATH="+cityPath,
 		"GC_PACK_DIR="+root,
@@ -964,10 +973,7 @@ func TestSyncRefspecOptionShapedOverrideFails(t *testing.T) {
 	_ = writeSyncFakeBeadsBD(t, cityPath)
 
 	cmd := exec.Command("sh", script, "--db", "app")
-	cmd.Env = append(filteredEnv(
-		"PATH", "GC_DOLT_HOST", "GC_DOLT_PORT", "GC_DOLT_USER",
-		"GC_DOLT_PASSWORD", "GC_DOLT_DATA_DIR", "GC_CITY_PATH", "GC_PACK_DIR",
-	),
+	cmd.Env = append(syncFilteredEnv(),
 		"PATH="+binDir+":"+os.Getenv("PATH"),
 		"GC_CITY_PATH="+cityPath,
 		"GC_PACK_DIR="+root,
@@ -1004,10 +1010,7 @@ func TestSyncWarnsWhenActiveBranchFallbacksToMain(t *testing.T) {
 	_ = writeSyncFakeBeadsBD(t, cityPath)
 
 	cmd := exec.Command("sh", script, "--db", "app")
-	cmd.Env = append(filteredEnv(
-		"PATH", "GC_DOLT_HOST", "GC_DOLT_PORT", "GC_DOLT_USER",
-		"GC_DOLT_PASSWORD", "GC_DOLT_DATA_DIR", "GC_CITY_PATH", "GC_PACK_DIR",
-	),
+	cmd.Env = append(syncFilteredEnv(),
 		"PATH="+binDir+":"+os.Getenv("PATH"),
 		"GC_CITY_PATH="+cityPath,
 		"GC_PACK_DIR="+root,
@@ -1054,11 +1057,7 @@ func TestSyncSQLPushTimeoutReportsTimeout(t *testing.T) {
 	_ = writeSyncFakeBeadsBD(t, cityPath)
 
 	cmd := exec.Command("sh", script, "--db", "app")
-	cmd.Env = append(filteredEnv(
-		"PATH", "GC_DOLT_HOST", "GC_DOLT_PORT", "GC_DOLT_USER",
-		"GC_DOLT_PASSWORD", "GC_DOLT_DATA_DIR", "GC_CITY_PATH", "GC_PACK_DIR",
-		"GC_DOLT_SYNC_PUSH_TIMEOUT_SECS",
-	),
+	cmd.Env = append(syncFilteredEnv(),
 		"PATH="+binDir+":"+os.Getenv("PATH"),
 		"GC_CITY_PATH="+cityPath,
 		"GC_PACK_DIR="+root,
@@ -1102,11 +1101,7 @@ func TestSyncSQLPushReportsExitCode(t *testing.T) {
 	_ = writeSyncFakeBeadsBD(t, cityPath)
 
 	cmd := exec.Command("sh", script, "--db", "app")
-	cmd.Env = append(filteredEnv(
-		"PATH", "GC_DOLT_HOST", "GC_DOLT_PORT", "GC_DOLT_USER",
-		"GC_DOLT_PASSWORD", "GC_DOLT_DATA_DIR", "GC_CITY_PATH", "GC_PACK_DIR",
-		"GC_DOLT_SYNC_PUSH_TIMEOUT_SECS",
-	),
+	cmd.Env = append(syncFilteredEnv(),
 		"PATH="+binDir+":"+os.Getenv("PATH"),
 		"GC_CITY_PATH="+cityPath,
 		"GC_PACK_DIR="+root,
@@ -1148,11 +1143,7 @@ func TestSyncSQLPushReplaysStderr(t *testing.T) {
 	_ = writeSyncFakeBeadsBD(t, cityPath)
 
 	cmd := exec.Command("sh", script, "--db", "app")
-	cmd.Env = append(filteredEnv(
-		"PATH", "GC_DOLT_HOST", "GC_DOLT_PORT", "GC_DOLT_USER",
-		"GC_DOLT_PASSWORD", "GC_DOLT_DATA_DIR", "GC_CITY_PATH", "GC_PACK_DIR",
-		"GC_DOLT_SYNC_PUSH_TIMEOUT_SECS",
-	),
+	cmd.Env = append(syncFilteredEnv(),
 		"PATH="+binDir+":"+os.Getenv("PATH"),
 		"GC_CITY_PATH="+cityPath,
 		"GC_PACK_DIR="+root,
@@ -1170,6 +1161,53 @@ func TestSyncSQLPushReplaysStderr(t *testing.T) {
 	}
 	if !strings.Contains(string(out), "app: fatal: authentication required") {
 		t.Fatalf("replayed stderr should be prefixed with the db name, got:\n%s", out)
+	}
+}
+
+// TestSyncSQLPushReplaysStderrFinalLineWithoutTrailingNewline verifies the
+// stderr replay surfaces a final line that lacks a trailing newline — a terse
+// dolt diagnostic or a SIGKILL-truncated write. POSIX `read` returns non-zero
+// at an unterminated EOF, so without the loop's `|| [ -n "$line" ]` flush the
+// last line is captured but never replayed, re-introducing the swallowed
+// failure this command set exists to surface.
+func TestSyncSQLPushReplaysStderrFinalLineWithoutTrailingNewline(t *testing.T) {
+	root := repoRoot(t)
+	script := filepath.Join(root, syncScript)
+
+	port, cleanup := startReachableTCPListener(t)
+	defer cleanup()
+
+	cityPath := t.TempDir()
+	dataDir := filepath.Join(cityPath, "data")
+	if err := os.MkdirAll(filepath.Join(dataDir, "app", ".dolt"), 0o755); err != nil {
+		t.Fatalf("mkdir db: %v", err)
+	}
+
+	binDir := t.TempDir()
+	writeSyncFakeDoltPushFailsNoTrailingNewline(t, binDir, 1)
+	_ = writeSyncFakeBeadsBD(t, cityPath)
+
+	cmd := exec.Command("sh", script, "--db", "app")
+	cmd.Env = append(syncFilteredEnv(),
+		"PATH="+binDir+":"+os.Getenv("PATH"),
+		"GC_CITY_PATH="+cityPath,
+		"GC_PACK_DIR="+root,
+		"GC_DOLT_DATA_DIR="+dataDir,
+		fmt.Sprintf("GC_DOLT_PORT=%d", port),
+		"GC_DOLT_USER=root",
+		"GC_DOLT_PASSWORD=",
+	)
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("expected push failure, output:\n%s", out)
+	}
+	// The newline-less final line must still be surfaced, db-prefixed.
+	if !strings.Contains(string(out), "app: fatal: last line no newline") {
+		t.Fatalf("replay dropped the final stderr line lacking a trailing newline, got:\n%s", out)
+	}
+	// The preceding (newline-terminated) line must survive too.
+	if !strings.Contains(string(out), "app: error: push diagnostics follow") {
+		t.Fatalf("expected the first stderr line to be surfaced, got:\n%s", out)
 	}
 }
 
@@ -1194,11 +1232,7 @@ func TestSyncSQLPushEmptyStderrNoBlankLines(t *testing.T) {
 	_ = writeSyncFakeBeadsBD(t, cityPath)
 
 	cmd := exec.Command("sh", script, "--db", "app")
-	cmd.Env = append(filteredEnv(
-		"PATH", "GC_DOLT_HOST", "GC_DOLT_PORT", "GC_DOLT_USER",
-		"GC_DOLT_PASSWORD", "GC_DOLT_DATA_DIR", "GC_CITY_PATH", "GC_PACK_DIR",
-		"GC_DOLT_SYNC_PUSH_TIMEOUT_SECS",
-	),
+	cmd.Env = append(syncFilteredEnv(),
 		"PATH="+binDir+":"+os.Getenv("PATH"),
 		"GC_CITY_PATH="+cityPath,
 		"GC_PACK_DIR="+root,
@@ -1239,11 +1273,7 @@ func TestSyncSQLPushTimeoutHonorsConfiguredCeiling(t *testing.T) {
 	_ = writeSyncFakeBeadsBD(t, cityPath)
 
 	cmd := exec.Command("sh", script, "--db", "app")
-	cmd.Env = append(filteredEnv(
-		"PATH", "GC_DOLT_HOST", "GC_DOLT_PORT", "GC_DOLT_USER",
-		"GC_DOLT_PASSWORD", "GC_DOLT_DATA_DIR", "GC_CITY_PATH", "GC_PACK_DIR",
-		"GC_DOLT_SYNC_PUSH_TIMEOUT_SECS",
-	),
+	cmd.Env = append(syncFilteredEnv(),
 		"PATH="+binDir+":"+os.Getenv("PATH"),
 		"GC_CITY_PATH="+cityPath,
 		"GC_PACK_DIR="+root,
@@ -1292,11 +1322,7 @@ func TestSyncSQLPushReplayDoesNotLeakPassword(t *testing.T) {
 
 	const secret = "s3cr3t-push-token"
 	cmd := exec.Command("sh", script, "--db", "app")
-	cmd.Env = append(filteredEnv(
-		"PATH", "GC_DOLT_HOST", "GC_DOLT_PORT", "GC_DOLT_USER",
-		"GC_DOLT_PASSWORD", "GC_DOLT_DATA_DIR", "GC_CITY_PATH", "GC_PACK_DIR",
-		"GC_DOLT_SYNC_PUSH_TIMEOUT_SECS",
-	),
+	cmd.Env = append(syncFilteredEnv(),
 		"PATH="+binDir+":"+os.Getenv("PATH"),
 		"GC_CITY_PATH="+cityPath,
 		"GC_PACK_DIR="+root,
@@ -1349,11 +1375,7 @@ func TestSyncSQLPushTimeoutReplaysNoMechanismMarker(t *testing.T) {
 	_ = writeSyncFakeBeadsBD(t, cityPath)
 
 	cmd := exec.Command("sh", script, "--db", "app")
-	cmd.Env = append(filteredEnv(
-		"PATH", "GC_DOLT_HOST", "GC_DOLT_PORT", "GC_DOLT_USER",
-		"GC_DOLT_PASSWORD", "GC_DOLT_DATA_DIR", "GC_CITY_PATH", "GC_PACK_DIR",
-		"GC_DOLT_SYNC_PUSH_TIMEOUT_SECS",
-	),
+	cmd.Env = append(syncFilteredEnv(),
 		"PATH="+binDir+":"+os.Getenv("PATH"),
 		"GC_CITY_PATH="+cityPath,
 		"GC_PACK_DIR="+root,
@@ -1399,11 +1421,7 @@ func TestSyncSQLPushTempFileFailureDegradesPerDb(t *testing.T) {
 	_ = writeSyncFakeBeadsBD(t, cityPath)
 
 	cmd := exec.Command("sh", script, "--db", "app")
-	cmd.Env = append(filteredEnv(
-		"PATH", "GC_DOLT_HOST", "GC_DOLT_PORT", "GC_DOLT_USER",
-		"GC_DOLT_PASSWORD", "GC_DOLT_DATA_DIR", "GC_CITY_PATH", "GC_PACK_DIR",
-		"GC_DOLT_SYNC_PUSH_TIMEOUT_SECS",
-	),
+	cmd.Env = append(syncFilteredEnv(),
 		"PATH="+binDir+":"+os.Getenv("PATH"),
 		"GC_CITY_PATH="+cityPath,
 		"GC_PACK_DIR="+root,
@@ -1445,11 +1463,7 @@ func assertSyncRejectsInvalidPushTimeout(t *testing.T, bad string) {
 	_ = writeSyncFakeBeadsBD(t, cityPath)
 
 	cmd := exec.Command("sh", script, "--db", "app")
-	cmd.Env = append(filteredEnv(
-		"PATH", "GC_DOLT_HOST", "GC_DOLT_PORT", "GC_DOLT_USER",
-		"GC_DOLT_PASSWORD", "GC_DOLT_DATA_DIR", "GC_CITY_PATH", "GC_PACK_DIR",
-		"GC_DOLT_SYNC_PUSH_TIMEOUT_SECS",
-	),
+	cmd.Env = append(syncFilteredEnv(),
 		"PATH="+binDir+":"+os.Getenv("PATH"),
 		"GC_CITY_PATH="+cityPath,
 		"GC_PACK_DIR="+root,
@@ -1532,11 +1546,7 @@ func TestSyncCLIPushReportsExitCode(t *testing.T) {
 	_ = writeSyncFakeBeadsBD(t, cityPath)
 
 	cmd := exec.Command("sh", script, "--db", "app")
-	cmd.Env = append(filteredEnv(
-		"PATH", "GC_DOLT_HOST", "GC_DOLT_PORT", "GC_DOLT_USER",
-		"GC_DOLT_PASSWORD", "GC_DOLT_DATA_DIR", "GC_CITY_PATH", "GC_PACK_DIR",
-		"GC_DOLT_SYNC_PUSH_TIMEOUT_SECS",
-	),
+	cmd.Env = append(syncFilteredEnv(),
 		"PATH="+binDir+":"+os.Getenv("PATH"),
 		"GC_CITY_PATH="+cityPath,
 		"GC_PACK_DIR="+root,
@@ -1577,11 +1587,7 @@ func TestSyncCLIForcePushReportsExitCode(t *testing.T) {
 	_ = writeSyncFakeBeadsBD(t, cityPath)
 
 	cmd := exec.Command("sh", script, "--db", "app", "--force")
-	cmd.Env = append(filteredEnv(
-		"PATH", "GC_DOLT_HOST", "GC_DOLT_PORT", "GC_DOLT_USER",
-		"GC_DOLT_PASSWORD", "GC_DOLT_DATA_DIR", "GC_CITY_PATH", "GC_PACK_DIR",
-		"GC_DOLT_SYNC_PUSH_TIMEOUT_SECS",
-	),
+	cmd.Env = append(syncFilteredEnv(),
 		"PATH="+binDir+":"+os.Getenv("PATH"),
 		"GC_CITY_PATH="+cityPath,
 		"GC_PACK_DIR="+root,
