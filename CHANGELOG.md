@@ -68,6 +68,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   matching `gc mail send`. Operators should use `gc mail` commands or
   explicit both-tier/wisp-aware bead queries for mail visibility; default
   issue-tier `bd list` output and git sync do not include wisp-tier messages.
+- Built-in pack auto-includes now skip packs already reachable from rig pack
+  graphs, preventing duplicate maintenance agents when a rig pack imports a
+  built-in pack transitively.
 
 ## [1.2.0] - 2026-05-25
 

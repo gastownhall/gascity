@@ -3215,6 +3215,86 @@ source = "../maintenance"
 	}
 }
 
+func TestResolvedPackNames_NonTransitiveImportDoesNotExposeNestedPack(t *testing.T) {
+	dir := t.TempDir()
+
+	writeFile(t, dir, "packs/maintenance/pack.toml", `
+[pack]
+name = "maintenance"
+schema = 2
+`)
+	writeFile(t, dir, "packs/middle/pack.toml", `
+[pack]
+name = "middle"
+schema = 2
+
+[imports.maintenance]
+source = "../maintenance"
+`)
+	writeFile(t, dir, "packs/root/pack.toml", `
+[pack]
+name = "root"
+schema = 2
+
+[imports.middle]
+source = "../middle"
+transitive = false
+`)
+
+	names := resolvedPackNames([]string{"packs/root"}, nil, fsys.OSFS{}, dir)
+	if !names["middle"] {
+		t.Fatalf("middle pack was not recorded: names=%v", names)
+	}
+	if names["maintenance"] {
+		t.Fatalf("non-transitive import exposed nested maintenance pack: names=%v", names)
+	}
+}
+
+func TestResolvedPackNames_RevisitsPackReachedFirstThroughNonTransitiveImport(t *testing.T) {
+	dir := t.TempDir()
+
+	writeFile(t, dir, "packs/maintenance/pack.toml", `
+[pack]
+name = "maintenance"
+schema = 2
+`)
+	writeFile(t, dir, "packs/middle/pack.toml", `
+[pack]
+name = "middle"
+schema = 2
+
+[imports.maintenance]
+source = "../maintenance"
+`)
+	writeFile(t, dir, "packs/shallow/pack.toml", `
+[pack]
+name = "shallow"
+schema = 2
+
+[imports.middle]
+source = "../middle"
+transitive = false
+`)
+	writeFile(t, dir, "packs/deep/pack.toml", `
+[pack]
+name = "deep"
+schema = 2
+
+[imports.middle]
+source = "../middle"
+`)
+
+	for _, includes := range [][]string{
+		{"packs/shallow", "packs/deep"},
+		{"packs/deep", "packs/shallow"},
+	} {
+		names := resolvedPackNames(includes, nil, fsys.OSFS{}, dir)
+		if !names["maintenance"] {
+			t.Fatalf("includes %v did not resolve transitive maintenance after shallow visit: names=%v", includes, names)
+		}
+	}
+}
+
 // agentNamesOf is a small test helper for readable failure messages.
 func agentNamesOf(agents []Agent) []string {
 	names := make([]string, 0, len(agents))
