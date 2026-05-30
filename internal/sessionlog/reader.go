@@ -281,8 +281,8 @@ func ReadFileRawOlder(path string, tailCompactions int, beforeMessageID string) 
 }
 
 // ReadProviderFileOlder reads an older page of a provider-specific transcript.
-// Codex and Pi sessions do not currently support message-ID pagination, so the
-// full provider transcript is returned.
+// Provider families without page-aware readers return the full provider
+// transcript.
 func ReadProviderFileOlder(provider, path string, tailCompactions int, beforeMessageID string) (*Session, error) {
 	switch ProviderFamily(provider) {
 	case "codex":
@@ -296,15 +296,15 @@ func ReadProviderFileOlder(provider, path string, tailCompactions int, beforeMes
 	case "pi":
 		return ReadPiFile(path, tailCompactions)
 	case "antigravity":
-		return ReadAntigravityFile(path, tailCompactions)
+		return ReadAntigravityFilePage(path, tailCompactions, beforeMessageID, "")
 	default:
 		return ReadFileOlder(path, tailCompactions, beforeMessageID)
 	}
 }
 
 // ReadProviderFileRawOlder reads an older page of a provider-specific raw
-// transcript. Codex and Pi sessions do not currently support message-ID
-// pagination, so the full provider transcript is returned.
+// transcript. Provider families without page-aware readers return the full
+// provider transcript.
 func ReadProviderFileRawOlder(provider, path string, tailCompactions int, beforeMessageID string) (*Session, error) {
 	switch ProviderFamily(provider) {
 	case "codex":
@@ -318,7 +318,7 @@ func ReadProviderFileRawOlder(provider, path string, tailCompactions int, before
 	case "pi":
 		return ReadPiFile(path, tailCompactions)
 	case "antigravity":
-		return ReadAntigravityFileRaw(path, tailCompactions)
+		return ReadAntigravityFileRawPage(path, tailCompactions, beforeMessageID, "")
 	default:
 		return ReadFileRawOlder(path, tailCompactions, beforeMessageID)
 	}
@@ -381,8 +381,8 @@ func ReadFileRawNewer(path string, tailCompactions int, afterMessageID string) (
 }
 
 // ReadProviderFileNewer reads a newer page of a provider-specific transcript.
-// Codex and Pi sessions do not currently support message-ID pagination, so the
-// full provider transcript is returned.
+// Provider families without page-aware readers return the full provider
+// transcript.
 func ReadProviderFileNewer(provider, path string, tailCompactions int, afterMessageID string) (*Session, error) {
 	switch ProviderFamily(provider) {
 	case "codex":
@@ -396,15 +396,15 @@ func ReadProviderFileNewer(provider, path string, tailCompactions int, afterMess
 	case "pi":
 		return ReadPiFile(path, tailCompactions)
 	case "antigravity":
-		return ReadAntigravityFile(path, tailCompactions)
+		return ReadAntigravityFilePage(path, tailCompactions, "", afterMessageID)
 	default:
 		return ReadFileNewer(path, tailCompactions, afterMessageID)
 	}
 }
 
 // ReadProviderFileRawNewer reads a newer page of a provider-specific raw
-// transcript. Codex and Pi sessions do not currently support message-ID
-// pagination, so the full provider transcript is returned.
+// transcript. Provider families without page-aware readers return the full
+// provider transcript.
 func ReadProviderFileRawNewer(provider, path string, tailCompactions int, afterMessageID string) (*Session, error) {
 	switch ProviderFamily(provider) {
 	case "codex":
@@ -418,7 +418,7 @@ func ReadProviderFileRawNewer(provider, path string, tailCompactions int, afterM
 	case "pi":
 		return ReadPiFile(path, tailCompactions)
 	case "antigravity":
-		return ReadAntigravityFileRaw(path, tailCompactions)
+		return ReadAntigravityFileRawPage(path, tailCompactions, "", afterMessageID)
 	default:
 		return ReadFileRawNewer(path, tailCompactions, afterMessageID)
 	}

@@ -70,6 +70,19 @@ func ReadAntigravityFile(path string, tailCompactions int) (*Session, error) {
 	return sess, nil
 }
 
+// ReadAntigravityFilePage parses an agy trajectory JSONL log and applies
+// message-ID pagination using the stable agy-N entry IDs emitted by the reader.
+func ReadAntigravityFilePage(path string, tailCompactions int, beforeMessageID, afterMessageID string) (*Session, error) {
+	sess, err := readAntigravityFile(path, false)
+	if err != nil {
+		return nil, err
+	}
+	paginated, info := sliceAtCompactBoundaries(sess.Messages, tailCompactions, beforeMessageID, afterMessageID)
+	sess.Messages = paginated
+	sess.Pagination = info
+	return sess, nil
+}
+
 // ReadAntigravityFileRaw parses an agy trajectory JSONL log without display type filtering.
 func ReadAntigravityFileRaw(path string, tailCompactions int) (*Session, error) {
 	sess, err := readAntigravityFile(path, true)
@@ -81,6 +94,19 @@ func ReadAntigravityFileRaw(path string, tailCompactions int) (*Session, error) 
 		sess.Messages = paginated
 		sess.Pagination = info
 	}
+	return sess, nil
+}
+
+// ReadAntigravityFileRawPage parses an agy trajectory JSONL log without
+// display type filtering and applies message-ID pagination.
+func ReadAntigravityFileRawPage(path string, tailCompactions int, beforeMessageID, afterMessageID string) (*Session, error) {
+	sess, err := readAntigravityFile(path, true)
+	if err != nil {
+		return nil, err
+	}
+	paginated, info := sliceAtCompactBoundaries(sess.Messages, tailCompactions, beforeMessageID, afterMessageID)
+	sess.Messages = paginated
+	sess.Pagination = info
 	return sess, nil
 }
 
@@ -267,7 +293,7 @@ func consumeAgyPendingCallID(pendingCallIDs *[]string, preferred string) string 
 				return preferred
 			}
 		}
-		return preferred
+		return ""
 	}
 	if len(*pendingCallIDs) == 0 {
 		return ""
@@ -359,7 +385,9 @@ func antigravitySessionID(path string) string {
 // nested brain layout. workDir is accepted for signature symmetry with the
 // other provider keyed lookups; the agy conversation id is globally unique, so
 // it is not needed to disambiguate the transcript path.
-func FindAntigravitySessionFileByID(searchPaths []string, _, sessionID string) string {
+func FindAntigravitySessionFileByID(searchPaths []string, workDir, sessionID string) string {
+	_ = workDir
+
 	sessionID = safeAntigravitySessionDirName(sessionID)
 	if sessionID == "" {
 		return ""

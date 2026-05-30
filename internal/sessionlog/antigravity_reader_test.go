@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 )
 
@@ -286,6 +287,37 @@ func TestReadAntigravityFileCorrelatesExplicitOutOfOrderToolResults(t *testing.T
 	}
 }
 
+func TestReadAntigravityFileTreatsUnmatchedExplicitResultIDsAsSystem(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "transcript.jsonl")
+	body := `{"step_index":1,"type":"PLANNER_RESPONSE","created_at":"2026-04-04T09:00:01Z","content":"checking","tool_calls":[{"id":"call-a","name":"Read","args":{"path":"a.txt"}}]}` + "\n" +
+		`{"step_index":2,"type":"READ_FILE","created_at":"2026-04-04T09:00:02Z","tool_call_id":"call-a","content":"contents of a"}` + "\n" +
+		`{"step_index":3,"type":"READ_FILE","created_at":"2026-04-04T09:00:03Z","tool_call_id":"call-a","content":"duplicate result"}` + "\n" +
+		`{"step_index":4,"type":"READ_FILE","created_at":"2026-04-04T09:00:04Z","call_id":"call-unknown","content":"unknown result"}` + "\n"
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatalf("write transcript: %v", err)
+	}
+
+	sess, err := ReadAntigravityFileRaw(path, 0)
+	if err != nil {
+		t.Fatalf("ReadAntigravityFileRaw: %v", err)
+	}
+	if len(sess.Messages) != 4 {
+		t.Fatalf("messages = %d, want 4", len(sess.Messages))
+	}
+	if sess.Messages[1].Type != "result" || sess.Messages[1].ToolUseID != "call-a" {
+		t.Fatalf("first result = type %q tool_use_id %q, want result call-a", sess.Messages[1].Type, sess.Messages[1].ToolUseID)
+	}
+	if sess.Messages[2].Type != "system" || sess.Messages[2].ToolUseID != "" {
+		t.Fatalf("duplicate explicit result = type %q tool_use_id %q, want unmatched system entry", sess.Messages[2].Type, sess.Messages[2].ToolUseID)
+	}
+	if sess.Messages[3].Type != "system" || sess.Messages[3].ToolUseID != "" {
+		t.Fatalf("unknown explicit result = type %q tool_use_id %q, want unmatched system entry", sess.Messages[3].Type, sess.Messages[3].ToolUseID)
+	}
+	if sess.OrphanedToolUseIDs != nil {
+		t.Fatalf("OrphanedToolUseIDs = %#v, want nil after matched call-a", sess.OrphanedToolUseIDs)
+	}
+}
+
 func TestReadAntigravityFileReportsOpenToolUseTail(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "transcript.jsonl")
 	body := `{"step_index":1,"type":"PLANNER_RESPONSE","created_at":"2026-04-04T09:00:01Z","content":"checking","tool_calls":[{"id":"call-open","name":"Read","args":{"path":"README.md"}}]}` + "\n"
@@ -349,6 +381,49 @@ func TestReadAntigravityFileNormalizesInteractions(t *testing.T) {
 	}
 }
 
+func TestReadProviderFileAntigravityAppliesMessageIDCursors(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "transcript.jsonl")
+	body := `{"step_index":0,"type":"USER_INPUT","created_at":"2026-04-04T09:00:00Z","content":"first"}` + "\n" +
+		`{"step_index":1,"type":"PLANNER_RESPONSE","created_at":"2026-04-04T09:00:01Z","content":"second"}` + "\n" +
+		`{"step_index":2,"type":"USER_INPUT","created_at":"2026-04-04T09:00:02Z","content":"third"}` + "\n" +
+		`{"step_index":3,"type":"PLANNER_RESPONSE","created_at":"2026-04-04T09:00:03Z","content":"fourth"}` + "\n"
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatalf("write transcript: %v", err)
+	}
+
+	newer, err := ReadProviderFileNewer("antigravity/tmux-cli", path, 0, "agy-1")
+	if err != nil {
+		t.Fatalf("ReadProviderFileNewer: %v", err)
+	}
+	if got := antigravityEntryIDs(newer.Messages); !reflect.DeepEqual(got, []string{"agy-2", "agy-3"}) {
+		t.Fatalf("newer Antigravity message IDs = %v, want [agy-2 agy-3]", got)
+	}
+
+	older, err := ReadProviderFileOlder("antigravity/tmux-cli", path, 0, "agy-2")
+	if err != nil {
+		t.Fatalf("ReadProviderFileOlder: %v", err)
+	}
+	if got := antigravityEntryIDs(older.Messages); !reflect.DeepEqual(got, []string{"agy-0", "agy-1"}) {
+		t.Fatalf("older Antigravity message IDs = %v, want [agy-0 agy-1]", got)
+	}
+
+	rawNewer, err := ReadProviderFileRawNewer("antigravity/tmux-cli", path, 0, "agy-2")
+	if err != nil {
+		t.Fatalf("ReadProviderFileRawNewer: %v", err)
+	}
+	if got := antigravityEntryIDs(rawNewer.Messages); !reflect.DeepEqual(got, []string{"agy-3"}) {
+		t.Fatalf("raw newer Antigravity message IDs = %v, want [agy-3]", got)
+	}
+
+	rawOlder, err := ReadProviderFileRawOlder("antigravity/tmux-cli", path, 0, "agy-3")
+	if err != nil {
+		t.Fatalf("ReadProviderFileRawOlder: %v", err)
+	}
+	if got := antigravityEntryIDs(rawOlder.Messages); !reflect.DeepEqual(got, []string{"agy-0", "agy-1", "agy-2"}) {
+		t.Fatalf("raw older Antigravity message IDs = %v, want [agy-0 agy-1 agy-2]", got)
+	}
+}
+
 func TestFindAntigravitySessionFileHonorsSearchPaths(t *testing.T) {
 	// Point HOME at an empty dir so only the configured search path can match.
 	t.Setenv("HOME", t.TempDir())
@@ -380,4 +455,12 @@ func TestFindAntigravitySessionFileHonorsSearchPaths(t *testing.T) {
 	if got != transcriptPath {
 		t.Fatalf("FindAntigravitySessionFile() = %q, want %q", got, transcriptPath)
 	}
+}
+
+func antigravityEntryIDs(entries []*Entry) []string {
+	ids := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		ids = append(ids, entry.UUID)
+	}
+	return ids
 }

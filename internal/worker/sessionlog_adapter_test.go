@@ -113,6 +113,46 @@ func TestSessionLogAdapterLoadHistoryAntigravityCompletedToolUseIDs(t *testing.T
 	}
 }
 
+func TestSessionLogAdapterReadTranscriptAntigravityHonorsCursors(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "transcript.jsonl")
+	writeLines(t, path,
+		`{"step_index":0,"type":"USER_INPUT","created_at":"2026-04-04T09:00:00Z","content":"first"}`,
+		`{"step_index":1,"type":"PLANNER_RESPONSE","created_at":"2026-04-04T09:00:01Z","content":"second"}`,
+		`{"step_index":2,"type":"USER_INPUT","created_at":"2026-04-04T09:00:02Z","content":"third"}`,
+		`{"step_index":3,"type":"PLANNER_RESPONSE","created_at":"2026-04-04T09:00:03Z","content":"fourth"}`,
+	)
+
+	older, err := SessionLogAdapter{}.ReadTranscript(TranscriptRequest{
+		Provider:       "antigravity/tmux-cli",
+		TranscriptPath: path,
+		BeforeEntryID:  "agy-2",
+	})
+	if err != nil {
+		t.Fatalf("ReadTranscript older: %v", err)
+	}
+	if got := transcriptEntryIDs(older); strings.Join(got, ",") != "agy-0,agy-1" {
+		t.Fatalf("older Antigravity transcript IDs = %v, want [agy-0 agy-1]", got)
+	}
+
+	rawNewer, err := SessionLogAdapter{}.ReadTranscript(TranscriptRequest{
+		Provider:       "antigravity/tmux-cli",
+		TranscriptPath: path,
+		AfterEntryID:   "agy-2",
+		Raw:            true,
+	})
+	if err != nil {
+		t.Fatalf("ReadTranscript raw newer: %v", err)
+	}
+	if got := transcriptEntryIDs(rawNewer); strings.Join(got, ",") != "agy-3" {
+		t.Fatalf("raw newer Antigravity transcript IDs = %v, want [agy-3]", got)
+	}
+	if len(rawNewer.RawMessages) != 1 {
+		t.Fatalf("raw newer RawMessages = %d, want 1", len(rawNewer.RawMessages))
+	}
+}
+
 func TestSessionLogAdapterDiscoverTranscriptExplicitIDFailsClosed(t *testing.T) {
 	t.Parallel()
 
@@ -134,6 +174,14 @@ func TestSessionLogAdapterDiscoverTranscriptExplicitIDFailsClosed(t *testing.T) 
 	if discovered != "" {
 		t.Fatalf("DiscoverTranscript() = %q, want empty string when explicit session ID is missing", discovered)
 	}
+}
+
+func transcriptEntryIDs(result *TranscriptResult) []string {
+	ids := make([]string, 0, len(result.Session.Messages))
+	for _, entry := range result.Session.Messages {
+		ids = append(ids, entry.UUID)
+	}
+	return ids
 }
 
 func TestSessionLogAdapterDiscoverTranscriptKimiKeyedMissFailsClosed(t *testing.T) {

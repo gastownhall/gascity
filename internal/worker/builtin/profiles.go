@@ -458,6 +458,9 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 		ResumeStyle:      "flag",
 	},
 	"antigravity": {
+		// Antigravity does not currently expose a provider hook mechanism
+		// that Gas City can install; nudges still drain via the supervisor
+		// dispatcher / per-session poller.
 		DisplayName: "Antigravity",
 		Command:     "agy",
 		OptionDefaults: map[string]string{
