@@ -77,10 +77,11 @@ source_kind = "git"
 func TestPackRegistryAddListSearchShowRemove(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("GC_HOME", home)
+	writeEmptyRegistryConfig(t, home)
 	catalogDir := writeRegistryCatalog(t, packRegistryTestCatalog)
 
 	var stdout, stderr bytes.Buffer
-	if code := doPackRegistryAdd("main", catalogDir, false, false, &stdout, &stderr); code != 0 {
+	if code := doPackRegistryAdd("local", catalogDir, false, false, &stdout, &stderr); code != 0 {
 		t.Fatalf("add code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
 
@@ -89,7 +90,7 @@ func TestPackRegistryAddListSearchShowRemove(t *testing.T) {
 	if code := doPackRegistryList(false, &stdout, &stderr); code != 0 {
 		t.Fatalf("list code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "main") || !strings.Contains(stdout.String(), catalogDir) {
+	if !strings.Contains(stdout.String(), "local") || !strings.Contains(stdout.String(), catalogDir) {
 		t.Fatalf("list output missing registry: %q", stdout.String())
 	}
 
@@ -107,16 +108,16 @@ func TestPackRegistryAddListSearchShowRemove(t *testing.T) {
 	if code := doPackRegistryShow("lighthouse", false, false, &stdout, &stderr); code != 0 {
 		t.Fatalf("show code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "main:lighthouse") || !strings.Contains(stdout.String(), "1.2.0") {
+	if !strings.Contains(stdout.String(), "local:lighthouse") || !strings.Contains(stdout.String(), "1.2.0") {
 		t.Fatalf("unexpected show output: %q", stdout.String())
 	}
 
 	stdout.Reset()
 	stderr.Reset()
-	if code := doPackRegistryRemove("main", false, &stdout, &stderr); code != 0 {
+	if code := doPackRegistryRemove("local", false, &stdout, &stderr); code != 0 {
 		t.Fatalf("remove code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
-	if _, err := os.Stat(filepath.Join(home, "registry-cache", "main")); err != nil {
+	if _, err := os.Stat(filepath.Join(home, "registry-cache", "local")); err != nil {
 		t.Fatalf("registry cache pruned during remove, stat err=%v", err)
 	}
 
@@ -125,12 +126,12 @@ func TestPackRegistryAddListSearchShowRemove(t *testing.T) {
 	if code := doPackRegistryRefresh("", false, &stdout, &stderr); code != 0 {
 		t.Fatalf("refresh after remove code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
-	if _, err := os.Stat(filepath.Join(home, "registry-cache", "main")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(home, "registry-cache", "local")); !os.IsNotExist(err) {
 		t.Fatalf("registry cache not pruned by refresh, stat err=%v", err)
 	}
 }
 
-func TestPackRegistryCommandsDoNotImplicitlySeedDefaultRegistry(t *testing.T) {
+func TestPackRegistryCommandsPreRegisterDefaultRegistryOnVanillaHome(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("GC_HOME", home)
 
@@ -138,11 +139,8 @@ func TestPackRegistryCommandsDoNotImplicitlySeedDefaultRegistry(t *testing.T) {
 	if code := doPackRegistryList(false, &stdout, &stderr); code != 0 {
 		t.Fatalf("list code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "No pack registries configured.") {
-		t.Fatalf("list output = %q, want no registries message", stdout.String())
-	}
-	if _, err := os.Stat(packregistry.ConfigPath(home)); !os.IsNotExist(err) {
-		t.Fatalf("registry list should not seed registries.toml, stat err = %v", err)
+	if !strings.Contains(stdout.String(), packregistry.DefaultRegistryName) || !strings.Contains(stdout.String(), packregistry.DefaultRegistrySource) {
+		t.Fatalf("list output = %q, want default main registry", stdout.String())
 	}
 
 	stdout.Reset()
@@ -150,8 +148,8 @@ func TestPackRegistryCommandsDoNotImplicitlySeedDefaultRegistry(t *testing.T) {
 	if code := doPackRegistrySearch("gastown", "", false, 50, false, false, &stdout, &stderr); code != 0 {
 		t.Fatalf("search code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "No registry packs found.") {
-		t.Fatalf("search output = %q, want no packs message", stdout.String())
+	if !strings.Contains(stdout.String(), "gastown") || strings.Contains(stderr.String(), "cache unavailable") {
+		t.Fatalf("search output = stdout=%q stderr=%q, want default main results without cache warning", stdout.String(), stderr.String())
 	}
 }
 
@@ -160,6 +158,7 @@ func TestPackRegistryShowBareNameAmbiguous(t *testing.T) {
 	t.Setenv("GC_HOME", home)
 	mainDir := writeRegistryCatalog(t, packRegistryTestCatalog)
 	otherDir := writeRegistryCatalog(t, packRegistryOtherCatalog)
+	writeEmptyRegistryConfig(t, home)
 
 	var stdout, stderr bytes.Buffer
 	if code := doPackRegistryAdd("main", mainDir, false, false, &stdout, &stderr); code != 0 {
@@ -190,6 +189,7 @@ func TestPackRegistryShowBareNameAmbiguous(t *testing.T) {
 func TestPackRegistryAddDuplicateDoesNotPoisonCache(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("GC_HOME", home)
+	writeEmptyRegistryConfig(t, home)
 	mainDir := writeRegistryCatalog(t, packRegistryTestCatalog)
 	otherDir := writeRegistryCatalog(t, packRegistryOtherCatalog)
 
@@ -214,6 +214,7 @@ func TestPackRegistryAddDuplicateDoesNotPoisonCache(t *testing.T) {
 func TestPackRegistryAddNoValidateInvalidatesReusedNameCache(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("GC_HOME", home)
+	writeEmptyRegistryConfig(t, home)
 	catalogDir := writeRegistryCatalog(t, packRegistryTestCatalog)
 
 	var stdout, stderr bytes.Buffer
@@ -247,6 +248,7 @@ func TestPackRegistryAddNoValidateInvalidatesReusedNameCache(t *testing.T) {
 func TestPackRegistryLatestUsesHighestNonWithdrawnSemver(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("GC_HOME", home)
+	writeEmptyRegistryConfig(t, home)
 	catalogDir := writeRegistryCatalog(t, packRegistryUnsortedCatalog)
 
 	var stdout, stderr bytes.Buffer
@@ -266,6 +268,7 @@ func TestPackRegistryLatestUsesHighestNonWithdrawnSemver(t *testing.T) {
 func TestPackRegistrySearchPartialReachabilityWarns(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("GC_HOME", home)
+	writeEmptyRegistryConfig(t, home)
 	goodDir := writeRegistryCatalog(t, packRegistryTestCatalog)
 	var stdout, stderr bytes.Buffer
 	if code := doPackRegistryAdd("good", goodDir, false, false, &stdout, &stderr); code != 0 {
@@ -290,6 +293,7 @@ func TestPackRegistrySearchPartialReachabilityWarns(t *testing.T) {
 func TestPackRegistrySearchAllCachesUnavailableFails(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("GC_HOME", home)
+	writeEmptyRegistryConfig(t, home)
 	var stdout, stderr bytes.Buffer
 	if code := doPackRegistryAdd("bad", filepath.Join(t.TempDir(), "missing"), true, false, &stdout, &stderr); code != 0 {
 		t.Fatalf("add bad: %d %s", code, stderr.String())
@@ -305,9 +309,33 @@ func TestPackRegistrySearchAllCachesUnavailableFails(t *testing.T) {
 	}
 }
 
+func TestPackRegistrySearchRefreshesMissingCache(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("GC_HOME", home)
+	writeEmptyRegistryConfig(t, home)
+	catalogDir := writeRegistryCatalog(t, packRegistryTestCatalog)
+	var stdout, stderr bytes.Buffer
+	if code := doPackRegistryAdd("main", catalogDir, false, false, &stdout, &stderr); code != 0 {
+		t.Fatalf("add main: %d %s", code, stderr.String())
+	}
+	if err := os.Remove(filepath.Join(home, "registry-cache", "main", "registry.toml")); err != nil {
+		t.Fatalf("Remove cache: %v", err)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := doPackRegistrySearch("light", "", false, 50, false, false, &stdout, &stderr); code != 0 {
+		t.Fatalf("search code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "lighthouse") || strings.Contains(stderr.String(), "cache unavailable") {
+		t.Fatalf("search did not refresh missing cache cleanly stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+}
+
 func TestPackRegistrySearchRefreshFallsBackToCache(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("GC_HOME", home)
+	writeEmptyRegistryConfig(t, home)
 	catalogDir := writeRegistryCatalog(t, packRegistryTestCatalog)
 	var stdout, stderr bytes.Buffer
 	if code := doPackRegistryAdd("main", catalogDir, false, false, &stdout, &stderr); code != 0 {
@@ -330,6 +358,7 @@ func TestPackRegistrySearchRefreshFallsBackToCache(t *testing.T) {
 func TestPackRegistryShowUnqualifiedFailsClosedWithUnavailableRegistry(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("GC_HOME", home)
+	writeEmptyRegistryConfig(t, home)
 	goodDir := writeRegistryCatalog(t, packRegistryTestCatalog)
 	var stdout, stderr bytes.Buffer
 	if code := doPackRegistryAdd("good", goodDir, false, false, &stdout, &stderr); code != 0 {
@@ -361,6 +390,7 @@ func TestPackRegistrySearchWarnsOnStaleCache(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("GC_HOME", home)
 	t.Setenv("GC_REGISTRY_FRESHNESS", "1s")
+	writeEmptyRegistryConfig(t, home)
 	catalogDir := writeRegistryCatalog(t, packRegistryTestCatalog)
 	var stdout, stderr bytes.Buffer
 	if code := doPackRegistryAdd("main", catalogDir, false, false, &stdout, &stderr); code != 0 {
@@ -404,8 +434,15 @@ func TestPackRegistryLiveGascityPacksCatalog(t *testing.T) {
 	t.Setenv("GC_HOME", home)
 
 	var stdout, stderr bytes.Buffer
-	if code := doPackRegistryAdd("main", source, false, false, &stdout, &stderr); code != 0 {
-		t.Fatalf("add gascity-packs registry code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	if source == packregistry.DefaultRegistryName {
+		if code := doPackRegistryRefresh(packregistry.DefaultRegistryName, false, &stdout, &stderr); code != 0 {
+			t.Fatalf("refresh gascity-packs registry code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+		}
+	} else {
+		writeEmptyRegistryConfig(t, home)
+		if code := doPackRegistryAdd(packregistry.DefaultRegistryName, source, false, false, &stdout, &stderr); code != 0 {
+			t.Fatalf("add gascity-packs registry code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+		}
 	}
 
 	stdout.Reset()
@@ -440,4 +477,11 @@ func writeRegistryCatalog(t *testing.T, body string) string {
 		t.Fatalf("WriteFile(registry.toml): %v", err)
 	}
 	return dir
+}
+
+func writeEmptyRegistryConfig(t *testing.T, home string) {
+	t.Helper()
+	if err := packregistry.SaveConfig(home, packregistry.Config{}); err != nil {
+		t.Fatalf("SaveConfig(empty): %v", err)
+	}
 }

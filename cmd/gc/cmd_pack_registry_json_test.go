@@ -14,6 +14,7 @@ import (
 func TestPackRegistryJSONOutputMatchesSchemas(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("GC_HOME", home)
+	writeEmptyRegistryConfig(t, home)
 	catalogDir := writeRegistryCatalog(t, packRegistryTestCatalog)
 
 	runPackRegistryJSONAndValidate(t, []string{"pack", "registry", "add", "main", catalogDir, "--json"})
@@ -27,6 +28,7 @@ func TestPackRegistryJSONOutputMatchesSchemas(t *testing.T) {
 func TestPackRegistryJSONOutputMatchesSchemasForFlagCombinations(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("GC_HOME", home)
+	writeEmptyRegistryConfig(t, home)
 	goodDir := writeRegistryCatalog(t, packRegistryTestCatalog)
 	otherDir := writeRegistryCatalog(t, packRegistryOtherCatalog)
 
@@ -45,6 +47,7 @@ func TestPackRegistryJSONOutputMatchesSchemasForFlagCombinations(t *testing.T) {
 func TestPackRegistryJSONFailureMatchesFailureSchema(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("GC_HOME", home)
+	writeEmptyRegistryConfig(t, home)
 	catalogDir := writeRegistryCatalog(t, packRegistryTestCatalog)
 	otherDir := writeRegistryCatalog(t, packRegistryOtherCatalog)
 
@@ -72,6 +75,7 @@ func TestPackRegistryJSONFailureMatchesFailureSchema(t *testing.T) {
 func TestPackRegistryRefreshJSONAllFailuresUsesResultSchemaWithNonzeroExit(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("GC_HOME", home)
+	writeEmptyRegistryConfig(t, home)
 	runPackRegistryJSONAndValidate(t, []string{"pack", "registry", "add", "bad", filepath.Join(t.TempDir(), "missing"), "--no-validate", "--json"})
 	runPackRegistryJSONAndValidateExitCode(t, []string{"pack", "registry", "refresh", "--json"}, 1)
 }

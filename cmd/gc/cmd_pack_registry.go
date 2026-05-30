@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"slices"
 	"strings"
 	"time"
@@ -435,7 +436,7 @@ func doPackRegistrySearch(query, registry string, refresh bool, limit int, all b
 				fmt.Fprintf(stderr, "warning: registry %s refresh failed: %v\n", reg.Name, err) //nolint:errcheck
 			}
 		}
-		catalog, _, err := packregistry.ReadCachedRegistryCatalog(home, reg)
+		catalog, err := readPackRegistryCatalogForCommand(context.Background(), home, reg, !refresh)
 		if err != nil {
 			failures++
 			cacheFailures = append(cacheFailures, packRegistryFailureJSON{Name: reg.Name, Message: err.Error()})
@@ -544,7 +545,7 @@ func doPackRegistryShow(target string, refresh bool, jsonOutput bool, stdout, st
 				fmt.Fprintf(stderr, "warning: registry %s refresh failed: %v\n", reg.Name, err) //nolint:errcheck
 			}
 		}
-		catalog, _, err := packregistry.ReadCachedRegistryCatalog(home, reg)
+		catalog, err := readPackRegistryCatalogForCommand(context.Background(), home, reg, !refresh)
 		if err != nil {
 			unavailable = append(unavailable, reg.Name)
 			continue
@@ -609,6 +610,17 @@ func doPackRegistryShow(target string, refresh bool, jsonOutput bool, stdout, st
 		}
 	}
 	return 0
+}
+
+func readPackRegistryCatalogForCommand(ctx context.Context, home string, reg packregistry.Registry, refreshMissing bool) (packregistry.Catalog, error) {
+	catalog, _, err := packregistry.ReadCachedRegistryCatalog(home, reg)
+	if err == nil {
+		return catalog, nil
+	}
+	if !refreshMissing || !os.IsNotExist(err) {
+		return packregistry.Catalog{}, err
+	}
+	return packregistry.RefreshRegistry(ctx, home, reg, packregistry.FetchOptions{})
 }
 
 func warnStaleRegistryCache(home, registry string, stderr io.Writer) {

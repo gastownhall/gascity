@@ -17,6 +17,13 @@ import (
 // ConfigSchema is the supported registries.toml schema version.
 const ConfigSchema = 1
 
+const (
+	// DefaultRegistryName is the built-in public pack registry name.
+	DefaultRegistryName = "main"
+	// DefaultRegistrySource is the public gascity-packs registry catalog.
+	DefaultRegistrySource = "https://raw.githubusercontent.com/gastownhall/gascity-packs/main/registry.toml"
+)
+
 var registryNameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)
 
 // Config is the parsed registry configuration stored under the Gas City home.
@@ -44,7 +51,13 @@ func LoadConfig(home string) (Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return Config{Schema: ConfigSchema}, nil
+			return Config{
+				Schema: ConfigSchema,
+				Registries: []Registry{{
+					Name:   DefaultRegistryName,
+					Source: DefaultRegistrySource,
+				}},
+			}, nil
 		}
 		return cfg, fmt.Errorf("reading registries.toml: %w", err)
 	}
