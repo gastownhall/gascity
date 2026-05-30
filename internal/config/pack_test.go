@@ -3082,6 +3082,139 @@ includes = ["packs/gastown"]
 	}
 }
 
+func TestLoadWithIncludes_SkipsExtraIncludeReachableFromNamedRigPackGraph(t *testing.T) {
+	dir := t.TempDir()
+
+	writeFile(t, dir, "packs/maintenance/pack.toml", `
+[pack]
+name = "maintenance"
+schema = 2
+`)
+	writeFile(t, dir, "packs/maintenance/agents/dog/agent.toml", `
+scope = "city"
+fallback = true
+`)
+
+	writeFile(t, dir, ".gc/cache/packs/maintenance/pack.toml", `
+[pack]
+name = "maintenance"
+schema = 2
+`)
+	writeFile(t, dir, ".gc/cache/packs/maintenance/agents/dog/agent.toml", `
+scope = "city"
+fallback = true
+`)
+
+	writeFile(t, dir, ".gc/cache/packs/gastown/pack.toml", `
+[pack]
+name = "gastown"
+schema = 2
+
+[imports.maintenance]
+source = "../maintenance"
+`)
+	writeFile(t, dir, ".gc/cache/packs/gastown/agents/polecat/agent.toml", `
+scope = "rig"
+`)
+
+	writeFile(t, dir, "city.toml", `
+[workspace]
+name = "test"
+
+[packs.gastown]
+source = "https://example.com/gastown.git"
+
+[[rigs]]
+name = "gascity"
+path = "/tmp/gascity"
+includes = ["gastown"]
+`)
+
+	cfg, _, err := LoadWithIncludes(
+		fsys.OSFS{},
+		filepath.Join(dir, "city.toml"),
+		filepath.Join(dir, "packs", "maintenance"),
+	)
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+
+	for _, packDir := range cfg.PackDirs {
+		if filepath.Base(packDir) == "maintenance" {
+			t.Fatalf("maintenance was injected at city scope despite being reachable from named rig pack graph: PackDirs=%v RigPackDirs=%v",
+				cfg.PackDirs, cfg.RigPackDirs)
+		}
+	}
+	if got := cfg.RigPackDirs["gascity"]; len(got) != 2 {
+		t.Fatalf("rig pack graph dirs = %v, want gastown plus transitive maintenance", got)
+	}
+}
+
+func TestResolvedPackNames_ExpandsRepeatedSourceWhenAnyVisitIsTransitive(t *testing.T) {
+	dir := t.TempDir()
+
+	writeFile(t, dir, "packs/maintenance/pack.toml", `
+[pack]
+name = "maintenance"
+schema = 2
+`)
+	writeFile(t, dir, "packs/shared/pack.toml", `
+[pack]
+name = "shared"
+schema = 2
+
+[imports.maintenance]
+source = "../maintenance"
+`)
+	writeFile(t, dir, "packs/wrapper/pack.toml", `
+[pack]
+name = "wrapper"
+schema = 2
+
+[imports.shared]
+source = "../shared"
+transitive = false
+`)
+
+	names := resolvedPackNames([]string{"packs/wrapper"}, map[string]Import{
+		"shared": {Source: "packs/shared"},
+	}, fsys.OSFS{}, dir)
+
+	if !names["maintenance"] {
+		t.Fatalf("maintenance missing after mixed shallow/deep visits: names=%v", names)
+	}
+}
+
+func TestResolvedPackNames_NonTransitiveImportDoesNotCollectDeepDependency(t *testing.T) {
+	dir := t.TempDir()
+
+	writeFile(t, dir, "packs/maintenance/pack.toml", `
+[pack]
+name = "maintenance"
+schema = 2
+`)
+	writeFile(t, dir, "packs/shared/pack.toml", `
+[pack]
+name = "shared"
+schema = 2
+
+[imports.maintenance]
+source = "../maintenance"
+`)
+
+	transitiveFalse := false
+	names := resolvedPackNames(nil, map[string]Import{
+		"shared": {Source: "packs/shared", Transitive: &transitiveFalse},
+	}, fsys.OSFS{}, dir)
+
+	if !names["shared"] {
+		t.Fatalf("shared missing from non-transitive visit: names=%v", names)
+	}
+	if names["maintenance"] {
+		t.Fatalf("maintenance collected through non-transitive import: names=%v", names)
+	}
+}
+
 // agentNamesOf is a small test helper for readable failure messages.
 func agentNamesOf(agents []Agent) []string {
 	names := make([]string, 0, len(agents))
