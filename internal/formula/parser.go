@@ -223,6 +223,7 @@ func (p *Parser) Resolve(formula *Formula) (*Formula, error) {
 	merged := &Formula{
 		Formula:     formula.Formula,
 		Description: formula.Description,
+		Catalog:     formula.Catalog,
 		Version:     formula.Version,
 		Contract:    formula.Contract,
 		Type:        formula.Type,
