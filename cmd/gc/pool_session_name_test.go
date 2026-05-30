@@ -1081,6 +1081,55 @@ func TestReleaseOrphanedPoolAssignments_ReopensUnassignedInProgressPoolWork(t *t
 	}
 }
 
+// TestCollectAndReleaseOrphanPoolStepBead_Issue2793 pins the end-to-end fix
+// for issue #2793: a graph.v2 step bead that is status=open with a
+// dead-session long-form assignee (e.g. "<rig>--<pool>__coder...") and
+// gc.routed_to=<pool template> must flow from collectAssignedWorkBeads
+// into releaseOrphanedPoolAssignments and have its assignee cleared.
+// Before the fix, collect's two passes (in_progress / Ready by live
+// assignee) both missed the bead, so release never saw it and pool
+// demand stayed at 0 across reconcile ticks.
+func TestCollectAndReleaseOrphanPoolStepBead_Issue2793(t *testing.T) {
+	store := beads.NewMemStore()
+	work, err := store.Create(beads.Bead{
+		Title:    "graph.v2 step bead orphaned by dead session",
+		Type:     "task",
+		Status:   "open",
+		Assignee: "rig--pool__coder-gc-session-deadbeef",
+		Metadata: map[string]string{"gc.routed_to": "worker"},
+	})
+	if err != nil {
+		t.Fatalf("Create orphaned step bead: %v", err)
+	}
+
+	cfg := &config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}}
+
+	found, foundStores, foundStoreRefs, partial := collectAssignedWorkBeadsWithStores(cfg, store, nil, nil, nil)
+	if partial {
+		t.Fatal("collectAssignedWorkBeadsWithStores reported partial results")
+	}
+	if len(found) != 1 || found[0].ID != work.ID {
+		t.Fatalf("collect missed the orphaned step bead: got %#v, want [%s]", found, work.ID)
+	}
+
+	// Empty openSessionBeads — the assignee's session is dead.
+	released := releaseOrphanedPoolAssignments(store, cfg, "", nil, found, foundStores, foundStoreRefs, nil)
+	if len(released) != 1 || released[0].ID != work.ID {
+		t.Fatalf("released = %v, want [%s]", released, work.ID)
+	}
+
+	got, err := store.Get(work.ID)
+	if err != nil {
+		t.Fatalf("Get work bead: %v", err)
+	}
+	if got.Status != "open" {
+		t.Fatalf("status = %q, want open", got.Status)
+	}
+	if got.Assignee != "" {
+		t.Fatalf("assignee = %q, want empty after release", got.Assignee)
+	}
+}
+
 func TestCollectAssignedWorkBeadsIncludesUnassignedInProgressPoolWorkForRecovery(t *testing.T) {
 	store := beads.NewMemStore()
 	work, err := store.Create(beads.Bead{

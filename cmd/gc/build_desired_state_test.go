@@ -1570,6 +1570,58 @@ func TestCollectAssignedWorkBeads_ExcludesRoutedToMetadataWithoutAssignee(t *tes
 	}
 }
 
+// TestCollectAssignedWorkBeads_IncludesOpenPoolRoutedAssignedWork pins the
+// fix for issue #2793: an open step bead carrying both gc.routed_to and a
+// stale (dead-session) assignee must enter assignedWorkBeads so the
+// orphan-release sweep can iterate it. The status=in_progress pass misses
+// it (wrong status) and the Ready(Assignee=...) pass misses it (the
+// assignee identity belongs to a session that no longer exists). Without
+// this pass, the step bead stays assigned forever, pool demand stays 0,
+// and graph.v2 wisps stall after an orphan drain.
+func TestCollectAssignedWorkBeads_IncludesOpenPoolRoutedAssignedWork(t *testing.T) {
+	t.Parallel()
+	store := beads.NewMemStore()
+	work, err := store.Create(beads.Bead{
+		Title:    "orphaned step bead",
+		Type:     "task",
+		Status:   "open",
+		Assignee: "rig--pool__coder-dead-session",
+		Metadata: map[string]string{"gc.routed_to": "rig/pool.coder"},
+	})
+	if err != nil {
+		t.Fatalf("create orphaned step bead: %v", err)
+	}
+
+	got, _ := collectAssignedWorkBeads(&config.City{}, store)
+	if len(got) != 1 || got[0].ID != work.ID {
+		t.Fatalf("collectAssignedWorkBeads = %#v, want [%s]", got, work.ID)
+	}
+}
+
+// TestCollectAssignedWorkBeads_IncludesOpenRunTargetAssignedWork covers the
+// graph.v2 root-step shape: root beads stamp gc.run_target (not
+// gc.routed_to). The third pass must accept either marker so root steps
+// that orphan-release missed are also recoverable.
+func TestCollectAssignedWorkBeads_IncludesOpenRunTargetAssignedWork(t *testing.T) {
+	t.Parallel()
+	store := beads.NewMemStore()
+	work, err := store.Create(beads.Bead{
+		Title:    "orphaned root step",
+		Type:     "task",
+		Status:   "open",
+		Assignee: "rig--pool__coder-dead-session",
+		Metadata: map[string]string{"gc.run_target": "rig/pool.coder"},
+	})
+	if err != nil {
+		t.Fatalf("create orphaned root step: %v", err)
+	}
+
+	got, _ := collectAssignedWorkBeads(&config.City{}, store)
+	if len(got) != 1 || got[0].ID != work.ID {
+		t.Fatalf("collectAssignedWorkBeads = %#v, want [%s]", got, work.ID)
+	}
+}
+
 func TestCollectAssignedWorkBeads_ExcludesSessionBeads(t *testing.T) {
 	t.Parallel()
 	store := beads.NewMemStore()
