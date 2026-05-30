@@ -4953,6 +4953,17 @@ func TestLoadSessionBeadSnapshotUsesActiveOnlyQuery(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create open session bead: %v", err)
 	}
+	labelLess, err := store.Create(beads.Bead{
+		Title: "label-less",
+		Type:  sessionBeadType,
+		Metadata: map[string]string{
+			"session_name": "label-less-worker",
+			"state":        string(session.StateCreating),
+		},
+	})
+	if err != nil {
+		t.Fatalf("create label-less session bead: %v", err)
+	}
 	closed, err := store.Create(beads.Bead{
 		Title:  "closed",
 		Type:   sessionBeadType,
@@ -4981,6 +4992,12 @@ func TestLoadSessionBeadSnapshotUsesActiveOnlyQuery(t *testing.T) {
 	if len(store.queries) != 2 {
 		t.Fatalf("List query count = %d, want 2 (Type + Label)", len(store.queries))
 	}
+	if store.queries[0].Type != sessionBeadType {
+		t.Fatalf("first query Type = %q, want %q", store.queries[0].Type, sessionBeadType)
+	}
+	if store.queries[1].Label != sessionBeadLabel {
+		t.Fatalf("second query Label = %q, want %q", store.queries[1].Label, sessionBeadLabel)
+	}
 	for i, q := range store.queries {
 		if q.IncludeClosed {
 			t.Fatalf("loadSessionBeadSnapshot used IncludeClosed query[%d]: %+v", i, q)
@@ -4988,6 +5005,9 @@ func TestLoadSessionBeadSnapshotUsesActiveOnlyQuery(t *testing.T) {
 	}
 	if _, ok := snapshot.FindByID(open.ID); !ok {
 		t.Fatalf("snapshot missing open session bead %s", open.ID)
+	}
+	if _, ok := snapshot.FindByID(labelLess.ID); !ok {
+		t.Fatalf("snapshot missing label-less session bead %s", labelLess.ID)
 	}
 	if _, ok := snapshot.FindByID(closed.ID); ok {
 		t.Fatalf("snapshot retained closed session bead %s", closed.ID)

@@ -22,6 +22,12 @@ func stageFiles(ctx context.Context, ops k8sOps, podName string, cfg runtime.Con
 		return err
 	}
 
+	// Wait for exec endpoint to be ready. The kubelet reports Running
+	// before the CRI exec handler is set up, so we poll a trivial command.
+	if err := waitForExecReady(ctx, ops, podName, 120*time.Second); err != nil {
+		return err
+	}
+
 	// Copy rig work_dir into the pod.
 	podWorkDir := "/workspace"
 	if ctrlCity != "" && cfg.WorkDir != "" && cfg.WorkDir != ctrlCity {
@@ -143,6 +149,46 @@ func waitForInitContainer(ctx context.Context, ops k8sOps, podName string, timeo
 		time.Sleep(time.Second)
 	}
 	return fmt.Errorf("init container not running in pod %s after %s", podName, timeout)
+}
+
+// waitForExecReady polls exec with a trivial command until it succeeds.
+// The kubelet reports a container as Running before the CRI exec handler
+// (SPDY) is fully set up, causing "container not found" errors if we
+// exec too early. This is especially common on K3s with containerd.
+func waitForExecReady(ctx context.Context, ops k8sOps, podName string, timeout time.Duration) error {
+	const container = "stage"
+
+	deadline := time.Now().Add(timeout)
+	var lastErr error
+	for time.Now().Before(deadline) {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+		_, err := ops.execInPod(ctx, podName, container, []string{"true"}, nil)
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+
+		delay := 500 * time.Millisecond
+		if remaining := time.Until(deadline); remaining < delay {
+			delay = remaining
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(delay):
+		}
+	}
+	if lastErr != nil {
+		return fmt.Errorf("exec not ready in %s/%s after %s: %w", podName, container, timeout, lastErr)
+	}
+	return fmt.Errorf("exec not ready in %s/%s after %s", podName, container, timeout)
 }
 
 // copyDirToPod copies a local directory into the pod via tar-based exec.

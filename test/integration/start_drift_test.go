@@ -26,6 +26,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"syscall"
 	"testing"
@@ -58,6 +59,7 @@ const (
 // integration assertion uses a wider wall-clock budget so a loaded CI
 // runner does not fail an otherwise healthy restart path.
 func TestStartDrift_DirectLaunch_RestartsToNewBuildID(t *testing.T) {
+	requireLinuxProcExe(t)
 	tc := setupDriftDirectScenario(t)
 
 	out, exitCode, _ := runDriftCommand(t, tc.newBinary, tc.env, tc.cityDir, "start", tc.cityDir)
@@ -266,6 +268,7 @@ func TestStartDrift_KillSwitchInConfig_PreventsRestart(t *testing.T) {
 // /proc/<pid>/exe so the scenario is unreproducible) or when no
 // secondary uid is available to spawn the decoy supervisor.
 func TestStartDrift_PermissionDenied_DescriptiveError(t *testing.T) {
+	requireLinuxProcExe(t)
 	requireSecondaryUID(t)
 	tc := setupDriftDirectScenarioAsUID(t, secondaryUID(t))
 
@@ -295,6 +298,7 @@ func TestStartDrift_PermissionDenied_DescriptiveError(t *testing.T) {
 // shim that just sleeps without binding the port). The kill+spawn
 // succeeds; PollReady cannot get a 200; the timeout fires.
 func TestStartDrift_RestartTimeout_ExitsNonZero(t *testing.T) {
+	requireLinuxProcExe(t)
 	tc := setupDriftDirectScenario(t)
 
 	// Replace the binary on disk with a no-op shim so the post-kill
@@ -329,6 +333,7 @@ func TestStartDrift_RestartTimeout_ExitsNonZero(t *testing.T) {
 // error. Persistent tracking of restart attempts (driftRestartHistoryFile)
 // keeps the guard honest across `gc start` invocations.
 func TestStartDrift_RestartLoopGuard_RefusesFourthInWindow(t *testing.T) {
+	requireLinuxProcExe(t)
 	tc := setupDriftDirectScenario(t)
 
 	// Drive four drift cycles back-to-back. Between cycles, alternate
@@ -392,6 +397,7 @@ func TestStartDrift_RestartLoopGuard_RefusesFourthInWindow(t *testing.T) {
 //   - never print "standalone controller already running";
 //   - converge /health to the new build_id.
 func TestStartDrift_RestartDoesNotTriggerStandaloneControllerConflict(t *testing.T) {
+	requireLinuxProcExe(t)
 	tc := setupDriftDirectScenario(t)
 
 	out, exitCode, _ := runDriftCommand(t, tc.newBinary, tc.env, tc.cityDir, "start", tc.cityDir)
@@ -952,6 +958,13 @@ func requireUserSystemd(t *testing.T) {
 	// skip when the bus is completely unavailable.
 	if err != nil && (strings.Contains(state, "offline") || strings.Contains(state, "Failed to connect")) {
 		t.Skipf("user systemd not usable: %s", state)
+	}
+}
+
+func requireLinuxProcExe(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS != "linux" {
+		t.Skip("direct supervisor binary-drift restart uses Linux /proc/<pid>/exe; macOS production restart is covered by launchd unit tests")
 	}
 }
 

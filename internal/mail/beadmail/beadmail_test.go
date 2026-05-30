@@ -3,7 +3,9 @@ package beadmail
 import (
 	"errors"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/mail"
@@ -35,6 +37,28 @@ func (s noBroadSessionRouteStore) List(query beads.ListQuery) ([]beads.Bead, err
 	return s.MemStore.List(query)
 }
 
+type messageListProbeStore struct {
+	*beads.MemStore
+	messageQueries []beads.ListQuery
+}
+
+func (s *messageListProbeStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	if query.Type == "message" {
+		s.messageQueries = append(s.messageQueries, query)
+	}
+	return s.MemStore.List(query)
+}
+
+type noCloseAllStore struct {
+	*beads.MemStore
+	t *testing.T
+}
+
+func (s noCloseAllStore) CloseAll(_ []string, _ map[string]string) (int, error) {
+	s.t.Fatal("ArchiveMany used CloseAll; mail archive must delete each bead eagerly")
+	return 0, nil
+}
+
 func TestInboxDoesNotCallBroadList(t *testing.T) {
 	base := beads.NewMemStore()
 	p := New(noListScanStore{MemStore: base})
@@ -52,6 +76,197 @@ func TestInboxDoesNotCallBroadList(t *testing.T) {
 	}
 }
 
+func TestMessageCreatedInWispTier(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+
+	sent, err := p.Send("human", "mayor", "hello", "body")
+	if err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+
+	items, err := store.List(beads.ListQuery{
+		Type:      "message",
+		TierMode:  beads.TierWisps,
+		AllowScan: true,
+	})
+	if err != nil {
+		t.Fatalf("List wisp-tier messages: %v", err)
+	}
+	if len(items) != 1 || items[0].ID != sent.ID {
+		t.Fatalf("wisp-tier messages = %#v, want sent message %s", items, sent.ID)
+	}
+	if !items[0].Ephemeral {
+		t.Fatalf("sent message Ephemeral = false, want true")
+	}
+}
+
+func TestInboxUsesSingleBothTierMessageScanAcrossRoutes(t *testing.T) {
+	store := &messageListProbeStore{MemStore: beads.NewMemStore()}
+	p := New(store)
+
+	sessionBead, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"alias":         "sky",
+			"alias_history": "mayor,witness",
+			"session_name":  "runtime-sky",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create session: %v", err)
+	}
+	for _, to := range []string{"sky", sessionBead.ID, "mayor", "runtime-sky"} {
+		if _, err := p.Send("human", to, "", "for "+to); err != nil {
+			t.Fatalf("Send(%q): %v", to, err)
+		}
+	}
+	if _, err := p.Send("human", "other", "", "not for sky"); err != nil {
+		t.Fatalf("Send(other): %v", err)
+	}
+
+	msgs, err := p.Inbox("sky")
+	if err != nil {
+		t.Fatalf("Inbox: %v", err)
+	}
+	if len(msgs) != 4 {
+		t.Fatalf("Inbox = %#v, want four routed messages", msgs)
+	}
+	if len(store.messageQueries) != 1 {
+		t.Fatalf("message query count = %d, want 1; queries=%+v", len(store.messageQueries), store.messageQueries)
+	}
+	query := store.messageQueries[0]
+	if query.TierMode != beads.TierBoth || !query.AllowScan || query.Type != "message" || query.Status != "open" || query.Assignee != "" {
+		t.Fatalf("message query = %+v, want one both-tier message scan without per-route assignee", query)
+	}
+	if !query.Live {
+		t.Fatalf("message query = %+v, want live read for command-visible mail freshness", query)
+	}
+}
+
+func TestInboxBypassesPrimedCacheForFreshMessages(t *testing.T) {
+	backing := beads.NewMemStore()
+	cache := beads.NewCachingStoreForTest(backing, nil)
+	if err := cache.PrimeActive(); err != nil {
+		t.Fatalf("PrimeActive: %v", err)
+	}
+
+	if _, err := backing.Create(beads.Bead{
+		Type:        "message",
+		Assignee:    "mayor",
+		From:        "human",
+		Title:       "fresh",
+		Description: "created after cache prime",
+	}); err != nil {
+		t.Fatalf("Create message in backing store: %v", err)
+	}
+
+	msgs, err := New(cache).Inbox("mayor")
+	if err != nil {
+		t.Fatalf("Inbox: %v", err)
+	}
+	if len(msgs) != 1 || msgs[0].Subject != "fresh" {
+		t.Fatalf("Inbox = %#v, want fresh message from backing store", msgs)
+	}
+}
+
+func TestInboxIncludesEphemeralMessages(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+	recipient := "agent-a"
+
+	ephemeral, err := store.Create(beads.Bead{
+		Title:       "status",
+		Type:        "message",
+		Status:      "open",
+		Assignee:    recipient,
+		From:        "human",
+		Description: "stored in wisps tier",
+		Ephemeral:   true,
+	})
+	if err != nil {
+		t.Fatalf("Create ephemeral message: %v", err)
+	}
+
+	msgs, err := p.Inbox(recipient)
+	if err != nil {
+		t.Fatalf("Inbox: %v", err)
+	}
+	if len(msgs) != 1 || msgs[0].ID != ephemeral.ID {
+		t.Fatalf("Inbox = %#v, want ephemeral message %s", msgs, ephemeral.ID)
+	}
+}
+
+func TestInboxRecipientsDedupesRoutesAndReadFiltering(t *testing.T) {
+	store := &messageListProbeStore{MemStore: beads.NewMemStore()}
+	p := New(store)
+
+	sessionBead, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"alias":         "sky",
+			"alias_history": "mayor",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create session: %v", err)
+	}
+	msg1, err := p.Send("human", "sky", "", "current alias")
+	if err != nil {
+		t.Fatalf("Send sky: %v", err)
+	}
+	if _, err := p.Send("human", sessionBead.ID, "", "session id"); err != nil {
+		t.Fatalf("Send session ID: %v", err)
+	}
+	readMsg, err := p.Send("human", "mayor", "", "read historical alias")
+	if err != nil {
+		t.Fatalf("Send mayor: %v", err)
+	}
+	if _, err := p.Read(readMsg.ID); err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+
+	msgs, err := p.InboxRecipients([]string{"sky", "mayor", "sky"})
+	if err != nil {
+		t.Fatalf("InboxRecipients: %v", err)
+	}
+	if len(msgs) != 2 {
+		t.Fatalf("InboxRecipients = %#v, want two unread messages", msgs)
+	}
+	if msgs[0].ID != msg1.ID && msgs[1].ID != msg1.ID {
+		t.Fatalf("InboxRecipients = %#v, want current-alias message %s", msgs, msg1.ID)
+	}
+	if len(store.messageQueries) != 1 {
+		t.Fatalf("message query count = %d, want 1; queries=%+v", len(store.messageQueries), store.messageQueries)
+	}
+}
+
+func TestInboxRecipientsEmptyReturnsAllUnreadMessages(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+
+	if _, err := p.Send("human", "mayor", "", "one"); err != nil {
+		t.Fatalf("Send mayor: %v", err)
+	}
+	readMsg, err := p.Send("human", "worker", "", "read")
+	if err != nil {
+		t.Fatalf("Send worker: %v", err)
+	}
+	if _, err := p.Read(readMsg.ID); err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+
+	msgs, err := p.InboxRecipients(nil)
+	if err != nil {
+		t.Fatalf("InboxRecipients(nil): %v", err)
+	}
+	if len(msgs) != 1 || msgs[0].Body != "one" {
+		t.Fatalf("InboxRecipients(nil) = %#v, want one unread message", msgs)
+	}
+}
+
 func TestCheckDoesNotUseMessageLabelSupplement(t *testing.T) {
 	runner := func(_ string, name string, args ...string) ([]byte, error) {
 		cmd := name + " " + strings.Join(args, " ")
@@ -65,13 +280,10 @@ func TestCheckDoesNotUseMessageLabelSupplement(t *testing.T) {
 			return []byte(`[]`), nil
 		}
 		if strings.Contains(cmd, "bd query --json") {
-			if !strings.Contains(cmd, "ephemeral=true") || !strings.Contains(cmd, "type=message") {
-				t.Fatalf("mail check used unexpected wisp query: %s", cmd)
-			}
-			return []byte(`[]`), nil
+			t.Fatalf("mail check used supplemental wisp query: %s", cmd)
 		}
-		if strings.Contains(cmd, "--assignee=mayor") && strings.Contains(cmd, "--type=message") && strings.Contains(cmd, "--status=open") {
-			return []byte(`[{"id":"msg-1","title":"hello","description":"body","status":"open","issue_type":"message","assignee":"mayor","from":"human","created_at":"2026-01-02T03:04:05Z","labels":["gc:message"]}]`), nil
+		if strings.Contains(cmd, "bd list --json") && strings.Contains(cmd, "--type=message") && strings.Contains(cmd, "--status=open") {
+			return []byte(`[{"id":"msg-1","title":"hello","description":"body","status":"open","issue_type":"message","assignee":"mayor","from":"human","created_at":"2026-01-02T03:04:05Z","ephemeral":true,"labels":["gc:message"]}]`), nil
 		}
 		return nil, errors.New("unexpected command: " + cmd)
 	}
@@ -86,9 +298,9 @@ func TestCheckDoesNotUseMessageLabelSupplement(t *testing.T) {
 	}
 }
 
-func TestCheckSupportsSlashRecipientWithWispTier(t *testing.T) {
+func TestCheckUsesSingleBothTierScanForSlashRecipient(t *testing.T) {
 	recipient := "gascity/workflows.codex-max"
-	sawWispQuery := false
+	var messageListCalls int
 	runner := func(_ string, name string, args ...string) ([]byte, error) {
 		cmd := name + " " + strings.Join(args, " ")
 		switch {
@@ -98,17 +310,14 @@ func TestCheckSupportsSlashRecipientWithWispTier(t *testing.T) {
 			return []byte(`[]`), nil
 		case strings.Contains(cmd, "bd list --json") && strings.Contains(cmd, "--type=session"):
 			return []byte(`[]`), nil
-		case strings.Contains(cmd, "bd list --json") && strings.Contains(cmd, "--assignee="+recipient):
-			return []byte(`[]`), nil
-		case strings.Contains(cmd, "bd query --json"):
-			sawWispQuery = true
-			if strings.Contains(cmd, "assignee="+recipient) {
-				t.Fatalf("slash recipient leaked into bd query: %s", cmd)
+		case strings.Contains(cmd, "bd list --json") && strings.Contains(cmd, "--type=message") && strings.Contains(cmd, "--status=open"):
+			if strings.Contains(cmd, "--assignee=") {
+				t.Fatalf("slash recipient used per-assignee message query: %s", cmd)
 			}
-			if !strings.Contains(cmd, "ephemeral=true") || !strings.Contains(cmd, "type=message") {
-				t.Fatalf("unexpected wisp query: %s", cmd)
-			}
+			messageListCalls++
 			return []byte(`[{"id":"msg-w","title":"hello","description":"body","status":"open","issue_type":"message","assignee":"gascity/workflows.codex-max","from":"human","created_at":"2026-01-02T03:04:05Z","ephemeral":true}]`), nil
+		case strings.Contains(cmd, "bd query --json"):
+			t.Fatalf("slash recipient used supplemental wisp query: %s", cmd)
 		}
 		return nil, errors.New("unexpected command: " + cmd)
 	}
@@ -118,19 +327,52 @@ func TestCheckSupportsSlashRecipientWithWispTier(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Check: %v", err)
 	}
-	if !sawWispQuery {
-		t.Fatal("Check did not query wisps tier")
+	if messageListCalls != 1 {
+		t.Fatalf("message list calls = %d, want 1", messageListCalls)
 	}
 	if len(msgs) != 1 || msgs[0].ID != "msg-w" {
 		t.Fatalf("Check = %#v, want msg-w", msgs)
 	}
 }
 
-func TestMessageQueriesIncludeWispTier(t *testing.T) {
+func TestCheckUsesSingleBothTierBdMessageScan(t *testing.T) {
+	var messageListCalls int
+	runner := func(_ string, name string, args ...string) ([]byte, error) {
+		cmd := name + " " + strings.Join(args, " ")
+		switch {
+		case strings.Contains(cmd, "bd show --json mayor"):
+			return nil, errors.New("not found")
+		case strings.Contains(cmd, "bd list --json") && strings.Contains(cmd, "--metadata-field"):
+			return []byte(`[]`), nil
+		case strings.Contains(cmd, "bd list --json") && strings.Contains(cmd, "--type=session"):
+			return []byte(`[]`), nil
+		case strings.Contains(cmd, "bd query --json"):
+			t.Fatalf("mail check used supplemental bd query: %s", cmd)
+		case strings.Contains(cmd, "bd list --json") && strings.Contains(cmd, "--type=message") && strings.Contains(cmd, "--status=open"):
+			messageListCalls++
+			return []byte(`[{"id":"msg-1","title":"hello","description":"body","status":"open","issue_type":"message","assignee":"mayor","from":"human","created_at":"2026-01-02T03:04:05Z","ephemeral":true}]`), nil
+		}
+		return nil, errors.New("unexpected command: " + cmd)
+	}
+	p := New(beads.NewBdStore(t.TempDir(), runner))
+
+	msgs, err := p.Check("mayor")
+	if err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	if messageListCalls != 1 {
+		t.Fatalf("message list calls = %d, want 1", messageListCalls)
+	}
+	if len(msgs) != 1 || msgs[0].ID != "msg-1" {
+		t.Fatalf("Check = %#v, want msg-1", msgs)
+	}
+}
+
+func TestMessageQueriesUseBothTiers(t *testing.T) {
 	store := beads.NewMemStore()
 	p := New(store)
 
-	msg, err := store.Create(beads.Bead{
+	wisp, err := store.Create(beads.Bead{
 		Title:       "wisp status",
 		Type:        "message",
 		Assignee:    "mayor",
@@ -142,38 +384,58 @@ func TestMessageQueriesIncludeWispTier(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create ephemeral message: %v", err)
 	}
+	msg, err := store.Create(beads.Bead{
+		Title:       "issue status",
+		Type:        "message",
+		Assignee:    "mayor",
+		From:        "human",
+		Description: "issue body",
+		Labels:      []string{"thread:t2"},
+	})
+	if err != nil {
+		t.Fatalf("Create issue-tier message: %v", err)
+	}
 
 	inbox, err := p.Check("mayor")
 	if err != nil {
 		t.Fatalf("Check: %v", err)
 	}
-	if len(inbox) != 1 || inbox[0].ID != msg.ID {
-		t.Fatalf("Check = %#v, want ephemeral message %s", inbox, msg.ID)
+	if len(inbox) != 2 || !messagesContain(inbox, wisp.ID) || !messagesContain(inbox, msg.ID) {
+		t.Fatalf("Check = %#v, want wisp %s and issue %s", inbox, wisp.ID, msg.ID)
 	}
 
 	all, err := p.All("")
 	if err != nil {
 		t.Fatalf("All: %v", err)
 	}
-	if len(all) != 1 || all[0].ID != msg.ID {
-		t.Fatalf("All = %#v, want ephemeral message %s", all, msg.ID)
+	if len(all) != 2 || !messagesContain(all, wisp.ID) || !messagesContain(all, msg.ID) {
+		t.Fatalf("All = %#v, want wisp %s and issue %s", all, wisp.ID, msg.ID)
 	}
 
 	total, unread, err := p.Count("mayor")
 	if err != nil {
 		t.Fatalf("Count: %v", err)
 	}
-	if total != 1 || unread != 1 {
-		t.Fatalf("Count = (%d, %d), want (1, 1)", total, unread)
+	if total != 2 || unread != 2 {
+		t.Fatalf("Count = (%d, %d), want (2, 2)", total, unread)
 	}
 
 	thread, err := p.Thread("t1")
 	if err != nil {
 		t.Fatalf("Thread: %v", err)
 	}
-	if len(thread) != 1 || thread[0].ID != msg.ID {
-		t.Fatalf("Thread = %#v, want ephemeral message %s", thread, msg.ID)
+	if len(thread) != 1 {
+		t.Fatalf("Thread = %#v, want one thread message", thread)
 	}
+}
+
+func messagesContain(messages []mail.Message, id string) bool {
+	for _, msg := range messages {
+		if msg.ID == id {
+			return true
+		}
+	}
+	return false
 }
 
 func TestCountDoesNotCallBroadList(t *testing.T) {
@@ -735,13 +997,8 @@ func TestArchive(t *testing.T) {
 		t.Fatalf("Archive: %v", err)
 	}
 
-	// Bead should be closed.
-	b, err := store.Get(sent.ID)
-	if err != nil {
-		t.Fatalf("store.Get: %v", err)
-	}
-	if b.Status != "closed" {
-		t.Errorf("bead Status = %q, want %q", b.Status, "closed")
+	if _, err := store.Get(sent.ID); !errors.Is(err, beads.ErrNotFound) {
+		t.Fatalf("store.Get(%s) err = %v, want ErrNotFound", sent.ID, err)
 	}
 }
 
@@ -776,6 +1033,27 @@ func TestArchiveAlreadyClosed(t *testing.T) {
 	if !errors.Is(err, mail.ErrAlreadyArchived) {
 		t.Errorf("Archive already closed: got %v, want ErrAlreadyArchived", err)
 	}
+	if _, err := store.Get(sent.ID); !errors.Is(err, beads.ErrNotFound) {
+		t.Fatalf("store.Get(%s) err = %v, want ErrNotFound", sent.ID, err)
+	}
+}
+
+func TestArchiveAlreadyDeleted(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+
+	sent, err := p.Send("human", "mayor", "", "old")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Archive(sent.ID); err != nil {
+		t.Fatalf("first Archive: %v", err)
+	}
+
+	err = p.Archive(sent.ID)
+	if !errors.Is(err, mail.ErrAlreadyArchived) {
+		t.Errorf("Archive already deleted: got %v, want ErrAlreadyArchived", err)
+	}
 }
 
 func TestArchiveNotFound(t *testing.T) {
@@ -783,20 +1061,12 @@ func TestArchiveNotFound(t *testing.T) {
 	p := New(store)
 
 	err := p.Archive("gc-999")
-	if err == nil {
-		t.Error("Archive should fail for nonexistent ID")
+	if !errors.Is(err, mail.ErrAlreadyArchived) {
+		t.Errorf("Archive nonexistent ID: got %v, want ErrAlreadyArchived", err)
 	}
 }
 
-// TestArchiveStampsCloseReason verifies that Archive stamps
-// close_reason=MailArchivedCloseReason on the closed message bead.
-// Without this, bd's validation.on-close=error rejects the close and
-// leaves the message open silently.
-func TestArchiveStampsCloseReason(t *testing.T) {
-	if got := len(MailArchivedCloseReason); got < 20 {
-		t.Fatalf("MailArchivedCloseReason = %q (%d chars), want >=20", MailArchivedCloseReason, got)
-	}
-
+func TestArchiveReadAfterDeleteReturnsNotFound(t *testing.T) {
 	store := beads.NewMemStore()
 	p := New(store)
 
@@ -808,18 +1078,12 @@ func TestArchiveStampsCloseReason(t *testing.T) {
 		t.Fatalf("Archive: %v", err)
 	}
 
-	b, err := store.Get(sent.ID)
-	if err != nil {
-		t.Fatalf("store.Get: %v", err)
-	}
-	if got := b.Metadata["close_reason"]; got != MailArchivedCloseReason {
-		t.Errorf("close_reason = %q, want %q", got, MailArchivedCloseReason)
+	if _, err := p.Get(sent.ID); !errors.Is(err, beads.ErrNotFound) {
+		t.Fatalf("Get(%s) err = %v, want ErrNotFound", sent.ID, err)
 	}
 }
 
-// TestArchiveManyStampsCloseReason verifies the batch-archive path also
-// stamps close_reason on every closed bead.
-func TestArchiveManyStampsCloseReason(t *testing.T) {
+func TestArchiveManyDeletesImmediately(t *testing.T) {
 	store := beads.NewMemStore()
 	p := New(store)
 
@@ -842,15 +1106,75 @@ func TestArchiveManyStampsCloseReason(t *testing.T) {
 		}
 	}
 	for _, id := range []string{a.ID, b.ID} {
-		got, err := store.Get(id)
-		if err != nil {
-			t.Fatalf("store.Get(%s): %v", id, err)
+		if _, err := store.Get(id); !errors.Is(err, beads.ErrNotFound) {
+			t.Fatalf("store.Get(%s) err = %v, want ErrNotFound", id, err)
 		}
-		if got.Status != "closed" {
-			t.Errorf("bead %s status = %q, want closed", id, got.Status)
+	}
+}
+
+func TestArchiveManyReportsPerIDResults(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+
+	a, err := p.Send("human", "mayor", "", "first")
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := store.Create(beads.Bead{Title: "not mail", Type: "task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := p.Send("human", "mayor", "", "second")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	results, err := p.ArchiveMany([]string{a.ID, task.ID, b.ID})
+	if err != nil {
+		t.Fatalf("ArchiveMany: %v", err)
+	}
+	if len(results) != 3 {
+		t.Fatalf("results = %d, want 3", len(results))
+	}
+	if results[0].Err != nil {
+		t.Errorf("results[0].Err = %v, want nil", results[0].Err)
+	}
+	if results[1].Err == nil || !strings.Contains(results[1].Err.Error(), "not a message") {
+		t.Errorf("results[1].Err = %v, want not a message", results[1].Err)
+	}
+	if results[2].Err != nil {
+		t.Errorf("results[2].Err = %v, want nil", results[2].Err)
+	}
+	for _, id := range []string{a.ID, b.ID} {
+		if _, err := store.Get(id); !errors.Is(err, beads.ErrNotFound) {
+			t.Fatalf("store.Get(%s) err = %v, want ErrNotFound", id, err)
 		}
-		if reason := got.Metadata["close_reason"]; reason != MailArchivedCloseReason {
-			t.Errorf("bead %s close_reason = %q, want %q", id, reason, MailArchivedCloseReason)
+	}
+	if _, err := store.Get(task.ID); err != nil {
+		t.Fatalf("task bead should remain after ArchiveMany partial error: %v", err)
+	}
+}
+
+func TestArchiveManyDoesNotUseCloseAll(t *testing.T) {
+	store := noCloseAllStore{MemStore: beads.NewMemStore(), t: t}
+	p := New(store)
+
+	a, err := p.Send("human", "mayor", "", "first")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := p.Send("human", "mayor", "", "second")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	results, err := p.ArchiveMany([]string{a.ID, b.ID})
+	if err != nil {
+		t.Fatalf("ArchiveMany: %v", err)
+	}
+	for i, r := range results {
+		if r.Err != nil {
+			t.Errorf("ArchiveMany[%d].Err = %v", i, r.Err)
 		}
 	}
 }
@@ -891,12 +1215,8 @@ func TestArchiveMatchingSkipsPerMessageGet(t *testing.T) {
 		}
 	}
 	for _, id := range []string{matchingA.ID, matchingB.ID} {
-		got, err := base.Get(id)
-		if err != nil {
-			t.Fatalf("Get(%s): %v", id, err)
-		}
-		if got.Status != "closed" {
-			t.Fatalf("message %s status = %q, want closed", id, got.Status)
+		if _, err := base.Get(id); !errors.Is(err, beads.ErrNotFound) {
+			t.Fatalf("Get(%s) err = %v, want ErrNotFound", id, err)
 		}
 	}
 	got, err := base.Get(other.ID)
@@ -934,12 +1254,8 @@ func TestDelete(t *testing.T) {
 		t.Fatalf("Delete: %v", err)
 	}
 
-	b, err := store.Get(sent.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if b.Status != "closed" {
-		t.Errorf("bead Status = %q, want %q", b.Status, "closed")
+	if _, err := store.Get(sent.ID); !errors.Is(err, beads.ErrNotFound) {
+		t.Fatalf("store.Get(%s) err = %v, want ErrNotFound", sent.ID, err)
 	}
 }
 
@@ -970,6 +1286,42 @@ func TestReply(t *testing.T) {
 	}
 	if reply.ReplyTo != sent.ID {
 		t.Errorf("Reply ReplyTo = %q, want %q", reply.ReplyTo, sent.ID)
+	}
+
+	wispMessages, err := store.List(beads.ListQuery{
+		Type:     "message",
+		Status:   "open",
+		TierMode: beads.TierWisps,
+	})
+	if err != nil {
+		t.Fatalf("List wisp-tier messages: %v", err)
+	}
+	if len(wispMessages) != 2 {
+		t.Fatalf("wisp-tier messages = %d, want sent message and reply", len(wispMessages))
+	}
+	replyInWisps := false
+	for _, b := range wispMessages {
+		if b.ID == reply.ID {
+			replyInWisps = true
+			if !b.Ephemeral {
+				t.Fatalf("reply Ephemeral = false, want true")
+			}
+		}
+	}
+	if !replyInWisps {
+		t.Fatalf("reply %s not found in wisp-tier messages: %#v", reply.ID, wispMessages)
+	}
+
+	issueMessages, err := store.List(beads.ListQuery{
+		Type:     "message",
+		Status:   "open",
+		TierMode: beads.TierIssues,
+	})
+	if err != nil {
+		t.Fatalf("List issue-tier messages: %v", err)
+	}
+	if len(issueMessages) != 0 {
+		t.Fatalf("issue-tier messages = %#v, want none", issueMessages)
 	}
 }
 
@@ -1822,14 +2174,36 @@ func TestCheck(t *testing.T) {
 // across multiple Inbox calls in a single command invocation.
 type countingSessionListStore struct {
 	*beads.MemStore
+	mu               sync.Mutex
 	sessionListCalls int
 }
 
 func (s *countingSessionListStore) List(query beads.ListQuery) ([]beads.Bead, error) {
 	if query.Label == session.LabelSession && len(query.Metadata) == 0 {
+		s.mu.Lock()
 		s.sessionListCalls++
+		s.mu.Unlock()
 	}
 	return s.MemStore.List(query)
+}
+
+func (s *countingSessionListStore) sessionListCallCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.sessionListCalls
+}
+
+func setCachedProviderClock(t *testing.T, p *Provider, start time.Time) func(time.Duration) {
+	t.Helper()
+	if p.sessionCache == nil {
+		t.Fatal("cached provider has nil session cache")
+	}
+	current := start
+	p.sessionCache.refreshInterval = time.Minute
+	p.sessionCache.now = func() time.Time { return current }
+	return func(d time.Duration) {
+		current = current.Add(d)
+	}
 }
 
 func TestProvider_DefaultProviderSeesNewHistoricalAliasSessionAcrossCalls(t *testing.T) {
@@ -1869,8 +2243,8 @@ func TestProvider_DefaultProviderSeesNewHistoricalAliasSessionAcrossCalls(t *tes
 	if msgs[0].Body != "for old route" {
 		t.Fatalf("Inbox(old-route) body = %q, want %q", msgs[0].Body, "for old route")
 	}
-	if store.sessionListCalls != 2 {
-		t.Errorf("broad gc:session List calls = %d, want 2 (default provider must refetch per call to avoid stale shared state)", store.sessionListCalls)
+	if got := store.sessionListCallCount(); got != 2 {
+		t.Errorf("broad gc:session List calls = %d, want 2 (default provider must refetch per call to avoid stale shared state)", got)
 	}
 }
 
@@ -1915,8 +2289,181 @@ func TestProviderCached_BroadSessionListCachedAcrossInboxCalls(t *testing.T) {
 		}
 	}
 
-	if store.sessionListCalls != 1 {
-		t.Errorf("broad gc:session List calls = %d, want 1 (Provider must cache the enumeration)", store.sessionListCalls)
+	if got := store.sessionListCallCount(); got != 1 {
+		t.Errorf("broad gc:session List calls = %d, want 1 (Provider must cache the enumeration)", got)
+	}
+}
+
+func TestProviderCached_BroadSessionListCacheConcurrentAccess(t *testing.T) {
+	store := &countingSessionListStore{MemStore: beads.NewMemStore()}
+	if _, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"alias":         "worker-a",
+			"alias_history": "old-route",
+			"session_name":  "wf__a",
+		},
+	}); err != nil {
+		t.Fatalf("Create session: %v", err)
+	}
+	p := NewCached(store)
+
+	const workers = 16
+	errs := make(chan error, workers)
+	var wg sync.WaitGroup
+	wg.Add(workers)
+	for i := 0; i < workers; i++ {
+		go func() {
+			defer wg.Done()
+			_, err := p.Inbox("old-route")
+			errs <- err
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("Inbox(old-route): %v", err)
+		}
+	}
+	if got := store.sessionListCallCount(); got != 1 {
+		t.Errorf("broad gc:session List calls = %d, want 1 under concurrent access", got)
+	}
+}
+
+func TestProviderCached_RefreshSeesNewHistoricalAliasSession(t *testing.T) {
+	store := &countingSessionListStore{MemStore: beads.NewMemStore()}
+	p := NewCached(store)
+	advance := setCachedProviderClock(t, p, time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC))
+
+	if _, err := p.Inbox("old-route"); err != nil {
+		t.Fatalf("initial Inbox(old-route): %v", err)
+	}
+	sessionBead, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"alias":         "worker-a",
+			"alias_history": "old-route",
+			"session_name":  "wf__a",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create session: %v", err)
+	}
+	if _, err := p.Send("human", sessionBead.Metadata["alias"], "", "visible after refresh"); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	advance(2 * time.Minute)
+
+	msgs, err := p.Inbox("old-route")
+	if err != nil {
+		t.Fatalf("refreshed Inbox(old-route): %v", err)
+	}
+	if len(msgs) != 1 || msgs[0].Body != "visible after refresh" {
+		t.Fatalf("Inbox(old-route) = %#v, want new session mail after refresh", msgs)
+	}
+	if got := store.sessionListCallCount(); got != 2 {
+		t.Errorf("broad gc:session List calls = %d, want initial scan plus refresh", got)
+	}
+}
+
+func TestProviderCached_RefreshRemovesClosedSessionFromLiveHistoricalMatch(t *testing.T) {
+	store := &countingSessionListStore{MemStore: beads.NewMemStore()}
+	p := NewCached(store)
+	advance := setCachedProviderClock(t, p, time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC))
+
+	oldSession, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"alias":         "worker-old",
+			"alias_history": "old-route",
+			"session_name":  "wf__old",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create old session: %v", err)
+	}
+	if _, err := p.Inbox("old-route"); err != nil {
+		t.Fatalf("prime Inbox(old-route): %v", err)
+	}
+	if _, err := p.Send("human", oldSession.Metadata["alias"], "", "stale closed session mail"); err != nil {
+		t.Fatalf("Send old: %v", err)
+	}
+	if err := store.Close(oldSession.ID); err != nil {
+		t.Fatalf("Close old session: %v", err)
+	}
+	newSession, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"alias":         "worker-new",
+			"alias_history": "old-route",
+			"session_name":  "wf__new",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create new session: %v", err)
+	}
+	if _, err := p.Send("human", newSession.Metadata["alias"], "", "live replacement mail"); err != nil {
+		t.Fatalf("Send new: %v", err)
+	}
+	advance(2 * time.Minute)
+
+	msgs, err := p.Inbox("old-route")
+	if err != nil {
+		t.Fatalf("refreshed Inbox(old-route): %v", err)
+	}
+	if len(msgs) != 1 || msgs[0].Body != "live replacement mail" {
+		t.Fatalf("Inbox(old-route) = %#v, want refreshed live replacement only", msgs)
+	}
+	if got := store.sessionListCallCount(); got != 2 {
+		t.Errorf("broad gc:session List calls = %d, want initial scan plus refresh", got)
+	}
+}
+
+func TestProviderCached_ExpiredRefreshConcurrentAccessScansOnce(t *testing.T) {
+	store := &countingSessionListStore{MemStore: beads.NewMemStore()}
+	if _, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"alias":         "worker-a",
+			"alias_history": "old-route",
+			"session_name":  "wf__a",
+		},
+	}); err != nil {
+		t.Fatalf("Create session: %v", err)
+	}
+	p := NewCached(store)
+	advance := setCachedProviderClock(t, p, time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC))
+	if _, err := p.Inbox("old-route"); err != nil {
+		t.Fatalf("prime Inbox(old-route): %v", err)
+	}
+	advance(2 * time.Minute)
+
+	const workers = 16
+	errs := make(chan error, workers)
+	var wg sync.WaitGroup
+	wg.Add(workers)
+	for i := 0; i < workers; i++ {
+		go func() {
+			defer wg.Done()
+			_, err := p.Inbox("old-route")
+			errs <- err
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("Inbox(old-route): %v", err)
+		}
+	}
+	if got := store.sessionListCallCount(); got != 2 {
+		t.Errorf("broad gc:session List calls = %d, want initial scan plus one concurrent refresh", got)
 	}
 }
 

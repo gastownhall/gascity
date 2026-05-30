@@ -402,8 +402,8 @@ func (v2AgentFormatCheck) Run(ctx *doctor.CheckContext) *doctor.CheckResult {
 		return okCheck("v2-agent-format", "no legacy [[agent]] tables found")
 	case cityHasLegacy && packHasLegacy:
 		return errorCheck("v2-agent-format",
-			"unsupported PackV1 [[agent]] tables found in city.toml; pack.toml also still uses deferred legacy [[agent]] tables",
-			"run `gc doctor --fix` to move each city.toml [[agent]] definition into agents/<name>/agent.toml; pack.toml [[agent]] enforcement remains deferred until doctor/remediation support exists",
+			"unsupported PackV1 [[agent]] tables found in city.toml and pack.toml",
+			"run `gc doctor --fix` to move each root city.toml and pack.toml [[agent]] definition into agents/<name>/agent.toml",
 			append(cityLegacy, packLegacy...))
 	case cityHasLegacy:
 		return errorCheck("v2-agent-format",
@@ -411,9 +411,9 @@ func (v2AgentFormatCheck) Run(ctx *doctor.CheckContext) *doctor.CheckResult {
 			"run `gc doctor --fix` to move each city.toml [[agent]] definition into agents/<name>/agent.toml",
 			cityLegacy)
 	default:
-		return warnCheck("v2-agent-format",
-			"legacy [[agent]] tables still present in pack.toml; enforcement is deferred until doctor/remediation support exists",
-			"leave this as-is for now or migrate to agents/<name>/agent.toml ahead of the follow-on enforcement pass",
+		return errorCheck("v2-agent-format",
+			"unsupported PackV1 [[agent]] tables found in pack.toml",
+			"run `gc doctor --fix` to move each root pack.toml [[agent]] definition into agents/<name>/agent.toml",
 			packLegacy)
 	}
 }

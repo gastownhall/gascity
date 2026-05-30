@@ -67,8 +67,8 @@ stderr 'not found'
 ! exec gc mail archive
 stderr 'missing message ID'
 
-! exec gc mail archive gc-999
-stderr 'not found'
+exec gc mail archive gc-999
+stdout 'Already archived gc-999'
 
 # --- Event errors ---
 

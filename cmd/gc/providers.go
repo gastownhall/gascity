@@ -670,15 +670,17 @@ func mailProviderNameForCity(cityPath string) string {
 
 // newMailProvider returns a mail.Provider based on the mail provider name
 // (env var → city.toml → default) and the given bead store (used as the
-// default backend). Shared callers such as the API use the stateless beadmail
-// provider so long-lived instances observe fresh session state.
+// default backend). Shared callers such as the API use the cached beadmail
+// provider so repeated mail reads reuse one session-topology enumeration.
+// The cache lasts for the provider lifetime; topology refresh for long-lived
+// providers is handled by rebuilding the provider.
 //
 //   - "fake" → in-memory fake (all ops succeed)
 //   - "fail" → broken fake (all ops return errors)
 //   - "exec:<script>" → user-supplied script (absolute path or PATH lookup)
 //   - default → beadmail (backed by beads.Store, no subprocess)
 func newMailProvider(store beads.Store) mail.Provider {
-	return newMailProviderNamed(mailProviderName(), store, false)
+	return newMailProviderNamed(mailProviderName(), store, true)
 }
 
 func newCommandMailProvider(store beads.Store) mail.Provider {

@@ -95,6 +95,26 @@ func TestResolveInstalledRemoteImportAcceptsBundledSyntheticCache(t *testing.T) 
 	}
 }
 
+func TestResolveImportPackRefAcceptsPublicGastownSyntheticCache(t *testing.T) {
+	home, cityDir := setupBundledImportTest(t)
+	source := PublicGastownPackSource
+	commit := strings.TrimPrefix(PublicGastownPackVersion, "sha:")
+	writeBundledImportLock(t, cityDir, source, commit)
+	cacheDir := bundledRepoCacheDir(home, source, commit)
+	if err := builtinpacks.MaterializeSyntheticRepo(cacheDir, commit); err != nil {
+		t.Fatalf("materialize synthetic repo: %v", err)
+	}
+
+	got, err := resolveImportPackRef(source, cityDir, cityDir)
+	if err != nil {
+		t.Fatalf("resolveImportPackRef: %v", err)
+	}
+	want := filepath.Join(cacheDir, "gastown")
+	if got != want {
+		t.Fatalf("import path = %q, want %q", got, want)
+	}
+}
+
 func TestResolveLockedRemoteImportSurfacesInvalidBundledMarker(t *testing.T) {
 	home, cityDir := setupBundledImportTest(t)
 	source := bundledPackSource()

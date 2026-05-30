@@ -214,7 +214,18 @@ func (v LifecycleView) HasWakeCause(cause WakeCause) bool {
 	return false
 }
 
-const lifecycleResetPendingReason = "reset-pending"
+const (
+	// LifecycleReasonResetPending is the shared display reason for a live reset request.
+	LifecycleReasonResetPending = "reset-pending"
+	// LifecycleReasonCircuitOpen is the shared display reason for an open session circuit breaker.
+	LifecycleReasonCircuitOpen = "circuit-open"
+	// SessionCircuitStateMetadataKey is the durable metadata key for session circuit breaker state.
+	SessionCircuitStateMetadataKey = "session_circuit_state"
+	// SessionCircuitStateOpen is the durable metadata value for an open session circuit breaker.
+	SessionCircuitStateOpen = "CIRCUIT_OPEN"
+	// SessionCircuitStateClosed is the durable metadata value for a closed session circuit breaker.
+	SessionCircuitStateClosed = "CIRCUIT_CLOSED"
+)
 
 // LifecycleDisplayReason returns the user-facing reason for a non-closed
 // session's current lifecycle posture.
@@ -242,7 +253,7 @@ func LifecycleDisplayReasonWithLiveness(status string, metadata map[string]strin
 		Now:      now,
 	})
 	if lifecycleResetPendingReasonVisible(view, metadata, sessionName, isRunning) {
-		return lifecycleResetPendingReason
+		return LifecycleReasonResetPending
 	}
 	return lifecycleDisplayReasonFromView(view, metadata)
 }
@@ -267,6 +278,9 @@ func lifecycleDisplayReasonFromView(view LifecycleView, metadata map[string]stri
 	}
 	if view.BaseState == BaseStateArchived && !view.ContinuityEligible {
 		return ""
+	}
+	if strings.TrimSpace(metadata[SessionCircuitStateMetadataKey]) == SessionCircuitStateOpen {
+		return LifecycleReasonCircuitOpen
 	}
 	if reason := strings.TrimSpace(metadata["sleep_reason"]); reason != "" {
 		staleTimedQuarantine := (reason == "quarantine" || reason == "context-churn" || reason == "rate_limit") &&

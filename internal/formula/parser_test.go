@@ -904,6 +904,93 @@ func TestResolve_InheritsGraphContractFromParent(t *testing.T) {
 	}
 }
 
+func TestResolve_PreservesChildCatalogWithoutInheritingParentCatalog(t *testing.T) {
+	dir := t.TempDir()
+	formulaDir := filepath.Join(dir, ".beads", "formulas")
+	if err := os.MkdirAll(formulaDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	parent := `{
+  "formula": "catalog-parent",
+  "version": 1,
+  "type": "workflow",
+  "catalog": {
+    "name": "catalog-parent",
+    "description": "Parent workflow"
+  },
+  "steps": [
+    {"id": "parent", "title": "Parent"}
+  ]
+}`
+	if err := os.WriteFile(filepath.Join(formulaDir, "catalog-parent.formula.json"), []byte(parent), 0o644); err != nil {
+		t.Fatalf("write parent: %v", err)
+	}
+
+	childWithCatalog := `{
+  "formula": "catalog-child",
+  "version": 1,
+  "type": "workflow",
+  "extends": ["catalog-parent"],
+  "catalog": {
+    "name": "catalog-child",
+    "description": "Child workflow"
+  },
+  "steps": [
+    {"id": "child", "title": "Child"}
+  ]
+}`
+	childWithCatalogPath := filepath.Join(formulaDir, "catalog-child.formula.json")
+	if err := os.WriteFile(childWithCatalogPath, []byte(childWithCatalog), 0o644); err != nil {
+		t.Fatalf("write child with catalog: %v", err)
+	}
+
+	childWithoutCatalog := `{
+  "formula": "internal-child",
+  "version": 1,
+  "type": "workflow",
+  "extends": ["catalog-parent"],
+  "steps": [
+    {"id": "child", "title": "Child"}
+  ]
+}`
+	childWithoutCatalogPath := filepath.Join(formulaDir, "internal-child.formula.json")
+	if err := os.WriteFile(childWithoutCatalogPath, []byte(childWithoutCatalog), 0o644); err != nil {
+		t.Fatalf("write child without catalog: %v", err)
+	}
+
+	p := NewParser(formulaDir)
+	parsedWithCatalog, err := p.ParseFile(childWithCatalogPath)
+	if err != nil {
+		t.Fatalf("ParseFile child with catalog: %v", err)
+	}
+	resolvedWithCatalog, err := p.Resolve(parsedWithCatalog)
+	if err != nil {
+		t.Fatalf("Resolve child with catalog: %v", err)
+	}
+	if resolvedWithCatalog.Catalog == nil {
+		t.Fatalf("resolved child catalog is nil")
+	}
+	if got := resolvedWithCatalog.Catalog.Name; got != "catalog-child" {
+		t.Fatalf("resolved child catalog name = %q, want catalog-child", got)
+	}
+	if got := resolvedWithCatalog.Catalog.Description; got != "Child workflow" {
+		t.Fatalf("resolved child catalog description = %q, want Child workflow", got)
+	}
+
+	parsedWithoutCatalog, err := p.ParseFile(childWithoutCatalogPath)
+	if err != nil {
+		t.Fatalf("ParseFile child without catalog: %v", err)
+	}
+	resolvedWithoutCatalog, err := p.Resolve(parsedWithoutCatalog)
+	if err != nil {
+		t.Fatalf("Resolve child without catalog: %v", err)
+	}
+	if resolvedWithoutCatalog.Catalog != nil {
+		t.Fatalf("resolved child without catalog inherited %+v, want nil", resolvedWithoutCatalog.Catalog)
+	}
+}
+
 func TestResolve_ExpansionExtendsPreservesTemplateAndInheritedContract(t *testing.T) {
 	dir := t.TempDir()
 	formulaDir := filepath.Join(dir, ".beads", "formulas")

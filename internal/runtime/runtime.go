@@ -429,6 +429,11 @@ type Config struct {
 	// Nil keeps the runtime default derived from other startup hints.
 	AcceptStartupDialogs *bool
 
+	// MouseOn reports whether tmux mouse mode should be preserved for this session.
+	// When false, tmux startup disables mouse mode and monitor-activity to keep
+	// terminal mouse escape sequences out of headless agent stdin.
+	MouseOn bool
+
 	// Nudge is text typed into the session after the agent is ready.
 	// Used for CLI agents that don't accept command-line prompts.
 	Nudge string

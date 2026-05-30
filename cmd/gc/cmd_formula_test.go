@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -310,5 +311,263 @@ func TestFormulaShowJSONFromRecipe(t *testing.T) {
 	}
 	if len(got.Steps) != 2 || got.Steps[1].Title != "Test unit" {
 		t.Fatalf("steps = %+v", got.Steps)
+	}
+}
+
+func TestFormulaCatalogEntriesUseResolvedWinnersAndSort(t *testing.T) {
+	cityDir := t.TempDir()
+	rigDir := t.TempDir()
+
+	writeFormulaTestFile(t, cityDir, "build-run", `formula = "build-run"
+description = "city build"
+
+[catalog]
+name = "build-run"
+description = "City build workflow"
+
+[[steps]]
+id = "run"
+title = "Run"
+`)
+	writeFormulaTestFile(t, cityDir, "internal-helper", `formula = "internal-helper"
+description = "not user runnable"
+
+[[steps]]
+id = "run"
+title = "Run"
+`)
+	writeFormulaTestFile(t, rigDir, "review", `formula = "review"
+description = "review"
+
+[catalog]
+name = "review"
+description = "Review a completed implementation."
+
+[[steps]]
+id = "review"
+title = "Review"
+`)
+	writeFormulaTestFile(t, rigDir, "build-run", `formula = "build-run"
+description = "rig build"
+
+[catalog]
+name = "build-run"
+description = "Rig-specific build workflow"
+
+[[steps]]
+id = "run"
+title = "Run"
+`)
+
+	got, warnings := formulaCatalogEntries([]string{cityDir, rigDir})
+	if len(warnings) != 0 {
+		t.Fatalf("warnings = %+v, want none", warnings)
+	}
+	want := []formulaCatalogEntryJSON{
+		{Name: "build-run", Description: "Rig-specific build workflow"},
+		{Name: "review", Description: "Review a completed implementation."},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("catalog entries = %+v, want %+v", got, want)
+	}
+}
+
+func TestFormulaCatalogEntriesUseFormulaRefForDiscovery(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skipf("git unavailable: %v", err)
+	}
+	root := t.TempDir()
+	runGitForFormulaTest(t, root, "init", "-b", "main")
+	runGitForFormulaTest(t, root, "config", "user.email", "test@example.com")
+	runGitForFormulaTest(t, root, "config", "user.name", "test")
+	runGitForFormulaTest(t, root, "config", "commit.gpgsign", "false")
+
+	formulaDir := filepath.Join(root, "formulas")
+	writeFormulaTestFile(t, formulaDir, "from-ref", `formula = "from-ref"
+
+[catalog]
+name = "from-ref"
+description = "Committed workflow"
+
+[[steps]]
+id = "run"
+title = "Run"
+`)
+	runGitForFormulaTest(t, root, "add", "formulas/from-ref.formula.toml")
+	runGitForFormulaTest(t, root, "commit", "-m", "add committed catalog formula")
+	runGitForFormulaTest(t, root, "checkout", "-b", "feature")
+	if err := os.Remove(filepath.Join(formulaDir, "from-ref.formula.toml")); err != nil {
+		t.Fatalf("remove committed formula from working tree: %v", err)
+	}
+	writeFormulaTestFile(t, formulaDir, "working-only", `formula = "working-only"
+
+[catalog]
+name = "working-only"
+description = "Uncommitted workflow"
+
+[[steps]]
+id = "run"
+title = "Run"
+`)
+	t.Setenv("GC_FORMULA_REF", "main")
+
+	got, warnings := formulaCatalogEntries([]string{formulaDir})
+	if len(warnings) != 0 {
+		t.Fatalf("warnings = %+v, want none", warnings)
+	}
+	want := []formulaCatalogEntryJSON{{Name: "from-ref", Description: "Committed workflow"}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("catalog entries = %+v, want %+v", got, want)
+	}
+}
+
+func TestFormulaCatalogEntriesWarnForPerFileFailures(t *testing.T) {
+	dir := t.TempDir()
+	writeFormulaTestFile(t, dir, "build-run", `formula = "build-run"
+
+[catalog]
+name = "build-run"
+description = "Build workflow"
+
+[[steps]]
+id = "run"
+title = "Run"
+`)
+	writeFormulaTestFile(t, dir, "broken-helper", `formula = "broken-helper"
+[catalog
+`)
+	writeFormulaTestFile(t, dir, "bad-catalog", `formula = "bad-catalog"
+
+[catalog]
+name = "other-name"
+description = "Bad metadata"
+
+[[steps]]
+id = "run"
+title = "Run"
+`)
+
+	got, warnings := formulaCatalogEntries([]string{dir})
+	want := []formulaCatalogEntryJSON{{Name: "build-run", Description: "Build workflow"}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("catalog entries = %+v, want %+v", got, want)
+	}
+	if len(warnings) != 2 {
+		t.Fatalf("warnings len = %d, want 2: %+v", len(warnings), warnings)
+	}
+	if warnings[0].Code == "" || warnings[0].Message == "" {
+		t.Fatalf("warning[0] = %+v, want structured code and message", warnings[0])
+	}
+	if warnings[1].Code == "" || warnings[1].Message == "" {
+		t.Fatalf("warning[1] = %+v, want structured code and message", warnings[1])
+	}
+}
+
+func TestFormulaCatalogEntriesWarnForInvalidMetadata(t *testing.T) {
+	t.Run("name mismatch", func(t *testing.T) {
+		dir := t.TempDir()
+		writeFormulaTestFile(t, dir, "build-run", `formula = "build-run"
+
+[catalog]
+name = "build"
+description = "Build workflow"
+
+[[steps]]
+id = "run"
+title = "Run"
+`)
+
+		got, warnings := formulaCatalogEntries([]string{dir})
+		if len(got) != 0 {
+			t.Fatalf("catalog entries = %+v, want none", got)
+		}
+		if len(warnings) != 1 {
+			t.Fatalf("warnings len = %d, want 1: %+v", len(warnings), warnings)
+		}
+		if !strings.Contains(warnings[0].Message, `catalog.name "build" must match formula name "build-run"`) {
+			t.Fatalf("warning = %+v", warnings[0])
+		}
+	})
+
+	t.Run("missing description", func(t *testing.T) {
+		dir := t.TempDir()
+		writeFormulaTestFile(t, dir, "review", `formula = "review"
+
+[catalog]
+name = "review"
+
+[[steps]]
+id = "run"
+title = "Run"
+`)
+
+		got, warnings := formulaCatalogEntries([]string{dir})
+		if len(got) != 0 {
+			t.Fatalf("catalog entries = %+v, want none", got)
+		}
+		if len(warnings) != 1 {
+			t.Fatalf("warnings len = %d, want 1: %+v", len(warnings), warnings)
+		}
+		if !strings.Contains(warnings[0].Message, `catalog.description is required`) {
+			t.Fatalf("warning = %+v", warnings[0])
+		}
+	})
+}
+
+func TestFormulaCatalogCommandJSONFromEntries(t *testing.T) {
+	var stdout bytes.Buffer
+	payload := formulaCatalogJSONFromEntries([]formulaCatalogEntryJSON{
+		{Name: "build-run", Description: "Build workflow"},
+	}, []jsonContractWarning{{Code: "formula_catalog_parse_failed", Message: "skipped broken-helper"}})
+	if err := writeCLIJSONLine(&stdout, payload); err != nil {
+		t.Fatalf("writeCLIJSONLine: %v", err)
+	}
+
+	var got struct {
+		SchemaVersion string `json:"schema_version"`
+		OK            bool   `json:"ok"`
+		Formulas      []struct {
+			Name        string `json:"name"`
+			Description string `json:"description"`
+			Source      string `json:"source"`
+		} `json:"formulas"`
+		Summary struct {
+			Count int `json:"count"`
+		} `json:"summary"`
+		Warnings []jsonContractWarning `json:"warnings"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatalf("formula catalog JSON is invalid: %v\n%s", err, stdout.String())
+	}
+	if got.SchemaVersion != "1" || !got.OK || got.Summary.Count != 1 {
+		t.Fatalf("payload = %+v", got)
+	}
+	if len(got.Formulas) != 1 || got.Formulas[0].Name != "build-run" || got.Formulas[0].Description != "Build workflow" {
+		t.Fatalf("formulas = %+v", got.Formulas)
+	}
+	if got.Formulas[0].Source != "" {
+		t.Fatalf("catalog JSON leaked source path: %+v", got.Formulas[0])
+	}
+	if len(got.Warnings) != 1 || got.Warnings[0].Code != "formula_catalog_parse_failed" {
+		t.Fatalf("warnings = %+v", got.Warnings)
+	}
+}
+
+func writeFormulaTestFile(t *testing.T, dir, name, content string) {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir formula dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, name+".formula.toml"), []byte(content), 0o644); err != nil {
+		t.Fatalf("write formula %s: %v", name, err)
+	}
+}
+
+func runGitForFormulaTest(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
 	}
 }

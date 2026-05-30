@@ -81,6 +81,7 @@ export type AgentPatch = {
     MaxSessionAge: string | null;
     MaxSessionAgeJitter: string | null;
     MinActiveSessions: number | null;
+    MouseMode: string | null;
     Name: string;
     Nudge: string | null;
     OptionDefaults: {

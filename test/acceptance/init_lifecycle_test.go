@@ -14,6 +14,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/config"
 	helpers "github.com/gastownhall/gascity/test/acceptance/helpers"
 )
 
@@ -146,6 +147,56 @@ source = ".gc/system/packs/gastown"
 	// Positive assertion: packs must have been materialized.
 	if !c.HasFile(".gc/system/packs/gastown/pack.toml") {
 		t.Fatal(".gc/system/packs/gastown/pack.toml not materialized after resume — Bug 4 regression")
+	}
+}
+
+func TestInitPublicGastownPackStartsFromCanonicalImport(t *testing.T) {
+	c := helpers.NewCity(t, testEnv)
+	templatePath := filepath.Join(helpers.TempDir(t), "public-gastown.toml")
+	cfg := config.GastownCity(filepath.Base(c.Dir), "claude", "")
+	data, err := cfg.Marshal()
+	if err != nil {
+		t.Fatalf("marshaling public gastown template: %v", err)
+	}
+	if err := os.WriteFile(templatePath, data, 0o644); err != nil {
+		t.Fatalf("writing public gastown template: %v", err)
+	}
+
+	out, err := helpers.RunGC(testEnv, "", "init", "--file", templatePath, "--skip-provider-readiness", c.Dir)
+	if err != nil {
+		t.Fatalf("gc init --file public gastown failed: %v\n%s", err, out)
+	}
+	t.Cleanup(c.CleanupRuntime)
+
+	packToml := c.ReadFile("pack.toml")
+	if !strings.Contains(packToml, `source = "`+config.PublicGastownPackSource+`"`) {
+		t.Fatalf("pack.toml missing canonical public gastown source:\n%s", packToml)
+	}
+	if !strings.Contains(packToml, `version = "`+config.PublicGastownPackVersion+`"`) {
+		t.Fatalf("pack.toml missing canonical public gastown version:\n%s", packToml)
+	}
+	if strings.Contains(packToml, ".gc/system/packs/gastown") {
+		t.Fatalf("pack.toml should not reference legacy materialized gastown paths:\n%s", packToml)
+	}
+
+	packsLock := c.ReadFile("packs.lock")
+	if !strings.Contains(packsLock, `[packs."`+config.PublicGastownPackSource+`"]`) {
+		t.Fatalf("packs.lock missing canonical public gastown source:\n%s", packsLock)
+	}
+
+	if out, err := c.GC("config", "show", "--validate"); err != nil {
+		t.Fatalf("config validation after public gastown init failed: %v\n%s", err, out)
+	}
+	if out, err := c.GC("stop", c.Dir); err != nil {
+		t.Fatalf("gc stop after public gastown init failed: %v\n%s", err, out)
+	}
+	if out, err := c.GC("unregister", c.Dir); err != nil {
+		t.Fatalf("gc unregister after public gastown init failed: %v\n%s", err, out)
+	}
+
+	c.StartWithSupervisor()
+	if out, err := c.GC("status", "--city", c.Dir); err != nil {
+		t.Fatalf("gc status after public gastown start failed: %v\n%s", err, out)
 	}
 }
 

@@ -23,6 +23,7 @@ builtin-pack-family
 config-semantics
 duration-range
 provider-parity
+named-always-min-conflict
 instructions-file
 skill-collision
 order-firing-current

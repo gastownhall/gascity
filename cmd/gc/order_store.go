@@ -83,6 +83,19 @@ func resolveOrderStoreTarget(cityPath string, cfg *config.City, a orders.Order) 
 	if cfg == nil {
 		return execStoreTarget{}, fmt.Errorf("rig-scoped order %q requires city config", a.ScopedName())
 	}
+	if strings.TrimSpace(a.Pool) != "" {
+		pool, err := qualifyOrderPool(a, cfg)
+		if err != nil {
+			return execStoreTarget{}, err
+		}
+		if !strings.Contains(pool, "/") {
+			return execStoreTarget{
+				ScopeRoot: cityPath,
+				ScopeKind: "city",
+				Prefix:    config.EffectiveHQPrefix(cfg),
+			}, nil
+		}
+	}
 	resolveRigPaths(cityPath, cfg.Rigs)
 	rig, ok := rigByName(cfg, a.Rig)
 	if !ok {

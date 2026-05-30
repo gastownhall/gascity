@@ -161,7 +161,21 @@
       "type": "array",
       "items": {
         "type": "object",
-        "additionalProperties": true
+        "required": [
+          "code",
+          "message"
+        ],
+        "properties": {
+          "code": {
+            "type": "string",
+            "minLength": 1
+          },
+          "message": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "additionalProperties": false
       }
     }
   },

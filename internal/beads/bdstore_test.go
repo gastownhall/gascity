@@ -3091,6 +3091,32 @@ func TestBdStoreListBothTiersAppliesCreatedBeforeBeforeMergedLimit(t *testing.T)
 	}
 }
 
+func TestBdStoreListBothTiersMessageUsesSingleBdListWithoutTierFiltering(t *testing.T) {
+	var calls []string
+	runner := func(_, name string, args ...string) ([]byte, error) {
+		full := name + " " + strings.Join(args, " ")
+		calls = append(calls, full)
+		switch {
+		case strings.HasPrefix(full, "bd list "):
+			return []byte(`[{"id":"bd-msg","title":"message","status":"open","issue_type":"message","assignee":"mayor","created_at":"2026-05-01T00:00:00Z","ephemeral":true}]`), nil
+		case strings.HasPrefix(full, "bd query "):
+			t.Fatalf("message TierBoth list issued bd query: %v", calls)
+		}
+		return nil, fmt.Errorf("unexpected: %s", full)
+	}
+	s := beads.NewBdStore("/city", runner)
+	got, err := s.List(beads.ListQuery{Type: "message", Status: "open", TierMode: beads.TierBoth})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(calls) != 1 {
+		t.Fatalf("got %d runner calls, want 1: %v", len(calls), calls)
+	}
+	if len(got) != 1 || got[0].ID != "bd-msg" || !got[0].Ephemeral {
+		t.Fatalf("got = %+v, want TierBoth bd message row bd-msg with Ephemeral=true", got)
+	}
+}
+
 func TestBdStoreListIssuesTierDoesNotIssueQuery(t *testing.T) {
 	var calls []string
 	runner := func(_, name string, args ...string) ([]byte, error) {

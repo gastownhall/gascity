@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -24,6 +23,7 @@ func newFormulaCmd(stdout, stderr io.Writer) *cobra.Command {
 
 	cmd.AddCommand(newFormulaListCmd(stdout, stderr))
 	cmd.AddCommand(newFormulaShowCmd(stdout, stderr))
+	cmd.AddCommand(newFormulaCatalogCmd(stdout, stderr))
 	cmd.AddCommand(newFormulaCookCmd(stdout, stderr))
 	cmd.AddCommand(newFormulaVersionCheckCmd(stdout, stderr))
 	return cmd
@@ -258,6 +258,42 @@ Examples:
 	return cmd
 }
 
+func newFormulaCatalogCmd(stdout, stderr io.Writer) *cobra.Command {
+	var jsonOutput bool
+	cmd := &cobra.Command{
+		Use:    "catalog",
+		Short:  "List formulas opted into agent workflow discovery",
+		Hidden: true,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			cityPath, err := resolveCity()
+			if err != nil {
+				return err
+			}
+			cfg, err := loadCityConfig(cityPath, stderr)
+			if err != nil {
+				return err
+			}
+			scope, err := resolveFormulaScope(cfg, cityPath)
+			if err != nil {
+				return err
+			}
+			entries, warnings := formulaCatalogEntries(scope.searchPaths)
+			if jsonOutput {
+				return writeCLIJSONLine(stdout, formulaCatalogJSONFromEntries(entries, warnings))
+			}
+			for _, warning := range warnings {
+				_, _ = fmt.Fprintln(stderr, warning.Message)
+			}
+			for _, entry := range entries {
+				_, _ = fmt.Fprintf(stdout, "%s\t%s\n", entry.Name, entry.Description)
+			}
+			return nil
+		},
+	}
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "emit JSON")
+	return cmd
+}
+
 type formulaListJSON struct {
 	SchemaVersion string                 `json:"schema_version"`
 	OK            bool                   `json:"ok"`
@@ -275,6 +311,19 @@ type formulaListRowJSON struct {
 
 type formulaListSummaryJSON struct {
 	Count int `json:"count"`
+}
+
+type formulaCatalogJSON struct {
+	SchemaVersion string                    `json:"schema_version"`
+	OK            bool                      `json:"ok"`
+	Formulas      []formulaCatalogEntryJSON `json:"formulas"`
+	Summary       formulaListSummaryJSON    `json:"summary"`
+	Warnings      []jsonContractWarning     `json:"warnings,omitempty"`
+}
+
+type formulaCatalogEntryJSON struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
 }
 
 type formulaShowJSON struct {
@@ -341,26 +390,16 @@ func listFormulaRows(warningWriter ...io.Writer) (string, []string, []formulaLis
 	}
 	paths := formulaSearchPathsForList(cfg)
 
-	// Scan search paths for canonical and legacy formula TOML files,
-	// deduplicating by name (last path wins, matching formula layer
-	// resolution order).
-	winners := make(map[string]string)
-	for _, dir := range paths {
-		entries, err := os.ReadDir(dir)
-		if err != nil {
-			continue
-		}
-		for _, e := range entries {
-			if e.IsDir() {
-				continue
-			}
-			name, ok := formula.TrimTOMLFilename(e.Name())
-			if !ok {
-				continue
-			}
-			winners[name] = filepath.Join(dir, e.Name())
-		}
-	}
+	rows := formulaRowsForSearchPaths(paths)
+	return cityPath, paths, rows
+}
+
+func formulaRowsForSearchPaths(paths []string) []formulaListRowJSON {
+	return formulaRowsForSearchPathsWithSource(formula.FSSource{}, paths)
+}
+
+func formulaRowsForSearchPathsWithSource(src formula.Source, paths []string) []formulaListRowJSON {
+	winners := formula.ResolveAllWithSource(src, paths)
 
 	names := make([]string, 0, len(winners))
 	for name := range winners {
@@ -372,7 +411,66 @@ func listFormulaRows(warningWriter ...io.Writer) (string, []string, []formulaLis
 	for _, name := range names {
 		rows = append(rows, formulaListRowJSON{Name: name, Source: winners[name]})
 	}
-	return cityPath, paths, rows
+	return rows
+}
+
+func formulaCatalogEntries(searchPaths []string) ([]formulaCatalogEntryJSON, []jsonContractWarning) {
+	parser := formula.NewParser(searchPaths...).SetSource(formula.SourceFromEnv())
+	rows := formulaRowsForSearchPathsWithSource(parser.Source(), searchPaths)
+
+	entries := make([]formulaCatalogEntryJSON, 0, len(rows))
+	warnings := make([]jsonContractWarning, 0)
+	for _, row := range rows {
+		parsed, err := parser.ParseFile(row.Source)
+		if err != nil {
+			warnings = append(warnings, formulaCatalogWarning("formula_catalog_parse_failed", row.Name, err))
+			continue
+		}
+		if parsed.Catalog == nil {
+			continue
+		}
+
+		name := strings.TrimSpace(parsed.Catalog.Name)
+		if name == "" {
+			warnings = append(warnings, formulaCatalogWarning("formula_catalog_invalid_metadata", row.Name, fmt.Errorf("catalog.name is required")))
+			continue
+		}
+		if name != row.Name {
+			warnings = append(warnings, formulaCatalogWarning("formula_catalog_invalid_metadata", row.Name, fmt.Errorf("catalog.name %q must match formula name %q", name, row.Name)))
+			continue
+		}
+		description := strings.TrimSpace(parsed.Catalog.Description)
+		if description == "" {
+			warnings = append(warnings, formulaCatalogWarning("formula_catalog_invalid_metadata", row.Name, fmt.Errorf("catalog.description is required")))
+			continue
+		}
+		entries = append(entries, formulaCatalogEntryJSON{
+			Name:        name,
+			Description: description,
+		})
+	}
+
+	slices.SortFunc(entries, func(a, b formulaCatalogEntryJSON) int {
+		return strings.Compare(a.Name, b.Name)
+	})
+	return entries, warnings
+}
+
+func formulaCatalogWarning(code, name string, err error) jsonContractWarning {
+	return jsonContractWarning{
+		Code:    code,
+		Message: fmt.Sprintf("skipping formula %q: %v", name, err),
+	}
+}
+
+func formulaCatalogJSONFromEntries(entries []formulaCatalogEntryJSON, warnings []jsonContractWarning) formulaCatalogJSON {
+	return formulaCatalogJSON{
+		SchemaVersion: "1",
+		OK:            true,
+		Formulas:      entries,
+		Summary:       formulaListSummaryJSON{Count: len(entries)},
+		Warnings:      warnings,
+	}
 }
 
 func formulaSearchPathsForList(cfg *config.City) []string {

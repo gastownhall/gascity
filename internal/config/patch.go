@@ -121,6 +121,8 @@ type AgentPatch struct {
 	ResumeCommand *string `toml:"resume_command,omitempty"`
 	// WakeMode overrides the agent's wake mode ("resume" or "fresh").
 	WakeMode *string `toml:"wake_mode,omitempty" jsonschema:"enum=resume,enum=fresh"`
+	// MouseMode overrides whether tmux mouse mode is preserved ("on" or "off").
+	MouseMode *string `toml:"mouse_mode,omitempty" jsonschema:"enum=on,enum=off"`
 	// PreStartAppend appends commands to the agent's pre_start list
 	// (instead of replacing). Applied after PreStart if both are set.
 	PreStartAppend []string `toml:"pre_start_append,omitempty"`
@@ -400,6 +402,9 @@ func applyAgentPatchFields(a *Agent, p *AgentPatch) {
 	}
 	if p.WakeMode != nil {
 		a.WakeMode = *p.WakeMode
+	}
+	if p.MouseMode != nil {
+		a.MouseMode = *p.MouseMode
 	}
 	// InjectFragments uses presence-aware semantics via *[]string: a nil
 	// pointer means "leave unchanged"; a non-nil pointer (even to an

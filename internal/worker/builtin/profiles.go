@@ -82,7 +82,7 @@ const (
 
 var builtinProviderOrder = []string{
 	"claude", "codex", "gemini", "kimi", "kiro", "cursor", "copilot",
-	"amp", "opencode", "auggie", "pi", "omp",
+	"amp", "opencode", "auggie", "pi", "omp", "antigravity",
 }
 
 var builtinProviderSpecs = map[string]BuiltinProviderSpec{
@@ -457,6 +457,49 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 		ResumeFlag:       "--resume",
 		ResumeStyle:      "flag",
 	},
+	"antigravity": {
+		// Antigravity does not currently expose a provider hook mechanism
+		// that Gas City can install; nudges still drain via the supervisor
+		// dispatcher / per-session poller.
+		DisplayName: "Antigravity",
+		Command:     "agy",
+		OptionDefaults: map[string]string{
+			"permission_mode": "unrestricted",
+		},
+		PromptMode:        "flag",
+		PromptFlag:        "--prompt-interactive",
+		ReadyPromptPrefix: "> ",
+		ReadyDelayMs:      5000,
+		ProcessNames:      []string{"agy"},
+		InstructionsFile:  "AGENTS.md",
+		ResumeFlag:        "--conversation",
+		ResumeStyle:       "flag",
+		PrintArgs:         []string{"--print"},
+		PermissionModes: map[string]string{
+			"unrestricted": "--dangerously-skip-permissions",
+		},
+		OptionsSchema: []BuiltinProviderOption{
+			{
+				Key:     "permission_mode",
+				Label:   "Permission Mode",
+				Type:    "select",
+				Default: "unrestricted",
+				Choices: []BuiltinOptionChoice{
+					{Value: "unrestricted", Label: "Bypass permissions", FlagArgs: []string{"--dangerously-skip-permissions"}},
+					{Value: "standard", Label: "Standard (prompt for permissions)", FlagArgs: []string{}},
+				},
+			},
+			{
+				Key:   "sandbox",
+				Label: "Sandbox",
+				Type:  "select",
+				Choices: []BuiltinOptionChoice{
+					{Value: "", Label: "Default"},
+					{Value: "enabled", Label: "Enabled", FlagArgs: []string{"--sandbox"}},
+				},
+			},
+		},
+	},
 }
 
 // BuiltinProviderOrder returns provider names in canonical order.
@@ -495,6 +538,8 @@ func CanonicalProfileIdentity(profile string) (ProfileIdentity, bool) {
 		return newProfileIdentity(profile, "opencode"), true
 	case "pi/tmux-cli":
 		return newProfileIdentity(profile, "pi"), true
+	case "antigravity/tmux-cli":
+		return newProfileIdentity(profile, "antigravity"), true
 	default:
 		return ProfileIdentity{}, false
 	}

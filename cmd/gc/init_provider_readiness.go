@@ -61,6 +61,10 @@ func finalizeInit(cityPath string, stdout, stderr io.Writer, opts initFinalizeOp
 		printDoltAuthorIdentityBlock(stderr, opts.commandName, status)
 		return 1
 	}
+	if err := ensureLegacyNamedPacksCached(cityPath); err != nil {
+		fmt.Fprintf(stderr, "%s: fetching packs: %v\n", opts.commandName, err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 
 	if opts.showProgress {
 		if opts.skipProviderReadiness {
@@ -69,16 +73,21 @@ func finalizeInit(cityPath string, stdout, stderr io.Writer, opts initFinalizeOp
 			logInitProgress(stdout, 6, "Checking provider readiness")
 		}
 	}
-	if err := ensureLegacyNamedPacksCached(cityPath); err != nil {
-		fmt.Fprintf(stderr, "%s: fetching packs: %v\n", opts.commandName, err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
 	if !opts.skipProviderReadiness {
 		if err := runInitProviderPreflight(cityPath, stdout, stderr, opts.commandName); err != nil {
 			return 1
 		}
 	} else if !opts.showProgress && stdout != nil {
 		fmt.Fprintln(stdout, "Skipping provider readiness checks.") //nolint:errcheck // best-effort stdout
+	}
+	if err := ensureInitRemoteImportsInstalled(cityPath); err != nil {
+		fmt.Fprintf(stderr, "%s: installing imports: %v\n", opts.commandName, err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	hasRemoteImports, err := initHasRemoteImports(cityPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "%s: reading imports for provider readiness: %v\n", opts.commandName, err) //nolint:errcheck // best-effort stderr
+		return 1
 	}
 
 	// Load config to resolve explicit HQ prefix (workspace.prefix field).
@@ -88,6 +97,11 @@ func finalizeInit(cityPath string, stdout, stderr io.Writer, opts initFinalizeOp
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: loading config for prefix resolution: %v\n", opts.commandName, err) //nolint:errcheck // best-effort stderr
 		return 1
+	}
+	if !opts.skipProviderReadiness && hasRemoteImports {
+		if err := runInitProviderPreflightForConfig(cityPath, cfg, stdout, stderr, opts.commandName); err != nil {
+			return 1
+		}
 	}
 	prefix := config.EffectiveHQPrefix(cfg)
 	if _, err := initDirIfReady(cityPath, cityPath, prefix); err != nil {
@@ -142,13 +156,17 @@ func wizardProviderGuidanceMessage(item api.ReadinessItem) string {
 }
 
 func runInitProviderPreflight(cityPath string, stdout, stderr io.Writer, commandName string) error {
-	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
+	cfg, err := loadInitProviderPreflightConfig(cityPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: city created, but startup is blocked by configuration loading\n", commandName) //nolint:errcheck // best-effort stderr
 		fmt.Fprintf(stderr, "%s: loading config for provider readiness: %v\n", commandName, err)                //nolint:errcheck // best-effort stderr
 		fmt.Fprintf(stderr, "%s: fix the config issue, then run 'gc start'\n", commandName)                     //nolint:errcheck // best-effort stderr
 		return errInitProviderPreflight
 	}
+	return runInitProviderPreflightForConfig(cityPath, cfg, stdout, stderr, commandName)
+}
+
+func runInitProviderPreflightForConfig(cityPath string, cfg *config.City, stdout, stderr io.Writer, commandName string) error {
 	ensureInitArtifacts(cityPath, stderr, commandName)
 	if err := seedDeferredManagedBeadsBeforeProviderReadiness(cityPath, cfg); err != nil {
 		fmt.Fprintf(stderr, "%s: city created, but startup is blocked by bead store initialization\n", commandName) //nolint:errcheck // best-effort stderr
@@ -205,6 +223,34 @@ func runInitProviderPreflight(cityPath string, stdout, stderr io.Writer, command
 	fmt.Fprintf(stderr, "Next: cd %s && gc start\n", shellQuotePath(cityPath))                        //nolint:errcheck // best-effort stderr
 	fmt.Fprintf(stderr, "Override: gc init --skip-provider-readiness %s\n", shellQuotePath(cityPath)) //nolint:errcheck // best-effort stderr
 	return errInitProviderPreflight
+}
+
+func initHasRemoteImports(cityPath string) (bool, error) {
+	allImports, err := collectAllImportsFS(fsys.OSFS{}, cityPath)
+	if err != nil {
+		return false, err
+	}
+	return hasRemoteImport(allImports), nil
+}
+
+func loadInitProviderPreflightConfig(cityPath string) (*config.City, error) {
+	tomlPath := filepath.Join(cityPath, "city.toml")
+	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, tomlPath)
+	if err == nil {
+		return cfg, nil
+	}
+	// Fresh init can check provider readiness before PackV2 remote imports
+	// have been installed. In that bootstrap-only case, fall back to raw
+	// city.toml so workspace.provider still gets checked before any network
+	// fetch. Other include/load errors remain startup-blocking.
+	if !strings.Contains(err.Error(), "remote import") || !strings.Contains(err.Error(), "gc import install") {
+		return nil, err
+	}
+	rawCfg, rawErr := config.Load(fsys.OSFS{}, tomlPath)
+	if rawErr != nil {
+		return nil, err
+	}
+	return rawCfg, nil
 }
 
 func collectInitProviderTargets(cfg *config.City) ([]initProviderTarget, []string, error) {

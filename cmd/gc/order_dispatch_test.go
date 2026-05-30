@@ -4471,9 +4471,12 @@ func TestQualifyPool(t *testing.T) {
 		{Name: "dog", BindingName: "maintenance", SourceDir: "/city/packs/maintenance"},
 		{Name: "dog", BindingName: "gastown", SourceDir: "/city/packs/gastown"},
 	}}
-	dirIsolatedCfg := &config.City{Agents: []config.Agent{
-		// City-level binding agent should NOT match a rig-scoped order.
+	rigWithCityFallbackCfg := &config.City{Agents: []config.Agent{
 		{Name: "dog", BindingName: "maintenance"},
+	}}
+	rigShadowCfg := &config.City{Agents: []config.Agent{
+		{Name: "dog", BindingName: "maintenance"},
+		{Name: "dog", BindingName: "foo", Dir: "api"},
 	}}
 
 	tests := []struct {
@@ -4506,7 +4509,9 @@ func TestQualifyPool(t *testing.T) {
 
 		// Rig-order binding lookup.
 		{"rig order resolves binding", rigBindingCfg, "dog", "api", "", "api/foo.dog", ""},
-		{"rig order isolated from city agent", dirIsolatedCfg, "dog", "api", "", "api/dog", ""},
+		{"rig order falls back to city binding", rigWithCityFallbackCfg, "dog", "api", "", "maintenance.dog", ""},
+		{"rig order binding-qualified city fallback", rigWithCityFallbackCfg, "maintenance.dog", "api", "", "maintenance.dog", ""},
+		{"rig order local binding shadows city fallback", rigShadowCfg, "dog", "api", "", "api/foo.dog", ""},
 
 		// Ambiguity is a hard failure — dispatch must not recreate the
 		// original bare-name route/scaler mismatch.
@@ -4666,6 +4671,88 @@ pool = "worker"
 	work := workBeadByOrderLabel(t, rigStore, "order-run:rig-digest:rig:frontend")
 	if work.Metadata["gc.routed_to"] != "frontend/worker" {
 		t.Errorf("gc.routed_to = %q, want %q", work.Metadata["gc.routed_to"], "frontend/worker")
+	}
+}
+
+func TestBuildOrderDispatcherRigOrderCityPoolUsesCityFileStore(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "frontend")
+	cityLayer := filepath.Join(cityDir, "formulas")
+	rigLayer := filepath.Join(rigDir, "formulas")
+	orderDir := filepath.Join(rigDir, "orders")
+	for _, dir := range []string{cityLayer, rigLayer, orderDir} {
+		if err := mkdirAll(dir); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeFile(t, filepath.Join(orderDir, "rig-digest.toml"), `[order]
+formula = "test-formula"
+trigger = "cooldown"
+interval = "1m"
+pool = "dog"
+`)
+	formulaText, err := os.ReadFile(filepath.Join(sharedTestFormulaDir, "test-formula.toml"))
+	if err != nil {
+		t.Fatalf("ReadFile(test-formula): %v", err)
+	}
+	writeFile(t, filepath.Join(rigLayer, "test-formula.toml"), string(formulaText))
+	if err := ensureScopedFileStoreLayout(cityDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensurePersistedScopeLocalFileStore(cityDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensurePersistedScopeLocalFileStore(rigDir); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "demo", Prefix: "ct"},
+		Agents: []config.Agent{{
+			Name:        "dog",
+			BindingName: "maintenance",
+		}},
+		FormulaLayers: config.FormulaLayers{
+			City: []string{cityLayer},
+			Rigs: map[string][]string{
+				"frontend": {cityLayer, rigLayer},
+			},
+		},
+		Rigs: []config.Rig{{
+			Name:   "frontend",
+			Path:   "frontend",
+			Prefix: "fe",
+		}},
+	}
+
+	var stderr bytes.Buffer
+	ad := buildOrderDispatcher(cityDir, cfg, events.Discard, &stderr)
+	if ad == nil {
+		t.Fatalf("expected non-nil dispatcher; stderr: %s", stderr.String())
+	}
+
+	ad.dispatch(context.Background(), cityDir, time.Now())
+	ad.drain(context.Background())
+
+	cityStore, err := openStoreAtForCity(cityDir, cityDir)
+	if err != nil {
+		t.Fatalf("openStoreAtForCity(city): %v", err)
+	}
+	work := workBeadByOrderLabel(t, cityStore, "order-run:rig-digest:rig:frontend")
+	if work.Metadata["gc.routed_to"] != "maintenance.dog" {
+		t.Errorf("city work gc.routed_to = %q, want maintenance.dog", work.Metadata["gc.routed_to"])
+	}
+
+	rigStore, err := openStoreAtForCity(rigDir, cityDir)
+	if err != nil {
+		t.Fatalf("openStoreAtForCity(rig): %v", err)
+	}
+	rigRuns := trackingBeads(t, rigStore, "order-run:rig-digest:rig:frontend")
+	if len(rigRuns) != 0 {
+		t.Fatalf("rig store has %d city-pool order bead(s), want 0", len(rigRuns))
 	}
 }
 

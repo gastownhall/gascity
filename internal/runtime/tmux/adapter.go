@@ -631,8 +631,21 @@ func (p *Provider) CopyTo(name, src, relDst string) error {
 }
 
 // Attach connects the user's terminal to the named tmux session.
-// This hands stdin/stdout/stderr to tmux and blocks until detach.
+// It returns [runtime.ErrSessionNotFound] when the session is absent and
+// refuses to attach to tmux remain-on-exit dead panes with a tmux-specific
+// message-only error. Pane-state query failures fall through to tmux attach.
 func (p *Provider) Attach(name string) error {
+	has, err := p.tm.HasSession(name)
+	if err != nil {
+		return fmt.Errorf("checking tmux session before attach: %w", err)
+	}
+	if !has {
+		return fmt.Errorf("%w: %w: %s", runtime.ErrSessionNotFound, ErrSessionNotFound, name)
+	}
+	dead, err := p.tm.IsPaneDead(name)
+	if err == nil && dead {
+		return fmt.Errorf("refusing to attach to dead pane for session %q", name)
+	}
 	args := []string{"-u"}
 	if p.cfg.SocketName != "" {
 		args = append(args, "-L", p.cfg.SocketName)
@@ -666,8 +679,10 @@ type startOps interface {
 	acceptStartupDialogs(ctx context.Context, name string) error
 	waitForReady(ctx context.Context, name string, rc *RuntimeConfig, timeout time.Duration) error
 	hasSession(name string) (bool, error)
+	capturePane(name string, lines int) (string, error)
 	sendKeys(name, text string) error
 	setRemainOnExit(name string) error
+	disableMouseAndActivity(name string) error
 	runSetupCommand(ctx context.Context, cmd string, env map[string]string, timeout time.Duration) error
 }
 
@@ -679,6 +694,7 @@ const (
 	minReadyProbeTimeout     = 5 * time.Second
 	maxReadyProbeTimeout     = 60 * time.Second
 	readyProbeSlack          = 5 * time.Second
+	startupPaneCaptureLines  = 80
 )
 
 func (o *tmuxStartOps) createSession(name, workDir, command string, env map[string]string) error {
@@ -726,12 +742,22 @@ func (o *tmuxStartOps) hasSession(name string) (bool, error) {
 	return o.tm.HasSession(name)
 }
 
+func (o *tmuxStartOps) capturePane(name string, lines int) (string, error) {
+	return o.tm.CapturePane(name, lines)
+}
+
 func (o *tmuxStartOps) sendKeys(name, text string) error {
 	return o.tm.NudgeSession(name, text)
 }
 
 func (o *tmuxStartOps) setRemainOnExit(name string) error {
 	return o.tm.SetRemainOnExit(name, true)
+}
+
+func (o *tmuxStartOps) disableMouseAndActivity(name string) error {
+	o.tm.run("set-option", "-t", name, "mouse", "off")             //nolint:errcheck
+	o.tm.run("set-option", "-wt", name, "monitor-activity", "off") //nolint:errcheck
+	return nil
 }
 
 func (o *tmuxStartOps) runSetupCommand(ctx context.Context, cmd string, env map[string]string, timeout time.Duration) error {
@@ -778,10 +804,43 @@ func ignoreDeadlineIfSessionAlive(ops startOps, name string, err error) error {
 	if hasErr != nil {
 		return fmt.Errorf("verifying session after ready deadline: %w", hasErr)
 	}
-	if alive {
+	if alive && ops.isSessionRunning(name) {
 		return nil
 	}
+	if alive {
+		return startupDeadSessionError(ops, name)
+	}
 	return err
+}
+
+func startupDeadSessionError(ops startOps, name string) error {
+	pane, err := ops.capturePane(name, startupPaneCaptureLines)
+	if err != nil {
+		return startupSessionDiedError(name)
+	}
+	pane = strings.TrimSpace(pane)
+	if pane == "" {
+		return startupSessionDiedError(name)
+	}
+	return fmt.Errorf("%w: session %q; last pane output:\n%s", runtime.ErrSessionDiedDuringStartup, name, pane)
+}
+
+func startupSessionDiedError(name string) error {
+	return fmt.Errorf("%w: session %q", runtime.ErrSessionDiedDuringStartup, name)
+}
+
+func failIfSessionDiedDuringStartupProbe(ops startOps, name string) error {
+	alive, err := ops.hasSession(name)
+	if err != nil {
+		return fmt.Errorf("verifying session after startup probe: %w", err)
+	}
+	if alive && ops.isSessionRunning(name) {
+		return nil
+	}
+	if alive {
+		return startupDeadSessionError(ops, name)
+	}
+	return nil
 }
 
 // doStartSession is the pure startup orchestration logic.
@@ -808,6 +867,11 @@ func doStartSession(ctx context.Context, ops startOps, name string, cfg runtime.
 
 	// Enable remain-on-exit for crash forensics. Best-effort.
 	_ = ops.setRemainOnExit(name)
+	// Headless sessions disable mouse tracking and monitor-activity to avoid
+	// terminal escape sequences leaking into agent stdin during controller polls.
+	if !cfg.MouseOn {
+		_ = ops.disableMouseAndActivity(name)
+	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -850,7 +914,11 @@ func doStartSession(ctx context.Context, ops startOps, name string, cfg runtime.
 			ReadyDelayMs:      cfg.ReadyDelayMs,
 			ProcessNames:      cfg.ProcessNames,
 		}}
-		_ = ops.waitForReady(ctx, name, rc, startupReadyProbeTimeout(cfg)) // best-effort
+		if err := ops.waitForReady(ctx, name, rc, startupReadyProbeTimeout(cfg)); err != nil {
+			if deadErr := failIfSessionDiedDuringStartupProbe(ops, name); deadErr != nil {
+				return deadErr
+			}
+		}
 		if err := ctx.Err(); err != nil {
 			return ignoreDeadlineIfSessionAlive(ops, name, err)
 		}
@@ -872,7 +940,10 @@ func doStartSession(ctx context.Context, ops startOps, name string, cfg runtime.
 		return fmt.Errorf("verifying session: %w", err)
 	}
 	if !alive {
-		return fmt.Errorf("%w: session %q", runtime.ErrSessionDiedDuringStartup, name)
+		return startupSessionDiedError(name)
+	}
+	if !ops.isSessionRunning(name) {
+		return startupDeadSessionError(ops, name)
 	}
 
 	// Step 5.5: Run session setup commands and script.

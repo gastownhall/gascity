@@ -3050,6 +3050,114 @@ func TestBackupScriptDiscoversNamedBackupsAndSyncsArtifactsOffsite(t *testing.T)
 	}
 }
 
+func TestBackupScriptSkipsConcurrentRunBeforeBackupSync(t *testing.T) {
+	if _, err := exec.LookPath("flock"); err != nil {
+		t.Skip("flock not installed; skipping")
+	}
+
+	cityPath := t.TempDir()
+	dataDir := filepath.Join(cityPath, "dolt-data")
+	if err := os.MkdirAll(filepath.Join(dataDir, "prod", ".dolt"), 0o755); err != nil {
+		t.Fatalf("mkdir db: %v", err)
+	}
+	binDir := t.TempDir()
+	_ = writeDogFakeGC(t, binDir)
+
+	doltLogPath := filepath.Join(binDir, "dolt.log")
+	startedFile := filepath.Join(binDir, "sync-started")
+	releaseFile := filepath.Join(binDir, "sync-release")
+	writeExecutable(t, filepath.Join(binDir, "dolt"), fmt.Sprintf(`#!/usr/bin/env bash
+set -euo pipefail
+printf 'dolt %%s\n' "$*" >> %s
+if [ "${1:-}" = "version" ]; then
+  printf 'dolt version 2.0.7\n'
+  exit 0
+fi
+case "$*" in
+  *"SHOW DATABASES"*)
+    printf 'Database\nprod\n'
+    exit 0
+    ;;
+esac
+if [ "${1:-}" = "backup" ] && [ "$#" -eq 1 ]; then
+  db="$(basename "$PWD")"
+  printf '%%s-backup file:///backups/%%s\n' "$db" "$db"
+  exit 0
+fi
+if [ "${1:-} ${2:-}" = "backup sync" ]; then
+  : > %s
+  while [ ! -f %s ]; do sleep 0.05; done
+  exit 0
+fi
+exit 0
+`, shellQuote(doltLogPath), shellQuote(startedFile), shellQuote(releaseFile)))
+
+	firstDone := make(chan struct{})
+	var firstOut string
+	var firstErr error
+	go func() {
+		firstOut, firstErr = runDogScriptCommand(t, "mol-dog-backup.sh", binDir, cityPath, dataDir, "GC_BACKUP_DATABASES=prod")
+		close(firstDone)
+	}()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, err := os.Stat(startedFile); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("first backup run did not reach backup sync")
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+
+	secondDone := make(chan struct{})
+	var secondOut string
+	var secondErr error
+	go func() {
+		secondOut, secondErr = runDogScriptCommand(t, "mol-dog-backup.sh", binDir, cityPath, dataDir,
+			"GC_BACKUP_DATABASES=prod",
+			"GC_DOLT_BACKUP_LOCK_WAIT_SECONDS=0",
+		)
+		close(secondDone)
+	}()
+	select {
+	case <-secondDone:
+	case <-time.After(2 * time.Second):
+		if err := os.WriteFile(releaseFile, []byte("ok\n"), 0o644); err != nil {
+			t.Fatalf("release blocked backup runs: %v", err)
+		}
+		<-secondDone
+		t.Fatalf("second backup run blocked instead of skipping while lock is held:\n%s", secondOut)
+	}
+	if secondErr != nil {
+		t.Fatalf("second backup run failed: %v\n%s", secondErr, secondOut)
+	}
+	if !strings.Contains(secondOut, "already running") {
+		t.Fatalf("second backup run should skip while lock is held:\n%s", secondOut)
+	}
+
+	if err := os.WriteFile(releaseFile, []byte("ok\n"), 0o644); err != nil {
+		t.Fatalf("release first backup run: %v", err)
+	}
+	select {
+	case <-firstDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("first backup run did not finish after release")
+	}
+	if firstErr != nil {
+		t.Fatalf("first backup run failed: %v\n%s", firstErr, firstOut)
+	}
+
+	doltLog, err := os.ReadFile(doltLogPath)
+	if err != nil {
+		t.Fatalf("read dolt log: %v", err)
+	}
+	if got := strings.Count(string(doltLog), "backup sync prod-backup"); got != 1 {
+		t.Fatalf("backup sync count = %d, want 1 while concurrent run skipped:\n%s", got, doltLog)
+	}
+}
+
 func TestBackupScriptIgnoresDocumentedSystemSchemasForAutoDiscoveryWithBSDGrep(t *testing.T) {
 	cityPath := t.TempDir()
 	dataDir := filepath.Join(cityPath, "dolt-data")

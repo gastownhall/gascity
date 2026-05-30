@@ -202,10 +202,9 @@ managed_runtime_port() (
   printf '%s\n' "$port"
 )
 
-# Resolve GC_DOLT_PORT if not already set by the caller. The shared helper
-# below honors the env override, falls through to validated managed runtime
-# state, and exits 78 if neither yields a port — replacing the silent 3307
-# fallback removed for ga-lsois.
+# Resolve GC_DOLT_PORT. The shared helper prefers validated live managed
+# runtime state over stale inherited env, then falls back to GC_DOLT_PORT as an
+# operator seed, and exits 78 if neither yields a port.
 . "${GC_PACK_DIR:-${GC_SYSTEM_PACKS_DIR:-$GC_CITY_PATH/.gc/system/packs}/dolt}/assets/scripts/port_resolve.sh"
 GC_DOLT_PORT=$(resolve_dolt_port_or_die "$DOLT_STATE_FILE" "$DOLT_PROVIDER_STATE_FILE" "$DOLT_DATA_DIR" "$GC_CITY_PATH") || exit $?
 

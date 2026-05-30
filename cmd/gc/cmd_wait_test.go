@@ -2337,10 +2337,12 @@ func TestCmdSessionWait_DoesNotMaterializeTemplateTarget(t *testing.T) {
 	setWaitTestFileBeads(t)
 	t.Setenv("GC_SESSION", "fake")
 
-	prevCityFlag := cityFlag
+	prevCityFlag, prevRigFlag := cityFlag, rigFlag
 	cityFlag = ""
+	rigFlag = ""
 	t.Cleanup(func() {
 		cityFlag = prevCityFlag
+		rigFlag = prevRigFlag
 	})
 
 	cityPath := shortSocketTempDir(t, "gc-bd-city-")
@@ -2544,10 +2546,12 @@ func setupFreshManagedBdWaitTestCity(t *testing.T) (string, string) {
 	resolveProviderLifecycleGCBinary = func() string { return currentGCBinaryForTests(t) }
 	t.Cleanup(func() { resolveProviderLifecycleGCBinary = oldResolve })
 
-	prevCityFlag := cityFlag
+	prevCityFlag, prevRigFlag := cityFlag, rigFlag
 	cityFlag = ""
+	rigFlag = ""
 	t.Cleanup(func() {
 		cityFlag = prevCityFlag
+		rigFlag = prevRigFlag
 	})
 
 	cityPath := shortSocketTempDir(t, "gc-bd-city-")
@@ -2604,10 +2608,12 @@ func setupManagedBdWaitTestCity(t *testing.T) (string, string) {
 	resolveProviderLifecycleGCBinary = func() string { return currentGCBinaryForTests(t) }
 	t.Cleanup(func() { resolveProviderLifecycleGCBinary = oldResolve })
 
-	prevCityFlag := cityFlag
+	prevCityFlag, prevRigFlag := cityFlag, rigFlag
 	cityFlag = ""
+	rigFlag = ""
 	t.Cleanup(func() {
 		cityFlag = prevCityFlag
+		rigFlag = prevRigFlag
 	})
 
 	templatePath := managedBdWaitTestTemplate(t, bdPath, doltPath)

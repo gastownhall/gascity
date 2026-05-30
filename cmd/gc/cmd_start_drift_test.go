@@ -311,6 +311,81 @@ func TestRunStartDriftCheck_RestartReturnsContinue(t *testing.T) {
 	}
 }
 
+// TestRunStartDriftCheck_DarwinLaunchdRestartDoesNotRequireProcExe pins the
+// macOS production upgrade path: launchd owns the supervisor lifecycle, so
+// binary drift restart must delegate to launchctl even though /proc/<pid>/exe
+// is unavailable on Darwin.
+func TestRunStartDriftCheck_DarwinLaunchdRestartDoesNotRequireProcExe(t *testing.T) {
+	cityPath, setCommit := driftCheckEnv(t, "old-build-id")
+	setCommit("new-build-id")
+
+	oldDry, oldNoAR := dryRunMode, noAutoRestartMode
+	dryRunMode, noAutoRestartMode = false, false
+	t.Cleanup(func() { dryRunMode, noAutoRestartMode = oldDry, oldNoAR })
+
+	oldGOOS := supervisorRuntimeGOOS
+	oldLaunchdActive := supervisorLaunchdActive
+	oldReadExe := readSupervisorExePathHook
+	oldHelpers := restartHelpersHook
+	t.Cleanup(func() {
+		supervisorRuntimeGOOS = oldGOOS
+		supervisorLaunchdActive = oldLaunchdActive
+		readSupervisorExePathHook = oldReadExe
+		restartHelpersHook = oldHelpers
+	})
+
+	supervisorRuntimeGOOS = "darwin"
+	supervisorLaunchdActive = func(label string) bool {
+		return label == supervisorLaunchdLabel()
+	}
+	readSupervisorExePathHook = func(pid int) (string, error) {
+		return "", fmt.Errorf("readlink /proc/%d/exe: no such file or directory", pid)
+	}
+	var launchctlArgs []string
+	restartHelpersHook = func() restartHelpers {
+		return restartHelpers{
+			Launchctl: func(args ...string) error {
+				launchctlArgs = append([]string(nil), args...)
+				return nil
+			},
+			Systemctl: func(...string) error {
+				t.Fatal("systemctl should not handle a Darwin launchd supervisor")
+				return nil
+			},
+			Kill: func(int) error {
+				t.Fatal("direct kill should not handle a Darwin launchd supervisor")
+				return nil
+			},
+			WaitExit: func(int) error { return nil },
+			Spawn: func(string, ...string) error {
+				t.Fatal("direct spawn should not handle a Darwin launchd supervisor")
+				return nil
+			},
+		}
+	}
+
+	var stdout, stderr bytes.Buffer
+	exitCode, cont := runStartDriftCheck(cityPath, &stdout, &stderr)
+	if exitCode != 0 {
+		t.Fatalf("exitCode = %d, want 0; stdout=%q stderr=%q", exitCode, stdout.String(), stderr.String())
+	}
+	if !cont {
+		t.Fatalf("cont = false after successful launchd restart; stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+	wantArgs := []string{"kickstart", "-k", supervisorLaunchdServiceTarget(supervisorLaunchdLabel())}
+	if len(launchctlArgs) != len(wantArgs) {
+		t.Fatalf("launchctl args = %v, want %v", launchctlArgs, wantArgs)
+	}
+	for i := range wantArgs {
+		if launchctlArgs[i] != wantArgs[i] {
+			t.Fatalf("launchctl arg %d = %q, want %q; full args=%v", i, launchctlArgs[i], wantArgs[i], launchctlArgs)
+		}
+	}
+	if strings.Contains(stderr.String(), "/proc/") {
+		t.Fatalf("stderr leaked /proc restart failure despite launchd management:\n%s", stderr.String())
+	}
+}
+
 // TestRunStartDriftCheck_DryRunReturnsTerminal pins the dry-run arm:
 // drift is reported, the operator is told what would happen, and the
 // caller exits (cont == false) so no further side effects fire.

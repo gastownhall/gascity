@@ -38,7 +38,7 @@ var tutorialPageManifests = []pageManifest{
 	{
 		path: "docs/tutorials/02-agents.md",
 		commands: []string{
-			"gc agent add --name reviewer --dir my-project",
+			"gc agent add --name reviewer",
 			"cat > agents/reviewer/agent.toml << 'EOF'",
 			"gc prime",
 			"cat > agents/reviewer/prompt.template.md << 'EOF'",
@@ -135,11 +135,11 @@ var tutorialPageManifests = []pageManifest{
 		path: "docs/tutorials/07-orders.md",
 		commands: []string{
 			"gc order list",
-			"gc order show review-check",
+			"gc order show pancakes-check",
 			"gc order check",
-			"gc order run review-check",
+			"gc order run pancakes-check",
 			"gc order history",
-			"gc order history review-check",
+			"gc order history pancakes-check",
 			"gc order list",
 			"gc order show test-suite --rig my-api",
 			"gc order run test-suite --rig my-api",

@@ -9,7 +9,8 @@
 #   workspace.pack → expands city-scoped agents only (mayor, deacon, boot)
 #   rigs[].pack    → expands rig agents only (witness, refinery, polecat)
 #
-# Crew members are individually named and declared inline in city.toml.
+# Crew members are individually named directory agents (agents/<name>/) plus a
+# named session; see the worked example in examples/gastown/city.toml.
 
 [pack]
 name = "gastown"

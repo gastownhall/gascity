@@ -2685,6 +2685,88 @@ func findTestBead(items []beads.Bead, id string) (beads.Bead, bool) {
 	return beads.Bead{}, false
 }
 
+// TestCachingStoreCachedReadyReflectsRoutedWorkReleaseAfterSessionClose is a
+// regression for gastownhall/gascity#2625. When `gc session close` releases a
+// routed in-progress work bead (Assignee cleared, Status reset to open) — the
+// path the close-time release Update takes — Source-1 of
+// defaultScaleCheckCounts (cmd/gc/build_desired_state.go:1309
+// readyForControllerDemand → CachedReady) must observe the released bead on
+// the next read. Without it, the pool scale-check sees scaleCount=0 and no
+// fresh worker spawns even though the demand is admittable.
+//
+// Asserts that the existing CachingStore.Update write-through path emits the
+// cache-update event for the released row — closing the loop that
+// cmd/gc/cmd_session.go cmdSessionClose relies on.
+func TestCachingStoreCachedReadyReflectsRoutedWorkReleaseAfterSessionClose(t *testing.T) {
+	t.Parallel()
+	backing := beads.NewMemStore()
+
+	work, err := backing.Create(beads.Bead{
+		Title:    "routed work assigned to soon-to-close session",
+		Type:     "task",
+		Metadata: map[string]string{"gc.routed_to": "worker"},
+	})
+	if err != nil {
+		t.Fatalf("create work bead: %v", err)
+	}
+	assignee := "sess-1"
+	inProgress := "in_progress"
+	if err := backing.Update(work.ID, beads.UpdateOpts{
+		Assignee: &assignee,
+		Status:   &inProgress,
+	}); err != nil {
+		t.Fatalf("assign work to session: %v", err)
+	}
+
+	cache := beads.NewCachingStoreForTest(backing, nil)
+	if err := cache.PrimeActive(); err != nil {
+		t.Fatalf("PrimeActive: %v", err)
+	}
+
+	ready, ok := cache.CachedReady()
+	if !ok {
+		t.Fatal("CachedReady reported cache unavailable before release")
+	}
+	for _, b := range ready {
+		if b.ID == work.ID {
+			t.Fatalf("CachedReady returned still-assigned in_progress work bead %s before release", b.ID)
+		}
+	}
+
+	empty := ""
+	open := "open"
+	if err := cache.Update(work.ID, beads.UpdateOpts{
+		Assignee: &empty,
+		Status:   &open,
+	}); err != nil {
+		t.Fatalf("release work bead: %v", err)
+	}
+
+	ready, ok = cache.CachedReady()
+	if !ok {
+		t.Fatal("CachedReady reported cache unavailable after release")
+	}
+	var found *beads.Bead
+	for i := range ready {
+		if ready[i].ID == work.ID {
+			found = &ready[i]
+			break
+		}
+	}
+	if found == nil {
+		t.Fatalf("CachedReady missing released work bead %s after Update; got %d beads", work.ID, len(ready))
+	}
+	if strings.TrimSpace(found.Assignee) != "" {
+		t.Errorf("released work bead Assignee = %q, want empty", found.Assignee)
+	}
+	if found.Status != "open" {
+		t.Errorf("released work bead Status = %q, want open", found.Status)
+	}
+	if found.Metadata["gc.routed_to"] != "worker" {
+		t.Errorf("released work bead routed_to = %q, want worker", found.Metadata["gc.routed_to"])
+	}
+}
+
 func strPtr(s string) *string { return &s }
 
 func containsString(values []string, want string) bool {
