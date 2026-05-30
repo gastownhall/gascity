@@ -71,8 +71,8 @@ Use `description_file` when a step's instructions should live in a separate
 Markdown file instead of inline TOML. Non-asset paths resolve relative to the
 formula file.
 
-Asset paths resolve through the same low-to-high formula layer order as the
-formula itself. For example, a bundled formula can reference:
+Paths using `../assets/...` resolve through the same low-to-high formula layer
+order as the formula itself. For example, a bundled formula can reference:
 
 ```toml
 description_file = "../assets/workflows/review/local-review.md"
@@ -86,7 +86,11 @@ assets/workflows/review/local-review.md
 ```
 
 The formula structure and step IDs remain inherited from the lower-priority
-pack; only the description file content is shadowed.
+pack; only the description file content is shadowed. Other relative or absolute
+paths that happen to contain an `assets` segment still use normal
+formula-relative or absolute path resolution. Description file reads use the
+same configured source as formula reads, so a parser pinned to a git ref also
+reads committed description file content from that ref.
 
 ## Graph.v2 Review Quorum Formula
 

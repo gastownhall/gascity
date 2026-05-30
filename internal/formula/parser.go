@@ -640,9 +640,9 @@ func ApplyDefaults(formula *Formula, values map[string]string) map[string]string
 
 // resolveDescriptionFiles walks all steps and replaces DescriptionFile
 // with the file's contents. Non-asset paths are resolved relative to baseDir
-// (the formula file's directory). Paths that reference assets/ are resolved
-// through formula layer order so city assets can shadow pack assets while the
-// formula itself remains inherited from a lower-priority pack.
+// (the formula file's directory). Paths using the documented ../assets/ form
+// are resolved through formula layer order so city assets can shadow pack
+// assets while the formula itself remains inherited from a lower-priority pack.
 func (p *Parser) resolveDescriptionFiles(steps []*Step, baseDir string) {
 	for _, step := range steps {
 		if step == nil {
@@ -689,21 +689,15 @@ func (p *Parser) readDescriptionFile(rawPath, baseDir string) ([]byte, bool) {
 
 func descriptionAssetRelPath(rawPath string) (string, bool) {
 	path := filepath.ToSlash(filepath.Clean(rawPath))
-	parts := strings.Split(path, "/")
-	for i, part := range parts {
-		if part != "assets" {
-			continue
-		}
-		if i == len(parts)-1 {
-			return "", false
-		}
-		rel := strings.Join(parts[i+1:], "/")
-		if rel == "." || rel == "" || strings.HasPrefix(rel, "../") {
-			return "", false
-		}
-		return rel, true
+	const assetPrefix = "../assets/"
+	if !strings.HasPrefix(path, assetPrefix) {
+		return "", false
 	}
-	return "", false
+	rel := strings.TrimPrefix(path, assetPrefix)
+	if rel == "." || rel == "" || strings.HasPrefix(rel, "../") {
+		return "", false
+	}
+	return rel, true
 }
 
 // SetSourceInfo populates the SourceFormula and SourcePath fields on each
