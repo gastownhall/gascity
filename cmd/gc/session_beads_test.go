@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -3246,6 +3247,129 @@ func TestSyncSessionBeads_RewritesStalePoolSlotWhenConcreteIdentityAgrees(t *tes
 	}
 }
 
+func TestSyncDesiredPoolSlotsUsesDesiredSlotBeforeSortedBackfill(t *testing.T) {
+	store := newCountingMetadataStore()
+	now := time.Date(2026, 5, 18, 18, 0, 0, 0, time.UTC)
+	cfg := &config.City{
+		Agents: []config.Agent{{
+			Name:              "worker",
+			Dir:               "pack",
+			MaxActiveSessions: intPtr(10),
+		}},
+	}
+	template := "pack/worker"
+	first, err := store.Create(beads.Bead{
+		Title:  "first",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:" + template},
+		Metadata: map[string]string{
+			"template":             template,
+			"session_name":         "session-a",
+			"agent_name":           "pack/worker-9",
+			"alias":                "pack/worker-9",
+			"session_origin":       "ephemeral",
+			poolManagedMetadataKey: boolMetadata(true),
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := store.Create(beads.Bead{
+		Title:  "second",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:" + template},
+		Metadata: map[string]string{
+			"template":             template,
+			"session_name":         "session-b",
+			"agent_name":           "pack/worker-2",
+			"alias":                "pack/worker-2",
+			"pool_slot":            "7",
+			"session_origin":       "ephemeral",
+			poolManagedMetadataKey: boolMetadata(true),
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	open := []beads.Bead{first, second}
+	index := map[string]int{"session-a": 0, "session-b": 1}
+	desired := map[string]TemplateParams{
+		"session-a": {TemplateName: template, InstanceName: "pack/worker-9", PoolSlot: 9},
+		"session-b": {TemplateName: template, InstanceName: "pack/worker-2", PoolSlot: 2},
+	}
+
+	syncDesiredPoolSlots(store, desired, open, index, cfg, now, io.Discard)
+
+	gotFirst, err := store.Get(first.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotFirst.Metadata["pool_slot"] != "9" {
+		t.Fatalf("first pool_slot = %q, want desired slot 9", gotFirst.Metadata["pool_slot"])
+	}
+	gotSecond, err := store.Get(second.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotSecond.Metadata["pool_slot"] != "2" {
+		t.Fatalf("second pool_slot = %q, want desired slot 2", gotSecond.Metadata["pool_slot"])
+	}
+}
+
+func TestSyncDesiredPoolSlotsDoesNotPersistSyntheticBackfillSlot(t *testing.T) {
+	store := newCountingMetadataStore()
+	now := time.Date(2026, 5, 18, 19, 0, 0, 0, time.UTC)
+	cfg := &config.City{
+		Agents: []config.Agent{{
+			Name:              "worker",
+			Dir:               "pack",
+			MaxActiveSessions: intPtr(10),
+		}},
+	}
+	template := "pack/worker"
+	sessionName := "pack-worker-23"
+	bead, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:" + template},
+		Metadata: map[string]string{
+			"template":             template,
+			"session_name":         sessionName,
+			"agent_name":           "pack/worker-23",
+			"alias":                "pack/worker-23",
+			"session_origin":       "ephemeral",
+			poolManagedMetadataKey: boolMetadata(true),
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	open := []beads.Bead{bead}
+	index := map[string]int{sessionName: 0}
+	desired := map[string]TemplateParams{
+		sessionName: {
+			TemplateName: template,
+			InstanceName: "pack/worker-23",
+			Alias:        "pack/worker-23",
+		},
+	}
+
+	syncDesiredPoolSlots(store, desired, open, index, cfg, now, io.Discard)
+
+	got, err := store.Get(bead.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Metadata["pool_slot"] != "" {
+		t.Fatalf("pool_slot = %q, want unset without authoritative slot", got.Metadata["pool_slot"])
+	}
+	if store.batchCalls != 0 {
+		t.Fatalf("metadata batch calls = %d, want 0", store.batchCalls)
+	}
+}
+
 func TestSyncSessionBeads_DoesNotRewriteOwnershipWhenAliasRepairFails(t *testing.T) {
 	store := beads.NewMemStore()
 	clk := &clock.Fake{Time: time.Date(2026, 5, 6, 2, 5, 0, 0, time.UTC)}
@@ -3421,6 +3545,88 @@ func TestSyncSessionBeads_DoesNotReservePoolSlotForAliasConflictBead(t *testing.
 	}
 	if got.Metadata["pool_slot"] != "6" {
 		t.Fatalf("pool_slot = %q, want live identity slot 6 preserved", got.Metadata["pool_slot"])
+	}
+}
+
+func TestSyncSessionBeads_DoesNotRefreshStablePoolAliasConflictEachTick(t *testing.T) {
+	store := newCountingMetadataStore()
+	clk := &clock.Fake{Time: time.Date(2026, 5, 18, 19, 5, 0, 0, time.UTC)}
+	sp := runtime.NewFake()
+	cfg := &config.City{
+		Agents: []config.Agent{{
+			Name:              "worker",
+			Dir:               "pack",
+			MaxActiveSessions: intPtr(10),
+		}},
+	}
+	template := "pack/worker"
+	if _, err := store.Create(beads.Bead{
+		Title:  "alias owner",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:" + template},
+		Metadata: map[string]string{
+			"template":             template,
+			"session_name":         "pack-worker-owner",
+			"agent_name":           "pack/worker-2",
+			"alias":                "pack/worker-2",
+			"pool_slot":            "2",
+			"state":                "awake",
+			"session_origin":       "ephemeral",
+			poolManagedMetadataKey: boolMetadata(true),
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	live, err := store.Create(beads.Bead{
+		Title:  "conflicted worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:" + template},
+		Metadata: map[string]string{
+			"template":                        template,
+			"session_name":                    "pack-worker-conflicted",
+			"agent_name":                      template,
+			"state":                           "awake",
+			"session_origin":                  "ephemeral",
+			"continuation_epoch":              strconv.Itoa(session.DefaultContinuationEpoch),
+			poolAliasConflictMetadataKey:      "pack/worker-2",
+			poolAliasConflictCountMetadataKey: "1",
+			poolAliasConflictAtMetadataKey:    "2026-05-18T18:57:58Z",
+			poolManagedMetadataKey:            boolMetadata(true),
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	desired := map[string]TemplateParams{
+		"pack-worker-conflicted": {
+			TemplateName: template,
+			InstanceName: "pack/worker-2",
+			Alias:        "pack/worker-2",
+			PoolSlot:     2,
+		},
+	}
+
+	var stderr bytes.Buffer
+	syncSessionBeads("", store, desired, sp, allConfiguredDS(desired), cfg, clk, &stderr, true)
+	got, err := store.Get(live.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Metadata[poolAliasConflictMetadataKey] != "pack/worker-2" {
+		t.Fatalf("pool_alias_conflict = %q, want preserved pack/worker-2", got.Metadata[poolAliasConflictMetadataKey])
+	}
+	if got.Metadata[poolAliasConflictCountMetadataKey] != "1" {
+		t.Fatalf("pool_alias_conflict_count = %q, want stable 1", got.Metadata[poolAliasConflictCountMetadataKey])
+	}
+	if got.Metadata[poolAliasConflictAtMetadataKey] != "2026-05-18T18:57:58Z" {
+		t.Fatalf("pool_alias_conflict_at = %q, want stable timestamp", got.Metadata[poolAliasConflictAtMetadataKey])
+	}
+	if store.batchCalls != 0 {
+		t.Fatalf("metadata batch calls = %d, want 0", store.batchCalls)
+	}
+	if !strings.Contains(stderr.String(), "unavailable") {
+		t.Fatalf("stderr %q does not mention alias conflict", stderr.String())
 	}
 }
 
