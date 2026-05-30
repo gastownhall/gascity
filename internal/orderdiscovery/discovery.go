@@ -63,7 +63,15 @@ func ScanAll(cityPath string, cfg *config.City, opts ScanOptions) ([]orders.Orde
 		rigNames[rigName] = struct{}{}
 	}
 
-	var rigOrders []orders.Order
+	// City-scoped orders register exactly once regardless of how many rigs
+	// import the pack, so dedup them across the rig loop by name. Seed the set
+	// with city-level orders so a city-local order of the same name wins.
+	cityScopedSeen := make(map[string]bool, len(cityOrders))
+	for _, o := range cityOrders {
+		cityScopedSeen[o.Name] = true
+	}
+
+	var promotedCityOrders, rigOrders []orders.Order
 	for _, rigName := range sortedRigNames(rigNames) {
 		exclusive := RigExclusiveLayers(cfg.FormulaLayers.Rigs[rigName], cityLayers)
 		exclusivePackDirs := cfg.RigPackDirs[rigName]
@@ -81,13 +89,24 @@ func ScanAll(cityPath string, cfg *config.City, opts ScanOptions) ([]orders.Orde
 			return nil, fmt.Errorf("rig %s: %w", rigName, err)
 		}
 		for i := range aa {
+			if aa[i].IsCityScoped() {
+				// Keep the first occurrence (rigs are scanned in deterministic
+				// order) and leave Rig empty so it registers city-wide once.
+				if cityScopedSeen[aa[i].Name] {
+					continue
+				}
+				cityScopedSeen[aa[i].Name] = true
+				promotedCityOrders = append(promotedCityOrders, aa[i])
+				continue
+			}
 			aa[i].Rig = rigName
+			rigOrders = append(rigOrders, aa[i])
 		}
-		rigOrders = append(rigOrders, aa...)
 	}
 
-	allOrders := make([]orders.Order, 0, len(cityOrders)+len(rigOrders))
+	allOrders := make([]orders.Order, 0, len(cityOrders)+len(promotedCityOrders)+len(rigOrders))
 	allOrders = append(allOrders, cityOrders...)
+	allOrders = append(allOrders, promotedCityOrders...)
 	allOrders = append(allOrders, rigOrders...)
 	if len(cfg.Orders.Overrides) > 0 {
 		if err := orders.ApplyOverrides(allOrders, overridesFromConfig(cfg.Orders.Overrides)); err != nil {
