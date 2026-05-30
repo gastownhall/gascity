@@ -603,12 +603,28 @@ var projectedDoltEnvKeys = []string{
 	"BEADS_DOLT_PASSWORD",
 }
 
+var bdCLIRemoteSyncOptOutEnvKeys = [...]string{
+	// BD_DOLT_SYNC_CLI_REMOTES is the key bd's BD-prefixed Viper env
+	// binding consumes today; keep BEADS_DOLT_SYNC_CLI_REMOTES as a
+	// compatibility alias only.
+	"BD_DOLT_SYNC_CLI_REMOTES",
+	"BEADS_DOLT_SYNC_CLI_REMOTES",
+}
+
+func appendBdCLIRemoteSyncOptOutEnvKeys(keys []string) []string {
+	for _, key := range bdCLIRemoteSyncOptOutEnvKeys {
+		keys = append(keys, key)
+	}
+	return keys
+}
+
 var beadsExecCommandRunnerWithEnv = beads.ExecCommandRunnerWithEnv
 
 var recoverManagedBDCommand = func(cityPath string) error {
 	script := gcBeadsBdScriptPath(cityPath)
 	overrides := cityRuntimeEnvMapForCity(cityPath)
 	setProjectedDoltEnvEmpty(overrides)
+	applyBdCLIRemoteSyncOptOut(overrides)
 	environ := mergeRuntimeEnv(os.Environ(), overrides)
 	environ = append(environ, providerLifecycleDoltPathEnv(cityPath)...)
 	if gcBin := resolveProviderLifecycleGCBinary(); gcBin != "" {
@@ -1165,7 +1181,7 @@ func cityRuntimeProcessEnvWithError(cityPath string) ([]string, error) {
 			}
 		}
 		keys := execProjectedBackendEnvKeys()
-		keys = append(keys, "BEADS_DOLT_AUTO_START", "BD_DOLT_SYNC_CLI_REMOTES", "BEADS_DOLT_SYNC_CLI_REMOTES")
+		keys = append(keys, "BEADS_DOLT_AUTO_START")
 		for _, key := range keys {
 			if value, ok := source[key]; ok {
 				overrides[key] = value
@@ -1179,8 +1195,9 @@ func applyBdCLIRemoteSyncOptOut(env map[string]string) {
 	if env == nil {
 		return
 	}
-	env["BD_DOLT_SYNC_CLI_REMOTES"] = "false"
-	env["BEADS_DOLT_SYNC_CLI_REMOTES"] = "false"
+	for _, key := range bdCLIRemoteSyncOptOutEnvKeys {
+		env[key] = "false"
+	}
 }
 
 func mirrorBeadsDoltEnv(env map[string]string) {
@@ -1253,13 +1270,11 @@ func mergeRuntimeEnv(environ []string, overrides map[string]string) []string {
 		"BEADS_DOLT_SERVER_HOST",
 		"BEADS_DOLT_SERVER_PORT",
 		"BEADS_DOLT_SERVER_USER",
-		"BEADS_DOLT_SYNC_CLI_REMOTES",
 		"BEADS_POSTGRES_DATABASE",
 		"BEADS_POSTGRES_HOST",
 		"BEADS_POSTGRES_PASSWORD",
 		"BEADS_POSTGRES_PORT",
 		"BEADS_POSTGRES_USER",
-		"BD_DOLT_SYNC_CLI_REMOTES",
 		"GC_CITY",
 		"GC_CITY_ROOT", // kept for stripping: no code emits this anymore, but inherited values must be cleaned
 		"GC_CITY_PATH",
@@ -1281,6 +1296,7 @@ func mergeRuntimeEnv(environ []string, overrides map[string]string) []string {
 		"GC_RIG",
 		"GC_RIG_ROOT",
 	}
+	keys = appendBdCLIRemoteSyncOptOutEnvKeys(keys)
 	if len(overrides) > 0 {
 		for key := range overrides {
 			if !containsString(keys, key) {
