@@ -299,7 +299,7 @@ func ComputeAwakeSet(input AwakeInput) map[string]AwakeDecision {
 			continue
 		}
 		template := agent.QualifiedName
-		covered := countMinActiveCovered(input.SessionBeads, desired, template)
+		covered := countMinActiveCovered(input.SessionBeads, desired, template, input.Now)
 		if covered >= agent.MinActiveSessions {
 			continue
 		}
@@ -308,6 +308,9 @@ func ComputeAwakeSet(input AwakeInput) map[string]AwakeDecision {
 				break
 			}
 			if _, already := desired[bead.SessionName]; already {
+				continue
+			}
+			if minActiveHardBlocked(bead, input.Now) {
 				continue
 			}
 			desired[bead.SessionName] = "min-active"
@@ -500,15 +503,24 @@ func isMinActivePoolBead(b AwakeSessionBead, template string) bool {
 		!b.ManualSession && !b.Drained && !b.DependencyOnly && b.State != "closed"
 }
 
+func minActiveHardBlocked(b AwakeSessionBead, now time.Time) bool {
+	return b.WaitHold ||
+		(!b.HeldUntil.IsZero() && now.Before(b.HeldUntil)) ||
+		(!b.QuarantinedUntil.IsZero() && now.Before(b.QuarantinedUntil))
+}
+
 // countMinActiveCovered counts pool session beads for template that already
 // satisfy the min_active_sessions guarantee: non-asleep live beads
 // (active/creating) plus any bead an earlier pass already marked
 // desired-awake this tick. An asleep bead with no wake reason does not count —
 // that is precisely the deficit the min-active pass fills.
-func countMinActiveCovered(beads []AwakeSessionBead, desired map[string]string, template string) int {
+func countMinActiveCovered(beads []AwakeSessionBead, desired map[string]string, template string, now time.Time) int {
 	n := 0
 	for _, b := range beads {
 		if !isMinActivePoolBead(b, template) {
+			continue
+		}
+		if minActiveHardBlocked(b, now) {
 			continue
 		}
 		if b.State == "asleep" {

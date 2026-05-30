@@ -620,6 +620,24 @@ func pendingResumePreservingNamedRestart(session beads.Bead, clk clock.Clock, st
 	return true
 }
 
+func wakeDemandOverridesSleepSuppression(
+	decision AwakeDecision,
+	eval wakeEvaluation,
+	policy resolvedSessionSleepPolicy,
+	poolDesired map[string]int,
+	template string,
+	hasExplicitSleepIntent bool,
+) bool {
+	if hasExplicitSleepIntent {
+		return false
+	}
+	hasDemand := poolDesired[template] > 0 || eval.HasAssignedWork
+	if hasDemand && policy.Class == config.SessionSleepNonInteractive {
+		return true
+	}
+	return decision.Reason == "min-active" && containsWakeReason(eval.Reasons, WakeConfig)
+}
+
 // reconcileSessionBeads performs bead-driven reconciliation using wake/sleep
 // semantics. For each session bead, it determines if the session should be
 // awake (has a matching entry in the desired state) and manages lifecycle
@@ -1966,15 +1984,17 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		if decision.ShouldWake && !pendingInteractionReady(sp, name) && target.session.Metadata["pin_awake"] != "true" && configWakeSuppressed(*target.session, policy, sp, clk) {
 			// Active demand (poolDesired > 0 or direct assigned work)
 			// overrides sleep suppression for non-interactive sessions
-			// (matching the old evaluateWakeReasons behavior). Interactive
-			// sessions honor their idle window regardless of demand — an
-			// idle chat session should still sleep to release resources.
+			// (matching the old evaluateWakeReasons behavior). Min-active
+			// city-stop revival is also config demand: stale detach metadata
+			// from before gc stop must not cancel the post-start guarantee.
+			// Other interactive sessions honor their idle window regardless
+			// of demand — an idle chat session should still sleep to release
+			// resources.
 			// Explicit sleep_intent always wins — if the session has
 			// signaled it wants to sleep, honor that regardless of demand.
 			template := normalizedSessionTemplate(*target.session, cfg)
-			hasDemand := poolDesired[template] > 0 || eval.HasAssignedWork
 			hasExplicitSleepIntent := target.session.Metadata["sleep_intent"] != ""
-			demandOverrides := hasDemand && policy.Class == config.SessionSleepNonInteractive && !hasExplicitSleepIntent
+			demandOverrides := wakeDemandOverridesSleepSuppression(decision, eval, policy, poolDesired, template, hasExplicitSleepIntent)
 			if !demandOverrides {
 				eval.ConfigSuppressed = true
 				eval.Reasons = nil // Clear reasons so Phase 2 does not cancel the drain.

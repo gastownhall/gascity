@@ -209,6 +209,8 @@ func awakeSetToWakeEvals(decisions map[string]AwakeDecision, sessionBeads []Awak
 				reasons = []WakeReason{WakeWait}
 			case "assigned-work", "named-demand", "work-query":
 				reasons = []WakeReason{WakeWork}
+			case "min-active":
+				reasons = []WakeReason{WakeConfig}
 			default:
 				reasons = []WakeReason{WakeConfig}
 			}

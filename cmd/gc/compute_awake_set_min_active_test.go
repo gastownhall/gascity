@@ -185,6 +185,56 @@ func TestMinActive_HeldBeadNotWoken(t *testing.T) {
 	assertAsleep(t, result, "rig--pl")
 }
 
+// TestMinActive_HeldCandidateDoesNotConsumeCoverage verifies a held city-stop
+// candidate does not consume the only min-active slot when an eligible sibling
+// can satisfy the guarantee instead.
+func TestMinActive_HeldCandidateDoesNotConsumeCoverage(t *testing.T) {
+	result := ComputeAwakeSet(AwakeInput{
+		Agents: []AwakeAgent{{QualifiedName: "rig/pl", MinActiveSessions: 1}},
+		SessionBeads: []AwakeSessionBead{
+			{ID: "s-a", SessionName: "rig--pl-held", Template: "rig/pl", State: "asleep", SleepReason: "city-stop", HeldUntil: now.Add(time.Hour)},
+			{ID: "s-b", SessionName: "rig--pl-ready", Template: "rig/pl", State: "asleep", SleepReason: "city-stop"},
+		},
+		Now: now,
+	})
+	assertAsleep(t, result, "rig--pl-held")
+	assertAwake(t, result, "rig--pl-ready")
+	assertReason(t, result, "rig--pl-ready", "min-active")
+}
+
+// TestMinActive_QuarantinedCandidateDoesNotConsumeCoverage mirrors the held
+// replacement case for crash-loop quarantine, which is also a hard blocker.
+func TestMinActive_QuarantinedCandidateDoesNotConsumeCoverage(t *testing.T) {
+	result := ComputeAwakeSet(AwakeInput{
+		Agents: []AwakeAgent{{QualifiedName: "rig/pl", MinActiveSessions: 1}},
+		SessionBeads: []AwakeSessionBead{
+			{ID: "s-a", SessionName: "rig--pl-quarantined", Template: "rig/pl", State: "asleep", SleepReason: "city-stop", QuarantinedUntil: now.Add(time.Hour)},
+			{ID: "s-b", SessionName: "rig--pl-ready", Template: "rig/pl", State: "asleep", SleepReason: "city-stop"},
+		},
+		Now: now,
+	})
+	assertAsleep(t, result, "rig--pl-quarantined")
+	assertAwake(t, result, "rig--pl-ready")
+	assertReason(t, result, "rig--pl-ready", "min-active")
+}
+
+// TestMinActive_WaitHoldCandidateDoesNotConsumeCoverage mirrors the held
+// replacement case for a user-issued wait hold, which suppresses ordinary
+// demand-driven wakes until the durable wait is ready.
+func TestMinActive_WaitHoldCandidateDoesNotConsumeCoverage(t *testing.T) {
+	result := ComputeAwakeSet(AwakeInput{
+		Agents: []AwakeAgent{{QualifiedName: "rig/pl", MinActiveSessions: 1}},
+		SessionBeads: []AwakeSessionBead{
+			{ID: "s-a", SessionName: "rig--pl-waiting", Template: "rig/pl", State: "asleep", SleepReason: "city-stop", WaitHold: true},
+			{ID: "s-b", SessionName: "rig--pl-ready", Template: "rig/pl", State: "asleep", SleepReason: "city-stop"},
+		},
+		Now: now,
+	})
+	assertAsleep(t, result, "rig--pl-waiting")
+	assertAwake(t, result, "rig--pl-ready")
+	assertReason(t, result, "rig--pl-ready", "min-active")
+}
+
 // TestMinActive_DependencyOnlyDoesNotCount verifies a dependency-only session
 // does not satisfy the min_active_sessions guarantee even while live: it is
 // excluded from the min-active pool (it wakes only via dependency gating), so
