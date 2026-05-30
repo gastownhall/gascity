@@ -78,6 +78,114 @@ func TestParse_BasicFormula(t *testing.T) {
 	}
 }
 
+func TestLoadByNameDescriptionFileUsesHighestPriorityAssetLayer(t *testing.T) {
+	tmp := t.TempDir()
+	coreFormulas := filepath.Join(tmp, "core", "formulas")
+	coreAssets := filepath.Join(tmp, "core", "assets", "workflows", "review")
+	cityFormulas := filepath.Join(tmp, "city", "formulas")
+	cityAssets := filepath.Join(tmp, "city", "assets", "workflows", "review")
+	for _, dir := range []string{coreFormulas, coreAssets, cityFormulas, cityAssets} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+
+	formulaText := `
+formula = "review"
+
+[[steps]]
+id = "local-review"
+title = "Review locally"
+description_file = "../assets/workflows/review/local-review.md"
+`
+	if err := os.WriteFile(filepath.Join(coreFormulas, "review.toml"), []byte(formulaText), 0o644); err != nil {
+		t.Fatalf("write formula: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(coreAssets, "local-review.md"), []byte("core review instructions"), 0o644); err != nil {
+		t.Fatalf("write core asset: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cityAssets, "local-review.md"), []byte("city review instructions"), 0o644); err != nil {
+		t.Fatalf("write city asset: %v", err)
+	}
+
+	p := NewParser(coreFormulas, cityFormulas)
+	formula, err := p.LoadByName("review")
+	if err != nil {
+		t.Fatalf("LoadByName(review): %v", err)
+	}
+	if got := formula.Steps[0].Description; got != "city review instructions" {
+		t.Fatalf("description = %q, want city asset shadow", got)
+	}
+}
+
+func TestLoadByNameDescriptionFileFallsBackToFormulaPackAsset(t *testing.T) {
+	tmp := t.TempDir()
+	coreFormulas := filepath.Join(tmp, "core", "formulas")
+	coreAssets := filepath.Join(tmp, "core", "assets", "workflows", "triage")
+	cityFormulas := filepath.Join(tmp, "city", "formulas")
+	for _, dir := range []string{coreFormulas, coreAssets, cityFormulas} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+
+	formulaText := `
+formula = "triage"
+
+[[steps]]
+id = "classify"
+title = "Classify work"
+description_file = "../assets/workflows/triage/classify.md"
+`
+	if err := os.WriteFile(filepath.Join(coreFormulas, "triage.toml"), []byte(formulaText), 0o644); err != nil {
+		t.Fatalf("write formula: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(coreAssets, "classify.md"), []byte("core triage instructions"), 0o644); err != nil {
+		t.Fatalf("write core asset: %v", err)
+	}
+
+	p := NewParser(coreFormulas, cityFormulas)
+	formula, err := p.LoadByName("triage")
+	if err != nil {
+		t.Fatalf("LoadByName(triage): %v", err)
+	}
+	if got := formula.Steps[0].Description; got != "core triage instructions" {
+		t.Fatalf("description = %q, want core asset fallback", got)
+	}
+}
+
+func TestLoadByNameDescriptionFileKeepsRelativeNonAssetBehavior(t *testing.T) {
+	tmp := t.TempDir()
+	formulas := filepath.Join(tmp, "pack", "formulas")
+	if err := os.MkdirAll(filepath.Join(formulas, "descriptions"), 0o755); err != nil {
+		t.Fatalf("mkdir descriptions: %v", err)
+	}
+
+	formulaText := `
+formula = "relative"
+
+[[steps]]
+id = "work"
+title = "Do work"
+description_file = "descriptions/work.md"
+`
+	if err := os.WriteFile(filepath.Join(formulas, "relative.toml"), []byte(formulaText), 0o644); err != nil {
+		t.Fatalf("write formula: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(formulas, "descriptions", "work.md"), []byte("relative instructions"), 0o644); err != nil {
+		t.Fatalf("write relative description: %v", err)
+	}
+
+	p := NewParser(formulas)
+	formula, err := p.LoadByName("relative")
+	if err != nil {
+		t.Fatalf("LoadByName(relative): %v", err)
+	}
+	if got := formula.Steps[0].Description; got != "relative instructions" {
+		t.Fatalf("description = %q, want relative description file", got)
+	}
+}
+
 func TestValidate_ValidFormula(t *testing.T) {
 	formula := &Formula{
 		Formula: "mol-valid",

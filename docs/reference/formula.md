@@ -65,6 +65,29 @@ molecule.
 | `check` | object | Runtime retry: `max_attempts` with a `check` script after each attempt |
 | `timeout` | duration string | Default timeout for this step's `check` script; `check.check.timeout` takes precedence |
 
+### Description Files
+
+Use `description_file` when a step's instructions should live in a separate
+Markdown file instead of inline TOML. Non-asset paths resolve relative to the
+formula file.
+
+Asset paths resolve through the same low-to-high formula layer order as the
+formula itself. For example, a bundled formula can reference:
+
+```toml
+description_file = "../assets/workflows/review/local-review.md"
+```
+
+A city or higher-priority pack can override only that prose by providing the
+same asset path next to its formula layer:
+
+```text
+assets/workflows/review/local-review.md
+```
+
+The formula structure and step IDs remain inherited from the lower-priority
+pack; only the description file content is shadowed.
+
 ## Graph.v2 Review Quorum Formula
 
 The core pack includes `mol-review-quorum`, a Gas City-owned review quorum
