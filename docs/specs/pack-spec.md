@@ -882,8 +882,11 @@ If a patch target does not exist when the patch runs, loading fails.
 `pack.toml` table.
 
 The current default application step actively applies
+`agent_defaults.provider` to agents whose `provider` is still unset and
 `agent_defaults.default_sling_formula` to agents whose `default_sling_formula`
-is still unset. It skips the control-dispatcher infrastructure agent.
+is still unset. `agent_defaults.provider` also counts as a configured provider
+for implicit provider-agent injection. The default application step skips the
+control-dispatcher infrastructure agent.
 
 The current runtime also applies shared attachment defaults for
 `append_fragments`. Attachment-list fields such as `skills` and `mcp` are

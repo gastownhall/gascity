@@ -230,9 +230,10 @@ type City struct {
 	GitHub GitHubConfig `toml:"github,omitempty"`
 	// AgentDefaults provides city-level defaults for agents that don't
 	// override them (canonical TOML key: agent_defaults). The runtime
-	// currently applies default_sling_formula and append_fragments; the
-	// attachment-list fields remain tombstones, and the other fields are
-	// parsed/composed but not yet inherited automatically.
+	// currently applies provider, default_sling_formula, and
+	// append_fragments; the attachment-list fields remain tombstones, and
+	// the other fields are parsed/composed but not yet inherited
+	// automatically.
 	AgentDefaults AgentDefaults `toml:"agent_defaults,omitempty"`
 	// AgentsDefaults is a temporary compatibility alias for [agent_defaults].
 	// Parse/load normalize it into AgentDefaults and prefer [agent_defaults]
@@ -2284,10 +2285,14 @@ func (c *City) PackDirsForRig(rigName string) []string {
 }
 
 // AgentDefaults provides city-level agent defaults declared via
-// [agent_defaults] in city.toml. The runtime currently applies
-// default_sling_formula and append_fragments; the remaining fields are
+// [agent_defaults] in city.toml. The runtime currently applies provider,
+// default_sling_formula, and append_fragments; the remaining fields are
 // parsed and composed but are not yet inherited onto agents automatically.
 type AgentDefaults struct {
+	// Provider is the default provider name for agents that do not set their
+	// own provider. It also counts as a configured provider for implicit agent
+	// injection.
+	Provider string `toml:"provider,omitempty"`
 	// Model is the parsed/composed default model name for agents
 	// (e.g., "claude-sonnet-4-6"), but it is not yet auto-applied at
 	// runtime. Agents with their own model override would take precedence.
@@ -2326,6 +2331,9 @@ type AgentDefaults struct {
 }
 
 func mergeAgentDefaultsAliasPreferCanonical(dst *AgentDefaults, src AgentDefaults, meta toml.MetaData) {
+	if !meta.IsDefined("agent_defaults", "provider") {
+		dst.Provider = src.Provider
+	}
 	if !meta.IsDefined("agent_defaults", "model") {
 		dst.Model = src.Model
 	}
@@ -3352,6 +3360,18 @@ func InjectImplicitAgents(cfg *City) {
 func ApplyAgentDefaults(cfg *City) {
 	applyAgentSharedAttachmentDefaults(cfg.Agents, cfg.AgentDefaults)
 
+	provider := cfg.AgentDefaults.Provider
+	if provider != "" {
+		for i := range cfg.Agents {
+			if cfg.Agents[i].Name == ControlDispatcherAgentName {
+				continue
+			}
+			if cfg.Agents[i].Provider == "" {
+				cfg.Agents[i].Provider = provider
+			}
+		}
+	}
+
 	formula := cfg.AgentDefaults.DefaultSlingFormula
 	if formula != "" {
 		for i := range cfg.Agents {
@@ -3439,6 +3459,12 @@ func hasDeprecatedAttachmentFields(cfg *City) bool {
 // mergeAgentDefaults merges src into dst using later-layer precedence for
 // scalars and additive append semantics for list fields.
 func mergeAgentDefaults(dst *AgentDefaults, src AgentDefaults, label string, prov *Provenance) {
+	if src.Provider != "" {
+		if prov != nil && dst.Provider != "" && dst.Provider != src.Provider {
+			prov.Warnings = append(prov.Warnings, fmt.Sprintf("agent_defaults.provider redefined by %q", label))
+		}
+		dst.Provider = src.Provider
+	}
 	if src.Model != "" {
 		if prov != nil && dst.Model != "" && dst.Model != src.Model {
 			prov.Warnings = append(prov.Warnings, fmt.Sprintf("agent_defaults.model redefined by %q", label))
@@ -3531,25 +3557,32 @@ func newControlDispatcherAgent(dir string) Agent {
 }
 
 // configuredProviders returns the merged set of providers that are explicitly
-// configured: the union of cfg.Providers keys and cfg.Workspace.Provider.
-// workspace.provider is only included if it names a built-in provider or one
-// already defined in cfg.Providers — a non-builtin workspace.provider without
-// a matching [providers.X] section is ignored (it would create an implicit
-// agent that fails at resolution time).
+// configured: the union of cfg.Providers keys, cfg.AgentDefaults.Provider, and
+// cfg.Workspace.Provider. Scalar provider defaults are only included if they
+// name a built-in provider or one already defined in cfg.Providers — a
+// non-builtin scalar default without a matching [providers.X] section is
+// ignored because it would create an implicit agent that fails at resolution
+// time.
 func configuredProviders(cfg *City) map[string]ProviderSpec {
 	merged := make(map[string]ProviderSpec, len(cfg.Providers)+1)
 	for k, v := range cfg.Providers {
 		merged[k] = v
 	}
-	if wp := cfg.Workspace.Provider; wp != "" {
-		if _, ok := merged[wp]; !ok {
-			// Only promote workspace.provider if it's a known builtin.
-			if _, builtin := BuiltinProviders()[wp]; builtin {
-				merged[wp] = ProviderSpec{}
-			}
-		}
-	}
+	addScalarProviderDefault(merged, cfg.AgentDefaults.Provider)
+	addScalarProviderDefault(merged, cfg.Workspace.Provider)
 	return merged
+}
+
+func addScalarProviderDefault(merged map[string]ProviderSpec, name string) {
+	if name == "" {
+		return
+	}
+	if _, ok := merged[name]; ok {
+		return
+	}
+	if _, builtin := BuiltinProviders()[name]; builtin {
+		merged[name] = ProviderSpec{}
+	}
 }
 
 // configuredProviderOrder returns provider names from the map in a

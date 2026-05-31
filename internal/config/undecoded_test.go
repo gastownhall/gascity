@@ -302,10 +302,10 @@ func TestParseWithMetaSkipsMixedTableWarningWhenOverlapIsOnlyUnsupportedFutureKe
 name = "test"
 
 [agent_defaults]
-provider = "claude"
+scope = "rig"
 
 [agents]
-provider = "codex"
+scope = "city"
 `
 	_, _, warnings, err := parseWithMeta([]byte(input), "test.toml")
 	if err != nil {
@@ -319,11 +319,11 @@ provider = "codex"
 	foundUnsupported := false
 	foundAlias := false
 	for _, w := range warnings {
-		if strings.Contains(w, `keep setting provider per agent in agents/<name>/agent.toml`) {
+		if strings.Contains(w, `keep setting scope per agent in agents/<name>/agent.toml`) {
 			foundUnsupported = true
 		}
-		if strings.Contains(w, `workspace.provider`) {
-			t.Fatalf("unsupported-key guidance should not point back to deprecated workspace.provider: %v", warnings)
+		if strings.Contains(w, `workspace.scope`) {
+			t.Fatalf("unsupported-key guidance should not point back to workspace.scope: %v", warnings)
 		}
 		if strings.Contains(w, agentsAliasWarning) {
 			foundAlias = true
@@ -343,17 +343,6 @@ func TestParseWithMetaWarnsOnUnsupportedAgentDefaultsMigrationKeys(t *testing.T)
 		input string
 		want  string
 	}{
-		{
-			name: "provider",
-			input: `
-[workspace]
-name = "test"
-
-[agent_defaults]
-provider = "claude"
-`,
-			want: `keep setting provider per agent in agents/<name>/agent.toml`,
-		},
 		{
 			name: "scope",
 			input: `
@@ -406,24 +395,67 @@ install_agent_hooks = ["hooks/gascity.json"]
 	}
 }
 
+func TestParseWithMetaAcceptsAgentDefaultsProvider(t *testing.T) {
+	input := `
+[workspace]
+name = "test"
+
+[agent_defaults]
+provider = "codex"
+`
+	cfg, _, warnings, err := parseWithMeta([]byte(input), "test.toml")
+	if err != nil {
+		t.Fatalf("parseWithMeta: %v", err)
+	}
+	if got := cfg.AgentDefaults.Provider; got != "codex" {
+		t.Fatalf("AgentDefaults.Provider = %q, want codex", got)
+	}
+	for _, w := range warnings {
+		if strings.Contains(w, "agent_defaults.provider") || strings.Contains(w, "unknown field") {
+			t.Fatalf("provider should be a supported agent default, got warnings: %v", warnings)
+		}
+	}
+}
+
+func TestParseWithMetaAgentDefaultsProviderAliasPrefersCanonical(t *testing.T) {
+	input := `
+[workspace]
+name = "test"
+
+[agent_defaults]
+provider = "codex"
+
+[agents]
+provider = "claude"
+`
+	cfg, _, warnings, err := parseWithMeta([]byte(input), "test.toml")
+	if err != nil {
+		t.Fatalf("parseWithMeta: %v", err)
+	}
+	if got := cfg.AgentDefaults.Provider; got != "codex" {
+		t.Fatalf("AgentDefaults.Provider = %q, want canonical codex", got)
+	}
+
+	foundOverlap := false
+	for _, w := range warnings {
+		if strings.Contains(w, "both [agent_defaults] and [agents] are present") {
+			foundOverlap = true
+		}
+		if strings.Contains(w, "agent_defaults.provider") || strings.Contains(w, "unknown field") {
+			t.Fatalf("provider should be a supported agent default, got warnings: %v", warnings)
+		}
+	}
+	if !foundOverlap {
+		t.Fatalf("expected mixed-table warning, got: %v", warnings)
+	}
+}
+
 func TestParsePackConfigWithMetaWarnsOnPackLocalUnsupportedAgentDefaultsKeys(t *testing.T) {
 	tests := []struct {
 		name  string
 		input string
 		want  string
 	}{
-		{
-			name: "provider",
-			input: `
-[pack]
-name = "test"
-schema = 2
-
-[agent_defaults]
-provider = "claude"
-`,
-			want: `keep setting provider per agent in agents/<name>/agent.toml`,
-		},
 		{
 			name: "install_agent_hooks",
 			input: `

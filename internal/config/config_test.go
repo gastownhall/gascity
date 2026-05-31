@@ -5837,6 +5837,79 @@ func TestInjectImplicitAgents_RigInjection(t *testing.T) {
 // agent_defaults.default_sling_formula
 // ---------------------------------------------------------------------------
 
+func TestAgentDefaultsProvider_ExplicitAgentInherits(t *testing.T) {
+	cfg := &City{
+		Agents: []Agent{
+			{Name: "worker"},
+		},
+		AgentDefaults: AgentDefaults{
+			Provider: "codex",
+		},
+	}
+	ApplyAgentDefaults(cfg)
+
+	if got := cfg.Agents[0].Provider; got != "codex" {
+		t.Fatalf("Provider = %q, want codex", got)
+	}
+}
+
+func TestAgentDefaultsProvider_ExplicitOverrideWins(t *testing.T) {
+	cfg := &City{
+		Agents: []Agent{
+			{Name: "worker", Provider: "claude"},
+		},
+		AgentDefaults: AgentDefaults{
+			Provider: "codex",
+		},
+	}
+	ApplyAgentDefaults(cfg)
+
+	if got := cfg.Agents[0].Provider; got != "claude" {
+		t.Fatalf("Provider = %q, want explicit claude", got)
+	}
+}
+
+func TestAgentDefaultsProvider_InjectImplicitAgents(t *testing.T) {
+	cfg := &City{
+		AgentDefaults: AgentDefaults{
+			Provider: "codex",
+		},
+	}
+	InjectImplicitAgents(cfg)
+	ApplyAgentDefaults(cfg)
+
+	for _, a := range cfg.Agents {
+		if a.Name == "codex" && a.Implicit {
+			if got := a.Provider; got != "codex" {
+				t.Fatalf("implicit codex Provider = %q, want codex", got)
+			}
+			return
+		}
+	}
+	t.Fatal("implicit codex agent not found")
+}
+
+func TestAgentDefaultsProvider_ControlDispatcherSkipped(t *testing.T) {
+	cfg := &City{
+		Daemon: DaemonConfig{FormulaV2: true},
+		AgentDefaults: AgentDefaults{
+			Provider: "codex",
+		},
+	}
+	InjectImplicitAgents(cfg)
+	ApplyAgentDefaults(cfg)
+
+	for _, a := range cfg.Agents {
+		if a.Name == ControlDispatcherAgentName {
+			if a.Provider != "" {
+				t.Fatalf("control-dispatcher Provider = %q, want empty", a.Provider)
+			}
+			return
+		}
+	}
+	t.Fatal("control-dispatcher agent not found")
+}
+
 func TestAgentDefaultsSlingFormula_ImplicitAgents(t *testing.T) {
 	// When agent_defaults.default_sling_formula is set, implicit agents
 	// should use it instead of the hardcoded "mol-do-work".

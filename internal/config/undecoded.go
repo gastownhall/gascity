@@ -12,6 +12,7 @@ import (
 const agentsAliasWarning = "[agents] is a deprecated compatibility alias for [agent_defaults]; rewrite the table name to [agent_defaults]"
 
 var agentDefaultsCompatibilityOverlapKeys = []string{
+	"provider",
 	"model",
 	"wake_mode",
 	"default_sling_formula",
@@ -124,8 +125,6 @@ func agentDefaultsTablesOverlap(md toml.MetaData) bool {
 
 func specializedUndecodedWarning(source, key string) (string, bool) {
 	switch key {
-	case "agent_defaults.provider", "agents.provider":
-		return fmt.Sprintf("%s: %q is not supported in this release wave; keep setting provider per agent in agents/<name>/agent.toml", source, key), true
 	case "agent_defaults.scope", "agents.scope":
 		return fmt.Sprintf("%s: %q is not supported in this release wave; keep setting scope per agent in agents/<name>/agent.toml", source, key), true
 	case "agent_defaults.install_agent_hooks", "agents.install_agent_hooks":

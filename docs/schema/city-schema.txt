@@ -337,6 +337,10 @@
     },
     "AgentDefaults": {
       "properties": {
+        "provider": {
+          "type": "string",
+          "description": "Provider is the default provider name for agents that do not set their\nown provider. It also counts as a configured provider for implicit agent\ninjection."
+        },
         "model": {
           "type": "string",
           "description": "Model is the parsed/composed default model name for agents\n(e.g., \"claude-sonnet-4-6\"), but it is not yet auto-applied at\nruntime. Agents with their own model override would take precedence."
@@ -1082,7 +1086,7 @@
         },
         "agent_defaults": {
           "$ref": "#/$defs/AgentDefaults",
-          "description": "AgentDefaults provides city-level defaults for agents that don't\noverride them (canonical TOML key: agent_defaults). The runtime\ncurrently applies default_sling_formula and append_fragments; the\nattachment-list fields remain tombstones, and the other fields are\nparsed/composed but not yet inherited automatically."
+          "description": "AgentDefaults provides city-level defaults for agents that don't\noverride them (canonical TOML key: agent_defaults). The runtime\ncurrently applies provider, default_sling_formula, and\nappend_fragments; the attachment-list fields remain tombstones, and\nthe other fields are parsed/composed but not yet inherited\nautomatically."
         },
         "pricing": {
           "items": {
