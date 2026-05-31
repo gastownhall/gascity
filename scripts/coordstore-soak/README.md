@@ -5,7 +5,7 @@ coordination-store backends. Used to land the build-vs-adopt decision for
 the gascity coord store.
 
 > ⚠️ **NOT FOR CI.** Each soak is multi-hour (2h Phase A + 15m chaos per
-> backend). The 4-RC matrix is ~9h. CI must never trigger these — they are
+> backend). CI must never trigger these — they are
 > all gated behind `COORDSTORE_SOAK=1` so the default `go test ./...` is a
 > no-op for the soak harness.
 
@@ -20,15 +20,14 @@ The Go test code lives at `internal/benchmarks/coordstore/`:
 | **Workload** | `workload.go`, `workload_soak_test.go`, `lifecycle_plateau_test.go` | Realistic-lifecycle workload (ga-w08fz): main creates with low close rate (long-lived tasks), wisps with high churn (plateau-shaped), batched read/scan patterns. |
 | **Triage** | `triage.go` + test | Phase C report: walks all per-phase artifacts, produces `triage.md` + `triage.json` cross-backend comparison. |
 | **Recorder** | `recorder.go` + test | Timeseries sampler (HeapInuse, RSS, AllocDelta, op-level p99/throughput). |
-| **Adapters** | `adapters/{hqstore,bbolt,sqlite-cgo,sqlite,badger,dolt,couchdb}/` | One per backend; trivial wrappers around `coordstore.StoreAdapter`. |
-| **Top-level tests** | `suite_test.go` | `TestBenchmarkSoakFullMatrix` (the 4-RC matrix: hqstore, bbolt, sqlite-cgo, badger) + `TestBenchmarkSoakDolt` (legacy/baseline). |
+| **Adapters** | `adapters/{authorcore,bbolt,couchdb,dolt,hqstore,postgres,sqlite}/` | One per backend; trivial wrappers around `coordstore.StoreAdapter`. External adapters register only when their DSN/URL env vars are set. |
+| **Top-level tests** | `suite_test.go` | `TestBenchmarkSoakPhaseA`, `TestBenchmarkSoakCalibrate`, `TestBenchmarkSoakPhaseB`, `TestBenchmarkSoakTriage`, and `TestBenchmarkSoakDolt` (legacy/baseline). |
 
 ## Gating env vars
 
 | Var | Purpose |
 |---|---|
 | `COORDSTORE_SOAK=1` | **Required** for any soak test. Default off → CI-safe. |
-| `COORDSTORE_FULL_MATRIX=1` | Required for the 4-RC matrix. |
 | `COORDSTORE_SQLITE_CGO=1` (+ `-tags sqlite_cgo`) | Enables the sqlite-cgo adapter. |
 | `COORDSTORE_DOLT_DSN` | Enables the dolt adapter — must point at an **isolated** throwaway dolt (never the city's :28232). |
 | `COORDSTORE_RESULTS_DIR` | Where scorecards/timeseries/triage go (required). |
@@ -36,12 +35,10 @@ The Go test code lives at `internal/benchmarks/coordstore/`:
 
 ## Launchers (this directory)
 
-- `launch-full-matrix.sh` — runs `TestBenchmarkSoakFullMatrix` (hqstore / bbolt / sqlite-cgo / badger). Wrap in `systemd-run --user --property=MemoryMax=4G --property=MemorySwapMax=0`.
-- `launch-single-backend.sh` — `TestBenchmarkSoakFullMatrix/<backend>` for filling a backend-specific gap (e.g., if matrix OOMs mid-run).
 - `launch-dolt-baseline.sh` — `TestBenchmarkSoakDolt`. Needs `COORDSTORE_DOLT_DSN` pre-set.
 - `setup-isolated-dolt.sh` — spins up a throwaway `dolt sql-server` on a non-:28232 port for the dolt baseline.
 
-Each launcher writes a `launch.txt` provenance file with branch SHA + env into the results dir.
+Each launcher writes a `launch.txt` provenance file with branch SHA + env into the results dir. Launchers derive Go paths from `go env` by default; override `GOPATH`, `GOCACHE`, `GOMODCACHE`, or `GOROOT` in the environment for local custom toolchains.
 
 ## Reading results
 
