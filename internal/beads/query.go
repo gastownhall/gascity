@@ -58,10 +58,13 @@ func TierModeFromOpts(opts []QueryOpt) TierMode {
 // Queries are conjunctive: every populated field must match. A zero-value query
 // is rejected unless AllowScan is true.
 type ListQuery struct {
-	Status        string
-	Type          string
-	Label         string
-	Assignee      string
+	Status   string
+	Type     string
+	Label    string
+	Assignee string
+	// Assignees matches beads assigned to any listed assignee.
+	// It is mutually exclusive with Assignee; call Validate to enforce that contract.
+	Assignees     []string
 	ParentID      string
 	Metadata      map[string]string
 	CreatedBefore time.Time
@@ -86,6 +89,14 @@ type ListQuery struct {
 	TierMode TierMode
 }
 
+// Validate returns an error when the query contains contradictory selectors.
+func (q ListQuery) Validate() error {
+	if q.Assignee != "" && len(q.Assignees) > 0 {
+		return errors.New("ListQuery: Assignee and Assignees are mutually exclusive")
+	}
+	return nil
+}
+
 // ReadyQuery describes optional filters for ready-work lookup. A zero-value
 // query preserves Ready's historical behavior: all open, unblocked actionable
 // work.
@@ -107,6 +118,7 @@ func (q ListQuery) HasFilter() bool {
 		q.Type != "" ||
 		q.Label != "" ||
 		q.Assignee != "" ||
+		len(q.Assignees) > 0 ||
 		q.ParentID != "" ||
 		len(q.Metadata) > 0 ||
 		!q.CreatedBefore.IsZero() ||
@@ -147,6 +159,18 @@ func (q ListQuery) Matches(b Bead) bool {
 	}
 	if q.Assignee != "" && b.Assignee != q.Assignee {
 		return false
+	}
+	if len(q.Assignees) > 0 {
+		matched := false
+		for _, assignee := range q.Assignees {
+			if b.Assignee == assignee {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return false
+		}
 	}
 	if q.ParentID != "" && b.ParentID != q.ParentID {
 		return false

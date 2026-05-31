@@ -111,6 +111,40 @@ func TestListQueryHasFilterIncludesUpdatedBefore(t *testing.T) {
 	}
 }
 
+func TestListQueryHasFilterIncludesAssignees(t *testing.T) {
+	query := ListQuery{Assignees: []string{"rig/builder", "rig/validator"}}
+
+	if !query.HasFilter() {
+		t.Fatal("HasFilter() = false, want true for Assignees")
+	}
+}
+
+func TestListQueryMatchesAnyAssignee(t *testing.T) {
+	query := ListQuery{Assignees: []string{"rig/builder", "rig/validator"}}
+
+	if !query.Matches(Bead{ID: "match", Assignee: "rig/validator"}) {
+		t.Fatal("Matches() = false, want true for listed assignee")
+	}
+	if query.Matches(Bead{ID: "miss", Assignee: "rig/reviewer"}) {
+		t.Fatal("Matches() = true, want false for unlisted assignee")
+	}
+}
+
+func TestListQueryValidateRejectsAssigneeAndAssignees(t *testing.T) {
+	query := ListQuery{
+		Assignee:  "rig/builder",
+		Assignees: []string{"rig/validator"},
+	}
+
+	err := query.Validate()
+	if err == nil {
+		t.Fatal("Validate() = nil, want error")
+	}
+	if got, want := err.Error(), "ListQuery: Assignee and Assignees are mutually exclusive"; got != want {
+		t.Fatalf("Validate() error = %q, want %q", got, want)
+	}
+}
+
 func TestListQueryUpdatedBeforeMatchesReferenceTimestampBoundaries(t *testing.T) {
 	cutoff := time.Date(2026, 4, 20, 12, 0, 0, 0, time.UTC)
 	tests := []struct {
