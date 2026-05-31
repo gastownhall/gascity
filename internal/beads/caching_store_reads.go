@@ -1,6 +1,7 @@
 package beads
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"time"
@@ -98,9 +99,102 @@ func (c *CachingStore) List(query ListQuery) ([]Bead, error) {
 	return c.backing.List(liveListQuery(query))
 }
 
+// RuntimeList serves hot runtime callers from cache or indexed SQL only. It
+// never delegates to the backing Store.List fallback path.
+func (c *CachingStore) RuntimeList(ctx context.Context, query ListQuery, policy ReadPolicy) ([]Bead, error) {
+	policy = normalizeReadPolicy(policy)
+	if policy.AllowFallback {
+		return c.List(query)
+	}
+	if !query.HasFilter() && !query.AllowScan {
+		return nil, fmt.Errorf("runtime cache list: %w", ErrQueryRequiresScan)
+	}
+	if cached, ok := c.runtimeCachedList(query, policy); ok {
+		return enforceRuntimeRowCap(cached, policy, "list", "cache")
+	}
+	if _, bd := c.backing.(*BdStore); !bd {
+		items, err := c.backing.List(liveListQuery(query))
+		if err != nil {
+			return items, err
+		}
+		return enforceRuntimeRowCap(items, policy, "list", "backing")
+	}
+	indexed, ok := c.backing.(IndexedLister)
+	if !ok {
+		return nil, degradedRead(policy, "list", "cache", "unavailable", ErrIndexedListUnsupported)
+	}
+	indexedQuery := liveListQuery(query)
+	if policy.MaxRows > 0 && indexedQuery.Limit <= 0 {
+		indexedQuery.Limit = policy.MaxRows
+	}
+	readCtx, cancel := contextWithReadPolicy(ctx, policy)
+	defer cancel()
+	result, err := indexed.ListIndexed(readCtx, indexedQuery)
+	if err != nil {
+		return result.Beads, degradedRead(policy, "list", "indexed", "", err)
+	}
+	if !result.DependencyCoverage {
+		return result.Beads, degradedRead(policy, "list", "indexed", "dependency-incomplete", ErrIndexedListUnsupported)
+	}
+	if !result.LabelsCoverage {
+		return result.Beads, degradedRead(policy, "list", "indexed", "labels-incomplete", ErrIndexedListUnsupported)
+	}
+	items := ApplyListQuery(result.Beads, query)
+	return enforceRuntimeRowCap(items, policy, "list", "indexed")
+}
+
+func (c *CachingStore) runtimeCachedList(query ListQuery, policy ReadPolicy) ([]Bead, bool) {
+	if policy.Class == ReadClassHotAuthoritative {
+		return nil, false
+	}
+	if query.TierMode != TierIssues || query.Live {
+		return nil, false
+	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if c.state != cacheLive && c.state != cachePartial {
+		return nil, false
+	}
+	if c.primePartialErr != nil {
+		return nil, false
+	}
+	if len(c.dirty) > 0 {
+		return nil, false
+	}
+	if query.IncludesClosed() {
+		return nil, false
+	}
+	cached := make([]Bead, 0, len(c.beads))
+	for _, b := range c.beads {
+		if !query.Matches(b) {
+			continue
+		}
+		cached = append(cached, cloneBead(b))
+	}
+	sortBeadsForQuery(cached, query.Sort)
+	if query.Limit > 0 && len(cached) > query.Limit {
+		cached = cached[:query.Limit]
+	}
+	return cached, true
+}
+
 func liveListQuery(query ListQuery) ListQuery {
 	query.Live = true
 	return query
+}
+
+// CountIndexed delegates cheap aggregate counts to the backing indexed store.
+// The in-memory cache intentionally holds only active rows, so all-status row
+// counts must be answered by the authoritative indexed reader.
+func (c *CachingStore) CountIndexed(ctx context.Context, query ListQuery) (int, error) {
+	if c == nil || c.backing == nil {
+		return 0, ErrIndexedListUnsupported
+	}
+	counter, ok := c.backing.(IndexedCounter)
+	if !ok {
+		return 0, ErrIndexedListUnsupported
+	}
+	return counter.CountIndexed(ctx, liveListQuery(query))
 }
 
 // CachedList returns query results from the in-memory cache only. The boolean
@@ -423,6 +517,39 @@ func (c *CachingStore) CachedReady() ([]Bead, bool) {
 		}
 	}
 	return result, true
+}
+
+// RuntimeReady serves controller/session hot ready checks from the cache read
+// model only. If the cache cannot prove dependency coverage, the read degrades
+// instead of invoking bd ready.
+func (c *CachingStore) RuntimeReady(_ context.Context, query ReadyQuery, policy ReadPolicy) ([]Bead, error) {
+	policy = normalizeReadPolicy(policy)
+	if policy.AllowFallback {
+		return readyWithQuery(c, query)
+	}
+	ready, ok := c.CachedReady()
+	if !ok {
+		return nil, degradedRead(policy, "ready", "cache", "dependency-incomplete", ErrIndexedListUnsupported)
+	}
+	ready = filterReadyQuery(ready, query)
+	return enforceRuntimeRowCap(ready, policy, "ready", "cache")
+}
+
+func filterReadyQuery(items []Bead, query ReadyQuery) []Bead {
+	if query == (ReadyQuery{}) {
+		return items
+	}
+	out := make([]Bead, 0, len(items))
+	for _, item := range items {
+		if query.Assignee != "" && item.Assignee != query.Assignee {
+			continue
+		}
+		out = append(out, item)
+		if query.Limit > 0 && len(out) >= query.Limit {
+			break
+		}
+	}
+	return out
 }
 
 func cachedBeadReady(statusByID map[string]string, deps []Dep) bool {

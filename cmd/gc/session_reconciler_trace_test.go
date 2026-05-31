@@ -581,6 +581,7 @@ func TestSessionReconcilePhaseTraceUsesDistinctSites(t *testing.T) {
 		newDrainTracker(),
 		nil,
 		nil,
+		nil,
 		false,
 		nil,
 		"trace-town",

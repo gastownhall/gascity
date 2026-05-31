@@ -3458,6 +3458,168 @@ func TestReconcileSessionBeads_OnDemandNamedSessionWakesFromRoutedSingletonTempl
 	}
 }
 
+func TestReconcileSessionBeads_OnDemandNamedSessionQueuesPatrolWispNudgeForLiveSession(t *testing.T) {
+	env := newReconcilerTestEnv()
+	cityPath := t.TempDir()
+	t.Setenv("GC_BEADS", "file")
+	if err := ensureScopedFileStoreLayout(cityPath); err != nil {
+		t.Fatalf("ensure scoped file store layout: %v", err)
+	}
+	if err := ensurePersistedScopeLocalFileStore(cityPath); err != nil {
+		t.Fatalf("ensure persisted scoped file store: %v", err)
+	}
+	env.cfg = &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Daemon:    config.DaemonConfig{NudgeDispatcher: "supervisor"},
+		Agents: []config.Agent{{
+			Name:         "worker",
+			StartCommand: "true",
+			Session:      config.SessionTransportACP,
+		}},
+		NamedSessions: []config.NamedSession{{Name: "primary", Template: "worker", Mode: "on_demand"}},
+	}
+	env.desiredState["primary"] = TemplateParams{
+		Command:                 "true",
+		SessionName:             "primary",
+		TemplateName:            "worker",
+		ConfiguredNamedIdentity: "primary",
+		ConfiguredNamedMode:     "on_demand",
+	}
+	if err := env.sp.Start(context.Background(), "primary", runtime.Config{Command: "true"}); err != nil {
+		t.Fatalf("Start(primary): %v", err)
+	}
+	session := env.createSessionBead("primary", "worker")
+	env.setSessionMetadata(&session, map[string]string{
+		"agent_name":                 "worker",
+		"alias":                      "primary",
+		"transport":                  config.SessionTransportACP,
+		namedSessionMetadataKey:      "true",
+		namedSessionIdentityMetadata: "primary",
+		namedSessionModeMetadata:     "on_demand",
+		"state":                      "active",
+		"last_woke_at":               env.clk.Now().UTC().Format(time.RFC3339),
+		"continuation_epoch":         "epoch-1",
+	})
+
+	cfgNames := configuredSessionNames(env.cfg, env.cfg.EffectiveCityName(), env.store)
+	wispDemand := map[string]NamedSessionWispDemandSource{
+		"primary": {WispID: "wisp-1", StoreRef: "rig-a", Status: "in_progress"},
+	}
+	woken := reconcileSessionBeadsAtPathWithNamedDemand(
+		context.Background(), cityPath, []beads.Bead{session}, env.desiredState, cfgNames, env.cfg, env.sp,
+		env.store, nil, nil, nil, nil, env.dt, nil,
+		map[string]bool{"primary": true}, wispDemand, false, nil, env.cfg.EffectiveCityName(),
+		nil, env.clk, env.rec, 0, 0, &env.stdout, &env.stderr,
+	)
+	if woken != 0 {
+		t.Fatalf("woken = %d, want 0 for already-live named session", woken)
+	}
+
+	pending, inFlight, dead, err := listQueuedNudges(cityPath, "primary", env.clk.Now())
+	if err != nil {
+		t.Fatalf("listQueuedNudges: %v", err)
+	}
+	if len(pending) != 1 || len(inFlight) != 0 || len(dead) != 0 {
+		t.Fatalf("queue sizes pending=%d in_flight=%d dead=%d, want 1/0/0", len(pending), len(inFlight), len(dead))
+	}
+	got := pending[0]
+	if got.Agent != "primary" || got.Source != namedSessionPatrolWispNudgeSource || got.Message != namedSessionPatrolWispNudgeMessage {
+		t.Fatalf("queued nudge = %+v, want patrol-wisp nudge for primary", got)
+	}
+	if got.SessionID != session.ID || got.ContinuationEpoch != "epoch-1" {
+		t.Fatalf("queued nudge fence session=%q epoch=%q, want %q/epoch-1", got.SessionID, got.ContinuationEpoch, session.ID)
+	}
+	if got.Reference == nil || got.Reference.Kind != namedSessionPatrolWispNudgeSource || got.Reference.ID != "rig:rig-a:wisp-1" {
+		t.Fatalf("queued nudge reference = %+v, want patrol-wisp rig:rig-a:wisp-1", got.Reference)
+	}
+	reloaded, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get(session): %v", err)
+	}
+	if reloaded.Metadata[namedSessionPatrolWispNudgeRefMetadata] != "rig:rig-a:wisp-1" {
+		t.Fatalf("%s = %q, want rig:rig-a:wisp-1", namedSessionPatrolWispNudgeRefMetadata, reloaded.Metadata[namedSessionPatrolWispNudgeRefMetadata])
+	}
+	if reloaded.Metadata[namedSessionPatrolWispNudgeEpochMetadata] != "epoch-1" {
+		t.Fatalf("%s = %q, want epoch-1", namedSessionPatrolWispNudgeEpochMetadata, reloaded.Metadata[namedSessionPatrolWispNudgeEpochMetadata])
+	}
+
+	reconcileSessionBeadsAtPathWithNamedDemand(
+		context.Background(), cityPath, []beads.Bead{reloaded}, env.desiredState, cfgNames, env.cfg, env.sp,
+		env.store, nil, nil, nil, nil, env.dt, nil,
+		map[string]bool{"primary": true}, wispDemand, false, nil, env.cfg.EffectiveCityName(),
+		nil, env.clk, env.rec, 0, 0, &env.stdout, &env.stderr,
+	)
+	pending, inFlight, dead, err = listQueuedNudges(cityPath, "primary", env.clk.Now())
+	if err != nil {
+		t.Fatalf("listQueuedNudges after duplicate tick: %v", err)
+	}
+	if len(pending) != 1 || len(inFlight) != 0 || len(dead) != 0 {
+		t.Fatalf("duplicate tick queue sizes pending=%d in_flight=%d dead=%d, want 1/0/0", len(pending), len(inFlight), len(dead))
+	}
+
+	if err := withNudgeQueueState(cityPath, func(state *nudgeQueueState) error {
+		state.Pending = nil
+		state.InFlight = nil
+		return nil
+	}); err != nil {
+		t.Fatalf("clear delivered queued nudge: %v", err)
+	}
+	reloaded, err = env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get(session) after ack: %v", err)
+	}
+	reconcileSessionBeadsAtPathWithNamedDemand(
+		context.Background(), cityPath, []beads.Bead{reloaded}, env.desiredState, cfgNames, env.cfg, env.sp,
+		env.store, nil, nil, nil, nil, env.dt, nil,
+		map[string]bool{"primary": true}, wispDemand, false, nil, env.cfg.EffectiveCityName(),
+		nil, env.clk, env.rec, 0, 0, &env.stdout, &env.stderr,
+	)
+	pending, inFlight, dead, err = listQueuedNudges(cityPath, "primary", env.clk.Now())
+	if err != nil {
+		t.Fatalf("listQueuedNudges after delivered same-wisp re-fire: %v", err)
+	}
+	if len(pending) != 1 || len(inFlight) != 0 || len(dead) != 0 {
+		t.Fatalf("delivered same-wisp re-fire queue sizes pending=%d in_flight=%d dead=%d, want 1/0/0", len(pending), len(inFlight), len(dead))
+	}
+	if pending[0].Reference == nil || pending[0].Reference.ID != "rig:rig-a:wisp-1" {
+		t.Fatalf("delivered same-wisp re-fire reference = %+v, want rig:rig-a:wisp-1", pending[0].Reference)
+	}
+
+	reloaded, err = env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get(session) before newer wisp demand: %v", err)
+	}
+	newerWispDemand := map[string]NamedSessionWispDemandSource{
+		"primary": {WispID: "wisp-2", StoreRef: "rig-a", Status: "in_progress"},
+	}
+	reconcileSessionBeadsAtPathWithNamedDemand(
+		context.Background(), cityPath, []beads.Bead{reloaded}, env.desiredState, cfgNames, env.cfg, env.sp,
+		env.store, nil, nil, nil, nil, env.dt, nil,
+		map[string]bool{"primary": true}, newerWispDemand, false, nil, env.cfg.EffectiveCityName(),
+		nil, env.clk, env.rec, 0, 0, &env.stdout, &env.stderr,
+	)
+	pending, inFlight, dead, err = listQueuedNudges(cityPath, "primary", env.clk.Now())
+	if err != nil {
+		t.Fatalf("listQueuedNudges after newer patrol-wisp demand: %v", err)
+	}
+	if len(pending) != 1 || len(inFlight) != 0 {
+		t.Fatalf("newer patrol-wisp demand queue sizes pending=%d in_flight=%d dead=%d, want 1/0/*", len(pending), len(inFlight), len(dead))
+	}
+	if pending[0].Reference == nil || pending[0].Reference.ID != "rig:rig-a:wisp-2" {
+		t.Fatalf("newer patrol-wisp demand reference = %+v, want rig:rig-a:wisp-2", pending[0].Reference)
+	}
+	for _, stale := range append(append([]queuedNudge{}, pending...), inFlight...) {
+		if stale.Reference != nil && stale.Reference.ID == "rig:rig-a:wisp-1" {
+			t.Fatalf("stale patrol-wisp nudge remained deliverable: %+v", stale)
+		}
+	}
+	for _, terminal := range dead {
+		if terminal.Reference != nil && terminal.Reference.ID == "rig:rig-a:wisp-1" && terminal.LastError != "superseded" {
+			t.Fatalf("terminal stale patrol-wisp nudge = %+v, want superseded", terminal)
+		}
+	}
+}
+
 func reconcileExistingAsleepNamedSessionWithRoutedWork(t *testing.T, cfg *config.City, sessionName, identity, routedTo string) (int, bool) {
 	t.Helper()
 
@@ -3514,7 +3676,7 @@ func reconcileExistingAsleepNamedSessionWithRoutedWork(t *testing.T, cfg *config
 	woken := reconcileSessionBeadsAtPathWithNamedDemand(
 		context.Background(), cityPath, sessions, dsResult.State, cfgNames, cfg, sp,
 		store, nil, dsResult.AssignedWorkBeads, nil, nil, newDrainTracker(), poolDesired,
-		dsResult.NamedSessionDemand, dsResult.StoreQueryPartial, nil, cfg.EffectiveCityName(),
+		dsResult.NamedSessionDemand, nil, dsResult.StoreQueryPartial, nil, cfg.EffectiveCityName(),
 		nil, clk, events.Discard, 0, 0, &stdout, &stderr,
 	)
 	return woken, sp.IsRunning(sessionName)

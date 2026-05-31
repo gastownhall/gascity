@@ -214,10 +214,11 @@ type PurgeResult struct {
 // BdStore implements Store by shelling out to the bd CLI (beads v0.55.1+).
 // It delegates all persistence to bd's embedded Dolt database.
 type BdStore struct {
-	dir         string          // city root directory (where .beads/ lives)
-	runner      CommandRunner   // injectable for testing
-	purgeRunner PurgeRunnerFunc // injectable for testing; nil uses exec default
-	idPrefix    string          // bead ID prefix owned by this store, without trailing "-"
+	dir           string          // city root directory (where .beads/ lives)
+	runner        CommandRunner   // injectable for testing
+	purgeRunner   PurgeRunnerFunc // injectable for testing; nil uses exec default
+	idPrefix      string          // bead ID prefix owned by this store, without trailing "-"
+	indexedReader IndexedLister   // optional read-only active list accelerator
 }
 
 const bdTransientWriteAttempts = 3
@@ -230,6 +231,77 @@ func NewBdStore(dir string, runner CommandRunner) *BdStore {
 // NewBdStoreWithPrefix creates a BdStore with an explicit owned bead ID prefix.
 func NewBdStoreWithPrefix(dir string, runner CommandRunner, idPrefix string) *BdStore {
 	return &BdStore{dir: dir, runner: runner, idPrefix: normalizeIDPrefix(idPrefix)}
+}
+
+// WithIndexedReader attaches a read-only active list accelerator.
+func (s *BdStore) WithIndexedReader(reader IndexedLister) *BdStore {
+	if s != nil {
+		s.indexedReader = reader
+	}
+	return s
+}
+
+// ListIndexed exposes the optional read-only indexed list path without falling
+// back to the Beads CLI.
+func (s *BdStore) ListIndexed(ctx context.Context, query ListQuery) (IndexedListResult, error) {
+	if s == nil || s.indexedReader == nil {
+		return IndexedListResult{}, ErrIndexedListUnsupported
+	}
+	return s.indexedReader.ListIndexed(ctx, query)
+}
+
+// CountIndexed exposes the optional read-only indexed count path without
+// falling back to the Beads CLI.
+func (s *BdStore) CountIndexed(ctx context.Context, query ListQuery) (int, error) {
+	if s == nil || s.indexedReader == nil {
+		return 0, ErrIndexedListUnsupported
+	}
+	counter, ok := s.indexedReader.(IndexedCounter)
+	if !ok {
+		return 0, ErrIndexedListUnsupported
+	}
+	return counter.CountIndexed(ctx, query)
+}
+
+// RuntimeList serves hot runtime reads through the indexed reader only. It
+// deliberately does not fall through to bd list/query when indexed coverage is
+// unavailable.
+func (s *BdStore) RuntimeList(ctx context.Context, query ListQuery, policy ReadPolicy) ([]Bead, error) {
+	policy = normalizeReadPolicy(policy)
+	if policy.AllowFallback {
+		return s.List(query)
+	}
+	if !query.HasFilter() && !query.AllowScan {
+		return nil, fmt.Errorf("runtime list: %w", ErrQueryRequiresScan)
+	}
+	if policy.MaxRows > 0 && query.Limit <= 0 {
+		query.Limit = policy.MaxRows
+	}
+	readCtx, cancel := contextWithReadPolicy(ctx, policy)
+	defer cancel()
+	result, err := s.ListIndexed(readCtx, query)
+	if err != nil {
+		return result.Beads, degradedRead(policy, "list", "indexed", "", err)
+	}
+	if !result.DependencyCoverage {
+		return result.Beads, degradedRead(policy, "list", "indexed", "dependency-incomplete", ErrIndexedListUnsupported)
+	}
+	if !result.LabelsCoverage {
+		return result.Beads, degradedRead(policy, "list", "indexed", "labels-incomplete", ErrIndexedListUnsupported)
+	}
+	items := applyListQuery(result.Beads, query)
+	return enforceRuntimeRowCap(items, policy, "list", "indexed")
+}
+
+// RuntimeReady has no safe direct BdStore implementation because bd ready is a
+// hydrated CLI command and indexed ready requires complete active-state
+// coverage. Controller hot paths should use CachingStore.RuntimeReady.
+func (s *BdStore) RuntimeReady(_ context.Context, query ReadyQuery, policy ReadPolicy) ([]Bead, error) {
+	policy = normalizeReadPolicy(policy)
+	if policy.AllowFallback {
+		return readyWithQuery(s, query)
+	}
+	return nil, degradedRead(policy, "ready", "indexed", "", ErrIndexedListUnsupported)
 }
 
 // IDPrefix returns the bead ID prefix owned by this store, without trailing "-".

@@ -70,7 +70,7 @@ type taskWorkDirLiveListCountingStore struct {
 }
 
 func (s *taskWorkDirLiveListCountingStore) List(query beads.ListQuery) ([]beads.Bead, error) {
-	if query.Live && query.Status == "in_progress" && query.Assignee != "" {
+	if query.Status == "in_progress" && query.Assignee != "" {
 		s.liveInProgressAssigneeLists++
 	}
 	return s.Store.List(query)

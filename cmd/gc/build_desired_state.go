@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -52,6 +53,11 @@ type DesiredStateResult struct {
 	// direct assignee demand (Assignee == identity). The reconciler merges this
 	// into poolDesired so that on-demand named sessions remain config-eligible.
 	NamedSessionDemand map[string]bool
+	// NamedSessionWispDemand records the patrol wisp that produced
+	// NamedSessionDemand for an on-demand named session. The reconciler uses
+	// this only to re-fire an already-live idle named session; generic assigned
+	// work, pool demand, and order dispatch must not consume it.
+	NamedSessionWispDemand map[string]NamedSessionWispDemandSource
 	// StoreQueryPartial is true when one or more bead store work queries
 	// failed. When set, the reconciler must NOT drain sessions based on the
 	// incomplete desired state — a transient failure would cause running
@@ -63,6 +69,26 @@ type DesiredStateResult struct {
 	// orphaned.
 	SessionQueryPartial bool
 	BeaconTime          time.Time
+}
+
+type NamedSessionWispDemandSource struct {
+	WispID    string
+	StoreRef  string
+	Status    string
+	CreatedAt time.Time
+}
+
+func (s NamedSessionWispDemandSource) ReferenceID() string {
+	if strings.TrimSpace(s.WispID) == "" {
+		return ""
+	}
+	storeRef := strings.TrimSpace(s.StoreRef)
+	if storeRef == "" {
+		storeRef = "city"
+	} else {
+		storeRef = "rig:" + storeRef
+	}
+	return storeRef + ":" + strings.TrimSpace(s.WispID)
 }
 
 func (r DesiredStateResult) snapshotQueryPartial() bool {
@@ -83,6 +109,12 @@ type defaultScaleCheckTarget struct {
 	store    beads.Store
 	err      error
 }
+
+const (
+	namedSessionWispWakeProbeLimit  = 25
+	namedSessionWispWakeReadBudget  = 250 * time.Millisecond
+	namedSessionWispWakeTotalBudget = time.Second
+)
 
 var errPoolSessionCreateBudgetExhausted = errors.New("pool session create budget exhausted")
 
@@ -580,6 +612,17 @@ func buildDesiredStateWithSessionBeads(
 			break
 		}
 	}
+	var namedWispDemand map[string]NamedSessionWispDemandSource
+	if store != nil && len(namedSpecs) > 0 {
+		wispDemand, wispPartial := namedSessionPatrolWispWakeDemand(cityPath, cfg, store, rigStores, namedSpecs, namedWorkReady, stderr)
+		if wispPartial {
+			storePartial = true
+		}
+		for identity := range wispDemand {
+			namedWorkReady[identity] = true
+		}
+		namedWispDemand = wispDemand
+	}
 	if len(assignedWorkBeads) > 0 {
 		fmt.Fprintf(stderr, "namedWorkReady: %d assigned beads, %d named specs, ready=%v\n", len(assignedWorkBeads), len(namedSpecs), namedWorkReady) //nolint:errcheck
 	}
@@ -644,6 +687,7 @@ func buildDesiredStateWithSessionBeads(
 		AssignedWorkStores:              assignedWorkStores,
 		AssignedWorkStoreRefs:           assignedWorkStoreRefs,
 		NamedSessionDemand:              namedWorkReady,
+		NamedSessionWispDemand:          namedWispDemand,
 		StoreQueryPartial:               storePartial,
 		BeaconTime:                      beaconTime,
 	}
@@ -848,6 +892,155 @@ func collectAssignedWorkBeadsWithStores(
 		}
 	}
 	return result, resultStores, resultStoreRefs, partial
+}
+
+func namedSessionPatrolWispWakeDemand(
+	cityPath string,
+	cfg *config.City,
+	cityStore beads.Store,
+	rigStores map[string]beads.Store,
+	namedSpecs map[string]namedSessionSpec,
+	alreadyReady map[string]bool,
+	stderr io.Writer,
+) (map[string]NamedSessionWispDemandSource, bool) {
+	if cfg == nil || cityStore == nil || len(namedSpecs) == 0 {
+		return nil, false
+	}
+	identities := make([]string, 0, len(namedSpecs))
+	for identity := range namedSpecs {
+		identities = append(identities, identity)
+	}
+	sort.Strings(identities)
+
+	var partial bool
+	demand := make(map[string]NamedSessionWispDemandSource)
+	probeCtx, cancel := context.WithTimeout(context.Background(), namedSessionWispWakeTotalBudget)
+	defer cancel()
+	readPolicy := beads.RuntimeReadPolicy(beads.ReadClassHotDegradedOK, "controller.named-session.wisp-wake")
+	readPolicy.Timeout = namedSessionWispWakeReadBudget
+	for _, identity := range identities {
+		if err := probeCtx.Err(); err != nil {
+			partial = true
+			log.Printf("namedWispWake: aggregate probe budget exhausted before assignee=%q: %v", identity, err)
+			break
+		}
+		spec := namedSpecs[identity]
+		if spec.Mode != "on_demand" || alreadyReady[identity] {
+			continue
+		}
+		store, storeRef, ok := namedSessionWispWakeStore(cityPath, cfg, cityStore, rigStores, spec)
+		if !ok {
+			partial = true
+			fmt.Fprintf(stderr, "namedWispWake: %s reachable store %q unavailable\n", identity, storeRef) //nolint:errcheck
+			continue
+		}
+		var selected NamedSessionWispDemandSource
+		var selectedOK bool
+		for _, status := range []string{"in_progress", "open"} {
+			if err := probeCtx.Err(); err != nil {
+				partial = true
+				log.Printf("namedWispWake: aggregate probe budget exhausted for assignee=%q status=%s: %v", identity, status, err)
+				break
+			}
+			rows, err := beads.RuntimeList(probeCtx, store, beads.ListQuery{
+				Status:     status,
+				Assignee:   identity,
+				Limit:      namedSessionWispWakeProbeLimit,
+				TierMode:   beads.TierWisps,
+				SkipLabels: true,
+			}, readPolicy)
+			if err != nil {
+				partial = true
+				log.Printf("namedWispWake: degraded runtime read status=%s assignee=%q store=%q: %v", status, identity, storeRef, err)
+				continue
+			}
+			for _, row := range rows {
+				if !isPatrolWispWakeCandidate(row) {
+					continue
+				}
+				candidate := NamedSessionWispDemandSource{
+					WispID:    row.ID,
+					StoreRef:  storeRef,
+					Status:    row.Status,
+					CreatedAt: row.CreatedAt,
+				}
+				if namedSessionWispDemandSourceNewer(candidate, selected, selectedOK) {
+					selected = candidate
+					selectedOK = true
+				}
+			}
+		}
+		if selectedOK {
+			fmt.Fprintf(stderr, "namedWispWake: %s matched by wisp %s (store=%s status=%s)\n", identity, selected.WispID, selected.StoreRef, selected.Status) //nolint:errcheck
+			demand[identity] = selected
+		}
+	}
+	if len(demand) == 0 {
+		return nil, partial
+	}
+	return demand, partial
+}
+
+func namedSessionWispDemandSourceNewer(candidate, current NamedSessionWispDemandSource, currentOK bool) bool {
+	if !currentOK {
+		return true
+	}
+	if candidate.CreatedAt.After(current.CreatedAt) {
+		return true
+	}
+	if candidate.CreatedAt.Equal(current.CreatedAt) {
+		return candidate.ReferenceID() > current.ReferenceID()
+	}
+	return false
+}
+
+func namedSessionWispWakeStore(
+	cityPath string,
+	cfg *config.City,
+	cityStore beads.Store,
+	rigStores map[string]beads.Store,
+	spec namedSessionSpec,
+) (beads.Store, string, bool) {
+	storeRef := assignedWorkStoreRefForAgent(cityPath, cfg, spec.Agent)
+	if storeRef == "" {
+		return cityStore, "", cityStore != nil
+	}
+	if rigStores == nil {
+		return nil, storeRef, false
+	}
+	store := rigStores[storeRef]
+	return store, storeRef, store != nil
+}
+
+func isPatrolWispWakeCandidate(bead beads.Bead) bool {
+	if !bead.Ephemeral {
+		return false
+	}
+	if bead.Status != "open" && bead.Status != "in_progress" {
+		return false
+	}
+	values := []string{
+		bead.Title,
+		bead.Ref,
+		bead.Metadata["formula"],
+		bead.Metadata["gc.formula"],
+		bead.Metadata["wisp_type"],
+		bead.Metadata["gc.wisp_type"],
+	}
+	for _, value := range values {
+		if isPatrolFormulaSignal(value) {
+			return true
+		}
+	}
+	return false
+}
+
+func isPatrolFormulaSignal(value string) bool {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return false
+	}
+	return value == "patrol" || strings.HasSuffix(value, "-patrol") || strings.HasSuffix(value, ".patrol")
 }
 
 func assignedWorkReadyLimit(cfg *config.City) int {
@@ -1061,19 +1254,13 @@ func defaultScaleCheckCounts(targets []defaultScaleCheckTarget) (map[string]int,
 		// unassigned + matching-routed_to checks apply below as for the
 		// Ready source.
 		//
-		// Live: true skips the CachingStore in-memory snapshot and reads
-		// the backing store directly. The cache populates from PrimeActive
-		// at supervisor startup and is maintained by the event stream, but
-		// gc order run is a sibling subprocess so the cache lag would
-		// otherwise stretch demand observation by an unbounded number of
-		// reconcile ticks. Mirrors openSessionBeadExists in
-		// adoption_barrier.go, which uses Live: true for the same
-		// cross-process freshness reason.
-		demand, demandErr := group.store.List(beads.ListQuery{
+		// RuntimeList uses the bounded hot-read contract. It can use cache or
+		// indexed coverage, but it must not fall through to hydrated CLI listing
+		// from the controller tick.
+		demand, demandErr := beads.RuntimeList(context.Background(), group.store, beads.ListQuery{
 			Status:   "open",
 			Metadata: poolDemandMetadataPair(),
-			Live:     true,
-		})
+		}, beads.RuntimeReadPolicy(beads.ReadClassHotDegradedOK, "controller.default-scale.pool-demand"))
 		if demandErr != nil {
 			errs = append(errs, fmt.Errorf("default scale_check %s templates=%s: List(%s): %w", key, strings.Join(sortedStringSet(group.templates), ","), poolDemandMetadataKey, demandErr))
 			partialTemplates = markScaleCheckPartialSet(partialTemplates, group.templates)
@@ -1307,22 +1494,16 @@ func sortedStringSet(values map[string]struct{}) []string {
 }
 
 func listForControllerDemand(store beads.Store, query beads.ListQuery) ([]beads.Bead, error) {
-	if _, ok := store.(interface {
-		CachedList(beads.ListQuery) ([]beads.Bead, bool)
-	}); ok {
-		cacheQuery := query
-		cacheQuery.Live = false
-		return store.List(cacheQuery)
-	}
-	liveQuery := query
-	liveQuery.Live = true
-	return store.List(liveQuery)
+	query.Live = false
+	return beads.RuntimeList(context.Background(), store, query,
+		beads.RuntimeReadPolicy(beads.ReadClassHotDegradedOK, "controller.demand.list"))
 }
 
 func readyForControllerDemand(store beads.Store) ([]beads.Bead, error) {
 	// Controller demand reads are intentionally cache-tolerant, not
-	// authoritative lifecycle gates; CachedReady falls back whenever the cache
-	// has dirty or unknown dependency coverage.
+	// authoritative lifecycle gates. CachedReady answers only when the cache
+	// has known dependency coverage; otherwise RuntimeReady reports a degraded
+	// hot read instead of invoking the hydrated ready path from the tick.
 	if cached, ok := store.(interface {
 		CachedReady() ([]beads.Bead, bool)
 	}); ok {
@@ -1330,7 +1511,8 @@ func readyForControllerDemand(store beads.Store) ([]beads.Bead, error) {
 			return ready, nil
 		}
 	}
-	return beads.ReadyLive(store)
+	return beads.RuntimeReady(context.Background(), store, beads.ReadyQuery{},
+		beads.RuntimeReadPolicy(beads.ReadClassHotDegradedOK, "controller.demand.ready"))
 }
 
 func readyForControllerDemandQuery(store beads.Store, query beads.ReadyQuery) ([]beads.Bead, error) {
@@ -1341,7 +1523,8 @@ func readyForControllerDemandQuery(store beads.Store, query beads.ReadyQuery) ([
 			return filterReadyForControllerDemand(ready, query), nil
 		}
 	}
-	return store.Ready(query)
+	return beads.RuntimeReady(context.Background(), store, query,
+		beads.RuntimeReadPolicy(beads.ReadClassHotDegradedOK, "controller.demand.ready"))
 }
 
 func filterReadyForControllerDemand(ready []beads.Bead, query beads.ReadyQuery) []beads.Bead {

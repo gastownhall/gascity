@@ -901,6 +901,7 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 		sigCtx, cityPath, open, ds, cfgNames, cfg, sp, oneShotStore,
 		nil, awakeAssignedWorkBeads, rigStores, nil, dt, poolDesired,
 		dsResult.NamedSessionDemand,
+		dsResult.NamedSessionWispDemand,
 		dsResult.snapshotQueryPartial(),
 		nil, cityName,
 		nil, clock.Real{}, recorder, cfg.Session.StartupTimeoutDuration(), 0,

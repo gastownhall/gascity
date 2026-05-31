@@ -29,12 +29,187 @@ import (
 	"github.com/gastownhall/gascity/internal/telemetry"
 )
 
-const maxIdleSleepProbesPerTick = 3
+const (
+	maxIdleSleepProbesPerTick = 3
+
+	namedSessionPatrolWispNudgeSource        = "patrol-wisp"
+	namedSessionPatrolWispNudgeMessage       = "Patrol wisp is ready. Run gc hook to continue the assigned patrol iteration."
+	namedSessionPatrolWispNudgeRefMetadata   = "last_patrol_wisp_nudge_ref"
+	namedSessionPatrolWispNudgeEpochMetadata = "last_patrol_wisp_nudge_epoch"
+	namedSessionPatrolWispNudgeAtMetadata    = "last_patrol_wisp_nudge_at"
+)
 
 type wakeTarget struct {
 	session *beads.Bead
 	tp      TemplateParams
 	alive   bool
+}
+
+func maybeQueueNamedSessionPatrolWispNudge(
+	cityPath string,
+	store beads.Store,
+	sp runtime.Provider,
+	cfg *config.City,
+	target wakeTarget,
+	source NamedSessionWispDemandSource,
+	now time.Time,
+	stderr io.Writer,
+) {
+	if cityPath == "" || store == nil || sp == nil || target.session == nil {
+		return
+	}
+	if stderr == nil {
+		stderr = io.Discard
+	}
+	refID := source.ReferenceID()
+	if refID == "" {
+		return
+	}
+	targetNudge := resolveNudgeTargetFromSessionBead(cityPath, cfg, *target.session)
+	continuationEpoch := strings.TrimSpace(targetNudge.continuationEpoch)
+	if err := supersedeStaleNamedSessionPatrolWispNudges(cityPath, store, targetNudge, refID, now); err != nil {
+		fmt.Fprintf(stderr, "session reconciler: superseding stale patrol-wisp nudges for %s from %s: %v\n", targetNudge.agentKey(), refID, err) //nolint:errcheck
+	}
+	if queued, err := namedSessionPatrolWispNudgeQueued(cityPath, targetNudge, refID, now); err != nil {
+		fmt.Fprintf(stderr, "session reconciler: checking queued patrol-wisp nudge for %s from %s: %v\n", targetNudge.agentKey(), refID, err) //nolint:errcheck
+	} else if queued {
+		return
+	}
+	item := newQueuedNudgeWithOptions(
+		targetNudge.agentKey(),
+		namedSessionPatrolWispNudgeMessage,
+		namedSessionPatrolWispNudgeSource,
+		now,
+		queuedNudgeOptions{
+			SessionID:         targetNudge.sessionID,
+			ContinuationEpoch: targetNudge.continuationEpoch,
+			Reference:         &nudgeReference{Kind: namedSessionPatrolWispNudgeSource, ID: refID},
+		},
+	)
+	if err := enqueueQueuedNudgeWithStore(cityPath, store, item); err != nil {
+		fmt.Fprintf(stderr, "session reconciler: queueing patrol-wisp nudge for %s from %s: %v\n", targetNudge.agentKey(), refID, err) //nolint:errcheck
+		return
+	}
+	batch := map[string]string{
+		namedSessionPatrolWispNudgeRefMetadata:   refID,
+		namedSessionPatrolWispNudgeEpochMetadata: continuationEpoch,
+		namedSessionPatrolWispNudgeAtMetadata:    now.UTC().Format(time.RFC3339),
+	}
+	if err := store.SetMetadataBatch(target.session.ID, batch); err != nil {
+		fmt.Fprintf(stderr, "session reconciler: stamping patrol-wisp nudge for %s from %s: %v\n", targetNudge.agentKey(), refID, err) //nolint:errcheck
+		return
+	}
+	if target.session.Metadata == nil {
+		target.session.Metadata = make(map[string]string, len(batch))
+	}
+	for key, value := range batch {
+		target.session.Metadata[key] = value
+	}
+	maybeStartNudgePoller(targetNudge)
+}
+
+func namedSessionPatrolWispNudgeQueued(cityPath string, target nudgeTarget, refID string, now time.Time) (bool, error) {
+	pending, inFlight, _, err := listQueuedNudgesForTarget(cityPath, target, now)
+	if err != nil {
+		return false, err
+	}
+	for _, item := range pending {
+		if queuedPatrolWispNudgeMatchesTarget(item, target, refID) {
+			return true, nil
+		}
+	}
+	for _, item := range inFlight {
+		if queuedPatrolWispNudgeMatchesTarget(item, target, refID) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func supersedeStaleNamedSessionPatrolWispNudges(cityPath string, store beads.Store, target nudgeTarget, refID string, now time.Time) error {
+	if cityPath == "" || refID == "" {
+		return nil
+	}
+	if store == nil {
+		store = openNudgeBeadStore(cityPath)
+	}
+	return withNudgeQueueState(cityPath, func(state *nudgeQueueState) error {
+		if err := recoverExpiredInFlightNudges(state, store, now); err != nil {
+			return err
+		}
+		if err := pruneExpiredQueuedNudges(state, store, now); err != nil {
+			return err
+		}
+		if err := pruneDeadQueuedNudges(state, store, now); err != nil {
+			return err
+		}
+		pending := state.Pending[:0]
+		for _, item := range state.Pending {
+			if stalePatrolWispNudgeMatchesTarget(item, target, refID) {
+				if err := markQueuedNudgeSuperseded(store, &state.Dead, item, now); err != nil {
+					return err
+				}
+				continue
+			}
+			pending = append(pending, item)
+		}
+		state.Pending = pending
+		inFlight := state.InFlight[:0]
+		for _, item := range state.InFlight {
+			if stalePatrolWispNudgeMatchesTarget(item, target, refID) {
+				if err := markQueuedNudgeSuperseded(store, &state.Dead, item, now); err != nil {
+					return err
+				}
+				continue
+			}
+			inFlight = append(inFlight, item)
+		}
+		state.InFlight = inFlight
+		sortQueuedNudges(state)
+		return nil
+	})
+}
+
+func markQueuedNudgeSuperseded(store beads.Store, dead *[]queuedNudge, item queuedNudge, now time.Time) error {
+	item.DeadAt = now.UTC()
+	item.LastError = "superseded"
+	*dead = append(*dead, item)
+	return markQueuedNudgeTerminal(store, item, "superseded", "superseded", "", now)
+}
+
+func stalePatrolWispNudgeMatchesTarget(item queuedNudge, target nudgeTarget, currentRefID string) bool {
+	if item.Source != namedSessionPatrolWispNudgeSource || item.Reference == nil {
+		return false
+	}
+	if item.Reference.Kind != namedSessionPatrolWispNudgeSource || item.Reference.ID == "" || item.Reference.ID == currentRefID {
+		return false
+	}
+	if !target.matchesQueueAgent(item.Agent) {
+		return false
+	}
+	if item.SessionID != "" && target.sessionID != "" && item.SessionID != target.sessionID {
+		return false
+	}
+	if item.ContinuationEpoch != "" && target.continuationEpoch != "" && item.ContinuationEpoch != target.continuationEpoch {
+		return false
+	}
+	return true
+}
+
+func queuedPatrolWispNudgeMatchesTarget(item queuedNudge, target nudgeTarget, refID string) bool {
+	if item.Source != namedSessionPatrolWispNudgeSource || item.Reference == nil {
+		return false
+	}
+	if item.Reference.Kind != namedSessionPatrolWispNudgeSource || item.Reference.ID != refID {
+		return false
+	}
+	if item.SessionID != "" && target.sessionID != "" && item.SessionID != target.sessionID {
+		return false
+	}
+	if item.ContinuationEpoch != "" && target.continuationEpoch != "" && item.ContinuationEpoch != target.continuationEpoch {
+		return false
+	}
+	return true
 }
 
 func lifecycleTimerBlocker(metadata map[string]string, now time.Time) string {
@@ -723,7 +898,7 @@ func reconcileSessionBeadsAtPath(
 ) int {
 	return reconcileSessionBeadsAtPathWithNamedDemand(
 		ctx, cityPath, sessions, desiredState, configuredNames, cfg, sp, store, dops, assignedWorkBeads, rigStores, readyWaitSet, dt,
-		poolDesired, nil, storeQueryPartial, workSet, cityName, it, clk, rec, startupTimeout, driftDrainTimeout, stdout, stderr,
+		poolDesired, nil, nil, storeQueryPartial, workSet, cityName, it, clk, rec, startupTimeout, driftDrainTimeout, stdout, stderr,
 	)
 }
 
@@ -743,6 +918,7 @@ func reconcileSessionBeadsAtPathWithNamedDemand(
 	dt *drainTracker,
 	poolDesired map[string]int,
 	namedSessionDemand map[string]bool,
+	namedSessionWispDemand map[string]NamedSessionWispDemandSource,
 	storeQueryPartial bool,
 	workSet map[string]bool,
 	cityName string,
@@ -755,7 +931,7 @@ func reconcileSessionBeadsAtPathWithNamedDemand(
 ) int {
 	return reconcileSessionBeadsTracedWithNamedDemand(
 		ctx, cityPath, sessions, desiredState, configuredNames, cfg, sp, store, dops, assignedWorkBeads, rigStores, readyWaitSet, dt,
-		poolDesired, namedSessionDemand, storeQueryPartial, workSet, cityName, it, clk, rec, startupTimeout, driftDrainTimeout, stdout, stderr, nil,
+		poolDesired, namedSessionDemand, namedSessionWispDemand, storeQueryPartial, workSet, cityName, it, clk, rec, startupTimeout, driftDrainTimeout, stdout, stderr, nil,
 	)
 }
 
@@ -788,7 +964,7 @@ func reconcileSessionBeadsTraced(
 ) int {
 	return reconcileSessionBeadsTracedWithNamedDemand(
 		ctx, cityPath, sessions, desiredState, configuredNames, cfg, sp, store, dops, assignedWorkBeads, rigStores, readyWaitSet, dt,
-		poolDesired, nil, storeQueryPartial, workSet, cityName, it, clk, rec, startupTimeout, driftDrainTimeout, stdout, stderr, trace,
+		poolDesired, nil, nil, storeQueryPartial, workSet, cityName, it, clk, rec, startupTimeout, driftDrainTimeout, stdout, stderr, trace,
 		startOptions...,
 	)
 }
@@ -809,6 +985,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 	dt *drainTracker,
 	poolDesired map[string]int,
 	namedSessionDemand map[string]bool,
+	namedSessionWispDemand map[string]NamedSessionWispDemandSource,
 	storeQueryPartial bool,
 	workSet map[string]bool,
 	cityName string,
@@ -2093,6 +2270,15 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				_ = store.SetMetadata(target.session.ID, "sleep_intent", "")
 				target.session.Metadata["sleep_intent"] = ""
 			}
+			if decision.Reason == "named-demand" && len(namedSessionWispDemand) > 0 {
+				identity := namedSessionIdentity(*target.session)
+				if identity == "" {
+					identity = strings.TrimSpace(target.tp.ConfiguredNamedIdentity)
+				}
+				if source, ok := namedSessionWispDemand[identity]; ok {
+					maybeQueueNamedSessionPatrolWispNudge(cityPath, store, sp, cfg, target, source, clk.Now(), stderr)
+				}
+			}
 		}
 
 		if !shouldWake && target.alive {
@@ -2414,7 +2600,8 @@ func firstOpenAssignedWorkBeadInStoreByIdentifiers(store beads.Store, identifier
 				continue
 			}
 			seen[key] = struct{}{}
-			items, err := store.List(beads.ListQuery{Assignee: assignee, Status: status, Live: true})
+			items, err := beads.RuntimeList(context.Background(), store, beads.ListQuery{Assignee: assignee, Status: status},
+				beads.RuntimeReadPolicy(beads.ReadClassHotAuthoritative, "session.reconcile.assigned-work"))
 			if err != nil {
 				return beads.Bead{}, false, err
 			}
@@ -2579,7 +2766,8 @@ func collectSessionAssignedWork(cityPath string, cfg *config.City, store beads.S
 				if assignee == "" {
 					continue
 				}
-				items, err := s.List(beads.ListQuery{Assignee: assignee, Status: status, Live: true})
+				items, err := beads.RuntimeList(context.Background(), s, beads.ListQuery{Assignee: assignee, Status: status},
+					beads.RuntimeReadPolicy(beads.ReadClassHotDegradedOK, "session.stranded.assigned-work"))
 				if err != nil {
 					return err
 				}
@@ -2668,7 +2856,8 @@ func sessionHasOpenAssignedWorkInStoreByIdentifiers(store beads.Store, identifie
 				continue
 			}
 			seen[key] = struct{}{}
-			items, err := store.List(beads.ListQuery{Assignee: assignee, Status: status, Live: true})
+			items, err := beads.RuntimeList(context.Background(), store, beads.ListQuery{Assignee: assignee, Status: status},
+				beads.RuntimeReadPolicy(beads.ReadClassHotAuthoritative, "session.reconcile.assigned-work"))
 			if err != nil {
 				return false, err
 			}
@@ -3233,12 +3422,11 @@ func resolveTaskWorkDir(store beads.Store, assignees ...string) string {
 			continue
 		}
 		seen[assignee] = true
-		assigned, err := store.List(beads.ListQuery{
+		assigned, err := beads.RuntimeList(context.Background(), store, beads.ListQuery{
 			Assignee: assignee,
 			Status:   "in_progress",
-			Live:     true,
 			Sort:     beads.SortCreatedDesc,
-		})
+		}, beads.RuntimeReadPolicy(beads.ReadClassHotDegradedOK, "session.reconcile.task-workdir"))
 		if err != nil {
 			continue
 		}

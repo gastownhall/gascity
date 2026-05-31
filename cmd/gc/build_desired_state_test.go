@@ -120,7 +120,7 @@ type demandListCountingStore struct {
 	beads.Store
 	liveInProgressLists int
 	liveOpenMolecules   int
-	livePoolDemand      int
+	poolDemandLists     int
 }
 
 func (s *demandListCountingStore) List(query beads.ListQuery) ([]beads.Bead, error) {
@@ -130,10 +130,53 @@ func (s *demandListCountingStore) List(query beads.ListQuery) ([]beads.Bead, err
 	if query.Live && query.Status == "open" && query.Type == "molecule" {
 		s.liveOpenMolecules++
 	}
-	if query.Live && query.Status == "open" && query.Metadata[poolDemandMetadataKey] == poolDemandMetadataValue {
-		s.livePoolDemand++
+	if query.Status == "open" && query.Metadata[poolDemandMetadataKey] == poolDemandMetadataValue {
+		s.poolDemandLists++
 	}
 	return s.Store.List(query)
+}
+
+type runtimeDemandCountingStore struct {
+	*beads.CachingStore
+	poolDemandRuntimeLists int
+}
+
+func (s *runtimeDemandCountingStore) RuntimeList(ctx context.Context, query beads.ListQuery, policy beads.ReadPolicy) ([]beads.Bead, error) {
+	if query.Status == "open" && query.Metadata[poolDemandMetadataKey] == poolDemandMetadataValue {
+		s.poolDemandRuntimeLists++
+	}
+	return s.CachingStore.RuntimeList(ctx, query, policy)
+}
+
+type demandTierRecordingStore struct {
+	*beads.MemStore
+	mu              sync.Mutex
+	wispTierLists   int
+	wispTierQueries []beads.ListQuery
+}
+
+func (s *demandTierRecordingStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	if query.TierMode == beads.TierWisps {
+		s.mu.Lock()
+		s.wispTierLists++
+		s.wispTierQueries = append(s.wispTierQueries, query)
+		s.mu.Unlock()
+	}
+	return s.MemStore.List(query)
+}
+
+func (s *demandTierRecordingStore) WispTierLists() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.wispTierLists
+}
+
+func (s *demandTierRecordingStore) WispTierQueries() []beads.ListQuery {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]beads.ListQuery, len(s.wispTierQueries))
+	copy(out, s.wispTierQueries)
+	return out
 }
 
 type demandRefreshFailStore struct {
@@ -191,7 +234,7 @@ func (s *partialAssignedWorkStore) List(query beads.ListQuery) ([]beads.Bead, er
 	if err != nil {
 		return nil, err
 	}
-	if s.partialInProgress && query.Status == "in_progress" && query.Live {
+	if s.partialInProgress && query.Status == "in_progress" {
 		return rows, &beads.PartialResultError{Op: "bd list", Err: errors.New("skipped corrupt in-progress bead")}
 	}
 	return rows, nil
@@ -326,6 +369,45 @@ func TestCollectAssignedWorkBeadsFallsBackLiveWhenCachedInProgressDirty(t *testi
 	}
 	if backing.liveInProgressLists != 1 {
 		t.Fatalf("live in_progress list calls = %d, want dirty cache fallback", backing.liveInProgressLists)
+	}
+}
+
+func TestCollectAssignedWorkBeadsDoesNotReadWispTierForDemand(t *testing.T) {
+	store := &demandTierRecordingStore{MemStore: beads.NewMemStore()}
+	work, err := store.Create(beads.Bead{
+		Title:    "active handoff",
+		Type:     "task",
+		Status:   "in_progress",
+		Assignee: "repo/refinery",
+	})
+	if err != nil {
+		t.Fatalf("create active bead: %v", err)
+	}
+	if _, err := store.Create(beads.Bead{
+		Title:     "refinery patrol",
+		Type:      "molecule",
+		Status:    "in_progress",
+		Assignee:  "repo/refinery",
+		Ephemeral: true,
+	}); err != nil {
+		t.Fatalf("create ephemeral wisp: %v", err)
+	}
+
+	got, partial := collectAssignedWorkBeads(&config.City{
+		NamedSessions: []config.NamedSession{{
+			Template: "refinery",
+			Dir:      "repo",
+			Mode:     "on_demand",
+		}},
+	}, store)
+	if partial {
+		t.Fatal("collectAssignedWorkBeads reported partial results")
+	}
+	if store.WispTierLists() != 0 {
+		t.Fatalf("wisp-tier demand list calls = %d, want 0", store.WispTierLists())
+	}
+	if len(got) != 1 || got[0].ID != work.ID {
+		t.Fatalf("collectAssignedWorkBeads returned %#v, want only issue-tier work %s", got, work.ID)
 	}
 }
 
@@ -535,11 +617,11 @@ func TestDefaultScaleCheckCountsIgnoresOpenMoleculeContainers(t *testing.T) {
 // Regression for https://github.com/gastownhall/gascity/pull/2531
 // → https://github.com/gastownhall/gascity/pull/2556.
 //
-// Also asserts the Live: true cache-bypass behavior is load-bearing:
-// the demandListCountingStore's livePoolDemand counter must increment,
-// proving defaultScaleCheckCounts goes through to the backing store
-// rather than the CachingStore snapshot (which can lag for wisps
-// created by sibling subprocesses like gc order run).
+// Also asserts the runtime-list demand path is load-bearing: the
+// runtimeDemandCountingStore's counter must increment, proving
+// defaultScaleCheckCounts asks for the explicit gc.pool_demand metadata pair
+// rather than relying on Ready() to return workflow containers. A live cache
+// may satisfy that read without consulting the backing store.
 func TestDefaultScaleCheckCountsCountsCronPoolDemandViaMetadataFlag(t *testing.T) {
 	backing := &demandListCountingStore{Store: beads.NewMemStore()}
 	if _, err := backing.Create(beads.Bead{
@@ -554,11 +636,12 @@ func TestDefaultScaleCheckCountsCountsCronPoolDemandViaMetadataFlag(t *testing.T
 	if err := cache.PrimeActive(); err != nil {
 		t.Fatalf("PrimeActive: %v", err)
 	}
+	runtimeStore := &runtimeDemandCountingStore{CachingStore: cache}
 
 	counts, _, errs := defaultScaleCheckCounts([]defaultScaleCheckTarget{{
 		template: "dog",
 		storeKey: "city",
-		store:    cache,
+		store:    runtimeStore,
 	}})
 	if len(errs) != 0 {
 		t.Fatalf("defaultScaleCheckCounts errs = %v", errs)
@@ -566,8 +649,8 @@ func TestDefaultScaleCheckCountsCountsCronPoolDemandViaMetadataFlag(t *testing.T
 	if got := counts["dog"]; got != 1 {
 		t.Fatalf("defaultScaleCheckCounts[%q] = %d, want 1 (gc.pool_demand wisp must count as cron pool demand)", "dog", got)
 	}
-	if backing.livePoolDemand == 0 {
-		t.Fatalf("livePoolDemand list calls = 0, want >0 (defaultScaleCheckCounts must use Live: true to bypass the CachingStore snapshot, since cron pool orders fire from sibling subprocesses and the cache lags)")
+	if runtimeStore.poolDemandRuntimeLists == 0 {
+		t.Fatalf("poolDemandRuntimeLists = 0, want >0 (defaultScaleCheckCounts must query gc.pool_demand metadata through RuntimeList)")
 	}
 }
 
@@ -828,7 +911,7 @@ func TestDefaultScaleCheckCountsHonorsCachedWriteThroughDependencies(t *testing.
 	}
 }
 
-func TestDefaultScaleCheckCountsFallsBackWhenCachedEventDepsUnknown(t *testing.T) {
+func TestDefaultScaleCheckCountsDegradesWhenCachedEventDepsUnknown(t *testing.T) {
 	backing := &readyStaticStore{
 		Store: beads.NewMemStore(),
 		ready: []beads.Bead{{
@@ -852,14 +935,14 @@ func TestDefaultScaleCheckCountsFallsBackWhenCachedEventDepsUnknown(t *testing.T
 		storeKey: "rig:gascity",
 		store:    cache,
 	}})
-	if len(errs) != 0 {
-		t.Fatalf("defaultScaleCheckCounts errs = %v", errs)
+	if len(errs) == 0 {
+		t.Fatal("defaultScaleCheckCounts errs = nil, want degraded runtime ready error")
 	}
-	if got := counts["gascity/workflows.codex-max"]; got != 1 {
-		t.Fatalf("defaultScaleCheckCounts = %d, want live ready fallback count only", got)
+	if got := counts["gascity/workflows.codex-max"]; got != 0 {
+		t.Fatalf("defaultScaleCheckCounts = %d, want 0 when hot ready read degrades", got)
 	}
-	if backing.readyCalls != 1 {
-		t.Fatalf("backing Ready calls = %d, want one live ready fallback", backing.readyCalls)
+	if backing.readyCalls != 0 {
+		t.Fatalf("backing Ready calls = %d, want no hydrated ready fallback", backing.readyCalls)
 	}
 }
 
@@ -4668,6 +4751,541 @@ func TestBuildDesiredState_OnDemandNamedSession_DirectAssigneeMaterializes(t *te
 	}
 	if !found {
 		t.Fatal("direct assignee should materialize on-demand named session")
+	}
+}
+
+func TestBuildDesiredState_OnDemandNamedSession_PatrolWispMaterializesNamedSessionOnly(t *testing.T) {
+	cityPath := t.TempDir()
+	rigPath := filepath.Join(cityPath, "riga")
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatalf("create rig dir: %v", err)
+	}
+	cityStore := &demandTierRecordingStore{MemStore: beads.NewMemStore()}
+	rigStore := &demandTierRecordingStore{MemStore: beads.NewMemStore()}
+	wisp, err := rigStore.Create(beads.Bead{
+		Title:     "refinery patrol",
+		Type:      "task",
+		Status:    "in_progress",
+		Assignee:  "riga/refinery",
+		Ref:       "mol-refinery-patrol",
+		Ephemeral: true,
+		Metadata: map[string]string{
+			"formula": "mol-refinery-patrol",
+			"gc.kind": "wisp",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create patrol wisp: %v", err)
+	}
+	inProgress := "in_progress"
+	assignee := "riga/refinery"
+	if err := rigStore.Update(wisp.ID, beads.UpdateOpts{Status: &inProgress, Assignee: &assignee}); err != nil {
+		t.Fatalf("mark patrol wisp in progress: %v", err)
+	}
+	wisp, err = rigStore.Get(wisp.ID)
+	if err != nil {
+		t.Fatalf("get patrol wisp: %v", err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs:      []config.Rig{{Name: "riga", Path: rigPath}},
+		Agents: []config.Agent{{
+			Name:              "refinery",
+			Dir:               "riga",
+			StartCommand:      "true",
+			MaxActiveSessions: intPtr(1),
+			WorkQuery:         "printf ''",
+		}},
+		NamedSessions: []config.NamedSession{{
+			Template: "refinery",
+			Dir:      "riga",
+			Mode:     "on_demand",
+		}},
+	}
+
+	dsResult := buildDesiredStateWithSessionBeads(
+		"test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(),
+		cityStore, map[string]beads.Store{"riga": rigStore}, nil, nil, io.Discard,
+	)
+	if !dsResult.NamedSessionDemand["riga/refinery"] {
+		t.Fatal("NamedSessionDemand[riga/refinery] = false for assigned patrol wisp")
+	}
+	source, ok := dsResult.NamedSessionWispDemand["riga/refinery"]
+	if !ok {
+		t.Fatal("NamedSessionWispDemand[riga/refinery] missing for assigned patrol wisp")
+	}
+	if source.WispID != wisp.ID || source.StoreRef != "riga" || source.Status != "in_progress" {
+		t.Fatalf("NamedSessionWispDemand[riga/refinery] = %+v, want wisp=%s store=riga status=in_progress", source, wisp.ID)
+	}
+	if got := source.ReferenceID(); got != "rig:riga:"+wisp.ID {
+		t.Fatalf("NamedSessionWispDemand reference = %q, want %q", got, "rig:riga:"+wisp.ID)
+	}
+	var refineryEntries []TemplateParams
+	for _, tp := range dsResult.State {
+		if tp.ConfiguredNamedIdentity == "riga/refinery" || tp.TemplateName == "riga/refinery" {
+			refineryEntries = append(refineryEntries, tp)
+		}
+	}
+	if len(refineryEntries) != 1 {
+		t.Fatalf("refinery desired entries = %d, want exactly one named session: %+v", len(refineryEntries), refineryEntries)
+	}
+	for _, bead := range dsResult.AssignedWorkBeads {
+		if bead.ID == wisp.ID {
+			t.Fatalf("assigned patrol wisp %s leaked into AssignedWorkBeads: %+v", wisp.ID, dsResult.AssignedWorkBeads)
+		}
+	}
+	if got := dsResult.ScaleCheckCounts["riga/refinery"]; got != 0 {
+		t.Fatalf("ScaleCheckCounts[riga/refinery] = %d, want 0 for named-session wisp wake", got)
+	}
+	if cityStore.WispTierLists() != 0 {
+		t.Fatalf("city store wisp-tier probes = %d, want 0 for rig-scoped named session", cityStore.WispTierLists())
+	}
+	queries := rigStore.WispTierQueries()
+	if len(queries) == 0 {
+		t.Fatal("rig store wisp-tier probe did not run")
+	}
+	first := queries[0]
+	if first.Assignee != "riga/refinery" || first.Status != "in_progress" || first.Limit != namedSessionWispWakeProbeLimit || first.TierMode != beads.TierWisps {
+		t.Fatalf("first wisp probe query = %+v, want assignee/status-bounded TierWisps Limit=%d", first, namedSessionWispWakeProbeLimit)
+	}
+}
+
+func TestBuildDesiredState_OnDemandNamedSession_PatrolWispDemandSelectsNewestCandidate(t *testing.T) {
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+	oldWisp, err := store.Create(beads.Bead{
+		Title:     "mol-refinery-patrol",
+		Assignee:  "refinery",
+		Ref:       "mol-refinery-patrol",
+		Ephemeral: true,
+		Metadata: map[string]string{
+			"formula": "mol-refinery-patrol",
+			"gc.kind": "wisp",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create old patrol wisp: %v", err)
+	}
+	inProgress := "in_progress"
+	if err := store.Update(oldWisp.ID, beads.UpdateOpts{Status: &inProgress}); err != nil {
+		t.Fatalf("mark old patrol wisp in progress: %v", err)
+	}
+	time.Sleep(time.Millisecond)
+	newWisp, err := store.Create(beads.Bead{
+		Title:     "mol-refinery-patrol",
+		Assignee:  "refinery",
+		Ref:       "mol-refinery-patrol",
+		Ephemeral: true,
+		Metadata: map[string]string{
+			"formula": "mol-refinery-patrol",
+			"gc.kind": "wisp",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create new patrol wisp: %v", err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "refinery",
+			StartCommand:      "true",
+			MaxActiveSessions: intPtr(1),
+			WorkQuery:         "printf ''",
+		}},
+		NamedSessions: []config.NamedSession{{
+			Template: "refinery",
+			Mode:     "on_demand",
+		}},
+	}
+
+	spec, ok := findNamedSessionSpec(cfg, "test-city", "refinery")
+	if !ok {
+		t.Fatal("named session spec not found")
+	}
+	demand, partial := namedSessionPatrolWispWakeDemand(
+		cityPath, cfg, store, nil,
+		map[string]namedSessionSpec{"refinery": spec},
+		nil,
+		io.Discard,
+	)
+	if partial {
+		t.Fatal("partial = true, want false")
+	}
+	source, ok := demand["refinery"]
+	if !ok {
+		t.Fatal("wisp demand[refinery] missing")
+	}
+	if source.WispID != newWisp.ID || source.Status != "open" {
+		t.Fatalf("selected source = %+v, want newest open wisp %s over old in_progress %s", source, newWisp.ID, oldWisp.ID)
+	}
+}
+
+func TestBuildDesiredState_OnDemandNamedSession_PatrolWispProbeChecksBoundedPageAndTitle(t *testing.T) {
+	cityPath := t.TempDir()
+	store := &demandTierRecordingStore{MemStore: beads.NewMemStore()}
+	if _, err := store.Create(beads.Bead{
+		Title:     "mol-refinery-work",
+		Status:    "in_progress",
+		Assignee:  "refinery",
+		Ephemeral: true,
+	}); err != nil {
+		t.Fatalf("create non-patrol wisp: %v", err)
+	}
+	wisp, err := store.Create(beads.Bead{
+		Title:     "mol-refinery-patrol",
+		Status:    "in_progress",
+		Assignee:  "refinery",
+		Ephemeral: true,
+	})
+	if err != nil {
+		t.Fatalf("create title-only patrol wisp: %v", err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "refinery",
+			StartCommand:      "true",
+			MaxActiveSessions: intPtr(1),
+			WorkQuery:         "printf ''",
+		}},
+		NamedSessions: []config.NamedSession{{
+			Template: "refinery",
+			Mode:     "on_demand",
+		}},
+	}
+
+	var stderr bytes.Buffer
+	dsResult := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, &stderr)
+	if !dsResult.NamedSessionDemand["refinery"] {
+		t.Fatal("NamedSessionDemand[refinery] = false when patrol wisp follows a non-patrol wisp in the bounded page")
+	}
+	if !strings.Contains(stderr.String(), "matched by wisp "+wisp.ID) {
+		t.Fatalf("stderr did not show patrol wisp match for %s:\n%s", wisp.ID, stderr.String())
+	}
+	queries := store.WispTierQueries()
+	var sawInProgress bool
+	for _, query := range queries {
+		if query.Status == "in_progress" && query.Assignee == "refinery" && query.TierMode == beads.TierWisps {
+			sawInProgress = true
+			if query.Limit != namedSessionWispWakeProbeLimit {
+				t.Fatalf("wisp probe limit = %d, want %d", query.Limit, namedSessionWispWakeProbeLimit)
+			}
+		}
+	}
+	if !sawInProgress {
+		t.Fatalf("wisp probe queries = %+v, want in_progress query", queries)
+	}
+}
+
+func TestBuildDesiredState_OnDemandNamedSession_OpenPatrolWispMaterializes(t *testing.T) {
+	cityPath := t.TempDir()
+	store := &demandTierRecordingStore{MemStore: beads.NewMemStore()}
+	if _, err := store.Create(beads.Bead{
+		Title:     "mayor patrol",
+		Type:      "task",
+		Status:    "open",
+		Assignee:  "mayor",
+		Ref:       "mol-mayor-patrol",
+		Ephemeral: true,
+		Metadata: map[string]string{
+			"formula": "mol-mayor-patrol",
+			"gc.kind": "wisp",
+		},
+	}); err != nil {
+		t.Fatalf("create patrol wisp: %v", err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "mayor",
+			StartCommand:      "true",
+			MaxActiveSessions: intPtr(1),
+			WorkQuery:         "printf ''",
+		}},
+		NamedSessions: []config.NamedSession{{
+			Template: "mayor",
+			Mode:     "on_demand",
+		}},
+	}
+
+	dsResult := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, io.Discard)
+	if !dsResult.NamedSessionDemand["mayor"] {
+		t.Fatal("NamedSessionDemand[mayor] = false for open assigned patrol wisp")
+	}
+	queries := store.WispTierQueries()
+	if len(queries) != 2 {
+		t.Fatalf("wisp probe queries = %+v, want in_progress miss then open hit", queries)
+	}
+	if queries[0].Status != "in_progress" || queries[1].Status != "open" {
+		t.Fatalf("wisp probe statuses = %+v, want in_progress then open", queries)
+	}
+}
+
+func TestBuildDesiredState_OnDemandNamedSession_WispWakeRequiresMatchingAssigneeStoreAndPatrol(t *testing.T) {
+	tests := []struct {
+		name     string
+		storeRef string
+		assignee string
+		formula  string
+	}{
+		{
+			name:     "wrong assignee",
+			storeRef: "rig",
+			assignee: "riga/other",
+			formula:  "mol-refinery-patrol",
+		},
+		{
+			name:     "wrong store",
+			storeRef: "city",
+			assignee: "riga/refinery",
+			formula:  "mol-refinery-patrol",
+		},
+		{
+			name:     "non patrol formula",
+			storeRef: "rig",
+			assignee: "riga/refinery",
+			formula:  "mol-refinery-work",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cityPath := t.TempDir()
+			rigPath := filepath.Join(cityPath, "riga")
+			if err := os.MkdirAll(rigPath, 0o755); err != nil {
+				t.Fatalf("create rig dir: %v", err)
+			}
+			cityStore := &demandTierRecordingStore{MemStore: beads.NewMemStore()}
+			rigStore := &demandTierRecordingStore{MemStore: beads.NewMemStore()}
+			targetStore := rigStore
+			if tc.storeRef == "city" {
+				targetStore = cityStore
+			}
+			if _, err := targetStore.Create(beads.Bead{
+				Title:     "candidate wisp",
+				Type:      "task",
+				Status:    "in_progress",
+				Assignee:  tc.assignee,
+				Ref:       tc.formula,
+				Ephemeral: true,
+				Metadata: map[string]string{
+					"formula": tc.formula,
+					"gc.kind": "wisp",
+				},
+			}); err != nil {
+				t.Fatalf("create wisp: %v", err)
+			}
+			cfg := &config.City{
+				Workspace: config.Workspace{Name: "test-city"},
+				Rigs:      []config.Rig{{Name: "riga", Path: rigPath}},
+				Agents: []config.Agent{{
+					Name:              "refinery",
+					Dir:               "riga",
+					StartCommand:      "true",
+					MaxActiveSessions: intPtr(1),
+					WorkQuery:         "printf ''",
+				}},
+				NamedSessions: []config.NamedSession{{
+					Template: "refinery",
+					Dir:      "riga",
+					Mode:     "on_demand",
+				}},
+			}
+
+			dsResult := buildDesiredStateWithSessionBeads(
+				"test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(),
+				cityStore, map[string]beads.Store{"riga": rigStore}, nil, nil, io.Discard,
+			)
+			if dsResult.NamedSessionDemand["riga/refinery"] {
+				t.Fatalf("NamedSessionDemand[riga/refinery] = true for %s", tc.name)
+			}
+			for _, tp := range dsResult.State {
+				if tp.ConfiguredNamedIdentity == "riga/refinery" || tp.TemplateName == "riga/refinery" {
+					t.Fatalf("named session materialized for %s: %+v", tc.name, tp)
+				}
+			}
+			if cityStore.WispTierLists() != 0 {
+				t.Fatalf("city store wisp-tier probes = %d, want 0 for rig-scoped named session", cityStore.WispTierLists())
+			}
+			if rigStore.WispTierLists() == 0 {
+				t.Fatal("rig store wisp-tier probe did not run")
+			}
+		})
+	}
+}
+
+func TestBuildDesiredState_OnDemandNamedSession_PatrolWispProbeDoesNotUseHydratedFallback(t *testing.T) {
+	cityPath := t.TempDir()
+	var mu sync.Mutex
+	runnerCalls := 0
+	backing := beads.NewBdStore(cityPath, func(string, string, ...string) ([]byte, error) {
+		mu.Lock()
+		runnerCalls++
+		mu.Unlock()
+		return nil, errors.New("runner must not be called")
+	})
+	store := beads.NewCachingStoreForTest(backing, nil)
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "refinery",
+			StartCommand:      "true",
+			MaxActiveSessions: intPtr(1),
+			WorkQuery:         "printf ''",
+		}},
+		NamedSessions: []config.NamedSession{{
+			Template: "refinery",
+			Mode:     "on_demand",
+		}},
+	}
+
+	spec, ok := findNamedSessionSpec(cfg, "test-city", "refinery")
+	if !ok {
+		t.Fatal("named session spec not found")
+	}
+	demand, partial := namedSessionPatrolWispWakeDemand(
+		cityPath, cfg, store, nil,
+		map[string]namedSessionSpec{"refinery": spec},
+		nil,
+		io.Discard,
+	)
+	mu.Lock()
+	calls := runnerCalls
+	mu.Unlock()
+	if calls != 0 {
+		t.Fatalf("bd runner calls = %d, want 0 for patrol-wisp hot probe", calls)
+	}
+	if _, ok := demand["refinery"]; ok {
+		t.Fatal("wisp demand[refinery] = true from degraded/unproven patrol-wisp read")
+	}
+	if !partial {
+		t.Fatal("partial = false, want true when patrol-wisp runtime read degrades")
+	}
+}
+
+type slowPatrolWispRuntimeStore struct {
+	*beads.MemStore
+	delay time.Duration
+
+	mu      sync.Mutex
+	queries []beads.ListQuery
+}
+
+func (s *slowPatrolWispRuntimeStore) RuntimeList(ctx context.Context, query beads.ListQuery, policy beads.ReadPolicy) ([]beads.Bead, error) {
+	if query.TierMode != beads.TierWisps {
+		return s.List(query)
+	}
+	s.mu.Lock()
+	s.queries = append(s.queries, query)
+	s.mu.Unlock()
+
+	readCtx := ctx
+	cancel := func() {}
+	if policy.Timeout > 0 {
+		readCtx, cancel = context.WithTimeout(ctx, policy.Timeout)
+	}
+	defer cancel()
+	timer := time.NewTimer(s.delay)
+	defer timer.Stop()
+	select {
+	case <-readCtx.Done():
+		return nil, readCtx.Err()
+	case <-timer.C:
+		return s.List(query)
+	}
+}
+
+func (s *slowPatrolWispRuntimeStore) queryCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.queries)
+}
+
+func TestBuildDesiredState_OnDemandNamedSession_PatrolWispProbeBudgetBoundsSlowStore(t *testing.T) {
+	cityPath := t.TempDir()
+	store := &slowPatrolWispRuntimeStore{
+		MemStore: beads.NewMemStore(),
+		delay:    10 * time.Second,
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+	}
+	for i := 0; i < 12; i++ {
+		name := fmt.Sprintf("worker%d", i)
+		cfg.Agents = append(cfg.Agents, config.Agent{
+			Name:              name,
+			StartCommand:      "true",
+			MaxActiveSessions: intPtr(1),
+			WorkQuery:         "printf ''",
+		})
+		cfg.NamedSessions = append(cfg.NamedSessions, config.NamedSession{
+			Template: name,
+			Mode:     "on_demand",
+		})
+	}
+
+	start := time.Now()
+	dsResult := buildDesiredStateWithSessionBeads(
+		"test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(),
+		store, nil, nil, nil, io.Discard,
+	)
+	elapsed := time.Since(start)
+	if elapsed > namedSessionWispWakeTotalBudget+750*time.Millisecond {
+		t.Fatalf("buildDesiredState elapsed = %v, want bounded by aggregate patrol-wisp budget %v", elapsed, namedSessionWispWakeTotalBudget)
+	}
+	if store.queryCount() < 2 {
+		t.Fatalf("wisp runtime queries = %d, want multiple probes before aggregate budget", store.queryCount())
+	}
+	if len(dsResult.NamedSessionDemand) != 0 {
+		t.Fatalf("NamedSessionDemand = %#v, want no demand from timed-out patrol-wisp probes", dsResult.NamedSessionDemand)
+	}
+	if !dsResult.StoreQueryPartial {
+		t.Fatal("StoreQueryPartial = false, want true when aggregate patrol-wisp budget expires")
+	}
+}
+
+func TestBuildDesiredState_OnDemandNamedSession_PatrolWispDoesNotEnterAssignedWorkBeads(t *testing.T) {
+	cityPath := t.TempDir()
+	store := &demandTierRecordingStore{MemStore: beads.NewMemStore()}
+	wisp, err := store.Create(beads.Bead{
+		Title:     "refinery patrol",
+		Type:      "task",
+		Status:    "in_progress",
+		Assignee:  "refinery",
+		Ref:       "refinery-patrol",
+		Ephemeral: true,
+		Metadata: map[string]string{
+			"formula": "refinery-patrol",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create patrol wisp: %v", err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "refinery",
+			StartCommand:      "true",
+			MaxActiveSessions: intPtr(1),
+			WorkQuery:         "printf ''",
+		}},
+		NamedSessions: []config.NamedSession{{
+			Template: "refinery",
+			Mode:     "on_demand",
+		}},
+	}
+
+	dsResult := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, io.Discard)
+	if !dsResult.NamedSessionDemand["refinery"] {
+		t.Fatal("NamedSessionDemand[refinery] = false for assigned patrol wisp")
+	}
+	for _, bead := range dsResult.AssignedWorkBeads {
+		if bead.ID == wisp.ID {
+			t.Fatalf("patrol wisp %s leaked into AssignedWorkBeads: %+v", wisp.ID, dsResult.AssignedWorkBeads)
+		}
+	}
+	if got := dsResult.ScaleCheckCounts["refinery"]; got != 0 {
+		t.Fatalf("ScaleCheckCounts[refinery] = %d, want 0 for patrol-wisp named-session wake", got)
 	}
 }
 
