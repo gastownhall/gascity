@@ -112,15 +112,11 @@ func psRecords() (map[int]psRecord, error) {
 		records[pid] = psRecord{
 			pid:     pid,
 			ppid:    ppid,
-			command: strings.Join(fields[2:], " "),
+			command: darwinPSCommand(fields),
 			env:     parseInlineEnv(fields[2:]),
 		}
 	}
 	return records, nil
-}
-
-func isInfrastructureCommand(command string) bool {
-	return strings.Contains(strings.ToLower(command), "tmux")
 }
 
 func parseInlineEnv(fields []string) map[string]string {
