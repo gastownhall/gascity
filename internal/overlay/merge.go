@@ -20,6 +20,18 @@ var mergeablePaths = map[string]bool{
 	filepath.Join(".github", "hooks", "gascity.json"): true,
 }
 
+// wrapBareHookPaths is the set of settings files whose top-level hook entries
+// must use the wrapped {"matcher": ..., "hooks": [...]} shape. For these files
+// a bare entry such as {"type": "command", "command": "..."} is schema-invalid
+// at the top level, so it is normalized into wrapped form during merge.
+//
+// Only Claude Code's .claude/settings.json is included here. Codex and Cursor
+// hooks.json legitimately use bare {"command": ...}/{"bash": ...} entries and
+// must NOT be wrapped.
+var wrapBareHookPaths = map[string]bool{
+	filepath.Join(".claude", "settings.json"): true,
+}
+
 var (
 	errBaseNotObject    = errors.New("base JSON is not an object")
 	errOverlayNotObject = errors.New("overlay JSON is not an object")
@@ -35,6 +47,30 @@ func IsOverlayObjectShapeError(err error) bool {
 // that should be JSON-merged rather than overwritten.
 func IsMergeablePath(relPath string) bool {
 	return mergeablePaths[filepath.Clean(relPath)]
+}
+
+// WrapsBareHooks reports whether relPath is a settings file that requires
+// wrapped hook entries, so bare/flat entries should be normalized into
+// {"matcher": "", "hooks": [entry]} form during merge.
+func WrapsBareHooks(relPath string) bool {
+	return wrapBareHookPaths[filepath.Clean(relPath)]
+}
+
+// MergeOption configures MergeSettingsJSON.
+type MergeOption func(*mergeConfig)
+
+type mergeConfig struct {
+	wrapBareHooks bool
+}
+
+// WithWrapBareHooks normalizes bare/flat hook entries (e.g.
+// {"type": "command", "command": "..."}) into the wrapped
+// {"matcher": "", "hooks": [entry]} shape that Claude settings require. Pass it
+// when merging a .claude/settings.json (see WrapsBareHooks). Without it the
+// merge preserves entry shapes verbatim, which is correct for Codex/Cursor
+// hooks.json.
+func WithWrapBareHooks() MergeOption {
+	return func(c *mergeConfig) { c.wrapBareHooks = true }
 }
 
 // MergeSettingsJSON performs a deep merge of base and overlay JSON documents.
@@ -54,9 +90,18 @@ func IsMergeablePath(relPath string) bool {
 //     overlay re-projecting an already-present command is a no-op instead of
 //     an unbounded append.
 //     5. else → no identity, always append
+//   - With WithWrapBareHooks, a final pass over the merged hooks normalizes any
+//     bare entry (one with neither a "matcher" nor a "hooks" key) into
+//     {"matcher": "", "hooks": [entry]}. This runs after the keyed merge so no
+//     entries are dropped or reordered; it only fixes the shape Claude requires.
 //
 // Returns pretty-printed JSON.
-func MergeSettingsJSON(base, overlay []byte) ([]byte, error) {
+func MergeSettingsJSON(base, overlay []byte, opts ...MergeOption) ([]byte, error) {
+	var cfg mergeConfig
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+
 	baseDoc, err := parseSettingsObject("base", base, errBaseNotObject)
 	if err != nil {
 		return nil, err
@@ -80,6 +125,15 @@ func MergeSettingsJSON(base, overlay []byte) ([]byte, error) {
 		} else {
 			// Non-hook keys: last writer wins.
 			result[k] = v
+		}
+	}
+
+	// For wrap-style providers, normalize any bare hook entry into wrapped form.
+	// Done after the merge so identity/merge semantics, ordering, and entry
+	// count are untouched — this only fixes the shape (Claude validity).
+	if cfg.wrapBareHooks {
+		if hooks, ok := result["hooks"].(map[string]any); ok {
+			result["hooks"] = wrapBareHookEntries(hooks)
 		}
 	}
 
@@ -240,6 +294,48 @@ func innerHooksKey(inner any) (string, bool) {
 		return "", false
 	}
 	return "inner:" + string(bytes.TrimRight(canon, "\n")), true
+}
+
+// wrapBareHookEntries returns a copy of a hooks map in which every bare
+// top-level entry — one with neither a "matcher" nor a "hooks" key, e.g.
+// {"type": "command", "command": "..."} — is normalized into the wrapped
+// {"matcher": "", "hooks": [entry]} shape that Claude settings require.
+// Already-wrapped entries are left unchanged. No entries are added or removed.
+func wrapBareHookEntries(hooks map[string]any) map[string]any {
+	out := make(map[string]any, len(hooks))
+	for category, v := range hooks {
+		arr, ok := toSliceAny(v)
+		if !ok {
+			out[category] = v
+			continue
+		}
+		normalized := make([]any, len(arr))
+		for i, entry := range arr {
+			normalized[i] = normalizeHookEntry(entry)
+		}
+		out[category] = normalized
+	}
+	return out
+}
+
+// normalizeHookEntry wraps a bare hook entry into {"matcher": "", "hooks":
+// [entry]} form. Entries that already carry a "matcher" or "hooks" key (or are
+// not JSON objects) are returned unchanged.
+func normalizeHookEntry(entry any) any {
+	m, ok := entry.(map[string]any)
+	if !ok {
+		return entry
+	}
+	if _, hasHooks := m["hooks"]; hasHooks {
+		return entry
+	}
+	if _, hasMatcher := m["matcher"]; hasMatcher {
+		return entry
+	}
+	return map[string]any{
+		"matcher": "",
+		"hooks":   []any{entry},
+	}
 }
 
 // toMapStringAny attempts to convert v to map[string]any.

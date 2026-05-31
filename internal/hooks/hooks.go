@@ -518,7 +518,7 @@ func desiredClaudeSettings(fs fsys.FS, cityDir string) ([]byte, claudeSettingsSo
 		return nil, claudeSettingsSourceNone, fmt.Errorf("upgrading Claude settings from %s: %w", overridePath, upgradeErr)
 	}
 
-	merged, err := overlay.MergeSettingsJSON(base, upgradedOverride)
+	merged, err := overlay.MergeSettingsJSON(base, upgradedOverride, overlay.WithWrapBareHooks())
 	if err != nil {
 		if overlay.IsOverlayObjectShapeError(err) {
 			return nil, claudeSettingsSourceNone, fmt.Errorf("invalid Claude settings override at %s: Claude settings override is not a JSON object; expected a JSON object; fix or remove the file to proceed with install: %w", overridePath, err)
