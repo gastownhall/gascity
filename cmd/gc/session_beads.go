@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"path/filepath"
@@ -2075,12 +2076,15 @@ func sweepProcessTableOrphans(
 			continue
 		}
 		bead, err := store.Get(live.SessionID)
-		if err == nil && bead.Status != "closed" {
+		switch {
+		case err == nil && bead.Status != "closed":
+			continue // bead still open — leave the runtime alone
+		case err != nil && !errors.Is(err, beads.ErrNotFound):
+			// transient/unreadable store error — do not destroy a live runtime on uncertainty
+			fmt.Fprintf(stderr, "session reconciler: looking up process-table orphan session bead %s pid=%d: %v\n", live.SessionID, live.PID, err) //nolint:errcheck
 			continue
 		}
-		if err != nil {
-			fmt.Fprintf(stderr, "session reconciler: looking up process-table orphan session bead %s pid=%d: %v\n", live.SessionID, live.PID, err) //nolint:errcheck
-		}
+		// here: bead is closed, or confirmed absent (ErrNotFound) — reap below
 		if err := scanner.TerminateRuntime(live); err != nil {
 			fmt.Fprintf(stderr, "session reconciler: terminating process-table orphan pid=%d session=%s: %v\n", live.PID, live.SessionID, err) //nolint:errcheck
 			continue

@@ -6212,6 +6212,37 @@ func TestSweepProcessTableOrphansNoopsWithoutScanner(t *testing.T) {
 	}
 }
 
+type flakyGetStore struct {
+	beads.Store
+	failID  string
+	failErr error
+}
+
+func (s *flakyGetStore) Get(id string) (beads.Bead, error) {
+	if id == s.failID {
+		return beads.Bead{}, s.failErr
+	}
+	return s.Store.Get(id)
+}
+
+func TestSweepProcessTableOrphansSkipsOnTransientStoreError(t *testing.T) {
+	inner := beads.NewMemStore()
+	store := &flakyGetStore{Store: inner, failID: "gm-flaky", failErr: errors.New("dolt: connection reset")}
+	sp := newProcessTableSweepProvider(
+		runtime.LiveRuntime{SessionID: "gm-flaky", PID: 301, IsTracked: false},
+	)
+	var stderr bytes.Buffer
+	if got := sweepProcessTableOrphans(sp, nil, store, &stderr); got != 0 {
+		t.Fatalf("sweepProcessTableOrphans() = %d, want 0 (transient error must not reap); stderr=%q", got, stderr.String())
+	}
+	if len(sp.terminated) != 0 {
+		t.Fatalf("terminated %v on transient store error, want none", sp.terminated)
+	}
+	if !strings.Contains(stderr.String(), "dolt: connection reset") {
+		t.Fatalf("stderr = %q, want transient error logged", stderr.String())
+	}
+}
+
 func TestControllerRuntimeSweepsProcessTableOrphansAfterClosedBeadReap(t *testing.T) {
 	data, err := os.ReadFile(filepath.Join(".", "city_runtime.go"))
 	if err != nil {
