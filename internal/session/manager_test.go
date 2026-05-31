@@ -4197,7 +4197,14 @@ func TestEnsureRunning_RetriesAfterStartupDeathError(t *testing.T) {
 	}
 }
 
-func TestEnsureRunning_StartupDeathWithoutStrippableResumeClearsMetadata(t *testing.T) {
+// When a startup-death recovery's resume command carries no resume flag/key
+// at all (it is already a fresh-start command), retryFreshStartAfterStaleKey
+// must clear the stale metadata and start fresh successfully. Previously it
+// hard-errored ("resume command could not be stripped") because the keyed
+// strip was a no-op — but a command with no --resume token is already fresh,
+// so failing only wedged the session. Same fragile-strip class of bug as the
+// diverged-key case in TestEnsureRunning_RetriesWhenResumeKeyDiverged.
+func TestEnsureRunning_StartupDeathWithoutStrippableResumeRecovers(t *testing.T) {
 	store := beads.NewMemStore()
 	base := runtime.NewFake()
 
@@ -4229,23 +4236,80 @@ func TestEnsureRunning_StartupDeathWithoutStrippableResumeClearsMetadata(t *test
 
 	sp.armed = true
 
+	// The resume command carries no --resume token, so it is already a valid
+	// fresh-start command. Recovery must succeed rather than wedge.
 	err = mgr.Send(context.Background(), info.ID, "hello", "claude --dangerously", runtime.Config{WorkDir: "/tmp"})
-	if err == nil {
-		t.Fatal("Send should fail when stale resume metadata cannot be stripped from the resume command")
+	if err != nil {
+		t.Fatalf("Send should recover via fresh start when resume command has no key to strip, got: %v", err)
+	}
+
+	if !base.IsRunning(info.SessionName) {
+		t.Fatal("session should be running after no-strippable-key fresh retry")
 	}
 
 	b, _ = store.Get(info.ID)
 	if b.Metadata["session_key"] != "" {
-		t.Errorf("session_key should be cleared after unstrippable startup-death fallback, got %q", b.Metadata["session_key"])
+		t.Errorf("session_key should be cleared after startup-death fallback, got %q", b.Metadata["session_key"])
 	}
 	if b.Metadata["started_config_hash"] != "" {
-		t.Errorf("started_config_hash should be cleared after unstrippable startup-death fallback, got %q", b.Metadata["started_config_hash"])
+		t.Errorf("started_config_hash should be cleared after startup-death fallback, got %q", b.Metadata["started_config_hash"])
 	}
 	if b.Metadata["continuation_reset_pending"] != "true" {
-		t.Errorf("continuation_reset_pending should be set after unstrippable startup-death fallback, got %q", b.Metadata["continuation_reset_pending"])
+		t.Errorf("continuation_reset_pending should be set after startup-death fallback, got %q", b.Metadata["continuation_reset_pending"])
 	}
-	if b.Metadata["state"] != string(StateSuspended) {
-		t.Errorf("state should remain suspended after failed unstrippable fallback, got %q", b.Metadata["state"])
+}
+
+// A resume-capable session whose embedded resume key has diverged from the
+// bead's current session_key (e.g. a concurrent fresh start minted a new key,
+// or a stale store read returned a different one) must still recover with a
+// fresh start. Previously retryFreshStartAfterStaleKey hard-errored with
+// "resume command could not be stripped" because the keyed strip could not
+// match the diverged key — wedging the session into a respawn/SIGTERM loop.
+// The fix falls back to a value-agnostic strip so the fresh start proceeds.
+func TestEnsureRunning_RetriesWhenResumeKeyDiverged(t *testing.T) {
+	store := beads.NewMemStore()
+	base := runtime.NewFake()
+
+	sp := &startupDeathProvider{Fake: base}
+	mgr := NewManager(store, sp)
+
+	info, err := mgr.Create(context.Background(), "worker", "", "claude --dangerously", "/tmp", "claude", nil, ProviderResume{
+		ResumeFlag:    "--resume",
+		SessionIDFlag: "--session-id",
+	}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	// The bead's stored session_key is KEY_B...
+	if err := store.SetMetadata(info.ID, "session_key", "key-B-current"); err != nil {
+		t.Fatalf("SetMetadata session_key: %v", err)
+	}
+	if err := mgr.Suspend(info.ID); err != nil {
+		t.Fatalf("Suspend: %v", err)
+	}
+
+	sp.armed = true
+
+	// ...but the resume command was built with a DIVERGED key (KEY_A). The
+	// keyed strip ("--resume key-B-current") is a no-op against this command;
+	// only the value-agnostic fallback can produce a clean fresh start.
+	resumeCommand := "claude --dangerously --resume key-A-diverged"
+	err = mgr.Send(context.Background(), info.ID, "hello", resumeCommand, runtime.Config{WorkDir: "/tmp"})
+	if err != nil {
+		t.Fatalf("Send should recover via fresh start when resume key diverged, got: %v", err)
+	}
+
+	if !base.IsRunning(info.SessionName) {
+		t.Fatal("session should be running after diverged-key fresh retry")
+	}
+
+	b, _ := store.Get(info.ID)
+	if b.Metadata["session_key"] != "" {
+		t.Errorf("session_key should be cleared after diverged-key retry, got %q", b.Metadata["session_key"])
+	}
+	if b.Metadata["continuation_reset_pending"] != "true" {
+		t.Errorf("continuation_reset_pending should be set after diverged-key retry, got %q", b.Metadata["continuation_reset_pending"])
 	}
 }
 

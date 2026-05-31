@@ -64,6 +64,38 @@ func stripResumeFlag(cmd, resumeFlag, sessionKey string) string {
 	return strings.TrimSpace(result)
 }
 
+// stripResumeFlagArg removes resumeFlag and the single whitespace-delimited
+// token that immediately follows it from cmd, regardless of that token's
+// value. It is the value-agnostic fallback for stripResumeFlag: when the
+// session_key embedded in the resume command at build time has diverged from
+// the bead's current session_key — a concurrent fresh start minted a new key,
+// or a stale store read — the keyed strip is a no-op, and we must still produce
+// a clean fresh-start command rather than wedge the session. Returns cmd
+// unchanged when resumeFlag is not present as a standalone token with a
+// following argument (in which case the command already carries no resume key
+// and is itself a valid fresh-start command).
+func stripResumeFlagArg(cmd, resumeFlag string) string {
+	if resumeFlag == "" {
+		return cmd
+	}
+	needle := resumeFlag + " "
+	idx := strings.Index(cmd, needle)
+	if idx < 0 || (idx > 0 && cmd[idx-1] != ' ') {
+		return cmd
+	}
+	rest := strings.TrimLeft(cmd[idx+len(needle):], " ")
+	if sp := strings.IndexByte(rest, ' '); sp >= 0 {
+		rest = rest[sp+1:]
+	} else {
+		rest = ""
+	}
+	result := strings.TrimRight(cmd[:idx], " ")
+	if rest != "" {
+		result = result + " " + rest
+	}
+	return strings.TrimSpace(result)
+}
+
 func (m *Manager) clearStaleResumeMetadata(id string, b *beads.Bead) error {
 	if err := m.store.SetMetadata(id, "session_key", ""); err != nil {
 		return fmt.Errorf("clearing stale resume metadata session_key: %w", err)
@@ -106,15 +138,20 @@ func (m *Manager) retryFreshStartAfterStaleKey(
 	// An empty resume_flag means the command was never resume-capable
 	// (e.g. a named-always session whose start command carries no
 	// --resume-style flag). stripResumeFlag is intentionally a no-op in
-	// that case, so refusing to retry would leave the session stuck.
-	// Only treat the no-op as an error when resume_flag was non-empty
-	// but the strip still found nothing — that signals an inconsistency
-	// between the bead metadata and the actual resume command.
+	// that case, and the command is already a valid fresh start.
+	//
+	// A non-empty resume_flag whose keyed strip was a no-op means the
+	// session_key embedded in resumeCommand diverged from the bead's
+	// current session_key (a concurrent fresh start minted a new key, or a
+	// stale store read). Fall back to a value-agnostic strip so we still
+	// produce a clean fresh-start command. Refusing to retry here is what
+	// wedged the session into a respawn/SIGTERM loop: the embedded resume
+	// key was always stale, the keyed strip could never match it, and the
+	// dead remain-on-exit pane lingered because we returned before
+	// killExistingOrphans. If even the generic strip finds nothing, the
+	// command carries no resume flag and is itself a fresh-start command.
 	if resumeFlag != "" && freshCmd == resumeCommand {
-		if unroute != nil {
-			unroute()
-		}
-		return false, fmt.Errorf("fresh start after stale key: resume command could not be stripped")
+		freshCmd = stripResumeFlagArg(resumeCommand, resumeFlag)
 	}
 	cfg.Command = freshCmd
 	m.killExistingOrphans(ctx, id)
