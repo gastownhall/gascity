@@ -1844,8 +1844,8 @@ func TestQuarantineControlGraphBeadClosesWithDiagnostics(t *testing.T) {
 		t.Fatalf("create control: %v", err)
 	}
 
-	if err := quarantineControlGraphBead(store, control.ID, fmt.Errorf("bad workflow")); err != nil {
-		t.Fatalf("quarantineControlGraphBead: %v", err)
+	if err := quarantineControlFailureBead(store, control.ID, fmt.Errorf("%w: bad workflow", dispatch.ErrControlGraphMalformed)); err != nil {
+		t.Fatalf("quarantineControlFailureBead: %v", err)
 	}
 
 	got, err := store.Get(control.ID)
@@ -1892,8 +1892,8 @@ func TestQuarantineControlGraphBeadTruncatesReasonAtUTF8Boundary(t *testing.T) {
 	}
 	reason := strings.Repeat("a", maxControlQuarantineReasonMetadata-1) + "é tail"
 
-	if err := quarantineControlGraphBead(store, control.ID, errors.New(reason)); err != nil {
-		t.Fatalf("quarantineControlGraphBead: %v", err)
+	if err := quarantineControlFailureBead(store, control.ID, errors.New(reason)); err != nil {
+		t.Fatalf("quarantineControlFailureBead: %v", err)
 	}
 
 	got, err := store.Get(control.ID)
@@ -3862,6 +3862,57 @@ func TestRunControlDispatcherQuarantinesMalformedFanoutScopeBody(t *testing.T) {
 		t.Fatalf("labels = %#v, want gc:control-quarantined", after.Labels)
 	}
 	if got := stderr.String(); !strings.Contains(got, "control dispatch: quarantined bead="+fanout.ID) {
+		t.Fatalf("stderr = %q, want quarantine message", got)
+	}
+}
+
+func TestRunControlDispatcherQuarantinesGenericControlFailure(t *testing.T) {
+	clearGCEnv(t)
+
+	store := beads.NewMemStore()
+	control, err := store.Create(beads.Bead{
+		Title: "Unsupported control",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind": "unknown-control-kind",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create control: %v", err)
+	}
+
+	var stderr bytes.Buffer
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	if err := runControlDispatcherWithStoreAndConfig(t.TempDir(), t.TempDir(), store, control, control.ID, cfg, io.Discard, &stderr); err != nil {
+		t.Fatalf("runControlDispatcherWithStoreAndConfig: %v", err)
+	}
+
+	after, err := store.Get(control.ID)
+	if err != nil {
+		t.Fatalf("get control: %v", err)
+	}
+	if after.Status != "closed" {
+		t.Fatalf("control status = %q, want closed", after.Status)
+	}
+	if got := after.Metadata["gc.outcome"]; got != "fail" {
+		t.Fatalf("gc.outcome = %q, want fail", got)
+	}
+	if got := after.Metadata["gc.failure_reason"]; got != "control_dispatch_error" {
+		t.Fatalf("gc.failure_reason = %q, want control_dispatch_error", got)
+	}
+	if got := after.Metadata["gc.control_quarantined"]; got != "true" {
+		t.Fatalf("gc.control_quarantined = %q, want true", got)
+	}
+	if got := after.Metadata["gc.controller_error"]; !strings.Contains(got, "unsupported control bead kind") {
+		t.Fatalf("gc.controller_error = %q, want unsupported control bead kind", got)
+	}
+	if got := after.Metadata["gc.final_disposition"]; got != "control_quarantined" {
+		t.Fatalf("gc.final_disposition = %q, want control_quarantined", got)
+	}
+	if !slices.Contains(after.Labels, "gc:control-quarantined") {
+		t.Fatalf("labels = %#v, want gc:control-quarantined", after.Labels)
+	}
+	if got := stderr.String(); !strings.Contains(got, "control dispatch: quarantined bead="+control.ID) {
 		t.Fatalf("stderr = %q, want quarantine message", got)
 	}
 }
