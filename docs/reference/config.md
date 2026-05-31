@@ -411,7 +411,7 @@ Import defines a named import of another pack.
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `source` | string | **yes** |  | Source is the durable authored pack location: a local path, a remote git URL, or a remote git URL with a monorepo subpath such as "github.com/org/repo//packs/foo". Registry handles are lookup-only in this release wave; authored [imports.*] entries store the resolved source plus optional version. |
+| `source` | string | **yes** |  | Source is the durable authored pack location: a local path, a remote git URL, or a dereferenceable GitHub tree URL for a pack below a repository root, such as "https://github.com/org/repo/tree/main/packs/foo". Registry handles are lookup-only in this release wave; authored [imports.*] entries store the resolved source plus optional version. |
 | `version` | string |  |  | Version is an optional semver constraint for git-backed imports (e.g., "^1.2"). Empty for local paths. "sha:&lt;hex&gt;" pins a specific commit. |
 | `export` | boolean |  |  | Export re-exports this import's contents into the parent pack's namespace. Consumers of the parent get this import's agents flattened under the parent's binding name. |
 | `transitive` | boolean |  |  | Transitive controls whether this import's own imports are visible to the consumer. Defaults to true (transitive). Set to false to suppress transitive resolution for this specific import. |

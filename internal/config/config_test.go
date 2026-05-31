@@ -16,6 +16,34 @@ import (
 
 func strPtr(s string) *string { return &s }
 
+func TestBoundImportsFromLegacySourcesPrefersGitHubTreeURL(t *testing.T) {
+	got := BoundImportsFromLegacySources([]string{"ops", "slashy"}, map[string]PackSource{
+		"ops": {
+			Source: "https://github.com/acme/ops-pack.git",
+			Path:   "roles",
+			Ref:    "v1.2.3",
+		},
+		"slashy": {
+			Source: "https://github.com/acme/ops-pack.git",
+			Path:   "plans",
+			Ref:    "feature/slashy",
+		},
+	})
+	want := []BoundImport{
+		{
+			Binding: "ops",
+			Import:  Import{Source: "https://github.com/acme/ops-pack/tree/v1.2.3/roles"},
+		},
+		{
+			Binding: "slashy",
+			Import:  Import{Source: "https://github.com/acme/ops-pack.git//plans#feature/slashy"},
+		},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("BoundImportsFromLegacySources = %#v, want %#v", got, want)
+	}
+}
+
 func TestDefaultCity(t *testing.T) {
 	c := DefaultCity("bright-lights")
 	if c.Workspace.Name != "bright-lights" {

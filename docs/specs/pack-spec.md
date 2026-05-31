@@ -237,7 +237,7 @@ Pack imports are named dependencies.
 ```toml
 [imports.gascity]
 source = "https://github.com/gastownhall/gascity-packs/tree/main/gascity"
-version = "sha:d3617d1319a1206ac85f69ba024ec395c49c6f4b"
+version = "^1"
 ```
 
 The binding name is local to the importing file. Current loader behavior uses
@@ -251,7 +251,7 @@ selector are part of the same source string.
 
 | Field | Type | Required | Rule |
 |---|---|---|---|
-| `source` | string | yes | Durable resolver coordinate for the pack root. Must not be empty. |
+| `source` | string | yes | Durable source for the pack root. Must not be empty. GitHub-hosted packs below a repository root should use dereferenceable `/tree/<ref>/<path>` URLs. |
 | `version` | string | no | Compatibility constraint for versioned sources. |
 
 Public import TOML must not use fields named `path`, `ref`, `commit`, or

@@ -65,7 +65,7 @@ func TestGenDocImportAddDocumentsSourceLanes(t *testing.T) {
 	for _, want := range []string{
 		"local paths outside git worktrees",
 		"remote git repositories",
-		"remote git repository subpaths",
+		"remote GitHub repository subpaths",
 		"Registry catalog handles are lookup shortcuts",
 		"source and optional version",
 	} {
@@ -87,9 +87,6 @@ func TestGenDocImportAddExamplesAvoidRejectedSourceRefs(t *testing.T) {
 	section, ok := cliDocSection(md.String(), "gc import add")
 	if !ok {
 		t.Fatal("missing gc import add section")
-	}
-	if strings.Contains(section, "GitHub tree") {
-		t.Fatalf("gc import add docs mention rejected GitHub tree URLs:\n%s", section)
 	}
 	for _, line := range strings.Split(section, "\n") {
 		line = strings.TrimSpace(line)

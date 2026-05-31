@@ -106,11 +106,12 @@ export = true
 ```
 
 Local imports use a path relative to the importing pack. Remote imports use a
-source plus a version constraint:
+source plus a version constraint. For GitHub-hosted packs below a repository
+root, prefer the same `/tree/<ref>/<path>` URL a browser can open:
 
 ```toml
 [imports.gastown]
-source = "github.com/gastownhall/gastown"
+source = "https://github.com/gastownhall/gascity-packs/tree/main/gastown"
 version = "^1.2"
 ```
 

@@ -448,7 +448,7 @@ name = "demo"
 schema = 1
 
 [imports.gastown]
-source = "https://github.com/gastownhall/gascity-packs.git//gastown"
+source = "https://github.com/gastownhall/gascity-packs/tree/main/gastown"
 version = "sha:d3617d1319a1206ac85f69ba024ec395c49c6f4b"
 `)
 

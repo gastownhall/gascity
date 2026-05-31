@@ -17,6 +17,7 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/gastownhall/gascity/internal/pricing"
+	"github.com/gastownhall/gascity/internal/remotesource"
 	"github.com/gastownhall/gascity/internal/shellquote"
 )
 
@@ -703,10 +704,10 @@ type PackSource struct {
 // optional version/export/transitive controls.
 type Import struct {
 	// Source is the durable authored pack location: a local path, a remote git
-	// URL, or a remote git URL with a monorepo subpath such as
-	// "github.com/org/repo//packs/foo". Registry handles are lookup-only in
-	// this release wave; authored [imports.*] entries store the resolved source
-	// plus optional version.
+	// URL, or a dereferenceable GitHub tree URL for a pack below a repository
+	// root, such as "https://github.com/org/repo/tree/main/packs/foo". Registry
+	// handles are lookup-only in this release wave; authored [imports.*]
+	// entries store the resolved source plus optional version.
 	Source string `toml:"source" jsonschema:"required"`
 	// Version is an optional semver constraint for git-backed imports (e.g.,
 	// "^1.2"). Empty for local paths. "sha:<hex>" pins a specific commit.
@@ -817,6 +818,9 @@ func legacyImportSourceFor(include string, packs map[string]PackSource) string {
 	if spec, ok := packs[include]; ok {
 		source := spec.Source
 		if spec.Path != "" {
+			if treeURL, ok := remotesource.FormatGitHubTreeSource(source, spec.Ref, spec.Path); ok {
+				return treeURL
+			}
 			source += "//" + strings.TrimPrefix(spec.Path, "/")
 		}
 		if spec.Ref != "" {

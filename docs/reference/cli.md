@@ -1548,8 +1548,8 @@ entry using source plus optional version. Supported sources are:
   with the pack subpath and locked to the current commit
 - remote git repositories: cloned and locked; --version accepts a semver
   constraint or sha:&lt;commit&gt;
-- remote git repository subpaths: use source strings such as
-  github.com/org/repo//packs/foo
+- remote GitHub repository subpaths: use dereferenceable tree URLs such as
+  https://github.com/org/repo/tree/main/packs/foo
 
 Registry catalog handles are lookup shortcuts in this wave, not durable
 [imports.*] field values. After lookup, authored TOML stores the resolved
@@ -1563,7 +1563,7 @@ gc import add <source> [flags]
 
 ```
 gc import add ./packs/review
-gc import add github.com/org/repo//packs/review --version '^1.2.0'
+gc import add https://github.com/org/repo/tree/main/packs/review --version '^1.2.0'
 
 # For uncommitted packs inside a git worktree, edit TOML directly:
 # [imports.review]

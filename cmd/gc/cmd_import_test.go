@@ -2086,7 +2086,7 @@ func TestHasRepositoryRefInSource(t *testing.T) {
 		"https://github.com/example/repo.git":                  false,
 		"file:///tmp/repo.git//packs/base":                     false,
 		"file:///tmp/repo.git#main":                            true,
-		"https://github.com/example/repo/tree/main/packs/base": true,
+		"https://github.com/example/repo/tree/main/packs/base": false,
 		"git@github.com:example/repo.git#main":                 true,
 	}
 	for input, want := range cases {
