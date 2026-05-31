@@ -165,6 +165,7 @@ func (w *beadWire) toBead() beads.Bead {
 		Type:        w.Type,
 		Priority:    priority,
 		CreatedAt:   w.CreatedAt,
+		UpdatedAt:   w.UpdatedAt,
 		Assignee:    w.Assignee,
 		From:        w.From,
 		ParentID:    w.ParentID,

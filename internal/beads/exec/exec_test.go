@@ -1003,6 +1003,29 @@ esac
 	}
 }
 
+func TestGet_updatedAtRoundTripsFromJSON(t *testing.T) {
+	dir := t.TempDir()
+
+	script := writeScript(t, dir, `
+case "$1" in
+  get)
+    echo '{"id":"EX-1","title":"test","status":"open","type":"task","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-02T03:04:05Z"}'
+    ;;
+  *) exit 2 ;;
+esac
+`)
+	s := NewStore(script)
+
+	got, err := s.Get("EX-1")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	want := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	if !got.UpdatedAt.Equal(want) {
+		t.Fatalf("UpdatedAt = %s, want %s", got.UpdatedAt, want)
+	}
+}
+
 func TestList_numericMetadataValuesCoercedToStrings(t *testing.T) {
 	dir := t.TempDir()
 
