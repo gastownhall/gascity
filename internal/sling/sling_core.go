@@ -267,7 +267,7 @@ func slingOnFormula(opts SlingOpts, deps SlingDeps, querier BeadQuerier, beadID 
 		}
 		result.WispRootID = wispRootID
 		result.FormulaName = opts.OnFormula
-		return finalize(opts, deps, beadID, method, result)
+		return finalize(opts, deps, wispRootID, method, result)
 	}
 	runGraph := func() (pendingSourceWorkflowLaunch, error) {
 		mResult, err := InstantiateSlingFormula(context.Background(), opts.OnFormula, SlingFormulaSearchPaths(deps, a), molecule.Options{
@@ -331,7 +331,7 @@ func slingDefaultFormula(opts SlingOpts, deps SlingDeps, querier BeadQuerier, be
 		}
 		result.WispRootID = wispRootID
 		result.FormulaName = defaultFormula
-		return finalize(opts, deps, beadID, method, result)
+		return finalize(opts, deps, wispRootID, method, result)
 	}
 	runGraph := func() (pendingSourceWorkflowLaunch, error) {
 		mResult, err := InstantiateSlingFormula(context.Background(), defaultFormula, SlingFormulaSearchPaths(deps, a), molecule.Options{

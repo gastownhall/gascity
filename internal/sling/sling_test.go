@@ -1795,7 +1795,7 @@ func TestSlingRouteBeadWithTypedRouter(t *testing.T) {
 	}
 }
 
-func TestSlingAttachFormulaRoutesSourceBeadWithTypedRouter(t *testing.T) {
+func TestSlingAttachFormulaRoutesMoleculeBeadWithTypedRouter(t *testing.T) {
 	router := &fakeBeadRouter{}
 	cfg := &config.City{Workspace: config.Workspace{Name: "test"}}
 	deps := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
@@ -1819,8 +1819,8 @@ func TestSlingAttachFormulaRoutesSourceBeadWithTypedRouter(t *testing.T) {
 	if len(router.routed) != 1 {
 		t.Fatalf("got %d route calls, want 1", len(router.routed))
 	}
-	if router.routed[0].BeadID != b.ID {
-		t.Fatalf("routed BeadID = %q, want source bead %q", router.routed[0].BeadID, b.ID)
+	if router.routed[0].BeadID != result.WispRootID {
+		t.Fatalf("routed BeadID = %q, want molecule bead %q", router.routed[0].BeadID, result.WispRootID)
 	}
 	got, err := deps.Store.Get(b.ID)
 	if err != nil {
@@ -1831,7 +1831,7 @@ func TestSlingAttachFormulaRoutesSourceBeadWithTypedRouter(t *testing.T) {
 	}
 }
 
-func TestSlingRouteBeadDefaultFormulaRoutesSourceBeadWithTypedRouter(t *testing.T) {
+func TestSlingRouteBeadDefaultFormulaMoleculeBeadWithTypedRouter(t *testing.T) {
 	router := &fakeBeadRouter{}
 	cfg := &config.City{Workspace: config.Workspace{Name: "test"}}
 	deps := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
@@ -1855,8 +1855,8 @@ func TestSlingRouteBeadDefaultFormulaRoutesSourceBeadWithTypedRouter(t *testing.
 	if len(router.routed) != 1 {
 		t.Fatalf("got %d route calls, want 1", len(router.routed))
 	}
-	if router.routed[0].BeadID != "BL-42" {
-		t.Fatalf("routed BeadID = %q, want source bead BL-42", router.routed[0].BeadID)
+	if router.routed[0].BeadID != result.WispRootID {
+		t.Fatalf("routed BeadID = %q, want molecule bead %q", router.routed[0].BeadID, result.WispRootID)
 	}
 	got, err := deps.Store.Get("BL-42")
 	if err != nil {
@@ -1864,6 +1864,158 @@ func TestSlingRouteBeadDefaultFormulaRoutesSourceBeadWithTypedRouter(t *testing.
 	}
 	if got.Metadata["molecule_id"] != result.WispRootID {
 		t.Fatalf("molecule_id metadata = %q, want %q", got.Metadata["molecule_id"], result.WispRootID)
+	}
+}
+
+// TestSlingOnFormulaRoutesMoleculeBeadWithShellRunner verifies that when
+// sling attaches a formula to an origin bead, the shell sling command is
+// issued against the molecule (wisp) bead, not the origin bead.
+func TestSlingOnFormulaRoutesMoleculeBeadWithShellRunner(t *testing.T) {
+	runner := newFakeRunner()
+	cfg := &config.City{Workspace: config.Workspace{Name: "test"}}
+	deps := testDeps(cfg, runtime.NewFake(), runner.run)
+	b, _ := deps.Store.Create(beads.Bead{Title: "work", Type: "task"})
+
+	result, err := DoSling(SlingOpts{
+		Target:        config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)},
+		BeadOrFormula: b.ID,
+		OnFormula:     "code-review",
+	}, deps, deps.Store)
+	if err != nil {
+		t.Fatalf("DoSling: %v", err)
+	}
+	if result.WispRootID == "" {
+		t.Fatal("WispRootID is empty")
+	}
+	if len(runner.calls) != 1 {
+		t.Fatalf("got %d runner calls, want 1", len(runner.calls))
+	}
+	if strings.Contains(runner.calls[0], b.ID) {
+		t.Fatalf("runner called with origin bead %q; want molecule bead %q\ncall: %s",
+			b.ID, result.WispRootID, runner.calls[0])
+	}
+	if !strings.Contains(runner.calls[0], result.WispRootID) {
+		t.Fatalf("runner called with %q; want molecule bead %q in command",
+			runner.calls[0], result.WispRootID)
+	}
+}
+
+// TestSlingDefaultFormulaRoutesMoleculeBeadWithShellRunner verifies that when
+// an agent has a default formula, the shell sling command is issued against
+// the molecule (wisp) bead, not the origin bead.
+func TestSlingDefaultFormulaRoutesMoleculeBeadWithShellRunner(t *testing.T) {
+	runner := newFakeRunner()
+	cfg := &config.City{Workspace: config.Workspace{Name: "test"}}
+	deps := testDeps(cfg, runtime.NewFake(), runner.run)
+	deps.Store = seededStore("BL-42")
+
+	result, err := DoSling(SlingOpts{
+		Target: config.Agent{
+			Name:                "mayor",
+			MaxActiveSessions:   intPtr(1),
+			DefaultSlingFormula: stringPtr("code-review"),
+		},
+		BeadOrFormula: "BL-42",
+	}, deps, deps.Store)
+	if err != nil {
+		t.Fatalf("DoSling: %v", err)
+	}
+	if result.WispRootID == "" {
+		t.Fatal("WispRootID is empty")
+	}
+	if len(runner.calls) != 1 {
+		t.Fatalf("got %d runner calls, want 1", len(runner.calls))
+	}
+	if strings.Contains(runner.calls[0], "BL-42") {
+		t.Fatalf("runner called with origin bead BL-42; want molecule bead %q\ncall: %s",
+			result.WispRootID, runner.calls[0])
+	}
+	if !strings.Contains(runner.calls[0], result.WispRootID) {
+		t.Fatalf("runner called with %q; want molecule bead %q in command",
+			runner.calls[0], result.WispRootID)
+	}
+}
+
+// TestSlingOnFormulaRoutesMoleculeBeadWithTypedRouter verifies that the typed
+// router receives the molecule (wisp) bead ID, not the origin bead ID, when
+// attaching a formula.
+func TestSlingOnFormulaRoutesMoleculeBeadWithTypedRouter(t *testing.T) {
+	router := &fakeBeadRouter{}
+	cfg := &config.City{Workspace: config.Workspace{Name: "test"}}
+	deps := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
+	deps.Router = router
+	b, _ := deps.Store.Create(beads.Bead{Title: "work", Type: "task"})
+
+	s, err := New(deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
+	result, err := s.AttachFormula(context.Background(), "code-review", b.ID, a, FormulaOpts{})
+	if err != nil {
+		t.Fatalf("AttachFormula: %v", err)
+	}
+	if result.WispRootID == "" {
+		t.Fatal("WispRootID is empty")
+	}
+	if len(router.routed) != 1 {
+		t.Fatalf("got %d route calls, want 1", len(router.routed))
+	}
+	if router.routed[0].BeadID == b.ID {
+		t.Fatalf("router received origin bead %q; want molecule bead %q",
+			b.ID, result.WispRootID)
+	}
+	if router.routed[0].BeadID != result.WispRootID {
+		t.Fatalf("router BeadID = %q, want molecule bead %q", router.routed[0].BeadID, result.WispRootID)
+	}
+	got, err := deps.Store.Get(b.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", b.ID, err)
+	}
+	if got.Metadata["molecule_id"] != result.WispRootID {
+		t.Fatalf("molecule_id on origin bead = %q, want %q", got.Metadata["molecule_id"], result.WispRootID)
+	}
+}
+
+// TestSlingDefaultFormulaRoutesMoleculeBeadWithTypedRouter verifies that the
+// typed router receives the molecule (wisp) bead ID when a default formula is
+// triggered.
+func TestSlingDefaultFormulaRoutesMoleculeBeadWithTypedRouter(t *testing.T) {
+	router := &fakeBeadRouter{}
+	cfg := &config.City{Workspace: config.Workspace{Name: "test"}}
+	deps := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
+	deps.Router = router
+	deps.Store = seededStore("BL-42")
+
+	s, err := New(deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	a := config.Agent{Name: "mayor", DefaultSlingFormula: stringPtr("code-review"), MaxActiveSessions: intPtr(1)}
+	result, err := s.RouteBead(context.Background(), "BL-42", a, RouteOpts{})
+	if err != nil {
+		t.Fatalf("RouteBead: %v", err)
+	}
+	if result.WispRootID == "" {
+		t.Fatal("WispRootID is empty")
+	}
+	if len(router.routed) != 1 {
+		t.Fatalf("got %d route calls, want 1", len(router.routed))
+	}
+	if router.routed[0].BeadID == "BL-42" {
+		t.Fatalf("router received origin bead BL-42; want molecule bead %q", result.WispRootID)
+	}
+	if router.routed[0].BeadID != result.WispRootID {
+		t.Fatalf("router BeadID = %q, want molecule bead %q", router.routed[0].BeadID, result.WispRootID)
+	}
+	got, err := deps.Store.Get("BL-42")
+	if err != nil {
+		t.Fatalf("Get(BL-42): %v", err)
+	}
+	if got.Metadata["molecule_id"] != result.WispRootID {
+		t.Fatalf("molecule_id on origin bead = %q, want %q", got.Metadata["molecule_id"], result.WispRootID)
 	}
 }
 
