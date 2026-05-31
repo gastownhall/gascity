@@ -288,10 +288,10 @@ func (a *Adapter) getMain(ctx context.Context, id string) (coordstore.Record, er
 	// Uses pre-compiled stmtGetMain: single query with correlated subqueries
 	// for labels and metadata. char(30)=RS, char(31)=US as separators.
 	var r coordstore.Record
-	var createdNs int64
+	var createdNs, updatedNs int64
 	var labelsStr, metaStr sql.NullString
 	err := a.stmtGetMain.QueryRowContext(ctx, id).Scan(
-		&r.ID, &r.Title, &r.Status, &r.Type, &r.Priority, &createdNs, &r.Assignee, &r.ParentID,
+		&r.ID, &r.Title, &r.Status, &r.Type, &r.Priority, &createdNs, &updatedNs, &r.Assignee, &r.ParentID,
 		&labelsStr, &metaStr,
 	)
 	if err == sql.ErrNoRows {
@@ -302,6 +302,9 @@ func (a *Adapter) getMain(ctx context.Context, id string) (coordstore.Record, er
 	}
 	r.CreatedAt = time.Unix(0, createdNs)
 	r.UpdatedAt = r.CreatedAt
+	if updatedNs > 0 {
+		r.UpdatedAt = time.Unix(0, updatedNs)
+	}
 	r.Labels = splitConcat(labelsStr)
 	r.Metadata = splitKVConcat(metaStr)
 	return r, nil
@@ -309,10 +312,10 @@ func (a *Adapter) getMain(ctx context.Context, id string) (coordstore.Record, er
 
 func (a *Adapter) getEphemeral(ctx context.Context, id string) (coordstore.Record, error) {
 	var r coordstore.Record
-	var createdNs, expiresNs int64
+	var createdNs, updatedNs, expiresNs int64
 	var labelsStr, metaStr sql.NullString
 	err := a.stmtGetEph.QueryRowContext(ctx, id).Scan(
-		&r.ID, &r.Title, &r.Status, &r.Type, &createdNs, &r.Assignee, &r.ParentID, &expiresNs,
+		&r.ID, &r.Title, &r.Status, &r.Type, &createdNs, &updatedNs, &r.Assignee, &r.ParentID, &expiresNs,
 		&labelsStr, &metaStr,
 	)
 	if err == sql.ErrNoRows {
@@ -323,6 +326,9 @@ func (a *Adapter) getEphemeral(ctx context.Context, id string) (coordstore.Recor
 	}
 	r.CreatedAt = time.Unix(0, createdNs)
 	r.UpdatedAt = r.CreatedAt
+	if updatedNs > 0 {
+		r.UpdatedAt = time.Unix(0, updatedNs)
+	}
 	r.Ephemeral = true
 	if expiresNs > 0 {
 		r.ExpiresAt = time.Unix(0, expiresNs)
@@ -922,13 +928,13 @@ func splitKVConcat(s sql.NullString) map[string]string {
 // sqlGetMain and sqlGetEphemeral are pre-compiled at Open time to avoid
 // repeated SQL parsing overhead on the hot Get path.
 const sqlGetMain = `
-	SELECT r.id, r.title, r.status, r.type, r.priority, r.created_at, r.assignee, r.parent_id,
+	SELECT r.id, r.title, r.status, r.type, r.priority, r.created_at, r.updated_at, r.assignee, r.parent_id,
 	    (SELECT GROUP_CONCAT(label, char(30)) FROM labels WHERE record_id = r.id),
 	    (SELECT GROUP_CONCAT(key || char(31) || value, char(30)) FROM metadata WHERE record_id = r.id)
 	FROM records r WHERE r.id = ?`
 
 const sqlGetEphemeral = `
-	SELECT e.id, e.title, e.status, e.type, e.created_at, e.assignee, e.parent_id, e.expires_at,
+	SELECT e.id, e.title, e.status, e.type, e.created_at, e.updated_at, e.assignee, e.parent_id, e.expires_at,
 	    (SELECT GROUP_CONCAT(label, char(30)) FROM ephemeral_labels WHERE record_id = e.id),
 	    (SELECT GROUP_CONCAT(key || char(31) || value, char(30)) FROM ephemeral_metadata WHERE record_id = e.id)
 	FROM ephemeral e WHERE e.id = ?`

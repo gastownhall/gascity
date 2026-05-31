@@ -132,6 +132,45 @@ func TestPurgeTerminalDeletesOldTerminalMainRecords(t *testing.T) {
 	}
 }
 
+func TestGetReturnsFreshUpdatedAtAfterMutation(t *testing.T) {
+	ctx := context.Background()
+	adapter := New()
+	if err := adapter.Open(ctx, coordstore.Config{DataDir: t.TempDir()}); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer adapter.Close() //nolint:errcheck
+
+	// Seed with an explicit past CreatedAt so the mutation's wall-clock
+	// updated_at is unambiguously later than the original timestamps.
+	created, err := adapter.Create(ctx, coordstore.Record{
+		Title:     "mutating record",
+		Status:    "open",
+		Type:      "task",
+		CreatedAt: time.Now().Add(-time.Hour),
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if !created.UpdatedAt.Equal(created.CreatedAt) {
+		t.Fatalf("new record UpdatedAt = %v, want equal to CreatedAt %v", created.UpdatedAt, created.CreatedAt)
+	}
+
+	if err := adapter.SetMetadataBatch(ctx, created.ID, map[string]string{"phase": "running"}); err != nil {
+		t.Fatalf("SetMetadataBatch: %v", err)
+	}
+
+	got, err := adapter.Get(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if !got.UpdatedAt.After(got.CreatedAt) {
+		t.Fatalf("Get UpdatedAt = %v, want strictly after CreatedAt %v", got.UpdatedAt, got.CreatedAt)
+	}
+	if !got.UpdatedAt.After(created.UpdatedAt) {
+		t.Fatalf("Get UpdatedAt = %v, want strictly after original UpdatedAt %v", got.UpdatedAt, created.UpdatedAt)
+	}
+}
+
 func mustCreateTerminalTestRecord(ctx context.Context, t *testing.T, adapter *Adapter, r coordstore.Record) coordstore.Record {
 	t.Helper()
 	created, err := adapter.Create(ctx, r)
