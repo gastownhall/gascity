@@ -6,6 +6,21 @@ Periodic compaction (`CALL DOLT_GC()`) and pre-gc snapshotting
 The loop runs **inside the supervisor process** when opted in via
 `city.toml`. There is no separate daemon, cron, or systemd unit.
 
+## Current wiring status
+
+**Observe-only mode (as of this release).** The SQL connection to Dolt
+(`OpenDoltOps`) and the backup runner (`OpenDoltBackup`) are not yet
+wired in the production controller. When `[maintenance.dolt]
+enabled=true`, the loop runs on schedule, emits events, and records
+history — but steps 2 (snapshot) and 3 (compaction) below are no-ops.
+The supervisor logs `store-maintenance: enabled in observe-only mode
+(snapshot and DOLT_GC not yet wired)` at startup.
+
+Production wiring of the snapshot and GC factories will land in a
+follow-up. Until then, `gc maintenance status` and the events are
+meaningful for scheduling/alert testing, but a `gc.store.maintenance.done`
+event does **not** imply compaction occurred.
+
 ## What this runs
 
 For each scheduled cycle the supervisor:

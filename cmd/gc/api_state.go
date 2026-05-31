@@ -312,7 +312,7 @@ func (cs *controllerState) startMaintenanceLoop(ctx context.Context) {
 	if cfg == nil || !cfg.Maintenance.Dolt.Enabled {
 		return
 	}
-	loop := supervisor.NewStoreMaintenanceLoop(supervisor.StoreMaintenanceLoopDeps{
+	deps := supervisor.StoreMaintenanceLoopDeps{
 		Cfg:       cfg.Maintenance.Dolt,
 		Store:     store,
 		CityPath:  cityPath,
@@ -320,7 +320,11 @@ func (cs *controllerState) startMaintenanceLoop(ctx context.Context) {
 		Stderr:    os.Stderr,
 		Mail:      mailProv,
 		LastRunAt: supervisor.SeedLastRunAt(cs.eventProv),
-	})
+	}
+	if deps.OpenDoltOps == nil || deps.OpenDoltBackup == nil {
+		fmt.Fprintln(os.Stderr, "store-maintenance: enabled in observe-only mode (snapshot and DOLT_GC not yet wired)")
+	}
+	loop := supervisor.NewStoreMaintenanceLoop(deps)
 	// Retain the handle so the API layer can expose
 	// /v0/city/{city}/maintenance/* (status reads + manual trigger)
 	// without a separate wiring path.

@@ -246,9 +246,11 @@ func (m *StoreMaintenanceLoop) Run(ctx context.Context) {
 			return
 		case <-timer.C:
 		}
-		if m.nextDelay(m.clock()) == 0 {
-			m.runOnce(ctx)
-		}
+		// Timer firing is the run signal; do not re-sample jitter here.
+		// A second nextDelay call would draw a new random value and could
+		// return non-zero even though the due time has passed, silently
+		// skipping the run.
+		m.runOnce(ctx)
 		timer.Reset(m.nextDelay(m.clock()))
 	}
 }
