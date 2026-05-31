@@ -115,6 +115,25 @@ source = "https://github.com/gastownhall/gascity-packs/tree/main/gastown"
 version = "^1.2"
 ```
 
+When the pack comes from a registry, start with `gc pack registry show`. The
+show output includes copy/paste-ready `gc import add` commands:
+
+```text
+$ gc pack registry show main:gastown
+Pack:        main:gastown
+Description: Gastown coordination workflow pack
+Source:      https://github.com/gastownhall/gascity-packs/tree/main/gastown
+Source kind: git
+Latest:      1.2.0
+Import commands:
+  This version or later: gc import add https://github.com/gastownhall/gascity-packs/tree/main/gastown --name gastown --version '>=1.2.0'
+  Exactly this version:  gc import add https://github.com/gastownhall/gascity-packs/tree/main/gastown --name gastown --version 1.2.0
+```
+
+Use the first command when you want future installs to accept newer published
+releases. Use the second command when the city should stay on exactly the
+displayed release until someone changes the import.
+
 Imports are transitive by default. Set `transitive = false` only when the
 import is internal to the pack and should not be visible to consumers.
 
