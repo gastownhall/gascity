@@ -252,7 +252,10 @@ rig directory to find the correct .beads database. This command resolves
 the rig automatically from the --rig flag or by detecting the bead prefix
 in the arguments.
 
-All arguments after "gc bd" are forwarded to bd unchanged.
+All arguments after "gc bd" are forwarded to bd unchanged, except the
+gc-only "heartbeat &lt;issue-id&gt;" subcommand, which rewrites to
+"update &lt;issue-id&gt; --set-metadata gc.last_heartbeat_at=&lt;RFC3339 UTC now&gt;"
+so long-running workers can signal liveness to the dashboard.
 
 gc bd forces BD_EXPORT_AUTO=false to prevent bd's git auto-export hook
 from wedging the wrapper after printing command output. If you need
@@ -269,6 +272,7 @@ gc bd --rig my-project list
   gc bd --rig my-project create "New task"
   gc bd show my-project-abc          # auto-detects rig from bead prefix
   gc bd list --rig my-project -s open
+  gc bd heartbeat my-project-abc     # stamp gc.last_heartbeat_at=now
 ```
 
 ## gc beads
