@@ -27,6 +27,7 @@ import (
 	sessionhybrid "github.com/gastownhall/gascity/internal/runtime/hybrid"
 	sessionk8s "github.com/gastownhall/gascity/internal/runtime/k8s"
 	sessionsubprocess "github.com/gastownhall/gascity/internal/runtime/subprocess"
+	sessiont3bridge "github.com/gastownhall/gascity/internal/runtime/t3bridge"
 	sessiontmux "github.com/gastownhall/gascity/internal/runtime/tmux"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/supervisor"
@@ -119,7 +120,11 @@ func providerStateDir(providerName, cityPath string) string {
 //   - default → real tmux provider
 func newSessionProviderByName(name string, sc config.SessionConfig, cityName, cityPath string) (runtime.Provider, error) {
 	if strings.HasPrefix(name, "exec:") {
-		return sessionexec.NewProvider(strings.TrimPrefix(name, "exec:")), nil
+		script := strings.TrimPrefix(name, "exec:")
+		if isLegacyT3BridgeExecScript(script) {
+			return sessiont3bridge.NewProvider(), nil
+		}
+		return sessionexec.NewProvider(script), nil
 	}
 	switch name {
 	case "fake":
@@ -141,6 +146,8 @@ func newSessionProviderByName(name string, sc config.SessionConfig, cityName, ci
 			return sessionacp.NewProviderWithDir(providerStateDir("acp", cityPath), cfg), nil
 		}
 		return sessionacp.NewProvider(cfg), nil
+	case "t3bridge":
+		return sessiont3bridge.NewProvider(), nil
 	case "k8s":
 		return sessionk8s.NewProvider()
 	case "hybrid":
@@ -148,6 +155,10 @@ func newSessionProviderByName(name string, sc config.SessionConfig, cityName, ci
 	default:
 		return sessiontmux.NewProviderWithConfig(tmuxConfigFromSession(sc, cityName, cityPath)), nil
 	}
+}
+
+func isLegacyT3BridgeExecScript(script string) bool {
+	return filepath.Base(strings.TrimSpace(script)) == "gc-session-t3"
 }
 
 // newSessionProvider returns a runtime.Provider based on the session provider
@@ -659,15 +670,17 @@ func mailProviderNameForCity(cityPath string) string {
 
 // newMailProvider returns a mail.Provider based on the mail provider name
 // (env var → city.toml → default) and the given bead store (used as the
-// default backend). Shared callers such as the API use the stateless beadmail
-// provider so long-lived instances observe fresh session state.
+// default backend). Shared callers such as the API use the cached beadmail
+// provider so repeated mail reads reuse one session-topology enumeration.
+// The cache lasts for the provider lifetime; topology refresh for long-lived
+// providers is handled by rebuilding the provider.
 //
 //   - "fake" → in-memory fake (all ops succeed)
 //   - "fail" → broken fake (all ops return errors)
 //   - "exec:<script>" → user-supplied script (absolute path or PATH lookup)
 //   - default → beadmail (backed by beads.Store, no subprocess)
 func newMailProvider(store beads.Store) mail.Provider {
-	return newMailProviderNamed(mailProviderName(), store, false)
+	return newMailProviderNamed(mailProviderName(), store, true)
 }
 
 func newCommandMailProvider(store beads.Store) mail.Provider {

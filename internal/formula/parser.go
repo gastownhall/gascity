@@ -146,10 +146,11 @@ func (p *Parser) ParseFile(path string) (*Formula, error) {
 	// Set source tracing info on all steps (gt-8tmz.18)
 	SetSourceInfo(formula)
 
-	// Resolve description_file references relative to the formula file's directory.
+	// Resolve description_file references relative to the formula file's directory,
+	// with asset references shadowed through the parser's formula layer order.
 	formulaDir := filepath.Dir(absPath)
-	resolveDescriptionFiles(formula.Steps, formulaDir)
-	resolveDescriptionFiles(formula.Template, formulaDir)
+	p.resolveDescriptionFiles(formula.Steps, formulaDir)
+	p.resolveDescriptionFiles(formula.Template, formulaDir)
 
 	p.cache[absPath] = formula
 
@@ -223,6 +224,7 @@ func (p *Parser) Resolve(formula *Formula) (*Formula, error) {
 	merged := &Formula{
 		Formula:     formula.Formula,
 		Description: formula.Description,
+		Catalog:     formula.Catalog,
 		Version:     formula.Version,
 		Contract:    formula.Contract,
 		Type:        formula.Type,
@@ -636,31 +638,66 @@ func ApplyDefaults(formula *Formula, values map[string]string) map[string]string
 	return result
 }
 
-// SetSourceInfo sets SourceFormula and SourceLocation on all steps in a formula.
-// Called after parsing to enable source tracing during cooking (gt-8tmz.18).
 // resolveDescriptionFiles walks all steps and replaces DescriptionFile
-// with the file's contents. Paths are resolved relative to baseDir
-// (the formula file's directory).
-func resolveDescriptionFiles(steps []*Step, baseDir string) {
+// with the file's contents. Non-asset paths are resolved relative to baseDir
+// (the formula file's directory). Paths using the documented ../assets/ form
+// are resolved through formula layer order so city assets can shadow pack
+// assets while the formula itself remains inherited from a lower-priority pack.
+func (p *Parser) resolveDescriptionFiles(steps []*Step, baseDir string) {
 	for _, step := range steps {
-		if step == nil || step.DescriptionFile == "" {
+		if step == nil {
 			continue
 		}
-		path := step.DescriptionFile
-		if !filepath.IsAbs(path) {
-			path = filepath.Join(baseDir, path)
+		if step.DescriptionFile != "" {
+			data, ok := p.readDescriptionFile(step.DescriptionFile, baseDir)
+			if ok {
+				step.Description = string(data)
+			}
+			step.DescriptionFile = "" // consumed; don't serialize
 		}
-		// #nosec G304 -- path comes from formula author, same trust as description
-		data, err := os.ReadFile(path)
-		if err == nil {
-			step.Description = string(data)
-		}
-		step.DescriptionFile = "" // consumed; don't serialize
 		if len(step.Children) > 0 {
-			resolveDescriptionFiles(step.Children, baseDir)
+			p.resolveDescriptionFiles(step.Children, baseDir)
+		}
+		if step.Loop != nil && len(step.Loop.Body) > 0 {
+			p.resolveDescriptionFiles(step.Loop.Body, baseDir)
 		}
 	}
-	// Also handle template steps (expansion formulas).
+}
+
+func (p *Parser) readDescriptionFile(rawPath, baseDir string) ([]byte, bool) {
+	if assetRel, ok := descriptionAssetRelPath(rawPath); ok {
+		var winner string
+		for _, layer := range p.searchPaths {
+			candidate := filepath.Join(filepath.Dir(layer), "assets", filepath.FromSlash(assetRel))
+			if p.source.Stat(candidate) {
+				winner = candidate
+			}
+		}
+		if winner != "" {
+			data, err := p.source.ReadFile(winner)
+			return data, err == nil
+		}
+	}
+
+	path := rawPath
+	if !filepath.IsAbs(path) {
+		path = filepath.Join(baseDir, path)
+	}
+	data, err := p.source.ReadFile(path)
+	return data, err == nil
+}
+
+func descriptionAssetRelPath(rawPath string) (string, bool) {
+	path := filepath.ToSlash(filepath.Clean(rawPath))
+	const assetPrefix = "../assets/"
+	if !strings.HasPrefix(path, assetPrefix) {
+		return "", false
+	}
+	rel := strings.TrimPrefix(path, assetPrefix)
+	if rel == "." || rel == "" || strings.HasPrefix(rel, "../") {
+		return "", false
+	}
+	return rel, true
 }
 
 // SetSourceInfo populates the SourceFormula and SourcePath fields on each

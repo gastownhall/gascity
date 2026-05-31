@@ -3145,6 +3145,96 @@ func TestRunWorkflowServeSkipsPendingControlBeadAndProcessesLaterReady(t *testin
 	}
 }
 
+func TestRunControlDispatcherReturnsPendingForOpenScopeSubject(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+
+	store := beads.NewMemStore()
+	workflow, err := store.Create(beads.Bead{
+		Title: "workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create workflow: %v", err)
+	}
+	body, err := store.Create(beads.Bead{
+		Title: "scope body",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":         "scope",
+			"gc.scope_ref":    "pending-scope",
+			"gc.scope_role":   "body",
+			"gc.root_bead_id": workflow.ID,
+		},
+	})
+	if err != nil {
+		t.Fatalf("create scope body: %v", err)
+	}
+	subject, err := store.Create(beads.Bead{
+		Title: "open subject",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.scope_ref":    "pending-scope",
+			"gc.scope_role":   "member",
+			"gc.root_bead_id": workflow.ID,
+		},
+	})
+	if err != nil {
+		t.Fatalf("create subject: %v", err)
+	}
+	control, err := store.Create(beads.Bead{
+		Title: "Finalize pending scope",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":         "scope-check",
+			"gc.root_bead_id": workflow.ID,
+			"gc.scope_ref":    "pending-scope",
+			"gc.scope_role":   "control",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create control: %v", err)
+	}
+	if err := store.DepAdd(control.ID, subject.ID, "blocks"); err != nil {
+		t.Fatalf("add control dependency: %v", err)
+	}
+
+	var stderr bytes.Buffer
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	err = runControlDispatcherWithStoreAndConfig(t.TempDir(), t.TempDir(), store, control, control.ID, cfg, io.Discard, &stderr)
+	if !errors.Is(err, dispatch.ErrControlPending) {
+		t.Fatalf("runControlDispatcherWithStoreAndConfig error = %v, want ErrControlPending", err)
+	}
+
+	after, err := store.Get(control.ID)
+	if err != nil {
+		t.Fatalf("get control: %v", err)
+	}
+	if after.Status != "open" {
+		t.Fatalf("control status = %q, want open", after.Status)
+	}
+	if got := after.Metadata["gc.control_quarantined"]; got != "" {
+		t.Fatalf("gc.control_quarantined = %q, want empty", got)
+	}
+	if slices.Contains(after.Labels, "gc:control-quarantined") {
+		t.Fatalf("labels = %#v, want no gc:control-quarantined", after.Labels)
+	}
+	bodyAfter, err := store.Get(body.ID)
+	if err != nil {
+		t.Fatalf("get scope body: %v", err)
+	}
+	if bodyAfter.Status != "open" {
+		t.Fatalf("body status = %q, want open", bodyAfter.Status)
+	}
+	if got := stderr.String(); strings.Contains(got, "control dispatch: quarantined bead="+control.ID) {
+		t.Fatalf("stderr = %q, want no quarantine message", got)
+	}
+}
+
 func TestRunWorkflowServeSkipsUnexpectedNonControlBeadAndProcessesLaterReady(t *testing.T) {
 	clearGCEnv(t)
 	disableManagedDoltRecoveryForTest(t)

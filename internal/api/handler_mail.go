@@ -323,6 +323,10 @@ func (s *Server) configuredMailRecipientAddress(store beads.Store, identifier st
 }
 
 func mailInboxForRecipients(mp mail.Provider, recipients []string) ([]mail.Message, error) {
+	recipients = uniqueMailRecipients(recipients)
+	if inboxer, ok := mp.(mail.MultiRecipientInboxer); ok {
+		return inboxer.InboxRecipients(recipients)
+	}
 	return mailMessagesForRecipients(mp.Inbox, recipients)
 }
 
@@ -376,7 +380,7 @@ func uniqueMailRecipients(recipients []string) []string {
 		return []string{""}
 	}
 	seen := make(map[string]bool, len(recipients))
-	unique := recipients[:0]
+	unique := make([]string, 0, len(recipients))
 	for _, recipient := range recipients {
 		if seen[recipient] {
 			continue
@@ -392,7 +396,7 @@ func uniqueMailRecipients(recipients []string) []string {
 
 func uniqueNonEmptyMailRecipients(recipients []string) []string {
 	seen := make(map[string]bool, len(recipients))
-	unique := recipients[:0]
+	unique := make([]string, 0, len(recipients))
 	for _, recipient := range recipients {
 		recipient = strings.TrimSpace(recipient)
 		if recipient == "" || seen[recipient] {

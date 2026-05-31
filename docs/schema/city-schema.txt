@@ -318,6 +318,14 @@
             "fresh"
           ],
           "description": "WakeMode controls context freshness across sleep/wake cycles.\n\"resume\" (default): reuse provider session key for conversation continuity.\n\"fresh\": start a new provider session on every wake (polecat pattern)."
+        },
+        "mouse_mode": {
+          "type": "string",
+          "enum": [
+            "on",
+            "off"
+          ],
+          "description": "MouseMode controls whether tmux mouse mode is preserved for this agent.\n\"on\" leaves the session's mouse setting alone for human-attached\nsessions; \"off\" or empty preserves the SDK's default mouse-off startup\nbehavior for headless sessions."
         }
       },
       "additionalProperties": false,
@@ -613,6 +621,14 @@
           ],
           "description": "WakeMode overrides the agent's wake mode (\"resume\" or \"fresh\")."
         },
+        "mouse_mode": {
+          "type": "string",
+          "enum": [
+            "on",
+            "off"
+          ],
+          "description": "MouseMode overrides whether tmux mouse mode is preserved (\"on\" or \"off\")."
+        },
         "inject_fragments_append": {
           "items": {
             "type": "string"
@@ -847,6 +863,14 @@
           ],
           "description": "WakeMode overrides the agent's wake mode (\"resume\" or \"fresh\")."
         },
+        "mouse_mode": {
+          "type": "string",
+          "enum": [
+            "on",
+            "off"
+          ],
+          "description": "MouseMode overrides whether tmux mouse mode is preserved (\"on\" or \"off\")."
+        },
         "pre_start_append": {
           "items": {
             "type": "string"
@@ -953,13 +977,6 @@
           "type": "object",
           "description": "Providers defines named provider presets for agent startup."
         },
-        "packs": {
-          "additionalProperties": {
-            "$ref": "#/$defs/PackSource"
-          },
-          "type": "object",
-          "description": "Packs defines named remote pack sources fetched via git (V1 mechanism)."
-        },
         "imports": {
           "additionalProperties": {
             "$ref": "#/$defs/Import"
@@ -1047,6 +1064,10 @@
         "doctor": {
           "$ref": "#/$defs/DoctorConfig",
           "description": "Doctor configures gc doctor thresholds and policy toggles\n(worktree size warnings, nested-worktree auto-prune)."
+        },
+        "maintenance": {
+          "$ref": "#/$defs/MaintenanceConfig",
+          "description": "Maintenance configures periodic store-maintenance loops."
         },
         "service": {
           "items": {
@@ -1144,6 +1165,11 @@
           "description": "DoltStopTimeout is the SIGTERM→SIGKILL grace period for the managed dolt\nsubprocess during stop, unregister, restart, and startup/recovery\ncleanup. Independent of ShutdownTimeout (which gates agent drain) so a\nslow session drain cannot steal dolt's flush window. Duration string\n(e.g., \"30s\", \"1m\"). A too-short value risks SIGKILL during a journal\nindex update or manifest rotation, which corrupts dolt's chunk journal\n(see gastownhall/gascity#2090). Defaults to \"30s\", which absorbs the\nlongest observed flush window on commodity SSDs without unduly delaying\nunregister. Set to \"0s\" for immediate SIGKILL with no grace. Negative\nvalues are rejected at config load. Note: when a city is stopped via the\ncontroller (`gc stop` while a controller is running), the standalone\ncontroller-stop wait budget is `shutdown_timeout` + 15s (20s at the\ndefault `shutdown_timeout` of \"5s\"); a `dolt_stop_timeout` larger than\nthat budget can be cut short on that path even though the direct\nstop/unregister path always honors the full grace.",
           "default": "30s"
         },
+        "dolt_start_address_in_use_retry_window": {
+          "type": "string",
+          "description": "DoltStartAddressInUseRetryWindow is how long the managed dolt start\npath waits on the originally requested port when bind fails with\n\"address already in use\" before falling back to a higher port. The\ncommon cause is a TIME_WAIT socket left by an abrupt stop of a sibling\ndolt subprocess (external SIGTERM, supervisor restart, OOM kill); on\nLinux the listening-socket slot typically frees within ~30s. Falling\nback immediately publishes the rebound port to provider state, after\nwhich `recoverManagedDoltShouldReuseExisting` keeps accepting the\nrebound instance as canonical and consumers hardcoded to the original\nport stay broken until the orphan is killed. Duration string (e.g.,\n\"30s\", \"1m\"). Set to \"0s\" to disable the retry (legacy fall-back-\nimmediately behavior). Defaults to \"30s\". Each port is waited on at\nmost once per startManagedDoltProcessWithOptions invocation, so the\nworst-case wall time per startup is bounded by\n(DoltStartAddressInUseRetryWindow + per-attempt-startup) × min(5,\ndistinct-ports-tried) rather than DoltStartAddressInUseRetryWindow × 5.\nNegative values are rejected at config load.",
+          "default": "30s"
+        },
         "wisp_gc_interval": {
           "type": "string",
           "description": "WispGCInterval is how often wisp GC runs. Duration string (e.g., \"5m\", \"1h\").\nWisp GC is disabled unless both WispGCInterval and WispTTL are set."
@@ -1218,6 +1244,13 @@
           "type": "boolean",
           "description": "NestedWorktreePrune escalates the nested-worktree-prune check\nfrom warning to error severity when safely-prunable nested\nworktrees are present, so CI / scripted doctor runs fail until\nthe operator runs `gc doctor --fix`. Actual removal still\nrequires --fix; this flag does not auto-prune. Safety is\nenforced by mechanical checks (no uncommitted changes, no\nunpushed commits, no stashes) — never by role identity.",
           "default": false
+        },
+        "check": {
+          "items": {
+            "$ref": "#/$defs/LocalDoctorCheck"
+          },
+          "type": "array",
+          "description": "Checks holds city-local inline doctor checks declared via\n[[doctor.check]] in city.toml."
         }
       },
       "additionalProperties": false,
@@ -1245,6 +1278,31 @@
       "additionalProperties": false,
       "type": "object",
       "description": "DoltConfig holds optional dolt server overrides."
+    },
+    "DoltMaintenance": {
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Enabled toggles the maintenance loop. Defaults to false (opt-in)."
+        },
+        "interval": {
+          "type": "string",
+          "description": "Interval is the cadence between maintenance runs as a duration\nstring (e.g., \"168h\"). Defaults to 168h (weekly).",
+          "default": "168h"
+        },
+        "alert_to": {
+          "type": "string",
+          "description": "AlertTo is the agent identity to mail on failure (e.g.,\n\"gascity/mayor\"). Empty disables alert mail."
+        },
+        "gc_timeout": {
+          "type": "string",
+          "description": "GCTimeout is the ceiling for CALL DOLT_GC() as a duration string.\nDefaults to 10m.",
+          "default": "10m"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "DoltMaintenance configures the periodic Dolt store maintenance loop."
     },
     "EventsConfig": {
       "properties": {
@@ -1302,11 +1360,11 @@
       "properties": {
         "source": {
           "type": "string",
-          "description": "Source is the pack location: a local relative path (e.g.,\n\"./assets/imports/gastown\") or a remote URL (e.g.,\n\"github.com/gastownhall/gastown\"). Local paths have no version."
+          "description": "Source is the durable authored pack location: a local path, a remote git\nURL, or a remote git URL with a monorepo subpath such as\n\"github.com/org/repo//packs/foo\". Registry handles are lookup-only in\nthis release wave; authored [imports.*] entries store the resolved source\nplus optional version."
         },
         "version": {
           "type": "string",
-          "description": "Version is a semver constraint for remote imports (e.g., \"^1.2\").\nEmpty for local paths. \"sha:\u003chex\u003e\" for commit pinning."
+          "description": "Version is an optional semver constraint for git-backed imports (e.g.,\n\"^1.2\"). Empty for local paths. \"sha:\u003chex\u003e\" pins a specific commit."
         },
         "export": {
           "type": "boolean",
@@ -1376,6 +1434,33 @@
       "type": "object",
       "description": "K8sConfig holds native K8s session provider settings."
     },
+    "LocalDoctorCheck": {
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Name is the bare check name. The SDK injects the \"local:\" prefix;\ndo not include it here."
+        },
+        "script": {
+          "type": "string",
+          "description": "Script is the path to the check script, relative to the city root.\nExecution registration enforces containment within the city directory."
+        },
+        "description": {
+          "type": "string",
+          "description": "Description is optional human-readable text shown in verbose output."
+        },
+        "fix": {
+          "type": "string",
+          "description": "Fix is the optional path to a remediation script, relative to the\ncity root."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "name",
+        "script"
+      ],
+      "description": "LocalDoctorCheck is a city-local doctor check declared inline in city.toml via [[doctor.check]]."
+    },
     "MailConfig": {
       "properties": {
         "provider": {
@@ -1387,6 +1472,17 @@
       "type": "object",
       "description": "MailConfig holds mail provider settings."
     },
+    "MaintenanceConfig": {
+      "properties": {
+        "dolt": {
+          "$ref": "#/$defs/DoltMaintenance",
+          "description": "Dolt configures the weekly Dolt store maintenance loop\n(CALL DOLT_GC + backup snapshot)."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "MaintenanceConfig groups periodic store-maintenance subsections."
+    },
     "ModelPricing": {
       "properties": {
         "provider": {
@@ -1395,7 +1491,7 @@
         },
         "model": {
           "type": "string",
-          "description": "Model is the provider-specific model identifier (e.g. \"claude-opus-4-7\")."
+          "description": "Model is the provider-specific model identifier (e.g. \"claude-opus-4-8\")."
         },
         "tier": {
           "$ref": "#/$defs/Tier",
@@ -1591,28 +1687,6 @@
       "additionalProperties": false,
       "type": "object",
       "description": "PackRigDefaults holds the [defaults.rig] block — defaults applied to rigs created from this pack."
-    },
-    "PackSource": {
-      "properties": {
-        "source": {
-          "type": "string",
-          "description": "Source is the git repository URL."
-        },
-        "ref": {
-          "type": "string",
-          "description": "Ref is the git ref to checkout (branch, tag, or commit). Defaults to HEAD."
-        },
-        "path": {
-          "type": "string",
-          "description": "Path is a subdirectory within the repo containing the pack files."
-        }
-      },
-      "additionalProperties": false,
-      "type": "object",
-      "required": [
-        "source"
-      ],
-      "description": "PackSource defines a remote pack repository."
     },
     "Patches": {
       "properties": {
@@ -2367,5 +2441,5 @@
     }
   },
   "title": "Gas City Configuration",
-  "description": "Schema for city.toml — the PackV2 deployment file for a Gas City instance. Pack definitions live in pack.toml and conventional pack directories such as agents/, formulas/, orders/, and commands/. Use [imports.*] for PackV2 composition; legacy includes, [packs.*], and [[agent]] fields remain visible for migration compatibility.\n\n\u003e **PackV2 format source of truth:** The public PackV2 format and loader semantics are specified in [Gas City Pack Specification (2.0)](/specs/pack-spec)."
+  "description": "Schema for city.toml — the PackV2 deployment file for a Gas City instance. Pack definitions live in pack.toml and conventional pack directories such as agents/, formulas/, orders/, and commands/. Use [imports.*] for PackV2 composition; legacy includes and [[agent]] fields remain visible for migration compatibility. Legacy [packs.*] entries are still accepted by the runtime for migration/fetch compatibility but are intentionally omitted from this public schema.\n\n\u003e **PackV2 format source of truth:** The public PackV2 format and loader semantics are specified in [Gas City Pack Specification (2.0)](/specs/pack-spec)."
 }

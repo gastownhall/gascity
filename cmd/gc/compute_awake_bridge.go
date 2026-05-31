@@ -42,9 +42,10 @@ func buildAwakeInputFromReconciler(
 	for i := range cfg.Agents {
 		a := &cfg.Agents[i]
 		agent := AwakeAgent{
-			QualifiedName:  a.QualifiedName(),
-			Suspended:      isAgentEffectivelySuspended(cfg, a),
-			SleepAfterIdle: parseSleepDuration(a.SleepAfterIdle),
+			QualifiedName:     a.QualifiedName(),
+			Suspended:         isAgentEffectivelySuspended(cfg, a),
+			SleepAfterIdle:    parseSleepDuration(a.SleepAfterIdle),
+			MinActiveSessions: a.EffectiveMinActiveSessions(),
 		}
 		if len(a.DependsOn) > 0 {
 			agent.DependsOn = a.DependsOn
@@ -208,6 +209,8 @@ func awakeSetToWakeEvals(decisions map[string]AwakeDecision, sessionBeads []Awak
 				reasons = []WakeReason{WakeWait}
 			case "assigned-work", "named-demand", "work-query":
 				reasons = []WakeReason{WakeWork}
+			case "min-active":
+				reasons = []WakeReason{WakeConfig}
 			default:
 				reasons = []WakeReason{WakeConfig}
 			}

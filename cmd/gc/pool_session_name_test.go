@@ -1,11 +1,17 @@
 package main
 
 import (
+	"bytes"
+	"errors"
+	"log"
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 )
+
+const testDetachedPoolProbeSpec = "tmux:gascity:soak-loop"
 
 func TestSessionBeadAssigneeIdentities(t *testing.T) {
 	tests := []struct {
@@ -277,6 +283,225 @@ func TestReleaseOrphanedPoolAssignments_ReopensMissingPoolAssignee(t *testing.T)
 	}
 	if got.Assignee != "" {
 		t.Fatalf("assignee = %q, want empty", got.Assignee)
+	}
+}
+
+func TestReleaseOrphanedPoolAssignments_DetachedProbeAliveSkipsRelease(t *testing.T) {
+	resetDetachedProbeErrorCountsForTest()
+	store := beads.NewMemStore()
+	work := createDetachedOrphanedPoolWork(t, store)
+	installFakeTmux(t, "exit 0")
+	var logs bytes.Buffer
+	restore := captureLogOutput(&logs)
+	defer restore()
+
+	released := releaseOrphanedPoolAssignments(
+		store,
+		testPoolReleaseConfig(),
+		"",
+		nil,
+		[]beads.Bead{work},
+		nil,
+		nil,
+		nil,
+	)
+	if len(released) != 0 {
+		t.Fatalf("released = %v, want none while detached probe is alive", released)
+	}
+	got, err := store.Get(work.ID)
+	if err != nil {
+		t.Fatalf("Get work bead: %v", err)
+	}
+	if got.Status != "in_progress" {
+		t.Fatalf("status = %q, want in_progress", got.Status)
+	}
+	if got.Assignee != "worker-dead" {
+		t.Fatalf("assignee = %q, want worker-dead", got.Assignee)
+	}
+	if got.Metadata[detachedProbeMetadataKey] != testDetachedPoolProbeSpec {
+		t.Fatalf("gc.detached = %q, want preserved", got.Metadata[detachedProbeMetadataKey])
+	}
+	if !strings.Contains(logs.String(), "detached probe alive") {
+		t.Fatalf("logs = %q, want detached probe alive diagnostic", logs.String())
+	}
+}
+
+func TestReleaseOrphanedPoolAssignments_DetachedProbeDeadReleasesAndClears(t *testing.T) {
+	resetDetachedProbeErrorCountsForTest()
+	store := beads.NewMemStore()
+	work := createDetachedOrphanedPoolWork(t, store)
+	installFakeTmux(t, "exit 1")
+
+	released := releaseOrphanedPoolAssignments(
+		store,
+		testPoolReleaseConfig(),
+		"",
+		nil,
+		[]beads.Bead{work},
+		nil,
+		nil,
+		nil,
+	)
+	if len(released) != 1 || released[0].ID != work.ID {
+		t.Fatalf("released = %v, want [%s]", released, work.ID)
+	}
+	got, err := store.Get(work.ID)
+	if err != nil {
+		t.Fatalf("Get work bead: %v", err)
+	}
+	if got.Status != "open" {
+		t.Fatalf("status = %q, want open", got.Status)
+	}
+	if got.Assignee != "" {
+		t.Fatalf("assignee = %q, want empty", got.Assignee)
+	}
+	if got.Metadata[detachedProbeMetadataKey] != "" {
+		t.Fatalf("gc.detached = %q, want cleared", got.Metadata[detachedProbeMetadataKey])
+	}
+}
+
+func TestReleaseOrphanedPoolAssignments_DetachedProbeDeadPreservesGuardWhenReleaseFails(t *testing.T) {
+	resetDetachedProbeErrorCountsForTest()
+	base := beads.NewMemStore()
+	work := createDetachedOrphanedPoolWork(t, base)
+	store := failReleaseUpdateStore{Store: base, failID: work.ID}
+	installFakeTmux(t, "exit 1")
+
+	released := releaseOrphanedPoolAssignments(
+		store,
+		testPoolReleaseConfig(),
+		"",
+		nil,
+		[]beads.Bead{work},
+		nil,
+		nil,
+		nil,
+	)
+	if len(released) != 0 {
+		t.Fatalf("released = %v, want none when release update fails", released)
+	}
+	got, err := base.Get(work.ID)
+	if err != nil {
+		t.Fatalf("Get work bead: %v", err)
+	}
+	if got.Status != "in_progress" {
+		t.Fatalf("status = %q, want in_progress", got.Status)
+	}
+	if got.Assignee != "worker-dead" {
+		t.Fatalf("assignee = %q, want worker-dead", got.Assignee)
+	}
+	if got.Metadata[detachedProbeMetadataKey] != testDetachedPoolProbeSpec {
+		t.Fatalf("gc.detached = %q, want preserved after failed release", got.Metadata[detachedProbeMetadataKey])
+	}
+}
+
+func TestReleaseOrphanedPoolAssignments_DetachedProbeErrorsReleaseOnThirdTick(t *testing.T) {
+	resetDetachedProbeErrorCountsForTest()
+	store := beads.NewMemStore()
+	work := createDetachedOrphanedPoolWork(t, store)
+	installFakeTmux(t, "exit 2")
+
+	for tick := 1; tick <= 2; tick++ {
+		released := releaseOrphanedPoolAssignments(
+			store,
+			testPoolReleaseConfig(),
+			"",
+			nil,
+			[]beads.Bead{work},
+			nil,
+			nil,
+			nil,
+		)
+		if len(released) != 0 {
+			t.Fatalf("tick %d released = %v, want none before third error", tick, released)
+		}
+		got, err := store.Get(work.ID)
+		if err != nil {
+			t.Fatalf("tick %d Get work bead: %v", tick, err)
+		}
+		if got.Status != "in_progress" {
+			t.Fatalf("tick %d status = %q, want in_progress", tick, got.Status)
+		}
+		if _, ok := got.Metadata["error_count"]; ok {
+			t.Fatalf("tick %d persisted error_count metadata: %+v", tick, got.Metadata)
+		}
+	}
+
+	released := releaseOrphanedPoolAssignments(
+		store,
+		testPoolReleaseConfig(),
+		"",
+		nil,
+		[]beads.Bead{work},
+		nil,
+		nil,
+		nil,
+	)
+	if len(released) != 1 || released[0].ID != work.ID {
+		t.Fatalf("third tick released = %v, want [%s]", released, work.ID)
+	}
+	got, err := store.Get(work.ID)
+	if err != nil {
+		t.Fatalf("Get work bead: %v", err)
+	}
+	if got.Status != "open" {
+		t.Fatalf("status = %q, want open", got.Status)
+	}
+	if got.Metadata[detachedProbeMetadataKey] != "" {
+		t.Fatalf("gc.detached = %q, want cleared", got.Metadata[detachedProbeMetadataKey])
+	}
+	if _, ok := got.Metadata["error_count"]; ok {
+		t.Fatalf("persisted error_count metadata after release: %+v", got.Metadata)
+	}
+}
+
+func createDetachedOrphanedPoolWork(t *testing.T, store beads.Store) beads.Bead {
+	t.Helper()
+	work, err := store.Create(beads.Bead{
+		Title:    "orphaned pool work",
+		Assignee: "worker-dead",
+		Metadata: map[string]string{
+			"gc.routed_to":           "worker",
+			detachedProbeMetadataKey: testDetachedPoolProbeSpec,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create work bead: %v", err)
+	}
+	if err := store.Update(work.ID, beads.UpdateOpts{Status: stringPtr("in_progress")}); err != nil {
+		t.Fatalf("Set work status: %v", err)
+	}
+	work, err = store.Get(work.ID)
+	if err != nil {
+		t.Fatalf("Reload work bead: %v", err)
+	}
+	return work
+}
+
+func testPoolReleaseConfig() *config.City {
+	return &config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}}
+}
+
+type failReleaseUpdateStore struct {
+	beads.Store
+	failID string
+}
+
+func (s failReleaseUpdateStore) Update(id string, opts beads.UpdateOpts) error {
+	if id == s.failID && opts.Status != nil && *opts.Status == "open" && opts.Assignee != nil && *opts.Assignee == "" {
+		return errors.New("release update failed")
+	}
+	return s.Store.Update(id, opts)
+}
+
+func captureLogOutput(buf *bytes.Buffer) func() {
+	previousOutput := log.Writer()
+	previousFlags := log.Flags()
+	log.SetOutput(buf)
+	log.SetFlags(0)
+	return func() {
+		log.SetOutput(previousOutput)
+		log.SetFlags(previousFlags)
 	}
 }
 

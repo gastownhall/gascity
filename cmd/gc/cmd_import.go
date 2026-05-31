@@ -101,7 +101,29 @@ func newImportAddCmd(stdout, stderr io.Writer) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "add <source>",
 		Short: "Add a pack import",
-		Args:  cobra.ExactArgs(1),
+		Long: `Add a pack import.
+
+The source argument is resolved once and written as a durable [imports.<name>]
+entry using source plus optional version. Supported sources are:
+
+- local paths outside git worktrees: stored as plain paths, with no lock entry
+- local paths inside git worktrees at HEAD: promoted to a file:// repo source
+  with the pack subpath and locked to the current commit
+- remote git repositories: cloned and locked; --version accepts a semver
+  constraint or sha:<commit>
+- remote git repository subpaths: use source strings such as
+  github.com/org/repo//packs/foo
+
+Registry catalog handles are lookup shortcuts in this wave, not durable
+[imports.*] field values. After lookup, authored TOML stores the resolved
+source and optional version.`,
+		Example: `gc import add ./packs/review
+gc import add github.com/org/repo//packs/review --version '^1.2.0'
+
+# For uncommitted packs inside a git worktree, edit TOML directly:
+# [imports.review]
+# source = "/Users/you/shared-packs/packs/review"`,
+		Args: cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			cityPath, err := resolveImportRoot()
 			if err != nil {

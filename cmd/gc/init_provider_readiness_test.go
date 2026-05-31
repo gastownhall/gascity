@@ -18,6 +18,7 @@ import (
 	"github.com/gastownhall/gascity/internal/bootstrap"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/packman"
 )
 
 func disableBootstrapForTests(t *testing.T) {
@@ -272,8 +273,10 @@ func TestFinalizeInitFetchesRemotePacksBeforeProviderReadiness(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	probeCalls := 0
 	oldProbe := initProbeProvidersReadiness
 	initProbeProvidersReadiness = func(_ context.Context, providers []string, fresh bool) (map[string]api.ReadinessItem, error) {
+		probeCalls++
 		if !fresh {
 			t.Fatal("finalizeInit should force a fresh readiness probe")
 		}
@@ -304,10 +307,98 @@ func TestFinalizeInitFetchesRemotePacksBeforeProviderReadiness(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("finalizeInit = %d, want 0: %s", code, stderr.String())
 	}
+	if probeCalls != 1 {
+		t.Fatalf("readiness probe calls = %d, want 1", probeCalls)
+	}
 
 	cacheDir := config.PackCachePath(cityPath, "remote-pack", config.PackSource{Source: remote})
 	if _, err := os.Stat(filepath.Join(cacheDir, "pack.toml")); err != nil {
 		t.Fatalf("expected fetched pack cache at %s: %v", cacheDir, err)
+	}
+}
+
+func TestFinalizeInitChecksRemoteImportProvidersAfterInstall(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_DOLT", "skip")
+	t.Setenv("HOME", t.TempDir())
+	configureIsolatedRuntimeEnv(t)
+	disableBootstrapForTests(t)
+	stubInitDependencyChecks(t)
+
+	remote := initImportBarePackRepo(t, "remote-pack", "", strings.Join([]string{
+		"[pack]",
+		`name = "remote-pack"`,
+		`version = "1.0.0"`,
+		"schema = 1",
+		"",
+		"[[agent]]",
+		`name = "worker"`,
+		`provider = "claude"`,
+		"",
+	}, "\n"))
+	commit := gitOutputImport(t, remote, "rev-parse", "HEAD")
+
+	cityPath := filepath.Join(t.TempDir(), "bright-lights")
+	if err := os.MkdirAll(cityPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureCityScaffold(cityPath); err != nil {
+		t.Fatal(err)
+	}
+	writeCityToml(t, cityPath, `[workspace]
+name = "bright-lights"
+`)
+	writePackToml(t, cityPath, strings.Join([]string{
+		"[pack]",
+		`name = "bright-lights"`,
+		"schema = 1",
+		"",
+		"[imports.remote]",
+		`source = "file://` + filepath.ToSlash(remote) + `"`,
+		`version = "sha:` + commit + `"`,
+		"",
+	}, "\n"))
+
+	probeCalls := 0
+	oldProbe := initProbeProvidersReadiness
+	initProbeProvidersReadiness = func(_ context.Context, providers []string, fresh bool) (map[string]api.ReadinessItem, error) {
+		probeCalls++
+		if !fresh {
+			t.Fatal("finalizeInit should force a fresh readiness probe")
+		}
+		if len(providers) != 1 || providers[0] != "claude" {
+			t.Fatalf("providers = %v, want [claude]", providers)
+		}
+		return map[string]api.ReadinessItem{
+			"claude": {
+				Name:        "claude",
+				Kind:        api.ProbeKindProvider,
+				DisplayName: "Claude Code",
+				Status:      api.ProbeStatusNeedsAuth,
+			},
+		}, nil
+	}
+	t.Cleanup(func() { initProbeProvidersReadiness = oldProbe })
+
+	oldRegister := registerCityWithSupervisorTestHook
+	registerCityWithSupervisorTestHook = func(_ string, _ string, _ io.Writer, _ io.Writer) (bool, int) {
+		t.Fatal("registerCityWithSupervisor should not run when imported provider readiness blocks init")
+		return true, 0
+	}
+	t.Cleanup(func() { registerCityWithSupervisorTestHook = oldRegister })
+
+	var stdout, stderr bytes.Buffer
+	code := finalizeInit(cityPath, &stdout, &stderr, initFinalizeOptions{
+		commandName: "gc init",
+	})
+	if code != 1 {
+		t.Fatalf("finalizeInit = %d, want 1; stderr=%s", code, stderr.String())
+	}
+	if probeCalls != 1 {
+		t.Fatalf("readiness probe calls = %d, want 1", probeCalls)
+	}
+	if !strings.Contains(stderr.String(), "startup is blocked by provider readiness") {
+		t.Fatalf("stderr = %q, want provider readiness block", stderr.String())
 	}
 }
 
@@ -345,6 +436,129 @@ func TestFinalizeInitDoesNotWriteImplicitImportState(t *testing.T) {
 	implicitPath := filepath.Join(os.Getenv("GC_HOME"), "implicit-import.toml")
 	if _, err := os.Stat(implicitPath); !os.IsNotExist(err) {
 		t.Fatalf("implicit-import.toml should not be created during finalizeInit, stat err = %v", err)
+	}
+}
+
+func TestInstallInitRemoteImportsSyncsRemoteImports(t *testing.T) {
+	clearGCEnv(t)
+	cityDir := t.TempDir()
+	writeCityToml(t, cityDir, "[workspace]\nname = \"demo\"\n")
+	writePackToml(t, cityDir, `[pack]
+name = "demo"
+schema = 1
+
+[imports.gastown]
+source = "https://github.com/gastownhall/gascity-packs.git//gastown"
+version = "sha:d3617d1319a1206ac85f69ba024ec395c49c6f4b"
+`)
+
+	prevSync := syncImports
+	prevInstall := installLockedImports
+	t.Cleanup(func() {
+		syncImports = prevSync
+		installLockedImports = prevInstall
+	})
+
+	lock := &packman.Lockfile{
+		Schema: packman.LockfileSchema,
+		Packs: map[string]packman.LockedPack{
+			config.PublicGastownPackSource: {
+				Version: config.PublicGastownPackVersion,
+				Commit:  strings.TrimPrefix(config.PublicGastownPackVersion, "sha:"),
+			},
+		},
+	}
+	syncImports = func(cityRoot string, imports map[string]config.Import, mode packman.InstallMode) (*packman.Lockfile, error) {
+		if cityRoot != cityDir {
+			t.Fatalf("sync cityRoot = %q, want %q", cityRoot, cityDir)
+		}
+		if mode != packman.InstallResolveIfNeeded {
+			t.Fatalf("sync mode = %v, want InstallResolveIfNeeded", mode)
+		}
+		if got := imports["pack:gastown"]; got.Source != config.PublicGastownPackSource {
+			t.Fatalf("pack:gastown import = %+v, want public gastown source", got)
+		}
+		return lock, nil
+	}
+	installLockedImports = func(cityRoot string) (*packman.Lockfile, error) {
+		if cityRoot != cityDir {
+			t.Fatalf("install cityRoot = %q, want %q", cityRoot, cityDir)
+		}
+		return lock, nil
+	}
+
+	if err := installInitRemoteImports(cityDir); err != nil {
+		t.Fatalf("installInitRemoteImports: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(cityDir, packman.LockfileName)); err != nil {
+		t.Fatalf("expected %s to be written: %v", packman.LockfileName, err)
+	}
+}
+
+func TestInstallInitRemoteImportsSkipsLocalOnlyImports(t *testing.T) {
+	clearGCEnv(t)
+	cityDir := t.TempDir()
+	writeCityToml(t, cityDir, "[workspace]\nname = \"demo\"\n")
+	writePackToml(t, cityDir, `[pack]
+name = "demo"
+schema = 1
+
+[imports.local]
+source = "./packs/local"
+`)
+
+	prevSync := syncImports
+	t.Cleanup(func() { syncImports = prevSync })
+	syncImports = func(string, map[string]config.Import, packman.InstallMode) (*packman.Lockfile, error) {
+		t.Fatal("syncImports should not run for local-only imports")
+		return nil, nil
+	}
+
+	if err := installInitRemoteImports(cityDir); err != nil {
+		t.Fatalf("installInitRemoteImports: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(cityDir, packman.LockfileName)); !os.IsNotExist(err) {
+		t.Fatalf("%s should not be written for local-only imports, stat err = %v", packman.LockfileName, err)
+	}
+}
+
+func TestFinalizeInitReportsRemoteImportInstallFailure(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_DOLT", "skip")
+	configureIsolatedRuntimeEnv(t)
+	disableBootstrapForTests(t)
+	stubInitDependencyChecks(t)
+
+	cityPath := filepath.Join(t.TempDir(), "bright-lights")
+	var initStdout, initStderr bytes.Buffer
+	code := doInit(fsys.OSFS{}, cityPath, defaultWizardConfig(), "", &initStdout, &initStderr, false)
+	if code != 0 {
+		t.Fatalf("doInit = %d, want 0: %s", code, initStderr.String())
+	}
+
+	prevInstall := ensureInitRemoteImportsInstalled
+	t.Cleanup(func() { ensureInitRemoteImportsInstalled = prevInstall })
+	ensureInitRemoteImportsInstalled = func(string) error {
+		return errors.New("sync failed")
+	}
+
+	oldRegister := registerCityWithSupervisorTestHook
+	registerCityWithSupervisorTestHook = func(_ string, _ string, _ io.Writer, _ io.Writer) (bool, int) {
+		t.Fatal("registerCityWithSupervisor should not run when import install fails")
+		return true, 0
+	}
+	t.Cleanup(func() { registerCityWithSupervisorTestHook = oldRegister })
+
+	var stdout, stderr bytes.Buffer
+	code = finalizeInit(cityPath, &stdout, &stderr, initFinalizeOptions{
+		commandName:           "gc init",
+		skipProviderReadiness: true,
+	})
+	if code != 1 {
+		t.Fatalf("finalizeInit = %d, want 1", code)
+	}
+	if !strings.Contains(stderr.String(), "installing imports: sync failed") {
+		t.Fatalf("stderr = %q, want import install failure", stderr.String())
 	}
 }
 
@@ -499,6 +713,31 @@ func TestCmdInitResumesFinalizeForExistingCity(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "Referenced providers not ready:") {
 		t.Fatalf("stderr = %q, want provider readiness guidance", stderr.String())
+	}
+}
+
+func TestLoadInitProviderPreflightConfigFallsBackForUninstalledRemoteImports(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_DOLT", "skip")
+	configureIsolatedRuntimeEnv(t)
+	disableBootstrapForTests(t)
+
+	cityPath := filepath.Join(t.TempDir(), "bright-lights")
+	var initStdout, initStderr bytes.Buffer
+	code := doInit(fsys.OSFS{}, cityPath, wizardConfig{
+		configName: "gastown",
+		provider:   "claude",
+	}, "", &initStdout, &initStderr, false)
+	if code != 0 {
+		t.Fatalf("doInit = %d, want 0: %s", code, initStderr.String())
+	}
+
+	cfg, err := loadInitProviderPreflightConfig(cityPath)
+	if err != nil {
+		t.Fatalf("loadInitProviderPreflightConfig: %v", err)
+	}
+	if got := cfg.Workspace.Provider; got != "claude" {
+		t.Fatalf("Workspace.Provider = %q, want claude", got)
 	}
 }
 

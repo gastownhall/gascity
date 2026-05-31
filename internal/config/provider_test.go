@@ -9,12 +9,12 @@ func TestBuiltinProviders(t *testing.T) {
 	providers := BuiltinProviders()
 	order := BuiltinProviderOrder()
 
-	// Must have exactly 12 built-in providers.
-	if len(providers) != 12 {
-		t.Fatalf("len(BuiltinProviders()) = %d, want 12", len(providers))
+	// Must have exactly 13 built-in providers.
+	if len(providers) != 13 {
+		t.Fatalf("len(BuiltinProviders()) = %d, want 13", len(providers))
 	}
-	if len(order) != 12 {
-		t.Fatalf("len(BuiltinProviderOrder()) = %d, want 12", len(order))
+	if len(order) != 13 {
+		t.Fatalf("len(BuiltinProviderOrder()) = %d, want 13", len(order))
 	}
 
 	// Every entry in order must exist in providers.
@@ -67,6 +67,31 @@ func TestBuiltinProvidersClaude(t *testing.T) {
 	}
 	if !derefBool(p.EmitsPermissionWarning) {
 		t.Error("EmitsPermissionWarning = false, want true")
+	}
+}
+
+func TestBuiltinProvidersClaudeModelChoices(t *testing.T) {
+	p := BuiltinProviders()["claude"]
+	var model OptionChoice
+	var oldOpus OptionChoice
+	for _, opt := range p.OptionsSchema {
+		if opt.Key != "model" {
+			continue
+		}
+		for _, choice := range opt.Choices {
+			switch choice.Value {
+			case "opus":
+				model = choice
+			case "opus-4-7":
+				oldOpus = choice
+			}
+		}
+	}
+	if !reflect.DeepEqual(model.FlagArgs, []string{"--model", "claude-opus-4-8"}) {
+		t.Fatalf("opus FlagArgs = %v, want Opus 4.8", model.FlagArgs)
+	}
+	if !reflect.DeepEqual(oldOpus.FlagArgs, []string{"--model", "claude-opus-4-7"}) {
+		t.Fatalf("opus-4-7 FlagArgs = %v, want Opus 4.7 preserved", oldOpus.FlagArgs)
 	}
 }
 

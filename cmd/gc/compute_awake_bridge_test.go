@@ -103,6 +103,26 @@ func TestAwakeSetToWakeEvalsPreservesDecisionReason(t *testing.T) {
 	}
 }
 
+func TestAwakeSetToWakeEvalsMapsMinActiveToWakeConfig(t *testing.T) {
+	evals := awakeSetToWakeEvals(
+		map[string]AwakeDecision{
+			"s-worker": {ShouldWake: true, Reason: "min-active"},
+		},
+		[]AwakeSessionBead{{
+			ID:          "mc-session-1",
+			SessionName: "s-worker",
+		}},
+	)
+
+	got := evals["mc-session-1"]
+	if got.Reason != "min-active" {
+		t.Fatalf("Reason = %q, want min-active", got.Reason)
+	}
+	if !containsWakeReason(got.Reasons, WakeConfig) {
+		t.Fatalf("Reasons = %v, want WakeConfig", got.Reasons)
+	}
+}
+
 func TestBuildAwakeInputFromReconcilerCarriesNamedSessionDemand(t *testing.T) {
 	now := time.Now().UTC()
 	cfg := &config.City{

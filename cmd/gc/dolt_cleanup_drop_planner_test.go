@@ -92,6 +92,31 @@ func TestPlanDoltDrops_BeadsTRequiresHexSuffix(t *testing.T) {
 	}
 }
 
+func TestPlanDoltDrops_DefaultPrefixesIncludeGuardAndFederationTests(t *testing.T) {
+	all := []string{
+		"hq",
+		"gascity",
+		"test_guard_abc123",
+		"test_federation_xyz",
+		"testdb_old",
+	}
+	protected := []string{"hq", "gascity"}
+
+	plan := planDoltDrops(all, defaultStaleDatabasePrefixes, protected)
+
+	wantDrop := []string{"test_guard_abc123", "test_federation_xyz", "testdb_old"}
+	if !equalStringSlice(plan.ToDrop, wantDrop) {
+		t.Errorf("ToDrop = %v, want %v", plan.ToDrop, wantDrop)
+	}
+	wantProtected := []string{"hq", "gascity"}
+	if !equalStringSlice(plan.Protected, wantProtected) {
+		t.Errorf("Protected = %v, want %v", plan.Protected, wantProtected)
+	}
+	if len(plan.Skipped) != 0 {
+		t.Errorf("Skipped = %v, want empty", plan.Skipped)
+	}
+}
+
 func TestPlanDoltDrops_SkipsInvalidDropIdentifiers(t *testing.T) {
 	all := []string{
 		"testdb_valid_1",
@@ -163,7 +188,10 @@ func TestPlanDoltDrops_EmptyInputsProduceEmptyPlan(t *testing.T) {
 func TestDefaultStaleDatabasePrefixes_MirrorsBeadsCleanDatabases(t *testing.T) {
 	// be-hjj-3 is the beads-side bead that converges these prefixes; until
 	// then we mirror beads/cmd/bd/dolt.go:staleDatabasePrefixes.
-	want := []string{"testdb_", "doctest_", "doctortest_", "beads_pt", "beads_vr", "beads_t"}
+	want := []string{
+		"testdb_", "test_guard_", "test_federation_",
+		"doctest_", "doctortest_", "beads_pt", "beads_vr", "beads_t",
+	}
 	if !equalStringSlice(defaultStaleDatabasePrefixes, want) {
 		t.Errorf("defaultStaleDatabasePrefixes = %v, want %v", defaultStaleDatabasePrefixes, want)
 	}

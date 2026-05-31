@@ -1618,6 +1618,8 @@ func liveContractProbeSkipReason(pathTemplate string) string {
 		return "requires a real session/conversation identity"
 	case strings.HasSuffix(pathTemplate, "/orders/history"):
 		return "requires a scoped order name fixture"
+	case strings.Contains(pathTemplate, "/maintenance"):
+		return "requires [maintenance.dolt] enabled=true in city.toml"
 	default:
 		return ""
 	}

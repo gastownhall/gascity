@@ -119,6 +119,46 @@ type StatusSummaryView struct {
 	RunningAgents int
 }
 
+// MaintenanceRunView is the CLI-facing shape of one completed (or failed)
+// Dolt store maintenance run. Times are rendered as RFC3339 UTC strings so
+// the JSON wire is stable across Go version upgrades and the shape is
+// comfortable to diff in operator tooling.
+type MaintenanceRunView struct {
+	StartedAt       string  `json:"started_at"`
+	FinishedAt      string  `json:"finished_at"`
+	Stage           string  `json:"stage"`
+	Err             string  `json:"err,omitempty"`
+	BeforeBytes     int64   `json:"before_bytes"`
+	AfterBytes      int64   `json:"after_bytes"`
+	SnapshotPath    string  `json:"snapshot_path,omitempty"`
+	DurationSeconds float64 `json:"duration_s"`
+}
+
+// MaintenanceStatusView is the CLI-facing response to `gc maintenance
+// status`. History is ordered chronologically (oldest first); LastRun
+// mirrors the newest history entry when present. InFlightStart is populated
+// only while a run is executing; callers use it to tell the user the run
+// already in progress and whether it looks stuck.
+type MaintenanceStatusView struct {
+	Enabled       bool                 `json:"enabled"`
+	IntervalSec   int64                `json:"interval_seconds"`
+	InFlight      bool                 `json:"in_flight"`
+	InFlightStart string               `json:"in_flight_start,omitempty"`
+	LastRun       *MaintenanceRunView  `json:"last_run,omitempty"`
+	NextScheduled string               `json:"next_scheduled,omitempty"`
+	History       []MaintenanceRunView `json:"history"`
+}
+
+// MaintenanceTriggerView is the CLI-facing response body for POST
+// /v0/city/{city}/maintenance/dolt-gc. In async mode (no ?wait=true) the
+// StartedAt field alone is populated and doubles as a run-id; in sync mode
+// the full Run is populated after the cycle completes.
+type MaintenanceTriggerView struct {
+	Accepted  bool                `json:"accepted"`
+	StartedAt string              `json:"started_at,omitempty"`
+	Run       *MaintenanceRunView `json:"run,omitempty"`
+}
+
 // cacheAgeFromResponse extracts the CachingStore age from the response's
 // X-GC-Cache-Age-S header. Returns 0 when the response is nil, the header
 // is absent, or the value fails to parse. The header value is a float64

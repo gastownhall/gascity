@@ -75,16 +75,6 @@ vulnerabilities:
       - "usr/local/bin/kubectl"
     expired_at: 2026-06-12
     statement: Upstream gh, bd, br, dolt, and kubectl embed Go 1.26.2 stdlib; remove once each rebuilds against 1.26.3+ (or 1.25.10+).
-  - id: CVE-2026-44431
-    paths:
-      - "usr/local/lib/python3.12/site-packages/urllib3-2.6.3.dist-info/METADATA"
-    expired_at: 2026-06-12
-    statement: mcp-agent-mail v0.3.2 transitive pin keeps urllib3 on 2.6.3; remove after upstream accepts urllib3 2.7.0 or later.
-  - id: CVE-2026-44432
-    paths:
-      - "usr/local/lib/python3.12/site-packages/urllib3-2.6.3.dist-info/METADATA"
-    expired_at: 2026-06-12
-    statement: mcp-agent-mail v0.3.2 transitive pin keeps urllib3 on 2.6.3; remove after upstream accepts urllib3 2.7.0 or later.
   - id: CVE-2026-41602
     paths:
       - "usr/local/bin/dolt"
@@ -93,8 +83,8 @@ vulnerabilities:
   - id: CVE-2026-34986
     paths:
       - "usr/local/bin/bd"
-    expired_at: 2026-05-29
-    statement: Latest bd v1.0.3 still embeds go-jose v4.1.3; remove after a beads release includes go-jose v4.1.4 or later.
+    expired_at: 2026-06-12
+    statement: Latest bd v1.0.4 still embeds go-jose v4.1.3; remove after a beads release includes go-jose v4.1.4 or later.
   - id: CVE-2026-41602
     paths:
       - "usr/local/bin/bd"

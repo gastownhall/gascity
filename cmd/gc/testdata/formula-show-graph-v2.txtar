@@ -1,0 +1,154 @@
+# gc formula show — a graph.v2 formula must not fail silently.
+#
+# Regression test for the silent exit-1: `gc formula show` on a formula
+# that declares `contract = "graph.v2"` returned the compile error
+# ("formula_v2 is disabled") raw from RunE, where the root command's
+# SilenceErrors swallowed it — producing exit 1 with empty stdout AND
+# empty stderr. The fix prints the compile error to stderr (and the same
+# applies to `gc formula cook`).
+
+env GC_BEADS=file
+env GC_DOLT=skip
+env GC_SESSION=fake
+
+# --- formula_v2 disabled (default): show must emit an actionable diagnostic, not fail silently ---
+exec gc init --file $WORK/city.toml $WORK/no-v2
+cd $WORK/no-v2
+! exec gc formula show graphwf
+stderr 'graph\.v2'
+stderr 'formula_v2'
+! stdout 'Formula: graphwf'
+
+# The structured failure contract must retain the specific compile reason for
+# programmatic callers.
+! exec gc formula show graphwf --json
+stdout '"ok":false'
+stdout 'graph\.v2'
+stdout 'formula_v2'
+! stdout 'command failed; see stderr for diagnostics'
+
+# cook must also surface the diagnostic rather than dying silently.
+# (run inside the no-v2 city so the graph.v2 gate is the failure, not a
+# missing-formula lookup).
+! exec gc formula cook graphwf
+stderr 'graph\.v2'
+stderr 'formula_v2'
+
+! exec gc formula cook graphwf --json
+stdout '"ok":false'
+stdout 'graph\.v2'
+stdout 'formula_v2'
+! stdout 'command failed; see stderr for diagnostics'
+
+# The attach mode has a separate compile branch. Compile happens before attach
+# lookup, so no real bead is needed to cover the diagnostic path.
+! exec gc formula cook graphwf --attach missing-root
+stderr 'graph\.v2'
+stderr 'formula_v2'
+
+! exec gc formula cook graphwf --attach missing-root --json
+stdout '"ok":false'
+stdout 'graph\.v2'
+stdout 'formula_v2'
+! stdout 'command failed; see stderr for diagnostics'
+
+# --- formula_v2 enabled: show compiles and prints the recipe ---
+# (graph.v2 expansion adds synthetic spec/attempt/finalize steps, so the
+# step count is intentionally not asserted exactly — only that the recipe
+# rendered with its header and user-defined step titles.)
+exec gc init --file $WORK/city-v2.toml $WORK/with-v2
+cd $WORK/with-v2
+exec gc formula show graphwf
+stdout 'Formula: graphwf'
+stdout 'Steps \('
+stdout 'Run a lane'
+stdout 'Synthesize'
+
+# Adjacent non-compile errors in the same commands must also surface in text
+# mode instead of returning raw errors that SilenceErrors hides.
+! exec gc formula show graphwf --var mode=bad
+stderr 'gc formula show:'
+stderr 'variable "mode"'
+stderr 'not in allowed values'
+! stdout .
+
+! exec gc formula show graphwf --var mode=bad --json
+stdout '"ok":false'
+stdout 'variable.*mode'
+stdout 'not in allowed values'
+! stderr .
+
+! exec gc formula cook graphwf --attach missing-root
+stderr 'gc formula cook:'
+stderr 'missing-root'
+! stdout .
+
+! exec gc formula cook graphwf --attach missing-root --json
+stdout '"ok":false'
+stdout 'missing-root'
+! stderr .
+
+-- city.toml --
+[workspace]
+name = "no-v2"
+provider = "claude"
+
+[[agent]]
+name = "worker"
+start_command = "echo hello"
+
+-- no-v2/formulas/graphwf.toml --
+formula = "graphwf"
+description = "A graph.v2 workflow"
+version = 2
+contract = "graph.v2"
+
+[vars]
+[vars.mode]
+description = "Mode"
+default = "ok"
+enum = ["ok"]
+
+[[steps]]
+id = "lane"
+title = "Run a lane"
+type = "task"
+
+[[steps]]
+id = "synth"
+title = "Synthesize"
+needs = ["lane"]
+
+-- city-v2.toml --
+[workspace]
+name = "with-v2"
+provider = "claude"
+
+[daemon]
+formula_v2 = true
+
+[[agent]]
+name = "worker"
+start_command = "echo hello"
+
+-- with-v2/formulas/graphwf.toml --
+formula = "graphwf"
+description = "A graph.v2 workflow"
+version = 2
+contract = "graph.v2"
+
+[vars]
+[vars.mode]
+description = "Mode"
+default = "ok"
+enum = ["ok"]
+
+[[steps]]
+id = "lane"
+title = "Run a lane"
+type = "task"
+
+[[steps]]
+id = "synth"
+title = "Synthesize"
+needs = ["lane"]

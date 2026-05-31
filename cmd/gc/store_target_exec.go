@@ -18,9 +18,10 @@ type execStoreTarget struct {
 }
 
 func execProjectedBackendEnvKeys() []string {
-	keys := make([]string, 0, len(projectedDoltEnvKeys)+len(projectedPostgresEnvKeys))
+	keys := make([]string, 0, len(projectedDoltEnvKeys)+len(projectedPostgresEnvKeys)+len(bdCLIRemoteSyncOptOutEnvKeys))
 	keys = append(keys, projectedDoltEnvKeys...)
 	keys = append(keys, projectedPostgresEnvKeys...)
+	keys = appendBdCLIRemoteSyncOptOutEnvKeys(keys)
 	return keys
 }
 
@@ -28,6 +29,7 @@ func setExecProjectedBackendEnvEmpty(env map[string]string) {
 	for _, key := range execProjectedBackendEnvKeys() {
 		env[key] = ""
 	}
+	applyBdCLIRemoteSyncOptOut(env)
 }
 
 func copyExecProjectedBackendEnv(dst, src map[string]string) {

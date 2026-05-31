@@ -512,7 +512,7 @@ func (cr *CityRuntime) run(ctx context.Context) {
 			}
 		}()
 
-		cleanupDeadRuntimeSessionCorpses(sessionBeads, cr.sessionDrains, cr.sp, cr.stderr)
+		cleanupDeadRuntimeSessionCorpses(cr.cityBeadStore(), cr.rigBeadStores(), cr.cfg, sessionBeads, cr.sessionDrains, cr.sp, clock.Real{}, cr.stderr)
 		// Reap live runtimes still bound to a closed bead (e.g. a named-session
 		// identity re-minted as a pool slot) so the name's current owner can
 		// rebind it and attach lands on the right runtime.
@@ -605,6 +605,12 @@ func (cr *CityRuntime) run(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
+		// Record the tick reason for any bd subprocess spawned during
+		// this tick — TraceBDCall reads it to attribute calls to
+		// patrol vs poke. Single-tenant best-effort: restore the
+		// previous value on exit so nested ticks don't lose context.
+		prev := beads.SetReconcilerTickTrigger(trigger)
+		defer beads.RestoreReconcilerTickTrigger(prev)
 		cr.safeTick(func() {
 			cr.tick(ctx, dirty, &lastProviderName, cityRoot, &prevPoolRunning, trigger)
 		}, trigger)
@@ -1027,7 +1033,7 @@ func (cr *CityRuntime) tick(
 	// Reap open session beads whose tmux session is dead before loading demand
 	// so stale names cannot block desired-state computation (#742).
 	phaseStart = time.Now()
-	cleanupDeadRuntimeSessionCorpses(sessionBeads, cr.sessionDrains, cr.sp, cr.stderr)
+	cleanupDeadRuntimeSessionCorpses(cr.cityBeadStore(), cr.rigBeadStores(), cr.cfg, sessionBeads, cr.sessionDrains, cr.sp, clock.Real{}, cr.stderr)
 	recordPhase(TraceSiteControllerTickPhase, "cleanup_dead_runtime_session_corpses", phaseStart, nil)
 	// Reap live runtimes still bound to a closed bead (e.g. a named-session
 	// identity re-minted as a pool slot) so the name's current owner can rebind

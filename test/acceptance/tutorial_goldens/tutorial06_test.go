@@ -31,7 +31,7 @@ func TestTutorial06Beads(t *testing.T) {
 	for _, cmd := range []string{
 		"gc agent add --name helper",
 		"gc agent add --name worker",
-		"gc agent add --name reviewer --dir my-project",
+		"gc agent add --name reviewer",
 	} {
 		if out, err := ws.runShell(cmd, ""); err != nil {
 			t.Fatalf("seed agent scaffold %q: %v\n%s", cmd, err, out)

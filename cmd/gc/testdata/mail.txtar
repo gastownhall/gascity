@@ -64,10 +64,12 @@ stdout 'Body:     yes, working on gc-4'
 exec gc mail read gc-2
 stdout 'Body:     yes, working on gc-4'
 
-# --- Messages are beads: they appear in bead list ---
+# --- Messages are beads: direct bead lookup works ---
 
-exec bd list
+exec bd show gc-1
 stdout 'gc-1'
+
+exec bd show gc-2
 stdout 'gc-2'
 
 # --- Archive a new message ---
@@ -120,10 +122,10 @@ exec gc mail send mayor 'count msg 2'
 exec gc mail count mayor
 stdout '3 total, 2 unread for mayor'
 
-# --- Error: archive nonexistent message ---
+# --- Archive nonexistent message is idempotent ---
 
-! exec gc mail archive gc-999
-stderr 'bead not found'
+exec gc mail archive gc-999
+stdout 'Already archived gc-999'
 
 # --- Error: archive with no args ---
 

@@ -1519,8 +1519,8 @@ find_dolt_pid() {
 
 # allocate_port determines the dolt server port.
 # Resolution order:
-#   1. GC_DOLT_PORT env var (explicit override) → use it
-#   2. State file has a port + PID is alive → reuse it (stable across restarts)
+#   1. State file has a reachable port + PID is alive → reuse it
+#   2. GC_DOLT_PORT env var (initial/operator override) → use it
 #   3. Hash GC_CITY_PATH into range 10000–60000, probe with lsof, increment until free
 allocate_port() {
     local gc_bin helper_port
@@ -1533,21 +1533,23 @@ allocate_port() {
         fi
     fi
 
-    # 1. Explicit override.
-    if [ -n "$GC_DOLT_PORT" ]; then
-        echo "$GC_DOLT_PORT"
-        return
-    fi
-
-    # 2. Provider state port with live PID.
+    # 1. Provider state port with live PID. Long-lived agents can inherit a
+    # stale GC_DOLT_PORT after managed Dolt rolls to a new port, so validated
+    # state wins over the inherited environment.
     if [ -f "$STATE_FILE" ]; then
         local state_port state_pid
         state_port=$(load_state_field port)
         state_pid=$(load_state_field pid)
-        if [ -n "$state_port" ] && [ -n "$state_pid" ] && kill -0 "$state_pid" 2>/dev/null; then
+        if [ -n "$state_port" ] && [ -n "$state_pid" ] && kill -0 "$state_pid" 2>/dev/null && tcp_check_port "$state_port"; then
             echo "$state_port"
             return
         fi
+    fi
+
+    # 2. Explicit override when no live provider state is available.
+    if [ -n "$GC_DOLT_PORT" ]; then
+        echo "$GC_DOLT_PORT"
+        return
     fi
 
     # 3. Deterministic hash of city path, probe until free.

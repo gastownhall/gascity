@@ -32,9 +32,11 @@ import (
 type nudgeFunc func(recipient string) error
 
 const (
-	mailInjectMaxMessages     = 3
-	mailInjectBodyPreviewSize = 240
-	mailInjectPreviewScanSize = 4096
+	mailInjectMaxMessages          = 3
+	mailInjectBodyPreviewSize      = 240
+	mailInjectPreviewScanSize      = 4096
+	mailCheckDegradedNotice        = "[mail check degraded — store slow; run 'gc mail inbox' when the factory load drops]"
+	mailCheckPartialDegradedNotice = "[mail check degraded — partial provider read; run 'gc mail inbox' after the provider recovers]"
 )
 
 type mailInboxJSONResult struct {
@@ -161,11 +163,11 @@ func newMailArchiveCmd(stdout, stderr io.Writer) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "archive <id>...",
 		Short: "Archive one or more messages without reading them",
-		Long: `Close one or more message beads without displaying their contents.
+		Long: `Remove one or more message beads without displaying their contents.
 
-Use this to dismiss messages without reading them. Each message is marked
-as closed and will no longer appear in mail check or inbox results. When
-multiple IDs are passed, they are archived in a single batch round-trip.
+Use this to dismiss messages without reading them. Each message is removed
+and will no longer appear in mail check or inbox results. When multiple IDs
+are passed, they are archived in input order.
 
 For large advisory backlogs, use --to with --subject-prefix, --subject-contains,
 or --from to archive a bounded matching slice without enumerating IDs by hand.`,
@@ -239,10 +241,9 @@ func cmdMailArchiveSelectedJSON(args []string, opts mailArchiveSelectOptions, js
 	return doMailArchiveSelectedJSON(mp, rec, args, opts, jsonOut, stdout, stderr)
 }
 
-// doMailArchive closes one or more message beads. For a single ID the
+// doMailArchive archives one or more message beads. For a single ID the
 // behavior matches the pre-batch CLI byte-for-byte; for two or more IDs it
-// delegates to mp.ArchiveMany for a single-round-trip close and prints one
-// result line per id.
+// delegates to mp.ArchiveMany and prints one result line per id.
 func doMailArchive(mp mail.Provider, rec events.Recorder, args []string, stdout, stderr io.Writer) int {
 	return doMailArchiveJSON(mp, rec, args, false, stdout, stderr)
 }
@@ -539,12 +540,28 @@ func routeMailCheck(_ string, args []string, inject bool, hookFormat string, c *
 	if c != nil {
 		cr, err := c.ListMailInbox(recipient, "")
 		if err == nil {
+			if mailListHasPartial(cr.Body) {
+				logRoute(stderr, cmdName, "api", "error")
+				if inject {
+					notice := formatMailCheckPartialDegradedNotice()
+					if mailListHasStoreSlowPartial(cr.Body) {
+						notice = formatMailCheckDegradedNotice()
+					}
+					_ = writeProviderHookContextForEvent(stdout, hookFormat, "UserPromptSubmit", notice)
+					return 0
+				}
+				fmt.Fprintf(stderr, "gc mail check: %s\n", mailListPartialErrorDetail(cr.Body)) //nolint:errcheck // best-effort stderr
+				return 1
+			}
 			logRoute(stderr, cmdName, "api", "")
 			return renderMailCheckFromAPI(cr, recipient, inject, hookFormat, stdout)
 		}
 		if !api.ShouldFallbackForRead(err) {
 			logRoute(stderr, cmdName, "api", "error")
 			if inject {
+				if api.IsStoreSlowError(err) {
+					_ = writeProviderHookContextForEvent(stdout, hookFormat, "UserPromptSubmit", formatMailCheckDegradedNotice())
+				}
 				return 0
 			}
 			fmt.Fprintf(stderr, "gc mail check: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -562,8 +579,8 @@ func routeMailCheck(_ string, args []string, inject bool, hookFormat string, c *
 // Without --inject, returns 0 if mail exists and 1 if empty, matching the
 // local fallback contract; human output appends a stale-read banner when the
 // supervisor cache is > 30 s old.
-func renderMailCheckFromAPI(cr api.CachedRead[[]mail.Message], recipient string, inject bool, hookFormat string, stdout io.Writer) int {
-	messages := cr.Body
+func renderMailCheckFromAPI(cr api.CachedRead[api.MailListView], recipient string, inject bool, hookFormat string, stdout io.Writer) int {
+	messages := cr.Body.Items
 	if inject {
 		if len(messages) > 0 {
 			_ = writeProviderHookContextForEvent(stdout, hookFormat, "UserPromptSubmit", formatInjectOutput(messages))
@@ -578,6 +595,53 @@ func renderMailCheckFromAPI(cr api.CachedRead[[]mail.Message], recipient string,
 		fmt.Fprintf(stdout, "(cache age: %.0fs — reconciler may be lagging)\n", cr.AgeSeconds) //nolint:errcheck // best-effort stdout
 	}
 	return 0
+}
+
+func mailListHasStoreSlowPartial(view api.MailListView) bool {
+	return mailPartialHasStoreSlow(view.Partial, view.PartialErrors)
+}
+
+func mailListHasPartial(view api.MailListView) bool {
+	return view.Partial || len(view.PartialErrors) > 0
+}
+
+func mailListPartialErrorDetail(view api.MailListView) string {
+	return mailPartialErrorDetail(view.PartialErrors, "partial mail read failed")
+}
+
+func mailCountHasPartial(view api.MailCountView) bool {
+	return view.Partial || len(view.PartialErrors) > 0
+}
+
+func mailCountPartialErrorDetail(view api.MailCountView) string {
+	return mailPartialErrorDetail(view.PartialErrors, "partial mail count failed")
+}
+
+func mailPartialHasStoreSlow(partial bool, partialErrors []string) bool {
+	if !partial {
+		return false
+	}
+	for _, msg := range partialErrors {
+		if strings.Contains(msg, api.StoreSlowErrorCode+":") || strings.HasPrefix(msg, api.StoreSlowErrorCode) {
+			return true
+		}
+	}
+	return false
+}
+
+func mailPartialErrorDetail(partialErrors []string, fallback string) string {
+	if len(partialErrors) == 0 {
+		return fallback
+	}
+	return strings.Join(partialErrors, "; ")
+}
+
+func formatMailCheckDegradedNotice() string {
+	return "<system-reminder>\n" + mailCheckDegradedNotice + "\n</system-reminder>\n"
+}
+
+func formatMailCheckPartialDegradedNotice() string {
+	return "<system-reminder>\n" + mailCheckPartialDegradedNotice + "\n</system-reminder>\n"
 }
 
 // doMailCheckFallback is the direct-bd path for `gc mail check`.
@@ -1370,7 +1434,7 @@ func newMailReadCmd(stdout, stderr io.Writer) *cobra.Command {
 		Long: `Display a message and mark it as read.
 
 Shows the full message details (ID, sender, recipient, subject, date, body).
-The message stays in the store — use "gc mail archive" to permanently close it.`,
+The message stays in the store — use "gc mail archive" to remove it.`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
 			if cmdMailReadWithJSON(args, jsonOut, stdout, stderr) != 0 {
@@ -2219,7 +2283,7 @@ func cmdMailDeleteJSON(args []string, jsonOut bool, stdout, stderr io.Writer) in
 	return doMailDeleteJSON(mp, rec, args, jsonOut, stdout, stderr)
 }
 
-// doMailDelete closes one or more message beads (same as archive but
+// doMailDelete deletes one or more message beads (same as archive but
 // different intent). Single-id behavior matches the pre-batch CLI
 // byte-for-byte; multi-id uses mp.DeleteMany to preserve provider delete
 // semantics.
@@ -2424,6 +2488,11 @@ func routeMailCount(_ string, args []string, c *api.Client, nilReason string, js
 	if c != nil {
 		cr, err := c.CountMail(recipient, "")
 		if err == nil {
+			if mailCountHasPartial(cr.Body) {
+				logRoute(stderr, cmdName, "api", "error")
+				fmt.Fprintf(stderr, "gc mail count: %s\n", mailCountPartialErrorDetail(cr.Body)) //nolint:errcheck // best-effort stderr
+				return 1
+			}
 			logRoute(stderr, cmdName, "api", "")
 			if jsonOut {
 				if err := writeCLIJSONLine(stdout, mailCountJSONResult{

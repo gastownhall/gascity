@@ -49,6 +49,64 @@ func TestGenDocProducesMarkdown(t *testing.T) {
 	}
 }
 
+func TestGenDocImportAddDocumentsSourceLanes(t *testing.T) {
+	var buf bytes.Buffer
+	root := newRootCmd(&buf, &buf)
+
+	var md bytes.Buffer
+	if err := docgen.RenderCLIMarkdown(&md, root); err != nil {
+		t.Fatalf("RenderCLIMarkdown: %v", err)
+	}
+
+	section, ok := cliDocSection(md.String(), "gc import add")
+	if !ok {
+		t.Fatal("missing gc import add section")
+	}
+	for _, want := range []string{
+		"local paths outside git worktrees",
+		"remote git repositories",
+		"remote git repository subpaths",
+		"Registry catalog handles are lookup shortcuts",
+		"source and optional version",
+	} {
+		if !strings.Contains(section, want) {
+			t.Fatalf("gc import add docs missing %q:\n%s", want, section)
+		}
+	}
+}
+
+func TestGenDocImportAddExamplesAvoidRejectedSourceRefs(t *testing.T) {
+	var buf bytes.Buffer
+	root := newRootCmd(&buf, &buf)
+
+	var md bytes.Buffer
+	if err := docgen.RenderCLIMarkdown(&md, root); err != nil {
+		t.Fatalf("RenderCLIMarkdown: %v", err)
+	}
+
+	section, ok := cliDocSection(md.String(), "gc import add")
+	if !ok {
+		t.Fatal("missing gc import add section")
+	}
+	if strings.Contains(section, "GitHub tree") {
+		t.Fatalf("gc import add docs mention rejected GitHub tree URLs:\n%s", section)
+	}
+	for _, line := range strings.Split(section, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "gc import add ") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 4 {
+			t.Fatalf("gc import add example missing source: %q", line)
+		}
+		source := fields[3]
+		if isRemoteImportSource(source) && hasRepositoryRefInSource(source) {
+			t.Fatalf("gc import add example uses rejected source ref %q in:\n%s", source, section)
+		}
+	}
+}
+
 // TestCLIDocsFreshness verifies every non-hidden command in the live cobra
 // tree has a section in docs/reference/cli.md. Catches "added or renamed a
 // command without running go run ./cmd/genschema". Avoids strict byte-equal

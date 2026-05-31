@@ -20,7 +20,7 @@ creating a rig-scoped reviewer:
 
 ```shell
 ~/my-city
-$ gc agent add --name reviewer --dir my-project
+$ gc agent add --name reviewer
 Scaffolded agent 'reviewer'
 
 ~/my-city
@@ -30,11 +30,9 @@ provider = "codex"
 EOF
 ```
 
-This creates both `agents/reviewer/prompt.template.md` and, because `--dir`
-was passed, `agents/reviewer/agent.toml` pre-filled with `dir = "my-project"`.
-Without `--dir`, `agent.toml` is not created — add one later when you want
-per-agent overrides. Here we edit `agent.toml` to add a provider override,
-switching the reviewer from the city's default `claude` provider to `codex`.
+This creates the `agents/reviewer/` scaffold. The `agent.toml` file scopes the
+reviewer to `my-project` and switches it from the city's default `claude`
+provider to `codex`.
 
 <Note>
 This section sets `provider = "codex"`. If you don't have Codex installed and

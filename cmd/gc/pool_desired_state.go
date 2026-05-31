@@ -11,9 +11,12 @@ import (
 
 // SessionRequest represents a single session the reconciler should start.
 type SessionRequest struct {
-	Template      string // agent template qualified name (e.g., "gascity/claude")
-	BeadPriority  int    // priority of the driving work bead
-	Tier          string // "resume" (in-progress work with assigned session) or "new" (ready unassigned work)
+	Template     string // agent template qualified name (e.g., "gascity/claude")
+	BeadPriority int    // priority of the driving work bead
+	// Tier is "resume" for in-progress work with a live session,
+	// "wake-known-identity" for in-progress work whose session exited but
+	// template is configured, or "new" for ready unassigned work.
+	Tier          string
 	SessionBeadID string // concrete session to preserve for resume or in-flight new demand
 	WorkBeadID    string // the work bead driving this request
 }
@@ -109,6 +112,7 @@ func computePoolDesiredStates(
 	}
 
 	var resumeRequests []SessionRequest
+	wakeRequestedTemplates := make(map[string]struct{})
 
 	for i := range cfg.Agents {
 		agent := &cfg.Agents[i]
@@ -123,7 +127,15 @@ func computePoolDesiredStates(
 		// Resume tier: actionable assigned work beads whose assignee resolves
 		// to a non-closed session bead. These sessions must stay alive.
 		for _, wb := range assignedWorkBeads {
-			routedTo := wb.Metadata["gc.routed_to"]
+			// Prefer gc.run_target (per-step target stamped by the cooker
+			// from formula step metadata) over gc.routed_to (convoy entry
+			// agent), mirroring the precedence in dispatch/fanout.go and
+			// dispatch/control.go. Falls back to gc.routed_to for beads
+			// authored before the gc.run_target migration (commit adaf6ec).
+			routedTo := strings.TrimSpace(wb.Metadata["gc.run_target"])
+			if routedTo == "" {
+				routedTo = strings.TrimSpace(wb.Metadata["gc.routed_to"])
+			}
 			if wb.Status != "in_progress" && wb.Status != "open" {
 				continue
 			}
@@ -164,9 +176,29 @@ func computePoolDesiredStates(
 					SessionBeadID: sessionBeadID,
 					WorkBeadID:    wb.ID,
 				})
+				continue
 			}
-			// Else: assignee set but session closed/unknown — orphaned
-			// work, not our job to respawn.
+			if assignee != template || !isKnownPoolTemplate(assignee, cfg) {
+				// Assignee set but session closed/unknown and not a configured
+				// pool template — orphaned work, not our job to respawn.
+				continue
+			}
+			if _, ok := wakeRequestedTemplates[template]; ok {
+				continue
+			}
+			wakeRequestedTemplates[template] = struct{}{}
+			resumeRequests = append(resumeRequests, SessionRequest{
+				Template:     template,
+				BeadPriority: beadPriority(wb),
+				Tier:         "wake-known-identity",
+				WorkBeadID:   wb.ID,
+			})
+			if trace != nil {
+				trace.recordDecision(string(TraceSitePoolWakeKnownIdentity), template, "", "assigned_work", "scheduled", traceRecordPayload{
+					"tier":      "wake-known-identity",
+					"work_bead": wb.ID,
+				}, nil, "")
+			}
 		}
 	}
 
@@ -288,9 +320,9 @@ func applyNestedCaps(cfg *config.City, requests []SessionRequest, trace *session
 		if requests[i].BeadPriority != requests[j].BeadPriority {
 			return requests[i].BeadPriority > requests[j].BeadPriority
 		}
-		// Resume tier before new tier at same priority.
+		// Resume-like tiers before new tier at same priority.
 		if requests[i].Tier != requests[j].Tier {
-			return requests[i].Tier == "resume"
+			return isResumeLikeTier(requests[i].Tier) && !isResumeLikeTier(requests[j].Tier)
 		}
 		return false
 	})
@@ -427,7 +459,7 @@ func acceptedNestedCapUsage(limits nestedCapLimits, requests []SessionRequest) n
 			return sorted[i].BeadPriority > sorted[j].BeadPriority
 		}
 		if sorted[i].Tier != sorted[j].Tier {
-			return sorted[i].Tier == "resume"
+			return isResumeLikeTier(sorted[i].Tier) && !isResumeLikeTier(sorted[j].Tier)
 		}
 		return false
 	})
@@ -528,4 +560,25 @@ func minInt(a, b int) int {
 		return a
 	}
 	return b
+}
+
+func isKnownPoolTemplate(assignee string, cfg *config.City) bool {
+	assignee = strings.TrimSpace(assignee)
+	if assignee == "" || cfg == nil {
+		return false
+	}
+	for i := range cfg.Agents {
+		agent := &cfg.Agents[i]
+		if agent.Suspended || !agent.SupportsGenericEphemeralSessions() {
+			continue
+		}
+		if assignee == agent.QualifiedName() {
+			return true
+		}
+	}
+	return false
+}
+
+func isResumeLikeTier(tier string) bool {
+	return tier == "resume" || tier == "wake-known-identity"
 }

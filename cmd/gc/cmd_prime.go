@@ -317,8 +317,9 @@ func doPrimeWithHookFormat(args []string, stdout, stderr io.Writer, hookMode boo
 				a.InheritedAppendFragments,
 				cfg.AgentDefaults.AppendFragments,
 			)
+			packDirs := cfg.PackDirsForRig(ctx.RigName)
 			prompt := renderPrompt(fsys.OSFS{}, cityPath, cityName, a.PromptTemplate, ctx, cfg.Workspace.SessionTemplate, stderr,
-				cfg.PackDirs, fragments, nil)
+				packDirs, fragments, nil)
 			if prompt != "" {
 				writePrimePromptWithFormat(stdout, cityName, ctx.AgentName, prompt, hookMode, hookFormat, suppressHookPrompt)
 				return 0

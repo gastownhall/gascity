@@ -9,8 +9,9 @@ import (
 	"time"
 )
 
-// ErrAlreadyArchived is returned by [Provider.Archive] when the message
-// has already been archived. CLI code uses this to print a distinct message.
+// ErrAlreadyArchived is returned by [Provider.Archive] when the message has
+// already been archived or deleted. CLI code uses this to print a distinct
+// message.
 var ErrAlreadyArchived = errors.New("already archived")
 
 // ErrNotFound is returned when a message ID does not exist.
@@ -48,8 +49,8 @@ type Message struct {
 }
 
 // ArchiveResult is one message's outcome in a batch [Provider.ArchiveMany] or
-// [Provider.DeleteMany] call. Err is nil for a newly-closed message,
-// [ErrAlreadyArchived] for an idempotent re-close, or a provider error.
+// [Provider.DeleteMany] call. Err is nil for a newly-archived/deleted message,
+// [ErrAlreadyArchived] for an idempotent repeat, or a provider error.
 type ArchiveResult struct {
 	ID  string
 	Err error
@@ -79,7 +80,8 @@ type Provider interface {
 	// MarkUnread marks a message as unread (removes "read" label).
 	MarkUnread(id string) error
 
-	// Archive closes a message bead (removes from all views).
+	// Archive removes a message from all views. Bead-backed implementations
+	// delete the message bead eagerly.
 	Archive(id string) error
 
 	// ArchiveMany archives a batch of messages in one round-trip where the
@@ -87,7 +89,7 @@ type Provider interface {
 	// Implementations MUST preserve per-id error reporting.
 	ArchiveMany(ids []string) ([]ArchiveResult, error)
 
-	// Delete is an alias for Archive (closes the bead).
+	// Delete is an alias for Archive.
 	Delete(id string) error
 
 	// DeleteMany deletes a batch of messages in one round-trip where the
@@ -112,4 +114,10 @@ type Provider interface {
 
 	// Count returns (total, unread) message counts for a recipient.
 	Count(recipient string) (total int, unread int, err error)
+}
+
+// MultiRecipientInboxer is an optional extension for providers that can return
+// unread inbox messages for multiple recipients in one backend pass.
+type MultiRecipientInboxer interface {
+	InboxRecipients(recipients []string) ([]Message, error)
 }

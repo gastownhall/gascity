@@ -1626,7 +1626,8 @@ func rigExclusiveLayers(rigLayers, cityLayers []string) []string {
 
 // qualifyPool resolves a raw pool name from an order TOML to the qualified
 // form used by Agent.QualifiedName() — the same string the scaler queries
-// via gc.routed_to. Three layers of qualification stack:
+// via gc.routed_to. Qualification resolves configured agents before falling
+// back to legacy synthesized routes:
 //
 //  1. If pool already contains "/" it is rig-qualified — pass through.
 //  2. If pool exactly matches a configured binding-qualified target
@@ -1635,12 +1636,11 @@ func rigExclusiveLayers(rigLayers, cityLayers []string) []string {
 //  3. If the order came from an imported pack, prefer same-source agents when
 //     resolving a bare pool name so pack-local orders stay pack-local even if
 //     other scopes also export the same bare agent name.
-//  4. Otherwise look up agents in cfg.Agents whose Dir matches rig
-//     (city orders use rig=="") and Name matches pool. If exactly one target
-//     resolves, swap pool for the binding-qualified form ("binding.name")
-//     before any rig prefixing. This handles V2 pack imports where the
-//     dispatched wisp must carry "binding.name" so the agent's default
-//     scale_check matches its own qualified name.
+//  4. Otherwise look up agents in cfg.Agents whose Dir matches the order
+//     scope and Name matches pool. If a rig order has no rig-scoped match,
+//     fall back to configured city-scoped agents before synthesizing a legacy
+//     rig/pool target. This lets rig orders from city packs target city-scoped
+//     utility pools instead of routing to non-existent rig-local pools.
 //
 // Ambiguity is a hard failure: silently stamping the bare pool string would
 // recreate the exact route/scaler mismatch this helper exists to prevent.
@@ -1669,23 +1669,47 @@ func qualifyPool(pool, rig string, cfg *config.City, sourceDirHint string) (stri
 		return rig + "/" + pool, nil
 	}
 
-	qualified := pool
-	scope := "city order"
-	if rig != "" {
-		scope = fmt.Sprintf("rig %q", rig)
-	}
-
-	var exactQualified []string
-	var sourceScopedMatches []string
-	var localBareMatches []string
-	var bareMatches []string
 	cleanHint := ""
 	if sourceDirHint != "" {
 		cleanHint = filepath.Clean(sourceDirHint)
 	}
+
+	if rig != "" {
+		qualified, matched, err := qualifyPoolInDir(pool, rig, fmt.Sprintf("rig %q", rig), cfg, cleanHint)
+		if err != nil {
+			return "", err
+		}
+		if matched {
+			return rig + "/" + qualified, nil
+		}
+		qualified, matched, err = qualifyPoolInDir(pool, "", "city order", cfg, cleanHint)
+		if err != nil {
+			return "", err
+		}
+		if matched {
+			return qualified, nil
+		}
+		return rig + "/" + pool, nil
+	}
+
+	qualified, matched, err := qualifyPoolInDir(pool, "", "city order", cfg, cleanHint)
+	if err != nil {
+		return "", err
+	}
+	if matched {
+		return qualified, nil
+	}
+	return pool, nil
+}
+
+func qualifyPoolInDir(pool, dir, scope string, cfg *config.City, cleanHint string) (string, bool, error) {
+	var exactQualified []string
+	var sourceScopedMatches []string
+	var localBareMatches []string
+	var bareMatches []string
 	for i := range cfg.Agents {
 		a := &cfg.Agents[i]
-		if a.Dir != rig {
+		if a.Dir != dir {
 			continue
 		}
 		switch {
@@ -1704,27 +1728,23 @@ func qualifyPool(pool, rig string, cfg *config.City, sourceDirHint string) (stri
 
 	switch {
 	case len(exactQualified) == 1:
-		qualified = exactQualified[0]
+		return exactQualified[0], true, nil
 	case len(exactQualified) > 1:
-		return "", fmt.Errorf("ambiguous pool %q for %s: matches %s", pool, scope, strings.Join(exactQualified, ", "))
+		return "", false, fmt.Errorf("ambiguous pool %q for %s: matches %s", pool, scope, strings.Join(exactQualified, ", "))
 	case len(sourceScopedMatches) == 1:
-		qualified = sourceScopedMatches[0]
+		return sourceScopedMatches[0], true, nil
 	case len(sourceScopedMatches) > 1:
-		return "", fmt.Errorf("ambiguous pool %q for %s: matches %s", pool, scope, strings.Join(sourceScopedMatches, ", "))
+		return "", false, fmt.Errorf("ambiguous pool %q for %s: matches %s", pool, scope, strings.Join(sourceScopedMatches, ", "))
 	case len(localBareMatches) == 1:
-		qualified = localBareMatches[0]
+		return localBareMatches[0], true, nil
 	case len(localBareMatches) > 1:
-		return "", fmt.Errorf("ambiguous pool %q for %s: matches %s", pool, scope, strings.Join(localBareMatches, ", "))
+		return "", false, fmt.Errorf("ambiguous pool %q for %s: matches %s", pool, scope, strings.Join(localBareMatches, ", "))
 	case len(bareMatches) == 1:
-		qualified = bareMatches[0]
+		return bareMatches[0], true, nil
 	case len(bareMatches) > 1:
-		return "", fmt.Errorf("ambiguous pool %q for %s: matches %s", pool, scope, strings.Join(bareMatches, ", "))
+		return "", false, fmt.Errorf("ambiguous pool %q for %s: matches %s", pool, scope, strings.Join(bareMatches, ", "))
 	}
-
-	if rig == "" {
-		return qualified, nil
-	}
-	return rig + "/" + qualified, nil
+	return pool, false, nil
 }
 
 func appendUniquePoolTarget(values []string, want string) []string {

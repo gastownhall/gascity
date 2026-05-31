@@ -8,7 +8,9 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/spf13/cobra"
 )
@@ -193,12 +195,22 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 	}
 	cmd.Env = workQueryEnvForDir(env, cmd.Dir)
 
+	traceStart := time.Now()
 	runErr := cmd.Run()
-
+	traceExit := 0
 	if runErr != nil {
 		var exitErr *exec.ExitError
 		if errors.As(runErr, &exitErr) {
-			return exitErr.ExitCode()
+			traceExit = exitErr.ExitCode()
+		} else {
+			traceExit = -1
+		}
+	}
+	beads.TraceBDCall("go:gc-bd-passthrough", target.ScopeRoot, bdArgs, traceStart, traceExit, runErr)
+
+	if runErr != nil {
+		if traceExit > 0 {
+			return traceExit
 		}
 		fmt.Fprintf(stderr, "gc bd: %v\n", runErr) //nolint:errcheck // best-effort stderr
 		return 1

@@ -32,13 +32,12 @@
 #   resolve_dolt_port_or_die  state_file  data_dir  city_path
 #
 # Behavior:
-#   1. If GC_DOLT_PORT is non-empty in the caller's environment, the
-#      function echoes that value and returns 0 (operator override wins,
-#      per NFR-04 of ga-lsois).
-#   2. Otherwise, it calls managed_runtime_port "$state_file" "$data_dir"
-#      and, on a non-empty result, echoes the port and returns 0.
-#   3. Otherwise, if provider_state_file was provided and GC_DOLT_STATE_FILE
+#   1. It calls managed_runtime_port "$state_file" "$data_dir" and, on a
+#      non-empty result, echoes the port and returns 0.
+#   2. Otherwise, if provider_state_file was provided and GC_DOLT_STATE_FILE
 #      did not force a specific state file, it tries the provider state.
+#   3. Otherwise, if GC_DOLT_PORT is non-empty in the caller's environment,
+#      the function echoes that value and returns 0 as an operator seed.
 #   4. Otherwise, it writes the §3 error template to stderr and exits 78.
 #
 # Preconditions (caller must arrange):
@@ -64,11 +63,6 @@ resolve_dolt_port_or_die() {
         _rdp_city_path="$3"
     fi
 
-    if [ -n "${GC_DOLT_PORT:-}" ]; then
-        printf '%s\n' "$GC_DOLT_PORT"
-        return 0
-    fi
-
     _rdp_resolved=$(managed_runtime_port "$_rdp_state_file" "$_rdp_data_dir" 2>/dev/null)
     if [ -n "$_rdp_resolved" ]; then
         printf '%s\n' "$_rdp_resolved"
@@ -83,6 +77,11 @@ resolve_dolt_port_or_die() {
             printf '%s\n' "$_rdp_resolved"
             return 0
         fi
+    fi
+
+    if [ -n "${GC_DOLT_PORT:-}" ]; then
+        printf '%s\n' "$GC_DOLT_PORT"
+        return 0
     fi
 
     _rdp_state_status="missing"

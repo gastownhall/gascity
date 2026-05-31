@@ -49,6 +49,8 @@ func ValidateDurations(cfg *City, source string) []string {
 	check("[daemon]", "wisp_ttl", cfg.Daemon.WispTTL)
 	check("[daemon]", "drift_drain_timeout", cfg.Daemon.DriftDrainTimeout)
 	check("[daemon]", "start_ready_timeout", cfg.Daemon.StartReadyTimeout)
+	check("[daemon]", "dolt_stop_timeout", cfg.Daemon.DoltStopTimeout)
+	check("[daemon]", "dolt_start_address_in_use_retry_window", cfg.Daemon.DoltStartAddressInUseRetryWindow)
 
 	// Orders config durations.
 	check("[orders]", "max_timeout", cfg.Orders.MaxTimeout)
@@ -58,6 +60,10 @@ func ValidateDurations(cfg *City, source string) []string {
 
 	// Chat sessions config durations.
 	check("[chat_sessions]", "idle_timeout", cfg.ChatSessions.IdleTimeout)
+
+	// Maintenance (dolt) config durations.
+	check("[maintenance.dolt]", "interval", cfg.Maintenance.Dolt.Interval)
+	check("[maintenance.dolt]", "gc_timeout", cfg.Maintenance.Dolt.GCTimeout)
 
 	// Session sleep config durations.
 	checkSleep("[session_sleep]", "interactive_resume", cfg.SessionSleep.InteractiveResume)
@@ -112,7 +118,10 @@ func ValidateNonNegativeDurations(cfg *City, source string) error {
 		return nil
 	}
 
-	return checkNonNegative("[daemon]", "dolt_stop_timeout", cfg.Daemon.DoltStopTimeout)
+	if err := checkNonNegative("[daemon]", "dolt_stop_timeout", cfg.Daemon.DoltStopTimeout); err != nil {
+		return err
+	}
+	return checkNonNegative("[daemon]", "dolt_start_address_in_use_retry_window", cfg.Daemon.DoltStartAddressInUseRetryWindow)
 }
 
 // ValidateEventsRotation returns non-fatal warnings for risky but intentional

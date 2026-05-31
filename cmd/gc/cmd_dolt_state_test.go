@@ -264,8 +264,25 @@ func TestDoltStateRuntimeLayoutCmdHonorsProjectedOverrides(t *testing.T) {
 	}
 }
 
+func clearManagedDoltRuntimeEnvForTest(t *testing.T) {
+	t.Helper()
+	for _, key := range []string{
+		"GC_CITY_RUNTIME_DIR",
+		"GC_PACK_STATE_DIR",
+		"GC_DOLT_DATA_DIR",
+		"GC_DOLT_LOG_FILE",
+		"GC_DOLT_STATE_FILE",
+		"GC_DOLT_PID_FILE",
+		"GC_DOLT_LOCK_FILE",
+		"GC_DOLT_CONFIG_FILE",
+	} {
+		t.Setenv(key, "")
+	}
+}
+
 func TestDoltStateAllocatePortCmdHonorsEnvOverride(t *testing.T) {
 	cityPath := t.TempDir()
+	clearManagedDoltRuntimeEnvForTest(t)
 	t.Setenv("GC_DOLT_PORT", "4406")
 
 	var stdout, stderr bytes.Buffer
@@ -275,6 +292,69 @@ func TestDoltStateAllocatePortCmdHonorsEnvOverride(t *testing.T) {
 	}
 	if got := strings.TrimSpace(stdout.String()); got != "4406" {
 		t.Fatalf("allocate-port = %q, want 4406", got)
+	}
+}
+
+func TestDoltStateAllocatePortCmdPrefersLiveProviderStateOverStaleEnv(t *testing.T) {
+	cityPath := t.TempDir()
+	clearManagedDoltRuntimeEnvForTest(t)
+	stateFile := filepath.Join(t.TempDir(), "dolt-provider-state.json")
+	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
+	if err != nil {
+		t.Fatalf("resolveManagedDoltRuntimeLayout: %v", err)
+	}
+	listener := listenOnRandomPort(t)
+	defer listener.Close() //nolint:errcheck // test cleanup
+	port := listener.Addr().(*net.TCPAddr).Port
+	if err := writeDoltRuntimeStateFile(stateFile, doltRuntimeState{
+		Running:   true,
+		PID:       os.Getpid(),
+		Port:      port,
+		DataDir:   layout.DataDir,
+		StartedAt: time.Now().UTC().Format(time.RFC3339),
+	}); err != nil {
+		t.Fatalf("writeDoltRuntimeStateFile: %v", err)
+	}
+	t.Setenv("GC_DOLT_PORT", "4406")
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"dolt-state", "allocate-port", "--city", cityPath, "--state-file", stateFile}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("run() = %d, stderr = %s", code, stderr.String())
+	}
+	if got := strings.TrimSpace(stdout.String()); got != strconv.Itoa(port) {
+		t.Fatalf("allocate-port = %q, want live provider state port %d", got, port)
+	}
+}
+
+func TestChooseManagedDoltPortPrefersLiveProviderStateOverStaleEnv(t *testing.T) {
+	cityPath := t.TempDir()
+	clearManagedDoltRuntimeEnvForTest(t)
+	stateFile := filepath.Join(t.TempDir(), "dolt-provider-state.json")
+	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
+	if err != nil {
+		t.Fatalf("resolveManagedDoltRuntimeLayout: %v", err)
+	}
+	listener := listenOnRandomPort(t)
+	defer listener.Close() //nolint:errcheck // test cleanup
+	port := listener.Addr().(*net.TCPAddr).Port
+	if err := writeDoltRuntimeStateFile(stateFile, doltRuntimeState{
+		Running:   true,
+		PID:       os.Getpid(),
+		Port:      port,
+		DataDir:   layout.DataDir,
+		StartedAt: time.Now().UTC().Format(time.RFC3339),
+	}); err != nil {
+		t.Fatalf("writeDoltRuntimeStateFile: %v", err)
+	}
+	t.Setenv("GC_DOLT_PORT", "4406")
+
+	got, err := chooseManagedDoltPort(cityPath, stateFile)
+	if err != nil {
+		t.Fatalf("chooseManagedDoltPort: %v", err)
+	}
+	if got != strconv.Itoa(port) {
+		t.Fatalf("chooseManagedDoltPort = %q, want live provider state port %d", got, port)
 	}
 }
 

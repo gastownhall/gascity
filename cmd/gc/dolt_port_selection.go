@@ -13,9 +13,7 @@ import (
 
 func chooseManagedDoltPort(cityPath, stateFile string) (string, error) {
 	cityPath = normalizePathForCompare(cityPath)
-	if port := strings.TrimSpace(os.Getenv("GC_DOLT_PORT")); port != "" {
-		return port, nil
-	}
+	envPort := strings.TrimSpace(os.Getenv("GC_DOLT_PORT"))
 
 	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
 	if err != nil {
@@ -72,6 +70,9 @@ func chooseManagedDoltPort(cityPath, stateFile string) (string, error) {
 			}
 			return strconv.Itoa(repaired.Port), nil
 		}
+	}
+	if envPort != "" {
+		return envPort, nil
 	}
 	seed := deterministicManagedDoltPortSeed(cityPath)
 	return strconv.Itoa(nextAvailableManagedDoltPort(seed)), nil
@@ -151,6 +152,29 @@ func nextAvailableManagedDoltPort(seed int) int {
 			port = 10000
 		}
 		if managedDoltPortAvailable(port) {
+			return port
+		}
+		port++
+	}
+	return seed
+}
+
+// nextAvailableManagedDoltPortForHost is the host-aware variant used by
+// startManagedDoltProcessWithOptions after a host-aware wait on the original
+// port has failed. Using the same host as the eventual bind avoids picking a
+// port that probes free on 127.0.0.1 but is actually busy on the bind host
+// (e.g. another process holds 192.168.1.5:X while leaving 127.0.0.1:X free,
+// and dolt is binding 0.0.0.0:X, which would fail). Blank host normalizes
+// to "0.0.0.0" inside managedDoltPortAvailableFn (the indirection over
+// managedDoltPortAvailableForHost) to match the bind default in
+// startManagedDoltProcessWithOptions.
+func nextAvailableManagedDoltPortForHost(host string, seed int) int {
+	port := seed
+	for attempts := 0; attempts < 100; attempts++ {
+		if port > 60000 {
+			port = 10000
+		}
+		if managedDoltPortAvailableFn(host, port) {
 			return port
 		}
 		port++

@@ -20,6 +20,37 @@ gc doctor --verbose   # extra detail
 gc doctor --fix       # attempt automatic repairs
 ```
 
+## Add City-Local Doctor Checks
+
+Use `[[doctor.check]]` in `city.toml` for a workspace-specific health check
+that does not need to be packaged as a reusable pack doctor. Provide the bare
+check name; `gc doctor` adds the `local:` prefix in output.
+
+```toml
+[doctor]
+
+[[doctor.check]]
+name = "gopath-symlink"
+description = "Verify the GOPATH symlink used by local build scripts"
+script = "scripts/check-gopath.sh"
+fix = "scripts/fix-gopath.sh"
+```
+
+The `script` and optional `fix` paths are relative to the city root. Absolute
+paths and paths that escape the city directory are rejected and reported as
+named `StatusError` check results.
+
+Local checks reuse the same script protocol as pack doctor checks:
+
+| Exit code | Result |
+|-----------|--------|
+| 0 | OK |
+| 1 | Warning |
+| 2 or higher | Error |
+
+The first stdout line becomes the check message. Additional stdout lines are
+shown by `gc doctor --verbose`.
+
 ## "command not found" After Install
 
 If `gc` is installed but your shell cannot find it, the binary is not on your
@@ -240,8 +271,8 @@ bead content and should not be shared across cities). Then:
 # Create a private repo on your git host (example: GitHub via gh)
 gh repo create my-city-jsonl-archive --private
 
-# Point the archive at it
-ARCHIVE=$(gc config get state_dir)/packs/maintenance/jsonl-archive
+# Point the archive at it (run from anywhere inside your city)
+ARCHIVE="$(gc status --json | jq -r '.city_path')/.gc/runtime/packs/maintenance/jsonl-archive"
 git -C "$ARCHIVE" remote add origin git@github.com:<you>/my-city-jsonl-archive.git
 
 # Seed the remote with the existing local history

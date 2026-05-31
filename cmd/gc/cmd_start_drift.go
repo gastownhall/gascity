@@ -284,7 +284,11 @@ func runStartDriftCheck(cityPath string, stdout, stderr io.Writer) (int, bool) {
 			SupervisorID: status.BuildID,
 			PackDrifted:  res.PackDrift,
 		})
-		if exeErr != nil {
+		serviceName := supervisorSystemdServiceName()
+		systemdManaged := supervisorSystemctlActive(serviceName)
+		launchdLabel := supervisorLaunchdLabel()
+		launchdManaged := supervisorRuntimeGOOS == "darwin" && supervisorLaunchdActive(launchdLabel)
+		if exeErr != nil && !systemdManaged && !launchdManaged {
 			// We can't safely auto-restart a supervisor whose
 			// /proc/<pid>/exe we can't read — the kernel readlink is
 			// the only reliable way to learn which binary to spawn,
@@ -295,25 +299,28 @@ func runStartDriftCheck(cityPath string, stdout, stderr io.Writer) (int, bool) {
 			// descriptive error rather than the silent
 			// `(unreadable)` fallback so the operator can fix the
 			// uid or opt out via --no-auto-restart.
-			fmt.Fprintf(stderr, "error: cannot auto-restart supervisor: /proc/%d/exe is owned by a different user (permission denied: %v). Either rerun gc start as the supervisor's uid, or pass --no-auto-restart to skip the restart and surface the drift as an error.\n", pid, exeErr) //nolint:errcheck // best-effort stderr
+			printUnreadableSupervisorRestartError(stderr, pid, exeErr)
 			return 1, false
 		}
 		if !recordDriftRestartAttempt(driftRestartHistoryPath(), driftRestartLoopMax, driftRestartLoopWindow, now) {
 			fmt.Fprintln(stderr, "error: supervisor restart loop detected (3 restarts in 60s); refusing further restarts. Investigate the stale state with 'gc trace' and consider 'gc stop --force'.") //nolint:errcheck // best-effort stderr
 			return 1, false
 		}
-		serviceName := supervisorSystemdServiceName()
-		systemdManaged := supervisorSystemctlActive(serviceName)
 		spec := restartSpec{
 			SystemdManaged: systemdManaged,
+			LaunchdManaged: launchdManaged,
 			PID:            pid,
 			ExePath:        exePath,
 			Argv:           []string{"supervisor", "run"},
 			ServiceName:    serviceName,
+			LaunchdLabel:   launchdLabel,
 		}
 		mode := "direct"
-		if systemdManaged {
+		switch {
+		case systemdManaged:
 			mode = "systemd-managed"
+		case launchdManaged:
+			mode = "launchd-managed"
 		}
 		fmt.Fprintf(stdout, "Restarting supervisor (%s)...", mode) //nolint:errcheck // best-effort stdout
 		t0 := time.Now()
@@ -363,6 +370,14 @@ func runStartDriftCheck(cityPath string, stdout, stderr io.Writer) (int, bool) {
 	return 0, true
 }
 
+func printUnreadableSupervisorRestartError(stderr io.Writer, pid int, exeErr error) {
+	if supervisorRuntimeGOOS == "darwin" {
+		fmt.Fprintf(stderr, "error: cannot auto-restart supervisor: macOS cannot resolve the executable path for a direct supervisor (%v). If the supervisor is launchd-managed, rerun 'gc supervisor install' and then 'gc start'; otherwise stop the supervisor manually and rerun 'gc start', or pass --no-auto-restart to skip the restart and surface the drift as an error.\n", exeErr) //nolint:errcheck // best-effort stderr
+		return
+	}
+	fmt.Fprintf(stderr, "error: cannot auto-restart supervisor: /proc/%d/exe is owned by a different user (permission denied: %v). Either rerun gc start as the supervisor's uid, or pass --no-auto-restart to skip the restart and surface the drift as an error.\n", pid, exeErr) //nolint:errcheck // best-effort stderr
+}
+
 // readSupervisorExePath returns the resolved path of the supervisor's
 // executable via /proc/<pid>/exe. The kernel readlink resolves
 // symlinks for us — no extra realpath layer needed.
@@ -400,6 +415,7 @@ func readDaemonAutoRestart(cityPath string) bool {
 func defaultRestartHelpers() restartHelpers {
 	return restartHelpers{
 		Systemctl: supervisorSystemctlRun,
+		Launchctl: supervisorLaunchctlRun,
 		Kill: func(pid int) error {
 			return syscall.Kill(pid, syscall.SIGTERM)
 		},

@@ -88,6 +88,23 @@ func TestCheckTriggerCronNotMatched(t *testing.T) {
 	}
 }
 
+func TestCheckTriggerCronCatchesUpMissedBoundary(t *testing.T) {
+	// Regression (gastown td-4kziysy): a scheduled occurrence elapsed since
+	// lastRun, but the controller evaluates at an off-schedule minute (its
+	// eval cadence did not land in the exact matching minute). Cron must CATCH
+	// UP and fire, the way cooldown's elapsed>=interval does. Unpatched
+	// checkCron returns "schedule not matched" here and silently drops the
+	// slot — which is why a "0 */4 * * *" order missed every boundary for days.
+	a := Order{Name: "stale-db", Trigger: "cron", Schedule: "0 */4 * * *"}
+	lastRun := time.Date(2026, 5, 29, 0, 0, 0, 0, time.UTC) // fired at the 00:00 boundary
+	now := time.Date(2026, 5, 29, 4, 1, 0, 0, time.UTC)     // 04:00 boundary passed; eval at 04:01 (off-minute)
+	lastRunFn := func(_ string) (time.Time, error) { return lastRun, nil }
+	result := CheckTrigger(a, now, lastRunFn, nil, nil)
+	if !result.Due {
+		t.Errorf("Due = false, want true (catch up the missed 04:00 occurrence); reason=%q", result.Reason)
+	}
+}
+
 func TestCheckTriggerCronAlreadyRunThisMinute(t *testing.T) {
 	a := Order{Name: "cleanup", Trigger: "cron", Schedule: "0 3 * * *"}
 	now := time.Date(2026, 2, 27, 3, 0, 30, 0, time.UTC)
