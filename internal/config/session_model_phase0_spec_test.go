@@ -80,8 +80,8 @@ func TestPhase0ConfigDefaults_WorkQueryIsOriginAware(t *testing.T) {
 	if !strings.Contains(got, "ephemeral") {
 		t.Fatalf("EffectiveWorkQuery() = %q, want origin-specific ephemeral generic queue tier", got)
 	}
-	if !strings.Contains(got, "gc.routed_to=myrig/worker") {
-		t.Fatalf("EffectiveWorkQuery() = %q, want qualified config route", got)
+	if !strings.Contains(got, "for key in gc.run_target gc.routed_to") || !strings.Contains(got, "-- myrig/worker") {
+		t.Fatalf("EffectiveWorkQuery() = %q, want qualified config route argument", got)
 	}
 }
 
