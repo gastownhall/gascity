@@ -2111,6 +2111,7 @@ func sweepProcessTableOrphans(
 	sp runtime.Provider,
 	_ *sessionBeadSnapshot,
 	store beads.Store,
+	cityPath string,
 	stderr io.Writer,
 ) int {
 	if sp == nil || store == nil {
@@ -2128,10 +2129,22 @@ func sweepProcessTableOrphans(
 		fmt.Fprintf(stderr, "session reconciler: scanning process table for orphaned runtimes: %v\n", err) //nolint:errcheck
 	}
 
+	cityPath = strings.TrimSpace(cityPath)
 	reaped := 0
 	for _, live := range found {
 		live.SessionID = strings.TrimSpace(live.SessionID)
 		if live.SessionID == "" || live.IsTracked {
+			continue
+		}
+		// The process-table scan is supervisor-wide: it walks all of /proc and
+		// returns every gc session on the host, across every city. But `store`
+		// here is this city's bead store and `sp` is this city's runtime
+		// provider, so a sibling city's live session is invisible to both —
+		// its bead lookup misses and IsTracked is false. Reaping on that basis
+		// SIGTERMs another city's healthy session. Only consider runtimes
+		// positively attributed to this city. When cityPath is unknown we
+		// cannot attribute safely, so fall through to the existing checks.
+		if cityPath != "" && strings.TrimSpace(live.City) != cityPath {
 			continue
 		}
 		bead, err := store.Get(live.SessionID)

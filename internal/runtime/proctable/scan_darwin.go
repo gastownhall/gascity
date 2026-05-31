@@ -39,8 +39,13 @@ func ScanBySessionID(id string) ([]runtime.LiveRuntime, error) {
 			continue
 		}
 		epoch, _ := strconv.Atoi(record.env["GC_RUNTIME_EPOCH"])
+		city := record.env["GC_CITY_PATH"]
+		if city == "" {
+			city = record.env["GC_CITY"]
+		}
 		out = append(out, runtime.LiveRuntime{
 			SessionID: sessionID,
+			City:      city,
 			Epoch:     epoch,
 			PID:       record.pid,
 		})

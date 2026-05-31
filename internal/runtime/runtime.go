@@ -283,6 +283,14 @@ type InterruptBoundaryWaitProvider interface {
 type LiveRuntime struct {
 	// SessionID is the GC_SESSION_ID value from the process environment.
 	SessionID string
+	// City is the GC_CITY_PATH value from the process environment (falling
+	// back to GC_CITY). Empty when neither is readable. The process-table scan
+	// is supervisor-wide (it walks all of /proc), but session beads and tmux
+	// runtime tracking are per-city. A consumer that owns only one city's
+	// store MUST filter scan results to City == its own city before reaping,
+	// or it will mistake another city's live session for an orphan and kill
+	// it.
+	City string
 	// Epoch is the GC_RUNTIME_EPOCH from the process environment, if readable.
 	// Zero if the variable is absent or unparseable.
 	Epoch int
