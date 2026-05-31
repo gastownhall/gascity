@@ -34,3 +34,17 @@ type StoreMaintenanceFailedPayload struct {
 
 // IsEventPayload marks StoreMaintenanceFailedPayload as an events.Payload variant.
 func (StoreMaintenanceFailedPayload) IsEventPayload() {}
+
+// SessionResetStalledPayload is the typed payload for
+// session.reset_stalled events. It identifies the session whose reset
+// completion has stalled and the reset timestamp used to compute the
+// elapsed diagnostic threshold.
+type SessionResetStalledPayload struct {
+	SessionName      string `json:"session_name"`
+	Template         string `json:"template"`
+	ResetCommittedAt string `json:"reset_committed_at"`
+	ElapsedSeconds   int    `json:"elapsed_s"`
+}
+
+// IsEventPayload marks SessionResetStalledPayload as an events.Payload variant.
+func (SessionResetStalledPayload) IsEventPayload() {}
