@@ -140,58 +140,73 @@ When context is filling up and you have incomplete work:
 they) hook it. Your next session sees the mail on the hook and executes those
 instructions immediately. Useful for one-off tasks that don't warrant a full bead.
 
-## Git Workflow: Work Off Main
+## Git Workflow: Branch + PR
 
-**Crew workers push directly to main. No feature branches.**
+**Crew workers work on feature branches and submit PRs against `main`.** No
+direct pushes to `main` — even when you have maintainer access, route through a
+PR so the change has a reviewable diff, a green CI run, and a deliberate merge.
 
-### No PRs in Maintainer Repos
+### The Workflow
 
-If you have direct push access to the repo (you're a maintainer):
-- **NEVER create GitHub PRs** - push directly to main instead
-- Crew workers: push directly to main
-- Polecats: run the done sequence (push, MR bead, close, exit) -> Refinery merges to main
+```bash
+git switch main && git pull             # Start fresh on main
+git switch -c <branch-name>             # Cut a feature branch
+# ... do work ...
+git add <files> && git commit -m "description"
+git push -u origin HEAD                 # Push the branch
+gh pr create --title "..." --body "..." # Open the PR
+# ... address review ...
+gh pr merge --squash --delete-branch    # Or merge via the GitHub UI
+```
 
-PRs are for external contributors submitting to repos they don't own.
-Check `git remote -v` to identify repo ownership.
+After merge, return your clone to a clean state:
+
+```bash
+git switch main && git pull && git remote prune origin
+```
+
+### Why PRs, Not Direct Push
+
+Each project picks its merge model. **The rigs in this town are PR-based**:
+review is expected, CI must pass, and direct pushes to `main` bypass both.
+Crew don't hand work to the Refinery the way polecats do — you shepherd your
+own PR from open to merge.
 
 ### The Landing Rule
 
-> **Work is NOT landed until it's either on `main` or submitted to the Refinery MQ.**
+> **Work is NOT landed until your PR is merged into `main`.**
 
-Feature branches are dangerous in multi-agent environments:
-- The repo baseline can diverge wildly in hours
-- Branches go stale with context cycling
-- Merge conflicts compound exponentially with time
-- Other agents can't see or build on unmerged work
+Open PRs are progress. Merged PRs are landing. Until the merge happens:
 
-**Valid landing states:**
-1. **Pushed to main** - Work is immediately available to all agents
-2. **Submitted to Refinery** - done sequence creates MR bead, Refinery will merge
+- The change isn't on `main`
+- Other agents can't pull it
+- Branches drift, conflicts accumulate
 
-**Invalid states (work is at risk):**
-- Sitting on a local branch
-- Pushed to a remote feature branch but not in MQ
-- "I'll merge it later" - later never comes in agent time
+Don't let PRs sit. Land them or close them; never accumulate orphan branches.
 
-### Workflow
+### Fix-Merging Community PRs
 
-```bash
-git pull                    # Start fresh
-# ... do work ...
-git add -A && git commit -m "description"
-git push                    # Direct to main
+When you take over a community contributor's PR (fix it up and merge), preserve
+their authorship with a `Co-Authored-By` trailer alongside Claude's:
+
+```
+Co-Authored-By: contributor-name <their-email>
+Co-Authored-By: Claude <noreply@anthropic.com>
 ```
 
-If push fails (someone else pushed): `git pull --rebase && git push`
+Without it, their contribution is invisible in `git log`, GitHub's contributor
+graph, and `git shortlog`.
 
 ### Cross-Rig Work (git worktree)
 
-`git worktree add` creates a branch for working in another rig's codebase. This is the
-ONE exception where branches are created. But the rule still applies:
+When you need to touch another rig's code, use `git worktree` — your home
+clone stays on its own branch, and the cross-rig worktree gets its own. Same
+PR rules apply: push the worktree's branch, open a PR against that rig's
+`main`.
 
-- Complete the work in one session if possible
-- Submit to that rig's Refinery immediately when done
-- Never leave cross-rig work sitting on an unmerged branch
+- Complete cross-rig work in one session if possible
+- Don't leave worktree branches sitting unmerged across sessions
+- Remove the worktree when the PR lands
 
 ## gc session nudge: Waking Agents
 
@@ -320,8 +335,8 @@ When you restart, your hook still has your molecule. The handoff mail provides c
 ## Landing the Plane (Session End Protocol)
 
 When ending a session, complete ALL steps below. The plane is NOT landed until
-`git push` succeeds. NEVER stop before pushing. NEVER say "ready to push when
-you are!" - that is a FAILURE. YOU must push, not the user.
+the branch is pushed AND the PR is open (or merged). NEVER stop with unpushed
+work on a local branch — that work is invisible to every other agent.
 
 **MANDATORY WORKFLOW - COMPLETE ALL STEPS:**
 
@@ -347,19 +362,21 @@ you are!" - that is a FAILURE. YOU must push, not the user.
    gc bd close <id> --reason "Completed"
    ```
 
-4. **PUSH TO REMOTE - NON-NEGOTIABLE:**
+4. **PUSH THE BRANCH AND OPEN/UPDATE THE PR — NON-NEGOTIABLE:**
    ```bash
-   git pull --rebase
    git add <files> && git commit -m "description"
-   git push
-   git status   # MUST show "up to date with origin/main"
+   git push -u origin HEAD            # Push your feature branch
+   gh pr create --title "..." --body "..."   # If no PR is open yet
+   # If a PR is already open, `git push` updates it automatically.
+   git status                         # Must show "up to date with origin/<branch>"
    ```
 
    **CRITICAL RULES:**
-   - The plane has NOT landed until `git push` completes successfully
-   - NEVER stop before `git push` - unpushed work breaks multi-agent coordination
+   - The plane has NOT landed until the branch is pushed AND a PR exists
+   - NEVER leave commits sitting only in your local clone — they're invisible
    - NEVER say "ready to push when you are!" - YOU must push, not the user
-   - If `git push` fails, resolve the issue and retry until it succeeds
+   - If `git push` is rejected, `git pull --rebase` and retry until it succeeds
+   - Direct push to `main` is NOT a landing state — only a merged PR is
 
 5. **Clean up git state:**
    ```bash
@@ -382,9 +399,9 @@ you are!" - that is a FAILURE. YOU must push, not the user.
    - What was completed this session
    - What beads were filed for follow-up
    - Status of quality gates (all passing / issues filed)
-   - Confirmation that ALL changes have been pushed to remote
+   - PR URL(s) for the work, and current PR state (open / approved / merged)
 
-**REMEMBER: Landing the plane means EVERYTHING is pushed to remote. No exceptions.**
+**REMEMBER: Landing means the branch is pushed and the PR is open. Merged PRs land the work; unpushed local commits don't.**
 
 ## Desire Paths: Improving the Tooling
 

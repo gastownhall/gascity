@@ -44,30 +44,15 @@ formula_v2 = true
 # name = "myproject"
 # path = "/path/to/your/project"
 
-# Crew members are persistent, individually named workers, so they can't be
-# pack-stamped. Each one is a directory agent under agents/<name>/ plus a
-# named session that keeps it alive. To add a crew member "wolf" bound to a
-# registered rig "myproject":
-#
-#   1. Create agents/wolf/agent.toml (relative paths resolve against this
-#      city directory):
-#
-#        scope = "rig"
-#        dir = "myproject"
-#        nudge = "Check your hook and mail, then act accordingly."
-#        work_dir = ".gc/worktrees/myproject/crew/wolf"
-#        idle_timeout = "4h"
-#        prompt_template = "packs/gastown/assets/prompts/crew.template.md"
-#        pre_start = ["{{.CityRoot}}/packs/gastown/assets/scripts/worktree-setup.sh {{.RigRoot}} {{.WorkDir}} {{.AgentBase}} --sync"]
-#
-#      tmux theming comes from the gastown pack's [global] session_live hooks,
-#      so crew members need no session_setup wiring of their own.
-#
-#   2. Keep the crew session alive by declaring a named session here. The
-#      dir must match the agent's so the session resolves to "myproject/wolf":
+# Crew members are individually named, so they can't be pack-stamped — declare
+# one [[named_session]] per crew member. The gastown pack ships the crew agent
+# template; the dir field pins the member to a specific rig, and the name field
+# yields a unique session per declaration (e.g., dir=myproject + name=wolf →
+# myproject/gastown.wolf).
 #
 # [[named_session]]
-# template = "wolf"
-# dir = "myproject"
+# template = "gastown.crew"
+# name = "wolf"
 # scope = "rig"
+# dir = "myproject"
 # mode = "always"

@@ -1071,3 +1071,56 @@ func TestWithCitySessionLocks_EmptyCityPathSharesIdentifierNamespace(t *testing.
 	}
 	<-acquired
 }
+
+func TestEnsureSessionNameAvailable_RetiredPoolSlotReleasesName(t *testing.T) {
+	store := beads.NewMemStore()
+
+	// A retired/drained ephemeral pool slot: the reconciler closed it without
+	// clearing session_name, and it lacks the configured_named_session marker.
+	// A configured named session materialized through the pool path lands here,
+	// so a dead pool slot must NOT permanently reserve the name.
+	bead, err := store.Create(beads.Bead{
+		Type:   BeadType,
+		Labels: []string{LabelSession},
+		Metadata: map[string]string{
+			"session_name":   "gastown__mayor",
+			"pool_managed":   "true",
+			"session_origin": "ephemeral",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(retired pool slot): %v", err)
+	}
+	if err := store.Close(bead.ID); err != nil {
+		t.Fatalf("Close(retired pool slot): %v", err)
+	}
+
+	if err := ensureSessionNameAvailableForSelfAndOwner(store, "gastown__mayor", "gc-999", ""); err != nil {
+		t.Fatalf("ensureSessionNameAvailableForSelfAndOwner(retired pool slot) = %v, want nil", err)
+	}
+}
+
+func TestEnsureSessionNameAvailable_RejectsClosedNonPoolSession(t *testing.T) {
+	store := beads.NewMemStore()
+
+	// A closed NON-pool session (no pool_managed, no configured_named_session)
+	// keeps its session_name reserved permanently: explicit names are permanent.
+	bead, err := store.Create(beads.Bead{
+		Type:   BeadType,
+		Labels: []string{LabelSession},
+		Metadata: map[string]string{
+			"session_name":   "gastown__mayor",
+			"session_origin": "manual",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(closed non-pool): %v", err)
+	}
+	if err := store.Close(bead.ID); err != nil {
+		t.Fatalf("Close(closed non-pool): %v", err)
+	}
+
+	if err := ensureSessionNameAvailableForSelfAndOwner(store, "gastown__mayor", "gc-999", ""); !errors.Is(err, ErrSessionNameExists) {
+		t.Fatalf("ensureSessionNameAvailableForSelfAndOwner(closed non-pool) = %v, want ErrSessionNameExists", err)
+	}
+}

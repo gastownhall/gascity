@@ -1,0 +1,20 @@
+# Crew worker — persistent, overseer-managed workspace within a rig.
+#
+# Unlike polecat (transient, witness-managed, fresh wake) or witness/refinery
+# (rig-patrol roles), crew exists to give the overseer a long-lived named
+# session per rig with provider context preserved across nudges. The home
+# directory is a full git clone (not a worktree) so the crew member can branch
+# freely and push their own PRs without colliding with other agents.
+#
+# Crew members are declared individually in city.toml as named_sessions with
+# template = "<binding>.crew" and a unique name per declaration. This pack
+# intentionally does NOT ship a [[named_session]] for crew — that would force
+# every rig to host an identically-named crew member.
+scope = "rig"
+wake_mode = "resume"
+work_dir = ".gc/worktrees/{{.Rig}}/crew/{{.AgentBase}}"
+nudge = "Run gc prime; then check your hook and mail."
+pre_start = ["{{.ConfigDir}}/assets/scripts/clone-setup.sh {{.RigRoot}} {{.WorkDir}} {{.AgentBase}}"]
+# No max_active_sessions: each crew member is an explicit [[named_session]] in
+# city.toml. The session count is bounded by the declarations, the same way
+# witness/refinery aren't capped.
