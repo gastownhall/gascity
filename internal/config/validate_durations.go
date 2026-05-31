@@ -55,6 +55,9 @@ func ValidateDurations(cfg *City, source string) []string {
 	// Orders config durations.
 	check("[orders]", "max_timeout", cfg.Orders.MaxTimeout)
 
+	// Mail config durations.
+	check("[mail]", "retention_ttl", cfg.Mail.RetentionTTL)
+
 	// Events config durations.
 	check("[events.rotation]", "archive_retain_age", cfg.Events.Rotation.ArchiveRetainAge)
 

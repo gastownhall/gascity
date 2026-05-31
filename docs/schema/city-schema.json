@@ -1627,6 +1627,10 @@
         "provider": {
           "type": "string",
           "description": "Provider selects the mail backend: \"fake\", \"fail\",\n\"exec:\u003cscript\u003e\", or \"\" (default: beadmail)."
+        },
+        "retention_ttl": {
+          "type": "string",
+          "description": "RetentionTTL is how long read messages are retained before purge. Empty\nor \"0\" disables read-message retention."
         }
       },
       "additionalProperties": false,

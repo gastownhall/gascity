@@ -76,6 +76,25 @@ func TestValidateDurationsBadSessionTimeout(t *testing.T) {
 	}
 }
 
+func TestValidateDurationsBadMailRetentionTTL(t *testing.T) {
+	cfg := &City{
+		Mail: MailConfig{RetentionTTL: "7d"},
+	}
+	warnings := ValidateDurations(cfg, "city.toml")
+	if len(warnings) != 1 {
+		t.Fatalf("expected 1 warning, got %d: %v", len(warnings), warnings)
+	}
+	if !strings.Contains(warnings[0], "[mail]") {
+		t.Errorf("warning should mention section: %s", warnings[0])
+	}
+	if !strings.Contains(warnings[0], "retention_ttl") {
+		t.Errorf("warning should mention field: %s", warnings[0])
+	}
+	if !strings.Contains(warnings[0], "7d") {
+		t.Errorf("warning should mention bad value: %s", warnings[0])
+	}
+}
+
 func TestValidateDurationsBadDaemonFields(t *testing.T) {
 	cfg := &City{
 		Daemon: DaemonConfig{

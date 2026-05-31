@@ -24,6 +24,13 @@ import (
 
 const initPackSchemaVersion = 2
 
+const initMailRetentionExample = `# [mail]
+# retention_ttl controls how long read messages are retained before purge.
+# 0 disables retention; use "168h" for 7 days.
+# "7d" is not a valid Go duration.
+# retention_ttl = "0"
+`
+
 type initPackMeta struct {
 	Name        string                   `toml:"name"`
 	Version     string                   `toml:"version,omitempty"`
@@ -586,6 +593,21 @@ func isZeroValue(v any) bool {
 	return reflect.ValueOf(v).IsZero()
 }
 
+func withInitMailRetentionExample(content []byte) []byte {
+	text := string(content)
+	if strings.Contains(text, "retention_ttl") {
+		return content
+	}
+	if !strings.HasSuffix(text, "\n") {
+		text += "\n"
+	}
+	if !strings.HasSuffix(text, "\n\n") {
+		text += "\n"
+	}
+	text += initMailRetentionExample
+	return []byte(text)
+}
+
 func newInitPackConfig(cityName string) initPackConfig {
 	return initPackConfig{
 		Pack: initPackMeta{
@@ -1012,6 +1034,7 @@ func doInit(fs fsys.FS, cityPath string, wiz wizardConfig, nameOverride string, 
 		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	content = withInitMailRetentionExample(content)
 	logInitProgress(stdout, 4, "Writing pack.toml")
 	wrotePack, err := writeInitPackTomlOpts(fs, cityPath, packCfg, preserveExisting)
 	if err != nil {

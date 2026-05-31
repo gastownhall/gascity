@@ -4428,6 +4428,39 @@ func TestInstallAgentHooksOmittedWhenEmpty(t *testing.T) {
 	}
 }
 
+func TestMailConfigRetentionTTLDuration(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+		want time.Duration
+	}{
+		{name: "empty", raw: "", want: 0},
+		{name: "zero", raw: "0", want: 0},
+		{name: "hours", raw: "168h", want: 168 * time.Hour},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := (MailConfig{RetentionTTL: tt.raw}).RetentionTTLDuration()
+			if err != nil {
+				t.Fatalf("RetentionTTLDuration() error = %v", err)
+			}
+			if got != tt.want {
+				t.Fatalf("RetentionTTLDuration() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestMailConfigRetentionTTLDurationRejectsInvalid(t *testing.T) {
+	_, err := (MailConfig{RetentionTTL: "7d"}).RetentionTTLDuration()
+	if err == nil {
+		t.Fatal("RetentionTTLDuration() succeeded, want error")
+	}
+	if !strings.Contains(err.Error(), "[mail] retention_ttl") || !strings.Contains(err.Error(), "7d") {
+		t.Fatalf("RetentionTTLDuration() error = %q, want field context and bad value", err)
+	}
+}
+
 // --- WispGC config tests ---
 
 func TestDaemonConfig_WispGCDisabledByDefault(t *testing.T) {

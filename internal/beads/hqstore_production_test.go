@@ -232,11 +232,15 @@ func TestHQStoreCoverageMatrix(t *testing.T) {
 func TestHQStoreOptionAndBranchCoverage(t *testing.T) {
 	store, err := beads.OpenHQStore(t.TempDir(),
 		beads.WithHQStoreIDPrefix("custom"),
+		beads.WithHQStoreMailRetentionTTL(2*time.Hour),
 		beads.WithHQStoreTTLInterval(10*time.Millisecond),
 		beads.WithHQStoreSnapshotInterval(0),
 	)
 	if err != nil {
 		t.Fatalf("OpenHQStore: %v", err)
+	}
+	if got := store.MailRetentionTTL(); got != 2*time.Hour {
+		t.Fatalf("MailRetentionTTL() = %v, want 2h", got)
 	}
 	t.Cleanup(func() {
 		if err := store.Shutdown(); err != nil {

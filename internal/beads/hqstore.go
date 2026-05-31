@@ -81,6 +81,7 @@ type HQStore struct {
 	ttlDone     chan struct{}
 
 	closedTaskRetention time.Duration
+	mailRetentionTTL    time.Duration
 
 	snapshotInterval time.Duration
 	snapStop         chan struct{}
@@ -96,6 +97,7 @@ type hqStoreOptions struct {
 	prefix           string
 	ttlInterval      time.Duration
 	closedRetention  time.Duration
+	mailRetentionTTL time.Duration
 	snapshotInterval time.Duration
 }
 
@@ -128,6 +130,15 @@ func WithHQStoreClosedTaskRetention(d time.Duration) HQStoreOption {
 	}
 }
 
+// WithHQStoreMailRetentionTTL sets how long read message wisps remain before
+// the TTL sweeper may delete them. A non-positive duration disables
+// read-message retention sweeping.
+func WithHQStoreMailRetentionTTL(d time.Duration) HQStoreOption {
+	return func(o *hqStoreOptions) {
+		o.mailRetentionTTL = d
+	}
+}
+
 // WithHQStoreSnapshotInterval sets the background snapshot cadence. A
 // non-positive interval disables periodic snapshots; Shutdown still flushes a
 // final snapshot so an orderly close is always durable.
@@ -157,6 +168,7 @@ func OpenHQStore(dir string, opts ...HQStoreOption) (*HQStore, error) {
 		prefix:              cfg.prefix,
 		ttlInterval:         cfg.ttlInterval,
 		closedTaskRetention: cfg.closedRetention,
+		mailRetentionTTL:    cfg.mailRetentionTTL,
 		snapshotInterval:    cfg.snapshotInterval,
 	}
 	store.resetCoreLocked()
@@ -167,6 +179,14 @@ func OpenHQStore(dir string, opts ...HQStoreOption) (*HQStore, error) {
 	store.startSnapshotter()
 	store.startTTLSweeper()
 	return store, nil
+}
+
+// MailRetentionTTL returns the configured read-message retention duration.
+func (s *HQStore) MailRetentionTTL() time.Duration {
+	if s == nil {
+		return 0
+	}
+	return s.mailRetentionTTL
 }
 
 // Counters returns the live HQStore entry counters for test and diagnostic

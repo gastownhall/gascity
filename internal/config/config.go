@@ -1380,6 +1380,26 @@ type MailConfig struct {
 	// Provider selects the mail backend: "fake", "fail",
 	// "exec:<script>", or "" (default: beadmail).
 	Provider string `toml:"provider,omitempty"`
+	// RetentionTTL is how long read messages are retained before purge. Empty
+	// or "0" disables read-message retention.
+	RetentionTTL string `toml:"retention_ttl,omitempty"`
+}
+
+// RetentionTTLDuration parses RetentionTTL as a Go time.Duration. Empty or
+// zero disables read-message retention.
+func (m MailConfig) RetentionTTLDuration() (time.Duration, error) {
+	raw := strings.TrimSpace(m.RetentionTTL)
+	if raw == "" {
+		return 0, nil
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil {
+		return 0, fmt.Errorf("[mail] retention_ttl %q is not a valid Go duration: %w", raw, err)
+	}
+	if d < 0 {
+		return 0, fmt.Errorf("[mail] retention_ttl must not be negative: got %q", raw)
+	}
+	return d, nil
 }
 
 // EventsConfig holds events provider settings.
