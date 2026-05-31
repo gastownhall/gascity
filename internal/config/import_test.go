@@ -1012,6 +1012,52 @@ scope = "city"
 	}
 }
 
+func TestResolvedPackNamesResolvesGitHubTreeImportsFromLockfileCache(t *testing.T) {
+	dir := t.TempDir()
+	home := filepath.Join(dir, "home")
+	t.Setenv("HOME", home)
+
+	cityDir := filepath.Join(dir, "city")
+	mustMkdirAll(t, cityDir, 0o755)
+
+	source := "https://github.com/example/repo/tree/main/gastown"
+	commit := "abc123def456"
+	stubCleanRepoCacheGit(t, commit)
+	cacheDir := filepath.Join(home, ".gc", "cache", "repos", RepoCacheKey(source, commit))
+	mustMkdirAll(t, filepath.Join(cacheDir, ".git"), 0o755)
+	writeTestFile(t, cityDir, "packs.lock", fmt.Sprintf(`
+schema = 1
+
+[packs.%q]
+version = "1.2.3"
+commit = %q
+fetched = "2026-04-10T00:00:00Z"
+`, source, commit))
+	writeTestFile(t, filepath.Join(cacheDir, "gastown"), "pack.toml", `
+[pack]
+name = "gastown"
+schema = 2
+
+[imports.maintenance]
+source = "../maintenance"
+`)
+	writeTestFile(t, filepath.Join(cacheDir, "maintenance"), "pack.toml", `
+[pack]
+name = "maintenance"
+schema = 2
+`)
+
+	names := resolvedPackNames(nil, map[string]Import{
+		"gastown": {Source: source, Version: "^1.2"},
+	}, fsys.OSFS{}, cityDir)
+
+	for _, name := range []string{"gastown", "maintenance"} {
+		if !names[name] {
+			t.Fatalf("resolved pack names = %#v, missing %q", names, name)
+		}
+	}
+}
+
 func TestImport_RootPackRejectsUnknownFields(t *testing.T) {
 	dir := t.TempDir()
 	cityDir := filepath.Join(dir, "city")
