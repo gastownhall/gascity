@@ -146,7 +146,12 @@ func isRootWithSessionID(root string, pid int, sessionID string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	if !ok || ppid <= 1 {
+	if !ok {
+		// stat vanished between environ read and here; process died in the race
+		// window — skip rather than misreport it as a root.
+		return false, nil
+	}
+	if ppid <= 1 {
 		return true, nil
 	}
 	parentEnv, err := parseEnvironFile(filepath.Join(root, strconv.Itoa(ppid), "environ"))
