@@ -1062,7 +1062,7 @@ func clonePriority(v *int) *int {
 // applyVarDefaults merges formula variable defaults with caller-provided
 // vars. Caller values take precedence over defaults.
 func applyVarDefaults(vars map[string]string, defs map[string]*formula.VarDef) map[string]string {
-	result := make(map[string]string, len(vars)+len(defs))
+	result := make(map[string]string)
 	for name, def := range defs {
 		if def != nil && def.Default != nil {
 			result[name] = *def.Default
@@ -1084,7 +1084,7 @@ func ValidateRecipeRuntimeVars(recipe *formula.Recipe, opts Options) error {
 	if len(validationErrs) == 0 && len(titleErrs) == 0 {
 		return nil
 	}
-	errs := make([]string, 0, len(validationErrs)+len(titleErrs))
+	errs := make([]string, 0)
 	errs = append(errs, validationErrs...)
 	errs = append(errs, titleErrs...)
 	return fmt.Errorf("variable validation failed:\n  - %s", strings.Join(errs, "\n  - "))
@@ -1098,7 +1098,7 @@ func runtimeValidationVars(recipe *formula.Recipe, opts Options) map[string]stri
 		return opts.Vars
 	}
 	vars := applyVarDefaults(opts.Vars, recipe.Vars)
-	result := make(map[string]string, len(vars)+1)
+	result := make(map[string]string)
 	for k, v := range vars {
 		result[k] = v
 	}

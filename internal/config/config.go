@@ -17,6 +17,7 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/gastownhall/gascity/internal/pricing"
+	"github.com/gastownhall/gascity/internal/shellquote"
 )
 
 // validAgentName matches names safe for use in session identifiers.
@@ -2805,7 +2806,15 @@ var poolDemandKeys = []string{"gc.run_target", "gc.routed_to"}
 // Callers append their own bd flags (--limit=1 for first-row work_query;
 // --limit 0 piped to jq 'length' for the count-form) and shell handling.
 func bdReadyPoolDemandShell(key, target string) string {
-	return `bd ready --metadata-field ` + key + `=` + target + ` --unassigned --exclude-type=epic --json`
+	return shellquote.Join([]string{
+		"bd",
+		"ready",
+		"--metadata-field",
+		key + "=" + target,
+		"--unassigned",
+		"--exclude-type=epic",
+		"--json",
+	})
 }
 
 // poolDemandFirstRowProbes emits the work_query Tier 3 body for target: it
