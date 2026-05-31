@@ -2047,6 +2047,50 @@ func reapRuntimesBoundToClosedBeads(
 	return reaped
 }
 
+func sweepProcessTableOrphans(
+	sp runtime.Provider,
+	_ *sessionBeadSnapshot,
+	store beads.Store,
+	stderr io.Writer,
+) int {
+	if sp == nil || store == nil {
+		return 0
+	}
+	if stderr == nil {
+		stderr = io.Discard
+	}
+	scanner, ok := sp.(runtime.ProcessTableScanner)
+	if !ok {
+		return 0
+	}
+	found, err := scanner.FindRuntimesBySessionID("")
+	if err != nil {
+		fmt.Fprintf(stderr, "session reconciler: scanning process table for orphaned runtimes: %v\n", err) //nolint:errcheck
+	}
+
+	reaped := 0
+	for _, live := range found {
+		live.SessionID = strings.TrimSpace(live.SessionID)
+		if live.SessionID == "" || live.IsTracked {
+			continue
+		}
+		bead, err := store.Get(live.SessionID)
+		if err == nil && bead.Status != "closed" {
+			continue
+		}
+		if err != nil {
+			fmt.Fprintf(stderr, "session reconciler: looking up process-table orphan session bead %s pid=%d: %v\n", live.SessionID, live.PID, err) //nolint:errcheck
+		}
+		if err := scanner.TerminateRuntime(live); err != nil {
+			fmt.Fprintf(stderr, "session reconciler: terminating process-table orphan pid=%d session=%s: %v\n", live.PID, live.SessionID, err) //nolint:errcheck
+			continue
+		}
+		fmt.Fprintf(stderr, "session reconciler: reaped process-table orphan pid=%d session=%s\n", live.PID, live.SessionID) //nolint:errcheck
+		reaped++
+	}
+	return reaped
+}
+
 func closeSessionBeadIfRuntimeStoppedAndUnassigned(
 	store beads.Store,
 	rigStores map[string]beads.Store,
