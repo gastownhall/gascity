@@ -3027,6 +3027,194 @@ includes = ["packs/rigsup"]
 	}
 }
 
+func TestLoadWithIncludes_SkipsExtraIncludeReachableFromRigPackGraph(t *testing.T) {
+	dir := t.TempDir()
+
+	writeFile(t, dir, "packs/maintenance/pack.toml", `
+[pack]
+name = "maintenance"
+schema = 2
+`)
+	writeFile(t, dir, "packs/maintenance/agents/dog/agent.toml", `
+scope = "city"
+fallback = true
+`)
+
+	writeFile(t, dir, "packs/gastown/pack.toml", `
+[pack]
+name = "gastown"
+schema = 2
+
+[imports.maintenance]
+source = "../maintenance"
+`)
+	writeFile(t, dir, "packs/gastown/agents/polecat/agent.toml", `
+scope = "rig"
+`)
+
+	writeFile(t, dir, "city.toml", `
+[workspace]
+name = "test"
+
+[[rigs]]
+name = "gascity"
+path = "/tmp/gascity"
+includes = ["packs/gastown"]
+`)
+
+	cfg, _, err := LoadWithIncludes(
+		fsys.OSFS{},
+		filepath.Join(dir, "city.toml"),
+		filepath.Join(dir, "packs", "maintenance"),
+	)
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+
+	for _, packDir := range cfg.PackDirs {
+		if filepath.Base(packDir) == "maintenance" {
+			t.Fatalf("maintenance was injected at city scope despite being reachable from rig pack graph: PackDirs=%v RigPackDirs=%v",
+				cfg.PackDirs, cfg.RigPackDirs)
+		}
+	}
+	if got := cfg.RigPackDirs["gascity"]; len(got) != 2 {
+		t.Fatalf("rig pack graph dirs = %v, want gastown plus transitive maintenance", got)
+	}
+}
+
+func TestLoadWithIncludes_SkipsExtraIncludeReachableFromNamedRigPackGraph(t *testing.T) {
+	dir := t.TempDir()
+
+	writeFile(t, dir, "packs/maintenance/pack.toml", `
+[pack]
+name = "maintenance"
+schema = 2
+`)
+	writeFile(t, dir, "packs/maintenance/agents/dog/agent.toml", `
+scope = "city"
+fallback = true
+`)
+
+	writeFile(t, dir, ".gc/cache/packs/maintenance/pack.toml", `
+[pack]
+name = "maintenance"
+schema = 2
+`)
+	writeFile(t, dir, ".gc/cache/packs/maintenance/agents/dog/agent.toml", `
+scope = "city"
+fallback = true
+`)
+
+	writeFile(t, dir, ".gc/cache/packs/gastown/pack.toml", `
+[pack]
+name = "gastown"
+schema = 2
+
+[imports.maintenance]
+source = "../maintenance"
+`)
+	writeFile(t, dir, ".gc/cache/packs/gastown/agents/polecat/agent.toml", `
+scope = "rig"
+`)
+
+	writeFile(t, dir, "city.toml", `
+[workspace]
+name = "test"
+
+[packs.gastown]
+source = "https://example.com/gastown.git"
+
+[[rigs]]
+name = "gascity"
+path = "/tmp/gascity"
+includes = ["gastown"]
+`)
+
+	cfg, _, err := LoadWithIncludes(
+		fsys.OSFS{},
+		filepath.Join(dir, "city.toml"),
+		filepath.Join(dir, "packs", "maintenance"),
+	)
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+
+	for _, packDir := range cfg.PackDirs {
+		if filepath.Base(packDir) == "maintenance" {
+			t.Fatalf("maintenance was injected at city scope despite being reachable from named rig pack graph: PackDirs=%v RigPackDirs=%v",
+				cfg.PackDirs, cfg.RigPackDirs)
+		}
+	}
+	if got := cfg.RigPackDirs["gascity"]; len(got) != 2 {
+		t.Fatalf("rig pack graph dirs = %v, want gastown plus transitive maintenance", got)
+	}
+}
+
+func TestResolvedPackNames_ExpandsRepeatedSourceWhenAnyVisitIsTransitive(t *testing.T) {
+	dir := t.TempDir()
+
+	writeFile(t, dir, "packs/maintenance/pack.toml", `
+[pack]
+name = "maintenance"
+schema = 2
+`)
+	writeFile(t, dir, "packs/shared/pack.toml", `
+[pack]
+name = "shared"
+schema = 2
+
+[imports.maintenance]
+source = "../maintenance"
+`)
+	writeFile(t, dir, "packs/wrapper/pack.toml", `
+[pack]
+name = "wrapper"
+schema = 2
+
+[imports.shared]
+source = "../shared"
+transitive = false
+`)
+
+	names := resolvedPackNames([]string{"packs/wrapper"}, map[string]Import{
+		"shared": {Source: "packs/shared"},
+	}, fsys.OSFS{}, dir)
+
+	if !names["maintenance"] {
+		t.Fatalf("maintenance missing after mixed shallow/deep visits: names=%v", names)
+	}
+}
+
+func TestResolvedPackNames_NonTransitiveImportDoesNotCollectDeepDependency(t *testing.T) {
+	dir := t.TempDir()
+
+	writeFile(t, dir, "packs/maintenance/pack.toml", `
+[pack]
+name = "maintenance"
+schema = 2
+`)
+	writeFile(t, dir, "packs/shared/pack.toml", `
+[pack]
+name = "shared"
+schema = 2
+
+[imports.maintenance]
+source = "../maintenance"
+`)
+
+	transitiveFalse := false
+	names := resolvedPackNames(nil, map[string]Import{
+		"shared": {Source: "packs/shared", Transitive: &transitiveFalse},
+	}, fsys.OSFS{}, dir)
+
+	if !names["shared"] {
+		t.Fatalf("shared missing from non-transitive visit: names=%v", names)
+	}
+	if names["maintenance"] {
+		t.Fatalf("maintenance collected through non-transitive import: names=%v", names)
+	}
+}
+
 // agentNamesOf is a small test helper for readable failure messages.
 func agentNamesOf(agents []Agent) []string {
 	names := make([]string, 0, len(agents))
@@ -4746,5 +4934,100 @@ depends_on = ["db"]
 	// Validation should pass since deps are now qualified.
 	if err := ValidateAgents(cfg.Agents); err != nil {
 		t.Errorf("ValidateAgents failed after pack expansion: %v", err)
+	}
+}
+
+// TestMergeHoistedCityAgents_DedupAcrossBindings covers the topology where a
+// pack (here "maintenance") is imported at the city level under one binding
+// (e.g. "gastown") and ALSO transitively pulled in via rig includes that
+// restamp the binding to something else (e.g. "atlas"). The same underlying
+// agent — same (Dir, Name) — then appears twice with different binding
+// prefixes. Hoist dedup must collapse these by (Dir, Name) because
+// ValidateAgents keys collisions on (Dir, Name), not on QualifiedName.
+//
+// Before the fix, hoist dedup only checked QualifiedName, so "gastown.dog"
+// and "atlas.dog" both survived and ValidateAgents reported a duplicate.
+//
+// The shared Dir mirrors the production reproducer literally: both entries
+// resolve to the same on-disk pack (.../packs/maintenance), which is why the
+// original failure rendered the same path twice in its "duplicate name
+// (from X and X)" message.
+func TestMergeHoistedCityAgents_DedupAcrossBindings(t *testing.T) {
+	const maintenanceDir = "/home/user/.gc/packs/maintenance"
+	agents := []Agent{
+		{Name: "dog", Dir: maintenanceDir, BindingName: "gastown", Scope: "city"},
+	}
+	hoisted := []Agent{
+		{Name: "dog", Dir: maintenanceDir, BindingName: "atlas", Scope: "city"},
+	}
+
+	merged := mergeHoistedCityAgents(agents, hoisted)
+	if len(merged) != 1 {
+		t.Fatalf("merged length = %d, want 1 (city-scope dog should only appear once)", len(merged))
+	}
+	if merged[0].BindingName != "gastown" {
+		t.Errorf("first-occurrence-wins: BindingName = %q, want %q", merged[0].BindingName, "gastown")
+	}
+
+	if err := ValidateAgents(merged); err != nil {
+		t.Errorf("ValidateAgents failed after dedup: %v", err)
+	}
+}
+
+// TestMergeHoistedCityAgents_SameNameDifferentDirPreserved locks the dedup key
+// to (Dir, Name) rather than Name alone. Two agents that share a Name but
+// originate from different on-disk packs are genuinely distinct definitions,
+// so both must survive the hoist. This guards against a future regression that
+// collapses the key down to Name and silently drops a legitimate agent.
+func TestMergeHoistedCityAgents_SameNameDifferentDirPreserved(t *testing.T) {
+	agents := []Agent{
+		{Name: "dog", Dir: "/home/user/.gc/packs/maintenance", BindingName: "gastown", Scope: "city"},
+	}
+	hoisted := []Agent{
+		{Name: "dog", Dir: "/home/user/.gc/packs/atlas", BindingName: "atlas", Scope: "city"},
+	}
+
+	merged := mergeHoistedCityAgents(agents, hoisted)
+	if len(merged) != 2 {
+		t.Fatalf("merged length = %d, want 2 (same Name from different Dir are distinct definitions)", len(merged))
+	}
+}
+
+// TestMergeHoistedCityAgents_DistinctNamesPreserved guards against
+// over-aggressive dedup: hoisted agents with the same binding but different
+// names must all survive.
+func TestMergeHoistedCityAgents_DistinctNamesPreserved(t *testing.T) {
+	agents := []Agent{
+		{Name: "mayor", Dir: "", BindingName: "gastown", Scope: "city"},
+	}
+	hoisted := []Agent{
+		{Name: "deacon", Dir: "", BindingName: "atlas", Scope: "city"},
+		{Name: "boot", Dir: "", BindingName: "atlas", Scope: "city"},
+	}
+
+	merged := mergeHoistedCityAgents(agents, hoisted)
+	if len(merged) != 3 {
+		t.Fatalf("merged length = %d, want 3", len(merged))
+	}
+}
+
+// TestMergeHoistedCityNamedSessions_DedupAcrossBindings mirrors the agent
+// case for named sessions. ValidateNamedSessions does not currently key on
+// BindingName, so a duplicate (Dir, Template) under different bindings
+// would still wedge city startup once the hoist re-introduced the conflict.
+func TestMergeHoistedCityNamedSessions_DedupAcrossBindings(t *testing.T) {
+	sessions := []NamedSession{
+		{Template: "mayor", Dir: "", BindingName: "gastown", Scope: "city"},
+	}
+	hoisted := []NamedSession{
+		{Template: "mayor", Dir: "", BindingName: "atlas", Scope: "city"},
+	}
+
+	merged := mergeHoistedCityNamedSessions(sessions, hoisted)
+	if len(merged) != 1 {
+		t.Fatalf("merged length = %d, want 1", len(merged))
+	}
+	if merged[0].BindingName != "gastown" {
+		t.Errorf("first-occurrence-wins: BindingName = %q, want %q", merged[0].BindingName, "gastown")
 	}
 }

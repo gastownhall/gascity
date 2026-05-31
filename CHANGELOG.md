@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `GC_DOLT_SYNC_PUSH_TIMEOUT_SECS` configures the SQL-mode push wall-clock
+  ceiling for `gc dolt sync` (default 1800s, replacing the prior fixed 120s
+  that SIGKILLed large first pushes). Metadata queries keep their own 120s
+  bound.
+
+### Fixed
+
+- `gc dolt sync` now emits per-mode diagnostics on push failure instead of a
+  generic "push failed": a TIMEOUT message naming the ceiling and
+  `GC_DOLT_SYNC_PUSH_TIMEOUT_SECS` on exit 124, the underlying exit code on
+  other failures, and the underlying dolt stderr. The replayed stderr cannot
+  leak `GC_DOLT_PASSWORD`: the password reaches dolt via the `DOLT_CLI_PASSWORD`
+  environment variable, never as an argv flag. `GC_DOLT_SYNC_PUSH_TIMEOUT_SECS`
+  rejects every numeric-zero form (`0`, `00`, `000`, …) — not just the literal
+  `0` — because GNU `timeout` treats a zero duration as "disable the timeout",
+  which would push unbounded. A failure to create the stderr-capture temp file
+  now degrades to a per-database error rather than aborting the whole run.
+
 ## [1.2.0] - 2026-05-25
 
 ### Added

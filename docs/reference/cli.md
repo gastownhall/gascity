@@ -37,6 +37,7 @@ gc [flags]
 | [gc event](#gc-event) | Event operations |
 | [gc events](#gc-events) | Show events from the GC API |
 | [gc formula](#gc-formula) | Manage and inspect formulas |
+| [gc github](#gc-github) | GitHub integration commands |
 | [gc graph](#gc-graph) | Show dependency graph for beads |
 | [gc handoff](#gc-handoff) | Send handoff mail and restart controller-managed sessions |
 | [gc help](#gc-help) | Help about any command |
@@ -45,6 +46,7 @@ gc [flags]
 | [gc init](#gc-init) | Initialize a new city |
 | [gc lint](#gc-lint) | Validate a pack before merge |
 | [gc mail](#gc-mail) | Send and receive messages between agents and humans |
+| [gc maintenance](#gc-maintenance) | Dolt store maintenance (gc + snapshot) |
 | [gc mcp](#gc-mcp) | Inspect projected MCP config |
 | [gc nudge](#gc-nudge) | Inspect and deliver deferred nudges |
 | [gc order](#gc-order) | Manage orders (scheduled and event-driven dispatch) |
@@ -1365,6 +1367,51 @@ gc formula show <formula-name> [flags]
 | `--json` | bool |  | emit JSON |
 | `--var` | stringArray |  | variable substitution for preview (key=value) |
 
+## gc github
+
+GitHub integration commands
+
+```
+gc github
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| [gc github pr](#gc-github-pr) | GitHub pull-request monitor commands |
+
+## gc github pr
+
+GitHub pull-request monitor commands
+
+```
+gc github pr
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| [gc github pr backfill](#gc-github-pr-backfill) | Query configured GitHub PR readiness monitors |
+
+## gc github pr backfill
+
+Query configured GitHub PR readiness monitors.
+
+The command reads [[github.pr_monitor]] entries from the resolved city
+configuration, queries open pull requests from GitHub, and reports PRs that
+need repair: failed checks, merge conflicts, blocked mergeability, or branches
+behind their base. By default clean and pending-only PRs are omitted; pass
+--all to include every observed PR.
+
+```
+gc github pr backfill [monitor-name] [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--all` | bool |  | include clean and pending-only PRs |
+| `--create-repair-beads` | bool |  | create deduped repair beads for actionable PRs |
+| `--json` | bool |  | emit JSON |
+| `--timeout` | duration | `45s` | GitHub query timeout |
+
 ## gc graph
 
 Show the dependency graph for a set of beads or a convoy.
@@ -1491,10 +1538,36 @@ gc import
 
 ## gc import add
 
-Add a pack import
+Add a pack import.
+
+The source argument is resolved once and written as a durable [imports.&lt;name&gt;]
+entry using source plus optional version. Supported sources are:
+
+- local paths outside git worktrees: stored as plain paths, with no lock entry
+- local paths inside git worktrees at HEAD: promoted to a file:// repo source
+  with the pack subpath and locked to the current commit
+- remote git repositories: cloned and locked; --version accepts a semver
+  constraint or sha:&lt;commit&gt;
+- remote git repository subpaths: use source strings such as
+  github.com/org/repo//packs/foo
+
+Registry catalog handles are lookup shortcuts in this wave, not durable
+[imports.*] field values. After lookup, authored TOML stores the resolved
+source and optional version.
 
 ```
 gc import add <source> [flags]
+```
+
+**Example:**
+
+```
+gc import add ./packs/review
+gc import add github.com/org/repo//packs/review --version '^1.2.0'
+
+# For uncommitted packs inside a git worktree, edit TOML directly:
+# [imports.review]
+# source = "/Users/you/shared-packs/packs/review"
 ```
 
 | Flag | Type | Default | Description |
@@ -1855,6 +1928,47 @@ gc mail thread <id> [flags]
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--json` | bool |  | emit JSON result |
+
+## gc maintenance
+
+Manage periodic Dolt store maintenance (see docs/adr/0002-dolt-store-maintenance-runbook.md).
+
+The weekly loop runs inside the supervisor process when [maintenance.dolt] enabled=true
+in city.toml. 'status' shows loop state and recent runs; 'dolt-gc' triggers a manual run.
+
+```
+gc maintenance
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| [gc maintenance dolt-gc](#gc-maintenance-dolt-gc) | Trigger a Dolt store maintenance run |
+| [gc maintenance status](#gc-maintenance-status) | Show Dolt store maintenance status |
+
+## gc maintenance dolt-gc
+
+Trigger a Dolt store maintenance run
+
+```
+gc maintenance dolt-gc [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--json` | bool |  | emit machine-readable JSON |
+| `--wait` | bool |  | block until the run completes (exit 1 on failure) |
+
+## gc maintenance status
+
+Show Dolt store maintenance status
+
+```
+gc maintenance status [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--json` | bool |  | emit machine-readable JSON |
 
 ## gc mcp
 

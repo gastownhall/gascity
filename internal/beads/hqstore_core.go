@@ -213,26 +213,31 @@ func (s *HQStore) List(query ListQuery) ([]Bead, error) {
 	if !query.HasFilter() && !query.AllowScan {
 		return nil, fmt.Errorf("listing beads: %w", ErrQueryRequiresScan)
 	}
+	// Keep filtered queries on the full path so Limit cannot hide older matches.
+	if query.Sort == SortCreatedDesc && query.Limit > 0 && query.AllowScan && !query.HasFilter() {
+		return s.listRecentDesc(query), nil
+	}
 	s.mu.RLock()
 
 	candidates := s.candidateIDsLocked(query)
-	snapshot := make([]Bead, 0, len(candidates))
+	raw := make([]Bead, 0, len(candidates))
 	for _, id := range s.iterationIDsLocked(query, candidates) {
 		if _, ok := candidates[id]; !ok {
 			continue
 		}
 		if b, ok := s.main[id]; ok {
-			snapshot = append(snapshot, cloneBead(b))
+			raw = append(raw, b)
 			continue
 		}
 		if b, ok := s.wisps[id]; ok {
-			snapshot = append(snapshot, cloneBead(b))
+			raw = append(raw, b)
 		}
 	}
 	s.mu.RUnlock()
 
-	result := make([]Bead, 0, len(snapshot))
-	for _, b := range snapshot {
+	result := make([]Bead, 0, len(raw))
+	for _, b := range raw {
+		b = cloneBead(b)
 		if query.Matches(b) {
 			result = append(result, b)
 		}
@@ -242,6 +247,44 @@ func (s *HQStore) List(query ListQuery) ([]Bead, error) {
 		result = result[:query.Limit]
 	}
 	return result, nil
+}
+
+func (s *HQStore) listRecentDesc(query ListQuery) []Bead {
+	s.mu.RLock()
+	raw := make([]Bead, 0, query.Limit)
+	for i := len(s.order) - 1; i >= 0 && len(raw) < query.Limit; i-- {
+		var b Bead
+		var ok bool
+		id := s.order[i]
+		switch query.TierMode {
+		case TierWisps:
+			b, ok = s.wisps[id]
+		case TierBoth:
+			b, ok = s.main[id]
+			if !ok {
+				b, ok = s.wisps[id]
+			}
+		default:
+			b, ok = s.main[id]
+		}
+		if !ok {
+			continue
+		}
+		if !query.IncludeClosed && b.Status == "closed" {
+			continue
+		}
+		raw = append(raw, b)
+	}
+	s.mu.RUnlock()
+
+	result := make([]Bead, 0, len(raw))
+	for _, b := range raw {
+		b = cloneBead(b)
+		if query.Matches(b) {
+			result = append(result, b)
+		}
+	}
+	return result
 }
 
 // ListOpen returns non-closed beads in creation order by default.
@@ -262,14 +305,14 @@ func (s *HQStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 
 	candidateIDs := s.readyCandidateIDsLocked(q)
 	candidateSet := make(map[string]bool, len(candidateIDs))
-	snapshot := make([]Bead, 0, len(candidateIDs))
+	raw := make([]Bead, 0, len(candidateIDs))
 	for _, id := range candidateIDs {
 		b, ok := s.main[id]
 		if !ok {
 			continue
 		}
 		candidateSet[id] = true
-		snapshot = append(snapshot, cloneBead(b))
+		raw = append(raw, b)
 	}
 	statusByID := make(map[string]string)
 	deps := make([]Dep, 0, len(s.deps))
@@ -285,7 +328,8 @@ func (s *HQStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 	s.mu.RUnlock()
 
 	var result []Bead
-	for _, b := range snapshot {
+	for _, b := range raw {
+		b = cloneBead(b)
 		if b.Status != "open" {
 			continue
 		}
@@ -579,6 +623,9 @@ func (s *HQStore) upsertLocked(b Bead) {
 }
 
 func (s *HQStore) upsertOwnedLocked(b Bead) {
+	// Write-invariant: stored bead reference fields must not be mutated in
+	// place. Mutations go through clone-and-replace so readers can safely
+	// clone shallow struct copies after releasing s.mu.
 	if old, ok := s.main[b.ID]; ok {
 		s.mainIdx.remove(old)
 		delete(s.main, b.ID)

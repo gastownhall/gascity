@@ -977,13 +977,6 @@
           "type": "object",
           "description": "Providers defines named provider presets for agent startup."
         },
-        "packs": {
-          "additionalProperties": {
-            "$ref": "#/$defs/PackSource"
-          },
-          "type": "object",
-          "description": "Packs defines named remote pack sources fetched via git (V1 mechanism)."
-        },
         "imports": {
           "additionalProperties": {
             "$ref": "#/$defs/Import"
@@ -1072,12 +1065,20 @@
           "$ref": "#/$defs/DoctorConfig",
           "description": "Doctor configures gc doctor thresholds and policy toggles\n(worktree size warnings, nested-worktree auto-prune)."
         },
+        "maintenance": {
+          "$ref": "#/$defs/MaintenanceConfig",
+          "description": "Maintenance configures periodic store-maintenance loops."
+        },
         "service": {
           "items": {
             "$ref": "#/$defs/Service"
           },
           "type": "array",
           "description": "Services declares workspace-owned HTTP services mounted on the\ncontroller edge under /svc/{name}."
+        },
+        "github": {
+          "$ref": "#/$defs/GitHubConfig",
+          "description": "GitHub configures GitHub-facing repository monitors."
         },
         "agent_defaults": {
           "$ref": "#/$defs/AgentDefaults",
@@ -1282,6 +1283,31 @@
       "type": "object",
       "description": "DoltConfig holds optional dolt server overrides."
     },
+    "DoltMaintenance": {
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Enabled toggles the maintenance loop. Defaults to false (opt-in)."
+        },
+        "interval": {
+          "type": "string",
+          "description": "Interval is the cadence between maintenance runs as a duration\nstring (e.g., \"168h\"). Defaults to 168h (weekly).",
+          "default": "168h"
+        },
+        "alert_to": {
+          "type": "string",
+          "description": "AlertTo is the agent identity to mail on failure (e.g.,\n\"gascity/mayor\"). Empty disables alert mail."
+        },
+        "gc_timeout": {
+          "type": "string",
+          "description": "GCTimeout is the ceiling for CALL DOLT_GC() as a duration string.\nDefaults to 10m.",
+          "default": "10m"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "DoltMaintenance configures the periodic Dolt store maintenance loop."
+    },
     "EventsConfig": {
       "properties": {
         "provider": {
@@ -1334,15 +1360,171 @@
       "type": "object",
       "description": "FormulasConfig holds legacy formula directory settings."
     },
+    "GitHubConfig": {
+      "properties": {
+        "pr_monitor": {
+          "items": {
+            "$ref": "#/$defs/GitHubPRMonitor"
+          },
+          "type": "array",
+          "description": "PRMonitors declares GitHub pull-request readiness monitors."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "GitHubConfig groups GitHub-facing repository monitor declarations."
+    },
+    "GitHubPRMonitor": {
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Name is the stable monitor identity used by patches and diagnostics."
+        },
+        "owner": {
+          "type": "string",
+          "description": "Owner is the GitHub repository owner or organization."
+        },
+        "repo": {
+          "type": "string",
+          "description": "Repo is the GitHub repository name."
+        },
+        "base_branches": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "BaseBranches lists the base branches this monitor owns."
+        },
+        "rig": {
+          "type": "string",
+          "description": "Rig is the Gas City rig that owns repair work for this repository."
+        },
+        "notify": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "Notify lists session or mail recipients for readiness notifications."
+        },
+        "repair_route": {
+          "type": "string",
+          "description": "RepairRoute is the operator-supplied route target for repair work."
+        },
+        "webhook_secret_env": {
+          "type": "string",
+          "description": "WebhookSecretEnv is the environment variable containing the webhook\nHMAC secret. The secret value itself must not be stored in city.toml."
+        },
+        "webhook_secret_key": {
+          "type": "string",
+          "description": "WebhookSecretKey is an optional stable key for identifying the webhook\nsecret during rotation. When omitted, WebhookSecretEnv is the key."
+        },
+        "poll_interval": {
+          "type": "string",
+          "description": "PollInterval optionally enables bounded polling/backfill cadence."
+        },
+        "merge_queue": {
+          "type": "string",
+          "enum": [
+            "ignore",
+            "observe",
+            "repair"
+          ],
+          "description": "MergeQueuePolicy controls merge-queue signal handling. Empty defaults\nto \"observe\"; valid values are \"ignore\", \"observe\", and \"repair\"."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "name",
+        "owner",
+        "repo",
+        "base_branches",
+        "rig",
+        "repair_route"
+      ],
+      "description": "GitHubPRMonitor declares how one repository/base-branch set is monitored and where durable repair work should be routed when readiness fails."
+    },
+    "GitHubPRMonitorPatch": {
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Name is the monitor identity to patch."
+        },
+        "owner": {
+          "type": "string",
+          "description": "Owner overrides the GitHub repository owner or organization."
+        },
+        "repo": {
+          "type": "string",
+          "description": "Repo overrides the GitHub repository name."
+        },
+        "base_branches": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "BaseBranches replaces the monitored base branch list. An empty list\nclears the field and will fail validation unless another patch fills it."
+        },
+        "rig": {
+          "type": "string",
+          "description": "Rig overrides the owning rig."
+        },
+        "notify": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "Notify replaces notification recipients. An empty list clears recipients."
+        },
+        "notify_append": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "NotifyAppend appends notification recipients after Notify replacement."
+        },
+        "repair_route": {
+          "type": "string",
+          "description": "RepairRoute overrides the repair route target."
+        },
+        "webhook_secret_env": {
+          "type": "string",
+          "description": "WebhookSecretEnv overrides the env var containing the webhook secret."
+        },
+        "webhook_secret_key": {
+          "type": "string",
+          "description": "WebhookSecretKey overrides the stable webhook secret key."
+        },
+        "poll_interval": {
+          "type": "string",
+          "description": "PollInterval overrides the optional polling cadence."
+        },
+        "merge_queue": {
+          "type": "string",
+          "enum": [
+            "ignore",
+            "observe",
+            "repair"
+          ],
+          "description": "MergeQueuePolicy overrides merge-queue signal handling."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "name"
+      ],
+      "description": "GitHubPRMonitorPatch modifies an existing GitHub PR readiness monitor by name."
+    },
     "Import": {
       "properties": {
         "source": {
           "type": "string",
-          "description": "Source is the pack location: a local relative path (e.g.,\n\"./assets/imports/gastown\") or a remote URL (e.g.,\n\"github.com/gastownhall/gastown\"). Local paths have no version."
+          "description": "Source is the durable authored pack location: a local path, a remote git\nURL, or a remote git URL with a monorepo subpath such as\n\"github.com/org/repo//packs/foo\". Registry handles are lookup-only in\nthis release wave; authored [imports.*] entries store the resolved source\nplus optional version."
         },
         "version": {
           "type": "string",
-          "description": "Version is a semver constraint for remote imports (e.g., \"^1.2\").\nEmpty for local paths. \"sha:\u003chex\u003e\" for commit pinning."
+          "description": "Version is an optional semver constraint for git-backed imports (e.g.,\n\"^1.2\"). Empty for local paths. \"sha:\u003chex\u003e\" pins a specific commit."
         },
         "export": {
           "type": "boolean",
@@ -1449,6 +1631,17 @@
       "additionalProperties": false,
       "type": "object",
       "description": "MailConfig holds mail provider settings."
+    },
+    "MaintenanceConfig": {
+      "properties": {
+        "dolt": {
+          "$ref": "#/$defs/DoltMaintenance",
+          "description": "Dolt configures the weekly Dolt store maintenance loop\n(CALL DOLT_GC + backup snapshot)."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "MaintenanceConfig groups periodic store-maintenance subsections."
     },
     "ModelPricing": {
       "properties": {
@@ -1655,28 +1848,6 @@
       "type": "object",
       "description": "PackRigDefaults holds the [defaults.rig] block — defaults applied to rigs created from this pack."
     },
-    "PackSource": {
-      "properties": {
-        "source": {
-          "type": "string",
-          "description": "Source is the git repository URL."
-        },
-        "ref": {
-          "type": "string",
-          "description": "Ref is the git ref to checkout (branch, tag, or commit). Defaults to HEAD."
-        },
-        "path": {
-          "type": "string",
-          "description": "Path is a subdirectory within the repo containing the pack files."
-        }
-      },
-      "additionalProperties": false,
-      "type": "object",
-      "required": [
-        "source"
-      ],
-      "description": "PackSource defines a remote pack repository."
-    },
     "Patches": {
       "properties": {
         "agent": {
@@ -1699,6 +1870,13 @@
           },
           "type": "array",
           "description": "Providers targets providers by name."
+        },
+        "github_pr_monitor": {
+          "items": {
+            "$ref": "#/$defs/GitHubPRMonitorPatch"
+          },
+          "type": "array",
+          "description": "GitHubPRMonitors targets GitHub PR readiness monitors by name."
         }
       },
       "additionalProperties": false,
@@ -2430,5 +2608,5 @@
     }
   },
   "title": "Gas City Configuration",
-  "description": "Schema for city.toml — the PackV2 deployment file for a Gas City instance. Pack definitions live in pack.toml and conventional pack directories such as agents/, formulas/, orders/, and commands/. Use [imports.*] for PackV2 composition; legacy includes, [packs.*], and [[agent]] fields remain visible for migration compatibility.\n\n\u003e **PackV2 format source of truth:** The public PackV2 format and loader semantics are specified in [Gas City Pack Specification (2.0)](/specs/pack-spec)."
+  "description": "Schema for city.toml — the PackV2 deployment file for a Gas City instance. Pack definitions live in pack.toml and conventional pack directories such as agents/, formulas/, orders/, and commands/. Use [imports.*] for PackV2 composition; legacy includes and [[agent]] fields remain visible for migration compatibility. Legacy [packs.*] entries are still accepted by the runtime for migration/fetch compatibility but are intentionally omitted from this public schema.\n\n\u003e **PackV2 format source of truth:** The public PackV2 format and loader semantics are specified in [Gas City Pack Specification (2.0)](/specs/pack-spec)."
 }

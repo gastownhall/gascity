@@ -1678,6 +1678,65 @@ type MailSendInputBody struct {
 	To string `json:"to"`
 }
 
+// MaintenanceRunBody defines model for MaintenanceRunBody.
+type MaintenanceRunBody struct {
+	// AfterBytes Store size in bytes after the run (0 when not measured).
+	AfterBytes int64 `json:"after_bytes"`
+
+	// BeforeBytes Store size in bytes before the run (0 when not measured).
+	BeforeBytes int64 `json:"before_bytes"`
+
+	// DurationS Elapsed wall-clock seconds between started_at and finished_at.
+	DurationS float64 `json:"duration_s"`
+
+	// Err Error message when Stage names a failing phase; empty on success.
+	Err *string `json:"err,omitempty"`
+
+	// FinishedAt RFC3339 timestamp when the run completed.
+	FinishedAt string `json:"finished_at"`
+
+	// SnapshotPath Absolute path to the snapshot directory created for this run.
+	SnapshotPath *string `json:"snapshot_path,omitempty"`
+
+	// Stage Outcome stage: 'done' on success or 'backup'/'gc'/'smoke-test'/'prune' on failure.
+	Stage string `json:"stage"`
+
+	// StartedAt RFC3339 timestamp when the run began.
+	StartedAt string `json:"started_at"`
+}
+
+// MaintenanceStatusBody defines model for MaintenanceStatusBody.
+type MaintenanceStatusBody struct {
+	// Enabled Whether [maintenance.dolt] enabled=true in city.toml.
+	Enabled bool `json:"enabled"`
+
+	// History Bounded ring of recent run outcomes (oldest first).
+	History *[]MaintenanceRunBody `json:"history"`
+
+	// InFlight True when a maintenance cycle is currently running.
+	InFlight bool `json:"in_flight"`
+
+	// InFlightStart RFC3339 start time of the in-flight run.
+	InFlightStart *string `json:"in_flight_start,omitempty"`
+
+	// IntervalSeconds Configured scheduling interval in seconds (0 when disabled).
+	IntervalSeconds int64               `json:"interval_seconds"`
+	LastRun         *MaintenanceRunBody `json:"last_run,omitempty"`
+
+	// NextScheduled RFC3339 approximate next scheduled run time.
+	NextScheduled *string `json:"next_scheduled,omitempty"`
+}
+
+// MaintenanceTriggerBody defines model for MaintenanceTriggerBody.
+type MaintenanceTriggerBody struct {
+	// Accepted True when the supervisor accepted the trigger (202) or completed it (200).
+	Accepted bool                `json:"accepted"`
+	Run      *MaintenanceRunBody `json:"run,omitempty"`
+
+	// StartedAt RFC3339 start time of the triggered run; doubles as a run identifier for async callers.
+	StartedAt *string `json:"started_at,omitempty"`
+}
+
 // Message defines model for Message.
 type Message struct {
 	Body      string    `json:"body"`
@@ -5114,6 +5173,15 @@ type PostV0CityByCityNameMailByIdReadParams struct {
 type ReplyMailParams struct {
 	// Rig Rig hint.
 	Rig *string `form:"rig,omitempty" json:"rig,omitempty"`
+
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+}
+
+// TriggerMaintenanceDoltGcParams defines parameters for TriggerMaintenanceDoltGc.
+type TriggerMaintenanceDoltGcParams struct {
+	// Wait When true, the handler blocks until the run completes and returns 200 with the full Run. When false (default), the handler returns 202 Accepted immediately.
+	Wait *bool `form:"wait,omitempty" json:"wait,omitempty"`
 
 	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
 	XGCRequest string `json:"X-GC-Request"`
@@ -10234,6 +10302,12 @@ type ClientInterface interface {
 
 	ReplyMail(ctx context.Context, cityName string, id string, params *ReplyMailParams, body ReplyMailJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// TriggerMaintenanceDoltGc request
+	TriggerMaintenanceDoltGc(ctx context.Context, cityName string, params *TriggerMaintenanceDoltGcParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// GetV0CityByCityNameMaintenanceStatus request
+	GetV0CityByCityNameMaintenanceStatus(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// GetV0CityByCityNameOrderHistoryByBeadId request
 	GetV0CityByCityNameOrderHistoryByBeadId(ctx context.Context, cityName string, beadId string, params *GetV0CityByCityNameOrderHistoryByBeadIdParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -11695,6 +11769,30 @@ func (c *Client) ReplyMailWithBody(ctx context.Context, cityName string, id stri
 
 func (c *Client) ReplyMail(ctx context.Context, cityName string, id string, params *ReplyMailParams, body ReplyMailJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewReplyMailRequest(c.Server, cityName, id, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) TriggerMaintenanceDoltGc(ctx context.Context, cityName string, params *TriggerMaintenanceDoltGcParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewTriggerMaintenanceDoltGcRequest(c.Server, cityName, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) GetV0CityByCityNameMaintenanceStatus(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetV0CityByCityNameMaintenanceStatusRequest(c.Server, cityName)
 	if err != nil {
 		return nil, err
 	}
@@ -17895,6 +17993,109 @@ func NewReplyMailRequestWithBody(server string, cityName string, id string, para
 	return req, nil
 }
 
+// NewTriggerMaintenanceDoltGcRequest generates requests for TriggerMaintenanceDoltGc
+func NewTriggerMaintenanceDoltGcRequest(server string, cityName string, params *TriggerMaintenanceDoltGcParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "cityName", cityName, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/v0/city/%s/maintenance/dolt-gc", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.Wait != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "wait", *params.Wait, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "boolean", Format: ""}); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
+	}
+
+	return req, nil
+}
+
+// NewGetV0CityByCityNameMaintenanceStatusRequest generates requests for GetV0CityByCityNameMaintenanceStatus
+func NewGetV0CityByCityNameMaintenanceStatusRequest(server string, cityName string) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "cityName", cityName, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/v0/city/%s/maintenance/status", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
 // NewGetV0CityByCityNameOrderHistoryByBeadIdRequest generates requests for GetV0CityByCityNameOrderHistoryByBeadId
 func NewGetV0CityByCityNameOrderHistoryByBeadIdRequest(server string, cityName string, beadId string, params *GetV0CityByCityNameOrderHistoryByBeadIdParams) (*http.Request, error) {
 	var err error
@@ -22275,6 +22476,12 @@ type ClientWithResponsesInterface interface {
 
 	ReplyMailWithResponse(ctx context.Context, cityName string, id string, params *ReplyMailParams, body ReplyMailJSONRequestBody, reqEditors ...RequestEditorFn) (*ReplyMailResponse, error)
 
+	// TriggerMaintenanceDoltGcWithResponse request
+	TriggerMaintenanceDoltGcWithResponse(ctx context.Context, cityName string, params *TriggerMaintenanceDoltGcParams, reqEditors ...RequestEditorFn) (*TriggerMaintenanceDoltGcResponse, error)
+
+	// GetV0CityByCityNameMaintenanceStatusWithResponse request
+	GetV0CityByCityNameMaintenanceStatusWithResponse(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameMaintenanceStatusResponse, error)
+
 	// GetV0CityByCityNameOrderHistoryByBeadIdWithResponse request
 	GetV0CityByCityNameOrderHistoryByBeadIdWithResponse(ctx context.Context, cityName string, beadId string, params *GetV0CityByCityNameOrderHistoryByBeadIdParams, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameOrderHistoryByBeadIdResponse, error)
 
@@ -24272,6 +24479,52 @@ func (r ReplyMailResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r ReplyMailResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type TriggerMaintenanceDoltGcResponse struct {
+	Body                          []byte
+	HTTPResponse                  *http.Response
+	JSON202                       *MaintenanceTriggerBody
+	ApplicationproblemJSONDefault *ErrorModel
+}
+
+// Status returns HTTPResponse.Status
+func (r TriggerMaintenanceDoltGcResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r TriggerMaintenanceDoltGcResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type GetV0CityByCityNameMaintenanceStatusResponse struct {
+	Body                          []byte
+	HTTPResponse                  *http.Response
+	JSON200                       *MaintenanceStatusBody
+	ApplicationproblemJSONDefault *ErrorModel
+}
+
+// Status returns HTTPResponse.Status
+func (r GetV0CityByCityNameMaintenanceStatusResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r GetV0CityByCityNameMaintenanceStatusResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -26739,6 +26992,24 @@ func (c *ClientWithResponses) ReplyMailWithResponse(ctx context.Context, cityNam
 		return nil, err
 	}
 	return ParseReplyMailResponse(rsp)
+}
+
+// TriggerMaintenanceDoltGcWithResponse request returning *TriggerMaintenanceDoltGcResponse
+func (c *ClientWithResponses) TriggerMaintenanceDoltGcWithResponse(ctx context.Context, cityName string, params *TriggerMaintenanceDoltGcParams, reqEditors ...RequestEditorFn) (*TriggerMaintenanceDoltGcResponse, error) {
+	rsp, err := c.TriggerMaintenanceDoltGc(ctx, cityName, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseTriggerMaintenanceDoltGcResponse(rsp)
+}
+
+// GetV0CityByCityNameMaintenanceStatusWithResponse request returning *GetV0CityByCityNameMaintenanceStatusResponse
+func (c *ClientWithResponses) GetV0CityByCityNameMaintenanceStatusWithResponse(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameMaintenanceStatusResponse, error) {
+	rsp, err := c.GetV0CityByCityNameMaintenanceStatus(ctx, cityName, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseGetV0CityByCityNameMaintenanceStatusResponse(rsp)
 }
 
 // GetV0CityByCityNameOrderHistoryByBeadIdWithResponse request returning *GetV0CityByCityNameOrderHistoryByBeadIdResponse
@@ -29980,6 +30251,72 @@ func ParseReplyMailResponse(rsp *http.Response) (*ReplyMailResponse, error) {
 			return nil, err
 		}
 		response.JSON201 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseTriggerMaintenanceDoltGcResponse parses an HTTP response from a TriggerMaintenanceDoltGcWithResponse call
+func ParseTriggerMaintenanceDoltGcResponse(rsp *http.Response) (*TriggerMaintenanceDoltGcResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &TriggerMaintenanceDoltGcResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 202:
+		var dest MaintenanceTriggerBody
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON202 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseGetV0CityByCityNameMaintenanceStatusResponse parses an HTTP response from a GetV0CityByCityNameMaintenanceStatusWithResponse call
+func ParseGetV0CityByCityNameMaintenanceStatusResponse(rsp *http.Response) (*GetV0CityByCityNameMaintenanceStatusResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &GetV0CityByCityNameMaintenanceStatusResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest MaintenanceStatusBody
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
 
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
 		var dest ErrorModel

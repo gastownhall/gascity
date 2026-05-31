@@ -228,6 +228,26 @@ func (m *Manager) persistTransport(id, provider, transport string) {
 	_ = m.store.SetMetadata(id, "transport", transport)
 }
 
+func (m *Manager) killExistingOrphans(ctx context.Context, sessionID string) {
+	_ = ctx
+	scanner, ok := m.sp.(runtime.ProcessTableScanner)
+	if !ok || sessionID == "" {
+		return
+	}
+	found, err := scanner.FindRuntimesBySessionID(sessionID)
+	if err != nil {
+		log.Printf("session: scanning for orphaned runtimes for %s: %v", sessionID, err)
+	}
+	for _, live := range found {
+		if live.IsTracked || live.SessionID != sessionID {
+			continue
+		}
+		if err := scanner.TerminateRuntime(live); err != nil {
+			log.Printf("session: terminating orphaned runtime for %s pid=%d provider_name=%q: %v", sessionID, live.PID, live.ProviderName, err)
+		}
+	}
+}
+
 func (m *Manager) now() time.Time {
 	if m != nil && m.clk != nil {
 		return m.clk.Now()
@@ -509,6 +529,7 @@ func (m *Manager) createAliasedNamedWithTransport(ctx context.Context, alias, ex
 		cfg = runtime.SyncWorkDirEnv(cfg)
 
 		// Start the runtime session.
+		m.killExistingOrphans(ctx, b.ID)
 		if err := m.sp.Start(ctx, sessName, cfg); err != nil {
 			if runtimeSessionMatchesBead(m.sp, sessName, b.ID, meta["instance_token"]) {
 				if metaErr := m.confirmStartedRuntimeMetadata(b.ID, &b); metaErr != nil {

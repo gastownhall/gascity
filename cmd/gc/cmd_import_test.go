@@ -378,6 +378,54 @@ func TestDoImportAddRejectsGitHubTreeSource(t *testing.T) {
 	}
 }
 
+func TestDoImportAddGitHubSubpathWithVersionWritesImport(t *testing.T) {
+	clearGCEnv(t)
+	dir := t.TempDir()
+	writeCityToml(t, dir, "[workspace]\nname = \"demo\"\n")
+
+	prevSync := syncImports
+	t.Cleanup(func() {
+		syncImports = prevSync
+	})
+	source := "github.com/example/tools//packs/review"
+	syncImports = func(_ string, imports map[string]config.Import, _ packman.InstallMode) (*packman.Lockfile, error) {
+		imp, ok := imports["pack:review"]
+		if !ok {
+			t.Fatalf("missing imports.pack:review in %#v", imports)
+		}
+		if imp.Source != source {
+			t.Fatalf("Source = %q, want %q", imp.Source, source)
+		}
+		if imp.Version != "^1.2.0" {
+			t.Fatalf("Version = %q, want ^1.2.0", imp.Version)
+		}
+		return &packman.Lockfile{
+			Schema: packman.LockfileSchema,
+			Packs: map[string]packman.LockedPack{
+				source: {Version: "1.2.3", Commit: "abc123"},
+			},
+		}, nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doImportAdd(fsys.OSFS{}, dir, source, "", "^1.2.0", &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code = %d, stderr = %s", code, stderr.String())
+	}
+
+	cfg, err := config.Load(fsys.OSFS{}, filepath.Join(dir, "pack.toml"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	imp := cfg.Imports["review"]
+	if imp.Source != source {
+		t.Fatalf("Source = %q, want %q", imp.Source, source)
+	}
+	if imp.Version != "^1.2.0" {
+		t.Fatalf("Version = %q, want ^1.2.0", imp.Version)
+	}
+}
+
 func TestDoImportAddPlainDirectoryOmitsVersion(t *testing.T) {
 	clearGCEnv(t)
 	dir := t.TempDir()

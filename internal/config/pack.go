@@ -2487,16 +2487,20 @@ func mergeHoistedCityAgents(agents, hoisted []Agent) []Agent {
 	if len(hoisted) == 0 {
 		return agents
 	}
-	seen := make(map[string]bool, len(agents))
+	seenQN := make(map[string]bool, len(agents))
+	seenDirName := make(map[[2]string]bool, len(agents))
 	for i := range agents {
-		seen[agents[i].QualifiedName()] = true
+		seenQN[agents[i].QualifiedName()] = true
+		seenDirName[[2]string{agents[i].Dir, agents[i].Name}] = true
 	}
 	for _, a := range hoisted {
 		qn := a.QualifiedName()
-		if seen[qn] {
+		dn := [2]string{a.Dir, a.Name}
+		if seenQN[qn] || seenDirName[dn] {
 			continue
 		}
-		seen[qn] = true
+		seenQN[qn] = true
+		seenDirName[dn] = true
 		agents = append(agents, a)
 	}
 	return agents
@@ -2508,16 +2512,20 @@ func mergeHoistedCityNamedSessions(sessions, hoisted []NamedSession) []NamedSess
 	if len(hoisted) == 0 {
 		return sessions
 	}
-	seen := make(map[string]bool, len(sessions))
+	seenQN := make(map[string]bool, len(sessions))
+	seenTpl := make(map[[2]string]bool, len(sessions))
 	for i := range sessions {
-		seen[sessions[i].QualifiedName()] = true
+		seenQN[sessions[i].QualifiedName()] = true
+		seenTpl[[2]string{sessions[i].Dir, sessions[i].Template}] = true
 	}
 	for _, s := range hoisted {
 		qn := s.QualifiedName()
-		if seen[qn] {
+		tpl := [2]string{s.Dir, s.Template}
+		if seenQN[qn] || seenTpl[tpl] {
 			continue
 		}
-		seen[qn] = true
+		seenQN[qn] = true
+		seenTpl[tpl] = true
 		sessions = append(sessions, s)
 	}
 	return sessions

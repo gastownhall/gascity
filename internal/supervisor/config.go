@@ -240,18 +240,15 @@ func seedIsolatedSupervisorConfig(path string) (bool, error) {
 }
 
 func shouldSeedIsolatedSupervisorConfig(path string) bool {
+	// GC_ISOLATED=1 lets non-test CI/dev sandboxes seed private supervisor configs.
+	if !isTestBinary() && os.Getenv("GC_ISOLATED") != "1" {
+		return false
+	}
 	gcHome := os.Getenv("GC_HOME")
 	if gcHome == "" {
 		return false
 	}
-	if !pathutil.SamePath(path, ConfigPath()) {
-		return false
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return true
-	}
-	return !pathutil.SamePath(gcHome, filepath.Join(home, ".gc"))
+	return pathutil.SamePath(path, ConfigPath())
 }
 
 func reserveLoopbackPort() (int, error) {

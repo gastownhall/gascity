@@ -34,6 +34,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/runtime/proctable"
 )
 
 // Provider manages agent sessions as child processes.
@@ -54,7 +55,10 @@ type sessionConn struct {
 }
 
 // Compile-time check.
-var _ runtime.Provider = (*Provider)(nil)
+var (
+	_ runtime.Provider            = (*Provider)(nil)
+	_ runtime.ProcessTableScanner = (*Provider)(nil)
+)
 
 // NewProvider returns a subprocess [Provider] that stores socket files in
 // a default temporary directory. Suitable for production use.
@@ -258,6 +262,53 @@ func (p *Provider) ProcessAlive(name string, processNames []string) bool {
 		return true
 	}
 	return p.IsRunning(name)
+}
+
+// FindRuntimesBySessionID implements [runtime.ProcessTableScanner].
+func (p *Provider) FindRuntimesBySessionID(id string) ([]runtime.LiveRuntime, error) {
+	found, scanErr := proctable.ScanBySessionID(id)
+
+	p.mu.Lock()
+	trackedBySessionID := make(map[string]string)
+	for name, sc := range p.procs {
+		if sc == nil || sc.cmd == nil || !sc.alive() {
+			continue
+		}
+		if sessionID := envValue(sc.cmd.Env, "GC_SESSION_ID"); sessionID != "" {
+			trackedBySessionID[sessionID] = name
+		}
+	}
+	p.mu.Unlock()
+
+	for i := range found {
+		if name, ok := trackedBySessionID[found[i].SessionID]; ok {
+			found[i].IsTracked = true
+			found[i].ProviderName = name
+		}
+	}
+	return found, scanErr
+}
+
+// TerminateRuntime implements [runtime.ProcessTableScanner].
+func (p *Provider) TerminateRuntime(r runtime.LiveRuntime) error {
+	if r.PID <= 1 {
+		return fmt.Errorf("subprocess: invalid PID %d for session %s", r.PID, r.SessionID)
+	}
+	if err := proctable.KillByPID(r.PID); err != nil {
+		return fmt.Errorf("subprocess: terminate runtime PID %d for session %s: %w", r.PID, r.SessionID, err)
+	}
+	return nil
+}
+
+func envValue(env []string, key string) string {
+	prefix := key + "="
+	for i := len(env) - 1; i >= 0; i-- {
+		value := env[i]
+		if strings.HasPrefix(value, prefix) {
+			return value[len(prefix):]
+		}
+	}
+	return ""
 }
 
 // Nudge is not supported by the subprocess provider — there is no

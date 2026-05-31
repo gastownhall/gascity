@@ -28,6 +28,7 @@ import (
 	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/supervisor"
 	"github.com/gastownhall/gascity/internal/workspacesvc"
 )
 
@@ -55,7 +56,8 @@ type controllerState struct {
 	services               workspacesvc.Registry
 	extmsgSvc              *extmsg.Services
 	adapterReg             *extmsg.AdapterRegistry
-	updateMu               sync.Mutex // serializes rebuild+swap so stale reloads cannot overtake newer mutations
+	maintenanceLoop        *supervisor.StoreMaintenanceLoop // nil when [maintenance.dolt] enabled=false
+	updateMu               sync.Mutex                       // serializes rebuild+swap so stale reloads cannot overtake newer mutations
 	beadEventStartSeq      uint64
 
 	// True after an API config mutation refreshes controller state ahead of the
@@ -294,6 +296,42 @@ func (cs *controllerState) startBeadEventWatcher(ctx context.Context) {
 			}
 		}
 	}()
+}
+
+// startMaintenanceLoop launches the periodic Dolt store maintenance
+// loop when [maintenance.dolt] enabled=true in city.toml. When the
+// section is omitted or enabled=false, this is a no-op — the caller
+// invokes it unconditionally so startup stays flat.
+func (cs *controllerState) startMaintenanceLoop(ctx context.Context) {
+	cs.mu.RLock()
+	cfg := cs.cfg
+	store := cs.cityBeadStore
+	cityPath := cs.cityPath
+	mailProv := cs.cityMailProv
+	cs.mu.RUnlock()
+	if cfg == nil || !cfg.Maintenance.Dolt.Enabled {
+		return
+	}
+	deps := supervisor.StoreMaintenanceLoopDeps{
+		Cfg:       cfg.Maintenance.Dolt,
+		Store:     store,
+		CityPath:  cityPath,
+		Recorder:  cs.eventProv,
+		Stderr:    os.Stderr,
+		Mail:      mailProv,
+		LastRunAt: supervisor.SeedLastRunAt(cs.eventProv),
+	}
+	if deps.OpenDoltOps == nil || deps.OpenDoltBackup == nil {
+		fmt.Fprintln(os.Stderr, "store-maintenance: enabled in observe-only mode (snapshot and DOLT_GC not yet wired)")
+	}
+	loop := supervisor.NewStoreMaintenanceLoop(deps)
+	// Retain the handle so the API layer can expose
+	// /v0/city/{city}/maintenance/* (status reads + manual trigger)
+	// without a separate wiring path.
+	cs.mu.Lock()
+	cs.maintenanceLoop = loop
+	cs.mu.Unlock()
+	go loop.Run(ctx)
 }
 
 func (cs *controllerState) applyBeadEventToStores(evt events.Event) {
@@ -647,6 +685,19 @@ func configDropsBoundRigs(current, next *config.City) bool {
 }
 
 // --- api.State implementation ---
+
+// MaintenanceLoop exposes the Dolt store maintenance loop to the API
+// layer, returning nil when [maintenance.dolt] is disabled. The
+// concrete *supervisor.StoreMaintenanceLoop satisfies
+// api.MaintenanceProvider directly.
+func (cs *controllerState) MaintenanceLoop() api.MaintenanceProvider {
+	cs.mu.RLock()
+	defer cs.mu.RUnlock()
+	if cs.maintenanceLoop == nil {
+		return nil
+	}
+	return cs.maintenanceLoop
+}
 
 // Config returns the current city config snapshot.
 func (cs *controllerState) Config() *config.City {

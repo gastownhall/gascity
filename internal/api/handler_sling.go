@@ -173,6 +173,10 @@ func (s *Server) execSling(ctx context.Context, body slingBody, _ string) (*slin
 		if errors.As(err, &crossRigErr) {
 			return nil, http.StatusBadRequest, "cross_rig", err.Error(), nil
 		}
+		var crossStoreErr *sling.CrossStoreRouteError
+		if errors.As(err, &crossStoreErr) {
+			return nil, http.StatusBadRequest, "cross_store", err.Error(), nil
+		}
 		return nil, http.StatusBadRequest, "invalid", err.Error(), nil
 	}
 

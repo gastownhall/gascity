@@ -922,6 +922,221 @@ func TestHealthScriptZombieScanExcludesRigLocalServers(t *testing.T) {
 	}
 }
 
+// TestHealthScriptZombieScanExcludesForeignManagedServers verifies that
+// Dolt servers managed by OTHER cities on the same host are not flagged
+// as zombies. Regression guard for the bug where deacon patrol in every
+// city on a shared dev host counted the other cities' Dolt servers as
+// zombies, because the rig-local PID filter only sees rigs of the calling
+// city. The scan extracts `--config <path>` from the args column of the
+// single bounded `ps -eo` pass and checks for a sibling `dolt.pid`
+// claiming the PID — the same shape gc itself uses when it manages Dolt
+// for any city. This drives the bounded pass (its awk + the matched-server
+// shell loop), NOT a per-PID `ps -p` shim.
+func TestHealthScriptZombieScanExcludesForeignManagedServers(t *testing.T) {
+	cityPath := t.TempDir()
+	foreignCityPath := t.TempDir()
+	fakeBin := t.TempDir()
+
+	mainPort := "19903"
+	mainPID := "424301"
+	foreignPID := "424302"
+	zombiePID := "424303"
+
+	// Foreign city: dolt-config.yaml + dolt.pid sibling claiming foreignPID.
+	foreignDoltDir := filepath.Join(foreignCityPath, ".gc", "runtime", "packs", "dolt")
+	if err := os.MkdirAll(foreignDoltDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	foreignConfigPath := filepath.Join(foreignDoltDir, "dolt-config.yaml")
+	if err := os.WriteFile(foreignConfigPath, []byte("# foreign city dolt config\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(foreignDoltDir, "dolt.pid"),
+		[]byte(foreignPID+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// City .beads directory with metadata.
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "metadata.json"),
+		[]byte(`{"dolt_database":"city"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Fake gc: fail so metadata_files() falls back to find.
+	writeExecutable(t, filepath.Join(fakeBin, "gc"), "#!/bin/sh\nexit 1\n")
+
+	// Fake pgrep: returns main PID, foreign PID, and a true zombie PID.
+	writeExecutable(t, filepath.Join(fakeBin, "pgrep"),
+		fmt.Sprintf("#!/bin/sh\necho %s\necho %s\necho %s\n", mainPID, foreignPID, zombiePID))
+
+	// Fake lsof: maps main port to mainPID.
+	writeExecutable(t, filepath.Join(fakeBin, "lsof"),
+		fmt.Sprintf(`#!/bin/sh
+for arg in "$@"; do
+  case "$arg" in
+    -iTCP:%s) echo %s; exit 0 ;;
+  esac
+done
+exit 1
+`, mainPort, mainPID))
+
+	// Fake ps: the bounded scan calls `ps -eo pid=,stat=,args=`. Emit the
+	// foreign PID's args line WITH `--config <path>` so the awk pass extracts
+	// it; the others are plain sql-servers. Also answer the `-p <pid> -o pid=`
+	// liveness probe used by managed_runtime_listener_pid.
+	writeExecutable(t, filepath.Join(fakeBin, "ps"), fmt.Sprintf(`#!/bin/sh
+if [ "$1" = "-eo" ]; then
+  echo "%s Sl dolt sql-server"
+  echo "%s Sl dolt sql-server --config %s"
+  echo "%s Sl dolt sql-server"
+  exit 0
+fi
+if [ "$1" = "-p" ] && [ "$3" = "-o" ] && [ "$4" = "pid=" ]; then
+  printf ' %%s\n' "$2"
+  exit 0
+fi
+exit 1
+`, mainPID, foreignPID, foreignConfigPath, zombiePID))
+
+	// Fake nc: unreachable (no real server).
+	writeExecutable(t, filepath.Join(fakeBin, "nc"), "#!/bin/sh\nexit 1\n")
+
+	// Fake dolt: SELECT 1 fails (no real server).
+	writeExecutable(t, filepath.Join(fakeBin, "dolt"), "#!/bin/sh\nexit 1\n")
+
+	root := repoRoot(t)
+	cmd := exec.Command("sh", filepath.Join(root, healthScript), "--json")
+	cmd.Env = append(
+		filteredEnv("GC_CITY_PATH", "GC_PACK_DIR", "GC_DOLT_HOST", "GC_DOLT_PORT",
+			"GC_DOLT_USER", "GC_DOLT_PASSWORD", "GC_HEALTH_SKIP_ZOMBIE_SCAN", "PATH"),
+		"GC_CITY_PATH="+cityPath,
+		"GC_PACK_DIR="+root,
+		"GC_DOLT_HOST=127.0.0.1",
+		"GC_DOLT_PORT="+mainPort,
+		"GC_DOLT_USER=root",
+		"GC_DOLT_PASSWORD=",
+		"PATH="+fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"),
+	)
+
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("health.sh failed: %v\n%s", err, out)
+	}
+	output := string(out)
+
+	// Only the true zombie (424303) should be counted; foreign-managed is excluded.
+	if !strings.Contains(output, `"zombie_count": 1`) {
+		t.Errorf("expected zombie_count 1; got:\n%s", output)
+	}
+	if strings.Contains(output, foreignPID) {
+		t.Errorf("foreign-managed Dolt PID %s should not be in zombie_pids; got:\n%s", foreignPID, output)
+	}
+	if !strings.Contains(output, zombiePID) {
+		t.Errorf("true zombie PID %s should be in zombie_pids; got:\n%s", zombiePID, output)
+	}
+}
+
+// TestHealthScriptZombieScanFlagsMismatchedForeignPidFile verifies that
+// when a foreign --config exists but the sibling dolt.pid does NOT match
+// the candidate PID (the recorded process died, a stranger reused the
+// PID, etc.), the candidate is still treated as a zombie. The foreign
+// recognition logic must self-validate against the sibling pid file
+// rather than trust the config-file path alone. Like the test above this
+// drives the bounded `ps -eo` pass, not a per-PID `ps -p` shim.
+func TestHealthScriptZombieScanFlagsMismatchedForeignPidFile(t *testing.T) {
+	cityPath := t.TempDir()
+	foreignCityPath := t.TempDir()
+	fakeBin := t.TempDir()
+
+	mainPort := "19904"
+	mainPID := "424401"
+	suspectPID := "424402"
+	// dolt.pid records a different PID — the sibling claim doesn't match
+	// the candidate, so the candidate is still a zombie.
+	recordedPID := "424499"
+
+	foreignDoltDir := filepath.Join(foreignCityPath, ".gc", "runtime", "packs", "dolt")
+	if err := os.MkdirAll(foreignDoltDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	foreignConfigPath := filepath.Join(foreignDoltDir, "dolt-config.yaml")
+	if err := os.WriteFile(foreignConfigPath, []byte("# foreign city dolt config\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(foreignDoltDir, "dolt.pid"),
+		[]byte(recordedPID+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "metadata.json"),
+		[]byte(`{"dolt_database":"city"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	writeExecutable(t, filepath.Join(fakeBin, "gc"), "#!/bin/sh\nexit 1\n")
+	writeExecutable(t, filepath.Join(fakeBin, "pgrep"),
+		fmt.Sprintf("#!/bin/sh\necho %s\necho %s\n", mainPID, suspectPID))
+	writeExecutable(t, filepath.Join(fakeBin, "lsof"),
+		fmt.Sprintf(`#!/bin/sh
+for arg in "$@"; do
+  case "$arg" in
+    -iTCP:%s) echo %s; exit 0 ;;
+  esac
+done
+exit 1
+`, mainPort, mainPID))
+	// Bounded `ps -eo` pass: the suspect PID carries `--config <path>` but
+	// its sibling dolt.pid records a different PID, so the foreign-managed
+	// check must NOT exclude it.
+	writeExecutable(t, filepath.Join(fakeBin, "ps"), fmt.Sprintf(`#!/bin/sh
+if [ "$1" = "-eo" ]; then
+  echo "%s Sl dolt sql-server"
+  echo "%s Sl dolt sql-server --config %s"
+  exit 0
+fi
+if [ "$1" = "-p" ] && [ "$3" = "-o" ] && [ "$4" = "pid=" ]; then
+  printf ' %%s\n' "$2"
+  exit 0
+fi
+exit 1
+`, mainPID, suspectPID, foreignConfigPath))
+	writeExecutable(t, filepath.Join(fakeBin, "nc"), "#!/bin/sh\nexit 1\n")
+	writeExecutable(t, filepath.Join(fakeBin, "dolt"), "#!/bin/sh\nexit 1\n")
+
+	root := repoRoot(t)
+	cmd := exec.Command("sh", filepath.Join(root, healthScript), "--json")
+	cmd.Env = append(
+		filteredEnv("GC_CITY_PATH", "GC_PACK_DIR", "GC_DOLT_HOST", "GC_DOLT_PORT",
+			"GC_DOLT_USER", "GC_DOLT_PASSWORD", "GC_HEALTH_SKIP_ZOMBIE_SCAN", "PATH"),
+		"GC_CITY_PATH="+cityPath,
+		"GC_PACK_DIR="+root,
+		"GC_DOLT_HOST=127.0.0.1",
+		"GC_DOLT_PORT="+mainPort,
+		"GC_DOLT_USER=root",
+		"GC_DOLT_PASSWORD=",
+		"PATH="+fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"),
+	)
+
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("health.sh failed: %v\n%s", err, out)
+	}
+	output := string(out)
+
+	if !strings.Contains(output, `"zombie_count": 1`) {
+		t.Errorf("expected zombie_count 1 (PID-mismatched config does not protect from zombie status); got:\n%s", output)
+	}
+	if !strings.Contains(output, suspectPID) {
+		t.Errorf("suspect PID %s with mismatched dolt.pid should still be flagged as zombie; got:\n%s", suspectPID, output)
+	}
+}
+
 // TestHealthScriptZombieScanIsBoundedFork is the regression guard for #2482:
 // the zombie scan must enumerate the process table a bounded number of times,
 // independent of how many dolt processes (especially Z-state zombies) exist.

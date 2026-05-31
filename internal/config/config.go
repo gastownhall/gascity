@@ -169,7 +169,12 @@ type City struct {
 	// Providers defines named provider presets for agent startup.
 	Providers map[string]ProviderSpec `toml:"providers,omitempty"`
 	// Packs defines named remote pack sources fetched via git (V1 mechanism).
-	Packs map[string]PackSource `toml:"packs,omitempty"`
+	//
+	// Legacy pack source map, accepted for migration and fetch/list
+	// compatibility only. PackV2 authored config uses [imports.*] with source
+	// plus optional version, so this legacy surface is intentionally omitted
+	// from generated public schemas and reference docs.
+	Packs map[string]PackSource `toml:"packs,omitempty" jsonschema:"-"`
 	// Imports defines named pack imports (V2 mechanism). Each key is a
 	// binding name; the value specifies the source and optional version,
 	// export, and transitive controls. Processed during ExpandCityPacks.
@@ -215,9 +220,13 @@ type City struct {
 	// Doctor configures gc doctor thresholds and policy toggles
 	// (worktree size warnings, nested-worktree auto-prune).
 	Doctor DoctorConfig `toml:"doctor,omitempty"`
+	// Maintenance configures periodic store-maintenance loops.
+	Maintenance MaintenanceConfig `toml:"maintenance,omitempty"`
 	// Services declares workspace-owned HTTP services mounted on the
 	// controller edge under /svc/{name}.
 	Services []Service `toml:"service,omitempty"`
+	// GitHub configures GitHub-facing repository monitors.
+	GitHub GitHubConfig `toml:"github,omitempty"`
 	// AgentDefaults provides city-level defaults for agents that don't
 	// override them (canonical TOML key: agent_defaults). The runtime
 	// currently applies default_sling_formula and append_fragments; the
@@ -673,8 +682,11 @@ type AgentOverride struct {
 	OptionDefaults map[string]string `toml:"option_defaults,omitempty"`
 }
 
-// PackSource defines a remote pack repository.
-// Referenced by name in rig pack fields and fetched into the cache.
+// PackSource defines a legacy remote pack repository.
+// Referenced by name in V1 pack fields and fetched into the cache.
+//
+// PackSource is retained for legacy migration and fetch/list compatibility.
+// PackV2 authored imports use Import.Source and Import.Version instead.
 type PackSource struct {
 	// Source is the git repository URL.
 	Source string `toml:"source" jsonschema:"required"`
@@ -689,12 +701,14 @@ type PackSource struct {
 // name (the TOML key), a source (local path or remote URL), and
 // optional version/export/transitive controls.
 type Import struct {
-	// Source is the pack location: a local relative path (e.g.,
-	// "./assets/imports/gastown") or a remote URL (e.g.,
-	// "github.com/gastownhall/gastown"). Local paths have no version.
+	// Source is the durable authored pack location: a local path, a remote git
+	// URL, or a remote git URL with a monorepo subpath such as
+	// "github.com/org/repo//packs/foo". Registry handles are lookup-only in
+	// this release wave; authored [imports.*] entries store the resolved source
+	// plus optional version.
 	Source string `toml:"source" jsonschema:"required"`
-	// Version is a semver constraint for remote imports (e.g., "^1.2").
-	// Empty for local paths. "sha:<hex>" for commit pinning.
+	// Version is an optional semver constraint for git-backed imports (e.g.,
+	// "^1.2"). Empty for local paths. "sha:<hex>" pins a specific commit.
 	Version string `toml:"version,omitempty"`
 	// Export re-exports this import's contents into the parent pack's
 	// namespace. Consumers of the parent get this import's agents
@@ -1738,6 +1752,56 @@ func (c ConvergenceConfig) MaxTotalOrDefault() int {
 		return 10
 	}
 	return c.MaxTotal
+}
+
+// MaintenanceConfig groups periodic store-maintenance subsections.
+type MaintenanceConfig struct {
+	// Dolt configures the weekly Dolt store maintenance loop
+	// (CALL DOLT_GC + backup snapshot).
+	Dolt DoltMaintenance `toml:"dolt,omitempty"`
+}
+
+// DoltMaintenance configures the periodic Dolt store maintenance loop.
+// Opt-in for v1: omission or enabled=false leaves the loop disabled.
+type DoltMaintenance struct {
+	// Enabled toggles the maintenance loop. Defaults to false (opt-in).
+	Enabled bool `toml:"enabled,omitempty"`
+	// Interval is the cadence between maintenance runs as a duration
+	// string (e.g., "168h"). Defaults to 168h (weekly).
+	Interval string `toml:"interval,omitempty" jsonschema:"default=168h"`
+	// AlertTo is the agent identity to mail on failure (e.g.,
+	// "gascity/mayor"). Empty disables alert mail.
+	AlertTo string `toml:"alert_to,omitempty"`
+	// GCTimeout is the ceiling for CALL DOLT_GC() as a duration string.
+	// Defaults to 10m.
+	GCTimeout string `toml:"gc_timeout,omitempty" jsonschema:"default=10m"`
+}
+
+// IntervalOrDefault returns the parsed Interval, falling back to 168h
+// (weekly) when unset or unparseable. Invalid values should already have
+// surfaced as warnings from ValidateDurations at load time.
+func (d DoltMaintenance) IntervalOrDefault() time.Duration {
+	if d.Interval == "" {
+		return 168 * time.Hour
+	}
+	v, err := time.ParseDuration(d.Interval)
+	if err != nil {
+		return 168 * time.Hour
+	}
+	return v
+}
+
+// GCTimeoutOrDefault returns the parsed GCTimeout, falling back to 10m
+// when unset or unparseable.
+func (d DoltMaintenance) GCTimeoutOrDefault() time.Duration {
+	if d.GCTimeout == "" {
+		return 10 * time.Minute
+	}
+	v, err := time.ParseDuration(d.GCTimeout)
+	if err != nil {
+		return 10 * time.Minute
+	}
+	return v
 }
 
 // DaemonConfig holds controller daemon settings.
@@ -3871,6 +3935,9 @@ func Load(fs fsys.FS, path string) (*City, error) {
 	// direct named-session declarations without requiring pack-provided
 	// backing templates to be present yet.
 	if err := validateNamedSessions(cfg, false); err != nil {
+		return nil, err
+	}
+	if err := ValidateGitHubPRMonitors(cfg); err != nil {
 		return nil, err
 	}
 	return cfg, nil

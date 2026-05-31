@@ -569,11 +569,11 @@
       "properties": {
         "source": {
           "type": "string",
-          "description": "Source is the pack location: a local relative path (e.g.,\n\"./assets/imports/gastown\") or a remote URL (e.g.,\n\"github.com/gastownhall/gastown\"). Local paths have no version."
+          "description": "Source is the durable authored pack location: a local path, a remote git\nURL, or a remote git URL with a monorepo subpath such as\n\"github.com/org/repo//packs/foo\". Registry handles are lookup-only in\nthis release wave; authored [imports.*] entries store the resolved source\nplus optional version."
         },
         "version": {
           "type": "string",
-          "description": "Version is a semver constraint for remote imports (e.g., \"^1.2\").\nEmpty for local paths. \"sha:\u003chex\u003e\" for commit pinning."
+          "description": "Version is an optional semver constraint for git-backed imports (e.g.,\n\"^1.2\"). Empty for local paths. \"sha:\u003chex\u003e\" pins a specific commit."
         },
         "export": {
           "type": "boolean",

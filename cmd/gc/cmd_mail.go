@@ -32,9 +32,11 @@ import (
 type nudgeFunc func(recipient string) error
 
 const (
-	mailInjectMaxMessages     = 3
-	mailInjectBodyPreviewSize = 240
-	mailInjectPreviewScanSize = 4096
+	mailInjectMaxMessages          = 3
+	mailInjectBodyPreviewSize      = 240
+	mailInjectPreviewScanSize      = 4096
+	mailCheckDegradedNotice        = "[mail check degraded — store slow; run 'gc mail inbox' when the factory load drops]"
+	mailCheckPartialDegradedNotice = "[mail check degraded — partial provider read; run 'gc mail inbox' after the provider recovers]"
 )
 
 type mailInboxJSONResult struct {
@@ -538,12 +540,28 @@ func routeMailCheck(_ string, args []string, inject bool, hookFormat string, c *
 	if c != nil {
 		cr, err := c.ListMailInbox(recipient, "")
 		if err == nil {
+			if mailListHasPartial(cr.Body) {
+				logRoute(stderr, cmdName, "api", "error")
+				if inject {
+					notice := formatMailCheckPartialDegradedNotice()
+					if mailListHasStoreSlowPartial(cr.Body) {
+						notice = formatMailCheckDegradedNotice()
+					}
+					_ = writeProviderHookContextForEvent(stdout, hookFormat, "UserPromptSubmit", notice)
+					return 0
+				}
+				fmt.Fprintf(stderr, "gc mail check: %s\n", mailListPartialErrorDetail(cr.Body)) //nolint:errcheck // best-effort stderr
+				return 1
+			}
 			logRoute(stderr, cmdName, "api", "")
 			return renderMailCheckFromAPI(cr, recipient, inject, hookFormat, stdout)
 		}
 		if !api.ShouldFallbackForRead(err) {
 			logRoute(stderr, cmdName, "api", "error")
 			if inject {
+				if api.IsStoreSlowError(err) {
+					_ = writeProviderHookContextForEvent(stdout, hookFormat, "UserPromptSubmit", formatMailCheckDegradedNotice())
+				}
 				return 0
 			}
 			fmt.Fprintf(stderr, "gc mail check: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -561,8 +579,8 @@ func routeMailCheck(_ string, args []string, inject bool, hookFormat string, c *
 // Without --inject, returns 0 if mail exists and 1 if empty, matching the
 // local fallback contract; human output appends a stale-read banner when the
 // supervisor cache is > 30 s old.
-func renderMailCheckFromAPI(cr api.CachedRead[[]mail.Message], recipient string, inject bool, hookFormat string, stdout io.Writer) int {
-	messages := cr.Body
+func renderMailCheckFromAPI(cr api.CachedRead[api.MailListView], recipient string, inject bool, hookFormat string, stdout io.Writer) int {
+	messages := cr.Body.Items
 	if inject {
 		if len(messages) > 0 {
 			_ = writeProviderHookContextForEvent(stdout, hookFormat, "UserPromptSubmit", formatInjectOutput(messages))
@@ -577,6 +595,53 @@ func renderMailCheckFromAPI(cr api.CachedRead[[]mail.Message], recipient string,
 		fmt.Fprintf(stdout, "(cache age: %.0fs — reconciler may be lagging)\n", cr.AgeSeconds) //nolint:errcheck // best-effort stdout
 	}
 	return 0
+}
+
+func mailListHasStoreSlowPartial(view api.MailListView) bool {
+	return mailPartialHasStoreSlow(view.Partial, view.PartialErrors)
+}
+
+func mailListHasPartial(view api.MailListView) bool {
+	return view.Partial || len(view.PartialErrors) > 0
+}
+
+func mailListPartialErrorDetail(view api.MailListView) string {
+	return mailPartialErrorDetail(view.PartialErrors, "partial mail read failed")
+}
+
+func mailCountHasPartial(view api.MailCountView) bool {
+	return view.Partial || len(view.PartialErrors) > 0
+}
+
+func mailCountPartialErrorDetail(view api.MailCountView) string {
+	return mailPartialErrorDetail(view.PartialErrors, "partial mail count failed")
+}
+
+func mailPartialHasStoreSlow(partial bool, partialErrors []string) bool {
+	if !partial {
+		return false
+	}
+	for _, msg := range partialErrors {
+		if strings.Contains(msg, api.StoreSlowErrorCode+":") || strings.HasPrefix(msg, api.StoreSlowErrorCode) {
+			return true
+		}
+	}
+	return false
+}
+
+func mailPartialErrorDetail(partialErrors []string, fallback string) string {
+	if len(partialErrors) == 0 {
+		return fallback
+	}
+	return strings.Join(partialErrors, "; ")
+}
+
+func formatMailCheckDegradedNotice() string {
+	return "<system-reminder>\n" + mailCheckDegradedNotice + "\n</system-reminder>\n"
+}
+
+func formatMailCheckPartialDegradedNotice() string {
+	return "<system-reminder>\n" + mailCheckPartialDegradedNotice + "\n</system-reminder>\n"
 }
 
 // doMailCheckFallback is the direct-bd path for `gc mail check`.
@@ -2423,6 +2488,11 @@ func routeMailCount(_ string, args []string, c *api.Client, nilReason string, js
 	if c != nil {
 		cr, err := c.CountMail(recipient, "")
 		if err == nil {
+			if mailCountHasPartial(cr.Body) {
+				logRoute(stderr, cmdName, "api", "error")
+				fmt.Fprintf(stderr, "gc mail count: %s\n", mailCountPartialErrorDetail(cr.Body)) //nolint:errcheck // best-effort stderr
+				return 1
+			}
 			logRoute(stderr, cmdName, "api", "")
 			if jsonOut {
 				if err := writeCLIJSONLine(stdout, mailCountJSONResult{

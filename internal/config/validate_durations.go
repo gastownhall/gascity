@@ -61,6 +61,10 @@ func ValidateDurations(cfg *City, source string) []string {
 	// Chat sessions config durations.
 	check("[chat_sessions]", "idle_timeout", cfg.ChatSessions.IdleTimeout)
 
+	// Maintenance (dolt) config durations.
+	check("[maintenance.dolt]", "interval", cfg.Maintenance.Dolt.Interval)
+	check("[maintenance.dolt]", "gc_timeout", cfg.Maintenance.Dolt.GCTimeout)
+
 	// Session sleep config durations.
 	checkSleep("[session_sleep]", "interactive_resume", cfg.SessionSleep.InteractiveResume)
 	checkSleep("[session_sleep]", "interactive_fresh", cfg.SessionSleep.InteractiveFresh)
@@ -71,6 +75,11 @@ func ValidateDurations(cfg *City, source string) []string {
 		checkSleep(ctx, "interactive_resume", r.SessionSleep.InteractiveResume)
 		checkSleep(ctx, "interactive_fresh", r.SessionSleep.InteractiveFresh)
 		checkSleep(ctx, "noninteractive", r.SessionSleep.NonInteractive)
+	}
+
+	for _, monitor := range cfg.GitHub.PRMonitors {
+		ctx := fmt.Sprintf("github.pr_monitor %q", monitor.Name)
+		check(ctx, "poll_interval", monitor.PollInterval)
 	}
 
 	// Per-agent durations.

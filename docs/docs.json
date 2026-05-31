@@ -129,6 +129,7 @@
         "pages": [
           "guides/index",
           "guides/migrating-to-pack-vnext",
+          "guides/understanding-packs",
           "guides/shareable-packs",
           "guides/using-json-from-gc"
         ]

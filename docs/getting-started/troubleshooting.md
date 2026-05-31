@@ -271,8 +271,8 @@ bead content and should not be shared across cities). Then:
 # Create a private repo on your git host (example: GitHub via gh)
 gh repo create my-city-jsonl-archive --private
 
-# Point the archive at it
-ARCHIVE=$(gc config get state_dir)/packs/maintenance/jsonl-archive
+# Point the archive at it (run from anywhere inside your city)
+ARCHIVE="$(gc status --json | jq -r '.city_path')/.gc/runtime/packs/maintenance/jsonl-archive"
 git -C "$ARCHIVE" remote add origin git@github.com:<you>/my-city-jsonl-archive.git
 
 # Seed the remote with the existing local history

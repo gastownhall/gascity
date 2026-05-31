@@ -1867,6 +1867,166 @@ func TestSlingRouteBeadDefaultFormulaRoutesSourceBeadWithTypedRouter(t *testing.
 	}
 }
 
+func crossStoreSlingDeps(t *testing.T) (SlingDeps, *fakeBeadRouter, config.Agent) {
+	t.Helper()
+	router := &fakeBeadRouter{}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test"},
+		Rigs: []config.Rig{
+			{Name: "myrig", Path: "/myrig", Prefix: "RW"},
+		},
+	}
+	target := config.Agent{Name: "target", Dir: "myrig", MaxActiveSessions: intPtr(1)}
+	deps := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
+	deps.Router = router
+	deps.StoreRef = "city:test-city"
+	return deps, router, target
+}
+
+func crossStoreSlingFixture(t *testing.T, assignee string) (SlingOpts, SlingDeps, *fakeBeadRouter, beads.Bead) {
+	t.Helper()
+	deps, router, target := crossStoreSlingDeps(t)
+	bead, err := deps.Store.Create(beads.Bead{Title: "work", Type: "task", Assignee: assignee})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	opts := SlingOpts{Target: target, BeadOrFormula: bead.ID, Force: true}
+	return opts, deps, router, bead
+}
+
+func requireCrossStoreRouteError(t *testing.T, err error) {
+	t.Helper()
+	var crossStoreErr *CrossStoreRouteError
+	if !errors.As(err, &crossStoreErr) {
+		t.Fatalf("error = %T %[1]v, want CrossStoreRouteError", err)
+	}
+}
+
+func requireNoCrossStoreRouteMutation(t *testing.T, store beads.Store, beadID string, wantAssignee string) {
+	t.Helper()
+	got, err := store.Get(beadID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", beadID, err)
+	}
+	if got.Assignee != wantAssignee {
+		t.Fatalf("Assignee = %q, want %q", got.Assignee, wantAssignee)
+	}
+	if got.Metadata["gc.routed_to"] != "" {
+		t.Fatalf("gc.routed_to = %q, want unset after refusal", got.Metadata["gc.routed_to"])
+	}
+	if got.Metadata["molecule_id"] != "" {
+		t.Fatalf("molecule_id = %q, want unset after refusal", got.Metadata["molecule_id"])
+	}
+}
+
+func requireOnlySeedBeads(t *testing.T, store beads.Store, want int) {
+	t.Helper()
+	items, err := store.List(beads.ListQuery{AllowScan: true})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(items) != want {
+		t.Fatalf("store bead count = %d, want %d; items = %#v", len(items), want, items)
+	}
+}
+
+func TestDoSlingRefusesCrossStoreOnFormulaBeforeMutation(t *testing.T) {
+	opts, deps, router, bead := crossStoreSlingFixture(t, "")
+	opts.OnFormula = "code-review"
+
+	_, err := DoSling(opts, deps, deps.Store)
+
+	requireCrossStoreRouteError(t, err)
+	requireNoCrossStoreRouteMutation(t, deps.Store, bead.ID, "")
+	requireOnlySeedBeads(t, deps.Store, 1)
+	if len(router.routed) != 0 {
+		t.Fatalf("router calls = %d, want 0", len(router.routed))
+	}
+}
+
+func TestDoSlingRefusesCrossStoreDefaultFormulaBeforeMutation(t *testing.T) {
+	opts, deps, router, bead := crossStoreSlingFixture(t, "")
+	opts.Target.DefaultSlingFormula = stringPtr("code-review")
+
+	_, err := DoSling(opts, deps, deps.Store)
+
+	requireCrossStoreRouteError(t, err)
+	requireNoCrossStoreRouteMutation(t, deps.Store, bead.ID, "")
+	requireOnlySeedBeads(t, deps.Store, 1)
+	if len(router.routed) != 0 {
+		t.Fatalf("router calls = %d, want 0", len(router.routed))
+	}
+}
+
+func TestDoSlingRefusesCrossStoreForceBeforeRouting(t *testing.T) {
+	opts, deps, router, bead := crossStoreSlingFixture(t, "")
+	opts.NoFormula = true
+
+	_, err := DoSling(opts, deps, deps.Store)
+
+	requireCrossStoreRouteError(t, err)
+	requireNoCrossStoreRouteMutation(t, deps.Store, bead.ID, "")
+	requireOnlySeedBeads(t, deps.Store, 1)
+	if len(router.routed) != 0 {
+		t.Fatalf("router calls = %d, want 0", len(router.routed))
+	}
+}
+
+func TestDoSlingRefusesCrossStoreReassignBeforeClearingAssignee(t *testing.T) {
+	opts, deps, router, bead := crossStoreSlingFixture(t, "human@example.com")
+	opts.NoFormula = true
+	opts.Reassign = true
+
+	_, err := DoSling(opts, deps, deps.Store)
+
+	requireCrossStoreRouteError(t, err)
+	requireNoCrossStoreRouteMutation(t, deps.Store, bead.ID, "human@example.com")
+	requireOnlySeedBeads(t, deps.Store, 1)
+	if len(router.routed) != 0 {
+		t.Fatalf("router calls = %d, want 0", len(router.routed))
+	}
+}
+
+func TestDoSlingBatchRefusesCrossStoreBeforeFormulaMutation(t *testing.T) {
+	deps, router, target := crossStoreSlingDeps(t)
+	store := deps.Store
+	convoy, err := store.Create(beads.Bead{Title: "convoy", Type: "convoy"})
+	if err != nil {
+		t.Fatalf("create convoy: %v", err)
+	}
+	childOne, err := store.Create(beads.Bead{Title: "one", Type: "task", ParentID: convoy.ID, Status: "open"})
+	if err != nil {
+		t.Fatalf("create child one: %v", err)
+	}
+	childTwo, err := store.Create(beads.Bead{Title: "two", Type: "task", ParentID: convoy.ID, Status: "open"})
+	if err != nil {
+		t.Fatalf("create child two: %v", err)
+	}
+	opts := SlingOpts{
+		Target:        target,
+		BeadOrFormula: convoy.ID,
+		OnFormula:     "code-review",
+		Force:         true,
+	}
+
+	result, err := DoSlingBatch(opts, deps, store)
+
+	requireCrossStoreRouteError(t, err)
+	if result.Failed != 2 {
+		t.Fatalf("Failed = %d, want 2", result.Failed)
+	}
+	if result.Routed != 0 {
+		t.Fatalf("Routed = %d, want 0", result.Routed)
+	}
+	for _, child := range []beads.Bead{childOne, childTwo} {
+		requireNoCrossStoreRouteMutation(t, store, child.ID, "")
+	}
+	requireOnlySeedBeads(t, store, 3)
+	if len(router.routed) != 0 {
+		t.Fatalf("router calls = %d, want 0", len(router.routed))
+	}
+}
+
 // --- Missing coverage tests ---
 
 func TestSlingAttachFormula(t *testing.T) {

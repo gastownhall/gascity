@@ -1649,7 +1649,7 @@ func TestOrderTrackingSweepWatchdogAllowsSweepOrderToCleanStaleTracking(t *testi
 		execRan = true
 		_, err := sweepStaleOrderTrackingAcrossStores(
 			[]beads.Store{store},
-			time.Now(),
+			freshMerge.CreatedAt.Add(25*time.Millisecond),
 			50*time.Millisecond,
 			nil,
 			orderTrackingSweepMetadataInitiator,

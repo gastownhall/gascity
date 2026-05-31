@@ -106,6 +106,32 @@ func TestMailMessagesFromGenList_PartialMissingFields(t *testing.T) {
 	}
 }
 
+func TestMailListFromGenPreservesPartialMetadata(t *testing.T) {
+	partial := true
+	partialErrs := []string{"mail provider slow: store_slow: mail read timed out after 8s"}
+	body := &genclient.MailListBody{
+		Items:         &[]genclient.Message{},
+		Total:         7,
+		Partial:       &partial,
+		PartialErrors: &partialErrs,
+	}
+
+	got := mailListFromGen(body)
+
+	if got.Total != 7 {
+		t.Fatalf("Total = %d, want 7", got.Total)
+	}
+	if got.Items == nil || len(got.Items) != 0 {
+		t.Fatalf("Items = %+v, want empty non-nil slice", got.Items)
+	}
+	if !got.Partial {
+		t.Fatal("Partial = false, want true")
+	}
+	if len(got.PartialErrors) != 1 || got.PartialErrors[0] != partialErrs[0] {
+		t.Fatalf("PartialErrors = %v, want %v", got.PartialErrors, partialErrs)
+	}
+}
+
 func TestMailCountFromGen_Valid(t *testing.T) {
 	partial := true
 	partialErrs := []string{"rig a: boom"}

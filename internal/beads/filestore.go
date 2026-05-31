@@ -517,6 +517,16 @@ func (fs *FileStore) DepList(id, direction string) ([]Dep, error) {
 	return fs.MemStore.DepList(id, direction)
 }
 
+// DepListBatch reloads the on-disk store before listing batched dependencies.
+func (fs *FileStore) DepListBatch(ids []string) (map[string][]Dep, error) {
+	fs.fmu.Lock()
+	defer fs.fmu.Unlock()
+	if err := fs.refreshReadStateLocked(); err != nil {
+		return nil, err
+	}
+	return fs.MemStore.DepListBatch(ids)
+}
+
 // memSnapshot holds a snapshot of MemStore state for rollback.
 type memSnapshot struct {
 	seq   int

@@ -24,6 +24,7 @@ var dialect = sqlstore.Dialect{
 		    type VARCHAR(64) NOT NULL DEFAULT 'task',
 		    priority BIGINT NOT NULL DEFAULT 0,
 		    created_at BIGINT NOT NULL,
+		    updated_at BIGINT NOT NULL DEFAULT 0,
 		    assignee VARCHAR(191) NOT NULL DEFAULT '',
 		    parent_id VARCHAR(191) NOT NULL DEFAULT '',
 		    description TEXT NOT NULL
@@ -33,6 +34,7 @@ var dialect = sqlstore.Dialect{
 		`CREATE INDEX IF NOT EXISTS idx_coord_records_type ON records(type)`,
 		`CREATE INDEX IF NOT EXISTS idx_coord_records_parent_id ON records(parent_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_coord_records_created ON records(created_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_coord_records_terminal_retention ON records(status, updated_at)`,
 		`CREATE INDEX IF NOT EXISTS idx_coord_records_status_assignee ON records(status, assignee)`,
 		`CREATE TABLE IF NOT EXISTS ephemeral (
 		    id VARCHAR(191) PRIMARY KEY,
@@ -40,6 +42,7 @@ var dialect = sqlstore.Dialect{
 		    status VARCHAR(64) NOT NULL DEFAULT 'open',
 		    type VARCHAR(64) NOT NULL DEFAULT 'message',
 		    created_at BIGINT NOT NULL,
+		    updated_at BIGINT NOT NULL DEFAULT 0,
 		    assignee VARCHAR(191) NOT NULL DEFAULT '',
 		    parent_id VARCHAR(191) NOT NULL DEFAULT '',
 		    expires_at BIGINT NOT NULL DEFAULT 0

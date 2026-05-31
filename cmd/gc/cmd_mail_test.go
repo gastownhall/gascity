@@ -3401,6 +3401,40 @@ func okMailCheckHandler(_ *testing.T) http.Handler {
 	})
 }
 
+func partialStoreSlowMailCheckHandler(_ *testing.T) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("X-GC-Cache-Age-S", "2")
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			"items": []map[string]any{
+				{"id": "msg-1", "from": "alice", "to": "mayor", "subject": "hi", "body": "hello", "created_at": "2026-04-23T10:00:00Z", "read": false},
+			},
+			"total":   1,
+			"partial": true,
+			"partial_errors": []string{
+				"mail provider slow: store_slow: mail read timed out after 8s",
+			},
+		})
+	})
+}
+
+func partialProviderErrorMailCheckHandler(_ *testing.T) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("X-GC-Cache-Age-S", "2")
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			"items": []map[string]any{
+				{"id": "msg-1", "from": "alice", "to": "mayor", "subject": "hi", "body": "hello", "created_at": "2026-04-23T10:00:00Z", "read": false},
+			},
+			"total":   1,
+			"partial": true,
+			"partial_errors": []string{
+				"mail provider beta: disk unavailable",
+			},
+		})
+	})
+}
+
 func okMailPeekHandler(_ *testing.T) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("X-GC-Cache-Age-S", "2")
@@ -3422,6 +3456,21 @@ func okMailCountHandler(_ *testing.T) http.Handler {
 		w.Header().Set("X-GC-Cache-Age-S", "2")
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{"total": 3, "unread": 1}) //nolint:errcheck
+	})
+}
+
+func partialStoreSlowMailCountHandler(_ *testing.T) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("X-GC-Cache-Age-S", "2")
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			"total":   3,
+			"unread":  1,
+			"partial": true,
+			"partial_errors": []string{
+				"mail provider slow: store_slow: mail read timed out after 8s",
+			},
+		})
 	})
 }
 
@@ -3568,6 +3617,203 @@ func TestRouteMailCheck_SixRowMatrix(t *testing.T) {
 				t.Errorf("stdout missing %q:\n%s", tc.wantStdout, stdout.String())
 			}
 		})
+	}
+}
+
+func TestRouteMailCountPartialStoreSlowHumanReturnsError(t *testing.T) {
+	cityPath := writeMailTestCity(t)
+	t.Setenv("GC_DEBUG", "1")
+	srv := httptest.NewServer(partialStoreSlowMailCountHandler(t))
+	defer srv.Close()
+	c := api.NewCityScopedClient(srv.URL, "test-city")
+
+	var stdout, stderr bytes.Buffer
+	code := routeMailCount(cityPath, []string{"mayor"}, c, "", false, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1; stderr=%q stdout=%q", code, stderr.String(), stdout.String())
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout = %q, want empty", stdout.String())
+	}
+	assertMailRouteLog(t, stderr.String(), "api", "error")
+	if !strings.Contains(stderr.String(), "store_slow: mail read timed out after 8s") {
+		t.Fatalf("stderr missing store_slow partial detail:\n%s", stderr.String())
+	}
+}
+
+func TestRouteMailCountPartialStoreSlowJSONReturnsError(t *testing.T) {
+	cityPath := writeMailTestCity(t)
+	t.Setenv("GC_DEBUG", "1")
+	srv := httptest.NewServer(partialStoreSlowMailCountHandler(t))
+	defer srv.Close()
+	c := api.NewCityScopedClient(srv.URL, "test-city")
+
+	var stdout, stderr bytes.Buffer
+	code := routeMailCount(cityPath, []string{"mayor"}, c, "", true, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1; stderr=%q stdout=%q", code, stderr.String(), stdout.String())
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout = %q, want empty", stdout.String())
+	}
+	assertMailRouteLog(t, stderr.String(), "api", "error")
+	if !strings.Contains(stderr.String(), "store_slow: mail read timed out after 8s") {
+		t.Fatalf("stderr missing store_slow partial detail:\n%s", stderr.String())
+	}
+}
+
+func TestRouteMailCheckInjectStoreSlowEmitsDegradedNotice(t *testing.T) {
+	cityPath := writeMailTestCity(t)
+	t.Setenv("GC_DEBUG", "1")
+	srv := httptest.NewServer(mailProblemHandler(http.StatusServiceUnavailable, "store_slow: mail read timed out after 8s")(t))
+	defer srv.Close()
+	c := api.NewCityScopedClient(srv.URL, "test-city")
+
+	var stdout, stderr bytes.Buffer
+	code := routeMailCheck(cityPath, []string{"mayor"}, true, "", c, "", &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr=%q stdout=%q", code, stderr.String(), stdout.String())
+	}
+	if got, want := stdout.String(), expectedMailCheckDegradedInjectOutput(); got != want {
+		t.Fatalf("stdout = %q, want exact degraded notice %q", got, want)
+	}
+	assertMailRouteLog(t, stderr.String(), "api", "error")
+	if strings.Contains(stderr.String(), "gc mail check:") {
+		t.Fatalf("inject mode surfaced store_slow as stderr error:\n%s", stderr.String())
+	}
+}
+
+func TestRouteMailCheckPartialStoreSlowInjectEmitsDegradedNotice(t *testing.T) {
+	cityPath := writeMailTestCity(t)
+	t.Setenv("GC_DEBUG", "1")
+	srv := httptest.NewServer(partialStoreSlowMailCheckHandler(t))
+	defer srv.Close()
+	c := api.NewCityScopedClient(srv.URL, "test-city")
+
+	var stdout, stderr bytes.Buffer
+	code := routeMailCheck(cityPath, []string{"mayor"}, true, "", c, "", &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr=%q stdout=%q", code, stderr.String(), stdout.String())
+	}
+	if got, want := stdout.String(), expectedMailCheckDegradedInjectOutput(); got != want {
+		t.Fatalf("stdout = %q, want exact degraded notice %q", got, want)
+	}
+	assertMailRouteLog(t, stderr.String(), "api", "error")
+}
+
+func TestRouteMailCheckPartialStoreSlowNonInjectReturnsError(t *testing.T) {
+	cityPath := writeMailTestCity(t)
+	t.Setenv("GC_DEBUG", "1")
+	srv := httptest.NewServer(partialStoreSlowMailCheckHandler(t))
+	defer srv.Close()
+	c := api.NewCityScopedClient(srv.URL, "test-city")
+
+	var stdout, stderr bytes.Buffer
+	code := routeMailCheck(cityPath, []string{"mayor"}, false, "", c, "", &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1; stderr=%q stdout=%q", code, stderr.String(), stdout.String())
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout = %q, want empty", stdout.String())
+	}
+	assertMailRouteLog(t, stderr.String(), "api", "error")
+	if !strings.Contains(stderr.String(), "store_slow: mail read timed out after 8s") {
+		t.Fatalf("stderr missing store_slow partial detail:\n%s", stderr.String())
+	}
+}
+
+func TestRouteMailCheckPartialProviderErrorInjectEmitsDegradedNotice(t *testing.T) {
+	cityPath := writeMailTestCity(t)
+	t.Setenv("GC_DEBUG", "1")
+	srv := httptest.NewServer(partialProviderErrorMailCheckHandler(t))
+	defer srv.Close()
+	c := api.NewCityScopedClient(srv.URL, "test-city")
+
+	var stdout, stderr bytes.Buffer
+	code := routeMailCheck(cityPath, []string{"mayor"}, true, "", c, "", &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr=%q stdout=%q", code, stderr.String(), stdout.String())
+	}
+	if got, want := stdout.String(), expectedMailCheckPartialDegradedInjectOutput(); got != want {
+		t.Fatalf("stdout = %q, want exact degraded notice %q", got, want)
+	}
+	assertMailRouteLog(t, stderr.String(), "api", "error")
+	if strings.Contains(stderr.String(), "gc mail check:") {
+		t.Fatalf("inject mode surfaced partial read as stderr error:\n%s", stderr.String())
+	}
+}
+
+func TestRouteMailCheckPartialProviderErrorNonInjectReturnsError(t *testing.T) {
+	cityPath := writeMailTestCity(t)
+	t.Setenv("GC_DEBUG", "1")
+	srv := httptest.NewServer(partialProviderErrorMailCheckHandler(t))
+	defer srv.Close()
+	c := api.NewCityScopedClient(srv.URL, "test-city")
+
+	var stdout, stderr bytes.Buffer
+	code := routeMailCheck(cityPath, []string{"mayor"}, false, "", c, "", &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1; stderr=%q stdout=%q", code, stderr.String(), stdout.String())
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout = %q, want empty", stdout.String())
+	}
+	assertMailRouteLog(t, stderr.String(), "api", "error")
+	if !strings.Contains(stderr.String(), "mail provider beta: disk unavailable") {
+		t.Fatalf("stderr missing partial provider detail:\n%s", stderr.String())
+	}
+}
+
+func TestRouteMailCheckStoreSlowNonInjectReturnsError(t *testing.T) {
+	cityPath := writeMailTestCity(t)
+	t.Setenv("GC_DEBUG", "1")
+	srv := httptest.NewServer(mailProblemHandler(http.StatusServiceUnavailable, "store_slow: mail read timed out after 8s")(t))
+	defer srv.Close()
+	c := api.NewCityScopedClient(srv.URL, "test-city")
+
+	var stdout, stderr bytes.Buffer
+	code := routeMailCheck(cityPath, []string{"mayor"}, false, "", c, "", &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1; stderr=%q stdout=%q", code, stderr.String(), stdout.String())
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout = %q, want empty", stdout.String())
+	}
+	assertMailRouteLog(t, stderr.String(), "api", "error")
+	if !strings.Contains(stderr.String(), "store_slow: mail read timed out after 8s") {
+		t.Fatalf("stderr missing store_slow detail:\n%s", stderr.String())
+	}
+}
+
+func expectedMailCheckDegradedInjectOutput() string {
+	return "<system-reminder>\n" + mailCheckDegradedNotice + "\n</system-reminder>\n"
+}
+
+func expectedMailCheckPartialDegradedInjectOutput() string {
+	return "<system-reminder>\n" + mailCheckPartialDegradedNotice + "\n</system-reminder>\n"
+}
+
+func TestRouteMailPeekStoreSlowDoesNotFallback(t *testing.T) {
+	cityPath := writeMailTestCity(t)
+	t.Setenv("GC_DEBUG", "1")
+	srv := httptest.NewServer(mailProblemHandler(http.StatusServiceUnavailable, "store_slow: mail read timed out after 8s")(t))
+	defer srv.Close()
+	c := api.NewCityScopedClient(srv.URL, "test-city")
+
+	var stdout, stderr bytes.Buffer
+	code := routeMailPeek(cityPath, []string{"msg-1"}, c, "", false, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1; stderr=%q stdout=%q", code, stderr.String(), stdout.String())
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout = %q, want empty", stdout.String())
+	}
+	assertMailRouteLog(t, stderr.String(), "api", "error")
+	if strings.Contains(stderr.String(), "route=fallback") {
+		t.Fatalf("store_slow peek fell back to local store:\n%s", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "store_slow: mail read timed out after 8s") {
+		t.Fatalf("stderr missing store_slow detail:\n%s", stderr.String())
 	}
 }
 
@@ -3772,14 +4018,16 @@ func TestRouteMailCheck_StaleBannerOver30s(t *testing.T) {
 }
 
 func TestRenderMailCheckFromAPIInjectCodexUsesUserPromptSubmit(t *testing.T) {
-	cr := api.CachedRead[[]mail.Message]{
-		Body: []mail.Message{{
-			ID:        "msg-1",
-			From:      "human",
-			To:        "mayor",
-			Body:      "review this",
-			CreatedAt: time.Date(2026, 4, 23, 10, 0, 0, 0, time.UTC),
-		}},
+	cr := api.CachedRead[api.MailListView]{
+		Body: api.MailListView{
+			Items: []mail.Message{{
+				ID:        "msg-1",
+				From:      "human",
+				To:        "mayor",
+				Body:      "review this",
+				CreatedAt: time.Date(2026, 4, 23, 10, 0, 0, 0, time.UTC),
+			}},
+		},
 	}
 
 	var stdout bytes.Buffer

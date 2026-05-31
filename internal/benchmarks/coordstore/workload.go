@@ -75,6 +75,14 @@ type WorkloadConfig struct {
 	// Live HQ: used for inbox-replay / archive; ~0.02/s.
 	RecentScanRate float64
 
+	// PurgeTerminalRate is the rate of main-tier terminal retention sweeps.
+	// Zero disables retention cleanup in the workload driver.
+	PurgeTerminalRate float64
+
+	// PurgeTerminalOlderThan is the TTL for terminal main-tier records.
+	// Records in terminal statuses with older last-update times are purged.
+	PurgeTerminalOlderThan time.Duration
+
 	// --- Run parameters ---
 
 	// Duration is how long the workload driver runs.
@@ -109,16 +117,19 @@ var RealWorldWorkload = WorkloadConfig{
 	DepEdgeCount:    13,
 
 	// Traffic mix from S3/S4 — read:write ≈ 265:1
-	MailPollRate:    150.0, // dominant hot path (S3 R1)
-	PointReadRate:   40.0,  // bd show / cache miss (S3 R5)
-	FilterScanRate:  0.2,   // bd ready per reconcile (S3 R2)
-	CreateRate:      1.5,   // tasks + order wisps (S4 W1, W8)
-	UpdateRate:      0.3,   // bead field changes (S4 W2)
-	SetMetadataRate: 3.0,   // session transitions (S4 W3)
-	BatchGetRate:    10.0,  // label/dep hydration (S3 R4)
-	ReadyRate:       0.2,   // reconcile tick (S3 R2)
-	DepOpRate:       0.1,   // dep add/remove (S4 W5 approx.)
-	RecentScanRate:  0.02,  // inbox-replay (S3 R11 proxy)
+	MailPollRate:      150.0, // dominant hot path (S3 R1)
+	PointReadRate:     40.0,  // bd show / cache miss (S3 R5)
+	FilterScanRate:    0.2,   // bd ready per reconcile (S3 R2)
+	CreateRate:        1.5,   // tasks + order wisps (S4 W1, W8)
+	UpdateRate:        0.3,   // bead field changes (S4 W2)
+	SetMetadataRate:   3.0,   // session transitions (S4 W3)
+	BatchGetRate:      10.0,  // label/dep hydration (S3 R4)
+	ReadyRate:         0.2,   // reconcile tick (S3 R2)
+	DepOpRate:         0.1,   // dep add/remove (S4 W5 approx.)
+	RecentScanRate:    0.02,  // inbox-replay (S3 R11 proxy)
+	PurgeTerminalRate: 0.033, // retention sweep, about once every 30s
+
+	PurgeTerminalOlderThan: 10 * time.Minute,
 
 	Duration:    30 * time.Second,
 	Concurrency: 20,

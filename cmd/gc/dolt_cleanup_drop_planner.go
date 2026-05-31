@@ -9,13 +9,15 @@ import "strings"
 //
 // Convention:
 //   - testdb_*: BEADS_TEST_MODE=1 FNV hash of temp paths
+//   - test_guard_*: guard/registry isolation tests
+//   - test_federation_*: federation isolation tests
 //   - doctest_*: doctor test helpers
 //   - doctortest_*: doctor test helpers
 //   - beads_pt*: orchestrator patrol_helpers_test.go random prefixes
 //   - beads_vr*: orchestrator mail/router_test.go random prefixes
 //   - beads_t[0-9a-f]*: protocol test random prefixes (t + 8 hex chars)
 var defaultStaleDatabasePrefixes = []string{
-	"testdb_", "doctest_", "doctortest_", "beads_pt", "beads_vr", "beads_t",
+	"testdb_", "test_guard_", "test_federation_", "doctest_", "doctortest_", "beads_pt", "beads_vr", "beads_t",
 }
 
 // systemDatabaseNames are the Dolt/MySQL system databases that SHOW

@@ -6,6 +6,7 @@ description: Practical guides for common Gas City workflows.
 These guides are task-oriented and current.
 
 - [Migrating to Pack/City v.next](/guides/migrating-to-pack-vnext)
+- [Understanding Packs](/guides/understanding-packs)
 - [Shareable Packs](/guides/shareable-packs)
 - [Using JSON from the Gas City CLI (`gc`)](/guides/using-json-from-gc)
 - [Using Gas City as a Multi-Agent Engineering Environment](/guides/multi-agent-engineering-environment)
