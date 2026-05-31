@@ -65,6 +65,59 @@ func TestHandleConfigGet(t *testing.T) {
 	}
 }
 
+func TestHandleConfigGet_ExposesWorkspaceMaxActiveSessions(t *testing.T) {
+	// The city-level cap is a *int tri-state: nil = unset (field omitted),
+	// -1 = unlimited, any other value = the explicit cap. The handler must
+	// pass the pointer through verbatim — never coerce nil/-1 to 0.
+	cases := []struct {
+		name        string
+		cap         *int
+		wantPresent bool
+		wantValue   int
+	}{
+		{name: "unset", cap: nil, wantPresent: false},
+		{name: "explicit cap", cap: intPtr(5), wantPresent: true, wantValue: 5},
+		{name: "unlimited", cap: intPtr(-1), wantPresent: true, wantValue: -1},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fs := newFakeState(t)
+			fs.cfg.Workspace.MaxActiveSessions = tc.cap
+			h := newTestCityHandler(t, fs)
+
+			req := httptest.NewRequest("GET", cityURL(fs, "/config"), nil)
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, req)
+
+			if w.Code != http.StatusOK {
+				t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusOK, w.Body.String())
+			}
+			body := w.Body.String()
+
+			var resp configResponse
+			json.NewDecoder(strings.NewReader(body)).Decode(&resp) //nolint:errcheck
+
+			if !tc.wantPresent {
+				if resp.Workspace.MaxActiveSessions != nil {
+					t.Errorf("workspace.max_active_sessions = %v, want nil", *resp.Workspace.MaxActiveSessions)
+				}
+				if strings.Contains(body, "max_active_sessions") {
+					t.Errorf("expected max_active_sessions omitted from JSON, got body = %s", body)
+				}
+				return
+			}
+
+			if resp.Workspace.MaxActiveSessions == nil {
+				t.Fatalf("workspace.max_active_sessions = nil, want %d", tc.wantValue)
+			}
+			if got := *resp.Workspace.MaxActiveSessions; got != tc.wantValue {
+				t.Errorf("workspace.max_active_sessions = %d, want %d", got, tc.wantValue)
+			}
+		})
+	}
+}
+
 func TestHandleConfigGet_UsesEffectiveWorkspaceIdentity(t *testing.T) {
 	fs := newFakeState(t)
 	fs.cityName = "machine-alias"

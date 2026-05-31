@@ -13769,6 +13769,10 @@
           "declared_prefix": {
             "type": "string"
           },
+          "max_active_sessions": {
+            "format": "int64",
+            "type": "integer"
+          },
           "name": {
             "type": "string"
           },

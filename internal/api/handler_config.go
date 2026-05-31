@@ -24,6 +24,12 @@ type workspaceResponse struct {
 	Provider        string `json:"provider,omitempty"`
 	Suspended       bool   `json:"suspended"`
 	SessionTemplate string `json:"session_template,omitempty"`
+	// MaxActiveSessions is the city-wide cap on total concurrent sessions,
+	// mirrored from config.Workspace.MaxActiveSessions. The tri-state is
+	// preserved: nil = unset (no city-level cap declared), -1 = unlimited,
+	// any other value = the explicit cap. Agents and rigs inherit this when
+	// they don't declare their own.
+	MaxActiveSessions *int `json:"max_active_sessions,omitempty"`
 }
 
 type configAgentResponse struct {

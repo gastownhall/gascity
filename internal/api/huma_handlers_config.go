@@ -56,13 +56,14 @@ func (s *Server) humaHandleConfigGet(_ context.Context, _ *ConfigGetInput) (*Ind
 
 	resp := configResponse{
 		Workspace: workspaceResponse{
-			Name:            name,
-			Prefix:          prefix,
-			DeclaredName:    strings.TrimSpace(cfg.Workspace.Name),
-			DeclaredPrefix:  strings.TrimSpace(cfg.Workspace.Prefix),
-			Provider:        cfg.Workspace.Provider,
-			Suspended:       cfg.Workspace.Suspended,
-			SessionTemplate: cfg.Workspace.SessionTemplate,
+			Name:              name,
+			Prefix:            prefix,
+			DeclaredName:      strings.TrimSpace(cfg.Workspace.Name),
+			DeclaredPrefix:    strings.TrimSpace(cfg.Workspace.Prefix),
+			Provider:          cfg.Workspace.Provider,
+			Suspended:         cfg.Workspace.Suspended,
+			SessionTemplate:   cfg.Workspace.SessionTemplate,
+			MaxActiveSessions: cfg.Workspace.MaxActiveSessions,
 		},
 		Agents:    agents,
 		Rigs:      rigs,

@@ -5393,6 +5393,7 @@ export type WorkflowSnapshotResponse = {
 export type WorkspaceResponse = {
     declared_name?: string;
     declared_prefix?: string;
+    max_active_sessions?: number;
     name: string;
     prefix?: string;
     provider?: string;

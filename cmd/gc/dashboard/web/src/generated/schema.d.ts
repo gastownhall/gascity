@@ -6676,6 +6676,8 @@ export interface components {
         WorkspaceResponse: {
             declared_name?: string;
             declared_prefix?: string;
+            /** Format: int64 */
+            max_active_sessions?: number;
             name: string;
             prefix?: string;
             provider?: string;
