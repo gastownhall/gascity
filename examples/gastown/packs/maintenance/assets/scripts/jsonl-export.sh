@@ -26,8 +26,11 @@ LEGACY_STATE_FILE="$CITY/.gc/jsonl-export-state.json"
 # Configurable via environment (defaults match the old formula).
 SPIKE_THRESHOLD="${GC_JSONL_SPIKE_THRESHOLD:-20}"  # percentage (0-100)
 # Skip the percentage spike check when the previous record count is below
-# this absolute floor — small-N percentages are noise. Set to 0 to disable.
-MIN_PREV_FOR_SPIKE_CHECK="${GC_JSONL_MIN_PREV_FOR_SPIKE:-10}"
+# this absolute floor — small-N percentages are noise. A fresh bead store
+# growing 10→309 records during stand-up legitimately trips a 20% delta on
+# every cycle; raising the floor to 100 keeps the check meaningful on real
+# data while suppressing stand-up flares. Set to 0 to disable.
+MIN_PREV_FOR_SPIKE_CHECK="${GC_JSONL_MIN_PREV_FOR_SPIKE:-100}"
 MAX_PUSH_FAILURES="${GC_JSONL_MAX_PUSH_FAILURES:-3}"
 PUSH_RETRY_DELAY_MIN="${GC_JSONL_PUSH_RETRY_DELAY_MIN:-1}"
 PUSH_RETRY_DELAY_SPAN="${GC_JSONL_PUSH_RETRY_DELAY_SPAN:-4}"

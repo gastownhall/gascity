@@ -14,7 +14,10 @@ import (
 	"github.com/gastownhall/gascity/internal/benchmarks/coordstore"
 )
 
-const expiresAtMetadataKey = "expires_at"
+const (
+	expiresAtMetadataKey = "expires_at"
+	updatedAtMetadataKey = "coordstore.updated_at"
+)
 
 // Adapter implements coordstore.StoreAdapter using the dormant HQStore backend.
 type Adapter struct {
@@ -92,9 +95,12 @@ func (a *Adapter) Update(_ context.Context, id string, u coordstore.Update) erro
 	if u.Assignee != "" {
 		opts.Assignee = &u.Assignee
 	}
-	if len(u.Metadata) > 0 {
-		opts.Metadata = u.Metadata
+	metadata := cloneMetadata(u.Metadata)
+	if metadata == nil {
+		metadata = make(map[string]string, 1)
 	}
+	metadata[updatedAtMetadataKey] = time.Now().Format(time.RFC3339Nano)
+	opts.Metadata = metadata
 	if err := a.store.Update(id, opts); err != nil {
 		return mapNotFound(err)
 	}
@@ -136,7 +142,12 @@ func (a *Adapter) BatchGet(_ context.Context, ids []string) ([]coordstore.Record
 
 // SetMetadataBatch atomically merges metadata into a record.
 func (a *Adapter) SetMetadataBatch(_ context.Context, id string, kvs map[string]string) error {
-	if err := a.store.SetMetadataBatch(id, kvs); err != nil {
+	metadata := cloneMetadata(kvs)
+	if metadata == nil {
+		metadata = make(map[string]string, 1)
+	}
+	metadata[updatedAtMetadataKey] = time.Now().Format(time.RFC3339Nano)
+	if err := a.store.SetMetadataBatch(id, metadata); err != nil {
 		return mapNotFound(err)
 	}
 	return nil
@@ -183,6 +194,44 @@ func (a *Adapter) PurgeExpired(context.Context) (int, error) {
 	return a.store.PurgeExpired()
 }
 
+// PurgeTerminal removes old terminal main-tier records.
+func (a *Adapter) PurgeTerminal(_ context.Context, olderThan time.Duration) (int, error) {
+	if olderThan <= 0 {
+		return 0, nil
+	}
+	items, err := a.store.List(beads.ListQuery{
+		AllowScan:     true,
+		IncludeClosed: true,
+		TierMode:      beads.TierIssues,
+	})
+	if err != nil {
+		return 0, err
+	}
+	cutoff := time.Now().Add(-olderThan)
+	purged := 0
+	for _, item := range items {
+		r := beadToRecord(item)
+		if !coordstore.IsTerminalStatus(r.Status) {
+			continue
+		}
+		ref := r.UpdatedAt
+		if ref.IsZero() {
+			ref = r.CreatedAt
+		}
+		if ref.IsZero() || !ref.Before(cutoff) {
+			continue
+		}
+		if err := a.store.Delete(r.ID); err != nil {
+			return purged, mapNotFound(err)
+		}
+		purged++
+		if purged >= coordstore.TerminalPurgeBatchSize {
+			break
+		}
+	}
+	return purged, nil
+}
+
 // PrimeScan loads open records through the HQStore list path.
 func (a *Adapter) PrimeScan(context.Context) (int, error) {
 	items, err := a.store.List(beads.ListQuery{AllowScan: true})
@@ -213,13 +262,17 @@ func (a *Adapter) Stats(context.Context) map[string]int64 {
 }
 
 func recordToBead(r coordstore.Record) beads.Bead {
-	metadata := r.Metadata
-	if !r.ExpiresAt.IsZero() {
-		metadata = cloneMetadata(metadata)
+	metadata := cloneMetadata(r.Metadata)
+	if !r.ExpiresAt.IsZero() || !r.UpdatedAt.IsZero() {
 		if metadata == nil {
-			metadata = make(map[string]string, 1)
+			metadata = make(map[string]string, 2)
 		}
+	}
+	if !r.ExpiresAt.IsZero() {
 		metadata[expiresAtMetadataKey] = r.ExpiresAt.Format(time.RFC3339Nano)
+	}
+	if !r.UpdatedAt.IsZero() {
+		metadata[updatedAtMetadataKey] = r.UpdatedAt.Format(time.RFC3339Nano)
 	}
 
 	var priority *int
@@ -264,6 +317,14 @@ func beadToRecord(b beads.Bead) coordstore.Record {
 		if expiresAt, err := time.Parse(time.RFC3339Nano, raw); err == nil {
 			r.ExpiresAt = expiresAt
 		}
+	}
+	if raw := r.Metadata[updatedAtMetadataKey]; raw != "" {
+		if updatedAt, err := time.Parse(time.RFC3339Nano, raw); err == nil {
+			r.UpdatedAt = updatedAt
+		}
+	}
+	if r.UpdatedAt.IsZero() {
+		r.UpdatedAt = r.CreatedAt
 	}
 	return r
 }

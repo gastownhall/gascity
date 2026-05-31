@@ -491,6 +491,54 @@ esac
 	}
 }
 
+// TestCmdHookClaimsRunTargetOnlyRoot is the #2763 end-to-end regression: a
+// graph.v2 workflow root routed to a pool stamps only gc.run_target (no
+// gc.routed_to), yet `gc hook <pool>` must surface it. Before the reader fix
+// the worker's claim query matched only gc.routed_to, so the routed root was
+// never claimed and the spawned worker idle-reaped with the work orphaned.
+func TestCmdHookClaimsRunTargetOnlyRoot(t *testing.T) {
+	disableManagedDoltRecoveryForTest(t)
+	clearInheritedCityRoutingEnv(t)
+	cityDir := t.TempDir()
+	fakeBin := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cityToml := `[workspace]
+name = "test-city"
+
+[[agent]]
+name = "worker"
+`
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Fake bd returns the routed root only for the gc.run_target predicate;
+	// gc.routed_to (and every other query) yields an empty queue.
+	script := `#!/bin/sh
+case "$*" in
+  *"--metadata-field gc.run_target=worker"*) printf '[{"id":"graph-root","title":"run_target work"}]' ;;
+  *) printf '[]' ;;
+esac
+`
+	if err := os.WriteFile(filepath.Join(fakeBin, "bd"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_SESSION_ORIGIN", "ephemeral")
+
+	var stdout, stderr bytes.Buffer
+	code := cmdHook([]string{"worker"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("cmdHook(worker) = %d, want 0; stdout=%q stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), `"graph-root"`) {
+		t.Fatalf("gc hook did not surface the run_target-only graph root: stdout=%q", stdout.String())
+	}
+}
+
 func TestHookInjectAlwaysExitsZero(t *testing.T) {
 	// Even on command failure, inject mode exits 0.
 	runner := func(string, string) (string, error) { return "", fmt.Errorf("command failed") }

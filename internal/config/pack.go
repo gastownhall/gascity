@@ -32,24 +32,28 @@ type deferredRigPatches struct {
 	overrides          []AgentOverride
 }
 
-// PackConfig is the TOML structure of a pack.toml file.
-// It has a [pack] metadata header and agent definitions.
+// PackConfig is the TOML structure of a pack.toml file. PackV2 agent
+// definitions are discovered from agents/<name>/agent.toml; the inline agent
+// list remains schema-visible for migration compatibility with legacy packs.
 type PackConfig struct {
-	Pack           PackMeta                `toml:"pack" jsonschema:"required"`
-	Imports        map[string]Import       `toml:"imports,omitempty"`
-	AgentDefaults  AgentDefaults           `toml:"agent_defaults,omitempty" jsonschema:"-"`
-	AgentsDefaults AgentDefaults           `toml:"agents,omitempty" jsonschema:"-"`
-	Defaults       PackDefaults            `toml:"defaults,omitempty" jsonschema:"-"`
-	Agents         []Agent                 `toml:"agent,omitempty"`
-	NamedSessions  []NamedSession          `toml:"named_session,omitempty"`
-	Services       []Service               `toml:"service,omitempty"`
-	Providers      map[string]ProviderSpec `toml:"providers,omitempty"`
-	Formulas       FormulasConfig          `toml:"formulas,omitempty" jsonschema:"-"`
-	Patches        PackPatches             `toml:"patches,omitempty"`
-	Doctor         []PackDoctorEntry       `toml:"doctor,omitempty"`
-	Commands       []PackCommandEntry      `toml:"commands,omitempty"`
-	Global         PackGlobal              `toml:"global,omitempty"`
-	Pricing        []pricing.ModelPricing  `toml:"pricing,omitempty"`
+	Pack           PackMeta          `toml:"pack" jsonschema:"required"`
+	Imports        map[string]Import `toml:"imports,omitempty"`
+	AgentDefaults  AgentDefaults     `toml:"agent_defaults,omitempty" jsonschema:"-"`
+	AgentsDefaults AgentDefaults     `toml:"agents,omitempty" jsonschema:"-"`
+	Defaults       PackDefaults      `toml:"defaults,omitempty" jsonschema:"-"`
+	// Agents holds legacy inline agent templates accepted by the current
+	// loader. New PackV2 packs should define agents under
+	// agents/<name>/agent.toml instead.
+	Agents        []Agent                 `toml:"agent,omitempty"`
+	NamedSessions []NamedSession          `toml:"named_session,omitempty"`
+	Services      []Service               `toml:"service,omitempty"`
+	Providers     map[string]ProviderSpec `toml:"providers,omitempty"`
+	Formulas      FormulasConfig          `toml:"formulas,omitempty" jsonschema:"-"`
+	Patches       PackPatches             `toml:"patches,omitempty"`
+	Doctor        []PackDoctorEntry       `toml:"doctor,omitempty"`
+	Commands      []PackCommandEntry      `toml:"commands,omitempty"`
+	Global        PackGlobal              `toml:"global,omitempty"`
+	Pricing       []pricing.ModelPricing  `toml:"pricing,omitempty"`
 }
 
 // PackPatches holds the patch operations valid in pack.toml. City
@@ -2483,16 +2487,20 @@ func mergeHoistedCityAgents(agents, hoisted []Agent) []Agent {
 	if len(hoisted) == 0 {
 		return agents
 	}
-	seen := make(map[string]bool, len(agents))
+	seenQN := make(map[string]bool, len(agents))
+	seenDirName := make(map[[2]string]bool, len(agents))
 	for i := range agents {
-		seen[agents[i].QualifiedName()] = true
+		seenQN[agents[i].QualifiedName()] = true
+		seenDirName[[2]string{agents[i].Dir, agents[i].Name}] = true
 	}
 	for _, a := range hoisted {
 		qn := a.QualifiedName()
-		if seen[qn] {
+		dn := [2]string{a.Dir, a.Name}
+		if seenQN[qn] || seenDirName[dn] {
 			continue
 		}
-		seen[qn] = true
+		seenQN[qn] = true
+		seenDirName[dn] = true
 		agents = append(agents, a)
 	}
 	return agents
@@ -2504,16 +2512,20 @@ func mergeHoistedCityNamedSessions(sessions, hoisted []NamedSession) []NamedSess
 	if len(hoisted) == 0 {
 		return sessions
 	}
-	seen := make(map[string]bool, len(sessions))
+	seenQN := make(map[string]bool, len(sessions))
+	seenTpl := make(map[[2]string]bool, len(sessions))
 	for i := range sessions {
-		seen[sessions[i].QualifiedName()] = true
+		seenQN[sessions[i].QualifiedName()] = true
+		seenTpl[[2]string{sessions[i].Dir, sessions[i].Template}] = true
 	}
 	for _, s := range hoisted {
 		qn := s.QualifiedName()
-		if seen[qn] {
+		tpl := [2]string{s.Dir, s.Template}
+		if seenQN[qn] || seenTpl[tpl] {
 			continue
 		}
-		seen[qn] = true
+		seenQN[qn] = true
+		seenTpl[tpl] = true
 		sessions = append(sessions, s)
 	}
 	return sessions
@@ -2671,6 +2683,9 @@ func applyAgentOverride(a *Agent, ov *AgentOverride) {
 	}
 	if ov.WakeMode != nil {
 		a.WakeMode = *ov.WakeMode
+	}
+	if ov.MouseMode != nil {
+		a.MouseMode = *ov.MouseMode
 	}
 	if ov.InjectFragments != nil {
 		a.InjectFragments = append([]string(nil), (*ov.InjectFragments)...)

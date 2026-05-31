@@ -305,6 +305,10 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		p.appendFragments,
 	)
 	providerKey, providerDisplayName := providerInfoForAgent(cfgAgent, p.workspace, p.providers)
+	packDirs := p.packDirs
+	if p.city != nil {
+		packDirs = p.city.PackDirsForRig(rigName)
+	}
 	prompt = renderPrompt(p.fs, p.cityPath, p.cityName, cfgAgent.PromptTemplate, PromptContext{
 		CityRoot:            p.cityPath,
 		AgentName:           qualifiedName,
@@ -322,7 +326,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		ProviderDisplayName: providerDisplayName,
 		InstructionsFile:    instructionsFileForAgent(cfgAgent, p.workspace, p.providers),
 		Env:                 cfgAgent.Env,
-	}, p.sessionTemplate, p.stderr, p.packDirs, fragments, p.beadStore)
+	}, p.sessionTemplate, p.stderr, packDirs, fragments, p.beadStore)
 	hasHooks := config.AgentHasHooks(cfgAgent, p.workspace, resolved.Name, p.providers)
 	beacon := runtime.FormatBeaconAt(p.cityName, qualifiedName, !hasHooks, p.beaconTime)
 	suppressStartupPrompt := suppressStartupPromptForAgent(cfgAgent)
@@ -550,6 +554,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		ProcessNames:           resolved.ProcessNames,
 		EmitsPermissionWarning: resolved.EmitsPermissionWarning,
 		AcceptStartupDialogs:   acceptStartupDialogs,
+		MouseOn:                cfgAgent.MouseModeOn(),
 		Nudge:                  nudge,
 		PreStart:               expandedPreStart,
 		SessionSetup:           expandedSetup,
@@ -601,6 +606,7 @@ func sessionBackendEnvWithError(cityPath, rigRoot string, rigs []config.Rig) (ma
 		// agent's cwd with the wrong data_dir.
 		"BEADS_DOLT_AUTO_START": "0",
 	}
+	applyBdCLIRemoteSyncOptOut(env)
 	// Explicit empty values let tmux unset stale Dolt vars inherited from
 	// the server environment when the current city/rig does not use them.
 	setProjectedDoltEnvEmpty(env)
@@ -704,6 +710,7 @@ func templateParamsToConfig(tp TemplateParams) runtime.Config {
 		ProcessNames:           tp.Hints.ProcessNames,
 		EmitsPermissionWarning: tp.Hints.EmitsPermissionWarning,
 		AcceptStartupDialogs:   tp.Hints.AcceptStartupDialogs,
+		MouseOn:                tp.Hints.MouseOn,
 		Nudge:                  nudge,
 		PreStart:               tp.Hints.PreStart,
 		SessionSetup:           tp.Hints.SessionSetup,

@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 )
@@ -122,6 +123,26 @@ func LegacyV1SurfaceErrors(cfg *City, source string, data ...[]byte) []string {
 func LegacyV1SurfaceError(cfg *City, source string, data ...[]byte) error {
 	violations := LegacyV1SurfaceErrors(cfg, source, data...)
 	return configSurfaceError("PackV1 config surfaces are no longer supported", violations)
+}
+
+type fragmentLegacyV1SurfaceError struct {
+	include string
+	err     error
+}
+
+func (e *fragmentLegacyV1SurfaceError) Error() string {
+	return fmt.Sprintf("fragment %q: %v", e.include, e.err)
+}
+
+func (e *fragmentLegacyV1SurfaceError) Unwrap() error {
+	return e.err
+}
+
+// IsFragmentLegacyV1SurfaceError reports whether err came from a legacy PackV1
+// surface authored in an included fragment rather than root city.toml/pack.toml.
+func IsFragmentLegacyV1SurfaceError(err error) bool {
+	var target *fragmentLegacyV1SurfaceError
+	return errors.As(err, &target)
 }
 
 // LegacyInlineAgentSurfaceErrors returns hard-error diagnostics for inline

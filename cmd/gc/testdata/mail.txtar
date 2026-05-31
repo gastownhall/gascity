@@ -64,10 +64,12 @@ stdout 'Body:     yes, working on gc-4'
 exec gc mail read gc-2
 stdout 'Body:     yes, working on gc-4'
 
-# --- Messages are beads: they appear in bead list ---
+# --- Messages are beads: direct bead lookup works ---
 
-exec bd list
+exec bd show gc-1
 stdout 'gc-1'
+
+exec bd show gc-2
 stdout 'gc-2'
 
 # --- Archive a new message ---

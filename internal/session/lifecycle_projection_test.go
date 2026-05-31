@@ -631,6 +631,14 @@ func TestLifecycleDisplayReasonUsesOnlyActiveLifecycleReasons(t *testing.T) {
 		want string
 	}{
 		{
+			name: "circuit open wins",
+			meta: map[string]string{
+				SessionCircuitStateMetadataKey: SessionCircuitStateOpen,
+				"sleep_reason":                 "user-hold",
+			},
+			want: LifecycleReasonCircuitOpen,
+		},
+		{
 			name: "sleep reason wins",
 			meta: map[string]string{
 				"sleep_reason":      "wait-hold",
@@ -746,6 +754,16 @@ func TestLifecycleDisplayReasonWithLivenessShowsResetPending(t *testing.T) {
 	})
 	if got != "reset-pending" {
 		t.Fatalf("LifecycleDisplayReasonWithLiveness = %q, want reset-pending", got)
+	}
+}
+
+func TestLifecycleDisplayReasonWithLivenessShowsCircuitOpenBeforeLifecycleReason(t *testing.T) {
+	got := LifecycleDisplayReasonWithLiveness("open", map[string]string{
+		SessionCircuitStateMetadataKey: SessionCircuitStateOpen,
+		"sleep_reason":                 "user-hold",
+	}, time.Date(2026, 4, 15, 12, 0, 0, 0, time.UTC), "", nil)
+	if got != LifecycleReasonCircuitOpen {
+		t.Fatalf("LifecycleDisplayReasonWithLiveness = %q, want circuit-open", got)
 	}
 }
 

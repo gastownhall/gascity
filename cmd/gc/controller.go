@@ -1316,6 +1316,7 @@ func runController(
 	cs.services = cr.svc
 	cr.setControllerState(cs)
 	cs.startBeadEventWatcher(ctx)
+	cs.startMaintenanceLoop(ctx)
 
 	// Start API server if configured. Standalone city mode wraps the
 	// single city in a SupervisorMux so every endpoint is served at its

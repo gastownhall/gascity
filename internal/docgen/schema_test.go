@@ -217,6 +217,32 @@ func TestCitySchemaCityAgentNotRequired(t *testing.T) {
 	}
 }
 
+func TestCitySchemaOmitsLegacyPackSourceSurface(t *testing.T) {
+	s, err := GenerateCitySchema()
+	if err != nil {
+		t.Fatalf("GenerateCitySchema: %v", err)
+	}
+
+	data, err := json.Marshal(s)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	var raw map[string]interface{}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	cityProps := defProperties(t, raw, "City")
+	if _, ok := cityProps["packs"]; ok {
+		t.Fatal("City schema exposes legacy [packs.*] surface")
+	}
+	defs := raw["$defs"].(map[string]interface{})
+	if _, ok := defs["PackSource"]; ok {
+		t.Fatal("City schema exposes legacy PackSource ref/path surface")
+	}
+}
+
 func TestGeneratePackSchema(t *testing.T) {
 	s, err := GeneratePackSchema()
 	if err != nil {

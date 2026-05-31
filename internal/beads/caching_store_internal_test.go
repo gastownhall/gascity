@@ -2151,6 +2151,43 @@ func TestCachingStoreBdIncompleteDepsUseBackingForDownDepList(t *testing.T) {
 	}
 }
 
+func TestCachingStoreCompleteEmbeddedDepsAvoidPerIDDepList(t *testing.T) {
+	t.Parallel()
+
+	backing := &completeEmbeddedDepsStore{
+		Store: NewMemStore(),
+		beads: []Bead{
+			{ID: "gc-parent", Title: "parent", Status: "open", Type: "task"},
+			{
+				ID:     "gc-child",
+				Title:  "child",
+				Status: "open",
+				Type:   "task",
+				Dependencies: []Dep{{
+					IssueID:     "gc-child",
+					DependsOnID: "gc-parent",
+					Type:        "blocks",
+				}},
+			},
+		},
+	}
+	cache := NewCachingStore(backing, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+
+	deps, err := cache.DepList("gc-child", "down")
+	if err != nil {
+		t.Fatalf("DepList: %v", err)
+	}
+	if len(deps) != 1 || deps[0].IssueID != "gc-child" || deps[0].DependsOnID != "gc-parent" || deps[0].Type != "blocks" {
+		t.Fatalf("deps = %v, want embedded gc-child -> gc-parent", deps)
+	}
+	if backing.depListCalls != 0 {
+		t.Fatalf("backing DepList calls = %d, want 0", backing.depListCalls)
+	}
+}
+
 func TestCachingStoreBdIncompleteDepsDepAddDoesNotDropExistingBackingDeps(t *testing.T) {
 	t.Parallel()
 
@@ -2205,6 +2242,32 @@ func TestCachingStoreBdIncompleteDepsDepRemoveDoesNotDropExternalBackingDeps(t *
 	if !hasDep(deps, "bd-2") || !hasDep(deps, "bd-4") {
 		t.Fatalf("deps after DepRemove = %v, want retained bd-2 and external bd-4", deps)
 	}
+}
+
+type completeEmbeddedDepsStore struct {
+	Store
+	beads        []Bead
+	depListCalls int
+}
+
+func (s *completeEmbeddedDepsStore) listIncludesCompleteDependencies() bool {
+	return true
+}
+
+func (s *completeEmbeddedDepsStore) List(query ListQuery) ([]Bead, error) {
+	if !query.HasFilter() && !query.AllowScan {
+		return nil, fmt.Errorf("listing beads: %w", ErrQueryRequiresScan)
+	}
+	items := make([]Bead, 0, len(s.beads))
+	for _, b := range s.beads {
+		items = append(items, cloneBead(b))
+	}
+	return ApplyListQuery(items, query), nil
+}
+
+func (s *completeEmbeddedDepsStore) DepList(string, string) ([]Dep, error) {
+	s.depListCalls++
+	return nil, errors.New("unexpected per-ID DepList")
 }
 
 type cachingStoreBdDepRunner struct {

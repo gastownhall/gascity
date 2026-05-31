@@ -35,12 +35,13 @@ so the rig's `.beads` database is found without manual intervention.
 
 **Beads must be in the agent's rig database.** Sling operates on the
 target agent's rig database — formula cooking, labeling, and convoy
-creation all happen there. Create beads with `--rig` so they land in
-the right database:
+creation all happen there. Create the bead in a specific rig's database
+with `gc bd create --rig <rig>`, which resolves the rig from city config
+and uses its database and prefix:
 
 ```
-bd create "fix the bug" --rig frontend   # Creates fe-xxx in frontend's db
-gc sling frontend/polecat fe-xxx         # Works — bead is in the right db
+gc bd create "fix the bug" --rig frontend   # Creates fe-xxx in frontend's db
+gc sling frontend/polecat fe-xxx            # Works — bead is in the right db
 ```
 
 If the bead is in the wrong database (e.g. `gc-xxx` in HQ but targeting

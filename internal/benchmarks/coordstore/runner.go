@@ -24,6 +24,9 @@ type Runner struct {
 	seedMu    sync.RWMutex
 	resultsMu sync.Mutex
 	results   map[string]*OperationResult // op name → result
+
+	purgeMu           sync.Mutex
+	lastTerminalPurge time.Time
 }
 
 // NewRunner creates a Runner for the given adapter and workload.
@@ -51,6 +54,9 @@ func (r *Runner) Run(ctx context.Context, w io.Writer) (Scorecard, error) {
 	if len(schedule) == 0 {
 		return Scorecard{}, fmt.Errorf("runner: workload has no operations (all rates are zero)")
 	}
+	if err := r.primeTerminalRetention(ctx); err != nil {
+		return Scorecard{}, err
+	}
 
 	var (
 		totalOps    atomic.Int64
@@ -60,6 +66,7 @@ func (r *Runner) Run(ctx context.Context, w io.Writer) (Scorecard, error) {
 	deadline := time.Now().Add(wl.Duration)
 	ctx, cancel := context.WithDeadline(ctx, deadline)
 	defer cancel()
+	r.startTerminalPurgeClock(time.Now())
 
 	// Start the memory sampler before the workload so its peak captures the
 	// full run, including the hot working set under load.
@@ -163,6 +170,7 @@ const (
 	opReady
 	opDepOp
 	opRecentScan
+	opPurgeTerminal
 )
 
 // buildSchedule creates a weighted list of operations proportional to their
@@ -186,6 +194,7 @@ func (r *Runner) buildSchedule() []opTag {
 		{opReady, wl.ReadyRate, len(r.seed.MainOpenIDs) > 0},
 		{opDepOp, wl.DepOpRate, len(r.seed.MainOpenIDs) >= 2},
 		{opRecentScan, wl.RecentScanRate, true},
+		{opPurgeTerminal, wl.PurgeTerminalRate, wl.PurgeTerminalOlderThan > 0},
 	}
 
 	var schedule []opTag
@@ -365,8 +374,55 @@ func (r *Runner) execOp(ctx context.Context, op opTag, rng *rand.Rand) error {
 		// FR-18: recent records by created_at DESC.
 		_, err := a.RecentScan(ctx, 50)
 		return r.recordOpErr("RecentScan", err)
+
+	case opPurgeTerminal:
+		if !r.takeTerminalPurgeSlot(time.Now()) {
+			return nil
+		}
+		_, err := a.PurgeTerminal(ctx, r.wl.PurgeTerminalOlderThan)
+		return r.recordOpErr("PurgeTerminal", err)
 	}
 	return nil
+}
+
+func (r *Runner) takeTerminalPurgeSlot(now time.Time) bool {
+	if r.wl.PurgeTerminalRate <= 0 || r.wl.PurgeTerminalOlderThan <= 0 {
+		return false
+	}
+	interval := time.Duration(float64(time.Second) / r.wl.PurgeTerminalRate)
+	r.purgeMu.Lock()
+	defer r.purgeMu.Unlock()
+	if r.lastTerminalPurge.IsZero() || now.Sub(r.lastTerminalPurge) >= interval {
+		r.lastTerminalPurge = now
+		return true
+	}
+	return false
+}
+
+func (r *Runner) startTerminalPurgeClock(now time.Time) {
+	if r.wl.PurgeTerminalRate <= 0 || r.wl.PurgeTerminalOlderThan <= 0 {
+		return
+	}
+	r.purgeMu.Lock()
+	defer r.purgeMu.Unlock()
+	if r.lastTerminalPurge.IsZero() {
+		r.lastTerminalPurge = now
+	}
+}
+
+func (r *Runner) primeTerminalRetention(ctx context.Context) error {
+	if r.wl.PurgeTerminalRate <= 0 || r.wl.PurgeTerminalOlderThan <= 0 {
+		return nil
+	}
+	for {
+		purged, err := r.adapter.PurgeTerminal(ctx, r.wl.PurgeTerminalOlderThan)
+		if err != nil {
+			return r.recordOpErr("PurgeTerminal", err)
+		}
+		if purged < TerminalPurgeBatchSize {
+			return nil
+		}
+	}
 }
 
 // record adds a latency sample to the named operation's histogram.
@@ -416,6 +472,8 @@ func opName(op opTag) string {
 		return "DepAdd"
 	case opRecentScan:
 		return "RecentScan"
+	case opPurgeTerminal:
+		return "PurgeTerminal"
 	}
 	return "unknown"
 }
@@ -690,6 +748,34 @@ func CorrectnessChecker(ctx context.Context, a StoreAdapter) []string {
 		_, getErr := a.Get(ctx, expiring.ID)
 		if getErr == nil {
 			failures = append(failures, "FR-12/PurgeExpired: expired record still accessible after purge")
+		}
+	}
+
+	// Terminal retention: old terminal main-tier records are purged without
+	// deleting recent terminal records or old active records.
+	old := time.Now().Add(-2 * time.Hour)
+	recentRef := time.Now().Add(-30 * time.Minute)
+	oldTerminal, err := a.Create(ctx, Record{Title: "terminal-old", Type: "task", Status: "closed", CreatedAt: old, UpdatedAt: old})
+	check("TerminalRetention/CreateOldTerminal", err)
+	recentTerminal, err := a.Create(ctx, Record{Title: "terminal-recent", Type: "task", Status: "closed", CreatedAt: old, UpdatedAt: recentRef})
+	check("TerminalRetention/CreateRecentTerminal", err)
+	oldActive, err := a.Create(ctx, Record{Title: "terminal-active", Type: "task", Status: "open", CreatedAt: old, UpdatedAt: old})
+	check("TerminalRetention/CreateOldActive", err)
+	if err == nil {
+		purged, err := a.PurgeTerminal(ctx, time.Hour)
+		check("TerminalRetention/PurgeTerminal", err)
+		if err == nil && purged == 0 {
+			failures = append(failures, "TerminalRetention/PurgeTerminal: expected ≥1 purged, got 0")
+		}
+		_, getErr := a.Get(ctx, oldTerminal.ID)
+		if getErr == nil {
+			failures = append(failures, "TerminalRetention/PurgeTerminal: old terminal record still accessible after purge")
+		}
+		if _, getErr := a.Get(ctx, recentTerminal.ID); getErr != nil {
+			failures = append(failures, "TerminalRetention/PurgeTerminal: recent terminal record was purged")
+		}
+		if _, getErr := a.Get(ctx, oldActive.ID); getErr != nil {
+			failures = append(failures, "TerminalRetention/PurgeTerminal: old active record was purged")
 		}
 	}
 

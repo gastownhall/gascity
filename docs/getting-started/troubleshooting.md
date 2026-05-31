@@ -192,6 +192,22 @@ bd version
 Upgrade via Homebrew (`brew upgrade beads`) or download a newer release from
 [gastownhall/beads/releases](https://github.com/gastownhall/beads/releases).
 
+## Native Store Falls Back Because Hooks Are Installed
+
+Native `bd` store selection intentionally falls back to the subprocess-backed
+store when executable `.beads/hooks/on_create`, `.beads/hooks/on_update`, or
+`.beads/hooks/on_close` scripts are present. Those hooks historically emitted
+bead events for external `bd` writes; the native in-process store does not run
+shell hooks.
+
+For controller-managed Gas City deployments, confirm that the controller is
+wrapping stores with `CachingStore` and emitting `bead.created`,
+`bead.updated`, `bead.closed`, and `bead.deleted` events to the event bus. After
+that migration is verified, remove the executable hook scripts from the city or
+rig `.beads/hooks/` directory to allow native store adoption. Keep
+`GC_BEADS_FORCE_FALLBACK=1` set when a deployment still depends on those hook
+scripts directly.
+
 ## flock Not Found (macOS)
 
 macOS does not ship `flock`. Install it via Homebrew:
@@ -271,8 +287,8 @@ bead content and should not be shared across cities). Then:
 # Create a private repo on your git host (example: GitHub via gh)
 gh repo create my-city-jsonl-archive --private
 
-# Point the archive at it
-ARCHIVE=$(gc config get state_dir)/packs/maintenance/jsonl-archive
+# Point the archive at it (run from anywhere inside your city)
+ARCHIVE="$(gc status --json | jq -r '.city_path')/.gc/runtime/packs/maintenance/jsonl-archive"
 git -C "$ARCHIVE" remote add origin git@github.com:<you>/my-city-jsonl-archive.git
 
 # Seed the remote with the existing local history

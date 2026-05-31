@@ -10,7 +10,7 @@ import (
 )
 
 // ApplyEvent updates the cache from a bd hook event. Call this when the
-// event bus delivers a bead.created, bead.updated, or bead.closed event
+// event bus delivers a bead.created, bead.updated, bead.closed, or bead.deleted event
 // with the full bead JSON payload. This keeps the cache fresh without
 // waiting for reconciliation.
 func (c *CachingStore) ApplyEvent(eventType string, payload json.RawMessage) {
@@ -214,6 +214,16 @@ func (c *CachingStore) ApplyEvent(eventType string, payload json.RawMessage) {
 		c.updateEventDepsLocked(eventType, b, fields, refreshedFromBacking)
 		delete(c.dirty, b.ID)
 		delete(c.deletedSeq, b.ID)
+		mutated = true
+	case "bead.deleted":
+		c.noteMutationLocked(b.ID)
+		delete(c.beads, b.ID)
+		delete(c.deps, b.ID)
+		delete(c.dirty, b.ID)
+		delete(c.beadSeq, b.ID)
+		delete(c.localBeadAt, b.ID)
+		c.deletedSeq[b.ID] = c.mutationSeq
+		c.updateStatsLocked()
 		mutated = true
 	default:
 		return

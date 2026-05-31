@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -23,6 +22,7 @@ func newFormulaCmd(stdout, stderr io.Writer) *cobra.Command {
 
 	cmd.AddCommand(newFormulaListCmd(stdout, stderr))
 	cmd.AddCommand(newFormulaShowCmd(stdout, stderr))
+	cmd.AddCommand(newFormulaCatalogCmd(stdout, stderr))
 	cmd.AddCommand(newFormulaCookCmd(stdout, stderr))
 	return cmd
 }
@@ -101,25 +101,25 @@ Examples:
 
 			cityPath, err := resolveCity()
 			if err != nil {
-				return err
+				return formulaCommandError(stderr, "gc formula show", jsonOutput, err)
 			}
 			cfg, err := loadCityConfig(cityPath, stderr)
 			if err != nil {
-				return err
+				return formulaCommandError(stderr, "gc formula show", jsonOutput, err)
 			}
 			scope, err := resolveFormulaScope(cfg, cityPath)
 			if err != nil {
-				return err
+				return formulaCommandError(stderr, "gc formula show", jsonOutput, err)
 			}
 			searchPaths := scope.searchPaths
 			rigVars := rigFormulaVarsForScope(cfg, cityPath)
 			recipe, err := formula.CompileWithoutRuntimeVarValidation(cmd.Context(), name, searchPaths, compileVars)
 			if err != nil {
-				return err
+				return formulaCommandError(stderr, "gc formula show", jsonOutput, err)
 			}
 			if len(vars) > 0 {
 				if err := formula.ValidateProvidedVarDefs(recipe.Vars, vars); err != nil {
-					return err
+					return formulaCommandError(stderr, "gc formula show", jsonOutput, err)
 				}
 			}
 
@@ -256,6 +256,42 @@ Examples:
 	return cmd
 }
 
+func newFormulaCatalogCmd(stdout, stderr io.Writer) *cobra.Command {
+	var jsonOutput bool
+	cmd := &cobra.Command{
+		Use:    "catalog",
+		Short:  "List formulas opted into agent workflow discovery",
+		Hidden: true,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			cityPath, err := resolveCity()
+			if err != nil {
+				return formulaCommandError(stderr, "gc formula catalog", jsonOutput, err)
+			}
+			cfg, err := loadCityConfig(cityPath, stderr)
+			if err != nil {
+				return formulaCommandError(stderr, "gc formula catalog", jsonOutput, err)
+			}
+			scope, err := resolveFormulaScope(cfg, cityPath)
+			if err != nil {
+				return formulaCommandError(stderr, "gc formula catalog", jsonOutput, err)
+			}
+			entries, warnings := formulaCatalogEntries(scope.searchPaths)
+			if jsonOutput {
+				return writeCLIJSONLine(stdout, formulaCatalogJSONFromEntries(entries, warnings))
+			}
+			for _, warning := range warnings {
+				_, _ = fmt.Fprintln(stderr, warning.Message)
+			}
+			for _, entry := range entries {
+				_, _ = fmt.Fprintf(stdout, "%s\t%s\n", entry.Name, entry.Description)
+			}
+			return nil
+		},
+	}
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "emit JSON")
+	return cmd
+}
+
 type formulaListJSON struct {
 	SchemaVersion string                 `json:"schema_version"`
 	OK            bool                   `json:"ok"`
@@ -273,6 +309,19 @@ type formulaListRowJSON struct {
 
 type formulaListSummaryJSON struct {
 	Count int `json:"count"`
+}
+
+type formulaCatalogJSON struct {
+	SchemaVersion string                    `json:"schema_version"`
+	OK            bool                      `json:"ok"`
+	Formulas      []formulaCatalogEntryJSON `json:"formulas"`
+	Summary       formulaListSummaryJSON    `json:"summary"`
+	Warnings      []jsonContractWarning     `json:"warnings,omitempty"`
+}
+
+type formulaCatalogEntryJSON struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
 }
 
 type formulaShowJSON struct {
@@ -339,26 +388,16 @@ func listFormulaRows(warningWriter ...io.Writer) (string, []string, []formulaLis
 	}
 	paths := formulaSearchPathsForList(cfg)
 
-	// Scan search paths for canonical and legacy formula TOML files,
-	// deduplicating by name (last path wins, matching formula layer
-	// resolution order).
-	winners := make(map[string]string)
-	for _, dir := range paths {
-		entries, err := os.ReadDir(dir)
-		if err != nil {
-			continue
-		}
-		for _, e := range entries {
-			if e.IsDir() {
-				continue
-			}
-			name, ok := formula.TrimTOMLFilename(e.Name())
-			if !ok {
-				continue
-			}
-			winners[name] = filepath.Join(dir, e.Name())
-		}
-	}
+	rows := formulaRowsForSearchPaths(paths)
+	return cityPath, paths, rows
+}
+
+func formulaRowsForSearchPaths(paths []string) []formulaListRowJSON {
+	return formulaRowsForSearchPathsWithSource(formula.FSSource{}, paths)
+}
+
+func formulaRowsForSearchPathsWithSource(src formula.Source, paths []string) []formulaListRowJSON {
+	winners := formula.ResolveAllWithSource(src, paths)
 
 	names := make([]string, 0, len(winners))
 	for name := range winners {
@@ -370,7 +409,66 @@ func listFormulaRows(warningWriter ...io.Writer) (string, []string, []formulaLis
 	for _, name := range names {
 		rows = append(rows, formulaListRowJSON{Name: name, Source: winners[name]})
 	}
-	return cityPath, paths, rows
+	return rows
+}
+
+func formulaCatalogEntries(searchPaths []string) ([]formulaCatalogEntryJSON, []jsonContractWarning) {
+	parser := formula.NewParser(searchPaths...).SetSource(formula.SourceFromEnv())
+	rows := formulaRowsForSearchPathsWithSource(parser.Source(), searchPaths)
+
+	entries := make([]formulaCatalogEntryJSON, 0, len(rows))
+	warnings := make([]jsonContractWarning, 0)
+	for _, row := range rows {
+		parsed, err := parser.ParseFile(row.Source)
+		if err != nil {
+			warnings = append(warnings, formulaCatalogWarning("formula_catalog_parse_failed", row.Name, err))
+			continue
+		}
+		if parsed.Catalog == nil {
+			continue
+		}
+
+		name := strings.TrimSpace(parsed.Catalog.Name)
+		if name == "" {
+			warnings = append(warnings, formulaCatalogWarning("formula_catalog_invalid_metadata", row.Name, fmt.Errorf("catalog.name is required")))
+			continue
+		}
+		if name != row.Name {
+			warnings = append(warnings, formulaCatalogWarning("formula_catalog_invalid_metadata", row.Name, fmt.Errorf("catalog.name %q must match formula name %q", name, row.Name)))
+			continue
+		}
+		description := strings.TrimSpace(parsed.Catalog.Description)
+		if description == "" {
+			warnings = append(warnings, formulaCatalogWarning("formula_catalog_invalid_metadata", row.Name, fmt.Errorf("catalog.description is required")))
+			continue
+		}
+		entries = append(entries, formulaCatalogEntryJSON{
+			Name:        name,
+			Description: description,
+		})
+	}
+
+	slices.SortFunc(entries, func(a, b formulaCatalogEntryJSON) int {
+		return strings.Compare(a.Name, b.Name)
+	})
+	return entries, warnings
+}
+
+func formulaCatalogWarning(code, name string, err error) jsonContractWarning {
+	return jsonContractWarning{
+		Code:    code,
+		Message: fmt.Sprintf("skipping formula %q: %v", name, err),
+	}
+}
+
+func formulaCatalogJSONFromEntries(entries []formulaCatalogEntryJSON, warnings []jsonContractWarning) formulaCatalogJSON {
+	return formulaCatalogJSON{
+		SchemaVersion: "1",
+		OK:            true,
+		Formulas:      entries,
+		Summary:       formulaListSummaryJSON{Count: len(entries)},
+		Warnings:      warnings,
+	}
 }
 
 func formulaSearchPathsForList(cfg *config.City) []string {
@@ -392,6 +490,14 @@ func formulaSearchPathsForList(cfg *config.City) []string {
 		add(layers)
 	}
 	return all
+}
+
+func formulaCommandError(stderr io.Writer, command string, jsonOutput bool, err error) error {
+	if err == nil || jsonOutput {
+		return err
+	}
+	fmt.Fprintf(stderr, "%s: %v\n", command, err) //nolint:errcheck // best-effort stderr
+	return errExit
 }
 
 func formulaShowJSONFromRecipe(recipe *formula.Recipe, cityPath string, scope formulaScope, rigVars, providedVars, displayVars map[string]string) formulaShowJSON {
@@ -492,19 +598,19 @@ bead into a sub-workflow at runtime.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cityPath, err := resolveCity()
 			if err != nil {
-				return err
+				return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
 			}
 			cfg, err := loadCityConfig(cityPath, stderr)
 			if err != nil {
-				return err
+				return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
 			}
 			scope, err := resolveFormulaScope(cfg, cityPath)
 			if err != nil {
-				return err
+				return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
 			}
 			store, err := openStoreAtForCity(scope.storeRoot, cityPath)
 			if err != nil {
-				return err
+				return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
 			}
 
 			cookVars := parseFormulaVars(vars)
@@ -512,7 +618,7 @@ bead into a sub-workflow at runtime.`,
 			if attach != "" {
 				recipe, err := formula.CompileWithoutRuntimeVarValidation(cmd.Context(), args[0], scope.searchPaths, cookVars)
 				if err != nil {
-					return fmt.Errorf("compile: %w", err)
+					return formulaCommandError(stderr, "gc formula cook: compile", jsonOutput, err)
 				}
 
 				result, err := molecule.Attach(cmd.Context(), store, recipe, attach, molecule.AttachOptions{
@@ -520,7 +626,7 @@ bead into a sub-workflow at runtime.`,
 					Vars:  cookVars,
 				})
 				if err != nil {
-					return err
+					return formulaCommandError(stderr, "gc formula cook: attach", jsonOutput, err)
 				}
 
 				if jsonOutput {
@@ -553,16 +659,17 @@ bead into a sub-workflow at runtime.`,
 				Vars:  cookVars,
 			})
 			if err != nil {
-				return err
+				return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
 			}
 
 			rootMeta, err := parseMetadataArgs(metadata)
 			if err != nil {
-				return err
+				return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
 			}
 			if len(rootMeta) > 0 {
 				if err := store.SetMetadataBatch(result.RootID, rootMeta); err != nil {
-					return fmt.Errorf("setting root metadata on %s: %w", result.RootID, err)
+					err := fmt.Errorf("setting root metadata on %s: %w", result.RootID, err)
+					return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
 				}
 			}
 

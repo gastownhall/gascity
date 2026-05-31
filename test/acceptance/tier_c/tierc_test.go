@@ -36,6 +36,13 @@ var testEnvC *helpers.Env
 const tierCAcceptanceConfig = `
 [session]
 startup_timeout = "3m"
+
+# Tier C runs Claude Code headlessly through the Ollama-compatible endpoint.
+# Keep tool approvals non-interactive even if the provider surfaces an edit
+# prompt despite the unrestricted permission-mode default.
+[providers.claude]
+base = "builtin:claude"
+args_append = ["--allowedTools", "Bash,Edit,MultiEdit,Write"]
 `
 
 func TestMain(m *testing.M) {

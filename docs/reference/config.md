@@ -1,6 +1,6 @@
 # Gas City Configuration
 
-Schema for city.toml — the PackV2 deployment file for a Gas City instance. Pack definitions live in pack.toml and conventional pack directories such as agents/, formulas/, orders/, and commands/. Use [imports.*] for PackV2 composition; legacy includes, [packs.*], and [[agent]] fields remain visible for migration compatibility.
+Schema for city.toml — the PackV2 deployment file for a Gas City instance. Pack definitions live in pack.toml and conventional pack directories such as agents/, formulas/, orders/, and commands/. Use [imports.*] for PackV2 composition; legacy includes and [[agent]] fields remain visible for migration compatibility. Legacy [packs.*] entries are still accepted by the runtime for migration/fetch compatibility but are intentionally omitted from this public schema.
 
 > **PackV2 format source of truth:** The public PackV2 format and loader semantics are specified in [Gas City Pack Specification (2.0)](/specs/pack-spec).
 
@@ -15,7 +15,6 @@ City is the top-level configuration for a Gas City instance.
 | `include` | []string |  |  | Include lists config fragment files to merge into this config. Processed by LoadWithIncludes; not recursive (fragments cannot include). |
 | `workspace` | Workspace | **yes** |  | Workspace holds city-level metadata (name, default provider). |
 | `providers` | map[string]ProviderSpec |  |  | Providers defines named provider presets for agent startup. |
-| `packs` | map[string]PackSource |  |  | Packs defines named remote pack sources fetched via git (V1 mechanism). |
 | `imports` | map[string]Import |  |  | Imports defines named pack imports (V2 mechanism). Each key is a binding name; the value specifies the source and optional version, export, and transitive controls. Processed during ExpandCityPacks. |
 | `defaults` | PackDefaults |  |  | Defaults holds city-level defaults that seed generated config. The canonical default-rig import table is [defaults.rig.imports]. |
 | `agent` | []Agent |  |  | Agents lists all configured agents in this city. Optional: PackV2 cities compose agents through [imports.*] and ship without any [[agent]] block. |
@@ -35,7 +34,9 @@ City is the top-level configuration for a Gas City instance.
 | `session_sleep` | SessionSleepConfig |  |  | SessionSleep configures idle sleep policy defaults for managed sessions. |
 | `convergence` | ConvergenceConfig |  |  | Convergence configures convergence loop limits. |
 | `doctor` | DoctorConfig |  |  | Doctor configures gc doctor thresholds and policy toggles (worktree size warnings, nested-worktree auto-prune). |
+| `maintenance` | MaintenanceConfig |  |  | Maintenance configures periodic store-maintenance loops. |
 | `service` | []Service |  |  | Services declares workspace-owned HTTP services mounted on the controller edge under /svc/&#123;name&#125;. |
+| `github` | GitHubConfig |  |  | GitHub configures GitHub-facing repository monitors. |
 | `agent_defaults` | AgentDefaults |  |  | AgentDefaults provides city-level defaults for agents that don't override them (canonical TOML key: agent_defaults). The runtime currently applies default_sling_formula and append_fragments; the attachment-list fields remain tombstones, and the other fields are parsed/composed but not yet inherited automatically. |
 | `pricing` | []ModelPricing |  |  | Pricing holds per-model cost rate overrides keyed by (provider, model). City-level entries override pack-level entries which override the defaults shipped with the pricing package. See internal/pricing for the estimation seam introduced by issue #1255 (1d). |
 
@@ -118,6 +119,7 @@ Agent defines a configured agent in the city.
 | `depends_on` | []string |  |  | DependsOn lists agent names that must be awake before this agent wakes. Used for dependency-ordered startup and shutdown. Validated for cycles at config load time. |
 | `resume_command` | string |  |  | ResumeCommand is the full shell command to run when resuming this agent. Supports &#123;&#123;.SessionKey&#125;&#125; template variable. When set, takes precedence over the provider's ResumeFlag/ResumeStyle. Example:   "claude --resume &#123;&#123;.SessionKey&#125;&#125; --dangerously-skip-permissions" |
 | `wake_mode` | string |  |  | WakeMode controls context freshness across sleep/wake cycles. "resume" (default): reuse provider session key for conversation continuity. "fresh": start a new provider session on every wake (polecat pattern). Enum: `resume`, `fresh` |
+| `mouse_mode` | string |  |  | MouseMode controls whether tmux mouse mode is preserved for this agent. "on" leaves the session's mouse setting alone for human-attached sessions; "off" or empty preserves the SDK's default mouse-off startup behavior for headless sessions. Enum: `on`, `off` |
 
 ## AgentDefaults
 
@@ -182,6 +184,7 @@ AgentOverride modifies a pack-stamped agent for a specific rig.
 | `depends_on` | []string |  |  | DependsOn overrides the agent's dependency list. |
 | `resume_command` | string |  |  | ResumeCommand overrides the agent's resume_command template. |
 | `wake_mode` | string |  |  | WakeMode overrides the agent's wake mode ("resume" or "fresh"). Enum: `resume`, `fresh` |
+| `mouse_mode` | string |  |  | MouseMode overrides whether tmux mouse mode is preserved ("on" or "off"). Enum: `on`, `off` |
 | `inject_fragments_append` | []string |  |  | InjectFragmentsAppend appends to the agent's inject_fragments list. |
 | `max_active_sessions` | integer |  |  | MaxActiveSessions overrides the agent-level cap on concurrent sessions. |
 | `min_active_sessions` | integer |  |  | MinActiveSessions overrides the minimum number of sessions to keep alive. |
@@ -232,6 +235,7 @@ AgentPatch modifies an existing agent identified by (Dir, Name).
 | `depends_on` | []string |  |  | DependsOn overrides the agent's dependency list. |
 | `resume_command` | string |  |  | ResumeCommand overrides the agent's resume_command template. |
 | `wake_mode` | string |  |  | WakeMode overrides the agent's wake mode ("resume" or "fresh"). Enum: `resume`, `fresh` |
+| `mouse_mode` | string |  |  | MouseMode overrides whether tmux mouse mode is preserved ("on" or "off"). Enum: `on`, `off` |
 | `pre_start_append` | []string |  |  | PreStartAppend appends commands to the agent's pre_start list (instead of replacing). Applied after PreStart if both are set. |
 | `session_setup_append` | []string |  |  | SessionSetupAppend appends commands to the agent's session_setup list. |
 | `session_live_append` | []string |  |  | SessionLiveAppend appends commands to the agent's session_live list. |
@@ -284,6 +288,7 @@ DaemonConfig holds controller daemon settings.
 | `session_circuit_breaker_reset_after` | string |  |  | SessionCircuitBreakerResetAfter is the cooldown before an open named-session breaker resets automatically. Empty defaults to 2 * SessionCircuitBreakerWindowDuration. |
 | `shutdown_timeout` | string |  | `5s` | ShutdownTimeout is the time to wait after sending Ctrl-C before force-killing agents during shutdown. Duration string (e.g., "5s", "30s"). Set to "0s" for immediate kill. Defaults to "5s". |
 | `dolt_stop_timeout` | string |  | `30s` | DoltStopTimeout is the SIGTERM→SIGKILL grace period for the managed dolt subprocess during stop, unregister, restart, and startup/recovery cleanup. Independent of ShutdownTimeout (which gates agent drain) so a slow session drain cannot steal dolt's flush window. Duration string (e.g., "30s", "1m"). A too-short value risks SIGKILL during a journal index update or manifest rotation, which corrupts dolt's chunk journal (see gastownhall/gascity#2090). Defaults to "30s", which absorbs the longest observed flush window on commodity SSDs without unduly delaying unregister. Set to "0s" for immediate SIGKILL with no grace. Negative values are rejected at config load. Note: when a city is stopped via the controller (`gc stop` while a controller is running), the standalone controller-stop wait budget is `shutdown_timeout` + 15s (20s at the default `shutdown_timeout` of "5s"); a `dolt_stop_timeout` larger than that budget can be cut short on that path even though the direct stop/unregister path always honors the full grace. |
+| `dolt_start_address_in_use_retry_window` | string |  | `30s` | DoltStartAddressInUseRetryWindow is how long the managed dolt start path waits on the originally requested port when bind fails with "address already in use" before falling back to a higher port. The common cause is a TIME_WAIT socket left by an abrupt stop of a sibling dolt subprocess (external SIGTERM, supervisor restart, OOM kill); on Linux the listening-socket slot typically frees within ~30s. Falling back immediately publishes the rebound port to provider state, after which `recoverManagedDoltShouldReuseExisting` keeps accepting the rebound instance as canonical and consumers hardcoded to the original port stay broken until the orphan is killed. Duration string (e.g., "30s", "1m"). Set to "0s" to disable the retry (legacy fall-back- immediately behavior). Defaults to "30s". Each port is waited on at most once per startManagedDoltProcessWithOptions invocation, so the worst-case wall time per startup is bounded by (DoltStartAddressInUseRetryWindow + per-attempt-startup) × min(5, distinct-ports-tried) rather than DoltStartAddressInUseRetryWindow × 5. Negative values are rejected at config load. |
 | `wisp_gc_interval` | string |  |  | WispGCInterval is how often wisp GC runs. Duration string (e.g., "5m", "1h"). Wisp GC is disabled unless both WispGCInterval and WispTTL are set. |
 | `wisp_ttl` | string |  |  | WispTTL is how long a closed molecule survives before being purged. Duration string (e.g., "24h", "7d"). Wisp GC is disabled unless both WispGCInterval and WispTTL are set. |
 | `drift_drain_timeout` | string |  | `2m` | DriftDrainTimeout is the maximum time to wait for an agent to acknowledge a drain signal during a config-drift restart. If the agent doesn't ack within this window, the controller force-kills and restarts it. Duration string (e.g., "2m", "5m"). Defaults to "2m". |
@@ -316,6 +321,17 @@ DoltConfig holds optional dolt server overrides.
 | `host` | string |  | `localhost` | Host is the dolt server hostname. Defaults to localhost. |
 | `archive_level` | integer |  | `0` | ArchiveLevel controls Dolt's auto_gc archive aggressiveness. 0 disables archive compaction (lower CPU on startup). 1 enables archive compaction (higher CPU on startup). nil (omitted) defaults to 0. |
 
+## DoltMaintenance
+
+DoltMaintenance configures the periodic Dolt store maintenance loop.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `enabled` | boolean |  |  | Enabled toggles the maintenance loop. Defaults to false (opt-in). |
+| `interval` | string |  | `168h` | Interval is the cadence between maintenance runs as a duration string (e.g., "168h"). Defaults to 168h (weekly). |
+| `alert_to` | string |  |  | AlertTo is the agent identity to mail on failure (e.g., "gascity/mayor"). Empty disables alert mail. |
+| `gc_timeout` | string |  | `10m` | GCTimeout is the ceiling for CALL DOLT_GC() as a duration string. Defaults to 10m. |
+
 ## EventsConfig
 
 EventsConfig holds events provider settings.
@@ -344,14 +360,59 @@ FormulasConfig holds legacy formula directory settings.
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
 
+## GitHubConfig
+
+GitHubConfig groups GitHub-facing repository monitor declarations.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `pr_monitor` | []GitHubPRMonitor |  |  | PRMonitors declares GitHub pull-request readiness monitors. |
+
+## GitHubPRMonitor
+
+GitHubPRMonitor declares how one repository/base-branch set is monitored and where durable repair work should be routed when readiness fails.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `name` | string | **yes** |  | Name is the stable monitor identity used by patches and diagnostics. |
+| `owner` | string | **yes** |  | Owner is the GitHub repository owner or organization. |
+| `repo` | string | **yes** |  | Repo is the GitHub repository name. |
+| `base_branches` | []string | **yes** |  | BaseBranches lists the base branches this monitor owns. |
+| `rig` | string | **yes** |  | Rig is the Gas City rig that owns repair work for this repository. |
+| `notify` | []string |  |  | Notify lists session or mail recipients for readiness notifications. |
+| `repair_route` | string | **yes** |  | RepairRoute is the operator-supplied route target for repair work. |
+| `webhook_secret_env` | string |  |  | WebhookSecretEnv is the environment variable containing the webhook HMAC secret. The secret value itself must not be stored in city.toml. |
+| `webhook_secret_key` | string |  |  | WebhookSecretKey is an optional stable key for identifying the webhook secret during rotation. When omitted, WebhookSecretEnv is the key. |
+| `poll_interval` | string |  |  | PollInterval optionally enables bounded polling/backfill cadence. |
+| `merge_queue` | string |  |  | MergeQueuePolicy controls merge-queue signal handling. Empty defaults to "observe"; valid values are "ignore", "observe", and "repair". Enum: `ignore`, `observe`, `repair` |
+
+## GitHubPRMonitorPatch
+
+GitHubPRMonitorPatch modifies an existing GitHub PR readiness monitor by name.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `name` | string | **yes** |  | Name is the monitor identity to patch. |
+| `owner` | string |  |  | Owner overrides the GitHub repository owner or organization. |
+| `repo` | string |  |  | Repo overrides the GitHub repository name. |
+| `base_branches` | []string |  |  | BaseBranches replaces the monitored base branch list. An empty list clears the field and will fail validation unless another patch fills it. |
+| `rig` | string |  |  | Rig overrides the owning rig. |
+| `notify` | []string |  |  | Notify replaces notification recipients. An empty list clears recipients. |
+| `notify_append` | []string |  |  | NotifyAppend appends notification recipients after Notify replacement. |
+| `repair_route` | string |  |  | RepairRoute overrides the repair route target. |
+| `webhook_secret_env` | string |  |  | WebhookSecretEnv overrides the env var containing the webhook secret. |
+| `webhook_secret_key` | string |  |  | WebhookSecretKey overrides the stable webhook secret key. |
+| `poll_interval` | string |  |  | PollInterval overrides the optional polling cadence. |
+| `merge_queue` | string |  |  | MergeQueuePolicy overrides merge-queue signal handling. Enum: `ignore`, `observe`, `repair` |
+
 ## Import
 
 Import defines a named import of another pack.
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `source` | string | **yes** |  | Source is the pack location: a local relative path (e.g., "./assets/imports/gastown") or a remote URL (e.g., "github.com/gastownhall/gastown"). Local paths have no version. |
-| `version` | string |  |  | Version is a semver constraint for remote imports (e.g., "^1.2"). Empty for local paths. "sha:&lt;hex&gt;" for commit pinning. |
+| `source` | string | **yes** |  | Source is the durable authored pack location: a local path, a remote git URL, or a remote git URL with a monorepo subpath such as "github.com/org/repo//packs/foo". Registry handles are lookup-only in this release wave; authored [imports.*] entries store the resolved source plus optional version. |
+| `version` | string |  |  | Version is an optional semver constraint for git-backed imports (e.g., "^1.2"). Empty for local paths. "sha:&lt;hex&gt;" pins a specific commit. |
 | `export` | boolean |  |  | Export re-exports this import's contents into the parent pack's namespace. Consumers of the parent get this import's agents flattened under the parent's binding name. |
 | `transitive` | boolean |  |  | Transitive controls whether this import's own imports are visible to the consumer. Defaults to true (transitive). Set to false to suppress transitive resolution for this specific import. |
 | `shadow` | string |  |  | Shadow controls shadow warnings when the importer defines an agent with the same name as one from this import. "warn" (default) emits a warning; "silent" suppresses it. Enum: `warn`, `silent` |
@@ -390,6 +451,14 @@ MailConfig holds mail provider settings.
 |-------|------|----------|---------|-------------|
 | `provider` | string |  |  | Provider selects the mail backend: "fake", "fail", "exec:&lt;script&gt;", or "" (default: beadmail). |
 
+## MaintenanceConfig
+
+MaintenanceConfig groups periodic store-maintenance subsections.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `dolt` | DoltMaintenance |  |  | Dolt configures the weekly Dolt store maintenance loop (CALL DOLT_GC + backup snapshot). |
+
 ## ModelPricing
 
 ModelPricing is a complete pricing entry for a (Provider, Model) pair.
@@ -426,7 +495,7 @@ OptionChoice is one allowed value for a "select" option.
 
 ## OrderOverride
 
-OrderOverride modifies a scanned order's scheduling fields.
+OrderOverride modifies a scanned order's scheduling fields and exec env.
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
@@ -441,6 +510,7 @@ OrderOverride modifies a scanned order's scheduling fields.
 | `on` | string |  |  | On overrides the event trigger event type. |
 | `pool` | string |  |  | Pool overrides the target session config. |
 | `timeout` | string |  |  | Timeout overrides the per-order timeout. Go duration string. |
+| `env` | map[string]string |  |  | Env adds or overrides environment variables exported into an exec order's child process. |
 
 ## OrdersConfig
 
@@ -468,16 +538,6 @@ PackRigDefaults holds the [defaults.rig] block — defaults applied to rigs crea
 |-------|------|----------|---------|-------------|
 | `imports` | map[string]Import |  |  |  |
 
-## PackSource
-
-PackSource defines a remote pack repository.
-
-| Field | Type | Required | Default | Description |
-|-------|------|----------|---------|-------------|
-| `source` | string | **yes** |  | Source is the git repository URL. |
-| `ref` | string |  |  | Ref is the git ref to checkout (branch, tag, or commit). Defaults to HEAD. |
-| `path` | string |  |  | Path is a subdirectory within the repo containing the pack files. |
-
 ## Patches
 
 Patches holds all patch blocks from composition.
@@ -487,6 +547,7 @@ Patches holds all patch blocks from composition.
 | `agent` | []AgentPatch |  |  | Agents targets agents by (dir, name). |
 | `rigs` | []RigPatch |  |  | Rigs targets rigs by name. |
 | `providers` | []ProviderPatch |  |  | Providers targets providers by name. |
+| `github_pr_monitor` | []GitHubPRMonitorPatch |  |  | GitHubPRMonitors targets GitHub PR readiness monitors by name. |
 
 ## PoolOverride
 

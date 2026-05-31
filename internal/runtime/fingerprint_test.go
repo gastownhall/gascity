@@ -119,6 +119,18 @@ func TestConfigFingerprintIncludesAcceptStartupDialogs(t *testing.T) {
 	}
 }
 
+func TestConfigFingerprintIncludesMouseOn(t *testing.T) {
+	off := Config{Command: "claude"}
+	on := Config{Command: "claude", MouseOn: true}
+
+	if CoreFingerprint(off) == CoreFingerprint(on) {
+		t.Fatal("MouseOn should affect core fingerprint")
+	}
+	if got := CoreFingerprintDriftFields(CoreFingerprintBreakdown(off), on); len(got) != 1 || got[0] != "MouseOn" {
+		t.Fatalf("CoreFingerprintDriftFields = %v, want [MouseOn]", got)
+	}
+}
+
 func TestConfigFingerprintIncludesLifecycle(t *testing.T) {
 	persistent := Config{Command: "custom-once"}
 	oneShot := Config{Command: "custom-once", Lifecycle: LifecycleOneShot}
@@ -822,7 +834,7 @@ func TestIsLegacyOrMismatchedVersion(t *testing.T) {
 		{"empty stored (handled by separate gate, not legacy/mismatch)", "", false},
 		{"current version prefix", current, false},
 		{"v0 prefix (older mismatched version)", "v0:" + bareHex, true},
-		{"v3 prefix (future mismatched version)", "v3:" + bareHex, true},
+		{"v4 prefix (future mismatched version)", "v4:" + bareHex, true},
 		{"vX prefix (non-numeric, treated as legacy)", "vX:" + bareHex, true},
 		{"v01 prefix (different literal version, mismatch)", "v01:" + bareHex, true},
 		{"non-v prefix (e.g. xyz, treated as legacy)", "xyz:" + bareHex, true},

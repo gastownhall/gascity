@@ -68,6 +68,9 @@ type Formula struct {
 	// Description explains what this formula does.
 	Description string `json:"description,omitempty"`
 
+	// Catalog opts the formula into user-facing workflow discovery.
+	Catalog *CatalogMetadata `json:"catalog,omitempty" toml:"catalog,omitempty"`
+
 	// Version is the formula revision.
 	// It is intentionally not a graph.v2 opt-in: legacy molecule formulas use
 	// this field for their own revisions and must keep hierarchy-first
@@ -123,6 +126,15 @@ type Formula struct {
 
 	// Source tracks where this formula was loaded from (set by parser).
 	Source string `json:"source,omitempty"`
+}
+
+// CatalogMetadata describes a formula exposed through gc formula catalog.
+type CatalogMetadata struct {
+	// Name is the runnable formula name shown in the catalog.
+	Name string `json:"name,omitempty" toml:"name,omitempty"`
+
+	// Description explains when to run the formula.
+	Description string `json:"description,omitempty" toml:"description,omitempty"`
 }
 
 // VarDef defines a template variable with optional validation.

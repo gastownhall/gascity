@@ -878,11 +878,7 @@ func TestListRunning_FindsSessions(t *testing.T) {
 }
 
 func TestStartLongSocketPathUsesShortSocketName(t *testing.T) {
-	root, err := os.MkdirTemp("", "gc-acp-sock-")
-	if err != nil {
-		t.Fatalf("MkdirTemp: %v", err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	root := shortTempDir(t)
 	const name = "control-dispatcher"
 	// Unix socket sun_path is 104 bytes on macOS / 108 on Linux. Use the
 	// macOS limit so the constructed path binds on either platform.

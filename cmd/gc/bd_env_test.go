@@ -45,6 +45,17 @@ func mustCityRuntimeProcessEnv(t *testing.T, cityPath string) []string {
 	return env
 }
 
+func envEntriesMap(entries []string) map[string]string {
+	result := make(map[string]string, len(entries))
+	for _, entry := range entries {
+		key, value, ok := strings.Cut(entry, "=")
+		if ok {
+			result[key] = value
+		}
+	}
+	return result
+}
+
 func mustSessionBackendEnv(t *testing.T, cityPath, rigRoot string, rigs []config.Rig) map[string]string {
 	t.Helper()
 	env, err := sessionBackendEnvWithError(cityPath, rigRoot, rigs)
@@ -83,6 +94,72 @@ func TestCityRuntimeProcessEnvStripsAmbientGCDolt(t *testing.T) {
 		if strings.HasPrefix(entry, "GC_DOLT=") {
 			t.Fatalf("cityRuntimeProcessEnv leaked ambient GC_DOLT control var: %q", entry)
 		}
+	}
+}
+
+func TestCityRuntimeProcessEnvUsesNativeOpenEnvSnapshotGuard(t *testing.T) {
+	orig := processEnvSnapshotExcludingNativeDoltOpen
+	called := false
+	processEnvSnapshotExcludingNativeDoltOpen = func() []string {
+		called = true
+		return []string{
+			"PATH=" + os.Getenv("PATH"),
+			"BEADS_DOLT_SERVER_HOST=ambient.example.com",
+		}
+	}
+	t.Cleanup(func() {
+		processEnvSnapshotExcludingNativeDoltOpen = orig
+	})
+
+	env, err := cityRuntimeProcessEnvWithError(t.TempDir())
+	if err != nil {
+		t.Fatalf("cityRuntimeProcessEnvWithError() error = %v", err)
+	}
+	if !called {
+		t.Fatal("cityRuntimeProcessEnvWithError did not use native-open env snapshot guard")
+	}
+	if got := envEntriesMap(env)["BEADS_DOLT_SERVER_HOST"]; got == "ambient.example.com" {
+		t.Fatalf("cityRuntimeProcessEnvWithError inherited unprojected native-open env host %q", got)
+	}
+}
+
+func TestRecoverManagedBDCommandUsesNativeOpenEnvSnapshotGuard(t *testing.T) {
+	orig := processEnvSnapshotExcludingNativeDoltOpen
+	called := false
+	processEnvSnapshotExcludingNativeDoltOpen = func() []string {
+		called = true
+		return []string{
+			"PATH=" + os.Getenv("PATH"),
+			"BEADS_DOLT_SERVER_HOST=ambient.example.com",
+		}
+	}
+	t.Cleanup(func() {
+		processEnvSnapshotExcludingNativeDoltOpen = orig
+	})
+
+	cityPath := t.TempDir()
+	capture := filepath.Join(t.TempDir(), "recover-env.txt")
+	script := gcBeadsBdScriptPath(cityPath)
+	if err := os.MkdirAll(filepath.Dir(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	content := fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' \"${BEADS_DOLT_SERVER_HOST:-}\" > %q\n", capture)
+	if err := os.WriteFile(script, []byte(content), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := recoverManagedBDCommand(cityPath); err != nil {
+		t.Fatalf("recoverManagedBDCommand: %v", err)
+	}
+	if !called {
+		t.Fatal("recoverManagedBDCommand did not use native-open env snapshot guard")
+	}
+	data, err := os.ReadFile(capture)
+	if err != nil {
+		t.Fatalf("read captured env: %v", err)
+	}
+	if got := strings.TrimSpace(string(data)); got == "ambient.example.com" {
+		t.Fatalf("recoverManagedBDCommand inherited unprojected native-open env host %q", got)
 	}
 }
 
@@ -189,6 +266,95 @@ func TestBdRuntimeEnvIncludesDoltHost(t *testing.T) {
 	}
 	if got := env["BEADS_DOLT_AUTO_START"]; got != "0" {
 		t.Errorf("BEADS_DOLT_AUTO_START = %q, want %q", got, "0")
+	}
+}
+
+func TestBdRuntimeEnvDisablesCLIRemoteSync(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("BD_DOLT_SYNC_CLI_REMOTES", "true")
+	t.Setenv("BEADS_DOLT_SYNC_CLI_REMOTES", "true")
+
+	env := mustBdRuntimeEnv(t, t.TempDir())
+	if got := env["BD_DOLT_SYNC_CLI_REMOTES"]; got != "false" {
+		t.Fatalf("BD_DOLT_SYNC_CLI_REMOTES = %q, want false", got)
+	}
+	if got := env["BEADS_DOLT_SYNC_CLI_REMOTES"]; got != "false" {
+		t.Fatalf("BEADS_DOLT_SYNC_CLI_REMOTES = %q, want false", got)
+	}
+}
+
+func TestCityRuntimeProcessEnvDisablesCLIRemoteSync(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("BD_DOLT_SYNC_CLI_REMOTES", "true")
+	t.Setenv("BEADS_DOLT_SYNC_CLI_REMOTES", "true")
+
+	env := mustCityRuntimeProcessEnv(t, t.TempDir())
+	values := map[string]string{}
+	for _, entry := range env {
+		key, value, ok := strings.Cut(entry, "=")
+		if ok {
+			values[key] = value
+		}
+	}
+	if got := values["BD_DOLT_SYNC_CLI_REMOTES"]; got != "false" {
+		t.Fatalf("BD_DOLT_SYNC_CLI_REMOTES = %q, want false", got)
+	}
+	if got := values["BEADS_DOLT_SYNC_CLI_REMOTES"]; got != "false" {
+		t.Fatalf("BEADS_DOLT_SYNC_CLI_REMOTES = %q, want false", got)
+	}
+}
+
+func TestSessionBackendEnvDisablesCLIRemoteSync(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("BD_DOLT_SYNC_CLI_REMOTES", "true")
+	t.Setenv("BEADS_DOLT_SYNC_CLI_REMOTES", "true")
+
+	env := mustSessionBackendEnv(t, t.TempDir(), "", nil)
+	if got := env["BD_DOLT_SYNC_CLI_REMOTES"]; got != "false" {
+		t.Fatalf("BD_DOLT_SYNC_CLI_REMOTES = %q, want false", got)
+	}
+	if got := env["BEADS_DOLT_SYNC_CLI_REMOTES"]; got != "false" {
+		t.Fatalf("BEADS_DOLT_SYNC_CLI_REMOTES = %q, want false", got)
+	}
+}
+
+func TestRecoverManagedBDCommandDisablesCLIRemoteSync(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("BD_DOLT_SYNC_CLI_REMOTES", "true")
+	t.Setenv("BEADS_DOLT_SYNC_CLI_REMOTES", "true")
+
+	cityPath := t.TempDir()
+	envFile := filepath.Join(cityPath, "recover-env.txt")
+	scriptPath := gcBeadsBdScriptPath(cityPath)
+	if err := os.MkdirAll(filepath.Dir(scriptPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	script := "#!/bin/sh\n" +
+		"printf 'BD_DOLT_SYNC_CLI_REMOTES=%s\\n' \"$BD_DOLT_SYNC_CLI_REMOTES\" > \"" + envFile + "\"\n" +
+		"printf 'BEADS_DOLT_SYNC_CLI_REMOTES=%s\\n' \"$BEADS_DOLT_SYNC_CLI_REMOTES\" >> \"" + envFile + "\"\n"
+	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := recoverManagedBDCommand(cityPath); err != nil {
+		t.Fatalf("recoverManagedBDCommand() error = %v", err)
+	}
+	data, err := os.ReadFile(envFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	values := map[string]string{}
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		key, value, ok := strings.Cut(line, "=")
+		if ok {
+			values[key] = value
+		}
+	}
+	if got := values["BD_DOLT_SYNC_CLI_REMOTES"]; got != "false" {
+		t.Fatalf("BD_DOLT_SYNC_CLI_REMOTES = %q, want false", got)
+	}
+	if got := values["BEADS_DOLT_SYNC_CLI_REMOTES"]; got != "false" {
+		t.Fatalf("BEADS_DOLT_SYNC_CLI_REMOTES = %q, want false", got)
 	}
 }
 
@@ -1453,10 +1619,14 @@ name = "demo"
 		t.Fatal(err)
 	}
 
-	rigStore, err := openStoreAtForCity(rigDir, cityDir)
+	rigResult, err := openStoreResultAtForCity(rigDir, cityDir)
 	if err != nil {
 		t.Fatalf("openStoreAtForCity(rig): %v", err)
 	}
+	if rigResult.Diagnostic.Store != "FileStore" {
+		t.Fatalf("rig beads_store = %q, want FileStore", rigResult.Diagnostic.Store)
+	}
+	rigStore := rigResult.Store
 	if _, err := rigStore.Create(beads.Bead{Title: "rig bead", Type: "task"}); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -1508,10 +1678,14 @@ prefix = "fe"
 		t.Fatal(err)
 	}
 
-	store, err := openStoreAtForCity(rigDir, cityDir)
+	result, err := openStoreResultAtForCity(rigDir, cityDir)
 	if err != nil {
 		t.Fatalf("openStoreAtForCity(rig): %v", err)
 	}
+	if result.Diagnostic.Store != "BdStore" {
+		t.Fatalf("beads_store = %q, want BdStore", result.Diagnostic.Store)
+	}
+	store := result.Store
 	if _, ok := store.(*beads.BdStore); !ok {
 		t.Fatalf("openStoreAtForCity(rig) returned %T, want *beads.BdStore", store)
 	}
@@ -1846,6 +2020,49 @@ exit 0
 	}
 	if got["GC_RIG_ROOT"] != rigDir {
 		t.Fatalf("GC_RIG_ROOT = %q, want %q", got["GC_RIG_ROOT"], rigDir)
+	}
+}
+
+func TestNativeDoltOpenEnvForScopeUsesRigScopedDoltConfig(t *testing.T) {
+	cityDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, ".beads", "config.yaml"), []byte(`issue_prefix: gc
+gc.endpoint_origin: city_canonical
+gc.endpoint_status: verified
+dolt.host: city-db.example.com
+dolt.port: 3307
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	rigDir := filepath.Join(t.TempDir(), "my-rig")
+	if err := os.MkdirAll(filepath.Join(rigDir, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rigDir, ".beads", "config.yaml"), []byte(`issue_prefix: myrig
+gc.endpoint_origin: explicit
+gc.endpoint_status: verified
+dolt.host: rig-db.example.com
+dolt.port: 4407
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{Rigs: []config.Rig{{Name: "my-rig", Path: rigDir}}}
+
+	env, err := nativeDoltOpenEnvForScope(cityDir, cfg, rigDir)
+	if err != nil {
+		t.Fatalf("nativeDoltOpenEnvForScope: %v", err)
+	}
+	if got := env["BEADS_DOLT_SERVER_HOST"]; got != "rig-db.example.com" {
+		t.Fatalf("BEADS_DOLT_SERVER_HOST = %q, want rig scoped host", got)
+	}
+	if got := env["BEADS_DOLT_SERVER_PORT"]; got != "4407" {
+		t.Fatalf("BEADS_DOLT_SERVER_PORT = %q, want rig scoped port", got)
+	}
+	if got := env["BEADS_DIR"]; got != filepath.Join(rigDir, ".beads") {
+		t.Fatalf("BEADS_DIR = %q, want rig scoped beads dir", got)
 	}
 }
 
@@ -4523,6 +4740,11 @@ func TestProjectedKeysCoverage(t *testing.T) {
 	for _, key := range projectedDoltEnvKeys {
 		if !projectedKeyStripped(key) {
 			t.Errorf("projectedDoltEnvKeys[%q] is not in mergeRuntimeEnv strip list - symmetry broken", key)
+		}
+	}
+	for _, key := range bdCLIRemoteSyncOptOutEnvKeys {
+		if !projectedKeyStripped(key) {
+			t.Errorf("bdCLIRemoteSyncOptOutEnvKeys[%q] is not in mergeRuntimeEnv strip list - symmetry broken", key)
 		}
 	}
 }

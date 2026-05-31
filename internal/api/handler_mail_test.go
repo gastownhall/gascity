@@ -2,13 +2,17 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/gastownhall/gascity/internal/api/genclient"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/mail"
@@ -86,6 +90,69 @@ func (p *exactRecipientMailProvider) unread(recipient string) []mail.Message {
 	return out
 }
 
+type blockingMailProvider struct {
+	exactRecipientMailProvider
+	release <-chan struct{}
+}
+
+func (p *blockingMailProvider) Inbox(string) ([]mail.Message, error) {
+	<-p.release
+	return nil, nil
+}
+
+func (p *blockingMailProvider) Get(string) (mail.Message, error) {
+	<-p.release
+	return mail.Message{}, nil
+}
+
+func (p *blockingMailProvider) Count(string) (int, int, error) {
+	<-p.release
+	return 0, 0, nil
+}
+
+func (p *blockingMailProvider) All(string) ([]mail.Message, error) {
+	<-p.release
+	return nil, nil
+}
+
+func (p *blockingMailProvider) Thread(string) ([]mail.Message, error) {
+	<-p.release
+	return nil, nil
+}
+
+type panicMailProvider struct {
+	exactRecipientMailProvider
+}
+
+func (p *panicMailProvider) Inbox(string) ([]mail.Message, error) {
+	panic("mail inbox exploded")
+}
+
+func (p *panicMailProvider) Count(string) (int, int, error) {
+	panic("mail count exploded")
+}
+
+func (p *panicMailProvider) All(string) ([]mail.Message, error) {
+	panic("mail all exploded")
+}
+
+func (p *panicMailProvider) Get(string) (mail.Message, error) {
+	panic("mail get exploded")
+}
+
+func (p *panicMailProvider) Thread(string) ([]mail.Message, error) {
+	panic("mail thread exploded")
+}
+
+type threadMailProvider struct {
+	exactRecipientMailProvider
+	messages []mail.Message
+}
+
+func (p *threadMailProvider) Thread(string) ([]mail.Message, error) {
+	return append([]mail.Message(nil), p.messages...), nil
+}
+
 type multiRecipientInboxMailProvider struct {
 	exactRecipientMailProvider
 	calls [][]string
@@ -98,6 +165,19 @@ func (p *multiRecipientInboxMailProvider) Inbox(recipient string) ([]mail.Messag
 func (p *multiRecipientInboxMailProvider) InboxRecipients(recipients []string) ([]mail.Message, error) {
 	p.calls = append(p.calls, append([]string(nil), recipients...))
 	return []mail.Message{{ID: "multi-1", To: strings.Join(recipients, ",")}}, nil
+}
+
+type multiProviderFakeState struct {
+	*fakeState
+	providers map[string]mail.Provider
+}
+
+func (f *multiProviderFakeState) MailProvider(rig string) mail.Provider {
+	return f.providers[rig]
+}
+
+func (f *multiProviderFakeState) MailProviders() map[string]mail.Provider {
+	return f.providers
 }
 
 func TestMailInboxForRecipientsUsesMultiRecipientProvider(t *testing.T) {
@@ -131,6 +211,34 @@ func TestMailInboxForRecipientsFallbackDedupesMessages(t *testing.T) {
 	}
 	if len(msgs) != 3 {
 		t.Fatalf("messages = %#v, want 3 deduped fallback messages", msgs)
+	}
+}
+
+func TestUniqueMailRecipientsDoesNotMutateInput(t *testing.T) {
+	recipients := []string{"sky", "sky", "mayor"}
+	original := append([]string(nil), recipients...)
+
+	got := uniqueMailRecipients(recipients)
+
+	if !reflect.DeepEqual(got, []string{"sky", "mayor"}) {
+		t.Fatalf("uniqueMailRecipients = %#v, want sky/mayor", got)
+	}
+	if !reflect.DeepEqual(recipients, original) {
+		t.Fatalf("input mutated to %#v, want %#v", recipients, original)
+	}
+}
+
+func TestUniqueNonEmptyMailRecipientsDoesNotMutateInput(t *testing.T) {
+	recipients := []string{" sky ", "", "mayor"}
+	original := append([]string(nil), recipients...)
+
+	got := uniqueNonEmptyMailRecipients(recipients)
+
+	if !reflect.DeepEqual(got, []string{"sky", "mayor"}) {
+		t.Fatalf("uniqueNonEmptyMailRecipients = %#v, want sky/mayor", got)
+	}
+	if !reflect.DeepEqual(recipients, original) {
+		t.Fatalf("input mutated to %#v, want %#v", recipients, original)
 	}
 }
 
@@ -321,6 +429,465 @@ func TestMailCount(t *testing.T) {
 	json.NewDecoder(rec.Body).Decode(&resp) //nolint:errcheck
 	if resp["unread"] != 2 {
 		t.Errorf("unread = %d, want 2", resp["unread"])
+	}
+}
+
+func TestMailListRigStoreSlowReturnsTyped503(t *testing.T) {
+	state := newFakeState(t)
+	release := make(chan struct{})
+	state.cityMailProv = &blockingMailProvider{release: release}
+	oldDeadline := mailReadDeadline
+	mailReadDeadline = 5 * time.Millisecond
+	t.Cleanup(func() {
+		mailReadDeadline = oldDeadline
+		close(release)
+	})
+	h := newTestCityHandler(t, state)
+
+	req := httptest.NewRequest("GET", cityURL(state, "/mail?agent=worker&rig=myrig"), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	assertStoreSlowProblem(t, rec)
+}
+
+func TestMailCountRigStoreSlowReturnsTyped503(t *testing.T) {
+	state := newFakeState(t)
+	release := make(chan struct{})
+	state.cityMailProv = &blockingMailProvider{release: release}
+	oldDeadline := mailReadDeadline
+	mailReadDeadline = 5 * time.Millisecond
+	t.Cleanup(func() {
+		mailReadDeadline = oldDeadline
+		close(release)
+	})
+	h := newTestCityHandler(t, state)
+
+	req := httptest.NewRequest("GET", cityURL(state, "/mail/count?agent=worker&rig=myrig"), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	assertStoreSlowProblem(t, rec)
+}
+
+func TestMailGetRigStoreSlowReturnsTyped503(t *testing.T) {
+	state := newFakeState(t)
+	release := make(chan struct{})
+	state.cityMailProv = &blockingMailProvider{release: release}
+	oldDeadline := mailReadDeadline
+	mailReadDeadline = 5 * time.Millisecond
+	t.Cleanup(func() {
+		mailReadDeadline = oldDeadline
+		close(release)
+	})
+	h := newTestCityHandler(t, state)
+
+	req := httptest.NewRequest("GET", cityURL(state, "/mail/msg-1?rig=myrig"), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	assertStoreSlowProblem(t, rec)
+}
+
+func TestMailListRigProviderPanicReturns500(t *testing.T) {
+	state := newFakeState(t)
+	state.cityMailProv = &panicMailProvider{}
+	h := newTestCityHandler(t, state)
+
+	req := httptest.NewRequest("GET", cityURL(state, "/mail?agent=worker&rig=myrig"), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusInternalServerError, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "mail provider read panicked") {
+		t.Fatalf("body missing recovered panic detail: %s", rec.Body.String())
+	}
+}
+
+func TestMailListAllRigsProviderPanicReturnsPartial(t *testing.T) {
+	state := &multiProviderFakeState{
+		fakeState: newFakeState(t),
+		providers: map[string]mail.Provider{
+			"fast": &exactRecipientMailProvider{messages: map[string][]mail.Message{
+				"worker": {{ID: "fast-1", To: "worker", Subject: "ready"}},
+			}},
+			"panic": &panicMailProvider{},
+		},
+	}
+	h := newTestCityHandler(t, state)
+
+	req := httptest.NewRequest("GET", cityURL(state, "/mail?agent=worker"), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var body struct {
+		Items         []mail.Message `json:"items"`
+		Partial       bool           `json:"partial"`
+		PartialErrors []string       `json:"partial_errors"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v; body: %s", err, rec.Body.String())
+	}
+	if len(body.Items) != 1 || body.Items[0].Rig != "fast" {
+		t.Fatalf("items = %+v, want one fast-rig message", body.Items)
+	}
+	if !body.Partial {
+		t.Fatalf("partial = false, want true; errors = %v", body.PartialErrors)
+	}
+	if len(body.PartialErrors) != 1 || !strings.Contains(body.PartialErrors[0], "mail provider read panicked") {
+		t.Fatalf("partial_errors = %v, want recovered panic detail", body.PartialErrors)
+	}
+}
+
+func TestMailListAllRigsStoreSlowReturnsPartial(t *testing.T) {
+	release := make(chan struct{})
+	state := &multiProviderFakeState{
+		fakeState: newFakeState(t),
+		providers: map[string]mail.Provider{
+			"fast": &exactRecipientMailProvider{messages: map[string][]mail.Message{
+				"worker": {{ID: "fast-1", To: "worker", Subject: "ready"}},
+			}},
+			"slow": &blockingMailProvider{release: release},
+		},
+	}
+	oldDeadline := mailReadDeadline
+	mailReadDeadline = 5 * time.Millisecond
+	t.Cleanup(func() {
+		mailReadDeadline = oldDeadline
+		close(release)
+	})
+	h := newTestCityHandler(t, state)
+
+	req := httptest.NewRequest("GET", cityURL(state, "/mail?agent=worker"), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	assertPartialMailListStoreSlow(t, rec)
+}
+
+func TestMailListAllStatusStoreSlowReturnsPartial(t *testing.T) {
+	release := make(chan struct{})
+	state := &multiProviderFakeState{
+		fakeState: newFakeState(t),
+		providers: map[string]mail.Provider{
+			"fast": &exactRecipientMailProvider{messages: map[string][]mail.Message{
+				"worker": {{ID: "fast-1", To: "worker", Subject: "ready", Read: true}},
+			}},
+			"slow": &blockingMailProvider{release: release},
+		},
+	}
+	oldDeadline := mailReadDeadline
+	mailReadDeadline = 5 * time.Millisecond
+	t.Cleanup(func() {
+		mailReadDeadline = oldDeadline
+		close(release)
+	})
+	h := newTestCityHandler(t, state)
+
+	req := httptest.NewRequest("GET", cityURL(state, "/mail?agent=worker&status=all"), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	assertPartialMailListStoreSlow(t, rec)
+}
+
+func TestMailCountAllRigsStoreSlowReturnsPartial(t *testing.T) {
+	release := make(chan struct{})
+	state := &multiProviderFakeState{
+		fakeState: newFakeState(t),
+		providers: map[string]mail.Provider{
+			"fast": &exactRecipientMailProvider{messages: map[string][]mail.Message{
+				"worker": {{ID: "fast-1", To: "worker", Subject: "ready"}},
+			}},
+			"slow": &blockingMailProvider{release: release},
+		},
+	}
+	oldDeadline := mailReadDeadline
+	mailReadDeadline = 5 * time.Millisecond
+	t.Cleanup(func() {
+		mailReadDeadline = oldDeadline
+		close(release)
+	})
+	h := newTestCityHandler(t, state)
+
+	req := httptest.NewRequest("GET", cityURL(state, "/mail/count?agent=worker"), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var body struct {
+		Total         int      `json:"total"`
+		Unread        int      `json:"unread"`
+		Partial       bool     `json:"partial"`
+		PartialErrors []string `json:"partial_errors"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v; body: %s", err, rec.Body.String())
+	}
+	if body.Total != 1 || body.Unread != 1 {
+		t.Fatalf("counts = total:%d unread:%d, want total:1 unread:1", body.Total, body.Unread)
+	}
+	assertPartialStoreSlow(t, body.Partial, body.PartialErrors)
+}
+
+func TestMailListAllRigsStoreSlowAllFailedReturnsTyped503(t *testing.T) {
+	releaseA := make(chan struct{})
+	releaseB := make(chan struct{})
+	state := &multiProviderFakeState{
+		fakeState: newFakeState(t),
+		providers: map[string]mail.Provider{
+			"slow-a": &blockingMailProvider{release: releaseA},
+			"slow-b": &blockingMailProvider{release: releaseB},
+		},
+	}
+	oldDeadline := mailReadDeadline
+	mailReadDeadline = 5 * time.Millisecond
+	t.Cleanup(func() {
+		mailReadDeadline = oldDeadline
+		close(releaseA)
+		close(releaseB)
+	})
+	h := newTestCityHandler(t, state)
+
+	req := httptest.NewRequest("GET", cityURL(state, "/mail?agent=worker"), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	assertStoreSlowProblem(t, rec)
+}
+
+func TestMailListAllStatusStoreSlowAllFailedReturnsTyped503(t *testing.T) {
+	releaseA := make(chan struct{})
+	releaseB := make(chan struct{})
+	state := &multiProviderFakeState{
+		fakeState: newFakeState(t),
+		providers: map[string]mail.Provider{
+			"slow-a": &blockingMailProvider{release: releaseA},
+			"slow-b": &blockingMailProvider{release: releaseB},
+		},
+	}
+	oldDeadline := mailReadDeadline
+	mailReadDeadline = 5 * time.Millisecond
+	t.Cleanup(func() {
+		mailReadDeadline = oldDeadline
+		close(releaseA)
+		close(releaseB)
+	})
+	h := newTestCityHandler(t, state)
+
+	req := httptest.NewRequest("GET", cityURL(state, "/mail?agent=worker&status=all"), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	assertStoreSlowProblem(t, rec)
+}
+
+func TestMailCountAllRigsStoreSlowAllFailedReturnsTyped503(t *testing.T) {
+	releaseA := make(chan struct{})
+	releaseB := make(chan struct{})
+	state := &multiProviderFakeState{
+		fakeState: newFakeState(t),
+		providers: map[string]mail.Provider{
+			"slow-a": &blockingMailProvider{release: releaseA},
+			"slow-b": &blockingMailProvider{release: releaseB},
+		},
+	}
+	oldDeadline := mailReadDeadline
+	mailReadDeadline = 5 * time.Millisecond
+	t.Cleanup(func() {
+		mailReadDeadline = oldDeadline
+		close(releaseA)
+		close(releaseB)
+	})
+	h := newTestCityHandler(t, state)
+
+	req := httptest.NewRequest("GET", cityURL(state, "/mail/count?agent=worker"), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	assertStoreSlowProblem(t, rec)
+}
+
+func TestMailThreadRigStoreSlowReturnsTyped503(t *testing.T) {
+	state := newFakeState(t)
+	release := make(chan struct{})
+	state.cityMailProv = &blockingMailProvider{release: release}
+	oldDeadline := mailReadDeadline
+	mailReadDeadline = 5 * time.Millisecond
+	t.Cleanup(func() {
+		mailReadDeadline = oldDeadline
+		close(release)
+	})
+	h := newTestCityHandler(t, state)
+
+	req := httptest.NewRequest("GET", cityURL(state, "/mail/thread/thread-1?rig=myrig"), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	assertStoreSlowProblem(t, rec)
+}
+
+func TestMailThreadAllRigsStoreSlowReturnsPartial(t *testing.T) {
+	release := make(chan struct{})
+	state := &multiProviderFakeState{
+		fakeState: newFakeState(t),
+		providers: map[string]mail.Provider{
+			"fast": &threadMailProvider{messages: []mail.Message{{ID: "fast-1", ThreadID: "thread-1"}}},
+			"slow": &blockingMailProvider{release: release},
+		},
+	}
+	oldDeadline := mailReadDeadline
+	mailReadDeadline = 5 * time.Millisecond
+	t.Cleanup(func() {
+		mailReadDeadline = oldDeadline
+		close(release)
+	})
+	h := newTestCityHandler(t, state)
+
+	req := httptest.NewRequest("GET", cityURL(state, "/mail/thread/thread-1"), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	assertPartialMailListStoreSlow(t, rec)
+}
+
+func TestMailThreadAllRigsStoreSlowAllFailedReturnsTyped503(t *testing.T) {
+	releaseA := make(chan struct{})
+	releaseB := make(chan struct{})
+	state := &multiProviderFakeState{
+		fakeState: newFakeState(t),
+		providers: map[string]mail.Provider{
+			"slow-a": &blockingMailProvider{release: releaseA},
+			"slow-b": &blockingMailProvider{release: releaseB},
+		},
+	}
+	oldDeadline := mailReadDeadline
+	mailReadDeadline = 5 * time.Millisecond
+	t.Cleanup(func() {
+		mailReadDeadline = oldDeadline
+		close(releaseA)
+		close(releaseB)
+	})
+	h := newTestCityHandler(t, state)
+
+	req := httptest.NewRequest("GET", cityURL(state, "/mail/thread/thread-1"), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	assertStoreSlowProblem(t, rec)
+}
+
+func TestClientMailListAllRigsMultipleStoreSlowReturnsTyped503BeforeClientTimeout(t *testing.T) {
+	releaseA := make(chan struct{})
+	releaseB := make(chan struct{})
+	releaseC := make(chan struct{})
+	state := &multiProviderFakeState{
+		fakeState: newFakeState(t),
+		providers: map[string]mail.Provider{
+			"slow-a": &blockingMailProvider{release: releaseA},
+			"slow-b": &blockingMailProvider{release: releaseB},
+			"slow-c": &blockingMailProvider{release: releaseC},
+		},
+	}
+	oldDeadline := mailReadDeadline
+	mailReadDeadline = 100 * time.Millisecond
+	ts := httptest.NewServer(newTestCityHandler(t, state))
+	t.Cleanup(ts.Close)
+	t.Cleanup(func() {
+		mailReadDeadline = oldDeadline
+		close(releaseA)
+		close(releaseB)
+		close(releaseC)
+	})
+	c := newTestCityScopedClientWithTimeout(t, ts.URL, state.CityName(), 250*time.Millisecond)
+
+	_, err := c.ListMailInbox("worker", "")
+	if err == nil {
+		t.Fatal("ListMailInbox succeeded, want typed store_slow error")
+	}
+	if !IsStoreSlowError(err) {
+		t.Fatalf("ListMailInbox error = %v, want typed store_slow before client timeout", err)
+	}
+	if ShouldFallbackForRead(err) {
+		t.Fatalf("ShouldFallbackForRead = true for typed store_slow error: %v", err)
+	}
+}
+
+func newTestCityScopedClientWithTimeout(t *testing.T, baseURL, cityName string, timeout time.Duration) *Client {
+	t.Helper()
+	cw, err := genclient.NewClientWithResponses(
+		baseURL,
+		genclient.WithHTTPClient(&http.Client{Timeout: timeout}),
+		genclient.WithRequestEditorFn(func(_ context.Context, req *http.Request) error {
+			req.Header.Set("X-GC-Request", "true")
+			return nil
+		}),
+	)
+	if err != nil {
+		t.Fatalf("NewClientWithResponses: %v", err)
+	}
+	return &Client{cw: cw, baseURL: baseURL, cityName: cityName}
+}
+
+func assertPartialMailListStoreSlow(t *testing.T, rec *httptest.ResponseRecorder) {
+	t.Helper()
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var body struct {
+		Items         []mail.Message `json:"items"`
+		Partial       bool           `json:"partial"`
+		PartialErrors []string       `json:"partial_errors"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v; body: %s", err, rec.Body.String())
+	}
+	if len(body.Items) != 1 || body.Items[0].Rig != "fast" {
+		t.Fatalf("items = %+v, want one fast-rig message", body.Items)
+	}
+	assertPartialStoreSlow(t, body.Partial, body.PartialErrors)
+}
+
+func assertPartialStoreSlow(t *testing.T, partial bool, partialErrors []string) {
+	t.Helper()
+	if !partial {
+		t.Fatalf("partial = false, want true; errors = %v", partialErrors)
+	}
+	if len(partialErrors) == 0 {
+		t.Fatal("partial_errors empty, want store_slow entry")
+	}
+	for _, msg := range partialErrors {
+		if strings.Contains(msg, "store_slow:") {
+			return
+		}
+	}
+	t.Fatalf("partial_errors = %v, want store_slow entry", partialErrors)
+}
+
+func assertStoreSlowProblem(t *testing.T, rec *httptest.ResponseRecorder) {
+	t.Helper()
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusServiceUnavailable, rec.Body.String())
+	}
+	var problem struct {
+		Detail string `json:"detail"`
+		Status int    `json:"status"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&problem); err != nil {
+		t.Fatalf("decode problem: %v; body: %s", err, rec.Body.String())
+	}
+	if problem.Status != http.StatusServiceUnavailable {
+		t.Fatalf("problem status = %d, want %d", problem.Status, http.StatusServiceUnavailable)
+	}
+	if !strings.HasPrefix(problem.Detail, "store_slow:") {
+		t.Fatalf("detail = %q, want store_slow prefix", problem.Detail)
 	}
 }
 

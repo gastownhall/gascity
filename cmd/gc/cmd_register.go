@@ -41,6 +41,7 @@ The supervisor is started if needed and immediately reconciles the city.`,
 	}
 	cmd.Flags().StringVar(&nameFlag, "name", "", "machine-local alias for this city registration")
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit JSONL summary")
+	cmd.Flags().BoolVar(&assumeYesForSupervisorCycle, "yes", false, "bypass the cross-city supervisor cycle confirmation prompt (warning is still printed for the audit trail)")
 	return cmd
 }
 

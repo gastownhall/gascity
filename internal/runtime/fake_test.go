@@ -491,3 +491,186 @@ func TestFakeWaitForIdleGate_MuReleasedWhileBlocked(t *testing.T) {
 
 	close(gate)
 }
+
+func TestFakeFindRuntimesBySessionID_BrokenError(t *testing.T) {
+	f := NewFailFake()
+
+	_, err := f.FindRuntimesBySessionID("sess1")
+	if err == nil {
+		t.Fatal("expected error from broken fake")
+	}
+
+	var found bool
+	for _, c := range f.Calls {
+		if c.Method == "FindRuntimesBySessionID" {
+			found = true
+			if c.Name != "sess1" {
+				t.Errorf("Call.Name = %q, want %q", c.Name, "sess1")
+			}
+		}
+	}
+	if !found {
+		t.Error("FindRuntimesBySessionID call not recorded on broken fake")
+	}
+}
+
+func TestFakeFindRuntimesBySessionID_EmptyIDReturnsAll(t *testing.T) {
+	f := NewFake()
+	f.OrphanedRuntimes["sid-a"] = LiveRuntime{SessionID: "sid-a", PID: 1}
+	f.OrphanedRuntimes["sid-b"] = LiveRuntime{PID: 2} // empty SessionID; map key is used
+	f.OrphanedRuntimes[""] = LiveRuntime{PID: 99}     // both key and SessionID empty; skipped
+	_ = f.Start(context.Background(), "provider-c", Config{Env: map[string]string{"GC_SESSION_ID": "sid-c"}})
+	_ = f.Start(context.Background(), "provider-d", Config{}) // no GC_SESSION_ID; skipped
+
+	runtimes, err := f.FindRuntimesBySessionID("")
+	if err != nil {
+		t.Fatalf("FindRuntimesBySessionID: %v", err)
+	}
+	if len(runtimes) != 3 {
+		t.Fatalf("got %d runtimes, want 3: %+v", len(runtimes), runtimes)
+	}
+}
+
+func TestFakeFindRuntimesBySessionID_FiltersByID(t *testing.T) {
+	f := NewFake()
+	f.OrphanedRuntimes["sid-match"] = LiveRuntime{SessionID: "sid-match"}
+	f.OrphanedRuntimes["sid-other"] = LiveRuntime{SessionID: "sid-other"}
+	_ = f.Start(context.Background(), "provider-match", Config{Env: map[string]string{"GC_SESSION_ID": "sid-match"}})
+	_ = f.Start(context.Background(), "provider-other", Config{Env: map[string]string{"GC_SESSION_ID": "sid-other"}})
+
+	runtimes, err := f.FindRuntimesBySessionID("sid-match")
+	if err != nil {
+		t.Fatalf("FindRuntimesBySessionID: %v", err)
+	}
+	if len(runtimes) != 2 {
+		t.Fatalf("got %d runtimes, want 2: %+v", len(runtimes), runtimes)
+	}
+	for _, r := range runtimes {
+		if r.SessionID != "sid-match" {
+			t.Errorf("returned runtime SessionID = %q, want %q", r.SessionID, "sid-match")
+		}
+	}
+	if f.CountCalls("FindRuntimesBySessionID", "sid-match") != 1 {
+		t.Error("FindRuntimesBySessionID call not recorded")
+	}
+}
+
+func TestFakeFindRuntimesBySessionID_EmptySessionIDsSkipped(t *testing.T) {
+	f := NewFake()
+	f.OrphanedRuntimes[""] = LiveRuntime{PID: 1}                   // both key and SessionID empty; skipped
+	_ = f.Start(context.Background(), "provider-no-sid", Config{}) // no GC_SESSION_ID; skipped
+
+	runtimes, err := f.FindRuntimesBySessionID("")
+	if err != nil {
+		t.Fatalf("FindRuntimesBySessionID: %v", err)
+	}
+	if len(runtimes) != 0 {
+		t.Fatalf("got %d runtimes, want 0: %+v", len(runtimes), runtimes)
+	}
+}
+
+func TestFakeFindRuntimesBySessionID_OrphanForcesIsTrackedFalse(t *testing.T) {
+	f := NewFake()
+	f.OrphanedRuntimes["sid-orphan"] = LiveRuntime{SessionID: "sid-orphan", IsTracked: true}
+
+	runtimes, err := f.FindRuntimesBySessionID("sid-orphan")
+	if err != nil {
+		t.Fatalf("FindRuntimesBySessionID: %v", err)
+	}
+	if len(runtimes) != 1 {
+		t.Fatalf("got %d runtimes, want 1", len(runtimes))
+	}
+	if runtimes[0].IsTracked {
+		t.Error("orphan runtime IsTracked = true, want false")
+	}
+}
+
+func TestFakeFindRuntimesBySessionID_TrackedUsesProviderNameAndSessionID(t *testing.T) {
+	f := NewFake()
+	_ = f.Start(context.Background(), "my-provider", Config{Env: map[string]string{"GC_SESSION_ID": "sess-abc"}})
+
+	runtimes, err := f.FindRuntimesBySessionID("sess-abc")
+	if err != nil {
+		t.Fatalf("FindRuntimesBySessionID: %v", err)
+	}
+	if len(runtimes) != 1 {
+		t.Fatalf("got %d runtimes, want 1", len(runtimes))
+	}
+	r := runtimes[0]
+	if r.SessionID != "sess-abc" {
+		t.Errorf("SessionID = %q, want %q", r.SessionID, "sess-abc")
+	}
+	if r.ProviderName != "my-provider" {
+		t.Errorf("ProviderName = %q, want %q", r.ProviderName, "my-provider")
+	}
+	if !r.IsTracked {
+		t.Error("tracked runtime IsTracked = false, want true")
+	}
+}
+
+func TestFakeTerminateRuntime_RecordsCallWithSessionID(t *testing.T) {
+	f := NewFake()
+
+	if err := f.TerminateRuntime(LiveRuntime{SessionID: "my-session", ProviderName: "some-provider"}); err != nil {
+		t.Fatalf("TerminateRuntime: %v", err)
+	}
+
+	var found bool
+	for _, c := range f.Calls {
+		if c.Method == "TerminateRuntime" {
+			found = true
+			if c.Name != "my-session" {
+				t.Errorf("Call.Name = %q, want %q (SessionID, not ProviderName)", c.Name, "my-session")
+			}
+		}
+	}
+	if !found {
+		t.Error("TerminateRuntime call not recorded")
+	}
+}
+
+func TestFakeTerminateRuntime_RemovesOrphan(t *testing.T) {
+	f := NewFake()
+	f.OrphanedRuntimes["my-session"] = LiveRuntime{SessionID: "my-session", PID: 42}
+
+	if err := f.TerminateRuntime(LiveRuntime{SessionID: "my-session"}); err != nil {
+		t.Fatalf("TerminateRuntime: %v", err)
+	}
+	if _, ok := f.OrphanedRuntimes["my-session"]; ok {
+		t.Error("OrphanedRuntimes still contains entry after TerminateRuntime")
+	}
+}
+
+func TestFakeTerminateRuntime_MissingEntryIsNil(t *testing.T) {
+	f := NewFake()
+
+	if err := f.TerminateRuntime(LiveRuntime{SessionID: "nonexistent"}); err != nil {
+		t.Fatalf("TerminateRuntime on missing entry returned error: %v", err)
+	}
+}
+
+func TestFakeTerminateRuntime_BrokenError(t *testing.T) {
+	f := NewFailFake()
+	f.OrphanedRuntimes["sid"] = LiveRuntime{SessionID: "sid"}
+
+	err := f.TerminateRuntime(LiveRuntime{SessionID: "sid"})
+	if err == nil {
+		t.Fatal("expected error from broken fake")
+	}
+
+	var found bool
+	for _, c := range f.Calls {
+		if c.Method == "TerminateRuntime" {
+			found = true
+			if c.Name != "sid" {
+				t.Errorf("Call.Name = %q, want %q", c.Name, "sid")
+			}
+		}
+	}
+	if !found {
+		t.Error("TerminateRuntime call not recorded on broken fake")
+	}
+	if _, ok := f.OrphanedRuntimes["sid"]; !ok {
+		t.Error("OrphanedRuntimes entry removed despite error from broken fake")
+	}
+}

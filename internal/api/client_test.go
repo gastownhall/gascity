@@ -1222,7 +1222,9 @@ func TestClientListMailInbox(t *testing.T) {
 			"items": []map[string]any{
 				{"id": "msg-1", "from": "alice", "to": "mayor", "subject": "hi", "body": "hello", "created_at": "2026-04-23T10:00:00Z", "read": false},
 			},
-			"total": 1,
+			"total":          1,
+			"partial":        true,
+			"partial_errors": []string{"mail provider slow: store_slow: mail read timed out after 8s"},
 		})
 	}))
 	defer ts.Close()
@@ -1232,8 +1234,14 @@ func TestClientListMailInbox(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListMailInbox: %v", err)
 	}
-	if len(got.Body) != 1 || got.Body[0].ID != "msg-1" || got.Body[0].From != "alice" {
+	if len(got.Body.Items) != 1 || got.Body.Items[0].ID != "msg-1" || got.Body.Items[0].From != "alice" {
 		t.Errorf("got.Body = %+v", got.Body)
+	}
+	if got.Body.Total != 1 || !got.Body.Partial {
+		t.Errorf("list metadata = total:%d partial:%v, want total:1 partial:true", got.Body.Total, got.Body.Partial)
+	}
+	if len(got.Body.PartialErrors) != 1 || !strings.Contains(got.Body.PartialErrors[0], "store_slow:") {
+		t.Errorf("PartialErrors = %v, want store_slow entry", got.Body.PartialErrors)
 	}
 	if got.AgeSeconds != 2 {
 		t.Errorf("AgeSeconds = %v, want 2", got.AgeSeconds)
@@ -1262,6 +1270,34 @@ func TestClientListMailInbox_CacheNotLiveFallback(t *testing.T) {
 	}
 	if !ShouldFallback(err) {
 		t.Errorf("ShouldFallback = false for cache-not-live: %v", err)
+	}
+}
+
+func TestClientListMailInbox_StoreSlowDoesNotFallback(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/problem+json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			"title":  "Service Unavailable",
+			"status": http.StatusServiceUnavailable,
+			"detail": "store_slow: mail read timed out after 8s",
+		})
+	}))
+	defer ts.Close()
+
+	c := NewCityScopedClient(ts.URL, "alpha")
+	_, err := c.ListMailInbox("mayor", "")
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !IsStoreSlowError(err) {
+		t.Fatalf("IsStoreSlowError = false for store_slow response: %v", err)
+	}
+	if ShouldFallbackForRead(err) {
+		t.Errorf("ShouldFallbackForRead = true for store_slow: %v", err)
+	}
+	if ShouldFallback(err) {
+		t.Errorf("ShouldFallback = true for store_slow: %v", err)
 	}
 }
 
@@ -1333,6 +1369,34 @@ func TestClientGetMail_CacheNotLiveFallback(t *testing.T) {
 	}
 }
 
+func TestClientGetMail_StoreSlowDoesNotFallback(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/problem+json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			"title":  "Service Unavailable",
+			"status": http.StatusServiceUnavailable,
+			"detail": "store_slow: mail read timed out after 8s",
+		})
+	}))
+	defer ts.Close()
+
+	c := NewCityScopedClient(ts.URL, "alpha")
+	_, err := c.GetMail("msg-1", "")
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !IsStoreSlowError(err) {
+		t.Fatalf("IsStoreSlowError = false for store_slow response: %v", err)
+	}
+	if ShouldFallbackForRead(err) {
+		t.Errorf("ShouldFallbackForRead = true for store_slow: %v", err)
+	}
+	if ShouldFallback(err) {
+		t.Errorf("ShouldFallback = true for store_slow: %v", err)
+	}
+}
+
 func TestClientGetMail_ConnErrorFallback(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 	ts.Close()
@@ -1395,6 +1459,34 @@ func TestClientCountMail_CacheNotLiveFallback(t *testing.T) {
 	}
 	if !ShouldFallback(err) {
 		t.Errorf("ShouldFallback = false for cache-not-live: %v", err)
+	}
+}
+
+func TestClientCountMail_StoreSlowDoesNotFallback(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/problem+json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			"title":  "Service Unavailable",
+			"status": http.StatusServiceUnavailable,
+			"detail": "store_slow: mail read timed out after 8s",
+		})
+	}))
+	defer ts.Close()
+
+	c := NewCityScopedClient(ts.URL, "alpha")
+	_, err := c.CountMail("mayor", "")
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !IsStoreSlowError(err) {
+		t.Fatalf("IsStoreSlowError = false for store_slow response: %v", err)
+	}
+	if ShouldFallbackForRead(err) {
+		t.Errorf("ShouldFallbackForRead = true for store_slow: %v", err)
+	}
+	if ShouldFallback(err) {
+		t.Errorf("ShouldFallback = true for store_slow: %v", err)
 	}
 }
 

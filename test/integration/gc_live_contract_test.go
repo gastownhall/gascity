@@ -221,7 +221,7 @@ func TestGCLiveContract_BeadsAndEvents(t *testing.T) {
 	}](t, baseURL, validator, http.MethodPost, cityBase+"/sling", map[string]any{
 		"rig":    rigName,
 		"target": targetAgent,
-		"bead":   rootBead.ID,
+		"bead":   cityScopedBead.ID,
 		"force":  true,
 	}, http.StatusOK)
 	formulaName := "real-world-app-contract-work"
@@ -1618,6 +1618,8 @@ func liveContractProbeSkipReason(pathTemplate string) string {
 		return "requires a real session/conversation identity"
 	case strings.HasSuffix(pathTemplate, "/orders/history"):
 		return "requires a scoped order name fixture"
+	case strings.Contains(pathTemplate, "/maintenance"):
+		return "requires [maintenance.dolt] enabled=true in city.toml"
 	default:
 		return ""
 	}

@@ -12,8 +12,6 @@ cmd/gc/.runtime/
 .runtime/
 *.test
 **/.beads/*
-!**/.beads/config.yaml
-!**/.beads/metadata.json
 !**/.beads/identity.toml
 .claude/
 !examples/gastown/packs/gastown/overlays/default/.claude/

@@ -108,7 +108,14 @@ func checkCooldown(a Order, now time.Time, lastRunFn LastRunFunc) TriggerResult 
 	}
 }
 
-// checkCron uses simple minute-granularity matching against the schedule.
+// checkCron uses minute-granularity matching against the schedule, WITH
+// catch-up. A scheduled occurrence fires if either (a) the current minute
+// matches, or (b) a scheduled minute elapsed since the last run without the
+// controller evaluating during that exact minute. Catch-up mirrors cooldown's
+// elapsed-based behavior: without it, a cron order silently drops a slot
+// whenever no evaluation lands in its matching minute, which made a
+// "0 */4 * * *" order miss every boundary (gastown td-4kziysy) because the
+// controller's eval cadence rarely coincides with a once-per-4h minute.
 // Schedule format: "minute hour day-of-month month day-of-week" (5 fields).
 func checkCron(a Order, now time.Time, lastRunFn LastRunFunc) TriggerResult {
 	fields := strings.Fields(a.Schedule)
@@ -118,24 +125,47 @@ func checkCron(a Order, now time.Time, lastRunFn LastRunFunc) TriggerResult {
 
 	minute, hour, dom, month, dow := fields[0], fields[1], fields[2], fields[3], fields[4]
 
-	if !cronFieldMatches(minute, now.Minute()) ||
-		!cronFieldMatches(hour, now.Hour()) ||
-		!cronFieldMatches(dom, now.Day()) ||
-		!cronFieldMatches(month, int(now.Month())) ||
-		!cronFieldMatches(dow, int(now.Weekday())) {
-		return TriggerResult{Due: false, Reason: "cron: schedule not matched"}
+	matchesAt := func(t time.Time) bool {
+		return cronFieldMatches(minute, t.Minute()) &&
+			cronFieldMatches(hour, t.Hour()) &&
+			cronFieldMatches(dom, t.Day()) &&
+			cronFieldMatches(month, int(t.Month())) &&
+			cronFieldMatches(dow, int(t.Weekday()))
 	}
 
-	// Schedule matches — check if already run this minute.
 	last, err := lastRunFn(a.ScopedName())
 	if err != nil {
 		return TriggerResult{Due: false, Reason: fmt.Sprintf("error querying last run: %v", err)}
 	}
-	if !last.IsZero() && last.Truncate(time.Minute).Equal(now.Truncate(time.Minute)) {
-		return TriggerResult{Due: false, Reason: "cron: already run this minute", LastRun: last}
+
+	// (a) Current minute matches — fire unless already run this minute.
+	if matchesAt(now) {
+		if !last.IsZero() && last.Truncate(time.Minute).Equal(now.Truncate(time.Minute)) {
+			return TriggerResult{Due: false, Reason: "cron: already run this minute", LastRun: last}
+		}
+		return TriggerResult{Due: true, Reason: "cron: schedule matched", LastRun: last}
 	}
 
-	return TriggerResult{Due: true, Reason: "cron: schedule matched", LastRun: last}
+	// (b) Catch-up: the current minute does not match, but a scheduled minute
+	// may have elapsed since lastRun without an evaluation landing on it. Scan
+	// minute-by-minute from just after lastRun up to now; any match is a missed
+	// occurrence that is now due. Bounded lookback so a very old lastRun cannot
+	// spin (it is overdue regardless). Skipped when lastRun is zero (never run):
+	// such an order fires only on an exact match, never back-filling history.
+	if !last.IsZero() {
+		const maxCatchupLookback = 366 * 24 * time.Hour
+		start := last.Truncate(time.Minute).Add(time.Minute)
+		if floor := now.Add(-maxCatchupLookback).Truncate(time.Minute); start.Before(floor) {
+			start = floor
+		}
+		for t := start; !t.After(now); t = t.Add(time.Minute) {
+			if matchesAt(t) {
+				return TriggerResult{Due: true, Reason: "cron: caught up missed occurrence", LastRun: last}
+			}
+		}
+	}
+
+	return TriggerResult{Due: false, Reason: "cron: schedule not matched", LastRun: last}
 }
 
 // cronFieldMatches checks if a single cron field matches a value.

@@ -302,6 +302,12 @@
               "null"
             ]
           },
+          "MouseMode": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "Name": {
             "type": "string"
           },
@@ -516,6 +522,7 @@
           "DependsOn",
           "ResumeCommand",
           "WakeMode",
+          "MouseMode",
           "PreStartAppend",
           "SessionSetupAppend",
           "SessionLiveAppend",
@@ -1079,6 +1086,28 @@
             "type": "string"
           }
         },
+        "type": "object"
+      },
+      "BeadsDiagnostic": {
+        "additionalProperties": false,
+        "properties": {
+          "beads_store": {
+            "type": "string"
+          },
+          "native_store_eligible": {
+            "type": "boolean"
+          },
+          "preflight_gate": {
+            "type": "string"
+          },
+          "preflight_reason": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "beads_store",
+          "native_store_eligible"
+        ],
         "type": "object"
       },
       "BindingStatus": {
@@ -1964,13 +1993,15 @@
             "examples": [
               "https://example.com/errors/example",
               "urn:gascity:error:sling-missing-bead",
-              "urn:gascity:error:sling-cross-rig"
+              "urn:gascity:error:sling-cross-rig",
+              "urn:gascity:error:sling-cross-store-route"
             ],
             "format": "uri",
             "type": "string",
             "x-gascity-problem-types": [
               "urn:gascity:error:sling-missing-bead",
-              "urn:gascity:error:sling-cross-rig"
+              "urn:gascity:error:sling-cross-rig",
+              "urn:gascity:error:sling-cross-store-route"
             ]
           }
         },
@@ -3944,6 +3975,123 @@
         ],
         "type": "object"
       },
+      "MaintenanceRunBody": {
+        "additionalProperties": false,
+        "properties": {
+          "after_bytes": {
+            "description": "Store size in bytes after the run (0 when not measured).",
+            "format": "int64",
+            "type": "integer"
+          },
+          "before_bytes": {
+            "description": "Store size in bytes before the run (0 when not measured).",
+            "format": "int64",
+            "type": "integer"
+          },
+          "duration_s": {
+            "description": "Elapsed wall-clock seconds between started_at and finished_at.",
+            "format": "double",
+            "type": "number"
+          },
+          "err": {
+            "description": "Error message when Stage names a failing phase; empty on success.",
+            "type": "string"
+          },
+          "finished_at": {
+            "description": "RFC3339 timestamp when the run completed.",
+            "type": "string"
+          },
+          "snapshot_path": {
+            "description": "Absolute path to the snapshot directory created for this run.",
+            "type": "string"
+          },
+          "stage": {
+            "description": "Outcome stage: 'done' on success or 'backup'/'gc'/'smoke-test'/'prune' on failure.",
+            "type": "string"
+          },
+          "started_at": {
+            "description": "RFC3339 timestamp when the run began.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "started_at",
+          "finished_at",
+          "stage",
+          "before_bytes",
+          "after_bytes",
+          "duration_s"
+        ],
+        "type": "object"
+      },
+      "MaintenanceStatusBody": {
+        "additionalProperties": false,
+        "properties": {
+          "enabled": {
+            "description": "Whether [maintenance.dolt] enabled=true in city.toml.",
+            "type": "boolean"
+          },
+          "history": {
+            "description": "Bounded ring of recent run outcomes (oldest first).",
+            "items": {
+              "$ref": "#/components/schemas/MaintenanceRunBody"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "in_flight": {
+            "description": "True when a maintenance cycle is currently running.",
+            "type": "boolean"
+          },
+          "in_flight_start": {
+            "description": "RFC3339 start time of the in-flight run.",
+            "type": "string"
+          },
+          "interval_seconds": {
+            "description": "Configured scheduling interval in seconds (0 when disabled).",
+            "format": "int64",
+            "type": "integer"
+          },
+          "last_run": {
+            "$ref": "#/components/schemas/MaintenanceRunBody",
+            "description": "Most recent completed run, or null when none."
+          },
+          "next_scheduled": {
+            "description": "RFC3339 approximate next scheduled run time.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "enabled",
+          "interval_seconds",
+          "in_flight",
+          "history"
+        ],
+        "type": "object"
+      },
+      "MaintenanceTriggerBody": {
+        "additionalProperties": false,
+        "properties": {
+          "accepted": {
+            "description": "True when the supervisor accepted the trigger (202) or completed it (200).",
+            "type": "boolean"
+          },
+          "run": {
+            "$ref": "#/components/schemas/MaintenanceRunBody",
+            "description": "Full run summary, populated when the caller set ?wait=true."
+          },
+          "started_at": {
+            "description": "RFC3339 start time of the triggered run; doubles as a run identifier for async callers.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "accepted"
+        ],
+        "type": "object"
+      },
       "Message": {
         "additionalProperties": false,
         "properties": {
@@ -4332,6 +4480,12 @@
           },
           "enabled": {
             "type": "boolean"
+          },
+          "env": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object"
           },
           "exec": {
             "type": "string"
@@ -6720,6 +6874,10 @@
             "$ref": "#/components/schemas/StatusAgentCounts",
             "description": "Agent state counts."
           },
+          "beads": {
+            "$ref": "#/components/schemas/BeadsDiagnostic",
+            "description": "Bead store selection diagnostic. Omitted when unavailable."
+          },
           "mail": {
             "$ref": "#/components/schemas/StatusMailCounts",
             "description": "Mail counts."
@@ -7344,6 +7502,7 @@
           "mapping": {
             "bead.closed": "#/components/schemas/TypedEventStreamEnvelopeBeadClosed",
             "bead.created": "#/components/schemas/TypedEventStreamEnvelopeBeadCreated",
+            "bead.deleted": "#/components/schemas/TypedEventStreamEnvelopeBeadDeleted",
             "bead.updated": "#/components/schemas/TypedEventStreamEnvelopeBeadUpdated",
             "city.created": "#/components/schemas/TypedEventStreamEnvelopeCityCreated",
             "city.resumed": "#/components/schemas/TypedEventStreamEnvelopeCityResumed",
@@ -7407,6 +7566,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeBeadCreated"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeBeadDeleted"
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeBeadUpdated"
@@ -7658,6 +7820,48 @@
           "payload"
         ],
         "title": "TypedEventStreamEnvelope bead.created",
+        "type": "object"
+      },
+      "TypedEventStreamEnvelopeBeadDeleted": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/BeadEventPayload"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "bead.deleted",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope bead.deleted",
         "type": "object"
       },
       "TypedEventStreamEnvelopeBeadUpdated": {
@@ -8078,6 +8282,7 @@
                 "session.work_query_failed",
                 "bead.created",
                 "bead.closed",
+                "bead.deleted",
                 "bead.updated",
                 "mail.sent",
                 "mail.read",
@@ -10033,6 +10238,7 @@
           "mapping": {
             "bead.closed": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadClosed",
             "bead.created": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadCreated",
+            "bead.deleted": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadDeleted",
             "bead.updated": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadUpdated",
             "city.created": "#/components/schemas/TypedTaggedEventStreamEnvelopeCityCreated",
             "city.resumed": "#/components/schemas/TypedTaggedEventStreamEnvelopeCityResumed",
@@ -10096,6 +10302,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadCreated"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadDeleted"
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadUpdated"
@@ -10355,6 +10564,52 @@
           "city"
         ],
         "title": "TypedTaggedEventStreamEnvelope bead.created",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopeBeadDeleted": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/BeadEventPayload"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "bead.deleted",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope bead.deleted",
         "type": "object"
       },
       "TypedTaggedEventStreamEnvelopeBeadUpdated": {
@@ -10814,6 +11069,7 @@
                 "session.work_query_failed",
                 "bead.created",
                 "bead.closed",
+                "bead.deleted",
                 "bead.updated",
                 "mail.sent",
                 "mail.read",
@@ -19911,6 +20167,138 @@
           }
         },
         "summary": "Reply to a mail message"
+      }
+    },
+    "/v0/city/{cityName}/maintenance/dolt-gc": {
+      "post": {
+        "description": "Trigger a one-off maintenance cycle (dolt backup + CALL DOLT_GC + smoke test). Default async (202); ?wait=true blocks until completion (200). Returns 409 when a run is already in flight.",
+        "operationId": "trigger-maintenance-dolt-gc",
+        "parameters": [
+          {
+            "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+            "in": "header",
+            "name": "X-GC-Request",
+            "required": true,
+            "schema": {
+              "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          },
+          {
+            "description": "When true, the handler blocks until the run completes and returns 200 with the full Run. When false (default), the handler returns 202 Accepted immediately.",
+            "explode": false,
+            "in": "query",
+            "name": "wait",
+            "schema": {
+              "description": "When true, the handler blocks until the run completes and returns 200 with the full Run. When false (default), the handler returns 202 Accepted immediately.",
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MaintenanceTriggerBody"
+                }
+              }
+            },
+            "description": "Accepted",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          }
+        },
+        "summary": "Trigger a Dolt store maintenance run"
+      }
+    },
+    "/v0/city/{cityName}/maintenance/status": {
+      "get": {
+        "operationId": "get-v0-city-by-city-name-maintenance-status",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MaintenanceStatusBody"
+                }
+              }
+            },
+            "description": "OK",
+            "headers": {
+              "X-GC-Cache-Age-S": {
+                "schema": {
+                  "format": "double",
+                  "type": "number"
+                }
+              },
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          }
+        },
+        "summary": "Get v0 city by city name maintenance status"
       }
     },
     "/v0/city/{cityName}/order/history/{bead_id}": {

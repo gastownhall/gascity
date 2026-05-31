@@ -749,6 +749,9 @@ func resolvedWorkerRuntimeTransport(info session.Info, resolved *config.Resolved
 	if storedWorkerSessionProvesACPTransport(resolved, configuredTransport, info.Command, metadata) {
 		return "acp"
 	}
+	if strings.TrimSpace(configuredTransport) == config.SessionTransportTmux {
+		return config.SessionTransportTmux
+	}
 	if strings.TrimSpace(info.Command) == "" {
 		return strings.TrimSpace(configuredTransport)
 	}

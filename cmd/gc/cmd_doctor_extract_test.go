@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/doctor"
 )
 
 func TestBuildDoctorChecks_NameSetUnchanged(t *testing.T) {
@@ -22,10 +23,7 @@ func TestBuildDoctorChecks_NameSetUnchanged(t *testing.T) {
 		SkipCityDoltCheck:    true,
 		SkipManagedDoltCheck: true,
 	})
-	var names []string
-	for _, check := range checks {
-		names = append(names, check.Name())
-	}
+	names := doctorCheckNames(checks)
 
 	data, err := os.ReadFile(filepath.Join("testdata", "doctor_check_names.golden"))
 	if err != nil {
@@ -36,4 +34,74 @@ func TestBuildDoctorChecks_NameSetUnchanged(t *testing.T) {
 	if got != want {
 		t.Fatalf("doctor check names changed\n--- got ---\n%s\n--- want ---\n%s", got, want)
 	}
+}
+
+func TestBuildDoctorChecksRegistersNamedAlwaysMinConflictCheck(t *testing.T) {
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"demo\"\n"), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	t.Setenv("GC_DOLT", "skip")
+	cfg := &config.City{Workspace: config.Workspace{Name: "demo"}}
+
+	names := doctorCheckNames(buildDoctorChecks(cityDir, cfg, nil, buildDoctorChecksOpts{
+		ControllerRunning:    false,
+		SkipCityDoltCheck:    true,
+		SkipManagedDoltCheck: true,
+	}))
+
+	providerParity := doctorCheckIndex(names, "provider-parity")
+	if providerParity < 0 {
+		t.Fatalf("provider-parity check missing: %v", names)
+	}
+	got := doctorCheckIndex(names, "named-always-min-conflict")
+	if got != providerParity+1 {
+		t.Fatalf("named-always-min-conflict index = %d, want immediately after provider-parity at %d; names=%v", got, providerParity, names)
+	}
+}
+
+func TestBuildDoctorChecksSkipsNamedAlwaysMinConflictCheckWithoutConfig(t *testing.T) {
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"demo\"\n"), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	t.Setenv("GC_DOLT", "skip")
+
+	tests := []struct {
+		name   string
+		cfg    *config.City
+		cfgErr error
+	}{
+		{name: "nil config", cfg: nil, cfgErr: nil},
+		{name: "config load error", cfg: &config.City{Workspace: config.Workspace{Name: "demo"}}, cfgErr: os.ErrInvalid},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			names := doctorCheckNames(buildDoctorChecks(cityDir, tt.cfg, tt.cfgErr, buildDoctorChecksOpts{
+				ControllerRunning:    false,
+				SkipCityDoltCheck:    true,
+				SkipManagedDoltCheck: true,
+			}))
+			if got := doctorCheckIndex(names, "named-always-min-conflict"); got >= 0 {
+				t.Fatalf("named-always-min-conflict registered at %d, want absent; names=%v", got, names)
+			}
+		})
+	}
+}
+
+func doctorCheckNames(checks []doctor.Check) []string {
+	names := make([]string, 0, len(checks))
+	for _, check := range checks {
+		names = append(names, check.Name())
+	}
+	return names
+}
+
+func doctorCheckIndex(names []string, want string) int {
+	for i, name := range names {
+		if name == want {
+			return i
+		}
+	}
+	return -1
 }

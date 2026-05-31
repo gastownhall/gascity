@@ -15,7 +15,7 @@ func derivedResumeSessionKey(provider, providerSessionID string) string {
 		return ""
 	}
 	providerFamily := sessionlog.ProviderFamily(provider)
-	if providerFamily == "kimi" || providerFamily == "opencode" || providerFamily == "pi" {
+	if providerFamily == "kimi" || providerFamily == "opencode" || providerFamily == "pi" || providerFamily == "antigravity" {
 		return providerSessionID
 	}
 	if providerFamily != "codex" {

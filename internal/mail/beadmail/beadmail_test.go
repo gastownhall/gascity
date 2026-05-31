@@ -5,6 +5,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/mail"
@@ -75,7 +76,7 @@ func TestInboxDoesNotCallBroadList(t *testing.T) {
 	}
 }
 
-func TestMessageCreatedInIssuesTier(t *testing.T) {
+func TestMessageCreatedInWispTier(t *testing.T) {
 	store := beads.NewMemStore()
 	p := New(store)
 
@@ -86,14 +87,17 @@ func TestMessageCreatedInIssuesTier(t *testing.T) {
 
 	items, err := store.List(beads.ListQuery{
 		Type:      "message",
-		TierMode:  beads.TierIssues,
+		TierMode:  beads.TierWisps,
 		AllowScan: true,
 	})
 	if err != nil {
-		t.Fatalf("List issues-tier messages: %v", err)
+		t.Fatalf("List wisp-tier messages: %v", err)
 	}
 	if len(items) != 1 || items[0].ID != sent.ID {
-		t.Fatalf("issues-tier messages = %#v, want sent message %s", items, sent.ID)
+		t.Fatalf("wisp-tier messages = %#v, want sent message %s", items, sent.ID)
+	}
+	if !items[0].Ephemeral {
+		t.Fatalf("sent message Ephemeral = false, want true")
 	}
 }
 
@@ -135,6 +139,62 @@ func TestInboxUsesSingleBothTierMessageScanAcrossRoutes(t *testing.T) {
 	query := store.messageQueries[0]
 	if query.TierMode != beads.TierBoth || !query.AllowScan || query.Type != "message" || query.Status != "open" || query.Assignee != "" {
 		t.Fatalf("message query = %+v, want one both-tier message scan without per-route assignee", query)
+	}
+	if !query.Live {
+		t.Fatalf("message query = %+v, want live read for command-visible mail freshness", query)
+	}
+}
+
+func TestInboxBypassesPrimedCacheForFreshMessages(t *testing.T) {
+	backing := beads.NewMemStore()
+	cache := beads.NewCachingStoreForTest(backing, nil)
+	if err := cache.PrimeActive(); err != nil {
+		t.Fatalf("PrimeActive: %v", err)
+	}
+
+	if _, err := backing.Create(beads.Bead{
+		Type:        "message",
+		Assignee:    "mayor",
+		From:        "human",
+		Title:       "fresh",
+		Description: "created after cache prime",
+	}); err != nil {
+		t.Fatalf("Create message in backing store: %v", err)
+	}
+
+	msgs, err := New(cache).Inbox("mayor")
+	if err != nil {
+		t.Fatalf("Inbox: %v", err)
+	}
+	if len(msgs) != 1 || msgs[0].Subject != "fresh" {
+		t.Fatalf("Inbox = %#v, want fresh message from backing store", msgs)
+	}
+}
+
+func TestInboxIncludesEphemeralMessages(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+	recipient := "agent-a"
+
+	ephemeral, err := store.Create(beads.Bead{
+		Title:       "status",
+		Type:        "message",
+		Status:      "open",
+		Assignee:    recipient,
+		From:        "human",
+		Description: "stored in wisps tier",
+		Ephemeral:   true,
+	})
+	if err != nil {
+		t.Fatalf("Create ephemeral message: %v", err)
+	}
+
+	msgs, err := p.Inbox(recipient)
+	if err != nil {
+		t.Fatalf("Inbox: %v", err)
+	}
+	if len(msgs) != 1 || msgs[0].ID != ephemeral.ID {
+		t.Fatalf("Inbox = %#v, want ephemeral message %s", msgs, ephemeral.ID)
 	}
 }
 
@@ -220,13 +280,10 @@ func TestCheckDoesNotUseMessageLabelSupplement(t *testing.T) {
 			return []byte(`[]`), nil
 		}
 		if strings.Contains(cmd, "bd query --json") {
-			if !strings.Contains(cmd, "ephemeral=true") || !strings.Contains(cmd, "type=message") {
-				t.Fatalf("mail check used unexpected wisp query: %s", cmd)
-			}
-			return []byte(`[]`), nil
+			t.Fatalf("mail check used supplemental wisp query: %s", cmd)
 		}
 		if strings.Contains(cmd, "bd list --json") && strings.Contains(cmd, "--type=message") && strings.Contains(cmd, "--status=open") {
-			return []byte(`[{"id":"msg-1","title":"hello","description":"body","status":"open","issue_type":"message","assignee":"mayor","from":"human","created_at":"2026-01-02T03:04:05Z","labels":["gc:message"]}]`), nil
+			return []byte(`[{"id":"msg-1","title":"hello","description":"body","status":"open","issue_type":"message","assignee":"mayor","from":"human","created_at":"2026-01-02T03:04:05Z","ephemeral":true,"labels":["gc:message"]}]`), nil
 		}
 		return nil, errors.New("unexpected command: " + cmd)
 	}
@@ -241,8 +298,9 @@ func TestCheckDoesNotUseMessageLabelSupplement(t *testing.T) {
 	}
 }
 
-func TestCheckUsesBothTiersForSlashRecipient(t *testing.T) {
+func TestCheckUsesSingleBothTierScanForSlashRecipient(t *testing.T) {
 	recipient := "gascity/workflows.codex-max"
+	var messageListCalls int
 	runner := func(_ string, name string, args ...string) ([]byte, error) {
 		cmd := name + " " + strings.Join(args, " ")
 		switch {
@@ -256,12 +314,10 @@ func TestCheckUsesBothTiersForSlashRecipient(t *testing.T) {
 			if strings.Contains(cmd, "--assignee=") {
 				t.Fatalf("slash recipient used per-assignee message query: %s", cmd)
 			}
-			return []byte(`[{"id":"msg-1","title":"hello","description":"body","status":"open","issue_type":"message","assignee":"gascity/workflows.codex-max","from":"human","created_at":"2026-01-02T03:04:05Z"}]`), nil
+			messageListCalls++
+			return []byte(`[{"id":"msg-w","title":"hello","description":"body","status":"open","issue_type":"message","assignee":"gascity/workflows.codex-max","from":"human","created_at":"2026-01-02T03:04:05Z","ephemeral":true}]`), nil
 		case strings.Contains(cmd, "bd query --json"):
-			if strings.Contains(cmd, "assignee=") {
-				t.Fatalf("slash recipient used per-assignee wisp query: %s", cmd)
-			}
-			return []byte(`[]`), nil
+			t.Fatalf("slash recipient used supplemental wisp query: %s", cmd)
 		}
 		return nil, errors.New("unexpected command: " + cmd)
 	}
@@ -270,6 +326,42 @@ func TestCheckUsesBothTiersForSlashRecipient(t *testing.T) {
 	msgs, err := p.Check(recipient)
 	if err != nil {
 		t.Fatalf("Check: %v", err)
+	}
+	if messageListCalls != 1 {
+		t.Fatalf("message list calls = %d, want 1", messageListCalls)
+	}
+	if len(msgs) != 1 || msgs[0].ID != "msg-w" {
+		t.Fatalf("Check = %#v, want msg-w", msgs)
+	}
+}
+
+func TestCheckUsesSingleBothTierBdMessageScan(t *testing.T) {
+	var messageListCalls int
+	runner := func(_ string, name string, args ...string) ([]byte, error) {
+		cmd := name + " " + strings.Join(args, " ")
+		switch {
+		case strings.Contains(cmd, "bd show --json mayor"):
+			return nil, errors.New("not found")
+		case strings.Contains(cmd, "bd list --json") && strings.Contains(cmd, "--metadata-field"):
+			return []byte(`[]`), nil
+		case strings.Contains(cmd, "bd list --json") && strings.Contains(cmd, "--type=session"):
+			return []byte(`[]`), nil
+		case strings.Contains(cmd, "bd query --json"):
+			t.Fatalf("mail check used supplemental bd query: %s", cmd)
+		case strings.Contains(cmd, "bd list --json") && strings.Contains(cmd, "--type=message") && strings.Contains(cmd, "--status=open"):
+			messageListCalls++
+			return []byte(`[{"id":"msg-1","title":"hello","description":"body","status":"open","issue_type":"message","assignee":"mayor","from":"human","created_at":"2026-01-02T03:04:05Z","ephemeral":true}]`), nil
+		}
+		return nil, errors.New("unexpected command: " + cmd)
+	}
+	p := New(beads.NewBdStore(t.TempDir(), runner))
+
+	msgs, err := p.Check("mayor")
+	if err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	if messageListCalls != 1 {
+		t.Fatalf("message list calls = %d, want 1", messageListCalls)
 	}
 	if len(msgs) != 1 || msgs[0].ID != "msg-1" {
 		t.Fatalf("Check = %#v, want msg-1", msgs)
@@ -292,9 +384,16 @@ func TestMessageQueriesUseBothTiers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create ephemeral message: %v", err)
 	}
-	msg, err := p.Send("human", "mayor", "issues", "issues body")
+	msg, err := store.Create(beads.Bead{
+		Title:       "issue status",
+		Type:        "message",
+		Assignee:    "mayor",
+		From:        "human",
+		Description: "issue body",
+		Labels:      []string{"thread:t2"},
+	})
 	if err != nil {
-		t.Fatalf("Send issues-tier message: %v", err)
+		t.Fatalf("Create issue-tier message: %v", err)
 	}
 
 	inbox, err := p.Check("mayor")
@@ -1188,6 +1287,42 @@ func TestReply(t *testing.T) {
 	if reply.ReplyTo != sent.ID {
 		t.Errorf("Reply ReplyTo = %q, want %q", reply.ReplyTo, sent.ID)
 	}
+
+	wispMessages, err := store.List(beads.ListQuery{
+		Type:     "message",
+		Status:   "open",
+		TierMode: beads.TierWisps,
+	})
+	if err != nil {
+		t.Fatalf("List wisp-tier messages: %v", err)
+	}
+	if len(wispMessages) != 2 {
+		t.Fatalf("wisp-tier messages = %d, want sent message and reply", len(wispMessages))
+	}
+	replyInWisps := false
+	for _, b := range wispMessages {
+		if b.ID == reply.ID {
+			replyInWisps = true
+			if !b.Ephemeral {
+				t.Fatalf("reply Ephemeral = false, want true")
+			}
+		}
+	}
+	if !replyInWisps {
+		t.Fatalf("reply %s not found in wisp-tier messages: %#v", reply.ID, wispMessages)
+	}
+
+	issueMessages, err := store.List(beads.ListQuery{
+		Type:     "message",
+		Status:   "open",
+		TierMode: beads.TierIssues,
+	})
+	if err != nil {
+		t.Fatalf("List issue-tier messages: %v", err)
+	}
+	if len(issueMessages) != 0 {
+		t.Fatalf("issue-tier messages = %#v, want none", issueMessages)
+	}
 }
 
 // TestReplyDerivesSubjectFromOriginal ensures an empty subject is replaced
@@ -2058,6 +2193,19 @@ func (s *countingSessionListStore) sessionListCallCount() int {
 	return s.sessionListCalls
 }
 
+func setCachedProviderClock(t *testing.T, p *Provider, start time.Time) func(time.Duration) {
+	t.Helper()
+	if p.sessionCache == nil {
+		t.Fatal("cached provider has nil session cache")
+	}
+	current := start
+	p.sessionCache.refreshInterval = time.Minute
+	p.sessionCache.now = func() time.Time { return current }
+	return func(d time.Duration) {
+		current = current.Add(d)
+	}
+}
+
 func TestProvider_DefaultProviderSeesNewHistoricalAliasSessionAcrossCalls(t *testing.T) {
 	// Pin: the default Provider is safe for long-lived shared use. If a lookup
 	// runs before the matching session exists, later lookups must see newly
@@ -2181,6 +2329,141 @@ func TestProviderCached_BroadSessionListCacheConcurrentAccess(t *testing.T) {
 	}
 	if got := store.sessionListCallCount(); got != 1 {
 		t.Errorf("broad gc:session List calls = %d, want 1 under concurrent access", got)
+	}
+}
+
+func TestProviderCached_RefreshSeesNewHistoricalAliasSession(t *testing.T) {
+	store := &countingSessionListStore{MemStore: beads.NewMemStore()}
+	p := NewCached(store)
+	advance := setCachedProviderClock(t, p, time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC))
+
+	if _, err := p.Inbox("old-route"); err != nil {
+		t.Fatalf("initial Inbox(old-route): %v", err)
+	}
+	sessionBead, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"alias":         "worker-a",
+			"alias_history": "old-route",
+			"session_name":  "wf__a",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create session: %v", err)
+	}
+	if _, err := p.Send("human", sessionBead.Metadata["alias"], "", "visible after refresh"); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	advance(2 * time.Minute)
+
+	msgs, err := p.Inbox("old-route")
+	if err != nil {
+		t.Fatalf("refreshed Inbox(old-route): %v", err)
+	}
+	if len(msgs) != 1 || msgs[0].Body != "visible after refresh" {
+		t.Fatalf("Inbox(old-route) = %#v, want new session mail after refresh", msgs)
+	}
+	if got := store.sessionListCallCount(); got != 2 {
+		t.Errorf("broad gc:session List calls = %d, want initial scan plus refresh", got)
+	}
+}
+
+func TestProviderCached_RefreshRemovesClosedSessionFromLiveHistoricalMatch(t *testing.T) {
+	store := &countingSessionListStore{MemStore: beads.NewMemStore()}
+	p := NewCached(store)
+	advance := setCachedProviderClock(t, p, time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC))
+
+	oldSession, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"alias":         "worker-old",
+			"alias_history": "old-route",
+			"session_name":  "wf__old",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create old session: %v", err)
+	}
+	if _, err := p.Inbox("old-route"); err != nil {
+		t.Fatalf("prime Inbox(old-route): %v", err)
+	}
+	if _, err := p.Send("human", oldSession.Metadata["alias"], "", "stale closed session mail"); err != nil {
+		t.Fatalf("Send old: %v", err)
+	}
+	if err := store.Close(oldSession.ID); err != nil {
+		t.Fatalf("Close old session: %v", err)
+	}
+	newSession, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"alias":         "worker-new",
+			"alias_history": "old-route",
+			"session_name":  "wf__new",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create new session: %v", err)
+	}
+	if _, err := p.Send("human", newSession.Metadata["alias"], "", "live replacement mail"); err != nil {
+		t.Fatalf("Send new: %v", err)
+	}
+	advance(2 * time.Minute)
+
+	msgs, err := p.Inbox("old-route")
+	if err != nil {
+		t.Fatalf("refreshed Inbox(old-route): %v", err)
+	}
+	if len(msgs) != 1 || msgs[0].Body != "live replacement mail" {
+		t.Fatalf("Inbox(old-route) = %#v, want refreshed live replacement only", msgs)
+	}
+	if got := store.sessionListCallCount(); got != 2 {
+		t.Errorf("broad gc:session List calls = %d, want initial scan plus refresh", got)
+	}
+}
+
+func TestProviderCached_ExpiredRefreshConcurrentAccessScansOnce(t *testing.T) {
+	store := &countingSessionListStore{MemStore: beads.NewMemStore()}
+	if _, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"alias":         "worker-a",
+			"alias_history": "old-route",
+			"session_name":  "wf__a",
+		},
+	}); err != nil {
+		t.Fatalf("Create session: %v", err)
+	}
+	p := NewCached(store)
+	advance := setCachedProviderClock(t, p, time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC))
+	if _, err := p.Inbox("old-route"); err != nil {
+		t.Fatalf("prime Inbox(old-route): %v", err)
+	}
+	advance(2 * time.Minute)
+
+	const workers = 16
+	errs := make(chan error, workers)
+	var wg sync.WaitGroup
+	wg.Add(workers)
+	for i := 0; i < workers; i++ {
+		go func() {
+			defer wg.Done()
+			_, err := p.Inbox("old-route")
+			errs <- err
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("Inbox(old-route): %v", err)
+		}
+	}
+	if got := store.sessionListCallCount(); got != 2 {
+		t.Errorf("broad gc:session List calls = %d, want initial scan plus one concurrent refresh", got)
 	}
 }
 

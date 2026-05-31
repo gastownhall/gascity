@@ -1226,6 +1226,82 @@ func TestRenderPromptCityRootFragmentsPerAgentWins(t *testing.T) {
 	}
 }
 
+// TestRenderPromptResolvesRigPackFragment is the renderer-level regression
+// test for gascity#2676: a template fragment shipped in a rig-imported pack
+// (i.e. in cfg.RigPackDirs[<rig>], not cfg.PackDirs) must resolve when the
+// renderer is given that rig's scoped pack directories. Before the fix the
+// two callers in agent_build_params.go / cmd_prime.go passed only cfg.PackDirs,
+// so rig-pack fragments silently fell through and the renderer emitted the raw
+// `{{ template ... }}` directive in error fallback.
+func TestRenderPromptResolvesRigPackFragment(t *testing.T) {
+	f := fsys.NewFake()
+	// Rig-imported pack ships a template fragment.
+	rigPackDir := "/city/.gc/cache/repos/abc123/packs/gastown"
+	f.Files[rigPackDir+"/template-fragments/work-query.template.md"] = []byte(
+		`{{ define "work-query" }}rig-pack-work-query{{ end }}`)
+	// An imported agent's prompt references that fragment.
+	f.Files["/city/agents/polecat/prompt.template.md"] = []byte(
+		`{{ template "work-query" . }}`)
+
+	cfg := &config.City{
+		// PackDirs is intentionally empty: this city imports its pack
+		// at the rig level, not the city level. Pre-fix callers passed
+		// cfg.PackDirs here and the fragment was never registered.
+		PackDirs: nil,
+		RigPackDirs: map[string][]string{
+			"gastown": {rigPackDir},
+		},
+	}
+
+	// Post-fix call: cfg.PackDirsForRig includes the current rig dir without
+	// exposing other rigs' pack fragments.
+	got := renderPrompt(f, "/city", "", "agents/polecat/prompt.template.md",
+		PromptContext{AgentName: "polecat"}, "", io.Discard, cfg.PackDirsForRig("gastown"), nil, nil)
+	if got != "rig-pack-work-query" {
+		t.Errorf("renderPrompt(cfg.PackDirsForRig()) = %q, want %q",
+			got, "rig-pack-work-query")
+	}
+
+	// Sanity-check the pre-fix behavior: passing cfg.PackDirs alone (what
+	// the two call sites used before gascity#2676) must NOT resolve the
+	// fragment — otherwise this test wouldn't be guarding the fix. The
+	// renderer's error path emits the raw body and logs to stderr; either
+	// way the rendered output must not be the resolved fragment text.
+	gotBuggy := renderPrompt(f, "/city", "", "agents/polecat/prompt.template.md",
+		PromptContext{AgentName: "polecat"}, "", io.Discard, cfg.PackDirs, nil, nil)
+	if gotBuggy == "rig-pack-work-query" {
+		t.Errorf("pre-fix call with cfg.PackDirs unexpectedly resolved the rig-pack fragment; the regression guard is not actually guarding anything")
+	}
+}
+
+// TestRenderPromptResolvesMultiRigPackFragments verifies that fragments from
+// multiple rig-imported packs all reach the renderer when cfg.AllPackDirs()
+// is passed. Guards against an off-by-one or single-rig assumption in the
+// AllPackDirs union.
+func TestRenderPromptResolvesMultiRigPackFragments(t *testing.T) {
+	f := fsys.NewFake()
+	alphaDir := "/city/.gc/cache/repos/aaa/packs/alpha"
+	bravoDir := "/city/.gc/cache/repos/bbb/packs/bravo"
+	f.Files[alphaDir+"/template-fragments/a.template.md"] = []byte(
+		`{{ define "a" }}A{{ end }}`)
+	f.Files[bravoDir+"/template-fragments/b.template.md"] = []byte(
+		`{{ define "b" }}B{{ end }}`)
+	f.Files["/city/agents/x/prompt.template.md"] = []byte(
+		`{{ template "a" . }}-{{ template "b" . }}`)
+
+	cfg := &config.City{
+		RigPackDirs: map[string][]string{
+			"alpha": {alphaDir},
+			"bravo": {bravoDir},
+		},
+	}
+	got := renderPrompt(f, "/city", "", "agents/x/prompt.template.md",
+		PromptContext{}, "", io.Discard, cfg.AllPackDirs(), nil, nil)
+	if got != "A-B" {
+		t.Errorf("renderPrompt(multi-rig AllPackDirs) = %q, want %q", got, "A-B")
+	}
+}
+
 // TestRenderPromptCityRootFragmentsAbsentNoEffect is the regression-safety
 // check: when the city root has no template-fragments/ or prompts/shared/,
 // rendered output is byte-identical to pre-fix behavior (i.e. the new

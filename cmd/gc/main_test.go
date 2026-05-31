@@ -2763,8 +2763,14 @@ func TestDoInitGastownWritesCanonicalPackV2Shape(t *testing.T) {
 	}
 
 	packToml := string(f.Files[filepath.Join("/bright-lights", "pack.toml")])
-	if !strings.Contains(packToml, "[imports.gastown]") || !strings.Contains(packToml, `source = ".gc/system/packs/gastown"`) {
+	if !strings.Contains(packToml, "[imports.gastown]") || !strings.Contains(packToml, `source = "`+config.PublicGastownPackSource+`"`) {
 		t.Fatalf("pack.toml missing gastown import:\n%s", packToml)
+	}
+	if !strings.Contains(packToml, `version = "`+config.PublicGastownPackVersion+`"`) {
+		t.Fatalf("pack.toml missing gastown version pin:\n%s", packToml)
+	}
+	if strings.Contains(packToml, ".gc/system/packs/gastown") {
+		t.Fatalf("pack.toml should not import legacy materialized gastown:\n%s", packToml)
 	}
 	if strings.Contains(packToml, `append_fragments = ["command-glossary", "operational-awareness"]`) {
 		t.Fatalf("pack.toml should not rewrite workspace.global_fragments into append_fragments:\n%s", packToml)

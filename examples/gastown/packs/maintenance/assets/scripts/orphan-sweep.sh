@@ -123,13 +123,25 @@ fi
 # Two bugs the chronic strip pattern (gastownhall/gascity#2363) revealed:
 # (1) The JSON shape is {"sessions":[...], "summary":..., "filters":..., "schema_version":...},
 #     so `.[]` iterated four top-level scalar keys instead of session objects.
-# (2) Field names are snake_case lower (.closed/.id/.session_name/.alias/.agent_name),
-#     not PascalCase. Combined, LIVE_SESSION_IDS was ALWAYS empty and every
-#     ephemeral assignee like gastown__polecat-gc-XXXXX got stripped on every tick.
+# (2) Field names vary by runtime/API path. Accept both snake_case
+#     (.closed/.id/.session_name/.alias/.agent_name) and PascalCase
+#     (.Closed/.ID/.SessionName/.Alias/.Template) so a schema casing change
+#     cannot make LIVE_SESSION_IDS empty and strip active pool claims.
 LIVE_SESSION_IDS=$(jq -r -s '
     .[] | .sessions[]?
-    | select(.closed == false)
-    | [.id, .session_name, .alias, .agent_name]
+    | select(
+        ((.closed // .Closed // false) == false)
+        and (((.state // .State // "") | ascii_downcase) != "closed")
+        and (((.state // .State // "") | ascii_downcase) != "stopped")
+        and (((.state // .State // "") | ascii_downcase) != "gc_swept")
+      )
+    | [
+        (.id // .ID),
+        (.session_name // .SessionName),
+        (.alias // .Alias),
+        (.agent_name // .AgentName // .template // .Template),
+        (.name // .Name)
+      ]
     | .[]
     | select(. != null and . != "")
 ' "$SESSION_TMP" 2>/dev/null) || exit 0

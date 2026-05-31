@@ -102,6 +102,29 @@ fix path is for safe mechanical rewrites, not for resolving semantic choices
 such as which duplicate agent definition should win.
 </Warning>
 
+## Fragment-Authored Legacy Agents
+
+`gc doctor --fix` handles root `city.toml` and root `pack.toml` legacy
+`[[agent]]` tables because those rewrites have a clear destination:
+`agents/<name>/agent.toml` in the same pack or city root.
+
+Included TOML fragments are different. A fragment can be shared, layered, or
+kept only for a specific deployment shape, so Gas City does not guess where a
+fragment-authored legacy agent should move. When `gc doctor` reports a
+fragment-authored legacy surface, migrate it by hand:
+
+1. Create or choose the owning `agents/<name>/` directory in the pack or city
+   that should own the agent.
+2. Move scalar agent fields into `agents/<name>/agent.toml`.
+3. Move prompt, overlay, namepool, skills, MCP, and template-fragment files
+   beside that agent when they are agent-local.
+4. Remove the legacy `[[agent]]` block from the fragment.
+5. Run `gc doctor` again and keep the fragment only for non-agent deployment
+   overrides that still belong there.
+
+This is intentionally manual. If the right owner is ambiguous, make that
+choice explicit in the repository rather than relying on an automatic rewrite.
+
 ## Auto-Imported System Packs
 
 `internal/config/config.go` is the source of truth for generated Gastown city

@@ -22,9 +22,6 @@ func (s *Server) humaHandleSessionList(_ context.Context, input *SessionListInpu
 	if store == nil {
 		return nil, huma.Error503ServiceUnavailable("no bead store configured")
 	}
-	if err := cacheLiveOr503(store); err != nil {
-		return nil, err
-	}
 	mgr := s.sessionManager(store)
 	cfg := s.state.Config()
 
@@ -108,9 +105,6 @@ func (s *Server) humaHandleSessionGet(_ context.Context, input *SessionGetInput)
 	store := s.state.CityBeadStore()
 	if store == nil {
 		return nil, huma.Error503ServiceUnavailable("no bead store configured")
-	}
-	if err := cacheLiveOr503(store); err != nil {
-		return nil, err
 	}
 	mgr := s.sessionManager(store)
 	cfg := s.state.Config()

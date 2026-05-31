@@ -100,8 +100,11 @@ func ExecCommandRunnerWithEnv(env map[string]string) CommandRunner {
 		cmd.Cancel = func() error {
 			return killCommandTree(cmd)
 		}
+		baseEnv := processEnvSnapshotExcludingNativeDoltOpen()
 		if len(env) > 0 {
-			cmd.Env = mergeEnv(os.Environ(), env)
+			cmd.Env = mergeEnv(baseEnv, env)
+		} else {
+			cmd.Env = baseEnv
 		}
 		var stderr bytes.Buffer
 		cmd.Stderr = &stderr
@@ -237,6 +240,10 @@ func (s *BdStore) IDPrefix() string {
 	return s.idPrefix
 }
 
+func (s *BdStore) listIncludesCompleteDependencies() bool {
+	return false
+}
+
 // Init initializes a beads database via bd init --server. This is an admin
 // operation on BdStore directly, not part of the Store interface (MemStore/
 // FileStore don't need it). If host is non-empty, --server-host (and
@@ -281,7 +288,7 @@ func (s *BdStore) Purge(beadsDir string, dryRun bool) (PurgeResult, error) {
 	}
 
 	dir := filepath.Dir(beadsDir)
-	env := envWithout(os.Environ(), "BEADS_DIR")
+	env := envWithout(processEnvSnapshotExcludingNativeDoltOpen(), "BEADS_DIR")
 	env = append(env, "BEADS_DIR="+beadsDir)
 
 	var out []byte
@@ -785,6 +792,64 @@ func (s *BdStore) Update(id string, opts UpdateOpts) error {
 		return fmt.Errorf("updating bead %q: %w", id, err)
 	}
 	return nil
+}
+
+// UpdateAll modifies the same fields on multiple beads via one bd update
+// invocation. It is intended for controller hot paths that need the semantics
+// of bd update, not bd close, across a batch of known bead IDs.
+func (s *BdStore) UpdateAll(ids []string, opts UpdateOpts) (int, error) {
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	args := append([]string{"update", "--json"}, ids...)
+	baseLen := len(args)
+	if opts.Title != nil {
+		args = append(args, "--title", *opts.Title)
+	}
+	if opts.Status != nil {
+		args = append(args, "--status", *opts.Status)
+	}
+	if opts.Type != nil {
+		args = append(args, "--type", *opts.Type)
+	}
+	if opts.Priority != nil {
+		args = append(args, "--priority", strconv.Itoa(*opts.Priority))
+	}
+	if opts.Description != nil {
+		args = append(args, "--description", *opts.Description)
+	}
+	if opts.ParentID != nil {
+		args = append(args, "--parent", *opts.ParentID)
+	}
+	if opts.Assignee != nil {
+		args = append(args, "--assignee", *opts.Assignee)
+	}
+	if len(opts.Metadata) > 0 {
+		keys := make([]string, 0, len(opts.Metadata))
+		for k := range opts.Metadata {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			args = append(args, "--set-metadata", k+"="+opts.Metadata[k])
+		}
+	}
+	for _, l := range opts.Labels {
+		args = append(args, "--add-label", l)
+	}
+	for _, l := range opts.RemoveLabels {
+		args = append(args, "--remove-label", l)
+	}
+	if len(args) == baseLen {
+		return 0, nil
+	}
+	if err := s.runBDTransientWrite(args...); err != nil {
+		if isBdNotFound(err) {
+			return 0, fmt.Errorf("batch updating beads %v: %w", ids, ErrNotFound)
+		}
+		return 0, fmt.Errorf("batch updating beads %v: %w", ids, err)
+	}
+	return len(ids), nil
 }
 
 // WaitForParentProjection blocks until bd's parent-child listing projection
@@ -1396,7 +1461,7 @@ func (s *BdStore) Delete(id string) error {
 	return nil
 }
 
-// List returns beads matching the query via bd list.
+// List returns beads matching the query via bd list and bd query.
 func (s *BdStore) List(query ListQuery) ([]Bead, error) {
 	if !query.HasFilter() && !query.AllowScan {
 		return nil, fmt.Errorf("bd list: %w", ErrQueryRequiresScan)
@@ -1406,9 +1471,20 @@ func (s *BdStore) List(query ListQuery) ([]Bead, error) {
 	case TierWisps:
 		return s.listEphemeral(query)
 	case TierBoth:
+		if bdListCoversBothTiers(query) {
+			return s.listViaBDList(query)
+		}
 		return s.listBothTiers(query)
 	}
 
+	return s.listViaBDList(query)
+}
+
+func bdListCoversBothTiers(query ListQuery) bool {
+	return query.Type == "message"
+}
+
+func (s *BdStore) listViaBDList(query ListQuery) ([]Bead, error) {
 	limit := query.Limit
 	if query.Sort == SortCreatedAsc {
 		limit = 0
@@ -1472,9 +1548,8 @@ func (s *BdStore) List(query ListQuery) ([]Bead, error) {
 }
 
 // listEphemeral reads only the wisps tier using `bd query "ephemeral=true AND
-// <filters>"`. bd list only scans the issues table; bd query is the canonical
-// way to reach the wisps table (mirrors gastown's internal/beads/beads.go
-// listEphemeral path).
+// <filters>"`. For most bead types, bd query is the canonical way to reach the
+// wisps table (mirrors gastown's internal/beads/beads.go listEphemeral path).
 func (s *BdStore) listEphemeral(query ListQuery) ([]Bead, error) {
 	clauses := []string{"ephemeral=true"}
 	serverFilteredOnly := true

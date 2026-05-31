@@ -6,7 +6,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -492,4 +494,344 @@ func TestHQStoreConcurrentCreateUpdate(t *testing.T) {
 		}
 		seen[b.ID] = true
 	}
+}
+
+func TestHQStoreListReadyConcurrentWithWriters(t *testing.T) {
+	store, err := beads.OpenHQStore(t.TempDir(), beads.WithHQStoreSnapshotInterval(0))
+	if err != nil {
+		t.Fatalf("OpenHQStore: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := store.Shutdown(); err != nil {
+			t.Errorf("Shutdown: %v", err)
+		}
+	})
+
+	const seedCount = 1000
+	seedIDs := make([]string, 0, seedCount)
+	for i := range seedCount {
+		created, err := store.Create(beads.Bead{
+			Title:    fmt.Sprintf("seed-%d", i),
+			Assignee: "builder",
+			Metadata: map[string]string{"seed": "true"},
+		})
+		if err != nil {
+			t.Fatalf("Create seed %d: %v", i, err)
+		}
+		seedIDs = append(seedIDs, created.ID)
+	}
+
+	var (
+		listObserved  atomic.Bool
+		readyObserved atomic.Bool
+		metadataOps   atomic.Uint64
+		updateOps     atomic.Uint64
+		createOps     atomic.Uint64
+		wg            sync.WaitGroup
+	)
+	start := make(chan struct{})
+	stop := make(chan struct{})
+	errs := make(chan error, 8)
+	runWorker := func(name string, fn func() error) {
+		t.Helper()
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				if err := fn(); err != nil {
+					select {
+					case errs <- fmt.Errorf("%s: %w", name, err):
+					case <-stop:
+					}
+					return
+				}
+			}
+		}()
+	}
+
+	runWorker("list reader", func() error {
+		got, err := store.List(beads.ListQuery{
+			AllowScan:     true,
+			IncludeClosed: true,
+			TierMode:      beads.TierBoth,
+		})
+		if err != nil {
+			return err
+		}
+		if len(got) == 0 {
+			return errors.New("List returned no beads")
+		}
+		listObserved.Store(true)
+		return nil
+	})
+	runWorker("ready reader", func() error {
+		got, err := store.Ready(beads.ReadyQuery{Assignee: "builder"})
+		if err != nil {
+			return err
+		}
+		if len(got) == 0 {
+			return errors.New("Ready returned no beads")
+		}
+		readyObserved.Store(true)
+		return nil
+	})
+	runWorker("metadata writer", func() error {
+		n := metadataOps.Add(1)
+		id := seedIDs[int(n-1)%len(seedIDs)]
+		return store.SetMetadataBatch(id, map[string]string{"race.metadata": fmt.Sprint(n)})
+	})
+	runWorker("update writer", func() error {
+		n := updateOps.Add(1)
+		id := seedIDs[int(n-1)%len(seedIDs)]
+		title := fmt.Sprintf("updated-%d", n)
+		return store.Update(id, beads.UpdateOpts{Title: &title})
+	})
+	runWorker("create writer", func() error {
+		n := createOps.Add(1)
+		b := beads.Bead{
+			Title:    fmt.Sprintf("created-%d", n),
+			Assignee: "builder",
+		}
+		if n%5 == 0 {
+			b.Ephemeral = true
+		}
+		_, err := store.Create(b)
+		return err
+	})
+
+	close(start)
+	time.Sleep(500 * time.Millisecond)
+	close(stop)
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Fatalf("concurrent worker error: %v", err)
+	}
+	if !listObserved.Load() {
+		t.Fatal("List reader did not observe non-empty results")
+	}
+	if !readyObserved.Load() {
+		t.Fatal("Ready reader did not observe non-empty results")
+	}
+}
+
+func TestHQStoreListRecentDescSmallDataset(t *testing.T) {
+	store, err := beads.OpenHQStore(t.TempDir(), beads.WithHQStoreSnapshotInterval(0))
+	if err != nil {
+		t.Fatalf("OpenHQStore: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := store.Shutdown(); err != nil {
+			t.Errorf("Shutdown: %v", err)
+		}
+	})
+
+	base := time.Date(2026, 5, 27, 10, 0, 0, 0, time.UTC)
+	var created []beads.Bead
+	for i, b := range []beads.Bead{
+		{Title: "old open", CreatedAt: base.Add(1 * time.Minute)},
+		{Title: "new closed", Status: "closed", CreatedAt: base.Add(2 * time.Minute)},
+		{Title: "newer wisp", Type: "message", Ephemeral: true, CreatedAt: base.Add(3 * time.Minute)},
+		{Title: "newest open", CreatedAt: base.Add(4 * time.Minute)},
+	} {
+		got, err := store.Create(b)
+		if err != nil {
+			t.Fatalf("Create %d: %v", i, err)
+		}
+		created = append(created, got)
+	}
+
+	query := beads.ListQuery{
+		AllowScan: true,
+		Limit:     3,
+		Sort:      beads.SortCreatedDesc,
+		TierMode:  beads.TierBoth,
+	}
+	got, err := store.List(query)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	want := []string{created[3].ID, created[2].ID, created[0].ID}
+	if gotIDs := hqTestBeadIDs(got); !slices.Equal(gotIDs, want) {
+		t.Fatalf("List IDs = %v, want %v", gotIDs, want)
+	}
+}
+
+func TestHQStoreListRecentDescLargeMixedDataset(t *testing.T) {
+	store, err := beads.OpenHQStore(t.TempDir(), beads.WithHQStoreSnapshotInterval(0))
+	if err != nil {
+		t.Fatalf("OpenHQStore: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := store.Shutdown(); err != nil {
+			t.Errorf("Shutdown: %v", err)
+		}
+	})
+
+	const total = 2500
+	base := time.Date(2026, 5, 27, 11, 0, 0, 0, time.UTC)
+	all := make([]beads.Bead, 0, total)
+	for i := range total {
+		b := beads.Bead{
+			Title:     fmt.Sprintf("mixed-%d", i),
+			CreatedAt: base.Add(time.Duration(i) * time.Second),
+		}
+		if i%3 == 0 {
+			b.Status = "closed"
+		}
+		if i%7 == 0 {
+			b.Type = "message"
+			b.Ephemeral = true
+		}
+		created, err := store.Create(b)
+		if err != nil {
+			t.Fatalf("Create %d: %v", i, err)
+		}
+		all = append(all, created)
+	}
+
+	query := beads.ListQuery{
+		AllowScan:     true,
+		IncludeClosed: true,
+		Limit:         5,
+		Sort:          beads.SortCreatedDesc,
+		TierMode:      beads.TierBoth,
+	}
+	got, err := store.List(query)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	want := beads.ApplyListQuery(all, query)
+	if gotIDs, wantIDs := hqTestBeadIDs(got), hqTestBeadIDs(want); !slices.Equal(gotIDs, wantIDs) {
+		t.Fatalf("List IDs = %v, want %v", gotIDs, wantIDs)
+	}
+}
+
+func TestListRecentDescConcurrentWithWriters(t *testing.T) {
+	store, err := beads.OpenHQStore(t.TempDir(), beads.WithHQStoreSnapshotInterval(0))
+	if err != nil {
+		t.Fatalf("OpenHQStore: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := store.Shutdown(); err != nil {
+			t.Errorf("Shutdown: %v", err)
+		}
+	})
+
+	const seedCount = 1000
+	seedIDs := make([]string, 0, seedCount)
+	base := time.Now().Add(-24 * time.Hour)
+	for i := range seedCount {
+		created, err := store.Create(beads.Bead{
+			Title:     fmt.Sprintf("recent-seed-%d", i),
+			CreatedAt: base.Add(time.Duration(i) * time.Second),
+			Metadata:  map[string]string{"seed": "true"},
+		})
+		if err != nil {
+			t.Fatalf("Create seed %d: %v", i, err)
+		}
+		seedIDs = append(seedIDs, created.ID)
+	}
+
+	var (
+		listObserved atomic.Bool
+		metadataOps  atomic.Uint64
+		createOps    atomic.Uint64
+		wg           sync.WaitGroup
+	)
+	start := make(chan struct{})
+	stop := make(chan struct{})
+	errs := make(chan error, 4)
+	runWorker := func(name string, fn func() error) {
+		t.Helper()
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				if err := fn(); err != nil {
+					select {
+					case errs <- fmt.Errorf("%s: %w", name, err):
+					case <-stop:
+					}
+					return
+				}
+			}
+		}()
+	}
+
+	runWorker("recent list reader", func() error {
+		got, err := store.List(beads.ListQuery{
+			AllowScan:     true,
+			IncludeClosed: true,
+			Limit:         5,
+			Sort:          beads.SortCreatedDesc,
+			TierMode:      beads.TierBoth,
+		})
+		if err != nil {
+			return err
+		}
+		if len(got) == 0 {
+			return errors.New("List returned no beads")
+		}
+		if len(got) > 5 {
+			return fmt.Errorf("List returned %d beads, want at most 5", len(got))
+		}
+		for i := 1; i < len(got); i++ {
+			if got[i-1].CreatedAt.Before(got[i].CreatedAt) {
+				return fmt.Errorf("List returned non-descending CreatedAt order at %d", i)
+			}
+		}
+		listObserved.Store(true)
+		return nil
+	})
+	runWorker("metadata writer", func() error {
+		n := metadataOps.Add(1)
+		id := seedIDs[int(n-1)%len(seedIDs)]
+		return store.SetMetadataBatch(id, map[string]string{"recent.race": fmt.Sprint(n)})
+	})
+	runWorker("create writer", func() error {
+		n := createOps.Add(1)
+		b := beads.Bead{Title: fmt.Sprintf("recent-created-%d", n)}
+		if n%4 == 0 {
+			b.Status = "closed"
+		}
+		if n%6 == 0 {
+			b.Type = "message"
+			b.Ephemeral = true
+		}
+		_, err := store.Create(b)
+		return err
+	})
+
+	close(start)
+	time.Sleep(500 * time.Millisecond)
+	close(stop)
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Fatalf("concurrent worker error: %v", err)
+	}
+	if !listObserved.Load() {
+		t.Fatal("List reader did not observe non-empty results")
+	}
+}
+
+func hqTestBeadIDs(items []beads.Bead) []string {
+	ids := make([]string, 0, len(items))
+	for _, b := range items {
+		ids = append(ids, b.ID)
+	}
+	return ids
 }

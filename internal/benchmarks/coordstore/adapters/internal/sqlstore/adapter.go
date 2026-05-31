@@ -107,9 +107,9 @@ func (a *Adapter) Create(ctx context.Context, r coordstore.Record) (coordstore.R
 			expiresNs = r.ExpiresAt.UnixNano()
 		}
 		_, err = tx.ExecContext(ctx,
-			`INSERT INTO ephemeral(id,title,status,type,created_at,assignee,parent_id,expires_at)
-			 VALUES(`+a.placeholders(8)+`)`,
-			r.ID, r.Title, r.Status, r.Type, r.CreatedAt.UnixNano(), r.Assignee, r.ParentID, expiresNs)
+			`INSERT INTO ephemeral(id,title,status,type,created_at,updated_at,assignee,parent_id,expires_at)
+			 VALUES(`+a.placeholders(9)+`)`,
+			r.ID, r.Title, r.Status, r.Type, r.CreatedAt.UnixNano(), r.UpdatedAt.UnixNano(), r.Assignee, r.ParentID, expiresNs)
 		if err != nil {
 			return coordstore.Record{}, fmt.Errorf("%s Create ephemeral: %w", a.dialect.Name, err)
 		}
@@ -121,9 +121,9 @@ func (a *Adapter) Create(ctx context.Context, r coordstore.Record) (coordstore.R
 		}
 	} else {
 		_, err = tx.ExecContext(ctx,
-			`INSERT INTO records(id,title,status,type,priority,created_at,assignee,parent_id,description)
-			 VALUES(`+a.placeholders(9)+`)`,
-			r.ID, r.Title, r.Status, r.Type, r.Priority, r.CreatedAt.UnixNano(), r.Assignee, r.ParentID, "")
+			`INSERT INTO records(id,title,status,type,priority,created_at,updated_at,assignee,parent_id,description)
+			 VALUES(`+a.placeholders(10)+`)`,
+			r.ID, r.Title, r.Status, r.Type, r.Priority, r.CreatedAt.UnixNano(), r.UpdatedAt.UnixNano(), r.Assignee, r.ParentID, "")
 		if err != nil {
 			return coordstore.Record{}, fmt.Errorf("%s Create main: %w", a.dialect.Name, err)
 		}
@@ -182,17 +182,17 @@ func (a *Adapter) Update(ctx context.Context, id string, u coordstore.Update) er
 		clauses = append(clauses, "assignee="+a.dialect.Placeholder(len(args)+1))
 		args = append(args, u.Assignee)
 	}
-	if len(clauses) > 0 {
-		args = append(args, id)
-		q := "UPDATE " + table + " SET " + strings.Join(clauses, ",") +
-			" WHERE id=" + a.dialect.Placeholder(len(args))
-		res, err := tx.ExecContext(ctx, q, args...)
-		if err != nil {
-			return fmt.Errorf("%s Update: %w", a.dialect.Name, err)
-		}
-		if n, _ := res.RowsAffected(); n == 0 {
-			return coordstore.ErrNotFound
-		}
+	clauses = append(clauses, "updated_at="+a.dialect.Placeholder(len(args)+1))
+	args = append(args, time.Now().UnixNano())
+	args = append(args, id)
+	q := "UPDATE " + table + " SET " + strings.Join(clauses, ",") +
+		" WHERE id=" + a.dialect.Placeholder(len(args))
+	res, err := tx.ExecContext(ctx, q, args...)
+	if err != nil {
+		return fmt.Errorf("%s Update: %w", a.dialect.Name, err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return coordstore.ErrNotFound
 	}
 	if len(u.Metadata) > 0 {
 		if err := a.upsertMetadata(ctx, tx, id, u.Metadata, ephemeral); err != nil {
@@ -282,7 +282,7 @@ func (a *Adapter) BatchGet(ctx context.Context, ids []string) ([]coordstore.Reco
 		args[i] = id
 	}
 	rows, err := a.db.QueryContext(ctx,
-		"SELECT id,title,status,type,priority,created_at,assignee,parent_id FROM records WHERE id IN ("+a.placeholders(len(ids))+")",
+		"SELECT id,title,status,type,priority,created_at,updated_at,assignee,parent_id FROM records WHERE id IN ("+a.placeholders(len(ids))+")",
 		args...)
 	if err != nil {
 		return nil, fmt.Errorf("%s BatchGet: %w", a.dialect.Name, err)
@@ -296,7 +296,7 @@ func (a *Adapter) SetMetadataBatch(ctx context.Context, id string, kvs map[strin
 	if len(kvs) == 0 {
 		return nil
 	}
-	_, ephemeral, err := a.locate(ctx, id)
+	table, ephemeral, err := a.locate(ctx, id)
 	if err != nil {
 		return err
 	}
@@ -308,6 +308,11 @@ func (a *Adapter) SetMetadataBatch(ctx context.Context, id string, kvs map[strin
 	if err := a.upsertMetadata(ctx, tx, id, kvs, ephemeral); err != nil {
 		return err
 	}
+	if _, err := tx.ExecContext(ctx,
+		"UPDATE "+table+" SET updated_at="+a.dialect.Placeholder(1)+" WHERE id="+a.dialect.Placeholder(2),
+		time.Now().UnixNano(), id); err != nil {
+		return fmt.Errorf("%s SetMetadataBatch updated_at: %w", a.dialect.Name, err)
+	}
 	return tx.Commit()
 }
 
@@ -318,7 +323,7 @@ func (a *Adapter) Ready(ctx context.Context, q coordstore.ReadyQuery) ([]coordst
 	for _, t := range excluded {
 		args = append(args, t)
 	}
-	query := `SELECT r.id,r.title,r.status,r.type,r.priority,r.created_at,r.assignee,r.parent_id
+	query := `SELECT r.id,r.title,r.status,r.type,r.priority,r.created_at,r.updated_at,r.assignee,r.parent_id
 	          FROM records r
 	          WHERE r.status IN ('open','in_progress')
 	            AND r.type NOT IN (` + a.placeholders(len(excluded)) + `)
@@ -428,6 +433,61 @@ func (a *Adapter) PurgeExpired(ctx context.Context) (int, error) {
 	return len(ids), nil
 }
 
+// PurgeTerminal removes old terminal main-tier records.
+func (a *Adapter) PurgeTerminal(ctx context.Context, olderThan time.Duration) (int, error) {
+	if olderThan <= 0 {
+		return 0, nil
+	}
+	cutoff := time.Now().Add(-olderThan).UnixNano()
+	rows, err := a.db.QueryContext(ctx,
+		`SELECT id FROM records
+		 WHERE status IN ('closed','cancelled','canceled','expired')
+		   AND COALESCE(NULLIF(updated_at, 0), created_at) < `+a.dialect.Placeholder(1)+
+			fmt.Sprintf(" LIMIT %d", coordstore.TerminalPurgeBatchSize), cutoff)
+	if err != nil {
+		return 0, fmt.Errorf("%s PurgeTerminal query: %w", a.dialect.Name, err)
+	}
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close() //nolint:errcheck
+			return 0, err
+		}
+		ids = append(ids, id)
+	}
+	rows.Close() //nolint:errcheck
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+
+	tx, err := a.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("%s PurgeTerminal begin tx: %w", a.dialect.Name, err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+	for _, id := range ids {
+		deletes := []struct {
+			stmt string
+			args []any
+		}{
+			{"DELETE FROM labels WHERE record_id=" + a.dialect.Placeholder(1), []any{id}},
+			{"DELETE FROM metadata WHERE record_id=" + a.dialect.Placeholder(1), []any{id}},
+			{"DELETE FROM deps WHERE issue_id=" + a.dialect.Placeholder(1) + " OR depends_on_id=" + a.dialect.Placeholder(2), []any{id, id}},
+			{"DELETE FROM records WHERE id=" + a.dialect.Placeholder(1), []any{id}},
+		}
+		for _, del := range deletes {
+			if _, err := tx.ExecContext(ctx, del.stmt, del.args...); err != nil {
+				return 0, fmt.Errorf("%s PurgeTerminal delete %q: %w", a.dialect.Name, id, err)
+			}
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return len(ids), nil
+}
+
 // PrimeScan scans open main-tier records.
 func (a *Adapter) PrimeScan(ctx context.Context) (int, error) {
 	rows, err := a.db.QueryContext(ctx,
@@ -448,11 +508,11 @@ func (a *Adapter) RecentScan(ctx context.Context, limit int) ([]coordstore.Recor
 	if limit <= 0 {
 		limit = 100
 	}
-	query := `SELECT id,title,status,type,priority,created_at,assignee,parent_id,expires_at,ephemeral
+	query := `SELECT id,title,status,type,priority,created_at,updated_at,assignee,parent_id,expires_at,ephemeral
 	          FROM (
-	              SELECT id,title,status,type,priority,created_at,assignee,parent_id,0 AS expires_at,0 AS ephemeral FROM records
+	              SELECT id,title,status,type,priority,created_at,updated_at,assignee,parent_id,0 AS expires_at,0 AS ephemeral FROM records
 	              UNION ALL
-	              SELECT id,title,status,type,0 AS priority,created_at,assignee,parent_id,expires_at,1 AS ephemeral FROM ephemeral
+	              SELECT id,title,status,type,0 AS priority,created_at,updated_at,assignee,parent_id,expires_at,1 AS ephemeral FROM ephemeral
 	          ) recent ORDER BY created_at DESC LIMIT ` + fmt.Sprintf("%d", limit)
 	rows, err := a.db.QueryContext(ctx, query)
 	if err != nil {
@@ -462,12 +522,16 @@ func (a *Adapter) RecentScan(ctx context.Context, limit int) ([]coordstore.Recor
 	var out []coordstore.Record
 	for rows.Next() {
 		var r coordstore.Record
-		var createdNs, expiresNs int64
+		var createdNs, updatedNs, expiresNs int64
 		var ephemeral int
-		if err := rows.Scan(&r.ID, &r.Title, &r.Status, &r.Type, &r.Priority, &createdNs, &r.Assignee, &r.ParentID, &expiresNs, &ephemeral); err != nil {
+		if err := rows.Scan(&r.ID, &r.Title, &r.Status, &r.Type, &r.Priority, &createdNs, &updatedNs, &r.Assignee, &r.ParentID, &expiresNs, &ephemeral); err != nil {
 			return nil, err
 		}
 		r.CreatedAt = time.Unix(0, createdNs)
+		r.UpdatedAt = r.CreatedAt
+		if updatedNs > 0 {
+			r.UpdatedAt = time.Unix(0, updatedNs)
+		}
 		r.Ephemeral = ephemeral == 1
 		if expiresNs > 0 {
 			r.ExpiresAt = time.Unix(0, expiresNs)
@@ -497,6 +561,9 @@ func (a *Adapter) normalize(r coordstore.Record) coordstore.Record {
 	if r.CreatedAt.IsZero() {
 		r.CreatedAt = time.Now()
 	}
+	if r.UpdatedAt.IsZero() {
+		r.UpdatedAt = r.CreatedAt
+	}
 	if r.Status == "" {
 		r.Status = "open"
 	}
@@ -512,14 +579,14 @@ func (a *Adapter) normalize(r coordstore.Record) coordstore.Record {
 
 func (a *Adapter) getFrom(ctx context.Context, table, id string, ephemeral bool) (coordstore.Record, error) {
 	var r coordstore.Record
-	var createdNs, expiresNs int64
+	var createdNs, updatedNs, expiresNs int64
 	query := "SELECT id,title,status,type,"
 	if ephemeral {
 		query += "0 AS priority,"
 	} else {
 		query += "priority,"
 	}
-	query += "created_at,assignee,parent_id"
+	query += "created_at,updated_at,assignee,parent_id"
 	if ephemeral {
 		query += ",expires_at"
 	}
@@ -527,9 +594,9 @@ func (a *Adapter) getFrom(ctx context.Context, table, id string, ephemeral bool)
 	row := a.db.QueryRowContext(ctx, query, id)
 	var err error
 	if ephemeral {
-		err = row.Scan(&r.ID, &r.Title, &r.Status, &r.Type, &r.Priority, &createdNs, &r.Assignee, &r.ParentID, &expiresNs)
+		err = row.Scan(&r.ID, &r.Title, &r.Status, &r.Type, &r.Priority, &createdNs, &updatedNs, &r.Assignee, &r.ParentID, &expiresNs)
 	} else {
-		err = row.Scan(&r.ID, &r.Title, &r.Status, &r.Type, &r.Priority, &createdNs, &r.Assignee, &r.ParentID)
+		err = row.Scan(&r.ID, &r.Title, &r.Status, &r.Type, &r.Priority, &createdNs, &updatedNs, &r.Assignee, &r.ParentID)
 	}
 	if errors.Is(err, sql.ErrNoRows) {
 		return coordstore.Record{}, coordstore.ErrNotFound
@@ -538,6 +605,10 @@ func (a *Adapter) getFrom(ctx context.Context, table, id string, ephemeral bool)
 		return coordstore.Record{}, err
 	}
 	r.CreatedAt = time.Unix(0, createdNs)
+	r.UpdatedAt = r.CreatedAt
+	if updatedNs > 0 {
+		r.UpdatedAt = time.Unix(0, updatedNs)
+	}
 	r.Ephemeral = ephemeral
 	if expiresNs > 0 {
 		r.ExpiresAt = time.Unix(0, expiresNs)
@@ -581,13 +652,13 @@ func (a *Adapter) filter(ctx context.Context, q coordstore.Query, ephemeral bool
 	alias := "r"
 	labelTable := "labels"
 	metaTable := "metadata"
-	selectCols := "r.id,r.title,r.status,r.type,r.priority,r.created_at,r.assignee,r.parent_id"
+	selectCols := "r.id,r.title,r.status,r.type,r.priority,r.created_at,r.updated_at,r.assignee,r.parent_id"
 	if ephemeral {
 		table = "ephemeral"
 		alias = "e"
 		labelTable = "ephemeral_labels"
 		metaTable = "ephemeral_metadata"
-		selectCols = "e.id,e.title,e.status,e.type,e.created_at,e.assignee,e.parent_id,e.expires_at"
+		selectCols = "e.id,e.title,e.status,e.type,e.created_at,e.updated_at,e.assignee,e.parent_id,e.expires_at"
 	}
 	var where []string
 	var args []any
@@ -728,11 +799,15 @@ func scanMainRows(rows *sql.Rows) ([]coordstore.Record, error) {
 	var records []coordstore.Record
 	for rows.Next() {
 		var r coordstore.Record
-		var createdNs int64
-		if err := rows.Scan(&r.ID, &r.Title, &r.Status, &r.Type, &r.Priority, &createdNs, &r.Assignee, &r.ParentID); err != nil {
+		var createdNs, updatedNs int64
+		if err := rows.Scan(&r.ID, &r.Title, &r.Status, &r.Type, &r.Priority, &createdNs, &updatedNs, &r.Assignee, &r.ParentID); err != nil {
 			return nil, err
 		}
 		r.CreatedAt = time.Unix(0, createdNs)
+		r.UpdatedAt = r.CreatedAt
+		if updatedNs > 0 {
+			r.UpdatedAt = time.Unix(0, updatedNs)
+		}
 		records = append(records, r)
 	}
 	return records, rows.Err()
@@ -742,11 +817,15 @@ func scanEphemeralRows(rows *sql.Rows) ([]coordstore.Record, error) {
 	var records []coordstore.Record
 	for rows.Next() {
 		var r coordstore.Record
-		var createdNs, expiresNs int64
-		if err := rows.Scan(&r.ID, &r.Title, &r.Status, &r.Type, &createdNs, &r.Assignee, &r.ParentID, &expiresNs); err != nil {
+		var createdNs, updatedNs, expiresNs int64
+		if err := rows.Scan(&r.ID, &r.Title, &r.Status, &r.Type, &createdNs, &updatedNs, &r.Assignee, &r.ParentID, &expiresNs); err != nil {
 			return nil, err
 		}
 		r.CreatedAt = time.Unix(0, createdNs)
+		r.UpdatedAt = r.CreatedAt
+		if updatedNs > 0 {
+			r.UpdatedAt = time.Unix(0, updatedNs)
+		}
 		r.Ephemeral = true
 		if expiresNs > 0 {
 			r.ExpiresAt = time.Unix(0, expiresNs)

@@ -603,13 +603,32 @@ var projectedDoltEnvKeys = []string{
 	"BEADS_DOLT_PASSWORD",
 }
 
-var beadsExecCommandRunnerWithEnv = beads.ExecCommandRunnerWithEnv
+var bdCLIRemoteSyncOptOutEnvKeys = [...]string{
+	// BD_DOLT_SYNC_CLI_REMOTES is the key bd's BD-prefixed Viper env
+	// binding consumes today; keep BEADS_DOLT_SYNC_CLI_REMOTES as a
+	// compatibility alias only.
+	"BD_DOLT_SYNC_CLI_REMOTES",
+	"BEADS_DOLT_SYNC_CLI_REMOTES",
+}
+
+func appendBdCLIRemoteSyncOptOutEnvKeys(keys []string) []string {
+	for _, key := range bdCLIRemoteSyncOptOutEnvKeys {
+		keys = append(keys, key)
+	}
+	return keys
+}
+
+var (
+	beadsExecCommandRunnerWithEnv             = beads.ExecCommandRunnerWithEnv
+	processEnvSnapshotExcludingNativeDoltOpen = beads.ProcessEnvSnapshotExcludingNativeDoltOpen
+)
 
 var recoverManagedBDCommand = func(cityPath string) error {
 	script := gcBeadsBdScriptPath(cityPath)
 	overrides := cityRuntimeEnvMapForCity(cityPath)
 	setProjectedDoltEnvEmpty(overrides)
-	environ := mergeRuntimeEnv(os.Environ(), overrides)
+	applyBdCLIRemoteSyncOptOut(overrides)
+	environ := mergeRuntimeEnv(processEnvSnapshotExcludingNativeDoltOpen(), overrides)
 	environ = append(environ, providerLifecycleDoltPathEnv(cityPath)...)
 	if gcBin := resolveProviderLifecycleGCBinary(); gcBin != "" {
 		environ = removeEnvKey(environ, "GC_BIN")
@@ -1084,6 +1103,21 @@ func bdRuntimeEnvForRigWithError(cityPath string, cfg *config.City, rigPath stri
 	return env, nil
 }
 
+func nativeDoltOpenEnvForScope(cityPath string, cfg *config.City, scopeRoot string) (map[string]string, error) {
+	scopeRoot = resolveStoreScopeRoot(cityPath, scopeRoot)
+	if samePath(scopeRoot, cityPath) {
+		return bdRuntimeEnvWithError(cityPath)
+	}
+	if cfg == nil {
+		loaded, err := loadCityConfig(cityPath, io.Discard)
+		if err != nil {
+			return nil, err
+		}
+		cfg = loaded
+	}
+	return bdRuntimeEnvForRigWithError(cityPath, cfg, scopeRoot)
+}
+
 func bdRuntimeEnvWithError(cityPath string) (map[string]string, error) {
 	env := cityRuntimeEnvMapForCity(cityPath)
 	env["BEADS_DIR"] = filepath.Join(cityPath, ".beads")
@@ -1104,6 +1138,7 @@ func bdRuntimeEnvWithError(cityPath string) (map[string]string, error) {
 	// stall bd create / gc mail send for the full 2m subprocess timeout on
 	// large datasets.
 	env["BD_EXPORT_AUTO"] = "false"
+	applyBdCLIRemoteSyncOptOut(env)
 	if !cityUsesBdStoreContract(cityPath) {
 		return env, nil
 	}
@@ -1151,6 +1186,7 @@ func cityRuntimeProcessEnvWithError(cityPath string) ([]string, error) {
 	var projectionErr error
 	if cityUsesBdStoreContract(cityPath) {
 		source := map[string]string{"BEADS_DOLT_AUTO_START": "0"}
+		applyBdCLIRemoteSyncOptOut(source)
 		if usedPostgres, err := applyCityPostgresBackendEnv(source, cityPath); err != nil {
 			clearProjectedDoltEnv(source)
 			clearProjectedPostgresEnv(source)
@@ -1170,7 +1206,16 @@ func cityRuntimeProcessEnvWithError(cityPath string) ([]string, error) {
 			}
 		}
 	}
-	return mergeRuntimeEnv(os.Environ(), overrides), projectionErr
+	return mergeRuntimeEnv(processEnvSnapshotExcludingNativeDoltOpen(), overrides), projectionErr
+}
+
+func applyBdCLIRemoteSyncOptOut(env map[string]string) {
+	if env == nil {
+		return
+	}
+	for _, key := range bdCLIRemoteSyncOptOutEnvKeys {
+		env[key] = "false"
+	}
 }
 
 func mirrorBeadsDoltEnv(env map[string]string) {
@@ -1269,6 +1314,7 @@ func mergeRuntimeEnv(environ []string, overrides map[string]string) []string {
 		"GC_RIG",
 		"GC_RIG_ROOT",
 	}
+	keys = appendBdCLIRemoteSyncOptOutEnvKeys(keys)
 	if len(overrides) > 0 {
 		for key := range overrides {
 			if !containsString(keys, key) {

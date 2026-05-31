@@ -143,6 +143,73 @@ schema = 2
 	}
 }
 
+func TestDoPrimeScopesRigPackFragmentsByCurrentRig(t *testing.T) {
+	clearGCEnv(t)
+
+	cityDir := t.TempDir()
+	write := func(rel, data string) {
+		path := filepath.Join(cityDir, rel)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("MkdirAll(%s): %v", path, err)
+		}
+		if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+			t.Fatalf("WriteFile(%s): %v", path, err)
+		}
+	}
+	write("pack.toml", "[pack]\nname = \"prompt-city\"\nschema = 2\n")
+	write("city.toml", `
+[workspace]
+name = "prompt-city"
+
+[[rigs]]
+name = "alpha"
+
+[rigs.imports.alpha]
+source = "./packs/alpha"
+
+[[rigs]]
+name = "bravo"
+
+[rigs.imports.bravo]
+source = "./packs/bravo"
+`)
+	write(".gc/site.toml", `
+workspace_name = "prompt-city"
+
+[[rig]]
+name = "alpha"
+path = "./rigs/alpha"
+
+[[rig]]
+name = "bravo"
+path = "./rigs/bravo"
+`)
+	write("agents/alpha-worker/agent.toml", "dir = \"alpha\"\nprompt_template = \"agents/alpha-worker/prompt.template.md\"\n")
+	write("agents/bravo-worker/agent.toml", "dir = \"bravo\"\nprompt_template = \"agents/bravo-worker/prompt.template.md\"\n")
+	write("agents/alpha-worker/prompt.template.md", `{{ template "work-query" . }}`)
+	write("agents/bravo-worker/prompt.template.md", `{{ template "work-query" . }}`)
+	write("packs/alpha/pack.toml", "[pack]\nname = \"alpha\"\nschema = 2\n")
+	write("packs/bravo/pack.toml", "[pack]\nname = \"bravo\"\nschema = 2\n")
+	write("packs/alpha/template-fragments/work-query.template.md", `{{ define "work-query" }}alpha-work-query{{ end }}`)
+	write("packs/bravo/template-fragments/work-query.template.md", `{{ define "work-query" }}bravo-work-query{{ end }}`)
+
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_ALIAS", "")
+	t.Setenv("GC_AGENT", "")
+
+	var stdout, stderr bytes.Buffer
+	code := doPrimeWithMode([]string{"alpha-worker"}, &stdout, &stderr, false, true)
+	if code != 0 {
+		t.Fatalf("doPrime() = %d, want 0; stderr=%q", code, stderr.String())
+	}
+	if got := stdout.String(); got != "alpha-work-query" {
+		t.Fatalf("stdout = %q, want alpha rig fragment; stderr=%q", got, stderr.String())
+	}
+	if strings.Contains(stdout.String(), "bravo-work-query") {
+		t.Fatalf("stdout = %q, must not include bravo rig fragment", stdout.String())
+	}
+}
+
 func TestBuildPrimeContextPrefersGCAliasOverGCAgent(t *testing.T) {
 	// When GC_AGENT is a session bead ID, buildPrimeContext should prefer
 	// GC_ALIAS for AgentName so the prompt doesn't contain a bead ID.

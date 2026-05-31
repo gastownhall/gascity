@@ -17,6 +17,7 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/gastownhall/gascity/internal/pricing"
+	"github.com/gastownhall/gascity/internal/shellquote"
 )
 
 // validAgentName matches names safe for use in session identifiers.
@@ -169,7 +170,12 @@ type City struct {
 	// Providers defines named provider presets for agent startup.
 	Providers map[string]ProviderSpec `toml:"providers,omitempty"`
 	// Packs defines named remote pack sources fetched via git (V1 mechanism).
-	Packs map[string]PackSource `toml:"packs,omitempty"`
+	//
+	// Legacy pack source map, accepted for migration and fetch/list
+	// compatibility only. PackV2 authored config uses [imports.*] with source
+	// plus optional version, so this legacy surface is intentionally omitted
+	// from generated public schemas and reference docs.
+	Packs map[string]PackSource `toml:"packs,omitempty" jsonschema:"-"`
 	// Imports defines named pack imports (V2 mechanism). Each key is a
 	// binding name; the value specifies the source and optional version,
 	// export, and transitive controls. Processed during ExpandCityPacks.
@@ -215,9 +221,13 @@ type City struct {
 	// Doctor configures gc doctor thresholds and policy toggles
 	// (worktree size warnings, nested-worktree auto-prune).
 	Doctor DoctorConfig `toml:"doctor,omitempty"`
+	// Maintenance configures periodic store-maintenance loops.
+	Maintenance MaintenanceConfig `toml:"maintenance,omitempty"`
 	// Services declares workspace-owned HTTP services mounted on the
 	// controller edge under /svc/{name}.
 	Services []Service `toml:"service,omitempty"`
+	// GitHub configures GitHub-facing repository monitors.
+	GitHub GitHubConfig `toml:"github,omitempty"`
 	// AgentDefaults provides city-level defaults for agents that don't
 	// override them (canonical TOML key: agent_defaults). The runtime
 	// currently applies default_sling_formula and append_fragments; the
@@ -667,6 +677,8 @@ type AgentOverride struct {
 	ResumeCommand *string `toml:"resume_command,omitempty"`
 	// WakeMode overrides the agent's wake mode ("resume" or "fresh").
 	WakeMode *string `toml:"wake_mode,omitempty" jsonschema:"enum=resume,enum=fresh"`
+	// MouseMode overrides whether tmux mouse mode is preserved ("on" or "off").
+	MouseMode *string `toml:"mouse_mode,omitempty" jsonschema:"enum=on,enum=off"`
 	// InjectFragmentsAppend appends to the agent's inject_fragments list.
 	InjectFragmentsAppend []string `toml:"inject_fragments_append,omitempty"`
 	// MaxActiveSessions overrides the agent-level cap on concurrent sessions.
@@ -683,8 +695,11 @@ type AgentOverride struct {
 	OptionDefaults map[string]string `toml:"option_defaults,omitempty"`
 }
 
-// PackSource defines a remote pack repository.
-// Referenced by name in rig pack fields and fetched into the cache.
+// PackSource defines a legacy remote pack repository.
+// Referenced by name in V1 pack fields and fetched into the cache.
+//
+// PackSource is retained for legacy migration and fetch/list compatibility.
+// PackV2 authored imports use Import.Source and Import.Version instead.
 type PackSource struct {
 	// Source is the git repository URL.
 	Source string `toml:"source" jsonschema:"required"`
@@ -699,12 +714,14 @@ type PackSource struct {
 // name (the TOML key), a source (local path or remote URL), and
 // optional version/export/transitive controls.
 type Import struct {
-	// Source is the pack location: a local relative path (e.g.,
-	// "./assets/imports/gastown") or a remote URL (e.g.,
-	// "github.com/gastownhall/gastown"). Local paths have no version.
+	// Source is the durable authored pack location: a local path, a remote git
+	// URL, or a remote git URL with a monorepo subpath such as
+	// "github.com/org/repo//packs/foo". Registry handles are lookup-only in
+	// this release wave; authored [imports.*] entries store the resolved source
+	// plus optional version.
 	Source string `toml:"source" jsonschema:"required"`
-	// Version is a semver constraint for remote imports (e.g., "^1.2").
-	// Empty for local paths. "sha:<hex>" for commit pinning.
+	// Version is an optional semver constraint for git-backed imports (e.g.,
+	// "^1.2"). Empty for local paths. "sha:<hex>" pins a specific commit.
 	Version string `toml:"version,omitempty"`
 	// Export re-exports this import's contents into the parent pack's
 	// namespace. Consumers of the parent get this import's agents
@@ -1529,7 +1546,7 @@ type OrdersConfig struct {
 	Overrides []OrderOverride `toml:"overrides,omitempty"`
 }
 
-// OrderOverride modifies a scanned order's scheduling fields.
+// OrderOverride modifies a scanned order's scheduling fields and exec env.
 // Uses pointer fields to distinguish "not set" from "set to zero value."
 type OrderOverride struct {
 	// Name is the order name to target (required).
@@ -1556,6 +1573,9 @@ type OrderOverride struct {
 	Pool *string `toml:"pool,omitempty"`
 	// Timeout overrides the per-order timeout. Go duration string.
 	Timeout *string `toml:"timeout,omitempty"`
+	// Env adds or overrides environment variables exported into an exec
+	// order's child process.
+	Env map[string]string `toml:"env,omitempty"`
 }
 
 func (o *OrderOverride) normalizeLegacyAliases() {
@@ -1781,6 +1801,56 @@ func (c ConvergenceConfig) MaxTotalOrDefault() int {
 	return c.MaxTotal
 }
 
+// MaintenanceConfig groups periodic store-maintenance subsections.
+type MaintenanceConfig struct {
+	// Dolt configures the weekly Dolt store maintenance loop
+	// (CALL DOLT_GC + backup snapshot).
+	Dolt DoltMaintenance `toml:"dolt,omitempty"`
+}
+
+// DoltMaintenance configures the periodic Dolt store maintenance loop.
+// Opt-in for v1: omission or enabled=false leaves the loop disabled.
+type DoltMaintenance struct {
+	// Enabled toggles the maintenance loop. Defaults to false (opt-in).
+	Enabled bool `toml:"enabled,omitempty"`
+	// Interval is the cadence between maintenance runs as a duration
+	// string (e.g., "168h"). Defaults to 168h (weekly).
+	Interval string `toml:"interval,omitempty" jsonschema:"default=168h"`
+	// AlertTo is the agent identity to mail on failure (e.g.,
+	// "gascity/mayor"). Empty disables alert mail.
+	AlertTo string `toml:"alert_to,omitempty"`
+	// GCTimeout is the ceiling for CALL DOLT_GC() as a duration string.
+	// Defaults to 10m.
+	GCTimeout string `toml:"gc_timeout,omitempty" jsonschema:"default=10m"`
+}
+
+// IntervalOrDefault returns the parsed Interval, falling back to 168h
+// (weekly) when unset or unparseable. Invalid values should already have
+// surfaced as warnings from ValidateDurations at load time.
+func (d DoltMaintenance) IntervalOrDefault() time.Duration {
+	if d.Interval == "" {
+		return 168 * time.Hour
+	}
+	v, err := time.ParseDuration(d.Interval)
+	if err != nil {
+		return 168 * time.Hour
+	}
+	return v
+}
+
+// GCTimeoutOrDefault returns the parsed GCTimeout, falling back to 10m
+// when unset or unparseable.
+func (d DoltMaintenance) GCTimeoutOrDefault() time.Duration {
+	if d.GCTimeout == "" {
+		return 10 * time.Minute
+	}
+	v, err := time.ParseDuration(d.GCTimeout)
+	if err != nil {
+		return 10 * time.Minute
+	}
+	return v
+}
+
 // DaemonConfig holds controller daemon settings.
 type DaemonConfig struct {
 	// FormulaV2 enables formula v2 graph workflow infrastructure:
@@ -1835,6 +1905,24 @@ type DaemonConfig struct {
 	// that budget can be cut short on that path even though the direct
 	// stop/unregister path always honors the full grace.
 	DoltStopTimeout string `toml:"dolt_stop_timeout,omitempty" jsonschema:"default=30s"`
+	// DoltStartAddressInUseRetryWindow is how long the managed dolt start
+	// path waits on the originally requested port when bind fails with
+	// "address already in use" before falling back to a higher port. The
+	// common cause is a TIME_WAIT socket left by an abrupt stop of a sibling
+	// dolt subprocess (external SIGTERM, supervisor restart, OOM kill); on
+	// Linux the listening-socket slot typically frees within ~30s. Falling
+	// back immediately publishes the rebound port to provider state, after
+	// which `recoverManagedDoltShouldReuseExisting` keeps accepting the
+	// rebound instance as canonical and consumers hardcoded to the original
+	// port stay broken until the orphan is killed. Duration string (e.g.,
+	// "30s", "1m"). Set to "0s" to disable the retry (legacy fall-back-
+	// immediately behavior). Defaults to "30s". Each port is waited on at
+	// most once per startManagedDoltProcessWithOptions invocation, so the
+	// worst-case wall time per startup is bounded by
+	// (DoltStartAddressInUseRetryWindow + per-attempt-startup) × min(5,
+	// distinct-ports-tried) rather than DoltStartAddressInUseRetryWindow × 5.
+	// Negative values are rejected at config load.
+	DoltStartAddressInUseRetryWindow string `toml:"dolt_start_address_in_use_retry_window,omitempty" jsonschema:"default=30s"`
 	// WispGCInterval is how often wisp GC runs. Duration string (e.g., "5m", "1h").
 	// Wisp GC is disabled unless both WispGCInterval and WispTTL are set.
 	WispGCInterval string `toml:"wisp_gc_interval,omitempty"`
@@ -2044,6 +2132,37 @@ func (d *DaemonConfig) DoltStopTimeoutDuration() time.Duration {
 	return dur
 }
 
+// DefaultDoltStartAddressInUseRetryWindow is the per-port retry window used
+// when dolt's bind fails with "address already in use" before the start path
+// falls back to the next available port. 30s is roughly half Linux's default
+// TCP TIME_WAIT — the listening-socket slot typically frees well before the
+// full TIME_WAIT elapses because there are no active half-open connections
+// during a clean restart. Values up to 60s are safer for kernels with
+// tcp_fin_timeout raised; values below 10s materially shrink the window for
+// outliving TIME_WAIT.
+const DefaultDoltStartAddressInUseRetryWindow = 30 * time.Second
+
+// DoltStartAddressInUseRetryWindowDuration returns the configured retry
+// window for the managed-dolt address-in-use loop as a time.Duration.
+// Defaults to DefaultDoltStartAddressInUseRetryWindow (30s) when empty or
+// unparseable. Zero disables the retry — callers fall back to a higher port
+// immediately, matching legacy behavior. Negative values pass through
+// unchanged: callers that route through loadCityConfig already reject them
+// via ValidateNonNegativeDurations, so a negative reaching this helper
+// implies a hand-rolled DaemonConfig that bypassed validation — treat zero
+// as a misconfiguration upstream rather than silently overriding it here.
+// Mirrors DoltStopTimeoutDuration's policy.
+func (d *DaemonConfig) DoltStartAddressInUseRetryWindowDuration() time.Duration {
+	if d.DoltStartAddressInUseRetryWindow == "" {
+		return DefaultDoltStartAddressInUseRetryWindow
+	}
+	dur, err := time.ParseDuration(d.DoltStartAddressInUseRetryWindow)
+	if err != nil {
+		return DefaultDoltStartAddressInUseRetryWindow
+	}
+	return dur
+}
+
 // DefaultProbeConcurrency is the default bd probe concurrency limit.
 // Used by ProbeConcurrencyOrDefault and referenced by cmd/gc/pool.go
 // so the default lives in one place.
@@ -2147,6 +2266,38 @@ func (c *City) FormulasDir() string {
 		return c.Formulas.Dir
 	}
 	return citylayout.FormulasRoot
+}
+
+// AllPackDirs returns the union of city-level and all rig-level pack directories
+// (city dirs first, then sorted-by-rig-name dirs), deduplicated. Use this for
+// global scans that intentionally need the full pack-fragment universe. Prompt
+// rendering for a specific rig should use PackDirsForRig so one rig's fragments
+// cannot override another rig's same-named fragments.
+func (c *City) AllPackDirs() []string {
+	var dirs []string
+	dirs = appendUnique(dirs, c.PackDirs...)
+	rigNames := make([]string, 0, len(c.RigPackDirs))
+	for name := range c.RigPackDirs {
+		rigNames = append(rigNames, name)
+	}
+	sort.Strings(rigNames)
+	for _, name := range rigNames {
+		dirs = appendUnique(dirs, c.RigPackDirs[name]...)
+	}
+	return dirs
+}
+
+// PackDirsForRig returns the city-level pack directories plus the pack
+// directories imported by rigName, deduplicated with city-level dirs kept first.
+// Use this when rendering prompts for one agent so rig-imported template
+// fragments are available without exposing fragments imported by other rigs.
+func (c *City) PackDirsForRig(rigName string) []string {
+	var dirs []string
+	dirs = appendUnique(dirs, c.PackDirs...)
+	if rigName != "" {
+		dirs = appendUnique(dirs, c.RigPackDirs[rigName]...)
+	}
+	return dirs
 }
 
 // AgentDefaults provides city-level agent defaults declared via
@@ -2520,6 +2671,11 @@ type Agent struct {
 	// "resume" (default): reuse provider session key for conversation continuity.
 	// "fresh": start a new provider session on every wake (polecat pattern).
 	WakeMode string `toml:"wake_mode,omitempty" jsonschema:"enum=resume,enum=fresh"`
+	// MouseMode controls whether tmux mouse mode is preserved for this agent.
+	// "on" leaves the session's mouse setting alone for human-attached
+	// sessions; "off" or empty preserves the SDK's default mouse-off startup
+	// behavior for headless sessions.
+	MouseMode string `toml:"mouse_mode,omitempty" jsonschema:"enum=on,enum=off"`
 	// SleepAfterIdleSource records which config layer supplied SleepAfterIdle.
 	// Runtime-only — not persisted to TOML or JSON.
 	SleepAfterIdleSource string `toml:"-" json:"-"`
@@ -2659,23 +2815,95 @@ func (a *Agent) EffectiveWakeMode() string {
 	return "resume"
 }
 
+// MouseModeOn reports whether tmux mouse mode should be preserved for this agent.
+func (a *Agent) MouseModeOn() bool {
+	return a.MouseMode == "on"
+}
+
 // AttachEnabled reports whether the agent supports interactive attachment.
 func (a *Agent) AttachEnabled() bool {
 	return a.Attach == nil || *a.Attach
 }
 
+// poolDemandKeys lists the routing metadata keys the pool-demand predicate
+// consults, in precedence order. gc.run_target — the canonical per-step
+// target stamped by the graph.v2 stamper (and, since #2386, the legacy
+// stamper) — is preferred; gc.routed_to is the compatibility fallback for
+// beads authored before the gc.run_target migration. The worker claim path
+// (EffectiveWorkQuery Tier 3) and the reconciler demand path
+// (EffectivePoolDemandQuery) walk these in the same order so that a graph.v2
+// workflow root stamping only gc.run_target is both spawned-for and
+// claimable (#2763 — completes the reader migration #2386 began;
+// bdReadyPoolDemandShell was the one reader site it missed).
+var poolDemandKeys = []string{"gc.run_target", "gc.routed_to"}
+
 // bdReadyPoolDemandShell returns the bd ready predicate for unassigned,
-// non-epic pool demand routed to target. This is the one-source-of-truth for the
-// "is there work on this routed queue?" question that both the worker (via
-// EffectiveWorkQuery Tier 3) and the reconciler (via EffectivePoolDemandQuery,
-// count-form) ask. Diverging the two re-introduces the protocol-mismatch class;
-// see the "scale_check ↔ work_query correspondence" note in
-// engdocs/architecture/dispatch.md.
+// non-epic pool demand matched on metadata field key=target, where key and
+// target are shell variables scoped by the caller. This is the
+// one-source-of-truth for the "is there work on this routed queue?" question
+// that both the worker (via EffectiveWorkQuery Tier 3) and the reconciler (via
+// EffectivePoolDemandQuery, count-form) ask. Diverging the two re-introduces
+// the protocol-mismatch class; see the "scale_check ↔ work_query
+// correspondence" note in engdocs/architecture/dispatch.md.
 //
-// Callers append their own bd flags (--limit=1 for first-row work_query;
-// piped to jq 'length' for the count-form) and shell handling.
-func bdReadyPoolDemandShell(target string) string {
-	return `bd ready --metadata-field gc.routed_to=` + target + ` --unassigned --exclude-type=epic --json`
+// bd ready cannot express a single "match key A or key B" predicate
+// (--metadata-field is AND-combined and there is no key-absent filter), so the
+// run_target/routed_to precedence is composed at the shell layer by
+// poolDemandFirstRowFunctionScript (work_query) and poolDemandCountShell
+// (count-form), which call this helper once per key in poolDemandKeys order.
+//
+// target is passed as a positional argument to the outer sh -c command, not
+// interpolated into the nested shell body. That keeps routes containing shell
+// metacharacters as data instead of executable syntax.
+func bdReadyPoolDemandShell(limitFlag string) string {
+	return `bd ready --metadata-field "$key=$target" --unassigned --exclude-type=epic --json ` + limitFlag
+}
+
+func poolDemandKeyListShell() string {
+	return shellquote.Join(poolDemandKeys)
+}
+
+// poolDemandFirstRowFunctionScript emits the work_query Tier 3 function: it
+// tries each routing key in poolDemandKeys precedence order at --limit=1,
+// printing the first non-empty JSON array and exiting 0. The target comes from
+// the function's first argument, so callers can reuse the same script for both
+// primary and legacy workflow-control routes without embedding dynamic targets
+// inside the shell body.
+func poolDemandFirstRowFunctionScript() string {
+	return `probe_pool_demand() { ` +
+		`target="$1"; ` +
+		`[ -z "$target" ] && return 1; ` +
+		`for key in ` + poolDemandKeyListShell() + `; do ` +
+		`r=$(` + bdReadyPoolDemandShell("--limit=1") + ` 2>/dev/null); ` +
+		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
+		`done; ` +
+		`return 1; ` +
+		`}; `
+}
+
+// poolDemandCountShell emits the reconciler count-form for target: it counts
+// ready demand under the first routing key in poolDemandKeys that yields a
+// non-empty result (gc.run_target preferred, gc.routed_to fallback) and prints
+// the array length. Precedence mirrors poolDemandFirstRowFunctionScript so the
+// reconciler's spawn decision and the worker's claim decision agree — the
+// worker drains the preferred tier first, then the count surfaces the fallback
+// tier on the next pass.
+//
+// Unlike the work_query probes, this form must NOT redirect bd stderr or
+// default to zero: a failed `bd ready` has to surface as an error rather than
+// masquerade as "no demand", which would silently stop the pool from spawning.
+// Every query is chained with && so any non-zero bd exit short-circuits the
+// whole expression (TestEffectiveScaleCheckUsesReadyOnly).
+func poolDemandCountShell(target string) string {
+	script := `target="$1"; ` +
+		`ready_json="[]"; ` +
+		`for key in ` + poolDemandKeyListShell() + `; do ` +
+		`cur=$(` + bdReadyPoolDemandShell("--limit 0") + `) || exit $?; ` +
+		`if [ "$cur" != "[]" ]; then ready_json="$cur"; break; fi; ` +
+		`ready_json="$cur"; ` +
+		`done; ` +
+		`printf "%s\n" "$ready_json" | jq "length"`
+	return shellquote.Join([]string{"sh", "-c", script, "--", target})
 }
 
 func (a *Agent) poolDemandTarget() string {
@@ -2684,6 +2912,47 @@ func (a *Agent) poolDemandTarget() string {
 		target = a.PoolName
 	}
 	return target
+}
+
+func standardAssignedWorkQueryScript() string {
+	return `for id in "$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"; do ` +
+		`[ -z "$id" ] && continue; ` +
+		`r=$(bd list --status in_progress --assignee="$id" --exclude-type=epic --json --limit=1 2>/dev/null); ` +
+		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
+		`done; ` +
+		`for id in "$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"; do ` +
+		`[ -z "$id" ] && continue; ` +
+		`r=$(bd ready --assignee="$id" --exclude-type=epic --json --limit=1 2>/dev/null); ` +
+		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
+		`done; `
+}
+
+func legacyControlAssignedWorkQueryScript() string {
+	return `for id in "$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"; do ` +
+		`[ -z "$id" ] && continue; ` +
+		`legacy=""; case "$id" in *control-dispatcher) legacy="${id%control-dispatcher}workflow-control";; esac; ` +
+		`for cand in "$id" "$legacy"; do ` +
+		`[ -z "$cand" ] && continue; ` +
+		`r=$(bd list --status in_progress --assignee="$cand" --exclude-type=epic --json --limit=1 2>/dev/null); ` +
+		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
+		`done; ` +
+		`done; ` +
+		`for id in "$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"; do ` +
+		`[ -z "$id" ] && continue; ` +
+		`legacy=""; case "$id" in *control-dispatcher) legacy="${id%control-dispatcher}workflow-control";; esac; ` +
+		`for cand in "$id" "$legacy"; do ` +
+		`[ -z "$cand" ] && continue; ` +
+		`r=$(bd ready --assignee="$cand" --exclude-type=epic --json --limit=1 2>/dev/null); ` +
+		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
+		`done; ` +
+		`done; `
+}
+
+func poolDemandOriginGateScript() string {
+	return `case "$GC_SESSION_ORIGIN" in ` +
+		`ephemeral|"") ;; ` +
+		`*) exit 0 ;; ` +
+		`esac; `
 }
 
 // EffectiveWorkQuery returns the work query command for this agent.
@@ -2721,62 +2990,20 @@ func (a *Agent) EffectiveWorkQuery() string {
 	target := a.poolDemandTarget()
 	legacyTarget := legacyWorkflowControlQualifiedName(target)
 	if legacyTarget == "" {
-		return `sh -c '` +
-			// Tier 1: in_progress assigned to any of my identifiers (crash recovery)
-			`for id in "$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"; do ` +
-			`[ -z "$id" ] && continue; ` +
-			`r=$(bd list --status in_progress --assignee="$id" --exclude-type=epic --json --limit=1 2>/dev/null); ` +
-			`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
-			`done; ` +
-			// Tier 2: ready assigned to any of my identifiers (pre-assigned)
-			`for id in "$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"; do ` +
-			`[ -z "$id" ] && continue; ` +
-			`r=$(bd ready --assignee="$id" --exclude-type=epic --json --limit=1 2>/dev/null); ` +
-			`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
-			`done; ` +
-			// Tier 3: ready unassigned routed to this config (shared routed queue).
-			// Only ephemeral sessions and controller probes consume generic config demand.
-			`case "$GC_SESSION_ORIGIN" in ` +
-			`ephemeral|"") ;; ` +
-			`*) exit 0 ;; ` +
-			`esac; ` +
-			`r=$(` + bdReadyPoolDemandShell(target) + ` --limit=1 2>/dev/null); ` +
-			`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
-			`printf "[]"'`
+		script := standardAssignedWorkQueryScript() +
+			poolDemandOriginGateScript() +
+			poolDemandFirstRowFunctionScript() +
+			`probe_pool_demand "$1"; ` +
+			`printf "[]"`
+		return shellquote.Join([]string{"sh", "-c", script, "--", target})
 	}
-	return `sh -c '` +
-		// Tier 1: in_progress assigned to any of my identifiers (crash recovery).
-		// Built-in control-dispatchers also claim legacy workflow-control names so
-		// pre-rename workflows keep moving without live metadata rewrites.
-		`for id in "$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"; do ` +
-		`[ -z "$id" ] && continue; ` +
-		`legacy=""; case "$id" in *control-dispatcher) legacy="${id%control-dispatcher}workflow-control";; esac; ` +
-		`for cand in "$id" "$legacy"; do ` +
-		`[ -z "$cand" ] && continue; ` +
-		`r=$(bd list --status in_progress --assignee="$cand" --exclude-type=epic --json --limit=1 2>/dev/null); ` +
-		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
-		`done; ` +
-		`done; ` +
-		// Tier 2: ready assigned to any of my identifiers (pre-assigned)
-		`for id in "$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"; do ` +
-		`[ -z "$id" ] && continue; ` +
-		`legacy=""; case "$id" in *control-dispatcher) legacy="${id%control-dispatcher}workflow-control";; esac; ` +
-		`for cand in "$id" "$legacy"; do ` +
-		`[ -z "$cand" ] && continue; ` +
-		`r=$(bd ready --assignee="$cand" --exclude-type=epic --json --limit=1 2>/dev/null); ` +
-		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
-		`done; ` +
-		`done; ` +
-		// Tier 3: ready unassigned routed to this config (shared routed queue),
-		// then the legacy workflow-control route for pre-rename graphs.
-		// Only ephemeral sessions and controller probes consume generic config demand.
-		`case "$GC_SESSION_ORIGIN" in ` +
-		`ephemeral|"") ;; ` +
-		`*) exit 0 ;; ` +
-		`esac; ` +
-		`r=$(` + bdReadyPoolDemandShell(target) + ` --limit=1 2>/dev/null); ` +
-		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
-		bdReadyPoolDemandShell(legacyTarget) + ` --limit=1 2>/dev/null'`
+	script := legacyControlAssignedWorkQueryScript() +
+		poolDemandOriginGateScript() +
+		poolDemandFirstRowFunctionScript() +
+		`probe_pool_demand "$1"; ` +
+		`probe_pool_demand "$2"; ` +
+		`printf "[]"`
+	return shellquote.Join([]string{"sh", "-c", script, "--", target, legacyTarget})
 }
 
 func legacyWorkflowControlQualifiedName(target string) string {
@@ -2858,8 +3085,7 @@ func (a *Agent) EffectivePoolDemandQuery() string {
 		return a.ScaleCheck
 	}
 	target := a.poolDemandTarget()
-	return `ready_json=$(` + bdReadyPoolDemandShell(target) +
-		` --limit 0) && printf '%s\n' "$ready_json" | jq 'length'`
+	return poolDemandCountShell(target)
 }
 
 // EffectiveScaleCheck returns the scale check command for this agent.
@@ -3413,6 +3639,13 @@ func ValidateAgents(agents []Agent) error {
 		default:
 			return fmt.Errorf("agent %q: wake_mode must be \"resume\", \"fresh\", or empty, got %q", a.QualifiedName(), a.WakeMode)
 		}
+		// MouseMode enum.
+		switch a.MouseMode {
+		case "", "on", "off":
+			// valid
+		default:
+			return fmt.Errorf("agent %q: mouse_mode must be \"on\", \"off\", or empty, got %q", a.QualifiedName(), a.MouseMode)
+		}
 		if a.MinActiveSessions != nil && *a.MinActiveSessions < 0 {
 			return fmt.Errorf("agent %q: min_active_sessions must be >= 0", a.Name)
 		}
@@ -3669,8 +3902,8 @@ func WizardCity(name, provider, startCommand string) City {
 }
 
 // GastownCity returns a City configured for the gastown orchestration pack.
-// Agents come from the pack (.gc/system/packs/gastown); no inline agents are
-// defined. The root city pack imports gastown and sets canonical
+// Agents come from the public gastown pack; no inline agents are defined. The
+// root city pack imports gastown explicitly and sets canonical
 // DefaultRigImports so newly added rigs inherit the same pack by default. It
 // also sets global fragments and daemon config. If startCommand is set, it
 // takes precedence over provider.
@@ -3689,10 +3922,16 @@ func GastownCity(name, provider, startCommand string) City {
 	return City{
 		Workspace: ws,
 		Imports: map[string]Import{
-			"gastown": {Source: ".gc/system/packs/gastown"},
+			"gastown": {
+				Source:  PublicGastownPackSource,
+				Version: PublicGastownPackVersion,
+			},
 		},
 		DefaultRigImports: map[string]Import{
-			"gastown": {Source: ".gc/system/packs/gastown"},
+			"gastown": {
+				Source:  PublicGastownPackSource,
+				Version: PublicGastownPackVersion,
+			},
 		},
 		DefaultRigImportOrder: []string{"gastown"},
 		Daemon: DaemonConfig{
@@ -3749,6 +3988,9 @@ func Load(fs fsys.FS, path string) (*City, error) {
 	// direct named-session declarations without requiring pack-provided
 	// backing templates to be present yet.
 	if err := validateNamedSessions(cfg, false); err != nil {
+		return nil, err
+	}
+	if err := ValidateGitHubPRMonitors(cfg); err != nil {
 		return nil, err
 	}
 	return cfg, nil

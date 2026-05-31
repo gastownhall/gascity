@@ -1888,6 +1888,41 @@ func TestHandleSessionListShowsResetPendingForLiveRuntime(t *testing.T) {
 	}
 }
 
+func TestHandleSessionListShowsCircuitOpenReason(t *testing.T) {
+	fs := newSessionFakeState(t)
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+
+	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Circuit Open")
+	if err := fs.cityBeadStore.SetMetadataBatch(info.ID, map[string]string{
+		session.SessionCircuitStateMetadataKey: session.SessionCircuitStateOpen,
+		"sleep_reason":                         "user-hold",
+	}); err != nil {
+		t.Fatalf("set circuit metadata: %v", err)
+	}
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", cityURL(fs, "/sessions"), nil)
+	h.ServeHTTP(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusOK, w.Body.String())
+	}
+
+	var body struct {
+		Items []sessionResponse `json:"items"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(body.Items) != 1 {
+		t.Fatalf("got %d items, want 1", len(body.Items))
+	}
+	if body.Items[0].Reason != session.LifecycleReasonCircuitOpen {
+		t.Fatalf("reason = %q, want circuit-open", body.Items[0].Reason)
+	}
+}
+
 func TestHandleSessionRename(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)

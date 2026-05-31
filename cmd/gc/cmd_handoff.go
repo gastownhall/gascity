@@ -307,6 +307,7 @@ func createHandoffMail(store beads.Store, rec events.Recorder, senderAddress, re
 		From:        senderDisplay,
 		Labels:      []string{"thread:" + handoffThreadID()},
 		Metadata:    metadata,
+		Ephemeral:   true,
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "gc handoff: creating mail: %v\n", err) //nolint:errcheck // best-effort stderr

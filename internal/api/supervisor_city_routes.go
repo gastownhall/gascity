@@ -247,6 +247,17 @@ func (sm *SupervisorMux) registerCityRoutes() {
 	// Sling.
 	cityPost(sm, "/sling", (*Server).humaHandleSling)
 
+	// Maintenance (Dolt store gc + snapshot).
+	cityGet(sm, "/maintenance/status", (*Server).humaHandleMaintenanceStatus)
+	cityRegister(sm, huma.Operation{
+		OperationID:   "trigger-maintenance-dolt-gc",
+		Method:        http.MethodPost,
+		Path:          "/maintenance/dolt-gc",
+		Summary:       "Trigger a Dolt store maintenance run",
+		Description:   "Trigger a one-off maintenance cycle (dolt backup + CALL DOLT_GC + smoke test). Default async (202); ?wait=true blocks until completion (200). Returns 409 when a run is already in flight.",
+		DefaultStatus: http.StatusAccepted,
+	}, (*Server).humaHandleMaintenanceTriggerDoltGC)
+
 	// Services (workspace services).
 	cityGet(sm, "/services", (*Server).humaHandleServiceList)
 	cityGet(sm, "/service/{name}", (*Server).humaHandleServiceGet)

@@ -862,11 +862,11 @@ func TestGastownCity(t *testing.T) {
 	if c.Workspace.Provider != "claude" {
 		t.Errorf("Workspace.Provider = %q, want %q", c.Workspace.Provider, "claude")
 	}
-	if len(c.Imports) != 1 || c.Imports["gastown"].Source != ".gc/system/packs/gastown" {
-		t.Errorf("Imports = %v, want gastown=.gc/system/packs/gastown", c.Imports)
+	if len(c.Imports) != 1 || c.Imports["gastown"].Source != PublicGastownPackSource || c.Imports["gastown"].Version != PublicGastownPackVersion {
+		t.Errorf("Imports = %v, want gastown=%s %s", c.Imports, PublicGastownPackSource, PublicGastownPackVersion)
 	}
-	if len(c.DefaultRigImports) != 1 || c.DefaultRigImports["gastown"].Source != ".gc/system/packs/gastown" {
-		t.Errorf("DefaultRigImports = %v, want gastown=.gc/system/packs/gastown", c.DefaultRigImports)
+	if len(c.DefaultRigImports) != 1 || c.DefaultRigImports["gastown"].Source != PublicGastownPackSource || c.DefaultRigImports["gastown"].Version != PublicGastownPackVersion {
+		t.Errorf("DefaultRigImports = %v, want gastown=%s %s", c.DefaultRigImports, PublicGastownPackSource, PublicGastownPackVersion)
 	}
 	if len(c.Workspace.GlobalFragments) != 2 {
 		t.Errorf("Workspace.GlobalFragments = %v, want 2 entries", c.Workspace.GlobalFragments)
@@ -914,8 +914,8 @@ func TestGastownCityRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Parse(Marshal output): %v", err)
 	}
-	if len(got.Imports) != 1 || got.Imports["gastown"].Source != ".gc/system/packs/gastown" {
-		t.Errorf("round-trip Imports = %v, want gastown=.gc/system/packs/gastown", got.Imports)
+	if len(got.Imports) != 1 || got.Imports["gastown"].Source != PublicGastownPackSource || got.Imports["gastown"].Version != PublicGastownPackVersion {
+		t.Errorf("round-trip Imports = %v, want gastown=%s %s", got.Imports, PublicGastownPackSource, PublicGastownPackVersion)
 	}
 	if got.Workspace.Provider != "claude" {
 		t.Errorf("round-trip Provider = %q, want %q", got.Workspace.Provider, "claude")
@@ -1106,6 +1106,7 @@ name = "bright-lights"
 name = "scout"
 provider = "claude"
 args = ["--dangerously-skip-permissions", "--verbose"]
+mouse_mode = "on"
 ready_delay_ms = 15000
 prompt_mode = "flag"
 prompt_flag = "--prompt"
@@ -1137,6 +1138,12 @@ emits_permission_warning = false
 	}
 	if a.PromptFlag != "--prompt" {
 		t.Errorf("PromptFlag = %q, want %q", a.PromptFlag, "--prompt")
+	}
+	if a.MouseMode != "on" {
+		t.Errorf("MouseMode = %q, want %q", a.MouseMode, "on")
+	}
+	if !a.MouseModeOn() {
+		t.Error("MouseModeOn() = false, want true")
 	}
 	if a.EmitsPermissionWarning == nil || *a.EmitsPermissionWarning != false {
 		t.Errorf("EmitsPermissionWarning = %v, want false", a.EmitsPermissionWarning)
@@ -1472,9 +1479,16 @@ func TestPoolRoundTrip(t *testing.T) {
 func TestEffectiveWorkQueryDefault(t *testing.T) {
 	a := Agent{Name: "mayor"}
 	got := a.EffectiveWorkQuery()
-	// Tiered query: check that tier 3 (routed_to) and tier 1-2 (assignee resolution) are present.
-	if !strings.Contains(got, "bd ready --metadata-field gc.routed_to=mayor --unassigned --exclude-type=epic --json --limit=1") {
-		t.Errorf("EffectiveWorkQuery() missing tier 3 routed_to: %q", got)
+	// Tiered query: check that tier 3 (run_target preferred, routed_to fallback)
+	// and tier 1-2 (assignee resolution) are present.
+	if !strings.Contains(got, "for key in gc.run_target gc.routed_to") {
+		t.Errorf("EffectiveWorkQuery() missing tier 3 routing-key precedence: %q", got)
+	}
+	if !strings.Contains(got, `bd ready --metadata-field "$key=$target" --unassigned --exclude-type=epic --json --limit=1`) {
+		t.Errorf("EffectiveWorkQuery() missing tier 3 pool-demand probe: %q", got)
+	}
+	if !strings.Contains(got, "-- mayor") {
+		t.Errorf("EffectiveWorkQuery() missing tier 3 target argument: %q", got)
 	}
 	if !strings.Contains(got, `"$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"`) {
 		t.Errorf("EffectiveWorkQuery() missing multi-identifier resolution: %q", got)
@@ -1493,16 +1507,16 @@ func TestEffectiveWorkQueryCustom(t *testing.T) {
 func TestEffectiveWorkQueryWithDir(t *testing.T) {
 	a := Agent{Name: "polecat", Dir: "hello-world"}
 	got := a.EffectiveWorkQuery()
-	if !strings.Contains(got, "bd ready --metadata-field gc.routed_to=hello-world/polecat --unassigned --exclude-type=epic --json --limit=1") {
-		t.Errorf("EffectiveWorkQuery() missing tier 3 routed_to: %q", got)
+	if !strings.Contains(got, "-- hello-world/polecat") {
+		t.Errorf("EffectiveWorkQuery() missing tier 3 target argument: %q", got)
 	}
 }
 
 func TestEffectiveWorkQueryPoolDefault(t *testing.T) {
 	a := Agent{Name: "polecat", Dir: "hello-world", MinActiveSessions: ptrInt(1), MaxActiveSessions: ptrInt(3)}
 	got := a.EffectiveWorkQuery()
-	if !strings.Contains(got, "bd ready --metadata-field gc.routed_to=hello-world/polecat --unassigned --exclude-type=epic --json --limit=1") {
-		t.Errorf("EffectiveWorkQuery() missing tier 3 routed_to: %q", got)
+	if !strings.Contains(got, "-- hello-world/polecat") {
+		t.Errorf("EffectiveWorkQuery() missing tier 3 target argument: %q", got)
 	}
 	if strings.Contains(got, "--type=molecule") {
 		t.Errorf("EffectiveWorkQuery() should not route molecule containers: %q", got)
@@ -1554,8 +1568,8 @@ func TestEffectiveWorkQueryPoolNameOverride(t *testing.T) {
 		PoolName: "hello-world/dog",
 	}
 	got := a.EffectiveWorkQuery()
-	if !strings.Contains(got, "bd ready --metadata-field gc.routed_to=hello-world/dog --unassigned --exclude-type=epic --json --limit=1") {
-		t.Errorf("EffectiveWorkQuery() missing tier 3 routed_to with pool name: %q", got)
+	if !strings.Contains(got, "-- hello-world/dog") {
+		t.Errorf("EffectiveWorkQuery() missing tier 3 pool target argument: %q", got)
 	}
 	if strings.Contains(got, "--type=molecule") {
 		t.Errorf("EffectiveWorkQuery() should not route molecule containers with pool name: %q", got)
@@ -1565,19 +1579,16 @@ func TestEffectiveWorkQueryPoolNameOverride(t *testing.T) {
 func TestEffectiveWorkQueryPoolNoPoolName(t *testing.T) {
 	a := Agent{Name: "dog", Dir: "hello-world", MinActiveSessions: ptrInt(1), MaxActiveSessions: ptrInt(3)}
 	got := a.EffectiveWorkQuery()
-	if !strings.Contains(got, "bd ready --metadata-field gc.routed_to=hello-world/dog --unassigned --exclude-type=epic --json --limit=1") {
-		t.Errorf("EffectiveWorkQuery() missing tier 3 routed_to: %q", got)
+	if !strings.Contains(got, "-- hello-world/dog") {
+		t.Errorf("EffectiveWorkQuery() missing tier 3 target argument: %q", got)
 	}
 }
 
 func TestEffectiveWorkQueryControlDispatcherIncludesLegacyWorkflowControlRoute(t *testing.T) {
 	a := Agent{Name: ControlDispatcherAgentName, Dir: "gascity"}
 	got := a.EffectiveWorkQuery()
-	if !strings.Contains(got, "gc.routed_to=gascity/control-dispatcher") {
-		t.Fatalf("EffectiveWorkQuery() missing current control-dispatcher route: %q", got)
-	}
-	if !strings.Contains(got, "gc.routed_to=gascity/workflow-control") {
-		t.Fatalf("EffectiveWorkQuery() missing legacy workflow-control route: %q", got)
+	if !strings.Contains(got, "-- gascity/control-dispatcher gascity/workflow-control") {
+		t.Fatalf("EffectiveWorkQuery() missing current and legacy route arguments: %q", got)
 	}
 	if !strings.Contains(got, `workflow-control`) {
 		t.Fatalf("EffectiveWorkQuery() missing legacy assignee alias handling: %q", got)
@@ -1664,7 +1675,9 @@ func TestEffectiveWorkQueryExcludesEpics(t *testing.T) {
 	wantSnippets := []string{
 		`bd list --status in_progress --assignee="$id" --exclude-type=epic --json`,
 		`bd ready --assignee="$id" --exclude-type=epic --json`,
-		`bd ready --metadata-field gc.routed_to=hello-world/worker --unassigned --exclude-type=epic --json`,
+		`bd ready --metadata-field "$key=$target" --unassigned --exclude-type=epic --json`,
+		`for key in gc.run_target gc.routed_to`,
+		`-- hello-world/worker`,
 	}
 	for _, want := range wantSnippets {
 		if !strings.Contains(got, want) {
@@ -1682,8 +1695,9 @@ func TestEffectiveWorkQueryExcludesEpicsControlDispatcher(t *testing.T) {
 	wantSnippets := []string{
 		`bd list --status in_progress --assignee="$cand" --exclude-type=epic --json`,
 		`bd ready --assignee="$cand" --exclude-type=epic --json`,
-		`bd ready --metadata-field gc.routed_to=gascity/control-dispatcher --unassigned --exclude-type=epic --json`,
-		`bd ready --metadata-field gc.routed_to=gascity/workflow-control --unassigned --exclude-type=epic --json`,
+		`bd ready --metadata-field "$key=$target" --unassigned --exclude-type=epic --json`,
+		`for key in gc.run_target gc.routed_to`,
+		`-- gascity/control-dispatcher gascity/workflow-control`,
 	}
 	for _, want := range wantSnippets {
 		if !strings.Contains(got, want) {
@@ -1739,6 +1753,108 @@ esac
 	}
 }
 
+// TestEffectiveWorkQueryPrefersRunTarget is the #2763 regression: the worker
+// claim path (EffectiveWorkQuery Tier 3) must return a graph.v2 workflow root
+// that stamps only gc.run_target (gc.routed_to unset). Before the fix the
+// reconciler spawned the worker on gc.run_target demand but the worker's claim
+// query read only gc.routed_to and saw an empty queue, so the root was never
+// claimed and the worker idle-reaped — silently orphaning the work. The fake
+// bd returns work solely for the gc.run_target predicate.
+func TestEffectiveWorkQueryPrefersRunTarget(t *testing.T) {
+	a := Agent{Name: "worker", Dir: "hello-world"}
+	out := runEffectiveWorkQuery(t, a, map[string]string{
+		"GC_SESSION_ORIGIN": "ephemeral",
+	}, `#!/bin/sh
+set -eu
+case "$*" in
+  *"--metadata-field gc.run_target=hello-world/worker"*)
+    printf '[{"id":"graph-root","issue_type":"workflow"}]'
+    ;;
+  *)
+    printf '[]'
+    ;;
+esac
+`)
+	if !strings.Contains(out, "graph-root") {
+		t.Fatalf("EffectiveWorkQuery() did not claim the run_target-only graph root: %q", out)
+	}
+}
+
+// TestEffectiveWorkQueryFallsBackToRoutedTo verifies the gc.routed_to
+// compatibility fallback still claims legacy roots stamped only with
+// gc.routed_to (gc.run_target unset) — e.g. the legacy --formula wisp path
+// that the #2763 reader change must not regress.
+func TestEffectiveWorkQueryFallsBackToRoutedTo(t *testing.T) {
+	a := Agent{Name: "worker", Dir: "hello-world"}
+	out := runEffectiveWorkQuery(t, a, map[string]string{
+		"GC_SESSION_ORIGIN": "ephemeral",
+	}, `#!/bin/sh
+set -eu
+case "$*" in
+  *"--metadata-field gc.run_target=hello-world/worker"*) printf '[]' ;;
+  *"--metadata-field gc.routed_to=hello-world/worker"*)
+    printf '[{"id":"legacy-root","issue_type":"wisp"}]'
+    ;;
+  *) printf '[]' ;;
+esac
+`)
+	if !strings.Contains(out, "legacy-root") {
+		t.Fatalf("EffectiveWorkQuery() did not claim the routed_to-only legacy root: %q", out)
+	}
+}
+
+// TestEffectiveWorkQueryRunTargetWinsOverRoutedTo locks the precedence: when a
+// bead matches both keys, the preferred gc.run_target result is claimed and the
+// gc.routed_to result is not surfaced.
+func TestEffectiveWorkQueryRunTargetWinsOverRoutedTo(t *testing.T) {
+	a := Agent{Name: "worker", Dir: "hello-world"}
+	out := runEffectiveWorkQuery(t, a, map[string]string{
+		"GC_SESSION_ORIGIN": "ephemeral",
+	}, `#!/bin/sh
+set -eu
+case "$*" in
+  *"--metadata-field gc.run_target=hello-world/worker"*)
+    printf '[{"id":"run-target-root","issue_type":"workflow"}]'
+    ;;
+  *"--metadata-field gc.routed_to=hello-world/worker"*)
+    printf '[{"id":"routed-to-root","issue_type":"wisp"}]'
+    ;;
+  *) printf '[]' ;;
+esac
+`)
+	if !strings.Contains(out, "run-target-root") {
+		t.Fatalf("EffectiveWorkQuery() did not prefer the gc.run_target root: %q", out)
+	}
+	if strings.Contains(out, "routed-to-root") {
+		t.Fatalf("EffectiveWorkQuery() surfaced the gc.routed_to root despite a run_target match: %q", out)
+	}
+}
+
+// TestEffectivePoolDemandQueryPrefersRunTarget verifies the spawn-side half of
+// the #2763 symmetry: the reconciler count-form counts gc.run_target demand for
+// a graph.v2 root that stamps only gc.run_target, so it keeps the worker it
+// spawned alive rather than treating the queue as empty.
+func TestEffectivePoolDemandQueryPrefersRunTarget(t *testing.T) {
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skip("jq not available; count-form exercises a jq pipeline")
+	}
+	a := Agent{Name: "worker", Dir: "hello-world"}
+	out := runShellWithFakeBd(t, a.EffectivePoolDemandQuery(), nil, `#!/bin/sh
+set -eu
+case "$*" in
+  *"--metadata-field gc.run_target=hello-world/worker"*)
+    printf '[{"id":"a"},{"id":"b"}]'
+    ;;
+  *)
+    printf '[]'
+    ;;
+esac
+`)
+	if strings.TrimSpace(out) != "2" {
+		t.Fatalf("EffectivePoolDemandQuery() count = %q, want 2 (run_target demand)", strings.TrimSpace(out))
+	}
+}
+
 func TestDefaultPoolCheckUsesPoolName(t *testing.T) {
 	a := Agent{
 		Name:              "dog-1",
@@ -1747,8 +1863,8 @@ func TestDefaultPoolCheckUsesPoolName(t *testing.T) {
 		PoolName: "hello-world/dog",
 	}
 	check := a.EffectiveScaleCheck()
-	if !strings.Contains(check, "gc.routed_to=hello-world/dog") {
-		t.Errorf("EffectiveScaleCheck() = %q, want gc.routed_to=hello-world/dog", check)
+	if !strings.Contains(check, "-- hello-world/dog") {
+		t.Errorf("EffectiveScaleCheck() = %q, want target argument hello-world/dog", check)
 	}
 }
 
@@ -1778,9 +1894,9 @@ func TestDefaultPoolCheckUsesBdReady(t *testing.T) {
 // reconciler's pool-demand path (EffectivePoolDemandQuery) and the
 // worker's claim path (EffectiveWorkQuery Tier 3) must derive their
 // "is there work on this routed queue?" predicate from the same
-// bdReadyPoolDemandShell helper. Adding a tier to one without updating
-// the other re-introduces the spawn-storm bug — this test ensures both
-// reference the identical predicate string for the same target.
+// bdReadyPoolDemandShell helper and walk the same routing keys
+// (gc.run_target preferred, gc.routed_to fallback; #2763). Adding a tier to
+// one without updating the other re-introduces the spawn-storm bug.
 func TestPoolDemandPredicateSharedWithWorkQuery(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -1804,16 +1920,34 @@ func TestPoolDemandPredicateSharedWithWorkQuery(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			predicate := bdReadyPoolDemandShell(tt.target)
-
 			wq := tt.agent.EffectiveWorkQuery()
-			if !strings.Contains(wq, predicate) {
-				t.Errorf("EffectiveWorkQuery() missing shared predicate %q in %q", predicate, wq)
-			}
-
 			demand := tt.agent.EffectivePoolDemandQuery()
-			if !strings.Contains(demand, predicate) {
-				t.Errorf("EffectivePoolDemandQuery() missing shared predicate %q in %q", predicate, demand)
+			workPredicate := bdReadyPoolDemandShell("--limit=1")
+			if !strings.Contains(wq, workPredicate) {
+				t.Errorf("EffectiveWorkQuery() missing shared predicate %q in %q", workPredicate, wq)
+			}
+			countPredicate := bdReadyPoolDemandShell("--limit 0")
+			if !strings.Contains(demand, countPredicate) {
+				t.Errorf("EffectivePoolDemandQuery() missing shared predicate %q in %q", countPredicate, demand)
+			}
+			keyList := poolDemandKeyListShell()
+			if !strings.Contains(wq, "for key in "+keyList) {
+				t.Errorf("EffectiveWorkQuery() missing shared key order %q in %q", keyList, wq)
+			}
+			if !strings.Contains(demand, "for key in "+keyList) {
+				t.Errorf("EffectivePoolDemandQuery() missing shared key order %q in %q", keyList, demand)
+			}
+			if !strings.Contains(wq, tt.target) {
+				t.Errorf("EffectiveWorkQuery() missing target argument %q in %q", tt.target, wq)
+			}
+			if !strings.Contains(demand, tt.target) {
+				t.Errorf("EffectivePoolDemandQuery() missing target argument %q in %q", tt.target, demand)
+			}
+			for _, key := range poolDemandKeys {
+				embedded := key + "=" + tt.target
+				if strings.Contains(wq, embedded) {
+					t.Errorf("EffectiveWorkQuery() embeds target in predicate %q in %q", embedded, wq)
+				}
 			}
 		})
 	}
@@ -2082,8 +2216,8 @@ func TestEffectiveScaleCheckDefaults(t *testing.T) {
 	}
 	check := a.EffectiveScaleCheck()
 	// Default check uses bd ready for blocker-aware routed demand.
-	if !strings.Contains(check, "gc.routed_to=refinery") {
-		t.Errorf("EffectiveScaleCheck = %q, want gc.routed_to=refinery", check)
+	if !strings.Contains(check, "-- refinery") {
+		t.Errorf("EffectiveScaleCheck = %q, want target argument refinery", check)
 	}
 	if !strings.Contains(check, "--unassigned") {
 		t.Errorf("EffectiveScaleCheck = %q, want --unassigned for new unassigned demand", check)
@@ -2107,8 +2241,8 @@ func TestEffectiveScaleCheckDefaultsQualified(t *testing.T) {
 		MinActiveSessions: ptrInt(0), MaxActiveSessions: ptrInt(5),
 	}
 	check := a.EffectiveScaleCheck()
-	if !strings.Contains(check, "gc.routed_to=myproject/polecat") {
-		t.Errorf("EffectiveScaleCheck = %q, want gc.routed_to=myproject/polecat", check)
+	if !strings.Contains(check, "-- myproject/polecat") {
+		t.Errorf("EffectiveScaleCheck = %q, want target argument myproject/polecat", check)
 	}
 	if !strings.Contains(check, "--unassigned") {
 		t.Errorf("EffectiveScaleCheck = %q, want --unassigned for new unassigned demand", check)
@@ -2156,8 +2290,8 @@ func TestEffectiveScaleCheckUsesReadyOnly(t *testing.T) {
 	if strings.Contains(check, "${molecules:-0}") {
 		t.Errorf("unexpected ${molecules:-0} in arithmetic sum")
 	}
-	if !strings.Contains(check, "gc.routed_to=myrig/worker") {
-		t.Errorf("ready query missing gc.routed_to=myrig/worker")
+	if !strings.Contains(check, "-- myrig/worker") {
+		t.Errorf("ready query missing target argument myrig/worker")
 	}
 }
 
@@ -2349,6 +2483,24 @@ func TestValidateAgentsValid(t *testing.T) {
 	}
 	if err := ValidateAgents(agents); err != nil {
 		t.Errorf("ValidateAgents: unexpected error: %v", err)
+	}
+}
+
+func TestValidateAgentsMouseMode(t *testing.T) {
+	for _, mode := range []string{"", "on", "off"} {
+		t.Run("valid_"+mode, func(t *testing.T) {
+			if err := ValidateAgents([]Agent{{Name: "worker", MouseMode: mode}}); err != nil {
+				t.Fatalf("ValidateAgents mouse_mode %q: %v", mode, err)
+			}
+		})
+	}
+
+	err := ValidateAgents([]Agent{{Name: "worker", MouseMode: "auto"}})
+	if err == nil {
+		t.Fatal("ValidateAgents invalid mouse_mode: got nil error")
+	}
+	if !strings.Contains(err.Error(), "mouse_mode") {
+		t.Fatalf("ValidateAgents error = %v, want mouse_mode context", err)
 	}
 }
 
@@ -2883,6 +3035,103 @@ func TestValidateNonNegativeDurationsRejectsNegativeDoltStopTimeout(t *testing.T
 		!strings.Contains(err.Error(), "must not be negative") ||
 		!strings.Contains(err.Error(), `"-1s"`) {
 		t.Errorf("ValidateNonNegativeDurations() error = %q, want it to name the field, the constraint, and the value", err)
+	}
+}
+
+func TestDaemonDoltStartAddressInUseRetryDefault(t *testing.T) {
+	d := DaemonConfig{}
+	got := d.DoltStartAddressInUseRetryWindowDuration()
+	if got != DefaultDoltStartAddressInUseRetryWindow {
+		t.Errorf("DoltStartAddressInUseRetryWindowDuration() = %v, want %v", got, DefaultDoltStartAddressInUseRetryWindow)
+	}
+}
+
+func TestDaemonDoltStartAddressInUseRetryCustom(t *testing.T) {
+	d := DaemonConfig{DoltStartAddressInUseRetryWindow: "45s"}
+	got := d.DoltStartAddressInUseRetryWindowDuration()
+	if got != 45*time.Second {
+		t.Errorf("DoltStartAddressInUseRetryWindowDuration() = %v, want 45s", got)
+	}
+}
+
+func TestDaemonDoltStartAddressInUseRetryZero(t *testing.T) {
+	d := DaemonConfig{DoltStartAddressInUseRetryWindow: "0s"}
+	got := d.DoltStartAddressInUseRetryWindowDuration()
+	if got != 0 {
+		t.Errorf("DoltStartAddressInUseRetryWindowDuration() = %v, want 0", got)
+	}
+}
+
+func TestDaemonDoltStartAddressInUseRetryInvalid(t *testing.T) {
+	d := DaemonConfig{DoltStartAddressInUseRetryWindow: "not-a-duration"}
+	got := d.DoltStartAddressInUseRetryWindowDuration()
+	if got != DefaultDoltStartAddressInUseRetryWindow {
+		t.Errorf("DoltStartAddressInUseRetryWindowDuration() = %v, want %v (default for invalid)", got, DefaultDoltStartAddressInUseRetryWindow)
+	}
+}
+
+// TestDaemonDoltStartAddressInUseRetryWindowNegativePassesThrough mirrors
+// DoltStopTimeoutDuration's policy: negatives are rejected at config load by
+// ValidateNonNegativeDurations, so a negative reaching this helper implies a
+// hand-rolled DaemonConfig that bypassed validation. The helper returns the
+// parsed value as-is so the caller surfaces the misconfiguration rather than
+// silently overriding it. The runtime call site
+// (managedDoltStartWaitForPortFree) treats non-positive windows as "no wait",
+// so a negative effectively disables the retry without corrupting other
+// state.
+func TestDaemonDoltStartAddressInUseRetryWindowNegativePassesThrough(t *testing.T) {
+	d := DaemonConfig{DoltStartAddressInUseRetryWindow: "-1s"}
+	got := d.DoltStartAddressInUseRetryWindowDuration()
+	if got != -1*time.Second {
+		t.Errorf("DoltStartAddressInUseRetryWindowDuration() = %v, want -1s (pass-through, mirrors DoltStopTimeout policy)", got)
+	}
+}
+
+func TestParseDoltStartAddressInUseRetryWindow(t *testing.T) {
+	data := []byte(`
+[workspace]
+name = "test"
+
+[daemon]
+dolt_start_address_in_use_retry_window = "45s"
+
+[[agent]]
+name = "mayor"
+`)
+	cfg, err := Parse(data)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if cfg.Daemon.DoltStartAddressInUseRetryWindow != "45s" {
+		t.Errorf("Daemon.DoltStartAddressInUseRetryWindow = %q, want %q", cfg.Daemon.DoltStartAddressInUseRetryWindow, "45s")
+	}
+	got := cfg.Daemon.DoltStartAddressInUseRetryWindowDuration()
+	if got != 45*time.Second {
+		t.Errorf("DoltStartAddressInUseRetryWindowDuration() = %v, want 45s", got)
+	}
+}
+
+func TestValidateNonNegativeDurationsRejectsNegativeDoltStartAddressInUseRetryWindow(t *testing.T) {
+	cfg := &City{}
+	cfg.Daemon.DoltStartAddressInUseRetryWindow = "-2s"
+	err := ValidateNonNegativeDurations(cfg, "city.toml")
+	if err == nil {
+		t.Fatal("ValidateNonNegativeDurations() = nil, want error for negative dolt_start_address_in_use_retry_window")
+	}
+	if !strings.Contains(err.Error(), "dolt_start_address_in_use_retry_window") ||
+		!strings.Contains(err.Error(), "must not be negative") ||
+		!strings.Contains(err.Error(), `"-2s"`) {
+		t.Errorf("ValidateNonNegativeDurations() error = %q, want it to name the field, the constraint, and the value", err)
+	}
+}
+
+func TestValidateNonNegativeDurationsAllowsZeroAndPositiveDoltStartAddressInUseRetryWindow(t *testing.T) {
+	for _, v := range []string{"", "0s", "30s", "1m"} {
+		cfg := &City{}
+		cfg.Daemon.DoltStartAddressInUseRetryWindow = v
+		if err := ValidateNonNegativeDurations(cfg, "city.toml"); err != nil {
+			t.Errorf("ValidateNonNegativeDurations(dolt_start_address_in_use_retry_window=%q) = %v, want nil", v, err)
+		}
 	}
 }
 
@@ -4199,13 +4448,13 @@ func runLifecycleHookCommand(t *testing.T, command string, env map[string]string
 	return string(data)
 }
 
-// TestEffectiveMethodsAgentRouting verifies that all agents use
-// gc.routed_to=<qualified-name> metadata routing.
+// TestEffectiveMethodsAgentRouting verifies that default query methods route
+// through the qualified agent name.
 func TestEffectiveMethodsAgentRouting(t *testing.T) {
 	a := Agent{Name: "refinery", Dir: "hello-world"}
 	wq := a.EffectiveWorkQuery()
-	if !strings.Contains(wq, "gc.routed_to=hello-world/refinery") {
-		t.Errorf("EffectiveWorkQuery() = %q, want gc.routed_to=hello-world/refinery", wq)
+	if !strings.Contains(wq, "-- hello-world/refinery") {
+		t.Errorf("EffectiveWorkQuery() = %q, want target argument hello-world/refinery", wq)
 	}
 	sq := a.EffectiveSlingQuery()
 	if !strings.Contains(sq, "gc.routed_to=hello-world/refinery") {
@@ -5716,6 +5965,32 @@ interval = "24h"
 	}
 }
 
+func TestParseOrderOverrideEnv(t *testing.T) {
+	cfg, err := Parse([]byte(`
+[workspace]
+name = "test-city"
+
+[orders]
+
+[[orders.overrides]]
+name = "digest"
+
+[orders.overrides.env]
+GC_JSONL_MIN_PREV_FOR_SPIKE = "250"
+CUSTOM_ORDER_FLAG = "enabled"
+`))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if len(cfg.Orders.Overrides) != 1 {
+		t.Fatalf("len(overrides) = %d, want 1", len(cfg.Orders.Overrides))
+	}
+	env := cfg.Orders.Overrides[0].Env
+	if env["GC_JSONL_MIN_PREV_FOR_SPIKE"] != "250" || env["CUSTOM_ORDER_FLAG"] != "enabled" {
+		t.Fatalf("Env = %+v, want parsed override env", env)
+	}
+}
+
 func TestParseOrderOverrideLegacyGateAlias(t *testing.T) {
 	cfg, err := Parse([]byte(`
 [workspace]
@@ -5940,4 +6215,121 @@ printf 'TRACE=%%s\nARGS=%%s\n' "$GC_WORKFLOW_TRACE" "$*" > %q
 		t.Fatalf("fake gc result missing args:\n%s", data)
 	}
 	return tracePath, args
+}
+
+// TestAllPackDirs covers (*City).AllPackDirs() — the union of PackDirs and
+// RigPackDirs that the prompt renderer relies on. Regression: rig-imported
+// pack template fragments were silently dropped before gascity#2676.
+func TestAllPackDirs(t *testing.T) {
+	cases := []struct {
+		name        string
+		packDirs    []string
+		rigPackDirs map[string][]string
+		want        []string
+	}{
+		{
+			name: "empty",
+		},
+		{
+			name:     "city only",
+			packDirs: []string{"/city/packs/a", "/city/packs/b"},
+			want:     []string{"/city/packs/a", "/city/packs/b"},
+		},
+		{
+			name:        "rig only",
+			rigPackDirs: map[string][]string{"alpha": {"/rig/alpha/packs/x"}},
+			want:        []string{"/rig/alpha/packs/x"},
+		},
+		{
+			name:        "both city and rig",
+			packDirs:    []string{"/city/packs/a"},
+			rigPackDirs: map[string][]string{"alpha": {"/rig/alpha/packs/x"}},
+			want:        []string{"/city/packs/a", "/rig/alpha/packs/x"},
+		},
+		{
+			name:     "multiple rigs sorted by rig name",
+			packDirs: []string{"/city/packs/a"},
+			rigPackDirs: map[string][]string{
+				"zulu":  {"/rig/zulu/packs/z"},
+				"alpha": {"/rig/alpha/packs/x"},
+				"mike":  {"/rig/mike/packs/m"},
+			},
+			want: []string{
+				"/city/packs/a",
+				"/rig/alpha/packs/x",
+				"/rig/mike/packs/m",
+				"/rig/zulu/packs/z",
+			},
+		},
+		{
+			name:     "dedup across city and rig keeps first occurrence",
+			packDirs: []string{"/shared/packs/common", "/city/packs/a"},
+			rigPackDirs: map[string][]string{
+				"alpha": {"/shared/packs/common", "/rig/alpha/packs/x"},
+			},
+			want: []string{"/shared/packs/common", "/city/packs/a", "/rig/alpha/packs/x"},
+		},
+		{
+			name: "dedup within a single rig list",
+			rigPackDirs: map[string][]string{
+				"alpha": {"/rig/alpha/packs/x", "/rig/alpha/packs/x", "/rig/alpha/packs/y"},
+			},
+			want: []string{"/rig/alpha/packs/x", "/rig/alpha/packs/y"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := &City{PackDirs: tc.packDirs, RigPackDirs: tc.rigPackDirs}
+			got := c.AllPackDirs()
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("AllPackDirs() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestAllPackDirs_DeterministicAcrossCalls guards against a Go map-iteration
+// regression: two consecutive calls must return byte-identical ordering even
+// when RigPackDirs has multiple entries.
+func TestAllPackDirs_DeterministicAcrossCalls(t *testing.T) {
+	c := &City{
+		PackDirs: []string{"/city/packs/a"},
+		RigPackDirs: map[string][]string{
+			"zulu":    {"/rig/zulu/packs/z"},
+			"alpha":   {"/rig/alpha/packs/x"},
+			"mike":    {"/rig/mike/packs/m"},
+			"bravo":   {"/rig/bravo/packs/b"},
+			"yankee":  {"/rig/yankee/packs/y"},
+			"charlie": {"/rig/charlie/packs/c"},
+		},
+	}
+	first := c.AllPackDirs()
+	for i := 0; i < 20; i++ {
+		got := c.AllPackDirs()
+		if !reflect.DeepEqual(got, first) {
+			t.Fatalf("AllPackDirs() not deterministic across calls:\n iter %d = %v\n first   = %v", i, got, first)
+		}
+	}
+}
+
+func TestPackDirsForRig(t *testing.T) {
+	c := &City{
+		PackDirs: []string{"/city/packs/a", "/shared/packs/common"},
+		RigPackDirs: map[string][]string{
+			"alpha": {"/shared/packs/common", "/rig/alpha/packs/x"},
+			"bravo": {"/rig/bravo/packs/y"},
+		},
+	}
+
+	got := c.PackDirsForRig("alpha")
+	want := []string{"/city/packs/a", "/shared/packs/common", "/rig/alpha/packs/x"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("PackDirsForRig(alpha) = %v, want %v", got, want)
+	}
+
+	got = c.PackDirsForRig("missing")
+	want = []string{"/city/packs/a", "/shared/packs/common"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("PackDirsForRig(missing) = %v, want %v", got, want)
+	}
 }

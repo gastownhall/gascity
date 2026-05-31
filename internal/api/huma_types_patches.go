@@ -1,5 +1,7 @@
 package api
 
+import "github.com/gastownhall/gascity/internal/beads"
+
 // Per-domain Huma input/output types for the patches handler
 // group. Split out of the original huma_types.go; mirrors the layout
 // of huma_handlers_patches.go.
@@ -165,6 +167,7 @@ type StatusBody struct {
 	Work                StatusWorkCounts           `json:"work" doc:"Work item counts."`
 	Mail                StatusMailCounts           `json:"mail" doc:"Mail counts."`
 	StoreHealth         *StatusStoreHealth         `json:"store_health,omitempty" doc:"Dolt bead store health summary. Omitted when unavailable."`
+	Beads               *beads.BeadsDiagnostic     `json:"beads,omitempty" doc:"Bead store selection diagnostic. Omitted when unavailable."`
 	Partial             bool                       `json:"partial,omitempty" doc:"True when one or more status backing reads returned incomplete data."`
 	PartialErrors       []string                   `json:"partial_errors,omitempty" doc:"Human-readable errors from incomplete status backing reads."`
 	AgentDetails        []StatusAgentDetail        `json:"agent_details,omitempty" doc:"Per-agent state (for CLI status views). Empty when none."`

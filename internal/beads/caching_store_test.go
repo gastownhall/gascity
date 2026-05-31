@@ -1806,6 +1806,7 @@ func TestCachingStoreCloseNotifiesWhenBeadIsMissingFromCache(t *testing.T) {
 	if err := cs.Delete(created.ID); err != nil {
 		t.Fatalf("Delete setup: %v", err)
 	}
+	events = nil
 	created, err = mem.Create(beads.Bead{Title: "external"})
 	if err != nil {
 		t.Fatalf("Create second: %v", err)
@@ -1955,6 +1956,15 @@ func TestCachingStoreApplyEvent(t *testing.T) {
 	if got.Metadata["gc.step_ref"] != "" {
 		t.Fatalf("close event should replace stale metadata, got %v", got.Metadata)
 	}
+
+	if err := mem.Delete(b1.ID); err != nil {
+		t.Fatalf("Delete backing: %v", err)
+	}
+	payload, _ = json.Marshal(closed)
+	cs.ApplyEvent("bead.deleted", payload)
+	if _, err := cs.Get(b1.ID); !errors.Is(err, beads.ErrNotFound) {
+		t.Fatalf("Get after delete event error = %v, want ErrNotFound", err)
+	}
 }
 
 func TestCachingStoreApplyEventIgnoresUnknownForeignBead(t *testing.T) {
@@ -1966,7 +1976,7 @@ func TestCachingStoreApplyEventIgnoresUnknownForeignBead(t *testing.T) {
 		t.Fatalf("Prime: %v", err)
 	}
 
-	for _, eventType := range []string{"bead.created", "bead.updated", "bead.closed"} {
+	for _, eventType := range []string{"bead.created", "bead.updated", "bead.closed", "bead.deleted"} {
 		payload, err := json.Marshal(beads.Bead{
 			ID:     "foreign-" + eventType,
 			Title:  "belongs to another store",
@@ -2676,6 +2686,62 @@ func TestStartReconcilerStaggerAutoDifferentAgentsDiffer(t *testing.T) {
 	}
 }
 
+func TestStopReconcilerWaitsForPrime(t *testing.T) {
+	mem := beads.NewMemStore()
+	if _, err := mem.Create(beads.Bead{Title: "prime waits"}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	backing := &blockingListStore{
+		Store:   mem,
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	cache := beads.NewCachingStoreForTest(backing, nil)
+	primeDone := make(chan error, 1)
+	go func() {
+		primeDone <- cache.Prime(context.Background())
+	}()
+	select {
+	case <-backing.started:
+	case <-time.After(time.Second):
+		t.Fatal("Prime did not reach backing List")
+	}
+
+	stopDone := make(chan struct{})
+	go func() {
+		cache.StopReconciler()
+		close(stopDone)
+	}()
+	select {
+	case <-stopDone:
+		t.Fatal("StopReconciler returned before in-flight Prime finished")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(backing.release)
+	select {
+	case <-stopDone:
+	case <-time.After(time.Second):
+		t.Fatal("StopReconciler did not return after Prime finished")
+	}
+	if err := <-primeDone; err != nil && !errors.Is(err, context.Canceled) {
+		t.Fatalf("Prime error = %v, want nil or context.Canceled", err)
+	}
+}
+
+type blockingListStore struct {
+	beads.Store
+	started chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (s *blockingListStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	s.once.Do(func() { close(s.started) })
+	<-s.release
+	return s.Store.List(query)
+}
+
 func findTestBead(items []beads.Bead, id string) (beads.Bead, bool) {
 	for _, item := range items {
 		if item.ID == id {
@@ -2683,6 +2749,88 @@ func findTestBead(items []beads.Bead, id string) (beads.Bead, bool) {
 		}
 	}
 	return beads.Bead{}, false
+}
+
+// TestCachingStoreCachedReadyReflectsRoutedWorkReleaseAfterSessionClose is a
+// regression for gastownhall/gascity#2625. When `gc session close` releases a
+// routed in-progress work bead (Assignee cleared, Status reset to open) — the
+// path the close-time release Update takes — Source-1 of
+// defaultScaleCheckCounts (cmd/gc/build_desired_state.go:1309
+// readyForControllerDemand → CachedReady) must observe the released bead on
+// the next read. Without it, the pool scale-check sees scaleCount=0 and no
+// fresh worker spawns even though the demand is admittable.
+//
+// Asserts that the existing CachingStore.Update write-through path emits the
+// cache-update event for the released row — closing the loop that
+// cmd/gc/cmd_session.go cmdSessionClose relies on.
+func TestCachingStoreCachedReadyReflectsRoutedWorkReleaseAfterSessionClose(t *testing.T) {
+	t.Parallel()
+	backing := beads.NewMemStore()
+
+	work, err := backing.Create(beads.Bead{
+		Title:    "routed work assigned to soon-to-close session",
+		Type:     "task",
+		Metadata: map[string]string{"gc.routed_to": "worker"},
+	})
+	if err != nil {
+		t.Fatalf("create work bead: %v", err)
+	}
+	assignee := "sess-1"
+	inProgress := "in_progress"
+	if err := backing.Update(work.ID, beads.UpdateOpts{
+		Assignee: &assignee,
+		Status:   &inProgress,
+	}); err != nil {
+		t.Fatalf("assign work to session: %v", err)
+	}
+
+	cache := beads.NewCachingStoreForTest(backing, nil)
+	if err := cache.PrimeActive(); err != nil {
+		t.Fatalf("PrimeActive: %v", err)
+	}
+
+	ready, ok := cache.CachedReady()
+	if !ok {
+		t.Fatal("CachedReady reported cache unavailable before release")
+	}
+	for _, b := range ready {
+		if b.ID == work.ID {
+			t.Fatalf("CachedReady returned still-assigned in_progress work bead %s before release", b.ID)
+		}
+	}
+
+	empty := ""
+	open := "open"
+	if err := cache.Update(work.ID, beads.UpdateOpts{
+		Assignee: &empty,
+		Status:   &open,
+	}); err != nil {
+		t.Fatalf("release work bead: %v", err)
+	}
+
+	ready, ok = cache.CachedReady()
+	if !ok {
+		t.Fatal("CachedReady reported cache unavailable after release")
+	}
+	var found *beads.Bead
+	for i := range ready {
+		if ready[i].ID == work.ID {
+			found = &ready[i]
+			break
+		}
+	}
+	if found == nil {
+		t.Fatalf("CachedReady missing released work bead %s after Update; got %d beads", work.ID, len(ready))
+	}
+	if strings.TrimSpace(found.Assignee) != "" {
+		t.Errorf("released work bead Assignee = %q, want empty", found.Assignee)
+	}
+	if found.Status != "open" {
+		t.Errorf("released work bead Status = %q, want open", found.Status)
+	}
+	if found.Metadata["gc.routed_to"] != "worker" {
+		t.Errorf("released work bead routed_to = %q, want worker", found.Metadata["gc.routed_to"])
+	}
 }
 
 func strPtr(s string) *string { return &s }
