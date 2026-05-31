@@ -10,6 +10,7 @@ import (
 func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 	now := time.Date(2026, 4, 15, 13, 0, 0, 0, time.UTC)
 	later := now.Add(5 * time.Minute)
+	resetNow := time.Date(2026, 4, 15, 6, 0, 0, 0, time.FixedZone("test", -7*60*60))
 
 	tests := []struct {
 		name  string
@@ -203,11 +204,12 @@ func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 		},
 		{
 			name:  "restart request",
-			patch: RestartRequestPatch("new-session-key"),
+			patch: RestartRequestPatch("new-session-key", resetNow),
 			want: MetadataPatch{
 				"restart_requested":          "",
 				"started_config_hash":        "",
 				"continuation_reset_pending": "true",
+				resetCommittedAtKey:          resetNow.UTC().Format(time.RFC3339),
 				"last_woke_at":               "",
 				"pending_create_claim":       "",
 				"pending_create_started_at":  "",
@@ -216,11 +218,12 @@ func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 		},
 		{
 			name:  "restart request without rotated key",
-			patch: RestartRequestPatch(""),
+			patch: RestartRequestPatch("", resetNow),
 			want: MetadataPatch{
 				"restart_requested":          "",
 				"started_config_hash":        "",
 				"continuation_reset_pending": "true",
+				resetCommittedAtKey:          resetNow.UTC().Format(time.RFC3339),
 				"last_woke_at":               "",
 				"pending_create_claim":       "",
 				"pending_create_started_at":  "",
@@ -433,6 +436,25 @@ func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 				t.Fatalf("patch = %#v, want %#v", tt.patch, tt.want)
 			}
 		})
+	}
+}
+
+func TestPreWakePatchPreservesResetCommittedAt(t *testing.T) {
+	committedAt := "2026-04-15T13:00:00Z"
+	meta := map[string]string{
+		resetCommittedAtKey: committedAt,
+	}
+
+	got := PreWakePatch(PreWakePatchInput{
+		Generation:        1,
+		InstanceToken:     "token-1",
+		ContinuationEpoch: 1,
+		Now:               time.Date(2026, 4, 15, 13, 1, 0, 0, time.UTC),
+		FreshWake:         true,
+	}).Apply(meta)
+
+	if got[resetCommittedAtKey] != committedAt {
+		t.Fatalf("PreWakePatch should preserve %s, got %q", resetCommittedAtKey, got[resetCommittedAtKey])
 	}
 }
 

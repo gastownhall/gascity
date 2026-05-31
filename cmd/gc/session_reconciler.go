@@ -1443,7 +1443,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				// intentional death from crash and churn trackers (both
 				// check last_woke_at first).
 				newSessionKey, hasCapability := freshRestartSessionKey(tp, session.Metadata)
-				batch := sessionpkg.RestartRequestPatch(newSessionKey)
+				batch := sessionpkg.RestartRequestPatch(newSessionKey, clk.Now())
 				if hasCapability && newSessionKey == "" {
 					batch["session_key"] = ""
 				}
