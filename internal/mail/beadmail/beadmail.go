@@ -818,13 +818,18 @@ func (p *Provider) messageCandidatesForRoutes(routes []string) ([]beads.Bead, er
 // messages. Live reads are required so command-visible mail sees fresh wisps
 // even when the active store cache was primed earlier.
 func (p *Provider) messageCandidatesAll(routes []string) ([]beads.Bead, error) {
-	all, err := p.store.List(beads.ListQuery{
-		Type:      "message",
-		Status:    "open",
-		TierMode:  beads.TierBoth,
-		AllowScan: true,
-		Live:      true,
-	})
+	query := beads.ListQuery{
+		Type:     "message",
+		Status:   "open",
+		TierMode: beads.TierBoth,
+		Live:     true,
+	}
+	if len(routes) > 0 {
+		query.Assignees = routes
+	} else {
+		query.AllowScan = true
+	}
+	all, err := p.store.List(query)
 	if err != nil {
 		return nil, fmt.Errorf("scanning message beads: %w", err)
 	}
@@ -833,6 +838,8 @@ func (p *Provider) messageCandidatesAll(routes []string) ([]beads.Bead, error) {
 	}
 	out := make([]beads.Bead, 0, len(all))
 	for _, b := range all {
+		// matchesRecipientRoute is defense-in-depth: HQStore returns exact
+		// matches from the index; BdStore multi-route fallback may return excess.
 		if matchesRecipientRoute(routes, b.Assignee) {
 			out = append(out, b)
 		}

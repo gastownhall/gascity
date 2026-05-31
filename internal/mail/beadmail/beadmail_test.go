@@ -2,6 +2,7 @@ package beadmail
 
 import (
 	"errors"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -137,8 +138,9 @@ func TestInboxUsesSingleBothTierMessageScanAcrossRoutes(t *testing.T) {
 		t.Fatalf("message query count = %d, want 1; queries=%+v", len(store.messageQueries), store.messageQueries)
 	}
 	query := store.messageQueries[0]
-	if query.TierMode != beads.TierBoth || !query.AllowScan || query.Type != "message" || query.Status != "open" || query.Assignee != "" {
-		t.Fatalf("message query = %+v, want one both-tier message scan without per-route assignee", query)
+	wantRoutes := []string{"sky", sessionBead.ID, "runtime-sky", "mayor", "witness"}
+	if query.TierMode != beads.TierBoth || query.AllowScan || query.Type != "message" || query.Status != "open" || query.Assignee != "" || !slices.Equal(query.Assignees, wantRoutes) {
+		t.Fatalf("message query = %+v, want one both-tier Assignees scan for %v", query, wantRoutes)
 	}
 	if !query.Live {
 		t.Fatalf("message query = %+v, want live read for command-visible mail freshness", query)
@@ -298,7 +300,7 @@ func TestCheckDoesNotUseMessageLabelSupplement(t *testing.T) {
 	}
 }
 
-func TestCheckUsesSingleBothTierScanForSlashRecipient(t *testing.T) {
+func TestCheckUsesSingleAssigneeMessageScanForSlashRecipient(t *testing.T) {
 	recipient := "gascity/workflows.codex-max"
 	var messageListCalls int
 	runner := func(_ string, name string, args ...string) ([]byte, error) {
@@ -311,8 +313,8 @@ func TestCheckUsesSingleBothTierScanForSlashRecipient(t *testing.T) {
 		case strings.Contains(cmd, "bd list --json") && strings.Contains(cmd, "--type=session"):
 			return []byte(`[]`), nil
 		case strings.Contains(cmd, "bd list --json") && strings.Contains(cmd, "--type=message") && strings.Contains(cmd, "--status=open"):
-			if strings.Contains(cmd, "--assignee=") {
-				t.Fatalf("slash recipient used per-assignee message query: %s", cmd)
+			if !strings.Contains(cmd, "--assignee="+recipient) {
+				t.Fatalf("slash recipient message query = %s, want single --assignee filter", cmd)
 			}
 			messageListCalls++
 			return []byte(`[{"id":"msg-w","title":"hello","description":"body","status":"open","issue_type":"message","assignee":"gascity/workflows.codex-max","from":"human","created_at":"2026-01-02T03:04:05Z","ephemeral":true}]`), nil

@@ -1493,41 +1493,42 @@ func bdListCoversBothTiers(query ListQuery) bool {
 }
 
 func (s *BdStore) listViaBDList(query ListQuery) ([]Bead, error) {
-	limit := query.Limit
-	if query.Sort == SortCreatedAsc {
+	serverQuery, clientFilteredAssignees := bdServerQueryForAssignees(query)
+	limit := serverQuery.Limit
+	if serverQuery.Sort == SortCreatedAsc || clientFilteredAssignees {
 		limit = 0
 	}
 	args := []string{"list", "--json"}
-	if query.Label != "" {
-		args = append(args, "--label="+query.Label)
+	if serverQuery.Label != "" {
+		args = append(args, "--label="+serverQuery.Label)
 	}
-	if query.Assignee != "" {
-		args = append(args, "--assignee="+query.Assignee)
+	if serverQuery.Assignee != "" {
+		args = append(args, "--assignee="+serverQuery.Assignee)
 	}
-	if query.Status != "" {
-		args = append(args, "--status="+query.Status)
+	if serverQuery.Status != "" {
+		args = append(args, "--status="+serverQuery.Status)
 	}
-	if query.Type != "" {
-		args = append(args, "--type="+query.Type)
+	if serverQuery.Type != "" {
+		args = append(args, "--type="+serverQuery.Type)
 	}
-	if query.IncludeClosed || query.Status == "closed" {
+	if serverQuery.IncludeClosed || serverQuery.Status == "closed" {
 		args = append(args, "--all")
 	}
-	if !query.CreatedBefore.IsZero() {
-		args = append(args, "--created-before", query.CreatedBefore.Format(time.RFC3339Nano))
+	if !serverQuery.CreatedBefore.IsZero() {
+		args = append(args, "--created-before", serverQuery.CreatedBefore.Format(time.RFC3339Nano))
 	}
 	args = append(args, "--include-infra", "--include-gates", "--limit", fmt.Sprintf("%d", limit))
-	if query.ParentID != "" {
-		args = append(args, "--parent", query.ParentID)
+	if serverQuery.ParentID != "" {
+		args = append(args, "--parent", serverQuery.ParentID)
 	}
-	if len(query.Metadata) > 0 {
-		keys := make([]string, 0, len(query.Metadata))
-		for k := range query.Metadata {
+	if len(serverQuery.Metadata) > 0 {
+		keys := make([]string, 0, len(serverQuery.Metadata))
+		for k := range serverQuery.Metadata {
 			keys = append(keys, k)
 		}
 		sort.Strings(keys)
 		for _, k := range keys {
-			args = append(args, "--metadata-field", k+"="+query.Metadata[k])
+			args = append(args, "--metadata-field", k+"="+serverQuery.Metadata[k])
 		}
 	}
 
@@ -1555,20 +1556,40 @@ func (s *BdStore) listViaBDList(query ListQuery) ([]Bead, error) {
 	return filtered, nil
 }
 
+func bdServerQueryForAssignees(query ListQuery) (ListQuery, bool) {
+	serverQuery := query
+	if query.Assignee != "" {
+		return serverQuery, false
+	}
+	switch len(query.Assignees) {
+	case 0:
+		return serverQuery, false
+	case 1:
+		serverQuery.Assignee = query.Assignees[0]
+		serverQuery.Assignees = nil
+		return serverQuery, false
+	default:
+		serverQuery.Assignees = nil
+		serverQuery.AllowScan = true
+		return serverQuery, true
+	}
+}
+
 // listEphemeral reads only the wisps tier using `bd query "ephemeral=true AND
 // <filters>"`. For most bead types, bd query is the canonical way to reach the
 // wisps table (mirrors gastown's internal/beads/beads.go listEphemeral path).
 func (s *BdStore) listEphemeral(query ListQuery) ([]Bead, error) {
+	serverQuery, clientFilteredAssignees := bdServerQueryForAssignees(query)
 	clauses := []string{"ephemeral=true"}
-	serverFilteredOnly := true
-	clauses, serverFilteredOnly = appendBdQueryClause(clauses, serverFilteredOnly, "label", query.Label)
-	clauses, serverFilteredOnly = appendBdQueryClause(clauses, serverFilteredOnly, "status", query.Status)
-	clauses, serverFilteredOnly = appendBdQueryClause(clauses, serverFilteredOnly, "type", query.Type)
-	clauses, serverFilteredOnly = appendBdQueryClause(clauses, serverFilteredOnly, "assignee", query.Assignee)
-	clauses, serverFilteredOnly = appendBdQueryClause(clauses, serverFilteredOnly, "parent", query.ParentID)
+	serverFilteredOnly := !clientFilteredAssignees
+	clauses, serverFilteredOnly = appendBdQueryClause(clauses, serverFilteredOnly, "label", serverQuery.Label)
+	clauses, serverFilteredOnly = appendBdQueryClause(clauses, serverFilteredOnly, "status", serverQuery.Status)
+	clauses, serverFilteredOnly = appendBdQueryClause(clauses, serverFilteredOnly, "type", serverQuery.Type)
+	clauses, serverFilteredOnly = appendBdQueryClause(clauses, serverFilteredOnly, "assignee", serverQuery.Assignee)
+	clauses, serverFilteredOnly = appendBdQueryClause(clauses, serverFilteredOnly, "parent", serverQuery.ParentID)
 
 	args := []string{"query", "--json", strings.Join(clauses, " AND ")}
-	if query.IncludeClosed || query.Status == "closed" {
+	if serverQuery.IncludeClosed || serverQuery.Status == "closed" {
 		args = append(args, "--all")
 	}
 	wispsLimit := 0
