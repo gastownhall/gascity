@@ -54,23 +54,25 @@ type AwakeNamedSession struct {
 
 // AwakeSessionBead represents an open session bead from the store.
 type AwakeSessionBead struct {
-	ID                     string
-	SessionName            string
-	Template               string
-	State                  string // "creating", "active", "asleep", "drained", "closed"
-	SleepReason            string
-	ManualSession          bool
-	PendingCreate          bool      // controller claimed this bead for initial start
-	ExplicitWake           bool      // explicit durable wake request is pending
-	DependencyOnly         bool      // only wakeable via dependency gate
-	NamedIdentity          string    // non-empty for named session beads
-	ConfiguredNamedSession bool      // configured_named_session metadata is true
-	Pinned                 bool      // pin_awake durable wake reason
-	Drained                bool      // state=="drained" or sleep_reason=="drained"
-	WaitHold               bool      // user-issued gc wait in progress
-	HeldUntil              time.Time // zero = not held
-	QuarantinedUntil       time.Time // zero = not quarantined
-	IdleSince              time.Time // zero = unknown/not idle
+	ID                       string
+	SessionName              string
+	Template                 string
+	State                    string // "creating", "active", "asleep", "drained", "closed"
+	SleepReason              string
+	ManualSession            bool
+	PendingCreate            bool      // controller claimed this bead for initial start
+	ExplicitWake             bool      // explicit durable wake request is pending
+	DependencyOnly           bool      // only wakeable via dependency gate
+	NamedIdentity            string    // non-empty for named session beads
+	ConfiguredNamedSession   bool      // configured_named_session metadata is true
+	Pinned                   bool      // pin_awake durable wake reason
+	Drained                  bool      // state=="drained" or sleep_reason=="drained"
+	WaitHold                 bool      // user-issued gc wait in progress
+	HeldUntil                time.Time // zero = not held
+	QuarantinedUntil         time.Time // zero = not quarantined
+	IdleSince                time.Time // zero = unknown/not idle
+	RestartRequested         bool      // restart_requested metadata is still active
+	ContinuationResetPending bool      // continuation_reset_pending metadata is set
 }
 
 // AwakeWorkBead represents a work bead with an assignee.
@@ -149,7 +151,6 @@ func ComputeAwakeSet(input AwakeInput) map[string]AwakeDecision {
 			desired[bead.SessionName] = "explicit-wake"
 		}
 	}
-
 	// Named sessions
 	for _, ns := range input.NamedSessions {
 		if agent, ok := lookupAgent(ns.Identity); ok && agent.Suspended {
@@ -318,6 +319,18 @@ func ComputeAwakeSet(input AwakeInput) map[string]AwakeDecision {
 		}
 	}
 
+	for _, bead := range input.SessionBeads {
+		if !bead.ContinuationResetPending || bead.RestartRequested || bead.WaitHold {
+			continue
+		}
+		switch desired[bead.SessionName] {
+		case "pending-create", "explicit-wake":
+			continue
+		default:
+			desired[bead.SessionName] = "reset-pending"
+		}
+	}
+
 	// Step 2-3: Decide awake
 	result := make(map[string]AwakeDecision)
 
@@ -388,7 +401,8 @@ func ComputeAwakeSet(input AwakeInput) map[string]AwakeDecision {
 		// assignments do not prevent idle sleep.
 		if decision.ShouldWake && !input.AttachedSessions[name] && !input.PendingSessions[name] && !bead.Pinned && !bead.IdleSince.IsZero() &&
 			!isAlwaysNamedSession(input.NamedSessions, bead) &&
-			desired[name] != "assigned-work" && desired[name] != "min-active" {
+			desired[name] != "assigned-work" && desired[name] != "min-active" &&
+			desired[name] != "reset-pending" {
 			agent, hasAgent := lookupAgent(bead.Template)
 			var idleTimeout time.Duration
 			switch {

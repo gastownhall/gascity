@@ -41,6 +41,45 @@ func TestBuildAwakeInputFromReconcilerUsesLifecycleProjectionForCompatibilitySta
 	}
 }
 
+func TestBuildAwakeInputFromReconcilerCarriesResetPendingMetadata(t *testing.T) {
+	now := time.Now().UTC()
+	input := buildAwakeInputFromReconciler(
+		&config.City{},
+		[]beads.Bead{{
+			ID:     "mc-session-1",
+			Status: "open",
+			Type:   "session",
+			Metadata: map[string]string{
+				"state":                      "stopped",
+				"session_name":               "s-reset-target",
+				"template":                   "build-agent",
+				"restart_requested":          "true",
+				"continuation_reset_pending": "true",
+				resetCommittedAtMetadataKey:  now.Format(time.RFC3339),
+			},
+		}},
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		now,
+	)
+
+	if len(input.SessionBeads) != 1 {
+		t.Fatalf("SessionBeads length = %d, want 1", len(input.SessionBeads))
+	}
+	got := input.SessionBeads[0]
+	if !got.RestartRequested {
+		t.Fatalf("RestartRequested = false, want true")
+	}
+	if !got.ContinuationResetPending {
+		t.Fatalf("ContinuationResetPending = false, want true")
+	}
+}
+
 func TestBuildAwakeInputFromReconcilerPopulatesPendingInteractions(t *testing.T) {
 	now := time.Now().UTC()
 	sp := runtime.NewFake()

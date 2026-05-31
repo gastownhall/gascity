@@ -1455,6 +1455,13 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					session.Metadata = make(map[string]string, len(batch))
 				}
 				for key, value := range batch {
+					// The durable reset commit marker is for the next
+					// reconciler pass; keeping it out of this tick's
+					// in-memory bead prevents on-demand sessions from
+					// being force-woken without demand.
+					if key == resetCommittedAtMetadataKey {
+						continue
+					}
 					session.Metadata[key] = value
 				}
 				if runtimeRunning {
