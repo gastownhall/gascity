@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"os"
 	"path/filepath"
 	"runtime/debug"
 	"strconv"
@@ -24,6 +23,7 @@ import (
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/shellquote"
 	"github.com/gastownhall/gascity/internal/worker"
+	workertranscript "github.com/gastownhall/gascity/internal/worker/transcript"
 )
 
 const (
@@ -808,18 +808,24 @@ func buildPreparedStartWithWorkDirResolver(
 		agentCfg.WorkDir = wd
 	}
 	// Pre-flight stale-resume guard: if the bead carries a session_key whose
-	// claude JSONL file is no longer on disk (provider session retention
-	// disabled, manual cleanup, worktree rebuild), --resume would hard-fail
-	// with "No conversation found" and the pane would die ~2s after spawn.
-	// Post-start observation can miss the death (tmux state cache TTL race),
-	// so the bead stays asleep and every subsequent wake re-fires the same
-	// broken command. Clear the stale key here so the regen block below mints
-	// a fresh one and resolveSessionCommand uses --session-id (which creates
-	// a new conversation) instead of --resume (which can't).
-	if sk := strings.TrimSpace(session.Metadata["session_key"]); sk != "" &&
-		providerUsesClaudeJSONL(tp.ResolvedProvider, session.Metadata["provider"]) &&
-		agentCfg.WorkDir != "" && !claudeSessionFileExists(agentCfg.WorkDir, sk) {
-		clearStaleResumeKeyMetadata(session, store)
+	// keyed transcript is no longer on disk (provider session retention
+	// disabled, manual cleanup, worktree rebuild), a resume would hard-fail
+	// (e.g. claude's "No conversation found") and the pane would die ~2s after
+	// spawn. Post-start observation can miss the death (tmux state cache TTL
+	// race), so the bead stays asleep and every subsequent wake re-fires the
+	// same broken command. Clear the stale key here so the regen block below
+	// mints a fresh one and resolveSessionCommand uses --session-id (which
+	// creates a new conversation) instead of --resume (which can't).
+	//
+	// The "is the keyed transcript present" decision is delegated to the
+	// transcript layer so each provider keeps its own resumability rules; for
+	// providers whose resume state we cannot probe on disk (codex/gemini/...)
+	// the probe reports !probeable and we leave their metadata untouched.
+	if sk := strings.TrimSpace(session.Metadata["session_key"]); sk != "" && agentCfg.WorkDir != "" {
+		provider := sessionTranscriptProvider(tp.ResolvedProvider, session.Metadata)
+		if present, probeable := staleResumeKeyProbe(provider, agentCfg.WorkDir, sk); probeable && !present {
+			clearStaleResumeKeyMetadata(session, store)
+		}
 	}
 	if session.Metadata["session_key"] == "" && tp.ResolvedProvider != nil && tp.ResolvedProvider.SessionIDFlag != "" {
 		sessionKey, err := sessionpkg.GenerateSessionKey()
@@ -1515,29 +1521,41 @@ func observeRuntimeProviderLiveness(sp runtime.Provider, name string, processNam
 	return obs.Running, obs.Alive
 }
 
-// providerUsesClaudeJSONL reports whether resume for this provider depends on
-// claude's per-session JSONL file (the only artifact we currently know how to
-// probe on disk). Other providers store resume state elsewhere; we leave them
-// alone to avoid false-positive clears.
-func providerUsesClaudeJSONL(rp *config.ResolvedProvider, providerMetadata string) bool {
-	if rp != nil {
-		// Builtin claude profiles set Command to "claude" and use --resume
-		// with --session-id. The base name survives through extension/override.
-		if base := strings.ToLower(strings.TrimSpace(claudeProviderBaseName(rp))); base != "" {
-			return base == "claude"
-		}
-	}
-	switch strings.ToLower(strings.TrimSpace(providerMetadata)) {
-	case "claude", "claude-eco":
-		return true
-	}
-	return false
+// staleResumeKeyProbe reports whether the keyed transcript a resume would
+// reattach to is present (present), and whether the provider exposes a keyed
+// transcript that can be probed on disk at all (probeable). It is a package var
+// so tests can model a present or absent transcript without materializing
+// provider-specific transcript trees. Production delegates to the transcript
+// discovery layer, which knows each provider's on-disk layout and merges each
+// provider's own default roots on top of the supplied claude default, so
+// claude/kimi/pi each probe their real location.
+var staleResumeKeyProbe = func(provider, workDir, sessionKey string) (present, probeable bool) {
+	return workertranscript.HasKeyedTranscript(worker.DefaultSearchPaths(), provider, workDir, sessionKey)
 }
 
-// claudeProviderBaseName returns the first token of the provider's start
+// sessionTranscriptProvider resolves the provider-family identifier consumed by
+// the transcript discovery layer, preferring the resolved provider's builtin
+// ancestor and falling back to its start command and then the session's
+// recorded provider metadata.
+func sessionTranscriptProvider(rp *config.ResolvedProvider, metadata map[string]string) string {
+	if rp != nil {
+		if v := strings.TrimSpace(rp.BuiltinAncestor); v != "" {
+			return v
+		}
+		if base := providerCommandBaseName(rp); base != "" {
+			return base
+		}
+	}
+	if v := strings.TrimSpace(metadata["provider_kind"]); v != "" {
+		return v
+	}
+	return strings.TrimSpace(metadata["provider"])
+}
+
+// providerCommandBaseName returns the first token of the provider's start
 // command (e.g. "claude" from "claude --dangerously-skip-permissions ..."),
 // stripped of quoting and path prefix.
-func claudeProviderBaseName(rp *config.ResolvedProvider) string {
+func providerCommandBaseName(rp *config.ResolvedProvider) string {
 	if rp == nil {
 		return ""
 	}
@@ -1552,57 +1570,8 @@ func claudeProviderBaseName(rp *config.ResolvedProvider) string {
 	return filepath.Base(parts[0])
 }
 
-// workDirToClaudeProjectSlug converts an absolute work_dir into the slug
-// claude uses for its per-project storage directory under
-// ~/.claude/projects/. The rule is to replace every '/', '_', and '.' with
-// '-'.
-func workDirToClaudeProjectSlug(workDir string) string {
-	if workDir == "" {
-		return ""
-	}
-	return strings.Map(func(r rune) rune {
-		if r == '/' || r == '_' || r == '.' {
-			return '-'
-		}
-		return r
-	}, workDir)
-}
-
-// claudeSessionFile returns the on-disk path where claude would store the
-// JSONL transcript for the given work_dir + session key. Returns "" when
-// the home directory cannot be resolved or the inputs are empty.
-func claudeSessionFile(workDir, sessionKey string) string {
-	workDir = strings.TrimSpace(workDir)
-	sessionKey = strings.TrimSpace(sessionKey)
-	if workDir == "" || sessionKey == "" {
-		return ""
-	}
-	home, err := os.UserHomeDir()
-	if err != nil || home == "" {
-		return ""
-	}
-	slug := workDirToClaudeProjectSlug(workDir)
-	if slug == "" {
-		return ""
-	}
-	return filepath.Join(home, ".claude", "projects", slug, sessionKey+".jsonl")
-}
-
-// claudeSessionFileExists reports whether the JSONL file claude would resume
-// for the given (work_dir, session_key) is present on disk. Treats any stat
-// error (including ENOENT and permission failures) as "missing" — the caller
-// then falls back to a fresh-start path that doesn't rely on the file.
-func claudeSessionFileExists(workDir, sessionKey string) bool {
-	path := claudeSessionFile(workDir, sessionKey)
-	if path == "" {
-		return false
-	}
-	_, err := os.Stat(path)
-	return err == nil
-}
-
 // clearStaleResumeKeyMetadata wipes the resume-tracking metadata for a bead
-// whose stored session_key references a JSONL that no longer exists. Mirrors
+// whose stored session_key references a transcript that no longer exists. Mirrors
 // the clears performed by recordWakeFailure (cmd/gc/session_reconcile.go) and
 // Manager.clearStaleResumeMetadata (internal/session/chat.go), so downstream
 // breaker / churn logic treats this as the same kind of recovery cycle.

@@ -23,6 +23,7 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/sessionlog"
 	"github.com/gastownhall/gascity/internal/shellquote"
 )
 
@@ -6304,81 +6305,6 @@ func TestStopTargetThroughWorkerBoundary_CityStopLeavesSessionAsleep(t *testing.
 	}
 }
 
-func TestWorkDirToClaudeProjectSlug(t *testing.T) {
-	cases := []struct {
-		name string
-		in   string
-		want string
-	}{
-		{"empty", "", ""},
-		{
-			"city worktree",
-			"/home/sirwassail/source/city_hy/.gc/worktrees/pringle/kettle",
-			"-home-sirwassail-source-city-hy--gc-worktrees-pringle-kettle",
-		},
-		{
-			"underscores",
-			"/foo/bar_baz/qux",
-			"-foo-bar-baz-qux",
-		},
-		{
-			"dot-prefixed dir",
-			"/a/.b/c",
-			"-a--b-c",
-		},
-		{
-			"no special chars",
-			"alpha",
-			"alpha",
-		},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			got := workDirToClaudeProjectSlug(tc.in)
-			if got != tc.want {
-				t.Fatalf("workDirToClaudeProjectSlug(%q) = %q, want %q", tc.in, got, tc.want)
-			}
-		})
-	}
-}
-
-func TestClaudeSessionFileExists(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	// On some systems os.UserHomeDir consults USERPROFILE first; clear it
-	// so the test is reproducible across platforms.
-	t.Setenv("USERPROFILE", "")
-
-	workDir := "/tmp/projects/example_one"
-	slug := workDirToClaudeProjectSlug(workDir) // -tmp-projects-example-one
-	projDir := filepath.Join(home, ".claude", "projects", slug)
-	if err := os.MkdirAll(projDir, 0o755); err != nil {
-		t.Fatalf("mkdir: %v", err)
-	}
-
-	key := "11111111-2222-3333-4444-555555555555"
-	jsonl := filepath.Join(projDir, key+".jsonl")
-	if err := os.WriteFile(jsonl, []byte("{}\n"), 0o600); err != nil {
-		t.Fatalf("writefile: %v", err)
-	}
-
-	if !claudeSessionFileExists(workDir, key) {
-		t.Fatalf("expected file %s to be detected as existing", jsonl)
-	}
-
-	missingKey := "99999999-9999-9999-9999-999999999999"
-	if claudeSessionFileExists(workDir, missingKey) {
-		t.Fatalf("expected missing key %q to report not-exists", missingKey)
-	}
-
-	if claudeSessionFileExists("", key) {
-		t.Fatalf("empty workDir should report not-exists")
-	}
-	if claudeSessionFileExists(workDir, "") {
-		t.Fatalf("empty sessionKey should report not-exists")
-	}
-}
-
 func TestClearStaleResumeKeyMetadata(t *testing.T) {
 	store := beads.NewMemStore()
 	seed := beads.Bead{
@@ -6447,54 +6373,91 @@ func TestClearStaleResumeKeyMetadataNilSafety(t *testing.T) {
 	}
 }
 
-func TestProviderUsesClaudeJSONL(t *testing.T) {
+func TestSessionTranscriptProvider(t *testing.T) {
 	cases := []struct {
 		name     string
 		rp       *config.ResolvedProvider
-		metadata string
-		want     bool
+		metadata map[string]string
+		want     string
 	}{
 		{
-			name: "claude command",
-			rp:   &config.ResolvedProvider{Command: "claude --dangerously-skip-permissions"},
-			want: true,
+			name: "builtin ancestor wins",
+			rp:   &config.ResolvedProvider{BuiltinAncestor: "claude", Command: "claude-wrapper"},
+			want: "claude",
 		},
 		{
-			name: "claude command with path prefix",
-			rp:   &config.ResolvedProvider{Command: "/usr/local/bin/claude"},
-			want: true,
+			name: "command base name fallback",
+			rp:   &config.ResolvedProvider{Command: "/usr/local/bin/claude --dangerously-skip-permissions"},
+			want: "claude",
 		},
 		{
-			name:     "metadata fallback when rp command empty",
+			name:     "metadata provider_kind fallback",
 			rp:       &config.ResolvedProvider{},
-			metadata: "claude",
-			want:     true,
+			metadata: map[string]string{"provider_kind": "kimi"},
+			want:     "kimi",
 		},
 		{
-			name:     "claude-eco metadata fallback",
-			rp:       &config.ResolvedProvider{},
-			metadata: "claude-eco",
-			want:     true,
-		},
-		{
-			name:     "non-claude provider",
-			rp:       &config.ResolvedProvider{Command: "codex run"},
-			metadata: "codex",
-			want:     false,
-		},
-		{
-			name:     "nil rp + non-claude metadata",
+			name:     "metadata provider fallback",
 			rp:       nil,
-			metadata: "openai",
-			want:     false,
+			metadata: map[string]string{"provider": "codex"},
+			want:     "codex",
+		},
+		{
+			name: "empty when nothing resolves",
+			rp:   nil,
+			want: "",
 		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := providerUsesClaudeJSONL(tc.rp, tc.metadata)
+			got := sessionTranscriptProvider(tc.rp, tc.metadata)
 			if got != tc.want {
-				t.Fatalf("providerUsesClaudeJSONL(rp, %q) = %v, want %v", tc.metadata, got, tc.want)
+				t.Fatalf("sessionTranscriptProvider() = %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestStaleResumeKeyProbe(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	// os.UserHomeDir consults USERPROFILE first on some platforms; clear it so
+	// the test is reproducible.
+	t.Setenv("USERPROFILE", "")
+
+	workDir := "/tmp/projects/example_one"
+	key := "11111111-2222-3333-4444-555555555555"
+
+	// Missing transcript: claude is probeable and reports absent, so the guard
+	// would treat the resume key as stale.
+	if present, probeable := staleResumeKeyProbe("claude", workDir, key); !probeable || present {
+		t.Fatalf("missing claude transcript: probeable=%v present=%v, want probeable && !present", probeable, present)
+	}
+
+	// Create the keyed transcript where claude would store it (canonical slug:
+	// '/' and '.' map to '-', '_' is preserved).
+	slug := sessionlog.ProjectSlug(workDir)
+	projDir := filepath.Join(home, ".claude", "projects", slug)
+	if err := os.MkdirAll(projDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(projDir, key+".jsonl"), []byte("{}\n"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if present, probeable := staleResumeKeyProbe("claude", workDir, key); !probeable || !present {
+		t.Fatalf("present claude transcript: probeable=%v present=%v, want probeable && present", probeable, present)
+	}
+
+	// Codex resolves transcripts by cwd/date, not a keyed file, so it is never
+	// probeable and the guard leaves its metadata untouched.
+	if _, probeable := staleResumeKeyProbe("codex", workDir, key); probeable {
+		t.Fatal("codex probeable = true, want false")
+	}
+	// Empty inputs are not probeable.
+	if _, probeable := staleResumeKeyProbe("claude", "", key); probeable {
+		t.Fatal("empty workDir probeable = true, want false")
+	}
+	if _, probeable := staleResumeKeyProbe("claude", workDir, ""); probeable {
+		t.Fatal("empty key probeable = true, want false")
 	}
 }

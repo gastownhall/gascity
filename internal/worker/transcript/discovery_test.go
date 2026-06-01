@@ -266,6 +266,61 @@ func TestSupportsIDLookup(t *testing.T) {
 	}
 }
 
+func TestHasKeyedTranscript(t *testing.T) {
+	base := t.TempDir()
+	workDir := filepath.Join(t.TempDir(), "claude-project")
+	slugDir := filepath.Join(base, sessionlog.ProjectSlug(workDir))
+	if err := os.MkdirAll(slugDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	keyed := filepath.Join(slugDir, "gc-present.jsonl")
+	if err := os.WriteFile(keyed, []byte(`{}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("claude present", func(t *testing.T) {
+		exists, probeable := HasKeyedTranscript([]string{base}, "claude/tmux-cli", workDir, "gc-present")
+		if !probeable || !exists {
+			t.Fatalf("HasKeyedTranscript() = (exists=%v, probeable=%v), want (true, true)", exists, probeable)
+		}
+	})
+
+	t.Run("claude missing", func(t *testing.T) {
+		exists, probeable := HasKeyedTranscript([]string{base}, "claude/tmux-cli", workDir, "gc-missing")
+		if !probeable || exists {
+			t.Fatalf("HasKeyedTranscript() = (exists=%v, probeable=%v), want (false, true)", exists, probeable)
+		}
+	})
+
+	t.Run("codex not probeable", func(t *testing.T) {
+		// codex resolves transcripts by cwd/date, not a session-id-keyed file,
+		// so it must report !probeable regardless of what is on disk.
+		_, probeable := HasKeyedTranscript([]string{base}, "codex/tmux-cli", workDir, "gc-present")
+		if probeable {
+			t.Fatal("HasKeyedTranscript(codex) probeable = true, want false")
+		}
+	})
+
+	t.Run("unknown provider not probeable", func(t *testing.T) {
+		// Unknown/custom providers must not be probed: we cannot assume their
+		// on-disk layout, so absence is not a reliable stale-resume signal.
+		for _, p := range []string{"true", "openai", ""} {
+			if _, probeable := HasKeyedTranscript([]string{base}, p, workDir, "gc-present"); probeable {
+				t.Fatalf("HasKeyedTranscript(%q) probeable = true, want false", p)
+			}
+		}
+	})
+
+	t.Run("empty inputs", func(t *testing.T) {
+		if _, probeable := HasKeyedTranscript([]string{base}, "claude/tmux-cli", "", "gc-present"); probeable {
+			t.Fatal("empty workDir probeable = true, want false")
+		}
+		if _, probeable := HasKeyedTranscript([]string{base}, "claude/tmux-cli", workDir, ""); probeable {
+			t.Fatal("empty sessionKey probeable = true, want false")
+		}
+	})
+}
+
 func md5Hex(value string) string {
 	sum := md5.Sum([]byte(value))
 	return hex.EncodeToString(sum[:])
