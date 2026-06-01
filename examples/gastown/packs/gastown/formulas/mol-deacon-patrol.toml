@@ -409,25 +409,54 @@ gc mail inbox
 ```
 Handle any urgent messages that arrived during patrol. Archive the rest.
 
-**3. Pour next iteration BEFORE burning:**
+**3. Resolve current wisp and pour next iteration BEFORE burning:**
 ```bash
-NEXT=$(gc bd mol wisp mol-deacon-patrol --root-only --var binding_prefix='{{binding_prefix}}' --json | jq -r '.new_epic_id')
-gc bd update "$NEXT" --assignee=$GC_AGENT
+CURRENT_WISP=${GC_BEAD_ID:-}
+if [ -z "$CURRENT_WISP" ]; then
+  CURRENT_WISP=$(gc bd list --assignee="$GC_AGENT" --status=in_progress --type=wisp --limit=1 --json | jq -r '.[0].id // empty')
+fi
+
+NEXT=$(gc bd mol wisp mol-deacon-patrol --root-only --var binding_prefix='{{binding_prefix}}' --json | jq -r '.new_epic_id // empty')
+if [ -z "$NEXT" ]; then
+  echo "Could not pour next deacon wisp; not burning."
+  gc runtime drain-ack
+  exit 1
+fi
+if ! gc bd update "$NEXT" --assignee="$GC_AGENT"; then
+  echo "Could not assign next deacon wisp; not burning."
+  gc runtime drain-ack
+  exit 1
+fi
 ```
 
-**4. Wait before next cycle:**
+**4. Burn this wisp before waiting:**
+```bash
+if [ -n "$CURRENT_WISP" ]; then
+  gc bd mol burn "$CURRENT_WISP" --force
+else
+  echo "Could not resolve current deacon wisp; not burning."
+  gc runtime drain-ack
+  exit 1
+fi
+```
+
+Do not sleep with the current wisp still open. The backoff belongs to the
+already-assigned successor wisp; if the session restarts during the sleep, the
+successor remains the single resumable patrol item.
+
+**5. Wait before next cycle:**
 ```bash
 sleep {{event_timeout}}
 ```
 
 Previous implementation watched `gc events --type=bead.updated` for fast wake-up, but cache-reconcile fires that event constantly, turning the watch into a tight loop with no useful backoff. Fixed sleep gives predictable idle cost.
 
-**5. Burn this wisp:**
+**6. Re-enter the hook:**
 ```bash
-gc bd mol burn <this-wisp-id> --force
+gc hook
 ```
 
-The new wisp is ready. Re-read formula steps to start
-the next patrol cycle.
+The new wisp is ready. Re-read formula steps to start the next patrol cycle.
 
-**Exit criteria:** Next wisp poured, this wisp burned."""
+**Exit criteria:** Next wisp poured and assigned, this wisp burned, backoff
+elapsed, and `gc hook` re-entered."""
