@@ -798,8 +798,11 @@ func TestSyncSessionBeads_RetiresRemovedNamedSessionAndCreatesFreshOnReadd(t *te
 		if got.Assignee != "" {
 			t.Fatalf("work bead %s assignee = %q, want unclaimed after named session removal", id, got.Assignee)
 		}
-		if got.Metadata["gc.routed_to"] != "myrig/witness" {
-			t.Fatalf("work bead %s gc.routed_to = %q, want fallback route myrig/witness", id, got.Metadata["gc.routed_to"])
+		if got.Metadata["gc.run_target"] != "myrig/witness" {
+			t.Fatalf("work bead %s gc.run_target = %q, want fallback route myrig/witness", id, got.Metadata["gc.run_target"])
+		}
+		if got.Metadata["gc.routed_to"] != "" {
+			t.Fatalf("work bead %s gc.routed_to = %q, want empty canonical route fallback", id, got.Metadata["gc.routed_to"])
 		}
 	}
 	gotWait, err := store.Get(wait.ID)
@@ -6692,6 +6695,57 @@ func TestUnclaimResetsInProgressStatus(t *testing.T) {
 	}
 }
 
+func TestUnclaimWorkAssignedToRetiredSessionBeadPreservesRunTargetRoute(t *testing.T) {
+	store := beads.NewMemStore()
+
+	sessionBead, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name": "worker-1",
+			"state":        "active",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+
+	work, err := store.Create(beads.Bead{
+		Title:    "graph step",
+		Status:   "in_progress",
+		Assignee: sessionBead.ID,
+		Metadata: map[string]string{"gc.run_target": "graph/worker"},
+	})
+	if err != nil {
+		t.Fatalf("create work bead: %v", err)
+	}
+	inProgress := "in_progress"
+	if err := store.Update(work.ID, beads.UpdateOpts{Status: &inProgress}); err != nil {
+		t.Fatalf("mark work in_progress: %v", err)
+	}
+
+	var stderr bytes.Buffer
+	unclaimWorkAssignedToRetiredSessionBead(store, nil, sessionBead, "fallback/worker", &stderr)
+
+	got, err := store.Get(work.ID)
+	if err != nil {
+		t.Fatalf("get work bead: %v", err)
+	}
+	if got.Assignee != "" {
+		t.Fatalf("assignee = %q, want empty", got.Assignee)
+	}
+	if got.Status != "open" {
+		t.Fatalf("status = %q, want open", got.Status)
+	}
+	if got.Metadata["gc.run_target"] != "graph/worker" {
+		t.Fatalf("gc.run_target = %q, want graph/worker", got.Metadata["gc.run_target"])
+	}
+	if got.Metadata["gc.routed_to"] != "" {
+		t.Fatalf("gc.routed_to = %q, want empty to preserve gc.run_target as the canonical route", got.Metadata["gc.routed_to"])
+	}
+}
+
 // closeBead is the low-level metadata+close helper. Ownership checks live in
 // closeSessionBeadIfUnassigned, which has the full multi-store, multi-identifier
 // view of assigned work. closeBead itself must stay dumb so it doesn't
@@ -7103,8 +7157,11 @@ func TestUnclaimWorkAssignedToRetiredSessionBeadClearsRigStoreSessionIdentifiers
 	if gotByIdentity.Status != "open" {
 		t.Fatalf("named-identity status = %q, want open after unclaim", gotByIdentity.Status)
 	}
-	if gotByIdentity.Metadata["gc.routed_to"] != "frontend/codex-max" {
-		t.Fatalf("named-identity gc.routed_to = %q, want frontend/codex-max", gotByIdentity.Metadata["gc.routed_to"])
+	if gotByIdentity.Metadata["gc.run_target"] != "frontend/codex-max" {
+		t.Fatalf("named-identity gc.run_target = %q, want frontend/codex-max", gotByIdentity.Metadata["gc.run_target"])
+	}
+	if gotByIdentity.Metadata["gc.routed_to"] != "" {
+		t.Fatalf("named-identity gc.routed_to = %q, want empty canonical route fallback", gotByIdentity.Metadata["gc.routed_to"])
 	}
 }
 

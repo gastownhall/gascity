@@ -659,12 +659,14 @@ func unclaimWorkAssignedToRetiredSessionBead(
 					// Clearing assignee on an in_progress bead leaves it invisible to
 					// the work_query: Tier 1 needs an assignee match, Tiers 2/3 only
 					// match "ready" status. Reset to "open" so a fresh worker can
-					// re-claim via the routed queue (gc.routed_to + --unassigned).
+					// re-claim via the routed queue.
 					if item.Status == "in_progress" {
 						update.Status = &open
 					}
-					if fallbackRoute != "" && strings.TrimSpace(item.Metadata["gc.routed_to"]) == "" {
-						update.Metadata = map[string]string{"gc.routed_to": fallbackRoute}
+					if fallbackRoute != "" &&
+						strings.TrimSpace(item.Metadata["gc.run_target"]) == "" &&
+						strings.TrimSpace(item.Metadata["gc.routed_to"]) == "" {
+						update.Metadata = map[string]string{"gc.run_target": fallbackRoute}
 					}
 					if err := ownerStore.Update(item.ID, update); err != nil {
 						fmt.Fprintf(stderr, "session beads: unclaiming work %s assigned to retired session %s: %v\n", item.ID, sessionBead.ID, err) //nolint:errcheck
