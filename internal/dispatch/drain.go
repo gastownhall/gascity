@@ -127,6 +127,9 @@ func expandDrain(store beads.Store, bead beads.Bead, opts ProcessOptions) (Contr
 		if row.ItemRootID == "" {
 			rootID, created, err := ensureDrainItemRoot(store, bead, unit, member, len(members), row, itemFormula, parentVars, opts)
 			if err != nil {
+				if errors.Is(err, errDrainInvalidItemFormula) {
+					return closeDrainItemFormulaFailure(store, bead, manifest, err)
+				}
 				return ControlResult{}, err
 			}
 			if created {
@@ -220,8 +223,9 @@ func loadOrBuildDrainManifest(store beads.Store, bead beads.Bead, parentConvoyID
 }
 
 var (
-	errDrainLimitExceeded    = errors.New("drain limit exceeded")
-	errDrainUnresolvedMember = errors.New("drain unresolved member")
+	errDrainLimitExceeded      = errors.New("drain limit exceeded")
+	errDrainInvalidItemFormula = errors.New("invalid drain item formula")
+	errDrainUnresolvedMember   = errors.New("drain unresolved member")
 )
 
 type drainUnresolvedMemberError struct {
@@ -389,6 +393,9 @@ func advanceSharedDrain(store beads.Store, bead beads.Bead, manifest drainManife
 		}
 		created, err := materializeDrainRow(store, bead, manifest.ParentConvoyID, members, row, member, itemFormula, parentVars, opts)
 		if err != nil {
+			if errors.Is(err, errDrainInvalidItemFormula) {
+				return closeDrainItemFormulaFailure(store, bead, manifest, err)
+			}
 			return ControlResult{}, err
 		}
 		if err := persistDrainManifest(store, bead.ID, manifest, map[string]string{
@@ -626,19 +633,19 @@ func ensureDrainItemRoot(store beads.Store, control, unit, member beads.Bead, co
 	vars[graphv2.ConvoyIDVar] = unit.ID
 	recipe, err := formula.CompileWithoutRuntimeVarValidation(context.Background(), itemFormula, opts.FormulaSearchPaths, vars)
 	if err != nil {
-		return "", false, fmt.Errorf("%s: compiling drain item formula %q: %w", control.ID, itemFormula, err)
+		return "", false, fmt.Errorf("%w: %s: compiling drain item formula %q: %w", errDrainInvalidItemFormula, control.ID, itemFormula, err)
 	}
 	if !isGraphV2WorkflowRecipe(recipe) {
-		return "", false, fmt.Errorf("%s: drain item formula %q must declare contract = \"graph.v2\"", control.ID, itemFormula)
+		return "", false, fmt.Errorf("%w: %s: drain item formula %q must declare contract = \"graph.v2\"", errDrainInvalidItemFormula, control.ID, itemFormula)
 	}
 	if err := molecule.ValidateRecipeRuntimeVars(recipe, molecule.Options{Vars: vars}); err != nil {
-		return "", false, fmt.Errorf("%s: validating drain item formula %q: %w", control.ID, itemFormula, err)
+		return "", false, fmt.Errorf("%w: %s: validating drain item formula %q: %w", errDrainInvalidItemFormula, control.ID, itemFormula, err)
 	}
 	runtimeVars := drainItemRuntimeVars(recipe, vars)
 	stampDrainItemRecipe(recipe, control, unit, member, count, row, itemFormula, runtimeVars)
 	if opts.PrepareRecipe != nil {
 		if err := opts.PrepareRecipe(recipe, control); err != nil {
-			return "", false, fmt.Errorf("%s: preparing drain item formula %q: %w", control.ID, itemFormula, err)
+			return "", false, fmt.Errorf("%w: %s: preparing drain item formula %q: %w", errDrainInvalidItemFormula, control.ID, itemFormula, err)
 		}
 	}
 	result, err := molecule.Instantiate(context.Background(), store, recipe, molecule.Options{
@@ -861,6 +868,54 @@ func closeDrainReservationFailure(store beads.Store, bead beads.Bead, manifest d
 		return ControlResult{}, fmt.Errorf("%s: closing reservation-failed drain after %w: %w", bead.ID, err, closeErr)
 	}
 	return ControlResult{Processed: true, Action: "drain-reservation-failed"}, nil
+}
+
+func closeDrainItemFormulaFailure(store beads.Store, bead beads.Bead, manifest drainManifest, err error) (ControlResult, error) {
+	const failureReason = "invalid_drain_item_formula"
+	if closeErr := closeOpenDrainItemRoots(store, &manifest, failureReason); closeErr != nil {
+		return ControlResult{}, fmt.Errorf("%s: closing partial drain item roots after %w: %w", bead.ID, err, closeErr)
+	}
+	markIncompleteDrainRowsFailed(&manifest, failureReason)
+	data, marshalErr := json.Marshal(manifest)
+	if marshalErr != nil {
+		return ControlResult{}, marshalErr
+	}
+	metadata := map[string]string{
+		"gc.drain_state":         "failed",
+		"gc.outcome":             "fail",
+		"gc.failure_class":       "hard",
+		"gc.failure_reason":      failureReason,
+		drainManifestMetadataKey: string(data),
+	}
+	if manifest.Formula != "" {
+		metadata["gc.failure_subject"] = manifest.Formula
+	}
+	if releaseErr := releaseDrainReservations(store, bead.ID, manifest); releaseErr != nil {
+		return ControlResult{}, fmt.Errorf("%s: releasing reservations after %w: %w", bead.ID, err, releaseErr)
+	}
+	if closeErr := updateMetadataAndClose(store, bead.ID, metadata); closeErr != nil {
+		return ControlResult{}, fmt.Errorf("%s: closing invalid-item-formula drain after %w: %w", bead.ID, err, closeErr)
+	}
+	return ControlResult{Processed: true, Action: "drain-failed"}, nil
+}
+
+func markIncompleteDrainRowsFailed(manifest *drainManifest, failureReason string) {
+	if manifest == nil {
+		return
+	}
+	for i := range manifest.Rows {
+		row := &manifest.Rows[i]
+		if row.Status == "succeeded" || row.OutcomeKind == "pass" {
+			continue
+		}
+		row.Status = "failed"
+		if row.OutcomeKind == "" {
+			row.OutcomeKind = "fail"
+		}
+		if row.Failure == "" {
+			row.Failure = failureReason
+		}
+	}
 }
 
 func closeOpenDrainItemRoots(store beads.Store, manifest *drainManifest, failureReason string) error {

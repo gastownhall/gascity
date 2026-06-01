@@ -1014,7 +1014,7 @@ func metadataRequiresGraphContract(metadata map[string]string) bool {
 // Validate checks the formula for structural errors.
 func (f *Formula) Validate() error {
 	var errs []string
-	graphV2 := declaresGraphV2Contract(f)
+	graphV2 := UsesGraphCompiler(f)
 
 	if f.Formula == "" {
 		errs = append(errs, "formula: name is required")

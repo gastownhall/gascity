@@ -668,6 +668,14 @@ bead into a sub-workflow at runtime.`,
 								WorkflowIDs:  sourceworkflow.BlockingWorkflowIDs(roots),
 							}
 						}
+						if roots, err := sourceworkflow.ListLiveRoots(store, attach, storeRef, storeRef); err != nil {
+							return fmt.Errorf("checking live workflows for %s: %w", attach, err)
+						} else if len(roots) > 0 {
+							return &sourceworkflow.ConflictError{
+								SourceBeadID: attach,
+								WorkflowIDs:  sourceworkflow.BlockingWorkflowIDs(roots),
+							}
+						}
 						source, err := store.Get(attach)
 						if err != nil {
 							return fmt.Errorf("attach bead %s: %w", attach, err)

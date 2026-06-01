@@ -262,7 +262,7 @@ func buildFormulaDetail(ctx context.Context, store beads.Store, name string, pat
 }
 
 func formulaDetailPreviewVars(ctx context.Context, store beads.Store, name string, paths []string, resolved *formula.Formula, target string, vars map[string]string, validateRuntimeVars bool) (map[string]string, error) {
-	if resolved == nil || !strings.EqualFold(strings.TrimSpace(resolved.Contract), "graph.v2") {
+	if resolved == nil || !formula.UsesGraphCompiler(resolved) {
 		return vars, nil
 	}
 	if !validateRuntimeVars {
@@ -270,6 +270,38 @@ func formulaDetailPreviewVars(ctx context.Context, store beads.Store, name strin
 			return nil, err
 		}
 		out := graphv2.EffectiveRuntimeVars(resolved, vars)
+		parser := formula.NewParser(paths...).SetSource(formula.SourceFromEnv())
+		formulaRequiresTarget, err := formula.GraphV2FormulaReferencesInputConvoyTransitively(resolved, parser)
+		if err != nil {
+			return nil, err
+		}
+		recipe, err := formula.CompileWithoutRuntimeVarValidation(ctx, name, paths, out)
+		if err != nil {
+			return nil, err
+		}
+		recipeRequiresTarget := formula.GraphV2RecipeReferencesInputConvoy(recipe)
+		if !formulaRequiresTarget && !recipeRequiresTarget {
+			if err := formula.ValidateGraphV2RecipeReservedSymbols(recipe, false); err != nil {
+				return nil, err
+			}
+			return out, nil
+		}
+		if strings.TrimSpace(target) == "" {
+			if formulaRequiresTarget {
+				if err := formula.ValidateGraphV2ReservedSymbolsTransitively(resolved, parser, false); err != nil {
+					return nil, err
+				}
+			}
+			if recipeRequiresTarget {
+				if err := formula.ValidateGraphV2RecipeReservedSymbols(recipe, false); err != nil {
+					return nil, err
+				}
+			}
+			return nil, fmt.Errorf("graph.v2 target is required")
+		}
+		if err := formula.ValidateGraphV2RecipeReservedSymbols(recipe, true); err != nil {
+			return nil, err
+		}
 		inputConvoyID, err := graphv2.PreviewInputConvoyID(store, target)
 		if err != nil {
 			return nil, err

@@ -672,3 +672,81 @@ func TestCloseWorkflowSubtree_StampsCloseReason(t *testing.T) {
 		}
 	}
 }
+
+func TestSnapshotRestoreWorkflowBeadsRestoresMutableState(t *testing.T) {
+	store := beads.NewMemStore()
+	root, err := store.Create(beads.Bead{
+		Title:    "workflow",
+		Type:     "task",
+		Status:   "in_progress",
+		Assignee: "worker-1",
+		Metadata: map[string]string{
+			"gc.kind":           "workflow",
+			"gc.source_bead_id": "source-1",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	child, err := store.Create(beads.Bead{
+		Title:    "child",
+		Type:     "task",
+		Status:   "in_progress",
+		ParentID: root.ID,
+		Assignee: "worker-2",
+		Metadata: map[string]string{
+			"gc.root_bead_id":    root.ID,
+			"gc.outcome":         "pass",
+			"gc.failure_reason":  "old-reason",
+			"close_reason":       "old close reason long enough",
+			"unrelated_metadata": "keep",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	snapshots, err := SnapshotOpenWorkflowBeads(store, root.ID)
+	if err != nil {
+		t.Fatalf("SnapshotOpenWorkflowBeads: %v", err)
+	}
+	if len(snapshots) != 2 {
+		t.Fatalf("snapshots = %+v, want root and child", snapshots)
+	}
+	if _, err := CloseWorkflowSubtree(store, root.ID); err != nil {
+		t.Fatalf("CloseWorkflowSubtree: %v", err)
+	}
+	if err := store.SetMetadata(child.ID, "gc.outcome", "fail"); err != nil {
+		t.Fatalf("SetMetadata(outcome): %v", err)
+	}
+
+	if err := RestoreWorkflowBeads(store, snapshots); err != nil {
+		t.Fatalf("RestoreWorkflowBeads: %v", err)
+	}
+	rootAfter, err := store.Get(root.ID)
+	if err != nil {
+		t.Fatalf("Get(root): %v", err)
+	}
+	if rootAfter.Status != "open" || rootAfter.Assignee != "worker-1" {
+		t.Fatalf("root after restore = %+v, want original status/assignee", rootAfter)
+	}
+	childAfter, err := store.Get(child.ID)
+	if err != nil {
+		t.Fatalf("Get(child): %v", err)
+	}
+	if childAfter.Status != "open" || childAfter.Assignee != "worker-2" {
+		t.Fatalf("child after restore = %+v, want original status/assignee", childAfter)
+	}
+	if got := childAfter.Metadata["gc.outcome"]; got != "pass" {
+		t.Fatalf("child gc.outcome = %q, want pass", got)
+	}
+	if got := childAfter.Metadata["gc.failure_reason"]; got != "old-reason" {
+		t.Fatalf("child gc.failure_reason = %q, want old-reason", got)
+	}
+	if got := childAfter.Metadata["close_reason"]; got != "old close reason long enough" {
+		t.Fatalf("child close_reason = %q, want original close reason", got)
+	}
+	if got := childAfter.Metadata["unrelated_metadata"]; got != "keep" {
+		t.Fatalf("child unrelated metadata = %q, want keep", got)
+	}
+}
