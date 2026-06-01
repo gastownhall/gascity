@@ -954,6 +954,61 @@ func TestOrderRunJSONFormulaSummary(t *testing.T) {
 	}
 }
 
+func TestOrderRunHonorsFormulaV2DisabledCity(t *testing.T) {
+	t.Cleanup(func() {
+		applyFeatureFlags(&config.City{Daemon: config.DaemonConfig{FormulaV2: true}})
+	})
+
+	cityDir := t.TempDir()
+	formulaDir := filepath.Join(cityDir, "formulas")
+	if err := os.MkdirAll(formulaDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cityToml := `[workspace]
+name = "test-city"
+
+[daemon]
+formula_v2 = false
+`
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	graphFormula := `
+formula = "graph-work"
+
+[requires]
+formula_compiler = ">=2.0.0"
+
+[[steps]]
+id = "step"
+title = "Do work"
+`
+	if err := os.WriteFile(filepath.Join(formulaDir, "graph-work.toml"), []byte(graphFormula), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	aa := []orders.Order{
+		{Name: "blocked", Formula: "graph-work", Trigger: "cooldown", Interval: "15m", FormulaLayer: formulaDir},
+	}
+	store := beads.NewMemStore()
+
+	var stdout, stderr bytes.Buffer
+	code := doOrderRun(aa, "blocked", "", cityDir, store, nil, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("doOrderRun = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "formula_v2 is disabled") {
+		t.Fatalf("stderr missing formula_v2 diagnostic:\n%s", stderr.String())
+	}
+	results, err := store.ListByLabel("order-run:blocked", 0)
+	if err != nil {
+		t.Fatalf("store.ListByLabel(): %v", err)
+	}
+	if len(results) != 0 {
+		t.Fatalf("created %d order-run bead(s), want none: %#v", len(results), results)
+	}
+}
+
 func TestOrderRunJSONRejectsExecWithoutRunning(t *testing.T) {
 	aa := []orders.Order{
 		{Name: "release-exec", Trigger: "manual", Exec: "printf unsafe"},

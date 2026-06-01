@@ -145,6 +145,49 @@ title = "Work"
 	}
 }
 
+func TestFormulaRequirementsCheckDeduplicatesCityDiagnosticsInRigLayers(t *testing.T) {
+	cityDir := t.TempDir()
+	rigDir := t.TempDir()
+	writeDoctorFormula(t, cityDir, "shared-missing", `
+formula = "shared-missing"
+
+[[steps]]
+id = "work"
+title = "Work"
+metadata = { "gc.on_fail" = "abort_scope" }
+`)
+	writeDoctorFormula(t, rigDir, "rig-invalid", `
+formula = "rig-invalid"
+
+[requires]
+formula_compiler = "not-a-comparator"
+
+[[steps]]
+id = "work"
+title = "Work"
+`)
+
+	check := NewFormulaRequirementsCheck(&config.City{
+		Daemon: config.DaemonConfig{FormulaV2: true},
+		FormulaLayers: config.FormulaLayers{
+			City: []string{cityDir},
+			Rigs: map[string][]string{"proj": {cityDir, rigDir}},
+		},
+	}, t.TempDir())
+
+	result := check.Run(&CheckContext{})
+	if result.Status != StatusError {
+		t.Fatalf("Status = %v, want error; details:\n%s", result.Status, strings.Join(result.Details, "\n"))
+	}
+	details := strings.Join(result.Details, "\n")
+	if got := strings.Count(details, `formula "shared-missing"`); got != 1 {
+		t.Fatalf("shared city diagnostic count = %d, want 1; details:\n%s", got, details)
+	}
+	if !strings.Contains(details, `formula "rig-invalid"`) {
+		t.Fatalf("details missing rig-specific diagnostic:\n%s", details)
+	}
+}
+
 func TestFormulaRequirementsCheckReportsGraphConstructMissingCompilerRequirement(t *testing.T) {
 	dir := t.TempDir()
 	writeDoctorFormula(t, dir, "retry-without-requirement", `
