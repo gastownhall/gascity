@@ -10,6 +10,10 @@ Base checked: origin/main b2b659d421ace115fcc47575b202c0a4541ad75a
 
 `docs/PROJECT_MANIFEST.md` is not present in this worktree, so this gate uses the deployer prompt criteria and the source bead acceptance checklist.
 
+HQStore-specific evidence below is historical only after `ga-r1jzbn`; the
+HQStore backend and benchmark adapter were removed by the HQStore-removal
+branch.
+
 ## Scope
 
 The release diff from current `origin/main` contains one mail retention configuration wiring slice plus this release gate:
