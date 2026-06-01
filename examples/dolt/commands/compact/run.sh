@@ -1392,8 +1392,11 @@ flatten_database() {
   fi
 
   if has_compact_marker "$quarantine_dir" "$db"; then
-    printf 'compact: db=%s integrity quarantine marker exists — manual intervention required before compaction or GC\n' \
-      "$db" >&2
+    quarantine_marker=$(compact_marker_path "$quarantine_dir" "$db")
+    quarantine_reason=$(compact_marker_value "$quarantine_dir" "$db" reason || true)
+    quarantine_created_at=$(compact_marker_value "$quarantine_dir" "$db" created_at || true)
+    printf 'compact: db=%s integrity quarantine marker exists at %s reason=%s created_at=%s — manual intervention required before compaction or GC\n' \
+      "$db" "$quarantine_marker" "${quarantine_reason:-<unknown>}" "${quarantine_created_at:-<unknown>}" >&2
     return 1
   fi
 

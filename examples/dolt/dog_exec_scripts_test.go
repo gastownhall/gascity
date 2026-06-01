@@ -2754,6 +2754,11 @@ func TestCompactScriptQuarantineBlocksSecondCycleAfterRowCountDecrease(t *testin
 	if !strings.Contains(secondOut, "integrity quarantine marker exists") {
 		t.Fatalf("second compact missing quarantine explanation:\n%s", secondOut)
 	}
+	quarantine := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-quarantine", "beads")
+	if !strings.Contains(secondOut, quarantine) ||
+		!strings.Contains(secondOut, "reason=post-flatten row count decreased") {
+		t.Fatalf("second compact missing quarantine marker details:\n%s", secondOut)
+	}
 	logData, err := os.ReadFile(fixture.doltLog)
 	if err != nil {
 		t.Fatalf("read dolt log: %v", err)
