@@ -1886,6 +1886,56 @@ func TestCmdSessionListJSONNoSessionsReturnsEmptyEnvelope(t *testing.T) {
 	}
 }
 
+func TestRenderSessionListFromAPIJSONUsesSnakeCaseSessionFields(t *testing.T) {
+	var stdout bytes.Buffer
+	code := renderSessionListFromAPI(api.CachedRead[[]SessionView]{
+		AgeSeconds: 1.25,
+		Body: []SessionView{
+			{
+				ID:          "gc-abc",
+				Template:    "worker",
+				State:       "active",
+				Reason:      "assigned",
+				Title:       "Worker session",
+				Alias:       "worker-1",
+				SessionName: "worker-gc-abc",
+				CreatedAt:   "2026-04-23T10:00:00Z",
+				LastActive:  "2026-04-23T12:00:00Z",
+				Attached:    true,
+				Running:     true,
+				LastOutput:  "ready",
+			},
+		},
+	}, true, &stdout)
+	if code != 0 {
+		t.Fatalf("renderSessionListFromAPI(--json) = %d, want 0", code)
+	}
+	out := stdout.String()
+	for _, want := range []string{`"id"`, `"session_name"`, `"created_at"`, `"last_active"`, `"last_output"`} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("API JSON output missing %s:\n%s", want, out)
+		}
+	}
+	for _, oldName := range []string{`"ID"`, `"SessionName"`, `"CreatedAt"`, `"LastActive"`, `"LastOutput"`} {
+		if strings.Contains(out, oldName) {
+			t.Fatalf("API JSON output contains Go field name %s:\n%s", oldName, out)
+		}
+	}
+
+	var got struct {
+		Sessions []map[string]any `json:"sessions"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatalf("stdout is not JSON: %v; stdout=%q", err, out)
+	}
+	if len(got.Sessions) != 1 {
+		t.Fatalf("sessions length = %d, want 1; stdout=%s", len(got.Sessions), out)
+	}
+	if got.Sessions[0]["session_name"] != "worker-gc-abc" {
+		t.Fatalf("session_name = %#v, want worker-gc-abc; row=%#v", got.Sessions[0]["session_name"], got.Sessions[0])
+	}
+}
+
 // TestCmdSessionList_RendersLastNudgeColumn pins the table rendering of the
 // "LAST NUDGE" column added by the warm-idle ACP nudge fix: the header is
 // emitted, sessions stamped with metadata.last_nudge_delivered_at render as
