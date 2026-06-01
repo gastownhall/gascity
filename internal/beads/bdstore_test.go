@@ -3200,6 +3200,9 @@ func TestBdStoreListBothTiersReturnsPartialRowsWithErrorOnTierFailure(t *testing
 		if err == nil {
 			t.Fatalf("err = nil, want non-nil partial-failure error")
 		}
+		if !beads.IsPartialResult(err) {
+			t.Fatalf("err = %v, want PartialResultError so survivor rows are retainable", err)
+		}
 		if !strings.Contains(err.Error(), "wisps tier") {
 			t.Fatalf("err = %v, want wisps tier in message", err)
 		}
@@ -3223,6 +3226,9 @@ func TestBdStoreListBothTiersReturnsPartialRowsWithErrorOnTierFailure(t *testing
 		got, err := s.List(beads.ListQuery{Label: "order-run:o", TierMode: beads.TierBoth})
 		if err == nil {
 			t.Fatalf("err = nil, want non-nil partial-failure error")
+		}
+		if !beads.IsPartialResult(err) {
+			t.Fatalf("err = %v, want PartialResultError so survivor rows are retainable", err)
 		}
 		if !strings.Contains(err.Error(), "issues tier") {
 			t.Fatalf("err = %v, want issues tier in message", err)

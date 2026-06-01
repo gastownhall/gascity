@@ -4174,7 +4174,7 @@ func TestOnFormulaCopiesSourcePriorityToCreatedBeads(t *testing.T) {
 		t.Fatal("workflow root has no descendants")
 	}
 
-	all, err := deps.Store.ListOpen()
+	all, err := deps.Store.List(beads.ListQuery{AllowScan: true, TierMode: beads.TierBoth})
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
@@ -4269,7 +4269,7 @@ title = "Do work"
 	if got := root.Metadata["gc.root_store_ref"]; got != "city:test-city" {
 		t.Fatalf("root gc.root_store_ref = %q, want city:test-city", got)
 	}
-	all, err := deps.Store.ListOpen()
+	all, err := deps.Store.List(beads.ListQuery{AllowScan: true, TierMode: beads.TierBoth})
 	if err != nil {
 		t.Fatalf("list workflow beads: %v", err)
 	}
@@ -4305,7 +4305,7 @@ title = "Do work"
 		}
 	}
 	if assigned == 0 {
-		t.Fatal("expected at least one assigned workflow bead")
+		t.Fatalf("expected at least one assigned workflow bead; rows=%#v", all)
 	}
 	if !strings.Contains(stdout.String(), "Attached workflow") {
 		t.Fatalf("stdout = %q, want attached workflow message", stdout.String())

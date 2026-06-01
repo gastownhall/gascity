@@ -6755,6 +6755,30 @@ func TestOrderDispatchSingleFlightLockSeesEphemeralTracker(t *testing.T) {
 	}
 }
 
+func TestOrderDispatchSingleFlightLockSeesBackingOnlyCachedTracker(t *testing.T) {
+	backing := beads.NewMemStore()
+	store := beads.NewCachingStoreForTest(backing, nil)
+	if err := store.PrimeActive(); err != nil {
+		t.Fatalf("prime cache: %v", err)
+	}
+	if _, err := backing.Create(beads.Bead{
+		Title:     "order:double-fire",
+		Labels:    []string{"order-run:double-fire", labelOrderTracking},
+		Ephemeral: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	m := &memoryOrderDispatcher{}
+	hasOpen, err := m.hasOpenWorkStrict(store, "double-fire")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasOpen {
+		t.Fatal("single-flight lock missed backing-only tracking bead behind a primed cache")
+	}
+}
+
 func TestOrderDispatchSingleFlightLockFailsClosedOnPartialTierError(t *testing.T) {
 	store := &partialListStore{
 		Store: beads.NewMemStore(),

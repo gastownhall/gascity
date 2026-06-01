@@ -52,6 +52,42 @@ func (c *CachingStore) Update(id string, opts UpdateOpts) error {
 	fresh, err := c.backing.Get(id)
 	if err != nil {
 		c.mu.Lock()
+		seq := c.noteLocalMutationLocked(id)
+		if errors.Is(err, ErrNotFound) {
+			var closed Bead
+			notifyClosed := false
+			if current, ok := c.beads[id]; ok && current.Status != "closed" {
+				closed = cloneBead(current)
+				closed.Status = "closed"
+				notifyClosed = true
+			}
+			delete(c.beads, id)
+			delete(c.deps, id)
+			delete(c.dirty, id)
+			delete(c.beadSeq, id)
+			delete(c.localBeadAt, id)
+			c.deletedSeq[id] = seq
+			c.markFreshLocked(time.Now())
+			c.updateStatsLocked()
+			c.mu.Unlock()
+			if notifyClosed {
+				c.notifyChange("bead.closed", closed)
+			}
+			return nil
+		}
+		if current, ok := c.beads[id]; ok {
+			fresh = applyUpdateOptsToBead(current, opts)
+			c.beads[id] = cloneBead(fresh)
+			c.deps[id] = depsFromBeadFields(fresh)
+			delete(c.dirty, id)
+			delete(c.deletedSeq, id)
+			c.markFreshLocked(time.Now())
+			c.updateStatsLocked()
+			c.mu.Unlock()
+			c.recordProblem("refresh bead after update", fmt.Errorf("%s: %w", id, err))
+			c.notifyChange("bead.updated", fresh)
+			return nil
+		}
 		c.dirty[id] = struct{}{}
 		c.mu.Unlock()
 		c.recordProblem("refresh bead after update", fmt.Errorf("%s: %w", id, err))
