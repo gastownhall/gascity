@@ -302,7 +302,13 @@ run_sql_change() {
         record_anomaly "$db" "$label failed for $db: could not create stderr capture file"
         return 1
     fi
+    # DML (DELETE/UPDATE) against a database-qualified table still needs an
+    # active database selected, or Dolt can reject it with "no database
+    # selected" (Error 1105) even though the target is fully qualified —
+    # reads (get_sql_count/get_sql_rows) do not. USE the target db first,
+    # mirroring the DOLT_COMMIT block below.
     if ! output=$(dolt_sql -r csv -q "
+USE \`$db\`;
 $query;
 SELECT ROW_COUNT();
     " 2>"$stderr_file"); then
