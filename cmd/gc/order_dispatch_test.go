@@ -3186,6 +3186,31 @@ func TestSweepOrphanedOrderTrackingLimit_ClosesAtMostBudget(t *testing.T) {
 	}
 }
 
+func TestSweepOrphanedOrderTrackingRetryLimitSpendsRemainingBudget(t *testing.T) {
+	inner := beads.NewMemStore()
+	for _, name := range []string{"one", "two", "three", "four"} {
+		_, err := inner.Create(beads.Bead{
+			Title:  "order:" + name,
+			Labels: []string{"order-run:" + name, labelOrderTracking},
+		})
+		if err != nil {
+			t.Fatalf("Create(%s): %v", name, err)
+		}
+	}
+
+	fs := &closeFailStore{Store: inner, closeN: 1}
+	n, err := sweepOrphanedOrderTrackingRetryLimit(fs, 3, time.Millisecond, 2)
+	if err == nil {
+		t.Fatal("expected error from partial close failure")
+	}
+	if n != 2 {
+		t.Fatalf("n = %d, want 2", n)
+	}
+	if fs.listCalls != 1 {
+		t.Fatalf("ListByLabel calls = %d, want 1 (budget exhaustion should stop retries)", fs.listCalls)
+	}
+}
+
 func TestSweepOrphanedOrderTracking_NoOrphans(t *testing.T) {
 	store := beads.NewMemStore()
 

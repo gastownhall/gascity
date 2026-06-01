@@ -1656,8 +1656,18 @@ func sweepOrphanedOrderTrackingRetryLimit(store beads.Store, attempts int, backo
 	total := 0
 	var err error
 	for i := range attempts {
+		remainingLimit := limit
+		if limit > 0 {
+			remainingLimit = limit - total
+			if remainingLimit <= 0 {
+				if err != nil {
+					return total, fmt.Errorf("sweep reached close budget after partial close: %w", err)
+				}
+				return total, nil
+			}
+		}
 		var n int
-		n, err = sweepOrphanedOrderTrackingLimit(store, limit)
+		n, err = sweepOrphanedOrderTrackingLimit(store, remainingLimit)
 		total += n
 		if err == nil {
 			return total, nil

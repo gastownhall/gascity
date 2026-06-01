@@ -1219,6 +1219,74 @@ prefix = "fe"
 	}
 }
 
+func TestCmdOrderSweepTrackingUsesCloseBudget(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+
+	cityDir := t.TempDir()
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_CITY_PATH", cityDir)
+	t.Setenv("GC_CITY_ROOT", cityDir)
+	t.Setenv("GC_RIG", "")
+	t.Setenv("GC_RIG_ROOT", "")
+	t.Chdir(cityDir)
+
+	writeFile(t, filepath.Join(cityDir, "city.toml"), `[workspace]
+name = "test-city"
+prefix = "ct"
+`)
+	if err := ensureScopedFileStoreLayout(cityDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensurePersistedScopeLocalFileStore(cityDir); err != nil {
+		t.Fatal(err)
+	}
+	store, err := openStoreAtForCity(cityDir, cityDir)
+	if err != nil {
+		t.Fatalf("openStoreAtForCity(city): %v", err)
+	}
+	ids := make([]string, 0, orderTrackingSweepCloseBudget+1)
+	for i := range orderTrackingSweepCloseBudget + 1 {
+		stale, err := store.Create(beads.Bead{
+			Title:     fmt.Sprintf("order:cleanup-%d", i),
+			Labels:    []string{fmt.Sprintf("order-run:cleanup-%d", i), labelOrderTracking},
+			Ephemeral: true,
+		})
+		if err != nil {
+			t.Fatalf("Create(stale-%d): %v", i, err)
+		}
+		ids = append(ids, stale.ID)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := cmdOrderSweepTracking(time.Nanosecond, false, false, nil, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("cmdOrderSweepTracking = %d, want 0; stderr: %s", code, stderr.String())
+	}
+
+	reopened, err := openStoreAtForCity(cityDir, cityDir)
+	if err != nil {
+		t.Fatalf("openStoreAtForCity(city reopen): %v", err)
+	}
+	closed := 0
+	for _, id := range ids {
+		got, err := reopened.Get(id)
+		if err != nil {
+			t.Fatalf("Get(%s): %v", id, err)
+		}
+		if got.Status == "closed" {
+			closed++
+		}
+	}
+	if closed != orderTrackingSweepCloseBudget {
+		t.Fatalf("closed = %d, want %d", closed, orderTrackingSweepCloseBudget)
+	}
+	want := fmt.Sprintf("closed %d stale order-tracking bead", orderTrackingSweepCloseBudget)
+	if !strings.Contains(stdout.String(), want) {
+		t.Fatalf("stdout = %q, want %q", stdout.String(), want)
+	}
+}
+
 func TestCmdOrderSweepTrackingFailsWhenTargetedRigStoreOpenFails(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_BEADS_SCOPE_ROOT", "")

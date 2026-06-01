@@ -1599,6 +1599,46 @@ func TestOrderTrackingSweepWatchdogClosesAllStaleTracking(t *testing.T) {
 	}
 }
 
+func TestOrderTrackingSweepWatchdogUsesCloseBudget(t *testing.T) {
+	store := beads.NewMemStore()
+	ids := make([]string, 0, orderTrackingSweepCloseBudget+1)
+	for i := range orderTrackingSweepCloseBudget + 1 {
+		b, err := store.Create(beads.Bead{
+			Title:     fmt.Sprintf("order:stale-%d", i),
+			Labels:    []string{fmt.Sprintf("order-run:stale-%d", i), labelOrderTracking},
+			Ephemeral: true,
+		})
+		if err != nil {
+			t.Fatalf("Create(stale-%d): %v", i, err)
+		}
+		ids = append(ids, b.ID)
+	}
+
+	cr := &CityRuntime{
+		cityName:            "test-city",
+		cfg:                 &config.City{Workspace: config.Workspace{Name: "test-city"}},
+		standaloneCityStore: store,
+		stdout:              io.Discard,
+		stderr:              io.Discard,
+		logPrefix:           "gc test",
+	}
+	cr.runOrderTrackingSweepWatchdog(time.Now().Add(orderTrackingSweepWatchdogStaleAfter + time.Second))
+
+	closed := 0
+	for _, id := range ids {
+		got, err := store.Get(id)
+		if err != nil {
+			t.Fatalf("Get(%s): %v", id, err)
+		}
+		if got.Status == "closed" {
+			closed++
+		}
+	}
+	if closed != orderTrackingSweepCloseBudget {
+		t.Fatalf("closed = %d, want %d", closed, orderTrackingSweepCloseBudget)
+	}
+}
+
 func TestOrderTrackingSweepWatchdogAllowsSweepOrderToCleanStaleTracking(t *testing.T) {
 	store := beads.NewMemStore()
 	sweepTracking, err := store.Create(beads.Bead{
