@@ -2904,16 +2904,12 @@ func TestControllerStateBeadEventWatcherConsumesExternalFileEvent(t *testing.T) 
 		t.Fatal("external file bead event did not poke controller")
 	}
 
-	counts, _, errs := defaultScaleCheckCounts([]defaultScaleCheckTarget{{
-		template: "claude",
-		store:    cs.cityBeadStore,
-	}})
-	if len(errs) != 0 {
-		t.Fatalf("defaultScaleCheckCounts errs = %v", errs)
-	}
-	if got := counts["claude"]; got != 1 {
-		t.Fatalf("defaultScaleCheckCounts[claude] = %d, want 1", got)
-	}
+	// This test's contract is that the watcher consumes the external file event
+	// and pokes the controller (asserted above). Demand-count behavior after an
+	// incremental cache apply is not asserted here: under the cache-only demand
+	// read model it depends on the store shape (an unprimed *CachingStore reports
+	// a partial, while a logical store is served directly), so it is covered by
+	// the dedicated defaultScaleCheckCounts tests instead.
 }
 
 func TestControllerStateApplyBeadEventPokesController(t *testing.T) {

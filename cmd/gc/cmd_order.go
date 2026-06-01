@@ -253,12 +253,7 @@ func loadAllOrdersWithCity(stderr io.Writer, cmdName string) (string, *config.Ci
 // loadAllOrders scans all configured orders and applies configured overrides.
 // Callers that execute or list active work should use loadActiveOrders instead.
 func loadAllOrders(cityPath string, cfg *config.City, stderr io.Writer, cmdName string) ([]orders.Order, int) {
-	allAA, err := orderdiscovery.ScanAll(cityPath, cfg, orderdiscovery.ScanOptions{
-		OnRigScanError: func(rigName string, err error) error {
-			fmt.Fprintf(stderr, "%s: rig %s: %v\n", cmdName, rigName, err) //nolint:errcheck // best-effort stderr
-			return nil
-		},
-	})
+	allAA, err := orderdiscovery.ScanAll(cityPath, cfg, orderScanOptions(stderr, cmdName))
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", cmdName, err) //nolint:errcheck // best-effort stderr
 		return nil, 1
@@ -277,12 +272,21 @@ func loadActiveOrdersForCity(cityPath string, cfg *config.City, stderr io.Writer
 // scanAllOrders returns the shared post-override discovery view used by command
 // tests and compatibility call sites.
 func scanAllOrders(cityPath string, cfg *config.City, stderr io.Writer, cmdName string) ([]orders.Order, error) {
-	return orderdiscovery.ScanAll(cityPath, cfg, orderdiscovery.ScanOptions{
+	return orderdiscovery.ScanAll(cityPath, cfg, orderScanOptions(stderr, cmdName))
+}
+
+func orderScanOptions(stderr io.Writer, cmdName string) orderdiscovery.ScanOptions {
+	return orderdiscovery.ScanOptions{
 		OnRigScanError: func(rigName string, err error) error {
 			fmt.Fprintf(stderr, "%s: rig %s: %v\n", cmdName, rigName, err) //nolint:errcheck // best-effort stderr
 			return nil
 		},
-	})
+		OnValidateError: func(orderName string, err error) error {
+			fmt.Fprintf(stderr, "%s: order %s: %v\n", cmdName, orderName, err) //nolint:errcheck // best-effort stderr
+			return nil
+		},
+		ValidateOrder: validateOrderExecEnvOverrides,
+	}
 }
 
 func cityOrderRoots(cityPath string, cfg *config.City) []orders.ScanRoot {
@@ -371,23 +375,24 @@ type orderShowJSON struct {
 }
 
 type orderJSON struct {
-	Name         string `json:"name"`
-	ScopedName   string `json:"scoped_name"`
-	Rig          string `json:"rig,omitempty"`
-	Description  string `json:"description,omitempty"`
-	Type         string `json:"type"`
-	Formula      string `json:"formula,omitempty"`
-	Exec         string `json:"exec,omitempty"`
-	Trigger      string `json:"trigger"`
-	Interval     string `json:"interval,omitempty"`
-	Schedule     string `json:"schedule,omitempty"`
-	Check        string `json:"check,omitempty"`
-	On           string `json:"on,omitempty"`
-	Target       string `json:"target,omitempty"`
-	Timeout      string `json:"timeout,omitempty"`
-	Enabled      bool   `json:"enabled"`
-	Source       string `json:"source,omitempty"`
-	FormulaLayer string `json:"formula_layer,omitempty"`
+	Name         string            `json:"name"`
+	ScopedName   string            `json:"scoped_name"`
+	Rig          string            `json:"rig,omitempty"`
+	Description  string            `json:"description,omitempty"`
+	Type         string            `json:"type"`
+	Formula      string            `json:"formula,omitempty"`
+	Exec         string            `json:"exec,omitempty"`
+	Trigger      string            `json:"trigger"`
+	Interval     string            `json:"interval,omitempty"`
+	Schedule     string            `json:"schedule,omitempty"`
+	Check        string            `json:"check,omitempty"`
+	On           string            `json:"on,omitempty"`
+	Target       string            `json:"target,omitempty"`
+	Timeout      string            `json:"timeout,omitempty"`
+	Enabled      bool              `json:"enabled"`
+	Source       string            `json:"source,omitempty"`
+	FormulaLayer string            `json:"formula_layer,omitempty"`
+	Env          map[string]string `json:"env,omitempty"`
 }
 
 func doOrderListJSON(cityPath string, cfg *config.City, aa []orders.Order, stdout io.Writer) int {
@@ -456,7 +461,17 @@ func orderToJSON(a orders.Order) orderJSON {
 		Enabled:      a.IsEnabled(),
 		Source:       a.Source,
 		FormulaLayer: a.FormulaLayer,
+		Env:          a.Env,
 	}
+}
+
+func sortedOrderEnvKeys(env map[string]string) []string {
+	keys := make([]string, 0, len(env))
+	for key := range env {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 // anyOrderHasRig returns true if any order in the list has a non-empty Rig.
@@ -522,6 +537,12 @@ func doOrderShow(aa []orders.Order, name, rig string, stdout, stderr io.Writer) 
 	}
 	if a.Pool != "" {
 		w(fmt.Sprintf("Target:      %s", a.Pool))
+	}
+	if len(a.Env) > 0 {
+		w("Env:")
+		for _, key := range sortedOrderEnvKeys(a.Env) {
+			w(fmt.Sprintf("  %s=%s", key, a.Env[key]))
+		}
 	}
 	w(fmt.Sprintf("Source:      %s", a.Source))
 	return 0
@@ -979,6 +1000,10 @@ func doOrderCheckWithStoresResolverScopedJSON(cityPath string, cfg *config.City,
 			Orders:        make([]orderCheckJSONRow, 0, len(aa)),
 		}
 		for _, a := range aa {
+			if err := validateOrderCheckPreflight(a); err != nil {
+				fmt.Fprintf(stderr, "gc order check: %v\n", err) //nolint:errcheck // best-effort stderr
+				return 1
+			}
 			stores, err := resolveStores(a)
 			if err != nil {
 				fmt.Fprintf(stderr, "gc order check: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -1044,6 +1069,10 @@ func doOrderCheckWithStoresResolverScopedJSON(cityPath string, cfg *config.City,
 	}
 	anyDue := false
 	for _, a := range aa {
+		if err := validateOrderCheckPreflight(a); err != nil {
+			fmt.Fprintf(stderr, "gc order check: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
 		stores, err := resolveStores(a)
 		if err != nil {
 			fmt.Fprintf(stderr, "gc order check: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -1099,6 +1128,10 @@ func doOrderCheckWithStoresResolverScopedJSON(cityPath string, cfg *config.City,
 		return 0
 	}
 	return 1
+}
+
+func validateOrderCheckPreflight(a orders.Order) error {
+	return validateOrderExecEnvOverrides(a)
 }
 
 // --- gc order history ---

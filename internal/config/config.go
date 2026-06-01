@@ -1507,7 +1507,7 @@ type OrdersConfig struct {
 	Overrides []OrderOverride `toml:"overrides,omitempty"`
 }
 
-// OrderOverride modifies a scanned order's scheduling fields.
+// OrderOverride modifies a scanned order's scheduling fields and exec env.
 // Uses pointer fields to distinguish "not set" from "set to zero value."
 type OrderOverride struct {
 	// Name is the order name to target (required).
@@ -1534,6 +1534,9 @@ type OrderOverride struct {
 	Pool *string `toml:"pool,omitempty"`
 	// Timeout overrides the per-order timeout. Go duration string.
 	Timeout *string `toml:"timeout,omitempty"`
+	// Env adds or overrides environment variables exported into an exec
+	// order's child process.
+	Env map[string]string `toml:"env,omitempty"`
 }
 
 func (o *OrderOverride) normalizeLegacyAliases() {
@@ -2814,7 +2817,7 @@ var poolDemandKeys = []string{"gc.run_target", "gc.routed_to"}
 // interpolated into the nested shell body. That keeps routes containing shell
 // metacharacters as data instead of executable syntax.
 func bdReadyPoolDemandShell(limitFlag string) string {
-	return `bd ready --metadata-field "$key=$target" --unassigned --exclude-type=epic --json ` + limitFlag
+	return `bd ready --include-ephemeral --metadata-field "$key=$target" --unassigned --exclude-type=epic --json ` + limitFlag
 }
 
 func poolDemandKeyListShell() string {
@@ -2822,21 +2825,27 @@ func poolDemandKeyListShell() string {
 }
 
 // poolDemandFirstRowFunctionScript emits the work_query Tier 3 function: it
-// tries each routing key in poolDemandKeys precedence order at --limit=1,
-// printing the first non-empty JSON array and exiting 0. The target comes from
-// the function's first argument, so callers can reuse the same script for both
-// primary and legacy workflow-control routes without embedding dynamic targets
-// inside the shell body.
+// tries each routing key in poolDemandKeys precedence order with native
+// oldest-first sorting, printing the first non-empty JSON array and exiting 0.
+// The target comes from the function's first argument, so callers can reuse
+// the same script for both primary and legacy workflow-control routes without
+// embedding dynamic targets inside the shell body.
 func poolDemandFirstRowFunctionScript() string {
 	return `probe_pool_demand() { ` +
 		`target="$1"; ` +
 		`[ -z "$target" ] && return 1; ` +
 		`for key in ` + poolDemandKeyListShell() + `; do ` +
-		`r=$(` + bdReadyPoolDemandShell("--limit=1") + ` 2>/dev/null); ` +
+		`r=$(` + routedReadyTierCommand() + `); ` +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
 		`done; ` +
 		`return 1; ` +
 		`}; `
+}
+
+func routedReadyTierCommand() string {
+	// The shared predicate stays order-free so the count-form does no wasted
+	// sorting; the worker first-row path asks bd for the oldest candidate.
+	return bdReadyPoolDemandShell("--sort oldest --limit=1") + ` 2>/dev/null`
 }
 
 // poolDemandCountShell emits the reconciler count-form for target: it counts
@@ -2875,12 +2884,12 @@ func (a *Agent) poolDemandTarget() string {
 func standardAssignedWorkQueryScript() string {
 	return `for id in "$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"; do ` +
 		`[ -z "$id" ] && continue; ` +
-		`r=$(bd list --status in_progress --assignee="$id" --exclude-type=epic --json --limit=1 2>/dev/null); ` +
+		`r=$(bd list --include-ephemeral --status in_progress --assignee="$id" --exclude-type=epic --json --limit=1 2>/dev/null); ` +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
 		`done; ` +
 		`for id in "$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"; do ` +
 		`[ -z "$id" ] && continue; ` +
-		`r=$(bd ready --assignee="$id" --exclude-type=epic --json --limit=1 2>/dev/null); ` +
+		`r=$(bd ready --include-ephemeral --assignee="$id" --exclude-type=epic --json --limit=1 2>/dev/null); ` +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
 		`done; `
 }
@@ -2891,7 +2900,7 @@ func legacyControlAssignedWorkQueryScript() string {
 		`legacy=""; case "$id" in *control-dispatcher) legacy="${id%control-dispatcher}workflow-control";; esac; ` +
 		`for cand in "$id" "$legacy"; do ` +
 		`[ -z "$cand" ] && continue; ` +
-		`r=$(bd list --status in_progress --assignee="$cand" --exclude-type=epic --json --limit=1 2>/dev/null); ` +
+		`r=$(bd list --include-ephemeral --status in_progress --assignee="$cand" --exclude-type=epic --json --limit=1 2>/dev/null); ` +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
 		`done; ` +
 		`done; ` +
@@ -2900,7 +2909,7 @@ func legacyControlAssignedWorkQueryScript() string {
 		`legacy=""; case "$id" in *control-dispatcher) legacy="${id%control-dispatcher}workflow-control";; esac; ` +
 		`for cand in "$id" "$legacy"; do ` +
 		`[ -z "$cand" ] && continue; ` +
-		`r=$(bd ready --assignee="$cand" --exclude-type=epic --json --limit=1 2>/dev/null); ` +
+		`r=$(bd ready --include-ephemeral --assignee="$cand" --exclude-type=epic --json --limit=1 2>/dev/null); ` +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
 		`done; ` +
 		`done; `
@@ -3210,7 +3219,7 @@ func (a *Agent) EffectiveOnDeath() string {
 	// (gc.routed_to + --unassigned). If routed metadata is missing entirely,
 	// backfill the fallback route so reopened direct-assigned work does not
 	// stay invisible.
-	return `bd list --assignee=` + a.QualifiedName() +
+	return `bd list --include-ephemeral --assignee=` + a.QualifiedName() +
 		` --status=in_progress --json 2>/dev/null | ` +
 		`jq -r '.[] | [.id, (.metadata["gc.routed_to"] // "")] | @tsv' 2>/dev/null | ` +
 		`while IFS="$(printf '\t')" read -r id current_route; do ` +
@@ -3233,7 +3242,7 @@ func (a *Agent) EffectiveOnBoot() string {
 	if a.PoolName != "" {
 		template = a.PoolName
 	}
-	return `bd list --metadata-field gc.routed_to=` + template +
+	return `bd list --include-ephemeral --metadata-field gc.routed_to=` + template +
 		` --status=in_progress --no-assignee --json 2>/dev/null | ` +
 		`jq -r '.[].id' 2>/dev/null | ` +
 		`xargs -rI{} bd update {} --status open 2>/dev/null`

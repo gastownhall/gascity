@@ -804,7 +804,11 @@ max_active_sessions = 1
 
 func assertSpawnedSpecClosedAndUnrouted(t *testing.T, store beads.Store, rootID, specFor string) {
 	t.Helper()
-	all, err := store.ListByMetadata(map[string]string{"gc.root_bead_id": rootID}, 0, beads.IncludeClosed)
+	all, err := store.List(beads.ListQuery{
+		Metadata:      map[string]string{"gc.root_bead_id": rootID},
+		IncludeClosed: true,
+		TierMode:      beads.TierBoth,
+	})
 	if err != nil {
 		t.Fatalf("ListByMetadata(gc.root_bead_id=%q): %v", rootID, err)
 	}
@@ -1368,7 +1372,7 @@ func TestRetryIdempotencyKeyPreventsDoubleSpawn(t *testing.T) {
 // findAttemptByRef finds a bead with a matching gc.step_ref in the workflow.
 func findAttemptByRef(t *testing.T, store beads.Store, _, stepRef string) beads.Bead {
 	t.Helper()
-	all, err := store.ListOpen()
+	all, err := store.List(beads.ListQuery{AllowScan: true, TierMode: beads.TierBoth})
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}

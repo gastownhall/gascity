@@ -90,7 +90,7 @@ func TestPhase0ConfigDefaults_OnBootUnclaimsRoutedWorkByDefault(t *testing.T) {
 
 	got := a.EffectiveOnBoot()
 	for _, want := range []string{
-		"bd list --metadata-field gc.routed_to=myrig/worker",
+		"bd list --include-ephemeral --metadata-field gc.routed_to=myrig/worker",
 		"--status=in_progress",
 		"--no-assignee",
 		"--status open",
@@ -109,7 +109,7 @@ func TestPhase0ConfigDefaults_OnDeathUnclaimsAssignedWorkByDefault(t *testing.T)
 
 	got := a.EffectiveOnDeath()
 	for _, want := range []string{
-		"bd list --assignee=myrig/worker",
+		"bd list --include-ephemeral --assignee=myrig/worker",
 		"--status=in_progress",
 		"--assignee \"\"",
 	} {

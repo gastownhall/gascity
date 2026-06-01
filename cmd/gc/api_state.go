@@ -979,6 +979,11 @@ func (cs *controllerState) OrdersAll() []orders.Order {
 			log.Printf("gc api: applying order overrides for %s: %v", cs.cityPath, err)
 			return nil
 		},
+		OnValidateError: func(orderName string, err error) error {
+			log.Printf("gc api: skipping invalid order %s for %s: %v", orderName, cs.cityPath, err)
+			return nil
+		},
+		ValidateOrder: validateOrderExecEnvOverrides,
 	})
 	if err != nil {
 		return nil

@@ -407,7 +407,7 @@ managed city Dolt. Do **not** edit `.beads/dolt-server.port` or
 `bd dolt set port` directly; both self-revert.
 
 See the
-[Managed-city Dolt endpoints runbook](../runbooks/managed-city-endpoints.md)
+[Managed-city Dolt endpoints runbook](/runbooks/managed-city-endpoints)
 for the mental model, the forbidden edits, the sanctioned escape
 hatches (`gc rig set-endpoint --inherit`/`--self --force`/`--external`),
 and an end-to-end recovery recipe.

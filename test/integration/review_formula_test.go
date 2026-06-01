@@ -364,7 +364,7 @@ func setupReviewFormulaCity(t *testing.T, mode string, extraEnv map[string]strin
 	cityDir := filepath.Join(t.TempDir(), cityName)
 
 	startCommand := workflowAgentStartCommand(mode, extraEnv)
-	polecatScaleCheck := `ready_json=$(bd ready --metadata-field gc.routed_to=polecat --unassigned --exclude-type=epic --json --limit=0) && printf '%s\n' "$ready_json" | jq 'length'`
+	polecatScaleCheck := `ready_json=$(bd ready --include-ephemeral --metadata-field gc.routed_to=polecat --unassigned --exclude-type=epic --json --limit=0) && printf '%s\n' "$ready_json" | jq 'length'`
 	cityToml := fmt.Sprintf(
 		"[workspace]\nname = %q\n\n[session]\nprovider = \"subprocess\"\n\n[daemon]\nformula_v2 = true\npatrol_interval = \"100ms\"\n\n"+
 			"[[agent]]\nname = \"worker\"\nmax_active_sessions = 1\nstart_command = %q\n\n"+

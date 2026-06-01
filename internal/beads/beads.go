@@ -11,6 +11,10 @@ import (
 // ErrNotFound is returned when a bead ID does not exist in the store.
 var ErrNotFound = errors.New("bead not found")
 
+// ErrCacheUnavailable is returned by cache-only read handles when the cache
+// cannot answer without consulting the backing store.
+var ErrCacheUnavailable = errors.New("bead cache unavailable")
+
 // ErrStoreClosed is returned when a caller uses a bead store after its backing
 // handle has been closed.
 var ErrStoreClosed = errors.New("bead store closed")

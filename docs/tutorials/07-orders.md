@@ -14,7 +14,7 @@ wakes up every 30 seconds (a _tick_), checks the state of the city, and takes
 action. One of the things it does on each tick is evaluate the triggers that
 unblock an order from running. That periodic check is what makes orders work.
 
-We'll pick up where [Tutorial 06](./06-beads.md) left off. You should
+We'll pick up where [Tutorial 06](/tutorials/06-beads) left off. You should
 have `my-city` running with agents and formulas configured.
 
 If you've been dispatching formulas by hand with `gc sling`, orders are the next
@@ -508,7 +508,7 @@ Here's a city with two orders: a frequent lint check (exec, no agent needed) and
 weekly release notes (formula, dispatched to an agent).
 
 Assume you've already created a `worker` agent as in
-[Tutorial 05](./05-formulas.md). The remaining pieces are just the order
+[Tutorial 05](/tutorials/05-formulas). The remaining pieces are just the order
 files and the formula they dispatch.
 
 ```toml

@@ -126,6 +126,27 @@ func TestApplyOverrides(t *testing.T) {
 			},
 		},
 		{
+			name: "env override merges with source env",
+			orders: []Order{
+				{Name: "patrol", Rig: "", Env: map[string]string{"KEEP": "source", "OVERRIDE": "source"}},
+			},
+			overrides: []Override{
+				{Name: "patrol", Rig: "", Env: map[string]string{"OVERRIDE": "city", "ADD": "city"}},
+			},
+			check: func(t *testing.T, aa []Order) {
+				t.Helper()
+				if aa[0].Env["KEEP"] != "source" {
+					t.Errorf("KEEP = %q, want source", aa[0].Env["KEEP"])
+				}
+				if aa[0].Env["OVERRIDE"] != "city" {
+					t.Errorf("OVERRIDE = %q, want city", aa[0].Env["OVERRIDE"])
+				}
+				if aa[0].Env["ADD"] != "city" {
+					t.Errorf("ADD = %q, want city", aa[0].Env["ADD"])
+				}
+			},
+		},
+		{
 			name: "wildcard rig with no matching name still errors",
 			orders: []Order{
 				{Name: "patrol", Rig: "demo"},

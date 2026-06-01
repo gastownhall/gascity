@@ -213,7 +213,7 @@ source = "`+gastownPackDir+`"
 	if code != 0 {
 		t.Fatalf("doOrderRun = %d, want 0; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
 	}
-	runs, err := store.ListByLabel("order-run:digest-generate", 0)
+	runs, err := store.ListByLabel("order-run:digest-generate", 0, beads.WithBothTiers)
 	if err != nil {
 		t.Fatalf("store.ListByLabel(order-run:digest-generate): %v", err)
 	}

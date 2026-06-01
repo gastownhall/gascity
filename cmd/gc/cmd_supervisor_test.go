@@ -4885,6 +4885,25 @@ func TestSupervisorShutdownModeNameHandlesKnownAndUnknownModes(t *testing.T) {
 	}
 }
 
+func TestSupervisorShutdownExitCode(t *testing.T) {
+	tests := []struct {
+		name    string
+		shutErr error
+		want    int
+	}{
+		{name: "clean shutdown exits cleanly", want: 0},
+		{name: "shutdown errors fail", shutErr: errors.New("city failed to stop"), want: 1},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := supervisorShutdownExitCode(tt.shutErr); got != tt.want {
+				t.Fatalf("supervisorShutdownExitCode(%v) = %d, want %d", tt.shutErr, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestSupervisorShutdownModeForSignalPreservesOnlySIGTERMWhenConfigured(t *testing.T) {
 	t.Setenv(supervisorPreserveSessionsOnSignalEnv, "1")
 	if got := supervisorShutdownModeForSignal(syscall.SIGTERM); got != supervisorShutdownPreserveSessions {

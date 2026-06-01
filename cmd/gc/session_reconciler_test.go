@@ -1825,6 +1825,34 @@ func TestReconcileSessionBeads_PoolSlotWithStrandedWorkEmitsDiagnostic(t *testin
 	}
 }
 
+func TestCollectSessionAssignedWorkIncludesAssignedWisp(t *testing.T) {
+	store := beads.NewMemStore()
+	session := beads.Bead{
+		ID: "sess-1",
+		Metadata: map[string]string{
+			"session_name": "worker-session",
+		},
+	}
+	work, err := store.Create(beads.Bead{
+		Title:     "stranded wisp implementation",
+		Type:      "task",
+		Status:    "in_progress",
+		Assignee:  "worker-session",
+		Ephemeral: true,
+	})
+	if err != nil {
+		t.Fatalf("Create wisp work: %v", err)
+	}
+
+	got, err := collectSessionAssignedWork("", nil, store, nil, session)
+	if err != nil {
+		t.Fatalf("collectSessionAssignedWork: %v", err)
+	}
+	if len(got) != 1 || got[0].bead.ID != work.ID {
+		t.Fatalf("collectSessionAssignedWork = %#v, want assigned wisp %s", got, work.ID)
+	}
+}
+
 // throttleKeySetMetadataFailStore wraps a beads.Store and fails any
 // SetMetadata call writing the stranded throttle key. Other writes
 // pass through unmodified. Used by the throttle write-ordering

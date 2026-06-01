@@ -117,7 +117,7 @@ rm -rf ~/qlandia/.beads/backup.old-*
 ### Option C — operator wipe (when the database has shrunk hard)
 
 After running `dolt gc --full` on the source database (see
-[dolt-bloat-recovery.md](dolt-bloat-recovery.md)), the source's noms
+[dolt-bloat-recovery.md](/troubleshooting/dolt-bloat-recovery)), the source's noms
 directory shrinks but the backup remote does not. The full backup
 chain — every chunk ever written — is still on disk in
 `.beads/backup/`.

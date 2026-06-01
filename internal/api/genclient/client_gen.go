@@ -1865,12 +1865,13 @@ type OrderListBody struct {
 
 // OrderResponse defines model for OrderResponse.
 type OrderResponse struct {
-	CaptureOutput bool    `json:"capture_output"`
-	Check         *string `json:"check,omitempty"`
-	Description   *string `json:"description,omitempty"`
-	Enabled       bool    `json:"enabled"`
-	Exec          *string `json:"exec,omitempty"`
-	Formula       *string `json:"formula,omitempty"`
+	CaptureOutput bool               `json:"capture_output"`
+	Check         *string            `json:"check,omitempty"`
+	Description   *string            `json:"description,omitempty"`
+	Enabled       bool               `json:"enabled"`
+	Env           *map[string]string `json:"env,omitempty"`
+	Exec          *string            `json:"exec,omitempty"`
+	Formula       *string            `json:"formula,omitempty"`
 	// Deprecated: this property has been marked as deprecated upstream, but no `x-deprecated-reason` was set
 	Gate       *string `json:"gate,omitempty"`
 	Interval   *string `json:"interval,omitempty"`

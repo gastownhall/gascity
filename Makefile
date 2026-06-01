@@ -264,11 +264,12 @@ test-fsys-darwin-compile:
 ## test-pack-registry-live: run the opt-in gascity-packs registry canary
 test-pack-registry-live:
 	@if [ -z "$${GC_TEST_GASCITY_PACKS_REGISTRY:-}" ]; then \
-		echo "Set GC_TEST_GASCITY_PACKS_REGISTRY to a gascity-packs registry.toml source"; \
-		echo "Example: GC_TEST_GASCITY_PACKS_REGISTRY=/Users/dbox/repos/gc/wt/gascity-packs-public-builtins/registry.toml make test-pack-registry-live"; \
+		echo "Set GC_TEST_GASCITY_PACKS_REGISTRY to main or a gascity-packs registry.toml source"; \
+		echo "Example: GC_TEST_GASCITY_PACKS_REGISTRY=main make test-pack-registry-live"; \
 		exit 2; \
 	fi
 	$(TEST_ENV) GC_TEST_GASCITY_PACKS_REGISTRY="$${GC_TEST_GASCITY_PACKS_REGISTRY}" go test ./cmd/gc -run '^TestPackRegistryLiveGascityPacksCatalog$$' -count=1
+	$(TEST_ENV) GC_TEST_GASCITY_PACKS_REGISTRY="$${GC_TEST_GASCITY_PACKS_REGISTRY}" go test -tags acceptance_a -timeout 10m ./test/acceptance -run '^TestPackRegistryLiveImportsEveryCatalogPack$$' -count=1
 
 ## test-cmd-gc-process: run the full non-short cmd/gc suite, including the
 ## process-backed lifecycle coverage routed out of the default fast loop

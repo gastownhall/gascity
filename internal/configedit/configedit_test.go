@@ -2349,6 +2349,34 @@ func TestMergeOrderOverridePreservesExistingTriggerOnPartialUpdate(t *testing.T)
 	}
 }
 
+func TestMergeOrderOverrideMergesEnv(t *testing.T) {
+	dir := t.TempDir()
+	path := writeTOML(t, dir, minimalCity())
+	ed := configedit.NewEditor(fsys.OSFS{}, path)
+
+	_ = ed.SetOrderOverride(config.OrderOverride{
+		Name: "health-check",
+		Env:  map[string]string{"KEEP": "source", "OVERRIDE": "source"},
+	})
+
+	err := ed.MergeOrderOverride(config.OrderOverride{
+		Name: "health-check",
+		Env:  map[string]string{"OVERRIDE": "city", "ADD": "city"},
+	})
+	if err != nil {
+		t.Fatalf("MergeOrderOverride: %v", err)
+	}
+
+	cfg := readTOML(t, path)
+	if len(cfg.Orders.Overrides) != 1 {
+		t.Fatalf("expected 1 override, got %d", len(cfg.Orders.Overrides))
+	}
+	env := cfg.Orders.Overrides[0].Env
+	if env["KEEP"] != "source" || env["OVERRIDE"] != "city" || env["ADD"] != "city" {
+		t.Fatalf("Env = %+v, want merged env", env)
+	}
+}
+
 func TestDeleteOrderOverride(t *testing.T) {
 	dir := t.TempDir()
 	path := writeTOML(t, dir, minimalCity())

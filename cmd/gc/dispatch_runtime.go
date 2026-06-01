@@ -696,6 +696,10 @@ func workflowServeControlReadyQuery(agentCfg config.Agent, controlSessionNames .
 	query := queryPrefix + ` sh -c '` +
 		`tmp=$(mktemp); trap "rm -f \"$tmp\"" EXIT; ` +
 		`emit_ready() { r=$("$@" 2>/dev/null || true); [ -n "$r" ] && [ "$r" != "[]" ] && printf "%s\n" "$r" >> "$tmp"; }; ` +
+		`routed_ready() { route="$1"; [ -z "$route" ] && return 0; ` +
+		`emit_ready bd --readonly --sandbox ready --include-ephemeral --metadata-field "gc.run_target=$route" --unassigned --exclude-type=epic --json --sort oldest --limit=` + limit + `; ` +
+		`emit_ready bd --readonly --sandbox ready --include-ephemeral --metadata-field "gc.routed_to=$route" --unassigned --exclude-type=epic --json --sort oldest --limit=` + limit + `; ` +
+		`}; ` +
 		`for id in "$GC_CONTROL_SESSION_NAME" "$GC_SESSION_NAME" "$GC_ALIAS" "$GC_CONTROL_TARGET" "$GC_SESSION_ID"; do ` +
 		`[ -z "$id" ] && continue; ` +
 		`legacy=""; case "$id" in *control-dispatcher) legacy="${id%control-dispatcher}workflow-control";; esac; ` +
@@ -704,13 +708,9 @@ func workflowServeControlReadyQuery(agentCfg config.Agent, controlSessionNames .
 		`emit_ready bd --readonly --sandbox ready --assignee="$cand" --json --limit=` + limit + `; ` +
 		`done; ` +
 		`done; ` +
-		`emit_ready bd --readonly --sandbox ready --metadata-field "gc.routed_to=$GC_CONTROL_TARGET" --unassigned --json --limit=` + limit + `; `
-	if legacy := workflowServeLegacyControlRoute(target); legacy != "" {
-		query += `emit_ready bd --readonly --sandbox ready --metadata-field "gc.routed_to=$GC_CONTROL_LEGACY_TARGET" --unassigned --json --limit=` + limit + `; `
-	} else {
-		query += `:; `
-	}
-	query += `[ -s "$tmp" ] && jq -s "reduce add[] as \$item ([]; if any(.[]; .id == \$item.id) then . else . + [\$item] end)" "$tmp" || printf "[]"` + `'`
+		`routed_ready "$GC_CONTROL_TARGET"; ` +
+		`routed_ready "${GC_CONTROL_LEGACY_TARGET:-}"; ` +
+		`[ -s "$tmp" ] && jq -s "reduce add[] as \$item ([]; if any(.[]; .id == \$item.id) then . else . + [\$item] end)" "$tmp" || printf "[]"` + `'`
 	return query
 }
 

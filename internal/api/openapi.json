@@ -4481,6 +4481,12 @@
           "enabled": {
             "type": "boolean"
           },
+          "env": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object"
+          },
           "exec": {
             "type": "string"
           },

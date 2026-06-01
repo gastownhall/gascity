@@ -641,7 +641,7 @@ func unclaimWorkAssignedToRetiredSessionBead(
 	for storeIndex, ownerStore := range workAssignmentStores(store, rigStores) {
 		for _, status := range []string{"open", "in_progress"} {
 			for _, assignee := range identifiers {
-				work, err := ownerStore.List(beads.ListQuery{Assignee: assignee, Status: status, Live: true})
+				work, err := ownerStore.List(beads.ListQuery{Assignee: assignee, Status: status, Live: true, TierMode: beads.TierBoth})
 				if err != nil {
 					fmt.Fprintf(stderr, "session beads: listing work assigned to retired session %s via %q: %v\n", sessionBead.ID, assignee, err) //nolint:errcheck
 					continue
@@ -693,7 +693,7 @@ func reassignWorkAssignedToRetiredSessionBead(
 	for storeIndex, ownerStore := range workAssignmentStores(store, rigStores) {
 		for _, status := range []string{"open", "in_progress"} {
 			for _, assignee := range identifiers {
-				work, err := ownerStore.List(beads.ListQuery{Assignee: assignee, Status: status, Live: true})
+				work, err := ownerStore.List(beads.ListQuery{Assignee: assignee, Status: status, Live: true, TierMode: beads.TierBoth})
 				if err != nil {
 					fmt.Fprintf(stderr, "session beads: listing work assigned to retired session %s via %q: %v\n", retiredSession.ID, assignee, err) //nolint:errcheck
 					continue
@@ -1018,6 +1018,19 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 				bySessionName[sn] = reopened
 				openBeads = append(openBeads, reopened)
 				indexBySessionName[sn] = len(openBeads) - 1
+			}
+		}
+		if exists && poolSlot <= 0 {
+			if slot, err := strconv.Atoi(strings.TrimSpace(b.Metadata["pool_slot"])); err == nil && slot > 0 {
+				poolSlot = slot
+				isPoolInstance = true
+				if managedAlias == "" {
+					if cfgAgent := findAgentByTemplate(cfg, tp.TemplateName); cfgAgent != nil && cfgAgent.UsesCanonicalSingletonPoolIdentity() {
+						managedAlias = cfgAgent.QualifiedName()
+					} else {
+						managedAlias = strings.TrimSpace(b.Metadata["agent_name"])
+					}
+				}
 			}
 		}
 		if !exists {
@@ -1410,6 +1423,16 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 			}
 		}
 		recordAliasConflict := func() {
+			retryDeferredSingleton := false
+			if cfgAgent := findAgentByTemplate(cfg, tp.TemplateName); cfgAgent != nil && cfgAgent.UsesCanonicalSingletonPoolIdentity() {
+				retryDeferredSingleton = strings.TrimSpace(b.Metadata["alias"]) == "" &&
+					strings.TrimSpace(b.Metadata[poolAliasConflictMetadataKey]) == managedAlias
+			}
+			if strings.TrimSpace(b.Metadata[poolAliasConflictMetadataKey]) == managedAlias &&
+				strings.TrimSpace(b.Metadata[poolAliasConflictCountMetadataKey]) != "" &&
+				!retryDeferredSingleton {
+				return
+			}
 			count := 0
 			if existing, err := strconv.Atoi(strings.TrimSpace(b.Metadata[poolAliasConflictCountMetadataKey])); err == nil && existing > 0 {
 				count = existing
@@ -1433,9 +1456,12 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 			appliedWithLock := false
 			lockErr := session.WithCitySessionAliasLock(cityPath, lockAlias, func() error {
 				var err error
-				if isConfiguredNamed {
+				switch {
+				case isConfiguredNamed:
 					err = session.EnsureAliasAvailableWithConfigForOwner(store, cfg, managedAlias, b.ID, tp.ConfiguredNamedIdentity)
-				} else {
+				case isManagedPool && isPoolInstance:
+					err = session.EnsureAliasAvailableWithConfigForOwner(store, cfg, managedAlias, b.ID, managedAlias)
+				default:
 					err = session.EnsureAliasAvailableWithConfig(store, cfg, managedAlias, b.ID)
 				}
 				if err != nil {
@@ -1610,24 +1636,17 @@ func syncDesiredPoolSlots(
 			if tp.Alias != "" && bead.Metadata["alias"] != tp.Alias {
 				continue
 			}
+			if tp.PoolSlot > 0 && usedSlots[tp.PoolSlot] == "" {
+				usedSlots[tp.PoolSlot] = sn
+				slotByName[sn] = tp.PoolSlot
+				continue
+			}
 			slot := existingPoolSlotWithConfig(cfg, agentCfg, openBeads[idx])
 			if slot <= 0 || usedSlots[slot] != "" {
 				continue
 			}
 			usedSlots[slot] = sn
 			slotByName[sn] = slot
-		}
-
-		nextSlot := 1
-		for _, sn := range names {
-			if slotByName[sn] != 0 {
-				continue
-			}
-			for usedSlots[nextSlot] != "" {
-				nextSlot++
-			}
-			usedSlots[nextSlot] = sn
-			slotByName[sn] = nextSlot
 		}
 
 		for _, sn := range names {
@@ -1640,7 +1659,11 @@ func syncDesiredPoolSlots(
 			if tp.Alias != "" && bead.Metadata["alias"] != tp.Alias {
 				continue
 			}
-			wantSlot := strconv.Itoa(slotByName[sn])
+			slot := slotByName[sn]
+			if slot <= 0 {
+				continue
+			}
+			wantSlot := strconv.Itoa(slot)
 			batch := map[string]string{}
 			if bead.Metadata[poolManagedMetadataKey] != boolMetadata(true) {
 				batch[poolManagedMetadataKey] = boolMetadata(true)
@@ -1663,7 +1686,6 @@ func syncDesiredPoolSlots(
 			}
 			openBeads[idx] = bead
 		}
-		_ = template
 	}
 
 	return openBeads

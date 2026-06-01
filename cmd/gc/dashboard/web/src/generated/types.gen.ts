@@ -1848,6 +1848,9 @@ export type OrderResponse = {
     check?: string;
     description?: string;
     enabled: boolean;
+    env?: {
+        [key: string]: string;
+    };
     exec?: string;
     formula?: string;
     /**
