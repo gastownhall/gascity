@@ -20,7 +20,7 @@ The Go test code lives at `internal/benchmarks/coordstore/`:
 | **Workload** | `workload.go`, `workload_soak_test.go`, `lifecycle_plateau_test.go` | Realistic-lifecycle workload (ga-w08fz): main creates with low close rate (long-lived tasks), wisps with high churn (plateau-shaped), batched read/scan patterns. |
 | **Triage** | `triage.go` + test | Phase C report: walks all per-phase artifacts, produces `triage.md` + `triage.json` cross-backend comparison. |
 | **Recorder** | `recorder.go` + test | Timeseries sampler (HeapInuse, RSS, AllocDelta, op-level p99/throughput). |
-| **Adapters** | `adapters/{authorcore,bbolt,couchdb,dolt,hqstore,postgres,sqlite}/` | One per backend; trivial wrappers around `coordstore.StoreAdapter`. External adapters register only when their DSN/URL env vars are set. |
+| **Adapters** | `adapters/{authorcore,bbolt,couchdb,dolt,postgres,sqlite}/` | One per backend; trivial wrappers around `coordstore.StoreAdapter`. External adapters register only when their DSN/URL env vars are set. |
 | **Top-level tests** | `suite_test.go` | `TestBenchmarkSoakPhaseA`, `TestBenchmarkSoakCalibrate`, `TestBenchmarkSoakPhaseB`, `TestBenchmarkSoakTriage`, and `TestBenchmarkSoakDolt` (legacy/baseline). |
 
 ## Gating env vars

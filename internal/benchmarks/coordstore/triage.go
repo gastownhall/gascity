@@ -44,7 +44,6 @@ type TriageReport struct {
 }
 
 var foreverTaxByBackend = map[string]string{
-	"hqstore":    "~9d build + ~15-20d/yr maintain + own crash-recovery bugs",
 	"boltdb":     "~3d + own WAL risk (reversible)",
 	"bbolt":      "~3d + own WAL risk (reversible)",
 	"sqlite-cgo": "~3d (fully reversible)",

@@ -129,7 +129,7 @@ func TestTriageReportWritesJSONAndMarkdownInterpretation(t *testing.T) {
 		GeneratedAt: time.Date(2026, 5, 24, 21, 0, 0, 0, time.UTC),
 		Backends: []TriageBackend{
 			{Name: "badger", GetP99Ms: Percentile{P99: 1}, CreateP99Ms: Percentile{P99: 9}, MailPollP99Ms: Percentile{P99: 2}, RSSCeilingMB: 128, RSSGrowthMBPerHour: 2, GoroutineP99: 30, KillEvents: 2, LostRecords: 0, RecoveryP99Ms: 40, ForeverTax: "~3d (fully reversible)"},
-			{Name: "hqstore", GetP99Ms: Percentile{P99: 3}, CreateP99Ms: Percentile{P99: 4}, MailPollP99Ms: Percentile{P99: 1}, RSSCeilingMB: 256, RSSGrowthMBPerHour: 1, GoroutineP99: 20, KillEvents: 2, LostRecords: 1, RecoveryP99Ms: 30, ForeverTax: "~9d build + ~15-20d/yr maintain + own crash-recovery bugs"},
+			{Name: "sqlite", GetP99Ms: Percentile{P99: 3}, CreateP99Ms: Percentile{P99: 4}, MailPollP99Ms: Percentile{P99: 1}, RSSCeilingMB: 256, RSSGrowthMBPerHour: 1, GoroutineP99: 20, KillEvents: 2, LostRecords: 1, RecoveryP99Ms: 30, ForeverTax: "~3d (fully reversible)"},
 		},
 	}
 
