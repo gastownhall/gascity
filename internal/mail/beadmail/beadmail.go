@@ -255,6 +255,7 @@ type ArchiveFilter struct {
 	From            string
 	SubjectPrefix   string
 	SubjectContains string
+	EmptyBody       bool
 	IncludeRead     bool
 	CaseInsensitive bool
 	Limit           int
@@ -317,6 +318,9 @@ func (p *Provider) ArchiveCandidates(filter ArchiveFilter) ([]mail.Message, erro
 			continue
 		}
 		if !archiveContainsMatches(msg.Subject, filter.SubjectContains, filter.CaseInsensitive) {
+			continue
+		}
+		if filter.EmptyBody && strings.TrimSpace(msg.Body) != "" {
 			continue
 		}
 		matches = append(matches, msg)

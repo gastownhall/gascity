@@ -91,9 +91,11 @@ type mailMessageSummary struct {
 
 type mailArchiveSelectOptions struct {
 	Recipient       string
+	AllRecipients   bool
 	From            string
 	SubjectPrefix   string
 	SubjectContains string
+	EmptyBody       bool
 	Limit           int
 	IncludeRead     bool
 	DryRun          bool
@@ -169,8 +171,9 @@ Use this to dismiss messages without reading them. Each message is removed
 and will no longer appear in mail check or inbox results. When multiple IDs
 are passed, they are archived in input order.
 
-For large advisory backlogs, use --to with --subject-prefix, --subject-contains,
-or --from to archive a bounded matching slice without enumerating IDs by hand.`,
+For large advisory backlogs, use --to or --all-recipients with
+--subject-prefix, --subject-contains, or --from to archive a bounded matching
+slice without enumerating IDs by hand.`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
 			code := 0
@@ -194,9 +197,11 @@ or --from to archive a bounded matching slice without enumerating IDs by hand.`,
 	}
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit JSONL result")
 	cmd.Flags().StringVar(&opts.Recipient, "to", "", "archive matching unread messages addressed to this recipient")
+	cmd.Flags().BoolVar(&opts.AllRecipients, "all-recipients", false, "archive matching messages across all recipients")
 	cmd.Flags().StringVar(&opts.From, "from", "", "archive matching unread messages from this exact sender")
 	cmd.Flags().StringVar(&opts.SubjectPrefix, "subject-prefix", "", "archive matching unread messages whose subject starts with this text")
 	cmd.Flags().StringVar(&opts.SubjectContains, "subject-contains", "", "archive matching unread messages whose subject contains this text")
+	cmd.Flags().BoolVar(&opts.EmptyBody, "empty-body", false, "only archive matching messages whose body is empty")
 	cmd.Flags().IntVar(&opts.Limit, "limit", opts.Limit, "maximum matching messages to archive in this run")
 	cmd.Flags().BoolVar(&opts.IncludeRead, "include-read", false, "include read-but-open messages when selecting by filter")
 	cmd.Flags().BoolVar(&opts.DryRun, "dry-run", false, "list matching messages without archiving them")
@@ -219,9 +224,11 @@ func cmdMailArchiveJSON(args []string, jsonOut bool, stdout, stderr io.Writer) i
 
 func (o mailArchiveSelectOptions) hasSelector() bool {
 	return strings.TrimSpace(o.Recipient) != "" ||
+		o.AllRecipients ||
 		strings.TrimSpace(o.From) != "" ||
 		strings.TrimSpace(o.SubjectPrefix) != "" ||
 		strings.TrimSpace(o.SubjectContains) != "" ||
+		o.EmptyBody ||
 		o.IncludeRead ||
 		o.DryRun
 }
@@ -263,8 +270,12 @@ func doMailArchiveSelectedJSON(mp mail.Provider, rec events.Recorder, args []str
 		return 1
 	}
 	opts.Recipient = strings.TrimSpace(opts.Recipient)
-	if opts.Recipient == "" {
-		fmt.Fprintln(stderr, "gc mail archive: --to is required when using archive filters") //nolint:errcheck // best-effort stderr
+	if opts.Recipient != "" && opts.AllRecipients {
+		fmt.Fprintln(stderr, "gc mail archive: choose either --to or --all-recipients") //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if opts.Recipient == "" && !opts.AllRecipients {
+		fmt.Fprintln(stderr, "gc mail archive: --to or --all-recipients is required when using archive filters") //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	if !opts.hasContentFilter() {
@@ -280,11 +291,16 @@ func doMailArchiveSelectedJSON(mp mail.Provider, rec events.Recorder, args []str
 		fmt.Fprintln(stderr, "gc mail archive: filtered archive requires the beadmail provider") //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	recipients := []string(nil)
+	if !opts.AllRecipients {
+		recipients = []string{opts.Recipient}
+	}
 	filter := beadmail.ArchiveFilter{
-		Recipients:      []string{opts.Recipient},
+		Recipients:      recipients,
 		From:            opts.From,
 		SubjectPrefix:   opts.SubjectPrefix,
 		SubjectContains: opts.SubjectContains,
+		EmptyBody:       opts.EmptyBody,
 		IncludeRead:     opts.IncludeRead,
 		CaseInsensitive: opts.CaseInsensitive,
 		Limit:           opts.Limit,

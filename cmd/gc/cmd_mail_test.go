@@ -2617,6 +2617,56 @@ func TestMailArchiveSelectedIsFilteredAndBounded(t *testing.T) {
 	}
 }
 
+func TestMailArchiveSelectedAllRecipientsEmptyBody(t *testing.T) {
+	store := beads.NewMemStore()
+	mp := beadmail.New(store)
+	first, err := mp.Send("system", "session-a", "context cycle", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := mp.Send("system", "session-b", "context cycle", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	nonEmpty, err := mp.Send("system", "session-c", "context cycle", "handoff context")
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherSubject, err := mp.Send("system", "session-d", "operator note", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doMailArchiveSelected(mp, events.Discard, mailArchiveSelectOptions{
+		AllRecipients:   true,
+		SubjectPrefix:   "context cycle",
+		EmptyBody:       true,
+		Limit:           10,
+		CaseInsensitive: true,
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doMailArchiveSelected = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	for _, id := range []string{first.ID, second.ID} {
+		if !strings.Contains(stdout.String(), "Archived message "+id) {
+			t.Fatalf("stdout = %q, want archive confirmation for %s", stdout.String(), id)
+		}
+		if _, err := store.Get(id); !errors.Is(err, beads.ErrNotFound) {
+			t.Fatalf("Get(%s) err = %v, want ErrNotFound", id, err)
+		}
+	}
+	for _, id := range []string{nonEmpty.ID, otherSubject.ID} {
+		got, err := store.Get(id)
+		if err != nil {
+			t.Fatalf("Get(%s): %v", id, err)
+		}
+		if got.Status != "open" {
+			t.Fatalf("message %s status = %q, want open", id, got.Status)
+		}
+	}
+}
+
 // --- gc mail send --notify ---
 
 func TestMailSendNotifySuccess(t *testing.T) {
