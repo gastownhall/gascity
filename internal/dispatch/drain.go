@@ -614,7 +614,7 @@ func ensureDrainItemRoot(store beads.Store, control, unit, member beads.Bead, co
 		}
 		return candidate.ID, false, nil
 	}
-	vars := make(map[string]string, len(parentVars)+1)
+	vars := make(map[string]string, len(parentVars))
 	for key, value := range parentVars {
 		switch strings.TrimSpace(key) {
 		case "", graphv2.ConvoyIDVar, "issue", "bead_id":
