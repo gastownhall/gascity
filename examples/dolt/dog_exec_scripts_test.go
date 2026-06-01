@@ -2832,6 +2832,7 @@ func TestCompactScriptSkipsNonLocalExternalEndpoint(t *testing.T) {
 	out, err := fixture.run(t, "success",
 		"GC_DOLT_MANAGED_LOCAL=0",
 		"GC_DOLT_HOST=external.example.internal",
+		"GC_DOLT_PORT=3307",
 		"GC_DOLT_COMPACT_THRESHOLD_COMMITS=500",
 		"GC_DOLT_COMPACT_DRY_RUN=1",
 	)
@@ -3041,6 +3042,11 @@ func TestCompactScriptBareGCRefusesQuarantinedDatabase(t *testing.T) {
 	}
 	if !strings.Contains(out, "integrity quarantine marker exists") {
 		t.Fatalf("bare-gc output missing quarantine explanation:\n%s", out)
+	}
+	if !strings.Contains(out, quarantineMarker) ||
+		!strings.Contains(out, "reason=test") ||
+		!strings.Contains(out, "created_at=2026-05-01T00:00:00Z") {
+		t.Fatalf("bare-gc output missing quarantine marker details:\n%s", out)
 	}
 	// Quarantine refusal exits before any dolt query, so the fake dolt log
 	// may not exist. Tolerate that and assert only on presence.
