@@ -2033,6 +2033,54 @@ func TestBuildResumeCommand(t *testing.T) {
 	}
 }
 
+func TestStripResumeFlagArgRoundTripsBuildResumeCommand(t *testing.T) {
+	tests := []struct {
+		name string
+		info Info
+	}{
+		{
+			name: "generated flag style",
+			info: Info{
+				Command:     "claude --dangerously-skip-permissions",
+				Provider:    "claude",
+				SessionKey:  "abc-123",
+				ResumeFlag:  "--resume",
+				ResumeStyle: "flag",
+			},
+		},
+		{
+			name: "generated subcommand style",
+			info: Info{
+				Command:     "codex --model o3",
+				Provider:    "codex",
+				SessionKey:  "abc-123",
+				ResumeFlag:  "resume",
+				ResumeStyle: "subcommand",
+			},
+		},
+		{
+			name: "single token subcommand style",
+			info: Info{
+				Command:     "codex",
+				Provider:    "codex",
+				SessionKey:  "abc-123",
+				ResumeFlag:  "resume",
+				ResumeStyle: "subcommand",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			resume := BuildResumeCommand(tt.info)
+			got := stripResumeFlagArg(resume, tt.info.ResumeFlag, tt.info.ResumeStyle)
+			if got != tt.info.Command {
+				t.Fatalf("stripResumeFlagArg(BuildResumeCommand()) = %q, want %q", got, tt.info.Command)
+			}
+		})
+	}
+}
+
 func TestCreateWithResumeFlagNoSessionIDFlag(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
@@ -4310,6 +4358,97 @@ func TestEnsureRunning_RetriesWhenResumeKeyDiverged(t *testing.T) {
 	}
 	if b.Metadata["continuation_reset_pending"] != "true" {
 		t.Errorf("continuation_reset_pending should be set after diverged-key retry, got %q", b.Metadata["continuation_reset_pending"])
+	}
+}
+
+func TestEnsureRunning_RetriesWhenResumeKeyDivergedKeepsEarlierResumeText(t *testing.T) {
+	store := beads.NewMemStore()
+	base := runtime.NewFake()
+
+	sp := &startupDeathProvider{Fake: base}
+	mgr := NewManager(store, sp)
+
+	info, err := mgr.Create(context.Background(), "worker", "", `claude --label "--resume keep-me"`, "/tmp", "claude", nil, ProviderResume{
+		ResumeFlag:    "--resume",
+		ResumeStyle:   "flag",
+		SessionIDFlag: "--session-id",
+	}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	if err := store.SetMetadata(info.ID, "session_key", "key-B-current"); err != nil {
+		t.Fatalf("SetMetadata session_key: %v", err)
+	}
+	if err := mgr.Suspend(info.ID); err != nil {
+		t.Fatalf("Suspend: %v", err)
+	}
+
+	sp.armed = true
+
+	resumeCommand := `claude --label "--resume keep-me" --resume key-A-diverged`
+	err = mgr.Send(context.Background(), info.ID, "hello", resumeCommand, runtime.Config{WorkDir: "/tmp"})
+	if err != nil {
+		t.Fatalf("Send should recover via fresh start when resume key diverged, got: %v", err)
+	}
+
+	var retryCommand string
+	for _, call := range base.Calls {
+		if call.Method == "Start" && call.Name == info.SessionName {
+			retryCommand = call.Config.Command
+		}
+	}
+	if retryCommand == "" {
+		t.Fatalf("fresh retry Start call not recorded: %#v", base.Calls)
+	}
+	want := `claude --label "--resume keep-me"`
+	if retryCommand != want {
+		t.Fatalf("fresh retry command = %q, want %q", retryCommand, want)
+	}
+}
+
+func TestEnsureRunning_RetriesExplicitResumeCommandWhenResumeKeyDiverged(t *testing.T) {
+	store := beads.NewMemStore()
+	base := runtime.NewFake()
+
+	sp := &startupDeathProvider{Fake: base}
+	mgr := NewManager(store, sp)
+
+	info, err := mgr.Create(context.Background(), "worker", "", "claude --dangerously-skip-permissions", "/tmp", "claude", nil, ProviderResume{
+		ResumeFlag:    "--resume",
+		SessionIDFlag: "--session-id",
+		ResumeCommand: "claude --resume {{.SessionKey}} --dangerously-skip-permissions",
+	}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	if err := store.SetMetadata(info.ID, "session_key", "key-B-current"); err != nil {
+		t.Fatalf("SetMetadata session_key: %v", err)
+	}
+	if err := mgr.Suspend(info.ID); err != nil {
+		t.Fatalf("Suspend: %v", err)
+	}
+
+	sp.armed = true
+
+	resumeCommand := "claude --resume key-A-diverged --dangerously-skip-permissions"
+	err = mgr.Send(context.Background(), info.ID, "hello", resumeCommand, runtime.Config{WorkDir: "/tmp"})
+	if err != nil {
+		t.Fatalf("Send should recover via fresh start when explicit resume_command key diverged, got: %v", err)
+	}
+
+	var retryCommand string
+	for _, call := range base.Calls {
+		if call.Method == "Start" && call.Name == info.SessionName {
+			retryCommand = call.Config.Command
+		}
+	}
+	if retryCommand == "" {
+		t.Fatalf("fresh retry Start call not recorded: %#v", base.Calls)
+	}
+	if want := "claude --dangerously-skip-permissions"; retryCommand != want {
+		t.Fatalf("fresh retry command = %q, want %q", retryCommand, want)
 	}
 }
 
