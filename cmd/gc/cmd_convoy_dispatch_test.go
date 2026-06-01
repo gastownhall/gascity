@@ -1830,7 +1830,7 @@ func TestRunWorkflowServeReturnsControlErrorWithoutQuarantine(t *testing.T) {
 	}
 }
 
-func TestQuarantineControlGraphBeadClosesWithDiagnostics(t *testing.T) {
+func TestQuarantineControlFailureBeadClosesWithDiagnostics(t *testing.T) {
 	store := beads.NewMemStore()
 	control, err := store.Create(beads.Bead{
 		Title:  "control",
@@ -1844,8 +1844,8 @@ func TestQuarantineControlGraphBeadClosesWithDiagnostics(t *testing.T) {
 		t.Fatalf("create control: %v", err)
 	}
 
-	if err := quarantineControlGraphBead(store, control.ID, fmt.Errorf("bad workflow")); err != nil {
-		t.Fatalf("quarantineControlGraphBead: %v", err)
+	if err := quarantineControlFailureBead(store, control.ID, fmt.Errorf("%w: bad workflow", dispatch.ErrControlGraphMalformed)); err != nil {
+		t.Fatalf("quarantineControlFailureBead: %v", err)
 	}
 
 	got, err := store.Get(control.ID)
@@ -1864,6 +1864,15 @@ func TestQuarantineControlGraphBeadClosesWithDiagnostics(t *testing.T) {
 	if got.Metadata["gc.failure_reason"] != "malformed_control_graph" {
 		t.Fatalf("failure_reason = %q, want malformed_control_graph", got.Metadata["gc.failure_reason"])
 	}
+	if got.Metadata["gc.controller_error_class"] != "hard" {
+		t.Fatalf("controller_error_class = %q, want hard", got.Metadata["gc.controller_error_class"])
+	}
+	if got.Metadata["gc.final_disposition"] != "control_quarantined" {
+		t.Fatalf("final_disposition = %q, want control_quarantined", got.Metadata["gc.final_disposition"])
+	}
+	if !strings.Contains(got.Metadata["gc.controller_error"], "bad workflow") {
+		t.Fatalf("controller_error = %q, want bad workflow", got.Metadata["gc.controller_error"])
+	}
 	if got.Metadata["gc.control_quarantined"] != "true" {
 		t.Fatalf("control_quarantined = %q, want true", got.Metadata["gc.control_quarantined"])
 	}
@@ -1878,7 +1887,7 @@ func TestQuarantineControlGraphBeadClosesWithDiagnostics(t *testing.T) {
 	}
 }
 
-func TestQuarantineControlGraphBeadTruncatesReasonAtUTF8Boundary(t *testing.T) {
+func TestQuarantineControlFailureBeadTruncatesReasonAtUTF8Boundary(t *testing.T) {
 	store := beads.NewMemStore()
 	control, err := store.Create(beads.Bead{
 		Title:  "control",
@@ -1892,8 +1901,8 @@ func TestQuarantineControlGraphBeadTruncatesReasonAtUTF8Boundary(t *testing.T) {
 	}
 	reason := strings.Repeat("a", maxControlQuarantineReasonMetadata-1) + "é tail"
 
-	if err := quarantineControlGraphBead(store, control.ID, errors.New(reason)); err != nil {
-		t.Fatalf("quarantineControlGraphBead: %v", err)
+	if err := quarantineControlFailureBead(store, control.ID, errors.New(reason)); err != nil {
+		t.Fatalf("quarantineControlFailureBead: %v", err)
 	}
 
 	got, err := store.Get(control.ID)
@@ -1906,6 +1915,137 @@ func TestQuarantineControlGraphBeadTruncatesReasonAtUTF8Boundary(t *testing.T) {
 	}
 	if !utf8.ValidString(recorded) {
 		t.Fatalf("recorded reason is invalid UTF-8: %q", recorded)
+	}
+}
+
+func TestRunControlDispatcherReturnsTransientControlErrorWithoutQuarantine(t *testing.T) {
+	clearGCEnv(t)
+
+	base := beads.NewMemStore()
+	missingRootID := "gc-missing-root"
+	control, err := base.Create(beads.Bead{
+		Title: "orphan check",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":           "fanout",
+			"gc.root_bead_id":   missingRootID,
+			"gc.root_store_ref": "city:test",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create control: %v", err)
+	}
+	store := transientGetStore{
+		Store:  base,
+		failID: missingRootID,
+		err:    errors.New("bad connection: root lookup timed out"),
+	}
+
+	var stderr bytes.Buffer
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	err = runControlDispatcherWithStoreAndConfig(t.TempDir(), t.TempDir(), store, control, control.ID, cfg, io.Discard, &stderr)
+	if err == nil {
+		t.Fatal("runControlDispatcherWithStoreAndConfig error = nil, want transient error")
+	}
+	if !dispatch.IsTransientControllerError(err) {
+		t.Fatalf("runControlDispatcherWithStoreAndConfig error = %v, want transient classifier match", err)
+	}
+
+	after, err := base.Get(control.ID)
+	if err != nil {
+		t.Fatalf("get control: %v", err)
+	}
+	if after.Status != "open" {
+		t.Fatalf("control status = %q, want open", after.Status)
+	}
+	if got := after.Metadata["gc.control_quarantined"]; got != "" {
+		t.Fatalf("gc.control_quarantined = %q, want empty", got)
+	}
+	if got := after.Metadata["gc.final_disposition"]; got != "" {
+		t.Fatalf("gc.final_disposition = %q, want empty", got)
+	}
+	if slices.Contains(after.Labels, "gc:control-quarantined") {
+		t.Fatalf("labels = %#v, want no gc:control-quarantined", after.Labels)
+	}
+}
+
+type transientGetStore struct {
+	beads.Store
+	failID string
+	err    error
+}
+
+func (s transientGetStore) Get(id string) (beads.Bead, error) {
+	if id == s.failID {
+		return beads.Bead{}, s.err
+	}
+	return s.Store.Get(id)
+}
+
+func TestRunControlDispatcherQuarantineReconcilesScopedControlFailure(t *testing.T) {
+	clearGCEnv(t)
+
+	store := beads.NewMemStore()
+	workflow, err := store.Create(beads.Bead{
+		Title: "workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create workflow: %v", err)
+	}
+	body, err := store.Create(beads.Bead{
+		Title: "scope body",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":         "scope",
+			"gc.root_bead_id": workflow.ID,
+			"gc.scope_ref":    "review-loop.iteration.1",
+			"gc.scope_role":   "body",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create scope body: %v", err)
+	}
+	control, err := store.Create(beads.Bead{
+		Title: "unsupported scoped control",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":         "unknown-control-kind",
+			"gc.root_bead_id": workflow.ID,
+			"gc.scope_ref":    "review-loop.iteration.1",
+			"gc.scope_role":   "member",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create control: %v", err)
+	}
+
+	var stderr bytes.Buffer
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	if err := runControlDispatcherWithStoreAndConfig(t.TempDir(), t.TempDir(), store, control, control.ID, cfg, io.Discard, &stderr); err != nil {
+		t.Fatalf("runControlDispatcherWithStoreAndConfig: %v", err)
+	}
+
+	afterControl, err := store.Get(control.ID)
+	if err != nil {
+		t.Fatalf("get control: %v", err)
+	}
+	if afterControl.Status != "closed" {
+		t.Fatalf("control status = %q, want closed", afterControl.Status)
+	}
+	afterBody, err := store.Get(body.ID)
+	if err != nil {
+		t.Fatalf("get scope body: %v", err)
+	}
+	if afterBody.Status != "closed" {
+		t.Fatalf("scope body status = %q, want closed", afterBody.Status)
+	}
+	if got := afterBody.Metadata["gc.outcome"]; got != "fail" {
+		t.Fatalf("scope body gc.outcome = %q, want fail", got)
 	}
 }
 
@@ -3862,6 +4002,57 @@ func TestRunControlDispatcherQuarantinesMalformedFanoutScopeBody(t *testing.T) {
 		t.Fatalf("labels = %#v, want gc:control-quarantined", after.Labels)
 	}
 	if got := stderr.String(); !strings.Contains(got, "control dispatch: quarantined bead="+fanout.ID) {
+		t.Fatalf("stderr = %q, want quarantine message", got)
+	}
+}
+
+func TestRunControlDispatcherQuarantinesGenericControlFailure(t *testing.T) {
+	clearGCEnv(t)
+
+	store := beads.NewMemStore()
+	control, err := store.Create(beads.Bead{
+		Title: "Unsupported control",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind": "unknown-control-kind",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create control: %v", err)
+	}
+
+	var stderr bytes.Buffer
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	if err := runControlDispatcherWithStoreAndConfig(t.TempDir(), t.TempDir(), store, control, control.ID, cfg, io.Discard, &stderr); err != nil {
+		t.Fatalf("runControlDispatcherWithStoreAndConfig: %v", err)
+	}
+
+	after, err := store.Get(control.ID)
+	if err != nil {
+		t.Fatalf("get control: %v", err)
+	}
+	if after.Status != "closed" {
+		t.Fatalf("control status = %q, want closed", after.Status)
+	}
+	if got := after.Metadata["gc.outcome"]; got != "fail" {
+		t.Fatalf("gc.outcome = %q, want fail", got)
+	}
+	if got := after.Metadata["gc.failure_reason"]; got != "control_dispatch_error" {
+		t.Fatalf("gc.failure_reason = %q, want control_dispatch_error", got)
+	}
+	if got := after.Metadata["gc.control_quarantined"]; got != "true" {
+		t.Fatalf("gc.control_quarantined = %q, want true", got)
+	}
+	if got := after.Metadata["gc.controller_error"]; !strings.Contains(got, "unsupported control bead kind") {
+		t.Fatalf("gc.controller_error = %q, want unsupported control bead kind", got)
+	}
+	if got := after.Metadata["gc.final_disposition"]; got != "control_quarantined" {
+		t.Fatalf("gc.final_disposition = %q, want control_quarantined", got)
+	}
+	if !slices.Contains(after.Labels, "gc:control-quarantined") {
+		t.Fatalf("labels = %#v, want gc:control-quarantined", after.Labels)
+	}
+	if got := stderr.String(); !strings.Contains(got, "control dispatch: quarantined bead="+control.ID) {
 		t.Fatalf("stderr = %q, want quarantine message", got)
 	}
 }

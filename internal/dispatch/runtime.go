@@ -1361,11 +1361,15 @@ func setOutcomeAndClose(store beads.Store, beadID, outcome string) error {
 	})
 }
 
-// reconcileClosedScopeMember re-reads the just-closed bead and delegates to
-// reconcileTerminalScopedMember. Callers invoke it immediately after
+// ReconcileClosedScopeMember re-reads a just-closed bead and delegates to
+// scope reconciliation. Callers invoke it immediately after
 // setOutcomeAndClose, so this relies on the store being read-after-write
 // consistent (true for MemStore today). If a future store becomes eventually
 // consistent, pass the in-memory closed bead directly instead of re-reading.
+func ReconcileClosedScopeMember(store beads.Store, beadID string) (ControlResult, error) {
+	return reconcileClosedScopeMember(store, beadID)
+}
+
 func reconcileClosedScopeMember(store beads.Store, beadID string) (ControlResult, error) {
 	return reconcileClosedScopeMemberWithOptions(store, beadID, ProcessOptions{})
 }

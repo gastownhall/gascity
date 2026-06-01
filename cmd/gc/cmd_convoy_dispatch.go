@@ -241,14 +241,17 @@ func runControlDispatcherWithStoreAndConfig(cityPath, storePath string, store be
 
 	result, err := dispatch.ProcessControl(store, bead, opts)
 	if err != nil {
-		if errors.Is(err, dispatch.ErrControlGraphMalformed) {
-			if quarantineErr := quarantineControlGraphBead(store, beadID, err); quarantineErr != nil {
-				return errors.Join(err, quarantineErr)
-			}
-			_, _ = fmt.Fprintf(stderr, "control dispatch: quarantined bead=%s reason=%v\n", beadID, err)
-			return nil
+		if errors.Is(err, dispatch.ErrControlPending) {
+			return err
 		}
-		return err
+		if dispatch.IsTransientControllerError(err) {
+			return err
+		}
+		if quarantineErr := quarantineControlFailureBead(store, beadID, err); quarantineErr != nil {
+			return errors.Join(err, quarantineErr)
+		}
+		_, _ = fmt.Fprintf(stderr, "control dispatch: quarantined bead=%s reason=%v\n", beadID, err)
+		return nil
 	}
 	if result.Processed {
 		_, _ = fmt.Fprintf(stdout, "control dispatch: bead=%s action=%s", beadID, result.Action)
@@ -263,21 +266,33 @@ func runControlDispatcherWithStoreAndConfig(cityPath, storePath string, store be
 	return nil
 }
 
-func quarantineControlGraphBead(store beads.Store, beadID string, cause error) error {
-	reason := controlQuarantineReason(cause, dispatch.ErrControlGraphMalformed.Error())
+func quarantineControlFailureBead(store beads.Store, beadID string, cause error) error {
+	failureReason := "control_dispatch_error"
+	if errors.Is(cause, dispatch.ErrControlGraphMalformed) {
+		failureReason = "malformed_control_graph"
+	}
+	reason := controlQuarantineReason(cause, failureReason)
 	status := "closed"
-	return store.Update(beadID, beads.UpdateOpts{
+	if err := store.Update(beadID, beads.UpdateOpts{
 		Status: &status,
 		Labels: []string{"gc:control-quarantined"},
 		Metadata: map[string]string{
 			"gc.outcome":                   "fail",
 			"gc.failure_class":             "hard",
-			"gc.failure_reason":            "malformed_control_graph",
+			"gc.failure_reason":            failureReason,
+			"gc.controller_error":          reason,
+			"gc.controller_error_class":    "hard",
+			"gc.controller_retryable":      "",
+			"gc.final_disposition":         "control_quarantined",
 			"gc.control_quarantined":       "true",
 			"gc.control_quarantine_reason": reason,
 			"gc.control_quarantined_at":    workflowTraceNow().UTC().Format(time.RFC3339),
 		},
-	})
+	}); err != nil {
+		return err
+	}
+	_, _ = dispatch.ReconcileClosedScopeMember(store, beadID)
+	return nil
 }
 
 func controlQuarantineReason(cause error, fallback string) string {
