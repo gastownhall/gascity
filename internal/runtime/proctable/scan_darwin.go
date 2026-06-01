@@ -16,6 +16,9 @@ import (
 // ScanBySessionID returns live agent root processes whose environment carries
 // GC_SESSION_ID equal to id. Empty id returns all roots with any GC_SESSION_ID.
 func ScanBySessionID(id string) ([]runtime.LiveRuntime, error) {
+	if _, err := liveScanRoot(); err != nil {
+		return []runtime.LiveRuntime{}, err
+	}
 	records, err := psRecords()
 	if err != nil {
 		return []runtime.LiveRuntime{}, err
@@ -54,6 +57,9 @@ func ScanBySessionID(id string) ([]runtime.LiveRuntime, error) {
 // IsScanRoot reports whether pid is outside its GC_SESSION_ID parent's
 // envelope and should be treated as an agent root.
 func IsScanRoot(pid int) bool {
+	if _, err := liveScanRoot(); err != nil {
+		return false
+	}
 	if pid == 1 {
 		return true
 	}
