@@ -323,6 +323,11 @@ func (s *Server) humaHandleSessionPending(_ context.Context, input *SessionIDInp
 // the per-session SSE pending frame. Per-session probe failures are surfaced
 // as Partial/PartialErrors rather than failing the whole aggregate, so one
 // gone runtime session does not blind the operator to the rest.
+//
+// The probe set is active sessions plus legacy empty-state ("none") beads,
+// which the codebase treats as active for upgrade/bootstrap cities; a live
+// runtime predating the state-metadata field can still hold a pending
+// decision and must not be dropped from the aggregate.
 func (s *Server) humaHandleCityPending(_ context.Context, _ *CityPendingInput) (*ListOutput[cityPendingEntry], error) {
 	store := s.state.CityBeadStore()
 	if store == nil {
@@ -334,8 +339,21 @@ func (s *Server) humaHandleCityPending(_ context.Context, _ *CityPendingInput) (
 	if err != nil {
 		return nil, huma.Error500InternalServerError(err.Error())
 	}
-	// Only active sessions can be awaiting a human decision.
-	sessions := mgr.ListFullFromBeads(all, string(session.StateActive), "").Sessions
+	// Active sessions can be awaiting a human decision — and so can legacy
+	// empty-state ("none") beads, which the codebase treats as active for
+	// upgrade/bootstrap cities (see resolveLiveSessionByPathAlias in
+	// session_resolution.go and the StateNone->StateActive normalization in
+	// session/manager.go). A live runtime predating the state-metadata field
+	// can still hold a PendingInteraction, so it must be probed too. Asleep,
+	// draining, creating, and closed beads stay excluded: they have no live
+	// runtime that could be holding a pending decision. Pending() itself
+	// degrades gracefully (runtime-gone -> no pending), so over-including a
+	// dormant empty-state bead is harmless.
+	// ListFullFromBeads takes a comma-separated state filter; StateNone is the
+	// empty string, so this resolves to "active," — both states, closed beads
+	// still excluded by ListFullFromBeads' status guard.
+	stateFilter := strings.Join([]string{string(session.StateActive), string(session.StateNone)}, ",")
+	sessions := mgr.ListFullFromBeads(all, stateFilter, "").Sessions
 
 	entries := make([]cityPendingEntry, 0, len(sessions))
 	for _, sess := range sessions {
