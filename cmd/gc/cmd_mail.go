@@ -546,8 +546,9 @@ var mailCheckAPIClient = func(cityPath string) (*api.Client, string) {
 
 // routeMailCheck dispatches non-injecting `mail check` to the supervisor API
 // when a controller is up; otherwise falls back to the local mail-provider path.
-// Injecting hooks always use the local path because provider-backed mail may
-// need to perform delivery side effects after successful injection.
+// Injecting hooks probe the API for degraded-read notices, then use the local
+// path because provider-backed mail may need to perform delivery side effects
+// after successful injection.
 // Emits exactly one route=... log line per exit path (gated on GC_DEBUG).
 func routeMailCheck(_ string, args []string, inject bool, hookFormat string, c *api.Client, nilReason string, stdout, stderr io.Writer) int {
 	const cmdName = "mail check"
@@ -556,6 +557,26 @@ func routeMailCheck(_ string, args []string, inject bool, hookFormat string, c *
 		recipient = strings.TrimSpace(args[0])
 	}
 	if inject {
+		if c != nil {
+			cr, err := c.ListMailInbox(recipient, "")
+			if err == nil {
+				if mailListHasPartial(cr.Body) {
+					logRoute(stderr, cmdName, "api", "error")
+					notice := formatMailCheckPartialDegradedNotice()
+					if mailListHasStoreSlowPartial(cr.Body) {
+						notice = formatMailCheckDegradedNotice()
+					}
+					_ = writeProviderHookContextForEvent(stdout, hookFormat, "UserPromptSubmit", notice)
+					return 0
+				}
+			} else if !api.ShouldFallbackForRead(err) {
+				logRoute(stderr, cmdName, "api", "error")
+				if api.IsStoreSlowError(err) {
+					_ = writeProviderHookContextForEvent(stdout, hookFormat, "UserPromptSubmit", formatMailCheckDegradedNotice())
+				}
+				return 0
+			}
+		}
 		logRoute(stderr, cmdName, "fallback", "inject-local-side-effects")
 		return doMailCheckFallback(args, inject, hookFormat, stdout, stderr)
 	}
@@ -564,14 +585,6 @@ func routeMailCheck(_ string, args []string, inject bool, hookFormat string, c *
 		if err == nil {
 			if mailListHasPartial(cr.Body) {
 				logRoute(stderr, cmdName, "api", "error")
-				if inject {
-					notice := formatMailCheckPartialDegradedNotice()
-					if mailListHasStoreSlowPartial(cr.Body) {
-						notice = formatMailCheckDegradedNotice()
-					}
-					_ = writeProviderHookContextForEvent(stdout, hookFormat, "UserPromptSubmit", notice)
-					return 0
-				}
 				fmt.Fprintf(stderr, "gc mail check: %s\n", mailListPartialErrorDetail(cr.Body)) //nolint:errcheck // best-effort stderr
 				return 1
 			}
@@ -580,12 +593,6 @@ func routeMailCheck(_ string, args []string, inject bool, hookFormat string, c *
 		}
 		if !api.ShouldFallbackForRead(err) {
 			logRoute(stderr, cmdName, "api", "error")
-			if inject {
-				if api.IsStoreSlowError(err) {
-					_ = writeProviderHookContextForEvent(stdout, hookFormat, "UserPromptSubmit", formatMailCheckDegradedNotice())
-				}
-				return 0
-			}
 			fmt.Fprintf(stderr, "gc mail check: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
