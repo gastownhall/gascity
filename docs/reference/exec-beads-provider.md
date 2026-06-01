@@ -450,7 +450,7 @@ maps to Gas City's requirements:
 | `Update` | `br update --json <id>` | Has `--description`, `--label` |
 | `Close` | `br close --json <id>` | Direct mapping |
 | `List` | `br list --json` | Has `--limit`, `--all` |
-| `Ready` | `br ready --json` | Open beads |
+| `Ready` | `br ready --json` | Default ready scans only; `gc-beads-br` exits 1 for `ready --include-ephemeral` until br can return ready ephemeral rows |
 | `ListByLabel` | `br list --json --label=X` | Has `--label` filter |
 
 ### Gaps (Script Must Bridge)
@@ -460,6 +460,7 @@ maps to Gas City's requirements:
 | `Children(parentID)` | No `--parent` on create | Script tracks parent→child in sidecar or labels |
 | `SetMetadata(id, key, value)` | No `--set-metadata` | Script uses labels (`meta:key=value`) or sidecar file |
 | `MolCook(formula, title, vars)` | No molecule concept | Script creates root bead + step beads from formula TOML |
+| Wisp-aware `Ready` | No ready query that includes ephemeral rows | Script rejects `ready --include-ephemeral` with exit 1 rather than silently downgrading |
 
 ### Not Needed by Store Interface
 
