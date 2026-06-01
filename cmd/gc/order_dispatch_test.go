@@ -4337,6 +4337,376 @@ func TestSweepStaleOrderTrackingWithWispsClosesOldOpenWispSubtree(t *testing.T) 
 	}
 }
 
+func TestSweepStaleOrderTrackingWithWispsClosesGraphDependentSubtreeViaTrackingSweep(t *testing.T) {
+	store := beads.NewMemStore()
+
+	wispRoot, err := store.Create(beads.Bead{
+		Title:  "mol-seth-patrol",
+		Type:   "task",
+		Labels: []string{"order-run:seth-patrol"},
+		Metadata: map[string]string{
+			"gc.kind": "workflow",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(wisp root): %v", err)
+	}
+	step, err := store.Create(beads.Bead{
+		Title: "Infrastructure patrol",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.root_bead_id": wispRoot.ID,
+			"gc.step_ref":     "mol-seth-patrol.patrol",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(step): %v", err)
+	}
+	if err := store.DepAdd(step.ID, wispRoot.ID, "tracks"); err != nil {
+		t.Fatalf("DepAdd(tracks): %v", err)
+	}
+
+	result, err := sweepStaleOrderTrackingWithOptions(
+		store,
+		wispRoot.CreatedAt.Add(time.Hour),
+		orderFilterForTest("seth-patrol"),
+		true,
+	)
+	if err != nil {
+		t.Fatalf("sweepStaleOrderTrackingWithOptions: %v", err)
+	}
+	if result.wispClosed != 2 {
+		t.Fatalf("wispClosed = %d, want 2", result.wispClosed)
+	}
+
+	for _, id := range []string{wispRoot.ID, step.ID} {
+		got, err := store.Get(id)
+		if err != nil {
+			t.Fatalf("Get(%s): %v", id, err)
+		}
+		if got.Status != "closed" {
+			t.Fatalf("%s status = %q, want closed", id, got.Status)
+		}
+		if got.Metadata["close_reason"] != staleOrderWispCloseReason {
+			t.Fatalf("%s close_reason = %q, want %q", id, got.Metadata["close_reason"], staleOrderWispCloseReason)
+		}
+	}
+}
+
+func TestSweepStaleOrderTrackingWithWispsClosesMetadataGraphSubtreeWithoutCloseOrdering(t *testing.T) {
+	base := beads.NewMemStore()
+
+	wispRoot, err := base.Create(beads.Bead{
+		Title:     "mol-seth-patrol",
+		Type:      "task",
+		Labels:    []string{"order-run:seth-patrol"},
+		Ephemeral: true,
+		Metadata: map[string]string{
+			"gc.kind": "workflow",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(wisp root): %v", err)
+	}
+	step, err := base.Create(beads.Bead{
+		Title:     "Infrastructure patrol",
+		Type:      "task",
+		Ephemeral: true,
+		Metadata: map[string]string{
+			"gc.root_bead_id": wispRoot.ID,
+			"gc.step_ref":     "mol-seth-patrol.patrol",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(step): %v", err)
+	}
+	store := depListFailStore{Store: base, failID: wispRoot.ID}
+
+	result, err := sweepStaleOrderTrackingWithOptions(
+		store,
+		wispRoot.CreatedAt.Add(time.Hour),
+		orderFilterForTest("seth-patrol"),
+		true,
+	)
+	if err != nil {
+		t.Fatalf("sweepStaleOrderTrackingWithOptions: %v", err)
+	}
+	if result.wispClosed != 2 {
+		t.Fatalf("wispClosed = %d, want 2", result.wispClosed)
+	}
+
+	for _, id := range []string{wispRoot.ID, step.ID} {
+		got, err := base.Get(id)
+		if err != nil {
+			t.Fatalf("Get(%s): %v", id, err)
+		}
+		if got.Status != "closed" {
+			t.Fatalf("%s status = %q, want closed", id, got.Status)
+		}
+		if got.Metadata["close_reason"] != staleOrderWispCloseReason {
+			t.Fatalf("%s close_reason = %q, want %q", id, got.Metadata["close_reason"], staleOrderWispCloseReason)
+		}
+	}
+}
+
+func TestSweepStaleOrderTrackingWithWispsMixedLegacyGraphClosesOnlyOwnedSubtree(t *testing.T) {
+	store := beads.NewMemStore()
+
+	metadataRoot, err := store.Create(beads.Bead{
+		Title:     "mol-seth-patrol",
+		Type:      "task",
+		Labels:    []string{"order-run:seth-patrol"},
+		Ephemeral: true,
+		Metadata: map[string]string{
+			"gc.kind": "workflow",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(metadata root): %v", err)
+	}
+	metadataStep, err := store.Create(beads.Bead{
+		Title:     "Metadata-backed step",
+		Type:      "task",
+		Ephemeral: true,
+		Metadata: map[string]string{
+			"gc.root_bead_id": metadataRoot.ID,
+			"gc.step_ref":     "mol-seth-patrol.metadata",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(metadata step): %v", err)
+	}
+
+	legacyRoot, err := store.Create(beads.Bead{
+		Title:     "mol-seth-patrol",
+		Type:      "task",
+		Labels:    []string{"order-run:seth-patrol"},
+		Ephemeral: true,
+		Metadata: map[string]string{
+			"gc.kind": "workflow",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(legacy root): %v", err)
+	}
+	legacyStep, err := store.Create(beads.Bead{
+		Title:     "Legacy graph step",
+		Type:      "task",
+		Ephemeral: true,
+		Metadata: map[string]string{
+			"gc.step_ref": "mol-seth-patrol.legacy",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(legacy step): %v", err)
+	}
+	if err := store.DepAdd(legacyStep.ID, legacyRoot.ID, "tracks"); err != nil {
+		t.Fatalf("DepAdd(legacy tracks): %v", err)
+	}
+
+	result, err := sweepStaleOrderTrackingWithOptions(
+		store,
+		metadataRoot.CreatedAt.Add(time.Hour),
+		orderFilterForTest("seth-patrol"),
+		true,
+	)
+	if err != nil {
+		t.Fatalf("sweepStaleOrderTrackingWithOptions: %v", err)
+	}
+	if result.wispClosed != 2 {
+		t.Fatalf("wispClosed = %d, want 2", result.wispClosed)
+	}
+	for _, id := range []string{metadataRoot.ID, metadataStep.ID} {
+		got, err := store.Get(id)
+		if err != nil {
+			t.Fatalf("Get(%s): %v", id, err)
+		}
+		if got.Status != "closed" {
+			t.Fatalf("%s status = %q, want closed", id, got.Status)
+		}
+	}
+	// Dep-linked beads without gc.root_bead_id ownership metadata are outside
+	// the sweep's close authority (orderWispGraphDependentOwnedByRoot), so the
+	// legacy subtree is conservatively left open for dep-edge reaping.
+	for _, id := range []string{legacyRoot.ID, legacyStep.ID} {
+		got, err := store.Get(id)
+		if err != nil {
+			t.Fatalf("Get(%s): %v", id, err)
+		}
+		if got.Status != "open" {
+			t.Fatalf("unowned legacy wisp %s status = %q, want open", id, got.Status)
+		}
+	}
+}
+
+func TestSweepStaleOrderTrackingDryRunCountsGraphSubtreeWithoutClosing(t *testing.T) {
+	store := beads.NewMemStore()
+
+	tracking, err := store.Create(beads.Bead{
+		Title:     "order:seth-patrol",
+		Labels:    []string{"order-run:seth-patrol", labelOrderTracking},
+		Ephemeral: true,
+	})
+	if err != nil {
+		t.Fatalf("Create(tracking): %v", err)
+	}
+	wispRoot, err := store.Create(beads.Bead{
+		Title:  "mol-seth-patrol",
+		Type:   "task",
+		Labels: []string{"order-run:seth-patrol"},
+		Metadata: map[string]string{
+			"gc.kind": "workflow",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(wisp root): %v", err)
+	}
+	step, err := store.Create(beads.Bead{
+		Title: "Infrastructure patrol",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.root_bead_id": wispRoot.ID,
+			"gc.step_ref":     "mol-seth-patrol.patrol",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(step): %v", err)
+	}
+	if err := store.DepAdd(step.ID, wispRoot.ID, "tracks"); err != nil {
+		t.Fatalf("DepAdd(tracks): %v", err)
+	}
+
+	result, err := sweepStaleOrderTrackingWithOptionsLimitDryRun(
+		store,
+		wispRoot.CreatedAt.Add(time.Hour),
+		time.Minute,
+		orderFilterForTest("seth-patrol"),
+		orderTrackingSweepMetadataInitiator,
+		true,
+		0,
+	)
+	if err != nil {
+		t.Fatalf("sweepStaleOrderTrackingWithOptionsLimitDryRun: %v", err)
+	}
+	if result.trackingClosed != 1 {
+		t.Fatalf("trackingClosed = %d, want 1 dry-run candidate", result.trackingClosed)
+	}
+	if result.wispClosed != 2 {
+		t.Fatalf("wispClosed = %d, want 2 dry-run candidates", result.wispClosed)
+	}
+
+	for _, id := range []string{tracking.ID, wispRoot.ID, step.ID} {
+		got, err := store.Get(id)
+		if err != nil {
+			t.Fatalf("Get(%s): %v", id, err)
+		}
+		if got.Status != "open" {
+			t.Fatalf("%s status after dry-run = %q, want open", id, got.Status)
+		}
+	}
+}
+
+func TestSweepStaleOrderTrackingDryRunSkipsCloseOrdering(t *testing.T) {
+	base := beads.NewMemStore()
+
+	wispRoot, err := base.Create(beads.Bead{
+		Title:  "mol-digest-generate",
+		Type:   "molecule",
+		Labels: []string{"order-run:digest"},
+	})
+	if err != nil {
+		t.Fatalf("Create(wisp root): %v", err)
+	}
+	child, err := base.Create(beads.Bead{
+		Title:    "draft-digest",
+		ParentID: wispRoot.ID,
+	})
+	if err != nil {
+		t.Fatalf("Create(child): %v", err)
+	}
+	store := depListFailStore{Store: base, failID: child.ID}
+
+	result, err := sweepStaleOrderTrackingWithOptionsLimitDryRun(
+		store,
+		wispRoot.CreatedAt.Add(time.Hour),
+		time.Minute,
+		orderFilterForTest("digest"),
+		orderTrackingSweepMetadataInitiator,
+		true,
+		0,
+	)
+	if err != nil {
+		t.Fatalf("sweepStaleOrderTrackingWithOptionsLimitDryRun: %v", err)
+	}
+	if result.wispClosed != 2 {
+		t.Fatalf("wispClosed = %d, want 2 dry-run candidates", result.wispClosed)
+	}
+	for _, id := range []string{wispRoot.ID, child.ID} {
+		got, err := base.Get(id)
+		if err != nil {
+			t.Fatalf("Get(%s): %v", id, err)
+		}
+		if got.Status != "open" {
+			t.Fatalf("%s status after dry-run = %q, want open", id, got.Status)
+		}
+	}
+}
+
+func TestSweepStaleOrderTrackingDryRunUsesRootMetadataDescendants(t *testing.T) {
+	base := beads.NewMemStore()
+
+	wispRoot, err := base.Create(beads.Bead{
+		Title:     "mol-seth-patrol",
+		Type:      "task",
+		Labels:    []string{"order-run:seth-patrol"},
+		Ephemeral: true,
+		Metadata: map[string]string{
+			"gc.kind": "workflow",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(wisp root): %v", err)
+	}
+	step, err := base.Create(beads.Bead{
+		Title:     "Infrastructure patrol",
+		Type:      "task",
+		Ephemeral: true,
+		Metadata: map[string]string{
+			"gc.root_bead_id": wispRoot.ID,
+			"gc.step_ref":     "mol-seth-patrol.patrol",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(step): %v", err)
+	}
+	store := depListFailStore{Store: base, failID: wispRoot.ID}
+
+	result, err := sweepStaleOrderTrackingWithOptionsLimitDryRun(
+		store,
+		wispRoot.CreatedAt.Add(time.Hour),
+		time.Minute,
+		orderFilterForTest("seth-patrol"),
+		orderTrackingSweepMetadataInitiator,
+		true,
+		0,
+	)
+	if err != nil {
+		t.Fatalf("sweepStaleOrderTrackingWithOptionsLimitDryRun: %v", err)
+	}
+	if result.wispClosed != 2 {
+		t.Fatalf("wispClosed = %d, want 2 dry-run candidates", result.wispClosed)
+	}
+	for _, id := range []string{wispRoot.ID, step.ID} {
+		got, err := base.Get(id)
+		if err != nil {
+			t.Fatalf("Get(%s): %v", id, err)
+		}
+		if got.Status != "open" {
+			t.Fatalf("%s status after dry-run = %q, want open", id, got.Status)
+		}
+	}
+}
+
 func TestSweepStaleOrderTrackingWithoutWispsLeavesOpenWispSubtree(t *testing.T) {
 	store := beads.NewMemStore()
 

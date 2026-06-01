@@ -425,6 +425,29 @@ name = "store"
 	}
 }
 
+func TestAutocloseCityPathForStoreRootUsesExplicitCityForExternalRigRuntime(t *testing.T) {
+	configureIsolatedRuntimeEnv(t)
+
+	envCityDir := t.TempDir()
+	if err := ensureScopedFileStoreLayout(envCityDir); err != nil {
+		t.Fatal(err)
+	}
+	writeProviderAwareTestCity(t, envCityDir, `[workspace]
+name = "ambient"
+`)
+	t.Setenv("GC_CITY", envCityDir)
+
+	rigDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(rigDir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	got := autocloseCityPathForStoreRoot(rigDir)
+	if canonicalTestPath(got) != canonicalTestPath(envCityDir) {
+		t.Fatalf("autocloseCityPathForStoreRoot(%q) = %q, want explicit city %q", rigDir, got, envCityDir)
+	}
+}
+
 func TestDoWispAutocloseUsesBeadsDirStoreRoot(t *testing.T) {
 	configureIsolatedRuntimeEnv(t)
 	t.Setenv("GC_BEADS", "file")

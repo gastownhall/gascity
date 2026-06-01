@@ -536,8 +536,17 @@ func orderTrackingSweepTargetsForConfig(cityPath string, cfg *config.City) []ord
 	return targets
 }
 
-func orderTrackingSweepStoresForConfig(cityPath string, cfg *config.City) ([]beads.Store, error) {
+func orderTrackingSweepStoresForConfigTargets(cityPath string, cfg *config.City, requiredTargets map[string][]string) ([]beads.Store, error) {
 	targets := orderTrackingSweepTargetsForConfig(cityPath, cfg)
+	if len(requiredTargets) > 0 {
+		filtered := targets[:0]
+		for _, target := range targets {
+			if _, ok := requiredTargets[orderStoreTargetKey(target.target)]; ok {
+				filtered = append(filtered, target)
+			}
+		}
+		targets = filtered
+	}
 	return orderTrackingSweepStoresFromTargets(targets, func(sweepTarget orderTrackingSweepTarget) (beads.Store, error) {
 		return openStoreAtForCity(sweepTarget.target.ScopeRoot, cityPath)
 	})

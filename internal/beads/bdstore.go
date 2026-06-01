@@ -1803,11 +1803,9 @@ func (s *BdStore) CloseAll(ids []string, metadata map[string]string) (int, error
 
 	// Set metadata on all beads first (before closing, since some stores
 	// prevent metadata writes on closed beads).
-	for _, id := range ids {
-		if len(metadata) > 0 {
-			if err := s.SetMetadataBatch(id, metadata); err != nil {
-				return 0, err
-			}
+	if len(metadata) > 0 {
+		if err := s.setMetadataBatchAll(ids, metadata); err != nil {
+			return 0, err
 		}
 	}
 
@@ -1832,6 +1830,36 @@ func (s *BdStore) CloseAll(ids []string, metadata map[string]string) (int, error
 		return closed, nil
 	}
 	return len(ids), nil
+}
+
+func (s *BdStore) setMetadataBatchAll(ids []string, kvs map[string]string) error {
+	if len(ids) == 0 || len(kvs) == 0 {
+		return nil
+	}
+	args := []string{"update", "--json"}
+	args = append(args, ids...)
+	keys := make([]string, 0, len(kvs))
+	for k := range kvs {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		args = append(args, "--set-metadata", k+"="+kvs[k])
+	}
+	err := s.runBDTransientWrite(args...)
+	if err == nil {
+		return nil
+	}
+	if isBdNotFound(err) {
+		if len(ids) == 1 {
+			return fmt.Errorf("setting metadata on %q: %w", ids[0], ErrNotFound)
+		}
+		return fmt.Errorf("setting metadata on %d beads: %w", len(ids), ErrNotFound)
+	}
+	if len(ids) == 1 {
+		return fmt.Errorf("setting metadata on %q: %w", ids[0], err)
+	}
+	return fmt.Errorf("setting metadata on %d beads: %w", len(ids), err)
 }
 
 // CloseAllWithReason closes multiple beads with one reasoned bd close command

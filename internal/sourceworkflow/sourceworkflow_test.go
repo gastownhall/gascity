@@ -558,6 +558,125 @@ func TestCloseWorkflowSubtreeStampsCloseReason(t *testing.T) {
 	}
 }
 
+func TestCloseSpecSidecarsForRootClosesOnlyOpenSpecs(t *testing.T) {
+	store := beads.NewMemStore()
+	root, err := store.Create(beads.Bead{
+		Title:  "root",
+		Type:   "task",
+		Status: "open",
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(root): %v", err)
+	}
+	spec, err := store.Create(beads.Bead{
+		Title: "Step spec for review",
+		Type:  "spec",
+		Metadata: map[string]string{
+			"gc.kind":         "spec",
+			"gc.root_bead_id": root.ID,
+			"gc.spec_for":     "review",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(spec): %v", err)
+	}
+	work, err := store.Create(beads.Bead{
+		Title: "real workflow work",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.root_bead_id": root.ID,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(work): %v", err)
+	}
+
+	closed, err := CloseSpecSidecarsForRoot(store, root.ID, "")
+	if err != nil {
+		t.Fatalf("CloseSpecSidecarsForRoot: %v", err)
+	}
+	if closed != 1 {
+		t.Fatalf("CloseSpecSidecarsForRoot closed %d beads, want 1", closed)
+	}
+	specAfter, err := store.Get(spec.ID)
+	if err != nil {
+		t.Fatalf("Get(spec): %v", err)
+	}
+	if specAfter.Status != "closed" {
+		t.Fatalf("spec status = %q, want closed", specAfter.Status)
+	}
+	if got := specAfter.Metadata["gc.outcome"]; got != "pass" {
+		t.Fatalf("spec gc.outcome = %q, want pass", got)
+	}
+	if got := specAfter.Metadata["close_reason"]; got != WorkflowSpecSidecarClosedReason {
+		t.Fatalf("spec close_reason = %q, want %q", got, WorkflowSpecSidecarClosedReason)
+	}
+	workAfter, err := store.Get(work.ID)
+	if err != nil {
+		t.Fatalf("Get(work): %v", err)
+	}
+	if workAfter.Status != "open" {
+		t.Fatalf("non-spec workflow bead status = %q, want open", workAfter.Status)
+	}
+}
+
+func TestListWorkflowBeadsQueriesBothTiersForRootOwnedDescendants(t *testing.T) {
+	store := &workflowTierAssertingStore{MemStore: beads.NewMemStore()}
+	root, err := store.Create(beads.Bead{
+		Title: "root",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(root): %v", err)
+	}
+	if _, err := store.Create(beads.Bead{
+		Title:     "Step spec for review",
+		Type:      "spec",
+		NoHistory: true,
+		Metadata: map[string]string{
+			"gc.kind":         "spec",
+			"gc.root_bead_id": root.ID,
+			"gc.spec_for":     "review",
+		},
+	}); err != nil {
+		t.Fatalf("Create(spec): %v", err)
+	}
+
+	matched, err := ListWorkflowBeads(store, root.ID)
+	if err != nil {
+		t.Fatalf("ListWorkflowBeads: %v", err)
+	}
+	if !store.sawRootMetadataQuery {
+		t.Fatal("ListWorkflowBeads did not query gc.root_bead_id descendants")
+	}
+	if len(matched) != 2 {
+		t.Fatalf("ListWorkflowBeads returned %d beads, want root plus spec", len(matched))
+	}
+}
+
+type workflowTierAssertingStore struct {
+	*beads.MemStore
+	sawRootMetadataQuery bool
+}
+
+func (s *workflowTierAssertingStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	if _, ok := query.Metadata["gc.root_bead_id"]; ok {
+		s.sawRootMetadataQuery = true
+		if query.TierMode != beads.TierBoth {
+			return nil, fmt.Errorf("gc.root_bead_id query tier = %v, want TierBoth", query.TierMode)
+		}
+	}
+	return s.MemStore.List(query)
+}
+
 func workflowIDsOf(bs []beads.Bead) []string {
 	out := make([]string, len(bs))
 	for i, b := range bs {

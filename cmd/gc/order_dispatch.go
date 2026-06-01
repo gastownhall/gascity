@@ -1630,6 +1630,22 @@ func storeHasOpenDescendantsByWalk(store beads.Store, rootID string, skip func(b
 	return false, nil
 }
 
+func orderWispMetadataDescendants(reader beads.LiveReader, rootID string, includeClosed bool) ([]beads.Bead, error) {
+	rootID = strings.TrimSpace(rootID)
+	if rootID == "" {
+		return nil, nil
+	}
+	query := beads.ListQuery{
+		Metadata:      map[string]string{"gc.root_bead_id": rootID},
+		IncludeClosed: includeClosed,
+	}
+	descendants, err := reader.List(query)
+	if err != nil {
+		return nil, fmt.Errorf("listing graph metadata descendants for %s: %w", rootID, err)
+	}
+	return descendants, nil
+}
+
 func orderWispParentChildren(reader beads.LiveReader, parentID string) ([]beads.Bead, error) {
 	return reader.List(beads.ListQuery{
 		ParentID:      parentID,
@@ -1926,6 +1942,14 @@ func sweepStaleOrderTrackingAcrossStores(stores []beads.Store, now time.Time, st
 // order-tracking bead closes. Wisp subtree recovery is operator-scoped by
 // order name and closes complete stale subtrees when explicitly requested.
 func sweepStaleOrderTrackingAcrossStoresLimit(stores []beads.Store, now time.Time, staleAfter time.Duration, onlyOrders map[string]struct{}, initiator string, includeWispSubtrees bool, limit int) (orderTrackingSweepResult, error) {
+	return sweepStaleOrderTrackingAcrossStoresLimitMode(stores, now, staleAfter, onlyOrders, initiator, includeWispSubtrees, limit, false)
+}
+
+func sweepStaleOrderTrackingAcrossStoresDryRun(stores []beads.Store, now time.Time, staleAfter time.Duration, onlyOrders map[string]struct{}, includeWispSubtrees bool) (orderTrackingSweepResult, error) {
+	return sweepStaleOrderTrackingAcrossStoresLimitMode(stores, now, staleAfter, onlyOrders, orderTrackingSweepMetadataInitiator, includeWispSubtrees, 0, true)
+}
+
+func sweepStaleOrderTrackingAcrossStoresLimitMode(stores []beads.Store, now time.Time, staleAfter time.Duration, onlyOrders map[string]struct{}, initiator string, includeWispSubtrees bool, limit int, dryRun bool) (orderTrackingSweepResult, error) {
 	if staleAfter <= 0 {
 		return orderTrackingSweepResult{}, fmt.Errorf("stale-after must be positive")
 	}
@@ -1945,7 +1969,7 @@ func sweepStaleOrderTrackingAcrossStoresLimit(stores []beads.Store, now time.Tim
 				break
 			}
 		}
-		partial, err := sweepStaleOrderTrackingWithOptionsLimit(store, now, staleAfter, onlyOrders, initiator, includeWispSubtrees, remainingLimit)
+		partial, err := sweepStaleOrderTrackingWithOptionsLimitMode(store, now, staleAfter, onlyOrders, initiator, includeWispSubtrees, remainingLimit, dryRun)
 		result.trackingClosed += partial.trackingClosed
 		result.wispClosed += partial.wispClosed
 		if err != nil {
@@ -1989,6 +2013,14 @@ func orderTrackingSweepStoreLabel(store beads.Store, index int) string {
 // order-tracking bead closes. Wisp subtree recovery is order-scoped and closes
 // complete stale subtrees when includeWispSubtrees is set.
 func sweepStaleOrderTrackingWithOptionsLimit(store beads.Store, now time.Time, staleAfter time.Duration, onlyOrders map[string]struct{}, initiator string, includeWispSubtrees bool, limit int) (orderTrackingSweepResult, error) {
+	return sweepStaleOrderTrackingWithOptionsLimitMode(store, now, staleAfter, onlyOrders, initiator, includeWispSubtrees, limit, false)
+}
+
+func sweepStaleOrderTrackingWithOptionsLimitDryRun(store beads.Store, now time.Time, staleAfter time.Duration, onlyOrders map[string]struct{}, initiator string, includeWispSubtrees bool, limit int) (orderTrackingSweepResult, error) {
+	return sweepStaleOrderTrackingWithOptionsLimitMode(store, now, staleAfter, onlyOrders, initiator, includeWispSubtrees, limit, true)
+}
+
+func sweepStaleOrderTrackingWithOptionsLimitMode(store beads.Store, now time.Time, staleAfter time.Duration, onlyOrders map[string]struct{}, initiator string, includeWispSubtrees bool, limit int, dryRun bool) (orderTrackingSweepResult, error) {
 	if staleAfter <= 0 {
 		return orderTrackingSweepResult{}, fmt.Errorf("stale-after must be positive")
 	}
@@ -2026,22 +2058,26 @@ func sweepStaleOrderTrackingWithOptionsLimit(store beads.Store, now time.Time, s
 			return result, nil
 		}
 	} else {
-		metadata := map[string]string{
-			"order_tracking_sweep": orderTrackingSweepMetadataReason,
-			"close_reason":         staleOrderTrackingCloseReason,
-		}
-		if initiator != "" {
-			metadata["order_tracking_sweep_by"] = initiator
-		}
-		n, err := closeAndVerifyOrderTrackingBeads(context.Background(), store, ids, metadata)
-		result.trackingClosed = n
-		if err != nil {
-			return result, fmt.Errorf("closing stale order-tracking beads: %w", err)
+		if dryRun {
+			result.trackingClosed = len(ids)
+		} else {
+			metadata := map[string]string{
+				"order_tracking_sweep": orderTrackingSweepMetadataReason,
+				"close_reason":         staleOrderTrackingCloseReason,
+			}
+			if initiator != "" {
+				metadata["order_tracking_sweep_by"] = initiator
+			}
+			n, err := closeAndVerifyOrderTrackingBeads(context.Background(), store, ids, metadata)
+			result.trackingClosed = n
+			if err != nil {
+				return result, fmt.Errorf("closing stale order-tracking beads: %w", err)
+			}
 		}
 	}
 
 	if includeWispSubtrees {
-		n, err := sweepStaleOrderWispSubtrees(store, cutoff, onlyOrders, initiator)
+		n, err := sweepStaleOrderWispSubtreesMode(store, cutoff, onlyOrders, initiator, dryRun)
 		result.wispClosed = n
 		if err != nil {
 			return result, err
@@ -2257,6 +2293,20 @@ func orderTrackingClosedReferenceTime(b beads.Bead) time.Time {
 }
 
 func sweepStaleOrderWispSubtrees(store beads.Store, cutoff time.Time, onlyOrders map[string]struct{}, initiator string) (int, error) {
+	return sweepStaleOrderWispSubtreesMode(store, cutoff, onlyOrders, initiator, false)
+}
+
+func sweepStaleOrderWispSubtreesMode(store beads.Store, cutoff time.Time, onlyOrders map[string]struct{}, initiator string, dryRun bool) (int, error) {
+	batchIDs, handled, err := staleOrderWispSubtreeBatchCloseIDs(store, cutoff, onlyOrders)
+	if err != nil {
+		return 0, err
+	}
+	if handled {
+		if dryRun || len(batchIDs) == 0 {
+			return len(batchIDs), nil
+		}
+		return closeStaleOrderWispIDs(store, batchIDs, initiator)
+	}
 	roots, err := staleOrderWispRoots(store, cutoff, onlyOrders)
 	if err != nil {
 		return 0, err
@@ -2300,10 +2350,17 @@ func sweepStaleOrderWispSubtrees(store beads.Store, cutoff time.Time, onlyOrders
 	if len(ids) == 0 {
 		return 0, nil
 	}
+	if dryRun {
+		return len(ids), nil
+	}
 	ordered, err := closeorder.Order(store, ids)
 	if err != nil {
 		return 0, fmt.Errorf("ordering stale order wisp closes: %w", err)
 	}
+	return closeStaleOrderWispIDs(store, ordered, initiator)
+}
+
+func closeStaleOrderWispIDs(store beads.Store, ids []string, initiator string) (int, error) {
 	metadata := map[string]string{
 		"order_tracking_sweep": orderTrackingSweepMetadataReason,
 		"order_wisp_sweep":     "stale-order-wisp",
@@ -2312,11 +2369,83 @@ func sweepStaleOrderWispSubtrees(store beads.Store, cutoff time.Time, onlyOrders
 	if initiator != "" {
 		metadata["order_tracking_sweep_by"] = initiator
 	}
-	n, err := store.CloseAll(ordered, metadata)
+	n, err := store.CloseAll(ids, metadata)
 	if err != nil {
 		return n, fmt.Errorf("closing stale order wisp subtrees: %w", err)
 	}
 	return n, nil
+}
+
+func staleOrderWispSubtreeBatchCloseIDs(store beads.Store, cutoff time.Time, onlyOrders map[string]struct{}) ([]string, bool, error) {
+	if len(onlyOrders) == 0 {
+		return nil, false, fmt.Errorf("include-wisps requires at least one order name")
+	}
+	all, err := beads.HandlesFor(store).Live.List(beads.ListQuery{
+		CreatedBefore: time.Now().Add(24 * time.Hour),
+	})
+	if err != nil {
+		return nil, false, fmt.Errorf("listing open wisp candidates for order-wisp batch sweep: %w", err)
+	}
+	if len(all) == 0 {
+		return nil, false, nil
+	}
+
+	descendantsByRoot := make(map[string][]beads.Bead)
+	for _, bead := range all {
+		if bead.ID == "" || bead.Status == "closed" {
+			continue
+		}
+		rootID := strings.TrimSpace(bead.Metadata["gc.root_bead_id"])
+		if rootID == "" {
+			continue
+		}
+		descendantsByRoot[rootID] = append(descendantsByRoot[rootID], bead)
+	}
+
+	handled := false
+	ids := make([]string, 0)
+	seenIDs := make(map[string]struct{})
+	for _, root := range all {
+		if root.ID == "" || root.Status == "closed" {
+			continue
+		}
+		if beadLabelsContain(root.Labels, labelOrderTracking) {
+			continue
+		}
+		name, ok := orderNameFromTrackingBead(root)
+		if !ok {
+			continue
+		}
+		if _, ok := onlyOrders[name]; !ok {
+			continue
+		}
+		if root.CreatedAt.IsZero() || !root.CreatedAt.Before(cutoff) {
+			continue
+		}
+		if !isOrderWispRootCandidate(root) {
+			continue
+		}
+		descendants := descendantsByRoot[root.ID]
+		if len(descendants) == 0 && !isOrderRootOnlyWispCandidate(root) {
+			// Legacy graph-v2 wisps may only expose descendants through deps.
+			return nil, false, nil
+		}
+		handled = true
+		subtree := make([]beads.Bead, 0, 1+len(descendants))
+		subtree = append(subtree, root)
+		subtree = append(subtree, descendants...)
+		if !openSubtreeOlderThan(subtree, cutoff) {
+			continue
+		}
+		for _, id := range staleOrderWispSubtreeCloseIDs(subtree) {
+			if _, ok := seenIDs[id]; ok {
+				continue
+			}
+			seenIDs[id] = struct{}{}
+			ids = append(ids, id)
+		}
+	}
+	return ids, handled, nil
 }
 
 func staleOrderWispRoots(store beads.Store, cutoff time.Time, onlyOrders map[string]struct{}) ([]beads.Bead, error) {
@@ -2342,10 +2471,31 @@ func collectOrderWispSubtree(store beads.Store, root beads.Bead) ([]beads.Bead, 
 	if root.ID == "" {
 		return nil, nil
 	}
+	reader := beads.HandlesFor(store).Live
+	if orderWispMayHaveGraphDependents(root) {
+		metadataDescendants, err := orderWispMetadataDescendants(reader, root.ID, true)
+		if err != nil {
+			return nil, err
+		}
+		if len(metadataDescendants) > 0 {
+			out := []beads.Bead{root}
+			seen := map[string]struct{}{root.ID: {}}
+			for _, descendant := range metadataDescendants {
+				if descendant.ID == "" {
+					continue
+				}
+				if _, ok := seen[descendant.ID]; ok {
+					continue
+				}
+				seen[descendant.ID] = struct{}{}
+				out = append(out, descendant)
+			}
+			return out, nil
+		}
+	}
 	seen := map[string]struct{}{root.ID: {}}
 	out := []beads.Bead{root}
 	queue := []string{root.ID}
-	reader := beads.HandlesFor(store).Live
 	for len(queue) > 0 {
 		parentID := queue[0]
 		queue = queue[1:]

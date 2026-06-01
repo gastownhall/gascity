@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 )
 
 func TestWispAutocloseClosesOpenMolecule(t *testing.T) {
@@ -106,6 +107,178 @@ func TestWispAutocloseChecksDescendantsWhenAttachedRootAlreadyClosed(t *testing.
 	}
 	if child.Status != "closed" {
 		t.Fatalf("descendant status = %q, want closed", child.Status)
+	}
+}
+
+func TestWispAutocloseClosesGeneratedSpecsForClosedWorkflowRoot(t *testing.T) {
+	store := beads.NewMemStore()
+	root, err := store.Create(beads.Bead{
+		Title: "workflow root",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(root): %v", err)
+	}
+	spec, err := store.Create(beads.Bead{
+		Title: "Step spec for review",
+		Type:  "spec",
+		Metadata: map[string]string{
+			"gc.kind":         "spec",
+			"gc.root_bead_id": root.ID,
+			"gc.spec_for":     "review",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(spec): %v", err)
+	}
+	work, err := store.Create(beads.Bead{
+		Title: "real workflow work",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.root_bead_id": root.ID,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(work): %v", err)
+	}
+	_ = store.Close(root.ID)
+
+	var stdout bytes.Buffer
+	doWispAutocloseWith(store, root.ID, &stdout)
+
+	if !strings.Contains(stdout.String(), "Auto-closed 1 generated spec bead(s) on "+root.ID) {
+		t.Fatalf("stdout = %q, want generated spec cleanup message", stdout.String())
+	}
+	specAfter, err := store.Get(spec.ID)
+	if err != nil {
+		t.Fatalf("Get(spec): %v", err)
+	}
+	if specAfter.Status != "closed" {
+		t.Fatalf("spec status = %q, want closed", specAfter.Status)
+	}
+	workAfter, err := store.Get(work.ID)
+	if err != nil {
+		t.Fatalf("Get(work): %v", err)
+	}
+	if workAfter.Status != "open" {
+		t.Fatalf("non-spec workflow bead status = %q, want open", workAfter.Status)
+	}
+}
+
+func TestWispAutocloseSkipsGeneratedSpecsForClosedWorkflowChild(t *testing.T) {
+	store := beads.NewMemStore()
+	root, err := store.Create(beads.Bead{
+		Title: "workflow root",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(root): %v", err)
+	}
+	child, err := store.Create(beads.Bead{
+		Title: "workflow child",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.root_bead_id": root.ID,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(child): %v", err)
+	}
+	spec, err := store.Create(beads.Bead{
+		Title: "Step spec for review",
+		Type:  "spec",
+		Metadata: map[string]string{
+			"gc.kind":         "spec",
+			"gc.root_bead_id": root.ID,
+			"gc.spec_for":     "review",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(spec): %v", err)
+	}
+	_ = store.Close(child.ID)
+
+	var stdout bytes.Buffer
+	doWispAutocloseWith(store, child.ID, &stdout)
+
+	if stdout.String() != "" {
+		t.Fatalf("stdout = %q, want no generated spec cleanup message", stdout.String())
+	}
+	specAfter, err := store.Get(spec.ID)
+	if err != nil {
+		t.Fatalf("Get(spec): %v", err)
+	}
+	if specAfter.Status != "open" {
+		t.Fatalf("spec status = %q, want open", specAfter.Status)
+	}
+}
+
+func TestWispAutocloseReadsClosedWorkflowRootFromLiveHandle(t *testing.T) {
+	mem := beads.NewMemStore()
+	root, err := mem.Create(beads.Bead{
+		Title: "workflow root",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(root): %v", err)
+	}
+	spec, err := mem.Create(beads.Bead{
+		Title: "Step spec for review",
+		Type:  "spec",
+		Metadata: map[string]string{
+			"gc.kind":         "spec",
+			"gc.root_bead_id": root.ID,
+			"gc.spec_for":     "review",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(spec): %v", err)
+	}
+	if err := mem.Close(root.ID); err != nil {
+		t.Fatalf("Close(root): %v", err)
+	}
+	store := wrapStoreWithBeadPolicies(staleCachedWispStore{MemStore: mem}, &config.City{})
+
+	var stdout bytes.Buffer
+	doWispAutocloseWith(store, root.ID, &stdout)
+
+	if !strings.Contains(stdout.String(), "Auto-closed 1 generated spec bead(s) on "+root.ID) {
+		t.Fatalf("stdout = %q, want generated spec cleanup message", stdout.String())
+	}
+	specAfter, err := mem.Get(spec.ID)
+	if err != nil {
+		t.Fatalf("Get(spec): %v", err)
+	}
+	if specAfter.Status != "closed" {
+		t.Fatalf("spec status = %q, want closed", specAfter.Status)
+	}
+}
+
+type staleCachedWispStore struct {
+	*beads.MemStore
+}
+
+func (s staleCachedWispStore) Get(_ string) (beads.Bead, error) {
+	return beads.Bead{}, beads.ErrCacheUnavailable
+}
+
+func (s staleCachedWispStore) Handles() beads.StoreHandles {
+	return beads.StoreHandles{
+		Cached: s,
+		Live:   s.MemStore,
+		Writer: s.MemStore,
 	}
 }
 

@@ -1791,6 +1791,12 @@ func convoyAutocloseStoreRoot(cwd string) string {
 // supervising process.
 func autocloseCityPathForStoreRoot(storeRoot string) string {
 	if cityPath, err := findCity(storeRoot); err == nil {
+		if _, statErr := os.Stat(filepath.Join(cityPath, "city.toml")); statErr == nil {
+			return cityPath
+		}
+		if explicitCity, ok := resolveExplicitCityPathEnv(); ok {
+			return explicitCity
+		}
 		return cityPath
 	}
 	return cityForStoreDir(storeRoot)

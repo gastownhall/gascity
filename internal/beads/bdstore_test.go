@@ -1311,6 +1311,32 @@ func TestBdStoreCloseAllReturnsMetadataWriteFailure(t *testing.T) {
 	}
 }
 
+func TestBdStoreCloseAllWritesSharedMetadataInSingleBatch(t *testing.T) {
+	runner := fakeRunner(map[string]struct {
+		out []byte
+		err error
+	}{
+		`bd update --json bd-1 bd-2 --set-metadata source=wave1`: {
+			out: []byte(`[]`),
+		},
+		`bd close --force --json bd-1 bd-2`: {
+			out: []byte(`[
+				{"id":"bd-1","title":"one","status":"closed","issue_type":"task","created_at":"2025-01-15T10:30:00Z"},
+				{"id":"bd-2","title":"two","status":"closed","issue_type":"task","created_at":"2025-01-15T10:30:00Z"}
+			]`),
+		},
+	})
+
+	s := beads.NewBdStore("/city", runner)
+	closed, err := s.CloseAll([]string{"bd-1", "bd-2"}, map[string]string{"source": "wave1"})
+	if err != nil {
+		t.Fatalf("CloseAll: %v", err)
+	}
+	if closed != 2 {
+		t.Fatalf("closed = %d, want 2", closed)
+	}
+}
+
 func TestBdStoreCloseAllReturnsPartialCountAndErrorOnFallbackFailure(t *testing.T) {
 	batchErr := errors.New("batch close failed")
 	individualErr := errors.New("single close failed")
