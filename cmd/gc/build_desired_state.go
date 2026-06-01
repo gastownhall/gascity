@@ -2934,6 +2934,9 @@ func stampRunSessionIdentity(workBeads []beads.Bead, workStores []beads.Store, s
 		return
 	}
 	sessionByAssignee := buildSessionAssigneeIndex(sessionBeads)
+	// Roots stamped this pass, so a multi-step run's shared root is resolved
+	// once rather than per step.
+	stampedRoots := map[string]struct{}{}
 	for i, wb := range workBeads {
 		if wb.Status != "in_progress" {
 			continue
@@ -2953,6 +2956,9 @@ func stampRunSessionIdentity(workBeads []beads.Bead, workStores []beads.Store, s
 		sb := match.bead
 		sessionName := sessionBeadIdentifier(sb)
 		workDir := strings.TrimSpace(sb.Metadata["work_dir"])
+		if sessionName == "" && workDir == "" {
+			continue
+		}
 		patch := map[string]string{}
 		if sessionName != "" && strings.TrimSpace(wb.Metadata["gc.session_name"]) != sessionName {
 			patch["gc.session_name"] = sessionName
@@ -2960,12 +2966,52 @@ func stampRunSessionIdentity(workBeads []beads.Bead, workStores []beads.Store, s
 		if workDir != "" && strings.TrimSpace(wb.Metadata["gc.work_dir"]) != workDir {
 			patch["gc.work_dir"] = workDir
 		}
-		if len(patch) == 0 {
-			continue
+		if len(patch) > 0 {
+			if err := store.SetMetadataBatch(wb.ID, patch); err != nil && stderr != nil {
+				fmt.Fprintf(stderr, "stampRunSessionIdentity: %s: %v\n", wb.ID, err) //nolint:errcheck
+			}
 		}
-		if err := store.SetMetadataBatch(wb.ID, patch); err != nil && stderr != nil {
-			fmt.Fprintf(stderr, "stampRunSessionIdentity: %s: %v\n", wb.ID, err) //nolint:errcheck
-		}
+		// Propagate to the run root. The molecule root (gc.kind=workflow) is a
+		// control-lane bead — never in_progress+assigned — so it is not in
+		// workBeads and route-time stamping skips it for pool agents. The
+		// dashboard's root-only snapshot reads the root's own metadata, so a
+		// worked step back-fills its root via gc.root_bead_id. (#2843)
+		stampRunRootFromStep(store, wb, sessionName, workDir, stampedRoots, stderr)
+	}
+}
+
+// stampRunRootFromStep copies a step's resolved session_name/work_dir onto its
+// workflow root (gc.root_bead_id), once per root per pass. Idempotent: it reads
+// the root and writes only the keys that differ. Best-effort — a root that is
+// in another store, already gone, or already stamped is silently skipped (a
+// cross-store root gets stamped on its own store's reconcile pass).
+func stampRunRootFromStep(store beads.Store, step beads.Bead, sessionName, workDir string, stampedRoots map[string]struct{}, stderr io.Writer) {
+	rootID := strings.TrimSpace(step.Metadata["gc.root_bead_id"])
+	if rootID == "" || rootID == step.ID {
+		return
+	}
+	if _, done := stampedRoots[rootID]; done {
+		return
+	}
+	root, err := store.Get(rootID)
+	if err != nil {
+		// Cross-store / missing / transient — do NOT mark stamped, so a later
+		// step this pass (or a later reconcile) can retry resolving the root.
+		return
+	}
+	stampedRoots[rootID] = struct{}{}
+	patch := map[string]string{}
+	if sessionName != "" && strings.TrimSpace(root.Metadata["gc.session_name"]) != sessionName {
+		patch["gc.session_name"] = sessionName
+	}
+	if workDir != "" && strings.TrimSpace(root.Metadata["gc.work_dir"]) != workDir {
+		patch["gc.work_dir"] = workDir
+	}
+	if len(patch) == 0 {
+		return
+	}
+	if err := store.SetMetadataBatch(rootID, patch); err != nil && stderr != nil {
+		fmt.Fprintf(stderr, "stampRunSessionIdentity root %s: %v\n", rootID, err) //nolint:errcheck
 	}
 }
 

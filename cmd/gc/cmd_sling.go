@@ -1180,6 +1180,12 @@ func decorateGraphWorkflowRecipe(recipe *formula.Recipe, routeVars map[string]st
 			// (fixes #2763; gc.run_target retired as a wire field — ga-eld2x).
 			step.Metadata["gc.routed_to"] = routedTo
 			delete(step.Metadata, "gc.run_target")
+			if sessionName != "" {
+				// Mirror graphroute's root #2843 session stamp so this CLI-local
+				// decorator stays in sync. Non-root steps already delegate to
+				// graphroute via assignGraphStepRoute.
+				step.Metadata["gc.session_name"] = sessionName
+			}
 			continue
 		}
 		if sling.IsWorkflowTopologyKind(step.Metadata["gc.kind"]) {

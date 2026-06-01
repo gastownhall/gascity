@@ -255,6 +255,11 @@ func TestDecorateGraphWorkflowRecipe_SetsRootMetadata(t *testing.T) {
 	if _, ok := root.Metadata["gc.run_target"]; ok {
 		t.Errorf("root still carries retired gc.run_target = %q", root.Metadata["gc.run_target"])
 	}
+	// #2843: the run root carries a durable session back-reference (the
+	// dashboard root-only snapshot reads this) for single-session agents.
+	if root.Metadata["gc.session_name"] != "test--mayor" {
+		t.Errorf("root gc.session_name = %q, want test--mayor", root.Metadata["gc.session_name"])
+	}
 	if root.Metadata["gc.source_bead_id"] != "src-1" {
 		t.Errorf("root gc.source_bead_id = %q, want src-1", root.Metadata["gc.source_bead_id"])
 	}

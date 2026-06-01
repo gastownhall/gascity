@@ -135,8 +135,16 @@ func parseGraphStepRouteTarget(step *formula.RecipeStep, routeVars map[string]st
 
 // ApplyGraphRouteBinding sets the routing metadata on a recipe step.
 func ApplyGraphRouteBinding(step *formula.RecipeStep, binding GraphRouteBinding) {
+	// Clear any prior session back-references so the metadata always matches
+	// the current binding when a step is re-decorated (#2843).
+	delete(step.Metadata, "gc.session_name")
+	delete(step.Metadata, "gc.session_id")
 	if binding.DirectSessionID != "" {
 		delete(step.Metadata, "gc.routed_to")
+		// Durably record the bound session so consumers (e.g. the dashboard
+		// run-detail session/diff views) can resolve the step's session after
+		// the transient Assignee is cleared on close. (#2843)
+		step.Metadata["gc.session_id"] = binding.DirectSessionID
 		step.Assignee = binding.DirectSessionID
 		return
 	}
@@ -144,6 +152,12 @@ func ApplyGraphRouteBinding(step *formula.RecipeStep, binding GraphRouteBinding)
 	if binding.MetadataOnly {
 		step.Assignee = ""
 		return
+	}
+	if binding.SessionName != "" {
+		// Durable session back-reference for single-session agents (#2843).
+		// Pool agents resolve MetadataOnly above and bind a concrete session
+		// only when a slot claims the step — out of scope for route-time.
+		step.Metadata["gc.session_name"] = binding.SessionName
 	}
 	step.Assignee = binding.SessionName
 }
@@ -153,13 +167,19 @@ func ApplyGraphRouteBinding(step *formula.RecipeStep, binding GraphRouteBinding)
 // "work for this config queue"; using it for a named dispatcher would create
 // config-routed work instead of delivering to the known dispatcher session.
 func ApplyGraphControlRouteBinding(step *formula.RecipeStep, binding GraphRouteBinding) {
+	// Clear any prior session back-references so the metadata matches the
+	// current binding when a control step is re-decorated (#2843).
+	delete(step.Metadata, "gc.session_name")
+	delete(step.Metadata, "gc.session_id")
 	if binding.DirectSessionID != "" {
 		delete(step.Metadata, "gc.routed_to")
+		step.Metadata["gc.session_id"] = binding.DirectSessionID
 		step.Assignee = binding.DirectSessionID
 		return
 	}
 	if binding.SessionName != "" {
 		delete(step.Metadata, "gc.routed_to")
+		step.Metadata["gc.session_name"] = binding.SessionName
 		step.Assignee = binding.SessionName
 		return
 	}
@@ -448,6 +468,11 @@ func DecorateGraphWorkflowRecipe(recipe *formula.Recipe, routeVars map[string]st
 			// (fixes #2763; gc.run_target retired as a wire field — ga-eld2x).
 			step.Metadata["gc.routed_to"] = routedTo
 			delete(step.Metadata, "gc.run_target")
+			if sessionName != "" {
+				// Durable session back-reference on the run root for
+				// single-session agents (#2843). Empty for pool agents.
+				step.Metadata["gc.session_name"] = sessionName
+			}
 			if sourceBeadID != "" {
 				step.Metadata["gc.source_bead_id"] = sourceBeadID
 				if rootStoreRef != "" {
