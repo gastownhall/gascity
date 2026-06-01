@@ -84,7 +84,7 @@ fi
 # original guard for the upstream GC/writer deadlock fixed in dolthub/dolt
 # commit ccf7bde206 (PR #10876) and keeps managed backup sync on the pinned
 # Dolt release line.
-required="2.0.7"
+required="2.1.0"
 
 parse_dolt_version() {
     local input="$1"

@@ -126,16 +126,16 @@ func runDoctorCheck(t *testing.T, sandboxBin string) (int, string) {
 	return 0, ""
 }
 
-// TestDoctorCheckVersionFloor exercises the dolt >= 2.0.7
+// TestDoctorCheckVersionFloor exercises the dolt >= 2.1.0
 // version gate. The original gate guards against an
 // upstream GC/writer deadlock fixed in dolthub/dolt commit
 // ccf7bde206 (PR #10876) — older binaries hang sql-server during
 // dolt_backup('sync', ...) under heavy commit load. The gate must:
 //
 //  1. Reject older pinned releases and the prior patch.
-//  2. Accept the boundary 2.0.7 exactly.
-//  3. Accept versions where a segment is multi-digit (2.0.10);
-//     lexical string comparison would order 2.0.10 before 2.0.7.
+//  2. Accept the boundary 2.1.0 exactly.
+//  3. Accept versions where a segment is multi-digit (2.1.10);
+//     lexical string comparison would order 2.1.10 before 2.1.0.
 //  4. Accept later minors and majors.
 //  5. Reject pre-release/dev builds at the floor, while accepting
 //     build metadata on a final release.
@@ -155,89 +155,95 @@ func TestDoctorCheckVersionFloor(t *testing.T) {
 			name:        "previous pinned 2.0.3 rejected",
 			version:     "dolt version 2.0.3",
 			wantExit:    2,
-			wantContain: []string{"too old", "2.0.3", "2.0.7", "ccf7bde206"},
+			wantContain: []string{"too old", "2.0.3", "2.1.0", "ccf7bde206"},
 		},
 		{
-			name:        "previous patch 2.0.6 rejected",
-			version:     "dolt version 2.0.6",
-			wantExit:    2,
-			wantContain: []string{"too old", "2.0.6", "2.0.7", "ccf7bde206"},
-		},
-		{
-			name:        "boundary 2.0.7 accepted",
+			name:        "previous floor 2.0.7 rejected",
 			version:     "dolt version 2.0.7",
-			wantExit:    0,
-			wantContain: []string{"dolt available", "2.0.7", "flock ok", "lsof ok"},
-			wantOmit:    []string{"too old"},
+			wantExit:    2,
+			wantContain: []string{"too old", "2.0.7", "2.1.0", "ccf7bde206"},
 		},
 		{
-			name:        "multi-digit patch 2.0.10 accepted",
+			name:        "previous multi-digit patch 2.0.10 rejected",
 			version:     "dolt version 2.0.10",
-			wantExit:    0,
-			wantContain: []string{"dolt available", "2.0.10"},
-			wantOmit:    []string{"too old"},
+			wantExit:    2,
+			wantContain: []string{"too old", "2.0.10", "2.1.0", "ccf7bde206"},
 		},
 		{
-			name:        "later minor 2.1.0 accepted",
+			name:        "boundary 2.1.0 accepted",
 			version:     "dolt version 2.1.0",
 			wantExit:    0,
-			wantContain: []string{"dolt available", "2.1.0"},
+			wantContain: []string{"dolt available", "2.1.0", "flock ok", "lsof ok"},
 			wantOmit:    []string{"too old"},
 		},
 		{
-			name:        "pre-release 2.0.7-rc1 rejected",
-			version:     "dolt version 2.0.7-rc1",
-			wantExit:    2,
-			wantContain: []string{"pre-release", "2.0.7-rc1", "2.0.7"},
-			wantOmit:    []string{"dolt available"},
+			name:        "multi-digit patch 2.1.10 accepted",
+			version:     "dolt version 2.1.10",
+			wantExit:    0,
+			wantContain: []string{"dolt available", "2.1.10"},
+			wantOmit:    []string{"too old"},
 		},
 		{
-			name:        "pre-release with build metadata 2.0.7-rc1+build.5 rejected",
-			version:     "dolt version 2.0.7-rc1+build.5",
-			wantExit:    2,
-			wantContain: []string{"pre-release", "2.0.7-rc1+build.5", "2.0.7"},
-			wantOmit:    []string{"dolt available"},
+			name:        "later minor 2.2.0 accepted",
+			version:     "dolt version 2.2.0",
+			wantExit:    0,
+			wantContain: []string{"dolt available", "2.2.0"},
+			wantOmit:    []string{"too old"},
 		},
 		{
-			name:        "dev build 2.0.7-dev rejected",
-			version:     "dolt version 2.0.7-dev.0",
-			wantExit:    2,
-			wantContain: []string{"pre-release", "2.0.7-dev.0", "2.0.7"},
-			wantOmit:    []string{"dolt available"},
-		},
-		{
-			name:        "pre-release above floor 2.0.8-rc1 rejected",
-			version:     "dolt version 2.0.8-rc1",
-			wantExit:    2,
-			wantContain: []string{"pre-release", "2.0.8-rc1", "2.0.7"},
-			wantOmit:    []string{"dolt available"},
-		},
-		{
-			name:        "pre-release later minor 2.1.0-rc1 rejected",
+			name:        "pre-release 2.1.0-rc1 rejected",
 			version:     "dolt version 2.1.0-rc1",
 			wantExit:    2,
-			wantContain: []string{"pre-release", "2.1.0-rc1", "2.0.7"},
+			wantContain: []string{"pre-release", "2.1.0-rc1", "2.1.0"},
 			wantOmit:    []string{"dolt available"},
 		},
 		{
-			name:        "build metadata on 2.0.7 accepted",
-			version:     "dolt version 2.0.7+build.5",
+			name:        "pre-release with build metadata 2.1.0-rc1+build.5 rejected",
+			version:     "dolt version 2.1.0-rc1+build.5",
+			wantExit:    2,
+			wantContain: []string{"pre-release", "2.1.0-rc1+build.5", "2.1.0"},
+			wantOmit:    []string{"dolt available"},
+		},
+		{
+			name:        "dev build 2.1.0-dev rejected",
+			version:     "dolt version 2.1.0-dev.0",
+			wantExit:    2,
+			wantContain: []string{"pre-release", "2.1.0-dev.0", "2.1.0"},
+			wantOmit:    []string{"dolt available"},
+		},
+		{
+			name:        "pre-release above floor 2.1.1-rc1 rejected",
+			version:     "dolt version 2.1.1-rc1",
+			wantExit:    2,
+			wantContain: []string{"pre-release", "2.1.1-rc1", "2.1.0"},
+			wantOmit:    []string{"dolt available"},
+		},
+		{
+			name:        "pre-release later minor 2.2.0-rc1 rejected",
+			version:     "dolt version 2.2.0-rc1",
+			wantExit:    2,
+			wantContain: []string{"pre-release", "2.2.0-rc1", "2.1.0"},
+			wantOmit:    []string{"dolt available"},
+		},
+		{
+			name:        "build metadata on 2.1.0 accepted",
+			version:     "dolt version 2.1.0+build.5",
 			wantExit:    0,
-			wantContain: []string{"dolt available", "2.0.7+build.5"},
+			wantContain: []string{"dolt available", "2.1.0+build.5"},
 			wantOmit:    []string{"too old", "pre-release"},
 		},
 		{
-			name:        "hyphenated build metadata on 2.0.7 accepted",
-			version:     "dolt version 2.0.7+build-5",
+			name:        "hyphenated build metadata on 2.1.0 accepted",
+			version:     "dolt version 2.1.0+build-5",
 			wantExit:    0,
-			wantContain: []string{"dolt available", "2.0.7+build-5"},
+			wantContain: []string{"dolt available", "2.1.0+build-5"},
 			wantOmit:    []string{"too old", "pre-release"},
 		},
 		{
-			name:        "v-prefixed 2.0.7 accepted",
-			version:     "dolt version v2.0.7",
+			name:        "v-prefixed 2.1.0 accepted",
+			version:     "dolt version v2.1.0",
 			wantExit:    0,
-			wantContain: []string{"dolt available", "v2.0.7", "flock ok", "lsof ok"},
+			wantContain: []string{"dolt available", "v2.1.0", "flock ok", "lsof ok"},
 			wantOmit:    []string{"too old", "unrecognized"},
 		},
 		{
@@ -302,7 +308,7 @@ func TestDoctorCheckVersionFloor(t *testing.T) {
 
 func TestDoctorCheckVersionFloorDoesNotRequireVersionSort(t *testing.T) {
 	bin := doctorSandbox(t, doctorSandboxOpts{
-		dolt:         strPtr("dolt version 2.0.10"),
+		dolt:         strPtr("dolt version 2.1.10"),
 		includeFlock: true,
 		includeLsof:  true,
 	})
@@ -327,7 +333,7 @@ func TestDoctorCheckVersionFloorDoesNotRequireVersionSort(t *testing.T) {
 // servers onto the same data directory and corrupt state.
 func TestDoctorCheckMissingFlock(t *testing.T) {
 	bin := doctorSandbox(t, doctorSandboxOpts{
-		dolt:         strPtr("dolt version 2.0.7"),
+		dolt:         strPtr("dolt version 2.1.0"),
 		includeFlock: false,
 		includeLsof:  true,
 	})
@@ -347,7 +353,7 @@ func TestDoctorCheckMissingFlock(t *testing.T) {
 // state later.
 func TestDoctorCheckMissingLsof(t *testing.T) {
 	bin := doctorSandbox(t, doctorSandboxOpts{
-		dolt:         strPtr("dolt version 2.0.7"),
+		dolt:         strPtr("dolt version 2.1.0"),
 		includeFlock: true,
 		includeLsof:  false,
 	})

@@ -37,7 +37,7 @@ default = ""
 id = "preflight"
 title = "Verify dolt version compatible with backup sync"
 description = """
-**Required:** dolt >= 2.0.7.
+**Required:** dolt >= 2.1.0.
 
 Older dolt versions are below Gas City's managed bd/Dolt compatibility floor.
 Releases before 1.86.2 also have a GC/writer deadlock that hangs the
@@ -50,7 +50,7 @@ Run:
 dolt version | head -1
 ```
 
-If the version is < 2.0.7, abort the molecule and nudge the mayor to
+If the version is < 2.1.0, abort the molecule and nudge the mayor to
 upgrade dolt. Do NOT proceed to the sync step or close it as successful.
 
 Close this bead with:
