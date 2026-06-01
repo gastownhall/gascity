@@ -21,7 +21,7 @@ type graphBead struct {
 	Title    string         `json:"title"`
 	Ref      string         `json:"ref"`
 	Status   string         `json:"status"`
-	Type     string         `json:"type"`
+	Type     string         `json:"issue_type"`
 	Metadata map[string]any `json:"metadata"`
 }
 

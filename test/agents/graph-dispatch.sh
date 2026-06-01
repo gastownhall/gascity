@@ -404,6 +404,21 @@ while true; do
             continue
         fi
         source_id=$(printf '%s\n' "$root_json" | json_payload | jq_bead '.metadata["gc.source_bead_id"]')
+        if [ -z "$source_id" ]; then
+            input_convoy_id=$(printf '%s\n' "$root_json" | json_payload | jq_bead '.metadata["gc.input_convoy_id"]')
+            if [ -n "$input_convoy_id" ]; then
+                if convoy_json=$(timeout 10 gc convoy status "$input_convoy_id" --json 2>/dev/null); then
+                    source_id=$(printf '%s\n' "$convoy_json" | json_payload | jq -r 'if (.children | length) == 1 then .children[0].id else empty end' 2>/dev/null || true)
+                    if [ -n "$source_id" ]; then
+                        trace "source-from-input-convoy bead=$bead_id root=$root_id convoy=$input_convoy_id source=$source_id"
+                    else
+                        trace "source-from-input-convoy-empty bead=$bead_id root=$root_id convoy=$input_convoy_id"
+                    fi
+                else
+                    trace "input-convoy-status-failed bead=$bead_id root=$root_id convoy=$input_convoy_id"
+                fi
+            fi
+        fi
     fi
     if [ -n "$source_id" ]; then
         if ! source_json=$(timeout 10 bd show --json "$source_id" 2>/dev/null); then

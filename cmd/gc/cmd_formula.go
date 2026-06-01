@@ -623,7 +623,7 @@ bead into a sub-workflow at runtime.`,
 			if attach != "" {
 				isGraphFormula, _, err := graphv2.IsGraphV2Formula(args[0], scope.searchPaths)
 				if err != nil {
-					return fmt.Errorf("load formula %q: %w", args[0], err)
+					return formulaCommandError(stderr, "gc formula cook", jsonOutput, fmt.Errorf("load formula %q: %w", args[0], err))
 				}
 				if isGraphFormula {
 					storeRef := workflowStoreRefForDir(scope.storeRoot, cityPath, loadedCityName(cfg, cityPath), cfg)
@@ -687,7 +687,7 @@ bead into a sub-workflow at runtime.`,
 						return ensureFormulaCookAttachDep(store, attach, result.RootID)
 					})
 					if err != nil {
-						return err
+						return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
 					}
 					if jsonOutput {
 						if err := writeCLIJSONLineOrErr(stdout, stderr, "gc formula cook", formulaCookJSONResult{
@@ -715,7 +715,7 @@ bead into a sub-workflow at runtime.`,
 
 				inv, err := graphv2.PrepareInvocation(cmd.Context(), store, args[0], scope.searchPaths, attach, cookVars)
 				if err != nil {
-					return fmt.Errorf("prepare graph.v2 invocation: %w", err)
+					return formulaCommandError(stderr, "gc formula cook", jsonOutput, fmt.Errorf("prepare graph.v2 invocation: %w", err))
 				}
 				cookVars = inv.Vars
 				recipe, err := formula.CompileWithoutRuntimeVarValidation(cmd.Context(), args[0], scope.searchPaths, cookVars)
@@ -763,7 +763,7 @@ bead into a sub-workflow at runtime.`,
 
 			inv, err := graphv2.PrepareInvocation(cmd.Context(), store, args[0], scope.searchPaths, "", cookVars)
 			if err != nil {
-				return fmt.Errorf("prepare graph.v2 invocation: %w", err)
+				return formulaCommandError(stderr, "gc formula cook", jsonOutput, fmt.Errorf("prepare graph.v2 invocation: %w", err))
 			}
 			cookVars = inv.Vars
 
