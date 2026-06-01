@@ -116,9 +116,30 @@ set -eu
 gc_dolt_port_input="$GC_DOLT_PORT"
 gc_dolt_host_input="${GC_DOLT_HOST:-}"
 
-PACK_DIR="${GC_PACK_DIR:-$(unset CDPATH; cd -- "$(dirname "$0")/.." && pwd)}"
-# shellcheck disable=SC1091
-. "$PACK_DIR/assets/scripts/runtime.sh"
+compact_dolt_host_is_local() (
+  compact_host=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
+  case "$compact_host" in
+    ''|localhost|0.0.0.0|::1|::|'[::1]'|'[::]')
+      return 0
+      ;;
+    127.*.*.*)
+      IFS=.
+      set -- $compact_host
+      [ "$#" -eq 4 ] || return 1
+      [ "$1" = "127" ] || return 1
+      for compact_octet in "$2" "$3" "$4"; do
+        case "$compact_octet" in
+          ''|*[!0-9]*)
+            return 1
+            ;;
+        esac
+        [ "$compact_octet" -le 255 ] 2>/dev/null || return 1
+      done
+      return 0
+      ;;
+  esac
+  return 1
+)
 
 explicit_external_local_dolt=0
 case "${GC_DOLT_MANAGED_LOCAL:-}" in
@@ -127,19 +148,20 @@ case "${GC_DOLT_MANAGED_LOCAL:-}" in
       printf 'compact: managed local Dolt runtime is not applicable and GC_DOLT_PORT is empty — skip\n'
       exit 0
     fi
-    case "$gc_dolt_host_input" in
-      ''|127.0.0.1|localhost|0.0.0.0|::1|::|'[::1]'|'[::]')
-        GC_DOLT_PORT="$gc_dolt_port_input"
-        explicit_external_local_dolt=1
-        ;;
-      *)
-        printf 'compact: GC_DOLT_HOST=%s is not a local Dolt compaction target — skip\n' \
-          "$gc_dolt_host_input"
-        exit 0
-        ;;
-    esac
+    if compact_dolt_host_is_local "$gc_dolt_host_input"; then
+      GC_DOLT_PORT="$gc_dolt_port_input"
+      explicit_external_local_dolt=1
+    else
+      printf 'compact: GC_DOLT_HOST=%s is not a local Dolt compaction target — skip\n' \
+        "$gc_dolt_host_input"
+      exit 0
+    fi
     ;;
 esac
+
+PACK_DIR="${GC_PACK_DIR:-$(unset CDPATH; cd -- "$(dirname "$0")/.." && pwd)}"
+# shellcheck disable=SC1091
+. "$PACK_DIR/assets/scripts/runtime.sh"
 
 if [ "${GC_DOLT_MANAGED_LOCAL:-}" = "1" ]; then
   managed_port=$(managed_runtime_port "$DOLT_STATE_FILE" "$DOLT_DATA_DIR" || true)
@@ -160,15 +182,11 @@ if [ "${GC_DOLT_MANAGED_LOCAL:-}" = "1" ]; then
 elif [ "$explicit_external_local_dolt" = "1" ]; then
   :
 elif [ -n "$gc_dolt_port_input" ]; then
-  case "$gc_dolt_host_input" in
-    ''|127.0.0.1|localhost|0.0.0.0|::1|::|'[::1]'|'[::]')
-      ;;
-    *)
-      printf 'compact: GC_DOLT_HOST=%s is not a local managed Dolt host — skip\n' \
-        "$gc_dolt_host_input"
-      exit 0
-      ;;
-  esac
+  if ! compact_dolt_host_is_local "$gc_dolt_host_input"; then
+    printf 'compact: GC_DOLT_HOST=%s is not a local managed Dolt host — skip\n' \
+      "$gc_dolt_host_input"
+    exit 0
+  fi
   managed_port=$(managed_runtime_port "$DOLT_STATE_FILE" "$DOLT_DATA_DIR" || true)
   if [ -z "$managed_port" ] || [ "$gc_dolt_port_input" != "$managed_port" ]; then
     printf 'compact: GC_DOLT_PORT=%s does not match managed runtime port=%s for data_dir=%s — skip\n' \
@@ -264,11 +282,9 @@ esac
 # and a second compactor running concurrently would race on the
 # graph-rewrite step.
 lock_host=$(printf '%s' "$host" | tr '[:upper:]' '[:lower:]' | sed 's/^\[\(.*\)\]$/\1/')
-case "$lock_host" in
-  ''|127.0.0.1|localhost|0.0.0.0|::1|::)
-    lock_host="127.0.0.1"
-    ;;
-esac
+if compact_dolt_host_is_local "$lock_host"; then
+  lock_host="127.0.0.1"
+fi
 lock_key=$(printf '%s-%s' "$lock_host" "$GC_DOLT_PORT" | tr -c 'A-Za-z0-9_.-' '-')
 lock_root="/tmp/gc-dolt-compact"
 old_umask=$(umask)

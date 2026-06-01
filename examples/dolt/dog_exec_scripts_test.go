@@ -2798,6 +2798,7 @@ func TestCompactScriptAllowsExplicitLocalExternalEndpointWithoutManagedState(t *
 
 	out, err := fixture.run(t, "success",
 		"GC_DOLT_MANAGED_LOCAL=0",
+		"GC_DOLT_HOST=127.0.0.2",
 		"GC_DOLT_DATA_DIR="+externalRoot,
 		"GC_DOLT_STATE_FILE="+filepath.Join(externalRoot, "dolt-state.json"),
 		"GC_DOLT_COMPACT_THRESHOLD_COMMITS=500",
@@ -2849,6 +2850,43 @@ func TestCompactScriptSkipsNonLocalExternalEndpoint(t *testing.T) {
 	}
 	if strings.TrimSpace(string(logData)) != "" {
 		t.Fatalf("non-local external endpoint should not be queried:\n%s", logData)
+	}
+}
+
+func TestCompactScriptSkipsNonLocalExternalEndpointWithoutPort(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	externalRoot := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "external-target")
+	if err := os.MkdirAll(externalRoot, 0o755); err != nil {
+		t.Fatalf("mkdir external target root: %v", err)
+	}
+
+	out, err := fixture.run(t, "success",
+		"GC_DOLT_MANAGED_LOCAL=0",
+		"GC_DOLT_HOST=external.example.internal",
+		"GC_DOLT_PORT=",
+		"GC_DOLT_DATA_DIR="+externalRoot,
+		"GC_DOLT_STATE_FILE="+filepath.Join(externalRoot, "dolt-state.json"),
+		"GC_DOLT_COMPACT_THRESHOLD_COMMITS=500",
+		"GC_DOLT_COMPACT_DRY_RUN=1",
+	)
+	if err != nil {
+		t.Fatalf("non-local external endpoint without a port should skip cleanly:\n%s", out)
+	}
+	if !strings.Contains(out, "GC_DOLT_PORT is empty") {
+		t.Fatalf("output missing empty-port external skip:\n%s", out)
+	}
+	if strings.Contains(out, "cannot resolve runtime port") {
+		t.Fatalf("runtime port resolution should not run before external skip:\n%s", out)
+	}
+	logData, err := os.ReadFile(fixture.doltLog)
+	if os.IsNotExist(err) {
+		return
+	}
+	if err != nil {
+		t.Fatalf("read dolt log: %v", err)
+	}
+	if strings.TrimSpace(string(logData)) != "" {
+		t.Fatalf("non-local external endpoint without a port should not be queried:\n%s", logData)
 	}
 }
 
