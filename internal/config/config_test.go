@@ -5910,6 +5910,36 @@ func TestAgentDefaultsProvider_ControlDispatcherSkipped(t *testing.T) {
 	t.Fatal("control-dispatcher agent not found")
 }
 
+func TestAgentDefaultsProvider_BeatsWorkspaceProviderForExplicitAgent(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/city.toml"] = []byte(`
+[workspace]
+name = "demo"
+provider = "claude"
+
+[agent_defaults]
+provider = "codex"
+
+[[agent]]
+name = "worker"
+`)
+
+	cfg, _, err := LoadWithIncludes(fs, "/city/city.toml")
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+
+	for _, a := range cfg.Agents {
+		if a.Name == "worker" {
+			if got := a.Provider; got != "codex" {
+				t.Fatalf("worker Provider = %q, want agent_defaults codex", got)
+			}
+			return
+		}
+	}
+	t.Fatal("worker agent not found")
+}
+
 func TestAgentDefaultsSlingFormula_ImplicitAgents(t *testing.T) {
 	// When agent_defaults.default_sling_formula is set, implicit agents
 	// should use it instead of the hardcoded "mol-do-work".

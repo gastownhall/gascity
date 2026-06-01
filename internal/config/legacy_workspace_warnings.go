@@ -14,7 +14,7 @@ type legacyWorkspaceFieldRule struct {
 var legacyWorkspaceFieldRules = []legacyWorkspaceFieldRule{
 	{
 		field:      "provider",
-		suggestion: "Set provider per agent in agents/<name>/agent.toml.",
+		suggestion: "Use `[agent_defaults] provider` for a city-wide default, or set provider per agent in agents/<name>/agent.toml.",
 		defined: func(ws Workspace, _ map[string]string) bool {
 			return ws.Provider != ""
 		},

@@ -447,6 +447,116 @@ provider = "local"
 	}
 }
 
+func TestMigrateMovesPackAgentDefaultsProvider(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		pack string
+		want []string
+	}{
+		{
+			name: "canonical provider only",
+			pack: `
+[agent_defaults]
+provider = "codex"
+`,
+			want: []string{
+				"[agent_defaults]",
+				`provider = "codex"`,
+			},
+		},
+		{
+			name: "canonical provider mixed with model",
+			pack: `
+[agent_defaults]
+provider = "codex"
+model = "gpt-5"
+`,
+			want: []string{
+				`provider = "codex"`,
+				`model = "gpt-5"`,
+			},
+		},
+		{
+			name: "legacy agents provider only",
+			pack: `
+[agents]
+provider = "claude"
+`,
+			want: []string{
+				"[agent_defaults]",
+				`provider = "claude"`,
+			},
+		},
+		{
+			name: "legacy agents provider fills canonical defaults",
+			pack: `
+[agent_defaults]
+model = "gpt-5"
+
+[agents]
+provider = "claude"
+`,
+			want: []string{
+				`provider = "claude"`,
+				`model = "gpt-5"`,
+			},
+		},
+		{
+			name: "canonical provider beats legacy agents alias",
+			pack: `
+[agent_defaults]
+provider = "codex"
+
+[agents]
+provider = "claude"
+wake_mode = "resume"
+`,
+			want: []string{
+				`provider = "codex"`,
+				`wake_mode = "resume"`,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			cityDir := t.TempDir()
+			writeFile(t, cityDir, "city.toml", `
+[workspace]
+name = "legacy-city"
+`)
+			writeFile(t, cityDir, "pack.toml", `
+[pack]
+name = "legacy-city"
+schema = 2
+`+tt.pack)
+
+			if _, err := Apply(cityDir, Options{}); err != nil {
+				t.Fatalf("Apply: %v", err)
+			}
+
+			cityToml := readFile(t, filepath.Join(cityDir, "city.toml"))
+			for _, want := range tt.want {
+				if !strings.Contains(cityToml, want) {
+					t.Fatalf("city.toml missing migrated provider default %q:\n%s", want, cityToml)
+				}
+			}
+
+			packToml := readFile(t, filepath.Join(cityDir, "pack.toml"))
+			for _, forbidden := range []string{"[agent_defaults]", "[agents]"} {
+				if strings.Contains(packToml, forbidden) {
+					t.Fatalf("pack.toml still contains %s after migration:\n%s", forbidden, packToml)
+				}
+			}
+		})
+	}
+}
+
 func TestMigrateCreatesFreshBindingWhenExistingImportHasNonDefaultSemantics(t *testing.T) {
 	t.Parallel()
 

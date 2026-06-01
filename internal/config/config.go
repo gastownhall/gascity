@@ -3281,13 +3281,13 @@ func (a *Agent) EffectiveOnBoot() string {
 
 // InjectImplicitAgents adds on-demand agents for each configured provider at
 // both city scope and each rig scope. A provider is "configured" if it
-// appears in cfg.Providers OR is named by cfg.Workspace.Provider — so the
-// common single-provider case (workspace.provider = "claude") works without
-// a redundant [providers.claude] section. Unconfigured built-in providers
-// are skipped. Pool min=0, max=-1 (unlimited) so they are available as
-// sling targets without an explicit [[agent]] entry. Explicit agents always
-// win — if city.toml defines [[agent]] name="claude" (or a rig-scoped
-// equivalent), no implicit agent is added for that scope.
+// appears in cfg.Providers, cfg.AgentDefaults.Provider, or
+// cfg.Workspace.Provider, so the common single-provider cases work without a
+// redundant [providers.claude] section. Unconfigured built-in providers are
+// skipped. Pool min=0, max=-1 (unlimited) so they are available as sling
+// targets without an explicit [[agent]] entry. Explicit agents always win: if
+// city.toml defines [[agent]] name="claude" (or a rig-scoped equivalent), no
+// implicit agent is added for that scope.
 // agentKey identifies an agent by its rig directory and name.
 type agentKey struct{ dir, name string }
 
