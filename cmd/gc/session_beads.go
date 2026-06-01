@@ -2129,7 +2129,7 @@ func sweepProcessTableOrphans(
 		fmt.Fprintf(stderr, "session reconciler: scanning process table for orphaned runtimes: %v\n", err) //nolint:errcheck
 	}
 
-	cityPath = strings.TrimSpace(cityPath)
+	cityPath = normalizePathForCompare(strings.TrimSpace(cityPath))
 	reaped := 0
 	for _, live := range found {
 		live.SessionID = strings.TrimSpace(live.SessionID)
@@ -2144,7 +2144,7 @@ func sweepProcessTableOrphans(
 		// SIGTERMs another city's healthy session. Only consider runtimes
 		// positively attributed to this city. When cityPath is unknown we
 		// cannot attribute safely, so fall through to the existing checks.
-		if cityPath != "" && strings.TrimSpace(live.City) != cityPath {
+		if cityPath != "" && normalizePathForCompare(strings.TrimSpace(live.City)) != cityPath {
 			continue
 		}
 		bead, err := store.Get(live.SessionID)

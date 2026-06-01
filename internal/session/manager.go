@@ -18,6 +18,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
+	"github.com/gastownhall/gascity/internal/pathutil"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
@@ -238,8 +239,12 @@ func (m *Manager) killExistingOrphans(ctx context.Context, sessionID string) {
 	if err != nil {
 		log.Printf("session: scanning for orphaned runtimes for %s: %v", sessionID, err)
 	}
+	cityPath := pathutil.NormalizePathForCompare(strings.TrimSpace(m.cityPath))
 	for _, live := range found {
 		if live.IsTracked || live.SessionID != sessionID {
+			continue
+		}
+		if cityPath != "" && pathutil.NormalizePathForCompare(strings.TrimSpace(live.City)) != cityPath {
 			continue
 		}
 		if err := scanner.TerminateRuntime(live); err != nil {

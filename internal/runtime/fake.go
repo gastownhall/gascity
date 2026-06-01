@@ -533,8 +533,13 @@ func (f *Fake) FindRuntimesBySessionID(id string) ([]LiveRuntime, error) {
 		if id != "" && sessionID != id {
 			continue
 		}
+		city := cfg.Env["GC_CITY_PATH"]
+		if city == "" {
+			city = cfg.Env["GC_CITY"]
+		}
 		out = append(out, LiveRuntime{
 			SessionID:    sessionID,
+			City:         city,
 			ProviderName: name,
 			IsTracked:    true,
 		})

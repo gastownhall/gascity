@@ -626,6 +626,34 @@ func TestFakeFindRuntimesBySessionID_TrackedUsesProviderNameAndSessionID(t *test
 	}
 }
 
+func TestFakeFindRuntimesBySessionID_TrackedUsesCityFromEnv(t *testing.T) {
+	f := NewFake()
+	_ = f.Start(context.Background(), "path-city", Config{Env: map[string]string{
+		"GC_SESSION_ID": "sess-path",
+		"GC_CITY_PATH":  "/tmp/path-city",
+		"GC_CITY":       "/tmp/fallback-city",
+	}})
+	_ = f.Start(context.Background(), "fallback-city", Config{Env: map[string]string{
+		"GC_SESSION_ID": "sess-fallback",
+		"GC_CITY":       "/tmp/fallback-city",
+	}})
+
+	runtimes, err := f.FindRuntimesBySessionID("")
+	if err != nil {
+		t.Fatalf("FindRuntimesBySessionID: %v", err)
+	}
+	cities := map[string]string{}
+	for _, r := range runtimes {
+		cities[r.SessionID] = r.City
+	}
+	if cities["sess-path"] != "/tmp/path-city" {
+		t.Errorf("City for sess-path = %q, want GC_CITY_PATH value", cities["sess-path"])
+	}
+	if cities["sess-fallback"] != "/tmp/fallback-city" {
+		t.Errorf("City for sess-fallback = %q, want GC_CITY fallback value", cities["sess-fallback"])
+	}
+}
+
 func TestFakeTerminateRuntime_RecordsCallWithSessionID(t *testing.T) {
 	f := NewFake()
 

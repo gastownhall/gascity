@@ -6536,6 +6536,29 @@ func TestSweepProcessTableOrphansSkipsOtherCityRuntimes(t *testing.T) {
 	}
 }
 
+func TestSweepProcessTableOrphansNormalizesCityPathBeforeCompare(t *testing.T) {
+	realCity := t.TempDir()
+	aliasCity := filepath.Join(t.TempDir(), "city-link")
+	if err := os.Symlink(realCity, aliasCity); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	store := beads.NewMemStoreFrom(0, []beads.Bead{
+		{ID: "gm-closed", Status: "closed"},
+	}, nil)
+	sp := newProcessTableSweepProvider(
+		runtime.LiveRuntime{SessionID: "gm-closed", City: realCity, PID: 101, IsTracked: false},
+	)
+
+	var stderr bytes.Buffer
+	got := sweepProcessTableOrphans(sp, nil, store, aliasCity, &stderr)
+	if got != 1 {
+		t.Fatalf("sweepProcessTableOrphans() = %d, want 1 for symlink-equivalent city paths; stderr=%q", got, stderr.String())
+	}
+	if ids := terminatedSessionIDs(sp.terminated); ids != "gm-closed" {
+		t.Fatalf("terminated = %s, want gm-closed", ids)
+	}
+}
+
 func TestSweepProcessTableOrphansContinuesAfterErrors(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := newProcessTableSweepProvider(

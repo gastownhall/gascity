@@ -354,6 +354,57 @@ func TestCreateSkipsTrackedRuntimeBeforeStart(t *testing.T) {
 	}
 }
 
+func TestCreateSkipsUntrackedRuntimeFromOtherCityBeforeStart(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := &orphanScanProvider{
+		Fake: runtime.NewFake(),
+		results: []runtime.LiveRuntime{{
+			PID:       1234,
+			City:      "/tmp/other-city",
+			IsTracked: false,
+		}},
+	}
+	mgr := NewManagerWithCityPath(store, sp, "/tmp/this-city")
+
+	info, err := mgr.Create(context.Background(), "helper", "my chat", "claude", "/tmp", "claude", nil, ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	want := []string{"find:" + info.ID, "start:" + info.ID}
+	if got := strings.Join(sp.events, ","); got != strings.Join(want, ",") {
+		t.Fatalf("events = %v, want %v", sp.events, want)
+	}
+}
+
+func TestCreateKillsUntrackedOrphanFromSameCityBeforeStartWithNormalizedPath(t *testing.T) {
+	realCity := t.TempDir()
+	aliasCity := filepath.Join(t.TempDir(), "city-link")
+	if err := os.Symlink(realCity, aliasCity); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	store := beads.NewMemStore()
+	sp := &orphanScanProvider{
+		Fake: runtime.NewFake(),
+		results: []runtime.LiveRuntime{{
+			PID:       1234,
+			City:      realCity,
+			IsTracked: false,
+		}},
+	}
+	mgr := NewManagerWithCityPath(store, sp, aliasCity)
+
+	info, err := mgr.Create(context.Background(), "helper", "my chat", "claude", "/tmp", "claude", nil, ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	want := []string{"find:" + info.ID, "terminate:" + info.ID, "start:" + info.ID}
+	if got := strings.Join(sp.events, ","); got != strings.Join(want, ",") {
+		t.Fatalf("events = %v, want %v", sp.events, want)
+	}
+}
+
 func TestCreateContinuesWhenOrphanCleanupFails(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := &orphanScanProvider{
