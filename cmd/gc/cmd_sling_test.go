@@ -718,7 +718,7 @@ func TestCliBeadRouterAllowsSameStoreRoute(t *testing.T) {
 	}
 }
 
-func TestCliBeadRouterAllowsHQTargetFromHQStore(t *testing.T) {
+func TestCliBeadRouterAllowsCityTargetFromCityStore(t *testing.T) {
 	cityPath := t.TempDir()
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "test-city"},

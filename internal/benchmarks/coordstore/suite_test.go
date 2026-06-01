@@ -12,7 +12,6 @@ import (
 	"github.com/gastownhall/gascity/internal/benchmarks/coordstore/adapters/boltdb"
 	"github.com/gastownhall/gascity/internal/benchmarks/coordstore/adapters/couchdb"
 	"github.com/gastownhall/gascity/internal/benchmarks/coordstore/adapters/dolt"
-	"github.com/gastownhall/gascity/internal/benchmarks/coordstore/adapters/hqstore"
 	"github.com/gastownhall/gascity/internal/benchmarks/coordstore/adapters/postgres"
 	"github.com/gastownhall/gascity/internal/benchmarks/coordstore/adapters/sqlite"
 )
@@ -41,10 +40,6 @@ func buildRegisteredAdapters() []adapterFactory {
 		{
 			name:  "authorcore",
 			newFn: func() coordstore.StoreAdapter { return authorcore.New() },
-		},
-		{
-			name:  "hqstore",
-			newFn: func() coordstore.StoreAdapter { return hqstore.New() },
 		},
 	}
 	if dsn := os.Getenv("COORDSTORE_POSTGRES_DSN"); dsn != "" {
