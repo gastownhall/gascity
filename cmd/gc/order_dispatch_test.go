@@ -6527,6 +6527,58 @@ func TestOrderDispatchOpenWispWithOpenStepsBlocksRedispatch(t *testing.T) {
 	}
 }
 
+func TestOrderDispatchClosedTrackingHistoryStillChecksOpenWispWork(t *testing.T) {
+	store := beads.NewMemStore()
+
+	wispRoot, err := store.Create(beads.Bead{
+		Title:  "mol-digest-generate",
+		Type:   "molecule",
+		Labels: []string{"order-run:my-pool-order"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Create(beads.Bead{
+		Title:    "determine-period",
+		ParentID: wispRoot.ID,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	tracking, err := store.Create(beads.Bead{
+		Title:     "order:my-pool-order",
+		Labels:    []string{"order-run:my-pool-order", labelOrderTracking},
+		Ephemeral: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(tracking.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	ran := false
+	fakeExec := func(_ context.Context, _, _ string, _ []string) ([]byte, error) {
+		ran = true
+		return nil, nil
+	}
+
+	aa := []orders.Order{{
+		Name:     "my-pool-order",
+		Trigger:  "cooldown",
+		Interval: "1s",
+		Exec:     "scripts/run.sh",
+	}}
+	ad := buildOrderDispatcherFromListExec(aa, store, nil, fakeExec, nil)
+
+	ad.dispatch(context.Background(), t.TempDir(), tracking.CreatedAt.Add(5*time.Second))
+	ad.drain(context.Background())
+
+	if ran {
+		t.Fatal("exec must NOT run — closed order-tracking history must not bypass " +
+			"the strict open-wisp check while prior step work is still open")
+	}
+}
+
 // Unused but keep for future event assertion tests.
 var (
 	_ = (*memRecorder).hasSubject

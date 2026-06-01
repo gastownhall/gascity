@@ -68,6 +68,7 @@ const (
 
 	completedOrderTrackingCloseReason = "order dispatch completed: tracking bead lifecycle finished"
 
+	orderTrackingHistoryIndexLimit   = 2048
 	defaultMaxOrderDispatchesPerTick = 4
 	orderTrackingSweepCloseBudget    = 4
 )
@@ -272,6 +273,16 @@ type memoryOrderDispatcher struct {
 	inflightDone chan struct{} // closed when inflightN returns to 0; nil when idle
 }
 
+type orderDispatchTrackingIndex struct {
+	entries map[string]map[string]orderTrackingSummary
+	errs    map[string]error
+}
+
+type orderTrackingSummary struct {
+	openTracking bool
+	lastRun      time.Time
+}
+
 // buildOrderDispatcher scans formula layers for orders and returns a
 // dispatcher. Returns nil if no auto-dispatchable orders are found.
 // Scans both city-level and per-rig orders. Rig orders get their Rig
@@ -386,6 +397,7 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 	}
 
 	stores := make(map[string]beads.Store)
+	trackingIndex := newOrderDispatchTrackingIndex()
 	budgetSpent := 0
 
 	total := len(m.aa)
@@ -451,7 +463,7 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 			continue
 		}
 
-		baseLastRunFn := orders.LastRunAcrossStores(storesForGate...)
+		baseLastRunFn := trackingIndex.lastRunFunc(storesForGate, storeKeysForGate, orders.LastRunAcrossStores(storesForGate...))
 		var lastRunErr error
 		var lastRunFromCache bool
 		lastRunFn := func(orderName string) (time.Time, error) {
@@ -530,7 +542,7 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 		}
 
 		// Skip dispatch if previous work hasn't been processed yet.
-		hasOpenWork, err = m.hasOpenWorkInStoresStrict(storesForGate, scoped)
+		hasOpenWork, err = trackingIndex.hasOpenWork(storesForGate, storeKeysForGate, scoped, m.hasOpenWorkInStoresStrict, true)
 		if err != nil {
 			logDispatchError(m.stderr, "gc: order dispatch: checking open work for %s: %v", scoped, err)
 			continue
@@ -635,6 +647,165 @@ func (m *memoryOrderDispatcher) drain(ctx context.Context) bool {
 	case <-ctx.Done():
 		return false
 	}
+}
+
+func newOrderDispatchTrackingIndex() *orderDispatchTrackingIndex {
+	return &orderDispatchTrackingIndex{
+		entries: make(map[string]map[string]orderTrackingSummary),
+		errs:    make(map[string]error),
+	}
+}
+
+func (idx *orderDispatchTrackingIndex) hasOpenWork(
+	stores []beads.Store,
+	storeKeys []string,
+	scopedName string,
+	fallback func([]beads.Store, string) (bool, error),
+	requireStrictFallback bool,
+) (bool, error) {
+	if idx == nil {
+		return fallback(stores, scopedName)
+	}
+	sawTrackingHistory := false
+	for i, store := range stores {
+		key := indexStoreKey(storeKeys, i)
+		if store == nil {
+			continue
+		}
+		entries, err := idx.entriesForStore(store, key)
+		if err != nil {
+			return false, err
+		}
+		if entries[scopedName].openTracking {
+			return true, nil
+		}
+		history, err := idx.historyEntriesForStore(store, key)
+		if err != nil {
+			return false, err
+		}
+		if summary, ok := history[scopedName]; ok {
+			if summary.openTracking {
+				return true, nil
+			}
+			sawTrackingHistory = true
+		}
+	}
+	if sawTrackingHistory && !requireStrictFallback {
+		return false, nil
+	}
+	return fallback(stores, scopedName)
+}
+
+func (idx *orderDispatchTrackingIndex) lastRunFunc(
+	stores []beads.Store,
+	storeKeys []string,
+	fallback orders.LastRunFunc,
+) orders.LastRunFunc {
+	return func(scopedName string) (time.Time, error) {
+		if idx == nil {
+			return fallback(scopedName)
+		}
+		var latest time.Time
+		for i, store := range stores {
+			last, err := idx.lastRunForStore(store, indexStoreKey(storeKeys, i), scopedName)
+			if err != nil {
+				return time.Time{}, err
+			}
+			if last.After(latest) {
+				latest = last
+			}
+		}
+		if fallback != nil {
+			last, err := fallback(scopedName)
+			if err != nil {
+				return time.Time{}, err
+			}
+			if last.After(latest) {
+				latest = last
+			}
+		}
+		return latest, nil
+	}
+}
+
+func (idx *orderDispatchTrackingIndex) lastRunForStore(store beads.Store, storeKey, scopedName string) (time.Time, error) {
+	if store == nil {
+		return time.Time{}, nil
+	}
+	entries, err := idx.historyEntriesForStore(store, storeKey)
+	if err != nil {
+		return time.Time{}, err
+	}
+	if summary, ok := entries[scopedName]; ok {
+		return summary.lastRun, nil
+	}
+	return time.Time{}, nil
+}
+
+func (idx *orderDispatchTrackingIndex) historyEntriesForStore(store beads.Store, storeKey string) (map[string]orderTrackingSummary, error) {
+	key := storeKey + "\x00history"
+	if err, ok := idx.errs[key]; ok {
+		return nil, err
+	}
+	if entries, ok := idx.entries[key]; ok {
+		return entries, nil
+	}
+	items, err := listCanonicalRecentOrderTrackingHistoryBeads(store)
+	if err != nil {
+		wrapped := fmt.Errorf("listing order-tracking history: %w", err)
+		idx.errs[key] = wrapped
+		return nil, wrapped
+	}
+	entries := make(map[string]orderTrackingSummary)
+	for _, item := range items {
+		scopedName, ok := orderNameFromTrackingBead(item)
+		if !ok {
+			continue
+		}
+		summary := entries[scopedName]
+		if item.CreatedAt.After(summary.lastRun) {
+			summary.lastRun = item.CreatedAt
+		}
+		entries[scopedName] = summary
+	}
+	idx.entries[key] = entries
+	return entries, nil
+}
+
+func (idx *orderDispatchTrackingIndex) entriesForStore(store beads.Store, storeKey string) (map[string]orderTrackingSummary, error) {
+	if err, ok := idx.errs[storeKey]; ok {
+		return nil, err
+	}
+	if entries, ok := idx.entries[storeKey]; ok {
+		return entries, nil
+	}
+	items, err := listCanonicalOpenOrderTrackingBeads(store)
+	if err != nil {
+		wrapped := fmt.Errorf("listing order-tracking beads: %w", err)
+		idx.errs[storeKey] = wrapped
+		return nil, wrapped
+	}
+	entries := make(map[string]orderTrackingSummary)
+	for _, item := range items {
+		scopedName, ok := orderNameFromTrackingBead(item)
+		if !ok {
+			continue
+		}
+		summary := entries[scopedName]
+		if item.Status != "closed" {
+			summary.openTracking = true
+		}
+		entries[scopedName] = summary
+	}
+	idx.entries[storeKey] = entries
+	return entries, nil
+}
+
+func indexStoreKey(storeKeys []string, index int) string {
+	if index >= 0 && index < len(storeKeys) && storeKeys[index] != "" {
+		return storeKeys[index]
+	}
+	return fmt.Sprintf("store:%d", index)
 }
 
 func (m *memoryOrderDispatcher) legacyCityStoreForTarget(cityPath string, target execStoreTarget, stores map[string]beads.Store) (beads.Store, bool) {
@@ -1136,6 +1307,23 @@ func (m *memoryOrderDispatcher) rigSuspendedByName(rigName string) bool {
 		}
 	}
 	return false
+}
+
+func listCanonicalRecentOrderTrackingHistoryBeads(store beads.Store) ([]beads.Bead, error) {
+	return beads.HandlesFor(store).Live.List(beads.ListQuery{
+		Label:         labelOrderTracking,
+		Limit:         orderTrackingHistoryIndexLimit,
+		IncludeClosed: true,
+		Sort:          beads.SortCreatedDesc,
+	})
+}
+
+func listCanonicalOpenOrderTrackingBeads(store beads.Store) ([]beads.Bead, error) {
+	return beads.HandlesFor(store).Live.List(beads.ListQuery{
+		Label:  labelOrderTracking,
+		Status: "open",
+		Sort:   beads.SortCreatedDesc,
+	})
 }
 
 // hasOpenWorkStrict reports whether any in-flight work exists for this
