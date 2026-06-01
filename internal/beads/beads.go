@@ -148,12 +148,30 @@ func IsReadyExcludedType(t string) bool {
 	return readyExcludeTypes[t]
 }
 
-// IsReadyCandidate reports whether a bead passes the store-independent Ready
-// filters: open status, main tier, actionable type, and no future defer_until.
-// Dependency and assignee checks are store-specific and happen separately.
+// IsReadyCandidate reports whether a bead passes the store-independent default
+// Ready filters: open status, main tier, actionable type, and no future
+// defer_until. Dependency and assignee checks are store-specific and happen
+// separately.
 func IsReadyCandidate(b Bead, now time.Time) bool {
+	return IsReadyCandidateForTier(b, now, TierIssues)
+}
+
+// IsReadyCandidateForTier reports whether a bead passes the store-independent
+// Ready filters for the requested storage tier.
+func IsReadyCandidateForTier(b Bead, now time.Time, tier TierMode) bool {
+	switch tier {
+	case TierWisps:
+		if !b.Ephemeral {
+			return false
+		}
+	case TierBoth:
+		// no tier filter
+	default: // TierIssues
+		if b.Ephemeral {
+			return false
+		}
+	}
 	return b.Status == "open" &&
-		!b.Ephemeral &&
 		!IsReadyExcludedType(b.Type) &&
 		!IsDeferred(b, now)
 }

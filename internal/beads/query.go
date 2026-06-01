@@ -103,6 +103,9 @@ func (q ListQuery) Validate() error {
 type ReadyQuery struct {
 	Assignee string
 	Limit    int
+	// TierMode selects the storage tier(s) to read from. Zero value
+	// (TierIssues) preserves Ready's historical main-tier behavior.
+	TierMode TierMode
 }
 
 func readyQueryFromArgs(queries []ReadyQuery) ReadyQuery {

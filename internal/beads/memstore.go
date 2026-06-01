@@ -270,7 +270,7 @@ func (m *MemStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 	var result []Bead
 	now := time.Now().UTC()
 	for _, b := range m.beads {
-		if !IsReadyCandidate(b, now) {
+		if !IsReadyCandidateForTier(b, now, q.TierMode) {
 			continue
 		}
 		if q.Assignee != "" && b.Assignee != q.Assignee {

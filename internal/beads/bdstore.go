@@ -1756,6 +1756,9 @@ func (s *BdStore) Children(parentID string, opts ...QueryOpt) ([]Bead, error) {
 func (s *BdStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 	q := readyQueryFromArgs(query)
 	args := []string{"ready", "--json"}
+	if q.TierMode == TierBoth || q.TierMode == TierWisps {
+		args = append(args, "--include-ephemeral")
+	}
 	if q.Assignee != "" {
 		args = append(args, "--assignee", q.Assignee)
 	}
@@ -1773,7 +1776,7 @@ func (s *BdStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 	now := time.Now().UTC()
 	for i := range issues {
 		bead := issues[i].toBead()
-		if !IsReadyCandidate(bead, now) {
+		if !IsReadyCandidateForTier(bead, now, q.TierMode) {
 			continue
 		}
 		if q.Assignee != "" && bead.Assignee != q.Assignee {

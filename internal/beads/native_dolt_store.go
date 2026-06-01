@@ -436,6 +436,9 @@ func (s *NativeDoltStore) Ready(queries ...ReadyQuery) ([]Bead, error) {
 statusLoop:
 	for _, status := range nativeDoltOpenReadyStatuses {
 		filter := beadslib.WorkFilter{Status: status}
+		if q.TierMode == TierBoth || q.TierMode == TierWisps {
+			filter.IncludeEphemeral = true
+		}
 		if q.Assignee != "" {
 			filter.Assignee = &q.Assignee
 		}
@@ -448,7 +451,7 @@ statusLoop:
 			if err != nil {
 				return nil, err
 			}
-			if !IsReadyCandidate(bead, now) || seen[bead.ID] {
+			if !IsReadyCandidateForTier(bead, now, q.TierMode) || seen[bead.ID] {
 				continue
 			}
 			seen[bead.ID] = true

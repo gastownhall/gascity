@@ -204,7 +204,7 @@ func (s *controllerDemandPartialStore) Ready(query ...beads.ReadyQuery) ([]beads
 	if err != nil {
 		return nil, err
 	}
-	if len(query) == 0 {
+	if len(query) == 0 || (query[0].Assignee == "" && query[0].Limit == 0) {
 		return rows, &beads.PartialResultError{Op: "bd ready", Err: errors.New("skipped corrupt controller demand bead")}
 	}
 	return rows, nil
@@ -304,8 +304,93 @@ func TestCollectAssignedWorkBeadsIncludesAssignedInProgressWisp(t *testing.T) {
 	}
 }
 
-func TestCollectAssignedWorkBeadsUsesCachedReadyReadModel(t *testing.T) {
-	backing := &readyFailStore{Store: beads.NewMemStore()}
+func TestCollectAssignedWorkBeadsIncludesReadyOpenAssignedWisp(t *testing.T) {
+	store := &readyQueryRecordingStore{MemStore: beads.NewMemStore()}
+	wisp, err := store.Create(beads.Bead{
+		Title:     "workflow control",
+		Type:      "task",
+		Status:    "open",
+		Assignee:  "control-dispatcher",
+		Ephemeral: true,
+		Metadata: map[string]string{
+			"gc.kind": "retry",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create wisp work: %v", err)
+	}
+	cfg := &config.City{
+		NamedSessions: []config.NamedSession{{
+			Template: "control-dispatcher",
+			Mode:     "on_demand",
+		}},
+	}
+
+	got, partial := collectAssignedWorkBeads(cfg, store)
+
+	if partial {
+		t.Fatal("collectAssignedWorkBeads reported partial results")
+	}
+	if len(got) != 1 || got[0].ID != wisp.ID {
+		t.Fatalf("collectAssignedWorkBeads returned %#v, want ready wisp %s", got, wisp.ID)
+	}
+	if len(store.readyQueries) == 0 {
+		t.Fatal("Ready was not queried")
+	}
+	for _, query := range store.readyQueries {
+		if query.TierMode != beads.TierBoth {
+			t.Fatalf("Ready query TierMode = %v, want TierBoth; queries=%#v", query.TierMode, store.readyQueries)
+		}
+	}
+}
+
+func TestCollectAssignedWorkBeadsUsesLiveReadyAfterExternalDependencyClose(t *testing.T) {
+	backing := beads.NewMemStore()
+	blocker, err := backing.Create(beads.Bead{
+		Title:  "first attempt",
+		Type:   "task",
+		Status: "open",
+	})
+	if err != nil {
+		t.Fatalf("create blocker: %v", err)
+	}
+	retry, err := backing.Create(beads.Bead{
+		Title:     "retry controller",
+		Type:      "task",
+		Status:    "open",
+		Assignee:  "control-dispatcher",
+		Ephemeral: true,
+		Metadata: map[string]string{
+			"gc.kind": "retry",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create retry: %v", err)
+	}
+	if err := backing.DepAdd(retry.ID, blocker.ID, "blocks"); err != nil {
+		t.Fatalf("add retry blocker: %v", err)
+	}
+	cache := beads.NewCachingStoreForTest(backing, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("prime cache: %v", err)
+	}
+	closed := "closed"
+	if err := backing.Update(blocker.ID, beads.UpdateOpts{Status: &closed}); err != nil {
+		t.Fatalf("close blocker outside cache: %v", err)
+	}
+
+	got, partial := collectAssignedWorkBeads(&config.City{}, cache)
+
+	if partial {
+		t.Fatal("collectAssignedWorkBeads reported partial results")
+	}
+	if len(got) != 1 || got[0].ID != retry.ID {
+		t.Fatalf("collectAssignedWorkBeads returned %#v, want live-ready retry %s after blocker close", got, retry.ID)
+	}
+}
+
+func TestCollectAssignedWorkBeadsUsesLiveReadyReadModel(t *testing.T) {
+	backing := &readyStaticStore{Store: beads.NewMemStore()}
 	handoff, err := backing.Create(beads.Bead{
 		Title:    "merge me",
 		Type:     "task",
@@ -315,6 +400,7 @@ func TestCollectAssignedWorkBeadsUsesCachedReadyReadModel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create handoff bead: %v", err)
 	}
+	backing.ready = []beads.Bead{handoff}
 	cache := beads.NewCachingStoreForTest(backing, nil)
 	if err := cache.PrimeActive(); err != nil {
 		t.Fatalf("PrimeActive: %v", err)
@@ -324,8 +410,8 @@ func TestCollectAssignedWorkBeadsUsesCachedReadyReadModel(t *testing.T) {
 	if len(got) != 1 || got[0].ID != handoff.ID {
 		t.Fatalf("collectAssignedWorkBeads returned %#v, want [%s]", got, handoff.ID)
 	}
-	if backing.readyCalls != 0 {
-		t.Fatalf("backing Ready calls = %d, want cached demand read", backing.readyCalls)
+	if backing.readyCalls == 0 {
+		t.Fatal("backing Ready was not called; assigned ready demand must use live state")
 	}
 }
 

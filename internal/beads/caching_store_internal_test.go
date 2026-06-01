@@ -677,7 +677,7 @@ func TestCachingStoreListBothTiersUsesCachedWispsByDefault(t *testing.T) {
 		ids[bead.ID] = true
 	}
 	if !ids[issue.ID] || !ids[wisp.ID] || len(got) != 2 {
-		t.Fatalf("List(open both tiers) ids = %v rows=%+v, want cached issue %s and wisp %s", ids, got, issue.ID, wisp.ID)
+		t.Fatalf("List(open both tiers) ids = %v rows=%+v, want cached issue %s and cached wisp %s", ids, got, issue.ID, wisp.ID)
 	}
 }
 

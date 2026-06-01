@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 )
 
 // CachedReader is the cache-only eventual-consistency read handle for active
@@ -236,9 +237,10 @@ func (c *CachingStore) cachedReadyOnly(query ReadyQuery) ([]Bead, error) {
 
 	statusByID := make(map[string]string, len(c.beads))
 	openBeads := make([]Bead, 0, len(c.beads))
+	now := time.Now().UTC()
 	for _, b := range c.beads {
 		statusByID[b.ID] = b.Status
-		if b.Status != "open" || b.Ephemeral || IsReadyExcludedType(b.Type) {
+		if !IsReadyCandidateForTier(b, now, query.TierMode) {
 			continue
 		}
 		if query.Assignee != "" && b.Assignee != query.Assignee {

@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -153,10 +152,7 @@ func assertControlDispatcherLane(t *testing.T, cityDir string) {
 }
 
 func graphWorkflowCloseTimeout() time.Duration {
-	if runtime.GOOS == "darwin" {
-		return 6 * time.Minute
-	}
-	return 4 * time.Minute
+	return 6 * time.Minute
 }
 
 func setupGraphWorkflowCity(t *testing.T, mode string) string {

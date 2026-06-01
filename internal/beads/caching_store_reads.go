@@ -359,19 +359,7 @@ func (c *CachingStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 
 		var result []Bead
 		for _, b := range openBeads {
-			blocked := false
-			for _, dep := range depsByID[b.ID] {
-				switch dep.Type {
-				case "blocks", "waits-for", "conditional-blocks":
-				default:
-					continue
-				}
-				if status, ok := statusByID[dep.DependsOnID]; ok && status != "closed" {
-					blocked = true
-					break
-				}
-			}
-			if !blocked {
+			if cachedBeadReady(statusByID, depsByID[b.ID]) {
 				result = append(result, cloneBead(b))
 			}
 		}

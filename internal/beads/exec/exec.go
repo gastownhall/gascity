@@ -351,6 +351,10 @@ func (s *Store) ListOpen(status ...string) ([]beads.Bead, error) {
 // Ready returns actionable open beads (excluding infrastructure types):
 // script ready
 func (s *Store) Ready(query ...beads.ReadyQuery) ([]beads.Bead, error) {
+	q := beads.ReadyQuery{}
+	if len(query) > 0 {
+		q = query[0]
+	}
 	out, err := s.run(nil, "ready")
 	if err != nil {
 		return nil, fmt.Errorf("exec beads ready: %w", err)
@@ -362,15 +366,11 @@ func (s *Store) Ready(query ...beads.ReadyQuery) ([]beads.Bead, error) {
 	result := all[:0]
 	now := time.Now().UTC()
 	for _, b := range all {
-		if beads.IsReadyCandidate(b, now) {
+		if beads.IsReadyCandidateForTier(b, now, q.TierMode) {
 			result = append(result, b)
 		}
 	}
-	if len(query) == 0 {
-		return result, nil
-	}
-	q := query[0]
-	return beads.ApplyListQuery(result, beads.ListQuery{Assignee: q.Assignee, Limit: q.Limit}), nil
+	return beads.ApplyListQuery(result, beads.ListQuery{Assignee: q.Assignee, Limit: q.Limit, TierMode: q.TierMode}), nil
 }
 
 // Children returns non-closed beads whose ParentID matches by default:
