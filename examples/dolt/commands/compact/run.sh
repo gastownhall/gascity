@@ -436,6 +436,14 @@ discover_database_names() {
       emit_database_name "$db"
     done
   fi
+
+  if [ -n "$only_dbs" ]; then
+    printf '%s\n' "$only_dbs" | tr ',' '\n' | while IFS= read -r db; do
+      db=$(printf '%s' "$db" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+      [ -n "$db" ] || continue
+      emit_database_name "$db"
+    done
+  fi
 }
 
 # dolt_query — wrapper that runs a single SQL statement against the
@@ -1449,10 +1457,6 @@ flatten_database() {
   fi
 
   if has_compact_marker "$pending_push_dir" "$db"; then
-    if [ -n "$dry_run" ]; then
-      printf 'compact: db=%s pending_push=present — dry-run (would retry remote push)\n' "$db"
-      return 0
-    fi
     pending_remote=$(compact_marker_value "$pending_push_dir" "$db" remote || true)
     pending_expected_remote_head=$(compact_marker_value "$pending_push_dir" "$db" expected_remote_head || true)
     pending_expected_remote_head_verified=$(compact_marker_value "$pending_push_dir" "$db" expected_remote_head_verified || true)
@@ -1509,6 +1513,10 @@ flatten_database() {
       esac
     fi
     ensure_remote_push_retry_fresh "$pending_push_dir" "$db" "pending_push" || return 1
+    if [ -n "$dry_run" ]; then
+      printf 'compact: db=%s pending_push=present — dry-run (would retry remote push)\n' "$db"
+      return 0
+    fi
     printf 'compact: db=%s pending_push=present — retrying remote push before threshold check\n' "$db"
     push_remote_after_compaction "$db" "$pending_remote" "$pending_expected_remote_head" "${pending_expected_remote_head_verified:-0}" "retry" "$pending_compacted_from_head" "$pending_local_branch" "$pending_remote_branch"
     return $?

@@ -1575,6 +1575,38 @@ func TestCompactScriptBlocksStalePendingPushRetryBeforeForcePush(t *testing.T) {
 	}
 }
 
+func TestCompactScriptDryRunReportsStalePendingPushMarker(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	firstOut, err := fixture.run(t, "remote_push_failure", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err != nil {
+		t.Fatalf("first compact should succeed locally despite remote push failure: %v\n%s", err, firstOut)
+	}
+	pendingPush := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-pending-push", "beads")
+	replaceCompactMarkerCreatedAt(t, pendingPush, "1970-01-01T00:00:00Z")
+
+	dryRunOut, err := fixture.run(t, "remote_success",
+		"GC_DOLT_COMPACT_THRESHOLD_COMMITS=500",
+		"GC_DOLT_COMPACT_DRY_RUN=1",
+	)
+	if err == nil {
+		t.Fatalf("dry-run stale pending-push retry succeeded without manual review:\n%s", dryRunOut)
+	}
+	if !strings.Contains(dryRunOut, "pending_push marker is stale") ||
+		!strings.Contains(dryRunOut, "manual review required") {
+		t.Fatalf("dry-run missing stale-marker manual-review explanation:\n%s", dryRunOut)
+	}
+	if strings.Contains(dryRunOut, "would retry remote push") {
+		t.Fatalf("dry-run should not claim it would retry a stale pending push:\n%s", dryRunOut)
+	}
+	logData, err := os.ReadFile(fixture.doltLog)
+	if err != nil {
+		t.Fatalf("read dolt log: %v", err)
+	}
+	if strings.Count(string(logData), "CALL DOLT_PUSH('--force', '--set-upstream', 'origin', 'main')") != 1 {
+		t.Fatalf("dry-run stale pending-push retry must not attempt another force push:\n%s", logData)
+	}
+}
+
 func TestCompactScriptFailsRetryWhenPendingPushRemoteHeadChangesAgain(t *testing.T) {
 	fixture := newCompactScriptFixture(t)
 	firstOut, err := fixture.run(t, "remote_advances_before_push", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
@@ -2806,6 +2838,34 @@ func TestCompactScriptOnlyDBsAllowlistFiltersDatabases(t *testing.T) {
 	}
 	if !strings.Contains(log, "db=beads query=") {
 		t.Fatalf("allowlisted database was not queried:\n%s", log)
+	}
+}
+
+func TestCompactScriptOnlyDBsCanTargetUndiscoveredDatabase(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "success",
+		"GC_DOLT_COMPACT_THRESHOLD_COMMITS=500",
+		"GC_DOLT_COMPACT_ONLY_DBS=ga",
+		"GC_DOLT_COMPACT_DRY_RUN=1",
+	)
+	if err != nil {
+		t.Fatalf("explicit allowlisted compact failed:\n%s", out)
+	}
+	if !strings.Contains(out, "db=beads not in GC_DOLT_COMPACT_ONLY_DBS") ||
+		!strings.Contains(out, "db=ga commits=") ||
+		!strings.Contains(out, "dry-run") {
+		t.Fatalf("output missing explicit allowlist target or discovered-db skip:\n%s", out)
+	}
+	logData, err := os.ReadFile(fixture.doltLog)
+	if err != nil {
+		t.Fatalf("read dolt log: %v", err)
+	}
+	log := string(logData)
+	if strings.Contains(log, "db=beads query=") {
+		t.Fatalf("non-allowlisted discovered database should not receive dolt queries:\n%s", log)
+	}
+	if !strings.Contains(log, "db=ga query=") {
+		t.Fatalf("explicit allowlisted database was not queried:\n%s", log)
 	}
 }
 
