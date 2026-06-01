@@ -1320,9 +1320,8 @@ func (cr *CityRuntime) runOrderTrackingSweepWatchdog(now time.Time) {
 			fmt.Fprintf(cr.stderr, "%s: order tracking sweep watchdog: %v\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
 		}
 	}
-	n := result.trackingClosed
-	if n > 0 && cr.stderr != nil {
-		fmt.Fprintf(cr.stderr, "%s: order tracking sweep watchdog closed %d stale tracking bead(s)\n", cr.logPrefix, n) //nolint:errcheck // best-effort stderr
+	if (result.trackingClosed > 0 || result.trackingDeleted > 0) && cr.stderr != nil {
+		fmt.Fprintf(cr.stderr, "%s: order tracking sweep watchdog closed %d stale tracking bead(s), deleted %d closed tracking bead(s)\n", cr.logPrefix, result.trackingClosed, result.trackingDeleted) //nolint:errcheck // best-effort stderr
 	}
 }
 

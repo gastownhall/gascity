@@ -1296,10 +1296,11 @@ func beadLabelsContain(labels []string, want string) bool {
 }
 
 type orderTrackingSweepResult struct {
-	trackingClosed int
-	wispClosed     int
-	storesSwept    int
-	sweptStoreKeys map[string]struct{}
+	trackingClosed  int
+	trackingDeleted int
+	wispClosed      int
+	storesSwept     int
+	sweptStoreKeys  map[string]struct{}
 }
 
 // sweepStaleOrderTracking closes open order-tracking beads whose creation
@@ -1344,6 +1345,7 @@ func sweepStaleOrderTrackingAcrossStoresLimit(stores []beads.Store, now time.Tim
 		}
 		partial, err := sweepStaleOrderTrackingWithOptionsLimit(store, now, staleAfter, onlyOrders, initiator, includeWispSubtrees, remainingLimit)
 		result.trackingClosed += partial.trackingClosed
+		result.trackingDeleted += partial.trackingDeleted
 		result.wispClosed += partial.wispClosed
 		if err != nil {
 			errs = append(errs, fmt.Errorf("sweeping order-tracking %s: %w", orderTrackingSweepStoreLabel(store, i), err))
@@ -1399,6 +1401,19 @@ func sweepStaleOrderTrackingWithOptionsLimit(store beads.Store, now time.Time, s
 
 	cutoff := now.Add(-staleAfter)
 	result := orderTrackingSweepResult{}
+
+	// Delete stale CLOSED tracking beads first. This sweep otherwise only closes
+	// stale OPEN beads and never removes the closed ones, so every completed
+	// order leaves a closed tracking bead behind — ~37k accumulated in one
+	// production city's hq store, bloating every bead query. The query is bounded
+	// so a large historical backlog drains gradually across sweep cycles; doing
+	// it before the close pass avoids deleting a bead the same run it is closed.
+	deleted, err := deleteStaleClosedOrderTracking(store, cutoff, onlyOrders)
+	if err != nil {
+		return result, fmt.Errorf("deleting stale order-tracking beads: %w", err)
+	}
+	result.trackingDeleted = deleted
+
 	var ids []string
 	for _, b := range all {
 		if len(onlyOrders) > 0 {
@@ -1445,6 +1460,95 @@ func sweepStaleOrderTrackingWithOptionsLimit(store beads.Store, now time.Time, s
 		}
 	}
 	return result, nil
+}
+
+// maxClosedOrderTrackingDeletesPerSweep bounds how many stale closed tracking
+// beads a single sweep queries and deletes, so a large historical backlog
+// drains gradually across sweep cycles and the sweep never scans the whole
+// (potentially bloated) closed-tracking set in one run.
+const maxClosedOrderTrackingDeletesPerSweep = 500
+
+// orderTrackingBeadInScope reports whether a tracking bead belongs to one of
+// the requested orders. An empty onlyOrders set matches every tracking bead.
+func orderTrackingBeadInScope(b beads.Bead, onlyOrders map[string]struct{}) bool {
+	if len(onlyOrders) == 0 {
+		return true
+	}
+	name, ok := orderNameFromTrackingBead(b)
+	if !ok {
+		return false
+	}
+	_, ok = onlyOrders[name]
+	return ok
+}
+
+// batchDeleter is implemented by stores that can remove many beads in one
+// operation (BdStore issues a single `bd delete`). The order-tracking sweep
+// uses it to drain large closed-tracking backlogs without one subprocess per
+// bead; stores without it fall back to sequential Delete.
+type batchDeleter interface {
+	DeleteAll(ids []string) (int, error)
+}
+
+// deleteStaleClosedOrderTracking deletes a bounded batch of closed tracking
+// beads older than cutoff. The Limit keeps each sweep cheap no matter how large
+// the closed-tracking backlog is — the query never returns the whole set.
+func deleteStaleClosedOrderTracking(store beads.Store, cutoff time.Time, onlyOrders map[string]struct{}) (int, error) {
+	if store == nil {
+		return 0, fmt.Errorf("order-tracking delete: nil store")
+	}
+	closed, err := store.List(beads.ListQuery{
+		Label:  labelOrderTracking,
+		Status: "closed",
+		Limit:  maxClosedOrderTrackingDeletesPerSweep,
+		Sort:   beads.SortCreatedDesc,
+		// Issues tier only. The leaked tracking beads are non-ephemeral; closed
+		// ephemeral (wisp-tier) tracking beads are already reclaimed by
+		// wisp-compact's TTL. Including wisps here would also let a stream of
+		// fresh closed wisps crowd out the bounded limit and stall draining the
+		// issues-tier backlog.
+		TierMode: beads.TierIssues,
+	})
+	if err != nil {
+		return 0, fmt.Errorf("listing closed order-tracking beads: %w", err)
+	}
+	var ids []string
+	for _, b := range closed {
+		if !orderTrackingBeadInScope(b, onlyOrders) {
+			continue
+		}
+		if b.CreatedAt.IsZero() || b.CreatedAt.After(cutoff) {
+			continue
+		}
+		ids = append(ids, b.ID)
+	}
+	return deleteOrderTrackingBeads(store, ids)
+}
+
+// deleteOrderTrackingBeads permanently removes the given (already-closed)
+// tracking beads, batching when the store supports it. ErrNotFound is treated
+// as already-drained.
+func deleteOrderTrackingBeads(store beads.Store, ids []string) (int, error) {
+	ids = uniqueNonEmptyOrderTrackingIDs(ids)
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	if batch, ok := store.(batchDeleter); ok {
+		return batch.DeleteAll(ids)
+	}
+	deleted := 0
+	var errs []error
+	for _, id := range ids {
+		switch err := store.Delete(id); {
+		case err == nil:
+			deleted++
+		case errors.Is(err, beads.ErrNotFound):
+			// already drained
+		default:
+			errs = append(errs, fmt.Errorf("deleting order-tracking bead %s: %w", id, err))
+		}
+	}
+	return deleted, errors.Join(errs...)
 }
 
 func sweepStaleOrderWispSubtrees(store beads.Store, cutoff time.Time, onlyOrders map[string]struct{}, initiator string) (int, error) {

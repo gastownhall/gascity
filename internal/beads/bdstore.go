@@ -1469,6 +1469,45 @@ func (s *BdStore) Delete(id string) error {
 	return nil
 }
 
+// bdDeleteBatchSize bounds how many ids go into a single `bd delete`
+// invocation, keeping command lines comfortably under ARG_MAX.
+const bdDeleteBatchSize = 256
+
+// DeleteAll permanently removes multiple beads using bd's native batch delete
+// (`bd delete <ids...> --force`), one invocation per chunk instead of one per
+// id. Returns the number of ids deleted; an id that is already gone counts as
+// deleted. Beads should be closed first.
+func (s *BdStore) DeleteAll(ids []string) (int, error) {
+	deleted := 0
+	for start := 0; start < len(ids); start += bdDeleteBatchSize {
+		end := start + bdDeleteBatchSize
+		if end > len(ids) {
+			end = len(ids)
+		}
+		chunk := ids[start:end]
+		args := append([]string{"delete", "--force", "--json"}, chunk...)
+		if _, err := s.runner(s.dir, "bd", args...); err != nil {
+			if !isBdNotFound(err) {
+				return deleted, fmt.Errorf("batch deleting %d beads: %w", len(chunk), err)
+			}
+			// One or more ids already gone — fall back to per-id so the rest
+			// of the chunk still drains.
+			for _, id := range chunk {
+				switch e := s.Delete(id); {
+				case e == nil:
+					deleted++
+				case errors.Is(e, ErrNotFound):
+				default:
+					return deleted, e
+				}
+			}
+			continue
+		}
+		deleted += len(chunk)
+	}
+	return deleted, nil
+}
+
 // List returns beads matching the query via bd list and bd query.
 func (s *BdStore) List(query ListQuery) ([]Bead, error) {
 	if !query.HasFilter() && !query.AllowScan {

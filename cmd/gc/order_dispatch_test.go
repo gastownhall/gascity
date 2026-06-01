@@ -3330,6 +3330,112 @@ func TestSweepOrphanedOrderTracking_OnlyClosedBeads(t *testing.T) {
 	}
 }
 
+func TestSweepStaleOrderTracking_DeletesClosedStaleTrackingBeads(t *testing.T) {
+	store := beads.NewMemStore()
+
+	// The leak: a tracking bead that completed (closed) long ago. The sweep
+	// otherwise never lists or deletes closed tracking beads, so it lingers
+	// forever — ~37k accumulated in one production city's hq store.
+	oldClosed, err := store.Create(beads.Bead{
+		Title:  "order:beads-health",
+		Labels: []string{"order-run:beads-health", labelOrderTracking},
+	})
+	if err != nil {
+		t.Fatalf("Create(oldClosed): %v", err)
+	}
+	if err := store.Close(oldClosed.ID); err != nil {
+		t.Fatalf("Close(oldClosed): %v", err)
+	}
+
+	// An old OPEN tracking bead — must still be closed (so a blocked order can
+	// retry), not deleted outright.
+	oldOpen, err := store.Create(beads.Bead{
+		Title:  "order:gate-sweep",
+		Labels: []string{"order-run:gate-sweep", labelOrderTracking},
+	})
+	if err != nil {
+		t.Fatalf("Create(oldOpen): %v", err)
+	}
+
+	time.Sleep(150 * time.Millisecond)
+
+	// A freshly-closed tracking bead — within retention, must be retained.
+	freshClosed, err := store.Create(beads.Bead{
+		Title:  "order:dispatch-tick",
+		Labels: []string{"order-run:dispatch-tick", labelOrderTracking},
+	})
+	if err != nil {
+		t.Fatalf("Create(freshClosed): %v", err)
+	}
+	if err := store.Close(freshClosed.ID); err != nil {
+		t.Fatalf("Close(freshClosed): %v", err)
+	}
+
+	if _, err := sweepStaleOrderTracking(store, time.Now(), 100*time.Millisecond, nil, orderTrackingSweepMetadataInitiator); err != nil {
+		t.Fatalf("sweepStaleOrderTracking: %v", err)
+	}
+
+	if _, err := store.Get(oldClosed.ID); !errors.Is(err, beads.ErrNotFound) {
+		t.Errorf("old closed tracking bead %s: Get err = %v, want ErrNotFound (should be deleted)", oldClosed.ID, err)
+	}
+	gotOpen, err := store.Get(oldOpen.ID)
+	if err != nil {
+		t.Errorf("old open tracking bead should be closed-not-deleted: Get err = %v", err)
+	} else if gotOpen.Status != "closed" {
+		t.Errorf("old open tracking bead status = %q, want closed", gotOpen.Status)
+	}
+	if _, err := store.Get(freshClosed.ID); err != nil {
+		t.Errorf("fresh closed tracking bead should be retained: Get err = %v, want nil", err)
+	}
+}
+
+func TestSweepStaleOrderTracking_BoundsDeletesPerSweep(t *testing.T) {
+	store := beads.NewMemStore()
+
+	// A backlog larger than the per-run bound — the sweep must drain it across
+	// multiple cycles, never querying or deleting the whole set in one run.
+	const backlog = maxClosedOrderTrackingDeletesPerSweep + 25
+	for i := 0; i < backlog; i++ {
+		b, err := store.Create(beads.Bead{
+			Title:  "order:beads-health",
+			Labels: []string{"order-run:beads-health", labelOrderTracking},
+		})
+		if err != nil {
+			t.Fatalf("Create(%d): %v", i, err)
+		}
+		if err := store.Close(b.ID); err != nil {
+			t.Fatalf("Close(%d): %v", i, err)
+		}
+	}
+
+	time.Sleep(150 * time.Millisecond)
+
+	result, err := sweepStaleOrderTrackingWithOptionsLimit(store, time.Now(), 100*time.Millisecond, nil, orderTrackingSweepMetadataInitiator, false, 0)
+	if err != nil {
+		t.Fatalf("first sweep: %v", err)
+	}
+	if result.trackingDeleted != maxClosedOrderTrackingDeletesPerSweep {
+		t.Fatalf("first sweep trackingDeleted = %d, want %d (bounded)", result.trackingDeleted, maxClosedOrderTrackingDeletesPerSweep)
+	}
+
+	remaining, err := store.List(beads.ListQuery{Label: labelOrderTracking, Status: "closed"})
+	if err != nil {
+		t.Fatalf("List remaining: %v", err)
+	}
+	if len(remaining) != backlog-maxClosedOrderTrackingDeletesPerSweep {
+		t.Fatalf("remaining closed tracking beads = %d, want %d", len(remaining), backlog-maxClosedOrderTrackingDeletesPerSweep)
+	}
+
+	// A second sweep drains the remainder.
+	result, err = sweepStaleOrderTrackingWithOptionsLimit(store, time.Now(), 100*time.Millisecond, nil, orderTrackingSweepMetadataInitiator, false, 0)
+	if err != nil {
+		t.Fatalf("second sweep: %v", err)
+	}
+	if result.trackingDeleted != backlog-maxClosedOrderTrackingDeletesPerSweep {
+		t.Fatalf("second sweep trackingDeleted = %d, want %d", result.trackingDeleted, backlog-maxClosedOrderTrackingDeletesPerSweep)
+	}
+}
+
 func TestSweepStaleOrderTracking_ClosesOnlyOldOpenTrackingBeads(t *testing.T) {
 	store := beads.NewMemStore()
 

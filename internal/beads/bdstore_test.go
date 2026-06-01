@@ -41,6 +41,33 @@ func mustJSON(t *testing.T, v any) string {
 	return string(data)
 }
 
+// --- DeleteAll ---
+
+func TestBdStoreDeleteAllBatchesIntoSingleCommand(t *testing.T) {
+	var calls [][]string
+	runner := func(_, name string, args ...string) ([]byte, error) {
+		calls = append(calls, append([]string{name}, args...))
+		return []byte(`{}`), nil
+	}
+	s := beads.NewBdStore("/city", runner)
+
+	n, err := s.DeleteAll([]string{"bd-1", "bd-2", "bd-3"})
+	if err != nil {
+		t.Fatalf("DeleteAll: %v", err)
+	}
+	if n != 3 {
+		t.Errorf("deleted = %d, want 3", n)
+	}
+	if len(calls) != 1 {
+		t.Fatalf("runner calls = %d, want 1 (batched into a single bd delete)", len(calls))
+	}
+	got := strings.Join(calls[0], " ")
+	want := "bd delete --force --json bd-1 bd-2 bd-3"
+	if got != want {
+		t.Errorf("call = %q, want %q", got, want)
+	}
+}
+
 // --- Create ---
 
 func TestBdStoreCreate(t *testing.T) {

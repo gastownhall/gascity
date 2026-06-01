@@ -1518,9 +1518,9 @@ func cmdOrderSweepTracking(staleAfter time.Duration, includeWisps, quiet bool, o
 	}
 	if !quiet {
 		if includeWisps {
-			fmt.Fprintf(stdout, "closed %d stale order-tracking bead(s), %d stale order wisp bead(s)\n", result.trackingClosed, result.wispClosed) //nolint:errcheck // best-effort stdout
+			fmt.Fprintf(stdout, "closed %d stale order-tracking bead(s), deleted %d closed tracking bead(s), %d stale order wisp bead(s)\n", result.trackingClosed, result.trackingDeleted, result.wispClosed) //nolint:errcheck // best-effort stdout
 		} else {
-			fmt.Fprintf(stdout, "closed %d stale order-tracking bead(s)\n", result.trackingClosed) //nolint:errcheck // best-effort stdout
+			fmt.Fprintf(stdout, "closed %d stale order-tracking bead(s), deleted %d closed tracking bead(s)\n", result.trackingClosed, result.trackingDeleted) //nolint:errcheck // best-effort stdout
 		}
 	}
 	return 0
