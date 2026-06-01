@@ -8,6 +8,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/formula"
+	"github.com/gastownhall/gascity/internal/pathutil"
 )
 
 // FormulaRequirementsCheck reports formula compiler requirement migration and
@@ -185,23 +186,9 @@ func (i formulaRequirementIssue) dedupeKey() formulaRequirementIssueKey {
 	return formulaRequirementIssueKey{
 		severity: i.severity,
 		formula:  i.formula,
-		path:     canonicalFormulaRequirementPath(i.path),
+		path:     pathutil.NormalizePathForCompare(i.path),
 		message:  i.message,
 	}
-}
-
-func canonicalFormulaRequirementPath(path string) string {
-	if path == "" {
-		return ""
-	}
-	abs, err := filepath.Abs(path)
-	if err != nil {
-		return filepath.Clean(path)
-	}
-	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
-		return resolved
-	}
-	return filepath.Clean(abs)
 }
 
 func (i formulaRequirementIssue) detail() string {

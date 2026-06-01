@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/formula"
 )
@@ -626,6 +627,73 @@ start_command = "echo hello"
 			t.Fatalf("stderr = %q, want command-scoped rig diagnostic", got)
 		}
 	})
+}
+
+func TestFormulaCookHonorsFormulaV2DisabledCityBeforeCreatingBeads(t *testing.T) {
+	configureIsolatedRuntimeEnv(t)
+	t.Setenv("GC_SESSION", "fake")
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_DOLT", "skip")
+	t.Setenv("GC_BOOTSTRAP", "skip")
+	t.Cleanup(func() {
+		applyFeatureFlags(&config.City{Daemon: config.DaemonConfig{FormulaV2: true}})
+	})
+
+	cityDir := t.TempDir()
+	formulaDir := filepath.Join(cityDir, "formulas")
+	if err := os.MkdirAll(formulaDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cityToml := `[workspace]
+name = "test-city"
+
+[daemon]
+formula_v2 = false
+`
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	graphFormula := `
+formula = "graph-work"
+
+[requires]
+formula_compiler = ">=2.0.0"
+
+[[steps]]
+id = "step"
+title = "Do work"
+`
+	if err := os.WriteFile(filepath.Join(formulaDir, "graph-work.toml"), []byte(graphFormula), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"--city", cityDir, "formula", "cook", "graph-work"}, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("gc formula cook = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout = %q, want empty", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "formula_v2 is disabled") {
+		t.Fatalf("stderr missing formula_v2 diagnostic:\n%s", stderr.String())
+	}
+
+	store, err := openStoreAtForCity(cityDir, cityDir)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	items, err := store.List(beads.ListQuery{
+		AllowScan:     true,
+		IncludeClosed: true,
+		TierMode:      beads.TierBoth,
+	})
+	if err != nil {
+		t.Fatalf("store.List(): %v", err)
+	}
+	if len(items) != 0 {
+		t.Fatalf("created %d bead(s), want none: %#v", len(items), items)
+	}
 }
 
 func writeFormulaTestFile(t *testing.T, dir, name, content string) {
