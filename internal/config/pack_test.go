@@ -21,6 +21,24 @@ func writeFile(t *testing.T, dir, name, content string) {
 	}
 }
 
+type readCountingFS struct {
+	fsys.OSFS
+	reads map[string]int
+}
+
+func newReadCountingFS() *readCountingFS {
+	return &readCountingFS{reads: make(map[string]int)}
+}
+
+func (f *readCountingFS) ReadFile(name string) ([]byte, error) {
+	f.reads[filepath.Clean(name)]++
+	return f.OSFS.ReadFile(name)
+}
+
+func (f *readCountingFS) ReadCount(name string) int {
+	return f.reads[filepath.Clean(name)]
+}
+
 func TestExpandPacks_Basic(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, dir, "packs/gastown/pack.toml", `
@@ -3321,6 +3339,81 @@ source = "../middle"
 			t.Fatalf("includes %v did not resolve transitive maintenance after shallow visit: names=%v", includes, names)
 		}
 	}
+}
+
+func TestResolvedPackNames_AvoidsRedundantPackReads(t *testing.T) {
+	t.Run("repeated shallow imports", func(t *testing.T) {
+		dir := t.TempDir()
+
+		writeFile(t, dir, "packs/shared/pack.toml", `
+[pack]
+name = "shared"
+schema = 2
+`)
+
+		transitiveFalse := false
+		countingFS := newReadCountingFS()
+		names := resolvedPackNames(nil, map[string]Import{
+			"shared_a": {Source: "packs/shared", Transitive: &transitiveFalse},
+			"shared_b": {Source: "packs/shared", Transitive: &transitiveFalse},
+		}, countingFS, dir)
+
+		if !names["shared"] {
+			t.Fatalf("shared missing from repeated shallow imports: names=%v", names)
+		}
+		if got := countingFS.ReadCount(filepath.Join(dir, "packs/shared/pack.toml")); got != 1 {
+			t.Fatalf("shared pack.toml read count = %d, want 1", got)
+		}
+	})
+
+	t.Run("diamond transitive imports", func(t *testing.T) {
+		dir := t.TempDir()
+
+		writeFile(t, dir, "packs/shared/pack.toml", `
+[pack]
+name = "shared"
+schema = 2
+`)
+		writeFile(t, dir, "packs/left/pack.toml", `
+[pack]
+name = "left"
+schema = 2
+
+[imports.shared]
+source = "../shared"
+`)
+		writeFile(t, dir, "packs/right/pack.toml", `
+[pack]
+name = "right"
+schema = 2
+
+[imports.shared]
+source = "../shared"
+`)
+		writeFile(t, dir, "packs/root/pack.toml", `
+[pack]
+name = "root"
+schema = 2
+
+[imports.left]
+source = "../left"
+
+[imports.right]
+source = "../right"
+`)
+
+		countingFS := newReadCountingFS()
+		names := resolvedPackNames([]string{"packs/root"}, nil, countingFS, dir)
+
+		for _, name := range []string{"root", "left", "right", "shared"} {
+			if !names[name] {
+				t.Fatalf("%s missing from diamond imports: names=%v", name, names)
+			}
+		}
+		if got := countingFS.ReadCount(filepath.Join(dir, "packs/shared/pack.toml")); got != 1 {
+			t.Fatalf("shared pack.toml read count = %d, want 1", got)
+		}
+	})
 }
 
 // agentNamesOf is a small test helper for readable failure messages.

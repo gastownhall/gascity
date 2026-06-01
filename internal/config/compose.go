@@ -1585,6 +1585,8 @@ func resolvedPackNames(includes []string, imports map[string]Import, sysFS fsys.
 				return
 			}
 		} else {
+			// Shallow visits record the pack name but must not block a later
+			// transitive visit from expanding the pack's children.
 			if seenShallowDirs[absDir] || expandedDirs[absDir] {
 				return
 			}
