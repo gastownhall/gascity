@@ -2347,6 +2347,40 @@ func TestBdStoreListInfersParentFromParentChildDependency(t *testing.T) {
 	}
 }
 
+func TestBdStoreListMapsUpdatedAt(t *testing.T) {
+	created := time.Date(2026, 5, 30, 6, 52, 8, 0, time.UTC)
+	updated := time.Date(2026, 5, 30, 23, 52, 11, 0, time.UTC)
+	runner := fakeRunner(map[string]struct {
+		out []byte
+		err error
+	}{
+		`bd list --json --all --include-infra --include-gates --limit 0`: {
+			out: []byte(`[
+				{
+					"id":"ga-updated",
+					"title":"updated bead",
+					"status":"closed",
+					"issue_type":"task",
+					"created_at":"` + created.Format(time.RFC3339) + `",
+					"updated_at":"` + updated.Format(time.RFC3339) + `"
+				}
+			]`),
+		},
+	})
+	s := beads.NewBdStore("/city", runner)
+
+	got, err := s.List(beads.ListQuery{AllowScan: true, IncludeClosed: true})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("List returned %d beads, want 1", len(got))
+	}
+	if !got[0].UpdatedAt.Equal(updated) {
+		t.Fatalf("UpdatedAt = %s, want %s", got[0].UpdatedAt, updated)
+	}
+}
+
 func TestBdStoreCreateNoLabelsNoParent(t *testing.T) {
 	var gotArgs []string
 	runner := func(_, _ string, args ...string) ([]byte, error) {

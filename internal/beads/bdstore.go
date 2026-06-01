@@ -453,6 +453,7 @@ type bdIssue struct {
 	IssueType    string       `json:"issue_type"`
 	Priority     *int         `json:"priority,omitempty"`
 	CreatedAt    time.Time    `json:"created_at"`
+	UpdatedAt    time.Time    `json:"updated_at"`
 	Assignee     string       `json:"assignee"`
 	From         string       `json:"from"`
 	ParentID     string       `json:"parent"`
@@ -580,6 +581,7 @@ func (b *bdIssue) toBead() Bead {
 		Type:         b.IssueType,
 		Priority:     cloneIntPtr(b.Priority),
 		CreatedAt:    b.CreatedAt.Truncate(time.Second),
+		UpdatedAt:    b.UpdatedAt.Truncate(time.Second),
 		Assignee:     b.Assignee,
 		From:         from,
 		ParentID:     parentID,
