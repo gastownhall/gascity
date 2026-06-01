@@ -345,3 +345,22 @@ func mustWriteManagedRuntimeState(t *testing.T, fs fsys.FS, city string, port in
 	}
 	return port
 }
+
+func TestWorkflowDependenciesSQLUsesSplitDependencyTargets(t *testing.T) {
+	query := workflowDependenciesSQL()
+
+	for _, want := range []string{
+		"d.depends_on_issue_id",
+		"d.depends_on_wisp_id",
+		"d.depends_on_external",
+		"AS depends_on_id",
+	} {
+		if !strings.Contains(query, want) {
+			t.Fatalf("workflow dependency SQL missing %q:\n%s", want, query)
+		}
+	}
+
+	if strings.Contains(query, "d.depends_on_id") {
+		t.Fatalf("workflow dependency SQL references removed physical depends_on_id column:\n%s", query)
+	}
+}

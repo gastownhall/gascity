@@ -130,18 +130,7 @@ func workflowSQLSnapshot(user, password, host string, port int, database, rootID
 	// Query 2: All deps between workflow beads
 	// Use subquery instead of IN (?,?,...) — dolt handles subqueries much
 	// faster than large parameter lists (13s vs 46ms for 95 IDs).
-	depRows, err := db.Query(`
-		SELECT d.issue_id, d.depends_on_id, d.type
-		FROM dependencies d
-		WHERE d.issue_id IN (
-			SELECT i.id FROM issues i
-			WHERE i.id = ? OR JSON_UNQUOTE(JSON_EXTRACT(i.metadata, '$."gc.root_bead_id"')) = ?
-		)
-		AND d.depends_on_id IN (
-			SELECT i.id FROM issues i
-			WHERE i.id = ? OR JSON_UNQUOTE(JSON_EXTRACT(i.metadata, '$."gc.root_bead_id"')) = ?
-		)
-	`, rootID, rootID, rootID, rootID)
+	depRows, err := db.Query(workflowDependenciesSQL(), rootID, rootID, rootID, rootID)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("deps query: %w", err)
 	}
@@ -192,6 +181,24 @@ func workflowSQLSnapshot(user, password, host string, port int, database, rootID
 	}
 
 	return workflowBeads, beadIndex, depMap, nil
+}
+
+func workflowDependenciesSQL() string {
+	return `
+		SELECT
+			d.issue_id,
+			COALESCE(d.depends_on_issue_id, d.depends_on_wisp_id, d.depends_on_external) AS depends_on_id,
+			d.type
+		FROM dependencies d
+		WHERE d.issue_id IN (
+			SELECT i.id FROM issues i
+			WHERE i.id = ? OR JSON_UNQUOTE(JSON_EXTRACT(i.metadata, '$."gc.root_bead_id"')) = ?
+		)
+		AND COALESCE(d.depends_on_issue_id, d.depends_on_wisp_id, d.depends_on_external) IN (
+			SELECT i.id FROM issues i
+			WHERE i.id = ? OR JSON_UNQUOTE(JSON_EXTRACT(i.metadata, '$."gc.root_bead_id"')) = ?
+		)
+	`
 }
 
 // tryFullWorkflowSQL does the entire workflow snapshot via SQL — root
