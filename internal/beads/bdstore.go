@@ -1768,12 +1768,10 @@ func (s *BdStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 	}
 	issues, parseErr := parseIssuesTolerant(extractJSON(out))
 	result := make([]Bead, 0, len(issues))
+	now := time.Now().UTC()
 	for i := range issues {
 		bead := issues[i].toBead()
-		if IsReadyExcludedType(bead.Type) {
-			continue
-		}
-		if bead.Ephemeral {
+		if !IsReadyCandidate(bead, now) {
 			continue
 		}
 		if q.Assignee != "" && bead.Assignee != q.Assignee {

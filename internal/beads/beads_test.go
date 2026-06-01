@@ -78,6 +78,66 @@ func TestIsReadyExcludedType(t *testing.T) {
 	}
 }
 
+func TestIsReadyCandidate(t *testing.T) {
+	now := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+	past := now.Add(-time.Minute)
+	future := now.Add(time.Minute)
+
+	tests := []struct {
+		name string
+		bead Bead
+		want bool
+	}{
+		{
+			name: "open task",
+			bead: Bead{Status: "open", Type: "task"},
+			want: true,
+		},
+		{
+			name: "closed task",
+			bead: Bead{Status: "closed", Type: "task"},
+			want: false,
+		},
+		{
+			name: "empty status is not normalized here",
+			bead: Bead{Type: "task"},
+			want: false,
+		},
+		{
+			name: "ephemeral task",
+			bead: Bead{Status: "open", Type: "task", Ephemeral: true},
+			want: false,
+		},
+		{
+			name: "excluded type",
+			bead: Bead{Status: "open", Type: "message"},
+			want: false,
+		},
+		{
+			name: "nil defer",
+			bead: Bead{Status: "open", Type: "task", DeferUntil: nil},
+			want: true,
+		},
+		{
+			name: "past defer",
+			bead: Bead{Status: "open", Type: "task", DeferUntil: &past},
+			want: true,
+		},
+		{
+			name: "future defer",
+			bead: Bead{Status: "open", Type: "task", DeferUntil: &future},
+			want: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := IsReadyCandidate(tt.bead, now); got != tt.want {
+				t.Fatalf("IsReadyCandidate(%+v) = %v, want %v", tt.bead, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestListQueryCreatedBeforeFiltersBeforeLimit(t *testing.T) {
 	base := time.Date(2026, 4, 20, 12, 0, 0, 0, time.UTC)
 	items := []Bead{

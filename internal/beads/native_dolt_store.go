@@ -432,6 +432,7 @@ func (s *NativeDoltStore) Ready(queries ...ReadyQuery) ([]Bead, error) {
 	defer cancel()
 	var beads []Bead
 	seen := make(map[string]bool)
+	now := time.Now().UTC()
 statusLoop:
 	for _, status := range nativeDoltOpenReadyStatuses {
 		filter := beadslib.WorkFilter{Status: status}
@@ -447,7 +448,7 @@ statusLoop:
 			if err != nil {
 				return nil, err
 			}
-			if bead.Status != "open" || bead.Ephemeral || IsReadyExcludedType(bead.Type) || seen[bead.ID] {
+			if !IsReadyCandidate(bead, now) || seen[bead.ID] {
 				continue
 			}
 			seen[bead.ID] = true
@@ -932,6 +933,7 @@ func nativeIssueFromBead(b Bead) (*beadslib.Issue, error) {
 		CreatedAt:   b.CreatedAt,
 		Labels:      append([]string(nil), b.Labels...),
 		Ephemeral:   b.Ephemeral,
+		DeferUntil:  cloneTimePtr(b.DeferUntil),
 	}
 	if b.Priority != nil {
 		issue.Priority = *b.Priority
@@ -994,6 +996,7 @@ func beadFromNativeIssue(issue *beadslib.Issue) (Bead, error) {
 		Labels:      append([]string(nil), issue.Labels...),
 		Metadata:    metadata,
 		Ephemeral:   issue.Ephemeral,
+		DeferUntil:  cloneTimePtr(issue.DeferUntil),
 	}
 	for _, dep := range issue.Dependencies {
 		if dep == nil {

@@ -225,7 +225,8 @@ The wire format matches `beads.Bead` JSON tags — the same shape that
   "needs": [],
   "description": "",
   "labels": ["order-run:digest", "pool:dog"],
-  "ephemeral": true
+  "ephemeral": true,
+  "defer_until": "2026-02-27T11:00:00Z"
 }
 ```
 
@@ -237,6 +238,11 @@ it on create/read paths so Gas City can keep wisps-tier work out of normal
 ready-work and issues-tier queries. Backends without a native wisps table may
 store the bit internally, such as with a private label, but must return it as
 the `ephemeral` JSON field.
+
+`defer_until` is part of the ready-work contract. Scripts may exclude
+future-deferred beads from `ready` output themselves, but any bead they return
+from `ready`, `get`, `list`, or `children` must preserve `defer_until` so Gas
+City can apply the same filter at the store boundary.
 
 `list`, `children`, and `list-by-label` should return every matching bead the
 script can see, including ephemeral beads. Gas City applies the caller's tier
@@ -251,7 +257,8 @@ issues/wisps/both argument.
   "type": "task",
   "labels": ["pool:dog"],
   "parent_id": "WP-1",
-  "ephemeral": false
+  "ephemeral": false,
+  "defer_until": "2026-02-27T11:00:00Z"
 }
 ```
 

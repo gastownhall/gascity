@@ -1090,8 +1090,12 @@ func defaultScaleCheckCounts(targets []defaultScaleCheckTarget) (map[string]int,
 				demand = nil
 			}
 		}
+		now := time.Now().UTC()
 		for _, b := range demand {
 			if strings.TrimSpace(b.Assignee) != "" {
+				continue
+			}
+			if beads.IsDeferred(b, now) {
 				continue
 			}
 			// gc.run_target (per-step) takes precedence over gc.routed_to

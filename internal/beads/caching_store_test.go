@@ -1230,6 +1230,47 @@ func TestCachingStoreCachedReadyExcludesFutureDeferredBead(t *testing.T) {
 	}
 }
 
+func TestCachingStoreApplyEventUpdatesCachedReadyFields(t *testing.T) {
+	t.Parallel()
+	mem := beads.NewMemStore()
+	deferredByEvent, err := mem.Create(beads.Bead{Title: "Deferred by event"})
+	if err != nil {
+		t.Fatalf("Create(deferredByEvent): %v", err)
+	}
+	ephemeralByEvent, err := mem.Create(beads.Bead{Title: "Ephemeral by event"})
+	if err != nil {
+		t.Fatalf("Create(ephemeralByEvent): %v", err)
+	}
+
+	cache := beads.NewCachingStoreForTest(mem, nil)
+	if err := cache.PrimeActive(); err != nil {
+		t.Fatalf("PrimeActive: %v", err)
+	}
+	assertCachedReadyHas(t, cache, deferredByEvent.ID, true)
+	assertCachedReadyHas(t, cache, ephemeralByEvent.ID, true)
+
+	future := time.Now().UTC().Add(24 * time.Hour)
+	cache.ApplyEvent("bead.updated", []byte(`{"id":"`+deferredByEvent.ID+`","defer_until":"`+future.Format(time.RFC3339Nano)+`"}`))
+	cache.ApplyEvent("bead.updated", []byte(`{"id":"`+ephemeralByEvent.ID+`","ephemeral":true}`))
+
+	got, err := cache.Get(deferredByEvent.ID)
+	if err != nil {
+		t.Fatalf("Get(deferredByEvent): %v", err)
+	}
+	if got.DeferUntil == nil || !got.DeferUntil.Equal(future) {
+		t.Fatalf("DeferUntil after event = %v, want %s", got.DeferUntil, future.Format(time.RFC3339Nano))
+	}
+	got, err = cache.Get(ephemeralByEvent.ID)
+	if err != nil {
+		t.Fatalf("Get(ephemeralByEvent): %v", err)
+	}
+	if !got.Ephemeral {
+		t.Fatal("Ephemeral after event = false, want true")
+	}
+	assertCachedReadyHas(t, cache, deferredByEvent.ID, false)
+	assertCachedReadyHas(t, cache, ephemeralByEvent.ID, false)
+}
+
 func TestCachingStoreCachedReadyUsesWriteThroughDependencies(t *testing.T) {
 	t.Parallel()
 	mem := beads.NewMemStore()
@@ -2297,6 +2338,25 @@ func requireCachedBead(t *testing.T, cs *beads.CachingStore, id string, includeC
 	}
 	t.Fatalf("cached bead %q missing from %#v", id, items)
 	return beads.Bead{}
+}
+
+func assertCachedReadyHas(t *testing.T, cs *beads.CachingStore, id string, want bool) {
+	t.Helper()
+	ready, ok := cs.CachedReady()
+	if !ok {
+		t.Fatal("CachedReady reported cache unavailable")
+	}
+	for _, b := range ready {
+		if b.ID == id {
+			if !want {
+				t.Fatalf("CachedReady included %s, want absent; ready=%v", id, ready)
+			}
+			return
+		}
+	}
+	if want {
+		t.Fatalf("CachedReady omitted %s; ready=%v", id, ready)
+	}
 }
 
 func TestCachingStoreApplyEventIgnoredWhenDegraded(t *testing.T) {

@@ -705,6 +705,39 @@ func TestDefaultScaleCheckCountsPoolDemandUsesRunTargetBeforeRoutedTo(t *testing
 	}
 }
 
+func TestDefaultScaleCheckCountsIgnoresFutureDeferredCronPoolDemand(t *testing.T) {
+	backing := &demandListCountingStore{Store: beads.NewMemStore()}
+	future := time.Now().UTC().Add(time.Hour)
+	if _, err := backing.Create(beads.Bead{
+		Title:      "deferred pool-order wisp",
+		Type:       "molecule",
+		Status:     "open",
+		Metadata:   poolWispMetadata("cat"),
+		DeferUntil: &future,
+	}); err != nil {
+		t.Fatalf("create deferred pool-order wisp: %v", err)
+	}
+	cache := beads.NewCachingStoreForTest(backing, nil)
+	if err := cache.PrimeActive(); err != nil {
+		t.Fatalf("PrimeActive: %v", err)
+	}
+
+	counts, _, errs := defaultScaleCheckCounts([]defaultScaleCheckTarget{{
+		template: "cat",
+		storeKey: "city",
+		store:    cache,
+	}})
+	if len(errs) != 0 {
+		t.Fatalf("defaultScaleCheckCounts errs = %v", errs)
+	}
+	if got := counts["cat"]; got != 0 {
+		t.Fatalf("defaultScaleCheckCounts[%q] = %d, want 0 for future-deferred gc.pool_demand wisp", "cat", got)
+	}
+	if backing.livePoolDemand == 0 {
+		t.Fatalf("livePoolDemand list calls = 0, want >0")
+	}
+}
+
 // poolWispMetadata builds the metadata map a pool-order wisp carries —
 // gc.routed_to + the poolDemandMetadataPair pair — for fixture use.
 // Mirrors the production composition in cmd/gc/cmd_order.go and

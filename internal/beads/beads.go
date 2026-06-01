@@ -155,13 +155,13 @@ func IsReadyCandidate(b Bead, now time.Time) bool {
 	return b.Status == "open" &&
 		!b.Ephemeral &&
 		!IsReadyExcludedType(b.Type) &&
-		!beadDeferred(b, now)
+		!IsDeferred(b, now)
 }
 
-// beadDeferred reports whether a bead is hidden by a future defer_until,
+// IsDeferred reports whether a bead is hidden by a future defer_until,
 // mirroring bd ready's server-side filter (defer_until IS NULL OR <= now is
 // ready) and cmd_hook.isFutureDeferredHookCandidate.
-func beadDeferred(b Bead, now time.Time) bool {
+func IsDeferred(b Bead, now time.Time) bool {
 	return b.DeferUntil != nil && b.DeferUntil.After(now)
 }
 

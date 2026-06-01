@@ -154,10 +154,14 @@ func (w *beadWire) toBead() beads.Bead {
 		cloned := *w.Priority
 		priority = &cloned
 	}
+	status := w.Status
+	if strings.TrimSpace(status) == "" {
+		status = "open"
+	}
 	return beads.Bead{
 		ID:          w.ID,
 		Title:       w.Title,
-		Status:      w.Status,
+		Status:      status,
 		Type:        w.Type,
 		Priority:    priority,
 		CreatedAt:   w.CreatedAt,

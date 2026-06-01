@@ -829,6 +829,34 @@ func TestReady(t *testing.T) {
 	}
 }
 
+func TestReady_treatsMissingOrEmptyStatusAsOpen(t *testing.T) {
+	dir := t.TempDir()
+	script := writeScript(t, dir, `
+case "$1" in
+  ready)
+    echo '[{"id":"EX-missing","title":"missing status","type":"task","created_at":"2026-02-27T10:00:00Z"},{"id":"EX-empty","title":"empty status","status":"","type":"task","created_at":"2026-02-27T10:01:00Z"}]'
+    ;;
+  *) exit 2 ;;
+esac
+`)
+	s := NewStore(script)
+
+	got, err := s.Ready()
+	if err != nil {
+		t.Fatalf("Ready: %v", err)
+	}
+	ids := map[string]bool{}
+	for _, bead := range got {
+		ids[bead.ID] = true
+		if bead.Status != "open" {
+			t.Fatalf("Ready bead %s status = %q, want normalized open", bead.ID, bead.Status)
+		}
+	}
+	if !ids["EX-missing"] || !ids["EX-empty"] {
+		t.Fatalf("Ready ids = %v, want missing-status and empty-status beads", ids)
+	}
+}
+
 func TestReady_excludesFutureDeferredBeads(t *testing.T) {
 	dir := t.TempDir()
 	future := time.Now().UTC().Add(24 * time.Hour)

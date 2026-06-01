@@ -1834,6 +1834,32 @@ func TestBdStoreReadyFiltersInfraTypes(t *testing.T) {
 	}
 }
 
+func TestBdStoreReadyFiltersFutureDeferredRows(t *testing.T) {
+	future := time.Now().UTC().Add(time.Hour).Format(time.RFC3339)
+	runner := fakeRunner(map[string]struct {
+		out []byte
+		err error
+	}{
+		`bd ready --json --limit 0`: {
+			out: []byte(`[
+				{"id":"bd-task","title":"ready one","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z"},
+				{"id":"bd-deferred","title":"not yet","status":"open","issue_type":"task","created_at":"2025-01-15T10:31:00Z","defer_until":"` + future + `"}
+			]`),
+		},
+	})
+	s := beads.NewBdStore("/city", runner)
+	got, err := s.Ready()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("Ready() returned %d beads, want 1", len(got))
+	}
+	if got[0].ID != "bd-task" {
+		t.Fatalf("Ready()[0].ID = %q, want bd-task", got[0].ID)
+	}
+}
+
 func TestBdStoreReadyEmpty(t *testing.T) {
 	runner := fakeRunner(map[string]struct {
 		out []byte

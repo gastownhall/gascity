@@ -351,6 +351,12 @@ func mergeCacheEventPatch(base, patch Bead, fields map[string]json.RawMessage) B
 	if hasCacheEventField(fields, "dependencies") {
 		merged.Dependencies = slices.Clone(patch.Dependencies)
 	}
+	if hasCacheEventField(fields, "ephemeral") {
+		merged.Ephemeral = patch.Ephemeral
+	}
+	if hasCacheEventField(fields, "defer_until") {
+		merged.DeferUntil = cloneTimePtr(patch.DeferUntil)
+	}
 	return merged
 }
 
@@ -388,6 +394,12 @@ func cacheEventConflictsCurrent(current, patch Bead, fields map[string]json.RawM
 		return true
 	}
 	if hasCacheEventField(fields, "labels") && !slices.Equal(current.Labels, patch.Labels) {
+		return true
+	}
+	if hasCacheEventField(fields, "ephemeral") && current.Ephemeral != patch.Ephemeral {
+		return true
+	}
+	if hasCacheEventField(fields, "defer_until") && !timePtrEqual(current.DeferUntil, patch.DeferUntil) {
 		return true
 	}
 	return false
@@ -540,7 +552,9 @@ func beadChanged(old, fresh Bead, skipLabels bool) bool {
 		old.From != fresh.From ||
 		old.ParentID != fresh.ParentID ||
 		old.Ref != fresh.Ref ||
-		old.Description != fresh.Description {
+		old.Description != fresh.Description ||
+		old.Ephemeral != fresh.Ephemeral ||
+		!timePtrEqual(old.DeferUntil, fresh.DeferUntil) {
 		return true
 	}
 	if !maps.Equal(old.Metadata, fresh.Metadata) {
@@ -567,5 +581,16 @@ func intPtrEqual(left, right *int) bool {
 		return false
 	default:
 		return *left == *right
+	}
+}
+
+func timePtrEqual(left, right *time.Time) bool {
+	switch {
+	case left == nil && right == nil:
+		return true
+	case left == nil || right == nil:
+		return false
+	default:
+		return left.Equal(*right)
 	}
 }

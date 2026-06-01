@@ -78,6 +78,40 @@ func TestHQStoreReadyExcludesFutureDeferredBeads(t *testing.T) {
 	}
 }
 
+func TestHQStoreReadySkipsEphemeralOpenTasks(t *testing.T) {
+	store, err := beads.OpenHQStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("OpenHQStore: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := store.Shutdown(); err != nil {
+			t.Errorf("Shutdown: %v", err)
+		}
+	})
+
+	ready, err := store.Create(beads.Bead{Title: "ready", Type: "task"})
+	if err != nil {
+		t.Fatalf("Create(ready): %v", err)
+	}
+	ephemeral, err := store.Create(beads.Bead{Title: "tracking", Type: "task", Ephemeral: true})
+	if err != nil {
+		t.Fatalf("Create(ephemeral): %v", err)
+	}
+
+	got, err := store.Ready()
+	if err != nil {
+		t.Fatalf("Ready: %v", err)
+	}
+	if len(got) != 1 || got[0].ID != ready.ID {
+		t.Fatalf("Ready() = %+v, want only non-ephemeral task %s", got, ready.ID)
+	}
+	for _, bead := range got {
+		if bead.ID == ephemeral.ID {
+			t.Fatalf("ephemeral bead %s leaked into Ready(): %+v", ephemeral.ID, got)
+		}
+	}
+}
+
 func TestHQStoreRecoversFlushedSnapshotAfterSIGKILL(t *testing.T) {
 	if os.Getenv("HQSTORE_SIGKILL_HELPER") == "1" {
 		hqStoreSIGKILLHelper(t)
