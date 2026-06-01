@@ -277,7 +277,7 @@ This launch does not define:
 This document describes the schema-2 surface. Older V1-style
 `[packs.*]` and `workspace.includes` layouts remain migration input, not
 the public authoring contract for new PackV2 cities. Use
-[migrating-to-pack-vnext.md](../../../docs/guides/migrating-to-pack-vnext.md) for
+[shareable-packs.md](../../../docs/guides/shareable-packs.md) for
 the conversion map.
 
 ---END ISSUE---
