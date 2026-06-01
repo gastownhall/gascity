@@ -3,6 +3,8 @@ package api
 import (
 	"net/http"
 	"strconv"
+
+	"github.com/gastownhall/gascity/internal/beads"
 )
 
 // This file hosts stable, CLI-facing read-path envelope types that are
@@ -61,6 +63,7 @@ type StatusView struct {
 	NamedSessions []StatusNamedSessionView
 	SessionCounts StatusSessionCountsView
 	StoreHealth   *StatusStoreHealthView
+	Beads         *beads.BeadsDiagnostic
 	Summary       StatusSummaryView
 }
 

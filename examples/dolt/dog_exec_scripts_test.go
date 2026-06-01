@@ -164,6 +164,7 @@ func (f compactScriptFixture) run(t *testing.T, mode string, extraEnv ...string)
 		"GC_DOLT_COMPACT_DRY_RUN",
 		"GC_DOLT_COMPACT_ONLY_DBS",
 		"GC_DOLT_COMPACT_REMOTE",
+		"GC_DOLT_COMPACT_BARE_GC",
 		"GC_FAKE_DOLT_COMPACT_MODE",
 		"GC_FAKE_DOLT_COUNT_FILE",
 		"GC_FAKE_DOLT_STATE_FILE",
@@ -2824,6 +2825,203 @@ func TestCompactScriptTableNameDoesNotClobberDatabaseName(t *testing.T) {
 	}
 	if !strings.Contains(log, "db=beads query=SELECT COUNT(*) FROM `blocked_issues`") {
 		t.Fatalf("blocked_issues table should be counted in the beads database:\n%s", log)
+	}
+}
+
+// Bare-GC mode (issue #2615): GC_DOLT_COMPACT_BARE_GC=1 must bypass the
+// threshold + flatten path and run a single bare CALL DOLT_GC() per
+// discovered database. The full DOLT_GC --full path is the wrong tool for
+// the NBS journal range index — a working-set GC (bare DOLT_GC()) resets
+// the index without rewriting history.
+
+func TestCompactScriptBareGCBypassesThresholdAndSkipsFlatten(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "below_threshold",
+		"GC_DOLT_COMPACT_THRESHOLD_COMMITS=500",
+		"GC_DOLT_COMPACT_BARE_GC=1")
+	if err != nil {
+		t.Fatalf("bare-gc compact failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "db=beads bare-gc duration=") {
+		t.Fatalf("bare-gc output missing success line:\n%s", out)
+	}
+	if strings.Contains(out, "below_threshold=") {
+		t.Fatalf("bare-gc must skip the threshold gate:\n%s", out)
+	}
+	logData, err := os.ReadFile(fixture.doltLog)
+	if err != nil {
+		t.Fatalf("read dolt log: %v", err)
+	}
+	log := string(logData)
+	for _, forbidden := range []string{"DOLT_RESET", "DOLT_COMMIT", "DOLT_PUSH", "DOLT_FETCH"} {
+		if strings.Contains(log, forbidden) {
+			t.Fatalf("bare-gc must not issue %s:\n%s", forbidden, log)
+		}
+	}
+	if !strings.Contains(log, "CALL DOLT_GC()") {
+		t.Fatalf("bare-gc must issue bare CALL DOLT_GC():\n%s", log)
+	}
+	if strings.Contains(log, "DOLT_GC('--full')") {
+		t.Fatalf("bare-gc must NOT run --full:\n%s", log)
+	}
+}
+
+func TestCompactScriptBareGCDryRunSkipsMutations(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "success",
+		"GC_DOLT_COMPACT_THRESHOLD_COMMITS=500",
+		"GC_DOLT_COMPACT_BARE_GC=1",
+		"GC_DOLT_COMPACT_DRY_RUN=1")
+	if err != nil {
+		t.Fatalf("bare-gc dry-run failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "dry-run (would bare GC)") {
+		t.Fatalf("bare-gc dry-run output missing explanation:\n%s", out)
+	}
+	// Bare-GC dry-run issues no dolt queries at all, so the fake dolt log
+	// may not exist. Tolerate that and assert only on presence.
+	if logData, err := os.ReadFile(fixture.doltLog); err == nil {
+		if strings.Contains(string(logData), "DOLT_GC") {
+			t.Fatalf("bare-gc dry-run must not issue DOLT_GC:\n%s", logData)
+		}
+	}
+}
+
+func TestCompactScriptBareGCHonorsOnlyDBsAllowlist(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	if err := os.MkdirAll(filepath.Join(fixture.dataDir, "cache", ".dolt"), 0o755); err != nil {
+		t.Fatalf("mkdir cache db: %v", err)
+	}
+	out, err := fixture.run(t, "success",
+		"GC_DOLT_COMPACT_THRESHOLD_COMMITS=500",
+		"GC_DOLT_COMPACT_BARE_GC=1",
+		"GC_DOLT_COMPACT_ONLY_DBS=beads")
+	if err != nil {
+		t.Fatalf("bare-gc allowlist compact failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "db=cache not in GC_DOLT_COMPACT_ONLY_DBS") {
+		t.Fatalf("bare-gc output missing allowlist skip:\n%s", out)
+	}
+	if !strings.Contains(out, "db=beads bare-gc duration=") {
+		t.Fatalf("bare-gc output missing success for allowlisted db:\n%s", out)
+	}
+	logData, err := os.ReadFile(fixture.doltLog)
+	if err != nil {
+		t.Fatalf("read dolt log: %v", err)
+	}
+	log := string(logData)
+	if strings.Contains(log, "db=cache query=") {
+		t.Fatalf("non-allowlisted database should not receive dolt queries:\n%s", log)
+	}
+	if !strings.Contains(log, "db=beads query=CALL DOLT_GC()") {
+		t.Fatalf("allowlisted database was not bare-GC'd:\n%s", log)
+	}
+}
+
+func TestCompactScriptBareGCRefusesQuarantinedDatabase(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	quarantineMarker := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-quarantine", "beads")
+	if err := os.MkdirAll(filepath.Dir(quarantineMarker), 0o755); err != nil {
+		t.Fatalf("mkdir quarantine dir: %v", err)
+	}
+	if err := os.WriteFile(quarantineMarker, []byte("db=beads\nreason=test\ncreated_at=2026-05-01T00:00:00Z\n"), 0o600); err != nil {
+		t.Fatalf("write quarantine marker: %v", err)
+	}
+	out, err := fixture.run(t, "success",
+		"GC_DOLT_COMPACT_THRESHOLD_COMMITS=500",
+		"GC_DOLT_COMPACT_BARE_GC=1")
+	if err == nil {
+		t.Fatalf("bare-gc must fail when quarantine marker exists:\n%s", out)
+	}
+	if !strings.Contains(out, "integrity quarantine marker exists") {
+		t.Fatalf("bare-gc output missing quarantine explanation:\n%s", out)
+	}
+	// Quarantine refusal exits before any dolt query, so the fake dolt log
+	// may not exist. Tolerate that and assert only on presence.
+	if logData, err := os.ReadFile(fixture.doltLog); err == nil {
+		if strings.Contains(string(logData), "DOLT_GC") {
+			t.Fatalf("quarantined database must not be bare-GC'd:\n%s", logData)
+		}
+	}
+}
+
+func TestCompactScriptBareGCSurfacesDoltGCFailureStderr(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "gc_failure",
+		"GC_DOLT_COMPACT_THRESHOLD_COMMITS=500",
+		"GC_DOLT_COMPACT_BARE_GC=1")
+	if err == nil {
+		t.Fatalf("bare-gc must fail when DOLT_GC fails:\n%s", out)
+	}
+	if !strings.Contains(out, "gc exploded") {
+		t.Fatalf("bare-gc output missing Dolt GC stderr:\n%s", out)
+	}
+	if !strings.Contains(out, "bare-gc failed rc=") {
+		t.Fatalf("bare-gc output missing failure summary:\n%s", out)
+	}
+	if !strings.Contains(out, "1 database(s) failed bare GC") {
+		t.Fatalf("bare-gc output missing per-run failure tally:\n%s", out)
+	}
+	// Bare GC must NOT write flatten-bookkeeping markers — those describe
+	// flatten remediation state that bare GC never enters.
+	pendingGC := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-pending-gc", "beads")
+	if _, err := os.Stat(pendingGC); !os.IsNotExist(err) {
+		t.Fatalf("bare-gc failure must not write pending-GC marker, stat err=%v", err)
+	}
+	pendingPush := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-pending-push", "beads")
+	if _, err := os.Stat(pendingPush); !os.IsNotExist(err) {
+		t.Fatalf("bare-gc failure must not write pending-push marker, stat err=%v", err)
+	}
+	quarantine := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-quarantine", "beads")
+	if _, err := os.Stat(quarantine); !os.IsNotExist(err) {
+		t.Fatalf("bare-gc failure must not write quarantine marker, stat err=%v", err)
+	}
+}
+
+func TestCompactScriptBareGCRejectsInvalidValue(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "success",
+		"GC_DOLT_COMPACT_THRESHOLD_COMMITS=500",
+		"GC_DOLT_COMPACT_BARE_GC=bogus")
+	if err == nil {
+		t.Fatalf("bare-gc must reject invalid value:\n%s", out)
+	}
+	if !strings.Contains(out, "invalid GC_DOLT_COMPACT_BARE_GC=bogus") {
+		t.Fatalf("bare-gc output missing invalid-value diagnostic:\n%s", out)
+	}
+	// Invalid env exits during validation, before any dolt query, so the
+	// fake dolt log may not exist. Tolerate that and assert only on
+	// presence.
+	if logData, err := os.ReadFile(fixture.doltLog); err == nil {
+		if strings.Contains(string(logData), "DOLT_GC") {
+			t.Fatalf("invalid env value must exit before any DOLT_GC call:\n%s", logData)
+		}
+	}
+}
+
+func TestCompactScriptBareGCDisabledWhenEnvFalsy(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "below_threshold",
+		"GC_DOLT_COMPACT_THRESHOLD_COMMITS=500",
+		"GC_DOLT_COMPACT_BARE_GC=0")
+	if err != nil {
+		t.Fatalf("falsy bare-gc compact failed: %v\n%s", err, out)
+	}
+	// Falsy bare-gc must fall through to the normal threshold-gated path:
+	// in below_threshold mode that means the standard "below_threshold" skip
+	// line, NOT a bare-GC success.
+	if !strings.Contains(out, "below_threshold=500") {
+		t.Fatalf("falsy bare-gc must defer to the threshold path:\n%s", out)
+	}
+	if strings.Contains(out, "bare-gc") {
+		t.Fatalf("falsy bare-gc must not execute the bare-GC path:\n%s", out)
+	}
+	logData, err := os.ReadFile(fixture.doltLog)
+	if err != nil {
+		t.Fatalf("read dolt log: %v", err)
+	}
+	if strings.Contains(string(logData), "DOLT_GC") {
+		t.Fatalf("falsy bare-gc + below threshold must not call DOLT_GC:\n%s", logData)
 	}
 }
 

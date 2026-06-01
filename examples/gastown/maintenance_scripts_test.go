@@ -5335,7 +5335,7 @@ func TestJsonlExportSkipsSpikeCheckBelowMinPrev(t *testing.T) {
 	// Bug 2 (#1547): percent-delta with no absolute floor escalates on tiny
 	// counts. prev=2, current=1 → 50% delta would cross the 20% threshold.
 	// With the fix, no escalation when prev < GC_JSONL_MIN_PREV_FOR_SPIKE
-	// (default 10).
+	// (default 100).
 	cityDir := t.TempDir()
 	binDir := t.TempDir()
 	stateDir := t.TempDir()

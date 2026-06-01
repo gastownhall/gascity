@@ -623,6 +623,10 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 		return nil, nil, err
 	}
 
+	if err := ValidateGitHubPRMonitors(root); err != nil {
+		return nil, nil, err
+	}
+
 	// Validate all duration strings in the fully-merged config.
 	prov.Warnings = append(prov.Warnings, ValidateDurations(root, path)...)
 	prov.Warnings = append(prov.Warnings, ValidateEventsRotation(root)...)
@@ -918,6 +922,10 @@ func mergeFragment(base, fragment *City, fragMeta toml.MetaData, fragPath string
 	// Services: concatenate.
 	base.Services = append(base.Services, fragment.Services...)
 
+	// GitHub PR monitors: concatenate. Validation rejects duplicate repo/base
+	// ownership after patches have had a chance to adjust declarations.
+	base.GitHub.PRMonitors = append(base.GitHub.PRMonitors, fragment.GitHub.PRMonitors...)
+
 	// Providers: deep-merge per-field.
 	mergeProviders(base, fragment, fragMeta, fragPath, prov)
 
@@ -937,6 +945,7 @@ func mergeFragment(base, fragment *City, fragMeta toml.MetaData, fragPath string
 	base.Patches.Agents = append(base.Patches.Agents, fragment.Patches.Agents...)
 	base.Patches.Rigs = append(base.Patches.Rigs, fragment.Patches.Rigs...)
 	base.Patches.Providers = append(base.Patches.Providers, fragment.Patches.Providers...)
+	base.Patches.GitHubPRMonitors = append(base.Patches.GitHubPRMonitors, fragment.Patches.GitHubPRMonitors...)
 
 	// Simple sections: last-writer-wins if fragment defines them.
 	if fragMeta.IsDefined("beads") {
@@ -1552,12 +1561,13 @@ func trackWorkspace(prov *Provenance, meta toml.MetaData, source string) {
 }
 
 // resolvedPackNames collects pack names that are reachable from a set of
-// top-level include paths and imports. It walks legacy [pack].includes
-// transitively and follows V2 [imports] according to each import's transitive
-// setting so builtin system-pack injection can be skipped when a user pack
-// already brings the same pack into the city closure.
+// top-level include paths and imports. It walks legacy [pack].includes and V2
+// [imports] according to each import's transitive setting so builtin system-pack
+// injection can be skipped when a user pack already brings the same pack into
+// the city closure.
 func resolvedPackNames(includes []string, imports map[string]Import, sysFS fsys.FS, cityRoot string) map[string]bool {
 	names := make(map[string]bool, len(includes)+len(imports))
+	seenShallowDirs := make(map[string]bool)
 	expandedDirs := make(map[string]bool)
 
 	var visit func(ref, declDir string, transitive bool)
@@ -1570,6 +1580,16 @@ func resolvedPackNames(includes []string, imports map[string]Import, sysFS fsys.
 		if absErr != nil {
 			absDir = dir
 		}
+		if transitive {
+			if expandedDirs[absDir] {
+				return
+			}
+		} else {
+			if seenShallowDirs[absDir] || expandedDirs[absDir] {
+				return
+			}
+		}
+
 		data, err := sysFS.ReadFile(filepath.Join(dir, packFile))
 		if err != nil {
 			return
@@ -1587,9 +1607,7 @@ func resolvedPackNames(includes []string, imports map[string]Import, sysFS fsys.
 
 		names[pc.Pack.Name] = true
 		if !transitive {
-			return
-		}
-		if expandedDirs[absDir] {
+			seenShallowDirs[absDir] = true
 			return
 		}
 		expandedDirs[absDir] = true

@@ -26,6 +26,40 @@ type noImmediateProvider struct {
 	runtime.Provider
 }
 
+type providerWithoutProcessScanner struct {
+	runtime.Provider
+}
+
+type orphanScanProvider struct {
+	*runtime.Fake
+	results      []runtime.LiveRuntime
+	findErr      error
+	terminateErr error
+	events       []string
+}
+
+func (p *orphanScanProvider) Start(ctx context.Context, name string, cfg runtime.Config) error {
+	p.events = append(p.events, "start:"+cfg.Env["GC_SESSION_ID"])
+	return p.Fake.Start(ctx, name, cfg)
+}
+
+func (p *orphanScanProvider) FindRuntimesBySessionID(id string) ([]runtime.LiveRuntime, error) {
+	p.events = append(p.events, "find:"+id)
+	out := make([]runtime.LiveRuntime, len(p.results))
+	copy(out, p.results)
+	for i := range out {
+		if out[i].SessionID == "" {
+			out[i].SessionID = id
+		}
+	}
+	return out, p.findErr
+}
+
+func (p *orphanScanProvider) TerminateRuntime(r runtime.LiveRuntime) error {
+	p.events = append(p.events, "terminate:"+r.SessionID)
+	return p.terminateErr
+}
+
 type nonRunningStopRecorder struct {
 	*runtime.Fake
 	stopCalls int
@@ -247,9 +281,17 @@ func TestCreate(t *testing.T) {
 	if b.Metadata["instance_token"] == "" {
 		t.Error("instance_token is empty")
 	}
-	startCall := sp.Calls[0]
-	if startCall.Method != "Start" {
-		t.Fatalf("first runtime call = %q, want Start", startCall.Method)
+	var startCall runtime.Call
+	foundStart := false
+	for _, call := range sp.Calls {
+		if call.Method == "Start" {
+			startCall = call
+			foundStart = true
+			break
+		}
+	}
+	if !foundStart {
+		t.Fatalf("runtime calls = %v, want Start", sp.Calls)
 	}
 	if got := startCall.Config.Env["GC_SESSION_ID"]; got != info.ID {
 		t.Errorf("GC_SESSION_ID = %q, want %q", got, info.ID)
@@ -266,6 +308,132 @@ func TestCreate(t *testing.T) {
 	if got := startCall.Config.Env["GC_DIR"]; got != "/tmp" {
 		t.Errorf("GC_DIR = %q, want %q", got, "/tmp")
 	}
+}
+
+func TestCreateKillsUntrackedOrphanBeforeStart(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := &orphanScanProvider{
+		Fake: runtime.NewFake(),
+		results: []runtime.LiveRuntime{{
+			PID:       1234,
+			IsTracked: false,
+		}},
+	}
+	mgr := NewManager(store, sp)
+
+	info, err := mgr.Create(context.Background(), "helper", "my chat", "claude", "/tmp", "claude", nil, ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	want := []string{"find:" + info.ID, "terminate:" + info.ID, "start:" + info.ID}
+	if got := strings.Join(sp.events, ","); got != strings.Join(want, ",") {
+		t.Fatalf("events = %v, want %v", sp.events, want)
+	}
+}
+
+func TestCreateSkipsTrackedRuntimeBeforeStart(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := &orphanScanProvider{
+		Fake: runtime.NewFake(),
+		results: []runtime.LiveRuntime{{
+			PID:       1234,
+			IsTracked: true,
+		}},
+	}
+	mgr := NewManager(store, sp)
+
+	info, err := mgr.Create(context.Background(), "helper", "my chat", "claude", "/tmp", "claude", nil, ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	want := []string{"find:" + info.ID, "start:" + info.ID}
+	if got := strings.Join(sp.events, ","); got != strings.Join(want, ",") {
+		t.Fatalf("events = %v, want %v", sp.events, want)
+	}
+}
+
+func TestCreateContinuesWhenOrphanCleanupFails(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := &orphanScanProvider{
+		Fake:         runtime.NewFake(),
+		findErr:      errors.New("partial scan failed"),
+		terminateErr: errors.New("terminate failed"),
+		results: []runtime.LiveRuntime{{
+			PID:       1234,
+			IsTracked: false,
+		}},
+	}
+	mgr := NewManager(store, sp)
+
+	info, err := mgr.Create(context.Background(), "helper", "my chat", "claude", "/tmp", "claude", nil, ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if !sp.IsRunning(info.SessionName) {
+		t.Fatalf("runtime session %q was not started after cleanup errors", info.SessionName)
+	}
+	want := []string{"find:" + info.ID, "terminate:" + info.ID, "start:" + info.ID}
+	if got := strings.Join(sp.events, ","); got != strings.Join(want, ",") {
+		t.Fatalf("events = %v, want %v", sp.events, want)
+	}
+}
+
+func TestCreateWithProviderWithoutProcessScannerStillStarts(t *testing.T) {
+	store := beads.NewMemStore()
+	fake := runtime.NewFake()
+	mgr := NewManager(store, &providerWithoutProcessScanner{Provider: fake})
+
+	info, err := mgr.Create(context.Background(), "helper", "my chat", "claude", "/tmp", "claude", nil, ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if !fake.IsRunning(info.SessionName) {
+		t.Fatalf("runtime session %q was not started", info.SessionName)
+	}
+}
+
+func TestRuntimeStartCallSitesCleanOrphansFirst(t *testing.T) {
+	tests := []struct {
+		file   string
+		idExpr string
+	}{
+		{file: "manager.go", idExpr: "b.ID"},
+		{file: "chat.go", idExpr: "id"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.file, func(t *testing.T) {
+			data, err := os.ReadFile(filepath.Join(".", tt.file))
+			if err != nil {
+				t.Fatalf("read %s: %v", tt.file, err)
+			}
+			lines := strings.Split(string(data), "\n")
+			starts := 0
+			for i, line := range lines {
+				if !strings.Contains(line, "m.sp.Start(ctx, sessName, cfg)") {
+					continue
+				}
+				starts++
+				prev := previousNonBlankLine(lines, i)
+				if !strings.Contains(prev, "m.killExistingOrphans(ctx, "+tt.idExpr+")") {
+					t.Errorf("%s:%d Start is not immediately preceded by orphan cleanup using %s; previous line: %q", tt.file, i+1, tt.idExpr, prev)
+				}
+			}
+			if starts == 0 {
+				t.Fatalf("%s contains no m.sp.Start(ctx, sessName, cfg) call sites", tt.file)
+			}
+		})
+	}
+}
+
+func previousNonBlankLine(lines []string, before int) string {
+	for i := before - 1; i >= 0; i-- {
+		if strings.TrimSpace(lines[i]) != "" {
+			return strings.TrimSpace(lines[i])
+		}
+	}
+	return ""
 }
 
 func TestUpdateTemplateOverridesRejectsRunningSessionUnderLock(t *testing.T) {

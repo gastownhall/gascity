@@ -46,7 +46,6 @@ type CachingStore struct {
 	syncFailures int
 	stats        CacheStats
 	onChange     func(eventType, beadID string, payload json.RawMessage)
-	cancelFn     context.CancelFunc
 	problemf     func(string)
 	problemLog   map[string]cacheProblemLogState
 
@@ -61,6 +60,12 @@ type CachingStore struct {
 	primeCycle             *fullPrimeCycle
 	lastFullPrimeStartedAt time.Time
 	primeRetryDelay        func(attempt int) time.Duration
+
+	lifecycleMu sync.Mutex
+	lifecycleWG sync.WaitGroup
+	cancelFn    context.CancelFunc
+	stopCh      chan struct{}
+	stopped     bool
 
 	// latencyWindow holds the most recent reconciliation bd-list
 	// durations for adaptive cadence decisions. Bounded at
@@ -214,9 +219,8 @@ func computeAutoStagger(agentID string) time.Duration {
 // watchdog reconciliation. The onChange callback (optional) is called for
 // each detected external change with event type and bead JSON.
 //
-// BdStore backings provide an issue prefix for filtering event-hook payloads
-// from other stores. Other Store implementations are wrapped and delegated
-// normally, with foreign-event filtering disabled.
+// BdStore-backed caches filter hook events by issue prefix. Other Store
+// implementations are valid backings, but run without foreign-event filtering.
 func NewCachingStore(backing Store, onChange func(eventType, beadID string, payload json.RawMessage)) *CachingStore {
 	prefix := ""
 	bdBacking := false
@@ -228,6 +232,8 @@ func NewCachingStore(backing Store, onChange func(eventType, beadID string, payl
 		} else {
 			prefix = bd.IDPrefix()
 		}
+	} else if backing, ok := backing.(interface{ IDPrefix() string }); ok {
+		prefix = backing.IDPrefix()
 	}
 	cs := newCachingStore(backing, prefix, onChange)
 	switch {
@@ -277,6 +283,7 @@ func newCachingStore(backing Store, idPrefix string, onChange func(eventType, be
 			log.Printf("beads cache: %s", msg)
 		},
 		primeRetryDelay: defaultCachePrimeRetryDelay,
+		stopCh:          make(chan struct{}),
 	}
 }
 
@@ -359,7 +366,7 @@ func (c *CachingStore) PrimeActive() error {
 	for _, b := range all {
 		beadMap[b.ID] = cloneBead(b)
 	}
-	depMap, depsComplete, depErr := c.fetchDepsForIDs(beadIDs(beadMap))
+	depMap, depsComplete, depErr := c.fetchDepsForBeads(beadMap)
 	if depErr != nil {
 		partialErr = errors.Join(partialErr, depErr)
 		c.recordProblem("prime active dep cache", depErr)
@@ -405,6 +412,17 @@ func (c *CachingStore) PrimeActive() error {
 // Retries up to 3 times on failure since bd list can time out under
 // concurrent dolt load.
 func (c *CachingStore) Prime(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := c.beginCacheWorker(); err != nil {
+		return err
+	}
+	defer c.endCacheWorker()
+	if err := c.cacheContextErr(ctx); err != nil {
+		return err
+	}
+
 	done, owner := c.beginFullPrime()
 	if !owner {
 		return c.waitForFullPrimeDone(ctx, done)
@@ -414,7 +432,14 @@ func (c *CachingStore) Prime(ctx context.Context) error {
 	return err
 }
 
-func (c *CachingStore) prime(_ context.Context) error {
+func (c *CachingStore) prime(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := c.cacheContextErr(ctx); err != nil {
+		return err
+	}
+
 	c.mu.RLock()
 	startSeq := c.mutationSeq
 	c.mu.RUnlock()
@@ -440,12 +465,17 @@ func (c *CachingStore) prime(_ context.Context) error {
 				delay = c.primeRetryDelay(attempt)
 			}
 			if delay > 0 {
-				time.Sleep(delay)
+				if err := c.cacheSleep(ctx, delay); err != nil {
+					return err
+				}
 			}
 		}
 	}
 	if err != nil {
 		return fmt.Errorf("prime list: %w", err)
+	}
+	if err := c.cacheContextErr(ctx); err != nil {
+		return err
 	}
 
 	beadMap := make(map[string]Bead, len(all))
@@ -453,9 +483,12 @@ func (c *CachingStore) prime(_ context.Context) error {
 		beadMap[b.ID] = cloneBead(b)
 	}
 
-	depMap, depsComplete, depErr := c.fetchDepsForIDs(beadIDs(beadMap))
+	depMap, depsComplete, depErr := c.fetchDepsForBeads(beadMap)
 	if depErr != nil {
 		c.recordProblem("prime dep cache", depErr)
+	}
+	if err := c.cacheContextErr(ctx); err != nil {
+		return err
 	}
 
 	now := time.Now()
@@ -544,6 +577,9 @@ func (c *CachingStore) finishFullPrime(cycle *fullPrimeCycle, err error) {
 }
 
 func (c *CachingStore) waitForFullPrimeDone(ctx context.Context, cycle *fullPrimeCycle) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if cycle == nil || cycle.done == nil {
 		return ErrCacheUnavailable
 	}
@@ -558,8 +594,18 @@ func (c *CachingStore) waitForFullPrimeDone(ctx context.Context, cycle *fullPrim
 }
 
 func (c *CachingStore) ensureFullPrime(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if c.cacheFullyPrimed() {
 		return nil
+	}
+	if err := c.beginCacheWorker(); err != nil {
+		return errors.Join(ErrCacheUnavailable, err)
+	}
+	defer c.endCacheWorker()
+	if err := c.cacheContextErr(ctx); err != nil {
+		return errors.Join(ErrCacheUnavailable, err)
 	}
 	cycle, owner, suppressed := c.beginLazyFullPrime(time.Now())
 	if suppressed {
@@ -619,6 +665,44 @@ func (c *CachingStore) cacheFullyPrimed() bool {
 	return c.state == cacheLive && c.primePartialErr == nil
 }
 
+func (c *CachingStore) beginCacheWorker() error {
+	c.lifecycleMu.Lock()
+	defer c.lifecycleMu.Unlock()
+	if c.stopped {
+		return context.Canceled
+	}
+	c.lifecycleWG.Add(1)
+	return nil
+}
+
+func (c *CachingStore) endCacheWorker() {
+	c.lifecycleWG.Done()
+}
+
+func (c *CachingStore) cacheContextErr(ctx context.Context) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-c.stopCh:
+		return context.Canceled
+	default:
+		return nil
+	}
+}
+
+func (c *CachingStore) cacheSleep(ctx context.Context, d time.Duration) error {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-c.stopCh:
+		return context.Canceled
+	case <-timer.C:
+		return nil
+	}
+}
+
 // StartReconciler launches watchdog reconciliation. Cancel ctx to stop.
 // The stagger applies a one-time delay between this call and the first
 // reconciler tick (see StaggerOption); agentID is consulted only when
@@ -626,8 +710,19 @@ func (c *CachingStore) cacheFullyPrimed() bool {
 // agent=..." log line is emitted before the loop starts, even when the
 // resolved stagger is zero, so absence is unambiguous.
 func (c *CachingStore) StartReconciler(ctx context.Context, stagger StaggerOption, agentID string) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	ctx, cancel := context.WithCancel(ctx)
+	c.lifecycleMu.Lock()
+	if c.stopped {
+		c.lifecycleMu.Unlock()
+		cancel()
+		return
+	}
 	c.cancelFn = cancel
+	c.lifecycleWG.Add(1)
+	c.lifecycleMu.Unlock()
 
 	offset := stagger.resolve(agentID)
 
@@ -637,14 +732,26 @@ func (c *CachingStore) StartReconciler(ctx context.Context, stagger StaggerOptio
 
 	log.Printf("beads cache: stagger=%dms agent=%s", offset.Milliseconds(), agentID)
 
-	go c.reconcileLoop(ctx, offset)
+	go func() {
+		defer c.lifecycleWG.Done()
+		c.reconcileLoop(ctx, offset)
+	}()
 }
 
-// StopReconciler cancels the background reconciler.
+// StopReconciler cancels and waits for cache-owned background work.
 func (c *CachingStore) StopReconciler() {
-	if c.cancelFn != nil {
-		c.cancelFn()
+	c.lifecycleMu.Lock()
+	if !c.stopped {
+		close(c.stopCh)
+		c.stopped = true
 	}
+	cancel := c.cancelFn
+	c.cancelFn = nil
+	c.lifecycleMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	c.lifecycleWG.Wait()
 }
 
 // Stats returns current cache statistics.
@@ -744,14 +851,21 @@ func beadIDs(beadMap map[string]Bead) []string {
 	return ids
 }
 
+type listDependencyCompletenessStore interface {
+	listIncludesCompleteDependencies() bool
+}
+
+func (c *CachingStore) fetchDepsForBeads(beadMap map[string]Bead) (map[string][]Dep, bool, error) {
+	if backing, ok := c.backing.(listDependencyCompletenessStore); ok {
+		return depsFromBeads(beadMap, nil, false), backing.listIncludesCompleteDependencies(), nil
+	}
+	return c.fetchDepsForIDs(beadIDs(beadMap))
+}
+
 func (c *CachingStore) fetchDepsForIDs(ids []string) (map[string][]Dep, bool, error) {
 	depMap := make(map[string][]Dep)
 	if len(ids) == 0 {
 		return depMap, true, nil
-	}
-
-	if _, ok := c.backing.(*BdStore); ok {
-		return depMap, false, nil
 	}
 
 	for _, id := range ids {

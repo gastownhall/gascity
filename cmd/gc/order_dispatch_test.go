@@ -6383,6 +6383,127 @@ func TestOrderExecEnvSetsBeadsActorToOrderName(t *testing.T) {
 	}
 }
 
+// TestOrderExecEnvAppliesOrderEnvOverrides verifies that env entries
+// declared in `[order.env]` on the order TOML reach the dispatched
+// subprocess. This is the per-order tuning knob for threshold env vars
+// (GC_DOCTOR_LATENCY_WARN_S, GC_JSONL_SPIKE_THRESHOLD, etc.) that would
+// otherwise require editing the controller's parent environment.
+func TestOrderExecEnvAppliesOrderEnvOverrides(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("GC_DOLT", "skip")
+	_ = os.Unsetenv("BEADS_ACTOR")
+
+	cityDir := t.TempDir()
+	target := execStoreTarget{ScopeRoot: cityDir, ScopeKind: "city", Prefix: "pc"}
+	a := orders.Order{
+		Name:     "doctor",
+		Trigger:  "cooldown",
+		Interval: "1m",
+		Exec:     "true",
+		Env: map[string]string{
+			"GC_DOCTOR_LATENCY_WARN_S": "5",
+			"CUSTOM_ORDER_FLAG":        "yes",
+		},
+	}
+
+	envSlice, err := orderExecEnvWithError(cityDir, nil, target, a)
+	if err != nil {
+		t.Fatalf("orderExecEnvWithError() error = %v", err)
+	}
+
+	wants := []string{
+		"GC_DOCTOR_LATENCY_WARN_S=5",
+		"CUSTOM_ORDER_FLAG=yes",
+	}
+	for _, want := range wants {
+		found := false
+		for _, entry := range envSlice {
+			if entry == want {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("orderExecEnv missing %q; env=%v", want, envSlice)
+		}
+	}
+}
+
+// TestOrderExecEnvRejectsReservedOrderEnvKeys verifies that `[order.env]`
+// cannot shadow controller-owned routing and identity variables after the
+// store target has already been resolved.
+func TestOrderExecEnvRejectsReservedOrderEnvKeys(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("GC_DOLT", "skip")
+
+	cityDir := t.TempDir()
+	target := execStoreTarget{ScopeRoot: cityDir, ScopeKind: "city", Prefix: "pc"}
+	for _, key := range []string{
+		"GC_STORE_SCOPE",
+		"ORDER_DIR",
+		"PACK_DIR",
+		"BD_EXPORT_AUTO",
+		"GC_BEADS",
+		"GC_BEADS_SCOPE_ROOT",
+	} {
+		t.Run(key, func(t *testing.T) {
+			a := orders.Order{
+				Name:     "scoped-order",
+				Trigger:  "cooldown",
+				Interval: "1m",
+				Exec:     "true",
+				Env: map[string]string{
+					key: "overridden",
+				},
+			}
+
+			_, err := orderExecEnvWithError(cityDir, nil, target, a)
+			if err == nil {
+				t.Fatal("orderExecEnvWithError() succeeded; want reserved env key error")
+			}
+			if !strings.Contains(err.Error(), key) || !strings.Contains(err.Error(), "controller-owned") {
+				t.Fatalf("error = %q, want controller-owned %s diagnostic", err, key)
+			}
+		})
+	}
+}
+
+func TestOrderExecEnvReservedKeysCoverProjectedEnv(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("GC_DOLT", "skip")
+
+	cityDir := t.TempDir()
+	packDir := filepath.Join(cityDir, "packs", "maintenance")
+	target := execStoreTarget{ScopeRoot: cityDir, ScopeKind: "city", Prefix: "pc"}
+	a := orders.Order{
+		Name:         "scoped-order",
+		Trigger:      "cooldown",
+		Interval:     "1m",
+		Exec:         "true",
+		Source:       filepath.Join(packDir, "orders", "scoped-order.toml"),
+		FormulaLayer: filepath.Join(packDir, "formulas"),
+	}
+
+	envSlice, err := orderExecEnvWithError(cityDir, nil, target, a)
+	if err != nil {
+		t.Fatalf("orderExecEnvWithError() error = %v", err)
+	}
+
+	var unreserved []string
+	for _, entry := range envSlice {
+		key, _, ok := strings.Cut(entry, "=")
+		if !ok {
+			continue
+		}
+		if !isReservedOrderExecEnvKey(key) {
+			unreserved = append(unreserved, key)
+		}
+	}
+	if len(unreserved) > 0 {
+		t.Fatalf("projected order exec env keys missing from reserved guard: %v", unreserved)
+	}
+}
+
 // TestOrderExecEnvSkipsBeadsActorForUnnamedOrder guards against accidentally
 // emitting "BEADS_ACTOR=order:" (empty suffix) when an order has no name.
 // The conditional in orderExecEnv prevents that — verified here so future

@@ -10,7 +10,7 @@ permissions:
 
 env:
   DOLT_VERSION: "2.0.7"
-  BD_VERSION: "v1.0.4"
+  BD_VERSION: "v1.0.5"
 
 jobs:
   tier-b:

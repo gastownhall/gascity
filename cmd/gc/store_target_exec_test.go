@@ -485,10 +485,14 @@ func TestOpenStoreAtForCityExecBeadsBdProjectsScopedExternalDoltEnv(t *testing.T
 	t.Setenv("BD_DOLT_SYNC_CLI_REMOTES", "true")
 	t.Setenv("BEADS_DOLT_SYNC_CLI_REMOTES", "true")
 
-	store, err := openStoreAtForCity(rigDir, cityDir)
+	result, err := openStoreResultAtForCity(rigDir, cityDir)
 	if err != nil {
 		t.Fatalf("openStoreAtForCity: %v", err)
 	}
+	if result.Diagnostic.Store != "ExecStore" {
+		t.Fatalf("beads_store = %q, want ExecStore", result.Diagnostic.Store)
+	}
+	store := result.Store
 	if _, err := store.Create(beads.Bead{Title: "rig"}); err != nil {
 		t.Fatalf("Create: %v", err)
 	}

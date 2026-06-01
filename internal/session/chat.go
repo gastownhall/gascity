@@ -117,6 +117,7 @@ func (m *Manager) retryFreshStartAfterStaleKey(
 		return false, fmt.Errorf("fresh start after stale key: resume command could not be stripped")
 	}
 	cfg.Command = freshCmd
+	m.killExistingOrphans(ctx, id)
 	if err := m.sp.Start(ctx, sessName, cfg); err != nil {
 		if unroute != nil {
 			unroute()
@@ -285,6 +286,7 @@ func (m *Manager) ensureRunning(ctx context.Context, id string, b beads.Bead, se
 	}
 	cfg = runtime.SyncWorkDirEnv(cfg)
 	started := false
+	m.killExistingOrphans(ctx, id)
 	if err := m.sp.Start(ctx, sessName, cfg); err != nil {
 		if errors.Is(err, runtime.ErrSessionDiedDuringStartup) && b.Metadata["session_key"] != "" {
 			retried, err := m.retryFreshStartAfterStaleKey(ctx, id, &b, sessName, resumeCommand, cfg, unroute)
@@ -395,6 +397,7 @@ func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, id string, b bea
 	}
 	cfg = runtime.SyncWorkDirEnv(cfg)
 	started := false
+	m.killExistingOrphans(ctx, id)
 	if err := m.sp.Start(ctx, sessName, cfg); err != nil {
 		switch {
 		case errors.Is(err, runtime.ErrSessionDiedDuringStartup) && b.Metadata["session_key"] != "":

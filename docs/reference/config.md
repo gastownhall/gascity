@@ -36,6 +36,7 @@ City is the top-level configuration for a Gas City instance.
 | `doctor` | DoctorConfig |  |  | Doctor configures gc doctor thresholds and policy toggles (worktree size warnings, nested-worktree auto-prune). |
 | `maintenance` | MaintenanceConfig |  |  | Maintenance configures periodic store-maintenance loops. |
 | `service` | []Service |  |  | Services declares workspace-owned HTTP services mounted on the controller edge under /svc/&#123;name&#125;. |
+| `github` | GitHubConfig |  |  | GitHub configures GitHub-facing repository monitors. |
 | `agent_defaults` | AgentDefaults |  |  | AgentDefaults provides city-level defaults for agents that don't override them (canonical TOML key: agent_defaults). The runtime currently applies default_sling_formula and append_fragments; the attachment-list fields remain tombstones, and the other fields are parsed/composed but not yet inherited automatically. |
 | `pricing` | []ModelPricing |  |  | Pricing holds per-model cost rate overrides keyed by (provider, model). City-level entries override pack-level entries which override the defaults shipped with the pricing package. See internal/pricing for the estimation seam introduced by issue #1255 (1d). |
 
@@ -359,6 +360,51 @@ FormulasConfig holds legacy formula directory settings.
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
 
+## GitHubConfig
+
+GitHubConfig groups GitHub-facing repository monitor declarations.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `pr_monitor` | []GitHubPRMonitor |  |  | PRMonitors declares GitHub pull-request readiness monitors. |
+
+## GitHubPRMonitor
+
+GitHubPRMonitor declares how one repository/base-branch set is monitored and where durable repair work should be routed when readiness fails.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `name` | string | **yes** |  | Name is the stable monitor identity used by patches and diagnostics. |
+| `owner` | string | **yes** |  | Owner is the GitHub repository owner or organization. |
+| `repo` | string | **yes** |  | Repo is the GitHub repository name. |
+| `base_branches` | []string | **yes** |  | BaseBranches lists the base branches this monitor owns. |
+| `rig` | string | **yes** |  | Rig is the Gas City rig that owns repair work for this repository. |
+| `notify` | []string |  |  | Notify lists session or mail recipients for readiness notifications. |
+| `repair_route` | string | **yes** |  | RepairRoute is the operator-supplied route target for repair work. |
+| `webhook_secret_env` | string |  |  | WebhookSecretEnv is the environment variable containing the webhook HMAC secret. The secret value itself must not be stored in city.toml. |
+| `webhook_secret_key` | string |  |  | WebhookSecretKey is an optional stable key for identifying the webhook secret during rotation. When omitted, WebhookSecretEnv is the key. |
+| `poll_interval` | string |  |  | PollInterval optionally enables bounded polling/backfill cadence. |
+| `merge_queue` | string |  |  | MergeQueuePolicy controls merge-queue signal handling. Empty defaults to "observe"; valid values are "ignore", "observe", and "repair". Enum: `ignore`, `observe`, `repair` |
+
+## GitHubPRMonitorPatch
+
+GitHubPRMonitorPatch modifies an existing GitHub PR readiness monitor by name.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `name` | string | **yes** |  | Name is the monitor identity to patch. |
+| `owner` | string |  |  | Owner overrides the GitHub repository owner or organization. |
+| `repo` | string |  |  | Repo overrides the GitHub repository name. |
+| `base_branches` | []string |  |  | BaseBranches replaces the monitored base branch list. An empty list clears the field and will fail validation unless another patch fills it. |
+| `rig` | string |  |  | Rig overrides the owning rig. |
+| `notify` | []string |  |  | Notify replaces notification recipients. An empty list clears recipients. |
+| `notify_append` | []string |  |  | NotifyAppend appends notification recipients after Notify replacement. |
+| `repair_route` | string |  |  | RepairRoute overrides the repair route target. |
+| `webhook_secret_env` | string |  |  | WebhookSecretEnv overrides the env var containing the webhook secret. |
+| `webhook_secret_key` | string |  |  | WebhookSecretKey overrides the stable webhook secret key. |
+| `poll_interval` | string |  |  | PollInterval overrides the optional polling cadence. |
+| `merge_queue` | string |  |  | MergeQueuePolicy overrides merge-queue signal handling. Enum: `ignore`, `observe`, `repair` |
+
 ## Import
 
 Import defines a named import of another pack.
@@ -449,7 +495,7 @@ OptionChoice is one allowed value for a "select" option.
 
 ## OrderOverride
 
-OrderOverride modifies a scanned order's scheduling fields.
+OrderOverride modifies a scanned order's scheduling fields and exec env.
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
@@ -464,6 +510,7 @@ OrderOverride modifies a scanned order's scheduling fields.
 | `on` | string |  |  | On overrides the event trigger event type. |
 | `pool` | string |  |  | Pool overrides the target session config. |
 | `timeout` | string |  |  | Timeout overrides the per-order timeout. Go duration string. |
+| `env` | map[string]string |  |  | Env adds or overrides environment variables exported into an exec order's child process. |
 
 ## OrdersConfig
 
@@ -500,6 +547,7 @@ Patches holds all patch blocks from composition.
 | `agent` | []AgentPatch |  |  | Agents targets agents by (dir, name). |
 | `rigs` | []RigPatch |  |  | Rigs targets rigs by name. |
 | `providers` | []ProviderPatch |  |  | Providers targets providers by name. |
+| `github_pr_monitor` | []GitHubPRMonitorPatch |  |  | GitHubPRMonitors targets GitHub PR readiness monitors by name. |
 
 ## PoolOverride
 

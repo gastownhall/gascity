@@ -1076,6 +1076,10 @@
           "type": "array",
           "description": "Services declares workspace-owned HTTP services mounted on the\ncontroller edge under /svc/{name}."
         },
+        "github": {
+          "$ref": "#/$defs/GitHubConfig",
+          "description": "GitHub configures GitHub-facing repository monitors."
+        },
         "agent_defaults": {
           "$ref": "#/$defs/AgentDefaults",
           "description": "AgentDefaults provides city-level defaults for agents that don't\noverride them (canonical TOML key: agent_defaults). The runtime\ncurrently applies default_sling_formula and append_fragments; the\nattachment-list fields remain tombstones, and the other fields are\nparsed/composed but not yet inherited automatically."
@@ -1356,6 +1360,162 @@
       "type": "object",
       "description": "FormulasConfig holds legacy formula directory settings."
     },
+    "GitHubConfig": {
+      "properties": {
+        "pr_monitor": {
+          "items": {
+            "$ref": "#/$defs/GitHubPRMonitor"
+          },
+          "type": "array",
+          "description": "PRMonitors declares GitHub pull-request readiness monitors."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "GitHubConfig groups GitHub-facing repository monitor declarations."
+    },
+    "GitHubPRMonitor": {
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Name is the stable monitor identity used by patches and diagnostics."
+        },
+        "owner": {
+          "type": "string",
+          "description": "Owner is the GitHub repository owner or organization."
+        },
+        "repo": {
+          "type": "string",
+          "description": "Repo is the GitHub repository name."
+        },
+        "base_branches": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "BaseBranches lists the base branches this monitor owns."
+        },
+        "rig": {
+          "type": "string",
+          "description": "Rig is the Gas City rig that owns repair work for this repository."
+        },
+        "notify": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "Notify lists session or mail recipients for readiness notifications."
+        },
+        "repair_route": {
+          "type": "string",
+          "description": "RepairRoute is the operator-supplied route target for repair work."
+        },
+        "webhook_secret_env": {
+          "type": "string",
+          "description": "WebhookSecretEnv is the environment variable containing the webhook\nHMAC secret. The secret value itself must not be stored in city.toml."
+        },
+        "webhook_secret_key": {
+          "type": "string",
+          "description": "WebhookSecretKey is an optional stable key for identifying the webhook\nsecret during rotation. When omitted, WebhookSecretEnv is the key."
+        },
+        "poll_interval": {
+          "type": "string",
+          "description": "PollInterval optionally enables bounded polling/backfill cadence."
+        },
+        "merge_queue": {
+          "type": "string",
+          "enum": [
+            "ignore",
+            "observe",
+            "repair"
+          ],
+          "description": "MergeQueuePolicy controls merge-queue signal handling. Empty defaults\nto \"observe\"; valid values are \"ignore\", \"observe\", and \"repair\"."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "name",
+        "owner",
+        "repo",
+        "base_branches",
+        "rig",
+        "repair_route"
+      ],
+      "description": "GitHubPRMonitor declares how one repository/base-branch set is monitored and where durable repair work should be routed when readiness fails."
+    },
+    "GitHubPRMonitorPatch": {
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Name is the monitor identity to patch."
+        },
+        "owner": {
+          "type": "string",
+          "description": "Owner overrides the GitHub repository owner or organization."
+        },
+        "repo": {
+          "type": "string",
+          "description": "Repo overrides the GitHub repository name."
+        },
+        "base_branches": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "BaseBranches replaces the monitored base branch list. An empty list\nclears the field and will fail validation unless another patch fills it."
+        },
+        "rig": {
+          "type": "string",
+          "description": "Rig overrides the owning rig."
+        },
+        "notify": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "Notify replaces notification recipients. An empty list clears recipients."
+        },
+        "notify_append": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "NotifyAppend appends notification recipients after Notify replacement."
+        },
+        "repair_route": {
+          "type": "string",
+          "description": "RepairRoute overrides the repair route target."
+        },
+        "webhook_secret_env": {
+          "type": "string",
+          "description": "WebhookSecretEnv overrides the env var containing the webhook secret."
+        },
+        "webhook_secret_key": {
+          "type": "string",
+          "description": "WebhookSecretKey overrides the stable webhook secret key."
+        },
+        "poll_interval": {
+          "type": "string",
+          "description": "PollInterval overrides the optional polling cadence."
+        },
+        "merge_queue": {
+          "type": "string",
+          "enum": [
+            "ignore",
+            "observe",
+            "repair"
+          ],
+          "description": "MergeQueuePolicy overrides merge-queue signal handling."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "name"
+      ],
+      "description": "GitHubPRMonitorPatch modifies an existing GitHub PR readiness monitor by name."
+    },
     "Import": {
       "properties": {
         "source": {
@@ -1631,6 +1791,13 @@
         "timeout": {
           "type": "string",
           "description": "Timeout overrides the per-order timeout. Go duration string."
+        },
+        "env": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object",
+          "description": "Env adds or overrides environment variables exported into an exec\norder's child process."
         }
       },
       "additionalProperties": false,
@@ -1638,7 +1805,7 @@
       "required": [
         "name"
       ],
-      "description": "OrderOverride modifies a scanned order's scheduling fields."
+      "description": "OrderOverride modifies a scanned order's scheduling fields and exec env."
     },
     "OrdersConfig": {
       "properties": {
@@ -1710,6 +1877,13 @@
           },
           "type": "array",
           "description": "Providers targets providers by name."
+        },
+        "github_pr_monitor": {
+          "items": {
+            "$ref": "#/$defs/GitHubPRMonitorPatch"
+          },
+          "type": "array",
+          "description": "GitHubPRMonitors targets GitHub PR readiness monitors by name."
         }
       },
       "additionalProperties": false,

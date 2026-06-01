@@ -2,6 +2,7 @@ package doctor
 
 import (
 	"fmt"
+	"log"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -153,7 +154,13 @@ func (c *OrderFiringCurrentCheck) Run(ctx *CheckContext) *CheckResult {
 }
 
 func scanOrderFiringCurrentOrders(cityPath string, cfg *config.City) ([]orders.Order, error) {
-	allOrders, err := orderdiscovery.ScanAll(cityPath, cfg, orderdiscovery.ScanOptions{})
+	allOrders, err := orderdiscovery.ScanAll(cityPath, cfg, orderdiscovery.ScanOptions{
+		OnValidateError: func(orderName string, err error) error {
+			log.Printf("gc doctor: skipping invalid order %s for %s: %v", orderName, cityPath, err)
+			return nil
+		},
+		ValidateOrder: orders.ValidateExecEnvOverrides,
+	})
 	if err != nil {
 		return nil, err
 	}

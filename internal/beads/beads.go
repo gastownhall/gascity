@@ -15,6 +15,10 @@ var ErrNotFound = errors.New("bead not found")
 // cannot answer without consulting the backing store.
 var ErrCacheUnavailable = errors.New("bead cache unavailable")
 
+// ErrStoreClosed is returned when a caller uses a bead store after its backing
+// handle has been closed.
+var ErrStoreClosed = errors.New("bead store closed")
+
 // ErrParentProjectionSuperseded reports that a parent update was overtaken by a
 // concurrent reparent before the caller's projection wait could converge.
 var ErrParentProjectionSuperseded = errors.New("parent projection superseded by concurrent update")

@@ -45,6 +45,17 @@ func mustCityRuntimeProcessEnv(t *testing.T, cityPath string) []string {
 	return env
 }
 
+func envEntriesMap(entries []string) map[string]string {
+	result := make(map[string]string, len(entries))
+	for _, entry := range entries {
+		key, value, ok := strings.Cut(entry, "=")
+		if ok {
+			result[key] = value
+		}
+	}
+	return result
+}
+
 func mustSessionBackendEnv(t *testing.T, cityPath, rigRoot string, rigs []config.Rig) map[string]string {
 	t.Helper()
 	env, err := sessionBackendEnvWithError(cityPath, rigRoot, rigs)
@@ -83,6 +94,72 @@ func TestCityRuntimeProcessEnvStripsAmbientGCDolt(t *testing.T) {
 		if strings.HasPrefix(entry, "GC_DOLT=") {
 			t.Fatalf("cityRuntimeProcessEnv leaked ambient GC_DOLT control var: %q", entry)
 		}
+	}
+}
+
+func TestCityRuntimeProcessEnvUsesNativeOpenEnvSnapshotGuard(t *testing.T) {
+	orig := processEnvSnapshotExcludingNativeDoltOpen
+	called := false
+	processEnvSnapshotExcludingNativeDoltOpen = func() []string {
+		called = true
+		return []string{
+			"PATH=" + os.Getenv("PATH"),
+			"BEADS_DOLT_SERVER_HOST=ambient.example.com",
+		}
+	}
+	t.Cleanup(func() {
+		processEnvSnapshotExcludingNativeDoltOpen = orig
+	})
+
+	env, err := cityRuntimeProcessEnvWithError(t.TempDir())
+	if err != nil {
+		t.Fatalf("cityRuntimeProcessEnvWithError() error = %v", err)
+	}
+	if !called {
+		t.Fatal("cityRuntimeProcessEnvWithError did not use native-open env snapshot guard")
+	}
+	if got := envEntriesMap(env)["BEADS_DOLT_SERVER_HOST"]; got == "ambient.example.com" {
+		t.Fatalf("cityRuntimeProcessEnvWithError inherited unprojected native-open env host %q", got)
+	}
+}
+
+func TestRecoverManagedBDCommandUsesNativeOpenEnvSnapshotGuard(t *testing.T) {
+	orig := processEnvSnapshotExcludingNativeDoltOpen
+	called := false
+	processEnvSnapshotExcludingNativeDoltOpen = func() []string {
+		called = true
+		return []string{
+			"PATH=" + os.Getenv("PATH"),
+			"BEADS_DOLT_SERVER_HOST=ambient.example.com",
+		}
+	}
+	t.Cleanup(func() {
+		processEnvSnapshotExcludingNativeDoltOpen = orig
+	})
+
+	cityPath := t.TempDir()
+	capture := filepath.Join(t.TempDir(), "recover-env.txt")
+	script := gcBeadsBdScriptPath(cityPath)
+	if err := os.MkdirAll(filepath.Dir(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	content := fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' \"${BEADS_DOLT_SERVER_HOST:-}\" > %q\n", capture)
+	if err := os.WriteFile(script, []byte(content), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := recoverManagedBDCommand(cityPath); err != nil {
+		t.Fatalf("recoverManagedBDCommand: %v", err)
+	}
+	if !called {
+		t.Fatal("recoverManagedBDCommand did not use native-open env snapshot guard")
+	}
+	data, err := os.ReadFile(capture)
+	if err != nil {
+		t.Fatalf("read captured env: %v", err)
+	}
+	if got := strings.TrimSpace(string(data)); got == "ambient.example.com" {
+		t.Fatalf("recoverManagedBDCommand inherited unprojected native-open env host %q", got)
 	}
 }
 
@@ -1542,10 +1619,14 @@ name = "demo"
 		t.Fatal(err)
 	}
 
-	rigStore, err := openStoreAtForCity(rigDir, cityDir)
+	rigResult, err := openStoreResultAtForCity(rigDir, cityDir)
 	if err != nil {
 		t.Fatalf("openStoreAtForCity(rig): %v", err)
 	}
+	if rigResult.Diagnostic.Store != "FileStore" {
+		t.Fatalf("rig beads_store = %q, want FileStore", rigResult.Diagnostic.Store)
+	}
+	rigStore := rigResult.Store
 	if _, err := rigStore.Create(beads.Bead{Title: "rig bead", Type: "task"}); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -1597,10 +1678,14 @@ prefix = "fe"
 		t.Fatal(err)
 	}
 
-	store, err := openStoreAtForCity(rigDir, cityDir)
+	result, err := openStoreResultAtForCity(rigDir, cityDir)
 	if err != nil {
 		t.Fatalf("openStoreAtForCity(rig): %v", err)
 	}
+	if result.Diagnostic.Store != "BdStore" {
+		t.Fatalf("beads_store = %q, want BdStore", result.Diagnostic.Store)
+	}
+	store := result.Store
 	if _, ok := store.(*beads.BdStore); !ok {
 		t.Fatalf("openStoreAtForCity(rig) returned %T, want *beads.BdStore", store)
 	}
@@ -1935,6 +2020,49 @@ exit 0
 	}
 	if got["GC_RIG_ROOT"] != rigDir {
 		t.Fatalf("GC_RIG_ROOT = %q, want %q", got["GC_RIG_ROOT"], rigDir)
+	}
+}
+
+func TestNativeDoltOpenEnvForScopeUsesRigScopedDoltConfig(t *testing.T) {
+	cityDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, ".beads", "config.yaml"), []byte(`issue_prefix: gc
+gc.endpoint_origin: city_canonical
+gc.endpoint_status: verified
+dolt.host: city-db.example.com
+dolt.port: 3307
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	rigDir := filepath.Join(t.TempDir(), "my-rig")
+	if err := os.MkdirAll(filepath.Join(rigDir, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rigDir, ".beads", "config.yaml"), []byte(`issue_prefix: myrig
+gc.endpoint_origin: explicit
+gc.endpoint_status: verified
+dolt.host: rig-db.example.com
+dolt.port: 4407
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{Rigs: []config.Rig{{Name: "my-rig", Path: rigDir}}}
+
+	env, err := nativeDoltOpenEnvForScope(cityDir, cfg, rigDir)
+	if err != nil {
+		t.Fatalf("nativeDoltOpenEnvForScope: %v", err)
+	}
+	if got := env["BEADS_DOLT_SERVER_HOST"]; got != "rig-db.example.com" {
+		t.Fatalf("BEADS_DOLT_SERVER_HOST = %q, want rig scoped host", got)
+	}
+	if got := env["BEADS_DOLT_SERVER_PORT"]; got != "4407" {
+		t.Fatalf("BEADS_DOLT_SERVER_PORT = %q, want rig scoped port", got)
+	}
+	if got := env["BEADS_DIR"]; got != filepath.Join(rigDir, ".beads") {
+		t.Fatalf("BEADS_DIR = %q, want rig scoped beads dir", got)
 	}
 }
 

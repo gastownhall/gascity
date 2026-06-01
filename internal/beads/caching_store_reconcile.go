@@ -279,7 +279,7 @@ func (c *CachingStore) runReconciliation() {
 
 	c.recoverMissingFromList(freshByID)
 
-	depMap, depsComplete, depErr := c.fetchDepsForIDs(beadIDs(freshByID))
+	depMap, depsComplete, depErr := c.fetchDepsForBeads(freshByID)
 	if depErr != nil {
 		c.recordProblem("refresh dep cache during reconcile", depErr)
 	}

@@ -618,14 +618,17 @@ func appendBdCLIRemoteSyncOptOutEnvKeys(keys []string) []string {
 	return keys
 }
 
-var beadsExecCommandRunnerWithEnv = beads.ExecCommandRunnerWithEnv
+var (
+	beadsExecCommandRunnerWithEnv             = beads.ExecCommandRunnerWithEnv
+	processEnvSnapshotExcludingNativeDoltOpen = beads.ProcessEnvSnapshotExcludingNativeDoltOpen
+)
 
 var recoverManagedBDCommand = func(cityPath string) error {
 	script := gcBeadsBdScriptPath(cityPath)
 	overrides := cityRuntimeEnvMapForCity(cityPath)
 	setProjectedDoltEnvEmpty(overrides)
 	applyBdCLIRemoteSyncOptOut(overrides)
-	environ := mergeRuntimeEnv(os.Environ(), overrides)
+	environ := mergeRuntimeEnv(processEnvSnapshotExcludingNativeDoltOpen(), overrides)
 	environ = append(environ, providerLifecycleDoltPathEnv(cityPath)...)
 	if gcBin := resolveProviderLifecycleGCBinary(); gcBin != "" {
 		environ = removeEnvKey(environ, "GC_BIN")
@@ -1100,6 +1103,21 @@ func bdRuntimeEnvForRigWithError(cityPath string, cfg *config.City, rigPath stri
 	return env, nil
 }
 
+func nativeDoltOpenEnvForScope(cityPath string, cfg *config.City, scopeRoot string) (map[string]string, error) {
+	scopeRoot = resolveStoreScopeRoot(cityPath, scopeRoot)
+	if samePath(scopeRoot, cityPath) {
+		return bdRuntimeEnvWithError(cityPath)
+	}
+	if cfg == nil {
+		loaded, err := loadCityConfig(cityPath, io.Discard)
+		if err != nil {
+			return nil, err
+		}
+		cfg = loaded
+	}
+	return bdRuntimeEnvForRigWithError(cityPath, cfg, scopeRoot)
+}
+
 func bdRuntimeEnvWithError(cityPath string) (map[string]string, error) {
 	env := cityRuntimeEnvMapForCity(cityPath)
 	env["BEADS_DIR"] = filepath.Join(cityPath, ".beads")
@@ -1188,7 +1206,7 @@ func cityRuntimeProcessEnvWithError(cityPath string) ([]string, error) {
 			}
 		}
 	}
-	return mergeRuntimeEnv(os.Environ(), overrides), projectionErr
+	return mergeRuntimeEnv(processEnvSnapshotExcludingNativeDoltOpen(), overrides), projectionErr
 }
 
 func applyBdCLIRemoteSyncOptOut(env map[string]string) {
