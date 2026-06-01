@@ -192,6 +192,8 @@ func newOrderSweepTrackingCmd(stdout, stderr io.Writer) *cobra.Command {
 
 This is intended for maintenance exec orders. It only closes tracking beads
 older than --stale-after so a fresh in-flight order is not interrupted.
+The manual command runs to completion; controller startup and watchdog sweeps
+use bounded cleanup to avoid spending an unbounded tick on stale work.
 
 Use --include-wisps for operator recovery of abandoned order-run wisp
 subtrees whose open descendants are also older than --stale-after. Pass one
@@ -1503,7 +1505,7 @@ func cmdOrderSweepTracking(staleAfter time.Duration, includeWisps, quiet bool, o
 		}
 		return 1
 	}
-	result, sweepErr := sweepStaleOrderTrackingAcrossStoresLimit(stores, time.Now(), staleAfter, onlyOrders, orderTrackingSweepMetadataInitiator, includeWisps, orderTrackingSweepCloseBudget)
+	result, sweepErr := sweepStaleOrderTrackingAcrossStores(stores, time.Now(), staleAfter, onlyOrders, includeWisps)
 	if err := errors.Join(openErr, sweepErr); err != nil {
 		fmt.Fprintf(stderr, "gc order sweep-tracking: %v\n", err) //nolint:errcheck // best-effort stderr
 		if result.storesSwept == 0 {

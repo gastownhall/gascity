@@ -2139,6 +2139,8 @@ Close stale open order-tracking beads.
 
 This is intended for maintenance exec orders. It only closes tracking beads
 older than --stale-after so a fresh in-flight order is not interrupted.
+The manual command runs to completion; controller startup and watchdog sweeps
+use bounded cleanup to avoid spending an unbounded tick on stale work.
 
 Use --include-wisps for operator recovery of abandoned order-run wisp
 subtrees whose open descendants are also older than --stale-after. Pass one

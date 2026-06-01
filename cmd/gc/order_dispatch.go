@@ -67,7 +67,6 @@ const (
 
 	completedOrderTrackingCloseReason = "order dispatch completed: tracking bead lifecycle finished"
 
-	orderTrackingHistoryIndexLimit   = 2048
 	defaultMaxOrderDispatchesPerTick = 4
 	orderTrackingSweepCloseBudget    = 4
 )
@@ -386,7 +385,7 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 	}
 
 	stores := make(map[string]beads.Store)
-	dispatched := 0
+	budgetSpent := 0
 
 	total := len(m.aa)
 	if total == 0 {
@@ -395,6 +394,13 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 	start := 0
 	if m.maxDispatchesPerTick > 0 {
 		start = m.nextDispatchStart % total
+	}
+	spendDispatchBudget := func(idx int) bool {
+		budgetSpent++
+		if m.maxDispatchesPerTick > 0 {
+			m.nextDispatchStart = (idx + 1) % total
+		}
+		return m.maxDispatchesPerTick > 0 && budgetSpent >= m.maxDispatchesPerTick
 	}
 
 	for offset := 0; offset < total; offset++ {
@@ -491,6 +497,9 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 				Subject: a.ScopedName(),
 				Message: msg,
 			})
+			if spendDispatchBudget(idx) {
+				return
+			}
 			continue
 		}
 		result := orders.CheckTriggerWithOptions(a, now, lastRunFn, m.ep, cursorFn, triggerOpts)
@@ -547,11 +556,7 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 		// controller exit or config reload.
 		m.addInflight()
 		m.launchDispatchOne(ctx, store, target, a, cityPath, trackingBead.ID)
-		dispatched++
-		if m.maxDispatchesPerTick > 0 {
-			m.nextDispatchStart = (idx + 1) % total
-		}
-		if m.maxDispatchesPerTick > 0 && dispatched >= m.maxDispatchesPerTick {
+		if spendDispatchBudget(idx) {
 			return
 		}
 	}
@@ -1310,10 +1315,13 @@ func sweepStaleOrderTrackingLimit(store beads.Store, now time.Time, staleAfter t
 	return result.trackingClosed, err
 }
 
-func sweepStaleOrderTrackingAcrossStores(stores []beads.Store, now time.Time, staleAfter time.Duration, onlyOrders map[string]struct{}, initiator string, includeWispSubtrees bool) (orderTrackingSweepResult, error) {
-	return sweepStaleOrderTrackingAcrossStoresLimit(stores, now, staleAfter, onlyOrders, initiator, includeWispSubtrees, 0)
+func sweepStaleOrderTrackingAcrossStores(stores []beads.Store, now time.Time, staleAfter time.Duration, onlyOrders map[string]struct{}, includeWispSubtrees bool) (orderTrackingSweepResult, error) {
+	return sweepStaleOrderTrackingAcrossStoresLimit(stores, now, staleAfter, onlyOrders, orderTrackingSweepMetadataInitiator, includeWispSubtrees, 0)
 }
 
+// sweepStaleOrderTrackingAcrossStoresLimit applies limit only to
+// order-tracking bead closes. Wisp subtree recovery is operator-scoped by
+// order name and closes complete stale subtrees when explicitly requested.
 func sweepStaleOrderTrackingAcrossStoresLimit(stores []beads.Store, now time.Time, staleAfter time.Duration, onlyOrders map[string]struct{}, initiator string, includeWispSubtrees bool, limit int) (orderTrackingSweepResult, error) {
 	if staleAfter <= 0 {
 		return orderTrackingSweepResult{}, fmt.Errorf("stale-after must be positive")
@@ -1374,10 +1382,9 @@ func orderTrackingSweepStoreLabel(store beads.Store, index int) string {
 	return fmt.Sprintf("store %d", index+1)
 }
 
-func sweepStaleOrderTrackingWithOptions(store beads.Store, now time.Time, onlyOrders map[string]struct{}, includeWispSubtrees bool) (orderTrackingSweepResult, error) {
-	return sweepStaleOrderTrackingWithOptionsLimit(store, now, time.Minute, onlyOrders, orderTrackingSweepMetadataInitiator, includeWispSubtrees, 0)
-}
-
+// sweepStaleOrderTrackingWithOptionsLimit applies limit only to
+// order-tracking bead closes. Wisp subtree recovery is order-scoped and closes
+// complete stale subtrees when includeWispSubtrees is set.
 func sweepStaleOrderTrackingWithOptionsLimit(store beads.Store, now time.Time, staleAfter time.Duration, onlyOrders map[string]struct{}, initiator string, includeWispSubtrees bool, limit int) (orderTrackingSweepResult, error) {
 	if staleAfter <= 0 {
 		return orderTrackingSweepResult{}, fmt.Errorf("stale-after must be positive")

@@ -1820,6 +1820,86 @@ dolt.auto-start: false
 	}
 }
 
+func TestOrderDispatchTriggerEnvFailuresRespectMaxDispatchesPerTick(t *testing.T) {
+	clearAmbientPostgresEnv(t)
+	t.Setenv("GC_BEADS", "bd")
+
+	cityDir := t.TempDir()
+	writePGScopeFixture(t, cityDir, "")
+	if err := os.WriteFile(filepath.Join(cityDir, ".beads", "config.yaml"), []byte(`issue_prefix: city
+gc.endpoint_origin: managed_city
+gc.endpoint_status: verified
+dolt.auto-start: false
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	store := beads.NewMemStore()
+	var rec memRecorder
+	var aa []orders.Order
+	for i := 0; i < 5; i++ {
+		aa = append(aa, orders.Order{
+			Name:    fmt.Sprintf("pg-condition-%d", i),
+			Trigger: "condition",
+			Check:   "true",
+			Exec:    "true",
+		})
+	}
+	ad := buildOrderDispatcherFromListExec(aa, store, nil, successfulExec, &rec)
+	mad := ad.(*memoryOrderDispatcher)
+	mad.maxDispatchesPerTick = 2
+
+	now := time.Date(2026, 5, 19, 2, 30, 0, 0, time.UTC)
+	mad.dispatch(context.Background(), cityDir, now)
+	mad.drain(context.Background())
+
+	if got := countOrderTrackingRuns(t, store); got != 2 {
+		t.Fatalf("tracking runs after first tick = %d, want 2", got)
+	}
+	if got := countRecordedOrderFailedEvents(t, &rec); got != 2 {
+		t.Fatalf("order.failed events after first tick = %d, want 2", got)
+	}
+
+	mad.dispatch(context.Background(), cityDir, now.Add(time.Second))
+	mad.drain(context.Background())
+	if got := countOrderTrackingRuns(t, store); got != 4 {
+		t.Fatalf("tracking runs after second tick = %d, want 4", got)
+	}
+	if got := countRecordedOrderFailedEvents(t, &rec); got != 4 {
+		t.Fatalf("order.failed events after second tick = %d, want 4", got)
+	}
+
+	mad.dispatch(context.Background(), cityDir, now.Add(2*time.Second))
+	mad.drain(context.Background())
+	if got := countOrderTrackingRuns(t, store); got != 5 {
+		t.Fatalf("tracking runs after third tick = %d, want 5", got)
+	}
+	if got := countRecordedOrderFailedEvents(t, &rec); got != 5 {
+		t.Fatalf("order.failed events after third tick = %d, want 5", got)
+	}
+	for i := 0; i < 5; i++ {
+		label := fmt.Sprintf("order-run:pg-condition-%d", i)
+		if got := len(trackingBeads(t, store, label)); got != 1 {
+			t.Fatalf("%s tracking markers = %d, want 1", label, got)
+		}
+	}
+}
+
+func countRecordedOrderFailedEvents(t *testing.T, rec *memRecorder) int {
+	t.Helper()
+
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+
+	count := 0
+	for _, event := range rec.events {
+		if event.Type == events.OrderFailed {
+			count++
+		}
+	}
+	return count
+}
+
 func TestOrderDispatchTriggerEnvFailureTrackingSuppressesNonConditionBeforeEvaluation(t *testing.T) {
 	tests := []struct {
 		name          string
@@ -3454,7 +3534,6 @@ func TestSweepStaleOrderTrackingAcrossStoresClosesRigStoreAndUnblocksDispatch(t 
 		stale.CreatedAt.Add(time.Hour),
 		time.Minute,
 		orderFilterForTest("rig-digest:rig:frontend"),
-		orderTrackingSweepMetadataInitiator,
 		false,
 	)
 	if err != nil {
@@ -3519,7 +3598,6 @@ func TestSweepStaleOrderTrackingAcrossStoresContinuesAfterStoreError(t *testing.
 		cityStale.CreatedAt.Add(time.Hour),
 		time.Minute,
 		nil,
-		orderTrackingSweepMetadataInitiator,
 		false,
 	)
 	if err == nil {
@@ -3846,6 +3924,10 @@ func TestSweepStaleOrderTrackingWithoutWispsLeavesOpenWispSubtree(t *testing.T) 
 	}
 }
 
+func sweepStaleOrderTrackingWithOptions(store beads.Store, now time.Time, onlyOrders map[string]struct{}, includeWispSubtrees bool) (orderTrackingSweepResult, error) {
+	return sweepStaleOrderTrackingWithOptionsLimit(store, now, time.Minute, onlyOrders, orderTrackingSweepMetadataInitiator, includeWispSubtrees, 0)
+}
+
 func TestSweepStaleOrderTrackingWithWispsClosesDeepestFirst(t *testing.T) {
 	base := beads.NewMemStore()
 	store := parentLastCloseStore{Store: base}
@@ -3888,6 +3970,71 @@ func TestSweepStaleOrderTrackingWithWispsClosesDeepestFirst(t *testing.T) {
 
 	for _, id := range []string{wispRoot.ID, child.ID, grandchild.ID} {
 		got, err := base.Get(id)
+		if err != nil {
+			t.Fatalf("Get(%s): %v", id, err)
+		}
+		if got.Status != "closed" {
+			t.Fatalf("%s status = %q, want closed", id, got.Status)
+		}
+	}
+}
+
+func TestSweepStaleOrderTrackingLimitOnlyAppliesToTrackingBeads(t *testing.T) {
+	store := beads.NewMemStore()
+
+	for _, name := range []string{"digest", "digest-retry"} {
+		_, err := store.Create(beads.Bead{
+			Title:     "order:" + name,
+			Labels:    []string{"order-run:" + name, labelOrderTracking},
+			Ephemeral: true,
+		})
+		if err != nil {
+			t.Fatalf("Create(tracking %s): %v", name, err)
+		}
+	}
+	wispRoot, err := store.Create(beads.Bead{
+		Title:  "mol-digest-generate",
+		Type:   "molecule",
+		Labels: []string{"order-run:digest"},
+	})
+	if err != nil {
+		t.Fatalf("Create(wisp root): %v", err)
+	}
+	child, err := store.Create(beads.Bead{
+		Title:    "draft-digest",
+		ParentID: wispRoot.ID,
+	})
+	if err != nil {
+		t.Fatalf("Create(child): %v", err)
+	}
+	grandchild, err := store.Create(beads.Bead{
+		Title:    "nested-step-still-running",
+		ParentID: child.ID,
+	})
+	if err != nil {
+		t.Fatalf("Create(grandchild): %v", err)
+	}
+
+	result, err := sweepStaleOrderTrackingWithOptionsLimit(
+		store,
+		time.Now().Add(time.Hour),
+		time.Minute,
+		orderFilterForTest("digest", "digest-retry"),
+		orderTrackingSweepMetadataInitiator,
+		true,
+		1,
+	)
+	if err != nil {
+		t.Fatalf("sweepStaleOrderTrackingWithOptionsLimit: %v", err)
+	}
+	if result.trackingClosed != 1 {
+		t.Fatalf("trackingClosed = %d, want 1", result.trackingClosed)
+	}
+	if result.wispClosed != 3 {
+		t.Fatalf("wispClosed = %d, want 3", result.wispClosed)
+	}
+	for _, id := range []string{wispRoot.ID, child.ID, grandchild.ID} {
+		got, err := store.Get(id)
 		if err != nil {
 			t.Fatalf("Get(%s): %v", id, err)
 		}

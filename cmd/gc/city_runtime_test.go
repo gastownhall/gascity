@@ -1692,7 +1692,6 @@ func TestOrderTrackingSweepWatchdogAllowsSweepOrderToCleanStaleTracking(t *testi
 			freshMerge.CreatedAt.Add(25*time.Millisecond),
 			50*time.Millisecond,
 			nil,
-			orderTrackingSweepMetadataInitiator,
 			false,
 		)
 		return nil, err

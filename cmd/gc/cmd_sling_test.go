@@ -337,7 +337,7 @@ func init() {
 	sweepOrphanPIDPrefixedDirs(tmpRoot, testSlingFormulaDirPrefix)
 	sweepOrphanPIDPrefixedDirs(tmpRoot, testSlingCityDirPrefix)
 
-	dir, err := os.MkdirTemp("", pidPrefixedTempPattern(testSlingFormulaDirPrefix))
+	dir, err := os.MkdirTemp("", "gc-shared-test-formulas-*")
 	if err != nil {
 		panic(err)
 	}

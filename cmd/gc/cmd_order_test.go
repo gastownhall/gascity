@@ -1219,7 +1219,7 @@ prefix = "fe"
 	}
 }
 
-func TestCmdOrderSweepTrackingUsesCloseBudget(t *testing.T) {
+func TestSweepOrderTrackingCommandClosesAllStaleTracking(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
 
@@ -1278,10 +1278,10 @@ prefix = "ct"
 			closed++
 		}
 	}
-	if closed != orderTrackingSweepCloseBudget {
-		t.Fatalf("closed = %d, want %d", closed, orderTrackingSweepCloseBudget)
+	if closed != len(ids) {
+		t.Fatalf("closed = %d, want %d", closed, len(ids))
 	}
-	want := fmt.Sprintf("closed %d stale order-tracking bead", orderTrackingSweepCloseBudget)
+	want := fmt.Sprintf("closed %d stale order-tracking bead", len(ids))
 	if !strings.Contains(stdout.String(), want) {
 		t.Fatalf("stdout = %q, want %q", stdout.String(), want)
 	}
