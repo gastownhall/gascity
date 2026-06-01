@@ -4518,7 +4518,7 @@ func runShellWithFakeBd(t *testing.T, shellCmd string, env map[string]string, bd
 	return string(out)
 }
 
-func runLifecycleHookCommand(t *testing.T, command string, env map[string]string, bdScript string) string {
+func runLifecycleHookCommand(t *testing.T, command string, bdScript string) string {
 	t.Helper()
 
 	tmp := t.TempDir()
@@ -4532,9 +4532,6 @@ func runLifecycleHookCommand(t *testing.T, command string, env map[string]string
 	cmd.Env = []string{
 		"PATH=" + tmp + ":" + os.Getenv("PATH"),
 		"BD_LOG=" + logPath,
-	}
-	for k, v := range env {
-		cmd.Env = append(cmd.Env, k+"="+v)
 	}
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("run lifecycle hook: %v\n%s", err, out)
@@ -4909,7 +4906,7 @@ func TestEffectiveOnDeathDefault(t *testing.T) {
 		MinActiveSessions: ptrInt(0), MaxActiveSessions: ptrInt(5),
 	}
 	got := a.EffectiveOnDeath()
-	for _, want := range []string{"bd list --include-ephemeral --assignee=myrig/dog", "--status=in_progress", `--assignee "" --status open`, "--set-metadata gc.routed_to=myrig/dog"} {
+	for _, want := range []string{"bd list --include-ephemeral --assignee=myrig/dog", "--status=in_progress", `--assignee "" --status open`, "--set-metadata 'gc.run_target=myrig/dog'"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("EffectiveOnDeath() = %q, want %q", got, want)
 		}
@@ -4930,7 +4927,7 @@ func TestEffectiveOnDeathCustom(t *testing.T) {
 func TestEffectiveOnDeathFixedAgent(t *testing.T) {
 	a := Agent{Name: "mayor"}
 	got := a.EffectiveOnDeath()
-	for _, want := range []string{"bd list --include-ephemeral --assignee=mayor", "--status=in_progress", `--assignee "" --status open`, "--set-metadata gc.routed_to=mayor"} {
+	for _, want := range []string{"bd list --include-ephemeral --assignee=mayor", "--status=in_progress", `--assignee "" --status open`, "--set-metadata 'gc.run_target=mayor'"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("EffectiveOnDeath() = %q, want %q", got, want)
 		}
@@ -4945,7 +4942,7 @@ func TestEffectiveOnDeathBackfillsMissingRouteOnReopen(t *testing.T) {
 		PoolName: "hello-world/dog",
 	}
 
-	log := runLifecycleHookCommand(t, a.EffectiveOnDeath(), nil, `#!/bin/sh
+	log := runLifecycleHookCommand(t, a.EffectiveOnDeath(), `#!/bin/sh
 set -eu
 case "$1" in
   list)
@@ -4966,7 +4963,7 @@ esac
 	if !strings.Contains(log, "--status open") {
 		t.Fatalf("hook log = %q, want reopened status", log)
 	}
-	if !strings.Contains(log, "--set-metadata gc.routed_to=hello-world/dog") {
+	if !strings.Contains(log, "--set-metadata gc.run_target=hello-world/dog") {
 		t.Fatalf("hook log = %q, want fallback route for ownerless reopened work", log)
 	}
 }
@@ -4979,7 +4976,7 @@ func TestEffectiveOnDeathPreservesExistingRouteOnReopen(t *testing.T) {
 		PoolName: "hello-world/dog",
 	}
 
-	log := runLifecycleHookCommand(t, a.EffectiveOnDeath(), nil, `#!/bin/sh
+	log := runLifecycleHookCommand(t, a.EffectiveOnDeath(), `#!/bin/sh
 set -eu
 case "$1" in
   list)
@@ -5005,6 +5002,37 @@ esac
 	}
 }
 
+func TestEffectiveOnDeathPreservesExistingRunTargetOnReopen(t *testing.T) {
+	a := Agent{
+		Name:              "dog-1",
+		Dir:               "hello-world",
+		MinActiveSessions: ptrInt(0), MaxActiveSessions: ptrInt(5),
+		PoolName: "hello-world/dog",
+	}
+
+	log := runLifecycleHookCommand(t, a.EffectiveOnDeath(), `#!/bin/sh
+set -eu
+case "$1" in
+  list)
+    printf '%s\n' "$*" >> "$BD_LOG"
+    printf '[{"id":"ga-run-target","type":"wisp","metadata":{"gc.run_target":"hello-world/dog"}}]'
+    ;;
+  update)
+    printf '%s\n' "$*" >> "$BD_LOG"
+    ;;
+  *)
+    exit 1
+    ;;
+esac
+`)
+	if !strings.Contains(log, "update ga-run-target --assignee  --status open") {
+		t.Fatalf("hook log = %q, want run_target-only work reopened", log)
+	}
+	if strings.Contains(log, "--set-metadata") {
+		t.Fatalf("hook log = %q, want existing gc.run_target preserved without gc.routed_to overwrite", log)
+	}
+}
+
 func TestEffectiveOnBootDefault(t *testing.T) {
 	a := Agent{
 		Name:              "dog",
@@ -5012,7 +5040,7 @@ func TestEffectiveOnBootDefault(t *testing.T) {
 		MinActiveSessions: ptrInt(0), MaxActiveSessions: ptrInt(5),
 	}
 	got := a.EffectiveOnBoot()
-	for _, want := range []string{"bd list --include-ephemeral --metadata-field gc.routed_to=myrig/dog", "--status=in_progress", "--no-assignee", "--status open"} {
+	for _, want := range []string{"template='myrig/dog'", "for key in gc.run_target gc.routed_to", `--metadata-field "$key=$template"`, "--status=in_progress", "--no-assignee", "--status open"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("EffectiveOnBoot() = %q, want %q", got, want)
 		}
@@ -5031,7 +5059,7 @@ func TestEffectiveOnBootDefaultPoolName(t *testing.T) {
 		PoolName: "myrig/dog",
 	}
 	got := a.EffectiveOnBoot()
-	for _, want := range []string{"bd list --include-ephemeral --metadata-field gc.routed_to=myrig/dog", "--status=in_progress", "--no-assignee", "--status open"} {
+	for _, want := range []string{"template='myrig/dog'", "for key in gc.run_target gc.routed_to", `--metadata-field "$key=$template"`, "--status=in_progress", "--no-assignee", "--status open"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("EffectiveOnBoot() = %q, want %q", got, want)
 		}
@@ -5049,12 +5077,16 @@ func TestEffectiveOnBootReopensOwnerlessEphemeralRoutedWork(t *testing.T) {
 		PoolName: "hello-world/dog",
 	}
 
-	log := runLifecycleHookCommand(t, a.EffectiveOnBoot(), nil, `#!/bin/sh
+	log := runLifecycleHookCommand(t, a.EffectiveOnBoot(), `#!/bin/sh
 set -eu
 case "$1" in
   list)
     printf '%s\n' "$*" >> "$BD_LOG"
-    printf '[{"id":"ga-wisp","type":"wisp","metadata":{"gc.routed_to":"hello-world/dog"}}]'
+    case "$*" in
+      *"--metadata-field gc.run_target=hello-world/dog"*) printf '[]' ;;
+      *"--metadata-field gc.routed_to=hello-world/dog"*) printf '[{"id":"ga-wisp","type":"wisp","metadata":{"gc.routed_to":"hello-world/dog"}}]' ;;
+      *) printf '[]' ;;
+    esac
     ;;
   update)
     printf '%s\n' "$*" >> "$BD_LOG"
@@ -5072,6 +5104,68 @@ esac
 	}
 }
 
+func TestEffectiveOnBootReopensOwnerlessEphemeralRunTargetWork(t *testing.T) {
+	a := Agent{
+		Name:              "dog-1",
+		Dir:               "hello-world",
+		MinActiveSessions: ptrInt(0), MaxActiveSessions: ptrInt(5),
+		PoolName: "hello-world/dog",
+	}
+
+	log := runLifecycleHookCommand(t, a.EffectiveOnBoot(), `#!/bin/sh
+set -eu
+case "$1" in
+  list)
+    printf '%s\n' "$*" >> "$BD_LOG"
+    case "$*" in
+      *"--metadata-field gc.run_target=hello-world/dog"*) printf '[{"id":"ga-run-target","type":"wisp","metadata":{"gc.run_target":"hello-world/dog"}}]' ;;
+      *) printf '[]' ;;
+    esac
+    ;;
+  update)
+    printf '%s\n' "$*" >> "$BD_LOG"
+    ;;
+  *)
+    exit 1
+    ;;
+esac
+`)
+	if !strings.Contains(log, "list --include-ephemeral --metadata-field gc.run_target=hello-world/dog --status=in_progress --no-assignee --json") {
+		t.Fatalf("hook log = %q, want ephemeral-aware run_target list query", log)
+	}
+	if !strings.Contains(log, "update ga-run-target --status open") {
+		t.Fatalf("hook log = %q, want ownerless run_target wisp reopened", log)
+	}
+}
+
+func TestEffectiveOnBootDedupesReopenedIDs(t *testing.T) {
+	a := Agent{
+		Name:              "dog-1",
+		Dir:               "hello-world",
+		MinActiveSessions: ptrInt(0), MaxActiveSessions: ptrInt(5),
+		PoolName: "hello-world/dog",
+	}
+
+	log := runLifecycleHookCommand(t, a.EffectiveOnBoot(), `#!/bin/sh
+set -eu
+case "$1" in
+  list)
+    printf '%s\n' "$*" >> "$BD_LOG"
+    printf '[{"id":"ga-dup","type":"wisp","metadata":{"gc.run_target":"hello-world/dog"}},{"id":"ga-dup","type":"wisp","metadata":{"gc.routed_to":"hello-world/dog"}}]'
+    ;;
+  update)
+    printf '%s\n' "$*" >> "$BD_LOG"
+    ;;
+  *)
+    exit 1
+    ;;
+esac
+`)
+	if count := strings.Count(log, "update ga-dup --status open"); count != 1 {
+		t.Fatalf("update count for ga-dup = %d, want 1; hook log:\n%s", count, log)
+	}
+}
+
 func TestEffectiveOnBootCustom(t *testing.T) {
 	a := Agent{
 		Name:              "dog",
@@ -5086,7 +5180,7 @@ func TestEffectiveOnBootCustom(t *testing.T) {
 func TestEffectiveOnBootNonPool(t *testing.T) {
 	a := Agent{Name: "mayor"}
 	got := a.EffectiveOnBoot()
-	for _, want := range []string{"bd list --include-ephemeral --metadata-field gc.routed_to=mayor", "--status=in_progress", "--no-assignee", "--status open"} {
+	for _, want := range []string{"template='mayor'", "for key in gc.run_target gc.routed_to", `--metadata-field "$key=$template"`, "--status=in_progress", "--no-assignee", "--status open"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("EffectiveOnBoot() = %q, want %q", got, want)
 		}

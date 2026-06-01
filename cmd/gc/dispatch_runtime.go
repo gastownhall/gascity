@@ -705,7 +705,7 @@ func workflowServeControlReadyQuery(agentCfg config.Agent, controlSessionNames .
 		`legacy=""; case "$id" in *control-dispatcher) legacy="${id%control-dispatcher}workflow-control";; esac; ` +
 		`for cand in "$id" "$legacy"; do ` +
 		`[ -z "$cand" ] && continue; ` +
-		`emit_ready bd --readonly --sandbox ready --assignee="$cand" --json --limit=` + limit + `; ` +
+		`emit_ready bd --readonly --sandbox ready --include-ephemeral --assignee="$cand" --exclude-type=epic --json --limit=` + limit + `; ` +
 		`done; ` +
 		`done; ` +
 		`routed_ready "$GC_CONTROL_TARGET"; ` +

@@ -667,6 +667,44 @@ func TestDefaultScaleCheckCountsCountsCronPoolDemandViaMetadataFlag(t *testing.T
 	}
 }
 
+func TestDefaultScaleCheckCountsPoolDemandUsesRunTargetBeforeRoutedTo(t *testing.T) {
+	backing := &demandListCountingStore{Store: beads.NewMemStore()}
+	metadata := map[string]string{
+		"gc.run_target": "dog",
+		"gc.routed_to":  "cat",
+	}
+	for k, v := range poolDemandMetadataPair() {
+		metadata[k] = v
+	}
+	if _, err := backing.Create(beads.Bead{
+		Title:     "pool demand with canonical route",
+		Type:      "molecule",
+		Status:    "open",
+		Metadata:  metadata,
+		Ephemeral: true,
+	}); err != nil {
+		t.Fatalf("create pool-order wisp: %v", err)
+	}
+	cache := beads.NewCachingStoreForTest(backing, nil)
+	if err := cache.PrimeActive(); err != nil {
+		t.Fatalf("PrimeActive: %v", err)
+	}
+
+	counts, _, errs := defaultScaleCheckCounts([]defaultScaleCheckTarget{
+		{template: "dog", storeKey: "city", store: cache},
+		{template: "cat", storeKey: "city", store: cache},
+	})
+	if len(errs) != 0 {
+		t.Fatalf("defaultScaleCheckCounts errs = %v", errs)
+	}
+	if got := counts["dog"]; got != 1 {
+		t.Fatalf("defaultScaleCheckCounts[%q] = %d, want 1 (gc.run_target is the canonical pool-demand route)", "dog", got)
+	}
+	if got := counts["cat"]; got != 0 {
+		t.Fatalf("defaultScaleCheckCounts[%q] = %d, want 0 (gc.routed_to must not win over gc.run_target)", "cat", got)
+	}
+}
+
 // poolWispMetadata builds the metadata map a pool-order wisp carries —
 // gc.routed_to + the poolDemandMetadataPair pair — for fixture use.
 // Mirrors the production composition in cmd/gc/cmd_order.go and

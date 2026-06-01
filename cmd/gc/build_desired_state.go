@@ -1094,7 +1094,13 @@ func defaultScaleCheckCounts(targets []defaultScaleCheckTarget) (map[string]int,
 			if strings.TrimSpace(b.Assignee) != "" {
 				continue
 			}
-			template := strings.TrimSpace(b.Metadata["gc.routed_to"])
+			// gc.run_target (per-step) takes precedence over gc.routed_to
+			// here too; this source handles pool-demand wisps that Ready()
+			// intentionally filters out.
+			template := strings.TrimSpace(b.Metadata["gc.run_target"])
+			if template == "" {
+				template = strings.TrimSpace(b.Metadata["gc.routed_to"])
+			}
 			if _, ok := group.templates[template]; !ok {
 				continue
 			}

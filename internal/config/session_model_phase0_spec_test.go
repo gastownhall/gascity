@@ -90,7 +90,9 @@ func TestPhase0ConfigDefaults_OnBootUnclaimsRoutedWorkByDefault(t *testing.T) {
 
 	got := a.EffectiveOnBoot()
 	for _, want := range []string{
-		"bd list --include-ephemeral --metadata-field gc.routed_to=myrig/worker",
+		"template='myrig/worker'",
+		"for key in gc.run_target gc.routed_to",
+		`--metadata-field "$key=$template"`,
 		"--status=in_progress",
 		"--no-assignee",
 		"--status open",

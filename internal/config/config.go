@@ -3211,18 +3211,18 @@ func (a *Agent) EffectiveOnDeath() string {
 	}
 	// Reset both assignee and status: clearing assignee alone leaves the bead
 	// invisible to every work_query tier (Tier 1 needs assignee match, Tiers
-	// 2/3 only match "ready" status). The next worker re-claims via Tier 3
-	// (gc.routed_to + --unassigned). If routed metadata is missing entirely,
-	// backfill the fallback route so reopened direct-assigned work does not
-	// stay invisible.
+	// 2/3 only match "ready" status). The next worker re-claims via Tier 3.
+	// If routed metadata is missing entirely, backfill the canonical
+	// gc.run_target route so reopened direct-assigned work does not stay
+	// invisible.
 	return `bd list --include-ephemeral --assignee=` + a.QualifiedName() +
 		` --status=in_progress --json 2>/dev/null | ` +
-		`jq -r '.[] | [.id, (.metadata["gc.routed_to"] // "")] | @tsv' 2>/dev/null | ` +
-		`while IFS="$(printf '\t')" read -r id current_route; do ` +
+		`jq -r '.[] | [.id, (.metadata["gc.run_target"] // ""), (.metadata["gc.routed_to"] // "")] | @tsv' 2>/dev/null | ` +
+		`while IFS="$(printf '\t')" read -r id run_target routed_to; do ` +
 		`[ -z "$id" ] && continue; ` +
-		`if [ -n "$current_route" ]; then ` +
+		`if [ -n "$run_target" ] || [ -n "$routed_to" ]; then ` +
 		`bd update "$id" --assignee "" --status open 2>/dev/null; ` +
-		`else bd update "$id" --assignee "" --status open --set-metadata gc.routed_to=` + route + ` 2>/dev/null; ` +
+		`else bd update "$id" --assignee "" --status open --set-metadata ` + shellquote.Quote("gc.run_target="+route) + ` 2>/dev/null; ` +
 		`fi; ` +
 		`done`
 }
@@ -3238,9 +3238,11 @@ func (a *Agent) EffectiveOnBoot() string {
 	if a.PoolName != "" {
 		template = a.PoolName
 	}
-	return `bd list --include-ephemeral --metadata-field gc.routed_to=` + template +
-		` --status=in_progress --no-assignee --json 2>/dev/null | ` +
-		`jq -r '.[].id' 2>/dev/null | ` +
+	return `template=` + shellquote.Quote(template) + `; ` +
+		`for key in ` + poolDemandKeyListShell() + `; do ` +
+		`bd list --include-ephemeral --metadata-field "$key=$template" --status=in_progress --no-assignee --json 2>/dev/null | ` +
+		`jq -r '.[].id' 2>/dev/null; ` +
+		`done | awk 'NF && !seen[$0]++' | ` +
 		`xargs -rI{} bd update {} --status open 2>/dev/null`
 }
 
