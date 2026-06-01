@@ -1,3 +1,5 @@
+// Package cloudflare implements [runtime.Provider] using a Cloudflare Worker
+// runtime API.
 package cloudflare
 
 import (
@@ -117,7 +119,7 @@ func (p *Provider) Stop(name string) error {
 }
 
 // Interrupt sends a best-effort SIGINT to user-owned processes in the remote
-// session. Targets the current user only to avoid signalling system daemons in
+// session. Targets the current user only to avoid signaling system daemons in
 // the shared container environment.
 func (p *Provider) Interrupt(name string) error {
 	err := p.exec(context.Background(), name, `pkill -INT -u "$(id -u)" 2>/dev/null; true`, nil)
@@ -314,11 +316,13 @@ func (p *Provider) doURL(parent context.Context, timeout time.Duration, method, 
 	if err != nil {
 		return fmt.Errorf("cloudflare runtime request: %w", err)
 	}
-	defer resp.Body.Close()
-
-	data, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
-	if err != nil {
-		return fmt.Errorf("reading cloudflare runtime response: %w", err)
+	data, readErr := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
+	closeErr := resp.Body.Close()
+	if readErr != nil {
+		return fmt.Errorf("reading cloudflare runtime response: %w", readErr)
+	}
+	if closeErr != nil {
+		return fmt.Errorf("closing cloudflare runtime response: %w", closeErr)
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
