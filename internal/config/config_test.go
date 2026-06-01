@@ -5352,6 +5352,15 @@ func TestInjectImplicitAgents_NoProviders(t *testing.T) {
 	if !reflect.DeepEqual(a.ProcessNames, []string{"gc"}) {
 		t.Fatalf("control-dispatcher ProcessNames = %v, want [gc]", a.ProcessNames)
 	}
+	if a.SleepAfterIdle != "" {
+		t.Fatalf("control-dispatcher SleepAfterIdle = %q, want inherited idle-sleep policy", a.SleepAfterIdle)
+	}
+	if len(cfg.NamedSessions) != 1 {
+		t.Fatalf("got %d named sessions, want 1 control-dispatcher session", len(cfg.NamedSessions))
+	}
+	if ns := cfg.NamedSessions[0]; ns.Template != ControlDispatcherAgentName || ns.Mode != "on_demand" {
+		t.Fatalf("control-dispatcher named session = %+v, want on_demand %q", ns, ControlDispatcherAgentName)
+	}
 }
 
 func TestInjectImplicitAgents_WorkspaceProvider(t *testing.T) {

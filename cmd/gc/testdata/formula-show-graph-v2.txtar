@@ -11,7 +11,7 @@ env GC_BEADS=file
 env GC_DOLT=skip
 env GC_SESSION=fake
 
-# --- formula_v2 disabled (default): show must emit an actionable diagnostic, not fail silently ---
+# --- formula_v2 disabled explicitly: show must emit an actionable diagnostic, not fail silently ---
 exec gc init --file $WORK/city.toml $WORK/no-v2
 cd $WORK/no-v2
 ! exec gc formula show graphwf
@@ -92,6 +92,9 @@ stdout 'missing-root'
 [workspace]
 name = "no-v2"
 provider = "claude"
+
+[daemon]
+formula_v2 = false
 
 [[agent]]
 name = "worker"

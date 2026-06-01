@@ -953,7 +953,13 @@ func mergeFragment(base, fragment *City, fragMeta toml.MetaData, fragPath string
 		base.Formulas = fragment.Formulas
 	}
 	if fragMeta.IsDefined("daemon") {
+		formulaV2 := base.Daemon.FormulaV2
+		formulaV2Set := base.Daemon.formulaV2Set
 		base.Daemon = fragment.Daemon
+		if !fragMeta.IsDefined("daemon", "formula_v2") && !fragMeta.IsDefined("daemon", "graph_workflows") {
+			base.Daemon.FormulaV2 = formulaV2
+			base.Daemon.formulaV2Set = formulaV2Set
+		}
 	}
 	if fragMeta.IsDefined("session") {
 		base.Session = fragment.Session

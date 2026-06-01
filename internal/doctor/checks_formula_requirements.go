@@ -67,9 +67,10 @@ func (c *FormulaRequirementsCheck) Fix(_ *CheckContext) error { return nil }
 
 func (c *FormulaRequirementsCheck) collectIssues() []formulaRequirementIssue {
 	var issues []formulaRequirementIssue
+	src := formula.SourceFromEnv()
 	for _, scope := range c.formulaScopes() {
-		parser := formula.NewParser(scope.paths...)
-		winners := formula.ResolveAll(scope.paths)
+		parser := formula.NewParser(scope.paths...).SetSource(src)
+		winners := formula.ResolveAllWithSource(src, scope.paths)
 		names := make([]string, 0, len(winners))
 		for name := range winners {
 			names = append(names, name)
@@ -79,15 +80,13 @@ func (c *FormulaRequirementsCheck) collectIssues() []formulaRequirementIssue {
 			path := winners[name]
 			f, err := parser.ParseFile(path)
 			if err != nil {
-				if isFormulaRequirementError(err) {
-					issues = append(issues, formulaRequirementIssue{
-						severity: StatusError,
-						scope:    scope.name,
-						formula:  name,
-						path:     path,
-						message:  err.Error(),
-					})
-				}
+				issues = append(issues, formulaRequirementIssue{
+					severity: StatusError,
+					scope:    scope.name,
+					formula:  name,
+					path:     path,
+					message:  fmt.Sprintf("parse formula: %v", err),
+				})
 				continue
 			}
 			if strings.EqualFold(strings.TrimSpace(f.Contract), "graph.v2") {
@@ -101,16 +100,23 @@ func (c *FormulaRequirementsCheck) collectIssues() []formulaRequirementIssue {
 			}
 			resolved, err := parser.Resolve(f)
 			if err != nil {
-				if isFormulaRequirementError(err) {
-					issues = append(issues, formulaRequirementIssue{
-						severity: StatusError,
-						scope:    scope.name,
-						formula:  f.Formula,
-						path:     path,
-						message:  err.Error(),
-					})
-				}
+				issues = append(issues, formulaRequirementIssue{
+					severity: StatusError,
+					scope:    scope.name,
+					formula:  f.Formula,
+					path:     path,
+					message:  fmt.Sprintf("resolve formula: %v", err),
+				})
 				continue
+			}
+			if err := formula.ValidateExplicitGraphCompilerRequirement(resolved); err != nil {
+				issues = append(issues, formulaRequirementIssue{
+					severity: StatusError,
+					scope:    scope.name,
+					formula:  resolved.Formula,
+					path:     path,
+					message:  err.Error(),
+				})
 			}
 			if err := formula.ValidateHostRequirements(resolved, c.cfg.Daemon.FormulaV2); err != nil {
 				issues = append(issues, formulaRequirementIssue{
@@ -180,22 +186,4 @@ func countFormulaRequirementIssues(issues []formulaRequirementIssue) (errors, wa
 		}
 	}
 	return errors, warnings
-}
-
-func isFormulaRequirementError(err error) bool {
-	if err == nil {
-		return false
-	}
-	msg := err.Error()
-	for _, marker := range []string{
-		"formula.requirement_",
-		"formula.compiler_requirement_",
-		"graph-only constructs",
-		"formula_v2 is disabled",
-	} {
-		if strings.Contains(msg, marker) {
-			return true
-		}
-	}
-	return false
 }

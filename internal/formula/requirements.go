@@ -168,6 +168,22 @@ func setFormulaCompilerConstraints(f *Formula, constraints []formulaCompilerCons
 	f.Requires = &Requirements{FormulaCompiler: strings.Join(parts, ", ")}
 }
 
+func addFormulaCompilerConstraints(f *Formula, extra []formulaCompilerConstraint) error {
+	if f == nil || len(extra) == 0 {
+		return nil
+	}
+	constraints, err := formulaCompilerConstraints(f)
+	if err != nil {
+		return err
+	}
+	constraints = append(constraints, extra...)
+	if err := validateFormulaCompilerConstraintSet(f.Formula, constraints); err != nil {
+		return err
+	}
+	setFormulaCompilerConstraints(f, constraints)
+	return nil
+}
+
 func validateFormulaCompilerConstraintSet(formulaName string, constraints []formulaCompilerConstraint) error {
 	if len(constraints) < 2 {
 		return nil
@@ -276,6 +292,12 @@ func formulaCompilerRequirementConflict(formulaName string, constraints []formul
 		parts = append(parts, fmt.Sprintf("%s%s", constraint.Raw, source))
 	}
 	return fmt.Errorf("formula.compiler_requirement_conflict: formula %q has non-overlapping formula_compiler requirements: %s", name, strings.Join(parts, "; "))
+}
+
+// UsesGraphCompiler reports whether f declares compiler-v2 graph workflow
+// semantics through [requires] formula_compiler or legacy contract = "graph.v2".
+func UsesGraphCompiler(f *Formula) bool {
+	return declaresGraphCompilerRequirement(f)
 }
 
 func declaresGraphCompilerRequirement(f *Formula) bool {

@@ -25,6 +25,8 @@ import (
 // generation. The limit applies to template children, not to expansion rules.
 const DefaultMaxExpansionDepth = 5
 
+type formulaRequirementCollector func(*Formula) error
+
 // ApplyExpansions applies all expand and map rules to a formula's steps.
 // Returns a new steps slice with expansions applied.
 // The original steps slice is not modified.
@@ -39,6 +41,10 @@ func ApplyExpansions(steps []*Step, compose *ComposeRules, parser *Parser) ([]*S
 // steps, resolving any override values against the provided parent vars before
 // merging them into the expansion formula's own defaults.
 func ApplyExpansionsWithVars(steps []*Step, compose *ComposeRules, parser *Parser, parentVars map[string]string) ([]*Step, error) {
+	return applyExpansionsWithVars(steps, compose, parser, parentVars, nil)
+}
+
+func applyExpansionsWithVars(steps []*Step, compose *ComposeRules, parser *Parser, parentVars map[string]string, collectRequirements formulaRequirementCollector) ([]*Step, error) {
 	if compose == nil || parser == nil {
 		return steps, nil
 	}
@@ -65,7 +71,7 @@ func ApplyExpansionsWithVars(steps []*Step, compose *ComposeRules, parser *Parse
 			continue // Already expanded
 		}
 
-		expFormula, err := loadResolvedExpansionFormula(parser, rule.With, "expand")
+		expFormula, err := loadResolvedExpansionFormula(parser, rule.With, "expand", collectRequirements)
 		if err != nil {
 			return nil, err
 		}
@@ -108,7 +114,7 @@ func ApplyExpansionsWithVars(steps []*Step, compose *ComposeRules, parser *Parse
 
 	// Apply map rules (pattern matching)
 	for _, rule := range compose.Map {
-		expFormula, err := loadResolvedExpansionFormula(parser, rule.With, "map")
+		expFormula, err := loadResolvedExpansionFormula(parser, rule.With, "map", collectRequirements)
 		if err != nil {
 			return nil, err
 		}
@@ -174,7 +180,7 @@ func ApplyExpansionsWithVars(steps []*Step, compose *ComposeRules, parser *Parse
 	return result, nil
 }
 
-func loadResolvedExpansionFormula(parser *Parser, name, context string) (*Formula, error) {
+func loadResolvedExpansionFormula(parser *Parser, name, context string, collectRequirements formulaRequirementCollector) (*Formula, error) {
 	expFormula, err := parser.LoadByName(name)
 	if err != nil {
 		return nil, fmt.Errorf("%s: loading %q: %w", context, name, err)
@@ -191,6 +197,11 @@ func loadResolvedExpansionFormula(parser *Parser, name, context string) (*Formul
 
 	if len(resolved.Template) == 0 {
 		return nil, fmt.Errorf("%s: %q has no template steps", context, name)
+	}
+	if collectRequirements != nil {
+		if err := collectRequirements(resolved); err != nil {
+			return nil, fmt.Errorf("%s: collecting requirements for %q: %w", context, name, err)
+		}
 	}
 
 	return resolved, nil
@@ -673,16 +684,20 @@ func ApplyInlineExpansions(steps []*Step, parser *Parser) ([]*Step, error) {
 // ApplyInlineExpansionsWithVars applies Step.Expand fields to inline expansions
 // using vars for condition filtering during expansion-time validation.
 func ApplyInlineExpansionsWithVars(steps []*Step, parser *Parser, vars map[string]string) ([]*Step, error) {
+	return applyInlineExpansionsWithVars(steps, parser, vars, nil)
+}
+
+func applyInlineExpansionsWithVars(steps []*Step, parser *Parser, vars map[string]string, collectRequirements formulaRequirementCollector) ([]*Step, error) {
 	if parser == nil {
 		return steps, nil
 	}
 
-	return applyInlineExpansionsRecursive(steps, parser, vars, 0)
+	return applyInlineExpansionsRecursive(steps, parser, vars, collectRequirements, 0)
 }
 
 // applyInlineExpansionsRecursive handles inline expansions for a slice of steps.
 // depth tracks recursion to prevent infinite expansion loops.
-func applyInlineExpansionsRecursive(steps []*Step, parser *Parser, vars map[string]string, depth int) ([]*Step, error) {
+func applyInlineExpansionsRecursive(steps []*Step, parser *Parser, vars map[string]string, collectRequirements formulaRequirementCollector, depth int) ([]*Step, error) {
 	if depth > DefaultMaxExpansionDepth {
 		return nil, fmt.Errorf("inline expansion depth limit exceeded: max %d levels", DefaultMaxExpansionDepth)
 	}
@@ -692,7 +707,7 @@ func applyInlineExpansionsRecursive(steps []*Step, parser *Parser, vars map[stri
 	for _, step := range steps {
 		// Check if this step has an inline expansion
 		if step.Expand != "" {
-			expFormula, err := loadResolvedExpansionFormula(parser, step.Expand, fmt.Sprintf("inline expand on step %q", step.ID))
+			expFormula, err := loadResolvedExpansionFormula(parser, step.Expand, fmt.Sprintf("inline expand on step %q", step.ID), collectRequirements)
 			if err != nil {
 				return nil, err
 			}
@@ -718,7 +733,7 @@ func applyInlineExpansionsRecursive(steps []*Step, parser *Parser, vars map[stri
 			propagateTargetDeps(step, expandedSteps)
 
 			// Recursively process expanded steps for nested inline expansions
-			processedSteps, err := applyInlineExpansionsRecursive(expandedSteps, parser, conditionVars, depth+1)
+			processedSteps, err := applyInlineExpansionsRecursive(expandedSteps, parser, conditionVars, collectRequirements, depth+1)
 			if err != nil {
 				return nil, err
 			}
@@ -729,7 +744,7 @@ func applyInlineExpansionsRecursive(steps []*Step, parser *Parser, vars map[stri
 			clone := cloneStep(step)
 
 			if len(step.Children) > 0 {
-				processedChildren, err := applyInlineExpansionsRecursive(step.Children, parser, vars, depth)
+				processedChildren, err := applyInlineExpansionsRecursive(step.Children, parser, vars, collectRequirements, depth)
 				if err != nil {
 					return nil, err
 				}

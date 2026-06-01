@@ -96,6 +96,92 @@ title = "Review"
 	requireErrorContains(t, err, "[daemon] formula_v2 is disabled")
 }
 
+func TestCompileComposeExpansionRequirementRequiresEnabledV2(t *testing.T) {
+	dir := t.TempDir()
+	writeJSONFormula(t, dir, "parent", `{
+		"formula": "parent",
+		"steps": [{"id": "work", "title": "Work"}],
+		"compose": {"expand": [{"target": "work", "with": "needs-v2-expansion"}]}
+	}`)
+	writeJSONFormula(t, dir, "needs-v2-expansion", `{
+		"formula": "needs-v2-expansion",
+		"type": "expansion",
+		"requires": {"formula_compiler": ">=2.0.0"},
+		"template": [{"id": "{target}.child", "title": "Child"}]
+	}`)
+
+	prev := IsFormulaV2Enabled()
+	SetFormulaV2Enabled(false)
+	defer SetFormulaV2Enabled(prev)
+
+	_, err := Compile(context.Background(), "parent", []string{dir}, nil)
+	if err == nil {
+		t.Fatal("Compile unexpectedly succeeded")
+	}
+	requireErrorContains(t, err, "formula.compiler_requirement_unsatisfied")
+	requireErrorContains(t, err, `formula "needs-v2-expansion" [requires]`)
+}
+
+func TestCompileComposeAspectRequirementRequiresEnabledV2(t *testing.T) {
+	dir := t.TempDir()
+	writeJSONFormula(t, dir, "parent", `{
+		"formula": "parent",
+		"steps": [{"id": "work", "title": "Work"}],
+		"compose": {"aspects": ["needs-v2-aspect"]}
+	}`)
+	writeJSONFormula(t, dir, "needs-v2-aspect", `{
+		"formula": "needs-v2-aspect",
+		"type": "aspect",
+		"requires": {"formula_compiler": ">=2.0.0"},
+		"advice": [{"target": "work", "after": {"id": "{step.id}.audit", "title": "Audit"}}]
+	}`)
+
+	prev := IsFormulaV2Enabled()
+	SetFormulaV2Enabled(false)
+	defer SetFormulaV2Enabled(prev)
+
+	_, err := Compile(context.Background(), "parent", []string{dir}, nil)
+	if err == nil {
+		t.Fatal("Compile unexpectedly succeeded")
+	}
+	requireErrorContains(t, err, "formula.compiler_requirement_unsatisfied")
+	requireErrorContains(t, err, `formula "needs-v2-aspect" [requires]`)
+}
+
+func TestCompileComposeRequirementMarksGraphWorkflow(t *testing.T) {
+	dir := t.TempDir()
+	writeJSONFormula(t, dir, "parent", `{
+		"formula": "parent",
+		"steps": [{"id": "work", "title": "Work"}],
+		"compose": {"expand": [{"target": "work", "with": "needs-v2-expansion"}]}
+	}`)
+	writeJSONFormula(t, dir, "needs-v2-expansion", `{
+		"formula": "needs-v2-expansion",
+		"type": "expansion",
+		"requires": {"formula_compiler": ">=2.0.0"},
+		"template": [{"id": "{target}.child", "title": "Child"}]
+	}`)
+
+	prev := IsFormulaV2Enabled()
+	SetFormulaV2Enabled(true)
+	defer SetFormulaV2Enabled(prev)
+
+	recipe, err := Compile(context.Background(), "parent", []string{dir}, nil)
+	if err != nil {
+		t.Fatalf("Compile failed: %v", err)
+	}
+	root := recipe.RootStep()
+	if root == nil {
+		t.Fatal("RootStep is nil")
+	}
+	if got := root.Metadata["gc.kind"]; got != "workflow" {
+		t.Fatalf("root gc.kind = %q, want workflow", got)
+	}
+	if got := root.Metadata["gc.formula_contract"]; got != "graph.v2" {
+		t.Fatalf("root gc.formula_contract = %q, want graph.v2", got)
+	}
+}
+
 func TestCompileFormulaCompilerRequirementEnablesGraphWorkflow(t *testing.T) {
 	dir := t.TempDir()
 	writeFormula(t, dir, `
@@ -444,6 +530,13 @@ func writeFormula(t *testing.T, dir, content string) {
 func writeNamedFormula(t *testing.T, dir, name, content string) {
 	t.Helper()
 	if err := os.WriteFile(filepath.Join(dir, name+".toml"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func writeJSONFormula(t *testing.T, dir, name, content string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, name+".formula.json"), []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}
 }

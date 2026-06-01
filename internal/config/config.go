@@ -1816,10 +1816,12 @@ type DaemonConfig struct {
 	// formula_v2=false, so the TOML encoder preserves that operator choice.
 	formulaV2Set bool `toml:"-" json:"-" jsonschema:"-"`
 
-	// FormulaV2 enables formula compiler v2 workflow infrastructure:
-	// the control-dispatcher implicit agent, compiler-v2 workflow compilation,
-	// and batch graph-apply bead creation. Requires bd with --graph support.
-	// Default: true. Set false only for cities pinned to formula compiler v1.
+	// FormulaV2 enables formula compiler v2 workflow infrastructure: the
+	// control-dispatcher implicit agent and on-demand named session,
+	// compiler-v2 workflow compilation, and batch graph-apply bead creation.
+	// The implicit dispatcher follows normal session idle-sleep policy.
+	// Requires bd with --graph support. Default: true. Set false only for cities
+	// pinned to formula compiler v1.
 	FormulaV2 bool `toml:"formula_v2" jsonschema:"default=true"`
 	// GraphWorkflows is the deprecated predecessor of FormulaV2. Retained
 	// for backwards compatibility as an alias. Explicit formula_v2 wins.
@@ -3474,7 +3476,7 @@ func injectControlDispatcherAgents(cfg *City, existing map[agentKey]bool) {
 		if !existingNS[ControlDispatcherAgentName] {
 			cfg.NamedSessions = append(cfg.NamedSessions, NamedSession{
 				Template: ControlDispatcherAgentName,
-				Mode:     "always",
+				Mode:     "on_demand",
 			})
 		}
 	}
@@ -3486,7 +3488,7 @@ func injectControlDispatcherAgents(cfg *City, existing map[agentKey]bool) {
 				cfg.NamedSessions = append(cfg.NamedSessions, NamedSession{
 					Template: ControlDispatcherAgentName,
 					Dir:      rig.Name,
-					Mode:     "always",
+					Mode:     "on_demand",
 				})
 			}
 		}
@@ -3506,7 +3508,6 @@ func newControlDispatcherAgent(dir string) Agent {
 		Description:       "Built-in deterministic compiler-v2 workflow control worker",
 		StartCommand:      ControlDispatcherStartCommandFor(qualifiedName),
 		ProcessNames:      []string{"gc"},
-		SleepAfterIdle:    SessionSleepOff,
 		MaxActiveSessions: &one,
 		Implicit:          true,
 	}

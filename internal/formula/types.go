@@ -889,13 +889,23 @@ type AroundAdvice struct {
 }
 
 func requiresExplicitGraphContract(f *Formula) bool {
-	if f == nil || declaresGraphCompilerRequirement(f) {
+	if f == nil || UsesGraphCompiler(f) {
 		return false
 	}
 	if stepsRequireDetachedGraphContract(f.Steps) {
 		return true
 	}
 	return stepsRequireDetachedGraphContract(f.Template)
+}
+
+func requiresExplicitGraphCompilerRequirement(f *Formula) bool {
+	if f == nil || UsesGraphCompiler(f) {
+		return false
+	}
+	if stepsRequireGraphCompiler(f.Steps) {
+		return true
+	}
+	return stepsRequireGraphCompiler(f.Template)
 }
 
 func stepsRequireDetachedGraphContract(steps []*Step) bool {
@@ -918,6 +928,28 @@ func stepRequiresDetachedGraphContract(step *Step) bool {
 		return true
 	}
 	return stepsRequireDetachedGraphContract(step.Children)
+}
+
+func stepsRequireGraphCompiler(steps []*Step) bool {
+	for _, step := range steps {
+		if stepRequiresGraphCompiler(step) {
+			return true
+		}
+	}
+	return false
+}
+
+func stepRequiresGraphCompiler(step *Step) bool {
+	if step == nil {
+		return false
+	}
+	if step.Ralph != nil || step.Retry != nil || step.OnComplete != nil || metadataRequiresGraphContract(step.Metadata) {
+		return true
+	}
+	if step.Loop != nil && stepsRequireGraphCompiler(step.Loop.Body) {
+		return true
+	}
+	return stepsRequireGraphCompiler(step.Children)
 }
 
 func metadataRequiresGraphContract(metadata map[string]string) bool {
@@ -950,7 +982,7 @@ func (f *Formula) Validate() error {
 	}
 	errs = append(errs, validateRequirementDeclarations(f)...)
 	if requiresExplicitGraphContract(f) {
-		errs = append(errs, `requires: formulas that use graph-only constructs must declare [requires] formula_compiler = ">=2.0.0" or legacy contract = "graph.v2" explicitly`)
+		errs = append(errs, explicitGraphRequirementError)
 	}
 
 	if f.Type != "" && !f.Type.IsValid() {

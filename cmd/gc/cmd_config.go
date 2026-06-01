@@ -400,6 +400,9 @@ func validateLegacyFormulaConfigRoutes(cfg *config.City) []string {
 		if resolved.Type != formula.TypeWorkflow {
 			continue
 		}
+		if !formula.UsesGraphCompiler(resolved) {
+			continue
+		}
 		collectLegacyGraphAssigneeErrors(name, resolved.Steps, agentTargets, namedTargets, &errs)
 	}
 	sort.Strings(errs)

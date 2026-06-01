@@ -332,12 +332,8 @@ var (
 	sharedTestCityDir    string
 )
 
-func init() {
-	tmpRoot := os.TempDir()
-	sweepOrphanPIDPrefixedDirs(tmpRoot, testSlingFormulaDirPrefix)
-	sweepOrphanPIDPrefixedDirs(tmpRoot, testSlingCityDirPrefix)
-
-	dir, err := os.MkdirTemp("", "gc-shared-test-formulas-*")
+func initSharedSlingTestFixtures(root string) {
+	dir, err := os.MkdirTemp(root, pidPrefixedTempPattern(testSlingFormulaDirPrefix))
 	if err != nil {
 		panic(err)
 	}
@@ -353,7 +349,7 @@ func init() {
 	}
 	sharedTestFormulaDir = dir
 
-	cityDir, err := os.MkdirTemp("", pidPrefixedTempPattern(testSlingCityDirPrefix))
+	cityDir, err := os.MkdirTemp(root, pidPrefixedTempPattern(testSlingCityDirPrefix))
 	if err != nil {
 		panic(err)
 	}

@@ -192,6 +192,9 @@ func TestMain(m *testing.M) {
 	sweepOrphanPIDPrefixedDirs(tmpRoot, testGCHomeDirPrefix)
 	sweepOrphanPIDPrefixedDirs(tmpRoot, testRuntimeDirPrefix)
 	sweepOrphanPIDPrefixedDirs(tmpRoot, testProviderStubDirPrefix)
+	sweepOrphanPIDPrefixedDirs(tmpRoot, testSlingFormulaDirPrefix)
+	sweepOrphanPIDPrefixedDirs(tmpRoot, testSlingCityDirPrefix)
+	initSharedSlingTestFixtures(testTempRoot)
 
 	gcHome, err := os.MkdirTemp("", pidPrefixedTempPattern(testGCHomeDirPrefix))
 	if err != nil {
