@@ -163,8 +163,18 @@ func cmdHookWithFormat(args []string, inject bool, hookFormat string, stdout, st
 	}
 	queryEnv := mergeRuntimeEnv(os.Environ(), overrides)
 	failureTemplate, emitFailureEvent := hookWorkQueryFailureTemplate(len(args) > 0, sessionTemplateContext, a.QualifiedName())
-	runner := func(command, dir string) (string, error) {
-		out, err := shellWorkQueryWithEnv(command, dir, queryEnv)
+
+	// A cross-store-eligible (city-scoped) agent federates its work query across
+	// all stores — its own first, then every rig store — matched on its own
+	// identity (vp-kvp stage iii). Rig agents get a single-entry list, so their
+	// behavior is byte-for-byte unchanged.
+	stores := []hookStore{{dir: workDir, env: queryEnv}}
+	if agentIsCrossStoreEligible(&a) {
+		stores = appendRigHookStores(stores, cityPath, cfg, &a, overrides)
+	}
+
+	runner := func(command, _ string) (string, error) {
+		out, err := firstStoreWithWork(command, stores, shellWorkQueryWithEnv)
 		if err != nil && emitFailureEvent {
 			// A killed/timed-out work query strands the session with no
 			// output and no cause on the event bus; emit one so the

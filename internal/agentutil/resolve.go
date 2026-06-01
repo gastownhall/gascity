@@ -239,11 +239,29 @@ func AgentReachesWorkflowStore(storeRef string, agentCfg *config.Agent, cityPath
 	if cfg == nil || agentCfg == nil {
 		return true
 	}
+	// City-scoped agents are cross-store eligible: a city-wide singleton
+	// legitimately serves work in ANY store (vp-kvp). Without this exemption the
+	// cross-store route guard (validateBuiltInRouteStoreReachable) would
+	// false-positive on a legitimate route to a city-scoped target and refuse
+	// it — the very dead-drop stages ii/iii exist to remove. Rig-scoped agents
+	// stay single-store, so all existing reachability is unchanged.
+	if AgentIsCrossStoreEligible(agentCfg) {
+		return true
+	}
 	agentRig := workdirutil.ConfiguredRigName(cityPath, *agentCfg, cfg.Rigs)
 	if agentRig == "" {
 		return strings.HasPrefix(storeRef, "city:")
 	}
 	return storeRef == "rig:"+agentRig
+}
+
+// AgentIsCrossStoreEligible reports whether an agent may discover and serve
+// work in ANY store, not just its configured rig. City-scoped agents are
+// cross-store eligible: a city-wide singleton legitimately serves per-rig
+// routed work (vp-kvp — "scope determines discovery breadth"). Centralized
+// here so domain packages and the CLI share one definition.
+func AgentIsCrossStoreEligible(agentCfg *config.Agent) bool {
+	return agentCfg != nil && strings.TrimSpace(agentCfg.Scope) == "city"
 }
 
 // AgentReachableStoreLabel returns the workflow store ref an agent's
