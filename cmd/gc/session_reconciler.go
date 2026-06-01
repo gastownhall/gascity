@@ -1459,7 +1459,11 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				}
 				if runtimeRunning {
 					if tmuxRequested && dops != nil {
-						_ = dops.clearRestartRequested(name)
+						if err := dops.clearRestartRequested(name); err != nil {
+							if !runtime.IsSessionGone(err) {
+								fmt.Fprintf(stderr, "session reconciler: clearing restart-requested marker for %s (bead %s): %v\n", name, session.ID, err) //nolint:errcheck
+							}
+						}
 					}
 					fmt.Fprintf(stdout, "Stopped restart-requested session '%s'\n", name) //nolint:errcheck
 					// Yield this tick so the kill and the next wake run

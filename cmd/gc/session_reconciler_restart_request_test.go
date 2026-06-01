@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -74,6 +75,10 @@ func (e *restartRequestTestEnv) reconcile(sessions []beads.Bead) {
 			poolDesired[tp.TemplateName]++
 		}
 	}
+	e.reconcileWithPoolDesiredAndDrainOps(sessions, poolDesired, nil)
+}
+
+func (e *restartRequestTestEnv) reconcileWithPoolDesiredAndDrainOps(sessions []beads.Bead, poolDesired map[string]int, dops drainOps) {
 	cfgNames := configuredSessionNames(e.cfg, "", e.store)
 	_ = reconcileSessionBeads(
 		context.Background(),
@@ -83,7 +88,7 @@ func (e *restartRequestTestEnv) reconcile(sessions []beads.Bead) {
 		e.cfg,
 		e.sp,
 		e.store,
-		nil,
+		dops,
 		nil,
 		nil,
 		e.dt,
@@ -99,6 +104,56 @@ func (e *restartRequestTestEnv) reconcile(sessions []beads.Bead) {
 		&e.stdout,
 		&e.stderr,
 	)
+}
+
+type clearRestartErrorDrainOps struct {
+	*fakeDrainOps
+	err error
+}
+
+func (d *clearRestartErrorDrainOps) clearRestartRequested(string) error {
+	return d.err
+}
+
+func newLiveRestartRequestScenario(t *testing.T) (*restartRequestTestEnv, beads.Bead, string) {
+	t.Helper()
+
+	env := newRestartRequestTestEnv()
+	env.cfg = &config.City{
+		Workspace:     config.Workspace{Name: "test-city"},
+		Agents:        []config.Agent{{Name: "worker", StartCommand: "true", MaxActiveSessions: restartRequestTestIntPtr(1)}},
+		NamedSessions: []config.NamedSession{{Template: "worker", Mode: "on_demand"}},
+	}
+	sessionName := config.NamedSessionRuntimeName(env.cfg.Workspace.Name, env.cfg.Workspace, "worker")
+	env.desiredState[sessionName] = TemplateParams{
+		Command:      "true",
+		SessionName:  sessionName,
+		TemplateName: "worker",
+		ResolvedProvider: &config.ResolvedProvider{
+			SessionIDFlag: "--session-id",
+		},
+	}
+
+	session := env.createSessionBead(sessionName)
+	env.setSessionMetadata(&session, map[string]string{
+		namedSessionMetadataKey:      "true",
+		namedSessionIdentityMetadata: "worker",
+		namedSessionModeMetadata:     "on_demand",
+		"state":                      "active",
+		"session_key":                "original-key",
+		"started_config_hash":        "hash-before-restart",
+	})
+	if err := env.sp.Start(context.Background(), sessionName, runtime.Config{Command: "true"}); err != nil {
+		t.Fatalf("start session: %v", err)
+	}
+	if err := env.sp.SetMeta(sessionName, "GC_SESSION_ID", session.ID); err != nil {
+		t.Fatalf("SetMeta(GC_SESSION_ID): %v", err)
+	}
+	if err := env.sp.SetMeta(sessionName, "GC_RESTART_REQUESTED", "1"); err != nil {
+		t.Fatalf("SetMeta(GC_RESTART_REQUESTED): %v", err)
+	}
+
+	return env, session, sessionName
 }
 
 func TestReconcileSessionBeads_RestartRequestRotatesKeyForSessionIDProviders(t *testing.T) {
@@ -244,6 +299,38 @@ func TestReconcileSessionBeads_RestartRequestPreservesLiveHashesDuringHandoff(t 
 	}
 	if got.Metadata["startup_dialog_verified"] != "true" {
 		t.Fatalf("startup_dialog_verified = %q, want preserved until next successful start", got.Metadata["startup_dialog_verified"])
+	}
+}
+
+func TestReconcileSessionBeads_RestartRequestReportsClearRestartRequestedError(t *testing.T) {
+	env, session, sessionName := newLiveRestartRequestScenario(t)
+	env.sp.RemoveMetaErrors[sessionName] = map[string]error{
+		"GC_RESTART_REQUESTED": errors.New("permission denied"),
+	}
+
+	env.reconcileWithPoolDesiredAndDrainOps([]beads.Bead{session}, map[string]int{"worker": 0}, newDrainOps(env.sp))
+
+	got := env.stderr.String()
+	if !strings.Contains(got, "clearing restart-requested marker") ||
+		!strings.Contains(got, sessionName) ||
+		!strings.Contains(got, session.ID) ||
+		!strings.Contains(got, "permission denied") {
+		t.Fatalf("stderr = %q, want contextual clearRestartRequested diagnostic", got)
+	}
+}
+
+func TestReconcileSessionBeads_RestartRequestSuppressesGoneClearRestartRequestedError(t *testing.T) {
+	env, session, sessionName := newLiveRestartRequestScenario(t)
+	dops := &clearRestartErrorDrainOps{
+		fakeDrainOps: newFakeDrainOps(),
+		err:          fmt.Errorf("%w: %s", runtime.ErrSessionNotFound, sessionName),
+	}
+	dops.restartRequested[sessionName] = true
+
+	env.reconcileWithPoolDesiredAndDrainOps([]beads.Bead{session}, map[string]int{"worker": 0}, dops)
+
+	if got := env.stderr.String(); got != "" {
+		t.Fatalf("stderr = %q, want no diagnostic for gone clearRestartRequested error", got)
 	}
 }
 
