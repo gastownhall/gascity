@@ -938,6 +938,36 @@ esac
 	}
 }
 
+func TestReady_includeEphemeralExit2ReturnsError(t *testing.T) {
+	dir := t.TempDir()
+	script := writeScript(t, dir, `
+op="$1"; shift
+case "$op" in
+  ready)
+    case " $* " in
+      *" --include-ephemeral "*)
+        echo "unknown argument: --include-ephemeral" >&2
+        exit 2
+        ;;
+      *)
+        echo '[{"id":"EX-issue","title":"regular","status":"open","type":"task","created_at":"2026-02-27T10:00:00Z"}]'
+        ;;
+    esac
+    ;;
+  *) exit 2 ;;
+esac
+`)
+	s := NewStore(script)
+
+	_, err := s.Ready(beads.ReadyQuery{TierMode: beads.TierBoth})
+	if err == nil {
+		t.Fatal("Ready(TierBoth) succeeded after ready --include-ephemeral exited 2, want error")
+	}
+	if !strings.Contains(err.Error(), "unknown argument: --include-ephemeral") {
+		t.Fatalf("Ready(TierBoth) error = %q, want exit-2 stderr context", err)
+	}
+}
+
 func TestReady_treatsMissingOrEmptyStatusAsOpen(t *testing.T) {
 	dir := t.TempDir()
 	script := writeScript(t, dir, `

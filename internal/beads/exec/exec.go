@@ -74,8 +74,9 @@ func stripExecEnvKey(key string) bool {
 // run executes the script with the given args, optionally piping stdinData
 // to its stdin. Returns the trimmed stdout on success.
 //
-// Exit code 2 is treated as success (unknown operation — forward compatible).
-// Any other non-zero exit code returns an error wrapping stderr.
+// Exit code 2 is treated as success for unknown operation names. When a known
+// operation receives arguments, exit code 2 means the invocation was rejected
+// and must surface as an error instead of silently returning empty data.
 func (s *Store) run(stdinData []byte, args ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), s.timeout)
 	defer cancel()
@@ -100,6 +101,13 @@ func (s *Store) run(stdinData []byte, args ...string) (string, error) {
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {
 			if exitErr.ExitCode() == 2 {
+				if exit2IsRejectedInvocation(args) {
+					errMsg := strings.TrimSpace(stderr.String())
+					if errMsg == "" {
+						errMsg = err.Error()
+					}
+					return "", fmt.Errorf("exec beads %s %s: %s", s.script, strings.Join(args, " "), errMsg)
+				}
 				return "", nil
 			}
 		}
@@ -111,6 +119,10 @@ func (s *Store) run(stdinData []byte, args ...string) (string, error) {
 	}
 
 	return strings.TrimRight(stdout.String(), "\n"), nil
+}
+
+func exit2IsRejectedInvocation(args []string) bool {
+	return len(args) > 1 && args[0] == "ready"
 }
 
 // isNotFoundError reports whether an error from the script indicates a
