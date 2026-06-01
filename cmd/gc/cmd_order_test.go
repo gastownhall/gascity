@@ -78,7 +78,7 @@ func TestOrderList(t *testing.T) {
 func TestOrderListJSON(t *testing.T) {
 	aa := []orders.Order{
 		{Name: "digest", Trigger: "cooldown", Interval: "24h", Pool: "dog", Formula: "mol-digest", Source: "/city/orders/digest.toml"},
-		{Name: "poll", Trigger: "condition", Check: "bd ready --json", Exec: "scripts/poll.sh", Rig: "frontend"},
+		{Name: "poll", Trigger: "condition", Check: "bd ready --json", Exec: "scripts/poll.sh", Rig: "frontend", Env: map[string]string{"GC_JSONL_MIN_PREV_FOR_SPIKE": "250"}},
 	}
 
 	var stdout bytes.Buffer
@@ -91,11 +91,12 @@ func TestOrderListJSON(t *testing.T) {
 		SchemaVersion string `json:"schema_version"`
 		CityName      string `json:"city_name"`
 		Orders        []struct {
-			Name       string `json:"name"`
-			ScopedName string `json:"scoped_name"`
-			Type       string `json:"type"`
-			Target     string `json:"target"`
-			Enabled    bool   `json:"enabled"`
+			Name       string            `json:"name"`
+			ScopedName string            `json:"scoped_name"`
+			Type       string            `json:"type"`
+			Target     string            `json:"target"`
+			Enabled    bool              `json:"enabled"`
+			Env        map[string]string `json:"env"`
 		} `json:"orders"`
 		Summary struct {
 			Count int `json:"count"`
@@ -112,6 +113,9 @@ func TestOrderListJSON(t *testing.T) {
 	}
 	if got.Orders[1].ScopedName != "poll:rig:frontend" || got.Orders[1].Type != "exec" {
 		t.Fatalf("second order = %+v", got.Orders[1])
+	}
+	if got.Orders[1].Env["GC_JSONL_MIN_PREV_FOR_SPIKE"] != "250" {
+		t.Fatalf("second order env = %+v, want GC_JSONL_MIN_PREV_FOR_SPIKE=250", got.Orders[1].Env)
 	}
 }
 
@@ -173,6 +177,36 @@ func TestOrderShowJSON(t *testing.T) {
 	}
 	if stderr.Len() != 0 {
 		t.Fatalf("stderr = %q, want empty", stderr.String())
+	}
+}
+
+func TestOrderShowJSONIncludesEnv(t *testing.T) {
+	aa := []orders.Order{{
+		Name:    "poll",
+		Exec:    "scripts/poll.sh",
+		Trigger: "manual",
+		Env: map[string]string{
+			"GC_JSONL_MIN_PREV_FOR_SPIKE": "250",
+			"CUSTOM_ORDER_FLAG":           "enabled",
+		},
+	}}
+
+	var stdout, stderr bytes.Buffer
+	code := doOrderShowJSON("/city", nil, aa, "poll", "", &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doOrderShowJSON = %d, want 0; stderr=%s", code, stderr.String())
+	}
+
+	var got struct {
+		Order struct {
+			Env map[string]string `json:"env"`
+		} `json:"order"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatalf("order show JSON invalid: %v\n%s", err, stdout.String())
+	}
+	if got.Order.Env["GC_JSONL_MIN_PREV_FOR_SPIKE"] != "250" || got.Order.Env["CUSTOM_ORDER_FLAG"] != "enabled" {
+		t.Fatalf("env = %+v, want configured order env", got.Order.Env)
 	}
 }
 
@@ -515,6 +549,10 @@ func TestOrderShowExec(t *testing.T) {
 			Trigger:     "cooldown",
 			Interval:    "2m",
 			Source:      "/city/orders/poll.toml",
+			Env: map[string]string{
+				"GC_JSONL_MIN_PREV_FOR_SPIKE": "250",
+				"CUSTOM_ORDER_FLAG":           "enabled",
+			},
 		},
 	}
 
@@ -529,6 +567,11 @@ func TestOrderShowExec(t *testing.T) {
 	}
 	if !strings.Contains(out, "scripts/poll.sh") {
 		t.Errorf("stdout missing script path:\n%s", out)
+	}
+	for _, want := range []string{"Env:", "CUSTOM_ORDER_FLAG=enabled", "GC_JSONL_MIN_PREV_FOR_SPIKE=250"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("stdout missing %q:\n%s", want, out)
+		}
 	}
 	// Should NOT show Formula: line.
 	if strings.Contains(out, "Formula:") {
@@ -567,6 +610,36 @@ func TestOrderCheck(t *testing.T) {
 	}
 	if !strings.Contains(out, "yes") {
 		t.Errorf("stdout missing 'yes':\n%s", out)
+	}
+}
+
+func TestOrderCheckWithStoresResolverRejectsReservedOrderEnvKey(t *testing.T) {
+	aa := []orders.Order{
+		{
+			Name:     "bad-env",
+			Trigger:  "cooldown",
+			Interval: "24h",
+			Exec:     "scripts/bad-env.sh",
+			Env:      map[string]string{"GC_CITY": "shadowed"},
+		},
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doOrderCheckWithStoresResolverScoped(
+		t.TempDir(),
+		&config.City{},
+		aa,
+		time.Date(2026, 2, 27, 12, 0, 0, 0, time.UTC),
+		nil,
+		func(orders.Order) ([]beads.Store, error) { return nil, nil },
+		&stdout,
+		&stderr,
+	)
+	if code != 1 {
+		t.Fatalf("doOrderCheckWithStoresResolverScoped = %d, want 1; stdout: %s; stderr: %s", code, stdout.String(), stderr.String())
+	}
+	if got := stderr.String(); !strings.Contains(got, `controller-owned env key "GC_CITY"`) {
+		t.Fatalf("stderr = %q, want reserved-key validation diagnostic", got)
 	}
 }
 
@@ -2608,7 +2681,8 @@ name = "mayor"
 	if err := os.MkdirAll(ordersDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	orderToml := `trigger = "manual"
+	orderToml := `[order]
+trigger = "manual"
 formula = "mol-digest"
 `
 	if err := os.WriteFile(filepath.Join(ordersDir, "digest.toml"), []byte(orderToml), 0o644); err != nil {

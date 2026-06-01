@@ -110,6 +110,33 @@
         }
       }
     },
+    "beads": {
+      "type": "object",
+      "description": "Bead store selection and native-store eligibility diagnostics.",
+      "additionalProperties": false,
+      "required": [
+        "beads_store",
+        "native_store_eligible"
+      ],
+      "properties": {
+        "beads_store": {
+          "type": "string",
+          "description": "Selected bead store implementation."
+        },
+        "native_store_eligible": {
+          "type": "boolean",
+          "description": "Whether the native Dolt-backed store passed preflight gates."
+        },
+        "preflight_gate": {
+          "type": "string",
+          "description": "Preflight gate that prevented native-store selection, when any."
+        },
+        "preflight_reason": {
+          "type": "string",
+          "description": "Human-readable native-store fallback reason, when any."
+        }
+      }
+    },
     "agents": {
       "type": "array",
       "description": "Configured agents visible to the city.",

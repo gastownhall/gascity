@@ -501,7 +501,7 @@ func failedAttemptAttachRootID(store beads.Store, control beads.Bead, attemptNum
 	if rootID == "" {
 		rootID = control.ID
 	}
-	matches, err := store.List(beads.ListQuery{
+	matches, err := beads.HandlesFor(store).Live.List(beads.ListQuery{
 		Metadata: map[string]string{
 			"gc.idempotency_key": fmt.Sprintf("%s:attempt:%d", control.ID, attemptNum),
 			"gc.root_bead_id":    rootID,

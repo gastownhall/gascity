@@ -64,6 +64,34 @@ name = "refinery"
 	}
 }
 
+func TestExpandPacksAllowsSemanticallyInvalidFlatOrder(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "packs/tools/pack.toml", `
+[pack]
+name = "tools"
+version = "1.0.0"
+schema = 1
+`)
+	writeFile(t, dir, "packs/tools/orders/deploy.toml", `
+[order]
+formula = "mol-deploy"
+trigger = "manual"
+
+[order.env]
+CUSTOM_ORDER_FLAG = "enabled"
+`)
+
+	cfg := &City{
+		Rigs: []Rig{
+			{Name: "demo", Path: "/work", Includes: []string{"packs/tools"}},
+		},
+	}
+
+	if err := ExpandPacks(cfg, fsys.OSFS{}, dir, nil); err != nil {
+		t.Fatalf("ExpandPacks: %v", err)
+	}
+}
+
 func TestExpandPacks_MultipleRigs(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, dir, "packs/gastown/pack.toml", `
@@ -3212,6 +3240,86 @@ source = "../maintenance"
 	}
 	if names["maintenance"] {
 		t.Fatalf("maintenance collected through non-transitive import: names=%v", names)
+	}
+}
+
+func TestResolvedPackNames_NonTransitiveImportDoesNotExposeNestedPack(t *testing.T) {
+	dir := t.TempDir()
+
+	writeFile(t, dir, "packs/maintenance/pack.toml", `
+[pack]
+name = "maintenance"
+schema = 2
+`)
+	writeFile(t, dir, "packs/middle/pack.toml", `
+[pack]
+name = "middle"
+schema = 2
+
+[imports.maintenance]
+source = "../maintenance"
+`)
+	writeFile(t, dir, "packs/root/pack.toml", `
+[pack]
+name = "root"
+schema = 2
+
+[imports.middle]
+source = "../middle"
+transitive = false
+`)
+
+	names := resolvedPackNames([]string{"packs/root"}, nil, fsys.OSFS{}, dir)
+	if !names["middle"] {
+		t.Fatalf("middle pack was not recorded: names=%v", names)
+	}
+	if names["maintenance"] {
+		t.Fatalf("non-transitive import exposed nested maintenance pack: names=%v", names)
+	}
+}
+
+func TestResolvedPackNames_RevisitsPackReachedFirstThroughNonTransitiveImport(t *testing.T) {
+	dir := t.TempDir()
+
+	writeFile(t, dir, "packs/maintenance/pack.toml", `
+[pack]
+name = "maintenance"
+schema = 2
+`)
+	writeFile(t, dir, "packs/middle/pack.toml", `
+[pack]
+name = "middle"
+schema = 2
+
+[imports.maintenance]
+source = "../maintenance"
+`)
+	writeFile(t, dir, "packs/shallow/pack.toml", `
+[pack]
+name = "shallow"
+schema = 2
+
+[imports.middle]
+source = "../middle"
+transitive = false
+`)
+	writeFile(t, dir, "packs/deep/pack.toml", `
+[pack]
+name = "deep"
+schema = 2
+
+[imports.middle]
+source = "../middle"
+`)
+
+	for _, includes := range [][]string{
+		{"packs/shallow", "packs/deep"},
+		{"packs/deep", "packs/shallow"},
+	} {
+		names := resolvedPackNames(includes, nil, fsys.OSFS{}, dir)
+		if !names["maintenance"] {
+			t.Fatalf("includes %v did not resolve transitive maintenance after shallow visit: names=%v", includes, names)
+		}
 	}
 }
 

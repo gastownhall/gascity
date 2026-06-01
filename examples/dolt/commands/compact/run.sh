@@ -84,6 +84,27 @@
 #                                         replaced by '_' to derive the env
 #                                         key; DB names that differ only by
 #                                         '-' vs '_' share that key.
+#   GC_DOLT_COMPACT_BARE_GC               (optional) — when set to a truthy
+#                                         value (1, true, yes — matching
+#                                         the GC_DOLT_MANAGED_LOCAL style),
+#                                         skip the commit-count threshold
+#                                         AND the flatten/full-GC path
+#                                         entirely, and run a bare
+#                                         CALL DOLT_GC() on each
+#                                         discovered database. Decouples
+#                                         the working-set GC pass (which
+#                                         resets the NBS journal range
+#                                         index that grows with write
+#                                         churn) from the threshold-gated
+#                                         flatten, so a memory-pressure
+#                                         caller can run a short-cadence
+#                                         GC without rewriting history.
+#                                         Honors GC_DOLT_COMPACT_ONLY_DBS,
+#                                         GC_DOLT_COMPACT_DRY_RUN, and the
+#                                         per-db quarantine marker; does
+#                                         NOT write pending-GC /
+#                                         pending-push markers (those are
+#                                         flatten-remediation state).
 set -eu
 
 : "${GC_CITY_PATH:?GC_CITY_PATH must be set}"
@@ -156,6 +177,20 @@ pending_push_max_age_secs="${GC_DOLT_COMPACT_PENDING_PUSH_MAX_AGE_SECS:-172800}"
 compact_remote="${GC_DOLT_COMPACT_REMOTE:-}"
 dry_run="${GC_DOLT_COMPACT_DRY_RUN:-}"
 only_dbs="${GC_DOLT_COMPACT_ONLY_DBS:-}"
+bare_gc_input="${GC_DOLT_COMPACT_BARE_GC:-}"
+case "$bare_gc_input" in
+  ''|0|false|FALSE|no|NO)
+    bare_gc=0
+    ;;
+  1|true|TRUE|yes|YES)
+    bare_gc=1
+    ;;
+  *)
+    printf 'compact: invalid GC_DOLT_COMPACT_BARE_GC=%s (must be 1/true/yes or 0/false/no)\n' \
+      "$bare_gc_input" >&2
+    exit 2
+    ;;
+esac
 
 case "$threshold_commits" in
   ''|*[!0-9]*)
@@ -1911,6 +1946,48 @@ flatten_database() {
   return 1
 }
 
+bare_gc_database() {
+  db="$1"
+
+  if [ -n "$only_dbs" ]; then
+    case ",$only_dbs," in
+      *,"$db",*) ;;
+      *)
+        printf 'compact: db=%s not in GC_DOLT_COMPACT_ONLY_DBS — skip\n' "$db"
+        return 0
+        ;;
+    esac
+  fi
+
+  if has_compact_marker "$quarantine_dir" "$db"; then
+    printf 'compact: db=%s integrity quarantine marker exists — manual intervention required before compaction or GC\n' \
+      "$db" >&2
+    return 1
+  fi
+
+  if [ -n "$dry_run" ]; then
+    printf 'compact: db=%s — dry-run (would bare GC)\n' "$db"
+    return 0
+  fi
+
+  start=$(date +%s)
+  gc_rc=0
+  gc_err_tmp=$(mktemp)
+  dolt_query "$db" "CALL DOLT_GC()" >/dev/null 2>"$gc_err_tmp" || gc_rc=$?
+  elapsed=$(( $(date +%s) - start ))
+  if [ "$gc_rc" -ne 0 ]; then
+    printf 'compact: db=%s bare-gc failed rc=%s duration=%ss\n' \
+      "$db" "$gc_rc" "$elapsed" >&2
+    emit_error_file "$db" "$gc_err_tmp"
+    rm -f "$gc_err_tmp"
+    return 1
+  fi
+  rm -f "$gc_err_tmp"
+
+  printf 'compact: db=%s bare-gc duration=%ss — ok\n' "$db" "$elapsed"
+  return 0
+}
+
 # shellcheck disable=SC2317
 cleanup() {
   if [ "$flock_acquired" = "1" ]; then
@@ -2080,6 +2157,21 @@ main() {
   done < "$_db_tmp"
 
   failed_count=0
+  if [ "$bare_gc" = "1" ]; then
+    while IFS= read -r db; do
+      [ -n "$db" ] || continue
+      if ! bare_gc_database "$db"; then
+        failed_count=$((failed_count + 1))
+      fi
+    done < "$_unique_db_tmp"
+
+    if [ "$failed_count" -gt 0 ]; then
+      printf 'compact: %s database(s) failed bare GC\n' "$failed_count" >&2
+      exit 1
+    fi
+    exit 0
+  fi
+
   while IFS= read -r db; do
     [ -n "$db" ] || continue
     if ! flatten_database "$db"; then

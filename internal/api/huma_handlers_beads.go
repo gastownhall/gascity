@@ -143,7 +143,7 @@ func (s *Server) humaHandleBeadReady(ctx context.Context, input *BeadReadyInput)
 	var pa partialAggregator
 	for _, rigName := range rigNames {
 		pa.attempt()
-		ready, err := beads.ReadyLive(stores[rigName])
+		ready, err := beads.HandlesFor(stores[rigName]).Live.Ready()
 		if err != nil {
 			if beads.IsPartialResult(err) && len(ready) > 0 {
 				pa.record("rig "+rigName, err)

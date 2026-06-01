@@ -8,7 +8,7 @@ permissions:
 
 env:
   DOLT_VERSION: "2.0.7"
-  BD_VERSION: "v1.0.4"
+  BD_VERSION: "v1.0.5"
   ANTHROPIC_BASE_URL: https://ollama.com
   ANTHROPIC_API_KEY: ""
   ANTHROPIC_AUTH_TOKEN: ${{ secrets.OLLAMA_API_KEY }}

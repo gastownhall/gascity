@@ -49,6 +49,9 @@ func TestHandleOrderList(t *testing.T) {
 			Trigger:     "cooldown",
 			Interval:    "5m",
 			Enabled:     &enabled,
+			Env: map[string]string{
+				"GC_JSONL_MIN_PREV_FOR_SPIKE": "250",
+			},
 		},
 		{
 			Name:    "deploy",
@@ -94,6 +97,9 @@ func TestHandleOrderList(t *testing.T) {
 	if !a0.Enabled {
 		t.Error("expected enabled=true")
 	}
+	if a0.Env["GC_JSONL_MIN_PREV_FOR_SPIKE"] != "250" {
+		t.Fatalf("env = %+v, want GC_JSONL_MIN_PREV_FOR_SPIKE=250", a0.Env)
+	}
 
 	a1 := resp.Orders[1]
 	if a1.Name != "deploy" {
@@ -119,6 +125,9 @@ func TestHandleOrderGet(t *testing.T) {
 			Exec:        "dolt status",
 			Trigger:     "cooldown",
 			Interval:    "5m",
+			Env: map[string]string{
+				"GC_JSONL_MIN_PREV_FOR_SPIKE": "250",
+			},
 		},
 	}
 	h := newTestCityHandler(t, fs)
@@ -140,6 +149,9 @@ func TestHandleOrderGet(t *testing.T) {
 	}
 	if resp.Type != "exec" {
 		t.Errorf("type = %q, want %q", resp.Type, "exec")
+	}
+	if resp.Env["GC_JSONL_MIN_PREV_FOR_SPIKE"] != "250" {
+		t.Fatalf("env = %+v, want GC_JSONL_MIN_PREV_FOR_SPIKE=250", resp.Env)
 	}
 }
 

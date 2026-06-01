@@ -382,6 +382,13 @@ export type BeadUpdateBody = {
     type?: string;
 };
 
+export type BeadsDiagnostic = {
+    beads_store: string;
+    native_store_eligible: boolean;
+    preflight_gate?: string;
+    preflight_reason?: string;
+};
+
 /**
  * Lifecycle state of a session binding.
  */
@@ -1841,6 +1848,9 @@ export type OrderResponse = {
     check?: string;
     description?: string;
     enabled: boolean;
+    env?: {
+        [key: string]: string;
+    };
     exec?: string;
     formula?: string;
     /**
@@ -2916,6 +2926,10 @@ export type StatusBody = {
      */
     agents: StatusAgentCounts;
     /**
+     * Bead store selection diagnostic. Omitted when unavailable.
+     */
+    beads?: BeadsDiagnostic;
+    /**
      * Mail counts.
      */
     mail: StatusMailCounts;
@@ -3262,6 +3276,8 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeBeadClosed) | ({
     type: 'bead.created';
 } & TypedEventStreamEnvelopeBeadCreated) | ({
+    type: 'bead.deleted';
+} & TypedEventStreamEnvelopeBeadDeleted) | ({
     type: 'bead.updated';
 } & TypedEventStreamEnvelopeBeadUpdated) | ({
     type: 'city.created';
@@ -3398,6 +3414,20 @@ export type TypedEventStreamEnvelopeBeadCreated = {
     subject?: string;
     ts: string;
     type: 'bead.created';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedEventStreamEnvelope bead.deleted
+ */
+export type TypedEventStreamEnvelopeBeadDeleted = {
+    actor: string;
+    message?: string;
+    payload: BeadEventPayload;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'bead.deleted';
     workflow?: WorkflowEventProjection;
 };
 
@@ -4181,6 +4211,8 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeBeadClosed) | ({
     type: 'bead.created';
 } & TypedTaggedEventStreamEnvelopeBeadCreated) | ({
+    type: 'bead.deleted';
+} & TypedTaggedEventStreamEnvelopeBeadDeleted) | ({
     type: 'bead.updated';
 } & TypedTaggedEventStreamEnvelopeBeadUpdated) | ({
     type: 'city.created';
@@ -4319,6 +4351,21 @@ export type TypedTaggedEventStreamEnvelopeBeadCreated = {
     subject?: string;
     ts: string;
     type: 'bead.created';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope bead.deleted
+ */
+export type TypedTaggedEventStreamEnvelopeBeadDeleted = {
+    actor: string;
+    city: string;
+    message?: string;
+    payload: BeadEventPayload;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'bead.deleted';
     workflow?: WorkflowEventProjection;
 };
 

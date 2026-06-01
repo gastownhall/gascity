@@ -109,7 +109,9 @@ func TestCityStatusJSONIncludesStoreHealthWhenSupervisorAlive(t *testing.T) {
 
 	store := beads.NewMemStore()
 	oldOpen := openCityStoreAtForStatus
-	openCityStoreAtForStatus = func(string) (beads.Store, error) { return store, nil }
+	openCityStoreAtForStatus = func(string) (beads.StoreOpenResult, error) {
+		return beads.StoreOpenResult{Store: store}, nil
+	}
 	t.Cleanup(func() { openCityStoreAtForStatus = oldOpen })
 
 	cfg := &config.City{Workspace: config.Workspace{Name: "bright-lights"}}
@@ -150,7 +152,9 @@ func TestCityStatusTextIncludesStoreHealthBlockWhenSupervisorAlive(t *testing.T)
 
 	store := beads.NewMemStore()
 	oldOpen := openCityStoreAtForStatus
-	openCityStoreAtForStatus = func(string) (beads.Store, error) { return store, nil }
+	openCityStoreAtForStatus = func(string) (beads.StoreOpenResult, error) {
+		return beads.StoreOpenResult{Store: store}, nil
+	}
 	t.Cleanup(func() { openCityStoreAtForStatus = oldOpen })
 
 	cfg := &config.City{Workspace: config.Workspace{Name: "bright-lights"}}

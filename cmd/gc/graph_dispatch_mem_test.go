@@ -143,6 +143,46 @@ func executeMemGraphWorkerBead(t *testing.T, store beads.Store, bead beads.Bead,
 	}
 }
 
+func memGraphReady(t *testing.T, store beads.Store) []beads.Bead {
+	t.Helper()
+
+	all, err := store.List(beads.ListQuery{AllowScan: true, IncludeClosed: true, TierMode: beads.TierBoth})
+	if err != nil {
+		t.Fatalf("List(graph ready): %v", err)
+	}
+	statusByID := make(map[string]string, len(all))
+	for _, bead := range all {
+		statusByID[bead.ID] = bead.Status
+	}
+
+	var ready []beads.Bead
+	for _, bead := range all {
+		if bead.Status != "open" || beads.IsReadyExcludedType(bead.Type) {
+			continue
+		}
+		deps, err := store.DepList(bead.ID, "down")
+		if err != nil {
+			t.Fatalf("DepList(%s, down): %v", bead.ID, err)
+		}
+		blocked := false
+		for _, dep := range deps {
+			switch dep.Type {
+			case "blocks", "waits-for", "conditional-blocks":
+			default:
+				continue
+			}
+			if statusByID[dep.DependsOnID] != "closed" {
+				blocked = true
+				break
+			}
+		}
+		if !blocked {
+			ready = append(ready, bead)
+		}
+	}
+	return ready
+}
+
 func runMemGraphWorkflowToCompletion(t *testing.T, store beads.Store, workflowID, sourceID, workerSession, cityPath, mode string) {
 	t.Helper()
 
@@ -152,10 +192,7 @@ func runMemGraphWorkflowToCompletion(t *testing.T, store beads.Store, workflowID
 			return
 		}
 
-		ready, err := store.Ready()
-		if err != nil {
-			t.Fatalf("Ready(): %v", err)
-		}
+		ready := memGraphReady(t, store)
 
 		progressed := false
 		for _, bead := range ready {
@@ -169,10 +206,7 @@ func runMemGraphWorkflowToCompletion(t *testing.T, store beads.Store, workflowID
 			progressed = progressed || result.Processed
 		}
 
-		ready, err = store.Ready()
-		if err != nil {
-			t.Fatalf("Ready() after control: %v", err)
-		}
+		ready = memGraphReady(t, store)
 		for {
 			bead, ok, err := selectExecutableGraphWorkerBead(ready, workerSession)
 			if err != nil {
@@ -183,10 +217,7 @@ func runMemGraphWorkflowToCompletion(t *testing.T, store beads.Store, workflowID
 			}
 			executeMemGraphWorkerBead(t, store, bead, sourceID, cityPath, mode)
 			progressed = true
-			ready, err = store.Ready()
-			if err != nil {
-				t.Fatalf("Ready() after worker step: %v", err)
-			}
+			ready = memGraphReady(t, store)
 		}
 
 		if progressed {
@@ -357,7 +388,11 @@ func TestGraphWorkflowInMemoryFailureRunsCleanup(t *testing.T) {
 		t.Fatalf("work_dir = %q, want empty after cleanup", got)
 	}
 
-	all, err := store.ListByMetadata(map[string]string{"gc.root_bead_id": workflowID}, 0, beads.IncludeClosed)
+	all, err := store.List(beads.ListQuery{
+		Metadata:      map[string]string{"gc.root_bead_id": workflowID},
+		IncludeClosed: true,
+		TierMode:      beads.TierBoth,
+	})
 	if err != nil {
 		t.Fatalf("ListByMetadata(gc.root_bead_id=%q): %v", workflowID, err)
 	}
@@ -417,7 +452,7 @@ func TestGraphWorkflowInMemoryCreateExecuteWaitFlow(t *testing.T) {
 func TestGraphWorkflowInMemoryRouteUsesControlDispatcherForControlBeads(t *testing.T) {
 	store, _, workflowID := startMemScopedWorkflow(t)
 
-	all, err := store.ListOpen()
+	all, err := store.List(beads.ListQuery{AllowScan: true, TierMode: beads.TierBoth})
 	if err != nil {
 		t.Fatalf("List(): %v", err)
 	}

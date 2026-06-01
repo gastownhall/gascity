@@ -298,6 +298,11 @@ func scanOrderSetSnapshotFS(fs fsys.FS, cityPath string, cfg *config.City, stder
 			logDispatchError(stderr, "%s: order overrides: %v", cmdName, err)
 			return nil
 		},
+		OnValidateError: func(orderName string, err error) error {
+			logDispatchError(stderr, "%s: order %s: %v", cmdName, orderName, err)
+			return nil
+		},
+		ValidateOrder: validateOrderExecEnvOverrides,
 	})
 	if err != nil {
 		return orderSetSnapshot{}, err
@@ -1115,11 +1120,11 @@ func (m *memoryOrderDispatcher) rigSuspendedByName(rigName string) bool {
 // (tr-kds01, where 24h-interval digest wisps accumulated because the
 // pool never picked them up).
 func (m *memoryOrderDispatcher) hasOpenWorkStrict(store beads.Store, scopedName string) (bool, error) {
-	results, err := store.List(beads.ListQuery{
+	results, err := beads.HandlesFor(store).Live.List(beads.ListQuery{
 		Label: "order-run:" + scopedName,
 		Sort:  beads.SortCreatedDesc,
 		// Tracking beads are ephemeral while wisp roots are issue-tier, so
-		// the single-flight gate must union both tiers.
+		// the authoritative single-flight gate must union both tiers.
 		TierMode: beads.TierBoth,
 	})
 	if err != nil {

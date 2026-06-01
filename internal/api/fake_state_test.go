@@ -35,7 +35,8 @@ type fakeState struct {
 	rawCfg        *config.City // optional: raw config for provenance detection
 	sp            *runtime.Fake
 	stores        map[string]beads.Store
-	cityBeadStore beads.Store   // city-level store for session beads
+	cityBeadStore beads.Store // city-level store for session beads
+	cityBeadsDiag *beads.BeadsDiagnostic
 	cityMailProv  mail.Provider // city-level mail provider (all mail is city-scoped)
 	eventProv     events.Provider
 	cityName      string
@@ -100,7 +101,14 @@ func (f *fakeState) StartedAt() time.Time                  { return f.startedAt 
 func (f *fakeState) IsQuarantined(sessionName string) bool { return f.quarantined[sessionName] }
 func (f *fakeState) ClearCrashHistory(sessionName string)  { delete(f.quarantined, sessionName) }
 func (f *fakeState) CityBeadStore() beads.Store            { return f.cityBeadStore }
-func (f *fakeState) Orders() []orders.Order                { return f.autos }
+func (f *fakeState) CityBeadsDiagnostic() *beads.BeadsDiagnostic {
+	if f.cityBeadsDiag == nil {
+		return nil
+	}
+	diag := *f.cityBeadsDiag
+	return &diag
+}
+func (f *fakeState) Orders() []orders.Order { return f.autos }
 func (f *fakeState) OrdersAll() []orders.Order {
 	if f.allOrders != nil {
 		return f.allOrders

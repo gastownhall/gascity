@@ -12,7 +12,7 @@ Beads are the universal work primitive in Gas City. Every trackable thing —
 tasks, messages, sessions, molecules, convoys — is a bead in the store. This
 tutorial peels back the layer and shows you what's underneath.
 
-We'll pick up where [Tutorial 03](./03-sessions.md) left off. You
+We'll pick up where [Tutorial 03](/tutorials/03-sessions) left off. You
 should have `my-city` running with `my-project` rigged, and agents for `mayor`
 and `reviewer` (along with the corresponding prompts):
 
@@ -474,5 +474,5 @@ Gas City — sessions, mail, formulas, convoys — is built on top of them.
 
 ## What's next
 
-- **[Orders](./07-orders.md)** — formulas and scripts on autopilot, triggered
+- **[Orders](/tutorials/07-orders)** — formulas and scripts on autopilot, triggered
   by time, schedule, conditions, or events

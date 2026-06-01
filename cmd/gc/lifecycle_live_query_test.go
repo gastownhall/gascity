@@ -3,7 +3,9 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
+	"sync"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -178,6 +180,87 @@ func TestSessionHasOpenAssignedWorkInStore_UsesLiveOpenOwnership(t *testing.T) {
 	}
 }
 
+type failLiveWispListStore struct {
+	beads.Store
+	mu   sync.Mutex
+	fail bool
+}
+
+func (s *failLiveWispListStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	s.mu.Lock()
+	fail := s.fail
+	s.mu.Unlock()
+	if fail && query.Live && (query.TierMode == beads.TierWisps || query.TierMode == beads.TierBoth) {
+		return nil, errors.New("live wisp list should not be required")
+	}
+	return s.Store.List(query)
+}
+
+func (s *failLiveWispListStore) setFail(fail bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.fail = fail
+}
+
+func TestSessionHasOpenAssignedWorkInStore_UsesCachedWispOwnership(t *testing.T) {
+	t.Parallel()
+
+	backing := &failLiveWispListStore{Store: beads.NewMemStore()}
+	if _, err := backing.Create(beads.Bead{
+		Title:     "wisp work",
+		Type:      "task",
+		Status:    "in_progress",
+		Assignee:  "sess-1",
+		Ephemeral: true,
+	}); err != nil {
+		t.Fatalf("Create(wisp): %v", err)
+	}
+
+	cache := beads.NewCachingStoreForTest(backing, nil)
+	if err := cache.PrimeActive(); err != nil {
+		t.Fatalf("PrimeActive: %v", err)
+	}
+	backing.setFail(true)
+
+	session := beads.Bead{ID: "sess-1"}
+	hasAssignedWork, err := sessionHasOpenAssignedWorkInStore(cache, session)
+	if err != nil {
+		t.Fatalf("sessionHasOpenAssignedWorkInStore: %v", err)
+	}
+	if !hasAssignedWork {
+		t.Fatal("sessionHasOpenAssignedWorkInStore() = false, want cached wisp ownership to count")
+	}
+}
+
+func TestSessionHasOpenAssignedWorkInStore_FallsBackToLiveForCachedWispMiss(t *testing.T) {
+	t.Parallel()
+
+	backing := beads.NewMemStore()
+	cache := beads.NewCachingStoreForTest(backing, nil)
+	if err := cache.PrimeActive(); err != nil {
+		t.Fatalf("PrimeActive: %v", err)
+	}
+	wisp, err := backing.Create(beads.Bead{
+		Title:     "new wisp work",
+		Type:      "task",
+		Status:    "in_progress",
+		Assignee:  "sess-1",
+		Ephemeral: true,
+	})
+	if err != nil {
+		t.Fatalf("Create(wisp): %v", err)
+	}
+
+	session := beads.Bead{ID: "sess-1"}
+	hasAssignedWork, err := sessionHasOpenAssignedWorkInStore(cache, session)
+	if err != nil {
+		t.Fatalf("sessionHasOpenAssignedWorkInStore: %v", err)
+	}
+	if !hasAssignedWork {
+		t.Fatalf("sessionHasOpenAssignedWorkInStore() = false, want live wisp %s after cached miss", wisp.ID)
+	}
+}
+
 func TestUnclaimWorkAssignedToRetiredSessionBead_UsesLiveOpenOwnership(t *testing.T) {
 	t.Parallel()
 
@@ -216,5 +299,75 @@ func TestUnclaimWorkAssignedToRetiredSessionBead_UsesLiveOpenOwnership(t *testin
 	}
 	if got.Assignee != reassigned {
 		t.Fatalf("Assignee = %q, want %q; stale open ownership should not be cleared", got.Assignee, reassigned)
+	}
+}
+
+func TestUnclaimWorkAssignedToRetiredSessionBead_IncludesEphemeralWork(t *testing.T) {
+	t.Parallel()
+
+	store := beads.NewMemStore()
+	work, err := store.Create(beads.Bead{
+		Title:     "wisp work",
+		Type:      "task",
+		Status:    "in_progress",
+		Assignee:  "retired-session",
+		Ephemeral: true,
+	})
+	if err != nil {
+		t.Fatalf("Create(work): %v", err)
+	}
+
+	unclaimWorkAssignedToRetiredSessionBead(
+		store,
+		nil,
+		beads.Bead{ID: "retired-session"},
+		"worker",
+		io.Discard,
+	)
+
+	got, err := store.Get(work.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", work.ID, err)
+	}
+	if got.Status != "open" {
+		t.Fatalf("Status = %q, want open", got.Status)
+	}
+	if got.Assignee != "" {
+		t.Fatalf("Assignee = %q, want empty", got.Assignee)
+	}
+	if got.Metadata["gc.routed_to"] != "worker" {
+		t.Fatalf("gc.routed_to = %q, want worker", got.Metadata["gc.routed_to"])
+	}
+}
+
+func TestReassignWorkAssignedToRetiredSessionBead_IncludesEphemeralWork(t *testing.T) {
+	t.Parallel()
+
+	store := beads.NewMemStore()
+	work, err := store.Create(beads.Bead{
+		Title:     "wisp work",
+		Type:      "task",
+		Status:    "in_progress",
+		Assignee:  "retired-session",
+		Ephemeral: true,
+	})
+	if err != nil {
+		t.Fatalf("Create(work): %v", err)
+	}
+
+	reassignWorkAssignedToRetiredSessionBead(
+		store,
+		nil,
+		beads.Bead{ID: "retired-session"},
+		"replacement-session",
+		io.Discard,
+	)
+
+	got, err := store.Get(work.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", work.ID, err)
+	}
+	if got.Assignee != "replacement-session" {
+		t.Fatalf("Assignee = %q, want replacement-session", got.Assignee)
 	}
 }

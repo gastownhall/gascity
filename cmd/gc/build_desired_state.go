@@ -465,6 +465,14 @@ func buildDesiredStateWithSessionBeads(
 		} else {
 			fmt.Fprintf(stderr, "assignedWorkBeads: 0 beads (rigStores=%d)\n", len(rigStores)) //nolint:errcheck
 		}
+		// Durably record which session is executing each in-progress work
+		// bead. The Assignee link is transient (cleared on close), so without
+		// this a completed run carries no session/worktree reference. See
+		// stampRunSessionIdentity. Unlike drain decisions, this is not gated on
+		// storePartial: stamping the beads that WERE collected is always
+		// correct, and any bead missed by a partial query simply gets stamped
+		// on a later tick.
+		stampRunSessionIdentity(assignedWorkBeads, assignedWorkStores, sessionBeads, stderr)
 		scaleCheckCounts, poolScaleCheckPartialTemplates = evaluatePendingPoolsMap(cfg, pendingPools, stderr, trace)
 		if len(defaultScaleTargets) > 0 {
 			defaultCounts, partialTemplates, errs := defaultScaleCheckCounts(defaultScaleTargets)
@@ -773,7 +781,7 @@ func collectAssignedWorkBeadsWithStores(
 			// unassigned pool work that needs to be reopened. This pass runs
 			// across every store before any ready handoff probes, so already
 			// active work never waits behind unrelated ready scans.
-			if inProgress, err := listForControllerDemand(source.store, beads.ListQuery{Status: "in_progress"}); err == nil {
+			if inProgress, err := listBothTiersForControllerDemand(source.store, beads.ListQuery{Status: "in_progress"}); err == nil {
 				appendInProgressWorkUnique(cfg, &result, &resultStores, &resultStoreRefs, inProgress, seen, source.store, source.ref)
 			} else {
 				errs = append(errs, fmt.Errorf("List(in_progress): %w", err))
@@ -1073,6 +1081,7 @@ func defaultScaleCheckCounts(targets []defaultScaleCheckTarget) (map[string]int,
 			Status:   "open",
 			Metadata: poolDemandMetadataPair(),
 			Live:     true,
+			TierMode: beads.TierBoth,
 		})
 		if demandErr != nil {
 			errs = append(errs, fmt.Errorf("default scale_check %s templates=%s: List(%s): %w", key, strings.Join(sortedStringSet(group.templates), ","), poolDemandMetadataKey, demandErr))
@@ -1306,59 +1315,31 @@ func sortedStringSet(values map[string]struct{}) []string {
 	return out
 }
 
-func listForControllerDemand(store beads.Store, query beads.ListQuery) ([]beads.Bead, error) {
-	if _, ok := store.(interface {
-		CachedList(beads.ListQuery) ([]beads.Bead, bool)
-	}); ok {
-		cacheQuery := query
-		cacheQuery.Live = false
-		return store.List(cacheQuery)
+func listBothTiersForControllerDemand(store beads.Store, query beads.ListQuery) ([]beads.Bead, error) {
+	handles := beads.HandlesFor(store)
+	rows, err := handles.Cached.List(query)
+	if errors.Is(err, beads.ErrCacheUnavailable) {
+		return handles.Live.List(query)
 	}
-	liveQuery := query
-	liveQuery.Live = true
-	return store.List(liveQuery)
+	return rows, err
 }
 
 func readyForControllerDemand(store beads.Store) ([]beads.Bead, error) {
-	// Controller demand reads are intentionally cache-tolerant, not
-	// authoritative lifecycle gates; CachedReady falls back whenever the cache
-	// has dirty or unknown dependency coverage.
-	if cached, ok := store.(interface {
-		CachedReady() ([]beads.Bead, bool)
-	}); ok {
-		if ready, ok := cached.CachedReady(); ok {
-			return ready, nil
-		}
+	handles := beads.HandlesFor(store)
+	rows, err := handles.Cached.Ready()
+	if errors.Is(err, beads.ErrCacheUnavailable) {
+		return handles.Live.Ready()
 	}
-	return beads.ReadyLive(store)
+	return rows, err
 }
 
 func readyForControllerDemandQuery(store beads.Store, query beads.ReadyQuery) ([]beads.Bead, error) {
-	if cached, ok := store.(interface {
-		CachedReady() ([]beads.Bead, bool)
-	}); ok {
-		if ready, ok := cached.CachedReady(); ok {
-			return filterReadyForControllerDemand(ready, query), nil
-		}
+	handles := beads.HandlesFor(store)
+	rows, err := handles.Cached.Ready(query)
+	if errors.Is(err, beads.ErrCacheUnavailable) {
+		return handles.Live.Ready(query)
 	}
-	return store.Ready(query)
-}
-
-func filterReadyForControllerDemand(ready []beads.Bead, query beads.ReadyQuery) []beads.Bead {
-	if query == (beads.ReadyQuery{}) {
-		return ready
-	}
-	result := make([]beads.Bead, 0, len(ready))
-	for _, bead := range ready {
-		if query.Assignee != "" && bead.Assignee != query.Assignee {
-			continue
-		}
-		result = append(result, bead)
-		if query.Limit > 0 && len(result) >= query.Limit {
-			break
-		}
-	}
-	return result
+	return rows, err
 }
 
 // mergeNamedSessionDemand ensures that named-session assignee demand is
@@ -2869,6 +2850,114 @@ func sessionBeadHasAssignedWork(workBeads []beads.Bead, sessionBead beads.Bead) 
 		}
 	}
 	return false
+}
+
+// sessionAssigneeMatch is an entry in the assignee-identity index: the session
+// a work bead's Assignee resolves to, or ambiguous=true when more than one open
+// session claims the same identity (a transient duplicate-alias state). An
+// ambiguous identity is skipped, never guessed — the stamp is best-effort and
+// must not attach the wrong session, mirroring the canonical resolver's
+// fail-on-conflict posture (internal/session.ResolveSession) in a non-fatal
+// form.
+type sessionAssigneeMatch struct {
+	bead      beads.Bead
+	ambiguous bool
+}
+
+// buildSessionAssigneeIndex maps every assignment identity an open session can
+// be claimed under to that session, computed once per reconcile. Open() copies
+// the session slice, so resolving per work bead would otherwise cost
+// O(workBeads × openSessions). Identities come from sessionBeadAssigneeIdentities
+// — bead ID, session_name, configured named identity, current alias, AND prior
+// aliases (alias_history) — so a bead assigned under a since-rotated pool alias
+// still resolves. An identity claimed by two different sessions is marked
+// ambiguous.
+func buildSessionAssigneeIndex(sessionBeads *sessionBeadSnapshot) map[string]sessionAssigneeMatch {
+	index := make(map[string]sessionAssigneeMatch)
+	if sessionBeads == nil {
+		return index
+	}
+	for _, sb := range sessionBeads.Open() {
+		for _, identity := range sessionBeadAssigneeIdentities(sb) {
+			if existing, ok := index[identity]; ok {
+				if !existing.ambiguous && existing.bead.ID != sb.ID {
+					index[identity] = sessionAssigneeMatch{ambiguous: true}
+				}
+				continue
+			}
+			index[identity] = sessionAssigneeMatch{bead: sb}
+		}
+	}
+	return index
+}
+
+// sessionBeadIdentifier returns the most resolvable name for a session: its
+// session_name when set (pool workers), else its alias or configured named
+// identity (named sessions carry an empty session_name and identify by alias —
+// e.g. "mayor"). All three appear in the supervisor session-list index that
+// consumers match against, so this is the value to stamp as gc.session_name.
+func sessionBeadIdentifier(sb beads.Bead) string {
+	for _, key := range []string{"session_name", "alias", "configured_named_identity"} {
+		if v := strings.TrimSpace(sb.Metadata[key]); v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+// stampRunSessionIdentity durably records, on each in-progress assigned work
+// bead, the session_name and work_dir of the session executing it.
+//
+// The session↔bead link (Assignee) is transient: it is cleared when the bead
+// closes, so a consumer that reads a completed run (e.g. the dashboard's
+// session-drill-in and per-run diff panels) has no way to resolve which
+// session ran it or in which worktree. Stamping gc.session_name + gc.work_dir
+// at execution time makes that link durable — the existing dashboard resolvers
+// then attach the session and derive the worktree with no consumer changes.
+//
+// Idempotent by design: it writes only when the resolved value differs from
+// what is already on the bead, so steady-state reconciles perform no writes;
+// only a newly claimed (or reassigned) bead triggers a single write. A write
+// failure is logged and skipped — stamping is best-effort observability and
+// must never block reconciliation.
+func stampRunSessionIdentity(workBeads []beads.Bead, workStores []beads.Store, sessionBeads *sessionBeadSnapshot, stderr io.Writer) {
+	if sessionBeads == nil || len(workBeads) != len(workStores) {
+		return
+	}
+	sessionByAssignee := buildSessionAssigneeIndex(sessionBeads)
+	for i, wb := range workBeads {
+		if wb.Status != "in_progress" {
+			continue
+		}
+		store := workStores[i]
+		if store == nil {
+			continue
+		}
+		assignee := strings.TrimSpace(wb.Assignee)
+		if assignee == "" {
+			continue
+		}
+		match, ok := sessionByAssignee[assignee]
+		if !ok || match.ambiguous {
+			continue
+		}
+		sb := match.bead
+		sessionName := sessionBeadIdentifier(sb)
+		workDir := strings.TrimSpace(sb.Metadata["work_dir"])
+		patch := map[string]string{}
+		if sessionName != "" && strings.TrimSpace(wb.Metadata["gc.session_name"]) != sessionName {
+			patch["gc.session_name"] = sessionName
+		}
+		if workDir != "" && strings.TrimSpace(wb.Metadata["gc.work_dir"]) != workDir {
+			patch["gc.work_dir"] = workDir
+		}
+		if len(patch) == 0 {
+			continue
+		}
+		if err := store.SetMetadataBatch(wb.ID, patch); err != nil && stderr != nil {
+			fmt.Fprintf(stderr, "stampRunSessionIdentity: %s: %v\n", wb.ID, err) //nolint:errcheck
+		}
+	}
 }
 
 func selectOrCreateDependencyPoolSessionBead(

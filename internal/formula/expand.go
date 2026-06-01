@@ -360,7 +360,7 @@ func mergeConditionVars(base map[string]string, overrides map[string]string) map
 		return nil
 	}
 
-	merged := make(map[string]string, len(base)+len(overrides))
+	merged := make(map[string]string)
 	for k, v := range base {
 		merged[k] = v
 	}

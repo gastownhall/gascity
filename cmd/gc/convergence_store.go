@@ -174,7 +174,7 @@ func (a *convergenceStoreAdapter) pourWisp(parentID, formula, idempotencyKey str
 	}
 
 	// Build vars map with evaluate_prompt if set.
-	cookVars := make(map[string]string, len(vars)+1)
+	cookVars := make(map[string]string)
 	for k, v := range vars {
 		cookVars[k] = v
 	}

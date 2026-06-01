@@ -495,7 +495,7 @@ OptionChoice is one allowed value for a "select" option.
 
 ## OrderOverride
 
-OrderOverride modifies a scanned order's scheduling fields.
+OrderOverride modifies a scanned order's scheduling fields and exec env.
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
@@ -510,6 +510,7 @@ OrderOverride modifies a scanned order's scheduling fields.
 | `on` | string |  |  | On overrides the event trigger event type. |
 | `pool` | string |  |  | Pool overrides the target session config. |
 | `timeout` | string |  |  | Timeout overrides the per-order timeout. Go duration string. |
+| `env` | map[string]string |  |  | Env adds or overrides environment variables exported into an exec order's child process. |
 
 ## OrdersConfig
 

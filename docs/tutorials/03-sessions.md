@@ -4,7 +4,7 @@ sidebarTitle: 03 - Sessions
 description: See agent output, interact directly with agents, and learn about polecats and crew.
 ---
 
-In [Tutorial 02](./02-agents.md), you worked with agents to produce work,
+In [Tutorial 02](/tutorials/02-agents), you worked with agents to produce work,
 which created sessions with agents that we haven't seen yet. In this tutorial,
 you'll see and talk with agents via sessions as well as see how agents talk to
 each other. You'll also learn the difference between "polecats" (agents spun up
@@ -279,8 +279,8 @@ You've seen how sessions are created on demand for slung work, how named
 sessions keep crew agents alive, and how to peek, attach, nudge, and read logs.
 From here:
 
-- **[Agent-to-Agent Communication](./04-communication.md)** — how agents
+- **[Agent-to-Agent Communication](/tutorials/04-communication)** — how agents
   coordinate through mail, slung work, and hooks
-- **[Formulas](./05-formulas.md)** — multi-step workflow templates with
+- **[Formulas](/tutorials/05-formulas)** — multi-step workflow templates with
   dependencies and variables
-- **[Beads](./06-beads.md)** — the work tracking system underneath it all
+- **[Beads](/tutorials/06-beads)** — the work tracking system underneath it all

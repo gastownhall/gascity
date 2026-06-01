@@ -260,11 +260,24 @@ func (s *Server) buildStatusBody() StatusBody {
 		Partial:             len(partialErrors) > 0,
 		PartialErrors:       partialErrors,
 		StoreHealth:         s.cachedStoreHealth(time.Now()),
+		Beads:               s.cityBeadsDiagnostic(),
 		AgentDetails:        agentDetails,
 		RigDetails:          rigDetails,
 		NamedSessionDetails: namedSessionDetails,
 		SessionCountsDetail: sessionCounts,
 	}
+}
+
+type cityBeadsDiagnosticProvider interface {
+	CityBeadsDiagnostic() *beads.BeadsDiagnostic
+}
+
+func (s *Server) cityBeadsDiagnostic() *beads.BeadsDiagnostic {
+	provider, ok := s.state.(cityBeadsDiagnosticProvider)
+	if !ok {
+		return nil
+	}
+	return provider.CityBeadsDiagnostic()
 }
 
 // poolScaleLabel renders the "scaled (min=N, max=M)" banner the CLI emits

@@ -155,13 +155,19 @@ Dispatch has two read sides that must stay symmetric:
 Both forms answer the same question — "is there ready, unassigned,
 non-epic work routed to this pool-demand target?" — and must therefore
 observe the bead store through the same filter. They share target
-resolution and the predicate: `bdReadyPoolDemandShell(target)` returns
-`bd ready --metadata-field gc.routed_to=<target> --unassigned
---exclude-type=epic --json`. The count form pipes through `jq 'length'`;
-the work-query form appends
-`--limit=1` and prints the first match. Targets resolve to
-`Agent.PoolName` when set and `Agent.QualifiedName()` otherwise, so
-pool instances and pool templates land on the same routed queue.
+resolution and the predicate: `bdReadyPoolDemandShell(limitFlag)`
+returns `bd ready --include-ephemeral --metadata-field
+"$key=$target" --unassigned --exclude-type=epic --json <limitFlag>`.
+The caller provides `key` and `target` as shell variables. The work-query
+form checks `gc.run_target` first, then the compatibility fallback
+`gc.routed_to`; each tier appends `--sort oldest --limit=1`.
+That is an intentional routed-queue policy: unassigned routed pool work is
+FIFO before priority, so newer high-priority work does not jump ahead of
+older ready work already queued for the same target. The count form uses
+the same key precedence and predicate, appends `--limit 0`, and pipes
+through `jq 'length'`. Targets resolve to `Agent.PoolName` when set and
+`Agent.QualifiedName()` otherwise, so pool instances and pool templates
+land on the same routed queue.
 
 Supported handoff forms are intentionally distinct. Generic pool demand is
 ready work with `assignee=""` and `gc.routed_to=<target>`; assigning the
@@ -239,15 +245,18 @@ be single-helper changes; tests `TestPoolDemandPredicateSharedWithWorkQuery`
 11. **scale_check ↔ work_query correspondence.** The reconciler's
     pool-demand-detection path (`Agent.EffectivePoolDemandQuery`, count
     form) and the worker's claim path (`Agent.EffectiveWorkQuery`, Tier
-    3 first-row form) MUST derive their `bd ready --metadata-field
-    gc.routed_to=<target> --unassigned --exclude-type=epic --json`
-    predicate from the same target-resolution helper and
-    `bdReadyPoolDemandShell` helper in `internal/config/config.go`. Any
-    pool-demand predicate change to one (added filter, modified target
-    resolution, new state) MUST be reflected in the other. Diverging the two
-    re-introduces the protocol-mismatch class — the reconciler spawning
-    sessions for work the worker can't claim, or the worker idle while
-    new demand sits unspawned. The legacy `workflow-control` fallback is
+    3 first-row form) MUST derive their `bd ready --include-ephemeral
+    --metadata-field <key>=<target> --unassigned --exclude-type=epic
+    --json` predicate from the same target-resolution helper and
+    `bdReadyPoolDemandShell` helper in `internal/config/config.go`. The
+    worker and reconciler must use the same `gc.run_target` then
+    `gc.routed_to` key precedence; only the worker's first-row form adds
+    native `bd ready --sort oldest --limit=1` selection. Any pool-demand
+    predicate change to one (added filter, modified target resolution, new
+    state) MUST be reflected in the other. Diverging the two re-introduces
+    the protocol-mismatch class — the reconciler
+    spawning sessions for work the worker can't claim, or the worker idle
+    while new demand sits unspawned. The legacy `workflow-control` fallback is
     worker-only for pre-rename `control-dispatcher` graphs and intentionally
     lives outside the shared primary pool-demand predicate. Enforced by
     `TestPoolDemandPredicateSharedWithWorkQuery` and
@@ -321,7 +330,9 @@ Pool agents with default queries:
 name = "coder"
 pool = { min = 1, max = 3, check = "echo 2" }
 # Default sling_query: bd update {} --set-metadata gc.routed_to=coder
-# Default work_query:  bd ready --metadata-field gc.routed_to=coder --unassigned --limit=1
+# Default work_query: bd ready --include-ephemeral --metadata-field gc.run_target=coder
+#   --unassigned --exclude-type=epic --json --sort oldest --limit=1,
+#   then gc.routed_to fallback
 ```
 
 System formulas are embedded in the `gc` binary and materialized to

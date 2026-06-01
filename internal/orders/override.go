@@ -13,7 +13,7 @@ import (
 // equal to "*" are rejected by config validation.
 const RigWildcard = "*"
 
-// Override modifies a scanned order's scheduling fields.
+// Override modifies a scanned order's scheduling fields and exec env.
 // Uses pointer fields to distinguish "not set" from "set to zero value."
 // Mirrors config.OrderOverride but lives in the orders package
 // to avoid a circular dependency.
@@ -28,6 +28,7 @@ type Override struct {
 	On       *string
 	Pool     *string
 	Timeout  *string
+	Env      map[string]string
 }
 
 // ApplyOverrides applies each override to the matching order in aa.
@@ -149,5 +150,13 @@ func applyOverride(a *Order, ov *Override) {
 	}
 	if ov.Timeout != nil {
 		a.Timeout = *ov.Timeout
+	}
+	if len(ov.Env) > 0 {
+		if a.Env == nil {
+			a.Env = make(map[string]string, len(ov.Env))
+		}
+		for k, v := range ov.Env {
+			a.Env[k] = v
+		}
 	}
 }

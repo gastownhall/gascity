@@ -432,8 +432,9 @@ func liveWorkAssignmentStillReleasable(store beads.Store, id, assignee string) b
 		return false
 	}
 	work, err := store.List(beads.ListQuery{
-		Status: "in_progress",
-		Live:   true,
+		Status:   "in_progress",
+		Live:     true,
+		TierMode: beads.TierBoth,
 	})
 	if err != nil {
 		log.Printf("releaseOrphanedPoolAssignments: live work validation failed for %q: %v", id, err)

@@ -100,8 +100,11 @@ func ExecCommandRunnerWithEnv(env map[string]string) CommandRunner {
 		cmd.Cancel = func() error {
 			return killCommandTree(cmd)
 		}
+		baseEnv := processEnvSnapshotExcludingNativeDoltOpen()
 		if len(env) > 0 {
-			cmd.Env = mergeEnv(os.Environ(), env)
+			cmd.Env = mergeEnv(baseEnv, env)
+		} else {
+			cmd.Env = baseEnv
 		}
 		var stderr bytes.Buffer
 		cmd.Stderr = &stderr
@@ -237,6 +240,10 @@ func (s *BdStore) IDPrefix() string {
 	return s.idPrefix
 }
 
+func (s *BdStore) listIncludesCompleteDependencies() bool {
+	return false
+}
+
 // Init initializes a beads database via bd init --server. This is an admin
 // operation on BdStore directly, not part of the Store interface (MemStore/
 // FileStore don't need it). If host is non-empty, --server-host (and
@@ -281,7 +288,7 @@ func (s *BdStore) Purge(beadsDir string, dryRun bool) (PurgeResult, error) {
 	}
 
 	dir := filepath.Dir(beadsDir)
-	env := envWithout(os.Environ(), "BEADS_DIR")
+	env := envWithout(processEnvSnapshotExcludingNativeDoltOpen(), "BEADS_DIR")
 	env = append(env, "BEADS_DIR="+beadsDir)
 
 	var out []byte
@@ -467,10 +474,11 @@ type bdIssueDep struct {
 }
 
 // PartialResultError indicates that a list-style bd command returned at least
-// one usable entry but also included entries that failed to parse. The
-// successful entries are still returned alongside this error; callers that can
-// surface partial data may proceed with those rows, while callers that require
-// a complete picture should treat this as a hard failure.
+// one usable entry but could not produce a complete result because some entries
+// failed to parse or one underlying tier failed. The successful entries are
+// still returned alongside this error; callers that can surface partial data
+// may proceed with those rows, while callers that require a complete picture
+// should treat this as a hard failure.
 type PartialResultError struct {
 	// Op identifies the bd subcommand that produced the partial result
 	// (e.g. "bd list", "bd ready").
@@ -1626,8 +1634,10 @@ func isBareBdQueryValue(value string) bool {
 //
 // Partial failure: if exactly one tier errors, the other tier's rows are
 // returned along with a non-nil error so callers can decide whether to
-// degrade or fail. Silently swallowing the failure would let dispatch paths
-// see "no in-flight work" and double-fire.
+// degrade or fail. When survivor rows exist, the error is a PartialResultError
+// so controller demand paths can retain those rows while still reporting the
+// incomplete read. Silently swallowing the failure would let dispatch paths see
+// "no in-flight work" and double-fire.
 func (s *BdStore) listBothTiers(query ListQuery) ([]Bead, error) {
 	issuesQ := query
 	issuesQ.TierMode = TierIssues
@@ -1666,8 +1676,14 @@ func (s *BdStore) listBothTiers(query ListQuery) ([]Bead, error) {
 	// result for a complete one.
 	switch {
 	case issuesErr != nil:
+		if len(merged) > 0 {
+			return merged, &PartialResultError{Op: "bd list both tiers", Err: fmt.Errorf("issues tier: %w", issuesErr)}
+		}
 		return merged, fmt.Errorf("bd list both tiers: issues tier: %w", issuesErr)
 	case wispsErr != nil:
+		if len(merged) > 0 {
+			return merged, &PartialResultError{Op: "bd list both tiers", Err: fmt.Errorf("wisps tier: %w", wispsErr)}
+		}
 		return merged, fmt.Errorf("bd list both tiers: wisps tier: %w", wispsErr)
 	}
 	return merged, nil

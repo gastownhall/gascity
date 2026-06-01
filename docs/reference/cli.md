@@ -1668,6 +1668,7 @@ gc init
 | `--preserve-existing` | bool |  | keep any pre-authored pack.toml, city.toml, or agent prompt files instead of overwriting them |
 | `--provider` | string |  | built-in workspace provider to use for the default mayor config |
 | `--skip-provider-readiness` | bool |  | skip provider login/readiness checks during init and continue startup |
+| `--yes` | bool |  | bypass the cross-city supervisor cycle confirmation prompt (warning is still printed for the audit trail) |
 
 ## gc lint
 
@@ -2439,6 +2440,7 @@ gc register [path] [flags]
 |------|------|---------|-------------|
 | `--json` | bool |  | emit JSONL summary |
 | `--name` | string |  | machine-local alias for this city registration |
+| `--yes` | bool |  | bypass the cross-city supervisor cycle confirmation prompt (warning is still printed for the audit trail) |
 
 ## gc reload
 
@@ -2748,9 +2750,10 @@ gc runtime drain <name> [flags]
 
 Acknowledge a drain signal — tell the controller to stop this session.
 
-Sets GC_DRAIN_ACK metadata on the session. The controller will stop
-the session on its next reconcile tick. Call this after the session has
-finished its current work in response to a drain signal.
+Sets GC_DRAIN_ACK metadata on the session, then pokes the controller
+socket so the reconciler stops the session immediately rather than on
+its next patrol tick. Call this after the session has finished its
+current work in response to a drain signal.
 
 ```
 gc runtime drain-ack [name] [flags]
@@ -3410,6 +3413,7 @@ gc status [path] [flags]
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
+| `--format` | string |  | Output format: text or json |
 | `--json` | bool |  | Output in JSON format |
 
 ## gc stop

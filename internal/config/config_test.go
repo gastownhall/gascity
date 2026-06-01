@@ -1481,11 +1481,14 @@ func TestEffectiveWorkQueryDefault(t *testing.T) {
 	got := a.EffectiveWorkQuery()
 	// Tiered query: check that tier 3 (run_target preferred, routed_to fallback)
 	// and tier 1-2 (assignee resolution) are present.
-	if !strings.Contains(got, "bd ready --metadata-field gc.run_target=mayor --unassigned --exclude-type=epic --json --limit=1") {
-		t.Errorf("EffectiveWorkQuery() missing tier 3 run_target: %q", got)
+	if !strings.Contains(got, "for key in gc.run_target gc.routed_to") {
+		t.Errorf("EffectiveWorkQuery() missing tier 3 routing-key precedence: %q", got)
 	}
-	if !strings.Contains(got, "bd ready --metadata-field gc.routed_to=mayor --unassigned --exclude-type=epic --json --limit=1") {
-		t.Errorf("EffectiveWorkQuery() missing tier 3 routed_to fallback: %q", got)
+	if !strings.Contains(got, `bd ready --include-ephemeral --metadata-field "$key=$target" --unassigned --exclude-type=epic --json --sort oldest --limit=1`) {
+		t.Errorf("EffectiveWorkQuery() missing tier 3 pool-demand probe: %q", got)
+	}
+	if !strings.Contains(got, "-- mayor") {
+		t.Errorf("EffectiveWorkQuery() missing tier 3 target argument: %q", got)
 	}
 	if !strings.Contains(got, `"$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"`) {
 		t.Errorf("EffectiveWorkQuery() missing multi-identifier resolution: %q", got)
@@ -1504,16 +1507,16 @@ func TestEffectiveWorkQueryCustom(t *testing.T) {
 func TestEffectiveWorkQueryWithDir(t *testing.T) {
 	a := Agent{Name: "polecat", Dir: "hello-world"}
 	got := a.EffectiveWorkQuery()
-	if !strings.Contains(got, "bd ready --metadata-field gc.routed_to=hello-world/polecat --unassigned --exclude-type=epic --json --limit=1") {
-		t.Errorf("EffectiveWorkQuery() missing tier 3 routed_to: %q", got)
+	if !strings.Contains(got, "-- hello-world/polecat") {
+		t.Errorf("EffectiveWorkQuery() missing tier 3 target argument: %q", got)
 	}
 }
 
 func TestEffectiveWorkQueryPoolDefault(t *testing.T) {
 	a := Agent{Name: "polecat", Dir: "hello-world", MinActiveSessions: ptrInt(1), MaxActiveSessions: ptrInt(3)}
 	got := a.EffectiveWorkQuery()
-	if !strings.Contains(got, "bd ready --metadata-field gc.routed_to=hello-world/polecat --unassigned --exclude-type=epic --json --limit=1") {
-		t.Errorf("EffectiveWorkQuery() missing tier 3 routed_to: %q", got)
+	if !strings.Contains(got, "-- hello-world/polecat") {
+		t.Errorf("EffectiveWorkQuery() missing tier 3 target argument: %q", got)
 	}
 	if strings.Contains(got, "--type=molecule") {
 		t.Errorf("EffectiveWorkQuery() should not route molecule containers: %q", got)
@@ -1565,8 +1568,8 @@ func TestEffectiveWorkQueryPoolNameOverride(t *testing.T) {
 		PoolName: "hello-world/dog",
 	}
 	got := a.EffectiveWorkQuery()
-	if !strings.Contains(got, "bd ready --metadata-field gc.routed_to=hello-world/dog --unassigned --exclude-type=epic --json --limit=1") {
-		t.Errorf("EffectiveWorkQuery() missing tier 3 routed_to with pool name: %q", got)
+	if !strings.Contains(got, "-- hello-world/dog") {
+		t.Errorf("EffectiveWorkQuery() missing tier 3 pool target argument: %q", got)
 	}
 	if strings.Contains(got, "--type=molecule") {
 		t.Errorf("EffectiveWorkQuery() should not route molecule containers with pool name: %q", got)
@@ -1576,19 +1579,16 @@ func TestEffectiveWorkQueryPoolNameOverride(t *testing.T) {
 func TestEffectiveWorkQueryPoolNoPoolName(t *testing.T) {
 	a := Agent{Name: "dog", Dir: "hello-world", MinActiveSessions: ptrInt(1), MaxActiveSessions: ptrInt(3)}
 	got := a.EffectiveWorkQuery()
-	if !strings.Contains(got, "bd ready --metadata-field gc.routed_to=hello-world/dog --unassigned --exclude-type=epic --json --limit=1") {
-		t.Errorf("EffectiveWorkQuery() missing tier 3 routed_to: %q", got)
+	if !strings.Contains(got, "-- hello-world/dog") {
+		t.Errorf("EffectiveWorkQuery() missing tier 3 target argument: %q", got)
 	}
 }
 
 func TestEffectiveWorkQueryControlDispatcherIncludesLegacyWorkflowControlRoute(t *testing.T) {
 	a := Agent{Name: ControlDispatcherAgentName, Dir: "gascity"}
 	got := a.EffectiveWorkQuery()
-	if !strings.Contains(got, "gc.routed_to=gascity/control-dispatcher") {
-		t.Fatalf("EffectiveWorkQuery() missing current control-dispatcher route: %q", got)
-	}
-	if !strings.Contains(got, "gc.routed_to=gascity/workflow-control") {
-		t.Fatalf("EffectiveWorkQuery() missing legacy workflow-control route: %q", got)
+	if !strings.Contains(got, "-- gascity/control-dispatcher gascity/workflow-control") {
+		t.Fatalf("EffectiveWorkQuery() missing current and legacy route arguments: %q", got)
 	}
 	if !strings.Contains(got, `workflow-control`) {
 		t.Fatalf("EffectiveWorkQuery() missing legacy assignee alias handling: %q", got)
@@ -1600,20 +1600,29 @@ func TestEffectiveWorkQueryControlDispatcherIncludesLegacyWorkflowControlRoute(t
 
 func TestEffectiveWorkQueryControlDispatcherClaimsLegacyAssignedWork(t *testing.T) {
 	a := Agent{Name: ControlDispatcherAgentName, Dir: "gascity"}
+	got := a.EffectiveWorkQuery()
+	for _, want := range []string{
+		`bd list --include-ephemeral --status in_progress --assignee="$cand"`,
+		`bd ready --include-ephemeral --assignee="$cand"`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("EffectiveWorkQuery() = %q, want ephemeral-aware legacy assigned tier %q", got, want)
+		}
+	}
 	out := runEffectiveWorkQuery(t, a, map[string]string{
 		"GC_SESSION_NAME": "gascity--control-dispatcher",
 		"GC_ALIAS":        "gascity/control-dispatcher",
 	}, `#!/bin/sh
 set -eu
 case "$*" in
-  "list --status in_progress --assignee=gascity--control-dispatcher --exclude-type=epic --json --limit=1"|\
-  "list --status in_progress --assignee=gascity/control-dispatcher --exclude-type=epic --json --limit=1"|\
-  "list --status in_progress --assignee=gascity--workflow-control --exclude-type=epic --json --limit=1"|\
-  "list --status in_progress --assignee=gascity/workflow-control --exclude-type=epic --json --limit=1")
+  "list --include-ephemeral --status in_progress --assignee=gascity--control-dispatcher --exclude-type=epic --json --limit=1"|\
+  "list --include-ephemeral --status in_progress --assignee=gascity/control-dispatcher --exclude-type=epic --json --limit=1"|\
+  "list --include-ephemeral --status in_progress --assignee=gascity--workflow-control --exclude-type=epic --json --limit=1"|\
+  "list --include-ephemeral --status in_progress --assignee=gascity/workflow-control --exclude-type=epic --json --limit=1")
     printf '[]'
     ;;
-  "ready --assignee=gascity--workflow-control --exclude-type=epic --json --limit=1"|\
-  "ready --assignee=gascity/workflow-control --exclude-type=epic --json --limit=1")
+  "ready --include-ephemeral --assignee=gascity--workflow-control --exclude-type=epic --json --limit=1"|\
+  "ready --include-ephemeral --assignee=gascity/workflow-control --exclude-type=epic --json --limit=1")
     printf '[{"id":"ga-legacy-ready"}]'
     ;;
   *)
@@ -1631,10 +1640,10 @@ func TestEffectiveWorkQueryControlDispatcherClaimsLegacyUnassignedRoute(t *testi
 	out := runEffectiveWorkQuery(t, a, nil, `#!/bin/sh
 set -eu
 case "$*" in
-  "ready --metadata-field gc.routed_to=gascity/control-dispatcher --unassigned --exclude-type=epic --json --limit=1")
+  *"ready --include-ephemeral"*"--metadata-field gc.routed_to=gascity/control-dispatcher"*"--unassigned"*"--exclude-type=epic"*"--json"*"--sort oldest"*"--limit=1"*)
     printf '[]'
     ;;
-  "ready --metadata-field gc.routed_to=gascity/workflow-control --unassigned --exclude-type=epic --json --limit=1")
+  *"ready --include-ephemeral"*"--metadata-field gc.routed_to=gascity/workflow-control"*"--unassigned"*"--exclude-type=epic"*"--json"*"--sort oldest"*"--limit=1"*)
     printf '[{"id":"ga-legacy-route"}]'
     ;;
   *)
@@ -1644,6 +1653,87 @@ esac
 `)
 	if got, want := strings.TrimSpace(out), `[{"id":"ga-legacy-route"}]`; got != want {
 		t.Fatalf("legacy routed work query output = %q, want %q", got, want)
+	}
+}
+
+func TestEffectiveWorkQueryRoutedQueueUsesNativeOldestSortAcrossReadyTiers(t *testing.T) {
+	a := Agent{Name: "worker", Dir: "hello-world"}
+	got := a.EffectiveWorkQuery()
+	for _, want := range []string{
+		`bd list --include-ephemeral --status in_progress --assignee="$id"`,
+		`bd ready --include-ephemeral --assignee="$id"`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("EffectiveWorkQuery() = %q, want ephemeral-aware assigned tier %q", got, want)
+		}
+	}
+	out := runEffectiveWorkQuery(t, a, map[string]string{
+		"GC_SESSION_ORIGIN": "ephemeral",
+	}, `#!/bin/sh
+set -eu
+case "$*" in
+  "ready --include-ephemeral --metadata-field gc.run_target=hello-world/worker --unassigned --exclude-type=epic --json --sort oldest --limit=1")
+    printf '[{"id":"older-no-history","priority":2,"created_at":"2026-05-20T06:09:30Z","no_history":true}]'
+    ;;
+  *)
+    printf '[]'
+    ;;
+esac
+`)
+	if !strings.Contains(out, "older-no-history") {
+		t.Fatalf("EffectiveWorkQuery() did not pick oldest routed work: %q", out)
+	}
+	if strings.Contains(out, "newer-durable") {
+		t.Fatalf("EffectiveWorkQuery() returned more than first oldest routed work: %q", out)
+	}
+}
+
+func TestEffectiveWorkQueryRoutedQueueUsesOldestBeforePriority(t *testing.T) {
+	a := Agent{Name: "worker", Dir: "hello-world"}
+	out := runEffectiveWorkQuery(t, a, map[string]string{
+		"GC_SESSION_ORIGIN": "ephemeral",
+	}, `#!/bin/sh
+set -eu
+case "$*" in
+  *"ready --include-ephemeral"*"--metadata-field gc.run_target=hello-world/worker"*"--unassigned"*"--exclude-type=epic"*"--json"*"--sort oldest"*"--limit=1"*)
+    printf '[{"id":"older-p2","priority":2,"created_at":"2026-05-20T06:09:30Z"}]'
+    ;;
+  *)
+    printf '[]'
+    ;;
+esac
+`)
+	if !strings.Contains(out, "older-p2") {
+		t.Fatalf("EffectiveWorkQuery() did not pick oldest routed work across priorities: %q", out)
+	}
+	if strings.Contains(out, "newer-p0") {
+		t.Fatalf("EffectiveWorkQuery() returned newer high-priority routed work before oldest: %q", out)
+	}
+}
+
+func TestEffectiveWorkQueryRoutedFallbackUsesNativeOldestSort(t *testing.T) {
+	a := Agent{Name: "worker", Dir: "hello-world"}
+	out := runEffectiveWorkQuery(t, a, map[string]string{
+		"GC_SESSION_ORIGIN": "ephemeral",
+	}, `#!/bin/sh
+set -eu
+case "$*" in
+  *"ready --include-ephemeral"*"--metadata-field gc.run_target=hello-world/worker"*"--unassigned"*"--exclude-type=epic"*"--json"*"--sort oldest"*"--limit=1"*)
+    printf '[]'
+    ;;
+  *"ready --include-ephemeral"*"--metadata-field gc.routed_to=hello-world/worker"*"--unassigned"*"--exclude-type=epic"*"--json"*"--sort oldest"*"--limit=1"*)
+    printf '[{"id":"older-fallback","priority":2,"created_at":"2026-05-20T06:09:30Z"}]'
+    ;;
+  *)
+    printf '[]'
+    ;;
+esac
+`)
+	if !strings.Contains(out, "older-fallback") {
+		t.Fatalf("EffectiveWorkQuery() did not pick oldest routed fallback work: %q", out)
+	}
+	if strings.Contains(out, "newer-fallback") {
+		t.Fatalf("EffectiveWorkQuery() returned newer high-priority fallback work before oldest: %q", out)
 	}
 }
 
@@ -1673,10 +1763,11 @@ func TestEffectiveWorkQueryExcludesEpics(t *testing.T) {
 	// All three tiers (in_progress assignee, ready assignee, ready routed)
 	// must structurally exclude the epic type.
 	wantSnippets := []string{
-		`bd list --status in_progress --assignee="$id" --exclude-type=epic --json`,
-		`bd ready --assignee="$id" --exclude-type=epic --json`,
-		`bd ready --metadata-field gc.run_target=hello-world/worker --unassigned --exclude-type=epic --json`,
-		`bd ready --metadata-field gc.routed_to=hello-world/worker --unassigned --exclude-type=epic --json`,
+		`bd list --include-ephemeral --status in_progress --assignee="$id" --exclude-type=epic --json`,
+		`bd ready --include-ephemeral --assignee="$id" --exclude-type=epic --json`,
+		`bd ready --include-ephemeral --metadata-field "$key=$target" --unassigned --exclude-type=epic --json`,
+		`for key in gc.run_target gc.routed_to`,
+		`-- hello-world/worker`,
 	}
 	for _, want := range wantSnippets {
 		if !strings.Contains(got, want) {
@@ -1692,12 +1783,11 @@ func TestEffectiveWorkQueryExcludesEpicsControlDispatcher(t *testing.T) {
 	a := Agent{Name: ControlDispatcherAgentName, Dir: "gascity"}
 	got := a.EffectiveWorkQuery()
 	wantSnippets := []string{
-		`bd list --status in_progress --assignee="$cand" --exclude-type=epic --json`,
-		`bd ready --assignee="$cand" --exclude-type=epic --json`,
-		`bd ready --metadata-field gc.run_target=gascity/control-dispatcher --unassigned --exclude-type=epic --json`,
-		`bd ready --metadata-field gc.routed_to=gascity/control-dispatcher --unassigned --exclude-type=epic --json`,
-		`bd ready --metadata-field gc.run_target=gascity/workflow-control --unassigned --exclude-type=epic --json`,
-		`bd ready --metadata-field gc.routed_to=gascity/workflow-control --unassigned --exclude-type=epic --json`,
+		`bd list --include-ephemeral --status in_progress --assignee="$cand" --exclude-type=epic --json`,
+		`bd ready --include-ephemeral --assignee="$cand" --exclude-type=epic --json`,
+		`bd ready --include-ephemeral --metadata-field "$key=$target" --unassigned --exclude-type=epic --json`,
+		`for key in gc.run_target gc.routed_to`,
+		`-- gascity/control-dispatcher gascity/workflow-control`,
 	}
 	for _, want := range wantSnippets {
 		if !strings.Contains(got, want) {
@@ -1863,8 +1953,8 @@ func TestDefaultPoolCheckUsesPoolName(t *testing.T) {
 		PoolName: "hello-world/dog",
 	}
 	check := a.EffectiveScaleCheck()
-	if !strings.Contains(check, "gc.routed_to=hello-world/dog") {
-		t.Errorf("EffectiveScaleCheck() = %q, want gc.routed_to=hello-world/dog", check)
+	if !strings.Contains(check, "-- hello-world/dog") {
+		t.Errorf("EffectiveScaleCheck() = %q, want target argument hello-world/dog", check)
 	}
 }
 
@@ -1894,10 +1984,9 @@ func TestDefaultPoolCheckUsesBdReady(t *testing.T) {
 // reconciler's pool-demand path (EffectivePoolDemandQuery) and the
 // worker's claim path (EffectiveWorkQuery Tier 3) must derive their
 // "is there work on this routed queue?" predicate from the same
-// bdReadyPoolDemandShell helper. Adding a tier to one without updating
-// the other re-introduces the spawn-storm bug — this test ensures both
-// reference the identical per-key predicate string for every routing key
-// in poolDemandKeys (gc.run_target preferred, gc.routed_to fallback; #2763).
+// bdReadyPoolDemandShell helper and walk the same routing keys
+// (gc.run_target preferred, gc.routed_to fallback; #2763). Adding a tier to
+// one without updating the other re-introduces the spawn-storm bug.
 func TestPoolDemandPredicateSharedWithWorkQuery(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -1923,13 +2012,31 @@ func TestPoolDemandPredicateSharedWithWorkQuery(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			wq := tt.agent.EffectiveWorkQuery()
 			demand := tt.agent.EffectivePoolDemandQuery()
+			workPredicate := bdReadyPoolDemandShell("--sort oldest --limit=1")
+			if !strings.Contains(wq, workPredicate) {
+				t.Errorf("EffectiveWorkQuery() missing shared predicate %q in %q", workPredicate, wq)
+			}
+			countPredicate := bdReadyPoolDemandShell("--limit 0")
+			if !strings.Contains(demand, countPredicate) {
+				t.Errorf("EffectivePoolDemandQuery() missing shared predicate %q in %q", countPredicate, demand)
+			}
+			keyList := poolDemandKeyListShell()
+			if !strings.Contains(wq, "for key in "+keyList) {
+				t.Errorf("EffectiveWorkQuery() missing shared key order %q in %q", keyList, wq)
+			}
+			if !strings.Contains(demand, "for key in "+keyList) {
+				t.Errorf("EffectivePoolDemandQuery() missing shared key order %q in %q", keyList, demand)
+			}
+			if !strings.Contains(wq, tt.target) {
+				t.Errorf("EffectiveWorkQuery() missing target argument %q in %q", tt.target, wq)
+			}
+			if !strings.Contains(demand, tt.target) {
+				t.Errorf("EffectivePoolDemandQuery() missing target argument %q in %q", tt.target, demand)
+			}
 			for _, key := range poolDemandKeys {
-				predicate := bdReadyPoolDemandShell(key, tt.target)
-				if !strings.Contains(wq, predicate) {
-					t.Errorf("EffectiveWorkQuery() missing shared predicate %q in %q", predicate, wq)
-				}
-				if !strings.Contains(demand, predicate) {
-					t.Errorf("EffectivePoolDemandQuery() missing shared predicate %q in %q", predicate, demand)
+				embedded := key + "=" + tt.target
+				if strings.Contains(wq, embedded) {
+					t.Errorf("EffectiveWorkQuery() embeds target in predicate %q in %q", embedded, wq)
 				}
 			}
 		})
@@ -1987,6 +2094,14 @@ func TestPoolDemandAndWorkQueryAgreeOnRoutedSemantics(t *testing.T) {
 			wantDemandZero: false,
 		},
 		{
+			name:           "ephemeral wisp routed work",
+			agent:          Agent{Name: "worker", Dir: "foundations"},
+			target:         "foundations/worker",
+			bdReadyOutput:  `[{"id":"fo-wisp","type":"wisp"}]`,
+			wantWorkQuery:  `[{"id":"fo-wisp","type":"wisp"}]`,
+			wantDemandZero: false,
+		},
+		{
 			name: "pool instance uses pool target",
 			agent: Agent{
 				Name:     "worker-1",
@@ -2003,7 +2118,7 @@ func TestPoolDemandAndWorkQueryAgreeOnRoutedSemantics(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			bdScript := `#!/bin/sh
 case "$*" in
-  *"ready --metadata-field gc.routed_to=` + tc.target + ` --unassigned --exclude-type=epic"*)
+  *"ready --include-ephemeral"*"--metadata-field gc.routed_to=` + tc.target + `"*"--unassigned"*"--exclude-type=epic"*)
     printf '%s' '` + tc.bdReadyOutput + `'
     ;;
   *)
@@ -2199,8 +2314,8 @@ func TestEffectiveScaleCheckDefaults(t *testing.T) {
 	}
 	check := a.EffectiveScaleCheck()
 	// Default check uses bd ready for blocker-aware routed demand.
-	if !strings.Contains(check, "gc.routed_to=refinery") {
-		t.Errorf("EffectiveScaleCheck = %q, want gc.routed_to=refinery", check)
+	if !strings.Contains(check, "-- refinery") {
+		t.Errorf("EffectiveScaleCheck = %q, want target argument refinery", check)
 	}
 	if !strings.Contains(check, "--unassigned") {
 		t.Errorf("EffectiveScaleCheck = %q, want --unassigned for new unassigned demand", check)
@@ -2224,8 +2339,8 @@ func TestEffectiveScaleCheckDefaultsQualified(t *testing.T) {
 		MinActiveSessions: ptrInt(0), MaxActiveSessions: ptrInt(5),
 	}
 	check := a.EffectiveScaleCheck()
-	if !strings.Contains(check, "gc.routed_to=myproject/polecat") {
-		t.Errorf("EffectiveScaleCheck = %q, want gc.routed_to=myproject/polecat", check)
+	if !strings.Contains(check, "-- myproject/polecat") {
+		t.Errorf("EffectiveScaleCheck = %q, want target argument myproject/polecat", check)
 	}
 	if !strings.Contains(check, "--unassigned") {
 		t.Errorf("EffectiveScaleCheck = %q, want --unassigned for new unassigned demand", check)
@@ -2273,8 +2388,8 @@ func TestEffectiveScaleCheckUsesReadyOnly(t *testing.T) {
 	if strings.Contains(check, "${molecules:-0}") {
 		t.Errorf("unexpected ${molecules:-0} in arithmetic sum")
 	}
-	if !strings.Contains(check, "gc.routed_to=myrig/worker") {
-		t.Errorf("ready query missing gc.routed_to=myrig/worker")
+	if !strings.Contains(check, "-- myrig/worker") {
+		t.Errorf("ready query missing target argument myrig/worker")
 	}
 }
 
@@ -4431,13 +4546,13 @@ func runLifecycleHookCommand(t *testing.T, command string, env map[string]string
 	return string(data)
 }
 
-// TestEffectiveMethodsAgentRouting verifies that all agents use
-// gc.routed_to=<qualified-name> metadata routing.
+// TestEffectiveMethodsAgentRouting verifies that default query methods route
+// through the qualified agent name.
 func TestEffectiveMethodsAgentRouting(t *testing.T) {
 	a := Agent{Name: "refinery", Dir: "hello-world"}
 	wq := a.EffectiveWorkQuery()
-	if !strings.Contains(wq, "gc.routed_to=hello-world/refinery") {
-		t.Errorf("EffectiveWorkQuery() = %q, want gc.routed_to=hello-world/refinery", wq)
+	if !strings.Contains(wq, "-- hello-world/refinery") {
+		t.Errorf("EffectiveWorkQuery() = %q, want target argument hello-world/refinery", wq)
 	}
 	sq := a.EffectiveSlingQuery()
 	if !strings.Contains(sq, "gc.routed_to=hello-world/refinery") {
@@ -4794,7 +4909,7 @@ func TestEffectiveOnDeathDefault(t *testing.T) {
 		MinActiveSessions: ptrInt(0), MaxActiveSessions: ptrInt(5),
 	}
 	got := a.EffectiveOnDeath()
-	for _, want := range []string{"bd list --assignee=myrig/dog", "--status=in_progress", `--assignee "" --status open`, "--set-metadata gc.routed_to=myrig/dog"} {
+	for _, want := range []string{"bd list --include-ephemeral --assignee=myrig/dog", "--status=in_progress", `--assignee "" --status open`, "--set-metadata gc.routed_to=myrig/dog"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("EffectiveOnDeath() = %q, want %q", got, want)
 		}
@@ -4815,7 +4930,7 @@ func TestEffectiveOnDeathCustom(t *testing.T) {
 func TestEffectiveOnDeathFixedAgent(t *testing.T) {
 	a := Agent{Name: "mayor"}
 	got := a.EffectiveOnDeath()
-	for _, want := range []string{"bd list --assignee=mayor", "--status=in_progress", `--assignee "" --status open`, "--set-metadata gc.routed_to=mayor"} {
+	for _, want := range []string{"bd list --include-ephemeral --assignee=mayor", "--status=in_progress", `--assignee "" --status open`, "--set-metadata gc.routed_to=mayor"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("EffectiveOnDeath() = %q, want %q", got, want)
 		}
@@ -4834,7 +4949,8 @@ func TestEffectiveOnDeathBackfillsMissingRouteOnReopen(t *testing.T) {
 set -eu
 case "$1" in
   list)
-    printf '[{"id":"ga-missing","metadata":{}}]'
+    printf '%s\n' "$*" >> "$BD_LOG"
+    printf '[{"id":"ga-missing","type":"wisp","metadata":{}}]'
     ;;
   update)
     printf '%s\n' "$*" >> "$BD_LOG"
@@ -4844,6 +4960,9 @@ case "$1" in
     ;;
 esac
 `)
+	if !strings.Contains(log, "list --include-ephemeral --assignee=hello-world/dog-1 --status=in_progress --json") {
+		t.Fatalf("hook log = %q, want ephemeral-aware list query", log)
+	}
 	if !strings.Contains(log, "--status open") {
 		t.Fatalf("hook log = %q, want reopened status", log)
 	}
@@ -4864,7 +4983,8 @@ func TestEffectiveOnDeathPreservesExistingRouteOnReopen(t *testing.T) {
 set -eu
 case "$1" in
   list)
-    printf '[{"id":"ga-routed","metadata":{"gc.routed_to":"already/routed"}}]'
+    printf '%s\n' "$*" >> "$BD_LOG"
+    printf '[{"id":"ga-routed","type":"wisp","metadata":{"gc.routed_to":"already/routed"}}]'
     ;;
   update)
     printf '%s\n' "$*" >> "$BD_LOG"
@@ -4874,6 +4994,9 @@ case "$1" in
     ;;
 esac
 `)
+	if !strings.Contains(log, "list --include-ephemeral --assignee=hello-world/dog-1 --status=in_progress --json") {
+		t.Fatalf("hook log = %q, want ephemeral-aware list query", log)
+	}
 	if !strings.Contains(log, "--status open") {
 		t.Fatalf("hook log = %q, want reopened status", log)
 	}
@@ -4889,7 +5012,7 @@ func TestEffectiveOnBootDefault(t *testing.T) {
 		MinActiveSessions: ptrInt(0), MaxActiveSessions: ptrInt(5),
 	}
 	got := a.EffectiveOnBoot()
-	for _, want := range []string{"bd list --metadata-field gc.routed_to=myrig/dog", "--status=in_progress", "--no-assignee", "--status open"} {
+	for _, want := range []string{"bd list --include-ephemeral --metadata-field gc.routed_to=myrig/dog", "--status=in_progress", "--no-assignee", "--status open"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("EffectiveOnBoot() = %q, want %q", got, want)
 		}
@@ -4908,13 +5031,44 @@ func TestEffectiveOnBootDefaultPoolName(t *testing.T) {
 		PoolName: "myrig/dog",
 	}
 	got := a.EffectiveOnBoot()
-	for _, want := range []string{"bd list --metadata-field gc.routed_to=myrig/dog", "--status=in_progress", "--no-assignee", "--status open"} {
+	for _, want := range []string{"bd list --include-ephemeral --metadata-field gc.routed_to=myrig/dog", "--status=in_progress", "--no-assignee", "--status open"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("EffectiveOnBoot() = %q, want %q", got, want)
 		}
 	}
 	if strings.Contains(got, `--assignee ""`) {
 		t.Errorf("EffectiveOnBoot() = %q, want to target only ownerless work instead of bulk-unassigning routed work", got)
+	}
+}
+
+func TestEffectiveOnBootReopensOwnerlessEphemeralRoutedWork(t *testing.T) {
+	a := Agent{
+		Name:              "dog-1",
+		Dir:               "hello-world",
+		MinActiveSessions: ptrInt(0), MaxActiveSessions: ptrInt(5),
+		PoolName: "hello-world/dog",
+	}
+
+	log := runLifecycleHookCommand(t, a.EffectiveOnBoot(), nil, `#!/bin/sh
+set -eu
+case "$1" in
+  list)
+    printf '%s\n' "$*" >> "$BD_LOG"
+    printf '[{"id":"ga-wisp","type":"wisp","metadata":{"gc.routed_to":"hello-world/dog"}}]'
+    ;;
+  update)
+    printf '%s\n' "$*" >> "$BD_LOG"
+    ;;
+  *)
+    exit 1
+    ;;
+esac
+`)
+	if !strings.Contains(log, "list --include-ephemeral --metadata-field gc.routed_to=hello-world/dog --status=in_progress --no-assignee --json") {
+		t.Fatalf("hook log = %q, want ephemeral-aware routed list query", log)
+	}
+	if !strings.Contains(log, "update ga-wisp --status open") {
+		t.Fatalf("hook log = %q, want ownerless wisp reopened", log)
 	}
 }
 
@@ -4932,7 +5086,7 @@ func TestEffectiveOnBootCustom(t *testing.T) {
 func TestEffectiveOnBootNonPool(t *testing.T) {
 	a := Agent{Name: "mayor"}
 	got := a.EffectiveOnBoot()
-	for _, want := range []string{"bd list --metadata-field gc.routed_to=mayor", "--status=in_progress", "--no-assignee", "--status open"} {
+	for _, want := range []string{"bd list --include-ephemeral --metadata-field gc.routed_to=mayor", "--status=in_progress", "--no-assignee", "--status open"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("EffectiveOnBoot() = %q, want %q", got, want)
 		}
@@ -5945,6 +6099,32 @@ interval = "24h"
 	}
 	if cfg.Orders.Overrides[0].Trigger == nil || *cfg.Orders.Overrides[0].Trigger != "cooldown" {
 		t.Fatalf("Trigger = %#v, want cooldown", cfg.Orders.Overrides[0].Trigger)
+	}
+}
+
+func TestParseOrderOverrideEnv(t *testing.T) {
+	cfg, err := Parse([]byte(`
+[workspace]
+name = "test-city"
+
+[orders]
+
+[[orders.overrides]]
+name = "digest"
+
+[orders.overrides.env]
+GC_JSONL_MIN_PREV_FOR_SPIKE = "250"
+CUSTOM_ORDER_FLAG = "enabled"
+`))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if len(cfg.Orders.Overrides) != 1 {
+		t.Fatalf("len(overrides) = %d, want 1", len(cfg.Orders.Overrides))
+	}
+	env := cfg.Orders.Overrides[0].Env
+	if env["GC_JSONL_MIN_PREV_FOR_SPIKE"] != "250" || env["CUSTOM_ORDER_FLAG"] != "enabled" {
+		t.Fatalf("Env = %+v, want parsed override env", env)
 	}
 }
 

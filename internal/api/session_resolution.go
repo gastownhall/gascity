@@ -202,7 +202,7 @@ func reassignOpenWorkAssignedToSession(store beads.Store, oldID, newID string) e
 		return nil
 	}
 	for _, status := range []string{"open", "in_progress"} {
-		work, err := store.List(beads.ListQuery{Assignee: oldID, Status: status, Live: true})
+		work, err := store.List(beads.ListQuery{Assignee: oldID, Status: status, Live: true, TierMode: beads.TierBoth})
 		if err != nil {
 			return fmt.Errorf("listing work assigned to retired session %s: %w", oldID, err)
 		}

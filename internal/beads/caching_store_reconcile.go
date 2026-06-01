@@ -256,7 +256,7 @@ func (c *CachingStore) runReconciliation() {
 	c.mu.RUnlock()
 
 	bdStart := time.Now()
-	fresh, err := c.backing.List(ListQuery{AllowScan: true, SkipLabels: true})
+	fresh, err := c.backing.List(ListQuery{AllowScan: true, SkipLabels: true, TierMode: TierBoth})
 	bdLatency := time.Since(bdStart)
 	if err != nil {
 		c.mu.Lock()
@@ -279,7 +279,7 @@ func (c *CachingStore) runReconciliation() {
 
 	c.recoverMissingFromList(freshByID)
 
-	depMap, depsComplete, depErr := c.fetchDepsForIDs(beadIDs(freshByID))
+	depMap, depsComplete, depErr := c.fetchDepsForBeads(freshByID)
 	if depErr != nil {
 		c.recordProblem("refresh dep cache during reconcile", depErr)
 	}

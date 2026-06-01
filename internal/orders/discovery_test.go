@@ -38,6 +38,32 @@ schedule = "*/5 * * * *"
 	}
 }
 
+func TestDiscoverRootDefersEnvOnFormulaValidation(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/pack/orders/health-check.toml"] = []byte(`
+[order]
+formula = "health-check"
+trigger = "manual"
+
+[order.env]
+CUSTOM_ORDER_FLAG = "enabled"
+`)
+
+	got, err := discoverRoot(fs, ScanRoot{
+		Dir:          "/pack/orders",
+		FormulaLayer: "/pack/formulas",
+	})
+	if err != nil {
+		t.Fatalf("discoverRoot: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("got %d orders, want 1", len(got))
+	}
+	if got[0].Env["CUSTOM_ORDER_FLAG"] != "enabled" {
+		t.Fatalf("Env = %+v, want parsed env preserved for post-layering validation", got[0].Env)
+	}
+}
+
 func TestDiscoverRootRejectsSubdirectoryFormat(t *testing.T) {
 	fs := fsys.NewFake()
 	fs.Dirs["/pack/orders/health-check"] = true

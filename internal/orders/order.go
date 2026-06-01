@@ -6,6 +6,7 @@ package orders
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/BurntSushi/toml"
@@ -42,6 +43,13 @@ type Order struct {
 	Timeout string `toml:"timeout,omitempty"`
 	// Enabled controls whether the order is active. Defaults to true.
 	Enabled *bool `toml:"enabled,omitempty"`
+	// Env is a map of environment variables exported into an exec
+	// order's child process. Use the `[order.env]` TOML table to
+	// override thresholds (e.g. GC_DOCTOR_LATENCY_WARN_S) without
+	// editing the order's shell scripts or the controller's parent
+	// environment. Env is supported only for exec orders; controller-
+	// owned routing and identity keys are rejected before dispatch.
+	Env map[string]string `toml:"env,omitempty"`
 	// Source is the absolute file path to the discovered order file (set by scanner, not from TOML).
 	Source string `toml:"-"`
 	// FormulaLayer is the formula layer directory this order was
@@ -62,18 +70,19 @@ func (a *Order) ScopedName() string {
 }
 
 type orderDecode struct {
-	Description string `toml:"description,omitempty"`
-	Formula     string `toml:"formula,omitempty"`
-	Exec        string `toml:"exec,omitempty"`
-	Trigger     string `toml:"trigger,omitempty"`
-	Gate        string `toml:"gate,omitempty"`
-	Interval    string `toml:"interval,omitempty"`
-	Schedule    string `toml:"schedule,omitempty"`
-	Check       string `toml:"check,omitempty"`
-	On          string `toml:"on,omitempty"`
-	Pool        string `toml:"pool,omitempty"`
-	Timeout     string `toml:"timeout,omitempty"`
-	Enabled     *bool  `toml:"enabled,omitempty"`
+	Description string            `toml:"description,omitempty"`
+	Formula     string            `toml:"formula,omitempty"`
+	Exec        string            `toml:"exec,omitempty"`
+	Trigger     string            `toml:"trigger,omitempty"`
+	Gate        string            `toml:"gate,omitempty"`
+	Interval    string            `toml:"interval,omitempty"`
+	Schedule    string            `toml:"schedule,omitempty"`
+	Check       string            `toml:"check,omitempty"`
+	On          string            `toml:"on,omitempty"`
+	Pool        string            `toml:"pool,omitempty"`
+	Timeout     string            `toml:"timeout,omitempty"`
+	Enabled     *bool             `toml:"enabled,omitempty"`
+	Env         map[string]string `toml:"env,omitempty"`
 }
 
 func (d orderDecode) normalized() Order {
@@ -93,6 +102,7 @@ func (d orderDecode) normalized() Order {
 		Pool:        d.Pool,
 		Timeout:     d.Timeout,
 		Enabled:     d.Enabled,
+		Env:         d.Env,
 	}
 }
 
@@ -147,9 +157,20 @@ func Validate(a Order) error {
 	if a.Formula != "" && a.Exec != "" {
 		return fmt.Errorf("order %q: formula and exec are mutually exclusive", a.Name)
 	}
+	if len(a.Env) > 0 && a.Exec == "" {
+		return fmt.Errorf("order %q: env is supported only for exec orders", a.Name)
+	}
 	// Exec orders must not have a pool (no agent pipeline).
 	if a.Exec != "" && a.Pool != "" {
 		return fmt.Errorf("order %q: exec orders cannot have a pool", a.Name)
+	}
+	for key := range a.Env {
+		if strings.TrimSpace(key) == "" {
+			return fmt.Errorf("order %q: env key is required", a.Name)
+		}
+		if strings.Contains(key, "=") {
+			return fmt.Errorf("order %q: invalid env key %q: must not contain '='", a.Name, key)
+		}
 	}
 	// Validate timeout if set.
 	if a.Timeout != "" {

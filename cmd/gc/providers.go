@@ -13,6 +13,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/agent"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
@@ -519,14 +520,7 @@ func rawBeadsProviderFromConfig(cityPath string) string {
 }
 
 func providerUsesBdStoreContract(provider string) bool {
-	provider = strings.TrimSpace(provider)
-	if provider == "" || provider == "bd" {
-		return true
-	}
-	if strings.HasPrefix(provider, "exec:") && execProviderBase(provider) == "gc-beads-bd" {
-		return true
-	}
-	return false
+	return contract.ProviderUsesBDContract(provider)
 }
 
 func cityUsesBdStoreContract(cityPath string) bool {

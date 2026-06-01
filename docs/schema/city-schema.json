@@ -1791,6 +1791,13 @@
         "timeout": {
           "type": "string",
           "description": "Timeout overrides the per-order timeout. Go duration string."
+        },
+        "env": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object",
+          "description": "Env adds or overrides environment variables exported into an exec\norder's child process."
         }
       },
       "additionalProperties": false,
@@ -1798,7 +1805,7 @@
       "required": [
         "name"
       ],
-      "description": "OrderOverride modifies a scanned order's scheduling fields."
+      "description": "OrderOverride modifies a scanned order's scheduling fields and exec env."
     },
     "OrdersConfig": {
       "properties": {
