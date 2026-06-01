@@ -7,6 +7,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/session"
 )
 
 func TestBuildAwakeInputFromReconcilerUsesLifecycleProjectionForCompatibilityStates(t *testing.T) {
@@ -55,7 +56,7 @@ func TestBuildAwakeInputFromReconcilerCarriesResetPendingMetadata(t *testing.T) 
 				"template":                   "build-agent",
 				"restart_requested":          "true",
 				"continuation_reset_pending": "true",
-				resetCommittedAtMetadataKey:  now.Format(time.RFC3339),
+				session.ResetCommittedAtKey:  now.Format(time.RFC3339),
 			},
 		}},
 		nil,

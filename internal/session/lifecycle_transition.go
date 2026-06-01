@@ -13,7 +13,8 @@ var freshWakeConversationResetKeys = []string{
 	startupDialogVerifiedKey,
 }
 
-const resetCommittedAtKey = "reset_committed_at"
+// ResetCommittedAtKey records when a restart handoff durably committed.
+const ResetCommittedAtKey = "reset_committed_at"
 
 // MetadataPatch is an atomic set of metadata key updates for one lifecycle
 // transition. Empty values intentionally clear metadata keys in existing store
@@ -340,7 +341,7 @@ func RestartRequestPatch(sessionKey string, now time.Time) MetadataPatch {
 		"restart_requested":          "",
 		"started_config_hash":        "",
 		"continuation_reset_pending": "true",
-		resetCommittedAtKey:          now.UTC().Format(time.RFC3339),
+		ResetCommittedAtKey:          now.UTC().Format(time.RFC3339),
 		"last_woke_at":               "",
 		"pending_create_claim":       "",
 		"pending_create_started_at":  "",

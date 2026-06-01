@@ -10,8 +10,6 @@ import (
 	"github.com/gastownhall/gascity/internal/session"
 )
 
-const resetCommittedAtMetadataKey = "reset_committed_at"
-
 // buildAwakeInputFromReconciler constructs AwakeInput from the reconciler's
 // existing data. Runtime liveness is populated from the already-computed
 // wakeTargets; attachment and pending interactions come from provider
@@ -113,7 +111,7 @@ func buildAwakeInputFromReconciler(
 			WaitHold:               b.Metadata["wait_hold"] == "true",
 			RestartRequested:       strings.TrimSpace(b.Metadata["restart_requested"]) == "true",
 			ContinuationResetPending: strings.TrimSpace(b.Metadata["continuation_reset_pending"]) == "true" &&
-				strings.TrimSpace(b.Metadata[resetCommittedAtMetadataKey]) != "",
+				strings.TrimSpace(b.Metadata[session.ResetCommittedAtKey]) != "",
 		}
 		bead.HeldUntil = lifecycle.HeldUntil
 		bead.QuarantinedUntil = lifecycle.QuarantinedUntil

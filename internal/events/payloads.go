@@ -1,5 +1,7 @@
 package events
 
+import "encoding/json"
+
 // Domain payload types shared across packages. Payloads specific to one
 // package live with their emitter (see internal/api/event_payloads.go and
 // internal/extmsg/events.go); this file holds payload shapes that are
@@ -48,3 +50,15 @@ type SessionResetStalledPayload struct {
 
 // IsEventPayload marks SessionResetStalledPayload as an events.Payload variant.
 func (SessionResetStalledPayload) IsEventPayload() {}
+
+// SessionResetStalledPayloadJSON builds the JSON wire form for attachment to
+// an Event.Payload field.
+func SessionResetStalledPayloadJSON(sessionName, template, resetCommittedAt string, elapsedSeconds int) json.RawMessage {
+	b, _ := json.Marshal(SessionResetStalledPayload{
+		SessionName:      sessionName,
+		Template:         template,
+		ResetCommittedAt: resetCommittedAt,
+		ElapsedSeconds:   elapsedSeconds,
+	})
+	return b
+}

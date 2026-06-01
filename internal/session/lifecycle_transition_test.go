@@ -209,7 +209,7 @@ func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 				"restart_requested":          "",
 				"started_config_hash":        "",
 				"continuation_reset_pending": "true",
-				resetCommittedAtKey:          resetNow.UTC().Format(time.RFC3339),
+				ResetCommittedAtKey:          resetNow.UTC().Format(time.RFC3339),
 				"last_woke_at":               "",
 				"pending_create_claim":       "",
 				"pending_create_started_at":  "",
@@ -223,7 +223,7 @@ func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 				"restart_requested":          "",
 				"started_config_hash":        "",
 				"continuation_reset_pending": "true",
-				resetCommittedAtKey:          resetNow.UTC().Format(time.RFC3339),
+				ResetCommittedAtKey:          resetNow.UTC().Format(time.RFC3339),
 				"last_woke_at":               "",
 				"pending_create_claim":       "",
 				"pending_create_started_at":  "",
@@ -442,7 +442,7 @@ func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 func TestPreWakePatchPreservesResetCommittedAt(t *testing.T) {
 	committedAt := "2026-04-15T13:00:00Z"
 	meta := map[string]string{
-		resetCommittedAtKey: committedAt,
+		ResetCommittedAtKey: committedAt,
 	}
 
 	got := PreWakePatch(PreWakePatchInput{
@@ -453,8 +453,8 @@ func TestPreWakePatchPreservesResetCommittedAt(t *testing.T) {
 		FreshWake:         true,
 	}).Apply(meta)
 
-	if got[resetCommittedAtKey] != committedAt {
-		t.Fatalf("PreWakePatch should preserve %s, got %q", resetCommittedAtKey, got[resetCommittedAtKey])
+	if got[ResetCommittedAtKey] != committedAt {
+		t.Fatalf("PreWakePatch should preserve %s, got %q", ResetCommittedAtKey, got[ResetCommittedAtKey])
 	}
 }
 

@@ -266,6 +266,7 @@ func ComputeAwakeSet(input AwakeInput) map[string]AwakeDecision {
 	// ready open work assigned to it must stay awake. Open work must carry
 	// Ready=true so a blocked routed assignment cannot become wake demand if
 	// a future caller accidentally broadens the collection query.
+	assignedWorkDemand := make(map[string]bool)
 	for _, bead := range input.SessionBeads {
 		if bead.State == "closed" {
 			continue
@@ -279,6 +280,7 @@ func ComputeAwakeSet(input AwakeInput) map[string]AwakeDecision {
 				continue
 			}
 			if sessionAssigneeMatches(input.NamedSessions, bead, assignee) {
+				assignedWorkDemand[bead.SessionName] = true
 				desired[bead.SessionName] = "assigned-work"
 				break
 			}
@@ -337,7 +339,7 @@ func ComputeAwakeSet(input AwakeInput) map[string]AwakeDecision {
 	for _, bead := range input.SessionBeads {
 		name := bead.SessionName
 		decision := AwakeDecision{
-			HasAssignedWork: desired[name] == "assigned-work",
+			HasAssignedWork: assignedWorkDemand[name],
 		}
 
 		// Desired set (demand-driven wake). wait_hold suppresses normal
