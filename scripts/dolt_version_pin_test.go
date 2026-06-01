@@ -8,7 +8,7 @@ import (
 )
 
 func TestDoltVersionPins(t *testing.T) {
-	const doltVersion = "2.0.7"
+	const doltVersion = "2.1.0"
 	repoRoot := repoRoot(t)
 
 	assertContains := func(rel, want string) {

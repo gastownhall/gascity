@@ -34,7 +34,7 @@ and verifying the result.
 - **Free disk space.** Dolt GC rewrites chunks into a new store before
   swapping; budget at least **2× the current `.dolt/` size** in free space
   on the same filesystem.
-- **Final Dolt 2.0.7 or newer.** This matches the floor enforced by Gas
+- **Final Dolt 2.1.0 or newer.** This matches the floor enforced by Gas
   City's managed Dolt tooling. Releases before 1.86.2 also have the upstream
   GC/writer deadlock fixed in dolthub/dolt commit `ccf7bde206`, which can hang
   `dolt_backup sync` under heavy write load. Check with
@@ -82,7 +82,7 @@ If GC finishes but the size barely moves, the chunks are nearly all live
 
 ## Prevention
 
-- **Keep Dolt at a final 2.0.7 or newer.** This matches Gas City's
+- **Keep Dolt at a final 2.1.0 or newer.** This matches Gas City's
   managed-Dolt floor; newer releases ship improved auto-GC heuristics and
   default archive compression.
 - **Let the dolt pack's `mol-dog-compactor` order run continuously.**
