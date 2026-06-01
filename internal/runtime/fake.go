@@ -19,6 +19,7 @@ type Fake struct {
 	meta                    map[string]map[string]string // session → key → value
 	Calls                   []Call                       // recorded calls in order
 	broken                  bool                         // when true, all ops fail
+	OrphanedRuntimes        map[string]LiveRuntime       // session ID → untracked live runtime
 	Zombies                 map[string]bool              // sessions with dead agent processes
 	Attached                map[string]bool              // sessions with attached terminals
 	AttachedSequence        map[string][]bool            // scripted IsAttached results by session
@@ -46,6 +47,8 @@ type Fake struct {
 	// cancellation without relying on wall-clock sleeps.
 	WaitForIdleStarted map[string]chan struct{}
 }
+
+var _ ProcessTableScanner = (*Fake)(nil)
 
 // Call records a single method invocation on [Fake].
 type Call struct {
@@ -80,6 +83,7 @@ func NewFake() *Fake {
 	return &Fake{
 		sessions:                make(map[string]Config),
 		meta:                    make(map[string]map[string]string),
+		OrphanedRuntimes:        make(map[string]LiveRuntime),
 		Zombies:                 make(map[string]bool),
 		Attached:                make(map[string]bool),
 		AttachedSequence:        make(map[string][]bool),
@@ -106,6 +110,7 @@ func NewFailFake() *Fake {
 	return &Fake{
 		sessions:                make(map[string]Config),
 		meta:                    make(map[string]map[string]string),
+		OrphanedRuntimes:        make(map[string]LiveRuntime),
 		Zombies:                 make(map[string]bool),
 		Attached:                make(map[string]bool),
 		StartErrors:             make(map[string]error),
@@ -484,6 +489,62 @@ func (f *Fake) ListRunning(prefix string) ([]string, error) {
 		}
 	}
 	return names, nil
+}
+
+// FindRuntimesBySessionID returns fake tracked and orphaned runtimes matching
+// a GC_SESSION_ID. Empty id returns all runtimes with a session ID.
+func (f *Fake) FindRuntimesBySessionID(id string) ([]LiveRuntime, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.Calls = append(f.Calls, Call{Method: "FindRuntimesBySessionID", Name: id})
+	if f.broken {
+		return nil, fmt.Errorf("finding runtimes for session %q: session unavailable", id)
+	}
+
+	var out []LiveRuntime
+	for sid, runtime := range f.OrphanedRuntimes {
+		sessionID := runtime.SessionID
+		if sessionID == "" {
+			sessionID = sid
+		}
+		if sessionID == "" {
+			continue
+		}
+		if id != "" && sessionID != id {
+			continue
+		}
+		runtime.SessionID = sessionID
+		runtime.IsTracked = false
+		out = append(out, runtime)
+	}
+	for name, cfg := range f.sessions {
+		sessionID := cfg.Env["GC_SESSION_ID"]
+		if sessionID == "" {
+			continue
+		}
+		if id != "" && sessionID != id {
+			continue
+		}
+		out = append(out, LiveRuntime{
+			SessionID:    sessionID,
+			ProviderName: name,
+			IsTracked:    true,
+		})
+	}
+	return out, nil
+}
+
+// TerminateRuntime records a process-table termination and removes the fake
+// orphan entry for the runtime's session ID. Missing entries are already gone.
+func (f *Fake) TerminateRuntime(runtime LiveRuntime) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.Calls = append(f.Calls, Call{Method: "TerminateRuntime", Name: runtime.SessionID})
+	if f.broken {
+		return fmt.Errorf("terminating runtime %q: session unavailable", runtime.SessionID)
+	}
+	delete(f.OrphanedRuntimes, runtime.SessionID)
+	return nil
 }
 
 // SetActivity sets the canned last activity time for the named session.

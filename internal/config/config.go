@@ -17,6 +17,7 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/gastownhall/gascity/internal/pricing"
+	"github.com/gastownhall/gascity/internal/shellquote"
 )
 
 // validAgentName matches names safe for use in session identifiers.
@@ -225,6 +226,8 @@ type City struct {
 	// Services declares workspace-owned HTTP services mounted on the
 	// controller edge under /svc/{name}.
 	Services []Service `toml:"service,omitempty"`
+	// GitHub configures GitHub-facing repository monitors.
+	GitHub GitHubConfig `toml:"github,omitempty"`
 	// AgentDefaults provides city-level defaults for agents that don't
 	// override them (canonical TOML key: agent_defaults). The runtime
 	// currently applies default_sling_formula and append_fragments; the
@@ -1500,7 +1503,7 @@ type OrdersConfig struct {
 	Overrides []OrderOverride `toml:"overrides,omitempty"`
 }
 
-// OrderOverride modifies a scanned order's scheduling fields.
+// OrderOverride modifies a scanned order's scheduling fields and exec env.
 // Uses pointer fields to distinguish "not set" from "set to zero value."
 type OrderOverride struct {
 	// Name is the order name to target (required).
@@ -1527,6 +1530,9 @@ type OrderOverride struct {
 	Pool *string `toml:"pool,omitempty"`
 	// Timeout overrides the per-order timeout. Go duration string.
 	Timeout *string `toml:"timeout,omitempty"`
+	// Env adds or overrides environment variables exported into an exec
+	// order's child process.
+	Env map[string]string `toml:"env,omitempty"`
 }
 
 func (o *OrderOverride) normalizeLegacyAliases() {
@@ -2789,7 +2795,8 @@ func (a *Agent) AttachEnabled() bool {
 var poolDemandKeys = []string{"gc.run_target", "gc.routed_to"}
 
 // bdReadyPoolDemandShell returns the bd ready predicate for unassigned,
-// non-epic pool demand matched on metadata field key=target. This is the
+// non-epic pool demand matched on metadata field key=target, where key and
+// target are shell variables scoped by the caller. This is the
 // one-source-of-truth for the "is there work on this routed queue?" question
 // that both the worker (via EffectiveWorkQuery Tier 3) and the reconciler (via
 // EffectivePoolDemandQuery, count-form) ask. Diverging the two re-introduces
@@ -2799,40 +2806,48 @@ var poolDemandKeys = []string{"gc.run_target", "gc.routed_to"}
 // bd ready cannot express a single "match key A or key B" predicate
 // (--metadata-field is AND-combined and there is no key-absent filter), so the
 // run_target/routed_to precedence is composed at the shell layer by
-// poolDemandFirstRowProbes (work_query) and poolDemandCountShell (count-form),
-// which call this helper once per key in poolDemandKeys order.
+// poolDemandFirstRowFunctionScript (work_query) and poolDemandCountShell
+// (count-form), which call this helper once per key in poolDemandKeys order.
 //
-// Callers append their own bd flags (--sort oldest --limit=1 for first-row
-// work_query; --limit 0 piped to jq 'length' for the count-form) and shell
-// handling.
-func bdReadyPoolDemandShell(key, target string) string {
-	return `bd ready --include-ephemeral --metadata-field ` + key + `=` + target + ` --unassigned --exclude-type=epic --json`
+// target is passed as a positional argument to the outer sh -c command, not
+// interpolated into the nested shell body. That keeps routes containing shell
+// metacharacters as data instead of executable syntax.
+func bdReadyPoolDemandShell(limitFlag string) string {
+	return `bd ready --include-ephemeral --metadata-field "$key=$target" --unassigned --exclude-type=epic --json ` + limitFlag
 }
 
-// poolDemandFirstRowProbes emits the work_query Tier 3 body for target: it
+func poolDemandKeyListShell() string {
+	return shellquote.Join(poolDemandKeys)
+}
+
+// poolDemandFirstRowFunctionScript emits the work_query Tier 3 function: it
 // tries each routing key in poolDemandKeys precedence order with native
 // oldest-first sorting, printing the first non-empty JSON array and exiting 0.
-// Used for both the primary and legacy workflow-control targets. The caller
-// appends a terminal fallthrough (e.g. printf "[]") for the all-empty case.
-func poolDemandFirstRowProbes(target string) string {
-	var b strings.Builder
-	for _, key := range poolDemandKeys {
-		b.WriteString(`r=$(` + routedReadyTierCommand(key, target) + `); `)
-		b.WriteString(`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; `)
-	}
-	return b.String()
+// The target comes from the function's first argument, so callers can reuse
+// the same script for both primary and legacy workflow-control routes without
+// embedding dynamic targets inside the shell body.
+func poolDemandFirstRowFunctionScript() string {
+	return `probe_pool_demand() { ` +
+		`target="$1"; ` +
+		`[ -z "$target" ] && return 1; ` +
+		`for key in ` + poolDemandKeyListShell() + `; do ` +
+		`r=$(` + routedReadyTierCommand() + `); ` +
+		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
+		`done; ` +
+		`return 1; ` +
+		`}; `
 }
 
-func routedReadyTierCommand(key, target string) string {
+func routedReadyTierCommand() string {
 	// The shared predicate stays order-free so the count-form does no wasted
 	// sorting; the worker first-row path asks bd for the oldest candidate.
-	return bdReadyPoolDemandShell(key, target) + ` --sort oldest --limit=1 2>/dev/null`
+	return bdReadyPoolDemandShell("--sort oldest --limit=1") + ` 2>/dev/null`
 }
 
 // poolDemandCountShell emits the reconciler count-form for target: it counts
 // ready demand under the first routing key in poolDemandKeys that yields a
 // non-empty result (gc.run_target preferred, gc.routed_to fallback) and prints
-// the array length. Precedence mirrors poolDemandFirstRowProbes so the
+// the array length. Precedence mirrors poolDemandFirstRowFunctionScript so the
 // reconciler's spawn decision and the worker's claim decision agree — the
 // worker drains the preferred tier first, then the count surfaces the fallback
 // tier on the next pass.
@@ -2843,17 +2858,15 @@ func routedReadyTierCommand(key, target string) string {
 // Every query is chained with && so any non-zero bd exit short-circuits the
 // whole expression (TestEffectiveScaleCheckUsesReadyOnly).
 func poolDemandCountShell(target string) string {
-	keys := poolDemandKeys
-	last := len(keys) - 1
-	// Least-preferred key assigns unconditionally; its bd failure propagates
-	// through the outer &&.
-	expr := `ready_json=$(` + bdReadyPoolDemandShell(keys[last], target) + ` --limit 0)`
-	for i := last - 1; i >= 0; i-- {
-		query := bdReadyPoolDemandShell(keys[i], target) + ` --limit 0`
-		expr = `cur=$(` + query + `) && ` +
-			`if [ "$cur" != "[]" ]; then ready_json="$cur"; else ` + expr + `; fi`
-	}
-	return expr + ` && printf '%s\n' "$ready_json" | jq 'length'`
+	script := `target="$1"; ` +
+		`ready_json="[]"; ` +
+		`for key in ` + poolDemandKeyListShell() + `; do ` +
+		`cur=$(` + bdReadyPoolDemandShell("--limit 0") + `) || exit $?; ` +
+		`if [ "$cur" != "[]" ]; then ready_json="$cur"; break; fi; ` +
+		`ready_json="$cur"; ` +
+		`done; ` +
+		`printf "%s\n" "$ready_json" | jq "length"`
+	return shellquote.Join([]string{"sh", "-c", script, "--", target})
 }
 
 func (a *Agent) poolDemandTarget() string {
@@ -2862,6 +2875,47 @@ func (a *Agent) poolDemandTarget() string {
 		target = a.PoolName
 	}
 	return target
+}
+
+func standardAssignedWorkQueryScript() string {
+	return `for id in "$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"; do ` +
+		`[ -z "$id" ] && continue; ` +
+		`r=$(bd list --include-ephemeral --status in_progress --assignee="$id" --exclude-type=epic --json --limit=1 2>/dev/null); ` +
+		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
+		`done; ` +
+		`for id in "$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"; do ` +
+		`[ -z "$id" ] && continue; ` +
+		`r=$(bd ready --include-ephemeral --assignee="$id" --exclude-type=epic --json --limit=1 2>/dev/null); ` +
+		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
+		`done; `
+}
+
+func legacyControlAssignedWorkQueryScript() string {
+	return `for id in "$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"; do ` +
+		`[ -z "$id" ] && continue; ` +
+		`legacy=""; case "$id" in *control-dispatcher) legacy="${id%control-dispatcher}workflow-control";; esac; ` +
+		`for cand in "$id" "$legacy"; do ` +
+		`[ -z "$cand" ] && continue; ` +
+		`r=$(bd list --include-ephemeral --status in_progress --assignee="$cand" --exclude-type=epic --json --limit=1 2>/dev/null); ` +
+		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
+		`done; ` +
+		`done; ` +
+		`for id in "$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"; do ` +
+		`[ -z "$id" ] && continue; ` +
+		`legacy=""; case "$id" in *control-dispatcher) legacy="${id%control-dispatcher}workflow-control";; esac; ` +
+		`for cand in "$id" "$legacy"; do ` +
+		`[ -z "$cand" ] && continue; ` +
+		`r=$(bd ready --include-ephemeral --assignee="$cand" --exclude-type=epic --json --limit=1 2>/dev/null); ` +
+		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
+		`done; ` +
+		`done; `
+}
+
+func poolDemandOriginGateScript() string {
+	return `case "$GC_SESSION_ORIGIN" in ` +
+		`ephemeral|"") ;; ` +
+		`*) exit 0 ;; ` +
+		`esac; `
 }
 
 // EffectiveWorkQuery returns the work query command for this agent.
@@ -2899,63 +2953,20 @@ func (a *Agent) EffectiveWorkQuery() string {
 	target := a.poolDemandTarget()
 	legacyTarget := legacyWorkflowControlQualifiedName(target)
 	if legacyTarget == "" {
-		return `sh -c '` +
-			// Tier 1: in_progress assigned to any of my identifiers (crash recovery)
-			`for id in "$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"; do ` +
-			`[ -z "$id" ] && continue; ` +
-			`r=$(bd list --include-ephemeral --status in_progress --assignee="$id" --exclude-type=epic --json --limit=1 2>/dev/null); ` +
-			`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
-			`done; ` +
-			// Tier 2: ready assigned to any of my identifiers (pre-assigned)
-			`for id in "$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"; do ` +
-			`[ -z "$id" ] && continue; ` +
-			`r=$(bd ready --include-ephemeral --assignee="$id" --exclude-type=epic --json --limit=1 2>/dev/null); ` +
-			`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
-			`done; ` +
-			// Tier 3: ready unassigned routed to this config (shared routed queue).
-			// Prefers gc.run_target, falls back to gc.routed_to (poolDemandKeys).
-			// Only ephemeral sessions and controller probes consume generic config demand.
-			`case "$GC_SESSION_ORIGIN" in ` +
-			`ephemeral|"") ;; ` +
-			`*) exit 0 ;; ` +
-			`esac; ` +
-			poolDemandFirstRowProbes(target) +
-			`printf "[]"'`
+		script := standardAssignedWorkQueryScript() +
+			poolDemandOriginGateScript() +
+			poolDemandFirstRowFunctionScript() +
+			`probe_pool_demand "$1"; ` +
+			`printf "[]"`
+		return shellquote.Join([]string{"sh", "-c", script, "--", target})
 	}
-	return `sh -c '` +
-		// Tier 1: in_progress assigned to any of my identifiers (crash recovery).
-		// Built-in control-dispatchers also claim legacy workflow-control names so
-		// pre-rename workflows keep moving without live metadata rewrites.
-		`for id in "$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"; do ` +
-		`[ -z "$id" ] && continue; ` +
-		`legacy=""; case "$id" in *control-dispatcher) legacy="${id%control-dispatcher}workflow-control";; esac; ` +
-		`for cand in "$id" "$legacy"; do ` +
-		`[ -z "$cand" ] && continue; ` +
-		`r=$(bd list --include-ephemeral --status in_progress --assignee="$cand" --exclude-type=epic --json --limit=1 2>/dev/null); ` +
-		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
-		`done; ` +
-		`done; ` +
-		// Tier 2: ready assigned to any of my identifiers (pre-assigned)
-		`for id in "$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"; do ` +
-		`[ -z "$id" ] && continue; ` +
-		`legacy=""; case "$id" in *control-dispatcher) legacy="${id%control-dispatcher}workflow-control";; esac; ` +
-		`for cand in "$id" "$legacy"; do ` +
-		`[ -z "$cand" ] && continue; ` +
-		`r=$(bd ready --include-ephemeral --assignee="$cand" --exclude-type=epic --json --limit=1 2>/dev/null); ` +
-		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
-		`done; ` +
-		`done; ` +
-		// Tier 3: ready unassigned routed to this config (shared routed queue),
-		// then the legacy workflow-control route for pre-rename graphs. Each
-		// target prefers gc.run_target, falling back to gc.routed_to (poolDemandKeys).
-		// Only ephemeral sessions and controller probes consume generic config demand.
-		`case "$GC_SESSION_ORIGIN" in ` +
-		`ephemeral|"") ;; ` +
-		`*) exit 0 ;; ` +
-		`esac; ` +
-		poolDemandFirstRowProbes(target) +
-		poolDemandFirstRowProbes(legacyTarget) +
-		`printf "[]"'`
+	script := legacyControlAssignedWorkQueryScript() +
+		poolDemandOriginGateScript() +
+		poolDemandFirstRowFunctionScript() +
+		`probe_pool_demand "$1"; ` +
+		`probe_pool_demand "$2"; ` +
+		`printf "[]"`
+	return shellquote.Join([]string{"sh", "-c", script, "--", target, legacyTarget})
 }
 
 func legacyWorkflowControlQualifiedName(target string) string {
@@ -3940,6 +3951,9 @@ func Load(fs fsys.FS, path string) (*City, error) {
 	// direct named-session declarations without requiring pack-provided
 	// backing templates to be present yet.
 	if err := validateNamedSessions(cfg, false); err != nil {
+		return nil, err
+	}
+	if err := ValidateGitHubPRMonitors(cfg); err != nil {
 		return nil, err
 	}
 	return cfg, nil

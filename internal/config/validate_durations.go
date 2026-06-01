@@ -77,6 +77,11 @@ func ValidateDurations(cfg *City, source string) []string {
 		checkSleep(ctx, "noninteractive", r.SessionSleep.NonInteractive)
 	}
 
+	for _, monitor := range cfg.GitHub.PRMonitors {
+		ctx := fmt.Sprintf("github.pr_monitor %q", monitor.Name)
+		check(ctx, "poll_interval", monitor.PollInterval)
+	}
+
 	// Per-agent durations.
 	for _, a := range cfg.Agents {
 		ctx := fmt.Sprintf("agent %q", a.QualifiedName())

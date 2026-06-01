@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/config"
+	workdirutil "github.com/gastownhall/gascity/internal/workdir"
 )
 
 // ResolveOpts controls the behavior of ResolveAgent.
@@ -229,6 +230,37 @@ func NormalizePoolRouteTarget(cfg *config.City, target string) string {
 		return base
 	}
 	return target
+}
+
+// AgentReachesWorkflowStore reports whether an agent's scale_check can read
+// beads from storeRef. storeRef uses the workflow store format: "city:<name>"
+// for the HQ store and "rig:<name>" for rig stores.
+func AgentReachesWorkflowStore(storeRef string, agentCfg *config.Agent, cityPath string, cfg *config.City) bool {
+	if cfg == nil || agentCfg == nil {
+		return true
+	}
+	agentRig := workdirutil.ConfiguredRigName(cityPath, *agentCfg, cfg.Rigs)
+	if agentRig == "" {
+		return strings.HasPrefix(storeRef, "city:")
+	}
+	return storeRef == "rig:"+agentRig
+}
+
+// AgentReachableStoreLabel returns the workflow store ref an agent's
+// scale_check reads, for use in cross-store routing diagnostics.
+func AgentReachableStoreLabel(agentCfg *config.Agent, cityPath, cityName string, cfg *config.City) string {
+	if cfg == nil || agentCfg == nil {
+		return ""
+	}
+	agentRig := workdirutil.ConfiguredRigName(cityPath, *agentCfg, cfg.Rigs)
+	if agentRig == "" {
+		cn := strings.TrimSpace(cityName)
+		if cn == "" {
+			cn = "city"
+		}
+		return "city:" + cn
+	}
+	return "rig:" + agentRig
 }
 
 // matchPoolInstanceBare checks if a bare input matches a multi-session

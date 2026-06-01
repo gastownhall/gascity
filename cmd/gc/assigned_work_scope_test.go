@@ -4,6 +4,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/agentutil"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 )
@@ -277,5 +278,70 @@ func TestSessionAssignmentIdentifiersForConfigConfiguredNamedSessionFallbackIsCo
 				}
 			}
 		})
+	}
+}
+
+func TestAgentReachesWorkflowStore(t *testing.T) {
+	cityPath := t.TempDir()
+	rigPath := filepath.Join(cityPath, "alpha")
+	cfg := &config.City{
+		Rigs: []config.Rig{{Name: "alpha", Path: rigPath}},
+	}
+	hqAgent := &config.Agent{Name: "mayor"}
+	rigAgent := &config.Agent{Name: "polecat", Dir: "alpha"}
+
+	cases := []struct {
+		name     string
+		storeRef string
+		agent    *config.Agent
+		want     bool
+	}{
+		{name: "hq agent reaches city store", storeRef: "city:test-city", agent: hqAgent, want: true},
+		{name: "hq agent cannot reach rig store", storeRef: "rig:alpha", agent: hqAgent, want: false},
+		{name: "rig agent reaches own rig store", storeRef: "rig:alpha", agent: rigAgent, want: true},
+		{name: "rig agent cannot reach city store", storeRef: "city:test-city", agent: rigAgent, want: false},
+		{name: "rig agent cannot reach a different rig", storeRef: "rig:beta", agent: rigAgent, want: false},
+		{name: "empty storeRef is unreachable for rig agent", storeRef: "", agent: rigAgent, want: false},
+		{name: "empty storeRef is unreachable for hq agent", storeRef: "", agent: hqAgent, want: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := agentutil.AgentReachesWorkflowStore(tc.storeRef, tc.agent, cityPath, cfg); got != tc.want {
+				t.Fatalf("AgentReachesWorkflowStore(%q, %q) = %v, want %v", tc.storeRef, tc.agent.Name, got, tc.want)
+			}
+		})
+	}
+
+	if !agentutil.AgentReachesWorkflowStore("city:test-city", nil, cityPath, cfg) {
+		t.Fatal("nil agent should permissively reach any store")
+	}
+	if !agentutil.AgentReachesWorkflowStore("rig:alpha", rigAgent, cityPath, nil) {
+		t.Fatal("nil cfg should permissively reach any store")
+	}
+}
+
+func TestAgentReachableStoreLabel(t *testing.T) {
+	cityPath := t.TempDir()
+	rigPath := filepath.Join(cityPath, "alpha")
+	cfg := &config.City{
+		Rigs: []config.Rig{{Name: "alpha", Path: rigPath}},
+	}
+	hqAgent := &config.Agent{Name: "mayor"}
+	rigAgent := &config.Agent{Name: "polecat", Dir: "alpha"}
+
+	if got := agentutil.AgentReachableStoreLabel(hqAgent, cityPath, "test-city", cfg); got != "city:test-city" {
+		t.Errorf("hq agent label = %q, want city:test-city", got)
+	}
+	if got := agentutil.AgentReachableStoreLabel(rigAgent, cityPath, "test-city", cfg); got != "rig:alpha" {
+		t.Errorf("rig agent label = %q, want rig:alpha", got)
+	}
+	if got := agentutil.AgentReachableStoreLabel(hqAgent, cityPath, "", cfg); got != "city:city" {
+		t.Errorf("hq agent label with empty cityName = %q, want city:city", got)
+	}
+	if got := agentutil.AgentReachableStoreLabel(nil, cityPath, "test-city", cfg); got != "" {
+		t.Errorf("nil agent label = %q, want empty", got)
+	}
+	if got := agentutil.AgentReachableStoreLabel(hqAgent, cityPath, "test-city", nil); got != "" {
+		t.Errorf("nil cfg label = %q, want empty", got)
 	}
 }

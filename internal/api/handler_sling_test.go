@@ -100,6 +100,47 @@ func TestSlingWithBead(t *testing.T) {
 	}
 }
 
+func TestSlingRefusesCityStoreBeadToRigTarget(t *testing.T) {
+	h, state := newSlingTestServer(t)
+	state.cfg.Workspace.Prefix = "gc"
+	state.cfg.Rigs[0].Prefix = "rw"
+	state.cityBeadStore = beads.NewMemStore()
+	b, err := state.cityBeadStore.Create(beads.Bead{Title: "city task", Type: "task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	body := `{"target":"myrig/worker","bead":"` + b.ID + `","force":true}`
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, newPostRequest(cityURL(state, "/sling"), strings.NewReader(body)))
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body = %s", rec.Code, rec.Body.String())
+	}
+	var problem struct {
+		Type   string `json:"type"`
+		Detail string `json:"detail"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&problem); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if problem.Type != slingCrossStoreRouteProblemType {
+		t.Fatalf("type = %q, want cross-store discriminator", problem.Type)
+	}
+	for _, want := range []string{"refusing cross-store route", "city:test-city", "myrig/worker", "rig:myrig"} {
+		if !strings.Contains(problem.Detail, want) {
+			t.Fatalf("detail = %q, want %q", problem.Detail, want)
+		}
+	}
+	updated, err := state.cityBeadStore.Get(b.ID)
+	if err != nil {
+		t.Fatalf("Get(%q): %v", b.ID, err)
+	}
+	if got := updated.Metadata["gc.routed_to"]; got != "" {
+		t.Fatalf("gc.routed_to = %q, want unset after refusal", got)
+	}
+}
+
 func TestSlingWithMissingBeadReturnsBadRequest(t *testing.T) {
 	h, state := newSlingTestServer(t)
 
@@ -375,7 +416,7 @@ func TestSlingProblemTypesDocumentedInOpenAPI(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal components: %v", err)
 	}
-	for _, want := range []string{slingMissingBeadProblemType, slingCrossRigProblemType} {
+	for _, want := range []string{slingMissingBeadProblemType, slingCrossRigProblemType, slingCrossStoreRouteProblemType} {
 		if !bytes.Contains(components, []byte(want)) {
 			t.Fatalf("OpenAPI components missing problem type %q", want)
 		}

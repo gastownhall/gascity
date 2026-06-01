@@ -417,9 +417,10 @@ func newRuntimeDrainAckCmd(stdout, stderr io.Writer) *cobra.Command {
 		Short: "Acknowledge drain — signal the controller to stop this session",
 		Long: `Acknowledge a drain signal — tell the controller to stop this session.
 
-Sets GC_DRAIN_ACK metadata on the session. The controller will stop
-the session on its next reconcile tick. Call this after the session has
-finished its current work in response to a drain signal.`,
+Sets GC_DRAIN_ACK metadata on the session, then pokes the controller
+socket so the reconciler stops the session immediately rather than on
+its next patrol tick. Call this after the session has finished its
+current work in response to a drain signal.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			if cmdRuntimeDrainAck(args, jsonOutput, stdout, stderr) != 0 {
@@ -441,7 +442,7 @@ func cmdRuntimeDrainAck(args []string, jsonOutput bool, stdout, stderr io.Writer
 		}
 		sp := newSessionProvider()
 		dops := newDrainOps(sp)
-		return doRuntimeDrainAck(dops, target.display, target.sessionName, jsonOutput, stdout, stderr)
+		return doRuntimeDrainAck(dops, target.cityPath, target.display, target.sessionName, jsonOutput, stdout, stderr)
 	}
 
 	current, err := currentSessionRuntimeTarget()
@@ -451,7 +452,7 @@ func cmdRuntimeDrainAck(args []string, jsonOutput bool, stdout, stderr io.Writer
 	}
 	sp := newSessionProvider()
 	dops := newDrainOps(sp)
-	return doRuntimeDrainAck(dops, current.display, current.sessionName, jsonOutput, stdout, stderr)
+	return doRuntimeDrainAck(dops, current.cityPath, current.display, current.sessionName, jsonOutput, stdout, stderr)
 }
 
 // ---------------------------------------------------------------------------
@@ -623,12 +624,20 @@ func waitForControllerRestart(ctx context.Context, dops drainOps, sn, command st
 	}
 }
 
-// doRuntimeDrainAck sets the drain-ack flag on the session. The controller
-// will stop the session on the next tick.
-func doRuntimeDrainAck(dops drainOps, targetName, sn string, jsonOutput bool, stdout, stderr io.Writer) int {
+// drainAckPokeController is a mutable global test seam over pokeController.
+// Tests that swap it MUST NOT call t.Parallel().
+var drainAckPokeController = pokeController
+
+// doRuntimeDrainAck sets the drain-ack flag on the session, then pokes the
+// controller so the reconciler observes the drained state immediately instead
+// of waiting for its next patrol tick.
+func doRuntimeDrainAck(dops drainOps, cityPath, targetName, sn string, jsonOutput bool, stdout, stderr io.Writer) int {
 	if err := dops.setDrainAck(sn); err != nil {
 		fmt.Fprintf(stderr, "gc runtime drain-ack: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
+	}
+	if err := drainAckPokeController(cityPath); err != nil {
+		fmt.Fprintf(stderr, "gc runtime drain-ack: warning: poke failed: %v\n", err) //nolint:errcheck // best-effort stderr
 	}
 	if jsonOutput {
 		if err := writeCLIJSONLine(stdout, runtimeActionJSON{

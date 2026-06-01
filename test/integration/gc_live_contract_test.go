@@ -221,7 +221,7 @@ func TestGCLiveContract_BeadsAndEvents(t *testing.T) {
 	}](t, baseURL, validator, http.MethodPost, cityBase+"/sling", map[string]any{
 		"rig":    rigName,
 		"target": targetAgent,
-		"bead":   rootBead.ID,
+		"bead":   cityScopedBead.ID,
 		"force":  true,
 	}, http.StatusOK)
 	formulaName := "real-world-app-contract-work"

@@ -606,6 +606,14 @@ type BeadUpdateBody struct {
 	Type *string `json:"type,omitempty"`
 }
 
+// BeadsDiagnostic defines model for BeadsDiagnostic.
+type BeadsDiagnostic struct {
+	BeadsStore          string  `json:"beads_store"`
+	NativeStoreEligible bool    `json:"native_store_eligible"`
+	PreflightGate       *string `json:"preflight_gate,omitempty"`
+	PreflightReason     *string `json:"preflight_reason,omitempty"`
+}
+
 // BindingStatus Lifecycle state of a session binding.
 type BindingStatus string
 
@@ -1857,12 +1865,13 @@ type OrderListBody struct {
 
 // OrderResponse defines model for OrderResponse.
 type OrderResponse struct {
-	CaptureOutput bool    `json:"capture_output"`
-	Check         *string `json:"check,omitempty"`
-	Description   *string `json:"description,omitempty"`
-	Enabled       bool    `json:"enabled"`
-	Exec          *string `json:"exec,omitempty"`
-	Formula       *string `json:"formula,omitempty"`
+	CaptureOutput bool               `json:"capture_output"`
+	Check         *string            `json:"check,omitempty"`
+	Description   *string            `json:"description,omitempty"`
+	Enabled       bool               `json:"enabled"`
+	Env           *map[string]string `json:"env,omitempty"`
+	Exec          *string            `json:"exec,omitempty"`
+	Formula       *string            `json:"formula,omitempty"`
 	// Deprecated: this property has been marked as deprecated upstream, but no `x-deprecated-reason` was set
 	Gate       *string `json:"gate,omitempty"`
 	Interval   *string `json:"interval,omitempty"`
@@ -2775,6 +2784,7 @@ type StatusBody struct {
 	// AgentDetails Per-agent state (for CLI status views). Empty when none.
 	AgentDetails *[]StatusAgentDetail `json:"agent_details,omitempty"`
 	Agents       StatusAgentCounts    `json:"agents"`
+	Beads        *BeadsDiagnostic     `json:"beads,omitempty"`
 	Mail         StatusMailCounts     `json:"mail"`
 
 	// Name City name.
@@ -3061,6 +3071,18 @@ type TypedEventStreamEnvelopeBeadClosed struct {
 
 // TypedEventStreamEnvelopeBeadCreated defines model for TypedEventStreamEnvelopeBeadCreated.
 type TypedEventStreamEnvelopeBeadCreated struct {
+	Actor    string                   `json:"actor"`
+	Message  *string                  `json:"message,omitempty"`
+	Payload  BeadEventPayload         `json:"payload"`
+	Seq      int64                    `json:"seq"`
+	Subject  *string                  `json:"subject,omitempty"`
+	Ts       time.Time                `json:"ts"`
+	Type     string                   `json:"type"`
+	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedEventStreamEnvelopeBeadDeleted defines model for TypedEventStreamEnvelopeBeadDeleted.
+type TypedEventStreamEnvelopeBeadDeleted struct {
 	Actor    string                   `json:"actor"`
 	Message  *string                  `json:"message,omitempty"`
 	Payload  BeadEventPayload         `json:"payload"`
@@ -3751,6 +3773,19 @@ type TypedTaggedEventStreamEnvelopeBeadClosed struct {
 
 // TypedTaggedEventStreamEnvelopeBeadCreated defines model for TypedTaggedEventStreamEnvelopeBeadCreated.
 type TypedTaggedEventStreamEnvelopeBeadCreated struct {
+	Actor    string                   `json:"actor"`
+	City     string                   `json:"city"`
+	Message  *string                  `json:"message,omitempty"`
+	Payload  BeadEventPayload         `json:"payload"`
+	Seq      int64                    `json:"seq"`
+	Subject  *string                  `json:"subject,omitempty"`
+	Ts       time.Time                `json:"ts"`
+	Type     string                   `json:"type"`
+	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeBeadDeleted defines model for TypedTaggedEventStreamEnvelopeBeadDeleted.
+type TypedTaggedEventStreamEnvelopeBeadDeleted struct {
 	Actor    string                   `json:"actor"`
 	City     string                   `json:"city"`
 	Message  *string                  `json:"message,omitempty"`
@@ -6524,6 +6559,34 @@ func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeBeadCreated(v Ty
 	return err
 }
 
+// AsTypedEventStreamEnvelopeBeadDeleted returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeBeadDeleted
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeBeadDeleted() (TypedEventStreamEnvelopeBeadDeleted, error) {
+	var body TypedEventStreamEnvelopeBeadDeleted
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeBeadDeleted overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeBeadDeleted
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeBeadDeleted(v TypedEventStreamEnvelopeBeadDeleted) error {
+	v.Type = "bead.deleted"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeBeadDeleted performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeBeadDeleted
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeBeadDeleted(v TypedEventStreamEnvelopeBeadDeleted) error {
+	v.Type = "bead.deleted"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedEventStreamEnvelopeBeadUpdated returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeBeadUpdated
 func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeBeadUpdated() (TypedEventStreamEnvelopeBeadUpdated, error) {
 	var body TypedEventStreamEnvelopeBeadUpdated
@@ -8084,6 +8147,8 @@ func (t TypedEventStreamEnvelope) ValueByDiscriminator() (interface{}, error) {
 		return t.AsTypedEventStreamEnvelopeBeadClosed()
 	case "bead.created":
 		return t.AsTypedEventStreamEnvelopeBeadCreated()
+	case "bead.deleted":
+		return t.AsTypedEventStreamEnvelopeBeadDeleted()
 	case "bead.updated":
 		return t.AsTypedEventStreamEnvelopeBeadUpdated()
 	case "city.created":
@@ -8253,6 +8318,34 @@ func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeBeadC
 // MergeTypedTaggedEventStreamEnvelopeBeadCreated performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeBeadCreated
 func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeBeadCreated(v TypedTaggedEventStreamEnvelopeBeadCreated) error {
 	v.Type = "bead.created"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeBeadDeleted returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeBeadDeleted
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeBeadDeleted() (TypedTaggedEventStreamEnvelopeBeadDeleted, error) {
+	var body TypedTaggedEventStreamEnvelopeBeadDeleted
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeBeadDeleted overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeBeadDeleted
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeBeadDeleted(v TypedTaggedEventStreamEnvelopeBeadDeleted) error {
+	v.Type = "bead.deleted"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeBeadDeleted performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeBeadDeleted
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeBeadDeleted(v TypedTaggedEventStreamEnvelopeBeadDeleted) error {
+	v.Type = "bead.deleted"
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -9823,6 +9916,8 @@ func (t TypedTaggedEventStreamEnvelope) ValueByDiscriminator() (interface{}, err
 		return t.AsTypedTaggedEventStreamEnvelopeBeadClosed()
 	case "bead.created":
 		return t.AsTypedTaggedEventStreamEnvelopeBeadCreated()
+	case "bead.deleted":
+		return t.AsTypedTaggedEventStreamEnvelopeBeadDeleted()
 	case "bead.updated":
 		return t.AsTypedTaggedEventStreamEnvelopeBeadUpdated()
 	case "city.created":

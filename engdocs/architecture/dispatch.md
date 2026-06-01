@@ -155,11 +155,12 @@ Dispatch has two read sides that must stay symmetric:
 Both forms answer the same question — "is there ready, unassigned,
 non-epic work routed to this pool-demand target?" — and must therefore
 observe the bead store through the same filter. They share target
-resolution and the predicate: `bdReadyPoolDemandShell(key, target)`
+resolution and the predicate: `bdReadyPoolDemandShell(limitFlag)`
 returns `bd ready --include-ephemeral --metadata-field
-<key>=<target> --unassigned --exclude-type=epic --json`. The
-work-query form checks `gc.run_target` first, then the compatibility
-fallback `gc.routed_to`; each tier appends `--sort oldest --limit=1`.
+"$key=$target" --unassigned --exclude-type=epic --json <limitFlag>`.
+The caller provides `key` and `target` as shell variables. The work-query
+form checks `gc.run_target` first, then the compatibility fallback
+`gc.routed_to`; each tier appends `--sort oldest --limit=1`.
 That is an intentional routed-queue policy: unassigned routed pool work is
 FIFO before priority, so newer high-priority work does not jump ahead of
 older ready work already queued for the same target. The count form uses

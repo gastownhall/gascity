@@ -107,6 +107,12 @@
         "enabled": {
           "type": "boolean"
         },
+        "env": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
         "source": {
           "type": "string"
         },

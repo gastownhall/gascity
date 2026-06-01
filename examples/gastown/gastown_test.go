@@ -2616,10 +2616,11 @@ func TestWitnessPatrolLivenessProcedureUsesExactSessionIdentity(t *testing.T) {
 		}
 	}
 	for _, want := range []string{
-		`$s.ID`,
-		`$s.SessionName`,
-		`$s.Alias`,
-		`$s.AgentName`,
+		`$s.id`,
+		`$s.name`,
+		`$s.session_name`,
+		`$s.alias`,
+		`$s.agent_name`,
 		`configured_named_identity`,
 	} {
 		if !strings.Contains(body, want) {

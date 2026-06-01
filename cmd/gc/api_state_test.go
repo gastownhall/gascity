@@ -1454,6 +1454,155 @@ func TestWrapWithCachingStoreReturnsNilStore(t *testing.T) {
 	}
 }
 
+type closeStoreSpy struct {
+	beads.Store
+	closed   atomic.Int32
+	closeErr error
+}
+
+func (s *closeStoreSpy) CloseStore() error {
+	s.closed.Add(1)
+	return s.closeErr
+}
+
+func (s *closeStoreSpy) Get(id string) (beads.Bead, error) {
+	if s.closeCount() > 0 {
+		return beads.Bead{}, fmt.Errorf("closeStoreSpy: %w", beads.ErrStoreClosed)
+	}
+	return s.Store.Get(id)
+}
+
+func (s *closeStoreSpy) closeCount() int {
+	return int(s.closed.Load())
+}
+
+func setControllerStateStoreCloseDelayForTest(t *testing.T, delay time.Duration) {
+	t.Helper()
+	prev := controllerStateStoreCloseDelay
+	controllerStateStoreCloseDelay = delay
+	t.Cleanup(func() { controllerStateStoreCloseDelay = prev })
+}
+
+func waitForCloseStoreSpy(t *testing.T, store *closeStoreSpy) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if got := store.closeCount(); got == 1 {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("CloseStore calls = %d, want 1", store.closeCount())
+}
+
+func TestControllerStateUpdateClosesReplacedCityStore(t *testing.T) {
+	prevOpen := newControllerStateOpenCityStore
+	t.Cleanup(func() { newControllerStateOpenCityStore = prevOpen })
+	setControllerStateStoreCloseDelayForTest(t, time.Millisecond)
+
+	replacement := beads.NewMemStore()
+	newControllerStateOpenCityStore = func(string) (beads.StoreOpenResult, error) {
+		return beads.StoreOpenResult{Store: replacement}, nil
+	}
+	oldStore := &closeStoreSpy{Store: beads.NewMemStore()}
+	cs := &controllerState{
+		cfg:           &config.City{},
+		cityPath:      t.TempDir(),
+		cityBeadStore: oldStore,
+		beadStores:    map[string]beads.Store{},
+	}
+
+	cs.update(&config.City{}, runtime.NewFake())
+
+	if cs.CityBeadStore() == oldStore {
+		t.Fatal("city bead store was not replaced")
+	}
+	waitForCloseStoreSpy(t, oldStore)
+}
+
+func TestControllerStateUpdateClosesReplacedRigStores(t *testing.T) {
+	prevOpen := newControllerStateOpenCityStore
+	t.Cleanup(func() { newControllerStateOpenCityStore = prevOpen })
+	setControllerStateStoreCloseDelayForTest(t, time.Millisecond)
+
+	newControllerStateOpenCityStore = func(string) (beads.StoreOpenResult, error) {
+		return beads.StoreOpenResult{}, nil
+	}
+	oldStore := &closeStoreSpy{Store: beads.NewMemStore()}
+	cs := &controllerState{
+		cfg:        &config.City{},
+		cityPath:   t.TempDir(),
+		beadStores: map[string]beads.Store{"frontend": oldStore},
+	}
+
+	cs.update(&config.City{}, runtime.NewFake())
+
+	if _, ok := cs.BeadStores()["frontend"]; ok {
+		t.Fatal("frontend rig store was not replaced")
+	}
+	waitForCloseStoreSpy(t, oldStore)
+}
+
+func TestControllerStateUpdateKeepsStaleRigStoreUsableDuringReload(t *testing.T) {
+	prevOpen := newControllerStateOpenCityStore
+	t.Cleanup(func() { newControllerStateOpenCityStore = prevOpen })
+	setControllerStateStoreCloseDelayForTest(t, 200*time.Millisecond)
+
+	newControllerStateOpenCityStore = func(string) (beads.StoreOpenResult, error) {
+		return beads.StoreOpenResult{}, nil
+	}
+	oldStore := &closeStoreSpy{Store: beads.NewMemStore()}
+	created, err := oldStore.Create(beads.Bead{Title: "in-flight"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	cs := &controllerState{
+		cfg:        &config.City{},
+		cityPath:   t.TempDir(),
+		beadStores: map[string]beads.Store{"frontend": oldStore},
+	}
+
+	stale := cs.BeadStore("frontend")
+	cs.update(&config.City{}, runtime.NewFake())
+
+	got, err := stale.Get(created.ID)
+	if err != nil {
+		t.Fatalf("stale store Get after reload returned %v; want old handle usable during drain", err)
+	}
+	if got.ID != created.ID {
+		t.Fatalf("stale store Get ID = %q, want %q", got.ID, created.ID)
+	}
+	waitForCloseStoreSpy(t, oldStore)
+}
+
+func TestControllerStateUpdateReturnsTypedStoreClosedAfterReloadDrain(t *testing.T) {
+	prevOpen := newControllerStateOpenCityStore
+	t.Cleanup(func() { newControllerStateOpenCityStore = prevOpen })
+	setControllerStateStoreCloseDelayForTest(t, time.Millisecond)
+
+	newControllerStateOpenCityStore = func(string) (beads.StoreOpenResult, error) {
+		return beads.StoreOpenResult{}, nil
+	}
+	oldStore := &closeStoreSpy{Store: beads.NewMemStore()}
+	created, err := oldStore.Create(beads.Bead{Title: "in-flight"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	cs := &controllerState{
+		cfg:        &config.City{},
+		cityPath:   t.TempDir(),
+		beadStores: map[string]beads.Store{"frontend": oldStore},
+	}
+
+	stale := cs.BeadStore("frontend")
+	cs.update(&config.City{}, runtime.NewFake())
+	waitForCloseStoreSpy(t, oldStore)
+
+	if _, err := stale.Get(created.ID); !errors.Is(err, beads.ErrStoreClosed) {
+		t.Fatalf("stale store Get after reload drain returned %v, want ErrStoreClosed", err)
+	}
+}
+
 func TestControllerStateBeadEventsRespectStorePrefixes(t *testing.T) {
 	cityBacking := beads.NewMemStore()
 	rigBacking := beads.NewMemStore()
@@ -1977,6 +2126,77 @@ provider = "file"
 	}
 }
 
+func TestControllerStateBuildStoresRoutesBdRigThroughStoreFactory(t *testing.T) {
+	t.Setenv("GC_BEADS", "")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+
+	prevOpen := controllerStateOpenRigStoreAtForCity
+	t.Cleanup(func() { controllerStateOpenRigStoreAtForCity = prevOpen })
+
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "frontend")
+	if err := os.MkdirAll(filepath.Join(rigDir, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
+name = "demo"
+
+[beads]
+provider = "file"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rigDir, ".beads", "metadata.json"), []byte(`{"database":"dolt","backend":"dolt","dolt_mode":"embedded","dolt_database":"fe"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	nativeBacking := beads.NewMemStore()
+	factoryCalled := false
+	controllerStateOpenRigStoreAtForCity = func(_ context.Context, opts beads.StoreOpenOptions) (beads.StoreOpenResult, error) {
+		factoryCalled = true
+		if opts.ScopeRoot != rigDir {
+			t.Fatalf("factory ScopeRoot = %q, want %q", opts.ScopeRoot, rigDir)
+		}
+		if opts.CityPath != cityDir {
+			t.Fatalf("factory CityPath = %q, want %q", opts.CityPath, cityDir)
+		}
+		if opts.Provider != "bd" {
+			t.Fatalf("factory Provider = %q, want bd", opts.Provider)
+		}
+		if opts.OpenBdStore == nil {
+			t.Fatal("factory OpenBdStore is nil")
+		}
+		return beads.StoreOpenResult{
+			Store: nativeBacking,
+			Diagnostic: beads.BeadsDiagnostic{
+				Store:               "NativeDoltStore",
+				NativeStoreEligible: true,
+			},
+		}, nil
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "demo"},
+		Rigs: []config.Rig{{
+			Name:   "frontend",
+			Path:   rigDir,
+			Prefix: "fe",
+		}},
+	}
+
+	cs := &controllerState{cityPath: cityDir, cfg: cfg}
+	stores := cs.buildStores(cfg)
+
+	if !factoryCalled {
+		t.Fatal("buildStores did not route bd-backed rig through store factory")
+	}
+	cached, ok := stores["frontend"].(*beads.CachingStore)
+	if !ok {
+		t.Fatalf("frontend store = %T, want caching store", stores["frontend"])
+	}
+	if cached.Backing() != nativeBacking {
+		t.Fatalf("frontend backing = %T, want native factory backing", cached.Backing())
+	}
+}
+
 func TestControllerStateBuildStoresUsesRigFileMarkerUnderLegacyFileCity(t *testing.T) {
 	t.Setenv("GC_BEADS", "")
 	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
@@ -2474,9 +2694,9 @@ func TestControllerStateEstablishesBeadEventCursorBeforePrimingStores(t *testing
 	ep := newBlockingLatestEventProvider()
 	var storeOpened atomic.Bool
 	prevCityStore := newControllerStateOpenCityStore
-	newControllerStateOpenCityStore = func(string) (beads.Store, error) {
+	newControllerStateOpenCityStore = func(string) (beads.StoreOpenResult, error) {
 		storeOpened.Store(true)
-		return beads.NewMemStore(), nil
+		return beads.StoreOpenResult{Store: beads.NewMemStore()}, nil
 	}
 	t.Cleanup(func() {
 		newControllerStateOpenCityStore = prevCityStore
@@ -2516,8 +2736,8 @@ func TestControllerStateEstablishesBeadEventCursorBeforePrimingStores(t *testing
 func TestControllerStateBeadEventWatcherReplaysEventsAfterCachePrime(t *testing.T) {
 	backing := beads.NewMemStore()
 	prevCityStore := newControllerStateOpenCityStore
-	newControllerStateOpenCityStore = func(string) (beads.Store, error) {
-		return backing, nil
+	newControllerStateOpenCityStore = func(string) (beads.StoreOpenResult, error) {
+		return beads.StoreOpenResult{Store: backing}, nil
 	}
 	t.Cleanup(func() {
 		newControllerStateOpenCityStore = prevCityStore
@@ -2572,8 +2792,8 @@ func TestControllerStateBeadEventWatcherReplaysEventsAfterCachePrime(t *testing.
 func TestControllerStateBeadEventWatcherRetriesSetupErrors(t *testing.T) {
 	backing := beads.NewMemStore()
 	prevCityStore := newControllerStateOpenCityStore
-	newControllerStateOpenCityStore = func(string) (beads.Store, error) {
-		return backing, nil
+	newControllerStateOpenCityStore = func(string) (beads.StoreOpenResult, error) {
+		return beads.StoreOpenResult{Store: backing}, nil
 	}
 	t.Cleanup(func() {
 		newControllerStateOpenCityStore = prevCityStore
@@ -2623,8 +2843,8 @@ func TestControllerStateBeadEventWatcherRetriesSetupErrors(t *testing.T) {
 func TestControllerStateBeadEventWatcherConsumesExternalFileEvent(t *testing.T) {
 	backing := beads.NewMemStore()
 	prevCityStore := newControllerStateOpenCityStore
-	newControllerStateOpenCityStore = func(string) (beads.Store, error) {
-		return backing, nil
+	newControllerStateOpenCityStore = func(string) (beads.StoreOpenResult, error) {
+		return beads.StoreOpenResult{Store: backing}, nil
 	}
 	t.Cleanup(func() {
 		newControllerStateOpenCityStore = prevCityStore

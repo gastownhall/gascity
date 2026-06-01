@@ -117,6 +117,11 @@ func preflight(opts SlingOpts, deps SlingDeps, querier BeadQuerier) (SlingResult
 		}
 		result.BeadWarnings = append(result.BeadWarnings, check.Warnings...)
 	}
+	if shouldValidateBuiltInRouteStoreReachable(opts, deps) {
+		if err := validateBuiltInRouteStoreReachable(deps, opts.BeadOrFormula, a); err != nil {
+			return result, fmt.Errorf("%w", err)
+		}
+	}
 
 	// Reassign: clear any existing human assignee before routing so the
 	// target pool/agent can claim the bead. Without this, beads claimed
@@ -165,6 +170,10 @@ func shouldGuardCrossRig(opts SlingOpts) bool {
 
 func shouldCheckBeadState(opts SlingOpts) bool {
 	return !opts.IsFormula && !opts.Force && (!opts.DryRun || !opts.InlineText)
+}
+
+func shouldValidateBuiltInRouteStoreReachable(opts SlingOpts, deps SlingDeps) bool {
+	return deps.Router != nil && !opts.IsFormula && !opts.DryRun
 }
 
 func validateExistingBead(beadID string, deps SlingDeps) error {
@@ -355,6 +364,10 @@ func finalize(opts SlingOpts, deps SlingDeps, beadID, method string, result Slin
 	slingEnv := ResolveSlingEnv(a, deps, beadID)
 	rigDir := SlingDirForBead(deps.Cfg, deps.CityPath, beadID)
 	if deps.Router != nil {
+		if err := validateBuiltInRouteStoreReachable(deps, beadID, a); err != nil {
+			telemetry.RecordSling(context.Background(), a.QualifiedName(), TargetType(&a), method, err)
+			return result, fmt.Errorf("%w", err)
+		}
 		req := RouteRequest{
 			BeadID:  beadID,
 			Target:  a.QualifiedName(),
@@ -447,6 +460,21 @@ func finalize(opts SlingOpts, deps SlingDeps, beadID, method string, result Slin
 	}
 
 	return result, nil
+}
+
+func validateBuiltInRouteStoreReachable(deps SlingDeps, beadID string, a config.Agent) error {
+	if deps.Cfg == nil || IsCustomSlingQuery(a) {
+		return nil
+	}
+	if agentutil.AgentReachesWorkflowStore(deps.StoreRef, &a, deps.CityPath, deps.Cfg) {
+		return nil
+	}
+	return &CrossStoreRouteError{
+		BeadID:            beadID,
+		StoreRef:          deps.StoreRef,
+		Target:            a.QualifiedName(),
+		ReachableStoreRef: agentutil.AgentReachableStoreLabel(&a, deps.CityPath, deps.CityName, deps.Cfg),
+	}
 }
 
 // doStartGraphWorkflow performs post-instantiation graph workflow setup.
@@ -1124,6 +1152,18 @@ func DoSlingBatch(opts SlingOpts, deps SlingDeps, querier BeadChildQuerier) (Sli
 			batchResult.BeadWarnings = append(batchResult.BeadWarnings, check.Warnings...)
 		}
 
+		if shouldValidateBuiltInRouteStoreReachable(opts, deps) {
+			if err := validateBuiltInRouteStoreReachable(deps, child.ID, a); err != nil {
+				childResult.Failed = true
+				childResult.FailReason = err.Error()
+				batchResult.Children = append(batchResult.Children, childResult)
+				childErrors = append(childErrors, err)
+				telemetry.RecordSling(context.Background(), a.QualifiedName(), TargetType(&a), batchMethod, err)
+				failed++
+				continue
+			}
+		}
+
 		if useFormula != "" {
 			formulaLabel := "formula"
 			if opts.OnFormula == "" {
@@ -1154,6 +1194,15 @@ func DoSlingBatch(opts SlingOpts, deps SlingDeps, querier BeadChildQuerier) (Sli
 		childEnv := ResolveSlingEnvForBead(a, deps, child)
 		rigDir := SlingDirForBead(deps.Cfg, deps.CityPath, child.ID)
 		if deps.Router != nil {
+			if err := validateBuiltInRouteStoreReachable(deps, child.ID, a); err != nil {
+				childResult.Failed = true
+				childResult.FailReason = err.Error()
+				batchResult.Children = append(batchResult.Children, childResult)
+				childErrors = append(childErrors, err)
+				telemetry.RecordSling(context.Background(), a.QualifiedName(), TargetType(&a), batchMethod, err)
+				failed++
+				continue
+			}
 			req := RouteRequest{
 				BeadID:  child.ID,
 				Target:  a.QualifiedName(),

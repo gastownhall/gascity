@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"syscall"
 	"testing"
@@ -67,6 +68,45 @@ type deadRuntimeArtifactProvider struct {
 	listErr   error
 	stopped   []string
 	stopCalls map[string]int
+}
+
+type processTableSweepProvider struct {
+	*runtime.Fake
+	runtimes     []runtime.LiveRuntime
+	findErr      error
+	terminateErr map[int]error
+	terminated   []runtime.LiveRuntime
+}
+
+func newProcessTableSweepProvider(runtimes ...runtime.LiveRuntime) *processTableSweepProvider {
+	return &processTableSweepProvider{
+		Fake:         runtime.NewFake(),
+		runtimes:     runtimes,
+		terminateErr: make(map[int]error),
+	}
+}
+
+func (p *processTableSweepProvider) FindRuntimesBySessionID(id string) ([]runtime.LiveRuntime, error) {
+	if id != "" {
+		var filtered []runtime.LiveRuntime
+		for _, live := range p.runtimes {
+			if live.SessionID == id {
+				filtered = append(filtered, live)
+			}
+		}
+		return filtered, p.findErr
+	}
+	out := make([]runtime.LiveRuntime, len(p.runtimes))
+	copy(out, p.runtimes)
+	return out, p.findErr
+}
+
+func (p *processTableSweepProvider) TerminateRuntime(live runtime.LiveRuntime) error {
+	if err := p.terminateErr[live.PID]; err != nil {
+		return err
+	}
+	p.terminated = append(p.terminated, live)
+	return nil
 }
 
 func newDeadRuntimeArtifactProvider() *deadRuntimeArtifactProvider {
@@ -6103,6 +6143,149 @@ func TestCleanupDeadRuntimeSessionCorpsesRetainsBeadWhenRigStoreWorkAssigned(t *
 	if after.Status == "closed" {
 		t.Fatalf("bead status = closed; want still open — closing would orphan rig-store work assigned by session_name %q", "worker-9")
 	}
+}
+
+func TestSweepProcessTableOrphansReapsClosedAndAbsentUntrackedRuntimes(t *testing.T) {
+	store := beads.NewMemStoreFrom(0, []beads.Bead{
+		{ID: "gm-open", Status: "open"},
+		{ID: "gm-closed", Status: "closed"},
+		{ID: "gm-tracked-closed", Status: "closed"},
+	}, nil)
+	snapshot := newSessionBeadSnapshot([]beads.Bead{{ID: "gm-open", Status: "open"}})
+	sp := newProcessTableSweepProvider(
+		runtime.LiveRuntime{SessionID: "gm-open", PID: 101, IsTracked: false},
+		runtime.LiveRuntime{SessionID: "gm-closed", PID: 102, IsTracked: false},
+		runtime.LiveRuntime{SessionID: "gm-missing", PID: 103, IsTracked: false},
+		runtime.LiveRuntime{SessionID: "gm-tracked-closed", PID: 104, IsTracked: true},
+	)
+
+	var stderr bytes.Buffer
+	got := sweepProcessTableOrphans(sp, snapshot, store, &stderr)
+	if got != 2 {
+		t.Fatalf("sweepProcessTableOrphans() = %d, want 2; stderr=%q", got, stderr.String())
+	}
+	if got := terminatedSessionIDs(sp.terminated); got != "gm-closed,gm-missing" {
+		t.Fatalf("terminated = %s, want gm-closed,gm-missing", got)
+	}
+	if after, err := store.Get("gm-open"); err != nil || after.Status != "open" {
+		t.Fatalf("open bead mutated: bead=%+v err=%v", after, err)
+	}
+	if after, err := store.Get("gm-closed"); err != nil || after.Status != "closed" {
+		t.Fatalf("closed bead mutated: bead=%+v err=%v", after, err)
+	}
+}
+
+func TestSweepProcessTableOrphansContinuesAfterErrors(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := newProcessTableSweepProvider(
+		runtime.LiveRuntime{SessionID: "gm-reaped", PID: 201, IsTracked: false},
+		runtime.LiveRuntime{SessionID: "gm-term-fails", PID: 202, IsTracked: false},
+	)
+	sp.findErr = errors.New("partial scan failed")
+	sp.terminateErr[202] = errors.New("terminate failed")
+
+	var stderr bytes.Buffer
+	got := sweepProcessTableOrphans(sp, nil, store, &stderr)
+	if got != 1 {
+		t.Fatalf("sweepProcessTableOrphans() = %d, want 1; stderr=%q", got, stderr.String())
+	}
+	if got := terminatedSessionIDs(sp.terminated); got != "gm-reaped" {
+		t.Fatalf("terminated = %s, want gm-reaped", got)
+	}
+	for _, want := range []string{"partial scan failed", "gm-reaped", "gm-term-fails", "terminate failed"} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Fatalf("stderr = %q, want %q", stderr.String(), want)
+		}
+	}
+}
+
+func TestSweepProcessTableOrphansNoopsWithoutScanner(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := struct{ runtime.Provider }{Provider: runtime.NewFake()}
+	var stderr bytes.Buffer
+
+	if got := sweepProcessTableOrphans(sp, nil, store, &stderr); got != 0 {
+		t.Fatalf("sweepProcessTableOrphans() = %d, want 0", got)
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want empty", stderr.String())
+	}
+}
+
+type flakyGetStore struct {
+	beads.Store
+	failID  string
+	failErr error
+}
+
+func (s *flakyGetStore) Get(id string) (beads.Bead, error) {
+	if id == s.failID {
+		return beads.Bead{}, s.failErr
+	}
+	return s.Store.Get(id)
+}
+
+func TestSweepProcessTableOrphansSkipsOnTransientStoreError(t *testing.T) {
+	inner := beads.NewMemStore()
+	store := &flakyGetStore{Store: inner, failID: "gm-flaky", failErr: errors.New("dolt: connection reset")}
+	sp := newProcessTableSweepProvider(
+		runtime.LiveRuntime{SessionID: "gm-flaky", PID: 301, IsTracked: false},
+	)
+	var stderr bytes.Buffer
+	if got := sweepProcessTableOrphans(sp, nil, store, &stderr); got != 0 {
+		t.Fatalf("sweepProcessTableOrphans() = %d, want 0 (transient error must not reap); stderr=%q", got, stderr.String())
+	}
+	if len(sp.terminated) != 0 {
+		t.Fatalf("terminated %v on transient store error, want none", sp.terminated)
+	}
+	if !strings.Contains(stderr.String(), "dolt: connection reset") {
+		t.Fatalf("stderr = %q, want transient error logged", stderr.String())
+	}
+}
+
+func TestControllerRuntimeSweepsProcessTableOrphansAfterClosedBeadReap(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join(".", "city_runtime.go"))
+	if err != nil {
+		t.Fatalf("read city_runtime.go: %v", err)
+	}
+	lines := strings.Split(string(data), "\n")
+	reapCalls := 0
+	for i, line := range lines {
+		if !strings.Contains(line, "reapRuntimesBoundToClosedBeads(") {
+			continue
+		}
+		reapCalls++
+		sweepLine := nextLineContaining(lines, i, "sweepProcessTableOrphans(")
+		staleReapLine := nextLineContaining(lines, i, "reapStaleSessionBeads(")
+		if sweepLine == -1 {
+			t.Errorf("city_runtime.go:%d closed-bead reap is not followed by process-table orphan sweep", i+1)
+			continue
+		}
+		if staleReapLine != -1 && sweepLine > staleReapLine {
+			t.Errorf("city_runtime.go:%d process-table orphan sweep runs after stale session reap; sweep line=%d stale reap line=%d", i+1, sweepLine+1, staleReapLine+1)
+		}
+	}
+	if reapCalls == 0 {
+		t.Fatal("city_runtime.go contains no reapRuntimesBoundToClosedBeads calls")
+	}
+}
+
+func terminatedSessionIDs(runtimes []runtime.LiveRuntime) string {
+	ids := make([]string, 0, len(runtimes))
+	for _, live := range runtimes {
+		ids = append(ids, live.SessionID)
+	}
+	sort.Strings(ids)
+	return strings.Join(ids, ",")
+}
+
+func nextLineContaining(lines []string, after int, needle string) int {
+	for i := after + 1; i < len(lines); i++ {
+		if strings.Contains(lines[i], needle) {
+			return i
+		}
+	}
+	return -1
 }
 
 // TestReapRuntimesBoundToClosedBeadsStopsLiveRuntime reproduces the alias

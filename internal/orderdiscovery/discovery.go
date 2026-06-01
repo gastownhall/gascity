@@ -21,11 +21,20 @@ type RigScanErrorHandler func(rigName string, err error) error
 // override set.
 type OverrideErrorHandler func(err error) error
 
+// ValidateErrorHandler handles an order validation failure after config
+// layering. Returning nil drops that order and continues scanning.
+type ValidateErrorHandler func(orderName string, err error) error
+
+// OrderValidator performs caller-specific post-layering validation.
+type OrderValidator func(order orders.Order) error
+
 // ScanOptions controls shared order discovery behavior.
 type ScanOptions struct {
 	FS              fsys.FS
 	OnRigScanError  RigScanErrorHandler
 	OnOverrideError OverrideErrorHandler
+	OnValidateError ValidateErrorHandler
+	ValidateOrder   OrderValidator
 }
 
 // ScanAll scans city-level and rig-exclusive order roots, stamps rig orders,
@@ -82,16 +91,48 @@ func ScanAll(cityPath string, cfg *config.City, opts ScanOptions) ([]orders.Orde
 	allOrders = append(allOrders, rigOrders...)
 	if len(cfg.Orders.Overrides) > 0 {
 		if err := orders.ApplyOverrides(allOrders, overridesFromConfig(cfg.Orders.Overrides)); err != nil {
-			if opts.OnOverrideError != nil {
-				if handlerErr := opts.OnOverrideError(err); handlerErr != nil {
-					return nil, handlerErr
-				}
-				return allOrders, nil
+			if opts.OnOverrideError == nil {
+				return nil, err
 			}
-			return nil, err
+			if handlerErr := opts.OnOverrideError(err); handlerErr != nil {
+				return nil, handlerErr
+			}
 		}
 	}
+	allOrders, err = validateOrders(allOrders, opts.ValidateOrder, opts.OnValidateError)
+	if err != nil {
+		return nil, err
+	}
 	return allOrders, nil
+}
+
+func validateOrders(allOrders []orders.Order, extraValidate OrderValidator, onError ValidateErrorHandler) ([]orders.Order, error) {
+	valid := allOrders[:0]
+	for _, order := range allOrders {
+		if err := validateOrder(order, extraValidate); err != nil {
+			if onError == nil {
+				return nil, err
+			}
+			if handlerErr := onError(order.ScopedName(), err); handlerErr != nil {
+				return nil, handlerErr
+			}
+			continue
+		}
+		valid = append(valid, order)
+	}
+	return valid, nil
+}
+
+func validateOrder(order orders.Order, extraValidate OrderValidator) error {
+	if err := orders.Validate(order); err != nil {
+		return err
+	}
+	if extraValidate != nil {
+		if err := extraValidate(order); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // cityFormulaLayers returns the formula directory layers for city-level order
@@ -229,6 +270,7 @@ func overridesFromConfig(cfgOverrides []config.OrderOverride) []orders.Override 
 			On:       override.On,
 			Pool:     override.Pool,
 			Timeout:  override.Timeout,
+			Env:      override.Env,
 		}
 	}
 	return out

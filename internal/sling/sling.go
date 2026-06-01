@@ -649,6 +649,33 @@ func CrossRigRouteError(beadID string, a config.Agent, cfg *config.City) *CrossR
 	}
 }
 
+// CrossStoreRouteError reports that a target agent cannot read the workflow
+// store containing the routed bead.
+type CrossStoreRouteError struct {
+	BeadID            string
+	StoreRef          string
+	Target            string
+	ReachableStoreRef string
+}
+
+// Error returns the cross-store routing diagnostic.
+func (e *CrossStoreRouteError) Error() string {
+	source := routeStoreLabel(e.StoreRef)
+	reachable := routeStoreLabel(e.ReachableStoreRef)
+	return fmt.Sprintf(
+		"gc sling: refusing cross-store route: bead %s lives in %s but target %q reads %s; "+
+			"re-file the bead in %s (or pick a target reachable from %s). "+
+			"Cross-store routes silently wedge pools — see tr-6s7yx",
+		e.BeadID, source, e.Target, reachable, reachable, source)
+}
+
+func routeStoreLabel(storeRef string) string {
+	if strings.TrimSpace(storeRef) == "" {
+		return "<unclassified store>"
+	}
+	return storeRef
+}
+
 // ProbeBeadInStore checks if a bead exists in the given store and surfaces
 // non-not-found lookup errors.
 func ProbeBeadInStore(store beads.Store, id string) (bool, error) {

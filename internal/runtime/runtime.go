@@ -278,6 +278,46 @@ type InterruptBoundaryWaitProvider interface {
 	WaitForInterruptBoundary(ctx context.Context, name string, since time.Time, timeout time.Duration) error
 }
 
+// LiveRuntime identifies a single agent runtime process discovered via
+// process-table scan, independent of provider-visible artifacts.
+type LiveRuntime struct {
+	// SessionID is the GC_SESSION_ID value from the process environment.
+	SessionID string
+	// Epoch is the GC_RUNTIME_EPOCH from the process environment, if readable.
+	// Zero if the variable is absent or unparseable.
+	Epoch int
+	// PID is the OS process ID for local providers, or a provider-specific
+	// process identifier for remote infrastructure.
+	PID int
+	// ProviderName is the session name as known to the provider. Empty means
+	// the runtime is not visible in the provider's artifact registry.
+	ProviderName string
+	// IsTracked is true when this runtime also appears in the provider's
+	// registry. False marks a live process that is invisible to the provider.
+	IsTracked bool
+}
+
+// ProcessTableScanner is an optional extension for runtimes that can discover
+// live agent root processes by GC_SESSION_ID independently of provider-visible
+// artifacts.
+//
+// Providers that cannot inspect process tables do not implement this
+// interface. Callers must use a type assertion and continue safely when the
+// provider lacks the capability.
+type ProcessTableScanner interface {
+	// FindRuntimesBySessionID returns live agent root processes carrying
+	// GC_SESSION_ID equal to id. If id is empty, it returns all live agent root
+	// processes with any GC_SESSION_ID set.
+	//
+	// Best-effort implementations may return both partial results and a non-nil
+	// error; callers should proceed with any returned results.
+	FindRuntimesBySessionID(id string) ([]LiveRuntime, error)
+
+	// TerminateRuntime stops the process or infrastructure unit identified by r.
+	// It returns nil when the runtime is already gone.
+	TerminateRuntime(r LiveRuntime) error
+}
+
 // CopyEntry describes a file or directory to stage in the session's
 // working directory before the agent command starts.
 type CopyEntry struct {

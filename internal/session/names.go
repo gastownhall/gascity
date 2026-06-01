@@ -397,6 +397,9 @@ func failedCreateIdentityReleased(b beads.Bead) bool {
 }
 
 func continuityIneligibleConfiguredOwner(b beads.Bead, selfOwner string) bool {
+	if failedCreateIdentityReleased(b) {
+		return false
+	}
 	if selfOwner == "" || strings.TrimSpace(b.Metadata["configured_named_identity"]) != selfOwner {
 		return false
 	}

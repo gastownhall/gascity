@@ -12,6 +12,8 @@
 package tierb_test
 
 import (
+	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -200,6 +202,216 @@ func TestLifecycle_DrainAckStopsSession(t *testing.T) {
 		out, _ := c.GC("status", "--city", c.Dir)
 		t.Fatalf("agent not stopped after drain-ack within %s:\n%s", deadline, out)
 	}
+}
+
+// TestLifecycle_DrainAckResponsiveRespawn verifies that after a sole pool
+// worker calls gc runtime drain-ack, the controller socket is poked
+// immediately (issue #2364) so a replacement worker is reconciled within a
+// tick or two instead of after the ~4-tick (~120s) discovery cascade.
+//
+// Both arrival orderings — #2364 (work pre-queued before the drain) and
+// #2251 (cold pool scaling from zero with work present) — ride the SAME
+// drain-ack → pokeController code path (plan R5: one code change covers both
+// orderings), so both subtests exercise that path end-to-end through the real
+// controller socket under StartWithSupervisor.
+//
+// AC8 verification vehicle: the mechanically tested unit is the per-step
+// respawn latency — a single drain → respawn cycle measured by the wall-clock
+// gap between consecutive spawn markers. The full "no step in the chain
+// regresses to 4 ticks" property is delegated to RC observation of that same
+// per-step signal; automating an N-cycle loop here would add wall-clock
+// flakiness without strengthening the per-step bound that already
+// discriminates the fix from the bug.
+//
+// Detection is provider-agnostic and dolt-free: the worker stand-in appends a
+// timestamped marker line each time it spawns, so the count and spacing of
+// marker lines measure respawn cadence directly. The file beads provider keeps
+// tier B free of an external dolt dependency, and the routed demand beads are
+// written straight into the in-process store file that the reconciler's
+// default scale_check reads.
+func TestLifecycle_DrainAckResponsiveRespawn(t *testing.T) {
+	t.Run("prequeued_respawn_2364", func(t *testing.T) {
+		// Long patrol interval: the only fast path to a replacement is the
+		// drain-ack poke. Without the fix the reconciler would not observe the
+		// drain until the next 60s tick, so a sub-40s respawn proves the poke
+		// drove an immediate reconcile.
+		runResponsiveRespawn(t, "60s", 40*time.Second, 50*time.Second)
+	})
+	t.Run("coldpool_arrival_2251", func(t *testing.T) {
+		// Short patrol: a cold pool (0 active) scales up to service the routed
+		// work and the post-drain replacement both land within a couple of
+		// ticks. Covers #2251's arrival ordering over the shared poke path.
+		runResponsiveRespawn(t, "10s", 30*time.Second, 30*time.Second)
+	})
+}
+
+// runResponsiveRespawn drives one responsive-respawn scenario: it stands up a
+// min=0/max=1 pool with pre-queued routed work, lets the worker stand-in
+// spawn-mark-drain-exit, and asserts that a replacement spawns within
+// maxRespawnLatency of the first worker. firstMarkerTimeout bounds the initial
+// cold scale-up. patrolInterval tunes how strongly the poke is isolated from
+// the patrol tick (a long interval makes the poke the only fast path).
+func runResponsiveRespawn(t *testing.T, patrolInterval string, maxRespawnLatency, firstMarkerTimeout time.Duration) {
+	t.Helper()
+	c := helpers.NewCity(t, testEnvB)
+	c.Init("claude")
+
+	scriptCmd, markersPath := writeRespawnMarkerScript(t, c)
+	writeRespawnPoolConfig(c, scriptCmd, patrolInterval)
+	writePrequeuedRoutedBeads(t, c, "worker", 4)
+
+	c.StartWithSupervisor()
+
+	// The cold pool must scale from zero to service the routed work.
+	if !c.WaitForCondition(func() bool {
+		return len(readRespawnMarkers(markersPath)) >= 1
+	}, firstMarkerTimeout) {
+		out, _ := c.GC("status", "--city", c.Dir)
+		t.Fatalf("pool worker never spawned to service pre-queued routed work within %s\nstatus:\n%s", firstMarkerTimeout, out)
+	}
+
+	// A replacement must spawn after the first worker drain-acked. Poll past
+	// the assertion bound so a marker landing right at the boundary is still
+	// observed before we measure it.
+	deadline := time.Now().Add(maxRespawnLatency + 15*time.Second)
+	for time.Now().Before(deadline) {
+		if len(readRespawnMarkers(markersPath)) >= 2 {
+			break
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+
+	markers := readRespawnMarkers(markersPath)
+	if len(markers) < 2 {
+		out, _ := c.GC("status", "--city", c.Dir)
+		t.Fatalf("replacement worker did not spawn after drain-ack (poke not honored?); markers=%v\nstatus:\n%s", markers, out)
+	}
+
+	latency := time.Duration((markers[1] - markers[0]) * float64(time.Second))
+	if latency > maxRespawnLatency {
+		t.Fatalf("respawn latency %s exceeds responsive bound %s (markers=%v, patrol=%s)",
+			latency, maxRespawnLatency, markers, patrolInterval)
+	}
+	t.Logf("observed %d spawns; first respawn latency %s (bound %s, patrol %s)",
+		len(markers), latency, maxRespawnLatency, patrolInterval)
+}
+
+// writeRespawnMarkerScript writes the pool-worker stand-in: it appends a
+// timestamped marker line, calls the no-arg gc runtime drain-ack (which pokes
+// the controller via GC_CITY_PATH from the agent env), then exits. Returns the
+// start_command and the markers file path.
+func writeRespawnMarkerScript(t *testing.T, c *helpers.City) (scriptCmd, markersPath string) {
+	t.Helper()
+	scriptsDir := filepath.Join(c.Dir, ".gc", "scripts")
+	if err := os.MkdirAll(scriptsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	markersPath = filepath.Join(c.Dir, ".gc", "respawn-markers.txt")
+	script := fmt.Sprintf(`#!/bin/sh
+# Pool-worker stand-in for the responsive-respawn acceptance test. Each spawned
+# worker appends one timestamped marker line, drain-acks (poking the controller
+# so a replacement is reconciled immediately rather than on the next patrol
+# tick), then exits. No set -e: a failing drain-ack must not skip the marker.
+MARKERS=%q
+printf 'RUN %%s\n' "$(date +%%s.%%N)" >> "$MARKERS"
+gc runtime drain-ack 2>/dev/null || true
+sleep 1
+exit 0
+`, markersPath)
+	scriptPath := filepath.Join(scriptsDir, "respawn-marker.sh")
+	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return "bash " + scriptPath, markersPath
+}
+
+// writeRespawnPoolConfig writes city.toml (workspace + file beads provider +
+// tuned daemon patrol interval) and a single city-scoped pool agent
+// (min=0/max=1, wake_mode=fresh) under the directory-based agents/worker/
+// surface. Inline [[agent]] tables in city.toml are a rejected PackV1 surface
+// under schema-2 enforcement, so the agent must live in agents/<name>/agent.toml.
+func writeRespawnPoolConfig(c *helpers.City, scriptCmd, patrolInterval string) {
+	cityName := filepath.Base(c.Dir)
+	c.WriteConfig(fmt.Sprintf(`[workspace]
+name = %q
+
+[beads]
+provider = "file"
+
+[daemon]
+patrol_interval = %q
+`, cityName, patrolInterval))
+	c.WriteV2AgentDir("worker",
+		fmt.Sprintf("start_command = %q", scriptCmd),
+		`wake_mode = "fresh"`,
+		"min_active_sessions = 0",
+		"max_active_sessions = 1",
+	)
+}
+
+// writePrequeuedRoutedBeads seeds the file beads store with n open, unassigned
+// task beads routed to the given pool template. The reconciler's default
+// scale_check counts these as pool demand (it reads the in-process store's
+// Ready() set and matches metadata gc.routed_to), so a min=0/max=1 pool scales
+// up to service them. A surplus of beads keeps demand positive across several
+// drain → respawn cycles regardless of whether the reconciler assigns a bead
+// per spawn.
+func writePrequeuedRoutedBeads(t *testing.T, c *helpers.City, template string, n int) {
+	t.Helper()
+	type fileBead struct {
+		ID        string            `json:"id"`
+		Title     string            `json:"title"`
+		Status    string            `json:"status"`
+		Type      string            `json:"issue_type"`
+		Priority  int               `json:"priority"`
+		CreatedAt string            `json:"created_at"`
+		Metadata  map[string]string `json:"metadata"`
+	}
+	store := struct {
+		Seq   int        `json:"seq"`
+		Beads []fileBead `json:"beads"`
+	}{Seq: n}
+	now := time.Now().UTC().Format(time.RFC3339)
+	for i := 1; i <= n; i++ {
+		store.Beads = append(store.Beads, fileBead{
+			ID:        fmt.Sprintf("prequeued-%d", i),
+			Title:     fmt.Sprintf("pre-queued pool work %d", i),
+			Status:    "open",
+			Type:      "task",
+			Priority:  2,
+			CreatedAt: now,
+			Metadata:  map[string]string{"gc.routed_to": template},
+		})
+	}
+	data, err := json.MarshalIndent(store, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(c.Dir, ".gc", "beads.json"), data, 0o644); err != nil {
+		t.Fatalf("writing pre-queued beads.json: %v", err)
+	}
+}
+
+// readRespawnMarkers parses the marker file into spawn timestamps (epoch
+// seconds). A missing file yields no markers.
+func readRespawnMarkers(path string) []float64 {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	var ts []float64
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "RUN ") {
+			continue
+		}
+		v, err := strconv.ParseFloat(strings.TrimSpace(strings.TrimPrefix(line, "RUN ")), 64)
+		if err != nil {
+			continue
+		}
+		ts = append(ts, v)
+	}
+	return ts
 }
 
 // TestLifecycle_PackMaterializationOnStart verifies that gc start

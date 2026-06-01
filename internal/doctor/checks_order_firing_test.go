@@ -161,6 +161,65 @@ func TestOrderFiringCurrent_FiredRecently(t *testing.T) {
 	}
 }
 
+func TestOrderFiringCurrent_SkipsInvalidOrderDuringScan(t *testing.T) {
+	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
+	cityPath, cfg := orderFiringTestCity(t)
+	writeOrderFiringTestOrder(t, cityPath, "cleanup-cooldown", "cooldown", "4h")
+	writeOrderFiringRawOrder(t, cityPath, "invalid-env-on-formula", `[order]
+formula = "mol-maintenance"
+trigger = "manual"
+
+[order.env]
+CUSTOM_ORDER_FLAG = "enabled"
+`)
+	writeOrderFiringTestEvents(t, cityPath,
+		events.Event{Type: events.ControllerStarted, Ts: now.Add(-8 * time.Hour)},
+		events.Event{Type: events.OrderFired, Subject: "cleanup-cooldown", Ts: now.Add(-1 * time.Hour)},
+	)
+
+	result := runOrderFiringCurrentTest(t, cfg, cityPath, now)
+	if result.Status != StatusOK {
+		t.Fatalf("status = %v, want OK; msg = %s; details = %v", result.Status, result.Message, result.Details)
+	}
+	details := strings.Join(result.Details, "\n")
+	if !strings.Contains(details, "cleanup-cooldown: last fired 1h ago, expected every 4h") {
+		t.Fatalf("details = %v, want valid order firing detail", result.Details)
+	}
+	if strings.Contains(details, "invalid-env-on-formula") {
+		t.Fatalf("details = %v, want invalid order skipped", result.Details)
+	}
+}
+
+func TestOrderFiringCurrent_SkipsReservedExecEnvDuringScan(t *testing.T) {
+	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
+	cityPath, cfg := orderFiringTestCity(t)
+	writeOrderFiringTestOrder(t, cityPath, "cleanup-cooldown", "cooldown", "4h")
+	writeOrderFiringRawOrder(t, cityPath, "invalid-reserved-env", `[order]
+exec = "true"
+trigger = "cooldown"
+interval = "4h"
+
+[order.env]
+GC_CITY = "shadow-city"
+`)
+	writeOrderFiringTestEvents(t, cityPath,
+		events.Event{Type: events.ControllerStarted, Ts: now.Add(-8 * time.Hour)},
+		events.Event{Type: events.OrderFired, Subject: "cleanup-cooldown", Ts: now.Add(-1 * time.Hour)},
+	)
+
+	result := runOrderFiringCurrentTest(t, cfg, cityPath, now)
+	if result.Status != StatusOK {
+		t.Fatalf("status = %v, want OK; msg = %s; details = %v", result.Status, result.Message, result.Details)
+	}
+	details := strings.Join(result.Details, "\n")
+	if !strings.Contains(details, "cleanup-cooldown: last fired 1h ago, expected every 4h") {
+		t.Fatalf("details = %v, want valid order firing detail", result.Details)
+	}
+	if strings.Contains(details, "invalid-reserved-env") {
+		t.Fatalf("details = %v, want reserved-env order skipped", result.Details)
+	}
+}
+
 func TestOrderFiringCurrent_Overdue(t *testing.T) {
 	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
 	cityPath, cfg := orderFiringTestCity(t)
@@ -344,12 +403,25 @@ exec = "true"
 trigger = "event"
 on = "` + timing + `"
 `
+	case "condition":
+		body = `[order]
+exec = "true"
+trigger = "condition"
+check = "true"
+`
 	default:
 		body = `[order]
 exec = "true"
 trigger = "` + trigger + `"
 `
 	}
+	if err := os.WriteFile(filepath.Join(cityPath, "orders", name+".toml"), []byte(body), 0o644); err != nil {
+		t.Fatalf("writing order %s: %v", name, err)
+	}
+}
+
+func writeOrderFiringRawOrder(t *testing.T, cityPath, name, body string) {
+	t.Helper()
 	if err := os.WriteFile(filepath.Join(cityPath, "orders", name+".toml"), []byte(body), 0o644); err != nil {
 		t.Fatalf("writing order %s: %v", name, err)
 	}

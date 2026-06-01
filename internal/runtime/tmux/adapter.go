@@ -17,6 +17,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/overlay"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/runtime/proctable"
 	"github.com/gastownhall/gascity/internal/shellquote"
 )
 
@@ -38,6 +39,7 @@ var (
 	_ runtime.ImmediateNudgeProvider        = (*Provider)(nil)
 	_ runtime.InterruptBoundaryWaitProvider = (*Provider)(nil)
 	_ runtime.InterruptedTurnResetProvider  = (*Provider)(nil)
+	_ runtime.ProcessTableScanner           = (*Provider)(nil)
 )
 
 // NewProvider returns a [Provider] backed by a real tmux installation
@@ -297,6 +299,51 @@ func (p *Provider) ProcessAlive(name string, processNames []string) bool {
 		return true
 	}
 	return p.cache.ProcessAlive(name, processNames)
+}
+
+// FindRuntimesBySessionID implements [runtime.ProcessTableScanner].
+func (p *Provider) FindRuntimesBySessionID(id string) ([]runtime.LiveRuntime, error) {
+	found, scanErr := proctable.ScanBySessionID(id)
+	running, listErr := p.ListRunning("")
+	if listErr != nil {
+		for i := range found {
+			found[i].IsTracked = true
+		}
+		return found, errors.Join(scanErr, fmt.Errorf("tmux list running: %w", listErr))
+	}
+
+	tracked := make(map[string]string)
+	for _, name := range running {
+		sessionID, err := p.GetMeta(name, "GC_SESSION_ID")
+		if err == nil && strings.TrimSpace(sessionID) != "" {
+			tracked[sessionID] = name
+		}
+	}
+	for i := range found {
+		if name, ok := tracked[found[i].SessionID]; ok {
+			found[i].IsTracked = true
+			found[i].ProviderName = name
+		}
+	}
+	return found, scanErr
+}
+
+// TerminateRuntime implements [runtime.ProcessTableScanner].
+func (p *Provider) TerminateRuntime(r runtime.LiveRuntime) error {
+	if r.PID <= 1 {
+		return fmt.Errorf("tmux: invalid PID %d for session %s", r.PID, r.SessionID)
+	}
+	if err := proctable.KillByPID(r.PID); err != nil {
+		return fmt.Errorf("tmux: terminate runtime PID %d for session %s: %w", r.PID, r.SessionID, err)
+	}
+	return nil
+}
+
+// ForgetSession removes provider metadata for name without stopping its tmux
+// process. Tests use this to simulate an OS-live process orphaned from the
+// provider's registry.
+func (p *Provider) ForgetSession(name string) {
+	_ = p.RemoveMeta(name, "GC_SESSION_ID")
 }
 
 // ObserveLiveness reports both pane presence and agent-process presence for a

@@ -100,8 +100,11 @@ func ExecCommandRunnerWithEnv(env map[string]string) CommandRunner {
 		cmd.Cancel = func() error {
 			return killCommandTree(cmd)
 		}
+		baseEnv := processEnvSnapshotExcludingNativeDoltOpen()
 		if len(env) > 0 {
-			cmd.Env = mergeEnv(os.Environ(), env)
+			cmd.Env = mergeEnv(baseEnv, env)
+		} else {
+			cmd.Env = baseEnv
 		}
 		var stderr bytes.Buffer
 		cmd.Stderr = &stderr
@@ -237,6 +240,10 @@ func (s *BdStore) IDPrefix() string {
 	return s.idPrefix
 }
 
+func (s *BdStore) listIncludesCompleteDependencies() bool {
+	return false
+}
+
 // Init initializes a beads database via bd init --server. This is an admin
 // operation on BdStore directly, not part of the Store interface (MemStore/
 // FileStore don't need it). If host is non-empty, --server-host (and
@@ -281,7 +288,7 @@ func (s *BdStore) Purge(beadsDir string, dryRun bool) (PurgeResult, error) {
 	}
 
 	dir := filepath.Dir(beadsDir)
-	env := envWithout(os.Environ(), "BEADS_DIR")
+	env := envWithout(processEnvSnapshotExcludingNativeDoltOpen(), "BEADS_DIR")
 	env = append(env, "BEADS_DIR="+beadsDir)
 
 	var out []byte
