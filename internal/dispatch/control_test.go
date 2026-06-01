@@ -2085,6 +2085,13 @@ func TestBuildAttemptRecipeSeedsNestedRalphFirstIteration(t *testing.T) {
 	if got := seed.Metadata["gc.step_id"]; got != "inner-loop" {
 		t.Errorf("seed gc.step_id = %q, want inner-loop", got)
 	}
+	// The seed is merged into the outer attempt recipe, which already owns its
+	// root. molecule.Attach maps ANY IsRoot step to the attach root, so the
+	// seed must not carry IsRoot or it corrupts the iteration bead and breaks
+	// wiring. Regression guard for gastownhall/gascity#2798.
+	if seed.IsRoot {
+		t.Error("inner ralph seed iteration must have IsRoot=false")
+	}
 
 	// Inner control must block on its seeded first iteration, exactly as the
 	// compile-time control.Needs wiring does.
@@ -2149,6 +2156,12 @@ func TestBuildAttemptRecipeSeedsNestedRalphWithChildren(t *testing.T) {
 	}
 	if got := scope.Metadata["gc.kind"]; got != "scope" {
 		t.Errorf("inner iteration gc.kind = %q, want scope", got)
+	}
+	// Merged into the outer recipe, the seed scope must not be IsRoot —
+	// molecule.Attach maps any IsRoot step to the attach root, which would
+	// corrupt the iteration bead. Regression guard for gastownhall/gascity#2798.
+	if scope.IsRoot {
+		t.Error("inner ralph seed iteration scope must have IsRoot=false")
 	}
 
 	// Inner iteration members must be seeded under the inner iteration scope.

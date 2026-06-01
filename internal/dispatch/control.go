@@ -742,6 +742,18 @@ func buildNestedControlSeed(child *formula.Step, childID string) ([]formula.Reci
 		},
 	}
 	seed := buildAttemptRecipe(child, synthetic, 1)
+	// buildAttemptRecipe marks the seed's root step with IsRoot=true, but once
+	// these steps are merged into the outer attempt recipe they are no longer
+	// roots — the outer recipe already owns its root at Steps[0]. molecule.Attach
+	// applies the attach-root overrides (Type="molecule", Ref, ParentID) to ANY
+	// IsRoot step and maps it as an attach root, so a leftover IsRoot on the
+	// nested seed would corrupt the iteration bead's type/ref/parent and break
+	// dependency wiring. Clear it on every returned seed step. RootStep() below
+	// returns Steps[0] regardless of the flag, so the blocks dep wiring is
+	// unaffected. See gastownhall/gascity#2798.
+	for i := range seed.Steps {
+		seed.Steps[i].IsRoot = false
+	}
 	deps := append([]formula.RecipeDep{}, seed.Deps...)
 	if root := seed.RootStep(); root != nil {
 		// The inner control blocks on its first iteration, exactly as the
