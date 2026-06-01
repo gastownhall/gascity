@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -144,6 +145,73 @@ func TestProcessRetryControlPassClosesWithSingleFinalMetadataUpdate(t *testing.T
 	}
 	if store.closeUpdateMetadata["gc.attempt_log"] == "" {
 		t.Fatal("close metadata missing gc.attempt_log")
+	}
+}
+
+func TestProcessRetryControlRetriesPassMissingRequiredArtifact(t *testing.T) {
+	t.Parallel()
+	store := beads.NewMemStore()
+
+	root := mustCreate(t, store, beads.Bead{
+		Title:    "workflow",
+		Metadata: map[string]string{"gc.kind": "workflow"},
+	})
+	control := mustCreate(t, store, beads.Bead{
+		Title: "review",
+		Metadata: map[string]string{
+			"gc.kind":             "retry",
+			"gc.root_bead_id":     root.ID,
+			"gc.step_ref":         "mol-test.review",
+			"gc.step_id":          "review",
+			"gc.max_attempts":     "3",
+			"gc.on_exhausted":     "hard_fail",
+			"gc.source_step_spec": `{"id":"review","title":"Review","type":"task","metadata":{"gc.required_artifact":"/tmp/missing-review.md"},"retry":{"max_attempts":3}}`,
+			"gc.control_epoch":    "1",
+		},
+	})
+	missingReview := filepath.Join(t.TempDir(), "codex-review.md")
+	attempt1 := mustCreate(t, store, beads.Bead{
+		Title: "review attempt 1",
+		Metadata: map[string]string{
+			"gc.root_bead_id":      root.ID,
+			"gc.step_ref":          "mol-test.review.attempt.1",
+			"gc.attempt":           "1",
+			"gc.outcome":           "pass",
+			"gc.required_artifact": missingReview,
+		},
+	})
+	mustClose(t, store, attempt1.ID)
+	mustDep(t, store, control.ID, attempt1.ID, "blocks")
+
+	result, err := processRetryControl(store, mustGet(t, store, control.ID), ProcessOptions{})
+	if err != nil {
+		t.Fatalf("processRetryControl: %v", err)
+	}
+	if !result.Processed || result.Action != "retry" {
+		t.Fatalf("result = %+v, want processed retry", result)
+	}
+
+	after := mustGet(t, store, control.ID)
+	if after.Status != "open" {
+		t.Fatalf("control status = %q, want open", after.Status)
+	}
+	if !strings.Contains(after.Metadata["gc.attempt_log"], "missing_required_artifact") {
+		t.Fatalf("attempt log = %q, want missing_required_artifact", after.Metadata["gc.attempt_log"])
+	}
+
+	var foundAttempt2 bool
+	open, err := store.ListOpen()
+	if err != nil {
+		t.Fatalf("ListOpen: %v", err)
+	}
+	for _, bead := range open {
+		if bead.Metadata["gc.step_ref"] == "mol-test.review.attempt.2" {
+			foundAttempt2 = true
+			break
+		}
+	}
+	if !foundAttempt2 {
+		t.Fatal("missing retry attempt 2")
 	}
 }
 
