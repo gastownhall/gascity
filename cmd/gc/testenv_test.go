@@ -102,6 +102,7 @@ func TestClearProcessLiveEnvForTestsUnsetsInheritedState(t *testing.T) {
 	}
 	preserved := []string{
 		"GC_FAST_UNIT",
+		"GC_REAL_PROCESS_SIGNAL_TESTS",
 		"GC_TEST_KEEP",
 	}
 
@@ -171,12 +172,19 @@ func liveEnvKeysForTests() []string {
 
 func preserveTestControlEnv(key string) bool {
 	return key == "GC_FAST_UNIT" ||
+		key == "GC_REAL_PROCESS_SIGNAL_TESTS" ||
 		key == managedDoltTestModeEnv ||
 		key == managedDoltTestParentPIDEnv ||
 		key == "GC_DOLT_REAL_BINARY" ||
 		strings.HasPrefix(key, "GC_LIVE_") ||
 		strings.HasPrefix(key, "GC_SESSION_CHAOS_") ||
 		strings.HasPrefix(key, "GC_TEST_")
+}
+
+func TestPreserveTestControlEnvKeepsRealProcessSignalGate(t *testing.T) {
+	if !preserveTestControlEnv("GC_REAL_PROCESS_SIGNAL_TESTS") {
+		t.Fatal("GC_REAL_PROCESS_SIGNAL_TESTS must survive cmd/gc test env scrubbing")
+	}
 }
 
 // isTestscriptCommandInvocation reports whether this process is a

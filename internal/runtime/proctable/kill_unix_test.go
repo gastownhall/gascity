@@ -4,6 +4,7 @@ package proctable
 
 import (
 	"os/exec"
+	"slices"
 	"syscall"
 	"testing"
 )
@@ -52,5 +53,23 @@ func TestSignalPIDGroupThenFallback(t *testing.T) {
 		if got[i] != want[i] {
 			t.Fatalf("signal calls = %v, want %v", got, want)
 		}
+	}
+}
+
+func TestSignalPIDGroupSuccessSkipsFallback(t *testing.T) {
+	var got []int
+	err := signalPIDWith(12345, syscall.SIGTERM, func(pid int, sig syscall.Signal) error {
+		if sig != syscall.SIGTERM {
+			t.Fatalf("signal = %v, want SIGTERM", sig)
+		}
+		got = append(got, pid)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("signalPIDWith(): %v", err)
+	}
+	want := []int{-12345}
+	if !slices.Equal(got, want) {
+		t.Fatalf("signal calls = %v, want %v", got, want)
 	}
 }

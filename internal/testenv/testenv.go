@@ -24,9 +24,9 @@
 // top-level var initialization, which keeps the direct-`go test` path safe.
 //
 // Scope: only the named LeakVectorVars below are scrubbed. Test-gate vars
-// (GC_FAST_UNIT, GC_DOLT_REAL_BINARY, GC_*_HELPER, ...) flow through
-// untouched so opt-in test paths and helper-subprocess trampolines keep
-// working.
+// (GC_FAST_UNIT, GC_REAL_PROCESS_SIGNAL_TESTS, GC_DOLT_REAL_BINARY,
+// GC_*_HELPER, ...) flow through untouched so opt-in test paths and
+// helper-subprocess trampolines keep working.
 //
 // Passthrough: a parent that intentionally launches a helper subprocess
 // with seeded leak-vector vars (e.g. workspacesvc's proxy_process tests,
@@ -77,8 +77,8 @@ const PassthroughVar = "GC_TESTENV_PASSTHROUGH"
 //
 // Adding a new env var that names a city path, session identity, bead store,
 // or managed Dolt target? Add it here too. Test-gate vars (GC_FAST_UNIT,
-// GC_DOLT_REAL_BINARY, ...) do NOT belong here — they're how tests opt into
-// expensive paths.
+// GC_REAL_PROCESS_SIGNAL_TESTS, GC_DOLT_REAL_BINARY, ...) do NOT belong here;
+// they're how tests opt into expensive paths.
 var LeakVectorVars = []string{
 	"BEADS_DIR",
 	"BEADS_DOLT_PASSWORD",
