@@ -1694,7 +1694,7 @@ func TestBdStoreReadyReturnsPartialResultErrorOnCorruptEntries(t *testing.T) {
 		out []byte
 		err error
 	}{
-		`bd ready --json --include-ephemeral --limit 0`: {
+		`bd ready --json --limit 0`: {
 			out: []byte(`[
 				{"id":"bd-good","title":"good","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z"},
 				{"id":"bd-bad","title":"bad","status":"open","issue_type":"task","created_at":"not-a-time"}
@@ -1721,7 +1721,7 @@ func TestBdStoreReadyReturnsHardErrorWithoutUsableSurvivors(t *testing.T) {
 		out []byte
 		err error
 	}{
-		`bd ready --json --include-ephemeral --limit 0`: {
+		`bd ready --json --limit 0`: {
 			out: []byte(`[
 				{"id":"bd-bad","title":"bad","status":"open","issue_type":"task","created_at":"not-a-time"}
 			]`),
@@ -1767,7 +1767,7 @@ func TestBdStoreReady(t *testing.T) {
 		out []byte
 		err error
 	}{
-		`bd ready --json --include-ephemeral --limit 0`: {
+		`bd ready --json --limit 0`: {
 			out: []byte(`[{"id":"bd-aaa","title":"ready one","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z"}]`),
 		},
 	})
@@ -1789,7 +1789,7 @@ func TestBdStoreReadyWithAssigneeAndLimit(t *testing.T) {
 		out []byte
 		err error
 	}{
-		`bd ready --json --include-ephemeral --assignee worker-1 --limit 3`: {
+		`bd ready --json --assignee worker-1 --limit 3`: {
 			out: []byte(`[
 				{"id":"bd-worker","title":"ready one","status":"open","issue_type":"task","assignee":"worker-1","created_at":"2025-01-15T10:30:00Z"},
 				{"id":"bd-other","title":"wrong assignee","status":"open","issue_type":"task","assignee":"worker-2","created_at":"2025-01-15T10:31:00Z"}
@@ -1814,7 +1814,7 @@ func TestBdStoreReadyDoesNotSpecialCaseSyntheticMetadata(t *testing.T) {
 		out []byte
 		err error
 	}{
-		`bd ready --json --include-ephemeral --limit 1`: {
+		`bd ready --json --limit 1`: {
 			out: []byte(`[
 				{"id":"bd-synthetic","title":"synthetic unit","status":"open","issue_type":"convoy","created_at":"2025-01-15T10:29:00Z","metadata":{"gc.synthetic":"true"}},
 				{"id":"bd-task","title":"ready one","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z"},
@@ -1840,7 +1840,7 @@ func TestBdStoreReadyFiltersInfraTypes(t *testing.T) {
 		out []byte
 		err error
 	}{
-		`bd ready --json --include-ephemeral --limit 0`: {
+		`bd ready --json --limit 0`: {
 			out: []byte(`[
 				{"id":"bd-task","title":"ready one","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z"},
 				{"id":"bd-session","title":"infra session","status":"open","issue_type":"session","created_at":"2025-01-15T10:31:00Z"}
@@ -1891,7 +1891,7 @@ func TestBdStoreReadyEmpty(t *testing.T) {
 		out []byte
 		err error
 	}{
-		`bd ready --json --include-ephemeral --limit 0`: {out: []byte(`[]`)},
+		`bd ready --json --limit 0`: {out: []byte(`[]`)},
 	})
 	s := beads.NewBdStore("/city", runner)
 	got, err := s.Ready()
@@ -1922,7 +1922,7 @@ func TestBdStoreReadyReturnsParseErrorOnMalformedJSON(t *testing.T) {
 		out []byte
 		err error
 	}{
-		`bd ready --json --include-ephemeral --limit 0`: {
+		`bd ready --json --limit 0`: {
 			out: []byte(`{not json`),
 		},
 	})

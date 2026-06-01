@@ -484,6 +484,7 @@ func DecorateGraphWorkflowRecipeWithDefaultBinding(recipe *formula.Recipe, route
 		return fmt.Errorf("workflow recipe is nil")
 	}
 	routedTo := strings.TrimSpace(defaultRoute.QualifiedName)
+	rootSessionName := strings.TrimSpace(defaultRoute.SessionName)
 	routingRigContext := graphBindingRigContext(defaultRoute)
 	controlRoute, err := ControlDispatcherBinding(store, cityName, cfg, routingRigContext, deps)
 	if err != nil {
@@ -525,10 +526,10 @@ func DecorateGraphWorkflowRecipeWithDefaultBinding(recipe *formula.Recipe, route
 			// (fixes #2763; gc.run_target retired as a wire field — ga-eld2x).
 			step.Metadata["gc.routed_to"] = routedTo
 			delete(step.Metadata, "gc.run_target")
-			if sessionName != "" {
+			if rootSessionName != "" {
 				// Durable session back-reference on the run root for
 				// single-session agents (#2843). Empty for pool agents.
-				step.Metadata["gc.session_name"] = sessionName
+				step.Metadata["gc.session_name"] = rootSessionName
 			}
 			if sourceBeadID != "" {
 				step.Metadata["gc.source_bead_id"] = sourceBeadID

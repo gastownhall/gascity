@@ -1060,7 +1060,7 @@ func prepareGraphV2FormulaInvocation(ctx context.Context, formulaName, targetID 
 	if err != nil {
 		return graphv2.Invocation{}, false, err
 	}
-	isGraph := inv.Formula != nil && strings.EqualFold(strings.TrimSpace(inv.Formula.Contract), "graph.v2")
+	isGraph := formula.UsesGraphCompiler(inv.Formula)
 	return inv, isGraph, nil
 }
 

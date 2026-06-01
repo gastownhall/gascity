@@ -71,6 +71,42 @@ title = "Inspect {{convoy_id}}"
 	}
 }
 
+func TestPrepareInvocationUsesFormulaCompilerRequirement(t *testing.T) {
+	formulatest.EnableV2ForTest(t)
+	dir := t.TempDir()
+	writeFormula(t, dir, "work.formula.toml", `
+formula = "work"
+type = "workflow"
+
+[requires]
+formula_compiler = ">=2.0.0"
+
+[[steps]]
+id = "inspect"
+title = "Inspect {{convoy_id}}"
+`)
+	store := beads.NewMemStore()
+	target, err := store.Create(beads.Bead{Title: "target", Type: "task"})
+	if err != nil {
+		t.Fatalf("Create target: %v", err)
+	}
+
+	isGraph, _, err := IsGraphV2Formula("work", []string{dir})
+	if err != nil {
+		t.Fatalf("IsGraphV2Formula: %v", err)
+	}
+	if !isGraph {
+		t.Fatal("IsGraphV2Formula = false, want formula_compiler requirement to opt into graph semantics")
+	}
+	inv, err := PrepareInvocation(context.Background(), store, "work", []string{dir}, target.ID, nil)
+	if err != nil {
+		t.Fatalf("PrepareInvocation: %v", err)
+	}
+	if inv.InputConvoy == "" {
+		t.Fatalf("InputConvoy empty for formula_compiler graph invocation: %+v", inv)
+	}
+}
+
 func TestPrepareInvocationHonorsFormulaRef(t *testing.T) {
 	formulatest.EnableV2ForTest(t)
 	invocationGitOK(t)

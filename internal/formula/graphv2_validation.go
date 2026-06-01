@@ -651,7 +651,7 @@ func (s *graphV2TransitiveReferenceScanner) scanExpansionRefs(prefix string, ste
 }
 
 func (s *graphV2TransitiveReferenceScanner) scanExpansionFormula(prefix, name string) error {
-	expansion, err := loadResolvedExpansionFormula(s.parser, name, prefix)
+	expansion, err := loadResolvedExpansionFormula(s.parser, name, prefix, nil)
 	if err != nil {
 		return err
 	}

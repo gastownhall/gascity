@@ -63,13 +63,14 @@ func loadFormulaWithParser(formulaName string, searchPaths []string) (*formula.F
 	return resolved, parser, nil
 }
 
-// IsGraphV2Formula reports whether the named formula declares graph.v2.
+// IsGraphV2Formula reports whether the named formula uses graph compiler
+// semantics.
 func IsGraphV2Formula(formulaName string, searchPaths []string) (bool, *formula.Formula, error) {
 	resolved, err := LoadFormula(formulaName, searchPaths)
 	if err != nil {
 		return false, nil, err
 	}
-	return strings.EqualFold(strings.TrimSpace(resolved.Contract), "graph.v2"), resolved, nil
+	return formula.UsesGraphCompiler(resolved), resolved, nil
 }
 
 // PrepareInvocation validates and normalizes a graph.v2 invocation. Non-graph
@@ -88,7 +89,7 @@ func PrepareInvocation(ctx context.Context, store beads.Store, formulaName strin
 	if inv.Vars == nil {
 		inv.Vars = make(map[string]string)
 	}
-	if !strings.EqualFold(strings.TrimSpace(resolved.Contract), "graph.v2") {
+	if !formula.UsesGraphCompiler(resolved) {
 		return inv, nil
 	}
 	if err := ValidateNoReservedUserVars(inv.Vars); err != nil {
@@ -360,7 +361,7 @@ func PreparePreviewInvocation(ctx context.Context, store beads.Store, formulaNam
 		Vars:        maps.Clone(userVars),
 		Targeted:    strings.TrimSpace(targetID) != "",
 	}
-	if !strings.EqualFold(strings.TrimSpace(resolved.Contract), "graph.v2") {
+	if !formula.UsesGraphCompiler(resolved) {
 		return inv, nil
 	}
 	if err := ValidateNoReservedUserVars(userVars); err != nil {

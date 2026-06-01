@@ -14,7 +14,7 @@ func TestGraphV2RejectsLegacyReservedReferences(t *testing.T) {
 	defer SetFormulaV2Enabled(prev)
 
 	dir := t.TempDir()
-	writeFormula(t, dir, "bad.formula.toml", `
+	writeGraphV2Formula(t, dir, "bad.formula.toml", `
 formula = "bad"
 version = 1
 contract = "graph.v2"
@@ -59,7 +59,7 @@ func TestGraphV2RejectsNonCanonicalConvoyReferences(t *testing.T) {
 	defer SetFormulaV2Enabled(prev)
 
 	dir := t.TempDir()
-	writeFormula(t, dir, "bad-convoy.formula.toml", `
+	writeGraphV2Formula(t, dir, "bad-convoy.formula.toml", `
 formula = "bad-convoy"
 version = 1
 contract = "graph.v2"
@@ -101,7 +101,7 @@ func TestGraphV2RejectsLegacyReservedReferencesInExpansionBeforeConditionFilteri
 	defer SetFormulaV2Enabled(prev)
 
 	dir := t.TempDir()
-	writeFormula(t, dir, "parent.formula.toml", `
+	writeGraphV2Formula(t, dir, "parent.formula.toml", `
 formula = "parent"
 version = 2
 contract = "graph.v2"
@@ -112,7 +112,7 @@ id = "work"
 title = "Work"
 expand = "hidden-legacy"
 `)
-	writeFormula(t, dir, "hidden-legacy.formula.toml", `
+	writeGraphV2Formula(t, dir, "hidden-legacy.formula.toml", `
 formula = "hidden-legacy"
 version = 2
 type = "expansion"
@@ -135,7 +135,6 @@ condition = "!{{convoy_id}}"
 func TestGraphV2RejectsReservedVariableDeclarations(t *testing.T) {
 	f := &Formula{
 		Formula:  "bad-vars",
-		Version:  1,
 		Contract: "graph.v2",
 		Type:     TypeWorkflow,
 		Vars: map[string]*VarDef{
@@ -160,7 +159,6 @@ func TestGraphV2RejectsReservedVariableDeclarations(t *testing.T) {
 func TestGraphV2TargetlessRejectsConvoyReferencesAndDrain(t *testing.T) {
 	f := &Formula{
 		Formula:     "needs-target",
-		Version:     1,
 		Contract:    "graph.v2",
 		Type:        TypeWorkflow,
 		Description: "Work on {{convoy_id}}",
@@ -186,7 +184,6 @@ func TestGraphV2TargetlessRejectsConvoyReferencesAndDrain(t *testing.T) {
 func TestGraphV2DrainV0AcceptsSharedAndExclusive(t *testing.T) {
 	f := &Formula{
 		Formula:  "shared-drain",
-		Version:  1,
 		Contract: "graph.v2",
 		Type:     TypeWorkflow,
 		Steps: []*Step{{
@@ -233,7 +230,6 @@ func TestGraphV2DrainV0RejectsInvalidModes(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			f := &Formula{
 				Formula:  "bad-drain",
-				Version:  1,
 				Contract: "graph.v2",
 				Type:     TypeWorkflow,
 				Steps: []*Step{{
@@ -256,7 +252,7 @@ func TestGraphV2DrainV0RejectsInvalidModes(t *testing.T) {
 
 func TestParseGraphV2DrainStep(t *testing.T) {
 	dir := t.TempDir()
-	writeFormula(t, dir, "drain-demo.formula.toml", `
+	writeGraphV2Formula(t, dir, "drain-demo.formula.toml", `
 formula = "drain-demo"
 version = 1
 contract = "graph.v2"
@@ -289,7 +285,7 @@ on_item_failure = "continue"
 
 func TestResolveGraphV2DrainRejectsExplicitZeroMaxUnits(t *testing.T) {
 	dir := t.TempDir()
-	writeFormula(t, dir, "zero-drain.formula.toml", `
+	writeGraphV2Formula(t, dir, "zero-drain.formula.toml", `
 formula = "zero-drain"
 version = 1
 contract = "graph.v2"
@@ -321,7 +317,7 @@ max_units = 0
 
 func TestParseFileReturnsDescriptionFileErrors(t *testing.T) {
 	dir := t.TempDir()
-	writeFormula(t, dir, "missing-desc.formula.toml", `
+	writeGraphV2Formula(t, dir, "missing-desc.formula.toml", `
 formula = "missing-desc"
 version = 1
 contract = "graph.v2"
@@ -344,7 +340,7 @@ description_file = "does-not-exist.md"
 
 func TestParseFileKeepsLegacyDescriptionFileTolerance(t *testing.T) {
 	dir := t.TempDir()
-	writeFormula(t, dir, "missing-desc.formula.toml", `
+	writeGraphV2Formula(t, dir, "missing-desc.formula.toml", `
 formula = "missing-desc"
 version = 1
 type = "workflow"
@@ -397,7 +393,7 @@ description_file = "desc.md"
 
 func TestParseFileLegacyDescriptionFileMissStillResolvesChildren(t *testing.T) {
 	dir := t.TempDir()
-	writeFormula(t, dir, "legacy-desc.formula.toml", `
+	writeGraphV2Formula(t, dir, "legacy-desc.formula.toml", `
 formula = "legacy-desc"
 version = 1
 type = "workflow"
@@ -430,7 +426,7 @@ description_file = "child.md"
 
 func TestResolveInheritedGraphV2RejectsUnresolvedChildDescriptionFile(t *testing.T) {
 	dir := t.TempDir()
-	writeFormula(t, dir, "graph-base.formula.toml", `
+	writeGraphV2Formula(t, dir, "graph-base.formula.toml", `
 formula = "graph-base"
 version = 1
 contract = "graph.v2"
@@ -440,7 +436,7 @@ type = "workflow"
 id = "base"
 title = "Base"
 `)
-	writeFormula(t, dir, "graph-child.formula.toml", `
+	writeGraphV2Formula(t, dir, "graph-child.formula.toml", `
 formula = "graph-child"
 version = 1
 type = "workflow"
@@ -472,7 +468,7 @@ func TestCompileGraphV2RejectsUnresolvedExpansionDescriptionFile(t *testing.T) {
 	defer SetFormulaV2Enabled(prev)
 
 	dir := t.TempDir()
-	writeFormula(t, dir, "parent.formula.toml", `
+	writeGraphV2Formula(t, dir, "parent.formula.toml", `
 formula = "parent"
 version = 2
 contract = "graph.v2"
@@ -483,7 +479,7 @@ id = "work"
 title = "Work"
 expand = "exp"
 `)
-	writeFormula(t, dir, "exp.formula.toml", `
+	writeGraphV2Formula(t, dir, "exp.formula.toml", `
 formula = "exp"
 version = 2
 type = "expansion"
@@ -533,7 +529,7 @@ func TestValidateGraphV2RecipeRejectsZeroDrainMaxUnits(t *testing.T) {
 	}
 }
 
-func writeFormula(t *testing.T, dir, name, contents string) {
+func writeGraphV2Formula(t *testing.T, dir, name, contents string) {
 	t.Helper()
 	if err := os.WriteFile(filepath.Join(dir, name), []byte(strings.TrimSpace(contents)+"\n"), 0o644); err != nil {
 		t.Fatalf("write formula: %v", err)
