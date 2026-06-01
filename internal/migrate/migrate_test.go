@@ -931,6 +931,7 @@ func TestAgentConfigFromAgentCoversPersistedFields(t *testing.T) {
 		"NamepoolNames":                true,
 		"OverlayDir":                   true,
 		"SourceDir":                    true,
+		"InheritedProvider":            true,
 		"InheritedDefaultSlingFormula": true,
 		"InheritedAppendFragments":     true,
 		"Implicit":                     true,

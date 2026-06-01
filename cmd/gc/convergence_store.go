@@ -10,6 +10,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/convergence"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/graphv2"
 	"github.com/gastownhall/gascity/internal/molecule"
 )
 
@@ -180,6 +181,13 @@ func (a *convergenceStoreAdapter) pourWisp(parentID, formula, idempotencyKey str
 	}
 	if evaluatePrompt != "" {
 		cookVars["evaluate_prompt"] = evaluatePrompt
+	}
+	isGraphV2, _, err := graphv2.IsGraphV2Formula(formula, a.formulaSearchPaths)
+	if err != nil {
+		return "", fmt.Errorf("checking graph.v2 contract for convergence wisp %q: %w", formula, err)
+	}
+	if isGraphV2 {
+		return "", fmt.Errorf("convergence wisps do not support graph.v2 formula %q; use a non-graph formula until convergence has an explicit input convoy target", formula)
 	}
 	result, err := molecule.Cook(context.Background(), a.store, formula, a.formulaSearchPaths, molecule.Options{
 		Vars:           cookVars,

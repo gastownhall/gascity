@@ -738,11 +738,12 @@ type ConfigPatchesResponse struct {
 
 // ConfigResponse defines model for ConfigResponse.
 type ConfigResponse struct {
-	Agents    *[]ConfigAgentResponse       `json:"agents"`
-	Patches   *ConfigPatchesResponse       `json:"patches,omitempty"`
-	Providers *map[string]ProviderSpecJSON `json:"providers,omitempty"`
-	Rigs      *[]ConfigRigResponse         `json:"rigs"`
-	Workspace WorkspaceResponse            `json:"workspace"`
+	Agents          *[]ConfigAgentResponse       `json:"agents"`
+	EffectiveApiUrl *string                      `json:"effective_api_url,omitempty"`
+	Patches         *ConfigPatchesResponse       `json:"patches,omitempty"`
+	Providers       *map[string]ProviderSpecJSON `json:"providers,omitempty"`
+	Rigs            *[]ConfigRigResponse         `json:"rigs"`
+	Workspace       WorkspaceResponse            `json:"workspace"`
 }
 
 // ConfigRigResponse defines model for ConfigRigResponse.

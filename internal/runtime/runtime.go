@@ -8,6 +8,7 @@ package runtime //nolint:revive // shadows stdlib runtime; isolated to internal
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -474,6 +475,10 @@ type Config struct {
 	// MCPServers is the effective ACP session/new MCP server list for this
 	// session. Non-ACP providers ignore it.
 	MCPServers []MCPServerConfig
+
+	// StartupEnvelope carries provider-specific startup metadata used by
+	// the T3 bridge path. It is excluded from the core fingerprint.
+	StartupEnvelope json.RawMessage
 
 	// Startup reliability hints (all optional — zero values skip).
 

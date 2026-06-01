@@ -17,6 +17,66 @@ but all its roles are hardwired in Go code. Steve realized the MEOW stack
 configuration. Gas City extracts that insight into an SDK where Gas Town
 becomes one configuration among many.
 
+## Current integration mission
+
+This fork is integrating **Gas City + T3 Code + a DoltLite-backed beads
+store**. The target is not a permanent divergence from upstream Gas City.
+The target is a maintainable integration branch whose useful changes can
+track upstream easily and whose fork-specific behavior is isolated behind
+small, obvious ownership boundaries.
+
+When working here, assume three codebases matter:
+
+- **This repo** (`/data/projects/gascity`): the Gas City SDK and the fork
+  integration layer.
+- **T3 Code** (`/data/projects/t3code` when present): the UI/runtime that
+  hosts visible agent threads through the `t3bridge` runtime provider.
+- **Beads / bd with DoltLite**: the work ledger backend. Gas City should use
+  the normal beads abstractions and keep DoltLite-specific read/write behavior
+  contained in beads/provider boundaries.
+
+### Upstream alignment rules
+
+- Keep `upstream/main` easy to merge. Prefer new files, small adapters,
+  and fork-owned packages over broad edits to upstream-owned code.
+- If upstream code must change, make the patch minimal and idiomatic so it
+  can be rebased, dropped, or proposed upstream cleanly.
+- Do not bury T3 Code or DoltLite assumptions in generic SDK paths. Put
+  provider-specific behavior behind the existing runtime, config, or beads
+  backend boundaries.
+- Before rebuilding a missing feature from scratch, search history. This
+  fork has repeatedly lost working code during branch churn; older branches
+  and commits often already contain the fix.
+- Treat archived plans and audits as evidence, not gospel. Confirm against
+  current code and current upstream before porting.
+
+### Feature archaeology workflow
+
+Use git history deliberately when a feature appears missing or regressed:
+
+```bash
+git remote -v
+git fetch upstream
+git log --all --oneline --decorate --grep '<keyword>'
+git log --all --oneline --decorate -- <path>
+git show <commit>:<path>
+git diff upstream/main...HEAD -- <path>
+git range-diff upstream/main...HEAD
+```
+
+Useful search targets:
+
+- T3 bridge/runtime: `t3bridge`, `T3Bridge`, `internal/runtime/t3bridge`,
+  `cmd/gc/template_resolve_t3bridge.go`
+- DoltLite/beads backend: `doltlite`, `DoltLite`, `internal/beads`,
+  `providers.go`, `beads_provider_lifecycle`
+- Prior parity work: `engdocs/archive/analysis/gastown-upstream-audit.md`,
+  `engdocs/archive/analysis/feature-parity.md`,
+  `engdocs/contributors/dolt-regression-audit.md`
+
+If history contains working code, prefer porting the smallest proven slice
+instead of inventing a parallel mechanism.
+
 ## Development approach
 
 **TDD.** Write the test first, watch it fail, make it pass. Every package

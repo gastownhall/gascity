@@ -518,6 +518,7 @@ export type ConfigPatchesResponse = {
 
 export type ConfigResponse = {
     agents: Array<ConfigAgentResponse> | null;
+    effective_api_url?: string;
     patches?: ConfigPatchesResponse;
     providers?: {
         [key: string]: ProviderSpecJson;

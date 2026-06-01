@@ -15,8 +15,13 @@ import (
 	"github.com/gastownhall/gascity/internal/session"
 )
 
-// GraphExecutionRouteMetaKey is the metadata key for the execution route.
-const GraphExecutionRouteMetaKey = "gc.execution_routed_to"
+const (
+	// GraphExecutionRouteMetaKey is the metadata key for the execution route.
+	GraphExecutionRouteMetaKey = "gc.execution_routed_to"
+	// GraphExecutionRigContextMetaKey preserves the formula-layer rig context
+	// for control beads whose execution route is a concrete session ID.
+	GraphExecutionRigContextMetaKey = "gc.execution_rig_context"
+)
 
 // AgentResolver resolves an agent name to a config.Agent.
 type AgentResolver interface {
@@ -42,6 +47,7 @@ type GraphRouteBinding struct {
 	// concrete session bead ID. When set, gc.routed_to is intentionally
 	// omitted because execution already targets a specific session.
 	DirectSessionID string
+	RigContext      string
 	MetadataOnly    bool
 }
 
@@ -54,7 +60,7 @@ type graphStepTarget struct {
 // dispatcher kind (routed to the control dispatcher agent).
 func IsControlDispatcherKind(kind string) bool {
 	switch kind {
-	case "check", "fanout", "retry-eval", "scope-check", "workflow-finalize", "retry", "ralph":
+	case "check", "drain", "fanout", "retry-eval", "scope-check", "workflow-finalize", "retry", "ralph":
 		return true
 	default:
 		return false
@@ -111,6 +117,32 @@ func GraphRouteRigContext(route string) string {
 		return ""
 	}
 	return route[:idx]
+}
+
+func graphBindingRigContext(binding GraphRouteBinding) string {
+	if rigContext := strings.TrimSpace(binding.RigContext); rigContext != "" {
+		return rigContext
+	}
+	return GraphRouteRigContext(binding.QualifiedName)
+}
+
+func graphDirectSessionRigContext(target, rigContext string, bead beads.Bead) string {
+	if rigContext = strings.TrimSpace(rigContext); rigContext != "" {
+		return rigContext
+	}
+	if rigContext = GraphRouteRigContext(target); rigContext != "" {
+		return rigContext
+	}
+	for _, candidate := range []string{
+		bead.Metadata[session.NamedSessionIdentityMetadata],
+		bead.Metadata["alias"],
+		bead.Metadata["template"],
+	} {
+		if rigContext = GraphRouteRigContext(candidate); rigContext != "" {
+			return rigContext
+		}
+	}
+	return ""
 }
 
 // GraphStepRouteTarget extracts the route target from a step's direct-session
@@ -191,15 +223,24 @@ func ApplyGraphControlRouteBinding(step *formula.RecipeStep, binding GraphRouteB
 // control steps to the control dispatcher.
 func AssignGraphStepRoute(step *formula.RecipeStep, executionBinding GraphRouteBinding, controlBinding *GraphRouteBinding) {
 	if controlBinding != nil {
-		if executionBinding.QualifiedName != "" {
+		switch {
+		case executionBinding.QualifiedName != "":
 			step.Metadata[GraphExecutionRouteMetaKey] = executionBinding.QualifiedName
-		} else {
+		case executionBinding.DirectSessionID != "":
+			step.Metadata[GraphExecutionRouteMetaKey] = executionBinding.DirectSessionID
+		default:
 			delete(step.Metadata, GraphExecutionRouteMetaKey)
+		}
+		if rigContext := graphBindingRigContext(executionBinding); rigContext != "" {
+			step.Metadata[GraphExecutionRigContextMetaKey] = rigContext
+		} else {
+			delete(step.Metadata, GraphExecutionRigContextMetaKey)
 		}
 		ApplyGraphControlRouteBinding(step, *controlBinding)
 		return
 	}
 	delete(step.Metadata, GraphExecutionRouteMetaKey)
+	delete(step.Metadata, GraphExecutionRigContextMetaKey)
 	ApplyGraphRouteBinding(step, executionBinding)
 }
 
@@ -392,14 +433,23 @@ func resolveGraphDirectSessionBinding(store beads.Store, cityName string, cfg *c
 			return GraphRouteBinding{}, false, err
 		}
 		if ok {
-			return GraphRouteBinding{DirectSessionID: id}, true, nil
+			binding := GraphRouteBinding{DirectSessionID: id, RigContext: strings.TrimSpace(rigContext)}
+			if binding.RigContext == "" {
+				binding.RigContext = GraphRouteRigContext(target)
+			}
+			if binding.RigContext == "" {
+				if bead, getErr := store.Get(id); getErr == nil {
+					binding.RigContext = graphDirectSessionRigContext(target, rigContext, bead)
+				}
+			}
+			return binding, true, nil
 		}
 	}
 	// Exact session bead IDs are unambiguous and must win even when they
 	// collide with a config target name.
 	if id, err := session.ResolveSessionIDByExactID(store, target); err == nil {
 		if bead, getErr := store.Get(id); getErr == nil && session.IsSessionBeadOrRepairable(bead) && bead.Status != "closed" {
-			return GraphRouteBinding{DirectSessionID: bead.ID}, true, nil
+			return GraphRouteBinding{DirectSessionID: bead.ID, RigContext: graphDirectSessionRigContext(target, rigContext, bead)}, true, nil
 		}
 	}
 	if cfg != nil && deps.Resolver != nil {
@@ -409,7 +459,7 @@ func resolveGraphDirectSessionBinding(store beads.Store, cityName string, cfg *c
 	}
 	if id, err := session.ResolveSessionID(store, target); err == nil {
 		if bead, getErr := store.Get(id); getErr == nil && session.IsSessionBeadOrRepairable(bead) && bead.Status != "closed" {
-			return GraphRouteBinding{DirectSessionID: bead.ID}, true, nil
+			return GraphRouteBinding{DirectSessionID: bead.ID, RigContext: graphDirectSessionRigContext(target, rigContext, bead)}, true, nil
 		}
 	}
 	return GraphRouteBinding{}, false, nil
@@ -418,16 +468,24 @@ func resolveGraphDirectSessionBinding(store beads.Store, cityName string, cfg *c
 // DecorateGraphWorkflowRecipe applies routing metadata to all steps in a
 // graph.v2 workflow recipe.
 func DecorateGraphWorkflowRecipe(recipe *formula.Recipe, routeVars map[string]string, sourceBeadID, scopeKind, scopeRef, rootStoreRef, routedTo, sessionName string, store beads.Store, cityName string, cfg *config.City, deps Deps) error {
-	if recipe == nil {
-		return fmt.Errorf("workflow recipe is nil")
-	}
 	defaultRoute := GraphRouteBinding{QualifiedName: routedTo}
 	if sessionName != "" {
 		defaultRoute.SessionName = sessionName
 	} else {
 		defaultRoute.MetadataOnly = true
 	}
-	routingRigContext := GraphRouteRigContext(defaultRoute.QualifiedName)
+	return DecorateGraphWorkflowRecipeWithDefaultBinding(recipe, routeVars, sourceBeadID, scopeKind, scopeRef, rootStoreRef, defaultRoute, store, cityName, cfg, deps)
+}
+
+// DecorateGraphWorkflowRecipeWithDefaultBinding applies routing metadata to all
+// steps in a graph.v2 workflow recipe using a pre-resolved default route.
+func DecorateGraphWorkflowRecipeWithDefaultBinding(recipe *formula.Recipe, routeVars map[string]string, sourceBeadID, scopeKind, scopeRef, rootStoreRef string, defaultRoute GraphRouteBinding, store beads.Store, cityName string, cfg *config.City, deps Deps) error {
+	if recipe == nil {
+		return fmt.Errorf("workflow recipe is nil")
+	}
+	routedTo := strings.TrimSpace(defaultRoute.QualifiedName)
+	rootSessionName := strings.TrimSpace(defaultRoute.SessionName)
+	routingRigContext := graphBindingRigContext(defaultRoute)
 	controlRoute, err := ControlDispatcherBinding(store, cityName, cfg, routingRigContext, deps)
 	if err != nil {
 		return err
@@ -468,10 +526,10 @@ func DecorateGraphWorkflowRecipe(recipe *formula.Recipe, routeVars map[string]st
 			// (fixes #2763; gc.run_target retired as a wire field — ga-eld2x).
 			step.Metadata["gc.routed_to"] = routedTo
 			delete(step.Metadata, "gc.run_target")
-			if sessionName != "" {
+			if rootSessionName != "" {
 				// Durable session back-reference on the run root for
 				// single-session agents (#2843). Empty for pool agents.
-				step.Metadata["gc.session_name"] = sessionName
+				step.Metadata["gc.session_name"] = rootSessionName
 			}
 			if sourceBeadID != "" {
 				step.Metadata["gc.source_bead_id"] = sourceBeadID

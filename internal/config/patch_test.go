@@ -698,6 +698,111 @@ func TestPatchesIsEmpty(t *testing.T) {
 	if (&Patches{Agents: []AgentPatch{{Name: "x"}}}).IsEmpty() {
 		t.Error("Patches with agents should not be empty")
 	}
+	if (&Patches{NamedSessions: []NamedSessionPatch{{Template: "mayor"}}}).IsEmpty() {
+		t.Error("Patches with named sessions should not be empty")
+	}
+}
+
+func TestLoadWithIncludes_PatchesNamedSession(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/city.toml"] = []byte(`
+[workspace]
+name = "test"
+
+[[agent]]
+name = "mayor"
+
+[[named_session]]
+template = "mayor"
+mode = "on_demand"
+
+[[patches.named_session]]
+template = "mayor"
+mode = "always"
+`)
+	cfg, _, err := LoadWithIncludes(fs, "/city/city.toml")
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+	sessions := userNamedSessions(cfg.NamedSessions)
+	if len(sessions) != 1 {
+		t.Fatalf("len(user NamedSessions) = %d, want 1", len(sessions))
+	}
+	if got := sessions[0].Template; got != "mayor" {
+		t.Errorf("Template = %q, want mayor", got)
+	}
+	if got := sessions[0].Mode; got != "always" {
+		t.Errorf("Mode = %q, want always", got)
+	}
+}
+
+func TestLoadWithIncludes_PatchesNamedSessionByNameWhenTemplateAmbiguous(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/city.toml"] = []byte(`
+[workspace]
+name = "test"
+
+[[agent]]
+name = "coder"
+max_active_sessions = 2
+
+[[named_session]]
+name = "alice"
+template = "coder"
+mode = "on_demand"
+
+[[named_session]]
+name = "bob"
+template = "coder"
+mode = "on_demand"
+
+[[patches.named_session]]
+name = "bob"
+mode = "always"
+`)
+	cfg, _, err := LoadWithIncludes(fs, "/city/city.toml")
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+	if got := cfg.NamedSessions[0].Mode; got != "on_demand" {
+		t.Fatalf("alice mode = %q, want on_demand", got)
+	}
+	if got := cfg.NamedSessions[1].Mode; got != "always" {
+		t.Fatalf("bob mode = %q, want always", got)
+	}
+}
+
+func TestLoadWithIncludes_PatchNamedSessionTemplateAmbiguous(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/city.toml"] = []byte(`
+[workspace]
+name = "test"
+
+[[agent]]
+name = "coder"
+max_active_sessions = 2
+
+[[named_session]]
+name = "alice"
+template = "coder"
+mode = "on_demand"
+
+[[named_session]]
+name = "bob"
+template = "coder"
+mode = "on_demand"
+
+[[patches.named_session]]
+template = "coder"
+mode = "always"
+`)
+	_, _, err := LoadWithIncludes(fs, "/city/city.toml")
+	if err == nil {
+		t.Fatal("expected ambiguous named_session patch error")
+	}
+	if !strings.Contains(err.Error(), "ambiguous") || !strings.Contains(err.Error(), "coder") {
+		t.Fatalf("error = %q, want ambiguous coder target", err)
+	}
 }
 
 func TestApplyPatches_AgentSessionSetup(t *testing.T) {

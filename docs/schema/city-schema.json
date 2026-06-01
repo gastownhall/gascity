@@ -355,28 +355,28 @@
         },
         "default_sling_formula": {
           "type": "string",
-          "description": "DefaultSlingFormula is the city-level default formula used for agents\nthat inherit [agent_defaults]. Explicit agents only receive this value\nwhen agent_defaults.default_sling_formula is set; implicit multi-session\nconfigs are seeded with \"mol-do-work\" elsewhere when no explicit default is set."
+          "description": "DefaultSlingFormula is the default formula used for agents that inherit\n[agent_defaults]. Explicit agents only receive this value when\nagent_defaults.default_sling_formula is set; implicit multi-session\nconfigs are seeded with \"mol-do-work\" elsewhere when no explicit default is set."
         },
         "allow_overlay": {
           "items": {
             "type": "string"
           },
           "type": "array",
-          "description": "AllowOverlay is parsed and composed as a city-level allowlist for\nsession overlays, but it is not yet inherited onto agents\nautomatically at runtime."
+          "description": "AllowOverlay is parsed and composed as a config-level allowlist for\nsession overlays, but it is not yet inherited onto agents automatically\nat runtime."
         },
         "allow_env_override": {
           "items": {
             "type": "string"
           },
           "type": "array",
-          "description": "AllowEnvOverride is parsed and composed as a city-level allowlist for\nsession env overrides, but it is not yet inherited onto agents\nautomatically at runtime. Names must match ^[A-Z][A-Z0-9_]{0,127}$."
+          "description": "AllowEnvOverride is parsed and composed as a config-level allowlist for\nsession env overrides, but it is not yet inherited onto agents\nautomatically at runtime. Names must match ^[A-Z][A-Z0-9_]{0,127}$."
         },
         "append_fragments": {
           "items": {
             "type": "string"
           },
           "type": "array",
-          "description": "AppendFragments lists named template fragments to auto-append to\n.template.md prompts after rendering. Legacy .md.tmpl prompts are\nstill supported during the transition; plain .md remains inert.\nV2 migration convenience — replaces global_fragments/inject_fragments\nfor city-wide defaults."
+          "description": "AppendFragments lists named template fragments to auto-append to\n.template.md prompts after rendering. Legacy .md.tmpl prompts are\nstill supported during the transition; plain .md remains inert.\nV2 migration convenience — replaces global_fragments/inject_fragments\nfor config-wide defaults."
         },
         "skills": {
           "items": {
@@ -395,7 +395,7 @@
       },
       "additionalProperties": false,
       "type": "object",
-      "description": "AgentDefaults provides city-level agent defaults declared via [agent_defaults] in city.toml."
+      "description": "AgentDefaults provides agent defaults declared via [agent_defaults] in city.toml or pack.toml."
     },
     "AgentOverride": {
       "properties": {
@@ -944,6 +944,10 @@
           "type": "string",
           "description": "Provider selects the bead store backend: \"bd\" (default), \"file\",\nor \"exec:\u003cscript\u003e\" for a user-supplied script.",
           "default": "bd"
+        },
+        "backend": {
+          "type": "string",
+          "description": "Backend selects the bd storage engine when Provider is \"bd\".\nEmpty defaults to \"dolt\"; T3Code uses \"doltlite\" for local dev stores."
         }
       },
       "additionalProperties": false,
@@ -1086,7 +1090,7 @@
         },
         "agent_defaults": {
           "$ref": "#/$defs/AgentDefaults",
-          "description": "AgentDefaults provides city-level defaults for agents that don't\noverride them (canonical TOML key: agent_defaults). The runtime\ncurrently applies provider, default_sling_formula, and\nappend_fragments; the attachment-list fields remain tombstones, and\nthe other fields are parsed/composed but not yet inherited\nautomatically."
+          "description": "AgentDefaults provides root city defaults for agents that don't override\nthem (canonical TOML key: agent_defaults). Pack-local defaults use the\nsame table shape in pack.toml. The runtime currently applies provider,\ndefault_sling_formula, and append_fragments; the attachment-list fields\nremain tombstones, and the other fields are parsed/composed but not yet\ninherited automatically."
         },
         "pricing": {
           "items": {
@@ -1719,6 +1723,33 @@
       ],
       "description": "NamedSession defines a canonical persistent session backed by an agent template."
     },
+    "NamedSessionPatch": {
+      "properties": {
+        "dir": {
+          "type": "string",
+          "description": "Dir is the targeting key. Empty targets a city-scoped named session."
+        },
+        "name": {
+          "type": "string",
+          "description": "Name is the canonical named-session identity. Use this to disambiguate\nsessions that share the same template."
+        },
+        "template": {
+          "type": "string",
+          "description": "Template is a compatibility targeting key when Name is omitted."
+        },
+        "mode": {
+          "type": "string",
+          "enum": [
+            "on_demand",
+            "always"
+          ],
+          "description": "Mode overrides the named-session controller mode (\"on_demand\" or \"always\")."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "NamedSessionPatch modifies an existing named session identified by canonical name or, for compatibility, by an unambiguous template."
+    },
     "OptionChoice": {
       "properties": {
         "value": {
@@ -1872,6 +1903,13 @@
           },
           "type": "array",
           "description": "Agents targets agents by (dir, name)."
+        },
+        "named_session": {
+          "items": {
+            "$ref": "#/$defs/NamedSessionPatch"
+          },
+          "type": "array",
+          "description": "NamedSessions targets configured named sessions by (dir, template)."
         },
         "rigs": {
           "items": {

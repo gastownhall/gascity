@@ -72,9 +72,6 @@ func validateCityAuthoringSurface(md toml.MetaData) error {
 }
 
 func validatePackAuthoringSurface(md toml.MetaData, source string) error {
-	if md.IsDefined("agent_defaults") {
-		return fmt.Errorf("%s: [agent_defaults] is a city.toml table, not a pack.toml field", source)
-	}
 	if md.IsDefined("agents") {
 		return fmt.Errorf("%s: [agents] is a city.toml compatibility alias for [agent_defaults], not a pack.toml field", source)
 	}

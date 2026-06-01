@@ -142,6 +142,12 @@ var readyExcludeTypes = map[string]bool{
 	"rig":           true, // rig identity beads
 }
 
+var readyBlockingDependencyTypes = map[string]bool{
+	"blocks":             true,
+	"waits-for":          true,
+	"conditional-blocks": true,
+}
+
 // IsReadyExcludedType reports whether the bead type is excluded from
 // Ready() results by default.
 func IsReadyExcludedType(t string) bool {
@@ -172,8 +178,23 @@ func IsReadyCandidateForTier(b Bead, now time.Time, tier TierMode) bool {
 		}
 	}
 	return b.Status == "open" &&
-		!IsReadyExcludedType(b.Type) &&
+		!IsReadyExcludedBead(b) &&
 		!IsDeferred(b, now)
+}
+
+// IsReadyExcludedBead reports whether a bead is infrastructure rather than
+// actionable Ready work.
+func IsReadyExcludedBead(b Bead) bool {
+	if IsReadyExcludedType(b.Type) {
+		return true
+	}
+	for _, label := range b.Labels {
+		switch label {
+		case "gc:session", "gc:order-tracking", "order-tracking":
+			return true
+		}
+	}
+	return false
 }
 
 // IsDeferred reports whether a bead is hidden by a future defer_until,
@@ -181,6 +202,10 @@ func IsReadyCandidateForTier(b Bead, now time.Time, tier TierMode) bool {
 // ready) and cmd_hook.isFutureDeferredHookCandidate.
 func IsDeferred(b Bead, now time.Time) bool {
 	return b.DeferUntil != nil && b.DeferUntil.After(now)
+}
+
+func isReadyBlockingDependencyType(t string) bool {
+	return readyBlockingDependencyTypes[t]
 }
 
 // Dep represents a dependency relationship between two beads. The IssueID

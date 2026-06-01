@@ -294,6 +294,68 @@
       ],
       "description": "Agent defines a configured agent in the city."
     },
+    "AgentDefaults": {
+      "properties": {
+        "provider": {
+          "type": "string",
+          "description": "Provider is the default provider name for agents that do not set their\nown provider. It also counts as a configured provider for implicit agent\ninjection."
+        },
+        "model": {
+          "type": "string",
+          "description": "Model is the parsed/composed default model name for agents\n(e.g., \"claude-sonnet-4-6\"), but it is not yet auto-applied at\nruntime. Agents with their own model override would take precedence."
+        },
+        "wake_mode": {
+          "type": "string",
+          "enum": [
+            "resume",
+            "fresh"
+          ],
+          "description": "WakeMode is the parsed/composed default wake mode (\"resume\" or\n\"fresh\"), but it is not yet auto-applied at runtime."
+        },
+        "default_sling_formula": {
+          "type": "string",
+          "description": "DefaultSlingFormula is the default formula used for agents that inherit\n[agent_defaults]. Explicit agents only receive this value when\nagent_defaults.default_sling_formula is set; implicit multi-session\nconfigs are seeded with \"mol-do-work\" elsewhere when no explicit default is set."
+        },
+        "allow_overlay": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "AllowOverlay is parsed and composed as a config-level allowlist for\nsession overlays, but it is not yet inherited onto agents automatically\nat runtime."
+        },
+        "allow_env_override": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "AllowEnvOverride is parsed and composed as a config-level allowlist for\nsession env overrides, but it is not yet inherited onto agents\nautomatically at runtime. Names must match ^[A-Z][A-Z0-9_]{0,127}$."
+        },
+        "append_fragments": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "AppendFragments lists named template fragments to auto-append to\n.template.md prompts after rendering. Legacy .md.tmpl prompts are\nstill supported during the transition; plain .md remains inert.\nV2 migration convenience — replaces global_fragments/inject_fragments\nfor config-wide defaults."
+        },
+        "skills": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "Skills is a tombstone field retained for v0.15.1 backwards\ncompatibility. Parsed and composed for migration visibility, but\nattachment-list fields are accepted but ignored by the active\nmaterializer."
+        },
+        "mcp": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "MCP is a tombstone field retained for v0.15.1 backwards compatibility.\nParsed and composed for migration visibility, but attachment-list\nfields are accepted but ignored by the active materializer."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "AgentDefaults provides agent defaults declared via [agent_defaults] in city.toml or pack.toml."
+    },
     "AgentPatch": {
       "properties": {
         "dir": {
@@ -740,6 +802,9 @@
             "$ref": "#/$defs/Import"
           },
           "type": "object"
+        },
+        "agent_defaults": {
+          "$ref": "#/$defs/AgentDefaults"
         },
         "agent": {
           "items": {

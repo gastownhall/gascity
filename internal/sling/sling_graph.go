@@ -17,6 +17,9 @@ type GraphRouteBinding = graphroute.GraphRouteBinding
 // GraphExecutionRouteMetaKey is an alias for graphroute.GraphExecutionRouteMetaKey.
 const GraphExecutionRouteMetaKey = graphroute.GraphExecutionRouteMetaKey
 
+// GraphExecutionRigContextMetaKey is an alias for graphroute.GraphExecutionRigContextMetaKey.
+const GraphExecutionRigContextMetaKey = graphroute.GraphExecutionRigContextMetaKey
+
 // IsCompiledGraphWorkflow delegates to graphroute.
 func IsCompiledGraphWorkflow(recipe *formula.Recipe) bool {
 	return graphroute.IsCompiledGraphWorkflow(recipe)
@@ -108,4 +111,16 @@ func DecorateGraphWorkflowRecipe(recipe *formula.Recipe, routeVars map[string]st
 		gdeps.DirectSessionResolver = deps.DirectSessionResolver
 	}
 	return graphroute.DecorateGraphWorkflowRecipe(recipe, routeVars, sourceBeadID, scopeKind, scopeRef, rootStoreRef, routedTo, sessionName, store, cityName, cfg, gdeps)
+}
+
+// DecorateGraphWorkflowRecipeWithDefaultBinding delegates to graphroute.
+func DecorateGraphWorkflowRecipeWithDefaultBinding(recipe *formula.Recipe, routeVars map[string]string, sourceBeadID, scopeKind, scopeRef, rootStoreRef string, defaultRoute GraphRouteBinding, store beads.Store, cityName string, cfg *config.City, deps SlingDeps) error {
+	gdeps := graphroute.Deps{CityPath: deps.CityPath}
+	if deps.Resolver != nil {
+		gdeps.Resolver = deps.Resolver
+	}
+	if deps.DirectSessionResolver != nil {
+		gdeps.DirectSessionResolver = deps.DirectSessionResolver
+	}
+	return graphroute.DecorateGraphWorkflowRecipeWithDefaultBinding(recipe, routeVars, sourceBeadID, scopeKind, scopeRef, rootStoreRef, defaultRoute, store, cityName, cfg, gdeps)
 }

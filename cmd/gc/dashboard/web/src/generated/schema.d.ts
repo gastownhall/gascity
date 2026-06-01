@@ -2390,6 +2390,7 @@ export interface components {
         };
         ConfigResponse: {
             agents: components["schemas"]["ConfigAgentResponse"][] | null;
+            effective_api_url?: string;
             patches?: components["schemas"]["ConfigPatchesResponse"];
             providers?: {
                 [key: string]: components["schemas"]["ProviderSpecJSON"];

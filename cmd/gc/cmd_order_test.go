@@ -20,6 +20,7 @@ import (
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/formulatest"
 	"github.com/gastownhall/gascity/internal/orders"
 )
 
@@ -1782,6 +1783,45 @@ title = "Do work"
 	}
 	if !foundControl {
 		t.Fatal("missing routed workflow finalizer")
+	}
+}
+
+func TestOrderRunGraphV2ConvoyReferenceRequiresTarget(t *testing.T) {
+	formulatest.EnableV2ForTest(t)
+	dir := t.TempDir()
+	graphFormula := `
+formula = "graph-needs-convoy"
+version = 1
+contract = "graph.v2"
+type = "workflow"
+
+[[steps]]
+id = "step"
+title = "Do work"
+description = "Inspect convoy {{convoy_id}}"
+`
+	if err := os.WriteFile(filepath.Join(dir, "graph-needs-convoy.formula.toml"), []byte(strings.TrimSpace(graphFormula)+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	aa := []orders.Order{
+		{Name: "convoy-patrol", Formula: "graph-needs-convoy", Trigger: "cooldown", Interval: "15m", FormulaLayer: dir},
+	}
+	store := beads.NewMemStore()
+	var stdout, stderr bytes.Buffer
+	code := doOrderRun(aa, "convoy-patrol", "", "/city", store, nil, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("doOrderRun = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "requires a targeted graph.v2 invocation") {
+		t.Fatalf("stderr = %q, want targeted graph.v2 invocation error", stderr.String())
+	}
+	results, err := store.ListByLabel("order-run:convoy-patrol", 0, beads.IncludeClosed)
+	if err != nil {
+		t.Fatalf("ListByLabel: %v", err)
+	}
+	if len(results) != 0 {
+		t.Fatalf("created order-run beads = %+v, want none", results)
 	}
 }
 

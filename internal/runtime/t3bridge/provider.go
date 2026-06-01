@@ -34,6 +34,8 @@ var (
 	cachedBridgeWSTokenExpiresAt time.Time
 )
 
+var _ runtime.Provider = (*Provider)(nil)
+
 var defaultWSURLCandidates = []string{
 	"ws://127.0.0.1:3773/ws",
 	"ws://localhost:3773/ws",
@@ -881,10 +883,12 @@ func (p *Provider) rpcCall(method string, params map[string]interface{}) (map[st
 
 func (p *Provider) rpcCallOnce(method string, params map[string]interface{}, reqID int) (map[string]interface{}, error) {
 	var lastErr error
+	var failures []string
 	for _, candidate := range resolveWsURLCandidates() {
 		wsURL, headers, err := authenticatedWsURL(candidate)
 		if err != nil {
 			lastErr = fmt.Errorf("%s: %w", candidate, err)
+			failures = append(failures, lastErr.Error())
 			continue
 		}
 		dialer := *websocket.DefaultDialer
@@ -892,6 +896,7 @@ func (p *Provider) rpcCallOnce(method string, params map[string]interface{}, req
 		conn, _, err := dialer.Dial(wsURL, headers)
 		if err != nil {
 			lastErr = fmt.Errorf("%s: %w", candidate, err)
+			failures = append(failures, lastErr.Error())
 			continue
 		}
 		defer func() { _ = conn.Close() }()
@@ -909,6 +914,7 @@ func (p *Provider) rpcCallOnce(method string, params map[string]interface{}, req
 		}
 		if err := conn.WriteJSON(request); err != nil {
 			lastErr = fmt.Errorf("%s: %w", candidate, err)
+			failures = append(failures, lastErr.Error())
 			continue
 		}
 
@@ -917,6 +923,7 @@ func (p *Provider) rpcCallOnce(method string, params map[string]interface{}, req
 			_, msg, err := conn.ReadMessage()
 			if err != nil {
 				lastErr = fmt.Errorf("%s: %w", candidate, err)
+				failures = append(failures, lastErr.Error())
 				break
 			}
 			var resp struct {
@@ -949,6 +956,9 @@ func (p *Provider) rpcCallOnce(method string, params map[string]interface{}, req
 	}
 	if lastErr == nil {
 		lastErr = fmt.Errorf("no T3 WebSocket URL candidates")
+	}
+	if len(failures) > 1 {
+		return nil, fmt.Errorf("all T3 WebSocket candidates failed: %s", strings.Join(failures, "; "))
 	}
 	return nil, lastErr
 }
@@ -1048,7 +1058,7 @@ func (p *Provider) nextCommandID(prefix string) string {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.reqSeq++
-	return fmt.Sprintf("%s-%d", prefix, p.reqSeq)
+	return fmt.Sprintf("%s-%d-%s", prefix, p.reqSeq, uuid.NewString())
 }
 
 // rpcCreateWorktree calls git.createWorktree via WebSocket. Returns (worktreePath, branch, error).
@@ -1348,6 +1358,7 @@ func threadHasRequiredGCMetadata(snapshot map[string]interface{}, threadID strin
 func (p *Provider) waitForThreadGCMetadata(threadID string, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	for {
+		p.clearSnapshotCache()
 		snapshot, err := p.rpcSnapshot()
 		if err == nil && threadHasRequiredGCMetadata(snapshot, threadID) {
 			return nil
@@ -1386,10 +1397,25 @@ func buildThreadEnv(env map[string]string) map[string]string {
 			threadEnv[key] = value
 		}
 	}
-	if host := threadEnv["GC_DOLT_HOST"]; host != "" {
+	if strings.EqualFold(threadEnv["GC_BEADS_BACKEND"], "doltlite") || strings.EqualFold(env["BEADS_BACKEND"], "doltlite") {
+		for _, key := range []string{
+			"GC_DOLT_HOST",
+			"GC_DOLT_PORT",
+			"GC_DOLT_SERVER_PORT",
+			"BEADS_DOLT_PORT",
+			"BEADS_DOLT_SERVER_HOST",
+			"BEADS_DOLT_SERVER_MODE",
+			"BEADS_DOLT_SERVER_PORT",
+			"BEADS_DOLT_SHARED_SERVER",
+		} {
+			delete(threadEnv, key)
+		}
+		return threadEnv
+	}
+	if host := strings.TrimSpace(threadEnv["GC_DOLT_HOST"]); host != "" {
 		threadEnv["BEADS_DOLT_SERVER_HOST"] = host
 	}
-	if port := threadEnv["GC_DOLT_PORT"]; port != "" {
+	if port := strings.TrimSpace(threadEnv["GC_DOLT_PORT"]); port != "" {
 		threadEnv["BEADS_DOLT_PORT"] = port
 		threadEnv["BEADS_DOLT_SERVER_PORT"] = port
 		threadEnv["BEADS_DOLT_SERVER_MODE"] = "1"
@@ -1448,14 +1474,17 @@ func buildGCMetadata(envelope StartupEnvelope, runtimeProvider string, sessionEn
 		if encodedEnv, err := json.Marshal(sessionEnv); err == nil {
 			meta["gc.sessionEnv"] = string(encodedEnv)
 		}
-		if port := sessionEnv["GC_DOLT_PORT"]; port != "" {
+		if port := sessionEnv["GC_DOLT_PORT"]; port != "" && !strings.EqualFold(sessionEnv["GC_BEADS_BACKEND"], "doltlite") && !strings.EqualFold(sessionEnv["BEADS_BACKEND"], "doltlite") {
 			meta["gc.doltPort"] = port
 		}
 	}
 	for key, value := range meta {
-		if str, ok := value.(string); ok && str == "" {
+		str := strings.TrimSpace(fmt.Sprint(value))
+		if str == "" {
 			delete(meta, key)
+			continue
 		}
+		meta[key] = str
 	}
 	return meta
 }
@@ -1856,6 +1885,21 @@ func (p *Provider) stopEventWatcher(name string) {
 	}
 }
 
+func t3bridgeDebugEnabled() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("GC_T3BRIDGE_DEBUG"))) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
+
+func t3bridgeDebugf(format string, args ...interface{}) {
+	if t3bridgeDebugEnabled() {
+		fmt.Fprintf(os.Stderr, format, args...) //nolint:errcheck // best-effort debug logging
+	}
+}
+
 // IsRunning checks T3 for session liveness via the orchestration snapshot.
 // A recently-started session is treated as running for a short grace period
 // even before T3 reports a provider session, avoiding duplicate starts while
@@ -1867,13 +1911,13 @@ func (p *Provider) IsRunning(name string) bool {
 			fmt.Fprintf(os.Stderr, "t3bridge: IsRunning(%s) — snapshot soft-unavailable during startup grace → true (%v)\n", name, err)
 			return true
 		}
-		fmt.Fprintf(os.Stderr, "t3bridge: IsRunning(%s) — snapshot error: %v\n", name, err)
+		t3bridgeDebugf("t3bridge: IsRunning(%s) — snapshot error: %v\n", name, err)
 		return false
 	}
 	thread := snapshotThreadBySessionName(snapshot, name)
 	binding := snapshotThreadBinding(thread)
 	if binding == nil {
-		fmt.Fprintf(os.Stderr, "t3bridge: IsRunning(%s) — no snapshot binding\n", name)
+		t3bridgeDebugf("t3bridge: IsRunning(%s) — no snapshot binding\n", name)
 		return false
 	}
 	status := p.threadSessionStatus(binding.ThreadID)
@@ -1882,7 +1926,7 @@ func (p *Provider) IsRunning(name string) bool {
 		return true
 	}
 	result := status == "running" || status == "ready"
-	fmt.Fprintf(os.Stderr, "t3bridge: IsRunning(%s) threadID=%s status=%q → %v\n", name, binding.ThreadID, status, result)
+	t3bridgeDebugf("t3bridge: IsRunning(%s) threadID=%s status=%q → %v\n", name, binding.ThreadID, status, result)
 	return result
 }
 

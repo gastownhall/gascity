@@ -223,7 +223,7 @@ func TestMain(m *testing.M) {
 	}
 	configureFSPressureForTests()
 	configureSupervisorHooksForTests()
-	testscript.Main(newDoltLeakGuardedTestingM(m, testTempRoot, testTempRoot, gcHome, runtimeDir, providerStubDir, sharedTestFormulaDir, sharedTestCityDir), map[string]func(){
+	testscript.Main(newDoltLeakGuardedTestingM(m, testTempRoot, testTempRoot, gcHome, runtimeDir, providerStubDir, sharedTestFixtureRoot), map[string]func(){
 		"gc": func() {
 			configureTestscriptEnvDefaults()
 			os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))

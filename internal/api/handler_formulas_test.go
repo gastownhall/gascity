@@ -19,6 +19,7 @@ import (
 
 func TestFormulaListReturnsCatalogSummaries(t *testing.T) {
 	state := newFakeState(t)
+	state.cityBeadStore = beads.NewMemStore()
 	state.cfg.Daemon.FormulaV2 = true
 	formulaDir := t.TempDir()
 	state.cfg.FormulaLayers.City = []string{formulaDir}
@@ -568,7 +569,6 @@ func TestFormulaPreviewAcceptsTypedVarsBody(t *testing.T) {
 description = "Preview {{issue}}"
 formula = "mol-preview"
 version = 2
-contract = "graph.v2"
 
 [vars]
 [vars.issue]
@@ -583,7 +583,6 @@ title = "Prep {{issue}}"
 id = "review"
 title = "Review {{issue}}"
 needs = ["prep"]
-metadata = { "gc.kind" = "run", "gc.scope_ref" = "body" }
 `)
 
 	body := bytes.NewBufferString(`{"scope_kind":"city","scope_ref":"test-city","target":"worker","vars":{"issue":"BD-123"}}`)
@@ -620,8 +619,107 @@ metadata = { "gc.kind" = "run", "gc.scope_ref" = "body" }
 	if len(detail.Preview.Nodes) != 2 {
 		t.Fatalf("preview.nodes = %+v, want 2 nodes", detail.Preview.Nodes)
 	}
-	if detail.Preview.Nodes[1].Kind != "run" || detail.Preview.Nodes[1].ScopeRef != "body" {
-		t.Fatalf("preview node = %+v, want run node with scope_ref", detail.Preview.Nodes[1])
+}
+
+func TestFormulaPreviewGraphV2InjectsTargetConvoy(t *testing.T) {
+	formulatest.EnableV2ForTest(t)
+
+	state := newFakeState(t)
+	state.cityBeadStore = beads.NewMemStore()
+	state.cfg.Daemon.FormulaV2 = true
+	formulaDir := t.TempDir()
+	state.cfg.FormulaLayers.City = []string{formulaDir}
+
+	writeTestFormula(t, formulaDir, "graph-preview", `
+description = "Preview {{convoy_id}}"
+formula = "graph-preview"
+version = 2
+contract = "graph.v2"
+
+[[steps]]
+id = "inspect"
+title = "Inspect {{convoy_id}}"
+`)
+	convoy, err := state.cityBeadStore.Create(beads.Bead{Title: "input", Type: "convoy"})
+	if err != nil {
+		t.Fatalf("Create(convoy): %v", err)
+	}
+
+	body := bytes.NewBufferString(fmt.Sprintf(`{"scope_kind":"city","scope_ref":"test-city","target":%q}`, convoy.ID))
+	h := newTestCityHandler(t, state)
+	req := httptest.NewRequest(http.MethodPost, cityURL(state, "/formulas/graph-preview/preview"), body)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-GC-Request", "true")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	var detail formulaDetailResponse
+	if err := json.NewDecoder(rec.Body).Decode(&detail); err != nil {
+		t.Fatalf("Decode(detail): %v", err)
+	}
+	if detail.Description != "Preview "+convoy.ID {
+		t.Fatalf("description = %q, want injected convoy", detail.Description)
+	}
+	if len(detail.Steps) != 1 || detail.Steps[0].Title != "Inspect "+convoy.ID {
+		t.Fatalf("steps = %+v, want substituted graph.v2 preview step", detail.Steps)
+	}
+}
+
+func TestFormulaPreviewGraphV2UsesPreviewInputConvoyForBeadTarget(t *testing.T) {
+	formulatest.EnableV2ForTest(t)
+
+	state := newFakeState(t)
+	state.cityBeadStore = beads.NewMemStore()
+	state.cfg.Daemon.FormulaV2 = true
+	formulaDir := t.TempDir()
+	state.cfg.FormulaLayers.City = []string{formulaDir}
+
+	writeTestFormula(t, formulaDir, "graph-preview", `
+description = "Preview {{convoy_id}}"
+formula = "graph-preview"
+version = 2
+contract = "graph.v2"
+
+[[steps]]
+id = "inspect"
+title = "Inspect {{convoy_id}}"
+`)
+	target, err := state.cityBeadStore.Create(beads.Bead{Title: "input", Type: "task"})
+	if err != nil {
+		t.Fatalf("Create(target): %v", err)
+	}
+
+	body := bytes.NewBufferString(fmt.Sprintf(`{"scope_kind":"city","scope_ref":"test-city","target":%q}`, target.ID))
+	h := newTestCityHandler(t, state)
+	req := httptest.NewRequest(http.MethodPost, cityURL(state, "/formulas/graph-preview/preview"), body)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-GC-Request", "true")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	var detail formulaDetailResponse
+	if err := json.NewDecoder(rec.Body).Decode(&detail); err != nil {
+		t.Fatalf("Decode(detail): %v", err)
+	}
+	want := "preview-input-convoy:" + target.ID
+	if detail.Description != "Preview "+want {
+		t.Fatalf("description = %q, want preview input convoy", detail.Description)
+	}
+	if len(detail.Steps) != 1 || detail.Steps[0].Title != "Inspect "+want {
+		t.Fatalf("steps = %+v, want preview input graph.v2 step", detail.Steps)
+	}
+	matches, err := state.cityBeadStore.List(beads.ListQuery{Type: "convoy"})
+	if err != nil {
+		t.Fatalf("List input convoys: %v", err)
+	}
+	if len(matches) != 0 {
+		t.Fatalf("preview persisted input convoys = %+v, want none", matches)
 	}
 }
 
@@ -712,6 +810,70 @@ title = "Prep {{issue}}"
 	}
 	if !strings.Contains(problem.Detail, `variable "issue" is required`) {
 		t.Fatalf("detail = %q, want missing issue validation error", problem.Detail)
+	}
+}
+
+func TestFormulaDetailGraphV2DrainSkipsItemRuntimeValidation(t *testing.T) {
+	formulatest.EnableV2ForTest(t)
+
+	state := newFakeState(t)
+	state.cityBeadStore = beads.NewMemStore()
+	state.cfg.Daemon.FormulaV2 = true
+	formulaDir := t.TempDir()
+	state.cfg.FormulaLayers.City = []string{formulaDir}
+	target, err := state.cityBeadStore.Create(beads.Bead{Title: "target", Type: "task"})
+	if err != nil {
+		t.Fatalf("Create(target): %v", err)
+	}
+
+	writeTestFormula(t, formulaDir, "parent-drain", `
+formula = "parent-drain"
+version = 2
+contract = "graph.v2"
+
+[[steps]]
+id = "drain"
+title = "Drain {{convoy_id}}"
+
+[steps.drain]
+context = "separate"
+formula = "item-work"
+`)
+	writeTestFormula(t, formulaDir, "item-work", `
+formula = "item-work"
+version = 2
+contract = "graph.v2"
+
+[vars]
+[vars.extra]
+description = "Required only when validating a runnable preview"
+required = true
+
+[[steps]]
+id = "work"
+title = "Work {{convoy_id}} with {{extra}}"
+`)
+
+	h := newTestCityHandler(t, state)
+	req := httptest.NewRequest(http.MethodGet, cityURL(state, "/formulas/parent-drain?scope_kind=city&scope_ref=test-city&target="+target.ID), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET detail status = %d, want 200 without item runtime validation: %s", rec.Code, rec.Body.String())
+	}
+
+	body := bytes.NewBufferString(fmt.Sprintf(`{"scope_kind":"city","scope_ref":"test-city","target":%q}`, target.ID))
+	req = httptest.NewRequest(http.MethodPost, cityURL(state, "/formulas/parent-drain/preview"), body)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-GC-Request", "true")
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("POST preview status = %d, want 400 with item runtime validation: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "extra") {
+		t.Fatalf("POST preview body = %s, want missing extra", rec.Body.String())
 	}
 }
 

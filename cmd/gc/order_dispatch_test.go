@@ -18,6 +18,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/formulatest"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/gastownhall/gascity/internal/pgauth"
@@ -927,6 +928,58 @@ func TestOrderDispatchEventWispLatestSeqErrorDoesNotInstantiate(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "reading event cursor for release-watch") {
 		t.Fatalf("stderr = %q, want event cursor read failure", stderr.String())
+	}
+}
+
+func TestOrderDispatchGraphV2ConvoyReferenceFailsBeforeInstantiate(t *testing.T) {
+	formulatest.EnableV2ForTest(t)
+	dir := t.TempDir()
+	formulaBody := `
+formula = "graph-needs-convoy"
+version = 1
+contract = "graph.v2"
+type = "workflow"
+
+[[steps]]
+id = "step"
+title = "Do work"
+description = "Inspect convoy {{convoy_id}}"
+`
+	if err := os.WriteFile(filepath.Join(dir, "graph-needs-convoy.formula.toml"), []byte(strings.TrimSpace(formulaBody)+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	store := beads.NewMemStore()
+	tracking, err := store.Create(beads.Bead{
+		Title:  "order:convoy-patrol",
+		Labels: []string{"order-run:convoy-patrol", labelOrderTracking},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rec memRecorder
+	ad := buildOrderDispatcherFromListExec([]orders.Order{{
+		Name:         "convoy-patrol",
+		Trigger:      "cooldown",
+		Interval:     "15m",
+		Formula:      "graph-needs-convoy",
+		FormulaLayer: dir,
+	}}, store, nil, successfulExec, &rec)
+	if ad == nil {
+		t.Fatal("expected non-nil dispatcher")
+	}
+	mad := ad.(*memoryOrderDispatcher)
+
+	mad.dispatchWisp(context.Background(), store, mad.aa[0], t.TempDir(), tracking.ID)
+
+	all := trackingBeads(t, store, "order-run:convoy-patrol")
+	if len(all) != 1 {
+		t.Fatalf("tracking beads with order-run label = %d, want only tracking bead", len(all))
+	}
+	if !slicesContain(all[0].Labels, "wisp-failed") {
+		t.Fatalf("tracking bead labels = %v, want wisp-failed", all[0].Labels)
+	}
+	if !rec.hasType(events.OrderFailed) {
+		t.Fatal("missing order.failed event")
 	}
 }
 
@@ -6157,6 +6210,51 @@ func TestHasOpenWorkStrictBlocksOnWispWithOpenChildren(t *testing.T) {
 	if !has {
 		t.Fatal("wisp root with open child step beads must count as in-flight; " +
 			"the gate ignored them and the next cooldown tick poured a duplicate wisp (tr-kds01)")
+	}
+}
+
+func TestHasOpenWorkStrictFindsOlderInFlightWispBehindOrphanRoots(t *testing.T) {
+	const formerOpenWorkProbeLimit = 50
+
+	base := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+	rows := []beads.Bead{{
+		ID:        "gc-inflight-root",
+		Title:     "older in-flight wisp",
+		Status:    "open",
+		Type:      "molecule",
+		CreatedAt: base,
+		UpdatedAt: base,
+		Labels:    []string{"order-run:digest"},
+	}, {
+		ID:        "gc-inflight-child",
+		Title:     "still running",
+		Status:    "open",
+		Type:      "task",
+		ParentID:  "gc-inflight-root",
+		CreatedAt: base.Add(time.Second),
+		UpdatedAt: base.Add(time.Second),
+	}}
+	for i := 0; i < formerOpenWorkProbeLimit+1; i++ {
+		created := base.Add(time.Duration(i+2) * time.Second)
+		rows = append(rows, beads.Bead{
+			ID:        fmt.Sprintf("gc-orphan-root-%02d", i),
+			Title:     "newer orphan wisp root",
+			Status:    "open",
+			Type:      "molecule",
+			CreatedAt: created,
+			UpdatedAt: created,
+			Labels:    []string{"order-run:digest"},
+		})
+	}
+	store := beads.NewMemStoreFrom(len(rows), rows, nil)
+
+	ad := &memoryOrderDispatcher{}
+	has, err := ad.hasOpenWorkStrict(store, "digest")
+	if err != nil {
+		t.Fatalf("hasOpenWorkStrict: %v", err)
+	}
+	if !has {
+		t.Fatal("older wisp with open descendants must block even after newer orphan roots exceed the old probe window")
 	}
 }
 

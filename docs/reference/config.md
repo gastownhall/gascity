@@ -37,7 +37,7 @@ City is the top-level configuration for a Gas City instance.
 | `maintenance` | MaintenanceConfig |  |  | Maintenance configures periodic store-maintenance loops. |
 | `service` | []Service |  |  | Services declares workspace-owned HTTP services mounted on the controller edge under /svc/&#123;name&#125;. |
 | `github` | GitHubConfig |  |  | GitHub configures GitHub-facing repository monitors. |
-| `agent_defaults` | AgentDefaults |  |  | AgentDefaults provides city-level defaults for agents that don't override them (canonical TOML key: agent_defaults). The runtime currently applies provider, default_sling_formula, and append_fragments; the attachment-list fields remain tombstones, and the other fields are parsed/composed but not yet inherited automatically. |
+| `agent_defaults` | AgentDefaults |  |  | AgentDefaults provides root city defaults for agents that don't override them (canonical TOML key: agent_defaults). Pack-local defaults use the same table shape in pack.toml. The runtime currently applies provider, default_sling_formula, and append_fragments; the attachment-list fields remain tombstones, and the other fields are parsed/composed but not yet inherited automatically. |
 | `pricing` | []ModelPricing |  |  | Pricing holds per-model cost rate overrides keyed by (provider, model). City-level entries override pack-level entries which override the defaults shipped with the pricing package. See internal/pricing for the estimation seam introduced by issue #1255 (1d). |
 
 ## ACPSessionConfig
@@ -123,17 +123,17 @@ Agent defines a configured agent in the city.
 
 ## AgentDefaults
 
-AgentDefaults provides city-level agent defaults declared via [agent_defaults] in city.toml.
+AgentDefaults provides agent defaults declared via [agent_defaults] in city.toml or pack.toml.
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
 | `provider` | string |  |  | Provider is the default provider name for agents that do not set their own provider. It also counts as a configured provider for implicit agent injection. |
 | `model` | string |  |  | Model is the parsed/composed default model name for agents (e.g., "claude-sonnet-4-6"), but it is not yet auto-applied at runtime. Agents with their own model override would take precedence. |
 | `wake_mode` | string |  |  | WakeMode is the parsed/composed default wake mode ("resume" or "fresh"), but it is not yet auto-applied at runtime. Enum: `resume`, `fresh` |
-| `default_sling_formula` | string |  |  | DefaultSlingFormula is the city-level default formula used for agents that inherit [agent_defaults]. Explicit agents only receive this value when agent_defaults.default_sling_formula is set; implicit multi-session configs are seeded with "mol-do-work" elsewhere when no explicit default is set. |
-| `allow_overlay` | []string |  |  | AllowOverlay is parsed and composed as a city-level allowlist for session overlays, but it is not yet inherited onto agents automatically at runtime. |
-| `allow_env_override` | []string |  |  | AllowEnvOverride is parsed and composed as a city-level allowlist for session env overrides, but it is not yet inherited onto agents automatically at runtime. Names must match ^[A-Z][A-Z0-9_]&#123;0,127&#125;$. |
-| `append_fragments` | []string |  |  | AppendFragments lists named template fragments to auto-append to .template.md prompts after rendering. Legacy .md.tmpl prompts are still supported during the transition; plain .md remains inert. V2 migration convenience — replaces global_fragments/inject_fragments for city-wide defaults. |
+| `default_sling_formula` | string |  |  | DefaultSlingFormula is the default formula used for agents that inherit [agent_defaults]. Explicit agents only receive this value when agent_defaults.default_sling_formula is set; implicit multi-session configs are seeded with "mol-do-work" elsewhere when no explicit default is set. |
+| `allow_overlay` | []string |  |  | AllowOverlay is parsed and composed as a config-level allowlist for session overlays, but it is not yet inherited onto agents automatically at runtime. |
+| `allow_env_override` | []string |  |  | AllowEnvOverride is parsed and composed as a config-level allowlist for session env overrides, but it is not yet inherited onto agents automatically at runtime. Names must match ^[A-Z][A-Z0-9_]&#123;0,127&#125;$. |
+| `append_fragments` | []string |  |  | AppendFragments lists named template fragments to auto-append to .template.md prompts after rendering. Legacy .md.tmpl prompts are still supported during the transition; plain .md remains inert. V2 migration convenience — replaces global_fragments/inject_fragments for config-wide defaults. |
 | `skills` | []string |  |  | Skills is a tombstone field retained for v0.15.1 backwards compatibility. Parsed and composed for migration visibility, but attachment-list fields are accepted but ignored by the active materializer. |
 | `mcp` | []string |  |  | MCP is a tombstone field retained for v0.15.1 backwards compatibility. Parsed and composed for migration visibility, but attachment-list fields are accepted but ignored by the active materializer. |
 
@@ -254,6 +254,7 @@ BeadsConfig holds bead store settings.
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
 | `provider` | string |  | `bd` | Provider selects the bead store backend: "bd" (default), "file", or "exec:&lt;script&gt;" for a user-supplied script. |
+| `backend` | string |  |  | Backend selects the bd storage engine when Provider is "bd". Empty defaults to "dolt"; T3Code uses "doltlite" for local dev stores. |
 
 ## ChatSessionsConfig
 
@@ -484,6 +485,17 @@ NamedSession defines a canonical persistent session backed by an agent template.
 | `dir` | string |  |  | Dir is the identity prefix for rig-scoped named sessions after pack expansion. Empty means city-scoped. |
 | `mode` | string |  |  | Mode controls when the controller ensures this named session is live. "on_demand" (default): reserve identity and materialize when work or an explicit reference requires it. "always": keep the canonical session controller-managed. Note: mode="always" is independent of min_active_sessions; both produce sessions, and gc doctor reports accidental duplicate-pool combinations. Enum: `on_demand`, `always` |
 
+## NamedSessionPatch
+
+NamedSessionPatch modifies an existing named session identified by canonical name or, for compatibility, by an unambiguous template.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `dir` | string |  |  | Dir is the targeting key. Empty targets a city-scoped named session. |
+| `name` | string |  |  | Name is the canonical named-session identity. Use this to disambiguate sessions that share the same template. |
+| `template` | string |  |  | Template is a compatibility targeting key when Name is omitted. |
+| `mode` | string |  |  | Mode overrides the named-session controller mode ("on_demand" or "always"). Enum: `on_demand`, `always` |
+
 ## OptionChoice
 
 OptionChoice is one allowed value for a "select" option.
@@ -547,6 +559,7 @@ Patches holds all patch blocks from composition.
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
 | `agent` | []AgentPatch |  |  | Agents targets agents by (dir, name). |
+| `named_session` | []NamedSessionPatch |  |  | NamedSessions targets configured named sessions by (dir, template). |
 | `rigs` | []RigPatch |  |  | Rigs targets rigs by name. |
 | `providers` | []ProviderPatch |  |  | Providers targets providers by name. |
 | `github_pr_monitor` | []GitHubPRMonitorPatch |  |  | GitHubPRMonitors targets GitHub PR readiness monitors by name. |

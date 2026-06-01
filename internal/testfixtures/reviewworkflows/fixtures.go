@@ -266,9 +266,6 @@ version = 2
 contract = "graph.v2"
 
 [vars]
-[vars.issue]
-required = true
-
 [vars.base_branch]
 default = "main"
 
@@ -377,9 +374,6 @@ version = 2
 contract = "graph.v2"
 
 [vars]
-[vars.issue]
-required = true
-
 [vars.base_branch]
 default = "main"
 

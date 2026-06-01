@@ -592,6 +592,13 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 	// Apply [agent_defaults] values to all agents (explicit and implicit)
 	// that don't set their own override. Deprecated [agents] aliases are
 	// normalized during parse/load before composition reaches this point.
+	if root.AgentDefaults.Provider != "" {
+		for i := range root.Agents {
+			if root.Agents[i].BindingName == "" {
+				root.Agents[i].InheritedProvider = ""
+			}
+		}
+	}
 	if root.AgentDefaults.DefaultSlingFormula != "" {
 		for i := range root.Agents {
 			if root.Agents[i].BindingName == "" {
@@ -938,6 +945,7 @@ func mergeFragment(base, fragment *City, fragMeta toml.MetaData, fragPath string
 
 	// Patches: accumulate from fragments (applied after all merges).
 	base.Patches.Agents = append(base.Patches.Agents, fragment.Patches.Agents...)
+	base.Patches.NamedSessions = append(base.Patches.NamedSessions, fragment.Patches.NamedSessions...)
 	base.Patches.Rigs = append(base.Patches.Rigs, fragment.Patches.Rigs...)
 	base.Patches.Providers = append(base.Patches.Providers, fragment.Patches.Providers...)
 	base.Patches.GitHubPRMonitors = append(base.Patches.GitHubPRMonitors, fragment.Patches.GitHubPRMonitors...)

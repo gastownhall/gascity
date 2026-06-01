@@ -9,7 +9,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/formula"
+	"github.com/gastownhall/gascity/internal/graphv2"
 	"github.com/gastownhall/gascity/internal/molecule"
 )
 
@@ -168,7 +170,7 @@ func buildFormulaRuns(state State, formulaName, requestedScopeKind, requestedSco
 	}, nil
 }
 
-func buildFormulaDetail(ctx context.Context, name string, paths []string, _ string, vars map[string]string, validateRuntimeVars bool) (*formulaDetailResponse, error) {
+func buildFormulaDetail(ctx context.Context, store beads.Store, name string, paths []string, target string, vars map[string]string, validateRuntimeVars bool) (*formulaDetailResponse, error) {
 	if len(paths) == 0 {
 		return nil, fmt.Errorf("%w: %q not in search paths", errFormulaNotFound, name)
 	}
@@ -177,16 +179,20 @@ func buildFormulaDetail(ctx context.Context, name string, paths []string, _ stri
 	if err != nil {
 		return nil, err
 	}
-	recipe, err := formula.CompileWithoutRuntimeVarValidation(ctx, name, paths, vars)
+	compileVars, err := formulaDetailPreviewVars(ctx, store, name, paths, resolved, target, vars, validateRuntimeVars)
+	if err != nil {
+		return nil, err
+	}
+	recipe, err := formula.CompileWithoutRuntimeVarValidation(ctx, name, paths, compileVars)
 	if err != nil {
 		return nil, err
 	}
 	if validateRuntimeVars {
-		if err := molecule.ValidateRecipeRuntimeVars(recipe, molecule.Options{Vars: vars}); err != nil {
+		if err := molecule.ValidateRecipeRuntimeVars(recipe, molecule.Options{Vars: compileVars}); err != nil {
 			return nil, fmt.Errorf("formula %q: %w", name, err)
 		}
 	}
-	displayVars := formula.ApplyDefaults(resolved, vars)
+	displayVars := formula.ApplyDefaults(resolved, compileVars)
 
 	rootID := ""
 	if root := recipe.RootStep(); root != nil {
@@ -253,6 +259,32 @@ func buildFormulaDetail(ctx context.Context, name string, paths []string, _ stri
 	resp.Preview.Nodes = nodes
 	resp.Preview.Edges = edges
 	return resp, nil
+}
+
+func formulaDetailPreviewVars(ctx context.Context, store beads.Store, name string, paths []string, resolved *formula.Formula, target string, vars map[string]string, validateRuntimeVars bool) (map[string]string, error) {
+	if resolved == nil || !strings.EqualFold(strings.TrimSpace(resolved.Contract), "graph.v2") {
+		return vars, nil
+	}
+	if !validateRuntimeVars {
+		if err := graphv2.ValidateNoReservedUserVars(vars); err != nil {
+			return nil, err
+		}
+		out := graphv2.EffectiveRuntimeVars(resolved, vars)
+		inputConvoyID, err := graphv2.PreviewInputConvoyID(store, target)
+		if err != nil {
+			return nil, err
+		}
+		if out == nil {
+			out = make(map[string]string, 1)
+		}
+		out[graphv2.ConvoyIDVar] = inputConvoyID
+		return out, nil
+	}
+	inv, err := graphv2.PreparePreviewInvocation(ctx, store, name, paths, target, vars)
+	if err != nil {
+		return nil, err
+	}
+	return inv.Vars, nil
 }
 
 // discoverFormulaNamesFromSource lists formula names through the same

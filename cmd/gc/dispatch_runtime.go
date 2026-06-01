@@ -25,6 +25,9 @@ import (
 // graphExecutionRouteMetaKey is an alias for sling.GraphExecutionRouteMetaKey.
 const graphExecutionRouteMetaKey = sling.GraphExecutionRouteMetaKey
 
+// graphExecutionRigContextMetaKey is an alias for sling.GraphExecutionRigContextMetaKey.
+const graphExecutionRigContextMetaKey = sling.GraphExecutionRigContextMetaKey
+
 // isControlDispatcherKind delegates to sling.IsControlDispatcherKind.
 func isControlDispatcherKind(kind string) bool {
 	return sling.IsControlDispatcherKind(kind)
@@ -52,7 +55,7 @@ func assignGraphStepRoute(step *formula.RecipeStep, executionBinding sling.Graph
 }
 
 // applyGraphRouting delegates to sling.ApplyGraphRouting with CLI interfaces.
-func applyGraphRouting(recipe *formula.Recipe, a *config.Agent, routedTo string, vars map[string]string, sourceBeadID, scopeKind, scopeRef, storeRef string, store beads.Store, cityName, cityPath string, cfg *config.City) error {
+func applyGraphRouting(recipe *formula.Recipe, a *config.Agent, routedTo string, vars map[string]string, scopeKind, scopeRef, storeRef string, store beads.Store, cityName, cityPath string, cfg *config.City) error {
 	deps := sling.SlingDeps{
 		CityName:              cityName,
 		CityPath:              cityPath,
@@ -62,7 +65,7 @@ func applyGraphRouting(recipe *formula.Recipe, a *config.Agent, routedTo string,
 		Resolver:              cliAgentResolver{},
 		DirectSessionResolver: cliDirectSessionResolver,
 	}
-	return sling.ApplyGraphRouting(recipe, a, routedTo, vars, sourceBeadID, scopeKind, scopeRef, storeRef, store, cityName, cfg, deps)
+	return sling.ApplyGraphRouting(recipe, a, routedTo, vars, "", scopeKind, scopeRef, storeRef, store, cityName, cfg, deps)
 }
 
 var (

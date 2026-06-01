@@ -190,6 +190,7 @@ func TestSweepOrphanAllPrefixesStabilize(t *testing.T) {
 	prefixes := []string{
 		testGCBinaryDirPrefix,
 		testCmdGCTempRootPrefix,
+		testSharedFixtureDirPrefix,
 		testSlingFormulaDirPrefix,
 		testSlingCityDirPrefix,
 		testGCHomeDirPrefix,

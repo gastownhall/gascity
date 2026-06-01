@@ -565,6 +565,9 @@ func TestResolveGraphStepBinding_AssigneeConcreteSessionBeatsTemplateCollision(t
 	if binding.DirectSessionID != "worker" {
 		t.Fatalf("DirectSessionID = %q, want worker", binding.DirectSessionID)
 	}
+	if binding.RigContext != "frontend" {
+		t.Fatalf("RigContext = %q, want frontend", binding.RigContext)
+	}
 }
 
 func TestResolveGraphStepBinding_CanonicalSingletonPoolUsesConcreteSession(t *testing.T) {
@@ -693,6 +696,37 @@ func TestAssignGraphStepRoute_ControlBindingUsesDirectAssigneeWithoutRoutedTo(t 
 	}
 	if got := step.Metadata[GraphExecutionRouteMetaKey]; got != "gascity/claude" {
 		t.Fatalf("control execution route = %q, want gascity/claude", got)
+	}
+}
+
+func TestAssignGraphStepRoute_ControlBindingPreservesDirectExecutionRoute(t *testing.T) {
+	step := &formula.RecipeStep{
+		Metadata: map[string]string{
+			"gc.routed_to": "stale-control-route",
+		},
+	}
+	execution := GraphRouteBinding{
+		DirectSessionID: "session-123",
+		RigContext:      "frontend",
+	}
+	control := GraphRouteBinding{
+		QualifiedName: "gascity/control-dispatcher",
+		SessionName:   "gascity--control-dispatcher",
+	}
+
+	AssignGraphStepRoute(step, execution, &control)
+
+	if step.Assignee != "gascity--control-dispatcher" {
+		t.Fatalf("control assignee = %q, want gascity--control-dispatcher", step.Assignee)
+	}
+	if got := step.Metadata["gc.routed_to"]; got != "" {
+		t.Fatalf("control gc.routed_to = %q, want empty direct assignee", got)
+	}
+	if got := step.Metadata[GraphExecutionRouteMetaKey]; got != "session-123" {
+		t.Fatalf("control execution route = %q, want direct session id", got)
+	}
+	if got := step.Metadata[GraphExecutionRigContextMetaKey]; got != "frontend" {
+		t.Fatalf("control execution rig context = %q, want frontend", got)
 	}
 }
 

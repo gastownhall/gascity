@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -830,6 +831,27 @@ func TestWorkflowSQLCandidatesForWorkflowIDUsesConfiguredHyphenatedPrefix(t *tes
 	}
 	if candidates[0].path != annotatorPath {
 		t.Fatalf("candidate.path = %q, want %q", candidates[0].path, annotatorPath)
+	}
+}
+
+func TestWorkflowSQLDepFromRowDefaultsMissingTypeToBlocks(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		depType sql.NullString
+	}{
+		{name: "null", depType: sql.NullString{}},
+		{name: "empty", depType: sql.NullString{Valid: true}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dep := workflowSQLDepFromRow(
+				sql.NullString{String: "child", Valid: true},
+				sql.NullString{String: "parent", Valid: true},
+				tc.depType,
+			)
+			if dep.Type != "blocks" {
+				t.Fatalf("dep.Type = %q, want blocks", dep.Type)
+			}
+		})
 	}
 }
 

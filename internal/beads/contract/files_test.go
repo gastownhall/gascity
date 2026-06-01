@@ -1236,7 +1236,7 @@ func TestLoadMetadataStateRejectFixtures(t *testing.T) {
 		{
 			name:            "E2 unknown backend",
 			fixture:         "reject_unknown_backend.json",
-			wantErrContains: `unsupported backend "postgress" (supported: dolt, postgres)`,
+			wantErrContains: `unsupported backend "postgress" (supported: dolt, doltlite, postgres)`,
 		},
 		{
 			name:            "E3 mixed backends fires before required-fields",

@@ -1446,6 +1446,9 @@
               "null"
             ]
           },
+          "effective_api_url": {
+            "type": "string"
+          },
           "patches": {
             "$ref": "#/components/schemas/ConfigPatchesResponse"
           },

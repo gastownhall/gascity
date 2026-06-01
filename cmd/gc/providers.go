@@ -183,12 +183,12 @@ func newSessionProviderForCity(cfg *config.City, cityPath string) runtime.Provid
 
 func newStatusSessionProviderForCity(cfg *config.City, cityPath string) runtime.Provider {
 	ctx := sessionProviderContextForCity(cfg, cityPath, os.Getenv("GC_SESSION"))
-	return newSessionProviderFromContext(ctx, nil)
+	return newBoundedStatusProvider(newSessionProviderFromContext(ctx, nil))
 }
 
 func newStatusSessionProviderForCityWithSnapshot(cfg *config.City, cityPath string, sessionBeads *sessionBeadSnapshot) runtime.Provider {
 	ctx := sessionProviderContextForCity(cfg, cityPath, os.Getenv("GC_SESSION"))
-	return newSessionProviderFromContext(ctx, sessionBeads)
+	return newBoundedStatusProvider(newSessionProviderFromContext(ctx, sessionBeads))
 }
 
 func registerStatusProviderACPRoutes(sp runtime.Provider, snapshot *sessionBeadSnapshot, cityName string, cfg *config.City) {
@@ -522,12 +522,35 @@ func rawBeadsProviderFromConfig(cityPath string) string {
 	return "bd"
 }
 
+func configuredBeadsBackendValue(cityPath string) string {
+	if v := strings.TrimSpace(os.Getenv("GC_BEADS_BACKEND")); v != "" {
+		return v
+	}
+	return strings.TrimSpace(peekBeadsBackend(filepath.Join(cityPath, "city.toml")))
+}
+
+func beadsBackend(cityPath string) string {
+	backend := strings.ToLower(configuredBeadsBackendValue(cityPath))
+	if backend == "" {
+		return "dolt"
+	}
+	return backend
+}
+
+func cityUsesDoltliteBeadsBackend(cityPath string) bool {
+	return beadsBackend(cityPath) == "doltlite"
+}
+
 func providerUsesBdStoreContract(provider string) bool {
 	return contract.ProviderUsesBDContract(provider)
 }
 
 func cityUsesBdStoreContract(cityPath string) bool {
 	return providerUsesBdStoreContract(rawBeadsProvider(cityPath))
+}
+
+func cityUsesManagedDoltBeadsLifecycle(cityPath string) bool {
+	return cityUsesBdStoreContract(cityPath) && !cityUsesDoltliteBeadsBackend(cityPath)
 }
 
 func rawBeadsProviderForScope(scopeRoot, cityPath string) string {

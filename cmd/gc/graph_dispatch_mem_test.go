@@ -9,10 +9,10 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	convoycore "github.com/gastownhall/gascity/internal/convoy"
 	"github.com/gastownhall/gascity/internal/dispatch"
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/runtime"
-	"github.com/gastownhall/gascity/internal/sourceworkflow"
 )
 
 func builtinFormulaDir(t *testing.T) string {
@@ -84,24 +84,24 @@ func selectExecutableGraphWorkerBead(ready []beads.Bead, assignee string) (beads
 	return beads.Bead{}, false, nil
 }
 
-func executeMemGraphWorkerBead(t *testing.T, store beads.Store, bead beads.Bead, sourceID, cityPath, mode string) {
+func executeMemGraphWorkerBead(t *testing.T, store beads.Store, bead beads.Bead, targetID, cityPath, mode string) {
 	t.Helper()
 
 	ref := beadRef(bead)
 	switch {
 	case strings.Contains(ref, ".workspace-setup"):
-		workDir := filepath.Join(cityPath, "worktrees", sourceID)
+		workDir := filepath.Join(cityPath, "worktrees", targetID)
 		if err := os.MkdirAll(workDir, 0o755); err != nil {
 			t.Fatalf("MkdirAll(%q): %v", workDir, err)
 		}
-		if err := store.SetMetadata(sourceID, "work_dir", workDir); err != nil {
+		if err := store.SetMetadata(targetID, "work_dir", workDir); err != nil {
 			t.Fatalf("SetMetadata(work_dir): %v", err)
 		}
 	case strings.Contains(ref, ".implement"):
-		source := mustGetMemBead(t, store, sourceID)
-		workDir := source.Metadata["work_dir"]
+		target := mustGetMemBead(t, store, targetID)
+		workDir := target.Metadata["work_dir"]
 		if workDir == "" {
-			t.Fatalf("implement step missing work_dir on source bead %s", sourceID)
+			t.Fatalf("implement step missing work_dir on target convoy %s", targetID)
 		}
 		if err := os.MkdirAll(workDir, 0o755); err != nil {
 			t.Fatalf("MkdirAll(%q): %v", workDir, err)
@@ -110,16 +110,16 @@ func executeMemGraphWorkerBead(t *testing.T, store beads.Store, bead beads.Bead,
 			t.Fatalf("WriteFile(implemented.txt): %v", err)
 		}
 	case strings.Contains(ref, ".submit"):
-		if err := store.SetMetadata(sourceID, "submitted", "true"); err != nil {
+		if err := store.SetMetadata(targetID, "submitted", "true"); err != nil {
 			t.Fatalf("SetMetadata(submitted): %v", err)
 		}
 	case strings.Contains(ref, ".cleanup-worktree"):
-		source := mustGetMemBead(t, store, sourceID)
-		workDir := source.Metadata["work_dir"]
+		target := mustGetMemBead(t, store, targetID)
+		workDir := target.Metadata["work_dir"]
 		if workDir != "" {
 			_ = os.RemoveAll(workDir)
 		}
-		if err := store.SetMetadata(sourceID, "work_dir", ""); err != nil {
+		if err := store.SetMetadata(targetID, "work_dir", ""); err != nil {
 			t.Fatalf("SetMetadata(clear work_dir): %v", err)
 		}
 	case strings.Contains(ref, ".preflight-tests") && mode == "fail-preflight":
@@ -183,7 +183,7 @@ func memGraphReady(t *testing.T, store beads.Store) []beads.Bead {
 	return ready
 }
 
-func runMemGraphWorkflowToCompletion(t *testing.T, store beads.Store, workflowID, sourceID, workerSession, cityPath, mode string) {
+func runMemGraphWorkflowToCompletion(t *testing.T, store beads.Store, workflowID, targetID, workerSession, cityPath, mode string) {
 	t.Helper()
 
 	for step := 0; step < 200; step++ {
@@ -215,7 +215,7 @@ func runMemGraphWorkflowToCompletion(t *testing.T, store beads.Store, workflowID
 			if !ok {
 				break
 			}
-			executeMemGraphWorkerBead(t, store, bead, sourceID, cityPath, mode)
+			executeMemGraphWorkerBead(t, store, bead, targetID, cityPath, mode)
 			progressed = true
 			ready = memGraphReady(t, store)
 		}
@@ -242,9 +242,22 @@ func startMemScopedWorkflow(t *testing.T) (*beads.MemStore, string, string) {
 	runner := newFakeRunner()
 	cfg := buildMemGraphWorkflowConfig(t)
 	store := beads.NewMemStore()
-	issue, err := store.Create(beads.Bead{Title: "Run scoped workflow", Type: "task"})
+	first, err := store.Create(beads.Bead{Title: "Run scoped workflow part one", Type: "task"})
 	if err != nil {
-		t.Fatalf("Create(issue): %v", err)
+		t.Fatalf("Create(first issue): %v", err)
+	}
+	second, err := store.Create(beads.Bead{Title: "Run scoped workflow part two", Type: "task"})
+	if err != nil {
+		t.Fatalf("Create(second issue): %v", err)
+	}
+	convoy, err := store.Create(beads.Bead{Title: "Run scoped workflow", Type: "convoy"})
+	if err != nil {
+		t.Fatalf("Create(convoy): %v", err)
+	}
+	for _, id := range []string{first.ID, second.ID} {
+		if err := convoycore.TrackItem(store, convoy.ID, id); err != nil {
+			t.Fatalf("TrackItem(%s, %s): %v", convoy.ID, id, err)
+		}
 	}
 
 	deps, stdout, stderr := testDeps(cfg, runtime.NewFake(), runner.run)
@@ -260,19 +273,20 @@ func startMemScopedWorkflow(t *testing.T) (*beads.MemStore, string, string) {
 	slingPokeController = func(string) error { return nil }
 	t.Cleanup(func() { slingPokeController = oldPoke })
 
-	opts := testOpts(worker, issue.ID)
+	opts := testOpts(worker, convoy.ID)
 	opts.OnFormula = "mol-scoped-work"
-	opts.Vars = []string{"issue=" + issue.ID}
 	if code := doSling(opts, deps, store, stdout, stderr); code != 0 {
 		t.Fatalf("doSling returned %d; stderr=%s", code, stderr.String())
 	}
 
-	source := mustGetMemBead(t, store, issue.ID)
-	workflowID := source.Metadata["workflow_id"]
-	if workflowID == "" {
-		t.Fatal("source bead workflow_id missing")
+	roots, err := store.ListByMetadata(map[string]string{"gc.input_convoy_id": convoy.ID, "gc.kind": "workflow"}, 1)
+	if err != nil {
+		t.Fatalf("ListByMetadata(workflow root): %v", err)
 	}
-	return store, issue.ID, workflowID
+	if len(roots) != 1 {
+		t.Fatalf("workflow root count = %d, want 1", len(roots))
+	}
+	return store, convoy.ID, roots[0].ID
 }
 
 func TestSelectExecutableGraphWorkerBeadRejectsControlKinds(t *testing.T) {
@@ -344,10 +358,10 @@ func TestSelectExecutableGraphWorkerBeadSkipsForeignAndSkippedWork(t *testing.T)
 }
 
 func TestGraphWorkflowInMemorySuccessPath(t *testing.T) {
-	store, issueID, workflowID := startMemScopedWorkflow(t)
+	store, convoyID, workflowID := startMemScopedWorkflow(t)
 	cityPath := t.TempDir()
 
-	runMemGraphWorkflowToCompletion(t, store, workflowID, issueID, "worker", cityPath, "success")
+	runMemGraphWorkflowToCompletion(t, store, workflowID, convoyID, "worker", cityPath, "success")
 
 	root := mustGetMemBead(t, store, workflowID)
 	if root.Status != "closed" {
@@ -357,20 +371,20 @@ func TestGraphWorkflowInMemorySuccessPath(t *testing.T) {
 		t.Fatalf("root outcome = %q, want pass", got)
 	}
 
-	issue := mustGetMemBead(t, store, issueID)
-	if got := issue.Metadata["submitted"]; got != "true" {
+	convoy := mustGetMemBead(t, store, convoyID)
+	if got := convoy.Metadata["submitted"]; got != "true" {
 		t.Fatalf("submitted = %q, want true", got)
 	}
-	if got := issue.Metadata["work_dir"]; got != "" {
+	if got := convoy.Metadata["work_dir"]; got != "" {
 		t.Fatalf("work_dir = %q, want empty after cleanup", got)
 	}
 }
 
 func TestGraphWorkflowInMemoryFailureRunsCleanup(t *testing.T) {
-	store, issueID, workflowID := startMemScopedWorkflow(t)
+	store, convoyID, workflowID := startMemScopedWorkflow(t)
 	cityPath := t.TempDir()
 
-	runMemGraphWorkflowToCompletion(t, store, workflowID, issueID, "worker", cityPath, "fail-preflight")
+	runMemGraphWorkflowToCompletion(t, store, workflowID, convoyID, "worker", cityPath, "fail-preflight")
 
 	root := mustGetMemBead(t, store, workflowID)
 	if root.Status != "closed" {
@@ -380,11 +394,11 @@ func TestGraphWorkflowInMemoryFailureRunsCleanup(t *testing.T) {
 		t.Fatalf("root outcome = %q, want fail", got)
 	}
 
-	issue := mustGetMemBead(t, store, issueID)
-	if got := issue.Metadata["submitted"]; got != "" {
+	convoy := mustGetMemBead(t, store, convoyID)
+	if got := convoy.Metadata["submitted"]; got != "" {
 		t.Fatalf("submitted = %q, want empty on failed workflow", got)
 	}
-	if got := issue.Metadata["work_dir"]; got != "" {
+	if got := convoy.Metadata["work_dir"]; got != "" {
 		t.Fatalf("work_dir = %q, want empty after cleanup", got)
 	}
 
@@ -422,9 +436,9 @@ func TestGraphWorkflowInMemoryFailureRunsCleanup(t *testing.T) {
 }
 
 func TestGraphWorkflowInMemoryCreateExecuteWaitFlow(t *testing.T) {
-	store, issueID, workflowID := startMemScopedWorkflow(t)
-	if issueID == "" || workflowID == "" {
-		t.Fatalf("issue/workflow ids must be non-empty: issue=%q workflow=%q", issueID, workflowID)
+	store, convoyID, workflowID := startMemScopedWorkflow(t)
+	if convoyID == "" || workflowID == "" {
+		t.Fatalf("convoy/workflow ids must be non-empty: convoy=%q workflow=%q", convoyID, workflowID)
 	}
 
 	root := mustGetMemBead(t, store, workflowID)
@@ -434,14 +448,14 @@ func TestGraphWorkflowInMemoryCreateExecuteWaitFlow(t *testing.T) {
 	if root.Status != "in_progress" {
 		t.Fatalf("root status = %q, want in_progress", root.Status)
 	}
-	if root.Metadata["gc.source_bead_id"] != issueID {
-		t.Fatalf("root source_bead_id = %q, want %q", root.Metadata["gc.source_bead_id"], issueID)
+	if root.Metadata["gc.source_bead_id"] != "" {
+		t.Fatalf("root source_bead_id = %q, want empty", root.Metadata["gc.source_bead_id"])
 	}
-	if got := root.Metadata[sourceworkflow.SourceStoreRefMetadataKey]; got != "city:test-city" {
-		t.Fatalf("root %s = %q, want city:test-city", sourceworkflow.SourceStoreRefMetadataKey, got)
+	if root.Metadata["gc.input_convoy_id"] != convoyID {
+		t.Fatalf("root input_convoy_id = %q, want %q", root.Metadata["gc.input_convoy_id"], convoyID)
 	}
 
-	runMemGraphWorkflowToCompletion(t, store, workflowID, issueID, "worker", t.TempDir(), "success")
+	runMemGraphWorkflowToCompletion(t, store, workflowID, convoyID, "worker", t.TempDir(), "success")
 
 	root = mustGetMemBead(t, store, workflowID)
 	if root.Status != "closed" || root.Metadata["gc.outcome"] != "pass" {
@@ -525,7 +539,7 @@ func TestGraphWorkflowRoutingLeavesSpecBeadsUnrouted(t *testing.T) {
 		},
 	}
 
-	if err := applyGraphRouting(recipe, &worker, worker.QualifiedName(), nil, "", "", "", "city:test-city", store, cfg.Workspace.Name, cityPath, cfg); err != nil {
+	if err := applyGraphRouting(recipe, &worker, worker.QualifiedName(), nil, "", "", "city:test-city", store, cfg.Workspace.Name, cityPath, cfg); err != nil {
 		t.Fatalf("applyGraphRouting: %v", err)
 	}
 

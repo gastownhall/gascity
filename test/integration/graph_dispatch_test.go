@@ -17,12 +17,24 @@ import (
 )
 
 type graphBead struct {
-	ID       string         `json:"id"`
-	Title    string         `json:"title"`
-	Ref      string         `json:"ref"`
-	Status   string         `json:"status"`
-	Type     string         `json:"type"`
-	Metadata map[string]any `json:"metadata"`
+	ID        string         `json:"id"`
+	Title     string         `json:"title"`
+	Ref       string         `json:"ref"`
+	Status    string         `json:"status"`
+	Type      string         `json:"type"`
+	IssueType string         `json:"issue_type"`
+	Metadata  map[string]any `json:"metadata"`
+}
+
+type graphConvoyCreateResult struct {
+	ConvoyID string `json:"convoy_id"`
+}
+
+func beadType(bead graphBead) string {
+	if bead.Type != "" {
+		return bead.Type
+	}
+	return bead.IssueType
 }
 
 func metaValue(bead graphBead, key string) string {
@@ -47,7 +59,7 @@ func metaValue(bead graphBead, key string) string {
 
 func TestGraphWorkflowSuccessPath(t *testing.T) {
 	cityDir := setupGraphWorkflowCity(t, "success")
-	issueID, workflowID := startScopedWorkflow(t, cityDir)
+	convoyID, workflowID := startScopedWorkflow(t, cityDir)
 
 	workflow := waitForBeadClosed(t, cityDir, workflowID, graphWorkflowCloseTimeout())
 	if got := metaValue(workflow, "gc.outcome"); got != "pass" {
@@ -59,15 +71,15 @@ func TestGraphWorkflowSuccessPath(t *testing.T) {
 		t.Fatalf("body outcome = %q, want pass", got)
 	}
 
-	issue := showBead(t, cityDir, issueID)
-	if got := metaValue(issue, "work_dir"); got != "" {
-		t.Fatalf("issue work_dir = %q, want unset after cleanup", got)
+	convoy := showBead(t, cityDir, convoyID)
+	if got := metaValue(convoy, "work_dir"); got != "" {
+		t.Fatalf("convoy work_dir = %q, want unset after cleanup", got)
 	}
-	if got := metaValue(issue, "submitted"); got != "true" {
-		t.Fatalf("issue submitted = %q, want true", got)
+	if got := metaValue(convoy, "submitted"); got != "true" {
+		t.Fatalf("convoy submitted = %q, want true", got)
 	}
 
-	worktreePath := filepath.Join(cityDir, "worktrees", issueID)
+	worktreePath := filepath.Join(cityDir, "worktrees", convoyID)
 	if _, err := os.Stat(worktreePath); !os.IsNotExist(err) {
 		t.Fatalf("worktree path %s should be removed, stat err=%v", worktreePath, err)
 	}
@@ -92,7 +104,7 @@ func TestGraphWorkflowSuccessPath(t *testing.T) {
 
 func TestGraphWorkflowFailureRunsCleanup(t *testing.T) {
 	cityDir := setupGraphWorkflowCity(t, "fail-preflight")
-	issueID, workflowID := startScopedWorkflow(t, cityDir)
+	convoyID, workflowID := startScopedWorkflow(t, cityDir)
 
 	workflow := waitForBeadClosed(t, cityDir, workflowID, graphWorkflowCloseTimeout())
 	if got := metaValue(workflow, "gc.outcome"); got != "fail" {
@@ -104,12 +116,12 @@ func TestGraphWorkflowFailureRunsCleanup(t *testing.T) {
 		t.Fatalf("body outcome = %q, want fail", got)
 	}
 
-	issue := showBead(t, cityDir, issueID)
-	if got := metaValue(issue, "work_dir"); got != "" {
-		t.Fatalf("issue work_dir = %q, want unset after cleanup", got)
+	convoy := showBead(t, cityDir, convoyID)
+	if got := metaValue(convoy, "work_dir"); got != "" {
+		t.Fatalf("convoy work_dir = %q, want unset after cleanup", got)
 	}
-	if got := metaValue(issue, "submitted"); got != "" {
-		t.Fatalf("issue submitted = %q, want unset on failed workflow", got)
+	if got := metaValue(convoy, "submitted"); got != "" {
+		t.Fatalf("convoy submitted = %q, want unset on failed workflow", got)
 	}
 
 	for _, suffix := range []string{".implement", ".self-review", ".submit"} {
@@ -204,32 +216,97 @@ func setupGraphWorkflowCity(t *testing.T, mode string) string {
 func startScopedWorkflow(t *testing.T, cityDir string) (string, string) {
 	t.Helper()
 
-	out, err := bdDolt(cityDir, "create", "--json", "Run built-in scoped workflow")
+	out, err := bdDolt(cityDir, "create", "--json", "Run built-in scoped workflow part one")
 	if err != nil {
 		t.Fatalf("bd create failed: %v\noutput: %s", err, out)
 	}
-	var created graphBead
-	if err := json.Unmarshal([]byte(strings.TrimSpace(extractJSONPayload(out))), &created); err != nil {
-		t.Fatalf("unmarshal created issue: %v\njson: %s", err, out)
+	var first graphBead
+	if err := json.Unmarshal([]byte(strings.TrimSpace(extractJSONPayload(out))), &first); err != nil {
+		t.Fatalf("unmarshal first issue: %v\njson: %s", err, out)
 	}
-	issueID := created.ID
-	if issueID == "" {
-		t.Fatalf("bd create returned empty issue id\njson: %s", out)
+	if first.ID == "" {
+		t.Fatalf("bd create returned empty first issue id\njson: %s", out)
 	}
 
-	out, err = gcDolt(cityDir, "sling", "worker", issueID, "--on=mol-scoped-work", "--var", "issue="+issueID)
+	out, err = bdDolt(cityDir, "create", "--json", "Run built-in scoped workflow part two")
+	if err != nil {
+		t.Fatalf("bd create failed: %v\noutput: %s", err, out)
+	}
+	var second graphBead
+	if err := json.Unmarshal([]byte(strings.TrimSpace(extractJSONPayload(out))), &second); err != nil {
+		t.Fatalf("unmarshal second issue: %v\njson: %s", err, out)
+	}
+	if second.ID == "" {
+		t.Fatalf("bd create returned empty second issue id\njson: %s", out)
+	}
+
+	out, err = gcDolt(cityDir, "convoy", "create", "Run built-in scoped workflow", first.ID, second.ID, "--json")
+	if err != nil {
+		t.Fatalf("gc convoy create failed: %v\noutput: %s", err, out)
+	}
+	var created graphConvoyCreateResult
+	if err := json.Unmarshal([]byte(strings.TrimSpace(extractJSONPayload(out))), &created); err != nil {
+		t.Fatalf("unmarshal created convoy: %v\njson: %s", err, out)
+	}
+	convoyID := created.ConvoyID
+	if convoyID == "" {
+		t.Fatalf("gc convoy create returned empty convoy id\njson: %s", out)
+	}
+
+	out, err = gcDolt(cityDir, "sling", "worker", convoyID, "--on=mol-scoped-work")
 	if err != nil {
 		t.Fatalf("gc sling failed: %v\noutput: %s", err, out)
 	}
 	slingOutput := out
 
-	if _, workflowID, err := waitForBeadMetadataValue(t, cityDir, issueID, "workflow_id", 10*time.Second); err == nil {
-		return issueID, workflowID
-	} else {
-		issue := showBead(t, cityDir, issueID)
-		t.Fatalf("timed out waiting for workflow_id on source bead %s: %v\ngc sling output:\n%s\nsource bead:\n%+v", issueID, err, slingOutput, issue)
+	workflowID := waitForGraphWorkflowRootForInputConvoy(t, cityDir, convoyID, slingOutput, 10*time.Second)
+	return convoyID, workflowID
+}
+
+func waitForGraphWorkflowRootForInputConvoy(t *testing.T, cityDir, inputConvoyID, slingOutput string, timeout time.Duration) string {
+	t.Helper()
+
+	deadline := time.Now().Add(timeout)
+	var lastErr error
+	var lastList string
+	for time.Now().Before(deadline) {
+		workflowID, rawList, err := findGraphWorkflowRootForInputConvoy(cityDir, inputConvoyID)
+		if err == nil && workflowID != "" {
+			return workflowID
+		}
+		lastErr = err
+		lastList = rawList
+		time.Sleep(200 * time.Millisecond)
 	}
-	return "", ""
+	inputConvoy := showBead(t, cityDir, inputConvoyID)
+	t.Fatalf("timed out waiting for graph.v2 workflow root for input convoy %s: %v\ngc sling output:\n%s\ninput convoy:\n%+v\nbd list:\n%s", inputConvoyID, lastErr, slingOutput, inputConvoy, lastList)
+	return ""
+}
+
+func findGraphWorkflowRootForInputConvoy(cityDir, inputConvoyID string) (string, string, error) {
+	out, err := bdDolt(cityDir, "list", "--json", "--all", "--limit=0")
+	if err != nil {
+		return "", out, fmt.Errorf("bd list --json failed: %w", err)
+	}
+	var beads []graphBead
+	if err := json.Unmarshal([]byte(strings.TrimSpace(extractJSONPayload(out))), &beads); err != nil {
+		return "", out, fmt.Errorf("unmarshal bead list: %w", err)
+	}
+
+	for _, bead := range beads {
+		if bead.ID == inputConvoyID && beadType(bead) != "convoy" {
+			return "", out, fmt.Errorf("input target %s is type %q, want convoy", inputConvoyID, beadType(bead))
+		}
+	}
+	for _, bead := range beads {
+		if metaValue(bead, "gc.kind") != "workflow" {
+			continue
+		}
+		if metaValue(bead, "gc.input_convoy_id") == inputConvoyID {
+			return bead.ID, out, nil
+		}
+	}
+	return "", out, fmt.Errorf("no workflow root found for input convoy %s", inputConvoyID)
 }
 
 func waitForBeadClosed(t *testing.T, cityDir, beadID string, timeout time.Duration) graphBead {

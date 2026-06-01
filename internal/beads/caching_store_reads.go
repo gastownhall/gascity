@@ -177,7 +177,9 @@ func (c *CachingStore) refreshCachedBeads(query ListQuery, startSeq uint64, item
 			}
 		}
 		c.beads[item.ID] = cloneBead(item)
-		c.deps[item.ID] = depsFromBeadFields(item)
+		if beadCarriesDependencyFields(item) {
+			c.deps[item.ID] = depsFromBeadFields(item)
+		}
 		delete(c.dirty, item.ID)
 		delete(c.deletedSeq, item.ID)
 		if !recentLocalMutation(c.localBeadAt[item.ID], now) {
@@ -196,7 +198,9 @@ func (c *CachingStore) refreshCachedBeads(query ListQuery, startSeq uint64, item
 			continue
 		}
 		c.beads[id] = bead
-		c.deps[id] = depsFromBeadFields(bead)
+		if beadCarriesDependencyFields(bead) {
+			c.deps[id] = depsFromBeadFields(bead)
+		}
 		delete(c.dirty, id)
 		delete(c.deletedSeq, id)
 		if !recentLocalMutation(c.localBeadAt[id], now) {
@@ -412,9 +416,7 @@ func (c *CachingStore) CachedReady() ([]Bead, bool) {
 
 func cachedBeadReady(statusByID map[string]string, deps []Dep) bool {
 	for _, dep := range deps {
-		switch dep.Type {
-		case "blocks", "waits-for", "conditional-blocks":
-		default:
+		if !isReadyBlockingDependencyType(dep.Type) {
 			continue
 		}
 		if status, ok := statusByID[dep.DependsOnID]; ok && status != "closed" {

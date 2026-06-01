@@ -65,9 +65,10 @@ func (s *Server) humaHandleConfigGet(_ context.Context, _ *ConfigGetInput) (*Ind
 			SessionTemplate:   cfg.Workspace.SessionTemplate,
 			MaxActiveSessions: cfg.Workspace.MaxActiveSessions,
 		},
-		Agents:    agents,
-		Rigs:      rigs,
-		Providers: providers,
+		EffectiveAPIURL: configEffectiveAPIURL(s.state),
+		Agents:          agents,
+		Rigs:            rigs,
+		Providers:       providers,
 	}
 
 	if !cfg.Patches.IsEmpty() {

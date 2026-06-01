@@ -987,6 +987,7 @@ func healStatePatchWithRollback(session beads.Bead, alive bool, clk clock.Clock,
 			target = string(sessionpkg.StateStartPending)
 		}
 	}
+	stalePendingCreateRollback := false
 	// failed-create is a terminal rollback marker written by
 	// rollbackPendingCreate when a start attempt failed. A bead in this state
 	// whose runtime is not alive must heal toward asleep, even if
@@ -1019,7 +1020,6 @@ func healStatePatchWithRollback(session beads.Bead, alive bool, clk clock.Clock,
 	// rollbackAvailable=false means the caller deferred the formal rollback
 	// (e.g. storeQueryPartial); preserve the claim so the next complete tick
 	// can drive attemptRollbackPendingCreate properly.
-	stalePendingCreateRollback := false
 	if rollbackAvailable && !alive && strings.TrimSpace(meta["state"]) == "creating" {
 		if pendingCreateLeaseExpiredForRollback(session, clk, startupTimeout) {
 			target = string(sessionpkg.StateAsleep)

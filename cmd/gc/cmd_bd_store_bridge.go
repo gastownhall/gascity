@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -301,6 +302,7 @@ func runBdStoreBridge(op string, args []string, dir, host, port, user string, st
 func bdStoreBridgeEnv(dir, host, port, user, password string) map[string]string {
 	env := map[string]string{}
 	for _, key := range []string{
+		"BEADS_BACKEND",
 		"BEADS_DIR",
 		"BEADS_CREDENTIALS_FILE",
 		"BEADS_DOLT_AUTO_START",
@@ -312,6 +314,7 @@ func bdStoreBridgeEnv(dir, host, port, user, password string) map[string]string 
 		"BEADS_DOLT_SERVER_USER",
 		"BD_EXPORT_AUTO",
 		"GC_BEADS",
+		"GC_BEADS_BACKEND",
 		"GC_BEADS_PREFIX",
 		"GC_DOLT_DATABASE",
 		"GC_DOLT_HOST",
@@ -322,17 +325,42 @@ func bdStoreBridgeEnv(dir, host, port, user, password string) map[string]string 
 		env[key] = ""
 	}
 	env["BEADS_DIR"] = dir + "/.beads"
-	env["GC_DOLT_HOST"] = host
-	env["BEADS_DOLT_SERVER_HOST"] = host
-	env["GC_DOLT_PORT"] = port
-	env["BEADS_DOLT_SERVER_PORT"] = port
-	env["GC_DOLT_USER"] = user
-	env["BEADS_DOLT_SERVER_USER"] = user
-	env["GC_DOLT_PASSWORD"] = password
-	env["BEADS_DOLT_PASSWORD"] = password
-	env["BEADS_DOLT_AUTO_START"] = "0"
+	if bdStoreBridgeUsesDoltliteBackend(dir) {
+		env["GC_BEADS_BACKEND"] = "doltlite"
+		env["BEADS_BACKEND"] = "doltlite"
+	} else {
+		env["GC_DOLT_HOST"] = host
+		env["BEADS_DOLT_SERVER_HOST"] = host
+		env["GC_DOLT_PORT"] = port
+		env["BEADS_DOLT_SERVER_PORT"] = port
+		env["GC_DOLT_USER"] = user
+		env["BEADS_DOLT_SERVER_USER"] = user
+		env["GC_DOLT_PASSWORD"] = password
+		env["BEADS_DOLT_PASSWORD"] = password
+		env["BEADS_DOLT_AUTO_START"] = "0"
+	}
 	env["BD_EXPORT_AUTO"] = "false"
 	return env
+}
+
+func bdStoreBridgeUsesDoltliteBackend(dir string) bool {
+	if strings.EqualFold(strings.TrimSpace(os.Getenv("GC_BEADS_BACKEND")), "doltlite") ||
+		strings.EqualFold(strings.TrimSpace(os.Getenv("BEADS_BACKEND")), "doltlite") {
+		return true
+	}
+	data, err := os.ReadFile(filepath.Join(dir, ".beads", "metadata.json"))
+	if err != nil {
+		return false
+	}
+	var meta struct {
+		Backend  string `json:"backend"`
+		Database string `json:"database"`
+	}
+	if err := json.Unmarshal(data, &meta); err != nil {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(meta.Backend), "doltlite") ||
+		strings.EqualFold(strings.TrimSpace(meta.Database), "doltlite")
 }
 
 func decodeJSON(r io.Reader, dest any) error {
