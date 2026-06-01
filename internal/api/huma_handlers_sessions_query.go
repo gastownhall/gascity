@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"strings"
 
@@ -308,6 +309,59 @@ func (s *Server) humaHandleSessionPending(_ context.Context, input *SessionIDInp
 		Body: sessionPendingResponse{
 			Supported: supported,
 			Pending:   pending,
+		},
+	}, nil
+}
+
+// --- City Pending Aggregate ---
+
+// humaHandleCityPending is the Huma-typed handler for GET
+// /v0/city/{cityName}/pending. It returns the snapshot of active sessions
+// currently awaiting a human decision by probing each active session's
+// PendingInteraction via the session manager — the city-wide poll-based
+// complement to the per-session GET .../session/{id}/pending endpoint and
+// the per-session SSE pending frame. Per-session probe failures are surfaced
+// as Partial/PartialErrors rather than failing the whole aggregate, so one
+// gone runtime session does not blind the operator to the rest.
+func (s *Server) humaHandleCityPending(_ context.Context, _ *CityPendingInput) (*ListOutput[cityPendingEntry], error) {
+	store := s.state.CityBeadStore()
+	if store == nil {
+		return nil, huma.Error503ServiceUnavailable("no bead store configured")
+	}
+	mgr := s.sessionManager(store)
+
+	all, partialErrors, err := sessionReadModelRows(store)
+	if err != nil {
+		return nil, huma.Error500InternalServerError(err.Error())
+	}
+	// Only active sessions can be awaiting a human decision.
+	sessions := mgr.ListFullFromBeads(all, string(session.StateActive), "").Sessions
+
+	entries := make([]cityPendingEntry, 0, len(sessions))
+	for _, sess := range sessions {
+		pending, supported, pErr := mgr.Pending(sess.ID)
+		if pErr != nil {
+			partialErrors = append(partialErrors, fmt.Sprintf("session %s: %v", sess.ID, pErr))
+			continue
+		}
+		if !supported || pending == nil {
+			continue
+		}
+		entries = append(entries, cityPendingEntry{
+			SessionID: sess.ID,
+			RequestID: pending.RequestID,
+			Kind:      pending.Kind,
+		})
+	}
+
+	return &ListOutput[cityPendingEntry]{
+		Index:     s.latestIndex(),
+		CacheAgeS: cacheAgeSeconds(store),
+		Body: ListBody[cityPendingEntry]{
+			Items:         entries,
+			Total:         len(entries),
+			Partial:       len(partialErrors) > 0,
+			PartialErrors: partialErrors,
 		},
 	}, nil
 }

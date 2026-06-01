@@ -5529,6 +5529,65 @@ func TestHandleSessionTranscriptAfterCursorNotFound(t *testing.T) {
 	}
 }
 
+func TestHandleCityPendingAggregate(t *testing.T) {
+	fs := newSessionFakeState(t)
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+
+	// Two active sessions; only one is awaiting a human decision.
+	pendingInfo := createTestSession(t, fs.cityBeadStore, fs.sp, "Interactive")
+	fs.sp.SetPendingInteraction(pendingInfo.SessionName, &runtime.PendingInteraction{
+		RequestID: "req-1",
+		Kind:      "approval",
+		Prompt:    "approve?",
+	})
+	_ = createTestSession(t, fs.cityBeadStore, fs.sp, "Idle") // no pending interaction
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", cityURL(fs, "/pending"), nil)
+	h.ServeHTTP(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("city pending status = %d, want %d; body: %s", w.Code, http.StatusOK, w.Body.String())
+	}
+
+	var resp ListBody[cityPendingEntry]
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode city pending: %v", err)
+	}
+	if resp.Total != 1 || len(resp.Items) != 1 {
+		t.Fatalf("got %d items (total %d), want exactly 1; resp=%#v", len(resp.Items), resp.Total, resp)
+	}
+	got := resp.Items[0]
+	if got.SessionID != pendingInfo.ID || got.RequestID != "req-1" || got.Kind != "approval" {
+		t.Fatalf("entry = %#v, want session=%s request_id=req-1 kind=approval", got, pendingInfo.ID)
+	}
+}
+
+func TestHandleCityPendingEmptyWhenNoneAwaiting(t *testing.T) {
+	fs := newSessionFakeState(t)
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+
+	_ = createTestSession(t, fs.cityBeadStore, fs.sp, "Idle") // no pending interaction
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", cityURL(fs, "/pending"), nil)
+	h.ServeHTTP(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("city pending status = %d, want %d; body: %s", w.Code, http.StatusOK, w.Body.String())
+	}
+
+	var resp ListBody[cityPendingEntry]
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode city pending: %v", err)
+	}
+	if resp.Total != 0 || len(resp.Items) != 0 {
+		t.Fatalf("got %d items (total %d), want 0; resp=%#v", len(resp.Items), resp.Total, resp)
+	}
+}
+
 func TestHandleSessionPendingAndRespond(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)

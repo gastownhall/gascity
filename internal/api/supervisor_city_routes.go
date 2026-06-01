@@ -275,6 +275,7 @@ func (sm *SupervisorMux) registerCityRoutes() {
 	cityGet(sm, "/session/{id}", (*Server).humaHandleSessionGet)
 	cityGet(sm, "/session/{id}/transcript", (*Server).humaHandleSessionTranscript)
 	cityGet(sm, "/session/{id}/pending", (*Server).humaHandleSessionPending)
+	cityGet(sm, "/pending", (*Server).humaHandleCityPending)
 	cityPatch(sm, "/session/{id}", (*Server).humaHandleSessionPatch)
 	cityPost(sm, "/session/{id}/permission-mode", (*Server).humaHandleSessionPermissionMode)
 	cityRegister(sm, huma.Operation{
