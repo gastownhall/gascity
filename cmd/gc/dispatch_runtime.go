@@ -461,16 +461,9 @@ func drainWorkflowServeWork(agentCfg config.Agent, cityPath, storePath, workQuer
 		idlePolls = 0
 		processedThisCycle := false
 		pendingCount := 0
-		legacyOversizedCount := 0
-		unexpectedKindCount := 0
 		for _, candidate := range queue {
 			beadID := candidate.ID
 			kind := strings.TrimSpace(candidate.Metadata["gc.kind"])
-			if !isControlDispatcherKind(kind) {
-				unexpectedKindCount++
-				workflowTracef("serve unexpected-kind-skip bead=%s kind=%s", beadID, kind)
-				continue
-			}
 			workflowTracef("serve process bead=%s kind=%s store=%s", beadID, kind, storePath)
 			// controlDispatcherServe currently returns nil both when it
 			// successfully advanced a control bead AND when ProcessControl
@@ -495,10 +488,6 @@ func drainWorkflowServeWork(agentCfg config.Agent, cityPath, storePath, workQuer
 					workflowTracef("serve transient-error-pending bead=%s kind=%s err=%v", beadID, kind, err)
 					continue
 				}
-				if isLegacyOversizedControlEventError(err) {
-					legacyOversizedCount++
-					continue
-				}
 				return result, fmt.Errorf("processing control bead %s: %w", beadID, err)
 			}
 			workflowTracef("serve processed bead=%s kind=%s", beadID, kind)
@@ -512,25 +501,7 @@ func drainWorkflowServeWork(agentCfg config.Agent, cityPath, storePath, workQuer
 			workflowTracef("serve pending-queue agent=%s count=%d", agentCfg.QualifiedName(), pendingCount)
 			return result, nil
 		}
-		if legacyOversizedCount > 0 {
-			workflowTracef("serve legacy-oversized-queue agent=%s count=%d", agentCfg.QualifiedName(), legacyOversizedCount)
-			return result, nil
-		}
-		if unexpectedKindCount > 0 {
-			workflowTracef("serve unexpected-kind-queue agent=%s count=%d", agentCfg.QualifiedName(), unexpectedKindCount)
-			return result, nil
-		}
 	}
-}
-
-func isLegacyOversizedControlEventError(err error) bool {
-	if err == nil {
-		return false
-	}
-	msg := err.Error()
-	return strings.Contains(msg, "recording attempt log") &&
-		strings.Contains(msg, "old_value") &&
-		strings.Contains(msg, "too large")
 }
 
 func runWorkflowServeFollow(agentCfg config.Agent, cityPath, storePath, workQuery string, workEnv map[string]string, stderr io.Writer) error {
