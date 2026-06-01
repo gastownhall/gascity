@@ -201,6 +201,7 @@ func TestBuiltinDatabaseEnumeratorsSkipManagedProbeDatabase(t *testing.T) {
 		{"maintenance", filepath.Join("assets", "scripts", "reaper.sh"), doltSystemNeedle, 1},
 		{"maintenance", filepath.Join("assets", "scripts", "reaper.sh"), maintenanceScratchNeedle, 1},
 		{"maintenance", filepath.Join("assets", "scripts", "reaper.sh"), maintenanceTempNeedle, 1},
+		{"maintenance", filepath.Join("assets", "scripts", "reaper.sh"), "expires_at", 1},
 		{"dolt", filepath.Join("commands", "list", "run.sh"), doltSystemNeedle, 1},
 		{"dolt", filepath.Join("commands", "cleanup", "run.sh"), doltSystemNeedle, 1},
 		{"dolt", filepath.Join("commands", "health", "run.sh"), doltSystemNeedle, 2},

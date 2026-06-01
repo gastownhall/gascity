@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# reaper — close stale wisps with closed parents, purge old closed data, auto-close stale issues.
+# reaper — close stale wisps with closed parents, purge old closed data, auto-close stale and TTL-expired issues.
 #
 # Replaces mol-dog-reaper formula. All operations are deterministic:
 # SQL queries with age thresholds, bd close/update commands, count
@@ -125,6 +125,7 @@ TOTAL_PURGED=0
 TOTAL_MAIL_WISPS=0
 TOTAL_ISSUES_CLOSED=0
 TOTAL_STALE_ISSUES_SKIPPED=0
+TOTAL_EXPIRED_ISSUES_CLOSED=0
 TOTAL_SESSIONS_PRUNED=0
 SESSION_PRUNE_ATTEMPTED=0
 ANOMALIES=""
@@ -462,6 +463,47 @@ while IFS= read -r DB; do
         fi
     fi
 
+    # Step 3: Close issues whose metadata.expires_at is in the past.
+    # Nudge beads carry a 24 h TTL stamped in metadata.expires_at, but Step 4's
+    # stale-issue threshold (720 h / 30 days) never reads that field.  Without
+    # this step, expired nudges accumulate for up to 30 days.  Any open issue
+    # with expires_at set and elapsed is closed here; the explicit TTL takes
+    # precedence over the priority and type guards used in Step 4.
+    DB_EXPIRED_ISSUES_CLOSED=0
+    get_sql_rows "$DB" "expired issue" "
+        SELECT id FROM \`$DB\`.issues
+        WHERE status IN ('open', 'in_progress')
+        AND JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.expires_at')) IS NOT NULL
+        AND JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.expires_at')) != ''
+        AND STR_TO_DATE(JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.expires_at')), '%Y-%m-%dT%H:%i:%sZ') < UTC_TIMESTAMP()
+    "
+    EXPIRED_IDS=$SQL_ROWS_RESULT
+
+    if [ -n "$EXPIRED_IDS" ] && [ -z "$DRY_RUN" ]; then
+        if [ -z "$CITY_DB" ]; then
+            if [ "$CITY_DB_ANOMALY_RECORDED" -eq 0 ]; then
+                record_anomaly "city" "city database could not be determined from GC_REAPER_CITY_DATABASE or $CITY/.beads/metadata.json; expired issue close disabled"
+                CITY_DB_ANOMALY_RECORDED=1
+            fi
+            SKIPPED_COUNT=$(printf '%s\n' "$EXPIRED_IDS" | sed '/^[[:space:]]*$/d' | wc -l | tr -d ' ')
+            TOTAL_STALE_ISSUES_SKIPPED=$((TOTAL_STALE_ISSUES_SKIPPED + SKIPPED_COUNT))
+        elif [ "$DB" != "$CITY_DB" ]; then
+            SKIPPED_COUNT=$(printf '%s\n' "$EXPIRED_IDS" | sed '/^[[:space:]]*$/d' | wc -l | tr -d ' ')
+            TOTAL_STALE_ISSUES_SKIPPED=$((TOTAL_STALE_ISSUES_SKIPPED + SKIPPED_COUNT))
+        else
+            while IFS= read -r issue_id; do
+                [ -z "$issue_id" ] && continue
+                if CLOSE_OUTPUT=$(close_city_issue "$issue_id" "ttl:expired by reaper" 2>&1); then
+                    DB_EXPIRED_ISSUES_CLOSED=$((DB_EXPIRED_ISSUES_CLOSED + 1))
+                    TOTAL_EXPIRED_ISSUES_CLOSED=$((TOTAL_EXPIRED_ISSUES_CLOSED + 1))
+                    DB_MUTATIONS=$((DB_MUTATIONS + 1))
+                else
+                    record_anomaly "$DB" "closing expired issue $issue_id failed for $DB: $(sanitize_output "$CLOSE_OUTPUT")"
+                fi
+            done <<< "$EXPIRED_IDS"
+        fi
+    fi
+
     # Step 4: Auto-close stale issues (exclude P0/P1, epics, active deps).
     DB_ISSUES_CLOSED=0
     get_sql_rows "$DB" "stale issue" "
@@ -542,7 +584,7 @@ while IFS= read -r DB; do
     if [ -z "$DRY_RUN" ] && [ "$DB_MUTATIONS" -gt 0 ]; then
         if ! COMMIT_OUTPUT=$(dolt_sql -q "
             USE \`$DB\`;
-            CALL DOLT_COMMIT('-Am', 'reaper: stale_wisps=$STALE_WISP_COUNT closed_wisps=$DB_CLOSED_WISPS purged=$DB_PURGED stale_issues=$DB_ISSUES_CLOSED', '--author', 'reaper <reaper@gastown.local>')
+            CALL DOLT_COMMIT('-Am', 'reaper: stale_wisps=$STALE_WISP_COUNT closed_wisps=$DB_CLOSED_WISPS purged=$DB_PURGED stale_issues=$DB_ISSUES_CLOSED expired_issues=$DB_EXPIRED_ISSUES_CLOSED', '--author', 'reaper <reaper@gastown.local>')
         " 2>&1); then
             case "$COMMIT_OUTPUT" in
                 *"nothing to commit"*|*"Nothing to commit"*)
@@ -610,7 +652,7 @@ if [ -n "$ANOMALIES" ]; then
         -m "$ANOMALIES" 2>/dev/null || true
 fi
 
-SUMMARY="reaper — stale_wisps:$TOTAL_STALE_WISPS, closed_wisps:$TOTAL_CLOSED_WISPS, purged:$TOTAL_PURGED, sessions-pruned:$TOTAL_SESSIONS_PRUNED, closed:$TOTAL_ISSUES_CLOSED, skipped_non_city_issues:$TOTAL_STALE_ISSUES_SKIPPED, mail_wisps:$TOTAL_MAIL_WISPS"
+SUMMARY="reaper — stale_wisps:$TOTAL_STALE_WISPS, closed_wisps:$TOTAL_CLOSED_WISPS, purged:$TOTAL_PURGED, sessions-pruned:$TOTAL_SESSIONS_PRUNED, closed:$TOTAL_ISSUES_CLOSED, expired:$TOTAL_EXPIRED_ISSUES_CLOSED, skipped_non_city_issues:$TOTAL_STALE_ISSUES_SKIPPED, mail_wisps:$TOTAL_MAIL_WISPS"
 if [ -n "$DRY_RUN" ]; then
     SUMMARY="$SUMMARY, would_close_wisps:$TOTAL_WOULD_CLOSE_WISPS (dry run)"
 fi
