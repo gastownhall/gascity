@@ -360,14 +360,6 @@ func TestLoadWithIncludesRejectsPackAuthoringSurfaces(t *testing.T) {
 		want     string
 	}{
 		{
-			name: "agent_defaults",
-			packBody: `
-[agent_defaults]
-default_sling_formula = "mol-pack"
-`,
-			want: "[agent_defaults] is a city.toml table, not a pack.toml field",
-		},
-		{
 			name: "agents_alias",
 			packBody: `
 [agents]

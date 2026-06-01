@@ -2284,10 +2284,10 @@ func (c *City) PackDirsForRig(rigName string) []string {
 	return dirs
 }
 
-// AgentDefaults provides city-level agent defaults declared via
-// [agent_defaults] in city.toml. The runtime currently applies provider,
-// default_sling_formula, and append_fragments; the remaining fields are
-// parsed and composed but are not yet inherited onto agents automatically.
+// AgentDefaults provides agent defaults declared via [agent_defaults] in
+// city.toml or pack.toml. The runtime currently applies provider,
+// default_sling_formula, and append_fragments; the remaining fields are parsed
+// and composed but are not yet inherited onto agents automatically.
 type AgentDefaults struct {
 	// Provider is the default provider name for agents that do not set their
 	// own provider. It also counts as a configured provider for implicit agent

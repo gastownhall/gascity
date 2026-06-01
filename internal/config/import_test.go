@@ -116,7 +116,7 @@ scope = "city"
 	}
 }
 
-func TestImport_RejectsPackAgentDefaultsDefaultSlingFormula(t *testing.T) {
+func TestImport_PackAgentDefaultsApplyToImportedAgents(t *testing.T) {
 	dir := t.TempDir()
 	cityDir := filepath.Join(dir, "city")
 	importDir := filepath.Join(dir, "tools")
@@ -141,22 +141,44 @@ name = "tools"
 schema = 1
 
 [agent_defaults]
+provider = "codex"
 default_sling_formula = "mol-pack-default"
 
 [[agent]]
 name = "worker"
 scope = "city"
+
+[[agent]]
+name = "reviewer"
+scope = "city"
+provider = "claude"
 `)
 
-	_, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityDir, "city.toml"))
-	if err == nil {
-		t.Fatal("expected LoadWithIncludes to reject imported pack [agent_defaults]")
+	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityDir, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
 	}
-	if !strings.Contains(err.Error(), "[agent_defaults] is a city.toml table, not a pack.toml field") {
-		t.Fatalf("error = %v, want pack authoring surface rejection", err)
+
+	var worker, reviewer *Agent
+	for i := range cfg.Agents {
+		switch cfg.Agents[i].QualifiedName() {
+		case "tools.worker":
+			worker = &cfg.Agents[i]
+		case "tools.reviewer":
+			reviewer = &cfg.Agents[i]
+		}
 	}
-	if !strings.Contains(err.Error(), filepath.Join(importDir, "pack.toml")) {
-		t.Fatalf("error = %v, want offending imported pack path", err)
+	if worker == nil || reviewer == nil {
+		t.Fatalf("expected imported worker and reviewer, got worker=%v reviewer=%v", worker != nil, reviewer != nil)
+	}
+	if got := worker.Provider; got != "codex" {
+		t.Fatalf("worker Provider = %q, want codex", got)
+	}
+	if got := worker.EffectiveDefaultSlingFormula(); got != "mol-pack-default" {
+		t.Fatalf("worker EffectiveDefaultSlingFormula = %q, want mol-pack-default", got)
+	}
+	if got := reviewer.Provider; got != "claude" {
+		t.Fatalf("reviewer Provider = %q, want explicit claude", got)
 	}
 }
 

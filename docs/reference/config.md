@@ -123,7 +123,7 @@ Agent defines a configured agent in the city.
 
 ## AgentDefaults
 
-AgentDefaults provides city-level agent defaults declared via [agent_defaults] in city.toml.
+AgentDefaults provides agent defaults declared via [agent_defaults] in city.toml or pack.toml.
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|

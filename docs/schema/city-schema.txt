@@ -395,7 +395,7 @@
       },
       "additionalProperties": false,
       "type": "object",
-      "description": "AgentDefaults provides city-level agent defaults declared via [agent_defaults] in city.toml."
+      "description": "AgentDefaults provides agent defaults declared via [agent_defaults] in city.toml or pack.toml."
     },
     "AgentOverride": {
       "properties": {
