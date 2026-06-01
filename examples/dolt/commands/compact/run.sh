@@ -78,6 +78,10 @@
 #   GC_DOLT_COMPACT_ONLY_DBS              (optional) — comma-separated list of
 #                                         database names to compact. When set,
 #                                         all other databases are skipped.
+#   GC_DOLT_MANAGED_LOCAL                 (optional) — 1 for gc-managed local
+#                                         runtime validation; 0 allows explicit
+#                                         loopback host/port targets and skips
+#                                         non-local external targets.
 #   GC_DOLT_REFSPEC_<DB_UPPER>            (optional) — compact remote push
 #                                         refspec in <local>:<remote> form.
 #                                         DB name is uppercased with '-'
@@ -116,10 +120,24 @@ PACK_DIR="${GC_PACK_DIR:-$(unset CDPATH; cd -- "$(dirname "$0")/.." && pwd)}"
 # shellcheck disable=SC1091
 . "$PACK_DIR/assets/scripts/runtime.sh"
 
+explicit_external_local_dolt=0
 case "${GC_DOLT_MANAGED_LOCAL:-}" in
   0|false|FALSE|no|NO)
-    printf 'compact: managed local Dolt runtime is not applicable for this order — skip\n'
-    exit 0
+    if [ -z "$gc_dolt_port_input" ]; then
+      printf 'compact: managed local Dolt runtime is not applicable and GC_DOLT_PORT is empty — skip\n'
+      exit 0
+    fi
+    case "$gc_dolt_host_input" in
+      ''|127.0.0.1|localhost|0.0.0.0|::1|::|'[::1]'|'[::]')
+        GC_DOLT_PORT="$gc_dolt_port_input"
+        explicit_external_local_dolt=1
+        ;;
+      *)
+        printf 'compact: GC_DOLT_HOST=%s is not a local Dolt compaction target — skip\n' \
+          "$gc_dolt_host_input"
+        exit 0
+        ;;
+    esac
     ;;
 esac
 
@@ -139,6 +157,8 @@ if [ "${GC_DOLT_MANAGED_LOCAL:-}" = "1" ]; then
   else
     GC_DOLT_PORT="$gc_dolt_port_input"
   fi
+elif [ "$explicit_external_local_dolt" = "1" ]; then
+  :
 elif [ -n "$gc_dolt_port_input" ]; then
   case "$gc_dolt_host_input" in
     ''|127.0.0.1|localhost|0.0.0.0|::1|::|'[::1]'|'[::]')

@@ -2784,6 +2784,69 @@ func TestCompactScriptDryRunSkipsMutations(t *testing.T) {
 	}
 }
 
+func TestCompactScriptAllowsExplicitLocalExternalEndpointWithoutManagedState(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	externalRoot := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "external-target")
+	if err := os.MkdirAll(filepath.Join(externalRoot, "beads", ".dolt"), 0o755); err != nil {
+		t.Fatalf("mkdir external target db: %v", err)
+	}
+
+	out, err := fixture.run(t, "success",
+		"GC_DOLT_MANAGED_LOCAL=0",
+		"GC_DOLT_DATA_DIR="+externalRoot,
+		"GC_DOLT_STATE_FILE="+filepath.Join(externalRoot, "dolt-state.json"),
+		"GC_DOLT_COMPACT_THRESHOLD_COMMITS=500",
+		"GC_DOLT_COMPACT_DRY_RUN=1",
+	)
+	if err != nil {
+		t.Fatalf("dry-run compact against explicit local external endpoint failed:\n%s", out)
+	}
+	for _, unwanted := range []string{
+		"managed local Dolt runtime is not applicable",
+		"does not match managed runtime port",
+	} {
+		if strings.Contains(out, unwanted) {
+			t.Fatalf("explicit local endpoint should not be treated as inactive managed runtime:\n%s", out)
+		}
+	}
+	if !strings.Contains(out, "dry-run") {
+		t.Fatalf("dry-run output missing explanation:\n%s", out)
+	}
+	logData, err := os.ReadFile(fixture.doltLog)
+	if err != nil {
+		t.Fatalf("read dolt log: %v", err)
+	}
+	if !strings.Contains(string(logData), "db=beads query=") {
+		t.Fatalf("explicit local endpoint did not query discovered database:\n%s", logData)
+	}
+}
+
+func TestCompactScriptSkipsNonLocalExternalEndpoint(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "success",
+		"GC_DOLT_MANAGED_LOCAL=0",
+		"GC_DOLT_HOST=external.example.internal",
+		"GC_DOLT_COMPACT_THRESHOLD_COMMITS=500",
+		"GC_DOLT_COMPACT_DRY_RUN=1",
+	)
+	if err != nil {
+		t.Fatalf("non-local external endpoint skip should exit cleanly:\n%s", out)
+	}
+	if !strings.Contains(out, "GC_DOLT_HOST=external.example.internal is not a local Dolt compaction target") {
+		t.Fatalf("output missing non-local external skip:\n%s", out)
+	}
+	logData, err := os.ReadFile(fixture.doltLog)
+	if os.IsNotExist(err) {
+		return
+	}
+	if err != nil {
+		t.Fatalf("read dolt log: %v", err)
+	}
+	if strings.TrimSpace(string(logData)) != "" {
+		t.Fatalf("non-local external endpoint should not be queried:\n%s", logData)
+	}
+}
+
 func TestCompactScriptOnlyDBsAllowlistFiltersDatabases(t *testing.T) {
 	fixture := newCompactScriptFixture(t)
 	if err := os.MkdirAll(filepath.Join(fixture.dataDir, "cache", ".dolt"), 0o755); err != nil {
