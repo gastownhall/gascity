@@ -658,6 +658,9 @@ func (c *CachingStore) metadataAlreadyMatchesCached(id string, kvs map[string]st
 	}
 	c.mu.RLock()
 	defer c.mu.RUnlock()
+	if c.state != cacheLive && c.state != cachePartial {
+		return false
+	}
 	if _, dirty := c.dirty[id]; dirty {
 		return false
 	}
