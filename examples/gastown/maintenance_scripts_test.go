@@ -523,7 +523,7 @@ exit 1
 	}
 }
 
-func TestOrphanSweepPreservesRigScopedLiveEphemeralSessionAssignees(t *testing.T) {
+func TestOrphanSweepPreservesRigScopedLiveEphemeralSessionAssigneesFromCurrentSchema(t *testing.T) {
 	cityDir := t.TempDir()
 	binDir := t.TempDir()
 	gcLog := filepath.Join(t.TempDir(), "gc.log")
@@ -557,7 +557,8 @@ EOF
       if [ "$rig" = "project" ]; then
         cat <<'EOF'
 {"sessions":[
-  {"id":"mc-live-rig","session_name":"project__worker-gc-rig123","alias":"project/worker-1","agent_name":"project/worker","closed":false}
+  {"id":"mc-live-rig","name":"project/worker-1","template":"project/worker","state":"active","session_name":"project__worker-gc-rig123","alias":"project/worker-1","agent_name":"project/worker","closed":false},
+  {"id":"mc-live-rig-asleep","name":"project/worker-2","template":"project/worker","state":"asleep","session_name":"project__worker-gc-asleep","alias":"project/worker-2","agent_name":"project/worker","closed":false}
 ],"summary":{},"filters":{},"schema_version":"1"}
 EOF
         exit 0
@@ -571,7 +572,9 @@ EOF
       if [ "$4" = "project" ]; then
         cat <<'EOF'
 [
-  {"id":"ga-rig-live","status":"in_progress","assignee":"project__worker-gc-rig123"},
+  {"id":"ga-rig-live-by-session-name","status":"in_progress","assignee":"project__worker-gc-rig123"},
+  {"id":"ga-rig-live-by-id","status":"in_progress","assignee":"mc-live-rig-asleep"},
+  {"id":"ga-rig-closed-default-filtered","status":"in_progress","assignee":"project__worker-gc-closed"},
   {"id":"ga-rig-orphan","status":"in_progress","assignee":"missing-rig-session"}
 ]
 EOF
@@ -602,7 +605,7 @@ exit 1
 	if err != nil {
 		t.Fatalf("%s failed: %v\n%s", filepath.Base(script), err, out)
 	}
-	if !strings.Contains(string(out), "orphan-sweep: reset 1 orphaned beads") {
+	if !strings.Contains(string(out), "orphan-sweep: reset 2 orphaned beads") {
 		t.Fatalf("unexpected orphan-sweep output:\n%s", out)
 	}
 
@@ -617,12 +620,17 @@ exit 1
 	if !strings.Contains(log, "bd update ga-rig-orphan --status=open --assignee=") {
 		t.Fatalf("rig orphan bead was not reset:\n%s", log)
 	}
-	if strings.Contains(log, "bd update ga-rig-live ") {
-		t.Fatalf("rig live ephemeral session assignee was reset:\n%s", log)
+	if !strings.Contains(log, "bd update ga-rig-closed-default-filtered --status=open --assignee=") {
+		t.Fatalf("closed/default-filtered session assignee was not reset:\n%s", log)
+	}
+	for _, preserved := range []string{"ga-rig-live-by-session-name", "ga-rig-live-by-id"} {
+		if strings.Contains(log, "bd update "+preserved+" ") {
+			t.Fatalf("rig live ephemeral session assignee %s was reset:\n%s", preserved, log)
+		}
 	}
 }
 
-func TestOrphanSweepPreservesPascalCaseLiveSessionIdentities(t *testing.T) {
+func TestOrphanSweepPreservesPascalCaseLiveSessionIdentitiesAsForwardCompat(t *testing.T) {
 	cityDir := t.TempDir()
 	binDir := t.TempDir()
 	gcLog := filepath.Join(t.TempDir(), "gc.log")
@@ -657,8 +665,6 @@ EOF
         cat <<'EOF'
 {"sessions":[
   {"ID":"vgc-live-id","SessionName":"project__worker-vgc-live-name","Alias":"project/worker-1","Template":"project/worker","State":"active","Closed":false},
-  {"ID":"vgc-stopped","SessionName":"project__worker-vgc-stopped","State":"stopped","Closed":false},
-  {"ID":"vgc-swept","SessionName":"project__worker-vgc-swept","State":"gc_swept","Closed":false},
   {"ID":"vgc-closed","SessionName":"project__worker-vgc-closed","State":"closed","Closed":true}
 ],"summary":{},"filters":{},"schema_version":"1"}
 EOF
@@ -675,8 +681,6 @@ EOF
 [
   {"id":"ga-live-by-id","status":"in_progress","assignee":"vgc-live-id"},
   {"id":"ga-live-by-session-name","status":"in_progress","assignee":"project__worker-vgc-live-name"},
-  {"id":"ga-stopped-session","status":"in_progress","assignee":"vgc-stopped"},
-  {"id":"ga-swept-session","status":"in_progress","assignee":"project__worker-vgc-swept"},
   {"id":"ga-closed-session","status":"in_progress","assignee":"vgc-closed"},
   {"id":"ga-missing-session","status":"in_progress","assignee":"missing-session"}
 ]
@@ -708,7 +712,7 @@ exit 1
 	if err != nil {
 		t.Fatalf("%s failed: %v\n%s", filepath.Base(script), err, out)
 	}
-	if !strings.Contains(string(out), "orphan-sweep: reset 4 orphaned beads") {
+	if !strings.Contains(string(out), "orphan-sweep: reset 2 orphaned beads") {
 		t.Fatalf("unexpected orphan-sweep output:\n%s", out)
 	}
 
@@ -719,10 +723,10 @@ exit 1
 	log := string(logData)
 	for _, preserved := range []string{"ga-live-by-id", "ga-live-by-session-name"} {
 		if strings.Contains(log, "bd update "+preserved+" ") {
-			t.Fatalf("live PascalCase session assignee %s was reset:\n%s", preserved, log)
+			t.Fatalf("forward-compatible PascalCase session assignee %s was reset:\n%s", preserved, log)
 		}
 	}
-	for _, reset := range []string{"ga-stopped-session", "ga-swept-session", "ga-closed-session", "ga-missing-session"} {
+	for _, reset := range []string{"ga-closed-session", "ga-missing-session"} {
 		if !strings.Contains(log, "bd update "+reset+" --status=open --assignee=") {
 			t.Fatalf("expected %s to be reset:\n%s", reset, log)
 		}

@@ -113,34 +113,47 @@ if [ -z "$AGENTS" ]; then
     exit 0
 fi
 
-# Step 2b: Parse identities of every live (non-closed) session so that
-# pool-spawned ephemeral assignees (e.g. gastown__polekitten-gc-q9j0om) are
-# treated as known. The Go-side releaseOrphanedPoolAssignments path validates
-# these via liveOpenSessionAssignmentExists, but this shell sweep ran without
-# that guard — an ephemeral assignee whose template-stripped form did not
-# match any agent name was incorrectly reset, racing against active polekitten
-# work and producing the false-orphan loop tracked in ga-nvx.
+# Step 2b: Parse identities of every session row that `gc session list --json`
+# reports as open so that pool-spawned ephemeral assignees (e.g.
+# gastown__polekitten-gc-q9j0om) are treated as known. The Go-side
+# releaseOrphanedPoolAssignments path validates these from session beads via
+# liveOpenSessionAssignmentExists, but this shell sweep only has the CLI JSON
+# contract available. That means it protects the exposed wire identities below;
+# it cannot see bead-only fields such as configured_named_identity or
+# alias_history unless the CLI starts exporting them.
+#
+# The default CLI path already omits closed sessions. The closed/state guards
+# below keep explicit or future session-list producers from making terminal
+# rows live while preserving any non-closed row the CLI reports.
+#
+# This shell sweep ran without a live-session guard before ga-nvx: an ephemeral
+# assignee whose template-stripped form did not match any agent name was
+# incorrectly reset, racing against active polekitten work and producing a
+# false-orphan loop.
 # Two bugs the chronic strip pattern (gastownhall/gascity#2363) revealed:
 # (1) The JSON shape is {"sessions":[...], "summary":..., "filters":..., "schema_version":...},
 #     so `.[]` iterated four top-level scalar keys instead of session objects.
-# (2) Field names vary by runtime/API path. Accept both snake_case
-#     (.closed/.id/.session_name/.alias/.agent_name) and PascalCase
-#     (.Closed/.ID/.SessionName/.Alias/.Template) so a schema casing change
-#     cannot make LIVE_SESSION_IDS empty and strip active pool claims.
+# (2) Field names vary by runtime/API path. The current CLI emits snake_case
+#     (.closed/.id/.session_name/.alias/.agent_name); PascalCase is accepted
+#     only as forward-compatible hardening so a casing change cannot make
+#     LIVE_SESSION_IDS empty and strip active pool claims.
 LIVE_SESSION_IDS=$(jq -r -s '
+    def pick($snake; $pascal; $default):
+      if has($snake) and .[$snake] != null then .[$snake]
+      elif has($pascal) and .[$pascal] != null then .[$pascal]
+      else $default end;
     .[] | .sessions[]?
     | select(
-        ((.closed // .Closed // false) == false)
-        and (((.state // .State // "") | ascii_downcase) != "closed")
-        and (((.state // .State // "") | ascii_downcase) != "stopped")
-        and (((.state // .State // "") | ascii_downcase) != "gc_swept")
+        (pick("closed"; "Closed"; false) == false)
+        and ((pick("state"; "State"; "") | ascii_downcase) != "closed")
       )
     | [
-        (.id // .ID),
-        (.session_name // .SessionName),
-        (.alias // .Alias),
-        (.agent_name // .AgentName // .template // .Template),
-        (.name // .Name)
+        pick("id"; "ID"; null),
+        pick("session_name"; "SessionName"; null),
+        pick("alias"; "Alias"; null),
+        pick("agent_name"; "AgentName"; null),
+        pick("template"; "Template"; null),
+        pick("name"; "Name"; null)
       ]
     | .[]
     | select(. != null and . != "")
