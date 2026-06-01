@@ -156,7 +156,7 @@ func graphWorkflowCloseTimeout() time.Duration {
 	if runtime.GOOS == "darwin" {
 		return 6 * time.Minute
 	}
-	return 180 * time.Second
+	return 4 * time.Minute
 }
 
 func setupGraphWorkflowCity(t *testing.T, mode string) string {

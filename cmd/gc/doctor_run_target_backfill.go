@@ -62,9 +62,11 @@ func (c *runTargetRoutedToBackfillCheck) collect() (targets []backfillTarget, sk
 			skipped = append(skipped, fmt.Sprintf("%s skipped: opening bead store: %v", sc.label, err))
 			continue
 		}
-		// gc.kind=workflow is the only bead shape the stamper ever leaves with a
-		// bare gc.run_target (non-root steps are resolved to gc.routed_to via the
-		// binding). A targeted metadata query avoids a full-store scan.
+		// Workflow roots are the only pool-routed persisted beads that need
+		// gc.routed_to backfilled to stay claimable. Control-dispatcher and
+		// topology beads can also carry bare gc.run_target, but they are not
+		// claimed through the pool-demand gc.routed_to path. A targeted metadata
+		// query avoids a full-store scan.
 		items, err := store.List(beads.ListQuery{Metadata: map[string]string{"gc.kind": "workflow"}})
 		if err != nil {
 			skipped = append(skipped, fmt.Sprintf("%s skipped: listing beads: %v", sc.label, err))
@@ -105,11 +107,14 @@ func (c *runTargetRoutedToBackfillCheck) Run(_ *doctor.CheckContext) *doctor.Che
 }
 
 func (c *runTargetRoutedToBackfillCheck) Fix(_ *doctor.CheckContext) error {
-	targets, _ := c.collect()
+	targets, skipped := c.collect()
 	for _, tgt := range targets {
 		if err := tgt.store.SetMetadata(tgt.beadID, "gc.routed_to", tgt.runTarget); err != nil {
 			return fmt.Errorf("%s bead %s: backfill gc.routed_to: %w", tgt.label, tgt.beadID, err)
 		}
+	}
+	if len(skipped) > 0 {
+		return fmt.Errorf("run-target-routed-to-backfill skipped %d scope(s): %s", len(skipped), strings.Join(skipped, "; "))
 	}
 	return nil
 }

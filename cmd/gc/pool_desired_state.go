@@ -127,7 +127,7 @@ func computePoolDesiredStates(
 		// Resume tier: actionable assigned work beads whose assignee resolves
 		// to a non-closed session bead. These sessions must stay alive.
 		for _, wb := range assignedWorkBeads {
-			routedTo := strings.TrimSpace(wb.Metadata["gc.routed_to"])
+			routedTo := routedToOrLegacyWorkflowTarget(wb)
 			if wb.Status != "in_progress" && wb.Status != "open" {
 				continue
 			}

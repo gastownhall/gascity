@@ -447,6 +447,7 @@ func DecorateGraphWorkflowRecipe(recipe *formula.Recipe, routeVars map[string]st
 			// scale_check but never claimed by the worker, then idle-reaped
 			// (fixes #2763; gc.run_target retired as a wire field — ga-eld2x).
 			step.Metadata["gc.routed_to"] = routedTo
+			delete(step.Metadata, "gc.run_target")
 			if sourceBeadID != "" {
 				step.Metadata["gc.source_bead_id"] = sourceBeadID
 				if rootStoreRef != "" {

@@ -154,18 +154,19 @@ Dispatch has two read sides that must stay symmetric:
 
 Both forms answer the same question — "is there ready, unassigned,
 non-epic work routed to this pool-demand target?" — and must therefore
-observe the bead store through the same filter. They share target
-resolution and the predicate: `bdReadyPoolDemandShell(limitFlag)`
-returns `bd ready --include-ephemeral --metadata-field
-"$key=$target" --unassigned --exclude-type=epic --json <limitFlag>`.
-The caller provides `key` and `target` as shell variables. The work-query
-form checks `gc.run_target` first, then the compatibility fallback
-`gc.routed_to`; each tier appends `--sort oldest --limit=1`.
-That is an intentional routed-queue policy: unassigned routed pool work is
-FIFO before priority, so newer high-priority work does not jump ahead of
-older ready work already queued for the same target. The count form uses
-the same key precedence and predicate, appends `--limit 0`, and pipes
-through `jq 'length'`. Targets resolve to `Agent.PoolName` when set and
+observe the bead store through the same filters. They share target
+resolution and predicates: `bdReadyPoolDemandShell(limitFlag)` reads the
+canonical `gc.routed_to=<target>` route with `--include-ephemeral`, and
+the temporary migration predicate reads `gc.run_target=<target>` only on
+`gc.kind=workflow` roots that predate root `gc.routed_to` stamping. The
+work-query form appends `--sort oldest --limit=1` to the canonical probe
+and prints the first match, then filters the migration probe to roots with
+empty `gc.routed_to`. That is an intentional routed-queue policy:
+unassigned routed pool work is FIFO before priority, so newer
+high-priority work does not jump ahead of older ready work already queued
+for the same target. The count form unions canonical and migration
+probes and deduplicates by bead ID before piping through `jq 'length'`.
+Targets resolve to `Agent.PoolName` when set and
 `Agent.QualifiedName()` otherwise, so pool instances and pool templates
 land on the same routed queue.
 
@@ -192,12 +193,19 @@ re-spawned, producing spawn storms.
 PR #1516 retired the old molecule-counting tier from the count form. A
 later gc-udx change added `--exclude-type=epic` to the worker claim
 path, leaving the default count form one filter behind. This refactor
-does two things: routes both paths through `bdReadyPoolDemandShell` and
-adds `--exclude-type=epic` to the default count form. Custom
-`scale_check` overrides are unchanged. Future predicate changes should
-be single-helper changes; tests `TestPoolDemandPredicateSharedWithWorkQuery`
-(structural) and `TestPoolDemandAndWorkQueryAgreeOnRoutedSemantics`
-(behavioral) guard against regressions.
+does two things: routes both paths through shared predicate helpers and
+adds `--exclude-type=epic` to the default count form. During the
+`gc.run_target` retirement window, `gc doctor --fix` backfills legacy
+workflow roots and both shell predicates keep unbackfilled roots visible;
+the controller's in-process demand readers share that same
+workflow-root-only fallback. The fallback intentionally does not prefer
+`gc.run_target` on child beads: current stampers write `gc.routed_to` for
+routable children, and the migration audit found no open non-root bead with a
+divergent `gc.routed_to` / `gc.run_target` pair. Custom `scale_check`
+overrides are unchanged. Future predicate changes should be single-helper
+changes; tests `TestPoolDemandPredicateSharedWithWorkQuery` (structural) and
+`TestPoolDemandAndWorkQueryAgreeOnRoutedSemantics` (behavioral) guard against
+regressions.
 
 ## Invariants
 
@@ -246,15 +254,16 @@ be single-helper changes; tests `TestPoolDemandPredicateSharedWithWorkQuery`
     pool-demand-detection path (`Agent.EffectivePoolDemandQuery`, count
     form) and the worker's claim path (`Agent.EffectiveWorkQuery`, Tier
     3 first-row form) MUST derive their `bd ready --include-ephemeral
-    --metadata-field <key>=<target> --unassigned --exclude-type=epic
-    --json` predicate from the same target-resolution helper and
+    --metadata-field gc.routed_to=<target> --unassigned --exclude-type=epic
+    --json` canonical predicate from the same target-resolution helper and
     `bdReadyPoolDemandShell` helper in `internal/config/config.go`. The
-    worker and reconciler must use the same `gc.run_target` then
-    `gc.routed_to` key precedence; only the worker's first-row form adds
-    native `bd ready --sort oldest --limit=1` selection. Any pool-demand
-    predicate change to one (added filter, modified target resolution, new
-    state) MUST be reflected in the other. Diverging the two re-introduces
-    the protocol-mismatch class — the reconciler
+    worker and reconciler must also share the temporary migration predicate
+    for `gc.run_target=<target>` on `gc.kind=workflow` roots with empty
+    `gc.routed_to`; only the worker's first-row form adds native
+    `bd ready --sort oldest --limit=1` selection to the canonical probe.
+    Any pool-demand predicate change to one (added filter, modified target
+    resolution, new state) MUST be reflected in the other. Diverging the two
+    re-introduces the protocol-mismatch class — the reconciler
     spawning sessions for work the worker can't claim, or the worker idle
     while new demand sits unspawned. The legacy `workflow-control` fallback is
     worker-only for pre-rename `control-dispatcher` graphs and intentionally
@@ -330,9 +339,9 @@ Pool agents with default queries:
 name = "coder"
 pool = { min = 1, max = 3, check = "echo 2" }
 # Default sling_query: bd update {} --set-metadata gc.routed_to=coder
-# Default work_query: bd ready --include-ephemeral --metadata-field gc.run_target=coder
+# Default work_query: bd ready --include-ephemeral --metadata-field gc.routed_to=coder
 #   --unassigned --exclude-type=epic --json --sort oldest --limit=1,
-#   then gc.routed_to fallback
+#   then a temporary gc.run_target workflow-root migration fallback
 ```
 
 System formulas are embedded in the `gc` binary and materialized to

@@ -238,6 +238,7 @@ func TestDecorateGraphWorkflowRecipe_SetsRootMetadata(t *testing.T) {
 		Steps: []formula.RecipeStep{
 			{ID: "wf-test.root", IsRoot: true, Metadata: map[string]string{
 				"gc.kind": "workflow", "gc.formula_contract": "graph.v2",
+				"gc.run_target": "stale-target",
 			}},
 			{ID: "wf-test.work", Metadata: map[string]string{}},
 		},

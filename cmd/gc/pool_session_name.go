@@ -139,7 +139,7 @@ func releaseOrphanedPoolAssignments(
 			continue
 		}
 		assignee := strings.TrimSpace(wb.Assignee)
-		template := strings.TrimSpace(wb.Metadata["gc.routed_to"])
+		template := routedToOrLegacyWorkflowTarget(wb)
 		if template == "" {
 			continue
 		}
@@ -296,7 +296,7 @@ func storeForPoolAssignment(cfg *config.City, cityStore beads.Store, rigStores m
 	if cfg == nil || len(rigStores) == 0 {
 		return cityStore
 	}
-	routed := strings.TrimSpace(wb.Metadata["gc.routed_to"])
+	routed := routedToOrLegacyWorkflowTarget(wb)
 	if routed != "" {
 		if slash := strings.IndexByte(routed, '/'); slash > 0 {
 			if store := rigStores[routed[:slash]]; store != nil {
@@ -319,7 +319,7 @@ func isRecoverableUnassignedInProgressPoolWork(cfg *config.City, wb beads.Bead) 
 	if wb.Status != "in_progress" || strings.TrimSpace(wb.Assignee) != "" {
 		return false
 	}
-	template := strings.TrimSpace(wb.Metadata["gc.routed_to"])
+	template := routedToOrLegacyWorkflowTarget(wb)
 	if template == "" {
 		return false
 	}

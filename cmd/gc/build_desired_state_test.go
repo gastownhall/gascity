@@ -524,6 +524,145 @@ func TestDefaultScaleCheckCountsCountsUnassignedRoutedPoolWork(t *testing.T) {
 	}
 }
 
+func TestDefaultScaleCheckCountsCountsRunTargetOnlyWorkflowDuringMigration(t *testing.T) {
+	const template = "gascity/reviewer"
+	backing := beads.NewMemStore()
+	if _, err := backing.Create(beads.Bead{
+		Title:  "legacy workflow root",
+		Type:   "task",
+		Status: "open",
+		Metadata: map[string]string{
+			"gc.kind":       "workflow",
+			"gc.run_target": template,
+		},
+	}); err != nil {
+		t.Fatalf("create legacy workflow root: %v", err)
+	}
+	cache := beads.NewCachingStoreForTest(backing, nil)
+	if err := cache.PrimeActive(); err != nil {
+		t.Fatalf("PrimeActive: %v", err)
+	}
+
+	counts, _, errs := defaultScaleCheckCounts([]defaultScaleCheckTarget{{
+		template: template,
+		storeKey: "rig:gascity",
+		store:    cache,
+	}})
+	if len(errs) != 0 {
+		t.Fatalf("defaultScaleCheckCounts errs = %v", errs)
+	}
+	if got := counts[template]; got != 1 {
+		t.Fatalf("defaultScaleCheckCounts[%q] = %d, want 1", template, got)
+	}
+}
+
+func TestDefaultScaleCheckCountsIgnoresRunTargetOnNonWorkflowDivergentWork(t *testing.T) {
+	const (
+		entryTarget = "gascity/controller"
+		stepTarget  = "gascity/reviewer"
+	)
+	backing := beads.NewMemStore()
+	if _, err := backing.Create(beads.Bead{
+		Title:  "legacy divergent step",
+		Type:   "task",
+		Status: "open",
+		Metadata: map[string]string{
+			"gc.routed_to":  entryTarget,
+			"gc.run_target": stepTarget,
+		},
+	}); err != nil {
+		t.Fatalf("create legacy divergent step: %v", err)
+	}
+	cache := beads.NewCachingStoreForTest(backing, nil)
+	if err := cache.PrimeActive(); err != nil {
+		t.Fatalf("PrimeActive: %v", err)
+	}
+
+	counts, _, errs := defaultScaleCheckCounts([]defaultScaleCheckTarget{
+		{template: entryTarget, storeKey: "rig:gascity", store: cache},
+		{template: stepTarget, storeKey: "rig:gascity", store: cache},
+	})
+	if len(errs) != 0 {
+		t.Fatalf("defaultScaleCheckCounts errs = %v", errs)
+	}
+	if got := counts[entryTarget]; got != 1 {
+		t.Fatalf("defaultScaleCheckCounts[%q] = %d, want 1", entryTarget, got)
+	}
+	if got := counts[stepTarget]; got != 0 {
+		t.Fatalf("defaultScaleCheckCounts[%q] = %d, want 0", stepTarget, got)
+	}
+}
+
+func TestDefaultScaleCheckCountsIgnoresRunTargetWhenWorkflowRoutedToPresent(t *testing.T) {
+	const (
+		entryTarget = "gascity/controller"
+		staleTarget = "gascity/reviewer"
+	)
+	backing := beads.NewMemStore()
+	if _, err := backing.Create(beads.Bead{
+		Title:  "divergent workflow root",
+		Type:   "task",
+		Status: "open",
+		Metadata: map[string]string{
+			"gc.kind":       "workflow",
+			"gc.routed_to":  entryTarget,
+			"gc.run_target": staleTarget,
+		},
+	}); err != nil {
+		t.Fatalf("create divergent workflow root: %v", err)
+	}
+	cache := beads.NewCachingStoreForTest(backing, nil)
+	if err := cache.PrimeActive(); err != nil {
+		t.Fatalf("PrimeActive: %v", err)
+	}
+
+	counts, _, errs := defaultScaleCheckCounts([]defaultScaleCheckTarget{
+		{template: entryTarget, storeKey: "rig:gascity", store: cache},
+		{template: staleTarget, storeKey: "rig:gascity", store: cache},
+	})
+	if len(errs) != 0 {
+		t.Fatalf("defaultScaleCheckCounts errs = %v", errs)
+	}
+	if got := counts[entryTarget]; got != 1 {
+		t.Fatalf("defaultScaleCheckCounts[%q] = %d, want 1", entryTarget, got)
+	}
+	if got := counts[staleTarget]; got != 0 {
+		t.Fatalf("defaultScaleCheckCounts[%q] = %d, want 0", staleTarget, got)
+	}
+}
+
+func TestDefaultScaleCheckCountsFallsBackToRoutedToWhenRunTargetDoesNotMatchTemplate(t *testing.T) {
+	const template = "gascity/reviewer"
+	backing := beads.NewMemStore()
+	if _, err := backing.Create(beads.Bead{
+		Title:  "new graph step",
+		Type:   "task",
+		Status: "open",
+		Metadata: map[string]string{
+			"gc.run_target": "reviewer",
+			"gc.routed_to":  template,
+		},
+	}); err != nil {
+		t.Fatalf("create graph step: %v", err)
+	}
+	cache := beads.NewCachingStoreForTest(backing, nil)
+	if err := cache.PrimeActive(); err != nil {
+		t.Fatalf("PrimeActive: %v", err)
+	}
+
+	counts, _, errs := defaultScaleCheckCounts([]defaultScaleCheckTarget{{
+		template: template,
+		storeKey: "rig:gascity",
+		store:    cache,
+	}})
+	if len(errs) != 0 {
+		t.Fatalf("defaultScaleCheckCounts errs = %v", errs)
+	}
+	if got := counts[template]; got != 1 {
+		t.Fatalf("defaultScaleCheckCounts[%q] = %d, want 1", template, got)
+	}
+}
+
 func TestDefaultScaleCheckCountsDoesNotTreatTemplateAssigneeAsDemand(t *testing.T) {
 	const template = "gascity/reviewer"
 	backing := beads.NewMemStore()
@@ -674,7 +813,7 @@ func TestDefaultScaleCheckCountsCountsCronPoolDemandViaMetadataFlag(t *testing.T
 	}
 }
 
-func TestDefaultScaleCheckCountsPoolDemandUsesRunTargetBeforeRoutedTo(t *testing.T) {
+func TestDefaultScaleCheckCountsPoolDemandUsesRoutedToBeforeRunTarget(t *testing.T) {
 	backing := &demandListCountingStore{Store: beads.NewMemStore()}
 	metadata := map[string]string{
 		"gc.run_target": "dog",
@@ -704,11 +843,11 @@ func TestDefaultScaleCheckCountsPoolDemandUsesRunTargetBeforeRoutedTo(t *testing
 	if len(errs) != 0 {
 		t.Fatalf("defaultScaleCheckCounts errs = %v", errs)
 	}
-	if got := counts["dog"]; got != 1 {
-		t.Fatalf("defaultScaleCheckCounts[%q] = %d, want 1 (gc.run_target is the canonical pool-demand route)", "dog", got)
+	if got := counts["dog"]; got != 0 {
+		t.Fatalf("defaultScaleCheckCounts[%q] = %d, want 0 (gc.run_target is ignored when gc.routed_to is present)", "dog", got)
 	}
-	if got := counts["cat"]; got != 0 {
-		t.Fatalf("defaultScaleCheckCounts[%q] = %d, want 0 (gc.routed_to must not win over gc.run_target)", "cat", got)
+	if got := counts["cat"]; got != 1 {
+		t.Fatalf("defaultScaleCheckCounts[%q] = %d, want 1 (gc.routed_to is the canonical pool-demand route)", "cat", got)
 	}
 }
 
@@ -1164,6 +1303,44 @@ func TestDefaultNamedSessionDemandUsesPartialReadyRows(t *testing.T) {
 	}
 	if !partialTemplates["worker"] {
 		t.Fatalf("partialTemplates = %v, want worker marked partial", partialTemplates)
+	}
+}
+
+func TestDefaultNamedSessionDemandCountsRunTargetOnlyWorkflowDuringMigration(t *testing.T) {
+	store := beads.NewMemStore()
+	if _, err := store.Create(beads.Bead{
+		Title:  "legacy workflow root",
+		Type:   "task",
+		Status: "open",
+		Metadata: map[string]string{
+			"gc.kind":       "workflow",
+			"gc.run_target": "reviewer",
+		},
+	}); err != nil {
+		t.Fatalf("create routed bead: %v", err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name: "reviewer",
+		}},
+		NamedSessions: []config.NamedSession{{
+			Name:     "primary",
+			Template: "reviewer",
+			Mode:     "on_demand",
+		}},
+	}
+
+	demand, _, errs := defaultNamedSessionDemand([]defaultScaleCheckTarget{{
+		template: "reviewer",
+		storeKey: "rig:gascity",
+		store:    store,
+	}}, cfg, "test-city")
+	if len(errs) != 0 {
+		t.Fatalf("defaultNamedSessionDemand errs = %v", errs)
+	}
+	if !demand["primary"] {
+		t.Fatal("defaultNamedSessionDemand[primary] = false, want legacy run_target demand")
 	}
 }
 

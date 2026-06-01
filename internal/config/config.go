@@ -2791,22 +2791,42 @@ func (a *Agent) AttachEnabled() bool {
 	return a.Attach == nil || *a.Attach
 }
 
-// bdReadyPoolDemandShell returns the bd ready predicate for unassigned,
-// non-epic pool demand routed to target. gc.routed_to is the sole persisted
-// routing key: the graph.v2 stamper and the legacy stamper both stamp it on
-// every routable bead, including the workflow root (ga-eld2x retired the
-// short-lived gc.run_target wire field). This predicate is the one source of
-// truth for "is there work on this routed queue?" that both the worker (via
-// EffectiveWorkQuery Tier 3) and the reconciler (via EffectivePoolDemandQuery,
-// count-form) ask; diverging the two re-introduces the protocol-mismatch class
-// (see the "scale_check ↔ work_query correspondence" note in
-// engdocs/architecture/dispatch.md).
+// bdReadyPoolDemandShell returns the canonical bd ready predicate for
+// unassigned, non-epic pool demand routed to target. gc.routed_to is the
+// canonical persisted routing key: the graph.v2 stamper and the legacy stamper
+// both stamp it on every routable bead, including the workflow root (ga-eld2x
+// retired the short-lived gc.run_target wire field). This predicate is the main
+// source of truth for "is there work on this routed queue?" that both the
+// worker (via EffectiveWorkQuery Tier 3) and the reconciler (via
+// EffectivePoolDemandQuery, count-form) ask; diverging the two re-introduces
+// the protocol-mismatch class (see the "scale_check ↔ work_query
+// correspondence" note in engdocs/architecture/dispatch.md).
 //
 // target is passed as a positional argument to the outer sh -c command, not
 // interpolated into the nested shell body. That keeps routes containing shell
 // metacharacters as data instead of executable syntax.
 func bdReadyPoolDemandShell(limitFlag string) string {
 	return `bd ready --include-ephemeral --metadata-field "gc.routed_to=$target" --unassigned --exclude-type=epic --json ` + limitFlag
+}
+
+// bdReadyPoolDemandMigrationShell is a temporary raw compatibility probe for
+// graph.v2 workflow roots created before gc.routed_to root stamping shipped.
+// It is scoped to workflow roots so gc.run_target remains an authoring hint
+// everywhere else. Callers must pass its output through
+// poolDemandMigrationFilterJQ so a stale divergent gc.run_target cannot remain
+// visible once a root carries gc.routed_to. This retirement-window fallback
+// requires jq in the default worker/reconciler environment; remove it with the
+// Go-side legacy candidates after the backfill completion tracked by ga-dhf44.
+func bdReadyPoolDemandMigrationShell(limitFlag string) string {
+	return `bd ready --include-ephemeral --metadata-field "gc.run_target=$target" --metadata-field "gc.kind=workflow" --unassigned --exclude-type=epic --json --sort oldest ` + limitFlag
+}
+
+func poolDemandMigrationFilterJQ(limit int) string {
+	filter := `[.[] | select((.metadata["gc.routed_to"] // "") == "")]`
+	if limit > 0 {
+		filter += ` | .[:` + strconv.Itoa(limit) + `]`
+	}
+	return shellquote.Join([]string{"jq", filter})
 }
 
 // poolDemandFirstRowFunctionScript emits the work_query Tier 3 function: it
@@ -2819,6 +2839,9 @@ func poolDemandFirstRowFunctionScript() string {
 		`[ -z "$target" ] && return 1; ` +
 		`r=$(` + routedReadyTierCommand() + `); ` +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
+		`legacy_candidates=$(` + bdReadyPoolDemandMigrationShell("--limit=20") + ` 2>/dev/null); ` +
+		`r=$(printf "%s" "$legacy_candidates" | ` + poolDemandMigrationFilterJQ(1) + ` 2>/dev/null); ` +
+		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
 		`return 1; ` +
 		`}; `
 }
@@ -2830,10 +2853,10 @@ func routedReadyTierCommand() string {
 }
 
 // poolDemandCountShell emits the reconciler count-form for target: it counts
-// ready, unassigned, routed demand and prints the array length. It shares
-// bdReadyPoolDemandShell with poolDemandFirstRowFunctionScript so the
-// reconciler's spawn decision and the worker's claim decision read the same
-// predicate.
+// ready, unassigned, routed demand and prints the array length. It shares the
+// canonical and migration predicates with poolDemandFirstRowFunctionScript so
+// the reconciler's spawn decision and the worker's claim decision read the
+// same demand shape.
 //
 // Unlike the work_query probe, this form must NOT redirect bd stderr or default
 // to zero: a failed `bd ready` has to surface as an error rather than
@@ -2843,7 +2866,9 @@ func routedReadyTierCommand() string {
 func poolDemandCountShell(target string) string {
 	script := `target="$1"; ` +
 		`ready_json=$(` + bdReadyPoolDemandShell("--limit 0") + `) || exit $?; ` +
-		`printf "%s\n" "$ready_json" | jq "length"`
+		`legacy_candidates=$(` + bdReadyPoolDemandMigrationShell("--limit 0") + `) || exit $?; ` +
+		`legacy_json=$(printf "%s" "$legacy_candidates" | ` + poolDemandMigrationFilterJQ(0) + `) || exit $?; ` +
+		`printf "%s\n%s\n" "$ready_json" "$legacy_json" | jq -s "(add // []) | unique_by(.id) | length"`
 	return shellquote.Join([]string{"sh", "-c", script, "--", target})
 }
 
@@ -2921,8 +2946,8 @@ func poolDemandOriginGateScript() string {
 // context), all identity vars are empty → assignee tiers skip → only
 // the routed_to tier fires to detect new demand.
 //
-// Tier 3's predicate is shared with EffectivePoolDemandQuery via
-// bdReadyPoolDemandShell so reconciler spawn decisions and worker claim
+// Tier 3's canonical and migration predicates are shared with
+// EffectivePoolDemandQuery so reconciler spawn decisions and worker claim
 // decisions stay symmetric.
 func (a *Agent) EffectiveWorkQuery() string {
 	if a.WorkQuery != "" {
@@ -3008,7 +3033,7 @@ func (a *Agent) DrainTimeoutDuration() time.Duration {
 // EffectivePoolDemandQuery returns the count-form pool-demand query the
 // reconciler runs to detect new unassigned routed work. It is the
 // reconciler-side counterpart to EffectiveWorkQuery's Tier 3 (the worker
-// claim path): both derive their predicate from bdReadyPoolDemandShell so
+// claim path): both derive their predicates from the same helpers so
 // any future change to the pool-demand shape flows to both paths
 // simultaneously.
 //
@@ -3217,10 +3242,12 @@ func (a *Agent) EffectiveOnBoot() string {
 		template = a.PoolName
 	}
 	return `template=` + shellquote.Quote(template) + `; ` +
-		`for key in ` + poolDemandKeyListShell() + `; do ` +
-		`bd list --include-ephemeral --metadata-field "$key=$template" --status=in_progress --no-assignee --json 2>/dev/null | ` +
+		`{ ` +
+		`bd list --include-ephemeral --metadata-field "gc.routed_to=$template" --status=in_progress --no-assignee --json 2>/dev/null | ` +
 		`jq -r '.[].id' 2>/dev/null; ` +
-		`done | awk 'NF && !seen[$0]++' | ` +
+		`bd list --include-ephemeral --metadata-field "gc.run_target=$template" --metadata-field "gc.kind=workflow" --status=in_progress --no-assignee --json 2>/dev/null | ` +
+		`jq -r '.[] | select((.metadata["gc.routed_to"] // "") == "") | .id' 2>/dev/null; ` +
+		`} | awk 'NF && !seen[$0]++' | ` +
 		`xargs -rI{} bd update {} --status open 2>/dev/null`
 }
 

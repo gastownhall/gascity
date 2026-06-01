@@ -81,7 +81,7 @@ func TestPhase0ConfigDefaults_WorkQueryIsOriginAware(t *testing.T) {
 	if !strings.Contains(got, "ephemeral") {
 		t.Fatalf("EffectiveWorkQuery() = %q, want origin-specific ephemeral generic queue tier", got)
 	}
-	if !strings.Contains(got, `bd ready --metadata-field "gc.routed_to=$target"`) || !strings.Contains(got, "-- myrig/worker") {
+	if !strings.Contains(got, `bd ready --include-ephemeral --metadata-field "gc.routed_to=$target"`) || !strings.Contains(got, "-- myrig/worker") {
 		t.Fatalf("EffectiveWorkQuery() = %q, want qualified config route argument", got)
 	}
 }
@@ -92,8 +92,9 @@ func TestPhase0ConfigDefaults_OnBootUnclaimsRoutedWorkByDefault(t *testing.T) {
 	got := a.EffectiveOnBoot()
 	for _, want := range []string{
 		"template='myrig/worker'",
-		"for key in gc.run_target gc.routed_to",
-		`--metadata-field "$key=$template"`,
+		`--metadata-field "gc.routed_to=$template"`,
+		`--metadata-field "gc.run_target=$template"`,
+		`--metadata-field "gc.kind=workflow"`,
 		"--status=in_progress",
 		"--no-assignee",
 		"--status open",
