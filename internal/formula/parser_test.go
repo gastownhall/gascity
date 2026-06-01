@@ -183,6 +183,53 @@ description_file = "descriptions/work.md"
 	}
 }
 
+func TestParseFileDescriptionFileResolvesRelativeToSymlinkTarget(t *testing.T) {
+	dir := t.TempDir()
+	packFormulaDir := filepath.Join(dir, "pack", "formulas")
+	packPromptDir := filepath.Join(dir, "pack", "prompts")
+	cityFormulaDir := filepath.Join(dir, "city", "formulas")
+	for _, path := range []string{packFormulaDir, packPromptDir, cityFormulaDir} {
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", path, err)
+		}
+	}
+
+	promptPath := filepath.Join(packPromptDir, "operator.md")
+	if err := os.WriteFile(promptPath, []byte("embedded pack prompt\n"), 0o644); err != nil {
+		t.Fatalf("write prompt: %v", err)
+	}
+
+	formulaPath := filepath.Join(packFormulaDir, "symlink-description.toml")
+	formulaText := `formula = "symlink-description"
+version = 1
+
+[[steps]]
+id = "work"
+title = "Work"
+description_file = "../prompts/operator.md"
+`
+	if err := os.WriteFile(formulaPath, []byte(formulaText), 0o644); err != nil {
+		t.Fatalf("write formula: %v", err)
+	}
+
+	linkPath := filepath.Join(cityFormulaDir, "symlink-description.formula.toml")
+	if err := os.Symlink(formulaPath, linkPath); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+
+	p := NewParser(cityFormulaDir)
+	parsed, err := p.ParseFile(linkPath)
+	if err != nil {
+		t.Fatalf("ParseFile: %v", err)
+	}
+	if len(parsed.Steps) != 1 {
+		t.Fatalf("len(Steps) = %d, want 1", len(parsed.Steps))
+	}
+	if got := parsed.Steps[0].Description; got != "embedded pack prompt\n" {
+		t.Fatalf("step description = %q, want embedded pack prompt", got)
+	}
+}
+
 func TestLoadByNameDescriptionFileKeepsFormulaLocalAssetsPath(t *testing.T) {
 	tmp := t.TempDir()
 	coreFormulas := filepath.Join(tmp, "core", "formulas")

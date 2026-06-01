@@ -146,11 +146,13 @@ func (p *Parser) ParseFile(path string) (*Formula, error) {
 	// Set source tracing info on all steps (gt-8tmz.18)
 	SetSourceInfo(formula)
 
-	// Resolve description_file references relative to the formula file's
+	// Resolve description_file references relative to the real formula file's
 	// directory, with asset references shadowed through formula layer order.
-	// Graph.v2 formulas fail fast on missing files; legacy formulas keep the
-	// historical best-effort behavior.
-	formulaDir := filepath.Dir(absPath)
+	// Pack formulas may be symlinked into a city's formula directory; relative
+	// prompt files should stay pack-relative, not city-relative. Graph.v2
+	// formulas fail fast on missing files; legacy formulas keep the historical
+	// best-effort behavior.
+	formulaDir := descriptionFileBaseDir(absPath)
 	strictDescriptionFiles := UsesGraphCompiler(formula)
 	if err := p.resolveDescriptionFiles(formula.Steps, formulaDir, strictDescriptionFiles); err != nil {
 		return nil, fmt.Errorf("resolve description_file in %s: %w", path, err)
@@ -165,6 +167,13 @@ func (p *Parser) ParseFile(path string) (*Formula, error) {
 	p.cache[formula.Formula] = formula
 
 	return formula, nil
+}
+
+func descriptionFileBaseDir(path string) string {
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		return filepath.Dir(resolved)
+	}
+	return filepath.Dir(path)
 }
 
 // Parse parses a formula from JSON bytes.
