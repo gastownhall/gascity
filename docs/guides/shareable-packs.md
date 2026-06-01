@@ -171,6 +171,82 @@ source = "./assets/code-review"
 Rig-level imports create rig-scoped identities such as
 `backend/gastown.polecat` and `backend/review.reviewer`.
 
+## Composing Packs and Work
+
+When you need domain-specific behavior, extend an existing pack instead of
+copying it. Import the base pack, add your own agents and formulas next to it,
+then patch only the imported definitions that need local policy.
+
+```toml
+[pack]
+name = "backend-delivery"
+schema = 2
+
+[imports.gastown]
+source = "../gastown"
+
+[[patches.agent]]
+name = "gastown.polecat"
+default_sling_formula = "backend-implementation"
+
+[patches.agent.env]
+BACKEND_TEST_TARGET = "./..."
+```
+
+Put the new behavior in this pack's conventional directories:
+
+```text
+backend-delivery/
+├── pack.toml
+├── formulas/
+│   └── backend-implementation.toml
+├── template-fragments/
+│   └── backend-standards.template.md
+└── agents/
+    └── reviewer/
+        └── prompt.template.md
+```
+
+This keeps the imported pack upgradeable. Use unique formula and agent names for
+new behavior; use patches when you intentionally want to change an imported
+definition.
+
+Work composition follows the same rule: choose the smallest grouping that has a
+single lifecycle.
+
+- Use one convoy when the work shares the same owner, target branch, merge
+  policy, and landing decision.
+- Use separate convoys when different teams, target branches, release gates, or
+  owners can finish independently.
+- Link separate convoys or beads with `related` or `tracks` dependencies when
+  you need visibility without blocking.
+- Use a `blocks` dependency only when downstream work must not become ready
+  until upstream work closes.
+
+```bash
+gc convoy create backend-api --owned --target integration/backend-api
+gc convoy create backend-docs --owned --target integration/backend-docs
+bd dep add <docs-convoy-or-bead> <api-convoy-or-bead> --type related
+```
+
+For formulas, prefer a wisp when the workflow is short-lived and one agent can
+drive it from the source bead. Prefer a molecule when individual steps need
+their own beads for independent routing, review, recovery, or dashboard
+visibility.
+
+If upstream work changes after a workflow already ran, clean up the old workflow
+for the source bead, reopen the source, and sling it again:
+
+```bash
+gc convoy delete-source <source-bead-id> --apply
+gc convoy reopen-source <source-bead-id>
+gc sling <target-agent> <source-bead-id> --on <formula>
+```
+
+Use `--store-ref city:<name>` or `--store-ref rig:<name>` with
+`delete-source` and `reopen-source` when the source bead is not uniquely
+resolvable from the current directory.
+
 ## Named Sessions
 
 Packs can declare sessions that should exist independent of current work.
