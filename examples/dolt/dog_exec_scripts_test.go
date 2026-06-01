@@ -230,6 +230,17 @@ func compactMarkerValue(t *testing.T, markerPath, key string) string {
 	return ""
 }
 
+func rewriteLegacyPendingPushMarker(t *testing.T, markerPath, createdAt string) {
+	t.Helper()
+	if err := os.WriteFile(markerPath, []byte(
+		"db=beads\n"+
+			"reason=flatten and full GC succeeded but remote push failed\n"+
+			"created_at="+createdAt+"\n",
+	), 0o600); err != nil {
+		t.Fatalf("rewrite legacy pending-push marker: %v", err)
+	}
+}
+
 func writeBSDOnlyDate(t *testing.T, binDir string) {
 	t.Helper()
 	writeExecutable(t, filepath.Join(binDir, "date"), `#!/bin/sh
@@ -1604,6 +1615,72 @@ func TestCompactScriptDryRunReportsStalePendingPushMarker(t *testing.T) {
 	}
 	if strings.Count(string(logData), "CALL DOLT_PUSH('--force', '--set-upstream', 'origin', 'main')") != 1 {
 		t.Fatalf("dry-run stale pending-push retry must not attempt another force push:\n%s", logData)
+	}
+}
+
+func TestCompactScriptRecoversLegacyPendingPushMarkerWhenRemoteHeadIsLocal(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	firstOut, err := fixture.run(t, "remote_push_failure", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err != nil {
+		t.Fatalf("first compact should succeed locally despite remote push failure: %v\n%s", err, firstOut)
+	}
+	pendingPush := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-pending-push", "beads")
+	rewriteLegacyPendingPushMarker(t, pendingPush, "1970-01-01T00:00:00Z")
+
+	secondOut, err := fixture.run(t, "remote_ahead_reconciled", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err != nil {
+		t.Fatalf("legacy pending-push retry should recover from current remote state: %v\n%s", err, secondOut)
+	}
+	if !strings.Contains(secondOut, "legacy pending_push marker recovered") ||
+		!strings.Contains(secondOut, "pushed compacted main") {
+		t.Fatalf("retry missing legacy-marker recovery explanation:\n%s", secondOut)
+	}
+	logData, err := os.ReadFile(fixture.doltLog)
+	if err != nil {
+		t.Fatalf("read dolt log: %v", err)
+	}
+	log := string(logData)
+	if strings.Count(log, "DOLT_RESET") != 1 {
+		t.Fatalf("legacy pending-push retry must not flatten again:\n%s", log)
+	}
+	if strings.Count(log, "CALL DOLT_PUSH('--force', '--set-upstream', 'origin', 'main')") < 2 {
+		t.Fatalf("legacy pending-push retry should attempt the deferred remote push:\n%s", log)
+	}
+	if _, err := os.Stat(pendingPush); !os.IsNotExist(err) {
+		t.Fatalf("successful legacy retry should clear marker, stat err=%v", err)
+	}
+}
+
+func TestCompactScriptLegacyPendingPushMarkerRequiresRemoteHeadInLocalHistory(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	firstOut, err := fixture.run(t, "remote_push_failure", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err != nil {
+		t.Fatalf("first compact should succeed locally despite remote push failure: %v\n%s", err, firstOut)
+	}
+	pendingPush := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-pending-push", "beads")
+	rewriteLegacyPendingPushMarker(t, pendingPush, "1970-01-01T00:00:00Z")
+
+	secondOut, err := fixture.run(t, "remote_ahead", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err == nil {
+		t.Fatalf("legacy pending-push retry succeeded with unverified remote HEAD:\n%s", secondOut)
+	}
+	if !strings.Contains(secondOut, "legacy pending_push marker recovery requires remote HEAD") ||
+		!strings.Contains(secondOut, "manual intervention required") {
+		t.Fatalf("retry missing legacy-marker verification failure:\n%s", secondOut)
+	}
+	logData, err := os.ReadFile(fixture.doltLog)
+	if err != nil {
+		t.Fatalf("read dolt log: %v", err)
+	}
+	log := string(logData)
+	if strings.Count(log, "DOLT_RESET") != 1 {
+		t.Fatalf("legacy pending-push retry must not flatten again:\n%s", log)
+	}
+	if strings.Count(log, "CALL DOLT_PUSH('--force', '--set-upstream', 'origin', 'main')") != 1 {
+		t.Fatalf("unverified legacy pending-push retry must not attempt another force push:\n%s", log)
+	}
+	if _, err := os.Stat(pendingPush); err != nil {
+		t.Fatalf("failed legacy retry should keep pending-push marker: %v", err)
 	}
 }
 
