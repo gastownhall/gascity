@@ -244,6 +244,9 @@ func runControlDispatcherWithStoreAndConfig(cityPath, storePath string, store be
 		if errors.Is(err, dispatch.ErrControlPending) {
 			return err
 		}
+		if dispatch.IsTransientControllerError(err) {
+			return err
+		}
 		if quarantineErr := quarantineControlFailureBead(store, beadID, err); quarantineErr != nil {
 			return errors.Join(err, quarantineErr)
 		}
@@ -270,7 +273,7 @@ func quarantineControlFailureBead(store beads.Store, beadID string, cause error)
 	}
 	reason := controlQuarantineReason(cause, failureReason)
 	status := "closed"
-	return store.Update(beadID, beads.UpdateOpts{
+	if err := store.Update(beadID, beads.UpdateOpts{
 		Status: &status,
 		Labels: []string{"gc:control-quarantined"},
 		Metadata: map[string]string{
@@ -285,7 +288,11 @@ func quarantineControlFailureBead(store beads.Store, beadID string, cause error)
 			"gc.control_quarantine_reason": reason,
 			"gc.control_quarantined_at":    workflowTraceNow().UTC().Format(time.RFC3339),
 		},
-	})
+	}); err != nil {
+		return err
+	}
+	_, _ = dispatch.ReconcileClosedScopeMember(store, beadID)
+	return nil
 }
 
 func controlQuarantineReason(cause error, fallback string) string {
