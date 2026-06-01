@@ -1809,6 +1809,35 @@ func TestBdStoreReadyWithAssigneeAndLimit(t *testing.T) {
 	}
 }
 
+func TestBdStoreReadyWispsAppliesLimitAfterTierFilter(t *testing.T) {
+	var gotCmd string
+	runner := func(_, name string, args ...string) ([]byte, error) {
+		gotCmd = name + " " + strings.Join(args, " ")
+		return []byte(`[
+			{"id":"bd-issue","title":"normal ready work","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z"},
+			{"id":"bd-wisp","title":"ready wisp","status":"open","issue_type":"task","created_at":"2025-01-15T10:31:00Z","ephemeral":true},
+			{"id":"bd-wisp-2","title":"second ready wisp","status":"open","issue_type":"task","created_at":"2025-01-15T10:32:00Z","ephemeral":true}
+		]`), nil
+	}
+	s := beads.NewBdStore("/city", runner)
+	got, err := s.Ready(beads.ReadyQuery{TierMode: beads.TierWisps, Limit: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(gotCmd, "--include-ephemeral") {
+		t.Fatalf("bd ready command = %q, want --include-ephemeral", gotCmd)
+	}
+	if strings.Contains(gotCmd, "--limit 1") {
+		t.Fatalf("bd ready command = %q, must not pre-limit before wisp filtering", gotCmd)
+	}
+	if !strings.Contains(gotCmd, "--limit 0") {
+		t.Fatalf("bd ready command = %q, want unbounded pre-filter read", gotCmd)
+	}
+	if len(got) != 1 || got[0].ID != "bd-wisp" {
+		t.Fatalf("Ready(TierWisps, Limit:1) = %+v, want first wisp after tier filtering", got)
+	}
+}
+
 func TestBdStoreReadyFiltersInfraTypes(t *testing.T) {
 	runner := fakeRunner(map[string]struct {
 		out []byte

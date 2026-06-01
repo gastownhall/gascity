@@ -610,6 +610,38 @@ func TestDefaultScaleCheckCountsCountsUnassignedRoutedPoolWork(t *testing.T) {
 	}
 }
 
+func TestDefaultScaleCheckCountsCountsUnassignedRoutedTaskWisp(t *testing.T) {
+	const template = "gascity/reviewer"
+	backing := beads.NewMemStore()
+	if _, err := backing.Create(beads.Bead{
+		Title:     "routed ephemeral pool work",
+		Type:      "task",
+		Status:    "open",
+		Ephemeral: true,
+		Metadata: map[string]string{
+			"gc.routed_to": template,
+		},
+	}); err != nil {
+		t.Fatalf("create routed wisp: %v", err)
+	}
+	cache := beads.NewCachingStoreForTest(backing, nil)
+	if err := cache.PrimeActive(); err != nil {
+		t.Fatalf("PrimeActive: %v", err)
+	}
+
+	counts, _, errs := defaultScaleCheckCounts([]defaultScaleCheckTarget{{
+		template: template,
+		storeKey: "rig:gascity",
+		store:    cache,
+	}})
+	if len(errs) != 0 {
+		t.Fatalf("defaultScaleCheckCounts errs = %v", errs)
+	}
+	if got := counts[template]; got != 1 {
+		t.Fatalf("defaultScaleCheckCounts[%q] = %d, want 1 for task-shaped wisp", template, got)
+	}
+}
+
 func TestDefaultScaleCheckCountsCountsRunTargetOnlyWorkflowDuringMigration(t *testing.T) {
 	const template = "gascity/reviewer"
 	backing := beads.NewMemStore()
@@ -4975,6 +5007,49 @@ func TestBuildDesiredState_OnDemandNamedSession_DefaultRoutedWorkMaterializesNam
 	}
 	if !dsResult.NamedSessionDemand["mayor"] {
 		t.Fatal("NamedSessionDemand should record default routed work for mayor")
+	}
+}
+
+func TestBuildDesiredState_OnDemandNamedSession_DefaultRoutedTaskWispMaterializesNamedSession(t *testing.T) {
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+	if _, err := store.Create(beads.Bead{
+		Title:     "queued mayor wisp",
+		Type:      "task",
+		Status:    "open",
+		Ephemeral: true,
+		Metadata: map[string]string{
+			"gc.routed_to": "mayor",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "mayor",
+			StartCommand:      "true",
+			MaxActiveSessions: intPtr(1),
+			WorkQuery:         "printf ''",
+		}},
+		NamedSessions: []config.NamedSession{{
+			Template: "mayor",
+			Mode:     "on_demand",
+		}},
+	}
+
+	dsResult := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, io.Discard)
+	foundNamed := false
+	for _, tp := range dsResult.State {
+		if tp.TemplateName == "mayor" && tp.ConfiguredNamedIdentity == "mayor" {
+			foundNamed = true
+		}
+	}
+	if !foundNamed {
+		t.Fatal("default routed task wisp should materialize the on-demand named session")
+	}
+	if !dsResult.NamedSessionDemand["mayor"] {
+		t.Fatal("NamedSessionDemand should record default routed task wisp for mayor")
 	}
 }
 

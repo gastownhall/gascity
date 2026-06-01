@@ -1023,12 +1023,11 @@ func defaultScaleCheckCounts(targets []defaultScaleCheckTarget) (map[string]int,
 		// flag) is counted exactly once per template.
 		counted := make(map[string]struct{})
 
-		// Source 1: Ready()/CachedReady() iteration. Surfaces the
-		// actionable-type set (task, etc.) matched against canonical routing
-		// metadata, with the temporary gc.run_target migration fallback.
-		// Legacy formula step beads are NOT here because PR #1154 added
-		// "step" to readyExcludeTypes; molecule wisps are NOT here
-		// because workflow containers were already excluded.
+		// Source 1: Ready()/CachedReady() iteration. Surfaces actionable
+		// work (task, etc.) from both durable and ephemeral tiers matched
+		// against canonical routing metadata, with the temporary gc.run_target
+		// migration fallback. Legacy formula step beads and molecule wisps are
+		// not here because readyExcludeTypes filters workflow scaffolding out.
 		ready, readyErr := readyForControllerDemand(group.store)
 		if readyErr != nil {
 			errs = append(errs, fmt.Errorf("default scale_check %s templates=%s: Ready(): %w", key, strings.Join(sortedStringSet(group.templates), ","), readyErr))
@@ -1166,17 +1165,14 @@ func defaultNamedSessionDemand(targets []defaultScaleCheckTarget, cfg *config.Ci
 	}
 
 	// NOTE: this loop intentionally only consults Ready(), not the
-	// gc.pool_demand list path that defaultScaleCheckCounts uses for
-	// pool agents. All current pack-shipped cron orders route to pool
-	// agents (none target named on_demand sessions), so this function
-	// is never the load-bearing demand source for cron-fired wisps in
-	// practice. If a future named on_demand cron order surfaces — i.e.
-	// a wisp lands with gc.routed_to=<named-identity> AND the molecule
-	// type filters it out of Ready() — mirror the Source-2 List path
-	// from defaultScaleCheckCounts here (query open + poolDemandMetadataPair()
-	// from the same group.store, apply the unassigned + routed-to
-	// match, dedup against the Ready source) and add a parallel test
-	// next to TestDefaultScaleCheckCountsCountsCronPoolDemandViaMetadataFlag.
+	// gc.pool_demand list path that defaultScaleCheckCounts uses for pool
+	// agents. Ready includes task-shaped wisps for on_demand named sessions;
+	// molecule/step workflow containers still stay out through readyExcludeTypes.
+	// If a future named on_demand cron order needs molecule-container demand,
+	// mirror the Source-2 List path from defaultScaleCheckCounts here (query
+	// open + poolDemandMetadataPair() from the same group.store, apply the
+	// unassigned + routed-to match, dedup against the Ready source) and add a
+	// parallel test next to TestDefaultScaleCheckCountsCountsCronPoolDemandViaMetadataFlag.
 	for key, group := range groups {
 		ready, err := readyForControllerDemand(group.store)
 		if err != nil {

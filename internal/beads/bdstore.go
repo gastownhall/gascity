@@ -1762,8 +1762,12 @@ func (s *BdStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 	if q.Assignee != "" {
 		args = append(args, "--assignee", q.Assignee)
 	}
-	if q.Limit > 0 {
-		args = append(args, "--limit", strconv.Itoa(q.Limit))
+	cliLimit := q.Limit
+	if q.TierMode == TierWisps && q.Limit > 0 {
+		cliLimit = 0
+	}
+	if cliLimit > 0 {
+		args = append(args, "--limit", strconv.Itoa(cliLimit))
 	} else {
 		args = append(args, "--limit", "0")
 	}
@@ -1783,6 +1787,9 @@ func (s *BdStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 			continue
 		}
 		result = append(result, bead)
+	}
+	if q.TierMode == TierWisps && q.Limit > 0 && len(result) > q.Limit {
+		result = result[:q.Limit]
 	}
 	if parseErr != nil {
 		if len(result) == 0 {

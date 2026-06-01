@@ -349,13 +349,17 @@ func (s *Store) ListOpen(status ...string) ([]beads.Bead, error) {
 }
 
 // Ready returns actionable open beads (excluding infrastructure types):
-// script ready
+// script ready [--include-ephemeral]
 func (s *Store) Ready(query ...beads.ReadyQuery) ([]beads.Bead, error) {
 	q := beads.ReadyQuery{}
 	if len(query) > 0 {
 		q = query[0]
 	}
-	out, err := s.run(nil, "ready")
+	args := []string{"ready"}
+	if q.TierMode == beads.TierBoth || q.TierMode == beads.TierWisps {
+		args = append(args, "--include-ephemeral")
+	}
+	out, err := s.run(nil, args...)
 	if err != nil {
 		return nil, fmt.Errorf("exec beads ready: %w", err)
 	}
