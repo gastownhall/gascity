@@ -27,6 +27,34 @@ import (
 
 const tmuxGuardCommandTimeout = 2 * time.Second
 
+const (
+	tmuxEnv     = "TMUX"
+	tmuxPaneEnv = "TMUX_PANE"
+	tmuxTmpEnv  = "TMUX_TMPDIR"
+)
+
+// ConfigureProcessEnv points all tmux commands in the current process tree at
+// socketRoot and removes inherited client bindings from an outer tmux session.
+func ConfigureProcessEnv(socketRoot string) error {
+	socketRoot = strings.TrimSpace(socketRoot)
+	if socketRoot == "" {
+		return fmt.Errorf("tmux socket root is empty")
+	}
+	if err := os.MkdirAll(socketRoot, 0o700); err != nil {
+		return fmt.Errorf("creating tmux socket root %q: %w", socketRoot, err)
+	}
+	if err := os.Unsetenv(tmuxEnv); err != nil {
+		return fmt.Errorf("unsetting %s: %w", tmuxEnv, err)
+	}
+	if err := os.Unsetenv(tmuxPaneEnv); err != nil {
+		return fmt.Errorf("unsetting %s: %w", tmuxPaneEnv, err)
+	}
+	if err := os.Setenv(tmuxTmpEnv, socketRoot); err != nil {
+		return fmt.Errorf("setting %s: %w", tmuxTmpEnv, err)
+	}
+	return nil
+}
+
 // RequireTmux skips the test if tmux is not installed.
 func RequireTmux(t testing.TB) {
 	t.Helper()

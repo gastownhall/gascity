@@ -10,6 +10,19 @@ import (
 	"time"
 )
 
+// RequireRealProcessSignals skips tests that intentionally send OS signals
+// unless the process-backed test lane explicitly opted in.
+func RequireRealProcessSignals(t testing.TB) {
+	t.Helper()
+	if strings.TrimSpace(os.Getenv("GC_REAL_PROCESS_SIGNAL_TESTS")) == "1" {
+		return
+	}
+	if strings.TrimSpace(os.Getenv("GC_FAST_UNIT")) == "0" {
+		return
+	}
+	t.Skip("skipping real process signal test in unit lane; set GC_FAST_UNIT=0 or GC_REAL_PROCESS_SIGNAL_TESTS=1")
+}
+
 // KillFromPIDFile terminates the process whose PID is recorded at path.
 func KillFromPIDFile(t *testing.T, path string) {
 	t.Helper()

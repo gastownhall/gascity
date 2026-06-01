@@ -29,6 +29,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	helpers "github.com/gastownhall/gascity/test/acceptance/helpers"
+	"github.com/gastownhall/gascity/test/tmuxtest"
 )
 
 var testEnvC *helpers.Env
@@ -82,6 +83,9 @@ func TestMain(m *testing.M) {
 		if err := os.MkdirAll(d, 0o755); err != nil {
 			panic("acceptance-c: " + err.Error())
 		}
+	}
+	if err := tmuxtest.ConfigureProcessEnv(filepath.Join(runtimeDir, "tmux")); err != nil {
+		panic("acceptance-c: configuring tmux test env: " + err.Error())
 	}
 	if err := helpers.WriteSupervisorConfig(gcHome); err != nil {
 		panic("acceptance-c: " + err.Error())

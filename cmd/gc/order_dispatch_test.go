@@ -2856,6 +2856,8 @@ func TestShellExecRunnerDoesNotStartWhenContextCanceled(t *testing.T) {
 }
 
 func TestShellExecRunnerKillsProcessGroupOnTimeout(t *testing.T) {
+	processgrouptest.RequireRealProcessSignals(t)
+
 	workDir := t.TempDir()
 	heartbeatPath := filepath.Join(workDir, "heartbeat")
 	childPIDPath := filepath.Join(workDir, "child.pid")
@@ -2877,6 +2879,8 @@ func TestShellExecRunnerKillsProcessGroupOnTimeout(t *testing.T) {
 }
 
 func TestShellExecRunnerKillsProcessGroupAfterWaitDelay(t *testing.T) {
+	processgrouptest.RequireRealProcessSignals(t)
+
 	workDir := t.TempDir()
 	heartbeatPath := filepath.Join(workDir, "heartbeat")
 	childPIDPath := filepath.Join(workDir, "child.pid")

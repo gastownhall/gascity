@@ -8,6 +8,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/processgroup/processgrouptest"
 )
 
 func TestTerminateEscalatesToSIGKILL(t *testing.T) {
@@ -66,6 +68,8 @@ func TestTerminateRefusesCurrentProcessGroup(t *testing.T) {
 }
 
 func TestTerminateCommandPreservesGroupFailureAfterDirectKill(t *testing.T) {
+	processgrouptest.RequireRealProcessSignals(t)
+
 	cmd := exec.Command("sleep", "10")
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start sleep: %v", err)

@@ -16,6 +16,7 @@ import (
 	"time"
 
 	helpers "github.com/gastownhall/gascity/test/acceptance/helpers"
+	"github.com/gastownhall/gascity/test/tmuxtest"
 )
 
 const canonicalTutorialRoot = "docs/tutorials"
@@ -48,6 +49,9 @@ func TestMain(m *testing.M) {
 	}
 	if os.Getenv("GC_ACCEPTANCE_KEEP") != "1" {
 		defer os.RemoveAll(tmpDir)
+	}
+	if err := tmuxtest.ConfigureProcessEnv(filepath.Join(tmpDir, "tmux")); err != nil {
+		panic("tutorial-goldens: configuring tmux test env: " + err.Error())
 	}
 
 	goldenGCBinary = helpers.BuildGC(tmpDir)

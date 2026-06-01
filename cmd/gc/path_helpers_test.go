@@ -62,14 +62,14 @@ func clearInheritedBeadsEnv(t *testing.T) {
 // does not false-positive the cleanup check.
 func requireNoLeakedDoltAfterForPaths(t *testing.T, paths ...string) {
 	t.Helper()
-	requireNoLeakedDoltAfterWithFilter(t, discoverDoltProcesses, func(configPath string) bool {
+	requireNoLeakedDoltAfterWithFilterAndKiller(t, discoverDoltProcesses, func(configPath string) bool {
 		for _, path := range paths {
 			if path != "" && pathutil.PathWithin(path, configPath) {
 				return true
 			}
 		}
 		return false
-	})
+	}, killProcess)
 }
 
 type doltLeakGuardedTestingM struct {
@@ -323,6 +323,10 @@ func reapDoltLeakPIDsWithKiller(pids []int, killFn func(int, syscall.Signal) err
 	return errs
 }
 
+func ignoreProcessSignal(int, syscall.Signal) error {
+	return nil
+}
+
 // requireNoLeakedDoltAfterWith is the testReporter+injectable-enumerator
 // form of requireNoLeakedDoltAfter. Production callers go through the
 // thin wrapper above; unit tests for the leak-detector itself pass a
@@ -332,13 +336,13 @@ func requireNoLeakedDoltAfterWith(t testReporter, enumerate func() ([]DoltProcIn
 	t.Helper()
 	homeDir, _ := os.UserHomeDir()
 	tempDir := os.TempDir()
-	requireNoLeakedDoltAfterWithFilter(t, enumerate, func(configPath string) bool {
+	requireNoLeakedDoltAfterWithFilterAndKiller(t, enumerate, func(configPath string) bool {
 		return isTestConfigPath(configPath, homeDir, tempDir)
-	})
+	}, ignoreProcessSignal)
 }
 
 func requireNoLeakedDoltAfterWithFilter(t testReporter, enumerate func() ([]DoltProcInfo, error), includeConfigPath func(string) bool) {
-	requireNoLeakedDoltAfterWithFilterAndKiller(t, enumerate, includeConfigPath, killProcess)
+	requireNoLeakedDoltAfterWithFilterAndKiller(t, enumerate, includeConfigPath, ignoreProcessSignal)
 }
 
 func requireNoLeakedDoltAfterWithFilterAndKiller(t testReporter, enumerate func() ([]DoltProcInfo, error), includeConfigPath func(string) bool, killFn func(int, syscall.Signal) error) {

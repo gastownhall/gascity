@@ -159,6 +159,8 @@ func TestCheckTriggerConditionFails(t *testing.T) {
 }
 
 func TestCheckTriggerConditionKillsProcessGroupOnTimeout(t *testing.T) {
+	processgrouptest.RequireRealProcessSignals(t)
+
 	dir := t.TempDir()
 	heartbeatPath := filepath.Join(dir, "heartbeat")
 	childPIDPath := filepath.Join(dir, "child.pid")
@@ -188,6 +190,8 @@ func TestCheckTriggerConditionKillsProcessGroupOnTimeout(t *testing.T) {
 }
 
 func TestCheckTriggerConditionKillsProcessGroupAfterWaitDelay(t *testing.T) {
+	processgrouptest.RequireRealProcessSignals(t)
+
 	dir := t.TempDir()
 	heartbeatPath := filepath.Join(dir, "heartbeat")
 	childPIDPath := filepath.Join(dir, "child.pid")

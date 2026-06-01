@@ -24,6 +24,7 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/supervisor"
+	"github.com/gastownhall/gascity/test/tmuxtest"
 	"github.com/rogpeppe/go-internal/testscript"
 )
 
@@ -182,6 +183,9 @@ func TestMain(m *testing.M) {
 		panic(err)
 	}
 	if err := os.Setenv("TMPDIR", testTempRoot); err != nil {
+		panic(err)
+	}
+	if err := tmuxtest.ConfigureProcessEnv(filepath.Join(testTempRoot, "tmux")); err != nil {
 		panic(err)
 	}
 	tmpRoot := os.TempDir()
