@@ -528,14 +528,20 @@ var mailCheckAPIClient = func(cityPath string) (*api.Client, string) {
 	return nil, apiClientFallbackReason(cityPath)
 }
 
-// routeMailCheck dispatches `mail check` to the supervisor API when a
-// controller is up; otherwise falls back to the local mail-provider path.
+// routeMailCheck dispatches non-injecting `mail check` to the supervisor API
+// when a controller is up; otherwise falls back to the local mail-provider path.
+// Injecting hooks always use the local path because provider-backed mail may
+// need to perform delivery side effects after successful injection.
 // Emits exactly one route=... log line per exit path (gated on GC_DEBUG).
 func routeMailCheck(_ string, args []string, inject bool, hookFormat string, c *api.Client, nilReason string, stdout, stderr io.Writer) int {
 	const cmdName = "mail check"
 	recipient := defaultMailIdentity()
 	if len(args) > 0 {
 		recipient = strings.TrimSpace(args[0])
+	}
+	if inject {
+		logRoute(stderr, cmdName, "fallback", "inject-local-side-effects")
+		return doMailCheckFallback(args, inject, hookFormat, stdout, stderr)
 	}
 	if c != nil {
 		cr, err := c.ListMailInbox(recipient, "")
@@ -689,7 +695,15 @@ func doMailCheckTargetWithFormat(mp mail.Provider, target resolvedMailTarget, in
 
 	if inject {
 		if len(messages) > 0 {
-			_ = writeProviderHookContextForEvent(stdout, hookFormat, "UserPromptSubmit", formatInjectOutput(messages))
+			if err := writeProviderHookContextForEvent(stdout, hookFormat, "UserPromptSubmit", formatInjectOutput(messages)); err != nil {
+				fmt.Fprintf(stderr, "gc mail check: writing hook output: %v\n", err) //nolint:errcheck // best-effort stderr
+				return 0
+			}
+			injectedMessages := messages
+			if len(injectedMessages) > mailInjectMaxMessages {
+				injectedMessages = injectedMessages[:mailInjectMaxMessages]
+			}
+			archiveInjectedAutoHandoffMessages(mp, injectedMessages, stderr)
 		}
 		return 0 // --inject always exits 0
 	}
@@ -700,6 +714,24 @@ func doMailCheckTargetWithFormat(mp mail.Provider, target resolvedMailTarget, in
 	}
 	fmt.Fprintf(stdout, "%d unread message(s) for %s\n", len(messages), target.display) //nolint:errcheck // best-effort stdout
 	return 0
+}
+
+type injectedAutoHandoffArchiver interface {
+	ArchiveInjectedAutoHandoffs([]string) error
+}
+
+func archiveInjectedAutoHandoffMessages(mp mail.Provider, messages []mail.Message, stderr io.Writer) {
+	archiver, ok := mp.(injectedAutoHandoffArchiver)
+	if !ok {
+		return
+	}
+	ids := make([]string, 0, len(messages))
+	for _, msg := range messages {
+		ids = append(ids, msg.ID)
+	}
+	if err := archiver.ArchiveInjectedAutoHandoffs(ids); err != nil {
+		fmt.Fprintf(stderr, "gc mail check: archiving injected auto handoff mail: %v\n", err) //nolint:errcheck // best-effort stderr
+	}
 }
 
 // formatInjectOutput formats messages as a <system-reminder> block for

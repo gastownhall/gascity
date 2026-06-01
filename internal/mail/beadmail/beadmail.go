@@ -355,6 +355,35 @@ func (p *Provider) ArchiveMatching(filter ArchiveFilter) ([]mail.Message, []mail
 	return candidates, results, nil
 }
 
+// ArchiveInjectedAutoHandoffs archives auto-handoff messages after they have
+// been injected into a provider hook. Ordinary user mail is left untouched.
+func (p *Provider) ArchiveInjectedAutoHandoffs(ids []string) error {
+	var errs []error
+	for _, id := range ids {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		b, err := p.store.Get(id)
+		if err != nil {
+			if errors.Is(err, beads.ErrNotFound) {
+				continue
+			}
+			errs = append(errs, fmt.Errorf("loading %s: %w", id, err))
+			continue
+		}
+		if b.Type != "message" ||
+			!hasLabel(b.Labels, mail.AutoHandoffLabel) ||
+			!hasLabel(b.Labels, mail.ArchiveAfterInjectLabel) {
+			continue
+		}
+		if err := p.store.Delete(id); err != nil && !errors.Is(err, beads.ErrNotFound) {
+			errs = append(errs, fmt.Errorf("archiving %s: %w", id, err))
+		}
+	}
+	return errors.Join(errs...)
+}
+
 func archiveExactMatches(value, exact string, insensitive bool) bool {
 	exact = strings.TrimSpace(exact)
 	if exact == "" {
