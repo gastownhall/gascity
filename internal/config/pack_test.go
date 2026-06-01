@@ -1088,6 +1088,48 @@ includes = ["packs/gt"]
 	}
 }
 
+func TestLoadWithIncludes_CityAgentDefaultsProviderOverridesIncludedPackDefault(t *testing.T) {
+	dir := t.TempDir()
+
+	writeFile(t, dir, "packs/gt/pack.toml", `
+[pack]
+name = "gastown"
+version = "1.0.0"
+schema = 1
+
+[agent_defaults]
+provider = "codex"
+
+[[agent]]
+name = "worker"
+`)
+
+	writeFile(t, dir, "city.toml", `
+[workspace]
+name = "test-city"
+includes = ["packs/gt"]
+
+[agent_defaults]
+provider = "gemini"
+`)
+
+	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(dir, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+
+	for _, a := range cfg.Agents {
+		if a.QualifiedName() != "worker" {
+			continue
+		}
+		if got := a.Provider; got != "gemini" {
+			t.Fatalf("worker Provider = %q, want city default gemini", got)
+		}
+		return
+	}
+	t.Fatal("worker agent not found")
+}
+
 func TestExpandPacks_OverrideEnv(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, dir, "packs/gt/pack.toml", `

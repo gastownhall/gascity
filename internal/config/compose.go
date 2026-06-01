@@ -592,6 +592,13 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 	// Apply [agent_defaults] values to all agents (explicit and implicit)
 	// that don't set their own override. Deprecated [agents] aliases are
 	// normalized during parse/load before composition reaches this point.
+	if root.AgentDefaults.Provider != "" {
+		for i := range root.Agents {
+			if root.Agents[i].BindingName == "" {
+				root.Agents[i].InheritedProvider = ""
+			}
+		}
+	}
 	if root.AgentDefaults.DefaultSlingFormula != "" {
 		for i := range root.Agents {
 			if root.Agents[i].BindingName == "" {

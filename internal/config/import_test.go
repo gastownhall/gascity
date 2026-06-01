@@ -182,6 +182,58 @@ provider = "claude"
 	}
 }
 
+func TestImport_PackAgentDefaultsProviderOverridesCityDefaultForImportedAgent(t *testing.T) {
+	dir := t.TempDir()
+	cityDir := filepath.Join(dir, "city")
+	importDir := filepath.Join(dir, "tools")
+	mustMkdirAll(t, cityDir, 0o755)
+	mustMkdirAll(t, importDir, 0o755)
+
+	writeTestFile(t, cityDir, "city.toml", `
+[workspace]
+name = "test"
+
+[agent_defaults]
+provider = "gemini"
+`)
+	writeTestFile(t, cityDir, "pack.toml", `
+[pack]
+name = "test"
+schema = 1
+
+[imports.tools]
+source = "../tools"
+`)
+	writeTestFile(t, importDir, "pack.toml", `
+[pack]
+name = "tools"
+schema = 1
+
+[agent_defaults]
+provider = "codex"
+
+[[agent]]
+name = "worker"
+scope = "city"
+`)
+
+	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityDir, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+
+	for _, a := range cfg.Agents {
+		if a.QualifiedName() != "tools.worker" {
+			continue
+		}
+		if got := a.Provider; got != "codex" {
+			t.Fatalf("tools.worker Provider = %q, want imported pack default codex", got)
+		}
+		return
+	}
+	t.Fatalf("imported agent tools.worker not found: %+v", explicitAgents(cfg.Agents))
+}
+
 func TestImport_CityAgentDefaultsDefaultSlingFormulaAppliesToImportedAgent(t *testing.T) {
 	dir := t.TempDir()
 	cityDir := filepath.Join(dir, "city")

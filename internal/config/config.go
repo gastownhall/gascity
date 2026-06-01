@@ -228,12 +228,12 @@ type City struct {
 	Services []Service `toml:"service,omitempty"`
 	// GitHub configures GitHub-facing repository monitors.
 	GitHub GitHubConfig `toml:"github,omitempty"`
-	// AgentDefaults provides city-level defaults for agents that don't
-	// override them (canonical TOML key: agent_defaults). The runtime
-	// currently applies provider, default_sling_formula, and
-	// append_fragments; the attachment-list fields remain tombstones, and
-	// the other fields are parsed/composed but not yet inherited
-	// automatically.
+	// AgentDefaults provides root city defaults for agents that don't override
+	// them (canonical TOML key: agent_defaults). Pack-local defaults use the
+	// same table shape in pack.toml. The runtime currently applies provider,
+	// default_sling_formula, and append_fragments; the attachment-list fields
+	// remain tombstones, and the other fields are parsed/composed but not yet
+	// inherited automatically.
 	AgentDefaults AgentDefaults `toml:"agent_defaults,omitempty"`
 	// AgentsDefaults is a temporary compatibility alias for [agent_defaults].
 	// Parse/load normalize it into AgentDefaults and prefer [agent_defaults]
@@ -2300,16 +2300,16 @@ type AgentDefaults struct {
 	// WakeMode is the parsed/composed default wake mode ("resume" or
 	// "fresh"), but it is not yet auto-applied at runtime.
 	WakeMode string `toml:"wake_mode,omitempty" jsonschema:"enum=resume,enum=fresh"`
-	// DefaultSlingFormula is the city-level default formula used for agents
-	// that inherit [agent_defaults]. Explicit agents only receive this value
-	// when agent_defaults.default_sling_formula is set; implicit multi-session
+	// DefaultSlingFormula is the default formula used for agents that inherit
+	// [agent_defaults]. Explicit agents only receive this value when
+	// agent_defaults.default_sling_formula is set; implicit multi-session
 	// configs are seeded with "mol-do-work" elsewhere when no explicit default is set.
 	DefaultSlingFormula string `toml:"default_sling_formula,omitempty"`
-	// AllowOverlay is parsed and composed as a city-level allowlist for
-	// session overlays, but it is not yet inherited onto agents
-	// automatically at runtime.
+	// AllowOverlay is parsed and composed as a config-level allowlist for
+	// session overlays, but it is not yet inherited onto agents automatically
+	// at runtime.
 	AllowOverlay []string `toml:"allow_overlay,omitempty"`
-	// AllowEnvOverride is parsed and composed as a city-level allowlist for
+	// AllowEnvOverride is parsed and composed as a config-level allowlist for
 	// session env overrides, but it is not yet inherited onto agents
 	// automatically at runtime. Names must match ^[A-Z][A-Z0-9_]{0,127}$.
 	AllowEnvOverride []string `toml:"allow_env_override,omitempty"`
@@ -2317,7 +2317,7 @@ type AgentDefaults struct {
 	// .template.md prompts after rendering. Legacy .md.tmpl prompts are
 	// still supported during the transition; plain .md remains inert.
 	// V2 migration convenience — replaces global_fragments/inject_fragments
-	// for city-wide defaults.
+	// for config-wide defaults.
 	AppendFragments []string `toml:"append_fragments,omitempty"`
 	// Skills is a tombstone field retained for v0.15.1 backwards
 	// compatibility. Parsed and composed for migration visibility, but
@@ -2430,6 +2430,9 @@ type Agent struct {
 	Session string `toml:"session,omitempty" jsonschema:"enum=acp"`
 	// Provider names the provider preset to use for this agent.
 	Provider string `toml:"provider,omitempty"`
+	// InheritedProvider records the pack-scoped default provider for agents
+	// loaded from imported packs. Runtime-only.
+	InheritedProvider string `toml:"-" json:"-"`
 	// StartCommand overrides the provider's command for this agent.
 	StartCommand string `toml:"start_command,omitempty"`
 	// Lifecycle controls runtime lifetime semantics. Empty uses the default
@@ -3367,7 +3370,20 @@ func ApplyAgentDefaults(cfg *City) {
 				continue
 			}
 			if cfg.Agents[i].Provider == "" {
-				cfg.Agents[i].Provider = provider
+				if cfg.Agents[i].InheritedProvider != "" {
+					cfg.Agents[i].Provider = cfg.Agents[i].InheritedProvider
+				} else {
+					cfg.Agents[i].Provider = provider
+				}
+			}
+		}
+	} else {
+		for i := range cfg.Agents {
+			if cfg.Agents[i].Name == ControlDispatcherAgentName {
+				continue
+			}
+			if cfg.Agents[i].Provider == "" && cfg.Agents[i].InheritedProvider != "" {
+				cfg.Agents[i].Provider = cfg.Agents[i].InheritedProvider
 			}
 		}
 	}
