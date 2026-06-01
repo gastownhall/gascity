@@ -859,6 +859,17 @@ func (m *Manager) Pending(id string) (*runtime.PendingInteraction, bool, error) 
 	if err != nil {
 		return nil, false, err
 	}
+	return m.PendingByName(sessName)
+}
+
+// PendingByName probes the provider for a pending interaction using an
+// already-resolved runtime session name, skipping the bead-store lookup that
+// Pending performs to map an id to a name. Callers that aggregate across many
+// sessions (e.g. the city-wide pending snapshot) already hold each session's
+// name and would otherwise pay a redundant store.Get per session. Error
+// mapping mirrors Pending: unsupported -> (nil, false, nil); a gone runtime
+// session -> (nil, true, nil); any other error -> (nil, true, error).
+func (m *Manager) PendingByName(sessName string) (*runtime.PendingInteraction, bool, error) {
 	ip, ok := m.sp.(runtime.InteractionProvider)
 	if !ok {
 		return nil, false, nil

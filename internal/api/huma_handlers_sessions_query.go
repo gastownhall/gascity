@@ -9,9 +9,11 @@ import (
 
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sessionlog"
 	"github.com/gastownhall/gascity/internal/worker"
+	"golang.org/x/sync/errgroup"
 )
 
 // Query-side session handlers (list, get, transcript, pending, agent-list,
@@ -315,6 +317,19 @@ func (s *Server) humaHandleSessionPending(_ context.Context, input *SessionIDInp
 
 // --- City Pending Aggregate ---
 
+// cityPendingProbeConcurrency bounds the city pending aggregate's per-session
+// probe fan-out so a many-session city neither serializes expensive runtime
+// probes nor floods the provider with unbounded concurrent captures.
+const cityPendingProbeConcurrency = 8
+
+// cityPendingProbe is one session's pending-probe outcome, collected by index
+// so the concurrent aggregate can be reassembled in deterministic order.
+type cityPendingProbe struct {
+	pending   *runtime.PendingInteraction
+	supported bool
+	err       error
+}
+
 // humaHandleCityPending is the Huma-typed handler for GET
 // /v0/city/{cityName}/pending. It returns the snapshot of active sessions
 // currently awaiting a human decision by probing each active session's
@@ -355,20 +370,42 @@ func (s *Server) humaHandleCityPending(_ context.Context, _ *CityPendingInput) (
 	stateFilter := strings.Join([]string{string(session.StateActive), string(session.StateNone)}, ",")
 	sessions := mgr.ListFullFromBeads(all, stateFilter, "").Sessions
 
+	// Probe sessions concurrently with bounded fan-out. Pending() can be
+	// expensive per session (e.g. a tmux pane capture), so probing a
+	// many-session city sequentially adds avoidable latency and provider load;
+	// the limit keeps a large city from spawning an unbounded probe storm.
+	// PendingByName reuses each session's already-resolved runtime name,
+	// skipping the redundant per-session bead-store lookup that Pending(id)
+	// would perform. Each goroutine writes its own slot in probes, and entries
+	// are assembled by iterating sessions in order afterward, so the aggregate
+	// stays deterministic regardless of probe completion order.
+	probes := make([]cityPendingProbe, len(sessions))
+	group := new(errgroup.Group)
+	group.SetLimit(cityPendingProbeConcurrency)
+	for i, sess := range sessions {
+		i, sessName := i, sess.SessionName
+		group.Go(func() error {
+			pending, supported, pErr := mgr.PendingByName(sessName)
+			probes[i] = cityPendingProbe{pending: pending, supported: supported, err: pErr}
+			return nil
+		})
+	}
+	_ = group.Wait()
+
 	entries := make([]cityPendingEntry, 0, len(sessions))
-	for _, sess := range sessions {
-		pending, supported, pErr := mgr.Pending(sess.ID)
-		if pErr != nil {
-			partialErrors = append(partialErrors, fmt.Sprintf("session %s: %v", sess.ID, pErr))
+	for i, sess := range sessions {
+		probe := probes[i]
+		if probe.err != nil {
+			partialErrors = append(partialErrors, fmt.Sprintf("session %s: %v", sess.ID, probe.err))
 			continue
 		}
-		if !supported || pending == nil {
+		if !probe.supported || probe.pending == nil {
 			continue
 		}
 		entries = append(entries, cityPendingEntry{
 			SessionID: sess.ID,
-			RequestID: pending.RequestID,
-			Kind:      pending.Kind,
+			RequestID: probe.pending.RequestID,
+			Kind:      probe.pending.Kind,
 		})
 	}
 
