@@ -143,13 +143,17 @@ func TestPackRegistryCommandsPreRegisterDefaultRegistryOnVanillaHome(t *testing.
 		t.Fatalf("list output = %q, want default main registry", stdout.String())
 	}
 
+	if err := packregistry.WriteCatalogCache(home, packregistry.DefaultRegistryName, []byte(packRegistryTestCatalog)); err != nil {
+		t.Fatalf("WriteCatalogCache(default main): %v", err)
+	}
+
 	stdout.Reset()
 	stderr.Reset()
-	if code := doPackRegistrySearch("gastown", "", false, 50, false, false, &stdout, &stderr); code != 0 {
+	if code := doPackRegistrySearch("light", "", false, 50, false, false, &stdout, &stderr); code != 0 {
 		t.Fatalf("search code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "gastown") || strings.Contains(stderr.String(), "cache unavailable") {
-		t.Fatalf("search output = stdout=%q stderr=%q, want default main results without cache warning", stdout.String(), stderr.String())
+	if !strings.Contains(stdout.String(), "lighthouse") || strings.Contains(stderr.String(), "cache unavailable") {
+		t.Fatalf("search output = stdout=%q stderr=%q, want default main cached results without cache warning", stdout.String(), stderr.String())
 	}
 }
 
