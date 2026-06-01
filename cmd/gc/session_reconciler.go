@@ -86,6 +86,86 @@ func clearDrainTrackerForStopPending(session *beads.Bead, dt *drainTracker) {
 	dt.remove(session.ID)
 }
 
+func resetPendingCommittedAt(session beads.Bead) (string, time.Time, bool) {
+	if strings.TrimSpace(session.Metadata["continuation_reset_pending"]) != "true" {
+		return "", time.Time{}, false
+	}
+	raw := strings.TrimSpace(session.Metadata[sessionpkg.ResetCommittedAtKey])
+	if raw == "" {
+		return "", time.Time{}, false
+	}
+	committedAt, err := time.Parse(time.RFC3339, raw)
+	if err != nil {
+		return "", time.Time{}, false
+	}
+	return raw, committedAt, true
+}
+
+func recordResetStallIfDue(
+	session beads.Bead,
+	template string,
+	name string,
+	alive bool,
+	startupTimeout time.Duration,
+	now time.Time,
+	dt *drainTracker,
+	rec events.Recorder,
+	stderr io.Writer,
+	trace *sessionReconcilerTraceCycle,
+) {
+	resetCommittedAt, committedAt, pending := resetPendingCommittedAt(session)
+	if !pending {
+		if dt != nil {
+			dt.clearResetStall(session.ID)
+		}
+		return
+	}
+	if alive || startupTimeout <= 0 {
+		return
+	}
+	elapsed := now.Sub(committedAt)
+	if elapsed <= startupTimeout {
+		return
+	}
+	if dt != nil && !dt.markResetStall(session.ID) {
+		return
+	}
+	if stderr == nil {
+		stderr = io.Discard
+	}
+	elapsedSeconds := int(elapsed / time.Second)
+	msg := fmt.Sprintf(
+		"session reconciler: reset stalled for %s: elapsed_s=%d reset_committed_at=%s bead_id=%s",
+		name, elapsedSeconds, resetCommittedAt, session.ID,
+	)
+	fmt.Fprintln(stderr, msg) //nolint:errcheck
+
+	if rec != nil {
+		rec.Record(events.Event{
+			Type:    events.SessionResetStalled,
+			Actor:   "gc",
+			Subject: name,
+			Message: msg,
+			Payload: events.SessionResetStalledPayloadJSON(name, template, resetCommittedAt, elapsedSeconds),
+		})
+	}
+	if trace != nil {
+		trace.RecordDecision(
+			TraceSiteReconcilerResetStalled,
+			TraceReasonResetStalled,
+			TraceOutcomeFailed,
+			template,
+			name,
+			map[string]any{
+				"bead_id":            session.ID,
+				"elapsed_s":          elapsedSeconds,
+				"reset_committed_at": resetCommittedAt,
+				"startup_timeout_s":  int(startupTimeout / time.Second),
+			},
+		)
+	}
+}
+
 func drainAckAsyncStopKey(sessionID, name string) string {
 	if id := strings.TrimSpace(sessionID); id != "" {
 		return "id:" + id
@@ -759,6 +839,7 @@ func reconcileSessionBeadsAtPathWithNamedDemand(
 	)
 }
 
+//nolint:unparam // compatibility wrapper keeps the established traced test/helper signature.
 func reconcileSessionBeadsTraced(
 	ctx context.Context,
 	cityPath string,
@@ -989,6 +1070,9 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		session := &ordered[i]
 		name := strings.TrimSpace(session.Metadata["session_name"])
 		tp, desired := desiredState[name]
+		if _, _, pending := resetPendingCommittedAt(*session); !pending && dt != nil {
+			dt.clearResetStall(session.ID)
+		}
 
 		if reconcileDrainAckStopPending(cityPath, cfg, sp, store, rigStores, session, tp, desired, dops, dt, asyncStopTracker, clk, rec, stderr) {
 			continue
@@ -1280,6 +1364,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		// and activity are probed by the narrower branches that use them.
 		running, alive := observeRuntimeProviderLiveness(sp, name, tp.Hints.ProcessNames)
 		peek := cachedSessionPeek(cityPath, store, sp, cfg, session.ID, tp.Hints.ProcessNames)
+		recordResetStallIfDue(*session, tp.TemplateName, name, alive, startupTimeout, clk.Now().UTC(), dt, rec, stderr, trace)
 
 		// Zombie capture: session exists but process dead — grab scrollback for forensics.
 		if running && !alive {
@@ -1443,7 +1528,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				// intentional death from crash and churn trackers (both
 				// check last_woke_at first).
 				newSessionKey, hasCapability := freshRestartSessionKey(tp, session.Metadata)
-				batch := sessionpkg.RestartRequestPatch(newSessionKey)
+				batch := sessionpkg.RestartRequestPatch(newSessionKey, clk.Now())
 				if hasCapability && newSessionKey == "" {
 					batch["session_key"] = ""
 				}
@@ -1455,6 +1540,13 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					session.Metadata = make(map[string]string, len(batch))
 				}
 				for key, value := range batch {
+					// The durable reset commit marker is for the next
+					// reconciler pass; keeping it out of this tick's
+					// in-memory bead prevents on-demand sessions from
+					// being force-woken without demand.
+					if key == sessionpkg.ResetCommittedAtKey {
+						continue
+					}
 					session.Metadata[key] = value
 				}
 				if runtimeRunning {

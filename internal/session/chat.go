@@ -64,6 +64,79 @@ func stripResumeFlag(cmd, resumeFlag, sessionKey string) string {
 	return strings.TrimSpace(result)
 }
 
+// stripResumeFlagArg removes the generated resume flag/key pair from cmd,
+// regardless of the key's value. It is the value-agnostic fallback for
+// stripResumeFlag: when the session_key embedded in the resume command at build
+// time has diverged from the bead's current session_key — a concurrent fresh
+// start minted a new key, or a stale store read — the keyed strip is a no-op,
+// and we must still produce a clean fresh-start command rather than wedge the
+// session. Returns cmd unchanged when the generated resume shape is not present
+// (in which case the command already carries no generated resume key and is
+// itself a valid fresh-start command).
+func stripResumeFlagArg(cmd, resumeFlag, resumeStyle string) string {
+	if resumeFlag == "" {
+		return cmd
+	}
+	if resumeStyle == "subcommand" {
+		return stripInsertedResumeSubcommandArg(cmd, resumeFlag)
+	}
+	return stripTrailingResumeFlagArg(cmd, resumeFlag)
+}
+
+func stripTrailingResumeFlagArg(cmd, resumeFlag string) string {
+	trimmed := strings.TrimRight(cmd, " ")
+	keyStart := strings.LastIndexByte(trimmed, ' ')
+	if keyStart < 0 {
+		return cmd
+	}
+	beforeKey := strings.TrimRight(trimmed[:keyStart], " ")
+	flagStart := strings.LastIndexByte(beforeKey, ' ')
+	if flagStart < 0 {
+		return cmd
+	}
+	if beforeKey[flagStart+1:] != resumeFlag {
+		return cmd
+	}
+	return strings.TrimSpace(beforeKey[:flagStart])
+}
+
+func stripInsertedResumeSubcommandArg(cmd, resumeFlag string) string {
+	trimmed := strings.TrimSpace(cmd)
+	binaryEnd := strings.IndexByte(trimmed, ' ')
+	if binaryEnd < 0 {
+		return cmd
+	}
+	binary := trimmed[:binaryEnd]
+	rest := strings.TrimLeft(trimmed[binaryEnd+1:], " ")
+	needle := resumeFlag + " "
+	if !strings.HasPrefix(rest, needle) {
+		return cmd
+	}
+	afterFlag := strings.TrimLeft(rest[len(needle):], " ")
+	keyEnd := strings.IndexByte(afterFlag, ' ')
+	if keyEnd < 0 {
+		return binary
+	}
+	afterKey := strings.TrimLeft(afterFlag[keyEnd+1:], " ")
+	if afterKey == "" {
+		return binary
+	}
+	return strings.TrimSpace(binary + " " + afterKey)
+}
+
+func freshStartCommandFromMetadata(metadata map[string]string, fallback string) string {
+	if metadata == nil {
+		return fallback
+	}
+	if cmd := metadata["command"]; cmd != "" {
+		return cmd
+	}
+	if provider := metadata["provider"]; provider != "" {
+		return provider
+	}
+	return fallback
+}
+
 func (m *Manager) clearStaleResumeMetadata(id string, b *beads.Bead) error {
 	if err := m.store.SetMetadata(id, "session_key", ""); err != nil {
 		return fmt.Errorf("clearing stale resume metadata session_key: %w", err)
@@ -106,15 +179,26 @@ func (m *Manager) retryFreshStartAfterStaleKey(
 	// An empty resume_flag means the command was never resume-capable
 	// (e.g. a named-always session whose start command carries no
 	// --resume-style flag). stripResumeFlag is intentionally a no-op in
-	// that case, so refusing to retry would leave the session stuck.
-	// Only treat the no-op as an error when resume_flag was non-empty
-	// but the strip still found nothing — that signals an inconsistency
-	// between the bead metadata and the actual resume command.
+	// that case, and the command is already a valid fresh start.
+	//
+	// A non-empty resume_flag whose keyed strip was a no-op means the
+	// session_key embedded in resumeCommand diverged from the bead's
+	// current session_key (a concurrent fresh start minted a new key, or a
+	// stale store read). Fall back to a value-agnostic strip so we still
+	// produce a clean fresh-start command. Refusing to retry here is what
+	// wedged the session into a respawn/SIGTERM loop: the embedded resume
+	// key was always stale, the keyed strip could never match it, and the
+	// dead remain-on-exit pane lingered because we returned before
+	// killExistingOrphans. If even the generic strip finds nothing, the
+	// command carries no resume flag and is itself a fresh-start command.
 	if resumeFlag != "" && freshCmd == resumeCommand {
-		if unroute != nil {
-			unroute()
+		if b.Metadata["resume_command"] != "" {
+			log.Printf("session: resume key for %q diverged from explicit resume_command; falling back to stored start command", id)
+			freshCmd = freshStartCommandFromMetadata(b.Metadata, resumeCommand)
+		} else {
+			log.Printf("session: resume key for %q diverged from bead metadata; falling back to generated resume strip", id)
+			freshCmd = stripResumeFlagArg(resumeCommand, resumeFlag, b.Metadata["resume_style"])
 		}
-		return false, fmt.Errorf("fresh start after stale key: resume command could not be stripped")
 	}
 	cfg.Command = freshCmd
 	m.killExistingOrphans(ctx, id)
