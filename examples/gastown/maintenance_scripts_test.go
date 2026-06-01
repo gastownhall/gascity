@@ -1828,7 +1828,7 @@ exit 0
 	}
 }
 
-func TestReaperNonMessageWispsAboveAlertThresholdStillTriggerReapFailureAnomaly(t *testing.T) {
+func TestReaperFreshNonMessageWispsAboveAlertThresholdDoNotTriggerReapFailureAnomaly(t *testing.T) {
 	cityDir := t.TempDir()
 	binDir := t.TempDir()
 	doltLog := filepath.Join(t.TempDir(), "dolt-args.log")
@@ -1843,10 +1843,88 @@ case "$*" in
   *"SHOW DATABASES"*)
     printf 'Database\nbeads\n'
     ;;
+  *"issue_type NOT IN"*"created_at < DATE_SUB"*)
+    printf 'COUNT(*)\n0\n'
+    ;;
   *"issue_type NOT IN"*)
     printf 'COUNT(*)\n600\n'
     ;;
   *"issue_type = 'message'"*)
+    printf 'COUNT(*)\n0\n'
+    ;;
+  *"status = 'closed'"*|*"closed_at <"*)
+    printf 'COUNT(*)\n0\n'
+    ;;
+  *"created_at < DATE_SUB"*)
+    printf 'COUNT(*)\n0\n'
+    ;;
+  *"status IN ('open', 'hooked', 'in_progress')"*)
+    printf 'COUNT(*)\n600\n'
+    ;;
+  *"COUNT("*)
+    printf 'COUNT(*)\n0\n'
+    ;;
+  *"SELECT id"*)
+    printf 'id\n'
+    ;;
+esac
+exit 0
+`)
+	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+exit 0
+`)
+
+	env := map[string]string{
+		"DOLT_ARGS_LOG":             doltLog,
+		"GC_CALL_LOG":               gcLog,
+		"GC_CITY":                   cityDir,
+		"GC_CITY_PATH":              cityDir,
+		"GC_DOLT_HOST":              "127.0.0.1",
+		"GC_DOLT_PORT":              "3307",
+		"GC_DOLT_USER":              "root",
+		"GC_DOLT_PASSWORD":          "",
+		"GC_REAPER_ALERT_THRESHOLD": "500",
+		"PATH":                      binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+
+	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "reaper.sh"), env)
+
+	gcData, err := os.ReadFile(gcLog)
+	if err != nil {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	gcLogText := string(gcData)
+	if strings.Contains(gcLogText, "ESCALATION") {
+		t.Fatalf("reaper fired false-positive escalation for fresh non-message wisps above alert threshold:\n%s", gcLogText)
+	}
+}
+
+func TestReaperStaleNonMessageWispsAboveAlertThresholdStillTriggerReapFailureAnomaly(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	doltLog := filepath.Join(t.TempDir(), "dolt-args.log")
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+
+	writeExecutable(t, filepath.Join(binDir, "dolt"), `#!/bin/sh
+printf '%s\n' "$*" >> "$DOLT_ARGS_LOG"
+case "$*" in
+  *"SHOW TABLES FROM"*"LIKE 'wisps'"*)
+    printf 'Tables_in_db\nwisps\n'
+    ;;
+  *"SHOW DATABASES"*)
+    printf 'Database\nbeads\n'
+    ;;
+  *"issue_type NOT IN"*"created_at < DATE_SUB"*)
+    printf 'COUNT(*)\n600\n'
+    ;;
+  *"issue_type NOT IN"*)
+    printf 'COUNT(*)\n600\n'
+    ;;
+  *"issue_type = 'message'"*)
+    printf 'COUNT(*)\n0\n'
+    ;;
+  *"status = 'closed'"*|*"closed_at <"*)
     printf 'COUNT(*)\n0\n'
     ;;
   *"created_at < DATE_SUB"*)
@@ -1892,8 +1970,8 @@ exit 0
 	if !strings.Contains(gcLogText, "ESCALATION: Reaper anomalies detected [MEDIUM]") {
 		t.Fatalf("reaper did not fire reap-failure anomaly for non-message wisps above threshold:\n%s", gcLogText)
 	}
-	if !strings.Contains(gcLogText, "open wisps (threshold: 500)") {
-		t.Fatalf("reaper anomaly body missing open wisp count format:\n%s", gcLogText)
+	if !strings.Contains(gcLogText, "stale open wisps (threshold: 500, age: 24h)") {
+		t.Fatalf("reaper anomaly body missing stale open wisp count format:\n%s", gcLogText)
 	}
 }
 
@@ -1965,7 +2043,7 @@ exit 0
 	if !strings.Contains(gcLogText, "open mail-wisps (mail threshold: 200)") {
 		t.Fatalf("reaper anomaly body missing mail backlog threshold format:\n%s", gcLogText)
 	}
-	if strings.Contains(gcLogText, "open wisps (threshold: 500)") {
+	if strings.Contains(gcLogText, "stale open wisps (threshold: 500") {
 		t.Fatalf("reaper fired reapable-wisp anomaly for message-only backlog:\n%s", gcLogText)
 	}
 }
