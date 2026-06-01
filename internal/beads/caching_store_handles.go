@@ -2,12 +2,16 @@ package beads
 
 import (
 	"context"
+	"errors"
 	"fmt"
 )
 
-// CachedReader is the cache-only eventual-consistency read handle for beads.
-// List reads across both bead tiers regardless of the caller's TierMode; use
-// the underlying Store directly for intentionally tier-scoped list queries.
+// CachedReader is the cache-only eventual-consistency read handle for active
+// beads. Get may return ErrNotFound for closed-but-existing beads because the
+// cache does not retain complete closed history; use Live.Get for closed or
+// historical lookups. List reads across both bead tiers regardless of the
+// caller's TierMode; use the underlying Store directly for intentionally
+// tier-scoped list queries.
 type CachedReader interface {
 	Get(id string) (Bead, error)
 	List(query ListQuery) ([]Bead, error)
@@ -129,6 +133,10 @@ func (r cachedStoreReader) Get(id string) (Bead, error) {
 }
 
 func (r cachedStoreReader) List(query ListQuery) ([]Bead, error) {
+	rows, err := r.store.cachedListOnly(logicalCachedListQuery(query))
+	if err == nil || !errors.Is(err, ErrCacheUnavailable) {
+		return rows, err
+	}
 	if err := r.store.ensureFullPrime(context.Background()); err != nil {
 		return nil, err
 	}

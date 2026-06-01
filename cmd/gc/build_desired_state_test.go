@@ -122,9 +122,13 @@ type demandListCountingStore struct {
 	liveInProgressWispLists  int
 	liveOpenMolecules        int
 	livePoolDemand           int
+	fullPrimeLists           int
 }
 
 func (s *demandListCountingStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	if !query.Live && query.AllowScan && query.SkipLabels && query.TierMode == beads.TierBoth {
+		s.fullPrimeLists++
+	}
 	if query.Live && query.Status == "in_progress" {
 		switch query.TierMode {
 		case beads.TierWisps:
@@ -357,6 +361,9 @@ func TestCollectAssignedWorkBeadsUsesCachedInProgressReadModel(t *testing.T) {
 	}
 	if backing.liveInProgressWispLists != 0 {
 		t.Fatalf("live wisp in_progress list calls = %d, want cached demand read", backing.liveInProgressWispLists)
+	}
+	if backing.fullPrimeLists != 0 {
+		t.Fatalf("full-prime list calls = %d, want controller demand to use PrimeActive snapshot", backing.fullPrimeLists)
 	}
 }
 

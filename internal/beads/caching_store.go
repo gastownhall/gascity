@@ -502,14 +502,12 @@ func (c *CachingStore) prime(ctx context.Context) error {
 		nextLocalBeadAt := make(map[string]time.Time)
 		for id, current := range c.beads {
 			if fresh, exists := beadMap[id]; exists {
-				if recentLocalMutation(c.localBeadAt[id], now) {
-					c.carryRecentLocalMutationLocked(id, nextDirty, nextBeadSeq, nextLocalBeadAt)
-				}
 				if _, keep := c.recentLocalBeadConflictLocked(id, fresh, now, true); keep {
 					nextBeads[id] = cloneBead(current)
 					if deps, ok := c.deps[id]; ok {
 						nextDeps[id] = cloneDeps(deps)
 					}
+					c.carryRecentLocalMutationLocked(id, nextDirty, nextBeadSeq, nextLocalBeadAt)
 				}
 				continue
 			}

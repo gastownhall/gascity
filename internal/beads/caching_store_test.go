@@ -2339,7 +2339,7 @@ func TestCachingStoreListByMetadata(t *testing.T) {
 	}
 }
 
-func TestCachingStoreListIncludeClosedFallsBackToCachedMatches(t *testing.T) {
+func TestCachingStoreListIncludeClosedReturnsPartialErrorOnBackingFailure(t *testing.T) {
 	t.Parallel()
 	backing := &failingIncludeClosedMetadataStore{MemStore: beads.NewMemStore()}
 	match, _ := backing.Create(beads.Bead{Title: "A"})
@@ -2356,8 +2356,9 @@ func TestCachingStoreListIncludeClosedFallsBackToCachedMatches(t *testing.T) {
 		Metadata:      map[string]string{"gc.kind": "workflow"},
 		IncludeClosed: true,
 	})
-	if err != nil {
-		t.Fatalf("List(include closed): %v", err)
+	var partial *beads.PartialResultError
+	if !errors.As(err, &partial) {
+		t.Fatalf("List(include closed) error = %v, want *PartialResultError", err)
 	}
 	if len(results) != 1 || results[0].ID != match.ID {
 		t.Fatalf("results = %v, want only %s", results, match.ID)

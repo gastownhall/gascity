@@ -9,8 +9,8 @@ import (
 // List returns beads matching the query. Active-bead queries are served from
 // cache when available. IncludeClosed queries merge cached active results with
 // backing-store history when possible, preserving partial backing rows when bd
-// reports corrupt entries and retaining cache-only fallback for transient
-// non-partial bd failures.
+// reports corrupt entries and returning partial-result errors when backing
+// history cannot be fully read.
 func (c *CachingStore) List(query ListQuery) ([]Bead, error) {
 	if !query.HasFilter() && !query.AllowScan {
 		return nil, fmt.Errorf("listing beads: %w", ErrQueryRequiresScan)
@@ -70,7 +70,11 @@ func (c *CachingStore) List(query ListQuery) ([]Bead, error) {
 		all, err := c.backing.List(liveListQuery(query))
 		if err != nil {
 			if !IsPartialResult(err) {
-				return finish(cached, nil)
+				c.recordProblem("list include closed backing failure", err)
+				return finish(cached, &PartialResultError{
+					Op:  "cache list include closed",
+					Err: err,
+				})
 			}
 		}
 
@@ -97,10 +101,8 @@ func liveListQuery(query ListQuery) ListQuery {
 }
 
 // CachedList returns query results from the in-memory cache only. The boolean
-// reports whether the cache was initialized enough to answer without touching
-// the backing store. Dirty entries are returned from the last observed
-// snapshot; callers must treat this as a read model that may lag writes or
-// reconciliation by one tick.
+// reports whether the cache was initialized and clean enough to answer without
+// touching the backing store.
 func (c *CachingStore) CachedList(query ListQuery) ([]Bead, bool) {
 	if query.IncludesClosed() {
 		return nil, false
@@ -110,7 +112,7 @@ func (c *CachingStore) CachedList(query ListQuery) ([]Bead, bool) {
 	if c.state != cacheLive && c.state != cachePartial {
 		return nil, false
 	}
-	if c.primePartialErr != nil {
+	if c.primePartialErr != nil || len(c.dirty) > 0 {
 		return nil, false
 	}
 	cached := make([]Bead, 0, len(c.beads))

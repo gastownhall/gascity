@@ -241,7 +241,7 @@ func TestCachingStoreHandlesCachedReadsShareFullPrime(t *testing.T) {
 	}
 }
 
-func TestCachingStoreHandlesCachedReadsWaitForFullPrimeAfterPrimeActive(t *testing.T) {
+func TestCachingStoreHandlesCachedListUsesActiveSnapshotAfterPrimeActive(t *testing.T) {
 	t.Parallel()
 
 	mem := NewMemStore()
@@ -269,29 +269,23 @@ func TestCachingStoreHandlesCachedReadsWaitForFullPrimeAfterPrimeActive(t *testi
 	}()
 
 	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
 	case <-backing.started:
-	case err := <-done:
-		t.Fatalf("cached read returned before full prime: %v", err)
-	case <-time.After(time.Second):
-		t.Fatal("cached read did not start full prime after active prime")
-	}
-
-	select {
-	case err := <-done:
-		t.Fatalf("cached read finished while full prime was blocked: %v", err)
+		t.Fatal("cached active List started lazy full prime after PrimeActive")
 	case <-time.After(25 * time.Millisecond):
+		t.Fatal("cached active List did not return promptly from PrimeActive snapshot")
 	}
 
 	close(backing.release)
-	if err := <-done; err != nil {
-		t.Fatal(err)
-	}
-	if got := backing.primeListCalls.Load(); got != 1 {
-		t.Fatalf("total prime list calls = %d, want 1", got)
+	if got := backing.primeListCalls.Load(); got != 0 {
+		t.Fatalf("full-prime list calls = %d, want none for active cached List", got)
 	}
 }
 
-func TestCachingStoreHandlesCachedReadDoesNotWaitForRunningFullPrimeAfterPrimeActive(t *testing.T) {
+func TestCachingStoreHandlesCachedReadUsesActiveSnapshotDuringRunningFullPrimeAfterPrimeActive(t *testing.T) {
 	t.Parallel()
 
 	mem := NewMemStore()
@@ -325,8 +319,8 @@ func TestCachingStoreHandlesCachedReadDoesNotWaitForRunningFullPrimeAfterPrimeAc
 	}()
 	select {
 	case err := <-readDone:
-		if !errors.Is(err, ErrCacheUnavailable) {
-			t.Fatalf("Cached.List error = %v, want ErrCacheUnavailable", err)
+		if err != nil {
+			t.Fatalf("Cached.List error = %v, want active snapshot result", err)
 		}
 	case <-time.After(25 * time.Millisecond):
 		t.Fatal("Cached.List waited for the running full prime")
@@ -2226,7 +2220,7 @@ func TestCachingStoreCloseAllMarksRefreshFailuresDirty(t *testing.T) {
 	}
 }
 
-func TestCachingStoreCachedListReflectsWriteThroughRefreshFailure(t *testing.T) {
+func TestCachingStoreCachedListUnavailableAfterWriteThroughRefreshFailure(t *testing.T) {
 	t.Parallel()
 
 	backing := &refreshFailingStore{Store: NewMemStore()}
@@ -2245,15 +2239,59 @@ func TestCachingStoreCachedListReflectsWriteThroughRefreshFailure(t *testing.T) 
 		t.Fatalf("Update: %v", err)
 	}
 
+	if rows, ok := cache.CachedList(ListQuery{Status: "open"}); ok {
+		t.Fatalf("CachedList returned clean rows after refresh failure: %#v", rows)
+	}
+	if _, err := cache.Handles().Cached.List(ListQuery{Status: "open"}); !errors.Is(err, ErrCacheUnavailable) {
+		t.Fatalf("Cached.List after refresh failure = %v, want ErrCacheUnavailable", err)
+	}
+
+	got, err := cache.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("Get after refresh failure: %v", err)
+	}
+	if got.Title != title {
+		t.Fatalf("Get title = %q, want authoritative title %q", got.Title, title)
+	}
 	rows, ok := cache.CachedList(ListQuery{Status: "open"})
 	if !ok {
-		t.Fatal("CachedList returned ok=false after write-through update")
+		t.Fatal("CachedList returned ok=false after authoritative Get refresh")
 	}
-	if len(rows) != 1 || rows[0].ID != bead.ID {
-		t.Fatalf("CachedList = %#v, want row %s", rows, bead.ID)
+	if len(rows) != 1 || rows[0].ID != bead.ID || rows[0].Title != title {
+		t.Fatalf("CachedList after authoritative refresh = %#v, want %s title %q", rows, bead.ID, title)
 	}
-	if rows[0].Title != title {
-		t.Fatalf("CachedList title = %q, want write-through title %q", rows[0].Title, title)
+}
+
+func TestCachingStoreReconciliationClearsDirtyWriteThroughProjection(t *testing.T) {
+	t.Parallel()
+
+	backing := &refreshFailingStore{Store: NewMemStore()}
+	bead, err := backing.Create(Bead{Title: "active work"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	cache := NewCachingStoreForTest(backing, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+
+	title := "updated while refresh fails"
+	backing.failNextGet = true
+	if err := cache.Update(bead.ID, UpdateOpts{Title: &title}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	if rows, ok := cache.CachedList(ListQuery{Status: "open"}); ok {
+		t.Fatalf("CachedList returned clean rows after refresh failure: %#v", rows)
+	}
+
+	cache.runReconciliation()
+
+	rows, ok := cache.CachedList(ListQuery{Status: "open"})
+	if !ok {
+		t.Fatal("CachedList returned ok=false after authoritative reconciliation")
+	}
+	if len(rows) != 1 || rows[0].ID != bead.ID || rows[0].Title != title {
+		t.Fatalf("CachedList after reconciliation = %#v, want %s title %q", rows, bead.ID, title)
 	}
 }
 
