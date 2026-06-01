@@ -1752,7 +1752,8 @@ func (s *BdStore) Children(parentID string, opts ...QueryOpt) ([]Bead, error) {
 	})
 }
 
-// Ready returns open ready beads via bd ready.
+// Ready returns open ready beads via bd ready, including ephemeral rows for
+// wisp-aware tier modes.
 func (s *BdStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 	q := readyQueryFromArgs(query)
 	args := []string{"ready", "--json"}

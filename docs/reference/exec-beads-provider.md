@@ -158,11 +158,25 @@ provider pattern exactly.
 | `update` | `script update <id>` | UpdateOpts JSON | — |
 | `close` | `script close <id>` | — | — |
 | `list` | `script list` | — | Bead JSON array |
-| `ready` | `script ready` | — | Bead JSON array |
+| `ready` | `script ready [--include-ephemeral]` | — | Bead JSON array |
 | `children` | `script children <parent-id>` | — | Bead JSON array |
 | `set-metadata` | `script set-metadata <id> <key>` | value on stdin | — |
 | `mol-cook` | `script mol-cook` | MolCookRequest JSON | root bead ID (plain text) |
 | `list-by-label` | `script list-by-label <label> <limit>` | — | Bead JSON array |
+
+`script ready` returns actionable durable beads by default. When Gas City needs
+wisp-aware ready queries, including controller-demand scans, it calls
+`script ready --include-ephemeral` and expects the script to include both
+durable and ephemeral rows in its JSON result. Gas City applies final
+tier-specific filtering after reading the rows, so providers should not reject
+ephemeral rows when the flag is present.
+
+The `--include-ephemeral` flag is part of the `ready` operation contract. Gas
+City does not retry wisp-aware ready queries without it, because silently
+downgrading would hide runnable wisps from the controller. Legacy scripts that
+cannot support the flag should fail the `ready --include-ephemeral` invocation
+with exit code 1 and an explanatory stderr message; exit code 2 remains reserved
+for unknown operation names, not unsupported arguments to a known operation.
 
 #### Admin Operations (Optional)
 
