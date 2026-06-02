@@ -67,6 +67,23 @@ type configPatchesResponse struct {
 	ProviderCount int `json:"provider_count"`
 }
 
+// providerSpecJSONFrom renders a config.ProviderSpec into its wire shape.
+// Shared by the loaded-config and defaults-baseline handlers so the two
+// surfaces stay in lock-step.
+func providerSpecJSONFrom(spec config.ProviderSpec) providerSpecJSON {
+	return providerSpecJSON{
+		DisplayName:  spec.DisplayName,
+		Command:      spec.Command,
+		ACPCommand:   spec.ACPCommand,
+		Args:         spec.Args,
+		ACPArgs:      optionalStringSlice(spec.ACPArgs),
+		PromptMode:   spec.PromptMode,
+		PromptFlag:   spec.PromptFlag,
+		ReadyDelayMs: spec.ReadyDelayMs,
+		Env:          spec.Env,
+	}
+}
+
 // agentOrigin determines the provenance of an agent. When raw config is
 // available (via RawConfigProvider), it uses two-phase detection for
 // accurate results. Otherwise falls back to the patch-presence heuristic.
