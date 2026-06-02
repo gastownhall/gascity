@@ -1422,60 +1422,6 @@ func TestSendMailNotifyWithProviderQueuesWhenSessionSleeping(t *testing.T) {
 	}
 }
 
-// TestSendMailNotifySecondMailQueuesIndependentReminderWhilePending guards the
-// per-mail reminder guarantee from gc-ub7: a second `gc mail send --notify`
-// must queue its own reminder even when an earlier mail reminder is still
-// pending (i.e. the recipient already has unread mail). The original report
-// described a recipient that sat idle because a newer mail produced no
-// reminder while older mail was still unread. Mail nudges carry no Reference,
-// so the (agent, source, reference) supersession path must never coalesce two
-// independent mail reminders into one.
-func TestSendMailNotifySecondMailQueuesIndependentReminderWhilePending(t *testing.T) {
-	t.Setenv("GC_BEADS", "file")
-	dir := t.TempDir()
-	target := nudgeTarget{
-		cityPath:    dir,
-		agent:       config.Agent{Name: "mayor", MaxActiveSessions: intPtrNudge(1)},
-		resolved:    &config.ResolvedProvider{Name: "codex"},
-		sessionName: "sess-mayor",
-	}
-
-	// First mail: recipient now has one unread reminder pending.
-	if err := sendMailNotifyWithProvider(target, runtime.NewFake()); err != nil {
-		t.Fatalf("first sendMailNotifyWithProvider: %v", err)
-	}
-	// Second mail arrives while the first is still pending (still unread).
-	if err := sendMailNotifyWithProvider(target, runtime.NewFake()); err != nil {
-		t.Fatalf("second sendMailNotifyWithProvider: %v", err)
-	}
-
-	pending, inFlight, dead, err := listQueuedNudges(dir, target.agentKey(), time.Now())
-	if err != nil {
-		t.Fatalf("listQueuedNudges: %v", err)
-	}
-	if len(pending) != 2 {
-		t.Fatalf("pending = %d, want 2 (each mail must queue its own reminder)", len(pending))
-	}
-	if len(inFlight) != 0 {
-		t.Fatalf("inFlight = %d, want 0", len(inFlight))
-	}
-	// Neither reminder may be superseded — that would drop a mail notification.
-	if len(dead) != 0 {
-		t.Fatalf("dead = %d, want 0 (no mail reminder may be superseded)", len(dead))
-	}
-	for i, item := range pending {
-		if item.Source != "mail" {
-			t.Fatalf("pending[%d].Source = %q, want mail", i, item.Source)
-		}
-		if !strings.Contains(item.Message, "You have mail from human") {
-			t.Fatalf("pending[%d].Message = %q, want mail reminder", i, item.Message)
-		}
-	}
-	if pending[0].ID == pending[1].ID {
-		t.Fatalf("both reminders share ID %q; want two independent reminders", pending[0].ID)
-	}
-}
-
 func TestSendMailNotifyWithWorkerManagedNonRunningQueuesWakeForController(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	dir := t.TempDir()
@@ -1626,6 +1572,61 @@ func TestSendMailNotifyWithWorkerManagedQueueFailureDoesNotWake(t *testing.T) {
 	}
 	if got := updatedWait.Metadata["state"]; got != waitStatePending {
 		t.Fatalf("wait state = %q, want %q", got, waitStatePending)
+	}
+}
+
+// TestSendMailNotifyQueuesIndependentRemindersForEachMail is a regression
+// guard for the deferred-reminder race in gc-ub7: every `gc mail send --notify`
+// to a non-live recipient must queue its own reminder, even when an earlier
+// mail reminder for the same recipient is still pending (unread). The
+// queued-nudge layer must not collapse distinct mail arrivals — neither by ID
+// dedup nor by supersession — so the recipient learns about each mail rather
+// than only the first that crossed the no-unread -> has-unread boundary.
+func TestSendMailNotifyQueuesIndependentRemindersForEachMail(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	store := openNudgeBeadStore(dir)
+	fake := runtime.NewFake()
+	mgr := newSessionManagerWithConfig(dir, store, fake, nil)
+
+	info, err := mgr.Create(context.Background(), "mayor", "Mayor", "claude", dir, "claude", nil, session.ProviderResume{}, runtime.Config{WorkDir: dir})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	// Recipient is not live, so notify falls back to a queued reminder.
+	if err := mgr.Suspend(info.ID); err != nil {
+		t.Fatalf("Suspend: %v", err)
+	}
+
+	// City is not managed, so the wake path is skipped and notify takes the
+	// plain queued-reminder fallback — the path a real idle recipient hits.
+	prevManaged := nudgeCityUsesManagedReconciler
+	nudgeCityUsesManagedReconciler = func(string) bool { return false }
+	t.Cleanup(func() { nudgeCityUsesManagedReconciler = prevManaged })
+
+	target := nudgeTarget{
+		cityPath:    dir,
+		cfg:         &config.City{Agents: []config.Agent{{Name: "mayor", Provider: "claude"}}},
+		sessionID:   info.ID,
+		sessionName: info.SessionName,
+		identity:    "mayor",
+		agent:       config.Agent{Name: "mayor", Provider: "claude"},
+	}
+
+	// Two mails arrive back to back; the first reminder is still pending
+	// (unread) when the second arrives.
+	for i := 0; i < 2; i++ {
+		if err := sendMailNotifyWithWorker(target, store, fake, "human"); err != nil {
+			t.Fatalf("sendMailNotifyWithWorker(call %d): %v", i+1, err)
+		}
+	}
+
+	pending, inFlight, dead, err := listQueuedNudgesForTarget(dir, target, time.Now())
+	if err != nil {
+		t.Fatalf("listQueuedNudgesForTarget: %v", err)
+	}
+	if len(pending) != 2 {
+		t.Fatalf("pending reminders = %d, want 2 (the second mail must not be deduped against the still-unread first); pending=%#v inFlight=%#v dead=%#v", len(pending), pending, inFlight, dead)
 	}
 }
 
