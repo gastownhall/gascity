@@ -1094,3 +1094,63 @@ func TestLogWorkflowSQLFallbackSurfacesGenuineFailures(t *testing.T) {
 		t.Fatalf("genuine SQL fast-path failure not surfaced: %q", out)
 	}
 }
+
+// workflowIDListSpyStore counts only the scan's gc.workflow_id metadata List
+// queries (snapshotFromStore lists by gc.root_bead_id, which is not counted).
+type workflowIDListSpyStore struct {
+	beads.Store
+	calls *int
+}
+
+func (s workflowIDListSpyStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	if q.Metadata["gc.workflow_id"] != "" {
+		*s.calls++
+	}
+	return s.Store.List(q)
+}
+
+// Locks in the #2940 scan bound: when a point Get by physical bead id resolves
+// the workflow root, the gc.workflow_id metadata List sweep is skipped entirely
+// across all stores (the pre-bound single pass ran it in every store).
+func TestWorkflowGetSkipsMetadataListSweepWhenIDResolvesDirectly(t *testing.T) {
+	state := newFakeState(t)
+	state.cityName = "test-city"
+	state.cityBeadStore = beads.NewMemStore()
+	rigMem := beads.NewMemStore()
+	var listCalls int
+	state.stores = map[string]beads.Store{
+		"alpha": workflowIDListSpyStore{Store: rigMem, calls: &listCalls},
+	}
+
+	root, err := rigMem.Create(beads.Bead{
+		Title: "Rig workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(root): %v", err)
+	}
+
+	h := newTestCityHandler(t, state)
+	// Request by the physical bead id so Phase-1 Get resolves it directly.
+	req := httptest.NewRequest(http.MethodGet, cityURL(state, "/workflow/"+root.ID+"?scope_kind=rig&scope_ref=alpha"), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	var snapshot workflowSnapshotResponse
+	if err := json.NewDecoder(rec.Body).Decode(&snapshot); err != nil {
+		t.Fatalf("Decode(snapshot): %v", err)
+	}
+	if snapshot.RootBeadID != root.ID {
+		t.Fatalf("root_bead_id = %q, want %q", snapshot.RootBeadID, root.ID)
+	}
+	if listCalls != 0 {
+		t.Fatalf("gc.workflow_id metadata List ran %d time(s); want 0 once Get resolved the id directly", listCalls)
+	}
+}

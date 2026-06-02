@@ -42,6 +42,14 @@ type workflowRootMatch struct {
 	root beads.Bead
 }
 
+// workflowMatchKey dedups matches by (store, physical bead id) so one physical
+// root is never counted twice — which would defeat selectWorkflowRootMatch's
+// len(matches)==1 cross-store-uniqueness gate (gascity#2940).
+type workflowMatchKey struct {
+	ref string
+	id  string
+}
+
 func (s *Server) buildWorkflowSnapshot(workflowID, fallbackScopeKind, fallbackScopeRef string, snapshotIndex uint64) (*workflowSnapshotResponse, error) {
 	// Fast path: resolve the correct store and fetch the entire snapshot via SQL.
 	snap, sqlErr := s.tryFullWorkflowSQL(workflowID, fallbackScopeKind, fallbackScopeRef, snapshotIndex)
@@ -50,58 +58,95 @@ func (s *Server) buildWorkflowSnapshot(workflowID, fallbackScopeKind, fallbackSc
 	}
 	logWorkflowSQLFallback(workflowID, sqlErr)
 
-	// Slow path: bd subprocess N+1
+	// Slow path: no SQL fast path, so resolve the root by consulting the bead
+	// stores directly. The root for a workflow lives in exactly one store, and
+	// there are two ways to find it: a point Get by bead id (the common
+	// graph.v2 case, root.ID == workflowID) and a gc.workflow_id metadata List
+	// (the logical-id case). The List is the expensive metadata scan, so sweep
+	// every store with the cheap Get first and only fall back to the List sweep
+	// when no Get matched — dropping up to one metadata scan per store on the
+	// common path. Both phases still consult every store, so cross-store
+	// uniqueness (selectWorkflowRootMatch's len(matches)==1 gate) is unchanged
+	// (gascity#2940).
 	stores := s.workflowStores()
 	storesScanned := make([]string, 0, len(stores))
 	seenStoreRefs := make(map[string]bool, len(stores))
 	matches := make([]workflowRootMatch, 0)
-	listPartial := false
-	var firstListErr error
-	cityScopeRef := ""
+	seenMatches := make(map[workflowMatchKey]bool)
+	addMatch := func(info workflowStoreInfo, root beads.Bead) {
+		key := workflowMatchKey{ref: info.ref, id: root.ID}
+		if seenMatches[key] {
+			return
+		}
+		seenMatches[key] = true
+		matches = append(matches, workflowRootMatch{info: info, root: root})
+	}
+	// cityScopeRef feeds the legacy city-on-rig preserve path. Derive it from
+	// the city name directly (as the SQL path does) instead of harvesting it
+	// mid-scan, so it is correct even when the city store yields no match.
+	cityScopeRef := workflowCityScopeRef(s.state.CityName())
+	var firstGetErr error
 
 	for _, info := range stores {
 		if info.store == nil {
 			continue
 		}
-		if cityScopeRef == "" && info.scopeKind == "city" {
-			cityScopeRef = info.scopeRef
-		}
 		if !seenStoreRefs[info.ref] {
 			storesScanned = append(storesScanned, info.ref)
 			seenStoreRefs[info.ref] = true
 		}
-
-		if root, err := info.store.Get(workflowID); err == nil {
-			if isWorkflowRoot(root) && matchesWorkflowID(root, workflowID) {
-				matches = append(matches, workflowRootMatch{info: info, root: root})
-			}
-		} else if firstListErr == nil && !errors.Is(err, beads.ErrNotFound) {
-			firstListErr = err
-		}
-
-		roots, err := info.store.List(beads.ListQuery{
-			Metadata: map[string]string{
-				"gc.kind":        "workflow",
-				"gc.workflow_id": workflowID,
-			},
-			IncludeClosed: true,
-		})
+		root, err := info.store.Get(workflowID)
 		if err != nil {
-			listPartial = true
+			if firstGetErr == nil && !errors.Is(err, beads.ErrNotFound) {
+				firstGetErr = err
+			}
 			continue
 		}
-		for _, bead := range roots {
-			if !matchesWorkflowID(bead, workflowID) {
+		if isWorkflowRoot(root) && matchesWorkflowID(root, workflowID) {
+			addMatch(info, root)
+		}
+	}
+
+	// Fall back to the gc.workflow_id metadata sweep only when no store owned
+	// the id directly — the logical-workflow-id case Get cannot resolve. A
+	// Phase-1 hit is authoritative: Get is keyed by bead id, so a hit means
+	// root.ID == workflowID, and a physical bead id is owned by exactly one
+	// store. A second root elsewhere could only also match by stamping
+	// gc.workflow_id == workflowID, i.e. claiming another root's *physical* id
+	// as its own *logical* id — which the id-space separation (sling-prefixed
+	// physical ids vs formula-stamped logical ids) does not allow. So once a
+	// store owns the id directly, the metadata sweep cannot add a legitimate
+	// competing match, and skipping it is safe.
+	listPartial := false
+	if len(matches) == 0 {
+		for _, info := range stores {
+			if info.store == nil {
 				continue
 			}
-			matches = append(matches, workflowRootMatch{info: info, root: bead})
+			roots, err := info.store.List(beads.ListQuery{
+				Metadata: map[string]string{
+					"gc.kind":        "workflow",
+					"gc.workflow_id": workflowID,
+				},
+				IncludeClosed: true,
+			})
+			if err != nil {
+				listPartial = true
+				continue
+			}
+			for _, bead := range roots {
+				if !matchesWorkflowID(bead, workflowID) {
+					continue
+				}
+				addMatch(info, bead)
+			}
 		}
 	}
 
 	match, ok := selectWorkflowRootMatch(matches, fallbackScopeKind, fallbackScopeRef, cityScopeRef)
 	if !ok {
-		if firstListErr != nil {
-			return nil, firstListErr
+		if firstGetErr != nil {
+			return nil, firstGetErr
 		}
 		return nil, errWorkflowNotFound
 	}
