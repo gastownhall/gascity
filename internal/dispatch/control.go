@@ -566,7 +566,7 @@ func buildAttemptRecipe(step *formula.Step, control beads.Bead, attemptNum int) 
 	if step.Ralph != nil && len(step.Children) > 0 {
 		rootKind = "scope"
 	}
-	rootMeta := make(map[string]string, len(step.Metadata)+4)
+	rootMeta := make(map[string]string, len(step.Metadata))
 	for k, v := range step.Metadata {
 		rootMeta[k] = v
 	}
