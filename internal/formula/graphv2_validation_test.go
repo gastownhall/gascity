@@ -338,6 +338,31 @@ description_file = "does-not-exist.md"
 	}
 }
 
+func TestParseFileReturnsDescriptionFileErrorsForCompilerRequirement(t *testing.T) {
+	dir := t.TempDir()
+	writeGraphV2Formula(t, dir, "missing-desc.formula.toml", `
+formula = "missing-desc"
+version = 1
+type = "workflow"
+
+[requires]
+formula_compiler = ">=2.0.0"
+
+[[steps]]
+id = "work"
+title = "Work"
+description_file = "does-not-exist.md"
+`)
+
+	_, err := NewParser(dir).LoadByName("missing-desc")
+	if err == nil {
+		t.Fatal("LoadByName succeeded, want description_file error")
+	}
+	if !strings.Contains(err.Error(), "does-not-exist.md") {
+		t.Fatalf("error = %q, want missing path", err)
+	}
+}
+
 func TestParseFileKeepsLegacyDescriptionFileTolerance(t *testing.T) {
 	dir := t.TempDir()
 	writeGraphV2Formula(t, dir, "missing-desc.formula.toml", `
@@ -499,6 +524,35 @@ description_file = "missing-expansion.md"
 	}
 }
 
+func TestCompileRequiresGraphCompilerAcceptsDrain(t *testing.T) {
+	prev := IsFormulaV2Enabled()
+	SetFormulaV2Enabled(true)
+	defer SetFormulaV2Enabled(prev)
+
+	dir := t.TempDir()
+	writeGraphV2Formula(t, dir, "drain-demo.formula.toml", `
+formula = "drain-demo"
+version = 1
+type = "workflow"
+
+[requires]
+formula_compiler = ">=2.0.0"
+
+[[steps]]
+id = "drain"
+title = "Drain"
+
+[steps.drain]
+context = "separate"
+formula = "review-one"
+`)
+
+	_, err := CompileWithoutRuntimeVarValidation(context.Background(), "drain-demo", []string{dir}, nil)
+	if err != nil {
+		t.Fatalf("CompileWithoutRuntimeVarValidation: %v", err)
+	}
+}
+
 func TestValidateGraphV2RecipeRejectsZeroDrainMaxUnits(t *testing.T) {
 	recipe := &Recipe{Steps: []RecipeStep{
 		{
@@ -526,6 +580,36 @@ func TestValidateGraphV2RecipeRejectsZeroDrainMaxUnits(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "max_units must be >= 1") {
 		t.Fatalf("error = %q, want zero max_units error", err)
+	}
+}
+
+func TestValidateGraphV2RecipeRejectsDrainWithGate(t *testing.T) {
+	recipe := &Recipe{Steps: []RecipeStep{
+		{
+			ID:     "root",
+			IsRoot: true,
+			Metadata: map[string]string{
+				"gc.formula_contract": "graph.v2",
+			},
+		},
+		{
+			ID: "root.drain",
+			Metadata: map[string]string{
+				"gc.kind":                "drain",
+				"gc.drain_context":       "separate",
+				"gc.drain_formula":       "item",
+				"gc.drain_member_access": "read",
+			},
+			Gate: &RecipeGate{Type: "manual"},
+		},
+	}}
+
+	err := ValidateGraphV2RecipeReservedSymbols(recipe, true)
+	if err == nil {
+		t.Fatal("ValidateGraphV2RecipeReservedSymbols succeeded, want drain gate error")
+	}
+	if !strings.Contains(err.Error(), "drain cannot be combined with gate") {
+		t.Fatalf("error = %q, want drain gate error", err)
 	}
 }
 

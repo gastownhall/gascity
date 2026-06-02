@@ -2505,6 +2505,113 @@ exit 0
 	}
 }
 
+func TestReaperPrunesTerminalSessionStatesWithGcSessionPrune(t *testing.T) {
+	cityDir := t.TempDir()
+	if resolved, err := filepath.EvalSymlinks(cityDir); err == nil {
+		cityDir = resolved
+	}
+	writeCityBeadsMetadata(t, cityDir, "beads")
+	binDir := t.TempDir()
+	doltLog := filepath.Join(t.TempDir(), "dolt-args.log")
+	bdLog := filepath.Join(t.TempDir(), "bd.log")
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+
+	writeMaintenanceDoltStub(t, filepath.Join(binDir, "dolt"))
+	writeMaintenanceBdStub(t, filepath.Join(binDir, "bd"))
+	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+case "$*" in
+  "session prune --state drained --before 24h --json")
+    printf '{"action":"prune","count":5}\n'
+    ;;
+esac
+exit 0
+`)
+
+	env := map[string]string{
+		"BD_CALL_LOG":      bdLog,
+		"BD_PRUNE_COUNT":   "7",
+		"DOLT_ARGS_LOG":    doltLog,
+		"DOLT_DBS":         "beads",
+		"GC_CALL_LOG":      gcLog,
+		"GC_CITY":          cityDir,
+		"GC_CITY_PATH":     cityDir,
+		"GC_DOLT_HOST":     "127.0.0.1",
+		"GC_DOLT_PORT":     "3307",
+		"GC_DOLT_USER":     "root",
+		"GC_DOLT_PASSWORD": "",
+		"PATH":             binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+
+	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "reaper.sh"), env)
+
+	gcData, err := os.ReadFile(gcLog)
+	if err != nil {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	gcLogText := string(gcData)
+	if !strings.Contains(gcLogText, "session prune --state drained --before 24h --json") {
+		t.Fatalf("reaper did not call gc session prune for terminal drained sessions:\n%s", gcLogText)
+	}
+	if !strings.Contains(gcLogText, "sessions-pruned:12") {
+		t.Fatalf("reaper summary did not include bd and gc session prune counts:\n%s", gcLogText)
+	}
+}
+
+func TestReaperSessionStatePruneFailureEscalates(t *testing.T) {
+	cityDir := t.TempDir()
+	writeCityBeadsMetadata(t, cityDir, "beads")
+	binDir := t.TempDir()
+	doltLog := filepath.Join(t.TempDir(), "dolt-args.log")
+	bdLog := filepath.Join(t.TempDir(), "bd.log")
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+
+	writeMaintenanceDoltStub(t, filepath.Join(binDir, "dolt"))
+	writeMaintenanceBdStub(t, filepath.Join(binDir, "bd"))
+	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+case "$*" in
+  "session prune --state drained --before 24h --json")
+    printf 'session prune exploded\n' >&2
+    exit 42
+    ;;
+esac
+exit 0
+`)
+
+	env := map[string]string{
+		"BD_CALL_LOG":      bdLog,
+		"BD_PRUNE_COUNT":   "0",
+		"DOLT_ARGS_LOG":    doltLog,
+		"DOLT_DBS":         "beads",
+		"GC_CALL_LOG":      gcLog,
+		"GC_CITY":          cityDir,
+		"GC_CITY_PATH":     cityDir,
+		"GC_DOLT_HOST":     "127.0.0.1",
+		"GC_DOLT_PORT":     "3307",
+		"GC_DOLT_USER":     "root",
+		"GC_DOLT_PASSWORD": "",
+		"PATH":             binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+
+	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "reaper.sh"), env)
+
+	gcData, err := os.ReadFile(gcLog)
+	if err != nil {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	gcLogText := string(gcData)
+	if !strings.Contains(gcLogText, "mail send mayor/ -s ESCALATION: Reaper anomalies detected [MEDIUM]") {
+		t.Fatalf("reaper did not send escalation mail for session-state prune failure:\n%s", gcLogText)
+	}
+	if !strings.Contains(gcLogText, "gm: terminal session-state prune failed: session prune exploded") {
+		t.Fatalf("reaper escalation did not include session-state prune failure details:\n%s", gcLogText)
+	}
+	if !strings.Contains(gcLogText, "sessions-pruned:0") {
+		t.Fatalf("reaper summary counted failed session-state prune as success:\n%s", gcLogText)
+	}
+}
+
 func TestReaperSessionPruneDryRunOmitsForce(t *testing.T) {
 	cityDir := t.TempDir()
 	writeCityBeadsMetadata(t, cityDir, "beads")
@@ -2559,6 +2666,9 @@ exit 0
 	gcLogText := string(gcData)
 	if !strings.Contains(gcLogText, "sessions-pruned:3") || !strings.Contains(gcLogText, "(dry run)") {
 		t.Fatalf("reaper dry-run summary did not report session prune preview count:\n%s", gcLogText)
+	}
+	if strings.Contains(gcLogText, "session prune ") {
+		t.Fatalf("reaper dry-run called mutating gc session prune:\n%s", gcLogText)
 	}
 }
 

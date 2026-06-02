@@ -16,6 +16,7 @@ import (
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
 	"github.com/gastownhall/gascity/internal/formulatest"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/pidutil"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
@@ -2152,6 +2153,127 @@ func TestSlingAttachGraphFormulaAllowsDifferentLiveBareBeadRoots(t *testing.T) {
 	}
 	if len(liveRoots) != 2 {
 		t.Fatalf("live graph roots = %+v, want two roots %s and %s", liveRoots, first.WorkflowID, second.WorkflowID)
+	}
+}
+
+func TestInstantiateSlingFormulaForceReplacesGraphV2Root(t *testing.T) {
+	formulaDir := t.TempDir()
+	writeGraphV2ConvoyFormula(t, formulaDir)
+	cfg := graphV2SlingTestConfig(t, formulaDir)
+	deps := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
+	convoy, err := deps.Store.Create(beads.Bead{Title: "input", Type: "convoy"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	vars := map[string]string{"convoy_id": convoy.ID}
+	opts := molecule.Options{Vars: vars}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
+
+	first, err := InstantiateSlingFormula(context.Background(), "graph-work", []string{formulaDir}, opts, "", "default", "", a, deps)
+	if err != nil {
+		t.Fatalf("first InstantiateSlingFormula: %v", err)
+	}
+	second, err := InstantiateSlingFormula(context.Background(), "graph-work", []string{formulaDir}, opts, "", "default", "", a, deps, true)
+	if err != nil {
+		t.Fatalf("force InstantiateSlingFormula: %v", err)
+	}
+	if second.RootID == first.RootID {
+		t.Fatalf("force RootID = %q, want fresh root", second.RootID)
+	}
+	oldRoot, err := deps.Store.Get(first.RootID)
+	if err != nil {
+		t.Fatalf("Get(old root): %v", err)
+	}
+	if oldRoot.Status != "closed" {
+		t.Fatalf("old root status = %q, want closed", oldRoot.Status)
+	}
+	if got := oldRoot.Metadata["gc.failure_reason"]; got != "graphv2_force_replaced" {
+		t.Fatalf("old root gc.failure_reason = %q, want graphv2_force_replaced", got)
+	}
+	newRoot, err := deps.Store.Get(second.RootID)
+	if err != nil {
+		t.Fatalf("Get(new root): %v", err)
+	}
+	if newRoot.Status == "closed" {
+		t.Fatalf("new root status = %q, want live", newRoot.Status)
+	}
+}
+
+func TestRollbackGraphV2ReplacementLaunchRestoresReplacedRoot(t *testing.T) {
+	store := beads.NewMemStore()
+	replaced, err := store.Create(beads.Bead{
+		Title:    "old graph root",
+		Type:     "task",
+		Status:   "in_progress",
+		Assignee: "worker-1",
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	child, err := store.Create(beads.Bead{
+		Title:    "old child",
+		Type:     "task",
+		Status:   "in_progress",
+		ParentID: replaced.ID,
+		Assignee: "worker-2",
+		Metadata: map[string]string{
+			"gc.root_bead_id": replaced.ID,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshots, err := sourceworkflow.SnapshotOpenWorkflowBeads(store, replaced.ID)
+	if err != nil {
+		t.Fatalf("SnapshotOpenWorkflowBeads: %v", err)
+	}
+	if _, err := sourceworkflow.CloseWorkflowSubtree(store, replaced.ID); err != nil {
+		t.Fatalf("CloseWorkflowSubtree(replaced): %v", err)
+	}
+	replacement, err := store.Create(beads.Bead{
+		Title:  "new graph root",
+		Type:   "task",
+		Status: "in_progress",
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = rollbackGraphV2ReplacementLaunch(store, replacement.ID, graphV2ReplacementSnapshot{
+		rootID:    replaced.ID,
+		snapshots: snapshots,
+	})
+	if err != nil {
+		t.Fatalf("rollbackGraphV2ReplacementLaunch: %v", err)
+	}
+	replacedAfter, err := store.Get(replaced.ID)
+	if err != nil {
+		t.Fatalf("Get(replaced): %v", err)
+	}
+	if replacedAfter.Status != "open" || replacedAfter.Assignee != "worker-1" {
+		t.Fatalf("replaced root after rollback = %+v, want original state", replacedAfter)
+	}
+	childAfter, err := store.Get(child.ID)
+	if err != nil {
+		t.Fatalf("Get(child): %v", err)
+	}
+	if childAfter.Status != "open" || childAfter.Assignee != "worker-2" {
+		t.Fatalf("child after rollback = %+v, want original state", childAfter)
+	}
+	replacementAfter, err := store.Get(replacement.ID)
+	if err != nil {
+		t.Fatalf("Get(replacement): %v", err)
+	}
+	if replacementAfter.Status != "closed" {
+		t.Fatalf("replacement status = %q, want closed", replacementAfter.Status)
 	}
 }
 

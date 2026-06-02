@@ -33,10 +33,10 @@ automatic rewrites.`,
 
 func doImportMigrate(dryRun bool, _ io.Writer, stderr io.Writer) int {
 	_ = dryRun
-	fmt.Fprintln(stderr, "gc import migrate has been deprecated.")                                                                                 //nolint:errcheck // best-effort stderr
-	fmt.Fprintln(stderr, `Use "gc doctor" to inspect legacy PackV1 surfaces.`)                                                                     //nolint:errcheck // best-effort stderr
-	fmt.Fprintln(stderr, `Use "gc doctor --fix" for the safe mechanical cases that currently have automatic rewrites, then rerun "gc doctor".`)    //nolint:errcheck // best-effort stderr
-	fmt.Fprintln(stderr, `This shim no longer performs in-place PackV1-to-PackV2 rewrites.`)                                                       //nolint:errcheck // best-effort stderr
-	fmt.Fprintln(stderr, `See docs/guides/migrating-to-pack-vnext.md for the remaining manual migration steps and repo-content cleanup guidance.`) //nolint:errcheck // best-effort stderr
+	fmt.Fprintln(stderr, "gc import migrate has been deprecated.")                                                                              //nolint:errcheck // best-effort stderr
+	fmt.Fprintln(stderr, `Use "gc doctor" to inspect legacy PackV1 surfaces.`)                                                                  //nolint:errcheck // best-effort stderr
+	fmt.Fprintln(stderr, `Use "gc doctor --fix" for the safe mechanical cases that currently have automatic rewrites, then rerun "gc doctor".`) //nolint:errcheck // best-effort stderr
+	fmt.Fprintln(stderr, `This shim no longer performs in-place PackV1-to-PackV2 rewrites.`)                                                    //nolint:errcheck // best-effort stderr
+	fmt.Fprintln(stderr, `See docs/guides/shareable-packs.md for current pack layout guidance; use gc doctor for migration checks.`)            //nolint:errcheck // best-effort stderr
 	return 1
 }

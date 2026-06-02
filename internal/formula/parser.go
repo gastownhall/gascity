@@ -151,7 +151,7 @@ func (p *Parser) ParseFile(path string) (*Formula, error) {
 	// Graph.v2 formulas fail fast on missing files; legacy formulas keep the
 	// historical best-effort behavior.
 	formulaDir := filepath.Dir(absPath)
-	strictDescriptionFiles := declaresGraphV2Contract(formula)
+	strictDescriptionFiles := UsesGraphCompiler(formula)
 	if err := p.resolveDescriptionFiles(formula.Steps, formulaDir, strictDescriptionFiles); err != nil {
 		return nil, fmt.Errorf("resolve description_file in %s: %w", path, err)
 	}
@@ -742,7 +742,7 @@ func descriptionAssetRelPath(rawPath string) (string, bool) {
 }
 
 func validateResolvedGraphV2DescriptionFiles(f *Formula) error {
-	if !declaresGraphV2Contract(f) {
+	if !UsesGraphCompiler(f) {
 		return nil
 	}
 	if err := rejectUnresolvedDescriptionFiles(f.Steps, "steps"); err != nil {

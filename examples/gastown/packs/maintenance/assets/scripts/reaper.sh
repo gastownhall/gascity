@@ -24,6 +24,7 @@ MAX_AGE="${GC_REAPER_MAX_AGE:-24h}"
 PURGE_AGE="${GC_REAPER_PURGE_AGE:-168h}"
 STALE_ISSUE_AGE="${GC_REAPER_STALE_ISSUE_AGE:-720h}"
 SESSION_PURGE_AGE="${GC_REAPER_SESSION_PURGE_AGE:-720h}"
+SESSION_STATE_PRUNE_AGE="${GC_REAPER_SESSION_STATE_PRUNE_AGE:-24h}"
 ALERT_THRESHOLD="${GC_REAPER_ALERT_THRESHOLD:-500}"
 MAIL_ALERT_THRESHOLD="${GC_REAPER_MAIL_ALERT_THRESHOLD:-0}"  # 0 = disabled
 DRY_RUN="${GC_REAPER_DRY_RUN:-}"
@@ -566,6 +567,24 @@ if [ -d "$CITY_BEADS_DIR" ] && command -v bd >/dev/null 2>&1; then
     TOTAL_SESSIONS_PRUNED=$PRUNE_COUNT
     if [ "$PRUNE_COUNT" -gt 1000 ]; then
         record_anomaly "gm" "$PRUNE_COUNT closed session beads pruned in one run (threshold: 1000)"
+    fi
+fi
+
+if [ -d "$CITY_BEADS_DIR" ] && [ -z "$DRY_RUN" ] && command -v gc >/dev/null 2>&1; then
+    SESSION_PRUNE_ATTEMPTED=1
+    if SESSION_STATE_PRUNE_JSON=$((
+        cd "$CITY_ABS" && BEADS_DIR="$CITY_BEADS_DIR" gc session prune --state drained --before "$SESSION_STATE_PRUNE_AGE" --json
+    ) 2>&1); then
+        :
+    else
+        record_anomaly "gm" "terminal session-state prune failed: $(sanitize_output "$SESSION_STATE_PRUNE_JSON")"
+        SESSION_STATE_PRUNE_JSON='{"count":0}'
+    fi
+    SESSION_STATE_PRUNE_COUNT=$(printf '%s' "$SESSION_STATE_PRUNE_JSON" | sed -n 's/.*"count"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' | head -1)
+    [ -z "$SESSION_STATE_PRUNE_COUNT" ] && SESSION_STATE_PRUNE_COUNT=0
+    TOTAL_SESSIONS_PRUNED=$((TOTAL_SESSIONS_PRUNED + SESSION_STATE_PRUNE_COUNT))
+    if [ "$SESSION_STATE_PRUNE_COUNT" -gt 1000 ]; then
+        record_anomaly "gm" "$SESSION_STATE_PRUNE_COUNT terminal session-state beads pruned in one run (threshold: 1000)"
     fi
 fi
 

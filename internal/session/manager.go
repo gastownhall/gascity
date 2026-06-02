@@ -1278,8 +1278,9 @@ func templateOverrideWakeInFlight(metadata map[string]string, state State, now t
 
 // pruneStateTimestamp returns the timestamp that PruneDetailed compares
 // against its cutoff for a session in the given state. Suspended sessions keep
-// the historical CreatedAt fallback for legacy beads; other dormant states must
-// carry their explicit transition timestamp to be pruned.
+// the historical CreatedAt fallback for legacy beads. Asleep sessions normally
+// require slept_at, except legacy drained-asleep beads without slept_at can use
+// the bead update timestamp because sleep_reason=drained is terminal.
 func pruneStateTimestamp(b beads.Bead, state State) (time.Time, bool) {
 	switch state {
 	case StateSuspended:
@@ -1290,7 +1291,22 @@ func pruneStateTimestamp(b beads.Bead, state State) (time.Time, bool) {
 		}
 		return b.CreatedAt, true
 	case StateAsleep:
-		return parsePruneMetadataTimestamp(b.Metadata, "slept_at")
+		if ts, ok := parsePruneMetadataTimestamp(b.Metadata, "slept_at"); ok {
+			return ts, true
+		}
+		if strings.TrimSpace(b.Metadata["slept_at"]) != "" {
+			return time.Time{}, false
+		}
+		if strings.TrimSpace(b.Metadata["sleep_reason"]) != "drained" {
+			return time.Time{}, false
+		}
+		if !b.UpdatedAt.IsZero() {
+			return b.UpdatedAt, true
+		}
+		if !b.CreatedAt.IsZero() {
+			return b.CreatedAt, true
+		}
+		return time.Time{}, false
 	case StateDrained:
 		return parsePruneMetadataTimestamp(b.Metadata, "drain_at")
 	default:
@@ -1325,7 +1341,8 @@ func (m *Manager) Prune(before time.Time) (int, error) {
 // the given cutoff and reports the affected session IDs and queued wait nudges.
 // When no states are supplied it defaults to [StateSuspended] for backward
 // compatibility. Callers may opt in to asleep or drained cleanup by passing
-// StateAsleep or StateDrained.
+// StateAsleep or StateDrained. StateDrained also matches legacy
+// state=asleep/sleep_reason=drained beads.
 func (m *Manager) PruneDetailed(before time.Time, states ...State) (PruneResult, error) {
 	if len(states) == 0 {
 		states = []State{StateSuspended}
@@ -1349,7 +1366,7 @@ func (m *Manager) PruneDetailed(before time.Time, states ...State) (PruneResult,
 			continue // already closed
 		}
 		state := State(b.Metadata["state"])
-		if _, ok := allowed[state]; !ok {
+		if !pruneStateAllowed(state, b.Metadata, allowed) {
 			continue
 		}
 		ts, ok := pruneStateTimestamp(b, state)
@@ -1374,6 +1391,20 @@ func (m *Manager) PruneDetailed(before time.Time, states ...State) (PruneResult,
 		result.SessionIDs = append(result.SessionIDs, b.ID)
 	}
 	return result, nil
+}
+
+func pruneStateAllowed(state State, metadata map[string]string, allowed map[State]struct{}) bool {
+	if _, ok := allowed[state]; ok {
+		return true
+	}
+	if state != StateAsleep {
+		return false
+	}
+	if strings.TrimSpace(metadata["sleep_reason"]) != "drained" {
+		return false
+	}
+	_, ok := allowed[StateDrained]
+	return ok
 }
 
 // Get returns info about a single session.

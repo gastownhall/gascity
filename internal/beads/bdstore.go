@@ -1866,15 +1866,7 @@ func bdReadyArgs(q ReadyQuery, includeEphemeral bool) []string {
 	if q.Assignee != "" {
 		args = append(args, "--assignee", q.Assignee)
 	}
-	cliLimit := q.Limit
-	if q.TierMode == TierWisps && q.Limit > 0 {
-		cliLimit = 0
-	}
-	if cliLimit > 0 {
-		args = append(args, "--limit", strconv.Itoa(cliLimit))
-	} else {
-		args = append(args, "--limit", "0")
-	}
+	args = append(args, "--limit", "0")
 	return args
 }
 

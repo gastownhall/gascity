@@ -7,7 +7,10 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
@@ -68,6 +71,72 @@ title = "Inspect {{convoy_id}}"
 	}
 	if again.InputConvoy == inv.InputConvoy {
 		t.Fatalf("input convoy was reused: first=%s second=%s", inv.InputConvoy, again.InputConvoy)
+	}
+}
+
+func TestNormalizeInputConvoyRejectsNilStore(t *testing.T) {
+	_, err := NormalizeInputConvoy(nil, "target")
+	if err == nil {
+		t.Fatal("NormalizeInputConvoy succeeded, want nil-store error")
+	}
+	if !strings.Contains(err.Error(), "requires a bead store") {
+		t.Fatalf("error = %q, want nil-store message", err)
+	}
+}
+
+func TestCreateSingleItemInputConvoyRejectsNilStore(t *testing.T) {
+	_, err := CreateSingleItemInputConvoy(nil, beads.Bead{ID: "target", Status: "open"})
+	if err == nil {
+		t.Fatal("CreateSingleItemInputConvoy succeeded, want nil-store error")
+	}
+	if !strings.Contains(err.Error(), "requires a bead store") {
+		t.Fatalf("error = %q, want nil-store message", err)
+	}
+}
+
+func TestRootKeyIgnoresConvoyIDRuntimeVar(t *testing.T) {
+	base := RootKey("convoy-1", "graph-work", map[string]string{
+		ConvoyIDVar: "convoy-1",
+		"mode":      "review",
+	}, "", "")
+	same := RootKey("convoy-1", "graph-work", map[string]string{
+		ConvoyIDVar: "different-preview-value",
+		"mode":      "review",
+	}, "", "")
+	if same != base {
+		t.Fatalf("RootKey changed when only %s changed: %q vs %q", ConvoyIDVar, same, base)
+	}
+	changed := RootKey("convoy-1", "graph-work", map[string]string{
+		ConvoyIDVar: "convoy-1",
+		"mode":      "implement",
+	}, "", "")
+	if changed == base {
+		t.Fatalf("RootKey did not change when non-reserved vars changed: %q", changed)
+	}
+}
+
+func TestLockKeySerializesSameKey(t *testing.T) {
+	var active int32
+	var overlapped int32
+	var wg sync.WaitGroup
+
+	for range 16 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			unlock := LockKey("same-root-key")
+			defer unlock()
+			if n := atomic.AddInt32(&active, 1); n > 1 {
+				atomic.StoreInt32(&overlapped, 1)
+			}
+			time.Sleep(time.Millisecond)
+			atomic.AddInt32(&active, -1)
+		}()
+	}
+
+	wg.Wait()
+	if atomic.LoadInt32(&overlapped) != 0 {
+		t.Fatal("LockKey allowed concurrent critical sections for the same key")
 	}
 }
 

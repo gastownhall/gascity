@@ -17,7 +17,7 @@ Use the sources in this order when deciding what the suite should assert:
 
 1. [skew-analysis.md](skew-analysis.md) — release gating ledger for the
    current desired state
-2. [migrating-to-pack-vnext.md](../../../docs/guides/migrating-to-pack-vnext.md) —
+2. [shareable-packs.md](../../../docs/guides/shareable-packs.md) —
    migration-target behavior, but only where `skew-analysis.md` does not
    mark the surface missing, deferred, or non-gating
 3. [doc-agent-v2.md](doc-agent-v2.md) — prompt, template, fragment, and

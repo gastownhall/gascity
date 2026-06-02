@@ -723,6 +723,113 @@ title = "Inspect {{convoy_id}}"
 	}
 }
 
+func TestFormulaPreviewRequiresGraphCompilerInjectsTargetConvoy(t *testing.T) {
+	formulatest.EnableV2ForTest(t)
+
+	state := newFakeState(t)
+	state.cityBeadStore = beads.NewMemStore()
+	state.cfg.Daemon.FormulaV2 = true
+	formulaDir := t.TempDir()
+	state.cfg.FormulaLayers.City = []string{formulaDir}
+
+	writeTestFormula(t, formulaDir, "graph-preview", `
+description = "Preview {{convoy_id}}"
+formula = "graph-preview"
+version = 2
+
+[requires]
+formula_compiler = ">=2.0.0"
+
+[[steps]]
+id = "inspect"
+title = "Inspect {{convoy_id}}"
+`)
+	convoy, err := state.cityBeadStore.Create(beads.Bead{Title: "input", Type: "convoy"})
+	if err != nil {
+		t.Fatalf("Create(convoy): %v", err)
+	}
+
+	h := newTestCityHandler(t, state)
+	req := httptest.NewRequest(http.MethodGet, cityURL(state, "/formulas/graph-preview?scope_kind=city&scope_ref=test-city&target="+convoy.ID), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET detail status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	var detail formulaDetailResponse
+	if err := json.NewDecoder(rec.Body).Decode(&detail); err != nil {
+		t.Fatalf("Decode(GET detail): %v", err)
+	}
+	if detail.Description != "Preview "+convoy.ID {
+		t.Fatalf("GET description = %q, want injected convoy", detail.Description)
+	}
+	if len(detail.Steps) != 1 || detail.Steps[0].Title != "Inspect "+convoy.ID {
+		t.Fatalf("GET steps = %+v, want substituted graph.v2 detail step", detail.Steps)
+	}
+
+	body := bytes.NewBufferString(fmt.Sprintf(`{"scope_kind":"city","scope_ref":"test-city","target":%q}`, convoy.ID))
+	req = httptest.NewRequest(http.MethodPost, cityURL(state, "/formulas/graph-preview/preview"), body)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-GC-Request", "true")
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST preview status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	detail = formulaDetailResponse{}
+	if err := json.NewDecoder(rec.Body).Decode(&detail); err != nil {
+		t.Fatalf("Decode(POST detail): %v", err)
+	}
+	if detail.Description != "Preview "+convoy.ID {
+		t.Fatalf("POST description = %q, want injected convoy", detail.Description)
+	}
+	if len(detail.Steps) != 1 || detail.Steps[0].Title != "Inspect "+convoy.ID {
+		t.Fatalf("POST steps = %+v, want substituted graph.v2 preview step", detail.Steps)
+	}
+}
+
+func TestFormulaDetailGraphV2TargetlessAcceptsAgentTarget(t *testing.T) {
+	formulatest.EnableV2ForTest(t)
+
+	state := newFakeState(t)
+	state.cityBeadStore = beads.NewMemStore()
+	state.cfg.Daemon.FormulaV2 = true
+	formulaDir := t.TempDir()
+	state.cfg.FormulaLayers.City = []string{formulaDir}
+
+	writeTestFormula(t, formulaDir, "graph-detail", `
+description = "Targetless detail"
+formula = "graph-detail"
+version = 2
+contract = "graph.v2"
+
+[[steps]]
+id = "inspect"
+title = "Inspect"
+`)
+
+	h := newTestCityHandler(t, state)
+	req := httptest.NewRequest(http.MethodGet, cityURL(state, "/formulas/graph-detail?scope_kind=city&scope_ref=test-city&target=worker"), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET detail status = %d, want 200 for agent target on targetless graph.v2 formula: %s", rec.Code, rec.Body.String())
+	}
+	var detail formulaDetailResponse
+	if err := json.NewDecoder(rec.Body).Decode(&detail); err != nil {
+		t.Fatalf("Decode(detail): %v", err)
+	}
+	if detail.Description != "Targetless detail" {
+		t.Fatalf("description = %q, want targetless detail", detail.Description)
+	}
+	if len(detail.Steps) != 1 || detail.Steps[0].Title != "Inspect" {
+		t.Fatalf("steps = %+v, want unsubstituted graph.v2 detail step", detail.Steps)
+	}
+}
+
 func TestFormulaPreviewRejectsMissingRequiredVars(t *testing.T) {
 	formulatest.EnableV2ForTest(t)
 

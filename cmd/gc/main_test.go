@@ -251,7 +251,7 @@ func newTestscriptParams(t *testing.T, files ...string) testscript.Params {
 		WorkdirRoot: shortSocketTempDir(t, "gc-testscript-"),
 		Setup: func(env *testscript.Env) error {
 			gcHome := filepath.Join(env.WorkDir, ".gc-home")
-			runtimeDir := filepath.Join(env.WorkDir, ".runtime")
+			runtimeDir := filepath.Join(env.WorkDir, ".xdg-runtime")
 			if err := os.MkdirAll(gcHome, 0o755); err != nil {
 				return err
 			}
@@ -6265,11 +6265,10 @@ prompt_template = "prompts/mayor.md"
 	}
 }
 
-// TestDoPrimeStrictHookModeDoesNotPersistSessionOnFailure verifies that
-// when --strict fails because the agent isn't found, hook-mode side
-// effects (persisting the session ID to .runtime/session_id) do NOT fire.
-// A failing strict invocation must not leave partial state behind.
-func TestDoPrimeStrictHookModeDoesNotPersistSessionOnFailure(t *testing.T) {
+// TestDoPrimeStrictHookModeUnknownAgentDoesNotCreateRuntimeSidecar verifies
+// that when --strict fails because the agent isn't found, hook-mode side
+// effects do not recreate the legacy provider hook sidecar.
+func TestDoPrimeStrictHookModeUnknownAgentDoesNotCreateRuntimeSidecar(t *testing.T) {
 	clearGCEnv(t)
 	disableManagedDoltRecoveryForTest(t)
 
@@ -6294,8 +6293,8 @@ name = "mayor"
 		t.Fatal(err)
 	}
 
-	// Present a session ID the way a runtime hook would.
 	t.Setenv("GC_SESSION_ID", "test-session-123")
+	t.Setenv("GC_PROVIDER_SESSION_ID", "provider-session-123")
 
 	var stdout, stderr bytes.Buffer
 	code := doPrimeWithMode([]string{"nonexistent"}, &stdout, &stderr, true, true)
@@ -6303,20 +6302,20 @@ name = "mayor"
 		t.Fatalf("doPrimeWithMode(strict=true, hook=true, unknown agent) = 0, want non-zero; stderr: %s", stderr.String())
 	}
 
-	// The critical assertion: no .runtime/session_id should have been created.
-	sessionFile := filepath.Join(dir, ".runtime", "session_id")
-	if _, err := os.Stat(sessionFile); !os.IsNotExist(err) {
-		t.Errorf("strict failure should not persist session id, but %s exists (err=%v)", sessionFile, err)
+	sidecarDir := filepath.Join(dir, ".runtime")
+	if _, err := os.Stat(sidecarDir); !os.IsNotExist(err) {
+		t.Fatalf("gc prime --hook created legacy sidecar directory %s (err=%v)", sidecarDir, err)
 	}
 }
 
-// TestDoPrimeStrictHookModeMissingTemplateDoesNotPersistSessionOnFailure
+// TestDoPrimeStrictHookModeMissingTemplateDoesNotUpdateProviderMetadataOnFailure
 // verifies that strict template validation also runs before hook-mode side
-// effects. A missing prompt_template is a strict failure, so it must not
-// leave behind a session id for the failed hook invocation.
-func TestDoPrimeStrictHookModeMissingTemplateDoesNotPersistSessionOnFailure(t *testing.T) {
+// effects. A missing prompt_template is a strict failure, so it must not leave
+// behind provider resume metadata for the failed hook invocation.
+func TestDoPrimeStrictHookModeMissingTemplateDoesNotUpdateProviderMetadataOnFailure(t *testing.T) {
 	clearGCEnv(t)
 	disableManagedDoltRecoveryForTest(t)
+	t.Setenv("GC_BEADS", "file")
 
 	dir := t.TempDir()
 	gcDir := filepath.Join(dir, ".gc")
@@ -6333,6 +6332,27 @@ prompt_template = "prompts/does-not-exist.md"
 	if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte(toml), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	store, err := openCityStoreAt(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessionBead, err := store.Create(beads.Bead{
+		Title: "mayor",
+		Type:  "task",
+		Labels: []string{
+			"gc:session",
+			"template:mayor",
+		},
+		Metadata: map[string]string{
+			"template":     "mayor",
+			"session_name": "mayor",
+			"state":        "active",
+			"work_dir":     dir,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	orig, _ := os.Getwd()
 	t.Cleanup(func() { _ = os.Chdir(orig) })
@@ -6340,7 +6360,8 @@ prompt_template = "prompts/does-not-exist.md"
 		t.Fatal(err)
 	}
 
-	t.Setenv("GC_SESSION_ID", "test-session-missing-template")
+	t.Setenv("GC_SESSION_ID", sessionBead.ID)
+	t.Setenv("GC_PROVIDER_SESSION_ID", "provider-session-missing-template")
 
 	var stdout, stderr bytes.Buffer
 	code := doPrimeWithMode([]string{"mayor"}, &stdout, &stderr, true, true)
@@ -6351,17 +6372,18 @@ prompt_template = "prompts/does-not-exist.md"
 		t.Errorf("stderr = %q, want to reference the missing template path", stderr.String())
 	}
 
-	sessionFile := filepath.Join(dir, ".runtime", "session_id")
-	if _, err := os.Stat(sessionFile); !os.IsNotExist(err) {
-		t.Errorf("strict template failure should not persist session id, but %s exists (err=%v)", sessionFile, err)
+	updated, err := store.Get(sessionBead.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.TrimSpace(updated.Metadata["session_key"]); got != "" {
+		t.Fatalf("session_key = %q, want empty after strict template failure", got)
 	}
 }
 
-// TestDoPrimeStrictHookModePersistsSessionOnSuccess is the contrast test:
-// when --strict + --hook succeeds (agent is found, prompt renders),
-// session-id persistence DOES fire — the deferral is not a regression of
-// hook behavior for the success path.
-func TestDoPrimeStrictHookModePersistsSessionOnSuccess(t *testing.T) {
+// TestDoPrimeStrictHookModeDoesNotCreateRuntimeSidecarOnSuccess verifies that
+// strict+hook success no longer writes the legacy provider hook sidecar.
+func TestDoPrimeStrictHookModeDoesNotCreateRuntimeSidecarOnSuccess(t *testing.T) {
 	clearGCEnv(t)
 	disableManagedDoltRecoveryForTest(t)
 
@@ -6401,13 +6423,9 @@ prompt_template = "prompts/mayor.md"
 	if code != 0 {
 		t.Fatalf("doPrimeWithMode(strict=true, hook=true, known agent) = %d, want 0; stderr: %s", code, stderr.String())
 	}
-	sessionFile := filepath.Join(dir, ".runtime", "session_id")
-	content, err := os.ReadFile(sessionFile)
-	if err != nil {
-		t.Fatalf("expected session id persisted to %s on strict success, got err: %v", sessionFile, err)
-	}
-	if !strings.Contains(string(content), "test-session-456") {
-		t.Errorf("session id file contents = %q, want to contain 'test-session-456'", string(content))
+	sidecarDir := filepath.Join(dir, ".runtime")
+	if _, err := os.Stat(sidecarDir); !os.IsNotExist(err) {
+		t.Fatalf("gc prime --hook created legacy sidecar directory %s (err=%v)", sidecarDir, err)
 	}
 }
 
@@ -6471,14 +6489,10 @@ prompt_template = "prompts/mayor.md"
 	}
 }
 
-// TestDoPrimeStrictHookModeOnSuspendedAgentPersistsSessionID guards a
-// behavior parity that was missed in the first pass: a suspended agent
-// is a legitimate quiet state, not a strict failure, so strict+hook on
-// a suspended agent must still persist the session-id (matching what
-// non-strict+hook does via its eager call at the top of the function).
-// Without this guard, the strict deferral silently drops session-id
-// persistence on the suspended-agent success path.
-func TestDoPrimeStrictHookModeOnSuspendedAgentPersistsSessionID(t *testing.T) {
+// TestDoPrimeStrictHookModeOnSuspendedAgentDoesNotCreateRuntimeSidecar guards
+// the suspended-agent hook path. A suspended agent is a legitimate quiet state,
+// but it still must not recreate the legacy provider hook sidecar.
+func TestDoPrimeStrictHookModeOnSuspendedAgentDoesNotCreateRuntimeSidecar(t *testing.T) {
 	clearGCEnv(t)
 	disableManagedDoltRecoveryForTest(t)
 
@@ -6514,13 +6528,9 @@ suspended = true
 	if stdout.String() != "" {
 		t.Errorf("stdout = %q, want empty (suspended)", stdout.String())
 	}
-	sessionFile := filepath.Join(dir, ".runtime", "session_id")
-	content, err := os.ReadFile(sessionFile)
-	if err != nil {
-		t.Fatalf("expected session id persisted to %s on strict+hook+suspended success, got err: %v", sessionFile, err)
-	}
-	if !strings.Contains(string(content), "test-session-suspended") {
-		t.Errorf("session id file contents = %q, want to contain 'test-session-suspended'", string(content))
+	sidecarDir := filepath.Join(dir, ".runtime")
+	if _, err := os.Stat(sidecarDir); !os.IsNotExist(err) {
+		t.Fatalf("gc prime --hook created legacy sidecar directory %s (err=%v)", sidecarDir, err)
 	}
 }
 
@@ -6700,7 +6710,7 @@ func materializeBuiltinPrompts(cityPath string) error {
 	return MaterializeBuiltinPacks(cityPath)
 }
 
-func TestDoPrimeHookPersistsSessionID(t *testing.T) {
+func TestDoPrimeHookDoesNotCreateRuntimeSessionSidecar(t *testing.T) {
 	clearGCEnv(t)
 	disableManagedDoltRecoveryForTest(t)
 
@@ -6770,12 +6780,9 @@ prompt_template = "prompts/mayor.md"
 		t.Errorf("stdout = %q, hook beacon should not add manual gc prime instruction", out)
 	}
 
-	data, err := os.ReadFile(filepath.Join(dir, ".runtime", "session_id"))
-	if err != nil {
-		t.Fatalf("reading persisted session ID: %v", err)
-	}
-	if got := strings.TrimSpace(string(data)); got != "sess-123" {
-		t.Errorf("persisted session ID = %q, want %q", got, "sess-123")
+	sidecarDir := filepath.Join(dir, ".runtime")
+	if _, err := os.Stat(sidecarDir); !os.IsNotExist(err) {
+		t.Fatalf("gc prime --hook created legacy sidecar directory %s (err=%v)", sidecarDir, err)
 	}
 }
 

@@ -56,6 +56,84 @@ func TestProcessDrainSeparateExpandsConvoyIntoUnitRoots(t *testing.T) {
 	}
 }
 
+func TestProcessDrainSeparateSucceedsForEmptyInputConvoy(t *testing.T) {
+	formulatest.EnableV2ForTest(t)
+	dir := t.TempDir()
+	writeDrainItemFormula(t, dir)
+	store := beads.NewMemStore()
+	parent, err := store.Create(beads.Bead{Title: "empty parent", Type: "convoy"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, err := store.Create(beads.Bead{
+		Title: "workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+			"gc.input_convoy_id":  parent.ID,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	drain, err := store.Create(beads.Bead{
+		Title: "drain",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":                "drain",
+			"gc.root_bead_id":        root.ID,
+			"gc.drain_context":       "separate",
+			"gc.drain_formula":       "drain-item",
+			"gc.drain_member_access": "read",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := ProcessControl(store, drain, ProcessOptions{FormulaSearchPaths: []string{dir}})
+	if err != nil {
+		t.Fatalf("ProcessControl(empty drain): %v", err)
+	}
+	if result.Action != "drain-succeeded" {
+		t.Fatalf("Action = %q, want drain-succeeded", result.Action)
+	}
+	drain = mustGetBead(t, store, drain.ID)
+	if drain.Status != "closed" || drain.Metadata["gc.outcome"] != "pass" {
+		t.Fatalf("drain = status %q outcome %q, want closed/pass", drain.Status, drain.Metadata["gc.outcome"])
+	}
+	manifest := mustDrainManifest(t, drain)
+	if len(manifest.Rows) != 0 {
+		t.Fatalf("manifest rows = %+v, want none", manifest.Rows)
+	}
+}
+
+func TestProcessDrainSeparateFailsClosedWhenMaxUnitsExceeded(t *testing.T) {
+	formulatest.EnableV2ForTest(t)
+	dir := t.TempDir()
+	writeDrainItemFormula(t, dir)
+	store, drain := seedDrainWorkflow(t)
+	if err := store.SetMetadata(drain.ID, "gc.drain_max_units", "1"); err != nil {
+		t.Fatalf("SetMetadata(max units): %v", err)
+	}
+
+	result, err := ProcessControl(store, mustGetBead(t, store, drain.ID), ProcessOptions{FormulaSearchPaths: []string{dir}})
+	if err != nil {
+		t.Fatalf("ProcessControl(limit exceeded): %v", err)
+	}
+	if result.Action != "drain-limit-exceeded" {
+		t.Fatalf("Action = %q, want drain-limit-exceeded", result.Action)
+	}
+	drain = mustGetBead(t, store, drain.ID)
+	if drain.Status != "closed" || drain.Metadata["gc.outcome"] != "fail" {
+		t.Fatalf("drain = status %q outcome %q, want closed/fail", drain.Status, drain.Metadata["gc.outcome"])
+	}
+	if got := drain.Metadata["gc.failure_reason"]; got != "limit_exceeded" {
+		t.Fatalf("gc.failure_reason = %q, want limit_exceeded", got)
+	}
+}
+
 func TestProcessDrainSharedAdvancesOneItemAtATime(t *testing.T) {
 	formulatest.EnableV2ForTest(t)
 	dir := t.TempDir()
@@ -772,18 +850,45 @@ func TestEnsureDrainUnitConvoyRepairsExistingTrack(t *testing.T) {
 	}
 }
 
-func TestProcessDrainRejectsNonGraphItemFormula(t *testing.T) {
+func TestProcessDrainExclusiveFailsClosedForInvalidItemFormula(t *testing.T) {
 	formulatest.EnableV2ForTest(t)
 	dir := t.TempDir()
 	writeLegacyDrainItemFormula(t, dir)
 	store, drain := seedDrainWorkflow(t)
-
-	_, err := ProcessControl(store, drain, ProcessOptions{FormulaSearchPaths: []string{dir}})
-	if err == nil {
-		t.Fatal("ProcessControl succeeded, want non-graph item formula error")
+	if err := store.SetMetadata(drain.ID, "gc.drain_member_access", "exclusive"); err != nil {
+		t.Fatalf("SetMetadata(exclusive): %v", err)
 	}
-	if !strings.Contains(err.Error(), `must declare contract = "graph.v2"`) {
-		t.Fatalf("error = %q, want graph.v2 contract message", err)
+	root := mustGetBead(t, store, drain.Metadata["gc.root_bead_id"])
+	members, err := convoycore.Members(store, root.Metadata["gc.input_convoy_id"], false)
+	if err != nil {
+		t.Fatalf("Members: %v", err)
+	}
+
+	result, err := ProcessControl(store, mustGetBead(t, store, drain.ID), ProcessOptions{FormulaSearchPaths: []string{dir}})
+	if err != nil {
+		t.Fatalf("ProcessControl(non-graph item formula): %v", err)
+	}
+	if result.Action != "drain-failed" {
+		t.Fatalf("Action = %q, want drain-failed", result.Action)
+	}
+	drain = mustGetBead(t, store, drain.ID)
+	if drain.Status != "closed" || drain.Metadata["gc.outcome"] != "fail" {
+		t.Fatalf("drain = status %q outcome %q, want closed/fail", drain.Status, drain.Metadata["gc.outcome"])
+	}
+	if got := drain.Metadata["gc.failure_reason"]; got != "invalid_drain_item_formula" {
+		t.Fatalf("gc.failure_reason = %q, want invalid_drain_item_formula", got)
+	}
+	manifest := mustDrainManifest(t, drain)
+	for _, row := range manifest.Rows {
+		if row.Status != "failed" || row.Failure != "invalid_drain_item_formula" {
+			t.Fatalf("row = %+v, want failed invalid item formula", row)
+		}
+	}
+	for _, member := range members {
+		after := mustGetBead(t, store, member.ID)
+		if got := strings.TrimSpace(after.Metadata["gc.exclusive_drain_reservation"]); got != "" {
+			t.Fatalf("member %s reservation = %q, want released", member.ID, got)
+		}
 	}
 }
 

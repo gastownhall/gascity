@@ -298,6 +298,9 @@ func ValidateNoReservedUserVars(vars map[string]string) error {
 // it creates a visible system-created one-item convoy tracking targetID.
 func NormalizeInputConvoy(store beads.Store, targetID string) (string, error) {
 	targetID = strings.TrimSpace(targetID)
+	if store == nil {
+		return "", fmt.Errorf("graph.v2 invocation requires a bead store")
+	}
 	if targetID == "" {
 		return "", fmt.Errorf("graph.v2 target is required")
 	}
@@ -324,6 +327,9 @@ func NormalizeInputConvoy(store beads.Store, targetID string) (string, error) {
 // CreateSingleItemInputConvoy creates a system-created one-item convoy for a
 // graph.v2 invocation target.
 func CreateSingleItemInputConvoy(store beads.Store, target beads.Bead) (beads.Bead, error) {
+	if store == nil {
+		return beads.Bead{}, fmt.Errorf("graph.v2 invocation requires a bead store")
+	}
 	if convoycore.IsTerminalStatus(target.Status) {
 		return beads.Bead{}, fmt.Errorf("graph.v2 target %s is %s", target.ID, target.Status)
 	}

@@ -46,12 +46,10 @@ const primeHookReadTimeout = 500 * time.Millisecond
 var primeStdin = func() *os.File { return os.Stdin }
 
 type primeHookInput struct {
-	SessionID string `json:"session_id"`
-	Source    string `json:"source"`
+	Source string `json:"source"`
 }
 
 type primeHookContext struct {
-	SessionID     string
 	Source        string
 	HookEventName string
 }
@@ -145,10 +143,10 @@ func doPrime(args []string, stdout, stderr io.Writer) int { //nolint:unparam // 
 // strict is a debugging aid, not a stricter mode for the whole command.
 //
 // Hook-mode side effects under --strict are deferred until we know the
-// invocation is not a strict failure, so a failing --strict cannot leave
-// session-id state behind for an agent that doesn't exist. Suspended
-// paths still run side effects because suspension is a legitimate quiet
-// state, not a failure.
+// invocation is not a strict failure, so a failing --strict cannot update
+// provider resume metadata for an agent that doesn't exist. Suspended paths
+// still run side effects because suspension is a legitimate quiet state, not a
+// failure.
 func doPrimeWithMode(args []string, stdout, stderr io.Writer, hookMode, strictMode bool) int {
 	return doPrimeWithHookFormat(args, stdout, stderr, hookMode, "", strictMode)
 }
@@ -176,7 +174,7 @@ func primeInvocationAgentName(args []string) (string, bool) {
 
 func doPrimeWithHookFormat(args []string, stdout, stderr io.Writer, hookMode bool, hookFormat string, strictMode bool) int {
 	agentName, sessionTemplateContext := primeInvocationAgentName(args)
-	hookContext := primeHookContext{}
+	var hookContext primeHookContext
 	suppressHookPrompt := false
 	if hookMode {
 		hookContext = readPrimeHookContext()
@@ -184,14 +182,11 @@ func doPrimeWithHookFormat(args []string, stdout, stderr io.Writer, hookMode boo
 	}
 	// In non-strict mode, hook side effects fire eagerly (existing behavior).
 	// In strict mode, we defer them until after strict checks pass so that a
-	// failing --strict invocation does not persist a session-id for failed
-	// agent resolution or template validation.
+	// failing --strict invocation does not update provider resume metadata for
+	// failed agent resolution or template validation.
 	runHookSideEffects := func() {
 		if !hookMode {
 			return
-		}
-		if sessionID := hookContext.SessionID; sessionID != "" {
-			persistPrimeHookSessionID(sessionID)
 		}
 		persistPrimeHookProviderSessionKey()
 	}
@@ -279,7 +274,7 @@ func doPrimeWithHookFormat(args []string, stdout, stderr io.Writer, hookMode boo
 				return 1
 			}
 		}
-		// Strict preconditions passed; now it's safe to persist session-id.
+		// Strict preconditions passed; now it's safe to update provider resume metadata.
 		runHookSideEffects()
 	}
 
@@ -484,13 +479,7 @@ func readPrimeHookContext() primeHookContext {
 			if source := strings.TrimSpace(input.Source); source != "" {
 				ctx.Source = source
 			}
-			ctx.SessionID = strings.TrimSpace(input.SessionID)
 		}
-	}
-	if id := strings.TrimSpace(os.Getenv("GC_SESSION_ID")); id != "" {
-		ctx.SessionID = id
-	} else if id := strings.TrimSpace(os.Getenv("CLAUDE_SESSION_ID")); id != "" {
-		ctx.SessionID = id
 	}
 	return ctx
 }
@@ -540,21 +529,6 @@ func readPrimeHookStdin() *primeHookInput {
 		return nil
 	}
 	return &input
-}
-
-func persistPrimeHookSessionID(sessionID string) {
-	if sessionID == "" {
-		return
-	}
-	cwd, err := os.Getwd()
-	if err != nil {
-		return
-	}
-	runtimeDir := filepath.Join(cwd, ".runtime")
-	if err := os.MkdirAll(runtimeDir, 0o755); err != nil {
-		return
-	}
-	_ = os.WriteFile(filepath.Join(runtimeDir, "session_id"), []byte(sessionID+"\n"), 0o644)
 }
 
 func persistPrimeHookProviderSessionKey() {

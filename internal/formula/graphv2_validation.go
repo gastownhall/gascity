@@ -53,7 +53,7 @@ func ValidateGraphV2ReservedSymbolsTransitively(f *Formula, parser *Parser, allo
 // ValidateGraphV2ExpandedFormula enforces graph.v2-only constraints after
 // control flow, advice, and expansion templates have been materialized.
 func ValidateGraphV2ExpandedFormula(f *Formula, allowConvoyReference bool) error {
-	if f == nil || !declaresGraphV2Contract(f) {
+	if f == nil || !UsesGraphCompiler(f) {
 		return nil
 	}
 	errs := graphV2ReservedSymbolErrors(f, allowConvoyReference)
@@ -177,7 +177,7 @@ func graphV2StepsHaveDrain(steps []*Step) bool {
 }
 
 func graphV2ReservedSymbolErrors(f *Formula, allowConvoyReference bool) []string {
-	if f == nil || !declaresGraphV2Contract(f) {
+	if f == nil || !UsesGraphCompiler(f) {
 		return nil
 	}
 	var errs []string
@@ -373,6 +373,9 @@ func validateGraphV2RecipeDrainStep(prefix string, step RecipeStep, errs *[]stri
 	}
 	if strings.TrimSpace(step.Assignee) != "" {
 		*errs = append(*errs, fmt.Sprintf("%s: drain cannot be combined with assignee", prefix))
+	}
+	if step.Gate != nil {
+		*errs = append(*errs, fmt.Sprintf("%s: drain cannot be combined with gate", prefix))
 	}
 }
 

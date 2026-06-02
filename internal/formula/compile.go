@@ -72,7 +72,7 @@ func compileFormula(name string, searchPaths []string, vars map[string]string, v
 	if err != nil {
 		return nil, fmt.Errorf("resolving formula %q: %w", name, err)
 	}
-	if declaresGraphV2Contract(resolved) {
+	if UsesGraphCompiler(resolved) {
 		if err := ValidateGraphV2ReservedSymbolsTransitively(resolved, parser, true); err != nil {
 			return nil, err
 		}
