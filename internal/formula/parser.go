@@ -22,6 +22,8 @@ const (
 	FormulaExt           = FormulaExtJSON // Legacy alias for backwards compatibility
 )
 
+const descriptionFileInlineMaxBytes = 4 * 1024
+
 // ErrVarValidation reports invalid formula variable input.
 var ErrVarValidation = errors.New("variable validation failed")
 
@@ -152,10 +154,10 @@ func (p *Parser) ParseFile(path string) (*Formula, error) {
 	// historical best-effort behavior.
 	formulaDir := filepath.Dir(absPath)
 	strictDescriptionFiles := UsesGraphCompiler(formula)
-	if err := p.resolveDescriptionFiles(formula.Steps, formulaDir, strictDescriptionFiles); err != nil {
+	if err := p.resolveDescriptionFiles(formula.Steps, formulaDir, strictDescriptionFiles, formula.Vars); err != nil {
 		return nil, fmt.Errorf("resolve description_file in %s: %w", path, err)
 	}
-	if err := p.resolveDescriptionFiles(formula.Template, formulaDir, strictDescriptionFiles); err != nil {
+	if err := p.resolveDescriptionFiles(formula.Template, formulaDir, strictDescriptionFiles, formula.Vars); err != nil {
 		return nil, fmt.Errorf("resolve description_file in %s: %w", path, err)
 	}
 
@@ -679,27 +681,31 @@ func ApplyDefaults(formula *Formula, values map[string]string) map[string]string
 // (the formula file's directory). Paths using the documented ../assets/ form
 // are resolved through formula layer order so city assets can shadow pack
 // assets while the formula itself remains inherited from a lower-priority pack.
-func (p *Parser) resolveDescriptionFiles(steps []*Step, baseDir string, strict bool) error {
+func (p *Parser) resolveDescriptionFiles(steps []*Step, baseDir string, strict bool, vars map[string]*VarDef) error {
 	for _, step := range steps {
 		if step == nil {
 			continue
 		}
 		if step.DescriptionFile != "" {
-			data, err := p.readDescriptionFile(step.DescriptionFile, baseDir)
+			data, path, err := p.readDescriptionFile(step.DescriptionFile, baseDir)
 			if err != nil {
 				if strict {
 					return fmt.Errorf("%s: %w", step.DescriptionFile, err)
 				}
 			} else {
-				step.Description = string(data)
+				if len(data) > descriptionFileInlineMaxBytes {
+					step.Description = descriptionFileReferenceDescription(step.DescriptionFile, path, len(data), vars)
+				} else {
+					step.Description = string(data)
+				}
 				step.DescriptionFile = "" // consumed; don't serialize
 			}
 		}
-		if err := p.resolveDescriptionFiles(step.Children, baseDir, strict); err != nil {
+		if err := p.resolveDescriptionFiles(step.Children, baseDir, strict, vars); err != nil {
 			return err
 		}
 		if step.Loop != nil {
-			if err := p.resolveDescriptionFiles(step.Loop.Body, baseDir, strict); err != nil {
+			if err := p.resolveDescriptionFiles(step.Loop.Body, baseDir, strict, vars); err != nil {
 				return err
 			}
 		}
@@ -707,7 +713,7 @@ func (p *Parser) resolveDescriptionFiles(steps []*Step, baseDir string, strict b
 	return nil
 }
 
-func (p *Parser) readDescriptionFile(rawPath, baseDir string) ([]byte, error) {
+func (p *Parser) readDescriptionFile(rawPath, baseDir string) ([]byte, string, error) {
 	if assetRel, ok := descriptionAssetRelPath(rawPath); ok {
 		var winner string
 		for _, layer := range p.searchPaths {
@@ -717,7 +723,8 @@ func (p *Parser) readDescriptionFile(rawPath, baseDir string) ([]byte, error) {
 			}
 		}
 		if winner != "" {
-			return p.source.ReadFile(winner)
+			data, err := p.source.ReadFile(winner)
+			return data, winner, err
 		}
 	}
 
@@ -725,7 +732,8 @@ func (p *Parser) readDescriptionFile(rawPath, baseDir string) ([]byte, error) {
 	if !filepath.IsAbs(path) {
 		path = filepath.Join(baseDir, path)
 	}
-	return p.source.ReadFile(path)
+	data, err := p.source.ReadFile(path)
+	return data, path, err
 }
 
 func descriptionAssetRelPath(rawPath string) (string, bool) {
@@ -739,6 +747,36 @@ func descriptionAssetRelPath(rawPath string) (string, bool) {
 		return "", false
 	}
 	return rel, true
+}
+
+func descriptionFileReferenceDescription(rawPath, resolvedPath string, size int, vars map[string]*VarDef) string {
+	var b strings.Builder
+	b.WriteString("# External Prompt Required\n\n")
+	b.WriteString("This bead still follows the normal runtime and lifecycle protocol from your startup prompt and current agent prompt, including claiming work, honoring result contracts, checking for follow-on work, and draining only when appropriate.\n\n")
+	b.WriteString("In addition to that protocol, this bead's task-specific instructions come from a formula `description_file` that is too large to inline safely into bead storage.\n\n")
+	b.WriteString("Before you start the task-specific work, you MUST read the file below and treat it as the task prompt for this bead. Do not proceed from memory, ambient skills, or prior workflow knowledge until you have read it.\n\n")
+	fmt.Fprintf(&b, "- Resolved prompt file: `%s`\n", resolvedPath)
+	fmt.Fprintf(&b, "- Original formula description_file: `%s`\n", rawPath)
+	fmt.Fprintf(&b, "- Prompt file size: %d bytes\n\n", size)
+	b.WriteString("Treat the file contents as the authoritative task prompt for this bead. It augments the startup/runtime protocol; it does not replace the startup prompt, the current agent prompt, or any bead lifecycle/result-contract instructions already given to you.\n")
+	b.WriteString("Follow the section matching this bead's `gc.step_id` metadata and title, plus any result, closure, lifecycle, or post-close contract sections in that file.\n")
+
+	keys := make([]string, 0, len(vars))
+	for name := range vars {
+		keys = append(keys, name)
+	}
+	slices.Sort(keys)
+	if len(keys) > 0 {
+		b.WriteString("\n## Formula Variables\n\n")
+		b.WriteString("Use these resolved formula values when interpreting `{{...}}` placeholders in the prompt file:\n\n")
+		b.WriteString("```bash\n")
+		for _, name := range keys {
+			fmt.Fprintf(&b, "%s=\"{{%s}}\"\n", name, name)
+		}
+		b.WriteString("```\n")
+	}
+
+	return b.String()
 }
 
 func validateResolvedGraphV2DescriptionFiles(f *Formula) error {

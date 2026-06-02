@@ -362,6 +362,65 @@ func TestDescriptionAssetRelPath(t *testing.T) {
 	}
 }
 
+func TestParseFileOversizedDescriptionFileWritesPromptReference(t *testing.T) {
+	dir := t.TempDir()
+	promptPath := filepath.Join(dir, "operator.md")
+	largePrompt := strings.Repeat("large prompt body\n", descriptionFileInlineMaxBytes/16+128)
+	if len([]byte(largePrompt)) <= descriptionFileInlineMaxBytes {
+		t.Fatalf("test prompt length = %d, want > %d", len([]byte(largePrompt)), descriptionFileInlineMaxBytes)
+	}
+	if err := os.WriteFile(promptPath, []byte(largePrompt), 0o644); err != nil {
+		t.Fatalf("write prompt: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "oversized-desc.toml"), []byte(`
+formula = "oversized-desc"
+version = 1
+contract = "graph.v2"
+type = "workflow"
+
+[vars]
+pack_root = "/tmp/workflows"
+pr_url = "https://github.com/example/repo/pull/1"
+
+[[steps]]
+id = "work"
+title = "Work"
+description_file = "operator.md"
+`), 0o644); err != nil {
+		t.Fatalf("write formula: %v", err)
+	}
+
+	loaded, err := NewParser(dir).LoadByName("oversized-desc")
+	if err != nil {
+		t.Fatalf("LoadByName: %v", err)
+	}
+	step := loaded.Steps[0]
+	if step.DescriptionFile != "" {
+		t.Fatalf("DescriptionFile = %q, want consumed oversized reference", step.DescriptionFile)
+	}
+	if len(step.Description) >= len(largePrompt) {
+		t.Fatalf("Description length = %d, want compact reference shorter than prompt %d", len(step.Description), len(largePrompt))
+	}
+	for _, want := range []string{
+		"External Prompt Required",
+		"you MUST read the file",
+		"normal runtime and lifecycle protocol",
+		"does not replace the startup prompt",
+		promptPath,
+		"Original formula description_file: `operator.md`",
+		"pack_root=\"{{pack_root}}\"",
+		"pr_url=\"{{pr_url}}\"",
+		"Treat the file contents as the authoritative task prompt",
+	} {
+		if !strings.Contains(step.Description, want) {
+			t.Fatalf("Description missing %q:\n%s", want, step.Description)
+		}
+	}
+	if strings.Contains(step.Description, "large prompt body\nlarge prompt body\n") {
+		t.Fatalf("Description unexpectedly inlined oversized prompt:\n%s", step.Description)
+	}
+}
+
 func TestValidate_ValidFormula(t *testing.T) {
 	formula := &Formula{
 		Formula: "mol-valid",
