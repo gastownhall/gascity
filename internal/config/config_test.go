@@ -1788,14 +1788,14 @@ func TestEffectiveWorkQueryControlDispatcherClaimsLegacyAssignedWork(t *testing.
 	}, `#!/bin/sh
 set -eu
 case "$*" in
-  "list --include-ephemeral --status in_progress --assignee=gascity--control-dispatcher --exclude-type=epic --json --limit=1"|\
-  "list --include-ephemeral --status in_progress --assignee=gascity/control-dispatcher --exclude-type=epic --json --limit=1"|\
-  "list --include-ephemeral --status in_progress --assignee=gascity--workflow-control --exclude-type=epic --json --limit=1"|\
-  "list --include-ephemeral --status in_progress --assignee=gascity/workflow-control --exclude-type=epic --json --limit=1")
+  "list --include-ephemeral --status in_progress --assignee=gascity--control-dispatcher --json --limit=1"|\
+  "list --include-ephemeral --status in_progress --assignee=gascity/control-dispatcher --json --limit=1"|\
+  "list --include-ephemeral --status in_progress --assignee=gascity--workflow-control --json --limit=1"|\
+  "list --include-ephemeral --status in_progress --assignee=gascity/workflow-control --json --limit=1")
     printf '[]'
     ;;
-  "ready --include-ephemeral --assignee=gascity--workflow-control --exclude-type=epic --json --limit=1"|\
-  "ready --include-ephemeral --assignee=gascity/workflow-control --exclude-type=epic --json --limit=1")
+  "ready --include-ephemeral --assignee=gascity--workflow-control --json --limit=1"|\
+  "ready --include-ephemeral --assignee=gascity/workflow-control --json --limit=1")
     printf '[{"id":"ga-legacy-ready"}]'
     ;;
   *)
@@ -1933,37 +1933,85 @@ func TestEffectiveSlingQueryPoolNameOverride(t *testing.T) {
 func TestEffectiveWorkQueryExcludesEpics(t *testing.T) {
 	a := Agent{Name: "worker", Dir: "hello-world"}
 	got := a.EffectiveWorkQuery()
-	// All three tiers (in_progress assignee, ready assignee, ready routed)
-	// must structurally exclude the epic type.
-	wantSnippets := []string{
-		`bd list --include-ephemeral --status in_progress --assignee="$id" --exclude-type=epic --json`,
-		`bd ready --include-ephemeral --assignee="$id" --exclude-type=epic --json`,
+	// The routed (pool) tier excludes parent epics (gc-udx): an unassigned
+	// routed epic has no executable spec, so a pool worker grabbing one does
+	// undefined work. The assigned tiers do NOT exclude epics — an agent must
+	// resume its own assigned ephemeral epic wisp (the patrol-loop pattern).
+	wantPresent := []string{
+		// routed/pool tier still excludes epics (gc-udx guard)
 		`bd ready --include-ephemeral --metadata-field "gc.routed_to=$target" --unassigned --exclude-type=epic --json`,
+		// assigned tiers carry NO epic exclusion
+		`bd list --include-ephemeral --status in_progress --assignee="$id" --json`,
+		`bd ready --include-ephemeral --assignee="$id" --json`,
 		`-- hello-world/worker`,
 	}
-	for _, want := range wantSnippets {
+	for _, want := range wantPresent {
 		if !strings.Contains(got, want) {
-			t.Errorf("EffectiveWorkQuery() missing exclude-type=epic on tier:\n  want substring: %s\n  got: %s", want, got)
+			t.Errorf("EffectiveWorkQuery() missing expected substring:\n  want: %s\n  got: %s", want, got)
 		}
+	}
+	// The assigned tiers must NOT carry --exclude-type=epic, or self-assigned
+	// epic wisps get stranded (gc hook exits 1 with empty output).
+	if bad := `--assignee="$id" --exclude-type=epic`; strings.Contains(got, bad) {
+		t.Errorf("EffectiveWorkQuery() assigned tier must not exclude epics, found: %s\n  got: %s", bad, got)
 	}
 }
 
 // TestEffectiveWorkQueryExcludesEpicsControlDispatcher verifies the
 // control-dispatcher path (which has an extra legacy workflow-control
-// route) also excludes epics on every tier.
+// route) excludes epics on the routed (pool) tier but not the assigned
+// tiers — same scoping as the standard path.
 func TestEffectiveWorkQueryExcludesEpicsControlDispatcher(t *testing.T) {
 	a := Agent{Name: ControlDispatcherAgentName, Dir: "gascity"}
 	got := a.EffectiveWorkQuery()
-	wantSnippets := []string{
-		`bd list --include-ephemeral --status in_progress --assignee="$cand" --exclude-type=epic --json`,
-		`bd ready --include-ephemeral --assignee="$cand" --exclude-type=epic --json`,
+	wantPresent := []string{
 		`bd ready --include-ephemeral --metadata-field "gc.routed_to=$target" --unassigned --exclude-type=epic --json`,
+		`bd list --include-ephemeral --status in_progress --assignee="$cand" --json`,
+		`bd ready --include-ephemeral --assignee="$cand" --json`,
 		`-- gascity/control-dispatcher gascity/workflow-control`,
 	}
-	for _, want := range wantSnippets {
+	for _, want := range wantPresent {
 		if !strings.Contains(got, want) {
-			t.Errorf("EffectiveWorkQuery() missing exclude-type=epic on control-dispatcher tier:\n  want substring: %s\n  got: %s", want, got)
+			t.Errorf("EffectiveWorkQuery() missing expected substring on control-dispatcher:\n  want: %s\n  got: %s", want, got)
 		}
+	}
+	if bad := `--assignee="$cand" --exclude-type=epic`; strings.Contains(got, bad) {
+		t.Errorf("control-dispatcher assigned tier must not exclude epics, found: %s\n  got: %s", bad, got)
+	}
+}
+
+// TestEffectiveWorkQueryAssignedTierSurfacesEpicWisp verifies that a
+// self-assigned ephemeral epic (a "wisp" — the patrol-loop pattern used
+// by the gastown witness/refinery/deacon) is surfaced by the default
+// work query's assigned tiers. The fake bd here mimics real bd's
+// --exclude-type=epic behavior: it returns the epic wisp for a
+// `ready --assignee` query ONLY when --exclude-type=epic is absent.
+// Before the fix the assigned tier carried --exclude-type=epic and the
+// agent's own open wisp was dropped (gc hook exited 1 with no output);
+// the gc-udx parent-epic guard lives on the routed (Tier 3) query, which
+// still excludes epics — see TestEffectiveWorkQuerySkipsEpicLeafScenario.
+func TestEffectiveWorkQueryAssignedTierSurfacesEpicWisp(t *testing.T) {
+	a := Agent{Name: "witness", Dir: "hello-world"}
+	out := runEffectiveWorkQuery(t, a, map[string]string{
+		"GC_SESSION_ID":     "witness-sess",
+		"GC_SESSION_ORIGIN": "ephemeral",
+	}, `#!/bin/sh
+set -eu
+case "$1" in
+  ready)
+    case "$*" in
+      *"--assignee=witness-sess"*"--exclude-type=epic"*)
+        # real bd drops the epic-typed wisp when epics are excluded
+        printf '[]' ;;
+      *"--assignee=witness-sess"*)
+        printf '[{"id":"patrol-wisp","issue_type":"epic","ephemeral":true}]' ;;
+      *) printf '[]' ;;
+    esac ;;
+  *) printf '[]' ;;
+esac
+`)
+	if !strings.Contains(out, "patrol-wisp") {
+		t.Fatalf("EffectiveWorkQuery() did not surface the self-assigned epic wisp (assigned tier still excludes epics?): %q", out)
 	}
 }
 

@@ -3051,12 +3051,12 @@ func (a *Agent) poolDemandTarget() string {
 func standardAssignedWorkQueryScript() string {
 	return `for id in "$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"; do ` +
 		`[ -z "$id" ] && continue; ` +
-		`r=$(bd list --include-ephemeral --status in_progress --assignee="$id" --exclude-type=epic --json --limit=1 2>/dev/null); ` +
+		`r=$(bd list --include-ephemeral --status in_progress --assignee="$id" --json --limit=1 2>/dev/null); ` +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
 		`done; ` +
 		`for id in "$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"; do ` +
 		`[ -z "$id" ] && continue; ` +
-		`r=$(bd ready --include-ephemeral --assignee="$id" --exclude-type=epic --json --limit=1 2>/dev/null); ` +
+		`r=$(bd ready --include-ephemeral --assignee="$id" --json --limit=1 2>/dev/null); ` +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
 		`done; `
 }
@@ -3067,7 +3067,7 @@ func legacyControlAssignedWorkQueryScript() string {
 		`legacy=""; case "$id" in *control-dispatcher) legacy="${id%control-dispatcher}workflow-control";; esac; ` +
 		`for cand in "$id" "$legacy"; do ` +
 		`[ -z "$cand" ] && continue; ` +
-		`r=$(bd list --include-ephemeral --status in_progress --assignee="$cand" --exclude-type=epic --json --limit=1 2>/dev/null); ` +
+		`r=$(bd list --include-ephemeral --status in_progress --assignee="$cand" --json --limit=1 2>/dev/null); ` +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
 		`done; ` +
 		`done; ` +
@@ -3076,7 +3076,7 @@ func legacyControlAssignedWorkQueryScript() string {
 		`legacy=""; case "$id" in *control-dispatcher) legacy="${id%control-dispatcher}workflow-control";; esac; ` +
 		`for cand in "$id" "$legacy"; do ` +
 		`[ -z "$cand" ] && continue; ` +
-		`r=$(bd ready --include-ephemeral --assignee="$cand" --exclude-type=epic --json --limit=1 2>/dev/null); ` +
+		`r=$(bd ready --include-ephemeral --assignee="$cand" --json --limit=1 2>/dev/null); ` +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
 		`done; ` +
 		`done; `
@@ -3100,15 +3100,22 @@ func poolDemandOriginGateScript() string {
 //
 // State priority: in_progress+assigned (crash recovery) >
 // ready+assigned (pre-assigned) > ready+unassigned+routed_to (pool).
-// Formula roots that are themselves executable must be represented as ready()
-// work (for example type=wisp); molecule containers are not routable demand.
+// Executable formula roots are ephemeral epics (mol wisp preserves the
+// template-epic IssueType and marks Ephemeral=true); molecule containers
+// are not routable demand.
 //
-// Parent epics are excluded from every tier (--exclude-type=epic). An epic
-// has no executable spec — its semantic is "all children done" — so a worker
-// claiming an epic does undefined work (gc-udx). Roles that legitimately
-// process epics (oversight, reviewers, closers) opt in by setting an explicit
-// work_query in their agent config; that custom query is returned unchanged
-// above.
+// Parent epics are excluded from the routed (pool) tier only
+// (--exclude-type=epic). An unassigned parent epic has no executable spec —
+// its semantic is "all children done" — so a pool worker claiming one does
+// undefined work (gc-udx; the repro is a routed parent epic, see
+// TestEffectiveWorkQuerySkipsEpicLeafScenario). The assigned tiers do NOT
+// exclude epics: work already assigned to this agent is owned, and the
+// patrol-loop pattern (gastown witness/refinery/deacon) self-assigns an
+// ephemeral epic wisp that the agent must resume after a session restart.
+// Excluding epics there silently stranded those wisps (gc hook exited 1 with
+// empty output). Roles that need different behavior still opt in via an
+// explicit work_query in their agent config; that custom query is returned
+// unchanged above.
 //
 // When the reconciler runs the query for demand detection (no session
 // context), all identity vars are empty → assignee tiers skip → only

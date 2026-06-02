@@ -810,7 +810,7 @@ func collectAllOpenSessionBeads(
 		}
 	}
 	if len(errs) > 0 {
-		return allBeads, fmt.Errorf("collecting session beads: %v", errs)
+		return allBeads, errors.Join(errs...)
 	}
 	return allBeads, nil
 }

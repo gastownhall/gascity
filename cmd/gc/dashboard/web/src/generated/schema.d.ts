@@ -413,6 +413,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v0/city/{cityName}/config/defaults": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get v0 city by city name config defaults */
+        get: operations["get-v0-city-by-city-name-config-defaults"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v0/city/{cityName}/config/explain": {
         parameters: {
             query?: never;
@@ -4210,6 +4227,10 @@ export interface components {
             agents: components["schemas"]["StatusAgentCounts"];
             /** @description Bead store selection diagnostic. Omitted when unavailable. */
             beads?: components["schemas"]["BeadsDiagnostic"];
+            /** @description Version of the bd (beads) CLI the supervisor drives. Omitted when the probe failed or the binary is unavailable. */
+            beads_version?: string;
+            /** @description Version of the dolt engine binary the supervisor drives. Omitted when the probe failed or the binary is unavailable. */
+            dolt_version?: string;
             /** @description Mail counts. */
             mail: components["schemas"]["StatusMailCounts"];
             /** @description City name. */
@@ -8116,6 +8137,42 @@ export interface operations {
             };
         };
     };
+    "get-v0-city-by-city-name-config-defaults": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description City name. */
+                cityName: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    "X-GC-Cache-Age-S"?: number;
+                    "X-GC-Index"?: number;
+                    "X-GC-Request-Id": components["headers"]["X-GC-Request-Id"];
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ConfigResponse"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    "X-GC-Request-Id": components["headers"]["X-GC-Request-Id"];
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ErrorModel"];
+                };
+            };
+        };
+    };
     "get-v0-city-by-city-name-config-explain": {
         parameters: {
             query?: never;
@@ -9171,6 +9228,12 @@ export interface operations {
                 parent_conversation_id?: string;
                 /** @description Conversation kind. */
                 kind?: string;
+                /** @description Return entries with sequence greater than this cursor (default 0). */
+                after_sequence?: number;
+                /** @description Maximum number of entries to return (default 100, max 500). */
+                limit?: number;
+                /** @description Sort order by sequence: asc (oldest-first, default) or desc (newest-first). */
+                order?: "asc" | "desc";
             };
             header?: never;
             path: {

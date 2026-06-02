@@ -45,6 +45,7 @@ func (sm *SupervisorMux) registerCityRoutes() {
 	cityGet(sm, "/config", (*Server).humaHandleConfigGet)
 	cityGet(sm, "/config/explain", (*Server).humaHandleConfigExplain)
 	cityGet(sm, "/config/validate", (*Server).humaHandleConfigValidate)
+	cityGet(sm, "/config/defaults", (*Server).humaHandleConfigDefaults)
 
 	// Agents — read / CRUD. Agents can be addressed unqualified
 	// ({base}) or rig-qualified ({dir}/{base}); there is no third

@@ -52,15 +52,23 @@ jobs:
     needs: runner-policy
     runs-on: ${{ needs.runner-policy.outputs.runner_2vcpu }}
     outputs:
-      mail: ${{ steps.filter.outputs.mail }}
-      docker: ${{ steps.filter.outputs.docker }}
-      k8s: ${{ steps.filter.outputs.k8s }}
+      # Gated outputs fold in the `shared` filter: a change to a cross-cutting
+      # core path runs the full suite (union run) even when the path-scoped
+      # filter would not match on its own. This closes the path-filter
+      # asymmetry where a subtle change in shared code skips the jobs it could
+      # break. Downstream consumers read these outputs unchanged.
+      mail: ${{ steps.filter.outputs.mail == 'true' || steps.filter.outputs.shared == 'true' }}
+      docker: ${{ steps.filter.outputs.docker == 'true' || steps.filter.outputs.shared == 'true' }}
+      k8s: ${{ steps.filter.outputs.k8s == 'true' || steps.filter.outputs.shared == 'true' }}
       beads: ${{ steps.filter.outputs.beads }}
-      packs: ${{ steps.filter.outputs.packs }}
-      worker: ${{ steps.filter.outputs.worker }}
-      worker_phase2: ${{ steps.filter.outputs.worker_phase2 }}
-      cmd_gc_process: ${{ steps.filter.outputs.cmd_gc_process }}
-      integration: ${{ steps.filter.outputs.integration }}
+      packs: ${{ steps.filter.outputs.packs == 'true' || steps.filter.outputs.shared == 'true' }}
+      worker: ${{ steps.filter.outputs.worker == 'true' || steps.filter.outputs.shared == 'true' }}
+      worker_phase2: ${{ steps.filter.outputs.worker_phase2 == 'true' || steps.filter.outputs.shared == 'true' }}
+      cmd_gc_process: ${{ steps.filter.outputs.cmd_gc_process == 'true' || steps.filter.outputs.shared == 'true' }}
+      integration: ${{ steps.filter.outputs.integration == 'true' || steps.filter.outputs.shared == 'true' }}
+      # Raw cross-cutting signal and per-run coverage classification (metric).
+      shared: ${{ steps.filter.outputs.shared }}
+      suite_mode: ${{ steps.coverage.outputs.suite_mode }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: dorny/paths-filter@d1c1ffe0248fe513906c8e24db8ea791d46f8590 # v3
@@ -127,6 +135,24 @@ jobs:
               - 'scripts/test-go-test-shard'
               - 'scripts/go-test-observable'
               - 'examples/gastown/packs/**'
+            # Cross-cutting core paths. A change here is folded into every
+            # gated output above, forcing a full union run. Beads is the
+            # universal persistence substrate, events the universal observation
+            # substrate, config the universal activation mechanism; build,
+            # dependency, and CI-config files affect every job.
+            shared:
+              - 'go.mod'
+              - 'go.sum'
+              - 'Makefile'
+              - '.github/workflows/**'
+              - 'internal/beads/**'
+              - 'internal/events/**'
+              - 'internal/config/**'
+      - name: Classify suite coverage
+        id: coverage
+        env:
+          SHARED_FILTER_RESULT: ${{ steps.filter.outputs.shared }}
+        run: python3 .github/workflows/scripts/ci_suite_coverage.py classify "$SHARED_FILTER_RESULT"
 
   preflight-static:
     name: Preflight / static checks

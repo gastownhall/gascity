@@ -504,16 +504,19 @@ while IFS= read -r DB; do
         fi
     fi
 
-    # Step 5a: Anomaly check — reapable open wisp count.
-    get_sql_count "$DB" "reapable open wisp" "
+    # Step 5a: Anomaly check — stale open wisp count. Fresh workflow load can
+    # legitimately exceed the threshold on busy cities; only old non-message
+    # rows indicate a reaper leak.
+    get_sql_count "$DB" "stale open wisp anomaly" "
         SELECT COUNT(*) FROM \`$DB\`.wisps
         WHERE status IN ('open', 'hooked', 'in_progress')
         AND issue_type NOT IN ('message')
+        AND created_at < DATE_SUB(NOW(), INTERVAL $MAX_AGE_H HOUR)
     "
     REAPABLE_WISPS=$SQL_COUNT_RESULT
 
     if [ "$REAPABLE_WISPS" -gt "$ALERT_THRESHOLD" ]; then
-        ANOMALIES="${ANOMALIES}$DB: $REAPABLE_WISPS open wisps (threshold: $ALERT_THRESHOLD)\n"
+        ANOMALIES="${ANOMALIES}$DB: $REAPABLE_WISPS stale open wisps (threshold: $ALERT_THRESHOLD, age: ${MAX_AGE})\n"
     fi
 
     # Step 5b: Mail-wisp backlog count, observed separately from reapable wisps.

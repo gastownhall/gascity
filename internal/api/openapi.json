@@ -6969,6 +6969,14 @@
             "$ref": "#/components/schemas/BeadsDiagnostic",
             "description": "Bead store selection diagnostic. Omitted when unavailable."
           },
+          "beads_version": {
+            "description": "Version of the bd (beads) CLI the supervisor drives. Omitted when the probe failed or the binary is unavailable.",
+            "type": "string"
+          },
+          "dolt_version": {
+            "description": "Version of the dolt engine binary the supervisor drives. Omitted when the probe failed or the binary is unavailable.",
+            "type": "string"
+          },
           "mail": {
             "$ref": "#/components/schemas/StatusMailCounts",
             "description": "Mail counts."
@@ -16676,6 +16684,73 @@
         "summary": "Get v0 city by city name config"
       }
     },
+    "/v0/city/{cityName}/config/defaults": {
+      "get": {
+        "operationId": "get-v0-city-by-city-name-config-defaults",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConfigResponse"
+                }
+              }
+            },
+            "description": "OK",
+            "headers": {
+              "X-GC-Cache-Age-S": {
+                "schema": {
+                  "description": "Age in seconds of the CachingStore snapshot that served this response (0 if not applicable).",
+                  "format": "double",
+                  "type": "number"
+                }
+              },
+              "X-GC-Index": {
+                "schema": {
+                  "description": "Latest event sequence number.",
+                  "format": "int64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          }
+        },
+        "summary": "Get v0 city by city name config defaults"
+      }
+    },
     "/v0/city/{cityName}/config/explain": {
       "get": {
         "operationId": "get-v0-city-by-city-name-config-explain",
@@ -18762,6 +18837,42 @@
             "name": "kind",
             "schema": {
               "description": "Conversation kind.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Return entries with sequence greater than this cursor (default 0).",
+            "explode": false,
+            "in": "query",
+            "name": "after_sequence",
+            "schema": {
+              "description": "Return entries with sequence greater than this cursor (default 0).",
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Maximum number of entries to return (default 100, max 500).",
+            "explode": false,
+            "in": "query",
+            "name": "limit",
+            "schema": {
+              "description": "Maximum number of entries to return (default 100, max 500).",
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Sort order by sequence: asc (oldest-first, default) or desc (newest-first).",
+            "explode": false,
+            "in": "query",
+            "name": "order",
+            "schema": {
+              "description": "Sort order by sequence: asc (oldest-first, default) or desc (newest-first).",
+              "enum": [
+                "asc",
+                "desc"
+              ],
               "type": "string"
             }
           }

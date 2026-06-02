@@ -31,6 +31,7 @@ and drives the loop automatically.`,
 		newConvergeStopCmd(stdout, stderr),
 		newConvergeListCmd(stdout, stderr),
 		newConvergeTestGateCmd(stdout, stderr),
+		newConvergeTestTriggerCmd(stdout, stderr),
 		newConvergeRetryCmd(stdout, stderr),
 	)
 	return cmd
@@ -47,6 +48,8 @@ func newConvergeCreateCmd(stdout, stderr io.Writer) *cobra.Command {
 		gateTimeoutAction string
 		title             string
 		evaluatePrompt    string
+		trigger           string
+		triggerCondition  string
 		vars              []string
 		jsonOutput        bool
 	)
@@ -73,6 +76,8 @@ func newConvergeCreateCmd(stdout, stderr io.Writer) *cobra.Command {
 				"gate_timeout_action": gateTimeoutAction,
 				"title":               title,
 				"evaluate_prompt":     evaluatePrompt,
+				"trigger":             trigger,
+				"trigger_condition":   triggerCondition,
 				"rig":                 rctx.RigName,
 			}
 			for _, v := range vars {
@@ -125,6 +130,8 @@ func newConvergeCreateCmd(stdout, stderr io.Writer) *cobra.Command {
 	cmd.Flags().StringVar(&gateTimeoutAction, "gate-timeout-action", "iterate", "Action on gate timeout: iterate, retry, manual, terminate")
 	cmd.Flags().StringVar(&title, "title", "", "Convergence loop title")
 	cmd.Flags().StringVar(&evaluatePrompt, "evaluate-prompt", "", "Custom evaluate prompt (overrides formula default)")
+	cmd.Flags().StringVar(&trigger, "trigger", "", "Iteration trigger mode: event (gate each iteration on --trigger-condition). Empty disables.")
+	cmd.Flags().StringVar(&triggerCondition, "trigger-condition", "", "Path to trigger condition script (required when --trigger=event)")
 	cmd.Flags().StringArrayVar(&vars, "var", nil, "Template variable (key=value, repeatable)")
 	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Output JSONL summary")
 	_ = cmd.MarkFlagRequired("formula")
@@ -170,6 +177,8 @@ func newConvergeStatusCmd(stdout, stderr io.Writer) *cobra.Command {
 			formula := meta[convergence.FieldFormula]
 			target := meta[convergence.FieldTarget]
 			rig := meta[convergence.FieldRig]
+			trigger := meta[convergence.FieldTrigger]
+			triggerCondition := meta[convergence.FieldTriggerCondition]
 			gateOutcome := meta[convergence.FieldGateOutcome]
 			waitingReason := meta[convergence.FieldWaitingReason]
 			terminalReason := meta[convergence.FieldTerminalReason]
@@ -185,6 +194,15 @@ func newConvergeStatusCmd(stdout, stderr io.Writer) *cobra.Command {
 				fmt.Fprintf(stdout, "Rig:             %s\n", rig) //nolint:errcheck
 			}
 			fmt.Fprintf(stdout, "Gate:            %s\n", gateMode) //nolint:errcheck
+			if trigger != "" {
+				fmt.Fprintf(stdout, "Trigger:         %s\n", trigger) //nolint:errcheck
+				if triggerCondition != "" {
+					fmt.Fprintf(stdout, "Trigger Cond:    %s\n", triggerCondition) //nolint:errcheck
+				}
+				if state == convergence.StateWaitingTrigger {
+					fmt.Fprintf(stdout, "Waiting:         trigger\n") //nolint:errcheck
+				}
+			}
 			if gateOutcome != "" {
 				fmt.Fprintf(stdout, "Gate Outcome:    %s\n", gateOutcome) //nolint:errcheck
 			}
@@ -511,6 +529,136 @@ func newConvergeTestGateCmd(stdout, stderr io.Writer) *cobra.Command {
 	}
 	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Output JSONL summary")
 	return cmd
+}
+
+func newConvergeTestTriggerCmd(stdout, stderr io.Writer) *cobra.Command {
+	var jsonOutput bool
+	cmd := &cobra.Command{
+		Use:   "test-trigger <bead-id>",
+		Short: "Dry-run the trigger condition (no state changes)",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(_ *cobra.Command, args []string) error {
+			beadID := args[0]
+			store, rctx, storePath, code := openConvergeStore(stderr, "gc converge test-trigger")
+			if code != 0 {
+				return errExit
+			}
+			b, err := store.Get(beadID)
+			if err != nil {
+				fmt.Fprintf(stderr, "gc converge test-trigger: %v\n", err) //nolint:errcheck
+				return errExit
+			}
+			if b.Type != "convergence" {
+				fmt.Fprintf(stderr, "gc converge test-trigger: bead %s is type %q, not convergence\n", beadID, b.Type) //nolint:errcheck
+				return errExit
+			}
+			meta := b.Metadata
+			if meta == nil {
+				meta = map[string]string{}
+			}
+
+			triggerConfig, err := convergence.ParseTriggerConfig(meta)
+			if err != nil {
+				fmt.Fprintf(stderr, "gc converge test-trigger: %v\n", err) //nolint:errcheck
+				return errExit
+			}
+			if !triggerConfig.Enabled() {
+				if jsonOutput {
+					return writeCLIJSONLineOrErr(stdout, stderr, "gc converge test-trigger", convergeTestGateJSONResult{
+						SchemaVersion: "1",
+						OK:            true,
+						BeadID:        beadID,
+						Mode:          convergence.TriggerNone,
+						Skipped:       true,
+						Reason:        "no_trigger",
+					})
+				}
+				fmt.Fprintln(stdout, "No trigger configured for this loop.") //nolint:errcheck
+				return nil
+			}
+
+			// Bound the trigger with the loop's gate timeout (or its default).
+			gateConfig, err := convergence.ParseGateConfig(meta)
+			if err != nil {
+				fmt.Fprintf(stderr, "gc converge test-trigger: %v\n", err) //nolint:errcheck
+				return errExit
+			}
+
+			// Mirror HandleTrigger: the trigger gates the NEXT iteration to be
+			// poured (closed wisps + 1), evaluated with the same env contract
+			// (iteration source + artifact dir) the controller uses live, so the
+			// dry-run does not misrepresent GC_ITERATION / GC_ARTIFACT_DIR to the
+			// trigger condition script.
+			closed, err := convergeClosedIterations(store, beadID)
+			if err != nil {
+				fmt.Fprintf(stderr, "gc converge test-trigger: %v\n", err) //nolint:errcheck
+				return errExit
+			}
+			nextIteration := closed + 1
+			cityPath := meta[convergence.FieldCityPath]
+			if cityPath == "" {
+				cityPath = rctx.CityPath
+			}
+			env := convergence.TriggerConditionEnv(meta, beadID, cityPath, storePath, nextIteration)
+
+			if !jsonOutput {
+				fmt.Fprintf(stdout, "Testing trigger: %s\n", triggerConfig.Condition) //nolint:errcheck
+			}
+			result := convergence.RunCondition(
+				context.TODO(),
+				triggerConfig.Condition, env, gateConfig.Timeout, 0,
+			)
+			if jsonOutput {
+				payload := convergeTestGateJSONResult{
+					SchemaVersion: "1",
+					OK:            true,
+					BeadID:        beadID,
+					Mode:          triggerConfig.Mode,
+					Condition:     triggerConfig.Condition,
+					Outcome:       result.Outcome,
+					ExitCode:      result.ExitCode,
+					Stdout:        result.Stdout,
+					Stderr:        result.Stderr,
+				}
+				return writeCLIJSONLineOrErr(stdout, stderr, "gc converge test-trigger", payload)
+			}
+			fmt.Fprintf(stdout, "Outcome:  %s\n", result.Outcome) //nolint:errcheck
+			if result.ExitCode != nil {
+				fmt.Fprintf(stdout, "Exit:     %d\n", *result.ExitCode) //nolint:errcheck
+			}
+			if result.Stdout != "" {
+				fmt.Fprintf(stdout, "Stdout:\n%s\n", result.Stdout) //nolint:errcheck
+			}
+			if result.Stderr != "" {
+				fmt.Fprintf(stdout, "Stderr:\n%s\n", result.Stderr) //nolint:errcheck
+			}
+			return nil
+		},
+	}
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Output JSONL summary")
+	return cmd
+}
+
+// convergeClosedIterations counts closed iteration wisps under a convergence
+// root bead, mirroring the controller's Handler.deriveIterationCount over the
+// beads.Store boundary (the convergence store adapter surfaces the wisp
+// idempotency key via Metadata["idempotency_key"]). The test-trigger dry-run
+// uses it to compute the next iteration the trigger gates. The store error is
+// propagated rather than swallowed so the dry-run fails loudly instead of
+// silently reporting iteration 1, matching the live HandleTrigger path.
+func convergeClosedIterations(store beads.Store, beadID string) (int, error) {
+	children, err := store.Children(beadID, beads.IncludeClosed)
+	if err != nil {
+		return 0, fmt.Errorf("listing children of %s: %w", beadID, err)
+	}
+	prefix := convergence.IdempotencyKeyPrefix(beadID)
+	count := 0
+	for _, c := range children {
+		if c.Status == "closed" && c.Metadata != nil && strings.HasPrefix(c.Metadata["idempotency_key"], prefix) {
+			count++
+		}
+	}
+	return count, nil
 }
 
 func newConvergeRetryCmd(stdout, stderr io.Writer) *cobra.Command {

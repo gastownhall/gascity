@@ -91,9 +91,11 @@ type mailMessageSummary struct {
 
 type mailArchiveSelectOptions struct {
 	Recipient       string
+	AllRecipients   bool
 	From            string
 	SubjectPrefix   string
 	SubjectContains string
+	EmptyBody       bool
 	Limit           int
 	IncludeRead     bool
 	DryRun          bool
@@ -169,8 +171,9 @@ Use this to dismiss messages without reading them. Each message is removed
 and will no longer appear in mail check or inbox results. When multiple IDs
 are passed, they are archived in input order.
 
-For large advisory backlogs, use --to with --subject-prefix, --subject-contains,
-or --from to archive a bounded matching slice without enumerating IDs by hand.`,
+For large advisory backlogs, use --to or --all-recipients with
+--subject-prefix, --subject-contains, or --from to archive a bounded matching
+slice without enumerating IDs by hand.`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
 			code := 0
@@ -194,9 +197,11 @@ or --from to archive a bounded matching slice without enumerating IDs by hand.`,
 	}
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit JSONL result")
 	cmd.Flags().StringVar(&opts.Recipient, "to", "", "archive matching unread messages addressed to this recipient")
+	cmd.Flags().BoolVar(&opts.AllRecipients, "all-recipients", false, "archive matching messages across all recipients")
 	cmd.Flags().StringVar(&opts.From, "from", "", "archive matching unread messages from this exact sender")
 	cmd.Flags().StringVar(&opts.SubjectPrefix, "subject-prefix", "", "archive matching unread messages whose subject starts with this text")
 	cmd.Flags().StringVar(&opts.SubjectContains, "subject-contains", "", "archive matching unread messages whose subject contains this text")
+	cmd.Flags().BoolVar(&opts.EmptyBody, "empty-body", false, "only archive matching messages whose body is empty")
 	cmd.Flags().IntVar(&opts.Limit, "limit", opts.Limit, "maximum matching messages to archive in this run")
 	cmd.Flags().BoolVar(&opts.IncludeRead, "include-read", false, "include read-but-open messages when selecting by filter")
 	cmd.Flags().BoolVar(&opts.DryRun, "dry-run", false, "list matching messages without archiving them")
@@ -219,9 +224,11 @@ func cmdMailArchiveJSON(args []string, jsonOut bool, stdout, stderr io.Writer) i
 
 func (o mailArchiveSelectOptions) hasSelector() bool {
 	return strings.TrimSpace(o.Recipient) != "" ||
+		o.AllRecipients ||
 		strings.TrimSpace(o.From) != "" ||
 		strings.TrimSpace(o.SubjectPrefix) != "" ||
 		strings.TrimSpace(o.SubjectContains) != "" ||
+		o.EmptyBody ||
 		o.IncludeRead ||
 		o.DryRun
 }
@@ -263,8 +270,12 @@ func doMailArchiveSelectedJSON(mp mail.Provider, rec events.Recorder, args []str
 		return 1
 	}
 	opts.Recipient = strings.TrimSpace(opts.Recipient)
-	if opts.Recipient == "" {
-		fmt.Fprintln(stderr, "gc mail archive: --to is required when using archive filters") //nolint:errcheck // best-effort stderr
+	if opts.Recipient != "" && opts.AllRecipients {
+		fmt.Fprintln(stderr, "gc mail archive: choose either --to or --all-recipients") //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if opts.Recipient == "" && !opts.AllRecipients {
+		fmt.Fprintln(stderr, "gc mail archive: --to or --all-recipients is required when using archive filters") //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	if !opts.hasContentFilter() {
@@ -280,11 +291,16 @@ func doMailArchiveSelectedJSON(mp mail.Provider, rec events.Recorder, args []str
 		fmt.Fprintln(stderr, "gc mail archive: filtered archive requires the beadmail provider") //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	recipients := []string(nil)
+	if !opts.AllRecipients {
+		recipients = []string{opts.Recipient}
+	}
 	filter := beadmail.ArchiveFilter{
-		Recipients:      []string{opts.Recipient},
+		Recipients:      recipients,
 		From:            opts.From,
 		SubjectPrefix:   opts.SubjectPrefix,
 		SubjectContains: opts.SubjectContains,
+		EmptyBody:       opts.EmptyBody,
 		IncludeRead:     opts.IncludeRead,
 		CaseInsensitive: opts.CaseInsensitive,
 		Limit:           opts.Limit,
@@ -528,8 +544,11 @@ var mailCheckAPIClient = func(cityPath string) (*api.Client, string) {
 	return nil, apiClientFallbackReason(cityPath)
 }
 
-// routeMailCheck dispatches `mail check` to the supervisor API when a
-// controller is up; otherwise falls back to the local mail-provider path.
+// routeMailCheck dispatches non-injecting `mail check` to the supervisor API
+// when a controller is up; otherwise falls back to the local mail-provider path.
+// Injecting hooks probe the API for degraded-read notices, then use the local
+// path because provider-backed mail may need to perform delivery side effects
+// after successful injection.
 // Emits exactly one route=... log line per exit path (gated on GC_DEBUG).
 func routeMailCheck(_ string, args []string, inject bool, hookFormat string, c *api.Client, nilReason string, stdout, stderr io.Writer) int {
 	const cmdName = "mail check"
@@ -537,12 +556,12 @@ func routeMailCheck(_ string, args []string, inject bool, hookFormat string, c *
 	if len(args) > 0 {
 		recipient = strings.TrimSpace(args[0])
 	}
-	if c != nil {
-		cr, err := c.ListMailInbox(recipient, "")
-		if err == nil {
-			if mailListHasPartial(cr.Body) {
-				logRoute(stderr, cmdName, "api", "error")
-				if inject {
+	if inject {
+		if c != nil {
+			cr, err := c.ListMailInbox(recipient, "")
+			if err == nil {
+				if mailListHasPartial(cr.Body) {
+					logRoute(stderr, cmdName, "api", "error")
 					notice := formatMailCheckPartialDegradedNotice()
 					if mailListHasStoreSlowPartial(cr.Body) {
 						notice = formatMailCheckDegradedNotice()
@@ -550,6 +569,22 @@ func routeMailCheck(_ string, args []string, inject bool, hookFormat string, c *
 					_ = writeProviderHookContextForEvent(stdout, hookFormat, "UserPromptSubmit", notice)
 					return 0
 				}
+			} else if !api.ShouldFallbackForRead(err) {
+				logRoute(stderr, cmdName, "api", "error")
+				if api.IsStoreSlowError(err) {
+					_ = writeProviderHookContextForEvent(stdout, hookFormat, "UserPromptSubmit", formatMailCheckDegradedNotice())
+				}
+				return 0
+			}
+		}
+		logRoute(stderr, cmdName, "fallback", "inject-local-side-effects")
+		return doMailCheckFallback(args, inject, hookFormat, stdout, stderr)
+	}
+	if c != nil {
+		cr, err := c.ListMailInbox(recipient, "")
+		if err == nil {
+			if mailListHasPartial(cr.Body) {
+				logRoute(stderr, cmdName, "api", "error")
 				fmt.Fprintf(stderr, "gc mail check: %s\n", mailListPartialErrorDetail(cr.Body)) //nolint:errcheck // best-effort stderr
 				return 1
 			}
@@ -558,12 +593,6 @@ func routeMailCheck(_ string, args []string, inject bool, hookFormat string, c *
 		}
 		if !api.ShouldFallbackForRead(err) {
 			logRoute(stderr, cmdName, "api", "error")
-			if inject {
-				if api.IsStoreSlowError(err) {
-					_ = writeProviderHookContextForEvent(stdout, hookFormat, "UserPromptSubmit", formatMailCheckDegradedNotice())
-				}
-				return 0
-			}
 			fmt.Fprintf(stderr, "gc mail check: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
@@ -689,7 +718,15 @@ func doMailCheckTargetWithFormat(mp mail.Provider, target resolvedMailTarget, in
 
 	if inject {
 		if len(messages) > 0 {
-			_ = writeProviderHookContextForEvent(stdout, hookFormat, "UserPromptSubmit", formatInjectOutput(messages))
+			if err := writeProviderHookContextForEvent(stdout, hookFormat, "UserPromptSubmit", formatInjectOutput(messages)); err != nil {
+				fmt.Fprintf(stderr, "gc mail check: writing hook output: %v\n", err) //nolint:errcheck // best-effort stderr
+				return 0
+			}
+			injectedMessages := messages
+			if len(injectedMessages) > mailInjectMaxMessages {
+				injectedMessages = injectedMessages[:mailInjectMaxMessages]
+			}
+			archiveInjectedAutoHandoffMessages(mp, injectedMessages, stderr)
 		}
 		return 0 // --inject always exits 0
 	}
@@ -700,6 +737,24 @@ func doMailCheckTargetWithFormat(mp mail.Provider, target resolvedMailTarget, in
 	}
 	fmt.Fprintf(stdout, "%d unread message(s) for %s\n", len(messages), target.display) //nolint:errcheck // best-effort stdout
 	return 0
+}
+
+type injectedAutoHandoffArchiver interface {
+	ArchiveInjectedAutoHandoffs([]string) error
+}
+
+func archiveInjectedAutoHandoffMessages(mp mail.Provider, messages []mail.Message, stderr io.Writer) {
+	archiver, ok := mp.(injectedAutoHandoffArchiver)
+	if !ok {
+		return
+	}
+	ids := make([]string, 0, len(messages))
+	for _, msg := range messages {
+		ids = append(ids, msg.ID)
+	}
+	if err := archiver.ArchiveInjectedAutoHandoffs(ids); err != nil {
+		fmt.Fprintf(stderr, "gc mail check: archiving injected auto handoff mail: %v\n", err) //nolint:errcheck // best-effort stderr
+	}
 }
 
 // formatInjectOutput formats messages as a <system-reminder> block for
@@ -1392,7 +1447,7 @@ Use --all to broadcast to all live sessions (excluding sender and "human").`,
 			return nil
 		},
 	}
-	cmd.Flags().BoolVar(&notify, "notify", false, "nudge the recipient after sending")
+	cmd.Flags().BoolVar(&notify, "notify", false, "nudge the recipient about this message, even if earlier mail is still unread")
 	cmd.Flags().BoolVar(&notify, "nudge", false, "alias for --notify")
 	_ = cmd.Flags().MarkHidden("nudge")
 	cmd.Flags().BoolVar(&all, "all", false, "broadcast to all live sessions (excludes sender and human)")
@@ -1497,7 +1552,7 @@ Use -s/--subject for the reply subject and -m/--message for the reply body.`,
 	}
 	cmd.Flags().StringVarP(&subject, "subject", "s", "", "reply subject line")
 	cmd.Flags().StringVarP(&message, "message", "m", "", "reply body text")
-	cmd.Flags().BoolVar(&notify, "notify", false, "nudge the recipient after replying")
+	cmd.Flags().BoolVar(&notify, "notify", false, "nudge the recipient about this reply, even if earlier mail is still unread")
 	cmd.Flags().BoolVar(&notify, "nudge", false, "alias for --notify")
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit JSONL result")
 	_ = cmd.Flags().MarkHidden("nudge")

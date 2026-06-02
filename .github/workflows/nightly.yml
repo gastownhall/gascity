@@ -27,6 +27,10 @@ jobs:
           install-claude-cli: "false"
 
       - name: Tier B lifecycle tests
+        env:
+          GC_IDLE_BEAD_STABILITY_WARMUP: 10s
+          GC_IDLE_BEAD_STABILITY_SAMPLES: "36"
+          GC_IDLE_BEAD_STABILITY_INTERVAL: 5s
         run: make test-acceptance-b
 
   tier-c:

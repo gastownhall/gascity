@@ -213,6 +213,58 @@ func TestResolveTemplateUsesRigScopeBeadsProviderForBdBackedRig(t *testing.T) {
 	}
 }
 
+// TestResolveTemplatePreStartResolvesRigRootForCityLevelRigScopedAgent guards
+// gascity#1940: the pre_start substitution path must resolve {{.RigRoot}} and
+// {{.AgentBase}} for a city-level rig-scoped agent — one with Scope="rig" whose
+// Dir is not stamped to the rig (its work_dir is a city-level worktree), so the
+// rig association lives only in the qualified-name prefix. The session-setup
+// context flows from workdirutil.PathContextForQualifiedName, so the #2070
+// qualified-name-prefix fallback reaches pre_start templates too, not just
+// work_dir and the agent env. Without the unified context these would expand
+// empty.
+func TestResolveTemplatePreStartResolvesRigRootForCityLevelRigScopedAgent(t *testing.T) {
+	cityPath := t.TempDir()
+	writeTemplateResolveCityConfig(t, cityPath, "file")
+	rigRoot := filepath.Join(cityPath, "rigs", "thriva")
+	if err := os.MkdirAll(rigRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	params := &agentBuildParams{
+		cityName:   "city",
+		cityPath:   cityPath,
+		workspace:  &config.Workspace{Provider: "test"},
+		providers:  map[string]config.ProviderSpec{"test": {Command: "echo", PromptMode: "none"}},
+		lookPath:   func(string) (string, error) { return "/bin/echo", nil },
+		fs:         fsys.OSFS{},
+		rigs:       []config.Rig{{Name: "thriva", Path: rigRoot}},
+		beaconTime: time.Unix(0, 0),
+		beadNames:  make(map[string]string),
+		stderr:     io.Discard,
+	}
+
+	// No Dir stamp; rig association lives only in the qualified-name prefix and
+	// the work_dir is a city-level worktree outside the rig filesystem.
+	agent := &config.Agent{
+		Name:     "my_impl",
+		Scope:    "rig",
+		WorkDir:  ".gc/worktrees/my_impl",
+		PreStart: []string{"echo rig={{.RigRoot}} base={{.AgentBase}}"},
+	}
+	tp, err := resolveTemplate(params, agent, "thriva/my_impl", nil)
+	if err != nil {
+		t.Fatalf("resolveTemplate: %v", err)
+	}
+
+	if len(tp.Hints.PreStart) != 1 {
+		t.Fatalf("PreStart = %v, want one expanded command", tp.Hints.PreStart)
+	}
+	want := "echo rig=" + rigRoot + " base=my_impl"
+	if tp.Hints.PreStart[0] != want {
+		t.Fatalf("PreStart[0] = %q, want %q", tp.Hints.PreStart[0], want)
+	}
+}
+
 func TestResolveTemplateRigScopedEnvCarriesRigRoots(t *testing.T) {
 	cityPath := t.TempDir()
 	writeTemplateResolveCityConfig(t, cityPath, "file")
