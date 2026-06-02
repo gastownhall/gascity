@@ -351,8 +351,11 @@ func (s *Server) humaHandleExtMsgTranscriptList(ctx context.Context, input *ExtM
 
 	caller := extmsg.Caller{Kind: extmsg.CallerController, ID: "api"}
 	entries, err := svc.Transcript.List(ctx, extmsg.ListTranscriptInput{
-		Caller:       caller,
-		Conversation: ref,
+		Caller:        caller,
+		Conversation:  ref,
+		AfterSequence: input.AfterSequence,
+		Limit:         input.Limit,
+		Order:         extmsg.TranscriptOrder(input.Order),
 	})
 	if err != nil {
 		return nil, huma.Error500InternalServerError(err.Error())

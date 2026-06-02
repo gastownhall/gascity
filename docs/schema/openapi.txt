@@ -18666,6 +18666,42 @@
               "description": "Conversation kind.",
               "type": "string"
             }
+          },
+          {
+            "description": "Return entries with sequence greater than this cursor (default 0).",
+            "explode": false,
+            "in": "query",
+            "name": "after_sequence",
+            "schema": {
+              "description": "Return entries with sequence greater than this cursor (default 0).",
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Maximum number of entries to return (default 100, max 500).",
+            "explode": false,
+            "in": "query",
+            "name": "limit",
+            "schema": {
+              "description": "Maximum number of entries to return (default 100, max 500).",
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Sort order by sequence: asc (oldest-first, default) or desc (newest-first).",
+            "explode": false,
+            "in": "query",
+            "name": "order",
+            "schema": {
+              "description": "Sort order by sequence: asc (oldest-first, default) or desc (newest-first).",
+              "enum": [
+                "asc",
+                "desc"
+              ],
+              "type": "string"
+            }
           }
         ],
         "responses": {
