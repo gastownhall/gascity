@@ -1181,6 +1181,76 @@ type BeadsConfig struct {
 	// Backend selects the bd storage engine when Provider is "bd".
 	// Empty defaults to "dolt"; T3Code uses "doltlite" for local dev stores.
 	Backend string `toml:"backend,omitempty"`
+	// EventHooks controls installation of the bead event-forwarding hooks
+	// (.beads/hooks/on_create,on_update,on_close). Defaults to true.
+	// This config surface is staged ahead of the native bead-event support;
+	// current hook behavior remains unchanged until lifecycle code opts in.
+	EventHooks *bool `toml:"event_hooks,omitempty" jsonschema:"default=true"`
+	// Policies defines per-bead-use storage and garbage-collection defaults.
+	// Policy names are interpreted by higher-level systems; unknown names are
+	// preserved so packs can stage future policy classes without breaking load.
+	Policies map[string]BeadPolicyConfig `toml:"policies,omitempty"`
+}
+
+// EventHooksEnabled reports whether bead event hooks should be installed.
+// Unset preserves the current default of enabled hooks.
+func (b BeadsConfig) EventHooksEnabled() bool {
+	return b.EventHooks == nil || *b.EventHooks
+}
+
+// BeadPolicyConfig holds storage and retention defaults for a named bead use.
+type BeadPolicyConfig struct {
+	// Storage selects the intended persistence tier: "history", "no_history",
+	// or "ephemeral". Creation paths apply this incrementally as they opt in.
+	Storage string `toml:"storage,omitempty" jsonschema:"enum=history,enum=no_history,enum=ephemeral"`
+	// DeleteAfterClose deletes matching GC-owned beads after they have been
+	// closed for this duration. Accepts Go duration syntax plus whole-day "d"
+	// units, e.g. "7d" or "1d12h". Empty means the policy is not GC-managed.
+	DeleteAfterClose string `toml:"delete_after_close,omitempty"`
+}
+
+const (
+	// BeadStorageHistory stores beads in the normal history-tracked table.
+	BeadStorageHistory = "history"
+	// BeadStorageNoHistory stores beads without Dolt history while keeping
+	// non-ephemeral semantics.
+	BeadStorageNoHistory = "no_history"
+	// BeadStorageEphemeral stores beads as ephemeral wisps.
+	BeadStorageEphemeral = "ephemeral"
+)
+
+// NormalizeBeadPolicyStorage canonicalizes a bead policy storage value.
+func NormalizeBeadPolicyStorage(storage string) string {
+	return strings.ReplaceAll(strings.ToLower(strings.TrimSpace(storage)), "-", "_")
+}
+
+// ValidBeadPolicyStorage reports whether storage is one of the supported bead
+// storage classes. Empty storage is valid and means use the default.
+func ValidBeadPolicyStorage(storage string) bool {
+	switch NormalizeBeadPolicyStorage(storage) {
+	case "", BeadStorageHistory, BeadStorageNoHistory, BeadStorageEphemeral:
+		return true
+	default:
+		return false
+	}
+}
+
+// NormalizedStorage returns the canonical storage class for this policy.
+func (p BeadPolicyConfig) NormalizedStorage() string {
+	return NormalizeBeadPolicyStorage(p.Storage)
+}
+
+// DeleteAfterCloseDuration returns DeleteAfterClose as a duration. It accepts
+// ordinary Go durations plus a whole-day "d" unit, e.g. "7d" and "1d12h".
+func (p BeadPolicyConfig) DeleteAfterCloseDuration() time.Duration {
+	if p.DeleteAfterClose == "" {
+		return 0
+	}
+	dur, err := parseConfigDurationWithDays(p.DeleteAfterClose)
+	if err != nil {
+		return 0
+	}
+	return dur
 }
 
 // SessionConfig holds session provider settings.
@@ -2245,6 +2315,52 @@ func (d *DaemonConfig) WispTTLDuration() time.Duration {
 // and wisp_ttl must be set to non-zero durations.
 func (d *DaemonConfig) WispGCEnabled() bool {
 	return d.WispGCIntervalDuration() > 0 && d.WispTTLDuration() > 0
+}
+
+// parseConfigDurationWithDays extends time.ParseDuration with a whole-day "d"
+// unit. It accepts ordinary Go durations unchanged and supports one leading day
+// component such as "7d" or "1d12h".
+func parseConfigDurationWithDays(raw string) (time.Duration, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return 0, fmt.Errorf("empty duration")
+	}
+	dayIdx := strings.IndexByte(raw, 'd')
+	if dayIdx < 0 {
+		return time.ParseDuration(raw)
+	}
+	days, err := parsePositiveDurationDays(raw[:dayIdx])
+	if err != nil {
+		return 0, err
+	}
+	rest := raw[dayIdx+1:]
+	if rest == "" {
+		return time.Duration(days) * 24 * time.Hour, nil
+	}
+	dur, err := time.ParseDuration(rest)
+	if err != nil {
+		return 0, err
+	}
+	return time.Duration(days)*24*time.Hour + dur, nil
+}
+
+func parsePositiveDurationDays(raw string) (int64, error) {
+	if raw == "" {
+		return 0, fmt.Errorf("missing day count")
+	}
+	for _, r := range raw {
+		if r < '0' || r > '9' {
+			return 0, fmt.Errorf("invalid day count %q", raw)
+		}
+	}
+	days, err := strconv.ParseInt(raw, 10, 32)
+	if err != nil {
+		return 0, err
+	}
+	if days <= 0 {
+		return 0, fmt.Errorf("day count must be positive")
+	}
+	return days, nil
 }
 
 // FormulasDir returns the formulas directory, defaulting to "formulas".

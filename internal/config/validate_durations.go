@@ -21,6 +21,16 @@ func ValidateDurations(cfg *City, source string) []string {
 				source, context, field, value, err))
 		}
 	}
+	checkWithDays := func(context, field, value string) {
+		if value == "" {
+			return
+		}
+		if _, err := parseConfigDurationWithDays(value); err != nil {
+			warnings = append(warnings, fmt.Sprintf(
+				"%s: %s %s = %q is not a valid duration: %v",
+				source, context, field, value, err))
+		}
+	}
 	checkSleep := func(context, field, value string) {
 		if value == "" {
 			return
@@ -60,6 +70,15 @@ func ValidateDurations(cfg *City, source string) []string {
 
 	// Events config durations.
 	check("[events.rotation]", "archive_retain_age", cfg.Events.Rotation.ArchiveRetainAge)
+
+	for name, policy := range cfg.Beads.Policies {
+		checkWithDays(fmt.Sprintf("[beads.policies.%s]", name), "delete_after_close", policy.DeleteAfterClose)
+		if !ValidBeadPolicyStorage(policy.Storage) {
+			warnings = append(warnings, fmt.Sprintf(
+				"%s: [beads.policies.%s] storage = %q is not valid: must be one of %q, %q, or %q",
+				source, name, policy.Storage, BeadStorageHistory, BeadStorageNoHistory, BeadStorageEphemeral))
+		}
+	}
 
 	// Chat sessions config durations.
 	check("[chat_sessions]", "idle_timeout", cfg.ChatSessions.IdleTimeout)

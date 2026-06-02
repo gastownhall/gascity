@@ -543,6 +543,8 @@ name = "test-city"
 
 [beads]
 provider = "file"
+backend = "doltlite"
+event_hooks = false
 
 [[agent]]
 name = "mayor"
@@ -553,6 +555,12 @@ name = "mayor"
 	}
 	if cfg.Beads.Provider != "file" {
 		t.Errorf("Beads.Provider = %q, want %q", cfg.Beads.Provider, "file")
+	}
+	if cfg.Beads.Backend != "doltlite" {
+		t.Errorf("Beads.Backend = %q, want %q", cfg.Beads.Backend, "doltlite")
+	}
+	if cfg.Beads.EventHooks == nil || *cfg.Beads.EventHooks {
+		t.Errorf("Beads.EventHooks = %v, want false", cfg.Beads.EventHooks)
 	}
 }
 
@@ -571,6 +579,12 @@ name = "mayor"
 	if cfg.Beads.Provider != "" {
 		t.Errorf("Beads.Provider = %q, want empty", cfg.Beads.Provider)
 	}
+	if cfg.Beads.EventHooks != nil {
+		t.Errorf("Beads.EventHooks = %v, want nil", cfg.Beads.EventHooks)
+	}
+	if cfg.Beads.Policies != nil {
+		t.Errorf("Beads.Policies = %v, want nil", cfg.Beads.Policies)
+	}
 }
 
 func TestMarshalOmitsEmptyBeadsSection(t *testing.T) {
@@ -581,6 +595,83 @@ func TestMarshalOmitsEmptyBeadsSection(t *testing.T) {
 	}
 	if strings.Contains(string(data), "[beads]") {
 		t.Errorf("Marshal output should not contain '[beads]' when empty:\n%s", data)
+	}
+}
+
+func TestParseBeadsPoliciesSection(t *testing.T) {
+	data := []byte(`
+[workspace]
+name = "test-city"
+
+[beads]
+event_hooks = false
+
+[beads.policies.control]
+storage = "no-history"
+delete_after_close = "1d12h"
+
+[beads.policies.workflow]
+storage = "ephemeral"
+
+[[agent]]
+name = "mayor"
+`)
+	cfg, err := Parse(data)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if cfg.Beads.EventHooks == nil || *cfg.Beads.EventHooks {
+		t.Fatalf("Beads.EventHooks = %v, want false", cfg.Beads.EventHooks)
+	}
+	if len(cfg.Beads.Policies) != 2 {
+		t.Fatalf("len(Beads.Policies) = %d, want 2", len(cfg.Beads.Policies))
+	}
+	control := cfg.Beads.Policies["control"]
+	if got := control.NormalizedStorage(); got != BeadStorageNoHistory {
+		t.Errorf("control.NormalizedStorage() = %q, want %q", got, BeadStorageNoHistory)
+	}
+	if got := control.DeleteAfterCloseDuration(); got != 36*time.Hour {
+		t.Errorf("control.DeleteAfterCloseDuration() = %v, want 36h", got)
+	}
+	workflow := cfg.Beads.Policies["workflow"]
+	if got := workflow.NormalizedStorage(); got != BeadStorageEphemeral {
+		t.Errorf("workflow.NormalizedStorage() = %q, want %q", got, BeadStorageEphemeral)
+	}
+}
+
+func TestBeadsConfigRoundTripPreservesStagedFields(t *testing.T) {
+	disabled := false
+	c := City{
+		Workspace: Workspace{Name: "test"},
+		Beads: BeadsConfig{
+			Provider:   "bd",
+			Backend:    "doltlite",
+			EventHooks: &disabled,
+			Policies: map[string]BeadPolicyConfig{
+				"control": {
+					Storage:          BeadStorageNoHistory,
+					DeleteAfterClose: "48h",
+				},
+			},
+		},
+		Agents: []Agent{{Name: "mayor"}},
+	}
+	data, err := c.Marshal()
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	got, err := Parse(data)
+	if err != nil {
+		t.Fatalf("Parse(Marshal output): %v\n%s", err, data)
+	}
+	if got.Beads.EventHooks == nil || *got.Beads.EventHooks {
+		t.Errorf("round-tripped EventHooks = %v, want false", got.Beads.EventHooks)
+	}
+	if got.Beads.Backend != "doltlite" {
+		t.Errorf("round-tripped Backend = %q, want doltlite", got.Beads.Backend)
+	}
+	if got.Beads.Policies["control"].DeleteAfterClose != "48h" {
+		t.Errorf("round-tripped policy = %#v, want delete_after_close=48h", got.Beads.Policies["control"])
 	}
 }
 

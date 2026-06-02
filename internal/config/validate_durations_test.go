@@ -111,6 +111,44 @@ func TestValidateDurationsBadDaemonFields(t *testing.T) {
 	}
 }
 
+func TestValidateDurationsBadBeadPolicyDuration(t *testing.T) {
+	cfg := &City{
+		Beads: BeadsConfig{
+			Policies: map[string]BeadPolicyConfig{
+				"control": {DeleteAfterClose: "7days"},
+			},
+		},
+	}
+	warnings := ValidateDurations(cfg, "city.toml")
+	if len(warnings) != 1 {
+		t.Fatalf("expected 1 warning, got %d: %v", len(warnings), warnings)
+	}
+	for _, want := range []string{"[beads.policies.control]", "delete_after_close", "7days"} {
+		if !strings.Contains(warnings[0], want) {
+			t.Errorf("warning = %q, want substring %q", warnings[0], want)
+		}
+	}
+}
+
+func TestValidateDurationsBadBeadPolicyStorage(t *testing.T) {
+	cfg := &City{
+		Beads: BeadsConfig{
+			Policies: map[string]BeadPolicyConfig{
+				"control": {Storage: "forever-ish"},
+			},
+		},
+	}
+	warnings := ValidateDurations(cfg, "city.toml")
+	if len(warnings) != 1 {
+		t.Fatalf("expected 1 warning, got %d: %v", len(warnings), warnings)
+	}
+	for _, want := range []string{"[beads.policies.control]", "storage", "forever-ish"} {
+		if !strings.Contains(warnings[0], want) {
+			t.Errorf("warning = %q, want substring %q", warnings[0], want)
+		}
+	}
+}
+
 func TestValidateDurationsBadPoolDrainTimeout(t *testing.T) {
 	cfg := &City{
 		Agents: []Agent{

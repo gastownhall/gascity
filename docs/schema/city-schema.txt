@@ -938,6 +938,26 @@
       ],
       "description": "AgentPatch modifies an existing agent identified by (Dir, Name)."
     },
+    "BeadPolicyConfig": {
+      "properties": {
+        "storage": {
+          "type": "string",
+          "enum": [
+            "history",
+            "no_history",
+            "ephemeral"
+          ],
+          "description": "Storage selects the intended persistence tier: \"history\", \"no_history\",\nor \"ephemeral\". Creation paths apply this incrementally as they opt in."
+        },
+        "delete_after_close": {
+          "type": "string",
+          "description": "DeleteAfterClose deletes matching GC-owned beads after they have been\nclosed for this duration. Accepts Go duration syntax plus whole-day \"d\"\nunits, e.g. \"7d\" or \"1d12h\". Empty means the policy is not GC-managed."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "BeadPolicyConfig holds storage and retention defaults for a named bead use."
+    },
     "BeadsConfig": {
       "properties": {
         "provider": {
@@ -948,6 +968,18 @@
         "backend": {
           "type": "string",
           "description": "Backend selects the bd storage engine when Provider is \"bd\".\nEmpty defaults to \"dolt\"; T3Code uses \"doltlite\" for local dev stores."
+        },
+        "event_hooks": {
+          "type": "boolean",
+          "description": "EventHooks controls installation of the bead event-forwarding hooks\n(.beads/hooks/on_create,on_update,on_close). Defaults to true.\nThis config surface is staged ahead of the native bead-event support;\ncurrent hook behavior remains unchanged until lifecycle code opts in.",
+          "default": true
+        },
+        "policies": {
+          "additionalProperties": {
+            "$ref": "#/$defs/BeadPolicyConfig"
+          },
+          "type": "object",
+          "description": "Policies defines per-bead-use storage and garbage-collection defaults.\nPolicy names are interpreted by higher-level systems; unknown names are\npreserved so packs can stage future policy classes without breaking load."
         }
       },
       "additionalProperties": false,
