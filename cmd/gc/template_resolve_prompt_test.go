@@ -748,7 +748,7 @@ func TestResolveTemplateKeepsConcreteProviderForOverlays(t *testing.T) {
 func TestResolveTemplateExpandsPromptCommandTemplates(t *testing.T) {
 	cityPath := filepath.Join(t.TempDir(), "demo-city")
 	fs := fsys.NewFake()
-	fs.Files[cityPath+"/prompts/worker.template.md"] = []byte("Work={{ .WorkQuery }}\nSling={{ .SlingQuery }}")
+	fs.Files[cityPath+"/prompts/worker.template.md"] = []byte("Work={{ .WorkQuery }}\nAssigned={{ .AssignedReadyQuery }}\nSling={{ .SlingQuery }}")
 
 	params := &agentBuildParams{
 		fs:              fs,
@@ -779,8 +779,47 @@ func TestResolveTemplateExpandsPromptCommandTemplates(t *testing.T) {
 	if !strings.Contains(tp.Prompt, "Work=echo demo-city demo worker") {
 		t.Fatalf("Prompt missing expanded WorkQuery: %q", tp.Prompt)
 	}
+	if !strings.Contains(tp.Prompt, `Assigned=gc bd ready --assignee="$GC_SESSION_NAME"`) {
+		t.Fatalf("Prompt missing bd-1.0.4 assigned ready query: %q", tp.Prompt)
+	}
+	if strings.Contains(tp.Prompt, `Assigned=gc bd ready --include-ephemeral`) {
+		t.Fatalf("Prompt default assigned ready query should omit --include-ephemeral: %q", tp.Prompt)
+	}
 	if !strings.Contains(tp.Prompt, "Sling=dispatch {} --route=demo/worker --city=demo-city") {
 		t.Fatalf("Prompt missing expanded SlingQuery: %q", tp.Prompt)
+	}
+}
+
+func TestResolveTemplateAssignedReadyQueryUsesBD105Compatibility(t *testing.T) {
+	cityPath := filepath.Join(t.TempDir(), "demo-city")
+	fs := fsys.NewFake()
+	fs.Files[cityPath+"/prompts/worker.template.md"] = []byte("Assigned={{ .AssignedReadyQuery }}")
+
+	params := &agentBuildParams{
+		city:            &config.City{Beads: config.BeadsConfig{BDCompatibility: config.BeadsBDCompatibility105}},
+		fs:              fs,
+		cityName:        "",
+		cityPath:        cityPath,
+		workspace:       &config.Workspace{Provider: "opencode"},
+		providers:       config.BuiltinProviders(),
+		lookPath:        func(string) (string, error) { return "/usr/bin/opencode", nil },
+		beaconTime:      testBeaconTime,
+		sessionTemplate: "",
+		beadNames:       make(map[string]string),
+		stderr:          io.Discard,
+	}
+	agent := &config.Agent{
+		Name:           "worker",
+		PromptTemplate: "prompts/worker.template.md",
+		Provider:       "opencode",
+	}
+
+	tp, err := resolveTemplate(params, agent, agent.QualifiedName(), nil)
+	if err != nil {
+		t.Fatalf("resolveTemplate: %v", err)
+	}
+	if !strings.Contains(tp.Prompt, `Assigned=gc bd ready --include-ephemeral --assignee="$GC_SESSION_NAME"`) {
+		t.Fatalf("Prompt missing bd-1.0.5 assigned ready query: %q", tp.Prompt)
 	}
 }
 

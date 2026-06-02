@@ -309,6 +309,10 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	if p.city != nil {
 		packDirs = p.city.PackDirsForRig(rigName)
 	}
+	beadsCfg := config.BeadsConfig{}
+	if p.city != nil {
+		beadsCfg = p.city.Beads
+	}
 	prompt = renderPrompt(p.fs, p.cityPath, p.cityName, cfgAgent.PromptTemplate, PromptContext{
 		CityRoot:            p.cityPath,
 		AgentName:           qualifiedName,
@@ -320,7 +324,8 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		WorkDir:             workDir,
 		IssuePrefix:         findRigPrefix(rigName, p.rigs),
 		DefaultBranch:       defaultBranchForRig(rigName, p.rigs, workDir),
-		WorkQuery:           expandAgentCommandTemplate(p.cityPath, p.cityName, cfgAgent, p.rigs, "work_query", cfgAgent.EffectiveWorkQuery(), p.stderr),
+		WorkQuery:           expandAgentCommandTemplate(p.cityPath, p.cityName, cfgAgent, p.rigs, "work_query", cfgAgent.EffectiveWorkQueryForBeads(beadsCfg), p.stderr),
+		AssignedReadyQuery:  assignedReadyQueryForBeads(beadsCfg),
 		SlingQuery:          expandAgentCommandTemplate(p.cityPath, p.cityName, cfgAgent, p.rigs, "sling_query", cfgAgent.EffectiveSlingQuery(), p.stderr),
 		ProviderKey:         providerKey,
 		ProviderDisplayName: providerDisplayName,
@@ -597,6 +602,13 @@ func suppressStartupPromptForAgent(cfgAgent *config.Agent) bool {
 		cfgAgent.Implicit &&
 		strings.TrimSpace(cfgAgent.StartCommand) != "" &&
 		strings.TrimSpace(cfgAgent.Provider) == ""
+}
+
+func assignedReadyQueryForBeads(beadsCfg config.BeadsConfig) string {
+	if beadsCfg.UsesBD105ReadySemantics() {
+		return `gc bd ready --include-ephemeral --assignee="$GC_SESSION_NAME"`
+	}
+	return `gc bd ready --assignee="$GC_SESSION_NAME"`
 }
 
 func sessionBackendEnvWithError(cityPath, rigRoot string, rigs []config.Rig) (map[string]string, error) {

@@ -1213,6 +1213,7 @@ func openStoreResultAtForCity(storePath, cityPath string) (beads.StoreOpenResult
 	if runtimeCityPath == "" {
 		runtimeCityPath = cityForStoreDir(storePath)
 	}
+	cfg, _ := loadCityConfig(runtimeCityPath, io.Discard)
 	scopeRoot := resolveStoreScopeRoot(runtimeCityPath, storePath)
 	provider := rawBeadsProviderForScope(scopeRoot, runtimeCityPath)
 	if providerIsCoordStore(provider) {
@@ -1221,7 +1222,7 @@ func openStoreResultAtForCity(storePath, cityPath string) (beads.StoreOpenResult
 	}
 	if strings.HasPrefix(provider, "exec:") && !providerUsesBdStoreContract(provider) {
 		store, err := openExecStoreAtForCity(provider, scopeRoot, runtimeCityPath)
-		return beads.StoreOpenResult{Store: store, Diagnostic: beads.ExecStoreDiagnostic()}, err
+		return beads.StoreOpenResult{Store: wrapStoreWithBeadPolicies(store, cfg), Diagnostic: beads.ExecStoreDiagnostic()}, err
 	}
 	result, err := beads.OpenStoreAtForCity(context.Background(), beads.StoreOpenOptions{
 		ScopeRoot:        scopeRoot,
@@ -1252,6 +1253,7 @@ func openStoreResultAtForCity(storePath, cityPath string) (beads.StoreOpenResult
 	if err != nil {
 		return beads.StoreOpenResult{}, err
 	}
+	result.Store = wrapStoreWithBeadPolicies(result.Store, cfg)
 	return result, nil
 }
 

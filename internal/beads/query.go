@@ -24,16 +24,22 @@ const (
 // TierMode selects which storage tier(s) a List query reads from.
 // The zero value is TierIssues.
 //
-// TierIssues is the permanent tier and filters out Ephemeral rows when a store
-// returns them to the caller. TierBoth is a logical union; implementations may
-// satisfy it through a single backend query when the backing store exposes a
-// supported union surface for the requested bead type.
+// TierIssues is the permanent logical tier and filters out Ephemeral rows when
+// a store returns them to the caller. NoHistory rows remain visible to list
+// filters in TierIssues because they are durable work without Dolt history.
+// Raw bd ready defaults are narrower than the logical union surface. In bd
+// 1.0.4, ready queries cannot expose no-history rows with the full ready
+// filter semantics, so compatibility policy keeps claimable work history-backed
+// in that mode. TierBoth is a logical union; implementations may satisfy it
+// through a single backend query when the backing store exposes a supported
+// union surface for the requested bead type.
 type TierMode int
 
 const (
 	// TierIssues reads only the permanent (issues) tier. Default.
 	TierIssues TierMode = iota
-	// TierWisps reads only the ephemeral (wisps) tier.
+	// TierWisps reads only the wisp-backed tier, including ephemeral and
+	// no-history rows.
 	TierWisps
 	// TierBoth unions the issues and wisps tiers, deduping by ID and
 	// preserving the query's sort.
@@ -104,7 +110,10 @@ type ReadyQuery struct {
 	Assignee string
 	Limit    int
 	// TierMode selects the storage tier(s) to read from. Zero value
-	// (TierIssues) preserves Ready's historical main-tier behavior.
+	// (TierIssues) preserves raw Ready's historical main-tier behavior.
+	// Policy-aware callers should use the policy store wrapper, which expands
+	// default Ready reads to TierBoth so no-history and ephemeral policy rows
+	// remain reachable under bd 1.0.4.
 	TierMode TierMode
 }
 
@@ -137,7 +146,7 @@ func (q ListQuery) IncludesClosed() bool {
 func (q ListQuery) Matches(b Bead) bool {
 	switch q.TierMode {
 	case TierWisps:
-		if !b.Ephemeral {
+		if !b.Ephemeral && !b.NoHistory {
 			return false
 		}
 	case TierBoth:

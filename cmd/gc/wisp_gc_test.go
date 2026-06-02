@@ -268,6 +268,60 @@ func TestWispGC_PurgesExpiredMoleculeChildrenWithRoot(t *testing.T) {
 	}
 }
 
+func TestWispGC_PurgesExpiredClosureAcrossStorageTiers(t *testing.T) {
+	now := time.Now()
+	store := newGCStore([]beads.Bead{
+		{
+			ID:        "wisp-root",
+			Status:    "closed",
+			Type:      "task",
+			CreatedAt: now.Add(-2 * time.Hour),
+			Metadata:  map[string]string{"gc.kind": "wisp"},
+			Ephemeral: true,
+		},
+		{
+			ID:        "metadata-child",
+			Status:    "open",
+			Type:      "task",
+			CreatedAt: now.Add(-2 * time.Hour),
+			Metadata:  map[string]string{"gc.root_bead_id": "wisp-root"},
+			Ephemeral: true,
+		},
+		{
+			ID:        "parent-child",
+			Status:    "open",
+			Type:      "task",
+			CreatedAt: now.Add(-2 * time.Hour),
+			ParentID:  "wisp-root",
+			Ephemeral: true,
+		},
+		{
+			ID:        "no-history-child",
+			Status:    "open",
+			Type:      "task",
+			CreatedAt: now.Add(-2 * time.Hour),
+			ParentID:  "metadata-child",
+			NoHistory: true,
+		},
+	})
+	if err := store.DepAdd("parent-child", "wisp-root", "parent-child"); err != nil {
+		t.Fatalf("DepAdd(parent-child->wisp-root): %v", err)
+	}
+	if err := store.DepAdd("no-history-child", "metadata-child", "parent-child"); err != nil {
+		t.Fatalf("DepAdd(no-history-child->metadata-child): %v", err)
+	}
+
+	wg := newWispGC(5*time.Minute, time.Hour, 0)
+	purged, err := wg.runGC(store, now)
+	if err != nil {
+		t.Fatalf("runGC: %v", err)
+	}
+	if purged != 1 {
+		t.Fatalf("purged = %d, want 1 root purge accounting", purged)
+	}
+	assertDeletedIDs(t, store.deletedIDs, "wisp-root", "metadata-child", "parent-child", "no-history-child")
+}
+
 func TestWispGC_DoesNotDeleteExternalDependents(t *testing.T) {
 	now := time.Now()
 	store := newGCStore([]beads.Bead{
@@ -603,12 +657,12 @@ func makeGCBead(id string, createdAt time.Time, status, beadType string) beads.B
 }
 
 func makeGCBeadWithLabels(id string, createdAt time.Time, status, beadType string, labels ...string) beads.Bead {
-	// Order-tracking beads live in the ephemeral (wisps) tier in production;
+	// Order-tracking beads live in the no-history tier in production;
 	// mirror that here so wisp_gc's tier-aware queries see them.
-	ephemeral := false
+	noHistory := false
 	for _, l := range labels {
 		if l == labelOrderTracking {
-			ephemeral = true
+			noHistory = true
 			break
 		}
 	}
@@ -618,7 +672,7 @@ func makeGCBeadWithLabels(id string, createdAt time.Time, status, beadType strin
 		Type:      beadType,
 		CreatedAt: createdAt,
 		Labels:    labels,
-		Ephemeral: ephemeral,
+		NoHistory: noHistory,
 	}
 }
 

@@ -1190,6 +1190,10 @@ type BeadsConfig struct {
 	// This config surface is staged ahead of the native bead-event support;
 	// current hook behavior remains unchanged until lifecycle code opts in.
 	EventHooks *bool `toml:"event_hooks,omitempty" jsonschema:"default=true"`
+	// BDCompatibility selects the bd CLI semantics Gas City may rely on.
+	// Empty defaults to "bd-1.0.4", which keeps claimable work history-backed
+	// and avoids ready flags whose filtering is incomplete in bd 1.0.4.
+	BDCompatibility string `toml:"bd_compatibility,omitempty" jsonschema:"enum=bd-1.0.4,enum=bd-1.0.5"`
 	// Policies defines per-bead-use storage and garbage-collection defaults.
 	// Policy names are interpreted by higher-level systems; unknown names are
 	// preserved so packs can stage future policy classes without breaking load.
@@ -1200,6 +1204,34 @@ type BeadsConfig struct {
 // Unset preserves the current default of enabled hooks.
 func (b BeadsConfig) EventHooksEnabled() bool {
 	return b.EventHooks == nil || *b.EventHooks
+}
+
+const (
+	// BeadsBDCompatibility104 preserves behavior supported by installed bd
+	// 1.0.4, where ready filtering is reliable only for history-backed rows.
+	BeadsBDCompatibility104 = "bd-1.0.4"
+	// BeadsBDCompatibility105 opts into bd 1.0.5 ready/storage semantics.
+	BeadsBDCompatibility105 = "bd-1.0.5"
+)
+
+// NormalizedBDCompatibility returns the configured bd compatibility mode.
+// Empty and unknown values are treated as bd 1.0.4 by runtime code; validation
+// reports unknown values separately when loading user config.
+func (b BeadsConfig) NormalizedBDCompatibility() string {
+	switch b.BDCompatibility {
+	case "", BeadsBDCompatibility104:
+		return BeadsBDCompatibility104
+	case BeadsBDCompatibility105:
+		return BeadsBDCompatibility105
+	default:
+		return BeadsBDCompatibility104
+	}
+}
+
+// UsesBD105ReadySemantics reports whether generated bd ready commands may use
+// flags whose complete filter semantics require bd 1.0.5 or newer.
+func (b BeadsConfig) UsesBD105ReadySemantics() bool {
+	return b.NormalizedBDCompatibility() == BeadsBDCompatibility105
 }
 
 // BeadPolicyConfig holds storage and retention defaults for a named bead use.
@@ -3103,8 +3135,15 @@ func (a *Agent) AttachEnabled() bool {
 // target is passed as a positional argument to the outer sh -c command, not
 // interpolated into the nested shell body. That keeps routes containing shell
 // metacharacters as data instead of executable syntax.
-func bdReadyPoolDemandShell(limitFlag string) string {
-	return `bd ready --include-ephemeral --metadata-field "gc.routed_to=$target" --unassigned --exclude-type=epic --json ` + limitFlag
+func bdReadyIncludeEphemeralArg(includeEphemeralReady bool) string {
+	if includeEphemeralReady {
+		return " --include-ephemeral"
+	}
+	return ""
+}
+
+func bdReadyPoolDemandShell(limitFlag string, includeEphemeralReady bool) string {
+	return `bd ready` + bdReadyIncludeEphemeralArg(includeEphemeralReady) + ` --metadata-field "gc.routed_to=$target" --unassigned --exclude-type=epic --json ` + limitFlag
 }
 
 // bdReadyPoolDemandMigrationShell is a temporary raw compatibility probe for
@@ -3115,8 +3154,8 @@ func bdReadyPoolDemandShell(limitFlag string) string {
 // visible once a root carries gc.routed_to. This retirement-window fallback
 // requires jq in the default worker/reconciler environment; remove it with the
 // Go-side legacy candidates after the backfill completion tracked by ga-dhf44.
-func bdReadyPoolDemandMigrationShell(limitFlag string) string {
-	return `bd ready --include-ephemeral --metadata-field "gc.run_target=$target" --metadata-field "gc.kind=workflow" --unassigned --exclude-type=epic --json --sort oldest ` + limitFlag
+func bdReadyPoolDemandMigrationShell(limitFlag string, includeEphemeralReady bool) string {
+	return `bd ready` + bdReadyIncludeEphemeralArg(includeEphemeralReady) + ` --metadata-field "gc.run_target=$target" --metadata-field "gc.kind=workflow" --unassigned --exclude-type=epic --json --sort oldest ` + limitFlag
 }
 
 func poolDemandMigrationFilterJQ(limit int) string {
@@ -3131,23 +3170,23 @@ func poolDemandMigrationFilterJQ(limit int) string {
 // reads the first ready, unassigned, routed bead for the supplied target,
 // prints it, and exits 0. The caller appends a terminal fallthrough
 // (printf "[]") for the empty case.
-func poolDemandFirstRowFunctionScript() string {
+func poolDemandFirstRowFunctionScript(includeEphemeralReady bool) string {
 	return `probe_pool_demand() { ` +
 		`target="$1"; ` +
 		`[ -z "$target" ] && return 1; ` +
-		`r=$(` + routedReadyTierCommand() + `); ` +
+		`r=$(` + routedReadyTierCommand(includeEphemeralReady) + `); ` +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
-		`legacy_candidates=$(` + bdReadyPoolDemandMigrationShell("--limit=20") + ` 2>/dev/null); ` +
+		`legacy_candidates=$(` + bdReadyPoolDemandMigrationShell("--limit=20", includeEphemeralReady) + ` 2>/dev/null); ` +
 		`r=$(printf "%s" "$legacy_candidates" | ` + poolDemandMigrationFilterJQ(1) + ` 2>/dev/null); ` +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
 		`return 1; ` +
 		`}; `
 }
 
-func routedReadyTierCommand() string {
+func routedReadyTierCommand(includeEphemeralReady bool) string {
 	// The shared predicate stays order-free so the count-form does no wasted
 	// sorting; the worker first-row path asks bd for the oldest candidate.
-	return bdReadyPoolDemandShell("--sort oldest --limit=1") + ` 2>/dev/null`
+	return bdReadyPoolDemandShell("--sort oldest --limit=1", includeEphemeralReady) + ` 2>/dev/null`
 }
 
 // poolDemandCountShell emits the reconciler count-form for target: it counts
@@ -3161,10 +3200,10 @@ func routedReadyTierCommand() string {
 // masquerade as "no demand", which would silently stop the pool from spawning.
 // The && chain ensures any non-zero bd exit short-circuits the whole expression
 // (TestEffectiveScaleCheckUsesReadyOnly).
-func poolDemandCountShell(target string) string {
+func poolDemandCountShell(target string, includeEphemeralReady bool) string {
 	script := `target="$1"; ` +
-		`ready_json=$(` + bdReadyPoolDemandShell("--limit 0") + `) || exit $?; ` +
-		`legacy_candidates=$(` + bdReadyPoolDemandMigrationShell("--limit 0") + `) || exit $?; ` +
+		`ready_json=$(` + bdReadyPoolDemandShell("--limit 0", includeEphemeralReady) + `) || exit $?; ` +
+		`legacy_candidates=$(` + bdReadyPoolDemandMigrationShell("--limit 0", includeEphemeralReady) + `) || exit $?; ` +
 		`legacy_json=$(printf "%s" "$legacy_candidates" | ` + poolDemandMigrationFilterJQ(0) + `) || exit $?; ` +
 		`printf "%s\n%s\n" "$ready_json" "$legacy_json" | jq -s "(add // []) | unique_by(.id) | length"`
 	return shellquote.Join([]string{"sh", "-c", script, "--", target})
@@ -3178,26 +3217,26 @@ func (a *Agent) poolDemandTarget() string {
 	return target
 }
 
-func standardAssignedWorkQueryScript() string {
+func standardAssignedWorkQueryScript(includeEphemeralReady bool) string {
 	return `for id in "$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"; do ` +
 		`[ -z "$id" ] && continue; ` +
-		`r=$(bd list --include-ephemeral --status in_progress --assignee="$id" --json --limit=1 2>/dev/null); ` +
+		`r=$(bd list --status in_progress --assignee="$id" --json --limit=1 2>/dev/null); ` +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
 		`done; ` +
 		`for id in "$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"; do ` +
 		`[ -z "$id" ] && continue; ` +
-		`r=$(bd ready --include-ephemeral --assignee="$id" --json --limit=1 2>/dev/null); ` +
+		`r=$(bd ready` + bdReadyIncludeEphemeralArg(includeEphemeralReady) + ` --assignee="$id" --json --limit=1 2>/dev/null); ` +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
 		`done; `
 }
 
-func legacyControlAssignedWorkQueryScript() string {
+func legacyControlAssignedWorkQueryScript(includeEphemeralReady bool) string {
 	return `for id in "$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"; do ` +
 		`[ -z "$id" ] && continue; ` +
 		`legacy=""; case "$id" in *control-dispatcher) legacy="${id%control-dispatcher}workflow-control";; esac; ` +
 		`for cand in "$id" "$legacy"; do ` +
 		`[ -z "$cand" ] && continue; ` +
-		`r=$(bd list --include-ephemeral --status in_progress --assignee="$cand" --json --limit=1 2>/dev/null); ` +
+		`r=$(bd list --status in_progress --assignee="$cand" --json --limit=1 2>/dev/null); ` +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
 		`done; ` +
 		`done; ` +
@@ -3206,7 +3245,7 @@ func legacyControlAssignedWorkQueryScript() string {
 		`legacy=""; case "$id" in *control-dispatcher) legacy="${id%control-dispatcher}workflow-control";; esac; ` +
 		`for cand in "$id" "$legacy"; do ` +
 		`[ -z "$cand" ] && continue; ` +
-		`r=$(bd ready --include-ephemeral --assignee="$cand" --json --limit=1 2>/dev/null); ` +
+		`r=$(bd ready` + bdReadyIncludeEphemeralArg(includeEphemeralReady) + ` --assignee="$cand" --json --limit=1 2>/dev/null); ` +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
 		`done; ` +
 		`done; `
@@ -3230,9 +3269,10 @@ func poolDemandOriginGateScript() string {
 //
 // State priority: in_progress+assigned (crash recovery) >
 // ready+assigned (pre-assigned) > ready+unassigned+routed_to (pool).
-// Executable formula roots are ephemeral epics (mol wisp preserves the
-// template-epic IssueType and marks Ephemeral=true); molecule containers
-// are not routable demand.
+// Executable formula roots can be epic-typed; the bead storage policy decides
+// whether those roots are history-backed, no-history, or ephemeral for the
+// configured bd compatibility mode. Molecule containers are not routable
+// demand.
 //
 // Parent epics are excluded from the routed (pool) tier only
 // (--exclude-type=epic). An unassigned parent epic has no executable spec —
@@ -3240,12 +3280,12 @@ func poolDemandOriginGateScript() string {
 // undefined work (gc-udx; the repro is a routed parent epic, see
 // TestEffectiveWorkQuerySkipsEpicLeafScenario). The assigned tiers do NOT
 // exclude epics: work already assigned to this agent is owned, and the
-// patrol-loop pattern (gastown witness/refinery/deacon) self-assigns an
-// ephemeral epic wisp that the agent must resume after a session restart.
-// Excluding epics there silently stranded those wisps (gc hook exited 1 with
-// empty output). Roles that need different behavior still opt in via an
-// explicit work_query in their agent config; that custom query is returned
-// unchanged above.
+// patrol-loop pattern (gastown witness/refinery/deacon) can self-assign an
+// epic wisp that the agent must resume after a session restart. Excluding
+// epics there silently stranded those wisps (gc hook exited 1 with empty
+// output). Roles that need different behavior still opt in via an explicit
+// work_query in their agent config; that custom query is returned unchanged
+// above.
 //
 // When the reconciler runs the query for demand detection (no session
 // context), all identity vars are empty → assignee tiers skip → only
@@ -3255,22 +3295,32 @@ func poolDemandOriginGateScript() string {
 // EffectivePoolDemandQuery so reconciler spawn decisions and worker claim
 // decisions stay symmetric.
 func (a *Agent) EffectiveWorkQuery() string {
+	return a.effectiveWorkQuery(false)
+}
+
+// EffectiveWorkQueryForBeads returns the default work query using the bd
+// compatibility semantics configured for the city.
+func (a *Agent) EffectiveWorkQueryForBeads(beads BeadsConfig) string {
+	return a.effectiveWorkQuery(beads.UsesBD105ReadySemantics())
+}
+
+func (a *Agent) effectiveWorkQuery(includeEphemeralReady bool) string {
 	if a.WorkQuery != "" {
 		return a.WorkQuery
 	}
 	target := a.poolDemandTarget()
 	legacyTarget := legacyWorkflowControlQualifiedName(target)
 	if legacyTarget == "" {
-		script := standardAssignedWorkQueryScript() +
+		script := standardAssignedWorkQueryScript(includeEphemeralReady) +
 			poolDemandOriginGateScript() +
-			poolDemandFirstRowFunctionScript() +
+			poolDemandFirstRowFunctionScript(includeEphemeralReady) +
 			`probe_pool_demand "$1"; ` +
 			`printf "[]"`
 		return shellquote.Join([]string{"sh", "-c", script, "--", target})
 	}
-	script := legacyControlAssignedWorkQueryScript() +
+	script := legacyControlAssignedWorkQueryScript(includeEphemeralReady) +
 		poolDemandOriginGateScript() +
-		poolDemandFirstRowFunctionScript() +
+		poolDemandFirstRowFunctionScript(includeEphemeralReady) +
 		`probe_pool_demand "$1"; ` +
 		`probe_pool_demand "$2"; ` +
 		`printf "[]"`
@@ -3352,11 +3402,21 @@ func (a *Agent) DrainTimeoutDuration() time.Duration {
 // correspondence" and the protocol-mismatch class regression addressed
 // by PR #1516.
 func (a *Agent) EffectivePoolDemandQuery() string {
+	return a.effectivePoolDemandQuery(false)
+}
+
+// EffectivePoolDemandQueryForBeads returns the count-form demand query using
+// the bd compatibility semantics configured for the city.
+func (a *Agent) EffectivePoolDemandQueryForBeads(beads BeadsConfig) string {
+	return a.effectivePoolDemandQuery(beads.UsesBD105ReadySemantics())
+}
+
+func (a *Agent) effectivePoolDemandQuery(includeEphemeralReady bool) string {
 	if a.ScaleCheck != "" {
 		return a.ScaleCheck
 	}
 	target := a.poolDemandTarget()
-	return poolDemandCountShell(target)
+	return poolDemandCountShell(target, includeEphemeralReady)
 }
 
 // EffectiveScaleCheck returns the scale check command for this agent.
@@ -3523,7 +3583,7 @@ func (a *Agent) EffectiveOnDeath() string {
 	// If routed metadata is missing entirely, backfill the canonical
 	// gc.run_target route so reopened direct-assigned work does not stay
 	// invisible.
-	return `bd list --include-ephemeral --assignee=` + a.QualifiedName() +
+	return `bd list --assignee=` + a.QualifiedName() +
 		` --status=in_progress --json 2>/dev/null | ` +
 		`jq -r '.[] | [.id, (.metadata["gc.run_target"] // ""), (.metadata["gc.routed_to"] // "")] | @tsv' 2>/dev/null | ` +
 		`while IFS="$(printf '\t')" read -r id run_target routed_to; do ` +
@@ -3548,9 +3608,9 @@ func (a *Agent) EffectiveOnBoot() string {
 	}
 	return `template=` + shellquote.Quote(template) + `; ` +
 		`{ ` +
-		`bd list --include-ephemeral --metadata-field "gc.routed_to=$template" --status=in_progress --no-assignee --json 2>/dev/null | ` +
+		`bd list --metadata-field "gc.routed_to=$template" --status=in_progress --no-assignee --json 2>/dev/null | ` +
 		`jq -r '.[].id' 2>/dev/null; ` +
-		`bd list --include-ephemeral --metadata-field "gc.run_target=$template" --metadata-field "gc.kind=workflow" --status=in_progress --no-assignee --json 2>/dev/null | ` +
+		`bd list --metadata-field "gc.run_target=$template" --metadata-field "gc.kind=workflow" --status=in_progress --no-assignee --json 2>/dev/null | ` +
 		`jq -r '.[] | select((.metadata["gc.routed_to"] // "") == "") | .id' 2>/dev/null; ` +
 		`} | awk 'NF && !seen[$0]++' | ` +
 		`xargs -rI{} bd update {} --status open 2>/dev/null`

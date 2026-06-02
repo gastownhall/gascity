@@ -2210,9 +2210,10 @@ provider = "file"
 	if !factoryCalled {
 		t.Fatal("buildStores did not route bd-backed rig through store factory")
 	}
-	cached, ok := stores["frontend"].(*beads.CachingStore)
+	frontendStore := underlyingPolicyStoreForTest(stores["frontend"])
+	cached, ok := frontendStore.(*beads.CachingStore)
 	if !ok {
-		t.Fatalf("frontend store = %T, want caching store", stores["frontend"])
+		t.Fatalf("frontend store = %T, want caching store", frontendStore)
 	}
 	if cached.Backing() != nativeBacking {
 		t.Fatalf("frontend backing = %T, want native factory backing", cached.Backing())

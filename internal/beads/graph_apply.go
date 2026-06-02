@@ -20,6 +20,12 @@ type GraphApplyPlan struct {
 	Edges         []GraphApplyEdge `json:"edges,omitempty"`
 }
 
+// EphemeralGraphApplyStore reports whether a GraphApplyStore can create an
+// entire graph in ephemeral storage.
+type EphemeralGraphApplyStore interface {
+	SupportsEphemeralGraphApply() bool
+}
+
 // GraphApplyNode describes a single bead to create.
 type GraphApplyNode struct {
 	Key               string            `json:"key"`

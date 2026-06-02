@@ -108,9 +108,13 @@ type scaleParams struct {
 // decisions and worker claim decisions structurally symmetric. See
 // engdocs/architecture/dispatch.md "scale_check ↔ work_query correspondence".
 func scaleParamsFor(a *config.Agent) scaleParams {
+	return scaleParamsForBeads(a, config.BeadsConfig{})
+}
+
+func scaleParamsForBeads(a *config.Agent, beadsCfg config.BeadsConfig) scaleParams {
 	sp := scaleParams{
 		Min:   a.EffectiveMinActiveSessions(),
-		Check: a.EffectivePoolDemandQuery(),
+		Check: a.EffectivePoolDemandQueryForBeads(beadsCfg),
 	}
 	if m := a.EffectiveMaxActiveSessions(); m != nil {
 		sp.Max = *m

@@ -738,7 +738,7 @@ func TestComputeWorkSet_RunsWorkQuery(t *testing.T) {
 	}
 
 	runner := func(command, _ string, _ map[string]string) (string, error) {
-		if strings.Contains(command, `bd ready --include-ephemeral --metadata-field "gc.routed_to=$target"`) && strings.Contains(command, "-- worker") {
+		if strings.Contains(command, `bd ready --metadata-field "gc.routed_to=$target"`) && strings.Contains(command, "-- worker") {
 			return `[{"id":"BL-42"}]`, nil
 		}
 		return "", nil // empty = no work for idle's custom query

@@ -7220,10 +7220,10 @@ func TestLockedStderrWrapsNonNil(t *testing.T) {
 	}
 }
 
-// TestOrderDispatchTrackingBeadIsEphemeral asserts the dispatcher routes the
-// tracking bead to the wisps tier (Ephemeral=true), so each cooldown cycle
-// does not produce a full Dolt commit on the permanent issues tier.
-func TestOrderDispatchTrackingBeadIsEphemeral(t *testing.T) {
+// TestOrderDispatchTrackingBeadIsNoHistory asserts the dispatcher routes the
+// tracking bead to the no-history tier, so each cooldown cycle avoids a full
+// Dolt commit while remaining visible to normal issue-tier reads.
+func TestOrderDispatchTrackingBeadIsNoHistory(t *testing.T) {
 	store := beads.NewMemStore()
 
 	aa := []orders.Order{{
@@ -7253,33 +7253,40 @@ func TestOrderDispatchTrackingBeadIsEphemeral(t *testing.T) {
 	if tb == nil {
 		t.Fatal("no tracking bead found")
 	}
-	if !tb.Ephemeral {
-		t.Errorf("tracking bead Ephemeral = false, want true")
+	if tb.Ephemeral || !tb.NoHistory {
+		t.Errorf("tracking bead storage = Ephemeral:%v NoHistory:%v, want no-history only", tb.Ephemeral, tb.NoHistory)
 	}
-	// Tracking bead must NOT be visible to issues-tier-only queries —
-	// that is the whole point of routing it to the wisps tier.
+	// No-history beads remain visible to issue-tier reads, which keeps
+	// bd 1.0.4 ready/list compatibility while avoiding Dolt history pressure.
 	issuesOnly, err := store.ListByLabel("order-run:wisp-order", 0, beads.IncludeClosed)
 	if err != nil {
 		t.Fatal(err)
 	}
+	found := false
 	for _, b := range issuesOnly {
 		if strings.HasPrefix(b.Title, "order:") {
-			t.Errorf("ephemeral tracking bead leaked into issues-tier query: %+v", b)
+			found = true
+			if b.Ephemeral || !b.NoHistory {
+				t.Errorf("issue-tier tracking bead storage = Ephemeral:%v NoHistory:%v, want no-history only", b.Ephemeral, b.NoHistory)
+			}
 		}
+	}
+	if !found {
+		t.Errorf("no-history tracking bead was not visible to issues-tier query")
 	}
 }
 
-// TestOrderDispatchSingleFlightLockSeesEphemeralTracker is the regression
+// TestOrderDispatchSingleFlightLockSeesNoHistoryTracker is the regression
 // guard for the single-flight lock (`hasOpenWorkInStoresStrict`) after the
-// tracking bead moved to the wisps tier. If the lock query were not
+// tracking bead moved out of history. If the lock query were not
 // tier-aware, the dispatcher would re-fire the same cooldown order on the
 // next tick.
-func TestOrderDispatchSingleFlightLockSeesEphemeralTracker(t *testing.T) {
+func TestOrderDispatchSingleFlightLockSeesNoHistoryTracker(t *testing.T) {
 	store := beads.NewMemStore()
 	if _, err := store.Create(beads.Bead{
 		Title:     "order:double-fire",
 		Labels:    []string{"order-run:double-fire", labelOrderTracking},
-		Ephemeral: true,
+		NoHistory: true,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -7290,7 +7297,7 @@ func TestOrderDispatchSingleFlightLockSeesEphemeralTracker(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !hasOpen {
-		t.Fatal("single-flight lock missed ephemeral tracking bead — would dispatch again")
+		t.Fatal("single-flight lock missed no-history tracking bead; would dispatch again")
 	}
 }
 
@@ -7303,7 +7310,7 @@ func TestOrderDispatchSingleFlightLockSeesBackingOnlyCachedTracker(t *testing.T)
 	if _, err := backing.Create(beads.Bead{
 		Title:     "order:double-fire",
 		Labels:    []string{"order-run:double-fire", labelOrderTracking},
-		Ephemeral: true,
+		NoHistory: true,
 	}); err != nil {
 		t.Fatal(err)
 	}

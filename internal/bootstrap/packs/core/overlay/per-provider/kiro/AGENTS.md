@@ -31,6 +31,6 @@ check for and claim new work from the queue.
 - `gc nudge drain --inject` — drain queued nudges
 - `gc mail check --inject` — check for inter-agent messages
 - `gc hook` — check for and claim available work
-- `bd ready` — list ready beads (tasks)
+- `bd ready --include-ephemeral` — list ready beads (tasks)
 - `bd show <id>` — show bead details
 - `bd close <id>` — mark a bead as done

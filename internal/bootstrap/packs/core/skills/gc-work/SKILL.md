@@ -37,8 +37,8 @@ gc bd create "title" --label priority=high  # Create with labels
 ```
 gc bd list                                # List beads in current .beads/
 gc bd list --rig <rigname>                # List beads in a specific rig
-gc bd ready                               # List beads available for claiming
-gc bd ready --label role:worker           # Filter by label
+gc bd ready --include-ephemeral           # List beads available for claiming
+gc bd ready --include-ephemeral --label role:worker # Filter by label
 gc bd show <id>                           # Show bead details
 ```
 

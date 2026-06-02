@@ -1063,8 +1063,8 @@ name = "test-city"
 	if len(results) != 1 {
 		t.Fatalf("store.ListByLabel() len = %d, want 1 (%#v)", len(results), results)
 	}
-	if !results[0].Ephemeral {
-		t.Fatalf("tracking bead Ephemeral = false, want true")
+	if results[0].Ephemeral || !results[0].NoHistory {
+		t.Fatalf("tracking bead storage = Ephemeral:%v NoHistory:%v, want no-history only", results[0].Ephemeral, results[0].NoHistory)
 	}
 	for _, want := range []string{"order:release-exec", fmt.Sprintf("seq:%d", headSeq), "exec"} {
 		if !slicesContain(results[0].Labels, want) {
@@ -1127,8 +1127,8 @@ on = "bead.closed"
 	if len(results) != 1 {
 		t.Fatalf("store.ListByLabel() len = %d, want 1 (%#v)", len(results), results)
 	}
-	if !results[0].Ephemeral {
-		t.Fatalf("tracking bead Ephemeral = false, want true")
+	if results[0].Ephemeral || !results[0].NoHistory {
+		t.Fatalf("tracking bead storage = Ephemeral:%v NoHistory:%v, want no-history only", results[0].Ephemeral, results[0].NoHistory)
 	}
 	for _, want := range []string{"order:release-exec", fmt.Sprintf("seq:%d", headSeq), "exec"} {
 		if !slicesContain(results[0].Labels, want) {

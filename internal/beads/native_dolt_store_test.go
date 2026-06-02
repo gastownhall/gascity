@@ -101,6 +101,32 @@ func TestNativeDoltStoreCreateGetPreservesDeferUntil(t *testing.T) {
 	}
 }
 
+func TestNativeDoltStoreCreateGetPreservesNoHistory(t *testing.T) {
+	store := newNativeDoltStoreForTest(newNativeDoltMemStorage())
+
+	created, err := store.Create(Bead{Title: "native no history", NoHistory: true})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if !created.NoHistory {
+		t.Fatalf("created.NoHistory = false, want true")
+	}
+	if created.Ephemeral {
+		t.Fatalf("created.Ephemeral = true, want false for no-history bead")
+	}
+
+	got, err := store.Get(created.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if !got.NoHistory {
+		t.Fatalf("got.NoHistory = false, want true")
+	}
+	if got.Ephemeral {
+		t.Fatalf("got.Ephemeral = true, want false for no-history bead")
+	}
+}
+
 func TestNativeDoltStoreCreatePropagatesUpstreamError(t *testing.T) {
 	wantErr := errors.New("create failed")
 	storage := &nativeDoltStorageSpy{
@@ -1392,6 +1418,87 @@ func TestCachingStoreCreateWithNativeDoltStoreHydratesDependencies(t *testing.T)
 	assertNativeDependency(t, created.Dependencies, child.ID, blocker.ID, "blocks")
 }
 
+func TestNativeDoltStoreApplyGraphPlanWithStorageEphemeral(t *testing.T) {
+	store := newNativeDoltStoreForTest(newNativeDoltMemStorage())
+
+	result, err := store.ApplyGraphPlanWithStorage(t.Context(), &GraphApplyPlan{
+		CommitMessage: "gc: native ephemeral graph",
+		Nodes: []GraphApplyNode{
+			{Key: "root", Title: "Root", Metadata: map[string]string{"gc.kind": "wisp"}},
+			{Key: "blocker", Title: "Blocker"},
+			{
+				Key:               "child",
+				Title:             "Child",
+				ParentKey:         "root",
+				Assignee:          "gascity/worker",
+				AssignAfterCreate: true,
+				MetadataRefs:      map[string]string{"gc.root_bead_id": "root", "gc.blocker_id": "blocker"},
+			},
+		},
+		Edges: []GraphApplyEdge{
+			{FromKey: "child", ToKey: "blocker"},
+		},
+	}, StorageEphemeral)
+	if err != nil {
+		t.Fatalf("ApplyGraphPlanWithStorage: %v", err)
+	}
+
+	root, err := store.Get(result.IDs["root"])
+	if err != nil {
+		t.Fatalf("Get root: %v", err)
+	}
+	blocker, err := store.Get(result.IDs["blocker"])
+	if err != nil {
+		t.Fatalf("Get blocker: %v", err)
+	}
+	child, err := store.Get(result.IDs["child"])
+	if err != nil {
+		t.Fatalf("Get child: %v", err)
+	}
+
+	for _, bead := range []Bead{root, blocker, child} {
+		if !bead.Ephemeral {
+			t.Fatalf("bead %s Ephemeral = false, want true", bead.ID)
+		}
+		if bead.NoHistory {
+			t.Fatalf("bead %s NoHistory = true, want false", bead.ID)
+		}
+	}
+	if child.Assignee != "gascity/worker" {
+		t.Fatalf("child.Assignee = %q, want gascity/worker", child.Assignee)
+	}
+	if child.Metadata["gc.root_bead_id"] != root.ID || child.Metadata["gc.blocker_id"] != blocker.ID {
+		t.Fatalf("child metadata refs = %#v, want root/blocker IDs", child.Metadata)
+	}
+	if child.ParentID != root.ID {
+		t.Fatalf("child.ParentID = %q, want %q", child.ParentID, root.ID)
+	}
+	assertNativeDependency(t, child.Dependencies, child.ID, root.ID, string(beadslib.DepParentChild))
+	assertNativeDependency(t, child.Dependencies, child.ID, blocker.ID, string(beadslib.DepBlocks))
+}
+
+func TestNativeDoltStoreApplyGraphPlanWithStorageNoHistory(t *testing.T) {
+	store := newNativeDoltStoreForTest(newNativeDoltMemStorage())
+
+	result, err := store.ApplyGraphPlanWithStorage(t.Context(), &GraphApplyPlan{
+		Nodes: []GraphApplyNode{{Key: "node", Title: "No-history graph node"}},
+	}, StorageNoHistory)
+	if err != nil {
+		t.Fatalf("ApplyGraphPlanWithStorage: %v", err)
+	}
+
+	got, err := store.Get(result.IDs["node"])
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if !got.NoHistory {
+		t.Fatalf("NoHistory = false, want true")
+	}
+	if got.Ephemeral {
+		t.Fatalf("Ephemeral = true, want false")
+	}
+}
+
 func assertNativeDependency(t *testing.T, deps []Dep, issueID, dependsOnID, depType string) {
 	t.Helper()
 	for _, dep := range deps {
@@ -1403,6 +1510,7 @@ func assertNativeDependency(t *testing.T, deps []Dep, issueID, dependsOnID, depT
 }
 
 type nativeDoltTransactionTestStorage interface {
+	CreateIssues(context.Context, []*beadslib.Issue, string) error
 	GetIssue(context.Context, string) (*beadslib.Issue, error)
 	UpdateIssue(context.Context, string, map[string]interface{}, string) error
 	AddLabel(context.Context, string, string, string) error
@@ -1415,6 +1523,10 @@ type nativeDoltTransactionTestStorage interface {
 type nativeDoltTransactionForTest struct {
 	beadslib.Transaction
 	storage nativeDoltTransactionTestStorage
+}
+
+func (tx nativeDoltTransactionForTest) CreateIssues(ctx context.Context, issues []*beadslib.Issue, actor string) error {
+	return tx.storage.CreateIssues(ctx, issues, actor)
 }
 
 func (tx nativeDoltTransactionForTest) GetIssue(ctx context.Context, id string) (*beadslib.Issue, error) {
@@ -1448,6 +1560,7 @@ func (tx nativeDoltTransactionForTest) GetDependencyRecords(ctx context.Context,
 type nativeDoltStorageSpy struct {
 	beadslib.Storage
 	createIssue                 func(context.Context, *beadslib.Issue, string) error
+	createIssues                func(context.Context, []*beadslib.Issue, string) error
 	getIssue                    func(context.Context, string) (*beadslib.Issue, error)
 	updateIssue                 func(context.Context, string, map[string]interface{}, string) error
 	runInTransaction            func(context.Context, string, func(beadslib.Transaction) error) error
@@ -1472,6 +1585,18 @@ func (s *nativeDoltStorageSpy) CreateIssue(ctx context.Context, issue *beadslib.
 		return nil
 	}
 	return s.createIssue(ctx, issue, actor)
+}
+
+func (s *nativeDoltStorageSpy) CreateIssues(ctx context.Context, issues []*beadslib.Issue, actor string) error {
+	if s.createIssues != nil {
+		return s.createIssues(ctx, issues, actor)
+	}
+	for _, issue := range issues {
+		if err := s.CreateIssue(ctx, issue, actor); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *nativeDoltStorageSpy) GetIssue(ctx context.Context, id string) (*beadslib.Issue, error) {
@@ -1643,6 +1768,15 @@ func (s *nativeDoltMemStorage) CreateIssue(_ context.Context, issue *beadslib.Is
 		return err
 	}
 	*issue = *converted
+	return nil
+}
+
+func (s *nativeDoltMemStorage) CreateIssues(ctx context.Context, issues []*beadslib.Issue, actor string) error {
+	for _, issue := range issues {
+		if err := s.CreateIssue(ctx, issue, actor); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 

@@ -31,12 +31,12 @@ Check what's happening across the swarm:
 
 - `gc bd list --status=open` — all open work
 - `gc bd list --status=in_progress` — what coders are working on
-- `gc bd ready --unassigned` — unclaimed work
+- `gc bd ready --include-ephemeral --unassigned` — unclaimed work
 - `gc mail inbox` — messages from coders
 
 ## Communication
 
-- **Broadcast**: `gc mail send --all "New tasks filed — check gc bd ready"`
+- **Broadcast**: `gc mail send --all "New tasks filed — check gc bd ready --include-ephemeral"`
 - **Direct**: `gc mail send <rig>/<agent> "Priority shift: focus on auth"`
 - **Check mail**: `gc mail check`
 

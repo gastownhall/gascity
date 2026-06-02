@@ -477,17 +477,18 @@ func TestRenderPromptWorkQuery(t *testing.T) {
 
 func TestBuildTemplateData(t *testing.T) {
 	ctx := PromptContext{
-		CityRoot:      "/city",
-		AgentName:     "a/b",
-		TemplateName:  "b",
-		BindingName:   "dep",
-		BindingPrefix: "dep.",
-		RigName:       "a",
-		WorkDir:       "/city/a",
-		IssuePrefix:   "te-",
-		Branch:        "main",
-		DefaultBranch: "main",
-		Env:           map[string]string{"Custom": "val", "CityRoot": "override"},
+		CityRoot:           "/city",
+		AgentName:          "a/b",
+		TemplateName:       "b",
+		BindingName:        "dep",
+		BindingPrefix:      "dep.",
+		RigName:            "a",
+		WorkDir:            "/city/a",
+		IssuePrefix:        "te-",
+		Branch:             "main",
+		DefaultBranch:      "main",
+		AssignedReadyQuery: `gc bd ready --assignee="$GC_SESSION_NAME"`,
+		Env:                map[string]string{"Custom": "val", "CityRoot": "override"},
 	}
 	data := buildTemplateData(ctx)
 	// SDK vars override Env.
@@ -508,6 +509,9 @@ func TestBuildTemplateData(t *testing.T) {
 	}
 	if data["DefaultBranch"] != "main" {
 		t.Errorf("DefaultBranch = %q, want %q", data["DefaultBranch"], "main")
+	}
+	if data["AssignedReadyQuery"] != `gc bd ready --assignee="$GC_SESSION_NAME"` {
+		t.Errorf("AssignedReadyQuery = %q", data["AssignedReadyQuery"])
 	}
 }
 

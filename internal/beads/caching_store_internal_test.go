@@ -45,6 +45,51 @@ func TestCachingStoreRunReconciliationDetectsLabelContentChanges(t *testing.T) {
 	}
 }
 
+func TestCachingStoreCreateWithStorageForwardsPolicyStorageAndCachesResult(t *testing.T) {
+	backing := &storageCreateRecordingStore{Store: NewMemStore()}
+	cache := NewCachingStoreForTest(backing, nil)
+
+	created, err := cache.CreateWithStorage(Bead{Title: "session"}, StorageNoHistory)
+	if err != nil {
+		t.Fatalf("CreateWithStorage: %v", err)
+	}
+
+	if backing.storage != StorageNoHistory {
+		t.Fatalf("backing storage = %q, want %q", backing.storage, StorageNoHistory)
+	}
+	if !created.NoHistory || created.Ephemeral {
+		t.Fatalf("created storage = ephemeral:%v no_history:%v, want no-history", created.Ephemeral, created.NoHistory)
+	}
+	cached, err := cache.Get(created.ID)
+	if err != nil {
+		t.Fatalf("cache Get: %v", err)
+	}
+	if cached.ID != created.ID || !cached.NoHistory || cached.Ephemeral {
+		t.Fatalf("cached bead = %+v, want no-history created bead %s", cached, created.ID)
+	}
+}
+
+type storageCreateRecordingStore struct {
+	Store
+	storage StorageClass
+}
+
+func (s *storageCreateRecordingStore) CreateWithStorage(b Bead, storage StorageClass) (Bead, error) {
+	s.storage = storage
+	switch storage {
+	case StorageNoHistory:
+		b.NoHistory = true
+		b.Ephemeral = false
+	case StorageEphemeral:
+		b.Ephemeral = true
+		b.NoHistory = false
+	case StorageHistory:
+		b.Ephemeral = false
+		b.NoHistory = false
+	}
+	return s.Create(b)
+}
+
 func TestCachingStoreRunReconciliationSkipLabelsSuppressesLabelOnlyUpdates(t *testing.T) {
 	t.Parallel()
 

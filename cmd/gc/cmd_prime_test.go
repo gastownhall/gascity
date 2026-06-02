@@ -45,8 +45,25 @@ func TestBuildPrimeContextExpandsTemplateCommands(t *testing.T) {
 	if ctx.WorkQuery != "echo demo-city demo worker" {
 		t.Fatalf("WorkQuery = %q, want %q", ctx.WorkQuery, "echo demo-city demo worker")
 	}
+	if ctx.AssignedReadyQuery != `gc bd ready --assignee="$GC_SESSION_NAME"` {
+		t.Fatalf("AssignedReadyQuery = %q, want bd-1.0.4-compatible default", ctx.AssignedReadyQuery)
+	}
 	if ctx.SlingQuery != "dispatch {} --route=demo/worker --city=demo-city" {
 		t.Fatalf("SlingQuery = %q, want %q", ctx.SlingQuery, "dispatch {} --route=demo/worker --city=demo-city")
+	}
+}
+
+func TestBuildPrimeContextUsesBD105ReadyCompatibility(t *testing.T) {
+	cityPath := filepath.Join(t.TempDir(), "demo-city")
+	ctx := buildPrimeContextForBeads(cityPath, "", &config.Agent{
+		Name: "worker",
+	}, nil, config.BeadsConfig{BDCompatibility: config.BeadsBDCompatibility105}, nil)
+
+	if ctx.AssignedReadyQuery != `gc bd ready --include-ephemeral --assignee="$GC_SESSION_NAME"` {
+		t.Fatalf("AssignedReadyQuery = %q, want bd-1.0.5-compatible assigned ready query", ctx.AssignedReadyQuery)
+	}
+	if !strings.Contains(ctx.WorkQuery, "bd ready --include-ephemeral") {
+		t.Fatalf("WorkQuery = %q, want bd-1.0.5-compatible ready probes", ctx.WorkQuery)
 	}
 }
 

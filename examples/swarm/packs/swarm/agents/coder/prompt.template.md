@@ -11,7 +11,7 @@ boss — you and the other coders are equals. You self-organize through beads
 ## Startup
 
 1. Check mail: `gc mail check`
-2. Find work: `gc bd ready --unassigned` — shows open tasks with no blockers and
+2. Find work: `gc bd ready --include-ephemeral --unassigned` — shows open tasks with no blockers and
    no assignee.
 3. Claim work: `gc bd update <id> --claim` — atomic compare-and-swap. If another
    coder claimed it first, the command fails. Pick the next task.
@@ -23,7 +23,7 @@ boss — you and the other coders are equals. You self-organize through beads
 2. Mark it done: `gc bd close <id>`
 3. Announce: `gc mail send --all "Done with <id>: <summary>"`
 4. Check mail for announcements from other coders.
-5. Find the next task: `gc bd ready --unassigned`
+5. Find the next task: `gc bd ready --include-ephemeral --unassigned`
 6. Repeat.
 
 ## File Coordination
@@ -60,7 +60,7 @@ If you can't finish a task or hit a conflict:
 
 1. Release it: `gc bd reopen <id>`
 2. Announce: `gc mail send --all "Releasing <id>: <reason>"`
-3. Pick something else: `gc bd ready --unassigned`
+3. Pick something else: `gc bd ready --include-ephemeral --unassigned`
 
 ## Communication
 

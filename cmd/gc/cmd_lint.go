@@ -372,6 +372,7 @@ func lintPromptContext(packDir string, agentCfg config.Agent, providers map[stri
 		Branch:              "feature/lint",
 		DefaultBranch:       "main",
 		WorkQuery:           agentCfg.EffectiveWorkQuery(),
+		AssignedReadyQuery:  assignedReadyQueryForBeads(config.BeadsConfig{}),
 		SlingQuery:          agentCfg.EffectiveSlingQuery(),
 		ProviderKey:         providerKey,
 		ProviderDisplayName: providerDisplayNameFor(providerKey, providers),

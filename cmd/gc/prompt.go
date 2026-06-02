@@ -36,7 +36,10 @@ type PromptContext struct {
 	Branch        string
 	DefaultBranch string // e.g. "main" — from git symbolic-ref origin/HEAD
 	WorkQuery     string // command to find available work (from Agent.EffectiveWorkQuery)
-	SlingQuery    string // command template to route work to this agent (from Agent.EffectiveSlingQuery)
+	// AssignedReadyQuery is the storage-compatibility-aware command for
+	// pre-assigned ready work in agent-facing startup instructions.
+	AssignedReadyQuery string
+	SlingQuery         string // command template to route work to this agent (from Agent.EffectiveSlingQuery)
 	// ProviderKey is the resolved provider name for this agent (e.g. "claude",
 	// "codex", or a custom provider name from the city's [providers] section).
 	// Templates can branch on this via {{ .ProviderKey }} or feed it to
@@ -329,6 +332,7 @@ func buildTemplateData(ctx PromptContext) map[string]string {
 	m["Branch"] = ctx.Branch
 	m["DefaultBranch"] = ctx.DefaultBranch
 	m["WorkQuery"] = ctx.WorkQuery
+	m["AssignedReadyQuery"] = ctx.AssignedReadyQuery
 	m["SlingQuery"] = ctx.SlingQuery
 	m["ProviderKey"] = ctx.ProviderKey
 	m["ProviderDisplayName"] = ctx.ProviderDisplayName
