@@ -299,12 +299,29 @@ func peekBeadsProvider(tomlPath string) string {
 	var peek struct {
 		Beads struct {
 			Provider string `toml:"provider"`
+			Backend  string `toml:"backend"`
 		} `toml:"beads"`
 	}
 	if _, err := toml.Decode(string(data), &peek); err != nil {
 		return ""
 	}
 	return peek.Beads.Provider
+}
+
+func peekBeadsBackend(tomlPath string) string {
+	data, err := os.ReadFile(tomlPath)
+	if err != nil {
+		return ""
+	}
+	var peek struct {
+		Beads struct {
+			Backend string `toml:"backend"`
+		} `toml:"beads"`
+	}
+	if _, err := toml.Decode(string(data), &peek); err != nil {
+		return ""
+	}
+	return peek.Beads.Backend
 }
 
 // peekEventsProvider reads just the events.provider field from a city.toml

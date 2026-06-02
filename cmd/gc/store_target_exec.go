@@ -18,7 +18,8 @@ type execStoreTarget struct {
 }
 
 func execProjectedBackendEnvKeys() []string {
-	keys := make([]string, 0, len(projectedDoltEnvKeys)+len(projectedPostgresEnvKeys)+len(bdCLIRemoteSyncOptOutEnvKeys))
+	keys := make([]string, 0, len(projectedBeadsBackendEnvKeys)+len(projectedDoltEnvKeys)+len(projectedPostgresEnvKeys)+len(bdCLIRemoteSyncOptOutEnvKeys))
+	keys = append(keys, projectedBeadsBackendEnvKeys...)
 	keys = append(keys, projectedDoltEnvKeys...)
 	keys = append(keys, projectedPostgresEnvKeys...)
 	keys = appendBdCLIRemoteSyncOptOutEnvKeys(keys)

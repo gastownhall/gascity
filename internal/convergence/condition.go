@@ -183,10 +183,11 @@ func containedIn(absPath, root string) bool {
 // For relative paths, both the lexically-joined and the symlink-resolved
 // targets must land inside envelope OR base — defending against both
 // `../`-style traversal and symlinks that escape containment after
-// resolution. Absolute paths skip containment in this function; callers
-// (e.g. internal/dispatch/ralph.go) must validate absolute-string inputs
-// before passing them in. Returns the canonical absolute path after
-// symlink resolution and an exec-eligible file check.
+// resolution. Absolute paths skip containment in this function because
+// imported and registry-installed packs can live outside the city/store roots.
+// Callers must only pass absolute paths from surfaces they trust. Returns the
+// canonical absolute path after symlink resolution and an exec-eligible file
+// check.
 func ResolveConditionPath(envelope, base, conditionPath string) (string, error) {
 	if conditionPath == "" {
 		return "", fmt.Errorf("resolving gate condition path: empty path")

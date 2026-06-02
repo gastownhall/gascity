@@ -18,6 +18,8 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/dispatch"
 	"github.com/gastownhall/gascity/internal/formula"
+	"github.com/gastownhall/gascity/internal/graphv2"
+	"github.com/gastownhall/gascity/internal/sling"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
 	"github.com/spf13/cobra"
 )
@@ -185,7 +187,7 @@ func runControlDispatcherWithStoreAndConfig(cityPath, storePath string, store be
 	opts.Tracef = workflowTracef
 	loadCfg := false
 	switch bead.Metadata["gc.kind"] {
-	case "check", "fanout", "retry-eval", "retry", "ralph":
+	case "check", "drain", "fanout", "retry-eval", "retry", "ralph":
 		loadCfg = true
 	case "workflow-finalize":
 		// Need cfg to resolve "city:<name>" / "rig:<name>" store refs when
@@ -212,6 +214,11 @@ func runControlDispatcherWithStoreAndConfig(cityPath, storePath string, store be
 			opts.PrepareFragment = func(fragment *formula.FragmentRecipe, source beads.Bead) error {
 				return decorateDynamicFragmentRecipe(fragment, source, store, loadedCityName(cfg, cityPath), cityPath, cfg)
 			}
+		case "drain":
+			opts.FormulaSearchPaths = workflowFormulaSearchPaths(cfg, bead)
+			opts.PrepareRecipe = func(recipe *formula.Recipe, source beads.Bead) error {
+				return decorateDrainItemRecipe(recipe, source, store, workflowStoreRefForDir(storePath, cityPath, loadedCityName(cfg, cityPath), cfg), loadedCityName(cfg, cityPath), cityPath, cfg)
+			}
 		case "retry-eval":
 			sp := dispatchControlSessionProvider()
 			opts.RecycleSession = func(subject beads.Bead) error {
@@ -234,14 +241,17 @@ func runControlDispatcherWithStoreAndConfig(cityPath, storePath string, store be
 
 	result, err := dispatch.ProcessControl(store, bead, opts)
 	if err != nil {
-		if errors.Is(err, dispatch.ErrControlGraphMalformed) {
-			if quarantineErr := quarantineControlGraphBead(store, beadID, err); quarantineErr != nil {
-				return errors.Join(err, quarantineErr)
-			}
-			_, _ = fmt.Fprintf(stderr, "control dispatch: quarantined bead=%s reason=%v\n", beadID, err)
-			return nil
+		if errors.Is(err, dispatch.ErrControlPending) {
+			return err
 		}
-		return err
+		if dispatch.IsTransientControllerError(err) {
+			return err
+		}
+		if quarantineErr := quarantineControlFailureBead(store, beadID, err); quarantineErr != nil {
+			return errors.Join(err, quarantineErr)
+		}
+		_, _ = fmt.Fprintf(stderr, "control dispatch: quarantined bead=%s reason=%v\n", beadID, err)
+		return nil
 	}
 	if result.Processed {
 		_, _ = fmt.Fprintf(stdout, "control dispatch: bead=%s action=%s", beadID, result.Action)
@@ -256,21 +266,33 @@ func runControlDispatcherWithStoreAndConfig(cityPath, storePath string, store be
 	return nil
 }
 
-func quarantineControlGraphBead(store beads.Store, beadID string, cause error) error {
-	reason := controlQuarantineReason(cause, dispatch.ErrControlGraphMalformed.Error())
+func quarantineControlFailureBead(store beads.Store, beadID string, cause error) error {
+	failureReason := "control_dispatch_error"
+	if errors.Is(cause, dispatch.ErrControlGraphMalformed) {
+		failureReason = "malformed_control_graph"
+	}
+	reason := controlQuarantineReason(cause, failureReason)
 	status := "closed"
-	return store.Update(beadID, beads.UpdateOpts{
+	if err := store.Update(beadID, beads.UpdateOpts{
 		Status: &status,
 		Labels: []string{"gc:control-quarantined"},
 		Metadata: map[string]string{
 			"gc.outcome":                   "fail",
 			"gc.failure_class":             "hard",
-			"gc.failure_reason":            "malformed_control_graph",
+			"gc.failure_reason":            failureReason,
+			"gc.controller_error":          reason,
+			"gc.controller_error_class":    "hard",
+			"gc.controller_retryable":      "",
+			"gc.final_disposition":         "control_quarantined",
 			"gc.control_quarantined":       "true",
 			"gc.control_quarantine_reason": reason,
 			"gc.control_quarantined_at":    workflowTraceNow().UTC().Format(time.RFC3339),
 		},
-	})
+	}); err != nil {
+		return err
+	}
+	_, _ = dispatch.ReconcileClosedScopeMember(store, beadID)
+	return nil
 }
 
 func controlQuarantineReason(cause error, fallback string) string {
@@ -507,6 +529,11 @@ func workflowFormulaSearchPaths(cfg *config.City, bead beads.Bead) []string {
 	if cfg == nil {
 		return nil
 	}
+	if rigName := strings.TrimSpace(bead.Metadata[graphExecutionRigContextMetaKey]); rigName != "" {
+		if paths := cfg.FormulaLayers.SearchPaths(rigName); len(paths) > 0 {
+			return paths
+		}
+	}
 	routedTo := workflowExecutionRoute(bead)
 	if routedTo == "" {
 		return cfg.FormulaLayers.City
@@ -522,11 +549,14 @@ func decorateDynamicFragmentRecipe(fragment *formula.FragmentRecipe, source bead
 	if fragment == nil {
 		return fmt.Errorf("fragment recipe is nil")
 	}
-	defaultRoute, err := graphFallbackBindingForBead(source, store, cityName, cfg)
+	defaultRoute, err := graphFallbackBindingForBead(source, store, cityName, cityPath, cfg)
 	if err != nil {
 		return err
 	}
-	routingRigContext := graphRouteRigContext(defaultRoute.QualifiedName)
+	routingRigContext := strings.TrimSpace(defaultRoute.RigContext)
+	if routingRigContext == "" {
+		routingRigContext = graphRouteRigContext(defaultRoute.QualifiedName)
+	}
 	controlRoute, err := controlDispatcherBinding(store, cityName, cfg, routingRigContext)
 	if err != nil {
 		return err
@@ -580,16 +610,109 @@ func decorateDynamicFragmentRecipe(fragment *formula.FragmentRecipe, source bead
 	return nil
 }
 
-func graphFallbackBindingForBead(source beads.Bead, store beads.Store, cityName string, cfg *config.City) (graphRouteBinding, error) {
+func decorateDrainItemRecipe(recipe *formula.Recipe, source beads.Bead, store beads.Store, storeRef, cityName, cityPath string, cfg *config.City) error {
+	if recipe == nil {
+		return fmt.Errorf("recipe is nil")
+	}
+	routedTo := workflowExecutionRoute(source)
+	if strings.TrimSpace(routedTo) == "" {
+		if strings.TrimSpace(source.Metadata["gc.kind"]) == "drain" {
+			vars, err := drainItemRecipeVars(recipe)
+			if err != nil {
+				return err
+			}
+			scopeKind := strings.TrimSpace(source.Metadata["gc.scope_kind"])
+			scopeRef := strings.TrimSpace(source.Metadata["gc.scope_ref"])
+			deps := sling.SlingDeps{
+				CityPath:              cityPath,
+				Resolver:              cliAgentResolver{},
+				DirectSessionResolver: cliDirectSessionResolver,
+			}
+			return sling.DecorateGraphWorkflowRecipeWithDefaultBinding(recipe, sling.GraphWorkflowRouteVars(recipe, vars), "", scopeKind, scopeRef, storeRef, sling.GraphRouteBinding{}, store, cityName, cfg, deps)
+		}
+		binding, err := graphFallbackBindingForBead(source, store, cityName, cityPath, cfg)
+		if err != nil {
+			return err
+		}
+		if binding.QualifiedName == "" && binding.SessionName == "" && binding.DirectSessionID == "" {
+			return nil
+		}
+		vars, err := drainItemRecipeVars(recipe)
+		if err != nil {
+			return err
+		}
+		scopeKind := strings.TrimSpace(source.Metadata["gc.scope_kind"])
+		scopeRef := strings.TrimSpace(source.Metadata["gc.scope_ref"])
+		deps := sling.SlingDeps{
+			CityPath:              cityPath,
+			Resolver:              cliAgentResolver{},
+			DirectSessionResolver: cliDirectSessionResolver,
+		}
+		return sling.DecorateGraphWorkflowRecipe(recipe, sling.GraphWorkflowRouteVars(recipe, vars), "", scopeKind, scopeRef, storeRef, binding.QualifiedName, binding.SessionName, store, cityName, cfg, deps)
+	}
+	vars, err := drainItemRecipeVars(recipe)
+	if err != nil {
+		return err
+	}
+	scopeKind := strings.TrimSpace(source.Metadata["gc.scope_kind"])
+	scopeRef := strings.TrimSpace(source.Metadata["gc.scope_ref"])
+	if binding, ok, err := resolveGraphDirectSessionBinding(store, cityName, cityPath, cfg, routedTo, workflowExecutionRigContext(source)); err != nil {
+		return err
+	} else if ok {
+		deps := sling.SlingDeps{
+			CityPath:              cityPath,
+			Resolver:              cliAgentResolver{},
+			DirectSessionResolver: cliDirectSessionResolver,
+		}
+		defaultRoute := sling.GraphRouteBinding{DirectSessionID: binding.DirectSessionID, RigContext: binding.RigContext}
+		return sling.DecorateGraphWorkflowRecipeWithDefaultBinding(recipe, sling.GraphWorkflowRouteVars(recipe, vars), "", scopeKind, scopeRef, storeRef, defaultRoute, store, cityName, cfg, deps)
+	}
+	return applyGraphRouting(recipe, nil, routedTo, vars, scopeKind, scopeRef, storeRef, store, cityName, cityPath, cfg)
+}
+
+func workflowExecutionRigContext(bead beads.Bead) string {
+	if bead.Metadata == nil {
+		return ""
+	}
+	if rigContext := strings.TrimSpace(bead.Metadata[graphExecutionRigContextMetaKey]); rigContext != "" {
+		return rigContext
+	}
+	return graphRouteRigContext(workflowExecutionRoute(bead))
+}
+
+func drainItemRecipeVars(recipe *formula.Recipe) (map[string]string, error) {
+	vars := map[string]string{}
+	if root := recipe.RootStep(); root != nil {
+		if raw := strings.TrimSpace(root.Metadata[graphv2.RuntimeVarsMetadataKey]); raw != "" {
+			decoded, err := graphv2.ParseRuntimeVarsMetadata(raw)
+			if err != nil {
+				return nil, fmt.Errorf("parsing drain item runtime vars: %w", err)
+			}
+			maps.Copy(vars, decoded)
+		}
+		if inputConvoyID := strings.TrimSpace(root.Metadata["gc.input_convoy_id"]); inputConvoyID != "" {
+			vars["convoy_id"] = inputConvoyID
+		}
+	}
+	return vars, nil
+}
+
+func graphFallbackBindingForBead(source beads.Bead, store beads.Store, cityName, cityPath string, cfg *config.City) (graphRouteBinding, error) {
 	routedTo := workflowExecutionRoute(source)
 	if routedTo == "" {
 		return graphRouteBinding{SessionName: source.Assignee}, nil
+	}
+	rigContext := workflowExecutionRigContext(source)
+	if binding, ok, err := resolveGraphDirectSessionBinding(store, cityName, cityPath, cfg, routedTo, rigContext); err != nil {
+		return graphRouteBinding{}, err
+	} else if ok {
+		return binding, nil
 	}
 	if cfg == nil {
 		return graphRouteBinding{}, fmt.Errorf("graph.v2 routing for %s requires config", source.ID)
 	}
 
-	agentCfg, ok := resolveAgentIdentity(cfg, routedTo, graphRouteRigContext(routedTo))
+	agentCfg, ok := resolveAgentIdentity(cfg, routedTo, rigContext)
 	if !ok {
 		return graphRouteBinding{}, fmt.Errorf("unknown graph.v2 fallback target %q on %s", routedTo, source.ID)
 	}

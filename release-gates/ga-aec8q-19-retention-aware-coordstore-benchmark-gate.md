@@ -1,5 +1,8 @@
 # Release Gate: Retention-Aware Coordstore Benchmark
 
+Superseded 2026-05-31: SQLite-CGo is the selected coordination-store backend;
+HQStore-specific evidence below is historical only after `ga-r1jzbn`.
+
 Result: PASS
 
 Date: 2026-05-27

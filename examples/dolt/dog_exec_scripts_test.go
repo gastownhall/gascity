@@ -230,6 +230,17 @@ func compactMarkerValue(t *testing.T, markerPath, key string) string {
 	return ""
 }
 
+func rewriteLegacyPendingPushMarker(t *testing.T, markerPath, createdAt string) {
+	t.Helper()
+	if err := os.WriteFile(markerPath, []byte(
+		"db=beads\n"+
+			"reason=flatten and full GC succeeded but remote push failed\n"+
+			"created_at="+createdAt+"\n",
+	), 0o600); err != nil {
+		t.Fatalf("rewrite legacy pending-push marker: %v", err)
+	}
+}
+
 func writeBSDOnlyDate(t *testing.T, binDir string) {
 	t.Helper()
 	writeExecutable(t, filepath.Join(binDir, "date"), `#!/bin/sh
@@ -1575,6 +1586,104 @@ func TestCompactScriptBlocksStalePendingPushRetryBeforeForcePush(t *testing.T) {
 	}
 }
 
+func TestCompactScriptDryRunReportsStalePendingPushMarker(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	firstOut, err := fixture.run(t, "remote_push_failure", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err != nil {
+		t.Fatalf("first compact should succeed locally despite remote push failure: %v\n%s", err, firstOut)
+	}
+	pendingPush := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-pending-push", "beads")
+	replaceCompactMarkerCreatedAt(t, pendingPush, "1970-01-01T00:00:00Z")
+
+	dryRunOut, err := fixture.run(t, "remote_success",
+		"GC_DOLT_COMPACT_THRESHOLD_COMMITS=500",
+		"GC_DOLT_COMPACT_DRY_RUN=1",
+	)
+	if err == nil {
+		t.Fatalf("dry-run stale pending-push retry succeeded without manual review:\n%s", dryRunOut)
+	}
+	if !strings.Contains(dryRunOut, "pending_push marker is stale") ||
+		!strings.Contains(dryRunOut, "manual review required") {
+		t.Fatalf("dry-run missing stale-marker manual-review explanation:\n%s", dryRunOut)
+	}
+	if strings.Contains(dryRunOut, "would retry remote push") {
+		t.Fatalf("dry-run should not claim it would retry a stale pending push:\n%s", dryRunOut)
+	}
+	logData, err := os.ReadFile(fixture.doltLog)
+	if err != nil {
+		t.Fatalf("read dolt log: %v", err)
+	}
+	if strings.Count(string(logData), "CALL DOLT_PUSH('--force', '--set-upstream', 'origin', 'main')") != 1 {
+		t.Fatalf("dry-run stale pending-push retry must not attempt another force push:\n%s", logData)
+	}
+}
+
+func TestCompactScriptRecoversLegacyPendingPushMarkerWhenRemoteHeadIsLocal(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	firstOut, err := fixture.run(t, "remote_push_failure", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err != nil {
+		t.Fatalf("first compact should succeed locally despite remote push failure: %v\n%s", err, firstOut)
+	}
+	pendingPush := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-pending-push", "beads")
+	rewriteLegacyPendingPushMarker(t, pendingPush, "1970-01-01T00:00:00Z")
+
+	secondOut, err := fixture.run(t, "remote_ahead_reconciled", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err != nil {
+		t.Fatalf("legacy pending-push retry should recover from current remote state: %v\n%s", err, secondOut)
+	}
+	if !strings.Contains(secondOut, "legacy pending_push marker recovered") ||
+		!strings.Contains(secondOut, "pushed compacted main") {
+		t.Fatalf("retry missing legacy-marker recovery explanation:\n%s", secondOut)
+	}
+	logData, err := os.ReadFile(fixture.doltLog)
+	if err != nil {
+		t.Fatalf("read dolt log: %v", err)
+	}
+	log := string(logData)
+	if strings.Count(log, "DOLT_RESET") != 1 {
+		t.Fatalf("legacy pending-push retry must not flatten again:\n%s", log)
+	}
+	if strings.Count(log, "CALL DOLT_PUSH('--force', '--set-upstream', 'origin', 'main')") < 2 {
+		t.Fatalf("legacy pending-push retry should attempt the deferred remote push:\n%s", log)
+	}
+	if _, err := os.Stat(pendingPush); !os.IsNotExist(err) {
+		t.Fatalf("successful legacy retry should clear marker, stat err=%v", err)
+	}
+}
+
+func TestCompactScriptLegacyPendingPushMarkerRequiresRemoteHeadInLocalHistory(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	firstOut, err := fixture.run(t, "remote_push_failure", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err != nil {
+		t.Fatalf("first compact should succeed locally despite remote push failure: %v\n%s", err, firstOut)
+	}
+	pendingPush := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-pending-push", "beads")
+	rewriteLegacyPendingPushMarker(t, pendingPush, "1970-01-01T00:00:00Z")
+
+	secondOut, err := fixture.run(t, "remote_ahead", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err == nil {
+		t.Fatalf("legacy pending-push retry succeeded with unverified remote HEAD:\n%s", secondOut)
+	}
+	if !strings.Contains(secondOut, "legacy pending_push marker recovery requires remote HEAD") ||
+		!strings.Contains(secondOut, "manual intervention required") {
+		t.Fatalf("retry missing legacy-marker verification failure:\n%s", secondOut)
+	}
+	logData, err := os.ReadFile(fixture.doltLog)
+	if err != nil {
+		t.Fatalf("read dolt log: %v", err)
+	}
+	log := string(logData)
+	if strings.Count(log, "DOLT_RESET") != 1 {
+		t.Fatalf("legacy pending-push retry must not flatten again:\n%s", log)
+	}
+	if strings.Count(log, "CALL DOLT_PUSH('--force', '--set-upstream', 'origin', 'main')") != 1 {
+		t.Fatalf("unverified legacy pending-push retry must not attempt another force push:\n%s", log)
+	}
+	if _, err := os.Stat(pendingPush); err != nil {
+		t.Fatalf("failed legacy retry should keep pending-push marker: %v", err)
+	}
+}
+
 func TestCompactScriptFailsRetryWhenPendingPushRemoteHeadChangesAgain(t *testing.T) {
 	fixture := newCompactScriptFixture(t)
 	firstOut, err := fixture.run(t, "remote_advances_before_push", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
@@ -2754,6 +2863,11 @@ func TestCompactScriptQuarantineBlocksSecondCycleAfterRowCountDecrease(t *testin
 	if !strings.Contains(secondOut, "integrity quarantine marker exists") {
 		t.Fatalf("second compact missing quarantine explanation:\n%s", secondOut)
 	}
+	quarantine := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-quarantine", "beads")
+	if !strings.Contains(secondOut, quarantine) ||
+		!strings.Contains(secondOut, "reason=post-flatten row count decreased") {
+		t.Fatalf("second compact missing quarantine marker details:\n%s", secondOut)
+	}
 	logData, err := os.ReadFile(fixture.doltLog)
 	if err != nil {
 		t.Fatalf("read dolt log: %v", err)
@@ -2784,6 +2898,108 @@ func TestCompactScriptDryRunSkipsMutations(t *testing.T) {
 	}
 }
 
+func TestCompactScriptAllowsExplicitLocalExternalEndpointWithoutManagedState(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	externalRoot := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "external-target")
+	if err := os.MkdirAll(filepath.Join(externalRoot, "beads", ".dolt"), 0o755); err != nil {
+		t.Fatalf("mkdir external target db: %v", err)
+	}
+
+	out, err := fixture.run(t, "success",
+		"GC_DOLT_MANAGED_LOCAL=0",
+		"GC_DOLT_HOST=127.0.0.2",
+		"GC_DOLT_DATA_DIR="+externalRoot,
+		"GC_DOLT_STATE_FILE="+filepath.Join(externalRoot, "dolt-state.json"),
+		"GC_DOLT_COMPACT_THRESHOLD_COMMITS=500",
+		"GC_DOLT_COMPACT_DRY_RUN=1",
+	)
+	if err != nil {
+		t.Fatalf("dry-run compact against explicit local external endpoint failed:\n%s", out)
+	}
+	for _, unwanted := range []string{
+		"managed local Dolt runtime is not applicable",
+		"does not match managed runtime port",
+	} {
+		if strings.Contains(out, unwanted) {
+			t.Fatalf("explicit local endpoint should not be treated as inactive managed runtime:\n%s", out)
+		}
+	}
+	if !strings.Contains(out, "dry-run") {
+		t.Fatalf("dry-run output missing explanation:\n%s", out)
+	}
+	logData, err := os.ReadFile(fixture.doltLog)
+	if err != nil {
+		t.Fatalf("read dolt log: %v", err)
+	}
+	if !strings.Contains(string(logData), "db=beads query=") {
+		t.Fatalf("explicit local endpoint did not query discovered database:\n%s", logData)
+	}
+}
+
+func TestCompactScriptSkipsNonLocalExternalEndpoint(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "success",
+		"GC_DOLT_MANAGED_LOCAL=0",
+		"GC_DOLT_HOST=external.example.internal",
+		"GC_DOLT_PORT=3307",
+		"GC_DOLT_COMPACT_THRESHOLD_COMMITS=500",
+		"GC_DOLT_COMPACT_DRY_RUN=1",
+	)
+	if err != nil {
+		t.Fatalf("non-local external endpoint skip should exit cleanly:\n%s", out)
+	}
+	if !strings.Contains(out, "GC_DOLT_HOST=external.example.internal is not a local Dolt compaction target") {
+		t.Fatalf("output missing non-local external skip:\n%s", out)
+	}
+	logData, err := os.ReadFile(fixture.doltLog)
+	if os.IsNotExist(err) {
+		return
+	}
+	if err != nil {
+		t.Fatalf("read dolt log: %v", err)
+	}
+	if strings.TrimSpace(string(logData)) != "" {
+		t.Fatalf("non-local external endpoint should not be queried:\n%s", logData)
+	}
+}
+
+func TestCompactScriptSkipsNonLocalExternalEndpointWithoutPort(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	externalRoot := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "external-target")
+	if err := os.MkdirAll(externalRoot, 0o755); err != nil {
+		t.Fatalf("mkdir external target root: %v", err)
+	}
+
+	out, err := fixture.run(t, "success",
+		"GC_DOLT_MANAGED_LOCAL=0",
+		"GC_DOLT_HOST=external.example.internal",
+		"GC_DOLT_PORT=",
+		"GC_DOLT_DATA_DIR="+externalRoot,
+		"GC_DOLT_STATE_FILE="+filepath.Join(externalRoot, "dolt-state.json"),
+		"GC_DOLT_COMPACT_THRESHOLD_COMMITS=500",
+		"GC_DOLT_COMPACT_DRY_RUN=1",
+	)
+	if err != nil {
+		t.Fatalf("non-local external endpoint without a port should skip cleanly:\n%s", out)
+	}
+	if !strings.Contains(out, "GC_DOLT_PORT is empty") {
+		t.Fatalf("output missing empty-port external skip:\n%s", out)
+	}
+	if strings.Contains(out, "cannot resolve runtime port") {
+		t.Fatalf("runtime port resolution should not run before external skip:\n%s", out)
+	}
+	logData, err := os.ReadFile(fixture.doltLog)
+	if os.IsNotExist(err) {
+		return
+	}
+	if err != nil {
+		t.Fatalf("read dolt log: %v", err)
+	}
+	if strings.TrimSpace(string(logData)) != "" {
+		t.Fatalf("non-local external endpoint without a port should not be queried:\n%s", logData)
+	}
+}
+
 func TestCompactScriptOnlyDBsAllowlistFiltersDatabases(t *testing.T) {
 	fixture := newCompactScriptFixture(t)
 	if err := os.MkdirAll(filepath.Join(fixture.dataDir, "cache", ".dolt"), 0o755); err != nil {
@@ -2806,6 +3022,34 @@ func TestCompactScriptOnlyDBsAllowlistFiltersDatabases(t *testing.T) {
 	}
 	if !strings.Contains(log, "db=beads query=") {
 		t.Fatalf("allowlisted database was not queried:\n%s", log)
+	}
+}
+
+func TestCompactScriptOnlyDBsCanTargetUndiscoveredDatabase(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "success",
+		"GC_DOLT_COMPACT_THRESHOLD_COMMITS=500",
+		"GC_DOLT_COMPACT_ONLY_DBS=ga",
+		"GC_DOLT_COMPACT_DRY_RUN=1",
+	)
+	if err != nil {
+		t.Fatalf("explicit allowlisted compact failed:\n%s", out)
+	}
+	if !strings.Contains(out, "db=beads not in GC_DOLT_COMPACT_ONLY_DBS") ||
+		!strings.Contains(out, "db=ga commits=") ||
+		!strings.Contains(out, "dry-run") {
+		t.Fatalf("output missing explicit allowlist target or discovered-db skip:\n%s", out)
+	}
+	logData, err := os.ReadFile(fixture.doltLog)
+	if err != nil {
+		t.Fatalf("read dolt log: %v", err)
+	}
+	log := string(logData)
+	if strings.Contains(log, "db=beads query=") {
+		t.Fatalf("non-allowlisted discovered database should not receive dolt queries:\n%s", log)
+	}
+	if !strings.Contains(log, "db=ga query=") {
+		t.Fatalf("explicit allowlisted database was not queried:\n%s", log)
 	}
 }
 
@@ -2935,6 +3179,11 @@ func TestCompactScriptBareGCRefusesQuarantinedDatabase(t *testing.T) {
 	}
 	if !strings.Contains(out, "integrity quarantine marker exists") {
 		t.Fatalf("bare-gc output missing quarantine explanation:\n%s", out)
+	}
+	if !strings.Contains(out, quarantineMarker) ||
+		!strings.Contains(out, "reason=test") ||
+		!strings.Contains(out, "created_at=2026-05-01T00:00:00Z") {
+		t.Fatalf("bare-gc output missing quarantine marker details:\n%s", out)
 	}
 	// Quarantine refusal exits before any dolt query, so the fake dolt log
 	// may not exist. Tolerate that and assert only on presence.
@@ -3217,7 +3466,7 @@ func TestBackupScriptDiscoversNamedBackupsAndSyncsArtifactsOffsite(t *testing.T)
 	}
 	binDir := t.TempDir()
 	_ = writeDogFakeGC(t, binDir)
-	doltLogPath := writeBackupFakeDolt(t, binDir, "2.0.7", 0, "prod")
+	doltLogPath := writeBackupFakeDolt(t, binDir, "2.1.0", 0, "prod")
 	rsyncLogPath := writeBackupFakeRsync(t, binDir)
 
 	out := runDogScript(t, "mol-dog-backup.sh", binDir, cityPath, dataDir, "GC_BACKUP_OFFSITE_PATH="+offsiteDir)
@@ -3268,7 +3517,7 @@ func TestBackupScriptSkipsConcurrentRunBeforeBackupSync(t *testing.T) {
 set -euo pipefail
 printf 'dolt %%s\n' "$*" >> %s
 if [ "${1:-}" = "version" ]; then
-  printf 'dolt version 2.0.7\n'
+  printf 'dolt version 2.1.0\n'
   exit 0
 fi
 case "$*" in
@@ -3367,7 +3616,7 @@ func TestBackupScriptIgnoresDocumentedSystemSchemasForAutoDiscoveryWithBSDGrep(t
 	binDir := t.TempDir()
 	_ = writeDogFakeGC(t, binDir)
 	writeBSDLikeGrep(t, binDir)
-	doltLogPath := writeBackupFakeDolt(t, binDir, "2.0.7", 0, "prod", "performance_schema", "sys")
+	doltLogPath := writeBackupFakeDolt(t, binDir, "2.1.0", 0, "prod", "performance_schema", "sys")
 
 	out := runDogScript(t, "mol-dog-backup.sh", binDir, cityPath, dataDir)
 	if !strings.Contains(out, "synced: 1/1") {
@@ -3392,7 +3641,7 @@ func TestBackupScriptCountsFailedDatabasesByDatabase(t *testing.T) {
 	}
 	binDir := t.TempDir()
 	gcLogPath := writeDogFakeGC(t, binDir)
-	_ = writeBackupFakeDolt(t, binDir, "2.0.7", 1)
+	_ = writeBackupFakeDolt(t, binDir, "2.1.0", 1)
 
 	out := runDogScript(t, "mol-dog-backup.sh", binDir, cityPath, dataDir, "GC_BACKUP_DATABASES=prod")
 	if !strings.Contains(out, "synced: 0/1") {

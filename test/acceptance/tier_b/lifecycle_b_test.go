@@ -238,9 +238,9 @@ func TestLifecycle_DrainAckResponsiveRespawn(t *testing.T) {
 		runResponsiveRespawn(t, "60s", 40*time.Second, 50*time.Second)
 	})
 	t.Run("coldpool_arrival_2251", func(t *testing.T) {
-		// Short patrol: a cold pool (0 active) scales up to service the routed
-		// work and the post-drain replacement both land within a couple of
-		// ticks. Covers #2251's arrival ordering over the shared poke path.
+		// Short patrol: a cold pool (0 active) may use ordinary patrol timing to
+		// discover routed work. The measured post-drain replacement still covers
+		// #2251's arrival ordering over the shared drain-ack poke path.
 		runResponsiveRespawn(t, "10s", 30*time.Second, 30*time.Second)
 	})
 }
@@ -257,14 +257,14 @@ func runResponsiveRespawn(t *testing.T, patrolInterval string, maxRespawnLatency
 	c.Init("claude")
 
 	scriptCmd, markersPath := writeRespawnMarkerScript(t, c)
-	writeRespawnPoolConfig(c, scriptCmd, patrolInterval)
+	writeRespawnPoolConfig(t, c, scriptCmd, patrolInterval)
 	writePrequeuedRoutedBeads(t, c, "worker", 4)
 
 	c.StartWithSupervisor()
 
 	// The cold pool must scale from zero to service the routed work.
 	if !c.WaitForCondition(func() bool {
-		return len(readRespawnMarkers(markersPath)) >= 1
+		return len(readRespawnMarkers(t, markersPath)) >= 1
 	}, firstMarkerTimeout) {
 		out, _ := c.GC("status", "--city", c.Dir)
 		t.Fatalf("pool worker never spawned to service pre-queued routed work within %s\nstatus:\n%s", firstMarkerTimeout, out)
@@ -275,13 +275,13 @@ func runResponsiveRespawn(t *testing.T, patrolInterval string, maxRespawnLatency
 	// observed before we measure it.
 	deadline := time.Now().Add(maxRespawnLatency + 15*time.Second)
 	for time.Now().Before(deadline) {
-		if len(readRespawnMarkers(markersPath)) >= 2 {
+		if len(readRespawnMarkers(t, markersPath)) >= 2 {
 			break
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
 
-	markers := readRespawnMarkers(markersPath)
+	markers := readRespawnMarkers(t, markersPath)
 	if len(markers) < 2 {
 		out, _ := c.GC("status", "--city", c.Dir)
 		t.Fatalf("replacement worker did not spawn after drain-ack (poke not honored?); markers=%v\nstatus:\n%s", markers, out)
@@ -313,7 +313,7 @@ func writeRespawnMarkerScript(t *testing.T, c *helpers.City) (scriptCmd, markers
 # so a replacement is reconciled immediately rather than on the next patrol
 # tick), then exits. No set -e: a failing drain-ack must not skip the marker.
 MARKERS=%q
-printf 'RUN %%s\n' "$(date +%%s.%%N)" >> "$MARKERS"
+printf 'RUN %%s\n' "$(date +%%s)" >> "$MARKERS"
 gc runtime drain-ack 2>/dev/null || true
 sleep 1
 exit 0
@@ -330,7 +330,8 @@ exit 0
 // (min=0/max=1, wake_mode=fresh) under the directory-based agents/worker/
 // surface. Inline [[agent]] tables in city.toml are a rejected PackV1 surface
 // under schema-2 enforcement, so the agent must live in agents/<name>/agent.toml.
-func writeRespawnPoolConfig(c *helpers.City, scriptCmd, patrolInterval string) {
+func writeRespawnPoolConfig(t *testing.T, c *helpers.City, scriptCmd, patrolInterval string) {
+	t.Helper()
 	cityName := filepath.Base(c.Dir)
 	c.WriteConfig(fmt.Sprintf(`[workspace]
 name = %q
@@ -341,6 +342,10 @@ provider = "file"
 [daemon]
 patrol_interval = %q
 `, cityName, patrolInterval))
+	// Init scaffolds a default pool; this fixture needs only the worker pool.
+	if err := os.RemoveAll(filepath.Join(c.Dir, "agents", "dog")); err != nil {
+		t.Fatalf("removing scaffolded dog agent: %v", err)
+	}
 	c.WriteV2AgentDir("worker",
 		fmt.Sprintf("start_command = %q", scriptCmd),
 		`wake_mode = "fresh"`,
@@ -394,20 +399,24 @@ func writePrequeuedRoutedBeads(t *testing.T, c *helpers.City, template string, n
 
 // readRespawnMarkers parses the marker file into spawn timestamps (epoch
 // seconds). A missing file yields no markers.
-func readRespawnMarkers(path string) []float64 {
+func readRespawnMarkers(t *testing.T, path string) []float64 {
+	t.Helper()
 	data, err := os.ReadFile(path)
 	if err != nil {
+		if !os.IsNotExist(err) {
+			t.Fatalf("reading respawn markers: %v", err)
+		}
 		return nil
 	}
 	var ts []float64
-	for _, line := range strings.Split(string(data), "\n") {
+	for lineNum, line := range strings.Split(string(data), "\n") {
 		line = strings.TrimSpace(line)
 		if !strings.HasPrefix(line, "RUN ") {
 			continue
 		}
 		v, err := strconv.ParseFloat(strings.TrimSpace(strings.TrimPrefix(line, "RUN ")), 64)
 		if err != nil {
-			continue
+			t.Fatalf("parsing respawn marker line %d %q: %v", lineNum+1, line, err)
 		}
 		ts = append(ts, v)
 	}

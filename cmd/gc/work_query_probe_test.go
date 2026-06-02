@@ -31,7 +31,7 @@ func TestPrefixedWorkQueryForProbe_UsesNamedSessionRuntimeName(t *testing.T) {
 	}
 
 	command := prefixedWorkQueryForProbe(cfg, cityPath, "test-city", nil, nil, &cfg.Agents[0], nil)
-	if !strings.Contains(command, "for key in gc.run_target gc.routed_to") || !strings.Contains(command, "-- demo/witness") {
+	if !strings.Contains(command, `bd ready --include-ephemeral --metadata-field "gc.routed_to=$target"`) || !strings.Contains(command, "-- demo/witness") {
 		t.Fatalf("prefixedWorkQueryForProbe() = %q, want demo/witness route argument", command)
 	}
 }

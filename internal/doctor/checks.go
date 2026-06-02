@@ -951,6 +951,9 @@ func validateBDStoreTarget(cityPath, scopeRoot string) (contract.DoltConnectionT
 	if !scopeUsesBDDoltStore(cityPath, scopeRoot) {
 		return contract.DoltConnectionTarget{}, "", false, nil
 	}
+	if scopeUsesBDDoltliteStore(cityPath, scopeRoot) {
+		return contract.DoltConnectionTarget{}, "", false, nil
+	}
 	resolved, err := contract.ResolveScopeConfigState(fsys.OSFS{}, cityPath, scopeRoot, "")
 	if err != nil {
 		return contract.DoltConnectionTarget{}, "reconcile the canonical Dolt endpoint", true, err
@@ -987,6 +990,20 @@ func providerUsesBDDoltStore(provider string) bool {
 		return true
 	}
 	return false
+}
+
+func scopeUsesBDDoltliteStore(cityPath, scopePath string) bool {
+	if backend := strings.TrimSpace(os.Getenv("GC_BEADS_BACKEND")); strings.EqualFold(backend, "doltlite") {
+		scopedRoot := strings.TrimSpace(os.Getenv("GC_BEADS_SCOPE_ROOT"))
+		if scopedRoot == "" || sameDoctorScope(resolveDoctorScopePath(cityPath, scopedRoot), resolveDoctorScopePath(cityPath, scopePath)) {
+			return true
+		}
+	}
+	cfg, err := config.Load(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
+	if err != nil {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(cfg.Beads.Backend), "doltlite")
 }
 
 func doctorExecProviderBase(provider string) string {
@@ -1095,6 +1112,11 @@ func (c *DoltServerCheck) Run(_ *CheckContext) *CheckResult {
 		r.Message = "skipped (file backend or GC_DOLT=skip)"
 		return r
 	}
+	if scopeUsesBDDoltliteStore(c.cityPath, c.cityPath) {
+		r.Status = StatusOK
+		r.Message = "not required (bd backend=doltlite)"
+		return r
+	}
 
 	target, err := contract.ResolveDoltConnectionTarget(fsys.OSFS{}, c.cityPath, c.cityPath)
 	if err != nil {
@@ -1153,6 +1175,11 @@ func (c *RigDoltServerCheck) Run(_ *CheckContext) *CheckResult {
 	rigPath := c.rig.Path
 	if !filepath.IsAbs(rigPath) {
 		rigPath = filepath.Join(c.cityPath, rigPath)
+	}
+	if scopeUsesBDDoltliteStore(c.cityPath, rigPath) {
+		r.Status = StatusOK
+		r.Message = "not required (bd backend=doltlite)"
+		return r
 	}
 	if err := contract.ValidateInheritedCityEndpointMirror(fsys.OSFS{}, c.cityPath, rigPath); err != nil {
 		r.Status = StatusError

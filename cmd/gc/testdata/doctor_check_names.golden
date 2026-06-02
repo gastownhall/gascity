@@ -23,6 +23,7 @@ builtin-pack-family
 config-semantics
 duration-range
 provider-parity
+formula-requirements
 named-always-min-conflict
 instructions-file
 skill-collision
@@ -46,6 +47,7 @@ orphan-sessions
 bd-split-store
 beads-store
 v2-routed-to-namespace
+run-target-routed-to-backfill
 session-model
 dolt-server
 dolt-noms-size

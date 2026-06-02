@@ -37,7 +37,7 @@ City is the top-level configuration for a Gas City instance.
 | `maintenance` | MaintenanceConfig |  |  | Maintenance configures periodic store-maintenance loops. |
 | `service` | []Service |  |  | Services declares workspace-owned HTTP services mounted on the controller edge under /svc/&#123;name&#125;. |
 | `github` | GitHubConfig |  |  | GitHub configures GitHub-facing repository monitors. |
-| `agent_defaults` | AgentDefaults |  |  | AgentDefaults provides city-level defaults for agents that don't override them (canonical TOML key: agent_defaults). The runtime currently applies default_sling_formula and append_fragments; the attachment-list fields remain tombstones, and the other fields are parsed/composed but not yet inherited automatically. |
+| `agent_defaults` | AgentDefaults |  |  | AgentDefaults provides root city defaults for agents that don't override them (canonical TOML key: agent_defaults). Pack-local defaults use the same table shape in pack.toml. The runtime currently applies provider, default_sling_formula, and append_fragments; the attachment-list fields remain tombstones, and the other fields are parsed/composed but not yet inherited automatically. |
 | `pricing` | []ModelPricing |  |  | Pricing holds per-model cost rate overrides keyed by (provider, model). City-level entries override pack-level entries which override the defaults shipped with the pricing package. See internal/pricing for the estimation seam introduced by issue #1255 (1d). |
 
 ## ACPSessionConfig
@@ -90,7 +90,7 @@ Agent defines a configured agent in the city.
 | `env` | map[string]string |  |  | Env sets additional environment variables for the agent process. |
 | `option_defaults` | map[string]string |  |  | OptionDefaults overrides the provider's effective schema defaults for this agent. Keys are option keys, values are choice values. Applied on top of the provider's OptionDefaults (agent keys win). Example: option_defaults = &#123; permission_mode = "plan", model = "sonnet" &#125; |
 | `max_active_sessions` | integer |  |  | MaxActiveSessions is the agent-level cap on concurrent sessions. Nil means inherit from rig, then workspace, then unlimited. Replaces pool.max. |
-| `min_active_sessions` | integer |  |  | MinActiveSessions is the minimum number of sessions to keep alive. Agent-level only. Counts against rig/workspace caps. Replaces pool.min. |
+| `min_active_sessions` | integer |  |  | MinActiveSessions is the minimum number of sessions to keep alive. Agent-level only. Counts against rig/workspace caps. Replaces pool.min. This controls pool sessions independently of [[named_session]] mode="always"; both produce sessions, and gc doctor reports accidental combinations. |
 | `scale_check` | string |  |  | ScaleCheck is a shell command template whose output reports new unassigned session demand. In bead-backed reconciliation this is additive: assigned work is resumed separately, and ScaleCheck reports only how many new generic sessions to start, still bounded by all cap levels. Legacy no-store evaluation continues to treat the output as the desired session count. If it contains Go template placeholders, gc expands them using the same PathContext fields as work_dir and session_setup (Agent, AgentBase, Rig, RigRoot, CityRoot, CityName) before running the command. |
 | `drain_timeout` | string |  | `5m` | DrainTimeout is the maximum time to wait for a session to finish its current work before force-killing it during scale-down. Duration string (e.g., "5m", "30m", "1h"). Defaults to "5m". |
 | `on_boot` | string |  |  | OnBoot is a shell command template run once at controller startup for this agent. If it contains Go template placeholders, gc expands them using the same PathContext fields as work_dir and session_setup (Agent, AgentBase, Rig, RigRoot, CityRoot, CityName) before running the command. |
@@ -115,7 +115,7 @@ Agent defines a configured agent in the city.
 | `append_fragments` | []string |  |  | AppendFragments is the V2 per-agent alias for prompt fragment injection. It layers after InjectFragments and before inherited/default fragments. |
 | `inject_assigned_skills` | boolean |  |  | InjectAssignedSkills controls whether gc appends an "assigned skills" appendix to the agent's rendered prompt. The appendix lists every skill visible to this agent, partitioned into (assigned-to-you, shared-with-every-agent), so agents sharing a scope-root sink can tell which skills are their specialization vs which are the city-wide set.  Pointer tri-state:   nil   -&gt; inherit: inject when the agent has a vendor sink   *true -&gt; explicitly inject (equivalent to the default)   *false -&gt; disable; the template is responsible for rendering             any skill guidance itself |
 | `attach` | boolean |  |  | Attach controls whether the agent's session supports interactive attachment (e.g., tmux attach). When false, the agent can use a lighter runtime (subprocess instead of tmux). Defaults to true. |
-| `fallback` | boolean |  |  | Fallback marks this agent as a fallback definition. During pack composition, a non-fallback agent with the same name wins silently. When two fallbacks collide, the first loaded (depth-first) wins. See docs/guides/migrating-to-pack-vnext.md for migration guidance. |
+| `fallback` | boolean |  |  | Fallback marks this agent as a fallback definition. During pack composition, a non-fallback agent with the same name wins silently. When two fallbacks collide, the first loaded (depth-first) wins. See docs/guides/shareable-packs.md for pack layout guidance. |
 | `depends_on` | []string |  |  | DependsOn lists agent names that must be awake before this agent wakes. Used for dependency-ordered startup and shutdown. Validated for cycles at config load time. |
 | `resume_command` | string |  |  | ResumeCommand is the full shell command to run when resuming this agent. Supports &#123;&#123;.SessionKey&#125;&#125; template variable. When set, takes precedence over the provider's ResumeFlag/ResumeStyle. Example:   "claude --resume &#123;&#123;.SessionKey&#125;&#125; --dangerously-skip-permissions" |
 | `wake_mode` | string |  |  | WakeMode controls context freshness across sleep/wake cycles. "resume" (default): reuse provider session key for conversation continuity. "fresh": start a new provider session on every wake (polecat pattern). Enum: `resume`, `fresh` |
@@ -123,16 +123,17 @@ Agent defines a configured agent in the city.
 
 ## AgentDefaults
 
-AgentDefaults provides city-level agent defaults declared via [agent_defaults] in city.toml.
+AgentDefaults provides agent defaults declared via [agent_defaults] in city.toml or pack.toml.
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
+| `provider` | string |  |  | Provider is the default provider name for agents that do not set their own provider. It also counts as a configured provider for implicit agent injection. |
 | `model` | string |  |  | Model is the parsed/composed default model name for agents (e.g., "claude-sonnet-4-6"), but it is not yet auto-applied at runtime. Agents with their own model override would take precedence. |
 | `wake_mode` | string |  |  | WakeMode is the parsed/composed default wake mode ("resume" or "fresh"), but it is not yet auto-applied at runtime. Enum: `resume`, `fresh` |
-| `default_sling_formula` | string |  |  | DefaultSlingFormula is the city-level default formula used for agents that inherit [agent_defaults]. Explicit agents only receive this value when agent_defaults.default_sling_formula is set; implicit multi-session configs are seeded with "mol-do-work" elsewhere when no explicit default is set. |
-| `allow_overlay` | []string |  |  | AllowOverlay is parsed and composed as a city-level allowlist for session overlays, but it is not yet inherited onto agents automatically at runtime. |
-| `allow_env_override` | []string |  |  | AllowEnvOverride is parsed and composed as a city-level allowlist for session env overrides, but it is not yet inherited onto agents automatically at runtime. Names must match ^[A-Z][A-Z0-9_]&#123;0,127&#125;$. |
-| `append_fragments` | []string |  |  | AppendFragments lists named template fragments to auto-append to .template.md prompts after rendering. Legacy .md.tmpl prompts are still supported during the transition; plain .md remains inert. V2 migration convenience — replaces global_fragments/inject_fragments for city-wide defaults. |
+| `default_sling_formula` | string |  |  | DefaultSlingFormula is the default formula used for agents that inherit [agent_defaults]. Explicit agents only receive this value when agent_defaults.default_sling_formula is set; implicit multi-session configs are seeded with "mol-do-work" elsewhere when no explicit default is set. |
+| `allow_overlay` | []string |  |  | AllowOverlay is parsed and composed as a config-level allowlist for session overlays, but it is not yet inherited onto agents automatically at runtime. |
+| `allow_env_override` | []string |  |  | AllowEnvOverride is parsed and composed as a config-level allowlist for session env overrides, but it is not yet inherited onto agents automatically at runtime. Names must match ^[A-Z][A-Z0-9_]&#123;0,127&#125;$. |
+| `append_fragments` | []string |  |  | AppendFragments lists named template fragments to auto-append to .template.md prompts after rendering. Legacy .md.tmpl prompts are still supported during the transition; plain .md remains inert. V2 migration convenience — replaces global_fragments/inject_fragments for config-wide defaults. |
 | `skills` | []string |  |  | Skills is a tombstone field retained for v0.15.1 backwards compatibility. Parsed and composed for migration visibility, but attachment-list fields are accepted but ignored by the active materializer. |
 | `mcp` | []string |  |  | MCP is a tombstone field retained for v0.15.1 backwards compatibility. Parsed and composed for migration visibility, but attachment-list fields are accepted but ignored by the active materializer. |
 
@@ -246,6 +247,15 @@ AgentPatch modifies an existing agent identified by (Dir, Name).
 | `scale_check` | string |  |  | ScaleCheck overrides the command template whose output reports new unassigned session demand for bead-backed reconciliation. Supports the same Go template placeholders as Agent.scale_check. |
 | `option_defaults` | map[string]string |  |  | OptionDefaults adds or overrides provider option defaults for this agent. Keys are option keys, values are choice values. Merges additively (patch keys win over existing agent keys). Example: option_defaults = &#123; model = "sonnet" &#125; |
 
+## BeadPolicyConfig
+
+BeadPolicyConfig holds storage and retention defaults for a named bead use.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `storage` | string |  |  | Storage selects the intended persistence tier: "history", "no_history", or "ephemeral". Creation paths apply this incrementally as they opt in. Enum: `history`, `no_history`, `ephemeral` |
+| `delete_after_close` | string |  |  | DeleteAfterClose deletes matching GC-owned beads after they have been closed for this duration. Accepts Go duration syntax plus whole-day "d" units, e.g. "7d" or "1d12h". Empty means the policy is not GC-managed. |
+
 ## BeadsConfig
 
 BeadsConfig holds bead store settings.
@@ -253,6 +263,9 @@ BeadsConfig holds bead store settings.
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
 | `provider` | string |  | `bd` | Provider selects the bead store backend: "bd" (default), "file", or "exec:&lt;script&gt;" for a user-supplied script. |
+| `backend` | string |  |  | Backend selects the bd storage engine when Provider is "bd". Empty defaults to "dolt"; T3Code uses "doltlite" for local dev stores. |
+| `event_hooks` | boolean |  | `true` | EventHooks controls installation of the bead event-forwarding hooks (.beads/hooks/on_create,on_update,on_close). Defaults to true. This config surface is staged ahead of the native bead-event support; current hook behavior remains unchanged until lifecycle code opts in. |
+| `policies` | map[string]BeadPolicyConfig |  |  | Policies defines per-bead-use storage and garbage-collection defaults. Policy names are interpreted by higher-level systems; unknown names are preserved so packs can stage future policy classes without breaking load. |
 
 ## ChatSessionsConfig
 
@@ -277,8 +290,8 @@ DaemonConfig holds controller daemon settings.
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `formula_v2` | boolean |  |  | FormulaV2 enables formula v2 graph workflow infrastructure: the control-dispatcher implicit agent, graph.v2 formula compilation, and batch graph-apply bead creation. Requires bd with --graph support. Default: false (opt-in while the feature stabilizes). |
-| `graph_workflows` | boolean |  |  | GraphWorkflows is the deprecated predecessor of FormulaV2. Retained for backwards compatibility: if graph_workflows is true in TOML and formula_v2 is not set, FormulaV2 is promoted automatically during parsing. |
+| `formula_v2` | boolean |  | `true` | FormulaV2 enables formula compiler v2 workflow infrastructure: the control-dispatcher implicit agent and on-demand named session, compiler-v2 workflow compilation, and batch graph-apply bead creation. The implicit dispatcher follows normal session idle-sleep policy. Requires bd with --graph support. Default: true. Set false only for cities pinned to formula compiler v1. |
+| `graph_workflows` | boolean |  |  | GraphWorkflows is the deprecated predecessor of FormulaV2. Retained for backwards compatibility as an alias. Explicit formula_v2 wins. |
 | `patrol_interval` | string |  | `30s` | PatrolInterval is the health patrol interval. Duration string (e.g., "30s", "5m", "1h"). Defaults to "30s". |
 | `max_restarts` | integer |  | `5` | MaxRestarts is the maximum number of agent restarts within RestartWindow before the agent is quarantined. 0 means unlimited (no crash loop detection). Defaults to 5. |
 | `restart_window` | string |  | `1h` | RestartWindow is the sliding time window for counting restarts. Duration string (e.g., "30s", "5m", "1h"). Defaults to "1h". |
@@ -450,6 +463,7 @@ MailConfig holds mail provider settings.
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
 | `provider` | string |  |  | Provider selects the mail backend: "fake", "fail", "exec:&lt;script&gt;", or "" (default: beadmail). |
+| `retention_ttl` | string |  |  | RetentionTTL is how long read messages are retained before purge. Empty or "0" disables read-message retention. |
 
 ## MaintenanceConfig
 
@@ -480,7 +494,18 @@ NamedSession defines a canonical persistent session backed by an agent template.
 | `template` | string | **yes** |  | Template is the referenced agent template name. Root declarations may target imported PackV2 agents via "binding.agent". |
 | `scope` | string |  |  | Scope defines where this named session is instantiated in pack expansion: "city" (one per city) or "rig" (one per rig). Enum: `city`, `rig` |
 | `dir` | string |  |  | Dir is the identity prefix for rig-scoped named sessions after pack expansion. Empty means city-scoped. |
-| `mode` | string |  |  | Mode controls controller behavior for this named session. "on_demand" (default): reserve identity and materialize when work or an explicit reference requires it. "always": keep the canonical session controller-managed. Enum: `on_demand`, `always` |
+| `mode` | string |  |  | Mode controls when the controller ensures this named session is live. "on_demand" (default): reserve identity and materialize when work or an explicit reference requires it. "always": keep the canonical session controller-managed. Note: mode="always" is independent of min_active_sessions; both produce sessions, and gc doctor reports accidental duplicate-pool combinations. Enum: `on_demand`, `always` |
+
+## NamedSessionPatch
+
+NamedSessionPatch modifies an existing named session identified by canonical name or, for compatibility, by an unambiguous template.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `dir` | string |  |  | Dir is the targeting key. Empty targets a city-scoped named session. |
+| `name` | string |  |  | Name is the canonical named-session identity. Use this to disambiguate sessions that share the same template. |
+| `template` | string |  |  | Template is a compatibility targeting key when Name is omitted. |
+| `mode` | string |  |  | Mode overrides the named-session controller mode ("on_demand" or "always"). Enum: `on_demand`, `always` |
 
 ## OptionChoice
 
@@ -545,6 +570,7 @@ Patches holds all patch blocks from composition.
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
 | `agent` | []AgentPatch |  |  | Agents targets agents by (dir, name). |
+| `named_session` | []NamedSessionPatch |  |  | NamedSessions targets configured named sessions by (dir, template). |
 | `rigs` | []RigPatch |  |  | Rigs targets rigs by name. |
 | `providers` | []ProviderPatch |  |  | Providers targets providers by name. |
 | `github_pr_monitor` | []GitHubPRMonitorPatch |  |  | GitHubPRMonitors targets GitHub PR readiness monitors by name. |

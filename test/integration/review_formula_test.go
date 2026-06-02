@@ -24,7 +24,7 @@ import (
 // contention without letting a genuinely stuck workflow loiter.
 const reviewWorkflowTimeout = 18 * time.Minute
 
-// reviewWorkflowSlingTimeout only covers formula instantiation and source
+// reviewWorkflowSlingTimeout only covers formula instantiation and convoy
 // routing. The personal-work graph is large enough that bd-backed graph apply
 // can exceed the generic 2-minute Dolt command budget on busy CI runners.
 const reviewWorkflowSlingTimeout = 5 * time.Minute
@@ -135,8 +135,7 @@ esac
 // exercises graph.v2 scopes, Ralph, compose.expand, and pooled review fan-out.
 func TestAdoptPRFormulaCompileAndRun(t *testing.T) {
 	cityDir := setupReviewFormulaCity(t, "success", nil)
-	issueID, workflowID := startReviewWorkflow(t, cityDir, "mol-adopt-pr-v2", map[string]string{
-		"issue":       "", // filled after create
+	convoyID, workflowID := startReviewWorkflow(t, cityDir, "mol-adopt-pr-v2", map[string]string{
 		"pr_ref":      "refs/heads/test",
 		"base_branch": "main",
 		"skip_gemini": "false",
@@ -164,10 +163,10 @@ func TestAdoptPRFormulaCompileAndRun(t *testing.T) {
 		}
 	}
 
-	// Verify source bead is clean.
-	issue := showBead(t, cityDir, issueID)
-	if got := metaValue(issue, "work_dir"); got != "" {
-		t.Errorf("source bead work_dir not cleaned up: %q", got)
+	// Verify the input convoy is clean.
+	convoy := showBead(t, cityDir, convoyID)
+	if got := metaValue(convoy, "work_dir"); got != "" {
+		t.Errorf("input convoy work_dir not cleaned up: %q", got)
 	}
 }
 
@@ -175,8 +174,7 @@ func TestAdoptPRFormulaCompileAndRun(t *testing.T) {
 // fixture with two Ralph loops and two compose.expand sites.
 func TestPersonalWorkFormulaCompileAndRun(t *testing.T) {
 	cityDir := setupReviewFormulaCity(t, "success", nil)
-	issueID, workflowID := startReviewWorkflow(t, cityDir, "mol-personal-work-v2", map[string]string{
-		"issue":         "", // filled after create
+	convoyID, workflowID := startReviewWorkflow(t, cityDir, "mol-personal-work-v2", map[string]string{
 		"base_branch":   "main",
 		"skip_gemini":   "true",
 		"setup_command": "true",
@@ -206,9 +204,9 @@ func TestPersonalWorkFormulaCompileAndRun(t *testing.T) {
 		}
 	}
 
-	issue := showBead(t, cityDir, issueID)
-	if got := metaValue(issue, "work_dir"); got != "" {
-		t.Errorf("source bead work_dir not cleaned up: %q", got)
+	convoy := showBead(t, cityDir, convoyID)
+	if got := metaValue(convoy, "work_dir"); got != "" {
+		t.Errorf("input convoy work_dir not cleaned up: %q", got)
 	}
 }
 
@@ -217,7 +215,6 @@ func TestAdoptPRFormulaRetriesTransientReviewerStep(t *testing.T) {
 		"GC_GRAPH_TRANSIENT_ONCE_SUFFIXES": "review-loop.iteration.1.review-pipeline.review-codex.attempt.1",
 	})
 	_, workflowID := startReviewWorkflow(t, cityDir, "mol-adopt-pr-v2", map[string]string{
-		"issue":       "",
 		"pr_ref":      "refs/heads/test",
 		"base_branch": "main",
 		"skip_gemini": "false",
@@ -253,7 +250,6 @@ func TestAdoptPRFormulaSoftFailsGeminiAfterTransientRetries(t *testing.T) {
 		}, ","),
 	})
 	_, workflowID := startReviewWorkflow(t, cityDir, "mol-adopt-pr-v2", map[string]string{
-		"issue":       "",
 		"pr_ref":      "refs/heads/test",
 		"base_branch": "main",
 		"skip_gemini": "false",
@@ -313,9 +309,7 @@ max_attempts = 3
 on_exhausted = "hard_fail"
 `)
 
-	_, workflowID := startReviewWorkflow(t, cityDir, "mol-retry-recovery-smoke", map[string]string{
-		"issue": "",
-	})
+	_, workflowID := startReviewWorkflow(t, cityDir, "mol-retry-recovery-smoke", map[string]string{})
 
 	workflow := waitForBeadClosed(t, cityDir, workflowID, 4*time.Minute)
 	if got := metaValue(workflow, "gc.outcome"); got != "pass" {
@@ -451,20 +445,44 @@ func countTraceLinesWithAll(trace string, tokens ...string) int {
 func startReviewWorkflow(t *testing.T, cityDir, formula string, vars map[string]string) (string, string) {
 	t.Helper()
 
-	out, err := bdDolt(cityDir, "create", "--json", "Test review workflow")
+	out, err := bdDolt(cityDir, "create", "--json", "Test review workflow part one")
 	if err != nil {
 		t.Fatalf("bd create failed: %v\noutput: %s", err, out)
 	}
-	var created graphBead
-	if err := json.Unmarshal([]byte(strings.TrimSpace(extractJSONPayload(out))), &created); err != nil {
-		t.Fatalf("unmarshal: %v\njson: %s", err, out)
+	var first graphBead
+	if err := json.Unmarshal([]byte(strings.TrimSpace(extractJSONPayload(out))), &first); err != nil {
+		t.Fatalf("unmarshal first issue: %v\njson: %s", err, out)
 	}
-	issueID := created.ID
+	if first.ID == "" {
+		t.Fatalf("bd create returned empty first issue id\njson: %s", out)
+	}
 
-	// Set issue var to the created bead ID.
-	vars["issue"] = issueID
+	out, err = bdDolt(cityDir, "create", "--json", "Test review workflow part two")
+	if err != nil {
+		t.Fatalf("bd create failed: %v\noutput: %s", err, out)
+	}
+	var second graphBead
+	if err := json.Unmarshal([]byte(strings.TrimSpace(extractJSONPayload(out))), &second); err != nil {
+		t.Fatalf("unmarshal second issue: %v\njson: %s", err, out)
+	}
+	if second.ID == "" {
+		t.Fatalf("bd create returned empty second issue id\njson: %s", out)
+	}
 
-	args := []string{"sling", "worker", issueID, "--on=" + formula}
+	out, err = gcDolt(cityDir, "convoy", "create", "Test review workflow", first.ID, second.ID, "--json")
+	if err != nil {
+		t.Fatalf("gc convoy create failed: %v\noutput: %s", err, out)
+	}
+	var created graphConvoyCreateResult
+	if err := json.Unmarshal([]byte(strings.TrimSpace(extractJSONPayload(out))), &created); err != nil {
+		t.Fatalf("unmarshal created convoy: %v\njson: %s", err, out)
+	}
+	convoyID := created.ConvoyID
+	if convoyID == "" {
+		t.Fatalf("gc convoy create returned empty convoy id\njson: %s", out)
+	}
+
+	args := []string{"sling", "worker", convoyID, "--on=" + formula}
 	for k, v := range vars {
 		args = append(args, "--var", k+"="+v)
 	}
@@ -475,13 +493,8 @@ func startReviewWorkflow(t *testing.T, cityDir, formula string, vars map[string]
 	}
 	slingOutput := out
 
-	if _, wid, err := waitForBeadMetadataValue(t, cityDir, issueID, "workflow_id", 10*time.Second); err == nil {
-		return issueID, wid
-	} else {
-		issue := showBead(t, cityDir, issueID)
-		t.Fatalf("timed out waiting for workflow_id on %s: %v\ngc sling output:\n%s\nsource bead:\n%+v", issueID, err, slingOutput, issue)
-	}
-	return "", ""
+	workflowID := waitForGraphWorkflowRootForInputConvoy(t, cityDir, convoyID, slingOutput, 10*time.Second)
+	return convoyID, workflowID
 }
 
 func listWorkflowSteps(t *testing.T, cityDir, workflowID string) []string {

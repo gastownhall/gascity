@@ -124,12 +124,21 @@ func renderPromptWithMeta(fs fsys.FS, cityPath, cityName, templatePath string, c
 	// Load shared templates from pack dirs (lower priority).
 	// Each pack directory may contain prompts/shared/ and/or
 	// template-fragments/ subdirectories.
+	loadedPackFragmentRoots := make(map[string]struct{}, len(packDirs)+1)
 	for _, dir := range packDirs {
+		cleanDir := filepath.Clean(dir)
+		loadedPackFragmentRoots[cleanDir] = struct{}{}
 		sharedDir := filepath.Join(dir, "prompts", "shared")
 		loadSharedTemplates(fs, tmpl, sharedDir, stderr)
 		// V2: template-fragments/ at pack level.
 		fragDir := filepath.Join(dir, "template-fragments")
 		loadSharedTemplates(fs, tmpl, fragDir, stderr)
+	}
+	if sourcePackRoot := promptSourcePackRoot(cityPath, sourcePath); sourcePackRoot != "" {
+		if _, ok := loadedPackFragmentRoots[sourcePackRoot]; !ok {
+			loadSharedTemplates(fs, tmpl, filepath.Join(sourcePackRoot, "prompts", "shared"), stderr)
+			loadSharedTemplates(fs, tmpl, filepath.Join(sourcePackRoot, "template-fragments"), stderr)
+		}
 	}
 
 	// Load shared templates from the city root itself. cfg.PackDirs is
@@ -206,6 +215,21 @@ func promptTemplateSourcePath(cityPath, templatePath string) string {
 		return templatePath
 	}
 	return filepath.Join(cityPath, templatePath)
+}
+
+func promptSourcePackRoot(cityPath, sourcePath string) string {
+	cleanCityPath := filepath.Clean(cityPath)
+	cleanSourcePath := filepath.Clean(sourcePath)
+	agentDir := filepath.Dir(cleanSourcePath)
+	agentsDir := filepath.Dir(agentDir)
+	if filepath.Base(agentsDir) != "agents" {
+		return ""
+	}
+	packRoot := filepath.Clean(filepath.Dir(agentsDir))
+	if packRoot == cleanCityPath {
+		return ""
+	}
+	return packRoot
 }
 
 func isCanonicalPromptTemplatePath(path string) bool {

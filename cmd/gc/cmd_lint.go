@@ -297,6 +297,10 @@ func lintPrompt(packDir string, packDirs []string, providers map[string]config.P
 		diagnostics = append(diagnostics, lintLoadSharedTemplates(tmpl, filepath.Join(dir, "prompts", "shared"))...)
 		diagnostics = append(diagnostics, lintLoadSharedTemplates(tmpl, filepath.Join(dir, "template-fragments"))...)
 	}
+	if sourcePackRoot := promptSourcePackRoot(packDir, sourcePath); sourcePackRoot != "" {
+		diagnostics = append(diagnostics, lintLoadSharedTemplates(tmpl, filepath.Join(sourcePackRoot, "prompts", "shared"))...)
+		diagnostics = append(diagnostics, lintLoadSharedTemplates(tmpl, filepath.Join(sourcePackRoot, "template-fragments"))...)
+	}
 	diagnostics = append(diagnostics, lintLoadSharedTemplates(tmpl, filepath.Join(packDir, "prompts", "shared"))...)
 	diagnostics = append(diagnostics, lintLoadSharedTemplates(tmpl, filepath.Join(packDir, "template-fragments"))...)
 	diagnostics = append(diagnostics, lintLoadSharedTemplates(tmpl, filepath.Join(filepath.Dir(sourcePath), "shared"))...)

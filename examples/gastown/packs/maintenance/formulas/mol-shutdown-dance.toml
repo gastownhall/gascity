@@ -46,7 +46,6 @@ recovery mechanism for all stuck agents.
 
 Read each step's description before acting — Config values override defaults."""
 formula = "mol-shutdown-dance"
-version = 1
 
 [vars]
 [vars.warrant_id]

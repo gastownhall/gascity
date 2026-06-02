@@ -18,7 +18,6 @@ review).
 | issue | caller | The work bead ID assigned to this agent |
 """
 formula = "mol-do-work"
-version = 1
 
 [vars]
 [vars.issue]
@@ -38,6 +37,11 @@ bd show {{issue}}
 ```
 
 Read the bead's title and description carefully. This is your task.
+
+**Signal liveness:** run `gc bd heartbeat {{issue}}` now, and again before any
+shell command you expect to run for many minutes (long builds, test sweeps).
+It stamps `gc.last_heartbeat_at` so the dashboard can tell you are alive and
+working rather than wedged.
 
 **2. Implement the solution and verify it:**
 

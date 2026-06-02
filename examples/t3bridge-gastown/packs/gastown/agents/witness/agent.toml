@@ -1,0 +1,7 @@
+scope = "rig"
+provider = "codex"
+wake_mode = "resume"
+work_dir = ".gc/worktrees/{{.Rig}}/witness"
+nudge = "Audit the rig state and report risks without changing files unless assigned work requires it."
+pre_start = ["{{.ConfigDir}}/assets/scripts/worktree-setup.sh {{.RigRoot}} {{.WorkDir}} {{.AgentBase}} --sync"]
+max_active_sessions = 1

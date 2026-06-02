@@ -236,11 +236,17 @@ func shellWorkQueryWithEnv(command, dir string, env []string) (string, error) {
 	cmd.Env = workQueryEnvForDir(env, dir)
 	out, err := cmd.Output()
 	if ctx.Err() == context.DeadlineExceeded {
+		// Wrap context.DeadlineExceeded so callers can classify the timeout as
+		// transient (dispatch.IsTransientControllerError / errors.Is). Without
+		// this, a work-query timeout reads as an opaque fatal error and kills
+		// long-running consumers like the control-dispatcher --follow loop even
+		// though the timeout is just transient bead-store load. The human-facing
+		// "timed out after" text is preserved.
 		msg := strings.TrimSpace(string(out))
 		if msg != "" {
-			return string(out), fmt.Errorf("running work query %q: timed out after %s with partial stdout %q", command, hookWorkQueryTimeout, msg)
+			return string(out), fmt.Errorf("running work query %q: timed out after %s with partial stdout %q: %w", command, hookWorkQueryTimeout, msg, context.DeadlineExceeded)
 		}
-		return "", fmt.Errorf("running work query %q: timed out after %s", command, hookWorkQueryTimeout)
+		return "", fmt.Errorf("running work query %q: timed out after %s: %w", command, hookWorkQueryTimeout, context.DeadlineExceeded)
 	}
 	if err != nil {
 		return "", fmt.Errorf("running work query %q: %w", command, err)

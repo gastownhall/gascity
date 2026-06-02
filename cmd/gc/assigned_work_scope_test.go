@@ -81,6 +81,29 @@ func TestFilterAssignedWorkBeadsForPoolDemandKeepsDirectAssigneeAfterTemplateFal
 	}
 }
 
+func TestFilterAssignedWorkBeadsForPoolDemandKeepsLegacyWorkflowRunTarget(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{{
+			Name: "worker",
+		}},
+	}
+	work := []beads.Bead{{
+		ID:       "legacy-workflow-root",
+		Status:   "in_progress",
+		Assignee: "worker-dead",
+		Metadata: map[string]string{
+			"gc.kind":       "workflow",
+			"gc.run_target": "worker",
+		},
+	}}
+
+	got := filterAssignedWorkBeadsForPoolDemand(cfg, "", nil, work, []string{""})
+
+	if len(got) != 1 || got[0].ID != "legacy-workflow-root" {
+		t.Fatalf("filtered work = %#v, want legacy workflow root preserved through run_target fallback", got)
+	}
+}
+
 func TestFilterAssignedWorkBeadsForPoolDemandDropsDirectAssigneeFromUnreachableStore(t *testing.T) {
 	cityPath := t.TempDir()
 	rigPath := filepath.Join(cityPath, "riga")

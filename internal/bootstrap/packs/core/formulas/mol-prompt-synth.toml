@@ -27,7 +27,6 @@ to the destination, close the bead, drain.
 | Generated output is empty          | Re-run once; if still empty, mail Witness             |
 """
 formula = "mol-prompt-synth"
-version = 1
 
 [vars]
 [vars.issue]

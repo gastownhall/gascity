@@ -117,6 +117,45 @@ func TestScanWithRootParsesEpoch(t *testing.T) {
 	}
 }
 
+func TestScanWithRootPopulatesCityFromGCPath(t *testing.T) {
+	root := t.TempDir()
+	buildFakeProc(t, root, 310, map[string]string{
+		"GC_SESSION_ID": "ga-city",
+		"GC_CITY_PATH":  "/tmp/primary-city",
+		"GC_CITY":       "/tmp/fallback-city",
+	})
+
+	got, err := scanWithRoot(root, "ga-city")
+	if err != nil {
+		t.Fatalf("scanWithRoot error: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("got %d entries, want 1", len(got))
+	}
+	if got[0].City != "/tmp/primary-city" {
+		t.Fatalf("City = %q, want GC_CITY_PATH value", got[0].City)
+	}
+}
+
+func TestScanWithRootPopulatesCityFromGCCityFallback(t *testing.T) {
+	root := t.TempDir()
+	buildFakeProc(t, root, 320, map[string]string{
+		"GC_SESSION_ID": "ga-city",
+		"GC_CITY":       "/tmp/fallback-city",
+	})
+
+	got, err := scanWithRoot(root, "ga-city")
+	if err != nil {
+		t.Fatalf("scanWithRoot error: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("got %d entries, want 1", len(got))
+	}
+	if got[0].City != "/tmp/fallback-city" {
+		t.Fatalf("City = %q, want GC_CITY fallback value", got[0].City)
+	}
+}
+
 func TestScanWithRootMissingEnvironSkipped(t *testing.T) {
 	root := t.TempDir()
 	// Directory exists but no environ (ENOENT) — should be skipped without error.

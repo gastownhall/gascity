@@ -88,6 +88,25 @@ func (c *CachingStore) ApplyEvent(eventType string, payload json.RawMessage) {
 			return
 		}
 		if !matchesBacking {
+			// A field-changing event that could not be confirmed against the
+			// backing store is either genuinely stale, or real but not yet
+			// visible to this process's backing read — a write-through race
+			// after a cross-process gc sling/kickoff stamps gc.routed_to or
+			// claims the bead. Dropping it outright leaves a stale cached row
+			// that CachedReady still serves with ok=true, so the demand path
+			// counts the bead off the stale row and strands it (no routed_to /
+			// wrong status) until the next full reconcile
+			// (gastownhall/gascity#2927). Mark the bead dirty so the cached
+			// ready model declines for it and the demand path falls back to the
+			// authoritative ReadyLive query; reconciliation clears the flag once
+			// cache and backing reconverge. A dependency-only conflict is left
+			// untouched: dependency snapshots routinely arrive ahead of the
+			// backing and are intentionally tolerated without declining.
+			if fieldConflictCached {
+				c.mu.Lock()
+				c.dirty[patch.ID] = struct{}{}
+				c.mu.Unlock()
+			}
 			return
 		}
 		verifiedRecentLocal = true
@@ -351,6 +370,12 @@ func mergeCacheEventPatch(base, patch Bead, fields map[string]json.RawMessage) B
 	if hasCacheEventField(fields, "dependencies") {
 		merged.Dependencies = slices.Clone(patch.Dependencies)
 	}
+	if hasCacheEventField(fields, "ephemeral") {
+		merged.Ephemeral = patch.Ephemeral
+	}
+	if hasCacheEventField(fields, "defer_until") {
+		merged.DeferUntil = cloneTimePtr(patch.DeferUntil)
+	}
 	return merged
 }
 
@@ -388,6 +413,12 @@ func cacheEventConflictsCurrent(current, patch Bead, fields map[string]json.RawM
 		return true
 	}
 	if hasCacheEventField(fields, "labels") && !slices.Equal(current.Labels, patch.Labels) {
+		return true
+	}
+	if hasCacheEventField(fields, "ephemeral") && current.Ephemeral != patch.Ephemeral {
+		return true
+	}
+	if hasCacheEventField(fields, "defer_until") && !timePtrEqual(current.DeferUntil, patch.DeferUntil) {
 		return true
 	}
 	return false
@@ -540,7 +571,9 @@ func beadChanged(old, fresh Bead, skipLabels bool) bool {
 		old.From != fresh.From ||
 		old.ParentID != fresh.ParentID ||
 		old.Ref != fresh.Ref ||
-		old.Description != fresh.Description {
+		old.Description != fresh.Description ||
+		old.Ephemeral != fresh.Ephemeral ||
+		!timePtrEqual(old.DeferUntil, fresh.DeferUntil) {
 		return true
 	}
 	if !maps.Equal(old.Metadata, fresh.Metadata) {
@@ -567,5 +600,16 @@ func intPtrEqual(left, right *int) bool {
 		return false
 	default:
 		return *left == *right
+	}
+}
+
+func timePtrEqual(left, right *time.Time) bool {
+	switch {
+	case left == nil && right == nil:
+		return true
+	case left == nil || right == nil:
+		return false
+	default:
+		return left.Equal(*right)
 	}
 }

@@ -1567,6 +1567,19 @@ func commitStartResultTraced(
 			return false
 		}
 		if result.rollbackPending {
+			if errors.Is(result.err, context.DeadlineExceeded) {
+				rec.Record(events.Event{
+					Type:    events.SessionColdStartTimeout,
+					Actor:   "controller",
+					Subject: name,
+					Message: fmt.Sprintf("session %q cold start timed out", name),
+				})
+			}
+			// A rolled-back pending create is closed and recreated fresh on the
+			// next tick, so it deliberately does not record a wake failure (see
+			// TestReconcileSessionBeads_RollsBackPendingCreateOnProviderError).
+			// Genuine wake-failure accounting happens on the non-rollback path
+			// below via recordWakeFailure.
 			if trace != nil {
 				trace.recordOperation("reconciler.start.rollback_pending", tp.TemplateName, name, "", "start", result.outcome, traceRecordPayload{
 					"error": formatLifecycleError(result.err),

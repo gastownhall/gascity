@@ -63,6 +63,41 @@ func TestStampRunSessionIdentityStampsInProgressAssignedBead(t *testing.T) {
 	}
 }
 
+func TestStampRunSessionIdentityPropagatesToRunRoot(t *testing.T) {
+	// #2843: a worked in-progress STEP back-fills its workflow ROOT (which the
+	// dashboard's root-only snapshot reads). The root is a control-lane bead,
+	// never in_progress+assigned, so it is reached only via gc.root_bead_id.
+	const sn = "gascity-packs-polecat-gc-1"
+	const wd = "/home/ds/gascity-packs-worktrees/gascity-packs-polecat-1"
+	root := beads.Bead{ID: "gpk-root", Type: "molecule", Status: "in_progress", Metadata: map[string]string{"gc.kind": "workflow"}}
+	step := beads.Bead{ID: "gpk-step", Type: "step", Status: "in_progress", Assignee: sn, Metadata: map[string]string{"gc.step_ref": "wf.work", "gc.root_bead_id": "gpk-root"}}
+	mem := beads.NewMemStoreFrom(0, []beads.Bead{root, step}, nil)
+	store := &countingStore{Store: mem}
+	sessions := newSessionBeadSnapshot([]beads.Bead{stampTestSession(sn, wd)})
+
+	stampRunSessionIdentity([]beads.Bead{step}, []beads.Store{store}, sessions, io.Discard)
+
+	gotStep, _ := mem.Get("gpk-step")
+	if gotStep.Metadata["gc.session_name"] != sn || gotStep.Metadata["gc.work_dir"] != wd {
+		t.Errorf("step not stamped: session_name=%q work_dir=%q", gotStep.Metadata["gc.session_name"], gotStep.Metadata["gc.work_dir"])
+	}
+	gotRoot, _ := mem.Get("gpk-root")
+	if gotRoot.Metadata["gc.session_name"] != sn {
+		t.Errorf("root gc.session_name = %q, want %q (propagated from step)", gotRoot.Metadata["gc.session_name"], sn)
+	}
+	if gotRoot.Metadata["gc.work_dir"] != wd {
+		t.Errorf("root gc.work_dir = %q, want %q (propagated from step)", gotRoot.Metadata["gc.work_dir"], wd)
+	}
+
+	// Idempotent: a second pass writes nothing (step + root already stamped).
+	stamped, _ := mem.Get("gpk-step")
+	store.writes = 0
+	stampRunSessionIdentity([]beads.Bead{stamped}, []beads.Store{store}, sessions, io.Discard)
+	if store.writes != 0 {
+		t.Errorf("second pass wrote %d times, want 0 (step+root already stamped)", store.writes)
+	}
+}
+
 func TestStampRunSessionIdentityNamedSessionUsesAlias(t *testing.T) {
 	// Named sessions (e.g. mayor) carry an empty session_name; their
 	// resolvable identifier lives in alias / configured_named_identity.

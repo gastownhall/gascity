@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 	"time"
@@ -38,7 +39,11 @@ type ProcessOptions struct {
 	StorePath          string
 	FormulaSearchPaths []string
 	PrepareFragment    func(*formula.FragmentRecipe, beads.Bead) error
+	PrepareRecipe      func(*formula.Recipe, beads.Bead) error
 	RecycleSession     func(beads.Bead) error
+	// RequiredArtifactStat checks required-artifact files. When nil, the
+	// dispatcher uses os.Stat.
+	RequiredArtifactStat func(path string) (os.FileInfo, error)
 	// ResolveStoreRef opens the bead store identified by a gc.source_store_ref
 	// value (e.g. "city:foo", "rig:alpha"). Used by processWorkflowFinalize to
 	// propagate successful workflow completion across store boundaries: when
@@ -123,6 +128,8 @@ func ProcessControl(store beads.Store, bead beads.Bead, opts ProcessOptions) (Co
 		return processRetryEval(store, bead, opts)
 	case "fanout":
 		return processFanout(store, bead, opts)
+	case "drain":
+		return processDrain(store, bead, opts)
 	case "scope-check":
 		return processScopeCheck(store, bead, opts)
 	case "workflow-finalize":
@@ -1358,11 +1365,15 @@ func setOutcomeAndClose(store beads.Store, beadID, outcome string) error {
 	})
 }
 
-// reconcileClosedScopeMember re-reads the just-closed bead and delegates to
-// reconcileTerminalScopedMember. Callers invoke it immediately after
+// ReconcileClosedScopeMember re-reads a just-closed bead and delegates to
+// scope reconciliation. Callers invoke it immediately after
 // setOutcomeAndClose, so this relies on the store being read-after-write
 // consistent (true for MemStore today). If a future store becomes eventually
 // consistent, pass the in-memory closed bead directly instead of re-reading.
+func ReconcileClosedScopeMember(store beads.Store, beadID string) (ControlResult, error) {
+	return reconcileClosedScopeMember(store, beadID)
+}
+
 func reconcileClosedScopeMember(store beads.Store, beadID string) (ControlResult, error) {
 	return reconcileClosedScopeMemberWithOptions(store, beadID, ProcessOptions{})
 }

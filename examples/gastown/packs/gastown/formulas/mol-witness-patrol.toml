@@ -58,7 +58,6 @@ the worktree. This makes the work schedulable again.
 
 Read each step's description before acting — Config values override defaults."""
 formula = "mol-witness-patrol"
-version = 11
 
 [vars]
 [vars.binding_prefix]

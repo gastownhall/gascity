@@ -14,6 +14,7 @@ import (
 	"time"
 
 	bdpack "github.com/gastownhall/gascity/examples/bd"
+	"github.com/gastownhall/gascity/internal/processgroup/processgrouptest"
 )
 
 func TestDoltServerEnv_DoesNotInjectGCSchedulerDefault(t *testing.T) {
@@ -986,6 +987,7 @@ func TestTerminateManagedDoltTestPIDKillsProcessGroup(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX process-group signal semantics required")
 	}
+	processgrouptest.RequireRealProcessSignals(t)
 	dir := t.TempDir()
 	childFile := filepath.Join(dir, "child.pid")
 	// Shell becomes the new process group leader (Setpgid:true). It forks

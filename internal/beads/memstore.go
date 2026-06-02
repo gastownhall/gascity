@@ -61,6 +61,7 @@ func (m *MemStore) snapshot() (int, []Bead, []Dep) {
 // and the store.
 func cloneBead(b Bead) Bead {
 	b.Priority = cloneIntPtr(b.Priority)
+	b.DeferUntil = cloneTimePtr(b.DeferUntil)
 	b.Metadata = maps.Clone(b.Metadata)
 	b.Labels = slices.Clone(b.Labels)
 	b.Needs = slices.Clone(b.Needs)
@@ -267,14 +268,9 @@ func (m *MemStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 	}
 
 	var result []Bead
+	now := time.Now().UTC()
 	for _, b := range m.beads {
-		if b.Status != "open" {
-			continue
-		}
-		if b.Ephemeral {
-			continue
-		}
-		if IsReadyExcludedType(b.Type) {
+		if !IsReadyCandidateForTier(b, now, q.TierMode) {
 			continue
 		}
 		if q.Assignee != "" && b.Assignee != q.Assignee {

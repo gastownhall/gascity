@@ -154,15 +154,6 @@ func runRalphCheck(store beads.Store, bead, subject beads.Bead, attempt int, opt
 	if checkPath == "" {
 		return convergence.GateResult{}, fmt.Errorf("%s: missing gc.check_path", bead.ID)
 	}
-	// gc.check_path comes from formula metadata after variable substitution
-	// (internal/formula/expand.go), and sling API `vars` can flow into that
-	// substitution. Enforce the relative-path contract at this boundary so
-	// an absolute string synthesized via vars cannot bypass containment in
-	// convergence.ResolveConditionPath (which intentionally trusts callers
-	// to vouch for absolute inputs).
-	if filepath.IsAbs(checkPath) {
-		return convergence.GateResult{}, fmt.Errorf("%s: gc.check_path must be relative, got absolute %q", bead.ID, checkPath)
-	}
 	cityPath := opts.CityPath
 	if cityPath == "" {
 		cityPath = resolveInheritedMetadata(store, bead, "gc.city_path")
@@ -205,9 +196,16 @@ func runRalphCheck(store beads.Store, bead, subject beads.Bead, attempt int, opt
 	// gastownhall/gascity#2320 storePath (a rig subtree) was passed as both,
 	// causing relative gc.check_path values to be looked up under the rig
 	// tree even when the script lives in the city tree.
+	trustedAbsRoots := ralphCheckTrustedAbsoluteRoots(cityPath, storePath, opts.FormulaSearchPaths)
+	if filepath.IsAbs(checkPath) && !pathWithinAny(checkPath, trustedAbsRoots) {
+		return convergence.GateResult{}, fmt.Errorf("%s: absolute gc.check_path %q escapes trusted roots", bead.ID, checkPath)
+	}
 	scriptPath, err := convergence.ResolveConditionPath(cityPath, scriptBase, checkPath)
 	if err != nil {
 		return convergence.GateResult{}, fmt.Errorf("%s: resolving check path: %w", bead.ID, err)
+	}
+	if filepath.IsAbs(checkPath) && !pathWithinAny(scriptPath, trustedAbsRoots) {
+		return convergence.GateResult{}, fmt.Errorf("%s: resolved gc.check_path %q escapes trusted roots", bead.ID, scriptPath)
 	}
 
 	timeout := convergence.DefaultGateTimeout
@@ -256,6 +254,47 @@ func runRalphCheck(store beads.Store, bead, subject beads.Bead, attempt int, opt
 		ArtifactDir: artifactDir,
 	}, timeout, 0)
 	return result, nil
+}
+
+func ralphCheckTrustedAbsoluteRoots(cityPath, storePath string, formulaSearchPaths []string) []string {
+	roots := make([]string, 0, 2+2*len(formulaSearchPaths))
+	add := func(root string) {
+		root = strings.TrimSpace(root)
+		if root == "" {
+			return
+		}
+		normalized := pathutil.NormalizePathForCompare(root)
+		for _, existing := range roots {
+			if pathutil.SamePath(existing, normalized) {
+				return
+			}
+		}
+		roots = append(roots, normalized)
+	}
+	add(cityPath)
+	add(storePath)
+	// Pack-authored checks may live beside a formula layer's formulas/ dir.
+	for _, formulaPath := range formulaSearchPaths {
+		formulaPath = strings.TrimSpace(formulaPath)
+		if formulaPath == "" {
+			continue
+		}
+		clean := filepath.Clean(formulaPath)
+		add(clean)
+		if filepath.Base(clean) == "formulas" {
+			add(filepath.Dir(clean))
+		}
+	}
+	return roots
+}
+
+func pathWithinAny(path string, roots []string) bool {
+	for _, root := range roots {
+		if pathutil.PathWithin(root, path) {
+			return true
+		}
+	}
+	return false
 }
 
 // resolveRalphCheckMoleculePaths derives the molecule root directory and the

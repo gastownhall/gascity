@@ -42,14 +42,15 @@ mode = "on_demand"
 	if err != nil {
 		t.Fatalf("LoadWithIncludes: %v", err)
 	}
-	if len(cfg.NamedSessions) != 2 {
-		t.Fatalf("len(NamedSessions) = %d, want 2", len(cfg.NamedSessions))
+	sessions := userNamedSessions(cfg.NamedSessions)
+	if len(sessions) != 2 {
+		t.Fatalf("len(user NamedSessions) = %d, want 2", len(sessions))
 	}
-	if cfg.NamedSessions[0].Template != "mayor" {
-		t.Errorf("NamedSessions[0].Template = %q, want %q", cfg.NamedSessions[0].Template, "mayor")
+	if sessions[0].Template != "mayor" {
+		t.Errorf("NamedSessions[0].Template = %q, want %q", sessions[0].Template, "mayor")
 	}
-	if cfg.NamedSessions[1].Template != "polecat" {
-		t.Errorf("NamedSessions[1].Template = %q, want %q", cfg.NamedSessions[1].Template, "polecat")
+	if sessions[1].Template != "polecat" {
+		t.Errorf("NamedSessions[1].Template = %q, want %q", sessions[1].Template, "polecat")
 	}
 }
 
@@ -417,11 +418,12 @@ formula = "demo"
 	}
 
 	// 1. Fragment merged: named session should be present.
-	if len(cfg.NamedSessions) != 1 {
-		t.Fatalf("len(NamedSessions) = %d, want 1", len(cfg.NamedSessions))
+	sessions := userNamedSessions(cfg.NamedSessions)
+	if len(sessions) != 1 {
+		t.Fatalf("len(user NamedSessions) = %d, want 1", len(sessions))
 	}
-	if cfg.NamedSessions[0].Template != "mayor" {
-		t.Errorf("NamedSession template = %q, want %q", cfg.NamedSessions[0].Template, "mayor")
+	if sessions[0].Template != "mayor" {
+		t.Errorf("NamedSession template = %q, want %q", sessions[0].Template, "mayor")
 	}
 
 	// 2. City pack expanded: pack-city-agent should be present.

@@ -11,7 +11,7 @@ stderr 'gc import migrate has been deprecated\.'
 stderr 'Use "gc doctor" to inspect legacy PackV1 surfaces\.'
 stderr 'Use "gc doctor --fix" for the safe mechanical cases that currently have automatic rewrites'
 stderr 'no longer performs in-place PackV1-to-PackV2 rewrites'
-stderr 'docs/guides/migrating-to-pack-vnext.md'
+stderr 'docs/guides/shareable-packs.md'
 ! exists $WORK/legacy-city/pack.toml
 exec grep '\[\[agent\]\]' $WORK/legacy-city/city.toml
 

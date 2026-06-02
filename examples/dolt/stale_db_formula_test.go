@@ -18,9 +18,6 @@ func TestStaleDBFormulaRuntimeContract(t *testing.T) {
 		t.Fatalf("ParseFile: %v", err)
 	}
 
-	if f.Version != 1 {
-		t.Fatalf("Version = %d, want 1", f.Version)
-	}
 	if len(f.Steps) != 1 {
 		t.Fatalf("len(Steps) = %d, want 1 so shell state stays inside one formula step", len(f.Steps))
 	}

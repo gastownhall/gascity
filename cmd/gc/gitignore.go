@@ -8,7 +8,7 @@ import (
 )
 
 // cityGitignoreEntries are the paths that gc init writes into .gitignore.
-var cityGitignoreEntries = []string{".gc/", ".beads/*", "!.beads/identity.toml", "hooks/", ".runtime/"}
+var cityGitignoreEntries = []string{".gc/", ".beads/*", "!.beads/identity.toml", "hooks/"}
 
 // rigGitignoreEntries are the paths that gc rig add writes into
 // the rig-scoped .gitignore.

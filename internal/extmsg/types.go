@@ -478,12 +478,27 @@ type RemoveMembershipInput struct {
 	Now          time.Time
 }
 
+// TranscriptOrder controls the sort order of listed transcript entries by sequence.
+type TranscriptOrder string
+
+const (
+	// TranscriptOrderAsc returns entries oldest-first (ascending sequence). Default.
+	TranscriptOrderAsc TranscriptOrder = "asc"
+	// TranscriptOrderDesc returns entries newest-first (descending sequence),
+	// letting callers fetch the most recent entries without walking the whole
+	// stream on busy conversations.
+	TranscriptOrderDesc TranscriptOrder = "desc"
+)
+
 // ListTranscriptInput is the input for listing transcript entries.
 type ListTranscriptInput struct {
 	Caller        Caller
 	Conversation  ConversationRef
 	AfterSequence int64
 	Limit         int
+	// Order controls newest-first vs oldest-first traversal. Empty defaults to
+	// TranscriptOrderAsc for backwards compatibility.
+	Order TranscriptOrder
 }
 
 // ListBackfillInput is the input for listing backfill entries for a member.

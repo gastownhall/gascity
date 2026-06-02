@@ -9,11 +9,12 @@ import (
 // It provides a structured view of the expanded (post-pack, post-patch)
 // configuration state.
 type configResponse struct {
-	Workspace workspaceResponse           `json:"workspace"`
-	Agents    []configAgentResponse       `json:"agents"`
-	Rigs      []configRigResponse         `json:"rigs"`
-	Providers map[string]providerSpecJSON `json:"providers,omitempty"`
-	Patches   *configPatchesResponse      `json:"patches,omitempty"`
+	Workspace       workspaceResponse           `json:"workspace"`
+	EffectiveAPIURL string                      `json:"effective_api_url,omitempty"`
+	Agents          []configAgentResponse       `json:"agents"`
+	Rigs            []configRigResponse         `json:"rigs"`
+	Providers       map[string]providerSpecJSON `json:"providers,omitempty"`
+	Patches         *configPatchesResponse      `json:"patches,omitempty"`
 }
 
 type workspaceResponse struct {
@@ -24,6 +25,12 @@ type workspaceResponse struct {
 	Provider        string `json:"provider,omitempty"`
 	Suspended       bool   `json:"suspended"`
 	SessionTemplate string `json:"session_template,omitempty"`
+	// MaxActiveSessions is the city-wide cap on total concurrent sessions,
+	// mirrored from config.Workspace.MaxActiveSessions. The tri-state is
+	// preserved: nil = unset (no city-level cap declared), -1 = unlimited,
+	// any other value = the explicit cap. Agents and rigs inherit this when
+	// they don't declare their own.
+	MaxActiveSessions *int `json:"max_active_sessions,omitempty"`
 }
 
 type configAgentResponse struct {
@@ -58,6 +65,23 @@ type configPatchesResponse struct {
 	AgentCount    int `json:"agent_count"`
 	RigCount      int `json:"rig_count"`
 	ProviderCount int `json:"provider_count"`
+}
+
+// providerSpecJSONFrom renders a config.ProviderSpec into its wire shape.
+// Shared by the loaded-config and defaults-baseline handlers so the two
+// surfaces stay in lock-step.
+func providerSpecJSONFrom(spec config.ProviderSpec) providerSpecJSON {
+	return providerSpecJSON{
+		DisplayName:  spec.DisplayName,
+		Command:      spec.Command,
+		ACPCommand:   spec.ACPCommand,
+		Args:         spec.Args,
+		ACPArgs:      optionalStringSlice(spec.ACPArgs),
+		PromptMode:   spec.PromptMode,
+		PromptFlag:   spec.PromptFlag,
+		ReadyDelayMs: spec.ReadyDelayMs,
+		Env:          spec.Env,
+	}
 }
 
 // agentOrigin determines the provenance of an agent. When raw config is

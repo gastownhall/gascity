@@ -47,7 +47,7 @@ func TestEnsureGitignoreEntries_RigEntriesKeepBeadsRuntimeIgnored(t *testing.T) 
 			t.Errorf("rig .gitignore missing %q; got:\n%s", want, got)
 		}
 	}
-	for _, forbidden := range []string{".gc/", "hooks/", ".runtime/", "!.beads/config.yaml", "!.beads/metadata.json"} {
+	for _, forbidden := range []string{".gc/", "hooks/", "!.beads/config.yaml", "!.beads/metadata.json"} {
 		if strings.Contains(got, forbidden) {
 			t.Errorf("rig .gitignore should not contain %q; got:\n%s", forbidden, got)
 		}
@@ -155,7 +155,7 @@ func TestEnsureGitignoreEntries_Idempotent(t *testing.T) {
 
 func TestEnsureGitignoreEntries_NoOpWhenAllPresent(t *testing.T) {
 	f := fsys.NewFake()
-	original := ".gc/\n.beads/*\n!.beads/identity.toml\nhooks/\n.runtime/\n"
+	original := ".gc/\n.beads/*\n!.beads/identity.toml\nhooks/\n"
 	f.Files[filepath.Join("/city", ".gitignore")] = []byte(original)
 
 	if err := ensureGitignoreEntries(f, "/city", cityGitignoreEntries); err != nil {

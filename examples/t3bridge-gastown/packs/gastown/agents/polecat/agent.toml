@@ -1,0 +1,8 @@
+scope = "rig"
+provider = "codex"
+wake_mode = "resume"
+work_dir = ".gc/worktrees/{{.Rig}}/polecats/{{.AgentBase}}"
+nudge = "Run gc hook, inspect assigned work, and operate only inside your configured worktree."
+pre_start = ["{{.ConfigDir}}/assets/scripts/worktree-setup.sh {{.RigRoot}} {{.WorkDir}} {{.AgentBase}} --sync"]
+min_active_sessions = 0
+max_active_sessions = 2

@@ -460,10 +460,12 @@ func CloseWorkflowSubtree(store beads.Store, rootID string) (int, error) {
 // bead so force-replacement can restore them if the replacement's finalize
 // or post-finalize invariant check fails.
 type WorkflowBeadSnapshot struct {
-	ID       string
-	Status   string
-	Assignee string
-	Outcome  string
+	ID            string
+	Status        string
+	Assignee      string
+	Outcome       string
+	FailureReason string
+	CloseReason   string
 }
 
 // SnapshotOpenWorkflowBeads records the status/assignee/outcome of every
@@ -480,10 +482,12 @@ func SnapshotOpenWorkflowBeads(store beads.Store, rootID string) ([]WorkflowBead
 			continue
 		}
 		out = append(out, WorkflowBeadSnapshot{
-			ID:       bead.ID,
-			Status:   bead.Status,
-			Assignee: bead.Assignee,
-			Outcome:  bead.Metadata["gc.outcome"],
+			ID:            bead.ID,
+			Status:        bead.Status,
+			Assignee:      bead.Assignee,
+			Outcome:       bead.Metadata["gc.outcome"],
+			FailureReason: bead.Metadata["gc.failure_reason"],
+			CloseReason:   bead.Metadata["close_reason"],
 		})
 	}
 	return out, nil
@@ -509,6 +513,12 @@ func RestoreWorkflowBeads(store beads.Store, snapshots []WorkflowBeadSnapshot) e
 		}
 		if err := store.SetMetadata(snapshot.ID, "gc.outcome", snapshot.Outcome); err != nil {
 			restoreErr = errors.Join(restoreErr, fmt.Errorf("restore bead %s outcome: %w", snapshot.ID, err))
+		}
+		if err := store.SetMetadata(snapshot.ID, "gc.failure_reason", snapshot.FailureReason); err != nil {
+			restoreErr = errors.Join(restoreErr, fmt.Errorf("restore bead %s failure reason: %w", snapshot.ID, err))
+		}
+		if err := store.SetMetadata(snapshot.ID, "close_reason", snapshot.CloseReason); err != nil {
+			restoreErr = errors.Join(restoreErr, fmt.Errorf("restore bead %s close reason: %w", snapshot.ID, err))
 		}
 	}
 	return restoreErr

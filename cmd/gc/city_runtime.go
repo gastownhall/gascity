@@ -204,11 +204,7 @@ func newCityRuntime(p CityRuntimeParams) *CityRuntime {
 	it := buildIdleTracker(p.Cfg, p.CityName, p.CityPath, p.SP)
 	mat := buildMaxSessionAgeTracker(p.Cfg, p.CityName, p.SP)
 
-	var wg wispGC
-	if p.Cfg.Daemon.WispGCEnabled() {
-		wg = newWispGC(p.Cfg.Daemon.WispGCIntervalDuration(),
-			p.Cfg.Daemon.WispTTLDuration())
-	}
+	wg := newWispGCForConfig(p.Cfg)
 
 	managedDoltHealth := p.ManagedDoltHealth
 	if managedDoltHealth == nil {
@@ -237,7 +233,7 @@ func newCityRuntime(p CityRuntimeParams) *CityRuntime {
 	// errors immediately after ensureBeadsProvider returns (#753).
 	if sweepStore, err := newCityRuntimeOpenSweepStore(p.CityPath, p.CityPath); err != nil {
 		fmt.Fprintf(p.Stderr, "gc start: order tracking sweep: %v\n", err) //nolint:errcheck // best-effort stderr
-	} else if n, err := sweepOrphanedOrderTrackingRetry(sweepStore, 3, time.Second); err != nil {
+	} else if n, err := sweepOrphanedOrderTrackingRetryLimit(sweepStore, 3, time.Second, orderTrackingSweepCloseBudget); err != nil {
 		fmt.Fprintf(p.Stderr, "gc start: order tracking sweep (closed %d): %v\n", n, err) //nolint:errcheck // best-effort stderr
 	} else if n > 0 {
 		fmt.Fprintf(p.Stderr, "gc start: closed %d orphaned order-tracking beads\n", n) //nolint:errcheck // best-effort stderr
@@ -517,7 +513,7 @@ func (cr *CityRuntime) run(ctx context.Context) {
 		// identity re-minted as a pool slot) so the name's current owner can
 		// rebind it and attach lands on the right runtime.
 		reapRuntimesBoundToClosedBeads(cr.cityBeadStore(), sessionBeads, cr.sessionDrains, cr.sp, cr.stderr)
-		if swept := sweepProcessTableOrphans(cr.sp, sessionBeads, cr.cityBeadStore(), cr.stderr); swept > 0 {
+		if swept := sweepProcessTableOrphans(cr.sp, sessionBeads, cr.cityBeadStore(), cr.cityPath, cr.stderr); swept > 0 {
 			fmt.Fprintf(cr.stderr, "session reconciler: swept %d process-table orphan runtime(s)\n", swept) //nolint:errcheck
 		}
 		// Reap stale session beads from a previous run before building desired
@@ -1045,7 +1041,7 @@ func (cr *CityRuntime) tick(
 	reapRuntimesBoundToClosedBeads(cr.cityBeadStore(), sessionBeads, cr.sessionDrains, cr.sp, cr.stderr)
 	recordPhase(TraceSiteControllerTickPhase, "reap_runtimes_bound_to_closed_beads", phaseStart, nil)
 	phaseStart = time.Now()
-	swept := sweepProcessTableOrphans(cr.sp, sessionBeads, cr.cityBeadStore(), cr.stderr)
+	swept := sweepProcessTableOrphans(cr.sp, sessionBeads, cr.cityBeadStore(), cr.cityPath, cr.stderr)
 	if swept > 0 {
 		fmt.Fprintf(cr.stderr, "session reconciler: swept %d process-table orphan runtime(s)\n", swept) //nolint:errcheck
 	}
@@ -1318,7 +1314,7 @@ func (cr *CityRuntime) runOrderTrackingSweepWatchdog(now time.Time) {
 	// The staleAfter cutoff still protects in-flight dispatches regardless of
 	// which order they belong to, so a direct all-orders sweep is safe and
 	// recovers the jam without depending on any single order being scheduled.
-	result, sweepErr := sweepStaleOrderTrackingAcrossStores(stores, now, orderTrackingSweepWatchdogStaleAfter, nil, orderTrackingWatchdogMetadataInitiator, false)
+	result, sweepErr := sweepStaleOrderTrackingAcrossStoresLimit(stores, now, orderTrackingSweepWatchdogStaleAfter, nil, orderTrackingWatchdogMetadataInitiator, false, orderTrackingSweepCloseBudget)
 	if err := errors.Join(storeErr, sweepErr); err != nil {
 		if cr.stderr != nil {
 			fmt.Fprintf(cr.stderr, "%s: order tracking sweep watchdog: %v\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
@@ -1677,12 +1673,7 @@ func (cr *CityRuntime) reloadConfigTraced(
 	cr.it = buildIdleTracker(nextCfg, cr.cityName, cr.cityPath, nextSp)
 	cr.mat = buildMaxSessionAgeTracker(nextCfg, cr.cityName, nextSp)
 
-	if nextCfg.Daemon.WispGCEnabled() {
-		cr.wg = newWispGC(nextCfg.Daemon.WispGCIntervalDuration(),
-			nextCfg.Daemon.WispTTLDuration())
-	} else {
-		cr.wg = nil
-	}
+	cr.wg = newWispGCForConfig(nextCfg)
 
 	// Drain the outgoing dispatcher before replacing it so in-flight
 	// dispatchOne goroutines persist their tracking-bead outcomes against

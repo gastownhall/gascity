@@ -152,21 +152,13 @@ func TestFormulaVersionCheck_DivergeReturnsErrExit(t *testing.T) {
 	}
 }
 
-// TestFormulaVersionCheck_DivergeWithFormulaVersionAndPath asserts the
-// optional "bead version → disk version" and "formula path" lines
-// render when the bead carries a gc.formula_version label and the
-// recipe was loaded from a real path. Without this, two of the three
-// diverge-path conditional Fprintf calls go uncovered.
-func TestFormulaVersionCheck_DivergeWithFormulaVersionAndPath(t *testing.T) {
+// TestFormulaVersionCheck_DivergeShowsFormulaPath asserts the optional
+// "formula path" line renders on divergence when the recipe was loaded
+// from a real path. Without this, the diverge-path conditional Fprintf
+// for the formula source goes uncovered.
+func TestFormulaVersionCheck_DivergeShowsFormulaPath(t *testing.T) {
 	cityDir, _ := writeVersionCheckCity(t)
 	beadID := createVersionCheckBead(t, cityDir, "deploy", "deadbeefdeadbeefdeadbeefdeadbeef")
-	store, err := openStoreAtForCity(cityDir, cityDir)
-	if err != nil {
-		t.Fatalf("openStoreAtForCity: %v", err)
-	}
-	if err := store.SetMetadata(beadID, "gc.formula_version", "v1.0.0"); err != nil {
-		t.Fatalf("SetMetadata(gc.formula_version): %v", err)
-	}
 	t.Chdir(cityDir)
 
 	var stdout, stderr bytes.Buffer
@@ -176,9 +168,6 @@ func TestFormulaVersionCheck_DivergeWithFormulaVersionAndPath(t *testing.T) {
 		t.Fatalf("Execute on diverge: err = %v, want errExit; stderr=%s", err, stderr.String())
 	}
 	got := stdout.String()
-	if !strings.Contains(got, "bead version: v1.0.0") {
-		t.Errorf("stdout = %q, want bead-version line when metadata is set", got)
-	}
 	if !strings.Contains(got, "formula path:") {
 		t.Errorf("stdout = %q, want formula-path line when recipe has a source", got)
 	}

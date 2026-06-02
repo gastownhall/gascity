@@ -13,6 +13,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/mail"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/spf13/cobra"
@@ -228,7 +229,7 @@ func doHandoff(store beads.Store, rec events.Recorder, dops drainOps, persistRes
 func doHandoffWithOutcome(store beads.Store, rec events.Recorder, dops drainOps, persistRestart func() error,
 	sessionAddress, sessionName string, args []string, stdout, stderr io.Writer,
 ) handoffOutcome {
-	b, ok := createHandoffMail(store, rec, sessionAddress, sessionAddress, args, "HANDOFF: context cycle", stderr)
+	b, ok := createHandoffMail(store, rec, sessionAddress, sessionAddress, args, "HANDOFF: context cycle", nil, stderr)
 	if !ok {
 		return handoffOutcome{code: 1}
 	}
@@ -271,7 +272,10 @@ func doHandoffWithOutcome(store beads.Store, rec events.Recorder, dops drainOps,
 
 // doHandoffAuto sends handoff mail to self without requesting restart.
 func doHandoffAuto(store beads.Store, rec events.Recorder, sessionAddress string, args []string, hookFormat string, stdout, stderr io.Writer) int {
-	b, ok := createHandoffMail(store, rec, sessionAddress, sessionAddress, args, "context cycle", stderr)
+	b, ok := createHandoffMail(store, rec, sessionAddress, sessionAddress, args, "context cycle", []string{
+		mail.AutoHandoffLabel,
+		mail.ArchiveAfterInjectLabel,
+	}, stderr)
 	if !ok {
 		return 1
 	}
@@ -283,7 +287,7 @@ func doHandoffAuto(store beads.Store, rec events.Recorder, sessionAddress string
 	return 0
 }
 
-func createHandoffMail(store beads.Store, rec events.Recorder, senderAddress, recipientAddress string, args []string, defaultSubject string, stderr io.Writer) (beads.Bead, bool) {
+func createHandoffMail(store beads.Store, rec events.Recorder, senderAddress, recipientAddress string, args []string, defaultSubject string, extraLabels []string, stderr io.Writer) (beads.Bead, bool) {
 	subject := defaultSubject
 	if len(args) > 0 {
 		subject = args[0]
@@ -299,13 +303,15 @@ func createHandoffMail(store beads.Store, rec events.Recorder, senderAddress, re
 	}
 	senderDisplay := mailSenderDisplayFromMetadata(senderAddress, metadata)
 
+	labels := []string{"thread:" + handoffThreadID()}
+	labels = append(labels, extraLabels...)
 	b, err := store.Create(beads.Bead{
 		Title:       subject,
 		Description: message,
 		Type:        "message",
 		Assignee:    recipientAddress,
 		From:        senderDisplay,
-		Labels:      []string{"thread:" + handoffThreadID()},
+		Labels:      labels,
 		Metadata:    metadata,
 		Ephemeral:   true,
 	})
@@ -379,7 +385,7 @@ func clearRestartRequest(store beads.Store, dops drainOps, sessionName string) e
 func doHandoffRemote(store beads.Store, rec events.Recorder, sp runtime.Provider,
 	sessionName, targetAddress, sender string, args []string, stdout, stderr io.Writer,
 ) int {
-	b, ok := createHandoffMail(store, rec, sender, targetAddress, args, "HANDOFF: context cycle", stderr)
+	b, ok := createHandoffMail(store, rec, sender, targetAddress, args, "HANDOFF: context cycle", nil, stderr)
 	if !ok {
 		return 1
 	}

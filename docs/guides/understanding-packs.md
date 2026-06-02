@@ -218,8 +218,11 @@ definitions onto the same surface.
 
 ## Defaults And Patches
 
-Defaults fill in blanks after packs have loaded. They are city policy, so
-`[agent_defaults]` belongs in `city.toml`.
+Defaults fill in blanks after packs have loaded. Root city defaults belong in
+`city.toml`, and pack-scoped defaults can be declared in `pack.toml` for agents
+loaded from that pack. Pack-scoped defaults follow the precedence rules in the
+pack spec: explicit agent fields win, bound imports preserve inherited pack
+defaults, and unbound legacy includes yield to root city defaults.
 
 ```toml
 [agent_defaults]

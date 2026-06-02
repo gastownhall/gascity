@@ -8,6 +8,8 @@ import "fmt"
 type Patches struct {
 	// Agents targets agents by (dir, name).
 	Agents []AgentPatch `toml:"agent,omitempty"`
+	// NamedSessions targets configured named sessions by (dir, template).
+	NamedSessions []NamedSessionPatch `toml:"named_session,omitempty"`
 	// Rigs targets rigs by name.
 	Rigs []RigPatch `toml:"rigs,omitempty"`
 	// Providers targets providers by name.
@@ -151,6 +153,20 @@ type AgentPatch struct {
 	OptionDefaults map[string]string `toml:"option_defaults,omitempty"`
 }
 
+// NamedSessionPatch modifies an existing named session identified by canonical
+// name or, for compatibility, by an unambiguous template.
+type NamedSessionPatch struct {
+	// Dir is the targeting key. Empty targets a city-scoped named session.
+	Dir string `toml:"dir,omitempty"`
+	// Name is the canonical named-session identity. Use this to disambiguate
+	// sessions that share the same template.
+	Name string `toml:"name,omitempty"`
+	// Template is a compatibility targeting key when Name is omitted.
+	Template string `toml:"template,omitempty"`
+	// Mode overrides the named-session controller mode ("on_demand" or "always").
+	Mode *string `toml:"mode,omitempty" jsonschema:"enum=on_demand,enum=always"`
+}
+
 // PoolOverride modifies legacy [pool] fields that map to session scaling. Nil fields are not changed.
 type PoolOverride struct {
 	// Min overrides the minimum number of sessions.
@@ -262,7 +278,11 @@ type GitHubPRMonitorPatch struct {
 
 // IsEmpty reports whether p has no patch operations.
 func (p *Patches) IsEmpty() bool {
-	return len(p.Agents) == 0 && len(p.Rigs) == 0 && len(p.Providers) == 0 && len(p.GitHubPRMonitors) == 0
+	return len(p.Agents) == 0 &&
+		len(p.NamedSessions) == 0 &&
+		len(p.Rigs) == 0 &&
+		len(p.Providers) == 0 &&
+		len(p.GitHubPRMonitors) == 0
 }
 
 // Fragments returns a pointer to the given inject_fragments list for use
@@ -300,6 +320,11 @@ func ApplyPatches(cfg *City, patches Patches) error {
 			return fmt.Errorf("patches.agent[%d]: %w", i, err)
 		}
 	}
+	for i, p := range patches.NamedSessions {
+		if err := applyNamedSessionPatch(cfg, &p); err != nil {
+			return fmt.Errorf("patches.named_session[%d]: %w", i, err)
+		}
+	}
 	for i, p := range patches.Rigs {
 		if err := applyRigPatch(cfg, &p); err != nil {
 			return fmt.Errorf("patches.rigs[%d]: %w", i, err)
@@ -316,6 +341,53 @@ func ApplyPatches(cfg *City, patches Patches) error {
 		}
 	}
 	return nil
+}
+
+func applyNamedSessionPatch(cfg *City, patch *NamedSessionPatch) error {
+	target, matches, err := namedSessionPatchMatches(cfg, patch)
+	if err != nil {
+		return err
+	}
+	if len(matches) == 0 {
+		return fmt.Errorf("named_session %q not found in merged config", target)
+	}
+	if len(matches) > 1 {
+		return fmt.Errorf("named_session patch target %q is ambiguous; set name to the named_session identity", target)
+	}
+	applyNamedSessionPatchFields(&cfg.NamedSessions[matches[0]], patch)
+	return nil
+}
+
+func namedSessionPatchMatches(cfg *City, patch *NamedSessionPatch) (string, []int, error) {
+	if patch.Name == "" && patch.Template == "" {
+		return "", nil, fmt.Errorf("named_session patch: name or template is required")
+	}
+	if patch.Name != "" {
+		target := qualifiedNameFromPatch(patch.Dir, patch.Name)
+		matches := make([]int, 0, 1)
+		for i := range cfg.NamedSessions {
+			if cfg.NamedSessions[i].QualifiedName() == target {
+				matches = append(matches, i)
+			}
+		}
+		return target, matches, nil
+	}
+
+	target := qualifiedNameFromPatch(patch.Dir, patch.Template)
+	matches := make([]int, 0, 1)
+	for i := range cfg.NamedSessions {
+		s := &cfg.NamedSessions[i]
+		if s.QualifiedName() == target || s.TemplateQualifiedName() == target {
+			matches = append(matches, i)
+		}
+	}
+	return target, matches, nil
+}
+
+func applyNamedSessionPatchFields(s *NamedSession, p *NamedSessionPatch) {
+	if p.Mode != nil {
+		s.Mode = *p.Mode
+	}
 }
 
 // applyAgentPatch finds an agent by (dir, name) and applies the patch.

@@ -2,6 +2,7 @@ package beadmail
 
 import (
 	"errors"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -137,8 +138,9 @@ func TestInboxUsesSingleBothTierMessageScanAcrossRoutes(t *testing.T) {
 		t.Fatalf("message query count = %d, want 1; queries=%+v", len(store.messageQueries), store.messageQueries)
 	}
 	query := store.messageQueries[0]
-	if query.TierMode != beads.TierBoth || !query.AllowScan || query.Type != "message" || query.Status != "open" || query.Assignee != "" {
-		t.Fatalf("message query = %+v, want one both-tier message scan without per-route assignee", query)
+	wantRoutes := []string{"sky", sessionBead.ID, "runtime-sky", "mayor", "witness"}
+	if query.TierMode != beads.TierBoth || query.AllowScan || query.Type != "message" || query.Status != "open" || query.Assignee != "" || !slices.Equal(query.Assignees, wantRoutes) {
+		t.Fatalf("message query = %+v, want one both-tier Assignees scan for %v", query, wantRoutes)
 	}
 	if !query.Live {
 		t.Fatalf("message query = %+v, want live read for command-visible mail freshness", query)
@@ -298,7 +300,7 @@ func TestCheckDoesNotUseMessageLabelSupplement(t *testing.T) {
 	}
 }
 
-func TestCheckUsesSingleBothTierScanForSlashRecipient(t *testing.T) {
+func TestCheckUsesSingleAssigneeMessageScanForSlashRecipient(t *testing.T) {
 	recipient := "gascity/workflows.codex-max"
 	var messageListCalls int
 	runner := func(_ string, name string, args ...string) ([]byte, error) {
@@ -311,8 +313,8 @@ func TestCheckUsesSingleBothTierScanForSlashRecipient(t *testing.T) {
 		case strings.Contains(cmd, "bd list --json") && strings.Contains(cmd, "--type=session"):
 			return []byte(`[]`), nil
 		case strings.Contains(cmd, "bd list --json") && strings.Contains(cmd, "--type=message") && strings.Contains(cmd, "--status=open"):
-			if strings.Contains(cmd, "--assignee=") {
-				t.Fatalf("slash recipient used per-assignee message query: %s", cmd)
+			if !strings.Contains(cmd, "--assignee="+recipient) {
+				t.Fatalf("slash recipient message query = %s, want single --assignee filter", cmd)
 			}
 			messageListCalls++
 			return []byte(`[{"id":"msg-w","title":"hello","description":"body","status":"open","issue_type":"message","assignee":"gascity/workflows.codex-max","from":"human","created_at":"2026-01-02T03:04:05Z","ephemeral":true}]`), nil
@@ -400,7 +402,7 @@ func TestMessageQueriesUseBothTiers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Check: %v", err)
 	}
-	if len(inbox) != 2 || !messagesContain(inbox, wisp.ID) || !messagesContain(inbox, msg.ID) {
+	if len(inbox) != 2 || !hasMailMessageID(inbox, wisp.ID) || !hasMailMessageID(inbox, msg.ID) {
 		t.Fatalf("Check = %#v, want wisp %s and issue %s", inbox, wisp.ID, msg.ID)
 	}
 
@@ -408,7 +410,7 @@ func TestMessageQueriesUseBothTiers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("All: %v", err)
 	}
-	if len(all) != 2 || !messagesContain(all, wisp.ID) || !messagesContain(all, msg.ID) {
+	if len(all) != 2 || !hasMailMessageID(all, wisp.ID) || !hasMailMessageID(all, msg.ID) {
 		t.Fatalf("All = %#v, want wisp %s and issue %s", all, wisp.ID, msg.ID)
 	}
 
@@ -424,14 +426,14 @@ func TestMessageQueriesUseBothTiers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Thread: %v", err)
 	}
-	if len(thread) != 1 {
-		t.Fatalf("Thread = %#v, want one thread message", thread)
+	if len(thread) != 1 || thread[0].ID != wisp.ID {
+		t.Fatalf("Thread = %#v, want wisp thread message %s", thread, wisp.ID)
 	}
 }
 
-func messagesContain(messages []mail.Message, id string) bool {
-	for _, msg := range messages {
-		if msg.ID == id {
+func hasMailMessageID(messages []mail.Message, id string) bool {
+	for _, message := range messages {
+		if message.ID == id {
 			return true
 		}
 	}
@@ -999,6 +1001,38 @@ func TestArchive(t *testing.T) {
 
 	if _, err := store.Get(sent.ID); !errors.Is(err, beads.ErrNotFound) {
 		t.Fatalf("store.Get(%s) err = %v, want ErrNotFound", sent.ID, err)
+	}
+}
+
+func TestArchiveCandidatesUseBothTiers(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+
+	wisp, err := store.Create(beads.Bead{
+		Title:       "dismiss wisp",
+		Type:        "message",
+		Assignee:    "mayor",
+		From:        "human",
+		Description: "wisp body",
+		Ephemeral:   true,
+	})
+	if err != nil {
+		t.Fatalf("Create ephemeral message: %v", err)
+	}
+	issue, err := p.Send("human", "mayor", "dismiss issue", "issues body")
+	if err != nil {
+		t.Fatalf("Send issues-tier message: %v", err)
+	}
+
+	matches, err := p.ArchiveCandidates(ArchiveFilter{
+		Recipients:    []string{"mayor"},
+		SubjectPrefix: "dismiss",
+	})
+	if err != nil {
+		t.Fatalf("ArchiveCandidates: %v", err)
+	}
+	if len(matches) != 2 || !hasMailMessageID(matches, issue.ID) || !hasMailMessageID(matches, wisp.ID) {
+		t.Fatalf("ArchiveCandidates = %#v, want issues-tier message %s and wisp message %s", matches, issue.ID, wisp.ID)
 	}
 }
 

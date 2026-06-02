@@ -13,6 +13,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/session"
 	helpers "github.com/gastownhall/gascity/test/acceptance/helpers"
 )
@@ -128,17 +129,49 @@ func TestSessionDefaultNamedSession(t *testing.T) {
 		if err := json.Unmarshal([]byte(out), &got); err != nil {
 			t.Fatalf("gc session list --json output is not a session list envelope: %v\n%s", err, out)
 		}
-		if len(got.Sessions) != 1 {
-			t.Fatalf("session count = %d, want 1 default named session\n%s", len(got.Sessions), out)
+		var mayorSeen bool
+		for _, sess := range got.Sessions {
+			if sess.Template == "mayor" {
+				mayorSeen = true
+			}
 		}
-		if got.Sessions[0].Template != "mayor" {
-			t.Errorf("template = %q, want mayor\n%s", got.Sessions[0].Template, out)
+		if !mayorSeen {
+			t.Fatalf("default mayor named session missing\n%s", out)
 		}
-		switch got.Sessions[0].State {
-		case session.StateCreating, session.StateActive, session.StateAwake:
-		default:
-			t.Errorf("state = %q, want creating or running\n%s", got.Sessions[0].State, out)
+		for _, sess := range got.Sessions {
+			switch sess.State {
+			case session.StateCreating, session.StateActive, session.StateAwake:
+			default:
+				t.Errorf("session %q state = %q, want creating or running\n%s", sess.Template, sess.State, out)
+			}
 		}
+	})
+
+	t.Run("Config_JSON_DefaultOnDemandControlDispatcher", func(t *testing.T) {
+		out, err := c.GC("config", "show", "--json")
+		if err != nil {
+			t.Fatalf("gc config show --json: %v\n%s", err, out)
+		}
+		var got struct {
+			Config struct {
+				NamedSessions []struct {
+					Template string
+					Mode     string
+				}
+			}
+		}
+		if err := json.Unmarshal([]byte(out), &got); err != nil {
+			t.Fatalf("gc config show --json output is not a config envelope: %v\n%s", err, out)
+		}
+		for _, sess := range got.Config.NamedSessions {
+			if sess.Template == config.ControlDispatcherAgentName {
+				if sess.Mode != "on_demand" {
+					t.Fatalf("default control-dispatcher mode = %q, want on_demand\n%s", sess.Mode, out)
+				}
+				return
+			}
+		}
+		t.Fatalf("default control-dispatcher named session missing from config\n%s", out)
 	})
 
 	t.Run("Prune_NoClosedSessions", func(t *testing.T) {

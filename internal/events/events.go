@@ -58,6 +58,11 @@ const (
 	// the reconciler-detected leak so pack-level subscribers can decide
 	// whether to clear-assignee-and-respawn or escalate.
 	SessionStranded = "session.stranded"
+	// SessionResetStalled fires when a session reset was committed but
+	// the follow-up wake remains pending past the configured startup
+	// timeout. Operators use the typed payload to correlate the stuck
+	// session, template, reset timestamp, and elapsed wait.
+	SessionResetStalled = "session.reset_stalled"
 	// SessionWorkQueryFailed fires when the current managed session's
 	// work-discovery query subprocess is killed by an external signal or
 	// aborted by the runner-imposed timeout before producing output.
@@ -65,10 +70,17 @@ const (
 	// remains correlated; the companion reconciler handler is tracked in
 	// #1497.
 	SessionWorkQueryFailed = "session.work_query_failed"
-	ConvoyCreated          = "convoy.created"
-	ConvoyClosed           = "convoy.closed"
-	ControllerStarted      = "controller.started"
-	ControllerStopped      = "controller.stopped"
+	// SessionColdStartTimeout fires when a pool session's first runtime spawn
+	// (a pending create) exceeds the start deadline and is rolled back. It is
+	// per-session: it fires whenever a fresh spawn times out, including a warm
+	// pool scale-up adding capacity — not only when the whole pool was at zero.
+	// Emitted by the session reconciler's start-result commit path; the
+	// envelope's Subject carries the session name.
+	SessionColdStartTimeout = "session.cold_start_timeout"
+	ConvoyCreated           = "convoy.created"
+	ConvoyClosed            = "convoy.closed"
+	ControllerStarted       = "controller.started"
+	ControllerStopped       = "controller.stopped"
 	// SupervisorShutdownRequested fires when the supervisor's main loop
 	// observes a shutdown trigger (signal or socket stop) and is about to
 	// cancel the supervisor context. Carries attribution so operators can
@@ -137,7 +149,9 @@ var KnownEventTypes = []string{
 	SessionIdleKilled, SessionMaxAgeKilled, SessionSuspended, SessionUpdated,
 	SessionDrainAckedWithAssignedWork,
 	SessionStranded,
+	SessionResetStalled,
 	SessionWorkQueryFailed,
+	SessionColdStartTimeout,
 	BeadCreated, BeadClosed, BeadDeleted, BeadUpdated,
 	MailSent, MailRead, MailArchived, MailMarkedRead, MailMarkedUnread,
 	MailReplied, MailDeleted,

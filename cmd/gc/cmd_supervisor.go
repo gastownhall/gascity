@@ -454,6 +454,13 @@ type shutdownResult struct {
 	err error
 }
 
+func supervisorShutdownExitCode(shutErr error) int {
+	if shutErr != nil {
+		return 1
+	}
+	return 0
+}
+
 func newShutdownState() *shutdownState {
 	return &shutdownState{done: make(chan struct{})}
 }
@@ -1247,7 +1254,7 @@ func runSupervisor(stdout, stderr io.Writer) int {
 			}
 			shut.finish(shutErr)
 			fmt.Fprintln(stdout, "Supervisor stopped.") //nolint:errcheck
-			return 0
+			return supervisorShutdownExitCode(shutErr)
 		}
 	}
 }

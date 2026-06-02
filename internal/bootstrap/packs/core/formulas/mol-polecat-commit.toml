@@ -27,7 +27,6 @@ Push conflicts are handled by fetch + rebase + retry (up to 3 times).
 | Unsure what to do | Mail Witness, don't guess |"""
 formula = "mol-polecat-commit"
 extends = ["mol-polecat-base"]
-version = 1
 
 [[steps]]
 id = "workspace-setup"

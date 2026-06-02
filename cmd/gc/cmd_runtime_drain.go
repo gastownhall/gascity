@@ -654,6 +654,6 @@ func doRuntimeDrainAck(dops drainOps, cityPath, targetName, sn string, jsonOutpu
 		}
 		return 0
 	}
-	fmt.Fprintln(stdout, "Drain acknowledged. Controller will stop this session.") //nolint:errcheck // best-effort stdout
+	fmt.Fprintln(stdout, "Drain acknowledged. Controller poked for immediate stop.") //nolint:errcheck // best-effort stdout
 	return 0
 }

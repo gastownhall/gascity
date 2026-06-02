@@ -154,7 +154,7 @@ func standaloneAPIBaseURL(cfg *config.City) string {
 	switch bind {
 	case "", "0.0.0.0":
 		bind = "127.0.0.1"
-	case "::":
+	case "::", "[::]":
 		bind = "::1"
 	}
 	return "http://" + net.JoinHostPort(bind, strconv.Itoa(cfg.API.Port))

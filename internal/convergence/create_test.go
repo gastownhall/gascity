@@ -320,6 +320,86 @@ func TestCreateHandler_PersistsRig(t *testing.T) {
 	}
 }
 
+func TestCreateHandler_TriggerDefersFirstWisp(t *testing.T) {
+	store := newFakeStore()
+	emitter := &fakeEmitter{}
+	handler := &Handler{Store: store, Emitter: emitter, Clock: time.Now}
+
+	result, err := handler.CreateHandler(context.Background(), CreateParams{
+		Formula:          "test-formula",
+		Target:           "test-agent",
+		MaxIterations:    5,
+		GateMode:         GateModeManual,
+		Trigger:          TriggerEvent,
+		TriggerCondition: "/scripts/check-chunk-complete",
+	})
+	if err != nil {
+		t.Fatalf("CreateHandler: %v", err)
+	}
+	if result.FirstWispID != "" {
+		t.Errorf("FirstWispID = %q, want empty (first pour deferred to trigger)", result.FirstWispID)
+	}
+
+	meta, _ := store.GetMetadata(result.BeadID)
+	if meta[FieldState] != StateWaitingTrigger {
+		t.Errorf("state = %q, want %q", meta[FieldState], StateWaitingTrigger)
+	}
+	if meta[FieldIteration] != "0" {
+		t.Errorf("iteration = %q, want 0", meta[FieldIteration])
+	}
+	if meta[FieldTrigger] != TriggerEvent {
+		t.Errorf("trigger = %q, want %q", meta[FieldTrigger], TriggerEvent)
+	}
+	if meta[FieldTriggerCondition] != "/scripts/check-chunk-complete" {
+		t.Errorf("trigger_condition = %q, want %q", meta[FieldTriggerCondition], "/scripts/check-chunk-complete")
+	}
+	if meta[FieldActiveWisp] != "" {
+		t.Errorf("active_wisp = %q, want empty", meta[FieldActiveWisp])
+	}
+
+	// No wisp should have been poured at create time.
+	children, _ := store.Children(result.BeadID)
+	if len(children) != 0 {
+		t.Errorf("children = %d, want 0 (no wisp until trigger passes)", len(children))
+	}
+
+	// Created event with empty first wisp.
+	ev, ok := emitter.findEvent(EventCreated)
+	if !ok {
+		t.Fatal("expected ConvergenceCreated event")
+	}
+	var payload CreatedPayload
+	if err := json.Unmarshal(ev.Payload, &payload); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if payload.FirstWispID != "" {
+		t.Errorf("payload.FirstWispID = %q, want empty", payload.FirstWispID)
+	}
+}
+
+func TestCreateHandler_TriggerRequiresCondition(t *testing.T) {
+	store := newFakeStore()
+	handler := &Handler{Store: store, Emitter: &fakeEmitter{}, Clock: time.Now}
+
+	_, err := handler.CreateHandler(context.Background(), CreateParams{
+		Formula:       "test-formula",
+		Target:        "test-agent",
+		MaxIterations: 5,
+		GateMode:      GateModeManual,
+		Trigger:       TriggerEvent,
+		// TriggerCondition omitted — must error before any bead is created.
+	})
+	if err == nil {
+		t.Fatal("expected error for trigger without condition")
+	}
+	if !strings.Contains(err.Error(), "requires a trigger condition") {
+		t.Errorf("error = %q, want to contain %q", err.Error(), "requires a trigger condition")
+	}
+	if len(store.beads) != 0 {
+		t.Errorf("beads = %d, want 0 (validation before create)", len(store.beads))
+	}
+}
+
 func TestCreateHandler_EmptyRigForCityScope(t *testing.T) {
 	store := newFakeStore()
 	handler := &Handler{

@@ -1235,7 +1235,6 @@ func TestWorktreeSetupKeepsIgnoresLocal(t *testing.T) {
 		".beads/redirect",
 		".beads/hooks/",
 		".beads/formulas/",
-		".runtime/",
 		".logs/",
 		"worktrees/",
 		"__pycache__/",
@@ -1259,7 +1258,6 @@ func TestWorktreeSetupKeepsIgnoresLocal(t *testing.T) {
 		filepath.Join(worktree, ".opencode", "plugins", "gascity.js"):      "module.exports = {};\n",
 		filepath.Join(worktree, ".github", "hooks", "gascity.json"):        "{}\n",
 		filepath.Join(worktree, ".github", "copilot-instructions.md"):      "copilot\n",
-		filepath.Join(worktree, ".runtime", "state.json"):                  "{}\n",
 		filepath.Join(worktree, ".logs", "session.log"):                    "log\n",
 		filepath.Join(worktree, "__pycache__", "module.cpython-313.pyc"):   "pyc\n",
 		filepath.Join(worktree, "state.json"):                              "{}\n",
@@ -3268,6 +3266,33 @@ func TestDeaconPatrolDetectsQueueStarvation(t *testing.T) {
 	)
 }
 
+func TestDeaconPatrolNextIterationBurnsCurrentBeforeBackoff(t *testing.T) {
+	dir := exampleDir()
+	path := filepath.Join(dir, "packs", "gastown", "formulas", "mol-deacon-patrol.toml")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading deacon formula: %v", err)
+	}
+	body := string(data)
+	section := sectionBetween(t, body, `id = "next-iteration"`, "")
+
+	assertContainsInOrder(t, section,
+		`CURRENT_WISP=${GC_BEAD_ID:-}`,
+		`if [ -z "$CURRENT_WISP" ]; then`,
+		`CURRENT_WISP=$(gc bd list --assignee="$GC_AGENT" --status=in_progress --type=wisp --limit=1 --json | jq -r '.[0].id // empty')`,
+		`NEXT=$(gc bd mol wisp mol-deacon-patrol --root-only --var binding_prefix='{{binding_prefix}}' --json | jq -r '.new_epic_id // empty')`,
+		`if [ -z "$NEXT" ]; then`,
+		`if ! gc bd update "$NEXT" --assignee="$GC_AGENT"; then`,
+		`if [ -n "$CURRENT_WISP" ]; then`,
+		`gc bd mol burn "$CURRENT_WISP" --force`,
+		`sleep {{event_timeout}}`,
+		`gc hook`,
+	)
+	if strings.Contains(section, "<this-wisp-id>") {
+		t.Fatal("next-iteration still uses placeholder burn target")
+	}
+}
+
 // TestRefineryPromptUsesCanonicalAgentIdentity verifies the refinery
 // prompt's wisp lookup and assignment commands use $GC_AGENT, which the
 // session harness guarantees (internal/session/lifecycle.go). $GC_ALIAS
@@ -3285,7 +3310,7 @@ func TestRefineryPromptUsesCanonicalAgentIdentity(t *testing.T) {
 	for _, want := range []string{
 		`gc bd list --assignee="$GC_AGENT" --status=in_progress`,
 		`gc bd update "$WISP" --assignee="$GC_AGENT"`,
-		`| Find assigned work | ` + "`" + `gc bd list --assignee="$GC_AGENT" --status=open` + "`" + ` |`,
+		`| Find assigned work | ` + "`" + `gc bd list ${GC_RIG:+--rig="$GC_RIG"} --assignee="$GC_AGENT" --status=open` + "`" + ` |`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("refinery prompt missing canonical $GC_AGENT usage %q", want)
@@ -3296,6 +3321,100 @@ func TestRefineryPromptUsesCanonicalAgentIdentity(t *testing.T) {
 	// (it can be empty; the harness-guaranteed identity is $GC_AGENT).
 	if strings.Contains(body, `--assignee="$GC_ALIAS"`) {
 		t.Errorf("refinery prompt still uses $GC_ALIAS for its own identity; switch to $GC_AGENT")
+	}
+}
+
+// TestRefineryAssignedWorkQueriesUsePortableRigScope verifies every refinery
+// work-bead lookup added for rig scope uses an attached --rig=value token.
+func TestRefineryAssignedWorkQueriesUsePortableRigScope(t *testing.T) {
+	dir := exampleDir()
+	promptPath := filepath.Join(dir, "packs", "gastown", "agents", "refinery", "prompt.template.md")
+	promptData, err := os.ReadFile(promptPath)
+	if err != nil {
+		t.Fatalf("reading refinery prompt: %v", err)
+	}
+	prompt := string(promptData)
+
+	formulaPath := filepath.Join(dir, "packs", "gastown", "formulas", "mol-refinery-patrol.toml")
+	formulaData, err := os.ReadFile(formulaPath)
+	if err != nil {
+		t.Fatalf("reading refinery formula: %v", err)
+	}
+	formula := string(formulaData)
+
+	for _, check := range []struct {
+		name string
+		body string
+		want string
+	}{
+		{
+			name: "prompt orphan scan",
+			body: prompt,
+			want: `ORPHANS=$(gc bd list ${GC_RIG:+--rig="$GC_RIG"} --metadata-field gc.routed_to="${GC_RIG:+$GC_RIG/}{{ .BindingPrefix }}refinery" --status=open --json 2>/dev/null \`,
+		},
+		{
+			name: "prompt quick reference",
+			body: prompt,
+			want: `| Find assigned work | ` + "`" + `gc bd list ${GC_RIG:+--rig="$GC_RIG"} --assignee="$GC_AGENT" --status=open` + "`" + ` |`,
+		},
+		{
+			name: "formula find-work step",
+			body: formula,
+			want: `WORK=$(gc bd list ${GC_RIG:+--rig="$GC_RIG"} --assignee=$GC_AGENT --status=open \`,
+		},
+		{
+			name: "formula explanation",
+			body: formula,
+			want: "`${GC_RIG:+--rig=\"$GC_RIG\"}` scopes the query to this refinery's rig",
+		},
+	} {
+		if !strings.Contains(check.body, check.want) {
+			t.Errorf("%s missing portable rig-scoped assigned-work query %q", check.name, check.want)
+		}
+	}
+
+	for _, check := range []struct {
+		name string
+		body string
+	}{
+		{name: "prompt", body: prompt},
+		{name: "formula", body: formula},
+	} {
+		splitFlag := `${GC_RIG:+--rig ` + `"$GC_RIG"` + `}`
+		if strings.Contains(check.body, splitFlag) {
+			t.Errorf("%s still uses shell-dependent split rig flag", check.name)
+		}
+	}
+}
+
+// TestAttachedRigScopeShellToken verifies the refinery's conditional rig flag
+// expands to the single argv token parsed by gc bd in both sh and zsh.
+func TestAttachedRigScopeShellToken(t *testing.T) {
+	for _, shell := range []string{"sh", "zsh"} {
+		t.Run(shell, func(t *testing.T) {
+			path, err := exec.LookPath(shell)
+			if err != nil {
+				t.Skipf("%s not installed", shell)
+			}
+
+			cmd := exec.Command(path, "-c", `GC_RIG=gascity; for arg in ${GC_RIG:+--rig="$GC_RIG"}; do printf '<%s>\n' "$arg"; done`)
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("%s expansion failed: %v\n%s", shell, err, out)
+			}
+			if got, want := strings.TrimSpace(string(out)), "<--rig=gascity>"; got != want {
+				t.Fatalf("%s non-empty expansion = %q, want %q", shell, got, want)
+			}
+
+			cmd = exec.Command(path, "-c", `unset GC_RIG; for arg in ${GC_RIG:+--rig="$GC_RIG"}; do printf '<%s>\n' "$arg"; done`)
+			out, err = cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("%s empty expansion failed: %v\n%s", shell, err, out)
+			}
+			if got := strings.TrimSpace(string(out)); got != "" {
+				t.Fatalf("%s empty expansion = %q, want empty", shell, got)
+			}
+		})
 	}
 }
 

@@ -1,0 +1,7 @@
+scope = "rig"
+provider = "codex"
+wake_mode = "resume"
+work_dir = ".gc/worktrees/{{.Rig}}/convoymaster"
+nudge = "Create and maintain GC-native convoys; use rig-scoped beads for rig-scoped work."
+pre_start = ["{{.ConfigDir}}/assets/scripts/worktree-setup.sh {{.RigRoot}} {{.WorkDir}} {{.AgentBase}} --sync"]
+max_active_sessions = 1

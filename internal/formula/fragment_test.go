@@ -207,6 +207,35 @@ needs = ["{target}.review"]
 	}
 }
 
+func TestCompileExpansionFragmentValidatesHostRequirements(t *testing.T) {
+	enableV2ForTest(t)
+
+	dir := t.TempDir()
+	expansion := `
+formula = "future-expansion"
+type = "expansion"
+
+[requires]
+formula_compiler = ">2.0.0"
+
+[[template]]
+id = "{target}.future"
+title = "Future"
+`
+	if err := os.WriteFile(filepath.Join(dir, "future-expansion.toml"), []byte(expansion), 0o644); err != nil {
+		t.Fatalf("write expansion: %v", err)
+	}
+
+	target := &Step{ID: "demo.target", Title: "Target"}
+	_, err := CompileExpansionFragment(context.Background(), "future-expansion", []string{dir}, target, nil)
+	if err == nil {
+		t.Fatal("CompileExpansionFragment succeeded, want formula compiler requirement error")
+	}
+	if !strings.Contains(err.Error(), "formula.compiler_requirement_unsatisfied") {
+		t.Fatalf("CompileExpansionFragment error = %v, want unsatisfied compiler requirement", err)
+	}
+}
+
 func TestCompileExpansionFragmentRejectsDuplicateParentTemplateIDs(t *testing.T) {
 	enableV2ForTest(t)
 

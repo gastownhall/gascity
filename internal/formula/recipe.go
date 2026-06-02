@@ -42,9 +42,6 @@ type Recipe struct {
 	// Propagated from Formula.ContentHash during compilation.
 	ContentHash string
 
-	// FormulaVersion is the semantic version from the formula definition.
-	FormulaVersion int
-
 	// FormulaSource is the file path from which the formula was loaded.
 	FormulaSource string
 }

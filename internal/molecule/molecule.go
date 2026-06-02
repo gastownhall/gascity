@@ -547,9 +547,6 @@ func Instantiate(ctx context.Context, store beads.Store, recipe *formula.Recipe,
 			if recipe.ContentHash != "" {
 				b.Metadata["gc.formula_hash"] = recipe.ContentHash
 			}
-			if recipe.FormulaVersion > 0 {
-				b.Metadata["gc.formula_version"] = strconv.Itoa(recipe.FormulaVersion)
-			}
 			if recipe.FormulaSource != "" {
 				b.Metadata["gc.formula_source"] = recipe.FormulaSource
 			}
@@ -1008,11 +1005,11 @@ func validateTimeoutMetadataVars(stepID string, metadata map[string]string) erro
 }
 
 func deferBeadRouting(b *beads.Bead) {
-	beadType := b.Type
-	if beadType == "" {
-		beadType = "task"
-	}
-	if !beads.IsReadyExcludedType(beadType) {
+	if !beads.IsReadyExcludedBead(*b) {
+		beadType := b.Type
+		if beadType == "" {
+			beadType = "task"
+		}
 		ensureBeadMetadata(b)
 		b.Metadata[DeferredTypeMetadataKey] = beadType
 		b.Type = "gate"

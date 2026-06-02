@@ -335,6 +335,7 @@ func (s *Server) humaHandleBeadCreate(ctx context.Context, input *BeadCreateInpu
 		Labels:      input.Body.Labels,
 		ParentID:    input.Body.Parent,
 		Metadata:    input.Body.Metadata,
+		DeferUntil:  input.Body.DeferUntil,
 	})
 	if err != nil {
 		s.idem.unreserve(idemKey)

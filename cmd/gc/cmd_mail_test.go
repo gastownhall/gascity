@@ -2617,6 +2617,56 @@ func TestMailArchiveSelectedIsFilteredAndBounded(t *testing.T) {
 	}
 }
 
+func TestMailArchiveSelectedAllRecipientsEmptyBody(t *testing.T) {
+	store := beads.NewMemStore()
+	mp := beadmail.New(store)
+	first, err := mp.Send("system", "session-a", "context cycle", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := mp.Send("system", "session-b", "context cycle", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	nonEmpty, err := mp.Send("system", "session-c", "context cycle", "handoff context")
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherSubject, err := mp.Send("system", "session-d", "operator note", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doMailArchiveSelected(mp, events.Discard, mailArchiveSelectOptions{
+		AllRecipients:   true,
+		SubjectPrefix:   "context cycle",
+		EmptyBody:       true,
+		Limit:           10,
+		CaseInsensitive: true,
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doMailArchiveSelected = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	for _, id := range []string{first.ID, second.ID} {
+		if !strings.Contains(stdout.String(), "Archived message "+id) {
+			t.Fatalf("stdout = %q, want archive confirmation for %s", stdout.String(), id)
+		}
+		if _, err := store.Get(id); !errors.Is(err, beads.ErrNotFound) {
+			t.Fatalf("Get(%s) err = %v, want ErrNotFound", id, err)
+		}
+	}
+	for _, id := range []string{nonEmpty.ID, otherSubject.ID} {
+		got, err := store.Get(id)
+		if err != nil {
+			t.Fatalf("Get(%s): %v", id, err)
+		}
+		if got.Status != "open" {
+			t.Fatalf("message %s status = %q, want open", id, got.Status)
+		}
+	}
+}
+
 // --- gc mail send --notify ---
 
 func TestMailSendNotifySuccess(t *testing.T) {
@@ -3167,6 +3217,80 @@ func TestMailCheckInjectDoesNotCloseBeads(t *testing.T) {
 	}
 	if b.Status != "open" {
 		t.Errorf("bead Status = %q, want %q (inject must not close beads)", b.Status, "open")
+	}
+}
+
+func TestMailCheckInjectArchivesAutoHandoffMessages(t *testing.T) {
+	store := beads.NewMemStore()
+	mp := beadmail.New(store)
+	ordinary, err := mp.Send("human", "mayor", "ordinary", "still open")
+	if err != nil {
+		t.Fatalf("Send ordinary: %v", err)
+	}
+	auto, err := store.Create(beads.Bead{
+		Title:    "context cycle",
+		Type:     "message",
+		Assignee: "mayor",
+		From:     "mayor",
+		Labels:   []string{mail.AutoHandoffLabel, mail.ArchiveAfterInjectLabel},
+	})
+	if err != nil {
+		t.Fatalf("Create auto handoff: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doMailCheck(mp, "mayor", true, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doMailCheck = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), auto.ID) {
+		t.Fatalf("injected output missing auto handoff id %s:\n%s", auto.ID, stdout.String())
+	}
+	if _, err := store.Get(auto.ID); !errors.Is(err, beads.ErrNotFound) {
+		t.Fatalf("auto handoff mail should be archived after injection, got err=%v", err)
+	}
+	b, err := store.Get(ordinary.ID)
+	if err != nil {
+		t.Fatalf("ordinary mail should remain: %v", err)
+	}
+	if b.Status != "open" {
+		t.Fatalf("ordinary mail status = %q, want open", b.Status)
+	}
+}
+
+func TestMailCheckInjectLeavesTruncatedAutoHandoffMessages(t *testing.T) {
+	store := beads.NewMemStore()
+	mp := beadmail.New(store)
+	for i := 0; i < mailInjectMaxMessages; i++ {
+		if _, err := mp.Send("human", "mayor", fmt.Sprintf("ordinary-%d", i), "still open"); err != nil {
+			t.Fatalf("Send ordinary %d: %v", i, err)
+		}
+	}
+	auto, err := store.Create(beads.Bead{
+		Title:    "context cycle",
+		Type:     "message",
+		Assignee: "mayor",
+		From:     "mayor",
+		Labels:   []string{mail.AutoHandoffLabel, mail.ArchiveAfterInjectLabel},
+	})
+	if err != nil {
+		t.Fatalf("Create auto handoff: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doMailCheck(mp, "mayor", true, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doMailCheck = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if strings.Contains(stdout.String(), auto.ID) {
+		t.Fatalf("auto handoff id %s should not appear in truncated injection:\n%s", auto.ID, stdout.String())
+	}
+	b, err := store.Get(auto.ID)
+	if err != nil {
+		t.Fatalf("truncated auto handoff mail should remain: %v", err)
+	}
+	if b.Status != "open" {
+		t.Fatalf("truncated auto handoff status = %q, want open", b.Status)
 	}
 }
 
@@ -4014,6 +4138,67 @@ func TestRouteMailCheck_StaleBannerOver30s(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "cache age:") {
 		t.Errorf("stdout missing stale banner:\n%s", stdout.String())
+	}
+}
+
+func TestRouteMailCheckInjectUsesLocalPathForArchiveSideEffects(t *testing.T) {
+	clearInheritedBeadsEnv(t)
+	cityPath := t.TempDir()
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+	t.Setenv("GC_CITY_PATH", cityPath)
+	t.Setenv("GC_DEBUG", "1")
+	t.Setenv("GC_ALIAS", "mayor")
+	t.Setenv("GC_SESSION_NAME", "mayor")
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(`[workspace]
+name = "test-city"
+
+[[agent]]
+name = "mayor"
+`), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	store, err := openCityStoreAt(cityPath)
+	if err != nil {
+		t.Fatalf("openCityStoreAt: %v", err)
+	}
+	if _, err := store.Create(beads.Bead{
+		Type:   "session",
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"alias":        "mayor",
+			"session_name": "mayor",
+		},
+	}); err != nil {
+		t.Fatalf("Create session: %v", err)
+	}
+	auto, err := store.Create(beads.Bead{
+		Title:    "context cycle",
+		Type:     "message",
+		Assignee: "mayor",
+		From:     "mayor",
+		Labels:   []string{mail.AutoHandoffLabel, mail.ArchiveAfterInjectLabel},
+	})
+	if err != nil {
+		t.Fatalf("Create auto handoff: %v", err)
+	}
+	srv := httptest.NewServer(okMailCheckHandler(t))
+	defer srv.Close()
+	c := api.NewCityScopedClient(srv.URL, "test-city")
+
+	var stdout, stderr bytes.Buffer
+	if code := routeMailCheck(cityPath, nil, true, "", c, "", &stdout, &stderr); code != 0 {
+		t.Fatalf("exit = %d, stderr=%q", code, stderr.String())
+	}
+	assertMailRouteLog(t, stderr.String(), "fallback", "inject-local-side-effects")
+	if !strings.Contains(stdout.String(), auto.ID) {
+		t.Fatalf("injected output missing local auto handoff id %s:\n%s", auto.ID, stdout.String())
+	}
+	if strings.Contains(stdout.String(), "msg-1") {
+		t.Fatalf("inject path used API inbox instead of local provider:\n%s", stdout.String())
+	}
+	if _, err := store.Get(auto.ID); !errors.Is(err, beads.ErrNotFound) {
+		t.Fatalf("auto handoff mail should be archived after local injection, got err=%v", err)
 	}
 }
 

@@ -228,11 +228,12 @@ type City struct {
 	Services []Service `toml:"service,omitempty"`
 	// GitHub configures GitHub-facing repository monitors.
 	GitHub GitHubConfig `toml:"github,omitempty"`
-	// AgentDefaults provides city-level defaults for agents that don't
-	// override them (canonical TOML key: agent_defaults). The runtime
-	// currently applies default_sling_formula and append_fragments; the
-	// attachment-list fields remain tombstones, and the other fields are
-	// parsed/composed but not yet inherited automatically.
+	// AgentDefaults provides root city defaults for agents that don't override
+	// them (canonical TOML key: agent_defaults). Pack-local defaults use the
+	// same table shape in pack.toml. The runtime currently applies provider,
+	// default_sling_formula, and append_fragments; the attachment-list fields
+	// remain tombstones, and the other fields are parsed/composed but not yet
+	// inherited automatically.
 	AgentDefaults AgentDefaults `toml:"agent_defaults,omitempty"`
 	// AgentsDefaults is a temporary compatibility alias for [agent_defaults].
 	// Parse/load normalize it into AgentDefaults and prefer [agent_defaults]
@@ -378,10 +379,12 @@ type NamedSession struct {
 	// Dir is the identity prefix for rig-scoped named sessions after pack
 	// expansion. Empty means city-scoped.
 	Dir string `toml:"dir,omitempty"`
-	// Mode controls controller behavior for this named session.
+	// Mode controls when the controller ensures this named session is live.
 	// "on_demand" (default): reserve identity and materialize when work or
 	// an explicit reference requires it.
 	// "always": keep the canonical session controller-managed.
+	// Note: mode="always" is independent of min_active_sessions; both produce
+	// sessions, and gc doctor reports accidental duplicate-pool combinations.
 	Mode string `toml:"mode,omitempty" jsonschema:"enum=on_demand,enum=always"`
 	// SourceDir is the directory where this named session's config was
 	// defined. Set during pack/fragment loading; empty for inline config.
@@ -1175,6 +1178,81 @@ type BeadsConfig struct {
 	// Provider selects the bead store backend: "bd" (default), "file",
 	// or "exec:<script>" for a user-supplied script.
 	Provider string `toml:"provider,omitempty" jsonschema:"default=bd"`
+	// Backend selects the bd storage engine when Provider is "bd".
+	// Empty defaults to "dolt"; T3Code uses "doltlite" for local dev stores.
+	Backend string `toml:"backend,omitempty"`
+	// EventHooks controls installation of the bead event-forwarding hooks
+	// (.beads/hooks/on_create,on_update,on_close). Defaults to true.
+	// This config surface is staged ahead of the native bead-event support;
+	// current hook behavior remains unchanged until lifecycle code opts in.
+	EventHooks *bool `toml:"event_hooks,omitempty" jsonschema:"default=true"`
+	// Policies defines per-bead-use storage and garbage-collection defaults.
+	// Policy names are interpreted by higher-level systems; unknown names are
+	// preserved so packs can stage future policy classes without breaking load.
+	Policies map[string]BeadPolicyConfig `toml:"policies,omitempty"`
+}
+
+// EventHooksEnabled reports whether bead event hooks should be installed.
+// Unset preserves the current default of enabled hooks.
+func (b BeadsConfig) EventHooksEnabled() bool {
+	return b.EventHooks == nil || *b.EventHooks
+}
+
+// BeadPolicyConfig holds storage and retention defaults for a named bead use.
+type BeadPolicyConfig struct {
+	// Storage selects the intended persistence tier: "history", "no_history",
+	// or "ephemeral". Creation paths apply this incrementally as they opt in.
+	Storage string `toml:"storage,omitempty" jsonschema:"enum=history,enum=no_history,enum=ephemeral"`
+	// DeleteAfterClose deletes matching GC-owned beads after they have been
+	// closed for this duration. Accepts Go duration syntax plus whole-day "d"
+	// units, e.g. "7d" or "1d12h". Empty means the policy is not GC-managed.
+	DeleteAfterClose string `toml:"delete_after_close,omitempty"`
+}
+
+const (
+	// BeadStorageHistory stores beads in the normal history-tracked table.
+	BeadStorageHistory = "history"
+	// BeadStorageNoHistory stores beads without Dolt history while keeping
+	// non-ephemeral semantics.
+	BeadStorageNoHistory = "no_history"
+	// BeadStorageEphemeral stores beads as ephemeral wisps.
+	BeadStorageEphemeral = "ephemeral"
+)
+
+// NormalizeBeadPolicyStorage returns the configured bead policy storage value.
+// Storage spellings are intentionally canonical so runtime validation matches
+// the generated schema enum.
+func NormalizeBeadPolicyStorage(storage string) string {
+	return storage
+}
+
+// ValidBeadPolicyStorage reports whether storage is one of the supported bead
+// storage classes. Empty storage is valid and means use the default.
+func ValidBeadPolicyStorage(storage string) bool {
+	switch NormalizeBeadPolicyStorage(storage) {
+	case "", BeadStorageHistory, BeadStorageNoHistory, BeadStorageEphemeral:
+		return true
+	default:
+		return false
+	}
+}
+
+// NormalizedStorage returns the canonical storage class for this policy.
+func (p BeadPolicyConfig) NormalizedStorage() string {
+	return NormalizeBeadPolicyStorage(p.Storage)
+}
+
+// DeleteAfterCloseDuration returns DeleteAfterClose as a duration. It accepts
+// ordinary Go durations plus a whole-day "d" unit, e.g. "7d" and "1d12h".
+func (p BeadPolicyConfig) DeleteAfterCloseDuration() time.Duration {
+	if p.DeleteAfterClose == "" {
+		return 0
+	}
+	dur, err := parseConfigDurationWithDays(p.DeleteAfterClose)
+	if err != nil || dur <= 0 {
+		return 0
+	}
+	return dur
 }
 
 // SessionConfig holds session provider settings.
@@ -1378,6 +1456,26 @@ type MailConfig struct {
 	// Provider selects the mail backend: "fake", "fail",
 	// "exec:<script>", or "" (default: beadmail).
 	Provider string `toml:"provider,omitempty"`
+	// RetentionTTL is how long read messages are retained before purge. Empty
+	// or "0" disables read-message retention.
+	RetentionTTL string `toml:"retention_ttl,omitempty"`
+}
+
+// RetentionTTLDuration parses RetentionTTL as a Go time.Duration. Empty or
+// zero disables read-message retention.
+func (m MailConfig) RetentionTTLDuration() (time.Duration, error) {
+	raw := strings.TrimSpace(m.RetentionTTL)
+	if raw == "" {
+		return 0, nil
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil {
+		return 0, fmt.Errorf("[mail] retention_ttl %q is not a valid Go duration: %w", raw, err)
+	}
+	if d < 0 {
+		return 0, fmt.Errorf("[mail] retention_ttl must not be negative: got %q", raw)
+	}
+	return d, nil
 }
 
 // EventsConfig holds events provider settings.
@@ -1810,15 +1908,19 @@ func (d DoltMaintenance) GCTimeoutOrDefault() time.Duration {
 
 // DaemonConfig holds controller daemon settings.
 type DaemonConfig struct {
-	// FormulaV2 enables formula v2 graph workflow infrastructure:
-	// the control-dispatcher implicit agent, graph.v2 formula compilation,
-	// and batch graph-apply bead creation. Requires bd with --graph support.
-	// Default: false (opt-in while the feature stabilizes).
-	FormulaV2 bool `toml:"formula_v2,omitempty"`
+	// formulaV2Set keeps DaemonConfig non-zero when a file explicitly sets
+	// formula_v2=false, so the TOML encoder preserves that operator choice.
+	formulaV2Set bool `toml:"-" json:"-" jsonschema:"-"`
+
+	// FormulaV2 enables formula compiler v2 workflow infrastructure: the
+	// control-dispatcher implicit agent and on-demand named session,
+	// compiler-v2 workflow compilation, and batch graph-apply bead creation.
+	// The implicit dispatcher follows normal session idle-sleep policy.
+	// Requires bd with --graph support. Default: true. Set false only for cities
+	// pinned to formula compiler v1.
+	FormulaV2 bool `toml:"formula_v2" jsonschema:"default=true"`
 	// GraphWorkflows is the deprecated predecessor of FormulaV2. Retained
-	// for backwards compatibility: if graph_workflows is true in TOML and
-	// formula_v2 is not set, FormulaV2 is promoted automatically during
-	// parsing.
+	// for backwards compatibility as an alias. Explicit formula_v2 wins.
 	GraphWorkflows bool `toml:"graph_workflows,omitempty"`
 	// PatrolInterval is the health patrol interval. Duration string (e.g., "30s", "5m", "1h"). Defaults to "30s".
 	PatrolInterval string `toml:"patrol_interval,omitempty" jsonschema:"default=30s"`
@@ -2217,6 +2319,68 @@ func (d *DaemonConfig) WispGCEnabled() bool {
 	return d.WispGCIntervalDuration() > 0 && d.WispTTLDuration() > 0
 }
 
+// parseConfigDurationWithDays extends time.ParseDuration with a whole-day "d"
+// unit. It accepts ordinary Go durations unchanged and supports one leading day
+// component such as "7d" or "1d12h".
+func parseConfigDurationWithDays(raw string) (time.Duration, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return 0, fmt.Errorf("empty duration")
+	}
+	dayIdx := strings.IndexByte(raw, 'd')
+	if dayIdx < 0 {
+		return time.ParseDuration(raw)
+	}
+	days, err := parsePositiveDurationDays(raw[:dayIdx])
+	if err != nil {
+		return 0, err
+	}
+	dayDuration := time.Duration(days) * 24 * time.Hour
+	rest := raw[dayIdx+1:]
+	if rest == "" {
+		return dayDuration, nil
+	}
+	dur, err := time.ParseDuration(rest)
+	if err != nil {
+		return 0, err
+	}
+	return addConfigDurations(dayDuration, dur)
+}
+
+func parsePositiveDurationDays(raw string) (int64, error) {
+	if raw == "" {
+		return 0, fmt.Errorf("missing day count")
+	}
+	for _, r := range raw {
+		if r < '0' || r > '9' {
+			return 0, fmt.Errorf("invalid day count %q", raw)
+		}
+	}
+	days, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil {
+		return 0, err
+	}
+	if days <= 0 {
+		return 0, fmt.Errorf("day count must be positive")
+	}
+	if days > maxConfigDurationDays {
+		return 0, fmt.Errorf("day count %q exceeds maximum %d", raw, maxConfigDurationDays)
+	}
+	return days, nil
+}
+
+const maxConfigDurationDays = int64(1<<63-1) / int64(24*time.Hour)
+
+func addConfigDurations(a, b time.Duration) (time.Duration, error) {
+	if b > 0 && a > time.Duration(1<<63-1)-b {
+		return 0, fmt.Errorf("duration exceeds maximum")
+	}
+	if b < 0 && a < time.Duration(-1<<63)-b {
+		return 0, fmt.Errorf("duration is below minimum")
+	}
+	return a + b, nil
+}
+
 // FormulasDir returns the formulas directory, defaulting to "formulas".
 func (c *City) FormulasDir() string {
 	if c.Formulas.Dir != "" {
@@ -2257,11 +2421,15 @@ func (c *City) PackDirsForRig(rigName string) []string {
 	return dirs
 }
 
-// AgentDefaults provides city-level agent defaults declared via
-// [agent_defaults] in city.toml. The runtime currently applies
-// default_sling_formula and append_fragments; the remaining fields are
-// parsed and composed but are not yet inherited onto agents automatically.
+// AgentDefaults provides agent defaults declared via [agent_defaults] in
+// city.toml or pack.toml. The runtime currently applies provider,
+// default_sling_formula, and append_fragments; the remaining fields are parsed
+// and composed but are not yet inherited onto agents automatically.
 type AgentDefaults struct {
+	// Provider is the default provider name for agents that do not set their
+	// own provider. It also counts as a configured provider for implicit agent
+	// injection.
+	Provider string `toml:"provider,omitempty"`
 	// Model is the parsed/composed default model name for agents
 	// (e.g., "claude-sonnet-4-6"), but it is not yet auto-applied at
 	// runtime. Agents with their own model override would take precedence.
@@ -2269,16 +2437,16 @@ type AgentDefaults struct {
 	// WakeMode is the parsed/composed default wake mode ("resume" or
 	// "fresh"), but it is not yet auto-applied at runtime.
 	WakeMode string `toml:"wake_mode,omitempty" jsonschema:"enum=resume,enum=fresh"`
-	// DefaultSlingFormula is the city-level default formula used for agents
-	// that inherit [agent_defaults]. Explicit agents only receive this value
-	// when agent_defaults.default_sling_formula is set; implicit multi-session
+	// DefaultSlingFormula is the default formula used for agents that inherit
+	// [agent_defaults]. Explicit agents only receive this value when
+	// agent_defaults.default_sling_formula is set; implicit multi-session
 	// configs are seeded with "mol-do-work" elsewhere when no explicit default is set.
 	DefaultSlingFormula string `toml:"default_sling_formula,omitempty"`
-	// AllowOverlay is parsed and composed as a city-level allowlist for
-	// session overlays, but it is not yet inherited onto agents
-	// automatically at runtime.
+	// AllowOverlay is parsed and composed as a config-level allowlist for
+	// session overlays, but it is not yet inherited onto agents automatically
+	// at runtime.
 	AllowOverlay []string `toml:"allow_overlay,omitempty"`
-	// AllowEnvOverride is parsed and composed as a city-level allowlist for
+	// AllowEnvOverride is parsed and composed as a config-level allowlist for
 	// session env overrides, but it is not yet inherited onto agents
 	// automatically at runtime. Names must match ^[A-Z][A-Z0-9_]{0,127}$.
 	AllowEnvOverride []string `toml:"allow_env_override,omitempty"`
@@ -2286,7 +2454,7 @@ type AgentDefaults struct {
 	// .template.md prompts after rendering. Legacy .md.tmpl prompts are
 	// still supported during the transition; plain .md remains inert.
 	// V2 migration convenience — replaces global_fragments/inject_fragments
-	// for city-wide defaults.
+	// for config-wide defaults.
 	AppendFragments []string `toml:"append_fragments,omitempty"`
 	// Skills is a tombstone field retained for v0.15.1 backwards
 	// compatibility. Parsed and composed for migration visibility, but
@@ -2300,6 +2468,9 @@ type AgentDefaults struct {
 }
 
 func mergeAgentDefaultsAliasPreferCanonical(dst *AgentDefaults, src AgentDefaults, meta toml.MetaData) {
+	if !meta.IsDefined("agent_defaults", "provider") {
+		dst.Provider = src.Provider
+	}
 	if !meta.IsDefined("agent_defaults", "model") {
 		dst.Model = src.Model
 	}
@@ -2396,6 +2567,9 @@ type Agent struct {
 	Session string `toml:"session,omitempty" jsonschema:"enum=acp"`
 	// Provider names the provider preset to use for this agent.
 	Provider string `toml:"provider,omitempty"`
+	// InheritedProvider records the pack-scoped default provider for agents
+	// loaded from imported packs. Runtime-only.
+	InheritedProvider string `toml:"-" json:"-"`
 	// StartCommand overrides the provider's command for this agent.
 	StartCommand string `toml:"start_command,omitempty"`
 	// Lifecycle controls runtime lifetime semantics. Empty uses the default
@@ -2429,6 +2603,9 @@ type Agent struct {
 	MaxActiveSessions *int `toml:"max_active_sessions,omitempty"`
 	// MinActiveSessions is the minimum number of sessions to keep alive.
 	// Agent-level only. Counts against rig/workspace caps. Replaces pool.min.
+	// This controls pool sessions independently of [[named_session]]
+	// mode="always"; both produce sessions, and gc doctor reports accidental
+	// combinations.
 	MinActiveSessions *int `toml:"min_active_sessions,omitempty"`
 	// ScaleCheck is a shell command template whose output reports new
 	// unassigned session demand. In bead-backed reconciliation this is
@@ -2613,7 +2790,7 @@ type Agent struct {
 	// Fallback marks this agent as a fallback definition. During pack
 	// composition, a non-fallback agent with the same name wins silently.
 	// When two fallbacks collide, the first loaded (depth-first) wins.
-	// See docs/guides/migrating-to-pack-vnext.md for migration guidance.
+	// See docs/guides/shareable-packs.md for pack layout guidance.
 	Fallback bool `toml:"fallback,omitempty"`
 	// DependsOn lists agent names that must be awake before this agent wakes.
 	// Used for dependency-ordered startup and shutdown. Validated for cycles
@@ -2782,58 +2959,57 @@ func (a *Agent) AttachEnabled() bool {
 	return a.Attach == nil || *a.Attach
 }
 
-// poolDemandKeys lists the routing metadata keys the pool-demand predicate
-// consults, in precedence order. gc.run_target — the canonical per-step
-// target stamped by the graph.v2 stamper (and, since #2386, the legacy
-// stamper) — is preferred; gc.routed_to is the compatibility fallback for
-// beads authored before the gc.run_target migration. The worker claim path
-// (EffectiveWorkQuery Tier 3) and the reconciler demand path
-// (EffectivePoolDemandQuery) walk these in the same order so that a graph.v2
-// workflow root stamping only gc.run_target is both spawned-for and
-// claimable (#2763 — completes the reader migration #2386 began;
-// bdReadyPoolDemandShell was the one reader site it missed).
-var poolDemandKeys = []string{"gc.run_target", "gc.routed_to"}
-
-// bdReadyPoolDemandShell returns the bd ready predicate for unassigned,
-// non-epic pool demand matched on metadata field key=target, where key and
-// target are shell variables scoped by the caller. This is the
-// one-source-of-truth for the "is there work on this routed queue?" question
-// that both the worker (via EffectiveWorkQuery Tier 3) and the reconciler (via
-// EffectivePoolDemandQuery, count-form) ask. Diverging the two re-introduces
-// the protocol-mismatch class; see the "scale_check ↔ work_query
-// correspondence" note in engdocs/architecture/dispatch.md.
-//
-// bd ready cannot express a single "match key A or key B" predicate
-// (--metadata-field is AND-combined and there is no key-absent filter), so the
-// run_target/routed_to precedence is composed at the shell layer by
-// poolDemandFirstRowFunctionScript (work_query) and poolDemandCountShell
-// (count-form), which call this helper once per key in poolDemandKeys order.
+// bdReadyPoolDemandShell returns the canonical bd ready predicate for
+// unassigned, non-epic pool demand routed to target. gc.routed_to is the
+// canonical persisted routing key: the graph.v2 stamper and the legacy stamper
+// both stamp it on every routable bead, including the workflow root (ga-eld2x
+// retired the short-lived gc.run_target wire field). This predicate is the main
+// source of truth for "is there work on this routed queue?" that both the
+// worker (via EffectiveWorkQuery Tier 3) and the reconciler (via
+// EffectivePoolDemandQuery, count-form) ask; diverging the two re-introduces
+// the protocol-mismatch class (see the "scale_check ↔ work_query
+// correspondence" note in engdocs/architecture/dispatch.md).
 //
 // target is passed as a positional argument to the outer sh -c command, not
 // interpolated into the nested shell body. That keeps routes containing shell
 // metacharacters as data instead of executable syntax.
 func bdReadyPoolDemandShell(limitFlag string) string {
-	return `bd ready --include-ephemeral --metadata-field "$key=$target" --unassigned --exclude-type=epic --json ` + limitFlag
+	return `bd ready --include-ephemeral --metadata-field "gc.routed_to=$target" --unassigned --exclude-type=epic --json ` + limitFlag
 }
 
-func poolDemandKeyListShell() string {
-	return shellquote.Join(poolDemandKeys)
+// bdReadyPoolDemandMigrationShell is a temporary raw compatibility probe for
+// graph.v2 workflow roots created before gc.routed_to root stamping shipped.
+// It is scoped to workflow roots so gc.run_target remains an authoring hint
+// everywhere else. Callers must pass its output through
+// poolDemandMigrationFilterJQ so a stale divergent gc.run_target cannot remain
+// visible once a root carries gc.routed_to. This retirement-window fallback
+// requires jq in the default worker/reconciler environment; remove it with the
+// Go-side legacy candidates after the backfill completion tracked by ga-dhf44.
+func bdReadyPoolDemandMigrationShell(limitFlag string) string {
+	return `bd ready --include-ephemeral --metadata-field "gc.run_target=$target" --metadata-field "gc.kind=workflow" --unassigned --exclude-type=epic --json --sort oldest ` + limitFlag
+}
+
+func poolDemandMigrationFilterJQ(limit int) string {
+	filter := `[.[] | select((.metadata["gc.routed_to"] // "") == "")]`
+	if limit > 0 {
+		filter += ` | .[:` + strconv.Itoa(limit) + `]`
+	}
+	return shellquote.Join([]string{"jq", filter})
 }
 
 // poolDemandFirstRowFunctionScript emits the work_query Tier 3 function: it
-// tries each routing key in poolDemandKeys precedence order with native
-// oldest-first sorting, printing the first non-empty JSON array and exiting 0.
-// The target comes from the function's first argument, so callers can reuse
-// the same script for both primary and legacy workflow-control routes without
-// embedding dynamic targets inside the shell body.
+// reads the first ready, unassigned, routed bead for the supplied target,
+// prints it, and exits 0. The caller appends a terminal fallthrough
+// (printf "[]") for the empty case.
 func poolDemandFirstRowFunctionScript() string {
 	return `probe_pool_demand() { ` +
 		`target="$1"; ` +
 		`[ -z "$target" ] && return 1; ` +
-		`for key in ` + poolDemandKeyListShell() + `; do ` +
 		`r=$(` + routedReadyTierCommand() + `); ` +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
-		`done; ` +
+		`legacy_candidates=$(` + bdReadyPoolDemandMigrationShell("--limit=20") + ` 2>/dev/null); ` +
+		`r=$(printf "%s" "$legacy_candidates" | ` + poolDemandMigrationFilterJQ(1) + ` 2>/dev/null); ` +
+		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
 		`return 1; ` +
 		`}; `
 }
@@ -2845,27 +3021,22 @@ func routedReadyTierCommand() string {
 }
 
 // poolDemandCountShell emits the reconciler count-form for target: it counts
-// ready demand under the first routing key in poolDemandKeys that yields a
-// non-empty result (gc.run_target preferred, gc.routed_to fallback) and prints
-// the array length. Precedence mirrors poolDemandFirstRowFunctionScript so the
-// reconciler's spawn decision and the worker's claim decision agree — the
-// worker drains the preferred tier first, then the count surfaces the fallback
-// tier on the next pass.
+// ready, unassigned, routed demand and prints the array length. It shares the
+// canonical and migration predicates with poolDemandFirstRowFunctionScript so
+// the reconciler's spawn decision and the worker's claim decision read the
+// same demand shape.
 //
-// Unlike the work_query probes, this form must NOT redirect bd stderr or
-// default to zero: a failed `bd ready` has to surface as an error rather than
+// Unlike the work_query probe, this form must NOT redirect bd stderr or default
+// to zero: a failed `bd ready` has to surface as an error rather than
 // masquerade as "no demand", which would silently stop the pool from spawning.
-// Every query is chained with && so any non-zero bd exit short-circuits the
-// whole expression (TestEffectiveScaleCheckUsesReadyOnly).
+// The && chain ensures any non-zero bd exit short-circuits the whole expression
+// (TestEffectiveScaleCheckUsesReadyOnly).
 func poolDemandCountShell(target string) string {
 	script := `target="$1"; ` +
-		`ready_json="[]"; ` +
-		`for key in ` + poolDemandKeyListShell() + `; do ` +
-		`cur=$(` + bdReadyPoolDemandShell("--limit 0") + `) || exit $?; ` +
-		`if [ "$cur" != "[]" ]; then ready_json="$cur"; break; fi; ` +
-		`ready_json="$cur"; ` +
-		`done; ` +
-		`printf "%s\n" "$ready_json" | jq "length"`
+		`ready_json=$(` + bdReadyPoolDemandShell("--limit 0") + `) || exit $?; ` +
+		`legacy_candidates=$(` + bdReadyPoolDemandMigrationShell("--limit 0") + `) || exit $?; ` +
+		`legacy_json=$(printf "%s" "$legacy_candidates" | ` + poolDemandMigrationFilterJQ(0) + `) || exit $?; ` +
+		`printf "%s\n%s\n" "$ready_json" "$legacy_json" | jq -s "(add // []) | unique_by(.id) | length"`
 	return shellquote.Join([]string{"sh", "-c", script, "--", target})
 }
 
@@ -2880,12 +3051,12 @@ func (a *Agent) poolDemandTarget() string {
 func standardAssignedWorkQueryScript() string {
 	return `for id in "$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"; do ` +
 		`[ -z "$id" ] && continue; ` +
-		`r=$(bd list --include-ephemeral --status in_progress --assignee="$id" --exclude-type=epic --json --limit=1 2>/dev/null); ` +
+		`r=$(bd list --include-ephemeral --status in_progress --assignee="$id" --json --limit=1 2>/dev/null); ` +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
 		`done; ` +
 		`for id in "$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"; do ` +
 		`[ -z "$id" ] && continue; ` +
-		`r=$(bd ready --include-ephemeral --assignee="$id" --exclude-type=epic --json --limit=1 2>/dev/null); ` +
+		`r=$(bd ready --include-ephemeral --assignee="$id" --json --limit=1 2>/dev/null); ` +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
 		`done; `
 }
@@ -2896,7 +3067,7 @@ func legacyControlAssignedWorkQueryScript() string {
 		`legacy=""; case "$id" in *control-dispatcher) legacy="${id%control-dispatcher}workflow-control";; esac; ` +
 		`for cand in "$id" "$legacy"; do ` +
 		`[ -z "$cand" ] && continue; ` +
-		`r=$(bd list --include-ephemeral --status in_progress --assignee="$cand" --exclude-type=epic --json --limit=1 2>/dev/null); ` +
+		`r=$(bd list --include-ephemeral --status in_progress --assignee="$cand" --json --limit=1 2>/dev/null); ` +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
 		`done; ` +
 		`done; ` +
@@ -2905,7 +3076,7 @@ func legacyControlAssignedWorkQueryScript() string {
 		`legacy=""; case "$id" in *control-dispatcher) legacy="${id%control-dispatcher}workflow-control";; esac; ` +
 		`for cand in "$id" "$legacy"; do ` +
 		`[ -z "$cand" ] && continue; ` +
-		`r=$(bd ready --include-ephemeral --assignee="$cand" --exclude-type=epic --json --limit=1 2>/dev/null); ` +
+		`r=$(bd ready --include-ephemeral --assignee="$cand" --json --limit=1 2>/dev/null); ` +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
 		`done; ` +
 		`done; `
@@ -2929,22 +3100,29 @@ func poolDemandOriginGateScript() string {
 //
 // State priority: in_progress+assigned (crash recovery) >
 // ready+assigned (pre-assigned) > ready+unassigned+routed_to (pool).
-// Formula roots that are themselves executable must be represented as ready()
-// work (for example type=wisp); molecule containers are not routable demand.
+// Executable formula roots are ephemeral epics (mol wisp preserves the
+// template-epic IssueType and marks Ephemeral=true); molecule containers
+// are not routable demand.
 //
-// Parent epics are excluded from every tier (--exclude-type=epic). An epic
-// has no executable spec — its semantic is "all children done" — so a worker
-// claiming an epic does undefined work (gc-udx). Roles that legitimately
-// process epics (oversight, reviewers, closers) opt in by setting an explicit
-// work_query in their agent config; that custom query is returned unchanged
-// above.
+// Parent epics are excluded from the routed (pool) tier only
+// (--exclude-type=epic). An unassigned parent epic has no executable spec —
+// its semantic is "all children done" — so a pool worker claiming one does
+// undefined work (gc-udx; the repro is a routed parent epic, see
+// TestEffectiveWorkQuerySkipsEpicLeafScenario). The assigned tiers do NOT
+// exclude epics: work already assigned to this agent is owned, and the
+// patrol-loop pattern (gastown witness/refinery/deacon) self-assigns an
+// ephemeral epic wisp that the agent must resume after a session restart.
+// Excluding epics there silently stranded those wisps (gc hook exited 1 with
+// empty output). Roles that need different behavior still opt in via an
+// explicit work_query in their agent config; that custom query is returned
+// unchanged above.
 //
 // When the reconciler runs the query for demand detection (no session
 // context), all identity vars are empty → assignee tiers skip → only
 // the routed_to tier fires to detect new demand.
 //
-// Tier 3's predicate is shared with EffectivePoolDemandQuery via
-// bdReadyPoolDemandShell so reconciler spawn decisions and worker claim
+// Tier 3's canonical and migration predicates are shared with
+// EffectivePoolDemandQuery so reconciler spawn decisions and worker claim
 // decisions stay symmetric.
 func (a *Agent) EffectiveWorkQuery() string {
 	if a.WorkQuery != "" {
@@ -3030,7 +3208,7 @@ func (a *Agent) DrainTimeoutDuration() time.Duration {
 // EffectivePoolDemandQuery returns the count-form pool-demand query the
 // reconciler runs to detect new unassigned routed work. It is the
 // reconciler-side counterpart to EffectiveWorkQuery's Tier 3 (the worker
-// claim path): both derive their predicate from bdReadyPoolDemandShell so
+// claim path): both derive their predicates from the same helpers so
 // any future change to the pool-demand shape flows to both paths
 // simultaneously.
 //
@@ -3211,18 +3389,18 @@ func (a *Agent) EffectiveOnDeath() string {
 	}
 	// Reset both assignee and status: clearing assignee alone leaves the bead
 	// invisible to every work_query tier (Tier 1 needs assignee match, Tiers
-	// 2/3 only match "ready" status). The next worker re-claims via Tier 3
-	// (gc.routed_to + --unassigned). If routed metadata is missing entirely,
-	// backfill the fallback route so reopened direct-assigned work does not
-	// stay invisible.
+	// 2/3 only match "ready" status). The next worker re-claims via Tier 3.
+	// If routed metadata is missing entirely, backfill the canonical
+	// gc.run_target route so reopened direct-assigned work does not stay
+	// invisible.
 	return `bd list --include-ephemeral --assignee=` + a.QualifiedName() +
 		` --status=in_progress --json 2>/dev/null | ` +
-		`jq -r '.[] | [.id, (.metadata["gc.routed_to"] // "")] | @tsv' 2>/dev/null | ` +
-		`while IFS="$(printf '\t')" read -r id current_route; do ` +
+		`jq -r '.[] | [.id, (.metadata["gc.run_target"] // ""), (.metadata["gc.routed_to"] // "")] | @tsv' 2>/dev/null | ` +
+		`while IFS="$(printf '\t')" read -r id run_target routed_to; do ` +
 		`[ -z "$id" ] && continue; ` +
-		`if [ -n "$current_route" ]; then ` +
+		`if [ -n "$run_target" ] || [ -n "$routed_to" ]; then ` +
 		`bd update "$id" --assignee "" --status open 2>/dev/null; ` +
-		`else bd update "$id" --assignee "" --status open --set-metadata gc.routed_to=` + route + ` 2>/dev/null; ` +
+		`else bd update "$id" --assignee "" --status open --set-metadata ` + shellquote.Quote("gc.run_target="+route) + ` 2>/dev/null; ` +
 		`fi; ` +
 		`done`
 }
@@ -3238,21 +3416,25 @@ func (a *Agent) EffectiveOnBoot() string {
 	if a.PoolName != "" {
 		template = a.PoolName
 	}
-	return `bd list --include-ephemeral --metadata-field gc.routed_to=` + template +
-		` --status=in_progress --no-assignee --json 2>/dev/null | ` +
-		`jq -r '.[].id' 2>/dev/null | ` +
+	return `template=` + shellquote.Quote(template) + `; ` +
+		`{ ` +
+		`bd list --include-ephemeral --metadata-field "gc.routed_to=$template" --status=in_progress --no-assignee --json 2>/dev/null | ` +
+		`jq -r '.[].id' 2>/dev/null; ` +
+		`bd list --include-ephemeral --metadata-field "gc.run_target=$template" --metadata-field "gc.kind=workflow" --status=in_progress --no-assignee --json 2>/dev/null | ` +
+		`jq -r '.[] | select((.metadata["gc.routed_to"] // "") == "") | .id' 2>/dev/null; ` +
+		`} | awk 'NF && !seen[$0]++' | ` +
 		`xargs -rI{} bd update {} --status open 2>/dev/null`
 }
 
 // InjectImplicitAgents adds on-demand agents for each configured provider at
 // both city scope and each rig scope. A provider is "configured" if it
-// appears in cfg.Providers OR is named by cfg.Workspace.Provider — so the
-// common single-provider case (workspace.provider = "claude") works without
-// a redundant [providers.claude] section. Unconfigured built-in providers
-// are skipped. Pool min=0, max=-1 (unlimited) so they are available as
-// sling targets without an explicit [[agent]] entry. Explicit agents always
-// win — if city.toml defines [[agent]] name="claude" (or a rig-scoped
-// equivalent), no implicit agent is added for that scope.
+// appears in cfg.Providers, cfg.AgentDefaults.Provider, or
+// cfg.Workspace.Provider, so the common single-provider cases work without a
+// redundant [providers.claude] section. Unconfigured built-in providers are
+// skipped. Pool min=0, max=-1 (unlimited) so they are available as sling
+// targets without an explicit [[agent]] entry. Explicit agents always win: if
+// city.toml defines [[agent]] name="claude" (or a rig-scoped equivalent), no
+// implicit agent is added for that scope.
 // agentKey identifies an agent by its rig directory and name.
 type agentKey struct{ dir, name string }
 
@@ -3324,6 +3506,31 @@ func InjectImplicitAgents(cfg *City) {
 // pack defaults take precedence over the root city default.
 func ApplyAgentDefaults(cfg *City) {
 	applyAgentSharedAttachmentDefaults(cfg.Agents, cfg.AgentDefaults)
+
+	provider := cfg.AgentDefaults.Provider
+	if provider != "" {
+		for i := range cfg.Agents {
+			if cfg.Agents[i].Name == ControlDispatcherAgentName {
+				continue
+			}
+			if cfg.Agents[i].Provider == "" {
+				if cfg.Agents[i].InheritedProvider != "" {
+					cfg.Agents[i].Provider = cfg.Agents[i].InheritedProvider
+				} else {
+					cfg.Agents[i].Provider = provider
+				}
+			}
+		}
+	} else {
+		for i := range cfg.Agents {
+			if cfg.Agents[i].Name == ControlDispatcherAgentName {
+				continue
+			}
+			if cfg.Agents[i].Provider == "" && cfg.Agents[i].InheritedProvider != "" {
+				cfg.Agents[i].Provider = cfg.Agents[i].InheritedProvider
+			}
+		}
+	}
 
 	formula := cfg.AgentDefaults.DefaultSlingFormula
 	if formula != "" {
@@ -3412,6 +3619,12 @@ func hasDeprecatedAttachmentFields(cfg *City) bool {
 // mergeAgentDefaults merges src into dst using later-layer precedence for
 // scalars and additive append semantics for list fields.
 func mergeAgentDefaults(dst *AgentDefaults, src AgentDefaults, label string, prov *Provenance) {
+	if src.Provider != "" {
+		if prov != nil && dst.Provider != "" && dst.Provider != src.Provider {
+			prov.Warnings = append(prov.Warnings, fmt.Sprintf("agent_defaults.provider redefined by %q", label))
+		}
+		dst.Provider = src.Provider
+	}
 	if src.Model != "" {
 		if prov != nil && dst.Model != "" && dst.Model != src.Model {
 			prov.Warnings = append(prov.Warnings, fmt.Sprintf("agent_defaults.model redefined by %q", label))
@@ -3465,7 +3678,7 @@ func injectControlDispatcherAgents(cfg *City, existing map[agentKey]bool) {
 		if !existingNS[ControlDispatcherAgentName] {
 			cfg.NamedSessions = append(cfg.NamedSessions, NamedSession{
 				Template: ControlDispatcherAgentName,
-				Mode:     "always",
+				Mode:     "on_demand",
 			})
 		}
 	}
@@ -3477,7 +3690,7 @@ func injectControlDispatcherAgents(cfg *City, existing map[agentKey]bool) {
 				cfg.NamedSessions = append(cfg.NamedSessions, NamedSession{
 					Template: ControlDispatcherAgentName,
 					Dir:      rig.Name,
-					Mode:     "always",
+					Mode:     "on_demand",
 				})
 			}
 		}
@@ -3494,7 +3707,7 @@ func newControlDispatcherAgent(dir string) Agent {
 	a := Agent{
 		Name:              ControlDispatcherAgentName,
 		Dir:               dir,
-		Description:       "Built-in deterministic graph.v2 workflow control worker",
+		Description:       "Built-in deterministic compiler-v2 workflow control worker",
 		StartCommand:      ControlDispatcherStartCommandFor(qualifiedName),
 		ProcessNames:      []string{"gc"},
 		MaxActiveSessions: &one,
@@ -3504,25 +3717,32 @@ func newControlDispatcherAgent(dir string) Agent {
 }
 
 // configuredProviders returns the merged set of providers that are explicitly
-// configured: the union of cfg.Providers keys and cfg.Workspace.Provider.
-// workspace.provider is only included if it names a built-in provider or one
-// already defined in cfg.Providers — a non-builtin workspace.provider without
-// a matching [providers.X] section is ignored (it would create an implicit
-// agent that fails at resolution time).
+// configured: the union of cfg.Providers keys, cfg.AgentDefaults.Provider, and
+// cfg.Workspace.Provider. Scalar provider defaults are only included if they
+// name a built-in provider or one already defined in cfg.Providers — a
+// non-builtin scalar default without a matching [providers.X] section is
+// ignored because it would create an implicit agent that fails at resolution
+// time.
 func configuredProviders(cfg *City) map[string]ProviderSpec {
 	merged := make(map[string]ProviderSpec, len(cfg.Providers)+1)
 	for k, v := range cfg.Providers {
 		merged[k] = v
 	}
-	if wp := cfg.Workspace.Provider; wp != "" {
-		if _, ok := merged[wp]; !ok {
-			// Only promote workspace.provider if it's a known builtin.
-			if _, builtin := BuiltinProviders()[wp]; builtin {
-				merged[wp] = ProviderSpec{}
-			}
-		}
-	}
+	addScalarProviderDefault(merged, cfg.AgentDefaults.Provider)
+	addScalarProviderDefault(merged, cfg.Workspace.Provider)
 	return merged
+}
+
+func addScalarProviderDefault(merged map[string]ProviderSpec, name string) {
+	if name == "" {
+		return
+	}
+	if _, ok := merged[name]; ok {
+		return
+	}
+	if _, builtin := BuiltinProviders()[name]; builtin {
+		merged[name] = ProviderSpec{}
+	}
 }
 
 // configuredProviderOrder returns provider names from the map in a
@@ -3631,16 +3851,24 @@ func ValidateAgents(agents []Agent) error {
 }
 
 // ValidateNamedSessions checks named session declarations after pack expansion.
-func ValidateNamedSessions(cfg *City) error {
+// It returns non-fatal warnings (e.g. a named session whose backing template
+// did not resolve) alongside any fatal structural error.
+func ValidateNamedSessions(cfg *City) (warnings []string, err error) {
 	return validateNamedSessions(cfg, true)
 }
 
 // validateNamedSessions checks named session declarations for structural
-// errors. When requireBackingTemplate is true, it also requires every named
-// session to resolve to an expanded backing agent template.
-func validateNamedSessions(cfg *City, requireBackingTemplate bool) error {
+// errors. When requireBackingTemplate is true, a named session whose backing
+// agent template does not resolve after pack expansion is reported as a
+// non-fatal warning and the session is skipped, rather than failing the whole
+// config load. This keeps one broken named session from bricking every command
+// (a typo'd template should not stop `gc session attach <other>`). The session
+// still errors clearly when a command actually targets it, at materialization
+// time. Genuine structural problems (duplicate identity, invalid scope/mode,
+// name collisions, capacity overflow) remain fatal.
+func validateNamedSessions(cfg *City, requireBackingTemplate bool) (warnings []string, err error) {
 	if cfg == nil || len(cfg.NamedSessions) == 0 {
-		return nil
+		return nil, nil
 	}
 	type sessionKey struct{ dir, identity string }
 	seen := make(map[sessionKey]bool, len(cfg.NamedSessions))
@@ -3650,53 +3878,56 @@ func validateNamedSessions(cfg *City, requireBackingTemplate bool) error {
 	for i := range cfg.NamedSessions {
 		s := &cfg.NamedSessions[i]
 		if s.Template == "" {
-			return fmt.Errorf("named_session[%d]: template is required", i)
+			return nil, fmt.Errorf("named_session[%d]: template is required", i)
 		}
 		if !validNamedSessionTemplate.MatchString(s.Template) {
-			return fmt.Errorf("named_session[%d]: template %q must match [a-zA-Z0-9][a-zA-Z0-9_-]* or binding.agent", i, s.Template)
+			return nil, fmt.Errorf("named_session[%d]: template %q must match [a-zA-Z0-9][a-zA-Z0-9_-]* or binding.agent", i, s.Template)
 		}
 		if s.Name != "" && !validAgentName.MatchString(s.Name) {
-			return fmt.Errorf("named_session[%d]: name %q must match [a-zA-Z0-9][a-zA-Z0-9_-]*", i, s.Name)
+			return nil, fmt.Errorf("named_session[%d]: name %q must match [a-zA-Z0-9][a-zA-Z0-9_-]*", i, s.Name)
 		}
 		switch s.Scope {
 		case "", "city", "rig":
 			// valid
 		default:
-			return fmt.Errorf("named_session %q: scope must be \"city\", \"rig\", or empty, got %q", s.QualifiedName(), s.Scope)
+			return nil, fmt.Errorf("named_session %q: scope must be \"city\", \"rig\", or empty, got %q", s.QualifiedName(), s.Scope)
 		}
 		switch s.ModeOrDefault() {
 		case "on_demand", "always":
 			// valid
 		default:
-			return fmt.Errorf("named_session %q: mode must be \"on_demand\", \"always\", or empty, got %q", s.QualifiedName(), s.Mode)
+			return nil, fmt.Errorf("named_session %q: mode must be \"on_demand\", \"always\", or empty, got %q", s.QualifiedName(), s.Mode)
 		}
 		key := sessionKey{dir: s.Dir, identity: s.IdentityName()}
 		if seen[key] {
-			return fmt.Errorf("named_session %q: duplicate identity", s.QualifiedName())
+			return nil, fmt.Errorf("named_session %q: duplicate identity", s.QualifiedName())
 		}
 		seen[key] = true
 		agent := FindAgent(cfg, s.TemplateQualifiedName())
-		if agent == nil {
-			if requireBackingTemplate {
-				return fmt.Errorf("named_session %q: referenced template not found after pack expansion", s.QualifiedName())
-			}
+		if agent == nil && requireBackingTemplate {
+			// Non-fatal: a named session whose backing template did not
+			// resolve is skipped, not a hard error. Skipping here also
+			// keeps it out of the name-reservation and always-mode capacity
+			// bookkeeping below, since a disabled session holds no slot.
+			warnings = append(warnings, disabledNamedSessionWarning(s))
+			continue
 		}
 		identity := s.QualifiedName()
 		sessionName := NamedSessionRuntimeName(cfg.EffectiveCityName(), cfg.Workspace, identity)
 		if other, ok := reservedAliases[sessionName]; ok && other != identity {
-			return fmt.Errorf(
+			return nil, fmt.Errorf(
 				"named_session %q: reserved alias collides with deterministic session_name for %q (%q)",
 				identity, other, sessionName,
 			)
 		}
 		if other, ok := reservedSessionNames[identity]; ok && other != identity {
-			return fmt.Errorf(
+			return nil, fmt.Errorf(
 				"named_session %q: reserved alias collides with deterministic session_name for %q (%q)",
 				identity, other, identity,
 			)
 		}
 		if other, ok := reservedSessionNames[sessionName]; ok && other != identity {
-			return fmt.Errorf(
+			return nil, fmt.Errorf(
 				"named_session %q: deterministic session_name %q collides with configured named session %q",
 				identity, sessionName, other,
 			)
@@ -3706,21 +3937,44 @@ func validateNamedSessions(cfg *City, requireBackingTemplate bool) error {
 		if s.ModeOrDefault() == "always" && agent != nil {
 			alwaysByTemplate[agent.QualifiedName()]++
 			if maxActive := agent.EffectiveMaxActiveSessions(); maxActive != nil && *maxActive < alwaysByTemplate[agent.QualifiedName()] {
-				return fmt.Errorf(
+				return nil, fmt.Errorf(
 					"named_session %q: mode %q exceeds max_active_sessions capacity %d on template %q",
 					s.QualifiedName(), s.ModeOrDefault(), *maxActive, agent.QualifiedName(),
 				)
 			}
 			policy := ResolveSessionSleepPolicy(cfg, agent)
 			if normalized := NormalizeSleepAfterIdle(policy.Value); normalized != "" && normalized != SessionSleepOff {
-				return fmt.Errorf(
+				return nil, fmt.Errorf(
 					"named_session %q: mode %q is incompatible with sleep_after_idle=%q on template %q",
 					s.QualifiedName(), s.ModeOrDefault(), normalized, agent.QualifiedName(),
 				)
 			}
 		}
 	}
-	return nil
+	return warnings, nil
+}
+
+// disabledNamedSessionMarker is a stable suffix on the warning emitted when a
+// named session is skipped because its backing template did not resolve after
+// pack expansion. CLI warning classification keys off this marker, so keep it
+// in sync with IsDisabledNamedSessionWarning.
+const disabledNamedSessionMarker = "; named session disabled until its template resolves"
+
+// disabledNamedSessionWarning formats the non-fatal warning for a named session
+// whose backing template could not be resolved.
+func disabledNamedSessionWarning(s *NamedSession) string {
+	return fmt.Sprintf(
+		"named_session %q: backing template %q not found after pack expansion%s",
+		s.QualifiedName(), s.TemplateQualifiedName(), disabledNamedSessionMarker,
+	)
+}
+
+// IsDisabledNamedSessionWarning reports whether a load warning is the non-fatal
+// notice that a named session was skipped because its backing template did not
+// resolve. CLI warning filters use this to print the notice and keep it
+// non-fatal in strict mode.
+func IsDisabledNamedSessionWarning(warning string) bool {
+	return strings.HasSuffix(warning, disabledNamedSessionMarker)
 }
 
 // validateDependsOn checks that all depends_on references are valid agent
@@ -3829,6 +4083,7 @@ func ValidateRigs(rigs []Rig, hqPrefix string) error {
 func DefaultCity(name string) City {
 	return City{
 		Workspace:     Workspace{Name: name},
+		Daemon:        DaemonConfig{FormulaV2: true},
 		Agents:        []Agent{{Name: "mayor", PromptTemplate: "prompts/mayor.md"}},
 		NamedSessions: []NamedSession{{Template: "mayor", Mode: "always"}},
 	}
@@ -3857,6 +4112,7 @@ func WizardCity(name, provider, startCommand string) City {
 	}
 	return City{
 		Workspace: ws,
+		Daemon:    DaemonConfig{FormulaV2: true},
 		Agents: []Agent{
 			{Name: "mayor", PromptTemplate: "prompts/mayor.md"},
 		},
@@ -3898,6 +4154,7 @@ func GastownCity(name, provider, startCommand string) City {
 		},
 		DefaultRigImportOrder: []string{"gastown"},
 		Daemon: DaemonConfig{
+			FormulaV2:       true,
 			PatrolInterval:  "30s",
 			MaxRestarts:     &maxRestarts,
 			RestartWindow:   "1h",
@@ -3950,7 +4207,7 @@ func Load(fs fsys.FS, path string) (*City, error) {
 	// Load intentionally skips include and pack expansion, so validate the
 	// direct named-session declarations without requiring pack-provided
 	// backing templates to be present yet.
-	if err := validateNamedSessions(cfg, false); err != nil {
+	if _, err := validateNamedSessions(cfg, false); err != nil {
 		return nil, err
 	}
 	if err := ValidateGitHubPRMonitors(cfg); err != nil {
@@ -3967,12 +4224,9 @@ func Parse(data []byte) (*City, error) {
 		return nil, fmt.Errorf("parsing config: %w", err)
 	}
 	normalizeAgentDefaultsAlias(&cfg, md)
+	applyDaemonFormulaV2Default(&cfg, md)
 	normalizeLegacyOrderOverrideAliases(&cfg)
 	NormalizeSessionSleepFields(&cfg)
-	// Backwards compat: promote deprecated graph_workflows → formula_v2.
-	if cfg.Daemon.GraphWorkflows && !cfg.Daemon.FormulaV2 {
-		cfg.Daemon.FormulaV2 = true
-	}
 	// Stamp source=sourceInline on agents declared via [[agent]] in
 	// the parsed TOML. These are city.toml inline agents (or test
 	// fixtures using Parse directly); pack agents go through a
@@ -3982,4 +4236,22 @@ func Parse(data []byte) (*City, error) {
 		cfg.Agents[i].source = sourceInline
 	}
 	return &cfg, nil
+}
+
+func applyDaemonFormulaV2Default(cfg *City, md toml.MetaData) {
+	if cfg == nil {
+		return
+	}
+	if md.IsDefined("daemon", "formula_v2") {
+		cfg.Daemon.formulaV2Set = true
+		return
+	}
+	if md.IsDefined("daemon", "graph_workflows") {
+		cfg.Daemon.FormulaV2 = cfg.Daemon.GraphWorkflows
+		if !cfg.Daemon.FormulaV2 {
+			cfg.Daemon.formulaV2Set = true
+		}
+		return
+	}
+	cfg.Daemon.FormulaV2 = true
 }

@@ -164,7 +164,7 @@ without catching the mismatch (upstream #1833).
 # (e.g. controller restart, host wake, claim race). Their branch ships
 # but you never see the mail. Scan metadata for orphans before the
 # normal patrol — these are real merge candidates that need rescuing.
-ORPHANS=$(gc bd list --metadata-field gc.routed_to="${GC_RIG:+$GC_RIG/}{{ .BindingPrefix }}refinery" --status=open --json 2>/dev/null \
+ORPHANS=$(gc bd list ${GC_RIG:+--rig="$GC_RIG"} --metadata-field gc.routed_to="${GC_RIG:+$GC_RIG/}{{ .BindingPrefix }}refinery" --status=open --json 2>/dev/null \
   | jq -r '.[] | select(.metadata.branch != null) | .id')
 for ORPHAN in $ORPHANS; do
   echo "orphan-merge candidate: $ORPHAN"
@@ -310,7 +310,7 @@ alert the witness, not `gc mail send`.
 |------------|----------------|
 | Pour next wisp | `gc bd mol wisp mol-refinery-patrol --root-only --var target_branch={{ .DefaultBranch }} --var rig_name={{ .RigName }} --var binding_prefix={{ .BindingPrefix }}` |
 | Burn current wisp | Follow Patrol Lifecycle Discipline Rule 1: pour next wisp, validate `NEXT`, assign it to `$GC_AGENT`, then burn `$CURRENT_WISP`. Never run a standalone burn. |
-| Find assigned work | `gc bd list --assignee="$GC_AGENT" --status=open` |
+| Find assigned work | `gc bd list ${GC_RIG:+--rig="$GC_RIG"} --assignee="$GC_AGENT" --status=open` |
 | Snapshot event position | `gc events --seq` |
 | Wait for assignment | `gc events --watch --type=bead.updated --after=$SEQ` |
 | Read work metadata | `gc bd show $WORK --json \| jq '.[0].metadata'` |

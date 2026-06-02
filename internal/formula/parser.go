@@ -149,11 +149,20 @@ func (p *Parser) ParseFile(path string) (*Formula, error) {
 	// Set source tracing info on all steps (gt-8tmz.18)
 	SetSourceInfo(formula)
 
-	// Resolve description_file references relative to the formula file's directory,
-	// with asset references shadowed through the parser's formula layer order.
-	formulaDir := filepath.Dir(absPath)
-	p.resolveDescriptionFiles(formula.Steps, formulaDir)
-	p.resolveDescriptionFiles(formula.Template, formulaDir)
+	// Resolve description_file references relative to the real formula file's
+	// directory, with asset references shadowed through formula layer order.
+	// Pack formulas may be symlinked into a city's formula directory; relative
+	// prompt files should stay pack-relative, not city-relative. Graph.v2
+	// formulas fail fast on missing files; legacy formulas keep the historical
+	// best-effort behavior.
+	formulaDir := descriptionFileBaseDir(absPath)
+	strictDescriptionFiles := UsesGraphCompiler(formula)
+	if err := p.resolveDescriptionFiles(formula.Steps, formulaDir, strictDescriptionFiles); err != nil {
+		return nil, fmt.Errorf("resolve description_file in %s: %w", path, err)
+	}
+	if err := p.resolveDescriptionFiles(formula.Template, formulaDir, strictDescriptionFiles); err != nil {
+		return nil, fmt.Errorf("resolve description_file in %s: %w", path, err)
+	}
 
 	p.cache[absPath] = formula
 
@@ -161,6 +170,13 @@ func (p *Parser) ParseFile(path string) (*Formula, error) {
 	p.cache[formula.Formula] = formula
 
 	return formula, nil
+}
+
+func descriptionFileBaseDir(path string) string {
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		return filepath.Dir(resolved)
+	}
+	return filepath.Dir(path)
 }
 
 // Parse parses a formula from JSON bytes.
@@ -171,9 +187,6 @@ func (p *Parser) Parse(data []byte) (*Formula, error) {
 	}
 
 	// Set defaults
-	if formula.Version == 0 {
-		formula.Version = 1
-	}
 	if formula.Type == "" {
 		formula.Type = TypeWorkflow
 	}
@@ -189,9 +202,6 @@ func (p *Parser) ParseTOML(data []byte) (*Formula, error) {
 	}
 
 	// Set defaults
-	if formula.Version == 0 {
-		formula.Version = 1
-	}
 	if formula.Type == "" {
 		formula.Type = TypeWorkflow
 	}
@@ -223,13 +233,15 @@ func (p *Parser) Resolve(formula *Formula) (*Formula, error) {
 		return formula, nil
 	}
 
+	compilerConstraints := directFormulaCompilerConstraints(formula)
+
 	// Build merged formula from parents
 	merged := &Formula{
 		Formula:     formula.Formula,
 		Description: formula.Description,
 		Catalog:     formula.Catalog,
-		Version:     formula.Version,
 		Contract:    formula.Contract,
+		Requires:    cloneRequirements(formula.Requires),
 		Type:        formula.Type,
 		Source:      formula.Source,
 		Phase:       formula.Phase,
@@ -253,8 +265,17 @@ func (p *Parser) Resolve(formula *Formula) (*Formula, error) {
 			return nil, fmt.Errorf("resolve parent %s: %w", parentName, err)
 		}
 
+		parentConstraints, err := formulaCompilerConstraints(parent)
+		if err != nil {
+			return nil, fmt.Errorf("resolve parent %s: %w", parentName, err)
+		}
+		compilerConstraints = append(compilerConstraints, parentConstraints...)
+
 		if merged.Contract == "" {
 			merged.Contract = parent.Contract
+		}
+		if merged.Requires == nil {
+			merged.Requires = cloneRequirements(parent.Requires)
 		}
 
 		// Phase cascades from the first parent that declares one; child
@@ -307,7 +328,15 @@ func (p *Parser) Resolve(formula *Formula) (*Formula, error) {
 		merged.Description = formula.Description
 	}
 
+	if err := validateFormulaCompilerConstraintSet(merged.Formula, compilerConstraints); err != nil {
+		return nil, err
+	}
+	setFormulaCompilerConstraints(merged, compilerConstraints)
+
 	if err := merged.Validate(); err != nil {
+		return nil, err
+	}
+	if err := validateResolvedGraphV2DescriptionFiles(merged); err != nil {
 		return nil, err
 	}
 
@@ -437,13 +466,29 @@ func ExtractVariables(formula *Formula) []string {
 	extractFromStep = func(step *Step) {
 		extract(step.Title)
 		extract(step.Description)
+		extract(step.Notes)
 		extract(step.Assignee)
 		extract(step.Condition)
 		for _, l := range step.Labels {
 			extract(l)
 		}
+		for k, v := range step.Metadata {
+			extract(k)
+			extract(v)
+		}
+		if step.Drain != nil {
+			extract(step.Drain.Formula)
+			extract(step.Drain.ContinuationGroup)
+			extract(step.Drain.MemberAccess)
+			extract(step.Drain.OnItemFailure)
+		}
 		for _, child := range step.Children {
 			extractFromStep(child)
+		}
+		if step.Loop != nil {
+			for _, child := range step.Loop.Body {
+				extractFromStep(child)
+			}
 		}
 	}
 
@@ -646,28 +691,35 @@ func ApplyDefaults(formula *Formula, values map[string]string) map[string]string
 // (the formula file's directory). Paths using the documented ../assets/ form
 // are resolved through formula layer order so city assets can shadow pack
 // assets while the formula itself remains inherited from a lower-priority pack.
-func (p *Parser) resolveDescriptionFiles(steps []*Step, baseDir string) {
+func (p *Parser) resolveDescriptionFiles(steps []*Step, baseDir string, strict bool) error {
 	for _, step := range steps {
 		if step == nil {
 			continue
 		}
 		if step.DescriptionFile != "" {
-			data, ok := p.readDescriptionFile(step.DescriptionFile, baseDir)
-			if ok {
+			data, err := p.readDescriptionFile(step.DescriptionFile, baseDir)
+			if err != nil {
+				if strict {
+					return fmt.Errorf("%s: %w", step.DescriptionFile, err)
+				}
+			} else {
 				step.Description = string(data)
+				step.DescriptionFile = "" // consumed; don't serialize
 			}
-			step.DescriptionFile = "" // consumed; don't serialize
 		}
-		if len(step.Children) > 0 {
-			p.resolveDescriptionFiles(step.Children, baseDir)
+		if err := p.resolveDescriptionFiles(step.Children, baseDir, strict); err != nil {
+			return err
 		}
-		if step.Loop != nil && len(step.Loop.Body) > 0 {
-			p.resolveDescriptionFiles(step.Loop.Body, baseDir)
+		if step.Loop != nil {
+			if err := p.resolveDescriptionFiles(step.Loop.Body, baseDir, strict); err != nil {
+				return err
+			}
 		}
 	}
+	return nil
 }
 
-func (p *Parser) readDescriptionFile(rawPath, baseDir string) ([]byte, bool) {
+func (p *Parser) readDescriptionFile(rawPath, baseDir string) ([]byte, error) {
 	if assetRel, ok := descriptionAssetRelPath(rawPath); ok {
 		var winner string
 		for _, layer := range p.searchPaths {
@@ -677,8 +729,7 @@ func (p *Parser) readDescriptionFile(rawPath, baseDir string) ([]byte, bool) {
 			}
 		}
 		if winner != "" {
-			data, err := p.source.ReadFile(winner)
-			return data, err == nil
+			return p.source.ReadFile(winner)
 		}
 	}
 
@@ -686,8 +737,7 @@ func (p *Parser) readDescriptionFile(rawPath, baseDir string) ([]byte, bool) {
 	if !filepath.IsAbs(path) {
 		path = filepath.Join(baseDir, path)
 	}
-	data, err := p.source.ReadFile(path)
-	return data, err == nil
+	return p.source.ReadFile(path)
 }
 
 func descriptionAssetRelPath(rawPath string) (string, bool) {
@@ -701,6 +751,37 @@ func descriptionAssetRelPath(rawPath string) (string, bool) {
 		return "", false
 	}
 	return rel, true
+}
+
+func validateResolvedGraphV2DescriptionFiles(f *Formula) error {
+	if !UsesGraphCompiler(f) {
+		return nil
+	}
+	if err := rejectUnresolvedDescriptionFiles(f.Steps, "steps"); err != nil {
+		return err
+	}
+	return rejectUnresolvedDescriptionFiles(f.Template, "template")
+}
+
+func rejectUnresolvedDescriptionFiles(steps []*Step, prefix string) error {
+	for i, step := range steps {
+		if step == nil {
+			continue
+		}
+		stepPrefix := fmt.Sprintf("%s[%d] (%s)", prefix, i, step.ID)
+		if path := strings.TrimSpace(step.DescriptionFile); path != "" {
+			return fmt.Errorf("%s.description_file %q was not resolved", stepPrefix, path)
+		}
+		if err := rejectUnresolvedDescriptionFiles(step.Children, stepPrefix+".children"); err != nil {
+			return err
+		}
+		if step.Loop != nil {
+			if err := rejectUnresolvedDescriptionFiles(step.Loop.Body, stepPrefix+".loop.body"); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 // SetSourceInfo populates the SourceFormula and SourcePath fields on each

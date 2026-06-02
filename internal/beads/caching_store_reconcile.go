@@ -404,12 +404,10 @@ func (c *CachingStore) runReconciliation() {
 	for id, freshBead := range freshByID {
 		beadForCache := freshBead
 		preservedRecentLocal := false
-		if recentLocalMutation(c.localBeadAt[id], now) {
-			c.carryRecentLocalMutationLocked(id, nextDirty, nextBeadSeq, nextLocalBeadAt)
-		}
 		if current, keep := c.recentLocalBeadConflictLocked(id, freshBead, now, true); keep {
 			beadForCache = current
 			preservedRecentLocal = true
+			c.carryRecentLocalMutationLocked(id, nextDirty, nextBeadSeq, nextLocalBeadAt)
 		}
 		freshDeps := c.depsForReconcileLocked(id, freshBead, depMap, useFreshDeps)
 		nextBeads[id] = cloneBead(beadForCache)

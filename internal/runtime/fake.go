@@ -36,6 +36,7 @@ type Fake struct {
 	DialogErrors            map[string]error
 	ResetTurnErrors         map[string]error
 	InterruptBoundaryErrors map[string]error
+	RemoveMetaErrors        map[string]map[string]error // per-session/key RemoveMeta errors for testing
 	// WaitForIdleGates blocks WaitForIdle on a per-name channel until the
 	// caller closes it. A nil or absent entry returns the configured
 	// WaitForIdleErrors value immediately. The gate is read under f.mu
@@ -98,6 +99,7 @@ func NewFake() *Fake {
 		DialogErrors:            make(map[string]error),
 		ResetTurnErrors:         make(map[string]error),
 		InterruptBoundaryErrors: make(map[string]error),
+		RemoveMetaErrors:        make(map[string]map[string]error),
 		WaitForIdleGates:        make(map[string]chan struct{}),
 		WaitForIdleStarted:      make(map[string]chan struct{}),
 	}
@@ -124,6 +126,7 @@ func NewFailFake() *Fake {
 		DialogErrors:            make(map[string]error),
 		ResetTurnErrors:         make(map[string]error),
 		InterruptBoundaryErrors: make(map[string]error),
+		RemoveMetaErrors:        make(map[string]map[string]error),
 		WaitForIdleGates:        make(map[string]chan struct{}),
 		WaitForIdleStarted:      make(map[string]chan struct{}),
 		broken:                  true,
@@ -447,6 +450,11 @@ func (f *Fake) RemoveMeta(name, key string) error {
 	if f.broken {
 		return fmt.Errorf("session unavailable")
 	}
+	if keyed := f.RemoveMetaErrors[name]; keyed != nil {
+		if err := keyed[key]; err != nil {
+			return err
+		}
+	}
 	delete(f.meta[name], key)
 	return nil
 }
@@ -525,8 +533,13 @@ func (f *Fake) FindRuntimesBySessionID(id string) ([]LiveRuntime, error) {
 		if id != "" && sessionID != id {
 			continue
 		}
+		city := cfg.Env["GC_CITY_PATH"]
+		if city == "" {
+			city = cfg.Env["GC_CITY"]
+		}
 		out = append(out, LiveRuntime{
 			SessionID:    sessionID,
+			City:         city,
 			ProviderName: name,
 			IsTracked:    true,
 		})

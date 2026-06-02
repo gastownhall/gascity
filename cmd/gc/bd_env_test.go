@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -4719,8 +4720,69 @@ dolt.auto-start: false
 	}
 }
 
+func TestBdRuntimeEnvForRig_PostgresRigOverridesDoltliteCityBackend(t *testing.T) {
+	clearAmbientPostgresEnv(t)
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("GC_DOLT", "skip")
+	t.Setenv("GC_BEADS_BACKEND", "")
+	_ = os.Unsetenv("GC_BEADS_BACKEND")
+	t.Setenv("BEADS_BACKEND", "")
+	_ = os.Unsetenv("BEADS_BACKEND")
+
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(`[beads]
+provider = "bd"
+backend = "doltlite"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "metadata.json"), []byte(`{"backend":"doltlite","database":"doltlite","dolt_database":"hq"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte(`issue_prefix: city
+gc.endpoint_origin: managed_city
+gc.endpoint_status: verified
+dolt.auto-start: false
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	pgRig := filepath.Join(cityPath, "rigs", "pg")
+	writePGScopeFixture(t, pgRig, "pgpw")
+	if err := os.WriteFile(filepath.Join(pgRig, ".beads", "config.yaml"), []byte(`issue_prefix: pg
+gc.endpoint_origin: inherited_city
+gc.endpoint_status: verified
+dolt.auto-start: false
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{Rigs: []config.Rig{{Name: "pg", Path: "rigs/pg", Prefix: "pg"}}}
+
+	env, err := bdRuntimeEnvForRigWithError(cityPath, cfg, pgRig)
+	if err != nil {
+		t.Fatalf("bdRuntimeEnvForRigWithError(pg) error = %v", err)
+	}
+	if got := env["BEADS_POSTGRES_PASSWORD"]; got != "pgpw" {
+		t.Fatalf("BEADS_POSTGRES_PASSWORD = %q, want pgpw", got)
+	}
+	if got := env["BEADS_POSTGRES_HOST"]; got != "db.example.test" {
+		t.Fatalf("BEADS_POSTGRES_HOST = %q, want db.example.test", got)
+	}
+	for _, key := range []string{"GC_BEADS_BACKEND", "BEADS_BACKEND"} {
+		if got := env[key]; got == "doltlite" {
+			t.Fatalf("%s = %q, want Postgres rig to override DoltLite city backend", key, got)
+		}
+	}
+}
+
 func TestProjectedKeysCoverage(t *testing.T) {
-	parentKeys := make([]string, 0, len(projectedPostgresEnvKeys)+len(projectedDoltEnvKeys))
+	parentKeys := make([]string, 0, len(projectedBeadsBackendEnvKeys)+len(projectedPostgresEnvKeys)+len(projectedDoltEnvKeys))
+	for _, key := range projectedBeadsBackendEnvKeys {
+		parentKeys = append(parentKeys, key+"=PARENT")
+	}
 	for _, key := range projectedPostgresEnvKeys {
 		parentKeys = append(parentKeys, key+"=PARENT")
 	}
@@ -4732,6 +4794,11 @@ func TestProjectedKeysCoverage(t *testing.T) {
 		t.Errorf("mergeRuntimeEnv stripped projected keys = %d entries left, want 0; entries=%v", len(stripped), stripped)
 	}
 
+	for _, key := range projectedBeadsBackendEnvKeys {
+		if !projectedKeyStripped(key) {
+			t.Errorf("projectedBeadsBackendEnvKeys[%q] is not in mergeRuntimeEnv strip list - symmetry broken", key)
+		}
+	}
 	for _, key := range projectedPostgresEnvKeys {
 		if !pgKeyStripped(key) {
 			t.Errorf("projectedPostgresEnvKeys[%q] is not in mergeRuntimeEnv strip list - symmetry broken", key)
@@ -4746,6 +4813,25 @@ func TestProjectedKeysCoverage(t *testing.T) {
 		if !projectedKeyStripped(key) {
 			t.Errorf("bdCLIRemoteSyncOptOutEnvKeys[%q] is not in mergeRuntimeEnv strip list - symmetry broken", key)
 		}
+	}
+}
+
+func TestMergeRuntimeEnvStripsInheritedBeadsBackend(t *testing.T) {
+	result := mergeRuntimeEnv([]string{
+		"GC_BEADS_BACKEND=doltlite",
+		"BEADS_BACKEND=doltlite",
+		"PATH=/usr/bin",
+	}, nil)
+
+	for _, key := range []string{"GC_BEADS_BACKEND", "BEADS_BACKEND"} {
+		for _, entry := range result {
+			if strings.HasPrefix(entry, key+"=") {
+				t.Fatalf("%s leaked into merged runtime env: %v", key, result)
+			}
+		}
+	}
+	if !slices.Contains(result, "PATH=/usr/bin") {
+		t.Fatalf("PATH was not preserved in merged runtime env: %v", result)
 	}
 }
 

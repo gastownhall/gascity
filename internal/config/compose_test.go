@@ -45,6 +45,66 @@ name = "mayor"
 	}
 }
 
+func TestLoadWithIncludesDefaultsFormulaV2Enabled(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/city.toml"] = []byte(`
+[workspace]
+name = "test"
+`)
+	cfg, _, err := LoadWithIncludes(fs, "/city/city.toml")
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+	if !cfg.Daemon.FormulaV2 {
+		t.Fatal("Daemon.FormulaV2 = false, want true when formula_v2 is omitted")
+	}
+}
+
+func TestLoadWithIncludesPreservesExplicitFormulaV2False(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/city.toml"] = []byte(`
+[workspace]
+name = "test"
+
+[daemon]
+formula_v2 = false
+`)
+	cfg, _, err := LoadWithIncludes(fs, "/city/city.toml")
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+	if cfg.Daemon.FormulaV2 {
+		t.Fatal("Daemon.FormulaV2 = true, want explicit false")
+	}
+}
+
+func TestLoadWithIncludesPreservesExplicitFormulaV2FalseAcrossDaemonFragment(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/city.toml"] = []byte(`
+include = ["fragment.toml"]
+
+[workspace]
+name = "test"
+
+[daemon]
+formula_v2 = false
+`)
+	fs.Files["/city/fragment.toml"] = []byte(`
+[daemon]
+patrol_interval = "1m"
+`)
+	cfg, _, err := LoadWithIncludes(fs, "/city/city.toml")
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+	if cfg.Daemon.FormulaV2 {
+		t.Fatal("Daemon.FormulaV2 = true, want root explicit false to survive daemon fragment")
+	}
+	if cfg.Daemon.PatrolInterval != "1m" {
+		t.Fatalf("Daemon.PatrolInterval = %q, want fragment field", cfg.Daemon.PatrolInterval)
+	}
+}
+
 func TestLoadWithIncludes_InvalidProviderChainFailsLoad(t *testing.T) {
 	fs := fsys.NewFake()
 	fs.Files["/city/city.toml"] = []byte(`
@@ -299,14 +359,6 @@ func TestLoadWithIncludesRejectsPackAuthoringSurfaces(t *testing.T) {
 		packBody string
 		want     string
 	}{
-		{
-			name: "agent_defaults",
-			packBody: `
-[agent_defaults]
-default_sling_formula = "mol-pack"
-`,
-			want: "[agent_defaults] is a city.toml table, not a pack.toml field",
-		},
 		{
 			name: "agents_alias",
 			packBody: `
@@ -1060,12 +1112,13 @@ session_setup_script = "scripts/theme.sh"
 	if err != nil {
 		t.Fatalf("LoadWithIncludes: %v", err)
 	}
-	if len(cfg.Agents) != 1 {
-		t.Fatalf("len(cfg.Agents) = %d, want 1", len(cfg.Agents))
+	agents := explicitAgents(cfg.Agents)
+	if len(agents) != 1 {
+		t.Fatalf("len(explicit Agents) = %d, want 1", len(agents))
 	}
 	want := filepath.Join(dir, "fragments/scripts/theme.sh")
-	if cfg.Agents[0].SessionSetupScript != want {
-		t.Fatalf("SessionSetupScript = %q, want %q", cfg.Agents[0].SessionSetupScript, want)
+	if agents[0].SessionSetupScript != want {
+		t.Fatalf("SessionSetupScript = %q, want %q", agents[0].SessionSetupScript, want)
 	}
 }
 
@@ -1110,14 +1163,15 @@ overlay_dir = "overlays/theme"
 	if err != nil {
 		t.Fatalf("LoadWithIncludes: %v", err)
 	}
-	if len(cfg.Agents) != 1 {
-		t.Fatalf("len(cfg.Agents) = %d, want 1", len(cfg.Agents))
+	agents := explicitAgents(cfg.Agents)
+	if len(agents) != 1 {
+		t.Fatalf("len(explicit agents) = %d, want 1", len(agents))
 	}
-	if cfg.Agents[0].PromptTemplate != "fragments/prompts/theme.md" {
-		t.Fatalf("PromptTemplate = %q, want fragments/prompts/theme.md", cfg.Agents[0].PromptTemplate)
+	if agents[0].PromptTemplate != "fragments/prompts/theme.md" {
+		t.Fatalf("PromptTemplate = %q, want fragments/prompts/theme.md", agents[0].PromptTemplate)
 	}
-	if cfg.Agents[0].OverlayDir != "fragments/overlays/theme" {
-		t.Fatalf("OverlayDir = %q, want fragments/overlays/theme", cfg.Agents[0].OverlayDir)
+	if agents[0].OverlayDir != "fragments/overlays/theme" {
+		t.Fatalf("OverlayDir = %q, want fragments/overlays/theme", agents[0].OverlayDir)
 	}
 }
 
@@ -1157,12 +1211,13 @@ scope = "city"
 	if err != nil {
 		t.Fatalf("LoadWithIncludes: %v", err)
 	}
-	if len(cfg.Agents) != 1 {
-		t.Fatalf("len(cfg.Agents) = %d, want 1", len(cfg.Agents))
+	agents := explicitAgents(cfg.Agents)
+	if len(agents) != 1 {
+		t.Fatalf("len(explicit Agents) = %d, want 1", len(agents))
 	}
 	want := filepath.Join(dir, "scripts/local.sh")
-	if cfg.Agents[0].SessionSetupScript != want {
-		t.Fatalf("SessionSetupScript = %q, want %q", cfg.Agents[0].SessionSetupScript, want)
+	if agents[0].SessionSetupScript != want {
+		t.Fatalf("SessionSetupScript = %q, want %q", agents[0].SessionSetupScript, want)
 	}
 }
 
@@ -1204,14 +1259,15 @@ scope = "city"
 	if err != nil {
 		t.Fatalf("LoadWithIncludes: %v", err)
 	}
-	if len(cfg.Agents) != 1 {
-		t.Fatalf("len(cfg.Agents) = %d, want 1", len(cfg.Agents))
+	agents := explicitAgents(cfg.Agents)
+	if len(agents) != 1 {
+		t.Fatalf("len(explicit agents) = %d, want 1", len(agents))
 	}
-	if cfg.Agents[0].PromptTemplate != "prompts/local.md" {
-		t.Fatalf("PromptTemplate = %q, want prompts/local.md", cfg.Agents[0].PromptTemplate)
+	if agents[0].PromptTemplate != "prompts/local.md" {
+		t.Fatalf("PromptTemplate = %q, want prompts/local.md", agents[0].PromptTemplate)
 	}
-	if cfg.Agents[0].OverlayDir != "overlays/local" {
-		t.Fatalf("OverlayDir = %q, want overlays/local", cfg.Agents[0].OverlayDir)
+	if agents[0].OverlayDir != "overlays/local" {
+		t.Fatalf("OverlayDir = %q, want overlays/local", agents[0].OverlayDir)
 	}
 }
 
@@ -1262,14 +1318,15 @@ overlay_dir = "overlays/base-worker"
 	if err != nil {
 		t.Fatalf("LoadWithIncludes: %v", err)
 	}
-	if len(cfg.Agents) != 1 {
-		t.Fatalf("len(cfg.Agents) = %d, want 1", len(cfg.Agents))
+	agents := explicitAgents(cfg.Agents)
+	if len(agents) != 1 {
+		t.Fatalf("len(explicit agents) = %d, want 1", len(agents))
 	}
-	if cfg.Agents[0].PromptTemplate != "fragments/prompts/rig-worker.md" {
-		t.Fatalf("PromptTemplate = %q, want fragments/prompts/rig-worker.md", cfg.Agents[0].PromptTemplate)
+	if agents[0].PromptTemplate != "fragments/prompts/rig-worker.md" {
+		t.Fatalf("PromptTemplate = %q, want fragments/prompts/rig-worker.md", agents[0].PromptTemplate)
 	}
-	if cfg.Agents[0].OverlayDir != "fragments/overlays/rig-worker" {
-		t.Fatalf("OverlayDir = %q, want fragments/overlays/rig-worker", cfg.Agents[0].OverlayDir)
+	if agents[0].OverlayDir != "fragments/overlays/rig-worker" {
+		t.Fatalf("OverlayDir = %q, want fragments/overlays/rig-worker", agents[0].OverlayDir)
 	}
 }
 
@@ -1313,12 +1370,13 @@ scope = "rig"
 	if err != nil {
 		t.Fatalf("LoadWithIncludes: %v", err)
 	}
-	if len(cfg.Agents) != 1 {
-		t.Fatalf("len(cfg.Agents) = %d, want 1", len(cfg.Agents))
+	agents := explicitAgents(cfg.Agents)
+	if len(agents) != 1 {
+		t.Fatalf("len(explicit Agents) = %d, want 1", len(agents))
 	}
 	want := filepath.Join(dir, "scripts/rig-local.sh")
-	if cfg.Agents[0].SessionSetupScript != want {
-		t.Fatalf("SessionSetupScript = %q, want %q", cfg.Agents[0].SessionSetupScript, want)
+	if agents[0].SessionSetupScript != want {
+		t.Fatalf("SessionSetupScript = %q, want %q", agents[0].SessionSetupScript, want)
 	}
 }
 
@@ -1365,12 +1423,13 @@ scope = "rig"
 	if err != nil {
 		t.Fatalf("LoadWithIncludes: %v", err)
 	}
-	if len(cfg.Agents) != 1 {
-		t.Fatalf("len(cfg.Agents) = %d, want 1", len(cfg.Agents))
+	agents := explicitAgents(cfg.Agents)
+	if len(agents) != 1 {
+		t.Fatalf("len(explicit Agents) = %d, want 1", len(agents))
 	}
 	want := filepath.Join(dir, "fragments/scripts/fragment-local.sh")
-	if cfg.Agents[0].SessionSetupScript != want {
-		t.Fatalf("SessionSetupScript = %q, want %q", cfg.Agents[0].SessionSetupScript, want)
+	if agents[0].SessionSetupScript != want {
+		t.Fatalf("SessionSetupScript = %q, want %q", agents[0].SessionSetupScript, want)
 	}
 }
 

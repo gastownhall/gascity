@@ -911,10 +911,43 @@ func writeKillSwitch(t *testing.T, cityDir string, enabled bool) {
 	if !enabled {
 		val = "false"
 	}
-	addition := fmt.Sprintf("\n[daemon]\nauto_restart_on_drift = %s\n", val)
-	if err := os.WriteFile(tomlPath, append(data, []byte(addition)...), 0o644); err != nil {
+	next := setDaemonKeyForTest(string(data), "auto_restart_on_drift", val)
+	if err := os.WriteFile(tomlPath, []byte(next), 0o644); err != nil {
 		t.Fatalf("writing city.toml: %v", err)
 	}
+}
+
+func setDaemonKeyForTest(src, key, value string) string {
+	lines := strings.SplitAfter(src, "\n")
+	daemonStart := -1
+	daemonEnd := len(lines)
+	for i, line := range lines {
+		if strings.TrimSpace(line) == "[daemon]" {
+			daemonStart = i
+			continue
+		}
+		if daemonStart >= 0 && i > daemonStart && strings.HasPrefix(strings.TrimSpace(line), "[") {
+			daemonEnd = i
+			break
+		}
+	}
+	entry := fmt.Sprintf("%s = %s\n", key, value)
+	if daemonStart < 0 {
+		if len(src) > 0 && !strings.HasSuffix(src, "\n") {
+			src += "\n"
+		}
+		return src + "\n[daemon]\n" + entry
+	}
+	for i := daemonStart + 1; i < daemonEnd; i++ {
+		if strings.HasPrefix(strings.TrimSpace(lines[i]), key+" ") || strings.HasPrefix(strings.TrimSpace(lines[i]), key+"=") {
+			lines[i] = entry
+			return strings.Join(lines, "")
+		}
+	}
+	next := append([]string{}, lines[:daemonStart+1]...)
+	next = append(next, entry)
+	next = append(next, lines[daemonStart+1:]...)
+	return strings.Join(next, "")
 }
 
 // writeStuckSupervisorShim overwrites binaryPath with a shell script

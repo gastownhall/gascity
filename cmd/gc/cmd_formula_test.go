@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -11,8 +12,11 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/formula"
+	"github.com/gastownhall/gascity/internal/formulatest"
+	"github.com/gastownhall/gascity/internal/sourceworkflow"
 )
 
 // TestResolveFormulaScope_RigFlagWins verifies that an explicit --rig flag
@@ -628,6 +632,73 @@ start_command = "echo hello"
 	})
 }
 
+func TestFormulaCookHonorsFormulaV2DisabledCityBeforeCreatingBeads(t *testing.T) {
+	configureIsolatedRuntimeEnv(t)
+	t.Setenv("GC_SESSION", "fake")
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_DOLT", "skip")
+	t.Setenv("GC_BOOTSTRAP", "skip")
+	t.Cleanup(func() {
+		applyFeatureFlags(&config.City{Daemon: config.DaemonConfig{FormulaV2: true}})
+	})
+
+	cityDir := t.TempDir()
+	formulaDir := filepath.Join(cityDir, "formulas")
+	if err := os.MkdirAll(formulaDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cityToml := `[workspace]
+name = "test-city"
+
+[daemon]
+formula_v2 = false
+`
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	graphFormula := `
+formula = "graph-work"
+
+[requires]
+formula_compiler = ">=2.0.0"
+
+[[steps]]
+id = "step"
+title = "Do work"
+`
+	if err := os.WriteFile(filepath.Join(formulaDir, "graph-work.toml"), []byte(graphFormula), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"--city", cityDir, "formula", "cook", "graph-work"}, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("gc formula cook = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout = %q, want empty", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "formula_v2 is disabled") {
+		t.Fatalf("stderr missing formula_v2 diagnostic:\n%s", stderr.String())
+	}
+
+	store, err := openStoreAtForCity(cityDir, cityDir)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	items, err := store.List(beads.ListQuery{
+		AllowScan:     true,
+		IncludeClosed: true,
+		TierMode:      beads.TierBoth,
+	})
+	if err != nil {
+		t.Fatalf("store.List(): %v", err)
+	}
+	if len(items) != 0 {
+		t.Fatalf("created %d bead(s), want none: %#v", len(items), items)
+	}
+}
+
 func writeFormulaTestFile(t *testing.T, dir, name, content string) {
 	t.Helper()
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -644,5 +715,246 @@ func runGitForFormulaTest(t *testing.T, dir string, args ...string) {
 	cmd.Dir = dir
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
+	}
+}
+
+func TestFormulaCookAttachGraphV2CreatesFreshRootForBareBeadTarget(t *testing.T) {
+	formulatest.EnableV2ForTest(t)
+	t.Setenv("GC_HOME", t.TempDir())
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	t.Setenv("GC_SESSION", "fake")
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_DOLT", "skip")
+
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`
+[workspace]
+name = "my-city"
+provider = "claude"
+
+[daemon]
+formula_v2 = true
+`), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	formulaDir := filepath.Join(cityDir, "formulas")
+	if err := os.MkdirAll(formulaDir, 0o755); err != nil {
+		t.Fatalf("mkdir formulas: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(formulaDir, "graph-work.formula.toml"), []byte(`
+formula = "graph-work"
+version = 2
+contract = "graph.v2"
+
+[[steps]]
+id = "step"
+title = "Do work for {{convoy_id}}"
+`), 0o644); err != nil {
+		t.Fatalf("write formula: %v", err)
+	}
+	t.Chdir(cityDir)
+	store, err := openStoreAtForCity(cityDir, cityDir)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	source, err := store.Create(beads.Bead{Title: "target", Type: "task"})
+	if err != nil {
+		t.Fatalf("create source: %v", err)
+	}
+
+	runCook := func() {
+		t.Helper()
+		var stdout, stderr bytes.Buffer
+		cmd := newFormulaCookCmd(&stdout, &stderr)
+		cmd.SetArgs([]string{"graph-work", "--attach", source.ID, "--json"})
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("formula cook: %v\nstdout=%s\nstderr=%s", err, stdout.String(), stderr.String())
+		}
+	}
+	runCook()
+	runCook()
+
+	roots, err := store.List(beads.ListQuery{
+		Metadata: map[string]string{"gc.kind": "workflow"},
+	})
+	if err != nil {
+		t.Fatalf("list workflow roots: %v", err)
+	}
+	if len(roots) != 2 {
+		t.Fatalf("workflow roots = %+v, want two independent graph.v2 attach roots", roots)
+	}
+	for _, root := range roots {
+		if root.Metadata["gc.graphv2_root_key"] == "" {
+			t.Fatalf("root metadata = %#v, missing graphv2 root key", root.Metadata)
+		}
+		if root.ParentID != "" {
+			t.Fatalf("root %s ParentID = %q, want standalone graph.v2 root", root.ID, root.ParentID)
+		}
+	}
+	deps, err := store.DepList(source.ID, "down")
+	if err != nil {
+		t.Fatalf("DepList(source): %v", err)
+	}
+	blockedRoots := map[string]bool{}
+	for _, dep := range deps {
+		if dep.IssueID == source.ID && dep.Type == "blocks" {
+			blockedRoots[dep.DependsOnID] = true
+		}
+	}
+	for _, root := range roots {
+		if !blockedRoots[root.ID] {
+			t.Fatalf("source deps = %+v, want blocks dep to graph root %s", deps, root.ID)
+		}
+	}
+	sourceAfter, err := store.Get(source.ID)
+	if err != nil {
+		t.Fatalf("get source: %v", err)
+	}
+	if sourceAfter.Metadata["workflow_id"] != "" || sourceAfter.Metadata["molecule_id"] != "" {
+		t.Fatalf("source metadata = %#v, want graph.v2 cook attach to leave source unmodified", sourceAfter.Metadata)
+	}
+}
+
+func TestFormulaCookAttachGraphV2AllowsDifferentLiveBareBeadRoots(t *testing.T) {
+	formulatest.EnableV2ForTest(t)
+	t.Setenv("GC_HOME", t.TempDir())
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	t.Setenv("GC_SESSION", "fake")
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_DOLT", "skip")
+
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`
+[workspace]
+name = "my-city"
+provider = "claude"
+
+[daemon]
+formula_v2 = true
+`), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	formulaDir := filepath.Join(cityDir, "formulas")
+	if err := os.MkdirAll(formulaDir, 0o755); err != nil {
+		t.Fatalf("mkdir formulas: %v", err)
+	}
+	for _, name := range []string{"graph-a", "graph-b"} {
+		if err := os.WriteFile(filepath.Join(formulaDir, name+".formula.toml"), []byte(fmt.Sprintf(`
+formula = %q
+version = 2
+contract = "graph.v2"
+
+[[steps]]
+id = "step"
+title = "Do work for {{convoy_id}}"
+`, name)), 0o644); err != nil {
+			t.Fatalf("write formula %s: %v", name, err)
+		}
+	}
+	t.Chdir(cityDir)
+	store, err := openStoreAtForCity(cityDir, cityDir)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	source, err := store.Create(beads.Bead{Title: "target", Type: "task"})
+	if err != nil {
+		t.Fatalf("create source: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	cmd := newFormulaCookCmd(&stdout, &stderr)
+	cmd.SetArgs([]string{"graph-a", "--attach", source.ID, "--json"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("formula cook graph-a: %v\nstdout=%s\nstderr=%s", err, stdout.String(), stderr.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	cmd = newFormulaCookCmd(&stdout, &stderr)
+	cmd.SetArgs([]string{"graph-b", "--attach", source.ID, "--json"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("formula cook graph-b: %v\nstdout=%s\nstderr=%s", err, stdout.String(), stderr.String())
+	}
+	roots, err := store.ListByMetadata(map[string]string{"gc.formula_contract": "graph.v2", "gc.kind": "workflow"}, 0)
+	if err != nil {
+		t.Fatalf("list graph roots: %v", err)
+	}
+	if len(roots) != 2 {
+		t.Fatalf("graph roots = %+v, want two independent roots", roots)
+	}
+}
+
+func TestFormulaCookAttachGraphV2RejectsLiveLegacySourceWorkflow(t *testing.T) {
+	formulatest.EnableV2ForTest(t)
+	t.Setenv("GC_HOME", t.TempDir())
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	t.Setenv("GC_SESSION", "fake")
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_DOLT", "skip")
+
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`
+[workspace]
+name = "my-city"
+provider = "claude"
+
+[daemon]
+formula_v2 = true
+`), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	formulaDir := filepath.Join(cityDir, "formulas")
+	if err := os.MkdirAll(formulaDir, 0o755); err != nil {
+		t.Fatalf("mkdir formulas: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(formulaDir, "graph-work.formula.toml"), []byte(`
+formula = "graph-work"
+version = 2
+contract = "graph.v2"
+
+[[steps]]
+id = "step"
+title = "Do work for {{convoy_id}}"
+`), 0o644); err != nil {
+		t.Fatalf("write formula: %v", err)
+	}
+	t.Chdir(cityDir)
+	store, err := openStoreAtForCity(cityDir, cityDir)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	source, err := store.Create(beads.Bead{Title: "target", Type: "task"})
+	if err != nil {
+		t.Fatalf("create source: %v", err)
+	}
+	legacyRoot, err := store.Create(beads.Bead{
+		Title:  "legacy workflow",
+		Type:   "task",
+		Status: "open",
+		Metadata: map[string]string{
+			"gc.kind":           "workflow",
+			"gc.source_bead_id": source.ID,
+		},
+	})
+	if err != nil {
+		t.Fatalf("create legacy root: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	cmd := newFormulaCookCmd(&stdout, &stderr)
+	cmd.SetArgs([]string{"graph-work", "--attach", source.ID, "--json"})
+	err = cmd.Execute()
+	if err == nil {
+		t.Fatal("formula cook succeeded, want source workflow conflict")
+	}
+	var conflictErr *sourceworkflow.ConflictError
+	if !errors.As(err, &conflictErr) {
+		t.Fatalf("formula cook error = %T %[1]v, want ConflictError", err)
+	}
+	if conflictErr.SourceBeadID != source.ID {
+		t.Fatalf("SourceBeadID = %q, want %q", conflictErr.SourceBeadID, source.ID)
+	}
+	if !reflect.DeepEqual(conflictErr.WorkflowIDs, []string{legacyRoot.ID}) {
+		t.Fatalf("WorkflowIDs = %+v, want [%s]", conflictErr.WorkflowIDs, legacyRoot.ID)
 	}
 }

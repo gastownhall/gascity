@@ -363,6 +363,9 @@ func hasLiveTrackingConvoy(store beads.Store, itemID string) bool {
 		return false
 	}
 	for _, convoy := range convoys {
+		if beads.IsReadyExcludedBead(convoy) {
+			continue
+		}
 		if !convoycore.IsTerminalStatus(convoy.Status) {
 			return true
 		}

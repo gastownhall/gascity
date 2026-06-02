@@ -19,6 +19,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	convoycore "github.com/gastownhall/gascity/internal/convoy"
 	"github.com/gastownhall/gascity/internal/pgauth"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/shellquote"
@@ -328,17 +329,20 @@ func assertStoreRoutedTo(t *testing.T, store beads.Store, beadID, want string) {
 // sharedTestFormulaDir is a package-level temp directory containing minimal
 // formula TOML files for all formula names commonly used in sling tests.
 var (
-	sharedTestFormulaDir string
-	sharedTestCityDir    string
+	sharedTestFixtureRoot string
+	sharedTestFormulaDir  string
+	sharedTestCityDir     string
 )
 
-func init() {
-	tmpRoot := os.TempDir()
-	sweepOrphanPIDPrefixedDirs(tmpRoot, testSlingFormulaDirPrefix)
-	sweepOrphanPIDPrefixedDirs(tmpRoot, testSlingCityDirPrefix)
-
-	dir, err := os.MkdirTemp("", pidPrefixedTempPattern(testSlingFormulaDirPrefix))
+func initSharedSlingTestFixtures(root string) {
+	fixtureRoot, err := os.MkdirTemp(root, pidPrefixedTempPattern(testSharedFixtureDirPrefix))
 	if err != nil {
+		panic(err)
+	}
+	sharedTestFixtureRoot = fixtureRoot
+
+	dir := filepath.Join(fixtureRoot, "formulas")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		panic(err)
 	}
 	for _, name := range []string{
@@ -353,8 +357,8 @@ func init() {
 	}
 	sharedTestFormulaDir = dir
 
-	cityDir, err := os.MkdirTemp("", pidPrefixedTempPattern(testSlingCityDirPrefix))
-	if err != nil {
+	cityDir := filepath.Join(fixtureRoot, "city")
+	if err := os.MkdirAll(cityDir, 0o755); err != nil {
 		panic(err)
 	}
 	sharedTestCityDir = cityDir
@@ -722,7 +726,7 @@ func TestCliBeadRouterAllowsSameStoreRoute(t *testing.T) {
 	}
 }
 
-func TestCliBeadRouterAllowsHQTargetFromHQStore(t *testing.T) {
+func TestCliBeadRouterAllowsCityTargetFromCityStore(t *testing.T) {
 	cityPath := t.TempDir()
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "test-city"},
@@ -4239,10 +4243,35 @@ title = "Do work"
 	if got := parent.Status; got != "open" {
 		t.Fatalf("parent status = %q, want open", got)
 	}
-	rootID := parent.Metadata["workflow_id"]
-	if rootID == "" {
-		t.Fatal("parent workflow_id missing")
+	if got := parent.Metadata["workflow_id"]; got != "" {
+		t.Fatalf("parent workflow_id = %q, want empty for convoy-first graph.v2", got)
 	}
+	inputConvoys, err := deps.Store.List(beads.ListQuery{Type: "convoy"})
+	if err != nil {
+		t.Fatalf("list input convoys: %v", err)
+	}
+	var inputConvoy beads.Bead
+	for _, candidate := range inputConvoys {
+		members, err := convoycore.Members(deps.Store, candidate.ID, true)
+		if err != nil {
+			t.Fatalf("members(%s): %v", candidate.ID, err)
+		}
+		if len(members) == 1 && members[0].ID == "BL-42" {
+			inputConvoy = candidate
+			break
+		}
+	}
+	if inputConvoy.ID == "" {
+		t.Fatalf("input convoy for BL-42 not found in %+v", inputConvoys)
+	}
+	roots, err := deps.Store.ListByMetadata(map[string]string{"gc.input_convoy_id": inputConvoy.ID, "gc.kind": "workflow"}, 1)
+	if err != nil {
+		t.Fatalf("list workflow roots: %v", err)
+	}
+	if len(roots) != 1 {
+		t.Fatalf("workflow root count = %d, want 1", len(roots))
+	}
+	rootID := roots[0].ID
 
 	root, err := deps.Store.Get(rootID)
 	if err != nil {
@@ -4251,11 +4280,17 @@ title = "Do work"
 	if got := root.Status; got != "in_progress" {
 		t.Fatalf("root status = %q, want in_progress", got)
 	}
-	if got := root.Metadata["gc.run_target"]; got != "mayor" {
-		t.Fatalf("root gc.run_target = %q, want mayor", got)
+	// #2763 / ga-eld2x: the root persists gc.routed_to — the sole canonical
+	// delivery key the worker claim path reads — so a pool-routed root is
+	// claimable and not idle-reaped. gc.run_target is no longer stamped.
+	if got := root.Metadata["gc.routed_to"]; got != "mayor" {
+		t.Fatalf("root gc.routed_to = %q, want mayor", got)
 	}
-	if got := root.Metadata["gc.source_bead_id"]; got != "BL-42" {
-		t.Fatalf("root gc.source_bead_id = %q, want BL-42", got)
+	if _, ok := root.Metadata["gc.run_target"]; ok {
+		t.Fatalf("root still carries retired gc.run_target = %q", root.Metadata["gc.run_target"])
+	}
+	if got := root.Metadata["gc.source_bead_id"]; got != "" {
+		t.Fatalf("root gc.source_bead_id = %q, want empty", got)
 	}
 	if got := root.Metadata["gc.scope_kind"]; got != "city" {
 		t.Fatalf("root gc.scope_kind = %q, want city", got)
@@ -4263,8 +4298,8 @@ title = "Do work"
 	if got := root.Metadata["gc.scope_ref"]; got != "test-city" {
 		t.Fatalf("root gc.scope_ref = %q, want test-city", got)
 	}
-	if got := root.Metadata[sourceworkflow.SourceStoreRefMetadataKey]; got != "city:test-city" {
-		t.Fatalf("root %s = %q, want city:test-city", sourceworkflow.SourceStoreRefMetadataKey, got)
+	if got := root.Metadata[sourceworkflow.SourceStoreRefMetadataKey]; got != "" {
+		t.Fatalf("root %s = %q, want empty", sourceworkflow.SourceStoreRefMetadataKey, got)
 	}
 	if got := root.Metadata["gc.root_store_ref"]; got != "city:test-city" {
 		t.Fatalf("root gc.root_store_ref = %q, want city:test-city", got)
@@ -4356,17 +4391,10 @@ title = "Do work"
 	code := doSling(opts, deps, nil, stdout, stderr)
 
 	if code != 3 {
-		t.Fatalf("doSling returned %d, want 3; stderr: %s", code, stderr.String())
+		t.Fatalf("doSling returned %d, want 3 for legacy source workflow conflict; stderr: %s", code, stderr.String())
 	}
-	if got := stdout.String(); got != "" {
-		t.Fatalf("stdout = %q, want empty", got)
-	}
-	errText := stderr.String()
-	if !strings.Contains(errText, "source bead BL-42 already has live workflow(s): wf-existing") {
-		t.Fatalf("stderr = %q, want blocking workflow ids", errText)
-	}
-	if !strings.Contains(errText, "gc workflow delete-source BL-42 --store-ref city:test-city --apply") {
-		t.Fatalf("stderr = %q, want cleanup hint", errText)
+	if !strings.Contains(stderr.String(), "already has live workflow") {
+		t.Fatalf("stderr = %q, want live workflow conflict", stderr.String())
 	}
 }
 
@@ -4419,8 +4447,15 @@ title = "Do work"
 	if err != nil {
 		t.Fatalf("Get(BL-1): %v", err)
 	}
-	if child.Metadata["workflow_id"] == "" {
-		t.Fatal("child workflow_id missing")
+	if got := child.Metadata["workflow_id"]; got != "" {
+		t.Fatalf("child workflow_id = %q, want empty; convoy is graph.v2 input", got)
+	}
+	roots, err := deps.Store.ListByMetadata(map[string]string{"gc.input_convoy_id": "CVY-1", "gc.kind": "workflow"}, 1)
+	if err != nil {
+		t.Fatalf("list workflow roots: %v", err)
+	}
+	if len(roots) != 1 {
+		t.Fatalf("workflow root count = %d, want 1", len(roots))
 	}
 	out := stdout.String()
 	if !strings.Contains(out, "Attached workflow") {
@@ -4479,30 +4514,21 @@ title = "Do work"
 	opts.OnFormula = "graph-work"
 	code := doSlingBatch(opts, deps, q, stdout, stderr)
 
-	// Batch conflicts must use the same exit-3 contract as single-bead
-	// conflicts so users see the cleanup hint and know to run
-	// `gc workflow delete-source`. Before the adoption-review fixups
-	// batch returned exit 1 with no hint; that was the bug this PR
-	// exists to close for the batch path as well.
-	if code != 3 {
-		t.Fatalf("doSlingBatch returned %d, want 3 (exit-3 contract for batch conflict); stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	if code != 0 {
+		t.Fatalf("doSlingBatch returned %d, want 0 under convoy-first graph.v2; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
 	}
 	if len(runner.calls) != 0 {
 		t.Fatalf("graph workflow runner calls = %d, want 0; calls=%v", len(runner.calls), runner.calls)
-	}
-	errText := stderr.String()
-	if !strings.Contains(errText, "Failed BL-1: source bead BL-1 already has live workflow(s): wf-existing") {
-		t.Fatalf("stderr = %q, want per-child conflict summary", errText)
-	}
-	if !strings.Contains(errText, "gc workflow delete-source BL-1") {
-		t.Fatalf("stderr = %q, want cleanup hint for conflicted child", errText)
 	}
 	child, err := deps.Store.Get("BL-1")
 	if err != nil {
 		t.Fatalf("Get(BL-1): %v", err)
 	}
 	if got := child.Metadata["workflow_id"]; got != "" {
-		t.Fatalf("child workflow_id = %q, want unchanged empty metadata", got)
+		t.Fatalf("child workflow_id = %q, want empty; convoy is graph.v2 input", got)
+	}
+	if !strings.Contains(stdout.String(), "Attached workflow") {
+		t.Fatalf("stdout = %q, want attached workflow", stdout.String())
 	}
 }
 

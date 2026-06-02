@@ -25,6 +25,7 @@ import (
 	"github.com/gastownhall/gascity/internal/execenv"
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/graphv2"
 	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/orderdiscovery"
 	"github.com/gastownhall/gascity/internal/orders"
@@ -66,6 +67,10 @@ const (
 	staleOrderWispCloseReason     = "order-tracking sweep: stale order wisp subtree exceeded retention window"
 
 	completedOrderTrackingCloseReason = "order dispatch completed: tracking bead lifecycle finished"
+
+	orderTrackingHistoryIndexLimit   = 2048
+	defaultMaxOrderDispatchesPerTick = 4
+	orderTrackingSweepCloseBudget    = 4
 )
 
 var (
@@ -246,17 +251,19 @@ type orderSetSnapshot struct {
 // ctx OR dispatchCtx is done (see launchDispatchOne). cancel() cancels
 // dispatchCtx.
 type memoryOrderDispatcher struct {
-	aa           []orders.Order
-	storeFn      orderStoreFunc
-	ep           events.Provider
-	execRun      ExecRunner
-	rec          events.Recorder
-	stderr       io.Writer
-	maxTimeout   time.Duration
-	cfg          *config.City
-	cityName     string
-	cacheMu      sync.Mutex
-	lastRunCache map[string]time.Time
+	aa                   []orders.Order
+	storeFn              orderStoreFunc
+	ep                   events.Provider
+	execRun              ExecRunner
+	rec                  events.Recorder
+	stderr               io.Writer
+	maxTimeout           time.Duration
+	maxDispatchesPerTick int
+	nextDispatchStart    int
+	cfg                  *config.City
+	cityName             string
+	cacheMu              sync.Mutex
+	lastRunCache         map[string]time.Time
 
 	dispatchCtx    context.Context
 	dispatchCancel context.CancelFunc
@@ -264,6 +271,16 @@ type memoryOrderDispatcher struct {
 	inflightMu   sync.Mutex
 	inflightN    int
 	inflightDone chan struct{} // closed when inflightN returns to 0; nil when idle
+}
+
+type orderDispatchTrackingIndex struct {
+	entries map[string]map[string]orderTrackingSummary
+	errs    map[string]error
+}
+
+type orderTrackingSummary struct {
+	openTracking bool
+	lastRun      time.Time
 }
 
 // buildOrderDispatcher scans formula layers for orders and returns a
@@ -360,15 +377,16 @@ func buildOrderDispatcherFromOrderSet(cityPath string, cfg *config.City, allAA [
 		storeFn: func(target execStoreTarget) (beads.Store, error) {
 			return openStoreAtForCity(target.ScopeRoot, cityPath)
 		},
-		ep:             ep,
-		execRun:        shellExecRunner,
-		rec:            rec,
-		stderr:         lockedStderr(stderr),
-		maxTimeout:     cfg.Orders.MaxTimeoutDuration(),
-		cfg:            cfg,
-		cityName:       loadedCityName(cfg, cityPath),
-		dispatchCtx:    dispatchCtx,
-		dispatchCancel: dispatchCancel,
+		ep:                   ep,
+		execRun:              shellExecRunner,
+		rec:                  rec,
+		stderr:               lockedStderr(stderr),
+		maxTimeout:           cfg.Orders.MaxTimeoutDuration(),
+		maxDispatchesPerTick: defaultMaxOrderDispatchesPerTick,
+		cfg:                  cfg,
+		cityName:             loadedCityName(cfg, cityPath),
+		dispatchCtx:          dispatchCtx,
+		dispatchCancel:       dispatchCancel,
 	}
 }
 
@@ -379,8 +397,28 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 	}
 
 	stores := make(map[string]beads.Store)
+	trackingIndex := newOrderDispatchTrackingIndex()
+	budgetSpent := 0
 
-	for _, a := range m.aa {
+	total := len(m.aa)
+	if total == 0 {
+		return
+	}
+	start := 0
+	if m.maxDispatchesPerTick > 0 {
+		start = m.nextDispatchStart % total
+	}
+	spendDispatchBudget := func(idx int) bool {
+		budgetSpent++
+		if m.maxDispatchesPerTick > 0 {
+			m.nextDispatchStart = (idx + 1) % total
+		}
+		return m.maxDispatchesPerTick > 0 && budgetSpent >= m.maxDispatchesPerTick
+	}
+
+	for offset := 0; offset < total; offset++ {
+		idx := (start + offset) % total
+		a := m.aa[idx]
 		// Skip orders targeting suspended rigs.
 		if m.orderRigSuspended(a) {
 			continue
@@ -425,7 +463,7 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 			continue
 		}
 
-		baseLastRunFn := orders.LastRunAcrossStores(storesForGate...)
+		baseLastRunFn := trackingIndex.lastRunFunc(storesForGate, storeKeysForGate, orders.LastRunAcrossStores(storesForGate...))
 		var lastRunErr error
 		var lastRunFromCache bool
 		lastRunFn := func(orderName string) (time.Time, error) {
@@ -472,6 +510,9 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 				Subject: a.ScopedName(),
 				Message: msg,
 			})
+			if spendDispatchBudget(idx) {
+				return
+			}
 			continue
 		}
 		result := orders.CheckTriggerWithOptions(a, now, lastRunFn, m.ep, cursorFn, triggerOpts)
@@ -501,7 +542,7 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 		}
 
 		// Skip dispatch if previous work hasn't been processed yet.
-		hasOpenWork, err = m.hasOpenWorkInStoresStrict(storesForGate, scoped)
+		hasOpenWork, err = trackingIndex.hasOpenWork(storesForGate, storeKeysForGate, scoped, m.hasOpenWorkInStoresStrict, true)
 		if err != nil {
 			logDispatchError(m.stderr, "gc: order dispatch: checking open work for %s: %v", scoped, err)
 			continue
@@ -526,9 +567,11 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 		// Fire with timeout; inflight tracks the spawned goroutine so
 		// drain can wait for tracking-bead outcome persistence before
 		// controller exit or config reload.
-		a := a // capture loop variable
 		m.addInflight()
 		m.launchDispatchOne(ctx, store, target, a, cityPath, trackingBead.ID)
+		if spendDispatchBudget(idx) {
+			return
+		}
 	}
 }
 
@@ -604,6 +647,165 @@ func (m *memoryOrderDispatcher) drain(ctx context.Context) bool {
 	case <-ctx.Done():
 		return false
 	}
+}
+
+func newOrderDispatchTrackingIndex() *orderDispatchTrackingIndex {
+	return &orderDispatchTrackingIndex{
+		entries: make(map[string]map[string]orderTrackingSummary),
+		errs:    make(map[string]error),
+	}
+}
+
+func (idx *orderDispatchTrackingIndex) hasOpenWork(
+	stores []beads.Store,
+	storeKeys []string,
+	scopedName string,
+	fallback func([]beads.Store, string) (bool, error),
+	requireStrictFallback bool,
+) (bool, error) {
+	if idx == nil {
+		return fallback(stores, scopedName)
+	}
+	sawTrackingHistory := false
+	for i, store := range stores {
+		key := indexStoreKey(storeKeys, i)
+		if store == nil {
+			continue
+		}
+		entries, err := idx.entriesForStore(store, key)
+		if err != nil {
+			return false, err
+		}
+		if entries[scopedName].openTracking {
+			return true, nil
+		}
+		history, err := idx.historyEntriesForStore(store, key)
+		if err != nil {
+			return false, err
+		}
+		if summary, ok := history[scopedName]; ok {
+			if summary.openTracking {
+				return true, nil
+			}
+			sawTrackingHistory = true
+		}
+	}
+	if sawTrackingHistory && !requireStrictFallback {
+		return false, nil
+	}
+	return fallback(stores, scopedName)
+}
+
+func (idx *orderDispatchTrackingIndex) lastRunFunc(
+	stores []beads.Store,
+	storeKeys []string,
+	fallback orders.LastRunFunc,
+) orders.LastRunFunc {
+	return func(scopedName string) (time.Time, error) {
+		if idx == nil {
+			return fallback(scopedName)
+		}
+		var latest time.Time
+		for i, store := range stores {
+			last, err := idx.lastRunForStore(store, indexStoreKey(storeKeys, i), scopedName)
+			if err != nil {
+				return time.Time{}, err
+			}
+			if last.After(latest) {
+				latest = last
+			}
+		}
+		if fallback != nil {
+			last, err := fallback(scopedName)
+			if err != nil {
+				return time.Time{}, err
+			}
+			if last.After(latest) {
+				latest = last
+			}
+		}
+		return latest, nil
+	}
+}
+
+func (idx *orderDispatchTrackingIndex) lastRunForStore(store beads.Store, storeKey, scopedName string) (time.Time, error) {
+	if store == nil {
+		return time.Time{}, nil
+	}
+	entries, err := idx.historyEntriesForStore(store, storeKey)
+	if err != nil {
+		return time.Time{}, err
+	}
+	if summary, ok := entries[scopedName]; ok {
+		return summary.lastRun, nil
+	}
+	return time.Time{}, nil
+}
+
+func (idx *orderDispatchTrackingIndex) historyEntriesForStore(store beads.Store, storeKey string) (map[string]orderTrackingSummary, error) {
+	key := storeKey + "\x00history"
+	if err, ok := idx.errs[key]; ok {
+		return nil, err
+	}
+	if entries, ok := idx.entries[key]; ok {
+		return entries, nil
+	}
+	items, err := listCanonicalRecentOrderTrackingHistoryBeads(store)
+	if err != nil {
+		wrapped := fmt.Errorf("listing order-tracking history: %w", err)
+		idx.errs[key] = wrapped
+		return nil, wrapped
+	}
+	entries := make(map[string]orderTrackingSummary)
+	for _, item := range items {
+		scopedName, ok := orderNameFromTrackingBead(item)
+		if !ok {
+			continue
+		}
+		summary := entries[scopedName]
+		if item.CreatedAt.After(summary.lastRun) {
+			summary.lastRun = item.CreatedAt
+		}
+		entries[scopedName] = summary
+	}
+	idx.entries[key] = entries
+	return entries, nil
+}
+
+func (idx *orderDispatchTrackingIndex) entriesForStore(store beads.Store, storeKey string) (map[string]orderTrackingSummary, error) {
+	if err, ok := idx.errs[storeKey]; ok {
+		return nil, err
+	}
+	if entries, ok := idx.entries[storeKey]; ok {
+		return entries, nil
+	}
+	items, err := listCanonicalOpenOrderTrackingBeads(store)
+	if err != nil {
+		wrapped := fmt.Errorf("listing order-tracking beads: %w", err)
+		idx.errs[storeKey] = wrapped
+		return nil, wrapped
+	}
+	entries := make(map[string]orderTrackingSummary)
+	for _, item := range items {
+		scopedName, ok := orderNameFromTrackingBead(item)
+		if !ok {
+			continue
+		}
+		summary := entries[scopedName]
+		if item.Status != "closed" {
+			summary.openTracking = true
+		}
+		entries[scopedName] = summary
+	}
+	idx.entries[storeKey] = entries
+	return entries, nil
+}
+
+func indexStoreKey(storeKeys []string, index int) string {
+	if index >= 0 && index < len(storeKeys) && storeKeys[index] != "" {
+		return storeKeys[index]
+	}
+	return fmt.Sprintf("store:%d", index)
 }
 
 func (m *memoryOrderDispatcher) legacyCityStoreForTarget(cityPath string, target execStoreTarget, stores map[string]beads.Store) (beads.Store, bool) {
@@ -905,6 +1107,14 @@ func (m *memoryOrderDispatcher) dispatchExec(ctx context.Context, store beads.St
 	})
 }
 
+func prepareOrderWispRecipe(ctx context.Context, store beads.Store, a orders.Order, searchPaths []string) (*formula.Recipe, error) {
+	inv, err := graphv2.PrepareInvocation(ctx, store, a.Formula, searchPaths, "", nil)
+	if err != nil {
+		return nil, err
+	}
+	return formula.CompileWithoutRuntimeVarValidation(ctx, a.Formula, searchPaths, inv.Vars)
+}
+
 func redactOrderEnvError(err error, env []string) string {
 	if err == nil {
 		return ""
@@ -951,7 +1161,7 @@ func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, store beads.St
 	if a.FormulaLayer != "" {
 		searchPaths = []string{a.FormulaLayer}
 	}
-	recipe, err := formula.CompileWithoutRuntimeVarValidation(ctx, a.Formula, searchPaths, nil)
+	recipe, err := prepareOrderWispRecipe(ctx, store, a, searchPaths)
 	if err != nil {
 		m.rec.Record(events.Event{
 			Type:    events.OrderFailed,
@@ -992,7 +1202,7 @@ func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, store beads.St
 	// Decorate graph workflow recipes with routing metadata so child step
 	// beads get gc.routed_to set before instantiation.
 	if a.Pool != "" {
-		if err := applyGraphRouting(recipe, nil, pool, nil, "", "", "", "", store, m.cityName, cityPath, m.cfg); err != nil {
+		if err := applyGraphRouting(recipe, nil, pool, nil, "", "", "", store, m.cityName, cityPath, m.cfg); err != nil {
 			logDispatchError(m.stderr, "gc: order %s: routing decoration failed: %v", scoped, err)
 			// Non-fatal — molecule still works, just without step-level routing.
 		}
@@ -1097,6 +1307,23 @@ func (m *memoryOrderDispatcher) rigSuspendedByName(rigName string) bool {
 		}
 	}
 	return false
+}
+
+func listCanonicalRecentOrderTrackingHistoryBeads(store beads.Store) ([]beads.Bead, error) {
+	return beads.HandlesFor(store).Live.List(beads.ListQuery{
+		Label:         labelOrderTracking,
+		Limit:         orderTrackingHistoryIndexLimit,
+		IncludeClosed: true,
+		Sort:          beads.SortCreatedDesc,
+	})
+}
+
+func listCanonicalOpenOrderTrackingBeads(store beads.Store) ([]beads.Bead, error) {
+	return beads.HandlesFor(store).Live.List(beads.ListQuery{
+		Label:  labelOrderTracking,
+		Status: "open",
+		Sort:   beads.SortCreatedDesc,
+	})
 }
 
 // hasOpenWorkStrict reports whether any in-flight work exists for this
@@ -1220,6 +1447,10 @@ func (m *memoryOrderDispatcher) hasOpenWorkInStoresStrict(stores []beads.Store, 
 // behind by a previous controller instance. Returns the count of beads
 // closed. This is non-fatal: dispatch proceeds even if the sweep fails.
 func sweepOrphanedOrderTracking(store beads.Store) (int, error) {
+	return sweepOrphanedOrderTrackingLimit(store, 0)
+}
+
+func sweepOrphanedOrderTrackingLimit(store beads.Store, limit int) (int, error) {
 	// ListByLabel without IncludeClosed returns only open beads.
 	// New tracking beads live in the wisps tier, but legacy issues-tier
 	// tracking beads may still exist after upgrade; sweep both.
@@ -1236,6 +1467,9 @@ func sweepOrphanedOrderTracking(store beads.Store) (int, error) {
 			continue
 		}
 		ids = append(ids, b.ID)
+		if limit > 0 && len(ids) >= limit {
+			break
+		}
 	}
 	if len(ids) == 0 {
 		return 0, nil
@@ -1269,11 +1503,23 @@ type orderTrackingSweepResult struct {
 // timestamp is older than staleAfter. When onlyOrders is non-empty, it only
 // closes tracking beads for those scoped order names.
 func sweepStaleOrderTracking(store beads.Store, now time.Time, staleAfter time.Duration, onlyOrders map[string]struct{}, initiator string) (int, error) {
-	result, err := sweepStaleOrderTrackingWithOptions(store, now, staleAfter, onlyOrders, initiator, false)
+	result, err := sweepStaleOrderTrackingWithOptionsLimit(store, now, staleAfter, onlyOrders, initiator, false, 0)
 	return result.trackingClosed, err
 }
 
-func sweepStaleOrderTrackingAcrossStores(stores []beads.Store, now time.Time, staleAfter time.Duration, onlyOrders map[string]struct{}, initiator string, includeWispSubtrees bool) (orderTrackingSweepResult, error) {
+func sweepStaleOrderTrackingLimit(store beads.Store, now time.Time, staleAfter time.Duration, onlyOrders map[string]struct{}, initiator string, limit int) (int, error) {
+	result, err := sweepStaleOrderTrackingWithOptionsLimit(store, now, staleAfter, onlyOrders, initiator, false, limit)
+	return result.trackingClosed, err
+}
+
+func sweepStaleOrderTrackingAcrossStores(stores []beads.Store, now time.Time, staleAfter time.Duration, onlyOrders map[string]struct{}, includeWispSubtrees bool) (orderTrackingSweepResult, error) {
+	return sweepStaleOrderTrackingAcrossStoresLimit(stores, now, staleAfter, onlyOrders, orderTrackingSweepMetadataInitiator, includeWispSubtrees, 0)
+}
+
+// sweepStaleOrderTrackingAcrossStoresLimit applies limit only to
+// order-tracking bead closes. Wisp subtree recovery is operator-scoped by
+// order name and closes complete stale subtrees when explicitly requested.
+func sweepStaleOrderTrackingAcrossStoresLimit(stores []beads.Store, now time.Time, staleAfter time.Duration, onlyOrders map[string]struct{}, initiator string, includeWispSubtrees bool, limit int) (orderTrackingSweepResult, error) {
 	if staleAfter <= 0 {
 		return orderTrackingSweepResult{}, fmt.Errorf("stale-after must be positive")
 	}
@@ -1286,7 +1532,14 @@ func sweepStaleOrderTrackingAcrossStores(stores []beads.Store, now time.Time, st
 		if store == nil {
 			continue
 		}
-		partial, err := sweepStaleOrderTrackingWithOptions(store, now, staleAfter, onlyOrders, initiator, includeWispSubtrees)
+		remainingLimit := 0
+		if limit > 0 {
+			remainingLimit = limit - result.trackingClosed
+			if remainingLimit <= 0 {
+				break
+			}
+		}
+		partial, err := sweepStaleOrderTrackingWithOptionsLimit(store, now, staleAfter, onlyOrders, initiator, includeWispSubtrees, remainingLimit)
 		result.trackingClosed += partial.trackingClosed
 		result.wispClosed += partial.wispClosed
 		if err != nil {
@@ -1326,7 +1579,10 @@ func orderTrackingSweepStoreLabel(store beads.Store, index int) string {
 	return fmt.Sprintf("store %d", index+1)
 }
 
-func sweepStaleOrderTrackingWithOptions(store beads.Store, now time.Time, staleAfter time.Duration, onlyOrders map[string]struct{}, initiator string, includeWispSubtrees bool) (orderTrackingSweepResult, error) {
+// sweepStaleOrderTrackingWithOptionsLimit applies limit only to
+// order-tracking bead closes. Wisp subtree recovery is order-scoped and closes
+// complete stale subtrees when includeWispSubtrees is set.
+func sweepStaleOrderTrackingWithOptionsLimit(store beads.Store, now time.Time, staleAfter time.Duration, onlyOrders map[string]struct{}, initiator string, includeWispSubtrees bool, limit int) (orderTrackingSweepResult, error) {
 	if staleAfter <= 0 {
 		return orderTrackingSweepResult{}, fmt.Errorf("stale-after must be positive")
 	}
@@ -1355,6 +1611,9 @@ func sweepStaleOrderTrackingWithOptions(store beads.Store, now time.Time, staleA
 			continue
 		}
 		ids = append(ids, b.ID)
+		if limit > 0 && len(ids) >= limit {
+			break
+		}
 	}
 	if len(ids) == 0 {
 		if !includeWispSubtrees {
@@ -1591,14 +1850,28 @@ func orderNameFromTrackingBead(b beads.Bead) (string, bool) {
 // beads (see internal/beads/beads.go). The wrapper sleeps for up to
 // attempts*backoff in the worst case.
 func sweepOrphanedOrderTrackingRetry(store beads.Store, attempts int, backoff time.Duration) (int, error) { //nolint:unparam // attempts is configurable for testability
+	return sweepOrphanedOrderTrackingRetryLimit(store, attempts, backoff, 0)
+}
+
+func sweepOrphanedOrderTrackingRetryLimit(store beads.Store, attempts int, backoff time.Duration, limit int) (int, error) { //nolint:unparam // attempts is configurable for testability
 	if attempts <= 0 {
 		attempts = 1
 	}
 	total := 0
 	var err error
 	for i := range attempts {
+		remainingLimit := limit
+		if limit > 0 {
+			remainingLimit = limit - total
+			if remainingLimit <= 0 {
+				if err != nil {
+					return total, fmt.Errorf("sweep reached close budget after partial close: %w", err)
+				}
+				return total, nil
+			}
+		}
 		var n int
-		n, err = sweepOrphanedOrderTracking(store)
+		n, err = sweepOrphanedOrderTrackingLimit(store, remainingLimit)
 		total += n
 		if err == nil {
 			return total, nil

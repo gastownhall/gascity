@@ -80,8 +80,9 @@ The Dog should watch for and flag:
 
 Read each step's description before acting — Config values override defaults."""
 formula = "mol-dog-reaper"
-version = 2
-contract = "graph.v2"
+
+[requires]
+formula_compiler = ">=2.0.0"
 
 [vars]
 [vars.max_age]

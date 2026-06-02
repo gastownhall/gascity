@@ -4,6 +4,7 @@ package proctable
 
 import (
 	"os/exec"
+	"slices"
 	"syscall"
 	"testing"
 )
@@ -30,18 +31,45 @@ func TestKillByPIDAlreadyGoneIsSuccess(t *testing.T) {
 }
 
 func TestSignalPIDGroupThenFallback(t *testing.T) {
-	// Spawn a child in its own process group; verify we can signal it.
-	cmd := exec.Command("sleep", "30")
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("start sleep: %v", err)
+	var got []int
+	err := signalPIDWith(12345, syscall.SIGTERM, func(pid int, sig syscall.Signal) error {
+		if sig != syscall.SIGTERM {
+			t.Fatalf("signal = %v, want SIGTERM", sig)
+		}
+		got = append(got, pid)
+		if pid < 0 {
+			return syscall.ESRCH
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("signalPIDWith(): %v", err)
 	}
-	t.Cleanup(func() { _ = cmd.Process.Kill() })
+	want := []int{-12345, 12345}
+	if len(got) != len(want) {
+		t.Fatalf("signal calls = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("signal calls = %v, want %v", got, want)
+		}
+	}
+}
 
-	pid := cmd.Process.Pid
-	// signalPID targets the process group first (-pid), then falls back to PID.
-	// Both approaches should succeed for a process that's a group leader.
-	if err := signalPID(pid, syscall.SIGTERM); err != nil {
-		t.Fatalf("signalPID(%d, SIGTERM): %v", pid, err)
+func TestSignalPIDGroupSuccessSkipsFallback(t *testing.T) {
+	var got []int
+	err := signalPIDWith(12345, syscall.SIGTERM, func(pid int, sig syscall.Signal) error {
+		if sig != syscall.SIGTERM {
+			t.Fatalf("signal = %v, want SIGTERM", sig)
+		}
+		got = append(got, pid)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("signalPIDWith(): %v", err)
+	}
+	want := []int{-12345}
+	if !slices.Equal(got, want) {
+		t.Fatalf("signal calls = %v, want %v", got, want)
 	}
 }
