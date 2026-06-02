@@ -174,6 +174,51 @@ func TestCachingStoreListLiveBypassesCache(t *testing.T) {
 	}
 }
 
+func TestCachingStoreListLiveInvalidatesCachedRowsMissingFromBacking(t *testing.T) {
+	t.Parallel()
+
+	backing := NewMemStore()
+	bead, err := backing.Create(Bead{
+		Title:    "work",
+		Assignee: "worker",
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	cache := NewCachingStoreForTest(backing, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	if err := backing.Close(bead.ID); err != nil {
+		t.Fatalf("Close backing: %v", err)
+	}
+
+	live, err := cache.List(ListQuery{Status: "open", Assignee: "worker", Live: true})
+	if err != nil {
+		t.Fatalf("List live: %v", err)
+	}
+	if len(live) != 0 {
+		t.Fatalf("Live List(open) = %+v, want closed bead omitted", live)
+	}
+
+	cached, err := cache.Handles().Cached.List(ListQuery{Status: "open", Assignee: "worker"})
+	if err != nil {
+		t.Fatalf("Cached List(open): %v", err)
+	}
+	if len(cached) != 0 {
+		t.Fatalf("Cached List(open) after live refresh = %+v, want stale bead invalidated", cached)
+	}
+
+	got, err := cache.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Status != "closed" {
+		t.Fatalf("Get status after live refresh = %q, want closed", got.Status)
+	}
+}
+
 func TestCachingStoreHandlesCachedReadsShareFullPrime(t *testing.T) {
 	t.Parallel()
 
