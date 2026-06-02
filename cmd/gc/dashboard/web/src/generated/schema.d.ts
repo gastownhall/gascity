@@ -1353,6 +1353,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v0/city/{cityName}/pending": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get v0 city by city name pending */
+        get: operations["get-v0-city-by-city-name-pending"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v0/city/{cityName}/provider-readiness": {
         parameters: {
             query?: never;
@@ -2349,6 +2366,14 @@ export interface components {
             /** @description Whether the city is suspended. */
             suspended?: boolean;
         };
+        CityPendingEntry: {
+            /** @description Pending interaction kind (e.g. tool-approval, prompt-for-input). */
+            kind: string;
+            /** @description Pending interaction request ID. */
+            request_id: string;
+            /** @description Session ID awaiting a human decision. */
+            session_id: string;
+        };
         CityUnregisterSucceededPayload: {
             /** @description City name that was unregistered. */
             name: string;
@@ -2997,6 +3022,21 @@ export interface components {
         ListBodyBead: {
             /** @description The list of items. */
             items: components["schemas"]["Bead"][] | null;
+            /** @description Cursor for the next page of results. */
+            next_cursor?: string;
+            /** @description True when one or more backends failed and the list is incomplete. */
+            partial?: boolean;
+            /** @description Human-readable errors from backends that failed during aggregation. */
+            partial_errors?: string[] | null;
+            /**
+             * Format: int64
+             * @description Total number of items matching the query.
+             */
+            total: number;
+        };
+        ListBodyCityPendingEntry: {
+            /** @description The list of items. */
+            items: components["schemas"]["CityPendingEntry"][] | null;
             /** @description Cursor for the next page of results. */
             next_cursor?: string;
             /** @description True when one or more backends failed and the list is incomplete. */
@@ -10877,6 +10917,42 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["PatchOKResponseBody"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    "X-GC-Request-Id": components["headers"]["X-GC-Request-Id"];
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ErrorModel"];
+                };
+            };
+        };
+    };
+    "get-v0-city-by-city-name-pending": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description City name. */
+                cityName: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    "X-GC-Cache-Age-S"?: number;
+                    "X-GC-Index"?: number;
+                    "X-GC-Request-Id": components["headers"]["X-GC-Request-Id"];
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ListBodyCityPendingEntry"];
                 };
             };
             /** @description Error */

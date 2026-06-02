@@ -3798,6 +3798,51 @@ func TestPendingAndRespond(t *testing.T) {
 	}
 }
 
+// TestPendingByNameProbesProviderWithoutBeadLookup verifies the name-based
+// probe path the city-wide pending aggregate uses: given an already-resolved
+// runtime session name it returns the provider's interaction directly, and an
+// unknown name yields no pending (still supported) — neither call requires the
+// bead-store id->name resolution that Pending(id) performs.
+func TestPendingByNameProbesProviderWithoutBeadLookup(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManager(store, sp)
+
+	info, err := mgr.Create(context.Background(), "helper", "", "claude", "/tmp", "claude", nil, ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	sp.SetPendingInteraction(info.SessionName, &runtime.PendingInteraction{
+		RequestID: "req-1",
+		Kind:      "approval",
+		Prompt:    "approve?",
+	})
+
+	pending, supported, err := mgr.PendingByName(info.SessionName)
+	if err != nil {
+		t.Fatalf("PendingByName: %v", err)
+	}
+	if !supported {
+		t.Fatal("PendingByName should report supported for runtime.Fake")
+	}
+	if pending == nil || pending.RequestID != "req-1" || pending.Kind != "approval" {
+		t.Fatalf("PendingByName = %#v, want req-1/approval", pending)
+	}
+
+	// A name with no pending interaction is still a supported probe with no
+	// result — the aggregate skips it rather than recording a partial error.
+	none, supported, err := mgr.PendingByName("no-such-session")
+	if err != nil {
+		t.Fatalf("PendingByName(unknown): %v", err)
+	}
+	if !supported {
+		t.Fatal("PendingByName(unknown) should still report supported")
+	}
+	if none != nil {
+		t.Fatalf("PendingByName(unknown) = %#v, want nil", none)
+	}
+}
+
 type pendingSessionGoneProvider struct {
 	*runtime.Fake
 }

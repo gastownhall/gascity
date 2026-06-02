@@ -5529,6 +5529,182 @@ func TestHandleSessionTranscriptAfterCursorNotFound(t *testing.T) {
 	}
 }
 
+func TestHandleCityPendingAggregate(t *testing.T) {
+	fs := newSessionFakeState(t)
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+
+	// Two active sessions; only one is awaiting a human decision.
+	pendingInfo := createTestSession(t, fs.cityBeadStore, fs.sp, "Interactive")
+	fs.sp.SetPendingInteraction(pendingInfo.SessionName, &runtime.PendingInteraction{
+		RequestID: "req-1",
+		Kind:      "approval",
+		Prompt:    "approve?",
+	})
+	_ = createTestSession(t, fs.cityBeadStore, fs.sp, "Idle") // no pending interaction
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", cityURL(fs, "/pending"), nil)
+	h.ServeHTTP(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("city pending status = %d, want %d; body: %s", w.Code, http.StatusOK, w.Body.String())
+	}
+
+	var resp ListBody[cityPendingEntry]
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode city pending: %v", err)
+	}
+	if resp.Total != 1 || len(resp.Items) != 1 {
+		t.Fatalf("got %d items (total %d), want exactly 1; resp=%#v", len(resp.Items), resp.Total, resp)
+	}
+	got := resp.Items[0]
+	if got.SessionID != pendingInfo.ID || got.RequestID != "req-1" || got.Kind != "approval" {
+		t.Fatalf("entry = %#v, want session=%s request_id=req-1 kind=approval", got, pendingInfo.ID)
+	}
+}
+
+func TestHandleCityPendingEmptyWhenNoneAwaiting(t *testing.T) {
+	fs := newSessionFakeState(t)
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+
+	_ = createTestSession(t, fs.cityBeadStore, fs.sp, "Idle") // no pending interaction
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", cityURL(fs, "/pending"), nil)
+	h.ServeHTTP(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("city pending status = %d, want %d; body: %s", w.Code, http.StatusOK, w.Body.String())
+	}
+
+	var resp ListBody[cityPendingEntry]
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode city pending: %v", err)
+	}
+	if resp.Total != 0 || len(resp.Items) != 0 {
+		t.Fatalf("got %d items (total %d), want 0; resp=%#v", len(resp.Items), resp.Total, resp)
+	}
+}
+
+// TestHandleCityPendingIncludesLegacyEmptyStateSession proves a legacy
+// empty-state ("none") session bead — the upgrade/bootstrap shape the
+// codebase treats as active — is still probed for a pending interaction.
+// A pre-fix filter of state=="active" alone dropped these beads, hiding a
+// live runtime's pending decision from the city-wide aggregate.
+func TestHandleCityPendingIncludesLegacyEmptyStateSession(t *testing.T) {
+	fs := newSessionFakeState(t)
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+
+	// A live session awaiting a decision, then downgraded to a legacy
+	// empty-state bead (state metadata absent) as a pre-metadata city
+	// would have it on disk.
+	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Interactive")
+	fs.sp.SetPendingInteraction(info.SessionName, &runtime.PendingInteraction{
+		RequestID: "req-legacy",
+		Kind:      "approval",
+		Prompt:    "approve?",
+	})
+	if err := fs.cityBeadStore.SetMetadataBatch(info.ID, map[string]string{"state": ""}); err != nil {
+		t.Fatalf("clear state metadata: %v", err)
+	}
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", cityURL(fs, "/pending"), nil)
+	h.ServeHTTP(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("city pending status = %d, want %d; body: %s", w.Code, http.StatusOK, w.Body.String())
+	}
+
+	var resp ListBody[cityPendingEntry]
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode city pending: %v", err)
+	}
+	if resp.Total != 1 || len(resp.Items) != 1 {
+		t.Fatalf("got %d items (total %d), want exactly 1; resp=%#v", len(resp.Items), resp.Total, resp)
+	}
+	if got := resp.Items[0]; got.SessionID != info.ID || got.RequestID != "req-legacy" {
+		t.Fatalf("entry = %#v, want session=%s request_id=req-legacy", got, info.ID)
+	}
+}
+
+// pendingPerSessionErrorProvider injects a Pending() failure for one named
+// session while delegating every other session to the embedded Fake. It lets
+// the city aggregate's partial-degradation branch be exercised: one dead
+// runtime session must not blind the operator to the healthy ones.
+type pendingPerSessionErrorProvider struct {
+	*runtime.Fake
+	failName string
+	failErr  error
+}
+
+func (p *pendingPerSessionErrorProvider) Pending(name string) (*runtime.PendingInteraction, error) {
+	if name == p.failName {
+		return nil, p.failErr
+	}
+	return p.Fake.Pending(name)
+}
+
+// TestHandleCityPendingPartialWhenOneFails verifies the endpoint's defining
+// contract: a per-session probe failure is surfaced as Partial/PartialErrors
+// rather than failing the whole aggregate, and the healthy session still
+// appears in the result.
+func TestHandleCityPendingPartialWhenOneFails(t *testing.T) {
+	fs := newSessionFakeState(t)
+
+	// Healthy session awaiting a decision.
+	healthy := createTestSession(t, fs.cityBeadStore, fs.sp, "Healthy")
+	fs.sp.SetPendingInteraction(healthy.SessionName, &runtime.PendingInteraction{
+		RequestID: "req-healthy",
+		Kind:      "approval",
+		Prompt:    "approve?",
+	})
+	// Second session whose runtime probe blows up.
+	failing := createTestSession(t, fs.cityBeadStore, fs.sp, "Failing")
+
+	state := &stateWithSessionProvider{
+		fakeState: fs,
+		provider: &pendingPerSessionErrorProvider{
+			Fake:     fs.sp,
+			failName: failing.SessionName,
+			failErr:  fmt.Errorf("capturing pane: probe blew up"),
+		},
+	}
+	srv := New(state)
+	h := newTestCityHandlerWith(t, state, srv)
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", cityURL(fs, "/pending"), nil)
+	h.ServeHTTP(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("city pending status = %d, want %d; body: %s", w.Code, http.StatusOK, w.Body.String())
+	}
+
+	var resp ListBody[cityPendingEntry]
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode city pending: %v", err)
+	}
+	if !resp.Partial {
+		t.Fatalf("Partial = false, want true when one session probe fails; resp=%#v", resp)
+	}
+	if len(resp.PartialErrors) != 1 {
+		t.Fatalf("PartialErrors = %#v, want exactly one entry naming the failed session", resp.PartialErrors)
+	}
+	if !strings.Contains(resp.PartialErrors[0], failing.ID) {
+		t.Fatalf("PartialErrors[0] = %q, want it to name failing session %s", resp.PartialErrors[0], failing.ID)
+	}
+	if resp.Total != 1 || len(resp.Items) != 1 {
+		t.Fatalf("got %d items (total %d), want exactly the healthy session; resp=%#v", len(resp.Items), resp.Total, resp)
+	}
+	if got := resp.Items[0]; got.SessionID != healthy.ID || got.RequestID != "req-healthy" {
+		t.Fatalf("entry = %#v, want healthy session %s req-healthy", got, healthy.ID)
+	}
+}
+
 func TestHandleSessionPendingAndRespond(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)

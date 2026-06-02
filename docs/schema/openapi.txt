@@ -1308,6 +1308,29 @@
         },
         "type": "object"
       },
+      "CityPendingEntry": {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "description": "Pending interaction kind (e.g. tool-approval, prompt-for-input).",
+            "type": "string"
+          },
+          "request_id": {
+            "description": "Pending interaction request ID.",
+            "type": "string"
+          },
+          "session_id": {
+            "description": "Session ID awaiting a human decision.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id",
+          "request_id",
+          "kind"
+        ],
+        "type": "object"
+      },
       "CityUnregisterSucceededPayload": {
         "additionalProperties": false,
         "properties": {
@@ -3370,6 +3393,49 @@
             "description": "The list of items.",
             "items": {
               "$ref": "#/components/schemas/Bead"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "next_cursor": {
+            "description": "Cursor for the next page of results.",
+            "type": "string"
+          },
+          "partial": {
+            "description": "True when one or more backends failed and the list is incomplete.",
+            "type": "boolean"
+          },
+          "partial_errors": {
+            "description": "Human-readable errors from backends that failed during aggregation.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "total": {
+            "description": "Total number of items matching the query.",
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "items",
+          "total"
+        ],
+        "type": "object"
+      },
+      "ListBodyCityPendingEntry": {
+        "additionalProperties": false,
+        "properties": {
+          "items": {
+            "description": "The list of items.",
+            "items": {
+              "$ref": "#/components/schemas/CityPendingEntry"
             },
             "type": [
               "array",
@@ -22075,6 +22141,73 @@
           }
         },
         "summary": "Put v0 city by city name patches rigs"
+      }
+    },
+    "/v0/city/{cityName}/pending": {
+      "get": {
+        "operationId": "get-v0-city-by-city-name-pending",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListBodyCityPendingEntry"
+                }
+              }
+            },
+            "description": "OK",
+            "headers": {
+              "X-GC-Cache-Age-S": {
+                "schema": {
+                  "description": "Age in seconds of the CachingStore snapshot that served this response (0 if not applicable).",
+                  "format": "double",
+                  "type": "number"
+                }
+              },
+              "X-GC-Index": {
+                "schema": {
+                  "description": "Latest event sequence number.",
+                  "format": "int64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          }
+        },
+        "summary": "Get v0 city by city name pending"
       }
     },
     "/v0/city/{cityName}/provider-readiness": {
