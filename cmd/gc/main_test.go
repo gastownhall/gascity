@@ -6861,6 +6861,15 @@ max = -1
 	if !strings.Contains(out, "Do not start work with `bd update --status in_progress`") {
 		t.Fatalf("graph-worker prompt missing guard against unassigned in_progress work:\n%s", out)
 	}
+	if !strings.Contains(out, `ROOT_ID=$(bd show <id> --json | jq -r '.[0].metadata["gc.root_bead_id"] // empty')`) {
+		t.Fatalf("graph-worker prompt missing continuation-group root lookup:\n%s", out)
+	}
+	if !strings.Contains(out, `--metadata-field gc.root_bead_id=$ROOT_ID`) {
+		t.Fatalf("graph-worker prompt continuation-group sibling claim is not root-scoped:\n%s", out)
+	}
+	if !strings.Contains(out, `if [ -n "$GROUP" ] && [ -n "$ROOT_ID" ]; then`) {
+		t.Fatalf("graph-worker prompt should require group and root before preassigning siblings:\n%s", out)
+	}
 }
 
 func materializeBuiltinPrompts(cityPath string) error {

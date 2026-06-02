@@ -91,10 +91,12 @@ with you when they become ready:
 ```bash
 # After claiming your first bead, read its continuation group
 GROUP=$(bd show <id> --json | jq -r '.[0].metadata["gc.continuation_group"] // empty')
+ROOT_ID=$(bd show <id> --json | jq -r '.[0].metadata["gc.root_bead_id"] // empty')
 
-if [ -n "$GROUP" ]; then
-  # Find all open beads in the same group and pre-assign them
+if [ -n "$GROUP" ] && [ -n "$ROOT_ID" ]; then
+  # Find all open beads in the same workflow group and pre-assign them
   SIBLINGS=$(bd list --metadata-field gc.routed_to=$GC_TEMPLATE \
+    --metadata-field gc.root_bead_id=$ROOT_ID \
     --metadata-field gc.continuation_group=$GROUP \
     --status=open --json 2>/dev/null \
     | jq -r '.[].id' 2>/dev/null)
