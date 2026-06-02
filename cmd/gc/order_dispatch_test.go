@@ -7294,3 +7294,73 @@ func TestOrderDispatchSingleFlightLockFailsClosedOnPartialTierError(t *testing.T
 		t.Fatal("hasOpenWorkStrict returned true with partial tier error; caller must fail closed instead")
 	}
 }
+
+// spyCloseStore is a beads.Store wrapper that records CloseStore calls.
+type spyCloseStore struct {
+	beads.Store
+	mu         sync.Mutex
+	closeCalls int
+}
+
+func (s *spyCloseStore) CloseStore() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.closeCalls++
+	return nil
+}
+
+// TestDispatchClosesPerTickStores asserts that dispatch() calls CloseStore on
+// every store it opens during a tick. This is the regression test for the
+// per-tick store leak fixed by the deferred cleanup loop in dispatch().
+func TestDispatchClosesPerTickStores(t *testing.T) {
+	const ticks = 5
+
+	var mu sync.Mutex
+	var totalCloseCalls int
+	var spies []*spyCloseStore
+
+	dispatchCtx, dispatchCancel := context.WithCancel(context.Background())
+	t.Cleanup(dispatchCancel)
+
+	m := &memoryOrderDispatcher{
+		aa: []orders.Order{{
+			Name:     "test-order",
+			Trigger:  "cooldown",
+			Interval: "1ms",
+		}},
+		storeFn: func(_ execStoreTarget) (beads.Store, error) {
+			spy := &spyCloseStore{Store: beads.NewMemStore()}
+			mu.Lock()
+			spies = append(spies, spy)
+			mu.Unlock()
+			return spy, nil
+		},
+		rec:         events.Discard,
+		stderr:      lockedStderr(&bytes.Buffer{}),
+		cfg:         &config.City{},
+		dispatchCtx: dispatchCtx,
+	}
+
+	cityPath := t.TempDir()
+	for i := 0; i < ticks; i++ {
+		m.dispatch(context.Background(), cityPath, time.Now())
+	}
+	m.drain(context.Background())
+
+	mu.Lock()
+	for _, spy := range spies {
+		spy.mu.Lock()
+		totalCloseCalls += spy.closeCalls
+		spy.mu.Unlock()
+	}
+	openCount := len(spies)
+	mu.Unlock()
+
+	if openCount == 0 {
+		t.Fatal("storeFn was never called; test setup may be wrong (order never triggered)")
+	}
+	if totalCloseCalls != openCount {
+		t.Fatalf("CloseStore called %d times for %d opened stores across %d ticks; want equal counts — per-tick store leak not fixed",
+			totalCloseCalls, openCount, ticks)
+	}
+}

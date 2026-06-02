@@ -397,6 +397,15 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 	}
 
 	stores := make(map[string]beads.Store)
+	defer func() {
+		for _, s := range stores {
+			if c, ok := s.(interface{ CloseStore() error }); ok {
+				if err := c.CloseStore(); err != nil {
+					logDispatchError(m.stderr, "gc: order dispatch: closing store: %v", err)
+				}
+			}
+		}
+	}()
 	trackingIndex := newOrderDispatchTrackingIndex()
 	budgetSpent := 0
 
