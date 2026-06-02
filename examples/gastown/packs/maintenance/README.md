@@ -82,7 +82,7 @@ metadata edit — so the order fires once, exactly on the transition that
 unblocks dependents. For each closed bead it resolves dependents via:
 
 ```
-bd dep list <blocker> --direction=up --type=blocks --json
+gc bd dep list <blocker> --direction=up --type=blocks --json
 ```
 
 and nudges the `assignee` of every dependent whose status is `open` or

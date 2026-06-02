@@ -18,8 +18,10 @@
 # transition this order cares about.
 #
 # Cross-rig blocker chains within a city are supported via a prefix->rig
-# lookup so `bd dep list` and `gc session nudge` are scoped to the rig that
-# owns each bead. Cross-city cascade is out of scope.
+# lookup so `gc bd dep list` and `gc session nudge` are scoped to the rig that
+# owns each bead. The dep lookup routes through `gc bd` (not bare `bd`) so the
+# wrapper runs bd in the owning rig's directory; `--rig` is a gc flag, not a
+# bd flag. Cross-city cascade is out of scope.
 #
 # Runs as an exec order (no LLM, no agent, no wisp).
 set -euo pipefail
@@ -72,8 +74,12 @@ set_rig_args() {
     [ -n "$RIGS_JSON" ] || return 0
     _prefix="${1%%-*}"
     [ -n "$_prefix" ] && [ "$_prefix" != "$1" ] || return 0
+    # Exclude the HQ entry: `gc rig list` reports the city root as a rig with
+    # an hq=true flag and its own prefix, but it is not a declared rig binding,
+    # so `gc --rig <cityName>` cannot resolve it. Leaving RIG_ARG empty for HQ
+    # beads falls back to default scope, which is where they live.
     _rig="$(printf '%s' "$RIGS_JSON" \
-        | jq -r --arg p "$_prefix" '(.rigs // [])[] | select(.prefix == $p) | .name' 2>/dev/null \
+        | jq -r --arg p "$_prefix" '(.rigs // [])[] | select(.prefix == $p and (.hq != true)) | .name' 2>/dev/null \
         | head -1)"
     if [ -n "$_rig" ]; then
         RIG_ARG1="--rig"
@@ -100,7 +106,7 @@ while IFS= read -r blocker; do
     [ -n "$blocker" ] || continue
 
     set_rig_args "$blocker"
-    DEPS="$(bd dep list "$blocker" ${RIG_ARG1:+"$RIG_ARG1" "$RIG_ARG2"} \
+    DEPS="$(gc bd dep list "$blocker" ${RIG_ARG1:+"$RIG_ARG1" "$RIG_ARG2"} \
             --direction=up --type=blocks --json 2>/dev/null)" || continue
     if [ -z "$DEPS" ] || [ "$DEPS" = "[]" ]; then continue; fi
 

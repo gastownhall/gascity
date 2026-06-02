@@ -92,6 +92,32 @@ func TestCascadeNudgeOnBlockerCloseOrder(t *testing.T) {
 	assertEventExecOrder(t, "cascade-nudge-on-blocker-close.toml", "bead.closed", "cascade-nudge-on-blocker-close.sh")
 }
 
+// TestCascadeNudgeRoutesCrossRig guards the cascade order's cross-rig
+// routing. Two properties must hold or cross-rig cascades break silently
+// (failures are soft-skipped via `|| continue`, so a regression is invisible
+// at runtime): (1) the dependent lookup runs through the `gc bd` wrapper, not
+// bare `bd` — `--rig` is a gc flag, not a bd flag, and the wrapper runs bd in
+// the owning rig's directory; (2) the prefix->rig lookup excludes the HQ entry
+// (`gc rig list` reports the city root as an hq=true pseudo-rig that
+// `gc --rig <cityName>` cannot resolve), matching orphan-sweep.sh's
+// `select(.hq == false)` convention.
+func TestCascadeNudgeRoutesCrossRig(t *testing.T) {
+	data, err := fs.ReadFile(PackFS, "assets/scripts/cascade-nudge-on-blocker-close.sh")
+	if err != nil {
+		t.Fatalf("reading cascade-nudge-on-blocker-close.sh: %v", err)
+	}
+	body := string(data)
+	if !strings.Contains(body, "gc bd dep list") {
+		t.Error("cascade-nudge script must route the dep lookup through `gc bd dep list`; missing")
+	}
+	if strings.Contains(body, "$(bd dep list") {
+		t.Error("cascade-nudge script must not run bare `bd dep list` (--rig is a gc flag, not a bd flag)")
+	}
+	if !strings.Contains(body, ".hq != true") {
+		t.Error("cascade-nudge script must exclude the HQ entry from the prefix->rig lookup; missing `.hq != true`")
+	}
+}
+
 // TestNudgeOnRouteResolvesPoolMembers guards the pool-base fan-out: a
 // multi-session pool routes to the pool BASE (sling's NormalizePoolRouteTarget
 // collapses slot -> base), which is the members' template, not a session name
