@@ -2819,11 +2819,48 @@ func hasNonSessionAssignedWork(items []beads.Bead) bool {
 const (
 	namedSessionActivityThreshold                      = 2 * time.Minute
 	namedSessionRecentActivityConfigDriftDeferralLimit = 30 * time.Second
-	sessionAttachedConfigDriftFalseNegativeLimit       = 30 * time.Second
-	namedSessionConfigDriftDeferredAtMetadata          = "config_drift_deferred_at"
-	namedSessionConfigDriftDeferredKeyMetadata         = "config_drift_deferred_key"
-	sessionAttachedConfigDriftDeferredAtMetadata       = "attached_config_drift_deferred_at"
-	sessionAttachedConfigDriftDeferredKeyMetadata      = "attached_config_drift_deferred_key"
+	// sessionAttachedConfigDriftFalseNegativeLimit is how long a recorded
+	// attached-drift deferral keeps suppressing a config-drift drain, measured
+	// from the deferral's stored timestamp (NOT from the last positive
+	// attachment observation — see the refresh-interval note below). It bridges
+	// transient attachment-detection flicker (a probe momentarily reporting
+	// "not attached" between ticks) so a still-attached session is not drained.
+	//
+	// Because the stamp is refreshed at most once per
+	// sessionAttachedConfigDriftRefreshInterval, the GUARANTEED bridge after a
+	// positive observation is the worst case (limit - refreshInterval): a
+	// positive observation can be skipped just after a refresh, then attachment
+	// flickers false, and the deferral lapses limit after the last stored stamp.
+	// With the values below that worst case is 5m - 2m = 3m of flicker
+	// tolerance, which is ample; attachment detection flickers on the order of a
+	// tick, not minutes. Attachment is a reliable signal, so the window is kept
+	// generous and is intentionally decoupled from the re-stamp cadence.
+	//
+	// Tradeoff: raising this from 30s to 5m also raises the worst-case latency
+	// from a GENUINE detach to config-drift handling, since after a real detach
+	// the not-attached branch is gated solely by this window (drift waits it
+	// out, up to ~5m). That is acceptable — config-drift handling is a
+	// reconvergence restart, not a safety kill, and the existing activity
+	// heuristic already tolerates a 2m staleness window — but it is a conscious
+	// cost of removing the per-tick commit churn. The composed safety invariant
+	// (refresh interval + patrol < this limit) is asserted by
+	// TestRecordSessionAttachedConfigDriftDeferral_SurvivesSkippedRefreshThenFlicker.
+	sessionAttachedConfigDriftFalseNegativeLimit = 5 * time.Minute
+	// sessionAttachedConfigDriftRefreshInterval is the minimum age the existing
+	// stamp must reach before record() rewrites it. It is deliberately SEPARATE
+	// from (and smaller than) the false-negative limit: while attached, record()
+	// runs every reconciler tick, so the stamp only needs refreshing rarely —
+	// just often enough that it never ages out of the false-negative window
+	// during a real flicker. Coupling the refresh to the validity limit (the old
+	// "rewrite after limit/2" rule) caused a durable metadata write — and a Dolt
+	// commit — on essentially every tick whenever the patrol interval was >=
+	// limit/2 (e.g. the default 30s patrol with the old 30s limit), flooding the
+	// store with no-op churn for every persistently-attached drifted session.
+	sessionAttachedConfigDriftRefreshInterval     = 2 * time.Minute
+	namedSessionConfigDriftDeferredAtMetadata     = "config_drift_deferred_at"
+	namedSessionConfigDriftDeferredKeyMetadata    = "config_drift_deferred_key"
+	sessionAttachedConfigDriftDeferredAtMetadata  = "attached_config_drift_deferred_at"
+	sessionAttachedConfigDriftDeferredKeyMetadata = "attached_config_drift_deferred_key"
 )
 
 // namedSessionActivelyInUse returns true if a named session is currently
@@ -2930,16 +2967,17 @@ func recordSessionAttachedConfigDriftDeferral(session beads.Bead, store beads.St
 		now = clk.Now().UTC()
 	}
 	// Skip the write when the same drift key is already deferred and the
-	// existing stamp is comfortably within the false-negative TTL window.
-	// Without this guard the reconciler emits a bead.updated event on every
-	// tick (~1.4s) for every attached session with persistent drift.
-	// Refreshing at TTL/2 leaves enough headroom that a paused reconcile
-	// loop cannot accidentally let the deferral expire.
+	// existing stamp is still fresh. While attached, the reconciler calls this
+	// on every tick, so without a throttle it would emit a bead.updated event —
+	// and a durable Dolt commit — every tick for every attached session with
+	// persistent drift. The refresh interval is decoupled from (and well below)
+	// the false-negative limit, so the stamp is rewritten only occasionally yet
+	// can never age out of the validity window between two refreshes.
 	if driftKey != "" && session.Metadata[sessionAttachedConfigDriftDeferredKeyMetadata] == driftKey {
 		if raw := session.Metadata[sessionAttachedConfigDriftDeferredAtMetadata]; raw != "" {
 			if existing, err := time.Parse(time.RFC3339, raw); err == nil &&
 				!existing.After(now) &&
-				now.Sub(existing) < sessionAttachedConfigDriftFalseNegativeLimit/2 {
+				now.Sub(existing) < sessionAttachedConfigDriftRefreshInterval {
 				return nil
 			}
 		}
