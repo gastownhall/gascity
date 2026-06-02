@@ -7771,6 +7771,18 @@ export type GetV0CityByCityNameExtmsgTranscriptData = {
          * Conversation kind.
          */
         kind?: string;
+        /**
+         * Return entries with sequence greater than this cursor (default 0).
+         */
+        after_sequence?: number;
+        /**
+         * Maximum number of entries to return (default 100, max 500).
+         */
+        limit?: number;
+        /**
+         * Sort order by sequence: asc (oldest-first, default) or desc (newest-first).
+         */
+        order?: 'asc' | 'desc';
     };
     url: '/v0/city/{cityName}/extmsg/transcript';
 };

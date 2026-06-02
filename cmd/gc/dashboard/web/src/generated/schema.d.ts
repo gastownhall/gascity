@@ -9136,6 +9136,12 @@ export interface operations {
                 parent_conversation_id?: string;
                 /** @description Conversation kind. */
                 kind?: string;
+                /** @description Return entries with sequence greater than this cursor (default 0). */
+                after_sequence?: number;
+                /** @description Maximum number of entries to return (default 100, max 500). */
+                limit?: number;
+                /** @description Sort order by sequence: asc (oldest-first, default) or desc (newest-first). */
+                order?: "asc" | "desc";
             };
             header?: never;
             path: {
