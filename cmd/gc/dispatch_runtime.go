@@ -710,8 +710,11 @@ func workflowServeControlReadyQuery(agentCfg config.Agent, controlSessionNames .
 		queryPrefix += ` GC_CONTROL_LEGACY_TARGET=` + shellquote.Quote(legacy)
 	}
 	query := queryPrefix + ` sh -c '` +
-		`tmp=$(mktemp); trap "rm -f \"$tmp\"" EXIT; ` +
-		`emit_ready() { r=$("$@" 2>/dev/null || true); [ -n "$r" ] && [ "$r" != "[]" ] && printf "%s\n" "$r" >> "$tmp"; }; ` +
+		`set -e; ` +
+		`tmp=$(mktemp); seen="$tmp.seen"; : > "$seen"; trap "rm -f \"$tmp\" \"$seen\"" EXIT; ` +
+		`emit_ready() { r=$("$@" 2>&1) || { status=$?; printf "%s\n" "$r" >&2; return "$status"; }; [ -n "$r" ] && [ "$r" != "[]" ] && printf "%s\n" "$r" >> "$tmp"; return 0; }; ` +
+		`assignee_ready() { cand="$1"; [ -z "$cand" ] && return 0; if grep -Fxq "$cand" "$seen"; then return 0; fi; printf "%s\n" "$cand" >> "$seen"; ` +
+		`emit_ready bd --readonly --sandbox ready --include-ephemeral --assignee="$cand" --exclude-type=epic --json --limit=` + limit + `; }; ` +
 		`routed_ready() { route="$1"; [ -z "$route" ] && return 0; ` +
 		`emit_ready bd --readonly --sandbox ready --include-ephemeral --metadata-field "gc.run_target=$route" --unassigned --exclude-type=epic --json --sort oldest --limit=` + limit + `; ` +
 		`emit_ready bd --readonly --sandbox ready --include-ephemeral --metadata-field "gc.routed_to=$route" --unassigned --exclude-type=epic --json --sort oldest --limit=` + limit + `; ` +
@@ -721,7 +724,7 @@ func workflowServeControlReadyQuery(agentCfg config.Agent, controlSessionNames .
 		`legacy=""; case "$id" in *control-dispatcher) legacy="${id%control-dispatcher}workflow-control";; esac; ` +
 		`for cand in "$id" "$legacy"; do ` +
 		`[ -z "$cand" ] && continue; ` +
-		`emit_ready bd --readonly --sandbox ready --include-ephemeral --assignee="$cand" --exclude-type=epic --json --limit=` + limit + `; ` +
+		`assignee_ready "$cand"; ` +
 		`done; ` +
 		`done; ` +
 		`routed_ready "$GC_CONTROL_TARGET"; ` +

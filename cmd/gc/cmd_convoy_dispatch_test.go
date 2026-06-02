@@ -2885,12 +2885,52 @@ case "$*" in
     printf '[{"id":"ga-control-ready"}]'
     ;;
   *)
-    echo "unexpected first control query: $*" >&2
-    exit 42
+    printf '[]'
     ;;
 esac
 `)
 	assertJSONEqual(t, out, `[{"id":"ga-control-ready"}]`)
+}
+
+func TestWorkflowServeControlReadyQueryFailsFastOnBDReadyError(t *testing.T) {
+	query := workflowServeControlReadyQuery(
+		config.Agent{Name: config.ControlDispatcherAgentName, Dir: "gascity"},
+		"gascity--control-dispatcher",
+	)
+	tmp := t.TempDir()
+	bdPath := filepath.Join(tmp, "bd")
+	logPath := filepath.Join(tmp, "bd.log")
+	if err := os.WriteFile(bdPath, []byte(`#!/bin/sh
+set -eu
+printf '%s\n' "$*" >> "$BD_LOG"
+printf '[mysql] read tcp 127.0.0.1:1->127.0.0.1:3307: i/o timeout\n' >&2
+printf '{"error":"failed to open database: invalid connection"}\n'
+exit 1
+`), 0o755); err != nil {
+		t.Fatalf("write fake bd: %v", err)
+	}
+
+	_, err := shellWorkQueryWithEnv(query, t.TempDir(), []string{
+		"PATH=" + tmp + string(os.PathListSeparator) + os.Getenv("PATH"),
+		"BD_LOG=" + logPath,
+		"GC_SESSION_NAME=gascity--control-dispatcher",
+		"GC_ALIAS=gascity/control-dispatcher",
+	})
+	if err == nil {
+		t.Fatal("workflow serve query succeeded after bd ready failed")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "i/o timeout") || !strings.Contains(msg, "failed to open database") {
+		t.Fatalf("error = %q, want bd stderr/stdout details", msg)
+	}
+	logData, readErr := os.ReadFile(logPath)
+	if readErr != nil {
+		t.Fatalf("read bd log: %v", readErr)
+	}
+	calls := strings.Split(strings.TrimSpace(string(logData)), "\n")
+	if len(calls) != 1 {
+		t.Fatalf("bd calls = %d, want fail-fast after first call; calls:\n%s", len(calls), string(logData))
+	}
 }
 
 func TestWorkflowServeControlReadyQueryPrioritizesConfiguredRuntimeName(t *testing.T) {
@@ -2938,6 +2978,51 @@ esac
 	firstCall, _, _ := strings.Cut(strings.TrimSpace(string(logData)), "\n")
 	if want := "--readonly --sandbox ready --include-ephemeral --assignee=gascity--control-dispatcher --exclude-type=epic --json --limit=20"; firstCall != want {
 		t.Fatalf("first bd call = %q, want %q; all calls:\n%s", firstCall, want, string(logData))
+	}
+}
+
+func TestWorkflowServeControlReadyQueryDeduplicatesAssigneeProbes(t *testing.T) {
+	query := workflowServeControlReadyQuery(
+		config.Agent{Name: config.ControlDispatcherAgentName, Dir: "gascity"},
+		"gascity--control-dispatcher",
+	)
+	tmp := t.TempDir()
+	logPath := filepath.Join(tmp, "bd.log")
+	bdPath := filepath.Join(tmp, "bd")
+	if err := os.WriteFile(bdPath, []byte(`#!/bin/sh
+set -eu
+printf '%s\n' "$*" >> "$BD_LOG"
+case "$*" in
+  "--readonly --sandbox ready --include-ephemeral --assignee=gascity--control-dispatcher --exclude-type=epic --json --limit=20")
+    printf '[{"id":"ga-control-ready"}]'
+    ;;
+  *)
+    printf '[]'
+    ;;
+esac
+`), 0o755); err != nil {
+		t.Fatalf("write fake bd: %v", err)
+	}
+	out, err := shellWorkQueryWithEnv(query, t.TempDir(), []string{
+		"PATH=" + tmp + string(os.PathListSeparator) + os.Getenv("PATH"),
+		"BD_LOG=" + logPath,
+		"GC_SESSION_ID=gascity--control-dispatcher",
+		"GC_SESSION_NAME=gascity--control-dispatcher",
+		"GC_ALIAS=gascity/control-dispatcher",
+	})
+	if err != nil {
+		t.Fatalf("run workflow serve query: %v", err)
+	}
+	assertJSONEqual(t, out, `[{"id":"ga-control-ready"}]`)
+	logData, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read bd log: %v", err)
+	}
+	if got := strings.Count(string(logData), "--assignee=gascity--control-dispatcher "); got != 1 {
+		t.Fatalf("gascity--control-dispatcher query count = %d, want 1; calls:\n%s", got, string(logData))
+	}
+	if got := strings.Count(string(logData), "--assignee=gascity--workflow-control "); got != 1 {
+		t.Fatalf("gascity--workflow-control query count = %d, want 1; calls:\n%s", got, string(logData))
 	}
 }
 
