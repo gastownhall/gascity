@@ -1253,8 +1253,8 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 							hasAssignedWork = true
 						}
 						if providerAlive && hasAssignedWork {
-							if cancelOrphanedSessionDrainForAssignedWork(*session, sp, dt) ||
-								cancelRecoveredOrphanedDrainForAssignedWork(*session, sp, name) {
+							if cancelSessionDrainForAssignedWork(*session, sp, dt) ||
+								cancelRecoveredDrainForAssignedWork(*session, sp, name) {
 								_ = dops.clearDrain(name)
 								template := normalizedSessionTemplate(*session, cfg)
 								if template == "" {
@@ -1429,6 +1429,21 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						continue
 					}
 					ackReason, reconcilerOwnedAck := reconcilerDrainAckMatchesSession(*session, sp, name)
+					if reconcilerOwnedAck && assignedWorkDrainReasonCancelable(ackReason) {
+						hasAssignedWork, assignedErr := sessionHasOpenAssignedWorkForReachableStore(cityPath, cfg, store, rigStores, *session)
+						if assignedErr != nil {
+							fmt.Fprintf(stderr, "session reconciler: checking assigned work for drain-acked %s: %v\n", name, assignedErr) //nolint:errcheck
+							hasAssignedWork = true
+						}
+						if alive && hasAssignedWork &&
+							(cancelSessionDrainForAssignedWork(*session, sp, dt) || cancelRecoveredDrainForAssignedWork(*session, sp, name)) {
+							_ = dops.clearDrain(name)
+							if trace != nil {
+								trace.recordDecision("reconciler.drain.cancel", tp.TemplateName, name, ackReason, "cancel_assigned_work", nil, nil, "")
+							}
+							continue
+						}
+					}
 					if reconcilerOwnedAck && ackReason == "config-drift" {
 						driftKey := sessionConfigDriftKey(*session, cfg, tp)
 						attached, attachErr := sessionAttachedForConfigDrift(*session, sp, cityPath, store, cfg, name)

@@ -4694,6 +4694,138 @@ func TestReconcileSessionBeads_RecoveredDrainAckedOrphanCanceledForAssignedWork(
 	}
 }
 
+func TestReconcileSessionBeads_ReconcilerNoWakeDrainAckCanceledForAssignedWork(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	env.addDesired("worker", "worker", true)
+	session := env.createSessionBead("worker", "worker")
+	env.markSessionActive(&session)
+	work, err := env.store.Create(beads.Bead{
+		Title:    "assigned work",
+		Type:     "task",
+		Status:   "in_progress",
+		Assignee: session.ID,
+	})
+	if err != nil {
+		t.Fatalf("Create work bead: %v", err)
+	}
+	if err := setReconcilerDrainAckMetadata(env.sp, "worker", &drainState{
+		reason:     "no-wake-reason",
+		generation: 1,
+		ackSet:     true,
+	}); err != nil {
+		t.Fatalf("setReconcilerDrainAckMetadata: %v", err)
+	}
+	env.dt.set(session.ID, &drainState{
+		startedAt:  env.clk.Now().Add(-defaultDrainTimeout),
+		deadline:   env.clk.Now().Add(-time.Second),
+		reason:     "no-wake-reason",
+		generation: 1,
+		ackSet:     true,
+	})
+
+	reconcileSessionBeadsAtPath(
+		context.Background(),
+		"",
+		[]beads.Bead{session},
+		env.desiredState,
+		nil,
+		env.cfg,
+		env.sp,
+		env.store,
+		newDrainOps(env.sp),
+		[]beads.Bead{work},
+		nil,
+		nil,
+		env.dt,
+		map[string]int{"worker": 1},
+		false,
+		nil,
+		"",
+		nil,
+		env.clk,
+		env.rec,
+		0,
+		0,
+		&env.stdout,
+		&env.stderr,
+	)
+
+	if !env.sp.IsRunning("worker") {
+		t.Fatal("assigned-work no-wake drain should be canceled before stopping the running session")
+	}
+	if ds := env.dt.get(session.ID); ds != nil {
+		t.Fatalf("drain = %+v, want canceled", ds)
+	}
+	if ack, _ := env.sp.GetMeta("worker", "GC_DRAIN_ACK"); ack != "" {
+		t.Fatalf("GC_DRAIN_ACK = %q, want cleared", ack)
+	}
+	if source, _ := env.sp.GetMeta("worker", reconcilerDrainAckSourceKey); source != "" {
+		t.Fatalf("%s = %q, want cleared", reconcilerDrainAckSourceKey, source)
+	}
+}
+
+func TestReconcileSessionBeads_RecoveredNoWakeDrainAckCanceledForAssignedWork(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	env.addDesired("worker", "worker", true)
+	session := env.createSessionBead("worker", "worker")
+	env.markSessionActive(&session)
+	work, err := env.store.Create(beads.Bead{
+		Title:    "assigned work",
+		Type:     "task",
+		Status:   "in_progress",
+		Assignee: session.ID,
+	})
+	if err != nil {
+		t.Fatalf("Create work bead: %v", err)
+	}
+	if err := setReconcilerDrainAckMetadata(env.sp, "worker", &drainState{
+		reason:     "no-wake-reason",
+		generation: 1,
+		ackSet:     true,
+	}); err != nil {
+		t.Fatalf("setReconcilerDrainAckMetadata: %v", err)
+	}
+
+	reconcileSessionBeadsAtPath(
+		context.Background(),
+		"",
+		[]beads.Bead{session},
+		env.desiredState,
+		nil,
+		env.cfg,
+		env.sp,
+		env.store,
+		newDrainOps(env.sp),
+		[]beads.Bead{work},
+		nil,
+		nil,
+		env.dt,
+		map[string]int{"worker": 1},
+		false,
+		nil,
+		"",
+		nil,
+		env.clk,
+		env.rec,
+		0,
+		0,
+		&env.stdout,
+		&env.stderr,
+	)
+
+	if !env.sp.IsRunning("worker") {
+		t.Fatal("recovered assigned-work no-wake drain should be canceled before stopping the running session")
+	}
+	if ack, _ := env.sp.GetMeta("worker", "GC_DRAIN_ACK"); ack != "" {
+		t.Fatalf("GC_DRAIN_ACK = %q, want cleared", ack)
+	}
+	if source, _ := env.sp.GetMeta("worker", reconcilerDrainAckSourceKey); source != "" {
+		t.Fatalf("%s = %q, want cleared", reconcilerDrainAckSourceKey, source)
+	}
+}
+
 func TestReconcileSessionBeads_DeadDrainAckedOrphanWithAssignedWorkCompletesDrain(t *testing.T) {
 	env := newReconcilerTestEnv()
 	env.cfg = &config.City{}
