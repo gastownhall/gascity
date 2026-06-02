@@ -1,14 +1,17 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -1059,4 +1062,35 @@ func (p *incrementingLatestSeqProvider) Watch(context.Context, uint64) (events.W
 
 func (p *incrementingLatestSeqProvider) Close() error {
 	return nil
+}
+
+// Intentionally NOT t.Parallel(): it redirects the global log writer, so it
+// must not run concurrently with any other test that logs or rebinds output.
+func TestLogWorkflowSQLFallbackSurfacesGenuineFailures(t *testing.T) {
+	var buf bytes.Buffer
+	origOut := log.Writer()
+	origFlags := log.Flags()
+	log.SetOutput(&buf)
+	log.SetFlags(0)
+	t.Cleanup(func() {
+		log.SetOutput(origOut)
+		log.SetFlags(origFlags)
+	})
+
+	// A deployment with no SQL workflow store runs the per-store scan as its
+	// steady state, not a regression — it must stay quiet so the supervisor
+	// does not log on every workflow fetch (gascity#2940).
+	logWorkflowSQLFallback("wf_quiet", nil)
+	logWorkflowSQLFallback("wf_quiet", errNoSQLWorkflowStores)
+	if buf.Len() != 0 {
+		t.Fatalf("benign SQL fallbacks logged, want quiet: %q", buf.String())
+	}
+
+	// A genuine fast-path failure (Dolt unreachable, workflow absent from the
+	// scope's SQL stores, …) is the perf regression operators need to see.
+	logWorkflowSQLFallback("wf_loud", errors.New("dial tcp 127.0.0.1:3306: connection refused"))
+	out := buf.String()
+	if !strings.Contains(out, "wf_loud") || !strings.Contains(out, "connection refused") {
+		t.Fatalf("genuine SQL fast-path failure not surfaced: %q", out)
+	}
 }

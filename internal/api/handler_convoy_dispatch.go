@@ -2,6 +2,7 @@ package api
 
 import (
 	"errors"
+	"log"
 	"strconv"
 	"strings"
 
@@ -9,6 +10,19 @@ import (
 )
 
 var errWorkflowNotFound = errors.New("workflow not found")
+
+// logWorkflowSQLFallback surfaces a workflow-snapshot SQL fast-path failure
+// before buildWorkflowSnapshot drops to the per-store scan. The SQL path is the
+// ~190ms route; the scan is seconds and grows with rig count, so a silent
+// fallback hides a real perf regression (gascity#2940). The benign
+// "no SQL stores configured" outcome is left quiet so non-SQL deployments,
+// whose steady state IS the scan, do not log on every workflow fetch.
+func logWorkflowSQLFallback(workflowID string, err error) {
+	if err == nil || errors.Is(err, errNoSQLWorkflowStores) {
+		return
+	}
+	log.Printf("gc api: workflow %q SQL fast path failed, falling back to store scan: %v", workflowID, err)
+}
 
 // Response types (workflowSnapshotResponse, workflowBeadResponse,
 // workflowDepResponse, LogicalNode, ScopeGroup) live in
@@ -30,9 +44,11 @@ type workflowRootMatch struct {
 
 func (s *Server) buildWorkflowSnapshot(workflowID, fallbackScopeKind, fallbackScopeRef string, snapshotIndex uint64) (*workflowSnapshotResponse, error) {
 	// Fast path: resolve the correct store and fetch the entire snapshot via SQL.
-	if snap, err := s.tryFullWorkflowSQL(workflowID, fallbackScopeKind, fallbackScopeRef, snapshotIndex); err == nil {
+	snap, sqlErr := s.tryFullWorkflowSQL(workflowID, fallbackScopeKind, fallbackScopeRef, snapshotIndex)
+	if sqlErr == nil {
 		return snap, nil
 	}
+	logWorkflowSQLFallback(workflowID, sqlErr)
 
 	// Slow path: bd subprocess N+1
 	stores := s.workflowStores()
