@@ -87,6 +87,12 @@ type agentBuildParams struct {
 	// etc.). Used by the skill materialization integration to decide
 	// stage-2 eligibility.
 	sessionProvider string
+
+	// providerHealth is the per-provider health snapshot read once at the
+	// start of this build. The pool fresh-create path consults it to defer
+	// respawning a session onto a provider that is currently unhealthy
+	// (gate-on-green). Nil/empty means all providers healthy (fail-open).
+	providerHealth providerHealthSnapshot
 }
 
 // newAgentBuildParams constructs agentBuildParams from the common startup values.
@@ -116,6 +122,14 @@ func newAgentBuildParams(cityName, cityPath string, cfg *config.City, sp runtime
 	}
 	if store != nil {
 		params.poolSessionCreateBudget = newPoolSessionCreateBudget(cfg.Daemon.MaxWakesPerTickOrDefault())
+		// Provider health is fail-open: loadProviderHealthSnapshot returns an
+		// all-healthy snapshot even on read error, so a failing signal can
+		// never wedge respawns. Log the error but use the snapshot regardless.
+		snap, err := loadProviderHealthSnapshot(store)
+		if err != nil && stderr != nil {
+			fmt.Fprintf(stderr, "buildDesiredState: provider-health read failed: %v (treating all providers healthy)\n", err) //nolint:errcheck // best-effort stderr
+		}
+		params.providerHealth = snap
 	}
 	// Load the shared skill catalog once per build cycle. Transient load
 	// failures (filesystem race during dolt sync / heavy I/O) used to

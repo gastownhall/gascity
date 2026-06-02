@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 )
 
 // Provider-health is a generic, bead-backed signal that lets the reconciler
@@ -104,4 +105,28 @@ func providerHealthBeadTime(b beads.Bead) time.Time {
 		return b.UpdatedAt
 	}
 	return b.CreatedAt
+}
+
+// agentProviderName returns the provider preset an agent resolves to,
+// following config precedence: the agent's own provider, then its pack-inherited
+// default, then the city-level [agent_defaults] and [workspace] defaults. The
+// result is the key the provider-health snapshot is consulted with. Empty when
+// no provider is configured anywhere, in which case the health gate is a no-op
+// (fail-open).
+func agentProviderName(cfg *config.City, a *config.Agent) string {
+	if a != nil {
+		if a.Provider != "" {
+			return a.Provider
+		}
+		if a.InheritedProvider != "" {
+			return a.InheritedProvider
+		}
+	}
+	if cfg != nil {
+		if cfg.AgentDefaults.Provider != "" {
+			return cfg.AgentDefaults.Provider
+		}
+		return cfg.Workspace.Provider
+	}
+	return ""
 }

@@ -1984,6 +1984,18 @@ func realizePoolDesiredSessions(
 				return item
 			}
 			if plan != nil {
+				// Gate-on-green: defer a fresh respawn when this agent's
+				// provider is currently unhealthy. Existing-session reuse (the
+				// branch below) is untouched — only brand-new creates are held
+				// back, so a provider outage cannot trigger a respawn storm into
+				// a provider that cannot serve. The consumer that marked the
+				// provider unhealthy owns clearing it; until then the demand
+				// stays queued and is materialized on a later tick once healthy.
+				if provider := agentProviderName(bp.city, cfgAgent); !bp.providerHealth.healthy(provider) {
+					fmt.Fprintf(stderr, "buildDesiredState: pool %q: provider %q unhealthy; deferring fresh session create\n", qualifiedName, provider) //nolint:errcheck // best-effort stderr
+					item.skip = true
+					return item
+				}
 				item.plan = plan
 				item.slot = plan.poolSlot
 				return item

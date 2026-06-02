@@ -3340,6 +3340,84 @@ func TestRealizePoolDesiredSessionsLimitsFreshCreatesToWakeBudget(t *testing.T) 
 	}
 }
 
+func TestRealizePoolDesiredSessionsGatesFreshCreatesOnUnhealthyProvider(t *testing.T) {
+	store := beads.NewMemStore()
+	// The consumer layer marks the agent's provider unhealthy by writing a
+	// provider-health bead. The reconciler must then defer fresh respawns.
+	if _, err := store.Create(beads.Bead{
+		Title:  "provider health",
+		Status: "open",
+		Labels: []string{providerHealthLabel},
+		Metadata: map[string]string{
+			providerHealthProviderKey: "claude",
+			providerHealthStatusKey:   providerHealthStatusUnhealthy,
+		},
+	}); err != nil {
+		t.Fatalf("seed health bead: %v", err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "worker",
+			Provider:          "claude",
+			StartCommand:      "true",
+			MinActiveSessions: intPtr(0),
+			MaxActiveSessions: intPtr(10),
+		}},
+	}
+	var stderr bytes.Buffer
+	bp := newAgentBuildParams("test-city", t.TempDir(), cfg, runtime.NewFake(), time.Now().UTC(), store, &stderr)
+	bp.sessionBeads = &sessionBeadSnapshot{}
+	desired := map[string]TemplateParams{}
+
+	realizePoolDesiredSessions(bp, &cfg.Agents[0], PoolDesiredState{
+		Template: "worker",
+		Requests: []SessionRequest{{Template: "worker", Tier: "new"}, {Template: "worker", Tier: "new"}},
+	}, desired, &stderr)
+
+	if got := len(bp.sessionBeads.Open()); got != 0 {
+		t.Fatalf("unhealthy provider should defer all fresh creates, got %d; stderr=%q", got, stderr.String())
+	}
+	if got := len(desired); got != 0 {
+		t.Fatalf("unhealthy provider should yield no desired sessions, got %d", got)
+	}
+	if !strings.Contains(stderr.String(), "unhealthy; deferring fresh session create") {
+		t.Fatalf("stderr = %q, want unhealthy-defer diagnostic", stderr.String())
+	}
+}
+
+func TestRealizePoolDesiredSessionsAllowsFreshCreatesWhenProviderHealthy(t *testing.T) {
+	// No provider-health bead: the provider is healthy (fail-open), so fresh
+	// creates proceed exactly as they would without the gate.
+	store := beads.NewMemStore()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "worker",
+			Provider:          "claude",
+			StartCommand:      "true",
+			MinActiveSessions: intPtr(0),
+			MaxActiveSessions: intPtr(10),
+		}},
+	}
+	var stderr bytes.Buffer
+	bp := newAgentBuildParams("test-city", t.TempDir(), cfg, runtime.NewFake(), time.Now().UTC(), store, &stderr)
+	bp.sessionBeads = &sessionBeadSnapshot{}
+	desired := map[string]TemplateParams{}
+
+	realizePoolDesiredSessions(bp, &cfg.Agents[0], PoolDesiredState{
+		Template: "worker",
+		Requests: []SessionRequest{{Template: "worker", Tier: "new"}, {Template: "worker", Tier: "new"}},
+	}, desired, &stderr)
+
+	if got := len(desired); got != 2 {
+		t.Fatalf("healthy provider should create both fresh sessions, got %d; stderr=%q", got, stderr.String())
+	}
+	if strings.Contains(stderr.String(), "deferring fresh session create") {
+		t.Fatalf("healthy provider should not log a defer; stderr=%q", stderr.String())
+	}
+}
+
 func TestRealizePoolDesiredSessionsBudgetExhaustionStillAllowsLaterReuse(t *testing.T) {
 	maxWakes := 1
 	store := beads.NewMemStore()
