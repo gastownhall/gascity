@@ -140,8 +140,67 @@ func TestHandleTrigger_EntryPoursFirstWispOnPass(t *testing.T) {
 		t.Errorf("wisp key = %q, want %q", wispInfo.IdempotencyKey, IdempotencyKey("root-1", 1))
 	}
 
-	if _, ok := emitter.findEvent(EventIteration); !ok {
-		t.Error("expected ConvergenceIteration event")
+	// The trigger-driven advance emits a distinct ConvergenceTriggerAdvance
+	// event, NOT a ConvergenceIteration event: the latter is reserved for the
+	// per-wisp completion event the poured wisp emits when it closes. Emitting
+	// EventIteration here would collide with that event on EventIDIteration.
+	if _, ok := emitter.findEvent(EventIteration); ok {
+		t.Error("trigger advance must not emit ConvergenceIteration (collides with the per-wisp event id)")
+	}
+	advEv, ok := emitter.findEvent(EventTriggerAdvance)
+	if !ok {
+		t.Fatal("expected ConvergenceTriggerAdvance event")
+	}
+	if advEv.EventID != EventIDTriggerAdvance("root-1", 1) {
+		t.Errorf("event_id = %q, want %q", advEv.EventID, EventIDTriggerAdvance("root-1", 1))
+	}
+	if advEv.EventID == EventIDIteration("root-1", 1) {
+		t.Error("trigger-advance event id collides with the per-wisp iteration event id")
+	}
+	var advPayload ManualActionPayload
+	if err := json.Unmarshal(advEv.Payload, &advPayload); err != nil {
+		t.Fatalf("unmarshal trigger-advance payload: %v", err)
+	}
+	if advPayload.Iteration != 1 {
+		t.Errorf("payload iteration = %d, want 1", advPayload.Iteration)
+	}
+	// Entry-gated first iteration has no prior wisp: wisp_id must be null,
+	// not an empty/ambiguous string.
+	if advPayload.WispID != nil {
+		t.Errorf("payload wisp_id = %v, want nil on entry-gated iteration 1", *advPayload.WispID)
+	}
+	if advPayload.NextWispID == nil || *advPayload.NextWispID != result.NextWispID {
+		t.Errorf("payload next_wisp_id = %v, want %q", advPayload.NextWispID, result.NextWispID)
+	}
+}
+
+func TestTriggerConditionEnv_MirrorsNextIteration(t *testing.T) {
+	cityPath := "/city"
+	meta := map[string]string{
+		FieldMaxIterations:     "5",
+		VarPrefix + "doc_path": "/docs/spec.md",
+	}
+	env := TriggerConditionEnv(meta, "root-9", cityPath, "/store", 3)
+
+	// Iteration is the NEXT iteration the trigger gates (caller passes
+	// closed+1), not the stored convergence.iteration counter — this is the
+	// fidelity contract HandleTrigger and the test-trigger dry-run share.
+	if env.Iteration != 3 {
+		t.Errorf("Iteration = %d, want 3", env.Iteration)
+	}
+	// ArtifactDir must be populated so GC_ARTIFACT_DIR is exported to the
+	// trigger condition exactly as it is in the live controller path.
+	if env.ArtifactDir != ArtifactDirFor(cityPath, "root-9", 3) {
+		t.Errorf("ArtifactDir = %q, want %q", env.ArtifactDir, ArtifactDirFor(cityPath, "root-9", 3))
+	}
+	if env.MaxIterations != 5 {
+		t.Errorf("MaxIterations = %d, want 5", env.MaxIterations)
+	}
+	if env.DocPath != "/docs/spec.md" {
+		t.Errorf("DocPath = %q, want /docs/spec.md", env.DocPath)
+	}
+	if env.BeadID != "root-9" || env.CityPath != cityPath || env.StorePath != "/store" {
+		t.Errorf("env identity mismatch: %+v", env)
 	}
 }
 

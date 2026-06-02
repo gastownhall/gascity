@@ -90,17 +90,7 @@ func (h *Handler) HandleTrigger(ctx context.Context, rootBeadID string) (Handler
 		return HandlerResult{}, fmt.Errorf("trigger-gated loop %q at iteration %d exceeds max_iterations %d; refusing to advance", rootBeadID, nextIteration, maxIter)
 	}
 
-	env := ConditionEnv{
-		BeadID:      rootBeadID,
-		Iteration:   nextIteration,
-		CityPath:    cityPath,
-		StorePath:   h.StorePath,
-		DocPath:     meta[VarPrefix+"doc_path"],
-		ArtifactDir: ArtifactDirFor(cityPath, rootBeadID, nextIteration),
-	}
-	if maxIter, ok := DecodeInt(meta[FieldMaxIterations]); ok {
-		env.MaxIterations = maxIter
-	}
+	env := TriggerConditionEnv(meta, rootBeadID, cityPath, h.StorePath, nextIteration)
 
 	result := RunCondition(ctx, triggerConfig.Condition, env, gateConfig.Timeout, 0)
 	if result.Outcome != GatePass {
@@ -109,6 +99,27 @@ func (h *Handler) HandleTrigger(ctx context.Context, rootBeadID string) (Handler
 	}
 
 	return h.advanceFromTrigger(rootBeadID, meta, nextIteration)
+}
+
+// TriggerConditionEnv builds the ConditionEnv used to evaluate a trigger
+// condition for nextIteration — the iteration the trigger gates and pours when
+// it passes. HandleTrigger (live controller evaluation) and the
+// `gc converge test-trigger` dry-run both call this so the dry-run cannot drift
+// from production: same iteration source (closed wisps + 1, computed by the
+// caller), same artifact dir, same doc-path and max-iterations wiring.
+func TriggerConditionEnv(meta map[string]string, beadID, cityPath, storePath string, nextIteration int) ConditionEnv {
+	env := ConditionEnv{
+		BeadID:      beadID,
+		Iteration:   nextIteration,
+		CityPath:    cityPath,
+		StorePath:   storePath,
+		DocPath:     meta[VarPrefix+"doc_path"],
+		ArtifactDir: ArtifactDirFor(cityPath, beadID, nextIteration),
+	}
+	if maxIter, ok := DecodeInt(meta[FieldMaxIterations]); ok {
+		env.MaxIterations = maxIter
+	}
+	return env
 }
 
 // advanceFromTrigger pours and activates the next iteration's wisp after the
@@ -144,15 +155,22 @@ func (h *Handler) advanceFromTrigger(rootBeadID string, meta map[string]string, 
 		return HandlerResult{}, fmt.Errorf("setting state to active: %w", err)
 	}
 
-	// Emit a ConvergenceIteration event recording the trigger-driven advance.
-	iterPayload := IterationPayload{
+	// Emit a ConvergenceTriggerAdvance event recording the trigger-driven
+	// waiting_trigger -> active transition. This mirrors the manual_iterate
+	// event for the waiting_manual -> active transition (manual.go): a distinct
+	// event type and ID so it cannot collide with the per-wisp iteration event
+	// that the newly poured wisp emits when it closes (both would otherwise
+	// derive EventIDIteration(rootBeadID, nextIteration)). WispID is the prior
+	// (last processed) wisp and is null on the entry-gated first iteration.
+	advancePayload := ManualActionPayload{
+		Actor:      "controller",
+		PriorState: StateWaitingTrigger,
+		NewState:   StateActive,
 		Iteration:  nextIteration,
-		WispID:     meta[FieldLastProcessedWisp],
-		GateMode:   meta[FieldGateMode],
-		Action:     string(ActionIterate),
+		WispID:     NullableString(meta[FieldLastProcessedWisp]),
 		NextWispID: NullableString(nextWispID),
 	}
-	h.emitEvent(EventIteration, EventIDIteration(rootBeadID, nextIteration), rootBeadID, iterPayload)
+	h.emitEvent(EventTriggerAdvance, EventIDTriggerAdvance(rootBeadID, nextIteration), rootBeadID, advancePayload)
 
 	return HandlerResult{
 		Action:     ActionIterate,

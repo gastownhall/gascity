@@ -584,16 +584,22 @@ func newConvergeTestTriggerCmd(stdout, stderr io.Writer) *cobra.Command {
 				return errExit
 			}
 
-			iter, _ := convergence.DecodeInt(meta[convergence.FieldIteration])
-			maxIter, _ := convergence.DecodeInt(meta[convergence.FieldMaxIterations])
-			env := convergence.ConditionEnv{
-				BeadID:        beadID,
-				Iteration:     iter,
-				MaxIterations: maxIter,
-				CityPath:      rctx.CityPath,
-				StorePath:     storePath,
-				DocPath:       meta[convergence.VarPrefix+"doc_path"],
+			// Mirror HandleTrigger: the trigger gates the NEXT iteration to be
+			// poured (closed wisps + 1), evaluated with the same env contract
+			// (iteration source + artifact dir) the controller uses live, so the
+			// dry-run does not misrepresent GC_ITERATION / GC_ARTIFACT_DIR to the
+			// trigger condition script.
+			closed, err := convergeClosedIterations(store, beadID)
+			if err != nil {
+				fmt.Fprintf(stderr, "gc converge test-trigger: %v\n", err) //nolint:errcheck
+				return errExit
 			}
+			nextIteration := closed + 1
+			cityPath := meta[convergence.FieldCityPath]
+			if cityPath == "" {
+				cityPath = rctx.CityPath
+			}
+			env := convergence.TriggerConditionEnv(meta, beadID, cityPath, storePath, nextIteration)
 
 			if !jsonOutput {
 				fmt.Fprintf(stdout, "Testing trigger: %s\n", triggerConfig.Condition) //nolint:errcheck
@@ -631,6 +637,28 @@ func newConvergeTestTriggerCmd(stdout, stderr io.Writer) *cobra.Command {
 	}
 	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Output JSONL summary")
 	return cmd
+}
+
+// convergeClosedIterations counts closed iteration wisps under a convergence
+// root bead, mirroring the controller's Handler.deriveIterationCount over the
+// beads.Store boundary (the convergence store adapter surfaces the wisp
+// idempotency key via Metadata["idempotency_key"]). The test-trigger dry-run
+// uses it to compute the next iteration the trigger gates. The store error is
+// propagated rather than swallowed so the dry-run fails loudly instead of
+// silently reporting iteration 1, matching the live HandleTrigger path.
+func convergeClosedIterations(store beads.Store, beadID string) (int, error) {
+	children, err := store.Children(beadID, beads.IncludeClosed)
+	if err != nil {
+		return 0, fmt.Errorf("listing children of %s: %w", beadID, err)
+	}
+	prefix := convergence.IdempotencyKeyPrefix(beadID)
+	count := 0
+	for _, c := range children {
+		if c.Status == "closed" && c.Metadata != nil && strings.HasPrefix(c.Metadata["idempotency_key"], prefix) {
+			count++
+		}
+	}
+	return count, nil
 }
 
 func newConvergeRetryCmd(stdout, stderr io.Writer) *cobra.Command {
