@@ -1321,6 +1321,7 @@ gc formula
 | [gc formula cook](#gc-formula-cook) | Instantiate a formula into the current bead store |
 | [gc formula list](#gc-formula-list) | List available formulas |
 | [gc formula show](#gc-formula-show) | Show a compiled formula recipe |
+| [gc formula version-check](#gc-formula-version-check) | Check if a bead's formula matches the current on-disk version |
 
 ## gc formula cook
 
@@ -1385,6 +1386,27 @@ gc formula show <formula-name> [flags]
 |------|------|---------|-------------|
 | `--json` | bool |  | emit JSON |
 | `--var` | stringArray |  | variable substitution for preview (key=value) |
+
+## gc formula version-check
+
+Compare the formula content hash stored on a molecule/workflow bead
+against the current on-disk formula file. Exits 0 if they match, 1 if
+they diverge.
+
+The bead must have gc.formula_hash metadata (set during instantiation).
+The formula is located via the bead's Ref field and the current formula
+search paths.
+
+Use this to detect whether a running session's formula has been updated
+since it was spawned.
+
+```
+gc formula version-check <bead-id> [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--json` | bool |  | output result as JSON |
 
 ## gc github
 

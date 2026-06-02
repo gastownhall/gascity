@@ -2463,10 +2463,10 @@ func TestBuildRecipeApplyPlan_PreserveRootTypeKeepsTaskRoot(t *testing.T) {
 func TestInstantiateStampsFormulaHash(t *testing.T) {
 	store := beads.NewMemStore()
 	recipe := &formula.Recipe{
-		Name:           "mol-hash-check",
-		Description:    "Test hash stamping",
-		ContentHash:    "abc123def456",
-		FormulaSource:  "/path/to/mol-hash-check.toml",
+		Name:          "mol-hash-check",
+		Description:   "Test hash stamping",
+		ContentHash:   "abc123def456",
+		FormulaSource: "/path/to/mol-hash-check.toml",
 		Steps: []formula.RecipeStep{
 			{ID: "mol-hash-check", Title: "Root", Type: "molecule", IsRoot: true},
 			{ID: "mol-hash-check.step-a", Title: "Step A", Type: "task"},
