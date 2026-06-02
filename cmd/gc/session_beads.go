@@ -1076,7 +1076,7 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 			if tp.WorkDir != "" {
 				meta["work_dir"] = tp.WorkDir
 			}
-			if tp.WakeMode != "" && tp.WakeMode != "resume" {
+			if tp.WakeMode != "" {
 				meta["wake_mode"] = tp.WakeMode
 			}
 			if isConfiguredNamed {
