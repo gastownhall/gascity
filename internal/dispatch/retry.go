@@ -49,7 +49,7 @@ func processRetryEval(store beads.Store, bead beads.Bead, opts ProcessOptions) (
 		return ControlResult{}, ErrControlPending
 	}
 
-	result, err := classifyRetryAttemptWithPostconditions(store, subject)
+	result, err := classifyRetryAttemptWithPostconditions(store, subject, opts)
 	if err != nil {
 		return ControlResult{}, fmt.Errorf("%s: evaluating retry postconditions for %s: %w", bead.ID, subject.ID, err)
 	}
@@ -276,12 +276,12 @@ func classifyRetryAttempt(subject beads.Bead) retryEvalResult {
 	}
 }
 
-func classifyRetryAttemptWithPostconditions(store beads.Store, subject beads.Bead) (retryEvalResult, error) {
+func classifyRetryAttemptWithPostconditions(store beads.Store, subject beads.Bead, opts ProcessOptions) (retryEvalResult, error) {
 	result := classifyRetryAttempt(subject)
 	if result.Outcome != "pass" {
 		return result, nil
 	}
-	reason, err := validateRequiredArtifacts(store, subject)
+	reason, err := validateRequiredArtifacts(store, subject, opts.RequiredArtifactStat)
 	if err != nil {
 		return retryEvalResult{}, err
 	}
@@ -291,7 +291,10 @@ func classifyRetryAttemptWithPostconditions(store beads.Store, subject beads.Bea
 	return result, nil
 }
 
-func validateRequiredArtifacts(store beads.Store, subject beads.Bead) (string, error) {
+func validateRequiredArtifacts(store beads.Store, subject beads.Bead, stat func(string) (os.FileInfo, error)) (string, error) {
+	if stat == nil {
+		stat = os.Stat
+	}
 	for _, rawPath := range requiredArtifactTemplates(subject.Metadata) {
 		path, reason, err := resolveRequiredArtifactPath(store, subject, rawPath)
 		if err != nil {
@@ -300,7 +303,7 @@ func validateRequiredArtifacts(store beads.Store, subject beads.Bead) (string, e
 		if reason != "" {
 			return reason, nil
 		}
-		info, err := os.Stat(path)
+		info, err := stat(path)
 		if err != nil {
 			if os.IsNotExist(err) {
 				return "missing_required_artifact", nil
@@ -316,17 +319,18 @@ func validateRequiredArtifacts(store beads.Store, subject beads.Bead) (string, e
 
 func requiredArtifactTemplates(metadata map[string]string) []string {
 	var result []string
-	for _, key := range []string{"gc.required_artifact", "gc.required_artifacts"} {
-		raw := strings.TrimSpace(metadata[key])
-		if raw == "" {
-			continue
-		}
-		for _, part := range strings.FieldsFunc(raw, func(r rune) bool {
-			return r == '\n' || r == ','
-		}) {
-			if trimmed := strings.TrimSpace(part); trimmed != "" {
-				result = append(result, trimmed)
-			}
+	if raw := strings.TrimSpace(metadata["gc.required_artifact"]); raw != "" {
+		result = append(result, raw)
+	}
+	raw := strings.TrimSpace(metadata["gc.required_artifacts"])
+	if raw == "" {
+		return result
+	}
+	for _, part := range strings.FieldsFunc(raw, func(r rune) bool {
+		return r == '\n' || r == ','
+	}) {
+		if trimmed := strings.TrimSpace(part); trimmed != "" {
+			result = append(result, trimmed)
 		}
 	}
 	return result
@@ -337,7 +341,7 @@ func resolveRequiredArtifactPath(store beads.Store, subject beads.Bead, rawPath 
 	attempt := strings.TrimSpace(subject.Metadata["gc.attempt"])
 	worktree := strings.TrimSpace(subject.Metadata["work_dir"])
 
-	if strings.Contains(rawPath, "{worktree}") || (!filepath.IsAbs(rawPath) && worktree == "") {
+	if worktree == "" {
 		resolvedWorktree, reason, err := resolveRequiredArtifactWorktree(store, rootID)
 		if err != nil {
 			return "", "", err
@@ -346,6 +350,9 @@ func resolveRequiredArtifactPath(store beads.Store, subject beads.Bead, rawPath 
 			return "", reason, nil
 		}
 		worktree = resolvedWorktree
+	}
+	if worktree == "" {
+		return "", "missing_required_artifact_context", nil
 	}
 
 	path := rawPath
@@ -357,12 +364,33 @@ func resolveRequiredArtifactPath(store beads.Store, subject beads.Bead, rawPath 
 		return "", "unresolved_required_artifact_template", nil
 	}
 	if !filepath.IsAbs(path) {
-		if worktree == "" {
-			return "", "missing_required_artifact_context", nil
-		}
 		path = filepath.Join(worktree, path)
 	}
-	return filepath.Clean(path), "", nil
+	path = filepath.Clean(path)
+	contained, err := requiredArtifactPathInWorktree(worktree, path)
+	if err != nil {
+		return "", "", err
+	}
+	if !contained {
+		return "", "required_artifact_outside_worktree", nil
+	}
+	return path, "", nil
+}
+
+func requiredArtifactPathInWorktree(worktree, path string) (bool, error) {
+	absWorktree, err := filepath.Abs(filepath.Clean(worktree))
+	if err != nil {
+		return false, fmt.Errorf("resolving required artifact worktree path %q: %w", worktree, err)
+	}
+	absPath, err := filepath.Abs(filepath.Clean(path))
+	if err != nil {
+		return false, fmt.Errorf("resolving required artifact path %q: %w", path, err)
+	}
+	rel, err := filepath.Rel(absWorktree, absPath)
+	if err != nil {
+		return false, fmt.Errorf("checking required artifact path containment for %q: %w", path, err)
+	}
+	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && !filepath.IsAbs(rel)), nil
 }
 
 func resolveRequiredArtifactWorktree(store beads.Store, rootID string) (string, string, error) {

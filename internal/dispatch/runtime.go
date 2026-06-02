@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 	"time"
@@ -40,6 +41,9 @@ type ProcessOptions struct {
 	PrepareFragment    func(*formula.FragmentRecipe, beads.Bead) error
 	PrepareRecipe      func(*formula.Recipe, beads.Bead) error
 	RecycleSession     func(beads.Bead) error
+	// RequiredArtifactStat checks required-artifact files. When nil, the
+	// dispatcher uses os.Stat.
+	RequiredArtifactStat func(path string) (os.FileInfo, error)
 	// ResolveStoreRef opens the bead store identified by a gc.source_store_ref
 	// value (e.g. "city:foo", "rig:alpha"). Used by processWorkflowFinalize to
 	// propagate successful workflow completion across store boundaries: when
