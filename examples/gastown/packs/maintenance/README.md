@@ -36,14 +36,18 @@ or changed sits unclaimed against any worker not currently in an active turn
 cycle. This order ships that workaround.
 
 **Event contract.** Triggers on `bead.updated`. For each event whose bead
-carries a non-empty `metadata.gc.routed_to`, runs:
+carries a non-empty `metadata.gc.routed_to`, nudges that target with
+`check for assigned work`.
 
-```
-gc session nudge <routed_to> "check for assigned work"
-```
-
-`routed_to` is a self-describing session target (e.g. a pool path or session
-alias), so no rig scoping is needed.
+`routed_to` may be a concrete session **or** a pool base. Sling collapses a
+multi-session slot to the pool base (`NormalizePoolRouteTarget`), so a
+pool-routed bead's `routed_to` is the members' `template`, not a name
+`gc session nudge` can resolve. The script handles both: it enumerates the
+pool's active members via `gc session list --template <routed_to>` and nudges
+each, falling back to a direct `gc session nudge <routed_to>` when the target
+has no members (a single-session agent or an explicit slot). Without this,
+nudges to a pool base silently no-op — defeating the warm-idle pool wake this
+order exists to provide.
 
 **Idempotence.** A `(bead, routed_to)` pair is nudged at most once. The
 reconciler re-emits `bead.updated` for an actively-routed bead, so the dedup

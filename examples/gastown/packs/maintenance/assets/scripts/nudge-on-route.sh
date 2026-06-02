@@ -54,6 +54,32 @@ duration_to_seconds() {
     esac
 }
 
+# Nudge the session(s) named by a routed_to target. A multi-session pool
+# routes to the pool BASE (NormalizePoolRouteTarget collapses slot -> base),
+# which is the members' `template`, not a session name — `gc session nudge`
+# resolves a single session and cannot target a pool base. So enumerate the
+# pool's active members by template and nudge each; a target with no members
+# (a single-session agent, or an explicit slot name) is nudged directly.
+# Returns 0 if at least one nudge succeeded, non-zero otherwise.
+nudge_routed_target() {
+    _target="$1"
+    _members="$(gc session list --json --state active --template "$_target" 2>/dev/null \
+        | jq -r '(.sessions // [])[] | .name // .id' 2>/dev/null)" || _members=""
+    if [ -n "$_members" ]; then
+        _any=1
+        while IFS= read -r _m; do
+            [ -n "$_m" ] || continue
+            if gc session nudge "$_m" "$NUDGE_MESSAGE" >/dev/null 2>&1; then
+                _any=0
+            fi
+        done <<MEMBERS
+$_members
+MEMBERS
+        return "$_any"
+    fi
+    gc session nudge "$_target" "$NUDGE_MESSAGE" >/dev/null 2>&1
+}
+
 # Pull recent bead.updated events. Best-effort: a read failure (API down)
 # must not crash the controller's order loop.
 EVENTS="$(gc events --type bead.updated --since "$LOOKBACK" 2>/dev/null)" || exit 0
@@ -84,7 +110,7 @@ while IFS="$(printf '\t')" read -r bead_id routed_to; do
         STATE="$(echo "$STATE" | jq --arg k "$key" --arg now "$NOW" '.[$k] = $now')"
         continue
     fi
-    if gc session nudge "$routed_to" "$NUDGE_MESSAGE" >/dev/null 2>&1; then
+    if nudge_routed_target "$routed_to"; then
         STATE="$(echo "$STATE" | jq --arg k "$key" --arg now "$NOW" '.[$k] = $now')"
         NUDGED=$((NUDGED + 1))
     fi

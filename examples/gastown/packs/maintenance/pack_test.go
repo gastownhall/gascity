@@ -91,3 +91,22 @@ func TestNudgeOnRouteOrder(t *testing.T) {
 func TestCascadeNudgeOnBlockerCloseOrder(t *testing.T) {
 	assertEventExecOrder(t, "cascade-nudge-on-blocker-close.toml", "bead.closed", "cascade-nudge-on-blocker-close.sh")
 }
+
+// TestNudgeOnRouteResolvesPoolMembers guards the pool-base fan-out: a
+// multi-session pool routes to the pool BASE (sling's NormalizePoolRouteTarget
+// collapses slot -> base), which is the members' template, not a session name
+// `gc session nudge` can resolve. The script must therefore enumerate pool
+// members by template before nudging — a naive `gc session nudge "$routed_to"`
+// silently no-ops for exactly the warm-idle pool workers this order targets.
+func TestNudgeOnRouteResolvesPoolMembers(t *testing.T) {
+	data, err := fs.ReadFile(PackFS, "assets/scripts/nudge-on-route.sh")
+	if err != nil {
+		t.Fatalf("reading nudge-on-route.sh: %v", err)
+	}
+	body := string(data)
+	for _, want := range []string{"gc session list", "--template"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("nudge-on-route.sh must resolve pool members; missing %q", want)
+		}
+	}
+}
