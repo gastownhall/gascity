@@ -71,6 +71,69 @@ class PathsMatchTests(unittest.TestCase):
         self.assertTrue(cov.paths_match(["go.mod"], ["go.mod"]))
         self.assertFalse(cov.paths_match(["go.sum"], ["go.mod"]))
 
+    def test_trailing_wildcard_matches_within_segment(self) -> None:
+        # `cmd/gc/session_*` and `contrib/session-scripts/gc-session-k8s*`
+        self.assertTrue(cov.paths_match(["cmd/gc/session_pool.go"], ["cmd/gc/session_*"]))
+        self.assertTrue(
+            cov.paths_match(
+                ["contrib/session-scripts/gc-session-k8s-runner"],
+                ["contrib/session-scripts/gc-session-k8s*"],
+            )
+        )
+
+    def test_trailing_wildcard_does_not_cross_slash(self) -> None:
+        # `*` must not match a path separator, mirroring picomatch/dorny.
+        self.assertFalse(cov.paths_match(["cmd/gc/session_sub/extra.go"], ["cmd/gc/session_*"]))
+
+    def test_mid_path_wildcard_with_suffix(self) -> None:
+        # `cmd/gc/template_resolve*.go`
+        self.assertTrue(
+            cov.paths_match(
+                ["cmd/gc/template_resolve_t3bridge.go"],
+                ["cmd/gc/template_resolve*.go"],
+            )
+        )
+        self.assertFalse(
+            cov.paths_match(
+                ["cmd/gc/template_resolve_t3bridge.txt"], ["cmd/gc/template_resolve*.go"]
+            )
+        )
+
+    def test_embedded_globstar(self) -> None:
+        # `test/**worker**` matches any test path containing "worker".
+        self.assertTrue(
+            cov.paths_match(["test/integration/session_worker_test.go"], ["test/**worker**"])
+        )
+        self.assertFalse(cov.paths_match(["test/integration/mail_test.go"], ["test/**worker**"]))
+
+    def test_root_file_matches_leading_globstar_suffix(self) -> None:
+        # `**/*.go` must match a repo-root file, not only nested ones.
+        self.assertTrue(cov.paths_match(["main.go"], ["**/*.go"]))
+
+    def test_simulator_handles_every_glob_shape_in_ci_yml(self) -> None:
+        """Regression guard: a representative path for each real ci.yml glob
+        must match its glob. Catches a filter glob whose shape the simulator
+        silently fails to match (the under-fire failure mode this module
+        exists to detect)."""
+        # One sample path constructed to match each glob shape present in the
+        # ci.yml filters. Globstar/literal shapes are exercised above; this
+        # pins the trailing/mid-path single-star shapes against the live globs.
+        samples = {
+            "cmd/gc/template_resolve*.go": "cmd/gc/template_resolve_t3bridge.go",
+            "cmd/gc/session_*": "cmd/gc/session_pool.go",
+            "contrib/session-scripts/gc-session-k8s*": (
+                "contrib/session-scripts/gc-session-k8s-runner"
+            ),
+            "test/**worker**": "test/integration/session_worker_test.go",
+        }
+        all_globs = {glob for globs in _filter_globs().values() for glob in globs}
+        for glob, sample in samples.items():
+            self.assertIn(glob, all_globs, f"sample glob no longer present in ci.yml: {glob}")
+            self.assertTrue(
+                cov.paths_match([sample], [glob]),
+                f"simulator fails to match {sample!r} against live ci.yml glob {glob!r}",
+            )
+
 
 class AggregateTests(unittest.TestCase):
     def test_percentages(self) -> None:
