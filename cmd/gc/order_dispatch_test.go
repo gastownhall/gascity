@@ -374,7 +374,7 @@ func TestOrderDispatchResolvesPackBindingForPool(t *testing.T) {
 	}
 
 	m.dispatch(context.Background(), t.TempDir(), time.Now())
-	time.Sleep(50 * time.Millisecond)
+	m.drain(context.Background())
 
 	work := workBeadByOrderLabel(t, store, "order-run:mol-dog-doctor")
 	if got := work.Metadata["gc.routed_to"]; got != "maintenance.dog" {
@@ -416,7 +416,7 @@ func TestOrderDispatchPrefersCityShadowForPool(t *testing.T) {
 	}
 
 	m.dispatch(context.Background(), t.TempDir(), time.Now())
-	time.Sleep(50 * time.Millisecond)
+	m.drain(context.Background())
 
 	work := workBeadByOrderLabel(t, store, "order-run:mol-dog-doctor")
 	if got := work.Metadata["gc.routed_to"]; got != "dog" {
@@ -1762,7 +1762,7 @@ description = "Target: {{target_id}}, workspace: {{workspace}}"
 	mad.rec = &rec
 
 	ad.dispatch(context.Background(), t.TempDir(), time.Now())
-	time.Sleep(100 * time.Millisecond)
+	ad.drain(context.Background())
 
 	all := trackingBeads(t, store, "order-run:fail-formula-vars")
 	hasFailed := false
@@ -6030,7 +6030,7 @@ func TestOrderDispatchSkipsOpenTrackingBeadForConditionOrder(t *testing.T) {
 	ad := buildOrderDispatcherFromListExec(aa, store, nil, fakeExec, nil)
 
 	ad.dispatch(context.Background(), t.TempDir(), time.Now())
-	time.Sleep(50 * time.Millisecond)
+	ad.drain(context.Background())
 
 	if ran {
 		t.Error("exec should not have run while an order-tracking bead is open")
