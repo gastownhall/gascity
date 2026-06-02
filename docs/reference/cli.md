@@ -705,6 +705,7 @@ gc converge
 | [gc converge status](#gc-converge-status) | Show convergence loop status |
 | [gc converge stop](#gc-converge-stop) | Stop a convergence loop |
 | [gc converge test-gate](#gc-converge-test-gate) | Dry-run the gate condition (no state changes) |
+| [gc converge test-trigger](#gc-converge-test-trigger) | Dry-run the trigger condition (no state changes) |
 
 ## gc converge approve
 
@@ -738,6 +739,8 @@ gc converge create [flags]
 | `--max-iterations` | int | `5` | Maximum iterations |
 | `--target` | string |  | Target agent (required) |
 | `--title` | string |  | Convergence loop title |
+| `--trigger` | string |  | Iteration trigger mode: event (gate each iteration on --trigger-condition). Empty disables. |
+| `--trigger-condition` | string |  | Path to trigger condition script (required when --trigger=event) |
 | `--var` | stringArray |  | Template variable (key=value, repeatable) |
 
 ## gc converge iterate
@@ -810,6 +813,18 @@ Dry-run the gate condition (no state changes)
 
 ```
 gc converge test-gate <bead-id> [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--json` | bool |  | Output JSONL summary |
+
+## gc converge test-trigger
+
+Dry-run the trigger condition (no state changes)
+
+```
+gc converge test-trigger <bead-id> [flags]
 ```
 
 | Flag | Type | Default | Description |
