@@ -591,6 +591,143 @@ func supervisorServiceEnvMap(vars []supervisorServiceEnvVar) map[string]string {
 	return m
 }
 
+// writeSupervisorSecretsEnvFile writes dotenv content to ${GC_HOME}/secrets.env,
+// creating GC_HOME if needed. GC_HOME must already be set in the environment.
+func writeSupervisorSecretsEnvFile(t *testing.T, content string) {
+	t.Helper()
+	path := supervisorSecretsEnvFilePath()
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatalf("creating GC_HOME for secrets file: %v", err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("writing secrets file: %v", err)
+	}
+}
+
+// TestBuildSupervisorServiceDataMergesSecretsEnvFile asserts the durable fix
+// for credentials that live only in ${GC_HOME}/secrets.env: with the secret
+// absent from the calling shell, it still reaches the service env. A
+// non-allowlisted key in the file is dropped; a GC_SUPERVISOR_ENV opt-in key
+// present only in the file is honored.
+func TestBuildSupervisorServiceDataMergesSecretsEnvFile(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	t.Setenv("GC_HOME", filepath.Join(homeDir, ".gc"))
+	t.Setenv("PATH", "/usr/local/bin:/usr/bin:/bin")
+	t.Setenv("GC_SUPERVISOR_ENV", "CUSTOM_PROVIDER_TOKEN")
+	// Ensure the keys are NOT present in the calling shell's environment.
+	t.Setenv("ANTHROPIC_AUTH_TOKEN", "")
+	t.Setenv("CUSTOM_PROVIDER_TOKEN", "")
+	t.Setenv("UNRELATED_SECRET", "")
+
+	writeSupervisorSecretsEnvFile(t, `# machine-local provider secrets
+ANTHROPIC_AUTH_TOKEN=sk-from-file
+CUSTOM_PROVIDER_TOKEN=custom-from-file
+UNRELATED_SECRET=do-not-persist
+`)
+
+	data, err := buildSupervisorServiceData()
+	if err != nil {
+		t.Fatalf("buildSupervisorServiceData: %v", err)
+	}
+
+	got := supervisorServiceEnvMap(data.ExtraEnv)
+	for key, want := range map[string]string{
+		"ANTHROPIC_AUTH_TOKEN":  "sk-from-file",
+		"CUSTOM_PROVIDER_TOKEN": "custom-from-file",
+	} {
+		if got[key] != want {
+			t.Fatalf("ExtraEnv[%s] = %q, want %q (all env: %#v)", key, got[key], want, got)
+		}
+	}
+	if _, ok := got["UNRELATED_SECRET"]; ok {
+		t.Fatalf("ExtraEnv should not include non-allowlisted UNRELATED_SECRET: %#v", got)
+	}
+}
+
+// TestBuildSupervisorServiceDataShellEnvWinsOverSecretsFile asserts the
+// gap-fill precedence: a value exported in the calling shell takes precedence
+// over the same key in ${GC_HOME}/secrets.env.
+func TestBuildSupervisorServiceDataShellEnvWinsOverSecretsFile(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	t.Setenv("GC_HOME", filepath.Join(homeDir, ".gc"))
+	t.Setenv("PATH", "/usr/local/bin:/usr/bin:/bin")
+	t.Setenv("ANTHROPIC_AUTH_TOKEN", "sk-from-shell")
+
+	writeSupervisorSecretsEnvFile(t, "ANTHROPIC_AUTH_TOKEN=sk-from-file\n")
+
+	data, err := buildSupervisorServiceData()
+	if err != nil {
+		t.Fatalf("buildSupervisorServiceData: %v", err)
+	}
+
+	if got := supervisorServiceEnvMap(data.ExtraEnv); got["ANTHROPIC_AUTH_TOKEN"] != "sk-from-shell" {
+		t.Fatalf("ExtraEnv[ANTHROPIC_AUTH_TOKEN] = %q, want shell value %q",
+			got["ANTHROPIC_AUTH_TOKEN"], "sk-from-shell")
+	}
+}
+
+// TestBuildSupervisorServiceDataSecretsFileRespectsOmitProviderCreds asserts
+// that the provider-credential opt-out also suppresses provider keys sourced
+// from the secrets file.
+func TestBuildSupervisorServiceDataSecretsFileRespectsOmitProviderCreds(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	t.Setenv("GC_HOME", filepath.Join(homeDir, ".gc"))
+	t.Setenv("PATH", "/usr/local/bin:/usr/bin:/bin")
+	t.Setenv("ANTHROPIC_AUTH_TOKEN", "")
+	t.Setenv(supervisorOmitProviderCredsEnv, "1")
+
+	writeSupervisorSecretsEnvFile(t, "ANTHROPIC_AUTH_TOKEN=sk-from-file\n")
+
+	data, err := buildSupervisorServiceData()
+	if err != nil {
+		t.Fatalf("buildSupervisorServiceData: %v", err)
+	}
+
+	if _, ok := supervisorServiceEnvMap(data.ExtraEnv)["ANTHROPIC_AUTH_TOKEN"]; ok {
+		t.Fatalf("ExtraEnv should not include provider key from secrets file when %s=1",
+			supervisorOmitProviderCredsEnv)
+	}
+}
+
+// TestBuildSupervisorServiceDataMissingSecretsFileIsNotAnError asserts that the
+// absence of ${GC_HOME}/secrets.env is the normal case and does not fail.
+func TestBuildSupervisorServiceDataMissingSecretsFileIsNotAnError(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	t.Setenv("GC_HOME", filepath.Join(homeDir, ".gc"))
+	t.Setenv("PATH", "/usr/local/bin:/usr/bin:/bin")
+
+	if _, err := buildSupervisorServiceData(); err != nil {
+		t.Fatalf("buildSupervisorServiceData with no secrets file: %v", err)
+	}
+}
+
+// TestBuildSupervisorServiceDataMalformedSecretsFileDegradesGracefully asserts
+// the documented fail-safe: a malformed secrets file does not block service
+// file generation (no error) and contributes no env — the malformed file is
+// ignored rather than partially applied, so the good first line must not leak
+// through.
+func TestBuildSupervisorServiceDataMalformedSecretsFileDegradesGracefully(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	t.Setenv("GC_HOME", filepath.Join(homeDir, ".gc"))
+	t.Setenv("PATH", "/usr/local/bin:/usr/bin:/bin")
+	t.Setenv("ANTHROPIC_AUTH_TOKEN", "")
+
+	writeSupervisorSecretsEnvFile(t, "ANTHROPIC_AUTH_TOKEN=sk-from-file\nMALFORMED LINE WITHOUT EQUALS\n")
+
+	data, err := buildSupervisorServiceData()
+	if err != nil {
+		t.Fatalf("buildSupervisorServiceData with malformed secrets file: %v", err)
+	}
+	if _, ok := supervisorServiceEnvMap(data.ExtraEnv)["ANTHROPIC_AUTH_TOKEN"]; ok {
+		t.Fatalf("ExtraEnv should not include any key from a malformed secrets file")
+	}
+}
+
 // TestBuildSupervisorServiceDataForwardsRepresentativeProviderPrefixes asserts
 // that representative provider-prefix credentials are forwarded into the
 // supervisor's persistent env. internal/processenv owns complete allowlist

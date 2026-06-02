@@ -822,6 +822,10 @@ var supervisorServiceFixedEnvKeys = map[string]bool{
 func supervisorServiceExtraEnv() []supervisorServiceEnvVar {
 	env := make(map[string]string)
 	explicitEnvKeys := supervisorServiceExplicitEnvKeys(os.Getenv("GC_SUPERVISOR_ENV"))
+	explicitEnvKeySet := make(map[string]bool, len(explicitEnvKeys))
+	for _, key := range explicitEnvKeys {
+		explicitEnvKeySet[key] = true
+	}
 	for _, entry := range os.Environ() {
 		key, val, ok := strings.Cut(entry, "=")
 		if !ok || val == "" || !shouldPersistSupervisorEnv(key) {
@@ -833,6 +837,29 @@ func supervisorServiceExtraEnv() []supervisorServiceEnvVar {
 		if val := os.Getenv(key); val != "" {
 			env[key] = val
 		}
+	}
+	// Merge a persistent machine-local secrets file (${GC_HOME}/secrets.env)
+	// as a fallback tier. `gc start` snapshots the calling shell's env into
+	// the service file, so a credential that lives only in this file and was
+	// never exported into the invoking shell would otherwise be dropped —
+	// yielding a blank value and a silent provider auth failure. A non-empty
+	// value already in env (from the shell scan or a GC_SUPERVISOR_ENV opt-in)
+	// still takes precedence; the file only fills keys those tiers left unset.
+	// As elsewhere in this function, an empty value counts as unset. A file
+	// entry must clear the same gate the other tiers use — the persist
+	// allowlist or an explicit opt-in — so a stray key cannot bloat the
+	// service env.
+	for key, val := range supervisorSecretsEnvFileEntries() {
+		if val == "" {
+			continue
+		}
+		if _, ok := env[key]; ok {
+			continue
+		}
+		if !shouldPersistSupervisorEnv(key) && !explicitEnvKeySet[key] {
+			continue
+		}
+		env[key] = val
 	}
 	// Fall back to `launchctl getenv` for known-allowlisted keys and
 	// for GC_SUPERVISOR_ENV opt-ins. Without this, launchctl-set
@@ -890,6 +917,40 @@ func shouldPersistSupervisorEnv(key string) bool {
 
 func isProviderCredentialEnv(key string) bool {
 	return processenv.IsProviderCredentialEnv(key)
+}
+
+// supervisorSecretsEnvFileName is the dotenv-style file under GC_HOME that
+// supervisorServiceExtraEnv merges as a persistent, machine-local source of
+// provider credentials and other allowlisted service env.
+const supervisorSecretsEnvFileName = "secrets.env"
+
+// supervisorSecretsEnvFilePath returns the absolute path to the supervisor
+// secrets file (${GC_HOME}/secrets.env).
+func supervisorSecretsEnvFilePath() string {
+	return filepath.Join(supervisor.DefaultHome(), supervisorSecretsEnvFileName)
+}
+
+// supervisorSecretsEnvFileEntries reads ${GC_HOME}/secrets.env and returns its
+// parsed key/value pairs. A missing file is the normal case and yields nil. A
+// present-but-unreadable or malformed file is logged to stderr and ignored so
+// a bad secrets file never blocks supervisor install/start; the caller still
+// gates whatever is returned on the persist allowlist or an explicit
+// GC_SUPERVISOR_ENV opt-in.
+func supervisorSecretsEnvFileEntries() map[string]string {
+	path := supervisorSecretsEnvFilePath()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			fmt.Fprintf(os.Stderr, "gc: reading supervisor secrets file %q: %v\n", path, err)
+		}
+		return nil
+	}
+	entries, err := processenv.ParseEnvFile(string(data))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "gc: parsing supervisor secrets file %q: %v\n", path, err)
+		return nil
+	}
+	return entries
 }
 
 func supervisorServiceExplicitEnvKeys(raw string) []string {
