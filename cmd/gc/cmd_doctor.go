@@ -6,12 +6,15 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doctor"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/orders"
+	"github.com/gastownhall/gascity/internal/pathutil"
 	"github.com/spf13/cobra"
 )
 
@@ -19,6 +22,7 @@ var (
 	newDoctorDoltServerCheck    = doctor.NewDoltServerCheck
 	newDoctorRigDoltServerCheck = doctor.NewRigDoltServerCheck
 	newDoctorDoltBackupCheck    = doctor.NewDoltBackupCheck
+	newDoctorDoltLocalOnlyCheck = doctor.NewDoltLocalOnlyRemoteCheck
 )
 
 func newDoctorCmd(stdout, stderr io.Writer) *cobra.Command {
@@ -160,6 +164,20 @@ type buildDoctorChecksOpts struct {
 	SkipManagedDoltCheck bool
 }
 
+func doctorOrderFiringCurrentLastRunFunc(cityPath string, cfg *config.City, stderr io.Writer) doctor.OrderFiringCurrentLastRunFunc {
+	if stderr == nil {
+		stderr = io.Discard
+	}
+	resolveStores := cachedOrderHistoryStoresResolver(cityPath, cfg, stderr)
+	return func(order orders.Order) (time.Time, error) {
+		stores, err := resolveStores(order)
+		if err != nil {
+			return time.Time{}, err
+		}
+		return orders.LastRunAcrossStores(stores...)(order.ScopedName())
+	}
+}
+
 func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts buildDoctorChecksOpts) []doctor.Check {
 	var checks []doctor.Check
 	register := func(c doctor.Check) {
@@ -197,9 +215,11 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 		register(doctor.NewConfigSemanticsCheck(cfg, filepath.Join(cityPath, "city.toml")))
 		register(doctor.NewDurationRangeCheck(cfg))
 		register(doctor.NewProviderParityCheck(cfg))
+		register(doctor.NewFormulaRequirementsCheck(cfg, cityPath))
+		register(doctor.NewNamedAlwaysMinConflictCheck(cfg))
 		register(doctor.NewInstructionsFileCheck(cfg, cityPath))
 		register(doctor.NewSkillCollisionCheck(cfg, cityPath))
-		register(doctor.NewOrderFiringCurrentCheck(cfg, cityPath))
+		register(doctor.NewOrderFiringCurrentCheck(cfg, cityPath, doctor.WithOrderFiringCurrentLastRunFunc(doctorOrderFiringCurrentLastRunFunc(cityPath, cfg, opts.Stderr))))
 		register(newCodexHooksDriftCheck(codexHookWorkDirs(cityPath, cfg)))
 		register(doctor.NewRigPackCoverageCheck(cfg, cityPath))
 		register(newMCPConfigDoctorCheck(cityPath, cfg, exec.LookPath))
@@ -255,6 +275,7 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 		register(doctor.NewBDSplitStoreCheck(cityPath))
 		register(doctor.NewBeadsStoreCheck(cityPath, storeFactory))
 		register(newV2RoutedToNamespaceCheck(cfg, cityPath, storeFactory))
+		register(newRunTargetRoutedToBackfillCheck(cfg, cityPath, storeFactory))
 		register(&sessionModelDoctorCheck{cfg: cfg, cityPath: cityPath, newStore: storeFactory})
 	}
 	register(newDoctorDoltServerCheck(cityPath, opts.SkipCityDoltCheck))
@@ -313,6 +334,7 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 			// skip non-managed-bdstore rigs and GC_DOLT=skip environments.
 			if rigUsesManagedBdStoreContract(cityPath, rig) && !gcDoltSkip() {
 				register(newDoctorDoltBackupCheck(cityPath, rig, managedDoltDataDir))
+				register(newDoctorDoltLocalOnlyCheck(cityPath, rig, managedDoltDataDir))
 			}
 		}
 	}
@@ -332,6 +354,7 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 				Warmup:    entry.Warmup,
 			})
 		}
+		registerLocalDoctorChecksTo(register, cityPath, cfg.Doctor.Checks)
 	}
 
 	return checks
@@ -394,10 +417,82 @@ func (expandedConfigLoadCheck) Run(ctx *doctor.CheckContext) *doctor.CheckResult
 	if _, err := loadCityConfig(ctx.CityPath, io.Discard); err != nil {
 		return errorCheck("expanded-config-load",
 			fmt.Sprintf("expanded config load error: %v", err),
-			"fix the reported config, include, import, or pack-layout error and rerun gc doctor",
+			expandedConfigLoadFixHint(err),
 			nil)
 	}
 	return okCheck("expanded-config-load", "expanded config loaded")
+}
+
+func expandedConfigLoadFixHint(err error) string {
+	if config.IsFragmentLegacyV1SurfaceError(err) {
+		return "move fragment-authored legacy surfaces by hand; `gc doctor --fix` only rewrites root city.toml/pack.toml surfaces"
+	}
+	return "fix the reported config, include, import, or pack-layout error and rerun gc doctor"
+}
+
+func registerLocalDoctorChecks(d *doctor.Doctor, cityPath string, checks []config.LocalDoctorCheck) {
+	registerLocalDoctorChecksTo(d.Register, cityPath, checks)
+}
+
+func registerLocalDoctorChecksTo(register func(doctor.Check), cityPath string, checks []config.LocalDoctorCheck) {
+	for _, check := range checks {
+		checkName := "local:" + check.Name
+		script, err := resolveLocalDoctorScript(cityPath, check.Script)
+		if err != nil {
+			register(doctor.ErrorCheck(checkName, err.Error()))
+			continue
+		}
+
+		packCheck := &doctor.PackScriptCheck{
+			CheckName: checkName,
+			Script:    script,
+			PackDir:   cityPath,
+		}
+		if check.Fix != "" {
+			fixScript, err := resolveLocalDoctorFixScript(cityPath, check.Fix)
+			if err != nil {
+				register(doctor.ErrorCheck(checkName, err.Error()))
+				continue
+			}
+			packCheck.FixScript = fixScript
+		}
+		register(packCheck)
+	}
+}
+
+func resolveLocalDoctorScript(cityPath, scriptPath string) (string, error) {
+	return resolveLocalDoctorPath("script", cityPath, scriptPath)
+}
+
+func resolveLocalDoctorFixScript(cityPath, fixPath string) (string, error) {
+	return resolveLocalDoctorPath("fix path", cityPath, fixPath)
+}
+
+func resolveLocalDoctorPath(kind, cityPath, relPath string) (string, error) {
+	if relPath == "" {
+		return "", fmt.Errorf("%s must not be empty", kind)
+	}
+	if filepath.IsAbs(relPath) {
+		return "", fmt.Errorf("%s %q must be relative to the city root", kind, relPath)
+	}
+
+	candidate := filepath.Clean(filepath.Join(cityPath, relPath))
+	absCityPath, err := filepath.Abs(cityPath)
+	if err != nil {
+		return "", err
+	}
+	absCandidate, err := filepath.Abs(candidate)
+	if err != nil {
+		return "", err
+	}
+	rel, err := filepath.Rel(absCityPath, absCandidate)
+	if err != nil {
+		return "", err
+	}
+	if pathutil.IsOutsideDir(rel) {
+		return "", fmt.Errorf("%s %q escapes the city directory", kind, relPath)
+	}
+	return candidate, nil
 }
 
 // doctorJSONResult mirrors doctor.CheckResult for JSON output. Keeping the

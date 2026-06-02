@@ -1818,6 +1818,9 @@ func TestCookEndToEndCheckSyntax(t *testing.T) {
 formula = "ralph-demo"
 description = "Check cook test"
 
+[requires]
+formula_compiler = ">=2.0.0"
+
 [[steps]]
 id = "design"
 title = "Design"
@@ -1848,11 +1851,11 @@ timeout = "2m"
 		t.Fatalf("Cook: %v", err)
 	}
 
-	if result.Created != 5 {
-		t.Fatalf("Created = %d, want 5 (root + design + control + spec + iteration)", result.Created)
+	if result.Created != 6 {
+		t.Fatalf("Created = %d, want 6 (root + design + control + spec + iteration + finalize)", result.Created)
 	}
-	if result.GraphWorkflow {
-		t.Fatal("result.GraphWorkflow = true, want false without graph.v2 contract")
+	if !result.GraphWorkflow {
+		t.Fatal("result.GraphWorkflow = false, want true with compiler-v2 requirement")
 	}
 
 	root, err := store.Get(result.RootID)
@@ -1875,11 +1878,11 @@ timeout = "2m"
 	if control.Metadata["gc.kind"] != "ralph" {
 		t.Fatalf("control gc.kind = %q, want ralph", control.Metadata["gc.kind"])
 	}
-	if root.Metadata["gc.kind"] != "" {
-		t.Fatalf("root gc.kind = %q, want empty", root.Metadata["gc.kind"])
+	if root.Metadata["gc.kind"] != "workflow" {
+		t.Fatalf("root gc.kind = %q, want workflow", root.Metadata["gc.kind"])
 	}
-	if root.Type != "molecule" {
-		t.Fatalf("root type = %q, want molecule", root.Type)
+	if root.Type != "task" {
+		t.Fatalf("root type = %q, want task", root.Type)
 	}
 	if control.Metadata["gc.check_mode"] != "exec" {
 		t.Fatalf("control gc.check_mode = %q, want exec", control.Metadata["gc.check_mode"])
@@ -1896,8 +1899,8 @@ timeout = "2m"
 	if spec.Metadata["gc.spec_for"] != "implement" {
 		t.Fatalf("spec gc.spec_for = %q, want implement", spec.Metadata["gc.spec_for"])
 	}
-	if spec.Metadata["gc.spec_for_ref"] != "ralph-demo.implement" {
-		t.Fatalf("spec gc.spec_for_ref = %q, want ralph-demo.implement", spec.Metadata["gc.spec_for_ref"])
+	if spec.Metadata["gc.spec_for_ref"] != "implement" {
+		t.Fatalf("spec gc.spec_for_ref = %q, want implement", spec.Metadata["gc.spec_for_ref"])
 	}
 	var frozenSpec formula.Step
 	if err := json.Unmarshal([]byte(spec.Description), &frozenSpec); err != nil {
@@ -1912,11 +1915,11 @@ timeout = "2m"
 	if iteration.Metadata["gc.attempt"] != "1" {
 		t.Fatalf("iteration gc.attempt = %q, want 1", iteration.Metadata["gc.attempt"])
 	}
-	if iteration.ParentID != result.RootID {
-		t.Fatalf("iteration ParentID = %q, want root %q for molecule flow", iteration.ParentID, result.RootID)
+	if iteration.ParentID != "" {
+		t.Fatalf("iteration ParentID = %q, want empty for graph flow", iteration.ParentID)
 	}
-	if iteration.Metadata["gc.root_bead_id"] != "" {
-		t.Fatalf("iteration gc.root_bead_id = %q, want empty for molecule flow", iteration.Metadata["gc.root_bead_id"])
+	if iteration.Metadata["gc.root_bead_id"] != result.RootID {
+		t.Fatalf("iteration gc.root_bead_id = %q, want %q", iteration.Metadata["gc.root_bead_id"], result.RootID)
 	}
 	if iteration.Metadata["custom"] != "value" {
 		t.Fatalf("iteration custom metadata = %q, want value", iteration.Metadata["custom"])
@@ -1936,6 +1939,44 @@ timeout = "2m"
 	}
 	if !foundIterBlock {
 		t.Fatalf("control bead does not block on iteration bead; deps=%v", controlDeps)
+	}
+}
+
+func TestCookFormulaCompilerRequirementFailsBeforeDurableWrites(t *testing.T) {
+	prev := formula.IsFormulaV2Enabled()
+	formula.SetFormulaV2Enabled(false)
+	t.Cleanup(func() { formula.SetFormulaV2Enabled(prev) })
+
+	dir := t.TempDir()
+	toml := `
+formula = "needs-graph-compiler"
+
+[requires]
+formula_compiler = ">=2.0.0"
+
+[[steps]]
+id = "work"
+title = "Work"
+`
+	if err := os.WriteFile(filepath.Join(dir, "needs-graph-compiler.toml"), []byte(toml), 0o644); err != nil {
+		t.Fatalf("writing formula: %v", err)
+	}
+
+	store := beads.NewMemStore()
+	_, err := Cook(context.Background(), store, "needs-graph-compiler", []string{dir}, Options{})
+	if err == nil {
+		t.Fatal("Cook succeeded, want formula compiler requirement error")
+	}
+	if !strings.Contains(err.Error(), "formula.compiler_requirement_unsatisfied") {
+		t.Fatalf("Cook error = %v, want compiler requirement error", err)
+	}
+
+	got, err := store.List(beads.ListQuery{AllowScan: true, IncludeClosed: true})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("store has %d beads after failed Cook, want none: %+v", len(got), got)
 	}
 }
 

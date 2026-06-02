@@ -123,9 +123,6 @@ func TestTutorial01Cities(t *testing.T) {
 			for _, want := range []string{
 				`name = "my-city"`,
 				`schema = 2`,
-				`[[agent]]`,
-				`name = "mayor"`,
-				`prompt_template = "agents/mayor/prompt.template.md"`,
 				`[[named_session]]`,
 				`template = "mayor"`,
 				`mode = "always"`,

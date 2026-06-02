@@ -114,7 +114,7 @@ func TestDispatchAllQueuedNudgesNoOpInLegacyMode(t *testing.T) {
 	disableManagedDoltRecoveryForTest(t)
 
 	dir := t.TempDir()
-	if err := enqueueQueuedNudge(dir, newQueuedNudge("worker", "msg", "session", time.Now().Add(-time.Minute))); err != nil {
+	if err := enqueueQueuedNudge(dir, newQueuedNudge("worker", "msg", time.Now().Add(-time.Minute))); err != nil {
 		t.Fatalf("enqueueQueuedNudge: %v", err)
 	}
 	cfg := &config.City{Daemon: config.DaemonConfig{}} // legacy default
@@ -147,7 +147,7 @@ func TestDispatchAllQueuedNudgesSkipsNotYetDue(t *testing.T) {
 
 	dir := t.TempDir()
 	future := time.Now().Add(5 * time.Minute)
-	item := newQueuedNudge("worker", "later", "session", time.Now())
+	item := newQueuedNudge("worker", "later", time.Now())
 	item.DeliverAfter = future
 	if err := enqueueQueuedNudge(dir, item); err != nil {
 		t.Fatalf("enqueueQueuedNudge: %v", err)
@@ -192,7 +192,7 @@ func TestDispatchAllQueuedNudgesDeliversAndAcks(t *testing.T) {
 	}
 	fake.Activity = map[string]time.Time{info.SessionName: time.Now().Add(-10 * time.Second)}
 
-	if err := enqueueQueuedNudge(dir, newQueuedNudge("worker", "review the deploy logs", "session", time.Now().Add(-time.Minute))); err != nil {
+	if err := enqueueQueuedNudge(dir, newQueuedNudge("worker", "review the deploy logs", time.Now().Add(-time.Minute))); err != nil {
 		t.Fatalf("enqueueQueuedNudge: %v", err)
 	}
 
@@ -253,7 +253,7 @@ func TestDispatchAllQueuedNudgesDeliversToIdleACPSession(t *testing.T) {
 		t.Fatal("openNudgeBeadStore returned nil")
 	}
 
-	if err := enqueueQueuedNudgeWithStore(dir, store, newQueuedNudge("worker", "wake-up nudge", "session", time.Now().Add(-time.Minute))); err != nil {
+	if err := enqueueQueuedNudgeWithStore(dir, store, newQueuedNudge("worker", "wake-up nudge", time.Now().Add(-time.Minute))); err != nil {
 		t.Fatalf("enqueueQueuedNudgeWithStore: %v", err)
 	}
 
@@ -345,7 +345,7 @@ func TestDispatchAllQueuedNudgesSkipsACPSessionWhenNotRunning(t *testing.T) {
 	disableManagedDoltRecoveryForTest(t)
 
 	dir := t.TempDir()
-	if err := enqueueQueuedNudge(dir, newQueuedNudge("worker", "msg", "session", time.Now().Add(-time.Minute))); err != nil {
+	if err := enqueueQueuedNudge(dir, newQueuedNudge("worker", "msg", time.Now().Add(-time.Minute))); err != nil {
 		t.Fatalf("enqueueQueuedNudge: %v", err)
 	}
 	bead := beads.Bead{
@@ -386,7 +386,7 @@ func TestDispatchAllQueuedNudgesNilCfg(t *testing.T) {
 	disableManagedDoltRecoveryForTest(t)
 
 	dir := t.TempDir()
-	if err := enqueueQueuedNudge(dir, newQueuedNudge("worker", "msg", "session", time.Now().Add(-time.Minute))); err != nil {
+	if err := enqueueQueuedNudge(dir, newQueuedNudge("worker", "msg", time.Now().Add(-time.Minute))); err != nil {
 		t.Fatalf("enqueueQueuedNudge: %v", err)
 	}
 	delivered, err := dispatchAllQueuedNudges(dir, nil, nil, nil, newSessionBeadSnapshot(nil))
@@ -466,7 +466,7 @@ func TestEnqueuePingsWakeSocket(t *testing.T) {
 	}
 	defer lis.Close() //nolint:errcheck
 
-	if err := enqueueQueuedNudge(dir, newQueuedNudge("worker", "msg", "session", time.Now())); err != nil {
+	if err := enqueueQueuedNudge(dir, newQueuedNudge("worker", "msg", time.Now())); err != nil {
 		t.Fatalf("enqueueQueuedNudge: %v", err)
 	}
 	select {

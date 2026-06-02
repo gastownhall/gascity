@@ -454,6 +454,13 @@ type shutdownResult struct {
 	err error
 }
 
+func supervisorShutdownExitCode(shutErr error) int {
+	if shutErr != nil {
+		return 1
+	}
+	return 0
+}
+
 func newShutdownState() *shutdownState {
 	return &shutdownState{done: make(chan struct{})}
 }
@@ -1247,7 +1254,7 @@ func runSupervisor(stdout, stderr io.Writer) int {
 			}
 			shut.finish(shutErr)
 			fmt.Fprintln(stdout, "Supervisor stopped.") //nolint:errcheck
-			return 0
+			return supervisorShutdownExitCode(shutErr)
 		}
 	}
 }
@@ -1765,6 +1772,7 @@ func reconcileCities(
 		cs.services = cityRuntime.svc
 		cityRuntime.setControllerState(cs)
 		cs.startBeadEventWatcher(cityCtx)
+		cs.startMaintenanceLoop(cityCtx)
 
 		// Run pool on_boot hooks (same as runController does).
 		if err := runPostPrepareStep("running_pool_on_boot", func() error {

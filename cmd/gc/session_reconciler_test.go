@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -1570,6 +1571,127 @@ func (c *capturingRecorder) strandedEvents() []events.Event {
 	return out
 }
 
+func TestEmitSessionStrandedDiagnostic_DetachedProbeAliveSuppressesEvent(t *testing.T) {
+	store := beads.NewMemStore()
+	session, work := createDetachedStrandedWork(t, store, "tmux:gctest-stranded:soak-loop")
+	installFakeTmux(t, "exit 0")
+	rec := emitStrandedDiagnosticForTest(t, store, &session)
+
+	if stranded := rec.strandedEvents(); len(stranded) != 0 {
+		t.Fatalf("session.stranded events = %d, want 0 while detached probe is alive; events: %+v", len(stranded), rec.events)
+	}
+	got, err := store.Get(work.ID)
+	if err != nil {
+		t.Fatalf("Get work bead: %v", err)
+	}
+	if got.Metadata[detachedProbeMetadataKey] != "tmux:gctest-stranded:soak-loop" {
+		t.Fatalf("gc.detached = %q, want preserved", got.Metadata[detachedProbeMetadataKey])
+	}
+	if session.Metadata[strandedEventEmittedKey] != "" {
+		t.Fatalf("session in-memory throttle marker = %q, want unset when event suppressed", session.Metadata[strandedEventEmittedKey])
+	}
+}
+
+func TestEmitSessionStrandedDiagnostic_DetachedProbeDeadClearsAndEmits(t *testing.T) {
+	store := beads.NewMemStore()
+	session, work := createDetachedStrandedWork(t, store, "tmux:gctest-stranded:soak-loop")
+	installFakeTmux(t, "exit 1")
+	rec := emitStrandedDiagnosticForTest(t, store, &session)
+
+	stranded := rec.strandedEvents()
+	if len(stranded) != 1 {
+		t.Fatalf("session.stranded events = %d, want 1 for dead detached probe; events: %+v", len(stranded), rec.events)
+	}
+	if !strings.Contains(stranded[0].Message, work.ID) {
+		t.Fatalf("session.stranded message = %q, want work bead %q", stranded[0].Message, work.ID)
+	}
+	got, err := store.Get(work.ID)
+	if err != nil {
+		t.Fatalf("Get work bead: %v", err)
+	}
+	if got.Metadata[detachedProbeMetadataKey] != "" {
+		t.Fatalf("gc.detached = %q, want cleared before diagnostic emit", got.Metadata[detachedProbeMetadataKey])
+	}
+}
+
+func TestEmitSessionStrandedDiagnostic_DetachedProbeErrorEmitsNormally(t *testing.T) {
+	store := beads.NewMemStore()
+	session, work := createDetachedStrandedWork(t, store, "tmux:gctest-stranded:soak-loop")
+	installFakeTmux(t, "exit 2")
+	rec := emitStrandedDiagnosticForTest(t, store, &session)
+
+	stranded := rec.strandedEvents()
+	if len(stranded) != 1 {
+		t.Fatalf("session.stranded events = %d, want 1 when detached probe errors; events: %+v", len(stranded), rec.events)
+	}
+	if !strings.Contains(stranded[0].Message, work.ID) {
+		t.Fatalf("session.stranded message = %q, want work bead %q", stranded[0].Message, work.ID)
+	}
+	got, err := store.Get(work.ID)
+	if err != nil {
+		t.Fatalf("Get work bead: %v", err)
+	}
+	if got.Metadata[detachedProbeMetadataKey] != "tmux:gctest-stranded:soak-loop" {
+		t.Fatalf("gc.detached = %q, want preserved after probe error", got.Metadata[detachedProbeMetadataKey])
+	}
+}
+
+func createDetachedStrandedWork(t *testing.T, store beads.Store, detachedSpec string) (beads.Bead, beads.Bead) {
+	t.Helper()
+	session, err := store.Create(beads.Bead{
+		Title:  "worker session",
+		Type:   sessionBeadType,
+		Status: "open",
+		Metadata: map[string]string{
+			"session_name": "worker-mc-dead",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create session bead: %v", err)
+	}
+	work, err := store.Create(beads.Bead{
+		Title:    "stranded work",
+		Type:     "task",
+		Assignee: session.ID,
+		Metadata: map[string]string{
+			detachedProbeMetadataKey: detachedSpec,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create work bead: %v", err)
+	}
+	status := "in_progress"
+	if err := store.Update(work.ID, beads.UpdateOpts{Status: &status}); err != nil {
+		t.Fatalf("Update work bead status: %v", err)
+	}
+	work, err = store.Get(work.ID)
+	if err != nil {
+		t.Fatalf("Reload work bead: %v", err)
+	}
+	return session, work
+}
+
+func emitStrandedDiagnosticForTest(t *testing.T, store beads.Store, session *beads.Bead) *capturingRecorder {
+	t.Helper()
+	rec := &capturingRecorder{}
+	var stderr bytes.Buffer
+	emitSessionStrandedDiagnostic(
+		"",
+		nil,
+		store,
+		nil,
+		session,
+		"worker",
+		rec,
+		&clock.Fake{Time: time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)},
+		&stderr,
+	)
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want empty", stderr.String())
+	}
+	return rec
+}
+
 // TestReconcileSessionBeads_PoolSlotWithStrandedWorkEmitsDiagnostic
 // covers issue #1424: when a pool-managed session is observed
 // asleep + not-alive AND still has open in-progress work assigned, the
@@ -1701,6 +1823,34 @@ func TestReconcileSessionBeads_PoolSlotWithStrandedWorkEmitsDiagnostic(t *testin
 	stranded = rec.strandedEvents()
 	if len(stranded) != 1 {
 		t.Fatalf("session.stranded events after second tick = %d, want still 1 (throttled); events: %+v", len(stranded), rec.events)
+	}
+}
+
+func TestCollectSessionAssignedWorkIncludesAssignedWisp(t *testing.T) {
+	store := beads.NewMemStore()
+	session := beads.Bead{
+		ID: "sess-1",
+		Metadata: map[string]string{
+			"session_name": "worker-session",
+		},
+	}
+	work, err := store.Create(beads.Bead{
+		Title:     "stranded wisp implementation",
+		Type:      "task",
+		Status:    "in_progress",
+		Assignee:  "worker-session",
+		Ephemeral: true,
+	})
+	if err != nil {
+		t.Fatalf("Create wisp work: %v", err)
+	}
+
+	got, err := collectSessionAssignedWork("", nil, store, nil, session)
+	if err != nil {
+		t.Fatalf("collectSessionAssignedWork: %v", err)
+	}
+	if len(got) != 1 || got[0].bead.ID != work.ID {
+		t.Fatalf("collectSessionAssignedWork = %#v, want assigned wisp %s", got, work.ID)
 	}
 }
 
@@ -7507,6 +7657,128 @@ func TestReconcileSessionBeads_BeadMetadataRestartRequestedWhenSessionDead(t *te
 	}
 	if got.Metadata["pending_create_claim"] != "" {
 		t.Fatalf("pending_create_claim = %q, want cleared after durable dead-session restart request", got.Metadata["pending_create_claim"])
+	}
+}
+
+func TestReconcileSessionBeads_RecordsResetStallDiagnostic(t *testing.T) {
+	env := newReconcilerTestEnv()
+	rec := events.NewFake()
+	env.rec = rec
+	env.cfg = &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents:    []config.Agent{{Name: "worker", StartCommand: "true", MaxActiveSessions: intPtr(2)}},
+		Session:   config.SessionConfig{StartupTimeout: "60s"},
+	}
+	env.addDesired("worker", "worker", false)
+	session := env.createSessionBead("worker", "worker")
+	committedAt := env.clk.Now().Add(-75 * time.Second).UTC().Format(time.RFC3339)
+	env.setSessionMetadata(&session, map[string]string{
+		"continuation_reset_pending":   "true",
+		sessionpkg.ResetCommittedAtKey: committedAt,
+		"wait_hold":                    "true",
+	})
+
+	tracer := newSessionReconcilerTracer(t.TempDir(), "test-city", io.Discard)
+	t.Cleanup(func() { _ = tracer.Close() })
+	tracer.detail = map[string]TraceSource{"worker": TraceSourceManual}
+	trace := tracer.BeginCycle(TraceTickTriggerPatrol, "", env.clk.Now().UTC(), env.cfg)
+
+	reconcileSessionBeadsTraced(
+		context.Background(),
+		"",
+		[]beads.Bead{session},
+		env.desiredState,
+		configuredSessionNames(env.cfg, "", env.store),
+		env.cfg,
+		env.sp,
+		env.store,
+		nil,
+		nil,
+		nil,
+		nil,
+		env.dt,
+		map[string]int{"worker": 0},
+		false,
+		nil,
+		"test-city",
+		nil,
+		env.clk,
+		rec,
+		env.cfg.Session.StartupTimeoutDuration(),
+		0,
+		&env.stdout,
+		&env.stderr,
+		trace,
+	)
+
+	wantMessage := fmt.Sprintf(
+		"session reconciler: reset stalled for worker: elapsed_s=75 reset_committed_at=%s bead_id=%s",
+		committedAt,
+		session.ID,
+	)
+	if got := strings.TrimSpace(env.stderr.String()); got != wantMessage {
+		t.Fatalf("stderr = %q, want %q", got, wantMessage)
+	}
+	if len(rec.Events) != 1 {
+		t.Fatalf("recorded events = %d, want 1: %#v", len(rec.Events), rec.Events)
+	}
+	gotEvent := rec.Events[0]
+	if gotEvent.Type != events.SessionResetStalled {
+		t.Fatalf("event type = %q, want %q", gotEvent.Type, events.SessionResetStalled)
+	}
+	if gotEvent.Message != wantMessage {
+		t.Fatalf("event message = %q, want %q", gotEvent.Message, wantMessage)
+	}
+	var payload events.SessionResetStalledPayload
+	if err := json.Unmarshal(gotEvent.Payload, &payload); err != nil {
+		t.Fatalf("decode payload: %v", err)
+	}
+	if payload.SessionName != "worker" || payload.Template != "worker" || payload.ResetCommittedAt != committedAt || payload.ElapsedSeconds != 75 {
+		t.Fatalf("payload = %+v, want session/template worker, reset_committed_at %q, elapsed_s 75", payload, committedAt)
+	}
+
+	foundTrace := false
+	if trace != nil {
+		for _, rec := range trace.records {
+			if rec.SiteCode == TraceSiteReconcilerResetStalled &&
+				rec.ReasonCode == TraceReasonResetStalled &&
+				rec.OutcomeCode == TraceOutcomeFailed &&
+				rec.Template == "worker" &&
+				rec.SessionName == "worker" {
+				foundTrace = true
+				break
+			}
+		}
+	}
+	if !foundTrace {
+		t.Fatalf("reset stalled trace decision not recorded; records=%+v", trace.records)
+	}
+
+	env.stderr.Reset()
+	recordResetStallIfDue(session, "worker", "worker", false, env.cfg.Session.StartupTimeoutDuration(), env.clk.Now().UTC(), env.dt, rec, &env.stderr, trace)
+	if got := strings.TrimSpace(env.stderr.String()); got != "" {
+		t.Fatalf("second stalled pass stderr = %q, want debounce silence", got)
+	}
+	if len(rec.Events) != 1 {
+		t.Fatalf("recorded events after duplicate pass = %d, want 1", len(rec.Events))
+	}
+
+	env.setSessionMetadata(&session, map[string]string{
+		"continuation_reset_pending":   "",
+		sessionpkg.ResetCommittedAtKey: "",
+	})
+	recordResetStallIfDue(session, "worker", "worker", false, env.cfg.Session.StartupTimeoutDuration(), env.clk.Now().UTC(), env.dt, rec, &env.stderr, trace)
+	env.setSessionMetadata(&session, map[string]string{
+		"continuation_reset_pending":   "true",
+		sessionpkg.ResetCommittedAtKey: committedAt,
+	})
+	env.stderr.Reset()
+	recordResetStallIfDue(session, "worker", "worker", false, env.cfg.Session.StartupTimeoutDuration(), env.clk.Now().UTC(), env.dt, rec, &env.stderr, trace)
+	if got := strings.TrimSpace(env.stderr.String()); got != wantMessage {
+		t.Fatalf("re-stalled pass stderr = %q, want %q", got, wantMessage)
+	}
+	if len(rec.Events) != 2 {
+		t.Fatalf("recorded events after reset clear = %d, want 2", len(rec.Events))
 	}
 }
 

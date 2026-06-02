@@ -384,6 +384,41 @@ func TestParserHonorsSetSourceForLoadByName(t *testing.T) {
 	}
 }
 
+func TestParserHonorsSetSourceForDescriptionFile(t *testing.T) {
+	gitOK(t)
+	root := initRepo(t)
+	formulaDir := filepath.Join(root, "formulas")
+	if err := os.MkdirAll(filepath.Join(formulaDir, "descriptions"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	commitFile(t, root, "formulas/mol.toml", "formula = \"mol\"\n\n[[steps]]\nid = \"work\"\ntitle = \"Work\"\ndescription_file = \"descriptions/work.md\"\n")
+	commitFile(t, root, "formulas/descriptions/work.md", "COMMITTED")
+	commitOnBranch(t, root, "main", "init")
+
+	runGit(t, root, "checkout", "-b", "feature")
+	if err := os.WriteFile(filepath.Join(formulaDir, "descriptions", "work.md"), []byte("FEATURE-DRAFT"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	fsParser := NewParser(formulaDir)
+	fsFormula, err := fsParser.LoadByName("mol")
+	if err != nil {
+		t.Fatalf("FSSource LoadByName: %v", err)
+	}
+	if got := fsFormula.Steps[0].Description; got != "FEATURE-DRAFT" {
+		t.Fatalf("FSSource description = %q, want FEATURE-DRAFT", got)
+	}
+
+	refParser := NewParser(formulaDir).SetSource(NewGitRefSource("main"))
+	refFormula, err := refParser.LoadByName("mol")
+	if err != nil {
+		t.Fatalf("GitRefSource LoadByName: %v", err)
+	}
+	if got := refFormula.Steps[0].Description; got != "COMMITTED" {
+		t.Fatalf("GitRefSource description = %q, want COMMITTED", got)
+	}
+}
+
 // TestResolveWithSourcePrecedence verifies the layered last-wins
 // semantic is preserved when Source is parameterized. Highest-priority
 // layer that contains a Stat-hit wins, exactly as the legacy Resolve

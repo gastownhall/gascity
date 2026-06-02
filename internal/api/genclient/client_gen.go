@@ -276,6 +276,24 @@ func (e GetV0CityByCityNameAgentsParamsRunning) Valid() bool {
 	}
 }
 
+// Defines values for GetV0CityByCityNameExtmsgTranscriptParamsOrder.
+const (
+	Asc  GetV0CityByCityNameExtmsgTranscriptParamsOrder = "asc"
+	Desc GetV0CityByCityNameExtmsgTranscriptParamsOrder = "desc"
+)
+
+// Valid indicates whether the value is a known member of the GetV0CityByCityNameExtmsgTranscriptParamsOrder enum.
+func (e GetV0CityByCityNameExtmsgTranscriptParamsOrder) Valid() bool {
+	switch e {
+	case Asc:
+		return true
+	case Desc:
+		return true
+	default:
+		return false
+	}
+}
+
 // AdapterCapabilities defines model for AdapterCapabilities.
 type AdapterCapabilities struct {
 	MaxMessageLength           int64 `json:"MaxMessageLength"`
@@ -350,6 +368,7 @@ type AgentPatch struct {
 	MaxSessionAge           *string           `json:"MaxSessionAge"`
 	MaxSessionAgeJitter     *string           `json:"MaxSessionAgeJitter"`
 	MinActiveSessions       *int64            `json:"MinActiveSessions"`
+	MouseMode               *string           `json:"MouseMode"`
 	Name                    string            `json:"Name"`
 	Nudge                   *string           `json:"Nudge"`
 	OptionDefaults          map[string]string `json:"OptionDefaults"`
@@ -502,6 +521,7 @@ type AsyncAcceptedResponse struct {
 type Bead struct {
 	Assignee     *string            `json:"assignee,omitempty"`
 	CreatedAt    time.Time          `json:"created_at"`
+	DeferUntil   *time.Time         `json:"defer_until,omitempty"`
 	Dependencies *[]Dep             `json:"dependencies,omitempty"`
 	Description  *string            `json:"description,omitempty"`
 	Ephemeral    *bool              `json:"ephemeral,omitempty"`
@@ -516,6 +536,7 @@ type Bead struct {
 	Ref          *string            `json:"ref,omitempty"`
 	Status       string             `json:"status"`
 	Title        string             `json:"title"`
+	UpdatedAt    *time.Time         `json:"updated_at,omitempty"`
 }
 
 // BeadAssignInputBody defines model for BeadAssignInputBody.
@@ -528,6 +549,9 @@ type BeadAssignInputBody struct {
 type BeadCreateInputBody struct {
 	// Assignee Assigned agent.
 	Assignee *string `json:"assignee,omitempty"`
+
+	// DeferUntil Hide the bead from ready views until this time.
+	DeferUntil *time.Time `json:"defer_until,omitempty"`
 
 	// Description Bead description.
 	Description *string `json:"description,omitempty"`
@@ -602,6 +626,14 @@ type BeadUpdateBody struct {
 
 	// Type Bead type.
 	Type *string `json:"type,omitempty"`
+}
+
+// BeadsDiagnostic defines model for BeadsDiagnostic.
+type BeadsDiagnostic struct {
+	BeadsStore          string  `json:"beads_store"`
+	NativeStoreEligible bool    `json:"native_store_eligible"`
+	PreflightGate       *string `json:"preflight_gate,omitempty"`
+	PreflightReason     *string `json:"preflight_reason,omitempty"`
 }
 
 // BindingStatus Lifecycle state of a session binding.
@@ -679,6 +711,18 @@ type CityPatchInputBody struct {
 	Suspended *bool `json:"suspended,omitempty"`
 }
 
+// CityPendingEntry defines model for CityPendingEntry.
+type CityPendingEntry struct {
+	// Kind Pending interaction kind (e.g. tool-approval, prompt-for-input).
+	Kind string `json:"kind"`
+
+	// RequestId Pending interaction request ID.
+	RequestId string `json:"request_id"`
+
+	// SessionId Session ID awaiting a human decision.
+	SessionId string `json:"session_id"`
+}
+
 // CityUnregisterSucceededPayload defines model for CityUnregisterSucceededPayload.
 type CityUnregisterSucceededPayload struct {
 	// Name City name that was unregistered.
@@ -724,11 +768,12 @@ type ConfigPatchesResponse struct {
 
 // ConfigResponse defines model for ConfigResponse.
 type ConfigResponse struct {
-	Agents    *[]ConfigAgentResponse       `json:"agents"`
-	Patches   *ConfigPatchesResponse       `json:"patches,omitempty"`
-	Providers *map[string]ProviderSpecJSON `json:"providers,omitempty"`
-	Rigs      *[]ConfigRigResponse         `json:"rigs"`
-	Workspace WorkspaceResponse            `json:"workspace"`
+	Agents          *[]ConfigAgentResponse       `json:"agents"`
+	EffectiveApiUrl *string                      `json:"effective_api_url,omitempty"`
+	Patches         *ConfigPatchesResponse       `json:"patches,omitempty"`
+	Providers       *map[string]ProviderSpecJSON `json:"providers,omitempty"`
+	Rigs            *[]ConfigRigResponse         `json:"rigs"`
+	Workspace       WorkspaceResponse            `json:"workspace"`
 }
 
 // ConfigRigResponse defines model for ConfigRigResponse.
@@ -1201,7 +1246,6 @@ type FormulaDetailResponse struct {
 	Preview     FormulaPreviewResponse        `json:"preview"`
 	Steps       *[]FormulaStepResponse        `json:"steps"`
 	VarDefs     *[]FormulaVarDefResponse      `json:"var_defs"`
-	Version     string                        `json:"version"`
 }
 
 // FormulaFeedBody defines model for FormulaFeedBody.
@@ -1295,7 +1339,6 @@ type FormulaSummaryResponse struct {
 	RecentRuns  *[]FormulaRecentRunResponse `json:"recent_runs"`
 	RunCount    int64                       `json:"run_count"`
 	VarDefs     *[]FormulaVarDefResponse    `json:"var_defs"`
-	Version     string                      `json:"version"`
 }
 
 // FormulaVarDefResponse defines model for FormulaVarDefResponse.
@@ -1410,6 +1453,24 @@ type ListBodyAgentResponse struct {
 type ListBodyBead struct {
 	// Items The list of items.
 	Items *[]Bead `json:"items"`
+
+	// NextCursor Cursor for the next page of results.
+	NextCursor *string `json:"next_cursor,omitempty"`
+
+	// Partial True when one or more backends failed and the list is incomplete.
+	Partial *bool `json:"partial,omitempty"`
+
+	// PartialErrors Human-readable errors from backends that failed during aggregation.
+	PartialErrors *[]string `json:"partial_errors,omitempty"`
+
+	// Total Total number of items matching the query.
+	Total int64 `json:"total"`
+}
+
+// ListBodyCityPendingEntry defines model for ListBodyCityPendingEntry.
+type ListBodyCityPendingEntry struct {
+	// Items The list of items.
+	Items *[]CityPendingEntry `json:"items"`
 
 	// NextCursor Cursor for the next page of results.
 	NextCursor *string `json:"next_cursor,omitempty"`
@@ -1676,6 +1737,65 @@ type MailSendInputBody struct {
 	To string `json:"to"`
 }
 
+// MaintenanceRunBody defines model for MaintenanceRunBody.
+type MaintenanceRunBody struct {
+	// AfterBytes Store size in bytes after the run (0 when not measured).
+	AfterBytes int64 `json:"after_bytes"`
+
+	// BeforeBytes Store size in bytes before the run (0 when not measured).
+	BeforeBytes int64 `json:"before_bytes"`
+
+	// DurationS Elapsed wall-clock seconds between started_at and finished_at.
+	DurationS float64 `json:"duration_s"`
+
+	// Err Error message when Stage names a failing phase; empty on success.
+	Err *string `json:"err,omitempty"`
+
+	// FinishedAt RFC3339 timestamp when the run completed.
+	FinishedAt string `json:"finished_at"`
+
+	// SnapshotPath Absolute path to the snapshot directory created for this run.
+	SnapshotPath *string `json:"snapshot_path,omitempty"`
+
+	// Stage Outcome stage: 'done' on success or 'backup'/'gc'/'smoke-test'/'prune' on failure.
+	Stage string `json:"stage"`
+
+	// StartedAt RFC3339 timestamp when the run began.
+	StartedAt string `json:"started_at"`
+}
+
+// MaintenanceStatusBody defines model for MaintenanceStatusBody.
+type MaintenanceStatusBody struct {
+	// Enabled Whether [maintenance.dolt] enabled=true in city.toml.
+	Enabled bool `json:"enabled"`
+
+	// History Bounded ring of recent run outcomes (oldest first).
+	History *[]MaintenanceRunBody `json:"history"`
+
+	// InFlight True when a maintenance cycle is currently running.
+	InFlight bool `json:"in_flight"`
+
+	// InFlightStart RFC3339 start time of the in-flight run.
+	InFlightStart *string `json:"in_flight_start,omitempty"`
+
+	// IntervalSeconds Configured scheduling interval in seconds (0 when disabled).
+	IntervalSeconds int64               `json:"interval_seconds"`
+	LastRun         *MaintenanceRunBody `json:"last_run,omitempty"`
+
+	// NextScheduled RFC3339 approximate next scheduled run time.
+	NextScheduled *string `json:"next_scheduled,omitempty"`
+}
+
+// MaintenanceTriggerBody defines model for MaintenanceTriggerBody.
+type MaintenanceTriggerBody struct {
+	// Accepted True when the supervisor accepted the trigger (202) or completed it (200).
+	Accepted bool                `json:"accepted"`
+	Run      *MaintenanceRunBody `json:"run,omitempty"`
+
+	// StartedAt RFC3339 start time of the triggered run; doubles as a run identifier for async callers.
+	StartedAt *string `json:"started_at,omitempty"`
+}
+
 // Message defines model for Message.
 type Message struct {
 	Body      string    `json:"body"`
@@ -1796,12 +1916,13 @@ type OrderListBody struct {
 
 // OrderResponse defines model for OrderResponse.
 type OrderResponse struct {
-	CaptureOutput bool    `json:"capture_output"`
-	Check         *string `json:"check,omitempty"`
-	Description   *string `json:"description,omitempty"`
-	Enabled       bool    `json:"enabled"`
-	Exec          *string `json:"exec,omitempty"`
-	Formula       *string `json:"formula,omitempty"`
+	CaptureOutput bool               `json:"capture_output"`
+	Check         *string            `json:"check,omitempty"`
+	Description   *string            `json:"description,omitempty"`
+	Enabled       bool               `json:"enabled"`
+	Env           *map[string]string `json:"env,omitempty"`
+	Exec          *string            `json:"exec,omitempty"`
+	Formula       *string            `json:"formula,omitempty"`
 	// Deprecated: this property has been marked as deprecated upstream, but no `x-deprecated-reason` was set
 	Gate       *string `json:"gate,omitempty"`
 	Interval   *string `json:"interval,omitempty"`
@@ -2464,6 +2585,14 @@ type SessionRenameInputBody struct {
 	Title string `json:"title"`
 }
 
+// SessionResetStalledPayload defines model for SessionResetStalledPayload.
+type SessionResetStalledPayload struct {
+	ElapsedS         int64  `json:"elapsed_s"`
+	ResetCommittedAt string `json:"reset_committed_at"`
+	SessionName      string `json:"session_name"`
+	Template         string `json:"template"`
+}
+
 // SessionRespondInputBody defines model for SessionRespondInputBody.
 type SessionRespondInputBody struct {
 	// Action Response action (e.g. allow, deny).
@@ -2714,7 +2843,14 @@ type StatusBody struct {
 	// AgentDetails Per-agent state (for CLI status views). Empty when none.
 	AgentDetails *[]StatusAgentDetail `json:"agent_details,omitempty"`
 	Agents       StatusAgentCounts    `json:"agents"`
-	Mail         StatusMailCounts     `json:"mail"`
+	Beads        *BeadsDiagnostic     `json:"beads,omitempty"`
+
+	// BeadsVersion Version of the bd (beads) CLI the supervisor drives. Omitted when the probe failed or the binary is unavailable.
+	BeadsVersion *string `json:"beads_version,omitempty"`
+
+	// DoltVersion Version of the dolt engine binary the supervisor drives. Omitted when the probe failed or the binary is unavailable.
+	DoltVersion *string          `json:"dolt_version,omitempty"`
+	Mail        StatusMailCounts `json:"mail"`
 
 	// Name City name.
 	Name string `json:"name"`
@@ -3000,6 +3136,18 @@ type TypedEventStreamEnvelopeBeadClosed struct {
 
 // TypedEventStreamEnvelopeBeadCreated defines model for TypedEventStreamEnvelopeBeadCreated.
 type TypedEventStreamEnvelopeBeadCreated struct {
+	Actor    string                   `json:"actor"`
+	Message  *string                  `json:"message,omitempty"`
+	Payload  BeadEventPayload         `json:"payload"`
+	Seq      int64                    `json:"seq"`
+	Subject  *string                  `json:"subject,omitempty"`
+	Ts       time.Time                `json:"ts"`
+	Type     string                   `json:"type"`
+	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedEventStreamEnvelopeBeadDeleted defines model for TypedEventStreamEnvelopeBeadDeleted.
+type TypedEventStreamEnvelopeBeadDeleted struct {
 	Actor    string                   `json:"actor"`
 	Message  *string                  `json:"message,omitempty"`
 	Payload  BeadEventPayload         `json:"payload"`
@@ -3550,6 +3698,18 @@ type TypedEventStreamEnvelopeSessionQuarantined struct {
 	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
+// TypedEventStreamEnvelopeSessionResetStalled defines model for TypedEventStreamEnvelopeSessionResetStalled.
+type TypedEventStreamEnvelopeSessionResetStalled struct {
+	Actor    string                     `json:"actor"`
+	Message  *string                    `json:"message,omitempty"`
+	Payload  SessionResetStalledPayload `json:"payload"`
+	Seq      int64                      `json:"seq"`
+	Subject  *string                    `json:"subject,omitempty"`
+	Ts       time.Time                  `json:"ts"`
+	Type     string                     `json:"type"`
+	Workflow *WorkflowEventProjection   `json:"workflow,omitempty"`
+}
+
 // TypedEventStreamEnvelopeSessionStopped defines model for TypedEventStreamEnvelopeSessionStopped.
 type TypedEventStreamEnvelopeSessionStopped struct {
 	Actor    string                   `json:"actor"`
@@ -3690,6 +3850,19 @@ type TypedTaggedEventStreamEnvelopeBeadClosed struct {
 
 // TypedTaggedEventStreamEnvelopeBeadCreated defines model for TypedTaggedEventStreamEnvelopeBeadCreated.
 type TypedTaggedEventStreamEnvelopeBeadCreated struct {
+	Actor    string                   `json:"actor"`
+	City     string                   `json:"city"`
+	Message  *string                  `json:"message,omitempty"`
+	Payload  BeadEventPayload         `json:"payload"`
+	Seq      int64                    `json:"seq"`
+	Subject  *string                  `json:"subject,omitempty"`
+	Ts       time.Time                `json:"ts"`
+	Type     string                   `json:"type"`
+	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeBeadDeleted defines model for TypedTaggedEventStreamEnvelopeBeadDeleted.
+type TypedTaggedEventStreamEnvelopeBeadDeleted struct {
 	Actor    string                   `json:"actor"`
 	City     string                   `json:"city"`
 	Message  *string                  `json:"message,omitempty"`
@@ -4286,6 +4459,19 @@ type TypedTaggedEventStreamEnvelopeSessionQuarantined struct {
 	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
+// TypedTaggedEventStreamEnvelopeSessionResetStalled defines model for TypedTaggedEventStreamEnvelopeSessionResetStalled.
+type TypedTaggedEventStreamEnvelopeSessionResetStalled struct {
+	Actor    string                     `json:"actor"`
+	City     string                     `json:"city"`
+	Message  *string                    `json:"message,omitempty"`
+	Payload  SessionResetStalledPayload `json:"payload"`
+	Seq      int64                      `json:"seq"`
+	Subject  *string                    `json:"subject,omitempty"`
+	Ts       time.Time                  `json:"ts"`
+	Type     string                     `json:"type"`
+	Workflow *WorkflowEventProjection   `json:"workflow,omitempty"`
+}
+
 // TypedTaggedEventStreamEnvelopeSessionStopped defines model for TypedTaggedEventStreamEnvelopeSessionStopped.
 type TypedTaggedEventStreamEnvelopeSessionStopped struct {
 	Actor    string                   `json:"actor"`
@@ -4559,13 +4745,14 @@ type WorkflowSnapshotResponse struct {
 
 // WorkspaceResponse defines model for WorkspaceResponse.
 type WorkspaceResponse struct {
-	DeclaredName    *string `json:"declared_name,omitempty"`
-	DeclaredPrefix  *string `json:"declared_prefix,omitempty"`
-	Name            string  `json:"name"`
-	Prefix          *string `json:"prefix,omitempty"`
-	Provider        *string `json:"provider,omitempty"`
-	SessionTemplate *string `json:"session_template,omitempty"`
-	Suspended       bool    `json:"suspended"`
+	DeclaredName      *string `json:"declared_name,omitempty"`
+	DeclaredPrefix    *string `json:"declared_prefix,omitempty"`
+	MaxActiveSessions *int64  `json:"max_active_sessions,omitempty"`
+	Name              string  `json:"name"`
+	Prefix            *string `json:"prefix,omitempty"`
+	Provider          *string `json:"provider,omitempty"`
+	SessionTemplate   *string `json:"session_template,omitempty"`
+	Suspended         bool    `json:"suspended"`
 }
 
 // PostV0CityParams defines parameters for PostV0City.
@@ -4941,7 +5128,19 @@ type GetV0CityByCityNameExtmsgTranscriptParams struct {
 
 	// Kind Conversation kind.
 	Kind *string `form:"kind,omitempty" json:"kind,omitempty"`
+
+	// AfterSequence Return entries with sequence greater than this cursor (default 0).
+	AfterSequence *int64 `form:"after_sequence,omitempty" json:"after_sequence,omitempty"`
+
+	// Limit Maximum number of entries to return (default 100, max 500).
+	Limit *int64 `form:"limit,omitempty" json:"limit,omitempty"`
+
+	// Order Sort order by sequence: asc (oldest-first, default) or desc (newest-first).
+	Order *GetV0CityByCityNameExtmsgTranscriptParamsOrder `form:"order,omitempty" json:"order,omitempty"`
 }
+
+// GetV0CityByCityNameExtmsgTranscriptParamsOrder defines parameters for GetV0CityByCityNameExtmsgTranscript.
+type GetV0CityByCityNameExtmsgTranscriptParamsOrder string
 
 // PostV0CityByCityNameExtmsgTranscriptAckParams defines parameters for PostV0CityByCityNameExtmsgTranscriptAck.
 type PostV0CityByCityNameExtmsgTranscriptAckParams struct {
@@ -5112,6 +5311,15 @@ type PostV0CityByCityNameMailByIdReadParams struct {
 type ReplyMailParams struct {
 	// Rig Rig hint.
 	Rig *string `form:"rig,omitempty" json:"rig,omitempty"`
+
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+}
+
+// TriggerMaintenanceDoltGcParams defines parameters for TriggerMaintenanceDoltGc.
+type TriggerMaintenanceDoltGcParams struct {
+	// Wait When true, the handler blocks until the run completes and returns 200 with the full Run. When false (default), the handler returns 202 Accepted immediately.
+	Wait *bool `form:"wait,omitempty" json:"wait,omitempty"`
 
 	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
 	XGCRequest string `json:"X-GC-Request"`
@@ -6118,6 +6326,32 @@ func (t *EventPayload) MergeSessionMessageSucceededPayload(v SessionMessageSucce
 	return err
 }
 
+// AsSessionResetStalledPayload returns the union data inside the EventPayload as a SessionResetStalledPayload
+func (t EventPayload) AsSessionResetStalledPayload() (SessionResetStalledPayload, error) {
+	var body SessionResetStalledPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromSessionResetStalledPayload overwrites any union data inside the EventPayload as the provided SessionResetStalledPayload
+func (t *EventPayload) FromSessionResetStalledPayload(v SessionResetStalledPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeSessionResetStalledPayload performs a merge with any union data inside the EventPayload, using the provided SessionResetStalledPayload
+func (t *EventPayload) MergeSessionResetStalledPayload(v SessionResetStalledPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsSessionSubmitSucceededPayload returns the union data inside the EventPayload as a SessionSubmitSucceededPayload
 func (t EventPayload) AsSessionSubmitSucceededPayload() (SessionSubmitSucceededPayload, error) {
 	var body SessionSubmitSucceededPayload
@@ -6444,6 +6678,34 @@ func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeBeadCreated(v Typ
 // MergeTypedEventStreamEnvelopeBeadCreated performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeBeadCreated
 func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeBeadCreated(v TypedEventStreamEnvelopeBeadCreated) error {
 	v.Type = "bead.created"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedEventStreamEnvelopeBeadDeleted returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeBeadDeleted
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeBeadDeleted() (TypedEventStreamEnvelopeBeadDeleted, error) {
+	var body TypedEventStreamEnvelopeBeadDeleted
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeBeadDeleted overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeBeadDeleted
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeBeadDeleted(v TypedEventStreamEnvelopeBeadDeleted) error {
+	v.Type = "bead.deleted"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeBeadDeleted performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeBeadDeleted
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeBeadDeleted(v TypedEventStreamEnvelopeBeadDeleted) error {
+	v.Type = "bead.deleted"
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -7686,6 +7948,34 @@ func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeSessionQuarantin
 	return err
 }
 
+// AsTypedEventStreamEnvelopeSessionResetStalled returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeSessionResetStalled
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeSessionResetStalled() (TypedEventStreamEnvelopeSessionResetStalled, error) {
+	var body TypedEventStreamEnvelopeSessionResetStalled
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeSessionResetStalled overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeSessionResetStalled
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeSessionResetStalled(v TypedEventStreamEnvelopeSessionResetStalled) error {
+	v.Type = "session.reset_stalled"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeSessionResetStalled performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeSessionResetStalled
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeSessionResetStalled(v TypedEventStreamEnvelopeSessionResetStalled) error {
+	v.Type = "session.reset_stalled"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedEventStreamEnvelopeSessionStopped returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeSessionStopped
 func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeSessionStopped() (TypedEventStreamEnvelopeSessionStopped, error) {
 	var body TypedEventStreamEnvelopeSessionStopped
@@ -8014,6 +8304,8 @@ func (t TypedEventStreamEnvelope) ValueByDiscriminator() (interface{}, error) {
 		return t.AsTypedEventStreamEnvelopeBeadClosed()
 	case "bead.created":
 		return t.AsTypedEventStreamEnvelopeBeadCreated()
+	case "bead.deleted":
+		return t.AsTypedEventStreamEnvelopeBeadDeleted()
 	case "bead.updated":
 		return t.AsTypedEventStreamEnvelopeBeadUpdated()
 	case "city.created":
@@ -8102,6 +8394,8 @@ func (t TypedEventStreamEnvelope) ValueByDiscriminator() (interface{}, error) {
 		return t.AsTypedEventStreamEnvelopeSessionMaxAgeKilled()
 	case "session.quarantined":
 		return t.AsTypedEventStreamEnvelopeSessionQuarantined()
+	case "session.reset_stalled":
+		return t.AsTypedEventStreamEnvelopeSessionResetStalled()
 	case "session.stopped":
 		return t.AsTypedEventStreamEnvelopeSessionStopped()
 	case "session.stranded":
@@ -8183,6 +8477,34 @@ func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeBeadC
 // MergeTypedTaggedEventStreamEnvelopeBeadCreated performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeBeadCreated
 func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeBeadCreated(v TypedTaggedEventStreamEnvelopeBeadCreated) error {
 	v.Type = "bead.created"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeBeadDeleted returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeBeadDeleted
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeBeadDeleted() (TypedTaggedEventStreamEnvelopeBeadDeleted, error) {
+	var body TypedTaggedEventStreamEnvelopeBeadDeleted
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeBeadDeleted overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeBeadDeleted
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeBeadDeleted(v TypedTaggedEventStreamEnvelopeBeadDeleted) error {
+	v.Type = "bead.deleted"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeBeadDeleted performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeBeadDeleted
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeBeadDeleted(v TypedTaggedEventStreamEnvelopeBeadDeleted) error {
+	v.Type = "bead.deleted"
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -9425,6 +9747,34 @@ func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeSess
 	return err
 }
 
+// AsTypedTaggedEventStreamEnvelopeSessionResetStalled returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeSessionResetStalled
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeSessionResetStalled() (TypedTaggedEventStreamEnvelopeSessionResetStalled, error) {
+	var body TypedTaggedEventStreamEnvelopeSessionResetStalled
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeSessionResetStalled overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeSessionResetStalled
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeSessionResetStalled(v TypedTaggedEventStreamEnvelopeSessionResetStalled) error {
+	v.Type = "session.reset_stalled"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeSessionResetStalled performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeSessionResetStalled
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeSessionResetStalled(v TypedTaggedEventStreamEnvelopeSessionResetStalled) error {
+	v.Type = "session.reset_stalled"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedTaggedEventStreamEnvelopeSessionStopped returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeSessionStopped
 func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeSessionStopped() (TypedTaggedEventStreamEnvelopeSessionStopped, error) {
 	var body TypedTaggedEventStreamEnvelopeSessionStopped
@@ -9753,6 +10103,8 @@ func (t TypedTaggedEventStreamEnvelope) ValueByDiscriminator() (interface{}, err
 		return t.AsTypedTaggedEventStreamEnvelopeBeadClosed()
 	case "bead.created":
 		return t.AsTypedTaggedEventStreamEnvelopeBeadCreated()
+	case "bead.deleted":
+		return t.AsTypedTaggedEventStreamEnvelopeBeadDeleted()
 	case "bead.updated":
 		return t.AsTypedTaggedEventStreamEnvelopeBeadUpdated()
 	case "city.created":
@@ -9841,6 +10193,8 @@ func (t TypedTaggedEventStreamEnvelope) ValueByDiscriminator() (interface{}, err
 		return t.AsTypedTaggedEventStreamEnvelopeSessionMaxAgeKilled()
 	case "session.quarantined":
 		return t.AsTypedTaggedEventStreamEnvelopeSessionQuarantined()
+	case "session.reset_stalled":
+		return t.AsTypedTaggedEventStreamEnvelopeSessionResetStalled()
 	case "session.stopped":
 		return t.AsTypedTaggedEventStreamEnvelopeSessionStopped()
 	case "session.stranded":
@@ -10063,6 +10417,9 @@ type ClientInterface interface {
 	// GetV0CityByCityNameConfig request
 	GetV0CityByCityNameConfig(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// GetV0CityByCityNameConfigDefaults request
+	GetV0CityByCityNameConfigDefaults(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// GetV0CityByCityNameConfigExplain request
 	GetV0CityByCityNameConfigExplain(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -10232,6 +10589,12 @@ type ClientInterface interface {
 
 	ReplyMail(ctx context.Context, cityName string, id string, params *ReplyMailParams, body ReplyMailJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// TriggerMaintenanceDoltGc request
+	TriggerMaintenanceDoltGc(ctx context.Context, cityName string, params *TriggerMaintenanceDoltGcParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// GetV0CityByCityNameMaintenanceStatus request
+	GetV0CityByCityNameMaintenanceStatus(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// GetV0CityByCityNameOrderHistoryByBeadId request
 	GetV0CityByCityNameOrderHistoryByBeadId(ctx context.Context, cityName string, beadId string, params *GetV0CityByCityNameOrderHistoryByBeadIdParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -10306,6 +10669,9 @@ type ClientInterface interface {
 	PutV0CityByCityNamePatchesRigsWithBody(ctx context.Context, cityName string, params *PutV0CityByCityNamePatchesRigsParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	PutV0CityByCityNamePatchesRigs(ctx context.Context, cityName string, params *PutV0CityByCityNamePatchesRigsParams, body PutV0CityByCityNamePatchesRigsJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// GetV0CityByCityNamePending request
+	GetV0CityByCityNamePending(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// GetV0CityByCityNameProviderReadiness request
 	GetV0CityByCityNameProviderReadiness(ctx context.Context, cityName string, params *GetV0CityByCityNameProviderReadinessParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -10949,6 +11315,18 @@ func (c *Client) GetV0CityByCityNameBeadsReady(ctx context.Context, cityName str
 
 func (c *Client) GetV0CityByCityNameConfig(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewGetV0CityByCityNameConfigRequest(c.Server, cityName)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) GetV0CityByCityNameConfigDefaults(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetV0CityByCityNameConfigDefaultsRequest(c.Server, cityName)
 	if err != nil {
 		return nil, err
 	}
@@ -11703,6 +12081,30 @@ func (c *Client) ReplyMail(ctx context.Context, cityName string, id string, para
 	return c.Client.Do(req)
 }
 
+func (c *Client) TriggerMaintenanceDoltGc(ctx context.Context, cityName string, params *TriggerMaintenanceDoltGcParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewTriggerMaintenanceDoltGcRequest(c.Server, cityName, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) GetV0CityByCityNameMaintenanceStatus(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetV0CityByCityNameMaintenanceStatusRequest(c.Server, cityName)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
 func (c *Client) GetV0CityByCityNameOrderHistoryByBeadId(ctx context.Context, cityName string, beadId string, params *GetV0CityByCityNameOrderHistoryByBeadIdParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewGetV0CityByCityNameOrderHistoryByBeadIdRequest(c.Server, cityName, beadId, params)
 	if err != nil {
@@ -12005,6 +12407,18 @@ func (c *Client) PutV0CityByCityNamePatchesRigsWithBody(ctx context.Context, cit
 
 func (c *Client) PutV0CityByCityNamePatchesRigs(ctx context.Context, cityName string, params *PutV0CityByCityNamePatchesRigsParams, body PutV0CityByCityNamePatchesRigsJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewPutV0CityByCityNamePatchesRigsRequest(c.Server, cityName, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) GetV0CityByCityNamePending(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetV0CityByCityNamePendingRequest(c.Server, cityName)
 	if err != nil {
 		return nil, err
 	}
@@ -14687,6 +15101,40 @@ func NewGetV0CityByCityNameConfigRequest(server string, cityName string) (*http.
 	return req, nil
 }
 
+// NewGetV0CityByCityNameConfigDefaultsRequest generates requests for GetV0CityByCityNameConfigDefaults
+func NewGetV0CityByCityNameConfigDefaultsRequest(server string, cityName string) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "cityName", cityName, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/v0/city/%s/config/defaults", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
 // NewGetV0CityByCityNameConfigExplainRequest generates requests for GetV0CityByCityNameConfigExplain
 func NewGetV0CityByCityNameConfigExplainRequest(server string, cityName string) (*http.Request, error) {
 	var err error
@@ -16410,6 +16858,54 @@ func NewGetV0CityByCityNameExtmsgTranscriptRequest(server string, cityName strin
 
 		}
 
+		if params.AfterSequence != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "after_sequence", *params.AfterSequence, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "integer", Format: "int64"}); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Limit != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "limit", *params.Limit, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "integer", Format: "int64"}); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Order != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "order", *params.Order, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
 		queryURL.RawQuery = queryValues.Encode()
 	}
 
@@ -17893,6 +18389,109 @@ func NewReplyMailRequestWithBody(server string, cityName string, id string, para
 	return req, nil
 }
 
+// NewTriggerMaintenanceDoltGcRequest generates requests for TriggerMaintenanceDoltGc
+func NewTriggerMaintenanceDoltGcRequest(server string, cityName string, params *TriggerMaintenanceDoltGcParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "cityName", cityName, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/v0/city/%s/maintenance/dolt-gc", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.Wait != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "wait", *params.Wait, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "boolean", Format: ""}); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
+	}
+
+	return req, nil
+}
+
+// NewGetV0CityByCityNameMaintenanceStatusRequest generates requests for GetV0CityByCityNameMaintenanceStatus
+func NewGetV0CityByCityNameMaintenanceStatusRequest(server string, cityName string) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "cityName", cityName, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/v0/city/%s/maintenance/status", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
 // NewGetV0CityByCityNameOrderHistoryByBeadIdRequest generates requests for GetV0CityByCityNameOrderHistoryByBeadId
 func NewGetV0CityByCityNameOrderHistoryByBeadIdRequest(server string, cityName string, beadId string, params *GetV0CityByCityNameOrderHistoryByBeadIdParams) (*http.Request, error) {
 	var err error
@@ -19072,6 +19671,40 @@ func NewPutV0CityByCityNamePatchesRigsRequestWithBody(server string, cityName st
 
 		req.Header.Set("X-GC-Request", headerParam0)
 
+	}
+
+	return req, nil
+}
+
+// NewGetV0CityByCityNamePendingRequest generates requests for GetV0CityByCityNamePending
+func NewGetV0CityByCityNamePendingRequest(server string, cityName string) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "cityName", cityName, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/v0/city/%s/pending", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
 	}
 
 	return req, nil
@@ -22104,6 +22737,9 @@ type ClientWithResponsesInterface interface {
 	// GetV0CityByCityNameConfigWithResponse request
 	GetV0CityByCityNameConfigWithResponse(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameConfigResponse, error)
 
+	// GetV0CityByCityNameConfigDefaultsWithResponse request
+	GetV0CityByCityNameConfigDefaultsWithResponse(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameConfigDefaultsResponse, error)
+
 	// GetV0CityByCityNameConfigExplainWithResponse request
 	GetV0CityByCityNameConfigExplainWithResponse(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameConfigExplainResponse, error)
 
@@ -22273,6 +22909,12 @@ type ClientWithResponsesInterface interface {
 
 	ReplyMailWithResponse(ctx context.Context, cityName string, id string, params *ReplyMailParams, body ReplyMailJSONRequestBody, reqEditors ...RequestEditorFn) (*ReplyMailResponse, error)
 
+	// TriggerMaintenanceDoltGcWithResponse request
+	TriggerMaintenanceDoltGcWithResponse(ctx context.Context, cityName string, params *TriggerMaintenanceDoltGcParams, reqEditors ...RequestEditorFn) (*TriggerMaintenanceDoltGcResponse, error)
+
+	// GetV0CityByCityNameMaintenanceStatusWithResponse request
+	GetV0CityByCityNameMaintenanceStatusWithResponse(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameMaintenanceStatusResponse, error)
+
 	// GetV0CityByCityNameOrderHistoryByBeadIdWithResponse request
 	GetV0CityByCityNameOrderHistoryByBeadIdWithResponse(ctx context.Context, cityName string, beadId string, params *GetV0CityByCityNameOrderHistoryByBeadIdParams, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameOrderHistoryByBeadIdResponse, error)
 
@@ -22347,6 +22989,9 @@ type ClientWithResponsesInterface interface {
 	PutV0CityByCityNamePatchesRigsWithBodyWithResponse(ctx context.Context, cityName string, params *PutV0CityByCityNamePatchesRigsParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PutV0CityByCityNamePatchesRigsResponse, error)
 
 	PutV0CityByCityNamePatchesRigsWithResponse(ctx context.Context, cityName string, params *PutV0CityByCityNamePatchesRigsParams, body PutV0CityByCityNamePatchesRigsJSONRequestBody, reqEditors ...RequestEditorFn) (*PutV0CityByCityNamePatchesRigsResponse, error)
+
+	// GetV0CityByCityNamePendingWithResponse request
+	GetV0CityByCityNamePendingWithResponse(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNamePendingResponse, error)
 
 	// GetV0CityByCityNameProviderReadinessWithResponse request
 	GetV0CityByCityNameProviderReadinessWithResponse(ctx context.Context, cityName string, params *GetV0CityByCityNameProviderReadinessParams, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameProviderReadinessResponse, error)
@@ -23236,6 +23881,29 @@ func (r GetV0CityByCityNameConfigResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r GetV0CityByCityNameConfigResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type GetV0CityByCityNameConfigDefaultsResponse struct {
+	Body                          []byte
+	HTTPResponse                  *http.Response
+	JSON200                       *ConfigResponse
+	ApplicationproblemJSONDefault *ErrorModel
+}
+
+// Status returns HTTPResponse.Status
+func (r GetV0CityByCityNameConfigDefaultsResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r GetV0CityByCityNameConfigDefaultsResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -24276,6 +24944,52 @@ func (r ReplyMailResponse) StatusCode() int {
 	return 0
 }
 
+type TriggerMaintenanceDoltGcResponse struct {
+	Body                          []byte
+	HTTPResponse                  *http.Response
+	JSON202                       *MaintenanceTriggerBody
+	ApplicationproblemJSONDefault *ErrorModel
+}
+
+// Status returns HTTPResponse.Status
+func (r TriggerMaintenanceDoltGcResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r TriggerMaintenanceDoltGcResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type GetV0CityByCityNameMaintenanceStatusResponse struct {
+	Body                          []byte
+	HTTPResponse                  *http.Response
+	JSON200                       *MaintenanceStatusBody
+	ApplicationproblemJSONDefault *ErrorModel
+}
+
+// Status returns HTTPResponse.Status
+func (r GetV0CityByCityNameMaintenanceStatusResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r GetV0CityByCityNameMaintenanceStatusResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 type GetV0CityByCityNameOrderHistoryByBeadIdResponse struct {
 	Body                          []byte
 	HTTPResponse                  *http.Response
@@ -24799,6 +25513,29 @@ func (r PutV0CityByCityNamePatchesRigsResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r PutV0CityByCityNamePatchesRigsResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type GetV0CityByCityNamePendingResponse struct {
+	Body                          []byte
+	HTTPResponse                  *http.Response
+	JSON200                       *ListBodyCityPendingEntry
+	ApplicationproblemJSONDefault *ErrorModel
+}
+
+// Status returns HTTPResponse.Status
+func (r GetV0CityByCityNamePendingResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r GetV0CityByCityNamePendingResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -26198,6 +26935,15 @@ func (c *ClientWithResponses) GetV0CityByCityNameConfigWithResponse(ctx context.
 	return ParseGetV0CityByCityNameConfigResponse(rsp)
 }
 
+// GetV0CityByCityNameConfigDefaultsWithResponse request returning *GetV0CityByCityNameConfigDefaultsResponse
+func (c *ClientWithResponses) GetV0CityByCityNameConfigDefaultsWithResponse(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameConfigDefaultsResponse, error) {
+	rsp, err := c.GetV0CityByCityNameConfigDefaults(ctx, cityName, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseGetV0CityByCityNameConfigDefaultsResponse(rsp)
+}
+
 // GetV0CityByCityNameConfigExplainWithResponse request returning *GetV0CityByCityNameConfigExplainResponse
 func (c *ClientWithResponses) GetV0CityByCityNameConfigExplainWithResponse(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameConfigExplainResponse, error) {
 	rsp, err := c.GetV0CityByCityNameConfigExplain(ctx, cityName, reqEditors...)
@@ -26739,6 +27485,24 @@ func (c *ClientWithResponses) ReplyMailWithResponse(ctx context.Context, cityNam
 	return ParseReplyMailResponse(rsp)
 }
 
+// TriggerMaintenanceDoltGcWithResponse request returning *TriggerMaintenanceDoltGcResponse
+func (c *ClientWithResponses) TriggerMaintenanceDoltGcWithResponse(ctx context.Context, cityName string, params *TriggerMaintenanceDoltGcParams, reqEditors ...RequestEditorFn) (*TriggerMaintenanceDoltGcResponse, error) {
+	rsp, err := c.TriggerMaintenanceDoltGc(ctx, cityName, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseTriggerMaintenanceDoltGcResponse(rsp)
+}
+
+// GetV0CityByCityNameMaintenanceStatusWithResponse request returning *GetV0CityByCityNameMaintenanceStatusResponse
+func (c *ClientWithResponses) GetV0CityByCityNameMaintenanceStatusWithResponse(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameMaintenanceStatusResponse, error) {
+	rsp, err := c.GetV0CityByCityNameMaintenanceStatus(ctx, cityName, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseGetV0CityByCityNameMaintenanceStatusResponse(rsp)
+}
+
 // GetV0CityByCityNameOrderHistoryByBeadIdWithResponse request returning *GetV0CityByCityNameOrderHistoryByBeadIdResponse
 func (c *ClientWithResponses) GetV0CityByCityNameOrderHistoryByBeadIdWithResponse(ctx context.Context, cityName string, beadId string, params *GetV0CityByCityNameOrderHistoryByBeadIdParams, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameOrderHistoryByBeadIdResponse, error) {
 	rsp, err := c.GetV0CityByCityNameOrderHistoryByBeadId(ctx, cityName, beadId, params, reqEditors...)
@@ -26968,6 +27732,15 @@ func (c *ClientWithResponses) PutV0CityByCityNamePatchesRigsWithResponse(ctx con
 		return nil, err
 	}
 	return ParsePutV0CityByCityNamePatchesRigsResponse(rsp)
+}
+
+// GetV0CityByCityNamePendingWithResponse request returning *GetV0CityByCityNamePendingResponse
+func (c *ClientWithResponses) GetV0CityByCityNamePendingWithResponse(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNamePendingResponse, error) {
+	rsp, err := c.GetV0CityByCityNamePending(ctx, cityName, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseGetV0CityByCityNamePendingResponse(rsp)
 }
 
 // GetV0CityByCityNameProviderReadinessWithResponse request returning *GetV0CityByCityNameProviderReadinessResponse
@@ -28513,6 +29286,39 @@ func ParseGetV0CityByCityNameConfigResponse(rsp *http.Response) (*GetV0CityByCit
 	return response, nil
 }
 
+// ParseGetV0CityByCityNameConfigDefaultsResponse parses an HTTP response from a GetV0CityByCityNameConfigDefaultsWithResponse call
+func ParseGetV0CityByCityNameConfigDefaultsResponse(rsp *http.Response) (*GetV0CityByCityNameConfigDefaultsResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &GetV0CityByCityNameConfigDefaultsResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest ConfigResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
 // ParseGetV0CityByCityNameConfigExplainResponse parses an HTTP response from a GetV0CityByCityNameConfigExplainWithResponse call
 func ParseGetV0CityByCityNameConfigExplainResponse(rsp *http.Response) (*GetV0CityByCityNameConfigExplainResponse, error) {
 	bodyBytes, err := io.ReadAll(rsp.Body)
@@ -29991,6 +30797,72 @@ func ParseReplyMailResponse(rsp *http.Response) (*ReplyMailResponse, error) {
 	return response, nil
 }
 
+// ParseTriggerMaintenanceDoltGcResponse parses an HTTP response from a TriggerMaintenanceDoltGcWithResponse call
+func ParseTriggerMaintenanceDoltGcResponse(rsp *http.Response) (*TriggerMaintenanceDoltGcResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &TriggerMaintenanceDoltGcResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 202:
+		var dest MaintenanceTriggerBody
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON202 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseGetV0CityByCityNameMaintenanceStatusResponse parses an HTTP response from a GetV0CityByCityNameMaintenanceStatusWithResponse call
+func ParseGetV0CityByCityNameMaintenanceStatusResponse(rsp *http.Response) (*GetV0CityByCityNameMaintenanceStatusResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &GetV0CityByCityNameMaintenanceStatusResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest MaintenanceStatusBody
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
 // ParseGetV0CityByCityNameOrderHistoryByBeadIdResponse parses an HTTP response from a GetV0CityByCityNameOrderHistoryByBeadIdWithResponse call
 func ParseGetV0CityByCityNameOrderHistoryByBeadIdResponse(rsp *http.Response) (*GetV0CityByCityNameOrderHistoryByBeadIdResponse, error) {
 	bodyBytes, err := io.ReadAll(rsp.Body)
@@ -30733,6 +31605,39 @@ func ParsePutV0CityByCityNamePatchesRigsResponse(rsp *http.Response) (*PutV0City
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
 		var dest PatchOKResponseBody
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseGetV0CityByCityNamePendingResponse parses an HTTP response from a GetV0CityByCityNamePendingWithResponse call
+func ParseGetV0CityByCityNamePendingResponse(rsp *http.Response) (*GetV0CityByCityNamePendingResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &GetV0CityByCityNamePendingResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest ListBodyCityPendingEntry
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}

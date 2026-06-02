@@ -65,7 +65,9 @@ BEADS_POSTGRES_PORT=%%s
 BEADS_POSTGRES_USER=%%s
 BEADS_POSTGRES_DATABASE=%%s
 BEADS_POSTGRES_PASSWORD=%%s
-'       "${GC_STORE_ROOT:-}" "${GC_STORE_SCOPE:-}" "${GC_BEADS_PREFIX:-}" "${GC_CITY:-}" "${GC_CITY_PATH:-}" "${GC_RIG:-}" "${GC_RIG_ROOT:-}" "${GC_PROVIDER:-}" "${BEADS_DIR:-}" "${GC_DOLT_HOST:-}" "${GC_DOLT_PORT:-}" "${BEADS_POSTGRES_HOST:-}" "${BEADS_POSTGRES_PORT:-}" "${BEADS_POSTGRES_USER:-}" "${BEADS_POSTGRES_DATABASE:-}" "${BEADS_POSTGRES_PASSWORD:-}" > "$out"
+BD_DOLT_SYNC_CLI_REMOTES=%%s
+BEADS_DOLT_SYNC_CLI_REMOTES=%%s
+'       "${GC_STORE_ROOT:-}" "${GC_STORE_SCOPE:-}" "${GC_BEADS_PREFIX:-}" "${GC_CITY:-}" "${GC_CITY_PATH:-}" "${GC_RIG:-}" "${GC_RIG_ROOT:-}" "${GC_PROVIDER:-}" "${BEADS_DIR:-}" "${GC_DOLT_HOST:-}" "${GC_DOLT_PORT:-}" "${BEADS_POSTGRES_HOST:-}" "${BEADS_POSTGRES_PORT:-}" "${BEADS_POSTGRES_USER:-}" "${BEADS_POSTGRES_DATABASE:-}" "${BEADS_POSTGRES_PASSWORD:-}" "${BD_DOLT_SYNC_CLI_REMOTES:-}" "${BEADS_DOLT_SYNC_CLI_REMOTES:-}" > "$out"
     cat >/dev/null
     echo '{"id":"EX-1","title":"captured","status":"open","type":"task","created_at":"2026-02-27T10:00:00Z"}'
     ;;
@@ -480,11 +482,17 @@ func TestOpenStoreAtForCityExecBeadsBdProjectsScopedExternalDoltEnv(t *testing.T
 	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
 	t.Setenv("GC_DOLT_HOST", "ambient-dolt")
 	t.Setenv("GC_DOLT_PORT", "9999")
+	t.Setenv("BD_DOLT_SYNC_CLI_REMOTES", "true")
+	t.Setenv("BEADS_DOLT_SYNC_CLI_REMOTES", "true")
 
-	store, err := openStoreAtForCity(rigDir, cityDir)
+	result, err := openStoreResultAtForCity(rigDir, cityDir)
 	if err != nil {
 		t.Fatalf("openStoreAtForCity: %v", err)
 	}
+	if result.Diagnostic.Store != "ExecStore" {
+		t.Fatalf("beads_store = %q, want ExecStore", result.Diagnostic.Store)
+	}
+	store := result.Store
 	if _, err := store.Create(beads.Bead{Title: "rig"}); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -501,6 +509,12 @@ func TestOpenStoreAtForCityExecBeadsBdProjectsScopedExternalDoltEnv(t *testing.T
 	}
 	if got := rigEnv["BEADS_DIR"]; got != "" {
 		t.Fatalf("BEADS_DIR leaked as %q", got)
+	}
+	if got := rigEnv["BD_DOLT_SYNC_CLI_REMOTES"]; got != "false" {
+		t.Fatalf("BD_DOLT_SYNC_CLI_REMOTES = %q, want false", got)
+	}
+	if got := rigEnv["BEADS_DOLT_SYNC_CLI_REMOTES"]; got != "false" {
+		t.Fatalf("BEADS_DOLT_SYNC_CLI_REMOTES = %q, want false", got)
 	}
 }
 

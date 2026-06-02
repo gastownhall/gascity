@@ -8,7 +8,7 @@ import (
 )
 
 func TestDoltVersionPins(t *testing.T) {
-	const doltVersion = "2.0.7"
+	const doltVersion = "2.1.0"
 	repoRoot := repoRoot(t)
 
 	assertContains := func(rel, want string) {
@@ -35,6 +35,12 @@ func TestDoltVersionPins(t *testing.T) {
 	assertContains("deps.env", "DOLT_VERSION="+doltVersion)
 	assertContains("contrib/k8s/Dockerfile.base", "ARG DOLT_VERSION="+doltVersion)
 	assertCount("contrib/k8s/dolt-statefulset.yaml", "image: dolthub/dolt:"+doltVersion, 2)
+	assertContains("README.md", "| dolt | Beads provider `bd` | "+doltVersion+" or newer")
+	assertContains("README.md", "Managed Dolt checks require a final Dolt "+doltVersion+" or newer.")
+	assertContains("examples/dolt/pack.toml", "# Minimum dolt version: "+doltVersion+".")
+	assertContains("examples/dolt/doctor/check-dolt/run.sh", `required="`+doltVersion+`"`)
+	assertContains("examples/dolt/assets/scripts/mol-dog-backup.sh", `MIN_DOLT_BACKUP_VERSION="`+doltVersion+`"`)
+	assertContains("examples/dolt/formulas/mol-dog-backup.toml", "**Required:** dolt >= "+doltVersion+".")
 
 	for _, platform := range []string{"linux-amd64", "linux-arm64", "darwin-amd64", "darwin-arm64"} {
 		assertContains(".github/scripts/install-dolt-archive.sh", doltVersion+":"+platform)

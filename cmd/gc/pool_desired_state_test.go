@@ -181,6 +181,47 @@ func TestComputePoolDesiredStates_ResumeResolvesAssigneeByAlias(t *testing.T) {
 	}
 }
 
+func TestComputePoolDesiredStates_ResumeUsesLegacyWorkflowRunTarget(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{
+			poolAgent("claude", "rig", intPtr(2), 0),
+			poolAgent("reviewer", "rig", intPtr(2), 0),
+		},
+	}
+	work := []beads.Bead{{
+		ID:       "legacy-workflow-root",
+		Status:   "in_progress",
+		Assignee: "sess-1",
+		Priority: intPtr(5),
+		Metadata: map[string]string{
+			"gc.kind":       "workflow",
+			"gc.run_target": "rig/claude",
+		},
+	}}
+	sessions := []beads.Bead{{
+		ID:     "sess-1",
+		Status: "open",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			poolManagedMetadataKey: boolMetadata(true),
+		},
+	}}
+
+	result := ComputePoolDesiredStates(cfg, work, sessions, nil)
+
+	if len(result) != 1 {
+		t.Fatalf("len(result) = %d, want 1", len(result))
+	}
+	reqs := result[0].Requests
+	if len(reqs) != 1 {
+		t.Fatalf("len(requests) = %d, want 1 resume request", len(reqs))
+	}
+	if reqs[0].Tier != "resume" || reqs[0].SessionBeadID != "sess-1" {
+		t.Fatalf("request = %+v, want resume for sess-1", reqs[0])
+	}
+}
+
 func TestComputePoolDesiredStates_ResumeResolvesAssigneeByAliasHistory(t *testing.T) {
 	// Regression: alias rotation preserves prior aliases in alias_history.
 	// Work assigned under a prior alias must still resolve to its owning

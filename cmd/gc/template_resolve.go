@@ -83,6 +83,12 @@ type TemplateParams struct {
 	// metadata, and start background helpers, but they do not initiate the
 	// first model turn on their own.
 	HookEnabled bool
+	// SessionOverride is the per-agent session provider override (e.g., "acp",
+	// "tmux", "exec:..."). Empty means use the city-level default.
+	SessionOverride string
+	// EffectiveSessionProvider is the actual session provider after applying
+	// city-level defaults.
+	EffectiveSessionProvider string
 	// DependencyOnly marks a realized cold slot kept only so dependency wake
 	// has something concrete to wake even when pool check wants zero.
 	DependencyOnly bool
@@ -299,6 +305,10 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		p.appendFragments,
 	)
 	providerKey, providerDisplayName := providerInfoForAgent(cfgAgent, p.workspace, p.providers)
+	packDirs := p.packDirs
+	if p.city != nil {
+		packDirs = p.city.PackDirsForRig(rigName)
+	}
 	prompt = renderPrompt(p.fs, p.cityPath, p.cityName, cfgAgent.PromptTemplate, PromptContext{
 		CityRoot:            p.cityPath,
 		AgentName:           qualifiedName,
@@ -314,8 +324,9 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		SlingQuery:          expandAgentCommandTemplate(p.cityPath, p.cityName, cfgAgent, p.rigs, "sling_query", cfgAgent.EffectiveSlingQuery(), p.stderr),
 		ProviderKey:         providerKey,
 		ProviderDisplayName: providerDisplayName,
+		InstructionsFile:    instructionsFileForAgent(cfgAgent, p.workspace, p.providers),
 		Env:                 cfgAgent.Env,
-	}, p.sessionTemplate, p.stderr, p.packDirs, fragments, p.beadStore)
+	}, p.sessionTemplate, p.stderr, packDirs, fragments, p.beadStore)
 	hasHooks := config.AgentHasHooks(cfgAgent, p.workspace, resolved.Name, p.providers)
 	beacon := runtime.FormatBeaconAt(p.cityName, qualifiedName, !hasHooks, p.beaconTime)
 	suppressStartupPrompt := suppressStartupPromptForAgent(cfgAgent)
@@ -543,6 +554,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		ProcessNames:           resolved.ProcessNames,
 		EmitsPermissionWarning: resolved.EmitsPermissionWarning,
 		AcceptStartupDialogs:   acceptStartupDialogs,
+		MouseOn:                cfgAgent.MouseModeOn(),
 		Nudge:                  nudge,
 		PreStart:               expandedPreStart,
 		SessionSetup:           expandedSetup,
@@ -556,7 +568,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		CopyFiles:              copyFiles,
 	}
 
-	return TemplateParams{
+	params := TemplateParams{
 		Command:          command,
 		Prompt:           prompt,
 		Env:              env,
@@ -574,7 +586,10 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		IsACP:            sessionTransport == config.SessionTransportACP,
 		HookEnabled:      hasHooks,
 		MCPServers:       mcpServers,
-	}, nil
+	}
+	params.SessionOverride = cfgAgent.Session
+	params.EffectiveSessionProvider = effectiveSessionProvider(cfgAgent.Session, p.sessionProvider)
+	return params, nil
 }
 
 func suppressStartupPromptForAgent(cfgAgent *config.Agent) bool {
@@ -591,6 +606,7 @@ func sessionBackendEnvWithError(cityPath, rigRoot string, rigs []config.Rig) (ma
 		// agent's cwd with the wrong data_dir.
 		"BEADS_DOLT_AUTO_START": "0",
 	}
+	applyBdCLIRemoteSyncOptOut(env)
 	// Explicit empty values let tmux unset stale Dolt vars inherited from
 	// the server environment when the current city/rig does not use them.
 	setProjectedDoltEnvEmpty(env)
@@ -676,7 +692,7 @@ func templateParamsToConfig(tp TemplateParams) runtime.Config {
 		}
 		env[startupPromptDeliveredEnv] = "1"
 	}
-	return runtime.Config{
+	cfg := runtime.Config{
 		Command:      tp.Command,
 		PromptSuffix: promptSuffix,
 		PromptFlag:   promptFlag,
@@ -694,6 +710,7 @@ func templateParamsToConfig(tp TemplateParams) runtime.Config {
 		ProcessNames:           tp.Hints.ProcessNames,
 		EmitsPermissionWarning: tp.Hints.EmitsPermissionWarning,
 		AcceptStartupDialogs:   tp.Hints.AcceptStartupDialogs,
+		MouseOn:                tp.Hints.MouseOn,
 		Nudge:                  nudge,
 		PreStart:               tp.Hints.PreStart,
 		SessionSetup:           tp.Hints.SessionSetup,
@@ -707,6 +724,8 @@ func templateParamsToConfig(tp TemplateParams) runtime.Config {
 		CopyFiles:              tp.Hints.CopyFiles,
 		FingerprintExtra:       tp.FPExtra,
 	}
+	applyT3BridgeRuntimeConfig(tp, env)
+	return cfg
 }
 
 func prependStartupPromptToNudge(prompt, nudge string) string {

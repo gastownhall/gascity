@@ -9,13 +9,14 @@ import (
 // Convergence event type constants. These match the event_type discriminator
 // values in the Event Contracts spec section.
 const (
-	EventCreated       = "convergence.created"
-	EventIteration     = "convergence.iteration"
-	EventTerminated    = "convergence.terminated"
-	EventWaitingManual = "convergence.waiting_manual"
-	EventManualApprove = "convergence.manual_approve"
-	EventManualIterate = "convergence.manual_iterate"
-	EventManualStop    = "convergence.manual_stop"
+	EventCreated        = "convergence.created"
+	EventIteration      = "convergence.iteration"
+	EventTerminated     = "convergence.terminated"
+	EventWaitingManual  = "convergence.waiting_manual"
+	EventManualApprove  = "convergence.manual_approve"
+	EventManualIterate  = "convergence.manual_iterate"
+	EventManualStop     = "convergence.manual_stop"
+	EventTriggerAdvance = "convergence.trigger_advance"
 )
 
 // Event delivery tiers.
@@ -68,6 +69,15 @@ func EventIDManualIterate(beadID string, iteration int) string {
 // EventIDManualStop returns the stable event ID for a ConvergenceManualStop event.
 func EventIDManualStop(beadID string) string {
 	return fmt.Sprintf("converge:%s:manual_stop", beadID)
+}
+
+// EventIDTriggerAdvance returns the stable event ID for a ConvergenceTriggerAdvance
+// event. N is the iteration number of the NEW wisp poured when the trigger fired.
+// It is deliberately distinct from EventIDIteration so the trigger-driven advance
+// cannot collide with the per-wisp iteration event that the same iteration's wisp
+// emits when it closes (both would otherwise derive converge:<bead>:iter:N:iteration).
+func EventIDTriggerAdvance(beadID string, iteration int) string {
+	return fmt.Sprintf("converge:%s:iter:%d:trigger_advance", beadID, iteration)
 }
 
 // CreatedPayload is the structured payload for ConvergenceCreated events.
@@ -134,11 +144,12 @@ type WaitingManualPayload struct {
 	CumulativeDurationMs int64              `json:"cumulative_duration_ms"`
 }
 
-// ManualActionPayload is the structured payload for ConvergenceManualApprove,
-// ConvergenceManualIterate, and ConvergenceManualStop events.
+// ManualActionPayload is the structured payload for the state-transition
+// events ConvergenceManualApprove, ConvergenceManualIterate, ConvergenceManualStop
+// (operator-driven), and ConvergenceTriggerAdvance (controller-driven).
 type ManualActionPayload struct {
 	Rig        string  `json:"rig,omitempty"`
-	Actor      string  `json:"actor"` // operator:<username>
+	Actor      string  `json:"actor"` // operator:<username>, or "controller" for trigger_advance
 	PriorState string  `json:"prior_state"`
 	NewState   string  `json:"new_state"`
 	Iteration  int     `json:"iteration"`

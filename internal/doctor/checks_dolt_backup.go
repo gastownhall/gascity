@@ -103,11 +103,7 @@ func (c *DoltBackupCheck) CanFix() bool { return false }
 func (c *DoltBackupCheck) Fix(_ *CheckContext) error { return nil }
 
 func (c *DoltBackupCheck) normalizedRigPath() string {
-	rigPath := c.rig.Path
-	if !filepath.IsAbs(rigPath) {
-		rigPath = filepath.Join(c.cityPath, rigPath)
-	}
-	return rigPath
+	return normalizedRigPath(c.cityPath, c.rig)
 }
 
 // resolveDBName returns the rig's Dolt database name from
@@ -116,24 +112,36 @@ func (c *DoltBackupCheck) normalizedRigPath() string {
 // for rigs whose metadata never landed — the operator can correct the
 // db name in the suggested command if needed.
 func (c *DoltBackupCheck) resolveDBName(rigPath string) (string, []string) {
+	return resolveDoltDBName(c.rig, rigPath)
+}
+
+func normalizedRigPath(cityPath string, rig config.Rig) string {
+	rigPath := rig.Path
+	if !filepath.IsAbs(rigPath) {
+		rigPath = filepath.Join(cityPath, rigPath)
+	}
+	return rigPath
+}
+
+func resolveDoltDBName(rig config.Rig, rigPath string) (string, []string) {
 	metadataPath := filepath.Join(rigPath, ".beads", "metadata.json")
 	data, err := os.ReadFile(metadataPath)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			return c.rig.Name, nil
+			return rig.Name, nil
 		}
-		return c.rig.Name, []string{fmt.Sprintf("read metadata.json: %v; using rig name %q", err, c.rig.Name)}
+		return rig.Name, []string{fmt.Sprintf("read metadata.json: %v; using rig name %q", err, rig.Name)}
 	}
 	var meta struct {
 		DoltDatabase string `json:"dolt_database"`
 	}
 	if err := json.Unmarshal(data, &meta); err != nil {
-		return c.rig.Name, []string{fmt.Sprintf("parse metadata.json: %v; using rig name %q", err, c.rig.Name)}
+		return rig.Name, []string{fmt.Sprintf("parse metadata.json: %v; using rig name %q", err, rig.Name)}
 	}
 	if s := strings.TrimSpace(meta.DoltDatabase); s != "" {
 		return s, nil
 	}
-	return c.rig.Name, nil
+	return rig.Name, nil
 }
 
 // backupRemoteRegistered reports whether

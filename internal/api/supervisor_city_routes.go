@@ -45,6 +45,7 @@ func (sm *SupervisorMux) registerCityRoutes() {
 	cityGet(sm, "/config", (*Server).humaHandleConfigGet)
 	cityGet(sm, "/config/explain", (*Server).humaHandleConfigExplain)
 	cityGet(sm, "/config/validate", (*Server).humaHandleConfigValidate)
+	cityGet(sm, "/config/defaults", (*Server).humaHandleConfigDefaults)
 
 	// Agents — read / CRUD. Agents can be addressed unqualified
 	// ({base}) or rig-qualified ({dir}/{base}); there is no third
@@ -247,6 +248,17 @@ func (sm *SupervisorMux) registerCityRoutes() {
 	// Sling.
 	cityPost(sm, "/sling", (*Server).humaHandleSling)
 
+	// Maintenance (Dolt store gc + snapshot).
+	cityGet(sm, "/maintenance/status", (*Server).humaHandleMaintenanceStatus)
+	cityRegister(sm, huma.Operation{
+		OperationID:   "trigger-maintenance-dolt-gc",
+		Method:        http.MethodPost,
+		Path:          "/maintenance/dolt-gc",
+		Summary:       "Trigger a Dolt store maintenance run",
+		Description:   "Trigger a one-off maintenance cycle (dolt backup + CALL DOLT_GC + smoke test). Default async (202); ?wait=true blocks until completion (200). Returns 409 when a run is already in flight.",
+		DefaultStatus: http.StatusAccepted,
+	}, (*Server).humaHandleMaintenanceTriggerDoltGC)
+
 	// Services (workspace services).
 	cityGet(sm, "/services", (*Server).humaHandleServiceList)
 	cityGet(sm, "/service/{name}", (*Server).humaHandleServiceGet)
@@ -264,6 +276,7 @@ func (sm *SupervisorMux) registerCityRoutes() {
 	cityGet(sm, "/session/{id}", (*Server).humaHandleSessionGet)
 	cityGet(sm, "/session/{id}/transcript", (*Server).humaHandleSessionTranscript)
 	cityGet(sm, "/session/{id}/pending", (*Server).humaHandleSessionPending)
+	cityGet(sm, "/pending", (*Server).humaHandleCityPending)
 	cityPatch(sm, "/session/{id}", (*Server).humaHandleSessionPatch)
 	cityPost(sm, "/session/{id}/permission-mode", (*Server).humaHandleSessionPermissionMode)
 	cityRegister(sm, huma.Operation{

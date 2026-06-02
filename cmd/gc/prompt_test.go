@@ -1049,6 +1049,120 @@ func TestEmbeddedMayorPromptRendersProviderSpecificSlashNote(t *testing.T) {
 	}
 }
 
+func TestInstructionsFileForAgentClaudeReturnsCLAUDEMD(t *testing.T) {
+	ws := &config.Workspace{Provider: "claude"}
+	got := instructionsFileForAgent(&config.Agent{}, ws, nil)
+	if got != "CLAUDE.md" {
+		t.Errorf("InstructionsFile = %q, want %q", got, "CLAUDE.md")
+	}
+}
+
+func TestInstructionsFileForAgentCodexReturnsAGENTSMD(t *testing.T) {
+	ws := &config.Workspace{Provider: "codex"}
+	got := instructionsFileForAgent(&config.Agent{}, ws, nil)
+	if got != "AGENTS.md" {
+		t.Errorf("InstructionsFile = %q, want %q", got, "AGENTS.md")
+	}
+}
+
+func TestInstructionsFileForAgentDefaultsToAGENTSMDWhenUnset(t *testing.T) {
+	got := instructionsFileForAgent(&config.Agent{}, &config.Workspace{}, nil)
+	if got != "AGENTS.md" {
+		t.Errorf("InstructionsFile = %q, want %q (default)", got, "AGENTS.md")
+	}
+}
+
+func TestInstructionsFileForAgentResolvesAgentOverWorkspace(t *testing.T) {
+	ws := &config.Workspace{Provider: "codex"}
+	a := &config.Agent{Provider: "claude"}
+	got := instructionsFileForAgent(a, ws, nil)
+	if got != "CLAUDE.md" {
+		t.Errorf("InstructionsFile = %q, want %q (agent.Provider beats workspace.Provider)", got, "CLAUDE.md")
+	}
+}
+
+func TestInstructionsFileForAgentUsesCityOverride(t *testing.T) {
+	// A custom provider declared in city.toml with InstructionsFile set
+	// takes precedence over its builtin family default.
+	cityProviders := map[string]config.ProviderSpec{
+		"custom-claude": {
+			Command:          "claude-fork",
+			InstructionsFile: "INSTRUCTIONS.md",
+		},
+	}
+	ws := &config.Workspace{Provider: "custom-claude"}
+	got := instructionsFileForAgent(&config.Agent{}, ws, cityProviders)
+	if got != "INSTRUCTIONS.md" {
+		t.Errorf("InstructionsFile = %q, want %q (city override)", got, "INSTRUCTIONS.md")
+	}
+}
+
+func TestInstructionsFileForAgentFallsBackToBuiltinFamily(t *testing.T) {
+	// A custom provider with empty InstructionsFile but a builtin family
+	// inherits the family's filename. `kiro` (a claude-family fork) is the
+	// canonical case from internal/config/chain_test.go; here we mimic that
+	// pattern with a synthetic provider whose Base points at "claude".
+	base := "claude"
+	cityProviders := map[string]config.ProviderSpec{
+		"my-fork": {
+			Base:    &base,
+			Command: "my-fork",
+		},
+	}
+	ws := &config.Workspace{Provider: "my-fork"}
+	got := instructionsFileForAgent(&config.Agent{}, ws, cityProviders)
+	if got != "CLAUDE.md" {
+		t.Errorf("InstructionsFile = %q, want %q (inherited from claude family)", got, "CLAUDE.md")
+	}
+}
+
+func TestRenderedCrewPromptShowsProviderSpecificInstructionsFile(t *testing.T) {
+	// Regression test for Wasteland w-d4dba7b056: the Gastown pack's crew
+	// prompt should reference the provider-specific instruction filename as
+	// the fallback for missing/empty quality-gate guidance.
+	//
+	// Two assertions: (a) the shipped crew.template.md references the
+	// {{ .InstructionsFile }} placeholder in the expected backtick pattern,
+	// and (b) renderPrompt substitutes that placeholder to the right value
+	// for each provider via buildTemplateData. Asserting (a)+(b)
+	// independently keeps the test stable when crew.template.md gains new
+	// fragment includes that would otherwise break a full-render assertion.
+	crewPath := filepath.Join("..", "..", "examples", "gastown", "packs", "gastown", "assets", "prompts", "crew.template.md")
+	source, err := os.ReadFile(crewPath)
+	if err != nil {
+		t.Skipf("crew.template.md not readable at %s: %v", crewPath, err)
+	}
+	if !strings.Contains(string(source), "`{{ .InstructionsFile }}`") {
+		t.Fatalf("crew.template.md missing fallback marker `{{ .InstructionsFile }}` (w-d4dba7b056 regression)")
+	}
+
+	cases := []struct {
+		providerKey string
+		wantFile    string
+	}{
+		{"claude", "CLAUDE.md"},
+		{"codex", "AGENTS.md"},
+		{"", "AGENTS.md"},
+	}
+
+	const tmplBody = "fallback: (`{{ .InstructionsFile }}`)"
+	for _, tc := range cases {
+		f := fsys.NewFake()
+		f.Files["/city/prompts/p.template.md"] = []byte(tmplBody)
+		ws := &config.Workspace{Provider: tc.providerKey}
+		got := renderPrompt(f, "/city", "test-city", "prompts/p.template.md",
+			PromptContext{
+				ProviderKey:      tc.providerKey,
+				InstructionsFile: instructionsFileForAgent(&config.Agent{}, ws, nil),
+			},
+			"", io.Discard, nil, nil, nil)
+		want := "fallback: (`" + tc.wantFile + "`)"
+		if got != want {
+			t.Errorf("ProviderKey=%q: rendered = %q, want %q", tc.providerKey, got, want)
+		}
+	}
+}
+
 func TestProviderDisplayNameFallsBackToKeyForUnknownProvider(t *testing.T) {
 	ws := &config.Workspace{Provider: "totally-unknown"}
 	a := &config.Agent{}
@@ -1109,6 +1223,82 @@ func TestRenderPromptCityRootFragmentsPerAgentWins(t *testing.T) {
 	if got != "per-agent" {
 		t.Errorf("renderPrompt(per-agent overrides city-root) = %q, want %q",
 			got, "per-agent")
+	}
+}
+
+// TestRenderPromptResolvesRigPackFragment is the renderer-level regression
+// test for gascity#2676: a template fragment shipped in a rig-imported pack
+// (i.e. in cfg.RigPackDirs[<rig>], not cfg.PackDirs) must resolve when the
+// renderer is given that rig's scoped pack directories. Before the fix the
+// two callers in agent_build_params.go / cmd_prime.go passed only cfg.PackDirs,
+// so rig-pack fragments silently fell through and the renderer emitted the raw
+// `{{ template ... }}` directive in error fallback.
+func TestRenderPromptResolvesRigPackFragment(t *testing.T) {
+	f := fsys.NewFake()
+	// Rig-imported pack ships a template fragment.
+	rigPackDir := "/city/.gc/cache/repos/abc123/packs/gastown"
+	f.Files[rigPackDir+"/template-fragments/work-query.template.md"] = []byte(
+		`{{ define "work-query" }}rig-pack-work-query{{ end }}`)
+	// An imported agent's prompt references that fragment.
+	f.Files["/city/agents/polecat/prompt.template.md"] = []byte(
+		`{{ template "work-query" . }}`)
+
+	cfg := &config.City{
+		// PackDirs is intentionally empty: this city imports its pack
+		// at the rig level, not the city level. Pre-fix callers passed
+		// cfg.PackDirs here and the fragment was never registered.
+		PackDirs: nil,
+		RigPackDirs: map[string][]string{
+			"gastown": {rigPackDir},
+		},
+	}
+
+	// Post-fix call: cfg.PackDirsForRig includes the current rig dir without
+	// exposing other rigs' pack fragments.
+	got := renderPrompt(f, "/city", "", "agents/polecat/prompt.template.md",
+		PromptContext{AgentName: "polecat"}, "", io.Discard, cfg.PackDirsForRig("gastown"), nil, nil)
+	if got != "rig-pack-work-query" {
+		t.Errorf("renderPrompt(cfg.PackDirsForRig()) = %q, want %q",
+			got, "rig-pack-work-query")
+	}
+
+	// Sanity-check the pre-fix behavior: passing cfg.PackDirs alone (what
+	// the two call sites used before gascity#2676) must NOT resolve the
+	// fragment — otherwise this test wouldn't be guarding the fix. The
+	// renderer's error path emits the raw body and logs to stderr; either
+	// way the rendered output must not be the resolved fragment text.
+	gotBuggy := renderPrompt(f, "/city", "", "agents/polecat/prompt.template.md",
+		PromptContext{AgentName: "polecat"}, "", io.Discard, cfg.PackDirs, nil, nil)
+	if gotBuggy == "rig-pack-work-query" {
+		t.Errorf("pre-fix call with cfg.PackDirs unexpectedly resolved the rig-pack fragment; the regression guard is not actually guarding anything")
+	}
+}
+
+// TestRenderPromptResolvesMultiRigPackFragments verifies that fragments from
+// multiple rig-imported packs all reach the renderer when cfg.AllPackDirs()
+// is passed. Guards against an off-by-one or single-rig assumption in the
+// AllPackDirs union.
+func TestRenderPromptResolvesMultiRigPackFragments(t *testing.T) {
+	f := fsys.NewFake()
+	alphaDir := "/city/.gc/cache/repos/aaa/packs/alpha"
+	bravoDir := "/city/.gc/cache/repos/bbb/packs/bravo"
+	f.Files[alphaDir+"/template-fragments/a.template.md"] = []byte(
+		`{{ define "a" }}A{{ end }}`)
+	f.Files[bravoDir+"/template-fragments/b.template.md"] = []byte(
+		`{{ define "b" }}B{{ end }}`)
+	f.Files["/city/agents/x/prompt.template.md"] = []byte(
+		`{{ template "a" . }}-{{ template "b" . }}`)
+
+	cfg := &config.City{
+		RigPackDirs: map[string][]string{
+			"alpha": {alphaDir},
+			"bravo": {bravoDir},
+		},
+	}
+	got := renderPrompt(f, "/city", "", "agents/x/prompt.template.md",
+		PromptContext{}, "", io.Discard, cfg.AllPackDirs(), nil, nil)
+	if got != "A-B" {
+		t.Errorf("renderPrompt(multi-rig AllPackDirs) = %q, want %q", got, "A-B")
 	}
 }
 

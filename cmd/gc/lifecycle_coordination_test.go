@@ -30,6 +30,10 @@ case "$1" in
     # Simulate bd init: create .beads/ (may wipe existing hooks)
     mkdir -p "$2/.beads"
     ;;
+  create)
+    cat >/dev/null
+    printf '{"id":"spy-1","title":"spy bead","status":"open","type":"task"}\n'
+    ;;
 esac
 exit 0
 `

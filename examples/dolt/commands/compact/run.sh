@@ -78,12 +78,37 @@
 #   GC_DOLT_COMPACT_ONLY_DBS              (optional) — comma-separated list of
 #                                         database names to compact. When set,
 #                                         all other databases are skipped.
+#   GC_DOLT_MANAGED_LOCAL                 (optional) — 1 for gc-managed local
+#                                         runtime validation; 0 allows explicit
+#                                         loopback host/port targets and skips
+#                                         non-local external targets.
 #   GC_DOLT_REFSPEC_<DB_UPPER>            (optional) — compact remote push
 #                                         refspec in <local>:<remote> form.
 #                                         DB name is uppercased with '-'
 #                                         replaced by '_' to derive the env
 #                                         key; DB names that differ only by
 #                                         '-' vs '_' share that key.
+#   GC_DOLT_COMPACT_BARE_GC               (optional) — when set to a truthy
+#                                         value (1, true, yes — matching
+#                                         the GC_DOLT_MANAGED_LOCAL style),
+#                                         skip the commit-count threshold
+#                                         AND the flatten/full-GC path
+#                                         entirely, and run a bare
+#                                         CALL DOLT_GC() on each
+#                                         discovered database. Decouples
+#                                         the working-set GC pass (which
+#                                         resets the NBS journal range
+#                                         index that grows with write
+#                                         churn) from the threshold-gated
+#                                         flatten, so a memory-pressure
+#                                         caller can run a short-cadence
+#                                         GC without rewriting history.
+#                                         Honors GC_DOLT_COMPACT_ONLY_DBS,
+#                                         GC_DOLT_COMPACT_DRY_RUN, and the
+#                                         per-db quarantine marker; does
+#                                         NOT write pending-GC /
+#                                         pending-push markers (those are
+#                                         flatten-remediation state).
 set -eu
 
 : "${GC_CITY_PATH:?GC_CITY_PATH must be set}"
@@ -91,16 +116,52 @@ set -eu
 gc_dolt_port_input="$GC_DOLT_PORT"
 gc_dolt_host_input="${GC_DOLT_HOST:-}"
 
+compact_dolt_host_is_local() (
+  compact_host=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
+  case "$compact_host" in
+    ''|localhost|0.0.0.0|::1|::|'[::1]'|'[::]')
+      return 0
+      ;;
+    127.*.*.*)
+      IFS=.
+      set -- $compact_host
+      [ "$#" -eq 4 ] || return 1
+      [ "$1" = "127" ] || return 1
+      for compact_octet in "$2" "$3" "$4"; do
+        case "$compact_octet" in
+          ''|*[!0-9]*)
+            return 1
+            ;;
+        esac
+        [ "$compact_octet" -le 255 ] 2>/dev/null || return 1
+      done
+      return 0
+      ;;
+  esac
+  return 1
+)
+
+explicit_external_local_dolt=0
+case "${GC_DOLT_MANAGED_LOCAL:-}" in
+  0|false|FALSE|no|NO)
+    if [ -z "$gc_dolt_port_input" ]; then
+      printf 'compact: managed local Dolt runtime is not applicable and GC_DOLT_PORT is empty — skip\n'
+      exit 0
+    fi
+    if compact_dolt_host_is_local "$gc_dolt_host_input"; then
+      GC_DOLT_PORT="$gc_dolt_port_input"
+      explicit_external_local_dolt=1
+    else
+      printf 'compact: GC_DOLT_HOST=%s is not a local Dolt compaction target — skip\n' \
+        "$gc_dolt_host_input"
+      exit 0
+    fi
+    ;;
+esac
+
 PACK_DIR="${GC_PACK_DIR:-$(unset CDPATH; cd -- "$(dirname "$0")/.." && pwd)}"
 # shellcheck disable=SC1091
 . "$PACK_DIR/assets/scripts/runtime.sh"
-
-case "${GC_DOLT_MANAGED_LOCAL:-}" in
-  0|false|FALSE|no|NO)
-    printf 'compact: managed local Dolt runtime is not applicable for this order — skip\n'
-    exit 0
-    ;;
-esac
 
 if [ "${GC_DOLT_MANAGED_LOCAL:-}" = "1" ]; then
   managed_port=$(managed_runtime_port "$DOLT_STATE_FILE" "$DOLT_DATA_DIR" || true)
@@ -118,16 +179,14 @@ if [ "${GC_DOLT_MANAGED_LOCAL:-}" = "1" ]; then
   else
     GC_DOLT_PORT="$gc_dolt_port_input"
   fi
+elif [ "$explicit_external_local_dolt" = "1" ]; then
+  :
 elif [ -n "$gc_dolt_port_input" ]; then
-  case "$gc_dolt_host_input" in
-    ''|127.0.0.1|localhost|0.0.0.0|::1|::|'[::1]'|'[::]')
-      ;;
-    *)
-      printf 'compact: GC_DOLT_HOST=%s is not a local managed Dolt host — skip\n' \
-        "$gc_dolt_host_input"
-      exit 0
-      ;;
-  esac
+  if ! compact_dolt_host_is_local "$gc_dolt_host_input"; then
+    printf 'compact: GC_DOLT_HOST=%s is not a local managed Dolt host — skip\n' \
+      "$gc_dolt_host_input"
+    exit 0
+  fi
   managed_port=$(managed_runtime_port "$DOLT_STATE_FILE" "$DOLT_DATA_DIR" || true)
   if [ -z "$managed_port" ] || [ "$gc_dolt_port_input" != "$managed_port" ]; then
     printf 'compact: GC_DOLT_PORT=%s does not match managed runtime port=%s for data_dir=%s — skip\n' \
@@ -156,6 +215,20 @@ pending_push_max_age_secs="${GC_DOLT_COMPACT_PENDING_PUSH_MAX_AGE_SECS:-172800}"
 compact_remote="${GC_DOLT_COMPACT_REMOTE:-}"
 dry_run="${GC_DOLT_COMPACT_DRY_RUN:-}"
 only_dbs="${GC_DOLT_COMPACT_ONLY_DBS:-}"
+bare_gc_input="${GC_DOLT_COMPACT_BARE_GC:-}"
+case "$bare_gc_input" in
+  ''|0|false|FALSE|no|NO)
+    bare_gc=0
+    ;;
+  1|true|TRUE|yes|YES)
+    bare_gc=1
+    ;;
+  *)
+    printf 'compact: invalid GC_DOLT_COMPACT_BARE_GC=%s (must be 1/true/yes or 0/false/no)\n' \
+      "$bare_gc_input" >&2
+    exit 2
+    ;;
+esac
 
 case "$threshold_commits" in
   ''|*[!0-9]*)
@@ -209,11 +282,11 @@ esac
 # and a second compactor running concurrently would race on the
 # graph-rewrite step.
 lock_host=$(printf '%s' "$host" | tr '[:upper:]' '[:lower:]' | sed 's/^\[\(.*\)\]$/\1/')
-case "$lock_host" in
-  ''|127.0.0.1|localhost|0.0.0.0|::1|::)
-    lock_host="127.0.0.1"
-    ;;
-esac
+if compact_dolt_host_is_local "$lock_host"; then
+  # Deliberately collapse loopback aliases; over-serializing local endpoints is
+  # safer than allowing two compaction jobs to interleave on one local runtime.
+  lock_host="127.0.0.1"
+fi
 lock_key=$(printf '%s-%s' "$lock_host" "$GC_DOLT_PORT" | tr -c 'A-Za-z0-9_.-' '-')
 lock_root="/tmp/gc-dolt-compact"
 old_umask=$(umask)
@@ -398,6 +471,14 @@ discover_database_names() {
       db=${d%/}
       db=${db##*/}
       is_system_database "$db" && continue
+      emit_database_name "$db"
+    done
+  fi
+
+  if [ -n "$only_dbs" ]; then
+    printf '%s\n' "$only_dbs" | tr ',' '\n' | while IFS= read -r db; do
+      db=$(printf '%s' "$db" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+      [ -n "$db" ] || continue
       emit_database_name "$db"
     done
   fi
@@ -1045,6 +1126,72 @@ ensure_remote_push_retry_fresh() {
   return 0
 }
 
+recover_legacy_pending_push_contract() {
+  db="$1"
+
+  legacy_remote=$(select_remote "$db") || return 1
+  if [ -z "$legacy_remote" ]; then
+    printf 'compact: db=%s legacy pending_push marker recovery found no remote — manual intervention required\n' \
+      "$db" >&2
+    return 1
+  fi
+  valid_remote_name "$legacy_remote" || {
+    printf 'compact: db=%s legacy pending_push marker recovery found invalid remote=%s — manual intervention required\n' \
+      "$db" "$legacy_remote" >&2
+    return 1
+  }
+
+  legacy_active=$(query_single_cell "$db" "active branch probe failed" "SELECT active_branch()" 2>/dev/null || true)
+  if [ -z "$legacy_active" ] || ! valid_branch_name "$legacy_active"; then
+    printf 'compact: db=%s legacy pending_push marker recovery requires resolved active branch — manual intervention required\n' \
+      "$db" >&2
+    return 1
+  fi
+
+  legacy_override=$(refspec_env_value "$db") || return 1
+  if [ -n "$legacy_override" ]; then
+    legacy_parts=$(refspec_parts "$legacy_override") || {
+      printf 'compact: db=%s legacy pending_push marker recovery found invalid refspec override=%s — manual intervention required\n' \
+        "$db" "$legacy_override" >&2
+      return 1
+    }
+    legacy_local_branch=$(printf '%s\n' "$legacy_parts" | sed -n '1p')
+    legacy_remote_branch=$(printf '%s\n' "$legacy_parts" | sed -n '2p')
+    if [ "$legacy_local_branch" != "$legacy_active" ]; then
+      printf 'compact: db=%s legacy pending_push marker recovery local branch=%s does not match active branch=%s — manual intervention required\n' \
+        "$db" "$legacy_local_branch" "$legacy_active" >&2
+      return 1
+    fi
+  else
+    legacy_local_branch="$legacy_active"
+    legacy_remote_branch="$legacy_active"
+  fi
+
+  legacy_remote_head=$(remote_branch_head "$db" "$legacy_remote" "$legacy_remote_branch") || return 1
+  if [ -z "$legacy_remote_head" ]; then
+    printf 'compact: db=%s legacy pending_push marker recovery requires non-empty remote HEAD — manual intervention required\n' \
+      "$db" >&2
+    return 1
+  fi
+  case "$legacy_remote_head" in
+    *[!A-Za-z0-9]*)
+      printf 'compact: db=%s legacy pending_push marker recovery found invalid remote HEAD=%s — manual intervention required\n' \
+        "$db" "$legacy_remote_head" >&2
+      return 1
+      ;;
+  esac
+
+  legacy_in_local=$(commit_exists_in_local_log "$db" "$legacy_remote_head") || return 1
+  if [ "$legacy_in_local" != "1" ]; then
+    printf 'compact: db=%s legacy pending_push marker recovery requires remote HEAD=%s in local history; got=%s — manual intervention required\n' \
+      "$db" "$legacy_remote_head" "${legacy_in_local:-<empty>}" >&2
+    return 1
+  fi
+
+  printf '%s\n%s\n%s\n%s\n' "$legacy_remote" "$legacy_local_branch" "$legacy_remote_branch" "$legacy_remote_head"
+  return 0
+}
+
 clear_compact_marker() {
   dir="$1"
   db="$2"
@@ -1337,8 +1484,11 @@ flatten_database() {
   fi
 
   if has_compact_marker "$quarantine_dir" "$db"; then
-    printf 'compact: db=%s integrity quarantine marker exists — manual intervention required before compaction or GC\n' \
-      "$db" >&2
+    quarantine_marker=$(compact_marker_path "$quarantine_dir" "$db")
+    quarantine_reason=$(compact_marker_value "$quarantine_dir" "$db" reason || true)
+    quarantine_created_at=$(compact_marker_value "$quarantine_dir" "$db" created_at || true)
+    printf 'compact: db=%s integrity quarantine marker exists at %s reason=%s created_at=%s — manual intervention required before compaction or GC\n' \
+      "$db" "$quarantine_marker" "${quarantine_reason:-<unknown>}" "${quarantine_created_at:-<unknown>}" >&2
     return 1
   fi
 
@@ -1414,10 +1564,7 @@ flatten_database() {
   fi
 
   if has_compact_marker "$pending_push_dir" "$db"; then
-    if [ -n "$dry_run" ]; then
-      printf 'compact: db=%s pending_push=present — dry-run (would retry remote push)\n' "$db"
-      return 0
-    fi
+    legacy_pending_push_recovered=0
     pending_remote=$(compact_marker_value "$pending_push_dir" "$db" remote || true)
     pending_expected_remote_head=$(compact_marker_value "$pending_push_dir" "$db" expected_remote_head || true)
     pending_expected_remote_head_verified=$(compact_marker_value "$pending_push_dir" "$db" expected_remote_head_verified || true)
@@ -1427,9 +1574,16 @@ flatten_database() {
     [ -n "$pending_local_branch" ] || pending_local_branch="main"
     [ -n "$pending_remote_branch" ] || pending_remote_branch="$pending_local_branch"
     if [ -z "$pending_remote" ]; then
-      printf 'compact: db=%s pending_push marker is missing remote — manual intervention required\n' \
-        "$db" >&2
-      return 1
+      legacy_contract=$(recover_legacy_pending_push_contract "$db") || return 1
+      pending_remote=$(printf '%s\n' "$legacy_contract" | sed -n '1p')
+      pending_local_branch=$(printf '%s\n' "$legacy_contract" | sed -n '2p')
+      pending_remote_branch=$(printf '%s\n' "$legacy_contract" | sed -n '3p')
+      pending_expected_remote_head=$(printf '%s\n' "$legacy_contract" | sed -n '4p')
+      pending_expected_remote_head_verified=1
+      pending_compacted_from_head=""
+      legacy_pending_push_recovered=1
+      printf 'compact: db=%s legacy pending_push marker recovered remote=%s local_branch=%s remote_branch=%s expected_remote_head=%s — retrying with live remote verification\n' \
+        "$db" "$pending_remote" "$pending_local_branch" "$pending_remote_branch" "$pending_expected_remote_head"
     fi
     if ! valid_branch_name "$pending_local_branch"; then
       printf 'compact: db=%s pending_push marker has invalid local_branch=%s — manual intervention required\n' \
@@ -1473,7 +1627,13 @@ flatten_database() {
           ;;
       esac
     fi
-    ensure_remote_push_retry_fresh "$pending_push_dir" "$db" "pending_push" || return 1
+    if [ "$legacy_pending_push_recovered" != "1" ]; then
+      ensure_remote_push_retry_fresh "$pending_push_dir" "$db" "pending_push" || return 1
+    fi
+    if [ -n "$dry_run" ]; then
+      printf 'compact: db=%s pending_push=present — dry-run (would retry remote push)\n' "$db"
+      return 0
+    fi
     printf 'compact: db=%s pending_push=present — retrying remote push before threshold check\n' "$db"
     push_remote_after_compaction "$db" "$pending_remote" "$pending_expected_remote_head" "${pending_expected_remote_head_verified:-0}" "retry" "$pending_compacted_from_head" "$pending_local_branch" "$pending_remote_branch"
     return $?
@@ -1911,6 +2071,51 @@ flatten_database() {
   return 1
 }
 
+bare_gc_database() {
+  db="$1"
+
+  if [ -n "$only_dbs" ]; then
+    case ",$only_dbs," in
+      *,"$db",*) ;;
+      *)
+        printf 'compact: db=%s not in GC_DOLT_COMPACT_ONLY_DBS — skip\n' "$db"
+        return 0
+        ;;
+    esac
+  fi
+
+  if has_compact_marker "$quarantine_dir" "$db"; then
+    quarantine_marker=$(compact_marker_path "$quarantine_dir" "$db")
+    quarantine_reason=$(compact_marker_value "$quarantine_dir" "$db" reason || true)
+    quarantine_created_at=$(compact_marker_value "$quarantine_dir" "$db" created_at || true)
+    printf 'compact: db=%s integrity quarantine marker exists at %s reason=%s created_at=%s — manual intervention required before compaction or GC\n' \
+      "$db" "$quarantine_marker" "${quarantine_reason:-<unknown>}" "${quarantine_created_at:-<unknown>}" >&2
+    return 1
+  fi
+
+  if [ -n "$dry_run" ]; then
+    printf 'compact: db=%s — dry-run (would bare GC)\n' "$db"
+    return 0
+  fi
+
+  start=$(date +%s)
+  gc_rc=0
+  gc_err_tmp=$(mktemp)
+  dolt_query "$db" "CALL DOLT_GC()" >/dev/null 2>"$gc_err_tmp" || gc_rc=$?
+  elapsed=$(( $(date +%s) - start ))
+  if [ "$gc_rc" -ne 0 ]; then
+    printf 'compact: db=%s bare-gc failed rc=%s duration=%ss\n' \
+      "$db" "$gc_rc" "$elapsed" >&2
+    emit_error_file "$db" "$gc_err_tmp"
+    rm -f "$gc_err_tmp"
+    return 1
+  fi
+  rm -f "$gc_err_tmp"
+
+  printf 'compact: db=%s bare-gc duration=%ss — ok\n' "$db" "$elapsed"
+  return 0
+}
+
 # shellcheck disable=SC2317
 cleanup() {
   if [ "$flock_acquired" = "1" ]; then
@@ -2080,6 +2285,21 @@ main() {
   done < "$_db_tmp"
 
   failed_count=0
+  if [ "$bare_gc" = "1" ]; then
+    while IFS= read -r db; do
+      [ -n "$db" ] || continue
+      if ! bare_gc_database "$db"; then
+        failed_count=$((failed_count + 1))
+      fi
+    done < "$_unique_db_tmp"
+
+    if [ "$failed_count" -gt 0 ]; then
+      printf 'compact: %s database(s) failed bare GC\n' "$failed_count" >&2
+      exit 1
+    fi
+    exit 0
+  fi
+
   while IFS= read -r db; do
     [ -n "$db" ] || continue
     if ! flatten_database "$db"; then

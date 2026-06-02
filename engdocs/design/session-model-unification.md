@@ -554,6 +554,18 @@ for control-dispatch flows that temporarily repoint `gc.routed_to` at
 the control dispatcher while preserving the real config execution lane.
 It must not become a second general-purpose routing channel.
 
+### `gc.run_target` (compile-time only)
+
+`gc.run_target` is a formula-authoring hint, not a persisted routing field.
+It declares a step's intended config/pool target in recipe metadata, for
+steps where `assignee` cannot be used (e.g. check and control-dispatch
+steps). The stampers resolve it into `gc.routed_to` before a bead is
+persisted, so no runtime demand/claim/scale reader consults it:
+`gc.routed_to` is the sole persisted routing key (ga-eld2x). A bare
+`gc.run_target` left on a stored bead is inert authoring provenance;
+`gc doctor --fix` backfills `gc.routed_to` for any pre-migration workflow
+root that still carries only `gc.run_target`.
+
 ### Claiming Generic Work
 
 Generic config-routed work may keep `gc.routed_to` as provenance after a

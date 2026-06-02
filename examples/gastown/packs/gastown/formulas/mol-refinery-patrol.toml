@@ -29,8 +29,9 @@ closes the bead once the PR is verified.
 
 Read each step's description before acting — Config values override defaults."""
 formula = "mol-refinery-patrol"
-version = 4
-contract = "graph.v2"
+
+[requires]
+formula_compiler = ">=2.0.0"
 
 [vars]
 [vars.binding_prefix]
@@ -170,9 +171,15 @@ description = """
 
 Search for work beads assigned to you with branch metadata:
 ```bash
-WORK=$(gc bd list --assignee=$GC_AGENT --status=open \
+WORK=$(gc bd list ${GC_RIG:+--rig="$GC_RIG"} --assignee=$GC_AGENT --status=open \
   --exclude-type=epic --limit=1 --json | jq -r '.[0].id // empty')
 ```
+
+`${GC_RIG:+--rig="$GC_RIG"}` scopes the query to this refinery's rig
+database. Without it, `gc bd list` routes to the HQ database and never
+sees rig-scoped work beads — the `assignee` field alone does not route
+by namespace. For HQ-only refineries `$GC_RIG` is empty and the flag
+expands to nothing.
 
 If found: read the bead metadata to confirm it has a branch:
 ```bash
@@ -287,6 +294,15 @@ If run_tests = "true":
 ```
 
 If run_tests = "false": skip tests entirely.
+
+**Fallback when this wisp has no quality-gate commands configured** (all of
+setup_command, typecheck_command, lint_command, build_command, test_command
+empty): do not silently skip. Read the repo's project-instructions file
+(CLAUDE.md or AGENTS.md — whichever the configured provider expects; your
+agent prompt lists the exact filename) and run the quality gates it
+documents. Treat their failures the same way you would treat failures
+from configured commands. The fallback preserves the quality-gate intent
+when pack-specific guidance is missing.
 
 Track results: which checks ran, pass/fail, specific failures.
 Close this step when all checks complete (pass or fail)."""

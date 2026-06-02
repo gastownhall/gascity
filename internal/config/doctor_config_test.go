@@ -33,6 +33,61 @@ name = "mayor"
 	}
 }
 
+func TestParseDoctorLocalChecks(t *testing.T) {
+	data := []byte(`
+[workspace]
+name = "test-city"
+
+[doctor]
+worktree_rig_warn_size = "5GB"
+
+[[doctor.check]]
+name = "gopath-symlink"
+script = "./scripts/check-gopath.sh"
+description = "Verify GOPATH symlink"
+
+[[doctor.check]]
+name = "custom-env"
+script = "./scripts/check-env.sh"
+fix = "./scripts/fix-env.sh"
+`)
+	cfg, err := Parse(data)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if got := len(cfg.Doctor.Checks); got != 2 {
+		t.Fatalf("len(Doctor.Checks) = %d, want 2", got)
+	}
+
+	first := cfg.Doctor.Checks[0]
+	if first.Name != "gopath-symlink" {
+		t.Errorf("Checks[0].Name = %q, want %q", first.Name, "gopath-symlink")
+	}
+	if first.Script != "./scripts/check-gopath.sh" {
+		t.Errorf("Checks[0].Script = %q, want %q", first.Script, "./scripts/check-gopath.sh")
+	}
+	if first.Description != "Verify GOPATH symlink" {
+		t.Errorf("Checks[0].Description = %q, want %q", first.Description, "Verify GOPATH symlink")
+	}
+	if first.Fix != "" {
+		t.Errorf("Checks[0].Fix = %q, want empty", first.Fix)
+	}
+
+	second := cfg.Doctor.Checks[1]
+	if second.Name != "custom-env" {
+		t.Errorf("Checks[1].Name = %q, want %q", second.Name, "custom-env")
+	}
+	if second.Script != "./scripts/check-env.sh" {
+		t.Errorf("Checks[1].Script = %q, want %q", second.Script, "./scripts/check-env.sh")
+	}
+	if second.Description != "" {
+		t.Errorf("Checks[1].Description = %q, want empty", second.Description)
+	}
+	if second.Fix != "./scripts/fix-env.sh" {
+		t.Errorf("Checks[1].Fix = %q, want %q", second.Fix, "./scripts/fix-env.sh")
+	}
+}
+
 func TestParseNoDoctorSection(t *testing.T) {
 	data := []byte(`
 [workspace]

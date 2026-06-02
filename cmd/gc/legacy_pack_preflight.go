@@ -5,6 +5,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/packman"
 )
 
 // ensureLegacyNamedPacksCached preserves legacy [packs] compatibility.
@@ -18,4 +19,36 @@ func ensureLegacyNamedPacksCached(cityPath string) error {
 		}
 	}
 	return nil
+}
+
+var ensureInitRemoteImportsInstalled = installInitRemoteImports
+
+func installInitRemoteImports(cityPath string) error {
+	allImports, err := collectAllImportsFS(fsys.OSFS{}, cityPath)
+	if err != nil {
+		return err
+	}
+	if !hasRemoteImport(allImports) {
+		return nil
+	}
+	lock, err := syncImports(cityPath, allImports, packman.InstallResolveIfNeeded)
+	if err != nil {
+		return err
+	}
+	if err := writeImportLockfile(fsys.OSFS{}, cityPath, lock); err != nil {
+		return err
+	}
+	if _, err := installLockedImports(cityPath); err != nil {
+		return err
+	}
+	return nil
+}
+
+func hasRemoteImport(imports map[string]config.Import) bool {
+	for _, imp := range imports {
+		if isRemoteImportSource(imp.Source) {
+			return true
+		}
+	}
+	return false
 }

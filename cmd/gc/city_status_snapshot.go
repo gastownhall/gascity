@@ -55,14 +55,16 @@ func observeStatusTargetsParallel(
 }
 
 type cityStatusSnapshot struct {
-	CityName      string
-	CityPath      string
-	Controller    ControllerJSON
-	Suspended     bool
-	Agents        []cityStatusAgentRow
-	Rigs          []StatusRigJSON
-	NamedSessions []cityStatusNamedSession
-	Summary       StatusSummaryJSON
+	CityName        string
+	CityPath        string
+	EffectiveAPIURL string
+	Controller      ControllerJSON
+	Suspended       bool
+	Beads           *beads.BeadsDiagnostic
+	Agents          []cityStatusAgentRow
+	Rigs            []StatusRigJSON
+	NamedSessions   []cityStatusNamedSession
+	Summary         StatusSummaryJSON
 }
 
 type cityStatusAgentRow struct {
@@ -84,19 +86,19 @@ type rigStatusCounts struct {
 	Suspended int
 }
 
-func openCityStatusStore(cityPath string, stderr io.Writer) (beads.Store, int) {
+func openCityStatusStore(cityPath string, stderr io.Writer) (beads.Store, *beads.BeadsDiagnostic, int) {
 	if cityPath == "" {
-		return nil, 0
+		return nil, nil, 0
 	}
 	if !cityStatusStorePresent(cityPath) {
-		return nil, 0
+		return nil, nil, 0
 	}
 	opened, err := openCityStoreAtForStatus(cityPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc status: opening bead store: %v\n", err) //nolint:errcheck // best-effort stderr
-		return nil, 1
+		return nil, nil, 1
 	}
-	return opened, 0
+	return opened.Store, diagnosticPtr(opened.Diagnostic), 0
 }
 
 func cityStatusStorePresent(cityPath string) bool {
@@ -158,9 +160,10 @@ func collectCityStatusSnapshotFromStoreSnapshot(
 		suspended = citySuspended(cfg)
 	}
 	snapshot := cityStatusSnapshot{
-		CityPath:   cityPath,
-		Controller: controllerStatusForCity(cityPath),
-		Suspended:  suspended,
+		CityPath:        cityPath,
+		EffectiveAPIURL: resolveEffectiveAPIURL(cityPath, cfg),
+		Controller:      controllerStatusForCity(cityPath),
+		Suspended:       suspended,
 	}
 	snapshot.CityName = loadedCityName(cfg, cityPath)
 	registerStatusProviderACPRoutes(sp, statusSnapshot, snapshot.CityName, cfg)
@@ -450,15 +453,26 @@ func cityStatusJSONFromSnapshot(snapshot cityStatusSnapshot, summary StatusSumma
 		Running:       running,
 		Suspended:     snapshot.Suspended,
 		Health:        HealthJSON{Usable: running && !snapshot.Suspended, Degraded: degraded, Signals: signals},
+		Beads:         snapshot.Beads,
 		Agents:        agents,
 		Rigs:          rigs,
 		Summary:       summary,
 	}
 }
 
+func diagnosticPtr(diagnostic beads.BeadsDiagnostic) *beads.BeadsDiagnostic {
+	if diagnostic.Store == "" && !diagnostic.NativeStoreEligible && diagnostic.PreflightGate == "" && diagnostic.PreflightReason == "" {
+		return nil
+	}
+	return &diagnostic
+}
+
 func renderCityStatusText(snapshot cityStatusSnapshot, dops drainOps, stdout io.Writer) {
 	fmt.Fprintf(stdout, "%s  %s\n", snapshot.CityName, snapshot.CityPath)                //nolint:errcheck // best-effort stdout
 	fmt.Fprintf(stdout, "  Controller: %s\n", controllerStatusLine(snapshot.Controller)) //nolint:errcheck // best-effort stdout
+	if snapshot.EffectiveAPIURL != "" {
+		fmt.Fprintf(stdout, "  API:        %s\n", snapshot.EffectiveAPIURL) //nolint:errcheck // best-effort stdout
+	}
 	for _, line := range controllerStatusGuidance(snapshot.Controller, snapshot.CityPath) {
 		fmt.Fprintf(stdout, "  %s\n", line) //nolint:errcheck // best-effort stdout
 	}

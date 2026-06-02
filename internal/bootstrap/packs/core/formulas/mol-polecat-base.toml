@@ -19,7 +19,6 @@ then add a terminal step (submit, commit, etc).
 | lint_command | rig `formula_vars` | Lint command. Empty = skip. |
 | build_command | rig `formula_vars` | Build command. Empty = skip. |"""
 formula = "mol-polecat-base"
-version = 1
 
 [vars]
 [vars.issue]

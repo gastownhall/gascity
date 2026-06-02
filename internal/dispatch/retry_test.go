@@ -2,7 +2,10 @@ package dispatch
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 )
@@ -196,6 +199,304 @@ func TestClassifyRetryAttemptRetriesInvalidRequiredOutputJSON(t *testing.T) {
 	if got != want {
 		t.Fatalf("classifyRetryAttempt() = %+v, want %+v", got, want)
 	}
+}
+
+func TestClassifyRetryAttemptWithPostconditionsRequiresArtifact(t *testing.T) {
+	t.Parallel()
+
+	worktree := t.TempDir()
+	path := filepath.Join(worktree, "codex-review.md")
+	store := beads.NewMemStore()
+	subject := beads.Bead{
+		Metadata: map[string]string{
+			"gc.outcome":           "pass",
+			"gc.required_artifact": path,
+			"work_dir":             worktree,
+		},
+	}
+
+	got, err := classifyRetryAttemptWithPostconditions(store, subject, ProcessOptions{})
+	if err != nil {
+		t.Fatalf("classifyRetryAttemptWithPostconditions: %v", err)
+	}
+	want := retryEvalResult{Outcome: "transient", Reason: "missing_required_artifact"}
+	if got != want {
+		t.Fatalf("missing artifact classify = %+v, want %+v", got, want)
+	}
+
+	if err := os.WriteFile(path, []byte("review\n"), 0o644); err != nil {
+		t.Fatalf("write artifact: %v", err)
+	}
+	got, err = classifyRetryAttemptWithPostconditions(store, subject, ProcessOptions{})
+	if err != nil {
+		t.Fatalf("classifyRetryAttemptWithPostconditions after artifact write: %v", err)
+	}
+	want = retryEvalResult{Outcome: "pass"}
+	if got != want {
+		t.Fatalf("present artifact classify = %+v, want %+v", got, want)
+	}
+}
+
+func TestClassifyRetryAttemptWithPostconditionsResolvesReviewArtifactTemplate(t *testing.T) {
+	t.Parallel()
+
+	store := beads.NewMemStore()
+	worktree := t.TempDir()
+	source := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "source",
+		Type:  "convoy",
+		Metadata: map[string]string{
+			"work_dir": worktree,
+		},
+	})
+	root := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":            "workflow",
+			"gc.input_convoy_id": source.ID,
+		},
+	})
+	reviewPath := filepath.Join(worktree, ".gc", "reviews", root.ID, "attempt-2", "codex-review.md")
+	if err := os.MkdirAll(filepath.Dir(reviewPath), 0o755); err != nil {
+		t.Fatalf("mkdir review dir: %v", err)
+	}
+	if err := os.WriteFile(reviewPath, []byte("review\n"), 0o644); err != nil {
+		t.Fatalf("write review artifact: %v", err)
+	}
+
+	got, err := classifyRetryAttemptWithPostconditions(store, beads.Bead{
+		Metadata: map[string]string{
+			"gc.outcome":           "pass",
+			"gc.root_bead_id":      root.ID,
+			"gc.attempt":           "2",
+			"gc.required_artifact": "{worktree}/.gc/reviews/{root}/attempt-{attempt}/codex-review.md",
+		},
+	}, ProcessOptions{})
+	if err != nil {
+		t.Fatalf("classifyRetryAttemptWithPostconditions: %v", err)
+	}
+	want := retryEvalResult{Outcome: "pass"}
+	if got != want {
+		t.Fatalf("classifyRetryAttemptWithPostconditions() = %+v, want %+v", got, want)
+	}
+}
+
+func TestClassifyRetryAttemptWithPostconditionsSurfacesRequiredArtifactStoreError(t *testing.T) {
+	t.Parallel()
+
+	base := beads.NewMemStore()
+	root := mustCreateWorkflowBead(t, base, beads.Bead{
+		Title: "workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind": "workflow",
+		},
+	})
+	backendErr := errors.New("invalid connection: i/o timeout")
+	store := failGetStore{
+		Store:  base,
+		failID: root.ID,
+		err:    backendErr,
+	}
+
+	_, err := classifyRetryAttemptWithPostconditions(store, beads.Bead{
+		Metadata: map[string]string{
+			"gc.outcome":           "pass",
+			"gc.root_bead_id":      root.ID,
+			"gc.required_artifact": "codex-review.md",
+		},
+	}, ProcessOptions{})
+	if !errors.Is(err, backendErr) {
+		t.Fatalf("classifyRetryAttemptWithPostconditions error = %v, want backend error", err)
+	}
+}
+
+func TestClassifyRetryAttemptWithPostconditionsMissingRequiredArtifactContextStaysTransient(t *testing.T) {
+	t.Parallel()
+
+	got, err := classifyRetryAttemptWithPostconditions(beads.NewMemStore(), beads.Bead{
+		Metadata: map[string]string{
+			"gc.outcome":           "pass",
+			"gc.root_bead_id":      "missing-root",
+			"gc.required_artifact": "codex-review.md",
+		},
+	}, ProcessOptions{})
+	if err != nil {
+		t.Fatalf("classifyRetryAttemptWithPostconditions error = %v, want nil", err)
+	}
+	want := retryEvalResult{Outcome: "transient", Reason: "missing_required_artifact_context"}
+	if got != want {
+		t.Fatalf("classifyRetryAttemptWithPostconditions() = %+v, want %+v", got, want)
+	}
+}
+
+func TestClassifyRetryAttemptWithPostconditionsRejectsArtifactOutsideWorktreeBeforeStat(t *testing.T) {
+	t.Parallel()
+
+	store := beads.NewMemStore()
+	worktree := t.TempDir()
+	source := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "source",
+		Type:  "convoy",
+		Metadata: map[string]string{
+			"work_dir": worktree,
+		},
+	})
+	root := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.input_convoy_id": source.ID,
+		},
+	})
+
+	for _, tc := range []struct {
+		name string
+		path string
+	}{
+		{name: "relative traversal", path: "../outside.md"},
+		{name: "absolute outside", path: filepath.Join(filepath.Dir(worktree), "outside.md")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			var statCalls int
+			got, err := classifyRetryAttemptWithPostconditions(store, beads.Bead{
+				Metadata: map[string]string{
+					"gc.outcome":           "pass",
+					"gc.root_bead_id":      root.ID,
+					"gc.required_artifact": tc.path,
+				},
+			}, ProcessOptions{
+				RequiredArtifactStat: func(string) (os.FileInfo, error) {
+					statCalls++
+					return fakeFileInfo{size: 10}, nil
+				},
+			})
+			if err != nil {
+				t.Fatalf("classifyRetryAttemptWithPostconditions error = %v, want nil", err)
+			}
+			want := retryEvalResult{Outcome: "transient", Reason: "required_artifact_outside_worktree"}
+			if got != want {
+				t.Fatalf("classifyRetryAttemptWithPostconditions() = %+v, want %+v", got, want)
+			}
+			if statCalls != 0 {
+				t.Fatalf("artifact stat calls = %d, want 0", statCalls)
+			}
+		})
+	}
+}
+
+func TestClassifyRetryAttemptWithPostconditionsUsesRequiredArtifactStatOption(t *testing.T) {
+	t.Parallel()
+
+	worktree := t.TempDir()
+	path := filepath.Join(worktree, "review.md")
+	var statPath string
+	got, err := classifyRetryAttemptWithPostconditions(beads.NewMemStore(), beads.Bead{
+		Metadata: map[string]string{
+			"gc.outcome":           "pass",
+			"gc.required_artifact": path,
+			"work_dir":             worktree,
+		},
+	}, ProcessOptions{
+		RequiredArtifactStat: func(path string) (os.FileInfo, error) {
+			statPath = path
+			return fakeFileInfo{size: 10}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("classifyRetryAttemptWithPostconditions error = %v, want nil", err)
+	}
+	if got != (retryEvalResult{Outcome: "pass"}) {
+		t.Fatalf("classifyRetryAttemptWithPostconditions() = %+v, want pass", got)
+	}
+	if statPath != path {
+		t.Fatalf("stat path = %q, want %q", statPath, path)
+	}
+}
+
+func TestClassifyRetryAttemptWithPostconditionsRequiredArtifactEdgeReasons(t *testing.T) {
+	t.Parallel()
+
+	worktree := t.TempDir()
+	emptyPath := filepath.Join(worktree, "empty.md")
+	if err := os.WriteFile(emptyPath, nil, 0o644); err != nil {
+		t.Fatalf("write empty artifact: %v", err)
+	}
+
+	for _, tc := range []struct {
+		name   string
+		path   string
+		reason string
+	}{
+		{name: "empty file", path: emptyPath, reason: "empty_required_artifact"},
+		{name: "directory", path: worktree, reason: "empty_required_artifact"},
+		{name: "unresolved template", path: "{worktree}/{step}/review.md", reason: "unresolved_required_artifact_template"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			got, err := classifyRetryAttemptWithPostconditions(beads.NewMemStore(), beads.Bead{
+				Metadata: map[string]string{
+					"gc.outcome":           "pass",
+					"gc.required_artifact": tc.path,
+					"work_dir":             worktree,
+				},
+			}, ProcessOptions{})
+			if err != nil {
+				t.Fatalf("classifyRetryAttemptWithPostconditions error = %v, want nil", err)
+			}
+			want := retryEvalResult{Outcome: "transient", Reason: tc.reason}
+			if got != want {
+				t.Fatalf("classifyRetryAttemptWithPostconditions() = %+v, want %+v", got, want)
+			}
+		})
+	}
+}
+
+func TestRequiredArtifactTemplatesTreatsSingularAsOnePath(t *testing.T) {
+	t.Parallel()
+
+	got := requiredArtifactTemplates(map[string]string{
+		"gc.required_artifact":  "dir/file,with-comma.md",
+		"gc.required_artifacts": "first.md, second.md\nthird.md",
+	})
+	want := []string{"dir/file,with-comma.md", "first.md", "second.md", "third.md"}
+	if len(got) != len(want) {
+		t.Fatalf("requiredArtifactTemplates() = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("requiredArtifactTemplates()[%d] = %q, want %q (all: %v)", i, got[i], want[i], got)
+		}
+	}
+}
+
+type fakeFileInfo struct {
+	size  int64
+	isDir bool
+}
+
+func (f fakeFileInfo) Name() string       { return "artifact" }
+func (f fakeFileInfo) Size() int64        { return f.size }
+func (f fakeFileInfo) Mode() os.FileMode  { return 0o644 }
+func (f fakeFileInfo) ModTime() time.Time { return time.Time{} }
+func (f fakeFileInfo) IsDir() bool        { return f.isDir }
+func (f fakeFileInfo) Sys() any           { return nil }
+
+type failGetStore struct {
+	beads.Store
+	failID string
+	err    error
+}
+
+func (s failGetStore) Get(id string) (beads.Bead, error) {
+	if id == s.failID {
+		return beads.Bead{}, s.err
+	}
+	return s.Store.Get(id)
 }
 
 func TestProcessRetryEvalTransientAppendErrorStaysOpenForRetry(t *testing.T) {

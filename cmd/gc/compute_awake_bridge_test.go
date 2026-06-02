@@ -7,6 +7,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/session"
 )
 
 func TestBuildAwakeInputFromReconcilerUsesLifecycleProjectionForCompatibilityStates(t *testing.T) {
@@ -38,6 +39,45 @@ func TestBuildAwakeInputFromReconcilerUsesLifecycleProjectionForCompatibilitySta
 	}
 	if got := input.SessionBeads[0].State; got != "asleep" {
 		t.Fatalf("State = %q, want asleep-compatible projection for stopped", got)
+	}
+}
+
+func TestBuildAwakeInputFromReconcilerCarriesResetPendingMetadata(t *testing.T) {
+	now := time.Now().UTC()
+	input := buildAwakeInputFromReconciler(
+		&config.City{},
+		[]beads.Bead{{
+			ID:     "mc-session-1",
+			Status: "open",
+			Type:   "session",
+			Metadata: map[string]string{
+				"state":                      "stopped",
+				"session_name":               "s-reset-target",
+				"template":                   "build-agent",
+				"restart_requested":          "true",
+				"continuation_reset_pending": "true",
+				session.ResetCommittedAtKey:  now.Format(time.RFC3339),
+			},
+		}},
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		now,
+	)
+
+	if len(input.SessionBeads) != 1 {
+		t.Fatalf("SessionBeads length = %d, want 1", len(input.SessionBeads))
+	}
+	got := input.SessionBeads[0]
+	if !got.RestartRequested {
+		t.Fatalf("RestartRequested = false, want true")
+	}
+	if !got.ContinuationResetPending {
+		t.Fatalf("ContinuationResetPending = false, want true")
 	}
 }
 
@@ -100,6 +140,26 @@ func TestAwakeSetToWakeEvalsPreservesDecisionReason(t *testing.T) {
 	}
 	if !containsWakeReason(got.Reasons, WakeWork) {
 		t.Fatalf("Reasons = %v, want WakeWork", got.Reasons)
+	}
+}
+
+func TestAwakeSetToWakeEvalsMapsMinActiveToWakeConfig(t *testing.T) {
+	evals := awakeSetToWakeEvals(
+		map[string]AwakeDecision{
+			"s-worker": {ShouldWake: true, Reason: "min-active"},
+		},
+		[]AwakeSessionBead{{
+			ID:          "mc-session-1",
+			SessionName: "s-worker",
+		}},
+	)
+
+	got := evals["mc-session-1"]
+	if got.Reason != "min-active" {
+		t.Fatalf("Reason = %q, want min-active", got.Reason)
+	}
+	if !containsWakeReason(got.Reasons, WakeConfig) {
+		t.Fatalf("Reasons = %v, want WakeConfig", got.Reasons)
 	}
 }
 

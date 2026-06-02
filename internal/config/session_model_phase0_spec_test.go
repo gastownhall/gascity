@@ -43,19 +43,20 @@ template = "reviewer"
 	if err != nil {
 		t.Fatalf("LoadWithIncludes(city.toml): %v", err)
 	}
-	if len(cfg.NamedSessions) != 2 {
-		t.Fatalf("len(NamedSessions) = %d, want 2", len(cfg.NamedSessions))
+	sessions := userNamedSessions(cfg.NamedSessions)
+	if len(sessions) != 2 {
+		t.Fatalf("len(user NamedSessions) = %d, want 2", len(sessions))
 	}
-	if got := cfg.NamedSessions[0].QualifiedName(); got != "mayor" {
+	if got := sessions[0].QualifiedName(); got != "mayor" {
 		t.Fatalf("first QualifiedName = %q, want mayor", got)
 	}
-	if got := cfg.NamedSessions[1].QualifiedName(); got != "triage" {
+	if got := sessions[1].QualifiedName(); got != "triage" {
 		t.Fatalf("second QualifiedName = %q, want triage", got)
 	}
-	if got := cfg.NamedSessions[0].Template; got != "reviewer" {
+	if got := sessions[0].Template; got != "reviewer" {
 		t.Fatalf("first Template = %q, want reviewer", got)
 	}
-	if got := cfg.NamedSessions[1].Template; got != "reviewer" {
+	if got := sessions[1].Template; got != "reviewer" {
 		t.Fatalf("second Template = %q, want reviewer", got)
 	}
 	if FindNamedSession(cfg, "mayor") == nil {
@@ -80,8 +81,8 @@ func TestPhase0ConfigDefaults_WorkQueryIsOriginAware(t *testing.T) {
 	if !strings.Contains(got, "ephemeral") {
 		t.Fatalf("EffectiveWorkQuery() = %q, want origin-specific ephemeral generic queue tier", got)
 	}
-	if !strings.Contains(got, "gc.routed_to=myrig/worker") {
-		t.Fatalf("EffectiveWorkQuery() = %q, want qualified config route", got)
+	if !strings.Contains(got, `bd ready --include-ephemeral --metadata-field "gc.routed_to=$target"`) || !strings.Contains(got, "-- myrig/worker") {
+		t.Fatalf("EffectiveWorkQuery() = %q, want qualified config route argument", got)
 	}
 }
 
@@ -90,7 +91,10 @@ func TestPhase0ConfigDefaults_OnBootUnclaimsRoutedWorkByDefault(t *testing.T) {
 
 	got := a.EffectiveOnBoot()
 	for _, want := range []string{
-		"bd list --metadata-field gc.routed_to=myrig/worker",
+		"template='myrig/worker'",
+		`--metadata-field "gc.routed_to=$template"`,
+		`--metadata-field "gc.run_target=$template"`,
+		`--metadata-field "gc.kind=workflow"`,
 		"--status=in_progress",
 		"--no-assignee",
 		"--status open",
@@ -109,7 +113,7 @@ func TestPhase0ConfigDefaults_OnDeathUnclaimsAssignedWorkByDefault(t *testing.T)
 
 	got := a.EffectiveOnDeath()
 	for _, want := range []string{
-		"bd list --assignee=myrig/worker",
+		"bd list --include-ephemeral --assignee=myrig/worker",
 		"--status=in_progress",
 		"--assignee \"\"",
 	} {
@@ -202,10 +206,11 @@ template = "reviewer"
 	if err != nil {
 		t.Fatalf("LoadWithIncludes(city.toml): %v", err)
 	}
-	if len(cfg.NamedSessions) != 1 {
-		t.Fatalf("len(NamedSessions) = %d, want 1", len(cfg.NamedSessions))
+	sessions := userNamedSessions(cfg.NamedSessions)
+	if len(sessions) != 1 {
+		t.Fatalf("len(user NamedSessions) = %d, want 1", len(sessions))
 	}
-	if got := cfg.NamedSessions[0].QualifiedName(); got != "reviewer" {
+	if got := sessions[0].QualifiedName(); got != "reviewer" {
 		t.Fatalf("QualifiedName = %q, want compatibility default reviewer", got)
 	}
 }
@@ -240,16 +245,17 @@ path = "/tmp/beta"
 	if err != nil {
 		t.Fatalf("LoadWithIncludes(city.toml): %v", err)
 	}
-	if len(cfg.NamedSessions) != 2 {
-		t.Fatalf("len(NamedSessions) = %d, want 2", len(cfg.NamedSessions))
+	sessions := userNamedSessions(cfg.NamedSessions)
+	if len(sessions) != 2 {
+		t.Fatalf("len(user NamedSessions) = %d, want 2", len(sessions))
 	}
-	if got := cfg.NamedSessions[0].QualifiedName(); got != "alpha/reviewer" {
+	if got := sessions[0].QualifiedName(); got != "alpha/reviewer" {
 		t.Fatalf("NamedSessions[0] = %q, want alpha/reviewer", got)
 	}
-	if got := cfg.NamedSessions[1].QualifiedName(); got != "beta/reviewer" {
+	if got := sessions[1].QualifiedName(); got != "beta/reviewer" {
 		t.Fatalf("NamedSessions[1] = %q, want beta/reviewer", got)
 	}
-	if got := cfg.NamedSessions[0].TemplateQualifiedName(); got != "alpha/reviewer" {
+	if got := sessions[0].TemplateQualifiedName(); got != "alpha/reviewer" {
 		t.Fatalf("TemplateQualifiedName() = %q, want alpha/reviewer", got)
 	}
 	if agent := FindAgent(cfg, "alpha/reviewer"); agent == nil {

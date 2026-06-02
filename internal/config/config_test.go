@@ -83,9 +83,85 @@ func TestMarshalDefaultCityFormat(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Marshal: %v", err)
 	}
-	want := "[workspace]\nname = \"bright-lights\"\n\n[[agent]]\nname = \"mayor\"\nprompt_template = \"prompts/mayor.md\"\n\n[[named_session]]\ntemplate = \"mayor\"\nmode = \"always\"\n"
+	want := "[workspace]\nname = \"bright-lights\"\n\n[[agent]]\nname = \"mayor\"\nprompt_template = \"prompts/mayor.md\"\n\n[[named_session]]\ntemplate = \"mayor\"\nmode = \"always\"\n\n[daemon]\nformula_v2 = true\n"
 	if string(data) != want {
 		t.Errorf("Marshal output:\ngot:\n%s\nwant:\n%s", data, want)
+	}
+}
+
+func TestParseDefaultsFormulaV2Enabled(t *testing.T) {
+	cfg, err := Parse([]byte(`
+[workspace]
+name = "bright-lights"
+`))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if !cfg.Daemon.FormulaV2 {
+		t.Fatal("Daemon.FormulaV2 = false, want true when formula_v2 is omitted")
+	}
+}
+
+func TestParsePreservesExplicitFormulaV2False(t *testing.T) {
+	cfg, err := Parse([]byte(`
+[workspace]
+name = "bright-lights"
+
+[daemon]
+formula_v2 = false
+`))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if cfg.Daemon.FormulaV2 {
+		t.Fatal("Daemon.FormulaV2 = true, want explicit false")
+	}
+	data, err := cfg.Marshal()
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if !strings.Contains(string(data), "formula_v2 = false") {
+		t.Fatalf("Marshal output should preserve explicit formula_v2=false:\n%s", data)
+	}
+}
+
+func TestParseGraphWorkflowsDoesNotOverrideExplicitFormulaV2False(t *testing.T) {
+	cfg, err := Parse([]byte(`
+[workspace]
+name = "bright-lights"
+
+[daemon]
+graph_workflows = true
+formula_v2 = false
+`))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if cfg.Daemon.FormulaV2 {
+		t.Fatal("Daemon.FormulaV2 = true, want explicit formula_v2=false to win")
+	}
+}
+
+func TestParseGraphWorkflowsFalseAliasesFormulaV2False(t *testing.T) {
+	cfg, err := Parse([]byte(`
+[workspace]
+name = "bright-lights"
+
+[daemon]
+graph_workflows = false
+`))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if cfg.Daemon.FormulaV2 {
+		t.Fatal("Daemon.FormulaV2 = true, want legacy graph_workflows=false alias to disable formula_v2")
+	}
+	data, err := cfg.Marshal()
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if !strings.Contains(string(data), "formula_v2 = false") {
+		t.Fatalf("Marshal output should preserve canonical formula_v2=false:\n%s", data)
 	}
 }
 
@@ -467,6 +543,8 @@ name = "test-city"
 
 [beads]
 provider = "file"
+backend = "doltlite"
+event_hooks = false
 
 [[agent]]
 name = "mayor"
@@ -477,6 +555,12 @@ name = "mayor"
 	}
 	if cfg.Beads.Provider != "file" {
 		t.Errorf("Beads.Provider = %q, want %q", cfg.Beads.Provider, "file")
+	}
+	if cfg.Beads.Backend != "doltlite" {
+		t.Errorf("Beads.Backend = %q, want %q", cfg.Beads.Backend, "doltlite")
+	}
+	if cfg.Beads.EventHooks == nil || *cfg.Beads.EventHooks {
+		t.Errorf("Beads.EventHooks = %v, want false", cfg.Beads.EventHooks)
 	}
 }
 
@@ -495,6 +579,12 @@ name = "mayor"
 	if cfg.Beads.Provider != "" {
 		t.Errorf("Beads.Provider = %q, want empty", cfg.Beads.Provider)
 	}
+	if cfg.Beads.EventHooks != nil {
+		t.Errorf("Beads.EventHooks = %v, want nil", cfg.Beads.EventHooks)
+	}
+	if cfg.Beads.Policies != nil {
+		t.Errorf("Beads.Policies = %v, want nil", cfg.Beads.Policies)
+	}
 }
 
 func TestMarshalOmitsEmptyBeadsSection(t *testing.T) {
@@ -505,6 +595,83 @@ func TestMarshalOmitsEmptyBeadsSection(t *testing.T) {
 	}
 	if strings.Contains(string(data), "[beads]") {
 		t.Errorf("Marshal output should not contain '[beads]' when empty:\n%s", data)
+	}
+}
+
+func TestParseBeadsPoliciesSection(t *testing.T) {
+	data := []byte(`
+[workspace]
+name = "test-city"
+
+[beads]
+event_hooks = false
+
+[beads.policies.control]
+storage = "no_history"
+delete_after_close = "1d12h"
+
+[beads.policies.workflow]
+storage = "ephemeral"
+
+[[agent]]
+name = "mayor"
+`)
+	cfg, err := Parse(data)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if cfg.Beads.EventHooks == nil || *cfg.Beads.EventHooks {
+		t.Fatalf("Beads.EventHooks = %v, want false", cfg.Beads.EventHooks)
+	}
+	if len(cfg.Beads.Policies) != 2 {
+		t.Fatalf("len(Beads.Policies) = %d, want 2", len(cfg.Beads.Policies))
+	}
+	control := cfg.Beads.Policies["control"]
+	if got := control.NormalizedStorage(); got != BeadStorageNoHistory {
+		t.Errorf("control.NormalizedStorage() = %q, want %q", got, BeadStorageNoHistory)
+	}
+	if got := control.DeleteAfterCloseDuration(); got != 36*time.Hour {
+		t.Errorf("control.DeleteAfterCloseDuration() = %v, want 36h", got)
+	}
+	workflow := cfg.Beads.Policies["workflow"]
+	if got := workflow.NormalizedStorage(); got != BeadStorageEphemeral {
+		t.Errorf("workflow.NormalizedStorage() = %q, want %q", got, BeadStorageEphemeral)
+	}
+}
+
+func TestBeadsConfigRoundTripPreservesStagedFields(t *testing.T) {
+	disabled := false
+	c := City{
+		Workspace: Workspace{Name: "test"},
+		Beads: BeadsConfig{
+			Provider:   "bd",
+			Backend:    "doltlite",
+			EventHooks: &disabled,
+			Policies: map[string]BeadPolicyConfig{
+				"control": {
+					Storage:          BeadStorageNoHistory,
+					DeleteAfterClose: "48h",
+				},
+			},
+		},
+		Agents: []Agent{{Name: "mayor"}},
+	}
+	data, err := c.Marshal()
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	got, err := Parse(data)
+	if err != nil {
+		t.Fatalf("Parse(Marshal output): %v\n%s", err, data)
+	}
+	if got.Beads.EventHooks == nil || *got.Beads.EventHooks {
+		t.Errorf("round-tripped EventHooks = %v, want false", got.Beads.EventHooks)
+	}
+	if got.Beads.Backend != "doltlite" {
+		t.Errorf("round-tripped Backend = %q, want doltlite", got.Beads.Backend)
+	}
+	if got.Beads.Policies["control"].DeleteAfterClose != "48h" {
+		t.Errorf("round-tripped policy = %#v, want delete_after_close=48h", got.Beads.Policies["control"])
 	}
 }
 
@@ -862,11 +1029,11 @@ func TestGastownCity(t *testing.T) {
 	if c.Workspace.Provider != "claude" {
 		t.Errorf("Workspace.Provider = %q, want %q", c.Workspace.Provider, "claude")
 	}
-	if len(c.Imports) != 1 || c.Imports["gastown"].Source != ".gc/system/packs/gastown" {
-		t.Errorf("Imports = %v, want gastown=.gc/system/packs/gastown", c.Imports)
+	if len(c.Imports) != 1 || c.Imports["gastown"].Source != PublicGastownPackSource || c.Imports["gastown"].Version != PublicGastownPackVersion {
+		t.Errorf("Imports = %v, want gastown=%s %s", c.Imports, PublicGastownPackSource, PublicGastownPackVersion)
 	}
-	if len(c.DefaultRigImports) != 1 || c.DefaultRigImports["gastown"].Source != ".gc/system/packs/gastown" {
-		t.Errorf("DefaultRigImports = %v, want gastown=.gc/system/packs/gastown", c.DefaultRigImports)
+	if len(c.DefaultRigImports) != 1 || c.DefaultRigImports["gastown"].Source != PublicGastownPackSource || c.DefaultRigImports["gastown"].Version != PublicGastownPackVersion {
+		t.Errorf("DefaultRigImports = %v, want gastown=%s %s", c.DefaultRigImports, PublicGastownPackSource, PublicGastownPackVersion)
 	}
 	if len(c.Workspace.GlobalFragments) != 2 {
 		t.Errorf("Workspace.GlobalFragments = %v, want 2 entries", c.Workspace.GlobalFragments)
@@ -914,8 +1081,8 @@ func TestGastownCityRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Parse(Marshal output): %v", err)
 	}
-	if len(got.Imports) != 1 || got.Imports["gastown"].Source != ".gc/system/packs/gastown" {
-		t.Errorf("round-trip Imports = %v, want gastown=.gc/system/packs/gastown", got.Imports)
+	if len(got.Imports) != 1 || got.Imports["gastown"].Source != PublicGastownPackSource || got.Imports["gastown"].Version != PublicGastownPackVersion {
+		t.Errorf("round-trip Imports = %v, want gastown=%s %s", got.Imports, PublicGastownPackSource, PublicGastownPackVersion)
 	}
 	if got.Workspace.Provider != "claude" {
 		t.Errorf("round-trip Provider = %q, want %q", got.Workspace.Provider, "claude")
@@ -1106,6 +1273,7 @@ name = "bright-lights"
 name = "scout"
 provider = "claude"
 args = ["--dangerously-skip-permissions", "--verbose"]
+mouse_mode = "on"
 ready_delay_ms = 15000
 prompt_mode = "flag"
 prompt_flag = "--prompt"
@@ -1137,6 +1305,12 @@ emits_permission_warning = false
 	}
 	if a.PromptFlag != "--prompt" {
 		t.Errorf("PromptFlag = %q, want %q", a.PromptFlag, "--prompt")
+	}
+	if a.MouseMode != "on" {
+		t.Errorf("MouseMode = %q, want %q", a.MouseMode, "on")
+	}
+	if !a.MouseModeOn() {
+		t.Error("MouseModeOn() = false, want true")
 	}
 	if a.EmitsPermissionWarning == nil || *a.EmitsPermissionWarning != false {
 		t.Errorf("EmitsPermissionWarning = %v, want false", a.EmitsPermissionWarning)
@@ -1472,9 +1646,22 @@ func TestPoolRoundTrip(t *testing.T) {
 func TestEffectiveWorkQueryDefault(t *testing.T) {
 	a := Agent{Name: "mayor"}
 	got := a.EffectiveWorkQuery()
-	// Tiered query: check that tier 3 (routed_to) and tier 1-2 (assignee resolution) are present.
-	if !strings.Contains(got, "bd ready --metadata-field gc.routed_to=mayor --unassigned --exclude-type=epic --json --limit=1") {
-		t.Errorf("EffectiveWorkQuery() missing tier 3 routed_to: %q", got)
+	// Tiered query: tier 3 routes via gc.routed_to, with a temporary
+	// gc.run_target migration fallback for pre-backfill workflow roots, and
+	// tiers 1-2 resolve by assignee.
+	if !strings.Contains(got, `bd ready --include-ephemeral --metadata-field "gc.routed_to=$target" --unassigned --exclude-type=epic --json --sort oldest --limit=1`) {
+		t.Errorf("EffectiveWorkQuery() missing tier 3 pool-demand probe: %q", got)
+	}
+	if !strings.Contains(got, "-- mayor") {
+		t.Errorf("EffectiveWorkQuery() missing tier 3 target argument: %q", got)
+	}
+	if !strings.Contains(got, `bd ready --include-ephemeral --metadata-field "gc.run_target=$target" --metadata-field "gc.kind=workflow" --unassigned --exclude-type=epic --json --sort oldest --limit=20`) {
+		t.Errorf("EffectiveWorkQuery() missing run_target migration fallback: %q", got)
+	}
+	for _, want := range []string{`.metadata`, `.[:1]`} {
+		if !strings.Contains(got, want) {
+			t.Errorf("EffectiveWorkQuery() missing run_target migration filter fragment %q: %q", want, got)
+		}
 	}
 	if !strings.Contains(got, `"$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"`) {
 		t.Errorf("EffectiveWorkQuery() missing multi-identifier resolution: %q", got)
@@ -1493,16 +1680,16 @@ func TestEffectiveWorkQueryCustom(t *testing.T) {
 func TestEffectiveWorkQueryWithDir(t *testing.T) {
 	a := Agent{Name: "polecat", Dir: "hello-world"}
 	got := a.EffectiveWorkQuery()
-	if !strings.Contains(got, "bd ready --metadata-field gc.routed_to=hello-world/polecat --unassigned --exclude-type=epic --json --limit=1") {
-		t.Errorf("EffectiveWorkQuery() missing tier 3 routed_to: %q", got)
+	if !strings.Contains(got, "-- hello-world/polecat") {
+		t.Errorf("EffectiveWorkQuery() missing tier 3 target argument: %q", got)
 	}
 }
 
 func TestEffectiveWorkQueryPoolDefault(t *testing.T) {
 	a := Agent{Name: "polecat", Dir: "hello-world", MinActiveSessions: ptrInt(1), MaxActiveSessions: ptrInt(3)}
 	got := a.EffectiveWorkQuery()
-	if !strings.Contains(got, "bd ready --metadata-field gc.routed_to=hello-world/polecat --unassigned --exclude-type=epic --json --limit=1") {
-		t.Errorf("EffectiveWorkQuery() missing tier 3 routed_to: %q", got)
+	if !strings.Contains(got, "-- hello-world/polecat") {
+		t.Errorf("EffectiveWorkQuery() missing tier 3 target argument: %q", got)
 	}
 	if strings.Contains(got, "--type=molecule") {
 		t.Errorf("EffectiveWorkQuery() should not route molecule containers: %q", got)
@@ -1554,8 +1741,8 @@ func TestEffectiveWorkQueryPoolNameOverride(t *testing.T) {
 		PoolName: "hello-world/dog",
 	}
 	got := a.EffectiveWorkQuery()
-	if !strings.Contains(got, "bd ready --metadata-field gc.routed_to=hello-world/dog --unassigned --exclude-type=epic --json --limit=1") {
-		t.Errorf("EffectiveWorkQuery() missing tier 3 routed_to with pool name: %q", got)
+	if !strings.Contains(got, "-- hello-world/dog") {
+		t.Errorf("EffectiveWorkQuery() missing tier 3 pool target argument: %q", got)
 	}
 	if strings.Contains(got, "--type=molecule") {
 		t.Errorf("EffectiveWorkQuery() should not route molecule containers with pool name: %q", got)
@@ -1565,19 +1752,16 @@ func TestEffectiveWorkQueryPoolNameOverride(t *testing.T) {
 func TestEffectiveWorkQueryPoolNoPoolName(t *testing.T) {
 	a := Agent{Name: "dog", Dir: "hello-world", MinActiveSessions: ptrInt(1), MaxActiveSessions: ptrInt(3)}
 	got := a.EffectiveWorkQuery()
-	if !strings.Contains(got, "bd ready --metadata-field gc.routed_to=hello-world/dog --unassigned --exclude-type=epic --json --limit=1") {
-		t.Errorf("EffectiveWorkQuery() missing tier 3 routed_to: %q", got)
+	if !strings.Contains(got, "-- hello-world/dog") {
+		t.Errorf("EffectiveWorkQuery() missing tier 3 target argument: %q", got)
 	}
 }
 
 func TestEffectiveWorkQueryControlDispatcherIncludesLegacyWorkflowControlRoute(t *testing.T) {
 	a := Agent{Name: ControlDispatcherAgentName, Dir: "gascity"}
 	got := a.EffectiveWorkQuery()
-	if !strings.Contains(got, "gc.routed_to=gascity/control-dispatcher") {
-		t.Fatalf("EffectiveWorkQuery() missing current control-dispatcher route: %q", got)
-	}
-	if !strings.Contains(got, "gc.routed_to=gascity/workflow-control") {
-		t.Fatalf("EffectiveWorkQuery() missing legacy workflow-control route: %q", got)
+	if !strings.Contains(got, "-- gascity/control-dispatcher gascity/workflow-control") {
+		t.Fatalf("EffectiveWorkQuery() missing current and legacy route arguments: %q", got)
 	}
 	if !strings.Contains(got, `workflow-control`) {
 		t.Fatalf("EffectiveWorkQuery() missing legacy assignee alias handling: %q", got)
@@ -1589,20 +1773,29 @@ func TestEffectiveWorkQueryControlDispatcherIncludesLegacyWorkflowControlRoute(t
 
 func TestEffectiveWorkQueryControlDispatcherClaimsLegacyAssignedWork(t *testing.T) {
 	a := Agent{Name: ControlDispatcherAgentName, Dir: "gascity"}
+	got := a.EffectiveWorkQuery()
+	for _, want := range []string{
+		`bd list --include-ephemeral --status in_progress --assignee="$cand"`,
+		`bd ready --include-ephemeral --assignee="$cand"`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("EffectiveWorkQuery() = %q, want ephemeral-aware legacy assigned tier %q", got, want)
+		}
+	}
 	out := runEffectiveWorkQuery(t, a, map[string]string{
 		"GC_SESSION_NAME": "gascity--control-dispatcher",
 		"GC_ALIAS":        "gascity/control-dispatcher",
 	}, `#!/bin/sh
 set -eu
 case "$*" in
-  "list --status in_progress --assignee=gascity--control-dispatcher --exclude-type=epic --json --limit=1"|\
-  "list --status in_progress --assignee=gascity/control-dispatcher --exclude-type=epic --json --limit=1"|\
-  "list --status in_progress --assignee=gascity--workflow-control --exclude-type=epic --json --limit=1"|\
-  "list --status in_progress --assignee=gascity/workflow-control --exclude-type=epic --json --limit=1")
+  "list --include-ephemeral --status in_progress --assignee=gascity--control-dispatcher --json --limit=1"|\
+  "list --include-ephemeral --status in_progress --assignee=gascity/control-dispatcher --json --limit=1"|\
+  "list --include-ephemeral --status in_progress --assignee=gascity--workflow-control --json --limit=1"|\
+  "list --include-ephemeral --status in_progress --assignee=gascity/workflow-control --json --limit=1")
     printf '[]'
     ;;
-  "ready --assignee=gascity--workflow-control --exclude-type=epic --json --limit=1"|\
-  "ready --assignee=gascity/workflow-control --exclude-type=epic --json --limit=1")
+  "ready --include-ephemeral --assignee=gascity--workflow-control --json --limit=1"|\
+  "ready --include-ephemeral --assignee=gascity/workflow-control --json --limit=1")
     printf '[{"id":"ga-legacy-ready"}]'
     ;;
   *)
@@ -1620,10 +1813,10 @@ func TestEffectiveWorkQueryControlDispatcherClaimsLegacyUnassignedRoute(t *testi
 	out := runEffectiveWorkQuery(t, a, nil, `#!/bin/sh
 set -eu
 case "$*" in
-  "ready --metadata-field gc.routed_to=gascity/control-dispatcher --unassigned --exclude-type=epic --json --limit=1")
+  *"ready --include-ephemeral"*"--metadata-field gc.routed_to=gascity/control-dispatcher"*"--unassigned"*"--exclude-type=epic"*"--json"*"--sort oldest"*"--limit=1"*)
     printf '[]'
     ;;
-  "ready --metadata-field gc.routed_to=gascity/workflow-control --unassigned --exclude-type=epic --json --limit=1")
+  *"ready --include-ephemeral"*"--metadata-field gc.routed_to=gascity/workflow-control"*"--unassigned"*"--exclude-type=epic"*"--json"*"--sort oldest"*"--limit=1"*)
     printf '[{"id":"ga-legacy-route"}]'
     ;;
   *)
@@ -1633,6 +1826,87 @@ esac
 `)
 	if got, want := strings.TrimSpace(out), `[{"id":"ga-legacy-route"}]`; got != want {
 		t.Fatalf("legacy routed work query output = %q, want %q", got, want)
+	}
+}
+
+func TestEffectiveWorkQueryRoutedQueueUsesNativeOldestSortAcrossReadyTiers(t *testing.T) {
+	a := Agent{Name: "worker", Dir: "hello-world"}
+	got := a.EffectiveWorkQuery()
+	for _, want := range []string{
+		`bd list --include-ephemeral --status in_progress --assignee="$id"`,
+		`bd ready --include-ephemeral --assignee="$id"`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("EffectiveWorkQuery() = %q, want ephemeral-aware assigned tier %q", got, want)
+		}
+	}
+	out := runEffectiveWorkQuery(t, a, map[string]string{
+		"GC_SESSION_ORIGIN": "ephemeral",
+	}, `#!/bin/sh
+set -eu
+case "$*" in
+  "ready --include-ephemeral --metadata-field gc.routed_to=hello-world/worker --unassigned --exclude-type=epic --json --sort oldest --limit=1")
+    printf '[{"id":"older-no-history","priority":2,"created_at":"2026-05-20T06:09:30Z","no_history":true}]'
+    ;;
+  *)
+    printf '[]'
+    ;;
+esac
+`)
+	if !strings.Contains(out, "older-no-history") {
+		t.Fatalf("EffectiveWorkQuery() did not pick oldest routed work: %q", out)
+	}
+	if strings.Contains(out, "newer-durable") {
+		t.Fatalf("EffectiveWorkQuery() returned more than first oldest routed work: %q", out)
+	}
+}
+
+func TestEffectiveWorkQueryRoutedQueueUsesOldestBeforePriority(t *testing.T) {
+	a := Agent{Name: "worker", Dir: "hello-world"}
+	out := runEffectiveWorkQuery(t, a, map[string]string{
+		"GC_SESSION_ORIGIN": "ephemeral",
+	}, `#!/bin/sh
+set -eu
+case "$*" in
+  *"ready --include-ephemeral"*"--metadata-field gc.routed_to=hello-world/worker"*"--unassigned"*"--exclude-type=epic"*"--json"*"--sort oldest"*"--limit=1"*)
+    printf '[{"id":"older-p2","priority":2,"created_at":"2026-05-20T06:09:30Z"}]'
+    ;;
+  *)
+    printf '[]'
+    ;;
+esac
+`)
+	if !strings.Contains(out, "older-p2") {
+		t.Fatalf("EffectiveWorkQuery() did not pick oldest routed work across priorities: %q", out)
+	}
+	if strings.Contains(out, "newer-p0") {
+		t.Fatalf("EffectiveWorkQuery() returned newer high-priority routed work before oldest: %q", out)
+	}
+}
+
+func TestEffectiveWorkQueryRoutedFallbackUsesNativeOldestSort(t *testing.T) {
+	a := Agent{Name: "worker", Dir: "hello-world"}
+	out := runEffectiveWorkQuery(t, a, map[string]string{
+		"GC_SESSION_ORIGIN": "ephemeral",
+	}, `#!/bin/sh
+set -eu
+case "$*" in
+  *"ready --include-ephemeral"*"--metadata-field gc.routed_to=hello-world/worker"*"--unassigned"*"--exclude-type=epic"*"--json"*"--sort oldest"*"--limit=1"*)
+    printf '[]'
+    ;;
+  *"ready --include-ephemeral"*"--metadata-field gc.run_target=hello-world/worker"*"--metadata-field gc.kind=workflow"*"--unassigned"*"--exclude-type=epic"*"--json"*"--sort oldest"*"--limit=20"*)
+    printf '[{"id":"older-fallback","priority":2,"created_at":"2026-05-20T06:09:30Z","metadata":{"gc.kind":"workflow","gc.run_target":"hello-world/worker"}}]'
+    ;;
+  *)
+    printf '[]'
+    ;;
+esac
+`)
+	if !strings.Contains(out, "older-fallback") {
+		t.Fatalf("EffectiveWorkQuery() did not pick oldest routed fallback work: %q", out)
+	}
+	if strings.Contains(out, "newer-fallback") {
+		t.Fatalf("EffectiveWorkQuery() returned newer high-priority fallback work before oldest: %q", out)
 	}
 }
 
@@ -1659,36 +1933,85 @@ func TestEffectiveSlingQueryPoolNameOverride(t *testing.T) {
 func TestEffectiveWorkQueryExcludesEpics(t *testing.T) {
 	a := Agent{Name: "worker", Dir: "hello-world"}
 	got := a.EffectiveWorkQuery()
-	// All three tiers (in_progress assignee, ready assignee, ready routed)
-	// must structurally exclude the epic type.
-	wantSnippets := []string{
-		`bd list --status in_progress --assignee="$id" --exclude-type=epic --json`,
-		`bd ready --assignee="$id" --exclude-type=epic --json`,
-		`bd ready --metadata-field gc.routed_to=hello-world/worker --unassigned --exclude-type=epic --json`,
+	// The routed (pool) tier excludes parent epics (gc-udx): an unassigned
+	// routed epic has no executable spec, so a pool worker grabbing one does
+	// undefined work. The assigned tiers do NOT exclude epics — an agent must
+	// resume its own assigned ephemeral epic wisp (the patrol-loop pattern).
+	wantPresent := []string{
+		// routed/pool tier still excludes epics (gc-udx guard)
+		`bd ready --include-ephemeral --metadata-field "gc.routed_to=$target" --unassigned --exclude-type=epic --json`,
+		// assigned tiers carry NO epic exclusion
+		`bd list --include-ephemeral --status in_progress --assignee="$id" --json`,
+		`bd ready --include-ephemeral --assignee="$id" --json`,
+		`-- hello-world/worker`,
 	}
-	for _, want := range wantSnippets {
+	for _, want := range wantPresent {
 		if !strings.Contains(got, want) {
-			t.Errorf("EffectiveWorkQuery() missing exclude-type=epic on tier:\n  want substring: %s\n  got: %s", want, got)
+			t.Errorf("EffectiveWorkQuery() missing expected substring:\n  want: %s\n  got: %s", want, got)
 		}
+	}
+	// The assigned tiers must NOT carry --exclude-type=epic, or self-assigned
+	// epic wisps get stranded (gc hook exits 1 with empty output).
+	if bad := `--assignee="$id" --exclude-type=epic`; strings.Contains(got, bad) {
+		t.Errorf("EffectiveWorkQuery() assigned tier must not exclude epics, found: %s\n  got: %s", bad, got)
 	}
 }
 
 // TestEffectiveWorkQueryExcludesEpicsControlDispatcher verifies the
 // control-dispatcher path (which has an extra legacy workflow-control
-// route) also excludes epics on every tier.
+// route) excludes epics on the routed (pool) tier but not the assigned
+// tiers — same scoping as the standard path.
 func TestEffectiveWorkQueryExcludesEpicsControlDispatcher(t *testing.T) {
 	a := Agent{Name: ControlDispatcherAgentName, Dir: "gascity"}
 	got := a.EffectiveWorkQuery()
-	wantSnippets := []string{
-		`bd list --status in_progress --assignee="$cand" --exclude-type=epic --json`,
-		`bd ready --assignee="$cand" --exclude-type=epic --json`,
-		`bd ready --metadata-field gc.routed_to=gascity/control-dispatcher --unassigned --exclude-type=epic --json`,
-		`bd ready --metadata-field gc.routed_to=gascity/workflow-control --unassigned --exclude-type=epic --json`,
+	wantPresent := []string{
+		`bd ready --include-ephemeral --metadata-field "gc.routed_to=$target" --unassigned --exclude-type=epic --json`,
+		`bd list --include-ephemeral --status in_progress --assignee="$cand" --json`,
+		`bd ready --include-ephemeral --assignee="$cand" --json`,
+		`-- gascity/control-dispatcher gascity/workflow-control`,
 	}
-	for _, want := range wantSnippets {
+	for _, want := range wantPresent {
 		if !strings.Contains(got, want) {
-			t.Errorf("EffectiveWorkQuery() missing exclude-type=epic on control-dispatcher tier:\n  want substring: %s\n  got: %s", want, got)
+			t.Errorf("EffectiveWorkQuery() missing expected substring on control-dispatcher:\n  want: %s\n  got: %s", want, got)
 		}
+	}
+	if bad := `--assignee="$cand" --exclude-type=epic`; strings.Contains(got, bad) {
+		t.Errorf("control-dispatcher assigned tier must not exclude epics, found: %s\n  got: %s", bad, got)
+	}
+}
+
+// TestEffectiveWorkQueryAssignedTierSurfacesEpicWisp verifies that a
+// self-assigned ephemeral epic (a "wisp" — the patrol-loop pattern used
+// by the gastown witness/refinery/deacon) is surfaced by the default
+// work query's assigned tiers. The fake bd here mimics real bd's
+// --exclude-type=epic behavior: it returns the epic wisp for a
+// `ready --assignee` query ONLY when --exclude-type=epic is absent.
+// Before the fix the assigned tier carried --exclude-type=epic and the
+// agent's own open wisp was dropped (gc hook exited 1 with no output);
+// the gc-udx parent-epic guard lives on the routed (Tier 3) query, which
+// still excludes epics — see TestEffectiveWorkQuerySkipsEpicLeafScenario.
+func TestEffectiveWorkQueryAssignedTierSurfacesEpicWisp(t *testing.T) {
+	a := Agent{Name: "witness", Dir: "hello-world"}
+	out := runEffectiveWorkQuery(t, a, map[string]string{
+		"GC_SESSION_ID":     "witness-sess",
+		"GC_SESSION_ORIGIN": "ephemeral",
+	}, `#!/bin/sh
+set -eu
+case "$1" in
+  ready)
+    case "$*" in
+      *"--assignee=witness-sess"*"--exclude-type=epic"*)
+        # real bd drops the epic-typed wisp when epics are excluded
+        printf '[]' ;;
+      *"--assignee=witness-sess"*)
+        printf '[{"id":"patrol-wisp","issue_type":"epic","ephemeral":true}]' ;;
+      *) printf '[]' ;;
+    esac ;;
+  *) printf '[]' ;;
+esac
+`)
+	if !strings.Contains(out, "patrol-wisp") {
+		t.Fatalf("EffectiveWorkQuery() did not surface the self-assigned epic wisp (assigned tier still excludes epics?): %q", out)
 	}
 }
 
@@ -1739,6 +2062,163 @@ esac
 	}
 }
 
+// TestEffectiveWorkQueryClaimsRoutedToRoot verifies the worker claim path
+// (EffectiveWorkQuery Tier 3) claims a routed root via canonical gc.routed_to.
+// The fake bd returns work only for the gc.routed_to predicate.
+func TestEffectiveWorkQueryClaimsRoutedToRoot(t *testing.T) {
+	a := Agent{Name: "worker", Dir: "hello-world"}
+	out := runEffectiveWorkQuery(t, a, map[string]string{
+		"GC_SESSION_ORIGIN": "ephemeral",
+	}, `#!/bin/sh
+set -eu
+case "$*" in
+  *"--metadata-field gc.routed_to=hello-world/worker"*)
+    printf '[{"id":"routed-root","issue_type":"workflow"}]'
+    ;;
+  *) printf '[]' ;;
+esac
+`)
+	if !strings.Contains(out, "routed-root") {
+		t.Fatalf("EffectiveWorkQuery() did not claim the routed_to root: %q", out)
+	}
+}
+
+func TestEffectiveWorkQueryClaimsRunTargetOnlyRootDuringMigration(t *testing.T) {
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skip("jq not available; migration fallback filters routed_to with jq")
+	}
+	a := Agent{Name: "worker", Dir: "hello-world"}
+	out := runEffectiveWorkQuery(t, a, map[string]string{
+		"GC_SESSION_ORIGIN": "ephemeral",
+	}, `#!/bin/sh
+set -eu
+case "$*" in
+  *"--metadata-field gc.routed_to=hello-world/worker"*)
+    printf '[]'
+    ;;
+  *"--metadata-field gc.run_target=hello-world/worker"*"--metadata-field gc.kind=workflow"*|\
+  *"--metadata-field gc.kind=workflow"*"--metadata-field gc.run_target=hello-world/worker"*)
+    printf '[{"id":"legacy-root","issue_type":"workflow"}]'
+    ;;
+  *) printf '[]' ;;
+esac
+`)
+	if !strings.Contains(out, "legacy-root") {
+		t.Fatalf("EffectiveWorkQuery() did not claim the run_target-only root: %q", out)
+	}
+}
+
+func TestEffectiveWorkQueryIgnoresDivergentRunTargetWhenRoutedToPresent(t *testing.T) {
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skip("jq not available; migration fallback filters routed_to with jq")
+	}
+	a := Agent{Name: "worker", Dir: "hello-world"}
+	out := runEffectiveWorkQuery(t, a, map[string]string{
+		"GC_SESSION_ORIGIN": "ephemeral",
+	}, `#!/bin/sh
+set -eu
+case "$*" in
+  *"--metadata-field gc.routed_to=hello-world/worker"*)
+    printf '[]'
+    ;;
+  *"--metadata-field gc.run_target=hello-world/worker"*"--metadata-field gc.kind=workflow"*)
+    printf '[{"id":"divergent-root","metadata":{"gc.routed_to":"hello-world/controller","gc.run_target":"hello-world/worker","gc.kind":"workflow"}}]'
+    ;;
+  *) printf '[]' ;;
+esac
+`)
+	if strings.Contains(out, "divergent-root") {
+		t.Fatalf("EffectiveWorkQuery() claimed divergent legacy root through gc.run_target: %q", out)
+	}
+}
+
+// TestEffectivePoolDemandQueryCountsRoutedTo verifies the reconciler count-form
+// counts gc.routed_to demand — the spawn-side counterpart to the worker claim
+// path for the canonical persisted routing key.
+func TestEffectivePoolDemandQueryCountsRoutedTo(t *testing.T) {
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skip("jq not available; count-form exercises a jq pipeline")
+	}
+	a := Agent{Name: "worker", Dir: "hello-world"}
+	out := runShellWithFakeBd(t, a.EffectivePoolDemandQuery(), nil, `#!/bin/sh
+set -eu
+case "$*" in
+  *"--metadata-field gc.routed_to=hello-world/worker"*)
+    printf '[{"id":"a"},{"id":"b"}]'
+    ;;
+  *)
+    printf '[]'
+    ;;
+esac
+`)
+	if strings.TrimSpace(out) != "2" {
+		t.Fatalf("EffectivePoolDemandQuery() count = %q, want 2 (routed_to demand)", strings.TrimSpace(out))
+	}
+}
+
+func TestEffectivePoolDemandQueryCountsRunTargetOnlyRootDuringMigration(t *testing.T) {
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skip("jq not available; count-form exercises a jq pipeline")
+	}
+	a := Agent{Name: "worker", Dir: "hello-world"}
+	out := runShellWithFakeBd(t, a.EffectivePoolDemandQuery(), nil, `#!/bin/sh
+set -eu
+case "$*" in
+  *"--metadata-field gc.routed_to=hello-world/worker"*)
+    printf '[]'
+    ;;
+  *"--metadata-field gc.run_target=hello-world/worker"*"--metadata-field gc.kind=workflow"*|\
+  *"--metadata-field gc.kind=workflow"*"--metadata-field gc.run_target=hello-world/worker"*)
+    printf '[{"id":"legacy-root"}]'
+    ;;
+  *)
+    printf '[]'
+    ;;
+esac
+`)
+	if strings.TrimSpace(out) != "1" {
+		t.Fatalf("EffectivePoolDemandQuery() count = %q, want 1 (run_target migration demand)", strings.TrimSpace(out))
+	}
+}
+
+func TestEffectivePoolDemandQueryIgnoresDivergentRunTargetWhenRoutedToPresent(t *testing.T) {
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skip("jq not available; count-form exercises a jq pipeline")
+	}
+	a := Agent{Name: "worker", Dir: "hello-world"}
+	out := runShellWithFakeBd(t, a.EffectivePoolDemandQuery(), nil, `#!/bin/sh
+set -eu
+case "$*" in
+  *"--metadata-field gc.routed_to=hello-world/worker"*)
+    printf '[]'
+    ;;
+  *"--metadata-field gc.run_target=hello-world/worker"*"--metadata-field gc.kind=workflow"*)
+    printf '[{"id":"divergent-root","metadata":{"gc.routed_to":"hello-world/controller","gc.run_target":"hello-world/worker","gc.kind":"workflow"}}]'
+    ;;
+  *)
+    printf '[]'
+    ;;
+esac
+`)
+	if strings.TrimSpace(out) != "0" {
+		t.Fatalf("EffectivePoolDemandQuery() count = %q, want 0 for divergent legacy route", strings.TrimSpace(out))
+	}
+}
+
+func TestEffectivePoolDemandQueryTreatsEmptyReadyOutputAsZero(t *testing.T) {
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skip("jq not available; count-form exercises a jq pipeline")
+	}
+	a := Agent{Name: "worker", Dir: "hello-world"}
+	out := runShellWithFakeBd(t, a.EffectivePoolDemandQuery(), nil, `#!/bin/sh
+set -eu
+exit 0
+`)
+	if strings.TrimSpace(out) != "0" {
+		t.Fatalf("EffectivePoolDemandQuery() count = %q, want 0 for empty bd output", strings.TrimSpace(out))
+	}
+}
+
 func TestDefaultPoolCheckUsesPoolName(t *testing.T) {
 	a := Agent{
 		Name:              "dog-1",
@@ -1747,8 +2227,8 @@ func TestDefaultPoolCheckUsesPoolName(t *testing.T) {
 		PoolName: "hello-world/dog",
 	}
 	check := a.EffectiveScaleCheck()
-	if !strings.Contains(check, "gc.routed_to=hello-world/dog") {
-		t.Errorf("EffectiveScaleCheck() = %q, want gc.routed_to=hello-world/dog", check)
+	if !strings.Contains(check, "-- hello-world/dog") {
+		t.Errorf("EffectiveScaleCheck() = %q, want target argument hello-world/dog", check)
 	}
 }
 
@@ -1780,7 +2260,9 @@ func TestDefaultPoolCheckUsesBdReady(t *testing.T) {
 // "is there work on this routed queue?" predicate from the same
 // bdReadyPoolDemandShell helper. Adding a tier to one without updating
 // the other re-introduces the spawn-storm bug — this test ensures both
-// reference the identical predicate string for the same target.
+// reference the same predicate helpers for the canonical routing key and the
+// temporary migration fallback. The worker first-row path bounds its migration
+// scan, while the reconciler count path keeps the unbounded count form.
 func TestPoolDemandPredicateSharedWithWorkQuery(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -1804,18 +2286,78 @@ func TestPoolDemandPredicateSharedWithWorkQuery(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			predicate := bdReadyPoolDemandShell(tt.target)
-
 			wq := tt.agent.EffectiveWorkQuery()
-			if !strings.Contains(wq, predicate) {
-				t.Errorf("EffectiveWorkQuery() missing shared predicate %q in %q", predicate, wq)
-			}
-
 			demand := tt.agent.EffectivePoolDemandQuery()
-			if !strings.Contains(demand, predicate) {
-				t.Errorf("EffectivePoolDemandQuery() missing shared predicate %q in %q", predicate, demand)
+			workPredicate := bdReadyPoolDemandShell("--sort oldest --limit=1")
+			if !strings.Contains(wq, workPredicate) {
+				t.Errorf("EffectiveWorkQuery() missing shared predicate %q in %q", workPredicate, wq)
+			}
+			migrationWorkPredicate := bdReadyPoolDemandMigrationShell("--limit=20")
+			if !strings.Contains(wq, migrationWorkPredicate) {
+				t.Errorf("EffectiveWorkQuery() missing shared migration predicate %q in %q", migrationWorkPredicate, wq)
+			}
+			for _, want := range []string{`.metadata`, `.[:1]`} {
+				if !strings.Contains(wq, want) {
+					t.Errorf("EffectiveWorkQuery() missing migration filter fragment %q in %q", want, wq)
+				}
+			}
+			countPredicate := bdReadyPoolDemandShell("--limit 0")
+			if !strings.Contains(demand, countPredicate) {
+				t.Errorf("EffectivePoolDemandQuery() missing shared predicate %q in %q", countPredicate, demand)
+			}
+			migrationCountPredicate := bdReadyPoolDemandMigrationShell("--limit 0")
+			if !strings.Contains(demand, migrationCountPredicate) {
+				t.Errorf("EffectivePoolDemandQuery() missing shared migration predicate %q in %q", migrationCountPredicate, demand)
+			}
+			if !strings.Contains(demand, `.metadata`) {
+				t.Errorf("EffectivePoolDemandQuery() missing migration routed_to filter in %q", demand)
+			}
+			if !strings.Contains(wq, tt.target) {
+				t.Errorf("EffectiveWorkQuery() missing target argument %q in %q", tt.target, wq)
+			}
+			if !strings.Contains(demand, tt.target) {
+				t.Errorf("EffectivePoolDemandQuery() missing target argument %q in %q", tt.target, demand)
+			}
+			embedded := "gc.routed_to=" + tt.target
+			if strings.Contains(wq, embedded) {
+				t.Errorf("EffectiveWorkQuery() embeds target in predicate %q in %q", embedded, wq)
+			}
+			if strings.Contains(demand, embedded) {
+				t.Errorf("EffectivePoolDemandQuery() embeds target in predicate %q in %q", embedded, demand)
+			}
+			legacyEmbedded := "gc.run_target=" + tt.target
+			if strings.Contains(wq, legacyEmbedded) {
+				t.Errorf("EffectiveWorkQuery() embeds target in migration predicate %q in %q", legacyEmbedded, wq)
+			}
+			if strings.Contains(demand, legacyEmbedded) {
+				t.Errorf("EffectivePoolDemandQuery() embeds target in migration predicate %q in %q", legacyEmbedded, demand)
 			}
 		})
+	}
+}
+
+func TestEffectivePoolDemandQueryDedupsMigrationOverlap(t *testing.T) {
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skip("jq not available; count-form exercises a jq pipeline")
+	}
+	a := Agent{Name: "worker", Dir: "hello-world"}
+	out := runShellWithFakeBd(t, a.EffectivePoolDemandQuery(), nil, `#!/bin/sh
+set -eu
+case "$*" in
+  *"--metadata-field gc.routed_to=hello-world/worker"*)
+    printf '[{"id":"same-root"}]'
+    ;;
+  *"--metadata-field gc.run_target=hello-world/worker"*"--metadata-field gc.kind=workflow"*|\
+  *"--metadata-field gc.kind=workflow"*"--metadata-field gc.run_target=hello-world/worker"*)
+    printf '[{"id":"same-root"}]'
+    ;;
+  *)
+    printf '[]'
+    ;;
+esac
+`)
+	if strings.TrimSpace(out) != "1" {
+		t.Fatalf("EffectivePoolDemandQuery() count = %q, want 1 (overlap must dedup by bead id)", strings.TrimSpace(out))
 	}
 }
 
@@ -1870,6 +2412,14 @@ func TestPoolDemandAndWorkQueryAgreeOnRoutedSemantics(t *testing.T) {
 			wantDemandZero: false,
 		},
 		{
+			name:           "ephemeral wisp routed work",
+			agent:          Agent{Name: "worker", Dir: "foundations"},
+			target:         "foundations/worker",
+			bdReadyOutput:  `[{"id":"fo-wisp","type":"wisp"}]`,
+			wantWorkQuery:  `[{"id":"fo-wisp","type":"wisp"}]`,
+			wantDemandZero: false,
+		},
+		{
 			name: "pool instance uses pool target",
 			agent: Agent{
 				Name:     "worker-1",
@@ -1886,7 +2436,7 @@ func TestPoolDemandAndWorkQueryAgreeOnRoutedSemantics(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			bdScript := `#!/bin/sh
 case "$*" in
-  *"ready --metadata-field gc.routed_to=` + tc.target + ` --unassigned --exclude-type=epic"*)
+  *"ready --include-ephemeral"*"--metadata-field gc.routed_to=` + tc.target + `"*"--unassigned"*"--exclude-type=epic"*)
     printf '%s' '` + tc.bdReadyOutput + `'
     ;;
   *)
@@ -2082,8 +2632,8 @@ func TestEffectiveScaleCheckDefaults(t *testing.T) {
 	}
 	check := a.EffectiveScaleCheck()
 	// Default check uses bd ready for blocker-aware routed demand.
-	if !strings.Contains(check, "gc.routed_to=refinery") {
-		t.Errorf("EffectiveScaleCheck = %q, want gc.routed_to=refinery", check)
+	if !strings.Contains(check, "-- refinery") {
+		t.Errorf("EffectiveScaleCheck = %q, want target argument refinery", check)
 	}
 	if !strings.Contains(check, "--unassigned") {
 		t.Errorf("EffectiveScaleCheck = %q, want --unassigned for new unassigned demand", check)
@@ -2107,8 +2657,8 @@ func TestEffectiveScaleCheckDefaultsQualified(t *testing.T) {
 		MinActiveSessions: ptrInt(0), MaxActiveSessions: ptrInt(5),
 	}
 	check := a.EffectiveScaleCheck()
-	if !strings.Contains(check, "gc.routed_to=myproject/polecat") {
-		t.Errorf("EffectiveScaleCheck = %q, want gc.routed_to=myproject/polecat", check)
+	if !strings.Contains(check, "-- myproject/polecat") {
+		t.Errorf("EffectiveScaleCheck = %q, want target argument myproject/polecat", check)
 	}
 	if !strings.Contains(check, "--unassigned") {
 		t.Errorf("EffectiveScaleCheck = %q, want --unassigned for new unassigned demand", check)
@@ -2156,8 +2706,8 @@ func TestEffectiveScaleCheckUsesReadyOnly(t *testing.T) {
 	if strings.Contains(check, "${molecules:-0}") {
 		t.Errorf("unexpected ${molecules:-0} in arithmetic sum")
 	}
-	if !strings.Contains(check, "gc.routed_to=myrig/worker") {
-		t.Errorf("ready query missing gc.routed_to=myrig/worker")
+	if !strings.Contains(check, "-- myrig/worker") {
+		t.Errorf("ready query missing target argument myrig/worker")
 	}
 }
 
@@ -2349,6 +2899,24 @@ func TestValidateAgentsValid(t *testing.T) {
 	}
 	if err := ValidateAgents(agents); err != nil {
 		t.Errorf("ValidateAgents: unexpected error: %v", err)
+	}
+}
+
+func TestValidateAgentsMouseMode(t *testing.T) {
+	for _, mode := range []string{"", "on", "off"} {
+		t.Run("valid_"+mode, func(t *testing.T) {
+			if err := ValidateAgents([]Agent{{Name: "worker", MouseMode: mode}}); err != nil {
+				t.Fatalf("ValidateAgents mouse_mode %q: %v", mode, err)
+			}
+		})
+	}
+
+	err := ValidateAgents([]Agent{{Name: "worker", MouseMode: "auto"}})
+	if err == nil {
+		t.Fatal("ValidateAgents invalid mouse_mode: got nil error")
+	}
+	if !strings.Contains(err.Error(), "mouse_mode") {
+		t.Fatalf("ValidateAgents error = %v, want mouse_mode context", err)
 	}
 }
 
@@ -2744,14 +3312,14 @@ name = "worker"
 	}
 }
 
-func TestMarshalOmitsEmptyDaemonSection(t *testing.T) {
+func TestMarshalDefaultCityIncludesFormulaV2Default(t *testing.T) {
 	c := DefaultCity("test")
 	data, err := c.Marshal()
 	if err != nil {
 		t.Fatalf("Marshal: %v", err)
 	}
-	if strings.Contains(string(data), "[daemon]") {
-		t.Errorf("Marshal output should not contain '[daemon]' when empty:\n%s", data)
+	if !strings.Contains(string(data), "[daemon]") || !strings.Contains(string(data), "formula_v2 = true") {
+		t.Errorf("Marshal output should include formula_v2 default:\n%s", data)
 	}
 }
 
@@ -2883,6 +3451,145 @@ func TestValidateNonNegativeDurationsRejectsNegativeDoltStopTimeout(t *testing.T
 		!strings.Contains(err.Error(), "must not be negative") ||
 		!strings.Contains(err.Error(), `"-1s"`) {
 		t.Errorf("ValidateNonNegativeDurations() error = %q, want it to name the field, the constraint, and the value", err)
+	}
+}
+
+func TestDaemonDoltStartAddressInUseRetryDefault(t *testing.T) {
+	d := DaemonConfig{}
+	got := d.DoltStartAddressInUseRetryWindowDuration()
+	if got != DefaultDoltStartAddressInUseRetryWindow {
+		t.Errorf("DoltStartAddressInUseRetryWindowDuration() = %v, want %v", got, DefaultDoltStartAddressInUseRetryWindow)
+	}
+}
+
+func TestDaemonDoltStartAddressInUseRetryCustom(t *testing.T) {
+	d := DaemonConfig{DoltStartAddressInUseRetryWindow: "45s"}
+	got := d.DoltStartAddressInUseRetryWindowDuration()
+	if got != 45*time.Second {
+		t.Errorf("DoltStartAddressInUseRetryWindowDuration() = %v, want 45s", got)
+	}
+}
+
+func TestDaemonDoltStartAddressInUseRetryZero(t *testing.T) {
+	d := DaemonConfig{DoltStartAddressInUseRetryWindow: "0s"}
+	got := d.DoltStartAddressInUseRetryWindowDuration()
+	if got != 0 {
+		t.Errorf("DoltStartAddressInUseRetryWindowDuration() = %v, want 0", got)
+	}
+}
+
+func TestDaemonDoltStartAddressInUseRetryInvalid(t *testing.T) {
+	d := DaemonConfig{DoltStartAddressInUseRetryWindow: "not-a-duration"}
+	got := d.DoltStartAddressInUseRetryWindowDuration()
+	if got != DefaultDoltStartAddressInUseRetryWindow {
+		t.Errorf("DoltStartAddressInUseRetryWindowDuration() = %v, want %v (default for invalid)", got, DefaultDoltStartAddressInUseRetryWindow)
+	}
+}
+
+// TestDaemonDoltStartAddressInUseRetryWindowNegativePassesThrough mirrors
+// DoltStopTimeoutDuration's policy: negatives are rejected at config load by
+// ValidateNonNegativeDurations, so a negative reaching this helper implies a
+// hand-rolled DaemonConfig that bypassed validation. The helper returns the
+// parsed value as-is so the caller surfaces the misconfiguration rather than
+// silently overriding it. The runtime call site
+// (managedDoltStartWaitForPortFree) treats non-positive windows as "no wait",
+// so a negative effectively disables the retry without corrupting other
+// state.
+func TestDaemonDoltStartAddressInUseRetryWindowNegativePassesThrough(t *testing.T) {
+	d := DaemonConfig{DoltStartAddressInUseRetryWindow: "-1s"}
+	got := d.DoltStartAddressInUseRetryWindowDuration()
+	if got != -1*time.Second {
+		t.Errorf("DoltStartAddressInUseRetryWindowDuration() = %v, want -1s (pass-through, mirrors DoltStopTimeout policy)", got)
+	}
+}
+
+func TestParseDoltStartAddressInUseRetryWindow(t *testing.T) {
+	data := []byte(`
+[workspace]
+name = "test"
+
+[daemon]
+dolt_start_address_in_use_retry_window = "45s"
+
+[[agent]]
+name = "mayor"
+`)
+	cfg, err := Parse(data)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if cfg.Daemon.DoltStartAddressInUseRetryWindow != "45s" {
+		t.Errorf("Daemon.DoltStartAddressInUseRetryWindow = %q, want %q", cfg.Daemon.DoltStartAddressInUseRetryWindow, "45s")
+	}
+	got := cfg.Daemon.DoltStartAddressInUseRetryWindowDuration()
+	if got != 45*time.Second {
+		t.Errorf("DoltStartAddressInUseRetryWindowDuration() = %v, want 45s", got)
+	}
+}
+
+func TestValidateNonNegativeDurationsRejectsNegativeDoltStartAddressInUseRetryWindow(t *testing.T) {
+	cfg := &City{}
+	cfg.Daemon.DoltStartAddressInUseRetryWindow = "-2s"
+	err := ValidateNonNegativeDurations(cfg, "city.toml")
+	if err == nil {
+		t.Fatal("ValidateNonNegativeDurations() = nil, want error for negative dolt_start_address_in_use_retry_window")
+	}
+	if !strings.Contains(err.Error(), "dolt_start_address_in_use_retry_window") ||
+		!strings.Contains(err.Error(), "must not be negative") ||
+		!strings.Contains(err.Error(), `"-2s"`) {
+		t.Errorf("ValidateNonNegativeDurations() error = %q, want it to name the field, the constraint, and the value", err)
+	}
+}
+
+func TestValidateNonNegativeDurationsRejectsInvalidBeadPolicyDeleteAfterClose(t *testing.T) {
+	tests := []string{"-1h", "0s", "1d-48h", "200000d", "forever-ish"}
+	for _, value := range tests {
+		t.Run(value, func(t *testing.T) {
+			cfg := &City{
+				Beads: BeadsConfig{
+					Policies: map[string]BeadPolicyConfig{
+						"control": {DeleteAfterClose: value},
+					},
+				},
+			}
+			err := ValidateNonNegativeDurations(cfg, "city.toml")
+			if err == nil {
+				t.Fatal("ValidateNonNegativeDurations() = nil, want error for invalid delete_after_close")
+			}
+			msg := err.Error()
+			for _, want := range []string{"city.toml", "[beads.policies.control]", "delete_after_close", value} {
+				if !strings.Contains(msg, want) {
+					t.Errorf("ValidateNonNegativeDurations() error = %q, want substring %q", msg, want)
+				}
+			}
+		})
+	}
+}
+
+func TestValidateNonNegativeDurationsAllowsPositiveBeadPolicyDeleteAfterClose(t *testing.T) {
+	for _, value := range []string{"", "1h", "1d", "1d12h"} {
+		t.Run(value, func(t *testing.T) {
+			cfg := &City{
+				Beads: BeadsConfig{
+					Policies: map[string]BeadPolicyConfig{
+						"control": {DeleteAfterClose: value},
+					},
+				},
+			}
+			if err := ValidateNonNegativeDurations(cfg, "city.toml"); err != nil {
+				t.Errorf("ValidateNonNegativeDurations(delete_after_close=%q) = %v, want nil", value, err)
+			}
+		})
+	}
+}
+
+func TestValidateNonNegativeDurationsAllowsZeroAndPositiveDoltStartAddressInUseRetryWindow(t *testing.T) {
+	for _, v := range []string{"", "0s", "30s", "1m"} {
+		cfg := &City{}
+		cfg.Daemon.DoltStartAddressInUseRetryWindow = v
+		if err := ValidateNonNegativeDurations(cfg, "city.toml"); err != nil {
+			t.Errorf("ValidateNonNegativeDurations(dolt_start_address_in_use_retry_window=%q) = %v, want nil", v, err)
+		}
 	}
 }
 
@@ -4005,6 +4712,39 @@ func TestInstallAgentHooksOmittedWhenEmpty(t *testing.T) {
 	}
 }
 
+func TestMailConfigRetentionTTLDuration(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+		want time.Duration
+	}{
+		{name: "empty", raw: "", want: 0},
+		{name: "zero", raw: "0", want: 0},
+		{name: "hours", raw: "168h", want: 168 * time.Hour},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := (MailConfig{RetentionTTL: tt.raw}).RetentionTTLDuration()
+			if err != nil {
+				t.Fatalf("RetentionTTLDuration() error = %v", err)
+			}
+			if got != tt.want {
+				t.Fatalf("RetentionTTLDuration() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestMailConfigRetentionTTLDurationRejectsInvalid(t *testing.T) {
+	_, err := (MailConfig{RetentionTTL: "7d"}).RetentionTTLDuration()
+	if err == nil {
+		t.Fatal("RetentionTTLDuration() succeeded, want error")
+	}
+	if !strings.Contains(err.Error(), "[mail] retention_ttl") || !strings.Contains(err.Error(), "7d") {
+		t.Fatalf("RetentionTTLDuration() error = %q, want field context and bad value", err)
+	}
+}
+
 // --- WispGC config tests ---
 
 func TestDaemonConfig_WispGCDisabledByDefault(t *testing.T) {
@@ -4171,7 +4911,7 @@ func runShellWithFakeBd(t *testing.T, shellCmd string, env map[string]string, bd
 	return string(out)
 }
 
-func runLifecycleHookCommand(t *testing.T, command string, env map[string]string, bdScript string) string {
+func runLifecycleHookCommand(t *testing.T, command string, bdScript string) string {
 	t.Helper()
 
 	tmp := t.TempDir()
@@ -4186,9 +4926,6 @@ func runLifecycleHookCommand(t *testing.T, command string, env map[string]string
 		"PATH=" + tmp + ":" + os.Getenv("PATH"),
 		"BD_LOG=" + logPath,
 	}
-	for k, v := range env {
-		cmd.Env = append(cmd.Env, k+"="+v)
-	}
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("run lifecycle hook: %v\n%s", err, out)
 	}
@@ -4199,13 +4936,13 @@ func runLifecycleHookCommand(t *testing.T, command string, env map[string]string
 	return string(data)
 }
 
-// TestEffectiveMethodsAgentRouting verifies that all agents use
-// gc.routed_to=<qualified-name> metadata routing.
+// TestEffectiveMethodsAgentRouting verifies that default query methods route
+// through the qualified agent name.
 func TestEffectiveMethodsAgentRouting(t *testing.T) {
 	a := Agent{Name: "refinery", Dir: "hello-world"}
 	wq := a.EffectiveWorkQuery()
-	if !strings.Contains(wq, "gc.routed_to=hello-world/refinery") {
-		t.Errorf("EffectiveWorkQuery() = %q, want gc.routed_to=hello-world/refinery", wq)
+	if !strings.Contains(wq, "-- hello-world/refinery") {
+		t.Errorf("EffectiveWorkQuery() = %q, want target argument hello-world/refinery", wq)
 	}
 	sq := a.EffectiveSlingQuery()
 	if !strings.Contains(sq, "gc.routed_to=hello-world/refinery") {
@@ -4562,7 +5299,7 @@ func TestEffectiveOnDeathDefault(t *testing.T) {
 		MinActiveSessions: ptrInt(0), MaxActiveSessions: ptrInt(5),
 	}
 	got := a.EffectiveOnDeath()
-	for _, want := range []string{"bd list --assignee=myrig/dog", "--status=in_progress", `--assignee "" --status open`, "--set-metadata gc.routed_to=myrig/dog"} {
+	for _, want := range []string{"bd list --include-ephemeral --assignee=myrig/dog", "--status=in_progress", `--assignee "" --status open`, "--set-metadata 'gc.run_target=myrig/dog'"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("EffectiveOnDeath() = %q, want %q", got, want)
 		}
@@ -4583,7 +5320,7 @@ func TestEffectiveOnDeathCustom(t *testing.T) {
 func TestEffectiveOnDeathFixedAgent(t *testing.T) {
 	a := Agent{Name: "mayor"}
 	got := a.EffectiveOnDeath()
-	for _, want := range []string{"bd list --assignee=mayor", "--status=in_progress", `--assignee "" --status open`, "--set-metadata gc.routed_to=mayor"} {
+	for _, want := range []string{"bd list --include-ephemeral --assignee=mayor", "--status=in_progress", `--assignee "" --status open`, "--set-metadata 'gc.run_target=mayor'"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("EffectiveOnDeath() = %q, want %q", got, want)
 		}
@@ -4598,11 +5335,12 @@ func TestEffectiveOnDeathBackfillsMissingRouteOnReopen(t *testing.T) {
 		PoolName: "hello-world/dog",
 	}
 
-	log := runLifecycleHookCommand(t, a.EffectiveOnDeath(), nil, `#!/bin/sh
+	log := runLifecycleHookCommand(t, a.EffectiveOnDeath(), `#!/bin/sh
 set -eu
 case "$1" in
   list)
-    printf '[{"id":"ga-missing","metadata":{}}]'
+    printf '%s\n' "$*" >> "$BD_LOG"
+    printf '[{"id":"ga-missing","type":"wisp","metadata":{}}]'
     ;;
   update)
     printf '%s\n' "$*" >> "$BD_LOG"
@@ -4612,10 +5350,13 @@ case "$1" in
     ;;
 esac
 `)
+	if !strings.Contains(log, "list --include-ephemeral --assignee=hello-world/dog-1 --status=in_progress --json") {
+		t.Fatalf("hook log = %q, want ephemeral-aware list query", log)
+	}
 	if !strings.Contains(log, "--status open") {
 		t.Fatalf("hook log = %q, want reopened status", log)
 	}
-	if !strings.Contains(log, "--set-metadata gc.routed_to=hello-world/dog") {
+	if !strings.Contains(log, "--set-metadata gc.run_target=hello-world/dog") {
 		t.Fatalf("hook log = %q, want fallback route for ownerless reopened work", log)
 	}
 }
@@ -4628,11 +5369,12 @@ func TestEffectiveOnDeathPreservesExistingRouteOnReopen(t *testing.T) {
 		PoolName: "hello-world/dog",
 	}
 
-	log := runLifecycleHookCommand(t, a.EffectiveOnDeath(), nil, `#!/bin/sh
+	log := runLifecycleHookCommand(t, a.EffectiveOnDeath(), `#!/bin/sh
 set -eu
 case "$1" in
   list)
-    printf '[{"id":"ga-routed","metadata":{"gc.routed_to":"already/routed"}}]'
+    printf '%s\n' "$*" >> "$BD_LOG"
+    printf '[{"id":"ga-routed","type":"wisp","metadata":{"gc.routed_to":"already/routed"}}]'
     ;;
   update)
     printf '%s\n' "$*" >> "$BD_LOG"
@@ -4642,11 +5384,45 @@ case "$1" in
     ;;
 esac
 `)
+	if !strings.Contains(log, "list --include-ephemeral --assignee=hello-world/dog-1 --status=in_progress --json") {
+		t.Fatalf("hook log = %q, want ephemeral-aware list query", log)
+	}
 	if !strings.Contains(log, "--status open") {
 		t.Fatalf("hook log = %q, want reopened status", log)
 	}
 	if strings.Contains(log, "--set-metadata") {
 		t.Fatalf("hook log = %q, want existing route preserved without overwrite", log)
+	}
+}
+
+func TestEffectiveOnDeathPreservesExistingRunTargetOnReopen(t *testing.T) {
+	a := Agent{
+		Name:              "dog-1",
+		Dir:               "hello-world",
+		MinActiveSessions: ptrInt(0), MaxActiveSessions: ptrInt(5),
+		PoolName: "hello-world/dog",
+	}
+
+	log := runLifecycleHookCommand(t, a.EffectiveOnDeath(), `#!/bin/sh
+set -eu
+case "$1" in
+  list)
+    printf '%s\n' "$*" >> "$BD_LOG"
+    printf '[{"id":"ga-run-target","type":"wisp","metadata":{"gc.run_target":"hello-world/dog"}}]'
+    ;;
+  update)
+    printf '%s\n' "$*" >> "$BD_LOG"
+    ;;
+  *)
+    exit 1
+    ;;
+esac
+`)
+	if !strings.Contains(log, "update ga-run-target --assignee  --status open") {
+		t.Fatalf("hook log = %q, want run_target-only work reopened", log)
+	}
+	if strings.Contains(log, "--set-metadata") {
+		t.Fatalf("hook log = %q, want existing gc.run_target preserved without gc.routed_to overwrite", log)
 	}
 }
 
@@ -4657,7 +5433,7 @@ func TestEffectiveOnBootDefault(t *testing.T) {
 		MinActiveSessions: ptrInt(0), MaxActiveSessions: ptrInt(5),
 	}
 	got := a.EffectiveOnBoot()
-	for _, want := range []string{"bd list --metadata-field gc.routed_to=myrig/dog", "--status=in_progress", "--no-assignee", "--status open"} {
+	for _, want := range []string{"template='myrig/dog'", `--metadata-field "gc.routed_to=$template"`, `--metadata-field "gc.run_target=$template"`, `--metadata-field "gc.kind=workflow"`, "--status=in_progress", "--no-assignee", "--status open"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("EffectiveOnBoot() = %q, want %q", got, want)
 		}
@@ -4676,13 +5452,114 @@ func TestEffectiveOnBootDefaultPoolName(t *testing.T) {
 		PoolName: "myrig/dog",
 	}
 	got := a.EffectiveOnBoot()
-	for _, want := range []string{"bd list --metadata-field gc.routed_to=myrig/dog", "--status=in_progress", "--no-assignee", "--status open"} {
+	for _, want := range []string{"template='myrig/dog'", `--metadata-field "gc.routed_to=$template"`, `--metadata-field "gc.run_target=$template"`, `--metadata-field "gc.kind=workflow"`, "--status=in_progress", "--no-assignee", "--status open"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("EffectiveOnBoot() = %q, want %q", got, want)
 		}
 	}
 	if strings.Contains(got, `--assignee ""`) {
 		t.Errorf("EffectiveOnBoot() = %q, want to target only ownerless work instead of bulk-unassigning routed work", got)
+	}
+}
+
+func TestEffectiveOnBootReopensOwnerlessEphemeralRoutedWork(t *testing.T) {
+	a := Agent{
+		Name:              "dog-1",
+		Dir:               "hello-world",
+		MinActiveSessions: ptrInt(0), MaxActiveSessions: ptrInt(5),
+		PoolName: "hello-world/dog",
+	}
+
+	log := runLifecycleHookCommand(t, a.EffectiveOnBoot(), `#!/bin/sh
+set -eu
+case "$1" in
+  list)
+    printf '%s\n' "$*" >> "$BD_LOG"
+    case "$*" in
+      *"--metadata-field gc.run_target=hello-world/dog"*) printf '[]' ;;
+      *"--metadata-field gc.routed_to=hello-world/dog"*) printf '[{"id":"ga-wisp","type":"wisp","metadata":{"gc.routed_to":"hello-world/dog"}}]' ;;
+      *) printf '[]' ;;
+    esac
+    ;;
+  update)
+    printf '%s\n' "$*" >> "$BD_LOG"
+    ;;
+  *)
+    exit 1
+    ;;
+esac
+`)
+	if !strings.Contains(log, "list --include-ephemeral --metadata-field gc.routed_to=hello-world/dog --status=in_progress --no-assignee --json") {
+		t.Fatalf("hook log = %q, want ephemeral-aware routed list query", log)
+	}
+	if !strings.Contains(log, "update ga-wisp --status open") {
+		t.Fatalf("hook log = %q, want ownerless wisp reopened", log)
+	}
+}
+
+func TestEffectiveOnBootReopensOwnerlessEphemeralRunTargetWork(t *testing.T) {
+	a := Agent{
+		Name:              "dog-1",
+		Dir:               "hello-world",
+		MinActiveSessions: ptrInt(0), MaxActiveSessions: ptrInt(5),
+		PoolName: "hello-world/dog",
+	}
+
+	log := runLifecycleHookCommand(t, a.EffectiveOnBoot(), `#!/bin/sh
+set -eu
+case "$1" in
+  list)
+    printf '%s\n' "$*" >> "$BD_LOG"
+    case "$*" in
+      *"--metadata-field gc.run_target=hello-world/dog"*"--metadata-field gc.kind=workflow"*) printf '[{"id":"ga-run-target","type":"workflow","metadata":{"gc.kind":"workflow","gc.run_target":"hello-world/dog"}}]' ;;
+      *) printf '[]' ;;
+    esac
+    ;;
+  update)
+    printf '%s\n' "$*" >> "$BD_LOG"
+    ;;
+  *)
+    exit 1
+    ;;
+esac
+`)
+	if !strings.Contains(log, "list --include-ephemeral --metadata-field gc.run_target=hello-world/dog --metadata-field gc.kind=workflow --status=in_progress --no-assignee --json") {
+		t.Fatalf("hook log = %q, want ephemeral-aware run_target list query", log)
+	}
+	if !strings.Contains(log, "update ga-run-target --status open") {
+		t.Fatalf("hook log = %q, want ownerless run_target wisp reopened", log)
+	}
+}
+
+func TestEffectiveOnBootDedupesReopenedIDs(t *testing.T) {
+	a := Agent{
+		Name:              "dog-1",
+		Dir:               "hello-world",
+		MinActiveSessions: ptrInt(0), MaxActiveSessions: ptrInt(5),
+		PoolName: "hello-world/dog",
+	}
+
+	log := runLifecycleHookCommand(t, a.EffectiveOnBoot(), `#!/bin/sh
+set -eu
+case "$1" in
+  list)
+    printf '%s\n' "$*" >> "$BD_LOG"
+    case "$*" in
+      *"--metadata-field gc.routed_to=hello-world/dog"*) printf '[{"id":"ga-dup","type":"wisp","metadata":{"gc.routed_to":"hello-world/dog"}}]' ;;
+      *"--metadata-field gc.run_target=hello-world/dog"*) printf '[{"id":"ga-dup","type":"workflow","metadata":{"gc.kind":"workflow","gc.routed_to":"hello-world/dog","gc.run_target":"hello-world/dog"}}]' ;;
+      *) printf '[]' ;;
+    esac
+    ;;
+  update)
+    printf '%s\n' "$*" >> "$BD_LOG"
+    ;;
+  *)
+    exit 1
+    ;;
+esac
+`)
+	if count := strings.Count(log, "update ga-dup --status open"); count != 1 {
+		t.Fatalf("update count for ga-dup = %d, want 1; hook log:\n%s", count, log)
 	}
 }
 
@@ -4700,7 +5577,7 @@ func TestEffectiveOnBootCustom(t *testing.T) {
 func TestEffectiveOnBootNonPool(t *testing.T) {
 	a := Agent{Name: "mayor"}
 	got := a.EffectiveOnBoot()
-	for _, want := range []string{"bd list --metadata-field gc.routed_to=mayor", "--status=in_progress", "--no-assignee", "--status open"} {
+	for _, want := range []string{"template='mayor'", `--metadata-field "gc.routed_to=$template"`, `--metadata-field "gc.run_target=$template"`, `--metadata-field "gc.kind=workflow"`, "--status=in_progress", "--no-assignee", "--status open"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("EffectiveOnBoot() = %q, want %q", got, want)
 		}
@@ -4795,6 +5672,15 @@ func TestInjectImplicitAgents_NoProviders(t *testing.T) {
 	}
 	if !reflect.DeepEqual(a.ProcessNames, []string{"gc"}) {
 		t.Fatalf("control-dispatcher ProcessNames = %v, want [gc]", a.ProcessNames)
+	}
+	if a.SleepAfterIdle != "" {
+		t.Fatalf("control-dispatcher SleepAfterIdle = %q, want inherited idle-sleep policy", a.SleepAfterIdle)
+	}
+	if len(cfg.NamedSessions) != 1 {
+		t.Fatalf("got %d named sessions, want 1 control-dispatcher session", len(cfg.NamedSessions))
+	}
+	if ns := cfg.NamedSessions[0]; ns.Template != ControlDispatcherAgentName || ns.Mode != "on_demand" {
+		t.Fatalf("control-dispatcher named session = %+v, want on_demand %q", ns, ControlDispatcherAgentName)
 	}
 }
 
@@ -5131,6 +6017,109 @@ func TestInjectImplicitAgents_RigInjection(t *testing.T) {
 // ---------------------------------------------------------------------------
 // agent_defaults.default_sling_formula
 // ---------------------------------------------------------------------------
+
+func TestAgentDefaultsProvider_ExplicitAgentInherits(t *testing.T) {
+	cfg := &City{
+		Agents: []Agent{
+			{Name: "worker"},
+		},
+		AgentDefaults: AgentDefaults{
+			Provider: "codex",
+		},
+	}
+	ApplyAgentDefaults(cfg)
+
+	if got := cfg.Agents[0].Provider; got != "codex" {
+		t.Fatalf("Provider = %q, want codex", got)
+	}
+}
+
+func TestAgentDefaultsProvider_ExplicitOverrideWins(t *testing.T) {
+	cfg := &City{
+		Agents: []Agent{
+			{Name: "worker", Provider: "claude"},
+		},
+		AgentDefaults: AgentDefaults{
+			Provider: "codex",
+		},
+	}
+	ApplyAgentDefaults(cfg)
+
+	if got := cfg.Agents[0].Provider; got != "claude" {
+		t.Fatalf("Provider = %q, want explicit claude", got)
+	}
+}
+
+func TestAgentDefaultsProvider_InjectImplicitAgents(t *testing.T) {
+	cfg := &City{
+		AgentDefaults: AgentDefaults{
+			Provider: "codex",
+		},
+	}
+	InjectImplicitAgents(cfg)
+	ApplyAgentDefaults(cfg)
+
+	for _, a := range cfg.Agents {
+		if a.Name == "codex" && a.Implicit {
+			if got := a.Provider; got != "codex" {
+				t.Fatalf("implicit codex Provider = %q, want codex", got)
+			}
+			return
+		}
+	}
+	t.Fatal("implicit codex agent not found")
+}
+
+func TestAgentDefaultsProvider_ControlDispatcherSkipped(t *testing.T) {
+	cfg := &City{
+		Daemon: DaemonConfig{FormulaV2: true},
+		AgentDefaults: AgentDefaults{
+			Provider: "codex",
+		},
+	}
+	InjectImplicitAgents(cfg)
+	ApplyAgentDefaults(cfg)
+
+	for _, a := range cfg.Agents {
+		if a.Name == ControlDispatcherAgentName {
+			if a.Provider != "" {
+				t.Fatalf("control-dispatcher Provider = %q, want empty", a.Provider)
+			}
+			return
+		}
+	}
+	t.Fatal("control-dispatcher agent not found")
+}
+
+func TestAgentDefaultsProvider_BeatsWorkspaceProviderForExplicitAgent(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/city.toml"] = []byte(`
+[workspace]
+name = "demo"
+provider = "claude"
+
+[agent_defaults]
+provider = "codex"
+
+[[agent]]
+name = "worker"
+`)
+
+	cfg, _, err := LoadWithIncludes(fs, "/city/city.toml")
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+
+	for _, a := range cfg.Agents {
+		if a.Name == "worker" {
+			if got := a.Provider; got != "codex" {
+				t.Fatalf("worker Provider = %q, want agent_defaults codex", got)
+			}
+			return
+		}
+	}
+	t.Fatal("worker agent not found")
+}
 
 func TestAgentDefaultsSlingFormula_ImplicitAgents(t *testing.T) {
 	// When agent_defaults.default_sling_formula is set, implicit agents
@@ -5716,6 +6705,32 @@ interval = "24h"
 	}
 }
 
+func TestParseOrderOverrideEnv(t *testing.T) {
+	cfg, err := Parse([]byte(`
+[workspace]
+name = "test-city"
+
+[orders]
+
+[[orders.overrides]]
+name = "digest"
+
+[orders.overrides.env]
+GC_JSONL_MIN_PREV_FOR_SPIKE = "250"
+CUSTOM_ORDER_FLAG = "enabled"
+`))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if len(cfg.Orders.Overrides) != 1 {
+		t.Fatalf("len(overrides) = %d, want 1", len(cfg.Orders.Overrides))
+	}
+	env := cfg.Orders.Overrides[0].Env
+	if env["GC_JSONL_MIN_PREV_FOR_SPIKE"] != "250" || env["CUSTOM_ORDER_FLAG"] != "enabled" {
+		t.Fatalf("Env = %+v, want parsed override env", env)
+	}
+}
+
 func TestParseOrderOverrideLegacyGateAlias(t *testing.T) {
 	cfg, err := Parse([]byte(`
 [workspace]
@@ -5940,4 +6955,121 @@ printf 'TRACE=%%s\nARGS=%%s\n' "$GC_WORKFLOW_TRACE" "$*" > %q
 		t.Fatalf("fake gc result missing args:\n%s", data)
 	}
 	return tracePath, args
+}
+
+// TestAllPackDirs covers (*City).AllPackDirs() — the union of PackDirs and
+// RigPackDirs that the prompt renderer relies on. Regression: rig-imported
+// pack template fragments were silently dropped before gascity#2676.
+func TestAllPackDirs(t *testing.T) {
+	cases := []struct {
+		name        string
+		packDirs    []string
+		rigPackDirs map[string][]string
+		want        []string
+	}{
+		{
+			name: "empty",
+		},
+		{
+			name:     "city only",
+			packDirs: []string{"/city/packs/a", "/city/packs/b"},
+			want:     []string{"/city/packs/a", "/city/packs/b"},
+		},
+		{
+			name:        "rig only",
+			rigPackDirs: map[string][]string{"alpha": {"/rig/alpha/packs/x"}},
+			want:        []string{"/rig/alpha/packs/x"},
+		},
+		{
+			name:        "both city and rig",
+			packDirs:    []string{"/city/packs/a"},
+			rigPackDirs: map[string][]string{"alpha": {"/rig/alpha/packs/x"}},
+			want:        []string{"/city/packs/a", "/rig/alpha/packs/x"},
+		},
+		{
+			name:     "multiple rigs sorted by rig name",
+			packDirs: []string{"/city/packs/a"},
+			rigPackDirs: map[string][]string{
+				"zulu":  {"/rig/zulu/packs/z"},
+				"alpha": {"/rig/alpha/packs/x"},
+				"mike":  {"/rig/mike/packs/m"},
+			},
+			want: []string{
+				"/city/packs/a",
+				"/rig/alpha/packs/x",
+				"/rig/mike/packs/m",
+				"/rig/zulu/packs/z",
+			},
+		},
+		{
+			name:     "dedup across city and rig keeps first occurrence",
+			packDirs: []string{"/shared/packs/common", "/city/packs/a"},
+			rigPackDirs: map[string][]string{
+				"alpha": {"/shared/packs/common", "/rig/alpha/packs/x"},
+			},
+			want: []string{"/shared/packs/common", "/city/packs/a", "/rig/alpha/packs/x"},
+		},
+		{
+			name: "dedup within a single rig list",
+			rigPackDirs: map[string][]string{
+				"alpha": {"/rig/alpha/packs/x", "/rig/alpha/packs/x", "/rig/alpha/packs/y"},
+			},
+			want: []string{"/rig/alpha/packs/x", "/rig/alpha/packs/y"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := &City{PackDirs: tc.packDirs, RigPackDirs: tc.rigPackDirs}
+			got := c.AllPackDirs()
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("AllPackDirs() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestAllPackDirs_DeterministicAcrossCalls guards against a Go map-iteration
+// regression: two consecutive calls must return byte-identical ordering even
+// when RigPackDirs has multiple entries.
+func TestAllPackDirs_DeterministicAcrossCalls(t *testing.T) {
+	c := &City{
+		PackDirs: []string{"/city/packs/a"},
+		RigPackDirs: map[string][]string{
+			"zulu":    {"/rig/zulu/packs/z"},
+			"alpha":   {"/rig/alpha/packs/x"},
+			"mike":    {"/rig/mike/packs/m"},
+			"bravo":   {"/rig/bravo/packs/b"},
+			"yankee":  {"/rig/yankee/packs/y"},
+			"charlie": {"/rig/charlie/packs/c"},
+		},
+	}
+	first := c.AllPackDirs()
+	for i := 0; i < 20; i++ {
+		got := c.AllPackDirs()
+		if !reflect.DeepEqual(got, first) {
+			t.Fatalf("AllPackDirs() not deterministic across calls:\n iter %d = %v\n first   = %v", i, got, first)
+		}
+	}
+}
+
+func TestPackDirsForRig(t *testing.T) {
+	c := &City{
+		PackDirs: []string{"/city/packs/a", "/shared/packs/common"},
+		RigPackDirs: map[string][]string{
+			"alpha": {"/shared/packs/common", "/rig/alpha/packs/x"},
+			"bravo": {"/rig/bravo/packs/y"},
+		},
+	}
+
+	got := c.PackDirsForRig("alpha")
+	want := []string{"/city/packs/a", "/shared/packs/common", "/rig/alpha/packs/x"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("PackDirsForRig(alpha) = %v, want %v", got, want)
+	}
+
+	got = c.PackDirsForRig("missing")
+	want = []string{"/city/packs/a", "/shared/packs/common"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("PackDirsForRig(missing) = %v, want %v", got, want)
+	}
 }

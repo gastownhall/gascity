@@ -243,11 +243,14 @@ func (s *Server) buildStatusBody() StatusBody {
 	}
 
 	uptime := int(time.Since(s.state.StartedAt()).Seconds())
+	versions := s.resolveComponentVersions()
 
 	return StatusBody{
 		Name:                cityName,
 		Path:                s.state.CityPath(),
 		Version:             s.state.Version(),
+		DoltVersion:         versions.Dolt,
+		BeadsVersion:        versions.Beads,
 		UptimeSec:           uptime,
 		Suspended:           cfg.Workspace.Suspended,
 		AgentCount:          ac.Total,
@@ -260,11 +263,24 @@ func (s *Server) buildStatusBody() StatusBody {
 		Partial:             len(partialErrors) > 0,
 		PartialErrors:       partialErrors,
 		StoreHealth:         s.cachedStoreHealth(time.Now()),
+		Beads:               s.cityBeadsDiagnostic(),
 		AgentDetails:        agentDetails,
 		RigDetails:          rigDetails,
 		NamedSessionDetails: namedSessionDetails,
 		SessionCountsDetail: sessionCounts,
 	}
+}
+
+type cityBeadsDiagnosticProvider interface {
+	CityBeadsDiagnostic() *beads.BeadsDiagnostic
+}
+
+func (s *Server) cityBeadsDiagnostic() *beads.BeadsDiagnostic {
+	provider, ok := s.state.(cityBeadsDiagnosticProvider)
+	if !ok {
+		return nil
+	}
+	return provider.CityBeadsDiagnostic()
 }
 
 // poolScaleLabel renders the "scaled (min=N, max=M)" banner the CLI emits

@@ -136,7 +136,7 @@ After Slice 4, update docs that still describe MCP as list-only:
 - `docs/reference/cli.md`
 - `engdocs/design/packv2/doc-agent-v2.md`
 - `engdocs/design/packv2/doc-pack-v2.md`
-- `docs/guides/migrating-to-pack-vnext.md`
+- `docs/guides/shareable-packs.md`
 - any conformance/skew docs that still mention deferred projection
 
 These doc updates can merge with the final slice unless the code review

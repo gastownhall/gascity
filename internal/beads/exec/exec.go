@@ -74,8 +74,9 @@ func stripExecEnvKey(key string) bool {
 // run executes the script with the given args, optionally piping stdinData
 // to its stdin. Returns the trimmed stdout on success.
 //
-// Exit code 2 is treated as success (unknown operation — forward compatible).
-// Any other non-zero exit code returns an error wrapping stderr.
+// Exit code 2 is treated as success for unknown operation names. When ready is
+// called with contract flags, exit code 2 means the invocation was rejected and
+// must surface as an error instead of silently returning empty data.
 func (s *Store) run(stdinData []byte, args ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), s.timeout)
 	defer cancel()
@@ -100,6 +101,13 @@ func (s *Store) run(stdinData []byte, args ...string) (string, error) {
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {
 			if exitErr.ExitCode() == 2 {
+				if readyExit2IsRejectedInvocation(args) {
+					errMsg := strings.TrimSpace(stderr.String())
+					if errMsg == "" {
+						errMsg = err.Error()
+					}
+					return "", fmt.Errorf("exec beads %s %s: %s", s.script, strings.Join(args, " "), errMsg)
+				}
 				return "", nil
 			}
 		}
@@ -111,6 +119,10 @@ func (s *Store) run(stdinData []byte, args ...string) (string, error) {
 	}
 
 	return strings.TrimRight(stdout.String(), "\n"), nil
+}
+
+func readyExit2IsRejectedInvocation(args []string) bool {
+	return len(args) > 1 && args[0] == "ready"
 }
 
 // isNotFoundError reports whether an error from the script indicates a
@@ -154,13 +166,18 @@ func (w *beadWire) toBead() beads.Bead {
 		cloned := *w.Priority
 		priority = &cloned
 	}
+	status := w.Status
+	if strings.TrimSpace(status) == "" {
+		status = "open"
+	}
 	return beads.Bead{
 		ID:          w.ID,
 		Title:       w.Title,
-		Status:      w.Status,
+		Status:      status,
 		Type:        w.Type,
 		Priority:    priority,
 		CreatedAt:   w.CreatedAt,
+		UpdatedAt:   w.UpdatedAt,
 		Assignee:    w.Assignee,
 		From:        w.From,
 		ParentID:    w.ParentID,
@@ -170,7 +187,16 @@ func (w *beadWire) toBead() beads.Bead {
 		Labels:      w.Labels,
 		Metadata:    coerceMetadata(w.Metadata),
 		Ephemeral:   w.Ephemeral,
+		DeferUntil:  cloneTimePtr(w.DeferUntil),
 	}
+}
+
+func cloneTimePtr(v *time.Time) *time.Time {
+	if v == nil {
+		return nil
+	}
+	cloned := *v
+	return &cloned
 }
 
 // coerceMetadata converts raw JSON metadata values to strings. Backing stores
@@ -335,9 +361,17 @@ func (s *Store) ListOpen(status ...string) ([]beads.Bead, error) {
 }
 
 // Ready returns actionable open beads (excluding infrastructure types):
-// script ready
+// script ready [--include-ephemeral]
 func (s *Store) Ready(query ...beads.ReadyQuery) ([]beads.Bead, error) {
-	out, err := s.run(nil, "ready")
+	q := beads.ReadyQuery{}
+	if len(query) > 0 {
+		q = query[0]
+	}
+	args := []string{"ready"}
+	if q.TierMode == beads.TierBoth || q.TierMode == beads.TierWisps {
+		args = append(args, "--include-ephemeral")
+	}
+	out, err := s.run(nil, args...)
 	if err != nil {
 		return nil, fmt.Errorf("exec beads ready: %w", err)
 	}
@@ -346,16 +380,13 @@ func (s *Store) Ready(query ...beads.ReadyQuery) ([]beads.Bead, error) {
 		return nil, err
 	}
 	result := all[:0]
+	now := time.Now().UTC()
 	for _, b := range all {
-		if !b.Ephemeral && !beads.IsReadyExcludedType(b.Type) {
+		if beads.IsReadyCandidateForTier(b, now, q.TierMode) {
 			result = append(result, b)
 		}
 	}
-	if len(query) == 0 {
-		return result, nil
-	}
-	q := query[0]
-	return beads.ApplyListQuery(result, beads.ListQuery{Assignee: q.Assignee, Limit: q.Limit}), nil
+	return beads.ApplyListQuery(result, beads.ListQuery{Assignee: q.Assignee, Limit: q.Limit, TierMode: q.TierMode}), nil
 }
 
 // Children returns non-closed beads whose ParentID matches by default:

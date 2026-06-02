@@ -67,27 +67,7 @@
   "redirects": [
     {
       "source": "/packv2/migration",
-      "destination": "/guides/migrating-to-pack-vnext"
-    },
-    {
-      "source": "/schema/openapi.txt",
-      "destination": "/schema/openapi.json",
-      "permanent": false
-    },
-    {
-      "source": "/schema/events.txt",
-      "destination": "/schema/events.json",
-      "permanent": false
-    },
-    {
-      "source": "/schema/city-schema.txt",
-      "destination": "/schema/city-schema.json",
-      "permanent": false
-    },
-    {
-      "source": "/schema/pack-schema.txt",
-      "destination": "/schema/pack-schema.json",
-      "permanent": false
+      "destination": "/guides/shareable-packs"
     },
     {
       "source": "/tutorials/01-cities-and-rigs.md",
@@ -148,7 +128,7 @@
         "group": "Guides",
         "pages": [
           "guides/index",
-          "guides/migrating-to-pack-vnext",
+          "guides/understanding-packs",
           "guides/shareable-packs",
           "guides/using-json-from-gc"
         ]

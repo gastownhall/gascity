@@ -245,13 +245,11 @@ multi-agent city in one shot.
 This guide is not:
 
 - the Pack/City schema reference
-- the migration guide
 - the tutorials
 
 Those documents answer different questions:
 
 - the **reference** says what the fields mean
-- the **migration guide** says how to move existing content forward
 - the **tutorials** teach the product
 
 This guide is about turning an existing multi-agent engineering style
@@ -259,5 +257,4 @@ into something more coherent and more teachable.
 
 ## See also
 
-- [Migrating to Pack/City v.next](/guides/migrating-to-pack-vnext)
 - [Shareable Packs](/guides/shareable-packs)

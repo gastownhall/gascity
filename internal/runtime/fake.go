@@ -19,6 +19,7 @@ type Fake struct {
 	meta                    map[string]map[string]string // session → key → value
 	Calls                   []Call                       // recorded calls in order
 	broken                  bool                         // when true, all ops fail
+	OrphanedRuntimes        map[string]LiveRuntime       // session ID → untracked live runtime
 	Zombies                 map[string]bool              // sessions with dead agent processes
 	Attached                map[string]bool              // sessions with attached terminals
 	AttachedSequence        map[string][]bool            // scripted IsAttached results by session
@@ -35,6 +36,7 @@ type Fake struct {
 	DialogErrors            map[string]error
 	ResetTurnErrors         map[string]error
 	InterruptBoundaryErrors map[string]error
+	RemoveMetaErrors        map[string]map[string]error // per-session/key RemoveMeta errors for testing
 	// WaitForIdleGates blocks WaitForIdle on a per-name channel until the
 	// caller closes it. A nil or absent entry returns the configured
 	// WaitForIdleErrors value immediately. The gate is read under f.mu
@@ -46,6 +48,8 @@ type Fake struct {
 	// cancellation without relying on wall-clock sleeps.
 	WaitForIdleStarted map[string]chan struct{}
 }
+
+var _ ProcessTableScanner = (*Fake)(nil)
 
 // Call records a single method invocation on [Fake].
 type Call struct {
@@ -80,6 +84,7 @@ func NewFake() *Fake {
 	return &Fake{
 		sessions:                make(map[string]Config),
 		meta:                    make(map[string]map[string]string),
+		OrphanedRuntimes:        make(map[string]LiveRuntime),
 		Zombies:                 make(map[string]bool),
 		Attached:                make(map[string]bool),
 		AttachedSequence:        make(map[string][]bool),
@@ -94,6 +99,7 @@ func NewFake() *Fake {
 		DialogErrors:            make(map[string]error),
 		ResetTurnErrors:         make(map[string]error),
 		InterruptBoundaryErrors: make(map[string]error),
+		RemoveMetaErrors:        make(map[string]map[string]error),
 		WaitForIdleGates:        make(map[string]chan struct{}),
 		WaitForIdleStarted:      make(map[string]chan struct{}),
 	}
@@ -106,6 +112,7 @@ func NewFailFake() *Fake {
 	return &Fake{
 		sessions:                make(map[string]Config),
 		meta:                    make(map[string]map[string]string),
+		OrphanedRuntimes:        make(map[string]LiveRuntime),
 		Zombies:                 make(map[string]bool),
 		Attached:                make(map[string]bool),
 		StartErrors:             make(map[string]error),
@@ -119,6 +126,7 @@ func NewFailFake() *Fake {
 		DialogErrors:            make(map[string]error),
 		ResetTurnErrors:         make(map[string]error),
 		InterruptBoundaryErrors: make(map[string]error),
+		RemoveMetaErrors:        make(map[string]map[string]error),
 		WaitForIdleGates:        make(map[string]chan struct{}),
 		WaitForIdleStarted:      make(map[string]chan struct{}),
 		broken:                  true,
@@ -442,6 +450,11 @@ func (f *Fake) RemoveMeta(name, key string) error {
 	if f.broken {
 		return fmt.Errorf("session unavailable")
 	}
+	if keyed := f.RemoveMetaErrors[name]; keyed != nil {
+		if err := keyed[key]; err != nil {
+			return err
+		}
+	}
 	delete(f.meta[name], key)
 	return nil
 }
@@ -484,6 +497,67 @@ func (f *Fake) ListRunning(prefix string) ([]string, error) {
 		}
 	}
 	return names, nil
+}
+
+// FindRuntimesBySessionID returns fake tracked and orphaned runtimes matching
+// a GC_SESSION_ID. Empty id returns all runtimes with a session ID.
+func (f *Fake) FindRuntimesBySessionID(id string) ([]LiveRuntime, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.Calls = append(f.Calls, Call{Method: "FindRuntimesBySessionID", Name: id})
+	if f.broken {
+		return nil, fmt.Errorf("finding runtimes for session %q: session unavailable", id)
+	}
+
+	var out []LiveRuntime
+	for sid, runtime := range f.OrphanedRuntimes {
+		sessionID := runtime.SessionID
+		if sessionID == "" {
+			sessionID = sid
+		}
+		if sessionID == "" {
+			continue
+		}
+		if id != "" && sessionID != id {
+			continue
+		}
+		runtime.SessionID = sessionID
+		runtime.IsTracked = false
+		out = append(out, runtime)
+	}
+	for name, cfg := range f.sessions {
+		sessionID := cfg.Env["GC_SESSION_ID"]
+		if sessionID == "" {
+			continue
+		}
+		if id != "" && sessionID != id {
+			continue
+		}
+		city := cfg.Env["GC_CITY_PATH"]
+		if city == "" {
+			city = cfg.Env["GC_CITY"]
+		}
+		out = append(out, LiveRuntime{
+			SessionID:    sessionID,
+			City:         city,
+			ProviderName: name,
+			IsTracked:    true,
+		})
+	}
+	return out, nil
+}
+
+// TerminateRuntime records a process-table termination and removes the fake
+// orphan entry for the runtime's session ID. Missing entries are already gone.
+func (f *Fake) TerminateRuntime(runtime LiveRuntime) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.Calls = append(f.Calls, Call{Method: "TerminateRuntime", Name: runtime.SessionID})
+	if f.broken {
+		return fmt.Errorf("terminating runtime %q: session unavailable", runtime.SessionID)
+	}
+	delete(f.OrphanedRuntimes, runtime.SessionID)
+	return nil
 }
 
 // SetActivity sets the canned last activity time for the named session.

@@ -43,6 +43,15 @@ func ValidateSemantics(cfg *City, source string) []string {
 		}
 	}
 
+	// Check agent default provider.
+	if p := cfg.AgentDefaults.Provider; p != "" {
+		if !knownProviders[p] {
+			warnings = append(warnings, fmt.Sprintf(
+				"%s: [agent_defaults] provider %q is not a built-in or city-defined provider",
+				source, p))
+		}
+	}
+
 	// Check agent session field.
 	for _, a := range cfg.Agents {
 		if !IsValidSessionTransport(a.Session) {

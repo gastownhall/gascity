@@ -27,6 +27,11 @@ const (
 	// Repository is the canonical clone URL for bundled pack imports.
 	Repository = "https://github.com/gastownhall/gascity.git"
 
+	// PublicRepository is the wave-one public pack repository. The gc binary
+	// can serve its bundled public-pack aliases from the embedded pack set
+	// when the network is unavailable during init or doctor repair.
+	PublicRepository = "https://github.com/gastownhall/gascity-packs.git"
+
 	// SyntheticCacheNamespace separates bundled synthetic repo caches from
 	// ordinary git checkouts that point at the same repository and commit.
 	SyntheticCacheNamespace = "bundled-synthetic-v1"
@@ -84,15 +89,47 @@ func ByName(name string) (Pack, bool) {
 // NameForSource reports the bundled pack addressed by source.
 func NameForSource(source string) (string, bool) {
 	normalizedRepo, subpath := splitSource(source)
-	if normalizedRepo != Repository {
-		return "", false
-	}
-	for _, pack := range All() {
-		if subpath == pack.Subpath {
-			return pack.Name, true
+	for _, layout := range syntheticPackLayouts() {
+		if normalizedRepo == layout.Repository && subpath == layout.Subpath {
+			return layout.Pack.Name, true
 		}
 	}
 	return "", false
+}
+
+type syntheticPackLayout struct {
+	Repository string
+	Subpath    string
+	Pack       Pack
+}
+
+func syntheticPackLayouts() []syntheticPackLayout {
+	packs := All()
+	layouts := make([]syntheticPackLayout, 0, len(packs)+2)
+	for _, pack := range packs {
+		layouts = append(layouts, syntheticPackLayout{
+			Repository: Repository,
+			Subpath:    pack.Subpath,
+			Pack:       pack,
+		})
+		if publicSubpath, ok := publicSubpathForPack(pack.Name); ok {
+			layouts = append(layouts, syntheticPackLayout{
+				Repository: PublicRepository,
+				Subpath:    publicSubpath,
+				Pack:       pack,
+			})
+		}
+	}
+	return layouts
+}
+
+func publicSubpathForPack(name string) (string, bool) {
+	switch name {
+	case "gastown", "maintenance":
+		return name, true
+	default:
+		return "", false
+	}
 }
 
 // IsSource reports whether source addresses one of gc's bundled packs.
@@ -118,10 +155,10 @@ func MaterializeSyntheticRepo(dst, commit string) error {
 	if err := os.RemoveAll(dst); err != nil {
 		return fmt.Errorf("removing stale bundled pack cache %q: %w", dst, err)
 	}
-	for _, pack := range All() {
-		target := filepath.Join(dst, filepath.FromSlash(pack.Subpath))
-		if err := materializeFS(pack.FS, target); err != nil {
-			return fmt.Errorf("materializing bundled pack %q: %w", pack.Name, err)
+	for _, layout := range syntheticPackLayouts() {
+		target := filepath.Join(dst, filepath.FromSlash(layout.Subpath))
+		if err := materializeFS(layout.Pack.FS, target); err != nil {
+			return fmt.Errorf("materializing bundled pack %q at %s: %w", layout.Pack.Name, layout.Subpath, err)
 		}
 	}
 	hash, err := SyntheticContentHash()
@@ -191,8 +228,8 @@ func ValidateSyntheticRepo(dir, commit string) error {
 	if err := validateSyntheticRepoFileSet(dir); err != nil {
 		return err
 	}
-	for _, pack := range All() {
-		if err := validatePackFiles(pack, filepath.Join(dir, filepath.FromSlash(pack.Subpath))); err != nil {
+	for _, layout := range syntheticPackLayouts() {
+		if err := validatePackFiles(layout.Pack, filepath.Join(dir, filepath.FromSlash(layout.Subpath))); err != nil {
 			return err
 		}
 	}
@@ -214,7 +251,8 @@ func MaterializedFileMode(path string) os.FileMode {
 // and modes.
 func SyntheticContentHash() (string, error) {
 	var entries []string
-	for _, pack := range All() {
+	for _, layout := range syntheticPackLayouts() {
+		pack := layout.Pack
 		manifest, err := manifestForFS(pack.FS)
 		if err != nil {
 			return "", fmt.Errorf("hashing bundled pack %q: %w", pack.Name, err)
@@ -227,7 +265,7 @@ func SyntheticContentHash() (string, error) {
 		for _, rel := range paths {
 			file := manifest[rel]
 			sum := sha256.Sum256(file.data)
-			entries = append(entries, fmt.Sprintf("%s/%s %04o %x", pack.Subpath, rel, file.perm.Perm(), sum[:]))
+			entries = append(entries, fmt.Sprintf("%s/%s %04o %x", layout.Subpath, rel, file.perm.Perm(), sum[:]))
 		}
 	}
 	sort.Strings(entries)
@@ -354,11 +392,11 @@ func validateSyntheticRepoFileSet(dir string) error {
 func syntheticRepoAllowedPaths() (map[string]struct{}, map[string]struct{}, error) {
 	files := map[string]struct{}{syntheticMarkerFile: {}}
 	dirs := make(map[string]struct{})
-	for _, pack := range All() {
-		subpath := filepath.ToSlash(pack.Subpath)
-		manifest, err := manifestForFS(pack.FS)
+	for _, layout := range syntheticPackLayouts() {
+		subpath := filepath.ToSlash(layout.Subpath)
+		manifest, err := manifestForFS(layout.Pack.FS)
 		if err != nil {
-			return nil, nil, fmt.Errorf("reading bundled pack %q manifest: %w", pack.Name, err)
+			return nil, nil, fmt.Errorf("reading bundled pack %q manifest: %w", layout.Pack.Name, err)
 		}
 		for rel := range manifest {
 			full := path.Join(subpath, rel)
@@ -413,6 +451,9 @@ func normalizeRepository(repo string) string {
 	}
 	if repo == "https://github.com/gastownhall/gascity" {
 		return Repository
+	}
+	if repo == "https://github.com/gastownhall/gascity-packs" {
+		return PublicRepository
 	}
 	return repo
 }

@@ -151,7 +151,11 @@ func (s *Server) formulaDetail(ctx context.Context, rawName, rawScopeKind, rawSc
 		return nil, huma.Error400BadRequest(msg)
 	}
 
-	detail, err := buildFormulaDetail(ctx, name, paths, target, vars, validateRuntimeVars)
+	store := s.state.CityBeadStore()
+	if scopeKind == "rig" {
+		store = s.state.BeadStore(scopeRef)
+	}
+	detail, err := buildFormulaDetail(ctx, store, name, paths, target, vars, validateRuntimeVars)
 	if err != nil {
 		if errors.Is(err, errFormulaNotWorkflow) || errors.Is(err, errFormulaNotFound) {
 			return nil, huma.Error404NotFound(err.Error())

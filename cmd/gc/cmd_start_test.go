@@ -894,6 +894,19 @@ func TestPassthroughEnvClearsClaudeNestingUnconditionally(t *testing.T) {
 	}
 }
 
+func TestPassthroughEnvStripsCodexSessionContext(t *testing.T) {
+	t.Setenv("CODEX_THREAD_ID", "thread-123")
+	t.Setenv("CODEX_CI", "1")
+
+	got := passthroughEnv()
+
+	for _, key := range []string{"CODEX_THREAD_ID", "CODEX_CI"} {
+		if v, ok := got[key]; !ok || v != "" {
+			t.Errorf("%s should be present and empty, got ok=%v v=%q", key, ok, v)
+		}
+	}
+}
+
 func TestPassthroughEnvLANGFallback(t *testing.T) {
 	// When no locale is set (e.g. launchd supervisor), fall back to
 	// en_US.UTF-8 so TUI tools render UTF-8 glyphs correctly in managed

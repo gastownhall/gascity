@@ -29,6 +29,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	helpers "github.com/gastownhall/gascity/test/acceptance/helpers"
+	"github.com/gastownhall/gascity/test/tmuxtest"
 )
 
 var testEnvC *helpers.Env
@@ -36,6 +37,13 @@ var testEnvC *helpers.Env
 const tierCAcceptanceConfig = `
 [session]
 startup_timeout = "3m"
+
+# Tier C runs Claude Code headlessly through the Ollama-compatible endpoint.
+# Keep tool approvals non-interactive even if the provider surfaces an edit
+# prompt despite the unrestricted permission-mode default.
+[providers.claude]
+base = "builtin:claude"
+args_append = ["--allowedTools", "Bash,Edit,MultiEdit,Write"]
 `
 
 func TestMain(m *testing.M) {
@@ -75,6 +83,9 @@ func TestMain(m *testing.M) {
 		if err := os.MkdirAll(d, 0o755); err != nil {
 			panic("acceptance-c: " + err.Error())
 		}
+	}
+	if err := tmuxtest.ConfigureProcessEnv(filepath.Join(runtimeDir, "tmux")); err != nil {
+		panic("acceptance-c: configuring tmux test env: " + err.Error())
 	}
 	if err := helpers.WriteSupervisorConfig(gcHome); err != nil {
 		panic("acceptance-c: " + err.Error())

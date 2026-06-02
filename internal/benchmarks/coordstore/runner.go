@@ -24,6 +24,9 @@ type Runner struct {
 	seedMu    sync.RWMutex
 	resultsMu sync.Mutex
 	results   map[string]*OperationResult // op name → result
+
+	purgeMu           sync.Mutex
+	lastTerminalPurge time.Time
 }
 
 // NewRunner creates a Runner for the given adapter and workload.
@@ -51,6 +54,9 @@ func (r *Runner) Run(ctx context.Context, w io.Writer) (Scorecard, error) {
 	if len(schedule) == 0 {
 		return Scorecard{}, fmt.Errorf("runner: workload has no operations (all rates are zero)")
 	}
+	if err := r.primeTerminalRetention(ctx); err != nil {
+		return Scorecard{}, err
+	}
 
 	var (
 		totalOps    atomic.Int64
@@ -60,6 +66,7 @@ func (r *Runner) Run(ctx context.Context, w io.Writer) (Scorecard, error) {
 	deadline := time.Now().Add(wl.Duration)
 	ctx, cancel := context.WithDeadline(ctx, deadline)
 	defer cancel()
+	r.startTerminalPurgeClock(time.Now())
 
 	// Start the memory sampler before the workload so its peak captures the
 	// full run, including the hot working set under load.
@@ -149,6 +156,39 @@ progressLoop:
 	return sc, nil
 }
 
+// HistogramSnapshot returns a deep copy of the operation histograms collected
+// so far.
+func (r *Runner) HistogramSnapshot() map[string]*OperationResult {
+	r.resultsMu.Lock()
+	defer r.resultsMu.Unlock()
+
+	out := make(map[string]*OperationResult, len(r.results))
+	for name, res := range r.results {
+		if res == nil {
+			continue
+		}
+		cp := *res
+		cp.H = res.H.clone()
+		out[name] = &cp
+	}
+	return out
+}
+
+// SeedSnapshot returns a read-only copy of the runner's live seed population.
+// Slices are cloned so callers (tests) can inspect post-run population sizes
+// without racing the workload goroutines. Exposed for steady-state population
+// assertions (design ga-sftyt NFR-3); the mutable r.seed is never exported.
+func (r *Runner) SeedSnapshot() SeedResult {
+	r.seedMu.RLock()
+	defer r.seedMu.RUnlock()
+	return SeedResult{
+		MainOpenIDs:   append([]string(nil), r.seed.MainOpenIDs...),
+		MainClosedIDs: append([]string(nil), r.seed.MainClosedIDs...),
+		WispOpenIDs:   append([]string(nil), r.seed.WispOpenIDs...),
+		DepEdges:      append([]Dep(nil), r.seed.DepEdges...),
+	}
+}
+
 // opTag identifies which operation a goroutine will execute.
 type opTag int
 
@@ -163,6 +203,10 @@ const (
 	opReady
 	opDepOp
 	opRecentScan
+	opPurgeTerminal
+	opClose
+	opDeleteWisp
+	opPurgeExpired
 )
 
 // buildSchedule creates a weighted list of operations proportional to their
@@ -186,6 +230,10 @@ func (r *Runner) buildSchedule() []opTag {
 		{opReady, wl.ReadyRate, len(r.seed.MainOpenIDs) > 0},
 		{opDepOp, wl.DepOpRate, len(r.seed.MainOpenIDs) >= 2},
 		{opRecentScan, wl.RecentScanRate, true},
+		{opPurgeTerminal, wl.PurgeTerminalRate, wl.PurgeTerminalOlderThan > 0},
+		{opClose, wl.CloseRate, wl.CloseRate > 0 && len(r.seed.MainOpenIDs) > 100},
+		{opDeleteWisp, wl.WispDeleteRate, wl.WispDeleteRate > 0 && len(r.seed.WispOpenIDs) > 100},
+		{opPurgeExpired, wl.PurgeExpiredRate, wl.PurgeExpiredRate > 0},
 	}
 
 	var schedule []opTag
@@ -365,8 +413,119 @@ func (r *Runner) execOp(ctx context.Context, op opTag, rng *rand.Rand) error {
 		// FR-18: recent records by created_at DESC.
 		_, err := a.RecentScan(ctx, 50)
 		return r.recordOpErr("RecentScan", err)
+
+	case opPurgeTerminal:
+		if !r.takeTerminalPurgeSlot(time.Now()) {
+			return nil
+		}
+		_, err := a.PurgeTerminal(ctx, r.wl.PurgeTerminalOlderThan)
+		return r.recordOpErr("PurgeTerminal", err)
+
+	case opClose:
+		// Lifecycle (design ga-sftyt): close an open main-tier task (Update ->
+		// closed) and pop it from the open pool. Closed IDs are tracked (capped at
+		// 50k so the tracker itself stays bounded) for future retention ops; the
+		// record stays resident, modeling long-lived closed tasks. A floor guard
+		// keeps the open pool from draining below 100. The ID is removed under the
+		// lock so no other goroutine closes it; the adapter is called unlocked.
+		r.seedMu.Lock()
+		if len(seed.MainOpenIDs) <= 100 {
+			r.seedMu.Unlock()
+			return nil
+		}
+		idx := rng.IntN(len(seed.MainOpenIDs))
+		id := seed.MainOpenIDs[idx]
+		last := len(seed.MainOpenIDs) - 1
+		seed.MainOpenIDs[idx] = seed.MainOpenIDs[last]
+		seed.MainOpenIDs = seed.MainOpenIDs[:last]
+		r.seedMu.Unlock()
+
+		if err := a.Update(ctx, id, Update{Status: "closed"}); err != nil {
+			if IsNotFound(err) {
+				return nil // raced with a concurrent close
+			}
+			return r.recordOpErr("Close", err)
+		}
+		r.seedMu.Lock()
+		if len(seed.MainClosedIDs) < 50000 {
+			seed.MainClosedIDs = append(seed.MainClosedIDs, id)
+		}
+		r.seedMu.Unlock()
+		return nil
+
+	case opDeleteWisp:
+		// Lifecycle (design ga-sftyt): delete an open ephemeral record (mail
+		// archival / order cancellation) and pop it from the open pool. Wisp
+		// deletes ≈ wisp creates so the ephemeral population plateaus. Floor guard
+		// keeps the pool from draining below 100.
+		r.seedMu.Lock()
+		if len(seed.WispOpenIDs) <= 100 {
+			r.seedMu.Unlock()
+			return nil
+		}
+		idx := rng.IntN(len(seed.WispOpenIDs))
+		id := seed.WispOpenIDs[idx]
+		last := len(seed.WispOpenIDs) - 1
+		seed.WispOpenIDs[idx] = seed.WispOpenIDs[last]
+		seed.WispOpenIDs = seed.WispOpenIDs[:last]
+		r.seedMu.Unlock()
+
+		if err := a.Delete(ctx, id); err != nil {
+			if IsNotFound(err) {
+				return nil // raced with PurgeExpired or another goroutine
+			}
+			return r.recordOpErr("DeleteWisp", err)
+		}
+		return nil
+
+	case opPurgeExpired:
+		// Lifecycle (design ga-sftyt): TTL sweep of expired order-tracking wisps.
+		// Removes records by their already-past ExpiresAt; it must NOT touch the
+		// seed trackers, which hold live IDs only.
+		_, err := a.PurgeExpired(ctx)
+		return r.recordOpErr("PurgeExpired", err)
 	}
 	return nil
+}
+
+func (r *Runner) takeTerminalPurgeSlot(now time.Time) bool {
+	if r.wl.PurgeTerminalRate <= 0 || r.wl.PurgeTerminalOlderThan <= 0 {
+		return false
+	}
+	interval := time.Duration(float64(time.Second) / r.wl.PurgeTerminalRate)
+	r.purgeMu.Lock()
+	defer r.purgeMu.Unlock()
+	if r.lastTerminalPurge.IsZero() || now.Sub(r.lastTerminalPurge) >= interval {
+		r.lastTerminalPurge = now
+		return true
+	}
+	return false
+}
+
+func (r *Runner) startTerminalPurgeClock(now time.Time) {
+	if r.wl.PurgeTerminalRate <= 0 || r.wl.PurgeTerminalOlderThan <= 0 {
+		return
+	}
+	r.purgeMu.Lock()
+	defer r.purgeMu.Unlock()
+	if r.lastTerminalPurge.IsZero() {
+		r.lastTerminalPurge = now
+	}
+}
+
+func (r *Runner) primeTerminalRetention(ctx context.Context) error {
+	if r.wl.PurgeTerminalRate <= 0 || r.wl.PurgeTerminalOlderThan <= 0 {
+		return nil
+	}
+	for {
+		purged, err := r.adapter.PurgeTerminal(ctx, r.wl.PurgeTerminalOlderThan)
+		if err != nil {
+			return r.recordOpErr("PurgeTerminal", err)
+		}
+		if purged < TerminalPurgeBatchSize {
+			return nil
+		}
+	}
 }
 
 // record adds a latency sample to the named operation's histogram.
@@ -416,6 +575,14 @@ func opName(op opTag) string {
 		return "DepAdd"
 	case opRecentScan:
 		return "RecentScan"
+	case opPurgeTerminal:
+		return "PurgeTerminal"
+	case opClose:
+		return "Close"
+	case opDeleteWisp:
+		return "DeleteWisp"
+	case opPurgeExpired:
+		return "PurgeExpired"
 	}
 	return "unknown"
 }
@@ -690,6 +857,34 @@ func CorrectnessChecker(ctx context.Context, a StoreAdapter) []string {
 		_, getErr := a.Get(ctx, expiring.ID)
 		if getErr == nil {
 			failures = append(failures, "FR-12/PurgeExpired: expired record still accessible after purge")
+		}
+	}
+
+	// Terminal retention: old terminal main-tier records are purged without
+	// deleting recent terminal records or old active records.
+	old := time.Now().Add(-2 * time.Hour)
+	recentRef := time.Now().Add(-30 * time.Minute)
+	oldTerminal, err := a.Create(ctx, Record{Title: "terminal-old", Type: "task", Status: "closed", CreatedAt: old, UpdatedAt: old})
+	check("TerminalRetention/CreateOldTerminal", err)
+	recentTerminal, err := a.Create(ctx, Record{Title: "terminal-recent", Type: "task", Status: "closed", CreatedAt: old, UpdatedAt: recentRef})
+	check("TerminalRetention/CreateRecentTerminal", err)
+	oldActive, err := a.Create(ctx, Record{Title: "terminal-active", Type: "task", Status: "open", CreatedAt: old, UpdatedAt: old})
+	check("TerminalRetention/CreateOldActive", err)
+	if err == nil {
+		purged, err := a.PurgeTerminal(ctx, time.Hour)
+		check("TerminalRetention/PurgeTerminal", err)
+		if err == nil && purged == 0 {
+			failures = append(failures, "TerminalRetention/PurgeTerminal: expected ≥1 purged, got 0")
+		}
+		_, getErr := a.Get(ctx, oldTerminal.ID)
+		if getErr == nil {
+			failures = append(failures, "TerminalRetention/PurgeTerminal: old terminal record still accessible after purge")
+		}
+		if _, getErr := a.Get(ctx, recentTerminal.ID); getErr != nil {
+			failures = append(failures, "TerminalRetention/PurgeTerminal: recent terminal record was purged")
+		}
+		if _, getErr := a.Get(ctx, oldActive.ID); getErr != nil {
+			failures = append(failures, "TerminalRetention/PurgeTerminal: old active record was purged")
 		}
 	}
 

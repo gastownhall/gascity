@@ -11,6 +11,14 @@
 # Runs as an exec order (no LLM, no agent, no wisp).
 set -euo pipefail
 
+# Trace bd invocations to $GC_BD_TRACE when set (no-op otherwise).
+case "${BASH_SOURCE[0]}" in
+    */*) __SCRIPT_DIR="$(cd "${BASH_SOURCE[0]%/*}" && pwd)" ;;
+    *) __SCRIPT_DIR="$(pwd)" ;;
+esac
+# shellcheck disable=SC1091
+. "$__SCRIPT_DIR/_bd_trace.sh" "orphan-sweep"
+
 CITY="${GC_CITY:-.}"
 
 # Step 1: Collect in-progress beads from HQ and every rig whose session
@@ -105,23 +113,48 @@ if [ -z "$AGENTS" ]; then
     exit 0
 fi
 
-# Step 2b: Parse identities of every live (non-closed) session so that
-# pool-spawned ephemeral assignees (e.g. gastown__polekitten-gc-q9j0om) are
-# treated as known. The Go-side releaseOrphanedPoolAssignments path validates
-# these via liveOpenSessionAssignmentExists, but this shell sweep ran without
-# that guard — an ephemeral assignee whose template-stripped form did not
-# match any agent name was incorrectly reset, racing against active polekitten
-# work and producing the false-orphan loop tracked in ga-nvx.
+# Step 2b: Parse identities of every session row that `gc session list --json`
+# reports as open so that pool-spawned ephemeral assignees (e.g.
+# gastown__polekitten-gc-q9j0om) are treated as known. The Go-side
+# releaseOrphanedPoolAssignments path validates these from session beads via
+# liveOpenSessionAssignmentExists, but this shell sweep only has the CLI JSON
+# contract available. That means it protects the exposed wire identities below;
+# it cannot see bead-only fields such as configured_named_identity or
+# alias_history unless the CLI starts exporting them.
+#
+# The default CLI path already omits closed sessions. The closed/state guards
+# below keep explicit or future session-list producers from making terminal
+# rows live while preserving any non-closed row the CLI reports.
+#
+# This shell sweep ran without a live-session guard before ga-nvx: an ephemeral
+# assignee whose template-stripped form did not match any agent name was
+# incorrectly reset, racing against active polekitten work and producing a
+# false-orphan loop.
 # Two bugs the chronic strip pattern (gastownhall/gascity#2363) revealed:
 # (1) The JSON shape is {"sessions":[...], "summary":..., "filters":..., "schema_version":...},
 #     so `.[]` iterated four top-level scalar keys instead of session objects.
-# (2) Field names are snake_case lower (.closed/.id/.session_name/.alias/.agent_name),
-#     not PascalCase. Combined, LIVE_SESSION_IDS was ALWAYS empty and every
-#     ephemeral assignee like gastown__polecat-gc-XXXXX got stripped on every tick.
+# (2) Field names vary by runtime/API path. The current CLI emits snake_case
+#     (.closed/.id/.session_name/.alias/.agent_name); PascalCase is accepted
+#     only as forward-compatible hardening so a casing change cannot make
+#     LIVE_SESSION_IDS empty and strip active pool claims.
 LIVE_SESSION_IDS=$(jq -r -s '
+    def pick($snake; $pascal; $default):
+      if has($snake) and .[$snake] != null then .[$snake]
+      elif has($pascal) and .[$pascal] != null then .[$pascal]
+      else $default end;
     .[] | .sessions[]?
-    | select(.closed == false)
-    | [.id, .session_name, .alias, .agent_name]
+    | select(
+        (pick("closed"; "Closed"; false) == false)
+        and ((pick("state"; "State"; "") | ascii_downcase) != "closed")
+      )
+    | [
+        pick("id"; "ID"; null),
+        pick("session_name"; "SessionName"; null),
+        pick("alias"; "Alias"; null),
+        pick("agent_name"; "AgentName"; null),
+        pick("template"; "Template"; null),
+        pick("name"; "Name"; null)
+      ]
     | .[]
     | select(. != null and . != "")
 ' "$SESSION_TMP" 2>/dev/null) || exit 0

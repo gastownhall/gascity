@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
 	corev1 "k8s.io/api/core/v1"
@@ -277,6 +278,94 @@ func TestStageFilesPropagatesFatalProviderOverlayError(t *testing.T) {
 	}
 }
 
+func TestWaitForExecReadySucceedsImmediately(t *testing.T) {
+	ops := &execReadyOps{}
+
+	if err := waitForExecReady(context.Background(), ops, "pod", time.Second); err != nil {
+		t.Fatalf("waitForExecReady: %v", err)
+	}
+	if got := ops.calls; got != 1 {
+		t.Fatalf("exec calls = %d, want 1", got)
+	}
+	if got := ops.commands[0]; len(got) != 1 || got[0] != "true" {
+		t.Fatalf("probe command = %v, want [true]", got)
+	}
+}
+
+func TestWaitForExecReadyRetriesTransientErrors(t *testing.T) {
+	ops := &execReadyOps{
+		errors: []error{
+			errors.New("container not found"),
+			errors.New("container not found"),
+			nil,
+		},
+	}
+
+	if err := waitForExecReady(context.Background(), ops, "pod", 2*time.Second); err != nil {
+		t.Fatalf("waitForExecReady: %v", err)
+	}
+	if got := ops.calls; got != 3 {
+		t.Fatalf("exec calls = %d, want 3", got)
+	}
+}
+
+func TestWaitForExecReadyTimeoutPreservesLastError(t *testing.T) {
+	ops := &execReadyOps{errors: []error{errors.New("spdy endpoint unavailable")}}
+
+	err := waitForExecReady(context.Background(), ops, "pod", time.Millisecond)
+	if err == nil {
+		t.Fatal("waitForExecReady succeeded, want timeout error")
+	}
+	if !strings.Contains(err.Error(), "exec not ready in pod/stage after 1ms") {
+		t.Fatalf("error = %q, want timeout context", err)
+	}
+	if !errors.Is(err, ops.errors[0]) {
+		t.Fatalf("error = %v, want wrapped last exec error %v", err, ops.errors[0])
+	}
+}
+
+func TestWaitForExecReadyReturnsContextCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	ops := &execReadyOps{errors: []error{errors.New("container not found")}}
+	cancel()
+
+	err := waitForExecReady(ctx, ops, "pod", time.Second)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("waitForExecReady error = %v, want context.Canceled", err)
+	}
+	if got := ops.calls; got != 0 {
+		t.Fatalf("exec calls after context cancellation = %d, want 0", got)
+	}
+}
+
+func TestWaitForExecReadyReturnsContextCancellationDuringDelay(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	firstProbe := make(chan struct{})
+	ops := &execReadyOps{
+		errors: []error{errors.New("container not found")},
+		afterExec: func() {
+			go func() {
+				time.Sleep(10 * time.Millisecond)
+				cancel()
+			}()
+		},
+		firstProbeCh: firstProbe,
+	}
+
+	err := waitForExecReady(ctx, ops, "pod", time.Second)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("waitForExecReady error = %v, want context.Canceled", err)
+	}
+	select {
+	case <-firstProbe:
+	default:
+		t.Fatal("exec probe was not attempted before cancellation")
+	}
+	if got := ops.calls; got != 1 {
+		t.Fatalf("exec calls = %d, want 1", got)
+	}
+}
+
 type capturingStageOps struct {
 	files map[string]string
 }
@@ -329,6 +418,45 @@ func (o *capturingStageOps) execInPod(_ context.Context, _, _ string, cmd []stri
 			}
 			o.files[path.Join(cmd[4], hdr.Name)] = string(data)
 		}
+	}
+	return "", nil
+}
+
+type execReadyOps struct {
+	errors       []error
+	calls        int
+	commands     [][]string
+	afterExec    func()
+	firstProbeCh chan<- struct{}
+}
+
+func (o *execReadyOps) createPod(context.Context, *corev1.Pod) (*corev1.Pod, error) {
+	return nil, nil
+}
+
+func (o *execReadyOps) getPod(context.Context, string) (*corev1.Pod, error) {
+	return nil, nil
+}
+
+func (o *execReadyOps) deletePod(context.Context, string, int64) error {
+	return nil
+}
+
+func (o *execReadyOps) listPods(context.Context, string, string) ([]corev1.Pod, error) {
+	return nil, nil
+}
+
+func (o *execReadyOps) execInPod(_ context.Context, _, _ string, cmd []string, _ io.Reader) (string, error) {
+	o.calls++
+	o.commands = append(o.commands, append([]string(nil), cmd...))
+	if o.firstProbeCh != nil && o.calls == 1 {
+		close(o.firstProbeCh)
+	}
+	if o.afterExec != nil {
+		o.afterExec()
+	}
+	if o.calls <= len(o.errors) {
+		return "", o.errors[o.calls-1]
 	}
 	return "", nil
 }

@@ -83,6 +83,19 @@ func resolveOrderStoreTarget(cityPath string, cfg *config.City, a orders.Order) 
 	if cfg == nil {
 		return execStoreTarget{}, fmt.Errorf("rig-scoped order %q requires city config", a.ScopedName())
 	}
+	if strings.TrimSpace(a.Pool) != "" {
+		pool, err := qualifyOrderPool(a, cfg)
+		if err != nil {
+			return execStoreTarget{}, err
+		}
+		if !strings.Contains(pool, "/") {
+			return execStoreTarget{
+				ScopeRoot: cityPath,
+				ScopeKind: "city",
+				Prefix:    config.EffectiveHQPrefix(cfg),
+			}, nil
+		}
+	}
 	resolveRigPaths(cityPath, cfg.Rigs)
 	rig, ok := rigByName(cfg, a.Rig)
 	if !ok {
@@ -108,6 +121,9 @@ func orderStoreTargetKey(target execStoreTarget) string {
 }
 
 func orderExecEnvWithError(cityPath string, cfg *config.City, target execStoreTarget, a orders.Order) ([]string, error) {
+	if err := validateOrderExecEnvOverrides(a); err != nil {
+		return nil, err
+	}
 	var env map[string]string
 	var err error
 	if target.ScopeKind == "rig" {
@@ -155,7 +171,22 @@ func orderExecEnvWithError(cityPath string, cfg *config.City, target execStoreTa
 	applyOrderExecCanonicalDoltEnv(cityPath, target.ScopeRoot, env)
 	ensureProjectedDoltEnvExplicit(env)
 	ensureProjectedPostgresEnvExplicit(env)
+	// Order-supplied [order.env] entries take effect last so they can tune
+	// non-controller thresholds (e.g. raising GC_DOCTOR_LATENCY_WARN_S for a
+	// noisy city) without editing the order's shell scripts or the parent
+	// process environment.
+	for k, v := range a.Env {
+		env[k] = v
+	}
 	return mergeRuntimeEnv(nil, env), nil
+}
+
+func validateOrderExecEnvOverrides(a orders.Order) error {
+	return orders.ValidateExecEnvOverrides(a)
+}
+
+func isReservedOrderExecEnvKey(key string) bool {
+	return orders.IsReservedExecEnvKey(key)
 }
 
 func orderTriggerOptions(cityPath string, cfg *config.City, a orders.Order) (orders.TriggerOptions, error) {

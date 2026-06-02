@@ -113,11 +113,13 @@ default_sling_formula = "mol-do-work"
 append_fragments = ["operational-awareness"]
 ```
 
-As of release v0.15.0, the actively-applied defaults are still narrow:
-`default_sling_formula` plus `[agent_defaults].append_fragments` during
-prompt rendering. Other `AgentDefaults` fields are parsed and composed,
-but are not yet auto-inherited at runtime. Per-agent fields such as
-`provider` and `scope` still live in `agents/<name>/agent.toml`.
+As of the current implementation, the actively-applied defaults are still
+narrow: `provider`, `default_sling_formula`, and
+`[agent_defaults].append_fragments` during prompt rendering. `provider`
+fills agents that do not set their own provider and also seeds implicit
+provider-agent injection. Other `AgentDefaults` fields are parsed and
+composed, but are not yet auto-inherited at runtime. Per-agent fields such as
+`scope` still live in `agents/<name>/agent.toml`.
 
 Individual agents override in their own `agent.toml`:
 

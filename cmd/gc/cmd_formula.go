@@ -1,17 +1,21 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/formula"
+	"github.com/gastownhall/gascity/internal/graphv2"
 	"github.com/gastownhall/gascity/internal/molecule"
+	"github.com/gastownhall/gascity/internal/sling"
+	"github.com/gastownhall/gascity/internal/sourceworkflow"
 	"github.com/spf13/cobra"
 )
 
@@ -23,6 +27,7 @@ func newFormulaCmd(stdout, stderr io.Writer) *cobra.Command {
 
 	cmd.AddCommand(newFormulaListCmd(stdout, stderr))
 	cmd.AddCommand(newFormulaShowCmd(stdout, stderr))
+	cmd.AddCommand(newFormulaCatalogCmd(stdout, stderr))
 	cmd.AddCommand(newFormulaCookCmd(stdout, stderr))
 	return cmd
 }
@@ -101,25 +106,25 @@ Examples:
 
 			cityPath, err := resolveCity()
 			if err != nil {
-				return err
+				return formulaCommandError(stderr, "gc formula show", jsonOutput, err)
 			}
 			cfg, err := loadCityConfig(cityPath, stderr)
 			if err != nil {
-				return err
+				return formulaCommandError(stderr, "gc formula show", jsonOutput, err)
 			}
 			scope, err := resolveFormulaScope(cfg, cityPath)
 			if err != nil {
-				return err
+				return formulaCommandError(stderr, "gc formula show", jsonOutput, err)
 			}
 			searchPaths := scope.searchPaths
 			rigVars := rigFormulaVarsForScope(cfg, cityPath)
 			recipe, err := formula.CompileWithoutRuntimeVarValidation(cmd.Context(), name, searchPaths, compileVars)
 			if err != nil {
-				return err
+				return formulaCommandError(stderr, "gc formula show", jsonOutput, err)
 			}
 			if len(vars) > 0 {
 				if err := formula.ValidateProvidedVarDefs(recipe.Vars, vars); err != nil {
-					return err
+					return formulaCommandError(stderr, "gc formula show", jsonOutput, err)
 				}
 			}
 
@@ -256,6 +261,42 @@ Examples:
 	return cmd
 }
 
+func newFormulaCatalogCmd(stdout, stderr io.Writer) *cobra.Command {
+	var jsonOutput bool
+	cmd := &cobra.Command{
+		Use:    "catalog",
+		Short:  "List formulas opted into agent workflow discovery",
+		Hidden: true,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			cityPath, err := resolveCity()
+			if err != nil {
+				return formulaCommandError(stderr, "gc formula catalog", jsonOutput, err)
+			}
+			cfg, err := loadCityConfig(cityPath, stderr)
+			if err != nil {
+				return formulaCommandError(stderr, "gc formula catalog", jsonOutput, err)
+			}
+			scope, err := resolveFormulaScope(cfg, cityPath)
+			if err != nil {
+				return formulaCommandError(stderr, "gc formula catalog", jsonOutput, err)
+			}
+			entries, warnings := formulaCatalogEntries(scope.searchPaths)
+			if jsonOutput {
+				return writeCLIJSONLine(stdout, formulaCatalogJSONFromEntries(entries, warnings))
+			}
+			for _, warning := range warnings {
+				_, _ = fmt.Fprintln(stderr, warning.Message)
+			}
+			for _, entry := range entries {
+				_, _ = fmt.Fprintf(stdout, "%s\t%s\n", entry.Name, entry.Description)
+			}
+			return nil
+		},
+	}
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "emit JSON")
+	return cmd
+}
+
 type formulaListJSON struct {
 	SchemaVersion string                 `json:"schema_version"`
 	OK            bool                   `json:"ok"`
@@ -273,6 +314,19 @@ type formulaListRowJSON struct {
 
 type formulaListSummaryJSON struct {
 	Count int `json:"count"`
+}
+
+type formulaCatalogJSON struct {
+	SchemaVersion string                    `json:"schema_version"`
+	OK            bool                      `json:"ok"`
+	Formulas      []formulaCatalogEntryJSON `json:"formulas"`
+	Summary       formulaListSummaryJSON    `json:"summary"`
+	Warnings      []jsonContractWarning     `json:"warnings,omitempty"`
+}
+
+type formulaCatalogEntryJSON struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
 }
 
 type formulaShowJSON struct {
@@ -339,26 +393,16 @@ func listFormulaRows(warningWriter ...io.Writer) (string, []string, []formulaLis
 	}
 	paths := formulaSearchPathsForList(cfg)
 
-	// Scan search paths for canonical and legacy formula TOML files,
-	// deduplicating by name (last path wins, matching formula layer
-	// resolution order).
-	winners := make(map[string]string)
-	for _, dir := range paths {
-		entries, err := os.ReadDir(dir)
-		if err != nil {
-			continue
-		}
-		for _, e := range entries {
-			if e.IsDir() {
-				continue
-			}
-			name, ok := formula.TrimTOMLFilename(e.Name())
-			if !ok {
-				continue
-			}
-			winners[name] = filepath.Join(dir, e.Name())
-		}
-	}
+	rows := formulaRowsForSearchPaths(paths)
+	return cityPath, paths, rows
+}
+
+func formulaRowsForSearchPaths(paths []string) []formulaListRowJSON {
+	return formulaRowsForSearchPathsWithSource(formula.FSSource{}, paths)
+}
+
+func formulaRowsForSearchPathsWithSource(src formula.Source, paths []string) []formulaListRowJSON {
+	winners := formula.ResolveAllWithSource(src, paths)
 
 	names := make([]string, 0, len(winners))
 	for name := range winners {
@@ -370,7 +414,66 @@ func listFormulaRows(warningWriter ...io.Writer) (string, []string, []formulaLis
 	for _, name := range names {
 		rows = append(rows, formulaListRowJSON{Name: name, Source: winners[name]})
 	}
-	return cityPath, paths, rows
+	return rows
+}
+
+func formulaCatalogEntries(searchPaths []string) ([]formulaCatalogEntryJSON, []jsonContractWarning) {
+	parser := formula.NewParser(searchPaths...).SetSource(formula.SourceFromEnv())
+	rows := formulaRowsForSearchPathsWithSource(parser.Source(), searchPaths)
+
+	entries := make([]formulaCatalogEntryJSON, 0, len(rows))
+	warnings := make([]jsonContractWarning, 0)
+	for _, row := range rows {
+		parsed, err := parser.ParseFile(row.Source)
+		if err != nil {
+			warnings = append(warnings, formulaCatalogWarning("formula_catalog_parse_failed", row.Name, err))
+			continue
+		}
+		if parsed.Catalog == nil {
+			continue
+		}
+
+		name := strings.TrimSpace(parsed.Catalog.Name)
+		if name == "" {
+			warnings = append(warnings, formulaCatalogWarning("formula_catalog_invalid_metadata", row.Name, fmt.Errorf("catalog.name is required")))
+			continue
+		}
+		if name != row.Name {
+			warnings = append(warnings, formulaCatalogWarning("formula_catalog_invalid_metadata", row.Name, fmt.Errorf("catalog.name %q must match formula name %q", name, row.Name)))
+			continue
+		}
+		description := strings.TrimSpace(parsed.Catalog.Description)
+		if description == "" {
+			warnings = append(warnings, formulaCatalogWarning("formula_catalog_invalid_metadata", row.Name, fmt.Errorf("catalog.description is required")))
+			continue
+		}
+		entries = append(entries, formulaCatalogEntryJSON{
+			Name:        name,
+			Description: description,
+		})
+	}
+
+	slices.SortFunc(entries, func(a, b formulaCatalogEntryJSON) int {
+		return strings.Compare(a.Name, b.Name)
+	})
+	return entries, warnings
+}
+
+func formulaCatalogWarning(code, name string, err error) jsonContractWarning {
+	return jsonContractWarning{
+		Code:    code,
+		Message: fmt.Sprintf("skipping formula %q: %v", name, err),
+	}
+}
+
+func formulaCatalogJSONFromEntries(entries []formulaCatalogEntryJSON, warnings []jsonContractWarning) formulaCatalogJSON {
+	return formulaCatalogJSON{
+		SchemaVersion: "1",
+		OK:            true,
+		Formulas:      entries,
+		Summary:       formulaListSummaryJSON{Count: len(entries)},
+		Warnings:      warnings,
+	}
 }
 
 func formulaSearchPathsForList(cfg *config.City) []string {
@@ -392,6 +495,14 @@ func formulaSearchPathsForList(cfg *config.City) []string {
 		add(layers)
 	}
 	return all
+}
+
+func formulaCommandError(stderr io.Writer, command string, jsonOutput bool, err error) error {
+	if err == nil || jsonOutput {
+		return err
+	}
+	fmt.Fprintf(stderr, "%s: %v\n", command, err) //nolint:errcheck // best-effort stderr
+	return errExit
 }
 
 func formulaShowJSONFromRecipe(recipe *formula.Recipe, cityPath string, scope formulaScope, rigVars, providedVars, displayVars map[string]string) formulaShowJSON {
@@ -492,35 +603,145 @@ bead into a sub-workflow at runtime.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cityPath, err := resolveCity()
 			if err != nil {
-				return err
+				return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
 			}
 			cfg, err := loadCityConfig(cityPath, stderr)
 			if err != nil {
-				return err
+				return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
 			}
 			scope, err := resolveFormulaScope(cfg, cityPath)
 			if err != nil {
-				return err
+				return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
 			}
 			store, err := openStoreAtForCity(scope.storeRoot, cityPath)
 			if err != nil {
-				return err
+				return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
 			}
 
 			cookVars := parseFormulaVars(vars)
 
 			if attach != "" {
+				isGraphFormula, _, err := graphv2.IsGraphV2Formula(args[0], scope.searchPaths)
+				if err != nil {
+					return formulaCommandError(stderr, "gc formula cook", jsonOutput, fmt.Errorf("load formula %q: %w", args[0], err))
+				}
+				if isGraphFormula {
+					storeRef := workflowStoreRefForDir(scope.storeRoot, cityPath, loadedCityName(cfg, cityPath), cfg)
+					var result *molecule.Result
+					err := sourceworkflow.WithLock(cmd.Context(), cityPath, sourceWorkflowLockScopeForStoreRef(cityPath, cfg, scope.storeRoot, storeRef), attach, func() error {
+						inv, err := graphv2.PrepareInvocation(cmd.Context(), store, args[0], scope.searchPaths, attach, cookVars)
+						if err != nil {
+							return fmt.Errorf("prepare graph.v2 invocation: %w", err)
+						}
+						cookVars = inv.Vars
+						recipe, err := formula.CompileWithoutRuntimeVarValidation(cmd.Context(), args[0], scope.searchPaths, cookVars)
+						if err != nil {
+							return fmt.Errorf("compile: %w", err)
+						}
+						if err := molecule.ValidateRecipeRuntimeVars(recipe, molecule.Options{Title: title, Vars: cookVars}); err != nil {
+							return fmt.Errorf("validate runtime vars: %w", err)
+						}
+						graphRootKey := stampFormulaCookGraphV2Root(recipe, args[0], inv.InputConvoy, cookVars)
+						if err := decorateFormulaCookGraphV2Recipe(recipe, cookVars, storeRef, store, loadedCityName(cfg, cityPath), cityPath, cfg); err != nil {
+							return fmt.Errorf("decorate graph.v2 recipe: %w", err)
+						}
+						if graphRootKey != "" {
+							unlock := graphv2.LockKey(graphRootKey)
+							defer unlock()
+						}
+						if err := closeFormulaCookFailedGraphV2Roots(store, recipe); err != nil {
+							return err
+						}
+						existing, err := existingFormulaCookGraphV2Root(store, recipe)
+						if err != nil {
+							return err
+						}
+						if existing != nil {
+							result = existing
+							return ensureFormulaCookAttachDep(store, attach, result.RootID)
+						}
+						if roots, err := formulaCookLiveInputConvoyGraphRoots(store, inv.InputConvoy, graphRootKey); err != nil {
+							return err
+						} else if len(roots) > 0 {
+							return &sourceworkflow.ConflictError{
+								SourceBeadID: attach,
+								WorkflowIDs:  sourceworkflow.BlockingWorkflowIDs(roots),
+							}
+						}
+						if roots, err := sourceworkflow.ListLiveRoots(store, attach, storeRef, storeRef); err != nil {
+							return fmt.Errorf("checking live workflows for %s: %w", attach, err)
+						} else if len(roots) > 0 {
+							return &sourceworkflow.ConflictError{
+								SourceBeadID: attach,
+								WorkflowIDs:  sourceworkflow.BlockingWorkflowIDs(roots),
+							}
+						}
+						source, err := store.Get(attach)
+						if err != nil {
+							return fmt.Errorf("attach bead %s: %w", attach, err)
+						}
+						result, err = molecule.Instantiate(cmd.Context(), store, recipe, molecule.Options{
+							Title:            title,
+							Vars:             cookVars,
+							IdempotencyKey:   graphRootKey,
+							PriorityOverride: cloneFormulaCookPriority(source.Priority),
+						})
+						if err != nil {
+							if cleanupErr := closeFormulaCookFailedGraphV2Roots(store, recipe); cleanupErr != nil {
+								return errors.Join(err, cleanupErr)
+							}
+							return err
+						}
+						return ensureFormulaCookAttachDep(store, attach, result.RootID)
+					})
+					if err != nil {
+						return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
+					}
+					if jsonOutput {
+						if err := writeCLIJSONLineOrErr(stdout, stderr, "gc formula cook", formulaCookJSONResult{
+							SchemaVersion:  "1",
+							OK:             true,
+							Formula:        args[0],
+							Mode:           "attach",
+							AttachBeadID:   attach,
+							RootID:         result.RootID,
+							WorkflowRootID: result.RootID,
+							Created:        result.Created,
+							IDMapping:      result.IDMapping,
+						}); err != nil {
+							return err
+						}
+						_ = pokeControlDispatch(cityPath)
+						return nil
+					}
+					_, _ = fmt.Fprintf(stdout, "Attached: %s -> %s (root: %s)\n", attach, result.RootID, result.RootID)
+					_, _ = fmt.Fprintf(stdout, "Root: %s\n", result.RootID)
+					_, _ = fmt.Fprintf(stdout, "Created: %d\n", result.Created)
+					_ = pokeControlDispatch(cityPath)
+					return nil
+				}
+
+				inv, err := graphv2.PrepareInvocation(cmd.Context(), store, args[0], scope.searchPaths, attach, cookVars)
+				if err != nil {
+					return formulaCommandError(stderr, "gc formula cook", jsonOutput, fmt.Errorf("prepare graph.v2 invocation: %w", err))
+				}
+				cookVars = inv.Vars
 				recipe, err := formula.CompileWithoutRuntimeVarValidation(cmd.Context(), args[0], scope.searchPaths, cookVars)
 				if err != nil {
-					return fmt.Errorf("compile: %w", err)
+					return formulaCommandError(stderr, "gc formula cook: compile", jsonOutput, err)
+				}
+				graphRootKey := ""
+				if inv.InputConvoy != "" {
+					graphRootKey = stampFormulaCookGraphV2Root(recipe, args[0], inv.InputConvoy, cookVars)
 				}
 
 				result, err := molecule.Attach(cmd.Context(), store, recipe, attach, molecule.AttachOptions{
-					Title: title,
-					Vars:  cookVars,
+					Title:          title,
+					Vars:           cookVars,
+					IdempotencyKey: graphRootKey,
 				})
 				if err != nil {
-					return err
+					return formulaCommandError(stderr, "gc formula cook: attach", jsonOutput, err)
 				}
 
 				if jsonOutput {
@@ -548,21 +769,28 @@ bead into a sub-workflow at runtime.`,
 				return nil
 			}
 
+			inv, err := graphv2.PrepareInvocation(cmd.Context(), store, args[0], scope.searchPaths, "", cookVars)
+			if err != nil {
+				return formulaCommandError(stderr, "gc formula cook", jsonOutput, fmt.Errorf("prepare graph.v2 invocation: %w", err))
+			}
+			cookVars = inv.Vars
+
 			result, err := molecule.Cook(cmd.Context(), store, args[0], scope.searchPaths, molecule.Options{
 				Title: title,
 				Vars:  cookVars,
 			})
 			if err != nil {
-				return err
+				return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
 			}
 
 			rootMeta, err := parseMetadataArgs(metadata)
 			if err != nil {
-				return err
+				return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
 			}
 			if len(rootMeta) > 0 {
 				if err := store.SetMetadataBatch(result.RootID, rootMeta); err != nil {
-					return fmt.Errorf("setting root metadata on %s: %w", result.RootID, err)
+					err := fmt.Errorf("setting root metadata on %s: %w", result.RootID, err)
+					return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
 				}
 			}
 
@@ -608,6 +836,141 @@ type formulaCookJSONResult struct {
 	WorkflowRootID string            `json:"workflow_root_id,omitempty"`
 	Created        int               `json:"created"`
 	IDMapping      map[string]string `json:"id_mapping,omitempty"`
+}
+
+func stampFormulaCookGraphV2Root(recipe *formula.Recipe, formulaName, inputConvoyID string, vars map[string]string) string {
+	if recipe == nil || len(recipe.Steps) == 0 || strings.TrimSpace(inputConvoyID) == "" {
+		return ""
+	}
+	root := &recipe.Steps[0]
+	if root.Metadata == nil {
+		root.Metadata = make(map[string]string)
+	}
+	rootKey := graphv2.RootKey(inputConvoyID, formulaName, vars, "formula-cook", "")
+	root.Metadata["gc.input_convoy_id"] = inputConvoyID
+	root.Metadata["gc.graphv2_root_key"] = rootKey
+	if metadata := graphv2.RuntimeVarsMetadata(vars); metadata != "" {
+		root.Metadata[graphv2.RuntimeVarsMetadataKey] = metadata
+	}
+	return rootKey
+}
+
+func decorateFormulaCookGraphV2Recipe(recipe *formula.Recipe, vars map[string]string, storeRef string, store beads.Store, cityName, cityPath string, cfg *config.City) error {
+	deps := sling.SlingDeps{
+		CityPath:              cityPath,
+		Resolver:              cliAgentResolver{},
+		DirectSessionResolver: cliDirectSessionResolver,
+	}
+	return sling.DecorateGraphWorkflowRecipe(recipe, sling.GraphWorkflowRouteVars(recipe, vars), "", "formula-cook", "", storeRef, "", "", store, cityName, cfg, deps)
+}
+
+func ensureFormulaCookAttachDep(store beads.Store, attachBeadID, rootID string) error {
+	if store == nil || strings.TrimSpace(attachBeadID) == "" || strings.TrimSpace(rootID) == "" {
+		return nil
+	}
+	deps, err := store.DepList(attachBeadID, "down")
+	if err != nil {
+		return fmt.Errorf("checking attach dependency %s -> %s: %w", attachBeadID, rootID, err)
+	}
+	for _, dep := range deps {
+		if dep.IssueID == attachBeadID && dep.DependsOnID == rootID && dep.Type == "blocks" {
+			return nil
+		}
+	}
+	if err := store.DepAdd(attachBeadID, rootID, "blocks"); err != nil {
+		return fmt.Errorf("wiring attach dependency %s -> %s: %w", attachBeadID, rootID, err)
+	}
+	return nil
+}
+
+func formulaCookLiveInputConvoyGraphRoots(store beads.Store, inputConvoyID, allowedRootKey string) ([]beads.Bead, error) {
+	inputConvoyID = strings.TrimSpace(inputConvoyID)
+	if store == nil || inputConvoyID == "" {
+		return nil, nil
+	}
+	matches, err := store.ListByMetadata(map[string]string{"gc.input_convoy_id": inputConvoyID}, 0)
+	if err != nil {
+		return nil, fmt.Errorf("checking live graph roots for input convoy %s: %w", inputConvoyID, err)
+	}
+	allowedRootKey = strings.TrimSpace(allowedRootKey)
+	roots := make([]beads.Bead, 0, len(matches))
+	for _, root := range matches {
+		if root.Status == "closed" || !sourceworkflow.IsWorkflowRoot(root) {
+			continue
+		}
+		if root.Metadata["gc.formula_contract"] != "graph.v2" {
+			continue
+		}
+		if allowedRootKey != "" && strings.TrimSpace(root.Metadata["gc.graphv2_root_key"]) == allowedRootKey {
+			continue
+		}
+		roots = append(roots, root)
+	}
+	slices.SortFunc(roots, func(a, b beads.Bead) int {
+		return strings.Compare(a.ID, b.ID)
+	})
+	return roots, nil
+}
+
+func closeFormulaCookFailedGraphV2Roots(store beads.Store, recipe *formula.Recipe) error {
+	if store == nil || recipe == nil || len(recipe.Steps) == 0 {
+		return nil
+	}
+	key := strings.TrimSpace(recipe.Steps[0].Metadata["gc.graphv2_root_key"])
+	if key == "" {
+		return nil
+	}
+	matches, err := store.ListByMetadata(map[string]string{"gc.graphv2_root_key": key}, 0)
+	if err != nil {
+		return fmt.Errorf("looking up failed graph.v2 roots for key %s: %w", key, err)
+	}
+	for _, root := range matches {
+		if root.Status == "closed" || root.Metadata["molecule_failed"] != "true" {
+			continue
+		}
+		if _, err := sourceworkflow.CloseWorkflowSubtree(store, root.ID); err != nil {
+			return fmt.Errorf("closing failed graph.v2 root %s: %w", root.ID, err)
+		}
+	}
+	return nil
+}
+
+func existingFormulaCookGraphV2Root(store beads.Store, recipe *formula.Recipe) (*molecule.Result, error) {
+	if store == nil || recipe == nil || len(recipe.Steps) == 0 {
+		return nil, nil
+	}
+	key := strings.TrimSpace(recipe.Steps[0].Metadata["gc.graphv2_root_key"])
+	if key == "" {
+		return nil, nil
+	}
+	matches, err := store.ListByMetadata(map[string]string{"gc.graphv2_root_key": key}, 2)
+	if err != nil {
+		return nil, fmt.Errorf("looking up graph.v2 root key %s: %w", key, err)
+	}
+	if len(matches) == 0 {
+		return nil, nil
+	}
+	if len(matches) > 1 {
+		return nil, fmt.Errorf("graph.v2 root key %s has multiple live roots: %s, %s", key, matches[0].ID, matches[1].ID)
+	}
+	rootStep := recipe.RootStep()
+	idMapping := map[string]string{}
+	if rootStep != nil {
+		idMapping[rootStep.ID] = matches[0].ID
+	}
+	return &molecule.Result{
+		RootID:        matches[0].ID,
+		GraphWorkflow: true,
+		IDMapping:     idMapping,
+	}, nil
+}
+
+func cloneFormulaCookPriority(priority *int) *int {
+	if priority == nil {
+		return nil
+	}
+	clone := *priority
+	return &clone
 }
 
 func parseFormulaVars(varFlags []string) map[string]string {

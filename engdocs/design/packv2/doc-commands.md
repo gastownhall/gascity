@@ -7,7 +7,7 @@
 > - `engdocs/design/packv2/doc-directory-conventions.md`
 > - `engdocs/design/packv2/skew-analysis.md`
 > - `engdocs/design/packv2/doc-conformance-matrix.md`
-> - `docs/guides/migrating-to-pack-vnext.md`
+> - `docs/guides/shareable-packs.md`
 
 **GitHub Issue:** TBD
 

@@ -20,7 +20,7 @@ func TestDetectLegacyWorkspaceFields(t *testing.T) {
 			name:      "provider populated",
 			workspace: Workspace{Provider: "claude"},
 			wantField: "workspace.provider",
-			wantHint:  "provider per agent in agents/<name>/agent.toml",
+			wantHint:  "[agent_defaults] provider",
 		},
 		{
 			name:      "start_command populated",

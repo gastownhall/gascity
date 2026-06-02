@@ -298,7 +298,9 @@ suspended = true
 	oldCityCheck := newDoctorDoltServerCheck
 	oldRigCheck := newDoctorRigDoltServerCheck
 	oldBackupCheck := newDoctorDoltBackupCheck
-	registered := map[string]string{}
+	oldLocalOnlyCheck := newDoctorDoltLocalOnlyCheck
+	registeredBackup := map[string]string{}
+	registeredLocalOnly := map[string]string{}
 	newDoctorDoltServerCheck = func(cityPath string, _ bool) *doctor.DoltServerCheck {
 		return doctor.NewDoltServerCheck(cityPath, true)
 	}
@@ -306,29 +308,46 @@ suspended = true
 		return doctor.NewRigDoltServerCheck(cityPath, rig, true)
 	}
 	newDoctorDoltBackupCheck = func(cityPath string, rig config.Rig, dataDir string) *doctor.DoltBackupCheck {
-		registered[rig.Name] = dataDir
+		registeredBackup[rig.Name] = dataDir
 		return doctor.NewDoltBackupCheck(cityPath, rig, dataDir)
+	}
+	newDoctorDoltLocalOnlyCheck = func(cityPath string, rig config.Rig, dataDir string) *doctor.DoltLocalOnlyRemoteCheck {
+		registeredLocalOnly[rig.Name] = dataDir
+		return doctor.NewDoltLocalOnlyRemoteCheck(cityPath, rig, dataDir)
 	}
 	t.Cleanup(func() {
 		newDoctorDoltServerCheck = oldCityCheck
 		newDoctorRigDoltServerCheck = oldRigCheck
 		newDoctorDoltBackupCheck = oldBackupCheck
+		newDoctorDoltLocalOnlyCheck = oldLocalOnlyCheck
 	})
 
 	var stdout, stderr bytes.Buffer
 	_ = doDoctor(false, false, false, false, &stdout, &stderr)
 
-	if len(registered) != 1 {
-		t.Fatalf("registered dolt-backup checks = %#v, want only active managed rig", registered)
+	if len(registeredBackup) != 1 {
+		t.Fatalf("registered dolt-backup checks = %#v, want only active managed rig", registeredBackup)
 	}
-	if got := registered["managed"]; got != doltDataDir {
+	if got := registeredBackup["managed"]; got != doltDataDir {
 		t.Fatalf("managed rig data dir = %q, want runtime layout data dir %q", got, doltDataDir)
 	}
-	if _, ok := registered["filebacked"]; ok {
-		t.Fatalf("file-backed rig should not register dolt-backup check: %#v", registered)
+	if _, ok := registeredBackup["filebacked"]; ok {
+		t.Fatalf("file-backed rig should not register dolt-backup check: %#v", registeredBackup)
 	}
-	if _, ok := registered["sleeping"]; ok {
-		t.Fatalf("suspended rig should not register dolt-backup check: %#v", registered)
+	if _, ok := registeredBackup["sleeping"]; ok {
+		t.Fatalf("suspended rig should not register dolt-backup check: %#v", registeredBackup)
+	}
+	if len(registeredLocalOnly) != 1 {
+		t.Fatalf("registered dolt-local-only checks = %#v, want only active managed rig", registeredLocalOnly)
+	}
+	if got := registeredLocalOnly["managed"]; got != doltDataDir {
+		t.Fatalf("managed rig local-only data dir = %q, want runtime layout data dir %q", got, doltDataDir)
+	}
+	if _, ok := registeredLocalOnly["filebacked"]; ok {
+		t.Fatalf("file-backed rig should not register dolt-local-only check: %#v", registeredLocalOnly)
+	}
+	if _, ok := registeredLocalOnly["sleeping"]; ok {
+		t.Fatalf("suspended rig should not register dolt-local-only check: %#v", registeredLocalOnly)
 	}
 }
 
@@ -376,7 +395,9 @@ prefix = "ma"
 	oldCityCheck := newDoctorDoltServerCheck
 	oldRigCheck := newDoctorRigDoltServerCheck
 	oldBackupCheck := newDoctorDoltBackupCheck
-	registered := 0
+	oldLocalOnlyCheck := newDoctorDoltLocalOnlyCheck
+	registeredBackup := 0
+	registeredLocalOnly := 0
 	newDoctorDoltServerCheck = func(cityPath string, _ bool) *doctor.DoltServerCheck {
 		return doctor.NewDoltServerCheck(cityPath, true)
 	}
@@ -384,20 +405,28 @@ prefix = "ma"
 		return doctor.NewRigDoltServerCheck(cityPath, rig, true)
 	}
 	newDoctorDoltBackupCheck = func(cityPath string, rig config.Rig, dataDir string) *doctor.DoltBackupCheck {
-		registered++
+		registeredBackup++
 		return doctor.NewDoltBackupCheck(cityPath, rig, dataDir)
+	}
+	newDoctorDoltLocalOnlyCheck = func(cityPath string, rig config.Rig, dataDir string) *doctor.DoltLocalOnlyRemoteCheck {
+		registeredLocalOnly++
+		return doctor.NewDoltLocalOnlyRemoteCheck(cityPath, rig, dataDir)
 	}
 	t.Cleanup(func() {
 		newDoctorDoltServerCheck = oldCityCheck
 		newDoctorRigDoltServerCheck = oldRigCheck
 		newDoctorDoltBackupCheck = oldBackupCheck
+		newDoctorDoltLocalOnlyCheck = oldLocalOnlyCheck
 	})
 
 	var stdout, stderr bytes.Buffer
 	_ = doDoctor(false, false, false, false, &stdout, &stderr)
 
-	if registered != 0 {
-		t.Fatalf("registered %d dolt-backup checks, want 0 when GC_DOLT=skip", registered)
+	if registeredBackup != 0 {
+		t.Fatalf("registered %d dolt-backup checks, want 0 when GC_DOLT=skip", registeredBackup)
+	}
+	if registeredLocalOnly != 0 {
+		t.Fatalf("registered %d dolt-local-only checks, want 0 when GC_DOLT=skip", registeredLocalOnly)
 	}
 }
 

@@ -465,6 +465,14 @@ func buildDesiredStateWithSessionBeads(
 		} else {
 			fmt.Fprintf(stderr, "assignedWorkBeads: 0 beads (rigStores=%d)\n", len(rigStores)) //nolint:errcheck
 		}
+		// Durably record which session is executing each in-progress work
+		// bead. The Assignee link is transient (cleared on close), so without
+		// this a completed run carries no session/worktree reference. See
+		// stampRunSessionIdentity. Unlike drain decisions, this is not gated on
+		// storePartial: stamping the beads that WERE collected is always
+		// correct, and any bead missed by a partial query simply gets stamped
+		// on a later tick.
+		stampRunSessionIdentity(assignedWorkBeads, assignedWorkStores, sessionBeads, stderr)
 		scaleCheckCounts, poolScaleCheckPartialTemplates = evaluatePendingPoolsMap(cfg, pendingPools, stderr, trace)
 		if len(defaultScaleTargets) > 0 {
 			defaultCounts, partialTemplates, errs := defaultScaleCheckCounts(defaultScaleTargets)
@@ -773,7 +781,7 @@ func collectAssignedWorkBeadsWithStores(
 			// unassigned pool work that needs to be reopened. This pass runs
 			// across every store before any ready handoff probes, so already
 			// active work never waits behind unrelated ready scans.
-			if inProgress, err := listForControllerDemand(source.store, beads.ListQuery{Status: "in_progress"}); err == nil {
+			if inProgress, err := listBothTiersForControllerDemand(source.store, beads.ListQuery{Status: "in_progress"}); err == nil {
 				appendInProgressWorkUnique(cfg, &result, &resultStores, &resultStoreRefs, inProgress, seen, source.store, source.ref)
 			} else {
 				errs = append(errs, fmt.Errorf("List(in_progress): %w", err))
@@ -816,13 +824,13 @@ func collectAssignedWorkBeadsWithStores(
 			var err error
 			var errs []error
 			if len(assignees) == 0 {
-				ready, err = readyForControllerDemandQuery(source.store, beads.ReadyQuery{Limit: assignedWorkReadyLimit(cfg)})
+				ready, err = liveReadyForControllerDemandQuery(source.store, beads.ReadyQuery{Limit: assignedWorkReadyLimit(cfg)})
 				if err != nil {
 					errs = append(errs, fmt.Errorf("Ready(): %w", err))
 				}
 			} else {
 				for _, assignee := range assignees {
-					part, partErr := readyForControllerDemandQuery(source.store, beads.ReadyQuery{Assignee: assignee, Limit: assignedWorkReadyLimit(cfg)})
+					part, partErr := liveReadyForControllerDemandQuery(source.store, beads.ReadyQuery{Assignee: assignee, Limit: assignedWorkReadyLimit(cfg)})
 					if partErr != nil {
 						errs = append(errs, fmt.Errorf("Ready(assignee=%q): %w", assignee, partErr))
 					}
@@ -1015,11 +1023,11 @@ func defaultScaleCheckCounts(targets []defaultScaleCheckTarget) (map[string]int,
 		// flag) is counted exactly once per template.
 		counted := make(map[string]struct{})
 
-		// Source 1: Ready()/CachedReady() iteration. Surfaces the
-		// actionable-type set (task, etc.) matched against gc.routed_to.
-		// Legacy formula step beads are NOT here because PR #1154 added
-		// "step" to readyExcludeTypes; molecule wisps are NOT here
-		// because workflow containers were already excluded.
+		// Source 1: Ready()/CachedReady() iteration. Surfaces actionable
+		// work (task, etc.) from both durable and ephemeral tiers matched
+		// against canonical routing metadata, with the temporary gc.run_target
+		// migration fallback. Legacy formula step beads and molecule wisps are
+		// not here because readyExcludeTypes filters workflow scaffolding out.
 		ready, readyErr := readyForControllerDemand(group.store)
 		if readyErr != nil {
 			errs = append(errs, fmt.Errorf("default scale_check %s templates=%s: Ready(): %w", key, strings.Join(sortedStringSet(group.templates), ","), readyErr))
@@ -1032,7 +1040,7 @@ func defaultScaleCheckCounts(targets []defaultScaleCheckTarget) (map[string]int,
 			if strings.TrimSpace(b.Assignee) != "" {
 				continue
 			}
-			template := strings.TrimSpace(b.Metadata["gc.routed_to"])
+			template := controllerDemandRouteTarget(b, group.templates)
 			if _, ok := group.templates[template]; !ok {
 				continue
 			}
@@ -1053,7 +1061,7 @@ func defaultScaleCheckCounts(targets []defaultScaleCheckTarget) (map[string]int,
 		// (per PR #1154 / issue #1039 — formula steps are not actionable
 		// work, the molecule is the container). The list filter is
 		// metadata-only (open + gc.pool_demand=<sentinel>); the
-		// unassigned + matching-routed_to checks apply below as for the
+		// unassigned + matching-route checks apply below as for the
 		// Ready source.
 		//
 		// Live: true skips the CachingStore in-memory snapshot and reads
@@ -1068,6 +1076,7 @@ func defaultScaleCheckCounts(targets []defaultScaleCheckTarget) (map[string]int,
 			Status:   "open",
 			Metadata: poolDemandMetadataPair(),
 			Live:     true,
+			TierMode: beads.TierBoth,
 		})
 		if demandErr != nil {
 			errs = append(errs, fmt.Errorf("default scale_check %s templates=%s: List(%s): %w", key, strings.Join(sortedStringSet(group.templates), ","), poolDemandMetadataKey, demandErr))
@@ -1076,11 +1085,15 @@ func defaultScaleCheckCounts(targets []defaultScaleCheckTarget) (map[string]int,
 				demand = nil
 			}
 		}
+		now := time.Now().UTC()
 		for _, b := range demand {
 			if strings.TrimSpace(b.Assignee) != "" {
 				continue
 			}
-			template := strings.TrimSpace(b.Metadata["gc.routed_to"])
+			if beads.IsDeferred(b, now) {
+				continue
+			}
+			template := controllerDemandRouteTarget(b, group.templates)
 			if _, ok := group.templates[template]; !ok {
 				continue
 			}
@@ -1152,17 +1165,14 @@ func defaultNamedSessionDemand(targets []defaultScaleCheckTarget, cfg *config.Ci
 	}
 
 	// NOTE: this loop intentionally only consults Ready(), not the
-	// gc.pool_demand list path that defaultScaleCheckCounts uses for
-	// pool agents. All current pack-shipped cron orders route to pool
-	// agents (none target named on_demand sessions), so this function
-	// is never the load-bearing demand source for cron-fired wisps in
-	// practice. If a future named on_demand cron order surfaces — i.e.
-	// a wisp lands with gc.routed_to=<named-identity> AND the molecule
-	// type filters it out of Ready() — mirror the Source-2 List path
-	// from defaultScaleCheckCounts here (query open + poolDemandMetadataPair()
-	// from the same group.store, apply the unassigned + routed-to
-	// match, dedup against the Ready source) and add a parallel test
-	// next to TestDefaultScaleCheckCountsCountsCronPoolDemandViaMetadataFlag.
+	// gc.pool_demand list path that defaultScaleCheckCounts uses for pool
+	// agents. Ready includes task-shaped wisps for on_demand named sessions;
+	// molecule/step workflow containers still stay out through readyExcludeTypes.
+	// If a future named on_demand cron order needs molecule-container demand,
+	// mirror the Source-2 List path from defaultScaleCheckCounts here (query
+	// open + poolDemandMetadataPair() from the same group.store, apply the
+	// unassigned + routed-to match, dedup against the Ready source) and add a
+	// parallel test next to TestDefaultScaleCheckCountsCountsCronPoolDemandViaMetadataFlag.
 	for key, group := range groups {
 		ready, err := readyForControllerDemand(group.store)
 		if err != nil {
@@ -1176,7 +1186,7 @@ func defaultNamedSessionDemand(targets []defaultScaleCheckTarget, cfg *config.Ci
 			if strings.TrimSpace(b.Assignee) != "" {
 				continue
 			}
-			routedTo := strings.TrimSpace(b.Metadata["gc.routed_to"])
+			routedTo := routedToOrLegacyWorkflowTarget(b)
 			if routedTo == "" {
 				continue
 			}
@@ -1197,6 +1207,23 @@ func defaultNamedSessionDemand(targets []defaultScaleCheckTarget, cfg *config.Ci
 		}
 	}
 	return demand, partialTemplates, errs
+}
+
+func controllerDemandRouteTarget(b beads.Bead, templates map[string]struct{}) string {
+	for _, candidate := range controllerDemandRouteCandidates(b) {
+		if _, ok := templates[candidate]; ok {
+			return candidate
+		}
+	}
+	return ""
+}
+
+// controllerDemandRouteCandidates keeps controller-side readers compatible
+// with pre-ga-eld2x workflow roots. It matches the shell claim/count shape:
+// canonical gc.routed_to first, then gc.run_target only for workflow roots
+// stamped before root routing switched to gc.routed_to.
+func controllerDemandRouteCandidates(b beads.Bead) []string {
+	return routedToAndLegacyWorkflowCandidates(b)
 }
 
 func markScaleCheckPartialTemplate(partials map[string]bool, template string) map[string]bool {
@@ -1293,59 +1320,33 @@ func sortedStringSet(values map[string]struct{}) []string {
 	return out
 }
 
-func listForControllerDemand(store beads.Store, query beads.ListQuery) ([]beads.Bead, error) {
-	if _, ok := store.(interface {
-		CachedList(beads.ListQuery) ([]beads.Bead, bool)
-	}); ok {
-		cacheQuery := query
-		cacheQuery.Live = false
-		return store.List(cacheQuery)
+func listBothTiersForControllerDemand(store beads.Store, query beads.ListQuery) ([]beads.Bead, error) {
+	handles := beads.HandlesFor(store)
+	rows, err := handles.Cached.List(query)
+	if errors.Is(err, beads.ErrCacheUnavailable) {
+		return handles.Live.List(query)
 	}
-	liveQuery := query
-	liveQuery.Live = true
-	return store.List(liveQuery)
+	return rows, err
 }
 
 func readyForControllerDemand(store beads.Store) ([]beads.Bead, error) {
-	// Controller demand reads are intentionally cache-tolerant, not
-	// authoritative lifecycle gates; CachedReady falls back whenever the cache
-	// has dirty or unknown dependency coverage.
-	if cached, ok := store.(interface {
-		CachedReady() ([]beads.Bead, bool)
-	}); ok {
-		if ready, ok := cached.CachedReady(); ok {
-			return ready, nil
-		}
-	}
-	return beads.ReadyLive(store)
+	return readyForControllerDemandQuery(store, beads.ReadyQuery{})
 }
 
 func readyForControllerDemandQuery(store beads.Store, query beads.ReadyQuery) ([]beads.Bead, error) {
-	if cached, ok := store.(interface {
-		CachedReady() ([]beads.Bead, bool)
-	}); ok {
-		if ready, ok := cached.CachedReady(); ok {
-			return filterReadyForControllerDemand(ready, query), nil
-		}
+	query.TierMode = beads.TierBoth
+	handles := beads.HandlesFor(store)
+	rows, err := handles.Cached.Ready(query)
+	if errors.Is(err, beads.ErrCacheUnavailable) {
+		return handles.Live.Ready(query)
 	}
-	return store.Ready(query)
+	return rows, err
 }
 
-func filterReadyForControllerDemand(ready []beads.Bead, query beads.ReadyQuery) []beads.Bead {
-	if query == (beads.ReadyQuery{}) {
-		return ready
-	}
-	result := make([]beads.Bead, 0, len(ready))
-	for _, bead := range ready {
-		if query.Assignee != "" && bead.Assignee != query.Assignee {
-			continue
-		}
-		result = append(result, bead)
-		if query.Limit > 0 && len(result) >= query.Limit {
-			break
-		}
-	}
-	return result
+func liveReadyForControllerDemandQuery(store beads.Store, query beads.ReadyQuery) ([]beads.Bead, error) {
+	query.TierMode = beads.TierBoth
+	handles := beads.HandlesFor(store)
+	return handles.Live.Ready(query)
 }
 
 // mergeNamedSessionDemand ensures that named-session assignee demand is
@@ -2856,6 +2857,160 @@ func sessionBeadHasAssignedWork(workBeads []beads.Bead, sessionBead beads.Bead) 
 		}
 	}
 	return false
+}
+
+// sessionAssigneeMatch is an entry in the assignee-identity index: the session
+// a work bead's Assignee resolves to, or ambiguous=true when more than one open
+// session claims the same identity (a transient duplicate-alias state). An
+// ambiguous identity is skipped, never guessed — the stamp is best-effort and
+// must not attach the wrong session, mirroring the canonical resolver's
+// fail-on-conflict posture (internal/session.ResolveSession) in a non-fatal
+// form.
+type sessionAssigneeMatch struct {
+	bead      beads.Bead
+	ambiguous bool
+}
+
+// buildSessionAssigneeIndex maps every assignment identity an open session can
+// be claimed under to that session, computed once per reconcile. Open() copies
+// the session slice, so resolving per work bead would otherwise cost
+// O(workBeads × openSessions). Identities come from sessionBeadAssigneeIdentities
+// — bead ID, session_name, configured named identity, current alias, AND prior
+// aliases (alias_history) — so a bead assigned under a since-rotated pool alias
+// still resolves. An identity claimed by two different sessions is marked
+// ambiguous.
+func buildSessionAssigneeIndex(sessionBeads *sessionBeadSnapshot) map[string]sessionAssigneeMatch {
+	index := make(map[string]sessionAssigneeMatch)
+	if sessionBeads == nil {
+		return index
+	}
+	for _, sb := range sessionBeads.Open() {
+		for _, identity := range sessionBeadAssigneeIdentities(sb) {
+			if existing, ok := index[identity]; ok {
+				if !existing.ambiguous && existing.bead.ID != sb.ID {
+					index[identity] = sessionAssigneeMatch{ambiguous: true}
+				}
+				continue
+			}
+			index[identity] = sessionAssigneeMatch{bead: sb}
+		}
+	}
+	return index
+}
+
+// sessionBeadIdentifier returns the most resolvable name for a session: its
+// session_name when set (pool workers), else its alias or configured named
+// identity (named sessions carry an empty session_name and identify by alias —
+// e.g. "mayor"). All three appear in the supervisor session-list index that
+// consumers match against, so this is the value to stamp as gc.session_name.
+func sessionBeadIdentifier(sb beads.Bead) string {
+	for _, key := range []string{"session_name", "alias", "configured_named_identity"} {
+		if v := strings.TrimSpace(sb.Metadata[key]); v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+// stampRunSessionIdentity durably records, on each in-progress assigned work
+// bead, the session_name and work_dir of the session executing it.
+//
+// The session↔bead link (Assignee) is transient: it is cleared when the bead
+// closes, so a consumer that reads a completed run (e.g. the dashboard's
+// session-drill-in and per-run diff panels) has no way to resolve which
+// session ran it or in which worktree. Stamping gc.session_name + gc.work_dir
+// at execution time makes that link durable — the existing dashboard resolvers
+// then attach the session and derive the worktree with no consumer changes.
+//
+// Idempotent by design: it writes only when the resolved value differs from
+// what is already on the bead, so steady-state reconciles perform no writes;
+// only a newly claimed (or reassigned) bead triggers a single write. A write
+// failure is logged and skipped — stamping is best-effort observability and
+// must never block reconciliation.
+func stampRunSessionIdentity(workBeads []beads.Bead, workStores []beads.Store, sessionBeads *sessionBeadSnapshot, stderr io.Writer) {
+	if sessionBeads == nil || len(workBeads) != len(workStores) {
+		return
+	}
+	sessionByAssignee := buildSessionAssigneeIndex(sessionBeads)
+	// Roots stamped this pass, so a multi-step run's shared root is resolved
+	// once rather than per step.
+	stampedRoots := map[string]struct{}{}
+	for i, wb := range workBeads {
+		if wb.Status != "in_progress" {
+			continue
+		}
+		store := workStores[i]
+		if store == nil {
+			continue
+		}
+		assignee := strings.TrimSpace(wb.Assignee)
+		if assignee == "" {
+			continue
+		}
+		match, ok := sessionByAssignee[assignee]
+		if !ok || match.ambiguous {
+			continue
+		}
+		sb := match.bead
+		sessionName := sessionBeadIdentifier(sb)
+		workDir := strings.TrimSpace(sb.Metadata["work_dir"])
+		if sessionName == "" && workDir == "" {
+			continue
+		}
+		patch := map[string]string{}
+		if sessionName != "" && strings.TrimSpace(wb.Metadata["gc.session_name"]) != sessionName {
+			patch["gc.session_name"] = sessionName
+		}
+		if workDir != "" && strings.TrimSpace(wb.Metadata["gc.work_dir"]) != workDir {
+			patch["gc.work_dir"] = workDir
+		}
+		if len(patch) > 0 {
+			if err := store.SetMetadataBatch(wb.ID, patch); err != nil && stderr != nil {
+				fmt.Fprintf(stderr, "stampRunSessionIdentity: %s: %v\n", wb.ID, err) //nolint:errcheck
+			}
+		}
+		// Propagate to the run root. The molecule root (gc.kind=workflow) is a
+		// control-lane bead — never in_progress+assigned — so it is not in
+		// workBeads and route-time stamping skips it for pool agents. The
+		// dashboard's root-only snapshot reads the root's own metadata, so a
+		// worked step back-fills its root via gc.root_bead_id. (#2843)
+		stampRunRootFromStep(store, wb, sessionName, workDir, stampedRoots, stderr)
+	}
+}
+
+// stampRunRootFromStep copies a step's resolved session_name/work_dir onto its
+// workflow root (gc.root_bead_id), once per root per pass. Idempotent: it reads
+// the root and writes only the keys that differ. Best-effort — a root that is
+// in another store, already gone, or already stamped is silently skipped (a
+// cross-store root gets stamped on its own store's reconcile pass).
+func stampRunRootFromStep(store beads.Store, step beads.Bead, sessionName, workDir string, stampedRoots map[string]struct{}, stderr io.Writer) {
+	rootID := strings.TrimSpace(step.Metadata["gc.root_bead_id"])
+	if rootID == "" || rootID == step.ID {
+		return
+	}
+	if _, done := stampedRoots[rootID]; done {
+		return
+	}
+	root, err := store.Get(rootID)
+	if err != nil {
+		// Cross-store / missing / transient — do NOT mark stamped, so a later
+		// step this pass (or a later reconcile) can retry resolving the root.
+		return
+	}
+	stampedRoots[rootID] = struct{}{}
+	patch := map[string]string{}
+	if sessionName != "" && strings.TrimSpace(root.Metadata["gc.session_name"]) != sessionName {
+		patch["gc.session_name"] = sessionName
+	}
+	if workDir != "" && strings.TrimSpace(root.Metadata["gc.work_dir"]) != workDir {
+		patch["gc.work_dir"] = workDir
+	}
+	if len(patch) == 0 {
+		return
+	}
+	if err := store.SetMetadataBatch(rootID, patch); err != nil && stderr != nil {
+		fmt.Fprintf(stderr, "stampRunSessionIdentity root %s: %v\n", rootID, err) //nolint:errcheck
+	}
 }
 
 func selectOrCreateDependencyPoolSessionBead(

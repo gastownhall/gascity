@@ -356,6 +356,62 @@ func TestReconcileSessionBeads_AssignedNamedSessionByBeadIDOverridesNonInteracti
 	}
 }
 
+func TestReconcilerWakeDemandOverridesSleepSuppressionForMinActive(t *testing.T) {
+	policy := resolvedSessionSleepPolicy{Class: config.SessionSleepInteractiveResume}
+	decision := AwakeDecision{ShouldWake: true, Reason: "min-active"}
+	eval := wakeEvaluation{Reasons: []WakeReason{WakeConfig}}
+
+	if !wakeDemandOverridesSleepSuppression(decision, eval, policy, nil, "worker", false) {
+		t.Fatal("min-active config wake should override stale interactive sleep suppression")
+	}
+	if wakeDemandOverridesSleepSuppression(decision, eval, policy, nil, "worker", true) {
+		t.Fatal("explicit sleep intent should still override min-active demand")
+	}
+
+	scaledDemand := AwakeDecision{ShouldWake: true, Reason: "scaled:demand"}
+	if wakeDemandOverridesSleepSuppression(scaledDemand, eval, policy, map[string]int{"worker": 1}, "worker", false) {
+		t.Fatal("ordinary interactive pool demand should still honor sleep suppression")
+	}
+}
+
+func TestReconcileSessionBeads_MinActiveCityStopWakeBypassesInteractiveSleepSuppression(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{
+		SessionSleep: config.SessionSleepConfig{
+			InteractiveResume: "60s",
+		},
+		Agents: []config.Agent{{
+			Name:              "worker",
+			StartCommand:      "true",
+			MinActiveSessions: intPtr(1),
+		}},
+	}
+	env.addDesired("worker", "worker", false)
+	session := env.createSessionBead("worker", "worker")
+	stale := env.clk.Now().Add(-2 * time.Minute).UTC().Format(time.RFC3339)
+	env.setSessionMetadata(&session, map[string]string{
+		"state":        "asleep",
+		"sleep_reason": "city-stop",
+		"detached_at":  stale,
+		"last_woke_at": stale,
+	})
+
+	woken := env.reconcileWithPoolDesired([]beads.Bead{session}, map[string]int{"worker": 1})
+	if woken != 1 {
+		t.Fatalf("woken = %d, want 1; stderr=%s", woken, env.stderr.String())
+	}
+	if !env.sp.IsRunning("worker") {
+		t.Fatal("worker should start for min-active city-stop revival")
+	}
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	if got.Metadata["config_wake_suppressed"] == "true" {
+		t.Fatal("min-active city-stop wake was suppressed by interactive sleep policy")
+	}
+}
+
 func TestReconcileSessionBeads_AssignedWorkWithReadyWaitOverridesNonInteractiveSleepPolicy(t *testing.T) {
 	env := newReconcilerTestEnv()
 	env.cfg = &config.City{

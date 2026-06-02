@@ -8,6 +8,11 @@
 # Runs as an exec order (no LLM, no agent, no wisp).
 set -euo pipefail
 
+# Trace bd invocations to $GC_BD_TRACE when set (no-op otherwise).
+__SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck disable=SC1091
+. "$__SCRIPT_DIR/_bd_trace.sh" "reaper"
+
 CITY="${GC_CITY_PATH:-${GC_CITY:-.}}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$SCRIPT_DIR/dolt-target.sh"
@@ -19,6 +24,7 @@ MAX_AGE="${GC_REAPER_MAX_AGE:-24h}"
 PURGE_AGE="${GC_REAPER_PURGE_AGE:-168h}"
 STALE_ISSUE_AGE="${GC_REAPER_STALE_ISSUE_AGE:-720h}"
 SESSION_PURGE_AGE="${GC_REAPER_SESSION_PURGE_AGE:-720h}"
+SESSION_STATE_PRUNE_AGE="${GC_REAPER_SESSION_STATE_PRUNE_AGE:-24h}"
 ALERT_THRESHOLD="${GC_REAPER_ALERT_THRESHOLD:-500}"
 MAIL_ALERT_THRESHOLD="${GC_REAPER_MAIL_ALERT_THRESHOLD:-0}"  # 0 = disabled
 DRY_RUN="${GC_REAPER_DRY_RUN:-}"
@@ -123,7 +129,7 @@ SESSION_PRUNE_ATTEMPTED=0
 ANOMALIES=""
 
 sanitize_output() {
-    printf '%s' "$1" | tr '\n' ' ' | cut -c1-500
+    printf '%s' "$1" | tr '\n' ' ' | cut -c1-4000
 }
 
 record_anomaly() {
@@ -210,7 +216,7 @@ get_sql_count() {
     if ! output=$(dolt_sql -r csv -q "$query" 2>"$stderr_file"); then
         stderr_output=$(cat "$stderr_file" 2>/dev/null || true)
         rm -f "$stderr_file"
-        record_anomaly "$db" "$label count failed for $db: $(sanitize_output "$output $stderr_output")"
+        record_anomaly "$db" "$label count failed for $db: $(sanitize_output "$stderr_output $output")"
         return 0
     fi
     rm -f "$stderr_file"
@@ -241,7 +247,7 @@ get_sql_rows() {
     if ! output=$(dolt_sql -r csv -q "$query" 2>"$stderr_file"); then
         stderr_output=$(cat "$stderr_file" 2>/dev/null || true)
         rm -f "$stderr_file"
-        record_anomaly "$db" "$label query failed for $db: $(sanitize_output "$output $stderr_output")"
+        record_anomaly "$db" "$label query failed for $db: $(sanitize_output "$stderr_output $output")"
         return 0
     fi
     rm -f "$stderr_file"
@@ -297,13 +303,19 @@ run_sql_change() {
         record_anomaly "$db" "$label failed for $db: could not create stderr capture file"
         return 1
     fi
+    # DML (DELETE/UPDATE) against a database-qualified table still needs an
+    # active database selected, or Dolt can reject it with "no database
+    # selected" (Error 1105) even though the target is fully qualified —
+    # reads (get_sql_count/get_sql_rows) do not. USE the target db first,
+    # mirroring the DOLT_COMMIT block below.
     if ! output=$(dolt_sql -r csv -q "
+USE \`$db\`;
 $query;
 SELECT ROW_COUNT();
     " 2>"$stderr_file"); then
         stderr_output=$(cat "$stderr_file" 2>/dev/null || true)
         rm -f "$stderr_file"
-        record_anomaly "$db" "$label failed for $db: $(sanitize_output "$output $stderr_output")"
+        record_anomaly "$db" "$label failed for $db: $(sanitize_output "$stderr_output $output")"
         return 1
     fi
     stderr_output=$(cat "$stderr_file" 2>/dev/null || true)
@@ -311,7 +323,7 @@ SELECT ROW_COUNT();
 
     rows=$(printf '%s\n' "$output" | tail -1 | tr -d '\r')
     if [ -z "$rows" ] || ! [[ "$rows" =~ ^[0-9]+$ ]]; then
-        record_anomaly "$db" "$label returned non-numeric row count for $db: $(sanitize_output "$output $stderr_output")"
+        record_anomaly "$db" "$label returned non-numeric row count for $db: $(sanitize_output "$stderr_output $output")"
         return 1
     fi
 
@@ -492,16 +504,19 @@ while IFS= read -r DB; do
         fi
     fi
 
-    # Step 5a: Anomaly check — reapable open wisp count.
-    get_sql_count "$DB" "reapable open wisp" "
+    # Step 5a: Anomaly check — stale open wisp count. Fresh workflow load can
+    # legitimately exceed the threshold on busy cities; only old non-message
+    # rows indicate a reaper leak.
+    get_sql_count "$DB" "stale open wisp anomaly" "
         SELECT COUNT(*) FROM \`$DB\`.wisps
         WHERE status IN ('open', 'hooked', 'in_progress')
         AND issue_type NOT IN ('message')
+        AND created_at < DATE_SUB(NOW(), INTERVAL $MAX_AGE_H HOUR)
     "
     REAPABLE_WISPS=$SQL_COUNT_RESULT
 
     if [ "$REAPABLE_WISPS" -gt "$ALERT_THRESHOLD" ]; then
-        ANOMALIES="${ANOMALIES}$DB: $REAPABLE_WISPS open wisps (threshold: $ALERT_THRESHOLD)\n"
+        ANOMALIES="${ANOMALIES}$DB: $REAPABLE_WISPS stale open wisps (threshold: $ALERT_THRESHOLD, age: ${MAX_AGE})\n"
     fi
 
     # Step 5b: Mail-wisp backlog count, observed separately from reapable wisps.
@@ -561,6 +576,24 @@ if [ -d "$CITY_BEADS_DIR" ] && command -v bd >/dev/null 2>&1; then
     TOTAL_SESSIONS_PRUNED=$PRUNE_COUNT
     if [ "$PRUNE_COUNT" -gt 1000 ]; then
         record_anomaly "gm" "$PRUNE_COUNT closed session beads pruned in one run (threshold: 1000)"
+    fi
+fi
+
+if [ -d "$CITY_BEADS_DIR" ] && [ -z "$DRY_RUN" ] && command -v gc >/dev/null 2>&1; then
+    SESSION_PRUNE_ATTEMPTED=1
+    if SESSION_STATE_PRUNE_JSON=$((
+        cd "$CITY_ABS" && BEADS_DIR="$CITY_BEADS_DIR" gc session prune --state drained --before "$SESSION_STATE_PRUNE_AGE" --json
+    ) 2>&1); then
+        :
+    else
+        record_anomaly "gm" "terminal session-state prune failed: $(sanitize_output "$SESSION_STATE_PRUNE_JSON")"
+        SESSION_STATE_PRUNE_JSON='{"count":0}'
+    fi
+    SESSION_STATE_PRUNE_COUNT=$(printf '%s' "$SESSION_STATE_PRUNE_JSON" | sed -n 's/.*"count"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' | head -1)
+    [ -z "$SESSION_STATE_PRUNE_COUNT" ] && SESSION_STATE_PRUNE_COUNT=0
+    TOTAL_SESSIONS_PRUNED=$((TOTAL_SESSIONS_PRUNED + SESSION_STATE_PRUNE_COUNT))
+    if [ "$SESSION_STATE_PRUNE_COUNT" -gt 1000 ]; then
+        record_anomaly "gm" "$SESSION_STATE_PRUNE_COUNT terminal session-state beads pruned in one run (threshold: 1000)"
     fi
 fi
 

@@ -224,7 +224,7 @@ func TestValidateNamedSessions_RejectsAlwaysWithSleepAfterIdle(t *testing.T) {
 		}},
 	}
 
-	if err := ValidateNamedSessions(cfg); err == nil {
+	if _, err := ValidateNamedSessions(cfg); err == nil {
 		t.Fatal("ValidateNamedSessions() = nil, want error")
 	} else if !strings.Contains(err.Error(), "sleep_after_idle") {
 		t.Fatalf("ValidateNamedSessions() error = %v, want mention of sleep_after_idle", err)
@@ -247,7 +247,7 @@ func TestValidateNamedSessions_RejectsAliasSessionNameCollision(t *testing.T) {
 		},
 	}
 
-	if err := ValidateNamedSessions(cfg); err == nil {
+	if _, err := ValidateNamedSessions(cfg); err == nil {
 		t.Fatal("ValidateNamedSessions() = nil, want collision error")
 	} else if !strings.Contains(err.Error(), "collides with deterministic session_name") {
 		t.Fatalf("ValidateNamedSessions() error = %v, want session_name collision", err)
@@ -266,10 +266,58 @@ func TestValidateNamedSessions_RejectsQualifiedAliasName(t *testing.T) {
 		}},
 	}
 
-	if err := ValidateNamedSessions(cfg); err == nil {
+	if _, err := ValidateNamedSessions(cfg); err == nil {
 		t.Fatal("ValidateNamedSessions() = nil, want error")
 	} else if !strings.Contains(err.Error(), `name "gs.witness"`) {
 		t.Fatalf("ValidateNamedSessions() error = %v, want qualified alias rejection", err)
+	}
+}
+
+func TestValidateNamedSessions_MissingTemplateIsWarningNotFatal(t *testing.T) {
+	// One named session backs a real template; the other references a
+	// template that does not resolve. Validation must succeed (so unrelated
+	// sessions and every other command keep working) and surface the broken
+	// one as a non-fatal warning rather than failing the whole config.
+	cfg := &City{
+		Workspace: Workspace{Name: "test-city"},
+		Agents:    []Agent{{Name: "mayor"}},
+		NamedSessions: []NamedSession{
+			{Template: "mayor"},
+			{Name: "rizato", Template: "ghost"},
+		},
+	}
+
+	warnings, err := ValidateNamedSessions(cfg)
+	if err != nil {
+		t.Fatalf("ValidateNamedSessions() error = %v, want nil (missing template should be non-fatal)", err)
+	}
+	if len(warnings) != 1 {
+		t.Fatalf("ValidateNamedSessions() warnings = %v, want exactly one", warnings)
+	}
+	if !strings.Contains(warnings[0], `"rizato"`) || !strings.Contains(warnings[0], "ghost") {
+		t.Fatalf("warning = %q, want it to name the broken session and its template", warnings[0])
+	}
+	if !IsDisabledNamedSessionWarning(warnings[0]) {
+		t.Fatalf("IsDisabledNamedSessionWarning(%q) = false, want true", warnings[0])
+	}
+}
+
+func TestValidateNamedSessions_StructuralErrorsStayFatal(t *testing.T) {
+	// A duplicate identity is a genuine config error and must remain fatal
+	// even though a missing backing template is now demoted to a warning.
+	cfg := &City{
+		Workspace: Workspace{Name: "test-city"},
+		Agents:    []Agent{{Name: "mayor"}},
+		NamedSessions: []NamedSession{
+			{Template: "mayor"},
+			{Template: "mayor"},
+		},
+	}
+
+	if _, err := ValidateNamedSessions(cfg); err == nil {
+		t.Fatal("ValidateNamedSessions() = nil, want duplicate-identity error")
+	} else if !strings.Contains(err.Error(), "duplicate identity") {
+		t.Fatalf("ValidateNamedSessions() error = %v, want duplicate identity", err)
 	}
 }
 
@@ -289,7 +337,7 @@ func TestValidateNamedSessions_UsesResolvedWorkspaceName(t *testing.T) {
 		},
 	}
 
-	if err := ValidateNamedSessions(cfg); err == nil {
+	if _, err := ValidateNamedSessions(cfg); err == nil {
 		t.Fatal("ValidateNamedSessions() = nil, want collision error")
 	} else if !strings.Contains(err.Error(), "collides with deterministic session_name") {
 		t.Fatalf("ValidateNamedSessions() error = %v, want session_name collision", err)

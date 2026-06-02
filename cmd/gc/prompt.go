@@ -47,7 +47,14 @@ type PromptContext struct {
 	// builtins, then the builtin family of a custom provider; falls back to
 	// ProviderKey when nothing else matches.
 	ProviderDisplayName string
-	Env                 map[string]string // from Agent.Env — custom vars
+	// InstructionsFile is the filename the resolved provider reads for project
+	// instructions (e.g. "CLAUDE.md" for claude, "AGENTS.md" for codex/kiro).
+	// Resolved from city providers, then builtins, then the builtin family of a
+	// custom provider; defaults to "AGENTS.md" when no provider is configured.
+	// Templates use {{ .InstructionsFile }} as a provider-aware fallback when
+	// pack-specific guidance (e.g. quality-gate commands) is missing or empty.
+	InstructionsFile string
+	Env              map[string]string // from Agent.Env — custom vars
 }
 
 // PromptRenderResult holds the rendered text plus the version and rendered
@@ -117,12 +124,21 @@ func renderPromptWithMeta(fs fsys.FS, cityPath, cityName, templatePath string, c
 	// Load shared templates from pack dirs (lower priority).
 	// Each pack directory may contain prompts/shared/ and/or
 	// template-fragments/ subdirectories.
+	loadedPackFragmentRoots := make(map[string]struct{}, len(packDirs)+1)
 	for _, dir := range packDirs {
+		cleanDir := filepath.Clean(dir)
+		loadedPackFragmentRoots[cleanDir] = struct{}{}
 		sharedDir := filepath.Join(dir, "prompts", "shared")
 		loadSharedTemplates(fs, tmpl, sharedDir, stderr)
 		// V2: template-fragments/ at pack level.
 		fragDir := filepath.Join(dir, "template-fragments")
 		loadSharedTemplates(fs, tmpl, fragDir, stderr)
+	}
+	if sourcePackRoot := promptSourcePackRoot(cityPath, sourcePath); sourcePackRoot != "" {
+		if _, ok := loadedPackFragmentRoots[sourcePackRoot]; !ok {
+			loadSharedTemplates(fs, tmpl, filepath.Join(sourcePackRoot, "prompts", "shared"), stderr)
+			loadSharedTemplates(fs, tmpl, filepath.Join(sourcePackRoot, "template-fragments"), stderr)
+		}
 	}
 
 	// Load shared templates from the city root itself. cfg.PackDirs is
@@ -199,6 +215,21 @@ func promptTemplateSourcePath(cityPath, templatePath string) string {
 		return templatePath
 	}
 	return filepath.Join(cityPath, templatePath)
+}
+
+func promptSourcePackRoot(cityPath, sourcePath string) string {
+	cleanCityPath := filepath.Clean(cityPath)
+	cleanSourcePath := filepath.Clean(sourcePath)
+	agentDir := filepath.Dir(cleanSourcePath)
+	agentsDir := filepath.Dir(agentDir)
+	if filepath.Base(agentsDir) != "agents" {
+		return ""
+	}
+	packRoot := filepath.Clean(filepath.Dir(agentsDir))
+	if packRoot == cleanCityPath {
+		return ""
+	}
+	return packRoot
 }
 
 func isCanonicalPromptTemplatePath(path string) bool {
@@ -301,6 +332,7 @@ func buildTemplateData(ctx PromptContext) map[string]string {
 	m["SlingQuery"] = ctx.SlingQuery
 	m["ProviderKey"] = ctx.ProviderKey
 	m["ProviderDisplayName"] = ctx.ProviderDisplayName
+	m["InstructionsFile"] = ctx.InstructionsFile
 	return m
 }
 
@@ -412,6 +444,39 @@ func providerInfoForAgent(a *config.Agent, ws *config.Workspace, cityProviders m
 		return "", ""
 	}
 	return name, providerDisplayNameFor(name, cityProviders)
+}
+
+// instructionsFileForAgent returns the project-instructions filename the
+// resolved provider expects (e.g. "CLAUDE.md", "AGENTS.md"). It mirrors the
+// resolution chain used by providerInfoForAgent (agent.Provider >
+// workspace.Provider) and looks the filename up via the same precedence as
+// config.ResolveProvider (city providers > builtin spec > builtin family).
+// Returns "AGENTS.md" — the same default config.resolveProvider uses — when no
+// provider is configured or the resolved spec leaves InstructionsFile empty.
+func instructionsFileForAgent(a *config.Agent, ws *config.Workspace, cityProviders map[string]config.ProviderSpec) string {
+	const defaultInstructionsFile = "AGENTS.md"
+	if a == nil {
+		return defaultInstructionsFile
+	}
+	name := a.Provider
+	if name == "" && ws != nil {
+		name = ws.Provider
+	}
+	if name == "" {
+		return defaultInstructionsFile
+	}
+	if spec, ok := cityProviders[name]; ok && spec.InstructionsFile != "" {
+		return spec.InstructionsFile
+	}
+	if spec, ok := config.BuiltinProviders()[name]; ok && spec.InstructionsFile != "" {
+		return spec.InstructionsFile
+	}
+	if family := config.BuiltinFamily(name, cityProviders); family != "" && family != name {
+		if spec, ok := config.BuiltinProviders()[family]; ok && spec.InstructionsFile != "" {
+			return spec.InstructionsFile
+		}
+	}
+	return defaultInstructionsFile
 }
 
 // providerDisplayNameFor returns the human-readable name for a provider.

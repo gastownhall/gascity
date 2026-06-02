@@ -589,14 +589,8 @@ func TestAdoptionBarrier_UsesResolvedProviderProcessNames(t *testing.T) {
 		t.Fatalf("barrier should pass, stderr: %s", stderr.String())
 	}
 	got := sp.processNameCalls["test-city-worker"]
-	want := []string{"custom-agent", "node"}
-	if len(got) != len(want) {
-		t.Fatalf("process names = %v, want %v", got, want)
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Fatalf("process names = %v, want %v", got, want)
-		}
+	if strings.Join(got, ",") != "custom-agent,node" {
+		t.Fatalf("process names = %v, want [custom-agent node]", got)
 	}
 }
 
@@ -622,14 +616,8 @@ func TestAdoptionBarrier_UsesProviderlessDetectedProcessNames(t *testing.T) {
 		t.Fatalf("barrier should pass, stderr: %s", stderr.String())
 	}
 	got := sp.processNameCalls["test-city-worker"]
-	want := []string{"codex"}
-	if len(got) != len(want) {
-		t.Fatalf("process names = %v, want %v", got, want)
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Fatalf("process names = %v, want %v", got, want)
-		}
+	if strings.Join(got, ",") != "codex" {
+		t.Fatalf("process names = %v, want [codex]", got)
 	}
 }
 
@@ -829,5 +817,29 @@ func TestAdoptionBarrier_UnknownSession(t *testing.T) {
 	}
 	if result.Adopted != 1 {
 		t.Errorf("Adopted = %d, want 1", result.Adopted)
+	}
+}
+
+func TestProcessHintsUsesResolvedProviderProcessNames(t *testing.T) {
+	putExecutableOnPath(t, "codex")
+
+	cfg := &config.City{Workspace: config.Workspace{Provider: "codex"}}
+
+	if got := processHints(cfg, &config.Agent{Name: "worker"}); strings.Join(got, ",") != "codex" {
+		t.Fatalf("processHints() = %v, want [codex]", got)
+	}
+}
+
+func TestProcessHintsUsesExplicitAgentProcessNames(t *testing.T) {
+	cfg := &config.City{Workspace: config.Workspace{Provider: "codex"}}
+	agent := &config.Agent{Name: "worker", ProcessNames: []string{"worker-cli"}}
+
+	got := processHints(cfg, agent)
+	if len(got) != 1 || got[0] != "worker-cli" {
+		t.Fatalf("processHints() = %v, want [worker-cli]", got)
+	}
+	got[0] = "mutated"
+	if agent.ProcessNames[0] != "worker-cli" {
+		t.Fatalf("processHints() returned agent slice without cloning")
 	}
 }

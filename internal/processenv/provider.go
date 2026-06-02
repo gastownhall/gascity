@@ -157,5 +157,7 @@ func ProviderProcessPassthroughEnv() map[string]string {
 	}
 	m["CLAUDECODE"] = ""
 	m["CLAUDE_CODE_ENTRYPOINT"] = ""
+	m["CODEX_THREAD_ID"] = ""
+	m["CODEX_CI"] = ""
 	return m
 }

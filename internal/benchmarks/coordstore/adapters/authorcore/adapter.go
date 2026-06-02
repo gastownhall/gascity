@@ -1,6 +1,6 @@
 // Package authorcore provides the round-2 author-store-core proof-of-concept
 // adapter. It is intentionally small: a zero-fork, in-process hot store with
-// the same two-tier semantics as the proposed HQStore design.
+// two-tier coordination-store semantics.
 package authorcore
 
 import (

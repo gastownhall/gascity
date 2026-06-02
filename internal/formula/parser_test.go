@@ -45,9 +45,6 @@ func TestParse_BasicFormula(t *testing.T) {
 	if formula.Description != "Test workflow" {
 		t.Errorf("Description = %q, want 'Test workflow'", formula.Description)
 	}
-	if formula.Version != 1 {
-		t.Errorf("Version = %d, want 1", formula.Version)
-	}
 	if formula.Type != TypeWorkflow {
 		t.Errorf("Type = %q, want workflow", formula.Type)
 	}
@@ -78,10 +75,296 @@ func TestParse_BasicFormula(t *testing.T) {
 	}
 }
 
+func TestLoadByNameDescriptionFileUsesHighestPriorityAssetLayer(t *testing.T) {
+	tmp := t.TempDir()
+	coreFormulas := filepath.Join(tmp, "core", "formulas")
+	coreAssets := filepath.Join(tmp, "core", "assets", "workflows", "review")
+	cityFormulas := filepath.Join(tmp, "city", "formulas")
+	cityAssets := filepath.Join(tmp, "city", "assets", "workflows", "review")
+	for _, dir := range []string{coreFormulas, coreAssets, cityFormulas, cityAssets} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+
+	formulaText := `
+formula = "review"
+
+[[steps]]
+id = "local-review"
+title = "Review locally"
+description_file = "../assets/workflows/review/local-review.md"
+`
+	if err := os.WriteFile(filepath.Join(coreFormulas, "review.toml"), []byte(formulaText), 0o644); err != nil {
+		t.Fatalf("write formula: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(coreAssets, "local-review.md"), []byte("core review instructions"), 0o644); err != nil {
+		t.Fatalf("write core asset: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cityAssets, "local-review.md"), []byte("city review instructions"), 0o644); err != nil {
+		t.Fatalf("write city asset: %v", err)
+	}
+
+	p := NewParser(coreFormulas, cityFormulas)
+	formula, err := p.LoadByName("review")
+	if err != nil {
+		t.Fatalf("LoadByName(review): %v", err)
+	}
+	if got := formula.Steps[0].Description; got != "city review instructions" {
+		t.Fatalf("description = %q, want city asset shadow", got)
+	}
+}
+
+func TestLoadByNameDescriptionFileFallsBackToFormulaPackAsset(t *testing.T) {
+	tmp := t.TempDir()
+	coreFormulas := filepath.Join(tmp, "core", "formulas")
+	coreAssets := filepath.Join(tmp, "core", "assets", "workflows", "triage")
+	cityFormulas := filepath.Join(tmp, "city", "formulas")
+	for _, dir := range []string{coreFormulas, coreAssets, cityFormulas} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+
+	formulaText := `
+formula = "triage"
+
+[[steps]]
+id = "classify"
+title = "Classify work"
+description_file = "../assets/workflows/triage/classify.md"
+`
+	if err := os.WriteFile(filepath.Join(coreFormulas, "triage.toml"), []byte(formulaText), 0o644); err != nil {
+		t.Fatalf("write formula: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(coreAssets, "classify.md"), []byte("core triage instructions"), 0o644); err != nil {
+		t.Fatalf("write core asset: %v", err)
+	}
+
+	p := NewParser(coreFormulas, cityFormulas)
+	formula, err := p.LoadByName("triage")
+	if err != nil {
+		t.Fatalf("LoadByName(triage): %v", err)
+	}
+	if got := formula.Steps[0].Description; got != "core triage instructions" {
+		t.Fatalf("description = %q, want core asset fallback", got)
+	}
+}
+
+func TestLoadByNameDescriptionFileKeepsRelativeNonAssetBehavior(t *testing.T) {
+	tmp := t.TempDir()
+	formulas := filepath.Join(tmp, "pack", "formulas")
+	if err := os.MkdirAll(filepath.Join(formulas, "descriptions"), 0o755); err != nil {
+		t.Fatalf("mkdir descriptions: %v", err)
+	}
+
+	formulaText := `
+formula = "relative"
+
+[[steps]]
+id = "work"
+title = "Do work"
+description_file = "descriptions/work.md"
+`
+	if err := os.WriteFile(filepath.Join(formulas, "relative.toml"), []byte(formulaText), 0o644); err != nil {
+		t.Fatalf("write formula: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(formulas, "descriptions", "work.md"), []byte("relative instructions"), 0o644); err != nil {
+		t.Fatalf("write relative description: %v", err)
+	}
+
+	p := NewParser(formulas)
+	formula, err := p.LoadByName("relative")
+	if err != nil {
+		t.Fatalf("LoadByName(relative): %v", err)
+	}
+	if got := formula.Steps[0].Description; got != "relative instructions" {
+		t.Fatalf("description = %q, want relative description file", got)
+	}
+}
+
+func TestLoadByNameDescriptionFileKeepsFormulaLocalAssetsPath(t *testing.T) {
+	tmp := t.TempDir()
+	coreFormulas := filepath.Join(tmp, "core", "formulas")
+	coreAssets := filepath.Join(tmp, "core", "assets")
+	cityFormulas := filepath.Join(tmp, "city", "formulas")
+	cityAssets := filepath.Join(tmp, "city", "assets")
+	formulaLocalAssets := filepath.Join(coreFormulas, "assets")
+	for _, dir := range []string{coreFormulas, coreAssets, cityFormulas, cityAssets, formulaLocalAssets} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+
+	formulaText := `
+formula = "local-assets"
+
+[[steps]]
+id = "work"
+title = "Do work"
+description_file = "assets/work.md"
+`
+	if err := os.WriteFile(filepath.Join(coreFormulas, "local-assets.toml"), []byte(formulaText), 0o644); err != nil {
+		t.Fatalf("write formula: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(formulaLocalAssets, "work.md"), []byte("formula-local assets instructions"), 0o644); err != nil {
+		t.Fatalf("write formula-local asset: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(coreAssets, "work.md"), []byte("core pack asset instructions"), 0o644); err != nil {
+		t.Fatalf("write core asset: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cityAssets, "work.md"), []byte("city pack asset instructions"), 0o644); err != nil {
+		t.Fatalf("write city asset: %v", err)
+	}
+
+	p := NewParser(coreFormulas, cityFormulas)
+	formula, err := p.LoadByName("local-assets")
+	if err != nil {
+		t.Fatalf("LoadByName(local-assets): %v", err)
+	}
+	if got := formula.Steps[0].Description; got != "formula-local assets instructions" {
+		t.Fatalf("description = %q, want formula-local assets path", got)
+	}
+}
+
+func TestLoadByNameDescriptionFileKeepsAbsoluteAssetsPath(t *testing.T) {
+	tmp := t.TempDir()
+	formulas := filepath.Join(tmp, "pack", "formulas")
+	packAssets := filepath.Join(tmp, "pack", "assets")
+	explicitAssets := filepath.Join(tmp, "explicit", "assets")
+	for _, dir := range []string{formulas, packAssets, explicitAssets} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+
+	absoluteDescription := filepath.Join(explicitAssets, "work.md")
+	formulaText := fmt.Sprintf(`
+formula = "absolute-assets"
+
+[[steps]]
+id = "work"
+title = "Do work"
+description_file = %q
+`, absoluteDescription)
+	if err := os.WriteFile(filepath.Join(formulas, "absolute-assets.toml"), []byte(formulaText), 0o644); err != nil {
+		t.Fatalf("write formula: %v", err)
+	}
+	if err := os.WriteFile(absoluteDescription, []byte("explicit absolute instructions"), 0o644); err != nil {
+		t.Fatalf("write absolute description: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(packAssets, "work.md"), []byte("pack asset instructions"), 0o644); err != nil {
+		t.Fatalf("write pack asset: %v", err)
+	}
+
+	p := NewParser(formulas)
+	formula, err := p.LoadByName("absolute-assets")
+	if err != nil {
+		t.Fatalf("LoadByName(absolute-assets): %v", err)
+	}
+	if got := formula.Steps[0].Description; got != "explicit absolute instructions" {
+		t.Fatalf("description = %q, want explicit absolute path", got)
+	}
+}
+
+func TestLoadByNameDescriptionFileResolvesLoopBody(t *testing.T) {
+	tmp := t.TempDir()
+	formulas := filepath.Join(tmp, "pack", "formulas")
+	descriptions := filepath.Join(formulas, "descriptions")
+	if err := os.MkdirAll(descriptions, 0o755); err != nil {
+		t.Fatalf("mkdir descriptions: %v", err)
+	}
+
+	formulaText := `
+formula = "loop-description"
+
+[[steps]]
+id = "loop"
+title = "Loop"
+
+[steps.loop]
+count = 1
+
+[[steps.loop.body]]
+id = "work"
+title = "Do work"
+description_file = "descriptions/work.md"
+`
+	if err := os.WriteFile(filepath.Join(formulas, "loop-description.toml"), []byte(formulaText), 0o644); err != nil {
+		t.Fatalf("write formula: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(descriptions, "work.md"), []byte("loop body instructions"), 0o644); err != nil {
+		t.Fatalf("write loop description: %v", err)
+	}
+
+	p := NewParser(formulas)
+	formula, err := p.LoadByName("loop-description")
+	if err != nil {
+		t.Fatalf("LoadByName(loop-description): %v", err)
+	}
+	if got := formula.Steps[0].Loop.Body[0].Description; got != "loop body instructions" {
+		t.Fatalf("loop body description = %q, want resolved description file", got)
+	}
+}
+
+func TestDescriptionAssetRelPath(t *testing.T) {
+	tests := []struct {
+		name   string
+		raw    string
+		want   string
+		wantOK bool
+	}{
+		{
+			name:   "documented pack asset",
+			raw:    "../assets/workflows/review/local-review.md",
+			want:   "workflows/review/local-review.md",
+			wantOK: true,
+		},
+		{
+			name:   "cleans path inside asset tree",
+			raw:    "../assets/workflows/../review/local-review.md",
+			want:   "review/local-review.md",
+			wantOK: true,
+		},
+		{
+			name: "formula local assets directory",
+			raw:  "assets/work.md",
+		},
+		{
+			name: "nested relative assets directory",
+			raw:  "nested/assets/work.md",
+		},
+		{
+			name: "absolute assets directory",
+			raw:  filepath.Join(string(os.PathSeparator), "tmp", "assets", "work.md"),
+		},
+		{
+			name: "asset root only",
+			raw:  "../assets",
+		},
+		{
+			name: "traversal escapes asset tree",
+			raw:  "../assets/../work.md",
+		},
+		{
+			name: "empty path",
+			raw:  "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := descriptionAssetRelPath(tt.raw)
+			if ok != tt.wantOK || got != tt.want {
+				t.Fatalf("descriptionAssetRelPath(%q) = %q, %v; want %q, %v", tt.raw, got, ok, tt.want, tt.wantOK)
+			}
+		})
+	}
+}
+
 func TestValidate_ValidFormula(t *testing.T) {
 	formula := &Formula{
 		Formula: "mol-valid",
-		Version: 1,
 		Type:    TypeWorkflow,
 		Steps: []*Step{
 			{ID: "step1", Title: "Step 1"},
@@ -96,9 +379,8 @@ func TestValidate_ValidFormula(t *testing.T) {
 
 func TestValidate_MissingName(t *testing.T) {
 	formula := &Formula{
-		Version: 1,
-		Type:    TypeWorkflow,
-		Steps:   []*Step{{ID: "step1", Title: "Step 1"}},
+		Type:  TypeWorkflow,
+		Steps: []*Step{{ID: "step1", Title: "Step 1"}},
 	}
 
 	err := formula.Validate()
@@ -110,7 +392,6 @@ func TestValidate_MissingName(t *testing.T) {
 func TestValidate_DuplicateStepID(t *testing.T) {
 	formula := &Formula{
 		Formula: "mol-dup",
-		Version: 1,
 		Type:    TypeWorkflow,
 		Steps: []*Step{
 			{ID: "step1", Title: "Step 1"},
@@ -127,7 +408,6 @@ func TestValidate_DuplicateStepID(t *testing.T) {
 func TestValidate_InvalidDependency(t *testing.T) {
 	formula := &Formula{
 		Formula: "mol-bad-dep",
-		Version: 1,
 		Type:    TypeWorkflow,
 		Steps: []*Step{
 			{ID: "step1", Title: "Step 1", DependsOn: []string{"nonexistent"}},
@@ -143,7 +423,6 @@ func TestValidate_InvalidDependency(t *testing.T) {
 func TestValidate_RequiredWithDefault(t *testing.T) {
 	formula := &Formula{
 		Formula: "mol-bad-var",
-		Version: 1,
 		Type:    TypeWorkflow,
 		Vars: map[string]*VarDef{
 			"bad": {Required: true, Default: StringPtr("value")}, // can't have both
@@ -161,7 +440,6 @@ func TestValidate_InvalidPriority(t *testing.T) {
 	p := 10 // invalid: must be 0-4
 	formula := &Formula{
 		Formula: "mol-bad-priority",
-		Version: 1,
 		Type:    TypeWorkflow,
 		Steps: []*Step{
 			{ID: "step1", Title: "Step 1", Priority: &p},
@@ -174,10 +452,9 @@ func TestValidate_InvalidPriority(t *testing.T) {
 	}
 }
 
-func TestValidate_GraphRetryWorkflowRequiresContract(t *testing.T) {
+func TestValidateRetryWorkflowWithoutRequirementUsesLegacySyntax(t *testing.T) {
 	formula := &Formula{
-		Formula: "mol-implicit-v2",
-		Version: 2,
+		Formula: "mol-legacy-retry",
 		Type:    TypeWorkflow,
 		Steps: []*Step{
 			{
@@ -188,19 +465,14 @@ func TestValidate_GraphRetryWorkflowRequiresContract(t *testing.T) {
 		},
 	}
 
-	err := formula.Validate()
-	if err == nil {
-		t.Fatal("Validate should reject graph-only v2 workflow without contract")
-	}
-	if !strings.Contains(err.Error(), `contract = "graph.v2"`) {
-		t.Fatalf("Validate error = %v, want explicit graph.v2 contract guidance", err)
+	if err := formula.Validate(); err != nil {
+		t.Fatalf("Validate failed for legacy retry syntax without compiler requirement: %v", err)
 	}
 }
 
-func TestValidate_GraphOnCompleteWorkflowRequiresContract(t *testing.T) {
+func TestValidateOnCompleteWithoutRequirementUsesLegacySyntax(t *testing.T) {
 	formula := &Formula{
-		Formula: "mol-implicit-fanout",
-		Version: 2,
+		Formula: "mol-legacy-fanout",
 		Type:    TypeWorkflow,
 		Steps: []*Step{
 			{
@@ -214,19 +486,14 @@ func TestValidate_GraphOnCompleteWorkflowRequiresContract(t *testing.T) {
 		},
 	}
 
-	err := formula.Validate()
-	if err == nil {
-		t.Fatal("Validate should reject graph-only on_complete workflow without contract")
-	}
-	if !strings.Contains(err.Error(), `contract = "graph.v2"`) {
-		t.Fatalf("Validate error = %v, want explicit graph.v2 contract guidance", err)
+	if err := formula.Validate(); err != nil {
+		t.Fatalf("Validate failed for legacy on_complete syntax without compiler requirement: %v", err)
 	}
 }
 
-func TestValidate_Version1DetachedGraphMetadataRequiresContract(t *testing.T) {
+func TestValidate_DetachedGraphMetadataRequiresContract(t *testing.T) {
 	formula := &Formula{
 		Formula: "mol-detached-v1",
-		Version: 1,
 		Type:    TypeWorkflow,
 		Steps: []*Step{
 			{
@@ -249,7 +516,6 @@ func TestValidate_Version1DetachedGraphMetadataRequiresContract(t *testing.T) {
 func TestValidate_ValidTimeout(t *testing.T) {
 	formula := &Formula{
 		Formula: "mol-timeout",
-		Version: 1,
 		Type:    TypeWorkflow,
 		Steps: []*Step{
 			{ID: "build", Title: "Build", Timeout: "5m", Ralph: validTestRalphSpec()},
@@ -268,7 +534,6 @@ func TestValidate_AllowsUnresolvedTimeoutPlaceholders(t *testing.T) {
 	check.Check.Timeout = "{{check_timeout}}"
 	formula := &Formula{
 		Formula: "mol-placeholder-timeout",
-		Version: 1,
 		Type:    TypeWorkflow,
 		Steps: []*Step{
 			{ID: "step1", Title: "Step 1", Timeout: "{step_timeout}", Ralph: check},
@@ -293,7 +558,6 @@ func validTestRalphSpec() *RalphSpec {
 func TestValidate_TimeoutRequiresRalph(t *testing.T) {
 	formula := &Formula{
 		Formula: "mol-timeout-without-ralph",
-		Version: 1,
 		Type:    TypeWorkflow,
 		Steps: []*Step{
 			{ID: "step1", Title: "Step 1", Timeout: "5m"},
@@ -323,7 +587,6 @@ func TestValidate_InvalidTimeout(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			formula := &Formula{
 				Formula: "mol-bad-timeout",
-				Version: 1,
 				Type:    TypeWorkflow,
 				Steps: []*Step{
 					{ID: "step1", Title: "Step 1", Timeout: tt.timeout, Ralph: validTestRalphSpec()},
@@ -354,7 +617,6 @@ func TestValidate_InvalidRalphCheckTimeout(t *testing.T) {
 			check.Check.Timeout = tt.timeout
 			formula := &Formula{
 				Formula: "mol-bad-check-timeout",
-				Version: 1,
 				Type:    TypeWorkflow,
 				Steps: []*Step{
 					{ID: "step1", Title: "Step 1", Ralph: check},
@@ -386,7 +648,6 @@ func TestValidate_InvalidTimeoutInChild(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			formula := &Formula{
 				Formula: "mol-bad-child-timeout",
-				Version: 1,
 				Type:    TypeWorkflow,
 				Steps: []*Step{
 					{
@@ -410,7 +671,6 @@ func TestValidate_InvalidTimeoutInChild(t *testing.T) {
 func TestValidate_InvalidTimeoutInLoopBody(t *testing.T) {
 	formula := &Formula{
 		Formula: "mol-bad-loop-timeout",
-		Version: 1,
 		Type:    TypeWorkflow,
 		Steps: []*Step{
 			{
@@ -443,7 +703,6 @@ func TestValidate_InvalidTimeoutInLoopBody(t *testing.T) {
 func TestValidate_LoopBodyTimeoutAllowsLoopVariable(t *testing.T) {
 	formula := &Formula{
 		Formula: "mol-loop-timeout-var",
-		Version: 1,
 		Type:    TypeWorkflow,
 		Steps: []*Step{
 			{
@@ -473,7 +732,6 @@ func TestValidate_LoopBodyTimeoutAllowsLoopVariable(t *testing.T) {
 func TestValidate_ChildSteps(t *testing.T) {
 	formula := &Formula{
 		Formula: "mol-children",
-		Version: 1,
 		Type:    TypeWorkflow,
 		Steps: []*Step{
 			{
@@ -495,7 +753,6 @@ func TestValidate_ChildSteps(t *testing.T) {
 func TestValidate_ChildStepsInvalidDependsOn(t *testing.T) {
 	formula := &Formula{
 		Formula: "mol-bad-child-dep",
-		Version: 1,
 		Type:    TypeWorkflow,
 		Steps: []*Step{
 			{
@@ -519,7 +776,6 @@ func TestValidate_ChildStepsInvalidPriority(t *testing.T) {
 	p := 10 // invalid
 	formula := &Formula{
 		Formula: "mol-bad-child-priority",
-		Version: 1,
 		Type:    TypeWorkflow,
 		Steps: []*Step{
 			{
@@ -541,7 +797,6 @@ func TestValidate_ChildStepsInvalidPriority(t *testing.T) {
 func TestValidate_BondPoints(t *testing.T) {
 	formula := &Formula{
 		Formula: "mol-compose",
-		Version: 1,
 		Type:    TypeWorkflow,
 		Steps: []*Step{
 			{ID: "step1", Title: "Step 1"},
@@ -563,7 +818,6 @@ func TestValidate_BondPoints(t *testing.T) {
 func TestValidate_BondPointBothAnchors(t *testing.T) {
 	formula := &Formula{
 		Formula: "mol-bad-bond",
-		Version: 1,
 		Type:    TypeWorkflow,
 		Steps:   []*Step{{ID: "step1", Title: "Step 1"}},
 		Compose: &ComposeRules{
@@ -904,6 +1158,93 @@ func TestResolve_InheritsGraphContractFromParent(t *testing.T) {
 	}
 }
 
+func TestResolve_PreservesChildCatalogWithoutInheritingParentCatalog(t *testing.T) {
+	dir := t.TempDir()
+	formulaDir := filepath.Join(dir, ".beads", "formulas")
+	if err := os.MkdirAll(formulaDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	parent := `{
+  "formula": "catalog-parent",
+  "version": 1,
+  "type": "workflow",
+  "catalog": {
+    "name": "catalog-parent",
+    "description": "Parent workflow"
+  },
+  "steps": [
+    {"id": "parent", "title": "Parent"}
+  ]
+}`
+	if err := os.WriteFile(filepath.Join(formulaDir, "catalog-parent.formula.json"), []byte(parent), 0o644); err != nil {
+		t.Fatalf("write parent: %v", err)
+	}
+
+	childWithCatalog := `{
+  "formula": "catalog-child",
+  "version": 1,
+  "type": "workflow",
+  "extends": ["catalog-parent"],
+  "catalog": {
+    "name": "catalog-child",
+    "description": "Child workflow"
+  },
+  "steps": [
+    {"id": "child", "title": "Child"}
+  ]
+}`
+	childWithCatalogPath := filepath.Join(formulaDir, "catalog-child.formula.json")
+	if err := os.WriteFile(childWithCatalogPath, []byte(childWithCatalog), 0o644); err != nil {
+		t.Fatalf("write child with catalog: %v", err)
+	}
+
+	childWithoutCatalog := `{
+  "formula": "internal-child",
+  "version": 1,
+  "type": "workflow",
+  "extends": ["catalog-parent"],
+  "steps": [
+    {"id": "child", "title": "Child"}
+  ]
+}`
+	childWithoutCatalogPath := filepath.Join(formulaDir, "internal-child.formula.json")
+	if err := os.WriteFile(childWithoutCatalogPath, []byte(childWithoutCatalog), 0o644); err != nil {
+		t.Fatalf("write child without catalog: %v", err)
+	}
+
+	p := NewParser(formulaDir)
+	parsedWithCatalog, err := p.ParseFile(childWithCatalogPath)
+	if err != nil {
+		t.Fatalf("ParseFile child with catalog: %v", err)
+	}
+	resolvedWithCatalog, err := p.Resolve(parsedWithCatalog)
+	if err != nil {
+		t.Fatalf("Resolve child with catalog: %v", err)
+	}
+	if resolvedWithCatalog.Catalog == nil {
+		t.Fatalf("resolved child catalog is nil")
+	}
+	if got := resolvedWithCatalog.Catalog.Name; got != "catalog-child" {
+		t.Fatalf("resolved child catalog name = %q, want catalog-child", got)
+	}
+	if got := resolvedWithCatalog.Catalog.Description; got != "Child workflow" {
+		t.Fatalf("resolved child catalog description = %q, want Child workflow", got)
+	}
+
+	parsedWithoutCatalog, err := p.ParseFile(childWithoutCatalogPath)
+	if err != nil {
+		t.Fatalf("ParseFile child without catalog: %v", err)
+	}
+	resolvedWithoutCatalog, err := p.Resolve(parsedWithoutCatalog)
+	if err != nil {
+		t.Fatalf("Resolve child without catalog: %v", err)
+	}
+	if resolvedWithoutCatalog.Catalog != nil {
+		t.Fatalf("resolved child without catalog inherited %+v, want nil", resolvedWithoutCatalog.Catalog)
+	}
+}
+
 func TestResolve_ExpansionExtendsPreservesTemplateAndInheritedContract(t *testing.T) {
 	dir := t.TempDir()
 	formulaDir := filepath.Join(dir, ".beads", "formulas")
@@ -1143,7 +1484,6 @@ func TestValidate_NeedsField(t *testing.T) {
 	// Valid needs reference
 	formula := &Formula{
 		Formula: "mol-needs",
-		Version: 1,
 		Type:    TypeWorkflow,
 		Steps: []*Step{
 			{ID: "step1", Title: "Step 1"},
@@ -1158,7 +1498,6 @@ func TestValidate_NeedsField(t *testing.T) {
 	// Invalid needs reference
 	formulaBad := &Formula{
 		Formula: "mol-bad-needs",
-		Version: 1,
 		Type:    TypeWorkflow,
 		Steps: []*Step{
 			{ID: "step1", Title: "Step 1"},
@@ -1177,7 +1516,6 @@ func TestValidate_WaitsForField(t *testing.T) {
 	// Valid waits_for value
 	formula := &Formula{
 		Formula: "mol-waits-for",
-		Version: 1,
 		Type:    TypeWorkflow,
 		Steps: []*Step{
 			{ID: "fanout", Title: "Fanout"},
@@ -1192,7 +1530,6 @@ func TestValidate_WaitsForField(t *testing.T) {
 	// Invalid waits_for value
 	formulaBad := &Formula{
 		Formula: "mol-bad-waits-for",
-		Version: 1,
 		Type:    TypeWorkflow,
 		Steps: []*Step{
 			{ID: "step1", Title: "Step 1", WaitsFor: "invalid-gate"},
@@ -1210,7 +1547,6 @@ func TestValidate_WaitsForChildrenOf(t *testing.T) {
 	// Valid children-of() syntax
 	formula := &Formula{
 		Formula: "mol-children-of",
-		Version: 1,
 		Type:    TypeWorkflow,
 		Steps: []*Step{
 			{ID: "survey-workers", Title: "Survey Workers"},
@@ -1225,7 +1561,6 @@ func TestValidate_WaitsForChildrenOf(t *testing.T) {
 	// Invalid: reference to unknown step
 	formulaBad := &Formula{
 		Formula: "mol-bad-children-of",
-		Version: 1,
 		Type:    TypeWorkflow,
 		Steps: []*Step{
 			{ID: "step1", Title: "Step 1", WaitsFor: "children-of(unknown-step)"},
@@ -1239,7 +1574,6 @@ func TestValidate_WaitsForChildrenOf(t *testing.T) {
 	// Invalid: empty step ID
 	formulaEmpty := &Formula{
 		Formula: "mol-empty-children-of",
-		Version: 1,
 		Type:    TypeWorkflow,
 		Steps: []*Step{
 			{ID: "step1", Title: "Step 1", WaitsFor: "children-of()"},
@@ -1293,7 +1627,6 @@ func TestParseWaitsFor(t *testing.T) {
 func TestValidate_ChildNeedsAndWaitsFor(t *testing.T) {
 	formula := &Formula{
 		Formula: "mol-child-fields",
-		Version: 1,
 		Type:    TypeWorkflow,
 		Steps: []*Step{
 			{
@@ -1314,7 +1647,6 @@ func TestValidate_ChildNeedsAndWaitsFor(t *testing.T) {
 	// Invalid child needs
 	formulaBadNeeds := &Formula{
 		Formula: "mol-bad-child-needs",
-		Version: 1,
 		Type:    TypeWorkflow,
 		Steps: []*Step{
 			{
@@ -1334,7 +1666,6 @@ func TestValidate_ChildNeedsAndWaitsFor(t *testing.T) {
 	// Invalid child waits_for
 	formulaBadWaitsFor := &Formula{
 		Formula: "mol-bad-child-waits-for",
-		Version: 1,
 		Type:    TypeWorkflow,
 		Steps: []*Step{
 			{
@@ -1451,7 +1782,6 @@ func TestParse_OnComplete(t *testing.T) {
 func TestValidate_OnComplete_Valid(t *testing.T) {
 	formula := &Formula{
 		Formula: "mol-valid",
-		Version: 1,
 		Type:    TypeWorkflow,
 		Steps: []*Step{
 			{
@@ -1473,7 +1803,6 @@ func TestValidate_OnComplete_Valid(t *testing.T) {
 func TestValidate_OnComplete_MissingBond(t *testing.T) {
 	formula := &Formula{
 		Formula: "mol-invalid",
-		Version: 1,
 		Type:    TypeWorkflow,
 		Steps: []*Step{
 			{
@@ -1499,7 +1828,6 @@ func TestValidate_OnComplete_MissingBond(t *testing.T) {
 func TestValidate_OnComplete_MissingForEach(t *testing.T) {
 	formula := &Formula{
 		Formula: "mol-invalid",
-		Version: 1,
 		Type:    TypeWorkflow,
 		Steps: []*Step{
 			{
@@ -1525,7 +1853,6 @@ func TestValidate_OnComplete_MissingForEach(t *testing.T) {
 func TestValidate_OnComplete_InvalidForEachPath(t *testing.T) {
 	formula := &Formula{
 		Formula: "mol-invalid",
-		Version: 1,
 		Type:    TypeWorkflow,
 		Steps: []*Step{
 			{
@@ -1551,7 +1878,6 @@ func TestValidate_OnComplete_InvalidForEachPath(t *testing.T) {
 func TestValidate_OnComplete_ParallelAndSequential(t *testing.T) {
 	formula := &Formula{
 		Formula: "mol-invalid",
-		Version: 1,
 		Type:    TypeWorkflow,
 		Steps: []*Step{
 			{
@@ -1579,7 +1905,6 @@ func TestValidate_OnComplete_ParallelAndSequential(t *testing.T) {
 func TestValidate_OnComplete_Sequential(t *testing.T) {
 	formula := &Formula{
 		Formula: "mol-valid",
-		Version: 1,
 		Type:    TypeWorkflow,
 		Steps: []*Step{
 			{
@@ -1602,7 +1927,6 @@ func TestValidate_OnComplete_Sequential(t *testing.T) {
 func TestValidate_OnComplete_InChildren(t *testing.T) {
 	formula := &Formula{
 		Formula: "mol-valid",
-		Version: 1,
 		Type:    TypeWorkflow,
 		Steps: []*Step{
 			{
@@ -2270,7 +2594,6 @@ path = "scripts/verify.sh"
 func TestValidateRalphUsesCheckTerminology(t *testing.T) {
 	formula := &Formula{
 		Formula: "mol-bad-check",
-		Version: 1,
 		Type:    TypeWorkflow,
 		Steps: []*Step{
 			{

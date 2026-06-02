@@ -1,6 +1,9 @@
 package api
 
-import "github.com/gastownhall/gascity/internal/api/genclient"
+import (
+	"github.com/gastownhall/gascity/internal/api/genclient"
+	"github.com/gastownhall/gascity/internal/beads"
+)
 
 // statusViewFromGen translates the generated StatusBody (served by GET
 // /v0/city/{cityName}/status) into the stable CLI-facing StatusView.
@@ -78,6 +81,26 @@ func statusViewFromGen(body *genclient.StatusBody) StatusView {
 			view.LastGCStatus = *sh.LastGcStatus
 		}
 		out.StoreHealth = &view
+	}
+	if body.Beads != nil {
+		out.Beads = statusBeadsDiagnosticFromGen(body.Beads)
+	}
+	return out
+}
+
+func statusBeadsDiagnosticFromGen(g *genclient.BeadsDiagnostic) *beads.BeadsDiagnostic {
+	if g == nil {
+		return nil
+	}
+	out := &beads.BeadsDiagnostic{
+		Store:               g.BeadsStore,
+		NativeStoreEligible: g.NativeStoreEligible,
+	}
+	if g.PreflightGate != nil {
+		out.PreflightGate = *g.PreflightGate
+	}
+	if g.PreflightReason != nil {
+		out.PreflightReason = *g.PreflightReason
 	}
 	return out
 }

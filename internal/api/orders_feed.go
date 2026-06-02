@@ -422,7 +422,7 @@ func workflowProjectionTitle(root beads.Bead) string {
 }
 
 func workflowProjectionTarget(root beads.Bead) string {
-	for _, key := range []string{"gc.run_target", "gc.execution_routed_to", "gc.routed_to"} {
+	for _, key := range []string{"gc.execution_routed_to", "gc.routed_to", "gc.run_target"} {
 		if value := strings.TrimSpace(root.Metadata[key]); value != "" {
 			return value
 		}

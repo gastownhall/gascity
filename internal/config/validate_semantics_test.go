@@ -65,6 +65,35 @@ func TestValidateSemanticsUnknownWorkspaceProvider(t *testing.T) {
 	}
 }
 
+func TestValidateSemanticsUnknownAgentDefaultsProvider(t *testing.T) {
+	cfg := &City{
+		AgentDefaults: AgentDefaults{Provider: "cdoex"},
+	}
+	warnings := ValidateSemantics(cfg, "city.toml")
+	if len(warnings) != 1 {
+		t.Fatalf("expected 1 warning, got %d: %v", len(warnings), warnings)
+	}
+	if !strings.Contains(warnings[0], "[agent_defaults]") {
+		t.Errorf("warning should mention agent_defaults: %s", warnings[0])
+	}
+	if !strings.Contains(warnings[0], "cdoex") {
+		t.Errorf("warning should mention bad provider: %s", warnings[0])
+	}
+}
+
+func TestValidateSemanticsAgentDefaultsCustomProviderOK(t *testing.T) {
+	cfg := &City{
+		AgentDefaults: AgentDefaults{Provider: "local-llm"},
+		Providers: map[string]ProviderSpec{
+			"local-llm": {Command: "local-llm"},
+		},
+	}
+	warnings := ValidateSemantics(cfg, "city.toml")
+	if len(warnings) != 0 {
+		t.Errorf("expected no warnings for custom agent default provider, got: %v", warnings)
+	}
+}
+
 func TestValidateSemanticsStartCommandSkipsProviderCheck(t *testing.T) {
 	cfg := &City{
 		Agents: []Agent{

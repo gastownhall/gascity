@@ -51,11 +51,21 @@ sling_query = "bd update {} --set-metadata gc.routed_to=frontend/worker"
 	if err := json.Unmarshal([]byte(lines[0]), &result); err != nil {
 		t.Fatalf("invalid JSON: %v\nraw: %s", err, stdout.String())
 	}
-	if result.SchemaVersion != "1" || result.CityName != "test-city" || len(result.Agents) != 2 {
+	if result.SchemaVersion != "1" || result.CityName != "test-city" {
 		t.Fatalf("unexpected result: %+v", result)
 	}
-	var worker AgentListItem
+	userAgents := make([]AgentListItem, 0, len(result.Agents))
 	for _, item := range result.Agents {
+		if item.QualifiedName == config.ControlDispatcherAgentName {
+			continue
+		}
+		userAgents = append(userAgents, item)
+	}
+	if len(userAgents) != 2 {
+		t.Fatalf("user agents = %+v, want mayor and frontend/worker", userAgents)
+	}
+	var worker AgentListItem
+	for _, item := range userAgents {
 		if item.QualifiedName == "frontend/worker" {
 			worker = item
 		}
@@ -217,6 +227,54 @@ schema = 2
 	}
 }
 
+func TestLoadCityConfigFSToleratesMissingNamedSessionTemplate(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Dirs["/city/pk"] = true
+	fs.Files["/city/pk/pack.toml"] = []byte(`[pack]
+name = "pk"
+schema = 1
+
+[[agent]]
+name = "mayor"
+scope = "city"
+`)
+	fs.Files["/city/city.toml"] = []byte(`[workspace]
+name = "test-city"
+
+[imports.pk]
+source = "pk"
+
+[[named_session]]
+template = "pk.mayor"
+
+[[named_session]]
+name = "rizato"
+template = "pk.ghost"
+`)
+	fs.Files["/city/pack.toml"] = []byte(`[pack]
+name = "test-city"
+schema = 2
+`)
+
+	var stderr bytes.Buffer
+	cfg, err := loadCityConfigFS(fs, "/city/city.toml", &stderr)
+	if err != nil {
+		t.Fatalf("loadCityConfigFS: %v; a single broken named session must not brick config load", err)
+	}
+	if cfg == nil {
+		t.Fatal("loadCityConfigFS returned nil config")
+	}
+	// The valid sibling still resolves.
+	if config.FindNamedSession(cfg, "pk.mayor") == nil {
+		t.Fatal("FindNamedSession(pk.mayor) = nil, want the valid session to survive")
+	}
+	// The broken one is reported as a non-fatal warning on stderr.
+	if !strings.Contains(stderr.String(), `"rizato"`) ||
+		!strings.Contains(stderr.String(), "named session disabled until its template resolves") {
+		t.Fatalf("expected disabled-named-session warning on stderr, got %q", stderr.String())
+	}
+}
+
 func TestLoadCityConfigFSEmitsMigrationWarningsAcrossCalls(t *testing.T) {
 	fs := fsys.NewFake()
 	fs.Files["/city/city.toml"] = []byte(`[workspace]
@@ -312,7 +370,6 @@ func TestEmitLoadCityConfigWarningsFiltersNonMigrationWarnings(t *testing.T) {
 			`workspace.name redefined by "/city/defaults.toml"`,
 			`/city/pack.toml: [agents] is a deprecated compatibility alias for [agent_defaults]; rewrite the table name to [agent_defaults]`,
 			`/city/pack.toml: both [agent_defaults] and [agents] are present; [agent_defaults] wins on overlapping keys and [agents] only fills gaps`,
-			`/city/pack.toml: "agent_defaults.provider" is not supported in this release wave; keep setting provider per agent in agents/<name>/agent.toml`,
 			`/city/city.toml: workspace.provider is deprecated: Set provider per agent in agents/<name>/agent.toml.`,
 			`gc: warning: attachment-list fields (` + "`skills`, `mcp`, `skills_append`, `mcp_append`, `shared_skills`" + `) are deprecated as of v0.15.1 and ignored.`,
 		},
@@ -327,9 +384,6 @@ func TestEmitLoadCityConfigWarningsFiltersNonMigrationWarnings(t *testing.T) {
 	}
 	if !strings.Contains(output, `both [agent_defaults] and [agents] are present`) {
 		t.Fatalf("expected mixed-table warning, got %q", output)
-	}
-	if !strings.Contains(output, `"agent_defaults.provider" is not supported`) {
-		t.Fatalf("expected unsupported-key warning, got %q", output)
 	}
 	if strings.Contains(output, `workspace.provider is deprecated`) {
 		t.Fatalf("legacy workspace warnings should stay out of generic command stderr, got %q", output)
@@ -520,7 +574,6 @@ func TestStrictFatalLoadConfigWarningsKeepsMixedTableWarningsFatal(t *testing.T)
 	warnings := []string{
 		`/city/pack.toml: [agents] is a deprecated compatibility alias for [agent_defaults]; rewrite the table name to [agent_defaults]`,
 		`/city/pack.toml: both [agent_defaults] and [agents] are present; [agent_defaults] wins on overlapping keys and [agents] only fills gaps`,
-		`/city/pack.toml: "agent_defaults.provider" is not supported in this release wave; keep setting provider per agent in agents/<name>/agent.toml`,
 		`/city/city.toml: workspace.provider is deprecated: Set provider per agent in agents/<name>/agent.toml.`,
 		`workspace.name redefined by "/city/defaults.toml"`,
 	}
@@ -1155,9 +1208,6 @@ func TestLoadCityConfigFSAppliesFeatureFlags(t *testing.T) {
 	fs := fsys.NewFake()
 	fs.Files["/city/city.toml"] = []byte(`[workspace]
 name = "test-city"
-
-[daemon]
-formula_v2 = true
 `)
 
 	cfg, err := loadCityConfigFS(fs, "/city/city.toml")

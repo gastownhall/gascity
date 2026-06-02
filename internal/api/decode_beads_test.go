@@ -2,6 +2,7 @@ package api
 
 import (
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/api/genclient"
 )
@@ -11,8 +12,25 @@ func TestBeadsFromGenList_Valid(t *testing.T) {
 	assignee := "builder-1"
 	desc := "work here"
 	labels := []string{"ready-to-build", "source:actual-pm"}
+	createdAt := time.Date(2026, 4, 20, 12, 0, 0, 0, time.UTC)
+	updatedAt := createdAt.Add(5 * time.Minute)
+	deferUntil := createdAt.Add(2 * time.Hour)
+	ephemeral := true
 	items := []genclient.Bead{
-		{Id: "gc-1", Title: "first", IssueType: "task", Status: "open", Assignee: &assignee, Priority: &priority, Description: &desc, Labels: &labels},
+		{
+			Id:          "gc-1",
+			Title:       "first",
+			IssueType:   "task",
+			Status:      "open",
+			CreatedAt:   createdAt,
+			UpdatedAt:   &updatedAt,
+			Assignee:    &assignee,
+			Priority:    &priority,
+			Description: &desc,
+			Labels:      &labels,
+			DeferUntil:  &deferUntil,
+			Ephemeral:   &ephemeral,
+		},
 		{Id: "gc-2", Title: "second", IssueType: "task", Status: "closed"},
 	}
 	body := &genclient.ListBodyBead{Items: &items, Total: int64(len(items))}
@@ -33,6 +51,18 @@ func TestBeadsFromGenList_Valid(t *testing.T) {
 	}
 	if got[0].Description != "work here" {
 		t.Errorf("got[0].Description = %q", got[0].Description)
+	}
+	if !got[0].CreatedAt.Equal(createdAt) {
+		t.Errorf("got[0].CreatedAt = %s, want %s", got[0].CreatedAt, createdAt)
+	}
+	if !got[0].UpdatedAt.Equal(updatedAt) {
+		t.Errorf("got[0].UpdatedAt = %s, want %s", got[0].UpdatedAt, updatedAt)
+	}
+	if got[0].DeferUntil == nil || !got[0].DeferUntil.Equal(deferUntil) {
+		t.Errorf("got[0].DeferUntil = %v, want %s", got[0].DeferUntil, deferUntil)
+	}
+	if !got[0].Ephemeral {
+		t.Errorf("got[0].Ephemeral = false, want true")
 	}
 	if len(got[0].Labels) != 2 || got[0].Labels[0] != "ready-to-build" {
 		t.Errorf("got[0].Labels = %v", got[0].Labels)

@@ -289,7 +289,7 @@ func TestRegression_GastownPackArtifacts(t *testing.T) {
 		t.Logf("validated %d prompt template files", count)
 	})
 
-	// PR #3289: .beads/, .runtime/, .claude/commands/ blocked gt done.
+	// PR #3289: .beads/ and .claude/commands/ blocked gt done.
 	t.Run("GtDoneNotBlockedByInfraFiles", func(t *testing.T) {
 		overlayDirs := []string{
 			filepath.Join(c.Dir, "packs", "gastown", "overlays", "default"),

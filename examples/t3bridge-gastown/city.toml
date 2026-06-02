@@ -1,0 +1,27 @@
+# Minimal Gas Town city for testing the native T3 bridge provider.
+
+[workspace]
+name = "t3bridge-gastown"
+provider = "codex"
+
+[session]
+provider = "t3bridge"
+startup_timeout = "2m"
+nudge_ready_timeout = "30s"
+
+[imports.t3demo]
+source = "packs/t3demo"
+
+[daemon]
+patrol_interval = "30s"
+max_restarts = 3
+restart_window = "1h"
+shutdown_timeout = "5s"
+formula_v2 = true
+
+[[rigs]]
+name = "example"
+path = "."
+
+[rigs.imports.t3demo]
+source = "packs/t3demo"

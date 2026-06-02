@@ -22,6 +22,16 @@ type FragmentRecipe struct {
 // subgraphs into an existing workflow.
 func CompileExpansionFragment(_ context.Context, name string, searchPaths []string, target *Step, vars map[string]string) (*FragmentRecipe, error) {
 	parser := NewParser(searchPaths...).SetSource(SourceFromEnv())
+	v2Enabled := IsFormulaV2Enabled()
+	var composedRequirements []formulaCompilerConstraint
+	collectComposedRequirements := func(f *Formula) error {
+		constraints, err := formulaCompilerConstraints(f)
+		if err != nil {
+			return err
+		}
+		composedRequirements = append(composedRequirements, constraints...)
+		return nil
+	}
 
 	f, err := parser.LoadByName(name)
 	if err != nil {
@@ -65,14 +75,14 @@ func CompileExpansionFragment(_ context.Context, name string, searchPaths []stri
 		resolved.Steps = ApplyAdvice(resolved.Steps, resolved.Advice)
 	}
 
-	inlineExpandedSteps, err := ApplyInlineExpansionsWithVars(resolved.Steps, parser, expansionVars)
+	inlineExpandedSteps, err := applyInlineExpansionsWithVars(resolved.Steps, parser, expansionVars, collectComposedRequirements)
 	if err != nil {
 		return nil, fmt.Errorf("applying inline expansions to expansion %q: %w", name, err)
 	}
 	resolved.Steps = inlineExpandedSteps
 
 	if resolved.Compose != nil && (len(resolved.Compose.Expand) > 0 || len(resolved.Compose.Map) > 0) {
-		expandedSteps, expandErr := ApplyExpansionsWithVars(resolved.Steps, resolved.Compose, parser, expansionVars)
+		expandedSteps, expandErr := applyExpansionsWithVars(resolved.Steps, resolved.Compose, parser, expansionVars, collectComposedRequirements)
 		if expandErr != nil {
 			return nil, fmt.Errorf("applying expansions to expansion %q: %w", name, expandErr)
 		}
@@ -81,12 +91,9 @@ func CompileExpansionFragment(_ context.Context, name string, searchPaths []stri
 
 	if resolved.Compose != nil && len(resolved.Compose.Aspects) > 0 {
 		for _, aspectName := range resolved.Compose.Aspects {
-			aspectFormula, loadErr := parser.LoadByName(aspectName)
+			aspectFormula, loadErr := loadResolvedAspectFormula(parser, aspectName, collectComposedRequirements)
 			if loadErr != nil {
-				return nil, fmt.Errorf("loading aspect %q: %w", aspectName, loadErr)
-			}
-			if aspectFormula.Type != TypeAspect {
-				return nil, fmt.Errorf("%q is not an aspect formula (type=%s)", aspectName, aspectFormula.Type)
+				return nil, loadErr
 			}
 			if len(aspectFormula.Advice) == 0 {
 				continue
@@ -101,6 +108,13 @@ func CompileExpansionFragment(_ context.Context, name string, searchPaths []stri
 	}
 	resolved.Steps = filteredSteps
 
+	if err := addFormulaCompilerConstraints(resolved, composedRequirements); err != nil {
+		return nil, err
+	}
+	if err := validateExplicitGraphCompilerRequirement(resolved); err != nil {
+		return nil, err
+	}
+
 	retrySteps, err := ApplyRetries(resolved.Steps)
 	if err != nil {
 		return nil, fmt.Errorf("applying retry transforms to expansion %q: %w", name, err)
@@ -113,7 +127,11 @@ func CompileExpansionFragment(_ context.Context, name string, searchPaths []stri
 	}
 	resolved.Steps = ralphSteps
 
-	graphWorkflow, err := isGraphWorkflow(resolved, IsFormulaV2Enabled())
+	if err := ValidateHostRequirements(resolved, v2Enabled); err != nil {
+		return nil, err
+	}
+
+	graphWorkflow, err := isGraphWorkflow(resolved, v2Enabled)
 	if err != nil {
 		return nil, err
 	}

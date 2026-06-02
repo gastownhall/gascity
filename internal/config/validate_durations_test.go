@@ -76,6 +76,25 @@ func TestValidateDurationsBadSessionTimeout(t *testing.T) {
 	}
 }
 
+func TestValidateDurationsBadMailRetentionTTL(t *testing.T) {
+	cfg := &City{
+		Mail: MailConfig{RetentionTTL: "7d"},
+	}
+	warnings := ValidateDurations(cfg, "city.toml")
+	if len(warnings) != 1 {
+		t.Fatalf("expected 1 warning, got %d: %v", len(warnings), warnings)
+	}
+	if !strings.Contains(warnings[0], "[mail]") {
+		t.Errorf("warning should mention section: %s", warnings[0])
+	}
+	if !strings.Contains(warnings[0], "retention_ttl") {
+		t.Errorf("warning should mention field: %s", warnings[0])
+	}
+	if !strings.Contains(warnings[0], "7d") {
+		t.Errorf("warning should mention bad value: %s", warnings[0])
+	}
+}
+
 func TestValidateDurationsBadDaemonFields(t *testing.T) {
 	cfg := &City{
 		Daemon: DaemonConfig{
@@ -89,6 +108,92 @@ func TestValidateDurationsBadDaemonFields(t *testing.T) {
 	warnings := ValidateDurations(cfg, "city.toml")
 	if len(warnings) != 5 {
 		t.Fatalf("expected 5 warnings, got %d: %v", len(warnings), warnings)
+	}
+}
+
+func TestValidateDurationsBadBeadPolicyDuration(t *testing.T) {
+	cfg := &City{
+		Beads: BeadsConfig{
+			Policies: map[string]BeadPolicyConfig{
+				"control": {DeleteAfterClose: "7days"},
+			},
+		},
+	}
+	warnings := ValidateDurations(cfg, "city.toml")
+	if len(warnings) != 1 {
+		t.Fatalf("expected 1 warning, got %d: %v", len(warnings), warnings)
+	}
+	for _, want := range []string{"[beads.policies.control]", "delete_after_close", "7days"} {
+		if !strings.Contains(warnings[0], want) {
+			t.Errorf("warning = %q, want substring %q", warnings[0], want)
+		}
+	}
+}
+
+func TestValidateDurationsRejectsUnsafeBeadPolicyDuration(t *testing.T) {
+	tests := []string{"-1h", "0s", "1d-48h", "200000d"}
+	for _, value := range tests {
+		t.Run(value, func(t *testing.T) {
+			cfg := &City{
+				Beads: BeadsConfig{
+					Policies: map[string]BeadPolicyConfig{
+						"control": {DeleteAfterClose: value},
+					},
+				},
+			}
+			warnings := ValidateDurations(cfg, "city.toml")
+			if len(warnings) != 1 {
+				t.Fatalf("expected 1 warning, got %d: %v", len(warnings), warnings)
+			}
+			for _, want := range []string{"[beads.policies.control]", "delete_after_close", value} {
+				if !strings.Contains(warnings[0], want) {
+					t.Errorf("warning = %q, want substring %q", warnings[0], want)
+				}
+			}
+		})
+	}
+}
+
+func TestValidateDurationsBadBeadPolicyStorage(t *testing.T) {
+	cfg := &City{
+		Beads: BeadsConfig{
+			Policies: map[string]BeadPolicyConfig{
+				"control": {Storage: "forever-ish"},
+			},
+		},
+	}
+	warnings := ValidateDurations(cfg, "city.toml")
+	if len(warnings) != 1 {
+		t.Fatalf("expected 1 warning, got %d: %v", len(warnings), warnings)
+	}
+	for _, want := range []string{"[beads.policies.control]", "storage", "forever-ish"} {
+		if !strings.Contains(warnings[0], want) {
+			t.Errorf("warning = %q, want substring %q", warnings[0], want)
+		}
+	}
+}
+
+func TestValidateDurationsRejectsNonCanonicalBeadPolicyStorage(t *testing.T) {
+	tests := []string{"no-history", "EPHEMERAL"}
+	for _, value := range tests {
+		t.Run(value, func(t *testing.T) {
+			cfg := &City{
+				Beads: BeadsConfig{
+					Policies: map[string]BeadPolicyConfig{
+						"control": {Storage: value},
+					},
+				},
+			}
+			warnings := ValidateDurations(cfg, "city.toml")
+			if len(warnings) != 1 {
+				t.Fatalf("expected 1 warning, got %d: %v", len(warnings), warnings)
+			}
+			for _, want := range []string{"[beads.policies.control]", "storage", value} {
+				if !strings.Contains(warnings[0], want) {
+					t.Errorf("warning = %q, want substring %q", warnings[0], want)
+				}
+			}
+		})
 	}
 }
 
@@ -122,6 +227,47 @@ func TestValidateDurationsMultipleIssues(t *testing.T) {
 	warnings := ValidateDurations(cfg, "test.toml")
 	if len(warnings) != 5 {
 		t.Fatalf("expected 5 warnings, got %d: %v", len(warnings), warnings)
+	}
+}
+
+func TestValidateDurationsBadMaintenanceDoltFields(t *testing.T) {
+	cfg := &City{
+		Maintenance: MaintenanceConfig{
+			Dolt: DoltMaintenance{
+				Interval:  "one week",
+				GCTimeout: "ten minutes",
+			},
+		},
+	}
+	warnings := ValidateDurations(cfg, "city.toml")
+	if len(warnings) != 2 {
+		t.Fatalf("expected 2 warnings, got %d: %v", len(warnings), warnings)
+	}
+	joined := strings.Join(warnings, "|")
+	if !strings.Contains(joined, "[maintenance.dolt]") {
+		t.Errorf("warnings should mention section [maintenance.dolt]: %v", warnings)
+	}
+	if !strings.Contains(joined, "interval") {
+		t.Errorf("warnings should mention interval field: %v", warnings)
+	}
+	if !strings.Contains(joined, "gc_timeout") {
+		t.Errorf("warnings should mention gc_timeout field: %v", warnings)
+	}
+}
+
+func TestValidateDurationsMaintenanceDoltValidOK(t *testing.T) {
+	cfg := &City{
+		Maintenance: MaintenanceConfig{
+			Dolt: DoltMaintenance{
+				Enabled:   true,
+				Interval:  "168h",
+				GCTimeout: "10m",
+			},
+		},
+	}
+	warnings := ValidateDurations(cfg, "city.toml")
+	if len(warnings) != 0 {
+		t.Errorf("expected no warnings for valid maintenance.dolt, got: %v", warnings)
 	}
 }
 

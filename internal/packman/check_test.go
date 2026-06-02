@@ -46,6 +46,60 @@ func TestCheckInstalledReportsMissingLockfile(t *testing.T) {
 	assertSingleIssue(t, report, "missing-lockfile")
 }
 
+func TestSyncLockUsesBundledFallbackForPublicGastownWhenRemoteUnavailable(t *testing.T) {
+	home := t.TempDir()
+	city := t.TempDir()
+	t.Setenv("HOME", home)
+
+	oldRunGit := runGit
+	t.Cleanup(func() { runGit = oldRunGit })
+	runGit = func(_ string, args ...string) (string, error) {
+		return "", fmt.Errorf("network unavailable for git %s", strings.Join(args, " "))
+	}
+
+	imports := map[string]config.Import{
+		"gastown": {
+			Source:  config.PublicGastownPackSource,
+			Version: config.PublicGastownPackVersion,
+		},
+	}
+	lock, err := SyncLock(city, imports, InstallResolveIfNeeded)
+	if err != nil {
+		t.Fatalf("SyncLock: %v", err)
+	}
+	pack, ok := lock.Packs[config.PublicGastownPackSource]
+	if !ok {
+		t.Fatalf("lock packs = %#v, want public gastown source", lock.Packs)
+	}
+	if pack.Commit != strings.TrimPrefix(config.PublicGastownPackVersion, "sha:") {
+		t.Fatalf("lock commit = %q, want pinned public gastown commit", pack.Commit)
+	}
+	if err := WriteLockfile(fsys.OSFS{}, city, lock); err != nil {
+		t.Fatalf("WriteLockfile: %v", err)
+	}
+	if _, err := InstallLocked(city); err != nil {
+		t.Fatalf("InstallLocked: %v", err)
+	}
+	report, err := CheckInstalled(city, imports)
+	if err != nil {
+		t.Fatalf("CheckInstalled: %v", err)
+	}
+	if report.HasIssues() {
+		t.Fatalf("issues = %#v, want none", report.Issues)
+	}
+
+	cacheDir, err := RepoCachePath(config.PublicGastownPackSource, pack.Commit)
+	if err != nil {
+		t.Fatalf("RepoCachePath: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(cacheDir, "gastown", "pack.toml")); err != nil {
+		t.Fatalf("public gastown synthetic cache missing pack.toml: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(cacheDir, "maintenance", "pack.toml")); err != nil {
+		t.Fatalf("public maintenance synthetic cache missing pack.toml: %v", err)
+	}
+}
+
 func TestCheckInstalledReportsMissingCache(t *testing.T) {
 	home := t.TempDir()
 	city := t.TempDir()
