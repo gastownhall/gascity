@@ -284,3 +284,145 @@ func TestCloseHookScriptIncludesMoleculeAutoclose(t *testing.T) {
 		}
 	}
 }
+
+// TestMoleculeAutocloseClosesWorkflowRootOnSourceBeadClose is the headline
+// regression: a graph.v2 workflow wisp (issue_type "task", not
+// "molecule") with no expanded step children orphans when the worker closes
+// the work bead directly. Closing the source/work bead — via `gc bd close`
+// or a bare `bd update --status=closed`, both of which fire the same on_close
+// hook — must auto-close the workflow root whose gc.source_bead_id points at
+// it. Without the reverse source-bead lookup the root stays open forever and
+// gets re-routed to a fresh worker.
+func TestMoleculeAutocloseClosesWorkflowRootOnSourceBeadClose(t *testing.T) {
+	store := beads.NewMemStore()
+	work, _ := store.Create(beads.Bead{Title: "fix the bug", Type: "task"})
+	root, _ := store.Create(beads.Bead{
+		Title: "mol-focus-review",
+		Type:  "task", // graph.v2 wisps are issue_type "task", not "molecule"
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+			"gc.source_bead_id":   work.ID,
+		},
+	})
+
+	_ = store.Close(work.ID)
+	var out bytes.Buffer
+	doMoleculeAutocloseWith(store, events.Discard, work.ID, &out)
+
+	r, _ := store.Get(root.ID)
+	if r.Status != "closed" {
+		t.Fatalf("stepless workflow root not auto-closed on source bead close: status=%q out=%q", r.Status, out.String())
+	}
+	if !strings.Contains(out.String(), "Auto-closed molecule "+root.ID) {
+		t.Fatalf("stdout = %q, want auto-close announcement for %s", out.String(), root.ID)
+	}
+	if got := r.Metadata["close_reason"]; got != moleculeSourceAutocloseReason {
+		t.Errorf("close_reason = %q, want %q", got, moleculeSourceAutocloseReason)
+	}
+}
+
+// TestMoleculeAutocloseLeavesWorkflowRootOpenWhenStepOpenOnSourceClose asserts
+// the source-bead trigger does NOT close a multi-step workflow root that still
+// has genuine open work (e.g. an un-run review step). Only a root whose entire
+// subtree is already terminal may close.
+func TestMoleculeAutocloseLeavesWorkflowRootOpenWhenStepOpenOnSourceClose(t *testing.T) {
+	store := beads.NewMemStore()
+	work, _ := store.Create(beads.Bead{Title: "work", Type: "task"})
+	root, _ := store.Create(beads.Bead{
+		Title: "mol",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":           "workflow",
+			"gc.source_bead_id": work.ID,
+		},
+	})
+	_, _ = store.Create(beads.Bead{
+		Title:    "open review step",
+		Type:     "step",
+		ParentID: root.ID,
+		Metadata: map[string]string{"gc.root_bead_id": root.ID},
+	})
+
+	_ = store.Close(work.ID)
+	var out bytes.Buffer
+	doMoleculeAutocloseWith(store, events.Discard, work.ID, &out)
+
+	r, _ := store.Get(root.ID)
+	if r.Status == "closed" {
+		t.Fatalf("workflow root closed while a step is still open: status=%q out=%q", r.Status, out.String())
+	}
+	if out.Len() != 0 {
+		t.Fatalf("unexpected stdout while root still has open step: %q", out.String())
+	}
+}
+
+// TestMoleculeAutocloseClosesWorkflowRootWithTerminalStepsOnSourceClose
+// asserts the source-bead trigger closes a multi-step workflow root once both
+// the source bead and every step are terminal.
+func TestMoleculeAutocloseClosesWorkflowRootWithTerminalStepsOnSourceClose(t *testing.T) {
+	store := beads.NewMemStore()
+	work, _ := store.Create(beads.Bead{Title: "work", Type: "task"})
+	root, _ := store.Create(beads.Bead{
+		Title: "mol",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":           "workflow",
+			"gc.source_bead_id": work.ID,
+		},
+	})
+	step, _ := store.Create(beads.Bead{
+		Title:    "done step",
+		Type:     "step",
+		ParentID: root.ID,
+		Metadata: map[string]string{"gc.root_bead_id": root.ID},
+	})
+	_ = store.Close(step.ID)
+
+	_ = store.Close(work.ID)
+	var out bytes.Buffer
+	doMoleculeAutocloseWith(store, events.Discard, work.ID, &out)
+
+	r, _ := store.Get(root.ID)
+	if r.Status != "closed" {
+		t.Fatalf("workflow root not closed when source + all steps terminal: status=%q out=%q", r.Status, out.String())
+	}
+}
+
+// TestMoleculeAutocloseSourceCloseNoMatchingRootIsNoop asserts closing a bead
+// that is no workflow's source bead is a silent no-op (no panic, no stdout).
+func TestMoleculeAutocloseSourceCloseNoMatchingRootIsNoop(t *testing.T) {
+	store := beads.NewMemStore()
+	work, _ := store.Create(beads.Bead{Title: "lonely task", Type: "task"})
+	_ = store.Close(work.ID)
+
+	var out bytes.Buffer
+	doMoleculeAutocloseWith(store, events.Discard, work.ID, &out)
+	if out.Len() != 0 {
+		t.Fatalf("unexpected stdout closing a task with no workflow root: %q", out.String())
+	}
+}
+
+// TestMoleculeAutocloseSourceCloseIdempotentOnClosedRoot asserts that once the
+// workflow root is already closed, a repeat source-bead close is a no-op —
+// ListLiveRoots excludes closed roots, so no double-close announcement fires.
+func TestMoleculeAutocloseSourceCloseIdempotentOnClosedRoot(t *testing.T) {
+	store := beads.NewMemStore()
+	work, _ := store.Create(beads.Bead{Title: "work", Type: "task"})
+	root, _ := store.Create(beads.Bead{
+		Title: "mol",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":           "workflow",
+			"gc.source_bead_id": work.ID,
+		},
+	})
+	_ = store.Close(work.ID)
+	_ = store.Close(root.ID) // pre-close the root directly
+
+	var out bytes.Buffer
+	doMoleculeAutocloseWith(store, events.Discard, work.ID, &out)
+	if out.Len() != 0 {
+		t.Fatalf("unexpected stdout for already-closed workflow root: %q", out.String())
+	}
+}
