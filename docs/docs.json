@@ -112,6 +112,12 @@
         ]
       },
       {
+        "group": "Concepts",
+        "pages": [
+          "concepts/architecture-overview"
+        ]
+      },
+      {
         "group": "Tutorials",
         "pages": [
           "tutorials/index",
