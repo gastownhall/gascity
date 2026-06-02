@@ -157,6 +157,38 @@ func TestKnownTOMLKeysNotEmpty(t *testing.T) {
 	}
 }
 
+func TestCheckUndecodedKeysSuggestsBeadPolicyKey(t *testing.T) {
+	input := `
+[workspace]
+name = "test"
+
+[beads.policies.control]
+delete_after_cloes = "1d"
+`
+	var cfg City
+	md, err := toml.Decode(input, &cfg)
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+
+	warnings := CheckUndecodedKeys(md, "city.toml")
+	if len(warnings) == 0 {
+		t.Fatal("expected warning for bead policy typo")
+	}
+	found := false
+	for _, w := range warnings {
+		if strings.Contains(w, "delete_after_cloes") {
+			found = true
+			if !strings.Contains(w, `did you mean "delete_after_close"`) {
+				t.Errorf("warning should suggest delete_after_close, got: %s", w)
+			}
+		}
+	}
+	if !found {
+		t.Errorf("no warning about delete_after_cloes in: %v", warnings)
+	}
+}
+
 func TestParseWithMetaWarnings(t *testing.T) {
 	input := `
 [workspace]

@@ -130,6 +130,30 @@ func TestValidateDurationsBadBeadPolicyDuration(t *testing.T) {
 	}
 }
 
+func TestValidateDurationsRejectsUnsafeBeadPolicyDuration(t *testing.T) {
+	tests := []string{"-1h", "0s", "1d-48h", "200000d"}
+	for _, value := range tests {
+		t.Run(value, func(t *testing.T) {
+			cfg := &City{
+				Beads: BeadsConfig{
+					Policies: map[string]BeadPolicyConfig{
+						"control": {DeleteAfterClose: value},
+					},
+				},
+			}
+			warnings := ValidateDurations(cfg, "city.toml")
+			if len(warnings) != 1 {
+				t.Fatalf("expected 1 warning, got %d: %v", len(warnings), warnings)
+			}
+			for _, want := range []string{"[beads.policies.control]", "delete_after_close", value} {
+				if !strings.Contains(warnings[0], want) {
+					t.Errorf("warning = %q, want substring %q", warnings[0], want)
+				}
+			}
+		})
+	}
+}
+
 func TestValidateDurationsBadBeadPolicyStorage(t *testing.T) {
 	cfg := &City{
 		Beads: BeadsConfig{
@@ -146,6 +170,30 @@ func TestValidateDurationsBadBeadPolicyStorage(t *testing.T) {
 		if !strings.Contains(warnings[0], want) {
 			t.Errorf("warning = %q, want substring %q", warnings[0], want)
 		}
+	}
+}
+
+func TestValidateDurationsRejectsNonCanonicalBeadPolicyStorage(t *testing.T) {
+	tests := []string{"no-history", "EPHEMERAL"}
+	for _, value := range tests {
+		t.Run(value, func(t *testing.T) {
+			cfg := &City{
+				Beads: BeadsConfig{
+					Policies: map[string]BeadPolicyConfig{
+						"control": {Storage: value},
+					},
+				},
+			}
+			warnings := ValidateDurations(cfg, "city.toml")
+			if len(warnings) != 1 {
+				t.Fatalf("expected 1 warning, got %d: %v", len(warnings), warnings)
+			}
+			for _, want := range []string{"[beads.policies.control]", "storage", value} {
+				if !strings.Contains(warnings[0], want) {
+					t.Errorf("warning = %q, want substring %q", warnings[0], want)
+				}
+			}
+		})
 	}
 }
 

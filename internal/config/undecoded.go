@@ -200,6 +200,7 @@ func knownTOMLKeys() []string {
 		reflect.TypeOf(AgentPatch{}),
 		reflect.TypeOf(AgentOverride{}),
 		reflect.TypeOf(BeadsConfig{}),
+		reflect.TypeOf(BeadPolicyConfig{}),
 		reflect.TypeOf(SessionConfig{}),
 		reflect.TypeOf(MailConfig{}),
 		reflect.TypeOf(EventsConfig{}),

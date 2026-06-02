@@ -1219,9 +1219,11 @@ const (
 	BeadStorageEphemeral = "ephemeral"
 )
 
-// NormalizeBeadPolicyStorage canonicalizes a bead policy storage value.
+// NormalizeBeadPolicyStorage returns the configured bead policy storage value.
+// Storage spellings are intentionally canonical so runtime validation matches
+// the generated schema enum.
 func NormalizeBeadPolicyStorage(storage string) string {
-	return strings.ReplaceAll(strings.ToLower(strings.TrimSpace(storage)), "-", "_")
+	return storage
 }
 
 // ValidBeadPolicyStorage reports whether storage is one of the supported bead
@@ -1247,7 +1249,7 @@ func (p BeadPolicyConfig) DeleteAfterCloseDuration() time.Duration {
 		return 0
 	}
 	dur, err := parseConfigDurationWithDays(p.DeleteAfterClose)
-	if err != nil {
+	if err != nil || dur <= 0 {
 		return 0
 	}
 	return dur
@@ -2333,15 +2335,16 @@ func parseConfigDurationWithDays(raw string) (time.Duration, error) {
 	if err != nil {
 		return 0, err
 	}
+	dayDuration := time.Duration(days) * 24 * time.Hour
 	rest := raw[dayIdx+1:]
 	if rest == "" {
-		return time.Duration(days) * 24 * time.Hour, nil
+		return dayDuration, nil
 	}
 	dur, err := time.ParseDuration(rest)
 	if err != nil {
 		return 0, err
 	}
-	return time.Duration(days)*24*time.Hour + dur, nil
+	return addConfigDurations(dayDuration, dur)
 }
 
 func parsePositiveDurationDays(raw string) (int64, error) {
@@ -2353,14 +2356,29 @@ func parsePositiveDurationDays(raw string) (int64, error) {
 			return 0, fmt.Errorf("invalid day count %q", raw)
 		}
 	}
-	days, err := strconv.ParseInt(raw, 10, 32)
+	days, err := strconv.ParseInt(raw, 10, 64)
 	if err != nil {
 		return 0, err
 	}
 	if days <= 0 {
 		return 0, fmt.Errorf("day count must be positive")
 	}
+	if days > maxConfigDurationDays {
+		return 0, fmt.Errorf("day count %q exceeds maximum %d", raw, maxConfigDurationDays)
+	}
 	return days, nil
+}
+
+const maxConfigDurationDays = int64(1<<63-1) / int64(24*time.Hour)
+
+func addConfigDurations(a, b time.Duration) (time.Duration, error) {
+	if b > 0 && a > time.Duration(1<<63-1)-b {
+		return 0, fmt.Errorf("duration exceeds maximum")
+	}
+	if b < 0 && a < time.Duration(-1<<63)-b {
+		return 0, fmt.Errorf("duration is below minimum")
+	}
+	return a + b, nil
 }
 
 // FormulasDir returns the formulas directory, defaulting to "formulas".

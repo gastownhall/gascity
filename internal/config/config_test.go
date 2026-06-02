@@ -607,7 +607,7 @@ name = "test-city"
 event_hooks = false
 
 [beads.policies.control]
-storage = "no-history"
+storage = "no_history"
 delete_after_close = "1d12h"
 
 [beads.policies.workflow]
@@ -3490,6 +3490,48 @@ func TestValidateNonNegativeDurationsRejectsNegativeDoltStartAddressInUseRetryWi
 		!strings.Contains(err.Error(), "must not be negative") ||
 		!strings.Contains(err.Error(), `"-2s"`) {
 		t.Errorf("ValidateNonNegativeDurations() error = %q, want it to name the field, the constraint, and the value", err)
+	}
+}
+
+func TestValidateNonNegativeDurationsRejectsInvalidBeadPolicyDeleteAfterClose(t *testing.T) {
+	tests := []string{"-1h", "0s", "1d-48h", "200000d", "forever-ish"}
+	for _, value := range tests {
+		t.Run(value, func(t *testing.T) {
+			cfg := &City{
+				Beads: BeadsConfig{
+					Policies: map[string]BeadPolicyConfig{
+						"control": {DeleteAfterClose: value},
+					},
+				},
+			}
+			err := ValidateNonNegativeDurations(cfg, "city.toml")
+			if err == nil {
+				t.Fatal("ValidateNonNegativeDurations() = nil, want error for invalid delete_after_close")
+			}
+			msg := err.Error()
+			for _, want := range []string{"city.toml", "[beads.policies.control]", "delete_after_close", value} {
+				if !strings.Contains(msg, want) {
+					t.Errorf("ValidateNonNegativeDurations() error = %q, want substring %q", msg, want)
+				}
+			}
+		})
+	}
+}
+
+func TestValidateNonNegativeDurationsAllowsPositiveBeadPolicyDeleteAfterClose(t *testing.T) {
+	for _, value := range []string{"", "1h", "1d", "1d12h"} {
+		t.Run(value, func(t *testing.T) {
+			cfg := &City{
+				Beads: BeadsConfig{
+					Policies: map[string]BeadPolicyConfig{
+						"control": {DeleteAfterClose: value},
+					},
+				},
+			}
+			if err := ValidateNonNegativeDurations(cfg, "city.toml"); err != nil {
+				t.Errorf("ValidateNonNegativeDurations(delete_after_close=%q) = %v, want nil", value, err)
+			}
+		})
 	}
 }
 
