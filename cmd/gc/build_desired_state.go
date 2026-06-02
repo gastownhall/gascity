@@ -1992,6 +1992,11 @@ func realizePoolDesiredSessions(
 				// provider unhealthy owns clearing it; until then the demand
 				// stays queued and is materialized on a later tick once healthy.
 				if provider := agentProviderName(bp.city, cfgAgent); !bp.providerHealth.healthy(provider) {
+					// selectOrPlanPoolSessionBead already reserved a fresh-create
+					// budget slot for this plan. Release it on the deferral so a
+					// gated (unhealthy) pool does not consume the tick's create
+					// budget and starve other, healthy pools of their fair share.
+					bp.releasePoolSessionCreate()
 					fmt.Fprintf(stderr, "buildDesiredState: pool %q: provider %q unhealthy; deferring fresh session create\n", qualifiedName, provider) //nolint:errcheck // best-effort stderr
 					item.skip = true
 					return item

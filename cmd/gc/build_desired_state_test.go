@@ -3418,6 +3418,55 @@ func TestRealizePoolDesiredSessionsAllowsFreshCreatesWhenProviderHealthy(t *test
 	}
 }
 
+func TestRealizePoolDesiredSessionsReleasesBudgetWhenProviderUnhealthy(t *testing.T) {
+	// With a single create slot this tick, gating alpha (unhealthy provider)
+	// must RELEASE its reserved slot so zulu (healthy) still gets created. If
+	// the gate leaked the budget, zulu would be starved and desired would be
+	// empty.
+	maxWakes := 1
+	store := beads.NewMemStore()
+	if _, err := store.Create(beads.Bead{
+		Status: "open",
+		Labels: []string{providerHealthLabel},
+		Metadata: map[string]string{
+			providerHealthProviderKey: "down-prov",
+			providerHealthStatusKey:   providerHealthStatusUnhealthy,
+		},
+	}); err != nil {
+		t.Fatalf("seed health bead: %v", err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Daemon:    config.DaemonConfig{MaxWakesPerTick: &maxWakes},
+		Agents: []config.Agent{
+			{Name: "alpha", Provider: "down-prov", StartCommand: "true", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(10)},
+			{Name: "zulu", Provider: "up-prov", StartCommand: "true", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(10)},
+		},
+	}
+	var stderr bytes.Buffer
+	bp := newAgentBuildParams("test-city", t.TempDir(), cfg, runtime.NewFake(), time.Now().UTC(), store, &stderr)
+	bp.sessionBeads = &sessionBeadSnapshot{}
+	desired := map[string]TemplateParams{}
+
+	realizePoolDesiredSessions(bp, &cfg.Agents[0], PoolDesiredState{
+		Template: "alpha",
+		Requests: []SessionRequest{{Template: "alpha", Tier: "new"}},
+	}, desired, &stderr)
+	realizePoolDesiredSessions(bp, &cfg.Agents[1], PoolDesiredState{
+		Template: "zulu",
+		Requests: []SessionRequest{{Template: "zulu", Tier: "new"}},
+	}, desired, &stderr)
+
+	if got := len(desired); got != 1 {
+		t.Fatalf("desired sessions = %d, want zulu created after alpha's gated slot was released; desired=%v stderr=%q", got, desired, stderr.String())
+	}
+	for _, tp := range desired {
+		if tp.TemplateName != "zulu" {
+			t.Fatalf("created template = %q, want zulu; stderr=%q", tp.TemplateName, stderr.String())
+		}
+	}
+}
+
 func TestRealizePoolDesiredSessionsBudgetExhaustionStillAllowsLaterReuse(t *testing.T) {
 	maxWakes := 1
 	store := beads.NewMemStore()
