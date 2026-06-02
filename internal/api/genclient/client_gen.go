@@ -2826,7 +2826,13 @@ type StatusBody struct {
 	AgentDetails *[]StatusAgentDetail `json:"agent_details,omitempty"`
 	Agents       StatusAgentCounts    `json:"agents"`
 	Beads        *BeadsDiagnostic     `json:"beads,omitempty"`
-	Mail         StatusMailCounts     `json:"mail"`
+
+	// BeadsVersion Version of the bd (beads) CLI the supervisor drives. Omitted when the probe failed or the binary is unavailable.
+	BeadsVersion *string `json:"beads_version,omitempty"`
+
+	// DoltVersion Version of the dolt engine binary the supervisor drives. Omitted when the probe failed or the binary is unavailable.
+	DoltVersion *string          `json:"dolt_version,omitempty"`
+	Mail        StatusMailCounts `json:"mail"`
 
 	// Name City name.
 	Name string `json:"name"`

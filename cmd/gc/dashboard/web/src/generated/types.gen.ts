@@ -2979,6 +2979,14 @@ export type StatusBody = {
      */
     beads?: BeadsDiagnostic;
     /**
+     * Version of the bd (beads) CLI the supervisor drives. Omitted when the probe failed or the binary is unavailable.
+     */
+    beads_version?: string;
+    /**
+     * Version of the dolt engine binary the supervisor drives. Omitted when the probe failed or the binary is unavailable.
+     */
+    dolt_version?: string;
+    /**
      * Mail counts.
      */
     mail: StatusMailCounts;

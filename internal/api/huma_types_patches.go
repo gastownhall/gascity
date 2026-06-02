@@ -168,6 +168,8 @@ type StatusBody struct {
 	Mail                StatusMailCounts           `json:"mail" doc:"Mail counts."`
 	StoreHealth         *StatusStoreHealth         `json:"store_health,omitempty" doc:"Dolt bead store health summary. Omitted when unavailable."`
 	Beads               *beads.BeadsDiagnostic     `json:"beads,omitempty" doc:"Bead store selection diagnostic. Omitted when unavailable."`
+	DoltVersion         string                     `json:"dolt_version,omitempty" doc:"Version of the dolt engine binary the supervisor drives. Omitted when the probe failed or the binary is unavailable."`
+	BeadsVersion        string                     `json:"beads_version,omitempty" doc:"Version of the bd (beads) CLI the supervisor drives. Omitted when the probe failed or the binary is unavailable."`
 	Partial             bool                       `json:"partial,omitempty" doc:"True when one or more status backing reads returned incomplete data."`
 	PartialErrors       []string                   `json:"partial_errors,omitempty" doc:"Human-readable errors from incomplete status backing reads."`
 	AgentDetails        []StatusAgentDetail        `json:"agent_details,omitempty" doc:"Per-agent state (for CLI status views). Empty when none."`

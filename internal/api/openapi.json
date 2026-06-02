@@ -6969,6 +6969,14 @@
             "$ref": "#/components/schemas/BeadsDiagnostic",
             "description": "Bead store selection diagnostic. Omitted when unavailable."
           },
+          "beads_version": {
+            "description": "Version of the bd (beads) CLI the supervisor drives. Omitted when the probe failed or the binary is unavailable.",
+            "type": "string"
+          },
+          "dolt_version": {
+            "description": "Version of the dolt engine binary the supervisor drives. Omitted when the probe failed or the binary is unavailable.",
+            "type": "string"
+          },
           "mail": {
             "$ref": "#/components/schemas/StatusMailCounts",
             "description": "Mail counts."

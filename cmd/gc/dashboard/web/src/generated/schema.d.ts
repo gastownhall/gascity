@@ -4210,6 +4210,10 @@ export interface components {
             agents: components["schemas"]["StatusAgentCounts"];
             /** @description Bead store selection diagnostic. Omitted when unavailable. */
             beads?: components["schemas"]["BeadsDiagnostic"];
+            /** @description Version of the bd (beads) CLI the supervisor drives. Omitted when the probe failed or the binary is unavailable. */
+            beads_version?: string;
+            /** @description Version of the dolt engine binary the supervisor drives. Omitted when the probe failed or the binary is unavailable. */
+            dolt_version?: string;
             /** @description Mail counts. */
             mail: components["schemas"]["StatusMailCounts"];
             /** @description City name. */
