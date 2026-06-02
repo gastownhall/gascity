@@ -78,6 +78,10 @@
 #   GC_DOLT_COMPACT_ONLY_DBS              (optional) — comma-separated list of
 #                                         database names to compact. When set,
 #                                         all other databases are skipped.
+#   GC_DOLT_MANAGED_LOCAL                 (optional) — 1 for gc-managed local
+#                                         runtime validation; 0 allows explicit
+#                                         loopback host/port targets and skips
+#                                         non-local external targets.
 #   GC_DOLT_REFSPEC_<DB_UPPER>            (optional) — compact remote push
 #                                         refspec in <local>:<remote> form.
 #                                         DB name is uppercased with '-'
@@ -112,16 +116,52 @@ set -eu
 gc_dolt_port_input="$GC_DOLT_PORT"
 gc_dolt_host_input="${GC_DOLT_HOST:-}"
 
+compact_dolt_host_is_local() (
+  compact_host=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
+  case "$compact_host" in
+    ''|localhost|0.0.0.0|::1|::|'[::1]'|'[::]')
+      return 0
+      ;;
+    127.*.*.*)
+      IFS=.
+      set -- $compact_host
+      [ "$#" -eq 4 ] || return 1
+      [ "$1" = "127" ] || return 1
+      for compact_octet in "$2" "$3" "$4"; do
+        case "$compact_octet" in
+          ''|*[!0-9]*)
+            return 1
+            ;;
+        esac
+        [ "$compact_octet" -le 255 ] 2>/dev/null || return 1
+      done
+      return 0
+      ;;
+  esac
+  return 1
+)
+
+explicit_external_local_dolt=0
+case "${GC_DOLT_MANAGED_LOCAL:-}" in
+  0|false|FALSE|no|NO)
+    if [ -z "$gc_dolt_port_input" ]; then
+      printf 'compact: managed local Dolt runtime is not applicable and GC_DOLT_PORT is empty — skip\n'
+      exit 0
+    fi
+    if compact_dolt_host_is_local "$gc_dolt_host_input"; then
+      GC_DOLT_PORT="$gc_dolt_port_input"
+      explicit_external_local_dolt=1
+    else
+      printf 'compact: GC_DOLT_HOST=%s is not a local Dolt compaction target — skip\n' \
+        "$gc_dolt_host_input"
+      exit 0
+    fi
+    ;;
+esac
+
 PACK_DIR="${GC_PACK_DIR:-$(unset CDPATH; cd -- "$(dirname "$0")/.." && pwd)}"
 # shellcheck disable=SC1091
 . "$PACK_DIR/assets/scripts/runtime.sh"
-
-case "${GC_DOLT_MANAGED_LOCAL:-}" in
-  0|false|FALSE|no|NO)
-    printf 'compact: managed local Dolt runtime is not applicable for this order — skip\n'
-    exit 0
-    ;;
-esac
 
 if [ "${GC_DOLT_MANAGED_LOCAL:-}" = "1" ]; then
   managed_port=$(managed_runtime_port "$DOLT_STATE_FILE" "$DOLT_DATA_DIR" || true)
@@ -139,16 +179,14 @@ if [ "${GC_DOLT_MANAGED_LOCAL:-}" = "1" ]; then
   else
     GC_DOLT_PORT="$gc_dolt_port_input"
   fi
+elif [ "$explicit_external_local_dolt" = "1" ]; then
+  :
 elif [ -n "$gc_dolt_port_input" ]; then
-  case "$gc_dolt_host_input" in
-    ''|127.0.0.1|localhost|0.0.0.0|::1|::|'[::1]'|'[::]')
-      ;;
-    *)
-      printf 'compact: GC_DOLT_HOST=%s is not a local managed Dolt host — skip\n' \
-        "$gc_dolt_host_input"
-      exit 0
-      ;;
-  esac
+  if ! compact_dolt_host_is_local "$gc_dolt_host_input"; then
+    printf 'compact: GC_DOLT_HOST=%s is not a local managed Dolt host — skip\n' \
+      "$gc_dolt_host_input"
+    exit 0
+  fi
   managed_port=$(managed_runtime_port "$DOLT_STATE_FILE" "$DOLT_DATA_DIR" || true)
   if [ -z "$managed_port" ] || [ "$gc_dolt_port_input" != "$managed_port" ]; then
     printf 'compact: GC_DOLT_PORT=%s does not match managed runtime port=%s for data_dir=%s — skip\n' \
@@ -244,11 +282,11 @@ esac
 # and a second compactor running concurrently would race on the
 # graph-rewrite step.
 lock_host=$(printf '%s' "$host" | tr '[:upper:]' '[:lower:]' | sed 's/^\[\(.*\)\]$/\1/')
-case "$lock_host" in
-  ''|127.0.0.1|localhost|0.0.0.0|::1|::)
-    lock_host="127.0.0.1"
-    ;;
-esac
+if compact_dolt_host_is_local "$lock_host"; then
+  # Deliberately collapse loopback aliases; over-serializing local endpoints is
+  # safer than allowing two compaction jobs to interleave on one local runtime.
+  lock_host="127.0.0.1"
+fi
 lock_key=$(printf '%s-%s' "$lock_host" "$GC_DOLT_PORT" | tr -c 'A-Za-z0-9_.-' '-')
 lock_root="/tmp/gc-dolt-compact"
 old_umask=$(umask)
@@ -1372,8 +1410,11 @@ flatten_database() {
   fi
 
   if has_compact_marker "$quarantine_dir" "$db"; then
-    printf 'compact: db=%s integrity quarantine marker exists — manual intervention required before compaction or GC\n' \
-      "$db" >&2
+    quarantine_marker=$(compact_marker_path "$quarantine_dir" "$db")
+    quarantine_reason=$(compact_marker_value "$quarantine_dir" "$db" reason || true)
+    quarantine_created_at=$(compact_marker_value "$quarantine_dir" "$db" created_at || true)
+    printf 'compact: db=%s integrity quarantine marker exists at %s reason=%s created_at=%s — manual intervention required before compaction or GC\n' \
+      "$db" "$quarantine_marker" "${quarantine_reason:-<unknown>}" "${quarantine_created_at:-<unknown>}" >&2
     return 1
   fi
 
@@ -1960,8 +2001,11 @@ bare_gc_database() {
   fi
 
   if has_compact_marker "$quarantine_dir" "$db"; then
-    printf 'compact: db=%s integrity quarantine marker exists — manual intervention required before compaction or GC\n' \
-      "$db" >&2
+    quarantine_marker=$(compact_marker_path "$quarantine_dir" "$db")
+    quarantine_reason=$(compact_marker_value "$quarantine_dir" "$db" reason || true)
+    quarantine_created_at=$(compact_marker_value "$quarantine_dir" "$db" created_at || true)
+    printf 'compact: db=%s integrity quarantine marker exists at %s reason=%s created_at=%s — manual intervention required before compaction or GC\n' \
+      "$db" "$quarantine_marker" "${quarantine_reason:-<unknown>}" "${quarantine_created_at:-<unknown>}" >&2
     return 1
   fi
 
