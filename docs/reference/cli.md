@@ -1675,9 +1675,9 @@ Create a new Gas City workspace in the given directory (or cwd).
 Runs an interactive wizard to choose a config template and coding agent
 provider. Creates the .gc/ runtime directory plus pack.toml, city.toml,
 the standard top-level directories, and .template.md prompt templates, then
-materializes builtin packs under .gc/system/packs. Use --template and
---provider to create a city non-interactively, or --file to initialize from an
-existing TOML config file.
+materializes builtin packs under .gc/system/packs. Use --template with
+--default-provider to create a city non-interactively, or --file to initialize
+from an existing TOML config file.
 
 Pass --preserve-existing to keep any pre-authored pack.toml, city.toml, or
 agent prompt files in the target directory (useful when bootstrapping a
@@ -1692,9 +1692,10 @@ gc init [path] [flags]
 ```
 gc init
   gc init ~/my-city
-  gc init --provider codex ~/my-city
-  gc init --template gastown --provider codex ~/my-city
-  gc init --provider codex --bootstrap-profile k8s-cell /city
+  gc init --default-provider codex ~/my-city
+  gc init --template gastown --default-provider codex ~/my-city
+  gc init --providers claude,codex --default-provider codex ~/my-city
+  gc init --default-provider codex --bootstrap-profile k8s-cell /city
   gc init --name my-city
   gc init --from ~/elan --name elan /city
   gc init --file examples/gastown.toml ~/bright-lights
@@ -1704,14 +1705,15 @@ gc init
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--bootstrap-profile` | string |  | bootstrap profile to apply for hosted/container defaults |
+| `--default-provider` | string |  | default readiness-aware provider to select from --providers |
 | `--file` | string |  | path to a TOML file to use as city.toml |
 | `--from` | string |  | path to an example city directory to copy |
 | `--json` | bool |  | emit JSON summary |
 | `--name` | string |  | workspace name (default: target directory basename) |
 | `--preserve-existing` | bool |  | keep any pre-authored pack.toml, city.toml, or agent prompt files instead of overwriting them |
-| `--provider` | string |  | built-in workspace provider to use for the default mayor config |
+| `--providers` | stringArray |  | readiness-aware providers to write to city.toml (repeatable or comma-separated) |
 | `--skip-provider-readiness` | bool |  | skip provider login/readiness checks during init and continue startup |
-| `--template` | string |  | config template to use non-interactively (minimal, gastown, custom) |
+| `--template` | string |  | non-interactive template to write: minimal, gastown, or custom |
 | `--yes` | bool |  | bypass the cross-city supervisor cycle confirmation prompt (warning is still printed for the audit trail) |
 
 ## gc lint

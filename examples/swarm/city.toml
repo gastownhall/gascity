@@ -18,6 +18,9 @@
 name = "swarm"
 provider = "claude"
 
+[providers.claude]
+base = "builtin:claude"
+
 [daemon]
 patrol_interval = "30s"
 max_restarts = 5

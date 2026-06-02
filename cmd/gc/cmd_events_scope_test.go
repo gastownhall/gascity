@@ -23,14 +23,14 @@ func TestResolveEventsScopeUsesStandaloneControllerAPI(t *testing.T) {
 	if err := os.MkdirAll(cityDir, 0o755); err != nil {
 		t.Fatalf("mkdir city dir: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(withBuiltinProviderAliasesTOMLForTest(`
 [workspace]
 name = "alpha"
 provider = "claude"
 
 [api]
 port = 9123
-`), 0o644); err != nil {
+`, "claude")), 0o644); err != nil {
 		t.Fatalf("write city.toml: %v", err)
 	}
 
@@ -71,14 +71,14 @@ func TestResolveEventsScopeUsesLocalFallbackWhenStandaloneControllerStopped(t *t
 	if err := os.MkdirAll(cityDir, 0o755); err != nil {
 		t.Fatalf("mkdir city dir: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(withBuiltinProviderAliasesTOMLForTest(`
 [workspace]
 name = "alpha"
 provider = "claude"
 
 [api]
 port = 9123
-`), 0o644); err != nil {
+`, "claude")), 0o644); err != nil {
 		t.Fatalf("write city.toml: %v", err)
 	}
 
@@ -122,11 +122,11 @@ func TestResolveEventsScopeUsesRegisteredSupervisorCityName(t *testing.T) {
 	if err := os.MkdirAll(cityDir, 0o755); err != nil {
 		t.Fatalf("mkdir city dir: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(withBuiltinProviderAliasesTOMLForTest(`
 [workspace]
 name = "renamed-alpha"
 provider = "claude"
-`), 0o644); err != nil {
+`, "claude")), 0o644); err != nil {
 		t.Fatalf("write city.toml: %v", err)
 	}
 
@@ -175,11 +175,11 @@ func TestResolveEventsScopeExplicitAPIUsesRegisteredSupervisorCityName(t *testin
 	if err := os.MkdirAll(cityDir, 0o755); err != nil {
 		t.Fatalf("mkdir city dir: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(withBuiltinProviderAliasesTOMLForTest(`
 [workspace]
 name = "renamed-alpha"
 provider = "claude"
-`), 0o644); err != nil {
+`, "claude")), 0o644); err != nil {
 		t.Fatalf("write city.toml: %v", err)
 	}
 
@@ -231,11 +231,11 @@ func TestResolveEventsScopeExplicitAPIPreservesLocalCityNameForForeignServer(t *
 	if err := os.MkdirAll(cityDir, 0o755); err != nil {
 		t.Fatalf("mkdir city dir: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(withBuiltinProviderAliasesTOMLForTest(`
 [workspace]
 name = "renamed-alpha"
 provider = "claude"
-`), 0o644); err != nil {
+`, "claude")), 0o644); err != nil {
 		t.Fatalf("write city.toml: %v", err)
 	}
 
@@ -281,11 +281,11 @@ func TestResolveEventsScopeExplicitLocalSupervisorUsesRegisteredNameWhenSupervis
 	if err := os.MkdirAll(cityDir, 0o755); err != nil {
 		t.Fatalf("mkdir city dir: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(withBuiltinProviderAliasesTOMLForTest(`
 [workspace]
 name = "renamed-alpha"
 provider = "claude"
-`), 0o644); err != nil {
+`, "claude")), 0o644); err != nil {
 		t.Fatalf("write city.toml: %v", err)
 	}
 

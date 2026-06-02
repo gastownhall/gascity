@@ -140,6 +140,12 @@ source = "../tools"
 name = "tools"
 schema = 1
 
+[providers.claude]
+base = "builtin:claude"
+
+[providers.codex]
+base = "builtin:codex"
+
 [agent_defaults]
 provider = "codex"
 default_sling_formula = "mol-pack-default"
@@ -193,6 +199,12 @@ func TestImport_PackAgentDefaultsProviderOverridesCityDefaultForImportedAgent(t 
 [workspace]
 name = "test"
 
+[providers.codex]
+base = "builtin:codex"
+
+[providers.gemini]
+base = "builtin:gemini"
+
 [agent_defaults]
 provider = "gemini"
 `)
@@ -208,6 +220,9 @@ source = "../tools"
 [pack]
 name = "tools"
 schema = 1
+
+[providers.codex]
+base = "builtin:codex"
 
 [agent_defaults]
 provider = "codex"

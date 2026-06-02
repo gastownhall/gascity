@@ -95,9 +95,12 @@ type LoadOptions struct {
 	// SuppressDeprecatedOrderWarnings suppresses only legacy order-path
 	// migration warnings produced while discovering pack orders.
 	SuppressDeprecatedOrderWarnings bool
-	deferRigPatches                 bool
-	deferredRigPatches              *[]deferredRigPatches
-	allowLegacyOrderLayouts         bool
+	// AllowMissingProviderReferences leaves provider-reference catalog errors
+	// non-fatal for repair tools that need to inspect broken configs.
+	AllowMissingProviderReferences bool
+	deferRigPatches                bool
+	deferredRigPatches             *[]deferredRigPatches
+	allowLegacyOrderLayouts        bool
 }
 
 // LoadWithIncludes loads a city.toml and merges all included fragments.
@@ -648,6 +651,11 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 	}
 
 	// Validate cross-entity semantic constraints.
+	if !opts.AllowMissingProviderReferences {
+		if err := ValidateProviderReferences(root); err != nil {
+			return nil, nil, err
+		}
+	}
 	prov.Warnings = append(prov.Warnings, ValidateSemantics(root, path)...)
 	prov.Warnings = append(prov.Warnings, DetectLegacyProviderInheritance(root, path)...)
 	prov.Warnings = append(prov.Warnings, detectLegacyWorkspaceFields(root, path, prov.Workspace)...)

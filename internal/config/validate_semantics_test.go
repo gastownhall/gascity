@@ -8,6 +8,7 @@ import (
 func TestValidateSemanticsNoWarnings(t *testing.T) {
 	cfg := &City{
 		Workspace: Workspace{Provider: "claude"},
+		Providers: explicitBuiltins("claude", "codex"),
 		Agents: []Agent{
 			{Name: "mayor", Provider: "claude"},
 			{Name: "worker", Provider: "codex"},
@@ -108,6 +109,7 @@ func TestValidateSemanticsStartCommandSkipsProviderCheck(t *testing.T) {
 
 func TestValidateSemanticsAgentSessionTransportAllowsTmux(t *testing.T) {
 	cfg := &City{
+		Providers: explicitBuiltins("claude"),
 		Agents: []Agent{
 			{Name: "worker", Provider: "claude", Session: "tmux"},
 		},
@@ -120,6 +122,7 @@ func TestValidateSemanticsAgentSessionTransportAllowsTmux(t *testing.T) {
 
 func TestValidateSemanticsAgentSessionTransportRejectsUnknown(t *testing.T) {
 	cfg := &City{
+		Providers: explicitBuiltins("claude"),
 		Agents: []Agent{
 			{Name: "worker", Provider: "claude", Session: "stdio"},
 		},

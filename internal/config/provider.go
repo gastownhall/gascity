@@ -397,7 +397,6 @@ func BuiltinProviderOrder() []string {
 }
 
 // BuiltinProviders returns the built-in provider presets.
-// These are available without any [providers] section in city.toml.
 func BuiltinProviders() map[string]ProviderSpec {
 	specs := workerbuiltin.BuiltinProviders()
 	out := make(map[string]ProviderSpec, len(specs))
@@ -405,6 +404,13 @@ func BuiltinProviders() map[string]ProviderSpec {
 		out[name] = providerSpecFromWorker(spec)
 	}
 	return out
+}
+
+// BuiltinProviderAlias returns the thin explicit catalog entry used to expose
+// a built-in provider under its canonical key.
+func BuiltinProviderAlias(name string) ProviderSpec {
+	base := BasePrefixBuiltin + strings.TrimSpace(name)
+	return ProviderSpec{Base: &base}
 }
 
 func providerSpecFromWorker(spec workerbuiltin.BuiltinProviderSpec) ProviderSpec {

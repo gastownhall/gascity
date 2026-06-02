@@ -640,6 +640,9 @@ func TestSpawnNextAttemptPreservesExplicitChildPoolRoutes(t *testing.T) {
 name = "maintainer-city"
 provider = "claude"
 
+[providers.claude]
+base = "builtin:claude"
+
 [[agent]]
 name = "claude"
 dir = "gascity"

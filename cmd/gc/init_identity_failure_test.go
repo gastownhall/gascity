@@ -152,6 +152,9 @@ func TestDoInitFromDirMigratesRigPathsToSiteBinding(t *testing.T) {
 	fs.Files["/city/city.toml"] = []byte(`[workspace]
 provider = "claude"
 
+[providers.claude]
+base = "builtin:claude"
+
 [[rigs]]
 name = "frontend"
 path = "/srv/frontend"
@@ -199,6 +202,9 @@ func TestDoInitFromFileWritesCityBeforeRigSiteBindings(t *testing.T) {
 name = "declared-city"
 provider = "claude"
 
+[providers.claude]
+base = "builtin:claude"
+
 [[rigs]]
 name = "frontend"
 path = %q
@@ -237,6 +243,9 @@ func TestDoInitFromFileRestoresCityWhenRigSiteBindingWriteFails(t *testing.T) {
 	if err := os.WriteFile(srcToml, []byte(fmt.Sprintf(`[workspace]
 name = "declared-city"
 provider = "claude"
+
+[providers.claude]
+base = "builtin:claude"
 
 [[rigs]]
 name = "frontend"
@@ -280,6 +289,9 @@ func TestDoInitFromFileMigratesRigPathsToSiteBinding(t *testing.T) {
 name = "declared-city"
 provider = "claude"
 
+[providers.claude]
+base = "builtin:claude"
+
 [[rigs]]
 name = "frontend"
 path = %q
@@ -322,6 +334,9 @@ func TestDoInitFromDirWritesCityBeforeRigSiteBindings(t *testing.T) {
 	fs.Files["/city/city.toml"] = []byte(`[workspace]
 provider = "claude"
 
+[providers.claude]
+base = "builtin:claude"
+
 [[rigs]]
 name = "frontend"
 path = "/srv/frontend"
@@ -350,6 +365,9 @@ func TestRewriteCopiedInitFromIdentityRestoresRigPathsWhenSiteBindingFails(t *te
 	}
 	if err := fs.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(`[workspace]
 provider = "claude"
+
+[providers.claude]
+base = "builtin:claude"
 
 [[rigs]]
 name = "frontend"

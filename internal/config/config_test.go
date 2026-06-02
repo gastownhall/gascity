@@ -5685,10 +5685,14 @@ func TestInjectImplicitAgents_NoProviders(t *testing.T) {
 }
 
 func TestInjectImplicitAgents_WorkspaceProvider(t *testing.T) {
-	// workspace.provider alone is enough — no [providers.claude] section needed.
+	// workspace.provider selects a default but the provider catalog creates
+	// implicit agents.
 	cfg := &City{
 		Daemon:    DaemonConfig{FormulaV2: true},
 		Workspace: Workspace{Provider: "claude"},
+		Providers: map[string]ProviderSpec{
+			"claude": BuiltinProviderAlias("claude"),
+		},
 	}
 	InjectImplicitAgents(cfg)
 
@@ -5708,12 +5712,13 @@ func TestInjectImplicitAgents_WorkspaceProvider(t *testing.T) {
 }
 
 func TestInjectImplicitAgents_WorkspaceProviderPlusExplicit(t *testing.T) {
-	// workspace.provider = "claude" + [providers.codex] → both get implicit agents.
+	// [providers.claude] + [providers.codex] → both get implicit agents.
 	cfg := &City{
 		Daemon:    DaemonConfig{FormulaV2: true},
 		Workspace: Workspace{Provider: "claude"},
 		Providers: map[string]ProviderSpec{
-			"codex": {},
+			"claude": BuiltinProviderAlias("claude"),
+			"codex":  BuiltinProviderAlias("codex"),
 		},
 	}
 	InjectImplicitAgents(cfg)
@@ -6052,6 +6057,9 @@ func TestAgentDefaultsProvider_ExplicitOverrideWins(t *testing.T) {
 
 func TestAgentDefaultsProvider_InjectImplicitAgents(t *testing.T) {
 	cfg := &City{
+		Providers: map[string]ProviderSpec{
+			"codex": BuiltinProviderAlias("codex"),
+		},
 		AgentDefaults: AgentDefaults{
 			Provider: "codex",
 		},
@@ -6097,6 +6105,12 @@ func TestAgentDefaultsProvider_BeatsWorkspaceProviderForExplicitAgent(t *testing
 [workspace]
 name = "demo"
 provider = "claude"
+
+[providers.claude]
+base = "builtin:claude"
+
+[providers.codex]
+base = "builtin:codex"
 
 [agent_defaults]
 provider = "codex"

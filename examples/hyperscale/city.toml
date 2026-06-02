@@ -15,6 +15,9 @@ name = "hyperscale"
 provider = "claude"
 isolation = "none"
 
+[providers.claude]
+base = "builtin:claude"
+
 [imports.hyperscale]
 source = "packs/hyperscale"
 

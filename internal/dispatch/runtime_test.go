@@ -3294,6 +3294,9 @@ func TestAppendRalphRetryClearsPoolAssignee(t *testing.T) {
 name = "test-city"
 provider = "claude"
 
+[providers.claude]
+base = "builtin:claude"
+
 [[agent]]
 name = "polecat"
 

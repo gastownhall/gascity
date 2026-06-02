@@ -198,7 +198,7 @@ func TestOddballRootJSONBuildImageNonContextOnly(t *testing.T) {
 func TestOddballRootJSONInitSummaryWriter(t *testing.T) {
 	cityPath := filepath.Join(t.TempDir(), "city")
 	var stdout bytes.Buffer
-	err := writeInitJSONOrExit(0, true, []string{cityPath}, "custom-name", "", "codex", "k8s-cell", "provider", &stdout)
+	err := writeInitJSONOrExit(0, true, []string{cityPath}, "custom-name", "minimal", "codex", []string{"codex"}, "k8s-cell", "provider", &stdout)
 	if err != nil {
 		t.Fatalf("writeInitJSONOrExit: %v", err)
 	}

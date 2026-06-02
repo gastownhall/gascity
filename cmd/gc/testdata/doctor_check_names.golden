@@ -10,6 +10,8 @@ v2-legacy-order-layout
 v2-scripts-layout
 v2-workspace-name
 v2-prompt-template-suffix
+provider-catalog
+provider-catalog-local-readiness
 expanded-config-load
 implicit-import-cache
 deprecated-attachment-fields
