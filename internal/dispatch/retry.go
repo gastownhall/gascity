@@ -296,7 +296,7 @@ func validateRequiredArtifacts(store beads.Store, subject beads.Bead, stat func(
 		stat = os.Stat
 	}
 	for _, rawPath := range requiredArtifactTemplates(subject.Metadata) {
-		path, reason, err := resolveRequiredArtifactPath(store, subject, rawPath)
+		path, worktree, reason, err := resolveRequiredArtifactPath(store, subject, rawPath)
 		if err != nil {
 			return "", err
 		}
@@ -310,6 +310,13 @@ func validateRequiredArtifacts(store beads.Store, subject beads.Bead, stat func(
 			}
 			return "unreadable_required_artifact", nil
 		}
+		contained, err := requiredArtifactTargetInWorktree(worktree, path)
+		if err != nil {
+			return "", err
+		}
+		if !contained {
+			return "required_artifact_outside_worktree", nil
+		}
 		if info.IsDir() || info.Size() == 0 {
 			return "empty_required_artifact", nil
 		}
@@ -317,6 +324,8 @@ func validateRequiredArtifacts(store beads.Store, subject beads.Bead, stat func(
 	return "", nil
 }
 
+// requiredArtifactTemplates keeps the singular key as one opaque path; only
+// the plural key is parsed as a comma/newline-delimited list.
 func requiredArtifactTemplates(metadata map[string]string) []string {
 	var result []string
 	if raw := strings.TrimSpace(metadata["gc.required_artifact"]); raw != "" {
@@ -336,7 +345,7 @@ func requiredArtifactTemplates(metadata map[string]string) []string {
 	return result
 }
 
-func resolveRequiredArtifactPath(store beads.Store, subject beads.Bead, rawPath string) (string, string, error) {
+func resolveRequiredArtifactPath(store beads.Store, subject beads.Bead, rawPath string) (string, string, string, error) {
 	rootID := strings.TrimSpace(subject.Metadata["gc.root_bead_id"])
 	attempt := strings.TrimSpace(subject.Metadata["gc.attempt"])
 	worktree := strings.TrimSpace(subject.Metadata["work_dir"])
@@ -344,15 +353,15 @@ func resolveRequiredArtifactPath(store beads.Store, subject beads.Bead, rawPath 
 	if worktree == "" {
 		resolvedWorktree, reason, err := resolveRequiredArtifactWorktree(store, rootID)
 		if err != nil {
-			return "", "", err
+			return "", "", "", err
 		}
 		if reason != "" {
-			return "", reason, nil
+			return "", "", reason, nil
 		}
 		worktree = resolvedWorktree
 	}
 	if worktree == "" {
-		return "", "missing_required_artifact_context", nil
+		return "", "", "missing_required_artifact_context", nil
 	}
 
 	path := rawPath
@@ -361,7 +370,7 @@ func resolveRequiredArtifactPath(store beads.Store, subject beads.Bead, rawPath 
 	path = strings.ReplaceAll(path, "{root_id}", rootID)
 	path = strings.ReplaceAll(path, "{attempt}", attempt)
 	if strings.Contains(path, "{") || strings.Contains(path, "}") {
-		return "", "unresolved_required_artifact_template", nil
+		return "", "", "unresolved_required_artifact_template", nil
 	}
 	if !filepath.IsAbs(path) {
 		path = filepath.Join(worktree, path)
@@ -369,12 +378,12 @@ func resolveRequiredArtifactPath(store beads.Store, subject beads.Bead, rawPath 
 	path = filepath.Clean(path)
 	contained, err := requiredArtifactPathInWorktree(worktree, path)
 	if err != nil {
-		return "", "", err
+		return "", "", "", err
 	}
 	if !contained {
-		return "", "required_artifact_outside_worktree", nil
+		return "", "", "required_artifact_outside_worktree", nil
 	}
-	return path, "", nil
+	return path, worktree, "", nil
 }
 
 func requiredArtifactPathInWorktree(worktree, path string) (bool, error) {
@@ -393,6 +402,21 @@ func requiredArtifactPathInWorktree(worktree, path string) (bool, error) {
 	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && !filepath.IsAbs(rel)), nil
 }
 
+func requiredArtifactTargetInWorktree(worktree, path string) (bool, error) {
+	resolvedWorktree, err := filepath.EvalSymlinks(filepath.Clean(worktree))
+	if err != nil {
+		return false, fmt.Errorf("resolving required artifact worktree symlinks %q: %w", worktree, err)
+	}
+	resolvedPath, err := filepath.EvalSymlinks(filepath.Clean(path))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return true, nil
+		}
+		return false, fmt.Errorf("resolving required artifact path symlinks %q: %w", path, err)
+	}
+	return requiredArtifactPathInWorktree(resolvedWorktree, resolvedPath)
+}
+
 func resolveRequiredArtifactWorktree(store beads.Store, rootID string) (string, string, error) {
 	if rootID == "" {
 		return "", "missing_required_artifact_context", nil
@@ -402,7 +426,7 @@ func resolveRequiredArtifactWorktree(store beads.Store, rootID string) (string, 
 		return "", "missing_required_artifact_context", nil
 	}
 	if err != nil {
-		return "", "", fmt.Errorf("loading required artifact workflow root %s: %w", rootID, err)
+		return "", "", fmt.Errorf("loading required artifact workflow root %s: %w", rootID, markTransientControllerBoundaryError(err))
 	}
 	sourceID := strings.TrimSpace(root.Metadata["gc.source_bead_id"])
 	if sourceID == "" {
@@ -416,7 +440,7 @@ func resolveRequiredArtifactWorktree(store beads.Store, rootID string) (string, 
 		return "", "missing_required_artifact_context", nil
 	}
 	if err != nil {
-		return "", "", fmt.Errorf("loading required artifact source bead %s: %w", sourceID, err)
+		return "", "", fmt.Errorf("loading required artifact source bead %s: %w", sourceID, markTransientControllerBoundaryError(err))
 	}
 	worktree := strings.TrimSpace(source.Metadata["work_dir"])
 	if worktree == "" {
