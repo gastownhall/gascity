@@ -218,7 +218,7 @@ func TestResolveTemplateUsesRigScopeBeadsProviderForBdBackedRig(t *testing.T) {
 // {{.AgentBase}} for a city-level rig-scoped agent — one with Scope="rig" whose
 // Dir is not stamped to the rig (its work_dir is a city-level worktree), so the
 // rig association lives only in the qualified-name prefix. The session-setup
-// context flows from workdir.PathContextForQualifiedName, so the #2070
+// context flows from workdirutil.PathContextForQualifiedName, so the #2070
 // qualified-name-prefix fallback reaches pre_start templates too, not just
 // work_dir and the agent env. Without the unified context these would expand
 // empty.
