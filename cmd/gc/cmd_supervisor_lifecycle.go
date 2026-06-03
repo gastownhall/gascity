@@ -1178,8 +1178,19 @@ func systemdEnv(name, value string) string {
 	return name + "=" + strconv.Quote(value)
 }
 
+// supervisorSystemdQuotePath quotes a path for use in a systemd ExecStart line.
+// Paths that contain no spaces, double-quotes, or backslashes are returned as-is;
+// all others are wrapped in strconv.Quote to produce Go-style double-quoted strings,
+// which systemd unit parsers understand as the quoted-exec-path format.
+func supervisorSystemdQuotePath(s string) string {
+	if strings.ContainsAny(s, " \"\\") {
+		return strconv.Quote(s)
+	}
+	return s
+}
+
 func renderSupervisorTemplate(tmplStr string, data *supervisorServiceData) (string, error) {
-	funcMap := template.FuncMap{"xmlesc": xmlEscape, "systemdenv": systemdEnv, "systemdpath": strconv.Quote}
+	funcMap := template.FuncMap{"xmlesc": xmlEscape, "systemdenv": systemdEnv, "systemdpath": supervisorSystemdQuotePath}
 	tmpl, err := template.New("service").Funcs(funcMap).Parse(tmplStr)
 	if err != nil {
 		return "", err
@@ -1662,6 +1673,27 @@ func stopSupervisorSystemdForWarmRefresh(service string) ([]string, error) {
 }
 
 func installSupervisorSystemd(data *supervisorServiceData, stdout, stderr io.Writer) int {
+	// Check the binary guard before probing systemd so a refused install
+	// emits no systemctl calls.
+	path := supervisorSystemdServicePath()
+	existing, err := os.ReadFile(path)
+	hadCurrent := err == nil
+	if err != nil && !os.IsNotExist(err) {
+		fmt.Fprintf(stderr, "gc supervisor install: reading existing unit: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if hadCurrent && !supervisorInstallForce {
+		if existingBinary := supervisorSystemdExecStartBinary(string(existing)); existingBinary != "" && !supervisorSameBinary(existingBinary, data.GCPath) {
+			fmt.Fprintf(stderr, //nolint:errcheck // best-effort stderr
+				"gc supervisor install: existing unit %q references binary %q but the current gc binary resolves to %q; "+
+					"refusing to overwrite a unit installed from a different binary. "+
+					"Install gc to a stable location first (e.g. 'make install'), then rerun 'gc supervisor install'. "+
+					"To override, pass --force.\n",
+				path, existingBinary, data.GCPath)
+			return 1
+		}
+	}
+
 	// Bail out before we touch the unit file when there is no per-user
 	// systemd manager to load it. Otherwise daemon-reload + enable both
 	// fail and the rollback path tries daemon-reload again, producing
@@ -1686,26 +1718,8 @@ func installSupervisorSystemd(data *supervisorServiceData, stdout, stderr io.Wri
 		return 1
 	}
 
-	path := supervisorSystemdServicePath()
 	service := supervisorSystemdServiceName()
 	legacyPresent := legacySupervisorTargetsCurrentHome(legacySupervisorSystemdServicePath())
-	existing, err := os.ReadFile(path)
-	hadCurrent := err == nil
-	if err != nil && !os.IsNotExist(err) {
-		fmt.Fprintf(stderr, "gc supervisor install: reading existing unit: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
-	if hadCurrent && !supervisorInstallForce {
-		if existingBinary := supervisorSystemdExecStartBinary(string(existing)); existingBinary != "" && !supervisorSameBinary(existingBinary, data.GCPath) {
-			fmt.Fprintf(stderr, //nolint:errcheck // best-effort stderr
-				"gc supervisor install: existing unit %q references binary %q but the current gc binary resolves to %q; "+
-					"refusing to overwrite a unit installed from a different binary. "+
-					"Install gc to a stable location first (e.g. 'make install'), then rerun 'gc supervisor install'. "+
-					"To override, pass --force.\n",
-				path, existingBinary, data.GCPath)
-			return 1
-		}
-	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		fmt.Fprintf(stderr, "gc supervisor install: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
