@@ -659,7 +659,7 @@ func shouldRetryExecBdInit(err error) bool {
 	return strings.Contains(err.Error(), "bd schema not visible")
 }
 
-func isExecBeadsAlreadyInitializedError(err error) bool {
+func isBdAlreadyInitializedError(err error) bool {
 	if err == nil {
 		return false
 	}
@@ -810,7 +810,7 @@ func initBeadsForDir(cityPath, dir, prefix, doltDatabase string) error {
 				return err
 			}
 			if err := runProviderOpWithEnv(script, env, args...); err != nil {
-				if isExecBeadsAlreadyInitializedError(err) {
+				if isBdAlreadyInitializedError(err) {
 					return nil
 				}
 				return err
@@ -840,6 +840,9 @@ func initBeadsForDir(cityPath, dir, prefix, doltDatabase string) error {
 			}
 			env := overlayEnvEntries(baseEnv, overrides)
 			if err := runProviderOpWithEnv(script, env, args...); err != nil {
+				if isBdAlreadyInitializedError(err) {
+					return finalizeCanonicalBdScopeInit(cityPath, dir, prefix, canonicalDoltDatabase)
+				}
 				if shouldRetryExecBdInit(err) {
 					for attempt := 0; attempt < 3; attempt++ {
 						time.Sleep(time.Second)
@@ -927,6 +930,9 @@ func initDefaultRigBdStore(cityPath, dir, prefix, doltDatabase string) error {
 		args = append(args, "--database", canonicalDoltDatabase)
 	}
 	if _, err := beads.ExecCommandRunnerWithEnv(env)(dir, "bd", args...); err != nil {
+		if isBdAlreadyInitializedError(err) {
+			return finalizeCanonicalBdScopeInit(cityPath, dir, prefix, canonicalDoltDatabase)
+		}
 		return fmt.Errorf("bd init: %w", err)
 	}
 	return finalizeCanonicalBdScopeInit(cityPath, dir, prefix, canonicalDoltDatabase)
