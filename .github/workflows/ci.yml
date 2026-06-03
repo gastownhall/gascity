@@ -927,6 +927,20 @@ jobs:
         run: make install-tools
       - name: Pack compatibility tests
         run: make test-acceptance
+      - name: Live registry smoke
+        timeout-minutes: 12
+        run: |
+          for attempt in 1 2 3; do
+            if make test-pack-registry-live; then
+              exit 0
+            fi
+            if [ "$attempt" = "3" ]; then
+              exit 1
+            fi
+            sleep $((attempt * 10))
+          done
+        env:
+          GC_TEST_GASCITY_PACKS_REGISTRY: main
     env:
       DOLT_VERSION: "2.1.0"
       BD_VERSION: "v1.0.5"
