@@ -182,6 +182,37 @@ func TestNormalizeHTTPSRegistrySourcePaths(t *testing.T) {
 	}
 }
 
+func TestNormalizeSourceRejectsWindowsRegistrySources(t *testing.T) {
+	cases := []struct {
+		name    string
+		raw     string
+		wantErr string
+	}{
+		{
+			name:    "drive backslashes",
+			raw:     `C:\packs\registry.toml`,
+			wantErr: "Windows drive-letter registry sources are not supported portably",
+		},
+		{
+			name:    "drive slashes",
+			raw:     `C:/packs/registry.toml`,
+			wantErr: "Windows drive-letter registry sources are not supported portably",
+		},
+		{
+			name:    "unc backslashes",
+			raw:     `\\server\share\registry.toml`,
+			wantErr: "UNC registry sources are not supported portably",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := NormalizeSource(tc.raw); err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("NormalizeSource(%q) err = %v, want %q", tc.raw, err, tc.wantErr)
+			}
+		})
+	}
+}
+
 func TestLocalCatalogAcceptsWindowsPathSource(t *testing.T) {
 	text := strings.Replace(validCatalog, `source = "https://packages.example/lighthouse.git"`, `source = 'C:\packs\lighthouse.git'`, 1)
 	catalog, err := ParseCatalog([]byte(text))

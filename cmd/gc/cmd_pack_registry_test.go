@@ -201,6 +201,40 @@ func TestPackRegistryAddFreshHomePreservesDefaultRegistry(t *testing.T) {
 	}
 }
 
+func TestPackRegistryAddRejectsWindowsRegistrySources(t *testing.T) {
+	cases := []struct {
+		name    string
+		source  string
+		wantErr string
+	}{
+		{
+			name:    "drive letter",
+			source:  `C:\packs\registry.toml`,
+			wantErr: "Windows drive-letter registry sources are not supported portably",
+		},
+		{
+			name:    "unc",
+			source:  `\\server\share\registry.toml`,
+			wantErr: "UNC registry sources are not supported portably",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("GC_HOME", home)
+			writeEmptyRegistryConfig(t, home)
+
+			var stdout, stderr bytes.Buffer
+			if code := doPackRegistryAdd("local", tc.source, true, false, &stdout, &stderr); code == 0 {
+				t.Fatalf("add succeeded stdout=%q stderr=%q", stdout.String(), stderr.String())
+			}
+			if !strings.Contains(stderr.String(), tc.wantErr) {
+				t.Fatalf("stderr = %q, want %q", stderr.String(), tc.wantErr)
+			}
+		})
+	}
+}
+
 func TestPackRegistryRemoveMainFreshHomeWritesExplicitEmptyConfig(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("GC_HOME", home)
