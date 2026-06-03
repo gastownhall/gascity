@@ -134,10 +134,17 @@ log_level: %s
 listener:
   port: %s
   host: %s
-  max_connections: 1000
+  # Managed multi-agent cities open a short-lived bd/dolt-sql client connection
+  # per operation. When the client process exits without a clean COM_QUIT, the
+  # server holds the socket in Sleep until read_timeout fires. A 5-minute
+  # read_timeout let these dead per-call connections pile to the hundreds
+  # (200-460 idle Sleep conns observed), burning Dolt CPU managing the swarm.
+  # A 30s read_timeout reaps them promptly; bd operations are sub-second so no
+  # live connection is cut. max_connections bounds the swarm.
+  max_connections: 256
   back_log: 50
   max_connections_timeout_millis: 5000
-  read_timeout_millis: 300000
+  read_timeout_millis: 30000
   write_timeout_millis: 300000
 
 data_dir: %q
