@@ -1191,6 +1191,8 @@ func canonicalCoordStoreDir(scopeRoot string) (string, error) {
 
 func providerIsCoordStore(provider string) bool {
 	switch strings.TrimSpace(provider) {
+	// "sqlite" (pure-Go SQLite via modernc.org/sqlite; also accepts the "sqlite-cgo" alias).
+	// Both resolve to SQLiteStore; "sqlite-cgo" is preserved for operator compatibility.
 	case "sqlite", "sqlite-cgo":
 		return true
 	default:

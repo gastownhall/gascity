@@ -1,4 +1,4 @@
-//go:build cgo && gascity_native_beads
+//go:build gascity_native_beads
 
 package beads
 
@@ -651,7 +651,7 @@ func TestDoltliteReadStoreMetadataFilterFindsMatchBehindLimit(t *testing.T) {
 }
 
 func TestDoltliteMetadataFilterPredicatesMatchStringValues(t *testing.T) {
-	db, err := sql.Open("sqlite3", ":memory:")
+	db, err := sql.Open("sqlite", ":memory:")
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
@@ -808,7 +808,7 @@ func newTestDoltliteReadStore(t *testing.T) (*DoltliteReadStore, func()) {
 		t.Fatalf("mkdir doltlite dir: %v", err)
 	}
 	dbPath := filepath.Join(dbDir, "hq.db")
-	db, err := sql.Open("sqlite3", dbPath+"?_busy_timeout=10000")
+	db, err := sql.Open("sqlite", dbPath+"?_busy_timeout=10000")
 	if err != nil {
 		t.Fatalf("open doltlite fixture db: %v", err)
 	}
@@ -1170,7 +1170,7 @@ func openTestDoltliteWriter(t *testing.T, readDB *sql.DB) *sql.DB {
 		t.Fatal("main database path not found")
 	}
 
-	writer, err := sql.Open("sqlite3", "file:"+dbPath+"?mode=rw&_busy_timeout=10000")
+	writer, err := sql.Open("sqlite", "file:"+dbPath+"?mode=rw&_busy_timeout=10000")
 	if err != nil {
 		t.Fatalf("open writable doltlite db: %v", err)
 	}
