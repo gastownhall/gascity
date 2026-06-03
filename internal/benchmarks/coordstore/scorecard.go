@@ -78,12 +78,14 @@ var DiscoveryTargets = []Target{
 	},
 }
 
-// HeapInusePeakTarget is the memory ceiling from discovery.md: the store must
-// hold its working set in a bounded heap. Source: docs/coordination-store/
-// discovery.md §Targets (RAM ≤ 256MB HeapInuse peak).
+// HeapInusePeakTarget is retained as an informational threshold (256 MiB).
+// The primary memory gate is HeapInuseDeltaTarget (workload-induced growth);
+// HeapInusePeak is reported for visibility but does not fail the scorecard.
 const HeapInusePeakTarget = 256 * 1024 * 1024
 
 // HeapInuseDeltaTarget is the maximum workload-induced heap growth allowed.
+// This is the primary MemPass gate: HeapInuseDelta (peak minus baseline) must
+// stay at or below this value for the memory check to pass.
 const HeapInuseDeltaTarget = 256 * 1024 * 1024
 
 // MemReport captures memory consumption observed during a workload run.
