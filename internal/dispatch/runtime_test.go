@@ -7493,32 +7493,26 @@ func TestRunRalphCheckRejectsAbsoluteCheckPathSymlinkOutsideTrustedRoots(t *test
 	}
 }
 
-// TestRunRalphCheckRejectsAbsoluteWorkDirOutsideRoots pins the
-// gastownhall/gascity#2354 review fix: work_dir is the only path on
-// runRalphCheck's hot path that comes from caller-influenceable
-// metadata (sling API vars → bead metadata). If work_dir resolves
-// outside both cityPath and storePath, it must be rejected before it
-// becomes the `base` argument to convergence.ResolveConditionPath —
-// otherwise the OR-containment relaxation lets a relative gc.check_path
-// land anywhere the caller controls.
-func TestRunRalphCheckRejectsAbsoluteWorkDirOutsideRoots(t *testing.T) {
+// TestRunRalphCheckAllowsAbsoluteWorkDirOutsideRoots pins the PR-review
+// worktree contract: adopted PR worktrees are sibling directories outside
+// both the city and store roots, and ralph checks must be able to run
+// check scripts from that worktree when gc.work_dir points there.
+func TestRunRalphCheckAllowsAbsoluteWorkDirOutsideRoots(t *testing.T) {
 	parent := t.TempDir()
 	cityPath := filepath.Join(parent, "city")
 	storePath := filepath.Join(parent, "rig")
-	attackerDir := filepath.Join(parent, "attacker")
+	worktreeDir := filepath.Join(parent, "worktree")
 	if err := os.MkdirAll(cityPath, 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
 	if err := os.MkdirAll(storePath, 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
-	if err := os.MkdirAll(attackerDir, 0o755); err != nil {
+	if err := os.MkdirAll(worktreeDir, 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
-	// Plant a real script in attackerDir so the rejection cannot be
-	// blamed on a missing file — the failure must be the work_dir guard.
-	if err := os.WriteFile(filepath.Join(attackerDir, "check.sh"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
-		t.Fatalf("write attacker script: %v", err)
+	if err := os.WriteFile(filepath.Join(worktreeDir, "check.sh"), []byte("#!/bin/sh\necho \"$GC_WORK_DIR\"\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write worktree script: %v", err)
 	}
 
 	store := beads.NewMemStore()
@@ -7527,46 +7521,47 @@ func TestRunRalphCheckRejectsAbsoluteWorkDirOutsideRoots(t *testing.T) {
 		Type: "task",
 		Metadata: map[string]string{
 			"gc.check_path":    "check.sh",
-			"gc.work_dir":      attackerDir, // absolute, outside both roots
+			"gc.work_dir":      worktreeDir, // absolute, outside both roots
 			"gc.check_timeout": "30s",
 		},
 	}
 	subject := beads.Bead{ID: "run-abs-workdir", Type: "task"}
 
-	_, err := runRalphCheck(store, check, subject, 1, ProcessOptions{
+	result, err := runRalphCheck(store, check, subject, 1, ProcessOptions{
 		CityPath:  cityPath,
 		StorePath: storePath,
 	})
-	if err == nil {
-		t.Fatal("expected work_dir escape rejection, got nil")
+	if err != nil {
+		t.Fatalf("runRalphCheck: %v", err)
 	}
-	if !strings.Contains(err.Error(), "work_dir") || !strings.Contains(err.Error(), "escapes") {
-		t.Errorf("expected work_dir escape error, got: %v", err)
+	if result.Outcome != "pass" {
+		t.Fatalf("Outcome = %q, want pass (stderr=%q)", result.Outcome, result.Stderr)
+	}
+	if !strings.Contains(result.Stdout, worktreeDir) {
+		t.Fatalf("stdout = %q, want GC_WORK_DIR %q", result.Stdout, worktreeDir)
 	}
 }
 
-// TestRunRalphCheckRejectsRelativeWorkDirOutsideRoots pins the
-// companion case for relative work_dir values that traverse upward
-// out of storePath. The pre-2354 envelope-only check would still
-// reject because the resolved path escaped envelope; with the
-// OR-containment relaxation, the new ralph.go guard is what closes
-// this vector.
-func TestRunRalphCheckRejectsRelativeWorkDirOutsideRoots(t *testing.T) {
+// TestRunRalphCheckAllowsRelativeWorkDirOutsideRoots covers relative work_dir
+// values that resolve outside storePath. The resolved work_dir becomes the
+// base for relative check paths, and the lower-level condition resolver still
+// validates the script under that base.
+func TestRunRalphCheckAllowsRelativeWorkDirOutsideRoots(t *testing.T) {
 	parent := t.TempDir()
 	cityPath := filepath.Join(parent, "city")
 	storePath := filepath.Join(parent, "rig")
-	attackerDir := filepath.Join(parent, "attacker")
+	worktreeDir := filepath.Join(parent, "worktree")
 	if err := os.MkdirAll(cityPath, 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
 	if err := os.MkdirAll(storePath, 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
-	if err := os.MkdirAll(attackerDir, 0o755); err != nil {
+	if err := os.MkdirAll(worktreeDir, 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(attackerDir, "check.sh"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
-		t.Fatalf("write attacker script: %v", err)
+	if err := os.WriteFile(filepath.Join(worktreeDir, "check.sh"), []byte("#!/bin/sh\necho \"$GC_WORK_DIR\"\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write worktree script: %v", err)
 	}
 
 	store := beads.NewMemStore()
@@ -7575,21 +7570,24 @@ func TestRunRalphCheckRejectsRelativeWorkDirOutsideRoots(t *testing.T) {
 		Type: "task",
 		Metadata: map[string]string{
 			"gc.check_path":    "check.sh",
-			"gc.work_dir":      "../attacker", // joins under storePath, escapes both roots
+			"gc.work_dir":      "../worktree", // joins under storePath, outside city/store roots
 			"gc.check_timeout": "30s",
 		},
 	}
 	subject := beads.Bead{ID: "run-rel-workdir", Type: "task"}
 
-	_, err := runRalphCheck(store, check, subject, 1, ProcessOptions{
+	result, err := runRalphCheck(store, check, subject, 1, ProcessOptions{
 		CityPath:  cityPath,
 		StorePath: storePath,
 	})
-	if err == nil {
-		t.Fatal("expected work_dir traversal rejection, got nil")
+	if err != nil {
+		t.Fatalf("runRalphCheck: %v", err)
 	}
-	if !strings.Contains(err.Error(), "work_dir") || !strings.Contains(err.Error(), "escapes") {
-		t.Errorf("expected work_dir escape error, got: %v", err)
+	if result.Outcome != "pass" {
+		t.Fatalf("Outcome = %q, want pass (stderr=%q)", result.Outcome, result.Stderr)
+	}
+	if !strings.Contains(result.Stdout, worktreeDir) {
+		t.Fatalf("stdout = %q, want GC_WORK_DIR %q", result.Stdout, worktreeDir)
 	}
 }
 
