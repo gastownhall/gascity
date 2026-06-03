@@ -411,7 +411,16 @@ func TestDoltliteReadStoreHandlesNullDescription(t *testing.T) {
 	}
 }
 
-func TestDoltliteReadStoreBeforeFiltersUseDriverNativeTimestamps(t *testing.T) {
+// TestDoltliteReadStoreBeforeFiltersRespectCutoff verifies that the CreatedBefore
+// and UpdatedBefore list filters return only rows whose timestamps precede the
+// cutoff. Timestamps are seeded in the store's canonical SQLite text format
+// (doltliteSQLiteTime) because the before-filters compare with SQLite julianday()
+// and parse with parseTimeString, both of which require ISO-8601 text. Binding a
+// raw time.Time instead delegates formatting to the SQL driver:
+// github.com/mattn/go-sqlite3 emitted ISO text, but modernc.org/sqlite emits
+// time.Time.String() (e.g. "2026-06-01 07:00:00 +0000 UTC"), which julianday()
+// cannot parse — the filter would then drop every row. See ga-p7ipsu.
+func TestDoltliteReadStoreBeforeFiltersRespectCutoff(t *testing.T) {
 	store, closeStore := newTestDoltliteReadStore(t)
 	defer closeStore()
 	writer := openTestDoltliteWriter(t, store.db)
@@ -430,7 +439,7 @@ func TestDoltliteReadStoreBeforeFiltersUseDriverNativeTimestamps(t *testing.T) {
 			id, title, status, issue_type, priority, created_at, updated_at,
 			assignee, description, design, acceptance_criteria, notes, metadata
 		) VALUES (?, ?, 'open', 'task', 2, ?, ?, 'rig/native-time', '', '', '', '', '{}')`,
-			issue.id, issue.id, issue.createdAt, issue.updatedAt); err != nil {
+			issue.id, issue.id, doltliteSQLiteTime(issue.createdAt), doltliteSQLiteTime(issue.updatedAt)); err != nil {
 			t.Fatalf("insert native timestamp issue %s: %v", issue.id, err)
 		}
 	}
