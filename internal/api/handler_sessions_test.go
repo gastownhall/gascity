@@ -2804,7 +2804,7 @@ func TestMaterializeNamedSessionStampsProviderFamilyMetadata(t *testing.T) {
 		MaxActiveSessions: intPtr(1),
 	}}
 	fs.cfg.Providers = map[string]config.ProviderSpec{
-		"claude-max": {Base: &base},
+		"claude-max": {Base: &base, PathCheck: "true"},
 	}
 	srv := New(fs)
 
