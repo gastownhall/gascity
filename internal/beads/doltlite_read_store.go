@@ -1019,6 +1019,7 @@ func parseTimeString(s string) time.Time {
 	for _, layout := range []string{
 		time.RFC3339Nano,
 		"2006-01-02 15:04:05.999999999-07:00",
+		"2006-01-02 15:04:05.999999999 -0700 MST", // time.Time.String() — modernc default write format
 		"2006-01-02 15:04:05.999999999",
 		"2006-01-02 15:04:05",
 	} {
