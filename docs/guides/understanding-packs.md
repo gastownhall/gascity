@@ -296,6 +296,14 @@ mean.
 Use registry search when you know the kind of capability you want but not the
 exact pack name.
 
+If the public first-party registry is not configured on this machine yet, add
+and refresh it first:
+
+```text
+$ gc pack registry add main https://github.com/gastownhall/gascity-packs.git
+$ gc pack registry refresh main
+```
+
 ```text
 $ gc pack registry search gascity
 ```
@@ -329,11 +337,18 @@ Releases:
   0.1.0 v0.1.0 d3617d1319a
 ```
 
+Release versions and commit pins change as the registry publishes new pack
+releases; use your local `gc pack registry show` output as the current source
+of truth.
+
 The `Import commands` lines are ready to paste. The first command accepts the
 shown release or any newer release that matches the constraint. The second
 command pins exactly the shown release. Both commands write durable import TOML
 using the `Source` line and the selected `version`; the registry handle stays
 out of the file.
+
+For the short community-facing registry path and the current first-party pack
+list, see [Public Registry Packs](/guides/registry-showcase).
 
 ### Install Or Check Imports
 
@@ -410,6 +425,7 @@ state.
 
 | Task | Command or file |
 |---|---|
+| Add the public first-party registry | `gc pack registry add main https://github.com/gastownhall/gascity-packs.git` |
 | See configured catalogs | `gc pack registry list` |
 | Refresh cached catalog records | `gc pack registry refresh` |
 | Search for a reusable pack | `gc pack registry search` |

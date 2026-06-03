@@ -10,21 +10,37 @@ Gas City publishes first-party reusable packs through the public
 checked-in `pack.toml` still records durable GitHub tree URLs and optional
 version constraints.
 
-Add the public registry locally:
+## One-Page Setup
+
+1. Add the public registry locally:
 
 ```bash
 gc pack registry add main https://github.com/gastownhall/gascity-packs.git
 gc pack registry refresh main
 ```
 
-Search and inspect entries:
+2. Search and inspect entries:
 
 ```bash
 gc pack registry search gascity
 gc pack registry show main:gascity
 ```
 
-When you decide to use a pack, prefer the import command printed by
+3. Use the import command printed by `show`:
+
+```bash
+gc import add https://github.com/gastownhall/gascity-packs/tree/main/gascity --name gascity --version '>=0.1.0'
+```
+
+4. Install and validate the authored import:
+
+```bash
+gc import install
+gc import check
+gc config show --validate
+```
+
+When you decide to use a pack, prefer the exact command printed by
 `gc pack registry show`. It writes a durable `source` URL and optional
 `version`; it does not write the local registry handle into `pack.toml`.
 
