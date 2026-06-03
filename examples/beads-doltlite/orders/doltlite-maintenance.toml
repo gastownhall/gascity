@@ -1,0 +1,5 @@
+[order]
+description = "Run doltlite maintenance (flatten + gc) periodically"
+trigger = "cooldown"
+interval = "1h"
+exec = "gc doltlite flatten --json && gc doltlite gc --json"

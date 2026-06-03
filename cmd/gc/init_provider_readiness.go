@@ -547,8 +547,9 @@ var initRunVersion = func(binary string) (string, error) {
 
 // Minimum versions for beads-provider binaries.
 const (
-	doltMinVersion = doltversion.ManagedMin // sql-server features used by gc-beads-bd
-	bdMinVersion   = "1.0.4"                // BdStore shell-out interface, including bd create --id
+	doltMinVersion     = doltversion.ManagedMin // sql-server features used by gc-beads-bd
+	bdMinVersion       = "1.0.4"                // BdStore shell-out interface, including bd create --id
+	bdDoltliteMinVersion = "1.0.3"              // DoltLite bd fork minimum version
 )
 
 // checkHardDependencies verifies that all required binaries are available
@@ -566,6 +567,12 @@ func checkHardDependencies(cityPath string) []missingDep {
 	}
 
 	needsBd := initNeedsBdTooling(cityPath)
+	needsDolt := needsBd && !cityUsesDoltliteBeadsBackend(cityPath)
+
+	bdMin := bdMinVersion
+	if needsBd && cityUsesDoltliteBeadsBackend(cityPath) {
+		bdMin = bdDoltliteMinVersion
+	}
 
 	deps := []dep{
 		{
@@ -584,12 +591,12 @@ func checkHardDependencies(cityPath string) []missingDep {
 			name:        "dolt",
 			installHint: "https://github.com/dolthub/dolt/releases",
 			minVersion:  doltMinVersion,
-			condition:   func() bool { return needsBd },
+			condition:   func() bool { return needsDolt },
 		},
 		{
 			name:        "bd",
 			installHint: "https://github.com/gastownhall/beads/releases",
-			minVersion:  bdMinVersion,
+			minVersion:  bdMin,
 			condition:   func() bool { return needsBd },
 		},
 		{
@@ -693,6 +700,9 @@ func checkDoltAuthorIdentity(cityPath string) doltAuthorIdentityStatus {
 
 func initNeedsLocalDoltIdentity(cityPath string) bool {
 	if gcDoltSkip() {
+		return false
+	}
+	if cityUsesDoltliteBeadsBackend(cityPath) {
 		return false
 	}
 

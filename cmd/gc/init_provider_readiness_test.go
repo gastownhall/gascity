@@ -781,7 +781,7 @@ func TestCmdInitSkipProviderReadinessBypassesBlockedProvider(t *testing.T) {
 	t.Cleanup(func() { registerCityWithSupervisorTestHook = oldRegister })
 
 	var stdout, stderr bytes.Buffer
-	code = cmdInitWithOptions([]string{cityPath}, "", "", "", &stdout, &stderr, true, false)
+	code = cmdInitWithOptions([]string{cityPath}, "", "", "", "", &stdout, &stderr, true, false)
 	if code != 0 {
 		t.Fatalf("cmdInitWithOptions = %d, want 0: %s", code, stderr.String())
 	}

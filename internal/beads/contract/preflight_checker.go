@@ -47,7 +47,7 @@ func (c PreflightChecker) Check(scope string) (PreflightResult, error) {
 		c.checkBDContextAgreement(metadata, bdCtx, bdCtxErr),
 		c.checkDoltModeSafe(metadata, bdCtx, bdCtxErr),
 		c.checkIdentityMatch(scope, metadata),
-		c.checkVersionCompat(bdCtx, bdCtxErr),
+		c.checkVersionCompat(metadata, bdCtx, bdCtxErr),
 		c.checkContractShape(metadata),
 	}
 	verdict := preflightVerdictForChecks(checks)
@@ -122,6 +122,8 @@ func (c PreflightChecker) checkMetadataBackend(metadata preflightMetadata) Prefl
 	switch metadata.Backend {
 	case "dolt":
 		return NewPreflightCheckResult(PreflightCheckMetadataBackend, PreflightCheckPass, "Metadata backend is dolt", details)
+	case "doltlite":
+		return NewPreflightCheckResult(PreflightCheckMetadataBackend, PreflightCheckPass, "Metadata backend is doltlite", details)
 	case "postgres":
 		if hasDSN && !hasSplit {
 			return NewPreflightCheckResult(PreflightCheckMetadataBackend, PreflightCheckWarn, "Metadata backend is postgres (postgres_dsn form)", details)
@@ -187,6 +189,9 @@ func (c PreflightChecker) checkIdentityMatch(scope string, metadata preflightMet
 	if metadata.ProjectID == "" {
 		return NewPreflightCheckResult(PreflightCheckIdentityMatch, PreflightCheckFail, "metadata project_id is missing", details)
 	}
+	if metadata.Backend == "doltlite" {
+		return NewPreflightCheckResult(PreflightCheckIdentityMatch, PreflightCheckPass, "identity match not required for doltlite backend", details)
+	}
 	if c.DatabaseProjectID == nil {
 		return NewPreflightCheckResult(PreflightCheckIdentityMatch, PreflightCheckWarn, "database project_id reader is not configured", details)
 	}
@@ -201,7 +206,7 @@ func (c PreflightChecker) checkIdentityMatch(scope string, metadata preflightMet
 	return NewPreflightCheckResult(PreflightCheckIdentityMatch, PreflightCheckPass, "project_id matches", details)
 }
 
-func (c PreflightChecker) checkVersionCompat(ctx PreflightBDContext, err error) PreflightCheckResult {
+func (c PreflightChecker) checkVersionCompat(metadata preflightMetadata, ctx PreflightBDContext, err error) PreflightCheckResult {
 	libraryVersion := strings.TrimPrefix(strings.TrimSpace(c.BeadsLibraryVersion), "v")
 	if libraryVersion == "" {
 		libraryVersion = strings.TrimPrefix(beadsModuleVersion(), "v")
@@ -219,6 +224,12 @@ func (c PreflightChecker) checkVersionCompat(ctx PreflightBDContext, err error) 
 	}
 	if ctx.BDVersion == "" || libraryVersion == "" || libraryVersion == "(devel)" {
 		return NewPreflightCheckResult(PreflightCheckVersionCompat, PreflightCheckWarn, "bd/beads version compatibility could not be confirmed", details)
+	}
+	if metadata.Backend == "doltlite" {
+		if compareVersionStrings(strings.TrimPrefix(ctx.BDVersion, "v"), "1.0.3") >= 0 {
+			return NewPreflightCheckResult(PreflightCheckVersionCompat, PreflightCheckPass, "bd and doltlite versions compatible", details)
+		}
+		return NewPreflightCheckResult(PreflightCheckVersionCompat, PreflightCheckFail, "bd version too old for doltlite (need >= 1.0.3)", details)
 	}
 	if strings.TrimPrefix(ctx.BDVersion, "v") != libraryVersion {
 		return NewPreflightCheckResult(PreflightCheckVersionCompat, PreflightCheckFail, "bd version differs from linked beads library version", details)
@@ -249,6 +260,11 @@ func (c PreflightChecker) checkContractShape(metadata preflightMetadata) Preflig
 			return NewPreflightCheckResult(PreflightCheckContractShape, PreflightCheckFail, "dolt metadata contains postgres fields", details)
 		}
 		return NewPreflightCheckResult(PreflightCheckContractShape, PreflightCheckPass, "Metadata uses dolt shape", details)
+	case "doltlite":
+		if hasDSN || hasSplit {
+			return NewPreflightCheckResult(PreflightCheckContractShape, PreflightCheckFail, "doltlite metadata contains postgres fields", details)
+		}
+		return NewPreflightCheckResult(PreflightCheckContractShape, PreflightCheckPass, "Metadata uses doltlite shape", details)
 	case "postgres":
 		if hasDSN {
 			return NewPreflightCheckResult(PreflightCheckContractShape, PreflightCheckWarn, "postgres_dsn present; Gas City expects split fields", details)
@@ -292,6 +308,27 @@ func beadsModuleVersion() string {
 		}
 	}
 	return ""
+}
+
+func compareVersionStrings(a, b string) int {
+	aParts := strings.Split(a, ".")
+	bParts := strings.Split(b, ".")
+	for i := 0; i < len(aParts) || i < len(bParts); i++ {
+		var ai, bi int
+		if i < len(aParts) {
+			fmt.Sscanf(aParts[i], "%d", &ai)
+		}
+		if i < len(bParts) {
+			fmt.Sscanf(bParts[i], "%d", &bi)
+		}
+		if ai < bi {
+			return -1
+		}
+		if ai > bi {
+			return 1
+		}
+	}
+	return 0
 }
 
 type preflightMetadata struct {

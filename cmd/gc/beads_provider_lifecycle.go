@@ -482,14 +482,16 @@ func normalizeCanonicalBdScopeFilesForInit(cityPath, dir, prefix, doltDatabase s
 		// Preserve legacy probe metadata during startup normalization so old
 		// scopes can still boot and migrate deliberately. New init paths still
 		// reject this reserved name when it is not already pinned in metadata.
+		if cityUsesDoltliteBeadsBackend(cityPath) {
+			return ensureCanonicalDoltliteScopeMetadataForInit(fsys.OSFS{}, dir, doltDatabase)
+		}
 		return ensureCanonicalScopeMetadataForInit(fsys.OSFS{}, dir, doltDatabase)
+	}
+	if cityUsesDoltliteBeadsBackend(cityPath) {
+		return enforceCanonicalDoltliteScopeMetadataForInit(fsys.OSFS{}, dir, doltDatabase)
 	}
 	return enforceCanonicalScopeMetadataForInit(fsys.OSFS{}, dir, doltDatabase)
 }
-
-// initAndHookDir is the atomic unit of bead store initialization:
-// init the directory, then install event hooks. The ordering matters
-// because init (bd init) may recreate .beads/ and wipe existing hooks.
 func initAndHookDir(cityPath, dir, prefix string) error {
 	if usesPostgres, err := scopeUsesPostgresBackendForInit(cityPath, dir); err != nil {
 		return err
@@ -509,7 +511,7 @@ func initAndHookDir(cityPath, dir, prefix string) error {
 	if err := normalizeCanonicalBdScopeFilesForInit(cityPath, dir, prefix, doltDatabase); err != nil {
 		return err
 	}
-	if cityUsesBdStoreContract(cityPath) && currentResolvableManagedDoltPort(cityPath) != "" {
+	if cityUsesBdStoreContract(cityPath) && !cityUsesDoltliteBeadsBackend(cityPath) && currentResolvableManagedDoltPort(cityPath) != "" {
 		if err := syncManagedDoltPortMirrors(cityPath); err != nil {
 			return fmt.Errorf("sync managed dolt port mirrors after init: %w", err)
 		}
@@ -1473,6 +1475,11 @@ func ensureCanonicalScopeMetadataForInit(fs fsys.FS, scopeRoot, doltDatabase str
 //nolint:unparam // keep fs seam for future testable FS injection
 func ensureCanonicalDoltliteScopeMetadataForInit(fs fsys.FS, scopeRoot, doltDatabase string) error {
 	return ensureCanonicalDoltliteScopeMetadata(fs, scopeRoot, doltDatabase, true)
+}
+
+//nolint:unparam // keep fs seam for future testable FS injection
+func enforceCanonicalDoltliteScopeMetadataForInit(fs fsys.FS, scopeRoot, doltDatabase string) error {
+	return ensureCanonicalDoltliteScopeMetadata(fs, scopeRoot, doltDatabase, false)
 }
 
 //nolint:unparam // keep fs seam for future testable FS injection

@@ -2222,10 +2222,10 @@ doltlite_bd_schema_ready() {
 run_bd_doltlite_init() {
     local dir="$1" prefix="$2" database="$3" reinit="${4:-false}"
     if [ "$reinit" = true ]; then
-        run_bd_doltlite "$dir" init --reinit-local --quiet -p "$prefix" --database "$database" --skip-hooks --skip-agents || die "bd doltlite init failed for $dir"
+        run_bd_doltlite "$dir" init --backend doltlite --reinit-local --quiet -p "$prefix" --database "$database" --skip-hooks --skip-agents || die "bd doltlite init failed for $dir"
         return 0
     fi
-    run_bd_doltlite "$dir" init --quiet -p "$prefix" --database "$database" --skip-hooks --skip-agents || die "bd doltlite init failed for $dir"
+    run_bd_doltlite "$dir" init --backend doltlite --quiet -p "$prefix" --database "$database" --skip-hooks --skip-agents || die "bd doltlite init failed for $dir"
 }
 
 ensure_doltlite_bd_schema() {
