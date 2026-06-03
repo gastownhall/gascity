@@ -237,7 +237,7 @@ func TestClassifyRetryAttemptWithPostconditionsRequiresArtifact(t *testing.T) {
 	}
 }
 
-func TestClassifyRetryAttemptWithPostconditionsRejectsArtifactSymlinkOutsideWorktree(t *testing.T) {
+func TestClassifyRetryAttemptWithPostconditionsRejectsRelativeArtifactSymlinkOutsideWorktree(t *testing.T) {
 	t.Parallel()
 
 	worktree := t.TempDir()
@@ -451,7 +451,7 @@ func TestClassifyRetryAttemptWithPostconditionsRejectsArtifactOutsideWorktreeBef
 	}
 }
 
-func TestClassifyRetryAttemptWithPostconditionsRejectsArtifactSymlinkOutsideWorktree(t *testing.T) {
+func TestClassifyRetryAttemptWithPostconditionsRejectsAbsoluteArtifactSymlinkOutsideWorktree(t *testing.T) {
 	t.Parallel()
 
 	worktree := t.TempDir()
