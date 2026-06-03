@@ -5793,6 +5793,8 @@ func TestInstallSupervisorSystemdRefreshesStaleTmpExecStart(t *testing.T) {
 
 	oldRun := supervisorSystemctlRun
 	oldActive := supervisorSystemctlActive
+	oldForce := supervisorInstallForce
+	supervisorInstallForce = true // recovering a stale ExecStart requires --force
 	var calls []string
 	supervisorSystemctlRun = func(args ...string) error {
 		call := strings.Join(args, " ")
@@ -5814,6 +5816,7 @@ func TestInstallSupervisorSystemdRefreshesStaleTmpExecStart(t *testing.T) {
 	t.Cleanup(func() {
 		supervisorSystemctlRun = oldRun
 		supervisorSystemctlActive = oldActive
+		supervisorInstallForce = oldForce
 	})
 
 	var stdout, stderr bytes.Buffer

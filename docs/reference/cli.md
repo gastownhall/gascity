@@ -3521,8 +3521,12 @@ Install the machine-wide supervisor as a platform service that
 starts on login.
 
 ```
-gc supervisor install
+gc supervisor install [flags]
 ```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--force` | bool |  | overwrite an existing service unit even if it references a different gc binary |
 
 ## gc supervisor logs
 
