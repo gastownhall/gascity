@@ -239,7 +239,7 @@ Sessions are designed to be disposable.
 The controller probes
 them for liveness, and if one stalls it can restart it with backoff. If a
 session crashes, the controller can replace it. If the
-controler crashes and a session is alive and well, the controller can adopt it.
+controller crashes and a session is alive and well, the controller can adopt it.
 
 Because the work is a
 bead and the assignment is a hook on that bead, nothing is lost when a session
