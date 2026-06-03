@@ -907,5 +907,14 @@ func managedDoltTestParentDone(rawFD string) (<-chan struct{}, func(), error) {
 // doltServerEnv returns the environment applied to every managed dolt
 // sql-server we launch.
 func doltServerEnv(parent []string) []string {
-	return append([]string(nil), parent...)
+	env := append([]string(nil), parent...)
+	// Disable Dolt usage telemetry for managed servers. The `dolt send-metrics`
+	// event-flush reporter spawns transient `dolt send-metrics` processes that
+	// were observed burning 80-94% CPU on a busy managed city — a hidden cost
+	// dwarfing the actual query/commit load. This sits alongside the
+	// dolt_stats_enabled / auto_gc_enabled = OFF system variables already set in
+	// the managed dolt config (cmd_dolt_config.go): a managed Gas City server is
+	// not a telemetry source we want phoning home on the hot path.
+	env = append(env, "DOLT_DISABLE_EVENT_FLUSH=true")
+	return env
 }
