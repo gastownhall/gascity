@@ -63,8 +63,22 @@ func TestDoltServerEnv_RespectsUserOverride(t *testing.T) {
 func TestDoltServerEnv_PreservesEmptyUserValue(t *testing.T) {
 	parent := []string{"DOLT_GC_SCHEDULER="}
 	out := doltServerEnv(parent)
-	if len(out) != 1 || out[0] != "DOLT_GC_SCHEDULER=" {
+	// The explicit empty-value parent entry must be preserved exactly, and the
+	// managed-server telemetry disable must be appended.
+	var hasParent, hasTelemetryDisable bool
+	for _, kv := range out {
+		switch kv {
+		case "DOLT_GC_SCHEDULER=":
+			hasParent = true
+		case "DOLT_DISABLE_EVENT_FLUSH=true":
+			hasTelemetryDisable = true
+		}
+	}
+	if !hasParent {
 		t.Fatalf("explicit empty-value env not preserved: %v", out)
+	}
+	if !hasTelemetryDisable {
+		t.Fatalf("managed Dolt env should disable telemetry event flush: %v", out)
 	}
 }
 
