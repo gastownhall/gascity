@@ -1,6 +1,20 @@
 description = """
 Generate activity digest for the mayor.
 
+After claiming this vapor wisp, run:
+
+```bash
+gc bd formula show mol-digest-generate --json
+```
+
+Follow the step descriptions in order. When finished, close this bead, then run:
+
+```bash
+gc runtime drain-ack
+```
+
+The drain-ack tells the controller this session is done.
+
 This is a **periodic formula** — dispatched by the deacon's
 `periodic-formulas` step when the cooldown trigger elapses. Configured
 in `city.toml` under `[formulas]`:
@@ -30,9 +44,7 @@ The digest is mailed to the mayor and archived as a digest bead.
 
 Read each step's description before acting — Config values override defaults."""
 formula = "mol-digest-generate"
-
-[requires]
-formula_compiler = ">=2.0.0"
+phase = "vapor"
 
 [vars]
 [vars.period]

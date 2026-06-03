@@ -1634,6 +1634,88 @@ func TestGastownWarrantCreateCommandsUseCreateMetadata(t *testing.T) {
 	}
 }
 
+func TestDogAndDigestVaporFormulasHaveNoCompilerRequirement(t *testing.T) {
+	dir := exampleDir()
+	checks := []struct {
+		rel     string
+		formula string
+	}{
+		{"../dolt/formulas/mol-dog-backup.toml", "mol-dog-backup"},
+		{"../dolt/formulas/mol-dog-doctor.toml", "mol-dog-doctor"},
+		{"../dolt/formulas/mol-dog-phantom-db.toml", "mol-dog-phantom-db"},
+		{"../dolt/formulas/mol-dog-stale-db.toml", "mol-dog-stale-db"},
+		{"packs/maintenance/formulas/mol-dog-jsonl.toml", "mol-dog-jsonl"},
+		{"packs/maintenance/formulas/mol-dog-reaper.toml", "mol-dog-reaper"},
+		{"packs/maintenance/formulas/mol-shutdown-dance.toml", "mol-shutdown-dance"},
+		{"packs/gastown/formulas/mol-digest-generate.toml", "mol-digest-generate"},
+	}
+	for _, check := range checks {
+		path := filepath.Join(dir, check.rel)
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("reading %s: %v", check.rel, err)
+		}
+		body := string(data)
+		var decoded struct {
+			Formula  string            `toml:"formula"`
+			Phase    string            `toml:"phase"`
+			Requires map[string]string `toml:"requires"`
+		}
+		if _, err := toml.Decode(body, &decoded); err != nil {
+			t.Fatalf("decoding %s: %v", check.rel, err)
+		}
+		if decoded.Formula != check.formula {
+			t.Errorf("%s formula = %q, want %q", check.rel, decoded.Formula, check.formula)
+		}
+		if decoded.Phase != "vapor" {
+			t.Errorf("%s phase = %q, want vapor", check.rel, decoded.Phase)
+		}
+		if decoded.Requires["formula_compiler"] != "" || strings.Contains(body, "formula_compiler") {
+			t.Errorf("%s must not require formula_compiler", check.rel)
+		}
+		assertContainsInOrder(t, body,
+			"After claiming this vapor wisp",
+			"gc bd formula show "+check.formula+" --json",
+			"gc runtime drain-ack",
+		)
+	}
+}
+
+func TestDogStartupPromptUsesClaimFirstAssignedReadyPlaceholder(t *testing.T) {
+	dir := exampleDir()
+	checks := []string{
+		"packs/maintenance/agents/dog/prompt.template.md",
+		"packs/maintenance/template-fragments/propulsion.template.md",
+		"packs/gastown/template-fragments/propulsion.template.md",
+	}
+	for _, rel := range checks {
+		data, err := os.ReadFile(filepath.Join(dir, rel))
+		if err != nil {
+			t.Fatalf("reading %s: %v", rel, err)
+		}
+		body := string(data)
+		if !strings.Contains(body, "{{ .AssignedReadyQuery }}") {
+			t.Errorf("%s missing AssignedReadyQuery placeholder", rel)
+		}
+		if strings.Contains(body, `gc bd ready --assignee="$GC_SESSION_NAME"`) {
+			t.Errorf("%s hardcodes assigned-ready bd command instead of compatibility-aware placeholder", rel)
+		}
+	}
+
+	dogPrompt, err := os.ReadFile(filepath.Join(dir, "packs/maintenance/agents/dog/prompt.template.md"))
+	if err != nil {
+		t.Fatalf("reading dog prompt: %v", err)
+	}
+	assertContainsInOrder(t, string(dogPrompt),
+		"## Startup Protocol",
+		"CLAIM-FIRST INVARIANT",
+		"{{ .AssignedReadyQuery }}",
+		"{{ .WorkQuery }}",
+		"gc bd update <id> --claim",
+		"gc bd show <id> --json",
+	)
+}
+
 func TestGastownRigTargetShellExpressionsRenderForRigAndHQ(t *testing.T) {
 	tests := []struct {
 		name      string

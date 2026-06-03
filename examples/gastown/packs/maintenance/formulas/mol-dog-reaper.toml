@@ -1,6 +1,20 @@
 description = """
 Reap stale wisps across Dolt databases and close stale issues in the city DB.
 
+After claiming this vapor wisp, run:
+
+```bash
+gc bd formula show mol-dog-reaper --json
+```
+
+Follow the step descriptions in order. When finished, close this bead, then run:
+
+```bash
+gc runtime drain-ack
+```
+
+The drain-ack tells the controller this session is done.
+
 The Reaper Dog closes stale non-closed wisps only when parent-child
 dependency data proves the parent is closed, purges closed wisps
 older than the purge threshold, and auto-closes stale issues only in the city
@@ -80,9 +94,7 @@ The Dog should watch for and flag:
 
 Read each step's description before acting — Config values override defaults."""
 formula = "mol-dog-reaper"
-
-[requires]
-formula_compiler = ">=2.0.0"
+phase = "vapor"
 
 [vars]
 [vars.max_age]

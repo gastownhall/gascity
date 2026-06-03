@@ -1,6 +1,20 @@
 description = """
 Sync Dolt database backups to local and offsite storage.
 
+After claiming this vapor wisp, run:
+
+```bash
+gc bd formula show mol-dog-backup --json
+```
+
+Follow the step descriptions in order. When finished, close this bead, then run:
+
+```bash
+gc runtime drain-ack
+```
+
+The drain-ack tells the controller this session is done.
+
 The Backup Dog discovers configured backup remotes for each production
 database, syncs them, then rsyncs the local backup directory to offsite
 storage for replication.
@@ -27,6 +41,7 @@ overwrites the backup destination, but that is the intended behavior.
 
 Read each step's description before acting — Config values override defaults."""
 formula = "mol-dog-backup"
+phase = "vapor"
 
 [vars]
 [vars.databases]

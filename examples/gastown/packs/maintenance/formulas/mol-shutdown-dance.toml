@@ -1,6 +1,20 @@
 description = """
 Shutdown dance — due process for stuck agents.
 
+After claiming this vapor wisp, run:
+
+```bash
+gc bd formula show mol-shutdown-dance --json
+```
+
+Follow the step descriptions in order. When finished, close this bead, then run:
+
+```bash
+gc runtime drain-ack
+```
+
+The drain-ack tells the controller this session is done.
+
 Dispatched by filing a warrant bead routed to the dog pool:
 
 ```bash
@@ -46,6 +60,7 @@ recovery mechanism for all stuck agents.
 
 Read each step's description before acting — Config values override defaults."""
 formula = "mol-shutdown-dance"
+phase = "vapor"
 
 [vars]
 [vars.warrant_id]
