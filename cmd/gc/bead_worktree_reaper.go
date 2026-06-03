@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -23,10 +24,14 @@ func reapClosedBeadWorktrees(
 	cityPath string,
 	cfg *config.City,
 	rigBeadStores map[string]beads.Store,
+	rec events.Recorder,
 	stderr io.Writer,
 ) int {
 	if stderr == nil {
 		stderr = io.Discard
+	}
+	if rec == nil {
+		rec = events.Discard
 	}
 	if cfg == nil || len(rigBeadStores) == 0 {
 		return 0
@@ -95,13 +100,29 @@ func reapClosedBeadWorktrees(
 			hasStashes, _ := wg.HasStashesResult()
 
 			if hasUncommitted || hasUnpushed || hasStashes {
+				reason := fmt.Sprintf("uncommitted=%v unpushed=%v stashes=%v", hasUncommitted, hasUnpushed, hasStashes)
 				fmt.Fprintf(stderr, //nolint:errcheck
-					"reapClosedBeadWorktrees: skipping %s (bead %s closed but unsafe: uncommitted=%v unpushed=%v stashes=%v) [event:%s]\n",
-					worktreePath, beadID, hasUncommitted, hasUnpushed, hasStashes,
-					events.BeadWorktreeReapSkipped,
+					"reapClosedBeadWorktrees: skipping %s (bead %s closed but unsafe: %s)\n",
+					worktreePath, beadID, reason,
 				)
+				if raw, err := json.Marshal(events.BeadWorktreeReapSkippedPayload{
+					BeadID: beadID,
+					Path:   worktreePath,
+					Rig:    rigName,
+					Reason: reason,
+				}); err == nil {
+					rec.Record(events.Event{
+						Type:    events.BeadWorktreeReapSkipped,
+						Actor:   "gc",
+						Subject: beadID,
+						Payload: raw,
+					})
+				}
 				continue
 			}
+
+			// Capture branch before removal — the worktree dir will be gone after.
+			branch, _ := wg.CurrentBranch()
 
 			// Remove the worktree. git worktree remove must be run from the
 			// main repo root, not from within the worktree being removed.
@@ -110,11 +131,23 @@ func reapClosedBeadWorktrees(
 				fmt.Fprintf(stderr, "reapClosedBeadWorktrees: removing %s: %v\n", worktreePath, err) //nolint:errcheck
 				continue
 			}
-
 			fmt.Fprintf(stderr, //nolint:errcheck
-				"reapClosedBeadWorktrees: removed worktree %s for closed bead %s [event:%s]\n",
-				worktreePath, beadID, events.BeadWorktreeReaped,
+				"reapClosedBeadWorktrees: removed worktree %s for closed bead %s\n",
+				worktreePath, beadID,
 			)
+			if raw, err := json.Marshal(events.BeadWorktreeReapedPayload{
+				BeadID: beadID,
+				Path:   worktreePath,
+				Rig:    rigName,
+				Branch: branch,
+			}); err == nil {
+				rec.Record(events.Event{
+					Type:    events.BeadWorktreeReaped,
+					Actor:   "gc",
+					Subject: beadID,
+					Payload: raw,
+				})
+			}
 			reaped++
 		}
 	}
