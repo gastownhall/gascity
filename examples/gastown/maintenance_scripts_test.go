@@ -2291,6 +2291,26 @@ func TestReaperFormulaSQLReflectsCurrentSchema(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadFile(%s): %v", path, err)
 	}
+	formula := string(data)
+
+	for _, stalePhrase := range []string{
+		"Total open wisps (for alert threshold)",
+		"If total open wisps",
+		"Open wisp count exceeding",
+	} {
+		if strings.Contains(formula, stalePhrase) {
+			t.Errorf("formula still describes total-open-wisp alerting with %q; reaper alerts on stale non-message open wisps", stalePhrase)
+		}
+	}
+	for _, required := range []string{
+		"Stale non-message open wisps (for alert threshold)",
+		"issue_type NOT IN ('message')",
+		"created_at < DATE_SUB(NOW(), INTERVAL <max_age_hours> HOUR)",
+	} {
+		if !strings.Contains(formula, required) {
+			t.Errorf("formula is missing stale-only alert text/query fragment %q", required)
+		}
+	}
 
 	// Extract every ```sql ... ``` fence body and scan only those — prose
 	// warnings about the deprecated patterns are intentional and must not

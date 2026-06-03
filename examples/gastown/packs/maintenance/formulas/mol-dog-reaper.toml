@@ -153,9 +153,11 @@ AND id NOT IN (
   AND child_wisp.status IN ('open', 'hooked', 'in_progress')
 );
 
--- Total open wisps (for alert threshold)
+-- Stale non-message open wisps (for alert threshold)
 SELECT COUNT(*) FROM wisps
-WHERE status IN ('open', 'hooked', 'in_progress');
+WHERE status IN ('open', 'hooked', 'in_progress')
+AND issue_type NOT IN ('message')
+AND created_at < DATE_SUB(NOW(), INTERVAL <max_age_hours> HOUR);
 ```
 
 Mail is not a SQL table — do not query it via Dolt. Mail messages are
@@ -163,7 +165,7 @@ beads with Type=message; any mail cleanup goes through `bd`.
 
 **3. Check for anomalies:**
 - Sudden spikes in stale non-closed wisps vs previous cycle
-- Open wisp count exceeding {{alert_threshold}}
+- Stale non-message open wisps exceeding {{alert_threshold}}
 
 **4. Decide whether to proceed:**
 - If no candidates found across all databases, skip remaining steps
@@ -223,8 +225,9 @@ AND id IN (
 - Any errors encountered
 
 **4. Alert check:**
-If total open wisps across all databases exceed {{alert_threshold}},
-log a warning and consider escalating.
+If stale non-message open wisps across all databases exceed
+{{alert_threshold}}, log a warning and consider escalating. Fresh workflow load
+can legitimately exceed the raw open-wisp threshold on busy cities.
 
 **Exit criteria:** Stale non-closed wisps counted; only stale wisps with closed parents closed."""
 
@@ -334,7 +337,7 @@ gc mail send mayor/ -s "ESCALATION: Reaper anomalies detected [MEDIUM]" \
 
 **3. Signal completion:**
 ```bash
-gc session nudge deacon/ "DOG_DONE: reaper — stale_wisps:<count>, closed_wisps:<count>, purged:<count>, closed:<count>, skipped_non_city_issues:<count>"
+gc session nudge deacon/ "DOG_DONE: reaper — stale_wisps:<count>, closed_wisps:<count>, purged:<count>, sessions-pruned:<count>, closed:<count>, skipped_non_city_issues:<count>, mail_wisps:<count>[, would_close_wisps:<count> (dry run)]"
 ```
 
 **4. Close work and exit:**
