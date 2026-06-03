@@ -15,6 +15,7 @@ import (
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
+	"github.com/gastownhall/gascity/internal/pidutil"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/sessionlog"
 )
@@ -623,10 +624,27 @@ func existingSessionSubmitPollerPID(pidPath string) (bool, error) {
 	if _, err := fmt.Sscanf(pidText, "%d", &pid); err != nil || pid <= 0 {
 		return false, nil
 	}
-	if err := syscall.Kill(pid, 0); err == nil || errors.Is(err, syscall.EPERM) {
+	if pidutil.AliveWithCmdline(pid, submitPollerCmdlineMatcher(submitPollerSessionNameFromPIDPath(pidPath))) {
 		return true, nil
 	}
 	return false, nil
+}
+
+func submitPollerSessionNameFromPIDPath(pidPath string) string {
+	base := filepath.Base(pidPath)
+	return strings.TrimSuffix(base, ".pid")
+}
+
+func submitPollerCmdlineMatcher(sessionName string) func([]string) bool {
+	return func(argv []string) bool {
+		if !pidutil.ArgvContainsSequence(argv, "nudge", "poll") {
+			return false
+		}
+		if sessionName == "" {
+			return true
+		}
+		return pidutil.ArgvHasFlagValue(argv, "--session", sessionName)
+	}
 }
 
 func writeSessionSubmitPollerPID(pidPath string, pid int) error {

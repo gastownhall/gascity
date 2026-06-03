@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	goruntime "runtime"
 	"strings"
 	"testing"
 	"time"
@@ -2955,6 +2956,28 @@ func TestAcquireNudgePollerLeaseAllowsBootstrapPID(t *testing.T) {
 	_, err = os.Stat(pidPath)
 	if !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("pid file still exists after release: %v", err)
+	}
+}
+
+func TestExistingPollerPIDRejectsUnrelatedLivePID(t *testing.T) {
+	if goruntime.GOOS != "linux" {
+		t.Skip("poller ownership check uses /proc on linux")
+	}
+	dir := t.TempDir()
+	pidPath := nudgePollerPIDPath(dir, "sess-worker")
+	if err := os.MkdirAll(filepath.Dir(pidPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(pidPath, []byte(fmt.Sprintf("%d\n", os.Getpid())), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	running, err := existingPollerPID(pidPath)
+	if err != nil {
+		t.Fatalf("existingPollerPID: %v", err)
+	}
+	if running {
+		t.Fatalf("existingPollerPID(%q) = true for unrelated live PID %d", pidPath, os.Getpid())
 	}
 }
 

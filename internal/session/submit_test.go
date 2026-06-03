@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	goruntime "runtime"
 	"strings"
 	"testing"
 	"time"
@@ -459,6 +460,28 @@ func TestEnsureSessionSubmitPollerRejectsGoTestExecutable(t *testing.T) {
 	}
 	if _, statErr := os.Stat(sessionSubmitPollerLogPath(cityPath, "s-test")); !errors.Is(statErr, os.ErrNotExist) {
 		t.Fatalf("poller log file stat error = %v, want not exist", statErr)
+	}
+}
+
+func TestExistingSessionSubmitPollerPIDRejectsUnrelatedLivePID(t *testing.T) {
+	if goruntime.GOOS != "linux" {
+		t.Skip("poller ownership check uses /proc on linux")
+	}
+	cityPath := t.TempDir()
+	pidPath := sessionSubmitPollerPIDPath(cityPath, "s-test")
+	if err := os.MkdirAll(filepath.Dir(pidPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(pidPath, []byte(fmt.Sprintf("%d\n", os.Getpid())), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	running, err := existingSessionSubmitPollerPID(pidPath)
+	if err != nil {
+		t.Fatalf("existingSessionSubmitPollerPID: %v", err)
+	}
+	if running {
+		t.Fatalf("existingSessionSubmitPollerPID(%q) = true for unrelated live PID %d", pidPath, os.Getpid())
 	}
 }
 

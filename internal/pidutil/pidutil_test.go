@@ -47,3 +47,27 @@ func TestPSReportsZombieReturnsWhenPSHangs(t *testing.T) {
 		t.Fatalf("psReportsZombie took %s, want bounded timeout", elapsed)
 	}
 }
+
+func TestAliveWithCmdlineRejectsUnrelatedLivePID(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("cmdline detection uses /proc on linux")
+	}
+
+	if AliveWithCmdline(os.Getpid(), func(_ []string) bool {
+		return false
+	}) {
+		t.Fatalf("AliveWithCmdline(%d) = true for non-matching cmdline", os.Getpid())
+	}
+}
+
+func TestAliveWithCmdlineAcceptsMatchingLivePID(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("cmdline detection uses /proc on linux")
+	}
+
+	if !AliveWithCmdline(os.Getpid(), func(argv []string) bool {
+		return len(argv) > 0 && strings.Contains(filepath.Base(argv[0]), "pidutil")
+	}) {
+		t.Fatalf("AliveWithCmdline(%d) = false for matching cmdline", os.Getpid())
+	}
+}
