@@ -368,6 +368,9 @@ func IsTransientControllerError(err error) bool {
 		"too many connections",
 		"lock wait timeout",
 		"deadlock found",
+		"database is locked",
+		"database table is locked",
+		"sqlite_busy",
 	}
 	for _, needle := range transientNeedles {
 		if strings.Contains(msg, needle) {

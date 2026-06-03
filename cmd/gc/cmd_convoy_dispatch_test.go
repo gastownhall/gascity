@@ -2933,6 +2933,71 @@ exit 1
 	}
 }
 
+func TestWorkflowServeControlReadyQueryKeepsSuccessfulBDStderrOutOfJSON(t *testing.T) {
+	query := workflowServeControlReadyQuery(
+		config.Agent{Name: config.ControlDispatcherAgentName, Dir: "gascity"},
+		"gascity--control-dispatcher",
+	)
+	tmp := t.TempDir()
+	logPath := filepath.Join(tmp, "bd.log")
+	bdPath := filepath.Join(tmp, "bd")
+	if err := os.WriteFile(bdPath, []byte(`#!/bin/sh
+set -eu
+printf '%s\n' "$*" >> "$BD_LOG"
+case "$*" in
+  "--readonly --sandbox ready --include-ephemeral --assignee=gascity--control-dispatcher --exclude-type=epic --json --limit=20")
+    printf '[{"id":"ga-control-ready"}]'
+    printf 'notice: refreshed export metadata\n' >&2
+    ;;
+  *)
+    printf '[]'
+    ;;
+esac
+`), 0o755); err != nil {
+		t.Fatalf("write fake bd: %v", err)
+	}
+	out, err := shellWorkQueryWithEnv(query, t.TempDir(), []string{
+		"PATH=" + tmp + string(os.PathListSeparator) + os.Getenv("PATH"),
+		"BD_LOG=" + logPath,
+		"GC_SESSION_NAME=gascity--control-dispatcher",
+		"GC_ALIAS=gascity/control-dispatcher",
+	})
+	if err != nil {
+		t.Fatalf("run workflow serve query: %v", err)
+	}
+	assertJSONEqual(t, out, `[{"id":"ga-control-ready"}]`)
+}
+
+func TestWorkflowServeControlReadyQueryFailsOnMalformedBDJSON(t *testing.T) {
+	query := workflowServeControlReadyQuery(
+		config.Agent{Name: config.ControlDispatcherAgentName, Dir: "gascity"},
+		"gascity--control-dispatcher",
+	)
+	tmp := t.TempDir()
+	bdPath := filepath.Join(tmp, "bd")
+	if err := os.WriteFile(bdPath, []byte(`#!/bin/sh
+set -eu
+case "$*" in
+  "--readonly --sandbox ready --include-ephemeral --assignee=gascity--control-dispatcher --exclude-type=epic --json --limit=20")
+    printf 'not-json'
+    ;;
+  *)
+    printf '[]'
+    ;;
+esac
+`), 0o755); err != nil {
+		t.Fatalf("write fake bd: %v", err)
+	}
+	_, err := shellWorkQueryWithEnv(query, t.TempDir(), []string{
+		"PATH=" + tmp + string(os.PathListSeparator) + os.Getenv("PATH"),
+		"GC_SESSION_NAME=gascity--control-dispatcher",
+		"GC_ALIAS=gascity/control-dispatcher",
+	})
+	if err == nil {
+		t.Fatal("workflow serve query succeeded with malformed bd JSON")
+	}
+}
+
 func TestWorkflowServeControlReadyQueryPrioritizesConfiguredRuntimeName(t *testing.T) {
 	query := workflowServeControlReadyQuery(
 		config.Agent{Name: config.ControlDispatcherAgentName, Dir: "gascity"},

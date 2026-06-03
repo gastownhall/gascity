@@ -682,8 +682,8 @@ func workflowServeControlReadyQuery(agentCfg config.Agent, controlSessionNames .
 	}
 	query := queryPrefix + ` sh -c '` +
 		`set -e; ` +
-		`tmp=$(mktemp); seen="$tmp.seen"; : > "$seen"; trap "rm -f \"$tmp\" \"$seen\"" EXIT; ` +
-		`emit_ready() { r=$("$@" 2>&1) || { status=$?; printf "%s\n" "$r" >&2; return "$status"; }; [ -n "$r" ] && [ "$r" != "[]" ] && printf "%s\n" "$r" >> "$tmp"; return 0; }; ` +
+		`tmp=$(mktemp); seen="$tmp.seen"; err="$tmp.err"; : > "$seen"; trap "rm -f \"$tmp\" \"$seen\" \"$err\"" EXIT; ` +
+		`emit_ready() { r=$("$@" 2>"$err") || { status=$?; [ -n "$r" ] && printf "%s\n" "$r" >&2; cat "$err" >&2; return "$status"; }; [ -n "$r" ] && [ "$r" != "[]" ] && printf "%s\n" "$r" >> "$tmp"; return 0; }; ` +
 		`assignee_ready() { cand="$1"; [ -z "$cand" ] && return 0; if grep -Fxq "$cand" "$seen"; then return 0; fi; printf "%s\n" "$cand" >> "$seen"; ` +
 		`emit_ready bd --readonly --sandbox ready --include-ephemeral --assignee="$cand" --exclude-type=epic --json --limit=` + limit + `; }; ` +
 		`routed_ready() { route="$1"; [ -z "$route" ] && return 0; ` +
@@ -700,7 +700,7 @@ func workflowServeControlReadyQuery(agentCfg config.Agent, controlSessionNames .
 		`done; ` +
 		`routed_ready "$GC_CONTROL_TARGET"; ` +
 		`routed_ready "${GC_CONTROL_LEGACY_TARGET:-}"; ` +
-		`[ -s "$tmp" ] && jq -s "reduce add[] as \$item ([]; if any(.[]; .id == \$item.id) then . else . + [\$item] end)" "$tmp" || printf "[]"` + `'`
+		`if [ -s "$tmp" ]; then jq -s "reduce add[] as \$item ([]; if any(.[]; .id == \$item.id) then . else . + [\$item] end)" "$tmp"; else printf "[]"; fi` + `'`
 	return query
 }
 
