@@ -564,7 +564,7 @@ var (
 func ensureSessionSubmitPoller(cityPath, agentName, sessionName string) error {
 	pidPath := sessionSubmitPollerPIDPath(cityPath, sessionName)
 	return withSessionSubmitPollerPIDLock(pidPath, func() error {
-		if running, _ := existingSessionSubmitPollerPID(pidPath); running {
+		if running, _ := existingSessionSubmitPollerPID(pidPath, cityPath, sessionName); running {
 			return nil
 		}
 		exe, err := sessionSubmitPollerExecutable()
@@ -608,7 +608,7 @@ func sessionSubmitPollerLogPath(cityPath, sessionName string) string {
 	return citylayout.RuntimePath(cityPath, "nudges", "pollers", sessionName+".log")
 }
 
-func existingSessionSubmitPollerPID(pidPath string) (bool, error) {
+func existingSessionSubmitPollerPID(pidPath, cityPath, sessionName string) (bool, error) {
 	data, err := os.ReadFile(pidPath)
 	if errors.Is(err, os.ErrNotExist) {
 		return false, nil
@@ -624,26 +624,25 @@ func existingSessionSubmitPollerPID(pidPath string) (bool, error) {
 	if _, err := fmt.Sscanf(pidText, "%d", &pid); err != nil || pid <= 0 {
 		return false, nil
 	}
-	if pidutil.AliveWithCmdline(pid, submitPollerCmdlineMatcher(submitPollerSessionNameFromPIDPath(pidPath))) {
+	if cityPath == "" || sessionName == "" {
+		return false, nil
+	}
+	if pidutil.AliveWithCmdline(pid, submitPollerCmdlineMatcher(cityPath, sessionName)) {
 		return true, nil
 	}
 	return false, nil
 }
 
-func submitPollerSessionNameFromPIDPath(pidPath string) string {
-	base := filepath.Base(pidPath)
-	return strings.TrimSuffix(base, ".pid")
-}
-
-func submitPollerCmdlineMatcher(sessionName string) func([]string) bool {
+func submitPollerCmdlineMatcher(cityPath, sessionName string) func([]string) bool {
 	return func(argv []string) bool {
+		if cityPath == "" || sessionName == "" {
+			return false
+		}
 		if !pidutil.ArgvContainsSequence(argv, "nudge", "poll") {
 			return false
 		}
-		if sessionName == "" {
-			return true
-		}
-		return pidutil.ArgvHasFlagValue(argv, "--session", sessionName)
+		return pidutil.ArgvHasFlagValue(argv, "--city", cityPath) &&
+			pidutil.ArgvHasFlagValue(argv, "--session", sessionName)
 	}
 }
 

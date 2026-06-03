@@ -1177,7 +1177,7 @@ func terminalizeBlockedQueuedNudges(cityPath string, blocked map[string][]queued
 func ensureNudgePoller(cityPath, agentName, sessionName string) error {
 	pidPath := nudgePollerPIDPath(cityPath, sessionName)
 	return withNudgePollerPIDLock(pidPath, func() error {
-		if running, _ := existingPollerPID(pidPath); running {
+		if running, _ := existingPollerPID(pidPath, cityPath, sessionName); running {
 			return nil
 		}
 		exe, err := os.Executable()
@@ -1924,7 +1924,7 @@ func acquireNudgePollerLease(cityPath, sessionName string) (func(), error) {
 		case err == nil && strings.TrimSpace(string(current)) == strings.TrimSpace(string(pid)):
 			return nil
 		case err == nil:
-			if running, _ := existingPollerPID(pidPath); running {
+			if running, _ := existingPollerPID(pidPath, cityPath, sessionName); running {
 				return errNudgePollerRunning
 			}
 		case !errors.Is(err, os.ErrNotExist):
@@ -1938,7 +1938,7 @@ func acquireNudgePollerLease(cityPath, sessionName string) (func(), error) {
 	return release, nil
 }
 
-func existingPollerPID(pidPath string) (bool, error) {
+func existingPollerPID(pidPath, cityPath, sessionName string) (bool, error) {
 	data, err := os.ReadFile(pidPath)
 	if errors.Is(err, os.ErrNotExist) {
 		return false, nil
@@ -1954,26 +1954,25 @@ func existingPollerPID(pidPath string) (bool, error) {
 	if _, err := fmt.Sscanf(pidText, "%d", &pid); err != nil || pid <= 0 {
 		return false, nil
 	}
-	if pidutil.AliveWithCmdline(pid, nudgePollerCmdlineMatcher(pollerSessionNameFromPIDPath(pidPath))) {
+	if cityPath == "" || sessionName == "" {
+		return false, nil
+	}
+	if pidutil.AliveWithCmdline(pid, nudgePollerCmdlineMatcher(cityPath, sessionName)) {
 		return true, nil
 	}
 	return false, nil
 }
 
-func pollerSessionNameFromPIDPath(pidPath string) string {
-	base := filepath.Base(pidPath)
-	return strings.TrimSuffix(base, ".pid")
-}
-
-func nudgePollerCmdlineMatcher(sessionName string) func([]string) bool {
+func nudgePollerCmdlineMatcher(cityPath, sessionName string) func([]string) bool {
 	return func(argv []string) bool {
+		if cityPath == "" || sessionName == "" {
+			return false
+		}
 		if !pidutil.ArgvContainsSequence(argv, "nudge", "poll") {
 			return false
 		}
-		if sessionName == "" {
-			return true
-		}
-		return pidutil.ArgvHasFlagValue(argv, "--session", sessionName)
+		return pidutil.ArgvHasFlagValue(argv, "--city", cityPath) &&
+			pidutil.ArgvHasFlagValue(argv, "--session", sessionName)
 	}
 }
 
