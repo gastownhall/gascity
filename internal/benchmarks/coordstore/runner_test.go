@@ -152,7 +152,6 @@ func (a *purgeTrackingAdapter) RecentScan(context.Context, int) ([]Record, error
 	return nil, nil
 }
 func (a *purgeTrackingAdapter) Stats(context.Context) map[string]int64 { return nil }
-import "testing"
 
 func TestHeapInuseDelta(t *testing.T) {
 	tests := []struct {
