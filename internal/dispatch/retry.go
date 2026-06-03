@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/pathutil"
 )
 
 func processRetryEval(store beads.Store, bead beads.Bead, opts ProcessOptions) (ControlResult, error) {
@@ -386,11 +387,7 @@ func requiredArtifactPathInWorktree(worktree, path string) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("resolving required artifact path %q: %w", path, err)
 	}
-	rel, err := filepath.Rel(absWorktree, absPath)
-	if err != nil {
-		return false, fmt.Errorf("checking required artifact path containment for %q: %w", path, err)
-	}
-	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && !filepath.IsAbs(rel)), nil
+	return pathutil.PathWithin(absWorktree, absPath), nil
 }
 
 func resolveRequiredArtifactWorktree(store beads.Store, rootID string) (string, string, error) {
