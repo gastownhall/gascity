@@ -20,6 +20,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/extmsg"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/nudgepoller"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/pidutil"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -1184,7 +1185,7 @@ func ensureNudgePoller(cityPath, agentName, sessionName string) error {
 		if err != nil {
 			return err
 		}
-		cmd := exec.Command(exe, "nudge", "poll", "--city", cityPath, "--session", sessionName, agentName)
+		cmd := exec.Command(exe, nudgepoller.CommandArgs(cityPath, sessionName, agentName)...)
 		cmd.Env = os.Environ()
 		cmd.Stdout = io.Discard
 		cmd.Stderr = io.Discard
@@ -1957,23 +1958,10 @@ func existingPollerPID(pidPath, cityPath, sessionName string) (bool, error) {
 	if cityPath == "" || sessionName == "" {
 		return false, nil
 	}
-	if pidutil.AliveWithCmdline(pid, nudgePollerCmdlineMatcher(cityPath, sessionName)) {
+	if pidutil.AliveWithCmdline(pid, nudgepoller.CmdlineMatcher(cityPath, sessionName)) {
 		return true, nil
 	}
 	return false, nil
-}
-
-func nudgePollerCmdlineMatcher(cityPath, sessionName string) func([]string) bool {
-	return func(argv []string) bool {
-		if cityPath == "" || sessionName == "" {
-			return false
-		}
-		if !pidutil.ArgvContainsSequence(argv, "nudge", "poll") {
-			return false
-		}
-		return pidutil.ArgvHasFlagValue(argv, "--city", cityPath) &&
-			pidutil.ArgvHasFlagValue(argv, "--session", sessionName)
-	}
 }
 
 func writeNudgePollerPID(pidPath string, pid int) error {

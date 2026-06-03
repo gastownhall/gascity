@@ -16,6 +16,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/nudgepoller"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
@@ -3031,23 +3032,13 @@ func TestExistingPollerPIDRejectsDifferentCitySameSession(t *testing.T) {
 	}
 }
 
-func TestNudgePollerCmdlineMatcherRequiresCityAndSession(t *testing.T) {
-	argv := []string{"gc", "nudge", "poll", "--city", "/tmp/city", "--session", "sess-worker", "agent"}
-	if nudgePollerCmdlineMatcher("", "sess-worker")(argv) {
-		t.Fatal("nudgePollerCmdlineMatcher matched empty city")
-	}
-	if nudgePollerCmdlineMatcher("/tmp/city", "")(argv) {
-		t.Fatal("nudgePollerCmdlineMatcher matched empty session")
-	}
-}
-
 func startPollerLikeProcess(t *testing.T, cityPath, sessionName string) *exec.Cmd {
 	t.Helper()
 	scriptPath := filepath.Join(t.TempDir(), "gc-fake")
 	if err := os.WriteFile(scriptPath, []byte("#!/bin/sh\nread _hold\n"), 0o755); err != nil {
 		t.Fatalf("WriteFile(fake poller): %v", err)
 	}
-	cmd := exec.Command(scriptPath, "nudge", "poll", "--city", cityPath, "--session", sessionName, "agent")
+	cmd := exec.Command(scriptPath, nudgepoller.CommandArgs(cityPath, sessionName, "agent")...)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		t.Fatalf("StdinPipe(fake poller): %v", err)

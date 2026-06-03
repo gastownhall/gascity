@@ -14,6 +14,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/nudgepoller"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/pidutil"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -574,7 +575,7 @@ func ensureSessionSubmitPoller(cityPath, agentName, sessionName string) error {
 		if isGoTestExecutable(exe) {
 			return fmt.Errorf("refusing to start nudge poller with Go test binary %q", exe)
 		}
-		cmd := exec.Command(exe, "nudge", "poll", "--city", cityPath, "--session", sessionName, agentName)
+		cmd := exec.Command(exe, nudgepoller.CommandArgs(cityPath, sessionName, agentName)...)
 		cmd.Env = os.Environ()
 		logFile, err := os.OpenFile(sessionSubmitPollerLogPath(cityPath, sessionName), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
 		if err != nil {
@@ -627,23 +628,10 @@ func existingSessionSubmitPollerPID(pidPath, cityPath, sessionName string) (bool
 	if cityPath == "" || sessionName == "" {
 		return false, nil
 	}
-	if pidutil.AliveWithCmdline(pid, submitPollerCmdlineMatcher(cityPath, sessionName)) {
+	if pidutil.AliveWithCmdline(pid, nudgepoller.CmdlineMatcher(cityPath, sessionName)) {
 		return true, nil
 	}
 	return false, nil
-}
-
-func submitPollerCmdlineMatcher(cityPath, sessionName string) func([]string) bool {
-	return func(argv []string) bool {
-		if cityPath == "" || sessionName == "" {
-			return false
-		}
-		if !pidutil.ArgvContainsSequence(argv, "nudge", "poll") {
-			return false
-		}
-		return pidutil.ArgvHasFlagValue(argv, "--city", cityPath) &&
-			pidutil.ArgvHasFlagValue(argv, "--session", sessionName)
-	}
 }
 
 func writeSessionSubmitPollerPID(pidPath string, pid int) error {
