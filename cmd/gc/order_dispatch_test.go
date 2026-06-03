@@ -7295,72 +7295,142 @@ func TestOrderDispatchSingleFlightLockFailsClosedOnPartialTierError(t *testing.T
 	}
 }
 
-// spyCloseStore is a beads.Store wrapper that records CloseStore calls.
-type spyCloseStore struct {
-	beads.Store
-	mu         sync.Mutex
-	closeCalls int
+// --- dispatch() store-handle close regression tests (ga-anio6p) ---
+//
+// dispatch() must close every store handle it opens each pass via
+// closeBeadStoreHandle, which type-asserts for interface{ CloseStore() error }.
+
+// dispatchCloseStoreSpy wraps MemStore and counts CloseStore() calls. The
+// method is invoked by dispatch()'s deferred cleanup; not called concurrently.
+type dispatchCloseStoreSpy struct {
+	*beads.MemStore
+	closed   int
+	closeErr error
 }
 
-func (s *spyCloseStore) CloseStore() error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.closeCalls++
-	return nil
+func (s *dispatchCloseStoreSpy) CloseStore() error {
+	s.closed++
+	return s.closeErr
 }
 
-// TestDispatchClosesPerTickStores asserts that dispatch() calls CloseStore on
-// every store it opens during a tick. This is the regression test for the
-// per-tick store leak fixed by the deferred cleanup loop in dispatch().
-func TestDispatchClosesPerTickStores(t *testing.T) {
-	const ticks = 5
+// newDispatchCloseStoreSpyFn returns an orderStoreFunc that appends a fresh
+// dispatchCloseStoreSpy to *spies on each call and returns it as a Store.
+func newDispatchCloseStoreSpyFn(spies *[]*dispatchCloseStoreSpy) orderStoreFunc {
+	return func(_ execStoreTarget) (beads.Store, error) {
+		spy := &dispatchCloseStoreSpy{MemStore: beads.NewMemStore()}
+		*spies = append(*spies, spy)
+		return spy, nil
+	}
+}
 
-	var mu sync.Mutex
-	var totalCloseCalls int
-	var spies []*spyCloseStore
+func TestDispatchClosesEveryOpenedStoreHandle(t *testing.T) {
+	var spies []*dispatchCloseStoreSpy
+	m := &memoryOrderDispatcher{
+		aa: []orders.Order{{
+			Name:     "noop",
+			Trigger:  "cooldown",
+			Interval: "1m",
+			Exec:     "true",
+		}},
+		storeFn: newDispatchCloseStoreSpyFn(&spies),
+		execRun: func(_ context.Context, _, _ string, _ []string) ([]byte, error) { return nil, nil },
+		rec:     events.Discard,
+		stderr:  &bytes.Buffer{},
+		cfg:     &config.City{},
+	}
 
-	dispatchCtx, dispatchCancel := context.WithCancel(context.Background())
-	t.Cleanup(dispatchCancel)
+	m.dispatch(context.Background(), t.TempDir(), time.Now())
+
+	if len(spies) == 0 {
+		t.Fatal("storeFn never called: expected at least one store to be opened")
+	}
+	for i, spy := range spies {
+		if spy.closed != 1 {
+			t.Errorf("store[%d]: CloseStore() called %d times, want 1", i, spy.closed)
+		}
+	}
+	time.Sleep(50 * time.Millisecond) // let dispatchOne goroutines finish
+}
+
+func TestDispatchClosesRigAndLegacyCityStoreHandles(t *testing.T) {
+	var spies []*dispatchCloseStoreSpy
+	cityPath := t.TempDir()
+	rigPath := t.TempDir()
 
 	m := &memoryOrderDispatcher{
 		aa: []orders.Order{{
-			Name:     "test-order",
+			Name:     "rig-noop",
+			Rig:      "worker",
 			Trigger:  "cooldown",
-			Interval: "1ms",
+			Interval: "1m",
+			Exec:     "true",
 		}},
-		storeFn: func(_ execStoreTarget) (beads.Store, error) {
-			spy := &spyCloseStore{Store: beads.NewMemStore()}
-			mu.Lock()
-			spies = append(spies, spy)
-			mu.Unlock()
-			return spy, nil
+		storeFn: newDispatchCloseStoreSpyFn(&spies),
+		execRun: func(_ context.Context, _, _ string, _ []string) ([]byte, error) { return nil, nil },
+		rec:     events.Discard,
+		stderr:  &bytes.Buffer{},
+		cfg: &config.City{
+			Rigs: []config.Rig{{Name: "worker", Path: rigPath}},
 		},
-		rec:         events.Discard,
-		stderr:      lockedStderr(&bytes.Buffer{}),
-		cfg:         &config.City{},
-		dispatchCtx: dispatchCtx,
 	}
 
-	cityPath := t.TempDir()
-	for i := 0; i < ticks; i++ {
-		m.dispatch(context.Background(), cityPath, time.Now())
-	}
-	m.drain(context.Background())
+	m.dispatch(context.Background(), cityPath, time.Now())
 
-	mu.Lock()
-	for _, spy := range spies {
-		spy.mu.Lock()
-		totalCloseCalls += spy.closeCalls
-		spy.mu.Unlock()
+	if len(spies) != 2 {
+		t.Fatalf("storeFn called %d times, want 2 (rig + legacy city fallback)", len(spies))
 	}
-	openCount := len(spies)
-	mu.Unlock()
+	for i, spy := range spies {
+		if spy.closed != 1 {
+			t.Errorf("store[%d]: CloseStore() called %d times, want 1", i, spy.closed)
+		}
+	}
+	time.Sleep(50 * time.Millisecond)
+}
 
-	if openCount == 0 {
-		t.Fatal("storeFn was never called; test setup may be wrong (order never triggered)")
+func TestDispatchDeduplicatesStoreHandlesAcrossOrders(t *testing.T) {
+	var spies []*dispatchCloseStoreSpy
+	m := &memoryOrderDispatcher{
+		aa: []orders.Order{
+			{Name: "order-a", Trigger: "cooldown", Interval: "1m", Exec: "true"},
+			{Name: "order-b", Trigger: "cooldown", Interval: "1m", Exec: "true"},
+		},
+		storeFn: newDispatchCloseStoreSpyFn(&spies),
+		execRun: func(_ context.Context, _, _ string, _ []string) ([]byte, error) { return nil, nil },
+		rec:     events.Discard,
+		stderr:  &bytes.Buffer{},
+		cfg:     &config.City{},
 	}
-	if totalCloseCalls != openCount {
-		t.Fatalf("CloseStore called %d times for %d opened stores across %d ticks; want equal counts — per-tick store leak not fixed",
-			totalCloseCalls, openCount, ticks)
+
+	m.dispatch(context.Background(), t.TempDir(), time.Now())
+
+	if len(spies) != 1 {
+		t.Fatalf("storeFn called %d times, want 1 (same target deduped across orders)", len(spies))
+	}
+	if spies[0].closed != 1 {
+		t.Errorf("CloseStore() called %d times, want 1", spies[0].closed)
+	}
+	time.Sleep(50 * time.Millisecond)
+}
+
+func TestDispatchClosesNoStoresWhenCitySuspended(t *testing.T) {
+	var spies []*dispatchCloseStoreSpy
+	m := &memoryOrderDispatcher{
+		aa: []orders.Order{{
+			Name:     "noop",
+			Trigger:  "cooldown",
+			Interval: "1m",
+			Exec:     "true",
+		}},
+		storeFn: newDispatchCloseStoreSpyFn(&spies),
+		execRun: func(_ context.Context, _, _ string, _ []string) ([]byte, error) { return nil, nil },
+		rec:     events.Discard,
+		stderr:  &bytes.Buffer{},
+		cfg:     &config.City{Workspace: config.Workspace{Suspended: true}},
+	}
+
+	m.dispatch(context.Background(), t.TempDir(), time.Now())
+
+	if len(spies) != 0 {
+		t.Errorf("storeFn called %d times, want 0 when city is suspended", len(spies))
 	}
 }
