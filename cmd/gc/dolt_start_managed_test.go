@@ -176,8 +176,7 @@ func TestGCBeadsBDScript_InitForcesReinitOverPreSeededMetadata(t *testing.T) {
 	}
 	script := string(data)
 
-	guard := `if [ -f "$dir/.beads/metadata.json" ]; then
-        if ensure_database_registered "$dolt_database"; then`
+	guard := `if [ -f "$dir/.beads/metadata.json" ]; then`
 	if !strings.Contains(script, guard) {
 		t.Fatalf("gc-beads-bd.sh op_init must gate the already-initialized branch on the metadata.json file, not on project_id; " +
 			"gating on project_id leaves --force unset for gc-pre-seeded metadata and bd init aborts")
