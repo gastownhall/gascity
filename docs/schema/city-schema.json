@@ -971,7 +971,7 @@
         },
         "event_hooks": {
           "type": "boolean",
-          "description": "EventHooks controls installation of the bead event-forwarding hooks\n(.beads/hooks/on_create,on_update,on_close). Defaults to true.\nThis config surface is staged ahead of the native bead-event support;\ncurrent hook behavior remains unchanged until lifecycle code opts in.",
+          "description": "EventHooks controls installation of the bead event-forwarding hooks\n(.beads/hooks/on_create,on_update,on_close) that shell out to\n`gc event emit` on every bead write. Defaults to true. Set to false\nonce the controller's native cache-events already observe bead changes\n(the bd_hooks doctor gate): the lifecycle then removes the event hooks\n(leaving git hooks untouched) and stops reinstalling them, clearing the\nper-write churn and the native-store gate.",
           "default": true
         },
         "bd_compatibility": {

@@ -1231,9 +1231,12 @@ type BeadsConfig struct {
 	// Empty defaults to "dolt"; T3Code uses "doltlite" for local dev stores.
 	Backend string `toml:"backend,omitempty"`
 	// EventHooks controls installation of the bead event-forwarding hooks
-	// (.beads/hooks/on_create,on_update,on_close). Defaults to true.
-	// This config surface is staged ahead of the native bead-event support;
-	// current hook behavior remains unchanged until lifecycle code opts in.
+	// (.beads/hooks/on_create,on_update,on_close) that shell out to
+	// `gc event emit` on every bead write. Defaults to true. Set to false
+	// once the controller's native cache-events already observe bead changes
+	// (the bd_hooks doctor gate): the lifecycle then removes the event hooks
+	// (leaving git hooks untouched) and stops reinstalling them, clearing the
+	// per-write churn and the native-store gate.
 	EventHooks *bool `toml:"event_hooks,omitempty" jsonschema:"default=true"`
 	// BDCompatibility selects the bd CLI semantics Gas City may rely on.
 	// Empty defaults to "bd-1.0.4", which keeps claimable work history-backed

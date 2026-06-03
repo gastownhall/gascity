@@ -135,6 +135,55 @@ func TestInstallBeadHooksThreadsCityPath(t *testing.T) {
 	}
 }
 
+// TestInstallBeadHooksDisabledByConfig verifies that with
+// [beads] event_hooks = false, installBeadHooks removes the per-write
+// event-forwarding hooks (leaving git hooks) and does not reinstall them —
+// so a deployment whose controller cache-events already observe bead changes
+// avoids the `gc event emit` churn and clears the native-store bd_hooks gate.
+func TestInstallBeadHooksDisabledByConfig(t *testing.T) {
+	cityPath := t.TempDir()
+	writeSchema2RigCity(t, cityPath, "test-city",
+		"[workspace]\nname = \"test-city\"\n\n[beads]\nevent_hooks = false\n", "")
+
+	hooksDir := filepath.Join(cityPath, ".beads", "hooks")
+	if err := os.MkdirAll(hooksDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	eventHook := filepath.Join(hooksDir, "on_create")
+	gitHook := filepath.Join(hooksDir, "pre-commit")
+	for _, p := range []string{eventHook, gitHook} {
+		if err := os.WriteFile(p, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := installBeadHooks(cityPath, cityPath); err != nil {
+		t.Fatalf("installBeadHooks: %v", err)
+	}
+
+	if _, err := os.Stat(eventHook); !os.IsNotExist(err) {
+		t.Errorf("on_create event hook should be removed when event_hooks=false (stat err=%v)", err)
+	}
+	if _, err := os.Stat(gitHook); err != nil {
+		t.Errorf("git hook pre-commit must be left untouched: %v", err)
+	}
+}
+
+// TestInstallBeadHooksEnabledByDefault verifies that without the opt-out, the
+// event hooks install exactly as before (default true).
+func TestInstallBeadHooksEnabledByDefault(t *testing.T) {
+	cityPath := t.TempDir()
+	writeSchema2RigCity(t, cityPath, "test-city", "[workspace]\nname = \"test-city\"\n", "")
+	if err := installBeadHooks(cityPath, cityPath); err != nil {
+		t.Fatalf("installBeadHooks: %v", err)
+	}
+	for _, fn := range []string{"on_create", "on_update", "on_close"} {
+		if _, err := os.Stat(filepath.Join(cityPath, ".beads", "hooks", fn)); err != nil {
+			t.Errorf("default install should write %s: %v", fn, err)
+		}
+	}
+}
+
 func TestGeneratedHookPassesLiteralCityPath(t *testing.T) {
 	if _, err := exec.LookPath("sh"); err != nil {
 		t.Skip("sh not available")

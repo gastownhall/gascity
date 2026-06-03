@@ -3,12 +3,30 @@ package main
 import (
 	"bytes"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/fsys"
 )
+
+// beadEventHooksEnabled reports whether the per-write bead event-forwarding
+// hooks should be installed for cityPath. Defaults to true; a city opts out
+// with [beads] event_hooks = false once it has confirmed the controller's
+// native cache-events cover bead observation. Failure to load config falls
+// back to the safe default (install) so a transient read error never silently
+// drops event forwarding.
+func beadEventHooksEnabled(cityPath string) bool {
+	if strings.TrimSpace(cityPath) == "" {
+		return true
+	}
+	cfg, err := loadCityConfig(cityPath, io.Discard)
+	if err != nil || cfg == nil {
+		return true
+	}
+	return cfg.Beads.EventHooksEnabled()
+}
 
 // beadHooks maps bd hook filenames to the Gas City event types they emit.
 var beadHooks = map[string]string{
@@ -163,6 +181,18 @@ export GC_BD_TRACE_SCOPE="hook:bead.closed"
 // for tests and for callers that genuinely don't know the city yet.
 func installBeadHooks(dir, cityPath string) error {
 	hooksDir := filepath.Join(dir, ".beads", "hooks")
+	if !beadEventHooksEnabled(cityPath) {
+		// Opted out: ensure the event-forwarding hooks are absent so the
+		// native store's bd_hooks gate can clear and no per-write `gc`
+		// subprocess fires. Only the event hooks (beadHooks) are removed;
+		// git hooks and anything else in the directory are left untouched.
+		for filename := range beadHooks {
+			if err := os.Remove(filepath.Join(hooksDir, filename)); err != nil && !os.IsNotExist(err) {
+				return fmt.Errorf("removing disabled bead event hook %s: %w", filename, err)
+			}
+		}
+		return nil
+	}
 	if err := os.MkdirAll(hooksDir, 0o755); err != nil {
 		return fmt.Errorf("creating hooks directory: %w", err)
 	}
