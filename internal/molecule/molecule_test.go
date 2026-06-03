@@ -76,6 +76,113 @@ func TestBuildRecipeApplyPlanBugReportFlowV2(t *testing.T) {
 	}
 }
 
+func TestBuildRecipeApplyPlanSkipsRootTrackWhenExplicitRootEdgeExists(t *testing.T) {
+	recipe := &formula.Recipe{
+		Name: "wf.review.attempt.2",
+		Steps: []formula.RecipeStep{
+			{
+				ID:     "wf.review.attempt.2",
+				Title:  "Review attempt",
+				Type:   "task",
+				IsRoot: true,
+				Metadata: map[string]string{
+					"gc.attempt":  "2",
+					"gc.step_ref": "wf.review.attempt.2",
+				},
+			},
+			{
+				ID:    "wf.review.attempt.2-scope-check",
+				Title: "Finalize scope for Review attempt",
+				Type:  "task",
+				Metadata: map[string]string{
+					"gc.kind":        "scope-check",
+					"gc.control_for": "wf.review.attempt.2",
+					"gc.scope_role":  "control",
+					"gc.step_ref":    "wf.review.attempt.2-scope-check",
+				},
+			},
+		},
+		Deps: []formula.RecipeDep{
+			{
+				StepID:      "wf.review.attempt.2-scope-check",
+				DependsOnID: "wf.review.attempt.2",
+				Type:        "blocks",
+			},
+		},
+	}
+
+	plan, graphWorkflow, rootKey, err := buildRecipeApplyPlan(recipe, Options{PreserveRootType: true})
+	if err != nil {
+		t.Fatalf("buildRecipeApplyPlan: %v", err)
+	}
+	if !graphWorkflow {
+		t.Fatal("graphWorkflow = false, want true for retry attempt recipe")
+	}
+	if rootKey != "wf.review.attempt.2" {
+		t.Fatalf("rootKey = %q, want retry attempt root", rootKey)
+	}
+
+	assertGraphPlanEdgeCount(t, plan, "wf.review.attempt.2-scope-check", "wf.review.attempt.2", "", "blocks", 1)
+	assertGraphPlanEdgeCount(t, plan, "wf.review.attempt.2-scope-check", "wf.review.attempt.2", "", "tracks", 0)
+}
+
+func TestBuildFragmentApplyPlanSkipsRootTrackWhenExternalRootEdgeExists(t *testing.T) {
+	store := beads.NewMemStore()
+	root, err := store.Create(beads.Bead{
+		Title: "workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create root: %v", err)
+	}
+
+	fragment := &formula.FragmentRecipe{
+		Name: "review-fragment",
+		Steps: []formula.RecipeStep{
+			{
+				ID:    "review-fragment.item",
+				Title: "Review fragment item",
+				Type:  "task",
+			},
+		},
+	}
+
+	plan, err := buildFragmentApplyPlan(store, fragment, FragmentOptions{
+		RootID: root.ID,
+		ExternalDeps: []ExternalDep{
+			{
+				StepID:      "review-fragment.item",
+				DependsOnID: root.ID,
+				Type:        "blocks",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("buildFragmentApplyPlan: %v", err)
+	}
+
+	assertGraphPlanEdgeCount(t, plan, "review-fragment.item", "", root.ID, "blocks", 1)
+	assertGraphPlanEdgeCount(t, plan, "review-fragment.item", "", root.ID, "tracks", 0)
+}
+
+func assertGraphPlanEdgeCount(t *testing.T, plan *beads.GraphApplyPlan, fromKey, toKey, toID, depType string, want int) {
+	t.Helper()
+
+	got := 0
+	for _, edge := range plan.Edges {
+		if edge.FromKey == fromKey && edge.ToKey == toKey && edge.ToID == toID && edge.Type == depType {
+			got++
+		}
+	}
+	if got != want {
+		t.Fatalf("edge count from=%q toKey=%q toID=%q type=%q = %d, want %d; edges=%+v", fromKey, toKey, toID, depType, got, want, plan.Edges)
+	}
+}
+
 func TestBuildRecipeApplyPlanReviewQuorumSubstitutesSynthesisTarget(t *testing.T) {
 	formulatest.EnableV2ForTest(t)
 
