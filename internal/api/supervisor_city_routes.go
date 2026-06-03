@@ -45,6 +45,7 @@ func (sm *SupervisorMux) registerCityRoutes() {
 	cityGet(sm, "/config", (*Server).humaHandleConfigGet)
 	cityGet(sm, "/config/explain", (*Server).humaHandleConfigExplain)
 	cityGet(sm, "/config/validate", (*Server).humaHandleConfigValidate)
+	cityGet(sm, "/config/defaults", (*Server).humaHandleConfigDefaults)
 
 	// Agents — read / CRUD. Agents can be addressed unqualified
 	// ({base}) or rig-qualified ({dir}/{base}); there is no third
@@ -275,6 +276,7 @@ func (sm *SupervisorMux) registerCityRoutes() {
 	cityGet(sm, "/session/{id}", (*Server).humaHandleSessionGet)
 	cityGet(sm, "/session/{id}/transcript", (*Server).humaHandleSessionTranscript)
 	cityGet(sm, "/session/{id}/pending", (*Server).humaHandleSessionPending)
+	cityGet(sm, "/pending", (*Server).humaHandleCityPending)
 	cityPatch(sm, "/session/{id}", (*Server).humaHandleSessionPatch)
 	cityPost(sm, "/session/{id}/permission-mode", (*Server).humaHandleSessionPermissionMode)
 	cityRegister(sm, huma.Operation{

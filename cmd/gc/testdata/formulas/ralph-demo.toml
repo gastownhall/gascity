@@ -1,6 +1,8 @@
 formula = "ralph-demo"
-contract = "graph.v2"
 description = "Minimal inline Check demo"
+
+[requires]
+formula_compiler = ">=2.0.0"
 
 [[steps]]
 id = "implement"

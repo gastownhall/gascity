@@ -151,6 +151,13 @@ func TestPackRegistryCommandsPreRegisterDefaultRegistryOnVanillaHome(t *testing.
 	if !strings.Contains(stdout.String(), packregistry.DefaultRegistryName) || !strings.Contains(stdout.String(), packregistry.DefaultRegistrySource) {
 		t.Fatalf("list output = %q, want default main registry", stdout.String())
 	}
+	cfg, err := packregistry.LoadConfig(home)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if len(cfg.Registries) != 1 || cfg.Registries[0] != packregistry.DefaultRegistry() {
+		t.Fatalf("registries = %+v, want default registry", cfg.Registries)
+	}
 
 	if err := packregistry.WriteCatalogCache(home, packregistry.DefaultRegistryName, []byte(packRegistryTestCatalog)); err != nil {
 		t.Fatalf("WriteCatalogCache(default main): %v", err)
@@ -163,6 +170,60 @@ func TestPackRegistryCommandsPreRegisterDefaultRegistryOnVanillaHome(t *testing.
 	}
 	if !strings.Contains(stdout.String(), "lighthouse") || strings.Contains(stderr.String(), "cache unavailable") {
 		t.Fatalf("search output = stdout=%q stderr=%q, want default main cached results without cache warning", stdout.String(), stderr.String())
+	}
+}
+
+func TestPackRegistryAddFreshHomePreservesDefaultRegistry(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("GC_HOME", home)
+	catalogDir := writeRegistryCatalog(t, packRegistryTestCatalog)
+
+	var stdout, stderr bytes.Buffer
+	if code := doPackRegistryAdd("local", catalogDir, false, false, &stdout, &stderr); code != 0 {
+		t.Fatalf("add code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	cfg, err := packregistry.LoadConfig(home)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if len(cfg.Registries) != 2 {
+		t.Fatalf("registries = %+v, want default and local", cfg.Registries)
+	}
+	got := map[string]string{}
+	for _, reg := range cfg.Registries {
+		got[reg.Name] = reg.Source
+	}
+	if got[packregistry.DefaultRegistryName] != packregistry.DefaultRegistrySource {
+		t.Fatalf("default registry source = %q, want %q", got[packregistry.DefaultRegistryName], packregistry.DefaultRegistrySource)
+	}
+	if got["local"] != catalogDir {
+		t.Fatalf("local registry source = %q, want %q", got["local"], catalogDir)
+	}
+}
+
+func TestPackRegistryRemoveMainFreshHomeWritesExplicitEmptyConfig(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("GC_HOME", home)
+
+	var stdout, stderr bytes.Buffer
+	if code := doPackRegistryRemove(packregistry.DefaultRegistryName, false, &stdout, &stderr); code != 0 {
+		t.Fatalf("remove code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	cfg, err := packregistry.LoadConfig(home)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if len(cfg.Registries) != 0 {
+		t.Fatalf("registries = %+v, want explicit empty config", cfg.Registries)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := doPackRegistryList(false, &stdout, &stderr); code != 0 {
+		t.Fatalf("list code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "No pack registries configured.") {
+		t.Fatalf("list output = %q, want explicit empty config to remain unseeded", stdout.String())
 	}
 }
 

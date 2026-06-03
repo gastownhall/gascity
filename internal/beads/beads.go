@@ -48,6 +48,11 @@ type Bead struct {
 	// garbage collection. Reads must opt in via ListQuery.TierMode (or the
 	// WithEphemeral/WithBothTiers QueryOpts on the legacy label helpers).
 	Ephemeral bool `json:"ephemeral,omitempty"`
+	// DeferUntil hides the bead from ready/claimable views until this time,
+	// mirroring bd's defer_until column (a future value means "not yet ready";
+	// nil or past means ready). Create paths preserve it; UpdateOpts does not
+	// mutate it.
+	DeferUntil *time.Time `json:"defer_until,omitempty"`
 }
 
 // UpdateOpts specifies which fields to change. Nil pointers are skipped.
@@ -81,6 +86,14 @@ func runSequentialTx(tx Tx, fn func(Tx) error) error {
 }
 
 func cloneIntPtr(v *int) *int {
+	if v == nil {
+		return nil
+	}
+	cloned := *v
+	return &cloned
+}
+
+func cloneTimePtr(v *time.Time) *time.Time {
 	if v == nil {
 		return nil
 	}
@@ -129,10 +142,70 @@ var readyExcludeTypes = map[string]bool{
 	"rig":           true, // rig identity beads
 }
 
+var readyBlockingDependencyTypes = map[string]bool{
+	"blocks":             true,
+	"waits-for":          true,
+	"conditional-blocks": true,
+}
+
 // IsReadyExcludedType reports whether the bead type is excluded from
 // Ready() results by default.
 func IsReadyExcludedType(t string) bool {
 	return readyExcludeTypes[t]
+}
+
+// IsReadyCandidate reports whether a bead passes the store-independent default
+// Ready filters: open status, main tier, actionable type, and no future
+// defer_until. Dependency and assignee checks are store-specific and happen
+// separately.
+func IsReadyCandidate(b Bead, now time.Time) bool {
+	return IsReadyCandidateForTier(b, now, TierIssues)
+}
+
+// IsReadyCandidateForTier reports whether a bead passes the store-independent
+// Ready filters for the requested storage tier.
+func IsReadyCandidateForTier(b Bead, now time.Time, tier TierMode) bool {
+	switch tier {
+	case TierWisps:
+		if !b.Ephemeral {
+			return false
+		}
+	case TierBoth:
+		// no tier filter
+	default: // TierIssues
+		if b.Ephemeral {
+			return false
+		}
+	}
+	return b.Status == "open" &&
+		!IsReadyExcludedBead(b) &&
+		!IsDeferred(b, now)
+}
+
+// IsReadyExcludedBead reports whether a bead is infrastructure rather than
+// actionable Ready work.
+func IsReadyExcludedBead(b Bead) bool {
+	if IsReadyExcludedType(b.Type) {
+		return true
+	}
+	for _, label := range b.Labels {
+		switch label {
+		case "gc:session", "gc:order-tracking", "order-tracking":
+			return true
+		}
+	}
+	return false
+}
+
+// IsDeferred reports whether a bead is hidden by a future defer_until,
+// mirroring bd ready's server-side filter (defer_until IS NULL OR <= now is
+// ready) and cmd_hook.isFutureDeferredHookCandidate.
+func IsDeferred(b Bead, now time.Time) bool {
+	return b.DeferUntil != nil && b.DeferUntil.After(now)
+}
+
+func isReadyBlockingDependencyType(t string) bool {
+	return readyBlockingDependencyTypes[t]
 }
 
 // Dep represents a dependency relationship between two beads. The IssueID

@@ -55,15 +55,16 @@ func observeStatusTargetsParallel(
 }
 
 type cityStatusSnapshot struct {
-	CityName      string
-	CityPath      string
-	Controller    ControllerJSON
-	Suspended     bool
-	Beads         *beads.BeadsDiagnostic
-	Agents        []cityStatusAgentRow
-	Rigs          []StatusRigJSON
-	NamedSessions []cityStatusNamedSession
-	Summary       StatusSummaryJSON
+	CityName        string
+	CityPath        string
+	EffectiveAPIURL string
+	Controller      ControllerJSON
+	Suspended       bool
+	Beads           *beads.BeadsDiagnostic
+	Agents          []cityStatusAgentRow
+	Rigs            []StatusRigJSON
+	NamedSessions   []cityStatusNamedSession
+	Summary         StatusSummaryJSON
 }
 
 type cityStatusAgentRow struct {
@@ -159,9 +160,10 @@ func collectCityStatusSnapshotFromStoreSnapshot(
 		suspended = citySuspended(cfg)
 	}
 	snapshot := cityStatusSnapshot{
-		CityPath:   cityPath,
-		Controller: controllerStatusForCity(cityPath),
-		Suspended:  suspended,
+		CityPath:        cityPath,
+		EffectiveAPIURL: resolveEffectiveAPIURL(cityPath, cfg),
+		Controller:      controllerStatusForCity(cityPath),
+		Suspended:       suspended,
 	}
 	snapshot.CityName = loadedCityName(cfg, cityPath)
 	registerStatusProviderACPRoutes(sp, statusSnapshot, snapshot.CityName, cfg)
@@ -468,6 +470,9 @@ func diagnosticPtr(diagnostic beads.BeadsDiagnostic) *beads.BeadsDiagnostic {
 func renderCityStatusText(snapshot cityStatusSnapshot, dops drainOps, stdout io.Writer) {
 	fmt.Fprintf(stdout, "%s  %s\n", snapshot.CityName, snapshot.CityPath)                //nolint:errcheck // best-effort stdout
 	fmt.Fprintf(stdout, "  Controller: %s\n", controllerStatusLine(snapshot.Controller)) //nolint:errcheck // best-effort stdout
+	if snapshot.EffectiveAPIURL != "" {
+		fmt.Fprintf(stdout, "  API:        %s\n", snapshot.EffectiveAPIURL) //nolint:errcheck // best-effort stdout
+	}
 	for _, line := range controllerStatusGuidance(snapshot.Controller, snapshot.CityPath) {
 		fmt.Fprintf(stdout, "  %s\n", line) //nolint:errcheck // best-effort stdout
 	}

@@ -143,7 +143,7 @@ effective values rather than raw `city.toml` fields.
 - API response tests for effective name/prefix
 
 ### 4B. Update docs and schema
-**Files:** `docs/reference/config.md`, `engdocs/design/packv2/doc-pack-v2.md`, `engdocs/design/packv2/skew-analysis.md`, `docs/guides/migrating-to-pack-vnext.md`, schema/reference outputs
+**Files:** `docs/reference/config.md`, `engdocs/design/packv2/doc-pack-v2.md`, `engdocs/design/packv2/skew-analysis.md`, `docs/guides/shareable-packs.md`, schema/reference outputs
 
 **Scope:**
 - document `.gc/site.toml` as the home of machine-local workspace identity

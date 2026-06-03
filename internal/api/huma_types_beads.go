@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"time"
 )
 
 // Per-domain Huma input/output types for the beads handler
@@ -63,6 +64,7 @@ type BeadCreateInput struct {
 		Labels      []string          `json:"labels,omitempty" doc:"Bead labels."`
 		Parent      string            `json:"parent,omitempty" doc:"Parent bead ID."`
 		Metadata    map[string]string `json:"metadata,omitempty" doc:"Metadata key-value pairs to set at create time."`
+		DeferUntil  *time.Time        `json:"defer_until,omitempty" doc:"Hide the bead from ready views until this time."`
 	}
 }
 

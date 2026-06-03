@@ -335,8 +335,11 @@ func TestUnclaimWorkAssignedToRetiredSessionBead_IncludesEphemeralWork(t *testin
 	if got.Assignee != "" {
 		t.Fatalf("Assignee = %q, want empty", got.Assignee)
 	}
-	if got.Metadata["gc.routed_to"] != "worker" {
-		t.Fatalf("gc.routed_to = %q, want worker", got.Metadata["gc.routed_to"])
+	if got.Metadata["gc.run_target"] != "worker" {
+		t.Fatalf("gc.run_target = %q, want worker", got.Metadata["gc.run_target"])
+	}
+	if got.Metadata["gc.routed_to"] != "" {
+		t.Fatalf("gc.routed_to = %q, want empty canonical route fallback", got.Metadata["gc.routed_to"])
 	}
 }
 

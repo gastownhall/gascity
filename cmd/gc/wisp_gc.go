@@ -3,10 +3,14 @@ package main
 import (
 	"errors"
 	"fmt"
+	"log"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 )
+
+const mailReadMetadataKey = "mail.read"
 
 // wispGC performs mechanical garbage collection of closed molecules that
 // have exceeded their TTL. Follows the nil-guard tracker pattern used by
@@ -24,21 +28,35 @@ type wispGC interface {
 
 // memoryWispGC is the production implementation of wispGC.
 type memoryWispGC struct {
-	interval time.Duration
-	ttl      time.Duration
-	lastRun  time.Time
+	interval         time.Duration
+	ttl              time.Duration
+	mailRetentionTTL time.Duration
+	lastRun          time.Time
 }
 
-// newWispGC creates a wisp GC tracker. Returns nil if disabled (interval or
-// TTL is zero). Callers nil-guard before use.
-func newWispGC(interval, ttl time.Duration) wispGC {
-	if interval <= 0 || ttl <= 0 {
+// newWispGC creates a wisp GC tracker. Returns nil if disabled. The tracker
+// runs when an interval is configured and at least one retention policy is
+// enabled.
+func newWispGC(interval, ttl, mailRetentionTTL time.Duration) wispGC {
+	if interval <= 0 || (ttl <= 0 && mailRetentionTTL <= 0) {
 		return nil
 	}
 	return &memoryWispGC{
-		interval: interval,
-		ttl:      ttl,
+		interval:         interval,
+		ttl:              ttl,
+		mailRetentionTTL: mailRetentionTTL,
 	}
+}
+
+func newWispGCForConfig(cfg *config.City) wispGC {
+	if cfg == nil {
+		return nil
+	}
+	mailRetentionTTL, err := cfg.Mail.RetentionTTLDuration()
+	if err != nil {
+		mailRetentionTTL = 0
+	}
+	return newWispGC(cfg.Daemon.WispGCIntervalDuration(), cfg.Daemon.WispTTLDuration(), mailRetentionTTL)
 }
 
 func (m *memoryWispGC) shouldRun(now time.Time) bool {
@@ -51,21 +69,41 @@ func (m *memoryWispGC) runGC(store beads.Store, now time.Time) (int, error) {
 		return 0, fmt.Errorf("listing closed molecules: bead store unavailable")
 	}
 
-	entries, err := closedWispGCEntries(store)
-	if err != nil {
-		return 0, err
+	purged := 0
+	var deleteErr error
+	if m.ttl > 0 {
+		entries, err := closedWispGCEntries(store)
+		if err != nil {
+			return 0, err
+		}
+
+		cutoff := now.Add(-m.ttl)
+		closurePurged, closureDeleteErr := purgeExpiredBeadClosures(store, entries, cutoff)
+		purged += closurePurged
+		deleteErr = errors.Join(deleteErr, closureDeleteErr)
+
+		trackEntries, trackErr := store.List(beads.ListQuery{Status: "closed", Label: labelOrderTracking, TierMode: beads.TierBoth})
+		if trackErr == nil {
+			trackPurged, trackDeleteErr := purgeExpiredBeadRoots(store, trackEntries, cutoff)
+			purged += trackPurged
+			deleteErr = errors.Join(deleteErr, trackDeleteErr)
+		} else {
+			deleteErr = errors.Join(deleteErr, fmt.Errorf("listing closed order-tracking beads: %w", trackErr))
+		}
 	}
 
-	cutoff := now.Add(-m.ttl)
-	purged, deleteErr := purgeExpiredBeadClosures(store, entries, cutoff)
-
-	trackEntries, trackErr := store.List(beads.ListQuery{Status: "closed", Label: labelOrderTracking, TierMode: beads.TierBoth})
-	if trackErr == nil {
-		trackPurged, trackDeleteErr := purgeExpiredBeadRoots(store, trackEntries, cutoff)
-		purged += trackPurged
-		deleteErr = errors.Join(deleteErr, trackDeleteErr)
-	} else {
-		deleteErr = errors.Join(deleteErr, fmt.Errorf("listing closed order-tracking beads: %w", trackErr))
+	if m.mailRetentionTTL > 0 {
+		mailEntries, mailErr := readMessageWispGCEntries(store)
+		if mailErr == nil {
+			mailPurged, mailDeleteErr := purgeExpiredBeadRoots(store, mailEntries, now.Add(-m.mailRetentionTTL))
+			purged += mailPurged
+			deleteErr = errors.Join(deleteErr, mailDeleteErr)
+			if mailPurged > 0 {
+				log.Printf("wisp gc: purged %d read message wisps (retention_ttl=%s)", mailPurged, gcRetentionTTLString(m.mailRetentionTTL))
+			}
+		} else {
+			deleteErr = errors.Join(deleteErr, fmt.Errorf("listing read message wisps: %w", mailErr))
+		}
 	}
 
 	return purged, deleteErr
@@ -96,6 +134,19 @@ func closedWispGCEntries(store beads.Store) ([]beads.Bead, error) {
 		return nil, fmt.Errorf("listing closed wisp roots: %w", err)
 	}
 	appendUnique(wisps)
+	return entries, nil
+}
+
+func readMessageWispGCEntries(store beads.Store) ([]beads.Bead, error) {
+	entries, err := store.List(beads.ListQuery{
+		Type:          "message",
+		Metadata:      map[string]string{mailReadMetadataKey: "true"},
+		IncludeClosed: true,
+		TierMode:      beads.TierWisps,
+	})
+	if err != nil {
+		return nil, err
+	}
 	return entries, nil
 }
 
@@ -211,4 +262,11 @@ func collectExpiredBeadClosure(store beads.Store, rootID string) ([]string, erro
 		return nil, err
 	}
 	return ids, nil
+}
+
+func gcRetentionTTLString(d time.Duration) string {
+	if d%time.Hour == 0 {
+		return fmt.Sprintf("%dh", int(d/time.Hour))
+	}
+	return d.String()
 }

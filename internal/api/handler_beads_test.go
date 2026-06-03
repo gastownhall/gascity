@@ -898,6 +898,43 @@ func TestBeadCreatePersistsMetadataAndParent(t *testing.T) {
 	}
 }
 
+func TestBeadCreatePersistsDeferUntil(t *testing.T) {
+	state := newFakeState(t)
+	store := state.stores["myrig"]
+	h := newTestCityHandler(t, state)
+
+	deferUntil := time.Date(2026, 6, 1, 12, 30, 0, 0, time.UTC)
+	body := `{
+		"rig":"myrig",
+		"title":"Deferred task",
+		"type":"task",
+		"defer_until":"` + deferUntil.Format(time.RFC3339) + `"
+	}`
+	req := newPostRequest(cityURL(state, "/beads"), bytes.NewBufferString(body))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create status = %d, want %d, body: %s", rec.Code, http.StatusCreated, rec.Body.String())
+	}
+
+	var created beads.Bead
+	if err := json.NewDecoder(rec.Body).Decode(&created); err != nil {
+		t.Fatalf("decode created bead: %v", err)
+	}
+	if created.DeferUntil == nil || !created.DeferUntil.Equal(deferUntil) {
+		t.Fatalf("response defer_until = %v, want %s", created.DeferUntil, deferUntil.Format(time.RFC3339))
+	}
+
+	got, err := store.Get(created.ID)
+	if err != nil {
+		t.Fatalf("Get(created): %v", err)
+	}
+	if got.DeferUntil == nil || !got.DeferUntil.Equal(deferUntil) {
+		t.Fatalf("stored defer_until = %v, want %s", got.DeferUntil, deferUntil.Format(time.RFC3339))
+	}
+}
+
 func TestBeadCreateResponseUsesAuthoritativeStoredBead(t *testing.T) {
 	state := newFakeState(t)
 	store := newSparseCreateStore()

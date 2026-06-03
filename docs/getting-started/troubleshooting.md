@@ -133,7 +133,7 @@ check.
 
 | Tool | Min version | macOS | Linux |
 |------|-------------|-------|-------|
-| dolt | 2.0.7 or newer | `brew install dolt` | [releases](https://github.com/dolthub/dolt/releases) |
+| dolt | 2.1.0 or newer | `brew install dolt` | [releases](https://github.com/dolthub/dolt/releases) |
 | bd | 1.0.0 | [releases](https://github.com/gastownhall/beads/releases) | [releases](https://github.com/gastownhall/beads/releases) |
 | flock | -- | `brew install flock` | `apt install util-linux` |
 
@@ -165,7 +165,7 @@ durable versioned storage and is recommended for real work.
 
 ## Dolt Version Too Old
 
-Gas City requires a final Dolt 2.0.7 or newer. Older and pre-release builds
+Gas City requires a final Dolt 2.1.0 or newer. Older and pre-release builds
 are below the managed bd/Dolt compatibility floor; releases before 1.86.2 can
 also miss the upstream GC/writer deadlock fix in dolthub/dolt commit
 `ccf7bde206`, which can hang `dolt_backup sync` under heavy write load. Check
@@ -251,6 +251,46 @@ If `gc version` prints git progress lines (`Enumerating objects...`) instead
 of a clean version string, upgrade to Gas City v0.13.4 or later. This was a
 bug where remote pack fetches wrote git sideband output to the terminal,
 fixed in [PR #141](https://github.com/gastownhall/gascity/pull/141).
+
+## Provider Credentials Dropped When the Supervisor Starts
+
+Symptom: agents authenticate fine when you launch a city from your normal
+interactive shell, but fail to authenticate (or silently fall back to a
+different provider) when the city is started by the supervisor at login or
+after a reboot.
+
+Cause: the supervisor service file (launchd plist / systemd unit) captures
+provider credentials by snapshotting the environment of the shell that ran
+`gc start` (or `gc supervisor install`). A credential that is only present
+in an interactive shell — for example sourced from an rc file that the login
+service manager never reads — is not in that snapshot, so it never reaches
+the supervised process.
+
+Fix: put the durable credentials in a machine-local secrets file at
+`${GC_HOME}/secrets.env` (defaults to `~/.gc/secrets.env`). On every service
+file regeneration, `gc` merges this file into the supervisor environment, so
+the value survives a reboot regardless of which shell ran `gc start`.
+
+```bash
+# ~/.gc/secrets.env  (chmod 600)
+ANTHROPIC_API_KEY=sk-ant-...
+OPENAI_API_KEY=sk-...
+```
+
+The file uses dotenv syntax: `KEY=VALUE` per line, `#` comments, blank lines,
+an optional `export ` prefix, and optional surrounding quotes. Only keys that
+are already eligible for the supervisor environment are merged — provider
+credentials (recognized by their standard prefixes such as `ANTHROPIC_`,
+`OPENAI_`, `GEMINI_`) plus any keys you opt in via `GC_SUPERVISOR_ENV`; any
+other key in the file is ignored. A value exported in the calling shell still
+takes precedence over the file, and `GC_SUPERVISOR_OMIT_PROVIDER_CREDS=1`
+suppresses provider credentials from both sources.
+
+Apply the change by regenerating the service file:
+
+```bash
+gc service restart     # restarts the launchd/systemd service
+```
 
 ## JSONL Archive Push Failures
 

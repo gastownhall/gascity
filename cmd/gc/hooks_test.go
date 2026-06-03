@@ -506,7 +506,7 @@ func TestInstallBeadHooksInitIntegration(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := run([]string{"init", cityPath}, &stdout, &stderr)
+	code := run([]string{"init", "--skip-provider-readiness", "--provider", "claude", cityPath}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("gc init = %d; stderr: %s", code, stderr.String())
 	}

@@ -20,6 +20,7 @@ import (
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/formulatest"
 	"github.com/gastownhall/gascity/internal/orders"
 )
 
@@ -954,6 +955,61 @@ func TestOrderRunJSONFormulaSummary(t *testing.T) {
 	}
 }
 
+func TestOrderRunHonorsFormulaV2DisabledCity(t *testing.T) {
+	t.Cleanup(func() {
+		applyFeatureFlags(&config.City{Daemon: config.DaemonConfig{FormulaV2: true}})
+	})
+
+	cityDir := t.TempDir()
+	formulaDir := filepath.Join(cityDir, "formulas")
+	if err := os.MkdirAll(formulaDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cityToml := `[workspace]
+name = "test-city"
+
+[daemon]
+formula_v2 = false
+`
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	graphFormula := `
+formula = "graph-work"
+
+[requires]
+formula_compiler = ">=2.0.0"
+
+[[steps]]
+id = "step"
+title = "Do work"
+`
+	if err := os.WriteFile(filepath.Join(formulaDir, "graph-work.toml"), []byte(graphFormula), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	aa := []orders.Order{
+		{Name: "blocked", Formula: "graph-work", Trigger: "cooldown", Interval: "15m", FormulaLayer: formulaDir},
+	}
+	store := beads.NewMemStore()
+
+	var stdout, stderr bytes.Buffer
+	code := doOrderRun(aa, "blocked", "", cityDir, store, nil, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("doOrderRun = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "formula_v2 is disabled") {
+		t.Fatalf("stderr missing formula_v2 diagnostic:\n%s", stderr.String())
+	}
+	results, err := store.ListByLabel("order-run:blocked", 0)
+	if err != nil {
+		t.Fatalf("store.ListByLabel(): %v", err)
+	}
+	if len(results) != 0 {
+		t.Fatalf("created %d order-run bead(s), want none: %#v", len(results), results)
+	}
+}
+
 func TestOrderRunJSONRejectsExecWithoutRunning(t *testing.T) {
 	aa := []orders.Order{
 		{Name: "release-exec", Trigger: "manual", Exec: "printf unsafe"},
@@ -1216,6 +1272,74 @@ prefix = "fe"
 	}
 	if !strings.Contains(stdout.String(), "closed 1 stale order-tracking bead") {
 		t.Fatalf("stdout = %q, want one closed tracking bead", stdout.String())
+	}
+}
+
+func TestSweepOrderTrackingCommandClosesAllStaleTracking(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+
+	cityDir := t.TempDir()
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_CITY_PATH", cityDir)
+	t.Setenv("GC_CITY_ROOT", cityDir)
+	t.Setenv("GC_RIG", "")
+	t.Setenv("GC_RIG_ROOT", "")
+	t.Chdir(cityDir)
+
+	writeFile(t, filepath.Join(cityDir, "city.toml"), `[workspace]
+name = "test-city"
+prefix = "ct"
+`)
+	if err := ensureScopedFileStoreLayout(cityDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensurePersistedScopeLocalFileStore(cityDir); err != nil {
+		t.Fatal(err)
+	}
+	store, err := openStoreAtForCity(cityDir, cityDir)
+	if err != nil {
+		t.Fatalf("openStoreAtForCity(city): %v", err)
+	}
+	ids := make([]string, 0, orderTrackingSweepCloseBudget+1)
+	for i := range orderTrackingSweepCloseBudget + 1 {
+		stale, err := store.Create(beads.Bead{
+			Title:     fmt.Sprintf("order:cleanup-%d", i),
+			Labels:    []string{fmt.Sprintf("order-run:cleanup-%d", i), labelOrderTracking},
+			Ephemeral: true,
+		})
+		if err != nil {
+			t.Fatalf("Create(stale-%d): %v", i, err)
+		}
+		ids = append(ids, stale.ID)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := cmdOrderSweepTracking(time.Nanosecond, false, false, nil, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("cmdOrderSweepTracking = %d, want 0; stderr: %s", code, stderr.String())
+	}
+
+	reopened, err := openStoreAtForCity(cityDir, cityDir)
+	if err != nil {
+		t.Fatalf("openStoreAtForCity(city reopen): %v", err)
+	}
+	closed := 0
+	for _, id := range ids {
+		got, err := reopened.Get(id)
+		if err != nil {
+			t.Fatalf("Get(%s): %v", id, err)
+		}
+		if got.Status == "closed" {
+			closed++
+		}
+	}
+	if closed != len(ids) {
+		t.Fatalf("closed = %d, want %d", closed, len(ids))
+	}
+	want := fmt.Sprintf("closed %d stale order-tracking bead", len(ids))
+	if !strings.Contains(stdout.String(), want) {
+		t.Fatalf("stdout = %q, want %q", stdout.String(), want)
 	}
 }
 
@@ -1659,6 +1783,45 @@ title = "Do work"
 	}
 	if !foundControl {
 		t.Fatal("missing routed workflow finalizer")
+	}
+}
+
+func TestOrderRunGraphV2ConvoyReferenceRequiresTarget(t *testing.T) {
+	formulatest.EnableV2ForTest(t)
+	dir := t.TempDir()
+	graphFormula := `
+formula = "graph-needs-convoy"
+version = 1
+contract = "graph.v2"
+type = "workflow"
+
+[[steps]]
+id = "step"
+title = "Do work"
+description = "Inspect convoy {{convoy_id}}"
+`
+	if err := os.WriteFile(filepath.Join(dir, "graph-needs-convoy.formula.toml"), []byte(strings.TrimSpace(graphFormula)+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	aa := []orders.Order{
+		{Name: "convoy-patrol", Formula: "graph-needs-convoy", Trigger: "cooldown", Interval: "15m", FormulaLayer: dir},
+	}
+	store := beads.NewMemStore()
+	var stdout, stderr bytes.Buffer
+	code := doOrderRun(aa, "convoy-patrol", "", "/city", store, nil, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("doOrderRun = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "requires a targeted graph.v2 invocation") {
+		t.Fatalf("stderr = %q, want targeted graph.v2 invocation error", stderr.String())
+	}
+	results, err := store.ListByLabel("order-run:convoy-patrol", 0, beads.IncludeClosed)
+	if err != nil {
+		t.Fatalf("ListByLabel: %v", err)
+	}
+	if len(results) != 0 {
+		t.Fatalf("created order-run beads = %+v, want none", results)
 	}
 }
 

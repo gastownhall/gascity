@@ -189,6 +189,18 @@ func sessionStartRequested(session beads.Bead, clk clock.Clock) bool {
 // reached preWakeCommit use pendingCreateNeverStartedTimeout instead.
 const staleCreatingStateTimeout = time.Minute
 
+// stalePendingCreateTimeout is the longer grace window applied by
+// reapStaleSessionBeads to a started pending-create bead — one that holds
+// pending_create_claim=true AND has a last_woke_at (it reached preWakeCommit).
+// Such a bead may legitimately be mid-start or mid-rollback, so it is given
+// more time than a plain creating bead before being reaped. Without an upper
+// bound, a bead whose rollback never completes (e.g. a transient store error
+// on closeBead) would stay open as a phantom forever — the leak tracked by
+// gc-5tyf5. Never-started pending creates (no last_woke_at) instead defer to
+// pendingCreateNeverStartedTimeout, so a slow provider.Start() is not reaped
+// out from under the reconciler's still-active never-started lease.
+const stalePendingCreateTimeout = 5 * time.Minute
+
 func sessionMetadataState(session beads.Bead) string {
 	switch state := strings.TrimSpace(session.Metadata["state"]); state {
 	case "awake":
@@ -975,6 +987,7 @@ func healStatePatchWithRollback(session beads.Bead, alive bool, clk clock.Clock,
 			target = string(sessionpkg.StateStartPending)
 		}
 	}
+	stalePendingCreateRollback := false
 	// failed-create is a terminal rollback marker written by
 	// rollbackPendingCreate when a start attempt failed. A bead in this state
 	// whose runtime is not alive must heal toward asleep, even if
@@ -1007,7 +1020,6 @@ func healStatePatchWithRollback(session beads.Bead, alive bool, clk clock.Clock,
 	// rollbackAvailable=false means the caller deferred the formal rollback
 	// (e.g. storeQueryPartial); preserve the claim so the next complete tick
 	// can drive attemptRollbackPendingCreate properly.
-	stalePendingCreateRollback := false
 	if rollbackAvailable && !alive && strings.TrimSpace(meta["state"]) == "creating" {
 		if pendingCreateLeaseExpiredForRollback(session, clk, startupTimeout) {
 			target = string(sessionpkg.StateAsleep)

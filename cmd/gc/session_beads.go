@@ -659,12 +659,14 @@ func unclaimWorkAssignedToRetiredSessionBead(
 					// Clearing assignee on an in_progress bead leaves it invisible to
 					// the work_query: Tier 1 needs an assignee match, Tiers 2/3 only
 					// match "ready" status. Reset to "open" so a fresh worker can
-					// re-claim via the routed queue (gc.routed_to + --unassigned).
+					// re-claim via the routed queue.
 					if item.Status == "in_progress" {
 						update.Status = &open
 					}
-					if fallbackRoute != "" && strings.TrimSpace(item.Metadata["gc.routed_to"]) == "" {
-						update.Metadata = map[string]string{"gc.routed_to": fallbackRoute}
+					if fallbackRoute != "" &&
+						strings.TrimSpace(item.Metadata["gc.run_target"]) == "" &&
+						strings.TrimSpace(item.Metadata["gc.routed_to"]) == "" {
+						update.Metadata = map[string]string{"gc.run_target": fallbackRoute}
 					}
 					if err := ownerStore.Update(item.ID, update); err != nil {
 						fmt.Fprintf(stderr, "session beads: unclaiming work %s assigned to retired session %s: %v\n", item.ID, sessionBead.ID, err) //nolint:errcheck
@@ -1074,7 +1076,7 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 			if tp.WorkDir != "" {
 				meta["work_dir"] = tp.WorkDir
 			}
-			if tp.WakeMode != "" && tp.WakeMode != "resume" {
+			if tp.WakeMode != "" {
 				meta["wake_mode"] = tp.WakeMode
 			}
 			if isConfiguredNamed {
@@ -1817,14 +1819,22 @@ func reapStaleSessionBeads(
 		if sn == "" {
 			continue
 		}
-		// Only reap beads stuck in the creating state after their one-shot
-		// pending_create_claim has already been cleared. The pending create
-		// claim is authoritative across the lifecycle model: it keeps an
-		// in-flight or partially-healed start eligible for retry even when
-		// the bead's cached state has already moved past creating.
+		// Only reap beads stuck in the creating state. Sessions past creating
+		// may hold work claims; reaping them would orphan in_progress beads
+		// because the assignee link to a live session is the only signal the
+		// reconciler has for resume-after-restart. A still-creating bead has
+		// not completed startup, so it is guaranteed not to hold a claim
+		// (claiming is the first thing a worker does after startup).
+		//
+		// pending_create_claim=true no longer exempts a bead from reaping. The
+		// claim keeps an in-flight start eligible for retry, but a bead whose
+		// rollback never completes (e.g. a transient store error on closeBead)
+		// stays creating with the claim set and a dead tmux indefinitely — the
+		// phantom-accumulation leak (gc-5tyf5). Such beads are instead held to
+		// a longer grace window below so legitimate retries still complete
+		// first.
 		state := strings.TrimSpace(b.Metadata["state"])
-		pendingCreate := strings.TrimSpace(b.Metadata["pending_create_claim"]) == "true"
-		if state != "creating" || pendingCreate {
+		if state != "creating" {
 			continue
 		}
 		// Don't reap beads with an active drain — the drainTracker is
@@ -1849,8 +1859,35 @@ func reapStaleSessionBeads(
 		// because a long-lived bead may have been woken moments ago.
 		// Zero CreatedAt means unknown age — skip conservatively.
 		startedAt, ok := staleReapStartBoundary(b)
-		if !ok || now.Sub(startedAt) < staleCreatingStateTimeout {
+		if !ok {
 			continue
+		}
+		pendingCreate := strings.TrimSpace(b.Metadata["pending_create_claim"]) == "true"
+		// Never-started pending creates (pending_create_claim=true with no
+		// last_woke_at) have not reached preWakeCommit, so their start may
+		// still be in flight behind a busy pool start queue. Defer entirely to
+		// the reconciler's authoritative never-started lease
+		// (pendingCreateNeverStartedTimeout, 10m) rather than the shorter
+		// stalePendingCreateTimeout: reaping mid-start would close the bead out
+		// from under an active lease and let the reconciler spawn a replacement
+		// that double-binds the same tmux session name. Once that lease
+		// expires the phantom is still reaped (gc-5tyf5), just later.
+		if pendingCreate && strings.TrimSpace(b.Metadata["last_woke_at"]) == "" {
+			if !pendingCreateNeverStartedLeaseExpired(b, clk) {
+				continue
+			}
+		} else {
+			// Started (reached preWakeCommit) pending creates get the longer
+			// stalePendingCreateTimeout window because the reconciler may still
+			// be retrying their start or rollback; plain creating beads use the
+			// short staleCreatingStateTimeout.
+			grace := staleCreatingStateTimeout
+			if pendingCreate {
+				grace = stalePendingCreateTimeout
+			}
+			if now.Sub(startedAt) < grace {
+				continue
+			}
 		}
 		if closeBead(store, b.ID, "stale-session", now.UTC(), stderr) {
 			fmt.Fprintf(stderr, "WARN: reconciler: reaped stuck-creating session bead %s — tmux session %q not found\n", b.ID, sn) //nolint:errcheck
@@ -2074,6 +2111,7 @@ func sweepProcessTableOrphans(
 	sp runtime.Provider,
 	_ *sessionBeadSnapshot,
 	store beads.Store,
+	cityPath string,
 	stderr io.Writer,
 ) int {
 	if sp == nil || store == nil {
@@ -2091,10 +2129,22 @@ func sweepProcessTableOrphans(
 		fmt.Fprintf(stderr, "session reconciler: scanning process table for orphaned runtimes: %v\n", err) //nolint:errcheck
 	}
 
+	cityPath = normalizePathForCompare(strings.TrimSpace(cityPath))
 	reaped := 0
 	for _, live := range found {
 		live.SessionID = strings.TrimSpace(live.SessionID)
 		if live.SessionID == "" || live.IsTracked {
+			continue
+		}
+		// The process-table scan is supervisor-wide: it walks all of /proc and
+		// returns every gc session on the host, across every city. But `store`
+		// here is this city's bead store and `sp` is this city's runtime
+		// provider, so a sibling city's live session is invisible to both —
+		// its bead lookup misses and IsTracked is false. Reaping on that basis
+		// SIGTERMs another city's healthy session. Only consider runtimes
+		// positively attributed to this city. When cityPath is unknown we
+		// cannot attribute safely, so fall through to the existing checks.
+		if cityPath != "" && normalizePathForCompare(strings.TrimSpace(live.City)) != cityPath {
 			continue
 		}
 		bead, err := store.Get(live.SessionID)

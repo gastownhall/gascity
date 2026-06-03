@@ -32,6 +32,27 @@ func TestResolveWorkDirPathUsesWorkDirTemplate(t *testing.T) {
 	}
 }
 
+func TestResolveWorkDirPathUsesWorktreesRootTemplate(t *testing.T) {
+	cityPath := t.TempDir()
+	worktreesRoot := filepath.Join(t.TempDir(), "worktrees")
+	t.Setenv("GC_WORKTREES_DIR", worktreesRoot)
+	t.Setenv("T3CODE_WORKTREES_DIR", filepath.Join(t.TempDir(), "ignored"))
+	t.Setenv("T3CODE_HOME", filepath.Join(t.TempDir(), "ignored-home"))
+
+	agent := config.Agent{
+		Name:    "worker",
+		Dir:     "demo",
+		WorkDir: "{{.WorktreesRoot}}/gascity/{{.CityName}}/{{.Rig}}/jj/agents/{{.AgentBase}}",
+	}
+	rigs := []config.Rig{{Name: "demo", Path: filepath.Join(cityPath, "repos", "demo")}}
+
+	got := ResolveWorkDirPath(cityPath, "gastown", "demo/worker-1", agent, rigs)
+	want := filepath.Join(worktreesRoot, "gascity", "gastown", "demo", "jj", "agents", "worker-1")
+	if got != want {
+		t.Fatalf("ResolveWorkDirPath() = %q, want %q", got, want)
+	}
+}
+
 func TestResolveWorkDirPathDefaultsRigScopedAgentsToRigRoot(t *testing.T) {
 	cityPath := t.TempDir()
 	rigRoot := filepath.Join(t.TempDir(), "demo-repo")

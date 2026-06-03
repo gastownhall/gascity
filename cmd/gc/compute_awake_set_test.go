@@ -287,6 +287,106 @@ func TestNamedOnDemand_NoWork(t *testing.T) {
 	assertAsleep(t, result, "hello-world--refinery")
 }
 
+func TestNamedOnDemand_ResetPendingWakesWithoutDemand(t *testing.T) {
+	template := "fixture/build-agent"
+	identity := "fixture/reset-target"
+	sessionName := "fixture--reset-target"
+
+	result := ComputeAwakeSet(AwakeInput{
+		Agents:        []AwakeAgent{{QualifiedName: template}},
+		NamedSessions: []AwakeNamedSession{{Identity: identity, Template: template, Mode: "on_demand"}},
+		SessionBeads: []AwakeSessionBead{{
+			ID:                       "mc-reset",
+			SessionName:              sessionName,
+			Template:                 template,
+			State:                    "asleep",
+			NamedIdentity:            identity,
+			ContinuationResetPending: true,
+		}},
+		ScaleCheckCounts: map[string]int{template: 0},
+		Now:              now,
+	})
+
+	assertAwake(t, result, sessionName)
+	assertReason(t, result, sessionName, "reset-pending")
+}
+
+func TestNamedOnDemand_ResetPendingPreservesAssignedWorkDemand(t *testing.T) {
+	template := "fixture/build-agent"
+	identity := "fixture/reset-target"
+	sessionName := "fixture--reset-target"
+
+	result := ComputeAwakeSet(AwakeInput{
+		Agents:        []AwakeAgent{{QualifiedName: template}},
+		NamedSessions: []AwakeNamedSession{{Identity: identity, Template: template, Mode: "on_demand"}},
+		SessionBeads: []AwakeSessionBead{{
+			ID:                       "mc-reset",
+			SessionName:              sessionName,
+			Template:                 template,
+			State:                    "asleep",
+			NamedIdentity:            identity,
+			ContinuationResetPending: true,
+		}},
+		WorkBeads:        []AwakeWorkBead{{ID: "work-1", Assignee: identity, Status: "open", Ready: true}},
+		ScaleCheckCounts: map[string]int{template: 0},
+		Now:              now,
+	})
+
+	assertAwake(t, result, sessionName)
+	assertReason(t, result, sessionName, "reset-pending")
+	if !result[sessionName].HasAssignedWork {
+		t.Fatalf("HasAssignedWork = false, want true")
+	}
+}
+
+func TestNamedOnDemand_ResetPendingWaitHoldStaysAsleep(t *testing.T) {
+	template := "fixture/build-agent"
+	identity := "fixture/reset-target"
+	sessionName := "fixture--reset-target"
+
+	result := ComputeAwakeSet(AwakeInput{
+		Agents:        []AwakeAgent{{QualifiedName: template}},
+		NamedSessions: []AwakeNamedSession{{Identity: identity, Template: template, Mode: "on_demand"}},
+		SessionBeads: []AwakeSessionBead{{
+			ID:                       "mc-reset",
+			SessionName:              sessionName,
+			Template:                 template,
+			State:                    "asleep",
+			NamedIdentity:            identity,
+			ContinuationResetPending: true,
+			WaitHold:                 true,
+		}},
+		ScaleCheckCounts: map[string]int{template: 0},
+		Now:              now,
+	})
+
+	assertAsleep(t, result, sessionName)
+}
+
+func TestNamedOnDemand_ResetPendingWaitsForRestartRequestToClear(t *testing.T) {
+	template := "fixture/build-agent"
+	identity := "fixture/reset-target"
+	sessionName := "fixture--reset-target"
+
+	result := ComputeAwakeSet(AwakeInput{
+		Agents:        []AwakeAgent{{QualifiedName: template}},
+		NamedSessions: []AwakeNamedSession{{Identity: identity, Template: template, Mode: "on_demand"}},
+		SessionBeads: []AwakeSessionBead{{
+			ID:                       "mc-reset",
+			SessionName:              sessionName,
+			Template:                 template,
+			State:                    "asleep",
+			NamedIdentity:            identity,
+			RestartRequested:         true,
+			ContinuationResetPending: true,
+		}},
+		ScaleCheckCounts: map[string]int{template: 0},
+		Now:              now,
+	})
+
+	assertAsleep(t, result, sessionName)
+}
+
 func TestNamedOnDemand_ExactNamedIdentityAssigneeWakes(t *testing.T) {
 	result := ComputeAwakeSet(AwakeInput{
 		Agents:        []AwakeAgent{{QualifiedName: "hello-world/refinery"}},

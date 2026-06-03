@@ -324,9 +324,11 @@ func TestStart_ReusedThreadDoesNotInjectStartupTurns(t *testing.T) {
 	}
 }
 
-func TestBuildThreadEnv_DropsStartupEnvelope(t *testing.T) {
+func TestBuildThreadEnv_DropsStartupEnvelopeAndDoltliteServerEnv(t *testing.T) {
 	env := buildThreadEnv(map[string]string{
 		"GC_STARTUP_ENVELOPE":      `{"runtime":{"provider":"claudeAgent","model":"claude-sonnet-4-6"}}`,
+		"GC_BEADS_BACKEND":         "doltlite",
+		"GC_NATIVE_DOLTLITE_BEADS": "true",
 		"GC_MODEL":                 "gpt-5.4-mini",
 		"GC_SESSION_NAME":          "gc--mayor",
 		"GC_DOLT_HOST":             "127.0.0.1",
@@ -344,20 +346,48 @@ func TestBuildThreadEnv_DropsStartupEnvelope(t *testing.T) {
 	if env["GC_SESSION_NAME"] != "gc--mayor" {
 		t.Fatalf("GC_SESSION_NAME = %q, want gc--mayor", env["GC_SESSION_NAME"])
 	}
-	if env["BEADS_DOLT_SERVER_HOST"] != "127.0.0.1" {
-		t.Fatalf("BEADS_DOLT_SERVER_HOST = %q, want 127.0.0.1", env["BEADS_DOLT_SERVER_HOST"])
-	}
-	if env["BEADS_DOLT_SERVER_PORT"] != "35819" {
-		t.Fatalf("BEADS_DOLT_SERVER_PORT = %q, want 35819", env["BEADS_DOLT_SERVER_PORT"])
-	}
-	if env["BEADS_DOLT_SERVER_MODE"] != "1" {
-		t.Fatalf("BEADS_DOLT_SERVER_MODE = %q, want 1", env["BEADS_DOLT_SERVER_MODE"])
-	}
-	if _, ok := env["BEADS_DOLT_SHARED_SERVER"]; ok {
-		t.Fatal("BEADS_DOLT_SHARED_SERVER should not persist into thread env")
+	for _, key := range []string{"GC_DOLT_HOST", "GC_DOLT_PORT", "BEADS_DOLT_SHARED_SERVER", "BEADS_DOLT_SERVER_HOST", "BEADS_DOLT_SERVER_PORT", "BEADS_DOLT_SERVER_MODE"} {
+		if _, ok := env[key]; ok {
+			t.Fatalf("%s should not persist into DoltLite thread env", key)
+		}
 	}
 	if _, ok := env["NOT_GC"]; ok {
 		t.Fatal("non-GC key should not persist into thread env")
+	}
+}
+
+func TestBuildThreadEnv_MirrorsDoltEndpointForNonDoltliteSessions(t *testing.T) {
+	env := buildThreadEnv(map[string]string{
+		"GC_BEADS_BACKEND":         "dolt",
+		"GC_NATIVE_DOLTLITE_BEADS": "true",
+		"GC_DOLT_HOST":             "dolt.example.internal",
+		"GC_DOLT_PORT":             "4407",
+		"BEADS_DOLT_SERVER_HOST":   "stale.example.invalid",
+		"BEADS_DOLT_SERVER_PORT":   "9999",
+		"BEADS_DOLT_PORT":          "9998",
+		"BEADS_DOLT_SERVER_MODE":   "0",
+		"BEADS_DOLT_SHARED_SERVER": "1",
+		"GC_STARTUP_ENVELOPE":      `{"runtime":{"provider":"claudeAgent","model":"claude-sonnet-4-6"}}`,
+		"NOT_GC":                   "ignore",
+	})
+
+	want := map[string]string{
+		"GC_DOLT_HOST":           "dolt.example.internal",
+		"GC_DOLT_PORT":           "4407",
+		"BEADS_DOLT_SERVER_HOST": "dolt.example.internal",
+		"BEADS_DOLT_SERVER_PORT": "4407",
+		"BEADS_DOLT_PORT":        "4407",
+		"BEADS_DOLT_SERVER_MODE": "1",
+	}
+	for key, value := range want {
+		if env[key] != value {
+			t.Fatalf("%s = %q, want %q", key, env[key], value)
+		}
+	}
+	for _, key := range []string{"GC_STARTUP_ENVELOPE", "BEADS_DOLT_SHARED_SERVER", "NOT_GC"} {
+		if _, ok := env[key]; ok {
+			t.Fatalf("%s should not persist into non-DoltLite thread env", key)
+		}
 	}
 }
 

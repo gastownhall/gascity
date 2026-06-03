@@ -80,6 +80,27 @@ func TestNativeDoltStoreCreateDelegatesToUpstreamStorage(t *testing.T) {
 	}
 }
 
+func TestNativeDoltStoreCreateGetPreservesDeferUntil(t *testing.T) {
+	store := newNativeDoltStoreForTest(newNativeDoltMemStorage())
+	deferUntil := time.Now().UTC().Add(2 * time.Hour).Truncate(time.Second)
+
+	created, err := store.Create(Bead{Title: "native deferred", DeferUntil: &deferUntil})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if created.DeferUntil == nil || !created.DeferUntil.Equal(deferUntil) {
+		t.Fatalf("created.DeferUntil = %v, want %s", created.DeferUntil, deferUntil.Format(time.RFC3339))
+	}
+
+	got, err := store.Get(created.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.DeferUntil == nil || !got.DeferUntil.Equal(deferUntil) {
+		t.Fatalf("got.DeferUntil = %v, want %s", got.DeferUntil, deferUntil.Format(time.RFC3339))
+	}
+}
+
 func TestNativeDoltStoreCreatePropagatesUpstreamError(t *testing.T) {
 	wantErr := errors.New("create failed")
 	storage := &nativeDoltStorageSpy{
@@ -254,6 +275,40 @@ func TestNativeDoltStoreReadyIncludesOpenNormalizedUpstreamStatuses(t *testing.T
 		if bead.Status != "open" {
 			t.Fatalf("Ready bead %q status = %q, want normalized open", bead.ID, bead.Status)
 		}
+	}
+}
+
+func TestNativeDoltStoreReadyExcludesFutureDeferredBeads(t *testing.T) {
+	store := newNativeDoltStoreForTest(newNativeDoltMemStorage())
+
+	ready, err := store.Create(Bead{Title: "ready"})
+	if err != nil {
+		t.Fatalf("Create(ready): %v", err)
+	}
+	future := time.Now().UTC().Add(24 * time.Hour)
+	futureDeferred, err := store.Create(Bead{Title: "future", DeferUntil: &future})
+	if err != nil {
+		t.Fatalf("Create(future): %v", err)
+	}
+	past := time.Now().UTC().Add(-24 * time.Hour)
+	pastDeferred, err := store.Create(Bead{Title: "past", DeferUntil: &past})
+	if err != nil {
+		t.Fatalf("Create(past): %v", err)
+	}
+
+	got, err := store.Ready()
+	if err != nil {
+		t.Fatalf("Ready: %v", err)
+	}
+	ids := map[string]bool{}
+	for _, bead := range got {
+		ids[bead.ID] = true
+	}
+	if !ids[ready.ID] || !ids[pastDeferred.ID] {
+		t.Fatalf("Ready() ids = %v, want ready and past-deferred beads", ids)
+	}
+	if ids[futureDeferred.ID] {
+		t.Fatalf("Ready() ids = %v, future-deferred bead %s must be hidden", ids, futureDeferred.ID)
 	}
 }
 

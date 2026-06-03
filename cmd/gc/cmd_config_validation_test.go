@@ -58,7 +58,9 @@ func TestValidateLegacyFormulaConfigRoutes_RejectsTemplateAssignee(t *testing.T)
 	}
 	writeFile(t, filepath.Join(formulasDir, "legacy.toml"), `
 formula = "legacy"
-version = 2
+
+[requires]
+formula_compiler = ">=2.0.0"
 
 [[steps]]
 id = "work"
@@ -86,6 +88,34 @@ assignee = "worker"
 	}
 }
 
+func TestValidateLegacyFormulaConfigRoutes_AllowsTemplateAssigneeWithoutCompilerV2Requirement(t *testing.T) {
+	dir := t.TempDir()
+	formulasDir := filepath.Join(dir, "formulas")
+	if err := os.MkdirAll(formulasDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(formulasDir, "legacy.toml"), `
+formula = "legacy"
+
+[[steps]]
+id = "work"
+title = "Work"
+assignee = "worker"
+`)
+
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents:    []config.Agent{{Name: "worker"}},
+		FormulaLayers: config.FormulaLayers{
+			City: []string{formulasDir},
+		},
+	}
+
+	if errs := validateLegacyFormulaConfigRoutes(cfg); len(errs) != 0 {
+		t.Fatalf("errs = %v, want none for formula without compiler-v2 requirement", errs)
+	}
+}
+
 func TestValidateLegacyFormulaConfigRoutes_AllowsNamedSessionAssignee(t *testing.T) {
 	dir := t.TempDir()
 	formulasDir := filepath.Join(dir, "formulas")
@@ -94,7 +124,9 @@ func TestValidateLegacyFormulaConfigRoutes_AllowsNamedSessionAssignee(t *testing
 	}
 	writeFile(t, filepath.Join(formulasDir, "named.toml"), `
 formula = "named"
-version = 2
+
+[requires]
+formula_compiler = ">=2.0.0"
 
 [[steps]]
 id = "review"

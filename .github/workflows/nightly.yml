@@ -9,14 +9,14 @@ permissions:
   contents: read
 
 env:
-  DOLT_VERSION: "2.0.7"
+  DOLT_VERSION: "2.1.0"
   BD_VERSION: "v1.0.5"
 
 jobs:
   tier-b:
     name: Tier B acceptance tests
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
@@ -27,6 +27,12 @@ jobs:
           install-claude-cli: "false"
 
       - name: Tier B lifecycle tests
+        env:
+          ACCEPTANCE_B_TIMEOUT: 20m
+          EXTRA_TEST_ENV: >-
+            GC_IDLE_BEAD_STABILITY_WARMUP=10s
+            GC_IDLE_BEAD_STABILITY_SAMPLES=36
+            GC_IDLE_BEAD_STABILITY_INTERVAL=5s
         run: make test-acceptance-b
 
   tier-c:

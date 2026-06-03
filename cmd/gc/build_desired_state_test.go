@@ -122,9 +122,13 @@ type demandListCountingStore struct {
 	liveInProgressWispLists  int
 	liveOpenMolecules        int
 	livePoolDemand           int
+	fullPrimeLists           int
 }
 
 func (s *demandListCountingStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	if !query.Live && query.AllowScan && query.SkipLabels && query.TierMode == beads.TierBoth {
+		s.fullPrimeLists++
+	}
 	if query.Live && query.Status == "in_progress" {
 		switch query.TierMode {
 		case beads.TierWisps:
@@ -200,7 +204,7 @@ func (s *controllerDemandPartialStore) Ready(query ...beads.ReadyQuery) ([]beads
 	if err != nil {
 		return nil, err
 	}
-	if len(query) == 0 {
+	if len(query) == 0 || (query[0].Assignee == "" && query[0].Limit == 0) {
 		return rows, &beads.PartialResultError{Op: "bd ready", Err: errors.New("skipped corrupt controller demand bead")}
 	}
 	return rows, nil
@@ -300,8 +304,93 @@ func TestCollectAssignedWorkBeadsIncludesAssignedInProgressWisp(t *testing.T) {
 	}
 }
 
-func TestCollectAssignedWorkBeadsUsesCachedReadyReadModel(t *testing.T) {
-	backing := &readyFailStore{Store: beads.NewMemStore()}
+func TestCollectAssignedWorkBeadsIncludesReadyOpenAssignedWisp(t *testing.T) {
+	store := &readyQueryRecordingStore{MemStore: beads.NewMemStore()}
+	wisp, err := store.Create(beads.Bead{
+		Title:     "workflow control",
+		Type:      "task",
+		Status:    "open",
+		Assignee:  "control-dispatcher",
+		Ephemeral: true,
+		Metadata: map[string]string{
+			"gc.kind": "retry",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create wisp work: %v", err)
+	}
+	cfg := &config.City{
+		NamedSessions: []config.NamedSession{{
+			Template: "control-dispatcher",
+			Mode:     "on_demand",
+		}},
+	}
+
+	got, partial := collectAssignedWorkBeads(cfg, store)
+
+	if partial {
+		t.Fatal("collectAssignedWorkBeads reported partial results")
+	}
+	if len(got) != 1 || got[0].ID != wisp.ID {
+		t.Fatalf("collectAssignedWorkBeads returned %#v, want ready wisp %s", got, wisp.ID)
+	}
+	if len(store.readyQueries) == 0 {
+		t.Fatal("Ready was not queried")
+	}
+	for _, query := range store.readyQueries {
+		if query.TierMode != beads.TierBoth {
+			t.Fatalf("Ready query TierMode = %v, want TierBoth; queries=%#v", query.TierMode, store.readyQueries)
+		}
+	}
+}
+
+func TestCollectAssignedWorkBeadsUsesLiveReadyAfterExternalDependencyClose(t *testing.T) {
+	backing := beads.NewMemStore()
+	blocker, err := backing.Create(beads.Bead{
+		Title:  "first attempt",
+		Type:   "task",
+		Status: "open",
+	})
+	if err != nil {
+		t.Fatalf("create blocker: %v", err)
+	}
+	retry, err := backing.Create(beads.Bead{
+		Title:     "retry controller",
+		Type:      "task",
+		Status:    "open",
+		Assignee:  "control-dispatcher",
+		Ephemeral: true,
+		Metadata: map[string]string{
+			"gc.kind": "retry",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create retry: %v", err)
+	}
+	if err := backing.DepAdd(retry.ID, blocker.ID, "blocks"); err != nil {
+		t.Fatalf("add retry blocker: %v", err)
+	}
+	cache := beads.NewCachingStoreForTest(backing, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("prime cache: %v", err)
+	}
+	closed := "closed"
+	if err := backing.Update(blocker.ID, beads.UpdateOpts{Status: &closed}); err != nil {
+		t.Fatalf("close blocker outside cache: %v", err)
+	}
+
+	got, partial := collectAssignedWorkBeads(&config.City{}, cache)
+
+	if partial {
+		t.Fatal("collectAssignedWorkBeads reported partial results")
+	}
+	if len(got) != 1 || got[0].ID != retry.ID {
+		t.Fatalf("collectAssignedWorkBeads returned %#v, want live-ready retry %s after blocker close", got, retry.ID)
+	}
+}
+
+func TestCollectAssignedWorkBeadsUsesLiveReadyReadModel(t *testing.T) {
+	backing := &readyStaticStore{Store: beads.NewMemStore()}
 	handoff, err := backing.Create(beads.Bead{
 		Title:    "merge me",
 		Type:     "task",
@@ -311,6 +400,7 @@ func TestCollectAssignedWorkBeadsUsesCachedReadyReadModel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create handoff bead: %v", err)
 	}
+	backing.ready = []beads.Bead{handoff}
 	cache := beads.NewCachingStoreForTest(backing, nil)
 	if err := cache.PrimeActive(); err != nil {
 		t.Fatalf("PrimeActive: %v", err)
@@ -320,8 +410,8 @@ func TestCollectAssignedWorkBeadsUsesCachedReadyReadModel(t *testing.T) {
 	if len(got) != 1 || got[0].ID != handoff.ID {
 		t.Fatalf("collectAssignedWorkBeads returned %#v, want [%s]", got, handoff.ID)
 	}
-	if backing.readyCalls != 0 {
-		t.Fatalf("backing Ready calls = %d, want cached demand read", backing.readyCalls)
+	if backing.readyCalls == 0 {
+		t.Fatal("backing Ready was not called; assigned ready demand must use live state")
 	}
 }
 
@@ -357,6 +447,9 @@ func TestCollectAssignedWorkBeadsUsesCachedInProgressReadModel(t *testing.T) {
 	}
 	if backing.liveInProgressWispLists != 0 {
 		t.Fatalf("live wisp in_progress list calls = %d, want cached demand read", backing.liveInProgressWispLists)
+	}
+	if backing.fullPrimeLists != 0 {
+		t.Fatalf("full-prime list calls = %d, want controller demand to use PrimeActive snapshot", backing.fullPrimeLists)
 	}
 }
 
@@ -498,6 +591,177 @@ func TestDefaultScaleCheckCountsCountsUnassignedRoutedPoolWork(t *testing.T) {
 		},
 	}); err != nil {
 		t.Fatalf("create handoff bead: %v", err)
+	}
+	cache := beads.NewCachingStoreForTest(backing, nil)
+	if err := cache.PrimeActive(); err != nil {
+		t.Fatalf("PrimeActive: %v", err)
+	}
+
+	counts, _, errs := defaultScaleCheckCounts([]defaultScaleCheckTarget{{
+		template: template,
+		storeKey: "rig:gascity",
+		store:    cache,
+	}})
+	if len(errs) != 0 {
+		t.Fatalf("defaultScaleCheckCounts errs = %v", errs)
+	}
+	if got := counts[template]; got != 1 {
+		t.Fatalf("defaultScaleCheckCounts[%q] = %d, want 1", template, got)
+	}
+}
+
+func TestDefaultScaleCheckCountsCountsUnassignedRoutedTaskWisp(t *testing.T) {
+	const template = "gascity/reviewer"
+	backing := beads.NewMemStore()
+	if _, err := backing.Create(beads.Bead{
+		Title:     "routed ephemeral pool work",
+		Type:      "task",
+		Status:    "open",
+		Ephemeral: true,
+		Metadata: map[string]string{
+			"gc.routed_to": template,
+		},
+	}); err != nil {
+		t.Fatalf("create routed wisp: %v", err)
+	}
+	cache := beads.NewCachingStoreForTest(backing, nil)
+	if err := cache.PrimeActive(); err != nil {
+		t.Fatalf("PrimeActive: %v", err)
+	}
+
+	counts, _, errs := defaultScaleCheckCounts([]defaultScaleCheckTarget{{
+		template: template,
+		storeKey: "rig:gascity",
+		store:    cache,
+	}})
+	if len(errs) != 0 {
+		t.Fatalf("defaultScaleCheckCounts errs = %v", errs)
+	}
+	if got := counts[template]; got != 1 {
+		t.Fatalf("defaultScaleCheckCounts[%q] = %d, want 1 for task-shaped wisp", template, got)
+	}
+}
+
+func TestDefaultScaleCheckCountsCountsRunTargetOnlyWorkflowDuringMigration(t *testing.T) {
+	const template = "gascity/reviewer"
+	backing := beads.NewMemStore()
+	if _, err := backing.Create(beads.Bead{
+		Title:  "legacy workflow root",
+		Type:   "task",
+		Status: "open",
+		Metadata: map[string]string{
+			"gc.kind":       "workflow",
+			"gc.run_target": template,
+		},
+	}); err != nil {
+		t.Fatalf("create legacy workflow root: %v", err)
+	}
+	cache := beads.NewCachingStoreForTest(backing, nil)
+	if err := cache.PrimeActive(); err != nil {
+		t.Fatalf("PrimeActive: %v", err)
+	}
+
+	counts, _, errs := defaultScaleCheckCounts([]defaultScaleCheckTarget{{
+		template: template,
+		storeKey: "rig:gascity",
+		store:    cache,
+	}})
+	if len(errs) != 0 {
+		t.Fatalf("defaultScaleCheckCounts errs = %v", errs)
+	}
+	if got := counts[template]; got != 1 {
+		t.Fatalf("defaultScaleCheckCounts[%q] = %d, want 1", template, got)
+	}
+}
+
+func TestDefaultScaleCheckCountsIgnoresRunTargetOnNonWorkflowDivergentWork(t *testing.T) {
+	const (
+		entryTarget = "gascity/controller"
+		stepTarget  = "gascity/reviewer"
+	)
+	backing := beads.NewMemStore()
+	if _, err := backing.Create(beads.Bead{
+		Title:  "legacy divergent step",
+		Type:   "task",
+		Status: "open",
+		Metadata: map[string]string{
+			"gc.routed_to":  entryTarget,
+			"gc.run_target": stepTarget,
+		},
+	}); err != nil {
+		t.Fatalf("create legacy divergent step: %v", err)
+	}
+	cache := beads.NewCachingStoreForTest(backing, nil)
+	if err := cache.PrimeActive(); err != nil {
+		t.Fatalf("PrimeActive: %v", err)
+	}
+
+	counts, _, errs := defaultScaleCheckCounts([]defaultScaleCheckTarget{
+		{template: entryTarget, storeKey: "rig:gascity", store: cache},
+		{template: stepTarget, storeKey: "rig:gascity", store: cache},
+	})
+	if len(errs) != 0 {
+		t.Fatalf("defaultScaleCheckCounts errs = %v", errs)
+	}
+	if got := counts[entryTarget]; got != 1 {
+		t.Fatalf("defaultScaleCheckCounts[%q] = %d, want 1", entryTarget, got)
+	}
+	if got := counts[stepTarget]; got != 0 {
+		t.Fatalf("defaultScaleCheckCounts[%q] = %d, want 0", stepTarget, got)
+	}
+}
+
+func TestDefaultScaleCheckCountsIgnoresRunTargetWhenWorkflowRoutedToPresent(t *testing.T) {
+	const (
+		entryTarget = "gascity/controller"
+		staleTarget = "gascity/reviewer"
+	)
+	backing := beads.NewMemStore()
+	if _, err := backing.Create(beads.Bead{
+		Title:  "divergent workflow root",
+		Type:   "task",
+		Status: "open",
+		Metadata: map[string]string{
+			"gc.kind":       "workflow",
+			"gc.routed_to":  entryTarget,
+			"gc.run_target": staleTarget,
+		},
+	}); err != nil {
+		t.Fatalf("create divergent workflow root: %v", err)
+	}
+	cache := beads.NewCachingStoreForTest(backing, nil)
+	if err := cache.PrimeActive(); err != nil {
+		t.Fatalf("PrimeActive: %v", err)
+	}
+
+	counts, _, errs := defaultScaleCheckCounts([]defaultScaleCheckTarget{
+		{template: entryTarget, storeKey: "rig:gascity", store: cache},
+		{template: staleTarget, storeKey: "rig:gascity", store: cache},
+	})
+	if len(errs) != 0 {
+		t.Fatalf("defaultScaleCheckCounts errs = %v", errs)
+	}
+	if got := counts[entryTarget]; got != 1 {
+		t.Fatalf("defaultScaleCheckCounts[%q] = %d, want 1", entryTarget, got)
+	}
+	if got := counts[staleTarget]; got != 0 {
+		t.Fatalf("defaultScaleCheckCounts[%q] = %d, want 0", staleTarget, got)
+	}
+}
+
+func TestDefaultScaleCheckCountsFallsBackToRoutedToWhenRunTargetDoesNotMatchTemplate(t *testing.T) {
+	const template = "gascity/reviewer"
+	backing := beads.NewMemStore()
+	if _, err := backing.Create(beads.Bead{
+		Title:  "new graph step",
+		Type:   "task",
+		Status: "open",
+		Metadata: map[string]string{
+			"gc.run_target": "reviewer",
+			"gc.routed_to":  template,
+		},
+	}); err != nil {
+		t.Fatalf("create graph step: %v", err)
 	}
 	cache := beads.NewCachingStoreForTest(backing, nil)
 	if err := cache.PrimeActive(); err != nil {
@@ -664,6 +928,77 @@ func TestDefaultScaleCheckCountsCountsCronPoolDemandViaMetadataFlag(t *testing.T
 	}
 	if backing.livePoolDemand == 0 {
 		t.Fatalf("livePoolDemand list calls = 0, want >0 (defaultScaleCheckCounts must use Live: true to bypass the CachingStore snapshot, since cron pool orders fire from sibling subprocesses and the cache lags)")
+	}
+}
+
+func TestDefaultScaleCheckCountsPoolDemandUsesRoutedToBeforeRunTarget(t *testing.T) {
+	backing := &demandListCountingStore{Store: beads.NewMemStore()}
+	metadata := map[string]string{
+		"gc.run_target": "dog",
+		"gc.routed_to":  "cat",
+	}
+	for k, v := range poolDemandMetadataPair() {
+		metadata[k] = v
+	}
+	if _, err := backing.Create(beads.Bead{
+		Title:     "pool demand with canonical route",
+		Type:      "molecule",
+		Status:    "open",
+		Metadata:  metadata,
+		Ephemeral: true,
+	}); err != nil {
+		t.Fatalf("create pool-order wisp: %v", err)
+	}
+	cache := beads.NewCachingStoreForTest(backing, nil)
+	if err := cache.PrimeActive(); err != nil {
+		t.Fatalf("PrimeActive: %v", err)
+	}
+
+	counts, _, errs := defaultScaleCheckCounts([]defaultScaleCheckTarget{
+		{template: "dog", storeKey: "city", store: cache},
+		{template: "cat", storeKey: "city", store: cache},
+	})
+	if len(errs) != 0 {
+		t.Fatalf("defaultScaleCheckCounts errs = %v", errs)
+	}
+	if got := counts["dog"]; got != 0 {
+		t.Fatalf("defaultScaleCheckCounts[%q] = %d, want 0 (gc.run_target is ignored when gc.routed_to is present)", "dog", got)
+	}
+	if got := counts["cat"]; got != 1 {
+		t.Fatalf("defaultScaleCheckCounts[%q] = %d, want 1 (gc.routed_to is the canonical pool-demand route)", "cat", got)
+	}
+}
+
+func TestDefaultScaleCheckCountsIgnoresFutureDeferredCronPoolDemand(t *testing.T) {
+	backing := &demandListCountingStore{Store: beads.NewMemStore()}
+	future := time.Now().UTC().Add(time.Hour)
+	if _, err := backing.Create(beads.Bead{
+		Title:      "deferred pool-order wisp",
+		Type:       "molecule",
+		Status:     "open",
+		Metadata:   poolWispMetadata("cat"),
+		DeferUntil: &future,
+	}); err != nil {
+		t.Fatalf("create deferred pool-order wisp: %v", err)
+	}
+	cache := beads.NewCachingStoreForTest(backing, nil)
+	if err := cache.PrimeActive(); err != nil {
+		t.Fatalf("PrimeActive: %v", err)
+	}
+
+	counts, _, errs := defaultScaleCheckCounts([]defaultScaleCheckTarget{{
+		template: "cat",
+		storeKey: "city",
+		store:    cache,
+	}})
+	if len(errs) != 0 {
+		t.Fatalf("defaultScaleCheckCounts errs = %v", errs)
+	}
+	if got := counts["cat"]; got != 0 {
+		t.Fatalf("defaultScaleCheckCounts[%q] = %d, want 0 for future-deferred gc.pool_demand wisp", "cat", got)
+	}
+	if backing.livePoolDemand == 0 {
+		t.Fatalf("livePoolDemand list calls = 0, want >0")
 	}
 }
 
@@ -1086,6 +1421,44 @@ func TestDefaultNamedSessionDemandUsesPartialReadyRows(t *testing.T) {
 	}
 	if !partialTemplates["worker"] {
 		t.Fatalf("partialTemplates = %v, want worker marked partial", partialTemplates)
+	}
+}
+
+func TestDefaultNamedSessionDemandCountsRunTargetOnlyWorkflowDuringMigration(t *testing.T) {
+	store := beads.NewMemStore()
+	if _, err := store.Create(beads.Bead{
+		Title:  "legacy workflow root",
+		Type:   "task",
+		Status: "open",
+		Metadata: map[string]string{
+			"gc.kind":       "workflow",
+			"gc.run_target": "reviewer",
+		},
+	}); err != nil {
+		t.Fatalf("create routed bead: %v", err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name: "reviewer",
+		}},
+		NamedSessions: []config.NamedSession{{
+			Name:     "primary",
+			Template: "reviewer",
+			Mode:     "on_demand",
+		}},
+	}
+
+	demand, _, errs := defaultNamedSessionDemand([]defaultScaleCheckTarget{{
+		template: "reviewer",
+		storeKey: "rig:gascity",
+		store:    store,
+	}}, cfg, "test-city")
+	if len(errs) != 0 {
+		t.Fatalf("defaultNamedSessionDemand errs = %v", errs)
+	}
+	if !demand["primary"] {
+		t.Fatal("defaultNamedSessionDemand[primary] = false, want legacy run_target demand")
 	}
 }
 
@@ -1913,6 +2286,9 @@ source = "./assets/sidecar"
 [workspace]
 provider = "claude"
 
+[providers.claude]
+base = "builtin:claude"
+
 [[rigs]]
 name = "repo"
 
@@ -1994,6 +2370,9 @@ func TestBuildDesiredState_TransitiveFalseSkipsNestedImportedNamedSessions(t *te
 [workspace]
 name = "import-regression"
 provider = "claude"
+
+[providers.claude]
+base = "builtin:claude"
 
 [imports.outer]
 source = "./assets/outer"
@@ -2078,7 +2457,8 @@ func TestBuildDesiredState_RoutedQueueDoesNotCreateOneSessionPerBead(t *testing.
 		}},
 	}
 
-	dsResult := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, io.Discard)
+	var stderr bytes.Buffer
+	dsResult := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, &stderr)
 	if len(dsResult.AssignedWorkBeads) != 0 {
 		t.Fatalf("AssignedWorkBeads = %d, want 0 for routed-only queue", len(dsResult.AssignedWorkBeads))
 	}
@@ -4637,6 +5017,49 @@ func TestBuildDesiredState_OnDemandNamedSession_DefaultRoutedWorkMaterializesNam
 	}
 }
 
+func TestBuildDesiredState_OnDemandNamedSession_DefaultRoutedTaskWispMaterializesNamedSession(t *testing.T) {
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+	if _, err := store.Create(beads.Bead{
+		Title:     "queued mayor wisp",
+		Type:      "task",
+		Status:    "open",
+		Ephemeral: true,
+		Metadata: map[string]string{
+			"gc.routed_to": "mayor",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "mayor",
+			StartCommand:      "true",
+			MaxActiveSessions: intPtr(1),
+			WorkQuery:         "printf ''",
+		}},
+		NamedSessions: []config.NamedSession{{
+			Template: "mayor",
+			Mode:     "on_demand",
+		}},
+	}
+
+	dsResult := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, io.Discard)
+	foundNamed := false
+	for _, tp := range dsResult.State {
+		if tp.TemplateName == "mayor" && tp.ConfiguredNamedIdentity == "mayor" {
+			foundNamed = true
+		}
+	}
+	if !foundNamed {
+		t.Fatal("default routed task wisp should materialize the on-demand named session")
+	}
+	if !dsResult.NamedSessionDemand["mayor"] {
+		t.Fatal("NamedSessionDemand should record default routed task wisp for mayor")
+	}
+}
+
 func TestBuildDesiredState_OnDemandNamedSession_DefaultRoutedTemplateMaterializesSingletonIdentity(t *testing.T) {
 	cityPath := t.TempDir()
 	store := beads.NewMemStore()
@@ -5838,6 +6261,7 @@ func TestBuildDesiredState_SingletonTemplateDoesNotRealizeDependencyPoolFloorWit
 		Agents: []config.Agent{
 			{
 				Name:              "db",
+				StartCommand:      "true",
 				MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3), ScaleCheck: "printf 0",
 			},
 			{
@@ -5866,6 +6290,7 @@ func TestBuildDesiredState_DoesNotRealizeDependencyFloorForZeroScaledDependentPo
 		Agents: []config.Agent{
 			{
 				Name:              "db",
+				StartCommand:      "true",
 				MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3), ScaleCheck: "printf 0",
 			},
 			{
@@ -5891,6 +6316,7 @@ func TestBuildDesiredState_DoesNotRealizeDependencyFloorForSuspendedDependent(t 
 		Agents: []config.Agent{
 			{
 				Name:              "db",
+				StartCommand:      "true",
 				MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3), ScaleCheck: "printf 0",
 			},
 			{
@@ -5916,6 +6342,7 @@ func TestBuildDesiredState_SingletonTemplatesDoNotRealizeTransitiveDependencyPoo
 		Agents: []config.Agent{
 			{
 				Name:              "db",
+				StartCommand:      "true",
 				MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3), ScaleCheck: "printf 0",
 			},
 			{
@@ -5969,6 +6396,7 @@ func TestBuildDesiredState_DiscoveredSessionRootGetsDependencyPoolFloor(t *testi
 		Agents: []config.Agent{
 			{
 				Name:              "db",
+				StartCommand:      "true",
 				MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3), ScaleCheck: "printf 0",
 			},
 			{
@@ -5981,7 +6409,8 @@ func TestBuildDesiredState_DiscoveredSessionRootGetsDependencyPoolFloor(t *testi
 		},
 	}
 
-	dsResult := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, io.Discard)
+	var stderr bytes.Buffer
+	dsResult := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, &stderr)
 	desired := dsResult.State
 	if _, ok := desired["s-gc-100"]; !ok {
 		t.Fatalf("expected discovered helper session in desired state, got keys %v", desired)
@@ -5993,7 +6422,7 @@ func TestBuildDesiredState_DiscoveredSessionRootGetsDependencyPoolFloor(t *testi
 		}
 	}
 	if dbSlots != 1 {
-		t.Fatalf("db desired slots = %d, want 1", dbSlots)
+		t.Fatalf("db desired slots = %d, want 1; stderr=%s", dbSlots, stderr.String())
 	}
 }
 
@@ -6017,6 +6446,7 @@ func TestBuildDesiredState_ManualZeroScaledPoolSessionStaysDesiredAndKeepsDepend
 		Agents: []config.Agent{
 			{
 				Name:              "db",
+				StartCommand:      "true",
 				MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3), ScaleCheck: "printf 0",
 			},
 			{
@@ -6028,7 +6458,8 @@ func TestBuildDesiredState_ManualZeroScaledPoolSessionStaysDesiredAndKeepsDepend
 		},
 	}
 
-	dsResult := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, io.Discard)
+	var stderr bytes.Buffer
+	dsResult := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, &stderr)
 	desired := dsResult.State
 	if _, ok := desired["s-gc-200"]; !ok {
 		t.Fatalf("expected manual pool session in desired state, got keys %v", desired)
@@ -6040,7 +6471,7 @@ func TestBuildDesiredState_ManualZeroScaledPoolSessionStaysDesiredAndKeepsDepend
 		}
 	}
 	if dbSlots != 1 {
-		t.Fatalf("db desired slots = %d, want 1", dbSlots)
+		t.Fatalf("db desired slots = %d, want 1; stderr=%s", dbSlots, stderr.String())
 	}
 }
 
@@ -6436,6 +6867,7 @@ func TestBuildDesiredState_DrainedPoolManagedSessionIsNotRediscovered(t *testing
 	cfg := &config.City{
 		Agents: []config.Agent{{
 			Name:              "claude",
+			StartCommand:      "true",
 			MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(5),
 		}},
 	}
@@ -6509,6 +6941,7 @@ func TestBuildDesiredState_UsesBeadNamedPoolSessionsForScaleCheckDemand(t *testi
 		Agents: []config.Agent{
 			{
 				Name:              "worker",
+				StartCommand:      "true",
 				MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3), ScaleCheck: "echo 1",
 			},
 		},
@@ -6605,6 +7038,7 @@ func TestBuildDesiredState_FallsBackToLegacyPoolDemandWhenListFails(t *testing.T
 		Agents: []config.Agent{
 			{
 				Name:              "worker",
+				StartCommand:      "true",
 				MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(1),
 			},
 		},
@@ -6664,6 +7098,7 @@ func TestBuildDesiredState_DependencyFloorDoesNotReuseRegularPoolWorkerBead(t *t
 		Agents: []config.Agent{
 			{
 				Name:              "worker",
+				StartCommand:      "true",
 				MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3),
 			},
 			{
@@ -6702,6 +7137,7 @@ func TestBuildDesiredState_StoreBackedPoolUsesLogicalInstanceIdentity(t *testing
 		Agents: []config.Agent{
 			{
 				Name:              "worker",
+				StartCommand:      "true",
 				MinActiveSessions: intPtr(0),
 				MaxActiveSessions: intPtr(2),
 				ScaleCheck:        "printf 2",
@@ -6763,6 +7199,7 @@ func TestBuildDesiredState_StoreBackedPoolUsesQualifiedInstanceNameForBindings(t
 		Agents: []config.Agent{{
 			Name:              "worker",
 			BindingName:       "ops",
+			StartCommand:      "true",
 			WorkDir:           ".gc/worktrees/{{.AgentBase}}",
 			MinActiveSessions: intPtr(0),
 			MaxActiveSessions: intPtr(2),
@@ -6822,6 +7259,7 @@ func TestBuildDesiredState_RecoversPoolTemplateFromAliasOnlyBindingIdentity(t *t
 			Name:          "worker",
 			Dir:           "frontend",
 			BindingName:   "ops",
+			StartCommand:  "true",
 			NamepoolNames: []string{"furiosa", "nux"},
 			WorkDir:       ".gc/worktrees/{{.AgentBase}}",
 			ScaleCheck:    "printf 1",
@@ -7471,6 +7909,7 @@ func TestBuildDesiredState_DoesNotCreateDuplicatePoolBeadForDiscoveredSession(t 
 		Agents: []config.Agent{
 			{
 				Name:              "worker",
+				StartCommand:      "true",
 				MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3),
 			},
 		},
@@ -7511,10 +7950,12 @@ func TestBuildDesiredState_ZeroScaledPoolSessionKeepsDependencyFloorWhileDrainin
 		Agents: []config.Agent{
 			{
 				Name:              "db",
+				StartCommand:      "true",
 				MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3), ScaleCheck: "printf 0",
 			},
 			{
 				Name:              "api",
+				StartCommand:      "true",
 				DependsOn:         []string{"db"},
 				MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3), ScaleCheck: "printf 0",
 			},
@@ -7558,6 +7999,7 @@ func TestBuildDesiredState_PoolCheckInjectsDoltPortForRigScopedAgent(t *testing.
 			{
 				Name:              "worker",
 				Dir:               "myrig",
+				StartCommand:      "true",
 				MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(5), ScaleCheck: checkCmd,
 			},
 		},
@@ -7603,6 +8045,7 @@ func TestBuildDesiredState_PoolCheckUsesCityDoltPortForCityScopedAgent(t *testin
 		Agents: []config.Agent{
 			{
 				Name:              "worker",
+				StartCommand:      "true",
 				MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(5), ScaleCheck: checkCmd,
 			},
 		},
@@ -7658,6 +8101,7 @@ func TestBuildDesiredState_PoolCheckUsesExplicitRigPassword(t *testing.T) {
 		Agents: []config.Agent{{
 			Name:              "worker",
 			Dir:               "demo",
+			StartCommand:      "true",
 			MinActiveSessions: intPtr(0),
 			MaxActiveSessions: intPtr(5),
 			ScaleCheck:        checkCmd,
@@ -7678,8 +8122,15 @@ func TestBuildDesiredState_PoolCheckUsesExplicitRigPassword(t *testing.T) {
 
 func TestBuildDesiredState_PoolCheckUsesManagedCityDoltPortWhenRigHasNoOverride(t *testing.T) {
 	skipSlowCmdGCTest(t, "uses a live managed-dolt port probe for scale_check coverage; run make test-cmd-gc-process for full coverage")
+	clearGCEnv(t)
 	t.Setenv("GC_BEADS", "bd")
 	cityPath := t.TempDir()
+	t.Setenv("GC_BEADS_SCOPE_ROOT", cityPath)
+	writeRigEndpointCanonicalConfig(t, cityPath, contract.ConfigState{
+		IssuePrefix:    "gc",
+		EndpointOrigin: contract.EndpointOriginManagedCity,
+		EndpointStatus: contract.EndpointStatusVerified,
+	})
 	rigPath := filepath.Join(cityPath, "myrig")
 	if err := os.MkdirAll(rigPath, 0o755); err != nil {
 		t.Fatal(err)
@@ -7709,9 +8160,22 @@ func TestBuildDesiredState_PoolCheckUsesManagedCityDoltPortWhenRigHasNoOverride(
 			{
 				Name:              "worker",
 				Dir:               "myrig",
+				StartCommand:      "true",
 				MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(5), ScaleCheck: checkCmd,
 			},
 		},
+	}
+
+	queryEnv, err := controllerQueryRuntimeEnv(cityPath, cfg, &cfg.Agents[0])
+	if err != nil {
+		t.Fatalf("controllerQueryRuntimeEnv: %v", err)
+	}
+	wantPort := strconv.Itoa(ln.Addr().(*net.TCPAddr).Port)
+	if got := queryEnv["BEADS_DOLT_SERVER_PORT"]; got != wantPort {
+		t.Fatalf("BEADS_DOLT_SERVER_PORT = %q, want %q; GC_DOLT=%q provider=%q scopeProvider=%q cityUses=%v scopeUses=%v current=%q resolvable=%q",
+			got, wantPort, os.Getenv("GC_DOLT"), rawBeadsProvider(cityPath), rawBeadsProviderForScope(rigPath, cityPath),
+			cityUsesBdStoreContract(cityPath), scopeUsesManagedBdStoreContract(cityPath, rigPath),
+			currentManagedDoltPort(cityPath), currentResolvableManagedDoltPort(cityPath))
 	}
 
 	desired := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), nil, io.Discard)

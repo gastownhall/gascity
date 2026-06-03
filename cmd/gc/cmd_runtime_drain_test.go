@@ -443,6 +443,10 @@ func TestDoRuntimeDrainCheckJSONNotDrainingWritesFalseResult(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestDoRuntimeDrainAck(t *testing.T) {
+	old := drainAckPokeController
+	drainAckPokeController = func(string) error { return nil }
+	t.Cleanup(func() { drainAckPokeController = old })
+
 	dops := newFakeDrainOps()
 	var stdout, stderr bytes.Buffer
 	code := doRuntimeDrainAck(dops, "", "worker", "worker", false, &stdout, &stderr)
@@ -452,7 +456,7 @@ func TestDoRuntimeDrainAck(t *testing.T) {
 	if !dops.acked["worker"] {
 		t.Error("drain ack flag not set")
 	}
-	if got := stdout.String(); got != "Drain acknowledged. Controller will stop this session.\n" {
+	if got := stdout.String(); got != "Drain acknowledged. Controller poked for immediate stop.\n" {
 		t.Errorf("stdout = %q", got)
 	}
 }

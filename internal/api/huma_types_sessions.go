@@ -32,6 +32,21 @@ func (s *SessionListInput) Resolve(ctx huma.Context) []error {
 	return nil
 }
 
+// CityPendingInput is the Huma input for GET /v0/city/{cityName}/pending.
+type CityPendingInput struct {
+	CityScope
+}
+
+// cityPendingEntry is one active session awaiting a human decision in the
+// city-wide pending aggregate. It carries ids only; consumers fetch the full
+// interaction via the per-session GET /v0/city/{cityName}/session/{id}/pending
+// endpoint, keeping this snapshot minimal.
+type cityPendingEntry struct {
+	SessionID string `json:"session_id" doc:"Session ID awaiting a human decision."`
+	RequestID string `json:"request_id" doc:"Pending interaction request ID."`
+	Kind      string `json:"kind" doc:"Pending interaction kind (e.g. tool-approval, prompt-for-input)."`
+}
+
 // SessionGetInput is the Huma input for GET /v0/city/{cityName}/session/{id}.
 type SessionGetInput struct {
 	CityScope

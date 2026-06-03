@@ -8,13 +8,14 @@ import (
 )
 
 const (
-	testGCBinaryDirPrefix     = "gc-test-binary-pid"
-	testCmdGCTempRootPrefix   = "gct"
-	testSlingFormulaDirPrefix = "gc-sling-test-formulas-pid"
-	testSlingCityDirPrefix    = "gc-sling-test-city-pid"
-	testGCHomeDirPrefix       = "gascity-gc-home-pid"
-	testRuntimeDirPrefix      = "gascity-runtime-pid"
-	testProviderStubDirPrefix = "gascity-provider-stubs-pid"
+	testGCBinaryDirPrefix      = "gc-test-binary-pid"
+	testCmdGCTempRootPrefix    = "gct"
+	testSharedFixtureDirPrefix = "gascity-gc-test-fixtures-pid"
+	testSlingFormulaDirPrefix  = "gc-sling-test-formulas-pid"
+	testSlingCityDirPrefix     = "gc-sling-test-city-pid"
+	testGCHomeDirPrefix        = "gascity-gc-home-pid"
+	testRuntimeDirPrefix       = "gascity-runtime-pid"
+	testProviderStubDirPrefix  = "gascity-provider-stubs-pid"
 )
 
 func pidPrefixedTempPattern(prefix string) string {

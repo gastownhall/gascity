@@ -95,9 +95,12 @@ type LoadOptions struct {
 	// SuppressDeprecatedOrderWarnings suppresses only legacy order-path
 	// migration warnings produced while discovering pack orders.
 	SuppressDeprecatedOrderWarnings bool
-	deferRigPatches                 bool
-	deferredRigPatches              *[]deferredRigPatches
-	allowLegacyOrderLayouts         bool
+	// AllowMissingProviderReferences leaves provider-reference catalog errors
+	// non-fatal for repair tools that need to inspect broken configs.
+	AllowMissingProviderReferences bool
+	deferRigPatches                bool
+	deferredRigPatches             *[]deferredRigPatches
+	allowLegacyOrderLayouts        bool
 }
 
 // LoadWithIncludes loads a city.toml and merges all included fragments.
@@ -592,6 +595,13 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 	// Apply [agent_defaults] values to all agents (explicit and implicit)
 	// that don't set their own override. Deprecated [agents] aliases are
 	// normalized during parse/load before composition reaches this point.
+	if root.AgentDefaults.Provider != "" {
+		for i := range root.Agents {
+			if root.Agents[i].BindingName == "" {
+				root.Agents[i].InheritedProvider = ""
+			}
+		}
+	}
 	if root.AgentDefaults.DefaultSlingFormula != "" {
 		for i := range root.Agents {
 			if root.Agents[i].BindingName == "" {
@@ -619,9 +629,11 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 	// Validate named session declarations after pack expansion and site
 	// binding resolution so stamped identities and deterministic runtime
 	// names reflect the effective workspace identity.
-	if err := ValidateNamedSessions(root); err != nil {
+	namedSessionWarnings, err := ValidateNamedSessions(root)
+	if err != nil {
 		return nil, nil, err
 	}
+	prov.Warnings = append(prov.Warnings, namedSessionWarnings...)
 
 	if err := ValidateGitHubPRMonitors(root); err != nil {
 		return nil, nil, err
@@ -639,6 +651,11 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 	}
 
 	// Validate cross-entity semantic constraints.
+	if !opts.AllowMissingProviderReferences {
+		if err := ValidateProviderReferences(root); err != nil {
+			return nil, nil, err
+		}
+	}
 	prov.Warnings = append(prov.Warnings, ValidateSemantics(root, path)...)
 	prov.Warnings = append(prov.Warnings, DetectLegacyProviderInheritance(root, path)...)
 	prov.Warnings = append(prov.Warnings, detectLegacyWorkspaceFields(root, path, prov.Workspace)...)
@@ -657,11 +674,6 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 
 	// Load namepool files for pool agents.
 	loadNamepools(fs, root, cityRoot)
-
-	// Backwards compat: promote deprecated graph_workflows → formula_v2.
-	if root.Daemon.GraphWorkflows && !root.Daemon.FormulaV2 {
-		root.Daemon.FormulaV2 = true
-	}
 
 	// v0.15.1: emit a one-time deprecation warning if the loaded config
 	// still populates the v0.15.0 attachment-list tombstone fields. The
@@ -943,6 +955,7 @@ func mergeFragment(base, fragment *City, fragMeta toml.MetaData, fragPath string
 
 	// Patches: accumulate from fragments (applied after all merges).
 	base.Patches.Agents = append(base.Patches.Agents, fragment.Patches.Agents...)
+	base.Patches.NamedSessions = append(base.Patches.NamedSessions, fragment.Patches.NamedSessions...)
 	base.Patches.Rigs = append(base.Patches.Rigs, fragment.Patches.Rigs...)
 	base.Patches.Providers = append(base.Patches.Providers, fragment.Patches.Providers...)
 	base.Patches.GitHubPRMonitors = append(base.Patches.GitHubPRMonitors, fragment.Patches.GitHubPRMonitors...)
@@ -958,7 +971,13 @@ func mergeFragment(base, fragment *City, fragMeta toml.MetaData, fragPath string
 		base.Formulas = fragment.Formulas
 	}
 	if fragMeta.IsDefined("daemon") {
+		formulaV2 := base.Daemon.FormulaV2
+		formulaV2Set := base.Daemon.formulaV2Set
 		base.Daemon = fragment.Daemon
+		if !fragMeta.IsDefined("daemon", "formula_v2") && !fragMeta.IsDefined("daemon", "graph_workflows") {
+			base.Daemon.FormulaV2 = formulaV2
+			base.Daemon.formulaV2Set = formulaV2Set
+		}
 	}
 	if fragMeta.IsDefined("session") {
 		base.Session = fragment.Session
@@ -1334,6 +1353,7 @@ func parseWithMeta(data []byte, source string) (*City, toml.MetaData, []string, 
 		return nil, md, nil, fmt.Errorf("parsing config: %w", err)
 	}
 	normalizeAgentDefaultsAlias(&cfg, md)
+	applyDaemonFormulaV2Default(&cfg, md)
 	warnings := agentDefaultsCompatibilityWarnings(md, source)
 	normalizeLegacyOrderOverrideAliases(&cfg)
 	warnings = append(warnings, CheckUndecodedKeys(md, source)...)
@@ -1584,6 +1604,8 @@ func resolvedPackNames(includes []string, imports map[string]Import, sysFS fsys.
 				return
 			}
 		} else {
+			// Shallow visits record the pack name but must not block a later
+			// transitive visit from expanding the pack's children.
 			if seenShallowDirs[absDir] || expandedDirs[absDir] {
 				return
 			}

@@ -122,6 +122,9 @@ func isNonFatalLoadConfigWarning(warning string) bool {
 	if config.IsLegacyV1SurfaceWarning(warning) {
 		return true
 	}
+	if config.IsDisabledNamedSessionWarning(warning) {
+		return true
+	}
 	if config.IsLegacyWorkspaceFieldWarning(warning) {
 		return true
 	}

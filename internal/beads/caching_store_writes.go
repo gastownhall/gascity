@@ -79,9 +79,8 @@ func (c *CachingStore) Update(id string, opts UpdateOpts) error {
 			fresh = applyUpdateOptsToBead(current, opts)
 			c.beads[id] = cloneBead(fresh)
 			c.deps[id] = depsFromBeadFields(fresh)
-			delete(c.dirty, id)
+			c.dirty[id] = struct{}{}
 			delete(c.deletedSeq, id)
-			c.markFreshLocked(time.Now())
 			c.updateStatsLocked()
 			c.mu.Unlock()
 			c.recordProblem("refresh bead after update", fmt.Errorf("%s: %w", id, err))
@@ -560,6 +559,9 @@ func (c *CachingStore) updateMatchesCached(id string, opts UpdateOpts) bool {
 	if c.state != cacheLive && c.state != cachePartial {
 		return false
 	}
+	if _, dirty := c.dirty[id]; dirty {
+		return false
+	}
 	b, ok := c.beads[id]
 	if !ok {
 		return false
@@ -634,6 +636,9 @@ func (c *CachingStore) closeAlreadyMatchesCached(id string) bool {
 	if c.state != cacheLive && c.state != cachePartial {
 		return false
 	}
+	if _, dirty := c.dirty[id]; dirty {
+		return false
+	}
 	b, ok := c.beads[id]
 	if !ok {
 		return false
@@ -653,6 +658,12 @@ func (c *CachingStore) metadataAlreadyMatchesCached(id string, kvs map[string]st
 	}
 	c.mu.RLock()
 	defer c.mu.RUnlock()
+	if c.state != cacheLive && c.state != cachePartial {
+		return false
+	}
+	if _, dirty := c.dirty[id]; dirty {
+		return false
+	}
 	b, ok := c.beads[id]
 	if !ok {
 		return false

@@ -10,6 +10,8 @@ v2-legacy-order-layout
 v2-scripts-layout
 v2-workspace-name
 v2-prompt-template-suffix
+provider-catalog
+provider-catalog-local-readiness
 expanded-config-load
 implicit-import-cache
 deprecated-attachment-fields
@@ -23,6 +25,7 @@ builtin-pack-family
 config-semantics
 duration-range
 provider-parity
+formula-requirements
 named-always-min-conflict
 instructions-file
 skill-collision
@@ -46,6 +49,7 @@ orphan-sessions
 bd-split-store
 beads-store
 v2-routed-to-namespace
+run-target-routed-to-backfill
 session-model
 dolt-server
 dolt-noms-size

@@ -259,14 +259,6 @@ func NewCachingStoreForTestWithPrefix(backing Store, idPrefix string, onChange f
 	return newCachingStore(backing, idPrefix, onChange)
 }
 
-// IDPrefix returns the bead ID prefix owned by this cache, without trailing "-".
-func (c *CachingStore) IDPrefix() string {
-	if c == nil {
-		return ""
-	}
-	return c.idPrefix
-}
-
 func newCachingStore(backing Store, idPrefix string, onChange func(eventType, beadID string, payload json.RawMessage)) *CachingStore {
 	return &CachingStore{
 		backing:     backing,
@@ -289,6 +281,14 @@ func newCachingStore(backing Store, idPrefix string, onChange func(eventType, be
 
 func defaultCachePrimeRetryDelay(attempt int) time.Duration {
 	return time.Duration(attempt*5) * time.Second
+}
+
+// IDPrefix returns the bead ID prefix owned by this cache's backing store.
+func (c *CachingStore) IDPrefix() string {
+	if c == nil {
+		return ""
+	}
+	return c.idPrefix
 }
 
 func normalizeIDPrefix(prefix string) string {
@@ -502,14 +502,12 @@ func (c *CachingStore) prime(ctx context.Context) error {
 		nextLocalBeadAt := make(map[string]time.Time)
 		for id, current := range c.beads {
 			if fresh, exists := beadMap[id]; exists {
-				if recentLocalMutation(c.localBeadAt[id], now) {
-					c.carryRecentLocalMutationLocked(id, nextDirty, nextBeadSeq, nextLocalBeadAt)
-				}
 				if _, keep := c.recentLocalBeadConflictLocked(id, fresh, now, true); keep {
 					nextBeads[id] = cloneBead(current)
 					if deps, ok := c.deps[id]; ok {
 						nextDeps[id] = cloneDeps(deps)
 					}
+					c.carryRecentLocalMutationLocked(id, nextDirty, nextBeadSeq, nextLocalBeadAt)
 				}
 				continue
 			}
@@ -914,6 +912,10 @@ func depsFromBeadFields(b Bead) []Dep {
 		deps = append(deps, Dep{IssueID: b.ID, DependsOnID: dependsOnID, Type: depType})
 	}
 	return deps
+}
+
+func beadCarriesDependencyFields(b Bead) bool {
+	return len(b.Dependencies) > 0 || len(b.Needs) > 0
 }
 
 func cloneDeps(deps []Dep) []Dep {

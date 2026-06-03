@@ -50,13 +50,13 @@ func TestBuildDoctorChecksRegistersNamedAlwaysMinConflictCheck(t *testing.T) {
 		SkipManagedDoltCheck: true,
 	}))
 
-	providerParity := doctorCheckIndex(names, "provider-parity")
-	if providerParity < 0 {
-		t.Fatalf("provider-parity check missing: %v", names)
+	formulaRequirements := doctorCheckIndex(names, "formula-requirements")
+	if formulaRequirements < 0 {
+		t.Fatalf("formula-requirements check missing: %v", names)
 	}
 	got := doctorCheckIndex(names, "named-always-min-conflict")
-	if got != providerParity+1 {
-		t.Fatalf("named-always-min-conflict index = %d, want immediately after provider-parity at %d; names=%v", got, providerParity, names)
+	if got != formulaRequirements+1 {
+		t.Fatalf("named-always-min-conflict index = %d, want immediately after formula-requirements at %d; names=%v", got, formulaRequirements, names)
 	}
 }
 

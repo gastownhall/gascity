@@ -1,5 +1,9 @@
 # Release Gate: HQStore Simplified Snapshot Backend
 
+Superseded 2026-05-31: SQLite-CGo is the selected coordination-store backend;
+HQStore code was removed under `ga-r1jzbn`. This file remains as historical
+release-gate evidence.
+
 Date: 2026-05-24
 
 ## Target

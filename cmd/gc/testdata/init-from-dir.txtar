@@ -72,6 +72,9 @@ exists $WORK/v2-shim-city/pack.toml
 [workspace]
 provider = "claude"
 
+[providers.claude]
+base = "builtin:claude"
+
 -- template/pack.toml --
 [pack]
 name = "template"
@@ -91,6 +94,9 @@ package test
 name = "mining"
 provider = "claude"
 
+[providers.claude]
+base = "builtin:claude"
+
 -- named-template/pack.toml --
 [pack]
 name = "mining"
@@ -102,6 +108,9 @@ You are the mayor.
 -- v2-template/city.toml --
 [workspace]
 provider = "claude"
+
+[providers.claude]
+base = "builtin:claude"
 
 -- v2-template/pack.toml --
 [pack]
@@ -115,6 +124,9 @@ echo real top-level script
 -- v2-shim-template/city.toml --
 [workspace]
 provider = "claude"
+
+[providers.claude]
+base = "builtin:claude"
 
 -- v2-shim-template/pack.toml --
 [pack]

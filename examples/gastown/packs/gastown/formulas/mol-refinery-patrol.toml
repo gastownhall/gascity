@@ -29,8 +29,9 @@ closes the bead once the PR is verified.
 
 Read each step's description before acting — Config values override defaults."""
 formula = "mol-refinery-patrol"
-version = 4
-contract = "graph.v2"
+
+[requires]
+formula_compiler = ">=2.0.0"
 
 [vars]
 [vars.binding_prefix]
@@ -170,9 +171,15 @@ description = """
 
 Search for work beads assigned to you with branch metadata:
 ```bash
-WORK=$(gc bd list --assignee=$GC_AGENT --status=open \
-  --exclude-type=epic --limit=1 --json | jq -r '.[0].id // empty')
+WORK=$(gc bd list ${GC_RIG:+--rig="$GC_RIG"} --assignee=$GC_AGENT --status=open \
+  --exclude-type=epic --has-metadata-key=branch --limit=1 --json | jq -r '.[0].id // empty')
 ```
+
+`${GC_RIG:+--rig="$GC_RIG"}` scopes the query to this refinery's rig
+database. Without it, `gc bd list` routes to the HQ database and never
+sees rig-scoped work beads — the `assignee` field alone does not route
+by namespace. For HQ-only refineries `$GC_RIG` is empty and the flag
+expands to nothing.
 
 If found: read the bead metadata to confirm it has a branch:
 ```bash

@@ -45,3 +45,7 @@ reports/
 tmp_*.diff
 tmp_*.patch
 issues.jsonl
+
+# Beads / Dolt files (added by bd init)
+.beads/proxieddb/
+.beads.backup-*

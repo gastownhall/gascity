@@ -7,22 +7,6 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 )
 
-func TestHQStoreStampsUpdatedAt(t *testing.T) {
-	runUpdatedAtStoreTests(t, func(t *testing.T) beads.Store {
-		t.Helper()
-		store, err := beads.OpenHQStore(t.TempDir(), beads.WithHQStoreSnapshotInterval(0))
-		if err != nil {
-			t.Fatalf("OpenHQStore: %v", err)
-		}
-		t.Cleanup(func() {
-			if err := store.Shutdown(); err != nil {
-				t.Errorf("Shutdown: %v", err)
-			}
-		})
-		return store
-	})
-}
-
 func TestMemStoreStampsUpdatedAt(t *testing.T) {
 	runUpdatedAtStoreTests(t, func(t *testing.T) beads.Store {
 		t.Helper()

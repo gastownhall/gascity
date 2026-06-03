@@ -103,10 +103,10 @@ type scaleParams struct {
 // scaleParamsFor extracts scaling parameters from an Agent's fields.
 //
 // Check is the count-form pool-demand query (EffectivePoolDemandQuery).
-// It shares the bd ready predicate with EffectiveWorkQuery's Tier 3 via
-// bdReadyPoolDemandShell, keeping reconciler spawn decisions and worker
-// claim decisions structurally symmetric. See engdocs/architecture/dispatch.md
-// "scale_check ↔ work_query correspondence".
+// It shares the canonical and temporary migration bd ready predicates with
+// EffectiveWorkQuery's Tier 3 via config helpers, keeping reconciler spawn
+// decisions and worker claim decisions structurally symmetric. See
+// engdocs/architecture/dispatch.md "scale_check ↔ work_query correspondence".
 func scaleParamsFor(a *config.Agent) scaleParams {
 	sp := scaleParams{
 		Min:   a.EffectiveMinActiveSessions(),
@@ -227,6 +227,7 @@ func deepCopyAgent(src *config.Agent, name, dir string) config.Agent {
 		Scope:             src.Scope,
 		Session:           src.Session,
 		Provider:          src.Provider,
+		InheritedProvider: src.InheritedProvider,
 		PromptTemplate:    src.PromptTemplate,
 		Nudge:             src.Nudge,
 		StartCommand:      src.StartCommand,

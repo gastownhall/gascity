@@ -39,7 +39,6 @@ happens deliberately with the Dolt server stopped or through Dolt itself.
 
 Read each step's description before acting — Config values override defaults."""
 formula = "mol-dog-phantom-db"
-version = 1
 
 [vars]
 [vars.data_dir]

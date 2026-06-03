@@ -39,7 +39,7 @@ func TestDecorateGraphWorkflowRecipeSubstitutesRouteTargetsWithinRigContext(t *t
 				Title:    "Root",
 				Type:     "task",
 				IsRoot:   true,
-				Metadata: map[string]string{"gc.kind": "workflow", "gc.formula_contract": "graph.v2"},
+				Metadata: map[string]string{"gc.kind": "workflow", "gc.formula_contract": "graph.v2", "gc.run_target": "stale-target"},
 			},
 			{
 				ID:    "demo.design",
@@ -72,6 +72,16 @@ func TestDecorateGraphWorkflowRecipeSubstitutesRouteTargetsWithinRigContext(t *t
 
 	if err := decorateGraphWorkflowRecipe(recipe, graphWorkflowRouteVars(recipe, nil), "frontend/claude", claudeSession, store, cfg.Workspace.Name, "", cfg); err != nil {
 		t.Fatalf("decorateGraphWorkflowRecipe: %v", err)
+	}
+	root := recipe.StepByID("demo")
+	if root == nil {
+		t.Fatal("root step missing after decorate")
+	}
+	if root.Metadata["gc.routed_to"] != "frontend/claude" {
+		t.Fatalf("root gc.routed_to = %q, want frontend/claude", root.Metadata["gc.routed_to"])
+	}
+	if _, ok := root.Metadata["gc.run_target"]; ok {
+		t.Fatalf("root still carries retired gc.run_target = %q", root.Metadata["gc.run_target"])
 	}
 
 	design := recipe.StepByID("demo.design")

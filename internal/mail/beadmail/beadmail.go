@@ -255,6 +255,7 @@ type ArchiveFilter struct {
 	From            string
 	SubjectPrefix   string
 	SubjectContains string
+	EmptyBody       bool
 	IncludeRead     bool
 	CaseInsensitive bool
 	Limit           int
@@ -319,6 +320,9 @@ func (p *Provider) ArchiveCandidates(filter ArchiveFilter) ([]mail.Message, erro
 		if !archiveContainsMatches(msg.Subject, filter.SubjectContains, filter.CaseInsensitive) {
 			continue
 		}
+		if filter.EmptyBody && strings.TrimSpace(msg.Body) != "" {
+			continue
+		}
 		matches = append(matches, msg)
 		if filter.Limit > 0 && len(matches) >= filter.Limit {
 			break
@@ -353,6 +357,35 @@ func (p *Provider) ArchiveMatching(filter ArchiveFilter) ([]mail.Message, []mail
 		}
 	}
 	return candidates, results, nil
+}
+
+// ArchiveInjectedAutoHandoffs archives auto-handoff messages after they have
+// been injected into a provider hook. Ordinary user mail is left untouched.
+func (p *Provider) ArchiveInjectedAutoHandoffs(ids []string) error {
+	var errs []error
+	for _, id := range ids {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		b, err := p.store.Get(id)
+		if err != nil {
+			if errors.Is(err, beads.ErrNotFound) {
+				continue
+			}
+			errs = append(errs, fmt.Errorf("loading %s: %w", id, err))
+			continue
+		}
+		if b.Type != "message" ||
+			!hasLabel(b.Labels, mail.AutoHandoffLabel) ||
+			!hasLabel(b.Labels, mail.ArchiveAfterInjectLabel) {
+			continue
+		}
+		if err := p.store.Delete(id); err != nil && !errors.Is(err, beads.ErrNotFound) {
+			errs = append(errs, fmt.Errorf("archiving %s: %w", id, err))
+		}
+	}
+	return errors.Join(errs...)
 }
 
 func archiveExactMatches(value, exact string, insensitive bool) bool {
@@ -813,17 +846,23 @@ func (p *Provider) messageCandidatesForRoutes(routes []string) ([]beads.Bead, er
 }
 
 // messageCandidatesAll returns all open message beads matching any route.
-// Empty routes return all open messages. Message reads need TierBoth because
-// bd stores current message beads as wisps while older stores can still have
-// issue-tier messages.
+// TierBoth is one logical query; BdStore may satisfy it with separate
+// issue-tier and wisp-tier reads before deduping. Empty routes return all open
+// messages. Live reads are required so command-visible mail sees fresh wisps
+// even when the active store cache was primed earlier.
 func (p *Provider) messageCandidatesAll(routes []string) ([]beads.Bead, error) {
-	all, err := p.store.List(beads.ListQuery{
-		Type:      "message",
-		Status:    "open",
-		TierMode:  beads.TierBoth,
-		AllowScan: true,
-		Live:      true,
-	})
+	query := beads.ListQuery{
+		Type:     "message",
+		Status:   "open",
+		TierMode: beads.TierBoth,
+		Live:     true,
+	}
+	if len(routes) > 0 {
+		query.Assignees = routes
+	} else {
+		query.AllowScan = true
+	}
+	all, err := p.store.List(query)
 	if err != nil {
 		return nil, fmt.Errorf("scanning message beads: %w", err)
 	}
@@ -832,6 +871,8 @@ func (p *Provider) messageCandidatesAll(routes []string) ([]beads.Bead, error) {
 	}
 	out := make([]beads.Bead, 0, len(all))
 	for _, b := range all {
+		// matchesRecipientRoute is defense-in-depth: HQStore returns exact
+		// matches from the index; BdStore multi-route fallback may return excess.
 		if matchesRecipientRoute(routes, b.Assignee) {
 			out = append(out, b)
 		}

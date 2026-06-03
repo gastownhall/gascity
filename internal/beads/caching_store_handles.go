@@ -2,12 +2,17 @@ package beads
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"time"
 )
 
-// CachedReader is the cache-only eventual-consistency read handle for beads.
-// List reads across both bead tiers regardless of the caller's TierMode; use
-// the underlying Store directly for intentionally tier-scoped list queries.
+// CachedReader is the cache-only eventual-consistency read handle for active
+// beads. Get may return ErrNotFound for closed-but-existing beads because the
+// cache does not retain complete closed history; use Live.Get for closed or
+// historical lookups. List reads across both bead tiers regardless of the
+// caller's TierMode; use the underlying Store directly for intentionally
+// tier-scoped list queries.
 type CachedReader interface {
 	Get(id string) (Bead, error)
 	List(query ListQuery) ([]Bead, error)
@@ -129,6 +134,10 @@ func (r cachedStoreReader) Get(id string) (Bead, error) {
 }
 
 func (r cachedStoreReader) List(query ListQuery) ([]Bead, error) {
+	rows, err := r.store.cachedListOnly(logicalCachedListQuery(query))
+	if err == nil || !errors.Is(err, ErrCacheUnavailable) {
+		return rows, err
+	}
 	if err := r.store.ensureFullPrime(context.Background()); err != nil {
 		return nil, err
 	}
@@ -228,9 +237,10 @@ func (c *CachingStore) cachedReadyOnly(query ReadyQuery) ([]Bead, error) {
 
 	statusByID := make(map[string]string, len(c.beads))
 	openBeads := make([]Bead, 0, len(c.beads))
+	now := time.Now().UTC()
 	for _, b := range c.beads {
 		statusByID[b.ID] = b.Status
-		if b.Status != "open" || b.Ephemeral || IsReadyExcludedType(b.Type) {
+		if !IsReadyCandidateForTier(b, now, query.TierMode) {
 			continue
 		}
 		if query.Assignee != "" && b.Assignee != query.Assignee {

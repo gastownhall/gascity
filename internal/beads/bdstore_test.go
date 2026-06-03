@@ -41,6 +41,22 @@ func mustJSON(t *testing.T, v any) string {
 	return string(data)
 }
 
+func doltliteBdStoreTestDir(t *testing.T) string {
+	return doltliteBdStoreMetadataTestDir(t, `{"backend":"doltlite"}`)
+}
+
+func doltliteBdStoreMetadataTestDir(t *testing.T, metadata string) string {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".beads", "metadata.json"), []byte(metadata), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
 // --- Create ---
 
 func TestBdStoreCreate(t *testing.T) {
@@ -168,6 +184,27 @@ func TestBdStoreCreatePassesPriority(t *testing.T) {
 	}
 }
 
+func TestBdStoreCreatePassesDeferUntil(t *testing.T) {
+	var gotArgs []string
+	deferUntil := time.Date(2026, 6, 1, 12, 30, 0, 0, time.UTC)
+	runner := func(_, _ string, args ...string) ([]byte, error) {
+		gotArgs = args
+		return []byte(`{"id":"bd-x","title":"test","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z","defer_until":"` + deferUntil.Format(time.RFC3339) + `"}`), nil
+	}
+	s := beads.NewBdStore("/city", runner)
+	created, err := s.Create(beads.Bead{Title: "test", DeferUntil: &deferUntil})
+	if err != nil {
+		t.Fatal(err)
+	}
+	args := strings.Join(gotArgs, " ")
+	if !strings.Contains(args, "--defer "+deferUntil.Format(time.RFC3339)) {
+		t.Fatalf("args = %q, want defer flag", args)
+	}
+	if created.DeferUntil == nil || !created.DeferUntil.Equal(deferUntil) {
+		t.Fatalf("created.DeferUntil = %v, want %s", created.DeferUntil, deferUntil.Format(time.RFC3339))
+	}
+}
+
 func TestBdStoreCreateError(t *testing.T) {
 	runner := func(_, _ string, _ ...string) ([]byte, error) {
 		return nil, fmt.Errorf("exit status 1")
@@ -228,6 +265,66 @@ func TestBdStoreCreatePassesAssigneeAndFromMetadata(t *testing.T) {
 	}
 }
 
+func TestBdStoreCreateRetriesDoltliteTransientWrite(t *testing.T) {
+	dir := doltliteBdStoreTestDir(t)
+	calls := 0
+	var gotArgs [][]string
+	runner := func(_, _ string, args ...string) ([]byte, error) {
+		gotArgs = append(gotArgs, append([]string(nil), args...))
+		calls++
+		if calls == 1 {
+			return nil, fmt.Errorf("Error 1213 (40001): serialization failure")
+		}
+		return []byte(`{"id":"bd-x","title":"test","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z"}`), nil
+	}
+	s := beads.NewBdStore(dir, runner)
+	if _, err := s.Create(beads.Bead{Title: "test"}); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 2 {
+		t.Fatalf("calls = %d, want 2 transient retry attempts", calls)
+	}
+	for i, args := range gotArgs {
+		if got := strings.Join(args[:3], " "); got != "--dolt-auto-commit off create" {
+			t.Fatalf("call[%d] args = %q, want DoltLite auto-commit guard before create", i, strings.Join(args, " "))
+		}
+	}
+}
+
+func TestBdStoreCreateUsesDoltliteWriteGuardForNativeReadMetadata(t *testing.T) {
+	dir := doltliteBdStoreMetadataTestDir(t, `{"database":"doltlite","dolt_database":"hq"}`)
+	var gotArgs []string
+	runner := func(_, _ string, args ...string) ([]byte, error) {
+		gotArgs = append([]string(nil), args...)
+		return []byte(`{"id":"bd-x","title":"test","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z"}`), nil
+	}
+
+	s := beads.NewBdStore(dir, runner)
+	if _, err := s.Create(beads.Bead{Title: "test"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(gotArgs[:3], " "); got != "--dolt-auto-commit off create" {
+		t.Fatalf("args = %q, want DoltLite auto-commit guard for database=doltlite metadata", strings.Join(gotArgs, " "))
+	}
+}
+
+func TestBdStoreCreateDoesNotRetryIdlessAmbiguousConnectionLoss(t *testing.T) {
+	dir := doltliteBdStoreTestDir(t)
+	calls := 0
+	runner := func(_, _ string, _ ...string) ([]byte, error) {
+		calls++
+		return nil, fmt.Errorf("read tcp 127.0.0.1:53001->127.0.0.1:3306: connection reset by peer")
+	}
+
+	s := beads.NewBdStore(dir, runner)
+	if _, err := s.Create(beads.Bead{Title: "post-commit ambiguous"}); err == nil {
+		t.Fatal("Create() error = nil, want ambiguous connection error")
+	}
+	if calls != 1 {
+		t.Fatalf("calls = %d, want 1 so an id-less ambiguous create is not replayed", calls)
+	}
+}
+
 // --- Get ---
 
 func TestBdStoreGet(t *testing.T) {
@@ -249,6 +346,36 @@ func TestBdStoreGet(t *testing.T) {
 	}
 	if b.Assignee != "alice" {
 		t.Errorf("Assignee = %q, want %q", b.Assignee, "alice")
+	}
+}
+
+func TestBdStoreListUsesDecodedUpdatedAtForUpdatedBefore(t *testing.T) {
+	cutoff := time.Date(2026, 1, 3, 0, 0, 0, 0, time.UTC)
+	runner := func(_, name string, args ...string) ([]byte, error) {
+		if name != "bd" {
+			return nil, fmt.Errorf("unexpected command name %q", name)
+		}
+		if strings.Join(args, " ") != "list --json --label=stale --include-infra --include-gates --limit 0" {
+			return nil, fmt.Errorf("unexpected command: bd %s", strings.Join(args, " "))
+		}
+		return []byte(`[
+			{"id":"old","title":"old","status":"open","issue_type":"task","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-02T00:00:00Z","labels":["stale"]},
+			{"id":"recent","title":"recent","status":"open","issue_type":"task","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-04T00:00:00Z","labels":["stale"]}
+		]`), nil
+	}
+	s := beads.NewBdStore("/city", runner)
+	got, err := s.List(beads.ListQuery{
+		Label:         "stale",
+		UpdatedBefore: cutoff,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].ID != "old" {
+		t.Fatalf("List(UpdatedBefore) = %+v, want only old bead", got)
+	}
+	if !got[0].UpdatedAt.Equal(time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC)) {
+		t.Fatalf("UpdatedAt = %s, want decoded updated_at", got[0].UpdatedAt)
 	}
 }
 
@@ -1460,6 +1587,96 @@ func TestBdStoreCloseAllWhitespaceCloseReason(t *testing.T) {
 	}
 }
 
+func TestBdStoreDoltliteLifecycleMutationsRetryTransientWrites(t *testing.T) {
+	tests := []struct {
+		name string
+		run  func(*beads.BdStore) error
+	}{
+		{
+			name: "CloseWithReason",
+			run:  func(s *beads.BdStore) error { return s.CloseWithReason("bd-1", "done") },
+		},
+		{
+			name: "CloseAll",
+			run: func(s *beads.BdStore) error {
+				_, err := s.CloseAll([]string{"bd-1"}, nil)
+				return err
+			},
+		},
+		{
+			name: "CloseAllWithReason",
+			run: func(s *beads.BdStore) error {
+				_, err := s.CloseAllWithReason([]string{"bd-1"}, "done")
+				return err
+			},
+		},
+		{
+			name: "Reopen",
+			run:  func(s *beads.BdStore) error { return s.Reopen("bd-1") },
+		},
+		{
+			name: "Delete",
+			run:  func(s *beads.BdStore) error { return s.Delete("bd-1") },
+		},
+		{
+			name: "DepRemove",
+			run:  func(s *beads.BdStore) error { return s.DepRemove("bd-1", "bd-2") },
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := doltliteBdStoreTestDir(t)
+			closed := false
+			var writes [][]string
+			runner := func(_, name string, args ...string) ([]byte, error) {
+				if name != "bd" {
+					return nil, fmt.Errorf("unexpected command name %q", name)
+				}
+				unwrapped := stripDoltliteAutoCommitArgs(args)
+				switch unwrapped[0] {
+				case "show":
+					status := "open"
+					if closed {
+						status = "closed"
+					}
+					return []byte(`[{"id":"bd-1","title":"one","status":"` + status + `","issue_type":"task","created_at":"2025-01-15T10:30:00Z"}]`), nil
+				case "close", "reopen", "delete", "dep":
+					writes = append(writes, append([]string(nil), args...))
+					if len(writes) == 1 {
+						return nil, fmt.Errorf("Error 1213 (40001): serialization failure")
+					}
+					if unwrapped[0] == "close" {
+						closed = true
+					}
+					return []byte(`[{"id":"bd-1","title":"one","status":"closed","issue_type":"task","created_at":"2025-01-15T10:30:00Z"}]`), nil
+				default:
+					return nil, fmt.Errorf("unexpected command: bd %s", strings.Join(args, " "))
+				}
+			}
+			s := beads.NewBdStore(dir, runner)
+			if err := tt.run(s); err != nil {
+				t.Fatalf("%s: %v", tt.name, err)
+			}
+			if len(writes) != 2 {
+				t.Fatalf("write calls = %d, want 2 transient retry attempts: %v", len(writes), writes)
+			}
+			for i, args := range writes {
+				if got := strings.Join(args[:2], " "); got != "--dolt-auto-commit off" {
+					t.Fatalf("write[%d] args = %q, want DoltLite auto-commit guard", i, strings.Join(args, " "))
+				}
+			}
+		})
+	}
+}
+
+func stripDoltliteAutoCommitArgs(args []string) []string {
+	if len(args) >= 2 && args[0] == "--dolt-auto-commit" && args[1] == "off" {
+		return args[2:]
+	}
+	return args
+}
+
 // --- List ---
 
 func TestBdStoreList(t *testing.T) {
@@ -1768,7 +1985,7 @@ func TestBdStoreReadyWithAssigneeAndLimit(t *testing.T) {
 		out []byte
 		err error
 	}{
-		`bd ready --json --assignee worker-1 --limit 3`: {
+		`bd ready --json --assignee worker-1 --limit 0`: {
 			out: []byte(`[
 				{"id":"bd-worker","title":"ready one","status":"open","issue_type":"task","assignee":"worker-1","created_at":"2025-01-15T10:30:00Z"},
 				{"id":"bd-other","title":"wrong assignee","status":"open","issue_type":"task","assignee":"worker-2","created_at":"2025-01-15T10:31:00Z"}
@@ -1785,6 +2002,87 @@ func TestBdStoreReadyWithAssigneeAndLimit(t *testing.T) {
 	}
 	if got[0].ID != "bd-worker" {
 		t.Fatalf("Ready(assignee)[0].ID = %q, want bd-worker", got[0].ID)
+	}
+}
+
+func TestBdStoreReadyWispsAppliesLimitAfterTierFilter(t *testing.T) {
+	var gotCmd string
+	runner := func(_, name string, args ...string) ([]byte, error) {
+		gotCmd = name + " " + strings.Join(args, " ")
+		return []byte(`[
+			{"id":"bd-issue","title":"normal ready work","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z"},
+			{"id":"bd-wisp","title":"ready wisp","status":"open","issue_type":"task","created_at":"2025-01-15T10:31:00Z","ephemeral":true},
+			{"id":"bd-wisp-2","title":"second ready wisp","status":"open","issue_type":"task","created_at":"2025-01-15T10:32:00Z","ephemeral":true}
+		]`), nil
+	}
+	s := beads.NewBdStore("/city", runner)
+	got, err := s.Ready(beads.ReadyQuery{TierMode: beads.TierWisps, Limit: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(gotCmd, "--include-ephemeral") {
+		t.Fatalf("bd ready command = %q, want --include-ephemeral", gotCmd)
+	}
+	if strings.Contains(gotCmd, "--limit 1") {
+		t.Fatalf("bd ready command = %q, must not pre-limit before wisp filtering", gotCmd)
+	}
+	if !strings.Contains(gotCmd, "--limit 0") {
+		t.Fatalf("bd ready command = %q, want unbounded pre-filter read", gotCmd)
+	}
+	if len(got) != 1 || got[0].ID != "bd-wisp" {
+		t.Fatalf("Ready(TierWisps, Limit:1) = %+v, want first wisp after tier filtering", got)
+	}
+}
+
+func TestBdStoreReadyDoesNotSpecialCaseSyntheticMetadata(t *testing.T) {
+	runner := fakeRunner(map[string]struct {
+		out []byte
+		err error
+	}{
+		`bd ready --json --limit 0`: {
+			out: []byte(`[
+				{"id":"bd-synthetic","title":"synthetic unit","status":"open","issue_type":"convoy","created_at":"2025-01-15T10:29:00Z","metadata":{"gc.synthetic":"true"}},
+				{"id":"bd-task","title":"ready one","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z"},
+				{"id":"bd-extra","title":"ready two","status":"open","issue_type":"task","created_at":"2025-01-15T10:31:00Z"}
+			]`),
+		},
+	})
+	s := beads.NewBdStore("/city", runner)
+	got, err := s.Ready(beads.ReadyQuery{Limit: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("Ready(limit) returned %d beads, want 1", len(got))
+	}
+	if got[0].ID != "bd-synthetic" {
+		t.Fatalf("Ready(limit)[0].ID = %q, want bd-synthetic", got[0].ID)
+	}
+}
+
+func TestBdStoreReadyFiltersExcludedLabelsBeforeLimit(t *testing.T) {
+	runner := fakeRunner(map[string]struct {
+		out []byte
+		err error
+	}{
+		`bd ready --json --limit 0`: {
+			out: []byte(`[
+				{"id":"bd-order","title":"order bookkeeping","status":"open","issue_type":"task","labels":["order-tracking"],"created_at":"2025-01-15T10:29:00Z"},
+				{"id":"bd-task","title":"ready one","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z"},
+				{"id":"bd-extra","title":"ready two","status":"open","issue_type":"task","created_at":"2025-01-15T10:31:00Z"}
+			]`),
+		},
+	})
+	s := beads.NewBdStore("/city", runner)
+	got, err := s.Ready(beads.ReadyQuery{Limit: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("Ready(limit) returned %d beads, want 1", len(got))
+	}
+	if got[0].ID != "bd-task" {
+		t.Fatalf("Ready(limit)[0].ID = %q, want bd-task after excluded label filtering", got[0].ID)
 	}
 }
 
@@ -1810,6 +2108,32 @@ func TestBdStoreReadyFiltersInfraTypes(t *testing.T) {
 	}
 	if got[0].ID != "bd-task" {
 		t.Fatalf("Ready()[0].ID = %q, want %q", got[0].ID, "bd-task")
+	}
+}
+
+func TestBdStoreReadyFiltersFutureDeferredRows(t *testing.T) {
+	future := time.Now().UTC().Add(time.Hour).Format(time.RFC3339)
+	runner := fakeRunner(map[string]struct {
+		out []byte
+		err error
+	}{
+		`bd ready --json --limit 0`: {
+			out: []byte(`[
+				{"id":"bd-task","title":"ready one","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z"},
+				{"id":"bd-deferred","title":"not yet","status":"open","issue_type":"task","created_at":"2025-01-15T10:31:00Z","defer_until":"` + future + `"}
+			]`),
+		},
+	})
+	s := beads.NewBdStore("/city", runner)
+	got, err := s.Ready()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("Ready() returned %d beads, want 1", len(got))
+	}
+	if got[0].ID != "bd-task" {
+		t.Fatalf("Ready()[0].ID = %q, want bd-task", got[0].ID)
 	}
 }
 
@@ -2300,6 +2624,40 @@ func TestBdStoreListInfersParentFromParentChildDependency(t *testing.T) {
 	}
 }
 
+func TestBdStoreListMapsUpdatedAt(t *testing.T) {
+	created := time.Date(2026, 5, 30, 6, 52, 8, 0, time.UTC)
+	updated := time.Date(2026, 5, 30, 23, 52, 11, 0, time.UTC)
+	runner := fakeRunner(map[string]struct {
+		out []byte
+		err error
+	}{
+		`bd list --json --all --include-infra --include-gates --limit 0`: {
+			out: []byte(`[
+				{
+					"id":"ga-updated",
+					"title":"updated bead",
+					"status":"closed",
+					"issue_type":"task",
+					"created_at":"` + created.Format(time.RFC3339) + `",
+					"updated_at":"` + updated.Format(time.RFC3339) + `"
+				}
+			]`),
+		},
+	})
+	s := beads.NewBdStore("/city", runner)
+
+	got, err := s.List(beads.ListQuery{AllowScan: true, IncludeClosed: true})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("List returned %d beads, want 1", len(got))
+	}
+	if !got[0].UpdatedAt.Equal(updated) {
+		t.Fatalf("UpdatedAt = %s, want %s", got[0].UpdatedAt, updated)
+	}
+}
+
 func TestBdStoreCreateNoLabelsNoParent(t *testing.T) {
 	var gotArgs []string
 	runner := func(_, _ string, args ...string) ([]byte, error) {
@@ -2374,6 +2732,29 @@ func TestBdStoreSetMetadata(t *testing.T) {
 		t.Fatal(err)
 	}
 	wantArgs := "update --json bd-42 --set-metadata merge_strategy=mr"
+	if strings.Join(gotArgs, " ") != wantArgs {
+		t.Errorf("args = %q, want %q", strings.Join(gotArgs, " "), wantArgs)
+	}
+}
+
+func TestBdStoreSetMetadataDisablesAutoCommitForDoltlite(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".beads", "metadata.json"), []byte(`{"backend":"doltlite"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var gotArgs []string
+	runner := func(_, _ string, args ...string) ([]byte, error) {
+		gotArgs = args
+		return nil, nil
+	}
+	s := beads.NewBdStore(dir, runner)
+	if err := s.SetMetadata("bd-42", "merge_strategy", "mr"); err != nil {
+		t.Fatal(err)
+	}
+	wantArgs := "--dolt-auto-commit off update --json bd-42 --set-metadata merge_strategy=mr"
 	if strings.Join(gotArgs, " ") != wantArgs {
 		t.Errorf("args = %q, want %q", strings.Join(gotArgs, " "), wantArgs)
 	}
@@ -3157,6 +3538,113 @@ func TestBdStoreListBothTiersMessageUsesSingleBdListWithoutTierFiltering(t *test
 	}
 	if len(got) != 1 || got[0].ID != "bd-msg" || !got[0].Ephemeral {
 		t.Fatalf("got = %+v, want TierBoth bd message row bd-msg with Ephemeral=true", got)
+	}
+}
+
+func TestBdStoreListAssigneesSingleUsesAssigneeFlag(t *testing.T) {
+	var gotCmd string
+	runner := func(_, name string, args ...string) ([]byte, error) {
+		gotCmd = name + " " + strings.Join(args, " ")
+		return []byte(`[{"id":"bd-route-a","title":"message","status":"open","issue_type":"message","assignee":"route-a","created_at":"2026-05-01T00:00:00Z"}]`), nil
+	}
+	s := beads.NewBdStore("/city", runner)
+	got, err := s.List(beads.ListQuery{Assignees: []string{"route-a"}, Type: "message", Status: "open"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(gotCmd, "--assignee=route-a") {
+		t.Fatalf("cmd = %q, want single Assignees value mapped to --assignee", gotCmd)
+	}
+	if len(got) != 1 || got[0].ID != "bd-route-a" {
+		t.Fatalf("got = %+v, want bd-route-a", got)
+	}
+}
+
+func TestBdStoreListAssigneesMultipleFallsBackToClientFilter(t *testing.T) {
+	var gotCmd string
+	runner := func(_, name string, args ...string) ([]byte, error) {
+		gotCmd = name + " " + strings.Join(args, " ")
+		if strings.Contains(gotCmd, "--assignee=") {
+			t.Fatalf("cmd = %q, multi-route Assignees must not emit a single --assignee", gotCmd)
+		}
+		if strings.Contains(gotCmd, "--limit 1") {
+			return []byte(`[{"id":"bd-route-c","title":"message","status":"open","issue_type":"message","assignee":"route-c","created_at":"2026-05-01T00:00:00Z"}]`), nil
+		}
+		return []byte(`[
+			{"id":"bd-route-c","title":"message","status":"open","issue_type":"message","assignee":"route-c","created_at":"2026-05-01T00:00:00Z"},
+			{"id":"bd-route-b","title":"message","status":"open","issue_type":"message","assignee":"route-b","created_at":"2026-05-01T00:00:01Z"},
+			{"id":"bd-route-a","title":"message","status":"open","issue_type":"message","assignee":"route-a","created_at":"2026-05-01T00:00:02Z"}
+		]`), nil
+	}
+	s := beads.NewBdStore("/city", runner)
+	got, err := s.List(beads.ListQuery{
+		Assignees: []string{"route-a", "route-b"},
+		Type:      "message",
+		Status:    "open",
+		Limit:     1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(gotCmd, "--limit 0") {
+		t.Fatalf("cmd = %q, want unlimited server query before multi-Assignees client filtering", gotCmd)
+	}
+	if len(got) != 1 || got[0].ID != "bd-route-b" {
+		t.Fatalf("got = %+v, want first matching route after client filter", got)
+	}
+}
+
+func TestBdStoreListWispsAssigneesSingleUsesAssigneeClause(t *testing.T) {
+	var gotCmd string
+	runner := func(_, name string, args ...string) ([]byte, error) {
+		gotCmd = name + " " + strings.Join(args, " ")
+		return []byte(`[{"id":"bd-wisp-a","title":"message","status":"open","issue_type":"message","assignee":"route-a","created_at":"2026-05-01T00:00:00Z","ephemeral":true}]`), nil
+	}
+	s := beads.NewBdStore("/city", runner)
+	got, err := s.List(beads.ListQuery{Assignees: []string{"route-a"}, Type: "message", Status: "open", TierMode: beads.TierWisps})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(gotCmd, "assignee=route-a") {
+		t.Fatalf("cmd = %q, want single Assignees value mapped to assignee clause", gotCmd)
+	}
+	if len(got) != 1 || got[0].ID != "bd-wisp-a" {
+		t.Fatalf("got = %+v, want bd-wisp-a", got)
+	}
+}
+
+func TestBdStoreListWispsAssigneesMultipleFallsBackToClientFilter(t *testing.T) {
+	var gotCmd string
+	runner := func(_, name string, args ...string) ([]byte, error) {
+		gotCmd = name + " " + strings.Join(args, " ")
+		if strings.Contains(gotCmd, "assignee=") {
+			t.Fatalf("cmd = %q, multi-route Assignees must not emit one assignee clause", gotCmd)
+		}
+		if strings.Contains(gotCmd, "--limit 1") {
+			return []byte(`[{"id":"bd-wisp-c","title":"message","status":"open","issue_type":"message","assignee":"route-c","created_at":"2026-05-01T00:00:00Z","ephemeral":true}]`), nil
+		}
+		return []byte(`[
+			{"id":"bd-wisp-c","title":"message","status":"open","issue_type":"message","assignee":"route-c","created_at":"2026-05-01T00:00:00Z","ephemeral":true},
+			{"id":"bd-wisp-b","title":"message","status":"open","issue_type":"message","assignee":"route-b","created_at":"2026-05-01T00:00:01Z","ephemeral":true},
+			{"id":"bd-wisp-a","title":"message","status":"open","issue_type":"message","assignee":"route-a","created_at":"2026-05-01T00:00:02Z","ephemeral":true}
+		]`), nil
+	}
+	s := beads.NewBdStore("/city", runner)
+	got, err := s.List(beads.ListQuery{
+		Assignees: []string{"route-a", "route-b"},
+		Type:      "message",
+		Status:    "open",
+		Limit:     1,
+		TierMode:  beads.TierWisps,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(gotCmd, "--limit 0") {
+		t.Fatalf("cmd = %q, want unlimited server query before multi-Assignees client filtering", gotCmd)
+	}
+	if len(got) != 1 || got[0].ID != "bd-wisp-b" {
+		t.Fatalf("got = %+v, want first matching wisp after client filter", got)
 	}
 }
 

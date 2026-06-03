@@ -13,6 +13,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/mail"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 )
@@ -43,6 +44,15 @@ func listOpenMessagesInTier(t *testing.T, store beads.Store, tier beads.TierMode
 		t.Fatalf("List messages in tier %v: %v", tier, err)
 	}
 	return all
+}
+
+func hasString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }
 
 func listOpenBeadsBothTiers(t *testing.T, store beads.Store) []beads.Bead {
@@ -249,6 +259,11 @@ func TestCmdHandoffAutoSendsMailWithoutBlocking(t *testing.T) {
 	}
 	if got := all[0].Type; got != "message" {
 		t.Fatalf("mail type = %q, want message", got)
+	}
+	for _, want := range []string{mail.AutoHandoffLabel, mail.ArchiveAfterInjectLabel} {
+		if !hasString(all[0].Labels, want) {
+			t.Fatalf("auto handoff mail labels = %#v, want %q", all[0].Labels, want)
+		}
 	}
 	if strings.Contains(stdout.String(), "requesting restart") {
 		t.Fatalf("stdout = %q, --auto must not request restart", stdout.String())

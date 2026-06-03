@@ -18,6 +18,12 @@ type CreateParams struct {
 	Vars              map[string]string
 	CityPath          string
 	EvaluatePrompt    string
+	// Trigger gates iteration pours on an external condition. Empty means no
+	// trigger (default wisp-close iteration semantic).
+	Trigger string
+	// TriggerCondition is the path to the trigger condition script. Required
+	// when Trigger == "event".
+	TriggerCondition string
 	// Rig names the rig whose bead store owns this convergence loop.
 	// Empty means the city/HQ store. The loop physically lives in
 	// whichever store the handler is bound to; Rig is persisted as
@@ -61,6 +67,15 @@ func (h *Handler) CreateHandler(_ context.Context, params CreateParams) (CreateR
 		return CreateResult{}, err
 	}
 
+	// Validate trigger config before creating any state.
+	triggerConfig, err := ParseTriggerConfig(map[string]string{
+		FieldTrigger:          params.Trigger,
+		FieldTriggerCondition: params.TriggerCondition,
+	})
+	if err != nil {
+		return CreateResult{}, err
+	}
+
 	// Step 1: Create root bead (type=convergence, status=in_progress).
 	title := params.Title
 	if title == "" {
@@ -96,7 +111,8 @@ func (h *Handler) CreateHandler(_ context.Context, params CreateParams) (CreateR
 		{FieldCityPath, params.CityPath},
 		{FieldRig, params.Rig},
 		{FieldEvaluatePrompt, params.EvaluatePrompt},
-		{FieldState, StateActive},
+		{FieldTrigger, params.Trigger},
+		{FieldTriggerCondition, params.TriggerCondition},
 	}
 	for _, mw := range metaWrites {
 		if err := h.Store.SetMetadata(beadID, mw.key, mw.value); err != nil {
@@ -109,6 +125,32 @@ func (h *Handler) CreateHandler(_ context.Context, params CreateParams) (CreateR
 		if err := h.Store.SetMetadata(beadID, VarPrefix+k, v); err != nil {
 			return CreateResult{}, closeBead(fmt.Errorf("setting var %q on convergence bead: %w", k, err))
 		}
+	}
+
+	// Entry gate: when an external trigger gates the loop, defer pouring the
+	// first wisp until the trigger condition passes. The controller tick
+	// evaluates the trigger and pours iteration 1 via HandleTrigger.
+	if triggerConfig.Enabled() {
+		if err := h.Store.SetMetadata(beadID, FieldIteration, EncodeInt(0)); err != nil {
+			return CreateResult{}, closeBead(fmt.Errorf("setting iteration: %w", err))
+		}
+		if err := h.Store.SetMetadata(beadID, FieldState, StateWaitingTrigger); err != nil {
+			return CreateResult{}, closeBead(fmt.Errorf("setting waiting_trigger state: %w", err))
+		}
+		createdPayload := CreatedPayload{
+			Formula:       params.Formula,
+			Target:        params.Target,
+			GateMode:      params.GateMode,
+			MaxIterations: params.MaxIterations,
+			Title:         title,
+		}
+		h.emitEvent(EventCreated, EventIDCreated(beadID), beadID, createdPayload)
+		return CreateResult{BeadID: beadID}, nil
+	}
+
+	// No trigger: activate immediately and pour the first wisp.
+	if err := h.Store.SetMetadata(beadID, FieldState, StateActive); err != nil {
+		return CreateResult{}, closeBead(fmt.Errorf("setting active state: %w", err))
 	}
 
 	// Step 4: Pour first wisp with idempotency key converge:<bead-id>:iter:1.
