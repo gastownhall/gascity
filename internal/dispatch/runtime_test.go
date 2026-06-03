@@ -7493,26 +7493,30 @@ func TestRunRalphCheckRejectsAbsoluteCheckPathSymlinkOutsideTrustedRoots(t *test
 	}
 }
 
-// TestRunRalphCheckAllowsAbsoluteWorkDirOutsideRoots pins the PR-review
-// worktree contract: adopted PR worktrees are sibling directories outside
-// both the city and store roots, and ralph checks must be able to run
-// check scripts from that worktree when gc.work_dir points there.
-func TestRunRalphCheckAllowsAbsoluteWorkDirOutsideRoots(t *testing.T) {
+// TestRunRalphCheckAllowsAbsoluteCheckPathWithExternalWorkDir pins the
+// PR-review worktree contract: adopted PR worktrees are sibling directories
+// outside both the city and store roots, while review checks are absolute
+// pack-local scripts whose source is independently trusted.
+func TestRunRalphCheckAllowsAbsoluteCheckPathWithExternalWorkDir(t *testing.T) {
 	parent := t.TempDir()
 	cityPath := filepath.Join(parent, "city")
 	storePath := filepath.Join(parent, "rig")
 	worktreeDir := filepath.Join(parent, "worktree")
-	if err := os.MkdirAll(cityPath, 0o755); err != nil {
-		t.Fatalf("mkdir: %v", err)
+	packRoot := filepath.Join(parent, "workflows-pack")
+	for _, dir := range []string{
+		cityPath,
+		storePath,
+		worktreeDir,
+		filepath.Join(packRoot, "formulas"),
+		filepath.Join(packRoot, "assets", "scripts", "checks"),
+	} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
 	}
-	if err := os.MkdirAll(storePath, 0o755); err != nil {
-		t.Fatalf("mkdir: %v", err)
-	}
-	if err := os.MkdirAll(worktreeDir, 0o755); err != nil {
-		t.Fatalf("mkdir: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(worktreeDir, "check.sh"), []byte("#!/bin/sh\necho \"$GC_WORK_DIR\"\nexit 0\n"), 0o755); err != nil {
-		t.Fatalf("write worktree script: %v", err)
+	checkScript := filepath.Join(packRoot, "assets", "scripts", "checks", "review-approved.sh")
+	if err := os.WriteFile(checkScript, []byte("#!/bin/sh\nprintf '%s\\n%s\\n' \"$GC_WORK_DIR\" \"$(pwd)\"\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write pack check script: %v", err)
 	}
 
 	store := beads.NewMemStore()
@@ -7520,7 +7524,7 @@ func TestRunRalphCheckAllowsAbsoluteWorkDirOutsideRoots(t *testing.T) {
 		ID:   "check-abs-workdir",
 		Type: "task",
 		Metadata: map[string]string{
-			"gc.check_path":    "check.sh",
+			"gc.check_path":    checkScript,
 			"gc.work_dir":      worktreeDir, // absolute, outside both roots
 			"gc.check_timeout": "30s",
 		},
@@ -7528,8 +7532,9 @@ func TestRunRalphCheckAllowsAbsoluteWorkDirOutsideRoots(t *testing.T) {
 	subject := beads.Bead{ID: "run-abs-workdir", Type: "task"}
 
 	result, err := runRalphCheck(store, check, subject, 1, ProcessOptions{
-		CityPath:  cityPath,
-		StorePath: storePath,
+		CityPath:           cityPath,
+		StorePath:          storePath,
+		FormulaSearchPaths: []string{filepath.Join(packRoot, "formulas")},
 	})
 	if err != nil {
 		t.Fatalf("runRalphCheck: %v", err)
@@ -7542,52 +7547,58 @@ func TestRunRalphCheckAllowsAbsoluteWorkDirOutsideRoots(t *testing.T) {
 	}
 }
 
-// TestRunRalphCheckAllowsRelativeWorkDirOutsideRoots covers relative work_dir
-// values that resolve outside storePath. The resolved work_dir becomes the
-// base for relative check paths, and the lower-level condition resolver still
-// validates the script under that base.
-func TestRunRalphCheckAllowsRelativeWorkDirOutsideRoots(t *testing.T) {
+// TestRunRalphCheckRejectsRelativeCheckPathWithExternalWorkDir keeps
+// metadata-derived external work_dir values from becoming the trusted base for
+// relative gc.check_path scripts.
+func TestRunRalphCheckRejectsRelativeCheckPathWithExternalWorkDir(t *testing.T) {
 	parent := t.TempDir()
 	cityPath := filepath.Join(parent, "city")
 	storePath := filepath.Join(parent, "rig")
-	worktreeDir := filepath.Join(parent, "worktree")
-	if err := os.MkdirAll(cityPath, 0o755); err != nil {
-		t.Fatalf("mkdir: %v", err)
+	absoluteWorktreeDir := filepath.Join(parent, "abs-worktree")
+	relativeWorktreeDir := filepath.Join(parent, "rel-worktree")
+	for _, dir := range []string{cityPath, storePath, absoluteWorktreeDir, relativeWorktreeDir} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
 	}
-	if err := os.MkdirAll(storePath, 0o755); err != nil {
-		t.Fatalf("mkdir: %v", err)
-	}
-	if err := os.MkdirAll(worktreeDir, 0o755); err != nil {
-		t.Fatalf("mkdir: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(worktreeDir, "check.sh"), []byte("#!/bin/sh\necho \"$GC_WORK_DIR\"\nexit 0\n"), 0o755); err != nil {
-		t.Fatalf("write worktree script: %v", err)
+	for _, dir := range []string{absoluteWorktreeDir, relativeWorktreeDir} {
+		if err := os.WriteFile(filepath.Join(dir, "check.sh"), []byte("#!/bin/sh\necho \"$GC_WORK_DIR\"\nexit 0\n"), 0o755); err != nil {
+			t.Fatalf("write worktree script in %s: %v", dir, err)
+		}
 	}
 
-	store := beads.NewMemStore()
-	check := beads.Bead{
-		ID:   "check-rel-workdir",
-		Type: "task",
-		Metadata: map[string]string{
-			"gc.check_path":    "check.sh",
-			"gc.work_dir":      "../worktree", // joins under storePath, outside city/store roots
-			"gc.check_timeout": "30s",
-		},
+	cases := []struct {
+		name    string
+		workDir string
+	}{
+		{name: "absolute_external", workDir: absoluteWorktreeDir},
+		{name: "relative_external", workDir: "../rel-worktree"},
 	}
-	subject := beads.Bead{ID: "run-rel-workdir", Type: "task"}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			store := beads.NewMemStore()
+			check := beads.Bead{
+				ID:   "check-rel-workdir",
+				Type: "task",
+				Metadata: map[string]string{
+					"gc.check_path":    "check.sh",
+					"gc.work_dir":      tc.workDir,
+					"gc.check_timeout": "30s",
+				},
+			}
+			subject := beads.Bead{ID: "run-rel-workdir", Type: "task"}
 
-	result, err := runRalphCheck(store, check, subject, 1, ProcessOptions{
-		CityPath:  cityPath,
-		StorePath: storePath,
-	})
-	if err != nil {
-		t.Fatalf("runRalphCheck: %v", err)
-	}
-	if result.Outcome != "pass" {
-		t.Fatalf("Outcome = %q, want pass (stderr=%q)", result.Outcome, result.Stderr)
-	}
-	if !strings.Contains(result.Stdout, worktreeDir) {
-		t.Fatalf("stdout = %q, want GC_WORK_DIR %q", result.Stdout, worktreeDir)
+			result, err := runRalphCheck(store, check, subject, 1, ProcessOptions{
+				CityPath:  cityPath,
+				StorePath: storePath,
+			})
+			if err == nil {
+				t.Fatalf("expected external work_dir rejection, got outcome=%q stdout=%q", result.Outcome, result.Stdout)
+			}
+			if !strings.Contains(err.Error(), "escapes both city and store roots") {
+				t.Errorf("expected work_dir containment error, got: %v", err)
+			}
+		})
 	}
 }
 

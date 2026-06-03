@@ -174,6 +174,13 @@ func runRalphCheck(store beads.Store, bead, subject beads.Bead, attempt int, opt
 		} else {
 			resolvedWorkDir = filepath.Clean(filepath.Join(storePath, workDir))
 		}
+		// work_dir is inherited from bead metadata. For relative check paths
+		// it becomes the script resolution base, so it must remain under an
+		// operator-controlled tree. Absolute check paths are validated against
+		// trusted roots below; for those, work_dir is only the process cwd.
+		if !filepath.IsAbs(checkPath) && !pathutil.PathWithin(cityPath, resolvedWorkDir) && !pathutil.PathWithin(storePath, resolvedWorkDir) {
+			return convergence.GateResult{}, fmt.Errorf("%s: work_dir %q escapes both city and store roots", bead.ID, workDir)
+		}
 	}
 	scriptBase := storePath
 	if resolvedWorkDir != "" {
