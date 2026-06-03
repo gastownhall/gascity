@@ -3196,6 +3196,29 @@ func TestDaemonAutoRestartOnDriftExplicitFalse(t *testing.T) {
 	}
 }
 
+func TestDaemonAutoReapClosedBeadWorktreesDefault(t *testing.T) {
+	d := DaemonConfig{}
+	if !d.AutoReapClosedBeadWorktreesEnabled() {
+		t.Errorf("AutoReapClosedBeadWorktreesEnabled() = false, want true (default)")
+	}
+}
+
+func TestDaemonAutoReapClosedBeadWorktreesExplicitTrue(t *testing.T) {
+	v := true
+	d := DaemonConfig{AutoReapClosedBeadWorktrees: &v}
+	if !d.AutoReapClosedBeadWorktreesEnabled() {
+		t.Errorf("AutoReapClosedBeadWorktreesEnabled() = false, want true")
+	}
+}
+
+func TestDaemonAutoReapClosedBeadWorktreesExplicitFalse(t *testing.T) {
+	v := false
+	d := DaemonConfig{AutoReapClosedBeadWorktrees: &v}
+	if d.AutoReapClosedBeadWorktreesEnabled() {
+		t.Errorf("AutoReapClosedBeadWorktreesEnabled() = true, want false (kill switch)")
+	}
+}
+
 func TestDaemonRestartWindowDefault(t *testing.T) {
 	d := DaemonConfig{}
 	got := d.RestartWindowDuration()
