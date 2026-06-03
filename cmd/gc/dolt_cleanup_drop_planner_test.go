@@ -190,7 +190,7 @@ func TestDefaultStaleDatabasePrefixes_MirrorsBeadsCleanDatabases(t *testing.T) {
 	// then we mirror beads/cmd/bd/dolt.go:staleDatabasePrefixes.
 	want := []string{
 		"testdb_", "test_guard_", "test_federation_",
-		"doctest_", "doctortest_", "beads_pt", "beads_vr", "beads_t",
+		"doctest_", "doctortest_", "beads_pt", "beads_vr", "beads_t", "beads_test_bench_",
 	}
 	if !equalStringSlice(defaultStaleDatabasePrefixes, want) {
 		t.Errorf("defaultStaleDatabasePrefixes = %v, want %v", defaultStaleDatabasePrefixes, want)

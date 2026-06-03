@@ -187,7 +187,7 @@ func TestBuiltinDatabaseEnumeratorsSkipManagedProbeDatabase(t *testing.T) {
 	}
 
 	doltSystemNeedle := "information_schema|mysql|dolt_cluster|performance_schema|sys|__gc_probe"
-	maintenanceScratchNeedle := "benchdb|testdb_*|beads_pt*|beads_vr*|doctest_*|doctortest_*"
+	maintenanceScratchNeedle := "benchdb|testdb_*|beads_pt*|beads_vr*|beads_test_bench_*|doctest_*|doctortest_*"
 	maintenanceTempNeedle := "beads_t[0-9a-f]"
 	for _, tt := range []struct {
 		pack     string

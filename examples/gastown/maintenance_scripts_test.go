@@ -2115,6 +2115,7 @@ func TestMaintenanceDoltScriptsSkipTestPatternDatabases(t *testing.T) {
 		"beads_t1234abcd9",
 		"beads_ptbaz",
 		"beads_vrqux",
+		"beads_test_bench_1780469138694213039",
 		"doctest_xyz",
 		"doctortest_abc",
 	}
