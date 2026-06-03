@@ -3591,6 +3591,9 @@ func TestBdStoreListBothTiersMessageUsesSingleBdListWithoutTierFiltering(t *test
 	if len(calls) != 1 {
 		t.Fatalf("got %d runner calls, want 1: %v", len(calls), calls)
 	}
+	if strings.Contains(calls[0], "--include-templates") {
+		t.Fatalf("bd list command = %q, message TierBoth fast path must not include template rows", calls[0])
+	}
 	if len(got) != 1 || got[0].ID != "bd-msg" || !got[0].Ephemeral {
 		t.Fatalf("got = %+v, want TierBoth bd message row bd-msg with Ephemeral=true", got)
 	}

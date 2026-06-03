@@ -1609,9 +1609,6 @@ func (s *BdStore) listViaBDList(query ListQuery) ([]Bead, error) {
 		args = append(args, "--created-before", serverQuery.CreatedBefore.Format(time.RFC3339Nano))
 	}
 	args = append(args, "--include-infra", "--include-gates")
-	if query.TierMode == TierWisps || query.TierMode == TierBoth {
-		args = append(args, "--include-templates")
-	}
 	args = append(args, "--limit", fmt.Sprintf("%d", limit))
 	if serverQuery.ParentID != "" {
 		args = append(args, "--parent", serverQuery.ParentID)
