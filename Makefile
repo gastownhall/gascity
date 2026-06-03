@@ -29,8 +29,10 @@ LDFLAGS := -X main.version=$(VERSION) \
 ifeq ($(shell uname),Darwin)
 ICU_PREFIX := $(shell brew --prefix icu4c 2>/dev/null)
 ifneq ($(ICU_PREFIX),)
-export CGO_CPPFLAGS := $(CGO_CPPFLAGS) -I$(ICU_PREFIX)/include
-export CGO_LDFLAGS := $(CGO_LDFLAGS) -L$(ICU_PREFIX)/lib
+CGO_CPPFLAGS += -I$(ICU_PREFIX)/include
+CGO_LDFLAGS += -L$(ICU_PREFIX)/lib
+export CGO_CPPFLAGS
+export CGO_LDFLAGS
 endif
 endif
 
