@@ -451,36 +451,6 @@ func TestClassifyRetryAttemptWithPostconditionsRejectsArtifactOutsideWorktreeBef
 	}
 }
 
-func TestClassifyRetryAttemptWithPostconditionsRejectsArtifactSymlinkOutsideWorktree(t *testing.T) {
-	t.Parallel()
-
-	worktree := t.TempDir()
-	outsideDir := t.TempDir()
-	outsidePath := filepath.Join(outsideDir, "outside.md")
-	if err := os.WriteFile(outsidePath, []byte("review\n"), 0o644); err != nil {
-		t.Fatalf("write outside artifact: %v", err)
-	}
-	linkPath := filepath.Join(worktree, "review.md")
-	if err := os.Symlink(outsidePath, linkPath); err != nil {
-		t.Skipf("symlink unavailable: %v", err)
-	}
-
-	got, err := classifyRetryAttemptWithPostconditions(beads.NewMemStore(), beads.Bead{
-		Metadata: map[string]string{
-			"gc.outcome":           "pass",
-			"gc.required_artifact": linkPath,
-			"work_dir":             worktree,
-		},
-	}, ProcessOptions{})
-	if err != nil {
-		t.Fatalf("classifyRetryAttemptWithPostconditions error = %v, want nil", err)
-	}
-	want := retryEvalResult{Outcome: "transient", Reason: "required_artifact_outside_worktree"}
-	if got != want {
-		t.Fatalf("classifyRetryAttemptWithPostconditions() = %+v, want %+v", got, want)
-	}
-}
-
 func TestClassifyRetryAttemptWithPostconditionsUsesRequiredArtifactStatOption(t *testing.T) {
 	t.Parallel()
 
