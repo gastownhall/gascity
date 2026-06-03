@@ -273,7 +273,7 @@ test-pack-registry-live:
 
 ## test-native-doltlite-beads: compile and run the native DoltLite read-store suite
 test-native-doltlite-beads:
-	$(TEST_ENV) CGO_ENABLED=1 go test -tags 'cgo,gascity_native_beads' ./internal/beads -count=1
+	$(TEST_ENV) CGO_ENABLED=0 go test -tags gascity_native_beads ./internal/beads -count=1
 
 ## test-cmd-gc-process: run the full non-short cmd/gc suite, including the
 ## process-backed lifecycle coverage routed out of the default fast loop
