@@ -1261,8 +1261,8 @@
         },
         "auto_reap_closed_bead_worktrees": {
           "type": "boolean",
-          "description": "AutoReapClosedBeadWorktrees controls whether the reconciler patrol\nautomatically removes per-bead git worktrees once their associated\nwork bead reaches closed status. Only worktrees with a clean working\ntree, no unpushed commits, and no stashes are removed; unsafe worktrees\nare logged as warnings and left in place for operator review. Session\nhome directories (agent template directories) are never touched.\nDefaults to true. Set to false to retain worktrees for post-session\ndiagnostics.",
-          "default": true
+          "description": "AutoReapClosedBeadWorktrees controls whether the reconciler patrol\nautomatically removes per-bead git worktrees once their associated\nwork bead reaches closed status. Only worktrees with a clean working\ntree, no unpushed commits, and no stashes are removed; unsafe worktrees\nare logged as warnings and left in place for operator review. Session\nhome directories (agent template directories) are never touched.\nDefaults to false. Set to true to enable automated worktree cleanup.",
+          "default": false
         },
         "start_ready_timeout": {
           "type": "string",

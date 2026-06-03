@@ -77,7 +77,7 @@ func TestCityRuntimeTick_SkipsClosedBeadWorktreeReapWhenDisabled(t *testing.T) {
 
 // TestCityRuntimeTick_AttemptsClosedBeadWorktreeReapWhenEnabled verifies that
 // the runtime tick invokes reapClosedBeadWorktrees when
-// DaemonConfig.AutoReapClosedBeadWorktrees is nil (default: enabled).
+// DaemonConfig.AutoReapClosedBeadWorktrees is explicitly true.
 //
 // The reaper's skipping log confirms the gate fires. The worktree dir remains
 // because a plain non-git directory is treated as dirty by the safety checks
@@ -98,10 +98,10 @@ func TestCityRuntimeTick_AttemptsClosedBeadWorktreeReapWhenEnabled(t *testing.T)
 		Status: "closed",
 	}}, nil)
 
-	// nil = default = enabled
+	enabled := true
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "test", Prefix: "ga"},
-		Daemon:    config.DaemonConfig{AutoReapClosedBeadWorktrees: nil},
+		Daemon:    config.DaemonConfig{AutoReapClosedBeadWorktrees: &enabled},
 	}
 
 	cityStore := beads.NewMemStore()

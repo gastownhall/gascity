@@ -2035,9 +2035,8 @@ type DaemonConfig struct {
 	// tree, no unpushed commits, and no stashes are removed; unsafe worktrees
 	// are logged as warnings and left in place for operator review. Session
 	// home directories (agent template directories) are never touched.
-	// Defaults to true. Set to false to retain worktrees for post-session
-	// diagnostics.
-	AutoReapClosedBeadWorktrees *bool `toml:"auto_reap_closed_bead_worktrees,omitempty" jsonschema:"default=true"`
+	// Defaults to false. Set to true to enable automated worktree cleanup.
+	AutoReapClosedBeadWorktrees *bool `toml:"auto_reap_closed_bead_worktrees,omitempty" jsonschema:"default=false"`
 	// StartReadyTimeout is how long `gc start` and `gc register` wait for
 	// the supervisor to report the city as Running. Cities with many
 	// registered or adopted sessions take longer to start because the
@@ -2082,12 +2081,11 @@ func (d *DaemonConfig) AutoRestartOnDriftEnabled() bool {
 
 // AutoReapClosedBeadWorktreesEnabled reports whether the patrol should
 // automatically remove per-bead git worktrees for closed beads. Defaults
-// to true when the field is unset (nil). Set to false in city.toml to
-// disable automated cleanup — useful when worktrees need to survive for
-// post-session diagnostics.
+// to false when the field is unset (nil). Set to true in city.toml to
+// enable automated cleanup.
 func (d *DaemonConfig) AutoReapClosedBeadWorktreesEnabled() bool {
 	if d.AutoReapClosedBeadWorktrees == nil {
-		return true
+		return false
 	}
 	return *d.AutoReapClosedBeadWorktrees
 }

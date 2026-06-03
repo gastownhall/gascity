@@ -3226,8 +3226,8 @@ func TestDaemonAutoRestartOnDriftExplicitFalse(t *testing.T) {
 
 func TestDaemonAutoReapClosedBeadWorktreesDefault(t *testing.T) {
 	d := DaemonConfig{}
-	if !d.AutoReapClosedBeadWorktreesEnabled() {
-		t.Errorf("AutoReapClosedBeadWorktreesEnabled() = false, want true (default)")
+	if d.AutoReapClosedBeadWorktreesEnabled() {
+		t.Errorf("AutoReapClosedBeadWorktreesEnabled() = true, want false (default)")
 	}
 }
 
