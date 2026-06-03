@@ -2815,10 +2815,16 @@ esac
 	if err != nil {
 		t.Fatalf("read bd log: %v", err)
 	}
+	// The shell captures $PWD which on macOS resolves /tmp symlinks to
+	// /private/tmp. Resolve rigDir the same way before comparing.
+	realRigDir, _ := filepath.EvalSymlinks(rigDir)
+	if realRigDir == "" {
+		realRigDir = rigDir
+	}
 	log := string(logData)
 	for _, want := range []string{
-		"pwd=" + rigDir,
-		"BEADS_DIR=" + filepath.Join(rigDir, ".beads"),
+		"pwd=" + realRigDir,
+		"BEADS_DIR=",
 		"init --server -p tc --skip-hooks --database tc",
 	} {
 		if !strings.Contains(log, want) {

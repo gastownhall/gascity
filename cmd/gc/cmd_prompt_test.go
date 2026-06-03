@@ -46,6 +46,8 @@ func writeMinimalCity(t *testing.T, providerKey string, rigs ...config.Rig) stri
 	b.WriteString("[workspace]\nname = \"test-city\"\n")
 	if providerKey != "" {
 		b.WriteString("provider = \"" + providerKey + "\"\n")
+		b.WriteString("\n[providers." + providerKey + "]\n")
+		b.WriteString("base = \"builtin:" + providerKey + "\"\n")
 	}
 	for _, r := range rigs {
 		b.WriteString("\n[[rigs]]\n")
@@ -239,6 +241,7 @@ func TestRunPromptSynthAcceptsValidRoleNames(t *testing.T) {
 
 func TestRunPromptSynthHonorsExplicitProviderFlag(t *testing.T) {
 	cityDir := writeMinimalCity(t, "claude")
+	appendBuiltinProviderAlias(t, cityDir, "codex")
 	runner := &fakeSynthRunner{body: "# Codex Mayor\n\nbody."}
 	var stdout, stderr bytes.Buffer
 	err := runPromptSynth(context.Background(), promptSynthOpts{
@@ -254,6 +257,18 @@ func TestRunPromptSynthHonorsExplicitProviderFlag(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "Codex Mayor") {
 		t.Errorf("stdout should contain runner's body, got %q", stdout.String())
+	}
+}
+
+func appendBuiltinProviderAlias(t *testing.T, cityDir, providerKey string) {
+	t.Helper()
+	f, err := os.OpenFile(filepath.Join(cityDir, "city.toml"), os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatalf("open city.toml: %v", err)
+	}
+	defer func() { _ = f.Close() }()
+	if _, err := f.WriteString("\n[providers." + providerKey + "]\nbase = \"builtin:" + providerKey + "\"\n"); err != nil {
+		t.Fatalf("append provider alias: %v", err)
 	}
 }
 

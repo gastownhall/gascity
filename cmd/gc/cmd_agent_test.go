@@ -370,7 +370,7 @@ func TestEmitLoadCityConfigWarningsFiltersNonMigrationWarnings(t *testing.T) {
 			`workspace.name redefined by "/city/defaults.toml"`,
 			`/city/pack.toml: [agents] is a deprecated compatibility alias for [agent_defaults]; rewrite the table name to [agent_defaults]`,
 			`/city/pack.toml: both [agent_defaults] and [agents] are present; [agent_defaults] wins on overlapping keys and [agents] only fills gaps`,
-			`/city/city.toml: workspace.provider is deprecated: Set provider per agent in agents/<name>/agent.toml.`,
+			`/city/city.toml: workspace.global_fragments is deprecated: Use [agent_defaults] append_fragments or explicit template includes instead.`,
 			`gc: warning: attachment-list fields (` + "`skills`, `mcp`, `skills_append`, `mcp_append`, `shared_skills`" + `) are deprecated as of v0.15.1 and ignored.`,
 		},
 	})
@@ -385,7 +385,7 @@ func TestEmitLoadCityConfigWarningsFiltersNonMigrationWarnings(t *testing.T) {
 	if !strings.Contains(output, `both [agent_defaults] and [agents] are present`) {
 		t.Fatalf("expected mixed-table warning, got %q", output)
 	}
-	if strings.Contains(output, `workspace.provider is deprecated`) {
+	if strings.Contains(output, `workspace.global_fragments is deprecated`) {
 		t.Fatalf("legacy workspace warnings should stay out of generic command stderr, got %q", output)
 	}
 	if !strings.Contains(output, "attachment-list fields") {
@@ -574,7 +574,6 @@ func TestStrictFatalLoadConfigWarningsKeepsMixedTableWarningsFatal(t *testing.T)
 	warnings := []string{
 		`/city/pack.toml: [agents] is a deprecated compatibility alias for [agent_defaults]; rewrite the table name to [agent_defaults]`,
 		`/city/pack.toml: both [agent_defaults] and [agents] are present; [agent_defaults] wins on overlapping keys and [agents] only fills gaps`,
-		`/city/city.toml: workspace.provider is deprecated: Set provider per agent in agents/<name>/agent.toml.`,
 		`workspace.name redefined by "/city/defaults.toml"`,
 	}
 
@@ -623,7 +622,12 @@ func TestNonTestLoadCityConfigCallersPassWarningWriter(t *testing.T) {
 func v2CityWithPack(t *testing.T) *fsys.Fake {
 	t.Helper()
 	fs := fsys.NewFake()
-	fs.Files["/city/city.toml"] = []byte("")
+	fs.Files["/city/city.toml"] = []byte(`[providers.claude]
+base = "builtin:claude"
+
+[providers.codex]
+base = "builtin:codex"
+`)
 	fs.Files["/city/pack.toml"] = []byte(`[pack]
 name = "test-city"
 schema = 2
@@ -900,6 +904,9 @@ func TestDoAgentAddAllowsCityLocalNameSharedWithImportedAgent(t *testing.T) {
 	fs := v2CityWithPack(t)
 	fs.Files["/city/city.toml"] = []byte(`[imports.helper]
 source = "../helper"
+
+[providers.claude]
+base = "builtin:claude"
 `)
 	fs.Files["/helper/pack.toml"] = []byte(`[pack]
 name = "helper"
@@ -1099,6 +1106,9 @@ name = "test-city"
 	fs.Files["/city/pack.toml"] = []byte(`[pack]
 name = "test-city"
 schema = 2
+
+[providers.claude]
+base = "builtin:claude"
 
 [[agent]]
 name = "worker"

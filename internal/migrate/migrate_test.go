@@ -786,7 +786,7 @@ path = "packs/gastown"
 	if !strings.Contains(packToml, "[imports.gastown]") {
 		t.Fatalf("pack.toml missing gastown import:\n%s", packToml)
 	}
-	if !strings.Contains(packToml, "source = \"https://github.com/example/gastown.git//packs/gastown#main\"") {
+	if !strings.Contains(packToml, "source = \"https://github.com/example/gastown/tree/main/packs/gastown\"") {
 		t.Fatalf("pack.toml missing converted pack source:\n%s", packToml)
 	}
 }

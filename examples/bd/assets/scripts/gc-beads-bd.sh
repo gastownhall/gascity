@@ -616,6 +616,16 @@ bd_runtime_schema_ready() {
     server_sql "USE \`$db\`; SELECT 1 FROM config LIMIT 1" >/dev/null 2>&1
 }
 
+# server_reachable reports whether the managed Dolt server answers a
+# trivial query. Used to distinguish a transient connection failure
+# (port drift, an exclusive lock held by a stale dolt, a slow server
+# start) from a genuinely missing schema/registration before deciding to
+# force a destructive reinit. server_sql carries the connect target, so
+# this stays in lockstep with bd_runtime_schema_ready / ensure_database_registered.
+server_reachable() {
+    server_sql "SELECT 1" >/dev/null 2>&1
+}
+
 wait_for_bd_runtime_schema() {
     local db="$1"
     local attempt backoff_ms
@@ -2402,6 +2412,20 @@ op_init() {
     # instead breaks fresh init: gc-pre-seeded metadata has no project_id, so
     # --force is never set and bd init aborts.
     if [ -f "$dir/.beads/metadata.json" ]; then
+        # A pre-existing metadata.json means the store may already be
+        # initialized. Both checks below run SQL against the managed Dolt
+        # server, so a transient server-unreachable blip (port drift, an
+        # exclusive lock held by a stale dolt process, a slow server start)
+        # is indistinguishable from "schema missing" / "not registered" —
+        # and both of those branches react by forcing a DESTRUCTIVE reinit
+        # (--force), which trips bd's remote-history guard and aborts city
+        # init on an otherwise healthy store. Confirm the server actually
+        # answers before trusting a negative result; otherwise fail closed
+        # so the caller's retry loop waits for the server to come up instead
+        # of reinitializing live data.
+        if ! server_reachable; then
+            die "managed Dolt server unreachable while inspecting existing store '$dolt_database'; refusing to force-reinitialize (data-safety). retry once the Dolt server is reachable."
+        fi
         if ensure_database_registered "$dolt_database"; then
             if bd_runtime_schema_ready "$dolt_database"; then
                 # GC owns canonical metadata/config normalization after this backend

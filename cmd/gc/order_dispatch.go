@@ -461,7 +461,9 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 			storeKeysForGate = append(storeKeysForGate, orderStoreTargetKey(legacyOrderCityTarget(cityPath, m.cfg)))
 		}
 		scoped := a.ScopedName()
-		hasOpenWork, err := m.hasOpenWorkInStoresStrict(storesForGate, scoped)
+		hasOpenWork, err := gateOpenWorkBounded(ctx, orderGateTimeout, scoped, func() (bool, error) {
+			return m.hasOpenWorkInStoresStrict(storesForGate, scoped)
+		})
 		if err != nil {
 			logDispatchError(m.stderr, "gc: order dispatch: checking open work for %s: %v", scoped, err)
 			continue
@@ -549,7 +551,11 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 		}
 
 		// Skip dispatch if previous work hasn't been processed yet.
-		hasOpenWork, err = trackingIndex.hasOpenWork(storesForGate, storeKeysForGate, scoped, m.hasOpenWorkInStoresStrict, true)
+		// Bound the wisp-aware open-work gate (#2921) with our per-order
+		// timeout so a slow store can't starve later orders.
+		hasOpenWork, err = gateOpenWorkBounded(ctx, orderGateTimeout, scoped, func() (bool, error) {
+			return trackingIndex.hasOpenWork(storesForGate, storeKeysForGate, scoped, m.hasOpenWorkInStoresStrict, true)
+		})
 		if err != nil {
 			logDispatchError(m.stderr, "gc: order dispatch: checking open work for %s: %v", scoped, err)
 			continue
@@ -1448,6 +1454,45 @@ func (m *memoryOrderDispatcher) hasOpenWorkInStoresStrict(stores []beads.Store, 
 		}
 	}
 	return false, nil
+}
+
+// orderGateTimeout bounds a single order's open-work gate. The strict gate
+// walks an order's wisp subtree by spawning synchronous bd subprocesses
+// (storeHasOpenDescendants); under Dolt write contention one heavy order's gate
+// can block for minutes, and because dispatch iterates orders synchronously
+// that stalls every LATER order (feeders, nudger, route-reclaim) on the same
+// tick — the vc-6qh1 hang. Bounding the gate lets a slow order be skipped so
+// the rest of the sweep proceeds. Package-level var so it is tunable and
+// overridable in tests.
+var orderGateTimeout = 8 * time.Second
+
+// gateOpenWorkBounded runs the open-work gate under a per-order timeout that
+// also honors the dispatch context. On timeout (or cancellation) it returns an
+// error so the caller skips THAT order and continues to the rest
+// (fail-closed-but-continue, vc-6qh1 mitigation #2): a heavy gate never starves
+// the feeders. gate is invoked in a goroutine; on timeout that goroutine is
+// left to finish on its own (its result is discarded via the buffered channel)
+// rather than blocking the dispatch loop.
+func gateOpenWorkBounded(ctx context.Context, timeout time.Duration, scoped string, gate func() (bool, error)) (bool, error) {
+	type gateResult struct {
+		has bool
+		err error
+	}
+	done := make(chan gateResult, 1)
+	go func() {
+		has, err := gate()
+		done <- gateResult{has: has, err: err}
+	}()
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case r := <-done:
+		return r.has, r.err
+	case <-timer.C:
+		return false, fmt.Errorf("open-work gate for %s timed out after %s; skipping this order so later orders still dispatch (see vc-6qh1)", scoped, timeout)
+	case <-ctx.Done():
+		return false, fmt.Errorf("open-work gate for %s aborted: %w", scoped, ctx.Err())
+	}
 }
 
 // sweepOrphanedOrderTracking closes any open order-tracking beads left

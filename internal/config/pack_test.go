@@ -1045,6 +1045,12 @@ name = "gastown"
 version = "1.0.0"
 schema = 1
 
+[providers.claude]
+base = "builtin:claude"
+
+[providers.codex]
+base = "builtin:codex"
+
 [agent_defaults]
 provider = "codex"
 
@@ -1061,6 +1067,9 @@ provider = "claude"
 name = "test-city"
 provider = "gemini"
 includes = ["packs/gt"]
+
+[providers.gemini]
+base = "builtin:gemini"
 `)
 
 	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(dir, "city.toml"))
@@ -1097,6 +1106,9 @@ name = "gastown"
 version = "1.0.0"
 schema = 1
 
+[providers.codex]
+base = "builtin:codex"
+
 [agent_defaults]
 provider = "codex"
 
@@ -1111,6 +1123,9 @@ includes = ["packs/gt"]
 
 [agent_defaults]
 provider = "gemini"
+
+[providers.gemini]
+base = "builtin:gemini"
 `)
 
 	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(dir, "city.toml"))

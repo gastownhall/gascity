@@ -96,11 +96,12 @@ type CityRuntime struct {
 	standaloneRigStores map[string]beads.Store
 
 	// Bead-driven reconciler state (Phase 2f).
-	sessionDrains     *drainTracker // in-memory drain tracker; nil when bead reconciler disabled
-	asyncStartLimiter *asyncStartLimiter
-	asyncStarts       asyncStartTracker
-	asyncStops        asyncStartTracker
-	demandSnapshot    *runtimeDemandSnapshot
+	sessionDrains      *drainTracker       // in-memory drain tracker; nil when bead reconciler disabled
+	providerHealthGate *providerHealthGate // ADR-0013 A1 M3a; nil until bead reconciler initialized
+	asyncStartLimiter  *asyncStartLimiter
+	asyncStarts        asyncStartTracker
+	asyncStops         asyncStartTracker
+	demandSnapshot     *runtimeDemandSnapshot
 
 	fsPressureConsecutiveSkips int
 	fsPressureEpisodeLogged    bool
@@ -382,9 +383,10 @@ func (cr *CityRuntime) run(ctx context.Context) {
 	// Record bead store health metric.
 	telemetry.RecordBeadStoreHealth(context.Background(), cr.cityName, cr.cityBeadStore() != nil)
 
-	// Initialize bead-driven drain tracker when bead store is available.
+	// Initialize bead-driven drain tracker and provider-health gate when bead store is available.
 	if cr.cityBeadStore() != nil && cr.tomlPath != "" {
 		cr.sessionDrains = newDrainTracker()
+		cr.providerHealthGate = newProviderHealthGate()
 	}
 	if ctx.Err() != nil {
 		return
@@ -1792,9 +1794,10 @@ func (cr *CityRuntime) reloadConfigTraced(
 		cr.standaloneRigStores = buildStandaloneRigStores(nextCfg, cr.cityPath, cr.stderr)
 	}
 
-	// Ensure drain tracker is initialized when bead store becomes available.
+	// Ensure drain tracker and provider-health gate are initialized when bead store becomes available.
 	if cr.cityBeadStore() != nil && cr.tomlPath != "" && cr.sessionDrains == nil {
 		cr.sessionDrains = newDrainTracker()
+		cr.providerHealthGate = newProviderHealthGate()
 	}
 	cr.configRev = result.Revision
 	cr.watchTargets = config.WatchTargets(result.Prov, nextCfg, cityRoot)
@@ -2103,7 +2106,8 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 	reconcileSessionBeadsTracedWithNamedDemand(
 		ctx, cr.cityPath, open, desiredState, cfgNames, cr.cfg, cr.sp, store,
 		cr.dops,
-		awakeAssignedWorkBeads, rigStores, readyWaitSet, cr.sessionDrains, poolDesired,
+		awakeAssignedWorkBeads, rigStores, readyWaitSet, cr.sessionDrains, cr.providerHealthGate,
+		poolDesired,
 		result.NamedSessionDemand,
 		result.snapshotQueryPartial(),
 		workSet, cityName,
@@ -2563,6 +2567,7 @@ func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {
 		cr.rigBeadStores(),
 		nil, // control-dispatcher ticks only need ownership continuity, not main-tick assigned/ready snapshots
 		cr.sessionDrains,
+		cr.providerHealthGate,
 		poolDesired,
 		wfcResult.NamedSessionDemand,
 		false, // storeQueryPartial: config-change path doesn't query work beads

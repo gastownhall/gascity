@@ -631,7 +631,7 @@
       "properties": {
         "source": {
           "type": "string",
-          "description": "Source is the durable authored pack location: a local path, a remote git\nURL, or a remote git URL with a monorepo subpath such as\n\"github.com/org/repo//packs/foo\". Registry handles are lookup-only in\nthis release wave; authored [imports.*] entries store the resolved source\nplus optional version."
+          "description": "Source is the durable authored pack location: a local path, a remote git\nURL, or a dereferenceable GitHub tree URL for a pack below a repository\nroot, such as \"https://github.com/org/repo/tree/main/packs/foo\". Registry\nhandles are lookup-only in this release wave; authored [imports.*]\nentries store the resolved source plus optional version."
         },
         "version": {
           "type": "string",

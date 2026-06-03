@@ -265,6 +265,9 @@ func TestFinalizeInitFetchesRemotePacksBeforeProviderReadiness(t *testing.T) {
 		`name = "bright-lights"`,
 		`includes = ["remote-pack"]`,
 		"",
+		"[providers.claude]",
+		`base = "builtin:claude"`,
+		"",
 		"[packs.remote-pack]",
 		`source = "` + remote + `"`,
 		"",
@@ -330,6 +333,9 @@ func TestFinalizeInitChecksRemoteImportProvidersAfterInstall(t *testing.T) {
 		`name = "remote-pack"`,
 		`version = "1.0.0"`,
 		"schema = 1",
+		"",
+		"[providers.claude]",
+		`base = "builtin:claude"`,
 		"",
 		"[[agent]]",
 		`name = "worker"`,
@@ -448,7 +454,7 @@ name = "demo"
 schema = 1
 
 [imports.gastown]
-source = "https://github.com/gastownhall/gascity-packs.git//gastown"
+source = "https://github.com/gastownhall/gascity-packs/tree/main/gastown"
 version = "sha:d3617d1319a1206ac85f69ba024ec395c49c6f4b"
 `)
 
@@ -867,6 +873,9 @@ func initBareProviderPackRepo(t *testing.T, name, provider string) string {
 		`name = "` + name + `"`,
 		`version = "1.0.0"`,
 		"schema = 1",
+		"",
+		"[providers." + provider + "]",
+		`base = "builtin:` + provider + `"`,
 		"",
 		"[[agent]]",
 		`name = "worker"`,

@@ -897,6 +897,9 @@ func TestResolveTemplateCityAppendFragmentsApplyToImportedPackAgent(t *testing.T
 name = "test"
 includes = ["packs/imported"]
 
+[providers.claude]
+base = "builtin:claude"
+
 [agent_defaults]
 append_fragments = ["city-footer"]
 `)
@@ -935,7 +938,7 @@ prompt_template = "agents/mayor/prompt.template.md"
 		cityName:        "test",
 		cityPath:        cityPath,
 		workspace:       &cfg.Workspace,
-		providers:       config.BuiltinProviders(),
+		providers:       cfg.Providers,
 		lookPath:        func(string) (string, error) { return "/usr/bin/claude", nil },
 		beaconTime:      testBeaconTime,
 		packDirs:        cfg.PackDirs,
@@ -1031,7 +1034,11 @@ func TestResolveTemplateConventionAgentAppendFragments(t *testing.T) {
 	write("city.toml", `
 	[workspace]
 	name = "test"
+	provider = "claude"
 	includes = ["packs/imported"]
+
+	[providers.claude]
+	base = "builtin:claude"
 	`)
 	write("packs/imported/pack.toml", `
 	[pack]
@@ -1066,7 +1073,7 @@ func TestResolveTemplateConventionAgentAppendFragments(t *testing.T) {
 		cityName:        "test",
 		cityPath:        cityPath,
 		workspace:       &cfg.Workspace,
-		providers:       config.BuiltinProviders(),
+		providers:       cfg.Providers,
 		lookPath:        func(string) (string, error) { return "/usr/bin/claude", nil },
 		beaconTime:      testBeaconTime,
 		packDirs:        cfg.PackDirs,

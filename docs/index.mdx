@@ -4,13 +4,19 @@ description: Contributor-facing documentation for the Gas City orchestration SDK
 ---
 
 Gas City is an orchestration-builder SDK for multi-agent systems. This docs
-tree is organized for external contributors first: install the toolchain, run a
-local city, find the relevant subsystem, and then decide whether you need
-current-state architecture docs, forward-looking design docs, or archived
-working notes.
+tree is organized so you can get oriented quickly: understand how the system
+fits together, install the toolchain, run a local city, and then find the
+relevant subsystem.
+
+If you are new, start with the
+[Architecture Overview](/concepts/architecture-overview) — it explains what the
+major pieces are (cities, rigs, agents, sessions, the beads store, the event
+bus, and the controller) and how work flows through them, with diagrams.
 
 ## Start Here
 
+- [Architecture Overview](/concepts/architecture-overview) gives you the mental
+  model for the whole system before you run anything.
 - [Installation](/getting-started/installation) explains the local toolchain
   and the shortest path to a working `gc` binary.
 - [Quickstart](/getting-started/quickstart) walks through the smallest city
@@ -22,6 +28,8 @@ working notes.
   runtime, config, store, and controller code live.
 ## Documentation Types
 
+- [Concepts](/concepts/architecture-overview): the architecture overview and the
+  mental model that ties the system together.
 - [Tutorials](/tutorials/index): end-to-end walkthroughs that teach the user
   model.
 - [Guides](/guides/index): practical docs for specific workflows like packs

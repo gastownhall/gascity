@@ -1013,6 +1013,9 @@ name = "test-city"
 name = "mayor"
 provider = "missing-provider"
 
+[providers.missing-provider]
+command = "missing-provider"
+
 [[named_session]]
 template = "mayor"
 `
@@ -1039,6 +1042,9 @@ name = "test-city"
 name = "witness"
 dir = "demo"
 provider = "missing-provider"
+
+[providers.missing-provider]
+command = "missing-provider"
 
 [[named_session]]
 template = "witness"

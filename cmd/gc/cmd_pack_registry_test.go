@@ -111,6 +111,15 @@ func TestPackRegistryAddListSearchShowRemove(t *testing.T) {
 	if !strings.Contains(stdout.String(), "local:lighthouse") || !strings.Contains(stdout.String(), "1.2.0") {
 		t.Fatalf("unexpected show output: %q", stdout.String())
 	}
+	for _, want := range []string{
+		"Import commands:",
+		"gc import add https://packages.example/lighthouse.git --name lighthouse --version '>=1.2.0'",
+		"gc import add https://packages.example/lighthouse.git --name lighthouse --version 1.2.0",
+	} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("show output missing %q:\n%s", want, stdout.String())
+		}
+	}
 
 	stdout.Reset()
 	stderr.Reset()
@@ -529,7 +538,7 @@ func TestPackRegistryLiveGascityPacksCatalog(t *testing.T) {
 			t.Fatalf("show %s code=%d stdout=%q stderr=%q", name, code, stdout.String(), stderr.String())
 		}
 		out := stdout.String()
-		if !strings.Contains(out, "Source:") || !strings.Contains(out, "Latest:") || !strings.Contains(out, "Releases:") {
+		if !strings.Contains(out, "Source:") || !strings.Contains(out, "Latest:") || !strings.Contains(out, "Import commands:") || !strings.Contains(out, "Releases:") {
 			t.Fatalf("show %s output missing registry contract fields:\n%s", name, out)
 		}
 	}

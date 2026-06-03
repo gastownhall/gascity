@@ -392,7 +392,7 @@ schema = 2
 [imports.gs]
 source = "./assets/sidecar"
 `,
-		filepath.Join(cityPath, "city.toml"): `
+		filepath.Join(cityPath, "city.toml"): withBuiltinProviderAliasesTOMLForTest(`
 [workspace]
 provider = "claude"
 
@@ -404,7 +404,7 @@ name = "repo"
 
 [rigs.imports.gs]
 source = "./assets/sidecar"
-`,
+`, "claude"),
 		filepath.Join(cityPath, ".gc", "site.toml"): `
 workspace_name = "import-regression"
 

@@ -1299,7 +1299,7 @@ ref = "v1.2.3"
 		t.Fatalf("doRigAdd returned %d, stderr: %s", code, stderr.String())
 	}
 
-	wantSource := "https://github.com/acme/ops-pack.git//roles#v1.2.3"
+	wantSource := "https://github.com/acme/ops-pack/tree/v1.2.3/roles"
 	if !strings.Contains(stdout.String(), "Import: ops="+wantSource) {
 		t.Fatalf("output missing resolved import: %s", stdout.String())
 	}
@@ -1389,7 +1389,7 @@ ref = "v1.2.3"
 		t.Fatalf("doRigAdd returned %d, stderr: %s", code, stderr.String())
 	}
 
-	wantSource := "https://github.com/acme/ops-pack.git//roles#v1.2.3"
+	wantSource := "https://github.com/acme/ops-pack/tree/v1.2.3/roles"
 	if !strings.Contains(stdout.String(), "Import: ops="+wantSource+" (default)") {
 		t.Fatalf("output missing resolved default import: %s", stdout.String())
 	}

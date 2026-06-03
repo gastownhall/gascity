@@ -57,13 +57,9 @@ func TestGastownSmoke(t *testing.T) {
 		}
 
 		var unexpectedWarnings []string
-		var foundProviderWarning bool
 		var foundGlobalFragmentsWarning bool
 		for _, warning := range prov.Warnings {
 			if config.IsLegacyWorkspaceFieldWarning(warning) {
-				if strings.Contains(warning, "workspace.provider is deprecated:") {
-					foundProviderWarning = true
-				}
 				if strings.Contains(warning, "workspace.global_fragments is deprecated:") {
 					foundGlobalFragmentsWarning = true
 				}
@@ -73,9 +69,6 @@ func TestGastownSmoke(t *testing.T) {
 		}
 		if len(unexpectedWarnings) > 0 {
 			t.Errorf("unexpected provenance warnings: %v", unexpectedWarnings)
-		}
-		if !foundProviderWarning {
-			t.Error("expected gastown workspace.provider deprecation warning")
 		}
 		if !foundGlobalFragmentsWarning {
 			t.Error("expected gastown workspace.global_fragments deprecation warning")

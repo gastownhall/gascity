@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -234,6 +235,8 @@ func shellWorkQueryWithEnv(command, dir string, env []string) (string, error) {
 		cmd.Dir = dir
 	}
 	cmd.Env = workQueryEnvForDir(env, dir)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
 	out, err := cmd.Output()
 	if ctx.Err() == context.DeadlineExceeded {
 		// Wrap context.DeadlineExceeded so callers can classify the timeout as
@@ -249,6 +252,10 @@ func shellWorkQueryWithEnv(command, dir string, env []string) (string, error) {
 		return "", fmt.Errorf("running work query %q: timed out after %s: %w", command, hookWorkQueryTimeout, context.DeadlineExceeded)
 	}
 	if err != nil {
+		msg := strings.TrimSpace(stderr.String())
+		if msg != "" {
+			return "", fmt.Errorf("running work query %q: %w: %s", command, err, msg)
+		}
 		return "", fmt.Errorf("running work query %q: %w", command, err)
 	}
 	return string(out), nil

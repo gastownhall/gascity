@@ -139,6 +139,12 @@ const (
 	// MUST NOT carry the password value (asserted by
 	// TestPostgresEventOmitsPassword).
 	PostgresCredentialResolved = "pg.credential_resolved"
+
+	// ProviderHealthGateAlert fires once per red episode when the provider-health
+	// gate parks respawns for a provider. Carries episode ID, onset time, and
+	// session count. One alert per episode; AlertSent is cleared on green so
+	// the next episode fires independently. (ADR-0013 A1 M3a)
+	ProviderHealthGateAlert = "provider.health_gate_alert"
 )
 
 // KnownEventTypes lists every event-type constant this package defines.
@@ -174,6 +180,11 @@ var KnownEventTypes = []string{
 	EventsRotated,
 	StoreMaintenanceDone, StoreMaintenanceFailed,
 	PostgresCredentialResolved,
+	// ProviderHealthGateAlert is intentionally omitted from KnownEventTypes.
+	// The event is emitted by the reconciler but its typed SSE payload is not
+	// yet registered in internal/api (the payload registration lives in a
+	// follow-up that adds the full SSE projection). Until then, subscribers
+	// receive it via the custom-event envelope.
 }
 
 // Event is a single recorded occurrence in the system.

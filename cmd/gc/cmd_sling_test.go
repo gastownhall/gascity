@@ -1063,7 +1063,8 @@ func TestDoSlingNudgePoolMemberUsesBeadDerivedSessionName(t *testing.T) {
 	sp.Calls = nil
 
 	cfg := &config.City{
-		Workspace: config.Workspace{Name: "test-city"},
+		Workspace: config.Workspace{Name: "test-city", Provider: "claude"},
+		Providers: builtinProviderAliasesForTest("claude"),
 		Agents: []config.Agent{{
 			Name: "polecat",
 			Dir:  "hw",

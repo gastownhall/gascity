@@ -802,7 +802,7 @@ func reconcileSessionBeadsAtPath(
 	stdout, stderr io.Writer,
 ) int {
 	return reconcileSessionBeadsAtPathWithNamedDemand(
-		ctx, cityPath, sessions, desiredState, configuredNames, cfg, sp, store, dops, assignedWorkBeads, rigStores, readyWaitSet, dt,
+		ctx, cityPath, sessions, desiredState, configuredNames, cfg, sp, store, dops, assignedWorkBeads, rigStores, readyWaitSet, dt, nil,
 		poolDesired, nil, storeQueryPartial, workSet, cityName, it, clk, rec, startupTimeout, driftDrainTimeout, stdout, stderr,
 	)
 }
@@ -821,6 +821,7 @@ func reconcileSessionBeadsAtPathWithNamedDemand(
 	rigStores map[string]beads.Store,
 	readyWaitSet map[string]bool,
 	dt *drainTracker,
+	gate *providerHealthGate,
 	poolDesired map[string]int,
 	namedSessionDemand map[string]bool,
 	storeQueryPartial bool,
@@ -834,7 +835,7 @@ func reconcileSessionBeadsAtPathWithNamedDemand(
 	stdout, stderr io.Writer,
 ) int {
 	return reconcileSessionBeadsTracedWithNamedDemand(
-		ctx, cityPath, sessions, desiredState, configuredNames, cfg, sp, store, dops, assignedWorkBeads, rigStores, readyWaitSet, dt,
+		ctx, cityPath, sessions, desiredState, configuredNames, cfg, sp, store, dops, assignedWorkBeads, rigStores, readyWaitSet, dt, gate,
 		poolDesired, namedSessionDemand, storeQueryPartial, workSet, cityName, it, clk, rec, startupTimeout, driftDrainTimeout, stdout, stderr, nil,
 	)
 }
@@ -868,7 +869,7 @@ func reconcileSessionBeadsTraced(
 	startOptions ...startExecutionOption,
 ) int {
 	return reconcileSessionBeadsTracedWithNamedDemand(
-		ctx, cityPath, sessions, desiredState, configuredNames, cfg, sp, store, dops, assignedWorkBeads, rigStores, readyWaitSet, dt,
+		ctx, cityPath, sessions, desiredState, configuredNames, cfg, sp, store, dops, assignedWorkBeads, rigStores, readyWaitSet, dt, nil,
 		poolDesired, nil, storeQueryPartial, workSet, cityName, it, clk, rec, startupTimeout, driftDrainTimeout, stdout, stderr, trace,
 		startOptions...,
 	)
@@ -888,6 +889,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 	rigStores map[string]beads.Store,
 	readyWaitSet map[string]bool,
 	dt *drainTracker,
+	gate *providerHealthGate,
 	poolDesired map[string]int,
 	namedSessionDemand map[string]bool,
 	storeQueryPartial bool,
@@ -905,6 +907,9 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 	if ctx != nil && ctx.Err() != nil {
 		return 0
 	}
+	// Load provider-health snapshot once per tick (ADR-0013 A1 M3a).
+	// All per-session gate checks in Phase 2 use this snapshot — no I/O per session.
+	phSnap := loadProviderHealthSnapshot(cityPath)
 	reconcileOpts := startExecutionOptions{}
 	for _, apply := range startOptions {
 		if apply != nil {
@@ -2168,6 +2173,29 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					}
 				}
 			}
+			// Provider-health gate (ADR-0013 A1 M3a): skip respawn when the
+			// provider is red. Does NOT consume the wake budget (no append to
+			// startCandidates). Episode tracking fires exactly one alert per
+			// red episode via emitProviderHealthGateAlert.
+			if gate != nil && target.tp.ResolvedProvider != nil {
+				phProvider := target.tp.ResolvedProvider.Name
+				phHealthy, phPresent := phSnap.check(phProvider)
+				if !phPresent {
+					// Registry absent or no fresh entry — fail-open, log once per provider per tick.
+					fmt.Fprintf(stderr, "session reconciler: provider-health registry unavailable for %q; treating as green\n", phProvider) //nolint:errcheck
+				} else if !phHealthy {
+					gate.recordRedSkip(phProvider, clk.Now().UTC(), func(p, epID string, since time.Time, count int) {
+						emitProviderHealthGateAlert(rec, stdout, p, epID, since, count)
+					})
+					if trace != nil {
+						trace.recordDecision("reconciler.session.provider_health_gate", target.tp.TemplateName, name, "provider_red", "respawn_skipped", traceRecordPayload{
+							"provider": phProvider,
+						}, nil, "")
+					}
+					continue // skip startCandidates; wake budget is NOT consumed
+				}
+			}
+
 			if trace != nil {
 				trace.recordDecision("reconciler.session.wake", target.tp.TemplateName, name, "wake", "start_candidate", traceRecordPayload{
 					"should_wake": shouldWake,
@@ -2279,13 +2307,27 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			if closeReason == "" {
 				closeReason = "drained"
 			}
-			closeBead(store, target.session.ID, closeReason, clk.Now().UTC(), stderr)
+			if closeBead(store, target.session.ID, closeReason, clk.Now().UTC(), stderr) {
+				// Pool worktrees are transient by design — reclaim disk
+				// when the session bead is retired. Skipped under safety
+				// gates (uncommitted, unpushed, stashed) and overridable
+				// via cfg.Daemon.AutoPruneWorkerDir.
+				pruneAgentHomeWorktreeIfSafe(*target.session, cityPath, cfg, stderr)
+			}
 		}
 	}
 	recordPhase(TraceSiteSessionReconcileWakeSleep, "session_reconcile.apply_wake_sleep_decisions", phaseStart, map[string]any{
 		"wake_target_count":     len(wakeTargets),
 		"start_candidate_count": len(startCandidates),
 	})
+
+	// Flush green ticks so episode state clears even when all sessions for a
+	// provider are already alive (and never enter the shouldWake && !alive path).
+	if gate != nil {
+		for _, p := range phSnap.healthyProviders() {
+			gate.recordGreenTick(p)
+		}
+	}
 
 	if ctx != nil && ctx.Err() != nil {
 		return 0

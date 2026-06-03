@@ -303,12 +303,12 @@ $ gc pack registry search gascity
 Example output:
 
 ```text
-PACK          VERSION  SUMMARY
-main:gascity  0.1.0    Gas City planning and implementation workflow pack
+Registry  Name     Latest  Description
+main      gascity  0.1.0   Gas City planning and implementation workflow pack
 ```
 
-The `PACK` column is a registry handle for `gc pack registry` commands. To
-inspect that record:
+The registry name and pack name form a registry handle for `gc pack registry`
+commands. To inspect that record:
 
 ```text
 $ gc pack registry show main:gascity
@@ -317,14 +317,23 @@ $ gc pack registry show main:gascity
 Example output:
 
 ```text
-Pack: main:gascity
-Version: 0.1.0
-Source: https://github.com/gastownhall/gascity-packs/tree/main/gascity
-Summary: Gas City planning and implementation workflow pack
+Pack:        main:gascity
+Description: Gas City planning and implementation workflow pack
+Source:      https://github.com/gastownhall/gascity-packs/tree/main/gascity
+Source kind: git
+Latest:      0.1.0
+Import commands:
+  This version or later: gc import add https://github.com/gastownhall/gascity-packs/tree/main/gascity --name gascity --version '>=0.1.0'
+  Exactly this version:  gc import add https://github.com/gastownhall/gascity-packs/tree/main/gascity --name gascity --version 0.1.0
+Releases:
+  0.1.0 v0.1.0 d3617d1319a
 ```
 
-The `Source` line is the durable source to commit in TOML. The registry handle
-stays out of the file.
+The `Import commands` lines are ready to paste. The first command accepts the
+shown release or any newer release that matches the constraint. The second
+command pins exactly the shown release. Both commands write durable import TOML
+using the `Source` line and the selected `version`; the registry handle stays
+out of the file.
 
 ### Install Or Check Imports
 

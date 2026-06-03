@@ -95,9 +95,12 @@ type LoadOptions struct {
 	// SuppressDeprecatedOrderWarnings suppresses only legacy order-path
 	// migration warnings produced while discovering pack orders.
 	SuppressDeprecatedOrderWarnings bool
-	deferRigPatches                 bool
-	deferredRigPatches              *[]deferredRigPatches
-	allowLegacyOrderLayouts         bool
+	// AllowMissingProviderReferences leaves provider-reference catalog errors
+	// non-fatal for repair tools that need to inspect broken configs.
+	AllowMissingProviderReferences bool
+	deferRigPatches                bool
+	deferredRigPatches             *[]deferredRigPatches
+	allowLegacyOrderLayouts        bool
 }
 
 // LoadWithIncludes loads a city.toml and merges all included fragments.
@@ -648,6 +651,11 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 	}
 
 	// Validate cross-entity semantic constraints.
+	if !opts.AllowMissingProviderReferences {
+		if err := ValidateProviderReferences(root); err != nil {
+			return nil, nil, err
+		}
+	}
 	prov.Warnings = append(prov.Warnings, ValidateSemantics(root, path)...)
 	prov.Warnings = append(prov.Warnings, DetectLegacyProviderInheritance(root, path)...)
 	prov.Warnings = append(prov.Warnings, detectLegacyWorkspaceFields(root, path, prov.Workspace)...)
@@ -1582,12 +1590,11 @@ func resolvedPackNames(includes []string, imports map[string]Import, sysFS fsys.
 	seenShallowDirs := make(map[string]bool)
 	expandedDirs := make(map[string]bool)
 
-	var visit func(ref, declDir string, transitive bool)
-	visit = func(ref, declDir string, transitive bool) {
-		dir, err := resolvePackRef(ref, declDir, cityRoot)
-		if err != nil {
-			return
-		}
+	var visitDir func(dir string, transitive bool)
+	var visitInclude func(ref, declDir string, transitive bool)
+	var visitImport func(ref, declDir string, transitive bool)
+
+	visitDir = func(dir string, transitive bool) {
 		absDir, absErr := filepath.Abs(dir)
 		if absErr != nil {
 			absDir = dir
@@ -1626,18 +1633,34 @@ func resolvedPackNames(includes []string, imports map[string]Import, sysFS fsys.
 		}
 		expandedDirs[absDir] = true
 		for _, sub := range pc.Pack.Includes {
-			visit(sub, dir, true)
+			visitInclude(sub, dir, true)
 		}
 		for _, imp := range pc.Imports {
-			visit(imp.Source, dir, imp.ImportIsTransitive())
+			visitImport(imp.Source, dir, imp.ImportIsTransitive())
 		}
 	}
 
+	visitInclude = func(ref, declDir string, transitive bool) {
+		dir, err := resolvePackRef(ref, declDir, cityRoot)
+		if err != nil {
+			return
+		}
+		visitDir(dir, transitive)
+	}
+
+	visitImport = func(ref, declDir string, transitive bool) {
+		dir, err := resolveImportPackRef(ref, declDir, cityRoot)
+		if err != nil {
+			return
+		}
+		visitDir(dir, transitive)
+	}
+
 	for _, inc := range includes {
-		visit(inc, cityRoot, true)
+		visitInclude(inc, cityRoot, true)
 	}
 	for _, imp := range imports {
-		visit(imp.Source, cityRoot, imp.ImportIsTransitive())
+		visitImport(imp.Source, cityRoot, imp.ImportIsTransitive())
 	}
 	return names
 }
