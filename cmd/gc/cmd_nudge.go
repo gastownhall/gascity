@@ -345,6 +345,12 @@ func nonNilQueuedNudges(items []queuedNudge) []queuedNudge {
 }
 
 func cmdNudgeDrainWithFormat(args []string, inject bool, hookFormat string, stdout, stderr io.Writer) int {
+	// Emit a live clock (operator-local + UTC + epoch) on every prompt. This
+	// runs unconditionally, before the nudge-specific early returns below, so
+	// the current time is always present in agent context. See clock_inject.go.
+	if inject {
+		emitClockInject(hookFormat, stdout)
+	}
 	targetID := os.Getenv("GC_ALIAS")
 	if targetID == "" {
 		targetID = os.Getenv("GC_SESSION_ID")
