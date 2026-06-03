@@ -1,5 +1,11 @@
 # V2 Loader & Pack Composition — Design
 
+> **Historical PackV2 design note.** This page preserves design history and
+> rollout rationale. For current pack authoring guidance, use
+> `docs/specs/pack-spec.md` and `docs/guides/shareable-packs.md`.
+> When this note disagrees with shipped behavior, prefer the current docs,
+> generated reference, code, and tests.
+
 > **Status:** Design description of the v.next loader as proposed in
 > [doc-pack-v2.md](doc-pack-v2.md) ([gastownhall/gascity#360](https://github.com/gastownhall/gascity/issues/360)).
 > Companion to the current release-branch loader behavior and to the v.next

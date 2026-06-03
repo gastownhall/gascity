@@ -8,7 +8,7 @@ description: Authoritative specification for Gas City pack format and loading se
 | Field | Value |
 |---|---|
 | Status | Authoritative specification |
-| Last verified | 2026-05-30 |
+| Last verified | 2026-06-03 |
 | Pack schema | 2 |
 | Primary implementation | `internal/config/pack.go`, `internal/config/config.go`, `internal/config/compose.go` |
 | User-facing guide | `docs/guides/shareable-packs.md` |
@@ -70,7 +70,10 @@ constraints and lockfile resolution, not by a loader comparing `[pack].version`
 directly.
 
 The `requires_gc` field is optional metadata for the minimum compatible `gc`
-version. It is parsed as pack metadata.
+version. It is parsed and preserved as pack metadata. The current loader,
+importer, and doctor surfaces do not enforce the constraint during load,
+import, or validation; enforcement must be introduced by an explicit future
+implementation change before pack authors can rely on it as a hard gate.
 
 ### 0.3. Pack Contents
 
@@ -205,7 +208,7 @@ requires_gc = ">=0.13.0"
 | `name` | string | yes | Pack identifier and provenance label. Must not be empty. |
 | `schema` | integer | yes | Pack format version. Must be `2` for this specification. |
 | `version` | string | no | Pack version metadata. |
-| `requires_gc` | string | no | Minimum compatible `gc` version metadata. |
+| `requires_gc` | string | no | Minimum compatible `gc` version metadata. Parsed and preserved; not currently enforced during load/import/doctor. |
 | `description` | string | no | Human-readable pack summary. |
 | `requires` | array of tables | no | Agent requirements validated after expansion. |
 

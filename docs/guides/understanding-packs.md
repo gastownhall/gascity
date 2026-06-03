@@ -421,3 +421,30 @@ state.
 
 This separation keeps local discovery flexible without making shared config
 depend on the names or cache layout of one machine.
+
+### Registry Freshness
+
+Registry catalogs are cached locally. `gc pack registry search` and
+`gc pack registry show` read that cache unless you pass `--refresh`, and they
+warn when a configured registry cache is older than the freshness window.
+
+By default, a registry cache is considered fresh for 24 hours. Set
+`GC_REGISTRY_FRESHNESS` to a positive Go duration string when you need a
+different window:
+
+```bash
+GC_REGISTRY_FRESHNESS=1h gc pack registry search gascity
+```
+
+Invalid, zero, or negative values produce a warning and leave the command
+without a custom freshness window. Use `--refresh` when you want a command to
+fetch the latest catalog before reading it:
+
+```bash
+gc pack registry search gascity --refresh
+gc pack registry show main:gascity --refresh
+```
+
+Freshness affects discovery, not authored imports. A stale registry cache can
+hide a newly published pack record from search/show output, but shared
+`pack.toml` still stores durable import `source` and `version` values.

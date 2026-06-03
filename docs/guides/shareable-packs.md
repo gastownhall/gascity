@@ -139,6 +139,25 @@ not the registry handle. Publishing registry content is still a registry-repo
 workflow in this wave: edit the registry catalog, review it, and refresh the
 local registry cache before searching or showing new entries.
 
+The first public registry is the `gascity-packs` catalog:
+
+```text
+gc pack registry add main https://github.com/gastownhall/gascity-packs.git
+gc pack registry refresh main
+gc pack registry search gascity
+gc pack registry show main:gascity
+```
+
+Registry caches are local. Search and show warn when a registry cache is older
+than the freshness window. The default window is 24 hours. Set
+`GC_REGISTRY_FRESHNESS` to a positive Go duration string, such as `1h` or
+`30m`, to change that warning window. Invalid, zero, or negative values warn.
+Pass `--refresh` to `gc pack registry search` or `gc pack registry show` when
+you want that command to fetch the latest catalog before reading it.
+
+See [Public Registry Packs](/guides/registry-showcase) for the first-party
+packs currently advertised through the public registry.
+
 ## City Usage
 
 A city imports packs at the root pack level and declares deployment details in

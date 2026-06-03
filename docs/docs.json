@@ -138,6 +138,7 @@
           "guides/capabilities-for-coding-agent-users",
           "guides/understanding-packs",
           "guides/shareable-packs",
+          "guides/registry-showcase",
           "guides/gastown-config-recipes",
           "guides/using-json-from-gc",
           "guides/multi-agent-engineering-environment"

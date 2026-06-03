@@ -1,5 +1,11 @@
 # Pack Commands v.next
 
+> **Historical PackV2 design note.** This page preserves design history and
+> rollout rationale. For current pack authoring guidance, use
+> `docs/specs/pack-spec.md` and `docs/guides/shareable-packs.md`.
+> When this note disagrees with shipped behavior, prefer the current docs,
+> generated reference, code, and tests.
+
 > **Status:** design note / rationale only. This file is not the release-gating
 > authority for the shipped command or doctor surface.
 >

@@ -1,5 +1,11 @@
 # Consistency Audit: Directory Conventions and TOML Structure — RETIRED
 
+> **Historical PackV2 design note.** This page preserves design history and
+> rollout rationale. For current pack authoring guidance, use
+> `docs/specs/pack-spec.md` and `docs/guides/shareable-packs.md`.
+> When this note disagrees with shipped behavior, prefer the current docs,
+> generated reference, code, and tests.
+
 > **Status: Retired.** All findings have been folded into the canonical spec docs:
 > - Orders → top-level `orders/` (doc-directory-conventions.md, doc-pack-v2.md, doc-loader-v2.md)
 > - `[formulas].dir` → fixed convention (doc-directory-conventions.md, doc-pack-v2.md)

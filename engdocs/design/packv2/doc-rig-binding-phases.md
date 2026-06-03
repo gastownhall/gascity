@@ -1,5 +1,11 @@
 # Rig Binding Phases
 
+> **Historical PackV2 design note.** This page preserves design history and
+> rollout rationale. For current pack authoring guidance, use
+> `docs/specs/pack-spec.md` and `docs/guides/shareable-packs.md`.
+> When this note disagrees with shipped behavior, prefer the current docs,
+> generated reference, code, and tests.
+
 Doc state: transition truth
 
 GitHub issues:
