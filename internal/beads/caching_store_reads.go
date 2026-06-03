@@ -240,17 +240,25 @@ func (c *CachingStore) refreshCachedBeads(query ListQuery, startSeq uint64, item
 		if c.deletedSeq[id] > startSeq || c.beadSeq[id] > startSeq {
 			continue
 		}
+		if _, keep := c.recentLocalBeadConflictLocked(id, bead, now, false); keep {
+			continue
+		}
 		c.beads[id] = bead
 		if beadCarriesDependencyFields(bead) {
 			c.deps[id] = depsFromBeadFields(bead)
 		}
 		delete(c.dirty, id)
 		delete(c.deletedSeq, id)
-		delete(c.beadSeq, id)
-		delete(c.localBeadAt, id)
+		if !recentLocalMutation(c.localBeadAt[id], now) {
+			delete(c.beadSeq, id)
+			delete(c.localBeadAt, id)
+		}
 	}
 	for id := range removedLiveMissing {
 		if c.deletedSeq[id] > startSeq || c.beadSeq[id] > startSeq {
+			continue
+		}
+		if current, ok := c.beads[id]; ok && current.Status != "closed" && recentLocalMutation(c.localBeadAt[id], now) {
 			continue
 		}
 		delete(c.beads, id)
