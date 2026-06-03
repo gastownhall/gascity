@@ -13,7 +13,9 @@ func TestProgressStallTimeoutDuration(t *testing.T) {
 	}{
 		{"unset disables (zero)", "", 0},
 		{"valid duration", "30m", 30 * time.Minute},
+		{"too small clamps to safety floor", "30s", ProgressStallTimeoutMinimum},
 		{"unparseable disables (zero)", "not-a-duration", 0},
+		{"negative disables (zero)", "-5m", 0},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
