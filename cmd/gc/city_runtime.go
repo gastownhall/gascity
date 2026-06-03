@@ -231,13 +231,19 @@ func newCityRuntime(p CityRuntimeParams) *CityRuntime {
 	// (goroutines killed on restart, or silent Close failures).
 	// Retry with backoff as defense-in-depth against transient store
 	// errors immediately after ensureBeadsProvider returns (#753).
-	if sweepStore, err := newCityRuntimeOpenSweepStore(p.CityPath, p.CityPath); err != nil {
-		fmt.Fprintf(p.Stderr, "gc start: order tracking sweep: %v\n", err) //nolint:errcheck // best-effort stderr
-	} else if n, err := sweepOrphanedOrderTrackingRetryLimit(sweepStore, 3, time.Second, orderTrackingSweepCloseBudget); err != nil {
-		fmt.Fprintf(p.Stderr, "gc start: order tracking sweep (closed %d): %v\n", n, err) //nolint:errcheck // best-effort stderr
-	} else if n > 0 {
-		fmt.Fprintf(p.Stderr, "gc start: closed %d orphaned order-tracking beads\n", n) //nolint:errcheck // best-effort stderr
-	}
+	func() {
+		sweepStore, err := newCityRuntimeOpenSweepStore(p.CityPath, p.CityPath)
+		if err != nil {
+			fmt.Fprintf(p.Stderr, "gc start: order tracking sweep: %v\n", err) //nolint:errcheck // best-effort stderr
+			return
+		}
+		defer closeBeadStoreHandle(sweepStore) //nolint:errcheck
+		if n, err := sweepOrphanedOrderTrackingRetryLimit(sweepStore, 3, time.Second, orderTrackingSweepCloseBudget); err != nil {
+			fmt.Fprintf(p.Stderr, "gc start: order tracking sweep (closed %d): %v\n", n, err) //nolint:errcheck // best-effort stderr
+		} else if n > 0 {
+			fmt.Fprintf(p.Stderr, "gc start: closed %d orphaned order-tracking beads\n", n) //nolint:errcheck // best-effort stderr
+		}
+	}()
 
 	od, orderSnapshot := buildOrderDispatcherWithSnapshot(p.CityPath, p.Cfg, p.Rec, p.Stderr, "gc start: order scan")
 
@@ -1299,7 +1305,8 @@ func (cr *CityRuntime) runOrderTrackingSweepWatchdog(now time.Time) {
 	}
 	cr.orderSweepWatchdogLast = now
 
-	stores, _, storeErr := cr.orderTrackingSweepStores()
+	stores, _, closeOpened, storeErr := cr.orderTrackingSweepStores()
+	defer closeOpened()
 	if len(stores) == 0 {
 		if storeErr != nil && cr.stderr != nil {
 			fmt.Fprintf(cr.stderr, "%s: order tracking sweep watchdog: %v\n", cr.logPrefix, storeErr) //nolint:errcheck // best-effort stderr
@@ -1326,9 +1333,10 @@ func (cr *CityRuntime) runOrderTrackingSweepWatchdog(now time.Time) {
 	}
 }
 
-func (cr *CityRuntime) orderTrackingSweepStores() ([]beads.Store, []orderTrackingSweepTarget, error) {
+func (cr *CityRuntime) orderTrackingSweepStores() ([]beads.Store, []orderTrackingSweepTarget, func(), error) {
 	targets := orderTrackingSweepTargetsForConfig(cr.cityPath, cr.cfg)
 	rigStores := cr.rigBeadStores()
+	var freshlyOpened []beads.Store
 	stores, err := orderTrackingSweepStoresFromTargets(targets, func(sweepTarget orderTrackingSweepTarget) (beads.Store, error) {
 		var store beads.Store
 		switch sweepTarget.target.ScopeKind {
@@ -1338,11 +1346,20 @@ func (cr *CityRuntime) orderTrackingSweepStores() ([]beads.Store, []orderTrackin
 			store = rigStores[sweepTarget.target.RigName]
 		}
 		if store == nil {
-			return newCityRuntimeOpenSweepStore(sweepTarget.target.ScopeRoot, cr.cityPath)
+			fresh, openErr := newCityRuntimeOpenSweepStore(sweepTarget.target.ScopeRoot, cr.cityPath)
+			if openErr == nil {
+				freshlyOpened = append(freshlyOpened, fresh)
+			}
+			return fresh, openErr
 		}
 		return store, nil
 	})
-	return stores, targets, err
+	closeOpened := func() {
+		for _, s := range freshlyOpened {
+			_ = closeBeadStoreHandle(s) //nolint:errcheck // best-effort
+		}
+	}
+	return stores, targets, closeOpened, err
 }
 
 func (cr *CityRuntime) handleReloadRequest(req *reloadRequest) {
