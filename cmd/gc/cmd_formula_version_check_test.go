@@ -63,7 +63,7 @@ func writeVersionCheckCity(t *testing.T) (cityDir, diskHash string) {
 		}
 	}
 
-	writeFile("city.toml", "[workspace]\nname = \"my-city\"\nprovider = \"claude\"\n")
+	writeFile("city.toml", withBuiltinProviderAliasesTOMLForTest("[workspace]\nname = \"my-city\"\nprovider = \"claude\"\n", "claude"))
 	writeFile("formulas/"+versionCheckFormulaName+".toml", versionCheckFormulaBody)
 
 	recipe, err := formula.Compile(context.Background(), versionCheckFormulaName, []string{filepath.Join(cityDir, "formulas")}, nil)

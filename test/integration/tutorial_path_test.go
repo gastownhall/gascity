@@ -41,7 +41,12 @@ func TestCleanInstallTutorialPath(t *testing.T) {
 	cityDir := filepath.Join(t.TempDir(), cityName)
 
 	// --- Step 1: gc init (clean install, no --file) ---
-	out, err := runGCDoltWithEnv(env, "", "init", "--skip-provider-readiness", cityDir)
+	out, err := runGCDoltWithEnv(env, "", "init",
+		"--skip-provider-readiness",
+		"--providers", "codex",
+		"--default-provider", "codex",
+		cityDir,
+	)
 	if err != nil {
 		t.Fatalf("gc init failed: %v\noutput: %s", err, out)
 	}
