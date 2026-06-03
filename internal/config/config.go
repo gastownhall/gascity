@@ -2025,6 +2025,15 @@ type DaemonConfig struct {
 	// false as a global kill switch (e.g., for production cities where a
 	// rebuild on the host should not auto-restart the supervisor).
 	AutoRestartOnDrift *bool `toml:"auto_restart_on_drift,omitempty" jsonschema:"default=true"`
+	// AutoReapClosedBeadWorktrees controls whether the reconciler patrol
+	// automatically removes per-bead git worktrees once their associated
+	// work bead reaches closed status. Only worktrees with a clean working
+	// tree, no unpushed commits, and no stashes are removed; unsafe worktrees
+	// are logged as warnings and left in place for operator review. Session
+	// home directories (agent template directories) are never touched.
+	// Defaults to true. Set to false to retain worktrees for post-session
+	// diagnostics.
+	AutoReapClosedBeadWorktrees *bool `toml:"auto_reap_closed_bead_worktrees,omitempty" jsonschema:"default=true"`
 	// StartReadyTimeout is how long `gc start` and `gc register` wait for
 	// the supervisor to report the city as Running. Cities with many
 	// registered or adopted sessions take longer to start because the
@@ -2057,6 +2066,18 @@ func (d *DaemonConfig) AutoRestartOnDriftEnabled() bool {
 		return true
 	}
 	return *d.AutoRestartOnDrift
+}
+
+// AutoReapClosedBeadWorktreesEnabled reports whether the patrol should
+// automatically remove per-bead git worktrees for closed beads. Defaults
+// to true when the field is unset (nil). Set to false in city.toml to
+// disable automated cleanup — useful when worktrees need to survive for
+// post-session diagnostics.
+func (d *DaemonConfig) AutoReapClosedBeadWorktreesEnabled() bool {
+	if d.AutoReapClosedBeadWorktrees == nil {
+		return true
+	}
+	return *d.AutoReapClosedBeadWorktrees
 }
 
 // PatrolIntervalDuration returns the patrol interval as a time.Duration.
