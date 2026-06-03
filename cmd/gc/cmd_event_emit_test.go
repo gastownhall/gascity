@@ -292,7 +292,7 @@ func TestEventEmitViaCLI(t *testing.T) {
 
 	dir := t.TempDir()
 	var stdout, stderr bytes.Buffer
-	code := run([]string{"init", dir}, &stdout, &stderr)
+	code := run([]string{"init", "--skip-provider-readiness", "--provider", "claude", dir}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("gc init = %d; stderr: %s", code, stderr.String())
 	}

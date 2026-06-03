@@ -3076,9 +3076,43 @@ func TestSettingsArgsMissingFile(t *testing.T) {
 
 // --- runWizard ---
 
+func stubWizardProviderReadiness(t *testing.T, configured ...string) {
+	t.Helper()
+	configuredSet := make(map[string]bool, len(configured))
+	for _, provider := range configured {
+		configuredSet[provider] = true
+	}
+	oldProbe := initProbeProvidersReadiness
+	initProbeProvidersReadiness = func(_ context.Context, providers []string, fresh bool) (map[string]api.ReadinessItem, error) {
+		if !fresh {
+			t.Fatal("wizard provider readiness must use fresh probes")
+		}
+		out := make(map[string]api.ReadinessItem, len(providers))
+		for _, provider := range providers {
+			status := api.ProbeStatusNotInstalled
+			if configuredSet[provider] {
+				status = api.ProbeStatusConfigured
+			}
+			displayName := provider
+			if spec, ok := config.BuiltinProviders()[provider]; ok && spec.DisplayName != "" {
+				displayName = spec.DisplayName
+			}
+			out[provider] = api.ReadinessItem{
+				Name:        provider,
+				Kind:        api.ProbeKindProvider,
+				DisplayName: displayName,
+				Status:      status,
+			}
+		}
+		return out, nil
+	}
+	t.Cleanup(func() { initProbeProvidersReadiness = oldProbe })
+}
+
 func TestRunWizardDefaults(t *testing.T) {
-	// Two enters → default template (minimal) + default agent (claude).
-	stdin := strings.NewReader("\n\n")
+	stubWizardProviderReadiness(t, "claude")
+	// One configured provider is auto-selected after the template choice.
+	stdin := strings.NewReader("\n")
 	var stdout bytes.Buffer
 	wiz := runWizard(stdin, &stdout)
 
@@ -3088,8 +3122,11 @@ func TestRunWizardDefaults(t *testing.T) {
 	if wiz.configName != "minimal" {
 		t.Errorf("configName = %q, want %q", wiz.configName, "minimal")
 	}
-	if wiz.provider != "claude" {
-		t.Errorf("provider = %q, want %q", wiz.provider, "claude")
+	if wiz.defaultProvider != "claude" {
+		t.Errorf("defaultProvider = %q, want %q", wiz.defaultProvider, "claude")
+	}
+	if len(wiz.providers) != 1 || wiz.providers[0] != "claude" {
+		t.Errorf("providers = %v, want [claude]", wiz.providers)
 	}
 	// Verify both prompts were printed.
 	out := stdout.String()
@@ -3124,24 +3161,29 @@ func TestRunWizardNilStdin(t *testing.T) {
 }
 
 func TestRunWizardSelectGemini(t *testing.T) {
+	stubWizardProviderReadiness(t, "claude", "codex", "gemini")
 	// Default template + Gemini CLI.
-	stdin := strings.NewReader("\nGemini CLI\n")
+	stdin := strings.NewReader("\ngemini\n")
 	var stdout bytes.Buffer
 	wiz := runWizard(stdin, &stdout)
 
-	if wiz.provider != "gemini" {
-		t.Errorf("provider = %q, want %q", wiz.provider, "gemini")
+	if wiz.defaultProvider != "gemini" {
+		t.Errorf("defaultProvider = %q, want %q", wiz.defaultProvider, "gemini")
+	}
+	if got := strings.Join(wiz.providers, ","); got != "claude,codex,gemini" {
+		t.Errorf("providers = %v, want readiness-aware configured set", wiz.providers)
 	}
 }
 
 func TestRunWizardSelectCodex(t *testing.T) {
+	stubWizardProviderReadiness(t, "claude", "codex", "gemini")
 	// Default template + Codex by number.
 	stdin := strings.NewReader("\n2\n")
 	var stdout bytes.Buffer
 	wiz := runWizard(stdin, &stdout)
 
-	if wiz.provider != "codex" {
-		t.Errorf("provider = %q, want %q", wiz.provider, "codex")
+	if wiz.defaultProvider != "codex" {
+		t.Errorf("defaultProvider = %q, want %q", wiz.defaultProvider, "codex")
 	}
 }
 
@@ -3168,21 +3210,23 @@ func TestRunWizardCustomTemplate(t *testing.T) {
 }
 
 func TestRunWizardGastownTemplate(t *testing.T) {
+	stubWizardProviderReadiness(t, "claude")
 	// Select gastown template + default agent.
-	stdin := strings.NewReader("2\n\n")
+	stdin := strings.NewReader("2\n")
 	var stdout bytes.Buffer
 	wiz := runWizard(stdin, &stdout)
 
 	if wiz.configName != "gastown" {
 		t.Errorf("configName = %q, want %q", wiz.configName, "gastown")
 	}
-	if wiz.provider == "" {
-		t.Error("provider should be set to default for gastown")
+	if wiz.defaultProvider != "claude" {
+		t.Errorf("defaultProvider = %q, want claude", wiz.defaultProvider)
 	}
 }
 
 func TestRunWizardGastownByName(t *testing.T) {
-	stdin := strings.NewReader("gastown\n\n")
+	stubWizardProviderReadiness(t, "claude")
+	stdin := strings.NewReader("gastown\n")
 	var stdout bytes.Buffer
 	wiz := runWizard(stdin, &stdout)
 
@@ -3192,65 +3236,57 @@ func TestRunWizardGastownByName(t *testing.T) {
 }
 
 func TestRunWizardTutorialAliasMapsToMinimal(t *testing.T) {
-	stdin := strings.NewReader("tutorial\n\n")
+	stubWizardProviderReadiness(t, "claude")
+	stdin := strings.NewReader("tutorial\n")
 	var stdout bytes.Buffer
 	wiz := runWizard(stdin, &stdout)
 
 	if wiz.configName != "minimal" {
 		t.Errorf("configName = %q, want %q", wiz.configName, "minimal")
 	}
-	if wiz.provider != "claude" {
-		t.Errorf("provider = %q, want %q", wiz.provider, "claude")
+	if wiz.defaultProvider != "claude" {
+		t.Errorf("defaultProvider = %q, want %q", wiz.defaultProvider, "claude")
 	}
 }
 
-func TestRunWizardSelectCursorByNumber(t *testing.T) {
-	// Cursor is #6 in the order.
-	stdin := strings.NewReader("\n6\n")
+func TestRunWizardRequiresExplicitSelectionWhenMultipleProvidersConfigured(t *testing.T) {
+	stubWizardProviderReadiness(t, "claude", "codex")
+	stdin := strings.NewReader("\n\n")
 	var stdout bytes.Buffer
 	wiz := runWizard(stdin, &stdout)
 
-	if wiz.provider != "cursor" {
-		t.Errorf("provider = %q, want %q", wiz.provider, "cursor")
+	if wiz.err == nil {
+		t.Fatal("expected error when multiple providers are configured and no default is selected")
 	}
 }
 
-func TestRunWizardSelectCopilotByName(t *testing.T) {
-	stdin := strings.NewReader("\nGitHub Copilot\n")
+func TestRunWizardRejectsProviderOutsideReadinessSet(t *testing.T) {
+	stubWizardProviderReadiness(t, "claude", "codex", "gemini")
+	stdin := strings.NewReader("\ncursor\n")
 	var stdout bytes.Buffer
 	wiz := runWizard(stdin, &stdout)
 
-	if wiz.provider != "copilot" {
-		t.Errorf("provider = %q, want %q", wiz.provider, "copilot")
+	if wiz.err == nil {
+		t.Fatal("expected error for provider not present in readiness-aware choices")
 	}
 }
 
-func TestRunWizardSelectByProviderKey(t *testing.T) {
-	stdin := strings.NewReader("\namp\n")
+func TestRunWizardNoCustomCommandOption(t *testing.T) {
+	stubWizardProviderReadiness(t, "claude", "codex", "gemini")
+	stdin := strings.NewReader("\n4\n")
 	var stdout bytes.Buffer
 	wiz := runWizard(stdin, &stdout)
 
-	if wiz.provider != "amp" {
-		t.Errorf("provider = %q, want %q", wiz.provider, "amp")
+	if wiz.err == nil {
+		t.Fatal("expected error for non-existent fourth readiness provider")
 	}
-}
-
-func TestRunWizardCustomCommand(t *testing.T) {
-	// Default template + custom command (last option = len(providers)+1).
-	customNum := len(config.BuiltinProviderOrder()) + 1
-	stdin := strings.NewReader(fmt.Sprintf("\n%d\nmy-agent --auto --skip-confirm\n", customNum))
-	var stdout bytes.Buffer
-	wiz := runWizard(stdin, &stdout)
-
-	if wiz.provider != "" {
-		t.Errorf("provider = %q, want empty for custom command", wiz.provider)
-	}
-	if wiz.startCommand != "my-agent --auto --skip-confirm" {
-		t.Errorf("startCommand = %q, want %q", wiz.startCommand, "my-agent --auto --skip-confirm")
+	if wiz.startCommand != "" {
+		t.Errorf("startCommand = %q, want empty", wiz.startCommand)
 	}
 }
 
 func TestRunWizardEOFStdin(t *testing.T) {
+	stubWizardProviderReadiness(t, "claude")
 	stdin := strings.NewReader("")
 	var stdout bytes.Buffer
 	wiz := runWizard(stdin, &stdout)
@@ -3259,17 +3295,18 @@ func TestRunWizardEOFStdin(t *testing.T) {
 	if wiz.configName != "minimal" {
 		t.Errorf("configName = %q, want %q", wiz.configName, "minimal")
 	}
-	if wiz.provider != "claude" {
-		t.Errorf("provider = %q, want %q", wiz.provider, "claude")
+	if wiz.defaultProvider != "claude" {
+		t.Errorf("defaultProvider = %q, want %q", wiz.defaultProvider, "claude")
 	}
 }
 
 func TestDoInitWithWizardConfig(t *testing.T) {
 	f := fsys.NewFake()
 	wiz := wizardConfig{
-		interactive: true,
-		configName:  "minimal",
-		provider:    "claude",
+		interactive:     true,
+		configName:      "minimal",
+		defaultProvider: "claude",
+		providers:       []string{"claude", "codex"},
 	}
 
 	var stdout, stderr bytes.Buffer
@@ -3298,6 +3335,15 @@ func TestDoInitWithWizardConfig(t *testing.T) {
 	if raw.Workspace.Provider != "claude" {
 		t.Errorf("Workspace.Provider = %q, want %q", raw.Workspace.Provider, "claude")
 	}
+	for _, name := range []string{"claude", "codex"} {
+		spec, ok := raw.Providers[name]
+		if !ok {
+			t.Fatalf("city.toml missing provider alias %q:\n%s", name, data)
+		}
+		if spec.Base == nil || *spec.Base != "builtin:"+name {
+			t.Fatalf("providers.%s.base = %v, want builtin:%s", name, spec.Base, name)
+		}
+	}
 	cfg, err := loadCityConfigFS(f, filepath.Join("/bright-lights", "city.toml"))
 	if err != nil {
 		t.Fatalf("loading written config: %v", err)
@@ -3315,6 +3361,10 @@ func TestDoInitWithWizardConfig(t *testing.T) {
 	// Verify provider appears in TOML.
 	if !strings.Contains(string(data), `provider = "claude"`) {
 		t.Errorf("city.toml missing provider:\n%s", data)
+	}
+	packToml := string(f.Files[filepath.Join("/bright-lights", "pack.toml")])
+	if strings.Contains(packToml, "[providers.") {
+		t.Errorf("pack.toml should not contain generated provider aliases:\n%s", packToml)
 	}
 }
 
@@ -3417,9 +3467,7 @@ func TestDoInitWithCustomTemplate(t *testing.T) {
 		t.Fatalf("doInit = %d, want 0; stderr: %s", code, stderr.String())
 	}
 
-	// Custom template → DefaultCity (one mayor, no provider). The mayor
-	// now comes from the scaffolded agents/<name>/ tree rather than an
-	// inline pack.toml [[agent]].
+	// Custom template creates an empty providerless scaffold.
 	data := f.Files[filepath.Join("/my-city", "city.toml")]
 	raw, err := config.Parse(data)
 	if err != nil {
@@ -3433,11 +3481,8 @@ func TestDoInitWithCustomTemplate(t *testing.T) {
 		t.Fatalf("loading written config: %v", err)
 	}
 	explicit := explicitAgents(cfg.Agents)
-	if len(explicit) != 1 {
-		t.Fatalf("len(explicitAgents) = %d, want 1", len(explicit))
-	}
-	if explicit[0].Name != "mayor" {
-		t.Errorf("explicitAgents[0].Name = %q, want %q", explicit[0].Name, "mayor")
+	if len(explicit) != 0 {
+		t.Fatalf("len(explicitAgents) = %d, want 0", len(explicit))
 	}
 }
 
@@ -3571,13 +3616,18 @@ func TestDoInitWithClaudeProviderLeavesWorkspaceHooksEmpty(t *testing.T) {
 }
 
 func TestInitWizardConfigRejectsUnknownProvider(t *testing.T) {
-	if _, err := initWizardConfig("not-a-provider", "", ""); err == nil {
+	if _, err := initWizardConfig("not-a-provider", ""); err == nil {
 		t.Fatal("expected error for unknown provider")
 	}
 }
 
-func TestInitWizardConfigRejectsUnknownTemplate(t *testing.T) {
-	if _, err := initWizardConfig("claude", "", "not-a-template"); err == nil {
+func TestInitWizardConfigFromFlagsRejectsUnknownTemplate(t *testing.T) {
+	cmd := newInitCmd(io.Discard, io.Discard)
+	if err := cmd.Flags().Set("template", "not-a-template"); err != nil {
+		t.Fatal(err)
+	}
+	template, _ := cmd.Flags().GetString("template")
+	if _, _, err := initWizardConfigFromFlags(cmd, "", "", nil, template, ""); err == nil {
 		t.Fatal("expected error for unknown template")
 	}
 }
@@ -3589,7 +3639,7 @@ func TestCmdInitTemplateFlagSelectsGastown(t *testing.T) {
 
 	cityPath := filepath.Join(t.TempDir(), "bright-lights")
 	var stdout, stderr bytes.Buffer
-	code := run([]string{"init", "--template", "gastown", "--provider", "claude", "--skip-provider-readiness", cityPath}, &stdout, &stderr)
+	code := run([]string{"init", "--template", "gastown", "--default-provider", "claude", "--skip-provider-readiness", cityPath}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("run init --template gastown = %d; stderr=%q stdout=%q", code, stderr.String(), stdout.String())
 	}
@@ -3605,6 +3655,9 @@ func TestCmdInitTemplateFlagSelectsGastown(t *testing.T) {
 	if cfg.Workspace.Provider != "claude" {
 		t.Errorf("Workspace.Provider = %q, want claude", cfg.Workspace.Provider)
 	}
+	if _, ok := cfg.Providers["claude"]; !ok {
+		t.Fatalf("Providers = %v, want explicit claude alias", cfg.Providers)
+	}
 	if _, ok := cfg.Defaults.Rig.Imports["gastown"]; !ok {
 		t.Fatalf("Defaults.Rig.Imports = %v, want gastown import", cfg.Defaults.Rig.Imports)
 	}
@@ -3617,8 +3670,96 @@ func TestCmdInitTemplateFlagSelectsGastown(t *testing.T) {
 	}
 }
 
+func TestInitWizardConfigFromFlagsDefaultProviderInfersProviders(t *testing.T) {
+	cmd := newInitCmd(io.Discard, io.Discard)
+	if err := cmd.Flags().Set("default-provider", "codex"); err != nil {
+		t.Fatal(err)
+	}
+	defaultProvider, _ := cmd.Flags().GetString("default-provider")
+	wiz, mode, err := initWizardConfigFromFlags(cmd, "", defaultProvider, nil, "", "")
+	if err != nil {
+		t.Fatalf("initWizardConfigFromFlags: %v", err)
+	}
+	if mode != "provider" {
+		t.Fatalf("mode = %q, want provider", mode)
+	}
+	if wiz.defaultProvider != "codex" || len(wiz.providers) != 1 || wiz.providers[0] != "codex" {
+		t.Fatalf("wizard providers = default %q providers %v, want codex/[codex]", wiz.defaultProvider, wiz.providers)
+	}
+}
+
+func TestInitWizardConfigFromFlagsProvidersCanonicalOrder(t *testing.T) {
+	cmd := newInitCmd(io.Discard, io.Discard)
+	if err := cmd.Flags().Set("providers", "gemini,codex"); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Flags().Set("providers", "claude"); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Flags().Set("default-provider", "codex"); err != nil {
+		t.Fatal(err)
+	}
+	defaultProvider, _ := cmd.Flags().GetString("default-provider")
+	providers, _ := cmd.Flags().GetStringArray("providers")
+	wiz, _, err := initWizardConfigFromFlags(cmd, "", defaultProvider, providers, "", "")
+	if err != nil {
+		t.Fatalf("initWizardConfigFromFlags: %v", err)
+	}
+	if got := strings.Join(wiz.providers, ","); got != "claude,codex,gemini" {
+		t.Fatalf("providers = %v, want canonical readiness order", wiz.providers)
+	}
+}
+
+func TestInitWizardConfigFromFlagsProvidersRequireDefault(t *testing.T) {
+	cmd := newInitCmd(io.Discard, io.Discard)
+	if err := cmd.Flags().Set("providers", "claude,codex"); err != nil {
+		t.Fatal(err)
+	}
+	providers, _ := cmd.Flags().GetStringArray("providers")
+	if _, _, err := initWizardConfigFromFlags(cmd, "", "", providers, "", ""); err == nil {
+		t.Fatal("expected --providers without --default-provider to fail")
+	}
+}
+
+func TestInitWizardConfigFromFlagsRejectsProviderListTypo(t *testing.T) {
+	cmd := newInitCmd(io.Discard, io.Discard)
+	if err := cmd.Flags().Set("provider", "claude,codex"); err != nil {
+		t.Fatal(err)
+	}
+	provider, _ := cmd.Flags().GetString("provider")
+	_, _, err := initWizardConfigFromFlags(cmd, provider, "", nil, "", "")
+	if err == nil {
+		t.Fatal("expected deprecated --provider list typo to fail")
+	}
+	if !strings.Contains(err.Error(), "--providers claude,codex --default-provider") {
+		t.Fatalf("error = %v, want targeted --providers guidance", err)
+	}
+}
+
+func TestInitWizardConfigFromFlagsTemplateCustomRejectsProviders(t *testing.T) {
+	cmd := newInitCmd(io.Discard, io.Discard)
+	if err := cmd.Flags().Set("template", "custom"); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Flags().Set("default-provider", "claude"); err != nil {
+		t.Fatal(err)
+	}
+	template, _ := cmd.Flags().GetString("template")
+	defaultProvider, _ := cmd.Flags().GetString("default-provider")
+	if _, _, err := initWizardConfigFromFlags(cmd, "", defaultProvider, nil, template, ""); err == nil {
+		t.Fatal("expected --template custom with provider flags to fail")
+	}
+}
+
+func TestInitProviderFlagIsHidden(t *testing.T) {
+	cmd := newInitCmd(io.Discard, io.Discard)
+	if flag := cmd.Flags().Lookup("provider"); flag == nil || !flag.Hidden {
+		t.Fatalf("--provider hidden = %v, want true", flag != nil && flag.Hidden)
+	}
+}
+
 func TestInitWizardConfigNormalizesBootstrapAliases(t *testing.T) {
-	wiz, err := initWizardConfig("codex", "kubernetes", "")
+	wiz, err := initWizardConfig("codex", "kubernetes")
 	if err != nil {
 		t.Fatalf("initWizardConfig returned error: %v", err)
 	}
@@ -3643,7 +3784,7 @@ func TestCmdInitFromTOMLFileSuccess(t *testing.T) {
 	}
 
 	src := filepath.Join(dir, "my-config.toml")
-	tomlContent := []byte(`[workspace]
+	tomlContent := []byte(withBuiltinProviderAliasesTOMLForTest(`[workspace]
 name = "placeholder"
 provider = "claude"
 
@@ -3656,7 +3797,7 @@ name = "worker"
 min_active_sessions = 0
 max_active_sessions = 5
 scale_check = "echo 3"
-`)
+`, "claude"))
 	if err := os.WriteFile(src, tomlContent, 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -3880,7 +4021,7 @@ func TestCmdInitFromTOMLFilePreservesExistingFiles(t *testing.T) {
 	}
 
 	preExistingPack := []byte("[pack]\nname = \"user-authored\"\nschema = 2\nversion = \"9.9.9\"\n")
-	preExistingCity := []byte("[workspace]\nname = \"user-authored\"\nprovider = \"claude\"\n")
+	preExistingCity := []byte(withBuiltinProviderAliasesTOMLForTest("[workspace]\nname = \"user-authored\"\nprovider = \"claude\"\n", "claude"))
 	preExistingPrompt := []byte("user-authored mayor prompt\n")
 	for _, f := range []struct {
 		path string
@@ -3897,7 +4038,7 @@ func TestCmdInitFromTOMLFilePreservesExistingFiles(t *testing.T) {
 
 	src := filepath.Join(dir, "config.toml")
 	if err := os.WriteFile(src,
-		[]byte("[workspace]\nname = \"from-template\"\nprovider = \"claude\"\n\n[[agent]]\nname = \"mayor\"\nprompt_template = \"prompts/mayor.md\"\n"),
+		[]byte(withBuiltinProviderAliasesTOMLForTest("[workspace]\nname = \"from-template\"\nprovider = \"claude\"\n\n[[agent]]\nname = \"mayor\"\nprompt_template = \"prompts/mayor.md\"\n", "claude")),
 		0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -3943,12 +4084,12 @@ func TestCmdInitFromTOMLFilePreserveExistingLeavesRigSiteBindings(t *testing.T) 
 	}
 
 	preExistingPack := []byte("[pack]\nname = \"user-authored\"\nschema = 2\n")
-	preExistingCity := []byte(`[workspace]
+	preExistingCity := []byte(withBuiltinProviderAliasesTOMLForTest(`[workspace]
 provider = "claude"
 
 [[rigs]]
 name = "backend"
-`)
+`, "claude"))
 	preExistingSite := []byte(`[[rig]]
 name = "backend"
 path = "/existing/backend"
@@ -3968,14 +4109,14 @@ path = "/existing/backend"
 
 	src := filepath.Join(dir, "config.toml")
 	if err := os.WriteFile(src,
-		[]byte(`[workspace]
+		[]byte(withBuiltinProviderAliasesTOMLForTest(`[workspace]
 name = "from-template"
 provider = "claude"
 
 [[rigs]]
 name = "frontend"
 path = "/template/frontend"
-`),
+`, "claude")),
 		0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -4110,7 +4251,7 @@ func TestCmdInitFromFileWithOptionsUsesCWDWhenArgsEmpty(t *testing.T) {
 
 	src := filepath.Join(dir, "config.toml")
 	if err := os.WriteFile(src,
-		[]byte("[workspace]\nname = \"from-template\"\nprovider = \"claude\"\n"),
+		[]byte(withBuiltinProviderAliasesTOMLForTest("[workspace]\nname = \"from-template\"\nprovider = \"claude\"\n", "claude")),
 		0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -4174,7 +4315,7 @@ func TestDoInitFromDirSuccess(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(srcDir, "city.toml"),
-		[]byte("[workspace]\nname = \"template\"\nprovider = \"claude\"\n"), 0o644); err != nil {
+		[]byte("[workspace]\nname = \"template\"\nprovider = \"claude\"\n\n[providers.claude]\nbase = \"builtin:claude\"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(srcDir, "pack.toml"),
@@ -4273,7 +4414,7 @@ func TestDoInitFromDirMaterializesPackOverlayClaudeSettings(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(srcDir, "city.toml"),
-		[]byte("[workspace]\nname = \"template\"\nprovider = \"claude\"\n"), 0o644); err != nil {
+		[]byte("[workspace]\nname = \"template\"\nprovider = \"claude\"\n\n[providers.claude]\nbase = \"builtin:claude\"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(srcDir, "pack.toml"),
@@ -4366,7 +4507,7 @@ func TestInitNameFlagWithFrom(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(srcDir, "city.toml"),
-		[]byte("[workspace]\nname = \"template\"\nprovider = \"claude\"\n"), 0o644); err != nil {
+		[]byte(withBuiltinProviderAliasesTOMLForTest("[workspace]\nname = \"template\"\nprovider = \"claude\"\n", "claude")), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(srcDir, "pack.toml"),
@@ -4425,7 +4566,7 @@ func TestInitNameFlagWithFile(t *testing.T) {
 
 	tomlFile := filepath.Join(dir, "city.toml")
 	if err := os.WriteFile(tomlFile,
-		[]byte("[workspace]\nname = \"original\"\nprovider = \"claude\"\n\n[[agent]]\nname = \"mayor\"\nprompt_template = \"prompts/mayor.md\"\n"), 0o644); err != nil {
+		[]byte(withBuiltinProviderAliasesTOMLForTest("[workspace]\nname = \"original\"\nprovider = \"claude\"\n\n[[agent]]\nname = \"mayor\"\nprompt_template = \"prompts/mayor.md\"\n", "claude")), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -4496,7 +4637,7 @@ func TestInitFromDefaultsToTargetDirBasename(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(srcDir, "city.toml"),
-		[]byte("[workspace]\nname = \"template\"\nprovider = \"claude\"\n"), 0o644); err != nil {
+		[]byte(withBuiltinProviderAliasesTOMLForTest("[workspace]\nname = \"template\"\nprovider = \"claude\"\n", "claude")), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(srcDir, "pack.toml"),
@@ -4560,7 +4701,7 @@ func TestInitFromCopiesDefaultRigImportsToCityToml(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(srcDir, "city.toml"),
-		[]byte(`[workspace]
+		[]byte(withBuiltinProviderAliasesTOMLForTest(`[workspace]
 provider = "claude"
 
 [defaults.rig.imports.zeta]
@@ -4568,7 +4709,7 @@ source = "./packs/zeta"
 
 [defaults.rig.imports.alpha]
 source = "./packs/alpha"
-`), 0o644); err != nil {
+`, "claude")), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(srcDir, "pack.toml"), []byte(`[pack]
@@ -4618,7 +4759,7 @@ func TestInitFilePreservesDefaultRigImportsInCityToml(t *testing.T) {
 
 	dir := t.TempDir()
 	src := filepath.Join(dir, "source.toml")
-	if err := os.WriteFile(src, []byte(`[workspace]
+	if err := os.WriteFile(src, []byte(withBuiltinProviderAliasesTOMLForTest(`[workspace]
 provider = "claude"
 
 [defaults.rig.imports.zeta]
@@ -4626,7 +4767,7 @@ source = "./packs/zeta"
 
 [defaults.rig.imports.alpha]
 source = "./packs/alpha"
-`), 0o644); err != nil {
+`, "claude")), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -4665,7 +4806,7 @@ func TestInitFileKeepsCityOnlyPatchesOutOfPackToml(t *testing.T) {
 
 	dir := t.TempDir()
 	src := filepath.Join(dir, "source.toml")
-	if err := os.WriteFile(src, []byte(`[workspace]
+	if err := os.WriteFile(src, []byte(withBuiltinProviderAliasesTOMLForTest(`[workspace]
 provider = "claude"
 
 [providers.local]
@@ -4690,7 +4831,7 @@ prefix = "ga"
 [[patches.providers]]
 name = "local"
 command = "false"
-`), 0o644); err != nil {
+`, "claude")), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -4766,12 +4907,12 @@ func TestInitFromCopiesLegacyAgentDefaultsAliasToCityToml(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(srcDir, "city.toml"),
-		[]byte(`[workspace]
+		[]byte(withBuiltinProviderAliasesTOMLForTest(`[workspace]
 provider = "claude"
 
 [agents]
 append_fragments = ["legacy-footer"]
-`), 0o644); err != nil {
+`, "claude")), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(srcDir, "pack.toml"), []byte(`[pack]
@@ -4817,7 +4958,7 @@ func TestInitFromWithoutPackTomlPreservesLegacyWorkspaceIdentity(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(srcDir, "city.toml"),
-		[]byte("[workspace]\nname = \"template\"\nprovider = \"claude\"\n"), 0o644); err != nil {
+		[]byte(withBuiltinProviderAliasesTOMLForTest("[workspace]\nname = \"template\"\nprovider = \"claude\"\n", "claude")), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -6803,6 +6944,9 @@ func TestDoPrimeGeminiHookPersistsProviderSessionKey(t *testing.T) {
 name = "test-city"
 provider = "gemini"
 
+[providers.gemini]
+base = "builtin:gemini"
+
 [[agent]]
 name = "probe"
 prompt_template = "prompts/probe.md"
@@ -6877,6 +7021,10 @@ func TestDoPrimeHookPersistsGenericProviderSessionKey(t *testing.T) {
 	toml := `[workspace]
 name = "test-city"
 provider = "omp"
+
+[providers.omp]
+command = "omp"
+prompt_mode = "none"
 
 [[agent]]
 name = "probe"

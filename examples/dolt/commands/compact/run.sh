@@ -474,6 +474,14 @@ discover_database_names() {
       emit_database_name "$db"
     done
   fi
+
+  if [ -n "$only_dbs" ]; then
+    printf '%s\n' "$only_dbs" | tr ',' '\n' | while IFS= read -r db; do
+      db=$(printf '%s' "$db" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+      [ -n "$db" ] || continue
+      emit_database_name "$db"
+    done
+  fi
 }
 
 # dolt_query — wrapper that runs a single SQL statement against the
@@ -1118,6 +1126,72 @@ ensure_remote_push_retry_fresh() {
   return 0
 }
 
+recover_legacy_pending_push_contract() {
+  db="$1"
+
+  legacy_remote=$(select_remote "$db") || return 1
+  if [ -z "$legacy_remote" ]; then
+    printf 'compact: db=%s legacy pending_push marker recovery found no remote — manual intervention required\n' \
+      "$db" >&2
+    return 1
+  fi
+  valid_remote_name "$legacy_remote" || {
+    printf 'compact: db=%s legacy pending_push marker recovery found invalid remote=%s — manual intervention required\n' \
+      "$db" "$legacy_remote" >&2
+    return 1
+  }
+
+  legacy_active=$(query_single_cell "$db" "active branch probe failed" "SELECT active_branch()" 2>/dev/null || true)
+  if [ -z "$legacy_active" ] || ! valid_branch_name "$legacy_active"; then
+    printf 'compact: db=%s legacy pending_push marker recovery requires resolved active branch — manual intervention required\n' \
+      "$db" >&2
+    return 1
+  fi
+
+  legacy_override=$(refspec_env_value "$db") || return 1
+  if [ -n "$legacy_override" ]; then
+    legacy_parts=$(refspec_parts "$legacy_override") || {
+      printf 'compact: db=%s legacy pending_push marker recovery found invalid refspec override=%s — manual intervention required\n' \
+        "$db" "$legacy_override" >&2
+      return 1
+    }
+    legacy_local_branch=$(printf '%s\n' "$legacy_parts" | sed -n '1p')
+    legacy_remote_branch=$(printf '%s\n' "$legacy_parts" | sed -n '2p')
+    if [ "$legacy_local_branch" != "$legacy_active" ]; then
+      printf 'compact: db=%s legacy pending_push marker recovery local branch=%s does not match active branch=%s — manual intervention required\n' \
+        "$db" "$legacy_local_branch" "$legacy_active" >&2
+      return 1
+    fi
+  else
+    legacy_local_branch="$legacy_active"
+    legacy_remote_branch="$legacy_active"
+  fi
+
+  legacy_remote_head=$(remote_branch_head "$db" "$legacy_remote" "$legacy_remote_branch") || return 1
+  if [ -z "$legacy_remote_head" ]; then
+    printf 'compact: db=%s legacy pending_push marker recovery requires non-empty remote HEAD — manual intervention required\n' \
+      "$db" >&2
+    return 1
+  fi
+  case "$legacy_remote_head" in
+    *[!A-Za-z0-9]*)
+      printf 'compact: db=%s legacy pending_push marker recovery found invalid remote HEAD=%s — manual intervention required\n' \
+        "$db" "$legacy_remote_head" >&2
+      return 1
+      ;;
+  esac
+
+  legacy_in_local=$(commit_exists_in_local_log "$db" "$legacy_remote_head") || return 1
+  if [ "$legacy_in_local" != "1" ]; then
+    printf 'compact: db=%s legacy pending_push marker recovery requires remote HEAD=%s in local history; got=%s — manual intervention required\n' \
+      "$db" "$legacy_remote_head" "${legacy_in_local:-<empty>}" >&2
+    return 1
+  fi
+
+  printf '%s\n%s\n%s\n%s\n' "$legacy_remote" "$legacy_local_branch" "$legacy_remote_branch" "$legacy_remote_head"
+  return 0
+}
+
 clear_compact_marker() {
   dir="$1"
   db="$2"
@@ -1490,10 +1564,7 @@ flatten_database() {
   fi
 
   if has_compact_marker "$pending_push_dir" "$db"; then
-    if [ -n "$dry_run" ]; then
-      printf 'compact: db=%s pending_push=present — dry-run (would retry remote push)\n' "$db"
-      return 0
-    fi
+    legacy_pending_push_recovered=0
     pending_remote=$(compact_marker_value "$pending_push_dir" "$db" remote || true)
     pending_expected_remote_head=$(compact_marker_value "$pending_push_dir" "$db" expected_remote_head || true)
     pending_expected_remote_head_verified=$(compact_marker_value "$pending_push_dir" "$db" expected_remote_head_verified || true)
@@ -1503,9 +1574,16 @@ flatten_database() {
     [ -n "$pending_local_branch" ] || pending_local_branch="main"
     [ -n "$pending_remote_branch" ] || pending_remote_branch="$pending_local_branch"
     if [ -z "$pending_remote" ]; then
-      printf 'compact: db=%s pending_push marker is missing remote — manual intervention required\n' \
-        "$db" >&2
-      return 1
+      legacy_contract=$(recover_legacy_pending_push_contract "$db") || return 1
+      pending_remote=$(printf '%s\n' "$legacy_contract" | sed -n '1p')
+      pending_local_branch=$(printf '%s\n' "$legacy_contract" | sed -n '2p')
+      pending_remote_branch=$(printf '%s\n' "$legacy_contract" | sed -n '3p')
+      pending_expected_remote_head=$(printf '%s\n' "$legacy_contract" | sed -n '4p')
+      pending_expected_remote_head_verified=1
+      pending_compacted_from_head=""
+      legacy_pending_push_recovered=1
+      printf 'compact: db=%s legacy pending_push marker recovered remote=%s local_branch=%s remote_branch=%s expected_remote_head=%s — retrying with live remote verification\n' \
+        "$db" "$pending_remote" "$pending_local_branch" "$pending_remote_branch" "$pending_expected_remote_head"
     fi
     if ! valid_branch_name "$pending_local_branch"; then
       printf 'compact: db=%s pending_push marker has invalid local_branch=%s — manual intervention required\n' \
@@ -1549,7 +1627,13 @@ flatten_database() {
           ;;
       esac
     fi
-    ensure_remote_push_retry_fresh "$pending_push_dir" "$db" "pending_push" || return 1
+    if [ "$legacy_pending_push_recovered" != "1" ]; then
+      ensure_remote_push_retry_fresh "$pending_push_dir" "$db" "pending_push" || return 1
+    fi
+    if [ -n "$dry_run" ]; then
+      printf 'compact: db=%s pending_push=present — dry-run (would retry remote push)\n' "$db"
+      return 0
+    fi
     printf 'compact: db=%s pending_push=present — retrying remote push before threshold check\n' "$db"
     push_remote_after_compaction "$db" "$pending_remote" "$pending_expected_remote_head" "${pending_expected_remote_head_verified:-0}" "retry" "$pending_compacted_from_head" "$pending_local_branch" "$pending_remote_branch"
     return $?

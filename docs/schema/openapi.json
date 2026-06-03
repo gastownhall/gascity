@@ -6969,6 +6969,14 @@
             "$ref": "#/components/schemas/BeadsDiagnostic",
             "description": "Bead store selection diagnostic. Omitted when unavailable."
           },
+          "beads_version": {
+            "description": "Version of the bd (beads) CLI the supervisor drives. Omitted when the probe failed or the binary is unavailable.",
+            "type": "string"
+          },
+          "dolt_version": {
+            "description": "Version of the dolt engine binary the supervisor drives. Omitted when the probe failed or the binary is unavailable.",
+            "type": "string"
+          },
           "mail": {
             "$ref": "#/components/schemas/StatusMailCounts",
             "description": "Mail counts."
@@ -7632,6 +7640,7 @@
             "request.result.session.create": "#/components/schemas/TypedEventStreamEnvelopeRequestResultSessionCreate",
             "request.result.session.message": "#/components/schemas/TypedEventStreamEnvelopeRequestResultSessionMessage",
             "request.result.session.submit": "#/components/schemas/TypedEventStreamEnvelopeRequestResultSessionSubmit",
+            "session.cold_start_timeout": "#/components/schemas/TypedEventStreamEnvelopeSessionColdStartTimeout",
             "session.crashed": "#/components/schemas/TypedEventStreamEnvelopeSessionCrashed",
             "session.drain_acked_with_assigned_work": "#/components/schemas/TypedEventStreamEnvelopeSessionDrainAckedWithAssignedWork",
             "session.draining": "#/components/schemas/TypedEventStreamEnvelopeSessionDraining",
@@ -7775,6 +7784,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeRequestResultSessionSubmit"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeSessionColdStartTimeout"
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeSessionCrashed"
@@ -8376,6 +8388,7 @@
                 "session.stranded",
                 "session.reset_stalled",
                 "session.work_query_failed",
+                "session.cold_start_timeout",
                 "bead.created",
                 "bead.closed",
                 "bead.deleted",
@@ -9656,6 +9669,48 @@
         "title": "TypedEventStreamEnvelope request.result.session.submit",
         "type": "object"
       },
+      "TypedEventStreamEnvelopeSessionColdStartTimeout": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/NoPayload"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "session.cold_start_timeout",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope session.cold_start_timeout",
+        "type": "object"
+      },
       "TypedEventStreamEnvelopeSessionCrashed": {
         "additionalProperties": false,
         "properties": {
@@ -10415,6 +10470,7 @@
             "request.result.session.create": "#/components/schemas/TypedTaggedEventStreamEnvelopeRequestResultSessionCreate",
             "request.result.session.message": "#/components/schemas/TypedTaggedEventStreamEnvelopeRequestResultSessionMessage",
             "request.result.session.submit": "#/components/schemas/TypedTaggedEventStreamEnvelopeRequestResultSessionSubmit",
+            "session.cold_start_timeout": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionColdStartTimeout",
             "session.crashed": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionCrashed",
             "session.drain_acked_with_assigned_work": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionDrainAckedWithAssignedWork",
             "session.draining": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionDraining",
@@ -10558,6 +10614,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeRequestResultSessionSubmit"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionColdStartTimeout"
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionCrashed"
@@ -11210,6 +11269,7 @@
                 "session.stranded",
                 "session.reset_stalled",
                 "session.work_query_failed",
+                "session.cold_start_timeout",
                 "bead.created",
                 "bead.closed",
                 "bead.deleted",
@@ -12605,6 +12665,52 @@
           "city"
         ],
         "title": "TypedTaggedEventStreamEnvelope request.result.session.submit",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopeSessionColdStartTimeout": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/NoPayload"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "session.cold_start_timeout",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope session.cold_start_timeout",
         "type": "object"
       },
       "TypedTaggedEventStreamEnvelopeSessionCrashed": {
@@ -16578,6 +16684,73 @@
         "summary": "Get v0 city by city name config"
       }
     },
+    "/v0/city/{cityName}/config/defaults": {
+      "get": {
+        "operationId": "get-v0-city-by-city-name-config-defaults",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConfigResponse"
+                }
+              }
+            },
+            "description": "OK",
+            "headers": {
+              "X-GC-Cache-Age-S": {
+                "schema": {
+                  "description": "Age in seconds of the CachingStore snapshot that served this response (0 if not applicable).",
+                  "format": "double",
+                  "type": "number"
+                }
+              },
+              "X-GC-Index": {
+                "schema": {
+                  "description": "Latest event sequence number.",
+                  "format": "int64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          }
+        },
+        "summary": "Get v0 city by city name config defaults"
+      }
+    },
     "/v0/city/{cityName}/config/explain": {
       "get": {
         "operationId": "get-v0-city-by-city-name-config-explain",
@@ -18664,6 +18837,42 @@
             "name": "kind",
             "schema": {
               "description": "Conversation kind.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Return entries with sequence greater than this cursor (default 0).",
+            "explode": false,
+            "in": "query",
+            "name": "after_sequence",
+            "schema": {
+              "description": "Return entries with sequence greater than this cursor (default 0).",
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Maximum number of entries to return (default 100, max 500).",
+            "explode": false,
+            "in": "query",
+            "name": "limit",
+            "schema": {
+              "description": "Maximum number of entries to return (default 100, max 500).",
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Sort order by sequence: asc (oldest-first, default) or desc (newest-first).",
+            "explode": false,
+            "in": "query",
+            "name": "order",
+            "schema": {
+              "description": "Sort order by sequence: asc (oldest-first, default) or desc (newest-first).",
+              "enum": [
+                "asc",
+                "desc"
+              ],
               "type": "string"
             }
           }

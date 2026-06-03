@@ -237,6 +237,36 @@ func TestClassifyRetryAttemptWithPostconditionsRequiresArtifact(t *testing.T) {
 	}
 }
 
+func TestClassifyRetryAttemptWithPostconditionsRejectsArtifactSymlinkOutsideWorktree(t *testing.T) {
+	t.Parallel()
+
+	worktree := t.TempDir()
+	outsideDir := t.TempDir()
+	outsidePath := filepath.Join(outsideDir, "outside.md")
+	if err := os.WriteFile(outsidePath, []byte("outside review\n"), 0o644); err != nil {
+		t.Fatalf("write outside artifact: %v", err)
+	}
+	linkPath := filepath.Join(worktree, "codex-review.md")
+	if err := os.Symlink(outsidePath, linkPath); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	got, err := classifyRetryAttemptWithPostconditions(beads.NewMemStore(), beads.Bead{
+		Metadata: map[string]string{
+			"gc.outcome":           "pass",
+			"gc.required_artifact": "codex-review.md",
+			"work_dir":             worktree,
+		},
+	}, ProcessOptions{})
+	if err != nil {
+		t.Fatalf("classifyRetryAttemptWithPostconditions error = %v, want nil", err)
+	}
+	want := retryEvalResult{Outcome: "transient", Reason: "required_artifact_outside_worktree"}
+	if got != want {
+		t.Fatalf("classifyRetryAttemptWithPostconditions() = %+v, want %+v", got, want)
+	}
+}
+
 func TestClassifyRetryAttemptWithPostconditionsResolvesReviewArtifactTemplate(t *testing.T) {
 	t.Parallel()
 
@@ -309,6 +339,39 @@ func TestClassifyRetryAttemptWithPostconditionsSurfacesRequiredArtifactStoreErro
 	}, ProcessOptions{})
 	if !errors.Is(err, backendErr) {
 		t.Fatalf("classifyRetryAttemptWithPostconditions error = %v, want backend error", err)
+	}
+}
+
+func TestClassifyRetryAttemptWithPostconditionsStoreErrorIsTransientControllerError(t *testing.T) {
+	t.Parallel()
+
+	base := beads.NewMemStore()
+	root := mustCreateWorkflowBead(t, base, beads.Bead{
+		Title: "workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind": "workflow",
+		},
+	})
+	backendErr := errors.New("backend store unavailable")
+	store := failGetStore{
+		Store:  base,
+		failID: root.ID,
+		err:    backendErr,
+	}
+
+	_, err := classifyRetryAttemptWithPostconditions(store, beads.Bead{
+		Metadata: map[string]string{
+			"gc.outcome":           "pass",
+			"gc.root_bead_id":      root.ID,
+			"gc.required_artifact": "codex-review.md",
+		},
+	}, ProcessOptions{})
+	if !errors.Is(err, backendErr) {
+		t.Fatalf("classifyRetryAttemptWithPostconditions error = %v, want backend error", err)
+	}
+	if !IsTransientControllerError(err) {
+		t.Fatalf("IsTransientControllerError(%v) = false, want true", err)
 	}
 }
 

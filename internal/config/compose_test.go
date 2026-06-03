@@ -125,6 +125,60 @@ command = "bad"
 	}
 }
 
+func TestLoadWithIncludes_MissingExplicitProviderReferenceFails(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/city.toml"] = []byte(`
+[workspace]
+provider = "claude"
+
+[[agent]]
+name = "worker"
+provider = "codex"
+`)
+	_, _, err := LoadWithIncludes(fs, "/city/city.toml")
+	if err == nil {
+		t.Fatal("expected LoadWithIncludes to fail for missing explicit provider references")
+	}
+	msg := err.Error()
+	for _, want := range []string{
+		`provider catalog is missing referenced providers`,
+		`workspace.provider "claude": add [providers.claude] base = "builtin:claude"`,
+		`agent "worker": provider "codex": add [providers.codex] base = "builtin:codex"`,
+		`gc doctor --fix`,
+	} {
+		if !strings.Contains(msg, want) {
+			t.Fatalf("error = %q, missing %q", msg, want)
+		}
+	}
+}
+
+func TestLoadWithIncludes_ImportedProviderSatisfiesReference(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/city.toml"] = []byte(`
+[workspace]
+provider = "claude"
+
+[imports.local]
+source = "packs/local"
+`)
+	fs.Files["/city/packs/local/pack.toml"] = []byte(`
+[pack]
+name = "local"
+schema = 2
+
+[providers.claude]
+base = "builtin:claude"
+`)
+
+	cfg, _, err := LoadWithIncludes(fs, "/city/city.toml")
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+	if _, ok := cfg.Providers["claude"]; !ok {
+		t.Fatalf("imported provider missing from composed config: %v", cfg.Providers)
+	}
+}
+
 func TestLoadWithIncludes_RootPackDefaultRigImportsPreserveOrder(t *testing.T) {
 	fs := fsys.NewFake()
 	fs.Files["/city/city.toml"] = []byte(`
@@ -689,6 +743,12 @@ include = ["ws.toml"]
 [workspace]
 name = "bright-lights"
 provider = "claude"
+
+[providers.claude]
+base = "builtin:claude"
+
+[providers.gemini]
+base = "builtin:gemini"
 `)
 	fs.Files["/city/ws.toml"] = []byte(`
 [workspace]
@@ -892,6 +952,9 @@ func TestLoadWithIncludes_WorkspaceProvenanceTracking(t *testing.T) {
 [workspace]
 name = "test"
 provider = "claude"
+
+[providers.claude]
+base = "builtin:claude"
 `)
 	_, prov, err := LoadWithIncludes(fs, "/city/city.toml")
 	if err != nil {
@@ -2164,6 +2227,9 @@ func TestPopulateAgentLocalAssetDirsForDeclaredAgent(t *testing.T) {
 [workspace]
 name = "test"
 provider = "claude"
+
+[providers.claude]
+base = "builtin:claude"
 
 [[agent]]
 name = "mayor"

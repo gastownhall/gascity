@@ -88,6 +88,25 @@ func (c *CachingStore) ApplyEvent(eventType string, payload json.RawMessage) {
 			return
 		}
 		if !matchesBacking {
+			// A field-changing event that could not be confirmed against the
+			// backing store is either genuinely stale, or real but not yet
+			// visible to this process's backing read — a write-through race
+			// after a cross-process gc sling/kickoff stamps gc.routed_to or
+			// claims the bead. Dropping it outright leaves a stale cached row
+			// that CachedReady still serves with ok=true, so the demand path
+			// counts the bead off the stale row and strands it (no routed_to /
+			// wrong status) until the next full reconcile
+			// (gastownhall/gascity#2927). Mark the bead dirty so the cached
+			// ready model declines for it and the demand path falls back to the
+			// authoritative ReadyLive query; reconciliation clears the flag once
+			// cache and backing reconverge. A dependency-only conflict is left
+			// untouched: dependency snapshots routinely arrive ahead of the
+			// backing and are intentionally tolerated without declining.
+			if fieldConflictCached {
+				c.mu.Lock()
+				c.dirty[patch.ID] = struct{}{}
+				c.mu.Unlock()
+			}
 			return
 		}
 		verifiedRecentLocal = true

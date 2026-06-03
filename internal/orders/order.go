@@ -24,6 +24,11 @@ type Order struct {
 	// Exec is a shell command run directly by the controller, bypassing
 	// the agent pipeline. Mutually exclusive with Formula.
 	Exec string `toml:"exec,omitempty"`
+	// Scope controls how the order is instantiated during pack expansion:
+	// "city" registers the order exactly once regardless of how many rigs
+	// import the pack; "rig" (the default when empty) registers it once per
+	// importing rig. Mirrors [[named_session]].scope.
+	Scope string `toml:"scope,omitempty"`
 	// Trigger is the order scheduler selector: "cooldown", "cron",
 	// "condition", "event", or "manual". This is distinct from the
 	// separate "gate" concepts used elsewhere in the system.
@@ -73,6 +78,7 @@ type orderDecode struct {
 	Description string            `toml:"description,omitempty"`
 	Formula     string            `toml:"formula,omitempty"`
 	Exec        string            `toml:"exec,omitempty"`
+	Scope       string            `toml:"scope,omitempty"`
 	Trigger     string            `toml:"trigger,omitempty"`
 	Gate        string            `toml:"gate,omitempty"`
 	Interval    string            `toml:"interval,omitempty"`
@@ -94,6 +100,7 @@ func (d orderDecode) normalized() Order {
 		Description: d.Description,
 		Formula:     d.Formula,
 		Exec:        d.Exec,
+		Scope:       d.Scope,
 		Trigger:     trigger,
 		Interval:    d.Interval,
 		Schedule:    d.Schedule,
@@ -123,6 +130,13 @@ func (a *Order) IsEnabled() bool {
 // rather than formula (wisp) dispatch.
 func (a *Order) IsExec() bool {
 	return a.Exec != ""
+}
+
+// IsCityScoped reports whether the order is city-scoped, i.e. instantiated
+// exactly once during pack expansion regardless of how many rigs import the
+// pack. The default (empty Scope) is rig-scoped.
+func (a *Order) IsCityScoped() bool {
+	return a.Scope == "city"
 }
 
 // TimeoutOrDefault returns the order's configured timeout, or the
@@ -171,6 +185,12 @@ func Validate(a Order) error {
 		if strings.Contains(key, "=") {
 			return fmt.Errorf("order %q: invalid env key %q: must not contain '='", a.Name, key)
 		}
+	}
+	// Scope, if set, must be a known value. Empty defaults to rig-scoped.
+	switch a.Scope {
+	case "", "city", "rig":
+	default:
+		return fmt.Errorf("order %q: unknown scope %q (want \"city\" or \"rig\")", a.Name, a.Scope)
 	}
 	// Validate timeout if set.
 	if a.Timeout != "" {

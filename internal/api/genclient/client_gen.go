@@ -276,6 +276,24 @@ func (e GetV0CityByCityNameAgentsParamsRunning) Valid() bool {
 	}
 }
 
+// Defines values for GetV0CityByCityNameExtmsgTranscriptParamsOrder.
+const (
+	Asc  GetV0CityByCityNameExtmsgTranscriptParamsOrder = "asc"
+	Desc GetV0CityByCityNameExtmsgTranscriptParamsOrder = "desc"
+)
+
+// Valid indicates whether the value is a known member of the GetV0CityByCityNameExtmsgTranscriptParamsOrder enum.
+func (e GetV0CityByCityNameExtmsgTranscriptParamsOrder) Valid() bool {
+	switch e {
+	case Asc:
+		return true
+	case Desc:
+		return true
+	default:
+		return false
+	}
+}
+
 // AdapterCapabilities defines model for AdapterCapabilities.
 type AdapterCapabilities struct {
 	MaxMessageLength           int64 `json:"MaxMessageLength"`
@@ -2826,7 +2844,13 @@ type StatusBody struct {
 	AgentDetails *[]StatusAgentDetail `json:"agent_details,omitempty"`
 	Agents       StatusAgentCounts    `json:"agents"`
 	Beads        *BeadsDiagnostic     `json:"beads,omitempty"`
-	Mail         StatusMailCounts     `json:"mail"`
+
+	// BeadsVersion Version of the bd (beads) CLI the supervisor drives. Omitted when the probe failed or the binary is unavailable.
+	BeadsVersion *string `json:"beads_version,omitempty"`
+
+	// DoltVersion Version of the dolt engine binary the supervisor drives. Omitted when the probe failed or the binary is unavailable.
+	DoltVersion *string          `json:"dolt_version,omitempty"`
+	Mail        StatusMailCounts `json:"mail"`
 
 	// Name City name.
 	Name string `json:"name"`
@@ -3602,6 +3626,18 @@ type TypedEventStreamEnvelopeRequestResultSessionSubmit struct {
 	Workflow *WorkflowEventProjection      `json:"workflow,omitempty"`
 }
 
+// TypedEventStreamEnvelopeSessionColdStartTimeout defines model for TypedEventStreamEnvelopeSessionColdStartTimeout.
+type TypedEventStreamEnvelopeSessionColdStartTimeout struct {
+	Actor    string                   `json:"actor"`
+	Message  *string                  `json:"message,omitempty"`
+	Payload  NoPayload                `json:"payload"`
+	Seq      int64                    `json:"seq"`
+	Subject  *string                  `json:"subject,omitempty"`
+	Ts       time.Time                `json:"ts"`
+	Type     string                   `json:"type"`
+	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
 // TypedEventStreamEnvelopeSessionCrashed defines model for TypedEventStreamEnvelopeSessionCrashed.
 type TypedEventStreamEnvelopeSessionCrashed struct {
 	Actor    string                   `json:"actor"`
@@ -4357,6 +4393,19 @@ type TypedTaggedEventStreamEnvelopeRequestResultSessionSubmit struct {
 	Workflow *WorkflowEventProjection      `json:"workflow,omitempty"`
 }
 
+// TypedTaggedEventStreamEnvelopeSessionColdStartTimeout defines model for TypedTaggedEventStreamEnvelopeSessionColdStartTimeout.
+type TypedTaggedEventStreamEnvelopeSessionColdStartTimeout struct {
+	Actor    string                   `json:"actor"`
+	City     string                   `json:"city"`
+	Message  *string                  `json:"message,omitempty"`
+	Payload  NoPayload                `json:"payload"`
+	Seq      int64                    `json:"seq"`
+	Subject  *string                  `json:"subject,omitempty"`
+	Ts       time.Time                `json:"ts"`
+	Type     string                   `json:"type"`
+	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
 // TypedTaggedEventStreamEnvelopeSessionCrashed defines model for TypedTaggedEventStreamEnvelopeSessionCrashed.
 type TypedTaggedEventStreamEnvelopeSessionCrashed struct {
 	Actor    string                   `json:"actor"`
@@ -5104,7 +5153,19 @@ type GetV0CityByCityNameExtmsgTranscriptParams struct {
 
 	// Kind Conversation kind.
 	Kind *string `form:"kind,omitempty" json:"kind,omitempty"`
+
+	// AfterSequence Return entries with sequence greater than this cursor (default 0).
+	AfterSequence *int64 `form:"after_sequence,omitempty" json:"after_sequence,omitempty"`
+
+	// Limit Maximum number of entries to return (default 100, max 500).
+	Limit *int64 `form:"limit,omitempty" json:"limit,omitempty"`
+
+	// Order Sort order by sequence: asc (oldest-first, default) or desc (newest-first).
+	Order *GetV0CityByCityNameExtmsgTranscriptParamsOrder `form:"order,omitempty" json:"order,omitempty"`
 }
+
+// GetV0CityByCityNameExtmsgTranscriptParamsOrder defines parameters for GetV0CityByCityNameExtmsgTranscript.
+type GetV0CityByCityNameExtmsgTranscriptParamsOrder string
 
 // PostV0CityByCityNameExtmsgTranscriptAckParams defines parameters for PostV0CityByCityNameExtmsgTranscriptAck.
 type PostV0CityByCityNameExtmsgTranscriptAckParams struct {
@@ -7744,6 +7805,34 @@ func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeRequestResultSes
 	return err
 }
 
+// AsTypedEventStreamEnvelopeSessionColdStartTimeout returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeSessionColdStartTimeout
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeSessionColdStartTimeout() (TypedEventStreamEnvelopeSessionColdStartTimeout, error) {
+	var body TypedEventStreamEnvelopeSessionColdStartTimeout
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeSessionColdStartTimeout overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeSessionColdStartTimeout
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeSessionColdStartTimeout(v TypedEventStreamEnvelopeSessionColdStartTimeout) error {
+	v.Type = "session.cold_start_timeout"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeSessionColdStartTimeout performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeSessionColdStartTimeout
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeSessionColdStartTimeout(v TypedEventStreamEnvelopeSessionColdStartTimeout) error {
+	v.Type = "session.cold_start_timeout"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedEventStreamEnvelopeSessionCrashed returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeSessionCrashed
 func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeSessionCrashed() (TypedEventStreamEnvelopeSessionCrashed, error) {
 	var body TypedEventStreamEnvelopeSessionCrashed
@@ -8346,6 +8435,8 @@ func (t TypedEventStreamEnvelope) ValueByDiscriminator() (interface{}, error) {
 		return t.AsTypedEventStreamEnvelopeRequestResultSessionMessage()
 	case "request.result.session.submit":
 		return t.AsTypedEventStreamEnvelopeRequestResultSessionSubmit()
+	case "session.cold_start_timeout":
+		return t.AsTypedEventStreamEnvelopeSessionColdStartTimeout()
 	case "session.crashed":
 		return t.AsTypedEventStreamEnvelopeSessionCrashed()
 	case "session.drain_acked_with_assigned_work":
@@ -9543,6 +9634,34 @@ func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeRequ
 	return err
 }
 
+// AsTypedTaggedEventStreamEnvelopeSessionColdStartTimeout returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeSessionColdStartTimeout
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeSessionColdStartTimeout() (TypedTaggedEventStreamEnvelopeSessionColdStartTimeout, error) {
+	var body TypedTaggedEventStreamEnvelopeSessionColdStartTimeout
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeSessionColdStartTimeout overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeSessionColdStartTimeout
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeSessionColdStartTimeout(v TypedTaggedEventStreamEnvelopeSessionColdStartTimeout) error {
+	v.Type = "session.cold_start_timeout"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeSessionColdStartTimeout performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeSessionColdStartTimeout
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeSessionColdStartTimeout(v TypedTaggedEventStreamEnvelopeSessionColdStartTimeout) error {
+	v.Type = "session.cold_start_timeout"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedTaggedEventStreamEnvelopeSessionCrashed returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeSessionCrashed
 func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeSessionCrashed() (TypedTaggedEventStreamEnvelopeSessionCrashed, error) {
 	var body TypedTaggedEventStreamEnvelopeSessionCrashed
@@ -10145,6 +10264,8 @@ func (t TypedTaggedEventStreamEnvelope) ValueByDiscriminator() (interface{}, err
 		return t.AsTypedTaggedEventStreamEnvelopeRequestResultSessionMessage()
 	case "request.result.session.submit":
 		return t.AsTypedTaggedEventStreamEnvelopeRequestResultSessionSubmit()
+	case "session.cold_start_timeout":
+		return t.AsTypedTaggedEventStreamEnvelopeSessionColdStartTimeout()
 	case "session.crashed":
 		return t.AsTypedTaggedEventStreamEnvelopeSessionCrashed()
 	case "session.drain_acked_with_assigned_work":
@@ -10380,6 +10501,9 @@ type ClientInterface interface {
 
 	// GetV0CityByCityNameConfig request
 	GetV0CityByCityNameConfig(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// GetV0CityByCityNameConfigDefaults request
+	GetV0CityByCityNameConfigDefaults(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// GetV0CityByCityNameConfigExplain request
 	GetV0CityByCityNameConfigExplain(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -11276,6 +11400,18 @@ func (c *Client) GetV0CityByCityNameBeadsReady(ctx context.Context, cityName str
 
 func (c *Client) GetV0CityByCityNameConfig(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewGetV0CityByCityNameConfigRequest(c.Server, cityName)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) GetV0CityByCityNameConfigDefaults(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetV0CityByCityNameConfigDefaultsRequest(c.Server, cityName)
 	if err != nil {
 		return nil, err
 	}
@@ -15050,6 +15186,40 @@ func NewGetV0CityByCityNameConfigRequest(server string, cityName string) (*http.
 	return req, nil
 }
 
+// NewGetV0CityByCityNameConfigDefaultsRequest generates requests for GetV0CityByCityNameConfigDefaults
+func NewGetV0CityByCityNameConfigDefaultsRequest(server string, cityName string) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "cityName", cityName, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/v0/city/%s/config/defaults", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
 // NewGetV0CityByCityNameConfigExplainRequest generates requests for GetV0CityByCityNameConfigExplain
 func NewGetV0CityByCityNameConfigExplainRequest(server string, cityName string) (*http.Request, error) {
 	var err error
@@ -16760,6 +16930,54 @@ func NewGetV0CityByCityNameExtmsgTranscriptRequest(server string, cityName strin
 		if params.Kind != nil {
 
 			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "kind", *params.Kind, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.AfterSequence != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "after_sequence", *params.AfterSequence, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "integer", Format: "int64"}); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Limit != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "limit", *params.Limit, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "integer", Format: "int64"}); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Order != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "order", *params.Order, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
 				return nil, err
 			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
 				return nil, err
@@ -22604,6 +22822,9 @@ type ClientWithResponsesInterface interface {
 	// GetV0CityByCityNameConfigWithResponse request
 	GetV0CityByCityNameConfigWithResponse(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameConfigResponse, error)
 
+	// GetV0CityByCityNameConfigDefaultsWithResponse request
+	GetV0CityByCityNameConfigDefaultsWithResponse(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameConfigDefaultsResponse, error)
+
 	// GetV0CityByCityNameConfigExplainWithResponse request
 	GetV0CityByCityNameConfigExplainWithResponse(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameConfigExplainResponse, error)
 
@@ -23745,6 +23966,29 @@ func (r GetV0CityByCityNameConfigResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r GetV0CityByCityNameConfigResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type GetV0CityByCityNameConfigDefaultsResponse struct {
+	Body                          []byte
+	HTTPResponse                  *http.Response
+	JSON200                       *ConfigResponse
+	ApplicationproblemJSONDefault *ErrorModel
+}
+
+// Status returns HTTPResponse.Status
+func (r GetV0CityByCityNameConfigDefaultsResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r GetV0CityByCityNameConfigDefaultsResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -26776,6 +27020,15 @@ func (c *ClientWithResponses) GetV0CityByCityNameConfigWithResponse(ctx context.
 	return ParseGetV0CityByCityNameConfigResponse(rsp)
 }
 
+// GetV0CityByCityNameConfigDefaultsWithResponse request returning *GetV0CityByCityNameConfigDefaultsResponse
+func (c *ClientWithResponses) GetV0CityByCityNameConfigDefaultsWithResponse(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameConfigDefaultsResponse, error) {
+	rsp, err := c.GetV0CityByCityNameConfigDefaults(ctx, cityName, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseGetV0CityByCityNameConfigDefaultsResponse(rsp)
+}
+
 // GetV0CityByCityNameConfigExplainWithResponse request returning *GetV0CityByCityNameConfigExplainResponse
 func (c *ClientWithResponses) GetV0CityByCityNameConfigExplainWithResponse(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameConfigExplainResponse, error) {
 	rsp, err := c.GetV0CityByCityNameConfigExplain(ctx, cityName, reqEditors...)
@@ -29094,6 +29347,39 @@ func ParseGetV0CityByCityNameConfigResponse(rsp *http.Response) (*GetV0CityByCit
 	}
 
 	response := &GetV0CityByCityNameConfigResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest ConfigResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseGetV0CityByCityNameConfigDefaultsResponse parses an HTTP response from a GetV0CityByCityNameConfigDefaultsWithResponse call
+func ParseGetV0CityByCityNameConfigDefaultsResponse(rsp *http.Response) (*GetV0CityByCityNameConfigDefaultsResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &GetV0CityByCityNameConfigDefaultsResponse{
 		Body:         bodyBytes,
 		HTTPResponse: rsp,
 	}

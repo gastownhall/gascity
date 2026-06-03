@@ -461,16 +461,9 @@ func drainWorkflowServeWork(agentCfg config.Agent, cityPath, storePath, workQuer
 		idlePolls = 0
 		processedThisCycle := false
 		pendingCount := 0
-		legacyOversizedCount := 0
-		unexpectedKindCount := 0
 		for _, candidate := range queue {
 			beadID := candidate.ID
 			kind := strings.TrimSpace(candidate.Metadata["gc.kind"])
-			if !isControlDispatcherKind(kind) {
-				unexpectedKindCount++
-				workflowTracef("serve unexpected-kind-skip bead=%s kind=%s", beadID, kind)
-				continue
-			}
 			workflowTracef("serve process bead=%s kind=%s store=%s", beadID, kind, storePath)
 			// controlDispatcherServe currently returns nil both when it
 			// successfully advanced a control bead AND when ProcessControl
@@ -495,10 +488,6 @@ func drainWorkflowServeWork(agentCfg config.Agent, cityPath, storePath, workQuer
 					workflowTracef("serve transient-error-pending bead=%s kind=%s err=%v", beadID, kind, err)
 					continue
 				}
-				if isLegacyOversizedControlEventError(err) {
-					legacyOversizedCount++
-					continue
-				}
 				return result, fmt.Errorf("processing control bead %s: %w", beadID, err)
 			}
 			workflowTracef("serve processed bead=%s kind=%s", beadID, kind)
@@ -512,25 +501,7 @@ func drainWorkflowServeWork(agentCfg config.Agent, cityPath, storePath, workQuer
 			workflowTracef("serve pending-queue agent=%s count=%d", agentCfg.QualifiedName(), pendingCount)
 			return result, nil
 		}
-		if legacyOversizedCount > 0 {
-			workflowTracef("serve legacy-oversized-queue agent=%s count=%d", agentCfg.QualifiedName(), legacyOversizedCount)
-			return result, nil
-		}
-		if unexpectedKindCount > 0 {
-			workflowTracef("serve unexpected-kind-queue agent=%s count=%d", agentCfg.QualifiedName(), unexpectedKindCount)
-			return result, nil
-		}
 	}
-}
-
-func isLegacyOversizedControlEventError(err error) bool {
-	if err == nil {
-		return false
-	}
-	msg := err.Error()
-	return strings.Contains(msg, "recording attempt log") &&
-		strings.Contains(msg, "old_value") &&
-		strings.Contains(msg, "too large")
 }
 
 func runWorkflowServeFollow(agentCfg config.Agent, cityPath, storePath, workQuery string, workEnv map[string]string, stderr io.Writer) error {
@@ -710,8 +681,11 @@ func workflowServeControlReadyQuery(agentCfg config.Agent, controlSessionNames .
 		queryPrefix += ` GC_CONTROL_LEGACY_TARGET=` + shellquote.Quote(legacy)
 	}
 	query := queryPrefix + ` sh -c '` +
-		`tmp=$(mktemp); trap "rm -f \"$tmp\"" EXIT; ` +
-		`emit_ready() { r=$("$@" 2>/dev/null || true); [ -n "$r" ] && [ "$r" != "[]" ] && printf "%s\n" "$r" >> "$tmp"; }; ` +
+		`set -e; ` +
+		`tmp=$(mktemp); seen="$tmp.seen"; : > "$seen"; trap "rm -f \"$tmp\" \"$seen\"" EXIT; ` +
+		`emit_ready() { r=$("$@" 2>&1) || { status=$?; printf "%s\n" "$r" >&2; return "$status"; }; [ -n "$r" ] && [ "$r" != "[]" ] && printf "%s\n" "$r" >> "$tmp"; return 0; }; ` +
+		`assignee_ready() { cand="$1"; [ -z "$cand" ] && return 0; if grep -Fxq "$cand" "$seen"; then return 0; fi; printf "%s\n" "$cand" >> "$seen"; ` +
+		`emit_ready bd --readonly --sandbox ready --include-ephemeral --assignee="$cand" --exclude-type=epic --json --limit=` + limit + `; }; ` +
 		`routed_ready() { route="$1"; [ -z "$route" ] && return 0; ` +
 		`emit_ready bd --readonly --sandbox ready --include-ephemeral --metadata-field "gc.run_target=$route" --unassigned --exclude-type=epic --json --sort oldest --limit=` + limit + `; ` +
 		`emit_ready bd --readonly --sandbox ready --include-ephemeral --metadata-field "gc.routed_to=$route" --unassigned --exclude-type=epic --json --sort oldest --limit=` + limit + `; ` +
@@ -721,7 +695,7 @@ func workflowServeControlReadyQuery(agentCfg config.Agent, controlSessionNames .
 		`legacy=""; case "$id" in *control-dispatcher) legacy="${id%control-dispatcher}workflow-control";; esac; ` +
 		`for cand in "$id" "$legacy"; do ` +
 		`[ -z "$cand" ] && continue; ` +
-		`emit_ready bd --readonly --sandbox ready --include-ephemeral --assignee="$cand" --exclude-type=epic --json --limit=` + limit + `; ` +
+		`assignee_ready "$cand"; ` +
 		`done; ` +
 		`done; ` +
 		`routed_ready "$GC_CONTROL_TARGET"; ` +

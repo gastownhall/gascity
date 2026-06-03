@@ -325,8 +325,9 @@ test-acceptance:
 	$(TEST_ENV) go test -tags acceptance_a -timeout $(ACCEPTANCE_TIMEOUT) ./test/acceptance/...
 
 ## test-acceptance-b: run Tier B acceptance tests (lifecycle, ~5 min, nightly)
+ACCEPTANCE_B_TIMEOUT ?= 10m
 test-acceptance-b:
-	$(TEST_ENV) go test -tags acceptance_b -timeout 10m -v ./test/acceptance/tier_b/...
+	$(TEST_ENV) go test -tags acceptance_b -timeout $(ACCEPTANCE_B_TIMEOUT) -v ./test/acceptance/tier_b/...
 
 ## test-acceptance-c: run Tier C acceptance tests (real inference, ~30-40 min, manual/nightly)
 test-acceptance-c:

@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- The supervisor now merges a machine-local secrets file
+  (`${GC_HOME}/secrets.env`, dotenv syntax) into the launchd plist / systemd
+  unit environment on every service-file regeneration. This fixes provider
+  credentials being dropped when `gc start` runs from a shell that did not
+  export them (e.g. at login or after a reboot), which previously caused
+  silent provider auth failures. Only keys already eligible for the supervisor
+  environment are merged (provider credentials plus `GC_SUPERVISOR_ENV`
+  opt-ins); a value exported in the calling shell still takes precedence, and
+  `GC_SUPERVISOR_OMIT_PROVIDER_CREDS=1` suppresses provider credentials from
+  both sources.
 - `GC_DOLT_SYNC_PUSH_TIMEOUT_SECS` configures the SQL-mode push wall-clock
   ceiling for `gc dolt sync` (default 1800s, replacing the prior fixed 120s
   that SIGKILLed large first pushes). Metadata queries keep their own 120s

@@ -3266,6 +3266,33 @@ func TestDeaconPatrolDetectsQueueStarvation(t *testing.T) {
 	)
 }
 
+func TestDeaconPatrolNextIterationBurnsCurrentBeforeBackoff(t *testing.T) {
+	dir := exampleDir()
+	path := filepath.Join(dir, "packs", "gastown", "formulas", "mol-deacon-patrol.toml")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading deacon formula: %v", err)
+	}
+	body := string(data)
+	section := sectionBetween(t, body, `id = "next-iteration"`, "")
+
+	assertContainsInOrder(t, section,
+		`CURRENT_WISP=${GC_BEAD_ID:-}`,
+		`if [ -z "$CURRENT_WISP" ]; then`,
+		`CURRENT_WISP=$(gc bd list --assignee="$GC_AGENT" --status=in_progress --type=wisp --limit=1 --json | jq -r '.[0].id // empty')`,
+		`NEXT=$(gc bd mol wisp mol-deacon-patrol --root-only --var binding_prefix='{{binding_prefix}}' --json | jq -r '.new_epic_id // empty')`,
+		`if [ -z "$NEXT" ]; then`,
+		`if ! gc bd update "$NEXT" --assignee="$GC_AGENT"; then`,
+		`if [ -n "$CURRENT_WISP" ]; then`,
+		`gc bd mol burn "$CURRENT_WISP" --force`,
+		`sleep {{event_timeout}}`,
+		`gc hook`,
+	)
+	if strings.Contains(section, "<this-wisp-id>") {
+		t.Fatal("next-iteration still uses placeholder burn target")
+	}
+}
+
 // TestRefineryPromptUsesCanonicalAgentIdentity verifies the refinery
 // prompt's wisp lookup and assignment commands use $GC_AGENT, which the
 // session harness guarantees (internal/session/lifecycle.go). $GC_ALIAS

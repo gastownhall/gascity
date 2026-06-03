@@ -2460,10 +2460,185 @@ func TestBuildRecipeApplyPlan_PreserveRootTypeKeepsTaskRoot(t *testing.T) {
 	}
 }
 
-// TestInstantiate_NonRootStepsGetStepType verifies that non-root step beads
-// defaulting to "task" (empty or explicit) get coerced to "step" so Ready()
-// and `bd ready` skip them (#1039). Explicit non-"task" types ("bug",
-// "epic", ...) are preserved. The root still becomes "molecule".
+func TestInstantiateStampsFormulaHash(t *testing.T) {
+	store := beads.NewMemStore()
+	recipe := &formula.Recipe{
+		Name:          "mol-hash-check",
+		Description:   "Test hash stamping",
+		ContentHash:   "abc123def456",
+		FormulaSource: "/path/to/mol-hash-check.toml",
+		Steps: []formula.RecipeStep{
+			{ID: "mol-hash-check", Title: "Root", Type: "molecule", IsRoot: true},
+			{ID: "mol-hash-check.step-a", Title: "Step A", Type: "task"},
+		},
+		Deps: []formula.RecipeDep{
+			{StepID: "mol-hash-check.step-a", DependsOnID: "mol-hash-check", Type: "parent-child"},
+		},
+	}
+
+	result, err := Instantiate(context.Background(), store, recipe, Options{})
+	if err != nil {
+		t.Fatalf("Instantiate: %v", err)
+	}
+
+	root, err := store.Get(result.RootID)
+	if err != nil {
+		t.Fatalf("Get root: %v", err)
+	}
+
+	if got := root.Metadata["gc.formula_hash"]; got != "abc123def456" {
+		t.Errorf("gc.formula_hash = %q, want %q", got, "abc123def456")
+	}
+	if got := root.Metadata["gc.formula_source"]; got != "/path/to/mol-hash-check.toml" {
+		t.Errorf("gc.formula_source = %q, want %q", got, "/path/to/mol-hash-check.toml")
+	}
+
+	// Non-root beads should NOT have formula hash metadata
+	stepAID := result.IDMapping["mol-hash-check.step-a"]
+	stepA, err := store.Get(stepAID)
+	if err != nil {
+		t.Fatalf("Get step-a: %v", err)
+	}
+	if _, ok := stepA.Metadata["gc.formula_hash"]; ok {
+		t.Error("non-root bead should not have gc.formula_hash")
+	}
+}
+
+func TestInstantiateNoHashWhenEmpty(t *testing.T) {
+	store := beads.NewMemStore()
+	recipe := &formula.Recipe{
+		Name: "mol-no-hash",
+		Steps: []formula.RecipeStep{
+			{ID: "mol-no-hash", Title: "Root", Type: "molecule", IsRoot: true},
+		},
+	}
+
+	result, err := Instantiate(context.Background(), store, recipe, Options{})
+	if err != nil {
+		t.Fatalf("Instantiate: %v", err)
+	}
+
+	root, err := store.Get(result.RootID)
+	if err != nil {
+		t.Fatalf("Get root: %v", err)
+	}
+
+	if _, ok := root.Metadata["gc.formula_hash"]; ok {
+		t.Error("gc.formula_hash should not be set when ContentHash is empty")
+	}
+}
+
+func TestInstantiateStampsFormulaVarsOnRoot(t *testing.T) {
+	store := beads.NewMemStore()
+	recipe := &formula.Recipe{
+		Name: "test-formula",
+		Steps: []formula.RecipeStep{
+			{ID: "test-formula", Title: "Root", Type: "molecule", IsRoot: true},
+			{ID: "test-formula.step-a", Title: "Step A: {{problem}}", Type: "task"},
+		},
+		Deps: []formula.RecipeDep{
+			{StepID: "test-formula.step-a", DependsOnID: "test-formula", Type: "parent-child"},
+		},
+		Vars: map[string]*formula.VarDef{
+			"problem":   {Description: "Problem statement"},
+			"linear_id": {Description: "Linear ID"},
+		},
+	}
+
+	result, err := Instantiate(context.Background(), store, recipe, Options{
+		Vars: map[string]string{
+			"problem":   "SAF-88 API Guidelines",
+			"linear_id": "SAF-88",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Instantiate: %v", err)
+	}
+
+	root, err := store.Get(result.RootID)
+	if err != nil {
+		t.Fatalf("Get root: %v", err)
+	}
+	if got := root.Metadata["gc.var.problem"]; got != "SAF-88 API Guidelines" {
+		t.Errorf("gc.var.problem = %q, want %q", got, "SAF-88 API Guidelines")
+	}
+	if got := root.Metadata["gc.var.linear_id"]; got != "SAF-88" {
+		t.Errorf("gc.var.linear_id = %q, want %q", got, "SAF-88")
+	}
+}
+
+func TestInstantiateDoesNotStampEmptyVars(t *testing.T) {
+	store := beads.NewMemStore()
+	recipe := &formula.Recipe{
+		Name: "test-formula",
+		Steps: []formula.RecipeStep{
+			{ID: "test-formula", Title: "Root", Type: "molecule", IsRoot: true},
+		},
+		Vars: map[string]*formula.VarDef{
+			"problem":   {Description: "Problem statement"},
+			"linear_id": {Description: "Linear ID"},
+		},
+	}
+
+	emptyDefault := ""
+	recipe.Vars["linear_id"].Default = &emptyDefault
+
+	result, err := Instantiate(context.Background(), store, recipe, Options{
+		Vars: map[string]string{
+			"problem": "real problem",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Instantiate: %v", err)
+	}
+
+	root, err := store.Get(result.RootID)
+	if err != nil {
+		t.Fatalf("Get root: %v", err)
+	}
+	if got := root.Metadata["gc.var.problem"]; got != "real problem" {
+		t.Errorf("gc.var.problem = %q, want %q", got, "real problem")
+	}
+	if _, exists := root.Metadata["gc.var.linear_id"]; exists {
+		t.Errorf("gc.var.linear_id should not be stamped for empty value")
+	}
+}
+
+func TestBuildRecipeApplyPlanStampsFormulaVarsOnRoot(t *testing.T) {
+	recipe := &formula.Recipe{
+		Name: "test-formula",
+		Steps: []formula.RecipeStep{
+			{ID: "test-formula", Title: "Root", Type: "molecule", IsRoot: true},
+			{ID: "test-formula.step-a", Title: "Step A", Type: "task"},
+		},
+		Deps: []formula.RecipeDep{
+			{StepID: "test-formula.step-a", DependsOnID: "test-formula", Type: "parent-child"},
+		},
+	}
+
+	plan, _, _, err := buildRecipeApplyPlan(recipe, Options{
+		Vars: map[string]string{
+			"problem":   "SAF-88 API Guidelines",
+			"linear_id": "SAF-88",
+			"context":   "",
+		},
+	})
+	if err != nil {
+		t.Fatalf("buildRecipeApplyPlan: %v", err)
+	}
+
+	rootNode := plan.Nodes[0]
+	if got := rootNode.Metadata["gc.var.problem"]; got != "SAF-88 API Guidelines" {
+		t.Errorf("gc.var.problem = %q, want %q", got, "SAF-88 API Guidelines")
+	}
+	if got := rootNode.Metadata["gc.var.linear_id"]; got != "SAF-88" {
+		t.Errorf("gc.var.linear_id = %q, want %q", got, "SAF-88")
+	}
+	if _, exists := rootNode.Metadata["gc.var.context"]; exists {
+		t.Errorf("gc.var.context should not be stamped for empty value")
+	}
+}
+
 func TestInstantiate_NonRootStepsGetStepType(t *testing.T) {
 	store := beads.NewMemStore()
 	recipe := &formula.Recipe{

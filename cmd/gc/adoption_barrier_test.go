@@ -605,7 +605,11 @@ func TestAdoptionBarrier_UsesProviderlessDetectedProcessNames(t *testing.T) {
 	}
 	cfg := &config.City{
 		Workspace: config.Workspace{
+			Provider:        "codex",
 			SessionTemplate: "{{.City}}-{{.Agent}}",
+		},
+		Providers: map[string]config.ProviderSpec{
+			"codex": config.BuiltinProviderAlias("codex"),
 		},
 		Agents: []config.Agent{{Name: "worker"}},
 	}
@@ -823,7 +827,12 @@ func TestAdoptionBarrier_UnknownSession(t *testing.T) {
 func TestProcessHintsUsesResolvedProviderProcessNames(t *testing.T) {
 	putExecutableOnPath(t, "codex")
 
-	cfg := &config.City{Workspace: config.Workspace{Provider: "codex"}}
+	cfg := &config.City{
+		Workspace: config.Workspace{Provider: "codex"},
+		Providers: map[string]config.ProviderSpec{
+			"codex": config.BuiltinProviderAlias("codex"),
+		},
+	}
 
 	if got := processHints(cfg, &config.Agent{Name: "worker"}); strings.Join(got, ",") != "codex" {
 		t.Fatalf("processHints() = %v, want [codex]", got)

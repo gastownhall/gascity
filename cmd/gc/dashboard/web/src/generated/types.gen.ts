@@ -2979,6 +2979,14 @@ export type StatusBody = {
      */
     beads?: BeadsDiagnostic;
     /**
+     * Version of the bd (beads) CLI the supervisor drives. Omitted when the probe failed or the binary is unavailable.
+     */
+    beads_version?: string;
+    /**
+     * Version of the dolt engine binary the supervisor drives. Omitted when the probe failed or the binary is unavailable.
+     */
+    dolt_version?: string;
+    /**
      * Mail counts.
      */
     mail: StatusMailCounts;
@@ -3403,6 +3411,8 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeRequestResultSessionMessage) | ({
     type: 'request.result.session.submit';
 } & TypedEventStreamEnvelopeRequestResultSessionSubmit) | ({
+    type: 'session.cold_start_timeout';
+} & TypedEventStreamEnvelopeSessionColdStartTimeout) | ({
     type: 'session.crashed';
 } & TypedEventStreamEnvelopeSessionCrashed) | ({
     type: 'session.drain_acked_with_assigned_work';
@@ -4029,6 +4039,20 @@ export type TypedEventStreamEnvelopeRequestResultSessionSubmit = {
 };
 
 /**
+ * TypedEventStreamEnvelope session.cold_start_timeout
+ */
+export type TypedEventStreamEnvelopeSessionColdStartTimeout = {
+    actor: string;
+    message?: string;
+    payload: NoPayload;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'session.cold_start_timeout';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
  * TypedEventStreamEnvelope session.crashed
  */
 export type TypedEventStreamEnvelopeSessionCrashed = {
@@ -4354,6 +4378,8 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeRequestResultSessionMessage) | ({
     type: 'request.result.session.submit';
 } & TypedTaggedEventStreamEnvelopeRequestResultSessionSubmit) | ({
+    type: 'session.cold_start_timeout';
+} & TypedTaggedEventStreamEnvelopeSessionColdStartTimeout) | ({
     type: 'session.crashed';
 } & TypedTaggedEventStreamEnvelopeSessionCrashed) | ({
     type: 'session.drain_acked_with_assigned_work';
@@ -5018,6 +5044,21 @@ export type TypedTaggedEventStreamEnvelopeRequestResultSessionSubmit = {
     subject?: string;
     ts: string;
     type: 'request.result.session.submit';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope session.cold_start_timeout
+ */
+export type TypedTaggedEventStreamEnvelopeSessionColdStartTimeout = {
+    actor: string;
+    city: string;
+    message?: string;
+    payload: NoPayload;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'session.cold_start_timeout';
     workflow?: WorkflowEventProjection;
 };
 
@@ -6756,6 +6797,36 @@ export type GetV0CityByCityNameConfigResponses = {
 
 export type GetV0CityByCityNameConfigResponse = GetV0CityByCityNameConfigResponses[keyof GetV0CityByCityNameConfigResponses];
 
+export type GetV0CityByCityNameConfigDefaultsData = {
+    body?: never;
+    path: {
+        /**
+         * City name.
+         */
+        cityName: string;
+    };
+    query?: never;
+    url: '/v0/city/{cityName}/config/defaults';
+};
+
+export type GetV0CityByCityNameConfigDefaultsErrors = {
+    /**
+     * Error
+     */
+    default: ErrorModel;
+};
+
+export type GetV0CityByCityNameConfigDefaultsError = GetV0CityByCityNameConfigDefaultsErrors[keyof GetV0CityByCityNameConfigDefaultsErrors];
+
+export type GetV0CityByCityNameConfigDefaultsResponses = {
+    /**
+     * OK
+     */
+    200: ConfigResponse;
+};
+
+export type GetV0CityByCityNameConfigDefaultsResponse = GetV0CityByCityNameConfigDefaultsResponses[keyof GetV0CityByCityNameConfigDefaultsResponses];
+
 export type GetV0CityByCityNameConfigExplainData = {
     body?: never;
     path: {
@@ -7771,6 +7842,18 @@ export type GetV0CityByCityNameExtmsgTranscriptData = {
          * Conversation kind.
          */
         kind?: string;
+        /**
+         * Return entries with sequence greater than this cursor (default 0).
+         */
+        after_sequence?: number;
+        /**
+         * Maximum number of entries to return (default 100, max 500).
+         */
+        limit?: number;
+        /**
+         * Sort order by sequence: asc (oldest-first, default) or desc (newest-first).
+         */
+        order?: 'asc' | 'desc';
     };
     url: '/v0/city/{cityName}/extmsg/transcript';
 };

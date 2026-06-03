@@ -374,7 +374,7 @@ func TestOrderDispatchResolvesPackBindingForPool(t *testing.T) {
 	}
 
 	m.dispatch(context.Background(), t.TempDir(), time.Now())
-	time.Sleep(50 * time.Millisecond)
+	m.drain(context.Background())
 
 	work := workBeadByOrderLabel(t, store, "order-run:mol-dog-doctor")
 	if got := work.Metadata["gc.routed_to"]; got != "maintenance.dog" {
@@ -416,7 +416,7 @@ func TestOrderDispatchPrefersCityShadowForPool(t *testing.T) {
 	}
 
 	m.dispatch(context.Background(), t.TempDir(), time.Now())
-	time.Sleep(50 * time.Millisecond)
+	m.drain(context.Background())
 
 	work := workBeadByOrderLabel(t, store, "order-run:mol-dog-doctor")
 	if got := work.Metadata["gc.routed_to"]; got != "dog" {
@@ -1762,7 +1762,7 @@ description = "Target: {{target_id}}, workspace: {{workspace}}"
 	mad.rec = &rec
 
 	ad.dispatch(context.Background(), t.TempDir(), time.Now())
-	time.Sleep(100 * time.Millisecond)
+	ad.drain(context.Background())
 
 	all := trackingBeads(t, store, "order-run:fail-formula-vars")
 	hasFailed := false
@@ -6030,7 +6030,7 @@ func TestOrderDispatchSkipsOpenTrackingBeadForConditionOrder(t *testing.T) {
 	ad := buildOrderDispatcherFromListExec(aa, store, nil, fakeExec, nil)
 
 	ad.dispatch(context.Background(), t.TempDir(), time.Now())
-	time.Sleep(50 * time.Millisecond)
+	ad.drain(context.Background())
 
 	if ran {
 		t.Error("exec should not have run while an order-tracking bead is open")
@@ -6524,6 +6524,58 @@ func TestOrderDispatchOpenWispWithOpenStepsBlocksRedispatch(t *testing.T) {
 	if ran {
 		t.Fatal("exec must NOT run — prior wisp has open step beads, " +
 			"the cooldown gate must treat it as in-flight (tr-kds01)")
+	}
+}
+
+func TestOrderDispatchClosedTrackingHistoryStillChecksOpenWispWork(t *testing.T) {
+	store := beads.NewMemStore()
+
+	wispRoot, err := store.Create(beads.Bead{
+		Title:  "mol-digest-generate",
+		Type:   "molecule",
+		Labels: []string{"order-run:my-pool-order"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Create(beads.Bead{
+		Title:    "determine-period",
+		ParentID: wispRoot.ID,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	tracking, err := store.Create(beads.Bead{
+		Title:     "order:my-pool-order",
+		Labels:    []string{"order-run:my-pool-order", labelOrderTracking},
+		Ephemeral: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(tracking.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	ran := false
+	fakeExec := func(_ context.Context, _, _ string, _ []string) ([]byte, error) {
+		ran = true
+		return nil, nil
+	}
+
+	aa := []orders.Order{{
+		Name:     "my-pool-order",
+		Trigger:  "cooldown",
+		Interval: "1s",
+		Exec:     "scripts/run.sh",
+	}}
+	ad := buildOrderDispatcherFromListExec(aa, store, nil, fakeExec, nil)
+
+	ad.dispatch(context.Background(), t.TempDir(), tracking.CreatedAt.Add(5*time.Second))
+	ad.drain(context.Background())
+
+	if ran {
+		t.Fatal("exec must NOT run — closed order-tracking history must not bypass " +
+			"the strict open-wisp check while prior step work is still open")
 	}
 }
 
@@ -7240,5 +7292,145 @@ func TestOrderDispatchSingleFlightLockFailsClosedOnPartialTierError(t *testing.T
 	}
 	if hasOpen {
 		t.Fatal("hasOpenWorkStrict returned true with partial tier error; caller must fail closed instead")
+	}
+}
+
+// --- dispatch() store-handle close regression tests (ga-anio6p) ---
+//
+// dispatch() must close every store handle it opens each pass via
+// closeBeadStoreHandle, which type-asserts for interface{ CloseStore() error }.
+
+// dispatchCloseStoreSpy wraps MemStore and counts CloseStore() calls. The
+// method is invoked by dispatch()'s deferred cleanup; not called concurrently.
+type dispatchCloseStoreSpy struct {
+	*beads.MemStore
+	closed   int
+	closeErr error
+}
+
+func (s *dispatchCloseStoreSpy) CloseStore() error {
+	s.closed++
+	return s.closeErr
+}
+
+// newDispatchCloseStoreSpyFn returns an orderStoreFunc that appends a fresh
+// dispatchCloseStoreSpy to *spies on each call and returns it as a Store.
+func newDispatchCloseStoreSpyFn(spies *[]*dispatchCloseStoreSpy) orderStoreFunc {
+	return func(_ execStoreTarget) (beads.Store, error) {
+		spy := &dispatchCloseStoreSpy{MemStore: beads.NewMemStore()}
+		*spies = append(*spies, spy)
+		return spy, nil
+	}
+}
+
+func TestDispatchClosesEveryOpenedStoreHandle(t *testing.T) {
+	var spies []*dispatchCloseStoreSpy
+	m := &memoryOrderDispatcher{
+		aa: []orders.Order{{
+			Name:     "noop",
+			Trigger:  "cooldown",
+			Interval: "1m",
+			Exec:     "true",
+		}},
+		storeFn: newDispatchCloseStoreSpyFn(&spies),
+		execRun: func(_ context.Context, _, _ string, _ []string) ([]byte, error) { return nil, nil },
+		rec:     events.Discard,
+		stderr:  &bytes.Buffer{},
+		cfg:     &config.City{},
+	}
+
+	m.dispatch(context.Background(), t.TempDir(), time.Now())
+
+	if len(spies) == 0 {
+		t.Fatal("storeFn never called: expected at least one store to be opened")
+	}
+	for i, spy := range spies {
+		if spy.closed != 1 {
+			t.Errorf("store[%d]: CloseStore() called %d times, want 1", i, spy.closed)
+		}
+	}
+	time.Sleep(50 * time.Millisecond) // let dispatchOne goroutines finish
+}
+
+func TestDispatchClosesRigAndLegacyCityStoreHandles(t *testing.T) {
+	var spies []*dispatchCloseStoreSpy
+	cityPath := t.TempDir()
+	rigPath := t.TempDir()
+
+	m := &memoryOrderDispatcher{
+		aa: []orders.Order{{
+			Name:     "rig-noop",
+			Rig:      "worker",
+			Trigger:  "cooldown",
+			Interval: "1m",
+			Exec:     "true",
+		}},
+		storeFn: newDispatchCloseStoreSpyFn(&spies),
+		execRun: func(_ context.Context, _, _ string, _ []string) ([]byte, error) { return nil, nil },
+		rec:     events.Discard,
+		stderr:  &bytes.Buffer{},
+		cfg: &config.City{
+			Rigs: []config.Rig{{Name: "worker", Path: rigPath}},
+		},
+	}
+
+	m.dispatch(context.Background(), cityPath, time.Now())
+
+	if len(spies) != 2 {
+		t.Fatalf("storeFn called %d times, want 2 (rig + legacy city fallback)", len(spies))
+	}
+	for i, spy := range spies {
+		if spy.closed != 1 {
+			t.Errorf("store[%d]: CloseStore() called %d times, want 1", i, spy.closed)
+		}
+	}
+	time.Sleep(50 * time.Millisecond)
+}
+
+func TestDispatchDeduplicatesStoreHandlesAcrossOrders(t *testing.T) {
+	var spies []*dispatchCloseStoreSpy
+	m := &memoryOrderDispatcher{
+		aa: []orders.Order{
+			{Name: "order-a", Trigger: "cooldown", Interval: "1m", Exec: "true"},
+			{Name: "order-b", Trigger: "cooldown", Interval: "1m", Exec: "true"},
+		},
+		storeFn: newDispatchCloseStoreSpyFn(&spies),
+		execRun: func(_ context.Context, _, _ string, _ []string) ([]byte, error) { return nil, nil },
+		rec:     events.Discard,
+		stderr:  &bytes.Buffer{},
+		cfg:     &config.City{},
+	}
+
+	m.dispatch(context.Background(), t.TempDir(), time.Now())
+
+	if len(spies) != 1 {
+		t.Fatalf("storeFn called %d times, want 1 (same target deduped across orders)", len(spies))
+	}
+	if spies[0].closed != 1 {
+		t.Errorf("CloseStore() called %d times, want 1", spies[0].closed)
+	}
+	time.Sleep(50 * time.Millisecond)
+}
+
+func TestDispatchClosesNoStoresWhenCitySuspended(t *testing.T) {
+	var spies []*dispatchCloseStoreSpy
+	m := &memoryOrderDispatcher{
+		aa: []orders.Order{{
+			Name:     "noop",
+			Trigger:  "cooldown",
+			Interval: "1m",
+			Exec:     "true",
+		}},
+		storeFn: newDispatchCloseStoreSpyFn(&spies),
+		execRun: func(_ context.Context, _, _ string, _ []string) ([]byte, error) { return nil, nil },
+		rec:     events.Discard,
+		stderr:  &bytes.Buffer{},
+		cfg:     &config.City{Workspace: config.Workspace{Suspended: true}},
+	}
+
+	m.dispatch(context.Background(), t.TempDir(), time.Now())
+
+	if len(spies) != 0 {
+		t.Errorf("storeFn called %d times, want 0 when city is suspended", len(spies))
 	}
 }

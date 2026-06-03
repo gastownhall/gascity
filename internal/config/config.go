@@ -2045,6 +2045,14 @@ type DaemonConfig struct {
 	// behavior. Duration string (e.g., "250ms", "500ms"). Trade-off:
 	// adds tick latency up to this value when set.
 	TickDebounce string `toml:"tick_debounce,omitempty"`
+	// AutoPruneWorkerDir controls whether the reconciler removes a
+	// pool-managed session's worker_dir (agent worktree) after the session
+	// bead is closed. Removal is gated on: path lives under the city's
+	// .gc/worktrees/ tree, clean working tree, no unpushed commits, no
+	// stashed work. Nil (unset) defaults to true so pool worktrees do not
+	// accumulate without bound across pool recycles. Set to false to
+	// retain worktrees for post-session diagnostics.
+	AutoPruneWorkerDir *bool `toml:"auto_prune_worker_dir,omitempty" jsonschema:"default=true"`
 }
 
 // AutoRestartOnDriftEnabled reports whether the supervisor should be
@@ -2057,6 +2065,18 @@ func (d *DaemonConfig) AutoRestartOnDriftEnabled() bool {
 		return true
 	}
 	return *d.AutoRestartOnDrift
+}
+
+// AutoPruneWorkerDirEnabled reports whether the reconciler should remove a
+// pool-managed session's worker_dir after the session bead is closed. The
+// default is true: pool worktrees are transient by design and accumulate
+// without bound otherwise. Removal is still gated on per-worktree safety
+// probes (clean tree, no unpushed commits, no stashes).
+func (d *DaemonConfig) AutoPruneWorkerDirEnabled() bool {
+	if d.AutoPruneWorkerDir == nil {
+		return true
+	}
+	return *d.AutoPruneWorkerDir
 }
 
 // PatrolIntervalDuration returns the patrol interval as a time.Duration.
@@ -3051,12 +3071,12 @@ func (a *Agent) poolDemandTarget() string {
 func standardAssignedWorkQueryScript() string {
 	return `for id in "$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"; do ` +
 		`[ -z "$id" ] && continue; ` +
-		`r=$(bd list --include-ephemeral --status in_progress --assignee="$id" --exclude-type=epic --json --limit=1 2>/dev/null); ` +
+		`r=$(bd list --include-ephemeral --status in_progress --assignee="$id" --json --limit=1 2>/dev/null); ` +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
 		`done; ` +
 		`for id in "$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"; do ` +
 		`[ -z "$id" ] && continue; ` +
-		`r=$(bd ready --include-ephemeral --assignee="$id" --exclude-type=epic --json --limit=1 2>/dev/null); ` +
+		`r=$(bd ready --include-ephemeral --assignee="$id" --json --limit=1 2>/dev/null); ` +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
 		`done; `
 }
@@ -3067,7 +3087,7 @@ func legacyControlAssignedWorkQueryScript() string {
 		`legacy=""; case "$id" in *control-dispatcher) legacy="${id%control-dispatcher}workflow-control";; esac; ` +
 		`for cand in "$id" "$legacy"; do ` +
 		`[ -z "$cand" ] && continue; ` +
-		`r=$(bd list --include-ephemeral --status in_progress --assignee="$cand" --exclude-type=epic --json --limit=1 2>/dev/null); ` +
+		`r=$(bd list --include-ephemeral --status in_progress --assignee="$cand" --json --limit=1 2>/dev/null); ` +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
 		`done; ` +
 		`done; ` +
@@ -3076,7 +3096,7 @@ func legacyControlAssignedWorkQueryScript() string {
 		`legacy=""; case "$id" in *control-dispatcher) legacy="${id%control-dispatcher}workflow-control";; esac; ` +
 		`for cand in "$id" "$legacy"; do ` +
 		`[ -z "$cand" ] && continue; ` +
-		`r=$(bd ready --include-ephemeral --assignee="$cand" --exclude-type=epic --json --limit=1 2>/dev/null); ` +
+		`r=$(bd ready --include-ephemeral --assignee="$cand" --json --limit=1 2>/dev/null); ` +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
 		`done; ` +
 		`done; `
@@ -3100,15 +3120,22 @@ func poolDemandOriginGateScript() string {
 //
 // State priority: in_progress+assigned (crash recovery) >
 // ready+assigned (pre-assigned) > ready+unassigned+routed_to (pool).
-// Formula roots that are themselves executable must be represented as ready()
-// work (for example type=wisp); molecule containers are not routable demand.
+// Executable formula roots are ephemeral epics (mol wisp preserves the
+// template-epic IssueType and marks Ephemeral=true); molecule containers
+// are not routable demand.
 //
-// Parent epics are excluded from every tier (--exclude-type=epic). An epic
-// has no executable spec — its semantic is "all children done" — so a worker
-// claiming an epic does undefined work (gc-udx). Roles that legitimately
-// process epics (oversight, reviewers, closers) opt in by setting an explicit
-// work_query in their agent config; that custom query is returned unchanged
-// above.
+// Parent epics are excluded from the routed (pool) tier only
+// (--exclude-type=epic). An unassigned parent epic has no executable spec —
+// its semantic is "all children done" — so a pool worker claiming one does
+// undefined work (gc-udx; the repro is a routed parent epic, see
+// TestEffectiveWorkQuerySkipsEpicLeafScenario). The assigned tiers do NOT
+// exclude epics: work already assigned to this agent is owned, and the
+// patrol-loop pattern (gastown witness/refinery/deacon) self-assigns an
+// ephemeral epic wisp that the agent must resume after a session restart.
+// Excluding epics there silently stranded those wisps (gc hook exited 1 with
+// empty output). Roles that need different behavior still opt in via an
+// explicit work_query in their agent config; that custom query is returned
+// unchanged above.
 //
 // When the reconciler runs the query for demand detection (no session
 // context), all identity vars are empty → assignee tiers skip → only
@@ -3419,15 +3446,14 @@ func (a *Agent) EffectiveOnBoot() string {
 		`xargs -rI{} bd update {} --status open 2>/dev/null`
 }
 
-// InjectImplicitAgents adds on-demand agents for each configured provider at
-// both city scope and each rig scope. A provider is "configured" if it
-// appears in cfg.Providers, cfg.AgentDefaults.Provider, or
-// cfg.Workspace.Provider, so the common single-provider cases work without a
-// redundant [providers.claude] section. Unconfigured built-in providers are
-// skipped. Pool min=0, max=-1 (unlimited) so they are available as sling
-// targets without an explicit [[agent]] entry. Explicit agents always win: if
-// city.toml defines [[agent]] name="claude" (or a rig-scoped equivalent), no
-// implicit agent is added for that scope.
+// InjectImplicitAgents adds on-demand agents for each explicitly configured
+// provider at both city scope and each rig scope. A provider is configured
+// only when it appears in cfg.Providers; workspace.provider selects the
+// default from that catalog but does not create a catalog entry. Pool min=0,
+// max=-1 (unlimited) so they are available as sling targets without an
+// explicit [[agent]] entry. Explicit agents always win — if city.toml defines
+// [[agent]] name="claude" (or a rig-scoped equivalent), no implicit agent is
+// added for that scope.
 // agentKey identifies an agent by its rig directory and name.
 type agentKey struct{ dir, name string }
 
@@ -3709,33 +3735,14 @@ func newControlDispatcherAgent(dir string) Agent {
 	return a
 }
 
-// configuredProviders returns the merged set of providers that are explicitly
-// configured: the union of cfg.Providers keys, cfg.AgentDefaults.Provider, and
-// cfg.Workspace.Provider. Scalar provider defaults are only included if they
-// name a built-in provider or one already defined in cfg.Providers — a
-// non-builtin scalar default without a matching [providers.X] section is
-// ignored because it would create an implicit agent that fails at resolution
-// time.
+// configuredProviders returns the providers that are explicitly configured in
+// the provider catalog.
 func configuredProviders(cfg *City) map[string]ProviderSpec {
-	merged := make(map[string]ProviderSpec, len(cfg.Providers)+1)
+	merged := make(map[string]ProviderSpec, len(cfg.Providers))
 	for k, v := range cfg.Providers {
 		merged[k] = v
 	}
-	addScalarProviderDefault(merged, cfg.AgentDefaults.Provider)
-	addScalarProviderDefault(merged, cfg.Workspace.Provider)
 	return merged
-}
-
-func addScalarProviderDefault(merged map[string]ProviderSpec, name string) {
-	if name == "" {
-		return
-	}
-	if _, ok := merged[name]; ok {
-		return
-	}
-	if _, builtin := BuiltinProviders()[name]; builtin {
-		merged[name] = ProviderSpec{}
-	}
 }
 
 // configuredProviderOrder returns provider names from the map in a
@@ -4091,6 +4098,41 @@ func defaultInstallAgentHooksForProvider(provider string) []string {
 	}
 }
 
+func defaultInstallAgentHooksForProviders(providers []string) []string {
+	seen := map[string]bool{}
+	var hooks []string
+	for _, provider := range providers {
+		for _, hook := range defaultInstallAgentHooksForProvider(provider) {
+			if seen[hook] {
+				continue
+			}
+			seen[hook] = true
+			hooks = append(hooks, hook)
+		}
+	}
+	return hooks
+}
+
+func builtinProviderAliases(providers []string) map[string]ProviderSpec {
+	out := make(map[string]ProviderSpec)
+	for _, provider := range providers {
+		provider = strings.TrimSpace(provider)
+		if provider == "" {
+			continue
+		}
+		out[provider] = BuiltinProviderAlias(provider)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// EmptyCity returns a providerless city scaffold with no managed agents.
+func EmptyCity(name string) City {
+	return City{Workspace: Workspace{Name: name}}
+}
+
 // WizardCity returns a City with the given name, a workspace-level provider
 // or start command, and one agent (mayor). This is the config written by
 // "gc init" when the interactive wizard runs. If startCommand is set, it
@@ -4099,13 +4141,29 @@ func WizardCity(name, provider, startCommand string) City {
 	ws := Workspace{Name: name}
 	if startCommand != "" {
 		ws.StartCommand = startCommand
-	} else {
-		ws.Provider = provider
-		ws.InstallAgentHooks = defaultInstallAgentHooksForProvider(provider)
+		return City{
+			Workspace: ws,
+			Agents: []Agent{
+				{Name: "mayor", PromptTemplate: "prompts/mayor.md"},
+			},
+			NamedSessions: []NamedSession{{Template: "mayor", Mode: "always"}},
+		}
 	}
+	return WizardCityWithProviders(name, provider, []string{provider})
+}
+
+// WizardCityWithProviders returns a minimal managed city whose default
+// provider is selected from an explicit built-in provider catalog.
+func WizardCityWithProviders(name, defaultProvider string, providers []string) City {
+	ws := Workspace{Name: name}
+	if defaultProvider != "" {
+		ws.Provider = defaultProvider
+	}
+	ws.InstallAgentHooks = defaultInstallAgentHooksForProviders(providers)
 	return City{
 		Workspace: ws,
 		Daemon:    DaemonConfig{FormulaV2: true},
+		Providers: builtinProviderAliases(providers),
 		Agents: []Agent{
 			{Name: "mayor", PromptTemplate: "prompts/mayor.md"},
 		},
@@ -4126,13 +4184,30 @@ func GastownCity(name, provider, startCommand string) City {
 	}
 	if startCommand != "" {
 		ws.StartCommand = startCommand
-	} else if provider != "" {
-		ws.Provider = provider
-		ws.InstallAgentHooks = defaultInstallAgentHooksForProvider(provider)
+		return gastownCityWithWorkspace(name, ws, nil)
 	}
+	return GastownCityWithProviders(name, provider, []string{provider})
+}
+
+// GastownCityWithProviders returns a Gas Town city whose default provider is
+// selected from an explicit built-in provider catalog.
+func GastownCityWithProviders(name, defaultProvider string, providers []string) City {
+	ws := Workspace{
+		Name:            name,
+		GlobalFragments: []string{"command-glossary", "operational-awareness"},
+	}
+	if defaultProvider != "" {
+		ws.Provider = defaultProvider
+	}
+	ws.InstallAgentHooks = defaultInstallAgentHooksForProviders(providers)
+	return gastownCityWithWorkspace(name, ws, builtinProviderAliases(providers))
+}
+
+func gastownCityWithWorkspace(_ string, ws Workspace, providers map[string]ProviderSpec) City {
 	maxRestarts := 5
 	return City{
 		Workspace: ws,
+		Providers: providers,
 		Imports: map[string]Import{
 			"gastown": {
 				Source:  PublicGastownPackSource,

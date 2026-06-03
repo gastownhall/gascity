@@ -210,6 +210,13 @@ func workflowSQLDepFromRow(issueID, dependsOnID, depType sql.NullString) beads.D
 // tryFullWorkflowSQL does the entire workflow snapshot via SQL — root
 // discovery, bead fetch, dep fetch, and graph build. Falls back to nil
 // error only on full success so the caller can use the slow path on any failure.
+// errNoSQLWorkflowStores is the benign "this deployment has no SQL-backed
+// workflow store to consult" outcome — distinct from a SQL store that exists
+// but could not be reached or did not contain the workflow. The caller
+// (buildWorkflowSnapshot) uses errors.Is to keep the routine no-SQL fallback
+// quiet while still surfacing genuine fast-path failures (gascity#2940).
+var errNoSQLWorkflowStores = errors.New("no sql workflow stores")
+
 func (s *Server) tryFullWorkflowSQL(workflowID, fallbackScopeKind, fallbackScopeRef string, snapshotIndex uint64) (*workflowSnapshotResponse, error) {
 	candidates := workflowSQLCandidatesForWorkflowID(
 		s.state,
@@ -218,7 +225,7 @@ func (s *Server) tryFullWorkflowSQL(workflowID, fallbackScopeKind, fallbackScope
 		fallbackScopeRef,
 	)
 	if len(candidates) == 0 {
-		return nil, fmt.Errorf("no sql workflow stores")
+		return nil, errNoSQLWorkflowStores
 	}
 
 	type sqlWorkflowRootMatch struct {
@@ -226,18 +233,36 @@ func (s *Server) tryFullWorkflowSQL(workflowID, fallbackScopeKind, fallbackScope
 		root      beads.Bead
 	}
 	matches := make([]sqlWorkflowRootMatch, 0, len(candidates))
+	// Retain the first genuine probe failure (Dolt unreachable, query error)
+	// so a fully-failed sweep surfaces the real cause rather than a synthetic
+	// "not found" — that real cause is exactly what the #2940 fallback log
+	// needs to be actionable. A clean miss (ok == false, err == nil) is not a
+	// failure: the workflow simply isn't in that store.
+	var firstProbeErr error
 	for _, candidate := range candidates {
 		host, port, database, user, password, err := resolveDoltConnection(s.state.CityPath(), candidate.path)
 		if err != nil {
+			if firstProbeErr == nil {
+				firstProbeErr = fmt.Errorf("resolve dolt connection for %s: %w", candidate.info.ref, err)
+			}
 			continue
 		}
 		root, ok, err := workflowSQLFindRoot(s.state.Config(), user, password, host, port, database, workflowID)
-		if err != nil || !ok {
+		if err != nil {
+			if firstProbeErr == nil {
+				firstProbeErr = fmt.Errorf("sql find root in %s: %w", candidate.info.ref, err)
+			}
+			continue
+		}
+		if !ok {
 			continue
 		}
 		matches = append(matches, sqlWorkflowRootMatch{candidate: candidate, root: root})
 	}
 	if len(matches) == 0 {
+		if firstProbeErr != nil {
+			return nil, firstProbeErr
+		}
 		return nil, fmt.Errorf("workflow %q not found in sql stores", workflowID)
 	}
 

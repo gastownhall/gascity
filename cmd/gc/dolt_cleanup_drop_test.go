@@ -407,8 +407,12 @@ func TestProbeLiveSessions_TimesOut(t *testing.T) {
 	start := time.Now()
 	runDoltCleanup(opts, &stdout, &stderr)
 	elapsed := time.Since(start)
-	if elapsed >= 250*time.Millisecond {
-		t.Errorf("wall time = %v, want < 250ms", elapsed)
+	// Allow 10x the probe timeout as wall-clock budget. Under parallel test
+	// load the scheduler may delay goroutine wakeups past the theoretical
+	// minimum; 10x gives headroom without letting a truly hung probe pass.
+	wallBudget := cleanupLiveSessionProbeTimeout * 10
+	if elapsed >= wallBudget {
+		t.Errorf("wall time = %v, want < %v (10x probe timeout)", elapsed, wallBudget)
 	}
 
 	var r CleanupReport

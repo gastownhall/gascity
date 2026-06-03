@@ -64,10 +64,32 @@ path = "/tmp/my-rig"
 `
 }
 
+func withTestProviderCatalog(content string) string {
+	additions := []struct {
+		name string
+		body string
+	}{
+		{name: "claude", body: `base = "builtin:claude"`},
+		{name: "codex", body: `base = "builtin:codex"`},
+		{name: "gemini", body: `base = "builtin:gemini"`},
+		{name: "legacy", body: `command = "legacy"`},
+	}
+	for _, addition := range additions {
+		if strings.Contains(content, "[providers."+addition.name+"]") {
+			continue
+		}
+		if !strings.HasSuffix(content, "\n") {
+			content += "\n"
+		}
+		content += "\n[providers." + addition.name + "]\n" + addition.body + "\n"
+	}
+	return content
+}
+
 func writeTOML(t *testing.T, dir, content string) string {
 	t.Helper()
 	path := filepath.Join(dir, "city.toml")
-	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte(withTestProviderCatalog(content)), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	return path
@@ -1445,12 +1467,12 @@ provider = "legacy"
 
 func TestDeleteAgentSchema2LocalConventionRollsBackScaffoldWhenRemoveFails(t *testing.T) {
 	fs := fsys.NewFake()
-	fs.Files["/city/city.toml"] = []byte(`[workspace]
+	fs.Files["/city/city.toml"] = []byte(withTestProviderCatalog(`[workspace]
 
 [[patches.agent]]
 name = "coder"
 provider = "legacy"
-`)
+`))
 	fs.Files["/city/pack.toml"] = []byte("[pack]\nname = \"test-city\"\nschema = 2\n")
 	if err := fs.MkdirAll("/city/agents/coder", 0o755); err != nil {
 		t.Fatalf("MkdirAll: %v", err)
@@ -1488,7 +1510,8 @@ provider = "legacy"
 
 func TestDeleteAgentSchema2LocalConventionWithoutPatchRollsBackScaffoldWhenRemoveFails(t *testing.T) {
 	fs := fsys.NewFake()
-	fs.Files["/city/city.toml"] = []byte("[workspace]\n")
+	initialCity := withTestProviderCatalog("[workspace]\n")
+	fs.Files["/city/city.toml"] = []byte(initialCity)
 	fs.Files["/city/pack.toml"] = []byte("[pack]\nname = \"test-city\"\nschema = 2\n")
 	if err := fs.MkdirAll("/city/agents/coder", 0o755); err != nil {
 		t.Fatalf("MkdirAll: %v", err)
@@ -1517,7 +1540,7 @@ func TestDeleteAgentSchema2LocalConventionWithoutPatchRollsBackScaffoldWhenRemov
 			t.Fatalf("%s = %q, want restored %q", path, got, want)
 		}
 	}
-	if got := string(fs.Files["/city/city.toml"]); got != "[workspace]\n" {
+	if got := string(fs.Files["/city/city.toml"]); got != initialCity {
 		t.Fatalf("city.toml = %q, want unchanged", got)
 	}
 }

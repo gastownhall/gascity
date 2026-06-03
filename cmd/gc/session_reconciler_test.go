@@ -3542,7 +3542,7 @@ func reconcileExistingAsleepNamedSessionWithRoutedWork(t *testing.T, cfg *config
 
 	woken := reconcileSessionBeadsAtPathWithNamedDemand(
 		context.Background(), cityPath, sessions, dsResult.State, cfgNames, cfg, sp,
-		store, nil, dsResult.AssignedWorkBeads, nil, nil, newDrainTracker(), poolDesired,
+		store, nil, dsResult.AssignedWorkBeads, nil, nil, newDrainTracker(), nil, poolDesired,
 		dsResult.NamedSessionDemand, dsResult.StoreQueryPartial, nil, cfg.EffectiveCityName(),
 		nil, clk, events.Discard, 0, 0, &stdout, &stderr,
 	)

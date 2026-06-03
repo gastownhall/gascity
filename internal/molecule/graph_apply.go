@@ -166,6 +166,16 @@ func buildRecipeApplyPlan(recipe *formula.Recipe, opts Options) (*beads.GraphApp
 				}
 				node.Metadata["idempotency_key"] = opts.IdempotencyKey
 			}
+			if len(vars) > 0 {
+				if node.Metadata == nil {
+					node.Metadata = make(map[string]string, len(vars))
+				}
+				for k, v := range vars {
+					if v != "" {
+						node.Metadata[formulaVarMetadataPrefix+k] = v
+					}
+				}
+			}
 		} else {
 			// graph.v2 workflows and their retry/Ralph attempt sub-recipes
 			// use step beads as independently routable actionable work, not

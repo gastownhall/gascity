@@ -262,6 +262,21 @@ func (cr *CityRuntime) convergenceTickScope(ctx context.Context, scope *converge
 		if err != nil {
 			continue
 		}
+		// Trigger-gated loops are advanced by evaluating the trigger
+		// condition; they have no active wisp to poll.
+		if meta[convergence.FieldState] == convergence.StateWaitingTrigger {
+			result, hErr := scope.handler.HandleTrigger(ctx, beadID)
+			if hErr != nil {
+				fmt.Fprintf(cr.stderr, "%s: convergence%s: HandleTrigger(%s): %v\n", //nolint:errcheck
+					cr.logPrefix, scope.logSuffix(), beadID, hErr)
+				continue
+			}
+			if result.Action != convergence.ActionSkipped {
+				fmt.Fprintf(cr.stdout, "Convergence %s: %s (iteration %d)\n", //nolint:errcheck
+					beadID, result.Action, result.Iteration)
+			}
+			continue
+		}
 		// Only process active beads; skip others like waiting_manual
 		// that are indexed for CountActiveConvergenceLoops but not for tick.
 		if meta[convergence.FieldState] != convergence.StateActive {
@@ -449,6 +464,8 @@ func (cr *CityRuntime) handleConvergenceCreate(ctx context.Context, req converge
 		Vars:              vars,
 		CityPath:          cr.cityPath,
 		EvaluatePrompt:    req.Params["evaluate_prompt"],
+		Trigger:           req.Params["trigger"],
+		TriggerCondition:  req.Params["trigger_condition"],
 		Rig:               rig,
 	}
 

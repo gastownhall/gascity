@@ -3,6 +3,7 @@ package extmsg
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"strconv"
 	"sync"
@@ -1094,6 +1095,87 @@ func TestTranscriptServiceAppendDedupeAndList(t *testing.T) {
 	}
 	if got[0].ProviderMessageID != "msg-1" || got[1].ProviderMessageID != "msg-2" {
 		t.Fatalf("List provider_message_ids = %#v, want msg-1,msg-2", []string{got[0].ProviderMessageID, got[1].ProviderMessageID})
+	}
+}
+
+func TestTranscriptServiceListOrderLimitAndCursor(t *testing.T) {
+	freezeTestClock(t)
+	store := beads.NewMemStore()
+	svc := NewServices(store).Transcript
+	ref := testConversationRef()
+
+	const total = 5
+	for i := 0; i < total; i++ {
+		id := fmt.Sprintf("msg-%d", i+1)
+		if _, err := svc.Append(context.Background(), AppendTranscriptInput{
+			Caller:            testAdapterCaller(),
+			Conversation:      ref,
+			Kind:              TranscriptMessageInbound,
+			Provenance:        TranscriptProvenanceLive,
+			ProviderMessageID: id,
+			Text:              id,
+			CreatedAt:         testNow().Add(time.Duration(i) * time.Minute),
+		}); err != nil {
+			t.Fatalf("Append(%s): %v", id, err)
+		}
+	}
+
+	providerIDs := func(records []ConversationTranscriptRecord) []string {
+		ids := make([]string, len(records))
+		for i, r := range records {
+			ids[i] = r.ProviderMessageID
+		}
+		return ids
+	}
+
+	// Descending + limit returns the newest entries, newest-first.
+	desc, err := svc.List(context.Background(), ListTranscriptInput{
+		Caller:       testControllerCaller(),
+		Conversation: ref,
+		Limit:        2,
+		Order:        TranscriptOrderDesc,
+	})
+	if err != nil {
+		t.Fatalf("List(desc): %v", err)
+	}
+	if got := providerIDs(desc); len(got) != 2 || got[0] != "msg-5" || got[1] != "msg-4" {
+		t.Fatalf("List(desc) = %#v, want [msg-5 msg-4]", got)
+	}
+
+	// Empty order defaults to ascending (backwards compatible).
+	asc, err := svc.List(context.Background(), ListTranscriptInput{
+		Caller:       testControllerCaller(),
+		Conversation: ref,
+		Limit:        2,
+	})
+	if err != nil {
+		t.Fatalf("List(default asc): %v", err)
+	}
+	if got := providerIDs(asc); len(got) != 2 || got[0] != "msg-1" || got[1] != "msg-2" {
+		t.Fatalf("List(default asc) = %#v, want [msg-1 msg-2]", got)
+	}
+
+	// AfterSequence cursor is an exclusive lower bound under both orders.
+	descAfter, err := svc.List(context.Background(), ListTranscriptInput{
+		Caller:        testControllerCaller(),
+		Conversation:  ref,
+		AfterSequence: 3,
+		Order:         TranscriptOrderDesc,
+	})
+	if err != nil {
+		t.Fatalf("List(desc, after=3): %v", err)
+	}
+	if got := providerIDs(descAfter); len(got) != 2 || got[0] != "msg-5" || got[1] != "msg-4" {
+		t.Fatalf("List(desc, after=3) = %#v, want [msg-5 msg-4]", got)
+	}
+
+	// Invalid order is rejected.
+	if _, err := svc.List(context.Background(), ListTranscriptInput{
+		Caller:       testControllerCaller(),
+		Conversation: ref,
+		Order:        TranscriptOrder("sideways"),
+	}); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("List(invalid order) err = %v, want ErrInvalidInput", err)
 	}
 }
 

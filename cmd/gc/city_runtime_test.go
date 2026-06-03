@@ -5965,3 +5965,143 @@ func TestCityRuntimeStartupWatchdogDumpsGoroutinesOnSlowStartup(t *testing.T) {
 		t.Fatalf("stderr missing goroutine dump marker\nstderr:\n%s", out)
 	}
 }
+
+// TestCityRuntimeHandleReloadRequestForceClearsExpiredActive simulates a
+// wedged reconciler tick that never cleared activeReload (the failure
+// mode tracked by gco-r08): a fresh reload arrives, sees the slot has
+// been resident longer than reloadActiveTTL, force-clears the stuck
+// request with a timeout reply, and accepts the new one.
+func TestCityRuntimeHandleReloadRequestForceClearsExpiredActive(t *testing.T) {
+	prev := reloadActiveTTL
+	reloadActiveTTL = 10 * time.Millisecond
+	t.Cleanup(func() { reloadActiveTTL = prev })
+
+	staleDone := make(chan reloadControlReply, 1)
+	stale := &reloadRequest{
+		doneCh:  staleDone,
+		started: time.Now().Add(-time.Hour),
+	}
+	cr := &CityRuntime{
+		pokeCh:       make(chan struct{}, 1),
+		activeReload: stale,
+	}
+
+	req := &reloadRequest{
+		acceptedCh: make(chan reloadControlReply, 1),
+		doneCh:     make(chan reloadControlReply, 1),
+	}
+	cr.handleReloadRequest(req)
+
+	cr.reloadMu.Lock()
+	got := cr.activeReload
+	cr.reloadMu.Unlock()
+	if got != req {
+		t.Fatalf("activeReload = %p, want new request %p", got, req)
+	}
+
+	select {
+	case reply := <-staleDone:
+		if reply.Outcome != reloadOutcomeTimeout {
+			t.Fatalf("stale reply.Outcome = %q, want %q", reply.Outcome, reloadOutcomeTimeout)
+		}
+		if !strings.Contains(reply.Error, "force-cleared") {
+			t.Fatalf("stale reply.Error = %q, want force-clear reason", reply.Error)
+		}
+	default:
+		t.Fatal("stale activeReload did not receive timeout reply on force-clear")
+	}
+
+	select {
+	case reply := <-req.acceptedCh:
+		if reply.Outcome != reloadOutcomeAccepted {
+			t.Fatalf("new request reply.Outcome = %q, want %q", reply.Outcome, reloadOutcomeAccepted)
+		}
+	default:
+		t.Fatal("new request did not receive accepted reply")
+	}
+
+	if req.started.IsZero() {
+		t.Fatal("new request.started not stamped on accept")
+	}
+}
+
+// TestCityRuntimeHandleReloadRequestStillBusyWithinTTL covers the
+// regression direction: as long as the existing activeReload is younger
+// than reloadActiveTTL, the next request must still be rejected as
+// busy. We must not turn the TTL escape valve into a routine
+// preemption mechanism.
+func TestCityRuntimeHandleReloadRequestStillBusyWithinTTL(t *testing.T) {
+	prev := reloadActiveTTL
+	reloadActiveTTL = time.Hour
+	t.Cleanup(func() { reloadActiveTTL = prev })
+
+	activeDone := make(chan reloadControlReply, 1)
+	active := &reloadRequest{
+		doneCh:  activeDone,
+		started: time.Now(),
+	}
+	cr := &CityRuntime{
+		pokeCh:       make(chan struct{}, 1),
+		activeReload: active,
+	}
+
+	req := &reloadRequest{
+		acceptedCh: make(chan reloadControlReply, 1),
+		doneCh:     make(chan reloadControlReply, 1),
+	}
+	cr.handleReloadRequest(req)
+
+	cr.reloadMu.Lock()
+	got := cr.activeReload
+	cr.reloadMu.Unlock()
+	if got != active {
+		t.Fatalf("activeReload changed under TTL; got %p want %p", got, active)
+	}
+
+	select {
+	case reply := <-req.acceptedCh:
+		if reply.Outcome != reloadOutcomeBusy {
+			t.Fatalf("reply.Outcome = %q, want %q", reply.Outcome, reloadOutcomeBusy)
+		}
+	default:
+		t.Fatal("request did not receive busy reply")
+	}
+
+	select {
+	case reply := <-activeDone:
+		t.Fatalf("active request received unexpected reply %+v", reply)
+	default:
+	}
+}
+
+// TestCityRuntimeClearActiveReloadIfRespectsIdentity covers the second
+// half of the fix: when handleReloadRequest force-clears a wedged reload
+// and accepts a fresh one, the original (now-unblocked) reconciler tick
+// must not stomp on the new activeReload pointer when it finally runs
+// its cleanup defer.
+func TestCityRuntimeClearActiveReloadIfRespectsIdentity(t *testing.T) {
+	old := &reloadRequest{doneCh: make(chan reloadControlReply, 1)}
+	current := &reloadRequest{doneCh: make(chan reloadControlReply, 1)}
+
+	cr := &CityRuntime{activeReload: current}
+
+	if cleared := cr.clearActiveReloadIf(old); cleared {
+		t.Fatal("clearActiveReloadIf cleared slot for a stale pointer")
+	}
+	cr.reloadMu.Lock()
+	got := cr.activeReload
+	cr.reloadMu.Unlock()
+	if got != current {
+		t.Fatalf("activeReload = %p, want %p (must not be stomped)", got, current)
+	}
+
+	if cleared := cr.clearActiveReloadIf(current); !cleared {
+		t.Fatal("clearActiveReloadIf did not clear slot for the matching pointer")
+	}
+	cr.reloadMu.Lock()
+	gotAfter := cr.activeReload
+	cr.reloadMu.Unlock()
+	if gotAfter != nil {
+		t.Fatalf("activeReload = %p, want nil after identity-matched clear", gotAfter)
+	}
+}

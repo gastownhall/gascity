@@ -673,7 +673,12 @@ func bootstrapDriftCity(t *testing.T, binary string, env []string, gcHome string
 	t.Helper()
 	cityName := "drift-" + filepath.Base(t.TempDir())
 	cityDir := filepath.Join(filepath.Dir(gcHome), cityName)
-	cmd := exec.Command(binary, "init", "--skip-provider-readiness", cityDir)
+	cmd := exec.Command(binary, "init",
+		"--skip-provider-readiness",
+		"--providers", "codex",
+		"--default-provider", "codex",
+		cityDir,
+	)
 	cmd.Env = env
 	out, err := cmd.CombinedOutput()
 	if err != nil {

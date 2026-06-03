@@ -2885,12 +2885,52 @@ case "$*" in
     printf '[{"id":"ga-control-ready"}]'
     ;;
   *)
-    echo "unexpected first control query: $*" >&2
-    exit 42
+    printf '[]'
     ;;
 esac
 `)
 	assertJSONEqual(t, out, `[{"id":"ga-control-ready"}]`)
+}
+
+func TestWorkflowServeControlReadyQueryFailsFastOnBDReadyError(t *testing.T) {
+	query := workflowServeControlReadyQuery(
+		config.Agent{Name: config.ControlDispatcherAgentName, Dir: "gascity"},
+		"gascity--control-dispatcher",
+	)
+	tmp := t.TempDir()
+	bdPath := filepath.Join(tmp, "bd")
+	logPath := filepath.Join(tmp, "bd.log")
+	if err := os.WriteFile(bdPath, []byte(`#!/bin/sh
+set -eu
+printf '%s\n' "$*" >> "$BD_LOG"
+printf '[mysql] read tcp 127.0.0.1:1->127.0.0.1:3307: i/o timeout\n' >&2
+printf '{"error":"failed to open database: invalid connection"}\n'
+exit 1
+`), 0o755); err != nil {
+		t.Fatalf("write fake bd: %v", err)
+	}
+
+	_, err := shellWorkQueryWithEnv(query, t.TempDir(), []string{
+		"PATH=" + tmp + string(os.PathListSeparator) + os.Getenv("PATH"),
+		"BD_LOG=" + logPath,
+		"GC_SESSION_NAME=gascity--control-dispatcher",
+		"GC_ALIAS=gascity/control-dispatcher",
+	})
+	if err == nil {
+		t.Fatal("workflow serve query succeeded after bd ready failed")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "i/o timeout") || !strings.Contains(msg, "failed to open database") {
+		t.Fatalf("error = %q, want bd stderr/stdout details", msg)
+	}
+	logData, readErr := os.ReadFile(logPath)
+	if readErr != nil {
+		t.Fatalf("read bd log: %v", readErr)
+	}
+	calls := strings.Split(strings.TrimSpace(string(logData)), "\n")
+	if len(calls) != 1 {
+		t.Fatalf("bd calls = %d, want fail-fast after first call; calls:\n%s", len(calls), string(logData))
+	}
 }
 
 func TestWorkflowServeControlReadyQueryPrioritizesConfiguredRuntimeName(t *testing.T) {
@@ -2938,6 +2978,51 @@ esac
 	firstCall, _, _ := strings.Cut(strings.TrimSpace(string(logData)), "\n")
 	if want := "--readonly --sandbox ready --include-ephemeral --assignee=gascity--control-dispatcher --exclude-type=epic --json --limit=20"; firstCall != want {
 		t.Fatalf("first bd call = %q, want %q; all calls:\n%s", firstCall, want, string(logData))
+	}
+}
+
+func TestWorkflowServeControlReadyQueryDeduplicatesAssigneeProbes(t *testing.T) {
+	query := workflowServeControlReadyQuery(
+		config.Agent{Name: config.ControlDispatcherAgentName, Dir: "gascity"},
+		"gascity--control-dispatcher",
+	)
+	tmp := t.TempDir()
+	logPath := filepath.Join(tmp, "bd.log")
+	bdPath := filepath.Join(tmp, "bd")
+	if err := os.WriteFile(bdPath, []byte(`#!/bin/sh
+set -eu
+printf '%s\n' "$*" >> "$BD_LOG"
+case "$*" in
+  "--readonly --sandbox ready --include-ephemeral --assignee=gascity--control-dispatcher --exclude-type=epic --json --limit=20")
+    printf '[{"id":"ga-control-ready"}]'
+    ;;
+  *)
+    printf '[]'
+    ;;
+esac
+`), 0o755); err != nil {
+		t.Fatalf("write fake bd: %v", err)
+	}
+	out, err := shellWorkQueryWithEnv(query, t.TempDir(), []string{
+		"PATH=" + tmp + string(os.PathListSeparator) + os.Getenv("PATH"),
+		"BD_LOG=" + logPath,
+		"GC_SESSION_ID=gascity--control-dispatcher",
+		"GC_SESSION_NAME=gascity--control-dispatcher",
+		"GC_ALIAS=gascity/control-dispatcher",
+	})
+	if err != nil {
+		t.Fatalf("run workflow serve query: %v", err)
+	}
+	assertJSONEqual(t, out, `[{"id":"ga-control-ready"}]`)
+	logData, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read bd log: %v", err)
+	}
+	if got := strings.Count(string(logData), "--assignee=gascity--control-dispatcher "); got != 1 {
+		t.Fatalf("gascity--control-dispatcher query count = %d, want 1; calls:\n%s", got, string(logData))
+	}
+	if got := strings.Count(string(logData), "--assignee=gascity--workflow-control "); got != 1 {
+		t.Fatalf("gascity--workflow-control query count = %d, want 1; calls:\n%s", got, string(logData))
 	}
 }
 
@@ -3656,7 +3741,7 @@ func TestRunControlDispatcherReturnsPendingForOpenScopeSubject(t *testing.T) {
 	}
 }
 
-func TestRunWorkflowServeSkipsUnexpectedNonControlBeadAndProcessesLaterReady(t *testing.T) {
+func TestRunWorkflowServeDispatchesUnexpectedNonControlBeadAndProcessesLaterReady(t *testing.T) {
 	clearGCEnv(t)
 	disableManagedDoltRecoveryForTest(t)
 
@@ -3705,12 +3790,12 @@ func TestRunWorkflowServeSkipsUnexpectedNonControlBeadAndProcessesLaterReady(t *
 		t.Fatalf("runWorkflowServe: %v", err)
 	}
 
-	if !slices.Equal(controlled, []string{"gc-ready"}) {
-		t.Fatalf("controlled beads = %#v, want only valid control bead processed", controlled)
+	if !slices.Equal(controlled, []string{"gc-task", "gc-ready"}) {
+		t.Fatalf("controlled beads = %#v, want unexpected bead dispatched before later ready bead", controlled)
 	}
 }
 
-func TestRunWorkflowServeSkipsUnexpectedNonControlOnly(t *testing.T) {
+func TestRunWorkflowServeDispatchesUnexpectedNonControlOnly(t *testing.T) {
 	clearGCEnv(t)
 	disableManagedDoltRecoveryForTest(t)
 
@@ -3736,23 +3821,108 @@ func TestRunWorkflowServeSkipsUnexpectedNonControlOnly(t *testing.T) {
 		workflowServeIdlePollAttempts = prevAttempts
 	})
 
+	var controlled []string
 	calls := 0
 	workflowServeList = func(_, _ string, _ map[string]string) ([]hookBead, error) {
 		calls++
+		if calls > 1 {
+			return nil, nil
+		}
 		return []hookBead{
 			{ID: "gc-task", Metadata: map[string]string{"gc.routed_to": "workflows.codex-max"}},
 		}, nil
 	}
 	controlDispatcherServe = func(_, _ string, beadID string, _ io.Writer, _ io.Writer) error {
-		t.Fatalf("controlDispatcherServe called for non-control bead %q", beadID)
+		controlled = append(controlled, beadID)
 		return nil
 	}
 
 	if err := runWorkflowServe("", false, io.Discard, io.Discard); err != nil {
 		t.Fatalf("runWorkflowServe: %v", err)
 	}
-	if calls != 1 {
-		t.Fatalf("workflowServeList calls = %d, want one all-unexpected queue pass", calls)
+	if calls != 2 {
+		t.Fatalf("workflowServeList calls = %d, want one processed pass and one empty requery", calls)
+	}
+	if !slices.Equal(controlled, []string{"gc-task"}) {
+		t.Fatalf("controlled beads = %#v, want unexpected bead dispatched once", controlled)
+	}
+}
+
+func TestRunWorkflowServeQuarantinesUnexpectedNonControlBead(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n\n[daemon]\nformula_v2 = true\n"), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	t.Setenv("GC_CITY", cityDir)
+
+	prevCityFlag := cityFlag
+	prevList := workflowServeList
+	prevControl := controlDispatcherServe
+	prevInterval := workflowServeIdlePollInterval
+	prevAttempts := workflowServeIdlePollAttempts
+	cityFlag = ""
+	workflowServeIdlePollInterval = 0
+	workflowServeIdlePollAttempts = 0
+	t.Cleanup(func() {
+		cityFlag = prevCityFlag
+		workflowServeList = prevList
+		controlDispatcherServe = prevControl
+		workflowServeIdlePollInterval = prevInterval
+		workflowServeIdlePollAttempts = prevAttempts
+	})
+
+	store := beads.NewMemStore()
+	nonControl, err := store.Create(beads.Bead{
+		Title: "misrouted workflow root",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind": "workflow",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create non-control bead: %v", err)
+	}
+
+	calls := 0
+	workflowServeList = func(_, _ string, _ map[string]string) ([]hookBead, error) {
+		calls++
+		if calls > 1 {
+			return nil, nil
+		}
+		return []hookBead{{ID: nonControl.ID, Metadata: map[string]string{"gc.kind": "workflow"}}}, nil
+	}
+	controlDispatcherServe = func(cityPath, storePath, beadID string, stdout, stderr io.Writer) error {
+		bead, err := store.Get(beadID)
+		if err != nil {
+			return err
+		}
+		cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+		return runControlDispatcherWithStoreAndConfig(cityPath, storePath, store, bead, beadID, cfg, stdout, stderr)
+	}
+
+	var stderr bytes.Buffer
+	if err := runWorkflowServe("", false, io.Discard, &stderr); err != nil {
+		t.Fatalf("runWorkflowServe: %v", err)
+	}
+
+	after, err := store.Get(nonControl.ID)
+	if err != nil {
+		t.Fatalf("get non-control bead: %v", err)
+	}
+	if after.Status != "closed" {
+		t.Fatalf("status = %q, want closed", after.Status)
+	}
+	if got := after.Metadata["gc.control_quarantined"]; got != "true" {
+		t.Fatalf("gc.control_quarantined = %q, want true", got)
+	}
+	if got := after.Metadata["gc.final_disposition"]; got != "control_quarantined" {
+		t.Fatalf("gc.final_disposition = %q, want control_quarantined", got)
+	}
+	if got := stderr.String(); !strings.Contains(got, "control dispatch: quarantined bead="+nonControl.ID) {
+		t.Fatalf("stderr = %q, want quarantine message", got)
 	}
 }
 
@@ -4057,7 +4227,7 @@ func TestRunControlDispatcherQuarantinesGenericControlFailure(t *testing.T) {
 	}
 }
 
-func TestRunWorkflowServeSkipsLegacyOversizedControlAndProcessesLaterReady(t *testing.T) {
+func TestRunWorkflowServeReturnsLegacyOversizedControlError(t *testing.T) {
 	clearGCEnv(t)
 	disableManagedDoltRecoveryForTest(t)
 
@@ -4084,38 +4254,32 @@ func TestRunWorkflowServeSkipsLegacyOversizedControlAndProcessesLaterReady(t *te
 	})
 
 	var attempted []string
-	var processed []string
 	calls := 0
 	workflowServeList = func(_, _ string, _ map[string]string) ([]hookBead, error) {
 		calls++
-		switch calls {
-		case 1:
-			return []hookBead{
-				{ID: "gc-legacy", Metadata: map[string]string{"gc.kind": "ralph"}},
-				{ID: "gc-ready", Metadata: map[string]string{"gc.kind": "scope-check"}},
-			}, nil
-		default:
-			return nil, nil
-		}
+		return []hookBead{
+			{ID: "gc-legacy", Metadata: map[string]string{"gc.kind": "ralph"}},
+		}, nil
 	}
 	controlDispatcherServe = func(_, _ string, beadID string, _ io.Writer, _ io.Writer) error {
 		attempted = append(attempted, beadID)
 		if beadID == "gc-legacy" {
 			return fmt.Errorf("gc-legacy: recording attempt log: setting metadata on %q: failed to record event: old_value is too large", beadID)
 		}
-		processed = append(processed, beadID)
 		return nil
 	}
 
-	if err := runWorkflowServe("", false, io.Discard, io.Discard); err != nil {
-		t.Fatalf("runWorkflowServe: %v", err)
+	err := runWorkflowServe("", false, io.Discard, io.Discard)
+	if err == nil {
+		t.Fatal("runWorkflowServe error = nil, want legacy oversized control error")
+	}
+	if !strings.Contains(err.Error(), "recording attempt log") ||
+		!strings.Contains(err.Error(), "old_value is too large") {
+		t.Fatalf("runWorkflowServe error = %v, want oversized attempt-log error surfaced", err)
 	}
 
-	if !slices.Equal(attempted, []string{"gc-legacy", "gc-ready"}) {
-		t.Fatalf("attempted beads = %#v, want legacy oversized control skipped before ready bead is processed", attempted)
-	}
-	if !slices.Equal(processed, []string{"gc-ready"}) {
-		t.Fatalf("processed beads = %#v, want only later ready bead to be processed", processed)
+	if !slices.Equal(attempted, []string{"gc-legacy"}) {
+		t.Fatalf("attempted beads = %#v, want serve to stop at surfaced stranded control", attempted)
 	}
 }
 

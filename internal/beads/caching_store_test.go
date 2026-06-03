@@ -254,6 +254,54 @@ func TestCachingStoreIgnoresStaleUpdateEventAfterLocalUpdate(t *testing.T) {
 	}
 }
 
+// TestCachingStoreCachedReadyDeclinesAfterDroppedRoutingEvent reproduces the
+// cold-pool strand (gastownhall/gascity#2927). A bead flagged locally mutated
+// by a prior applied event (present in beadSeq, no recent local write) takes
+// the #2210 verify-then-apply branch when a conflicting event arrives; if the
+// backing read loses a write-through race the event is dropped, leaving a
+// stale open ready-candidate row in the cache. CachedReady must then decline
+// (ok=false) so the demand path falls back to the authoritative ReadyLive
+// query rather than counting pool demand off the stale row. Before the fix
+// CachedReady answered ok=true carrying the stale row, stranding the bead
+// until the next full reconcile.
+func TestCachingStoreCachedReadyDeclinesAfterDroppedRoutingEvent(t *testing.T) {
+	backing := &staleReadsAfterUpdateStore{Store: beads.NewMemStore()}
+	cs := beads.NewCachingStoreForTest(backing, nil)
+	if err := cs.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+
+	// A worker bead arrives via a remote bead.created event carrying a complete
+	// snapshot (title/status/created_at/type), so the cache keeps depsComplete
+	// true and lands the bead as an open ready candidate, flagged locally
+	// mutated (beadSeq) with no local write (recentLocalMutation false).
+	created, err := backing.Create(beads.Bead{Title: "route me"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	openSnapshot := created
+	cs.ApplyEvent("bead.created", json.RawMessage(`{"id":"`+created.ID+`","title":"route me","status":"open","created_at":"2026-01-01T00:00:00Z","type":"task"}`))
+	if ready, ok := cs.CachedReady(); !ok || !containsBeadID(ready, created.ID) {
+		t.Fatalf("precondition: CachedReady should answer with the fresh candidate (ok=%v, present=%v)", ok, containsBeadID(ready, created.ID))
+	}
+
+	// The claim lands in the backing (open -> in_progress); the matching
+	// bead.updated event then arrives, but the verify read loses the
+	// write-through race and sees the pre-claim row, so the #2210 branch cannot
+	// confirm the event. The demand path queries CachedReady directly (no
+	// intervening Get), so the stale row is what the scale-check would see.
+	if err := backing.Update(created.ID, beads.UpdateOpts{Status: strPtr("in_progress")}); err != nil {
+		t.Fatalf("Update backing: %v", err)
+	}
+	backing.stale = openSnapshot
+	backing.staleReadCount = 1
+	cs.ApplyEvent("bead.updated", json.RawMessage(`{"id":"`+created.ID+`","status":"in_progress"}`))
+
+	if _, ok := cs.CachedReady(); ok {
+		t.Fatal("CachedReady answered from a stale ready-candidate row (ok=true); want ok=false to force the authoritative ReadyLive fallback")
+	}
+}
+
 func TestCachingStoreIgnoresStaleClosedEventAfterLocalReopen(t *testing.T) {
 	mem := beads.NewMemStore()
 	created, err := mem.Create(beads.Bead{Title: "reopen me"})

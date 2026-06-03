@@ -1267,6 +1267,11 @@
         "tick_debounce": {
           "type": "string",
           "description": "TickDebounce coalesces bursty event-driven ticks (pokeCh,\ncontrolDispatcherCh) within this window. A first event in a quiet\nperiod arms a timer; subsequent events arriving before the timer\nfires are dropped (the single delayed tick re-reads authoritative\nstate covering all collapsed events). Zero (the default) disables\ndebouncing — each event fires its own tick, matching pre-existing\nbehavior. Duration string (e.g., \"250ms\", \"500ms\"). Trade-off:\nadds tick latency up to this value when set."
+        },
+        "auto_prune_worker_dir": {
+          "type": "boolean",
+          "description": "AutoPruneWorkerDir controls whether the reconciler removes a\npool-managed session's worker_dir (agent worktree) after the session\nbead is closed. Removal is gated on: path lives under the city's\n.gc/worktrees/ tree, clean working tree, no unpushed commits, no\nstashed work. Nil (unset) defaults to true so pool worktrees do not\naccumulate without bound across pool recycles. Set to false to\nretain worktrees for post-session diagnostics.",
+          "default": true
         }
       },
       "additionalProperties": false,
