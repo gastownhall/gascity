@@ -24,6 +24,9 @@ stdout 'cook'
 name = "my-city"
 provider = "claude"
 
+[providers.claude]
+base = "builtin:claude"
+
 [[agent]]
 name = "chef"
 start_command = "echo hello"

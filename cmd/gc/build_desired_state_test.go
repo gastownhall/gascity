@@ -8122,8 +8122,15 @@ func TestBuildDesiredState_PoolCheckUsesExplicitRigPassword(t *testing.T) {
 
 func TestBuildDesiredState_PoolCheckUsesManagedCityDoltPortWhenRigHasNoOverride(t *testing.T) {
 	skipSlowCmdGCTest(t, "uses a live managed-dolt port probe for scale_check coverage; run make test-cmd-gc-process for full coverage")
+	clearGCEnv(t)
 	t.Setenv("GC_BEADS", "bd")
 	cityPath := t.TempDir()
+	t.Setenv("GC_BEADS_SCOPE_ROOT", cityPath)
+	writeRigEndpointCanonicalConfig(t, cityPath, contract.ConfigState{
+		IssuePrefix:    "gc",
+		EndpointOrigin: contract.EndpointOriginManagedCity,
+		EndpointStatus: contract.EndpointStatusVerified,
+	})
 	rigPath := filepath.Join(cityPath, "myrig")
 	if err := os.MkdirAll(rigPath, 0o755); err != nil {
 		t.Fatal(err)
@@ -8153,9 +8160,22 @@ func TestBuildDesiredState_PoolCheckUsesManagedCityDoltPortWhenRigHasNoOverride(
 			{
 				Name:              "worker",
 				Dir:               "myrig",
+				StartCommand:      "true",
 				MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(5), ScaleCheck: checkCmd,
 			},
 		},
+	}
+
+	queryEnv, err := controllerQueryRuntimeEnv(cityPath, cfg, &cfg.Agents[0])
+	if err != nil {
+		t.Fatalf("controllerQueryRuntimeEnv: %v", err)
+	}
+	wantPort := strconv.Itoa(ln.Addr().(*net.TCPAddr).Port)
+	if got := queryEnv["BEADS_DOLT_SERVER_PORT"]; got != wantPort {
+		t.Fatalf("BEADS_DOLT_SERVER_PORT = %q, want %q; GC_DOLT=%q provider=%q scopeProvider=%q cityUses=%v scopeUses=%v current=%q resolvable=%q",
+			got, wantPort, os.Getenv("GC_DOLT"), rawBeadsProvider(cityPath), rawBeadsProviderForScope(rigPath, cityPath),
+			cityUsesBdStoreContract(cityPath), scopeUsesManagedBdStoreContract(cityPath, rigPath),
+			currentManagedDoltPort(cityPath), currentResolvableManagedDoltPort(cityPath))
 	}
 
 	desired := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), nil, io.Discard)

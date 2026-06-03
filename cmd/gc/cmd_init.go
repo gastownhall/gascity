@@ -359,6 +359,7 @@ committed workspace — e.g. from a bootstrap.sh shipped in the repo).`,
 			}
 			wiz, flagMode, err := initWizardConfigFromFlags(runCmd, providerFlag, defaultProviderFlag, providersFlag, templateFlag, bootstrapProfileFlag)
 			if err != nil {
+				fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
 				return err
 			}
 			if flagMode != "" {
