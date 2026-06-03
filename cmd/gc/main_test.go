@@ -169,15 +169,31 @@ func configureFSPressureForTests() {
 }
 
 func TestMain(m *testing.M) {
-	if !isTestscriptCommandInvocation(os.Args[0]) {
-		clearProcessLiveEnvForTests()
+	// testscript re-executes the test binary as "gc" or "bd" for each txtar
+	// command. On that path we must not create a new temp root — the parent
+	// already owns the fixtures. Just configure hooks and forward.
+	if isTestscriptCommandInvocation(os.Args[0]) {
+		configureFSPressureForTests()
+		configureSupervisorHooksForTests()
+		testscript.Main(m, map[string]func(){
+			"gc": func() {
+				configureTestscriptEnvDefaults()
+				os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
+			},
+			"bd": bdTestCmd,
+		})
+		return
 	}
+
+	clearProcessLiveEnvForTests()
 	if err := os.Setenv(managedDoltTestModeEnv, "1"); err != nil {
 		panic(err)
 	}
 	if err := os.Setenv(managedDoltTestParentPIDEnv, fmt.Sprintf("%d", os.Getpid())); err != nil {
 		panic(err)
 	}
+	// Sweep stale testTempRoot dirs in system /tmp before creating a new one.
+	sweepOrphanPIDPrefixedDirs(os.TempDir(), testCmdGCTempRootPrefix)
 	testTempRoot, err := os.MkdirTemp("/tmp", pidPrefixedTempPattern(testCmdGCTempRootPrefix))
 	if err != nil {
 		panic(err)

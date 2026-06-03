@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -236,5 +237,75 @@ func TestSweepOrphanAllPrefixesStabilize(t *testing.T) {
 		if _, err := os.Stat(selfDir); os.IsNotExist(err) {
 			t.Errorf("prefix %q: current-PID dir removed on second sweep", pfx)
 		}
+	}
+}
+
+// TestTestscriptCommandInvocationDoesNotLeakTempRoot verifies that re-executing
+// the test binary as "gc" or "bd" (the testscript path) does not create a
+// new /tmp/gct<PID>-* directory — the leak root cause (ga-lh1k9).
+func TestTestscriptCommandInvocationDoesNotLeakTempRoot(t *testing.T) {
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatalf("Executable: %v", err)
+	}
+	dir := t.TempDir()
+
+	tests := []struct {
+		name    string
+		command string
+		args    []string
+		wantErr bool
+	}{
+		{name: "gc", command: "gc", args: []string{"version"}},
+		{name: "bd", command: "bd", wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			commandPath := filepath.Join(dir, tt.command)
+			if err := os.Symlink(self, commandPath); err != nil {
+				t.Fatalf("Symlink: %v", err)
+			}
+			t.Cleanup(func() { _ = os.Remove(commandPath) })
+
+			cmd := exec.Command(commandPath, tt.args...)
+			cmd.Env = append(os.Environ(), "GC_DOLT=skip")
+			err := cmd.Run()
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("%s unexpectedly succeeded", tt.command)
+				}
+			} else if err != nil {
+				t.Fatalf("%s %v: %v", tt.command, tt.args, err)
+			}
+
+			pid := cmd.ProcessState.Pid()
+			matches, err := filepath.Glob(filepath.Join("/tmp", fmt.Sprintf("%s%d-*", testCmdGCTempRootPrefix, pid)))
+			if err != nil {
+				t.Fatalf("Glob: %v", err)
+			}
+			for _, match := range matches {
+				t.Cleanup(func() { _ = os.RemoveAll(match) })
+			}
+			if len(matches) > 0 {
+				t.Fatalf("leaked temp root(s) for pid %d: %v", pid, matches)
+			}
+		})
+	}
+}
+
+func TestSweepOrphanRemovesStaleCmdGCTempRootInSystemTmp(t *testing.T) {
+	pid := nonLivePID(t)
+	root := filepath.Join("/tmp", fmt.Sprintf("%s%d-stale-backstop", testCmdGCTempRootPrefix, pid))
+	_ = os.RemoveAll(root)
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+
+	sweepOrphanPIDPrefixedDirs("/tmp", testCmdGCTempRootPrefix)
+
+	if _, err := os.Stat(root); !os.IsNotExist(err) {
+		t.Fatalf("stale cmd/gc temp root still exists after sweep: %v", err)
 	}
 }
