@@ -1192,6 +1192,66 @@ func TestAdvanceSessionDrains_ConfigDriftCancelableOnPendingWake(t *testing.T) {
 	}
 }
 
+func TestAdvanceSessionDrains_ConfigDriftCanceledForAssignedWork(t *testing.T) {
+	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
+	clk := &clock.Fake{Time: now}
+	sp := runtime.NewFake()
+	store := beads.NewMemStore()
+	dt := newDrainTracker()
+
+	if err := sp.Start(context.Background(), "test-session", runtime.Config{}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	b, err := store.Create(beads.Bead{
+		Title:  "test",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name": "test-session",
+			"template":     "worker",
+			"generation":   "3",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create session bead: %v", err)
+	}
+
+	ds := &drainState{
+		startedAt:  now.Add(-10 * time.Second),
+		deadline:   now.Add(20 * time.Second),
+		reason:     "config-drift",
+		generation: 3,
+		ackSet:     true,
+	}
+	dt.set(b.ID, ds)
+	if err := setReconcilerDrainAckMetadata(sp, "test-session", ds); err != nil {
+		t.Fatalf("setReconcilerDrainAckMetadata: %v", err)
+	}
+
+	advanceSessionDrainsWithSessionsTraced(dt, sp, store, func(id string) *beads.Bead {
+		got, _ := store.Get(id)
+		return &got
+	}, []beads.Bead{b}, map[string]wakeEvaluation{
+		b.ID: {Reason: "assigned-work", Reasons: []WakeReason{WakeWork}, HasAssignedWork: true},
+	}, &config.City{Agents: []config.Agent{{Name: "worker"}}}, map[string]int{"worker": 1}, nil, nil, clk, nil)
+
+	if dt.get(b.ID) != nil {
+		t.Fatal("config-drift drain should be canceled when assigned work appears")
+	}
+	if ack, _ := sp.GetMeta("test-session", "GC_DRAIN_ACK"); ack != "" {
+		t.Fatalf("GC_DRAIN_ACK = %q, want cleared after assigned-work cancellation", ack)
+	}
+	if !sp.IsRunning("test-session") {
+		t.Fatal("session should stay running after assigned-work cancellation")
+	}
+	for _, call := range sp.Calls {
+		if call.Method == "Stop" || call.Method == "Interrupt" {
+			t.Fatalf("runtime call %s should not happen after assigned-work cancellation; calls=%#v", call.Method, sp.Calls)
+		}
+	}
+}
+
 func TestAdvanceSessionDrains_TimeoutTokenMismatch(t *testing.T) {
 	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
 	clk := &clock.Fake{Time: now}
