@@ -1224,6 +1224,51 @@ func TestOrderDispatchCooldownNotDue(t *testing.T) {
 	}
 }
 
+type strictOpenWorkListCountingStore struct {
+	beads.Store
+
+	strictOpenWorkLists int
+}
+
+func (s *strictOpenWorkListCountingStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	if strings.HasPrefix(query.Label, "order-run:") && !query.IncludeClosed && query.Limit == 0 {
+		s.strictOpenWorkLists++
+		return nil, fmt.Errorf("strict open-work scan should only run for due orders")
+	}
+	return s.Store.List(query)
+}
+
+func TestOrderDispatchCooldownNotDueSkipsStrictOpenWorkScan(t *testing.T) {
+	store := &strictOpenWorkListCountingStore{Store: beads.NewMemStore()}
+	now := time.Date(2026, 6, 3, 4, 40, 0, 0, time.UTC)
+
+	if _, err := store.Create(beads.Bead{
+		Title:     "recent run",
+		Labels:    []string{"order-run:test-order"},
+		CreatedAt: now.Add(-5 * time.Minute),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	aa := []orders.Order{{
+		Name:     "test-order",
+		Trigger:  "cooldown",
+		Interval: "1h",
+		Exec:     "true",
+	}}
+	ad := buildOrderDispatcherFromListExec(aa, store, nil, successfulExec, nil)
+	if ad == nil {
+		t.Fatal("expected non-nil dispatcher")
+	}
+
+	ad.dispatch(context.Background(), t.TempDir(), now)
+	ad.drain(context.Background())
+
+	if store.strictOpenWorkLists != 0 {
+		t.Fatalf("strict open-work scans = %d, want 0 for not-due order", store.strictOpenWorkLists)
+	}
+}
+
 func TestOrderDispatchMultiple(t *testing.T) {
 	store := beads.NewMemStore()
 
@@ -5455,8 +5500,8 @@ func TestOrderDispatchSkipsRigCooldownWhenLegacyOpenWorkReadFails(t *testing.T) 
 	if len(rigRuns) != 0 {
 		t.Fatalf("rig store has %d new run bead(s), want 0 when legacy last-run state cannot be read", len(rigRuns))
 	}
-	if !strings.Contains(stderr.String(), "checking open work") {
-		t.Fatalf("stderr missing open-work gate error:\n%s", stderr.String())
+	if !strings.Contains(stderr.String(), "reading last run") {
+		t.Fatalf("stderr missing last-run gate error:\n%s", stderr.String())
 	}
 }
 

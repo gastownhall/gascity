@@ -1738,6 +1738,61 @@ func TestBdStoreListEmptyOutputMeansNoBeads(t *testing.T) {
 	}
 }
 
+func TestBdStoreListSkipLabelsDoesNotEmitUnsupportedBd104Flag(t *testing.T) {
+	var gotCmd string
+	runner := func(_, name string, args ...string) ([]byte, error) {
+		gotCmd = name + " " + strings.Join(args, " ")
+		return []byte(`[]`), nil
+	}
+	s := beads.NewBdStore("/city", runner)
+	if _, err := s.List(beads.ListQuery{AllowScan: true, SkipLabels: true}); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(gotCmd, "--skip-labels") {
+		t.Fatalf("bd list command = %q, --skip-labels is not supported by bd 1.0.4", gotCmd)
+	}
+}
+
+func TestBdStoreListAcceptsBdListEnvelope(t *testing.T) {
+	var gotCmd string
+	runner := func(_, name string, args ...string) ([]byte, error) {
+		gotCmd = name + " " + strings.Join(args, " ")
+		return []byte(`{
+			"issues": [
+				{"id":"bd-envelope","title":"from envelope","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z"}
+			],
+			"meta": {"count": 1, "skip_labels": true},
+			"schema_version": 1
+		}`), nil
+	}
+	s := beads.NewBdStore("/city", runner)
+	got, err := s.List(beads.ListQuery{AllowScan: true, SkipLabels: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(gotCmd, "--skip-labels") {
+		t.Fatalf("bd list command = %q, --skip-labels is not supported by bd 1.0.4", gotCmd)
+	}
+	if len(got) != 1 || got[0].ID != "bd-envelope" {
+		t.Fatalf("List() = %+v, want bd-envelope from envelope", got)
+	}
+}
+
+func TestBdStoreListSkipLabelsOmittedForLabelFilter(t *testing.T) {
+	var gotCmd string
+	runner := func(_, name string, args ...string) ([]byte, error) {
+		gotCmd = name + " " + strings.Join(args, " ")
+		return []byte(`[]`), nil
+	}
+	s := beads.NewBdStore("/city", runner)
+	if _, err := s.List(beads.ListQuery{Label: "order-tracking", SkipLabels: true}); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(gotCmd, "--skip-labels") {
+		t.Fatalf("bd list command = %q, --skip-labels cannot combine with label filters", gotCmd)
+	}
+}
+
 func TestBdStoreListError(t *testing.T) {
 	runner := func(_, _ string, _ ...string) ([]byte, error) {
 		return nil, fmt.Errorf("exit status 1")

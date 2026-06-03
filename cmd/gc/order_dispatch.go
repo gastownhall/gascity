@@ -461,14 +461,14 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 			storeKeysForGate = append(storeKeysForGate, orderStoreTargetKey(legacyOrderCityTarget(cityPath, m.cfg)))
 		}
 		scoped := a.ScopedName()
-		hasOpenWork, err := gateOpenWorkBounded(ctx, orderGateTimeout, scoped, func() (bool, error) {
-			return m.hasOpenWorkInStoresStrict(storesForGate, scoped)
+		hasOpenTracking, err := gateOpenWorkBounded(ctx, orderGateTimeout, scoped, func() (bool, error) {
+			return trackingIndex.hasOpenTracking(storesForGate, storeKeysForGate, scoped)
 		})
 		if err != nil {
 			logDispatchError(m.stderr, "gc: order dispatch: checking open work for %s: %v", scoped, err)
 			continue
 		}
-		if hasOpenWork {
+		if hasOpenTracking {
 			continue
 		}
 
@@ -553,7 +553,7 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 		// Skip dispatch if previous work hasn't been processed yet.
 		// Bound the wisp-aware open-work gate (#2921) with our per-order
 		// timeout so a slow store can't starve later orders.
-		hasOpenWork, err = gateOpenWorkBounded(ctx, orderGateTimeout, scoped, func() (bool, error) {
+		hasOpenWork, err := gateOpenWorkBounded(ctx, orderGateTimeout, scoped, func() (bool, error) {
 			return trackingIndex.hasOpenWork(storesForGate, storeKeysForGate, scoped, m.hasOpenWorkInStoresStrict, true)
 		})
 		if err != nil {
@@ -667,6 +667,29 @@ func newOrderDispatchTrackingIndex() *orderDispatchTrackingIndex {
 		entries: make(map[string]map[string]orderTrackingSummary),
 		errs:    make(map[string]error),
 	}
+}
+
+func (idx *orderDispatchTrackingIndex) hasOpenTracking(
+	stores []beads.Store,
+	storeKeys []string,
+	scopedName string,
+) (bool, error) {
+	if idx == nil {
+		return false, nil
+	}
+	for i, store := range stores {
+		if store == nil {
+			continue
+		}
+		entries, err := idx.entriesForStore(store, indexStoreKey(storeKeys, i))
+		if err != nil {
+			return false, err
+		}
+		if entries[scopedName].openTracking {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func (idx *orderDispatchTrackingIndex) hasOpenWork(
