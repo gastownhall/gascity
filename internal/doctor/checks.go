@@ -2428,9 +2428,9 @@ func DoltConfigExpectedValues() []DoltConfigExpectedValue {
 		{"system_variables.dolt_stats_gc_enabled", "OFF"},
 		{"system_variables.dolt_stats_memory_only", "ON"},
 		{"system_variables.dolt_stats_paused", "ON"},
-		{"listener.read_timeout_millis", 300000},
+		{"listener.read_timeout_millis", 30000},
 		{"listener.write_timeout_millis", 300000},
-		{"listener.max_connections", 1000},
+		{"listener.max_connections", 256},
 		{"listener.back_log", 50},
 		{"listener.max_connections_timeout_millis", 5000},
 	}

@@ -7628,8 +7628,8 @@ log_level: $log_level
 listener:
   port: $port
   host: $host
-  max_connections: 1000
-  read_timeout_millis: 300000
+  max_connections: 256
+  read_timeout_millis: 30000
   write_timeout_millis: 300000
 
 data_dir: "$data_dir"
@@ -7890,8 +7890,8 @@ log_level: $log_level
 listener:
   port: $port
   host: $host
-  max_connections: 1000
-  read_timeout_millis: 300000
+  max_connections: 256
+  read_timeout_millis: 30000
   write_timeout_millis: 300000
 
 data_dir: "$data_dir"

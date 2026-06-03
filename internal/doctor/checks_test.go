@@ -3099,10 +3099,10 @@ func writeDoctorManagedDoltConfig(t *testing.T, cityPath string, overrides map[s
 		"listener": map[string]any{
 			"port":                           "3307",
 			"host":                           "127.0.0.1",
-			"max_connections":                1000,
+			"max_connections":                256,
 			"back_log":                       50,
 			"max_connections_timeout_millis": 5000,
-			"read_timeout_millis":            300000,
+			"read_timeout_millis":            30000,
 			"write_timeout_millis":           300000,
 		},
 		"data_dir": filepath.Join(cityPath, ".beads", "dolt"),
