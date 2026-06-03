@@ -126,6 +126,7 @@ TOTAL_MAIL_WISPS=0
 TOTAL_ISSUES_CLOSED=0
 TOTAL_STALE_ISSUES_SKIPPED=0
 TOTAL_EXPIRED_ISSUES_CLOSED=0
+TOTAL_EXPIRED_ISSUES_SKIPPED=0
 TOTAL_SESSIONS_PRUNED=0
 SESSION_PRUNE_ATTEMPTED=0
 ANOMALIES=""
@@ -463,33 +464,57 @@ while IFS= read -r DB; do
         fi
     fi
 
-    # Step 3: Close issues whose metadata.expires_at is in the past.
-    # Nudge beads carry a 24 h TTL stamped in metadata.expires_at, but Step 4's
-    # stale-issue threshold (720 h / 30 days) never reads that field.  Without
-    # this step, expired nudges accumulate for up to 30 days.  Any open issue
-    # with expires_at set and elapsed is closed here; the explicit TTL takes
-    # precedence over the priority and type guards used in Step 4.
+    # Step 3: Close nudge beads whose metadata.expires_at is in the past.
+    # Only beads labelled gc:nudge are candidates — other bead types that stamp
+    # expires_at (e.g. gc:extmsg-binding session bindings) must not be closed
+    # here.  The COALESCE handles both whole-second RFC3339+Z and RFC3339Nano
+    # (fractional seconds); rows where both patterns fail STR_TO_DATE return
+    # NULL and are recorded as anomalies rather than silently skipped.
     DB_EXPIRED_ISSUES_CLOSED=0
-    get_sql_rows "$DB" "expired issue" "
-        SELECT id FROM \`$DB\`.issues
-        WHERE status IN ('open', 'in_progress')
-        AND JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.expires_at')) IS NOT NULL
-        AND JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.expires_at')) != ''
-        AND STR_TO_DATE(JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.expires_at')), '%Y-%m-%dT%H:%i:%sZ') < UTC_TIMESTAMP()
+    get_sql_rows "$DB" "expired nudge bead with parse anomaly" "
+        SELECT i.id
+        FROM \`$DB\`.issues i
+        INNER JOIN \`$DB\`.labels lbl ON lbl.issue_id = i.id AND lbl.label = 'gc:nudge'
+        WHERE i.status IN ('open', 'in_progress')
+        AND JSON_UNQUOTE(JSON_EXTRACT(i.metadata, '$.expires_at')) IS NOT NULL
+        AND JSON_UNQUOTE(JSON_EXTRACT(i.metadata, '$.expires_at')) != ''
+        AND COALESCE(
+            STR_TO_DATE(JSON_UNQUOTE(JSON_EXTRACT(i.metadata, '$.expires_at')), '%Y-%m-%dT%H:%i:%s.%fZ'),
+            STR_TO_DATE(JSON_UNQUOTE(JSON_EXTRACT(i.metadata, '$.expires_at')), '%Y-%m-%dT%H:%i:%sZ')
+        ) IS NULL
+    "
+    if [ -n "$SQL_ROWS_RESULT" ]; then
+        while IFS= read -r bad_id; do
+            [ -z "$bad_id" ] && continue
+            record_anomaly "$DB" "nudge bead $bad_id in $DB has unparseable expires_at; skipped by TTL reaper"
+        done <<< "$SQL_ROWS_RESULT"
+    fi
+
+    get_sql_rows "$DB" "expired nudge bead" "
+        SELECT i.id
+        FROM \`$DB\`.issues i
+        INNER JOIN \`$DB\`.labels lbl ON lbl.issue_id = i.id AND lbl.label = 'gc:nudge'
+        WHERE i.status IN ('open', 'in_progress')
+        AND JSON_UNQUOTE(JSON_EXTRACT(i.metadata, '$.expires_at')) IS NOT NULL
+        AND JSON_UNQUOTE(JSON_EXTRACT(i.metadata, '$.expires_at')) != ''
+        AND COALESCE(
+            STR_TO_DATE(JSON_UNQUOTE(JSON_EXTRACT(i.metadata, '$.expires_at')), '%Y-%m-%dT%H:%i:%s.%fZ'),
+            STR_TO_DATE(JSON_UNQUOTE(JSON_EXTRACT(i.metadata, '$.expires_at')), '%Y-%m-%dT%H:%i:%sZ')
+        ) < UTC_TIMESTAMP()
     "
     EXPIRED_IDS=$SQL_ROWS_RESULT
 
     if [ -n "$EXPIRED_IDS" ] && [ -z "$DRY_RUN" ]; then
         if [ -z "$CITY_DB" ]; then
             if [ "$CITY_DB_ANOMALY_RECORDED" -eq 0 ]; then
-                record_anomaly "city" "city database could not be determined from GC_REAPER_CITY_DATABASE or $CITY/.beads/metadata.json; expired issue close disabled"
+                record_anomaly "city" "city database could not be determined from GC_REAPER_CITY_DATABASE or $CITY/.beads/metadata.json; expired nudge close disabled"
                 CITY_DB_ANOMALY_RECORDED=1
             fi
             SKIPPED_COUNT=$(printf '%s\n' "$EXPIRED_IDS" | sed '/^[[:space:]]*$/d' | wc -l | tr -d ' ')
-            TOTAL_STALE_ISSUES_SKIPPED=$((TOTAL_STALE_ISSUES_SKIPPED + SKIPPED_COUNT))
+            TOTAL_EXPIRED_ISSUES_SKIPPED=$((TOTAL_EXPIRED_ISSUES_SKIPPED + SKIPPED_COUNT))
         elif [ "$DB" != "$CITY_DB" ]; then
             SKIPPED_COUNT=$(printf '%s\n' "$EXPIRED_IDS" | sed '/^[[:space:]]*$/d' | wc -l | tr -d ' ')
-            TOTAL_STALE_ISSUES_SKIPPED=$((TOTAL_STALE_ISSUES_SKIPPED + SKIPPED_COUNT))
+            TOTAL_EXPIRED_ISSUES_SKIPPED=$((TOTAL_EXPIRED_ISSUES_SKIPPED + SKIPPED_COUNT))
         else
             while IFS= read -r issue_id; do
                 [ -z "$issue_id" ] && continue
@@ -498,7 +523,7 @@ while IFS= read -r DB; do
                     TOTAL_EXPIRED_ISSUES_CLOSED=$((TOTAL_EXPIRED_ISSUES_CLOSED + 1))
                     DB_MUTATIONS=$((DB_MUTATIONS + 1))
                 else
-                    record_anomaly "$DB" "closing expired issue $issue_id failed for $DB: $(sanitize_output "$CLOSE_OUTPUT")"
+                    record_anomaly "$DB" "closing expired nudge bead $issue_id failed for $DB: $(sanitize_output "$CLOSE_OUTPUT")"
                 fi
             done <<< "$EXPIRED_IDS"
         fi
@@ -656,7 +681,7 @@ if [ -n "$ANOMALIES" ]; then
         -m "$ANOMALIES" 2>/dev/null || true
 fi
 
-SUMMARY="reaper — stale_wisps:$TOTAL_STALE_WISPS, closed_wisps:$TOTAL_CLOSED_WISPS, purged:$TOTAL_PURGED, sessions-pruned:$TOTAL_SESSIONS_PRUNED, closed:$TOTAL_ISSUES_CLOSED, expired:$TOTAL_EXPIRED_ISSUES_CLOSED, skipped_non_city_issues:$TOTAL_STALE_ISSUES_SKIPPED, mail_wisps:$TOTAL_MAIL_WISPS"
+SUMMARY="reaper — stale_wisps:$TOTAL_STALE_WISPS, closed_wisps:$TOTAL_CLOSED_WISPS, purged:$TOTAL_PURGED, sessions-pruned:$TOTAL_SESSIONS_PRUNED, closed:$TOTAL_ISSUES_CLOSED, expired:$TOTAL_EXPIRED_ISSUES_CLOSED, expired_skipped:$TOTAL_EXPIRED_ISSUES_SKIPPED, skipped_non_city_issues:$TOTAL_STALE_ISSUES_SKIPPED, mail_wisps:$TOTAL_MAIL_WISPS"
 if [ -n "$DRY_RUN" ]; then
     SUMMARY="$SUMMARY, would_close_wisps:$TOTAL_WOULD_CLOSE_WISPS (dry run)"
 fi
