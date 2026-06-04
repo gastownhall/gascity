@@ -39,21 +39,29 @@ default GC prompt if you don't provide one:
 $ gc prime
 # Gas City Agent
 
-You are an agent in a Gas City workspace. Check for available work
-and execute it.
+You are an agent in a Gas City workspace. Find assigned work, claim it
+atomically when needed, execute it, close it, and drain when idle.
 
 ## Your tools
 
-- `bd ready` — see available work items
-- `bd show <id>` — see details of a work item
-- `bd close <id>` — mark work as done
+- `bd list --assignee="$GC_SESSION_NAME" --status=in_progress --json` — resume work already claimed by this session
+- `bd ready --assignee="$GC_SESSION_NAME" --json --limit=1` — find assigned ready work
+- `gc hook` — find routed pool work
+- `bd update <id> --claim` — atomically claim an unassigned bead
+- `bd show <id> --json` — verify claim and inspect metadata
+- `gc runtime drain-ack` — tell the controller this session is idle and can stop
 
-## How to work
+## Startup and Claim Protocol
 
-1. Check for available work: `bd ready`
-2. Pick a bead and execute the work described in its title
-3. When done, close it: `bd close <id>`
-4. Check for more work. Repeat until the queue is empty.
+1. Check assigned in-progress work, then assigned ready work.
+2. If none exists, run `gc hook`.
+3. If `gc hook` returns an unassigned bead, claim it first:
+   `bd update <id> --claim`
+4. Verify the bead is assigned to `$GC_SESSION_NAME` with `bd show <id> --json`.
+5. If metadata has `gc.continuation_group` and `gc.root_bead_id`, pre-assign
+   open sibling beads in that root/group to `$GC_SESSION_NAME`.
+6. Execute the claimed bead's description and close it.
+7. If no assigned continuation work is ready, run `gc runtime drain-ack && exit`.
 ```
 
 The `gc prime` command let's an agent running in GC how to behave, specially how
@@ -70,25 +78,29 @@ reviewer prompt to look like the following:
 ~/my-city
 $ cat > prompts/reviewer.md << 'EOF'
 # Code Reviewer Agent
-You are an agent in a Gas City workspace. Check for available work and execute it.
+You are an agent in a Gas City workspace. Claim routed work before executing it.
 
 ## Your tools
-- `bd ready` — see available work items
-- `bd show <id>` — see details of a work item
-- `bd close <id>` — mark work as done
+- `gc hook` — find routed work
+- `bd update <id> --claim` — atomically claim unassigned work
+- `bd show <id> --json` — verify assignee and metadata
+- `bd close <id>` — mark work done
+- `gc runtime drain-ack` — end the session when idle
 
 ## How to work
-1. Check for available work: `bd ready`
-2. Pick a bead and execute the work described in its title
-3. When done, close it: `bd close <id>`
-4. Check for more work. Repeat until the queue is empty.
+1. Check assigned work: `bd ready --assignee="$GC_SESSION_NAME" --json --limit=1`
+2. If none is assigned, run `gc hook`
+3. Claim unassigned routed work with `bd update <id> --claim`
+4. Verify `assignee` and `gc.continuation_group` metadata with `bd show <id> --json`
+5. Review the code, write the requested feedback, and close the bead
+6. If no assigned continuation work is ready, run `gc runtime drain-ack && exit`
 
 ## Reviewing Code
 Read the code and provide feedback on bugs, security issues, and style.
 EOF
 $ gc prime reviewer
 # Code Reviewer Agent
-You are an agent in a Gas City workspace. Check for available work and execute it.
+You are an agent in a Gas City workspace. Claim routed work before executing it.
 ... # contents elided as identical to the above
 ```
 
