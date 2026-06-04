@@ -345,6 +345,30 @@ func TestPromptFilesExist(t *testing.T) {
 	}
 }
 
+// TestTmuxKeybindingsScrollWheel locks ga-c4w Part A: the gastown tmux
+// keybindings must bind the mouse wheel to copy-mode scrollback (root table),
+// so the "mouse on" set in tmux-theme.sh drives tmux scrollback instead of
+// leaking the wheel to the focused TUI. It must NOT reintroduce the po-vtg2
+// client-attached set-hook stopgap (acceptance #5) — the interactive MouseOn
+// default in internal/api (sessionCreateHints) replaces it.
+func TestTmuxKeybindingsScrollWheel(t *testing.T) {
+	dir := exampleDir()
+	path := filepath.Join(dir, "packs", "gastown", "assets", "scripts", "tmux-keybindings.sh")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading tmux-keybindings.sh: %v", err)
+	}
+	script := string(data)
+	for _, want := range []string{"WheelUpPane", "WheelDownPane"} {
+		if !strings.Contains(script, want) {
+			t.Errorf("tmux-keybindings.sh missing %q wheel binding (ga-c4w Part A):\n%s", want, script)
+		}
+	}
+	if strings.Contains(script, "client-attached") {
+		t.Error("tmux-keybindings.sh contains the po-vtg2 client-attached set-hook stopgap; the interactive MouseOn default replaces it (ga-c4w acceptance #5)")
+	}
+}
+
 func TestOverlayDirsExist(t *testing.T) {
 	dir := exampleDir()
 	cfg := loadExpanded(t)
