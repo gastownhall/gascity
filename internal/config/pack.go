@@ -114,7 +114,22 @@ func expandPacks(cfg *City, fs fsys.FS, cityRoot string, rigFormulaDirs map[stri
 		cache := &packLoadCache{results: make(map[string]*packLoadResult)}
 		topoRefs := rig.Includes
 		if len(topoRefs) == 0 && len(rig.Imports) == 0 {
-			continue
+			// When a rig has only a path (no explicit includes/imports), treat
+			// the path directory itself as an implicit include if it contains a
+			// pack.toml. This supports the packV2 convention where a rig root
+			// can carry a pack.toml with agents/ directories.
+			if p := strings.TrimSpace(rig.Path); p != "" {
+				packPath := p
+				if !filepath.IsAbs(packPath) {
+					packPath = filepath.Join(cityRoot, packPath)
+				}
+				if _, sErr := fs.Stat(filepath.Join(packPath, packFile)); sErr == nil {
+					topoRefs = []string{packPath}
+				}
+			}
+			if len(topoRefs) == 0 {
+				continue
+			}
 		}
 
 		var rigAgents []Agent
@@ -2902,9 +2917,14 @@ func decodePackName(data []byte) (string, error) {
 }
 
 // HasPackRigs reports whether any rig in the config uses a pack.
+// Rigs with only a path are included because expandPacks auto-discovers
+// their root pack.toml (if present) as an implicit include.
 func HasPackRigs(rigs []Rig) bool {
 	for _, r := range rigs {
 		if len(r.Includes) > 0 || len(r.Imports) > 0 {
+			return true
+		}
+		if strings.TrimSpace(r.Path) != "" {
 			return true
 		}
 	}
