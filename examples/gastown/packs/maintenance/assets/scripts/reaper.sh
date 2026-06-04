@@ -120,6 +120,7 @@ fi
 
 TOTAL_STALE_WISPS=0
 TOTAL_CLOSED_WISPS=0
+TOTAL_WOULD_CLOSE_WISPS=0
 TOTAL_PURGED=0
 TOTAL_MAIL_WISPS=0
 TOTAL_ISSUES_CLOSED=0
@@ -385,7 +386,11 @@ while IFS= read -r DB; do
             )
         "
         CLOSE_WISP_BATCH=$SQL_COUNT_RESULT
-        if [ "$CLOSE_WISP_BATCH" -eq 0 ] || [ -n "$DRY_RUN" ]; then
+        if [ "$CLOSE_WISP_BATCH" -eq 0 ]; then
+            break
+        fi
+        if [ -n "$DRY_RUN" ]; then
+            TOTAL_WOULD_CLOSE_WISPS=$((TOTAL_WOULD_CLOSE_WISPS + CLOSE_WISP_BATCH))
             break
         fi
 
@@ -609,7 +614,7 @@ fi
 
 SUMMARY="reaper — stale_wisps:$TOTAL_STALE_WISPS, closed_wisps:$TOTAL_CLOSED_WISPS, purged:$TOTAL_PURGED, sessions-pruned:$TOTAL_SESSIONS_PRUNED, closed:$TOTAL_ISSUES_CLOSED, skipped_non_city_issues:$TOTAL_STALE_ISSUES_SKIPPED, mail_wisps:$TOTAL_MAIL_WISPS"
 if [ -n "$DRY_RUN" ]; then
-    SUMMARY="$SUMMARY (dry run)"
+    SUMMARY="$SUMMARY, would_close_wisps:$TOTAL_WOULD_CLOSE_WISPS (dry run)"
 fi
 
 gc session nudge deacon/ "DOG_DONE: $SUMMARY" 2>/dev/null || true
