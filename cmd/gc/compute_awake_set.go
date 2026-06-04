@@ -200,7 +200,8 @@ func ComputeAwakeSet(input AwakeInput) map[string]AwakeDecision {
 			continue
 		}
 		active := collectActiveBeads(input.SessionBeads, template)
-		filled := 0
+		filled := countAssignedScaleSlots(input.SessionBeads, input.WorkBeads, input.NamedSessions, template)
+		unassignedActiveFilled := 0
 		for _, bead := range active {
 			if filled >= count {
 				break
@@ -210,8 +211,10 @@ func ComputeAwakeSet(input AwakeInput) map[string]AwakeDecision {
 			}
 			desired[bead.SessionName] = "scaled:demand"
 			filled++
+			unassignedActiveFilled++
 		}
 		creating := collectCreatingBeads(input.SessionBeads, template)
+		filled = unassignedActiveFilled
 		for _, bead := range creating {
 			if filled >= count {
 				break
@@ -444,6 +447,22 @@ func ComputeAwakeSet(input AwakeInput) map[string]AwakeDecision {
 	}
 
 	return result
+}
+
+func countAssignedScaleSlots(beads []AwakeSessionBead, workBeads []AwakeWorkBead, named []AwakeNamedSession, template string) int {
+	n := 0
+	for _, bead := range beads {
+		if bead.Template != template || bead.State == "closed" {
+			continue
+		}
+		if bead.NamedIdentity != "" || bead.ConfiguredNamedSession || bead.ManualSession {
+			continue
+		}
+		if sessionHasAssignedWork(workBeads, named, bead) {
+			n++
+		}
+	}
+	return n
 }
 
 func awakeAgentBaseName(name string) string {
