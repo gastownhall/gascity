@@ -180,7 +180,7 @@ func releaseOrphanedPoolAssignments(
 				continue
 			}
 		}
-		if !liveWorkAssignmentStillReleasable(ownerStore, wb.ID, assignee) {
+		if !liveWorkAssignmentStillReleasable(ownerStore, wb.ID, wb.Status, assignee) {
 			continue
 		}
 		allowsRelease, clearDetached := detachedProbeAllowsOrphanRelease(wb)
@@ -417,13 +417,22 @@ func directSessionBeadIDCandidates(assignee string) []string {
 	return candidates
 }
 
-func liveWorkAssignmentStillReleasable(store beads.Store, id, assignee string) bool {
+// liveWorkAssignmentStillReleasable confirms the snapshot is not stale
+// before clearing assignee. The expectedStatus must match the snapshot
+// status the caller observed: if the bead has since transitioned (e.g. a
+// concurrent claim moved open→in_progress, or another release moved
+// in_progress→open) the snapshot's release decision is no longer safe.
+// Open status is required for the issue #2793 path — graph.v2 step
+// beads stuck on a dead session's long-form assignee are status=open,
+// not in_progress.
+func liveWorkAssignmentStillReleasable(store beads.Store, id, expectedStatus, assignee string) bool {
 	id = strings.TrimSpace(id)
-	if store == nil || id == "" {
+	expectedStatus = strings.TrimSpace(expectedStatus)
+	if store == nil || id == "" || expectedStatus == "" {
 		return false
 	}
 	work, err := store.List(beads.ListQuery{
-		Status:   "in_progress",
+		Status:   expectedStatus,
 		Live:     true,
 		TierMode: beads.TierBoth,
 	})

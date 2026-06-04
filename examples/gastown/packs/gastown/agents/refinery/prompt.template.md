@@ -174,7 +174,7 @@ for ORPHAN in $ORPHANS; do
 done
 
 # Step 1: Check for an in-progress patrol wisp
-gc bd list --assignee="$GC_AGENT" --status=in_progress
+{{ .AssignedInProgressQuery }}
 
 # If none found, pour one (root-only — no child step beads) and assign it
 WISP=$(gc bd mol wisp mol-refinery-patrol --root-only --var target_branch={{ .DefaultBranch }} --var rig_name={{ .RigName }} --var binding_prefix={{ .BindingPrefix }} --json | jq -r '.new_epic_id')

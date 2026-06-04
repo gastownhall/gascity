@@ -858,6 +858,57 @@ func TestWorkflowSQLDepFromRowDefaultsMissingTypeToBlocks(t *testing.T) {
 	}
 }
 
+func TestWorkflowSQLDependsOnExprFromColumnsSupportsBD104AndBD105(t *testing.T) {
+	tests := []struct {
+		name    string
+		columns map[string]bool
+		want    string
+	}{
+		{
+			name:    "bd 1.0.4 depends_on_id",
+			columns: map[string]bool{"depends_on_id": true},
+			want:    "COALESCE(NULLIF(d.depends_on_id, ''), '')",
+		},
+		{
+			name: "bd 1.0.5 split target columns",
+			columns: map[string]bool{
+				"depends_on_issue_id": true,
+				"depends_on_wisp_id":  true,
+				"depends_on_external": true,
+			},
+			want: "COALESCE(NULLIF(d.depends_on_issue_id, ''), NULLIF(d.depends_on_wisp_id, ''), NULLIF(d.depends_on_external, ''), '')",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := workflowSQLDependsOnExprFromColumns("d", tt.columns)
+			if err != nil {
+				t.Fatalf("workflowSQLDependsOnExprFromColumns() error = %v", err)
+			}
+			if got != tt.want {
+				t.Fatalf("workflowSQLDependsOnExprFromColumns() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestWorkflowSQLSnapshotScopeDefaultsToSelectedStore(t *testing.T) {
+	root := beads.Bead{Metadata: map[string]string{}}
+	info := workflowStoreInfo{scopeKind: "rig", scopeRef: "gascity"}
+
+	scopeKind, scopeRef := workflowSQLSnapshotScope(root, info, "", "")
+	if scopeKind != "rig" || scopeRef != "gascity" {
+		t.Fatalf("scope = (%q, %q), want selected store scope (rig, gascity)", scopeKind, scopeRef)
+	}
+
+	root.Metadata["gc.scope_kind"] = "city"
+	root.Metadata["gc.scope_ref"] = "maintainer-city"
+	scopeKind, scopeRef = workflowSQLSnapshotScope(root, info, "rig", "fallback")
+	if scopeKind != "city" || scopeRef != "maintainer-city" {
+		t.Fatalf("metadata scope = (%q, %q), want metadata override (city, maintainer-city)", scopeKind, scopeRef)
+	}
+}
+
 func TestWorkflowGetNormalizesShortScopeRefs(t *testing.T) {
 	state := newFakeState(t)
 	state.cityName = "test-city"

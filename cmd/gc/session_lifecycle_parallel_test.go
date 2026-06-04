@@ -1234,6 +1234,91 @@ func TestReconcileSessionBeads_DaemonMaxWakesPerTickOverride(t *testing.T) {
 	}
 }
 
+// TestExecutePlannedStarts_WakeBudgetPrioritizesLeastRecentlyWoken proves the
+// per-tick wake budget is FAIR. When the budget cannot cover every ready
+// candidate, the least-recently-woken (longest-waiting) session must win a slot
+// rather than being starved behind more-recently-woken siblings that sort ahead
+// of it in the stable dependency/topo order. Without fairness the same
+// back-of-order sessions are deferred_by_wake_budget every tick.
+func TestExecutePlannedStarts_WakeBudgetPrioritizesLeastRecentlyWoken(t *testing.T) {
+	sp := runtime.NewFake()
+	store := beads.NewMemStore()
+	clk := &clock.Fake{Time: time.Date(2026, 6, 4, 3, 30, 0, 0, time.UTC)}
+	budget := 2
+	cfg := &config.City{Daemon: config.DaemonConfig{MaxWakesPerTick: &budget}}
+
+	mkTP := func(name string) TemplateParams {
+		return TemplateParams{
+			Command:      "claude",
+			SessionName:  name,
+			TemplateName: name,
+			ResolvedProvider: &config.ResolvedProvider{
+				Name:          "claude",
+				Command:       "claude",
+				PromptMode:    "arg",
+				ResumeFlag:    "--resume",
+				ResumeStyle:   "flag",
+				SessionIDFlag: "--session-id",
+			},
+		}
+	}
+
+	// "starved" is LAST in slice/topo order (the stable order would defer it),
+	// but it was woken longest ago, so a fair budget must still wake it.
+	specs := []struct{ name, lastWoke string }{
+		{"front-1", "2026-06-04T03:29:00Z"},
+		{"front-2", "2026-06-04T03:29:00Z"},
+		{"starved", "2020-01-01T00:00:00Z"},
+	}
+	desired := map[string]TemplateParams{}
+	var candidates []startCandidate
+	for i, s := range specs {
+		sess, err := store.Create(beads.Bead{
+			Title:  s.name,
+			Type:   sessionBeadType,
+			Labels: []string{sessionBeadLabel},
+			Metadata: map[string]string{
+				"session_name":   s.name,
+				"agent_name":     s.name,
+				"template":       s.name,
+				"state":          "creating",
+				"generation":     "1",
+				"instance_token": "test-token",
+				"live_hash":      runtime.LiveFingerprint(runtime.Config{Command: "test-cmd"}),
+				"last_woke_at":   s.lastWoke,
+			},
+		})
+		if err != nil {
+			t.Fatalf("Create(%s): %v", s.name, err)
+		}
+		sCopy := sess
+		tp := mkTP(s.name)
+		desired[s.name] = tp
+		candidates = append(candidates, startCandidate{session: &sCopy, tp: tp, order: i})
+	}
+
+	woken := executePlannedStarts(
+		context.Background(),
+		candidates,
+		cfg,
+		desired,
+		sp,
+		store,
+		"",
+		clk,
+		events.Discard,
+		5*time.Second,
+		ioDiscard{},
+		ioDiscard{},
+	)
+	if woken != budget {
+		t.Fatalf("woken = %d, want %d", woken, budget)
+	}
+	if !sp.IsRunning("starved") {
+		t.Fatal("least-recently-woken 'starved' was deferred behind recently-woken siblings — wake budget is not fair (starvation)")
+	}
+}
+
 func TestPrepareStartCandidate_NoneModeInitialMessageStaysInNudge(t *testing.T) {
 	store := beads.NewMemStore()
 	bead, err := store.Create(beads.Bead{

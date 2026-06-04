@@ -5,6 +5,13 @@ Your formula defines your work as a sequence of steps. Steps are NOT
 materialized as individual beads — they exist in the formula definition.
 Read the step descriptions and work through them in order.
 
+If your claimed bead is a formula wisp, `gc bd show <wisp-id>` gives you the
+formula reference. Read the full recipe with:
+
+```bash
+gc bd formula show <formula-name> --json
+```
+
 **THE RULE**: Execute one step at a time. Verify completion. Move to next.
 Do NOT skip ahead. Do NOT claim steps done without actually doing them.
 

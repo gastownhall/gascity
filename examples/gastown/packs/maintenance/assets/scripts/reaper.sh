@@ -120,6 +120,7 @@ fi
 
 TOTAL_STALE_WISPS=0
 TOTAL_CLOSED_WISPS=0
+TOTAL_WOULD_CLOSE_WISPS=0
 TOTAL_PURGED=0
 TOTAL_MAIL_WISPS=0
 TOTAL_ISSUES_CLOSED=0
@@ -255,13 +256,14 @@ get_sql_rows() {
     SQL_ROWS_RESULT=$(printf '%s\n' "$output" | tail -n +2 | tr -d '\r')
 }
 
-has_split_dependency_target_columns() {
+has_dependency_target_column() {
     local db="$1"
+    local table="$2"
     local output
     local fields
 
-    if ! output=$(dolt_sql -r csv -q "SHOW COLUMNS FROM \`$db\`.dependencies" 2>/dev/null); then
-        return 0
+    if ! output=$(dolt_sql -r csv -q "SHOW COLUMNS FROM \`$db\`.$table" 2>/dev/null); then
+        return 1
     fi
 
     fields=$(printf '%s\n' "$output" | tail -n +2 | cut -d, -f1 | tr -d '\r')
@@ -269,8 +271,8 @@ has_split_dependency_target_columns() {
         return 0
     fi
 
-    printf '%s\n' "$fields" | grep -qx 'depends_on_issue_id' || return 1
-    printf '%s\n' "$fields" | grep -qx 'depends_on_wisp_id' || return 1
+    printf '%s\n' "$fields" | grep -qx 'issue_id' || return 1
+    printf '%s\n' "$fields" | grep -qx 'depends_on_id' || return 1
 }
 
 SQL_CHANGE_ROWS_RESULT=0
@@ -343,10 +345,10 @@ while IFS= read -r DB; do
         # server into noise. See gastownhall/gascity#1816.
         continue
     fi
-    if ! has_split_dependency_target_columns "$DB"; then
-        # Legacy dependency schema (pre-#2399). Skip silently like the
-        # has_wisps_table gate above; the only fix is the schema migration,
-        # which the reaper cannot perform. See gastownhall/gascity#2456.
+    if ! has_dependency_target_column "$DB" "dependencies" || ! has_dependency_target_column "$DB" "wisp_dependencies"; then
+        # Older or incompatible dependency schema. Skip silently like the
+        # has_wisps_table gate above; the only fix is a bead-store schema
+        # migration, which the reaper cannot perform.
         continue
     fi
 
@@ -372,11 +374,11 @@ while IFS= read -r DB; do
     while [ "$STALE_WISP_COUNT" -gt 0 ] && [ "$CLOSE_WISP_COUNT" -lt "$STALE_WISP_COUNT" ]; do
         get_sql_count "$DB" "schema-safe stale wisp" "
             SELECT COUNT(DISTINCT w.id) FROM \`$DB\`.wisps w
-            INNER JOIN \`$DB\`.dependencies d
+            INNER JOIN \`$DB\`.wisp_dependencies d
                 ON d.issue_id = w.id
                 AND d.type = 'parent-child'
-            LEFT JOIN \`$DB\`.wisps parent_wisp ON d.depends_on_wisp_id = parent_wisp.id
-            LEFT JOIN \`$DB\`.issues parent_issue ON d.depends_on_issue_id = parent_issue.id
+            LEFT JOIN \`$DB\`.wisps parent_wisp ON d.depends_on_id = parent_wisp.id
+            LEFT JOIN \`$DB\`.issues parent_issue ON d.depends_on_id = parent_issue.id
             WHERE w.status IN ('open', 'hooked', 'in_progress')
             AND w.created_at < DATE_SUB(NOW(), INTERVAL $MAX_AGE_H HOUR)
             AND (
@@ -385,7 +387,11 @@ while IFS= read -r DB; do
             )
         "
         CLOSE_WISP_BATCH=$SQL_COUNT_RESULT
-        if [ "$CLOSE_WISP_BATCH" -eq 0 ] || [ -n "$DRY_RUN" ]; then
+        if [ "$CLOSE_WISP_BATCH" -eq 0 ]; then
+            break
+        fi
+        if [ -n "$DRY_RUN" ]; then
+            TOTAL_WOULD_CLOSE_WISPS=$((TOTAL_WOULD_CLOSE_WISPS + CLOSE_WISP_BATCH))
             break
         fi
 
@@ -396,11 +402,11 @@ while IFS= read -r DB; do
             AND id IN (
                 SELECT id FROM (
                     SELECT w.id FROM \`$DB\`.wisps w
-                    INNER JOIN \`$DB\`.dependencies d
+                    INNER JOIN \`$DB\`.wisp_dependencies d
                         ON d.issue_id = w.id
                         AND d.type = 'parent-child'
-                    LEFT JOIN \`$DB\`.wisps parent_wisp ON d.depends_on_wisp_id = parent_wisp.id
-                    LEFT JOIN \`$DB\`.issues parent_issue ON d.depends_on_issue_id = parent_issue.id
+                    LEFT JOIN \`$DB\`.wisps parent_wisp ON d.depends_on_id = parent_wisp.id
+                    LEFT JOIN \`$DB\`.issues parent_issue ON d.depends_on_id = parent_issue.id
                     WHERE w.status IN ('open', 'hooked', 'in_progress')
                     AND w.created_at < DATE_SUB(NOW(), INTERVAL $MAX_AGE_H HOUR)
                     AND (
@@ -429,10 +435,9 @@ while IFS= read -r DB; do
         WHERE status = 'closed'
         AND closed_at < DATE_SUB(NOW(), INTERVAL $PURGE_AGE_H HOUR)
         AND id NOT IN (
-            SELECT DISTINCT d.depends_on_wisp_id FROM \`$DB\`.dependencies d
+            SELECT DISTINCT d.depends_on_id FROM \`$DB\`.wisp_dependencies d
             INNER JOIN \`$DB\`.wisps child_wisp ON d.issue_id = child_wisp.id
             WHERE d.type = 'parent-child'
-            AND d.depends_on_wisp_id IS NOT NULL
             AND child_wisp.status IN ('open', 'hooked', 'in_progress')
         )
     "
@@ -444,10 +449,9 @@ while IFS= read -r DB; do
             WHERE status = 'closed'
             AND closed_at < DATE_SUB(NOW(), INTERVAL $PURGE_AGE_H HOUR)
             AND id NOT IN (
-                SELECT DISTINCT d.depends_on_wisp_id FROM \`$DB\`.dependencies d
+                SELECT DISTINCT d.depends_on_id FROM \`$DB\`.wisp_dependencies d
                 INNER JOIN \`$DB\`.wisps child_wisp ON d.issue_id = child_wisp.id
                 WHERE d.type = 'parent-child'
-                AND d.depends_on_wisp_id IS NOT NULL
                 AND child_wisp.status IN ('open', 'hooked', 'in_progress')
             )
         "; then
@@ -468,13 +472,12 @@ while IFS= read -r DB; do
         AND issue_type != 'epic'
         AND id NOT IN (
             SELECT DISTINCT d.issue_id FROM \`$DB\`.dependencies d
-            INNER JOIN \`$DB\`.issues i ON d.depends_on_issue_id = i.id
+            INNER JOIN \`$DB\`.issues i ON d.depends_on_id = i.id
             WHERE i.status IN ('open', 'in_progress')
             UNION
-            SELECT DISTINCT d.depends_on_issue_id FROM \`$DB\`.dependencies d
+            SELECT DISTINCT d.depends_on_id FROM \`$DB\`.dependencies d
             INNER JOIN \`$DB\`.issues i ON d.issue_id = i.id
             WHERE i.status IN ('open', 'in_progress')
-            AND d.depends_on_issue_id IS NOT NULL
         )
     "
     STALE_IDS=$SQL_ROWS_RESULT
@@ -609,7 +612,7 @@ fi
 
 SUMMARY="reaper — stale_wisps:$TOTAL_STALE_WISPS, closed_wisps:$TOTAL_CLOSED_WISPS, purged:$TOTAL_PURGED, sessions-pruned:$TOTAL_SESSIONS_PRUNED, closed:$TOTAL_ISSUES_CLOSED, skipped_non_city_issues:$TOTAL_STALE_ISSUES_SKIPPED, mail_wisps:$TOTAL_MAIL_WISPS"
 if [ -n "$DRY_RUN" ]; then
-    SUMMARY="$SUMMARY (dry run)"
+    SUMMARY="$SUMMARY, would_close_wisps:$TOTAL_WOULD_CLOSE_WISPS (dry run)"
 fi
 
 gc session nudge deacon/ "DOG_DONE: $SUMMARY" 2>/dev/null || true

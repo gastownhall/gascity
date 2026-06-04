@@ -322,6 +322,7 @@ func (m *MemStore) Children(parentID string, opts ...QueryOpt) ([]Bead, error) {
 		ParentID:      parentID,
 		IncludeClosed: HasOpt(opts, IncludeClosed),
 		Sort:          SortCreatedAsc,
+		TierMode:      TierModeFromOpts(opts),
 	})
 }
 

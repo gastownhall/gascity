@@ -1,0 +1,172 @@
+description = """
+Polecat report-only variant — investigates an issue and writes findings
+as bead notes, without creating a branch or opening a pull request.
+
+Extends mol-polecat-base with a lightweight workspace (no git checkout, no
+isolated worktree) and a write-report terminal step instead of commit+push.
+Designed for tasks that produce analysis, recommendations, or investigation
+results — not code changes.
+
+## Polecat Contract (Report-Only Model)
+
+1. Receive work (molecule poured with this formula, assigned to you)
+2. Follow steps in order (read descriptions, execute, move to next)
+3. Write findings to bead notes, close bead, exit
+4. You are GONE — no branch, no PR, no push
+
+**No code changes.** Investigation results land as bead notes. Zero calls
+to `git push` or `gh pr create`.
+
+## Failure Modes
+
+| Situation | Action |
+|-----------|--------|
+| Investigation blocked | Mail Witness, mark yourself stuck |
+| Blocked on external | Mail Witness, mark yourself stuck |
+| Context filling | `gc runtime request-restart` (blocks until controller kills you) |
+| Unsure what to do | Mail Witness, don't guess |"""
+formula = "mol-polecat-report"
+extends = ["mol-polecat-base"]
+
+[[steps]]
+id = "workspace-setup"
+title = "Verify assignment (report-only, no worktree)"
+needs = ["load-context"]
+description = """
+No code changes are expected in this formula. Confirm the scope and
+verify the investigation environment is ready.
+
+**No git checkout, no isolated worktree.** You investigate with existing
+sources in place. If you discover the issue requires a code fix, do NOT
+attempt it here — mail Witness and drain-ack so the operator can
+re-pour with `mol-polecat-commit` or `mol-polecat-pr`.
+
+**1. Confirm scope:**
+
+Re-read the issue with fresh eyes:
+```bash
+bd show {{issue}}
+```
+
+**2. Prime environment:**
+```bash
+gc prime
+bd prime
+```
+
+**Exit criteria:** Scope confirmed as investigation/analysis only."""
+
+[[steps]]
+id = "preflight-tests"
+title = "Skip pre-flights (no code changes)"
+needs = ["workspace-setup"]
+description = """
+No pre-flights needed — this formula produces no code changes.
+
+Close this step immediately and proceed to implement.
+
+**Exit criteria:** (immediate — no action required)"""
+
+[[steps]]
+id = "implement"
+title = "Investigate (no code changes)"
+needs = ["preflight-tests"]
+description = """
+Investigate the issue. This is analysis only — you produce findings, not
+code changes.
+
+- Read the relevant sources, traces, logs, and configuration in place.
+- Gather concrete evidence: file paths, line numbers, command output.
+- Identify the root cause, or state clearly that it is unknown.
+- Do NOT edit, create, or delete any files. If you discover a code fix is
+  required, do NOT attempt it here — mail Witness and drain-ack so the
+  operator can re-pour with mol-polecat-commit or mol-polecat-pr.
+
+**Exit criteria:** Investigation complete, evidence gathered, no files modified."""
+
+[[steps]]
+id = "self-review"
+title = "Self-review: verify investigation is complete"
+needs = ["implement"]
+description = """
+Review your findings before writing the final report.
+
+**1. Verify completeness:**
+
+- Does the investigation answer every question in the issue description?
+- Are findings specific (file paths, line numbers, concrete observations)?
+- Are open questions or unresolved ambiguities noted?
+- Is the root cause identified (or clearly stated as unknown)?
+- Are recommended next steps actionable?
+
+**2. Check for accidental code changes:**
+
+```bash
+git status
+```
+
+There must be NO uncommitted code changes. If `git status` shows any
+modifications, STOP — do not run a broad `git checkout`. This is a shared,
+non-isolated checkout, so a blanket discard can wipe unrelated local work.
+Mail Witness, note the unexpected dirty state, and drain-ack so the
+operator can inspect. Only revert files you are certain you touched, by
+explicit path (e.g. `git checkout -- path/to/file`).
+
+This formula produces ZERO code changes. All output is bead notes.
+
+**Exit criteria:** Findings complete, git status clean."""
+
+[[steps]]
+id = "write-report"
+title = "Write report to bead notes and close"
+needs = ["self-review"]
+description = """
+Write your investigation findings to the bead and close it. No branch,
+no push, no PR. You cease to exist after this step.
+
+**1. Format and write the report:**
+
+Compose a clear summary of your findings. Include:
+- Root cause (or "unknown — further investigation required")
+- Supporting evidence (file paths, line numbers, log snippets)
+- Recommended next steps
+- Any open questions or caveats
+
+```bash
+REPORT="$(cat <<'ENDREPORT'
+## Findings
+
+<root cause or "unknown — further investigation required">
+
+## Evidence
+
+<specific evidence: file:line, log snippet, command output>
+
+## Recommended next steps
+
+<actionable items>
+
+## Open questions
+
+<unresolved items, caveats>
+ENDREPORT
+)"
+bd update {{issue}} --notes "$REPORT"
+```
+
+**2. Close the bead:**
+```bash
+bd close {{issue}}
+```
+
+**3. Signal reconciler and exit.**
+```bash
+gc runtime drain-ack
+exit
+```
+
+`gc runtime drain-ack` tells the reconciler to kill this session. The
+reconciler only restarts you if the pool check command finds more work.
+You are GONE. Done means gone. There is no idle state.
+
+**Exit criteria:** Report written to bead notes, bead closed, session exited."""

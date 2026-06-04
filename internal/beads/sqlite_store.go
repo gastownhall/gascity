@@ -572,10 +572,17 @@ func (s *SQLiteStore) List(query ListQuery) ([]Bead, error) {
 		if err != nil {
 			return nil, fmt.Errorf("listing sqlite beads: %w", err)
 		}
+		if !query.Matches(b) {
+			continue
+		}
 		result = append(result, b)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("listing sqlite beads: %w", err)
+	}
+	sortBeadsForQuery(result, query.Sort)
+	if query.Limit > 0 && len(result) > query.Limit {
+		result = result[:query.Limit]
 	}
 	return result, nil
 }
@@ -585,7 +592,8 @@ func sqliteListSQL(q ListQuery) (string, []any) {
 	args := []any{}
 	switch q.TierMode {
 	case TierWisps:
-		where = append(where, "tier='wisp'")
+		// NoHistory rows live in SQLite's main tier but remain part of the
+		// logical wisp tier, so final tier filtering happens after decode.
 	case TierBoth:
 	default:
 		where = append(where, "tier='main'")
@@ -634,7 +642,7 @@ func sqliteListSQL(q ListQuery) (string, []any) {
 	case SortCreatedDesc:
 		sqlText += " ORDER BY created_at DESC, id DESC"
 	}
-	if q.Limit > 0 {
+	if q.Limit > 0 && q.TierMode != TierWisps {
 		sqlText += fmt.Sprintf(" LIMIT %d", q.Limit)
 	}
 	return sqlText, args
@@ -649,27 +657,36 @@ func (s *SQLiteStore) ListOpen(status ...string) ([]Bead, error) {
 	return s.List(query)
 }
 
-// Ready returns open, unblocked actionable main-tier beads.
+// Ready returns open, unblocked actionable beads from the requested tier.
 func (s *SQLiteStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 	q := readyQueryFromArgs(query)
 	args := []any{}
-	sqlText := `SELECT b.bead_json FROM beads b
-		WHERE b.tier='main'
-		  AND b.status='open'
-		  AND b.issue_type NOT IN ('merge-request','gate','molecule','step','message','session','agent','role','rig')
-		  AND NOT EXISTS (
+	where := []string{
+		"b.status='open'",
+		`b.issue_type NOT IN ('merge-request','gate','molecule','step','message','session','agent','role','rig')`,
+		`NOT EXISTS (
 			SELECT 1 FROM deps d
 			LEFT JOIN beads blocker ON blocker.id=d.depends_on_id
 			WHERE d.issue_id=b.id
 			  AND d.dep_type IN ('blocks','waits-for','conditional-blocks')
 			  AND COALESCE(blocker.status, '') <> 'closed'
-		  )`
+		  )`,
+	}
+	switch q.TierMode {
+	case TierWisps:
+		// Filter after decode so NoHistory rows in SQLite's main tier are still
+		// visible to logical wisp-tier reads.
+	case TierBoth:
+	default:
+		where = append(where, "b.tier='main'")
+	}
+	sqlText := `SELECT b.bead_json FROM beads b WHERE ` + strings.Join(where, " AND ")
 	if q.Assignee != "" {
 		sqlText += " AND b.assignee=?"
 		args = append(args, q.Assignee)
 	}
 	sqlText += " ORDER BY b.created_at ASC, b.id ASC"
-	if q.Limit > 0 {
+	if q.Limit > 0 && q.TierMode != TierWisps {
 		sqlText += fmt.Sprintf(" LIMIT %d", q.Limit)
 	}
 	rows, err := s.readDB.QueryContext(context.Background(), sqlText, args...)
@@ -678,12 +695,19 @@ func (s *SQLiteStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 	}
 	defer rows.Close() //nolint:errcheck
 	var result []Bead
+	now := time.Now().UTC()
 	for rows.Next() {
 		b, err := scanSQLiteBead(rows)
 		if err != nil {
 			return nil, err
 		}
+		if !IsReadyCandidateForTier(b, now, q.TierMode) {
+			continue
+		}
 		result = append(result, b)
+		if q.Limit > 0 && len(result) >= q.Limit {
+			break
+		}
 	}
 	return result, rows.Err()
 }

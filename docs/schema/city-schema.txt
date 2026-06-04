@@ -974,6 +974,14 @@
           "description": "EventHooks controls installation of the bead event-forwarding hooks\n(.beads/hooks/on_create,on_update,on_close). Defaults to true.\nThis config surface is staged ahead of the native bead-event support;\ncurrent hook behavior remains unchanged until lifecycle code opts in.",
           "default": true
         },
+        "bd_compatibility": {
+          "type": "string",
+          "enum": [
+            "bd-1.0.4",
+            "bd-1.0.5"
+          ],
+          "description": "BDCompatibility selects the bd CLI semantics Gas City may rely on.\nEmpty defaults to \"bd-1.0.4\", which keeps claimable work history-backed\nand avoids ready flags whose filtering is incomplete in bd 1.0.4."
+        },
         "policies": {
           "additionalProperties": {
             "$ref": "#/$defs/BeadPolicyConfig"
@@ -1328,6 +1336,21 @@
           "type": "integer",
           "description": "ArchiveLevel controls Dolt's auto_gc archive aggressiveness.\n0 disables archive compaction (lower CPU on startup).\n1 enables archive compaction (higher CPU on startup).\nnil (omitted) defaults to 0.",
           "default": 0
+        },
+        "max_connections": {
+          "type": "integer",
+          "description": "MaxConnections overrides the managed Dolt listener max_connections.\n0 means use the managed default.",
+          "default": 256
+        },
+        "read_timeout_millis": {
+          "type": "integer",
+          "description": "ReadTimeoutMillis overrides the managed Dolt listener read_timeout_millis.\n0 means use the managed default.",
+          "default": 30000
+        },
+        "write_timeout_millis": {
+          "type": "integer",
+          "description": "WriteTimeoutMillis overrides the managed Dolt listener write_timeout_millis.\n0 means use the managed default.",
+          "default": 300000
         }
       },
       "additionalProperties": false,
@@ -2577,7 +2600,7 @@
         },
         "progress_stall_timeout": {
           "type": "string",
-          "description": "ProgressStallTimeout, when set, enables progress-aware session recycling:\na desired, alive, claim-less session on a healthy provider whose last\nprogress is older than this duration is restarted fresh. Such a session\nhas likely parked (e.g. its turn ended on a provider auth error) and will\nnot self-recover. Duration string (e.g. \"30m\"). Unset/zero disables it."
+          "description": "ProgressStallTimeout, when set, enables progress-aware session recycling:\na desired, alive, claim-less session on a healthy provider whose last\nprovider-reported activity is older than this duration is restarted fresh.\nSuch a session has likely parked (e.g. its turn ended on a provider auth\nerror) and will not self-recover. Set this above the longest legitimate\nalive-idle period for the city; values below 5m are clamped to 5m.\nDuration string (e.g. \"30m\"). Unset/zero disables it."
         },
         "socket": {
           "type": "string",

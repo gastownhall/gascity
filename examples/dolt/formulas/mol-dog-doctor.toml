@@ -1,6 +1,20 @@
 description = """
 Probe Dolt server health and inspect resource conditions.
 
+After claiming this vapor wisp, run:
+
+```bash
+gc bd formula show mol-dog-doctor --json
+```
+
+Follow the step descriptions in order. When finished, close this bead, then run:
+
+```bash
+gc runtime drain-ack
+```
+
+The drain-ack tells the controller this session is done.
+
 The Doctor Dog performs comprehensive health checks on the Dolt SQL server:
 connectivity, latency, connection count, disk usage, database count (orphan
 detection), and backup freshness. All checks are read-only — the Doctor
@@ -29,6 +43,7 @@ It only observes and reports.
 
 Read each step's description before acting — Config values override defaults."""
 formula = "mol-dog-doctor"
+phase = "vapor"
 
 [vars]
 [vars.port]
@@ -81,7 +96,6 @@ gc mail send mayor/ -s "ESCALATION: Dolt server unreachable on port {{port}} [CR
 [[steps]]
 id = "inspect"
 title = "Inspect resource conditions"
-needs = ["probe"]
 description = """
 Check resource usage and detect anomalies.
 
@@ -121,7 +135,6 @@ Check modification time of backup files. Warn if backups are stale
 [[steps]]
 id = "report"
 title = "Report findings and return to kennel"
-needs = ["inspect"]
 description = """
 Generate health report and signal completion.
 

@@ -36,6 +36,24 @@ func TestCmdGCTempRootPrefixKeepsControllerSocketLegacy(t *testing.T) {
 	}
 }
 
+func TestCmdGCTestTempRootPrefixDefaultsToLegacy(t *testing.T) {
+	t.Setenv(testShardIndexEnv, "")
+	t.Setenv(testShardTotalEnv, "")
+
+	if got := cmdGCTestTempRootPrefix(); got != testCmdGCTempRootPrefix {
+		t.Fatalf("cmdGCTestTempRootPrefix() = %q, want %q", got, testCmdGCTempRootPrefix)
+	}
+}
+
+func TestCmdGCTestTempRootPrefixUsesShardPrefix(t *testing.T) {
+	t.Setenv(testShardIndexEnv, "2")
+	t.Setenv(testShardTotalEnv, "6")
+
+	if got := cmdGCTestTempRootPrefix(); got != testCmdGCShardTempRootPrefix {
+		t.Fatalf("cmdGCTestTempRootPrefix() = %q, want %q", got, testCmdGCShardTempRootPrefix)
+	}
+}
+
 func TestSweepOrphanSkipsNonDirectories(t *testing.T) {
 	root := t.TempDir()
 	// A regular file whose name matches the prefix+PID pattern must not be removed.
@@ -155,6 +173,22 @@ func TestSweepOrphanRemovesStalePIDDirectory(t *testing.T) {
 	}
 }
 
+func TestSweepOrphanSkipsMarkedActiveRoot(t *testing.T) {
+	root := t.TempDir()
+	pid := nonLivePID(t)
+	dir := pidPrefixedTestDir(root, "pfx", pid)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, testActiveTempRootMarker), []byte("active\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sweepOrphanPIDPrefixedDirs(root, "pfx")
+	if _, err := os.Stat(dir); os.IsNotExist(err) {
+		t.Errorf("sweepOrphanPIDPrefixedDirs removed marked active root for stale PID %d", pid)
+	}
+}
+
 func TestSweepOrphanToleratesMissingRoot(t *testing.T) {
 	// ReadDir on a non-existent root must not panic.
 	sweepOrphanPIDPrefixedDirs(filepath.Join(t.TempDir(), "no-such-dir"), "pfx")
@@ -191,6 +225,7 @@ func TestSweepOrphanAllPrefixesStabilize(t *testing.T) {
 	prefixes := []string{
 		testGCBinaryDirPrefix,
 		testCmdGCTempRootPrefix,
+		testCmdGCShardTempRootPrefix,
 		testSharedFixtureDirPrefix,
 		testSlingFormulaDirPrefix,
 		testSlingCityDirPrefix,
@@ -280,30 +315,33 @@ func TestTestscriptCommandInvocationDoesNotLeakTempRoot(t *testing.T) {
 			}
 
 			pid := cmd.ProcessState.Pid()
-			matches, err := filepath.Glob(filepath.Join("/tmp", fmt.Sprintf("%s%d-*", testCmdGCTempRootPrefix, pid)))
-			if err != nil {
-				t.Fatalf("Glob: %v", err)
-			}
-			for _, match := range matches {
-				t.Cleanup(func() { _ = os.RemoveAll(match) })
-			}
-			if len(matches) > 0 {
-				t.Fatalf("leaked temp root(s) for pid %d: %v", pid, matches)
+			for _, prefix := range []string{testCmdGCTempRootPrefix, testCmdGCShardTempRootPrefix} {
+				matches, err := filepath.Glob(filepath.Join("/tmp", fmt.Sprintf("%s%d-*", prefix, pid)))
+				if err != nil {
+					t.Fatalf("Glob: %v", err)
+				}
+				for _, match := range matches {
+					t.Cleanup(func() { _ = os.RemoveAll(match) })
+				}
+				if len(matches) > 0 {
+					t.Fatalf("leaked temp root(s) for pid %d with prefix %q: %v", pid, prefix, matches)
+				}
 			}
 		})
 	}
 }
 
 func TestSweepOrphanRemovesStaleCmdGCTempRootInSystemTmp(t *testing.T) {
+	prefix := fmt.Sprintf("%s%d-test-", testCmdGCTempRootPrefix, os.Getpid())
 	pid := nonLivePID(t)
-	root := filepath.Join("/tmp", fmt.Sprintf("%s%d-stale-backstop", testCmdGCTempRootPrefix, pid))
+	root := filepath.Join("/tmp", fmt.Sprintf("%s%d-stale-backstop", prefix, pid))
 	_ = os.RemoveAll(root)
 	if err := os.MkdirAll(root, 0o755); err != nil {
 		t.Fatalf("MkdirAll: %v", err)
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(root) })
 
-	sweepOrphanPIDPrefixedDirs("/tmp", testCmdGCTempRootPrefix)
+	sweepOrphanPIDPrefixedDirs("/tmp", prefix)
 
 	if _, err := os.Stat(root); !os.IsNotExist(err) {
 		t.Fatalf("stale cmd/gc temp root still exists after sweep: %v", err)

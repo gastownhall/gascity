@@ -193,9 +193,15 @@ func TestMain(m *testing.M) {
 		panic(err)
 	}
 	// Sweep stale testTempRoot dirs in system /tmp before creating a new one.
-	sweepOrphanPIDPrefixedDirs(os.TempDir(), testCmdGCTempRootPrefix)
-	testTempRoot, err := os.MkdirTemp("/tmp", pidPrefixedTempPattern(testCmdGCTempRootPrefix))
+	// Sharded cmd/gc runs use a separate prefix so concurrent worktrees with
+	// older test harnesses cannot remove this package's active root.
+	testTempRootPrefix := cmdGCTestTempRootPrefix()
+	sweepOrphanPIDPrefixedDirs(os.TempDir(), testTempRootPrefix)
+	testTempRoot, err := os.MkdirTemp("/tmp", pidPrefixedTempPattern(testTempRootPrefix))
 	if err != nil {
+		panic(err)
+	}
+	if err := os.WriteFile(filepath.Join(testTempRoot, testActiveTempRootMarker), []byte(fmt.Sprintf("%d\n", os.Getpid())), 0o644); err != nil {
 		panic(err)
 	}
 	if err := os.Setenv("TMPDIR", testTempRoot); err != nil {

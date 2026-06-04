@@ -36,7 +36,7 @@ Check what's happening across the swarm:
 
 ## Communication
 
-- **Broadcast**: `gc mail send --all "New tasks filed — check gc bd ready"`
+- **Broadcast**: `gc mail send --all "New tasks filed - check gc bd ready --unassigned"`
 - **Direct**: `gc mail send <rig>/<agent> "Priority shift: focus on auth"`
 - **Check mail**: `gc mail check`
 

@@ -119,7 +119,12 @@ type NativeDoltStore struct {
 	idPrefix string
 }
 
-var _ Store = (*NativeDoltStore)(nil)
+var (
+	_ Store                    = (*NativeDoltStore)(nil)
+	_ GraphApplyStore          = (*NativeDoltStore)(nil)
+	_ StorageGraphApplyStore   = (*NativeDoltStore)(nil)
+	_ EphemeralGraphApplyStore = (*NativeDoltStore)(nil)
+)
 
 func newNativeDoltStoreWithStorage(storage beadslib.Storage, actor string) *NativeDoltStore {
 	if actor == "" {
@@ -201,6 +206,177 @@ func (s *NativeDoltStore) CloseStore() error {
 		return nil
 	}
 	return storage.Close()
+}
+
+// ApplyGraphPlan creates a bead graph atomically through the native beads
+// storage layer.
+func (s *NativeDoltStore) ApplyGraphPlan(ctx context.Context, plan *GraphApplyPlan) (*GraphApplyResult, error) {
+	return s.ApplyGraphPlanWithStorage(ctx, plan, StorageDefault)
+}
+
+// ApplyGraphPlanWithStorage creates a bead graph atomically in the selected
+// storage tier through the native beads storage layer.
+func (s *NativeDoltStore) ApplyGraphPlanWithStorage(parent context.Context, plan *GraphApplyPlan, storageClass StorageClass) (*GraphApplyResult, error) {
+	if plan == nil {
+		return nil, fmt.Errorf("graph apply plan is nil")
+	}
+	ephemeral, noHistory, err := graphStorageFlags(storageClass)
+	if err != nil {
+		return nil, fmt.Errorf("native graph apply: %w", err)
+	}
+	if err := validateNativeGraphApplyPlan(plan); err != nil {
+		return nil, fmt.Errorf("native graph apply: %w", err)
+	}
+
+	storage, release, err := s.acquireStorage()
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+
+	ctx, cancel := nativeDoltOperationContext(parent)
+	defer cancel()
+
+	keyToID := make(map[string]string, len(plan.Nodes))
+	commitMsg := plan.CommitMessage
+	if commitMsg == "" {
+		commitMsg = fmt.Sprintf("gc: graph-apply %d nodes", len(plan.Nodes))
+	}
+
+	if err := storage.RunInTransaction(ctx, commitMsg, func(tx beadslib.Transaction) error {
+		issues := make([]*beadslib.Issue, 0, len(plan.Nodes))
+		pendingAssignees := make(map[int]string)
+
+		for i, node := range plan.Nodes {
+			metadata, err := metadataRawFromMap(node.Metadata)
+			if err != nil {
+				return fmt.Errorf("node %q: marshaling metadata: %w", node.Key, err)
+			}
+			issueType := beadslib.IssueType(node.Type)
+			if issueType == "" {
+				issueType = beadslib.TypeTask
+			}
+			priority := 2
+			if node.Priority != nil {
+				priority = *node.Priority
+			}
+			issue := &beadslib.Issue{
+				Title:       node.Title,
+				Description: node.Description,
+				Status:      beadslib.StatusOpen,
+				Priority:    priority,
+				IssueType:   issueType,
+				Sender:      node.From,
+				Labels:      append([]string(nil), node.Labels...),
+				Metadata:    metadata,
+				Ephemeral:   ephemeral,
+				NoHistory:   noHistory,
+			}
+			if node.Assignee != "" {
+				if node.AssignAfterCreate {
+					pendingAssignees[i] = node.Assignee
+				} else {
+					issue.Assignee = node.Assignee
+				}
+			}
+			issues = append(issues, issue)
+		}
+
+		if err := tx.CreateIssues(ctx, issues, s.actor); err != nil {
+			return fmt.Errorf("batch create: %w", err)
+		}
+		for i, node := range plan.Nodes {
+			keyToID[node.Key] = issues[i].ID
+		}
+
+		for i, node := range plan.Nodes {
+			if len(node.MetadataRefs) == 0 {
+				continue
+			}
+			mergedMeta, err := metadataMapFromNative(issues[i].Metadata)
+			if err != nil {
+				return fmt.Errorf("node %q: re-parsing metadata: %w", node.Key, err)
+			}
+			if mergedMeta == nil {
+				mergedMeta = make(map[string]string, len(node.MetadataRefs))
+			}
+			for metaKey, refKey := range node.MetadataRefs {
+				mergedMeta[metaKey] = keyToID[refKey]
+			}
+			raw, err := metadataRawFromMap(mergedMeta)
+			if err != nil {
+				return fmt.Errorf("node %q: marshaling updated metadata: %w", node.Key, err)
+			}
+			if err := tx.UpdateIssue(ctx, issues[i].ID, map[string]interface{}{"metadata": raw}, s.actor); err != nil {
+				return fmt.Errorf("node %q: updating metadata refs: %w", node.Key, err)
+			}
+		}
+
+		parentDepPairs := nativeGraphApplyParentDepPairs(plan.Nodes, keyToID)
+		for i, edge := range plan.Edges {
+			fromID := nativeGraphApplyResolveRef(edge.FromKey, edge.FromID, keyToID)
+			toID := nativeGraphApplyResolveRef(edge.ToKey, edge.ToID, keyToID)
+			depType := nativeGraphApplyDependencyType(edge.Type)
+			if parentDepPairs[nativeGraphApplyDepPairKey(fromID, toID)] {
+				if depType == beadslib.DepParentChild {
+					continue
+				}
+				return fmt.Errorf("edge %d %s->%s duplicates a parent-child relationship with dependency type %q", i, fromID, toID, depType)
+			}
+			if parentDepPairs[nativeGraphApplyDepPairKey(toID, fromID)] && nativeGraphApplyCycleRelevantDependencyType(depType) {
+				return fmt.Errorf("edge %d %s->%s creates a blocking reverse of a parent-child relationship", i, fromID, toID)
+			}
+			dep := &beadslib.Dependency{
+				IssueID:     fromID,
+				DependsOnID: toID,
+				Type:        depType,
+				Metadata:    edge.Metadata,
+			}
+			if err := tx.AddDependency(ctx, dep, s.actor); err != nil {
+				return fmt.Errorf("adding edge %s->%s: %w", fromID, toID, err)
+			}
+		}
+
+		for i, node := range plan.Nodes {
+			parentID := node.ParentID
+			if node.ParentKey != "" {
+				parentID = keyToID[node.ParentKey]
+			}
+			if parentID == "" {
+				continue
+			}
+			dep := &beadslib.Dependency{
+				IssueID:     issues[i].ID,
+				DependsOnID: parentID,
+				Type:        beadslib.DepParentChild,
+			}
+			if err := tx.AddDependency(ctx, dep, s.actor); err != nil {
+				return fmt.Errorf("node %q: adding parent-child dep: %w", node.Key, err)
+			}
+		}
+
+		for i, assignee := range pendingAssignees {
+			if err := tx.UpdateIssue(ctx, issues[i].ID, map[string]interface{}{"assignee": assignee}, s.actor); err != nil {
+				return fmt.Errorf("node %q: setting assignee: %w", plan.Nodes[i].Key, err)
+			}
+		}
+
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+
+	result := &GraphApplyResult{IDs: keyToID}
+	if err := ValidateGraphApplyResult(plan, result); err != nil {
+		return nil, fmt.Errorf("native graph apply: %w", err)
+	}
+	return result, nil
+}
+
+// SupportsEphemeralGraphApply reports whether this store can apply a whole
+// graph directly into ephemeral storage.
+func (s *NativeDoltStore) SupportsEphemeralGraphApply() bool {
+	return true
 }
 
 // Create persists a new bead through the upstream beads storage layer.
@@ -901,6 +1077,93 @@ func nativeBeadIDPrefix(id string) string {
 	return normalizeIDPrefix(before)
 }
 
+func validateNativeGraphApplyPlan(plan *GraphApplyPlan) error {
+	if len(plan.Nodes) == 0 {
+		return fmt.Errorf("plan has no nodes")
+	}
+	knownKeys := make(map[string]bool, len(plan.Nodes))
+	for i, node := range plan.Nodes {
+		if strings.TrimSpace(node.Key) == "" {
+			return fmt.Errorf("node %d has empty key", i)
+		}
+		if knownKeys[node.Key] {
+			return fmt.Errorf("duplicate node key %q", node.Key)
+		}
+		knownKeys[node.Key] = true
+		if strings.TrimSpace(node.Title) == "" {
+			return fmt.Errorf("node %q has empty title", node.Key)
+		}
+	}
+	for _, node := range plan.Nodes {
+		for metaKey, refKey := range node.MetadataRefs {
+			if !knownKeys[refKey] {
+				return fmt.Errorf("node %q: metadata ref %q references unknown key %q", node.Key, metaKey, refKey)
+			}
+		}
+		if node.ParentKey != "" && !knownKeys[node.ParentKey] {
+			return fmt.Errorf("node %q: parent key %q not found in plan", node.Key, node.ParentKey)
+		}
+	}
+	for i, edge := range plan.Edges {
+		if edge.FromKey != "" && !knownKeys[edge.FromKey] {
+			return fmt.Errorf("edge %d: from key %q not found in plan", i, edge.FromKey)
+		}
+		if edge.ToKey != "" && !knownKeys[edge.ToKey] {
+			return fmt.Errorf("edge %d: to key %q not found in plan", i, edge.ToKey)
+		}
+		if edge.FromKey == "" && edge.FromID == "" {
+			return fmt.Errorf("edge %d: must specify from_key or from_id", i)
+		}
+		if edge.ToKey == "" && edge.ToID == "" {
+			return fmt.Errorf("edge %d: must specify to_key or to_id", i)
+		}
+		if depType := nativeGraphApplyDependencyType(edge.Type); !depType.IsValid() {
+			return fmt.Errorf("edge %d: invalid dependency type %q", i, edge.Type)
+		}
+	}
+	return nil
+}
+
+func nativeGraphApplyDependencyType(depType string) beadslib.DependencyType {
+	if depType == "" {
+		return beadslib.DepBlocks
+	}
+	return beadslib.DependencyType(depType)
+}
+
+func nativeGraphApplyCycleRelevantDependencyType(depType beadslib.DependencyType) bool {
+	return depType == beadslib.DepBlocks || depType == beadslib.DepConditionalBlocks
+}
+
+func nativeGraphApplyParentDepPairs(nodes []GraphApplyNode, keyToID map[string]string) map[string]bool {
+	pairs := make(map[string]bool)
+	for _, node := range nodes {
+		childID := keyToID[node.Key]
+		parentID := node.ParentID
+		if node.ParentKey != "" {
+			parentID = keyToID[node.ParentKey]
+		}
+		if childID != "" && parentID != "" {
+			pairs[nativeGraphApplyDepPairKey(childID, parentID)] = true
+		}
+	}
+	return pairs
+}
+
+func nativeGraphApplyDepPairKey(issueID, dependsOnID string) string {
+	return issueID + "\x00" + dependsOnID
+}
+
+func nativeGraphApplyResolveRef(key, id string, keyToID map[string]string) string {
+	if id != "" {
+		return id
+	}
+	if key != "" {
+		return keyToID[key]
+	}
+	return ""
+}
+
 func cloneNativeDependencies(deps []*beadslib.Dependency) []*beadslib.Dependency {
 	if len(deps) == 0 {
 		return nil
@@ -936,6 +1199,7 @@ func nativeIssueFromBead(b Bead) (*beadslib.Issue, error) {
 		CreatedAt:   b.CreatedAt,
 		Labels:      append([]string(nil), b.Labels...),
 		Ephemeral:   b.Ephemeral,
+		NoHistory:   b.NoHistory,
 		DeferUntil:  cloneTimePtr(b.DeferUntil),
 	}
 	if b.Priority != nil {
@@ -999,6 +1263,7 @@ func beadFromNativeIssue(issue *beadslib.Issue) (Bead, error) {
 		Labels:      append([]string(nil), issue.Labels...),
 		Metadata:    metadata,
 		Ephemeral:   issue.Ephemeral,
+		NoHistory:   issue.NoHistory,
 		DeferUntil:  cloneTimePtr(issue.DeferUntil),
 	}
 	for _, dep := range issue.Dependencies {
@@ -1031,7 +1296,7 @@ func nativePriorityFromIssue(issue *beadslib.Issue) *int {
 
 func nativeIssueFilterFromListQuery(query ListQuery) beadslib.IssueFilter {
 	limit := query.Limit
-	if query.Sort != SortDefault {
+	if query.Sort != SortDefault || query.TierMode == TierWisps {
 		limit = 0
 	}
 	filter := beadslib.IssueFilter{
@@ -1042,8 +1307,9 @@ func nativeIssueFilterFromListQuery(query ListQuery) beadslib.IssueFilter {
 	}
 	switch query.TierMode {
 	case TierWisps:
-		ephemeral := true
-		filter.Ephemeral = &ephemeral
+		// Upstream can filter only ephemeral rows, while Gas City's wisp tier
+		// includes both ephemeral and no-history rows. Let ApplyListQuery apply
+		// the final tier filter after all candidates are returned.
 	case TierBoth:
 		// no tier filter
 	default:

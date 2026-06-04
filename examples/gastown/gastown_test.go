@@ -226,18 +226,21 @@ func renderGastownPromptForPack(t *testing.T, rel, agentName, templateName, rigN
 	}
 
 	ctx := map[string]string{
-		"AgentName":     agentName,
-		"BindingName":   bindingName,
-		"BindingPrefix": bindingPrefix,
-		"CityRoot":      "/city",
-		"DefaultBranch": "main",
-		"IssuePrefix":   "demo",
-		"RigName":       rigName,
-		"RigRoot":       "/repos/" + rigName,
-		"SlingQuery":    "bd ready --metadata-field gc.routed_to=<canonical> --unassigned",
-		"TemplateName":  templateName,
-		"WorkDir":       "/repos/" + rigName,
-		"WorkQuery":     "bd ready",
+		"AgentName":               agentName,
+		"AssignedInProgressQuery": `bd list --include-ephemeral --status in_progress --assignee="$GC_SESSION_ID"; bd list --include-ephemeral --status in_progress --assignee="$GC_SESSION_NAME"; bd list --include-ephemeral --status in_progress --assignee="$GC_ALIAS"`,
+		"AssignedReadyQuery":      "bd ready --include-ephemeral --assignee=<session>",
+		"BindingName":             bindingName,
+		"BindingPrefix":           bindingPrefix,
+		"CityRoot":                "/city",
+		"DefaultBranch":           "main",
+		"IssuePrefix":             "demo",
+		"RigName":                 rigName,
+		"RigRoot":                 "/repos/" + rigName,
+		"RoutedPoolQuery":         "bd ready --metadata-field gc.routed_to=<canonical> --unassigned",
+		"SlingQuery":              "bd ready --metadata-field gc.routed_to=<canonical> --unassigned",
+		"TemplateName":            templateName,
+		"WorkDir":                 "/repos/" + rigName,
+		"WorkQuery":               "bd ready",
 	}
 	var buf bytes.Buffer
 	if err := tmpl.Execute(&buf, ctx); err != nil {
@@ -1631,6 +1634,339 @@ func TestGastownWarrantCreateCommandsUseCreateMetadata(t *testing.T) {
 				inCreate = false
 			}
 		}
+	}
+}
+
+func TestDogAndDigestVaporFormulasHaveNoCompilerRequirement(t *testing.T) {
+	dir := exampleDir()
+	checks := []struct {
+		rel     string
+		formula string
+	}{
+		{"../dolt/formulas/mol-dog-backup.toml", "mol-dog-backup"},
+		{"../dolt/formulas/mol-dog-doctor.toml", "mol-dog-doctor"},
+		{"../dolt/formulas/mol-dog-phantom-db.toml", "mol-dog-phantom-db"},
+		{"../dolt/formulas/mol-dog-stale-db.toml", "mol-dog-stale-db"},
+		{"packs/maintenance/formulas/mol-dog-jsonl.toml", "mol-dog-jsonl"},
+		{"packs/maintenance/formulas/mol-dog-reaper.toml", "mol-dog-reaper"},
+		{"packs/maintenance/formulas/mol-shutdown-dance.toml", "mol-shutdown-dance"},
+		{"packs/gastown/formulas/mol-digest-generate.toml", "mol-digest-generate"},
+	}
+	for _, check := range checks {
+		path := filepath.Join(dir, check.rel)
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("reading %s: %v", check.rel, err)
+		}
+		body := string(data)
+		var decoded struct {
+			Formula  string            `toml:"formula"`
+			Phase    string            `toml:"phase"`
+			Requires map[string]string `toml:"requires"`
+			Steps    []struct {
+				ID          string   `toml:"id"`
+				Needs       []string `toml:"needs"`
+				Description string   `toml:"description"`
+			} `toml:"steps"`
+		}
+		if _, err := toml.Decode(body, &decoded); err != nil {
+			t.Fatalf("decoding %s: %v", check.rel, err)
+		}
+		if decoded.Formula != check.formula {
+			t.Errorf("%s formula = %q, want %q", check.rel, decoded.Formula, check.formula)
+		}
+		if decoded.Phase != "vapor" {
+			t.Errorf("%s phase = %q, want vapor", check.rel, decoded.Phase)
+		}
+		if decoded.Requires["formula_compiler"] != "" || strings.Contains(body, "formula_compiler") {
+			t.Errorf("%s must not require formula_compiler", check.rel)
+		}
+		assertContainsInOrder(t, body,
+			"After claiming this vapor wisp",
+			"gc bd formula show "+check.formula+" --json",
+			"gc runtime drain-ack",
+		)
+		if strings.Contains(body, "needs =") {
+			t.Errorf("%s vapor formula must not declare child-step needs edges", check.rel)
+		}
+		if strings.Contains(strings.ToLower(body), "close this step") {
+			t.Errorf("%s vapor formula must not instruct workers to close non-materialized steps", check.rel)
+		}
+		if strings.Contains(body, "read the `preflight` bead") {
+			t.Errorf("%s vapor formula must not read a non-materialized preflight bead", check.rel)
+		}
+		for _, step := range decoded.Steps {
+			if len(step.Needs) > 0 {
+				t.Errorf("%s step %s needs = %v; vapor steps are not materialized", check.rel, step.ID, step.Needs)
+			}
+		}
+	}
+}
+
+func TestDogStartupPromptUsesSplitClaimFirstQueries(t *testing.T) {
+	dir := exampleDir()
+	checks := []string{
+		"packs/maintenance/agents/dog/prompt.template.md",
+		"packs/maintenance/template-fragments/propulsion.template.md",
+		"packs/gastown/template-fragments/propulsion.template.md",
+	}
+	for _, rel := range checks {
+		data, err := os.ReadFile(filepath.Join(dir, rel))
+		if err != nil {
+			t.Fatalf("reading %s: %v", rel, err)
+		}
+		body := string(data)
+		dogBody := body
+		if strings.Contains(rel, "template-fragments/propulsion.template.md") {
+			dogBody = sectionBetween(t, body, `{{ define "propulsion-dog" }}`, `{{ end }}`)
+		}
+		for _, want := range []string{
+			"{{ .AssignedInProgressQuery }}",
+			"{{ .AssignedReadyQuery }}",
+			"{{ .RoutedPoolQuery }}",
+		} {
+			if !strings.Contains(dogBody, want) {
+				t.Errorf("%s missing split query placeholder %q", rel, want)
+			}
+		}
+		if strings.Contains(dogBody, `gc bd ready --assignee="$GC_SESSION_NAME"`) {
+			t.Errorf("%s hardcodes assigned-ready bd command instead of compatibility-aware placeholder", rel)
+		}
+		if strings.Contains(dogBody, `gc bd list --assignee="$GC_SESSION_NAME" --status=in_progress`) {
+			t.Errorf("%s hardcodes weak in-progress recovery instead of compatibility-aware placeholder", rel)
+		}
+		for _, want := range []string{
+			"For Step 1a/1b candidates",
+			"Assigned work may have no",
+			"For Step 1c candidates",
+		} {
+			if !strings.Contains(dogBody, want) {
+				t.Errorf("%s missing source-aware dog verification text %q", rel, want)
+			}
+		}
+	}
+
+	dogPrompt, err := os.ReadFile(filepath.Join(dir, "packs/maintenance/agents/dog/prompt.template.md"))
+	if err != nil {
+		t.Fatalf("reading dog prompt: %v", err)
+	}
+	assertContainsInOrder(t, string(dogPrompt),
+		"## Startup Protocol",
+		"CLAIM-FIRST INVARIANT",
+		"{{ .AssignedInProgressQuery }}",
+		"{{ .AssignedReadyQuery }}",
+		"{{ .RoutedPoolQuery }}",
+		"gc bd update <id> --claim",
+		"gc bd show <id> --json",
+	)
+
+	renderedDogPrompt := renderGastownPromptForPack(t,
+		"packs/maintenance/agents/dog/prompt.template.md",
+		"maintenance/dog",
+		"dog",
+		"demo",
+		"maintenance",
+		"maintenance.",
+	)
+	assertContainsInOrder(t, renderedDogPrompt,
+		"CLAIM-FIRST INVARIANT",
+		"# Step 1a: Check for assigned in-progress work",
+		`bd list --include-ephemeral --status in_progress --assignee="$GC_SESSION_ID"`,
+		`bd list --include-ephemeral --status in_progress --assignee="$GC_SESSION_NAME"`,
+		`bd list --include-ephemeral --status in_progress --assignee="$GC_ALIAS"`,
+		"# Step 1b: If none, check for assigned ready work",
+		"bd ready --include-ephemeral --assignee=<session>",
+		"# Step 1c: If none, find routed pool work",
+		"bd ready --metadata-field gc.routed_to=<canonical> --unassigned",
+		"For Step 1a/1b candidates",
+		"Assigned work may have no",
+		"For Step 1c candidates",
+		"`metadata.gc.routed_to` is `$GC_TEMPLATE`",
+	)
+	if strings.Contains(renderedDogPrompt, "{{ .AssignedReadyQuery }}") {
+		t.Fatal("rendered dog prompt still contains AssignedReadyQuery placeholder")
+	}
+	if strings.Contains(renderedDogPrompt, "{{ .AssignedInProgressQuery }}") {
+		t.Fatal("rendered dog prompt still contains AssignedInProgressQuery placeholder")
+	}
+	if strings.Contains(renderedDogPrompt, "{{ .RoutedPoolQuery }}") {
+		t.Fatal("rendered dog prompt still contains RoutedPoolQuery placeholder")
+	}
+}
+
+func TestNonDogStartupPromptsUseAssignedInProgressQuery(t *testing.T) {
+	dir := exampleDir()
+	checks := []struct {
+		rel     string
+		start   string
+		end     string
+		want    string
+		forbid  []string
+		render  bool
+		agent   string
+		tmpl    string
+		rig     string
+		binding string
+	}{
+		{
+			rel:    "packs/gastown/template-fragments/propulsion.template.md",
+			start:  `{{ define "propulsion-mayor" }}`,
+			end:    `{{ define "propulsion-crew" }}`,
+			want:   "{{ .AssignedInProgressQuery }}",
+			forbid: []string{`gc bd list --assignee="$GC_ALIAS" --status=in_progress`},
+		},
+		{
+			rel:    "packs/gastown/template-fragments/propulsion.template.md",
+			start:  `{{ define "propulsion-crew" }}`,
+			end:    `{{ define "propulsion-deacon" }}`,
+			want:   "{{ .AssignedInProgressQuery }}",
+			forbid: []string{`gc bd list --assignee="$GC_SESSION_NAME" --status=in_progress`},
+		},
+		{
+			rel:    "packs/gastown/template-fragments/propulsion.template.md",
+			start:  `{{ define "propulsion-deacon" }}`,
+			end:    `{{ define "propulsion-witness" }}`,
+			want:   "{{ .AssignedInProgressQuery }}",
+			forbid: []string{`gc bd list --assignee="$GC_ALIAS" --status=in_progress`},
+		},
+		{
+			rel:    "packs/gastown/template-fragments/propulsion.template.md",
+			start:  `{{ define "propulsion-witness" }}`,
+			end:    `{{ define "propulsion-polecat" }}`,
+			want:   "{{ .AssignedInProgressQuery }}",
+			forbid: []string{`gc bd list --assignee="$GC_ALIAS" --status=in_progress`},
+		},
+		{
+			rel:    "packs/gastown/template-fragments/propulsion.template.md",
+			start:  `{{ define "propulsion-polecat" }}`,
+			end:    `{{ define "propulsion-refinery" }}`,
+			want:   "{{ .AssignedInProgressQuery }}",
+			forbid: []string{`gc bd list --assignee="$GC_SESSION_NAME" --status=in_progress`},
+		},
+		{
+			rel:    "packs/gastown/template-fragments/propulsion.template.md",
+			start:  `{{ define "propulsion-refinery" }}`,
+			end:    `{{ define "propulsion-dog" }}`,
+			want:   "{{ .AssignedInProgressQuery }}",
+			forbid: []string{`gc bd list --assignee="$GC_ALIAS" --status=in_progress`},
+		},
+		{
+			rel:    "packs/maintenance/template-fragments/propulsion.template.md",
+			start:  `{{ define "propulsion-mayor" }}`,
+			end:    `{{ define "propulsion-crew" }}`,
+			want:   "{{ .AssignedInProgressQuery }}",
+			forbid: []string{`gc bd list --assignee=$GC_AGENT --status=in_progress`},
+		},
+		{
+			rel:    "packs/maintenance/template-fragments/propulsion.template.md",
+			start:  `{{ define "propulsion-crew" }}`,
+			end:    `{{ define "propulsion-deacon" }}`,
+			want:   "{{ .AssignedInProgressQuery }}",
+			forbid: []string{`gc bd list --assignee=$GC_AGENT --status=in_progress`},
+		},
+		{
+			rel:    "packs/maintenance/template-fragments/propulsion.template.md",
+			start:  `{{ define "propulsion-deacon" }}`,
+			end:    `{{ define "propulsion-witness" }}`,
+			want:   "{{ .AssignedInProgressQuery }}",
+			forbid: []string{`gc bd list --assignee=$GC_AGENT --status=in_progress`},
+		},
+		{
+			rel:    "packs/maintenance/template-fragments/propulsion.template.md",
+			start:  `{{ define "propulsion-witness" }}`,
+			end:    `{{ define "propulsion-polecat" }}`,
+			want:   "{{ .AssignedInProgressQuery }}",
+			forbid: []string{`gc bd list --assignee=$GC_AGENT --status=in_progress`},
+		},
+		{
+			rel:    "packs/maintenance/template-fragments/propulsion.template.md",
+			start:  `{{ define "propulsion-polecat" }}`,
+			end:    `{{ define "propulsion-refinery" }}`,
+			want:   "{{ .AssignedInProgressQuery }}",
+			forbid: []string{`gc bd list --assignee=$GC_AGENT --status=in_progress`},
+		},
+		{
+			rel:    "packs/maintenance/template-fragments/propulsion.template.md",
+			start:  `{{ define "propulsion-refinery" }}`,
+			end:    `{{ define "propulsion-dog" }}`,
+			want:   "{{ .AssignedInProgressQuery }}",
+			forbid: []string{`gc bd list --assignee=$GC_AGENT --status=in_progress`},
+		},
+		{
+			rel:     "packs/gastown/agents/polecat/prompt.template.md",
+			start:   "## Startup Protocol",
+			end:     "## Context Exhaustion",
+			want:    "{{ .AssignedInProgressQuery }}",
+			forbid:  []string{`gc bd list --assignee="$GC_SESSION_NAME" --status=in_progress`},
+			render:  true,
+			agent:   "gastown/polecat",
+			tmpl:    "polecat",
+			rig:     "gastown",
+			binding: "gastown.",
+		},
+		{
+			rel:     "packs/gastown/agents/deacon/prompt.template.md",
+			start:   "## Startup Protocol",
+			end:     "**Hook ->",
+			want:    "{{ .AssignedInProgressQuery }}",
+			forbid:  []string{`gc bd list --assignee="$GC_ALIAS" --status=in_progress`},
+			render:  true,
+			agent:   "gastown/deacon",
+			tmpl:    "deacon",
+			rig:     "gastown",
+			binding: "gastown.",
+		},
+		{
+			rel:     "packs/gastown/agents/witness/prompt.template.md",
+			start:   "## Startup Protocol",
+			end:     "**Hook ->",
+			want:    "{{ .AssignedInProgressQuery }}",
+			forbid:  []string{`gc bd list --assignee="$GC_ALIAS" --status=in_progress`},
+			render:  true,
+			agent:   "gastown/witness",
+			tmpl:    "witness",
+			rig:     "gastown",
+			binding: "gastown.",
+		},
+		{
+			rel:     "packs/gastown/agents/refinery/prompt.template.md",
+			start:   "# Step 1: Check for an in-progress patrol wisp",
+			end:     "Then follow the formula.",
+			want:    "{{ .AssignedInProgressQuery }}",
+			forbid:  []string{`gc bd list --assignee="$GC_AGENT" --status=in_progress`},
+			render:  true,
+			agent:   "gastown/refinery",
+			tmpl:    "refinery",
+			rig:     "gastown",
+			binding: "gastown.",
+		},
+	}
+	for _, check := range checks {
+		t.Run(check.rel+"/"+check.start, func(t *testing.T) {
+			data, err := os.ReadFile(filepath.Join(dir, check.rel))
+			if err != nil {
+				t.Fatalf("reading %s: %v", check.rel, err)
+			}
+			body := sectionBetween(t, string(data), check.start, check.end)
+			if !strings.Contains(body, check.want) {
+				t.Fatalf("%s section %q missing %q", check.rel, check.start, check.want)
+			}
+			for _, forbidden := range check.forbid {
+				if strings.Contains(body, forbidden) {
+					t.Fatalf("%s section %q hardcodes %q", check.rel, check.start, forbidden)
+				}
+			}
+			if !check.render {
+				return
+			}
+			rendered := renderGastownPromptForPack(t, check.rel, check.agent, check.tmpl, "demo", check.rig, check.binding)
+			if strings.Contains(rendered, check.want) {
+				t.Fatalf("%s rendered prompt still contains %q", check.rel, check.want)
+			}
+			if !strings.Contains(rendered, `bd list --include-ephemeral --status in_progress --assignee="$GC_SESSION_ID"`) {
+				t.Fatalf("%s rendered prompt missing compatibility-aware in-progress query: %q", check.rel, rendered)
+			}
+		})
 	}
 }
 
