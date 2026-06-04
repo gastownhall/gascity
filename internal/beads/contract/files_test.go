@@ -398,6 +398,55 @@ func TestEnsureCanonicalConfigCanonicalizesFlatDoltDisableEventFlush(t *testing.
 	}
 }
 
+func TestEnsureCanonicalConfigFallbackPreservesFlatDoltDisableEventFlushOptOutInExistingDoltBlock(t *testing.T) {
+	fs := fsys.OSFS{}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	input := strings.Join([]string{
+		"issue-prefix: gc",
+		"dolt:",
+		"  host: 127.0.0.1",
+		"dolt.disable-event-flush: false",
+		": not yaml",
+		"",
+	}, "\n")
+	if err := fs.WriteFile(path, []byte(input), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	changed, err := EnsureCanonicalConfig(fs, path, ConfigState{
+		IssuePrefix:    "gc",
+		EndpointOrigin: EndpointOriginManagedCity,
+		EndpointStatus: EndpointStatusVerified,
+	})
+	if err != nil {
+		t.Fatalf("EnsureCanonicalConfig() error = %v", err)
+	}
+	if !changed {
+		t.Fatal("EnsureCanonicalConfig() should report changes")
+	}
+
+	dolt, ok, err := ReadDoltConfig(fs, path)
+	if err != nil {
+		t.Fatalf("ReadDoltConfig() error = %v", err)
+	}
+	if !ok || dolt.DisableEventFlush == nil || *dolt.DisableEventFlush {
+		t.Fatalf("ReadDoltConfig() = (%+v, %v), want explicit disable-event-flush false", dolt, ok)
+	}
+
+	data, err := fs.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	if !strings.Contains(text, "dolt:\n  host: 127.0.0.1\n  disable-event-flush: false") {
+		t.Fatalf("config should insert nested Dolt opt-out into existing block:\n%s", text)
+	}
+	if strings.Contains(text, "dolt.disable-event-flush") {
+		t.Fatalf("config should scrub flat Dolt telemetry setting:\n%s", text)
+	}
+}
+
 func TestEnsureCanonicalConfigWritesExternalFields(t *testing.T) {
 	fs := fsys.OSFS{}
 	dir := t.TempDir()
@@ -1026,6 +1075,33 @@ func TestReadDoltConfig(t *testing.T) {
 				t.Errorf("ReadDoltConfig().DisableEventFlushEnabled() = %v, want %v", got.DisableEventFlushEnabled(), tt.wantValue)
 			}
 		})
+	}
+}
+
+func TestReadDoltConfigFallsBackToNestedDisableEventFlushOnMalformedYAML(t *testing.T) {
+	fs := fsys.OSFS{}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	input := strings.Join([]string{
+		"issue_prefix: zz",
+		"dolt:",
+		"  disable-event-flush: false",
+		": not yaml",
+		"",
+	}, "\n")
+	if err := fs.WriteFile(path, []byte(input), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, ok, err := ReadDoltConfig(fs, path)
+	if err != nil {
+		t.Fatalf("ReadDoltConfig() error = %v", err)
+	}
+	if !ok {
+		t.Fatal("ReadDoltConfig() ok = false, want true")
+	}
+	if got.DisableEventFlush == nil || *got.DisableEventFlush {
+		t.Fatalf("ReadDoltConfig().DisableEventFlush = %v, want explicit false", got.DisableEventFlush)
 	}
 }
 

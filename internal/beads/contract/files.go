@@ -647,6 +647,7 @@ func ensureCanonicalConfigFallback(fs fsys.FS, path string, state ConfigState) (
 	} else {
 		deletions["dolt.user"] = struct{}{}
 	}
+	disableEventFlush := doltDisableEventFlushFallbackValue(data, state)
 
 	lines := strings.Split(string(data), "\n")
 	out := make([]string, 0, len(lines)+len(replacements))
@@ -708,10 +709,9 @@ func ensureCanonicalConfigFallback(fs fsys.FS, path string, state ConfigState) (
 		out = append(out, want)
 		changed = true
 	}
-	if !topLevelConfigKeyPresent(out, "dolt") {
-		out = append(out, "dolt:", "  disable-event-flush: "+boolString(doltDisableEventFlushFallbackValue(data, state)))
-		changed = true
-	}
+	var doltChanged bool
+	out, doltChanged = ensureFallbackNestedDoltDisableEventFlush(out, disableEventFlush)
+	changed = doltChanged || changed
 
 	if !changed {
 		return false, nil
@@ -836,6 +836,49 @@ func scanConfigBoolValueFromData(data []byte, prefixes ...string) (bool, bool) {
 	return false, false
 }
 
+func scanNestedConfigBoolValueFromData(data []byte, section string, keys ...string) (bool, bool) {
+	if raw, ok := scanNestedConfigLineValueFromData(data, section, keys...); ok {
+		parsed, err := strconv.ParseBool(raw)
+		if err == nil {
+			return parsed, true
+		}
+	}
+	return false, false
+}
+
+func scanNestedConfigLineValueFromData(data []byte, section string, keys ...string) (string, bool) {
+	inSection := false
+	for _, line := range strings.Split(string(data), string(rune(10))) {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		if strings.TrimLeft(line, " \t") == line {
+			key, value, ok := topLevelConfigLine(line)
+			inSection = ok && key == section && value == ""
+			continue
+		}
+		if !inSection {
+			continue
+		}
+		key, value, ok := strings.Cut(trimmed, ":")
+		if !ok {
+			continue
+		}
+		key = strings.TrimSpace(key)
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		for _, want := range keys {
+			if key == want {
+				return value, true
+			}
+		}
+	}
+	return "", false
+}
+
 func readConfigStateFromData(data []byte) ConfigState {
 	return ConfigState{
 		IssuePrefix:    scanConfigValueFromData(data, "issue_prefix:", "issue-prefix:"),
@@ -879,6 +922,10 @@ func readDoltConfigFromData(data []byte) (DoltConfig, bool) {
 
 func readDoltConfigFromDataOrEmpty(data []byte) DoltConfig {
 	var cfg DoltConfig
+	if value, ok := scanNestedConfigBoolValueFromData(data, "dolt", "disable-event-flush", "disable_event_flush"); ok {
+		cfg.DisableEventFlush = &value
+		return cfg
+	}
 	if value, ok := scanConfigBoolValueFromData(data, "dolt.disable-event-flush:", "dolt.disable_event_flush:"); ok {
 		cfg.DisableEventFlush = &value
 	}
@@ -927,14 +974,75 @@ func topLevelConfigLine(line string) (key, value string, ok bool) {
 	return strings.TrimSpace(key), strings.TrimSpace(value), true
 }
 
-func topLevelConfigKeyPresent(lines []string, want string) bool {
-	for _, line := range lines {
+func ensureFallbackNestedDoltDisableEventFlush(lines []string, value bool) ([]string, bool) {
+	want := "  disable-event-flush: " + boolString(value)
+	sectionIndex := -1
+	for i, line := range lines {
 		key, _, ok := topLevelConfigLine(line)
-		if ok && key == want {
-			return true
+		if ok && key == "dolt" {
+			sectionIndex = i
 		}
 	}
-	return false
+	if sectionIndex == -1 {
+		return append(lines, "dolt:", want), true
+	}
+
+	sectionEnd := len(lines)
+	for i := sectionIndex + 1; i < len(lines); i++ {
+		if _, _, ok := topLevelConfigLine(lines[i]); ok {
+			sectionEnd = i
+			break
+		}
+	}
+
+	out := make([]string, 0, len(lines)+1)
+	out = append(out, lines[:sectionIndex]...)
+	changed := false
+	if strings.TrimSpace(lines[sectionIndex]) != "dolt:" {
+		out = append(out, "dolt:")
+		changed = true
+	} else {
+		out = append(out, lines[sectionIndex])
+	}
+
+	seen := false
+	for _, line := range lines[sectionIndex+1 : sectionEnd] {
+		key, ok := nestedConfigLineKey(line)
+		if ok && (key == "disable-event-flush" || key == "disable_event_flush") {
+			if seen {
+				changed = true
+				continue
+			}
+			seen = true
+			if line != want {
+				out = append(out, want)
+				changed = true
+				continue
+			}
+		}
+		out = append(out, line)
+	}
+	if !seen {
+		out = append(out, want)
+		changed = true
+	}
+	out = append(out, lines[sectionEnd:]...)
+	return out, changed
+}
+
+func nestedConfigLineKey(line string) (string, bool) {
+	if strings.TrimLeft(line, " \t") == line {
+		return "", false
+	}
+	trimmed := strings.TrimSpace(line)
+	if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+		return "", false
+	}
+	key, _, ok := strings.Cut(trimmed, ":")
+	if !ok {
+		return "", false
+	}
+	return strings.TrimSpace(key), true
 }
 
 func endpointOriginValue(value string) EndpointOrigin {
