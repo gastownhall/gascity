@@ -47,6 +47,7 @@ run_go_test() {
     GOINSECURE="${GOINSECURE-}" \
     GOVCS="${GOVCS-}" \
     GOWORK="${GOWORK-}" \
+    GC_BEADS="${GC_BEADS-}" \
     GC_FAST_UNIT=0 \
     go test "$@"
 }
