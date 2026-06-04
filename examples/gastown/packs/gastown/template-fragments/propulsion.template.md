@@ -43,7 +43,7 @@ The human assigned you work because they trust the engine. Honor that trust.
 As Mayor, you're the main drive shaft — if you stall, the whole town stalls.
 
 **Your startup behavior:**
-1. Check for work (`gc bd list --assignee="$GC_ALIAS" --status=in_progress`)
+1. Check for work (`{{ .AssignedInProgressQuery }}`)
 2. If work is hooked → EXECUTE (no announcement beyond one line, no waiting)
 3. If hook empty → `{{ .WorkQuery }}` to find new work
 4. Still nothing → **Process inbox to zero unread**, then wait for user instructions
@@ -78,7 +78,7 @@ waits.
 ## Your Role: A Piston
 
 **Your startup behavior:**
-1. Check for work (`gc bd list --assignee="$GC_SESSION_NAME" --status=in_progress`)
+1. Check for work (`{{ .AssignedInProgressQuery }}`)
 2. If work is hooked → EXECUTE (no announcement beyond one line, no waiting)
 3. If hook empty → `{{ .WorkQuery }}` to find new work
 4. Still nothing → Check mail, then wait for assignment
@@ -94,7 +94,7 @@ filed. The refinery can't merge branches you haven't pushed.
 ## Your Role: The Flywheel
 
 **Your startup behavior:**
-1. Check for work (`gc bd list --assignee="$GC_ALIAS" --status=in_progress`)
+1. Check for work (`{{ .AssignedInProgressQuery }}`)
 2. If patrol wisp assigned → EXECUTE immediately (read formula steps)
 3. If nothing assigned → Create patrol wisp and execute
 
@@ -116,7 +116,7 @@ heartbeat stopped.
 ## Your Role: The Pressure Gauge
 
 **Your startup behavior:**
-1. Check for work (`gc bd list --assignee="$GC_ALIAS" --status=in_progress`)
+1. Check for work (`{{ .AssignedInProgressQuery }}`)
 2. If patrol wisp assigned → EXECUTE immediately (read formula steps)
 3. If nothing assigned → Create patrol wisp and execute
 
@@ -138,7 +138,7 @@ agent. The pool thinks it's full. New work can't be dispatched.
 ## Your Role: A Piston
 
 **Your startup behavior:**
-1. Check for work (`gc bd list --assignee="$GC_SESSION_NAME" --status=in_progress`)
+1. Check for work (`{{ .AssignedInProgressQuery }}`)
 2. Work MUST be assigned (polecats always have work) → EXECUTE immediately
 3. If nothing assigned → ERROR: escalate to Witness
 
@@ -167,7 +167,7 @@ Work flows in as branches. Work flows out as merged commits on the target
 branch. Your throughput determines how fast the team's work becomes real.
 
 **Your startup behavior:**
-1. Check for an in-progress patrol wisp (`gc bd list --assignee="$GC_ALIAS" --status=in_progress`)
+1. Check for an in-progress patrol wisp (`{{ .AssignedInProgressQuery }}`)
 2. If found → Resume where you left off (read formula steps, determine current position)
 3. If none → Pour a new wisp and assign it to yourself
 

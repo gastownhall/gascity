@@ -1794,6 +1794,182 @@ func TestDogStartupPromptUsesSplitClaimFirstQueries(t *testing.T) {
 	}
 }
 
+func TestNonDogStartupPromptsUseAssignedInProgressQuery(t *testing.T) {
+	dir := exampleDir()
+	checks := []struct {
+		rel     string
+		start   string
+		end     string
+		want    string
+		forbid  []string
+		render  bool
+		agent   string
+		tmpl    string
+		rig     string
+		binding string
+	}{
+		{
+			rel:    "packs/gastown/template-fragments/propulsion.template.md",
+			start:  `{{ define "propulsion-mayor" }}`,
+			end:    `{{ define "propulsion-crew" }}`,
+			want:   "{{ .AssignedInProgressQuery }}",
+			forbid: []string{`gc bd list --assignee="$GC_ALIAS" --status=in_progress`},
+		},
+		{
+			rel:    "packs/gastown/template-fragments/propulsion.template.md",
+			start:  `{{ define "propulsion-crew" }}`,
+			end:    `{{ define "propulsion-deacon" }}`,
+			want:   "{{ .AssignedInProgressQuery }}",
+			forbid: []string{`gc bd list --assignee="$GC_SESSION_NAME" --status=in_progress`},
+		},
+		{
+			rel:    "packs/gastown/template-fragments/propulsion.template.md",
+			start:  `{{ define "propulsion-deacon" }}`,
+			end:    `{{ define "propulsion-witness" }}`,
+			want:   "{{ .AssignedInProgressQuery }}",
+			forbid: []string{`gc bd list --assignee="$GC_ALIAS" --status=in_progress`},
+		},
+		{
+			rel:    "packs/gastown/template-fragments/propulsion.template.md",
+			start:  `{{ define "propulsion-witness" }}`,
+			end:    `{{ define "propulsion-polecat" }}`,
+			want:   "{{ .AssignedInProgressQuery }}",
+			forbid: []string{`gc bd list --assignee="$GC_ALIAS" --status=in_progress`},
+		},
+		{
+			rel:    "packs/gastown/template-fragments/propulsion.template.md",
+			start:  `{{ define "propulsion-polecat" }}`,
+			end:    `{{ define "propulsion-refinery" }}`,
+			want:   "{{ .AssignedInProgressQuery }}",
+			forbid: []string{`gc bd list --assignee="$GC_SESSION_NAME" --status=in_progress`},
+		},
+		{
+			rel:    "packs/gastown/template-fragments/propulsion.template.md",
+			start:  `{{ define "propulsion-refinery" }}`,
+			end:    `{{ define "propulsion-dog" }}`,
+			want:   "{{ .AssignedInProgressQuery }}",
+			forbid: []string{`gc bd list --assignee="$GC_ALIAS" --status=in_progress`},
+		},
+		{
+			rel:    "packs/maintenance/template-fragments/propulsion.template.md",
+			start:  `{{ define "propulsion-mayor" }}`,
+			end:    `{{ define "propulsion-crew" }}`,
+			want:   "{{ .AssignedInProgressQuery }}",
+			forbid: []string{`gc bd list --assignee=$GC_AGENT --status=in_progress`},
+		},
+		{
+			rel:    "packs/maintenance/template-fragments/propulsion.template.md",
+			start:  `{{ define "propulsion-crew" }}`,
+			end:    `{{ define "propulsion-deacon" }}`,
+			want:   "{{ .AssignedInProgressQuery }}",
+			forbid: []string{`gc bd list --assignee=$GC_AGENT --status=in_progress`},
+		},
+		{
+			rel:    "packs/maintenance/template-fragments/propulsion.template.md",
+			start:  `{{ define "propulsion-deacon" }}`,
+			end:    `{{ define "propulsion-witness" }}`,
+			want:   "{{ .AssignedInProgressQuery }}",
+			forbid: []string{`gc bd list --assignee=$GC_AGENT --status=in_progress`},
+		},
+		{
+			rel:    "packs/maintenance/template-fragments/propulsion.template.md",
+			start:  `{{ define "propulsion-witness" }}`,
+			end:    `{{ define "propulsion-polecat" }}`,
+			want:   "{{ .AssignedInProgressQuery }}",
+			forbid: []string{`gc bd list --assignee=$GC_AGENT --status=in_progress`},
+		},
+		{
+			rel:    "packs/maintenance/template-fragments/propulsion.template.md",
+			start:  `{{ define "propulsion-polecat" }}`,
+			end:    `{{ define "propulsion-refinery" }}`,
+			want:   "{{ .AssignedInProgressQuery }}",
+			forbid: []string{`gc bd list --assignee=$GC_AGENT --status=in_progress`},
+		},
+		{
+			rel:    "packs/maintenance/template-fragments/propulsion.template.md",
+			start:  `{{ define "propulsion-refinery" }}`,
+			end:    `{{ define "propulsion-dog" }}`,
+			want:   "{{ .AssignedInProgressQuery }}",
+			forbid: []string{`gc bd list --assignee=$GC_AGENT --status=in_progress`},
+		},
+		{
+			rel:     "packs/gastown/agents/polecat/prompt.template.md",
+			start:   "## Startup Protocol",
+			end:     "## Context Exhaustion",
+			want:    "{{ .AssignedInProgressQuery }}",
+			forbid:  []string{`gc bd list --assignee="$GC_SESSION_NAME" --status=in_progress`},
+			render:  true,
+			agent:   "gastown/polecat",
+			tmpl:    "polecat",
+			rig:     "gastown",
+			binding: "gastown.",
+		},
+		{
+			rel:     "packs/gastown/agents/deacon/prompt.template.md",
+			start:   "## Startup Protocol",
+			end:     "**Hook ->",
+			want:    "{{ .AssignedInProgressQuery }}",
+			forbid:  []string{`gc bd list --assignee="$GC_ALIAS" --status=in_progress`},
+			render:  true,
+			agent:   "gastown/deacon",
+			tmpl:    "deacon",
+			rig:     "gastown",
+			binding: "gastown.",
+		},
+		{
+			rel:     "packs/gastown/agents/witness/prompt.template.md",
+			start:   "## Startup Protocol",
+			end:     "**Hook ->",
+			want:    "{{ .AssignedInProgressQuery }}",
+			forbid:  []string{`gc bd list --assignee="$GC_ALIAS" --status=in_progress`},
+			render:  true,
+			agent:   "gastown/witness",
+			tmpl:    "witness",
+			rig:     "gastown",
+			binding: "gastown.",
+		},
+		{
+			rel:     "packs/gastown/agents/refinery/prompt.template.md",
+			start:   "# Step 1: Check for an in-progress patrol wisp",
+			end:     "Then follow the formula.",
+			want:    "{{ .AssignedInProgressQuery }}",
+			forbid:  []string{`gc bd list --assignee="$GC_AGENT" --status=in_progress`},
+			render:  true,
+			agent:   "gastown/refinery",
+			tmpl:    "refinery",
+			rig:     "gastown",
+			binding: "gastown.",
+		},
+	}
+	for _, check := range checks {
+		t.Run(check.rel+"/"+check.start, func(t *testing.T) {
+			data, err := os.ReadFile(filepath.Join(dir, check.rel))
+			if err != nil {
+				t.Fatalf("reading %s: %v", check.rel, err)
+			}
+			body := sectionBetween(t, string(data), check.start, check.end)
+			if !strings.Contains(body, check.want) {
+				t.Fatalf("%s section %q missing %q", check.rel, check.start, check.want)
+			}
+			for _, forbidden := range check.forbid {
+				if strings.Contains(body, forbidden) {
+					t.Fatalf("%s section %q hardcodes %q", check.rel, check.start, forbidden)
+				}
+			}
+			if !check.render {
+				return
+			}
+			rendered := renderGastownPromptForPack(t, check.rel, check.agent, check.tmpl, "demo", check.rig, check.binding)
+			if strings.Contains(rendered, check.want) {
+				t.Fatalf("%s rendered prompt still contains %q", check.rel, check.want)
+			}
+			if !strings.Contains(rendered, `bd list --include-ephemeral --status in_progress --assignee="$GC_SESSION_ID"`) {
+				t.Fatalf("%s rendered prompt missing compatibility-aware in-progress query: %q", check.rel, rendered)
+			}
+		})
+	}
+}
+
 func TestGastownRigTargetShellExpressionsRenderForRigAndHQ(t *testing.T) {
 	tests := []struct {
 		name      string

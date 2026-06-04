@@ -55,7 +55,7 @@ Your formula: `mol-deacon-patrol`
 
 ```bash
 # Step 1: Check for assigned work
-gc bd list --assignee="$GC_ALIAS" --status=in_progress
+{{ .AssignedInProgressQuery }}
 
 # Step 2: Nothing? Check mail for attached work
 gc mail inbox
