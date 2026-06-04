@@ -23,11 +23,24 @@ import (
 // host zone (time.Local, which honors $TZ) is used — useful when the server
 // runs UTC but the operator thinks in their own timezone.
 func emitClockInject(hookFormat string, stdout io.Writer) {
-	switch strings.ToLower(strings.TrimSpace(os.Getenv("GC_INJECT_CLOCK"))) {
-	case "0", "false", "off":
+	line := clockInjectLine()
+	if line == "" {
 		return
 	}
-	_ = writeProviderHookContextForEvent(stdout, hookFormat, "UserPromptSubmit", formatClockLine(time.Now()))
+	_ = writeProviderHookContextForEvent(stdout, hookFormat, "UserPromptSubmit", line)
+}
+
+// clockInjectLine returns the current-time stamp that emitClockInject would
+// write, or "" when clock injection is disabled via GC_INJECT_CLOCK
+// (0/false/off). Callers that already emit a UserPromptSubmit hook context
+// (e.g. the nudge inject path) prepend this so the clock and the nudge ride in
+// a single provider-formatted payload, keeping JSON formats one valid document.
+func clockInjectLine() string {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("GC_INJECT_CLOCK"))) {
+	case "0", "false", "off":
+		return ""
+	}
+	return formatClockLine(time.Now())
 }
 
 // formatClockLine renders, e.g.:
