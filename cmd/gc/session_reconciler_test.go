@@ -6899,6 +6899,35 @@ func TestReconcileSessionBeads_AttachedSessionNeverRestartedOnConfigDrift(t *tes
 	}
 }
 
+func TestReconcileSessionBeads_ConfigDriftAttachmentErrorDefersLiveDrift(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	env.addRunningWorkerDesiredWithNewConfig()
+	session := env.createSessionBead("worker", "worker")
+	env.setSessionMetadata(&session, map[string]string{
+		"started_config_hash": runtime.CoreFingerprint(runtime.Config{Command: "test-cmd"}),
+	})
+	backing := env.store
+	env.store = &sessionObservationGetErrorStore{
+		Store:     backing,
+		id:        session.ID,
+		remaining: 1,
+		err:       errors.New("attachment observation failed"),
+	}
+
+	env.reconcile([]beads.Bead{session})
+
+	if ds := env.dt.get(session.ID); ds != nil {
+		t.Fatalf("attachment observation error should defer config-drift drain, got %+v", ds)
+	}
+	if !env.sp.IsRunning("worker") {
+		t.Fatal("attachment observation error should keep config-drift session running")
+	}
+	if !strings.Contains(env.stderr.String(), "observing config-drift attachment") {
+		t.Fatalf("stderr = %q, want attachment observation diagnostic", env.stderr.String())
+	}
+}
+
 // The deferred_attached outcome must persist across reconciler cycles:
 // as long as the session stays attached, each cycle skips config-drift restart.
 func TestReconcileSessionBeads_AttachedDeferralPersistsAcrossCycles(t *testing.T) {
@@ -7025,6 +7054,54 @@ func TestReconcileSessionBeads_AttachedSessionCancelsQueuedConfigDriftDrainBefor
 	}
 	if !env.sp.IsRunning("worker") {
 		t.Fatal("attached session should remain running after reconciler-owned drain ack is canceled")
+	}
+}
+
+func TestReconcileSessionBeads_ConfigDriftDrainAckAttachmentErrorDefersStop(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	env.addRunningWorkerDesiredWithNewConfig()
+	session := env.createSessionBead("worker", "worker")
+	env.markSessionActive(&session)
+	env.setSessionMetadata(&session, map[string]string{
+		"started_config_hash": runtime.CoreFingerprint(runtime.Config{Command: "test-cmd"}),
+	})
+	dops := newDrainOps(env.sp)
+
+	env.reconcileWithPoolDesiredAndDrainOps([]beads.Bead{session}, map[string]int{"worker": 1}, dops)
+	if ds := env.dt.get(session.ID); ds == nil || ds.reason != "config-drift" {
+		t.Fatalf("detached config drift should queue a config-drift drain, got %+v", ds)
+	}
+	if ack, _ := env.sp.GetMeta("worker", "GC_DRAIN_ACK"); ack != "1" {
+		t.Fatalf("GC_DRAIN_ACK after queued drain = %q, want 1", ack)
+	}
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", session.ID, err)
+	}
+	backing := env.store
+	env.store = &sessionObservationGetErrorStore{
+		Store:     backing,
+		id:        session.ID,
+		remaining: 1,
+		err:       errors.New("attachment observation failed"),
+	}
+
+	env.clk.Time = env.clk.Now().Add(defaultDrainTimeout + time.Second)
+	env.reconcileWithPoolDesiredAndDrainOps([]beads.Bead{got}, map[string]int{"worker": 1}, dops)
+
+	after, err := backing.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get after reconcile: %v", err)
+	}
+	if isDrainAckStopPending(after) {
+		t.Fatalf("attachment observation error should not mark drain-ack stop pending; metadata=%v", after.Metadata)
+	}
+	if !env.sp.IsRunning("worker") {
+		t.Fatal("attachment observation error should keep config-drift drain-ack session running")
+	}
+	if !strings.Contains(env.stderr.String(), "observing config-drift attachment") {
+		t.Fatalf("stderr = %q, want attachment observation diagnostic", env.stderr.String())
 	}
 }
 

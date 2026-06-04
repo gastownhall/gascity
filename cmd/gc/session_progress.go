@@ -21,10 +21,10 @@ import "time"
 //     startup grace window.
 //   - lastProgress is known and older than threshold.
 //
-// lastProgress is the most recent progress timestamp the caller resolved (the
-// maximum of last session activity and last claim update). A zero value means
-// progress is unknown, in which case the predicate is conservative and returns
-// false rather than recycle a session whose liveness it cannot assess.
+// lastProgress is the most recent provider-reported activity timestamp the
+// caller resolved. A zero value means progress is unknown, in which case the
+// predicate is conservative and returns false rather than recycle a session
+// whose liveness it cannot assess.
 func sessionProgressStalled(threshold time.Duration, holdsClaim, providerHealthy, exempt bool, lastProgress, now time.Time) bool {
 	if threshold <= 0 || holdsClaim || !providerHealthy || exempt {
 		return false

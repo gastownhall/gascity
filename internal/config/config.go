@@ -1259,6 +1259,11 @@ func (p BeadPolicyConfig) DeleteAfterCloseDuration() time.Duration {
 	return dur
 }
 
+// ProgressStallTimeoutMinimum is the minimum positive progress-stall recycle
+// timeout. Values below this floor are clamped so an opt-in automated restart
+// loop cannot spin faster than the storm-protection backstops can observe.
+const ProgressStallTimeoutMinimum = 5 * time.Minute
+
 // SessionConfig holds session provider settings.
 type SessionConfig struct {
 	// Provider selects the session backend: "fake", "fail", "subprocess",
@@ -1291,9 +1296,11 @@ type SessionConfig struct {
 	StartupTimeout string `toml:"startup_timeout,omitempty" jsonschema:"default=60s"`
 	// ProgressStallTimeout, when set, enables progress-aware session recycling:
 	// a desired, alive, claim-less session on a healthy provider whose last
-	// progress is older than this duration is restarted fresh. Such a session
-	// has likely parked (e.g. its turn ended on a provider auth error) and will
-	// not self-recover. Duration string (e.g. "30m"). Unset/zero disables it.
+	// provider-reported activity is older than this duration is restarted fresh.
+	// Such a session has likely parked (e.g. its turn ended on a provider auth
+	// error) and will not self-recover. Set this above the longest legitimate
+	// alive-idle period for the city; values below 5m are clamped to 5m.
+	// Duration string (e.g. "30m"). Unset/zero disables it.
 	ProgressStallTimeout string `toml:"progress_stall_timeout,omitempty"`
 	// Socket specifies the tmux socket name for per-city isolation.
 	// When set, all tmux commands use "tmux -L <socket>" to connect to
@@ -1373,10 +1380,12 @@ func (s *SessionConfig) StartupTimeoutDuration() time.Duration {
 	return d
 }
 
-// ProgressStallTimeoutDuration returns the progress-stall recycle timeout, or 0
-// when unset or unparseable. Zero disables progress-aware recycling (the
-// default): only a city that explicitly opts in by setting a duration above its
-// agents' longest legitimate quiet period gets the behavior.
+// ProgressStallTimeoutDuration returns the progress-stall recycle timeout, or
+// 0 when unset, zero, negative, or unparseable. Positive values below
+// ProgressStallTimeoutMinimum are clamped to that floor. Zero disables
+// progress-aware recycling (the default): only a city that explicitly opts in
+// by setting a duration above its agents' longest legitimate quiet period gets
+// the behavior.
 func (s *SessionConfig) ProgressStallTimeoutDuration() time.Duration {
 	if s.ProgressStallTimeout == "" {
 		return 0
@@ -1384,6 +1393,12 @@ func (s *SessionConfig) ProgressStallTimeoutDuration() time.Duration {
 	d, err := time.ParseDuration(s.ProgressStallTimeout)
 	if err != nil {
 		return 0
+	}
+	if d <= 0 {
+		return 0
+	}
+	if d < ProgressStallTimeoutMinimum {
+		return ProgressStallTimeoutMinimum
 	}
 	return d
 }

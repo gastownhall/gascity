@@ -2577,7 +2577,7 @@
         },
         "progress_stall_timeout": {
           "type": "string",
-          "description": "ProgressStallTimeout, when set, enables progress-aware session recycling:\na desired, alive, claim-less session on a healthy provider whose last\nprogress is older than this duration is restarted fresh. Such a session\nhas likely parked (e.g. its turn ended on a provider auth error) and will\nnot self-recover. Duration string (e.g. \"30m\"). Unset/zero disables it."
+          "description": "ProgressStallTimeout, when set, enables progress-aware session recycling:\na desired, alive, claim-less session on a healthy provider whose last\nprovider-reported activity is older than this duration is restarted fresh.\nSuch a session has likely parked (e.g. its turn ended on a provider auth\nerror) and will not self-recover. Set this above the longest legitimate\nalive-idle period for the city; values below 5m are clamped to 5m.\nDuration string (e.g. \"30m\"). Unset/zero disables it."
         },
         "socket": {
           "type": "string",
