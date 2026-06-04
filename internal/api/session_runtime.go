@@ -76,8 +76,13 @@ func sessionCreateHints(resolved *config.ResolvedProvider, sessionEnv map[string
 		ProcessNames:           resolved.ProcessNames,
 		EmitsPermissionWarning: resolved.EmitsPermissionWarning,
 		AcceptStartupDialogs:   resolved.AcceptStartupDialogs,
-		Env:                    sessionEnv,
-		MCPServers:             mcpServers,
+		// Interactive create paths only (provider-adhoc + named sessions);
+		// MouseOn lets the runtime skip disableMouseAndActivity so the tmux
+		// wheel drives copy-mode scrollback. Headless agents resolve MouseOn
+		// from cmd/gc/template_resolve.go and stay mouse-off (ga-c4w).
+		MouseOn:    true,
+		Env:        sessionEnv,
+		MCPServers: mcpServers,
 	}
 }
 
