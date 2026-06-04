@@ -4271,6 +4271,229 @@ func TestSyncSessionBeadsWithSnapshot_RefreshesMissingNamedSessionFromStore(t *t
 	}
 }
 
+func TestCloseBeadReleasesWorkAssignedBySessionName(t *testing.T) {
+	store := beads.NewMemStore()
+	now := time.Date(2026, 4, 18, 12, 0, 0, 0, time.UTC)
+
+	sessionBead, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name": "worker-gm-dead",
+			"template":     "worker",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+
+	work, err := store.Create(beads.Bead{
+		Title:    "pool work",
+		Assignee: "worker-gm-dead",
+		Metadata: map[string]string{"gc.routed_to": "worker"},
+	})
+	if err != nil {
+		t.Fatalf("create work bead: %v", err)
+	}
+	if err := store.Update(work.ID, beads.UpdateOpts{Status: strPtr("in_progress")}); err != nil {
+		t.Fatalf("set work in_progress: %v", err)
+	}
+
+	if !closeBead(store, sessionBead.ID, "orphaned", now, ioDiscard{}) {
+		t.Fatal("closeBead returned false, want true")
+	}
+
+	gotSess, err := store.Get(sessionBead.ID)
+	if err != nil {
+		t.Fatalf("get session bead: %v", err)
+	}
+	if gotSess.Status != "closed" {
+		t.Fatalf("session status = %q, want closed", gotSess.Status)
+	}
+
+	gotWork, err := store.Get(work.ID)
+	if err != nil {
+		t.Fatalf("get work bead: %v", err)
+	}
+	if gotWork.Assignee != "" {
+		t.Errorf("work assignee = %q, want empty", gotWork.Assignee)
+	}
+	if gotWork.Status != "open" {
+		t.Errorf("work status = %q, want open", gotWork.Status)
+	}
+}
+
+func TestCloseBeadReleasesWorkAssignedByBeadID(t *testing.T) {
+	store := beads.NewMemStore()
+	now := time.Date(2026, 4, 18, 12, 0, 0, 0, time.UTC)
+
+	sessionBead, err := store.Create(beads.Bead{
+		Title:    "worker",
+		Type:     sessionBeadType,
+		Labels:   []string{sessionBeadLabel},
+		Metadata: map[string]string{"session_name": "worker-gm-dead"},
+	})
+	if err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+
+	work, err := store.Create(beads.Bead{
+		Title:    "direct-assigned work",
+		Assignee: sessionBead.ID,
+	})
+	if err != nil {
+		t.Fatalf("create work bead: %v", err)
+	}
+	if err := store.Update(work.ID, beads.UpdateOpts{Status: strPtr("in_progress")}); err != nil {
+		t.Fatalf("set work in_progress: %v", err)
+	}
+
+	if !closeBead(store, sessionBead.ID, "orphaned", now, ioDiscard{}) {
+		t.Fatal("closeBead returned false, want true")
+	}
+
+	gotWork, err := store.Get(work.ID)
+	if err != nil {
+		t.Fatalf("get work bead: %v", err)
+	}
+	if gotWork.Assignee != "" {
+		t.Errorf("work assignee = %q, want empty", gotWork.Assignee)
+	}
+	if gotWork.Status != "open" {
+		t.Errorf("work status = %q, want open", gotWork.Status)
+	}
+}
+
+func TestCloseBeadReleasesWorkAssignedByNamedIdentity(t *testing.T) {
+	store := beads.NewMemStore()
+	now := time.Date(2026, 4, 18, 12, 0, 0, 0, time.UTC)
+
+	sessionBead, err := store.Create(beads.Bead{
+		Title:  "reviewer",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":              "reviewer-gm-dead",
+			"configured_named_identity": "reviewer",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+
+	work, err := store.Create(beads.Bead{
+		Title:    "named-session work",
+		Assignee: "reviewer",
+	})
+	if err != nil {
+		t.Fatalf("create work bead: %v", err)
+	}
+	if err := store.Update(work.ID, beads.UpdateOpts{Status: strPtr("in_progress")}); err != nil {
+		t.Fatalf("set work in_progress: %v", err)
+	}
+
+	if !closeBead(store, sessionBead.ID, "suspended", now, ioDiscard{}) {
+		t.Fatal("closeBead returned false, want true")
+	}
+
+	gotWork, err := store.Get(work.ID)
+	if err != nil {
+		t.Fatalf("get work bead: %v", err)
+	}
+	if gotWork.Assignee != "" {
+		t.Errorf("work assignee = %q, want empty", gotWork.Assignee)
+	}
+	if gotWork.Status != "open" {
+		t.Errorf("work status = %q, want open", gotWork.Status)
+	}
+}
+
+func TestCloseBeadLeavesUnrelatedWorkAlone(t *testing.T) {
+	store := beads.NewMemStore()
+	now := time.Date(2026, 4, 18, 12, 0, 0, 0, time.UTC)
+
+	sessionBead, err := store.Create(beads.Bead{
+		Title:    "worker",
+		Type:     sessionBeadType,
+		Labels:   []string{sessionBeadLabel},
+		Metadata: map[string]string{"session_name": "worker-gm-dead"},
+	})
+	if err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+
+	other, err := store.Create(beads.Bead{
+		Title:    "someone else's work",
+		Assignee: "other-gm-live",
+	})
+	if err != nil {
+		t.Fatalf("create other work: %v", err)
+	}
+	if err := store.Update(other.ID, beads.UpdateOpts{Status: strPtr("in_progress")}); err != nil {
+		t.Fatalf("set other in_progress: %v", err)
+	}
+
+	if !closeBead(store, sessionBead.ID, "orphaned", now, ioDiscard{}) {
+		t.Fatal("closeBead returned false, want true")
+	}
+
+	gotOther, err := store.Get(other.ID)
+	if err != nil {
+		t.Fatalf("get other work: %v", err)
+	}
+	if gotOther.Assignee != "other-gm-live" {
+		t.Errorf("other assignee = %q, want preserved", gotOther.Assignee)
+	}
+	if gotOther.Status != "in_progress" {
+		t.Errorf("other status = %q, want in_progress", gotOther.Status)
+	}
+}
+
+func TestCloseBeadReleasesWorkAssignedByAlias(t *testing.T) {
+	store := beads.NewMemStore()
+	now := time.Date(2026, 4, 18, 12, 0, 0, 0, time.UTC)
+
+	sessionBead, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name": "worker-gm-dead",
+			"alias":        "worker-gm-aliased",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+
+	work, err := store.Create(beads.Bead{
+		Title:    "alias-assigned work",
+		Assignee: "worker-gm-aliased",
+	})
+	if err != nil {
+		t.Fatalf("create work bead: %v", err)
+	}
+	if err := store.Update(work.ID, beads.UpdateOpts{Status: strPtr("in_progress")}); err != nil {
+		t.Fatalf("set work in_progress: %v", err)
+	}
+
+	if !closeBead(store, sessionBead.ID, "orphaned", now, ioDiscard{}) {
+		t.Fatal("closeBead returned false, want true")
+	}
+
+	gotWork, err := store.Get(work.ID)
+	if err != nil {
+		t.Fatalf("get work bead: %v", err)
+	}
+	if gotWork.Assignee != "" {
+		t.Errorf("work assignee = %q, want empty", gotWork.Assignee)
+	}
+	if gotWork.Status != "open" {
+		t.Errorf("work status = %q, want open", gotWork.Status)
+	}
+}
+
 func TestSyncSessionBeads_ConfigDrift(t *testing.T) {
 	store := beads.NewMemStore()
 	clk := &clock.Fake{Time: time.Date(2026, 3, 7, 12, 0, 0, 0, time.UTC)}
