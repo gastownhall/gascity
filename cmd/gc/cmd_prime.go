@@ -19,13 +19,17 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// defaultPrimePrompt is the run-once worker prompt output when no agent name
-// matches a configured agent. This is for users who start Claude Code manually
-// inside a rig without being a managed agent.
+// defaultPrimePrompt is the run-once worker prompt output for managed runtime
+// sessions whose configured agent cannot be resolved or has no prompt template.
+// The protocol depends on session identity and controller drain-ack context.
 const defaultPrimePrompt = `# Gas City Agent
 
 You are an agent in a Gas City workspace. Find assigned work, claim it
 atomically when needed, execute it, close it, and drain when idle.
+
+This fallback prompt is for a managed runtime session. If $GC_SESSION_NAME is empty,
+do not run this protocol; use a named agent prompt or direct bd commands for
+manual work instead.
 
 ## Your tools
 
@@ -53,10 +57,14 @@ atomically when needed, execute it, close it, and drain when idle.
    The assignee must be ` + "`$GC_SESSION_NAME`" + `. If ` + "`$GC_TEMPLATE`" + ` is set,
    ` + "`gc.routed_to`" + ` or ` + "`gc.run_target`" + ` must match it.
 6. If the bead metadata has ` + "`gc.continuation_group`" + ` and ` + "`gc.root_bead_id`" + `,
-   pre-assign other open beads in the same root and continuation group to
-   ` + "`$GC_SESSION_NAME`" + ` so the workflow continues in this live session:
-   ` + "`bd list --metadata-field gc.root_bead_id=<root> --metadata-field gc.continuation_group=<group> --status=open --json`" + `
-   then ` + "`bd update <sibling-id> --assignee=\"$GC_SESSION_NAME\"`" + ` for each sibling.
+   pre-assign only unassigned sibling beads in the same root, continuation
+   group, and route so the workflow continues in this live session:
+   If ` + "`$GC_TEMPLATE`" + ` is empty, skip sibling pre-assignment.
+   ` + "`bd list --metadata-field gc.routed_to=\"$GC_TEMPLATE\" --metadata-field gc.root_bead_id=<root> --metadata-field gc.continuation_group=<group> --status=open --no-assignee --json`" + `
+   If the claimed bead used ` + "`gc.run_target`" + ` without ` + "`gc.routed_to`" + `,
+   use ` + "`--metadata-field gc.run_target=\"$GC_TEMPLATE\"`" + ` instead.
+   Then ` + "`bd update <sibling-id> --assignee=\"$GC_SESSION_NAME\"`" + ` for each sibling.
+   Never assign a sibling already assigned to another session or another route.
 7. Execute exactly the claimed bead's description.
 8. Close the bead when done. If the workflow expects explicit outcome
    metadata, set it before closing; otherwise ` + "`bd close <id>`" + ` is enough.

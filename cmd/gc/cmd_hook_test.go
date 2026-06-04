@@ -16,6 +16,18 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 )
 
+func TestNewHookCmdUsesRoutedWorkHelp(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	cmd := newHookCmd(&stdout, &stderr)
+
+	if got, want := cmd.Short, "Find routed work for an agent"; got != want {
+		t.Fatalf("Short = %q, want %q", got, want)
+	}
+	if !strings.Contains(cmd.Long, "Finds routed work using the agent's work_query config.") {
+		t.Fatalf("Long = %q, want routed-work description", cmd.Long)
+	}
+}
+
 // TestShellWorkQueryTimeoutClassifiesTransient guards the contract the
 // control-dispatcher --follow loop depends on: a work-query timeout must be
 // classifiable as a transient store error (wrapping context.DeadlineExceeded)

@@ -60,7 +60,7 @@ EOF`
 		if err != nil {
 			t.Fatalf("gc prime: %v\n%s", err, out)
 		}
-		for _, want := range []string{"# Gas City Agent", "bd update <id> --claim", "gc.continuation_group", "gc runtime drain-ack"} {
+		for _, want := range []string{"# Gas City Agent", "bd update <id> --claim", "gc.continuation_group", "--metadata-field gc.routed_to=\"$GC_TEMPLATE\"", "--no-assignee", "gc runtime drain-ack"} {
 			if !strings.Contains(out, want) {
 				t.Fatalf("gc prime missing %q:\n%s", want, out)
 			}
