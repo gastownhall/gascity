@@ -231,6 +231,10 @@ func processScopeCheck(store beads.Store, bead beads.Bead, opts ProcessOptions) 
 	}
 
 	if isRetryAttemptSubject(subject) {
+		if subject.Status != "closed" {
+			opts.tracef("scope-check bead=%s subject=%s pending status=%s", bead.ID, subject.ID, subject.Status)
+			return ControlResult{}, ErrControlPending
+		}
 		remainingOpen, err := tracePhase(opts, bead.ID, "check-open-members", func() (bool, error) {
 			return hasOpenScopeMembers(store, rootID, scopeRef, bead.ID)
 		})

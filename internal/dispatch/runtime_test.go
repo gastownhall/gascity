@@ -702,6 +702,81 @@ func TestProcessScopeCheckReturnsPendingWhenSubjectStillOpen(t *testing.T) {
 	}
 }
 
+func TestProcessScopeCheckReturnsPendingWhenRetryAttemptSubjectStillOpen(t *testing.T) {
+	t.Parallel()
+
+	store := beads.NewMemStore()
+	workflow := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+		},
+	})
+	body := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "body",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":         "scope",
+			"gc.scope_role":   "body",
+			"gc.root_bead_id": workflow.ID,
+			"gc.step_ref":     "demo.body",
+		},
+	})
+	logical := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "apply fixes",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":         "retry",
+			"gc.root_bead_id": workflow.ID,
+			"gc.scope_ref":    "body",
+			"gc.scope_role":   "member",
+			"gc.step_ref":     "demo.apply-fixes",
+		},
+	})
+	attempt := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "apply fixes attempt 1",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.root_bead_id":    workflow.ID,
+			"gc.scope_ref":       "body",
+			"gc.scope_role":      "member",
+			"gc.step_ref":        "demo.apply-fixes.attempt.1",
+			"gc.logical_bead_id": logical.ID,
+			"gc.attempt":         "1",
+		},
+	})
+	control := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "Finalize scope for apply fixes attempt 1",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":         "scope-check",
+			"gc.root_bead_id": workflow.ID,
+			"gc.scope_ref":    "body",
+			"gc.scope_role":   "control",
+		},
+	})
+
+	mustDepAdd(t, store, control.ID, attempt.ID, "blocks")
+	mustDepAdd(t, store, body.ID, control.ID, "blocks")
+	mustDepAdd(t, store, logical.ID, control.ID, "blocks")
+
+	_, err := ProcessControl(store, mustGetBead(t, store, control.ID), ProcessOptions{})
+	if !errors.Is(err, ErrControlPending) {
+		t.Fatalf("ProcessControl(scope-check with open retry attempt) = %v, want ErrControlPending", err)
+	}
+
+	controlAfter := mustGetBead(t, store, control.ID)
+	if controlAfter.Status != "open" {
+		t.Fatalf("control status = %q, want open", controlAfter.Status)
+	}
+	bodyAfter := mustGetBead(t, store, body.ID)
+	if bodyAfter.Status != "open" {
+		t.Fatalf("body status = %q, want open", bodyAfter.Status)
+	}
+}
+
 func TestProcessScopeCheckReturnsMalformedWhenScopeBodyMissing(t *testing.T) {
 	t.Parallel()
 
