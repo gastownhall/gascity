@@ -29,3 +29,23 @@ func TestNewEnvInheritsClaudeGatewayVariables(t *testing.T) {
 		}
 	}
 }
+
+func TestNewEnvDefaultsBeadsProviderToFile(t *testing.T) {
+	t.Setenv("GC_ACCEPTANCE_BEADS_PROVIDER", "")
+
+	env := NewEnv("", t.TempDir(), t.TempDir())
+
+	if got := env.Get("GC_BEADS"); got != "file" {
+		t.Fatalf("NewEnv() GC_BEADS = %q, want %q", got, "file")
+	}
+}
+
+func TestNewEnvUsesAcceptanceBeadsProviderOverride(t *testing.T) {
+	t.Setenv("GC_ACCEPTANCE_BEADS_PROVIDER", "sqlite")
+
+	env := NewEnv("", t.TempDir(), t.TempDir())
+
+	if got := env.Get("GC_BEADS"); got != "sqlite" {
+		t.Fatalf("NewEnv() GC_BEADS = %q, want %q", got, "sqlite")
+	}
+}

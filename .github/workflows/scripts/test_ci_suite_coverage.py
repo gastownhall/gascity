@@ -6,6 +6,7 @@ import yaml
 import ci_suite_coverage as cov
 
 CI_YML = Path(__file__).resolve().parents[1] / "ci.yml"
+INTEGRATION_SHARD = Path(__file__).resolve().parents[3] / "scripts" / "test-integration-shard"
 
 # Core substrates whose breakage ripples across every subsystem. Beads is the
 # universal persistence substrate, events the universal observation substrate,
@@ -204,6 +205,48 @@ class AcceptanceScenarioTests(unittest.TestCase):
         # if the integration filter had not matched on its own.
         integration_expr = _load_changes_job()["outputs"]["integration"]
         self.assertIn("shared", integration_expr)
+
+
+class SQLiteCoordinationStoreCoverageTests(unittest.TestCase):
+    def test_ci_runs_bdstore_and_acceptance_against_sqlite_coordination_store(self) -> None:
+        workflow = yaml.safe_load(CI_YML.read_text(encoding="utf-8"))
+        candidates = []
+        for name, job in workflow["jobs"].items():
+            rendered = yaml.safe_dump(job, sort_keys=True)
+            if "test-integration-bdstore" in rendered and "test-acceptance" in rendered:
+                candidates.append((name, rendered))
+
+        self.assertTrue(
+            candidates,
+            "CI must include one SQLite coordination-store job that runs both "
+            "`make test-integration-bdstore` and `make test-acceptance`.",
+        )
+
+        matching = [
+            name
+            for name, rendered in candidates
+            if "GC_BEADS" in rendered
+            and "sqlite" in rendered
+            and "GC_ACCEPTANCE_BEADS_PROVIDER" in rendered
+        ]
+        self.assertTrue(
+            matching,
+            "SQLite coordination-store CI job must pass GC_BEADS=sqlite to "
+            "the integration shard and GC_ACCEPTANCE_BEADS_PROVIDER=sqlite "
+            "to Tier A acceptance; candidates: "
+            + ", ".join(name for name, _ in candidates),
+        )
+
+    def test_integration_shard_preserves_gc_beads_override(self) -> None:
+        script = INTEGRATION_SHARD.read_text(encoding="utf-8")
+
+        self.assertIn(
+            'GC_BEADS="${GC_BEADS-}"',
+            script,
+            "scripts/test-integration-shard scrubs the environment with env -i; "
+            "it must explicitly preserve GC_BEADS so the bdstore shard can run "
+            "against provider=sqlite in CI.",
+        )
 
 
 if __name__ == "__main__":
