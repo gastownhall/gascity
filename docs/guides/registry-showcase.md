@@ -1,16 +1,17 @@
 ---
-title: "Public Registry Packs"
+title: "First-Party Registry Packs"
 description: Find and import the first-party packs published through the public Gas City registry.
 ---
 
-# Public Registry Packs
+# First-Party Registry Packs
 
 Gas City publishes first-party reusable packs through the public
-`gascity-packs` registry. The registry is a catalog for discovery; your
-checked-in `pack.toml` still records durable GitHub tree URLs and optional
-version constraints.
+`gascity-packs` registry. This is Gas City's first-party, or 1P, registry:
+the entries are owned by Gas City and reviewed in the `gascity-packs` repo.
+The registry is a catalog for discovery; your checked-in `pack.toml` still
+records durable GitHub tree URLs and optional version constraints.
 
-## One-Page Setup
+## Use The First-Party Registry
 
 1. Add the public registry locally:
 
@@ -44,7 +45,7 @@ When you decide to use a pack, prefer the exact command printed by
 `gc pack registry show`. It writes a durable `source` URL and optional
 `version`; it does not write the local registry handle into `pack.toml`.
 
-## First-Party Packs
+## First-Party Registry Packs
 
 | Pack | Use it for | Registry source |
 |---|---|---|
@@ -57,6 +58,21 @@ When you decide to use a pack, prefer the exact command printed by
 
 The built-in `core` and `maintenance` packs remain implicit in this wave. Do
 not add an import just to receive standard built-in behavior from `gc`.
+
+## Create Your Own Registry
+
+A registry is a Git repository with a `registry.toml` catalog. To try your own
+pack registry, publish a repo with that catalog, then add it locally under the
+name you want to use:
+
+```bash
+gc pack registry add team https://github.com/example/team-packs.git
+gc pack registry refresh team
+gc pack registry show team:example-pack
+```
+
+Use the first-party `gascity-packs` registry as the reference shape for catalog
+entries, release pins, and pack source URLs.
 
 ## Freshness
 
@@ -82,10 +98,14 @@ GC_REGISTRY_FRESHNESS=1h gc pack registry search gascity
 Invalid, zero, or negative values warn and are ignored for freshness
 calculation.
 
-## Not A Marketplace Yet
+## Registry Scope
 
-This page advertises first-party public registry entries. It is not a
-marketplace or external community curation workflow. Publishing a new registry
-entry is still a registry-repo change: update the catalog, review the change,
-merge it, then refresh local registry caches before searching or showing the
-new entry.
+Registry support is catalog plumbing: add a registry repo you trust, refresh
+its catalog, inspect an entry, and import the GitHub tree URL it advertises.
+A marketplace would add a separate curation layer, such as submission policies,
+moderation, ownership signals, ranking, and discovery across many publishers.
+
+This page only advertises Gas City's first-party entries and the mechanics for
+adding registry repos. Publishing a new first-party entry is still a
+`gascity-packs` repo change: update the catalog, review the change, merge it,
+then refresh local registry caches before searching or showing the new entry.

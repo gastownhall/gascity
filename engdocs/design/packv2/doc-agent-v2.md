@@ -1,4 +1,4 @@
-# Agent Definition v.next
+# Agent Definitions As Directories
 
 > **Historical PackV2 design note.** This page preserves design history and
 > rollout rationale. For current pack authoring guidance, use
@@ -8,7 +8,7 @@
 
 **GitHub Issue:** [gastownhall/gascity#356](https://github.com/gastownhall/gascity/issues/356)
 
-Title: `feat: Agent Definition v.next — agents as directories`
+Title: `feat: agent definitions as directories`
 
 This is a companion to [doc-pack-v2.md](doc-pack-v2.md), which covers the pack/city model redesign.
 
@@ -24,7 +24,7 @@ This is a companion to [doc-pack-v2.md](doc-pack-v2.md), which covers the pack/c
 ## Problem
 
 Agent definitions are split across `[[agent]]` TOML tables and filesystem assets (prompts, overlays, scripts) scattered in separate directory trees. This creates six problems:
-v
+
 1. **Scattered identity.** There's no single place to understand what an agent is. Adding an agent means editing city.toml *and* creating files in multiple directories (`prompts/`, `overlay/`, `scripts/`).
 
 2. **Invisible prompt injection.** Every `.md` file is secretly a Go template. Fragments get injected via `global_fragments` and `inject_fragments` without appearing in the prompt file itself. You can't read a prompt and know what the agent actually sees.
