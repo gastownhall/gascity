@@ -852,6 +852,56 @@ func TestResolveDoltArchiveLevel(t *testing.T) {
 	}
 }
 
+func TestResolveManagedDoltConfigForStartUsesCityListenerOverrides(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte(`
+[workspace]
+name = "test"
+
+[dolt]
+read_timeout_millis = 300000
+write_timeout_millis = 600000
+max_connections = 1024
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := resolveManagedDoltConfigForStart(dir, -1)
+	if err != nil {
+		t.Fatalf("resolveManagedDoltConfigForStart: %v", err)
+	}
+	if got.ReadTimeoutMillis != 300000 {
+		t.Fatalf("ReadTimeoutMillis = %d, want 300000", got.ReadTimeoutMillis)
+	}
+	if got.WriteTimeoutMillis != 600000 {
+		t.Fatalf("WriteTimeoutMillis = %d, want 600000", got.WriteTimeoutMillis)
+	}
+	if got.MaxConnections != 1024 {
+		t.Fatalf("MaxConnections = %d, want 1024", got.MaxConnections)
+	}
+}
+
+func TestResolveManagedDoltConfigForStartRejectsInvalidCityDoltConfig(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte(`
+[workspace]
+name = "test"
+
+[dolt]
+read_timeout_millis = -1
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := resolveManagedDoltConfigForStart(dir, -1)
+	if err == nil {
+		t.Fatal("resolveManagedDoltConfigForStart() error = nil, want invalid city dolt config rejection")
+	}
+	if got := err.Error(); !strings.Contains(got, "[dolt] read_timeout_millis must not be negative") {
+		t.Fatalf("error = %q, want negative read_timeout_millis rejection", got)
+	}
+}
+
 // TestTerminateManagedDoltPID_HonorsSubPollGrace asserts that terminate uses
 // the grace-clamped poll interval (managedDoltStopPollInterval) rather than a
 // fixed sleep: a SIGTERM-ignoring process with a tiny configured grace must be

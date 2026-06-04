@@ -115,14 +115,7 @@ func startManagedDoltProcess(cityPath, host, port, user, logLevel string, timeou
 	return startManagedDoltProcessWithOptions(cityPath, host, port, user, logLevel, -1, timeout, true)
 }
 
-// archiveLevel is currently always -1 from every caller (callers pass through
-// startManagedDoltProcess, which hardcodes -1, or pass -1 directly from
-// dolt_recover_managed). The parameter is preserved as a forward-compatible
-// hook because resolveDoltArchiveLevel(archiveLevel) and the config-file
-// write path are already wired to honor non-default values when the
-// supervisor / dolt-state CLI eventually exposes them.
-//
-//nolint:unparam // archiveLevel reserved for future caller override; see comment above.
+//nolint:unparam // archiveLevel is an explicit override hook; current callers use config/env fallback.
 func startManagedDoltProcessWithOptions(cityPath, host, port, user, logLevel string, archiveLevel int, timeout time.Duration, publish bool) (managedDoltStartReport, error) {
 	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
 	if err != nil {
@@ -147,9 +140,12 @@ func startManagedDoltProcessWithOptions(cityPath, host, port, user, logLevel str
 	if timeout <= 0 {
 		timeout = 30 * time.Second
 	}
-	archiveLevel = resolveDoltArchiveLevel(archiveLevel)
-
 	report := managedDoltStartReport{}
+	doltConfig, err := resolveManagedDoltConfigForStart(cityPath, archiveLevel)
+	if err != nil {
+		return report, err
+	}
+
 	currentPort := portNum
 	// retryWindow is resolved once before the loop so an in-progress
 	// city.toml edit cannot change the wait policy mid-flight.
@@ -169,7 +165,7 @@ func startManagedDoltProcessWithOptions(cityPath, host, port, user, logLevel str
 		if err := managedDoltPreflightCleanupFn(cityPath); err != nil {
 			return report, err
 		}
-		if err := writeManagedDoltConfigFile(layout.ConfigFile, host, strconv.Itoa(currentPort), layout.DataDir, logLevel, archiveLevel); err != nil {
+		if err := writeManagedDoltConfigFile(layout.ConfigFile, host, strconv.Itoa(currentPort), layout.DataDir, logLevel, doltConfig); err != nil {
 			return report, err
 		}
 
@@ -744,6 +740,55 @@ func managedDoltLogSuffix(path string, offset int64) (string, error) {
 		offset = 0
 	}
 	return string(data[offset:]), nil
+}
+
+func resolveManagedDoltConfigForStart(cityPath string, explicitArchiveLevel int) (config.DoltConfig, error) {
+	doltConfig := config.DoltConfig{}
+	if strings.TrimSpace(cityPath) != "" {
+		tomlPath := filepath.Join(cityPath, "city.toml")
+		if _, err := os.Stat(tomlPath); err != nil {
+			if !os.IsNotExist(err) {
+				return doltConfig, fmt.Errorf("stat city dolt config: %w", err)
+			}
+		} else {
+			if cfg, err := loadCityConfig(cityPath, io.Discard); err != nil {
+				return doltConfig, fmt.Errorf("load city dolt config: %w", err)
+			} else if cfg != nil {
+				doltConfig = cfg.Dolt
+			}
+		}
+	}
+	if explicitArchiveLevel >= 0 {
+		doltConfig.ArchiveLevel = &explicitArchiveLevel
+	} else if doltConfig.ArchiveLevel == nil {
+		if v := os.Getenv("GC_DOLT_ARCHIVE_LEVEL"); v != "" {
+			if parsed, err := strconv.Atoi(v); err == nil {
+				doltConfig.ArchiveLevel = &parsed
+			}
+		}
+	}
+	if doltConfig.MaxConnections <= 0 {
+		doltConfig.MaxConnections = positiveEnvInt("GC_DOLT_MAX_CONNECTIONS")
+	}
+	if doltConfig.ReadTimeoutMillis <= 0 {
+		doltConfig.ReadTimeoutMillis = positiveEnvInt("GC_DOLT_READ_TIMEOUT_MILLIS")
+	}
+	if doltConfig.WriteTimeoutMillis <= 0 {
+		doltConfig.WriteTimeoutMillis = positiveEnvInt("GC_DOLT_WRITE_TIMEOUT_MILLIS")
+	}
+	return doltConfig, nil
+}
+
+func positiveEnvInt(key string) int {
+	raw := os.Getenv(key)
+	if raw == "" {
+		return 0
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n <= 0 {
+		return 0
+	}
+	return n
 }
 
 // resolveDoltArchiveLevel resolves the archive level for dolt auto_gc.

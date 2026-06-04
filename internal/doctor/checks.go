@@ -2420,17 +2420,23 @@ type DoltConfigExpectedValue struct {
 // generation. Dynamic values such as data_dir are checked by DoltConfigCheck
 // because they depend on the inspected city path.
 func DoltConfigExpectedValues() []DoltConfigExpectedValue {
+	return DoltConfigExpectedValuesForConfig(config.DoltConfig{})
+}
+
+// DoltConfigExpectedValuesForConfig returns the managed Dolt config contract
+// after applying city-level [dolt] overrides.
+func DoltConfigExpectedValuesForConfig(doltConfig config.DoltConfig) []DoltConfigExpectedValue {
 	values := []DoltConfigExpectedValue{
 		{"behavior.auto_gc_behavior.enable", false},
-		{"behavior.auto_gc_behavior.archive_level", 0},
+		{"behavior.auto_gc_behavior.archive_level", doltConfig.EffectiveArchiveLevel()},
 		{"system_variables.dolt_auto_gc_enabled", "OFF"},
 		{"system_variables.dolt_stats_enabled", "OFF"},
 		{"system_variables.dolt_stats_gc_enabled", "OFF"},
 		{"system_variables.dolt_stats_memory_only", "ON"},
 		{"system_variables.dolt_stats_paused", "ON"},
-		{"listener.read_timeout_millis", 300000},
-		{"listener.write_timeout_millis", 300000},
-		{"listener.max_connections", 1000},
+		{"listener.read_timeout_millis", doltConfig.EffectiveReadTimeoutMillis()},
+		{"listener.write_timeout_millis", doltConfig.EffectiveWriteTimeoutMillis()},
+		{"listener.max_connections", doltConfig.EffectiveMaxConnections()},
 		{"listener.back_log", 50},
 		{"listener.max_connections_timeout_millis", 5000},
 	}
@@ -2503,6 +2509,7 @@ type DoltConfigCheck struct {
 	skip            bool
 	applicableKnown bool
 	applicable      bool
+	doltConfig      config.DoltConfig
 }
 
 // NewDoltConfigCheck creates a managed Dolt config drift check.
@@ -2512,11 +2519,16 @@ func NewDoltConfigCheck(cityPath string, skip bool) *DoltConfigCheck {
 
 // NewDoltConfigCheckForConfig creates a managed Dolt config drift check using preloaded city config.
 func NewDoltConfigCheckForConfig(cityPath string, skip bool, cfg *config.City, cfgErr error) *DoltConfigCheck {
+	var doltConfig config.DoltConfig
+	if cfg != nil {
+		doltConfig = cfg.Dolt
+	}
 	return &DoltConfigCheck{
 		cityPath:        cityPath,
 		skip:            skip,
 		applicableKnown: true,
 		applicable:      ManagedLocalDoltChecksApplicableForConfig(cityPath, cfg, cfgErr),
+		doltConfig:      doltConfig,
 	}
 }
 
@@ -2568,7 +2580,7 @@ func (c *DoltConfigCheck) Run(_ *CheckContext) *CheckResult {
 	}
 
 	var drifted []string
-	for _, exp := range DoltConfigExpectedValues() {
+	for _, exp := range DoltConfigExpectedValuesForConfig(c.doltConfig) {
 		got, present := lookupYAMLPath(doc, exp.Path)
 		if !present {
 			drifted = append(drifted, exp.Path+" (missing)")

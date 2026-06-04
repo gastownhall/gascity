@@ -335,6 +335,9 @@ DoltConfig holds optional dolt server overrides.
 | `port` | integer |  | `0` | Port is the dolt server port. 0 means use ephemeral port allocation (hashed from city path). Set explicitly to override. |
 | `host` | string |  | `localhost` | Host is the dolt server hostname. Defaults to localhost. |
 | `archive_level` | integer |  | `0` | ArchiveLevel controls Dolt's auto_gc archive aggressiveness. 0 disables archive compaction (lower CPU on startup). 1 enables archive compaction (higher CPU on startup). nil (omitted) defaults to 0. |
+| `max_connections` | integer |  | `256` | MaxConnections overrides the managed Dolt listener max_connections. 0 means use the managed default. |
+| `read_timeout_millis` | integer |  | `30000` | ReadTimeoutMillis overrides the managed Dolt listener read_timeout_millis. 0 means use the managed default. |
+| `write_timeout_millis` | integer |  | `300000` | WriteTimeoutMillis overrides the managed Dolt listener write_timeout_millis. 0 means use the managed default. |
 
 ## DoltMaintenance
 

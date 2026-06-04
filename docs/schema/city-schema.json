@@ -1328,6 +1328,21 @@
           "type": "integer",
           "description": "ArchiveLevel controls Dolt's auto_gc archive aggressiveness.\n0 disables archive compaction (lower CPU on startup).\n1 enables archive compaction (higher CPU on startup).\nnil (omitted) defaults to 0.",
           "default": 0
+        },
+        "max_connections": {
+          "type": "integer",
+          "description": "MaxConnections overrides the managed Dolt listener max_connections.\n0 means use the managed default.",
+          "default": 256
+        },
+        "read_timeout_millis": {
+          "type": "integer",
+          "description": "ReadTimeoutMillis overrides the managed Dolt listener read_timeout_millis.\n0 means use the managed default.",
+          "default": 30000
+        },
+        "write_timeout_millis": {
+          "type": "integer",
+          "description": "WriteTimeoutMillis overrides the managed Dolt listener write_timeout_millis.\n0 means use the managed default.",
+          "default": 300000
         }
       },
       "additionalProperties": false,

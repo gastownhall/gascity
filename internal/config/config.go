@@ -1605,6 +1605,15 @@ func (c EventsRotationConfig) ArchiveRetainAgeDuration() time.Duration {
 	return d
 }
 
+const (
+	// DefaultDoltMaxConnections is the managed Dolt listener connection cap.
+	DefaultDoltMaxConnections = 256
+	// DefaultDoltReadTimeoutMillis is the managed Dolt listener read timeout.
+	DefaultDoltReadTimeoutMillis = 30000
+	// DefaultDoltWriteTimeoutMillis is the managed Dolt listener write timeout.
+	DefaultDoltWriteTimeoutMillis = 300000
+)
+
 // DoltConfig holds optional dolt server overrides.
 // When present in city.toml, these override the defaults.
 type DoltConfig struct {
@@ -1618,6 +1627,48 @@ type DoltConfig struct {
 	// 1 enables archive compaction (higher CPU on startup).
 	// nil (omitted) defaults to 0.
 	ArchiveLevel *int `toml:"archive_level,omitempty" jsonschema:"default=0"`
+	// MaxConnections overrides the managed Dolt listener max_connections.
+	// 0 means use the managed default.
+	MaxConnections int `toml:"max_connections,omitempty" jsonschema:"default=256"`
+	// ReadTimeoutMillis overrides the managed Dolt listener read_timeout_millis.
+	// 0 means use the managed default.
+	ReadTimeoutMillis int `toml:"read_timeout_millis,omitempty" jsonschema:"default=30000"`
+	// WriteTimeoutMillis overrides the managed Dolt listener write_timeout_millis.
+	// 0 means use the managed default.
+	WriteTimeoutMillis int `toml:"write_timeout_millis,omitempty" jsonschema:"default=300000"`
+}
+
+// EffectiveArchiveLevel returns the configured Dolt archive level, defaulting
+// omitted values to 0.
+func (d DoltConfig) EffectiveArchiveLevel() int {
+	if d.ArchiveLevel != nil {
+		return *d.ArchiveLevel
+	}
+	return 0
+}
+
+// EffectiveMaxConnections returns the managed Dolt listener max_connections.
+func (d DoltConfig) EffectiveMaxConnections() int {
+	if d.MaxConnections > 0 {
+		return d.MaxConnections
+	}
+	return DefaultDoltMaxConnections
+}
+
+// EffectiveReadTimeoutMillis returns the managed Dolt listener read timeout.
+func (d DoltConfig) EffectiveReadTimeoutMillis() int {
+	if d.ReadTimeoutMillis > 0 {
+		return d.ReadTimeoutMillis
+	}
+	return DefaultDoltReadTimeoutMillis
+}
+
+// EffectiveWriteTimeoutMillis returns the managed Dolt listener write timeout.
+func (d DoltConfig) EffectiveWriteTimeoutMillis() int {
+	if d.WriteTimeoutMillis > 0 {
+		return d.WriteTimeoutMillis
+	}
+	return DefaultDoltWriteTimeoutMillis
 }
 
 // FormulasConfig holds legacy formula directory settings.
@@ -4338,6 +4389,9 @@ func Load(fs fsys.FS, path string) (*City, error) {
 		return nil, err
 	}
 	if err := ValidateGitHubPRMonitors(cfg); err != nil {
+		return nil, err
+	}
+	if err := ValidateDoltConfig(cfg, path); err != nil {
 		return nil, err
 	}
 	return cfg, nil

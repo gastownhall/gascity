@@ -193,6 +193,51 @@ graph_workflows = false
 	}
 }
 
+func TestParseDoltManagedListenerOverrides(t *testing.T) {
+	cfg, err := Parse([]byte(`
+[workspace]
+name = "bright-lights"
+
+[dolt]
+read_timeout_millis = 300000
+write_timeout_millis = 600000
+max_connections = 1024
+`))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if cfg.Dolt.ReadTimeoutMillis != 300000 {
+		t.Fatalf("Dolt.ReadTimeoutMillis = %d, want 300000", cfg.Dolt.ReadTimeoutMillis)
+	}
+	if cfg.Dolt.WriteTimeoutMillis != 600000 {
+		t.Fatalf("Dolt.WriteTimeoutMillis = %d, want 600000", cfg.Dolt.WriteTimeoutMillis)
+	}
+	if cfg.Dolt.MaxConnections != 1024 {
+		t.Fatalf("Dolt.MaxConnections = %d, want 1024", cfg.Dolt.MaxConnections)
+	}
+}
+
+func TestLoadRejectsNegativeDoltManagedListenerOverride(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "city.toml")
+	if err := os.WriteFile(path, []byte(`
+[workspace]
+name = "bright-lights"
+
+[dolt]
+read_timeout_millis = -1
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Load(fsys.OSFS{}, path)
+	if err == nil {
+		t.Fatal("Load() error = nil, want negative read_timeout_millis rejection")
+	}
+	if got := err.Error(); !strings.Contains(got, "[dolt] read_timeout_millis must not be negative") {
+		t.Fatalf("Load() error = %q, want read_timeout_millis rejection", got)
+	}
+}
+
 func TestParseWithAgentsAndStartCommand(t *testing.T) {
 	data := []byte(`
 [workspace]

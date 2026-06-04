@@ -1154,11 +1154,29 @@ kill_imposter() {
 # Overwritten on each server start. Without read/write timeouts, CLOSE_WAIT connections
 # accumulate and the server enters unrecoverable read-only mode.
 write_config_yaml() {
-    local archive_level gc_bin raw_wait_timeout wait_timeout_line
+    local archive_level gc_bin raw_wait_timeout wait_timeout_line max_connections read_timeout_millis write_timeout_millis
     archive_level=${GC_DOLT_ARCHIVE_LEVEL:-0}
     case "$archive_level" in
         ''|*[!0-9]*)
             archive_level=0
+            ;;
+    esac
+    max_connections=${GC_DOLT_MAX_CONNECTIONS:-256}
+    case "$max_connections" in
+        ''|*[!0-9]*|0)
+            max_connections=256
+            ;;
+    esac
+    read_timeout_millis=${GC_DOLT_READ_TIMEOUT_MILLIS:-30000}
+    case "$read_timeout_millis" in
+        ''|*[!0-9]*|0)
+            read_timeout_millis=30000
+            ;;
+    esac
+    write_timeout_millis=${GC_DOLT_WRITE_TIMEOUT_MILLIS:-300000}
+    case "$write_timeout_millis" in
+        ''|*[!0-9]*|0)
+            write_timeout_millis=300000
             ;;
     esac
     gc_bin=$(resolve_gc_helper_bin)
@@ -1169,7 +1187,10 @@ write_config_yaml() {
             --port "$DOLT_PORT" \
             --data-dir "$DATA_DIR" \
             --log-level "$DOLT_LOGLEVEL" \
-            --archive-level "$archive_level" || die "failed to write managed dolt config via gc helper $gc_bin"
+            --archive-level "$archive_level" \
+            --max-connections "$max_connections" \
+            --read-timeout-millis "$read_timeout_millis" \
+            --write-timeout-millis "$write_timeout_millis" || die "failed to write managed dolt config via gc helper $gc_bin"
         return 0
     fi
     wait_timeout_line='  wait_timeout: "30"'
@@ -1204,11 +1225,11 @@ log_level: $DOLT_LOGLEVEL
 listener:
   port: $DOLT_PORT
   host: $DOLT_HOST
-  max_connections: 1000
+  max_connections: $max_connections
   back_log: 50
   max_connections_timeout_millis: 5000
-  read_timeout_millis: 300000
-  write_timeout_millis: 300000
+  read_timeout_millis: $read_timeout_millis
+  write_timeout_millis: $write_timeout_millis
 
 data_dir: "$DATA_DIR"
 
