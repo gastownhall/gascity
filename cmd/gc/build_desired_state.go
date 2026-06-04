@@ -1555,8 +1555,8 @@ func appendAssignedUnique(dst *[]beads.Bead, stores *[]beads.Store, storeRefs *[
 	}
 }
 
-// appendOpenRoutedWorkUnique includes open beads that are still pool-routed
-// AND still carry an assignee. This is the narrow input
+// appendOpenRoutedWorkUnique includes open beads that are still releasably
+// pool-routed AND still carry an assignee. This is the narrow input
 // releaseOrphanedPoolAssignments needs to clear step beads abandoned by a
 // dead session (graph.v2 wisps where the root depends on the finalize
 // step, so the root never enters ready and the step assignee remains a
@@ -1566,11 +1566,7 @@ func appendOpenRoutedWorkUnique(dst *[]beads.Bead, stores *[]beads.Store, storeR
 		if strings.TrimSpace(b.Assignee) == "" {
 			continue
 		}
-		template := strings.TrimSpace(b.Metadata["gc.run_target"])
-		if template == "" {
-			template = strings.TrimSpace(b.Metadata["gc.routed_to"])
-		}
-		if template == "" {
+		if routedToOrLegacyWorkflowTarget(b) == "" {
 			continue
 		}
 		appendWorkUnique(dst, stores, storeRefs, b, seen, store, storeRef)

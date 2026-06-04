@@ -1581,6 +1581,10 @@ func TestCollectAssignedWorkBeads_ExcludesRoutedToMetadataWithoutAssignee(t *tes
 func TestCollectAssignedWorkBeads_IncludesOpenPoolRoutedAssignedWork(t *testing.T) {
 	t.Parallel()
 	store := beads.NewMemStore()
+	blocker, err := store.Create(beads.Bead{Title: "workflow finalize", Type: "task", Status: "open"})
+	if err != nil {
+		t.Fatalf("create blocker bead: %v", err)
+	}
 	work, err := store.Create(beads.Bead{
 		Title:    "orphaned step bead",
 		Type:     "task",
@@ -1591,6 +1595,9 @@ func TestCollectAssignedWorkBeads_IncludesOpenPoolRoutedAssignedWork(t *testing.
 	if err != nil {
 		t.Fatalf("create orphaned step bead: %v", err)
 	}
+	if err := store.DepAdd(work.ID, blocker.ID, "blocks"); err != nil {
+		t.Fatalf("block orphaned step bead: %v", err)
+	}
 
 	got, _ := collectAssignedWorkBeads(&config.City{}, store)
 	if len(got) != 1 || got[0].ID != work.ID {
@@ -1599,26 +1606,66 @@ func TestCollectAssignedWorkBeads_IncludesOpenPoolRoutedAssignedWork(t *testing.
 }
 
 // TestCollectAssignedWorkBeads_IncludesOpenRunTargetAssignedWork covers the
-// graph.v2 root-step shape: root beads stamp gc.run_target (not
-// gc.routed_to). The third pass must accept either marker so root steps
-// that orphan-release missed are also recoverable.
+// legacy workflow root shape: workflow beads stamp gc.run_target (not
+// gc.routed_to). The third pass accepts that marker only for the same
+// workflow-kind beads that releaseOrphanedPoolAssignments can release.
 func TestCollectAssignedWorkBeads_IncludesOpenRunTargetAssignedWork(t *testing.T) {
 	t.Parallel()
 	store := beads.NewMemStore()
+	blocker, err := store.Create(beads.Bead{Title: "workflow finalize", Type: "task", Status: "open"})
+	if err != nil {
+		t.Fatalf("create blocker bead: %v", err)
+	}
 	work, err := store.Create(beads.Bead{
 		Title:    "orphaned root step",
 		Type:     "task",
 		Status:   "open",
 		Assignee: "rig--pool__coder-dead-session",
-		Metadata: map[string]string{"gc.run_target": "rig/pool.coder"},
+		Metadata: map[string]string{
+			"gc.kind":       "workflow",
+			"gc.run_target": "rig/pool.coder",
+		},
 	})
 	if err != nil {
 		t.Fatalf("create orphaned root step: %v", err)
+	}
+	if err := store.DepAdd(work.ID, blocker.ID, "blocks"); err != nil {
+		t.Fatalf("block orphaned root step: %v", err)
 	}
 
 	got, _ := collectAssignedWorkBeads(&config.City{}, store)
 	if len(got) != 1 || got[0].ID != work.ID {
 		t.Fatalf("collectAssignedWorkBeads = %#v, want [%s]", got, work.ID)
+	}
+}
+
+func TestCollectAssignedWorkBeads_ExcludesOpenNonWorkflowRunTargetAssignedWork(t *testing.T) {
+	t.Parallel()
+	store := beads.NewMemStore()
+	blocker, err := store.Create(beads.Bead{Title: "workflow finalize", Type: "task", Status: "open"})
+	if err != nil {
+		t.Fatalf("create blocker bead: %v", err)
+	}
+	work, err := store.Create(beads.Bead{
+		Title:    "control retry bead",
+		Type:     "task",
+		Status:   "open",
+		Assignee: "gascity--control-dispatcher",
+		Metadata: map[string]string{
+			"gc.kind":       "retry",
+			"gc.run_target": "gascity/gc.implementation-worker",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create control retry bead: %v", err)
+	}
+	if err := store.DepAdd(work.ID, blocker.ID, "blocks"); err != nil {
+		t.Fatalf("block control retry bead: %v", err)
+	}
+
+	got, _ := collectAssignedWorkBeads(&config.City{}, store)
+	if len(got) != 0 {
+		t.Fatalf("collectAssignedWorkBeads returned %d beads, want 0 for non-workflow gc.run_target", len(got))
 	}
 }
 

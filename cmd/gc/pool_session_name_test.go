@@ -1091,6 +1091,10 @@ func TestReleaseOrphanedPoolAssignments_ReopensUnassignedInProgressPoolWork(t *t
 // demand stayed at 0 across reconcile ticks.
 func TestCollectAndReleaseOrphanPoolStepBead_Issue2793(t *testing.T) {
 	store := beads.NewMemStore()
+	blocker, err := store.Create(beads.Bead{Title: "workflow finalize", Type: "task", Status: "open"})
+	if err != nil {
+		t.Fatalf("Create blocker bead: %v", err)
+	}
 	work, err := store.Create(beads.Bead{
 		Title:    "graph.v2 step bead orphaned by dead session",
 		Type:     "task",
@@ -1100,6 +1104,9 @@ func TestCollectAndReleaseOrphanPoolStepBead_Issue2793(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("Create orphaned step bead: %v", err)
+	}
+	if err := store.DepAdd(work.ID, blocker.ID, "blocks"); err != nil {
+		t.Fatalf("Block orphaned step bead: %v", err)
 	}
 
 	cfg := &config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}}
@@ -1127,6 +1134,106 @@ func TestCollectAndReleaseOrphanPoolStepBead_Issue2793(t *testing.T) {
 	}
 	if got.Assignee != "" {
 		t.Fatalf("assignee = %q, want empty after release", got.Assignee)
+	}
+}
+
+func TestCollectAndReleaseOrphanWorkflowRunTargetBead(t *testing.T) {
+	store := beads.NewMemStore()
+	blocker, err := store.Create(beads.Bead{Title: "workflow finalize", Type: "task", Status: "open"})
+	if err != nil {
+		t.Fatalf("Create blocker bead: %v", err)
+	}
+	work, err := store.Create(beads.Bead{
+		Title:    "legacy workflow root orphaned by dead session",
+		Type:     "task",
+		Status:   "open",
+		Assignee: "rig--pool__coder-gc-session-deadbeef",
+		Metadata: map[string]string{
+			"gc.kind":       "workflow",
+			"gc.run_target": "worker",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create workflow run-target bead: %v", err)
+	}
+	if err := store.DepAdd(work.ID, blocker.ID, "blocks"); err != nil {
+		t.Fatalf("Block workflow run-target bead: %v", err)
+	}
+
+	cfg := &config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}}
+
+	found, foundStores, foundStoreRefs, partial := collectAssignedWorkBeadsWithStores(cfg, store, nil, nil, nil)
+	if partial {
+		t.Fatal("collectAssignedWorkBeadsWithStores reported partial results")
+	}
+	if len(found) != 1 || found[0].ID != work.ID {
+		t.Fatalf("collect missed the workflow run-target bead: got %#v, want [%s]", found, work.ID)
+	}
+
+	released := releaseOrphanedPoolAssignments(store, cfg, "", nil, found, foundStores, foundStoreRefs, nil)
+	if len(released) != 1 || released[0].ID != work.ID {
+		t.Fatalf("released = %v, want [%s]", released, work.ID)
+	}
+
+	got, err := store.Get(work.ID)
+	if err != nil {
+		t.Fatalf("Get workflow run-target bead: %v", err)
+	}
+	if got.Status != "open" {
+		t.Fatalf("status = %q, want open", got.Status)
+	}
+	if got.Assignee != "" {
+		t.Fatalf("assignee = %q, want empty after release", got.Assignee)
+	}
+}
+
+func TestCollectAndReleaseNonWorkflowRunTargetBeadStaysAssigned(t *testing.T) {
+	store := beads.NewMemStore()
+	blocker, err := store.Create(beads.Bead{Title: "workflow finalize", Type: "task", Status: "open"})
+	if err != nil {
+		t.Fatalf("Create blocker bead: %v", err)
+	}
+	work, err := store.Create(beads.Bead{
+		Title:    "control retry bead",
+		Type:     "task",
+		Status:   "open",
+		Assignee: "gascity--control-dispatcher",
+		Metadata: map[string]string{
+			"gc.kind":       "retry",
+			"gc.run_target": "worker",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create non-workflow run-target bead: %v", err)
+	}
+	if err := store.DepAdd(work.ID, blocker.ID, "blocks"); err != nil {
+		t.Fatalf("Block non-workflow run-target bead: %v", err)
+	}
+
+	cfg := &config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}}
+
+	found, foundStores, foundStoreRefs, partial := collectAssignedWorkBeadsWithStores(cfg, store, nil, nil, nil)
+	if partial {
+		t.Fatal("collectAssignedWorkBeadsWithStores reported partial results")
+	}
+	if len(found) != 0 {
+		t.Fatalf("collectAssignedWorkBeadsWithStores returned %#v, want none for non-workflow gc.run_target", found)
+	}
+
+	released := releaseOrphanedPoolAssignments(store, cfg, "", nil, found, foundStores, foundStoreRefs, nil)
+	if len(released) != 0 {
+		t.Fatalf("released = %v, want none for non-workflow gc.run_target", released)
+	}
+
+	got, err := store.Get(work.ID)
+	if err != nil {
+		t.Fatalf("Get non-workflow run-target bead: %v", err)
+	}
+	if got.Status != "open" {
+		t.Fatalf("status = %q, want open", got.Status)
+	}
+	if got.Assignee != "gascity--control-dispatcher" {
+		t.Fatalf("assignee = %q, want original control dispatcher", got.Assignee)
 	}
 }
 
