@@ -3628,6 +3628,43 @@ func resolveTaskWorkDir(store beads.Store, assignees ...string) string {
 	return ""
 }
 
+// resolveTaskModel returns the per-dispatch model choice requested by the
+// work bead a candidate session is about to claim. It mirrors
+// resolveTaskWorkDir: it scans the in-progress work beads assigned to the
+// candidate's identifiers and returns the first non-empty WorkRoutingModel
+// (the advisory "gc.model" metadata written by the model-advisor pack and the
+// mol-review-quorum formula). An empty result means "no per-dispatch model"
+// and leaves the agent's configured default model untouched.
+func resolveTaskModel(store beads.Store, assignees ...string) string {
+	if store == nil {
+		return ""
+	}
+	seen := make(map[string]bool, len(assignees))
+	for _, assignee := range assignees {
+		assignee = strings.TrimSpace(assignee)
+		if assignee == "" || seen[assignee] {
+			continue
+		}
+		seen[assignee] = true
+		assigned, err := store.List(beads.ListQuery{
+			Assignee: assignee,
+			Status:   "in_progress",
+			Live:     true,
+			TierMode: beads.TierBoth,
+			Sort:     beads.SortCreatedDesc,
+		})
+		if err != nil {
+			continue
+		}
+		for _, b := range assigned {
+			if model := WorkRoutingModel(b); model != "" {
+				return model
+			}
+		}
+	}
+	return ""
+}
+
 type assignedTaskWorkDir struct {
 	path      string
 	createdAt time.Time

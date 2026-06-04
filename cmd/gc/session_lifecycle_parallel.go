@@ -738,6 +738,73 @@ func refreshConfiguredNamedStartCandidate(
 	return candidate
 }
 
+// maybeApplyPerDispatchModelOverride stamps the per-dispatch model requested by
+// a candidate session's assigned work bead (its advisory "gc.model" metadata)
+// into the session's own template_overrides, so the existing override pipeline
+// turns it into a --model flag at launch.
+//
+// It is a no-op unless all of the following hold, which keeps default behavior
+// unchanged and the change backward-compatible:
+//   - the resolved provider exposes a "model" option in its schema;
+//   - the session does not already carry an explicit template_overrides["model"]
+//     (an operator/dashboard choice always wins over routing metadata);
+//   - a work bead assigned to the candidate carries a non-empty gc.model whose
+//     value is a valid "model" choice for the resolved provider.
+//
+// An unknown/invalid gc.model value is logged and ignored rather than failing
+// the start, so an advisory value the running provider doesn't recognize never
+// blocks a session from launching. The model is persisted on the session bead
+// (not just applied in memory) so config-drift hashing via
+// sessionCoreConfigForHash and the launch command stay consistent.
+func maybeApplyPerDispatchModelOverride(candidate startCandidate, cfg *config.City, store beads.Store) {
+	session := candidate.session
+	if store == nil || session == nil || session.ID == "" {
+		return
+	}
+	tp := candidate.tp
+	if tp.ResolvedProvider == nil || len(tp.ResolvedProvider.OptionsSchema) == 0 {
+		return
+	}
+	existing, err := sessionpkg.ParseTemplateOverrides(session.Metadata)
+	if err != nil {
+		// A malformed template_overrides blob is repaired by the existing
+		// override pipeline; don't compound it here.
+		return
+	}
+	if _, ok := existing["model"]; ok {
+		return // explicit per-session model wins.
+	}
+	model := resolveTaskModel(store, taskWorkDirAssignees(candidate, cfg)...)
+	if model == "" {
+		return
+	}
+	// Validate against the resolved provider's schema before persisting. An
+	// invalid value would otherwise surface only as a template_overrides
+	// resolution error at launch.
+	if _, err := config.ResolveExplicitOptions(tp.ResolvedProvider.OptionsSchema, map[string]string{"model": model}); err != nil {
+		log.Printf("session %s: ignoring work bead gc.model=%q: %v", session.ID, model, err)
+		return
+	}
+	merged := make(map[string]string, len(existing)+1)
+	for k, v := range existing {
+		merged[k] = v
+	}
+	merged["model"] = model
+	raw, err := json.Marshal(merged)
+	if err != nil {
+		log.Printf("session %s: marshaling per-dispatch model override: %v", session.ID, err)
+		return
+	}
+	if err := store.SetMetadata(session.ID, "template_overrides", string(raw)); err != nil {
+		log.Printf("session %s: persisting per-dispatch model override: %v", session.ID, err)
+		return
+	}
+	if session.Metadata == nil {
+		session.Metadata = make(map[string]string, 1)
+	}
+	session.Metadata["template_overrides"] = string(raw)
+}
+
 func buildPreparedStart(
 	candidate startCandidate,
 	cfg *config.City,
@@ -755,6 +822,19 @@ func buildPreparedStartWithWorkDirResolver(
 	session := candidate.session
 	tp := candidate.tp
 	agentCfg := templateParamsToConfig(tp)
+
+	// Per-dispatch model: fold a work bead's advisory "gc.model" metadata into
+	// this session's template_overrides before they are applied below. The
+	// model-advisor pack and the mol-review-quorum formula already write
+	// gc.model on work beads; persisting it as a per-session override here is
+	// what makes an advised model take effect per task/shape instead of only
+	// per agent. An explicit per-session model override always wins, so an
+	// operator/dashboard choice is never overridden by routing metadata, and
+	// the session bead remains the single source of truth so config-drift
+	// hashing (sessionCoreConfigForHash) stays consistent with the launch
+	// command. Default behavior is unchanged when no work bead carries
+	// gc.model.
+	maybeApplyPerDispatchModelOverride(candidate, cfg, store)
 
 	// Apply template_overrides from bead metadata. These are per-session
 	// schema option overrides (e.g., {"model":"opus","effort":"high"}) that
