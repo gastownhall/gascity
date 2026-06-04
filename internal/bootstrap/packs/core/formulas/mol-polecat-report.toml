@@ -68,6 +68,23 @@ Close this step immediately and proceed to implement.
 **Exit criteria:** (immediate — no action required)"""
 
 [[steps]]
+id = "implement"
+title = "Investigate (no code changes)"
+needs = ["preflight-tests"]
+description = """
+Investigate the issue. This is analysis only — you produce findings, not
+code changes.
+
+- Read the relevant sources, traces, logs, and configuration in place.
+- Gather concrete evidence: file paths, line numbers, command output.
+- Identify the root cause, or state clearly that it is unknown.
+- Do NOT edit, create, or delete any files. If you discover a code fix is
+  required, do NOT attempt it here — mail Witness and drain-ack so the
+  operator can re-pour with mol-polecat-commit or mol-polecat-pr.
+
+**Exit criteria:** Investigation complete, evidence gathered, no files modified."""
+
+[[steps]]
 id = "self-review"
 title = "Self-review: verify investigation is complete"
 needs = ["implement"]
@@ -88,11 +105,12 @@ Review your findings before writing the final report.
 git status
 ```
 
-There must be NO uncommitted code changes. If you made any accidental
-edits, discard them:
-```bash
-git checkout -- .
-```
+There must be NO uncommitted code changes. If `git status` shows any
+modifications, STOP — do not run a broad `git checkout`. This is a shared,
+non-isolated checkout, so a blanket discard can wipe unrelated local work.
+Mail Witness, note the unexpected dirty state, and drain-ack so the
+operator can inspect. Only revert files you are certain you touched, by
+explicit path (e.g. `git checkout -- path/to/file`).
 
 This formula produces ZERO code changes. All output is bead notes.
 

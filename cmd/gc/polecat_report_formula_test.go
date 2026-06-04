@@ -29,13 +29,23 @@ func TestPolecatReportFormulaParsesAndHasNoGHPRCreate(t *testing.T) {
 		t.Fatalf("ParseFile mol-polecat-report.toml: %v", err)
 	}
 
-	var hasWriteReport, hasWriteNotes, hasClose, hasDrainAck bool
+	var hasWriteReport, hasWriteNotes, hasClose, hasDrainAck, hasImplement bool
 	for _, step := range f.Steps {
 		if strings.Contains(step.Description, "gh pr create") {
 			t.Errorf("step %q must not invoke 'gh pr create'", step.ID)
 		}
 		if strings.Contains(step.Description, "git push") {
 			t.Errorf("step %q must not invoke 'git push'", step.ID)
+		}
+		if strings.Contains(step.Description, "git checkout -- .") {
+			t.Errorf("step %q must not run destructive 'git checkout -- .' in a shared checkout", step.ID)
+		}
+		if step.ID == "implement" {
+			hasImplement = true
+			desc := strings.ToLower(step.Description)
+			if !strings.Contains(desc, "no code changes") && !strings.Contains(desc, "analysis only") {
+				t.Errorf("implement step must forbid code changes (expected 'no code changes' or 'analysis only'), got: %q", step.Description)
+			}
 		}
 		if step.ID == "write-report" {
 			hasWriteReport = true
@@ -49,6 +59,9 @@ func TestPolecatReportFormulaParsesAndHasNoGHPRCreate(t *testing.T) {
 				hasDrainAck = true
 			}
 		}
+	}
+	if !hasImplement {
+		t.Error("mol-polecat-report formula missing 'implement' step override")
 	}
 	if !hasWriteReport {
 		t.Error("mol-polecat-report formula missing 'write-report' step")
