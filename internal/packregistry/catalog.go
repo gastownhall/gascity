@@ -88,10 +88,10 @@ func NormalizeSource(raw string) (Source, error) {
 		return Source{}, errors.New("registry source is required")
 	}
 	if windowsPathRE.MatchString(raw) {
-		return Source{}, fmt.Errorf("Windows drive-letter registry sources are not supported portably: %q; use an HTTPS URL or a file:// URL with a POSIX-style local path", raw)
+		return Source{}, fmt.Errorf("registry source uses a Windows drive-letter path, which is not supported portably: %q; use an HTTPS URL or a file:// URL with a POSIX-style local path", raw)
 	}
 	if windowsUNCPath.MatchString(raw) {
-		return Source{}, fmt.Errorf("UNC registry sources are not supported portably: %q; use an HTTPS URL or a file:// URL with a POSIX-style local path", raw)
+		return Source{}, fmt.Errorf("registry source uses a UNC path, which is not supported portably: %q; use an HTTPS URL or a file:// URL with a POSIX-style local path", raw)
 	}
 	u, err := url.Parse(raw)
 	if err == nil && u.Scheme != "" {

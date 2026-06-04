@@ -56,12 +56,12 @@ func TestLoadConfigRejectsWindowsRegistrySources(t *testing.T) {
 		{
 			name:    "drive letter",
 			source:  `C:\packs\registry.toml`,
-			wantErr: "Windows drive-letter registry sources are not supported portably",
+			wantErr: "registry source uses a Windows drive-letter path",
 		},
 		{
 			name:    "unc",
 			source:  `\\server\share\registry.toml`,
-			wantErr: "UNC registry sources are not supported portably",
+			wantErr: "registry source uses a UNC path",
 		},
 	}
 	for _, tc := range cases {

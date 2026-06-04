@@ -191,17 +191,17 @@ func TestNormalizeSourceRejectsWindowsRegistrySources(t *testing.T) {
 		{
 			name:    "drive backslashes",
 			raw:     `C:\packs\registry.toml`,
-			wantErr: "Windows drive-letter registry sources are not supported portably",
+			wantErr: "registry source uses a Windows drive-letter path",
 		},
 		{
 			name:    "drive slashes",
 			raw:     `C:/packs/registry.toml`,
-			wantErr: "Windows drive-letter registry sources are not supported portably",
+			wantErr: "registry source uses a Windows drive-letter path",
 		},
 		{
 			name:    "unc backslashes",
 			raw:     `\\server\share\registry.toml`,
-			wantErr: "UNC registry sources are not supported portably",
+			wantErr: "registry source uses a UNC path",
 		},
 	}
 	for _, tc := range cases {
