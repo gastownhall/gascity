@@ -318,6 +318,7 @@ func findExistingAttach(store beads.Store, recipe *formula.Recipe, rootBeadID, a
 			"gc.idempotency_key": key,
 			"gc.root_bead_id":    rootBeadID,
 		},
+		TierMode: beads.TierBoth,
 	})
 	if err != nil {
 		return nil, err
@@ -402,6 +403,7 @@ func existingAttachIDMapping(store beads.Store, recipe *formula.Recipe, rootBead
 	}
 	all, err := store.List(beads.ListQuery{
 		Metadata: map[string]string{"gc.root_bead_id": rootBeadID},
+		TierMode: beads.TierBoth,
 	})
 	if err != nil {
 		return nil, err
@@ -461,7 +463,7 @@ func Instantiate(ctx context.Context, store beads.Store, recipe *formula.Recipe,
 		return nil, fmt.Errorf("recipe %q has no steps", recipe.Name)
 	}
 	if !opts.DeferAssignees && IsGraphApplyEnabled() {
-		if applier, ok := store.(beads.GraphApplyStore); ok {
+		if applier, ok := beads.GraphApplyFor(store); ok {
 			result, err := instantiateViaGraphApply(ctx, applier, recipe, opts)
 			if err == nil {
 				return result, nil
@@ -714,7 +716,7 @@ func InstantiateFragment(ctx context.Context, store beads.Store, recipe *formula
 		priorityOverride = clonePriority(root.Priority)
 	}
 	if IsGraphApplyEnabled() {
-		if applier, ok := store.(beads.GraphApplyStore); ok {
+		if applier, ok := beads.GraphApplyFor(store); ok {
 			opts.PriorityOverride = priorityOverride
 			return instantiateFragmentViaGraphApply(ctx, store, applier, recipe, opts)
 		}
@@ -1234,6 +1236,7 @@ func trimAttemptSuffix(id, suffix string) (string, bool) {
 func existingLogicalBeadIDIndex(store beads.Store, rootID string) (map[string]string, error) {
 	all, err := store.List(beads.ListQuery{
 		Metadata: map[string]string{"gc.root_bead_id": rootID},
+		TierMode: beads.TierBoth,
 	})
 	if err != nil {
 		return nil, err

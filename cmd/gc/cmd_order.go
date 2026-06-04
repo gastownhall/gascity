@@ -186,11 +186,14 @@ func newOrderSweepTrackingCmd(stdout, stderr io.Writer) *cobra.Command {
 	quiet := false
 	cmd := &cobra.Command{
 		Use:   "sweep-tracking [order ...]",
-		Short: "Close stale order-tracking beads",
-		Long: `Close stale open order-tracking beads.
+		Short: "Close stale and prune closed order-tracking beads",
+		Long: `Close stale open order-tracking beads and prune expired closed history.
 
 This is intended for maintenance exec orders. It only closes tracking beads
 older than --stale-after so a fresh in-flight order is not interrupted.
+Closed order-tracking history is deleted after
+[beads.policies.order_tracking].delete_after_close, defaulting to 7d, while
+always retaining at least the latest 10 closed tracking beads per order.
 The manual command runs to completion; controller startup and watchdog sweeps
 use bounded cleanup to avoid spending an unbounded tick on stale work.
 
@@ -763,7 +766,7 @@ func doOrderRunExecTracked(a orders.Order, cityPath string, cfg *config.City, st
 	tracking, err := store.Create(beads.Bead{
 		Title:     "order:" + scoped,
 		Labels:    []string{"order-run:" + scoped, labelOrderTracking},
-		Ephemeral: true,
+		NoHistory: true,
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "gc order run: creating exec tracking bead for %s: %v\n", scoped, err) //nolint:errcheck // best-effort stderr
@@ -1490,6 +1493,10 @@ func cmdOrderSweepTracking(staleAfter time.Duration, includeWisps, quiet bool, o
 		return 1
 	}
 	onlyOrders := orderNameFilter(orderNames)
+	if includeWisps && len(onlyOrders) == 0 {
+		fmt.Fprintln(stderr, "gc order sweep-tracking: include-wisps requires at least one order name") //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	requiredTargets, err := orderTrackingSweepRequiredTargetKeysForOrders(cityPath, cfg, onlyOrders)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc order sweep-tracking: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -1504,10 +1511,13 @@ func cmdOrderSweepTracking(staleAfter time.Duration, includeWisps, quiet bool, o
 		}
 		return 1
 	}
-	result, sweepErr := sweepStaleOrderTrackingAcrossStores(stores, time.Now(), staleAfter, onlyOrders, includeWisps)
-	if err := errors.Join(openErr, sweepErr); err != nil {
+	now := time.Now()
+	result, sweepErr := sweepStaleOrderTrackingAcrossStores(stores, now, staleAfter, onlyOrders, includeWisps)
+	retentionResult, retentionErr := sweepClosedOrderTrackingRetentionAcrossStores(stores, now, orderTrackingRetentionPolicyForConfig(cfg), onlyOrders)
+	result.trackingDeleted = retentionResult.deleted
+	if err := errors.Join(openErr, sweepErr, retentionErr); err != nil {
 		fmt.Fprintf(stderr, "gc order sweep-tracking: %v\n", err) //nolint:errcheck // best-effort stderr
-		if result.storesSwept == 0 {
+		if orderTrackingSweepErrorIsFatal(result, retentionResult, retentionErr) {
 			return 1
 		}
 	}
@@ -1517,12 +1527,19 @@ func cmdOrderSweepTracking(staleAfter time.Duration, includeWisps, quiet bool, o
 	}
 	if !quiet {
 		if includeWisps {
-			fmt.Fprintf(stdout, "closed %d stale order-tracking bead(s), %d stale order wisp bead(s)\n", result.trackingClosed, result.wispClosed) //nolint:errcheck // best-effort stdout
+			fmt.Fprintf(stdout, "closed %d stale order-tracking bead(s), %d stale order wisp bead(s), deleted %d closed order-tracking bead(s)\n", result.trackingClosed, result.wispClosed, result.trackingDeleted) //nolint:errcheck // best-effort stdout
 		} else {
-			fmt.Fprintf(stdout, "closed %d stale order-tracking bead(s)\n", result.trackingClosed) //nolint:errcheck // best-effort stdout
+			fmt.Fprintf(stdout, "closed %d stale order-tracking bead(s), deleted %d closed order-tracking bead(s)\n", result.trackingClosed, result.trackingDeleted) //nolint:errcheck // best-effort stdout
 		}
 	}
 	return 0
+}
+
+func orderTrackingSweepErrorIsFatal(result orderTrackingSweepResult, retentionResult orderTrackingRetentionSweepResult, retentionErr error) bool {
+	if result.storesSwept == 0 {
+		return true
+	}
+	return retentionErr != nil && retentionResult.storesSwept == 0
 }
 
 func orderTrackingSweepRequiredTargetKeysForOrders(cityPath string, cfg *config.City, onlyOrders map[string]struct{}) (map[string][]string, error) {

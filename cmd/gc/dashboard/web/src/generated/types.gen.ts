@@ -268,6 +268,7 @@ export type Bead = {
         [key: string]: string;
     };
     needs?: Array<string> | null;
+    no_history?: boolean;
     parent?: string;
     priority?: number;
     ref?: string;

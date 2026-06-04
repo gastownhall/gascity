@@ -48,6 +48,9 @@ type Bead struct {
 	// garbage collection. Reads must opt in via ListQuery.TierMode (or the
 	// WithEphemeral/WithBothTiers QueryOpts on the legacy label helpers).
 	Ephemeral bool `json:"ephemeral,omitempty"`
+	// NoHistory routes the bead to durable no-history storage on Create. These
+	// rows are visible in normal durable reads but do not add Dolt history.
+	NoHistory bool `json:"no_history,omitempty"`
 	// DeferUntil hides the bead from ready/claimable views until this time,
 	// mirroring bd's defer_until column (a future value means "not yet ready";
 	// nil or past means ready). Create paths preserve it; UpdateOpts does not
@@ -148,6 +151,12 @@ var readyBlockingDependencyTypes = map[string]bool{
 	"conditional-blocks": true,
 }
 
+// IsReadyBlockingDependencyType reports whether a dependency type blocks a
+// bead from Ready() until the dependency target closes.
+func IsReadyBlockingDependencyType(t string) bool {
+	return readyBlockingDependencyTypes[t]
+}
+
 // IsReadyExcludedType reports whether the bead type is excluded from
 // Ready() results by default.
 func IsReadyExcludedType(t string) bool {
@@ -167,7 +176,7 @@ func IsReadyCandidate(b Bead, now time.Time) bool {
 func IsReadyCandidateForTier(b Bead, now time.Time, tier TierMode) bool {
 	switch tier {
 	case TierWisps:
-		if !b.Ephemeral {
+		if !b.Ephemeral && !b.NoHistory {
 			return false
 		}
 	case TierBoth:
@@ -205,7 +214,7 @@ func IsDeferred(b Bead, now time.Time) bool {
 }
 
 func isReadyBlockingDependencyType(t string) bool {
-	return readyBlockingDependencyTypes[t]
+	return IsReadyBlockingDependencyType(t)
 }
 
 // Dep represents a dependency relationship between two beads. The IssueID
@@ -353,6 +362,35 @@ type Store interface {
 	// query: "down" returns what this bead depends on (default),
 	// "up" returns what depends on this bead.
 	DepList(id, direction string) ([]Dep, error)
+}
+
+// StorageClass selects the physical bead storage tier for adapters that
+// support table-specific creates. It is adapter plumbing, not a domain-level
+// behavior knob; normal callers should use Store.Create and let the policy
+// wrapper classify semantic beads from config.
+type StorageClass string
+
+const (
+	// StorageDefault lets the concrete store use its normal create behavior.
+	StorageDefault StorageClass = ""
+	// StorageHistory stores a bead in the normal history-tracked issues table.
+	StorageHistory StorageClass = "history"
+	// StorageNoHistory stores a bead in durable no-history storage.
+	StorageNoHistory StorageClass = "no_history"
+	// StorageEphemeral stores a bead in ephemeral wisp storage.
+	StorageEphemeral StorageClass = "ephemeral"
+)
+
+// StorageCreateStore is an optional adapter capability for create calls whose
+// physical storage tier has already been selected by policy middleware.
+type StorageCreateStore interface {
+	CreateWithStorage(b Bead, storage StorageClass) (Bead, error)
+}
+
+// StorageGraphApplyStore is an optional adapter capability for graph creates
+// whose physical storage tier has already been selected by policy middleware.
+type StorageGraphApplyStore interface {
+	ApplyGraphPlanWithStorage(ctx context.Context, plan *GraphApplyPlan, storage StorageClass) (*GraphApplyResult, error)
 }
 
 // ParentProjectionWaiter is an optional capability for stores whose

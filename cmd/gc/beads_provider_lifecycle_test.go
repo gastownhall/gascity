@@ -303,6 +303,36 @@ func TestProviderLifecycleProcessEnvPropagatesArchiveLevel(t *testing.T) {
 	}
 }
 
+func TestProviderLifecycleProcessEnvPropagatesManagedDoltListenerOverrides(t *testing.T) {
+	cityPath := t.TempDir()
+	normPath := normalizePathForCompare(cityPath)
+
+	cityDoltConfigs.Store(normPath, config.DoltConfig{
+		ReadTimeoutMillis:  300000,
+		WriteTimeoutMillis: 600000,
+		MaxConnections:     1024,
+	})
+	t.Cleanup(func() { cityDoltConfigs.Delete(normPath) })
+
+	envEntries := mustProviderLifecycleProcessEnv(t, cityPath, "exec:"+gcBeadsBdScriptPath(cityPath))
+	env := map[string]string{}
+	for _, entry := range envEntries {
+		key, value, ok := strings.Cut(entry, "=")
+		if ok {
+			env[key] = value
+		}
+	}
+	for key, want := range map[string]string{
+		"GC_DOLT_READ_TIMEOUT_MILLIS":  "300000",
+		"GC_DOLT_WRITE_TIMEOUT_MILLIS": "600000",
+		"GC_DOLT_MAX_CONNECTIONS":      "1024",
+	} {
+		if got := env[key]; got != want {
+			t.Fatalf("%s = %q, want %q", key, got, want)
+		}
+	}
+}
+
 func TestProviderLifecycleProcessEnvOmitsArchiveLevelWhenNil(t *testing.T) {
 	cityPath := t.TempDir()
 	normPath := normalizePathForCompare(cityPath)
@@ -7742,8 +7772,8 @@ log_level: $log_level
 listener:
   port: $port
   host: $host
-  max_connections: 1000
-  read_timeout_millis: 300000
+  max_connections: 256
+  read_timeout_millis: 30000
   write_timeout_millis: 300000
 
 data_dir: "$data_dir"
@@ -8004,8 +8034,8 @@ log_level: $log_level
 listener:
   port: $port
   host: $host
-  max_connections: 1000
-  read_timeout_millis: 300000
+  max_connections: 256
+  read_timeout_millis: 30000
   write_timeout_millis: 300000
 
 data_dir: "$data_dir"
@@ -9327,7 +9357,7 @@ func TestManagedDoltConfigGoWriterMatchesShellFallbackSemantics(t *testing.T) {
 		t.Fatal(err)
 	}
 	goConfigPath := filepath.Join(t.TempDir(), "go", "dolt-config.yaml")
-	if err := writeManagedDoltConfigFile(goConfigPath, "0.0.0.0", "3311", filepath.Join(cityPath, ".beads", "dolt"), "info", 0); err != nil {
+	if err := writeManagedDoltConfigFile(goConfigPath, "0.0.0.0", "3311", filepath.Join(cityPath, ".beads", "dolt"), "info", config.DoltConfig{}); err != nil {
 		t.Fatalf("writeManagedDoltConfigFile: %v", err)
 	}
 

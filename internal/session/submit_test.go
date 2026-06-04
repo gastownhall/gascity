@@ -15,6 +15,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/nudgepoller"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
+	"github.com/gastownhall/gascity/internal/pidutil"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
@@ -556,7 +557,21 @@ func startSubmitPollerLikeProcess(t *testing.T, cityPath, sessionName string) *e
 		_ = stdin.Close()
 		_ = cmd.Wait()
 	})
+	waitForSubmitPollerCmdline(t, cmd.Process.Pid, cityPath, sessionName)
 	return cmd
+}
+
+func waitForSubmitPollerCmdline(t *testing.T, pid int, cityPath, sessionName string) {
+	t.Helper()
+	matches := nudgepoller.CmdlineMatcher(cityPath, sessionName)
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if pidutil.AliveWithCmdline(pid, matches) {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("poller PID %d did not expose matching command line", pid)
 }
 
 func TestSubmitFollowUpQueuesDeferredMessageForPoolManagedSession(t *testing.T) {

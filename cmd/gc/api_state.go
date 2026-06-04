@@ -145,7 +145,8 @@ func newControllerState(
 // wrapWithCachingStore wraps a Store with a CachingStore that primes
 // and starts a background reconciler.
 func wrapWithCachingStore(ctx context.Context, store beads.Store, ep events.Provider) beads.Store {
-	if store == nil {
+	baseStore, policyStore, policyWrapped := unwrapBeadPolicyStore(store)
+	if baseStore == nil {
 		return nil
 	}
 	if ctx == nil {
@@ -165,7 +166,7 @@ func wrapWithCachingStore(ctx context.Context, store beads.Store, ep events.Prov
 			})
 		}
 	}
-	cs := beads.NewCachingStore(store, onChange)
+	cs := beads.NewCachingStore(baseStore, onChange)
 	// Pre-prime active beads synchronously (~1-2s, indexed queries).
 	// Loads open + in_progress beads — enough for the startup path
 	// (adoption, session snapshot, desired state) so the city can
@@ -174,6 +175,9 @@ func wrapWithCachingStore(ctx context.Context, store beads.Store, ep events.Prov
 		log.Printf("caching-store: pre-prime failed: %v", err)
 	}
 	if ctx.Done() == nil {
+		if policyWrapped {
+			return wrapStoreWithBeadPolicies(cs, policyStore.cfg)
+		}
 		return cs
 	}
 	// Full prime runs async — backfills remaining beads for List()
@@ -189,6 +193,9 @@ func wrapWithCachingStore(ctx context.Context, store beads.Store, ep events.Prov
 		}
 		cs.StartReconciler(ctx, beads.WithStaggerAuto(), os.Getenv("GC_AGENT"))
 	}()
+	if policyWrapped {
+		return wrapStoreWithBeadPolicies(cs, policyStore.cfg)
+	}
 	return cs
 }
 
@@ -204,7 +211,7 @@ func (cs *controllerState) buildStores(cfg *config.City) map[string]beads.Store 
 	if cityProvider == "file" && !fileStoreUsesScopedRoots(cs.cityPath) {
 		store, err := openCompatibleFileStore(cs.cityPath, cs.cityPath)
 		if err == nil {
-			sharedLegacyFileStore = store
+			sharedLegacyFileStore = wrapStoreWithBeadPolicies(store, cfg)
 		}
 	}
 
@@ -261,14 +268,14 @@ func (cs *controllerState) openRigStore(provider, rigName, rigPath, prefix strin
 		if err != nil {
 			return unavailableStore{err: fmt.Errorf("open exec rig store %s: %w", scopeRoot, err)}
 		}
-		return store
+		return wrapStoreWithBeadPolicies(store, cfg)
 	}
 	if provider == "file" {
 		store, err := openCompatibleFileStore(scopeRoot, cs.cityPath)
 		if err != nil {
 			return unavailableStore{err: fmt.Errorf("open file rig store %s: %w", scopeRoot, err)}
 		}
-		return store
+		return wrapStoreWithBeadPolicies(store, cfg)
 	}
 	result, err := controllerStateOpenRigStoreAtForCity(context.Background(), beads.StoreOpenOptions{
 		ScopeRoot:        scopeRoot,
@@ -297,7 +304,7 @@ func (cs *controllerState) openRigStore(provider, rigName, rigPath, prefix strin
 	if err != nil {
 		return unavailableStore{err: fmt.Errorf("open rig store %s: %w", scopeRoot, err)}
 	}
-	return result.Store
+	return wrapStoreWithBeadPolicies(result.Store, cfg)
 }
 
 // startBeadEventWatcher subscribes to the event bus and feeds bead events
@@ -522,6 +529,9 @@ func scheduleCloseBeadStoreHandle(label string, store beads.Store) {
 func closeBeadStoreHandle(store beads.Store) error {
 	if store == nil {
 		return nil
+	}
+	if base, _, ok := unwrapBeadPolicyStore(store); ok {
+		return closeBeadStoreHandle(base)
 	}
 	if cached, ok := store.(*beads.CachingStore); ok {
 		cached.StopReconciler()

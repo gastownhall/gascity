@@ -1002,6 +1002,95 @@ func TestDefaultScaleCheckCountsIgnoresFutureDeferredCronPoolDemand(t *testing.T
 	}
 }
 
+func TestDefaultScaleCheckCountsIgnoresBlockedCronPoolDemand(t *testing.T) {
+	backing := &demandListCountingStore{Store: beads.NewMemStore()}
+	blocker, err := backing.Create(beads.Bead{
+		Title:  "open prerequisite",
+		Type:   "task",
+		Status: "open",
+	})
+	if err != nil {
+		t.Fatalf("create blocker: %v", err)
+	}
+	wisp, err := backing.Create(beads.Bead{
+		Title:     "blocked pool-order wisp",
+		Type:      "molecule",
+		Status:    "open",
+		Metadata:  poolWispMetadata("cat"),
+		Ephemeral: true,
+	})
+	if err != nil {
+		t.Fatalf("create blocked pool-order wisp: %v", err)
+	}
+	if err := backing.DepAdd(wisp.ID, blocker.ID, "blocks"); err != nil {
+		t.Fatalf("DepAdd: %v", err)
+	}
+	cache := beads.NewCachingStoreForTest(backing, nil)
+	if err := cache.PrimeActive(); err != nil {
+		t.Fatalf("PrimeActive: %v", err)
+	}
+
+	counts, _, errs := defaultScaleCheckCounts([]defaultScaleCheckTarget{{
+		template: "cat",
+		storeKey: "city",
+		store:    cache,
+	}})
+	if len(errs) != 0 {
+		t.Fatalf("defaultScaleCheckCounts errs = %v", errs)
+	}
+	if got := counts["cat"]; got != 0 {
+		t.Fatalf("defaultScaleCheckCounts[%q] = %d, want 0 for dependency-blocked gc.pool_demand wisp", "cat", got)
+	}
+	if backing.livePoolDemand == 0 {
+		t.Fatalf("livePoolDemand list calls = 0, want >0")
+	}
+}
+
+func TestDefaultScaleCheckCountsUsesLiveDepsThroughPolicyWrappedCache(t *testing.T) {
+	backing := &demandListCountingStore{Store: beads.NewMemStore()}
+	blocker, err := backing.Create(beads.Bead{
+		Title:  "open prerequisite",
+		Type:   "task",
+		Status: "open",
+	})
+	if err != nil {
+		t.Fatalf("create blocker: %v", err)
+	}
+	wisp, err := backing.Create(beads.Bead{
+		Title:     "blocked pool-order wisp",
+		Type:      "molecule",
+		Status:    "open",
+		Metadata:  poolWispMetadata("cat"),
+		Ephemeral: true,
+	})
+	if err != nil {
+		t.Fatalf("create blocked pool-order wisp: %v", err)
+	}
+	cache := beads.NewCachingStoreForTest(backing, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	if err := backing.DepAdd(wisp.ID, blocker.ID, "blocks"); err != nil {
+		t.Fatalf("DepAdd after cache prime: %v", err)
+	}
+
+	store := wrapStoreWithBeadPolicies(cache, &config.City{})
+	counts, _, errs := defaultScaleCheckCounts([]defaultScaleCheckTarget{{
+		template: "cat",
+		storeKey: "city",
+		store:    store,
+	}})
+	if len(errs) != 0 {
+		t.Fatalf("defaultScaleCheckCounts errs = %v", errs)
+	}
+	if got := counts["cat"]; got != 0 {
+		t.Fatalf("defaultScaleCheckCounts[%q] = %d, want 0 for dependency added after cache prime", "cat", got)
+	}
+	if backing.livePoolDemand == 0 {
+		t.Fatalf("livePoolDemand list calls = 0, want >0")
+	}
+}
+
 // poolWispMetadata builds the metadata map a pool-order wisp carries —
 // gc.routed_to + the poolDemandMetadataPair pair — for fixture use.
 // Mirrors the production composition in cmd/gc/cmd_order.go and
@@ -1581,6 +1670,10 @@ func TestCollectAssignedWorkBeads_ExcludesRoutedToMetadataWithoutAssignee(t *tes
 func TestCollectAssignedWorkBeads_IncludesOpenPoolRoutedAssignedWork(t *testing.T) {
 	t.Parallel()
 	store := beads.NewMemStore()
+	blocker, err := store.Create(beads.Bead{Title: "workflow finalize", Type: "task", Status: "open"})
+	if err != nil {
+		t.Fatalf("create blocker bead: %v", err)
+	}
 	work, err := store.Create(beads.Bead{
 		Title:    "orphaned step bead",
 		Type:     "task",
@@ -1591,6 +1684,9 @@ func TestCollectAssignedWorkBeads_IncludesOpenPoolRoutedAssignedWork(t *testing.
 	if err != nil {
 		t.Fatalf("create orphaned step bead: %v", err)
 	}
+	if err := store.DepAdd(work.ID, blocker.ID, "blocks"); err != nil {
+		t.Fatalf("block orphaned step bead: %v", err)
+	}
 
 	got, _ := collectAssignedWorkBeads(&config.City{}, store)
 	if len(got) != 1 || got[0].ID != work.ID {
@@ -1599,26 +1695,66 @@ func TestCollectAssignedWorkBeads_IncludesOpenPoolRoutedAssignedWork(t *testing.
 }
 
 // TestCollectAssignedWorkBeads_IncludesOpenRunTargetAssignedWork covers the
-// graph.v2 root-step shape: root beads stamp gc.run_target (not
-// gc.routed_to). The third pass must accept either marker so root steps
-// that orphan-release missed are also recoverable.
+// legacy workflow root shape: workflow beads stamp gc.run_target (not
+// gc.routed_to). The third pass accepts that marker only for the same
+// workflow-kind beads that releaseOrphanedPoolAssignments can release.
 func TestCollectAssignedWorkBeads_IncludesOpenRunTargetAssignedWork(t *testing.T) {
 	t.Parallel()
 	store := beads.NewMemStore()
+	blocker, err := store.Create(beads.Bead{Title: "workflow finalize", Type: "task", Status: "open"})
+	if err != nil {
+		t.Fatalf("create blocker bead: %v", err)
+	}
 	work, err := store.Create(beads.Bead{
 		Title:    "orphaned root step",
 		Type:     "task",
 		Status:   "open",
 		Assignee: "rig--pool__coder-dead-session",
-		Metadata: map[string]string{"gc.run_target": "rig/pool.coder"},
+		Metadata: map[string]string{
+			"gc.kind":       "workflow",
+			"gc.run_target": "rig/pool.coder",
+		},
 	})
 	if err != nil {
 		t.Fatalf("create orphaned root step: %v", err)
+	}
+	if err := store.DepAdd(work.ID, blocker.ID, "blocks"); err != nil {
+		t.Fatalf("block orphaned root step: %v", err)
 	}
 
 	got, _ := collectAssignedWorkBeads(&config.City{}, store)
 	if len(got) != 1 || got[0].ID != work.ID {
 		t.Fatalf("collectAssignedWorkBeads = %#v, want [%s]", got, work.ID)
+	}
+}
+
+func TestCollectAssignedWorkBeads_ExcludesOpenNonWorkflowRunTargetAssignedWork(t *testing.T) {
+	t.Parallel()
+	store := beads.NewMemStore()
+	blocker, err := store.Create(beads.Bead{Title: "workflow finalize", Type: "task", Status: "open"})
+	if err != nil {
+		t.Fatalf("create blocker bead: %v", err)
+	}
+	work, err := store.Create(beads.Bead{
+		Title:    "control retry bead",
+		Type:     "task",
+		Status:   "open",
+		Assignee: "gascity--control-dispatcher",
+		Metadata: map[string]string{
+			"gc.kind":       "retry",
+			"gc.run_target": "gascity/gc.implementation-worker",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create control retry bead: %v", err)
+	}
+	if err := store.DepAdd(work.ID, blocker.ID, "blocks"); err != nil {
+		t.Fatalf("block control retry bead: %v", err)
+	}
+
+	got, _ := collectAssignedWorkBeads(&config.City{}, store)
+	if len(got) != 0 {
+		t.Fatalf("collectAssignedWorkBeads returned %d beads, want 0 for non-workflow gc.run_target", len(got))
 	}
 }
 

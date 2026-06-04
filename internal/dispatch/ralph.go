@@ -390,7 +390,7 @@ func appendRalphRetry(store beads.Store, logicalID string, prevSubject, prevChec
 	}
 	cfg := loadAttemptRouteConfig(opts.CityPath)
 	if molecule.IsGraphApplyEnabled() {
-		if applier, ok := store.(beads.GraphApplyStore); ok {
+		if applier, ok := beads.GraphApplyFor(store); ok {
 			return appendRalphRetryViaGraphApply(store, applier, logicalID, prevSubject, prevCheck, attemptSet, oldAttempt, nextAttempt, oldScopeRef, newScopeRef, cfg, opts)
 		}
 	}

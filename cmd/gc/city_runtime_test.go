@@ -3158,7 +3158,7 @@ func TestCityRuntimeTick_PrefixesEachJoinedWispGCErrorLine(t *testing.T) {
 		wg: fixedWispGC{err: fmt.Errorf(
 			"%s\n%s",
 			"deleting expired bead \"mol-1\": delete failed",
-			"listing closed order-tracking beads: list failed",
+			"listing closed molecule roots: list failed",
 		)},
 		rec:       events.Discard,
 		logPrefix: "test-city",
@@ -3177,7 +3177,7 @@ func TestCityRuntimeTick_PrefixesEachJoinedWispGCErrorLine(t *testing.T) {
 	got := stderr.String()
 	for _, want := range []string{
 		"test-city: wisp gc: deleting expired bead \"mol-1\": delete failed\n",
-		"test-city: wisp gc: listing closed order-tracking beads: list failed\n",
+		"test-city: wisp gc: listing closed molecule roots: list failed\n",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("stderr = %q, want line %q", got, want)

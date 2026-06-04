@@ -196,6 +196,55 @@ func TestReconcileEmitsCloseWhenGetReturnsClosed(t *testing.T) {
 	assertNotCached(t, cache, closing.ID)
 }
 
+// TestReconcileEmitsFreshClosePayloadWhenGetReturnsClosed pins the close
+// recovery path that verifies a missing active-list row with backing.Get.
+// The close notification must carry the fresh closed row, not a synthetic
+// status flip built from stale cache contents.
+func TestReconcileEmitsFreshClosePayloadWhenGetReturnsClosed(t *testing.T) {
+	t.Parallel()
+
+	mem := NewMemStore()
+	closing, err := mem.Create(Bead{Title: "Closing"})
+	if err != nil {
+		t.Fatalf("Create closing: %v", err)
+	}
+
+	backing := &droppingListStore{Store: mem}
+	var closedPayload Bead
+	cache := NewCachingStoreForTest(backing, func(eventType, beadID string, payload json.RawMessage) {
+		if eventType != "bead.closed" || beadID != closing.ID {
+			return
+		}
+		if err := json.Unmarshal(payload, &closedPayload); err != nil {
+			t.Fatalf("unmarshal close payload: %v", err)
+		}
+	})
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+
+	status := "closed"
+	if err := mem.Update(closing.ID, UpdateOpts{
+		Status: &status,
+		Metadata: map[string]string{
+			"ci.verdict": "done",
+			"gc.outcome": "pass",
+		},
+	}); err != nil {
+		t.Fatalf("Close backing bead with metadata: %v", err)
+	}
+
+	cache.runReconciliation()
+
+	if closedPayload.ID != closing.ID {
+		t.Fatalf("closed payload ID = %q, want %q", closedPayload.ID, closing.ID)
+	}
+	if closedPayload.Metadata["ci.verdict"] != "done" || closedPayload.Metadata["gc.outcome"] != "pass" {
+		t.Fatalf("closed payload metadata = %#v, want fresh backing close metadata", closedPayload.Metadata)
+	}
+	assertNotCached(t, cache, closing.ID)
+}
+
 // TestReconcileDefersCloseOnBackingError verifies that a transient backing
 // failure (List omits the bead, Get returns a non-NotFound error) does NOT
 // produce a bead.closed event — the close is deferred until a later scan.

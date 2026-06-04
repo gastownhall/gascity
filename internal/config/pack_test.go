@@ -1302,8 +1302,14 @@ func TestHasPackRigs(t *testing.T) {
 	if HasPackRigs(nil) {
 		t.Error("nil rigs should return false")
 	}
-	if HasPackRigs([]Rig{{Name: "a", Path: "/a"}}) {
-		t.Error("rig without pack should return false")
+	if HasPackRigs([]Rig{{Name: "a"}}) {
+		t.Error("rig with no path and no includes should return false")
+	}
+	// A rig with only a path is treated as potentially having a pack (expandPacks
+	// will discover the root pack.toml if present). This enables the packV2
+	// convention where a rig root carries agents/ directories directly.
+	if !HasPackRigs([]Rig{{Name: "a", Path: "/a"}}) {
+		t.Error("rig with path should return true (may have root pack.toml)")
 	}
 	if !HasPackRigs([]Rig{{Name: "a", Path: "/a", Includes: []string{"topo"}}}) {
 		t.Error("rig with includes should return true")
