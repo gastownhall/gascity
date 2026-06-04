@@ -39,6 +39,7 @@ func TestCleanInstallTutorialPath(t *testing.T) {
 	env := newIsolatedCommandEnv(t, true)
 	cityName := uniqueCityName()
 	cityDir := filepath.Join(t.TempDir(), cityName)
+	registerIntegrationDoltSQLServerCleanup(t, cityDir)
 
 	// --- Step 1: gc init (clean install, no --file) ---
 	out, err := runGCDoltWithEnv(env, "", "init",
