@@ -23,6 +23,13 @@ const (
 	sqliteDefaultPrefix               = "gc"
 	sqliteDefaultRetentionPeriod      = 4 * time.Hour
 	sqliteDefaultRetentionSweepPeriod = 30 * time.Second
+
+	// sqliteBusyRetryAttempts is the number of application-level retries after
+	// the per-connection busy_timeout is exhausted. Each retry backs off by
+	// sqliteBusyRetryDelay before re-attempting, giving competing writers time
+	// to release the WAL write lock.
+	sqliteBusyRetryAttempts = 3
+	sqliteBusyRetryDelay    = 150 * time.Millisecond
 )
 
 // SQLiteStoreOptions configures the SQLite bead store.
@@ -53,6 +60,30 @@ func WithSQLiteStoreRetention(period, sweepInterval time.Duration) SQLiteStoreOp
 		o.retentionSweepInterval = sweepInterval
 		o.disableRetentionSweeper = sweepInterval <= 0
 	}
+}
+
+// isSQLiteBusy reports whether err is a SQLite write-contention error.
+// The modernc driver returns "database is locked (5) (SQLITE_BUSY)" when the
+// per-connection busy_timeout expires without acquiring the WAL write lock.
+func isSQLiteBusy(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "SQLITE_BUSY") || strings.Contains(msg, "database is locked")
+}
+
+// retryOnBusy retries fn up to sqliteBusyRetryAttempts times when it returns
+// a SQLITE_BUSY error, backing off by sqliteBusyRetryDelay between attempts.
+// The busy_timeout PRAGMA already retries at the C layer for 5 s per call, so
+// each application-level retry is an additional 5 s+ window for the lock.
+func retryOnBusy(fn func() error) error {
+	err := fn()
+	for attempt := 0; attempt < sqliteBusyRetryAttempts && isSQLiteBusy(err); attempt++ {
+		time.Sleep(sqliteBusyRetryDelay)
+		err = fn()
+	}
+	return err
 }
 
 // SQLiteStore is a pure-Go SQLite-backed Store using modernc.org/sqlite.
@@ -269,26 +300,33 @@ func (s *SQLiteStore) CloseStore() error {
 
 // Create persists a new bead.
 func (s *SQLiteStore) Create(b Bead) (Bead, error) {
-	ctx := context.Background()
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return Bead{}, fmt.Errorf("sqlite create: begin tx: %w", err)
-	}
-	defer tx.Rollback() //nolint:errcheck
-	stored := s.normalizeCreate(b)
-	if err := s.ensureCreateDoesNotExist(ctx, tx, stored.ID); err != nil {
-		return Bead{}, err
-	}
-	if err := s.upsertBeadTx(ctx, tx, stored); err != nil {
-		return Bead{}, err
-	}
-	for _, dep := range depsFromBeadFields(stored) {
-		if err := s.depAddTx(ctx, tx, dep.IssueID, dep.DependsOnID, dep.Type); err != nil {
-			return Bead{}, err
+	var stored Bead
+	err := retryOnBusy(func() error {
+		ctx := context.Background()
+		tx, err := s.db.BeginTx(ctx, nil)
+		if err != nil {
+			return fmt.Errorf("sqlite create: begin tx: %w", err)
 		}
-	}
-	if err := tx.Commit(); err != nil {
-		return Bead{}, fmt.Errorf("sqlite create: commit: %w", err)
+		defer tx.Rollback() //nolint:errcheck
+		stored = s.normalizeCreate(b)
+		if err := s.ensureCreateDoesNotExist(ctx, tx, stored.ID); err != nil {
+			return err
+		}
+		if err := s.upsertBeadTx(ctx, tx, stored); err != nil {
+			return err
+		}
+		for _, dep := range depsFromBeadFields(stored) {
+			if err := s.depAddTx(ctx, tx, dep.IssueID, dep.DependsOnID, dep.Type); err != nil {
+				return err
+			}
+		}
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("sqlite create: commit: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
+		return Bead{}, err
 	}
 	return cloneBead(stored), nil
 }
@@ -435,66 +473,68 @@ func scanSQLiteBead(row sqliteScanner) (Bead, error) {
 
 // Update modifies fields of an existing bead.
 func (s *SQLiteStore) Update(id string, opts UpdateOpts) error {
-	ctx := context.Background()
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("sqlite update: begin tx: %w", err)
-	}
-	defer tx.Rollback() //nolint:errcheck
-	b, err := s.getTx(ctx, tx, id)
-	if err != nil {
-		return err
-	}
-	if opts.Title != nil {
-		b.Title = *opts.Title
-	}
-	if opts.Status != nil {
-		b.Status = *opts.Status
-	}
-	if opts.Type != nil {
-		b.Type = *opts.Type
-	}
-	if opts.Priority != nil {
-		b.Priority = cloneIntPtr(opts.Priority)
-	}
-	if opts.Description != nil {
-		b.Description = *opts.Description
-	}
-	if opts.ParentID != nil {
-		b.ParentID = *opts.ParentID
-	}
-	if opts.Assignee != nil {
-		b.Assignee = *opts.Assignee
-	}
-	if len(opts.Metadata) > 0 {
-		if b.Metadata == nil {
-			b.Metadata = make(map[string]string, len(opts.Metadata))
+	return retryOnBusy(func() error {
+		ctx := context.Background()
+		tx, err := s.db.BeginTx(ctx, nil)
+		if err != nil {
+			return fmt.Errorf("sqlite update: begin tx: %w", err)
 		}
-		for k, v := range opts.Metadata {
-			b.Metadata[k] = v
+		defer tx.Rollback() //nolint:errcheck
+		b, err := s.getTx(ctx, tx, id)
+		if err != nil {
+			return err
 		}
-	}
-	if len(opts.Labels) > 0 {
-		b.Labels = append(b.Labels, opts.Labels...)
-	}
-	if len(opts.RemoveLabels) > 0 {
-		remove := make(map[string]bool, len(opts.RemoveLabels))
-		for _, label := range opts.RemoveLabels {
-			remove[label] = true
+		if opts.Title != nil {
+			b.Title = *opts.Title
 		}
-		filtered := b.Labels[:0]
-		for _, label := range b.Labels {
-			if !remove[label] {
-				filtered = append(filtered, label)
+		if opts.Status != nil {
+			b.Status = *opts.Status
+		}
+		if opts.Type != nil {
+			b.Type = *opts.Type
+		}
+		if opts.Priority != nil {
+			b.Priority = cloneIntPtr(opts.Priority)
+		}
+		if opts.Description != nil {
+			b.Description = *opts.Description
+		}
+		if opts.ParentID != nil {
+			b.ParentID = *opts.ParentID
+		}
+		if opts.Assignee != nil {
+			b.Assignee = *opts.Assignee
+		}
+		if len(opts.Metadata) > 0 {
+			if b.Metadata == nil {
+				b.Metadata = make(map[string]string, len(opts.Metadata))
+			}
+			for k, v := range opts.Metadata {
+				b.Metadata[k] = v
 			}
 		}
-		b.Labels = filtered
-	}
-	b.UpdatedAt = time.Now()
-	if err := s.upsertBeadTx(ctx, tx, b); err != nil {
-		return err
-	}
-	return tx.Commit()
+		if len(opts.Labels) > 0 {
+			b.Labels = append(b.Labels, opts.Labels...)
+		}
+		if len(opts.RemoveLabels) > 0 {
+			remove := make(map[string]bool, len(opts.RemoveLabels))
+			for _, label := range opts.RemoveLabels {
+				remove[label] = true
+			}
+			filtered := b.Labels[:0]
+			for _, label := range b.Labels {
+				if !remove[label] {
+					filtered = append(filtered, label)
+				}
+			}
+			b.Labels = filtered
+		}
+		b.UpdatedAt = time.Now()
+		if err := s.upsertBeadTx(ctx, tx, b); err != nil {
+			return err
+		}
+		return tx.Commit()
+	})
 }
 
 func (s *SQLiteStore) getTx(ctx context.Context, tx *sql.Tx, id string) (Bead, error) {
@@ -776,35 +816,39 @@ func (s *SQLiteStore) Tx(_ string, fn func(tx Tx) error) error {
 
 // Delete permanently removes a bead and its indexed rows.
 func (s *SQLiteStore) Delete(id string) error {
-	tx, err := s.db.BeginTx(context.Background(), nil)
-	if err != nil {
-		return fmt.Errorf("sqlite delete: begin tx: %w", err)
-	}
-	defer tx.Rollback() //nolint:errcheck
-	res, err := tx.Exec(`DELETE FROM beads WHERE id=?`, id)
-	if err != nil {
-		return fmt.Errorf("deleting bead %q: %w", id, err)
-	}
-	if n, _ := res.RowsAffected(); n == 0 {
-		return fmt.Errorf("deleting bead %q: %w", id, ErrNotFound)
-	}
-	if _, err := tx.Exec(`DELETE FROM deps WHERE issue_id=? OR depends_on_id=?`, id, id); err != nil {
-		return fmt.Errorf("deleting bead %q deps: %w", id, err)
-	}
-	return tx.Commit()
+	return retryOnBusy(func() error {
+		tx, err := s.db.BeginTx(context.Background(), nil)
+		if err != nil {
+			return fmt.Errorf("sqlite delete: begin tx: %w", err)
+		}
+		defer tx.Rollback() //nolint:errcheck
+		res, err := tx.Exec(`DELETE FROM beads WHERE id=?`, id)
+		if err != nil {
+			return fmt.Errorf("deleting bead %q: %w", id, err)
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			return fmt.Errorf("deleting bead %q: %w", id, ErrNotFound)
+		}
+		if _, err := tx.Exec(`DELETE FROM deps WHERE issue_id=? OR depends_on_id=?`, id, id); err != nil {
+			return fmt.Errorf("deleting bead %q deps: %w", id, err)
+		}
+		return tx.Commit()
+	})
 }
 
 // DepAdd records a dependency edge.
 func (s *SQLiteStore) DepAdd(issueID, dependsOnID, depType string) error {
-	tx, err := s.db.BeginTx(context.Background(), nil)
-	if err != nil {
-		return fmt.Errorf("sqlite dep add: begin tx: %w", err)
-	}
-	defer tx.Rollback() //nolint:errcheck
-	if err := s.depAddTx(context.Background(), tx, issueID, dependsOnID, depType); err != nil {
-		return err
-	}
-	return tx.Commit()
+	return retryOnBusy(func() error {
+		tx, err := s.db.BeginTx(context.Background(), nil)
+		if err != nil {
+			return fmt.Errorf("sqlite dep add: begin tx: %w", err)
+		}
+		defer tx.Rollback() //nolint:errcheck
+		if err := s.depAddTx(context.Background(), tx, issueID, dependsOnID, depType); err != nil {
+			return err
+		}
+		return tx.Commit()
+	})
 }
 
 func (s *SQLiteStore) depAddTx(ctx context.Context, tx *sql.Tx, issueID, dependsOnID, depType string) error {
@@ -823,8 +867,10 @@ func (s *SQLiteStore) depAddTx(ctx context.Context, tx *sql.Tx, issueID, depends
 
 // DepRemove removes a dependency edge.
 func (s *SQLiteStore) DepRemove(issueID, dependsOnID string) error {
-	_, err := s.db.ExecContext(context.Background(), `DELETE FROM deps WHERE issue_id=? AND depends_on_id=?`, issueID, dependsOnID)
-	return err
+	return retryOnBusy(func() error {
+		_, err := s.db.ExecContext(context.Background(), `DELETE FROM deps WHERE issue_id=? AND depends_on_id=?`, issueID, dependsOnID)
+		return err
+	})
 }
 
 // DepList returns dependency edges for a bead.
