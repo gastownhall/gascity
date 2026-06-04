@@ -71,7 +71,7 @@ func (c *CachingStore) ApplyEvent(eventType string, payload json.RawMessage) {
 		}
 		verifiedConflict = true
 		verifiedClosedBase = conflictBase
-		if closedEventPayloadOlderThanBacking(patch, fresh) {
+		if closedEventPayloadNeedsBackingRefresh(patch, fresh) {
 			verifiedClosedFresh = fresh
 			verifiedClosedFromBacking = true
 		}
@@ -462,11 +462,30 @@ func (c *CachingStore) cacheClosedEventMatchesBacking(id string) (Bead, bool, er
 	return fresh, fresh.Status == "closed", nil
 }
 
-func closedEventPayloadOlderThanBacking(patch, fresh Bead) bool {
-	if patch.UpdatedAt.IsZero() || fresh.UpdatedAt.IsZero() {
-		return false
+func closedEventPayloadNeedsBackingRefresh(patch Bead, fresh Bead) bool {
+	// Verified close events only need the backing row when the hook payload is
+	// partial and the timestamp is unusable or not newer. Rich close snapshots
+	// should still flow through the normal merge path so they can replace stale
+	// cached fields that the backing row still carries.
+	if patch.UpdatedAt.IsZero() || fresh.UpdatedAt.IsZero() || !patch.UpdatedAt.After(fresh.UpdatedAt) {
+		return !closedEventCarriesRichCloseSnapshot(patch)
 	}
-	return patch.UpdatedAt.Before(fresh.UpdatedAt)
+	return false
+}
+
+func closedEventCarriesRichCloseSnapshot(patch Bead) bool {
+	return patch.Title != "" ||
+		len(patch.Labels) > 0 ||
+		patch.Description != "" ||
+		patch.Assignee != "" ||
+		patch.ParentID != "" ||
+		patch.Ref != "" ||
+		len(patch.Needs) > 0 ||
+		patch.Type != "" ||
+		patch.Priority != nil ||
+		patch.Ephemeral ||
+		patch.NoHistory ||
+		patch.DeferUntil != nil
 }
 
 func cacheEventPatchMatchesBead(current, patch Bead, fields map[string]json.RawMessage) bool {

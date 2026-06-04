@@ -1090,6 +1090,111 @@ func TestCachingStoreClosedEventRefreshesStalePayloadFromBacking(t *testing.T) {
 	}
 }
 
+func TestCachingStoreClosedEventRefreshesBackingForMissingZeroOrEqualUpdatedAt(t *testing.T) {
+	type testCase struct {
+		name    string
+		payload func(t *testing.T, id string, fresh Bead) json.RawMessage
+		wantRef bool
+	}
+
+	cases := []testCase{
+		{
+			name: "missing updated_at",
+			payload: func(t *testing.T, id string, _ Bead) json.RawMessage {
+				t.Helper()
+				return json.RawMessage(fmt.Sprintf(`{"id":%q,"status":"closed"}`, id))
+			},
+			wantRef: true,
+		},
+		{
+			name: "zero updated_at",
+			payload: func(t *testing.T, id string, _ Bead) json.RawMessage {
+				t.Helper()
+				return json.RawMessage(fmt.Sprintf(
+					`{"id":%q,"status":"closed","updated_at":"0001-01-01T00:00:00Z"}`,
+					id,
+				))
+			},
+			wantRef: true,
+		},
+		{
+			name: "equal updated_at",
+			payload: func(t *testing.T, id string, fresh Bead) json.RawMessage {
+				t.Helper()
+				return json.RawMessage(fmt.Sprintf(
+					`{"id":%q,"status":"closed","updated_at":%q}`,
+					id,
+					fresh.UpdatedAt.Format(time.RFC3339Nano),
+				))
+			},
+			wantRef: true,
+		},
+		{
+			name: "newer updated_at",
+			payload: func(t *testing.T, id string, fresh Bead) json.RawMessage {
+				t.Helper()
+				return json.RawMessage(fmt.Sprintf(
+					`{"id":%q,"status":"closed","updated_at":%q,"metadata":{"gc.step_ref":"new"}}`,
+					id,
+					fresh.UpdatedAt.Add(time.Nanosecond).Format(time.RFC3339Nano),
+				))
+			},
+			wantRef: false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			backing := NewMemStore()
+			bead, err := backing.Create(Bead{Title: "close me", Metadata: map[string]string{"gc.step_ref": "old"}})
+			if err != nil {
+				t.Fatalf("Create: %v", err)
+			}
+
+			cache := NewCachingStoreForTest(backing, nil)
+			if err := cache.Prime(context.Background()); err != nil {
+				t.Fatalf("Prime: %v", err)
+			}
+
+			status := "closed"
+			if err := backing.Update(bead.ID, UpdateOpts{
+				Status: &status,
+				Metadata: map[string]string{
+					"ci.verdict": "done",
+					"gc.outcome": "pass",
+				},
+			}); err != nil {
+				t.Fatalf("Update backing close metadata: %v", err)
+			}
+			fresh, err := backing.Get(bead.ID)
+			if err != nil {
+				t.Fatalf("Get backing: %v", err)
+			}
+			cache.ApplyEvent("bead.closed", tc.payload(t, bead.ID, fresh))
+
+			got, err := cache.Get(bead.ID)
+			if err != nil {
+				t.Fatalf("Get: %v", err)
+			}
+			if got.Status != "closed" {
+				t.Fatalf("Status after close event = %q, want closed", got.Status)
+			}
+			if tc.wantRef {
+				if got.Metadata["ci.verdict"] != "done" || got.Metadata["gc.outcome"] != "pass" {
+					t.Fatalf("metadata after close event = %#v, want fresh backing metadata", got.Metadata)
+				}
+				return
+			}
+			if got.Metadata["gc.step_ref"] != "new" {
+				t.Fatalf("metadata after newer close event = %#v, want newer payload metadata", got.Metadata)
+			}
+			if _, ok := got.Metadata["ci.verdict"]; ok {
+				t.Fatalf("metadata after newer close event = %#v, want merge path to skip backing refresh", got.Metadata)
+			}
+		})
+	}
+}
+
 type cacheEventVerificationFailStore struct {
 	Store
 	failNextGet bool
