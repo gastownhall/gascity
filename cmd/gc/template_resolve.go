@@ -726,19 +726,19 @@ func templateParamsToConfig(tp TemplateParams) runtime.Config {
 		// long-lived config-declared/named sessions would force a one-time drift
 		// restart — they follow their resolved Hints.MouseOn (mouse_mode) instead.
 		// Ephemeral pool agents are likewise mouse-off (controller-poll safety).
-		MouseOn:                tp.Hints.MouseOn || templateParamsSessionOrigin(tp) == "manual",
-		Nudge:                  nudge,
-		PreStart:               tp.Hints.PreStart,
-		SessionSetup:           tp.Hints.SessionSetup,
-		SessionSetupScript:     tp.Hints.SessionSetupScript,
-		SessionLive:            tp.Hints.SessionLive,
-		ProviderName:           tp.Hints.ProviderName,
-		ProviderOverlayName:    tp.Hints.ProviderOverlayName,
-		InstallAgentHooks:      tp.Hints.InstallAgentHooks,
-		PackOverlayDirs:        tp.Hints.PackOverlayDirs,
-		OverlayDir:             tp.Hints.OverlayDir,
-		CopyFiles:              tp.Hints.CopyFiles,
-		FingerprintExtra:       tp.FPExtra,
+		MouseOn:             tp.Hints.MouseOn || templateParamsSessionOrigin(tp) == "manual",
+		Nudge:               nudge,
+		PreStart:            tp.Hints.PreStart,
+		SessionSetup:        tp.Hints.SessionSetup,
+		SessionSetupScript:  tp.Hints.SessionSetupScript,
+		SessionLive:         tp.Hints.SessionLive,
+		ProviderName:        tp.Hints.ProviderName,
+		ProviderOverlayName: tp.Hints.ProviderOverlayName,
+		InstallAgentHooks:   tp.Hints.InstallAgentHooks,
+		PackOverlayDirs:     tp.Hints.PackOverlayDirs,
+		OverlayDir:          tp.Hints.OverlayDir,
+		CopyFiles:           tp.Hints.CopyFiles,
+		FingerprintExtra:    tp.FPExtra,
 	}
 	applyT3BridgeRuntimeConfig(tp, env)
 	return cfg
