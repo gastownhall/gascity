@@ -151,7 +151,7 @@ func (c startCandidate) name() string {
 // wakeFairnessTime is the ordering key for the per-tick wake budget: the time the
 // session was last woken (last_woke_at), falling back to its creation time so a
 // brand-new session does not jump ahead of one that has been waiting for a slot.
-// Oldest sorts first = highest priority.
+// Oldest sorts first so the longest-waiting candidates spend the budget first.
 func wakeFairnessTime(c startCandidate) time.Time {
 	if c.session != nil && c.session.Metadata != nil {
 		if t, err := time.Parse(time.RFC3339, c.session.Metadata["last_woke_at"]); err == nil {
@@ -1968,8 +1968,7 @@ func executePlannedStartsTraced(
 		// Fairness: spend a budget-limited tick on the least-recently-woken
 		// candidates first. The wave order is a stable dependency topo-sort, so
 		// without this the same back-of-order sessions are deferred_by_wake_budget
-		// every tick (a routine pool/infra wake starves a devpipeline agent that
-		// topo-sorts behind it). Sorting within the dependency wave is safe: every
+		// every tick. Sorting within the dependency wave is safe: every
 		// candidate here already has its dependencies satisfied.
 		sortCandidatesByWakeFairness(ready)
 		for offset := 0; offset < len(ready); {

@@ -1239,8 +1239,7 @@ func TestReconcileSessionBeads_DaemonMaxWakesPerTickOverride(t *testing.T) {
 // candidate, the least-recently-woken (longest-waiting) session must win a slot
 // rather than being starved behind more-recently-woken siblings that sort ahead
 // of it in the stable dependency/topo order. Without fairness the same
-// back-of-order agents (e.g. devpipeline agents that topo-sort after the infra
-// they depend on) are deferred_by_wake_budget every tick.
+// back-of-order sessions are deferred_by_wake_budget every tick.
 func TestExecutePlannedStarts_WakeBudgetPrioritizesLeastRecentlyWoken(t *testing.T) {
 	sp := runtime.NewFake()
 	store := beads.NewMemStore()
