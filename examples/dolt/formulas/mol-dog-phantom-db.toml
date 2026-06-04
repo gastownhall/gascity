@@ -99,7 +99,6 @@ A retired replacement database has:
 [[steps]]
 id = "escalate"
 title = "Escalate unservable databases"
-needs = ["scan"]
 description = """
 Escalate unservable database directories without mutating them.
 
@@ -137,7 +136,6 @@ gc mail send mayor/ -s "ESCALATION: Unservable Dolt databases detected [HIGH]" \
 [[steps]]
 id = "report"
 title = "Report findings and return to kennel"
-needs = ["escalate"]
 description = """
 Generate summary and signal completion.
 

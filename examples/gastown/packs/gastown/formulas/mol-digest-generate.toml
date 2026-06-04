@@ -81,12 +81,11 @@ UNTIL=$(date -u -d 'today 00:00' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || \
 
 Note the timestamps for the digest header.
 
-Close this step when the time range is established."""
+Continue to data collection when the time range is established."""
 
 [[steps]]
 id = "collect-data"
 title = "Collect activity data from all rigs"
-needs = ["determine-period"]
 description = """
 Gather activity data from each rig.
 
@@ -130,12 +129,11 @@ c) **Warrants filed:**
 gc bd list --label=warrant --created-after=$SINCE --json
 ```
 
-Close this step when all data is collected."""
+Continue to digest generation when all data is collected."""
 
 [[steps]]
 id = "generate-and-send"
 title = "Generate digest, send to mayor, archive"
-needs = ["collect-data"]
 description = """
 Transform data into a formatted digest and deliver it.
 

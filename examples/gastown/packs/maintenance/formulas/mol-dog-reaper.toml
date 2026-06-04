@@ -188,7 +188,6 @@ beads with Type=message; any mail cleanup goes through `bd`.
 [[steps]]
 id = "reap"
 title = "Close stale wisps with closed parents"
-needs = ["scan"]
 description = """
 Report wisps past max_age and close only the schema-safe subset whose
 parent-child dependency points to a closed parent.
@@ -246,7 +245,6 @@ can legitimately exceed the raw open-wisp threshold on busy cities.
 [[steps]]
 id = "purge"
 title = "Purge old closed wisps"
-needs = ["reap"]
 description = """
 Delete closed wisps past purge_age.
 
@@ -279,7 +277,6 @@ for any mail cleanup, never DELETE FROM mail.
 [[steps]]
 id = "auto-close"
 title = "Auto-close stale city issues"
-needs = ["purge"]
 description = """
 Close city-scoped issues that have been open with no status change past
 stale_issue_age. Rig/non-city database candidates are report-only because a
@@ -326,7 +323,6 @@ issue candidates reported without mutation."""
 [[steps]]
 id = "report"
 title = "Report findings and return to kennel"
-needs = ["auto-close"]
 description = """
 Generate summary and signal completion.
 

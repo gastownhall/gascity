@@ -63,7 +63,7 @@ func MCPTemplateData(
 	if templateName == "" {
 		templateName = identity
 	}
-	data := make(map[string]string, len(agent.Env)+11)
+	data := make(map[string]string, len(agent.Env)+14)
 	for key, value := range agent.Env {
 		data[key] = value
 	}
@@ -78,6 +78,9 @@ func MCPTemplateData(
 	data["Branch"] = branch
 	data["DefaultBranch"] = branch
 	data["WorkQuery"] = agent.EffectiveWorkQuery()
+	data["AssignedInProgressQuery"] = agent.EffectiveAssignedInProgressQuery()
+	data["AssignedReadyQuery"] = agent.EffectiveAssignedReadyQuery()
+	data["RoutedPoolQuery"] = agent.EffectiveRoutedPoolQuery()
 	data["SlingQuery"] = agent.EffectiveSlingQuery()
 	return data
 }

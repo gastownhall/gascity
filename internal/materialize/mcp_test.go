@@ -233,6 +233,17 @@ func TestMCPTemplateDataUsesBackingTemplateName(t *testing.T) {
 	if got["TOKEN"] != "abc" {
 		t.Fatalf("TOKEN = %q, want abc", got["TOKEN"])
 	}
+	for _, key := range []string{"AssignedInProgressQuery", "AssignedReadyQuery", "RoutedPoolQuery"} {
+		if got[key] == "" {
+			t.Fatalf("%s = empty, want template data query value", key)
+		}
+	}
+	if strings.Contains(got["AssignedReadyQuery"], "gc.routed_to") {
+		t.Fatalf("AssignedReadyQuery includes routed pool demand: %q", got["AssignedReadyQuery"])
+	}
+	if !strings.Contains(got["RoutedPoolQuery"], "gc.routed_to") {
+		t.Fatalf("RoutedPoolQuery missing routed pool demand: %q", got["RoutedPoolQuery"])
+	}
 }
 
 func TestMCPTemplateDataUsesPoolNameForPoolInstances(t *testing.T) {

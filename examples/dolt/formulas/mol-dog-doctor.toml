@@ -96,7 +96,6 @@ gc mail send mayor/ -s "ESCALATION: Dolt server unreachable on port {{port}} [CR
 [[steps]]
 id = "inspect"
 title = "Inspect resource conditions"
-needs = ["probe"]
 description = """
 Check resource usage and detect anomalies.
 
@@ -136,7 +135,6 @@ Check modification time of backup files. Warn if backups are stale
 [[steps]]
 id = "report"
 title = "Report findings and return to kennel"
-needs = ["inspect"]
 description = """
 Generate health report and signal completion.
 

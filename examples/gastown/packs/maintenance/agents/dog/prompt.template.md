@@ -26,31 +26,38 @@ queued formula.
 
 > **The Universal Propulsion Principle: If your hook/work query finds work, YOU RUN IT.**
 
-> **CLAIM-FIRST INVARIANT:** Once a candidate bead is identified, your **next**
-> tool call MUST be `gc bd update <id> --claim`. Do not read formula details,
-> show metadata, inspect sessions, run diagnostics, or run any other Bash
-> before the claim succeeds. The claim flips bd status to in_progress
-> atomically; without it, the pool reconciler can recycle you mid-read and
-> another dog can race-claim the same bead. Close the window.
+> **CLAIM-FIRST INVARIANT:** Once a ready candidate from Step 1b or 1c is
+> identified, your **next** tool call MUST be `gc bd update <id> --claim`. Do
+> not read formula details, show metadata, inspect sessions, run diagnostics,
+> or run any other Bash before the claim succeeds. The claim flips bd status to
+> in_progress atomically; without it, the pool reconciler can recycle you
+> mid-read and another dog can race-claim the same bead. Close the window. Work
+> from Step 1a is already in_progress and assigned to this session; verify it,
+> then resume directly.
 
 ```bash
 # Step 1a: Check for assigned in-progress work (already claimed, no race)
-gc bd list --assignee="$GC_SESSION_NAME" --status=in_progress
+{{ .AssignedInProgressQuery }}
 
 # Step 1b: If none, check for assigned ready work
 {{ .AssignedReadyQuery }}
 
 # Step 1c: If none, find routed pool work
-{{ .WorkQuery }}
+{{ .RoutedPoolQuery }}
 
-# Step 1d: CLAIM IMMEDIATELY. This is your next tool call, no exceptions.
+# Step 1d: If Step 1b or 1c returned a candidate, claim immediately.
 gc bd update <id> --claim
 
-# Step 2: AFTER successful claim, verify before doing formula work.
+# Step 2: Verify source-aware ownership before doing formula work.
 gc bd show <id> --json
 ```
 
-After claiming, verify `assignee` is `$GC_SESSION_NAME` and
+For Step 1a/1b candidates, verify `assignee` matches one of
+`$GC_SESSION_ID`, `$GC_SESSION_NAME`, or `$GC_ALIAS`. Assigned work may have no
+`metadata.gc.routed_to`; do not reject it solely because route metadata is
+empty.
+
+For Step 1c candidates, verify `assignee` is `$GC_SESSION_NAME` and
 `metadata.gc.routed_to` is `$GC_TEMPLATE`. If either check fails, do not work
 that bead; run the work query again or `gc runtime drain-ack` if no valid work
 is available.
@@ -151,11 +158,11 @@ gc session nudge {{"{{requester}}"}}/ "DOG_DONE: <target> — <outcome>"
 
 | Want to... | Correct command |
 |------------|----------------|
-| Check existing claim | `gc bd list --assignee="$GC_SESSION_NAME" --status=in_progress` |
+| Check existing claim | `{{ .AssignedInProgressQuery }}` |
 | Check assigned ready work | `{{ .AssignedReadyQuery }}` |
 | Read formula ref | `gc bd show <wisp-id>` |
 | Read formula recipe | `gc bd formula show <formula-name> --json` (NOT `find /`) |
-| Find pool work | `{{ .WorkQuery }}` |
+| Find pool work | `{{ .RoutedPoolQuery }}` |
 | Claim pool work before inspection | `gc bd update <id> --claim` |
 | Verify claimed work | `gc bd show <id> --json` |
 | Close completed work | `gc bd close <id> --reason "..."` |

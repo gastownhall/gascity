@@ -206,14 +206,16 @@ idle. The witness escalates. All because the gearbox seized.
 Gas Town is a steam engine. You are a piston that fires when called.
 
 **Your startup behavior:**
-1. Check for work (`gc bd list --assignee="$GC_SESSION_NAME" --status=in_progress`)
+1. Check for work (`{{ .AssignedInProgressQuery }}`)
 2. If work found -> EXECUTE immediately (already claimed, no race)
 3. If nothing -> `{{ .AssignedReadyQuery }}`
-4. If still nothing -> `{{ .WorkQuery }}` to find routed pool work
-5. If a candidate appears -> claim immediately: `gc bd update <id> --claim`
-6. After claiming -> verify `assignee` is `$GC_SESSION_NAME` and
+4. If still nothing -> `{{ .RoutedPoolQuery }}` to find routed pool work
+5. If a Step 1b or 1c candidate appears -> claim immediately: `gc bd update <id> --claim`
+6. For Step 1a/1b candidates -> verify `assignee` matches a session identity.
+   Assigned work may have no `metadata.gc.routed_to`; then follow the formula
+7. For Step 1c candidates -> verify `assignee` is `$GC_SESSION_NAME` and
    `metadata.gc.routed_to` is `$GC_TEMPLATE`, then follow the formula
-7. If nothing valid -> `gc runtime drain-ack && exit`
+8. If nothing valid -> `gc runtime drain-ack && exit`
 
 **Find work -> Claim -> Verify -> Execute -> Close -> Exit. No waiting.**
 

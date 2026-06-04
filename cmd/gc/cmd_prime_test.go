@@ -45,6 +45,18 @@ func TestBuildPrimeContextExpandsTemplateCommands(t *testing.T) {
 	if ctx.WorkQuery != "echo demo-city demo worker" {
 		t.Fatalf("WorkQuery = %q, want %q", ctx.WorkQuery, "echo demo-city demo worker")
 	}
+	if ctx.AssignedInProgressQuery != "echo demo-city demo worker" {
+		t.Fatalf("AssignedInProgressQuery = %q, want expanded custom query", ctx.AssignedInProgressQuery)
+	}
+	if ctx.AssignedReadyQuery == "" {
+		t.Fatal("AssignedReadyQuery is empty")
+	}
+	if strings.Contains(ctx.AssignedReadyQuery, "gc.routed_to") {
+		t.Fatalf("AssignedReadyQuery includes routed pool demand: %q", ctx.AssignedReadyQuery)
+	}
+	if ctx.RoutedPoolQuery != "echo demo-city demo worker" {
+		t.Fatalf("RoutedPoolQuery = %q, want expanded custom query", ctx.RoutedPoolQuery)
+	}
 	if ctx.SlingQuery != "dispatch {} --route=demo/worker --city=demo-city" {
 		t.Fatalf("SlingQuery = %q, want %q", ctx.SlingQuery, "dispatch {} --route=demo/worker --city=demo-city")
 	}

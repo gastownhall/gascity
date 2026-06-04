@@ -226,18 +226,21 @@ func renderGastownPromptForPack(t *testing.T, rel, agentName, templateName, rigN
 	}
 
 	ctx := map[string]string{
-		"AgentName":     agentName,
-		"BindingName":   bindingName,
-		"BindingPrefix": bindingPrefix,
-		"CityRoot":      "/city",
-		"DefaultBranch": "main",
-		"IssuePrefix":   "demo",
-		"RigName":       rigName,
-		"RigRoot":       "/repos/" + rigName,
-		"SlingQuery":    "bd ready --metadata-field gc.routed_to=<canonical> --unassigned",
-		"TemplateName":  templateName,
-		"WorkDir":       "/repos/" + rigName,
-		"WorkQuery":     "bd ready",
+		"AgentName":               agentName,
+		"AssignedInProgressQuery": `bd list --include-ephemeral --status in_progress --assignee="$GC_SESSION_ID"; bd list --include-ephemeral --status in_progress --assignee="$GC_SESSION_NAME"; bd list --include-ephemeral --status in_progress --assignee="$GC_ALIAS"`,
+		"AssignedReadyQuery":      "bd ready --include-ephemeral --assignee=<session>",
+		"BindingName":             bindingName,
+		"BindingPrefix":           bindingPrefix,
+		"CityRoot":                "/city",
+		"DefaultBranch":           "main",
+		"IssuePrefix":             "demo",
+		"RigName":                 rigName,
+		"RigRoot":                 "/repos/" + rigName,
+		"RoutedPoolQuery":         "bd ready --metadata-field gc.routed_to=<canonical> --unassigned",
+		"SlingQuery":              "bd ready --metadata-field gc.routed_to=<canonical> --unassigned",
+		"TemplateName":            templateName,
+		"WorkDir":                 "/repos/" + rigName,
+		"WorkQuery":               "bd ready",
 	}
 	var buf bytes.Buffer
 	if err := tmpl.Execute(&buf, ctx); err != nil {
@@ -1660,6 +1663,11 @@ func TestDogAndDigestVaporFormulasHaveNoCompilerRequirement(t *testing.T) {
 			Formula  string            `toml:"formula"`
 			Phase    string            `toml:"phase"`
 			Requires map[string]string `toml:"requires"`
+			Steps    []struct {
+				ID          string   `toml:"id"`
+				Needs       []string `toml:"needs"`
+				Description string   `toml:"description"`
+			} `toml:"steps"`
 		}
 		if _, err := toml.Decode(body, &decoded); err != nil {
 			t.Fatalf("decoding %s: %v", check.rel, err)
@@ -1678,10 +1686,24 @@ func TestDogAndDigestVaporFormulasHaveNoCompilerRequirement(t *testing.T) {
 			"gc bd formula show "+check.formula+" --json",
 			"gc runtime drain-ack",
 		)
+		if strings.Contains(body, "needs =") {
+			t.Errorf("%s vapor formula must not declare child-step needs edges", check.rel)
+		}
+		if strings.Contains(strings.ToLower(body), "close this step") {
+			t.Errorf("%s vapor formula must not instruct workers to close non-materialized steps", check.rel)
+		}
+		if strings.Contains(body, "read the `preflight` bead") {
+			t.Errorf("%s vapor formula must not read a non-materialized preflight bead", check.rel)
+		}
+		for _, step := range decoded.Steps {
+			if len(step.Needs) > 0 {
+				t.Errorf("%s step %s needs = %v; vapor steps are not materialized", check.rel, step.ID, step.Needs)
+			}
+		}
 	}
 }
 
-func TestDogStartupPromptUsesClaimFirstAssignedReadyPlaceholder(t *testing.T) {
+func TestDogStartupPromptUsesSplitClaimFirstQueries(t *testing.T) {
 	dir := exampleDir()
 	checks := []string{
 		"packs/maintenance/agents/dog/prompt.template.md",
@@ -1694,11 +1716,33 @@ func TestDogStartupPromptUsesClaimFirstAssignedReadyPlaceholder(t *testing.T) {
 			t.Fatalf("reading %s: %v", rel, err)
 		}
 		body := string(data)
-		if !strings.Contains(body, "{{ .AssignedReadyQuery }}") {
-			t.Errorf("%s missing AssignedReadyQuery placeholder", rel)
+		dogBody := body
+		if strings.Contains(rel, "template-fragments/propulsion.template.md") {
+			dogBody = sectionBetween(t, body, `{{ define "propulsion-dog" }}`, `{{ end }}`)
 		}
-		if strings.Contains(body, `gc bd ready --assignee="$GC_SESSION_NAME"`) {
+		for _, want := range []string{
+			"{{ .AssignedInProgressQuery }}",
+			"{{ .AssignedReadyQuery }}",
+			"{{ .RoutedPoolQuery }}",
+		} {
+			if !strings.Contains(dogBody, want) {
+				t.Errorf("%s missing split query placeholder %q", rel, want)
+			}
+		}
+		if strings.Contains(dogBody, `gc bd ready --assignee="$GC_SESSION_NAME"`) {
 			t.Errorf("%s hardcodes assigned-ready bd command instead of compatibility-aware placeholder", rel)
+		}
+		if strings.Contains(dogBody, `gc bd list --assignee="$GC_SESSION_NAME" --status=in_progress`) {
+			t.Errorf("%s hardcodes weak in-progress recovery instead of compatibility-aware placeholder", rel)
+		}
+		for _, want := range []string{
+			"For Step 1a/1b candidates",
+			"Assigned work may have no",
+			"For Step 1c candidates",
+		} {
+			if !strings.Contains(dogBody, want) {
+				t.Errorf("%s missing source-aware dog verification text %q", rel, want)
+			}
 		}
 	}
 
@@ -1709,11 +1753,45 @@ func TestDogStartupPromptUsesClaimFirstAssignedReadyPlaceholder(t *testing.T) {
 	assertContainsInOrder(t, string(dogPrompt),
 		"## Startup Protocol",
 		"CLAIM-FIRST INVARIANT",
+		"{{ .AssignedInProgressQuery }}",
 		"{{ .AssignedReadyQuery }}",
-		"{{ .WorkQuery }}",
+		"{{ .RoutedPoolQuery }}",
 		"gc bd update <id> --claim",
 		"gc bd show <id> --json",
 	)
+
+	renderedDogPrompt := renderGastownPromptForPack(t,
+		"packs/maintenance/agents/dog/prompt.template.md",
+		"maintenance/dog",
+		"dog",
+		"demo",
+		"maintenance",
+		"maintenance.",
+	)
+	assertContainsInOrder(t, renderedDogPrompt,
+		"CLAIM-FIRST INVARIANT",
+		"# Step 1a: Check for assigned in-progress work",
+		`bd list --include-ephemeral --status in_progress --assignee="$GC_SESSION_ID"`,
+		`bd list --include-ephemeral --status in_progress --assignee="$GC_SESSION_NAME"`,
+		`bd list --include-ephemeral --status in_progress --assignee="$GC_ALIAS"`,
+		"# Step 1b: If none, check for assigned ready work",
+		"bd ready --include-ephemeral --assignee=<session>",
+		"# Step 1c: If none, find routed pool work",
+		"bd ready --metadata-field gc.routed_to=<canonical> --unassigned",
+		"For Step 1a/1b candidates",
+		"Assigned work may have no",
+		"For Step 1c candidates",
+		"`metadata.gc.routed_to` is `$GC_TEMPLATE`",
+	)
+	if strings.Contains(renderedDogPrompt, "{{ .AssignedReadyQuery }}") {
+		t.Fatal("rendered dog prompt still contains AssignedReadyQuery placeholder")
+	}
+	if strings.Contains(renderedDogPrompt, "{{ .AssignedInProgressQuery }}") {
+		t.Fatal("rendered dog prompt still contains AssignedInProgressQuery placeholder")
+	}
+	if strings.Contains(renderedDogPrompt, "{{ .RoutedPoolQuery }}") {
+		t.Fatal("rendered dog prompt still contains RoutedPoolQuery placeholder")
+	}
 }
 
 func TestGastownRigTargetShellExpressionsRenderForRigAndHQ(t *testing.T) {

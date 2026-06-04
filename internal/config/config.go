@@ -3179,12 +3179,19 @@ func (a *Agent) poolDemandTarget() string {
 }
 
 func standardAssignedWorkQueryScript() string {
+	return standardAssignedInProgressWorkQueryScript() + standardAssignedReadyWorkQueryScript()
+}
+
+func standardAssignedInProgressWorkQueryScript() string {
 	return `for id in "$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"; do ` +
 		`[ -z "$id" ] && continue; ` +
 		`r=$(bd list --include-ephemeral --status in_progress --assignee="$id" --json --limit=1 2>/dev/null); ` +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
-		`done; ` +
-		`for id in "$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"; do ` +
+		`done; `
+}
+
+func standardAssignedReadyWorkQueryScript() string {
+	return `for id in "$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"; do ` +
 		`[ -z "$id" ] && continue; ` +
 		`r=$(bd ready --include-ephemeral --assignee="$id" --json --limit=1 2>/dev/null); ` +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
@@ -3192,6 +3199,10 @@ func standardAssignedWorkQueryScript() string {
 }
 
 func legacyControlAssignedWorkQueryScript() string {
+	return legacyControlAssignedInProgressWorkQueryScript() + legacyControlAssignedReadyWorkQueryScript()
+}
+
+func legacyControlAssignedInProgressWorkQueryScript() string {
 	return `for id in "$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"; do ` +
 		`[ -z "$id" ] && continue; ` +
 		`legacy=""; case "$id" in *control-dispatcher) legacy="${id%control-dispatcher}workflow-control";; esac; ` +
@@ -3200,8 +3211,11 @@ func legacyControlAssignedWorkQueryScript() string {
 		`r=$(bd list --include-ephemeral --status in_progress --assignee="$cand" --json --limit=1 2>/dev/null); ` +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
 		`done; ` +
-		`done; ` +
-		`for id in "$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"; do ` +
+		`done; `
+}
+
+func legacyControlAssignedReadyWorkQueryScript() string {
+	return `for id in "$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"; do ` +
 		`[ -z "$id" ] && continue; ` +
 		`legacy=""; case "$id" in *control-dispatcher) legacy="${id%control-dispatcher}workflow-control";; esac; ` +
 		`for cand in "$id" "$legacy"; do ` +
@@ -3217,6 +3231,20 @@ func poolDemandOriginGateScript() string {
 		`ephemeral|"") ;; ` +
 		`*) exit 0 ;; ` +
 		`esac; `
+}
+
+func routedPoolWorkQueryProbeScript(targetCount int) string {
+	script := poolDemandOriginGateScript() + poolDemandFirstRowFunctionScript()
+	for i := 1; i <= targetCount; i++ {
+		script += fmt.Sprintf(`probe_pool_demand "$%d"; `, i)
+	}
+	return script + `printf "[]"`
+}
+
+func routedPoolWorkQueryCommand(targets ...string) string {
+	args := []string{"sh", "-c", routedPoolWorkQueryProbeScript(len(targets)), "--"}
+	args = append(args, targets...)
+	return shellquote.Join(args)
 }
 
 // EffectiveWorkQuery returns the work query command for this agent.
@@ -3261,20 +3289,56 @@ func (a *Agent) EffectiveWorkQuery() string {
 	target := a.poolDemandTarget()
 	legacyTarget := legacyWorkflowControlQualifiedName(target)
 	if legacyTarget == "" {
-		script := standardAssignedWorkQueryScript() +
-			poolDemandOriginGateScript() +
-			poolDemandFirstRowFunctionScript() +
-			`probe_pool_demand "$1"; ` +
-			`printf "[]"`
+		script := standardAssignedWorkQueryScript() + routedPoolWorkQueryProbeScript(1)
 		return shellquote.Join([]string{"sh", "-c", script, "--", target})
 	}
-	script := legacyControlAssignedWorkQueryScript() +
-		poolDemandOriginGateScript() +
-		poolDemandFirstRowFunctionScript() +
-		`probe_pool_demand "$1"; ` +
-		`probe_pool_demand "$2"; ` +
-		`printf "[]"`
+	script := legacyControlAssignedWorkQueryScript() + routedPoolWorkQueryProbeScript(2)
 	return shellquote.Join([]string{"sh", "-c", script, "--", target, legacyTarget})
+}
+
+// EffectiveAssignedInProgressQuery returns the assigned-in-progress-only command
+// for prompt templates that spell out crash recovery as a separate startup tier.
+// A custom WorkQuery is treated as the caller-owned full discovery contract, so
+// split-tier prompts may run that same custom command in each query slot.
+func (a *Agent) EffectiveAssignedInProgressQuery() string {
+	if a.WorkQuery != "" {
+		return a.WorkQuery
+	}
+	target := a.poolDemandTarget()
+	if legacyWorkflowControlQualifiedName(target) != "" {
+		return shellquote.Join([]string{"sh", "-c", legacyControlAssignedInProgressWorkQueryScript() + `printf "[]"`})
+	}
+	return shellquote.Join([]string{"sh", "-c", standardAssignedInProgressWorkQueryScript() + `printf "[]"`})
+}
+
+// EffectiveAssignedReadyQuery returns the assigned-ready-only command for
+// prompt templates that spell out claim-first startup in separate tiers. A
+// custom WorkQuery is treated as the caller-owned full discovery contract, so
+// split-tier prompts may run that same custom command in each query slot.
+func (a *Agent) EffectiveAssignedReadyQuery() string {
+	if a.WorkQuery != "" {
+		return a.WorkQuery
+	}
+	target := a.poolDemandTarget()
+	if legacyWorkflowControlQualifiedName(target) != "" {
+		return shellquote.Join([]string{"sh", "-c", legacyControlAssignedReadyWorkQueryScript() + `printf "[]"`})
+	}
+	return shellquote.Join([]string{"sh", "-c", standardAssignedReadyWorkQueryScript() + `printf "[]"`})
+}
+
+// EffectiveRoutedPoolQuery returns the routed-pool-only command for prompt
+// templates that spell out claim-first startup in separate tiers. It is the
+// prompt-side counterpart to EffectiveWorkQuery's routed pool tier.
+func (a *Agent) EffectiveRoutedPoolQuery() string {
+	if a.WorkQuery != "" {
+		return a.WorkQuery
+	}
+	target := a.poolDemandTarget()
+	legacyTarget := legacyWorkflowControlQualifiedName(target)
+	if legacyTarget == "" {
+		return routedPoolWorkQueryCommand(target)
+	}
+	return routedPoolWorkQueryCommand(target, legacyTarget)
 }
 
 func legacyWorkflowControlQualifiedName(target string) string {
