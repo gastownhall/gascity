@@ -4072,7 +4072,7 @@ func TestReaperDoesNotTTLCloseNonNudgeBeadWithElapsedExpiresAt(t *testing.T) {
 	bdLog := filepath.Join(t.TempDir(), "bd.log")
 	gcLog := filepath.Join(t.TempDir(), "gc.log")
 
-	// ga-binding is an expired bead that is NOT labelled gc:nudge (e.g. a
+	// ga-binding is an expired bead that is NOT labeled gc:nudge (e.g. a
 	// gc:extmsg-binding session binding). The Step 3 queries INNER JOIN on the
 	// gc:nudge label, so they return no rows for it, and the Step 4 stale path
 	// explicitly excludes any bead carrying expires_at. Only a query lacking
