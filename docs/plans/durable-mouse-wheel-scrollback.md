@@ -139,3 +139,33 @@ planner discipline so the consideration is explicit for an auditor.
 - The portharbour city-local po-vtg2 stopgap removal is a **separate** city-store
   follow-up (HQ bead), not part of this gc-source PR. Once this ships and the pack
   is rolled, file/track the stopgap teardown there.
+
+## Execution status (executor — ga-c4w)
+
+All micro-tasks green; per-task commits on `gc/ga-c4w`. Verified with the
+hermetic `env -i` test wrapper (Makefile `TEST_ENV`) + ICU CGO flags for
+`icu4c@78` (`CGO_CPPFLAGS=-I/opt/homebrew/opt/icu4c@78/include`,
+`CGO_LDFLAGS=-L/opt/homebrew/opt/icu4c@78/lib`).
+
+- [x] T-001 — failing test for interactive mouse-on hints       ✅ green at 19d6a9cdf (`TestSessionCreateHintsEnablesMouse`)
+- [x] T-002 — default interactive sessions to mouse-on          ✅ green at 19d6a9cdf
+- [x] T-003 — guard headless agents stay mouse-off              ✅ green at fe1c2149f (`TestResolveTemplateHeadlessAgentStaysMouseOff`)
+- [x] T-004 — failing test for pack wheel binding + no stopgap  ✅ green at 6bc2d400a (`TestTmuxKeybindingsScrollWheel`)
+- [x] T-005 — append wheel bindings to gastown pack             ✅ green at 6bc2d400a
+- [x] T-006 — build + targeted tests + CHANGELOG                ✅ green at 0745b53d8
+
+**Build/test evidence.** `go build ./...` → Success. `go test ./internal/api/...
+./examples/gastown/...` → 1635 passed. `go test ./cmd/gc/...` → all ga-c4w tests
+pass; two failures (`TestBdRuntimeEnvManagedCityProjectsHostOverride`,
+`TestBdRuntimeEnvForRigInheritedManagedCityProjectsHostOverride`) reproduce
+**identically on base `dd3ee8524`** with none of this bead's changes present —
+pre-existing, unrelated to ga-c4w (managed-Dolt port resolution; the sandbox's
+proxied-server setup does not produce the host-override). The
+`TestProbeDetachedWork_TmuxExitStatus` timeouts were host-env flakes that pass
+under the hermetic `env -i` wrapper.
+
+**Open questions.** Q#2 resolved (executor): `grep -rn sessionCreateHints` → only
+two production callers, both interactive (`session_resolution.go:318` named,
+`session_resolved_config.go:58` provider-adhoc); no headless/pool caller. Q#1
+(`monitor-activity` side-effect) and Q#3 (`WheelDownPane` exit-at-bottom) deferred
+to reviewer / manual verification per plan.
