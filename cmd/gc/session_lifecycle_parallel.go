@@ -825,7 +825,7 @@ func maybeApplyPerDispatchModelOverride(candidate startCandidate, cfg *config.Ci
 
 	// Work on a private copy so a marshal/persist failure never mutates the
 	// session's in-memory overrides.
-	overrides := make(map[string]string, len(existing)+1)
+	overrides := make(map[string]string, len(existing))
 	for k, v := range existing {
 		overrides[k] = v
 	}
