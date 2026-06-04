@@ -142,6 +142,20 @@ func TestSessionCreateHintsEnablesMouse(t *testing.T) {
 	}
 }
 
+// TestSessionResumeHintsEnablesMouse locks ga-c4w finding #2: an interactive
+// (API-created) session that is suspended/resumed or crash-restarted must keep
+// mouse-on so the tmux wheel still drives copy-mode scrollback after resume —
+// symmetric with sessionCreateHints. Without it the wheel works on first create
+// but is silently lost on the first resume. Headless agents are controller-owned
+// and re-resolve MouseOn via cmd/gc/template_resolve.go (mouse-off), so resume
+// mouse-on never reaches a polled agent.
+func TestSessionResumeHintsEnablesMouse(t *testing.T) {
+	hints := sessionResumeHints(&config.ResolvedProvider{Name: "stub"}, "", nil, nil)
+	if !hints.MouseOn {
+		t.Error("sessionResumeHints().MouseOn = false, want true (interactive wheel survives resume, ga-c4w)")
+	}
+}
+
 // TestResolvedSessionConfigForProviderSeedsCityRuntimeEnv is a
 // regression test for upstream gastownhall/gascity#101 (re-opened):
 // session-create paths through the API resolver dropped the
