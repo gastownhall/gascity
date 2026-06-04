@@ -2844,8 +2844,13 @@ func isIgnoredPackRuntimePath(path string) bool {
 	case ".beads", ".cache", ".gc", ".git", "state", "tmp":
 		return true
 	}
+	// Language-ecosystem dependency dirs are skipped at ANY depth. Pack
+	// hashing previously walked into node_modules for packs anchored at
+	// monorepo roots, opening tens of thousands of files into the
+	// supervisor every dirty reload (gastownhall/gascity#2954). Matches
+	// the existing __pycache__ precedent for Python ecosystems.
 	for _, part := range parts {
-		if part == "__pycache__" {
+		if part == "__pycache__" || part == "node_modules" {
 			return true
 		}
 	}

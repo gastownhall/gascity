@@ -91,7 +91,11 @@ func NewEnv(gcBinary, gcHome, runtimeDir string) *Env {
 	// tmuxtest.ConfigureProcessEnv with this same root before building Env.
 	e.vars["TMUX_TMPDIR"] = tmuxTmpDir
 	e.vars["GC_DOLT"] = "skip"
-	e.vars["GC_BEADS"] = "file"
+	beadsProvider := "file"
+	if override := os.Getenv("GC_ACCEPTANCE_BEADS_PROVIDER"); override != "" {
+		beadsProvider = override
+	}
+	e.vars["GC_BEADS"] = beadsProvider
 	e.vars["GC_SESSION"] = "subprocess"
 
 	return e
