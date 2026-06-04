@@ -231,6 +231,10 @@ func processScopeCheck(store beads.Store, bead beads.Bead, opts ProcessOptions) 
 	}
 
 	if isRetryAttemptSubject(subject) {
+		if subject.Status != "closed" {
+			opts.tracef("scope-check bead=%s subject=%s pending status=%s", bead.ID, subject.ID, subject.Status)
+			return ControlResult{}, ErrControlPending
+		}
 		remainingOpen, err := tracePhase(opts, bead.ID, "check-open-members", func() (bool, error) {
 			return hasOpenScopeMembers(store, rootID, scopeRef, bead.ID)
 		})
@@ -242,6 +246,11 @@ func processScopeCheck(store beads.Store, bead beads.Bead, opts ProcessOptions) 
 			snapshot, err := loadScopeSnapshotForControl(store, rootID, scopeRef, body, subject, bead.ID, opts)
 			if err != nil {
 				return ControlResult{}, err
+			}
+			if err := tracePhaseErr(opts, bead.ID, "propagate-metadata", func() error {
+				return snapshot.propagateScopeMemberMetadata(store, body.ID)
+			}); err != nil {
+				return ControlResult{}, fmt.Errorf("%s: propagating scope metadata: %w", bead.ID, err)
 			}
 			outputJSON, err := tracePhase(opts, bead.ID, "resolve-output", func() (string, error) {
 				return snapshot.resolveScopeOutputJSON(subject)

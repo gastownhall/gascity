@@ -18,25 +18,33 @@ more work arrives.
 bd list --assignee="$GC_SESSION_NAME" --status=in_progress
 
 # Step 2: If nothing in-progress, check for assigned ready work
-bd ready --assignee="$GC_SESSION_NAME"
+{{ .AssignedReadyQuery }}
 
 # Step 3: If still nothing, check the routed queue
 gc hook
 
-# Step 4: Claim it
-bd update <id> --claim
+# Step 4: Claim it ATOMICALLY — and STOP if you lost the race.
+# `bd update --claim` is a dolt-layer CAS (assignee IS NULL -> you); a
+# sibling pool session may have claimed this bead first. On a lost claim
+# the CLI exits NON-ZERO (gastownhall/gascity#1052). Never proceed on a
+# failed claim — that is the duplicate-execution bug.
+if ! bd update <id> --claim; then
+  # Lost the race. Do NOT work this bead. Return to the hook for the next
+  # unclaimed item (restart from Step 3); drain if none remains. Do NOT
+  # continue to Step 5/6 for this <id>.
+  gc hook   # or: gc runtime drain-ack  (no valid work left)
+else
+  # Step 5: Verify the claim actually landed on you before doing work. If
+  # assignee != $GC_SESSION_NAME (or routed_to != $GC_TEMPLATE), do NOT
+  # work it — re-enter at Step 3 (gc hook) or drain.
+  bd show <id> --json   # assignee must be $GC_SESSION_NAME; routed_to == $GC_TEMPLATE
 
-# Step 5: Verify the claim before doing work
-bd show <id> --json
-
-# Step 6: Read the bead and check for molecule_id in METADATA
-bd show <id>
+  # Step 6: Read the bead and check for molecule_id in METADATA
+  bd show <id>
+fi
 ```
 
 If nothing is available, run `gc runtime drain-ack` to end your session.
-After claiming, verify `assignee` is `$GC_SESSION_NAME` and
-`metadata.gc.routed_to` is `$GC_TEMPLATE`. If either check fails, do not work
-that bead; run `gc hook` again or drain if no valid work is available.
 
 ## Following Your Formula
 
@@ -85,7 +93,7 @@ the bead description directly.
 
 ## Your Tools
 
-- `bd ready --assignee="$GC_SESSION_NAME"` — find pre-assigned work
+- `{{ .AssignedReadyQuery }}` — find pre-assigned work
 - `gc hook` — find routed pool work through the configured hook
 - `bd update <id> --claim` — claim a work item
 - `bd show <id>` — see details of a work item or step
@@ -97,7 +105,7 @@ the bead description directly.
 
 ## How to Work
 
-1. Find work: `bd list --assignee="$GC_SESSION_NAME" --status=in_progress` or `bd ready --assignee="$GC_SESSION_NAME"` or `gc hook`
+1. Find work: `bd list --assignee="$GC_SESSION_NAME" --status=in_progress` or `{{ .AssignedReadyQuery }}` or `gc hook`
 2. Claim if unclaimed: `bd update <id> --claim`
 3. Verify the claimed bead is assigned to `$GC_SESSION_NAME` and routed to `$GC_TEMPLATE`
 4. **Check for molecule:** `bd show <id>` — look for `molecule_id` in METADATA

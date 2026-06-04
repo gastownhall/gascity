@@ -51,6 +51,72 @@ type waitGlobalListLimitStore struct {
 	beads.Store
 }
 
+func TestWaitNudgePollerKeyFallbackOrder(t *testing.T) {
+	cases := []struct {
+		name string
+		bead beads.Bead
+		want string
+	}{
+		{
+			name: "session id wins over agent name",
+			bead: beads.Bead{
+				ID:       "session-id",
+				Metadata: map[string]string{"agent_name": "agent", "template": "template"},
+			},
+			want: "session-id",
+		},
+		{
+			name: "agent name fallback",
+			bead: beads.Bead{
+				Metadata: map[string]string{"agent_name": "agent", "template": "template", "session_name": "s-test"},
+			},
+			want: "agent",
+		},
+		{
+			name: "alias fallback",
+			bead: beads.Bead{
+				Metadata: map[string]string{"alias": "alias", "agent_name": "agent", "template": "template", "session_name": "s-test"},
+				Title:    "title",
+			},
+			want: "alias",
+		},
+		{
+			name: "agent name fallback after alias",
+			bead: beads.Bead{
+				Metadata: map[string]string{"agent_name": "agent", "template": "template"},
+			},
+			want: "agent",
+		},
+		{
+			name: "template fallback",
+			bead: beads.Bead{
+				Metadata: map[string]string{"template": "template"},
+			},
+			want: "template",
+		},
+		{
+			name: "session name fallback",
+			bead: beads.Bead{
+				Metadata: map[string]string{"session_name": "s-test"},
+				Title:    "title",
+			},
+			want: "s-test",
+		},
+		{
+			name: "title fallback",
+			bead: beads.Bead{Title: "title"},
+			want: "title",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := waitNudgePollerKey(tc.bead); got != tc.want {
+				t.Fatalf("waitNudgePollerKey() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 type waitGlobalListErrorStore struct {
 	beads.Store
 }
@@ -1955,7 +2021,7 @@ func TestDispatchReadyWaitNudges_StartsCodexPoller(t *testing.T) {
 	prev := startNudgePoller
 	startNudgePoller = func(cityPath, agentName, sessionName string) error {
 		called = true
-		if cityPath != dir || agentName != "worker" || sessionName != "worker" {
+		if cityPath != dir || agentName != sessionBead.ID || sessionName != "worker" {
 			t.Fatalf("unexpected poller args city=%q agent=%q session=%q", cityPath, agentName, sessionName)
 		}
 		return nil
@@ -2011,7 +2077,7 @@ func TestDispatchReadyWaitNudges_StartsPiPoller(t *testing.T) {
 	prev := startNudgePoller
 	startNudgePoller = func(cityPath, agentName, sessionName string) error {
 		called = true
-		if cityPath != dir || agentName != "worker" || sessionName != "worker" {
+		if cityPath != dir || agentName != sessionBead.ID || sessionName != "worker" {
 			t.Fatalf("unexpected poller args city=%q agent=%q session=%q", cityPath, agentName, sessionName)
 		}
 		return nil

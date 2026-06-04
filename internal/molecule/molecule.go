@@ -318,6 +318,7 @@ func findExistingAttach(store beads.Store, recipe *formula.Recipe, rootBeadID, a
 			"gc.idempotency_key": key,
 			"gc.root_bead_id":    rootBeadID,
 		},
+		TierMode: beads.TierBoth,
 	})
 	if err != nil {
 		return nil, err
@@ -402,6 +403,7 @@ func existingAttachIDMapping(store beads.Store, recipe *formula.Recipe, rootBead
 	}
 	all, err := store.List(beads.ListQuery{
 		Metadata: map[string]string{"gc.root_bead_id": rootBeadID},
+		TierMode: beads.TierBoth,
 	})
 	if err != nil {
 		return nil, err
@@ -461,7 +463,7 @@ func Instantiate(ctx context.Context, store beads.Store, recipe *formula.Recipe,
 		return nil, fmt.Errorf("recipe %q has no steps", recipe.Name)
 	}
 	if !opts.DeferAssignees && IsGraphApplyEnabled() {
-		if applier, ok := store.(beads.GraphApplyStore); ok {
+		if applier, ok := beads.GraphApplyFor(store); ok {
 			result, err := instantiateViaGraphApply(ctx, applier, recipe, opts)
 			if err == nil {
 				return result, nil
@@ -541,12 +543,19 @@ func Instantiate(ctx context.Context, store beads.Store, recipe *formula.Recipe,
 			if opts.ParentID != "" && step.Metadata["gc.kind"] != "workflow" {
 				b.ParentID = opts.ParentID
 			}
+			if b.Metadata == nil {
+				b.Metadata = make(map[string]string, 4)
+			}
+			if recipe.ContentHash != "" {
+				b.Metadata["gc.formula_hash"] = recipe.ContentHash
+			}
+			if recipe.FormulaSource != "" {
+				b.Metadata["gc.formula_source"] = recipe.FormulaSource
+			}
 			if opts.IdempotencyKey != "" {
-				if b.Metadata == nil {
-					b.Metadata = make(map[string]string, 1)
-				}
 				b.Metadata["idempotency_key"] = opts.IdempotencyKey
 			}
+			stampFormulaVars(vars, &b)
 		} else {
 			// graph.v2 workflows and their retry/Ralph attempt sub-recipes
 			// use step beads as independently routable actionable work, not
@@ -707,7 +716,7 @@ func InstantiateFragment(ctx context.Context, store beads.Store, recipe *formula
 		priorityOverride = clonePriority(root.Priority)
 	}
 	if IsGraphApplyEnabled() {
-		if applier, ok := store.(beads.GraphApplyStore); ok {
+		if applier, ok := beads.GraphApplyFor(store); ok {
 			opts.PriorityOverride = priorityOverride
 			return instantiateFragmentViaGraphApply(ctx, store, applier, recipe, opts)
 		}
@@ -1032,6 +1041,23 @@ func ensureBeadMetadata(b *beads.Bead) {
 	}
 }
 
+const formulaVarMetadataPrefix = "gc.var."
+
+// stampFormulaVars records non-empty formula input vars on the root bead as
+// gc.var.<name> metadata so they are discoverable from the parent alone
+// without traversing sub-step descriptions.
+func stampFormulaVars(vars map[string]string, b *beads.Bead) {
+	if len(vars) == 0 {
+		return
+	}
+	ensureBeadMetadata(b)
+	for k, v := range vars {
+		if v != "" {
+			b.Metadata[formulaVarMetadataPrefix+k] = v
+		}
+	}
+}
+
 // substituteLabels applies variable substitution to each label.
 func substituteLabels(labels []string, vars map[string]string) []string {
 	if len(labels) == 0 {
@@ -1210,6 +1236,7 @@ func trimAttemptSuffix(id, suffix string) (string, bool) {
 func existingLogicalBeadIDIndex(store beads.Store, rootID string) (map[string]string, error) {
 	all, err := store.List(beads.ListQuery{
 		Metadata: map[string]string{"gc.root_bead_id": rootID},
+		TierMode: beads.TierBoth,
 	})
 	if err != nil {
 		return nil, err

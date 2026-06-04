@@ -3542,7 +3542,7 @@ func reconcileExistingAsleepNamedSessionWithRoutedWork(t *testing.T, cfg *config
 
 	woken := reconcileSessionBeadsAtPathWithNamedDemand(
 		context.Background(), cityPath, sessions, dsResult.State, cfgNames, cfg, sp,
-		store, nil, dsResult.AssignedWorkBeads, nil, nil, newDrainTracker(), poolDesired,
+		store, nil, dsResult.AssignedWorkBeads, nil, nil, newDrainTracker(), nil, poolDesired,
 		dsResult.NamedSessionDemand, dsResult.StoreQueryPartial, nil, cfg.EffectiveCityName(),
 		nil, clk, events.Discard, 0, 0, &stdout, &stderr,
 	)
@@ -4691,6 +4691,301 @@ func TestReconcileSessionBeads_RecoveredDrainAckedOrphanCanceledForAssignedWork(
 	}
 	if source, _ := env.sp.GetMeta("orphan", reconcilerDrainAckSourceKey); source != "" {
 		t.Fatalf("%s = %q, want cleared", reconcilerDrainAckSourceKey, source)
+	}
+}
+
+func TestReconcileSessionBeads_ReconcilerNoWakeDrainAckCanceledForAssignedWork(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	env.addDesired("worker", "worker", true)
+	session := env.createSessionBead("worker", "worker")
+	env.markSessionActive(&session)
+	work, err := env.store.Create(beads.Bead{
+		Title:    "assigned work",
+		Type:     "task",
+		Status:   "in_progress",
+		Assignee: session.ID,
+	})
+	if err != nil {
+		t.Fatalf("Create work bead: %v", err)
+	}
+	if err := setReconcilerDrainAckMetadata(env.sp, "worker", &drainState{
+		reason:     "no-wake-reason",
+		generation: 1,
+		ackSet:     true,
+	}); err != nil {
+		t.Fatalf("setReconcilerDrainAckMetadata: %v", err)
+	}
+	env.dt.set(session.ID, &drainState{
+		startedAt:  env.clk.Now().Add(-defaultDrainTimeout),
+		deadline:   env.clk.Now().Add(-time.Second),
+		reason:     "no-wake-reason",
+		generation: 1,
+		ackSet:     true,
+	})
+
+	reconcileSessionBeadsAtPath(
+		context.Background(),
+		"",
+		[]beads.Bead{session},
+		env.desiredState,
+		nil,
+		env.cfg,
+		env.sp,
+		env.store,
+		newDrainOps(env.sp),
+		[]beads.Bead{work},
+		nil,
+		nil,
+		env.dt,
+		map[string]int{"worker": 1},
+		false,
+		nil,
+		"",
+		nil,
+		env.clk,
+		env.rec,
+		0,
+		0,
+		&env.stdout,
+		&env.stderr,
+	)
+
+	if !env.sp.IsRunning("worker") {
+		t.Fatal("assigned-work no-wake drain should be canceled before stopping the running session")
+	}
+	if ds := env.dt.get(session.ID); ds != nil {
+		t.Fatalf("drain = %+v, want canceled", ds)
+	}
+	if ack, _ := env.sp.GetMeta("worker", "GC_DRAIN_ACK"); ack != "" {
+		t.Fatalf("GC_DRAIN_ACK = %q, want cleared", ack)
+	}
+	if source, _ := env.sp.GetMeta("worker", reconcilerDrainAckSourceKey); source != "" {
+		t.Fatalf("%s = %q, want cleared", reconcilerDrainAckSourceKey, source)
+	}
+}
+
+func TestReconcileSessionBeads_RecoveredNoWakeDrainAckCanceledForAssignedWork(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	env.addDesired("worker", "worker", true)
+	session := env.createSessionBead("worker", "worker")
+	env.markSessionActive(&session)
+	work, err := env.store.Create(beads.Bead{
+		Title:    "assigned work",
+		Type:     "task",
+		Status:   "in_progress",
+		Assignee: session.ID,
+	})
+	if err != nil {
+		t.Fatalf("Create work bead: %v", err)
+	}
+	if err := setReconcilerDrainAckMetadata(env.sp, "worker", &drainState{
+		reason:     "no-wake-reason",
+		generation: 1,
+		ackSet:     true,
+	}); err != nil {
+		t.Fatalf("setReconcilerDrainAckMetadata: %v", err)
+	}
+
+	reconcileSessionBeadsAtPath(
+		context.Background(),
+		"",
+		[]beads.Bead{session},
+		env.desiredState,
+		nil,
+		env.cfg,
+		env.sp,
+		env.store,
+		newDrainOps(env.sp),
+		[]beads.Bead{work},
+		nil,
+		nil,
+		env.dt,
+		map[string]int{"worker": 1},
+		false,
+		nil,
+		"",
+		nil,
+		env.clk,
+		env.rec,
+		0,
+		0,
+		&env.stdout,
+		&env.stderr,
+	)
+
+	if !env.sp.IsRunning("worker") {
+		t.Fatal("recovered assigned-work no-wake drain should be canceled before stopping the running session")
+	}
+	if ack, _ := env.sp.GetMeta("worker", "GC_DRAIN_ACK"); ack != "" {
+		t.Fatalf("GC_DRAIN_ACK = %q, want cleared", ack)
+	}
+	if source, _ := env.sp.GetMeta("worker", reconcilerDrainAckSourceKey); source != "" {
+		t.Fatalf("%s = %q, want cleared", reconcilerDrainAckSourceKey, source)
+	}
+}
+
+func TestReconcileSessionBeads_NoWakeDrainAckWithReadyOpenAssignedWorkCancelsDrain(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "other"}}}
+	if err := env.sp.Start(context.Background(), "worker", runtime.Config{}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	session := env.createSessionBead("worker", "worker")
+	env.markSessionActive(&session)
+	work, err := env.store.Create(beads.Bead{
+		Title:    "ready assigned work",
+		Type:     "task",
+		Status:   "open",
+		Assignee: session.ID,
+	})
+	if err != nil {
+		t.Fatalf("Create work bead: %v", err)
+	}
+	if err := setReconcilerDrainAckMetadata(env.sp, "worker", &drainState{
+		reason:     "no-wake-reason",
+		generation: 1,
+		ackSet:     true,
+	}); err != nil {
+		t.Fatalf("setReconcilerDrainAckMetadata: %v", err)
+	}
+	dops := newFakeDrainOps()
+	if err := dops.setDrainAck("worker"); err != nil {
+		t.Fatalf("setDrainAck: %v", err)
+	}
+	env.dt.set(session.ID, &drainState{
+		startedAt:  env.clk.Now().Add(-defaultDrainTimeout),
+		deadline:   env.clk.Now().Add(-time.Second),
+		reason:     "no-wake-reason",
+		generation: 1,
+		ackSet:     true,
+	})
+
+	reconcileSessionBeadsAtPath(
+		context.Background(),
+		"",
+		[]beads.Bead{session},
+		nil,
+		nil,
+		env.cfg,
+		env.sp,
+		env.store,
+		dops,
+		[]beads.Bead{work},
+		nil,
+		nil,
+		env.dt,
+		map[string]int{},
+		false,
+		nil,
+		"",
+		nil,
+		env.clk,
+		env.rec,
+		0,
+		0,
+		&env.stdout,
+		&env.stderr,
+	)
+
+	if !env.sp.IsRunning("worker") {
+		t.Fatal("ready open assigned work should cancel no-wake drain before stopping the running session")
+	}
+	if len(dops.clearDrainCalls) != 1 || dops.clearDrainCalls[0] != "worker" {
+		t.Fatalf("clearDrain calls = %v, want [worker]", dops.clearDrainCalls)
+	}
+	if ds := env.dt.get(session.ID); ds != nil {
+		t.Fatalf("drain = %+v, want canceled", ds)
+	}
+}
+
+func TestReconcileSessionBeads_NoWakeDrainAckWithBlockedOpenAssignedWorkStopsPending(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "other"}}}
+	if err := env.sp.Start(context.Background(), "worker", runtime.Config{}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	session := env.createSessionBead("worker", "worker")
+	env.markSessionActive(&session)
+	blocker, err := env.store.Create(beads.Bead{
+		Title:  "blocking dependency",
+		Type:   "task",
+		Status: "open",
+	})
+	if err != nil {
+		t.Fatalf("Create blocker: %v", err)
+	}
+	work, err := env.store.Create(beads.Bead{
+		Title:    "blocked assigned work",
+		Type:     "task",
+		Status:   "open",
+		Assignee: session.ID,
+	})
+	if err != nil {
+		t.Fatalf("Create work bead: %v", err)
+	}
+	if err := env.store.DepAdd(work.ID, blocker.ID, "blocks"); err != nil {
+		t.Fatalf("DepAdd: %v", err)
+	}
+	if err := setReconcilerDrainAckMetadata(env.sp, "worker", &drainState{
+		reason:     "no-wake-reason",
+		generation: 1,
+		ackSet:     true,
+	}); err != nil {
+		t.Fatalf("setReconcilerDrainAckMetadata: %v", err)
+	}
+	dops := newFakeDrainOps()
+	if err := dops.setDrainAck("worker"); err != nil {
+		t.Fatalf("setDrainAck: %v", err)
+	}
+	env.dt.set(session.ID, &drainState{
+		startedAt:  env.clk.Now().Add(-defaultDrainTimeout),
+		deadline:   env.clk.Now().Add(-time.Second),
+		reason:     "no-wake-reason",
+		generation: 1,
+		ackSet:     true,
+	})
+
+	reconcileSessionBeadsAtPath(
+		context.Background(),
+		"",
+		[]beads.Bead{session},
+		nil,
+		nil,
+		env.cfg,
+		env.sp,
+		env.store,
+		dops,
+		[]beads.Bead{work},
+		nil,
+		nil,
+		env.dt,
+		map[string]int{},
+		false,
+		nil,
+		"",
+		nil,
+		env.clk,
+		env.rec,
+		0,
+		0,
+		&env.stdout,
+		&env.stderr,
+	)
+
+	if len(dops.clearDrainCalls) != 0 {
+		t.Fatalf("clearDrain calls = %v, want no assigned-work cancellation for blocked open work", dops.clearDrainCalls)
+	}
+	if got := env.stdout.String(); strings.Contains(got, "Canceled drain-acked session 'worker'") {
+		t.Fatalf("blocked open work should not cancel no-wake drain, got stdout:\n%s", got)
+	}
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", session.ID, err)
+	}
+	if !isDrainAckStopPending(got) {
+		t.Fatalf("session metadata = %+v, want drain-ack stop-pending", got.Metadata)
 	}
 }
 
@@ -6604,6 +6899,35 @@ func TestReconcileSessionBeads_AttachedSessionNeverRestartedOnConfigDrift(t *tes
 	}
 }
 
+func TestReconcileSessionBeads_ConfigDriftAttachmentErrorDefersLiveDrift(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	env.addRunningWorkerDesiredWithNewConfig()
+	session := env.createSessionBead("worker", "worker")
+	env.setSessionMetadata(&session, map[string]string{
+		"started_config_hash": runtime.CoreFingerprint(runtime.Config{Command: "test-cmd"}),
+	})
+	backing := env.store
+	env.store = &sessionObservationGetErrorStore{
+		Store:     backing,
+		id:        session.ID,
+		remaining: 1,
+		err:       errors.New("attachment observation failed"),
+	}
+
+	env.reconcile([]beads.Bead{session})
+
+	if ds := env.dt.get(session.ID); ds != nil {
+		t.Fatalf("attachment observation error should defer config-drift drain, got %+v", ds)
+	}
+	if !env.sp.IsRunning("worker") {
+		t.Fatal("attachment observation error should keep config-drift session running")
+	}
+	if !strings.Contains(env.stderr.String(), "observing config-drift attachment") {
+		t.Fatalf("stderr = %q, want attachment observation diagnostic", env.stderr.String())
+	}
+}
+
 // The deferred_attached outcome must persist across reconciler cycles:
 // as long as the session stays attached, each cycle skips config-drift restart.
 func TestReconcileSessionBeads_AttachedDeferralPersistsAcrossCycles(t *testing.T) {
@@ -6730,6 +7054,54 @@ func TestReconcileSessionBeads_AttachedSessionCancelsQueuedConfigDriftDrainBefor
 	}
 	if !env.sp.IsRunning("worker") {
 		t.Fatal("attached session should remain running after reconciler-owned drain ack is canceled")
+	}
+}
+
+func TestReconcileSessionBeads_ConfigDriftDrainAckAttachmentErrorDefersStop(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	env.addRunningWorkerDesiredWithNewConfig()
+	session := env.createSessionBead("worker", "worker")
+	env.markSessionActive(&session)
+	env.setSessionMetadata(&session, map[string]string{
+		"started_config_hash": runtime.CoreFingerprint(runtime.Config{Command: "test-cmd"}),
+	})
+	dops := newDrainOps(env.sp)
+
+	env.reconcileWithPoolDesiredAndDrainOps([]beads.Bead{session}, map[string]int{"worker": 1}, dops)
+	if ds := env.dt.get(session.ID); ds == nil || ds.reason != "config-drift" {
+		t.Fatalf("detached config drift should queue a config-drift drain, got %+v", ds)
+	}
+	if ack, _ := env.sp.GetMeta("worker", "GC_DRAIN_ACK"); ack != "1" {
+		t.Fatalf("GC_DRAIN_ACK after queued drain = %q, want 1", ack)
+	}
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", session.ID, err)
+	}
+	backing := env.store
+	env.store = &sessionObservationGetErrorStore{
+		Store:     backing,
+		id:        session.ID,
+		remaining: 1,
+		err:       errors.New("attachment observation failed"),
+	}
+
+	env.clk.Time = env.clk.Now().Add(defaultDrainTimeout + time.Second)
+	env.reconcileWithPoolDesiredAndDrainOps([]beads.Bead{got}, map[string]int{"worker": 1}, dops)
+
+	after, err := backing.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get after reconcile: %v", err)
+	}
+	if isDrainAckStopPending(after) {
+		t.Fatalf("attachment observation error should not mark drain-ack stop pending; metadata=%v", after.Metadata)
+	}
+	if !env.sp.IsRunning("worker") {
+		t.Fatal("attachment observation error should keep config-drift drain-ack session running")
+	}
+	if !strings.Contains(env.stderr.String(), "observing config-drift attachment") {
+		t.Fatalf("stderr = %q, want attachment observation diagnostic", env.stderr.String())
 	}
 }
 
@@ -7491,6 +7863,38 @@ func TestReconcileSessionBeads_MaxSessionAgeFailsClosedOnStoreError(t *testing.T
 	}
 	if !strings.Contains(env.stderr.String(), "simulated transient store failure") {
 		t.Errorf("expected stderr to log the store error; got %q", env.stderr.String())
+	}
+}
+
+func TestSessionHasAwakeAssignedWorkUsesCachedInProgressWispProbe(t *testing.T) {
+	backing := &demandListCountingStore{Store: beads.NewMemStore()}
+	work, err := backing.Create(beads.Bead{
+		Title:     "active wisp work",
+		Type:      "task",
+		Status:    "in_progress",
+		Assignee:  "worker-session",
+		Ephemeral: true,
+	})
+	if err != nil {
+		t.Fatalf("Create active wisp: %v", err)
+	}
+	if err := backing.Update(work.ID, beads.UpdateOpts{Status: stringPtr("in_progress")}); err != nil {
+		t.Fatalf("mark active wisp in progress: %v", err)
+	}
+	cache := beads.NewCachingStoreForTest(backing, nil)
+	if err := cache.PrimeActive(); err != nil {
+		t.Fatalf("PrimeActive: %v", err)
+	}
+
+	has, err := sessionHasAwakeAssignedWorkInStoreByIdentifiers(cache, []string{"worker-session"})
+	if err != nil {
+		t.Fatalf("sessionHasAwakeAssignedWorkInStoreByIdentifiers: %v", err)
+	}
+	if !has {
+		t.Fatalf("sessionHasAwakeAssignedWorkInStoreByIdentifiers = false, want true for %s", work.ID)
+	}
+	if backing.liveInProgressWispLists != 0 {
+		t.Fatalf("live wisp in_progress list calls = %d, want cached wisp probe", backing.liveInProgressWispLists)
 	}
 }
 

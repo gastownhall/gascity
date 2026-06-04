@@ -47,6 +47,40 @@ func TestLoadConfigValidatesRegistrySources(t *testing.T) {
 	}
 }
 
+func TestLoadConfigRejectsWindowsRegistrySources(t *testing.T) {
+	cases := []struct {
+		name    string
+		source  string
+		wantErr string
+	}{
+		{
+			name:    "drive letter",
+			source:  `C:\packs\registry.toml`,
+			wantErr: "registry source uses a Windows drive-letter path",
+		},
+		{
+			name:    "unc",
+			source:  `\\server\share\registry.toml`,
+			wantErr: "registry source uses a UNC path",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			home := t.TempDir()
+			if err := os.MkdirAll(filepath.Dir(ConfigPath(home)), 0o755); err != nil {
+				t.Fatalf("MkdirAll: %v", err)
+			}
+			body := "schema = 1\n\n[[registry]]\nname = \"main\"\nsource = " + tomlQuoteForTest(tc.source) + "\n"
+			if err := os.WriteFile(ConfigPath(home), []byte(body), 0o644); err != nil {
+				t.Fatalf("WriteFile: %v", err)
+			}
+			if _, err := LoadConfig(home); err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("LoadConfig err = %v, want %q", err, tc.wantErr)
+			}
+		})
+	}
+}
+
 func TestAddRegistryWithCacheDoesNotConfigureWhenCacheWriteFails(t *testing.T) {
 	home := t.TempDir()
 	saveEmptyConfigForTest(t, home)
@@ -249,4 +283,8 @@ func saveEmptyConfigForTest(t *testing.T, home string) {
 	if err := SaveConfig(home, Config{}); err != nil {
 		t.Fatalf("SaveConfig(empty): %v", err)
 	}
+}
+
+func tomlQuoteForTest(value string) string {
+	return `"` + strings.ReplaceAll(value, `\`, `\\`) + `"`
 }

@@ -17,12 +17,6 @@ func TestDetectLegacyWorkspaceFields(t *testing.T) {
 		wantHint  string // substring expected in suggested replacement
 	}{
 		{
-			name:      "provider populated",
-			workspace: Workspace{Provider: "claude"},
-			wantField: "workspace.provider",
-			wantHint:  "[agent_defaults] provider",
-		},
-		{
 			name:      "start_command populated",
 			workspace: Workspace{StartCommand: "claude --resume"},
 			wantField: "workspace.start_command",
@@ -80,8 +74,8 @@ func TestIsLegacyWorkspaceFieldWarning(t *testing.T) {
 		InstallAgentHooks: []string{"claude"},
 		GlobalFragments:   []string{"shared"},
 	}}, "city.toml")
-	if len(warnings) != 5 {
-		t.Fatalf("len(warnings) = %d, want 5", len(warnings))
+	if len(warnings) != 4 {
+		t.Fatalf("len(warnings) = %d, want 4", len(warnings))
 	}
 	for _, warning := range warnings {
 		if !IsLegacyWorkspaceFieldWarning(warning) {
@@ -128,11 +122,10 @@ func TestDetectLegacyWorkspaceFields_AllFieldsStableOrder(t *testing.T) {
 		GlobalFragments:   []string{"shared"},
 	}}
 	warnings := DetectLegacyWorkspaceFields(cfg, "city.toml")
-	if len(warnings) != 5 {
-		t.Fatalf("want 5 warnings, got %d: %v", len(warnings), warnings)
+	if len(warnings) != 4 {
+		t.Fatalf("want 4 warnings, got %d: %v", len(warnings), warnings)
 	}
 	expected := []string{
-		"workspace.provider",
 		"workspace.start_command",
 		"workspace.suspended",
 		"workspace.install_agent_hooks",
@@ -145,30 +138,26 @@ func TestDetectLegacyWorkspaceFields_AllFieldsStableOrder(t *testing.T) {
 	}
 }
 
-func TestLoadWithIncludesEmitsNonFatalLegacyWorkspaceWarning(t *testing.T) {
+func TestLoadWithIncludesDoesNotWarnForWorkspaceProvider(t *testing.T) {
 	t.Parallel()
 	fs := fsys.NewFake()
 	fs.Files["/city/city.toml"] = []byte(`
 [workspace]
 name = "legacy-workspace"
 provider = "claude"
+
+[providers.claude]
+base = "builtin:claude"
 `)
 
 	_, prov, err := LoadWithIncludes(fs, "/city/city.toml")
 	if err != nil {
 		t.Fatalf("LoadWithIncludes: %v", err)
 	}
-	var found bool
 	for _, warning := range prov.Warnings {
 		if strings.Contains(warning, "workspace.provider is deprecated:") {
-			found = true
-			if !IsLegacyWorkspaceFieldWarning(warning) {
-				t.Fatalf("legacy workspace warning is not classified as non-fatal: %q", warning)
-			}
+			t.Fatalf("workspace.provider should not be deprecated in explicit-provider model: %v", prov.Warnings)
 		}
-	}
-	if !found {
-		t.Fatalf("missing workspace.provider deprecation warning in %v", prov.Warnings)
 	}
 }
 
@@ -180,6 +169,9 @@ include = ["fragment.toml"]
 
 [workspace]
 name = "legacy-workspace"
+
+[providers.claude]
+base = "builtin:claude"
 `)
 	fs.Files["/city/fragment.toml"] = []byte(`
 [workspace]
@@ -195,7 +187,7 @@ global_fragments = ["shared"]
 		t.Fatalf("LoadWithIncludes: %v", err)
 	}
 
-	for _, field := range []string{"provider", "start_command", "suspended", "install_agent_hooks", "global_fragments"} {
+	for _, field := range []string{"start_command", "suspended", "install_agent_hooks", "global_fragments"} {
 		want := "/city/fragment.toml: workspace." + field + " is deprecated:"
 		if !containsWarningPrefix(prov.Warnings, want) {
 			t.Fatalf("missing fragment-sourced %s warning with prefix %q in %v", field, want, prov.Warnings)

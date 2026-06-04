@@ -21,6 +21,10 @@ type Runner struct {
 	seed    SeedResult
 	rng     *rand.Rand
 
+	// rssReader overrides the default readRSSBytes function for testing.
+	// When nil, readRSSBytes is used.
+	rssReader func() (uint64, bool)
+
 	seedMu    sync.RWMutex
 	resultsMu sync.Mutex
 	results   map[string]*OperationResult // op name → result
@@ -71,9 +75,18 @@ func (r *Runner) Run(ctx context.Context, w io.Writer) (Scorecard, error) {
 	// Start the memory sampler before the workload so its peak captures the
 	// full run, including the hot working set under load.
 	mem := newMemSampler(200 * time.Millisecond)
+	mem.readRSS = r.rssReader
+	if wl.MaxRSSBytes > 0 || wl.MaxRSSGrowthBytesPerSec > 0 {
+		mem.maxRSSBytes = wl.MaxRSSBytes
+		mem.maxRSSGrowthBytesPerSec = wl.MaxRSSGrowthBytesPerSec
+		mem.abortCh = make(chan string, 1)
+	}
 	mem.start()
 
-	var wg sync.WaitGroup
+	var (
+		leakFinding string
+		wg          sync.WaitGroup
+	)
 	for range wl.Concurrency {
 		seedA := r.rng.Uint64()
 		seedB := r.rng.Uint64()
@@ -107,7 +120,7 @@ func (r *Runner) Run(ctx context.Context, w io.Writer) (Scorecard, error) {
 		}(seedA, seedB)
 	}
 
-	// Progress ticker.
+	// Progress ticker; also drains the memory guard abort channel.
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 	start := time.Now()
@@ -115,6 +128,11 @@ progressLoop:
 	for {
 		select {
 		case <-ctx.Done():
+			break progressLoop
+		case finding := <-mem.abortCh:
+			leakFinding = finding
+			fmt.Fprintf(w, "  [LEAK DETECTED] %s — aborting run\n", finding) //nolint:errcheck
+			cancel()
 			break progressLoop
 		case t := <-ticker.C:
 			fmt.Fprintf(w, "  [%s elapsed] ops=%d errors=%d\n", //nolint:errcheck
@@ -149,6 +167,10 @@ progressLoop:
 		int(totalOps.Load()), int(totalErrors.Load()),
 		r.results, throughput, memReport,
 	)
+	if leakFinding != "" {
+		sc.LeakAborted = true
+		sc.LeakFinding = leakFinding
+	}
 
 	fmt.Fprintf(w, "  workload %q done: %d ops in %s, %d errors\n", //nolint:errcheck
 		wl.Name, totalOps.Load(), FormatDuration(dur), totalErrors.Load())
@@ -587,12 +609,32 @@ func opName(op opTag) string {
 	return "unknown"
 }
 
+// memGuardWarmUp is the period after a run starts before the growth-rate
+// watchdog begins checking. This absorbs the initial allocation surge that
+// happens when the store opens and the first batch of ops runs.
+const memGuardWarmUp = 30 * time.Second
+
 // memSampler periodically samples process memory during a workload run and
 // tracks baseline, peak, and steady HeapInuse/RSS plus total bytes allocated.
+// When MaxRSSBytes or MaxRSSGrowthBytesPerSec are set, a breach sends a
+// finding string on abortCh (buffered, capacity 1).
 type memSampler struct {
 	interval time.Duration
 	stopCh   chan struct{}
 	doneCh   chan struct{}
+
+	// readRSS is the RSS reader function. Defaults to readRSSBytes when nil.
+	readRSS func() (uint64, bool)
+
+	// memory guard settings
+	maxRSSBytes             uint64
+	maxRSSGrowthBytesPerSec uint64
+	abortCh                 chan string // non-nil when any guard is active
+
+	// timing state for growth-rate guard
+	startedAt time.Time
+	warmUpAt  time.Time
+	warmUpRSS uint64
 
 	startTotalAlloc uint64
 	report          MemReport
@@ -609,16 +651,25 @@ func newMemSampler(interval time.Duration) *memSampler {
 	}
 }
 
+// rss returns the current RSS using the injected reader or the default.
+func (m *memSampler) rss() (uint64, bool) {
+	if m.readRSS != nil {
+		return m.readRSS()
+	}
+	return readRSSBytes()
+}
+
 // start records the baseline allocation counter and launches the sampling
 // goroutine. The first sample is taken immediately so a fast workload still
 // produces a non-zero peak.
 func (m *memSampler) start() {
+	m.startedAt = time.Now()
 	var ms runtime.MemStats
 	runtime.ReadMemStats(&ms)
 	m.startTotalAlloc = ms.TotalAlloc
 	m.report.HeapInuseBaseline = ms.HeapInuse
 	m.report.HeapInusePeak = ms.HeapInuse
-	if rss, ok := readRSSBytes(); ok {
+	if rss, ok := m.rss(); ok {
 		m.report.RSSBaseline = rss
 		m.report.RSSPeak = rss
 	}
@@ -639,17 +690,64 @@ func (m *memSampler) start() {
 	}()
 }
 
-// sampleOnce updates the running peaks from one observation.
+// sampleOnce updates the running peaks from one observation and checks
+// memory guard conditions, sending a finding to abortCh on breach.
 func (m *memSampler) sampleOnce() {
 	var ms runtime.MemStats
 	runtime.ReadMemStats(&ms)
 	if ms.HeapInuse > m.report.HeapInusePeak {
 		m.report.HeapInusePeak = ms.HeapInuse
 	}
-	if rss, ok := readRSSBytes(); ok && rss > m.report.RSSPeak {
+	rss, rssOK := m.rss()
+	if rssOK && rss > m.report.RSSPeak {
 		m.report.RSSPeak = rss
 	}
 	m.report.Sampled = true
+
+	if m.abortCh == nil || !rssOK {
+		return
+	}
+
+	now := time.Now()
+
+	// Absolute ceiling check.
+	if m.maxRSSBytes > 0 && rss > m.maxRSSBytes {
+		finding := fmt.Sprintf("RSS %s exceeds ceiling %s at T+%s (baseline %s)",
+			FormatBytes(rss), FormatBytes(m.maxRSSBytes),
+			FormatDuration(now.Sub(m.startedAt)),
+			FormatBytes(m.report.RSSBaseline))
+		select {
+		case m.abortCh <- finding:
+		default:
+		}
+		return
+	}
+
+	// Growth-rate check: only active after the warm-up period.
+	if m.maxRSSGrowthBytesPerSec > 0 {
+		// Record the warm-up checkpoint on first sample past the warm-up window.
+		if m.warmUpAt.IsZero() && !m.startedAt.IsZero() && now.Sub(m.startedAt) >= memGuardWarmUp {
+			m.warmUpAt = now
+			m.warmUpRSS = rss
+		}
+		if !m.warmUpAt.IsZero() {
+			elapsed := now.Sub(m.warmUpAt).Seconds()
+			if elapsed > 0 && rss > m.warmUpRSS {
+				growthRate := float64(rss-m.warmUpRSS) / elapsed
+				if growthRate > float64(m.maxRSSGrowthBytesPerSec) {
+					finding := fmt.Sprintf(
+						"RSS growth rate %.1f B/s exceeds limit %s/s at T+%s (warm-up RSS %s, current RSS %s)",
+						growthRate, FormatBytes(m.maxRSSGrowthBytesPerSec),
+						FormatDuration(now.Sub(m.startedAt)),
+						FormatBytes(m.warmUpRSS), FormatBytes(rss))
+					select {
+					case m.abortCh <- finding:
+					default:
+					}
+				}
+			}
+		}
+	}
 }
 
 // stop halts sampling and waits for the sampler goroutine to exit before
@@ -667,7 +765,7 @@ func (m *memSampler) stop() MemReport {
 	if ms.HeapInuse > m.report.HeapInusePeak {
 		m.report.HeapInusePeak = ms.HeapInuse
 	}
-	if rss, ok := readRSSBytes(); ok {
+	if rss, ok := m.rss(); ok {
 		m.report.RSSSteady = rss
 		if rss > m.report.RSSPeak {
 			m.report.RSSPeak = rss
@@ -676,7 +774,15 @@ func (m *memSampler) stop() MemReport {
 	if ms.TotalAlloc >= m.startTotalAlloc {
 		m.report.AllocDelta = ms.TotalAlloc - m.startTotalAlloc
 	}
+	m.report.HeapInuseDelta = heapInuseDelta(m.report.HeapInuseBaseline, m.report.HeapInusePeak)
 	return m.report
+}
+
+func heapInuseDelta(baseline, peak uint64) uint64 {
+	if peak >= baseline {
+		return peak - baseline
+	}
+	return 0
 }
 
 // readRSSBytes reads the resident set size from /proc/self/status (VmRSS).

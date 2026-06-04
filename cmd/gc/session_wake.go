@@ -250,12 +250,17 @@ func cancelSessionDrainForPending(session beads.Bead, sp runtime.Provider, dt *d
 	return cancelSessionDrainIf(session, sp, dt, pendingDrainReasonCancelable)
 }
 
-func cancelOrphanedSessionDrainForAssignedWork(session beads.Bead, sp runtime.Provider, dt *drainTracker) bool {
-	return cancelSessionDrainIf(session, sp, dt, func(reason string) bool {
-		// Only concrete assigned work overrides an orphan drain; generic
-		// work-query and named-demand wakeups intentionally do not.
-		return reason == "orphaned"
-	})
+func assignedWorkDrainReasonCancelable(reason string) bool {
+	switch reason {
+	case "orphaned", "no-wake-reason":
+		return true
+	default:
+		return false
+	}
+}
+
+func cancelSessionDrainForAssignedWork(session beads.Bead, sp runtime.Provider, dt *drainTracker) bool {
+	return cancelSessionDrainIf(session, sp, dt, assignedWorkDrainReasonCancelable)
 }
 
 func cancelSessionConfigDriftDrain(session beads.Bead, sp runtime.Provider, dt *drainTracker) bool {
@@ -371,9 +376,9 @@ func cancelRecoveredReconcilerAckedDrain(session beads.Bead, sp runtime.Provider
 	return true
 }
 
-func cancelRecoveredOrphanedDrainForAssignedWork(session beads.Bead, sp runtime.Provider, name string) bool {
+func cancelRecoveredDrainForAssignedWork(session beads.Bead, sp runtime.Provider, name string) bool {
 	reason, ok := reconcilerDrainAckMatchesSession(session, sp, name)
-	if !ok || reason != "orphaned" {
+	if !ok || !assignedWorkDrainReasonCancelable(reason) {
 		return false
 	}
 	_ = clearReconcilerDrainAckMetadata(sp, name)
@@ -497,8 +502,8 @@ func advanceSessionDrainsWithSessionsTraced(
 		if eval, ok := wakeEvals[session.ID]; ok &&
 			eval.Reason == "assigned-work" &&
 			containsWakeReason(eval.Reasons, WakeWork) &&
-			ds.reason == "orphaned" {
-			if cancelOrphanedSessionDrainForAssignedWork(*session, sp, dt) {
+			assignedWorkDrainReasonCancelable(ds.reason) {
+			if cancelSessionDrainForAssignedWork(*session, sp, dt) {
 				if trace != nil {
 					trace.recordDecision("reconciler.drain.cancel", normalizedSessionTemplate(*session, cfg), name, ds.reason, "cancel_assigned_work", nil, nil, "")
 				}

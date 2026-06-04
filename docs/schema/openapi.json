@@ -869,6 +869,9 @@
               "null"
             ]
           },
+          "no_history": {
+            "type": "boolean"
+          },
           "parent": {
             "type": "string"
           },
@@ -1095,6 +1098,54 @@
             "type": "string"
           }
         },
+        "type": "object"
+      },
+      "BeadWorktreeReapSkippedPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "bead_id": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "rig": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "bead_id",
+          "path",
+          "rig",
+          "reason"
+        ],
+        "type": "object"
+      },
+      "BeadWorktreeReapedPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "bead_id": {
+            "type": "string"
+          },
+          "branch": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "rig": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "bead_id",
+          "path",
+          "rig",
+          "branch"
+        ],
         "type": "object"
       },
       "BeadsDiagnostic": {
@@ -2095,6 +2146,12 @@
             "$ref": "#/components/schemas/BeadEventPayload"
           },
           {
+            "$ref": "#/components/schemas/BeadWorktreeReapSkippedPayload"
+          },
+          {
+            "$ref": "#/components/schemas/BeadWorktreeReapedPayload"
+          },
+          {
             "$ref": "#/components/schemas/BoundEventPayload"
           },
           {
@@ -2150,6 +2207,12 @@
           },
           {
             "$ref": "#/components/schemas/SessionSubmitSucceededPayload"
+          },
+          {
+            "$ref": "#/components/schemas/StoreDiskCriticalPayload"
+          },
+          {
+            "$ref": "#/components/schemas/StoreDiskWarnPayload"
           },
           {
             "$ref": "#/components/schemas/StoreMaintenanceDonePayload"
@@ -7260,6 +7323,55 @@
         ],
         "type": "object"
       },
+      "StoreDiskCriticalPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "data_dir": {
+            "type": "string"
+          },
+          "floor_bytes": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "free_bytes": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "free_bytes",
+          "floor_bytes",
+          "data_dir"
+        ],
+        "type": "object"
+      },
+      "StoreDiskWarnPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "data_dir": {
+            "type": "string"
+          },
+          "floor_bytes": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "free_bytes": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "warn_bytes": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "free_bytes",
+          "warn_bytes",
+          "floor_bytes",
+          "data_dir"
+        ],
+        "type": "object"
+      },
       "StoreMaintenanceDonePayload": {
         "additionalProperties": false,
         "properties": {
@@ -7603,6 +7715,8 @@
             "bead.created": "#/components/schemas/TypedEventStreamEnvelopeBeadCreated",
             "bead.deleted": "#/components/schemas/TypedEventStreamEnvelopeBeadDeleted",
             "bead.updated": "#/components/schemas/TypedEventStreamEnvelopeBeadUpdated",
+            "bead.worktree.reap_skipped": "#/components/schemas/TypedEventStreamEnvelopeBeadWorktreeReapSkipped",
+            "bead.worktree.reaped": "#/components/schemas/TypedEventStreamEnvelopeBeadWorktreeReaped",
             "city.created": "#/components/schemas/TypedEventStreamEnvelopeCityCreated",
             "city.resumed": "#/components/schemas/TypedEventStreamEnvelopeCityResumed",
             "city.suspended": "#/components/schemas/TypedEventStreamEnvelopeCitySuspended",
@@ -7619,6 +7733,8 @@
             "extmsg.inbound": "#/components/schemas/TypedEventStreamEnvelopeExtmsgInbound",
             "extmsg.outbound": "#/components/schemas/TypedEventStreamEnvelopeExtmsgOutbound",
             "extmsg.unbound": "#/components/schemas/TypedEventStreamEnvelopeExtmsgUnbound",
+            "gc.store.disk_critical": "#/components/schemas/TypedEventStreamEnvelopeGcStoreDiskCritical",
+            "gc.store.disk_warn": "#/components/schemas/TypedEventStreamEnvelopeGcStoreDiskWarn",
             "gc.store.maintenance.done": "#/components/schemas/TypedEventStreamEnvelopeGcStoreMaintenanceDone",
             "gc.store.maintenance.failed": "#/components/schemas/TypedEventStreamEnvelopeGcStoreMaintenanceFailed",
             "mail.archived": "#/components/schemas/TypedEventStreamEnvelopeMailArchived",
@@ -7640,6 +7756,7 @@
             "request.result.session.create": "#/components/schemas/TypedEventStreamEnvelopeRequestResultSessionCreate",
             "request.result.session.message": "#/components/schemas/TypedEventStreamEnvelopeRequestResultSessionMessage",
             "request.result.session.submit": "#/components/schemas/TypedEventStreamEnvelopeRequestResultSessionSubmit",
+            "session.cold_start_timeout": "#/components/schemas/TypedEventStreamEnvelopeSessionColdStartTimeout",
             "session.crashed": "#/components/schemas/TypedEventStreamEnvelopeSessionCrashed",
             "session.drain_acked_with_assigned_work": "#/components/schemas/TypedEventStreamEnvelopeSessionDrainAckedWithAssignedWork",
             "session.draining": "#/components/schemas/TypedEventStreamEnvelopeSessionDraining",
@@ -7672,6 +7789,12 @@
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeBeadUpdated"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeBeadWorktreeReapSkipped"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeBeadWorktreeReaped"
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeCityCreated"
@@ -7720,6 +7843,12 @@
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeExtmsgUnbound"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeGcStoreDiskCritical"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeGcStoreDiskWarn"
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeGcStoreMaintenanceDone"
@@ -7783,6 +7912,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeRequestResultSessionSubmit"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeSessionColdStartTimeout"
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeSessionCrashed"
@@ -8007,6 +8139,90 @@
           "payload"
         ],
         "title": "TypedEventStreamEnvelope bead.updated",
+        "type": "object"
+      },
+      "TypedEventStreamEnvelopeBeadWorktreeReapSkipped": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/BeadWorktreeReapSkippedPayload"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "bead.worktree.reap_skipped",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope bead.worktree.reap_skipped",
+        "type": "object"
+      },
+      "TypedEventStreamEnvelopeBeadWorktreeReaped": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/BeadWorktreeReapedPayload"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "bead.worktree.reaped",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope bead.worktree.reaped",
         "type": "object"
       },
       "TypedEventStreamEnvelopeCityCreated": {
@@ -8384,10 +8600,13 @@
                 "session.stranded",
                 "session.reset_stalled",
                 "session.work_query_failed",
+                "session.cold_start_timeout",
                 "bead.created",
                 "bead.closed",
                 "bead.deleted",
                 "bead.updated",
+                "bead.worktree.reaped",
+                "bead.worktree.reap_skipped",
                 "mail.sent",
                 "mail.read",
                 "mail.archived",
@@ -8427,6 +8646,8 @@
                 "events.rotated",
                 "gc.store.maintenance.done",
                 "gc.store.maintenance.failed",
+                "gc.store.disk_warn",
+                "gc.store.disk_critical",
                 "pg.credential_resolved"
               ]
             },
@@ -8780,6 +9001,90 @@
           "payload"
         ],
         "title": "TypedEventStreamEnvelope extmsg.unbound",
+        "type": "object"
+      },
+      "TypedEventStreamEnvelopeGcStoreDiskCritical": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/StoreDiskCriticalPayload"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "gc.store.disk_critical",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope gc.store.disk_critical",
+        "type": "object"
+      },
+      "TypedEventStreamEnvelopeGcStoreDiskWarn": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/StoreDiskWarnPayload"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "gc.store.disk_warn",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope gc.store.disk_warn",
         "type": "object"
       },
       "TypedEventStreamEnvelopeGcStoreMaintenanceDone": {
@@ -9664,6 +9969,48 @@
         "title": "TypedEventStreamEnvelope request.result.session.submit",
         "type": "object"
       },
+      "TypedEventStreamEnvelopeSessionColdStartTimeout": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/NoPayload"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "session.cold_start_timeout",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope session.cold_start_timeout",
+        "type": "object"
+      },
       "TypedEventStreamEnvelopeSessionCrashed": {
         "additionalProperties": false,
         "properties": {
@@ -10386,6 +10733,8 @@
             "bead.created": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadCreated",
             "bead.deleted": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadDeleted",
             "bead.updated": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadUpdated",
+            "bead.worktree.reap_skipped": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadWorktreeReapSkipped",
+            "bead.worktree.reaped": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadWorktreeReaped",
             "city.created": "#/components/schemas/TypedTaggedEventStreamEnvelopeCityCreated",
             "city.resumed": "#/components/schemas/TypedTaggedEventStreamEnvelopeCityResumed",
             "city.suspended": "#/components/schemas/TypedTaggedEventStreamEnvelopeCitySuspended",
@@ -10402,6 +10751,8 @@
             "extmsg.inbound": "#/components/schemas/TypedTaggedEventStreamEnvelopeExtmsgInbound",
             "extmsg.outbound": "#/components/schemas/TypedTaggedEventStreamEnvelopeExtmsgOutbound",
             "extmsg.unbound": "#/components/schemas/TypedTaggedEventStreamEnvelopeExtmsgUnbound",
+            "gc.store.disk_critical": "#/components/schemas/TypedTaggedEventStreamEnvelopeGcStoreDiskCritical",
+            "gc.store.disk_warn": "#/components/schemas/TypedTaggedEventStreamEnvelopeGcStoreDiskWarn",
             "gc.store.maintenance.done": "#/components/schemas/TypedTaggedEventStreamEnvelopeGcStoreMaintenanceDone",
             "gc.store.maintenance.failed": "#/components/schemas/TypedTaggedEventStreamEnvelopeGcStoreMaintenanceFailed",
             "mail.archived": "#/components/schemas/TypedTaggedEventStreamEnvelopeMailArchived",
@@ -10423,6 +10774,7 @@
             "request.result.session.create": "#/components/schemas/TypedTaggedEventStreamEnvelopeRequestResultSessionCreate",
             "request.result.session.message": "#/components/schemas/TypedTaggedEventStreamEnvelopeRequestResultSessionMessage",
             "request.result.session.submit": "#/components/schemas/TypedTaggedEventStreamEnvelopeRequestResultSessionSubmit",
+            "session.cold_start_timeout": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionColdStartTimeout",
             "session.crashed": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionCrashed",
             "session.drain_acked_with_assigned_work": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionDrainAckedWithAssignedWork",
             "session.draining": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionDraining",
@@ -10455,6 +10807,12 @@
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadUpdated"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadWorktreeReapSkipped"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadWorktreeReaped"
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeCityCreated"
@@ -10503,6 +10861,12 @@
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeExtmsgUnbound"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeGcStoreDiskCritical"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeGcStoreDiskWarn"
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeGcStoreMaintenanceDone"
@@ -10566,6 +10930,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeRequestResultSessionSubmit"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionColdStartTimeout"
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionCrashed"
@@ -10806,6 +11173,98 @@
           "city"
         ],
         "title": "TypedTaggedEventStreamEnvelope bead.updated",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopeBeadWorktreeReapSkipped": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/BeadWorktreeReapSkippedPayload"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "bead.worktree.reap_skipped",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope bead.worktree.reap_skipped",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopeBeadWorktreeReaped": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/BeadWorktreeReapedPayload"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "bead.worktree.reaped",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope bead.worktree.reaped",
         "type": "object"
       },
       "TypedTaggedEventStreamEnvelopeCityCreated": {
@@ -11218,10 +11677,13 @@
                 "session.stranded",
                 "session.reset_stalled",
                 "session.work_query_failed",
+                "session.cold_start_timeout",
                 "bead.created",
                 "bead.closed",
                 "bead.deleted",
                 "bead.updated",
+                "bead.worktree.reaped",
+                "bead.worktree.reap_skipped",
                 "mail.sent",
                 "mail.read",
                 "mail.archived",
@@ -11261,6 +11723,8 @@
                 "events.rotated",
                 "gc.store.maintenance.done",
                 "gc.store.maintenance.failed",
+                "gc.store.disk_warn",
+                "gc.store.disk_critical",
                 "pg.credential_resolved"
               ]
             },
@@ -11647,6 +12111,98 @@
           "city"
         ],
         "title": "TypedTaggedEventStreamEnvelope extmsg.unbound",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopeGcStoreDiskCritical": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/StoreDiskCriticalPayload"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "gc.store.disk_critical",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope gc.store.disk_critical",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopeGcStoreDiskWarn": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/StoreDiskWarnPayload"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "gc.store.disk_warn",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope gc.store.disk_warn",
         "type": "object"
       },
       "TypedTaggedEventStreamEnvelopeGcStoreMaintenanceDone": {
@@ -12613,6 +13169,52 @@
           "city"
         ],
         "title": "TypedTaggedEventStreamEnvelope request.result.session.submit",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopeSessionColdStartTimeout": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/NoPayload"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "session.cold_start_timeout",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope session.cold_start_timeout",
         "type": "object"
       },
       "TypedTaggedEventStreamEnvelopeSessionCrashed": {

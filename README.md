@@ -6,6 +6,7 @@
 
 <p align="center">
   <a href="https://github.com/gastownhall/gascity/actions/workflows/ci.yml?query=branch%3Amain"><img src="https://img.shields.io/github/actions/workflow/status/gastownhall/gascity/ci.yml?branch=main&label=Build&style=for-the-badge" alt="Build status"></a>
+  <a href="https://docs.gascityhall.com"><img src="https://img.shields.io/badge/Docs-latest-c9a84c.svg?style=for-the-badge" alt="Documentation"></a>
   <a href="https://github.com/gastownhall/gascity/releases"><img src="https://img.shields.io/github/v/release/gastownhall/gascity?include_prereleases&style=for-the-badge" alt="GitHub release"></a>
   <a href="https://discord.gg/xHpUGUzZp2"><img src="https://img.shields.io/discord/1462817445562814505?label=Discord&logo=discord&logoColor=white&color=5865F2&style=for-the-badge" alt="Discord"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg?style=for-the-badge" alt="MIT License"></a>
@@ -78,7 +79,9 @@ brew install gastownhall/gascity/gascity
 gc version
 ```
 
-Or build from source (requires `make` and Go 1.25+):
+Or build from source (requires `make`, Go 1.25+, and ICU for a transitive Dolt
+CGO dependency — `brew install icu4c` on macOS, `apt install libicu-dev` on
+Linux; on macOS the Makefile auto-detects the keg-only `icu4c` paths):
 
 ```bash
 make install
@@ -100,6 +103,8 @@ For the longer walkthrough, start with
 [Tutorial 01](docs/tutorials/01-cities-and-rigs.md).
 
 ## Documentation
+
+📖 **Read the docs online: [docs.gascityhall.com](https://docs.gascityhall.com)**
 
 The docs now use a Mintlify structure rooted in [`docs/`](docs/README.md).
 

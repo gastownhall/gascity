@@ -105,7 +105,8 @@ source = "../code-review"
 ```
 
 Local imports use a path relative to the importing pack. Remote imports use
-`source` plus an optional `version` constraint:
+`source` plus an optional `version` constraint. For GitHub-hosted packs below a
+repository root, prefer the same `/tree/<ref>/<path>` URL a browser can open:
 
 ```toml
 [imports.gastown]

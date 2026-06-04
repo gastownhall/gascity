@@ -376,10 +376,41 @@ func buildDesiredStateWithSessionBeads(
 	// Pre-compute suspended rig paths.
 	suspendedRigPaths := buildSuspendedRigPaths(cfg)
 
+	// Collect all open session beads from all stores to correctly count
+	// running sessions for each pool. A partial/failed collection is logged,
+	// not swallowed: undercounting running sessions can misclassify a pool as
+	// cold and trigger a spurious scale-from-zero probe.
+	allOpenSessionBeads, openSessionBeadsErr := collectAllOpenSessionBeads(cfg, store, rigStores, suspendedRigPaths)
+	if openSessionBeadsErr != nil {
+		fmt.Fprintf(stderr, "collectAllOpenSessionBeads: PARTIAL — %v (cold-pool detection may undercount running sessions)\n", openSessionBeadsErr) //nolint:errcheck
+	}
+
 	desired := make(map[string]TemplateParams)
 	var pendingPools []poolEvalWork
 	var defaultScaleTargets []defaultScaleCheckTarget
 	var defaultNamedScaleTargets []defaultScaleCheckTarget
+	// coldWakeTemplates marks pool templates that received a cold-pool wake
+	// probe (FR-S0.1). Their default-probe demand is clamped to 1 in the merge
+	// below so the probe wakes a cold pool from zero without overriding the
+	// pool's custom scale_check count.
+	coldWakeTemplates := map[string]bool{}
+	// activeStores is the set of stores a cold custom-scale_check pool is probed
+	// against (city + every non-suspended rig store), so routed demand a sleeping
+	// rig pool can't see locally — e.g. work queued in the city store — still
+	// wakes it. Only consulted for the clamped cold-wake probe.
+	type activeStore struct {
+		store beads.Store
+		ref   string
+	}
+	activeStores := []activeStore{{store: store, ref: "city"}}
+	for _, rig := range cfg.Rigs {
+		if suspendedRigPaths[filepath.Clean(rig.Path)] {
+			continue
+		}
+		if s, ok := rigStores[rig.Name]; ok {
+			activeStores = append(activeStores, activeStore{store: s, ref: rig.Name})
+		}
+	}
 
 	for i := range cfg.Agents {
 		if cfg.Agents[i].Suspended {
@@ -393,7 +424,7 @@ func buildDesiredStateWithSessionBeads(
 			}
 		}
 
-		sp := scaleParamsFor(&cfg.Agents[i])
+		sp := scaleParamsForBeads(&cfg.Agents[i], cfg.Beads)
 		// Expand {{.Rig}}/{{.AgentBase}} before the scale_check enters the
 		// controller probe pool so rig-scoped agents query their own rig.
 		sp.Check = expandAgentCommandTemplate(cityPath, cityName, &cfg.Agents[i], cfg.Rigs, "scale_check", sp.Check, stderr)
@@ -401,6 +432,34 @@ func buildDesiredStateWithSessionBeads(
 		if !cfg.Agents[i].SupportsGenericEphemeralSessions() {
 			continue
 		}
+
+		hasCustomScaleCheck := strings.TrimSpace(cfg.Agents[i].ScaleCheck) != ""
+		template := cfg.Agents[i].QualifiedName()
+		runningSessions := 0
+		for _, sb := range allOpenSessionBeads {
+			if isPoolManagedSessionBead(sb) {
+				// Match the qualified template only. allOpenSessionBeads is
+				// aggregated across the city + every rig store, and pool session
+				// beads store the qualified name (agent.QualifiedName(), see
+				// session_sleep.go). Also matching the unqualified base name would
+				// let a same-base-name pool in another rig (e.g. rigB/planner)
+				// inflate this rig's count and wrongly suppress its cold-wake probe.
+				if sb.Metadata["template"] == template {
+					runningSessions++
+				}
+			}
+		}
+
+		// Cold-pool wake probe (FR-S0.1): a pool with a custom scale_check that
+		// returns 0 while it has zero running sessions and min=0 would never wake
+		// to discover routed demand it can't see while asleep. For that case we
+		// probe every active store and clamp the result to 1 in the merge below,
+		// so the pool wakes from zero without the probe overriding the custom
+		// check's count. Pools without a custom scale_check use their own-store
+		// default probe (authoritative count; a missing rig store reports
+		// zero/partial), so they need no cold-specific handling.
+		isCold := runningSessions == 0 && cfg.Agents[i].EffectiveMinActiveSessions() == 0
+
 		if backsNamedSession {
 			rigName := configuredRigName(cityPath, &cfg.Agents[i], cfg.Rigs)
 			if rigName != "" && suspendedRigPaths[filepath.Clean(rigRootForName(rigName, cfg.Rigs))] {
@@ -412,9 +471,14 @@ func buildDesiredStateWithSessionBeads(
 			// routed-work scale_check feeds named demand separately so it does
 			// not create a parallel generic worker for the same backing template.
 			poolDir := agentCommandDir(cityPath, &cfg.Agents[i], cfg.Rigs)
-			if store != nil && strings.TrimSpace(cfg.Agents[i].ScaleCheck) == "" {
+			if store != nil && !hasCustomScaleCheck {
 				defaultNamedScaleTargets = append(defaultNamedScaleTargets, defaultScaleCheckTargetForAgent(cityPath, cfg, &cfg.Agents[i], store, rigStores))
 				continue
+			}
+			if store != nil && isCold {
+				for _, source := range activeStores {
+					defaultNamedScaleTargets = append(defaultNamedScaleTargets, defaultScaleCheckTarget{template: template, store: source.store, storeKey: source.ref})
+				}
 			}
 			pendingPools = append(pendingPools, poolEvalWork{agentIdx: i, sp: sp, poolDir: poolDir, newDemand: store != nil})
 			continue
@@ -428,9 +492,15 @@ func buildDesiredStateWithSessionBeads(
 		// them as desired counts; bead-backed mode uses them as authoritative
 		// new unassigned demand while assigned work drives resume requests.
 		poolDir := agentCommandDir(cityPath, &cfg.Agents[i], cfg.Rigs)
-		if store != nil && strings.TrimSpace(cfg.Agents[i].ScaleCheck) == "" {
+		if store != nil && !hasCustomScaleCheck {
 			defaultScaleTargets = append(defaultScaleTargets, defaultScaleCheckTargetForAgent(cityPath, cfg, &cfg.Agents[i], store, rigStores))
 			continue
+		}
+		if store != nil && isCold {
+			for _, source := range activeStores {
+				defaultScaleTargets = append(defaultScaleTargets, defaultScaleCheckTarget{template: template, store: source.store, storeKey: source.ref})
+			}
+			coldWakeTemplates[template] = true
 		}
 		env, err := controllerQueryRuntimeEnv(cityPath, cfg, &cfg.Agents[i])
 		if err != nil {
@@ -488,8 +558,19 @@ func buildDesiredStateWithSessionBeads(
 				fmt.Fprintf(stderr, "buildDesiredState: %v (counts above may be a partial of one demand source)\n", err) //nolint:errcheck
 			}
 			poolScaleCheckPartialTemplates = mergeScaleCheckPartialTemplates(poolScaleCheckPartialTemplates, partialTemplates)
+			if scaleCheckCounts == nil {
+				scaleCheckCounts = make(map[string]int)
+			}
 			for template, count := range defaultCounts {
-				scaleCheckCounts[template] = count
+				// A cold-pool wake probe only wakes the pool from zero; clamp its
+				// contribution to 1 so it never overrides a custom scale_check's
+				// authoritative count for the same template.
+				if coldWakeTemplates[template] && count > 1 {
+					count = 1
+				}
+				if count > scaleCheckCounts[template] {
+					scaleCheckCounts[template] = count
+				}
 			}
 		}
 		if len(defaultNamedScaleTargets) > 0 {
@@ -670,6 +751,70 @@ func buildSuspendedRigPaths(cfg *config.City) map[string]bool {
 	return suspendedRigPaths
 }
 
+func collectAllOpenSessionBeads(
+	cfg *config.City,
+	cityStore beads.Store,
+	rigStores map[string]beads.Store,
+	suspendedRigPaths map[string]bool,
+) ([]beads.Bead, error) {
+	// Use CachingStore-wrapped stores if available.
+	type workStore struct {
+		store beads.Store
+		ref   string
+	}
+	stores := []workStore{{store: cityStore, ref: "city"}}
+	for _, rig := range cfg.Rigs {
+		if suspendedRigPaths[filepath.Clean(rig.Path)] {
+			continue
+		}
+		if s, ok := rigStores[rig.Name]; ok {
+			stores = append(stores, workStore{store: s, ref: rig.Name})
+		}
+	}
+
+	type storeResult struct {
+		beads []beads.Bead
+		err   error
+	}
+	results := make([]storeResult, len(stores))
+	var wg sync.WaitGroup
+	for idx, source := range stores {
+		idx, source := idx, source
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			sessions, err := session.ListAllSessionBeads(source.store, beads.ListQuery{})
+			results[idx] = storeResult{beads: sessions, err: err}
+		}()
+	}
+	wg.Wait()
+
+	var allBeads []beads.Bead
+	var errs []error
+	for _, r := range results {
+		if r.err != nil {
+			errs = append(errs, r.err)
+			if beads.IsPartialResult(r.err) {
+				for _, b := range r.beads {
+					if b.Status != "closed" {
+						allBeads = append(allBeads, b)
+					}
+				}
+			}
+			continue
+		}
+		for _, b := range r.beads {
+			if b.Status != "closed" {
+				allBeads = append(allBeads, b)
+			}
+		}
+	}
+	if len(errs) > 0 {
+		return allBeads, errors.Join(errs...)
+	}
+	return allBeads, nil
+}
+
 func cloneDesiredState(src map[string]TemplateParams) map[string]TemplateParams {
 	if len(src) == 0 {
 		return nil
@@ -787,6 +932,24 @@ func collectAssignedWorkBeadsWithStores(
 				errs = append(errs, fmt.Errorf("List(in_progress): %w", err))
 				if beads.IsPartialResult(err) && len(inProgress) > 0 {
 					appendInProgressWorkUnique(cfg, &result, &resultStores, &resultStoreRefs, inProgress, seen, source.store, source.ref)
+				}
+			}
+			// Open pool-routed beads that still carry an assignee. These are
+			// invisible to the in-progress pass (status is "open") and to the
+			// ready-by-assignee pass (the assignee is a dead session's
+			// long-form id, not enumerated by readyAssignedWorkAssignees).
+			// Without this pass, graph.v2 step beads orphaned by a session
+			// drain stay assigned forever and releaseOrphanedPoolAssignments
+			// never sees them — pool demand stays at 0 and the workflow stalls
+			// (issue #2793). The release loop further gates each bead on
+			// openSessionOwnsWork / liveOpenSessionAssignmentExists, so
+			// live-session step beads in the same range are skipped untouched.
+			if openRouted, err := listBothTiersForControllerDemand(source.store, beads.ListQuery{Status: "open"}); err == nil {
+				appendOpenRoutedWorkUnique(&result, &resultStores, &resultStoreRefs, openRouted, seen, source.store, source.ref)
+			} else {
+				errs = append(errs, fmt.Errorf("List(open): %w", err))
+				if beads.IsPartialResult(err) && len(openRouted) > 0 {
+					appendOpenRoutedWorkUnique(&result, &resultStores, &resultStoreRefs, openRouted, seen, source.store, source.ref)
 				}
 			}
 			results[idx] = storeAssignedWorkResult{beads: result, stores: resultStores, storeRefs: resultStoreRefs, errs: errs}
@@ -1022,6 +1185,7 @@ func defaultScaleCheckCounts(targets []defaultScaleCheckTarget) (map[string]int,
 		// only if a task-shaped routed bead also happens to carry the
 		// flag) is counted exactly once per template.
 		counted := make(map[string]struct{})
+		liveReader := beads.HandlesFor(group.store).Live
 
 		// Source 1: Ready()/CachedReady() iteration. Surfaces actionable
 		// work (task, etc.) from both durable and ephemeral tiers matched
@@ -1071,8 +1235,10 @@ func defaultScaleCheckCounts(targets []defaultScaleCheckTarget) (map[string]int,
 		// otherwise stretch demand observation by an unbounded number of
 		// reconcile ticks. Mirrors openSessionBeadExists in
 		// adoption_barrier.go, which uses Live: true for the same
-		// cross-process freshness reason.
-		demand, demandErr := group.store.List(beads.ListQuery{
+		// cross-process freshness reason. Dependency checks below use the
+		// same live reader so blocked pool-order wisps do not create pool
+		// sessions while sibling processes are still mutating the graph.
+		demand, demandErr := liveReader.List(beads.ListQuery{
 			Status:   "open",
 			Metadata: poolDemandMetadataPair(),
 			Live:     true,
@@ -1097,6 +1263,15 @@ func defaultScaleCheckCounts(targets []defaultScaleCheckTarget) (map[string]int,
 			if _, ok := group.templates[template]; !ok {
 				continue
 			}
+			depsReady, depErr := poolDemandDependenciesReady(liveReader, b.ID)
+			if depErr != nil {
+				errs = append(errs, fmt.Errorf("default scale_check %s template=%s bead=%s: dependencies: %w", key, template, b.ID, depErr))
+				partialTemplates = markScaleCheckPartialTemplate(partialTemplates, template)
+				continue
+			}
+			if !depsReady {
+				continue
+			}
 			if _, dup := counted[b.ID]; dup {
 				continue
 			}
@@ -1105,6 +1280,33 @@ func defaultScaleCheckCounts(targets []defaultScaleCheckTarget) (map[string]int,
 		}
 	}
 	return counts, partialTemplates, errs
+}
+
+func poolDemandDependenciesReady(reader beads.LiveReader, beadID string) (bool, error) {
+	deps, err := reader.DepList(beadID, "down")
+	if err != nil {
+		return false, err
+	}
+	for _, dep := range deps {
+		if !beads.IsReadyBlockingDependencyType(dep.Type) {
+			continue
+		}
+		blockerID := strings.TrimSpace(dep.DependsOnID)
+		if blockerID == "" {
+			return false, nil
+		}
+		blocker, err := reader.Get(blockerID)
+		if err != nil {
+			if errors.Is(err, beads.ErrNotFound) {
+				return false, nil
+			}
+			return false, fmt.Errorf("getting blocker %q: %w", blockerID, err)
+		}
+		if blocker.Status != "closed" {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 func defaultNamedSessionDemand(targets []defaultScaleCheckTarget, cfg *config.City, cityName string) (map[string]bool, map[string]bool, []error) {
@@ -1386,6 +1588,24 @@ func appendInProgressWorkUnique(cfg *config.City, dst *[]beads.Bead, stores *[]b
 func appendAssignedUnique(dst *[]beads.Bead, stores *[]beads.Store, storeRefs *[]string, beadList []beads.Bead, seen map[string]struct{}, store beads.Store, storeRef string) {
 	for _, b := range beadList {
 		if strings.TrimSpace(b.Assignee) == "" {
+			continue
+		}
+		appendWorkUnique(dst, stores, storeRefs, b, seen, store, storeRef)
+	}
+}
+
+// appendOpenRoutedWorkUnique includes open beads that are still releasably
+// pool-routed AND still carry an assignee. This is the narrow input
+// releaseOrphanedPoolAssignments needs to clear step beads abandoned by a
+// dead session (graph.v2 wisps where the root depends on the finalize
+// step, so the root never enters ready and the step assignee remains a
+// long-form dead-session identity invisible to readyAssignedWorkAssignees).
+func appendOpenRoutedWorkUnique(dst *[]beads.Bead, stores *[]beads.Store, storeRefs *[]string, beadList []beads.Bead, seen map[string]struct{}, store beads.Store, storeRef string) {
+	for _, b := range beadList {
+		if strings.TrimSpace(b.Assignee) == "" {
+			continue
+		}
+		if routedToOrLegacyWorkflowTarget(b) == "" {
 			continue
 		}
 		appendWorkUnique(dst, stores, storeRefs, b, seen, store, storeRef)
@@ -2586,10 +2806,12 @@ func selectOrPlanPoolSessionBead(
 	}
 	slot := claimDesiredPoolSlot(bp.city, cfgAgent, beads.Bead{}, usedSlots)
 	_, qualifiedInstance, poolSlot := poolDesiredRequestIdentity(cfgAgent, slot)
+
 	if !bp.tryClaimPoolSessionCreate(template) {
 		delete(usedSlots, slot)
 		return beads.Bead{}, 0, nil, errPoolSessionCreateBudgetExhausted
 	}
+
 	plan := &poolSessionCreatePlan{
 		qualifiedInstance: qualifiedInstance,
 		slot:              slot,

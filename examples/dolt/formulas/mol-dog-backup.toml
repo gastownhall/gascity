@@ -1,6 +1,20 @@
 description = """
 Sync Dolt database backups to local and offsite storage.
 
+After claiming this vapor wisp, run:
+
+```bash
+gc bd formula show mol-dog-backup --json
+```
+
+Follow the step descriptions in order. When finished, close this bead, then run:
+
+```bash
+gc runtime drain-ack
+```
+
+The drain-ack tells the controller this session is done.
+
 The Backup Dog discovers configured backup remotes for each production
 database, syncs them, then rsyncs the local backup directory to offsite
 storage for replication.
@@ -27,6 +41,7 @@ overwrites the backup destination, but that is the intended behavior.
 
 Read each step's description before acting — Config values override defaults."""
 formula = "mol-dog-backup"
+phase = "vapor"
 
 [vars]
 [vars.databases]
@@ -50,31 +65,33 @@ Run:
 dolt version | head -1
 ```
 
-If the version is < 2.1.0, abort the molecule and nudge the mayor to
-upgrade dolt. Do NOT proceed to the sync step or close it as successful.
+If the version is < 2.1.0, abort this vapor wisp and nudge the mayor to
+upgrade dolt. Do NOT continue to the sync section or close the root bead as
+successful.
 
-Close this bead with:
+Close the root work bead with:
 ```bash
 bd update "$GC_BEAD_ID" --set-metadata gc.outcome=fail --set-metadata gc.failure_class=hard --set-metadata gc.failure_reason=dolt-too-old --status closed
 ```
-This formula does not wire scoped-abort metadata; the failed preflight outcome
-is the stop signal. Check the preflight outcome before acting on `sync`.
+This formula does not wire scoped-abort metadata. Because this is a root-only
+vapor wisp, the failed root-bead outcome is the stop signal; do not continue
+to `sync` after a failed preflight.
 """
 
 [[steps]]
 id = "sync"
 title = "Sync databases to backup remotes"
-needs = ["preflight"]
 description = """
 Discover and sync backup remotes for each production database.
 
-**1. Verify preflight passed:**
-Before running any `dolt backup sync`, read the `preflight` bead in this
-molecule and verify its `gc.outcome` metadata is `pass`. If the preflight
-outcome is `fail` or missing, close this bead with `gc.outcome=fail`,
-`gc.failure_class=hard`, and `gc.failure_reason=preflight-failed`. Do not run
-sync. This formula does not wire scoped-abort metadata; this check is the
-enforcement point.
+**1. Verify preflight passed in this root-wisp execution:**
+Before running any `dolt backup sync`, confirm you already ran the preflight
+section in this same root-wisp execution and observed dolt >= 2.1.0. On
+restart or uncertainty, rerun the preflight command before syncing. If the
+preflight command fails or reports an older version, close the root work bead
+with `gc.outcome=fail`, `gc.failure_class=hard`, and
+`gc.failure_reason=preflight-failed`. Do not run sync. This inline check is
+the enforcement point for the root-only vapor formula.
 
 **2. Determine databases:**
 Use the configured databases list when it is non-empty. Otherwise,
@@ -118,7 +135,6 @@ operate on the exact `(database, backup_name, backup_url)` tuple.
 [[steps]]
 id = "offsite"
 title = "Sync backups to offsite storage"
-needs = ["sync"]
 description = """
 Rsync local backups to offsite storage for replication.
 
@@ -156,7 +172,6 @@ backup row, and non-file rows skipped observably."""
 [[steps]]
 id = "report"
 title = "Report findings and return to kennel"
-needs = ["offsite"]
 description = """
 Generate summary and signal completion.
 

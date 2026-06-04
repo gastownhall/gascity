@@ -123,6 +123,19 @@ func TestResolveFromEnvUsesAmbientBeadsDoltPassword(t *testing.T) {
 	}
 }
 
+func TestResolveScopedFromEnvIgnoresAmbientBeadsDoltPassword(t *testing.T) {
+	scopeRoot := t.TempDir()
+	t.Setenv("GC_DOLT_USER", "")
+	t.Setenv("GC_DOLT_PASSWORD", "")
+	t.Setenv("BEADS_DOLT_PASSWORD", "operator-secret")
+	t.Setenv("BEADS_CREDENTIALS_FILE", "")
+
+	resolved := ResolveScopedFromEnv(scopeRoot, "fallback-user", map[string]string{})
+	if resolved.Password != "" {
+		t.Fatalf("Password = %q, want empty without scoped secret", resolved.Password)
+	}
+}
+
 func TestResolveFromEnvUsesProjectedBeadsDoltPassword(t *testing.T) {
 	scopeRoot := t.TempDir()
 	t.Setenv("GC_DOLT_USER", "")

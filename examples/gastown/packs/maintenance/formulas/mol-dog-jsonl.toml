@@ -1,6 +1,20 @@
 description = """
 Export Dolt databases to JSONL and push to git archive.
 
+After claiming this vapor wisp, run:
+
+```bash
+gc bd formula show mol-dog-jsonl --json
+```
+
+Follow the step descriptions in order. When finished, close this bead, then run:
+
+```bash
+gc runtime drain-ack
+```
+
+The drain-ack tells the controller this session is done.
+
 The JSONL Dog exports each production database's issues table (scrubbed of
 ephemeral data) plus supplemental tables to JSONL files, commits them to a
 git repository, and pushes to origin. This provides a human-readable,
@@ -39,6 +53,7 @@ the main codebase.
 
 Read each step's description before acting — Config values override defaults."""
 formula = "mol-dog-jsonl"
+phase = "vapor"
 
 [vars]
 [vars.databases]
@@ -92,7 +107,6 @@ DOLT_CLI_PASSWORD="${GC_DOLT_PASSWORD:-}" dolt \
 [[steps]]
 id = "verify"
 title = "Verify export counts and filter pollution"
-needs = ["export"]
 description = """
 Verify export integrity before committing.
 
@@ -126,7 +140,6 @@ Skip verification when no baseline exists (previous commit has no file).
 [[steps]]
 id = "push"
 title = "Commit and push to git archive"
-needs = ["verify"]
 description = """
 Stage, commit, and push JSONL files to the archive repository.
 
@@ -188,7 +201,6 @@ changes to commit)."""
 [[steps]]
 id = "report"
 title = "Report findings and return to kennel"
-needs = ["push"]
 description = """
 Generate summary and signal completion.
 

@@ -363,18 +363,51 @@ func TestDoImportAddRejectsRepositoryRefInSource(t *testing.T) {
 	}
 }
 
-func TestDoImportAddRejectsGitHubTreeSource(t *testing.T) {
+func TestDoImportAddAcceptsGitHubTreeSource(t *testing.T) {
 	clearGCEnv(t)
 	dir := t.TempDir()
 	writeCityToml(t, dir, "[workspace]\nname = \"demo\"\n")
 
-	var stdout, stderr bytes.Buffer
-	code := doImportAdd(fsys.OSFS{}, dir, "https://github.com/example/repo/tree/main/packs/base", "", "", &stdout, &stderr)
-	if code == 0 {
-		t.Fatal("expected failure for GitHub tree source")
+	prevSync := syncImports
+	t.Cleanup(func() {
+		syncImports = prevSync
+	})
+	source := "https://github.com/example/repo/tree/main/packs/base"
+	syncImports = func(_ string, imports map[string]config.Import, _ packman.InstallMode) (*packman.Lockfile, error) {
+		imp, ok := imports["pack:base"]
+		if !ok {
+			t.Fatalf("missing imports.pack:base in %#v", imports)
+		}
+		if imp.Source != source {
+			t.Fatalf("Source = %q, want %q", imp.Source, source)
+		}
+		if imp.Version != "^1.2.0" {
+			t.Fatalf("Version = %q, want ^1.2.0", imp.Version)
+		}
+		return &packman.Lockfile{
+			Schema: packman.LockfileSchema,
+			Packs: map[string]packman.LockedPack{
+				source: {Version: "1.2.3", Commit: "abc123"},
+			},
+		}, nil
 	}
-	if !strings.Contains(stderr.String(), "embed refs in --version") {
-		t.Fatalf("stderr = %q", stderr.String())
+
+	var stdout, stderr bytes.Buffer
+	code := doImportAdd(fsys.OSFS{}, dir, source, "", "^1.2.0", &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code = %d, stderr = %s", code, stderr.String())
+	}
+
+	cfg, err := config.Load(fsys.OSFS{}, filepath.Join(dir, "pack.toml"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	imp := cfg.Imports["base"]
+	if imp.Source != source {
+		t.Fatalf("Source = %q, want %q", imp.Source, source)
+	}
+	if imp.Version != "^1.2.0" {
+		t.Fatalf("Version = %q, want ^1.2.0", imp.Version)
 	}
 }
 
@@ -2086,7 +2119,7 @@ func TestHasRepositoryRefInSource(t *testing.T) {
 		"https://github.com/example/repo.git":                  false,
 		"file:///tmp/repo.git//packs/base":                     false,
 		"file:///tmp/repo.git#main":                            true,
-		"https://github.com/example/repo/tree/main/packs/base": true,
+		"https://github.com/example/repo/tree/main/packs/base": false,
 		"git@github.com:example/repo.git#main":                 true,
 	}
 	for input, want := range cases {

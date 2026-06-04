@@ -1002,6 +1002,95 @@ func TestDefaultScaleCheckCountsIgnoresFutureDeferredCronPoolDemand(t *testing.T
 	}
 }
 
+func TestDefaultScaleCheckCountsIgnoresBlockedCronPoolDemand(t *testing.T) {
+	backing := &demandListCountingStore{Store: beads.NewMemStore()}
+	blocker, err := backing.Create(beads.Bead{
+		Title:  "open prerequisite",
+		Type:   "task",
+		Status: "open",
+	})
+	if err != nil {
+		t.Fatalf("create blocker: %v", err)
+	}
+	wisp, err := backing.Create(beads.Bead{
+		Title:     "blocked pool-order wisp",
+		Type:      "molecule",
+		Status:    "open",
+		Metadata:  poolWispMetadata("cat"),
+		Ephemeral: true,
+	})
+	if err != nil {
+		t.Fatalf("create blocked pool-order wisp: %v", err)
+	}
+	if err := backing.DepAdd(wisp.ID, blocker.ID, "blocks"); err != nil {
+		t.Fatalf("DepAdd: %v", err)
+	}
+	cache := beads.NewCachingStoreForTest(backing, nil)
+	if err := cache.PrimeActive(); err != nil {
+		t.Fatalf("PrimeActive: %v", err)
+	}
+
+	counts, _, errs := defaultScaleCheckCounts([]defaultScaleCheckTarget{{
+		template: "cat",
+		storeKey: "city",
+		store:    cache,
+	}})
+	if len(errs) != 0 {
+		t.Fatalf("defaultScaleCheckCounts errs = %v", errs)
+	}
+	if got := counts["cat"]; got != 0 {
+		t.Fatalf("defaultScaleCheckCounts[%q] = %d, want 0 for dependency-blocked gc.pool_demand wisp", "cat", got)
+	}
+	if backing.livePoolDemand == 0 {
+		t.Fatalf("livePoolDemand list calls = 0, want >0")
+	}
+}
+
+func TestDefaultScaleCheckCountsUsesLiveDepsThroughPolicyWrappedCache(t *testing.T) {
+	backing := &demandListCountingStore{Store: beads.NewMemStore()}
+	blocker, err := backing.Create(beads.Bead{
+		Title:  "open prerequisite",
+		Type:   "task",
+		Status: "open",
+	})
+	if err != nil {
+		t.Fatalf("create blocker: %v", err)
+	}
+	wisp, err := backing.Create(beads.Bead{
+		Title:     "blocked pool-order wisp",
+		Type:      "molecule",
+		Status:    "open",
+		Metadata:  poolWispMetadata("cat"),
+		Ephemeral: true,
+	})
+	if err != nil {
+		t.Fatalf("create blocked pool-order wisp: %v", err)
+	}
+	cache := beads.NewCachingStoreForTest(backing, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	if err := backing.DepAdd(wisp.ID, blocker.ID, "blocks"); err != nil {
+		t.Fatalf("DepAdd after cache prime: %v", err)
+	}
+
+	store := wrapStoreWithBeadPolicies(cache, &config.City{})
+	counts, _, errs := defaultScaleCheckCounts([]defaultScaleCheckTarget{{
+		template: "cat",
+		storeKey: "city",
+		store:    store,
+	}})
+	if len(errs) != 0 {
+		t.Fatalf("defaultScaleCheckCounts errs = %v", errs)
+	}
+	if got := counts["cat"]; got != 0 {
+		t.Fatalf("defaultScaleCheckCounts[%q] = %d, want 0 for dependency added after cache prime", "cat", got)
+	}
+	if backing.livePoolDemand == 0 {
+		t.Fatalf("livePoolDemand list calls = 0, want >0")
+	}
+}
+
 // poolWispMetadata builds the metadata map a pool-order wisp carries —
 // gc.routed_to + the poolDemandMetadataPair pair — for fixture use.
 // Mirrors the production composition in cmd/gc/cmd_order.go and
@@ -1567,6 +1656,105 @@ func TestCollectAssignedWorkBeads_ExcludesRoutedToMetadataWithoutAssignee(t *tes
 	got, _ := collectAssignedWorkBeads(&config.City{}, store)
 	if len(got) != 0 {
 		t.Fatalf("collectAssignedWorkBeads returned %d beads, want 0", len(got))
+	}
+}
+
+// TestCollectAssignedWorkBeads_IncludesOpenPoolRoutedAssignedWork pins the
+// fix for issue #2793: an open step bead carrying both gc.routed_to and a
+// stale (dead-session) assignee must enter assignedWorkBeads so the
+// orphan-release sweep can iterate it. The status=in_progress pass misses
+// it (wrong status) and the Ready(Assignee=...) pass misses it (the
+// assignee identity belongs to a session that no longer exists). Without
+// this pass, the step bead stays assigned forever, pool demand stays 0,
+// and graph.v2 wisps stall after an orphan drain.
+func TestCollectAssignedWorkBeads_IncludesOpenPoolRoutedAssignedWork(t *testing.T) {
+	t.Parallel()
+	store := beads.NewMemStore()
+	blocker, err := store.Create(beads.Bead{Title: "workflow finalize", Type: "task", Status: "open"})
+	if err != nil {
+		t.Fatalf("create blocker bead: %v", err)
+	}
+	work, err := store.Create(beads.Bead{
+		Title:    "orphaned step bead",
+		Type:     "task",
+		Status:   "open",
+		Assignee: "rig--pool__coder-dead-session",
+		Metadata: map[string]string{"gc.routed_to": "rig/pool.coder"},
+	})
+	if err != nil {
+		t.Fatalf("create orphaned step bead: %v", err)
+	}
+	if err := store.DepAdd(work.ID, blocker.ID, "blocks"); err != nil {
+		t.Fatalf("block orphaned step bead: %v", err)
+	}
+
+	got, _ := collectAssignedWorkBeads(&config.City{}, store)
+	if len(got) != 1 || got[0].ID != work.ID {
+		t.Fatalf("collectAssignedWorkBeads = %#v, want [%s]", got, work.ID)
+	}
+}
+
+// TestCollectAssignedWorkBeads_IncludesOpenRunTargetAssignedWork covers the
+// legacy workflow root shape: workflow beads stamp gc.run_target (not
+// gc.routed_to). The third pass accepts that marker only for the same
+// workflow-kind beads that releaseOrphanedPoolAssignments can release.
+func TestCollectAssignedWorkBeads_IncludesOpenRunTargetAssignedWork(t *testing.T) {
+	t.Parallel()
+	store := beads.NewMemStore()
+	blocker, err := store.Create(beads.Bead{Title: "workflow finalize", Type: "task", Status: "open"})
+	if err != nil {
+		t.Fatalf("create blocker bead: %v", err)
+	}
+	work, err := store.Create(beads.Bead{
+		Title:    "orphaned root step",
+		Type:     "task",
+		Status:   "open",
+		Assignee: "rig--pool__coder-dead-session",
+		Metadata: map[string]string{
+			"gc.kind":       "workflow",
+			"gc.run_target": "rig/pool.coder",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create orphaned root step: %v", err)
+	}
+	if err := store.DepAdd(work.ID, blocker.ID, "blocks"); err != nil {
+		t.Fatalf("block orphaned root step: %v", err)
+	}
+
+	got, _ := collectAssignedWorkBeads(&config.City{}, store)
+	if len(got) != 1 || got[0].ID != work.ID {
+		t.Fatalf("collectAssignedWorkBeads = %#v, want [%s]", got, work.ID)
+	}
+}
+
+func TestCollectAssignedWorkBeads_ExcludesOpenNonWorkflowRunTargetAssignedWork(t *testing.T) {
+	t.Parallel()
+	store := beads.NewMemStore()
+	blocker, err := store.Create(beads.Bead{Title: "workflow finalize", Type: "task", Status: "open"})
+	if err != nil {
+		t.Fatalf("create blocker bead: %v", err)
+	}
+	work, err := store.Create(beads.Bead{
+		Title:    "control retry bead",
+		Type:     "task",
+		Status:   "open",
+		Assignee: "gascity--control-dispatcher",
+		Metadata: map[string]string{
+			"gc.kind":       "retry",
+			"gc.run_target": "gascity/gc.implementation-worker",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create control retry bead: %v", err)
+	}
+	if err := store.DepAdd(work.ID, blocker.ID, "blocks"); err != nil {
+		t.Fatalf("block control retry bead: %v", err)
+	}
+
+	got, _ := collectAssignedWorkBeads(&config.City{}, store)
+	if len(got) != 0 {
+		t.Fatalf("collectAssignedWorkBeads returned %d beads, want 0 for non-workflow gc.run_target", len(got))
 	}
 }
 
@@ -2286,6 +2474,9 @@ source = "./assets/sidecar"
 [workspace]
 provider = "claude"
 
+[providers.claude]
+base = "builtin:claude"
+
 [[rigs]]
 name = "repo"
 
@@ -2367,6 +2558,9 @@ func TestBuildDesiredState_TransitiveFalseSkipsNestedImportedNamedSessions(t *te
 [workspace]
 name = "import-regression"
 provider = "claude"
+
+[providers.claude]
+base = "builtin:claude"
 
 [imports.outer]
 source = "./assets/outer"
@@ -2451,7 +2645,8 @@ func TestBuildDesiredState_RoutedQueueDoesNotCreateOneSessionPerBead(t *testing.
 		}},
 	}
 
-	dsResult := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, io.Discard)
+	var stderr bytes.Buffer
+	dsResult := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, &stderr)
 	if len(dsResult.AssignedWorkBeads) != 0 {
 		t.Fatalf("AssignedWorkBeads = %d, want 0 for routed-only queue", len(dsResult.AssignedWorkBeads))
 	}
@@ -6254,6 +6449,7 @@ func TestBuildDesiredState_SingletonTemplateDoesNotRealizeDependencyPoolFloorWit
 		Agents: []config.Agent{
 			{
 				Name:              "db",
+				StartCommand:      "true",
 				MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3), ScaleCheck: "printf 0",
 			},
 			{
@@ -6282,6 +6478,7 @@ func TestBuildDesiredState_DoesNotRealizeDependencyFloorForZeroScaledDependentPo
 		Agents: []config.Agent{
 			{
 				Name:              "db",
+				StartCommand:      "true",
 				MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3), ScaleCheck: "printf 0",
 			},
 			{
@@ -6307,6 +6504,7 @@ func TestBuildDesiredState_DoesNotRealizeDependencyFloorForSuspendedDependent(t 
 		Agents: []config.Agent{
 			{
 				Name:              "db",
+				StartCommand:      "true",
 				MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3), ScaleCheck: "printf 0",
 			},
 			{
@@ -6332,6 +6530,7 @@ func TestBuildDesiredState_SingletonTemplatesDoNotRealizeTransitiveDependencyPoo
 		Agents: []config.Agent{
 			{
 				Name:              "db",
+				StartCommand:      "true",
 				MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3), ScaleCheck: "printf 0",
 			},
 			{
@@ -6385,6 +6584,7 @@ func TestBuildDesiredState_DiscoveredSessionRootGetsDependencyPoolFloor(t *testi
 		Agents: []config.Agent{
 			{
 				Name:              "db",
+				StartCommand:      "true",
 				MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3), ScaleCheck: "printf 0",
 			},
 			{
@@ -6397,7 +6597,8 @@ func TestBuildDesiredState_DiscoveredSessionRootGetsDependencyPoolFloor(t *testi
 		},
 	}
 
-	dsResult := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, io.Discard)
+	var stderr bytes.Buffer
+	dsResult := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, &stderr)
 	desired := dsResult.State
 	if _, ok := desired["s-gc-100"]; !ok {
 		t.Fatalf("expected discovered helper session in desired state, got keys %v", desired)
@@ -6409,7 +6610,7 @@ func TestBuildDesiredState_DiscoveredSessionRootGetsDependencyPoolFloor(t *testi
 		}
 	}
 	if dbSlots != 1 {
-		t.Fatalf("db desired slots = %d, want 1", dbSlots)
+		t.Fatalf("db desired slots = %d, want 1; stderr=%s", dbSlots, stderr.String())
 	}
 }
 
@@ -6433,6 +6634,7 @@ func TestBuildDesiredState_ManualZeroScaledPoolSessionStaysDesiredAndKeepsDepend
 		Agents: []config.Agent{
 			{
 				Name:              "db",
+				StartCommand:      "true",
 				MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3), ScaleCheck: "printf 0",
 			},
 			{
@@ -6444,7 +6646,8 @@ func TestBuildDesiredState_ManualZeroScaledPoolSessionStaysDesiredAndKeepsDepend
 		},
 	}
 
-	dsResult := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, io.Discard)
+	var stderr bytes.Buffer
+	dsResult := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, &stderr)
 	desired := dsResult.State
 	if _, ok := desired["s-gc-200"]; !ok {
 		t.Fatalf("expected manual pool session in desired state, got keys %v", desired)
@@ -6456,7 +6659,7 @@ func TestBuildDesiredState_ManualZeroScaledPoolSessionStaysDesiredAndKeepsDepend
 		}
 	}
 	if dbSlots != 1 {
-		t.Fatalf("db desired slots = %d, want 1", dbSlots)
+		t.Fatalf("db desired slots = %d, want 1; stderr=%s", dbSlots, stderr.String())
 	}
 }
 
@@ -6852,6 +7055,7 @@ func TestBuildDesiredState_DrainedPoolManagedSessionIsNotRediscovered(t *testing
 	cfg := &config.City{
 		Agents: []config.Agent{{
 			Name:              "claude",
+			StartCommand:      "true",
 			MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(5),
 		}},
 	}
@@ -6925,6 +7129,7 @@ func TestBuildDesiredState_UsesBeadNamedPoolSessionsForScaleCheckDemand(t *testi
 		Agents: []config.Agent{
 			{
 				Name:              "worker",
+				StartCommand:      "true",
 				MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3), ScaleCheck: "echo 1",
 			},
 		},
@@ -7021,6 +7226,7 @@ func TestBuildDesiredState_FallsBackToLegacyPoolDemandWhenListFails(t *testing.T
 		Agents: []config.Agent{
 			{
 				Name:              "worker",
+				StartCommand:      "true",
 				MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(1),
 			},
 		},
@@ -7080,6 +7286,7 @@ func TestBuildDesiredState_DependencyFloorDoesNotReuseRegularPoolWorkerBead(t *t
 		Agents: []config.Agent{
 			{
 				Name:              "worker",
+				StartCommand:      "true",
 				MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3),
 			},
 			{
@@ -7118,6 +7325,7 @@ func TestBuildDesiredState_StoreBackedPoolUsesLogicalInstanceIdentity(t *testing
 		Agents: []config.Agent{
 			{
 				Name:              "worker",
+				StartCommand:      "true",
 				MinActiveSessions: intPtr(0),
 				MaxActiveSessions: intPtr(2),
 				ScaleCheck:        "printf 2",
@@ -7179,6 +7387,7 @@ func TestBuildDesiredState_StoreBackedPoolUsesQualifiedInstanceNameForBindings(t
 		Agents: []config.Agent{{
 			Name:              "worker",
 			BindingName:       "ops",
+			StartCommand:      "true",
 			WorkDir:           ".gc/worktrees/{{.AgentBase}}",
 			MinActiveSessions: intPtr(0),
 			MaxActiveSessions: intPtr(2),
@@ -7238,6 +7447,7 @@ func TestBuildDesiredState_RecoversPoolTemplateFromAliasOnlyBindingIdentity(t *t
 			Name:          "worker",
 			Dir:           "frontend",
 			BindingName:   "ops",
+			StartCommand:  "true",
 			NamepoolNames: []string{"furiosa", "nux"},
 			WorkDir:       ".gc/worktrees/{{.AgentBase}}",
 			ScaleCheck:    "printf 1",
@@ -7887,6 +8097,7 @@ func TestBuildDesiredState_DoesNotCreateDuplicatePoolBeadForDiscoveredSession(t 
 		Agents: []config.Agent{
 			{
 				Name:              "worker",
+				StartCommand:      "true",
 				MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3),
 			},
 		},
@@ -7927,10 +8138,12 @@ func TestBuildDesiredState_ZeroScaledPoolSessionKeepsDependencyFloorWhileDrainin
 		Agents: []config.Agent{
 			{
 				Name:              "db",
+				StartCommand:      "true",
 				MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3), ScaleCheck: "printf 0",
 			},
 			{
 				Name:              "api",
+				StartCommand:      "true",
 				DependsOn:         []string{"db"},
 				MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3), ScaleCheck: "printf 0",
 			},
@@ -7974,6 +8187,7 @@ func TestBuildDesiredState_PoolCheckInjectsDoltPortForRigScopedAgent(t *testing.
 			{
 				Name:              "worker",
 				Dir:               "myrig",
+				StartCommand:      "true",
 				MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(5), ScaleCheck: checkCmd,
 			},
 		},
@@ -8019,6 +8233,7 @@ func TestBuildDesiredState_PoolCheckUsesCityDoltPortForCityScopedAgent(t *testin
 		Agents: []config.Agent{
 			{
 				Name:              "worker",
+				StartCommand:      "true",
 				MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(5), ScaleCheck: checkCmd,
 			},
 		},
@@ -8074,6 +8289,7 @@ func TestBuildDesiredState_PoolCheckUsesExplicitRigPassword(t *testing.T) {
 		Agents: []config.Agent{{
 			Name:              "worker",
 			Dir:               "demo",
+			StartCommand:      "true",
 			MinActiveSessions: intPtr(0),
 			MaxActiveSessions: intPtr(5),
 			ScaleCheck:        checkCmd,
@@ -8094,8 +8310,15 @@ func TestBuildDesiredState_PoolCheckUsesExplicitRigPassword(t *testing.T) {
 
 func TestBuildDesiredState_PoolCheckUsesManagedCityDoltPortWhenRigHasNoOverride(t *testing.T) {
 	skipSlowCmdGCTest(t, "uses a live managed-dolt port probe for scale_check coverage; run make test-cmd-gc-process for full coverage")
+	clearGCEnv(t)
 	t.Setenv("GC_BEADS", "bd")
 	cityPath := t.TempDir()
+	t.Setenv("GC_BEADS_SCOPE_ROOT", cityPath)
+	writeRigEndpointCanonicalConfig(t, cityPath, contract.ConfigState{
+		IssuePrefix:    "gc",
+		EndpointOrigin: contract.EndpointOriginManagedCity,
+		EndpointStatus: contract.EndpointStatusVerified,
+	})
 	rigPath := filepath.Join(cityPath, "myrig")
 	if err := os.MkdirAll(rigPath, 0o755); err != nil {
 		t.Fatal(err)
@@ -8125,9 +8348,22 @@ func TestBuildDesiredState_PoolCheckUsesManagedCityDoltPortWhenRigHasNoOverride(
 			{
 				Name:              "worker",
 				Dir:               "myrig",
+				StartCommand:      "true",
 				MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(5), ScaleCheck: checkCmd,
 			},
 		},
+	}
+
+	queryEnv, err := controllerQueryRuntimeEnv(cityPath, cfg, &cfg.Agents[0])
+	if err != nil {
+		t.Fatalf("controllerQueryRuntimeEnv: %v", err)
+	}
+	wantPort := strconv.Itoa(ln.Addr().(*net.TCPAddr).Port)
+	if got := queryEnv["BEADS_DOLT_SERVER_PORT"]; got != wantPort {
+		t.Fatalf("BEADS_DOLT_SERVER_PORT = %q, want %q; GC_DOLT=%q provider=%q scopeProvider=%q cityUses=%v scopeUses=%v current=%q resolvable=%q",
+			got, wantPort, os.Getenv("GC_DOLT"), rawBeadsProvider(cityPath), rawBeadsProviderForScope(rigPath, cityPath),
+			cityUsesBdStoreContract(cityPath), scopeUsesManagedBdStoreContract(cityPath, rigPath),
+			currentManagedDoltPort(cityPath), currentResolvableManagedDoltPort(cityPath))
 	}
 
 	desired := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), nil, io.Discard)

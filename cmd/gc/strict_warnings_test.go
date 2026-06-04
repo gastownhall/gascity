@@ -36,7 +36,6 @@ func TestSplitStrictConfigWarnings_LegacyV1SurfaceWarningsAreNonFatal(t *testing
 
 func TestSplitStrictConfigWarnings_LegacyWorkspaceFieldWarningsAreNonFatal(t *testing.T) {
 	fatal, nonFatal := splitStrictConfigWarnings([]string{
-		"city.toml: workspace.provider is deprecated: Set provider per agent in agents/<name>/agent.toml.",
 		"city.toml: workspace.start_command is deprecated: Use per-agent `start_command` in `agent.toml` instead.",
 		"city.toml: workspace.suspended is deprecated: This will move to `.gc/site.toml` in a future release. No action is required now.",
 		"city.toml: workspace.install_agent_hooks is deprecated: Set install_agent_hooks per agent in agents/<name>/agent.toml.",
@@ -47,8 +46,8 @@ func TestSplitStrictConfigWarnings_LegacyWorkspaceFieldWarningsAreNonFatal(t *te
 	if len(fatal) != 1 || fatal[0] != `city agent "mayor" shadows agent of the same name from import "gs"` {
 		t.Fatalf("fatal = %v, want only the shadow warning", fatal)
 	}
-	if len(nonFatal) != 5 {
-		t.Fatalf("nonFatal = %v, want 5 workspace field deprecations", nonFatal)
+	if len(nonFatal) != 4 {
+		t.Fatalf("nonFatal = %v, want 4 workspace field deprecations", nonFatal)
 	}
 }
 

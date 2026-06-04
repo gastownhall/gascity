@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -24,6 +25,17 @@ type workflowSQLStoreCandidate struct {
 	info workflowStoreInfo
 	path string
 }
+
+type workflowSQLTableSet struct {
+	beads  string
+	labels string
+	deps   string
+}
+
+var (
+	workflowSQLIssueTables = workflowSQLTableSet{beads: "issues", labels: "labels", deps: "dependencies"}
+	workflowSQLWispTables  = workflowSQLTableSet{beads: "wisps", labels: "wisp_labels", deps: "wisp_dependencies"}
+)
 
 func workflowSQLCandidatesForWorkflowID(
 	state State,
@@ -59,140 +71,287 @@ func workflowSQLSnapshot(user, password, host string, port int, database, rootID
 	db.SetMaxOpenConns(1)
 	db.SetConnMaxLifetime(30 * time.Second)
 
-	// Query 1: All workflow beads (root + children by gc.root_bead_id metadata)
-	beadRows, err := db.Query(`
-		SELECT
-			i.id, i.title, i.status, i.issue_type, i.assignee,
-			i.description, i.created_at, i.updated_at,
-			i.metadata
-		FROM issues i
-		WHERE i.id = ?
-		   OR JSON_UNQUOTE(JSON_EXTRACT(i.metadata, '$."gc.root_bead_id"')) = ?
-		ORDER BY i.created_at
-	`, rootID, rootID)
+	tableSets, err := workflowSQLAvailableTableSets(db)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("beads query: %w", err)
-	}
-	defer beadRows.Close() //nolint:errcheck // best-effort cleanup
-
-	var workflowBeads []beads.Bead
-	beadIndex := make(map[string]beads.Bead)
-	beadIDs := make([]string, 0, 100)
-
-	for beadRows.Next() {
-		var b beads.Bead
-		var assignee, description sql.NullString
-		var metadataJSON []byte
-		var createdAt, updatedAt time.Time
-
-		if err := beadRows.Scan(
-			&b.ID, &b.Title, &b.Status, &b.Type, &assignee,
-			&description, &createdAt, &updatedAt,
-			&metadataJSON,
-		); err != nil {
-			return nil, nil, nil, fmt.Errorf("bead scan: %w", err)
-		}
-
-		b.Assignee = assignee.String
-		b.Description = description.String
-		b.CreatedAt = createdAt
-
-		// Parse JSON metadata
-		if len(metadataJSON) > 0 {
-			b.Metadata = make(map[string]string)
-			var raw map[string]interface{}
-			if json.Unmarshal(metadataJSON, &raw) == nil {
-				for k, v := range raw {
-					if s, ok := v.(string); ok {
-						b.Metadata[k] = s
-					} else {
-						// Non-string values: marshal back to string
-						if encoded, err := json.Marshal(v); err == nil {
-							b.Metadata[k] = string(encoded)
-						}
-					}
-				}
-			}
-		}
-
-		workflowBeads = append(workflowBeads, b)
-		beadIndex[b.ID] = b
-		beadIDs = append(beadIDs, b.ID)
-	}
-	if err := beadRows.Err(); err != nil {
-		return nil, nil, nil, fmt.Errorf("bead rows: %w", err)
+		return nil, nil, nil, err
 	}
 
-	if len(beadIDs) == 0 {
+	workflowBeads, beadIndex, err := workflowSQLQueryWorkflowBeads(db, tableSets, rootID)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	if len(workflowBeads) == 0 {
 		return nil, nil, nil, fmt.Errorf("no beads found for workflow %s", rootID)
 	}
 
-	// Query 2: All deps between workflow beads
-	// Use subquery instead of IN (?,?,...) — dolt handles subqueries much
-	// faster than large parameter lists (13s vs 46ms for 95 IDs).
-	depRows, err := db.Query(`
-		SELECT d.issue_id, d.depends_on_id, COALESCE(NULLIF(d.type, ''), 'blocks')
-		FROM dependencies d
-		WHERE d.issue_id IN (
-			SELECT i.id FROM issues i
-			WHERE i.id = ? OR JSON_UNQUOTE(JSON_EXTRACT(i.metadata, '$."gc.root_bead_id"')) = ?
-		)
-		AND d.depends_on_id IN (
-			SELECT i.id FROM issues i
-			WHERE i.id = ? OR JSON_UNQUOTE(JSON_EXTRACT(i.metadata, '$."gc.root_bead_id"')) = ?
-		)
-	`, rootID, rootID, rootID, rootID)
+	depMap, err := workflowSQLQueryWorkflowDeps(db, tableSets, rootID)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("deps query: %w", err)
-	}
-	defer depRows.Close() //nolint:errcheck // best-effort cleanup
-
-	depMap := make(map[string][]beads.Dep)
-	for depRows.Next() {
-		var issueID, dependsOnID, depType sql.NullString
-		if err := depRows.Scan(&issueID, &dependsOnID, &depType); err != nil {
-			return nil, nil, nil, fmt.Errorf("dep scan: %w", err)
-		}
-		d := workflowSQLDepFromRow(issueID, dependsOnID, depType)
-		depMap[d.IssueID] = append(depMap[d.IssueID], d)
-	}
-	if err := depRows.Err(); err != nil {
-		return nil, nil, nil, fmt.Errorf("dep rows: %w", err)
+		return nil, nil, nil, err
 	}
 
-	// Query 3: Labels for workflow beads
-	labelRows, err := db.Query(`
-		SELECT l.issue_id, l.label
-		FROM labels l
-		WHERE l.issue_id IN (
-			SELECT i.id FROM issues i
-			WHERE i.id = ? OR JSON_UNQUOTE(JSON_EXTRACT(i.metadata, '$."gc.root_bead_id"')) = ?
-		)
-	`, rootID, rootID)
-	if err != nil {
-		// Non-fatal — labels are optional
+	if err := workflowSQLHydrateWorkflowLabels(db, tableSets, rootID, workflowBeads, beadIndex); err != nil {
 		return workflowBeads, beadIndex, depMap, nil
 	}
-	defer labelRows.Close() //nolint:errcheck // best-effort cleanup
 
-	labelMap := make(map[string][]string)
-	for labelRows.Next() {
-		var issueID, label string
-		if err := labelRows.Scan(&issueID, &label); err != nil {
+	return workflowBeads, beadIndex, depMap, nil
+}
+
+func workflowSQLQueryWorkflowBeads(db *sql.DB, tableSets []workflowSQLTableSet, rootID string) ([]beads.Bead, map[string]beads.Bead, error) {
+	workflowBeads := make([]beads.Bead, 0, 100)
+	beadIndex := make(map[string]beads.Bead)
+	for _, tables := range tableSets {
+		rows, err := db.Query(`
+			SELECT
+				i.id, i.title, i.status, i.issue_type, i.assignee,
+				i.description, i.created_at, i.updated_at,
+				i.metadata
+			FROM `+tables.beads+` i
+			WHERE i.id = ?
+			   OR JSON_UNQUOTE(JSON_EXTRACT(i.metadata, '$."gc.root_bead_id"')) = ?
+			ORDER BY i.created_at
+		`, rootID, rootID)
+		if err != nil {
+			return nil, nil, fmt.Errorf("beads query %s: %w", tables.beads, err)
+		}
+		for rows.Next() {
+			bead, ok, err := workflowSQLScanBead(rows.Scan)
+			if err != nil {
+				_ = rows.Close()
+				return nil, nil, fmt.Errorf("bead scan %s: %w", tables.beads, err)
+			}
+			if !ok {
+				continue
+			}
+			if _, seen := beadIndex[bead.ID]; seen {
+				continue
+			}
+			workflowBeads = append(workflowBeads, bead)
+			beadIndex[bead.ID] = bead
+		}
+		if err := rows.Err(); err != nil {
+			_ = rows.Close()
+			return nil, nil, fmt.Errorf("bead rows %s: %w", tables.beads, err)
+		}
+		if err := rows.Close(); err != nil {
+			return nil, nil, fmt.Errorf("bead rows close %s: %w", tables.beads, err)
+		}
+	}
+	sort.SliceStable(workflowBeads, func(i, j int) bool {
+		return workflowBeads[i].CreatedAt.Before(workflowBeads[j].CreatedAt)
+	})
+	return workflowBeads, beadIndex, nil
+}
+
+func workflowSQLQueryWorkflowDeps(db *sql.DB, tableSets []workflowSQLTableSet, rootID string) (map[string][]beads.Dep, error) {
+	depMap := make(map[string][]beads.Dep)
+	subquery := workflowSQLWorkflowIDsSubquery(tableSets)
+	subqueryArgs := workflowSQLWorkflowIDsSubqueryArgs(tableSets, rootID)
+	for _, tables := range tableSets {
+		exists, err := workflowSQLTableExists(db, tables.deps)
+		if err != nil {
+			return nil, fmt.Errorf("check dep table %s: %w", tables.deps, err)
+		}
+		if !exists {
 			continue
 		}
-		labelMap[issueID] = append(labelMap[issueID], label)
+		dependsOnExpr, err := workflowSQLDependsOnExpr(db, tables.deps, "d")
+		if err != nil {
+			return nil, err
+		}
+		args := make([]any, 0, len(subqueryArgs)*2)
+		args = append(args, subqueryArgs...)
+		args = append(args, subqueryArgs...)
+		rows, err := db.Query(`
+			SELECT d.issue_id, `+dependsOnExpr+`, COALESCE(NULLIF(d.type, ''), 'blocks')
+			FROM `+tables.deps+` d
+			WHERE d.issue_id IN (`+subquery+`)
+			  AND `+dependsOnExpr+` IN (`+subquery+`)
+		`, args...)
+		if err != nil {
+			return nil, fmt.Errorf("deps query %s: %w", tables.deps, err)
+		}
+		for rows.Next() {
+			var issueID, dependsOnID, depType sql.NullString
+			if err := rows.Scan(&issueID, &dependsOnID, &depType); err != nil {
+				_ = rows.Close()
+				return nil, fmt.Errorf("dep scan %s: %w", tables.deps, err)
+			}
+			dep := workflowSQLDepFromRow(issueID, dependsOnID, depType)
+			depMap[dep.IssueID] = append(depMap[dep.IssueID], dep)
+		}
+		if err := rows.Err(); err != nil {
+			_ = rows.Close()
+			return nil, fmt.Errorf("dep rows %s: %w", tables.deps, err)
+		}
+		if err := rows.Close(); err != nil {
+			return nil, fmt.Errorf("dep rows close %s: %w", tables.deps, err)
+		}
 	}
+	return depMap, nil
+}
 
-	// Attach labels to beads
+func workflowSQLHydrateWorkflowLabels(db *sql.DB, tableSets []workflowSQLTableSet, rootID string, workflowBeads []beads.Bead, beadIndex map[string]beads.Bead) error {
+	labelMap := make(map[string][]string)
+	subquery := workflowSQLWorkflowIDsSubquery(tableSets)
+	subqueryArgs := workflowSQLWorkflowIDsSubqueryArgs(tableSets, rootID)
+	for _, tables := range tableSets {
+		exists, err := workflowSQLTableExists(db, tables.labels)
+		if err != nil {
+			return fmt.Errorf("check label table %s: %w", tables.labels, err)
+		}
+		if !exists {
+			continue
+		}
+		rows, err := db.Query(`
+			SELECT l.issue_id, l.label
+			FROM `+tables.labels+` l
+			WHERE l.issue_id IN (`+subquery+`)
+		`, subqueryArgs...)
+		if err != nil {
+			return fmt.Errorf("labels query %s: %w", tables.labels, err)
+		}
+		for rows.Next() {
+			var issueID, label string
+			if err := rows.Scan(&issueID, &label); err != nil {
+				continue
+			}
+			labelMap[issueID] = append(labelMap[issueID], label)
+		}
+		if err := rows.Err(); err != nil {
+			_ = rows.Close()
+			return fmt.Errorf("label rows %s: %w", tables.labels, err)
+		}
+		if err := rows.Close(); err != nil {
+			return fmt.Errorf("label rows close %s: %w", tables.labels, err)
+		}
+	}
 	for i := range workflowBeads {
 		if labels, ok := labelMap[workflowBeads[i].ID]; ok {
 			workflowBeads[i].Labels = labels
 			beadIndex[workflowBeads[i].ID] = workflowBeads[i]
 		}
 	}
+	return nil
+}
 
-	return workflowBeads, beadIndex, depMap, nil
+func workflowSQLAvailableTableSets(db *sql.DB) ([]workflowSQLTableSet, error) {
+	issueExists, err := workflowSQLTableExists(db, workflowSQLIssueTables.beads)
+	if err != nil {
+		return nil, fmt.Errorf("check table %s: %w", workflowSQLIssueTables.beads, err)
+	}
+	wispExists, err := workflowSQLTableExists(db, workflowSQLWispTables.beads)
+	if err != nil {
+		return nil, fmt.Errorf("check table %s: %w", workflowSQLWispTables.beads, err)
+	}
+	tableSets := make([]workflowSQLTableSet, 0, 2)
+	if issueExists {
+		tableSets = append(tableSets, workflowSQLIssueTables)
+	}
+	if wispExists {
+		tableSets = append(tableSets, workflowSQLWispTables)
+	}
+	if len(tableSets) == 0 {
+		return nil, fmt.Errorf("no workflow bead SQL tables")
+	}
+	return tableSets, nil
+}
+
+func workflowSQLTableExists(db *sql.DB, table string) (bool, error) {
+	var count int
+	err := db.QueryRow(`
+		SELECT COUNT(*)
+		FROM information_schema.tables
+		WHERE table_schema = DATABASE()
+		  AND table_name = ?
+	`, table).Scan(&count)
+	if err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
+func workflowSQLExistingColumns(db *sql.DB, table string, candidates []string) (map[string]bool, error) {
+	if len(candidates) == 0 {
+		return map[string]bool{}, nil
+	}
+	placeholders := strings.TrimRight(strings.Repeat("?,", len(candidates)), ",")
+	args := make([]any, 0, len(candidates)+1)
+	args = append(args, table)
+	for _, column := range candidates {
+		args = append(args, column)
+	}
+	rows, err := db.Query(`
+		SELECT column_name
+		FROM information_schema.columns
+		WHERE table_schema = DATABASE()
+		  AND table_name = ?
+		  AND column_name IN (`+placeholders+`)
+	`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close() //nolint:errcheck // best-effort cleanup
+	columns := make(map[string]bool, len(candidates))
+	for rows.Next() {
+		var column string
+		if err := rows.Scan(&column); err != nil {
+			return nil, err
+		}
+		columns[column] = true
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return columns, nil
+}
+
+func workflowSQLDependsOnExpr(db *sql.DB, table, alias string) (string, error) {
+	candidates := []string{"depends_on_id", "depends_on_issue_id", "depends_on_wisp_id", "depends_on_external"}
+	columns, err := workflowSQLExistingColumns(db, table, candidates)
+	if err != nil {
+		return "", fmt.Errorf("read dep columns %s: %w", table, err)
+	}
+	expr, err := workflowSQLDependsOnExprFromColumns(alias, columns)
+	if err != nil {
+		return "", fmt.Errorf("dependency target columns %s: %w", table, err)
+	}
+	return expr, nil
+}
+
+func workflowSQLDependsOnExprFromColumns(alias string, columns map[string]bool) (string, error) {
+	prefix := ""
+	if strings.TrimSpace(alias) != "" {
+		prefix = alias + "."
+	}
+	parts := make([]string, 0, 4)
+	for _, column := range []string{"depends_on_id", "depends_on_issue_id", "depends_on_wisp_id", "depends_on_external"} {
+		if columns[column] {
+			parts = append(parts, "NULLIF("+prefix+column+", '')")
+		}
+	}
+	if len(parts) == 0 {
+		return "", fmt.Errorf("no dependency target columns")
+	}
+	return "COALESCE(" + strings.Join(parts, ", ") + ", '')", nil
+}
+
+func workflowSQLWorkflowIDsSubquery(tableSets []workflowSQLTableSet) string {
+	parts := make([]string, 0, len(tableSets))
+	for _, tables := range tableSets {
+		parts = append(parts, `
+			SELECT i.id FROM `+tables.beads+` i
+			WHERE i.id = ? OR JSON_UNQUOTE(JSON_EXTRACT(i.metadata, '$."gc.root_bead_id"')) = ?
+		`)
+	}
+	return strings.Join(parts, " UNION ")
+}
+
+func workflowSQLWorkflowIDsSubqueryArgs(tableSets []workflowSQLTableSet, rootID string) []any {
+	args := make([]any, 0, len(tableSets)*2)
+	for range tableSets {
+		args = append(args, rootID, rootID)
+	}
+	return args
 }
 
 func workflowSQLDepFromRow(issueID, dependsOnID, depType sql.NullString) beads.Dep {
@@ -315,14 +474,7 @@ func (s *Server) tryFullWorkflowSQL(workflowID, fallbackScopeKind, fallbackScope
 	// Collect physical deps only — logical nodes are computed by real-world app.
 	workflowDeps, partial := collectWorkflowDeps(store, beadIndex)
 
-	scopeKind := fallbackScopeKind
-	scopeRef := fallbackScopeRef
-	if sk := strings.TrimSpace(root.Metadata["gc.scope_kind"]); sk != "" {
-		scopeKind = sk
-	}
-	if sr := strings.TrimSpace(root.Metadata["gc.scope_ref"]); sr != "" {
-		scopeRef = sr
-	}
+	scopeKind, scopeRef := workflowSQLSnapshotScope(root, chosen.info, fallbackScopeKind, fallbackScopeRef)
 
 	storeRef := chosen.info.ref
 	beadResponses := make([]workflowBeadResponse, 0, len(workflowBeads))
@@ -361,6 +513,24 @@ func (s *Server) tryFullWorkflowSQL(workflowID, fallbackScopeKind, fallbackScope
 		snapshot.SnapshotEventSeq = &snapshotIndex
 	}
 	return snapshot, nil
+}
+
+func workflowSQLSnapshotScope(root beads.Bead, info workflowStoreInfo, fallbackScopeKind, fallbackScopeRef string) (string, string) {
+	scopeKind := strings.TrimSpace(fallbackScopeKind)
+	scopeRef := strings.TrimSpace(fallbackScopeRef)
+	if scopeKind == "" {
+		scopeKind = strings.TrimSpace(info.scopeKind)
+	}
+	if scopeRef == "" {
+		scopeRef = strings.TrimSpace(info.scopeRef)
+	}
+	if sk := strings.TrimSpace(root.Metadata["gc.scope_kind"]); sk != "" {
+		scopeKind = sk
+	}
+	if sr := strings.TrimSpace(root.Metadata["gc.scope_ref"]); sr != "" {
+		scopeRef = sr
+	}
+	return scopeKind, scopeRef
 }
 
 // tryWorkflowSQL attempts to resolve the dolt port and database for the
@@ -464,8 +634,19 @@ func workflowStorePath(state State, info workflowStoreInfo) (string, bool) {
 }
 
 func workflowSQLFindRoot(cfg *config.City, user, password, host string, port int, database, workflowID string) (beads.Bead, bool, error) {
+	db, err := openWorkflowSQLDB(user, password, host, port, database)
+	if err != nil {
+		return beads.Bead{}, false, err
+	}
+	defer db.Close() //nolint:errcheck // best-effort cleanup
+
+	tableSets, err := workflowSQLAvailableTableSets(db)
+	if err != nil {
+		return beads.Bead{}, false, err
+	}
+
 	hasWorkflowIDPrefix := workflowSQLWorkflowIDPrefix(cfg, workflowID) != ""
-	if root, ok, err := workflowSQLGetBead(user, password, host, port, database, workflowID); err != nil {
+	if root, ok, err := workflowSQLGetBeadFromTables(db, tableSets, workflowID); err != nil {
 		return beads.Bead{}, false, err
 	} else if ok {
 		if isWorkflowRoot(root) && matchesWorkflowID(root, workflowID) {
@@ -479,51 +660,64 @@ func workflowSQLFindRoot(cfg *config.City, user, password, host string, port int
 		return beads.Bead{}, false, nil
 	}
 
-	db, err := openWorkflowSQLDB(user, password, host, port, database)
-	if err != nil {
-		return beads.Bead{}, false, err
-	}
-	defer db.Close() //nolint:errcheck // best-effort cleanup
-
-	row := db.QueryRow(`
-		SELECT
-			i.id, i.title, i.status, i.issue_type, i.assignee,
-			i.description, i.created_at, i.updated_at,
-			i.metadata
-		FROM issues i
-		WHERE JSON_UNQUOTE(JSON_EXTRACT(i.metadata, '$."gc.kind"')) = 'workflow'
-		  AND JSON_UNQUOTE(JSON_EXTRACT(i.metadata, '$."gc.workflow_id"')) = ?
-		ORDER BY i.created_at
-		LIMIT 1
-	`, workflowID)
-	bead, ok, err := workflowSQLScanBead(row.Scan)
-	if err != nil || !ok {
-		return beads.Bead{}, ok, err
-	}
-	return bead, true, nil
+	return workflowSQLFindRootByWorkflowID(db, tableSets, workflowID)
 }
 
 func workflowSQLWorkflowIDPrefix(cfg *config.City, workflowID string) string {
 	return sling.BeadPrefixForCity(cfg, strings.TrimSpace(workflowID))
 }
 
-func workflowSQLGetBead(user, password, host string, port int, database, id string) (beads.Bead, bool, error) {
-	db, err := openWorkflowSQLDB(user, password, host, port, database)
-	if err != nil {
-		return beads.Bead{}, false, err
+func workflowSQLGetBeadFromTables(db *sql.DB, tableSets []workflowSQLTableSet, id string) (beads.Bead, bool, error) {
+	for _, tables := range tableSets {
+		row := db.QueryRow(`
+			SELECT
+				i.id, i.title, i.status, i.issue_type, i.assignee,
+				i.description, i.created_at, i.updated_at,
+				i.metadata
+			FROM `+tables.beads+` i
+			WHERE i.id = ?
+			LIMIT 1
+		`, id)
+		bead, ok, err := workflowSQLScanBead(row.Scan)
+		if err != nil {
+			return beads.Bead{}, false, fmt.Errorf("get bead %s from %s: %w", id, tables.beads, err)
+		}
+		if ok {
+			return bead, true, nil
+		}
 	}
-	defer db.Close() //nolint:errcheck // best-effort cleanup
+	return beads.Bead{}, false, nil
+}
 
-	row := db.QueryRow(`
-		SELECT
-			i.id, i.title, i.status, i.issue_type, i.assignee,
-			i.description, i.created_at, i.updated_at,
-			i.metadata
-		FROM issues i
-		WHERE i.id = ?
-		LIMIT 1
-	`, id)
-	return workflowSQLScanBead(row.Scan)
+func workflowSQLFindRootByWorkflowID(db *sql.DB, tableSets []workflowSQLTableSet, workflowID string) (beads.Bead, bool, error) {
+	matches := make([]beads.Bead, 0, len(tableSets))
+	for _, tables := range tableSets {
+		row := db.QueryRow(`
+			SELECT
+				i.id, i.title, i.status, i.issue_type, i.assignee,
+				i.description, i.created_at, i.updated_at,
+				i.metadata
+			FROM `+tables.beads+` i
+			WHERE JSON_UNQUOTE(JSON_EXTRACT(i.metadata, '$."gc.kind"')) = 'workflow'
+			  AND JSON_UNQUOTE(JSON_EXTRACT(i.metadata, '$."gc.workflow_id"')) = ?
+			ORDER BY i.created_at
+			LIMIT 1
+		`, workflowID)
+		bead, ok, err := workflowSQLScanBead(row.Scan)
+		if err != nil {
+			return beads.Bead{}, false, fmt.Errorf("find workflow %s in %s: %w", workflowID, tables.beads, err)
+		}
+		if ok {
+			matches = append(matches, bead)
+		}
+	}
+	if len(matches) == 0 {
+		return beads.Bead{}, false, nil
+	}
+	sort.SliceStable(matches, func(i, j int) bool {
+		return matches[i].CreatedAt.Before(matches[j].CreatedAt)
+	})
+	return matches[0], true, nil
 }
 
 func openWorkflowSQLDB(user, password, host string, port int, database string) (*sql.DB, error) {
@@ -557,6 +751,7 @@ func workflowSQLScanBead(scan func(dest ...any) error) (beads.Bead, bool, error)
 	b.Assignee = assignee.String
 	b.Description = description.String
 	b.CreatedAt = createdAt
+	b.UpdatedAt = updatedAt
 
 	if len(metadataJSON) > 0 {
 		b.Metadata = make(map[string]string)
@@ -600,13 +795,14 @@ func buildDoltDSN(user, password, host string, port int, database string) string
 		user = "root"
 	}
 	cfg := mysql.Config{
-		User:      user,
-		Passwd:    password,
-		Net:       "tcp",
-		Addr:      fmt.Sprintf("%s:%d", host, port),
-		DBName:    database,
-		ParseTime: true,
-		Timeout:   10 * time.Second,
+		User:                 user,
+		Passwd:               password,
+		Net:                  "tcp",
+		Addr:                 fmt.Sprintf("%s:%d", host, port),
+		DBName:               database,
+		AllowNativePasswords: true,
+		ParseTime:            true,
+		Timeout:              10 * time.Second,
 	}
 	return cfg.FormatDSN()
 }

@@ -8,18 +8,29 @@ import (
 )
 
 const (
-	testGCBinaryDirPrefix      = "gc-test-binary-pid"
-	testCmdGCTempRootPrefix    = "gct"
-	testSharedFixtureDirPrefix = "gascity-gc-test-fixtures-pid"
-	testSlingFormulaDirPrefix  = "gc-sling-test-formulas-pid"
-	testSlingCityDirPrefix     = "gc-sling-test-city-pid"
-	testGCHomeDirPrefix        = "gascity-gc-home-pid"
-	testRuntimeDirPrefix       = "gascity-runtime-pid"
-	testProviderStubDirPrefix  = "gascity-provider-stubs-pid"
+	testGCBinaryDirPrefix        = "gc-test-binary-pid"
+	testCmdGCTempRootPrefix      = "gct"
+	testCmdGCShardTempRootPrefix = "gcx"
+	testShardIndexEnv            = "GC_TEST_SHARD_INDEX"
+	testShardTotalEnv            = "GC_TEST_SHARD_TOTAL"
+	testActiveTempRootMarker     = ".gc-test-active-root"
+	testSharedFixtureDirPrefix   = "gascity-gc-test-fixtures-pid"
+	testSlingFormulaDirPrefix    = "gc-sling-test-formulas-pid"
+	testSlingCityDirPrefix       = "gc-sling-test-city-pid"
+	testGCHomeDirPrefix          = "gascity-gc-home-pid"
+	testRuntimeDirPrefix         = "gascity-runtime-pid"
+	testProviderStubDirPrefix    = "gascity-provider-stubs-pid"
 )
 
 func pidPrefixedTempPattern(prefix string) string {
 	return prefix + strconv.Itoa(os.Getpid()) + "-*"
+}
+
+func cmdGCTestTempRootPrefix() string {
+	if strings.TrimSpace(os.Getenv(testShardIndexEnv)) != "" || strings.TrimSpace(os.Getenv(testShardTotalEnv)) != "" {
+		return testCmdGCShardTempRootPrefix
+	}
+	return testCmdGCTempRootPrefix
 }
 
 func pidFromPrefixedDirName(name, prefix string) (int, bool) {
@@ -65,6 +76,10 @@ func sweepOrphanPIDPrefixedDirs(root, prefix string) {
 		if pidAlive(pid) {
 			continue
 		}
-		_ = os.RemoveAll(filepath.Join(root, e.Name()))
+		path := filepath.Join(root, e.Name())
+		if _, err := os.Stat(filepath.Join(path, testActiveTempRootMarker)); err == nil {
+			continue
+		}
+		_ = os.RemoveAll(path)
 	}
 }

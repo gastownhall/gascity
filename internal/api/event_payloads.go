@@ -456,6 +456,7 @@ func init() {
 	events.RegisterPayload(events.SessionStranded, events.NoPayload{})
 	events.RegisterPayload(events.SessionResetStalled, events.SessionResetStalledPayload{})
 	events.RegisterPayload(events.SessionWorkQueryFailed, SessionLifecyclePayload{})
+	events.RegisterPayload(events.SessionColdStartTimeout, events.NoPayload{})
 	events.RegisterPayload(events.ConvoyCreated, events.NoPayload{})
 	events.RegisterPayload(events.ConvoyClosed, events.NoPayload{})
 	events.RegisterPayload(events.ControllerStarted, events.NoPayload{})
@@ -485,4 +486,8 @@ func init() {
 	// gc.store.maintenance.* — supervisor StoreMaintenanceLoop outcomes.
 	events.RegisterPayload(events.StoreMaintenanceDone, events.StoreMaintenanceDonePayload{})
 	events.RegisterPayload(events.StoreMaintenanceFailed, events.StoreMaintenanceFailedPayload{})
+
+	// gc.store.disk_* — ENOSPC pre-flight events emitted before CALL DOLT_GC.
+	events.RegisterPayload(events.StoreDiskWarn, events.StoreDiskWarnPayload{})
+	events.RegisterPayload(events.StoreDiskCritical, events.StoreDiskCriticalPayload{})
 }

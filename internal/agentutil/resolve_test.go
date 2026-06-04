@@ -252,3 +252,44 @@ func TestNormalizePoolRouteTargetNilConfig(t *testing.T) {
 		t.Errorf("NormalizePoolRouteTarget(nil) = %q, want unchanged", got)
 	}
 }
+
+func TestAgentReachesWorkflowStoreCityScopedReachesAnyStore(t *testing.T) {
+	// vp-kvp stage i: the cross-store route guard
+	// (validateBuiltInRouteStoreReachable) must NOT refuse a route to a
+	// city-scoped (cross-store-eligible) target — it legitimately serves any
+	// store. Before this exemption, AgentReachesWorkflowStore gated city-scoped
+	// agents (no Dir) to "city:" stores only, so routing rig-store work to the
+	// city singleton failed loud as a false positive, blocking stages ii/iii.
+	cfg := &config.City{
+		Rigs: []config.Rig{{Name: "voxist-web", Path: "/c/voxist-web", Prefix: "vw"}},
+	}
+	cityAgent := &config.Agent{Name: "platform-architect", Scope: "city"}
+
+	if !AgentReachesWorkflowStore("rig:voxist-web", cityAgent, "/c", cfg) {
+		t.Fatal("city-scoped agent must reach a rig store (cross-store eligible)")
+	}
+	if !AgentReachesWorkflowStore("city:test-city", cityAgent, "/c", cfg) {
+		t.Fatal("city-scoped agent must still reach the city store")
+	}
+
+	// Rig-scoped agents are byte-for-byte unchanged: still single-store.
+	rigAgent := &config.Agent{Name: "reviewer", Dir: "voxist-web"}
+	if AgentReachesWorkflowStore("city:test-city", rigAgent, "/c", cfg) {
+		t.Fatal("rig-scoped agent must not reach the city store")
+	}
+	if !AgentReachesWorkflowStore("rig:voxist-web", rigAgent, "/c", cfg) {
+		t.Fatal("rig-scoped agent must reach its own rig store")
+	}
+}
+
+func TestAgentIsCrossStoreEligible(t *testing.T) {
+	if !AgentIsCrossStoreEligible(&config.Agent{Scope: "city"}) {
+		t.Fatal("scope=city must be cross-store eligible")
+	}
+	if AgentIsCrossStoreEligible(&config.Agent{Dir: "voxist-web"}) {
+		t.Fatal("rig-scoped agent must not be cross-store eligible")
+	}
+	if AgentIsCrossStoreEligible(nil) {
+		t.Fatal("nil agent must not be cross-store eligible")
+	}
+}

@@ -9,10 +9,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `gc nudge drain --inject` now prepends a one-line current-time stamp
+  (operator-local + UTC + epoch) to its `UserPromptSubmit` hook output, giving
+  agents a live clock in context every turn. The local zone follows the host
+  (`time.Local`/`$TZ`) or the `GC_OPERATOR_TZ` override; disable with
+  `GC_INJECT_CLOCK=0`. Folded into the existing nudge inject, so it adds zero
+  extra hook subprocesses per turn. See #3036.
+- The supervisor now merges a machine-local secrets file
+  (`${GC_HOME}/secrets.env`, dotenv syntax) into the launchd plist / systemd
+  unit environment on every service-file regeneration. This fixes provider
+  credentials being dropped when `gc start` runs from a shell that did not
+  export them (e.g. at login or after a reboot), which previously caused
+  silent provider auth failures. Only keys already eligible for the supervisor
+  environment are merged (provider credentials plus `GC_SUPERVISOR_ENV`
+  opt-ins); a value exported in the calling shell still takes precedence, and
+  `GC_SUPERVISOR_OMIT_PROVIDER_CREDS=1` suppresses provider credentials from
+  both sources.
 - `GC_DOLT_SYNC_PUSH_TIMEOUT_SECS` configures the SQL-mode push wall-clock
   ceiling for `gc dolt sync` (default 1800s, replacing the prior fixed 120s
   that SIGKILLed large first pushes). Metadata queries keep their own 120s
   bound.
+- **ENOSPC pre-flight for managed Dolt** (`GC_DOLT_MIN_FREE_BYTES`,
+  `GC_DOLT_WARN_FREE_BYTES`): managed-Dolt startup and the store-maintenance
+  compaction loop now check container free space via `statvfs(2)` before
+  performing disk-growing operations. Below the critical floor (default
+  500 MiB) startup is refused and compaction is skipped; below the soft floor
+  (default 2 GiB) a `gc.store.disk_warn` event is emitted and operations
+  proceed. Fails open on probe error and is disabled entirely when
+  `GC_DOLT_MIN_FREE_BYTES=0`. Uses `f_bavail` (APFS-safe — excludes purgeable
+  space). Addresses the root trigger of the 2026-06-01 fleet-drain incident.
 
 ### Fixed
 

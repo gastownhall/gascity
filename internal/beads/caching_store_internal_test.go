@@ -45,6 +45,120 @@ func TestCachingStoreRunReconciliationDetectsLabelContentChanges(t *testing.T) {
 	}
 }
 
+func TestCachingStoreCreateWithStorageForwardsPolicyStorageAndCachesResult(t *testing.T) {
+	backing := &storageCreateRecordingStore{Store: NewMemStore()}
+	cache := NewCachingStoreForTest(backing, nil)
+
+	created, err := cache.CreateWithStorage(Bead{Title: "session"}, StorageNoHistory)
+	if err != nil {
+		t.Fatalf("CreateWithStorage: %v", err)
+	}
+
+	if backing.storage != StorageNoHistory {
+		t.Fatalf("backing storage = %q, want %q", backing.storage, StorageNoHistory)
+	}
+	if !created.NoHistory || created.Ephemeral {
+		t.Fatalf("created storage = ephemeral:%v no_history:%v, want no-history", created.Ephemeral, created.NoHistory)
+	}
+	cached, err := cache.Get(created.ID)
+	if err != nil {
+		t.Fatalf("cache Get: %v", err)
+	}
+	if cached.ID != created.ID || !cached.NoHistory || cached.Ephemeral {
+		t.Fatalf("cached bead = %+v, want no-history created bead %s", cached, created.ID)
+	}
+}
+
+func TestCachingStoreGraphApplyHandleForwardsStorageAndCachesResult(t *testing.T) {
+	backing := &storageGraphApplyRecordingStore{Store: NewMemStore()}
+	cache := NewCachingStoreForTest(backing, nil)
+	applier, ok := GraphApplyFor(cache)
+	if !ok {
+		t.Fatal("GraphApplyFor(cache) = false, want graph handle from backing store")
+	}
+	storageApplier, ok := applier.(StorageGraphApplyStore)
+	if !ok {
+		t.Fatal("GraphApplyFor(cache) did not preserve StorageGraphApplyStore")
+	}
+
+	result, err := storageApplier.ApplyGraphPlanWithStorage(t.Context(), &GraphApplyPlan{
+		Nodes: []GraphApplyNode{{Key: "root", Title: "Root"}},
+	}, StorageEphemeral)
+	if err != nil {
+		t.Fatalf("ApplyGraphPlanWithStorage: %v", err)
+	}
+	if backing.storage != StorageEphemeral {
+		t.Fatalf("backing storage = %q, want %q", backing.storage, StorageEphemeral)
+	}
+	cached, err := cache.Get(result.IDs["root"])
+	if err != nil {
+		t.Fatalf("cache Get(graph root): %v", err)
+	}
+	if !cached.Ephemeral || cached.NoHistory {
+		t.Fatalf("cached graph root storage = ephemeral:%v no_history:%v, want ephemeral", cached.Ephemeral, cached.NoHistory)
+	}
+}
+
+func TestGraphApplyForCachingStoreWithoutGraphBackingReturnsFalse(t *testing.T) {
+	cache := NewCachingStoreForTest(NewMemStore(), nil)
+	if _, ok := GraphApplyFor(cache); ok {
+		t.Fatal("GraphApplyFor(cache with plain backing) = true, want false")
+	}
+}
+
+type storageCreateRecordingStore struct {
+	Store
+	storage StorageClass
+}
+
+func (s *storageCreateRecordingStore) CreateWithStorage(b Bead, storage StorageClass) (Bead, error) {
+	s.storage = storage
+	switch storage {
+	case StorageNoHistory:
+		b.NoHistory = true
+		b.Ephemeral = false
+	case StorageEphemeral:
+		b.Ephemeral = true
+		b.NoHistory = false
+	case StorageHistory:
+		b.Ephemeral = false
+		b.NoHistory = false
+	}
+	return s.Create(b)
+}
+
+type storageGraphApplyRecordingStore struct {
+	Store
+	storage StorageClass
+}
+
+func (s *storageGraphApplyRecordingStore) ApplyGraphPlan(ctx context.Context, plan *GraphApplyPlan) (*GraphApplyResult, error) {
+	return s.ApplyGraphPlanWithStorage(ctx, plan, StorageDefault)
+}
+
+func (s *storageGraphApplyRecordingStore) ApplyGraphPlanWithStorage(_ context.Context, plan *GraphApplyPlan, storage StorageClass) (*GraphApplyResult, error) {
+	s.storage = storage
+	ids := make(map[string]string, len(plan.Nodes))
+	for _, node := range plan.Nodes {
+		metadata := make(map[string]string, len(node.Metadata))
+		for key, value := range node.Metadata {
+			metadata[key] = value
+		}
+		created, err := s.Create(Bead{
+			Title:     node.Title,
+			Type:      node.Type,
+			Metadata:  metadata,
+			Ephemeral: storage == StorageEphemeral,
+			NoHistory: storage == StorageNoHistory,
+		})
+		if err != nil {
+			return nil, err
+		}
+		ids[node.Key] = created.ID
+	}
+	return &GraphApplyResult{IDs: ids}, nil
+}
+
 func TestCachingStoreRunReconciliationSkipLabelsSuppressesLabelOnlyUpdates(t *testing.T) {
 	t.Parallel()
 
@@ -171,6 +285,51 @@ func TestCachingStoreListLiveBypassesCache(t *testing.T) {
 	}
 	if len(got) != 1 || got[0].ID != bead.ID {
 		t.Fatalf("List(in_progress, Live) = %+v, want %s from backing store", got, bead.ID)
+	}
+}
+
+func TestCachingStoreListLiveInvalidatesCachedRowsMissingFromBacking(t *testing.T) {
+	t.Parallel()
+
+	backing := NewMemStore()
+	bead, err := backing.Create(Bead{
+		Title:    "work",
+		Assignee: "worker",
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	cache := NewCachingStoreForTest(backing, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	if err := backing.Close(bead.ID); err != nil {
+		t.Fatalf("Close backing: %v", err)
+	}
+
+	live, err := cache.List(ListQuery{Status: "open", Assignee: "worker", Live: true})
+	if err != nil {
+		t.Fatalf("List live: %v", err)
+	}
+	if len(live) != 0 {
+		t.Fatalf("Live List(open) = %+v, want closed bead omitted", live)
+	}
+
+	cached, err := cache.Handles().Cached.List(ListQuery{Status: "open", Assignee: "worker"})
+	if err != nil {
+		t.Fatalf("Cached List(open): %v", err)
+	}
+	if len(cached) != 0 {
+		t.Fatalf("Cached List(open) after live refresh = %+v, want stale bead invalidated", cached)
+	}
+
+	got, err := cache.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Status != "closed" {
+		t.Fatalf("Get status after live refresh = %q, want closed", got.Status)
 	}
 }
 
@@ -880,6 +1039,159 @@ func TestCachingStoreRecordsClosedEventVerificationErrorAndPreservesLocalReopen(
 	}
 	if !strings.Contains(stats.LastProblem, "verify bead.closed event") {
 		t.Fatalf("LastProblem = %q, want verify bead.closed event", stats.LastProblem)
+	}
+}
+
+func TestCachingStoreClosedEventRefreshesStalePayloadFromBacking(t *testing.T) {
+	backing := NewMemStore()
+	bead, err := backing.Create(Bead{Title: "close me", Metadata: map[string]string{"gc.step_ref": "old"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	cache := NewCachingStoreForTest(backing, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+
+	status := "closed"
+	if err := backing.Update(bead.ID, UpdateOpts{
+		Status: &status,
+		Metadata: map[string]string{
+			"ci.verdict": "done",
+			"gc.outcome": "pass",
+		},
+	}); err != nil {
+		t.Fatalf("Update backing close metadata: %v", err)
+	}
+
+	stalePayload, err := json.Marshal(Bead{
+		ID:        bead.ID,
+		Status:    "closed",
+		UpdatedAt: bead.UpdatedAt,
+		Metadata: map[string]string{
+			"gc.step_ref": "old",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Marshal stale payload: %v", err)
+	}
+	cache.ApplyEvent("bead.closed", stalePayload)
+
+	got, err := cache.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Status != "closed" {
+		t.Fatalf("Status after close event = %q, want closed", got.Status)
+	}
+	if got.Metadata["ci.verdict"] != "done" || got.Metadata["gc.outcome"] != "pass" {
+		t.Fatalf("metadata after stale close event = %#v, want fresh backing metadata", got.Metadata)
+	}
+}
+
+func TestCachingStoreClosedEventRefreshesBackingForMissingZeroOrEqualUpdatedAt(t *testing.T) {
+	type testCase struct {
+		name    string
+		payload func(t *testing.T, id string, fresh Bead) json.RawMessage
+		wantRef bool
+	}
+
+	cases := []testCase{
+		{
+			name: "missing updated_at",
+			payload: func(t *testing.T, id string, _ Bead) json.RawMessage {
+				t.Helper()
+				return json.RawMessage(fmt.Sprintf(`{"id":%q,"status":"closed"}`, id))
+			},
+			wantRef: true,
+		},
+		{
+			name: "zero updated_at",
+			payload: func(t *testing.T, id string, _ Bead) json.RawMessage {
+				t.Helper()
+				return json.RawMessage(fmt.Sprintf(
+					`{"id":%q,"status":"closed","updated_at":"0001-01-01T00:00:00Z"}`,
+					id,
+				))
+			},
+			wantRef: true,
+		},
+		{
+			name: "equal updated_at",
+			payload: func(t *testing.T, id string, fresh Bead) json.RawMessage {
+				t.Helper()
+				return json.RawMessage(fmt.Sprintf(
+					`{"id":%q,"status":"closed","updated_at":%q}`,
+					id,
+					fresh.UpdatedAt.Format(time.RFC3339Nano),
+				))
+			},
+			wantRef: true,
+		},
+		{
+			name: "newer updated_at",
+			payload: func(t *testing.T, id string, fresh Bead) json.RawMessage {
+				t.Helper()
+				return json.RawMessage(fmt.Sprintf(
+					`{"id":%q,"status":"closed","updated_at":%q,"metadata":{"gc.step_ref":"new"}}`,
+					id,
+					fresh.UpdatedAt.Add(time.Nanosecond).Format(time.RFC3339Nano),
+				))
+			},
+			wantRef: false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			backing := NewMemStore()
+			bead, err := backing.Create(Bead{Title: "close me", Metadata: map[string]string{"gc.step_ref": "old"}})
+			if err != nil {
+				t.Fatalf("Create: %v", err)
+			}
+
+			cache := NewCachingStoreForTest(backing, nil)
+			if err := cache.Prime(context.Background()); err != nil {
+				t.Fatalf("Prime: %v", err)
+			}
+
+			status := "closed"
+			if err := backing.Update(bead.ID, UpdateOpts{
+				Status: &status,
+				Metadata: map[string]string{
+					"ci.verdict": "done",
+					"gc.outcome": "pass",
+				},
+			}); err != nil {
+				t.Fatalf("Update backing close metadata: %v", err)
+			}
+			fresh, err := backing.Get(bead.ID)
+			if err != nil {
+				t.Fatalf("Get backing: %v", err)
+			}
+			cache.ApplyEvent("bead.closed", tc.payload(t, bead.ID, fresh))
+
+			got, err := cache.Get(bead.ID)
+			if err != nil {
+				t.Fatalf("Get: %v", err)
+			}
+			if got.Status != "closed" {
+				t.Fatalf("Status after close event = %q, want closed", got.Status)
+			}
+			if tc.wantRef {
+				if got.Metadata["ci.verdict"] != "done" || got.Metadata["gc.outcome"] != "pass" {
+					t.Fatalf("metadata after close event = %#v, want fresh backing metadata", got.Metadata)
+				}
+				return
+			}
+			if got.Metadata["gc.step_ref"] != "new" {
+				t.Fatalf("metadata after newer close event = %#v, want newer payload metadata", got.Metadata)
+			}
+			if _, ok := got.Metadata["ci.verdict"]; ok {
+				t.Fatalf("metadata after newer close event = %#v, want merge path to skip backing refresh", got.Metadata)
+			}
+		})
 	}
 }
 

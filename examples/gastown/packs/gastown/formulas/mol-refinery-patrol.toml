@@ -172,7 +172,7 @@ description = """
 Search for work beads assigned to you with branch metadata:
 ```bash
 WORK=$(gc bd list ${GC_RIG:+--rig="$GC_RIG"} --assignee=$GC_AGENT --status=open \
-  --exclude-type=epic --limit=1 --json | jq -r '.[0].id // empty')
+  --exclude-type=epic --has-metadata-key=branch --limit=1 --json | jq -r '.[0].id // empty')
 ```
 
 `${GC_RIG:+--rig="$GC_RIG"}` scopes the query to this refinery's rig

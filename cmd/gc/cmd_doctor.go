@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os/exec"
@@ -195,6 +196,8 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 	for _, c := range v2DeprecationChecks() {
 		register(c)
 	}
+	register(newProviderCatalogDoctorCheck(cityPath))
+	register(newProviderCatalogReadinessAdvisoryCheck(cityPath))
 	register(expandedConfigLoadCheck{})
 	register(&doctor.ImplicitImportCacheCheck{})
 	register(&doctor.DeprecatedAttachmentFieldsCheck{})
@@ -424,6 +427,10 @@ func (expandedConfigLoadCheck) Run(ctx *doctor.CheckContext) *doctor.CheckResult
 }
 
 func expandedConfigLoadFixHint(err error) string {
+	var providerErr *config.ProviderCatalogError
+	if errors.As(err, &providerErr) {
+		return "run `gc doctor --fix` to add missing builtin provider aliases; add custom providers manually"
+	}
 	if config.IsFragmentLegacyV1SurfaceError(err) {
 		return "move fragment-authored legacy surfaces by hand; `gc doctor --fix` only rewrites root city.toml/pack.toml surfaces"
 	}

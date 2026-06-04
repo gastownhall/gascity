@@ -41,7 +41,7 @@ gc [flags]
 | [gc graph](#gc-graph) | Show dependency graph for beads |
 | [gc handoff](#gc-handoff) | Send handoff mail and restart controller-managed sessions |
 | [gc help](#gc-help) | Help about any command |
-| [gc hook](#gc-hook) | Check for available work |
+| [gc hook](#gc-hook) | Find routed work for an agent |
 | [gc import](#gc-import) | Manage pack imports |
 | [gc init](#gc-init) | Initialize a new city |
 | [gc lint](#gc-lint) | Validate a pack before merge |
@@ -1321,6 +1321,7 @@ gc formula
 | [gc formula cook](#gc-formula-cook) | Instantiate a formula into the current bead store |
 | [gc formula list](#gc-formula-list) | List available formulas |
 | [gc formula show](#gc-formula-show) | Show a compiled formula recipe |
+| [gc formula version-check](#gc-formula-version-check) | Check if a bead's formula matches the current on-disk version |
 
 ## gc formula cook
 
@@ -1385,6 +1386,27 @@ gc formula show <formula-name> [flags]
 |------|------|---------|-------------|
 | `--json` | bool |  | emit JSON |
 | `--var` | stringArray |  | variable substitution for preview (key=value) |
+
+## gc formula version-check
+
+Compare the formula content hash stored on a molecule/workflow bead
+against the current on-disk formula file. Exits 0 if they match, 1 if
+they diverge.
+
+The bead must have gc.formula_hash metadata (set during instantiation).
+The formula is located via the bead's Ref field and the current formula
+search paths.
+
+Use this to detect whether a running session's formula has been updated
+since it was spawned.
+
+```
+gc formula version-check <bead-id> [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--json` | bool |  | output result as JSON |
 
 ## gc github
 
@@ -1522,7 +1544,7 @@ gc help [command]
 
 ## gc hook
 
-Checks for available work using the agent's work_query config.
+Finds routed work using the agent's work_query config.
 
 Without --inject: prints normalized ready-only output, exits 0 if work exists, 1 if empty.
 With --inject: silent legacy Stop-hook compatibility; skips the work query and always exits 0.
@@ -1567,8 +1589,8 @@ entry using source plus optional version. Supported sources are:
   with the pack subpath and locked to the current commit
 - remote git repositories: cloned and locked; --version accepts a semver
   constraint or sha:&lt;commit&gt;
-- remote git repository subpaths: use source strings such as
-  github.com/org/repo//packs/foo
+- remote GitHub repository subpaths: use dereferenceable tree URLs such as
+  https://github.com/org/repo/tree/main/packs/foo
 
 Registry catalog handles are lookup shortcuts in this wave, not durable
 [imports.*] field values. After lookup, authored TOML stores the resolved
@@ -1582,7 +1604,7 @@ gc import add <source> [flags]
 
 ```
 gc import add ./packs/review
-gc import add github.com/org/repo//packs/review --version '^1.2.0'
+gc import add https://github.com/org/repo/tree/main/packs/review --version '^1.2.0'
 
 # For uncommitted packs inside a git worktree, edit TOML directly:
 # [imports.review]
@@ -1653,9 +1675,9 @@ Create a new Gas City workspace in the given directory (or cwd).
 Runs an interactive wizard to choose a config template and coding agent
 provider. Creates the .gc/ runtime directory plus pack.toml, city.toml,
 the standard top-level directories, and .template.md prompt templates, then
-materializes builtin packs under .gc/system/packs. Use --template and
---provider to create a city non-interactively, or --file to initialize from an
-existing TOML config file.
+materializes builtin packs under .gc/system/packs. Use --template with
+--default-provider to create a city non-interactively, or --file to initialize
+from an existing TOML config file.
 
 Pass --preserve-existing to keep any pre-authored pack.toml, city.toml, or
 agent prompt files in the target directory (useful when bootstrapping a
@@ -1670,9 +1692,10 @@ gc init [path] [flags]
 ```
 gc init
   gc init ~/my-city
-  gc init --provider codex ~/my-city
-  gc init --template gastown --provider codex ~/my-city
-  gc init --provider codex --bootstrap-profile k8s-cell /city
+  gc init --default-provider codex ~/my-city
+  gc init --template gastown --default-provider codex ~/my-city
+  gc init --providers claude,codex --default-provider codex ~/my-city
+  gc init --default-provider codex --bootstrap-profile k8s-cell /city
   gc init --name my-city
   gc init --from ~/elan --name elan /city
   gc init --file examples/gastown.toml ~/bright-lights
@@ -1682,14 +1705,15 @@ gc init
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--bootstrap-profile` | string |  | bootstrap profile to apply for hosted/container defaults |
+| `--default-provider` | string |  | default readiness-aware provider to select from --providers |
 | `--file` | string |  | path to a TOML file to use as city.toml |
 | `--from` | string |  | path to an example city directory to copy |
 | `--json` | bool |  | emit JSON summary |
 | `--name` | string |  | workspace name (default: target directory basename) |
 | `--preserve-existing` | bool |  | keep any pre-authored pack.toml, city.toml, or agent prompt files instead of overwriting them |
-| `--provider` | string |  | built-in workspace provider to use for the default mayor config |
+| `--providers` | stringArray |  | readiness-aware providers to write to city.toml (repeatable or comma-separated) |
 | `--skip-provider-readiness` | bool |  | skip provider login/readiness checks during init and continue startup |
-| `--template` | string |  | config template to use non-interactively (minimal, gastown, custom) |
+| `--template` | string |  | non-interactive template to write: minimal, gastown, or custom |
 | `--yes` | bool |  | bypass the cross-city supervisor cycle confirmation prompt (warning is still printed for the audit trail) |
 
 ## gc lint
@@ -1903,7 +1927,7 @@ gc mail reply <id> [-s subject] [-m body] [flags]
 |------|------|---------|-------------|
 | `--json` | bool |  | emit JSONL result |
 | `-m`, `--message` | string |  | reply body text |
-| `--notify` | bool |  | nudge the recipient after replying |
+| `--notify` | bool |  | nudge the recipient about this reply, even if earlier mail is still unread |
 | `-s`, `--subject` | string |  | reply subject line |
 
 ## gc mail send
@@ -1939,7 +1963,7 @@ gc mail send mayor "Build is green"
 | `--from` | string |  | sender identity (default: $GC_SESSION_ID, $GC_ALIAS, $GC_AGENT, or "human") |
 | `--json` | bool |  | emit JSONL result |
 | `-m`, `--message` | string |  | message body text |
-| `--notify` | bool |  | nudge the recipient after sending |
+| `--notify` | bool |  | nudge the recipient about this message, even if earlier mail is still unread |
 | `-s`, `--subject` | string |  | message subject line |
 | `--to` | string |  | recipient address (alternative to positional argument) |
 
@@ -2075,7 +2099,7 @@ gc order
 | [gc order list](#gc-order-list) | List available orders |
 | [gc order run](#gc-order-run) | Execute an order manually |
 | [gc order show](#gc-order-show) | Show details of an order |
-| [gc order sweep-tracking](#gc-order-sweep-tracking) | Close stale order-tracking beads |
+| [gc order sweep-tracking](#gc-order-sweep-tracking) | Close stale and prune closed order-tracking beads |
 
 ## gc order check
 
@@ -2160,10 +2184,13 @@ gc order show <name> [flags]
 
 ## gc order sweep-tracking
 
-Close stale open order-tracking beads.
+Close stale open order-tracking beads and prune expired closed history.
 
 This is intended for maintenance exec orders. It only closes tracking beads
 older than --stale-after so a fresh in-flight order is not interrupted.
+Closed order-tracking history is deleted after
+[beads.policies.order_tracking].delete_after_close, defaulting to 7d, while
+always retaining at least the latest 10 closed tracking beads per order.
 The manual command runs to completion; controller startup and watchdog sweeps
 use bounded cleanup to avoid spending an unbounded tick on stale work.
 
@@ -3497,8 +3524,12 @@ Install the machine-wide supervisor as a platform service that
 starts on login.
 
 ```
-gc supervisor install
+gc supervisor install [flags]
 ```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--force` | bool |  | overwrite an existing service unit even if it references a different gc binary |
 
 ## gc supervisor logs
 

@@ -1162,6 +1162,44 @@ func openCompatibleFileStore(scopeRoot, cityPath string) (*beads.FileStore, erro
 	return openScopeLocalFileStore(cityPath)
 }
 
+// openCoordStoreAt opens the pure-Go SQLite bead store at the coordstore
+// directory for the given scope root.
+func openCoordStoreAt(scopeRoot, cityPath string) (beads.Store, error) {
+	storeDir, err := canonicalCoordStoreDir(scopeRoot)
+	if err != nil {
+		return nil, err
+	}
+	cfg, err := loadCityConfig(cityPath, io.Discard)
+	if err != nil {
+		cfg = nil
+	}
+	return beads.OpenSQLiteStore(
+		storeDir,
+		beads.WithSQLiteStoreIDPrefix(issuePrefixForScope(scopeRoot, cityPath, cfg)),
+		beads.WithSQLiteStoreRetention(4*time.Hour, 30*time.Second),
+	)
+}
+
+func canonicalCoordStoreDir(scopeRoot string) (string, error) {
+	storeDir := filepath.Join(scopeRoot, ".gc", "coordstore")
+	abs, err := filepath.Abs(filepath.Clean(storeDir))
+	if err != nil {
+		return "", fmt.Errorf("resolving coordstore dir %q: %w", storeDir, err)
+	}
+	return abs, nil
+}
+
+func providerIsCoordStore(provider string) bool {
+	switch strings.TrimSpace(provider) {
+	// "sqlite" (pure-Go SQLite via modernc.org/sqlite; also accepts the "sqlite-cgo" alias).
+	// Both resolve to SQLiteStore; "sqlite-cgo" is preserved for operator compatibility.
+	case "sqlite", "sqlite-cgo":
+		return true
+	default:
+		return false
+	}
+}
+
 func openStoreAtForCity(storePath, cityPath string) (beads.Store, error) {
 	result, err := openStoreResultAtForCity(storePath, cityPath)
 	if err != nil {
@@ -1175,11 +1213,16 @@ func openStoreResultAtForCity(storePath, cityPath string) (beads.StoreOpenResult
 	if runtimeCityPath == "" {
 		runtimeCityPath = cityForStoreDir(storePath)
 	}
+	cfg, _ := loadCityConfig(runtimeCityPath, io.Discard)
 	scopeRoot := resolveStoreScopeRoot(runtimeCityPath, storePath)
 	provider := rawBeadsProviderForScope(scopeRoot, runtimeCityPath)
+	if providerIsCoordStore(provider) {
+		store, err := openCoordStoreAt(scopeRoot, runtimeCityPath)
+		return beads.StoreOpenResult{Store: wrapStoreWithBeadPolicies(store, cfg), Diagnostic: beads.BeadsDiagnostic{Store: "SQLiteStore"}}, err
+	}
 	if strings.HasPrefix(provider, "exec:") && !providerUsesBdStoreContract(provider) {
 		store, err := openExecStoreAtForCity(provider, scopeRoot, runtimeCityPath)
-		return beads.StoreOpenResult{Store: store, Diagnostic: beads.ExecStoreDiagnostic()}, err
+		return beads.StoreOpenResult{Store: wrapStoreWithBeadPolicies(store, cfg), Diagnostic: beads.ExecStoreDiagnostic()}, err
 	}
 	result, err := beads.OpenStoreAtForCity(context.Background(), beads.StoreOpenOptions{
 		ScopeRoot:        scopeRoot,
@@ -1210,6 +1253,7 @@ func openStoreResultAtForCity(storePath, cityPath string) (beads.StoreOpenResult
 	if err != nil {
 		return beads.StoreOpenResult{}, err
 	}
+	result.Store = wrapStoreWithBeadPolicies(result.Store, cfg)
 	return result, nil
 }
 

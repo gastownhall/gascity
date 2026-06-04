@@ -22,7 +22,7 @@ $ brew install gascity
 
 ~
 $ gc version
-0.13.4
+1.2.1
 ```
 
 > NOTE: the gascity installation is a great way to get the right dependencies in

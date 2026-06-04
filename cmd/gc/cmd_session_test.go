@@ -1014,8 +1014,9 @@ func TestBuildResumeCommandIncludesSettingsAndDefaultArgs(t *testing.T) {
 
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "test-city"},
+		Providers: builtinProviderAliasesForTest("claude"),
 		Agents: []config.Agent{
-			{Name: "mayor"},
+			{Name: "mayor", Provider: "claude"},
 		},
 	}
 	info := session.Info{
@@ -2396,6 +2397,9 @@ name = "test-city"
 [beads]
 provider = "file"
 
+[providers.codex]
+base = "builtin:codex"
+
 [[rigs]]
 name = "demo"
 path = %q
@@ -2510,6 +2514,9 @@ provider = "file"
 
 [session]
 provider = "acp"
+
+[providers.codex]
+base = "builtin:codex"
 
 [[rigs]]
 name = "demo"

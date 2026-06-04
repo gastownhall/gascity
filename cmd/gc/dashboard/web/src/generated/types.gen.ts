@@ -268,6 +268,7 @@ export type Bead = {
         [key: string]: string;
     };
     needs?: Array<string> | null;
+    no_history?: boolean;
     parent?: string;
     priority?: number;
     ref?: string;
@@ -385,6 +386,20 @@ export type BeadUpdateBody = {
      * Bead type.
      */
     type?: string;
+};
+
+export type BeadWorktreeReapSkippedPayload = {
+    bead_id: string;
+    path: string;
+    reason: string;
+    rig: string;
+};
+
+export type BeadWorktreeReapedPayload = {
+    bead_id: string;
+    branch: string;
+    path: string;
+    rig: string;
 };
 
 export type BeadsDiagnostic = {
@@ -784,7 +799,7 @@ export type EventEmitRequest = {
     type: string;
 };
 
-export type EventPayload = AdapterEventPayload | BeadEventPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | GroupCreatedEventPayload | InboundEventPayload | MailEventPayload | NoPayload | OutboundEventPayload | PostgresCredentialResolvedPayload | ProjectIdentityStampedPayload | RequestFailedPayload | RotatedPayload | SessionCreateSucceededPayload | SessionDrainAckedWithAssignedWorkPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionResetStalledPayload | SessionSubmitSucceededPayload | StoreMaintenanceDonePayload | StoreMaintenanceFailedPayload | SupervisorFsPressureSkippedTickPayload | SupervisorShutdownPayload | UnboundEventPayload | WorkerOperationEventPayload;
+export type EventPayload = AdapterEventPayload | BeadEventPayload | BeadWorktreeReapSkippedPayload | BeadWorktreeReapedPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | GroupCreatedEventPayload | InboundEventPayload | MailEventPayload | NoPayload | OutboundEventPayload | PostgresCredentialResolvedPayload | ProjectIdentityStampedPayload | RequestFailedPayload | RotatedPayload | SessionCreateSucceededPayload | SessionDrainAckedWithAssignedWorkPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionResetStalledPayload | SessionSubmitSucceededPayload | StoreDiskCriticalPayload | StoreDiskWarnPayload | StoreMaintenanceDonePayload | StoreMaintenanceFailedPayload | SupervisorFsPressureSkippedTickPayload | SupervisorShutdownPayload | UnboundEventPayload | WorkerOperationEventPayload;
 
 export type EventRotateAnchor = {
     /**
@@ -3165,6 +3180,19 @@ export type StatusWorkCounts = {
     ready: number;
 };
 
+export type StoreDiskCriticalPayload = {
+    data_dir: string;
+    floor_bytes: number;
+    free_bytes: number;
+};
+
+export type StoreDiskWarnPayload = {
+    data_dir: string;
+    floor_bytes: number;
+    free_bytes: number;
+    warn_bytes: number;
+};
+
 export type StoreMaintenanceDonePayload = {
     after_bytes: number;
     before_bytes: number;
@@ -3337,6 +3365,10 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeBeadDeleted) | ({
     type: 'bead.updated';
 } & TypedEventStreamEnvelopeBeadUpdated) | ({
+    type: 'bead.worktree.reap_skipped';
+} & TypedEventStreamEnvelopeBeadWorktreeReapSkipped) | ({
+    type: 'bead.worktree.reaped';
+} & TypedEventStreamEnvelopeBeadWorktreeReaped) | ({
     type: 'city.created';
 } & TypedEventStreamEnvelopeCityCreated) | ({
     type: 'city.resumed';
@@ -3369,6 +3401,10 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeExtmsgOutbound) | ({
     type: 'extmsg.unbound';
 } & TypedEventStreamEnvelopeExtmsgUnbound) | ({
+    type: 'gc.store.disk_critical';
+} & TypedEventStreamEnvelopeGcStoreDiskCritical) | ({
+    type: 'gc.store.disk_warn';
+} & TypedEventStreamEnvelopeGcStoreDiskWarn) | ({
     type: 'gc.store.maintenance.done';
 } & TypedEventStreamEnvelopeGcStoreMaintenanceDone) | ({
     type: 'gc.store.maintenance.failed';
@@ -3411,6 +3447,8 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeRequestResultSessionMessage) | ({
     type: 'request.result.session.submit';
 } & TypedEventStreamEnvelopeRequestResultSessionSubmit) | ({
+    type: 'session.cold_start_timeout';
+} & TypedEventStreamEnvelopeSessionColdStartTimeout) | ({
     type: 'session.crashed';
 } & TypedEventStreamEnvelopeSessionCrashed) | ({
     type: 'session.drain_acked_with_assigned_work';
@@ -3501,6 +3539,34 @@ export type TypedEventStreamEnvelopeBeadUpdated = {
     subject?: string;
     ts: string;
     type: 'bead.updated';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedEventStreamEnvelope bead.worktree.reap_skipped
+ */
+export type TypedEventStreamEnvelopeBeadWorktreeReapSkipped = {
+    actor: string;
+    message?: string;
+    payload: BeadWorktreeReapSkippedPayload;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'bead.worktree.reap_skipped';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedEventStreamEnvelope bead.worktree.reaped
+ */
+export type TypedEventStreamEnvelopeBeadWorktreeReaped = {
+    actor: string;
+    message?: string;
+    payload: BeadWorktreeReapedPayload;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'bead.worktree.reaped';
     workflow?: WorkflowEventProjection;
 };
 
@@ -3739,6 +3805,34 @@ export type TypedEventStreamEnvelopeExtmsgUnbound = {
     subject?: string;
     ts: string;
     type: 'extmsg.unbound';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedEventStreamEnvelope gc.store.disk_critical
+ */
+export type TypedEventStreamEnvelopeGcStoreDiskCritical = {
+    actor: string;
+    message?: string;
+    payload: StoreDiskCriticalPayload;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'gc.store.disk_critical';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedEventStreamEnvelope gc.store.disk_warn
+ */
+export type TypedEventStreamEnvelopeGcStoreDiskWarn = {
+    actor: string;
+    message?: string;
+    payload: StoreDiskWarnPayload;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'gc.store.disk_warn';
     workflow?: WorkflowEventProjection;
 };
 
@@ -4037,6 +4131,20 @@ export type TypedEventStreamEnvelopeRequestResultSessionSubmit = {
 };
 
 /**
+ * TypedEventStreamEnvelope session.cold_start_timeout
+ */
+export type TypedEventStreamEnvelopeSessionColdStartTimeout = {
+    actor: string;
+    message?: string;
+    payload: NoPayload;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'session.cold_start_timeout';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
  * TypedEventStreamEnvelope session.crashed
  */
 export type TypedEventStreamEnvelopeSessionCrashed = {
@@ -4288,6 +4396,10 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeBeadDeleted) | ({
     type: 'bead.updated';
 } & TypedTaggedEventStreamEnvelopeBeadUpdated) | ({
+    type: 'bead.worktree.reap_skipped';
+} & TypedTaggedEventStreamEnvelopeBeadWorktreeReapSkipped) | ({
+    type: 'bead.worktree.reaped';
+} & TypedTaggedEventStreamEnvelopeBeadWorktreeReaped) | ({
     type: 'city.created';
 } & TypedTaggedEventStreamEnvelopeCityCreated) | ({
     type: 'city.resumed';
@@ -4320,6 +4432,10 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeExtmsgOutbound) | ({
     type: 'extmsg.unbound';
 } & TypedTaggedEventStreamEnvelopeExtmsgUnbound) | ({
+    type: 'gc.store.disk_critical';
+} & TypedTaggedEventStreamEnvelopeGcStoreDiskCritical) | ({
+    type: 'gc.store.disk_warn';
+} & TypedTaggedEventStreamEnvelopeGcStoreDiskWarn) | ({
     type: 'gc.store.maintenance.done';
 } & TypedTaggedEventStreamEnvelopeGcStoreMaintenanceDone) | ({
     type: 'gc.store.maintenance.failed';
@@ -4362,6 +4478,8 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeRequestResultSessionMessage) | ({
     type: 'request.result.session.submit';
 } & TypedTaggedEventStreamEnvelopeRequestResultSessionSubmit) | ({
+    type: 'session.cold_start_timeout';
+} & TypedTaggedEventStreamEnvelopeSessionColdStartTimeout) | ({
     type: 'session.crashed';
 } & TypedTaggedEventStreamEnvelopeSessionCrashed) | ({
     type: 'session.drain_acked_with_assigned_work';
@@ -4456,6 +4574,36 @@ export type TypedTaggedEventStreamEnvelopeBeadUpdated = {
     subject?: string;
     ts: string;
     type: 'bead.updated';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope bead.worktree.reap_skipped
+ */
+export type TypedTaggedEventStreamEnvelopeBeadWorktreeReapSkipped = {
+    actor: string;
+    city: string;
+    message?: string;
+    payload: BeadWorktreeReapSkippedPayload;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'bead.worktree.reap_skipped';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope bead.worktree.reaped
+ */
+export type TypedTaggedEventStreamEnvelopeBeadWorktreeReaped = {
+    actor: string;
+    city: string;
+    message?: string;
+    payload: BeadWorktreeReapedPayload;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'bead.worktree.reaped';
     workflow?: WorkflowEventProjection;
 };
 
@@ -4711,6 +4859,36 @@ export type TypedTaggedEventStreamEnvelopeExtmsgUnbound = {
     subject?: string;
     ts: string;
     type: 'extmsg.unbound';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope gc.store.disk_critical
+ */
+export type TypedTaggedEventStreamEnvelopeGcStoreDiskCritical = {
+    actor: string;
+    city: string;
+    message?: string;
+    payload: StoreDiskCriticalPayload;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'gc.store.disk_critical';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope gc.store.disk_warn
+ */
+export type TypedTaggedEventStreamEnvelopeGcStoreDiskWarn = {
+    actor: string;
+    city: string;
+    message?: string;
+    payload: StoreDiskWarnPayload;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'gc.store.disk_warn';
     workflow?: WorkflowEventProjection;
 };
 
@@ -5026,6 +5204,21 @@ export type TypedTaggedEventStreamEnvelopeRequestResultSessionSubmit = {
     subject?: string;
     ts: string;
     type: 'request.result.session.submit';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope session.cold_start_timeout
+ */
+export type TypedTaggedEventStreamEnvelopeSessionColdStartTimeout = {
+    actor: string;
+    city: string;
+    message?: string;
+    payload: NoPayload;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'session.cold_start_timeout';
     workflow?: WorkflowEventProjection;
 };
 

@@ -55,6 +55,9 @@ func (c *DurationRangeCheck) Run(_ *CheckContext) *CheckResult {
 			// ValidateDurations handles parse errors; skip here.
 			continue
 		}
+		if d <= 0 && durationRangeNonPositiveDisables(dr) {
+			continue
+		}
 		if d < dr.min {
 			issues = append(issues, fmt.Sprintf(
 				"%s %s = %q (%v) is below minimum %v",
@@ -100,6 +103,7 @@ func (c *DurationRangeCheck) collectRanges() []durationRange {
 		durationRange{"[session]", "nudge_retry_interval", c.cfg.Session.NudgeRetryInterval, minInterval, maxTimeout},
 		durationRange{"[session]", "nudge_lock_timeout", c.cfg.Session.NudgeLockTimeout, minTimeout, maxTimeout},
 		durationRange{"[session]", "startup_timeout", c.cfg.Session.StartupTimeout, minTimeout, maxTimeout},
+		durationRange{"[session]", "progress_stall_timeout", c.cfg.Session.ProgressStallTimeout, config.ProgressStallTimeoutMinimum, maxWindow},
 	)
 
 	// Daemon config.
@@ -126,6 +130,10 @@ func (c *DurationRangeCheck) collectRanges() []durationRange {
 	}
 
 	return ranges
+}
+
+func durationRangeNonPositiveDisables(dr durationRange) bool {
+	return dr.context == "[session]" && dr.field == "progress_stall_timeout"
 }
 
 // CanFix returns false — unreasonable durations must be corrected by the user.

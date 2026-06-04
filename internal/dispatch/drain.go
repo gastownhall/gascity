@@ -547,7 +547,7 @@ func buildDrainManifest(bead beads.Bead, parentConvoyID, itemFormula string, mem
 func ensureDrainUnitConvoy(store beads.Store, control beads.Bead, parentConvoyID string, count int, row drainManifestRow, member beads.Bead) (beads.Bead, bool, error) {
 	unlock := graphv2.LockKey(row.UnitKey)
 	defer unlock()
-	existing, err := store.ListByMetadata(map[string]string{"gc.drain_unit_key": row.UnitKey}, 1)
+	existing, err := store.ListByMetadata(map[string]string{"gc.drain_unit_key": row.UnitKey}, 1, beads.WithBothTiers)
 	if err != nil {
 		return beads.Bead{}, false, fmt.Errorf("%s: looking up unit convoy for member %s: %w", control.ID, member.ID, err)
 	}
@@ -611,7 +611,7 @@ func ensureDrainItemRoot(store beads.Store, control, unit, member beads.Bead, co
 	if err := closeFailedDrainItemRoots(store, control.ID, row.ItemRootKey); err != nil {
 		return "", false, err
 	}
-	existing, err := store.ListByMetadata(map[string]string{"gc.item_root_key": row.ItemRootKey}, 0, beads.IncludeClosed)
+	existing, err := store.ListByMetadata(map[string]string{"gc.item_root_key": row.ItemRootKey}, 0, beads.IncludeClosed, beads.WithBothTiers)
 	if err != nil {
 		return "", false, fmt.Errorf("%s: looking up item root %s: %w", control.ID, row.ItemRootKey, err)
 	}
@@ -687,7 +687,7 @@ func closeFailedDrainItemRoots(store beads.Store, controlID, itemRootKey string)
 	if store == nil || itemRootKey == "" {
 		return nil
 	}
-	matches, err := store.ListByMetadata(map[string]string{"gc.item_root_key": itemRootKey}, 0)
+	matches, err := store.ListByMetadata(map[string]string{"gc.item_root_key": itemRootKey}, 0, beads.WithBothTiers)
 	if err != nil {
 		return fmt.Errorf("%s: looking up failed drain item roots for key %s: %w", controlID, itemRootKey, err)
 	}

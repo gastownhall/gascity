@@ -331,8 +331,11 @@ func TestControllerStateCreatedAgentVisibleAfterStaleRuntimeInterleaving(t *test
 	current := &config.City{
 		Workspace: config.Workspace{Name: "city1"},
 		Beads:     config.BeadsConfig{Provider: "file"},
-		Rigs:      []config.Rig{{Name: "alpha", Path: rigDir}},
-		Agents:    []config.Agent{{Name: "worker", Dir: "alpha", Provider: "bash"}},
+		Providers: map[string]config.ProviderSpec{
+			"bash": {Command: "bash"},
+		},
+		Rigs:   []config.Rig{{Name: "alpha", Path: rigDir}},
+		Agents: []config.Agent{{Name: "worker", Dir: "alpha", Provider: "bash"}},
 	}
 	content, err := current.Marshal()
 	if err != nil {
@@ -354,8 +357,11 @@ func TestControllerStateCreatedAgentVisibleAfterStaleRuntimeInterleaving(t *test
 	stale := &config.City{
 		Workspace: config.Workspace{Name: "city1"},
 		Beads:     config.BeadsConfig{Provider: "file"},
-		Rigs:      []config.Rig{{Name: "alpha", Path: rigDir}},
-		Agents:    []config.Agent{{Name: "worker", Dir: "alpha", Provider: "bash"}},
+		Providers: map[string]config.ProviderSpec{
+			"bash": {Command: "bash"},
+		},
+		Rigs:   []config.Rig{{Name: "alpha", Path: rigDir}},
+		Agents: []config.Agent{{Name: "worker", Dir: "alpha", Provider: "bash"}},
 	}
 	cs.updateFromRuntime(stale, runtime.NewFake(), pendingRev)
 	if got := cs.Config(); configHasAgent(got, "alpha/helper") {
@@ -945,7 +951,7 @@ func TestControllerStateMutationRollsBackAgentOverrideWhenRefreshFails(t *testin
 		t.Fatalf("write prompt template: %v", err)
 	}
 
-	original := []byte("[workspace]\nname = \"city1\"\n")
+	original := []byte("[workspace]\nname = \"city1\"\n\n[providers.claude]\nbase = \"builtin:claude\"\n")
 	tomlPath := filepath.Join(cityDir, "city.toml")
 	if err := os.WriteFile(tomlPath, original, 0o644); err != nil {
 		t.Fatalf("write city.toml: %v", err)
@@ -1002,7 +1008,7 @@ func TestControllerStateMutationRestoresFullAgentScaffoldWhenRefreshFails(t *tes
 		}
 	}
 
-	original := []byte("[workspace]\nname = \"city1\"\n")
+	original := []byte("[workspace]\nname = \"city1\"\n\n[providers.claude]\nbase = \"builtin:claude\"\n")
 	tomlPath := filepath.Join(cityDir, "city.toml")
 	if err := os.WriteFile(tomlPath, original, 0o644); err != nil {
 		t.Fatalf("write city.toml: %v", err)
@@ -1010,6 +1016,9 @@ func TestControllerStateMutationRestoresFullAgentScaffoldWhenRefreshFails(t *tes
 
 	cs := newControllerState(context.Background(), &config.City{
 		Workspace: config.Workspace{Name: "city1"},
+		Providers: map[string]config.ProviderSpec{
+			"claude": config.BuiltinProviderAlias("claude"),
+		},
 	}, runtime.NewFake(), events.NewFake(), "city1", cityDir)
 	cs.editor = configedit.NewEditor(&corruptCityAfterRemoveFS{
 		triggerPath: agentDir,
@@ -1124,12 +1133,16 @@ func TestControllerStateSchema2CreateThenUpdateConventionAgent(t *testing.T) {
 		t.Fatalf("write pack.toml: %v", err)
 	}
 	tomlPath := filepath.Join(cityDir, "city.toml")
-	if err := os.WriteFile(tomlPath, []byte("[workspace]\nname = \"city1\"\n"), 0o644); err != nil {
+	if err := os.WriteFile(tomlPath, []byte("[workspace]\nname = \"city1\"\n\n[providers.claude]\nbase = \"builtin:claude\"\n\n[providers.codex]\nbase = \"builtin:codex\"\n"), 0o644); err != nil {
 		t.Fatalf("write city.toml: %v", err)
 	}
 
 	cs := newControllerState(context.Background(), &config.City{
 		Workspace: config.Workspace{Name: "city1"},
+		Providers: map[string]config.ProviderSpec{
+			"claude": config.BuiltinProviderAlias("claude"),
+			"codex":  config.BuiltinProviderAlias("codex"),
+		},
 	}, runtime.NewFake(), events.NewFake(), "city1", cityDir)
 	cs.pokeCh = make(chan struct{}, 2)
 	cs.configDirty = &atomic.Bool{}
@@ -1184,12 +1197,15 @@ func TestControllerStateSchema2CreateRollsBackFreshConventionScaffoldWhenAgentTO
 		t.Fatalf("write pack.toml: %v", err)
 	}
 	tomlPath := filepath.Join(cityDir, "city.toml")
-	if err := os.WriteFile(tomlPath, []byte("[workspace]\nname = \"city1\"\n"), 0o644); err != nil {
+	if err := os.WriteFile(tomlPath, []byte("[workspace]\nname = \"city1\"\n\n[providers.claude]\nbase = \"builtin:claude\"\n"), 0o644); err != nil {
 		t.Fatalf("write city.toml: %v", err)
 	}
 
 	cs := newControllerState(context.Background(), &config.City{
 		Workspace: config.Workspace{Name: "city1"},
+		Providers: map[string]config.ProviderSpec{
+			"claude": config.BuiltinProviderAlias("claude"),
+		},
 	}, runtime.NewFake(), events.NewFake(), "city1", cityDir)
 	agentDir := filepath.Join(cityDir, "agents", "helper")
 	cs.editor = configedit.NewEditor(&failAgentTomlRenameOSFS{target: filepath.Join(agentDir, "agent.toml")}, tomlPath)
@@ -1314,12 +1330,15 @@ func TestControllerStateSchema2RejectsRigScopeConventionAgent(t *testing.T) {
 		t.Fatalf("write pack.toml: %v", err)
 	}
 	tomlPath := filepath.Join(cityDir, "city.toml")
-	if err := os.WriteFile(tomlPath, []byte("[workspace]\nname = \"city1\"\n"), 0o644); err != nil {
+	if err := os.WriteFile(tomlPath, []byte("[workspace]\nname = \"city1\"\n\n[providers.claude]\nbase = \"builtin:claude\"\n"), 0o644); err != nil {
 		t.Fatalf("write city.toml: %v", err)
 	}
 
 	cs := newControllerState(context.Background(), &config.City{
 		Workspace: config.Workspace{Name: "city1"},
+		Providers: map[string]config.ProviderSpec{
+			"claude": config.BuiltinProviderAlias("claude"),
+		},
 	}, runtime.NewFake(), events.NewFake(), "city1", cityDir)
 
 	if err := cs.CreateAgent(config.Agent{Name: "helper", Provider: "claude", Scope: "rig"}); !errors.Is(err, configedit.ErrValidation) {
@@ -1348,12 +1367,15 @@ func TestControllerStateSchema2CreateThenDeleteConventionAgent(t *testing.T) {
 		t.Fatalf("write pack.toml: %v", err)
 	}
 	tomlPath := filepath.Join(cityDir, "city.toml")
-	if err := os.WriteFile(tomlPath, []byte("[workspace]\nname = \"city1\"\n"), 0o644); err != nil {
+	if err := os.WriteFile(tomlPath, []byte("[workspace]\nname = \"city1\"\n\n[providers.claude]\nbase = \"builtin:claude\"\n"), 0o644); err != nil {
 		t.Fatalf("write city.toml: %v", err)
 	}
 
 	cs := newControllerState(context.Background(), &config.City{
 		Workspace: config.Workspace{Name: "city1"},
+		Providers: map[string]config.ProviderSpec{
+			"claude": config.BuiltinProviderAlias("claude"),
+		},
 	}, runtime.NewFake(), events.NewFake(), "city1", cityDir)
 	cs.pokeCh = make(chan struct{}, 2)
 	cs.configDirty = &atomic.Bool{}
@@ -1541,6 +1563,19 @@ func TestControllerStateUpdateClosesReplacedRigStores(t *testing.T) {
 		t.Fatal("frontend rig store was not replaced")
 	}
 	waitForCloseStoreSpy(t, oldStore)
+}
+
+func TestCloseBeadStoreHandleUnwrapsPolicyWrappedCachingStore(t *testing.T) {
+	backing := &closeStoreSpy{Store: beads.NewMemStore()}
+	cache := beads.NewCachingStore(backing, nil)
+	wrapped := wrapStoreWithBeadPolicies(cache, &config.City{})
+
+	if err := closeBeadStoreHandle(wrapped); err != nil {
+		t.Fatalf("closeBeadStoreHandle: %v", err)
+	}
+	if backing.closeCount() != 1 {
+		t.Fatalf("backing CloseStore calls = %d, want 1", backing.closeCount())
+	}
 }
 
 func TestControllerStateUpdateKeepsStaleRigStoreUsableDuringReload(t *testing.T) {
@@ -2188,9 +2223,10 @@ provider = "file"
 	if !factoryCalled {
 		t.Fatal("buildStores did not route bd-backed rig through store factory")
 	}
-	cached, ok := stores["frontend"].(*beads.CachingStore)
+	frontendStore := underlyingPolicyStoreForTest(stores["frontend"])
+	cached, ok := frontendStore.(*beads.CachingStore)
 	if !ok {
-		t.Fatalf("frontend store = %T, want caching store", stores["frontend"])
+		t.Fatalf("frontend store = %T, want caching store", frontendStore)
 	}
 	if cached.Backing() != nativeBacking {
 		t.Fatalf("frontend backing = %T, want native factory backing", cached.Backing())

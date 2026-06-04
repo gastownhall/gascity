@@ -44,11 +44,10 @@ type TriageReport struct {
 }
 
 var foreverTaxByBackend = map[string]string{
-	"boltdb":     "~3d + own WAL risk (reversible)",
-	"bbolt":      "~3d + own WAL risk (reversible)",
-	"sqlite-cgo": "~3d (fully reversible)",
-	"sqlite":     "~3d (fully reversible)",
-	"badger":     "~3d (fully reversible)",
+	"boltdb": "~3d + own WAL risk (reversible)",
+	"bbolt":  "~3d + own WAL risk (reversible)",
+	"sqlite": "~3d (fully reversible)",
+	"badger": "~3d (fully reversible)",
 }
 
 type triageAccumulator struct {

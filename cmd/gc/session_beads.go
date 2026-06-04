@@ -1076,7 +1076,7 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 			if tp.WorkDir != "" {
 				meta["work_dir"] = tp.WorkDir
 			}
-			if tp.WakeMode != "" && tp.WakeMode != "resume" {
+			if tp.WakeMode != "" {
 				meta["wake_mode"] = tp.WakeMode
 			}
 			if isConfiguredNamed {
@@ -1899,8 +1899,8 @@ func reapStaleSessionBeads(
 
 func cleanupDeadRuntimeSessionCorpses(
 	store beads.Store,
-	rigStores map[string]beads.Store,
-	cfg *config.City,
+	_ map[string]beads.Store,
+	_ *config.City,
 	sessionBeads *sessionBeadSnapshot,
 	dt *drainTracker,
 	sp runtime.Provider,
@@ -1975,29 +1975,17 @@ func cleanupDeadRuntimeSessionCorpses(
 		// asleep/runtime-missing ghosts on the same slot indefinitely
 		// (gastownhall/gascity#2437).
 		//
-		// Gate the close on a live assigned-work check using the same
-		// predicate as closeSessionBeadIfRuntimeStoppedAndUnassigned —
-		// snapshots can be stale and work can be assigned by bead ID,
-		// runtime session_name, or configured named-session identity
-		// across the primary store and any rig stores. Closing while a
-		// session bead still owns open or in-progress work would
-		// orphan the assignment, remove the session from future
-		// snapshots, and starve the session.stranded diagnostic path
-		// (#1425) and normal wake/recovery flows of the session record
-		// they rely on. The outer `if store != nil` guard tolerates a
-		// nil store so the runtime-Stop side effect still runs in
-		// test contexts that don't wire a real store; closeBead is
-		// idempotent against repeated calls on the same bead.
+		// closeBead now releases any in-progress work assigned to this
+		// session (via releaseWorkFromClosedSessionBead), so closing is
+		// safe even when the session has assigned work. A session whose
+		// runtime has been confirmed dead and stopped cannot be resumed,
+		// so releasing its work is the correct action.
+		//
+		// The outer `if store != nil` guard tolerates a nil store so the
+		// runtime-Stop side effect still runs in test contexts that do not
+		// wire a real store; closeBead is idempotent on already-closed beads.
 		if store != nil {
-			hasAssignedWork, err := sessionHasOpenAssignedWorkForConfig(store, rigStores, b, cfg)
-			switch {
-			case err != nil:
-				fmt.Fprintf(stderr, "session reconciler: dead-runtime close guard for %s: %v\n", b.ID, err) //nolint:errcheck
-			case !hasAssignedWork:
-				closeBead(store, b.ID, "dead-runtime", clk.Now().UTC(), stderr)
-			default:
-				fmt.Fprintf(stderr, "session reconciler: dead runtime session %s retained — open assigned work blocks alias release\n", name) //nolint:errcheck
-			}
+			closeBead(store, b.ID, "dead-runtime", clk.Now().UTC(), stderr)
 		}
 		cleaned++
 	}
@@ -2261,7 +2249,16 @@ func staleReapStartBoundary(b beads.Bead) (time.Time, bool) {
 // the low-level metadata+close helper used once a caller has already decided
 // the bead is safe to retire (or the close reason is unrelated to work
 // ownership, such as failed-create cleanup).
+//
+// After a successful close, any non-closed work beads still assigned to
+// this session (by bead ID, session_name, or configured named identity)
+// have their assignee cleared and their status reset to "open" so the
+// pool reconciler can re-pick them. Without this, work orphaned by a
+// reap stays orphaned until someone clears the assignee by hand.
 func closeBead(store beads.Store, id, reason string, now time.Time, stderr io.Writer) bool {
+	if stderr == nil {
+		stderr = io.Discard
+	}
 	// Idempotence: closeBead is reached from three reconciler paths
 	// (closeSessionBeadIfUnassigned, closeSessionBeadIfRuntimeStoppedAndUnassigned,
 	// closeSessionBeadIfReachableStoreUnassigned). On an already-closed
@@ -2272,7 +2269,12 @@ func closeBead(store beads.Store, id, reason string, now time.Time, stderr io.Wr
 	// bead.updated event. Skipping the write when status is already
 	// closed is safe because all three callers are reconciler tick logic
 	// that should be no-op on terminal beads.
-	if existing, err := store.Get(id); err == nil && existing.Status == "closed" {
+	//
+	// We reuse this Get result as the snapshot for releaseWorkFromClosedSessionBead.
+	// A missing/failed Get is non-fatal — we still attempt the close, and
+	// releaseOrphanedPoolAssignments on the next tick is our idempotent fallback.
+	snapshot, snapshotErr := store.Get(id)
+	if snapshotErr == nil && snapshot.Status == "closed" {
 		return false
 	}
 	if reason == string(session.StateFailedCreate) {
@@ -2291,7 +2293,70 @@ func closeBead(store beads.Store, id, reason string, now time.Time, stderr io.Wr
 	// leaves zombie memberships and the successor never re-binds to
 	// slack (#1939).
 	cancelStateAssignedToRetiredSessionBead(store, id, now, stderr)
+	if snapshotErr == nil {
+		releaseWorkFromClosedSessionBead(store, snapshot, stderr)
+	}
 	return true
+}
+
+// releaseWorkFromClosedSessionBead clears the assignee on every non-closed
+// work bead that was assigned to the given session bead, and resets
+// in_progress work to open. The session's identifiers are those returned by
+// sessionBeadAssigneeIdentities (bead ID, session_name, configured named
+// identity, alias, and alias history) — any one of these may appear as a
+// work bead's assignee.
+//
+// Best-effort: errors are logged to stderr but never fail the caller, since
+// releaseOrphanedPoolAssignments at the top of the next reconcile tick is
+// our idempotent fallback.
+func releaseWorkFromClosedSessionBead(store beads.Store, sessionBead beads.Bead, stderr io.Writer) {
+	if store == nil {
+		return
+	}
+	if stderr == nil {
+		stderr = io.Discard
+	}
+
+	seenAssignees := make(map[string]struct{}, 3)
+	addAssignee := func(val string) {
+		val = strings.TrimSpace(val)
+		if val == "" {
+			return
+		}
+		seenAssignees[val] = struct{}{}
+	}
+	for _, id := range sessionBeadAssigneeIdentities(sessionBead) {
+		addAssignee(id)
+	}
+
+	seenWork := make(map[string]struct{})
+	empty := ""
+	openStatus := "open"
+	for assignee := range seenAssignees {
+		for _, status := range []string{"in_progress", "open"} {
+			work, err := store.List(beads.ListQuery{Assignee: assignee, Status: status})
+			if err != nil {
+				fmt.Fprintf(stderr, "session beads: listing work assigned to closing session %s (%s): %v\n", sessionBead.ID, assignee, err) //nolint:errcheck
+				continue
+			}
+			for _, item := range work {
+				if session.IsSessionBeadOrRepairable(item) {
+					continue
+				}
+				if _, dup := seenWork[item.ID]; dup {
+					continue
+				}
+				seenWork[item.ID] = struct{}{}
+				update := beads.UpdateOpts{Assignee: &empty}
+				if item.Status == "in_progress" {
+					update.Status = &openStatus
+				}
+				if err := store.Update(item.ID, update); err != nil {
+					fmt.Fprintf(stderr, "session beads: releasing work %s from closing session %s: %v\n", item.ID, sessionBead.ID, err) //nolint:errcheck
+				}
+			}
+		}
+	}
 }
 
 // resolveAgentTemplate returns the config agent template name for a given

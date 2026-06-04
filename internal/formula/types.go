@@ -122,6 +122,10 @@ type Formula struct {
 	// Source tracks where this formula was loaded from (set by parser).
 	Source string `json:"source,omitempty"`
 
+	// ContentHash is the SHA-256 hex digest of the raw formula file bytes.
+	// Set by ParseFile; empty for formulas parsed from in-memory bytes.
+	ContentHash string `json:"content_hash,omitempty"`
+
 	compilerRequirementSources []formulaCompilerConstraint
 }
 

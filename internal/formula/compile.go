@@ -296,11 +296,13 @@ func collectStepConditionVarRefs(condition string, refs map[string]bool) {
 
 func toRecipeWithGraph(f *Formula, graphWorkflow bool) (*Recipe, error) {
 	r := &Recipe{
-		Name:        f.Formula,
-		Description: f.Description,
-		Vars:        f.Vars,
-		Phase:       f.Phase,
-		Pour:        f.Pour,
+		Name:          f.Formula,
+		Description:   f.Description,
+		Vars:          f.Vars,
+		Phase:         f.Phase,
+		Pour:          f.Pour,
+		ContentHash:   f.ContentHash,
+		FormulaSource: f.Source,
 	}
 
 	// Determine root title: use {{title}} placeholder if the variable

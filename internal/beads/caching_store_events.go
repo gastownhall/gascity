@@ -54,10 +54,12 @@ func (c *CachingStore) ApplyEvent(eventType string, payload json.RawMessage) {
 
 	verifiedConflict := false
 	var verifiedClosedBase Bead
+	var verifiedClosedFresh Bead
+	verifiedClosedFromBacking := false
 	verifiedRecentLocal := false
 	var verifiedRecentLocalBase Bead
 	if conflictsCached && eventType == "bead.closed" {
-		matchesBacking, verifyErr := c.cacheClosedEventMatchesBacking(patch.ID)
+		fresh, matchesBacking, verifyErr := c.cacheClosedEventMatchesBacking(patch.ID)
 		if verifyErr != nil {
 			c.recordProblem(fmt.Sprintf("verify %s event", eventType), verifyErr)
 			// Drop destructive close events on verification failure; reconciliation
@@ -69,6 +71,10 @@ func (c *CachingStore) ApplyEvent(eventType string, payload json.RawMessage) {
 		}
 		verifiedConflict = true
 		verifiedClosedBase = conflictBase
+		if closedEventPayloadNeedsBackingRefresh(patch, fresh) {
+			verifiedClosedFresh = fresh
+			verifiedClosedFromBacking = true
+		}
 	}
 	if conflictsCached && eventType != "bead.closed" && locallyMutated && !recentlyLocal && !verifiedConflict {
 		// The bead is flagged locally mutated only because a prior applied
@@ -133,7 +139,10 @@ func (c *CachingStore) ApplyEvent(eventType string, payload json.RawMessage) {
 
 	b := patch
 	refreshedFromBacking := false
-	if !cached {
+	if verifiedClosedFromBacking {
+		b = verifiedClosedFresh
+		refreshedFromBacking = true
+	} else if !cached {
 		if fresh, err := c.backing.Get(patch.ID); err == nil {
 			b = fresh
 			refreshedFromBacking = true
@@ -196,7 +205,9 @@ func (c *CachingStore) ApplyEvent(eventType string, payload json.RawMessage) {
 				}
 			}
 		}
-		b = mergeCacheEventPatch(current, patch, fields)
+		if eventType != "bead.closed" || !verifiedClosedFromBacking {
+			b = mergeCacheEventPatch(current, patch, fields)
+		}
 	}
 
 	mutated := false
@@ -443,12 +454,38 @@ func (c *CachingStore) cacheEventMatchesBacking(id string, patch Bead, fields ma
 	return cacheEventPatchMatchesBead(fresh, patch, fields), nil
 }
 
-func (c *CachingStore) cacheClosedEventMatchesBacking(id string) (bool, error) {
+func (c *CachingStore) cacheClosedEventMatchesBacking(id string) (Bead, bool, error) {
 	fresh, err := c.backing.Get(id)
 	if err != nil {
-		return false, err
+		return Bead{}, false, err
 	}
-	return fresh.Status == "closed", nil
+	return fresh, fresh.Status == "closed", nil
+}
+
+func closedEventPayloadNeedsBackingRefresh(patch Bead, fresh Bead) bool {
+	// Verified close events only need the backing row when the hook payload is
+	// partial and the timestamp is unusable or not newer. Rich close snapshots
+	// should still flow through the normal merge path so they can replace stale
+	// cached fields that the backing row still carries.
+	if patch.UpdatedAt.IsZero() || fresh.UpdatedAt.IsZero() || !patch.UpdatedAt.After(fresh.UpdatedAt) {
+		return !closedEventCarriesRichCloseSnapshot(patch)
+	}
+	return false
+}
+
+func closedEventCarriesRichCloseSnapshot(patch Bead) bool {
+	return patch.Title != "" ||
+		len(patch.Labels) > 0 ||
+		patch.Description != "" ||
+		patch.Assignee != "" ||
+		patch.ParentID != "" ||
+		patch.Ref != "" ||
+		len(patch.Needs) > 0 ||
+		patch.Type != "" ||
+		patch.Priority != nil ||
+		patch.Ephemeral ||
+		patch.NoHistory ||
+		patch.DeferUntil != nil
 }
 
 func cacheEventPatchMatchesBead(current, patch Bead, fields map[string]json.RawMessage) bool {

@@ -859,6 +859,117 @@ func TestCachingStoreLiveListDoesNotOverwriteRecentLocalWriteWithStaleBackingRow
 	}
 }
 
+func TestCachingStoreLiveListDoesNotOverwriteRecentLocalWriteWhenBackingOmitsRow(t *testing.T) {
+	mem := beads.NewMemStore()
+	original, err := mem.Create(beads.Bead{
+		Title:    "claimed work",
+		Assignee: "worker",
+		Status:   "open",
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	store := &omittingLiveListGetStore{Store: mem}
+	cs := beads.NewCachingStoreForTest(store, nil)
+	if err := cs.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+
+	status := "in_progress"
+	if err := cs.Update(original.ID, beads.UpdateOpts{Status: &status}); err != nil {
+		t.Fatalf("Update local status: %v", err)
+	}
+	store.omitLiveListOnce()
+	store.returnStaleGetOnce(original)
+
+	if _, err := cs.List(beads.ListQuery{Status: "in_progress", Assignee: "worker", Live: true}); err != nil {
+		t.Fatalf("Live list refresh: %v", err)
+	}
+	cs.ApplyEvent("bead.updated", json.RawMessage(`{"id":"`+original.ID+`","status":"open"}`))
+
+	got, err := cs.Get(original.ID)
+	if err != nil {
+		t.Fatalf("Get after omitted live row: %v", err)
+	}
+	if got.Status != "in_progress" {
+		t.Fatalf("status after omitted live row = %q, want in_progress", got.Status)
+	}
+}
+
+func TestCachingStoreLiveListRemovesDeletedRowsMissingFromBacking(t *testing.T) {
+	mem := beads.NewMemStore()
+	original, err := mem.Create(beads.Bead{
+		Title:    "delete me",
+		Assignee: "worker",
+		Status:   "open",
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	cs := beads.NewCachingStoreForTest(mem, nil)
+	if err := cs.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	if err := mem.Delete(original.ID); err != nil {
+		t.Fatalf("Delete backing: %v", err)
+	}
+
+	live, err := cs.List(beads.ListQuery{Status: "open", Assignee: "worker", Live: true})
+	if err != nil {
+		t.Fatalf("Live list refresh: %v", err)
+	}
+	if len(live) != 0 {
+		t.Fatalf("live list after backing delete = %+v, want no rows", live)
+	}
+
+	cached, err := cs.Handles().Cached.List(beads.ListQuery{Status: "open", Assignee: "worker"})
+	if err != nil {
+		t.Fatalf("Cached List after backing delete: %v", err)
+	}
+	if len(cached) != 0 {
+		t.Fatalf("cached list after backing delete = %+v, want no rows", cached)
+	}
+	if got, err := cs.Get(original.ID); !errors.Is(err, beads.ErrNotFound) {
+		t.Fatalf("Get after backing delete = (%+v, %v), want ErrNotFound", got, err)
+	}
+}
+
+func TestCachingStoreLiveListDoesNotRemoveRecentLocalWriteWhenBackingReportsNotFound(t *testing.T) {
+	mem := beads.NewMemStore()
+	original, err := mem.Create(beads.Bead{
+		Title:    "claimed work",
+		Assignee: "worker",
+		Status:   "open",
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	store := &omittingLiveListGetStore{Store: mem}
+	cs := beads.NewCachingStoreForTest(store, nil)
+	if err := cs.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+
+	status := "in_progress"
+	if err := cs.Update(original.ID, beads.UpdateOpts{Status: &status}); err != nil {
+		t.Fatalf("Update local status: %v", err)
+	}
+	store.omitLiveListOnce()
+	store.returnNotFoundGetOnce(original.ID)
+
+	if _, err := cs.List(beads.ListQuery{Status: "in_progress", Assignee: "worker", Live: true}); err != nil {
+		t.Fatalf("Live list refresh: %v", err)
+	}
+
+	cached, err := cs.Handles().Cached.List(beads.ListQuery{Status: "in_progress", Assignee: "worker"})
+	if err != nil {
+		t.Fatalf("Cached List after omitted live row: %v", err)
+	}
+	if len(cached) != 1 || cached[0].ID != original.ID {
+		t.Fatalf("cached list after omitted live row = %+v, want locally updated row %s", cached, original.ID)
+	}
+}
+
 func TestCachingStoreUpdateDoesNotDuplicateAuthoritativeLabels(t *testing.T) {
 	mem := beads.NewMemStore()
 	original, err := mem.Create(beads.Bead{
@@ -1009,6 +1120,64 @@ func (s *staleListAfterUpdateStore) List(query beads.ListQuery) ([]beads.Bead, e
 	}
 	s.mu.Unlock()
 	return s.Store.List(query)
+}
+
+type omittingLiveListGetStore struct {
+	beads.Store
+	mu               sync.Mutex
+	omitLiveCount    int
+	staleGet         beads.Bead
+	staleGetCount    int
+	notFoundGetID    string
+	notFoundGetCount int
+}
+
+func (s *omittingLiveListGetStore) omitLiveListOnce() {
+	s.mu.Lock()
+	s.omitLiveCount = 1
+	s.mu.Unlock()
+}
+
+func (s *omittingLiveListGetStore) returnStaleGetOnce(stale beads.Bead) {
+	s.mu.Lock()
+	s.staleGet = stale
+	s.staleGetCount = 1
+	s.mu.Unlock()
+}
+
+func (s *omittingLiveListGetStore) returnNotFoundGetOnce(id string) {
+	s.mu.Lock()
+	s.notFoundGetID = id
+	s.notFoundGetCount = 1
+	s.mu.Unlock()
+}
+
+func (s *omittingLiveListGetStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	s.mu.Lock()
+	if s.omitLiveCount > 0 && query.Live {
+		s.omitLiveCount--
+		s.mu.Unlock()
+		return nil, nil
+	}
+	s.mu.Unlock()
+	return s.Store.List(query)
+}
+
+func (s *omittingLiveListGetStore) Get(id string) (beads.Bead, error) {
+	s.mu.Lock()
+	if s.staleGetCount > 0 && id == s.staleGet.ID {
+		s.staleGetCount--
+		stale := s.staleGet
+		s.mu.Unlock()
+		return stale, nil
+	}
+	if s.notFoundGetCount > 0 && id == s.notFoundGetID {
+		s.notFoundGetCount--
+		s.mu.Unlock()
+		return beads.Bead{}, beads.ErrNotFound
+	}
+	s.mu.Unlock()
+	return s.Store.Get(id)
 }
 
 type nonBdCachingBacking struct {

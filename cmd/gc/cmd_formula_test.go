@@ -560,14 +560,14 @@ func TestFormulaCatalogCommandJSONFromEntries(t *testing.T) {
 
 func TestFormulaCatalogCommandSetupErrorsSurfaceDiagnostics(t *testing.T) {
 	cityDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(withBuiltinProviderAliasesTOMLForTest(`[workspace]
 name = "catalog-test"
 provider = "claude"
 
 [[agent]]
 name = "worker"
 start_command = "echo hello"
-`), 0o644); err != nil {
+`, "claude")), 0o644); err != nil {
 		t.Fatalf("write city.toml: %v", err)
 	}
 
@@ -727,14 +727,14 @@ func TestFormulaCookAttachGraphV2CreatesFreshRootForBareBeadTarget(t *testing.T)
 	t.Setenv("GC_DOLT", "skip")
 
 	cityDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(withBuiltinProviderAliasesTOMLForTest(`
 [workspace]
 name = "my-city"
 provider = "claude"
 
 [daemon]
 formula_v2 = true
-`), 0o644); err != nil {
+`, "claude")), 0o644); err != nil {
 		t.Fatalf("write city.toml: %v", err)
 	}
 	formulaDir := filepath.Join(cityDir, "formulas")
@@ -824,14 +824,14 @@ func TestFormulaCookAttachGraphV2AllowsDifferentLiveBareBeadRoots(t *testing.T) 
 	t.Setenv("GC_DOLT", "skip")
 
 	cityDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(withBuiltinProviderAliasesTOMLForTest(`
 [workspace]
 name = "my-city"
 provider = "claude"
 
 [daemon]
 formula_v2 = true
-`), 0o644); err != nil {
+`, "claude")), 0o644); err != nil {
 		t.Fatalf("write city.toml: %v", err)
 	}
 	formulaDir := filepath.Join(cityDir, "formulas")
@@ -893,14 +893,14 @@ func TestFormulaCookAttachGraphV2RejectsLiveLegacySourceWorkflow(t *testing.T) {
 	t.Setenv("GC_DOLT", "skip")
 
 	cityDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(withBuiltinProviderAliasesTOMLForTest(`
 [workspace]
 name = "my-city"
 provider = "claude"
 
 [daemon]
 formula_v2 = true
-`), 0o644); err != nil {
+`, "claude")), 0o644); err != nil {
 		t.Fatalf("write city.toml: %v", err)
 	}
 	formulaDir := filepath.Join(cityDir, "formulas")

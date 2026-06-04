@@ -150,6 +150,45 @@ func TestMemStoreChildrenExcludeClosedByDefault(t *testing.T) {
 	}
 }
 
+func TestMemStoreChildrenHonorTierOptions(t *testing.T) {
+	s := beads.NewMemStore()
+
+	parent, err := s.Create(beads.Bead{Title: "parent"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	historyChild, err := s.Create(beads.Bead{Title: "history", ParentID: parent.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	noHistoryChild, err := s.Create(beads.Bead{Title: "no-history", ParentID: parent.ID, NoHistory: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ephemeralChild, err := s.Create(beads.Bead{Title: "ephemeral", ParentID: parent.ID, Ephemeral: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := s.Children(parent.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertMemStoreIDs(t, got, historyChild.ID, noHistoryChild.ID)
+
+	got, err = s.Children(parent.ID, beads.WithEphemeral)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertMemStoreIDs(t, got, noHistoryChild.ID, ephemeralChild.ID)
+
+	got, err = s.Children(parent.ID, beads.WithBothTiers)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertMemStoreIDs(t, got, historyChild.ID, noHistoryChild.ID, ephemeralChild.ID)
+}
+
 func TestMemStoreListByLabelRequiresIncludeClosed(t *testing.T) {
 	s := beads.NewMemStore()
 
@@ -179,6 +218,22 @@ func TestMemStoreListByLabelRequiresIncludeClosed(t *testing.T) {
 	}
 	if len(got) != 2 {
 		t.Fatalf("ListByLabel(IncludeClosed) = %d items, want 2", len(got))
+	}
+}
+
+func assertMemStoreIDs(t *testing.T, got []beads.Bead, want ...string) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("got %d beads (%v), want %v", len(got), got, want)
+	}
+	seen := make(map[string]bool, len(got))
+	for _, bead := range got {
+		seen[bead.ID] = true
+	}
+	for _, id := range want {
+		if !seen[id] {
+			t.Fatalf("got %v, want id %s", got, id)
+		}
 	}
 }
 

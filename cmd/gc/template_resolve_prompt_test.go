@@ -748,7 +748,7 @@ func TestResolveTemplateKeepsConcreteProviderForOverlays(t *testing.T) {
 func TestResolveTemplateExpandsPromptCommandTemplates(t *testing.T) {
 	cityPath := filepath.Join(t.TempDir(), "demo-city")
 	fs := fsys.NewFake()
-	fs.Files[cityPath+"/prompts/worker.template.md"] = []byte("Work={{ .WorkQuery }}\nSling={{ .SlingQuery }}")
+	fs.Files[cityPath+"/prompts/worker.template.md"] = []byte("Work={{ .WorkQuery }}\nAssigned={{ .AssignedReadyQuery }}\nSling={{ .SlingQuery }}")
 
 	params := &agentBuildParams{
 		fs:              fs,
@@ -779,8 +779,47 @@ func TestResolveTemplateExpandsPromptCommandTemplates(t *testing.T) {
 	if !strings.Contains(tp.Prompt, "Work=echo demo-city demo worker") {
 		t.Fatalf("Prompt missing expanded WorkQuery: %q", tp.Prompt)
 	}
+	if !strings.Contains(tp.Prompt, "Assigned=echo demo-city demo worker") {
+		t.Fatalf("Prompt missing expanded AssignedReadyQuery: %q", tp.Prompt)
+	}
+	if strings.Contains(tp.Prompt, "gc.routed_to") {
+		t.Fatalf("Prompt assigned-ready query should not include routed pool demand: %q", tp.Prompt)
+	}
 	if !strings.Contains(tp.Prompt, "Sling=dispatch {} --route=demo/worker --city=demo-city") {
 		t.Fatalf("Prompt missing expanded SlingQuery: %q", tp.Prompt)
+	}
+}
+
+func TestResolveTemplateAssignedReadyQueryUsesBD105Compatibility(t *testing.T) {
+	cityPath := filepath.Join(t.TempDir(), "demo-city")
+	fs := fsys.NewFake()
+	fs.Files[cityPath+"/prompts/worker.template.md"] = []byte("Assigned={{ .AssignedReadyQuery }}")
+
+	params := &agentBuildParams{
+		city:            &config.City{Beads: config.BeadsConfig{BDCompatibility: config.BeadsBDCompatibility105}},
+		fs:              fs,
+		cityName:        "",
+		cityPath:        cityPath,
+		workspace:       &config.Workspace{Provider: "opencode"},
+		providers:       config.BuiltinProviders(),
+		lookPath:        func(string) (string, error) { return "/usr/bin/opencode", nil },
+		beaconTime:      testBeaconTime,
+		sessionTemplate: "",
+		beadNames:       make(map[string]string),
+		stderr:          io.Discard,
+	}
+	agent := &config.Agent{
+		Name:           "worker",
+		PromptTemplate: "prompts/worker.template.md",
+		Provider:       "opencode",
+	}
+
+	tp, err := resolveTemplate(params, agent, agent.QualifiedName(), nil)
+	if err != nil {
+		t.Fatalf("resolveTemplate: %v", err)
+	}
+	if !strings.Contains(tp.Prompt, `bd ready --include-ephemeral --assignee="$id" --json --limit=1`) {
+		t.Fatalf("Prompt missing bd-1.0.5 assigned ready query: %q", tp.Prompt)
 	}
 }
 
@@ -897,6 +936,9 @@ func TestResolveTemplateCityAppendFragmentsApplyToImportedPackAgent(t *testing.T
 name = "test"
 includes = ["packs/imported"]
 
+[providers.claude]
+base = "builtin:claude"
+
 [agent_defaults]
 append_fragments = ["city-footer"]
 `)
@@ -935,7 +977,7 @@ prompt_template = "agents/mayor/prompt.template.md"
 		cityName:        "test",
 		cityPath:        cityPath,
 		workspace:       &cfg.Workspace,
-		providers:       config.BuiltinProviders(),
+		providers:       cfg.Providers,
 		lookPath:        func(string) (string, error) { return "/usr/bin/claude", nil },
 		beaconTime:      testBeaconTime,
 		packDirs:        cfg.PackDirs,
@@ -1031,7 +1073,11 @@ func TestResolveTemplateConventionAgentAppendFragments(t *testing.T) {
 	write("city.toml", `
 	[workspace]
 	name = "test"
+	provider = "claude"
 	includes = ["packs/imported"]
+
+	[providers.claude]
+	base = "builtin:claude"
 	`)
 	write("packs/imported/pack.toml", `
 	[pack]
@@ -1066,7 +1112,7 @@ func TestResolveTemplateConventionAgentAppendFragments(t *testing.T) {
 		cityName:        "test",
 		cityPath:        cityPath,
 		workspace:       &cfg.Workspace,
-		providers:       config.BuiltinProviders(),
+		providers:       cfg.Providers,
 		lookPath:        func(string) (string, error) { return "/usr/bin/claude", nil },
 		beaconTime:      testBeaconTime,
 		packDirs:        cfg.PackDirs,

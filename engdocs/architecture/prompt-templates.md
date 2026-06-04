@@ -25,8 +25,9 @@ prompt dynamically customized to its deployment context.
 - **PromptContext**: The data available to templates during rendering.
   Includes CityRoot, AgentName (qualified: `rig/agent-1`),
   TemplateName (config name: `agent` for pool template), RigName,
-  WorkDir, IssuePrefix, Branch, DefaultBranch, WorkQuery, SlingQuery,
-  and custom Env vars from agent config.
+  WorkDir, IssuePrefix, Branch, DefaultBranch, WorkQuery,
+  AssignedInProgressQuery, AssignedReadyQuery, RoutedPoolQuery,
+  SlingQuery, and custom Env vars from agent config.
 
 - **Shared Templates**: Reusable template partials in a `shared/`
   directory next to the prompt templates. Automatically loaded and
@@ -67,6 +68,7 @@ prompt dynamically customized to its deployment context.
   │ RigName      │            │  (text/template)  │
   │ WorkDir      │            └────────┬──────────┘
   │ WorkQuery    │                     │
+  │ Assigned...  │                     │
   │ SlingQuery   │                     ▼
   │ Env          │              Rendered Markdown
   └──────────────┘              (agent's prompt)
@@ -173,6 +175,9 @@ append_fragments = ["safety"]
 | `Branch` | Current git branch | `feature-x` |
 | `DefaultBranch` | Default branch | `main` |
 | `WorkQuery` | Work discovery command | `bd ready --assignee=...` |
+| `AssignedInProgressQuery` | Assigned in-progress recovery command | `bd list --include-ephemeral --status in_progress ...` |
+| `AssignedReadyQuery` | Assigned ready-work command | `bd ready --include-ephemeral --assignee=...` |
+| `RoutedPoolQuery` | Unassigned routed pool-work command | `bd ready --metadata-field gc.routed_to=... --unassigned` |
 | `SlingQuery` | Work routing command | `gc sling ...` |
 
 ### Template Functions

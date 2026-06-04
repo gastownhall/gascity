@@ -1045,6 +1045,12 @@ name = "gastown"
 version = "1.0.0"
 schema = 1
 
+[providers.claude]
+base = "builtin:claude"
+
+[providers.codex]
+base = "builtin:codex"
+
 [agent_defaults]
 provider = "codex"
 
@@ -1061,6 +1067,9 @@ provider = "claude"
 name = "test-city"
 provider = "gemini"
 includes = ["packs/gt"]
+
+[providers.gemini]
+base = "builtin:gemini"
 `)
 
 	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(dir, "city.toml"))
@@ -1097,6 +1106,9 @@ name = "gastown"
 version = "1.0.0"
 schema = 1
 
+[providers.codex]
+base = "builtin:codex"
+
 [agent_defaults]
 provider = "codex"
 
@@ -1111,6 +1123,9 @@ includes = ["packs/gt"]
 
 [agent_defaults]
 provider = "gemini"
+
+[providers.gemini]
+base = "builtin:gemini"
 `)
 
 	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(dir, "city.toml"))
@@ -1287,8 +1302,14 @@ func TestHasPackRigs(t *testing.T) {
 	if HasPackRigs(nil) {
 		t.Error("nil rigs should return false")
 	}
-	if HasPackRigs([]Rig{{Name: "a", Path: "/a"}}) {
-		t.Error("rig without pack should return false")
+	if HasPackRigs([]Rig{{Name: "a"}}) {
+		t.Error("rig with no path and no includes should return false")
+	}
+	// A rig with only a path is treated as potentially having a pack (expandPacks
+	// will discover the root pack.toml if present). This enables the packV2
+	// convention where a rig root carries agents/ directories directly.
+	if !HasPackRigs([]Rig{{Name: "a", Path: "/a"}}) {
+		t.Error("rig with path should return true (may have root pack.toml)")
 	}
 	if !HasPackRigs([]Rig{{Name: "a", Path: "/a", Includes: []string{"topo"}}}) {
 		t.Error("rig with includes should return true")

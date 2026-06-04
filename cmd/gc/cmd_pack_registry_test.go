@@ -111,6 +111,15 @@ func TestPackRegistryAddListSearchShowRemove(t *testing.T) {
 	if !strings.Contains(stdout.String(), "local:lighthouse") || !strings.Contains(stdout.String(), "1.2.0") {
 		t.Fatalf("unexpected show output: %q", stdout.String())
 	}
+	for _, want := range []string{
+		"Import commands:",
+		"gc import add https://packages.example/lighthouse.git --name lighthouse --version '>=1.2.0'",
+		"gc import add https://packages.example/lighthouse.git --name lighthouse --version 1.2.0",
+	} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("show output missing %q:\n%s", want, stdout.String())
+		}
+	}
 
 	stdout.Reset()
 	stderr.Reset()
@@ -189,6 +198,40 @@ func TestPackRegistryAddFreshHomePreservesDefaultRegistry(t *testing.T) {
 	}
 	if got["local"] != catalogDir {
 		t.Fatalf("local registry source = %q, want %q", got["local"], catalogDir)
+	}
+}
+
+func TestPackRegistryAddRejectsWindowsRegistrySources(t *testing.T) {
+	cases := []struct {
+		name    string
+		source  string
+		wantErr string
+	}{
+		{
+			name:    "drive letter",
+			source:  `C:\packs\registry.toml`,
+			wantErr: "registry source uses a Windows drive-letter path",
+		},
+		{
+			name:    "unc",
+			source:  `\\server\share\registry.toml`,
+			wantErr: "registry source uses a UNC path",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("GC_HOME", home)
+			writeEmptyRegistryConfig(t, home)
+
+			var stdout, stderr bytes.Buffer
+			if code := doPackRegistryAdd("local", tc.source, true, false, &stdout, &stderr); code == 0 {
+				t.Fatalf("add succeeded stdout=%q stderr=%q", stdout.String(), stderr.String())
+			}
+			if !strings.Contains(stderr.String(), tc.wantErr) {
+				t.Fatalf("stderr = %q, want %q", stderr.String(), tc.wantErr)
+			}
+		})
 	}
 }
 
@@ -529,7 +572,7 @@ func TestPackRegistryLiveGascityPacksCatalog(t *testing.T) {
 			t.Fatalf("show %s code=%d stdout=%q stderr=%q", name, code, stdout.String(), stderr.String())
 		}
 		out := stdout.String()
-		if !strings.Contains(out, "Source:") || !strings.Contains(out, "Latest:") || !strings.Contains(out, "Releases:") {
+		if !strings.Contains(out, "Source:") || !strings.Contains(out, "Latest:") || !strings.Contains(out, "Import commands:") || !strings.Contains(out, "Releases:") {
 			t.Fatalf("show %s output missing registry contract fields:\n%s", name, out)
 		}
 	}

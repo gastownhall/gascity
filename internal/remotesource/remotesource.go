@@ -92,6 +92,36 @@ func ParseGitHubTreeOrBlob(source string) (Parsed, bool) {
 	}, true
 }
 
+// FormatGitHubTreeSource returns a dereferenceable GitHub tree URL for a pack
+// that lives below a GitHub repository root.
+func FormatGitHubTreeSource(source, ref, subpath string) (string, bool) {
+	source = strings.TrimSpace(source)
+	ref = strings.TrimSpace(ref)
+	subpath = strings.Trim(strings.TrimSpace(subpath), "/")
+	if source == "" || ref == "" || subpath == "" || strings.Contains(ref, "/") {
+		return "", false
+	}
+
+	if idx := strings.Index(source, "://"); idx >= 0 {
+		scheme := source[:idx]
+		if scheme != "https" && scheme != "http" {
+			return "", false
+		}
+		source = source[idx+3:]
+	}
+	source = strings.Trim(source, "/")
+	parts := strings.Split(source, "/")
+	if len(parts) != 3 || parts[0] != "github.com" {
+		return "", false
+	}
+	owner := parts[1]
+	repo := strings.TrimSuffix(parts[2], ".git")
+	if owner == "" || repo == "" {
+		return "", false
+	}
+	return "https://github.com/" + owner + "/" + repo + "/tree/" + ref + "/" + subpath, true
+}
+
 func splitSourceSubpath(source string) (cloneURL, subpath string) {
 	searchFrom := 0
 	if idx := strings.Index(source, "://"); idx >= 0 {

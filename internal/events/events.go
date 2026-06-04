@@ -17,24 +17,26 @@ import (
 
 // Event type constants. Only types we actually emit today.
 const (
-	SessionWoke        = "session.woke"
-	SessionStopped     = "session.stopped"
-	SessionCrashed     = "session.crashed"
-	BeadCreated        = "bead.created"
-	BeadClosed         = "bead.closed"
-	BeadDeleted        = "bead.deleted"
-	BeadUpdated        = "bead.updated"
-	MailSent           = "mail.sent"
-	MailRead           = "mail.read"
-	MailArchived       = "mail.archived"
-	MailMarkedRead     = "mail.marked_read"
-	MailMarkedUnread   = "mail.marked_unread"
-	MailReplied        = "mail.replied"
-	MailDeleted        = "mail.deleted"
-	SessionDraining    = "session.draining"
-	SessionUndrained   = "session.undrained"
-	SessionQuarantined = "session.quarantined"
-	SessionIdleKilled  = "session.idle_killed"
+	SessionWoke             = "session.woke"
+	SessionStopped          = "session.stopped"
+	SessionCrashed          = "session.crashed"
+	BeadCreated             = "bead.created"
+	BeadClosed              = "bead.closed"
+	BeadDeleted             = "bead.deleted"
+	BeadUpdated             = "bead.updated"
+	BeadWorktreeReaped      = "bead.worktree.reaped"
+	BeadWorktreeReapSkipped = "bead.worktree.reap_skipped"
+	MailSent                = "mail.sent"
+	MailRead                = "mail.read"
+	MailArchived            = "mail.archived"
+	MailMarkedRead          = "mail.marked_read"
+	MailMarkedUnread        = "mail.marked_unread"
+	MailReplied             = "mail.replied"
+	MailDeleted             = "mail.deleted"
+	SessionDraining         = "session.draining"
+	SessionUndrained        = "session.undrained"
+	SessionQuarantined      = "session.quarantined"
+	SessionIdleKilled       = "session.idle_killed"
 	// SessionMaxAgeKilled fires when the controller preemptively restarts a
 	// long-running session because its wall-clock age exceeded the agent's
 	// max_session_age threshold. Motivating case: provider SDKs that cache
@@ -70,10 +72,17 @@ const (
 	// remains correlated; the companion reconciler handler is tracked in
 	// #1497.
 	SessionWorkQueryFailed = "session.work_query_failed"
-	ConvoyCreated          = "convoy.created"
-	ConvoyClosed           = "convoy.closed"
-	ControllerStarted      = "controller.started"
-	ControllerStopped      = "controller.stopped"
+	// SessionColdStartTimeout fires when a pool session's first runtime spawn
+	// (a pending create) exceeds the start deadline and is rolled back. It is
+	// per-session: it fires whenever a fresh spawn times out, including a warm
+	// pool scale-up adding capacity — not only when the whole pool was at zero.
+	// Emitted by the session reconciler's start-result commit path; the
+	// envelope's Subject carries the session name.
+	SessionColdStartTimeout = "session.cold_start_timeout"
+	ConvoyCreated           = "convoy.created"
+	ConvoyClosed            = "convoy.closed"
+	ControllerStarted       = "controller.started"
+	ControllerStopped       = "controller.stopped"
 	// SupervisorShutdownRequested fires when the supervisor's main loop
 	// observes a shutdown trigger (signal or socket stop) and is about to
 	// cancel the supervisor context. Carries attribution so operators can
@@ -124,12 +133,28 @@ const (
 	StoreMaintenanceDone   = "gc.store.maintenance.done"
 	StoreMaintenanceFailed = "gc.store.maintenance.failed"
 
+	// Dolt disk pre-flight events. Emitted by the supervisor's
+	// StoreMaintenanceLoop before CALL DOLT_GC when the container free
+	// space is below a configured threshold.
+	// StoreDiskWarn fires when free space is below GC_DOLT_WARN_FREE_BYTES
+	// but still above GC_DOLT_MIN_FREE_BYTES; the GC proceeds.
+	// StoreDiskCritical fires when free space is below GC_DOLT_MIN_FREE_BYTES;
+	// the GC is skipped to avoid growing the store further.
+	StoreDiskWarn     = "gc.store.disk_warn"
+	StoreDiskCritical = "gc.store.disk_critical"
+
 	// Postgres credential resolution. Emitted by the bd-env projection
 	// path on every successful pgauth resolve. The payload identifies
 	// the scope and the resolution tier that supplied the value; it
 	// MUST NOT carry the password value (asserted by
 	// TestPostgresEventOmitsPassword).
 	PostgresCredentialResolved = "pg.credential_resolved"
+
+	// ProviderHealthGateAlert fires once per red episode when the provider-health
+	// gate parks respawns for a provider. Carries episode ID, onset time, and
+	// session count. One alert per episode; AlertSent is cleared on green so
+	// the next episode fires independently. (ADR-0013 A1 M3a)
+	ProviderHealthGateAlert = "provider.health_gate_alert"
 )
 
 // KnownEventTypes lists every event-type constant this package defines.
@@ -144,7 +169,9 @@ var KnownEventTypes = []string{
 	SessionStranded,
 	SessionResetStalled,
 	SessionWorkQueryFailed,
+	SessionColdStartTimeout,
 	BeadCreated, BeadClosed, BeadDeleted, BeadUpdated,
+	BeadWorktreeReaped, BeadWorktreeReapSkipped,
 	MailSent, MailRead, MailArchived, MailMarkedRead, MailMarkedUnread,
 	MailReplied, MailDeleted,
 	ConvoyCreated, ConvoyClosed,
@@ -162,7 +189,13 @@ var KnownEventTypes = []string{
 	ExtMsgInbound, ExtMsgOutbound,
 	EventsRotated,
 	StoreMaintenanceDone, StoreMaintenanceFailed,
+	StoreDiskWarn, StoreDiskCritical,
 	PostgresCredentialResolved,
+	// ProviderHealthGateAlert is intentionally omitted from KnownEventTypes.
+	// The event is emitted by the reconciler but its typed SSE payload is not
+	// yet registered in internal/api (the payload registration lives in a
+	// follow-up that adds the full SSE projection). Until then, subscribers
+	// receive it via the custom-event envelope.
 }
 
 // Event is a single recorded occurrence in the system.
