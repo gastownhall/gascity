@@ -114,12 +114,21 @@ func TestEnsureCanonicalConfigCreatesManagedShape(t *testing.T) {
 		"issue-prefix: gc",
 		"dolt.auto-start: false",
 		"export.auto: false",
+		"dolt:",
+		"disable-event-flush: true",
 		"gc.endpoint_origin: managed_city",
 		"gc.endpoint_status: verified",
 	} {
 		if !strings.Contains(text, needle) {
 			t.Fatalf("config missing %q:\n%s", needle, text)
 		}
+	}
+	dolt, ok, err := ReadDoltConfig(fs, path)
+	if err != nil {
+		t.Fatalf("ReadDoltConfig() error = %v", err)
+	}
+	if !ok || dolt.DisableEventFlush == nil || !*dolt.DisableEventFlush {
+		t.Fatalf("ReadDoltConfig() = (%+v, %v), want disable-event-flush true", dolt, ok)
 	}
 	for _, forbidden := range []string{"dolt.host:", "dolt.port:", "dolt.user:"} {
 		if strings.Contains(text, forbidden) {
@@ -306,6 +315,87 @@ func TestEnsureCanonicalConfigForcesAutoExportOff(t *testing.T) {
 			t.Fatalf("config should force export.auto: false:\n%s", text)
 		}
 	})
+}
+
+func TestEnsureCanonicalConfigPreservesDoltDisableEventFlushOptOut(t *testing.T) {
+	fs := fsys.OSFS{}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	input := strings.Join([]string{
+		"issue-prefix: gc",
+		"dolt:",
+		"  disable-event-flush: false",
+		"",
+	}, "\n")
+	if err := fs.WriteFile(path, []byte(input), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	changed, err := EnsureCanonicalConfig(fs, path, ConfigState{
+		IssuePrefix:    "gc",
+		EndpointOrigin: EndpointOriginManagedCity,
+		EndpointStatus: EndpointStatusVerified,
+	})
+	if err != nil {
+		t.Fatalf("EnsureCanonicalConfig() error = %v", err)
+	}
+	if !changed {
+		t.Fatal("EnsureCanonicalConfig() should report changes for endpoint normalization")
+	}
+
+	dolt, ok, err := ReadDoltConfig(fs, path)
+	if err != nil {
+		t.Fatalf("ReadDoltConfig() error = %v", err)
+	}
+	if !ok || dolt.DisableEventFlush == nil || *dolt.DisableEventFlush {
+		t.Fatalf("ReadDoltConfig() = (%+v, %v), want explicit disable-event-flush false", dolt, ok)
+	}
+
+	data, err := fs.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	if !strings.Contains(text, "dolt:\n  disable-event-flush: false") {
+		t.Fatalf("config should preserve nested Dolt opt-out:\n%s", text)
+	}
+	if strings.Contains(text, "dolt.disable-event-flush") {
+		t.Fatalf("config should not write flat Dolt telemetry key:\n%s", text)
+	}
+}
+
+func TestEnsureCanonicalConfigCanonicalizesFlatDoltDisableEventFlush(t *testing.T) {
+	fs := fsys.OSFS{}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	input := strings.Join([]string{
+		"issue-prefix: gc",
+		"dolt.disable-event-flush: false",
+		"",
+	}, "\n")
+	if err := fs.WriteFile(path, []byte(input), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := EnsureCanonicalConfig(fs, path, ConfigState{
+		IssuePrefix:    "gc",
+		EndpointOrigin: EndpointOriginManagedCity,
+		EndpointStatus: EndpointStatusVerified,
+	}); err != nil {
+		t.Fatalf("EnsureCanonicalConfig() error = %v", err)
+	}
+
+	data, err := fs.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	if !strings.Contains(text, "dolt:\n  disable-event-flush: false") {
+		t.Fatalf("config should move flat Dolt telemetry setting into object:\n%s", text)
+	}
+	if strings.Contains(text, "dolt.disable-event-flush") {
+		t.Fatalf("config should scrub flat Dolt telemetry setting:\n%s", text)
+	}
 }
 
 func TestEnsureCanonicalConfigWritesExternalFields(t *testing.T) {
@@ -873,6 +963,86 @@ func TestReadExportAutoOnMissingFileReturnsAbsent(t *testing.T) {
 	}
 	if gotValue {
 		t.Errorf("ReadExportAuto() value = true, want false for missing file")
+	}
+}
+
+func TestReadDoltConfig(t *testing.T) {
+	tests := []struct {
+		name      string
+		yaml      string
+		wantValue bool
+		wantOK    bool
+	}{
+		{
+			name:      "nested explicit false",
+			yaml:      "issue_prefix: zz\ndolt:\n  disable-event-flush: false\n",
+			wantValue: false,
+			wantOK:    true,
+		},
+		{
+			name:      "nested explicit true",
+			yaml:      "issue_prefix: zz\ndolt:\n  disable-event-flush: true\n",
+			wantValue: true,
+			wantOK:    true,
+		},
+		{
+			name:      "flat compatibility false",
+			yaml:      "issue_prefix: zz\ndolt.disable-event-flush: false\n",
+			wantValue: false,
+			wantOK:    true,
+		},
+		{
+			name:      "absent",
+			yaml:      "issue_prefix: zz\n",
+			wantValue: true,
+			wantOK:    false,
+		},
+		{
+			name:      "garbage value returns absent",
+			yaml:      "issue_prefix: zz\ndolt:\n  disable-event-flush: maybe\n",
+			wantValue: true,
+			wantOK:    false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fs := fsys.OSFS{}
+			dir := t.TempDir()
+			path := filepath.Join(dir, "config.yaml")
+			if err := fs.WriteFile(path, []byte(tt.yaml), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			got, _, err := ReadDoltConfig(fs, path)
+			if err != nil {
+				t.Fatalf("ReadDoltConfig() error = %v", err)
+			}
+			gotOK := got.DisableEventFlush != nil
+			if gotOK != tt.wantOK {
+				t.Errorf("ReadDoltConfig().DisableEventFlush present = %v, want %v", gotOK, tt.wantOK)
+			}
+			if got.DisableEventFlushEnabled() != tt.wantValue {
+				t.Errorf("ReadDoltConfig().DisableEventFlushEnabled() = %v, want %v", got.DisableEventFlushEnabled(), tt.wantValue)
+			}
+		})
+	}
+}
+
+func TestReadDoltConfigDefaultsDisableEventFlushOnMissingFile(t *testing.T) {
+	fs := fsys.OSFS{}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "missing.yaml")
+
+	got, ok, err := ReadDoltConfig(fs, path)
+	if err != nil {
+		t.Fatalf("ReadDoltConfig() error = %v, want nil for missing file", err)
+	}
+	if ok {
+		t.Errorf("ReadDoltConfig() ok = true, want false for missing file")
+	}
+	if !got.DisableEventFlushEnabled() {
+		t.Errorf("ReadDoltConfig().DisableEventFlushEnabled() = false, want default true")
 	}
 }
 
