@@ -121,6 +121,7 @@ fi
 TOTAL_STALE_WISPS=0
 TOTAL_CLOSED_WISPS=0
 TOTAL_WOULD_CLOSE_WISPS=0
+TOTAL_WOULD_EXPIRE=0
 TOTAL_PURGED=0
 TOTAL_MAIL_WISPS=0
 TOTAL_ISSUES_CLOSED=0
@@ -467,9 +468,12 @@ while IFS= read -r DB; do
     # Step 3: Close nudge beads whose metadata.expires_at is in the past.
     # Only beads labelled gc:nudge are candidates — other bead types that stamp
     # expires_at (e.g. gc:extmsg-binding session bindings) must not be closed
-    # here.  The COALESCE handles both whole-second RFC3339+Z and RFC3339Nano
-    # (fractional seconds); rows where both patterns fail STR_TO_DATE return
-    # NULL and are recorded as anomalies rather than silently skipped.
+    # here.  The COALESCE handles whole-second RFC3339+Z, microsecond-width
+    # RFC3339 (MySQL %f tops out at 6 fractional digits), and full
+    # RFC3339Nano (7-9 fractional digits) by truncating the fractional part to
+    # whole seconds for parsing — sub-second precision is immaterial for TTL
+    # expiry.  Rows where every pattern fails STR_TO_DATE return NULL and are
+    # recorded as anomalies rather than silently skipped.
     DB_EXPIRED_ISSUES_CLOSED=0
     get_sql_rows "$DB" "expired nudge bead with parse anomaly" "
         SELECT i.id
@@ -480,7 +484,8 @@ while IFS= read -r DB; do
         AND JSON_UNQUOTE(JSON_EXTRACT(i.metadata, '$.expires_at')) != ''
         AND COALESCE(
             STR_TO_DATE(JSON_UNQUOTE(JSON_EXTRACT(i.metadata, '$.expires_at')), '%Y-%m-%dT%H:%i:%s.%fZ'),
-            STR_TO_DATE(JSON_UNQUOTE(JSON_EXTRACT(i.metadata, '$.expires_at')), '%Y-%m-%dT%H:%i:%sZ')
+            STR_TO_DATE(JSON_UNQUOTE(JSON_EXTRACT(i.metadata, '$.expires_at')), '%Y-%m-%dT%H:%i:%sZ'),
+            STR_TO_DATE(CONCAT(SUBSTRING_INDEX(JSON_UNQUOTE(JSON_EXTRACT(i.metadata, '$.expires_at')), '.', 1), 'Z'), '%Y-%m-%dT%H:%i:%sZ')
         ) IS NULL
     "
     if [ -n "$SQL_ROWS_RESULT" ]; then
@@ -499,10 +504,15 @@ while IFS= read -r DB; do
         AND JSON_UNQUOTE(JSON_EXTRACT(i.metadata, '$.expires_at')) != ''
         AND COALESCE(
             STR_TO_DATE(JSON_UNQUOTE(JSON_EXTRACT(i.metadata, '$.expires_at')), '%Y-%m-%dT%H:%i:%s.%fZ'),
-            STR_TO_DATE(JSON_UNQUOTE(JSON_EXTRACT(i.metadata, '$.expires_at')), '%Y-%m-%dT%H:%i:%sZ')
+            STR_TO_DATE(JSON_UNQUOTE(JSON_EXTRACT(i.metadata, '$.expires_at')), '%Y-%m-%dT%H:%i:%sZ'),
+            STR_TO_DATE(CONCAT(SUBSTRING_INDEX(JSON_UNQUOTE(JSON_EXTRACT(i.metadata, '$.expires_at')), '.', 1), 'Z'), '%Y-%m-%dT%H:%i:%sZ')
         ) < UTC_TIMESTAMP()
     "
     EXPIRED_IDS=$SQL_ROWS_RESULT
+    if [ -n "$EXPIRED_IDS" ]; then
+        WOULD_EXPIRE_COUNT=$(printf '%s\n' "$EXPIRED_IDS" | sed '/^[[:space:]]*$/d' | wc -l | tr -d ' ')
+        TOTAL_WOULD_EXPIRE=$((TOTAL_WOULD_EXPIRE + WOULD_EXPIRE_COUNT))
+    fi
 
     if [ -n "$EXPIRED_IDS" ] && [ -z "$DRY_RUN" ]; then
         if [ -z "$CITY_DB" ]; then
@@ -683,7 +693,7 @@ fi
 
 SUMMARY="reaper — stale_wisps:$TOTAL_STALE_WISPS, closed_wisps:$TOTAL_CLOSED_WISPS, purged:$TOTAL_PURGED, sessions-pruned:$TOTAL_SESSIONS_PRUNED, closed:$TOTAL_ISSUES_CLOSED, expired:$TOTAL_EXPIRED_ISSUES_CLOSED, expired_skipped:$TOTAL_EXPIRED_ISSUES_SKIPPED, skipped_non_city_issues:$TOTAL_STALE_ISSUES_SKIPPED, mail_wisps:$TOTAL_MAIL_WISPS"
 if [ -n "$DRY_RUN" ]; then
-    SUMMARY="$SUMMARY, would_close_wisps:$TOTAL_WOULD_CLOSE_WISPS (dry run)"
+    SUMMARY="$SUMMARY, would_close_wisps:$TOTAL_WOULD_CLOSE_WISPS, would_expire:$TOTAL_WOULD_EXPIRE (dry run)"
 fi
 
 gc session nudge deacon/ "DOG_DONE: $SUMMARY" 2>/dev/null || true
