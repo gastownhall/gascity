@@ -717,7 +717,13 @@ func templateParamsToConfig(tp TemplateParams) runtime.Config {
 		ProcessNames:           tp.Hints.ProcessNames,
 		EmitsPermissionWarning: tp.Hints.EmitsPermissionWarning,
 		AcceptStartupDialogs:   tp.Hints.AcceptStartupDialogs,
-		MouseOn:                tp.Hints.MouseOn,
+		// ga-c4w: interactive `gc session new` (session_origin=manual) and named
+		// sessions resolve mouse-on so the tmux wheel drives copy-mode scrollback,
+		// even when the agent config sets no mouse_mode. This is the managed,
+		// reconciler-deferred start seam the original API-only fix missed.
+		// Ephemeral pool agents have neither marker → MouseOn stays
+		// tp.Hints.MouseOn (false) → mouse-off, preserving controller-poll safety.
+		MouseOn:                tp.Hints.MouseOn || templateParamsSessionOrigin(tp) != "ephemeral",
 		Nudge:                  nudge,
 		PreStart:               tp.Hints.PreStart,
 		SessionSetup:           tp.Hints.SessionSetup,

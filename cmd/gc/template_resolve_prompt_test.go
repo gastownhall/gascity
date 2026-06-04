@@ -570,6 +570,32 @@ func TestResolveTemplateHeadlessAgentStaysMouseOff(t *testing.T) {
 	}
 }
 
+// TestTemplateParamsToConfigInteractiveSessionEnablesMouse locks ga-c4w finding
+// #1 for the MANAGED `gc session new` deferred-start path: the reconciler starts
+// a session_origin=manual bead through templateParamsToConfig (see
+// buildPreparedStartWithWorkDirResolver). Interactive sessions — manual
+// (`gc session new`) and named — must resolve MouseOn=true even when the agent
+// config sets no mouse_mode, while ephemeral pool agents stay MouseOn=false
+// (controller-poll safety). This is the seam the original API-only fix missed:
+// MouseOn for these sessions never flowed through internal/api sessionCreateHints.
+func TestTemplateParamsToConfigInteractiveSessionEnablesMouse(t *testing.T) {
+	// Managed-deferred `gc session new` → session_origin=manual → ManualSession.
+	manual := TemplateParams{ManualSession: true}
+	if !templateParamsToConfig(manual).MouseOn {
+		t.Error("templateParamsToConfig(manual).MouseOn = false, want true (gc session new managed-deferred, ga-c4w)")
+	}
+	// Named interactive sessions are also mouse-on.
+	named := TemplateParams{ConfiguredNamedIdentity: "operator"}
+	if !templateParamsToConfig(named).MouseOn {
+		t.Error("templateParamsToConfig(named).MouseOn = false, want true (named interactive, ga-c4w)")
+	}
+	// Ephemeral pool agent has neither marker → stays mouse-off (poll-safe).
+	pool := TemplateParams{}
+	if templateParamsToConfig(pool).MouseOn {
+		t.Error("templateParamsToConfig(pool).MouseOn = true, want false (pool agent must stay mouse-off, ga-c4w)")
+	}
+}
+
 func TestResolveTemplateFlagModeRetainsPromptForStartupDelivery(t *testing.T) {
 	cityPath := t.TempDir()
 	fs := fsys.NewFake()
