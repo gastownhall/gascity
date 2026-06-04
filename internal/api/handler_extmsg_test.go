@@ -136,16 +136,21 @@ func TestHandleExtMsgOutboundNotifiesPeerMembersAndMaterializesNamedSessions(t *
 	if peerSessionName == "" {
 		t.Fatal("materialized peer session missing session_name")
 	}
-	// Bead is written before Start() is called in createAliasedNamedWithTransport;
-	// poll until the provider reports the session running.
+	// Materialization commits the session bead before the runtime session is
+	// started (session.Manager create path: bead first, then provider Start),
+	// so a direct store reader can observe the resolvable bead before
+	// IsRunning flips true. Poll for running instead of checking once to avoid
+	// a load-dependent race (see ga-thgf8q).
+	running := false
 	deadline = time.Now().Add(time.Second)
 	for time.Now().Before(deadline) {
 		if fs.sp.IsRunning(peerSessionName) {
+			running = true
 			break
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	if !fs.sp.IsRunning(peerSessionName) {
+	if !running {
 		t.Fatalf("peer session %q should be running after outbound publish", peerSessionName)
 	}
 
@@ -153,12 +158,13 @@ func TestHandleExtMsgOutboundNotifiesPeerMembersAndMaterializesNamedSessions(t *
 	deadline = time.Now().Add(time.Second)
 	for time.Now().Before(deadline) {
 		peerNudges = 0
-		for _, call := range fs.sp.Calls {
+		calls := fs.sp.SnapshotCalls()
+		for _, call := range calls {
 			if call.Method != "Nudge" {
 				continue
 			}
 			if call.Name == source.SessionName {
-				t.Fatalf("source session should not receive peer publish nudge; calls=%#v", fs.sp.Calls)
+				t.Fatalf("source session should not receive peer publish nudge; calls=%#v", calls)
 			}
 			if call.Name == peerSessionName && strings.Contains(call.Message, "hello peers") {
 				peerNudges++
@@ -170,7 +176,7 @@ func TestHandleExtMsgOutboundNotifiesPeerMembersAndMaterializesNamedSessions(t *
 		time.Sleep(10 * time.Millisecond)
 	}
 	if peerNudges != 1 {
-		t.Fatalf("peer nudge count = %d, want 1; calls=%#v", peerNudges, fs.sp.Calls)
+		t.Fatalf("peer nudge count = %d, want 1; calls=%#v", peerNudges, fs.sp.SnapshotCalls())
 	}
 }
 
