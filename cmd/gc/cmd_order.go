@@ -1513,11 +1513,11 @@ func cmdOrderSweepTracking(staleAfter time.Duration, includeWisps, quiet bool, o
 	}
 	now := time.Now()
 	result, sweepErr := sweepStaleOrderTrackingAcrossStores(stores, now, staleAfter, onlyOrders, includeWisps)
-	deleted, retentionErr := sweepClosedOrderTrackingRetentionAcrossStores(stores, now, orderTrackingRetentionPolicyForConfig(cfg), onlyOrders)
-	result.trackingDeleted = deleted
+	retentionResult, retentionErr := sweepClosedOrderTrackingRetentionAcrossStores(stores, now, orderTrackingRetentionPolicyForConfig(cfg), onlyOrders)
+	result.trackingDeleted = retentionResult.deleted
 	if err := errors.Join(openErr, sweepErr, retentionErr); err != nil {
 		fmt.Fprintf(stderr, "gc order sweep-tracking: %v\n", err) //nolint:errcheck // best-effort stderr
-		if result.storesSwept == 0 {
+		if orderTrackingSweepErrorIsFatal(result, retentionResult, retentionErr) {
 			return 1
 		}
 	}
@@ -1533,6 +1533,13 @@ func cmdOrderSweepTracking(staleAfter time.Duration, includeWisps, quiet bool, o
 		}
 	}
 	return 0
+}
+
+func orderTrackingSweepErrorIsFatal(result orderTrackingSweepResult, retentionResult orderTrackingRetentionSweepResult, retentionErr error) bool {
+	if result.storesSwept == 0 {
+		return true
+	}
+	return retentionErr != nil && retentionResult.storesSwept == 0
 }
 
 func orderTrackingSweepRequiredTargetKeysForOrders(cityPath string, cfg *config.City, onlyOrders map[string]struct{}) (map[string][]string, error) {

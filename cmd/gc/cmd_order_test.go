@@ -1412,6 +1412,20 @@ delete_after_close = "1ns"
 	}
 }
 
+func TestOrderTrackingSweepErrorIsFatalForRetentionAllStoreFailure(t *testing.T) {
+	retentionErr := fmt.Errorf("retention failed")
+
+	if !orderTrackingSweepErrorIsFatal(orderTrackingSweepResult{storesSwept: 1}, orderTrackingRetentionSweepResult{}, retentionErr) {
+		t.Fatal("retention failure with no successful retention stores should be fatal")
+	}
+	if orderTrackingSweepErrorIsFatal(orderTrackingSweepResult{storesSwept: 1}, orderTrackingRetentionSweepResult{storesSwept: 1}, retentionErr) {
+		t.Fatal("retention failure with at least one successful retention store should remain partial")
+	}
+	if !orderTrackingSweepErrorIsFatal(orderTrackingSweepResult{}, orderTrackingRetentionSweepResult{storesSwept: 1}, nil) {
+		t.Fatal("stale sweep failure with no successful stale stores should be fatal")
+	}
+}
+
 func TestSweepOrderTrackingCommandIncludeWispsRequiresOrderBeforePruning(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_BEADS_SCOPE_ROOT", "")

@@ -41,6 +41,7 @@ const (
 	defaultOrderTrackingSweepStaleAfter    = 10 * time.Minute
 	defaultOrderTrackingDeleteAfterClose   = 7 * 24 * time.Hour
 	minClosedOrderTrackingRetained         = 10
+	legacyOrderTrackingRetentionBucket     = "\x00legacy-unscoped-order-tracking"
 	orderTrackingSweepWatchdogInterval     = 30 * time.Second
 	orderTrackingSweepWatchdogStaleAfter   = 2 * time.Minute
 	orderTrackingSweepMetadataReason       = "stale-order-tracking"
@@ -1578,6 +1579,11 @@ type orderTrackingSweepResult struct {
 	sweptStoreKeys  map[string]struct{}
 }
 
+type orderTrackingRetentionSweepResult struct {
+	deleted     int
+	storesSwept int
+}
+
 type orderTrackingRetentionPolicy struct {
 	deleteAfterClose time.Duration
 	retainLast       int
@@ -1595,9 +1601,6 @@ func orderTrackingRetentionPolicyForConfig(cfg *config.City) orderTrackingRetent
 		if duration := configured.DeleteAfterCloseDuration(); duration > 0 {
 			policy.deleteAfterClose = duration
 		}
-	}
-	if policy.retainLast < minClosedOrderTrackingRetained {
-		policy.retainLast = minClosedOrderTrackingRetained
 	}
 	return policy
 }
@@ -1747,20 +1750,22 @@ func sweepStaleOrderTrackingWithOptionsLimit(store beads.Store, now time.Time, s
 	return result, nil
 }
 
-func sweepClosedOrderTrackingRetentionAcrossStores(stores []beads.Store, now time.Time, policy orderTrackingRetentionPolicy, onlyOrders map[string]struct{}) (int, error) {
-	deleted := 0
+func sweepClosedOrderTrackingRetentionAcrossStores(stores []beads.Store, now time.Time, policy orderTrackingRetentionPolicy, onlyOrders map[string]struct{}) (orderTrackingRetentionSweepResult, error) {
+	result := orderTrackingRetentionSweepResult{}
 	var errs []error
 	for i, store := range stores {
 		if store == nil {
 			continue
 		}
 		n, err := sweepClosedOrderTrackingRetention(store, now, policy, onlyOrders)
-		deleted += n
+		result.deleted += n
 		if err != nil {
 			errs = append(errs, fmt.Errorf("pruning closed order-tracking %s: %w", orderTrackingSweepStoreLabel(store, i), err))
+			continue
 		}
+		result.storesSwept++
 	}
-	return deleted, errors.Join(errs...)
+	return result, errors.Join(errs...)
 }
 
 func sweepClosedOrderTrackingRetention(store beads.Store, now time.Time, policy orderTrackingRetentionPolicy, onlyOrders map[string]struct{}) (int, error) {
@@ -1770,6 +1775,8 @@ func sweepClosedOrderTrackingRetention(store beads.Store, now time.Time, policy 
 	if policy.deleteAfterClose <= 0 {
 		return 0, nil
 	}
+	// retainLast is intentionally package-internal and hardcoded; config can
+	// shorten the TTL but cannot remove the recent-history floor.
 	if policy.retainLast < minClosedOrderTrackingRetained {
 		policy.retainLast = minClosedOrderTrackingRetained
 	}
@@ -1785,14 +1792,14 @@ func sweepClosedOrderTrackingRetention(store beads.Store, now time.Time, policy 
 
 	byOrder := make(map[string][]beads.Bead)
 	for _, entry := range entries {
-		scopedName, ok := orderRunNameFromLabels(entry.Labels)
-		if !ok {
-			continue
-		}
+		scopedName, ok := orderTrackingRetentionBucket(entry, onlyOrders)
 		if len(onlyOrders) > 0 {
-			if _, ok := onlyOrders[scopedName]; !ok {
+			if !ok {
 				continue
 			}
+		}
+		if !ok {
+			scopedName = legacyOrderTrackingRetentionBucket
 		}
 		byOrder[scopedName] = append(byOrder[scopedName], entry)
 	}
@@ -1802,10 +1809,12 @@ func sweepClosedOrderTrackingRetention(store beads.Store, now time.Time, policy 
 	var deleteErr error
 	for _, entries := range byOrder {
 		sort.Slice(entries, func(i, j int) bool {
-			if entries[i].CreatedAt.Equal(entries[j].CreatedAt) {
+			left := orderTrackingClosedReferenceTime(entries[i])
+			right := orderTrackingClosedReferenceTime(entries[j])
+			if left.Equal(right) {
 				return entries[i].ID > entries[j].ID
 			}
-			return entries[i].CreatedAt.After(entries[j].CreatedAt)
+			return left.After(right)
 		})
 		if len(entries) <= policy.retainLast {
 			continue
@@ -1824,20 +1833,24 @@ func sweepClosedOrderTrackingRetention(store beads.Store, now time.Time, policy 
 	return deleted, deleteErr
 }
 
+func orderTrackingRetentionBucket(entry beads.Bead, onlyOrders map[string]struct{}) (string, bool) {
+	scopedName, ok := orderNameFromTrackingBead(entry)
+	if !ok {
+		return "", false
+	}
+	if len(onlyOrders) > 0 {
+		if _, ok := onlyOrders[scopedName]; !ok {
+			return "", false
+		}
+	}
+	return scopedName, true
+}
+
 func orderTrackingClosedReferenceTime(b beads.Bead) time.Time {
 	if !b.UpdatedAt.IsZero() {
 		return b.UpdatedAt
 	}
 	return b.CreatedAt
-}
-
-func orderRunNameFromLabels(labels []string) (string, bool) {
-	for _, label := range labels {
-		if name, ok := strings.CutPrefix(label, "order-run:"); ok && name != "" {
-			return name, true
-		}
-	}
-	return "", false
 }
 
 func sweepStaleOrderWispSubtrees(store beads.Store, cutoff time.Time, onlyOrders map[string]struct{}, initiator string) (int, error) {

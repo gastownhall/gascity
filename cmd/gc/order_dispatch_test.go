@@ -3640,6 +3640,118 @@ func TestSweepClosedOrderTrackingRetentionKeepsLatestTenPerOrderAcrossTiers(t *t
 	}
 }
 
+func TestSweepClosedOrderTrackingRetentionPrunesLegacyUnscopedTracking(t *testing.T) {
+	now := time.Date(2026, 6, 4, 12, 0, 0, 0, time.UTC)
+	beadTime := now.Add(-48 * time.Hour)
+	seed := make([]beads.Bead, 0, minClosedOrderTrackingRetained+2)
+	for i := range minClosedOrderTrackingRetained + 2 {
+		seed = append(seed, beads.Bead{
+			ID:        fmt.Sprintf("legacy-%02d", i),
+			Title:     "legacy tracking bead",
+			Status:    "closed",
+			Type:      "task",
+			CreatedAt: beadTime.Add(time.Duration(i) * time.Minute),
+			Labels:    []string{labelOrderTracking},
+			Ephemeral: i%2 == 0,
+		})
+	}
+	store := beads.NewMemStoreFrom(100, seed, nil)
+
+	deleted, err := sweepClosedOrderTrackingRetention(store, now, orderTrackingRetentionPolicy{
+		deleteAfterClose: 24 * time.Hour,
+		retainLast:       minClosedOrderTrackingRetained,
+	}, nil)
+	if err != nil {
+		t.Fatalf("sweepClosedOrderTrackingRetention: %v", err)
+	}
+	if deleted != 2 {
+		t.Fatalf("deleted = %d, want 2", deleted)
+	}
+	for _, id := range []string{"legacy-00", "legacy-01"} {
+		if _, err := store.Get(id); !errors.Is(err, beads.ErrNotFound) {
+			t.Fatalf("Get(%s) err = %v, want ErrNotFound", id, err)
+		}
+	}
+	for i := 2; i < minClosedOrderTrackingRetained+2; i++ {
+		id := fmt.Sprintf("legacy-%02d", i)
+		if _, err := store.Get(id); err != nil {
+			t.Fatalf("%s should be preserved by legacy retain floor: %v", id, err)
+		}
+	}
+}
+
+func TestSweepClosedOrderTrackingRetentionRanksLatestByClosedReferenceTime(t *testing.T) {
+	now := time.Date(2026, 6, 4, 12, 0, 0, 0, time.UTC)
+	seed := make([]beads.Bead, 0, minClosedOrderTrackingRetained+2)
+	for i := range minClosedOrderTrackingRetained + 2 {
+		seed = append(seed, beads.Bead{
+			ID:        fmt.Sprintf("ranked-%02d", i),
+			Title:     "order:ranked",
+			Status:    "closed",
+			Type:      "task",
+			CreatedAt: now.Add(-72*time.Hour + time.Duration(i)*time.Minute),
+			UpdatedAt: now.Add(-72*time.Hour + time.Duration(i)*time.Minute),
+			Labels:    []string{"order-run:ranked", labelOrderTracking},
+			Ephemeral: i%2 == 0,
+		})
+	}
+	seed[0].UpdatedAt = now.Add(-25 * time.Hour)
+	store := beads.NewMemStoreFrom(100, seed, nil)
+
+	deleted, err := sweepClosedOrderTrackingRetention(store, now, orderTrackingRetentionPolicy{
+		deleteAfterClose: 24 * time.Hour,
+		retainLast:       minClosedOrderTrackingRetained,
+	}, nil)
+	if err != nil {
+		t.Fatalf("sweepClosedOrderTrackingRetention: %v", err)
+	}
+	if deleted != 2 {
+		t.Fatalf("deleted = %d, want 2", deleted)
+	}
+	if _, err := store.Get("ranked-00"); err != nil {
+		t.Fatalf("ranked-00 should be preserved as a recent close: %v", err)
+	}
+	for _, id := range []string{"ranked-01", "ranked-02"} {
+		if _, err := store.Get(id); !errors.Is(err, beads.ErrNotFound) {
+			t.Fatalf("Get(%s) err = %v, want ErrNotFound", id, err)
+		}
+	}
+}
+
+func TestSweepClosedOrderTrackingRetentionAcrossStoresTracksSuccessfulStores(t *testing.T) {
+	now := time.Date(2026, 6, 4, 12, 0, 0, 0, time.UTC)
+	seed := make([]beads.Bead, 0, minClosedOrderTrackingRetained+1)
+	for i := range minClosedOrderTrackingRetained + 1 {
+		seed = append(seed, beads.Bead{
+			ID:        fmt.Sprintf("failed-%02d", i),
+			Title:     "order:failed",
+			Status:    "closed",
+			Type:      "task",
+			CreatedAt: now.Add(-48*time.Hour + time.Duration(i)*time.Minute),
+			Labels:    []string{"order-run:failed", labelOrderTracking},
+			Ephemeral: true,
+		})
+	}
+	store := &failingDeleteStore{
+		MemStore: beads.NewMemStoreFrom(100, seed, nil),
+		failID:   "failed-00",
+	}
+
+	result, err := sweepClosedOrderTrackingRetentionAcrossStores([]beads.Store{store}, now, orderTrackingRetentionPolicy{
+		deleteAfterClose: 24 * time.Hour,
+		retainLast:       minClosedOrderTrackingRetained,
+	}, nil)
+	if err == nil {
+		t.Fatal("sweepClosedOrderTrackingRetentionAcrossStores err = nil, want delete failure")
+	}
+	if result.storesSwept != 0 {
+		t.Fatalf("storesSwept = %d, want 0 when retention prune failed", result.storesSwept)
+	}
+	if result.deleted != 0 {
+		t.Fatalf("deleted = %d, want 0 after failed delete", result.deleted)
+	}
+}
+
 func TestSweepClosedOrderTrackingRetentionDeletesForAnyConfiguredStorageTarget(t *testing.T) {
 	now := time.Date(2026, 6, 4, 12, 0, 0, 0, time.UTC)
 	storages := []string{

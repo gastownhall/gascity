@@ -1334,6 +1334,9 @@ func (cr *CityRuntime) runOrderTrackingSweepWatchdog(now time.Time) {
 	// The staleAfter cutoff still protects in-flight dispatches regardless of
 	// which order they belong to, so a direct all-orders sweep is safe and
 	// recovers the jam without depending on any single order being scheduled.
+	// Closed-history retention is intentionally left to the maintenance exec
+	// order or the gc order sweep-tracking CLI; the watchdog only recovers
+	// stale open tracking beads.
 	result, sweepErr := sweepStaleOrderTrackingAcrossStoresLimit(stores, now, orderTrackingSweepWatchdogStaleAfter, nil, orderTrackingWatchdogMetadataInitiator, false, orderTrackingSweepCloseBudget)
 	if err := errors.Join(storeErr, sweepErr); err != nil {
 		if cr.stderr != nil {
