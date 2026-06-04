@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -4199,6 +4200,308 @@ func TestReconcilerStillDrainsOnSameVersionRealDrift(t *testing.T) {
 	}
 	if ds.reason != "config-drift" {
 		t.Errorf("drain reason = %q, want %q", ds.reason, "config-drift")
+	}
+}
+
+// hotReloadDriftFixture wires up a running session whose ONLY drifted core
+// field is CopyFiles: the desired state copies newSrc, the stored breakdown +
+// started_config_hash reflect oldSrc, and Command is identical on both sides.
+// Both hashes carry the current FingerprintVersion so the legacy-rebaseline
+// path does not intercept. Returns the session bead ready to reconcile.
+func hotReloadDriftFixture(t *testing.T, env *reconcilerTestEnv, named bool, workDir, oldSrc, newSrc string) beads.Bead {
+	t.Helper()
+	oldEntry := runtime.CopyEntry{Src: oldSrc, RelDst: "vendored.txt", Probed: true, ContentHash: runtime.HashPathContent(oldSrc)}
+	newEntry := runtime.CopyEntry{Src: newSrc, RelDst: "vendored.txt", Probed: true, ContentHash: runtime.HashPathContent(newSrc)}
+
+	tp := TemplateParams{
+		Command:      "test-cmd",
+		SessionName:  "worker",
+		TemplateName: "worker",
+		WorkDir:      workDir,
+		Hints:        agent.StartupHints{CopyFiles: []runtime.CopyEntry{newEntry}},
+	}
+	env.desiredState["worker"] = tp
+	_ = env.sp.Start(context.Background(), "worker", runtime.Config{Command: "test-cmd", WorkDir: workDir, CopyFiles: []runtime.CopyEntry{newEntry}})
+
+	session := env.createSessionBead("worker", "worker")
+	if named {
+		env.setSessionMetadata(&session, map[string]string{namedSessionMetadataKey: "true"})
+	}
+	env.markSessionActive(&session)
+
+	// Stored baseline reflects the OLD CopyFiles content.
+	oldCfg := runtime.Config{Command: "test-cmd", WorkDir: workDir, CopyFiles: []runtime.CopyEntry{oldEntry}}
+	oldBreakdown, err := json.Marshal(runtime.CoreFingerprintBreakdown(oldCfg))
+	if err != nil {
+		t.Fatalf("marshal old breakdown: %v", err)
+	}
+	env.setSessionMetadata(&session, map[string]string{
+		"started_config_hash": runtime.CoreFingerprint(oldCfg),
+		"core_hash_breakdown": string(oldBreakdown),
+	})
+
+	// Sanity: the only drifted field must be CopyFiles.
+	newCfg := sessionCoreConfigForHash(tp, session)
+	drifted := runtime.CoreFingerprintDriftFieldsFromJSON(string(oldBreakdown), newCfg)
+	if len(drifted) != 1 || drifted[0] != "CopyFiles" {
+		t.Fatalf("fixture drift = %v, want [CopyFiles]", drifted)
+	}
+	return session
+}
+
+// TestReconcile_HotReloadDrift_RebaselinesInPlaceNoDrain verifies the core
+// fix: an alive session whose only config drift is hot-reloadable
+// (CopyFiles) is rebaselined in place — no drain, no SessionDraining event,
+// started_config_hash advanced to the new value.
+func TestReconcile_HotReloadDrift_RebaselinesInPlaceNoDrain(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	rec := events.NewFake()
+	env.rec = rec
+	workDir := t.TempDir()
+	oldSrc := filepath.Join(t.TempDir(), "old.txt")
+	newSrc := filepath.Join(t.TempDir(), "new.txt")
+	if err := os.WriteFile(oldSrc, []byte("old content"), 0o600); err != nil {
+		t.Fatalf("write old src: %v", err)
+	}
+	if err := os.WriteFile(newSrc, []byte("new content"), 0o600); err != nil {
+		t.Fatalf("write new src: %v", err)
+	}
+
+	session := hotReloadDriftFixture(t, env, false, workDir, oldSrc, newSrc)
+
+	env.reconcile([]beads.Bead{session})
+
+	if ds := env.dt.get(session.ID); ds != nil {
+		t.Fatalf("hot-reloadable drift should not drain, got reason=%q stderr=%s", ds.reason, env.stderr.String())
+	}
+	for _, e := range rec.Events {
+		if e.Type == events.SessionDraining {
+			t.Errorf("unexpected SessionDraining event for hot-reload: %+v", e)
+		}
+	}
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get session: %v", err)
+	}
+	want := runtime.CoreFingerprint(sessionCoreConfigForHash(env.desiredState["worker"], session))
+	if got.Metadata["started_config_hash"] != want {
+		t.Errorf("started_config_hash = %q, want rebaseline to %q", got.Metadata["started_config_hash"], want)
+	}
+}
+
+// TestReconcile_HotReloadDrift_NamedSessionNeverKilled verifies a named
+// (context-holding) session with hot-reloadable-only drift is rebaselined in
+// place and never stopped/killed.
+func TestReconcile_HotReloadDrift_NamedSessionNeverKilled(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	workDir := t.TempDir()
+	oldSrc := filepath.Join(t.TempDir(), "old.txt")
+	newSrc := filepath.Join(t.TempDir(), "new.txt")
+	if err := os.WriteFile(oldSrc, []byte("old"), 0o600); err != nil {
+		t.Fatalf("write old src: %v", err)
+	}
+	if err := os.WriteFile(newSrc, []byte("new"), 0o600); err != nil {
+		t.Fatalf("write new src: %v", err)
+	}
+
+	session := hotReloadDriftFixture(t, env, true, workDir, oldSrc, newSrc)
+
+	env.reconcile([]beads.Bead{session})
+
+	if ds := env.dt.get(session.ID); ds != nil {
+		t.Fatalf("named hot-reload drift should not drain, got reason=%q", ds.reason)
+	}
+	if !env.sp.IsRunning("worker") {
+		t.Error("named session should still be running after hot-reload rebaseline")
+	}
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get session: %v", err)
+	}
+	want := runtime.CoreFingerprint(sessionCoreConfigForHash(env.desiredState["worker"], session))
+	if got.Metadata["started_config_hash"] != want {
+		t.Errorf("started_config_hash = %q, want rebaseline to %q", got.Metadata["started_config_hash"], want)
+	}
+}
+
+// TestReconcile_HotReloadDrift_ReMaterializesWorkdir proves the rebaseline
+// actually re-stages workdir content (not just a hash bump): the destination
+// file on disk must hold the NEW source bytes after reconcile.
+func TestReconcile_HotReloadDrift_ReMaterializesWorkdir(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	workDir := t.TempDir()
+	oldSrc := filepath.Join(t.TempDir(), "old.txt")
+	newSrc := filepath.Join(t.TempDir(), "new.txt")
+	if err := os.WriteFile(oldSrc, []byte("OLD-BYTES"), 0o600); err != nil {
+		t.Fatalf("write old src: %v", err)
+	}
+	if err := os.WriteFile(newSrc, []byte("NEW-BYTES"), 0o600); err != nil {
+		t.Fatalf("write new src: %v", err)
+	}
+	// Seed the destination with the OLD content so we can prove the restage
+	// overwrote it.
+	dst := filepath.Join(workDir, "vendored.txt")
+	if err := os.WriteFile(dst, []byte("OLD-BYTES"), 0o600); err != nil {
+		t.Fatalf("seed dst: %v", err)
+	}
+
+	session := hotReloadDriftFixture(t, env, false, workDir, oldSrc, newSrc)
+
+	env.reconcile([]beads.Bead{session})
+
+	got, err := os.ReadFile(dst)
+	if err != nil {
+		t.Fatalf("read dst after reconcile: %v", err)
+	}
+	if string(got) != "NEW-BYTES" {
+		t.Errorf("destination content = %q, want %q (restage did not run); stderr=%s", string(got), "NEW-BYTES", env.stderr.String())
+	}
+}
+
+// TestReconcile_RestartRequiredDrift_StillDrains verifies genuine
+// restart-required drift (Command) still initiates a drain — the hot-reload
+// path must not swallow it.
+func TestReconcile_RestartRequiredDrift_StillDrains(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	env.addRunningWorkerDesiredWithNewConfig()
+	session := env.createSessionBead("worker", "worker")
+	env.markSessionActive(&session)
+	oldCfg := runtime.Config{Command: "test-cmd"}
+	oldBreakdown, err := json.Marshal(runtime.CoreFingerprintBreakdown(oldCfg))
+	if err != nil {
+		t.Fatalf("marshal old breakdown: %v", err)
+	}
+	env.setSessionMetadata(&session, map[string]string{
+		"started_config_hash": runtime.CoreFingerprint(oldCfg),
+		"core_hash_breakdown": string(oldBreakdown),
+	})
+
+	env.reconcile([]beads.Bead{session})
+
+	ds := env.dt.get(session.ID)
+	if ds == nil {
+		t.Fatalf("Command drift should still drain; stderr=%s", env.stderr.String())
+	}
+	if ds.reason != "config-drift" {
+		t.Errorf("drain reason = %q, want config-drift", ds.reason)
+	}
+}
+
+// TestReconcile_MixedDrift_TreatedAsRestartRequired verifies that drift
+// touching BOTH a hot-reloadable field (CopyFiles) and a restart-required
+// field (Command) is treated as restart-required and drains.
+func TestReconcile_MixedDrift_TreatedAsRestartRequired(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	workDir := t.TempDir()
+	oldSrc := filepath.Join(t.TempDir(), "old.txt")
+	newSrc := filepath.Join(t.TempDir(), "new.txt")
+	if err := os.WriteFile(oldSrc, []byte("old"), 0o600); err != nil {
+		t.Fatalf("write old src: %v", err)
+	}
+	if err := os.WriteFile(newSrc, []byte("new"), 0o600); err != nil {
+		t.Fatalf("write new src: %v", err)
+	}
+	oldEntry := runtime.CopyEntry{Src: oldSrc, RelDst: "vendored.txt", Probed: true, ContentHash: runtime.HashPathContent(oldSrc)}
+	newEntry := runtime.CopyEntry{Src: newSrc, RelDst: "vendored.txt", Probed: true, ContentHash: runtime.HashPathContent(newSrc)}
+
+	// Desired: NEW command AND new CopyFiles.
+	tp := TemplateParams{
+		Command:      "new-cmd",
+		SessionName:  "worker",
+		TemplateName: "worker",
+		WorkDir:      workDir,
+		Hints:        agent.StartupHints{CopyFiles: []runtime.CopyEntry{newEntry}},
+	}
+	env.desiredState["worker"] = tp
+	_ = env.sp.Start(context.Background(), "worker", runtime.Config{Command: "new-cmd", WorkDir: workDir, CopyFiles: []runtime.CopyEntry{newEntry}})
+
+	session := env.createSessionBead("worker", "worker")
+	env.markSessionActive(&session)
+	oldCfg := runtime.Config{Command: "test-cmd", WorkDir: workDir, CopyFiles: []runtime.CopyEntry{oldEntry}}
+	oldBreakdown, err := json.Marshal(runtime.CoreFingerprintBreakdown(oldCfg))
+	if err != nil {
+		t.Fatalf("marshal old breakdown: %v", err)
+	}
+	env.setSessionMetadata(&session, map[string]string{
+		"started_config_hash": runtime.CoreFingerprint(oldCfg),
+		"core_hash_breakdown": string(oldBreakdown),
+	})
+
+	env.reconcile([]beads.Bead{session})
+
+	ds := env.dt.get(session.ID)
+	if ds == nil {
+		t.Fatalf("mixed drift (Command + CopyFiles) should drain; stderr=%s", env.stderr.String())
+	}
+	if ds.reason != "config-drift" {
+		t.Errorf("drain reason = %q, want config-drift", ds.reason)
+	}
+}
+
+// TestReconcile_AsleepNamedHotReloadDrift_RebaselinesNotReset verifies an
+// asleep named session with hot-reloadable-only drift rebaselines its stored
+// hash in place WITHOUT rotating session_key (the asleep reset's cold-start
+// behavior). --resume continuity is preserved.
+func TestReconcile_AsleepNamedHotReloadDrift_RebaselinesNotReset(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	workDir := t.TempDir()
+	oldSrc := filepath.Join(t.TempDir(), "old.txt")
+	newSrc := filepath.Join(t.TempDir(), "new.txt")
+	if err := os.WriteFile(oldSrc, []byte("old"), 0o600); err != nil {
+		t.Fatalf("write old src: %v", err)
+	}
+	if err := os.WriteFile(newSrc, []byte("new"), 0o600); err != nil {
+		t.Fatalf("write new src: %v", err)
+	}
+	oldEntry := runtime.CopyEntry{Src: oldSrc, RelDst: "vendored.txt", Probed: true, ContentHash: runtime.HashPathContent(oldSrc)}
+	newEntry := runtime.CopyEntry{Src: newSrc, RelDst: "vendored.txt", Probed: true, ContentHash: runtime.HashPathContent(newSrc)}
+
+	// Desired present (new CopyFiles) but session is ASLEEP, not running.
+	tp := TemplateParams{
+		Command:      "test-cmd",
+		SessionName:  "worker",
+		TemplateName: "worker",
+		WorkDir:      workDir,
+		Hints:        agent.StartupHints{CopyFiles: []runtime.CopyEntry{newEntry}},
+	}
+	env.desiredState["worker"] = tp
+
+	session := env.createSessionBead("worker", "worker")
+	env.setSessionMetadata(&session, map[string]string{namedSessionMetadataKey: "true"})
+	// Asleep: createSessionBead defaults state=asleep; do NOT mark active or start.
+	const sessionKey = "resume-key-keep-me"
+	oldCfg := runtime.Config{Command: "test-cmd", WorkDir: workDir, CopyFiles: []runtime.CopyEntry{oldEntry}}
+	oldBreakdown, err := json.Marshal(runtime.CoreFingerprintBreakdown(oldCfg))
+	if err != nil {
+		t.Fatalf("marshal old breakdown: %v", err)
+	}
+	env.setSessionMetadata(&session, map[string]string{
+		"started_config_hash": runtime.CoreFingerprint(oldCfg),
+		"core_hash_breakdown": string(oldBreakdown),
+		"session_key":         sessionKey,
+	})
+
+	env.reconcile([]beads.Bead{session})
+
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get session: %v", err)
+	}
+	if got.Metadata["session_key"] != sessionKey {
+		t.Errorf("session_key = %q, want unchanged %q (asleep hot-reload must not rotate it)", got.Metadata["session_key"], sessionKey)
+	}
+	want := runtime.CoreFingerprint(sessionCoreConfigForHash(tp, session))
+	if got.Metadata["started_config_hash"] != want {
+		t.Errorf("started_config_hash = %q, want rebaseline to %q (not cleared)", got.Metadata["started_config_hash"], want)
+	}
+	if got.Metadata["started_config_hash"] == "" {
+		t.Error("started_config_hash was cleared; asleep hot-reload must rebaseline, not clear")
 	}
 }
 

@@ -1780,6 +1780,35 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						// Diagnostic: log per-field breakdown to identify the drifting field.
 						driftedFields := runtime.CoreFingerprintDriftFieldsFromJSON(session.Metadata["core_hash_breakdown"], agentCfg)
 						runtime.LogCoreFingerprintDrift(stderr, name, session.Metadata["core_hash_breakdown"], agentCfg)
+						// Hot-reloadable-only drift (vendored CopyFiles/overlay/
+						// skills content) is adopted in place by re-materializing
+						// workdir content + rebaselining the stored hashes — for
+						// ALL sessions, attached or not, named or pool. A
+						// bed-refresh that only rewrites scripts/skills must never
+						// drain or cold-kill a live agent. Restart-required drift
+						// (Command/Env/MCP/PreStart/...) falls through to the
+						// existing guarded restart path below.
+						if runtime.HotReloadableDriftOnly(driftedFields) {
+							if rebaselineHotReloadDrift(cfg.Workspace.Provider, cfgAgent, session, store, cfg, cityPath, name, agentCfg, stdout, stderr) {
+								if err := clearSessionConfigDriftDeferral(*session, store); err != nil {
+									fmt.Fprintf(stderr, "session reconciler: clearing config-drift deferral after hot-reload for %s: %v\n", name, err) //nolint:errcheck
+								}
+								if trace != nil {
+									trace.recordDecision("reconciler.session.config_drift", tp.TemplateName, name, "config_drift", string(TraceOutcomeRebaselinedHotReload), configDriftTracePayload(storedHash, currentHash, driftedFields, nil), nil, "")
+								}
+								continue
+							}
+							// Cannot restage in place (k8s/acp/hybrid) or staging
+							// failed: DEFER rather than cold-kill. A missed
+							// hot-reload is recovered on the next human restart; a
+							// cold kill destroys context irreversibly.
+							if trace != nil {
+								trace.recordDecision("reconciler.session.config_drift", tp.TemplateName, name, "config_drift", string(TraceOutcomeDeferredActive), configDriftTracePayload(storedHash, currentHash, driftedFields, traceRecordPayload{
+									"active_reason": "hot_reload_restage_unavailable",
+								}), nil, "")
+							}
+							continue
+						}
 						restartedInPlace := false
 						// Attached sessions never get config-drift restarts.
 						// The human will restart when ready; drift applies
@@ -1791,6 +1820,22 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						attached, attachErr := sessionAttachedForConfigDrift(*session, sp, cityPath, store, cfg, name)
 						if attachErr != nil {
 							fmt.Fprintf(stderr, "session reconciler: observing config-drift attachment for %s: %v\n", name, attachErr) //nolint:errcheck
+							// Fail safe: a named/context-holding session must never be
+							// cold-killed on config drift when attach state is unknown.
+							// Defer this tick (treat unknown == possibly-attached) and
+							// record the attached-deferral so a persistent probe error
+							// can't be ground down into a kill across a reconcile burst.
+							if isNamedSessionBead(*session) {
+								if derr := recordSessionAttachedConfigDriftDeferral(*session, store, clk, driftKey); derr != nil {
+									fmt.Fprintf(stderr, "session reconciler: recording fail-safe attached deferral for %s: %v\n", name, derr) //nolint:errcheck
+								}
+								if trace != nil {
+									trace.recordDecision("reconciler.session.config_drift", tp.TemplateName, name, "config_drift", string(TraceOutcomeDeferredAttached), configDriftTracePayload(storedHash, currentHash, driftedFields, traceRecordPayload{
+										"active_reason": "attach_state_unknown",
+									}), nil, "")
+								}
+								continue
+							}
 						}
 						if attached {
 							if err := recordSessionAttachedConfigDriftDeferral(*session, store, clk, driftKey); err != nil {
@@ -2002,6 +2047,22 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 							continue
 						}
 						driftedFields := runtime.CoreFingerprintDriftFieldsFromJSON(session.Metadata["core_hash_breakdown"], agentCfg)
+						// Asleep named session with hot-reloadable-only drift:
+						// rebaseline the stored hash in place. The session is not
+						// running, so NO live restage is needed — the next wake
+						// stages current content at Start. Skipping the reset here
+						// avoids rotating session_key / clearing started_config_hash
+						// (the asleep reset's cold-start behavior) for a change the
+						// next start adopts for free, preserving --resume continuity.
+						if runtime.HotReloadableDriftOnly(driftedFields) {
+							if err := silentRebaselineSessionHashes(session, store, agentCfg); err != nil {
+								fmt.Fprintf(stderr, "session reconciler: rebaselining asleep hot-reload hashes for %s: %v\n", name, err) //nolint:errcheck
+							}
+							if trace != nil {
+								trace.recordDecision("reconciler.session.config_drift", tp.TemplateName, name, "config_drift", string(TraceOutcomeRebaselinedHotReload), configDriftTracePayload(storedHash, currentHash, driftedFields, nil), nil, "")
+							}
+							continue
+						}
 						resetConfiguredNamedSessionForConfigDrift(session, store, sp, name, false, "asleep", clk.Now().UTC(), stderr)
 						if trace != nil {
 							trace.recordDecision("reconciler.session.config_drift", tp.TemplateName, name, "config_drift", "repair_in_place", configDriftTracePayload(storedHash, currentHash, driftedFields, nil), nil, "")

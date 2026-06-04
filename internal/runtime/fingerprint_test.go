@@ -868,3 +868,206 @@ func TestCoreFingerprintDriftFields(t *testing.T) {
 		t.Fatalf("CoreFingerprintDriftFields with missing breakdown = %v, want empty", got)
 	}
 }
+
+// TestClassifyCoreField pins the hot-reloadable vs restart-required
+// partition of every CoreFingerprintBreakdown field. CopyFiles and Skills
+// are content the reconciler can re-materialize into a running session;
+// every other field (including OverlayDir, whose path-only drift can rewrite
+// settings.json hooks the live process won't re-read) requires a process
+// restart. An unknown name fails safe to restart-required so a future
+// breakdown field added without updating the classifier can't silently skip
+// a restart.
+func TestClassifyCoreField(t *testing.T) {
+	cases := []struct {
+		field string
+		want  FieldClass
+	}{
+		// Hot-reloadable: re-stage workdir content, no restart.
+		{"CopyFiles", FieldClassHotReloadable},
+		{"Skills", FieldClassHotReloadable},
+		// Restart-required: behavioral identity changed.
+		{"OverlayDir", FieldClassRestartRequired},
+		{"Command", FieldClassRestartRequired},
+		{"Lifecycle", FieldClassRestartRequired},
+		{"Env", FieldClassRestartRequired},
+		{"MCPServers", FieldClassRestartRequired},
+		{"FPExtra", FieldClassRestartRequired},
+		{"PreStart", FieldClassRestartRequired},
+		{"SessionSetup", FieldClassRestartRequired},
+		{"SessionSetupScript", FieldClassRestartRequired},
+		{"OverlayProviders", FieldClassRestartRequired},
+		{"AcceptStartupDialogs", FieldClassRestartRequired},
+		{"MouseOn", FieldClassRestartRequired},
+		// Unknown name fails safe to restart-required.
+		{"Bogus", FieldClassRestartRequired},
+	}
+	for _, tc := range cases {
+		t.Run(tc.field, func(t *testing.T) {
+			if got := ClassifyCoreField(tc.field); got != tc.want {
+				t.Errorf("ClassifyCoreField(%q) = %v, want %v", tc.field, got, tc.want)
+			}
+		})
+	}
+
+	// Every field a current breakdown emits must be classifiable. Pin the
+	// known field set so a NEW breakdown field fails here until someone makes
+	// an explicit hot-reloadable-vs-restart-required decision for it, rather
+	// than silently defaulting to restart-required unreviewed.
+	known := map[string]bool{
+		"Command": true, "Lifecycle": true, "Env": true, "MCPServers": true,
+		"FPExtra": true, "Skills": true, "PreStart": true, "SessionSetup": true,
+		"SessionSetupScript": true, "OverlayDir": true, "OverlayProviders": true,
+		"AcceptStartupDialogs": true, "CopyFiles": true, "MouseOn": true,
+	}
+	bd := CoreFingerprintBreakdown(Config{Command: "claude"})
+	if len(bd.Fields) == 0 {
+		t.Fatal("CoreFingerprintBreakdown produced no fields")
+	}
+	for name := range bd.Fields {
+		if !known[name] {
+			t.Errorf("breakdown emits unclassified field %q — classify it in hotReloadableCoreFields + TestClassifyCoreField", name)
+		}
+	}
+}
+
+// TestHotReloadableDriftOnly verifies the all-or-nothing classification of a
+// drifted-field set. Empty drift is not "hot-reloadable drift" (there is
+// nothing to adopt), a set of only hot-reloadable fields is, and any
+// restart-required field in the set forces the whole episode to be
+// restart-required.
+func TestHotReloadableDriftOnly(t *testing.T) {
+	cases := []struct {
+		name   string
+		fields []string
+		want   bool
+	}{
+		{"nil", nil, false},
+		{"empty", []string{}, false},
+		{"copyfiles only", []string{"CopyFiles"}, true},
+		{"all hot-reloadable", []string{"CopyFiles", "Skills"}, true},
+		{"overlaydir is restart-required", []string{"OverlayDir"}, false},
+		{"copyfiles plus command", []string{"CopyFiles", "Command"}, false},
+		{"env only", []string{"Env"}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := HotReloadableDriftOnly(tc.fields); got != tc.want {
+				t.Errorf("HotReloadableDriftOnly(%v) = %v, want %v", tc.fields, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestCoreFingerprintBreakdownSplitsSkillsFromFPExtra proves the breakdown
+// decomposes FingerprintExtra into a restart-required FPExtra component
+// (mcp:/pool.* keys) and a hot-reloadable Skills component (skills:* keys):
+// changing only a skill content-hash flips Skills and leaves FPExtra; changing
+// an mcp content-hash flips FPExtra and leaves Skills.
+func TestCoreFingerprintBreakdownSplitsSkillsFromFPExtra(t *testing.T) {
+	base := Config{
+		Command: "claude",
+		FingerprintExtra: map[string]string{
+			"skills:foo": "h1",
+			"mcp:claude": "h2",
+			"pool.min":   "1",
+		},
+	}
+	bd := CoreFingerprintBreakdown(base)
+	if _, ok := bd.Fields["Skills"]; !ok {
+		t.Fatalf("breakdown missing Skills field: %v", bd.Fields)
+	}
+	if _, ok := bd.Fields["FPExtra"]; !ok {
+		t.Fatalf("breakdown missing FPExtra field: %v", bd.Fields)
+	}
+
+	// Change only the skill content-hash → Skills flips, FPExtra unchanged.
+	skillChanged := base
+	skillChanged.FingerprintExtra = map[string]string{
+		"skills:foo": "h1-changed",
+		"mcp:claude": "h2",
+		"pool.min":   "1",
+	}
+	bdSkill := CoreFingerprintBreakdown(skillChanged)
+	if bdSkill.Fields["Skills"] == bd.Fields["Skills"] {
+		t.Errorf("Skills hash did not change after skill content change")
+	}
+	if bdSkill.Fields["FPExtra"] != bd.Fields["FPExtra"] {
+		t.Errorf("FPExtra hash changed after a skills-only change: %q -> %q", bd.Fields["FPExtra"], bdSkill.Fields["FPExtra"])
+	}
+
+	// Change only the mcp content-hash → FPExtra flips, Skills unchanged.
+	mcpChanged := base
+	mcpChanged.FingerprintExtra = map[string]string{
+		"skills:foo": "h1",
+		"mcp:claude": "h2-changed",
+		"pool.min":   "1",
+	}
+	bdMCP := CoreFingerprintBreakdown(mcpChanged)
+	if bdMCP.Fields["FPExtra"] == bd.Fields["FPExtra"] {
+		t.Errorf("FPExtra hash did not change after mcp content change")
+	}
+	if bdMCP.Fields["Skills"] != bd.Fields["Skills"] {
+		t.Errorf("Skills hash changed after an mcp-only change: %q -> %q", bd.Fields["Skills"], bdMCP.Fields["Skills"])
+	}
+}
+
+// TestBreakdownSplitDoesNotChangeCoreFingerprint proves the FPExtra/Skills
+// breakdown split is purely a decomposition: the overall CoreFingerprint folds
+// all of FingerprintExtra together in hashCoreFields and never consults the
+// breakdown, so two configs with identical FingerprintExtra must produce
+// identical CoreFingerprints regardless of the skills:/non-skills: split.
+func TestBreakdownSplitDoesNotChangeCoreFingerprint(t *testing.T) {
+	cfg := Config{
+		Command: "claude",
+		FingerprintExtra: map[string]string{
+			"skills:foo": "h1",
+			"skills:bar": "h3",
+			"mcp:claude": "h2",
+			"pool.min":   "1",
+		},
+	}
+	// Same inputs, independently constructed map (different iteration order
+	// possible) → identical overall hash.
+	cfg2 := Config{
+		Command: "claude",
+		FingerprintExtra: map[string]string{
+			"pool.min":   "1",
+			"mcp:claude": "h2",
+			"skills:bar": "h3",
+			"skills:foo": "h1",
+		},
+	}
+	if CoreFingerprint(cfg) != CoreFingerprint(cfg2) {
+		t.Errorf("CoreFingerprint differs for identical FingerprintExtra: %q vs %q", CoreFingerprint(cfg), CoreFingerprint(cfg2))
+	}
+
+	// A config with no FingerprintExtra and one whose only skills entry is
+	// removed must still both be stable across calls (sanity that the
+	// subset helper doesn't perturb the overall stream).
+	noExtra := Config{Command: "claude"}
+	if h1, h2 := CoreFingerprint(noExtra), CoreFingerprint(noExtra); h1 != h2 {
+		t.Errorf("CoreFingerprint not deterministic for empty FingerprintExtra: %q vs %q", h1, h2)
+	}
+}
+
+// TestFingerprintExtraSubset verifies the skills:/non-skills: partition helper
+// that backs the breakdown split.
+func TestFingerprintExtraSubset(t *testing.T) {
+	m := map[string]string{
+		"skills:foo": "h1",
+		"skills:bar": "h2",
+		"mcp:claude": "h3",
+		"pool.min":   "1",
+	}
+	skills := fingerprintExtraSubset(m, true)
+	if len(skills) != 2 || skills["skills:foo"] != "h1" || skills["skills:bar"] != "h2" {
+		t.Errorf("fingerprintExtraSubset(skillsOnly=true) = %v, want only skills: entries", skills)
+	}
+	nonSkill := fingerprintExtraSubset(m, false)
+	if len(nonSkill) != 2 || nonSkill["mcp:claude"] != "h3" || nonSkill["pool.min"] != "1" {
+		t.Errorf("fingerprintExtraSubset(skillsOnly=false) = %v, want only non-skills entries", nonSkill)
+	}
+	if got := fingerprintExtraSubset(nil, true); len(got) != 0 {
+		t.Errorf("fingerprintExtraSubset(nil) = %v, want empty", got)
+	}
+}

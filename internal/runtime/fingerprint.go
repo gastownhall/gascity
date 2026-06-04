@@ -36,6 +36,15 @@ type BreakdownCopyEntry struct {
 // different prefix) and silently rebaseline them instead of triggering a
 // false-positive drain. Bump this constant whenever the inputs to or the
 // algorithm of any Fingerprint helper change.
+//
+// v2 -> v3: CoreFingerprintBreakdown now partitions FingerprintExtra into a
+// restart-required FPExtra component and a hot-reloadable Skills component
+// (see fingerprintExtraSubset). The overall CoreFingerprint byte-stream is
+// unchanged, but a pre-upgrade session's stored breakdown carries the old
+// combined FPExtra hash; the bump routes every pre-upgrade session through
+// the IsLegacyOrMismatchedVersion -> silentRebaselineSessionHashes path once
+// (no drain) so its stored breakdown is rewritten to the new split format
+// before any real-drift comparison.
 const FingerprintVersion = "v3"
 
 // ConfigFingerprint returns a deterministic hash of the Config fields that
@@ -328,6 +337,22 @@ func hashSortedMap(h hash.Hash, m map[string]string) {
 	}
 }
 
+// fingerprintExtraSubset returns the FingerprintExtra entries whose keys
+// either have the "skills:" prefix (skillsOnly=true) or do not
+// (skillsOnly=false). Used to split the breakdown's hot-reloadable skill
+// content-hashes from restart-required FPExtra entries (mcp:, pool.*,
+// depends_on, wake_mode) WITHOUT changing the overall CoreFingerprint,
+// which folds all of FingerprintExtra together in hashCoreFields.
+func fingerprintExtraSubset(m map[string]string, skillsOnly bool) map[string]string {
+	out := make(map[string]string, len(m))
+	for k, v := range m {
+		if strings.HasPrefix(k, "skills:") == skillsOnly {
+			out[k] = v
+		}
+	}
+	return out
+}
+
 func hashMCPServers(h hash.Hash, servers []MCPServerConfig) {
 	for _, server := range NormalizeMCPServerConfigs(servers) {
 		h.Write([]byte(server.Name))      //nolint:errcheck // hash.Write never errors
@@ -395,10 +420,19 @@ func CoreFingerprintBreakdown(cfg Config) BreakdownV1 {
 			hashMCPServers(h, cfg.MCPServers)
 		}),
 		"FPExtra": fieldHash(func(h hash.Hash) {
-			if len(cfg.FingerprintExtra) > 0 {
+			nonSkill := fingerprintExtraSubset(cfg.FingerprintExtra, false)
+			if len(nonSkill) > 0 {
 				h.Write([]byte("fp"))
 				h.Write([]byte{0})
-				hashSortedMap(h, cfg.FingerprintExtra)
+				hashSortedMap(h, nonSkill)
+			}
+		}),
+		"Skills": fieldHash(func(h hash.Hash) {
+			skills := fingerprintExtraSubset(cfg.FingerprintExtra, true)
+			if len(skills) > 0 {
+				h.Write([]byte("fp"))
+				h.Write([]byte{0})
+				hashSortedMap(h, skills)
 			}
 		}),
 		"PreStart": fieldHash(func(h hash.Hash) {
@@ -465,6 +499,66 @@ func CoreFingerprintBreakdown(cfg Config) BreakdownV1 {
 		Fields:    fields,
 		CopyFiles: copyEntries,
 	}
+}
+
+// FieldClass categorizes a CoreFingerprintBreakdown field by whether a
+// change to it requires a process restart or can be hot-reloaded into a
+// running session by re-materializing workdir content.
+type FieldClass int
+
+const (
+	// FieldClassRestartRequired marks a field whose drift can only be
+	// adopted by restarting the session process.
+	FieldClassRestartRequired FieldClass = iota
+	// FieldClassHotReloadable marks a field whose drift can be adopted by
+	// re-materializing workdir content into the running session.
+	FieldClassHotReloadable
+)
+
+// hotReloadableCoreFields is the set of CoreFingerprintBreakdown field
+// names whose drift a running session can adopt by re-copying CopyFiles
+// content and re-running skill materialization, without a process
+// restart. Every other breakdown field name is restart-required.
+//
+// OverlayDir is deliberately NOT hot-reloadable. Its breakdown hashes the
+// overlay path (not content), so it drifts only when the configured path
+// changes — and re-staging an overlay rewrites mergeable files such as
+// .claude/settings.json, which carries hooks/permissions a running
+// provider reads only at startup and does not re-read live. Hot-reloading
+// an overlay repoint would leave the live process on stale hooks, so we
+// restart instead. (A finer approach — hot-reload an overlay change only
+// when it touches no settings/JSON the process reads at startup — would
+// need content-level fingerprinting plus per-file classification; not
+// worth the complexity for a rare path repoint.)
+var hotReloadableCoreFields = map[string]bool{
+	"CopyFiles": true,
+	"Skills":    true,
+}
+
+// ClassifyCoreField returns the FieldClass for a CoreFingerprintBreakdown
+// field name. Unknown names are treated as restart-required (fail safe):
+// a new breakdown field added without updating hotReloadableCoreFields
+// conservatively forces a restart rather than silently skipping one.
+func ClassifyCoreField(name string) FieldClass {
+	if hotReloadableCoreFields[name] {
+		return FieldClassHotReloadable
+	}
+	return FieldClassRestartRequired
+}
+
+// HotReloadableDriftOnly reports whether every field in driftedFields is
+// hot-reloadable. Returns false for an empty slice ("no drift" is not
+// "hot-reloadable drift") and false if any field is restart-required.
+func HotReloadableDriftOnly(driftedFields []string) bool {
+	if len(driftedFields) == 0 {
+		return false
+	}
+	for _, f := range driftedFields {
+		if ClassifyCoreField(f) != FieldClassHotReloadable {
+			return false
+		}
+	}
+	return true
 }
 
 // CoreFingerprintDriftFields returns sorted core fingerprint field names whose

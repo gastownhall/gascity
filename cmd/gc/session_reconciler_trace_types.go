@@ -192,6 +192,13 @@ const (
 	// current FingerprintVersion (older or future binary). No drain, no
 	// event.
 	TraceOutcomeRebaselinedVersionMismatch TraceOutcomeCode = "rebaselined_version_mismatch"
+	// TraceOutcomeRebaselinedHotReload marks a config-drift episode where the
+	// only drifted fields were hot-reloadable (CopyFiles/OverlayDir/Skills).
+	// The reconciler re-materialized workdir content into the running session
+	// and rebaselined the stored fingerprint hashes in place — no drain, no
+	// restart, no SessionDraining event. The canonical outcome for a
+	// bed-refresh that only rewrites vendored scripts/skills/overlay content.
+	TraceOutcomeRebaselinedHotReload TraceOutcomeCode = "rebaselined_hot_reload"
 )
 
 type TraceCompletionStatus string
@@ -691,7 +698,10 @@ func normalizeTraceOutcomeCode(raw string) (TraceOutcomeCode, string) {
 		TraceOutcomeStop,
 		TraceOutcomeStartCandidate,
 		TraceOutcomeRetry,
-		TraceOutcomeCancel:
+		TraceOutcomeCancel,
+		TraceOutcomeRebaselinedUnversioned,
+		TraceOutcomeRebaselinedVersionMismatch,
+		TraceOutcomeRebaselinedHotReload:
 		return TraceOutcomeCode(strings.TrimSpace(raw)), ""
 	default:
 		return TraceOutcomeUnknown, strings.TrimSpace(raw)
