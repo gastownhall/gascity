@@ -1042,6 +1042,54 @@ func TestCachingStoreRecordsClosedEventVerificationErrorAndPreservesLocalReopen(
 	}
 }
 
+func TestCachingStoreClosedEventRefreshesStalePayloadFromBacking(t *testing.T) {
+	backing := NewMemStore()
+	bead, err := backing.Create(Bead{Title: "close me", Metadata: map[string]string{"gc.step_ref": "old"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	cache := NewCachingStoreForTest(backing, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+
+	status := "closed"
+	if err := backing.Update(bead.ID, UpdateOpts{
+		Status: &status,
+		Metadata: map[string]string{
+			"ci.verdict": "done",
+			"gc.outcome": "pass",
+		},
+	}); err != nil {
+		t.Fatalf("Update backing close metadata: %v", err)
+	}
+
+	stalePayload, err := json.Marshal(Bead{
+		ID:        bead.ID,
+		Status:    "closed",
+		UpdatedAt: bead.UpdatedAt,
+		Metadata: map[string]string{
+			"gc.step_ref": "old",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Marshal stale payload: %v", err)
+	}
+	cache.ApplyEvent("bead.closed", stalePayload)
+
+	got, err := cache.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Status != "closed" {
+		t.Fatalf("Status after close event = %q, want closed", got.Status)
+	}
+	if got.Metadata["ci.verdict"] != "done" || got.Metadata["gc.outcome"] != "pass" {
+		t.Fatalf("metadata after stale close event = %#v, want fresh backing metadata", got.Metadata)
+	}
+}
+
 type cacheEventVerificationFailStore struct {
 	Store
 	failNextGet bool
