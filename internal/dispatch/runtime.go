@@ -247,6 +247,11 @@ func processScopeCheck(store beads.Store, bead beads.Bead, opts ProcessOptions) 
 			if err != nil {
 				return ControlResult{}, err
 			}
+			if err := tracePhaseErr(opts, bead.ID, "propagate-metadata", func() error {
+				return snapshot.propagateScopeMemberMetadata(store, body.ID)
+			}); err != nil {
+				return ControlResult{}, fmt.Errorf("%s: propagating scope metadata: %w", bead.ID, err)
+			}
 			outputJSON, err := tracePhase(opts, bead.ID, "resolve-output", func() (string, error) {
 				return snapshot.resolveScopeOutputJSON(subject)
 			})
