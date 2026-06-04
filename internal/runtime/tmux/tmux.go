@@ -2772,14 +2772,26 @@ func codexTranscriptTailContainsTurnAborted(tail string) bool {
 	return false
 }
 
-// paneContainsBusyIndicator checks captured pane lines for signs that the
-// agent is actively processing. Claude Code displays "esc to interrupt" in
-// the status bar while running tools or generating responses.
+// claudeBusySpinnerRe matches Claude Code's live "working" spinner footer: an
+// elapsed timer with a token-stream / interrupt suffix in parentheses, e.g.
+// "(2m 28s · ↓ 10.9k tokens)" or "(28m 11s • esc to interrupt)". Current Claude
+// Code (notably bypass-permissions mode) shows this spinner instead of a bare
+// "esc to interrupt" string while busy. Anchored on "(<digits><m|s>" before the
+// "·"/"•" separator so it does NOT match idle chrome — "(ctrl+o to expand)",
+// "(main)", "⏱️ Jun 4 02:57:04", or the "✻ Worked for 3m 38s" done marker.
+var claudeBusySpinnerRe = regexp.MustCompile(`\([0-9]+[ms][^)]*[·•]`)
+
+// paneContainsBusyIndicator checks captured pane lines for signs that the agent
+// is actively processing. Agent TUIs surface this differently: older Claude Code
+// and Codex show "esc to interrupt"; current Claude Code shows a live spinner
+// with an elapsed timer + token stream (claudeBusySpinnerRe); Gemini shows its
+// own cancel / shell-tool strings.
 func paneContainsBusyIndicator(lines []string) bool {
 	for _, line := range lines {
 		if strings.Contains(line, "esc to interrupt") ||
 			strings.Contains(line, "Press Esc or Ctrl+C to cancel") ||
-			strings.Contains(line, "[current working directory ") {
+			strings.Contains(line, "[current working directory ") ||
+			claudeBusySpinnerRe.MatchString(line) {
 			return true
 		}
 	}
