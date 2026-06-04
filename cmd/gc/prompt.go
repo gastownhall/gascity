@@ -24,19 +24,22 @@ const (
 
 // PromptContext holds template data for prompt rendering.
 type PromptContext struct {
-	CityRoot      string
-	AgentName     string // qualified: "rig/polecat-1" or "mayor"
-	TemplateName  string // config name: "polecat" (template) or "mayor" (named backing template)
-	BindingName   string
-	BindingPrefix string
-	RigName       string
-	RigRoot       string
-	WorkDir       string
-	IssuePrefix   string
-	Branch        string
-	DefaultBranch string // e.g. "main" — from git symbolic-ref origin/HEAD
-	WorkQuery     string // command to find available work (from Agent.EffectiveWorkQuery)
-	SlingQuery    string // command template to route work to this agent (from Agent.EffectiveSlingQuery)
+	CityRoot                string
+	AgentName               string // qualified: "rig/polecat-1" or "mayor"
+	TemplateName            string // config name: "polecat" (template) or "mayor" (named backing template)
+	BindingName             string
+	BindingPrefix           string
+	RigName                 string
+	RigRoot                 string
+	WorkDir                 string
+	IssuePrefix             string
+	Branch                  string
+	DefaultBranch           string // e.g. "main" — from git symbolic-ref origin/HEAD
+	WorkQuery               string // command to find available work (from Agent.EffectiveWorkQuery)
+	AssignedInProgressQuery string // command to find assigned in-progress work (from Agent.EffectiveAssignedInProgressQuery)
+	AssignedReadyQuery      string // command to find pre-assigned ready work (from Agent.EffectiveAssignedReadyQuery)
+	RoutedPoolQuery         string // command to find unassigned routed pool work (from Agent.EffectiveRoutedPoolQuery)
+	SlingQuery              string // command template to route work to this agent (from Agent.EffectiveSlingQuery)
 	// ProviderKey is the resolved provider name for this agent (e.g. "claude",
 	// "codex", or a custom provider name from the city's [providers] section).
 	// Templates can branch on this via {{ .ProviderKey }} or feed it to
@@ -312,7 +315,7 @@ func effectivePromptFragments(global, inject, appendFragments, inherited, defaul
 // buildTemplateData merges Env (lower priority) with SDK fields (higher
 // priority) into a single map for template execution.
 func buildTemplateData(ctx PromptContext) map[string]string {
-	m := make(map[string]string, len(ctx.Env)+10)
+	m := make(map[string]string, len(ctx.Env)+19)
 	for k, v := range ctx.Env {
 		m[k] = v
 	}
@@ -329,6 +332,9 @@ func buildTemplateData(ctx PromptContext) map[string]string {
 	m["Branch"] = ctx.Branch
 	m["DefaultBranch"] = ctx.DefaultBranch
 	m["WorkQuery"] = ctx.WorkQuery
+	m["AssignedInProgressQuery"] = ctx.AssignedInProgressQuery
+	m["AssignedReadyQuery"] = ctx.AssignedReadyQuery
+	m["RoutedPoolQuery"] = ctx.RoutedPoolQuery
 	m["SlingQuery"] = ctx.SlingQuery
 	m["ProviderKey"] = ctx.ProviderKey
 	m["ProviderDisplayName"] = ctx.ProviderDisplayName

@@ -2235,6 +2235,7 @@ export interface components {
                 [key: string]: string;
             };
             needs?: string[] | null;
+            no_history?: boolean;
             parent?: string;
             /** Format: int64 */
             priority?: number;

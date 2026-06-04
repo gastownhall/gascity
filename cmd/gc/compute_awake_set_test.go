@@ -580,7 +580,7 @@ func TestScaled_Demand2_OneActive(t *testing.T) {
 	assertAsleep(t, result, "polecat-mc-2") // asleep ephemerals not reused
 }
 
-func TestScaled_NewDemandDoesNotUseActiveAssignedSessions(t *testing.T) {
+func TestScaled_AssignedSessionsFillScaleSlotsBeforeCreatingSessions(t *testing.T) {
 	result := ComputeAwakeSet(AwakeInput{
 		Agents: []AwakeAgent{{QualifiedName: "hello-world/polecat"}},
 		SessionBeads: []AwakeSessionBead{
@@ -617,8 +617,7 @@ func TestScaled_NewDemandDoesNotUseActiveAssignedSessions(t *testing.T) {
 		suffix := strconv.Itoa(i)
 		assertAwake(t, result, "polecat-assigned-"+suffix)
 		assertReason(t, result, "polecat-assigned-"+suffix, "assigned-work")
-		assertAwake(t, result, "polecat-new-"+suffix)
-		assertReason(t, result, "polecat-new-"+suffix, "scaled:creating")
+		assertAsleep(t, result, "polecat-new-"+suffix)
 	}
 }
 
@@ -830,6 +829,46 @@ func TestDrained_WithAssignedWork_Wakes(t *testing.T) {
 	})
 	assertAwake(t, result, "polecat-mc-1")
 	assertReason(t, result, "polecat-mc-1", "assigned-work")
+}
+
+func TestScaleDemandCountsAssignedSessionBeforeKeepingIdlePoolSibling(t *testing.T) {
+	result := ComputeAwakeSet(AwakeInput{
+		Agents: []AwakeAgent{{QualifiedName: "gascity/gc.run-operator"}},
+		SessionBeads: []AwakeSessionBead{
+			{ID: "mc-old", SessionName: "gc__run-operator-mc-old", Template: "gascity/gc.run-operator", State: "active"},
+			{ID: "mc-new", SessionName: "gc__run-operator-mc-new", Template: "gascity/gc.run-operator", State: "active"},
+		},
+		WorkBeads: []AwakeWorkBead{{
+			ID: "ga-work", Assignee: "gc__run-operator-mc-new", Status: "in_progress",
+		}},
+		ScaleCheckCounts: map[string]int{"gascity/gc.run-operator": 1},
+		RunningSessions:  map[string]bool{"gc__run-operator-mc-old": true, "gc__run-operator-mc-new": true},
+		Now:              now,
+	})
+
+	assertAsleep(t, result, "gc__run-operator-mc-old")
+	assertAwake(t, result, "gc__run-operator-mc-new")
+	assertReason(t, result, "gc__run-operator-mc-new", "assigned-work")
+}
+
+func TestScaleDemandCountsAssignedSessionBeforeKeepingStartPendingPoolSibling(t *testing.T) {
+	result := ComputeAwakeSet(AwakeInput{
+		Agents: []AwakeAgent{{QualifiedName: "gascity/gc.run-operator"}},
+		SessionBeads: []AwakeSessionBead{
+			{ID: "mc-pending", SessionName: "gc__run-operator-mc-pending", Template: "gascity/gc.run-operator", State: string(sessionpkg.StateStartPending)},
+			{ID: "mc-new", SessionName: "gc__run-operator-mc-new", Template: "gascity/gc.run-operator", State: "active"},
+		},
+		WorkBeads: []AwakeWorkBead{{
+			ID: "ga-work", Assignee: "gc__run-operator-mc-new", Status: "in_progress",
+		}},
+		ScaleCheckCounts: map[string]int{"gascity/gc.run-operator": 1},
+		RunningSessions:  map[string]bool{"gc__run-operator-mc-new": true},
+		Now:              now,
+	})
+
+	assertAsleep(t, result, "gc__run-operator-mc-pending")
+	assertAwake(t, result, "gc__run-operator-mc-new")
+	assertReason(t, result, "gc__run-operator-mc-new", "assigned-work")
 }
 
 func TestDrained_PinnedStaysAsleepUntilUndrained(t *testing.T) {

@@ -531,6 +531,7 @@ type Bead struct {
 	Labels       *[]string          `json:"labels,omitempty"`
 	Metadata     *map[string]string `json:"metadata,omitempty"`
 	Needs        *[]string          `json:"needs,omitempty"`
+	NoHistory    *bool              `json:"no_history,omitempty"`
 	Parent       *string            `json:"parent,omitempty"`
 	Priority     *int64             `json:"priority,omitempty"`
 	Ref          *string            `json:"ref,omitempty"`

@@ -18,7 +18,7 @@ through explicit beads; you execute the ready bead currently assigned to you.
 bd list --assignee="$GC_SESSION_NAME" --status=in_progress --json
 
 # Step 2: If nothing in-progress, check for assigned ready work
-bd ready --assignee="$GC_SESSION_NAME" --json --limit=1
+{{ .AssignedReadyQuery }} --json --limit=1
 
 # Step 3: If still nothing, check the routed queue (multi-session configs only)
 gc hook
@@ -70,7 +70,7 @@ gc runtime drain-ack
    ```
 10. After closing, check for more assigned work:
    ```bash
-   bd ready --assignee="$GC_SESSION_NAME" --json --limit=1
+   {{ .AssignedReadyQuery }} --json --limit=1
    ```
 11. If more work exists, go to step 2. If not, poll briefly (see below).
 
@@ -113,7 +113,7 @@ for the same config (`--unassigned` filtering).
 
 ## Polling Before Drain
 
-After closing a bead, if `bd ready --assignee="$GC_SESSION_NAME"` returns
+After closing a bead, if `{{ .AssignedReadyQuery }}` returns
 nothing, do NOT drain immediately. The workflow controller may need a few
 seconds to process control beads and unlock your next step.
 
@@ -121,7 +121,7 @@ Poll up to 60 seconds (6 attempts, 10 seconds apart):
 
 ```bash
 for i in $(seq 1 6); do
-  NEXT=$(bd ready --assignee="$GC_SESSION_NAME" --json --limit=1 2>/dev/null)
+  NEXT=$({{ .AssignedReadyQuery }} --json --limit=1 2>/dev/null)
   if [ -n "$NEXT" ] && [ "$NEXT" != "[]" ]; then
     # Found work — continue working
     break

@@ -960,6 +960,13 @@ func TestPackContentHashRecursiveIgnoresRuntimeDirs(t *testing.T) {
 	writeFile(t, dir, ".cache/tool/result.json", `{"cached":true}`)
 	writeFile(t, dir, ".git/HEAD", "ref: refs/heads/main")
 	writeFile(t, dir, "nested/__pycache__/helper.pyc", "compiled")
+	// gastownhall/gascity#2954: node_modules at any depth must be skipped.
+	// Packs anchored at monorepo roots previously dragged tens of thousands
+	// of node_modules files through the supervisor on every dirty reload.
+	writeFile(t, dir, "node_modules/.package-lock.json", `{"name":"x"}`)
+	writeFile(t, dir, "node_modules/lodash/index.js", "module.exports = {}")
+	writeFile(t, dir, "packages/foo/node_modules/lodash/index.js", "module.exports = {}")
+	writeFile(t, dir, "apps/bar/node_modules/.bun/install-cache.bin", "binary")
 	h2 := PackContentHashRecursive(fsys.OSFS{}, dir)
 	if h2 != h1 {
 		t.Fatalf("hash changed after runtime output writes: %q vs %q", h1, h2)
@@ -1302,8 +1309,14 @@ func TestHasPackRigs(t *testing.T) {
 	if HasPackRigs(nil) {
 		t.Error("nil rigs should return false")
 	}
-	if HasPackRigs([]Rig{{Name: "a", Path: "/a"}}) {
-		t.Error("rig without pack should return false")
+	if HasPackRigs([]Rig{{Name: "a"}}) {
+		t.Error("rig with no path and no includes should return false")
+	}
+	// A rig with only a path is treated as potentially having a pack (expandPacks
+	// will discover the root pack.toml if present). This enables the packV2
+	// convention where a rig root carries agents/ directories directly.
+	if !HasPackRigs([]Rig{{Name: "a", Path: "/a"}}) {
+		t.Error("rig with path should return true (may have root pack.toml)")
 	}
 	if !HasPackRigs([]Rig{{Name: "a", Path: "/a", Includes: []string{"topo"}}}) {
 		t.Error("rig with includes should return true")

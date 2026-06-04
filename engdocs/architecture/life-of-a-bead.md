@@ -334,7 +334,11 @@ order fires, a bead is created with label `order-run:<name>`.
 On the next tick, `Store.ListByLabel("order-run:<name>", 1)` finds
 the most recent run. If it is younger than the cooldown period, the
 order is suppressed. The tracking bead's afterlife IS the cooldown
-mechanism.
+mechanism. Closed tracking history beyond
+`[beads.policies.order_tracking].delete_after_close` is pruned by
+`gc order sweep-tracking` and the maintenance exec order, defaulting
+to 7d while always keeping at least the latest 10 closed tracking
+beads per order.
 
 ## State Transition Summary
 

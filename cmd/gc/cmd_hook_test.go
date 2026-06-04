@@ -16,6 +16,18 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 )
 
+func TestNewHookCmdUsesRoutedWorkHelp(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	cmd := newHookCmd(&stdout, &stderr)
+
+	if got, want := cmd.Short, "Find routed work for an agent"; got != want {
+		t.Fatalf("Short = %q, want %q", got, want)
+	}
+	if !strings.Contains(cmd.Long, "Finds routed work using the agent's work_query config.") {
+		t.Fatalf("Long = %q, want routed-work description", cmd.Long)
+	}
+}
+
 // TestShellWorkQueryTimeoutClassifiesTransient guards the contract the
 // control-dispatcher --follow loop depends on: a work-query timeout must be
 // classifiable as a transient store error (wrapping context.DeadlineExceeded)
@@ -715,7 +727,7 @@ max = 5
 		t.Fatalf("stdout = %q, want GC_RIG_ROOT=%q", out, rigDir)
 	}
 	// Tiered query: first tier checks in_progress assigned to session name.
-	if !strings.Contains(out, "args=list --include-ephemeral --status in_progress --assignee=host-session --json --limit=1") {
+	if !strings.Contains(out, "args=list --status in_progress --assignee=host-session --json --limit=1") {
 		t.Fatalf("stdout = %q, want pool work_query args", out)
 	}
 }
@@ -1030,7 +1042,7 @@ max = 5
 		t.Fatalf("stdout = %q, want command to run from rig root %q", out, rigDir)
 	}
 	// Tiered query: first tier checks in_progress assigned to session name.
-	if !strings.Contains(out, "args=list --include-ephemeral --status in_progress --assignee=host-session --json --limit=1") {
+	if !strings.Contains(out, "args=list --status in_progress --assignee=host-session --json --limit=1") {
 		t.Fatalf("stdout = %q, want pool template work_query args", out)
 	}
 }
@@ -1098,7 +1110,7 @@ name = "worker"
 		t.Fatalf("stdout = %q, want GC_SESSION_NAME=host-session", out)
 	}
 	// Tiered query: first tier checks in_progress assigned to session name.
-	if !strings.Contains(out, `args=list --include-ephemeral --status in_progress --assignee=host-session --json --limit=1`) {
+	if !strings.Contains(out, `args=list --status in_progress --assignee=host-session --json --limit=1`) {
 		t.Fatalf("stdout = %q, want metadata-routed work query", out)
 	}
 }
@@ -1159,7 +1171,7 @@ dir = "myrig"
 		t.Fatalf("stdout = %q, want GC_SESSION_NAME=%s", out, wantSession)
 	}
 	// Tiered query: first tier checks in_progress assigned to session name.
-	if !strings.Contains(out, `args=list --include-ephemeral --status in_progress --assignee=host-session --json --limit=1`) {
+	if !strings.Contains(out, `args=list --status in_progress --assignee=host-session --json --limit=1`) {
 		t.Fatalf("stdout = %q, want metadata-routed work query", out)
 	}
 }

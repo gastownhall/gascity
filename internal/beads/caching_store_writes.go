@@ -8,7 +8,25 @@ import (
 
 // Create passes through to the backing store and updates the cache.
 func (c *CachingStore) Create(b Bead) (Bead, error) {
-	created, err := c.backing.Create(b)
+	return c.createWith(func() (Bead, error) {
+		return c.backing.Create(b)
+	})
+}
+
+// CreateWithStorage passes through a policy-selected storage class to backing
+// stores that support table-specific creates, then updates the cache.
+func (c *CachingStore) CreateWithStorage(b Bead, storage StorageClass) (Bead, error) {
+	storageBacking, ok := c.backing.(StorageCreateStore)
+	if !ok {
+		return c.Create(b)
+	}
+	return c.createWith(func() (Bead, error) {
+		return storageBacking.CreateWithStorage(b, storage)
+	})
+}
+
+func (c *CachingStore) createWith(create func() (Bead, error)) (Bead, error) {
+	created, err := create()
 	if err != nil {
 		return created, err
 	}

@@ -869,6 +869,9 @@
               "null"
             ]
           },
+          "no_history": {
+            "type": "boolean"
+          },
           "parent": {
             "type": "string"
           },

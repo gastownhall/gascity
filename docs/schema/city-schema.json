@@ -974,6 +974,14 @@
           "description": "EventHooks controls installation of the bead event-forwarding hooks\n(.beads/hooks/on_create,on_update,on_close). Defaults to true.\nThis config surface is staged ahead of the native bead-event support;\ncurrent hook behavior remains unchanged until lifecycle code opts in.",
           "default": true
         },
+        "bd_compatibility": {
+          "type": "string",
+          "enum": [
+            "bd-1.0.4",
+            "bd-1.0.5"
+          ],
+          "description": "BDCompatibility selects the bd CLI semantics Gas City may rely on.\nEmpty defaults to \"bd-1.0.4\", which keeps claimable work history-backed\nand avoids ready flags whose filtering is incomplete in bd 1.0.4."
+        },
         "policies": {
           "additionalProperties": {
             "$ref": "#/$defs/BeadPolicyConfig"

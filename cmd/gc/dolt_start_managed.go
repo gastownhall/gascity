@@ -15,7 +15,9 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/pidutil"
 )
 
@@ -379,7 +381,7 @@ func startManagedDoltSQLServer(cityPath, configFile, logFilePath string, logFile
 	cmd.Stderr = logFile
 	cmd.Stdin = nil
 	cmd.SysProcAttr = managedDoltSQLServerSysProcAttr()
-	cmd.Env = doltServerEnv(os.Environ())
+	cmd.Env = doltServerEnv(cityPath, os.Environ())
 	if err := cmd.Start(); err != nil {
 		return managedDoltStartedProcess{}, fmt.Errorf("start dolt sql-server: %w", err)
 	}
@@ -396,7 +398,7 @@ func startManagedDoltSQLServerWithTestWatchdog(cityPath, configFile, logFilePath
 		_ = os.Remove(disarmFile)
 		return managedDoltStartedProcess{}, err
 	}
-	args := []string{managedDoltTestWatchdogArg, managedDoltTestParentPIDString(), configFile, logFilePath, disarmFile}
+	args := []string{managedDoltTestWatchdogArg, managedDoltTestParentPIDString(), configFile, logFilePath, disarmFile, cityPath}
 	var parentPipeRead *os.File
 	var parentPipeWrite *os.File
 	if !managedDoltTestHasExternalParent() {
@@ -410,7 +412,7 @@ func startManagedDoltSQLServerWithTestWatchdog(cityPath, configFile, logFilePath
 	cmd := exec.Command(watchdogExecutable, args...)
 	cmd.Stderr = logFile
 	cmd.Stdin = nil
-	cmd.Env = doltServerEnv(os.Environ())
+	cmd.Env = doltServerEnv(cityPath, os.Environ())
 	if parentPipeRead != nil {
 		cmd.ExtraFiles = []*os.File{parentPipeRead}
 	}
@@ -845,8 +847,8 @@ func runManagedDoltTestWatchdog(args []string, stdout, stderr *os.File) int {
 		fmt.Fprintln(stderr, "managed dolt test watchdog is only available in managed Dolt test mode") //nolint:errcheck
 		return 2
 	}
-	if len(args) != 4 && len(args) != 5 {
-		fmt.Fprintf(stderr, "usage: %s <parent-pid> <config-file> <log-file> <disarm-file> [parent-pipe-fd]\n", managedDoltTestWatchdogArg) //nolint:errcheck
+	if len(args) < 4 || len(args) > 6 {
+		fmt.Fprintf(stderr, "usage: %s <parent-pid> <config-file> <log-file> <disarm-file> [city-path] [parent-pipe-fd]\n", managedDoltTestWatchdogArg) //nolint:errcheck
 		return 2
 	}
 	parentPID, err := strconv.Atoi(args[0])
@@ -857,9 +859,22 @@ func runManagedDoltTestWatchdog(args []string, stdout, stderr *os.File) int {
 	configFile := args[1]
 	logFilePath := args[2]
 	disarmFile := args[3]
-	var parentDone <-chan struct{}
+	cityPath := ""
+	parentPipeArg := ""
 	if len(args) == 5 {
-		done, closeParentDone, err := managedDoltTestParentDone(args[4])
+		if _, parseErr := strconv.Atoi(args[4]); parseErr == nil {
+			parentPipeArg = args[4]
+		} else {
+			cityPath = args[4]
+		}
+	}
+	if len(args) == 6 {
+		cityPath = args[4]
+		parentPipeArg = args[5]
+	}
+	var parentDone <-chan struct{}
+	if parentPipeArg != "" {
+		done, closeParentDone, err := managedDoltTestParentDone(parentPipeArg)
 		if err != nil {
 			fmt.Fprintf(stderr, "watch parent pipe: %v\n", err) //nolint:errcheck
 			return 2
@@ -884,7 +899,7 @@ func runManagedDoltTestWatchdog(args []string, stdout, stderr *os.File) int {
 	// archive workers) outlive their parent and leak across test runs
 	// (gastownhall/gascity#2313 follow-up M3).
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Env = doltServerEnv(os.Environ())
+	cmd.Env = doltServerEnv(cityPath, os.Environ())
 	if err := cmd.Start(); err != nil {
 		fmt.Fprintf(stderr, "start dolt sql-server: %v\n", err) //nolint:errcheck
 		return 1
@@ -954,6 +969,28 @@ func managedDoltTestParentDone(rawFD string) (<-chan struct{}, func(), error) {
 
 // doltServerEnv returns the environment applied to every managed dolt
 // sql-server we launch.
-func doltServerEnv(parent []string) []string {
-	return append([]string(nil), parent...)
+func doltServerEnv(cityPath string, parent []string) []string {
+	env := removeEnvKey(parent, "DOLT_DISABLE_EVENT_FLUSH")
+	if managedDoltDisableEventFlush(cityPath) {
+		// Disable Dolt usage telemetry for managed servers by default. The
+		// `dolt send-metrics` event-flush reporter spawns transient
+		// `dolt send-metrics` processes that were observed burning 80-94% CPU
+		// on a busy managed city. Operators can opt back in with
+		// `.beads/config.yaml`:
+		//   dolt:
+		//     disable-event-flush: false
+		env = append(env, "DOLT_DISABLE_EVENT_FLUSH=true")
+	}
+	return env
+}
+
+func managedDoltDisableEventFlush(cityPath string) bool {
+	if strings.TrimSpace(cityPath) == "" {
+		return true
+	}
+	cfg, _, err := contract.ReadDoltConfig(fsys.OSFS{}, filepath.Join(cityPath, ".beads", "config.yaml"))
+	if err != nil {
+		return true
+	}
+	return cfg.DisableEventFlushEnabled()
 }

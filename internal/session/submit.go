@@ -536,7 +536,7 @@ func (m *Manager) enqueueDeferredSubmitLocked(b beads.Bead, sessName, message st
 		return fmt.Errorf("queueing deferred submit: %w", err)
 	}
 	if m.supportsFollowUpLocked(b) {
-		_ = startSessionSubmitPoller(m.cityPath, deferredSubmitAgentKey(b), sessName)
+		_ = startSessionSubmitPoller(m.cityPath, deferredSubmitPollerKey(b), sessName)
 	}
 	return nil
 }
@@ -557,15 +557,19 @@ func deferredSubmitAgentKey(b beads.Bead) string {
 	return b.Title
 }
 
+func deferredSubmitPollerKey(b beads.Bead) string {
+	return PollerKeyFromBead(b)
+}
+
 var (
 	startSessionSubmitPoller      = ensureSessionSubmitPoller
 	sessionSubmitPollerExecutable = os.Executable
 )
 
 func ensureSessionSubmitPoller(cityPath, agentName, sessionName string) error {
-	pidPath := sessionSubmitPollerPIDPath(cityPath, sessionName)
+	pidPath := sessionSubmitPollerPIDPath(cityPath, sessionName, agentName)
 	return withSessionSubmitPollerPIDLock(pidPath, func() error {
-		if running, _ := existingSessionSubmitPollerPID(pidPath, cityPath, sessionName); running {
+		if running, _ := existingSessionSubmitPollerPID(pidPath, cityPath, sessionName, agentName); running {
 			return nil
 		}
 		exe, err := sessionSubmitPollerExecutable()
@@ -577,7 +581,7 @@ func ensureSessionSubmitPoller(cityPath, agentName, sessionName string) error {
 		}
 		cmd := exec.Command(exe, nudgepoller.CommandArgs(cityPath, sessionName, agentName)...)
 		cmd.Env = os.Environ()
-		logFile, err := os.OpenFile(sessionSubmitPollerLogPath(cityPath, sessionName), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+		logFile, err := os.OpenFile(sessionSubmitPollerLogPath(cityPath, sessionName, agentName), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
 		if err != nil {
 			return err
 		}
@@ -601,15 +605,15 @@ func isGoTestExecutable(path string) bool {
 	return strings.HasSuffix(filepath.Base(path), ".test")
 }
 
-func sessionSubmitPollerPIDPath(cityPath, sessionName string) string {
-	return citylayout.RuntimePath(cityPath, "nudges", "pollers", sessionName+".pid")
+func sessionSubmitPollerPIDPath(cityPath, sessionName, agentName string) string {
+	return citylayout.RuntimePath(cityPath, "nudges", "pollers", nudgepoller.PollerFileStem(sessionName, agentName)+".pid")
 }
 
-func sessionSubmitPollerLogPath(cityPath, sessionName string) string {
-	return citylayout.RuntimePath(cityPath, "nudges", "pollers", sessionName+".log")
+func sessionSubmitPollerLogPath(cityPath, sessionName, agentName string) string {
+	return citylayout.RuntimePath(cityPath, "nudges", "pollers", nudgepoller.PollerFileStem(sessionName, agentName)+".log")
 }
 
-func existingSessionSubmitPollerPID(pidPath, cityPath, sessionName string) (bool, error) {
+func existingSessionSubmitPollerPID(pidPath, cityPath, sessionName, agentName string) (bool, error) {
 	data, err := os.ReadFile(pidPath)
 	if errors.Is(err, os.ErrNotExist) {
 		return false, nil
@@ -625,10 +629,10 @@ func existingSessionSubmitPollerPID(pidPath, cityPath, sessionName string) (bool
 	if _, err := fmt.Sscanf(pidText, "%d", &pid); err != nil || pid <= 0 {
 		return false, nil
 	}
-	if cityPath == "" || sessionName == "" {
+	if cityPath == "" || sessionName == "" || agentName == "" {
 		return false, nil
 	}
-	if pidutil.AliveWithCmdline(pid, nudgepoller.CmdlineMatcher(cityPath, sessionName)) {
+	if pidutil.AliveWithCmdline(pid, nudgepoller.CmdlineMatcher(cityPath, sessionName, agentName)) {
 		return true, nil
 	}
 	return false, nil

@@ -41,7 +41,7 @@ gc [flags]
 | [gc graph](#gc-graph) | Show dependency graph for beads |
 | [gc handoff](#gc-handoff) | Send handoff mail and restart controller-managed sessions |
 | [gc help](#gc-help) | Help about any command |
-| [gc hook](#gc-hook) | Check for available work |
+| [gc hook](#gc-hook) | Find routed work for an agent |
 | [gc import](#gc-import) | Manage pack imports |
 | [gc init](#gc-init) | Initialize a new city |
 | [gc lint](#gc-lint) | Validate a pack before merge |
@@ -1544,7 +1544,7 @@ gc help [command]
 
 ## gc hook
 
-Checks for available work using the agent's work_query config.
+Finds routed work using the agent's work_query config.
 
 Without --inject: prints normalized ready-only output, exits 0 if work exists, 1 if empty.
 With --inject: silent legacy Stop-hook compatibility; skips the work query and always exits 0.
@@ -2099,7 +2099,7 @@ gc order
 | [gc order list](#gc-order-list) | List available orders |
 | [gc order run](#gc-order-run) | Execute an order manually |
 | [gc order show](#gc-order-show) | Show details of an order |
-| [gc order sweep-tracking](#gc-order-sweep-tracking) | Close stale order-tracking beads |
+| [gc order sweep-tracking](#gc-order-sweep-tracking) | Close stale and prune closed order-tracking beads |
 
 ## gc order check
 
@@ -2184,10 +2184,13 @@ gc order show <name> [flags]
 
 ## gc order sweep-tracking
 
-Close stale open order-tracking beads.
+Close stale open order-tracking beads and prune expired closed history.
 
 This is intended for maintenance exec orders. It only closes tracking beads
 older than --stale-after so a fresh in-flight order is not interrupted.
+Closed order-tracking history is deleted after
+[beads.policies.order_tracking].delete_after_close, defaulting to 7d, while
+always retaining at least the latest 10 closed tracking beads per order.
 The manual command runs to completion; controller startup and watchdog sweeps
 use bounded cleanup to avoid spending an unbounded tick on stale work.
 

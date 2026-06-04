@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `gc nudge drain --inject` now prepends a one-line current-time stamp
+  (operator-local + UTC + epoch) to its `UserPromptSubmit` hook output, giving
+  agents a live clock in context every turn. The local zone follows the host
+  (`time.Local`/`$TZ`) or the `GC_OPERATOR_TZ` override; disable with
+  `GC_INJECT_CLOCK=0`. Folded into the existing nudge inject, so it adds zero
+  extra hook subprocesses per turn. See #3036.
 - The supervisor now merges a machine-local secrets file
   (`${GC_HOME}/secrets.env`, dotenv syntax) into the launchd plist / systemd
   unit environment on every service-file regeneration. This fixes provider

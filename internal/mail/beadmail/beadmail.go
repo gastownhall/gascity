@@ -713,7 +713,10 @@ func (p *Provider) recipientSessionMatchesByCurrentAddress(recipient string, clo
 }
 
 func (p *Provider) recipientSessionMatchesByMetadata(key, recipient, status string) ([]beads.Bead, error) {
-	query := beads.ListQuery{Metadata: map[string]string{key: recipient}}
+	query := beads.ListQuery{
+		Metadata: map[string]string{key: recipient},
+		TierMode: beads.TierBoth,
+	}
 	if status != "" {
 		query.Status = status
 	}

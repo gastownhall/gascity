@@ -596,3 +596,99 @@ name = "test-city"
 		t.Fatalf("got %d PackDoctors, want 0", len(cfg.PackDoctors))
 	}
 }
+
+// TestExpandPacks_RigPathConventionAgentsRegistered asserts that convention-
+// based agents (agents/<name>/ dirs, no [[agent]] block) in a rig's root
+// pack.toml directory are discovered when the rig is defined with only
+// `path` and no explicit `includes`.
+//
+// Regression test for ga-dil: packV2 migration creates agents/<name>/ dirs
+// inside a rig's root directory but gc sling / gc status didn't find them
+// because expandPacks skipped rigs with no includes/imports.
+func TestExpandPacks_RigPathConventionAgentsRegistered(t *testing.T) {
+	dir := t.TempDir()
+	rigDir := filepath.Join(dir, "rigroot")
+	agentDir := filepath.Join(rigDir, "agents", "helper")
+	if err := os.MkdirAll(agentDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	writeTestFile(t, rigDir, "pack.toml", `
+[pack]
+name = "mrig-pack"
+schema = 1
+`)
+	writeTestFile(t, agentDir, "prompt.md", "You are the helper agent.\n")
+
+	cityDir := filepath.Join(dir, "city")
+	writeTestFile(t, cityDir, "city.toml", `
+[workspace]
+name = "test"
+
+[[rigs]]
+name = "mrig"
+path = "`+rigDir+`"
+`)
+
+	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityDir, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+
+	// Convention agent from the rig's path/pack.toml must appear in cfg.Agents.
+	explicit := explicitAgents(cfg.Agents)
+	for _, a := range explicit {
+		if a.Name == "helper" && a.Dir == "mrig" {
+			return // found: registered as mrig/helper
+		}
+	}
+	names := make([]string, 0, len(explicit))
+	for _, a := range explicit {
+		names = append(names, a.Dir+"/"+a.Name)
+	}
+	t.Fatalf("mrig/helper not found in cfg.Agents; got %v", names)
+}
+
+// TestExpandPacks_RigPathInlineAgentsRegistered asserts that explicit [[agent]]
+// blocks in a rig's path/pack.toml are registered when no includes is set.
+func TestExpandPacks_RigPathInlineAgentsRegistered(t *testing.T) {
+	dir := t.TempDir()
+	rigDir := filepath.Join(dir, "rigroot")
+
+	writeTestFile(t, rigDir, "pack.toml", `
+[pack]
+name = "mrig-pack"
+schema = 1
+
+[[agent]]
+name = "worker"
+scope = "rig"
+`)
+
+	cityDir := filepath.Join(dir, "city")
+	writeTestFile(t, cityDir, "city.toml", `
+[workspace]
+name = "test"
+
+[[rigs]]
+name = "myrig"
+path = "`+rigDir+`"
+`)
+
+	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityDir, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+
+	explicit := explicitAgents(cfg.Agents)
+	for _, a := range explicit {
+		if a.Name == "worker" && a.Dir == "myrig" {
+			return
+		}
+	}
+	names := make([]string, 0, len(explicit))
+	for _, a := range explicit {
+		names = append(names, a.Dir+"/"+a.Name)
+	}
+	t.Fatalf("myrig/worker not found in cfg.Agents; got %v", names)
+}
