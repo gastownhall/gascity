@@ -4532,6 +4532,58 @@ func TestSweepStaleOrderTrackingWithWispsSkipsFreshOpenDescendant(t *testing.T) 
 	}
 }
 
+func TestSweepStaleOrderTrackingWithWispsClosesGraphDependentSubtree(t *testing.T) {
+	store := beads.NewMemStore()
+
+	wispRoot, err := store.Create(beads.Bead{
+		Title:  "graph-workflow-digest",
+		Type:   "task",
+		Labels: []string{"order-run:digest"},
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(wisp root): %v", err)
+	}
+	step, err := store.Create(beads.Bead{
+		Title: "draft-digest",
+		Metadata: map[string]string{
+			"gc.root_bead_id": wispRoot.ID,
+			"gc.step_ref":     "draft",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(graph step): %v", err)
+	}
+	if err := store.DepAdd(step.ID, wispRoot.ID, "tracks"); err != nil {
+		t.Fatalf("DepAdd(tracks): %v", err)
+	}
+
+	closed, err := sweepStaleOrderWispSubtrees(
+		store,
+		step.CreatedAt.Add(time.Minute),
+		orderFilterForTest("digest"),
+		orderTrackingSweepMetadataInitiator,
+	)
+	if err != nil {
+		t.Fatalf("sweepStaleOrderWispSubtrees: %v", err)
+	}
+	if closed != 2 {
+		t.Fatalf("closed = %d, want root and graph step closed", closed)
+	}
+	for _, id := range []string{wispRoot.ID, step.ID} {
+		got, err := store.Get(id)
+		if err != nil {
+			t.Fatalf("Get(%s): %v", id, err)
+		}
+		if got.Status != "closed" {
+			t.Fatalf("%s status = %q, want closed", id, got.Status)
+		}
+	}
+}
+
 func TestSweepStaleOrderTrackingWithWispsPropagatesDescendantListError(t *testing.T) {
 	base := beads.NewMemStore()
 
@@ -6728,6 +6780,45 @@ func TestHasOpenWorkStrictBlocksOnGraphWorkflowWispWithOpenDescendant(t *testing
 	}
 	if !has {
 		t.Fatal("graph workflow wisp with an open nested descendant must count as in-flight work")
+	}
+}
+
+func TestHasOpenWorkStrictBlocksOnGraphWorkflowTracksDependent(t *testing.T) {
+	store := beads.NewMemStore()
+
+	wispRoot, err := store.Create(beads.Bead{
+		Title:  "graph-workflow-digest",
+		Type:   "task",
+		Labels: []string{"order-run:digest"},
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	step, err := store.Create(beads.Bead{
+		Title: "draft-digest",
+		Metadata: map[string]string{
+			"gc.root_bead_id": wispRoot.ID,
+			"gc.step_ref":     "draft",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DepAdd(step.ID, wispRoot.ID, "tracks"); err != nil {
+		t.Fatal(err)
+	}
+
+	ad := &memoryOrderDispatcher{}
+	has, err := ad.hasOpenWorkStrict(store, "digest")
+	if err != nil {
+		t.Fatalf("hasOpenWorkStrict: %v", err)
+	}
+	if !has {
+		t.Fatal("graph workflow wisp with an open tracks dependent must count as in-flight work")
 	}
 }
 

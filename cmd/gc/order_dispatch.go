@@ -1432,21 +1432,20 @@ func isOrderRootOnlyWispCandidate(b beads.Bead) bool {
 	return b.Metadata["gc.kind"] == "wisp" && !beads.IsMoleculeType(b.Type)
 }
 
-// storeHasOpenDescendants reports whether any transitive child of parentID is
-// non-closed. It includes closed intermediate nodes so nested molecule work
-// remains visible after a direct child step has completed.
+// storeHasOpenDescendants reports whether any transitive descendant of parentID
+// is non-closed. It includes closed intermediate nodes so nested molecule work
+// remains visible after a direct child step has completed. Graph-v2 workflows
+// can link children with dependency edges instead of ParentID, so descendants
+// include parent-child/tracks/blocks dependents too.
 func storeHasOpenDescendants(store beads.Store, parentID string) (bool, error) {
 	seen := map[string]struct{}{parentID: {}}
 	queue := []string{parentID}
+	reader := beads.HandlesFor(store).Live
 	for len(queue) > 0 {
 		parentID := queue[0]
 		queue = queue[1:]
 
-		children, err := store.List(beads.ListQuery{
-			ParentID:      parentID,
-			IncludeClosed: true,
-			TierMode:      beads.TierBoth,
-		})
+		children, err := orderWispDescendantChildren(reader, parentID)
 		if err != nil {
 			return false, err
 		}
@@ -1465,6 +1464,75 @@ func storeHasOpenDescendants(store beads.Store, parentID string) (bool, error) {
 		}
 	}
 	return false, nil
+}
+
+func orderWispDescendantChildren(reader beads.LiveReader, parentID string) ([]beads.Bead, error) {
+	children, err := reader.List(beads.ListQuery{
+		ParentID:      parentID,
+		IncludeClosed: true,
+		TierMode:      beads.TierBoth,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	parent, err := reader.Get(parentID)
+	if errors.Is(err, beads.ErrNotFound) {
+		return children, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("getting graph parent %s: %w", parentID, err)
+	}
+	if !orderWispMayHaveGraphDependents(parent) {
+		return children, nil
+	}
+
+	deps, err := reader.DepList(parentID, "up")
+	if err != nil {
+		return nil, fmt.Errorf("listing graph dependents for %s: %w", parentID, err)
+	}
+	for _, dep := range deps {
+		if dep.IssueID == "" || dep.DependsOnID != parentID {
+			continue
+		}
+		if !isOrderWispDescendantDepType(dep.Type) {
+			continue
+		}
+		child, err := reader.Get(dep.IssueID)
+		if errors.Is(err, beads.ErrNotFound) {
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("getting graph dependent %s: %w", dep.IssueID, err)
+		}
+		children = append(children, child)
+	}
+	return children, nil
+}
+
+func orderWispMayHaveGraphDependents(bead beads.Bead) bool {
+	if isOrderWispRootCandidate(bead) {
+		return true
+	}
+	if bead.Metadata["gc.root_bead_id"] != "" {
+		return true
+	}
+	if bead.Metadata["gc.step_ref"] != "" {
+		return true
+	}
+	if bead.Metadata["gc.logical_bead_id"] != "" {
+		return true
+	}
+	return false
+}
+
+func isOrderWispDescendantDepType(depType string) bool {
+	switch depType {
+	case "parent-child", "tracks", "blocks":
+		return true
+	default:
+		return false
+	}
 }
 
 func (m *memoryOrderDispatcher) hasOpenWorkInStoresStrict(stores []beads.Store, scopedName string) (bool, error) {
@@ -1942,15 +2010,12 @@ func collectOrderWispSubtree(store beads.Store, root beads.Bead) ([]beads.Bead, 
 	seen := map[string]struct{}{root.ID: {}}
 	out := []beads.Bead{root}
 	queue := []string{root.ID}
+	reader := beads.HandlesFor(store).Live
 	for len(queue) > 0 {
 		parentID := queue[0]
 		queue = queue[1:]
 
-		children, err := store.List(beads.ListQuery{
-			ParentID:      parentID,
-			IncludeClosed: true,
-			TierMode:      beads.TierBoth,
-		})
+		children, err := orderWispDescendantChildren(reader, parentID)
 		if err != nil {
 			return nil, err
 		}
