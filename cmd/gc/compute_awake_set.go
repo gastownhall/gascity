@@ -201,7 +201,6 @@ func ComputeAwakeSet(input AwakeInput) map[string]AwakeDecision {
 		}
 		active := collectActiveBeads(input.SessionBeads, template)
 		filled := countAssignedScaleSlots(input.SessionBeads, input.WorkBeads, input.NamedSessions, template)
-		unassignedActiveFilled := 0
 		for _, bead := range active {
 			if filled >= count {
 				break
@@ -211,10 +210,8 @@ func ComputeAwakeSet(input AwakeInput) map[string]AwakeDecision {
 			}
 			desired[bead.SessionName] = "scaled:demand"
 			filled++
-			unassignedActiveFilled++
 		}
 		creating := collectCreatingBeads(input.SessionBeads, template)
-		filled = unassignedActiveFilled
 		for _, bead := range creating {
 			if filled >= count {
 				break
