@@ -98,6 +98,90 @@ func sessionModelOverride(t *testing.T, store beads.Store, id string) string {
 	return parsed["model"]
 }
 
+// setAssignedWorkModel updates the gc.model metadata on the in-progress work
+// bead(s) assigned to assignee, simulating a later dispatch advising a
+// different (or, with gcModel=="", no) model on the same session.
+func setAssignedWorkModel(t *testing.T, store beads.Store, assignee, gcModel string) {
+	t.Helper()
+	assigned, err := store.List(beads.ListQuery{
+		Assignee: assignee,
+		Status:   "in_progress",
+		Live:     true,
+		TierMode: beads.TierBoth,
+	})
+	if err != nil {
+		t.Fatalf("List(assigned work): %v", err)
+	}
+	if len(assigned) == 0 {
+		t.Fatalf("no in-progress work assigned to %q", assignee)
+	}
+	for _, b := range assigned {
+		if err := store.SetMetadata(b.ID, "gc.model", gcModel); err != nil {
+			t.Fatalf("SetMetadata(gc.model): %v", err)
+		}
+	}
+}
+
+func TestMaybeApplyPerDispatchModelOverride_SwitchesModelAcrossDispatches(t *testing.T) {
+	store := beads.NewMemStore()
+	candidate := newModelSessionCandidate(t, store, "opus", nil)
+
+	// First dispatch stamps opus.
+	maybeApplyPerDispatchModelOverride(candidate, &config.City{}, store)
+	if got := sessionModelOverride(t, store, candidate.session.ID); got != "opus" {
+		t.Fatalf("after first dispatch model = %q, want %q", got, "opus")
+	}
+
+	// A later dispatch on the same session advises sonnet; the auto-stamped
+	// model must flip rather than leak the prior choice forward.
+	setAssignedWorkModel(t, store, "worker", "sonnet")
+	maybeApplyPerDispatchModelOverride(candidate, &config.City{}, store)
+	if got := sessionModelOverride(t, store, candidate.session.ID); got != "sonnet" {
+		t.Fatalf("after second dispatch model = %q, want %q", got, "sonnet")
+	}
+	if got := candidate.session.Metadata[perDispatchModelSourceKey]; got != "sonnet" {
+		t.Fatalf("provenance = %q, want %q", got, "sonnet")
+	}
+}
+
+func TestMaybeApplyPerDispatchModelOverride_ClearsWhenNextDispatchHasNoModel(t *testing.T) {
+	store := beads.NewMemStore()
+	candidate := newModelSessionCandidate(t, store, "opus", nil)
+
+	// First dispatch stamps opus.
+	maybeApplyPerDispatchModelOverride(candidate, &config.City{}, store)
+	if got := sessionModelOverride(t, store, candidate.session.ID); got != "opus" {
+		t.Fatalf("after first dispatch model = %q, want %q", got, "opus")
+	}
+
+	// A later dispatch advises no model; the auto-stamped override must be
+	// cleared so the agent falls back to its configured default.
+	setAssignedWorkModel(t, store, "worker", "")
+	maybeApplyPerDispatchModelOverride(candidate, &config.City{}, store)
+	if got := sessionModelOverride(t, store, candidate.session.ID); got != "" {
+		t.Fatalf("after clearing dispatch model = %q, want empty", got)
+	}
+	if got := candidate.session.Metadata[perDispatchModelSourceKey]; got != "" {
+		t.Fatalf("provenance = %q, want cleared", got)
+	}
+}
+
+func TestMaybeApplyPerDispatchModelOverride_ExplicitOverrideStillWinsAfterRouting(t *testing.T) {
+	store := beads.NewMemStore()
+	// Session carries a genuine explicit override (no provenance marker) and a
+	// work bead advises a different model.
+	candidate := newModelSessionCandidate(t, store, "opus", map[string]string{"model": "sonnet"})
+
+	maybeApplyPerDispatchModelOverride(candidate, &config.City{}, store)
+
+	if got := sessionModelOverride(t, store, candidate.session.ID); got != "sonnet" {
+		t.Fatalf("model = %q, want explicit %q (routing must not replace it)", got, "sonnet")
+	}
+	if _, ok := candidate.session.Metadata[perDispatchModelSourceKey]; ok {
+		t.Fatalf("provenance marker set on explicit override: %q", candidate.session.Metadata[perDispatchModelSourceKey])
+	}
+}
+
 func TestWorkRoutingModel(t *testing.T) {
 	if got := WorkRoutingModel(beads.Bead{}); got != "" {
 		t.Fatalf("WorkRoutingModel(empty) = %q, want empty", got)
