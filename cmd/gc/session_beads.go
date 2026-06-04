@@ -2313,9 +2313,10 @@ func closeBead(store beads.Store, id, reason string, now time.Time, stderr io.Wr
 
 // releaseWorkFromClosedSessionBead clears the assignee on every non-closed
 // work bead that was assigned to the given session bead, and resets
-// in_progress work to open. The session's identifiers are its bead ID,
-// session_name metadata, and configured_named_identity metadata — any one
-// of these may appear as a work bead's assignee.
+// in_progress work to open. The session's identifiers are those returned by
+// sessionBeadAssigneeIdentities (bead ID, session_name, configured named
+// identity, alias, and alias history) — any one of these may appear as a
+// work bead's assignee.
 //
 // Best-effort: errors are logged to stderr but never fail the caller, since
 // releaseOrphanedPoolAssignments at the top of the next reconcile tick is
@@ -2336,9 +2337,9 @@ func releaseWorkFromClosedSessionBead(store beads.Store, sessionBead beads.Bead,
 		}
 		seenAssignees[val] = struct{}{}
 	}
-	addAssignee(sessionBead.ID)
-	addAssignee(sessionBead.Metadata["session_name"])
-	addAssignee(sessionBead.Metadata["configured_named_identity"])
+	for _, id := range sessionBeadAssigneeIdentities(sessionBead) {
+		addAssignee(id)
+	}
 
 	seenWork := make(map[string]struct{})
 	empty := ""
