@@ -763,7 +763,7 @@ func doOrderRunExecTracked(a orders.Order, cityPath string, cfg *config.City, st
 	tracking, err := store.Create(beads.Bead{
 		Title:     "order:" + scoped,
 		Labels:    []string{"order-run:" + scoped, labelOrderTracking},
-		Ephemeral: true,
+		NoHistory: true,
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "gc order run: creating exec tracking bead for %s: %v\n", scoped, err) //nolint:errcheck // best-effort stderr

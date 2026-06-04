@@ -506,7 +506,7 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 			trackingBead, createErr := store.Create(beads.Bead{
 				Title:     "order:" + scoped,
 				Labels:    []string{"order-run:" + scoped, labelOrderTracking, labelTriggerEnvFailed},
-				Ephemeral: true,
+				NoHistory: true,
 			})
 			if createErr != nil {
 				logDispatchError(m.stderr, "gc: order dispatch: creating trigger env failure tracking bead for %s: %v", scoped, createErr)
@@ -569,7 +569,7 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 		trackingBead, err := store.Create(beads.Bead{
 			Title:     "order:" + scoped,
 			Labels:    []string{"order-run:" + scoped, labelOrderTracking},
-			Ephemeral: true,
+			NoHistory: true,
 		})
 		if err != nil {
 			logDispatchError(m.stderr, "gc: order dispatch: creating tracking bead for %s: %v", scoped, err)

@@ -51,8 +51,10 @@ func MCPTemplateData(
 		}
 	}
 	var rigs []config.Rig
+	beadsCfg := config.BeadsConfig{}
 	if cfg != nil {
 		rigs = cfg.Rigs
+		beadsCfg = cfg.Beads
 	}
 	rigName := workdirutil.ConfiguredRigName(cityPath, *agent, rigs)
 	rigRoot := workdirutil.RigRootForName(rigName, rigs)
@@ -77,10 +79,10 @@ func MCPTemplateData(
 	data["IssuePrefix"] = mcpRigPrefix(rigName, rigs)
 	data["Branch"] = branch
 	data["DefaultBranch"] = branch
-	data["WorkQuery"] = agent.EffectiveWorkQuery()
-	data["AssignedInProgressQuery"] = agent.EffectiveAssignedInProgressQuery()
-	data["AssignedReadyQuery"] = agent.EffectiveAssignedReadyQuery()
-	data["RoutedPoolQuery"] = agent.EffectiveRoutedPoolQuery()
+	data["WorkQuery"] = agent.EffectiveWorkQueryForBeads(beadsCfg)
+	data["AssignedInProgressQuery"] = agent.EffectiveAssignedInProgressQueryForBeads(beadsCfg)
+	data["AssignedReadyQuery"] = agent.EffectiveAssignedReadyQueryForBeads(beadsCfg)
+	data["RoutedPoolQuery"] = agent.EffectiveRoutedPoolQueryForBeads(beadsCfg)
 	data["SlingQuery"] = agent.EffectiveSlingQuery()
 	return data
 }

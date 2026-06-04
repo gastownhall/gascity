@@ -19,7 +19,7 @@ import (
 
 func TestDoltServerEnv_DoesNotInjectGCSchedulerDefault(t *testing.T) {
 	parent := []string{"PATH=/usr/bin", "HOME=/home/test"}
-	out := doltServerEnv(parent)
+	out := doltServerEnv("", parent)
 
 	for _, kv := range out {
 		if strings.HasPrefix(kv, "DOLT_GC_SCHEDULER=") {
@@ -43,7 +43,7 @@ func TestDoltServerEnv_DoesNotInjectGCSchedulerDefault(t *testing.T) {
 
 func TestDoltServerEnv_RespectsUserOverride(t *testing.T) {
 	parent := []string{"PATH=/usr/bin", "DOLT_GC_SCHEDULER=LOADAVG", "HOME=/home/test"}
-	out := doltServerEnv(parent)
+	out := doltServerEnv("", parent)
 
 	// User-provided value must be preserved exactly.
 	count := 0
@@ -62,9 +62,76 @@ func TestDoltServerEnv_RespectsUserOverride(t *testing.T) {
 
 func TestDoltServerEnv_PreservesEmptyUserValue(t *testing.T) {
 	parent := []string{"DOLT_GC_SCHEDULER="}
-	out := doltServerEnv(parent)
-	if len(out) != 1 || out[0] != "DOLT_GC_SCHEDULER=" {
+	out := doltServerEnv("", parent)
+	// The explicit empty-value parent entry must be preserved exactly, and the
+	// managed-server telemetry disable must be appended.
+	var hasParent, hasTelemetryDisable bool
+	for _, kv := range out {
+		switch kv {
+		case "DOLT_GC_SCHEDULER=":
+			hasParent = true
+		case "DOLT_DISABLE_EVENT_FLUSH=true":
+			hasTelemetryDisable = true
+		}
+	}
+	if !hasParent {
 		t.Fatalf("explicit empty-value env not preserved: %v", out)
+	}
+	if !hasTelemetryDisable {
+		t.Fatalf("managed Dolt env should disable telemetry event flush: %v", out)
+	}
+}
+
+func TestDoltServerEnv_UsesDoltConfigObjectOptOut(t *testing.T) {
+	cityPath := t.TempDir()
+	beadsDir := filepath.Join(cityPath, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(beadsDir, "config.yaml")
+	if err := os.WriteFile(configPath, []byte("dolt:\n  disable-event-flush: false\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	out := doltServerEnv(cityPath, []string{
+		"PATH=/usr/bin",
+		"DOLT_DISABLE_EVENT_FLUSH=true",
+	})
+
+	for _, kv := range out {
+		if strings.HasPrefix(kv, "DOLT_DISABLE_EVENT_FLUSH=") {
+			t.Fatalf("config opt-out should remove telemetry-disable env, got %v", out)
+		}
+	}
+}
+
+func TestDoltServerEnv_DefaultsDoltConfigObjectToDisableEventFlush(t *testing.T) {
+	cityPath := t.TempDir()
+	beadsDir := filepath.Join(cityPath, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(beadsDir, "config.yaml")
+	if err := os.WriteFile(configPath, []byte("issue_prefix: gc\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	out := doltServerEnv(cityPath, []string{
+		"PATH=/usr/bin",
+		"DOLT_DISABLE_EVENT_FLUSH=false",
+	})
+
+	count := 0
+	for _, kv := range out {
+		if kv == "DOLT_DISABLE_EVENT_FLUSH=true" {
+			count++
+		}
+		if kv == "DOLT_DISABLE_EVENT_FLUSH=false" {
+			t.Fatalf("default disable should replace inherited false env, got %v", out)
+		}
+	}
+	if count != 1 {
+		t.Fatalf("expected exactly one DOLT_DISABLE_EVENT_FLUSH=true entry, got %d in %v", count, out)
 	}
 }
 

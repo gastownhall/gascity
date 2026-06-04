@@ -2345,7 +2345,7 @@ func TestReaperParentIDIsParentChildDependencyProjection(t *testing.T) {
 	runner := func(_, name string, args ...string) ([]byte, error) {
 		call := name + " " + strings.Join(args, " ")
 		switch call {
-		case "bd list --json --label=parent-projection --include-infra --include-gates --limit 50":
+		case "bd list --json --label=parent-projection --include-infra --include-gates --limit 0":
 			return []byte(`[
 				{
 					"id":"ga-child",

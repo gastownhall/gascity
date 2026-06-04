@@ -48,17 +48,28 @@ func TestBuildPrimeContextExpandsTemplateCommands(t *testing.T) {
 	if ctx.AssignedInProgressQuery != "echo demo-city demo worker" {
 		t.Fatalf("AssignedInProgressQuery = %q, want expanded custom query", ctx.AssignedInProgressQuery)
 	}
-	if ctx.AssignedReadyQuery == "" {
-		t.Fatal("AssignedReadyQuery is empty")
-	}
-	if strings.Contains(ctx.AssignedReadyQuery, "gc.routed_to") {
-		t.Fatalf("AssignedReadyQuery includes routed pool demand: %q", ctx.AssignedReadyQuery)
+	if ctx.AssignedReadyQuery != "echo demo-city demo worker" {
+		t.Fatalf("AssignedReadyQuery = %q, want expanded custom query", ctx.AssignedReadyQuery)
 	}
 	if ctx.RoutedPoolQuery != "echo demo-city demo worker" {
 		t.Fatalf("RoutedPoolQuery = %q, want expanded custom query", ctx.RoutedPoolQuery)
 	}
 	if ctx.SlingQuery != "dispatch {} --route=demo/worker --city=demo-city" {
 		t.Fatalf("SlingQuery = %q, want %q", ctx.SlingQuery, "dispatch {} --route=demo/worker --city=demo-city")
+	}
+}
+
+func TestBuildPrimeContextUsesBD105ReadyCompatibility(t *testing.T) {
+	cityPath := filepath.Join(t.TempDir(), "demo-city")
+	ctx := buildPrimeContextForBeads(cityPath, "", &config.Agent{
+		Name: "worker",
+	}, nil, config.BeadsConfig{BDCompatibility: config.BeadsBDCompatibility105}, nil)
+
+	if !strings.Contains(ctx.AssignedReadyQuery, `bd ready --include-ephemeral --assignee="$id"`) {
+		t.Fatalf("AssignedReadyQuery = %q, want bd-1.0.5-compatible assigned ready query", ctx.AssignedReadyQuery)
+	}
+	if !strings.Contains(ctx.WorkQuery, "bd ready --include-ephemeral") {
+		t.Fatalf("WorkQuery = %q, want bd-1.0.5-compatible ready probes", ctx.WorkQuery)
 	}
 }
 

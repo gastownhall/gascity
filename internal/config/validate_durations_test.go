@@ -197,6 +197,96 @@ func TestValidateDurationsRejectsNonCanonicalBeadPolicyStorage(t *testing.T) {
 	}
 }
 
+func TestValidateBeadPolicyStorageCompatibilityAllowsBD104SafePolicies(t *testing.T) {
+	cfg := &City{
+		Beads: BeadsConfig{
+			Policies: map[string]BeadPolicyConfig{
+				"session":        {Storage: BeadStorageNoHistory},
+				"wait":           {Storage: BeadStorageNoHistory},
+				"nudge":          {Storage: BeadStorageNoHistory},
+				"order_tracking": {Storage: BeadStorageNoHistory},
+				"workflow":       {Storage: BeadStorageHistory},
+				"wisp":           {Storage: BeadStorageHistory},
+			},
+		},
+	}
+	if err := ValidateBeadPolicyStorageCompatibility(cfg, "city.toml"); err != nil {
+		t.Fatalf("ValidateBeadPolicyStorageCompatibility: %v", err)
+	}
+
+	cfg.Beads.Policies["session"] = BeadPolicyConfig{Storage: BeadStorageHistory}
+	cfg.Beads.Policies["wait"] = BeadPolicyConfig{Storage: BeadStorageHistory}
+	cfg.Beads.Policies["nudge"] = BeadPolicyConfig{Storage: BeadStorageHistory}
+	cfg.Beads.Policies["order_tracking"] = BeadPolicyConfig{Storage: BeadStorageHistory}
+	cfg.Beads.Policies["workflow"] = BeadPolicyConfig{Storage: BeadStorageHistory}
+	cfg.Beads.Policies["wisp"] = BeadPolicyConfig{Storage: BeadStorageHistory}
+	if err := ValidateBeadPolicyStorageCompatibility(cfg, "city.toml"); err != nil {
+		t.Fatalf("ValidateBeadPolicyStorageCompatibility with history overrides: %v", err)
+	}
+}
+
+func TestValidateBeadPolicyStorageCompatibilityAllowsBD105SafePolicies(t *testing.T) {
+	cfg := &City{
+		Beads: BeadsConfig{
+			BDCompatibility: BeadsBDCompatibility105,
+			Policies: map[string]BeadPolicyConfig{
+				"session":        {Storage: BeadStorageNoHistory},
+				"wait":           {Storage: BeadStorageNoHistory},
+				"nudge":          {Storage: BeadStorageNoHistory},
+				"order_tracking": {Storage: BeadStorageNoHistory},
+				"workflow":       {Storage: BeadStorageNoHistory},
+				"wisp":           {Storage: BeadStorageEphemeral},
+			},
+		},
+	}
+	if err := ValidateBeadPolicyStorageCompatibility(cfg, "city.toml"); err != nil {
+		t.Fatalf("ValidateBeadPolicyStorageCompatibility: %v", err)
+	}
+
+	cfg.Beads.Policies["wisp"] = BeadPolicyConfig{Storage: BeadStorageNoHistory}
+	if err := ValidateBeadPolicyStorageCompatibility(cfg, "city.toml"); err != nil {
+		t.Fatalf("ValidateBeadPolicyStorageCompatibility with no-history wisp override: %v", err)
+	}
+}
+
+func TestValidateBeadPolicyStorageCompatibilityRejectsBD104UnsafeOverrides(t *testing.T) {
+	tests := []struct {
+		name    string
+		policy  string
+		storage string
+	}{
+		{name: "wisp no-history", policy: "wisp", storage: BeadStorageNoHistory},
+		{name: "wisp ephemeral", policy: "wisp", storage: BeadStorageEphemeral},
+		{name: "session ephemeral", policy: "session", storage: BeadStorageEphemeral},
+		{name: "wait ephemeral", policy: "wait", storage: BeadStorageEphemeral},
+		{name: "nudge ephemeral", policy: "nudge", storage: BeadStorageEphemeral},
+		{name: "order tracking ephemeral", policy: "order_tracking", storage: BeadStorageEphemeral},
+		{name: "workflow no-history", policy: "workflow", storage: BeadStorageNoHistory},
+		{name: "workflow ephemeral", policy: "workflow", storage: BeadStorageEphemeral},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &City{
+				Beads: BeadsConfig{
+					Policies: map[string]BeadPolicyConfig{
+						tt.policy: {Storage: tt.storage},
+					},
+				},
+			}
+			err := ValidateBeadPolicyStorageCompatibility(cfg, "city.toml")
+			if err == nil {
+				t.Fatal("ValidateBeadPolicyStorageCompatibility = nil, want error")
+			}
+			msg := err.Error()
+			for _, want := range []string{"city.toml", "[beads.policies." + tt.policy + "]", tt.storage, BeadsBDCompatibility104} {
+				if !strings.Contains(msg, want) {
+					t.Fatalf("error = %q, want substring %q", msg, want)
+				}
+			}
+		})
+	}
+}
+
 func TestValidateDurationsBadPoolDrainTimeout(t *testing.T) {
 	cfg := &City{
 		Agents: []Agent{

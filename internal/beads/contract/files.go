@@ -43,6 +43,21 @@ type ConfigState struct {
 	DoltHost       string
 	DoltPort       string
 	DoltUser       string
+	Dolt           DoltConfig
+}
+
+// DoltConfig is the Dolt-specific subset of .beads/config.yaml that GC owns.
+type DoltConfig struct {
+	DisableEventFlush *bool
+}
+
+// DisableEventFlushEnabled returns whether managed Dolt launches should disable
+// Dolt's event-flush telemetry reporter. Missing config defaults to true.
+func (c DoltConfig) DisableEventFlushEnabled() bool {
+	if c.DisableEventFlush == nil {
+		return true
+	}
+	return *c.DisableEventFlush
 }
 
 // MetadataState is the canonical subset of .beads/metadata.json used by GC.
@@ -208,6 +223,24 @@ func ReadExportAuto(fs fsys.FS, path string) (value bool, ok bool, err error) {
 		return false, false, nil
 	}
 	return false, false, nil
+}
+
+// ReadDoltConfig reads the Dolt-specific GC config object from config.yaml.
+func ReadDoltConfig(fs fsys.FS, path string) (DoltConfig, bool, error) {
+	doc, err := readConfigDoc(fs, path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return DoltConfig{}, false, nil
+		}
+		if data, readErr := fs.ReadFile(path); readErr == nil {
+			if cfg, ok := readDoltConfigFromData(data); ok {
+				return cfg, true, nil
+			}
+		}
+		return DoltConfig{}, false, err
+	}
+	cfg := readDoltConfigFromRoot(mappingRoot(doc))
+	return cfg, cfg.hasValues(), nil
 }
 
 // ReadEndpointStatus reads gc.endpoint_status when present.
@@ -437,6 +470,16 @@ func EnsureCanonicalConfig(fs fsys.FS, path string, state ConfigState) (bool, er
 		changed = setString(root, "issue-prefix", prefix) || changed
 	}
 	changed = setBool(root, "dolt.auto-start", false) || changed
+	doltConfig := readDoltConfigFromRoot(root)
+	if state.Dolt.DisableEventFlush != nil {
+		doltConfig.DisableEventFlush = state.Dolt.DisableEventFlush
+	}
+	if doltConfig.DisableEventFlush == nil {
+		enabled := true
+		doltConfig.DisableEventFlush = &enabled
+	}
+	changed = setNestedBool(root, "dolt", "disable-event-flush", *doltConfig.DisableEventFlush) || changed
+	changed = deleteKeys(root, "dolt.disable-event-flush", "dolt.disable_event_flush") || changed
 	// Managed beads are Dolt-backed; issues.jsonl auto-export is redundant and
 	// triggers a re-import cycle that stalls bd writes for minutes on large
 	// datasets. BD_EXPORT_AUTO env-var suppression only covers gc's own calls,
@@ -583,9 +626,11 @@ func ensureCanonicalConfigFallback(fs fsys.FS, path string, state ConfigState) (
 	port := strings.TrimSpace(state.DoltPort)
 	user := strings.TrimSpace(state.DoltUser)
 	deletions := map[string]struct{}{
-		"dolt.password":    {},
-		"dolt_port":        {},
-		"dolt_server_port": {},
+		"dolt.password":            {},
+		"dolt.disable-event-flush": {},
+		"dolt.disable_event_flush": {},
+		"dolt_port":                {},
+		"dolt_server_port":         {},
 	}
 	if host != "" {
 		replacements["dolt.host"] = "dolt.host: " + host
@@ -663,6 +708,10 @@ func ensureCanonicalConfigFallback(fs fsys.FS, path string, state ConfigState) (
 		out = append(out, want)
 		changed = true
 	}
+	if !topLevelConfigKeyPresent(out, "dolt") {
+		out = append(out, "dolt:", "  disable-event-flush: "+boolString(doltDisableEventFlushFallbackValue(data, state)))
+		changed = true
+	}
 
 	if !changed {
 		return false, nil
@@ -735,6 +784,24 @@ func configStringValue(root *yaml.Node, keys ...string) (string, bool) {
 	return "", false
 }
 
+func configBoolValue(root *yaml.Node, keys ...string) (bool, bool) {
+	if value, ok := configStringValue(root, keys...); ok {
+		parsed, err := strconv.ParseBool(value)
+		if err == nil {
+			return parsed, true
+		}
+	}
+	return false, false
+}
+
+func nestedConfigBoolValue(root *yaml.Node, section string, keys ...string) (bool, bool) {
+	sectionNode := findValue(root, section)
+	if sectionNode == nil || sectionNode.Kind != yaml.MappingNode {
+		return false, false
+	}
+	return configBoolValue(sectionNode, keys...)
+}
+
 func scanConfigLineValue(fs fsys.FS, path string, prefixes ...string) (string, bool) {
 	data, err := fs.ReadFile(path)
 	if err != nil {
@@ -759,6 +826,16 @@ func scanConfigLineValueFromData(data []byte, prefixes ...string) (string, bool)
 	return "", false
 }
 
+func scanConfigBoolValueFromData(data []byte, prefixes ...string) (bool, bool) {
+	if raw, ok := scanConfigLineValueFromData(data, prefixes...); ok {
+		parsed, err := strconv.ParseBool(raw)
+		if err == nil {
+			return parsed, true
+		}
+	}
+	return false, false
+}
+
 func readConfigStateFromData(data []byte) ConfigState {
 	return ConfigState{
 		IssuePrefix:    scanConfigValueFromData(data, "issue_prefix:", "issue-prefix:"),
@@ -767,6 +844,7 @@ func readConfigStateFromData(data []byte) ConfigState {
 		DoltHost:       scanConfigValueFromData(data, "dolt.host:"),
 		DoltPort:       scanConfigValueFromData(data, "dolt.port:"),
 		DoltUser:       scanConfigValueFromData(data, "dolt.user:"),
+		Dolt:           readDoltConfigFromDataOrEmpty(data),
 	}
 }
 
@@ -778,7 +856,47 @@ func readConfigStateFromRoot(root *yaml.Node) ConfigState {
 		DoltHost:       configValue(root, "dolt.host"),
 		DoltPort:       configValue(root, "dolt.port"),
 		DoltUser:       configValue(root, "dolt.user"),
+		Dolt:           readDoltConfigFromRoot(root),
 	}
+}
+
+func readDoltConfigFromRoot(root *yaml.Node) DoltConfig {
+	var cfg DoltConfig
+	if value, ok := nestedConfigBoolValue(root, "dolt", "disable-event-flush", "disable_event_flush"); ok {
+		cfg.DisableEventFlush = &value
+		return cfg
+	}
+	if value, ok := configBoolValue(root, "dolt.disable-event-flush", "dolt.disable_event_flush"); ok {
+		cfg.DisableEventFlush = &value
+	}
+	return cfg
+}
+
+func readDoltConfigFromData(data []byte) (DoltConfig, bool) {
+	cfg := readDoltConfigFromDataOrEmpty(data)
+	return cfg, cfg.hasValues()
+}
+
+func readDoltConfigFromDataOrEmpty(data []byte) DoltConfig {
+	var cfg DoltConfig
+	if value, ok := scanConfigBoolValueFromData(data, "dolt.disable-event-flush:", "dolt.disable_event_flush:"); ok {
+		cfg.DisableEventFlush = &value
+	}
+	return cfg
+}
+
+func (c DoltConfig) hasValues() bool {
+	return c.DisableEventFlush != nil
+}
+
+func doltDisableEventFlushFallbackValue(data []byte, state ConfigState) bool {
+	if state.Dolt.DisableEventFlush != nil {
+		return *state.Dolt.DisableEventFlush
+	}
+	if cfg, ok := readDoltConfigFromData(data); ok && cfg.DisableEventFlush != nil {
+		return *cfg.DisableEventFlush
+	}
+	return true
 }
 
 func configValue(root *yaml.Node, keys ...string) string {
@@ -807,6 +925,16 @@ func topLevelConfigLine(line string) (key, value string, ok bool) {
 		return "", "", false
 	}
 	return strings.TrimSpace(key), strings.TrimSpace(value), true
+}
+
+func topLevelConfigKeyPresent(lines []string, want string) bool {
+	for _, line := range lines {
+		key, _, ok := topLevelConfigLine(line)
+		if ok && key == want {
+			return true
+		}
+	}
+	return false
 }
 
 func endpointOriginValue(value string) EndpointOrigin {
@@ -841,8 +969,60 @@ func findValue(root *yaml.Node, key string) *yaml.Node {
 	return nil
 }
 
+func setNestedBool(root *yaml.Node, section, key string, value bool) bool {
+	sectionNode := findValue(root, section)
+	changed := false
+	if sectionNode == nil || sectionNode.Kind != yaml.MappingNode {
+		sectionNode = &yaml.Node{Kind: yaml.MappingNode}
+		changed = setMapping(root, section, sectionNode) || changed
+	}
+	return setBool(sectionNode, key, value) || changed
+}
+
+func setMapping(root *yaml.Node, key string, value *yaml.Node) bool {
+	if root == nil || root.Kind != yaml.MappingNode {
+		return false
+	}
+	out := make([]*yaml.Node, 0, len(root.Content))
+	seen := false
+	changed := false
+	for i := 0; i+1 < len(root.Content); i += 2 {
+		if root.Content[i].Value != key {
+			out = append(out, root.Content[i], root.Content[i+1])
+			continue
+		}
+		if seen {
+			changed = true
+			continue
+		}
+		seen = true
+		if root.Content[i+1] != value {
+			changed = true
+		}
+		out = append(out, root.Content[i], value)
+	}
+	if seen {
+		if changed {
+			root.Content = out
+		}
+		return changed
+	}
+	root.Content = append(root.Content,
+		&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: key},
+		value,
+	)
+	return true
+}
+
 func setString(root *yaml.Node, key, value string) bool {
 	return setScalar(root, key, value, "!!str")
+}
+
+func boolString(value bool) string {
+	if value {
+		return "true"
+	}
+	return "false"
 }
 
 func setBool(root *yaml.Node, key string, value bool) bool {

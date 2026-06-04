@@ -114,7 +114,7 @@ func cmdHookWithFormat(args []string, inject bool, hookFormat string, stdout, st
 	}
 
 	cityName := loadedCityName(cfg, cityPath)
-	workQuery := a.EffectiveWorkQuery()
+	workQuery := a.EffectiveWorkQueryForBeads(cfg.Beads)
 	// Expand {{.Rig}}/{{.AgentBase}} in user-supplied work_query so agent-side
 	// hook invocation sees the same rig substitution as the controller-side
 	// probes in build_desired_state.go / session_reconcile.go. #793.

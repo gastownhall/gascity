@@ -1686,7 +1686,7 @@ prefix = "fe"
 	if result.Diagnostic.Store != "BdStore" {
 		t.Fatalf("beads_store = %q, want BdStore", result.Diagnostic.Store)
 	}
-	store := result.Store
+	store := underlyingPolicyStoreForTest(result.Store)
 	if _, ok := store.(*beads.BdStore); !ok {
 		t.Fatalf("openStoreAtForCity(rig) returned %T, want *beads.BdStore", store)
 	}
@@ -1719,6 +1719,7 @@ prefix = "fe"
 	if err != nil {
 		t.Fatalf("openStoreAtForCity(rig): %v", err)
 	}
+	store = underlyingPolicyStoreForTest(store)
 	if _, ok := store.(*beads.FileStore); !ok {
 		t.Fatalf("openStoreAtForCity(rig) returned %T, want *beads.FileStore", store)
 	}
@@ -1985,6 +1986,7 @@ exit 0
 	if err != nil {
 		t.Fatalf("openStoreAtForCity: %v", err)
 	}
+	store = underlyingPolicyStoreForTest(store)
 	bdStore, ok := store.(*beads.BdStore)
 	if !ok {
 		t.Fatalf("openStoreAtForCity returned %T, want *beads.BdStore", store)
@@ -2683,6 +2685,7 @@ func TestOpenCityStoreAtUsesExplicitCityOverGCCity(t *testing.T) {
 	if err != nil {
 		t.Fatalf("openCityStoreAt(%q): %v", explicitCity, err)
 	}
+	store = underlyingPolicyStoreForTest(store)
 	bdStore, ok := store.(*beads.BdStore)
 	if !ok {
 		t.Fatalf("openCityStoreAt(%q) returned %T, want *beads.BdStore", explicitCity, store)
@@ -2854,6 +2857,40 @@ dolt.user: canonical-user
 	}
 	if got := env["BEADS_CREDENTIALS_FILE"]; got != credentialsPath {
 		t.Fatalf("BEADS_CREDENTIALS_FILE = %q, want %q", got, credentialsPath)
+	}
+}
+
+func TestBdRuntimeEnvIgnoresAmbientBeadsPasswordWithoutScopedSecret(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("GC_DOLT", "skip")
+	t.Setenv("GC_DOLT_HOST", "")
+	t.Setenv("GC_DOLT_PORT", "")
+	t.Setenv("GC_DOLT_USER", "")
+	t.Setenv("GC_DOLT_PASSWORD", "")
+	t.Setenv("BEADS_DOLT_PASSWORD", "external-rig-secret")
+	t.Setenv("BEADS_CREDENTIALS_FILE", "")
+
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte(`issue_prefix: demo
+gc.endpoint_origin: city_canonical
+gc.endpoint_status: verified
+dolt.auto-start: false
+dolt.host: city-db.example.com
+dolt.port: 3307
+dolt.user: canonical-user
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	env := mustBdRuntimeEnv(t, cityPath)
+	if got := env["GC_DOLT_PASSWORD"]; got != "" {
+		t.Fatalf("GC_DOLT_PASSWORD = %q, want empty without scoped secret", got)
+	}
+	if got := env["BEADS_DOLT_PASSWORD"]; got != "" {
+		t.Fatalf("BEADS_DOLT_PASSWORD = %q, want empty without scoped secret", got)
 	}
 }
 

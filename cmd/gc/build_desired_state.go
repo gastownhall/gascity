@@ -424,7 +424,7 @@ func buildDesiredStateWithSessionBeads(
 			}
 		}
 
-		sp := scaleParamsFor(&cfg.Agents[i])
+		sp := scaleParamsForBeads(&cfg.Agents[i], cfg.Beads)
 		// Expand {{.Rig}}/{{.AgentBase}} before the scale_check enters the
 		// controller probe pool so rig-scoped agents query their own rig.
 		sp.Check = expandAgentCommandTemplate(cityPath, cityName, &cfg.Agents[i], cfg.Rigs, "scale_check", sp.Check, stderr)
@@ -1185,6 +1185,7 @@ func defaultScaleCheckCounts(targets []defaultScaleCheckTarget) (map[string]int,
 		// only if a task-shaped routed bead also happens to carry the
 		// flag) is counted exactly once per template.
 		counted := make(map[string]struct{})
+		liveReader := beads.HandlesFor(group.store).Live
 
 		// Source 1: Ready()/CachedReady() iteration. Surfaces actionable
 		// work (task, etc.) from both durable and ephemeral tiers matched
@@ -1234,8 +1235,10 @@ func defaultScaleCheckCounts(targets []defaultScaleCheckTarget) (map[string]int,
 		// otherwise stretch demand observation by an unbounded number of
 		// reconcile ticks. Mirrors openSessionBeadExists in
 		// adoption_barrier.go, which uses Live: true for the same
-		// cross-process freshness reason.
-		demand, demandErr := group.store.List(beads.ListQuery{
+		// cross-process freshness reason. Dependency checks below use the
+		// same live reader so blocked pool-order wisps do not create pool
+		// sessions while sibling processes are still mutating the graph.
+		demand, demandErr := liveReader.List(beads.ListQuery{
 			Status:   "open",
 			Metadata: poolDemandMetadataPair(),
 			Live:     true,
@@ -1260,6 +1263,15 @@ func defaultScaleCheckCounts(targets []defaultScaleCheckTarget) (map[string]int,
 			if _, ok := group.templates[template]; !ok {
 				continue
 			}
+			depsReady, depErr := poolDemandDependenciesReady(liveReader, b.ID)
+			if depErr != nil {
+				errs = append(errs, fmt.Errorf("default scale_check %s template=%s bead=%s: dependencies: %w", key, template, b.ID, depErr))
+				partialTemplates = markScaleCheckPartialTemplate(partialTemplates, template)
+				continue
+			}
+			if !depsReady {
+				continue
+			}
 			if _, dup := counted[b.ID]; dup {
 				continue
 			}
@@ -1268,6 +1280,33 @@ func defaultScaleCheckCounts(targets []defaultScaleCheckTarget) (map[string]int,
 		}
 	}
 	return counts, partialTemplates, errs
+}
+
+func poolDemandDependenciesReady(reader beads.LiveReader, beadID string) (bool, error) {
+	deps, err := reader.DepList(beadID, "down")
+	if err != nil {
+		return false, err
+	}
+	for _, dep := range deps {
+		if !beads.IsReadyBlockingDependencyType(dep.Type) {
+			continue
+		}
+		blockerID := strings.TrimSpace(dep.DependsOnID)
+		if blockerID == "" {
+			return false, nil
+		}
+		blocker, err := reader.Get(blockerID)
+		if err != nil {
+			if errors.Is(err, beads.ErrNotFound) {
+				return false, nil
+			}
+			return false, fmt.Errorf("getting blocker %q: %w", blockerID, err)
+		}
+		if blocker.Status != "closed" {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 func defaultNamedSessionDemand(targets []defaultScaleCheckTarget, cfg *config.City, cityName string) (map[string]bool, map[string]bool, []error) {

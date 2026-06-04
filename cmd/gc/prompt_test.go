@@ -841,6 +841,50 @@ func TestFormulaFilesystemSearchGuidanceCoversPromptSources(t *testing.T) {
 	}
 }
 
+func TestCoreWorkerPromptsUseAssignedReadyQueryTemplate(t *testing.T) {
+	repoRoot, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatalf("filepath.Abs(repo root): %v", err)
+	}
+
+	for _, rel := range []string{
+		"internal/bootstrap/packs/core/assets/prompts/pool-worker.md",
+		"internal/bootstrap/packs/core/assets/prompts/graph-worker.md",
+	} {
+		t.Run(rel, func(t *testing.T) {
+			data, err := os.ReadFile(filepath.Join(repoRoot, rel))
+			if err != nil {
+				t.Fatalf("ReadFile(%s): %v", rel, err)
+			}
+			text := string(data)
+			if !strings.Contains(text, "{{ .AssignedReadyQuery }}") {
+				t.Fatalf("%s missing AssignedReadyQuery placeholder", rel)
+			}
+			if strings.Contains(text, "bd ready --include-ephemeral --assignee") {
+				t.Fatalf("%s hardcodes bd ready --include-ephemeral instead of AssignedReadyQuery", rel)
+			}
+		})
+	}
+
+	for _, rel := range []string{
+		"internal/bootstrap/packs/core/overlay/per-provider/kiro/AGENTS.md",
+		"internal/bootstrap/packs/core/skills/gc-work/SKILL.md",
+		"examples/gastown/packs/gastown/agents/mayor/prompt.template.md",
+		"examples/hyperscale/packs/hyperscale/agents/worker/prompt.template.md",
+		"examples/swarm/packs/swarm/agents/coder/prompt.template.md",
+	} {
+		t.Run(rel, func(t *testing.T) {
+			data, err := os.ReadFile(filepath.Join(repoRoot, rel))
+			if err != nil {
+				t.Fatalf("ReadFile(%s): %v", rel, err)
+			}
+			if strings.Contains(string(data), "bd ready --include-ephemeral") {
+				t.Fatalf("%s hardcodes bd ready --include-ephemeral in static prompt guidance", rel)
+			}
+		})
+	}
+}
+
 func TestMergeFragmentLists(t *testing.T) {
 	tests := []struct {
 		name    string
