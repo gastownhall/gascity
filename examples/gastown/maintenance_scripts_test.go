@@ -3221,6 +3221,10 @@ case "$*" in
   *"SHOW DATABASES"*)
     printf 'Database\nbeads\n'
     ;;
+  *"STR_TO_DATE(JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.expires_at'))"*)
+    printf 'id\n'
+    printf 'non-fatal warning from dolt\n' >&2
+    ;;
   *"SELECT id FROM "*"issues"*)
     printf 'id\nga-old\n'
     printf 'non-fatal warning from dolt\n' >&2
@@ -3763,6 +3767,9 @@ case "$*" in
   *"SHOW DATABASES"*)
     printf 'Database\nbeads\n'
     ;;
+  *"STR_TO_DATE(JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.expires_at'))"*)
+    printf 'id\n'
+    ;;
   *"SELECT id FROM "*"issues"*)
     printf 'id\nga-old\n'
     ;;
@@ -3832,6 +3839,9 @@ case "$*" in
   *"SHOW DATABASES"*)
     printf 'Database\ncitydb\nrigdb\n'
     ;;
+  *"STR_TO_DATE(JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.expires_at'))"*)
+    printf 'id\n'
+    ;;
   *"SELECT id FROM "*"citydb"*"issues"*)
     printf 'id\nga-city\n'
     ;;
@@ -3893,6 +3903,84 @@ exit 0
 	}
 }
 
+func TestReaperDoesNotStaleCloseIssueWithFutureExpiresAt(t *testing.T) {
+	cityDir := t.TempDir()
+	writeCityBeadsMetadata(t, cityDir, "citydb")
+	binDir := t.TempDir()
+	doltLog := filepath.Join(t.TempDir(), "dolt-args.log")
+	bdLog := filepath.Join(t.TempDir(), "bd.log")
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+
+	writeExecutable(t, filepath.Join(binDir, "dolt"), `#!/bin/sh
+printf '%s\n' "$*" >> "$DOLT_ARGS_LOG"
+case "$*" in
+  *"SHOW TABLES FROM"*"LIKE 'wisps'"*)
+    printf 'Tables_in_db\nwisps\n'
+    ;;
+  *"SHOW DATABASES"*)
+    printf 'Database\ncitydb\n'
+    ;;
+  *"STR_TO_DATE(JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.expires_at'))"*)
+    printf 'id\n'
+    ;;
+  *"SELECT id FROM "*"citydb"*"issues"*)
+    case "$*" in
+      *"JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.expires_at')) = ''"*)
+        printf 'id\n'
+        ;;
+      *)
+        printf 'id\nga-future\n'
+        ;;
+    esac
+    ;;
+  *"COUNT("*)
+    printf 'COUNT(*)\n0\n'
+    ;;
+esac
+exit 0
+`)
+	writeExecutable(t, filepath.Join(binDir, "bd"), `#!/bin/sh
+printf '%s\n' "$*" >> "$BD_CALL_LOG"
+exit 0
+`)
+	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+exit 0
+`)
+
+	env := map[string]string{
+		"DOLT_ARGS_LOG":    doltLog,
+		"BD_CALL_LOG":      bdLog,
+		"GC_CALL_LOG":      gcLog,
+		"GC_CITY":          cityDir,
+		"GC_CITY_PATH":     cityDir,
+		"GC_DOLT_HOST":     "127.0.0.1",
+		"GC_DOLT_PORT":     "3307",
+		"GC_DOLT_USER":     "root",
+		"GC_DOLT_PASSWORD": "",
+		"PATH":             binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+
+	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "reaper.sh"), env)
+
+	bdData, err := os.ReadFile(bdLog)
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatalf("ReadFile(bd log): %v", err)
+	}
+	if strings.Contains(string(bdData), "close ga-future") {
+		t.Fatalf("reaper stale-closed issue with explicit future expires_at:\n%s", bdData)
+	}
+
+	gcData, err := os.ReadFile(gcLog)
+	if err != nil {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	gcLogText := string(gcData)
+	if !strings.Contains(gcLogText, "closed:0") || !strings.Contains(gcLogText, "expired:0") {
+		t.Fatalf("reaper summary reported an issue close despite future expires_at:\n%s", gcLogText)
+	}
+}
+
 func TestReaperCityDatabaseUsesGCCityPathFallback(t *testing.T) {
 	cityDir := t.TempDir()
 	writeCityBeadsMetadata(t, cityDir, "citydb")
@@ -3909,6 +3997,9 @@ case "$*" in
     ;;
   *"SHOW DATABASES"*)
     printf 'Database\ncitydb\n'
+    ;;
+  *"STR_TO_DATE(JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.expires_at'))"*)
+    printf 'id\n'
     ;;
   *"SELECT id FROM "*"citydb"*"issues"*)
     printf 'id\nga-city\n'
@@ -3993,6 +4084,9 @@ case "$*" in
   *"SHOW DATABASES"*)
     printf 'Database\ncitydb\n'
     ;;
+  *"STR_TO_DATE(JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.expires_at'))"*)
+    printf 'id\n'
+    ;;
   *"SELECT id FROM "*"citydb"*"issues"*)
     printf 'id\nga-city\n'
     ;;
@@ -4062,6 +4156,9 @@ case "$*" in
     ;;
   *"SHOW DATABASES"*)
     printf 'Database\ncitydb\nwrongdb\n'
+    ;;
+  *"STR_TO_DATE(JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.expires_at'))"*)
+    printf 'id\n'
     ;;
   *"SELECT id FROM "*"citydb"*"issues"*)
     printf 'id\nga-city\n'
@@ -4147,6 +4244,9 @@ case "$*" in
   *"SHOW DATABASES"*)
     printf 'Database\nbeads\n'
     ;;
+  *"STR_TO_DATE(JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.expires_at'))"*)
+    printf 'id\n'
+    ;;
   *"SELECT id FROM "*"issues"*)
     printf 'id\nga-old\n'
     ;;
@@ -4220,6 +4320,9 @@ case "$*" in
     ;;
   *"SHOW DATABASES"*)
     printf 'Database\ncitydb\n'
+    ;;
+  *"STR_TO_DATE(JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.expires_at'))"*)
+    printf 'id\n'
     ;;
   *"SELECT id FROM "*"citydb"*"issues"*)
     printf 'id\nga-city\n'
@@ -4298,6 +4401,9 @@ case "$*" in
   *"SHOW DATABASES"*)
     printf 'Database\nbeads\n'
     ;;
+  *"STR_TO_DATE(JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.expires_at'))"*)
+    printf 'id\n'
+    ;;
   *"SELECT id FROM "*"issues"*)
     printf 'id\nga-old\n'
     ;;
@@ -4367,6 +4473,9 @@ case "$*" in
     ;;
   *"SHOW DATABASES"*)
     printf 'Database\nbeads\nrigdb\n'
+    ;;
+  *"STR_TO_DATE(JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.expires_at'))"*)
+    printf 'id\n'
     ;;
   *"SELECT id FROM "*"issues"*)
     printf 'id\nga-old\n'

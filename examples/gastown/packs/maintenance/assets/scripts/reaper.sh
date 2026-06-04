@@ -512,6 +512,10 @@ while IFS= read -r DB; do
         AND updated_at < DATE_SUB(NOW(), INTERVAL $STALE_AGE_H HOUR)
         AND priority > 1
         AND issue_type != 'epic'
+        AND (
+            JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.expires_at')) IS NULL
+            OR JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.expires_at')) = ''
+        )
         AND id NOT IN (
             SELECT DISTINCT d.issue_id FROM \`$DB\`.dependencies d
             INNER JOIN \`$DB\`.issues i ON d.depends_on_id = i.id
