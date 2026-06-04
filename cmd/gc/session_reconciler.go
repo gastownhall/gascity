@@ -186,6 +186,10 @@ func drainAckAsyncStopKey(sessionID, name string) string {
 	return "name:" + strings.TrimSpace(name)
 }
 
+// drainAckAsyncStopPokeController is a mutable test seam over pokeController
+// for the async drain-ack stop path (see queueDrainAckAsyncStop).
+var drainAckAsyncStopPokeController = pokeController
+
 func queueDrainAckAsyncStop(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, sessionID, name string, tracker *asyncStartTracker, stderr io.Writer) {
 	name = strings.TrimSpace(name)
 	if name == "" || sp == nil {
@@ -208,6 +212,15 @@ func queueDrainAckAsyncStop(cityPath string, store beads.Store, sp runtime.Provi
 		}()
 		if err := workerKillSessionTargetWithConfig(cityPath, store, sp, cfg, name); err != nil && !runtime.IsSessionGone(err) {
 			fmt.Fprintf(stderr, "session reconciler: async drain-ack stop %s: %v\n", name, err) //nolint:errcheck
+			return
+		}
+		// The runtime session is now gone, but its pool session bead stays open
+		// (occupying the pool slot) until finalizeDrainAckStopPendingSessions
+		// closes it on a subsequent tick. Poke the controller so finalize +
+		// pool respawn runs on the next event-driven tick instead of waiting up
+		// to a full patrol interval (ga-ryhnhd). Mirrors the drain-ack CLI poke.
+		if perr := drainAckAsyncStopPokeController(cityPath); perr != nil {
+			fmt.Fprintf(stderr, "session reconciler: async drain-ack stop %s: poke failed: %v\n", name, perr) //nolint:errcheck
 		}
 	}()
 }
