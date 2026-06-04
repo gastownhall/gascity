@@ -534,6 +534,42 @@ func TestResolveTemplateCarriesMouseModeToRuntimeConfig(t *testing.T) {
 	}
 }
 
+// TestResolveTemplateHeadlessAgentStaysMouseOff is the ga-c4w guard for
+// acceptance #2/#4: the new interactive mouse-on default (sessionCreateHints
+// in internal/api) must NOT bleed into the headless agent path. An agent with
+// no mouse_mode resolves MouseOn=false, so the runtime runs
+// disableMouseAndActivity and the session stays mouse-off — controller-poll
+// safety. This path derives MouseOn from cfgAgent.MouseModeOn(), independent
+// of sessionCreateHints, and is unchanged by this bead.
+func TestResolveTemplateHeadlessAgentStaysMouseOff(t *testing.T) {
+	cityPath := t.TempDir()
+	params := &agentBuildParams{
+		fs:         fsys.NewFake(),
+		cityName:   "bright-lights",
+		cityPath:   cityPath,
+		workspace:  &config.Workspace{Name: "bright-lights"},
+		beaconTime: testBeaconTime,
+		beadNames:  make(map[string]string),
+		stderr:     io.Discard,
+	}
+	agent := &config.Agent{
+		Name:         "pool-worker",
+		StartCommand: "claude",
+		// no MouseMode set → headless default (mouse-off)
+	}
+
+	tp, err := resolveTemplate(params, agent, agent.QualifiedName(), nil)
+	if err != nil {
+		t.Fatalf("resolveTemplate: %v", err)
+	}
+	if tp.Hints.MouseOn {
+		t.Fatal("TemplateParams.Hints.MouseOn = true, want false (headless agent must stay mouse-off)")
+	}
+	if templateParamsToConfig(tp).MouseOn {
+		t.Fatal("runtime config MouseOn = true, want false (headless agent must stay mouse-off)")
+	}
+}
+
 func TestResolveTemplateFlagModeRetainsPromptForStartupDelivery(t *testing.T) {
 	cityPath := t.TempDir()
 	fs := fsys.NewFake()
