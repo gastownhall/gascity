@@ -87,6 +87,18 @@ func clearDrainTrackerForStopPending(session *beads.Bead, dt *drainTracker) {
 	dt.remove(session.ID)
 }
 
+func assignedWorkDrainCancelReason(session beads.Bead, sp runtime.Provider, dt *drainTracker, name string) string {
+	if dt != nil {
+		if ds := dt.get(session.ID); ds != nil && assignedWorkDrainReasonCancelable(ds.reason) {
+			return ds.reason
+		}
+	}
+	if reason, ok := reconcilerDrainAckMatchesSession(session, sp, name); ok && assignedWorkDrainReasonCancelable(reason) {
+		return reason
+	}
+	return "orphaned"
+}
+
 func resetPendingCommittedAt(session beads.Bead) (string, time.Time, bool) {
 	if strings.TrimSpace(session.Metadata["continuation_reset_pending"]) != "true" {
 		return "", time.Time{}, false
@@ -1248,14 +1260,15 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			default:
 				if dops != nil {
 					if acked, _ := dops.isDrainAcked(name); acked {
-						hasAssignedWork, assignedErr := sessionHasOpenAssignedWorkForReachableStore(cityPath, cfg, store, rigStores, *session)
+						ackReason := assignedWorkDrainCancelReason(*session, sp, dt, name)
+						hasAssignedWork, assignedErr := sessionHasAwakeAssignedWorkForReachableStore(cityPath, cfg, store, rigStores, *session)
 						if assignedErr != nil {
 							fmt.Fprintf(stderr, "session reconciler: checking assigned work for drain-acked %s: %v\n", name, assignedErr) //nolint:errcheck
 							hasAssignedWork = true
 						}
 						if providerAlive && hasAssignedWork {
-							if cancelOrphanedSessionDrainForAssignedWork(*session, sp, dt) ||
-								cancelRecoveredOrphanedDrainForAssignedWork(*session, sp, name) {
+							if cancelSessionDrainForAssignedWork(*session, sp, dt) ||
+								cancelRecoveredDrainForAssignedWork(*session, sp, name) {
 								_ = dops.clearDrain(name)
 								template := normalizedSessionTemplate(*session, cfg)
 								if template == "" {
@@ -1263,7 +1276,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 								}
 								fmt.Fprintf(stdout, "Canceled drain-acked session '%s' (assigned work)\n", name) //nolint:errcheck
 								if trace != nil {
-									trace.recordDecision("reconciler.drain.cancel", template, name, "orphaned", "cancel_assigned_work", nil, nil, "")
+									trace.recordDecision("reconciler.drain.cancel", template, name, ackReason, "cancel_assigned_work", nil, nil, "")
 								}
 								continue
 							}
@@ -1430,6 +1443,21 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						continue
 					}
 					ackReason, reconcilerOwnedAck := reconcilerDrainAckMatchesSession(*session, sp, name)
+					if reconcilerOwnedAck && assignedWorkDrainReasonCancelable(ackReason) {
+						hasAssignedWork, assignedErr := sessionHasAwakeAssignedWorkForReachableStore(cityPath, cfg, store, rigStores, *session)
+						if assignedErr != nil {
+							fmt.Fprintf(stderr, "session reconciler: checking assigned work for drain-acked %s: %v\n", name, assignedErr) //nolint:errcheck
+							hasAssignedWork = true
+						}
+						if alive && hasAssignedWork &&
+							(cancelSessionDrainForAssignedWork(*session, sp, dt) || cancelRecoveredDrainForAssignedWork(*session, sp, name)) {
+							_ = dops.clearDrain(name)
+							if trace != nil {
+								trace.recordDecision("reconciler.drain.cancel", tp.TemplateName, name, ackReason, "cancel_assigned_work", nil, nil, "")
+							}
+							continue
+						}
+					}
 					configDriftAck := reconcilerOwnedAck && ackReason == "config-drift"
 					if !configDriftAck && dt != nil {
 						if ds := dt.get(session.ID); ds != nil && ds.ackSet && ds.reason == "config-drift" {
@@ -2562,6 +2590,31 @@ func sessionHasOpenAssignedWorkForReachableStore(
 	return sessionHasOpenAssignedWorkInStoreByIdentifiers(rigStore, identifiers)
 }
 
+// sessionHasAwakeAssignedWorkForReachableStore reports whether assigned work
+// should keep a session awake: in-progress work always counts, while open work
+// counts only when it is ready: unblocked, not deferred, and not ready-excluded.
+func sessionHasAwakeAssignedWorkForReachableStore(
+	cityPath string,
+	cfg *config.City,
+	store beads.Store,
+	rigStores map[string]beads.Store,
+	session beads.Bead,
+) (bool, error) {
+	identifiers := sessionAssignmentIdentifiersForConfig(session, cfg)
+	storeRef, ok := assignedWorkStoreRefForSession(cityPath, cfg, session)
+	if !ok {
+		return sessionHasAwakeAssignedWorkInStores(store, rigStores, identifiers)
+	}
+	if storeRef == "" {
+		return sessionHasAwakeAssignedWorkInStoreByIdentifiers(store, identifiers)
+	}
+	rigStore, ok := rigStores[storeRef]
+	if !ok || rigStore == nil {
+		return false, fmt.Errorf("rig store %q unavailable for session %q", storeRef, session.Metadata["session_name"])
+	}
+	return sessionHasAwakeAssignedWorkInStoreByIdentifiers(rigStore, identifiers)
+}
+
 func assignedWorkStoreRefForSession(cityPath string, cfg *config.City, session beads.Bead) (string, bool) {
 	if cfg == nil {
 		return "", false
@@ -2884,6 +2937,18 @@ func sessionHasAssignedWorkInStoresForStatuses(store beads.Store, rigStores map[
 	return false, nil
 }
 
+func sessionHasAwakeAssignedWorkInStores(store beads.Store, rigStores map[string]beads.Store, identifiers []string) (bool, error) {
+	if has, err := sessionHasAwakeAssignedWorkInStoreByIdentifiers(store, identifiers); err != nil || has {
+		return has, err
+	}
+	for _, rs := range rigStores {
+		if has, err := sessionHasAwakeAssignedWorkInStoreByIdentifiers(rs, identifiers); err != nil || has {
+			return has, err
+		}
+	}
+	return false, nil
+}
+
 func sessionHasOpenAssignedWorkInStoreByIdentifiers(store beads.Store, identifiers []string) (bool, error) {
 	return sessionHasAssignedWorkInStoreByIdentifiersForStatuses(store, identifiers, []string{"open", "in_progress"})
 }
@@ -2914,6 +2979,38 @@ func sessionHasAssignedWorkInStoreByIdentifiersForStatuses(store beads.Store, id
 	return false, nil
 }
 
+func sessionHasAwakeAssignedWorkInStoreByIdentifiers(store beads.Store, identifiers []string) (bool, error) {
+	if store == nil {
+		return false, nil
+	}
+	seen := make(map[string]struct{}, len(identifiers))
+	for _, assignee := range identifiers {
+		if assignee == "" {
+			continue
+		}
+		if _, ok := seen[assignee]; ok {
+			continue
+		}
+		seen[assignee] = struct{}{}
+		for _, tierMode := range []beads.TierMode{beads.TierIssues, beads.TierWisps} {
+			if has, err := sessionHasInProgressAssignedWorkForTier(store, assignee, tierMode); err != nil || has {
+				return has, err
+			}
+			if has, err := sessionHasReadyAssignedWorkForTier(store, assignee, tierMode); err != nil || has {
+				return has, err
+			}
+		}
+	}
+	return false, nil
+}
+
+func sessionHasInProgressAssignedWorkForTier(store beads.Store, assignee string, tierMode beads.TierMode) (bool, error) {
+	if tierMode == beads.TierWisps {
+		return sessionHasOpenAssignedWispWork(store, assignee, "in_progress")
+	}
+	return sessionHasOpenAssignedWorkForTier(store, assignee, "in_progress", tierMode, true)
+}
+
 func sessionHasOpenAssignedWispWork(store beads.Store, assignee, status string) (bool, error) {
 	query := beads.ListQuery{Assignee: assignee, Status: status, TierMode: beads.TierWisps}
 	if cache, ok := store.(interface {
@@ -2928,6 +3025,14 @@ func sessionHasOpenAssignedWispWork(store beads.Store, assignee, status string) 
 		}
 	}
 	return sessionHasOpenAssignedWorkForTier(store, assignee, status, beads.TierWisps, true)
+}
+
+func sessionHasReadyAssignedWorkForTier(store beads.Store, assignee string, tierMode beads.TierMode) (bool, error) {
+	items, err := beads.ReadyLive(store, beads.ReadyQuery{Assignee: assignee, TierMode: tierMode})
+	if err != nil {
+		return false, err
+	}
+	return hasNonSessionAssignedWork(items), nil
 }
 
 func sessionHasOpenAssignedWorkForTier(store beads.Store, assignee, status string, tierMode beads.TierMode, live bool) (bool, error) {
