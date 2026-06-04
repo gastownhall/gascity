@@ -2326,8 +2326,8 @@ func TestReaperFormulaSQLReflectsCurrentSchema(t *testing.T) {
 		if strings.Contains(fence, "parent_id") {
 			t.Errorf("formula sql fence %d references parent_id (column does not exist in wisps):\n%s", i, fence)
 		}
-		if strings.Contains(fence, "depends_on_id") {
-			t.Errorf("formula sql fence %d references dependencies.depends_on_id instead of split target columns:\n%s", i, fence)
+		if strings.Contains(fence, "depends_on_wisp_id") || strings.Contains(fence, "depends_on_issue_id") {
+			t.Errorf("formula sql fence %d references split dependency target columns; bd 1.0.4 uses depends_on_id:\n%s", i, fence)
 		}
 		if strings.Contains(fence, "LEFT JOIN wisps parent ON") {
 			t.Errorf("formula sql fence %d still has the broken parent self-join:\n%s", i, fence)
@@ -2385,7 +2385,7 @@ func TestReaperParentIDIsParentChildDependencyProjection(t *testing.T) {
 	if strings.Contains(script, "parent_id") {
 		t.Fatalf("reaper queried parent_id directly; Dolt ParentID is projected from parent-child dependencies:\n%s", script)
 	}
-	if !strings.Contains(script, "dependencies d") || !strings.Contains(script, "d.type = 'parent-child'") {
+	if !strings.Contains(script, "wisp_dependencies d") || !strings.Contains(script, "d.type = 'parent-child'") {
 		t.Fatalf("reaper does not follow the canonical Dolt parent-child projection:\n%s", script)
 	}
 }
@@ -2429,8 +2429,10 @@ exit 0
 	if strings.Contains(log, "parent_id") {
 		t.Errorf("reaper SQL references parent_id (column does not exist in wisps):\n%s", log)
 	}
-	if strings.Contains(log, "depends_on_id") {
-		t.Errorf("reaper SQL references dependencies.depends_on_id instead of split target columns:\n%s", log)
+	for _, notWant := range []string{"depends_on_wisp_id", "depends_on_issue_id"} {
+		if strings.Contains(log, notWant) {
+			t.Errorf("reaper SQL references split dependency target column %q; bd 1.0.4 uses depends_on_id:\n%s", notWant, log)
+		}
 	}
 	// mail was removed: not a SQL table; messages are beads with type=message.
 	if strings.Contains(log, ".mail") {
@@ -2438,10 +2440,9 @@ exit 0
 	}
 	for _, want := range []string{
 		"SHOW COLUMNS FROM `beads`.dependencies",
-		"SELECT DISTINCT d.depends_on_wisp_id",
-		"d.depends_on_wisp_id IS NOT NULL",
-		"SELECT DISTINCT d.depends_on_issue_id",
-		"d.depends_on_issue_id IS NOT NULL",
+		"SHOW COLUMNS FROM `beads`.wisp_dependencies",
+		"FROM `beads`.wisp_dependencies d",
+		"SELECT DISTINCT d.depends_on_id",
 	} {
 		if !strings.Contains(log, want) {
 			t.Errorf("reaper SQL missing %q:\n%s", want, log)
@@ -2472,7 +2473,7 @@ exit 0
 		purgeSQL := log[purgeIdx:]
 		if !strings.Contains(purgeSQL, "child_wisp.status IN ('open', 'hooked', 'in_progress')") ||
 			!strings.Contains(purgeSQL, "d.type = 'parent-child'") ||
-			!strings.Contains(purgeSQL, "d.depends_on_wisp_id IS NOT NULL") {
+			!strings.Contains(purgeSQL, "SELECT DISTINCT d.depends_on_id") {
 			t.Errorf("reaper purge can delete closed parents with non-closed children:\n%s", purgeSQL)
 		}
 	}
@@ -2486,7 +2487,7 @@ exit 0
 	}
 }
 
-func TestReaperSkipsDependencyQueriesWithoutSplitDependencyTargets(t *testing.T) {
+func TestReaperSkipsDependencyQueriesWithoutGenericDependencyTargets(t *testing.T) {
 	cityDir := t.TempDir()
 	binDir := t.TempDir()
 	doltLog := filepath.Join(t.TempDir(), "dolt-args.log")
@@ -2501,7 +2502,7 @@ exit 0
 	env := map[string]string{
 		"DOLT_ARGS_LOG":          doltLog,
 		"DOLT_DBS":               "beads",
-		"DOLT_DEPENDENCY_SCHEMA": "legacy",
+		"DOLT_DEPENDENCY_SCHEMA": "missing-target",
 		"GC_CALL_LOG":            gcLog,
 		"GC_CITY":                cityDir,
 		"GC_CITY_PATH":           cityDir,
@@ -2522,8 +2523,8 @@ exit 0
 	if !strings.Contains(log, "SHOW COLUMNS FROM `beads`.dependencies") {
 		t.Fatalf("reaper did not probe dependency target columns:\n%s", log)
 	}
-	if strings.Contains(log, "FROM `beads`.dependencies d") || strings.Contains(log, "JOIN `beads`.dependencies d") {
-		t.Fatalf("reaper ran dependency-aware queries against legacy dependency schema:\n%s", log)
+	if strings.Contains(log, "FROM `beads`.wisp_dependencies d") || strings.Contains(log, "JOIN `beads`.wisp_dependencies d") {
+		t.Fatalf("reaper ran dependency-aware queries against schema without depends_on_id:\n%s", log)
 	}
 
 	// A silently-skipped DB may make no gc calls at all, so a missing
@@ -2532,8 +2533,57 @@ exit 0
 	if err != nil && !os.IsNotExist(err) {
 		t.Fatalf("ReadFile(gc log): %v", err)
 	}
-	if strings.Contains(string(gcData), "dependencies table lacks split target columns") {
-		t.Errorf("reaper escalated the legacy dependency schema as an anomaly; the split-target gate must skip silently:\n%s", gcData)
+	if strings.Contains(string(gcData), "dependencies table lacks depends_on_id") {
+		t.Errorf("reaper escalated the dependency schema as an anomaly; the target-column gate must skip silently:\n%s", gcData)
+	}
+}
+
+func TestReaperSkipsDependencyQueriesWithoutWispDependencyTable(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	doltLog := filepath.Join(t.TempDir(), "dolt-args.log")
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+
+	writeMaintenanceDoltStub(t, filepath.Join(binDir, "dolt"))
+	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+exit 0
+`)
+
+	env := map[string]string{
+		"DOLT_ARGS_LOG":               doltLog,
+		"DOLT_DBS":                    "beads",
+		"DOLT_WISP_DEPENDENCY_SCHEMA": "missing-table",
+		"GC_CALL_LOG":                 gcLog,
+		"GC_CITY":                     cityDir,
+		"GC_CITY_PATH":                cityDir,
+		"GC_DOLT_HOST":                "127.0.0.1",
+		"GC_DOLT_PORT":                "3307",
+		"GC_DOLT_USER":                "root",
+		"GC_DOLT_PASSWORD":            "",
+		"PATH":                        binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+
+	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "reaper.sh"), env)
+
+	logData, err := os.ReadFile(doltLog)
+	if err != nil {
+		t.Fatalf("ReadFile(dolt log): %v", err)
+	}
+	log := string(logData)
+	if !strings.Contains(log, "SHOW COLUMNS FROM `beads`.wisp_dependencies") {
+		t.Fatalf("reaper did not probe wisp dependency target columns:\n%s", log)
+	}
+	if strings.Contains(log, "FROM `beads`.wisp_dependencies d") || strings.Contains(log, "JOIN `beads`.wisp_dependencies d") {
+		t.Fatalf("reaper ran dependency-aware queries without a wisp_dependencies table:\n%s", log)
+	}
+
+	gcData, err := os.ReadFile(gcLog)
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	if strings.Contains(string(gcData), "wisp_dependencies") {
+		t.Errorf("reaper escalated the missing wisp dependency table as an anomaly; the schema gate must skip silently:\n%s", gcData)
 	}
 }
 
@@ -3248,7 +3298,7 @@ case "$*" in
   *"UPDATE "*"wisps SET status='closed'"*)
     printf 'ROW_COUNT()\n1\n'
     ;;
-  *"COUNT("*"wisps w"*"dependencies d"*)
+  *"COUNT("*"wisps w"*"wisp_dependencies d"*)
     printf 'COUNT(*)\n0\n'
     ;;
   *"status IN ('open', 'hooked', 'in_progress')"*"created_at <"*)
@@ -3287,7 +3337,7 @@ exit 0
 		t.Fatalf("ReadFile(dolt log): %v", err)
 	}
 	log := string(logData)
-	if strings.Contains(log, "UPDATE `beads`.wisps SET status='closed'") && !strings.Contains(log, "dependencies d") {
+	if strings.Contains(log, "UPDATE `beads`.wisps SET status='closed'") && !strings.Contains(log, "wisp_dependencies d") {
 		t.Fatalf("reaper closed non-closed wisps by age alone instead of using parent-child dependencies:\n%s", log)
 	}
 
@@ -3319,7 +3369,7 @@ case "$*" in
   *"UPDATE "*"wisps SET status='closed'"*)
     printf 'ROW_COUNT()\n1\n'
     ;;
-  *"COUNT("*"wisps w"*"dependencies d"*)
+  *"COUNT("*"wisps w"*"wisp_dependencies d"*)
     n=0
     if [ -f "$CLOSE_COUNT_STATE" ]; then
       n=$(cat "$CLOSE_COUNT_STATE")
@@ -3377,11 +3427,11 @@ exit 0
 	if !strings.Contains(log, "COUNT(DISTINCT w.id)") {
 		t.Fatalf("reaper stale-wisp close count can be join-multiplied:\n%s", log)
 	}
-	if !strings.Contains(log, "dependencies d") || !strings.Contains(log, "d.type = 'parent-child'") {
+	if !strings.Contains(log, "wisp_dependencies d") || !strings.Contains(log, "d.type = 'parent-child'") {
 		t.Fatalf("reaper stale-wisp close path does not use parent-child dependencies:\n%s", log)
 	}
-	if !strings.Contains(log, "d.depends_on_wisp_id = parent_wisp.id") || !strings.Contains(log, "d.depends_on_issue_id = parent_issue.id") {
-		t.Fatalf("reaper stale-wisp close path does not use split dependency target columns:\n%s", log)
+	if !strings.Contains(log, "d.depends_on_id = parent_wisp.id") || !strings.Contains(log, "d.depends_on_id = parent_issue.id") {
+		t.Fatalf("reaper stale-wisp close path does not use bd 1.0.4 dependency target column:\n%s", log)
 	}
 	if strings.Contains(log, "parent_wisp.id IS NULL AND parent_issue.id IS NULL") {
 		t.Fatalf("reaper closes stale wisps when parent liveness is unresolved:\n%s", log)
@@ -3557,7 +3607,7 @@ case "$*" in
       i=$((i + 1))
     done
     printf '\n'
-    printf 'Error 1105 (HY000): dependencies.depends_on_wisp_id missing from schema\n' >&2
+    printf 'Error 1105 (HY000): wisp_dependencies.depends_on_id missing from schema\n' >&2
     exit 42
     ;;
   *"status = 'closed'"*"closed_at <"*)
@@ -3598,7 +3648,7 @@ exit 0
 	if !strings.Contains(gcLogText, "purging closed wisps failed for beads") {
 		t.Fatalf("reaper did not escalate failed purge:\n%s", gcLogText)
 	}
-	if !strings.Contains(gcLogText, "Error 1105 (HY000): dependencies.depends_on_wisp_id missing from schema") {
+	if !strings.Contains(gcLogText, "Error 1105 (HY000): wisp_dependencies.depends_on_id missing from schema") {
 		t.Fatalf("reaper escalation lost Dolt stderr error tail:\n%s", gcLogText)
 	}
 }
@@ -3626,7 +3676,7 @@ case "$*" in
     printf 'delete failed\n' >&2
     exit 42
     ;;
-  *"COUNT("*"wisps w"*"dependencies d"*)
+  *"COUNT("*"wisps w"*"wisp_dependencies d"*)
     n=0
     if [ -f "$CLOSE_COUNT_STATE" ]; then
       n=$(cat "$CLOSE_COUNT_STATE")
@@ -5033,15 +5083,25 @@ case "$*" in
   ;;
 *"SHOW COLUMNS FROM"*"dependencies"*)
   printf 'Field,Type,Null,Key,Default,Extra\n'
-  if [ "${DOLT_DEPENDENCY_SCHEMA:-split}" = "legacy" ]; then
+  dependency_schema="${DOLT_DEPENDENCY_SCHEMA:-generic}"
+  case "$*" in
+    *"wisp_dependencies"*) dependency_schema="${DOLT_WISP_DEPENDENCY_SCHEMA:-$dependency_schema}" ;;
+  esac
+  if [ "$dependency_schema" = "missing-table" ]; then
+    printf 'table not found\n' >&2
+    exit 42
+  elif [ "$dependency_schema" = "missing-target" ]; then
     printf 'issue_id,varchar,NO,,,\n'
-    printf 'depends_on_id,varchar,NO,,,\n'
     printf 'type,varchar,NO,,,\n'
-  else
+  elif [ "$dependency_schema" = "split" ]; then
     printf 'issue_id,varchar,NO,,,\n'
     printf 'depends_on_issue_id,varchar,YES,,,\n'
     printf 'depends_on_wisp_id,varchar,YES,,,\n'
     printf 'depends_on_external,varchar,YES,,,\n'
+    printf 'type,varchar,NO,,,\n'
+  else
+    printf 'issue_id,varchar,NO,,,\n'
+    printf 'depends_on_id,varchar,NO,,,\n'
     printf 'type,varchar,NO,,,\n'
   fi
   ;;
