@@ -50,6 +50,7 @@ bd-split-store
 beads-store
 v2-routed-to-namespace
 run-target-routed-to-backfill
+backlog-depth
 session-model
 dolt-server
 dolt-noms-size
