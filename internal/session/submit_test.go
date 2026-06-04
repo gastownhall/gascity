@@ -394,6 +394,9 @@ func TestSubmitFollowUpQueuesDeferredMessageAndStartsCodexPoller(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
+	if err := store.SetMetadata(info.ID, "alias", "helper-alias"); err != nil {
+		t.Fatalf("SetMetadata(alias): %v", err)
+	}
 
 	var pollerCalls int
 	origPoller := startSessionSubmitPoller
@@ -430,8 +433,8 @@ func TestSubmitFollowUpQueuesDeferredMessageAndStartsCodexPoller(t *testing.T) {
 	if item.SessionID != info.ID {
 		t.Fatalf("SessionID = %q, want %q", item.SessionID, info.ID)
 	}
-	if item.Agent != info.ID {
-		t.Fatalf("Agent = %q, want %q", item.Agent, info.ID)
+	if item.Agent != "helper-alias" {
+		t.Fatalf("Agent = %q, want helper-alias", item.Agent)
 	}
 	if item.Message != "follow up later" {
 		t.Fatalf("Message = %q, want %q", item.Message, "follow up later")
@@ -458,10 +461,10 @@ func TestEnsureSessionSubmitPollerRejectsGoTestExecutable(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "Go test binary") {
 		t.Fatalf("ensureSessionSubmitPoller error = %v, want Go test binary refusal", err)
 	}
-	if _, statErr := os.Stat(sessionSubmitPollerPIDPath(cityPath, "s-test")); !errors.Is(statErr, os.ErrNotExist) {
+	if _, statErr := os.Stat(sessionSubmitPollerPIDPath(cityPath, "s-test", "agent")); !errors.Is(statErr, os.ErrNotExist) {
 		t.Fatalf("poller pid file stat error = %v, want not exist", statErr)
 	}
-	if _, statErr := os.Stat(sessionSubmitPollerLogPath(cityPath, "s-test")); !errors.Is(statErr, os.ErrNotExist) {
+	if _, statErr := os.Stat(sessionSubmitPollerLogPath(cityPath, "s-test", "agent")); !errors.Is(statErr, os.ErrNotExist) {
 		t.Fatalf("poller log file stat error = %v, want not exist", statErr)
 	}
 }
@@ -471,7 +474,7 @@ func TestExistingSessionSubmitPollerPIDRejectsUnrelatedLivePID(t *testing.T) {
 		t.Skip("poller ownership check uses /proc on linux")
 	}
 	cityPath := t.TempDir()
-	pidPath := sessionSubmitPollerPIDPath(cityPath, "s-test")
+	pidPath := sessionSubmitPollerPIDPath(cityPath, "s-test", "session-id")
 	if err := os.MkdirAll(filepath.Dir(pidPath), 0o755); err != nil {
 		t.Fatalf("MkdirAll: %v", err)
 	}
@@ -479,7 +482,7 @@ func TestExistingSessionSubmitPollerPIDRejectsUnrelatedLivePID(t *testing.T) {
 		t.Fatalf("WriteFile: %v", err)
 	}
 
-	running, err := existingSessionSubmitPollerPID(pidPath, cityPath, "s-test")
+	running, err := existingSessionSubmitPollerPID(pidPath, cityPath, "s-test", "session-id")
 	if err != nil {
 		t.Fatalf("existingSessionSubmitPollerPID: %v", err)
 	}
@@ -494,8 +497,8 @@ func TestExistingSessionSubmitPollerPIDAcceptsMatchingCitySession(t *testing.T) 
 	}
 	cityPath := t.TempDir()
 	sessionName := "s-test"
-	pidPath := sessionSubmitPollerPIDPath(cityPath, sessionName)
-	cmd := startSubmitPollerLikeProcess(t, cityPath, sessionName)
+	pidPath := sessionSubmitPollerPIDPath(cityPath, sessionName, "session-id")
+	cmd := startSubmitPollerLikeProcess(t, cityPath, sessionName, "session-id")
 	if err := os.MkdirAll(filepath.Dir(pidPath), 0o755); err != nil {
 		t.Fatalf("MkdirAll: %v", err)
 	}
@@ -503,7 +506,7 @@ func TestExistingSessionSubmitPollerPIDAcceptsMatchingCitySession(t *testing.T) 
 		t.Fatalf("WriteFile: %v", err)
 	}
 
-	running, err := existingSessionSubmitPollerPID(pidPath, cityPath, sessionName)
+	running, err := existingSessionSubmitPollerPID(pidPath, cityPath, sessionName, "session-id")
 	if err != nil {
 		t.Fatalf("existingSessionSubmitPollerPID: %v", err)
 	}
@@ -519,8 +522,8 @@ func TestExistingSessionSubmitPollerPIDRejectsDifferentCitySameSession(t *testin
 	cityPath := t.TempDir()
 	otherCityPath := t.TempDir()
 	sessionName := "s-test"
-	pidPath := sessionSubmitPollerPIDPath(cityPath, sessionName)
-	cmd := startSubmitPollerLikeProcess(t, otherCityPath, sessionName)
+	pidPath := sessionSubmitPollerPIDPath(cityPath, sessionName, "session-id")
+	cmd := startSubmitPollerLikeProcess(t, otherCityPath, sessionName, "session-id")
 	if err := os.MkdirAll(filepath.Dir(pidPath), 0o755); err != nil {
 		t.Fatalf("MkdirAll: %v", err)
 	}
@@ -528,7 +531,7 @@ func TestExistingSessionSubmitPollerPIDRejectsDifferentCitySameSession(t *testin
 		t.Fatalf("WriteFile: %v", err)
 	}
 
-	running, err := existingSessionSubmitPollerPID(pidPath, cityPath, sessionName)
+	running, err := existingSessionSubmitPollerPID(pidPath, cityPath, sessionName, "session-id")
 	if err != nil {
 		t.Fatalf("existingSessionSubmitPollerPID: %v", err)
 	}
@@ -537,13 +540,193 @@ func TestExistingSessionSubmitPollerPIDRejectsDifferentCitySameSession(t *testin
 	}
 }
 
-func startSubmitPollerLikeProcess(t *testing.T, cityPath, sessionName string) *exec.Cmd {
+func TestExistingSessionSubmitPollerPIDRejectsDifferentTargetSameCitySession(t *testing.T) {
+	if goruntime.GOOS != "linux" {
+		t.Skip("poller ownership check uses /proc on linux")
+	}
+	cityPath := t.TempDir()
+	sessionName := "s-test"
+	pidPath := sessionSubmitPollerPIDPath(cityPath, sessionName, "session-id")
+	cmd := startSubmitPollerLikeProcess(t, cityPath, sessionName, "old-alias")
+	if err := os.MkdirAll(filepath.Dir(pidPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(pidPath, []byte(fmt.Sprintf("%d\n", cmd.Process.Pid)), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	running, err := existingSessionSubmitPollerPID(pidPath, cityPath, sessionName, "session-id")
+	if err != nil {
+		t.Fatalf("existingSessionSubmitPollerPID: %v", err)
+	}
+	if running {
+		t.Fatalf("existingSessionSubmitPollerPID(%q) = true for same-session poller with different target key", pidPath)
+	}
+}
+
+func TestSessionSubmitPollerPathsScopeSameSessionByTarget(t *testing.T) {
+	cityPath := t.TempDir()
+	sessionName := "s-test"
+	pidPathA := sessionSubmitPollerPIDPath(cityPath, sessionName, "session-a")
+	pidPathB := sessionSubmitPollerPIDPath(cityPath, sessionName, "session-b")
+	logPathA := sessionSubmitPollerLogPath(cityPath, sessionName, "session-a")
+	logPathB := sessionSubmitPollerLogPath(cityPath, sessionName, "session-b")
+	if pidPathA == pidPathB {
+		t.Fatalf("sessionSubmitPollerPIDPath returned the same path for distinct targets: %q", pidPathA)
+	}
+	if logPathA == logPathB {
+		t.Fatalf("sessionSubmitPollerLogPath returned the same path for distinct targets: %q", logPathA)
+	}
+}
+
+func TestDeferredSubmitPollerKeyFallbackOrder(t *testing.T) {
+	cases := []struct {
+		name string
+		bead beads.Bead
+		want string
+	}{
+		{
+			name: "session id wins over alias",
+			bead: beads.Bead{
+				ID:       "session-id",
+				Metadata: map[string]string{"alias": "alias", "template": "template", "session_name": "s-test"},
+				Title:    "title",
+			},
+			want: "session-id",
+		},
+		{
+			name: "alias fallback",
+			bead: beads.Bead{
+				Metadata: map[string]string{"alias": "alias", "template": "template", "session_name": "s-test"},
+				Title:    "title",
+			},
+			want: "alias",
+		},
+		{
+			name: "template fallback",
+			bead: beads.Bead{
+				Metadata: map[string]string{"template": "template", "session_name": "s-test"},
+				Title:    "title",
+			},
+			want: "template",
+		},
+		{
+			name: "agent name fallback",
+			bead: beads.Bead{
+				Metadata: map[string]string{"agent_name": "agent", "template": "template", "session_name": "s-test"},
+				Title:    "title",
+			},
+			want: "agent",
+		},
+		{
+			name: "session name fallback",
+			bead: beads.Bead{
+				Metadata: map[string]string{"session_name": "s-test"},
+				Title:    "title",
+			},
+			want: "s-test",
+		},
+		{
+			name: "title fallback",
+			bead: beads.Bead{Title: "title"},
+			want: "title",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := deferredSubmitPollerKey(tc.bead); got != tc.want {
+				t.Fatalf("deferredSubmitPollerKey() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestPollerKeyFromBeadFallbackOrder(t *testing.T) {
+	cases := []struct {
+		name string
+		bead beads.Bead
+		want string
+	}{
+		{
+			name: "session id wins over metadata",
+			bead: beads.Bead{
+				ID: "session-id",
+				Metadata: map[string]string{
+					"alias":        "alias",
+					"agent_name":   "agent",
+					"template":     "template",
+					"session_name": "s-test",
+				},
+				Title: "title",
+			},
+			want: "session-id",
+		},
+		{
+			name: "alias fallback",
+			bead: beads.Bead{
+				Metadata: map[string]string{
+					"alias":        "alias",
+					"agent_name":   "agent",
+					"template":     "template",
+					"session_name": "s-test",
+				},
+				Title: "title",
+			},
+			want: "alias",
+		},
+		{
+			name: "agent name fallback",
+			bead: beads.Bead{
+				Metadata: map[string]string{
+					"agent_name":   "agent",
+					"template":     "template",
+					"session_name": "s-test",
+				},
+				Title: "title",
+			},
+			want: "agent",
+		},
+		{
+			name: "template fallback",
+			bead: beads.Bead{
+				Metadata: map[string]string{
+					"template":     "template",
+					"session_name": "s-test",
+				},
+				Title: "title",
+			},
+			want: "template",
+		},
+		{
+			name: "session name fallback",
+			bead: beads.Bead{
+				Metadata: map[string]string{"session_name": "s-test"},
+				Title:    "title",
+			},
+			want: "s-test",
+		},
+		{
+			name: "title fallback",
+			bead: beads.Bead{Title: "title"},
+			want: "title",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := PollerKeyFromBead(tc.bead); got != tc.want {
+				t.Fatalf("PollerKeyFromBead() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func startSubmitPollerLikeProcess(t *testing.T, cityPath, sessionName, agentName string) *exec.Cmd {
 	t.Helper()
 	scriptPath := filepath.Join(t.TempDir(), "gc-fake")
 	if err := os.WriteFile(scriptPath, []byte("#!/bin/sh\nread _hold\n"), 0o755); err != nil {
 		t.Fatalf("WriteFile(fake poller): %v", err)
 	}
-	cmd := exec.Command(scriptPath, nudgepoller.CommandArgs(cityPath, sessionName, "agent")...)
+	cmd := exec.Command(scriptPath, nudgepoller.CommandArgs(cityPath, sessionName, agentName)...)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		t.Fatalf("StdinPipe(fake poller): %v", err)
@@ -557,13 +740,13 @@ func startSubmitPollerLikeProcess(t *testing.T, cityPath, sessionName string) *e
 		_ = stdin.Close()
 		_ = cmd.Wait()
 	})
-	waitForSubmitPollerCmdline(t, cmd.Process.Pid, cityPath, sessionName)
+	waitForSubmitPollerCmdline(t, cmd.Process.Pid, cityPath, sessionName, agentName)
 	return cmd
 }
 
-func waitForSubmitPollerCmdline(t *testing.T, pid int, cityPath, sessionName string) {
+func waitForSubmitPollerCmdline(t *testing.T, pid int, cityPath, sessionName, agentName string) {
 	t.Helper()
-	matches := nudgepoller.CmdlineMatcher(cityPath, sessionName)
+	matches := nudgepoller.CmdlineMatcher(cityPath, sessionName, agentName)
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		if pidutil.AliveWithCmdline(pid, matches) {
