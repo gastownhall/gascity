@@ -76,10 +76,14 @@ func sessionCreateHints(resolved *config.ResolvedProvider, sessionEnv map[string
 		ProcessNames:           resolved.ProcessNames,
 		EmitsPermissionWarning: resolved.EmitsPermissionWarning,
 		AcceptStartupDialogs:   resolved.AcceptStartupDialogs,
-		// Interactive create paths only (provider-adhoc + named sessions);
-		// MouseOn lets the runtime skip disableMouseAndActivity so the tmux
-		// wheel drives copy-mode scrollback. Headless agents resolve MouseOn
-		// from cmd/gc/template_resolve.go and stay mouse-off (ga-c4w).
+		// API session-create path (dashboard / real-world-app), NOT the
+		// `gc session new` CLI seam — the CLI resolves MouseOn in cmd/gc
+		// (workerSessionCreateHints + templateParamsToConfig, ga-c4w). MouseOn
+		// lets the runtime skip disableMouseAndActivity so the tmux wheel drives
+		// copy-mode scrollback. Agent-kind sessions can also flow through here,
+		// but they are CreateModeDeferred and re-resolved mouse-off by the
+		// reconciler, so this unconditional default never enables mouse on a
+		// polled agent (ga-c4w).
 		MouseOn:    true,
 		Env:        sessionEnv,
 		MCPServers: mcpServers,

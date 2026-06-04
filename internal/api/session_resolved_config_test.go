@@ -127,12 +127,13 @@ func TestSessionCreateHintsSeedsRuntimeEnv(t *testing.T) {
 	}
 }
 
-// TestSessionCreateHintsEnablesMouse locks the ga-c4w contract: the
-// interactive session-create paths (provider-adhoc + named) must resolve
-// mouse-on so the tmux wheel drives copy-mode scrollback instead of leaking
-// to the focused TUI. The runtime skips disableMouseAndActivity only when
-// MouseOn is true (internal/runtime/tmux/adapter.go:930), so this is the
-// single seam that flips both interactive callers. Headless agent sessions
+// TestSessionCreateHintsEnablesMouse locks the ga-c4w contract for the API
+// session-create paths (provider-adhoc + named): they must resolve mouse-on so
+// the tmux wheel drives copy-mode scrollback instead of leaking to the focused
+// TUI. The runtime skips disableMouseAndActivity only when MouseOn is true (the
+// guard in internal/runtime/tmux adapter), so this seam flips both API callers;
+// the `gc session new` CLI resolves MouseOn separately in cmd/gc
+// (workerSessionCreateHints + templateParamsToConfig). Headless agent sessions
 // resolve MouseOn from cmd/gc/template_resolve.go and are unaffected (guarded
 // separately in template_resolve_prompt_test.go).
 func TestSessionCreateHintsEnablesMouse(t *testing.T) {

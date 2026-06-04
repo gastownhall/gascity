@@ -169,3 +169,42 @@ two production callers, both interactive (`session_resolution.go:318` named,
 `session_resolved_config.go:58` provider-adhoc); no headless/pool caller. Q#1
 (`monitor-activity` side-effect) and Q#3 (`WheelDownPane` exit-at-bottom) deferred
 to reviewer / manual verification per plan.
+
+## Re-review correction (executor — ga-c4w, second pass)
+
+The reviewer's **CHANGES_REQUESTED** (PR #3103) found the original fix targeted the
+wrong seam: **`gc session new` (CLI) never calls `internal/api/sessionCreateHints`** —
+that is the HTTP-API path (dashboard / real-world apps). Open-Q#2's analysis was
+mistaken: it verified the *callers of* `sessionCreateHints`, not that `gc session new`
+calls it (it does not). The CLI resolves runtime hints in **cmd/gc**: the
+managed-deferred reconciler start uses `templateParamsToConfig` (`MouseOn` was
+`cfgAgent.MouseModeOn()` = false), and the unmanaged direct start uses
+`workerSessionCreateHints` (set no `MouseOn`). So `gc session new` started mouse-off and
+the Part A wheel binding never fired — bead acceptance #1 unmet for the canonical entry
+point. Fixed across the real CLI seams (TDD, failing-first):
+
+- [x] T-007 — mouse-on for unmanaged `gc session new` direct start (`workerSessionCreateHints`)   ✅ green at ffb3a40c6 (`TestWorkerSessionCreateHintsEnablesMouse`)
+- [x] T-008 — mouse-on for managed-deferred `gc session new` via `session_origin=manual`; pool + named stay off (`templateParamsToConfig`)   ✅ green at c254074fc, **scope-corrected** to manual-only (see drift note) (`TestTemplateParamsToConfigInteractiveSessionEnablesMouse`)
+- [x] T-009 — keep interactive sessions mouse-on across resume (`sessionResumeHints`, reviewer finding #2)   ✅ green at 6c5e5f825 (`TestSessionResumeHintsEnablesMouse`)
+- [x] T-010 — CHANGELOG accuracy (all create + resume seams), LOW comment-rot fixes (`sessionCreateHints` comment, test `adapter.go:930`→function ref), build + targeted tests, plan status
+
+**Fingerprint-drift correction (T-008 scope).** The first T-008 cut keyed mouse-on on
+`templateParamsSessionOrigin(tp) != "ephemeral"`, i.e. **manual *and* named** sessions.
+That regressed two reconciler tests (`TestPhase0ConfigDrift_AsleepNamedSessionApplies\
+TemplateOverrides`, `TestReconcileSessionBeads_RateLimitScreenReholdsAfterQuarantine\
+Expiry`) — both pass on base `d2ff3e104`, both failed under the broad cut. Root cause:
+**`MouseOn` is an intentional core-fingerprint field** (locked by
+`runtime.TestConfigFingerprintIncludesMouseOn`), so flipping it for long-lived
+config-declared/named sessions changes their drift hash → spurious config-drift (and in
+the rate-limit case, drift even suppressed the post-quarantine wake). Fix: narrow the
+predicate to `templateParamsSessionOrigin(tp) == "manual"`, exactly the reviewer's
+`session_origin=manual` scope. Named/config sessions keep following `mouse_mode` via
+`Hints.MouseOn` (no drift). Both tests pass unmodified; `TestConfigFingerprintIncludesMouseOn`
+stays green (fingerprint contract untouched).
+
+**Seam coverage now.** Managed-deferred CLI (`templateParamsToConfig`: origin `manual`
+→ on; named/config → follows `mouse_mode`; ephemeral pool → off, controller-poll safe),
+unmanaged-direct CLI (`workerSessionCreateHints` → on), API create (`sessionCreateHints`
+→ on), API resume (`sessionResumeHints` → on). Headless agent path
+(`cfgAgent.MouseModeOn()` = false) is unchanged — `TestResolveTemplateHeadlessAgentStaysMouseOff`
+still green, so no poll-safety regression.

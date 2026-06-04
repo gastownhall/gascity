@@ -55,12 +55,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Interactive `gc session new` tmux sessions now scroll tmux scrollback on the
   mouse wheel instead of leaking the wheel to the focused TUI (Claude Code's own
   history, a pager, or the shell). The gastown pack binds `WheelUpPane`→copy-mode
-  and `WheelDownPane`→passthrough, and the runtime resolves interactive
-  provider/named sessions to mouse-on (`sessionCreateHints`) so tmux preserves
-  the `mouse on` set at session create. Headless agent sessions stay mouse-off
-  (controller-poll safety) — the agent template path is unchanged. Replaces the
-  portharbour po-vtg2 city-local `set-hook` stopgap with the in-source fix.
-  Refs: ga-c4w.
+  and `WheelDownPane`→passthrough, and the runtime resolves interactive sessions
+  to mouse-on across every create seam so tmux preserves the `mouse on` set at
+  session create: the `gc session new` CLI — both the managed-deferred reconciler
+  start (`templateParamsToConfig`, for `session_origin=manual` sessions) and the
+  unmanaged direct start (`workerSessionCreateHints`) — plus the API
+  provider/named paths (`sessionCreateHints`). Resume keeps mouse-on too
+  (`sessionResumeHints`), so the wheel survives suspend/restart. Headless agent
+  sessions stay mouse-off (controller-poll safety) — they resolve `MouseOn` from
+  the agent template path (`cfgAgent.MouseModeOn()`), which is unchanged and has
+  neither the `manual`/`named` interactive marker. Replaces the portharbour
+  po-vtg2 city-local `set-hook` stopgap with the in-source fix. Refs: ga-c4w.
 
 ## [1.2.1] - 2026-05-31
 
