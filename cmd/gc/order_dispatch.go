@@ -1432,25 +1432,45 @@ func isOrderRootOnlyWispCandidate(b beads.Bead) bool {
 	return b.Metadata["gc.kind"] == "wisp" && !beads.IsMoleculeType(b.Type)
 }
 
-// storeHasOpenDescendants reports whether any transitive descendant of parentID
+// storeHasOpenDescendants reports whether any transitive descendant of rootID
 // is non-closed. It includes closed intermediate nodes so nested molecule work
 // remains visible after a direct child step has completed. Graph-v2 workflows
 // can link children with dependency edges instead of ParentID, so descendants
 // include parent-child/tracks/blocks dependents too.
-func storeHasOpenDescendants(store beads.Store, parentID string) (bool, error) {
-	seen := map[string]struct{}{parentID: {}}
-	queue := []string{parentID}
+func storeHasOpenDescendants(store beads.Store, rootID string) (bool, error) {
+	seen := map[string]struct{}{rootID: {}}
+	queue := []string{rootID}
+	// ParentID queries and closed intermediate traversal require live reads:
+	// CachingStore does not retain a complete closed-history parent view.
 	reader := beads.HandlesFor(store).Live
 	for len(queue) > 0 {
 		parentID := queue[0]
 		queue = queue[1:]
 
-		children, err := orderWispDescendantChildren(reader, parentID)
+		children, err := orderWispParentChildren(reader, parentID)
 		if err != nil {
 			return false, err
 		}
 		for _, c := range children {
-			if c.ID == "" {
+			if c.ID == "" || c.ID == rootID {
+				continue
+			}
+			if _, ok := seen[c.ID]; ok {
+				continue
+			}
+			seen[c.ID] = struct{}{}
+			if c.Status != "closed" {
+				return true, nil
+			}
+			queue = append(queue, c.ID)
+		}
+
+		children, err = orderWispGraphDependentChildren(reader, rootID, parentID)
+		if err != nil {
+			return false, err
+		}
+		for _, c := range children {
+			if c.ID == "" || c.ID == rootID {
 				continue
 			}
 			if _, ok := seen[c.ID]; ok {
@@ -1466,33 +1486,50 @@ func storeHasOpenDescendants(store beads.Store, parentID string) (bool, error) {
 	return false, nil
 }
 
-func orderWispDescendantChildren(reader beads.LiveReader, parentID string) ([]beads.Bead, error) {
-	children, err := reader.List(beads.ListQuery{
+func orderWispParentChildren(reader beads.LiveReader, parentID string) ([]beads.Bead, error) {
+	return reader.List(beads.ListQuery{
 		ParentID:      parentID,
 		IncludeClosed: true,
 		TierMode:      beads.TierBoth,
 	})
+}
+
+// Order-wisp traversal follows structural ParentID children and graph.v2
+// ownership dependents because orders gate and close executable workflow work.
+// This is intentionally narrower than generic dependency closure: molecule
+// cleanup uses molecule metadata/ParentID, while wisp GC follows its own
+// ownership policy for runtime garbage collection.
+func orderWispDescendantChildren(reader beads.LiveReader, rootID, parentID string) ([]beads.Bead, error) {
+	children, err := orderWispParentChildren(reader, parentID)
 	if err != nil {
 		return nil, err
 	}
+	graphChildren, err := orderWispGraphDependentChildren(reader, rootID, parentID)
+	if err != nil {
+		return nil, err
+	}
+	return append(children, graphChildren...), nil
+}
 
+func orderWispGraphDependentChildren(reader beads.LiveReader, rootID, parentID string) ([]beads.Bead, error) {
 	parent, err := reader.Get(parentID)
 	if errors.Is(err, beads.ErrNotFound) {
-		return children, nil
+		return nil, nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("getting graph parent %s: %w", parentID, err)
 	}
 	if !orderWispMayHaveGraphDependents(parent) {
-		return children, nil
+		return nil, nil
 	}
 
 	deps, err := reader.DepList(parentID, "up")
 	if err != nil {
 		return nil, fmt.Errorf("listing graph dependents for %s: %w", parentID, err)
 	}
+	children := make([]beads.Bead, 0, len(deps))
 	for _, dep := range deps {
-		if dep.IssueID == "" || dep.DependsOnID != parentID {
+		if dep.IssueID == "" {
 			continue
 		}
 		if !isOrderWispDescendantDepType(dep.Type) {
@@ -1505,9 +1542,19 @@ func orderWispDescendantChildren(reader beads.LiveReader, parentID string) ([]be
 		if err != nil {
 			return nil, fmt.Errorf("getting graph dependent %s: %w", dep.IssueID, err)
 		}
+		if !orderWispGraphDependentOwnedByRoot(child, rootID) {
+			continue
+		}
 		children = append(children, child)
 	}
 	return children, nil
+}
+
+func orderWispGraphDependentOwnedByRoot(child beads.Bead, rootID string) bool {
+	if child.ID == rootID {
+		return true
+	}
+	return child.Metadata["gc.root_bead_id"] == rootID
 }
 
 func orderWispMayHaveGraphDependents(bead beads.Bead) bool {
@@ -2015,7 +2062,7 @@ func collectOrderWispSubtree(store beads.Store, root beads.Bead) ([]beads.Bead, 
 		parentID := queue[0]
 		queue = queue[1:]
 
-		children, err := orderWispDescendantChildren(reader, parentID)
+		children, err := orderWispDescendantChildren(reader, root.ID, parentID)
 		if err != nil {
 			return nil, err
 		}
