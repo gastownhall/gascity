@@ -2720,6 +2720,7 @@ func TestControllerStateCitySuspensionRecordsEvents(t *testing.T) {
 		mutate        func(*controllerState) error
 		wantSuspended bool
 		wantEventType string
+		wantActor     string
 	}{
 		{
 			name: "suspend city",
@@ -2728,6 +2729,7 @@ func TestControllerStateCitySuspensionRecordsEvents(t *testing.T) {
 			},
 			wantSuspended: true,
 			wantEventType: events.CitySuspended,
+			wantActor:     "gc",
 		},
 		{
 			name: "resume city",
@@ -2738,6 +2740,7 @@ func TestControllerStateCitySuspensionRecordsEvents(t *testing.T) {
 				return cs.ResumeCity()
 			},
 			wantEventType: events.CityResumed,
+			wantActor:     "gc",
 		},
 	}
 
@@ -2783,6 +2786,9 @@ func TestControllerStateCitySuspensionRecordsEvents(t *testing.T) {
 			}
 			if gotEvents[0].Type != tc.wantEventType {
 				t.Fatalf("recorded event type = %q, want %q", gotEvents[0].Type, tc.wantEventType)
+			}
+			if gotEvents[0].Actor != tc.wantActor {
+				t.Fatalf("recorded event actor = %q, want %q", gotEvents[0].Actor, tc.wantActor)
 			}
 		})
 	}
