@@ -1343,6 +1343,140 @@ prefix = "ct"
 	}
 }
 
+func TestSweepOrderTrackingCommandPrunesClosedTrackingWithConfiguredPolicy(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+
+	cityDir := t.TempDir()
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_CITY_PATH", cityDir)
+	t.Setenv("GC_CITY_ROOT", cityDir)
+	t.Setenv("GC_RIG", "")
+	t.Setenv("GC_RIG_ROOT", "")
+	t.Chdir(cityDir)
+
+	writeFile(t, filepath.Join(cityDir, "city.toml"), `[workspace]
+name = "test-city"
+prefix = "ct"
+
+[beads.policies.order_tracking]
+delete_after_close = "1ns"
+`)
+	if err := ensureScopedFileStoreLayout(cityDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensurePersistedScopeLocalFileStore(cityDir); err != nil {
+		t.Fatal(err)
+	}
+	store, err := openStoreAtForCity(cityDir, cityDir)
+	if err != nil {
+		t.Fatalf("openStoreAtForCity(city): %v", err)
+	}
+	ids := make([]string, 0, minClosedOrderTrackingRetained+2)
+	for i := range minClosedOrderTrackingRetained + 2 {
+		tracking, err := store.Create(beads.Bead{
+			Title:     "order:cleanup",
+			Labels:    []string{"order-run:cleanup", labelOrderTracking},
+			Ephemeral: i%2 == 0,
+		})
+		if err != nil {
+			t.Fatalf("Create(tracking-%d): %v", i, err)
+		}
+		if err := store.Close(tracking.ID); err != nil {
+			t.Fatalf("Close(tracking-%d): %v", i, err)
+		}
+		ids = append(ids, tracking.ID)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := cmdOrderSweepTracking(time.Hour, false, false, nil, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("cmdOrderSweepTracking = %d, want 0; stderr: %s", code, stderr.String())
+	}
+
+	reopened, err := openStoreAtForCity(cityDir, cityDir)
+	if err != nil {
+		t.Fatalf("openStoreAtForCity(city reopen): %v", err)
+	}
+	remaining := 0
+	for _, id := range ids {
+		if _, err := reopened.Get(id); err == nil {
+			remaining++
+		}
+	}
+	if remaining != minClosedOrderTrackingRetained {
+		t.Fatalf("remaining closed tracking beads = %d, want %d", remaining, minClosedOrderTrackingRetained)
+	}
+	if !strings.Contains(stdout.String(), "deleted 2 closed order-tracking bead") {
+		t.Fatalf("stdout = %q, want closed tracking delete count", stdout.String())
+	}
+}
+
+func TestSweepOrderTrackingCommandIncludeWispsRequiresOrderBeforePruning(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+
+	cityDir := t.TempDir()
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_CITY_PATH", cityDir)
+	t.Setenv("GC_CITY_ROOT", cityDir)
+	t.Setenv("GC_RIG", "")
+	t.Setenv("GC_RIG_ROOT", "")
+	t.Chdir(cityDir)
+
+	writeFile(t, filepath.Join(cityDir, "city.toml"), `[workspace]
+name = "test-city"
+prefix = "ct"
+
+[beads.policies.order_tracking]
+delete_after_close = "1ns"
+`)
+	if err := ensureScopedFileStoreLayout(cityDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensurePersistedScopeLocalFileStore(cityDir); err != nil {
+		t.Fatal(err)
+	}
+	store, err := openStoreAtForCity(cityDir, cityDir)
+	if err != nil {
+		t.Fatalf("openStoreAtForCity(city): %v", err)
+	}
+	ids := make([]string, 0, minClosedOrderTrackingRetained+2)
+	for i := range minClosedOrderTrackingRetained + 2 {
+		tracking, err := store.Create(beads.Bead{
+			Title:     "order:cleanup",
+			Labels:    []string{"order-run:cleanup", labelOrderTracking},
+			Ephemeral: true,
+		})
+		if err != nil {
+			t.Fatalf("Create(tracking-%d): %v", i, err)
+		}
+		if err := store.Close(tracking.ID); err != nil {
+			t.Fatalf("Close(tracking-%d): %v", i, err)
+		}
+		ids = append(ids, tracking.ID)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := cmdOrderSweepTracking(time.Hour, true, false, nil, &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("cmdOrderSweepTracking = 0, want failure")
+	}
+	if !strings.Contains(stderr.String(), "include-wisps requires at least one order name") {
+		t.Fatalf("stderr = %q, want include-wisps error", stderr.String())
+	}
+
+	reopened, err := openStoreAtForCity(cityDir, cityDir)
+	if err != nil {
+		t.Fatalf("openStoreAtForCity(city reopen): %v", err)
+	}
+	for _, id := range ids {
+		if _, err := reopened.Get(id); err != nil {
+			t.Fatalf("%s should be preserved after invalid command: %v", id, err)
+		}
+	}
+}
+
 func TestCmdOrderSweepTrackingFailsWhenTargetedRigStoreOpenFails(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_BEADS_SCOPE_ROOT", "")

@@ -3503,6 +3503,205 @@ func TestSweepStaleOrderTracking_ClosesOnlyOldOpenTrackingBeads(t *testing.T) {
 	}
 }
 
+func TestOrderTrackingRetentionPolicyDefaultsToSevenDays(t *testing.T) {
+	policy := orderTrackingRetentionPolicyForConfig(&config.City{})
+
+	if policy.deleteAfterClose != 7*24*time.Hour {
+		t.Fatalf("deleteAfterClose = %v, want 7d", policy.deleteAfterClose)
+	}
+	if policy.retainLast != minClosedOrderTrackingRetained {
+		t.Fatalf("retainLast = %d, want %d", policy.retainLast, minClosedOrderTrackingRetained)
+	}
+}
+
+func TestOrderTrackingRetentionPolicyUsesConfiguredDeleteAfterClose(t *testing.T) {
+	cfg := &config.City{
+		Beads: config.BeadsConfig{
+			Policies: map[string]config.BeadPolicyConfig{
+				orderTrackingBeadPolicyName: {DeleteAfterClose: "36h"},
+			},
+		},
+	}
+
+	policy := orderTrackingRetentionPolicyForConfig(cfg)
+
+	if policy.deleteAfterClose != 36*time.Hour {
+		t.Fatalf("deleteAfterClose = %v, want 36h", policy.deleteAfterClose)
+	}
+	if policy.retainLast != minClosedOrderTrackingRetained {
+		t.Fatalf("retainLast = %d, want %d", policy.retainLast, minClosedOrderTrackingRetained)
+	}
+}
+
+func TestSweepClosedOrderTrackingRetentionKeepsLatestTenPerOrderAcrossTiers(t *testing.T) {
+	now := time.Date(2026, 6, 4, 12, 0, 0, 0, time.UTC)
+	beadTime := now.Add(-48 * time.Hour)
+	seed := make([]beads.Bead, 0, 36)
+	for i := 0; i < 12; i++ {
+		seed = append(seed, beads.Bead{
+			ID:        fmt.Sprintf("alpha-%02d", i),
+			Title:     "order:alpha",
+			Status:    "closed",
+			Type:      "task",
+			CreatedAt: beadTime.Add(time.Duration(i) * time.Minute),
+			Labels:    []string{"order-run:alpha", labelOrderTracking},
+			Ephemeral: i%2 == 0,
+		})
+	}
+	for i := 0; i < 9; i++ {
+		seed = append(seed, beads.Bead{
+			ID:        fmt.Sprintf("beta-%02d", i),
+			Title:     "order:beta",
+			Status:    "closed",
+			Type:      "task",
+			CreatedAt: beadTime.Add(time.Duration(i) * time.Minute),
+			Labels:    []string{"order-run:beta", labelOrderTracking},
+			Ephemeral: i%2 == 0,
+		})
+	}
+	for i := 0; i < 12; i++ {
+		seed = append(seed, beads.Bead{
+			ID:        fmt.Sprintf("fresh-%02d", i),
+			Title:     "order:fresh",
+			Status:    "closed",
+			Type:      "task",
+			CreatedAt: now.Add(-time.Hour).Add(time.Duration(i) * time.Minute),
+			Labels:    []string{"order-run:fresh", labelOrderTracking},
+			Ephemeral: i%2 == 0,
+		})
+	}
+	seed = append(seed,
+		beads.Bead{
+			ID:        "open-old",
+			Title:     "order:alpha",
+			Status:    "open",
+			Type:      "task",
+			CreatedAt: beadTime,
+			Labels:    []string{"order-run:alpha", labelOrderTracking},
+			Ephemeral: true,
+		},
+		beads.Bead{
+			ID:        "unscoped-old",
+			Title:     "tracking without order scope",
+			Status:    "closed",
+			Type:      "task",
+			CreatedAt: beadTime,
+			Labels:    []string{labelOrderTracking},
+			Ephemeral: true,
+		},
+		beads.Bead{
+			ID:        "title-only-old",
+			Title:     "order:title-only",
+			Status:    "closed",
+			Type:      "task",
+			CreatedAt: beadTime,
+			Labels:    []string{labelOrderTracking},
+			Ephemeral: true,
+		},
+	)
+	store := beads.NewMemStoreFrom(100, seed, nil)
+
+	deleted, err := sweepClosedOrderTrackingRetention(store, now, orderTrackingRetentionPolicy{
+		deleteAfterClose: 24 * time.Hour,
+		retainLast:       minClosedOrderTrackingRetained,
+	}, nil)
+	if err != nil {
+		t.Fatalf("sweepClosedOrderTrackingRetention: %v", err)
+	}
+	if deleted != 2 {
+		t.Fatalf("deleted = %d, want 2", deleted)
+	}
+
+	for _, id := range []string{"alpha-00", "alpha-01"} {
+		if _, err := store.Get(id); !errors.Is(err, beads.ErrNotFound) {
+			t.Fatalf("Get(%s) err = %v, want ErrNotFound", id, err)
+		}
+	}
+	for _, prefixAndCount := range []struct {
+		prefix string
+		start  int
+		end    int
+	}{
+		{prefix: "alpha", start: 2, end: 12},
+		{prefix: "beta", start: 0, end: 9},
+		{prefix: "fresh", start: 0, end: 12},
+	} {
+		for i := prefixAndCount.start; i < prefixAndCount.end; i++ {
+			id := fmt.Sprintf("%s-%02d", prefixAndCount.prefix, i)
+			if _, err := store.Get(id); err != nil {
+				t.Fatalf("%s should be preserved: %v", id, err)
+			}
+		}
+	}
+	for _, id := range []string{"open-old", "unscoped-old", "title-only-old"} {
+		if _, err := store.Get(id); err != nil {
+			t.Fatalf("%s should be preserved: %v", id, err)
+		}
+	}
+}
+
+func TestSweepClosedOrderTrackingRetentionDeletesForAnyConfiguredStorageTarget(t *testing.T) {
+	now := time.Date(2026, 6, 4, 12, 0, 0, 0, time.UTC)
+	storages := []string{
+		config.BeadStorageHistory,
+		config.BeadStorageNoHistory,
+		config.BeadStorageEphemeral,
+	}
+
+	for _, storage := range storages {
+		t.Run(storage, func(t *testing.T) {
+			cfg := &config.City{
+				Beads: config.BeadsConfig{
+					Policies: map[string]config.BeadPolicyConfig{
+						orderTrackingBeadPolicyName: {
+							Storage:          storage,
+							DeleteAfterClose: "1h",
+						},
+					},
+				},
+			}
+			policy := orderTrackingRetentionPolicyForConfig(cfg)
+			seed := make([]beads.Bead, 0, minClosedOrderTrackingRetained+2)
+			for i := range minClosedOrderTrackingRetained + 2 {
+				seed = append(seed, beads.Bead{
+					ID:        fmt.Sprintf("%s-%02d", storage, i),
+					Title:     "order:" + storage,
+					Status:    "closed",
+					Type:      "task",
+					CreatedAt: now.Add(-48*time.Hour + time.Duration(i)*time.Minute),
+					Labels:    []string{"order-run:" + storage, labelOrderTracking},
+					Ephemeral: storage == config.BeadStorageEphemeral,
+				})
+			}
+			store := beads.NewMemStoreFrom(100, seed, nil)
+
+			deleted, err := sweepClosedOrderTrackingRetention(store, now, policy, nil)
+			if err != nil {
+				t.Fatalf("sweepClosedOrderTrackingRetention: %v", err)
+			}
+			if deleted != 2 {
+				t.Fatalf("deleted = %d, want 2", deleted)
+			}
+			for _, id := range []string{fmt.Sprintf("%s-00", storage), fmt.Sprintf("%s-01", storage)} {
+				if _, err := store.Get(id); !errors.Is(err, beads.ErrNotFound) {
+					t.Fatalf("Get(%s) err = %v, want ErrNotFound", id, err)
+				}
+			}
+			remaining, err := store.List(beads.ListQuery{
+				Status:   "closed",
+				Label:    labelOrderTracking,
+				TierMode: beads.TierBoth,
+			})
+			if err != nil {
+				t.Fatalf("List(remaining): %v", err)
+			}
+			if len(remaining) != minClosedOrderTrackingRetained {
+				t.Fatalf("remaining = %d, want %d", len(remaining), minClosedOrderTrackingRetained)
+			}
+		})
+	}
+}
+
 type noopCloseAllStore struct {
 	beads.Store
 	closeCalls int

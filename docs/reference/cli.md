@@ -2099,7 +2099,7 @@ gc order
 | [gc order list](#gc-order-list) | List available orders |
 | [gc order run](#gc-order-run) | Execute an order manually |
 | [gc order show](#gc-order-show) | Show details of an order |
-| [gc order sweep-tracking](#gc-order-sweep-tracking) | Close stale order-tracking beads |
+| [gc order sweep-tracking](#gc-order-sweep-tracking) | Close stale and prune closed order-tracking beads |
 
 ## gc order check
 
@@ -2184,10 +2184,13 @@ gc order show <name> [flags]
 
 ## gc order sweep-tracking
 
-Close stale open order-tracking beads.
+Close stale open order-tracking beads and prune expired closed history.
 
 This is intended for maintenance exec orders. It only closes tracking beads
 older than --stale-after so a fresh in-flight order is not interrupted.
+Closed order-tracking history is deleted after
+[beads.policies.order_tracking].delete_after_close, defaulting to 7d, while
+always retaining at least the latest 10 closed tracking beads per order.
 The manual command runs to completion; controller startup and watchdog sweeps
 use bounded cleanup to avoid spending an unbounded tick on stale work.
 

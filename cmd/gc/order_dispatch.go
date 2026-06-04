@@ -37,7 +37,10 @@ const (
 	labelTriggerEnvFailed = "trigger-env-failed"
 
 	orderTrackingSweepOrder                = "order-tracking-sweep"
+	orderTrackingBeadPolicyName            = "order_tracking"
 	defaultOrderTrackingSweepStaleAfter    = 10 * time.Minute
+	defaultOrderTrackingDeleteAfterClose   = 7 * 24 * time.Hour
+	minClosedOrderTrackingRetained         = 10
 	orderTrackingSweepWatchdogInterval     = 30 * time.Second
 	orderTrackingSweepWatchdogStaleAfter   = 2 * time.Minute
 	orderTrackingSweepMetadataReason       = "stale-order-tracking"
@@ -1568,10 +1571,35 @@ func beadLabelsContain(labels []string, want string) bool {
 }
 
 type orderTrackingSweepResult struct {
-	trackingClosed int
-	wispClosed     int
-	storesSwept    int
-	sweptStoreKeys map[string]struct{}
+	trackingClosed  int
+	wispClosed      int
+	trackingDeleted int
+	storesSwept     int
+	sweptStoreKeys  map[string]struct{}
+}
+
+type orderTrackingRetentionPolicy struct {
+	deleteAfterClose time.Duration
+	retainLast       int
+}
+
+func orderTrackingRetentionPolicyForConfig(cfg *config.City) orderTrackingRetentionPolicy {
+	policy := orderTrackingRetentionPolicy{
+		deleteAfterClose: defaultOrderTrackingDeleteAfterClose,
+		retainLast:       minClosedOrderTrackingRetained,
+	}
+	if cfg == nil {
+		return policy
+	}
+	if configured, ok := cfg.Beads.Policies[orderTrackingBeadPolicyName]; ok {
+		if duration := configured.DeleteAfterCloseDuration(); duration > 0 {
+			policy.deleteAfterClose = duration
+		}
+	}
+	if policy.retainLast < minClosedOrderTrackingRetained {
+		policy.retainLast = minClosedOrderTrackingRetained
+	}
+	return policy
 }
 
 // sweepStaleOrderTracking closes open order-tracking beads whose creation
@@ -1717,6 +1745,99 @@ func sweepStaleOrderTrackingWithOptionsLimit(store beads.Store, now time.Time, s
 		}
 	}
 	return result, nil
+}
+
+func sweepClosedOrderTrackingRetentionAcrossStores(stores []beads.Store, now time.Time, policy orderTrackingRetentionPolicy, onlyOrders map[string]struct{}) (int, error) {
+	deleted := 0
+	var errs []error
+	for i, store := range stores {
+		if store == nil {
+			continue
+		}
+		n, err := sweepClosedOrderTrackingRetention(store, now, policy, onlyOrders)
+		deleted += n
+		if err != nil {
+			errs = append(errs, fmt.Errorf("pruning closed order-tracking %s: %w", orderTrackingSweepStoreLabel(store, i), err))
+		}
+	}
+	return deleted, errors.Join(errs...)
+}
+
+func sweepClosedOrderTrackingRetention(store beads.Store, now time.Time, policy orderTrackingRetentionPolicy, onlyOrders map[string]struct{}) (int, error) {
+	if store == nil {
+		return 0, fmt.Errorf("bead store unavailable")
+	}
+	if policy.deleteAfterClose <= 0 {
+		return 0, nil
+	}
+	if policy.retainLast < minClosedOrderTrackingRetained {
+		policy.retainLast = minClosedOrderTrackingRetained
+	}
+	entries, err := beads.HandlesFor(store).Live.List(beads.ListQuery{
+		Status:   "closed",
+		Label:    labelOrderTracking,
+		Sort:     beads.SortCreatedDesc,
+		TierMode: beads.TierBoth,
+	})
+	if err != nil {
+		return 0, fmt.Errorf("listing closed order-tracking beads: %w", err)
+	}
+
+	byOrder := make(map[string][]beads.Bead)
+	for _, entry := range entries {
+		scopedName, ok := orderRunNameFromLabels(entry.Labels)
+		if !ok {
+			continue
+		}
+		if len(onlyOrders) > 0 {
+			if _, ok := onlyOrders[scopedName]; !ok {
+				continue
+			}
+		}
+		byOrder[scopedName] = append(byOrder[scopedName], entry)
+	}
+
+	cutoff := now.Add(-policy.deleteAfterClose)
+	deleted := 0
+	var deleteErr error
+	for _, entries := range byOrder {
+		sort.Slice(entries, func(i, j int) bool {
+			if entries[i].CreatedAt.Equal(entries[j].CreatedAt) {
+				return entries[i].ID > entries[j].ID
+			}
+			return entries[i].CreatedAt.After(entries[j].CreatedAt)
+		})
+		if len(entries) <= policy.retainLast {
+			continue
+		}
+		for _, entry := range entries[policy.retainLast:] {
+			if !orderTrackingClosedReferenceTime(entry).Before(cutoff) {
+				continue
+			}
+			if err := deleteWorkflowBead(store, entry.ID); err != nil {
+				deleteErr = errors.Join(deleteErr, fmt.Errorf("deleting closed order-tracking bead %q: %w", entry.ID, err))
+				continue
+			}
+			deleted++
+		}
+	}
+	return deleted, deleteErr
+}
+
+func orderTrackingClosedReferenceTime(b beads.Bead) time.Time {
+	if !b.UpdatedAt.IsZero() {
+		return b.UpdatedAt
+	}
+	return b.CreatedAt
+}
+
+func orderRunNameFromLabels(labels []string) (string, bool) {
+	for _, label := range labels {
+		if name, ok := strings.CutPrefix(label, "order-run:"); ok && name != "" {
+			return name, true
+		}
+	}
+	return "", false
 }
 
 func sweepStaleOrderWispSubtrees(store beads.Store, cutoff time.Time, onlyOrders map[string]struct{}, initiator string) (int, error) {

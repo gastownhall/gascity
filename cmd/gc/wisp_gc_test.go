@@ -505,7 +505,7 @@ func TestWispGC_PartialChildDeleteRemainsRetryable(t *testing.T) {
 	}
 }
 
-func TestWispGC_PurgesExpiredTrackingBeads(t *testing.T) {
+func TestWispGC_PreservesOrderTrackingBeads(t *testing.T) {
 	now := time.Now()
 	store := newGCStore([]beads.Bead{
 		makeGCBead("mol-1", now.Add(-2*time.Hour), "closed", "molecule"),
@@ -519,13 +519,18 @@ func TestWispGC_PurgesExpiredTrackingBeads(t *testing.T) {
 	if err != nil {
 		t.Fatalf("runGC: %v", err)
 	}
-	if purged != 2 {
-		t.Fatalf("purged = %d, want 2", purged)
+	if purged != 1 {
+		t.Fatalf("purged = %d, want 1", purged)
 	}
-	assertDeletedIDs(t, store.deletedIDs, "mol-1", "track-old")
+	assertDeletedIDs(t, store.deletedIDs, "mol-1")
+	for _, id := range []string{"track-old", "track-new", "track-open"} {
+		if _, err := store.Get(id); err != nil {
+			t.Fatalf("%s should be preserved for order-tracking retention: %v", id, err)
+		}
+	}
 }
 
-func TestWispGC_PurgesLegacyIssuesTierTrackingBeads(t *testing.T) {
+func TestWispGC_PreservesLegacyIssuesTierTrackingBeads(t *testing.T) {
 	now := time.Now()
 	store := newGCStore([]beads.Bead{
 		{
@@ -542,13 +547,15 @@ func TestWispGC_PurgesLegacyIssuesTierTrackingBeads(t *testing.T) {
 	if err != nil {
 		t.Fatalf("runGC: %v", err)
 	}
-	if purged != 1 {
-		t.Fatalf("purged = %d, want 1", purged)
+	if purged != 0 {
+		t.Fatalf("purged = %d, want 0", purged)
 	}
-	assertDeletedIDs(t, store.deletedIDs, "track-legacy")
+	if _, err := store.Get("track-legacy"); err != nil {
+		t.Fatalf("legacy tracking bead should be preserved: %v", err)
+	}
 }
 
-func TestWispGC_TrackingListErrorIsSurfacedAndMoleculePurgeContinues(t *testing.T) {
+func TestWispGC_DoesNotListOrderTrackingBeads(t *testing.T) {
 	now := time.Now()
 	store := newGCStore([]beads.Bead{
 		makeGCBead("mol-1", now.Add(-2*time.Hour), "closed", "molecule"),
@@ -558,16 +565,16 @@ func TestWispGC_TrackingListErrorIsSurfacedAndMoleculePurgeContinues(t *testing.
 
 	wg := newWispGC(5*time.Minute, time.Hour, 0)
 	purged, err := wg.runGC(store, now)
-	if err == nil {
-		t.Fatal("expected tracking list error to be surfaced")
+	if err != nil {
+		t.Fatalf("runGC: %v", err)
 	}
 	if purged != 1 {
 		t.Fatalf("purged = %d, want 1", purged)
 	}
-	if !strings.Contains(err.Error(), "tracking list failed") {
-		t.Fatalf("err = %v, want tracking list failure to be included", err)
-	}
 	assertDeletedIDs(t, store.deletedIDs, "mol-1")
+	if _, err := store.Get("track-old"); err != nil {
+		t.Fatalf("order-tracking bead should be preserved: %v", err)
+	}
 }
 
 func TestWispGC_TrackingBeadsDoNotDeleteParentChildDescendants(t *testing.T) {
@@ -591,12 +598,16 @@ func TestWispGC_TrackingBeadsDoNotDeleteParentChildDescendants(t *testing.T) {
 	if err != nil {
 		t.Fatalf("runGC: %v", err)
 	}
-	if purged != 1 {
-		t.Fatalf("purged = %d, want 1", purged)
+	if purged != 0 {
+		t.Fatalf("purged = %d, want 0", purged)
 	}
-	assertDeletedIDs(t, store.deletedIDs, "track-old")
-	if _, err := store.Get("track-child"); err != nil {
-		t.Fatalf("tracking child was deleted: %v", err)
+	if len(store.deletedIDs) != 0 {
+		t.Fatalf("deleted IDs = %v, want none", store.deletedIDs)
+	}
+	for _, id := range []string{"track-old", "track-child"} {
+		if _, err := store.Get(id); err != nil {
+			t.Fatalf("%s should be preserved: %v", id, err)
+		}
 	}
 }
 

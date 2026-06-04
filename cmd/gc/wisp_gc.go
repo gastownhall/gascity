@@ -81,15 +81,6 @@ func (m *memoryWispGC) runGC(store beads.Store, now time.Time) (int, error) {
 		closurePurged, closureDeleteErr := purgeExpiredBeadClosures(store, entries, cutoff)
 		purged += closurePurged
 		deleteErr = errors.Join(deleteErr, closureDeleteErr)
-
-		trackEntries, trackErr := store.List(beads.ListQuery{Status: "closed", Label: labelOrderTracking, TierMode: beads.TierBoth})
-		if trackErr == nil {
-			trackPurged, trackDeleteErr := purgeExpiredBeadRoots(store, trackEntries, cutoff)
-			purged += trackPurged
-			deleteErr = errors.Join(deleteErr, trackDeleteErr)
-		} else {
-			deleteErr = errors.Join(deleteErr, fmt.Errorf("listing closed order-tracking beads: %w", trackErr))
-		}
 	}
 
 	if m.mailRetentionTTL > 0 {
