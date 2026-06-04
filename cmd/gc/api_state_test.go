@@ -1452,7 +1452,7 @@ func TestWrapWithCachingStoreCachesNonBdStore(t *testing.T) {
 		t.Fatalf("Create: %v", err)
 	}
 
-	store := wrapWithCachingStore(context.Background(), backing, nil)
+	store := wrapWithCachingStore(context.Background(), backing, nil, true)
 	cached, ok := store.(*beads.CachingStore)
 	if !ok {
 		t.Fatalf("store type = %T, want *beads.CachingStore", store)
@@ -1471,8 +1471,44 @@ func TestWrapWithCachingStoreCachesNonBdStore(t *testing.T) {
 }
 
 func TestWrapWithCachingStoreReturnsNilStore(t *testing.T) {
-	if got := wrapWithCachingStore(context.Background(), nil, nil); got != nil {
+	if got := wrapWithCachingStore(context.Background(), nil, nil, true); got != nil {
 		t.Fatalf("wrapWithCachingStore(nil) = %#v, want nil", got)
+	}
+}
+
+// TestWrapWithCachingStoreNoBackgroundRefresh covers the suspended-rig path:
+// with backgroundRefresh=false the cache still serves pre-primed reads but does
+// NOT start the reconcile loop (StaggerOffsetMs stays 0), so a suspended rig
+// stops costing a bd subprocess per reconcile cycle.
+func TestWrapWithCachingStoreNoBackgroundRefresh(t *testing.T) {
+	backing := beads.NewMemStore()
+	created, err := backing.Create(beads.Bead{Title: "suspended-rig bead"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	// Cancellable ctx so the refresh path is reachable (Background() always
+	// early-returns regardless of the flag).
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	store := wrapWithCachingStore(ctx, backing, nil, false)
+	cached, ok := store.(*beads.CachingStore)
+	if !ok {
+		t.Fatalf("store type = %T, want *beads.CachingStore", store)
+	}
+	// Pre-primed reads still work (on-demand access to a suspended rig).
+	items, err := cached.ListOpen()
+	if err != nil {
+		t.Fatalf("ListOpen: %v", err)
+	}
+	if len(items) != 1 || items[0].ID != created.ID {
+		t.Fatalf("ListOpen = %#v, want only %s", items, created.ID)
+	}
+	// Reconciler never armed: StartReconciler (which sets StaggerOffsetMs) was
+	// not called. Give any erroneously-spawned goroutine a moment to set it.
+	time.Sleep(50 * time.Millisecond)
+	if got := cached.Stats().StaggerOffsetMs; got != 0 {
+		t.Fatalf("StaggerOffsetMs = %d, want 0 (reconciler must not start when backgroundRefresh=false)", got)
 	}
 }
 

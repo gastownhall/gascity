@@ -132,7 +132,7 @@ func newControllerState(
 		fmt.Fprintf(os.Stderr, "api: city bead store: %v (session/mail endpoints disabled)\n", err)
 	} else {
 		store := opened.Store
-		cs.cityBeadStore = wrapWithCachingStore(ctx, store, ep)
+		cs.cityBeadStore = wrapWithCachingStore(ctx, store, ep, true)
 		cs.cityBeadsDiagnostic = diagnosticPtr(opened.Diagnostic)
 		cs.cityMailProv = newMailProvider(cs.cityBeadStore)
 		svc := extmsg.NewServices(cs.cityBeadStore)
@@ -142,9 +142,15 @@ func newControllerState(
 	return cs
 }
 
-// wrapWithCachingStore wraps a Store with a CachingStore that primes
-// and starts a background reconciler.
-func wrapWithCachingStore(ctx context.Context, store beads.Store, ep events.Provider) beads.Store {
+// wrapWithCachingStore wraps store in an in-memory read cache. When
+// backgroundRefresh is true the cache fully primes and runs a continuous
+// reconcile loop (the steady-state cost: one bd subprocess per cycle per scope).
+// When false the cache only pre-primes active beads synchronously — enough for
+// on-demand reads — and skips both the async full prime and the reconcile loop.
+// Suspended rigs pass false: they spawn no agents, so nothing writes locally and
+// a continuously refreshed cache buys nothing; reconciling every suspended rig
+// every cycle is what pegs the supervisor (gastownhall/gascity #1978 follow-up).
+func wrapWithCachingStore(ctx context.Context, store beads.Store, ep events.Provider, backgroundRefresh bool) beads.Store {
 	baseStore, policyStore, policyWrapped := unwrapBeadPolicyStore(store)
 	if baseStore == nil {
 		return nil
@@ -174,7 +180,9 @@ func wrapWithCachingStore(ctx context.Context, store beads.Store, ep events.Prov
 	if err := cs.PrimeActive(); err != nil {
 		log.Printf("caching-store: pre-prime failed: %v", err)
 	}
-	if ctx.Done() == nil {
+	// No cancellable ctx, or caller opted out of background refresh (suspended
+	// rig): serve from the synchronous pre-prime only, no async prime/reconcile.
+	if ctx.Done() == nil || !backgroundRefresh {
 		if policyWrapped {
 			return wrapStoreWithBeadPolicies(cs, policyStore.cfg)
 		}
@@ -231,13 +239,13 @@ func (cs *controllerState) buildStores(cfg *config.City) map[string]beads.Store 
 			// Legacy file mode aliases every rig to the same backing store, so
 			// the cache handle must be shared too for immediate cross-rig reads.
 			if sharedLegacyCachedStore == nil {
-				sharedLegacyCachedStore = wrapWithCachingStore(cs.cacheCtx, sharedLegacyFileStore, cs.eventProv)
+				sharedLegacyCachedStore = wrapWithCachingStore(cs.cacheCtx, sharedLegacyFileStore, cs.eventProv, true)
 			}
 			stores[rig.Name] = sharedLegacyCachedStore
 			continue
 		}
 		store = cs.openRigStore(scopeProvider, rig.Name, scopeRoot, rig.EffectivePrefix(), cfg)
-		stores[rig.Name] = wrapWithCachingStore(cs.cacheCtx, store, cs.eventProv)
+		stores[rig.Name] = wrapWithCachingStore(cs.cacheCtx, store, cs.eventProv, !rig.Suspended)
 	}
 	return stores
 }
@@ -478,7 +486,7 @@ func (cs *controllerState) update(cfg *config.City, sp runtime.Provider) {
 	var cityMailProv mail.Provider
 	var extSvc *extmsg.Services
 	if cityStore != nil {
-		cityStore = wrapWithCachingStore(cs.cacheCtx, cityStore, cs.eventProv)
+		cityStore = wrapWithCachingStore(cs.cacheCtx, cityStore, cs.eventProv, true)
 		cityMailProv = newMailProvider(cityStore)
 		svc := extmsg.NewServices(cityStore)
 		extSvc = &svc
