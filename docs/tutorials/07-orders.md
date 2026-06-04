@@ -435,12 +435,6 @@ launches. This is what prevents the cooldown trigger from re-firing on the very
 next tick — the trigger checks for recent tracking beads when deciding if the order
 is due.
 
-Closed tracking history is pruned by the maintenance pack's
-`order-tracking-sweep` order after 7 days by default. Set
-`[beads.policies.order_tracking].delete_after_close` in `city.toml` to keep a
-longer or shorter UI history; Gas City still preserves at least the latest 10
-closed tracking beads per order.
-
 ## Duplicate prevention
 
 Before dispatching, the controller checks whether the order already has open
