@@ -197,3 +197,77 @@ func TestBeadPolicyStoreReadHelperTierConformance(t *testing.T) {
 		})
 	}
 }
+
+func TestBeadPolicyStoreHandleReadsArePolicyAware(t *testing.T) {
+	backing := &recordingPolicyReadStore{MemStore: beads.NewMemStore()}
+	store := wrapStoreWithBeadPolicies(backing, &config.City{})
+	handles := beads.HandlesFor(store)
+
+	handleCases := []struct {
+		name string
+		run  func() error
+	}{
+		{
+			name: "cached list",
+			run: func() error {
+				_, err := handles.Cached.List(beads.ListQuery{Status: "open"})
+				return err
+			},
+		},
+		{
+			name: "live list",
+			run: func() error {
+				_, err := handles.Live.List(beads.ListQuery{Status: "open"})
+				return err
+			},
+		},
+	}
+	for _, tc := range handleCases {
+		t.Run(tc.name, func(t *testing.T) {
+			backing.listQueries = nil
+			if err := tc.run(); err != nil {
+				t.Fatalf("handle list: %v", err)
+			}
+			if len(backing.listQueries) != 1 {
+				t.Fatalf("captured list queries = %#v, want exactly one", backing.listQueries)
+			}
+			if backing.listQueries[0].TierMode != beads.TierBoth {
+				t.Fatalf("handle List TierMode = %v, want TierBoth", backing.listQueries[0].TierMode)
+			}
+		})
+	}
+
+	readyHandleCases := []struct {
+		name string
+		run  func() error
+	}{
+		{
+			name: "cached ready",
+			run: func() error {
+				_, err := handles.Cached.Ready()
+				return err
+			},
+		},
+		{
+			name: "live ready",
+			run: func() error {
+				_, err := handles.Live.Ready()
+				return err
+			},
+		},
+	}
+	for _, tc := range readyHandleCases {
+		t.Run(tc.name, func(t *testing.T) {
+			backing.readyQueries = nil
+			if err := tc.run(); err != nil {
+				t.Fatalf("handle ready: %v", err)
+			}
+			if len(backing.readyQueries) != 1 {
+				t.Fatalf("captured ready queries = %#v, want exactly one", backing.readyQueries)
+			}
+			if backing.readyQueries[0].TierMode != beads.TierBoth {
+				t.Fatalf("handle Ready TierMode = %v, want TierBoth", backing.readyQueries[0].TierMode)
+			}
+		})
+	}
+}

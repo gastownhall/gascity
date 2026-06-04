@@ -530,6 +530,9 @@ func closeBeadStoreHandle(store beads.Store) error {
 	if store == nil {
 		return nil
 	}
+	if base, _, ok := unwrapBeadPolicyStore(store); ok {
+		return closeBeadStoreHandle(base)
+	}
 	if cached, ok := store.(*beads.CachingStore); ok {
 		cached.StopReconciler()
 		return closeBeadStoreHandle(cached.Backing())

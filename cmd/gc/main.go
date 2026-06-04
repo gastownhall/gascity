@@ -1218,7 +1218,7 @@ func openStoreResultAtForCity(storePath, cityPath string) (beads.StoreOpenResult
 	provider := rawBeadsProviderForScope(scopeRoot, runtimeCityPath)
 	if providerIsCoordStore(provider) {
 		store, err := openCoordStoreAt(scopeRoot, runtimeCityPath)
-		return beads.StoreOpenResult{Store: store, Diagnostic: beads.BeadsDiagnostic{Store: "SQLiteStore"}}, err
+		return beads.StoreOpenResult{Store: wrapStoreWithBeadPolicies(store, cfg), Diagnostic: beads.BeadsDiagnostic{Store: "SQLiteStore"}}, err
 	}
 	if strings.HasPrefix(provider, "exec:") && !providerUsesBdStoreContract(provider) {
 		store, err := openExecStoreAtForCity(provider, scopeRoot, runtimeCityPath)

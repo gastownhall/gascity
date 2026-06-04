@@ -88,6 +88,65 @@ func TestSQLiteStoreReady(t *testing.T) {
 	}
 }
 
+func TestSQLiteStoreReadyHonorsTierMode(t *testing.T) {
+	s, err := OpenSQLiteStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer func() {
+		if c, ok := s.(interface{ CloseStore() error }); ok {
+			c.CloseStore() //nolint:errcheck
+		}
+	}()
+
+	history, err := s.Create(Bead{Title: "history", Type: "task"})
+	if err != nil {
+		t.Fatalf("create history: %v", err)
+	}
+	noHistory, err := s.Create(Bead{Title: "no history", Type: "task", NoHistory: true})
+	if err != nil {
+		t.Fatalf("create no history: %v", err)
+	}
+	ephemeral, err := s.Create(Bead{Title: "ephemeral", Type: "task", Ephemeral: true})
+	if err != nil {
+		t.Fatalf("create ephemeral: %v", err)
+	}
+
+	defaultReady, err := s.Ready()
+	if err != nil {
+		t.Fatalf("Ready(default): %v", err)
+	}
+	if readyIDs(defaultReady)[ephemeral.ID] {
+		t.Fatalf("Ready(default) included ephemeral row %q: %+v", ephemeral.ID, defaultReady)
+	}
+	if !readyIDs(defaultReady)[history.ID] || !readyIDs(defaultReady)[noHistory.ID] {
+		t.Fatalf("Ready(default) = %+v, want history and no-history rows", defaultReady)
+	}
+
+	wisps, err := s.Ready(ReadyQuery{TierMode: TierWisps})
+	if err != nil {
+		t.Fatalf("Ready(TierWisps): %v", err)
+	}
+	wispIDs := readyIDs(wisps)
+	if wispIDs[history.ID] {
+		t.Fatalf("Ready(TierWisps) included history row %q: %+v", history.ID, wisps)
+	}
+	if !wispIDs[noHistory.ID] || !wispIDs[ephemeral.ID] {
+		t.Fatalf("Ready(TierWisps) = %+v, want no-history and ephemeral rows", wisps)
+	}
+
+	both, err := s.Ready(ReadyQuery{TierMode: TierBoth})
+	if err != nil {
+		t.Fatalf("Ready(TierBoth): %v", err)
+	}
+	bothIDs := readyIDs(both)
+	for _, id := range []string{history.ID, noHistory.ID, ephemeral.ID} {
+		if !bothIDs[id] {
+			t.Fatalf("Ready(TierBoth) = %+v, missing %s", both, id)
+		}
+	}
+}
+
 func TestSQLiteStoreCloseStore(t *testing.T) {
 	settle := func() {
 		runtime.GC()
@@ -163,4 +222,12 @@ func TestSQLiteStoreNoLeakOnDiscard(t *testing.T) {
 	if residual > 5 {
 		t.Fatalf("SQLiteStore CloseStore did not release resources: residual goroutines=%d after %d open+close cycles (want <=5)", residual, n)
 	}
+}
+
+func readyIDs(rows []Bead) map[string]bool {
+	ids := make(map[string]bool, len(rows))
+	for _, row := range rows {
+		ids[row.ID] = true
+	}
+	return ids
 }

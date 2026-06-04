@@ -377,7 +377,7 @@ func runPoolOnBoot(cfg *config.City, cityPath string, runner ScaleCheckRunner, s
 		if !a.SupportsInstanceExpansion() || a.Implicit {
 			continue
 		}
-		cmd := a.EffectiveOnBoot()
+		cmd := a.EffectiveOnBootForBeads(cfg.Beads)
 		if cmd == "" {
 			continue
 		}

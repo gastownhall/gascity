@@ -784,6 +784,37 @@ func TestNativeDoltStoreListDoesNotPushLimitBeforeLocalSort(t *testing.T) {
 	}
 }
 
+func TestNativeDoltStoreListTierWispsIncludesNoHistoryAndEphemeralRows(t *testing.T) {
+	issues, err := nativeIssuesFromBeads([]Bead{
+		{ID: "gc-history", Title: "history-backed row"},
+		{ID: "gc-no-history", Title: "no-history wisp", NoHistory: true},
+		{ID: "gc-ephemeral", Title: "ephemeral wisp", Ephemeral: true},
+	})
+	if err != nil {
+		t.Fatalf("nativeIssuesFromBeads: %v", err)
+	}
+	storage := &nativeDoltStorageSpy{
+		searchIssues: func(_ context.Context, _ string, filter beadslib.IssueFilter) ([]*beadslib.Issue, error) {
+			return filterNativeIssuesForTest(issues, filter), nil
+		},
+	}
+	store := newNativeDoltStoreForTest(storage)
+
+	got, err := store.List(ListQuery{AllowScan: true, TierMode: TierWisps, Limit: 2})
+	if err != nil {
+		t.Fatalf("List(TierWisps): %v", err)
+	}
+	if len(got) != 2 || got[0].ID != "gc-no-history" || got[1].ID != "gc-ephemeral" {
+		t.Fatalf("List(TierWisps) = %+v, want no-history and ephemeral rows", got)
+	}
+	if !got[0].NoHistory || got[0].Ephemeral {
+		t.Fatalf("first row storage = ephemeral:%v no_history:%v, want no-history", got[0].Ephemeral, got[0].NoHistory)
+	}
+	if !got[1].Ephemeral || got[1].NoHistory {
+		t.Fatalf("second row storage = ephemeral:%v no_history:%v, want ephemeral", got[1].Ephemeral, got[1].NoHistory)
+	}
+}
+
 func TestNativeDoltStoreSetMetadataBatchRejectsInvalidExistingMetadata(t *testing.T) {
 	updateCalled := false
 	storage := &nativeDoltStorageSpy{

@@ -310,9 +310,11 @@ func TestBdStoreGetUsesDirectShowForEphemeralRows(t *testing.T) {
 }
 
 func TestBdStoreListStorageTierConformance(t *testing.T) {
-	rows := `[
+	listRows := `[
 		{"id":"bd-history","title":"history","status":"open","issue_type":"task","created_at":"2026-05-01T00:00:00Z","labels":["scope"]},
-		{"id":"bd-no-history","title":"no-history","status":"open","issue_type":"task","created_at":"2026-05-01T00:00:01Z","labels":["scope"],"no_history":true},
+		{"id":"bd-no-history","title":"no-history","status":"open","issue_type":"task","created_at":"2026-05-01T00:00:01Z","labels":["scope"],"no_history":true}
+	]`
+	ephemeralRows := `[
 		{"id":"bd-ephemeral","title":"ephemeral","status":"open","issue_type":"task","created_at":"2026-05-01T00:00:02Z","labels":["scope"],"ephemeral":true}
 	]`
 	cases := []struct {
@@ -321,6 +323,7 @@ func TestBdStoreListStorageTierConformance(t *testing.T) {
 		wantIDs               []string
 		wantIncludeTemplates  bool
 		wantUnlimitedPrelimit bool
+		wantEphemeralQuery    bool
 	}{
 		{
 			name:    "issues tier keeps history and no-history rows",
@@ -339,31 +342,48 @@ func TestBdStoreListStorageTierConformance(t *testing.T) {
 			wantIDs:               []string{"bd-no-history", "bd-ephemeral"},
 			wantIncludeTemplates:  true,
 			wantUnlimitedPrelimit: true,
+			wantEphemeralQuery:    true,
 		},
 		{
 			name:                 "both tiers keeps all storage rows",
 			query:                beads.ListQuery{Label: "scope", TierMode: beads.TierBoth},
 			wantIDs:              []string{"bd-history", "bd-no-history", "bd-ephemeral"},
 			wantIncludeTemplates: true,
+			wantEphemeralQuery:   true,
 		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			var gotCmd string
+			var calls []string
 			runner := func(_, name string, args ...string) ([]byte, error) {
-				gotCmd = name + " " + strings.Join(args, " ")
-				return []byte(rows), nil
+				cmd := name + " " + strings.Join(args, " ")
+				calls = append(calls, cmd)
+				switch {
+				case strings.HasPrefix(cmd, "bd list "):
+					return []byte(listRows), nil
+				case strings.HasPrefix(cmd, "bd query "):
+					return []byte(ephemeralRows), nil
+				default:
+					return nil, fmt.Errorf("unexpected command: %s", cmd)
+				}
 			}
 			store := beads.NewBdStore("/city", runner)
 			got, err := store.List(tc.query)
 			if err != nil {
 				t.Fatalf("List: %v", err)
 			}
-			assertCommandContains(t, gotCmd, "--include-ephemeral", false)
-			assertCommandContains(t, gotCmd, "--include-templates", tc.wantIncludeTemplates)
+			listCmd := firstCallWithPrefix(calls, "bd list ")
+			if listCmd == "" {
+				t.Fatalf("calls = %#v, want bd list call", calls)
+			}
+			assertCommandContains(t, listCmd, "--include-ephemeral", false)
+			assertCommandContains(t, listCmd, "--include-templates", tc.wantIncludeTemplates)
 			if tc.query.Limit > 0 {
-				assertCommandContains(t, gotCmd, "--limit 0", tc.wantUnlimitedPrelimit)
+				assertCommandContains(t, listCmd, "--limit 0", tc.wantUnlimitedPrelimit)
+			}
+			if gotQuery := firstCallWithPrefix(calls, "bd query "); (gotQuery != "") != tc.wantEphemeralQuery {
+				t.Fatalf("bd query presence = %v, want %v; calls = %#v", gotQuery != "", tc.wantEphemeralQuery, calls)
 			}
 			if gotIDs := beadIDs(got); fmt.Sprint(gotIDs) != fmt.Sprint(tc.wantIDs) {
 				t.Fatalf("List IDs = %v, want %v", gotIDs, tc.wantIDs)
@@ -372,7 +392,7 @@ func TestBdStoreListStorageTierConformance(t *testing.T) {
 	}
 }
 
-func TestBdStoreListBothTiersUsesSingleListConformance(t *testing.T) {
+func TestBdStoreListBothTiersUnionsEphemeralQueryConformance(t *testing.T) {
 	var calls []string
 	runner := func(_, name string, args ...string) ([]byte, error) {
 		cmd := name + " " + strings.Join(args, " ")
@@ -380,11 +400,19 @@ func TestBdStoreListBothTiersUsesSingleListConformance(t *testing.T) {
 		if strings.Contains(cmd, "--include-ephemeral") {
 			t.Fatalf("bd list command = %q, --include-ephemeral is only valid for bd ready", cmd)
 		}
-		return []byte(`[
-			{"id":"bd-history","title":"history","status":"open","issue_type":"task","created_at":"2026-05-01T00:00:00Z","labels":["scope"]},
-			{"id":"bd-no-history","title":"no-history","status":"open","issue_type":"task","created_at":"2026-05-01T00:00:01Z","labels":["scope"],"no_history":true},
-			{"id":"bd-ephemeral","title":"ephemeral","status":"open","issue_type":"task","created_at":"2026-05-01T00:00:02Z","labels":["scope"],"ephemeral":true}
-		]`), nil
+		switch {
+		case strings.HasPrefix(cmd, "bd list "):
+			return []byte(`[
+				{"id":"bd-history","title":"history","status":"open","issue_type":"task","created_at":"2026-05-01T00:00:00Z","labels":["scope"]},
+				{"id":"bd-no-history","title":"no-history","status":"open","issue_type":"task","created_at":"2026-05-01T00:00:01Z","labels":["scope"],"no_history":true}
+			]`), nil
+		case strings.HasPrefix(cmd, "bd query "):
+			return []byte(`[
+				{"id":"bd-ephemeral","title":"ephemeral","status":"open","issue_type":"task","created_at":"2026-05-01T00:00:02Z","labels":["scope"],"ephemeral":true}
+			]`), nil
+		default:
+			return nil, fmt.Errorf("unexpected command: %s", cmd)
+		}
 	}
 	store := beads.NewBdStore("/city", runner)
 
@@ -392,8 +420,11 @@ func TestBdStoreListBothTiersUsesSingleListConformance(t *testing.T) {
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
-	if len(calls) != 1 {
-		t.Fatalf("calls = %#v, want one bd list read", calls)
+	if len(calls) != 2 {
+		t.Fatalf("calls = %#v, want bd list plus bd query reads", calls)
+	}
+	if firstCallWithPrefix(calls, "bd query ") == "" {
+		t.Fatalf("calls = %#v, want bd query ephemeral read", calls)
 	}
 	wantIDs := []string{"bd-history", "bd-no-history", "bd-ephemeral"}
 	if gotIDs := beadIDs(got); fmt.Sprint(gotIDs) != fmt.Sprint(wantIDs) {
@@ -499,6 +530,15 @@ func assertCommandContains(t *testing.T, command, fragment string, want bool) {
 	if got != want {
 		t.Fatalf("command = %q, contains %q = %v, want %v", command, fragment, got, want)
 	}
+}
+
+func firstCallWithPrefix(calls []string, prefix string) string {
+	for _, call := range calls {
+		if strings.HasPrefix(call, prefix) {
+			return call
+		}
+	}
+	return ""
 }
 
 func beadIDs(items []beads.Bead) []string {

@@ -3166,6 +3166,47 @@ func poolDemandMigrationFilterJQ(limit int) string {
 	return shellquote.Join([]string{"jq", filter})
 }
 
+func bdQueryEphemeralStatusShell(status string) string {
+	return `bd query --json ` + shellquote.Quote("ephemeral=true AND status="+status) + ` --limit=0`
+}
+
+func bdQueryEphemeralStatusQuietShell(status string) string {
+	return bdQueryEphemeralStatusShell(status) + ` 2>/dev/null`
+}
+
+func legacyEphemeralReadyFilterJQ(selector string, limit int) string {
+	filter := `[.[] | ` + selector +
+		` | select(((.issue_type // .type // "") != "epic"))` +
+		` | select(([ (.dependencies // [])[]` +
+		` | select((.type // .dep_type // "") as $t | ($t == "blocks" or $t == "waits-for" or $t == "conditional-blocks"))` +
+		` | select((.status // .depends_on_status // "") != "closed") ] | length) == 0)]` +
+		` | sort_by(.created_at // "")`
+	if limit > 0 {
+		filter += ` | .[:` + strconv.Itoa(limit) + `]`
+	}
+	return filter
+}
+
+func legacyEphemeralPoolDemandShell(limit int, includeEphemeralReady, quiet bool) string {
+	if includeEphemeralReady {
+		return `printf "[]"`
+	}
+	filter := legacyEphemeralReadyFilterJQ(
+		`select((.assignee // "") == "")`+
+			` | select(((.metadata["gc.routed_to"] // "") == $target) or (((.metadata["gc.routed_to"] // "") == "") and ((.metadata["gc.run_target"] // "") == $target) and ((.metadata["gc.kind"] // "") == "workflow")))`,
+		limit,
+	)
+	query := bdQueryEphemeralStatusShell("open")
+	if quiet {
+		query = bdQueryEphemeralStatusQuietShell("open")
+	}
+	jqStderr := ""
+	if quiet {
+		jqStderr = ` 2>/dev/null`
+	}
+	return `{ ` + query + ` | jq --arg target "$target" ` + shellquote.Quote(filter) + jqStderr + `; } || printf "[]"`
+}
+
 // poolDemandFirstRowFunctionScript emits the work_query Tier 3 function: it
 // reads the first ready, unassigned, routed bead for the supplied target,
 // prints it, and exits 0. The caller appends a terminal fallthrough
@@ -3178,6 +3219,9 @@ func poolDemandFirstRowFunctionScript(includeEphemeralReady bool) string {
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
 		`legacy_candidates=$(` + bdReadyPoolDemandMigrationShell("--limit=20", includeEphemeralReady) + ` 2>/dev/null); ` +
 		`r=$(printf "%s" "$legacy_candidates" | ` + poolDemandMigrationFilterJQ(1) + ` 2>/dev/null); ` +
+		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
+		`legacy_ephemeral_candidates=$(` + legacyEphemeralPoolDemandShell(20, includeEphemeralReady, true) + `); ` +
+		`r=$(printf "%s" "$legacy_ephemeral_candidates" | jq '.[0:1]' 2>/dev/null); ` +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
 		`return 1; ` +
 		`}; `
@@ -3205,7 +3249,8 @@ func poolDemandCountShell(target string, includeEphemeralReady bool) string {
 		`ready_json=$(` + bdReadyPoolDemandShell("--limit 0", includeEphemeralReady) + `) || exit $?; ` +
 		`legacy_candidates=$(` + bdReadyPoolDemandMigrationShell("--limit 0", includeEphemeralReady) + `) || exit $?; ` +
 		`legacy_json=$(printf "%s" "$legacy_candidates" | ` + poolDemandMigrationFilterJQ(0) + `) || exit $?; ` +
-		`printf "%s\n%s\n" "$ready_json" "$legacy_json" | jq -s "(add // []) | unique_by(.id) | length"`
+		`legacy_ephemeral_json=$(` + legacyEphemeralPoolDemandShell(0, includeEphemeralReady, false) + `); ` +
+		`printf "%s\n%s\n%s\n" "$ready_json" "$legacy_json" "$legacy_ephemeral_json" | jq -s "(add // []) | unique_by(.id) | length"`
 	return shellquote.Join([]string{"sh", "-c", script, "--", target})
 }
 
@@ -3218,26 +3263,30 @@ func (a *Agent) poolDemandTarget() string {
 }
 
 func standardAssignedWorkQueryScript(includeEphemeralReady bool) string {
-	return `for id in "$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"; do ` +
+	script := `for id in "$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"; do ` +
 		`[ -z "$id" ] && continue; ` +
 		`r=$(bd list --status in_progress --assignee="$id" --json --limit=1 2>/dev/null); ` +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
+		ephemeralAssignedInProgressProbeScript("id", includeEphemeralReady) +
 		`done; ` +
 		`for id in "$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"; do ` +
 		`[ -z "$id" ] && continue; ` +
 		`r=$(bd ready` + bdReadyIncludeEphemeralArg(includeEphemeralReady) + ` --assignee="$id" --json --limit=1 2>/dev/null); ` +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
+		ephemeralAssignedReadyProbeScript("id", includeEphemeralReady) +
 		`done; `
+	return script
 }
 
 func legacyControlAssignedWorkQueryScript(includeEphemeralReady bool) string {
-	return `for id in "$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"; do ` +
+	script := `for id in "$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"; do ` +
 		`[ -z "$id" ] && continue; ` +
 		`legacy=""; case "$id" in *control-dispatcher) legacy="${id%control-dispatcher}workflow-control";; esac; ` +
 		`for cand in "$id" "$legacy"; do ` +
 		`[ -z "$cand" ] && continue; ` +
 		`r=$(bd list --status in_progress --assignee="$cand" --json --limit=1 2>/dev/null); ` +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
+		ephemeralAssignedInProgressProbeScript("cand", includeEphemeralReady) +
 		`done; ` +
 		`done; ` +
 		`for id in "$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"; do ` +
@@ -3247,8 +3296,27 @@ func legacyControlAssignedWorkQueryScript(includeEphemeralReady bool) string {
 		`[ -z "$cand" ] && continue; ` +
 		`r=$(bd ready` + bdReadyIncludeEphemeralArg(includeEphemeralReady) + ` --assignee="$cand" --json --limit=1 2>/dev/null); ` +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
+		ephemeralAssignedReadyProbeScript("cand", includeEphemeralReady) +
 		`done; ` +
 		`done; `
+	return script
+}
+
+func ephemeralAssignedInProgressProbeScript(shellVar string, includeEphemeralReady bool) string {
+	_ = includeEphemeralReady
+	return `r=$(` + bdQueryEphemeralStatusQuietShell("in_progress") + ` | ` +
+		`jq --arg id "$` + shellVar + `" '[.[] | select((.assignee // "") == $id)] | .[:1]' 2>/dev/null); ` +
+		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; `
+}
+
+func ephemeralAssignedReadyProbeScript(shellVar string, includeEphemeralReady bool) string {
+	if includeEphemeralReady {
+		return ""
+	}
+	filter := legacyEphemeralReadyFilterJQ(`select((.assignee // "") == $id)`, 1)
+	return `r=$(` + bdQueryEphemeralStatusQuietShell("open") + ` | ` +
+		`jq --arg id "$` + shellVar + `" ` + shellquote.Quote(filter) + ` 2>/dev/null); ` +
+		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; `
 }
 
 func poolDemandOriginGateScript() string {
@@ -3570,6 +3638,16 @@ func (a *Agent) ResolvedMaxActiveSessions(cfg *City) *int {
 // If OnDeath is set, returns it. Otherwise returns the default recovery hook
 // that unclaims in-progress work assigned to this concrete agent identity.
 func (a *Agent) EffectiveOnDeath() string {
+	return a.effectiveOnDeath(false)
+}
+
+// EffectiveOnDeathForBeads returns the default on_death command using the bd
+// compatibility semantics configured for the city.
+func (a *Agent) EffectiveOnDeathForBeads(beads BeadsConfig) string {
+	return a.effectiveOnDeath(beads.UsesBD105ReadySemantics())
+}
+
+func (a *Agent) effectiveOnDeath(includeEphemeralInProgress bool) string {
 	if a.OnDeath != "" {
 		return a.OnDeath
 	}
@@ -3577,15 +3655,21 @@ func (a *Agent) EffectiveOnDeath() string {
 	if a.PoolName != "" {
 		route = a.PoolName
 	}
+	_ = includeEphemeralInProgress
+	ephemeralRead := bdQueryEphemeralStatusQuietShell("in_progress") + ` | ` +
+		`jq -r --arg assignee ` + shellquote.Quote(a.QualifiedName()) + ` '.[] | select((.assignee // "") == $assignee) | [.id, (.metadata["gc.run_target"] // ""), (.metadata["gc.routed_to"] // "")] | @tsv' 2>/dev/null; `
 	// Reset both assignee and status: clearing assignee alone leaves the bead
 	// invisible to every work_query tier (Tier 1 needs assignee match, Tiers
 	// 2/3 only match "ready" status). The next worker re-claims via Tier 3.
 	// If routed metadata is missing entirely, backfill the canonical
 	// gc.run_target route so reopened direct-assigned work does not stay
 	// invisible.
-	return `bd list --assignee=` + a.QualifiedName() +
+	return `{ ` +
+		`bd list --assignee=` + a.QualifiedName() +
 		` --status=in_progress --json 2>/dev/null | ` +
-		`jq -r '.[] | [.id, (.metadata["gc.run_target"] // ""), (.metadata["gc.routed_to"] // "")] | @tsv' 2>/dev/null | ` +
+		`jq -r '.[] | [.id, (.metadata["gc.run_target"] // ""), (.metadata["gc.routed_to"] // "")] | @tsv' 2>/dev/null; ` +
+		ephemeralRead +
+		`} | ` +
 		`while IFS="$(printf '\t')" read -r id run_target routed_to; do ` +
 		`[ -z "$id" ] && continue; ` +
 		`if [ -n "$run_target" ] || [ -n "$routed_to" ]; then ` +
@@ -3599,6 +3683,16 @@ func (a *Agent) EffectiveOnDeath() string {
 // If OnBoot is set, returns it. Otherwise returns the default recovery hook
 // that unclaims in-progress work routed to this backing config.
 func (a *Agent) EffectiveOnBoot() string {
+	return a.effectiveOnBoot(false)
+}
+
+// EffectiveOnBootForBeads returns the default on_boot command using the bd
+// compatibility semantics configured for the city.
+func (a *Agent) EffectiveOnBootForBeads(beads BeadsConfig) string {
+	return a.effectiveOnBoot(beads.UsesBD105ReadySemantics())
+}
+
+func (a *Agent) effectiveOnBoot(includeEphemeralInProgress bool) string {
 	if a.OnBoot != "" {
 		return a.OnBoot
 	}
@@ -3606,12 +3700,16 @@ func (a *Agent) EffectiveOnBoot() string {
 	if a.PoolName != "" {
 		template = a.PoolName
 	}
+	_ = includeEphemeralInProgress
+	ephemeralRead := bdQueryEphemeralStatusQuietShell("in_progress") + ` | ` +
+		`jq -r --arg template "$template" '.[] | select((.assignee // "") == "") | select(((.metadata["gc.routed_to"] // "") == $template) or (((.metadata["gc.routed_to"] // "") == "") and ((.metadata["gc.run_target"] // "") == $template) and ((.metadata["gc.kind"] // "") == "workflow"))) | .id' 2>/dev/null; `
 	return `template=` + shellquote.Quote(template) + `; ` +
 		`{ ` +
 		`bd list --metadata-field "gc.routed_to=$template" --status=in_progress --no-assignee --json 2>/dev/null | ` +
 		`jq -r '.[].id' 2>/dev/null; ` +
 		`bd list --metadata-field "gc.run_target=$template" --metadata-field "gc.kind=workflow" --status=in_progress --no-assignee --json 2>/dev/null | ` +
 		`jq -r '.[] | select((.metadata["gc.routed_to"] // "") == "") | .id' 2>/dev/null; ` +
+		ephemeralRead +
 		`} | awk 'NF && !seen[$0]++' | ` +
 		`xargs -rI{} bd update {} --status open 2>/dev/null`
 }

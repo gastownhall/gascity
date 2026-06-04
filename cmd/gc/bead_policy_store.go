@@ -4,7 +4,6 @@ import (
 	"context"
 	"slices"
 	"strings"
-	"sync"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -27,10 +26,6 @@ const (
 type beadPolicyStore struct {
 	beads.Store
 	cfg *config.City
-
-	mu               sync.Mutex
-	wispRootStorage  map[string]string
-	wispRootPolicies map[string]string
 }
 
 type beadPolicyGraphStore struct {
@@ -43,12 +38,10 @@ func wrapStoreWithBeadPolicies(store beads.Store, cfg *config.City) beads.Store 
 		return nil
 	}
 	policyStore := &beadPolicyStore{
-		Store:            store,
-		cfg:              cfg,
-		wispRootStorage:  make(map[string]string),
-		wispRootPolicies: make(map[string]string),
+		Store: store,
+		cfg:   cfg,
 	}
-	if applier, ok := store.(beads.GraphApplyStore); ok {
+	if applier, ok := beads.GraphApplyFor(store); ok {
 		return &beadPolicyGraphStore{
 			beadPolicyStore: policyStore,
 			applier:         applier,
@@ -69,18 +62,8 @@ func unwrapBeadPolicyStore(store beads.Store) (beads.Store, *beadPolicyStore, bo
 }
 
 func (s *beadPolicyStore) Create(b beads.Bead) (beads.Bead, error) {
-	policyName, storage := s.policyForCreate(b)
-	created, err := createWithStoragePolicy(s.Store, b, storage)
-	if err != nil {
-		return created, err
-	}
-	if policyName == beadPolicyWisp && created.ID != "" {
-		s.mu.Lock()
-		s.wispRootStorage[created.ID] = storage
-		s.wispRootPolicies[created.ID] = policyName
-		s.mu.Unlock()
-	}
-	return created, nil
+	_, storage := s.policyForCreate(b)
+	return createWithStoragePolicy(s.Store, b, storage)
 }
 
 func (s *beadPolicyStore) List(query beads.ListQuery) ([]beads.Bead, error) {
@@ -89,14 +72,39 @@ func (s *beadPolicyStore) List(query beads.ListQuery) ([]beads.Bead, error) {
 }
 
 func (s *beadPolicyStore) Ready(query ...beads.ReadyQuery) ([]beads.Bead, error) {
-	q := beads.ReadyQuery{}
-	if len(query) > 0 {
-		q = query[0]
-	}
-	if q.TierMode == beads.TierIssues {
-		q.TierMode = beads.TierBoth
-	}
-	return s.Store.Ready(q)
+	return s.Store.Ready(expandPolicyReadyQuery(query...))
+}
+
+func (s *beadPolicyStore) Handles() beads.StoreHandles {
+	handles := beads.HandlesFor(s.Store)
+	handles.Cached = beadPolicyCachedReader{CachedReader: handles.Cached}
+	handles.Live = beadPolicyLiveReader{LiveReader: handles.Live}
+	handles.Writer = s
+	return handles
+}
+
+type beadPolicyCachedReader struct {
+	beads.CachedReader
+}
+
+func (r beadPolicyCachedReader) List(query beads.ListQuery) ([]beads.Bead, error) {
+	return r.CachedReader.List(expandPolicyReadTier(query))
+}
+
+func (r beadPolicyCachedReader) Ready(query ...beads.ReadyQuery) ([]beads.Bead, error) {
+	return r.CachedReader.Ready(expandPolicyReadyQuery(query...))
+}
+
+type beadPolicyLiveReader struct {
+	beads.LiveReader
+}
+
+func (r beadPolicyLiveReader) List(query beads.ListQuery) ([]beads.Bead, error) {
+	return r.LiveReader.List(expandPolicyReadTier(query))
+}
+
+func (r beadPolicyLiveReader) Ready(query ...beads.ReadyQuery) ([]beads.Bead, error) {
+	return r.LiveReader.Ready(expandPolicyReadyQuery(query...))
 }
 
 func (s *beadPolicyStore) Children(parentID string, opts ...beads.QueryOpt) ([]beads.Bead, error) {
@@ -149,12 +157,9 @@ func (s *beadPolicyStore) ListOpen(status ...string) ([]beads.Bead, error) {
 
 func (s *beadPolicyStore) policyForCreate(b beads.Bead) (string, string) {
 	if rootID := strings.TrimSpace(b.Metadata["gc.root_bead_id"]); rootID != "" {
-		s.mu.Lock()
-		storage := s.wispRootStorage[rootID]
-		policyName := s.wispRootPolicies[rootID]
-		s.mu.Unlock()
-		if storage != "" {
-			return policyName, storage
+		root, err := s.Get(rootID)
+		if err == nil && policyNameForBead(root) == beadPolicyWisp {
+			return beadPolicyWisp, storageFromPersistedWispRoot(root)
 		}
 	}
 	policyName := policyNameForBead(b)
@@ -162,6 +167,17 @@ func (s *beadPolicyStore) policyForCreate(b beads.Bead) (string, string) {
 		return "", ""
 	}
 	return policyName, effectiveBeadStorage(s.cfg, policyName)
+}
+
+func storageFromPersistedWispRoot(root beads.Bead) string {
+	switch {
+	case root.Ephemeral:
+		return beadStorageEphemeral
+	case root.NoHistory:
+		return beadStorageNoHistory
+	default:
+		return beadStorageHistory
+	}
 }
 
 func (s *beadPolicyGraphStore) ApplyGraphPlan(ctx context.Context, plan *beads.GraphApplyPlan) (*beads.GraphApplyResult, error) {
@@ -333,6 +349,17 @@ func expandPolicyReadTier(query beads.ListQuery) beads.ListQuery {
 		query.TierMode = beads.TierBoth
 	}
 	return query
+}
+
+func expandPolicyReadyQuery(query ...beads.ReadyQuery) beads.ReadyQuery {
+	q := beads.ReadyQuery{}
+	if len(query) > 0 {
+		q = query[0]
+	}
+	if q.TierMode == beads.TierIssues {
+		q.TierMode = beads.TierBoth
+	}
+	return q
 }
 
 func policyTierFromOpts(opts []beads.QueryOpt) beads.TierMode {

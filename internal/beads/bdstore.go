@@ -1604,6 +1604,13 @@ func (s *BdStore) List(query ListQuery) ([]Bead, error) {
 	if !query.HasFilter() && !query.AllowScan {
 		return nil, fmt.Errorf("bd list: %w", ErrQueryRequiresScan)
 	}
+
+	switch query.TierMode {
+	case TierWisps:
+		return s.listWispsTier(query)
+	case TierBoth:
+		return s.listBothTiers(query)
+	}
 	return s.listViaBDList(query)
 }
 
@@ -1633,7 +1640,7 @@ func (s *BdStore) listViaBDList(query ListQuery) ([]Bead, error) {
 		args = append(args, "--created-before", serverQuery.CreatedBefore.Format(time.RFC3339Nano))
 	}
 	args = append(args, "--include-infra", "--include-gates")
-	if query.TierMode == TierWisps || query.TierMode == TierBoth {
+	if bdListShouldIncludeTemplates(query) {
 		args = append(args, "--include-templates")
 	}
 	args = append(args, "--limit", fmt.Sprintf("%d", limit))
@@ -1688,6 +1695,10 @@ func bdListRequiresClientLimit(query, serverQuery ListQuery, clientFilteredAssig
 	return false
 }
 
+func bdListShouldIncludeTemplates(query ListQuery) bool {
+	return query.TierMode == TierWisps || (query.TierMode == TierBoth && query.Type != "message")
+}
+
 func bdServerQueryForAssignees(query ListQuery) (ListQuery, bool) {
 	serverQuery := query
 	if query.Assignee != "" {
@@ -1704,6 +1715,167 @@ func bdServerQueryForAssignees(query ListQuery) (ListQuery, bool) {
 		serverQuery.Assignees = nil
 		serverQuery.AllowScan = true
 		return serverQuery, true
+	}
+}
+
+func (s *BdStore) listWispsTier(query ListQuery) ([]Bead, error) {
+	listQ := query
+	listQ.TierMode = TierWisps
+	listResult, listErr := s.listViaBDList(listQ)
+
+	ephemeralQ := query
+	ephemeralQ.TierMode = TierWisps
+	ephemeralResult, ephemeralErr := s.listEphemeral(ephemeralQ)
+
+	return mergeListTierResults(query, "bd list wisps tier", listResult, listErr, ephemeralResult, ephemeralErr)
+}
+
+// listEphemeral reads only ephemeral rows using `bd query "ephemeral=true AND
+// <filters>"`. The installed bd list surface does not expose ephemeral rows, so
+// TierWisps and TierBoth must union this path with bd list results.
+func (s *BdStore) listEphemeral(query ListQuery) ([]Bead, error) {
+	serverQuery, clientFilteredAssignees := bdServerQueryForAssignees(query)
+	clauses := []string{"ephemeral=true"}
+	serverFilteredOnly := !clientFilteredAssignees
+	clauses, serverFilteredOnly = appendBdQueryClause(clauses, serverFilteredOnly, "label", serverQuery.Label)
+	clauses, serverFilteredOnly = appendBdQueryClause(clauses, serverFilteredOnly, "status", serverQuery.Status)
+	clauses, serverFilteredOnly = appendBdQueryClause(clauses, serverFilteredOnly, "type", serverQuery.Type)
+	clauses, serverFilteredOnly = appendBdQueryClause(clauses, serverFilteredOnly, "assignee", serverQuery.Assignee)
+	clauses, serverFilteredOnly = appendBdQueryClause(clauses, serverFilteredOnly, "parent", serverQuery.ParentID)
+
+	args := []string{"query", "--json", strings.Join(clauses, " AND ")}
+	if serverQuery.IncludeClosed || serverQuery.Status == "closed" {
+		args = append(args, "--all")
+	}
+	wispsLimit := 0
+	if query.Limit > 0 && serverFilteredOnly && canApplyWispsServerLimit(query) {
+		wispsLimit = query.Limit
+	}
+	args = append(args, "--limit", strconv.Itoa(wispsLimit))
+
+	out, err := s.runner(s.dir, "bd", args...)
+	if err != nil {
+		if isBdQueryUnsupported(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("bd query (wisps): %w", err)
+	}
+	issues, parseErr := parseIssuesTolerant(extractJSON(out))
+	result := make([]Bead, len(issues))
+	for i := range issues {
+		result[i] = issues[i].toBead()
+		result[i].Ephemeral = true
+		result[i].NoHistory = false
+	}
+	filtered := applyListQuery(result, query)
+	if parseErr != nil {
+		if len(filtered) > 0 {
+			return filtered, &PartialResultError{Op: "bd query", Err: parseErr}
+		}
+		return filtered, fmt.Errorf("bd query: %w", parseErr)
+	}
+	return filtered, nil
+}
+
+func isBdQueryUnsupported(err error) bool {
+	if err == nil {
+		return false
+	}
+	text := strings.ToLower(err.Error())
+	return strings.Contains(text, "unknown subcommand \"query\"") ||
+		strings.Contains(text, "unknown command \"query\"") ||
+		strings.Contains(text, "unknown subcommand query") ||
+		strings.Contains(text, "unknown command query")
+}
+
+func canApplyWispsServerLimit(query ListQuery) bool {
+	return (query.Sort == SortDefault || query.Sort == SortCreatedDesc) &&
+		query.CreatedBefore.IsZero() &&
+		query.UpdatedBefore.IsZero() &&
+		len(query.Metadata) == 0
+}
+
+func appendBdQueryClause(clauses []string, serverFilteredOnly bool, field, value string) ([]string, bool) {
+	if value == "" {
+		return clauses, serverFilteredOnly
+	}
+	if !isBareBdQueryValue(value) {
+		return clauses, false
+	}
+	return append(clauses, field+"="+value), serverFilteredOnly
+}
+
+func isBareBdQueryValue(value string) bool {
+	upper := strings.ToUpper(value)
+	if upper == "AND" || upper == "OR" || upper == "NOT" {
+		return false
+	}
+	for _, r := range value {
+		switch {
+		case r >= 'a' && r <= 'z':
+		case r >= 'A' && r <= 'Z':
+		case r >= '0' && r <= '9':
+		case r == '_' || r == '-' || r == ':' || r == '.':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func (s *BdStore) listBothTiers(query ListQuery) ([]Bead, error) {
+	listQ := query
+	listQ.TierMode = TierBoth
+	listResult, listErr := s.listViaBDList(listQ)
+
+	ephemeralQ := query
+	ephemeralQ.TierMode = TierWisps
+	ephemeralResult, ephemeralErr := s.listEphemeral(ephemeralQ)
+
+	return mergeListTierResults(query, "bd list both tiers", listResult, listErr, ephemeralResult, ephemeralErr)
+}
+
+func mergeListTierResults(query ListQuery, op string, primary []Bead, primaryErr error, ephemeral []Bead, ephemeralErr error) ([]Bead, error) {
+	if primaryErr != nil && ephemeralErr != nil {
+		return nil, errors.Join(primaryErr, ephemeralErr)
+	}
+
+	merged := make([]Bead, 0, len(primary)+len(ephemeral))
+	seen := make(map[string]int, len(primary)+len(ephemeral))
+	add := func(b Bead) {
+		if idx, ok := seen[b.ID]; ok {
+			if b.Ephemeral && !merged[idx].Ephemeral {
+				merged[idx] = b
+			}
+			return
+		}
+		seen[b.ID] = len(merged)
+		merged = append(merged, b)
+	}
+	for _, b := range primary {
+		add(b)
+	}
+	for _, b := range ephemeral {
+		add(b)
+	}
+	sortBeadsForQuery(merged, query.Sort)
+	if query.Limit > 0 && len(merged) > query.Limit {
+		merged = merged[:query.Limit]
+	}
+
+	switch {
+	case primaryErr != nil:
+		if len(merged) > 0 {
+			return merged, &PartialResultError{Op: op, Err: fmt.Errorf("bd list: %w", primaryErr)}
+		}
+		return merged, fmt.Errorf("%s: bd list: %w", op, primaryErr)
+	case ephemeralErr != nil:
+		if len(merged) > 0 {
+			return merged, &PartialResultError{Op: op, Err: fmt.Errorf("bd query: %w", ephemeralErr)}
+		}
+		return merged, fmt.Errorf("%s: bd query: %w", op, ephemeralErr)
+	default:
+		return merged, nil
 	}
 }
 
@@ -1806,11 +1978,7 @@ func bdReadyArgs(q ReadyQuery, includeEphemeral bool) []string {
 	if q.Assignee != "" {
 		args = append(args, "--assignee", q.Assignee)
 	}
-	limit := 0
-	if q.Assignee != "" && q.TierMode == TierBoth {
-		limit = q.Limit
-	}
-	args = append(args, "--limit", strconv.Itoa(limit))
+	args = append(args, "--limit", "0")
 	return args
 }
 

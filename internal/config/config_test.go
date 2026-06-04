@@ -1755,6 +1755,77 @@ func TestEffectiveWorkQueryBD105CompatibilityOptIn(t *testing.T) {
 	}
 }
 
+func TestEffectiveWorkQueryBD104SurfacesLegacyEphemeralRoutedWork(t *testing.T) {
+	a := Agent{Name: "worker", Dir: "foundations"}
+	bdScript := `#!/bin/sh
+set -eu
+case "$1" in
+  list)
+    printf '[]'
+    ;;
+  ready)
+    printf '[]'
+    ;;
+  query)
+    case "$*" in
+      *"ephemeral=true AND status=open"*)
+        printf '[{"id":"ga-legacy-wisp","issue_type":"task","status":"open","ephemeral":true,"created_at":"2026-05-01T00:00:00Z","metadata":{"gc.routed_to":"foundations/worker"}}]'
+        ;;
+      *)
+        printf '[]'
+        ;;
+    esac
+    ;;
+  *)
+    printf '[]'
+    ;;
+esac
+`
+
+	out := runEffectiveWorkQuery(t, a, nil, bdScript)
+	if !strings.Contains(out, "ga-legacy-wisp") {
+		t.Fatalf("EffectiveWorkQuery() = %q, want legacy ephemeral routed work", out)
+	}
+
+	demandOut := strings.TrimSpace(runShellWithFakeBd(t, a.EffectivePoolDemandQuery(), nil, bdScript))
+	if demandOut == "0" {
+		t.Fatalf("EffectivePoolDemandQuery() = %q, want legacy ephemeral routed demand counted", demandOut)
+	}
+}
+
+func TestEffectiveWorkQueryBD105SurfacesEphemeralInProgressAssignedWork(t *testing.T) {
+	a := Agent{Name: "dog", Dir: "hello-world"}
+	out := runEffectiveWorkQueryForBeads(t, a, BeadsConfig{BDCompatibility: BeadsBDCompatibility105}, map[string]string{
+		"GC_SESSION_NAME": "hello-world/dog",
+	}, `#!/bin/sh
+set -eu
+case "$1" in
+  list)
+    printf '[]'
+    ;;
+  query)
+    case "$*" in
+      *"ephemeral=true AND status=in_progress"*)
+        printf '[{"id":"ga-ephemeral-progress","assignee":"hello-world/dog","status":"in_progress","ephemeral":true}]'
+        ;;
+      *)
+        printf '[]'
+        ;;
+    esac
+    ;;
+  ready)
+    printf '[]'
+    ;;
+  *)
+    printf '[]'
+    ;;
+esac
+`)
+	if !strings.Contains(out, "ga-ephemeral-progress") {
+		t.Fatalf("EffectiveWorkQueryForBeads(bd-1.0.5) did not surface assigned ephemeral in-progress work: %q", out)
+	}
+}
+
 func TestEffectiveWorkQueryCustom(t *testing.T) {
 	a := Agent{Name: "mayor", WorkQuery: "bd ready --label=pool:polecats"}
 	got := a.EffectiveWorkQuery()
@@ -5566,6 +5637,76 @@ esac
 	}
 }
 
+func TestEffectiveOnDeathForBeadsBD105ReopensEphemeralInProgressWork(t *testing.T) {
+	a := Agent{
+		Name:              "dog-1",
+		Dir:               "hello-world",
+		MinActiveSessions: ptrInt(0), MaxActiveSessions: ptrInt(5),
+		PoolName: "hello-world/dog",
+	}
+
+	log := runLifecycleHookCommand(t, a.EffectiveOnDeathForBeads(BeadsConfig{BDCompatibility: BeadsBDCompatibility105}), `#!/bin/sh
+set -eu
+case "$1" in
+  list)
+    printf '%s\n' "$*" >> "$BD_LOG"
+    printf '[]'
+    ;;
+  query)
+    printf '%s\n' "$*" >> "$BD_LOG"
+    printf '[{"id":"ga-ephemeral-death","assignee":"hello-world/dog-1","status":"in_progress","ephemeral":true,"metadata":{}}]'
+    ;;
+  update)
+    printf '%s\n' "$*" >> "$BD_LOG"
+    ;;
+  *)
+    exit 1
+    ;;
+esac
+`)
+	if !strings.Contains(log, "query --json ephemeral=true AND status=in_progress --limit=0") {
+		t.Fatalf("hook log = %q, want ephemeral in-progress query", log)
+	}
+	if !strings.Contains(log, "update ga-ephemeral-death --assignee  --status open --set-metadata gc.run_target=hello-world/dog") {
+		t.Fatalf("hook log = %q, want ephemeral in-progress work reopened with fallback route", log)
+	}
+}
+
+func TestEffectiveOnDeathDefaultReopensLegacyEphemeralInProgressWork(t *testing.T) {
+	a := Agent{
+		Name:              "dog-1",
+		Dir:               "hello-world",
+		MinActiveSessions: ptrInt(0), MaxActiveSessions: ptrInt(5),
+		PoolName: "hello-world/dog",
+	}
+
+	log := runLifecycleHookCommand(t, a.EffectiveOnDeath(), `#!/bin/sh
+set -eu
+case "$1" in
+  list)
+    printf '%s\n' "$*" >> "$BD_LOG"
+    printf '[]'
+    ;;
+  query)
+    printf '%s\n' "$*" >> "$BD_LOG"
+    printf '[{"id":"ga-legacy-ephemeral-death","assignee":"hello-world/dog-1","status":"in_progress","ephemeral":true,"metadata":{}}]'
+    ;;
+  update)
+    printf '%s\n' "$*" >> "$BD_LOG"
+    ;;
+  *)
+    exit 1
+    ;;
+esac
+`)
+	if !strings.Contains(log, "query --json ephemeral=true AND status=in_progress --limit=0") {
+		t.Fatalf("hook log = %q, want legacy ephemeral in-progress query", log)
+	}
+	if !strings.Contains(log, "update ga-legacy-ephemeral-death --assignee  --status open --set-metadata gc.run_target=hello-world/dog") {
+		t.Fatalf("hook log = %q, want legacy ephemeral in-progress work reopened with fallback route", log)
+	}
+}
+
 func TestEffectiveOnBootDefault(t *testing.T) {
 	a := Agent{
 		Name:              "dog",
@@ -5668,6 +5809,76 @@ esac
 	}
 	if !strings.Contains(log, "update ga-run-target --status open") {
 		t.Fatalf("hook log = %q, want ownerless run_target wisp reopened", log)
+	}
+}
+
+func TestEffectiveOnBootForBeadsBD105ReopensOwnerlessEphemeralRoutedWork(t *testing.T) {
+	a := Agent{
+		Name:              "dog-1",
+		Dir:               "hello-world",
+		MinActiveSessions: ptrInt(0), MaxActiveSessions: ptrInt(5),
+		PoolName: "hello-world/dog",
+	}
+
+	log := runLifecycleHookCommand(t, a.EffectiveOnBootForBeads(BeadsConfig{BDCompatibility: BeadsBDCompatibility105}), `#!/bin/sh
+set -eu
+case "$1" in
+  list)
+    printf '%s\n' "$*" >> "$BD_LOG"
+    printf '[]'
+    ;;
+  query)
+    printf '%s\n' "$*" >> "$BD_LOG"
+    printf '[{"id":"ga-ephemeral-boot","status":"in_progress","ephemeral":true,"metadata":{"gc.routed_to":"hello-world/dog"}}]'
+    ;;
+  update)
+    printf '%s\n' "$*" >> "$BD_LOG"
+    ;;
+  *)
+    exit 1
+    ;;
+esac
+`)
+	if !strings.Contains(log, "query --json ephemeral=true AND status=in_progress --limit=0") {
+		t.Fatalf("hook log = %q, want ephemeral in-progress query", log)
+	}
+	if !strings.Contains(log, "update ga-ephemeral-boot --status open") {
+		t.Fatalf("hook log = %q, want ownerless ephemeral routed work reopened", log)
+	}
+}
+
+func TestEffectiveOnBootDefaultReopensLegacyOwnerlessEphemeralRoutedWork(t *testing.T) {
+	a := Agent{
+		Name:              "dog-1",
+		Dir:               "hello-world",
+		MinActiveSessions: ptrInt(0), MaxActiveSessions: ptrInt(5),
+		PoolName: "hello-world/dog",
+	}
+
+	log := runLifecycleHookCommand(t, a.EffectiveOnBoot(), `#!/bin/sh
+set -eu
+case "$1" in
+  list)
+    printf '%s\n' "$*" >> "$BD_LOG"
+    printf '[]'
+    ;;
+  query)
+    printf '%s\n' "$*" >> "$BD_LOG"
+    printf '[{"id":"ga-legacy-ephemeral-boot","status":"in_progress","ephemeral":true,"metadata":{"gc.routed_to":"hello-world/dog"}}]'
+    ;;
+  update)
+    printf '%s\n' "$*" >> "$BD_LOG"
+    ;;
+  *)
+    exit 1
+    ;;
+esac
+`)
+	if !strings.Contains(log, "query --json ephemeral=true AND status=in_progress --limit=0") {
+		t.Fatalf("hook log = %q, want legacy ephemeral in-progress query", log)
+	}
+	if !strings.Contains(log, "update ga-legacy-ephemeral-boot --status open") {
+		t.Fatalf("hook log = %q, want ownerless legacy ephemeral routed work reopened", log)
 	}
 }
 

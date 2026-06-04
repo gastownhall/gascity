@@ -69,6 +69,43 @@ func TestCachingStoreCreateWithStorageForwardsPolicyStorageAndCachesResult(t *te
 	}
 }
 
+func TestCachingStoreGraphApplyHandleForwardsStorageAndCachesResult(t *testing.T) {
+	backing := &storageGraphApplyRecordingStore{Store: NewMemStore()}
+	cache := NewCachingStoreForTest(backing, nil)
+	applier, ok := GraphApplyFor(cache)
+	if !ok {
+		t.Fatal("GraphApplyFor(cache) = false, want graph handle from backing store")
+	}
+	storageApplier, ok := applier.(StorageGraphApplyStore)
+	if !ok {
+		t.Fatal("GraphApplyFor(cache) did not preserve StorageGraphApplyStore")
+	}
+
+	result, err := storageApplier.ApplyGraphPlanWithStorage(t.Context(), &GraphApplyPlan{
+		Nodes: []GraphApplyNode{{Key: "root", Title: "Root"}},
+	}, StorageEphemeral)
+	if err != nil {
+		t.Fatalf("ApplyGraphPlanWithStorage: %v", err)
+	}
+	if backing.storage != StorageEphemeral {
+		t.Fatalf("backing storage = %q, want %q", backing.storage, StorageEphemeral)
+	}
+	cached, err := cache.Get(result.IDs["root"])
+	if err != nil {
+		t.Fatalf("cache Get(graph root): %v", err)
+	}
+	if !cached.Ephemeral || cached.NoHistory {
+		t.Fatalf("cached graph root storage = ephemeral:%v no_history:%v, want ephemeral", cached.Ephemeral, cached.NoHistory)
+	}
+}
+
+func TestGraphApplyForCachingStoreWithoutGraphBackingReturnsFalse(t *testing.T) {
+	cache := NewCachingStoreForTest(NewMemStore(), nil)
+	if _, ok := GraphApplyFor(cache); ok {
+		t.Fatal("GraphApplyFor(cache with plain backing) = true, want false")
+	}
+}
+
 type storageCreateRecordingStore struct {
 	Store
 	storage StorageClass
@@ -88,6 +125,38 @@ func (s *storageCreateRecordingStore) CreateWithStorage(b Bead, storage StorageC
 		b.NoHistory = false
 	}
 	return s.Create(b)
+}
+
+type storageGraphApplyRecordingStore struct {
+	Store
+	storage StorageClass
+}
+
+func (s *storageGraphApplyRecordingStore) ApplyGraphPlan(ctx context.Context, plan *GraphApplyPlan) (*GraphApplyResult, error) {
+	return s.ApplyGraphPlanWithStorage(ctx, plan, StorageDefault)
+}
+
+func (s *storageGraphApplyRecordingStore) ApplyGraphPlanWithStorage(_ context.Context, plan *GraphApplyPlan, storage StorageClass) (*GraphApplyResult, error) {
+	s.storage = storage
+	ids := make(map[string]string, len(plan.Nodes))
+	for _, node := range plan.Nodes {
+		metadata := make(map[string]string, len(node.Metadata))
+		for key, value := range node.Metadata {
+			metadata[key] = value
+		}
+		created, err := s.Create(Bead{
+			Title:     node.Title,
+			Type:      node.Type,
+			Metadata:  metadata,
+			Ephemeral: storage == StorageEphemeral,
+			NoHistory: storage == StorageNoHistory,
+		})
+		if err != nil {
+			return nil, err
+		}
+		ids[node.Key] = created.ID
+	}
+	return &GraphApplyResult{IDs: ids}, nil
 }
 
 func TestCachingStoreRunReconciliationSkipLabelsSuppressesLabelOnlyUpdates(t *testing.T) {

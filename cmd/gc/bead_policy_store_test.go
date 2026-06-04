@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -373,6 +375,32 @@ func TestBeadPolicyGraphStoreBD105OptInUsesFastDefaultStorage(t *testing.T) {
 	}
 }
 
+func TestBeadPolicyGraphStorePreservesGraphApplyThroughCachingStore(t *testing.T) {
+	backing := &captureGraphStore{Store: beads.NewMemStore()}
+	cache := beads.NewCachingStoreForTest(backing, nil)
+	store := wrapStoreWithBeadPolicies(cache, &config.City{
+		Beads: config.BeadsConfig{BDCompatibility: config.BeadsBDCompatibility105},
+	})
+	applier, ok := store.(beads.GraphApplyStore)
+	if !ok {
+		t.Fatal("policy-wrapped cached graph store does not implement GraphApplyStore")
+	}
+
+	_, err := applier.ApplyGraphPlan(context.Background(), &beads.GraphApplyPlan{
+		Nodes: []beads.GraphApplyNode{
+			{Key: "root", Title: "Root", Metadata: map[string]string{"gc.kind": "wisp"}},
+			{Key: "child", Title: "Child", MetadataRefs: map[string]string{"gc.root_bead_id": "root"}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("ApplyGraphPlan: %v", err)
+	}
+	if backing.plan == nil {
+		t.Fatal("graph plan was not captured")
+	}
+	assertStorageClass(t, backing.storage, beadStorageEphemeral)
+}
+
 func TestBeadPolicyGraphStoreRejectsNoHistoryWispOverride(t *testing.T) {
 	backing := &captureGraphStore{Store: beads.NewMemStore()}
 	store := wrapStoreWithBeadPolicies(backing, &config.City{
@@ -525,6 +553,60 @@ func TestPolicyReadPathsIncludeHistoryAndNoHistoryRows(t *testing.T) {
 	if !foundNoHistoryWait {
 		t.Fatalf("waits = %+v, want bd-new-wait with no_history parsed", waits)
 	}
+}
+
+func TestOpenStoreResultAtForCityWrapsSQLiteWithBeadPolicies(t *testing.T) {
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
+name = "sqlite-policy-city"
+prefix = "ga"
+
+[beads]
+provider = "sqlite"
+bd_compatibility = "bd-1.0.5"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := openStoreResultAtForCity(cityDir, cityDir)
+	if err != nil {
+		t.Fatalf("openStoreResultAtForCity: %v", err)
+	}
+	base, _, wrapped := unwrapBeadPolicyStore(result.Store)
+	if !wrapped {
+		t.Fatalf("openStoreResultAtForCity(sqlite) returned %T, want bead policy wrapper", result.Store)
+	}
+	defer func() {
+		if c, ok := base.(interface{ CloseStore() error }); ok {
+			c.CloseStore() //nolint:errcheck
+		}
+	}()
+
+	created, err := result.Store.Create(beads.Bead{
+		Title: "workflow root",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(workflow): %v", err)
+	}
+	if !created.NoHistory {
+		t.Fatalf("created workflow = %+v, want policy-applied no_history storage", created)
+	}
+
+	ready, err := result.Store.Ready()
+	if err != nil {
+		t.Fatalf("Ready: %v", err)
+	}
+	for _, bead := range ready {
+		if bead.ID == created.ID {
+			return
+		}
+	}
+	t.Fatalf("Ready() = %+v, missing policy-created SQLite workflow %s", ready, created.ID)
 }
 
 func assertStorageClass(t *testing.T, got beads.StorageClass, want string) {

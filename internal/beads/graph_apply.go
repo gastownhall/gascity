@@ -12,6 +12,28 @@ type GraphApplyStore interface {
 	ApplyGraphPlan(ctx context.Context, plan *GraphApplyPlan) (*GraphApplyResult, error)
 }
 
+// GraphApplyHandleProvider exposes a graph-apply handle for stores whose
+// capability depends on wrapped runtime state.
+type GraphApplyHandleProvider interface {
+	GraphApplyHandle() (GraphApplyStore, bool)
+}
+
+// GraphApplyFor returns the graph-apply capability for store when one is
+// available. It preserves ordinary GraphApplyStore implementations and lets
+// wrappers expose a delegated handle without claiming the interface globally.
+func GraphApplyFor(store Store) (GraphApplyStore, bool) {
+	if store == nil {
+		return nil, false
+	}
+	if applier, ok := store.(GraphApplyStore); ok {
+		return applier, true
+	}
+	if provider, ok := store.(GraphApplyHandleProvider); ok {
+		return provider.GraphApplyHandle()
+	}
+	return nil, false
+}
+
 // GraphApplyPlan describes a symbolic bead graph to create atomically.
 // Keys are caller-defined stable identifiers (for example recipe step IDs).
 type GraphApplyPlan struct {

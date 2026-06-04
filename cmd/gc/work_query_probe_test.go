@@ -36,6 +36,19 @@ func TestPrefixedWorkQueryForProbe_UsesNamedSessionRuntimeName(t *testing.T) {
 	}
 }
 
+func TestPrefixedWorkQueryForProbeUsesBD105WorkQuery(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Beads:     config.BeadsConfig{BDCompatibility: config.BeadsBDCompatibility105},
+		Agents:    []config.Agent{{Name: "worker"}},
+	}
+
+	command := prefixedWorkQueryForProbeWithEnv(nil, cfg, t.TempDir(), cfg.Workspace.Name, nil, nil, &cfg.Agents[0], nil)
+	if !strings.Contains(command, "bd ready --include-ephemeral") {
+		t.Fatalf("prefixedWorkQueryForProbeWithEnv() = %q, want bd-1.0.5 ephemeral-ready probe", command)
+	}
+}
+
 func TestControllerQueryRuntimeEnvInheritedRigUsesCityStorePassword(t *testing.T) {
 	cityPath, rigDir, cfg := newControllerProbeFixture(t)
 	writeCanonicalScopeConfig(t, rigDir, contract.ConfigState{

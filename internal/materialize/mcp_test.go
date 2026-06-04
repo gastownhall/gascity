@@ -248,6 +248,20 @@ func TestMCPTemplateDataUsesPoolNameForPoolInstances(t *testing.T) {
 	}
 }
 
+func TestMCPTemplateDataUsesBD105WorkQuery(t *testing.T) {
+	t.Parallel()
+
+	cfg := &config.City{
+		Beads: config.BeadsConfig{BDCompatibility: config.BeadsBDCompatibility105},
+	}
+	agent := &config.Agent{Name: "worker"}
+
+	got := MCPTemplateData(cfg, "/tmp/city", agent, "worker", "/tmp/work")
+	if !strings.Contains(got["WorkQuery"], "bd ready --include-ephemeral") {
+		t.Fatalf("WorkQuery = %q, want bd-1.0.5 ephemeral-ready probe", got["WorkQuery"])
+	}
+}
+
 func TestMCPTemplateDataPreservesBranchAlias(t *testing.T) {
 	t.Parallel()
 

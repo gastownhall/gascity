@@ -1787,6 +1787,8 @@ func installCaptureBdRunner(t *testing.T) *[]bdInvocation {
 				return nil, fmt.Errorf("issue not found")
 			case len(args) >= 2 && args[0] == "list" && args[1] == "--json":
 				return []byte(`[]`), nil
+			case len(args) >= 2 && args[0] == "query" && args[1] == "--json":
+				return []byte(`[]`), nil
 			default:
 				t.Errorf("unexpected bd subcommand args=%v — fake must be extended if sling now invokes this", args)
 				return nil, fmt.Errorf("unexpected bd subcommand args=%v", args)

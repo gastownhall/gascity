@@ -1296,7 +1296,7 @@ func nativePriorityFromIssue(issue *beadslib.Issue) *int {
 
 func nativeIssueFilterFromListQuery(query ListQuery) beadslib.IssueFilter {
 	limit := query.Limit
-	if query.Sort != SortDefault {
+	if query.Sort != SortDefault || query.TierMode == TierWisps {
 		limit = 0
 	}
 	filter := beadslib.IssueFilter{
@@ -1307,8 +1307,9 @@ func nativeIssueFilterFromListQuery(query ListQuery) beadslib.IssueFilter {
 	}
 	switch query.TierMode {
 	case TierWisps:
-		ephemeral := true
-		filter.Ephemeral = &ephemeral
+		// Upstream can filter only ephemeral rows, while Gas City's wisp tier
+		// includes both ephemeral and no-history rows. Let ApplyListQuery apply
+		// the final tier filter after all candidates are returned.
 	case TierBoth:
 		// no tier filter
 	default:
