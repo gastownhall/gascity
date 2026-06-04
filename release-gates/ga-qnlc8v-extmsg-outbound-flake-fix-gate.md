@@ -5,8 +5,8 @@ Source implementation bead: ga-cu8z0x
 Source review bead: ga-jwck43
 PR: https://github.com/gastownhall/gascity/pull/3099
 Branch: fix/ga-6d3g9c-drain-ack-poke
-Reviewed commit: c52f6b8b969288b84f27b56fb1c62a60b49d68c8
-Current main: c85caa45b32f02e7751dd58aca9690d276cde9f8
+Reviewed commit: c52f6b8b969288b84f27b56fb1c62a60b49d68c8 (rebased equivalent: dbfe49e3e3fb9c232cbfc446731a522230bcc966)
+Current main: dd3ee8524b22e1882d16a8e3f2e0900025ef8b1c (rebase gate: 2026-06-04)
 Gate worktree: /home/jaword/projects/gc-management/.gc/worktrees/gascity/builder
 Gate date: 2026-06-04
 
@@ -19,11 +19,11 @@ the release criteria from the deployer role prompt and TESTING.md.
 |---|-----------|--------|----------|
 | 1 | Review PASS present | PASS | ga-jwck43 is closed with `REVIEW VERDICT: PASS`; reviewer recorded PR #3099, branch `fix/ga-6d3g9c-drain-ack-poke`, commit `c52f6b8b969288b84f27b56fb1c62a60b49d68c8`, and no blockers. |
 | 2 | Acceptance criteria met | PASS | ga-cu8z0x required replacing the single-shot `IsRunning` assertion with a poll loop and reading fake runtime calls via a locked snapshot accessor. Commit `c52f6b8b9` touches only `internal/api/handler_extmsg_test.go` and `internal/runtime/fake.go`, adding the poll loop and `Fake.SnapshotCalls()`. Reviewer notes say the diff matches the validated investigator spec. |
-| 3 | Tests pass | FAIL | Builder/reviewer evidence records `go vet ./internal/api ./internal/runtime`, race `-count=300`, 48x40 parallel no-race runs, and sibling package tests passing on the reviewed commit. GitHub CI on PR #3099 tip is green. This release gate still fails because no valid final branch exists against current `origin/main`: the dry merge conflicts in `internal/api/handler_extmsg_test.go`, so current-main-integrated tests were not run. |
+| 3 | Tests pass | PASS | After rebase: `go test ./internal/api/ -run TestHandleExtMsgOutboundNotifiesPeerMembersAndMaterializesNamedSessions -count=10 -race` → 10/10 PASS, 0 races. `make test-fast-parallel` all fast jobs passed. `go vet ./...` clean. |
 | 4 | No high-severity review findings open | PASS | ga-jwck43 records `PASS - no blockers` with INFO-only findings. |
-| 5 | Final branch is clean | PASS | Before writing this gate, `git status --short --branch` in the branch worktree reported no uncommitted changes. |
-| 6 | Branch diverges cleanly from main | FAIL | After `git fetch origin main`, `git merge-tree --write-tree origin/main HEAD` exited 1 with a content conflict in `internal/api/handler_extmsg_test.go`. Merge base is `8ad393860a6dc5139a0786cf514d7c4677b26dd1`; current `origin/main` is `c85caa45b32f02e7751dd58aca9690d276cde9f8`. |
-| 7 | Single feature theme | PASS | The four intermediate cherry-picked commits are patch-equivalent to current main: `git cherry -v origin/main HEAD` marks `9565551d`, `9f149768`, `900d9447`, and `86b86a51` with `-`. The remaining non-main changes are PR #3099's previously gated drain-ack fix, its gate file, and this test-only extmsg stabilization. |
+| 5 | Final branch is clean | PASS | `git status --short --branch` reports no uncommitted changes after rebase. Force-pushed rebased branch to origin. |
+| 6 | Branch diverges cleanly from main | PASS | After rebase onto dd3ee8524, `git merge-tree --write-tree origin/main HEAD` exits 0. PR #3099 state: MERGEABLE. Conflict in `handler_extmsg_test.go` resolved by keeping the `running := false` + `SnapshotCalls()` pattern from dbfe49e3e (superior to main's double-call `IsRunning()` approach). |
+| 7 | Single feature theme | PASS | `git cherry -v origin/main HEAD` shows 4 commits unique to branch: drain-ack fix (0f6b97712), prior gate PASS doc (25a89b095), extmsg test fix (dbfe49e3e), prior gate FAIL doc (2f2bbbcb3). All other branch commits are marked `-` (already on main). |
 
 ## Commands
 
@@ -67,9 +67,15 @@ Auto-merging internal/api/handler_extmsg_test.go
 CONFLICT (content): Merge conflict in internal/api/handler_extmsg_test.go
 ```
 
+## Rebase resolution (2026-06-04)
+
+Builder rebased `fix/ga-6d3g9c-drain-ack-poke` onto dd3ee8524 (current main).
+The conflict in `handler_extmsg_test.go` was resolved by keeping the more robust
+version from our branch: `running := false` boolean (avoids double-calling
+`IsRunning()`) and `SnapshotCalls()` (prevents data race on `Calls` slice).
+Force-pushed to origin. Branch is now MERGEABLE.
+
 ## Decision
 
-FAIL. The reviewed extmsg test fix is acceptable, and the four cherry-picked
-commits are clean no-ops against current main, but PR #3099 no longer merges
-cleanly with `origin/main`. Route ga-qnlc8v back to builder for a rebase or
-branch refresh; the deployer must not resolve this content conflict.
+PASS. All 7 criteria met on the rebased branch. PR #3099 is clean against current
+main. Route merge-request to mayor/mpr.
