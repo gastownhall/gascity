@@ -136,6 +136,15 @@ func TestHandleExtMsgOutboundNotifiesPeerMembersAndMaterializesNamedSessions(t *
 	if peerSessionName == "" {
 		t.Fatal("materialized peer session missing session_name")
 	}
+	// Bead is written before Start() is called in createAliasedNamedWithTransport;
+	// poll until the provider reports the session running.
+	deadline = time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if fs.sp.IsRunning(peerSessionName) {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 	if !fs.sp.IsRunning(peerSessionName) {
 		t.Fatalf("peer session %q should be running after outbound publish", peerSessionName)
 	}
