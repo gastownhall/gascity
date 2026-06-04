@@ -118,6 +118,13 @@ func (t nudgeTarget) agentKey() string {
 	return t.sessionName
 }
 
+func (t nudgeTarget) pollerKey() string {
+	if t.sessionID != "" {
+		return t.sessionID
+	}
+	return t.agentKey()
+}
+
 func (t nudgeTarget) queueKeys() []string {
 	var keys []string
 	seen := map[string]bool{}
@@ -1054,7 +1061,7 @@ func maybeStartNudgePoller(target nudgeTarget) {
 	if target.sessionTransport() == "acp" {
 		return
 	}
-	if err := startNudgePoller(target.cityPath, target.agentKey(), target.sessionName); err != nil {
+	if err := startNudgePoller(target.cityPath, target.pollerKey(), target.sessionName); err != nil {
 		return
 	}
 }

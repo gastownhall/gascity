@@ -2003,9 +2003,7 @@ func TestSendMailNotifyWithWorkerStartsPollerByAliasForAliasedTarget(t *testing.
 	prev := startNudgePoller
 	startNudgePoller = func(cityPath, agentName, sessionName string) error {
 		called = true
-		// The queued nudge carries the session fence, so the poller registration
-		// key can follow the operator-facing alias.
-		if cityPath != dir || agentName != "mayor" || sessionName != info.SessionName {
+		if cityPath != dir || agentName != info.ID || sessionName != info.SessionName {
 			t.Fatalf("unexpected poller args city=%q agent=%q session=%q", cityPath, agentName, sessionName)
 		}
 		return nil
@@ -2665,8 +2663,8 @@ func TestDeliverSlingNudgeQueuesFencedReminderAndStartsPollerForAsleepSession(t 
 	if pending[0].ContinuationEpoch != "7" {
 		t.Fatalf("queued nudge continuation_epoch = %q, want 7", pending[0].ContinuationEpoch)
 	}
-	if pollerCityPath != dir || pollerAgent != target.agentKey() || pollerSession != target.sessionName {
-		t.Fatalf("startNudgePoller = (%q, %q, %q), want (%q, %q, %q)", pollerCityPath, pollerAgent, pollerSession, dir, target.agentKey(), target.sessionName)
+	if pollerCityPath != dir || pollerAgent != target.sessionID || pollerSession != target.sessionName {
+		t.Fatalf("startNudgePoller = (%q, %q, %q), want (%q, %q, %q)", pollerCityPath, pollerAgent, pollerSession, dir, target.sessionID, target.sessionName)
 	}
 }
 
