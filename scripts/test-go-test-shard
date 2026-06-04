@@ -68,6 +68,8 @@ run_go_test() {
     GOVCS="${GOVCS-}" \
     GOWORK="${GOWORK-}" \
     GC_FAST_UNIT="${GC_FAST_UNIT:-0}"
+    GC_TEST_SHARD_INDEX="${shard_index}" \
+    GC_TEST_SHARD_TOTAL="${shard_total}"
   )
   if (( ${#extra_env[@]} > 0 )); then
     env -i "${base_env[@]}" "${extra_env[@]}" go test "$@"

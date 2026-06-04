@@ -1829,6 +1829,26 @@ func crossStoreSlingFixture(t *testing.T, assignee string) (SlingOpts, SlingDeps
 	return opts, deps, router, bead
 }
 
+func TestValidateBuiltInRouteStoreReachableAllowsCityScopedTarget(t *testing.T) {
+	// vp-kvp stage i: the fail-loud cross-store route guard must refuse a
+	// rig-scoped target that cannot reach the bead's store, but must NOT
+	// false-positive on a city-scoped (cross-store-eligible) target, which
+	// legitimately serves any store. Before the exemption the city singleton was
+	// refused, blocking cross-store work delivery (stages ii/iii).
+	deps, _, rigTarget := crossStoreSlingDeps(t) // deps.StoreRef = "city:test-city"
+
+	if err := validateBuiltInRouteStoreReachable(deps, "RW-1", rigTarget); err == nil {
+		t.Fatal("rig-scoped target routing a city-store bead must be refused (fail loud)")
+	} else {
+		requireCrossStoreRouteError(t, err)
+	}
+
+	cityTarget := config.Agent{Name: "platform-architect", Scope: "city", MaxActiveSessions: intPtr(1)}
+	if err := validateBuiltInRouteStoreReachable(deps, "RW-1", cityTarget); err != nil {
+		t.Fatalf("city-scoped target must not be refused as cross-store: %v", err)
+	}
+}
+
 func requireCrossStoreRouteError(t *testing.T, err error) {
 	t.Helper()
 	var crossStoreErr *CrossStoreRouteError

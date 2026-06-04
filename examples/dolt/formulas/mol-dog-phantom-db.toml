@@ -1,6 +1,20 @@
 description = """
 Detect unservable databases in .dolt-data/ that can crash or confuse the Dolt server.
 
+After claiming this vapor wisp, run:
+
+```bash
+gc bd formula show mol-dog-phantom-db --json
+```
+
+Follow the step descriptions in order. When finished, close this bead, then run:
+
+```bash
+gc runtime drain-ack
+```
+
+The drain-ack tells the controller this session is done.
+
 A phantom database is a directory in .dolt-data/ that has a .dolt/ subdirectory
 but is missing the noms/manifest file. When Dolt auto-discovers these dirs at
 startup, the broken noms store crashes INFORMATION_SCHEMA and can take down
@@ -39,6 +53,7 @@ happens deliberately with the Dolt server stopped or through Dolt itself.
 
 Read each step's description before acting — Config values override defaults."""
 formula = "mol-dog-phantom-db"
+phase = "vapor"
 
 [vars]
 [vars.data_dir]
@@ -84,7 +99,6 @@ A retired replacement database has:
 [[steps]]
 id = "escalate"
 title = "Escalate unservable databases"
-needs = ["scan"]
 description = """
 Escalate unservable database directories without mutating them.
 
@@ -122,7 +136,6 @@ gc mail send mayor/ -s "ESCALATION: Unservable Dolt databases detected [HIGH]" \
 [[steps]]
 id = "report"
 title = "Report findings and return to kennel"
-needs = ["escalate"]
 description = """
 Generate summary and signal completion.
 

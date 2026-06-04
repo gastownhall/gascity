@@ -251,6 +251,9 @@ func buildRecipeApplyPlan(recipe *formula.Recipe, opts Options) (*beads.GraphApp
 			if node.Key == rootKey {
 				continue
 			}
+			if graphApplyPlanHasEdgeFromKeyToTarget(plan.Edges, node.Key, rootKey, "") {
+				continue
+			}
 			plan.Edges = append(plan.Edges, beads.GraphApplyEdge{
 				FromKey: node.Key,
 				ToKey:   rootKey,
@@ -287,6 +290,21 @@ func ensureGraphNodeMetadata(node *beads.GraphApplyNode) {
 	if node.Metadata == nil {
 		node.Metadata = make(map[string]string, 1)
 	}
+}
+
+func graphApplyPlanHasEdgeFromKeyToTarget(edges []beads.GraphApplyEdge, fromKey, toKey, toID string) bool {
+	for _, edge := range edges {
+		if edge.FromKey != fromKey {
+			continue
+		}
+		if toKey != "" && edge.ToKey == toKey {
+			return true
+		}
+		if toID != "" && edge.ToID == toID {
+			return true
+		}
+	}
+	return false
 }
 
 func buildFragmentApplyPlan(store beads.Store, recipe *formula.FragmentRecipe, opts FragmentOptions) (*beads.GraphApplyPlan, error) {
@@ -397,6 +415,9 @@ func buildFragmentApplyPlan(store beads.Store, recipe *formula.FragmentRecipe, o
 	// dependency graph without introducing artificial blockers.
 	if opts.RootID != "" {
 		for _, node := range plan.Nodes {
+			if graphApplyPlanHasEdgeFromKeyToTarget(plan.Edges, node.Key, "", opts.RootID) {
+				continue
+			}
 			plan.Edges = append(plan.Edges, beads.GraphApplyEdge{
 				FromKey: node.Key,
 				ToID:    opts.RootID,

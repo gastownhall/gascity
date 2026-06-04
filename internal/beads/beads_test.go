@@ -109,6 +109,11 @@ func TestIsReadyCandidate(t *testing.T) {
 			want: false,
 		},
 		{
+			name: "no-history task remains durable ready work",
+			bead: Bead{Status: "open", Type: "task", NoHistory: true},
+			want: true,
+		},
+		{
 			name: "excluded type",
 			bead: Bead{Status: "open", Type: "message"},
 			want: false,
@@ -136,6 +141,35 @@ func TestIsReadyCandidate(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestTierWispsIncludesNoHistoryRows(t *testing.T) {
+	items := []Bead{
+		{ID: "issue", Title: "issue", Status: "open", Type: "task"},
+		{ID: "no-history", Title: "no-history", Status: "open", Type: "task", NoHistory: true},
+		{ID: "ephemeral", Title: "ephemeral", Status: "open", Type: "task", Ephemeral: true},
+	}
+
+	wisps := ApplyListQuery(items, ListQuery{TierMode: TierWisps, AllowScan: true})
+	if got := idsOf(wisps); got != "no-history,ephemeral" {
+		t.Fatalf("TierWisps IDs = %s, want no-history,ephemeral", got)
+	}
+
+	issues := ApplyListQuery(items, ListQuery{TierMode: TierIssues, AllowScan: true})
+	if got := idsOf(issues); got != "issue,no-history" {
+		t.Fatalf("TierIssues IDs = %s, want issue,no-history", got)
+	}
+}
+
+func idsOf(items []Bead) string {
+	out := ""
+	for i, item := range items {
+		if i > 0 {
+			out += ","
+		}
+		out += item.ID
+	}
+	return out
 }
 
 func TestListQueryCreatedBeforeFiltersBeforeLimit(t *testing.T) {

@@ -193,9 +193,15 @@ func TestMain(m *testing.M) {
 		panic(err)
 	}
 	// Sweep stale testTempRoot dirs in system /tmp before creating a new one.
-	sweepOrphanPIDPrefixedDirs(os.TempDir(), testCmdGCTempRootPrefix)
-	testTempRoot, err := os.MkdirTemp("/tmp", pidPrefixedTempPattern(testCmdGCTempRootPrefix))
+	// Sharded cmd/gc runs use a separate prefix so concurrent worktrees with
+	// older test harnesses cannot remove this package's active root.
+	testTempRootPrefix := cmdGCTestTempRootPrefix()
+	sweepOrphanPIDPrefixedDirs(os.TempDir(), testTempRootPrefix)
+	testTempRoot, err := os.MkdirTemp("/tmp", pidPrefixedTempPattern(testTempRootPrefix))
 	if err != nil {
+		panic(err)
+	}
+	if err := os.WriteFile(filepath.Join(testTempRoot, testActiveTempRootMarker), []byte(fmt.Sprintf("%d\n", os.Getpid())), 0o644); err != nil {
 		panic(err)
 	}
 	if err := os.Setenv("TMPDIR", testTempRoot); err != nil {
@@ -6860,6 +6866,15 @@ max = -1
 	}
 	if !strings.Contains(out, "Do not start work with `bd update --status in_progress`") {
 		t.Fatalf("graph-worker prompt missing guard against unassigned in_progress work:\n%s", out)
+	}
+	if !strings.Contains(out, `ROOT_ID=$(bd show <id> --json | jq -r '.[0].metadata["gc.root_bead_id"] // empty')`) {
+		t.Fatalf("graph-worker prompt missing continuation-group root lookup:\n%s", out)
+	}
+	if !strings.Contains(out, `--metadata-field gc.root_bead_id=$ROOT_ID`) {
+		t.Fatalf("graph-worker prompt continuation-group sibling claim is not root-scoped:\n%s", out)
+	}
+	if !strings.Contains(out, `if [ -n "$GROUP" ] && [ -n "$ROOT_ID" ]; then`) {
+		t.Fatalf("graph-worker prompt should require group and root before preassigning siblings:\n%s", out)
 	}
 }
 

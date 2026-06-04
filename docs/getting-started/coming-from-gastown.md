@@ -538,7 +538,8 @@ of re-expressing the intent in Gas City's primitives.
 If you already know Gas Town, this is the shortest path to becoming effective
 in Gas City:
 
-1. Read the Nine Concepts Overview (`engdocs/architecture/nine-concepts`).
+1. Read the [Primitives Reference](/concepts/primitives) — the nine building
+   blocks of Gas City in user terms.
 2. Read the Config System docs (`engdocs/architecture/config`).
 3. Read Orders (`engdocs/architecture/orders`) and mentally remap "plugins" to
    "orders".

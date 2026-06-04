@@ -15,7 +15,9 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/pidutil"
 )
 
@@ -115,17 +117,13 @@ func startManagedDoltProcess(cityPath, host, port, user, logLevel string, timeou
 	return startManagedDoltProcessWithOptions(cityPath, host, port, user, logLevel, -1, timeout, true)
 }
 
-// archiveLevel is currently always -1 from every caller (callers pass through
-// startManagedDoltProcess, which hardcodes -1, or pass -1 directly from
-// dolt_recover_managed). The parameter is preserved as a forward-compatible
-// hook because resolveDoltArchiveLevel(archiveLevel) and the config-file
-// write path are already wired to honor non-default values when the
-// supervisor / dolt-state CLI eventually exposes them.
-//
-//nolint:unparam // archiveLevel reserved for future caller override; see comment above.
+//nolint:unparam // archiveLevel is an explicit override hook; current callers use config/env fallback.
 func startManagedDoltProcessWithOptions(cityPath, host, port, user, logLevel string, archiveLevel int, timeout time.Duration, publish bool) (managedDoltStartReport, error) {
 	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
 	if err != nil {
+		return managedDoltStartReport{}, err
+	}
+	if err := checkManagedDoltDiskPreflight(layout.DataDir, doltDiskMinFreeBytes(), doltDiskWarnFreeBytes(), os.Stderr); err != nil {
 		return managedDoltStartReport{}, err
 	}
 	portNum, err := strconv.Atoi(strings.TrimSpace(port))
@@ -144,9 +142,12 @@ func startManagedDoltProcessWithOptions(cityPath, host, port, user, logLevel str
 	if timeout <= 0 {
 		timeout = 30 * time.Second
 	}
-	archiveLevel = resolveDoltArchiveLevel(archiveLevel)
-
 	report := managedDoltStartReport{}
+	doltConfig, err := resolveManagedDoltConfigForStart(cityPath, archiveLevel)
+	if err != nil {
+		return report, err
+	}
+
 	currentPort := portNum
 	// retryWindow is resolved once before the loop so an in-progress
 	// city.toml edit cannot change the wait policy mid-flight.
@@ -166,7 +167,7 @@ func startManagedDoltProcessWithOptions(cityPath, host, port, user, logLevel str
 		if err := managedDoltPreflightCleanupFn(cityPath); err != nil {
 			return report, err
 		}
-		if err := writeManagedDoltConfigFile(layout.ConfigFile, host, strconv.Itoa(currentPort), layout.DataDir, logLevel, archiveLevel); err != nil {
+		if err := writeManagedDoltConfigFile(layout.ConfigFile, host, strconv.Itoa(currentPort), layout.DataDir, logLevel, doltConfig); err != nil {
 			return report, err
 		}
 
@@ -380,7 +381,7 @@ func startManagedDoltSQLServer(cityPath, configFile, logFilePath string, logFile
 	cmd.Stderr = logFile
 	cmd.Stdin = nil
 	cmd.SysProcAttr = managedDoltSQLServerSysProcAttr()
-	cmd.Env = doltServerEnv(os.Environ())
+	cmd.Env = doltServerEnv(cityPath, os.Environ())
 	if err := cmd.Start(); err != nil {
 		return managedDoltStartedProcess{}, fmt.Errorf("start dolt sql-server: %w", err)
 	}
@@ -397,7 +398,7 @@ func startManagedDoltSQLServerWithTestWatchdog(cityPath, configFile, logFilePath
 		_ = os.Remove(disarmFile)
 		return managedDoltStartedProcess{}, err
 	}
-	args := []string{managedDoltTestWatchdogArg, managedDoltTestParentPIDString(), configFile, logFilePath, disarmFile}
+	args := []string{managedDoltTestWatchdogArg, managedDoltTestParentPIDString(), configFile, logFilePath, disarmFile, cityPath}
 	var parentPipeRead *os.File
 	var parentPipeWrite *os.File
 	if !managedDoltTestHasExternalParent() {
@@ -411,7 +412,7 @@ func startManagedDoltSQLServerWithTestWatchdog(cityPath, configFile, logFilePath
 	cmd := exec.Command(watchdogExecutable, args...)
 	cmd.Stderr = logFile
 	cmd.Stdin = nil
-	cmd.Env = doltServerEnv(os.Environ())
+	cmd.Env = doltServerEnv(cityPath, os.Environ())
 	if parentPipeRead != nil {
 		cmd.ExtraFiles = []*os.File{parentPipeRead}
 	}
@@ -743,6 +744,55 @@ func managedDoltLogSuffix(path string, offset int64) (string, error) {
 	return string(data[offset:]), nil
 }
 
+func resolveManagedDoltConfigForStart(cityPath string, explicitArchiveLevel int) (config.DoltConfig, error) {
+	doltConfig := config.DoltConfig{}
+	if strings.TrimSpace(cityPath) != "" {
+		tomlPath := filepath.Join(cityPath, "city.toml")
+		if _, err := os.Stat(tomlPath); err != nil {
+			if !os.IsNotExist(err) {
+				return doltConfig, fmt.Errorf("stat city dolt config: %w", err)
+			}
+		} else {
+			if cfg, err := loadCityConfig(cityPath, io.Discard); err != nil {
+				return doltConfig, fmt.Errorf("load city dolt config: %w", err)
+			} else if cfg != nil {
+				doltConfig = cfg.Dolt
+			}
+		}
+	}
+	if explicitArchiveLevel >= 0 {
+		doltConfig.ArchiveLevel = &explicitArchiveLevel
+	} else if doltConfig.ArchiveLevel == nil {
+		if v := os.Getenv("GC_DOLT_ARCHIVE_LEVEL"); v != "" {
+			if parsed, err := strconv.Atoi(v); err == nil {
+				doltConfig.ArchiveLevel = &parsed
+			}
+		}
+	}
+	if doltConfig.MaxConnections <= 0 {
+		doltConfig.MaxConnections = positiveEnvInt("GC_DOLT_MAX_CONNECTIONS")
+	}
+	if doltConfig.ReadTimeoutMillis <= 0 {
+		doltConfig.ReadTimeoutMillis = positiveEnvInt("GC_DOLT_READ_TIMEOUT_MILLIS")
+	}
+	if doltConfig.WriteTimeoutMillis <= 0 {
+		doltConfig.WriteTimeoutMillis = positiveEnvInt("GC_DOLT_WRITE_TIMEOUT_MILLIS")
+	}
+	return doltConfig, nil
+}
+
+func positiveEnvInt(key string) int {
+	raw := os.Getenv(key)
+	if raw == "" {
+		return 0
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n <= 0 {
+		return 0
+	}
+	return n
+}
+
 // resolveDoltArchiveLevel resolves the archive level for dolt auto_gc.
 // Explicit non-negative values are returned as-is. Negative values trigger
 // env-var fallback (GC_DOLT_ARCHIVE_LEVEL), defaulting to 0.
@@ -797,8 +847,8 @@ func runManagedDoltTestWatchdog(args []string, stdout, stderr *os.File) int {
 		fmt.Fprintln(stderr, "managed dolt test watchdog is only available in managed Dolt test mode") //nolint:errcheck
 		return 2
 	}
-	if len(args) != 4 && len(args) != 5 {
-		fmt.Fprintf(stderr, "usage: %s <parent-pid> <config-file> <log-file> <disarm-file> [parent-pipe-fd]\n", managedDoltTestWatchdogArg) //nolint:errcheck
+	if len(args) < 4 || len(args) > 6 {
+		fmt.Fprintf(stderr, "usage: %s <parent-pid> <config-file> <log-file> <disarm-file> [city-path] [parent-pipe-fd]\n", managedDoltTestWatchdogArg) //nolint:errcheck
 		return 2
 	}
 	parentPID, err := strconv.Atoi(args[0])
@@ -809,9 +859,22 @@ func runManagedDoltTestWatchdog(args []string, stdout, stderr *os.File) int {
 	configFile := args[1]
 	logFilePath := args[2]
 	disarmFile := args[3]
-	var parentDone <-chan struct{}
+	cityPath := ""
+	parentPipeArg := ""
 	if len(args) == 5 {
-		done, closeParentDone, err := managedDoltTestParentDone(args[4])
+		if _, parseErr := strconv.Atoi(args[4]); parseErr == nil {
+			parentPipeArg = args[4]
+		} else {
+			cityPath = args[4]
+		}
+	}
+	if len(args) == 6 {
+		cityPath = args[4]
+		parentPipeArg = args[5]
+	}
+	var parentDone <-chan struct{}
+	if parentPipeArg != "" {
+		done, closeParentDone, err := managedDoltTestParentDone(parentPipeArg)
 		if err != nil {
 			fmt.Fprintf(stderr, "watch parent pipe: %v\n", err) //nolint:errcheck
 			return 2
@@ -836,7 +899,7 @@ func runManagedDoltTestWatchdog(args []string, stdout, stderr *os.File) int {
 	// archive workers) outlive their parent and leak across test runs
 	// (gastownhall/gascity#2313 follow-up M3).
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Env = doltServerEnv(os.Environ())
+	cmd.Env = doltServerEnv(cityPath, os.Environ())
 	if err := cmd.Start(); err != nil {
 		fmt.Fprintf(stderr, "start dolt sql-server: %v\n", err) //nolint:errcheck
 		return 1
@@ -906,6 +969,28 @@ func managedDoltTestParentDone(rawFD string) (<-chan struct{}, func(), error) {
 
 // doltServerEnv returns the environment applied to every managed dolt
 // sql-server we launch.
-func doltServerEnv(parent []string) []string {
-	return append([]string(nil), parent...)
+func doltServerEnv(cityPath string, parent []string) []string {
+	env := removeEnvKey(parent, "DOLT_DISABLE_EVENT_FLUSH")
+	if managedDoltDisableEventFlush(cityPath) {
+		// Disable Dolt usage telemetry for managed servers by default. The
+		// `dolt send-metrics` event-flush reporter spawns transient
+		// `dolt send-metrics` processes that were observed burning 80-94% CPU
+		// on a busy managed city. Operators can opt back in with
+		// `.beads/config.yaml`:
+		//   dolt:
+		//     disable-event-flush: false
+		env = append(env, "DOLT_DISABLE_EVENT_FLUSH=true")
+	}
+	return env
+}
+
+func managedDoltDisableEventFlush(cityPath string) bool {
+	if strings.TrimSpace(cityPath) == "" {
+		return true
+	}
+	cfg, _, err := contract.ReadDoltConfig(fsys.OSFS{}, filepath.Join(cityPath, ".beads", "config.yaml"))
+	if err != nil {
+		return true
+	}
+	return cfg.DisableEventFlushEnabled()
 }

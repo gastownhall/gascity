@@ -27,9 +27,9 @@ gc sling "$POLECAT_TARGET" <bead-id>                     # dispatch to polecat p
 ```
 
 **Pool dispatch leaves the assignee empty.** The polecat that picks the bead up sets the
-assignee on claim. If you set `--assignee` yourself, the supervisor's scale_check
-(`bd ready --metadata-field gc.routed_to=<canonical> --unassigned`) won't count the bead as
-pool demand and no session will spawn. Set `gc.routed_to` only.
+assignee on claim. If you set `--assignee` yourself, the supervisor's
+storage-aware scale_check query will not count the bead as pool demand and no
+session will spawn. Set `gc.routed_to` only.
 
 **Why this is the default:**
 - Every polecat completion is a ledger entry — transparent, auditable work

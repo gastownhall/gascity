@@ -114,7 +114,8 @@
       {
         "group": "Concepts",
         "pages": [
-          "concepts/architecture-overview"
+          "concepts/architecture-overview",
+          "concepts/primitives"
         ]
       },
       {

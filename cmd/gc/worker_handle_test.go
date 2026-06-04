@@ -895,6 +895,43 @@ func TestResolveWorkerRuntimeProviderWithConfigMetadataIdentifiesProviderSession
 	}
 }
 
+func TestResolvedWorkerRuntimeWithConfigUsesCurrentAgentProviderOverStaleSessionProvider(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{
+			{Name: "worker", Dir: "myrig", Provider: "agent-provider"},
+		},
+		Providers: map[string]config.ProviderSpec{
+			"stale-provider": {
+				Command: "true",
+				Args:    []string{"stale"},
+			},
+			"agent-provider": {
+				Command: "true",
+				Args:    []string{"agent"},
+			},
+		},
+	}
+
+	resolved, err := resolvedWorkerRuntimeWithConfigAndMetadata("", cfg, session.Info{
+		Template: "myrig/worker",
+		Provider: "stale-provider",
+		WorkDir:  "/tmp/work",
+	}, "", map[string]string{
+		"session_origin": "ephemeral",
+		"agent_name":     "myrig/worker",
+	})
+	if err != nil {
+		t.Fatalf("resolvedWorkerRuntimeWithConfigAndMetadata: %v", err)
+	}
+	if resolved == nil {
+		t.Fatal("resolvedWorkerRuntimeWithConfigAndMetadata() = nil")
+	}
+	if got := resolved.Provider; got != "agent-provider" {
+		t.Fatalf("resolved.Provider = %q, want agent-provider", got)
+	}
+}
+
 func TestResolvedWorkerRuntimeWithConfigKeepsDefaultTransportWithoutExplicitACPTemplate(t *testing.T) {
 	cityDir := t.TempDir()
 	writePhase0InterfaceCity(t, cityDir, `[workspace]

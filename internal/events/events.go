@@ -133,6 +133,16 @@ const (
 	StoreMaintenanceDone   = "gc.store.maintenance.done"
 	StoreMaintenanceFailed = "gc.store.maintenance.failed"
 
+	// Dolt disk pre-flight events. Emitted by the supervisor's
+	// StoreMaintenanceLoop before CALL DOLT_GC when the container free
+	// space is below a configured threshold.
+	// StoreDiskWarn fires when free space is below GC_DOLT_WARN_FREE_BYTES
+	// but still above GC_DOLT_MIN_FREE_BYTES; the GC proceeds.
+	// StoreDiskCritical fires when free space is below GC_DOLT_MIN_FREE_BYTES;
+	// the GC is skipped to avoid growing the store further.
+	StoreDiskWarn     = "gc.store.disk_warn"
+	StoreDiskCritical = "gc.store.disk_critical"
+
 	// Postgres credential resolution. Emitted by the bd-env projection
 	// path on every successful pgauth resolve. The payload identifies
 	// the scope and the resolution tier that supplied the value; it
@@ -179,6 +189,7 @@ var KnownEventTypes = []string{
 	ExtMsgInbound, ExtMsgOutbound,
 	EventsRotated,
 	StoreMaintenanceDone, StoreMaintenanceFailed,
+	StoreDiskWarn, StoreDiskCritical,
 	PostgresCredentialResolved,
 	// ProviderHealthGateAlert is intentionally omitted from KnownEventTypes.
 	// The event is emitted by the reconciler but its typed SSE payload is not

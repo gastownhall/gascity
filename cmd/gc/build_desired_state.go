@@ -424,7 +424,7 @@ func buildDesiredStateWithSessionBeads(
 			}
 		}
 
-		sp := scaleParamsFor(&cfg.Agents[i])
+		sp := scaleParamsForBeads(&cfg.Agents[i], cfg.Beads)
 		// Expand {{.Rig}}/{{.AgentBase}} before the scale_check enters the
 		// controller probe pool so rig-scoped agents query their own rig.
 		sp.Check = expandAgentCommandTemplate(cityPath, cityName, &cfg.Agents[i], cfg.Rigs, "scale_check", sp.Check, stderr)
@@ -934,6 +934,24 @@ func collectAssignedWorkBeadsWithStores(
 					appendInProgressWorkUnique(cfg, &result, &resultStores, &resultStoreRefs, inProgress, seen, source.store, source.ref)
 				}
 			}
+			// Open pool-routed beads that still carry an assignee. These are
+			// invisible to the in-progress pass (status is "open") and to the
+			// ready-by-assignee pass (the assignee is a dead session's
+			// long-form id, not enumerated by readyAssignedWorkAssignees).
+			// Without this pass, graph.v2 step beads orphaned by a session
+			// drain stay assigned forever and releaseOrphanedPoolAssignments
+			// never sees them — pool demand stays at 0 and the workflow stalls
+			// (issue #2793). The release loop further gates each bead on
+			// openSessionOwnsWork / liveOpenSessionAssignmentExists, so
+			// live-session step beads in the same range are skipped untouched.
+			if openRouted, err := listBothTiersForControllerDemand(source.store, beads.ListQuery{Status: "open"}); err == nil {
+				appendOpenRoutedWorkUnique(&result, &resultStores, &resultStoreRefs, openRouted, seen, source.store, source.ref)
+			} else {
+				errs = append(errs, fmt.Errorf("List(open): %w", err))
+				if beads.IsPartialResult(err) && len(openRouted) > 0 {
+					appendOpenRoutedWorkUnique(&result, &resultStores, &resultStoreRefs, openRouted, seen, source.store, source.ref)
+				}
+			}
 			results[idx] = storeAssignedWorkResult{beads: result, stores: resultStores, storeRefs: resultStoreRefs, errs: errs}
 		}()
 	}
@@ -1167,6 +1185,7 @@ func defaultScaleCheckCounts(targets []defaultScaleCheckTarget) (map[string]int,
 		// only if a task-shaped routed bead also happens to carry the
 		// flag) is counted exactly once per template.
 		counted := make(map[string]struct{})
+		liveReader := beads.HandlesFor(group.store).Live
 
 		// Source 1: Ready()/CachedReady() iteration. Surfaces actionable
 		// work (task, etc.) from both durable and ephemeral tiers matched
@@ -1216,8 +1235,10 @@ func defaultScaleCheckCounts(targets []defaultScaleCheckTarget) (map[string]int,
 		// otherwise stretch demand observation by an unbounded number of
 		// reconcile ticks. Mirrors openSessionBeadExists in
 		// adoption_barrier.go, which uses Live: true for the same
-		// cross-process freshness reason.
-		demand, demandErr := group.store.List(beads.ListQuery{
+		// cross-process freshness reason. Dependency checks below use the
+		// same live reader so blocked pool-order wisps do not create pool
+		// sessions while sibling processes are still mutating the graph.
+		demand, demandErr := liveReader.List(beads.ListQuery{
 			Status:   "open",
 			Metadata: poolDemandMetadataPair(),
 			Live:     true,
@@ -1242,6 +1263,15 @@ func defaultScaleCheckCounts(targets []defaultScaleCheckTarget) (map[string]int,
 			if _, ok := group.templates[template]; !ok {
 				continue
 			}
+			depsReady, depErr := poolDemandDependenciesReady(liveReader, b.ID)
+			if depErr != nil {
+				errs = append(errs, fmt.Errorf("default scale_check %s template=%s bead=%s: dependencies: %w", key, template, b.ID, depErr))
+				partialTemplates = markScaleCheckPartialTemplate(partialTemplates, template)
+				continue
+			}
+			if !depsReady {
+				continue
+			}
 			if _, dup := counted[b.ID]; dup {
 				continue
 			}
@@ -1250,6 +1280,33 @@ func defaultScaleCheckCounts(targets []defaultScaleCheckTarget) (map[string]int,
 		}
 	}
 	return counts, partialTemplates, errs
+}
+
+func poolDemandDependenciesReady(reader beads.LiveReader, beadID string) (bool, error) {
+	deps, err := reader.DepList(beadID, "down")
+	if err != nil {
+		return false, err
+	}
+	for _, dep := range deps {
+		if !beads.IsReadyBlockingDependencyType(dep.Type) {
+			continue
+		}
+		blockerID := strings.TrimSpace(dep.DependsOnID)
+		if blockerID == "" {
+			return false, nil
+		}
+		blocker, err := reader.Get(blockerID)
+		if err != nil {
+			if errors.Is(err, beads.ErrNotFound) {
+				return false, nil
+			}
+			return false, fmt.Errorf("getting blocker %q: %w", blockerID, err)
+		}
+		if blocker.Status != "closed" {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 func defaultNamedSessionDemand(targets []defaultScaleCheckTarget, cfg *config.City, cityName string) (map[string]bool, map[string]bool, []error) {
@@ -1531,6 +1588,24 @@ func appendInProgressWorkUnique(cfg *config.City, dst *[]beads.Bead, stores *[]b
 func appendAssignedUnique(dst *[]beads.Bead, stores *[]beads.Store, storeRefs *[]string, beadList []beads.Bead, seen map[string]struct{}, store beads.Store, storeRef string) {
 	for _, b := range beadList {
 		if strings.TrimSpace(b.Assignee) == "" {
+			continue
+		}
+		appendWorkUnique(dst, stores, storeRefs, b, seen, store, storeRef)
+	}
+}
+
+// appendOpenRoutedWorkUnique includes open beads that are still releasably
+// pool-routed AND still carry an assignee. This is the narrow input
+// releaseOrphanedPoolAssignments needs to clear step beads abandoned by a
+// dead session (graph.v2 wisps where the root depends on the finalize
+// step, so the root never enters ready and the step assignee remains a
+// long-form dead-session identity invisible to readyAssignedWorkAssignees).
+func appendOpenRoutedWorkUnique(dst *[]beads.Bead, stores *[]beads.Store, storeRefs *[]string, beadList []beads.Bead, seen map[string]struct{}, store beads.Store, storeRef string) {
+	for _, b := range beadList {
+		if strings.TrimSpace(b.Assignee) == "" {
+			continue
+		}
+		if routedToOrLegacyWorkflowTarget(b) == "" {
 			continue
 		}
 		appendWorkUnique(dst, stores, storeRefs, b, seen, store, storeRef)

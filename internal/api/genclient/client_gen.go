@@ -531,6 +531,7 @@ type Bead struct {
 	Labels       *[]string          `json:"labels,omitempty"`
 	Metadata     *map[string]string `json:"metadata,omitempty"`
 	Needs        *[]string          `json:"needs,omitempty"`
+	NoHistory    *bool              `json:"no_history,omitempty"`
 	Parent       *string            `json:"parent,omitempty"`
 	Priority     *int64             `json:"priority,omitempty"`
 	Ref          *string            `json:"ref,omitempty"`
@@ -2996,6 +2997,21 @@ type StatusWorkCounts struct {
 	Ready int64 `json:"ready"`
 }
 
+// StoreDiskCriticalPayload defines model for StoreDiskCriticalPayload.
+type StoreDiskCriticalPayload struct {
+	DataDir    string `json:"data_dir"`
+	FloorBytes int64  `json:"floor_bytes"`
+	FreeBytes  int64  `json:"free_bytes"`
+}
+
+// StoreDiskWarnPayload defines model for StoreDiskWarnPayload.
+type StoreDiskWarnPayload struct {
+	DataDir    string `json:"data_dir"`
+	FloorBytes int64  `json:"floor_bytes"`
+	FreeBytes  int64  `json:"free_bytes"`
+	WarnBytes  int64  `json:"warn_bytes"`
+}
+
 // StoreMaintenanceDonePayload defines model for StoreMaintenanceDonePayload.
 type StoreMaintenanceDonePayload struct {
 	AfterBytes   int64   `json:"after_bytes"`
@@ -3407,6 +3423,30 @@ type TypedEventStreamEnvelopeExtmsgUnbound struct {
 	Actor    string                   `json:"actor"`
 	Message  *string                  `json:"message,omitempty"`
 	Payload  UnboundEventPayload      `json:"payload"`
+	Seq      int64                    `json:"seq"`
+	Subject  *string                  `json:"subject,omitempty"`
+	Ts       time.Time                `json:"ts"`
+	Type     string                   `json:"type"`
+	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedEventStreamEnvelopeGcStoreDiskCritical defines model for TypedEventStreamEnvelopeGcStoreDiskCritical.
+type TypedEventStreamEnvelopeGcStoreDiskCritical struct {
+	Actor    string                   `json:"actor"`
+	Message  *string                  `json:"message,omitempty"`
+	Payload  StoreDiskCriticalPayload `json:"payload"`
+	Seq      int64                    `json:"seq"`
+	Subject  *string                  `json:"subject,omitempty"`
+	Ts       time.Time                `json:"ts"`
+	Type     string                   `json:"type"`
+	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedEventStreamEnvelopeGcStoreDiskWarn defines model for TypedEventStreamEnvelopeGcStoreDiskWarn.
+type TypedEventStreamEnvelopeGcStoreDiskWarn struct {
+	Actor    string                   `json:"actor"`
+	Message  *string                  `json:"message,omitempty"`
+	Payload  StoreDiskWarnPayload     `json:"payload"`
 	Seq      int64                    `json:"seq"`
 	Subject  *string                  `json:"subject,omitempty"`
 	Ts       time.Time                `json:"ts"`
@@ -4179,6 +4219,32 @@ type TypedTaggedEventStreamEnvelopeExtmsgUnbound struct {
 	City     string                   `json:"city"`
 	Message  *string                  `json:"message,omitempty"`
 	Payload  UnboundEventPayload      `json:"payload"`
+	Seq      int64                    `json:"seq"`
+	Subject  *string                  `json:"subject,omitempty"`
+	Ts       time.Time                `json:"ts"`
+	Type     string                   `json:"type"`
+	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeGcStoreDiskCritical defines model for TypedTaggedEventStreamEnvelopeGcStoreDiskCritical.
+type TypedTaggedEventStreamEnvelopeGcStoreDiskCritical struct {
+	Actor    string                   `json:"actor"`
+	City     string                   `json:"city"`
+	Message  *string                  `json:"message,omitempty"`
+	Payload  StoreDiskCriticalPayload `json:"payload"`
+	Seq      int64                    `json:"seq"`
+	Subject  *string                  `json:"subject,omitempty"`
+	Ts       time.Time                `json:"ts"`
+	Type     string                   `json:"type"`
+	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeGcStoreDiskWarn defines model for TypedTaggedEventStreamEnvelopeGcStoreDiskWarn.
+type TypedTaggedEventStreamEnvelopeGcStoreDiskWarn struct {
+	Actor    string                   `json:"actor"`
+	City     string                   `json:"city"`
+	Message  *string                  `json:"message,omitempty"`
+	Payload  StoreDiskWarnPayload     `json:"payload"`
 	Seq      int64                    `json:"seq"`
 	Subject  *string                  `json:"subject,omitempty"`
 	Ts       time.Time                `json:"ts"`
@@ -6521,6 +6587,58 @@ func (t *EventPayload) MergeSessionSubmitSucceededPayload(v SessionSubmitSucceed
 	return err
 }
 
+// AsStoreDiskCriticalPayload returns the union data inside the EventPayload as a StoreDiskCriticalPayload
+func (t EventPayload) AsStoreDiskCriticalPayload() (StoreDiskCriticalPayload, error) {
+	var body StoreDiskCriticalPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromStoreDiskCriticalPayload overwrites any union data inside the EventPayload as the provided StoreDiskCriticalPayload
+func (t *EventPayload) FromStoreDiskCriticalPayload(v StoreDiskCriticalPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeStoreDiskCriticalPayload performs a merge with any union data inside the EventPayload, using the provided StoreDiskCriticalPayload
+func (t *EventPayload) MergeStoreDiskCriticalPayload(v StoreDiskCriticalPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsStoreDiskWarnPayload returns the union data inside the EventPayload as a StoreDiskWarnPayload
+func (t EventPayload) AsStoreDiskWarnPayload() (StoreDiskWarnPayload, error) {
+	var body StoreDiskWarnPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromStoreDiskWarnPayload overwrites any union data inside the EventPayload as the provided StoreDiskWarnPayload
+func (t *EventPayload) FromStoreDiskWarnPayload(v StoreDiskWarnPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeStoreDiskWarnPayload performs a merge with any union data inside the EventPayload, using the provided StoreDiskWarnPayload
+func (t *EventPayload) MergeStoreDiskWarnPayload(v StoreDiskWarnPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsStoreMaintenanceDonePayload returns the union data inside the EventPayload as a StoreMaintenanceDonePayload
 func (t EventPayload) AsStoreMaintenanceDonePayload() (StoreMaintenanceDonePayload, error) {
 	var body StoreMaintenanceDonePayload
@@ -7381,6 +7499,62 @@ func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeExtmsgUnbound(v T
 // MergeTypedEventStreamEnvelopeExtmsgUnbound performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeExtmsgUnbound
 func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeExtmsgUnbound(v TypedEventStreamEnvelopeExtmsgUnbound) error {
 	v.Type = "extmsg.unbound"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedEventStreamEnvelopeGcStoreDiskCritical returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeGcStoreDiskCritical
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeGcStoreDiskCritical() (TypedEventStreamEnvelopeGcStoreDiskCritical, error) {
+	var body TypedEventStreamEnvelopeGcStoreDiskCritical
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeGcStoreDiskCritical overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeGcStoreDiskCritical
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeGcStoreDiskCritical(v TypedEventStreamEnvelopeGcStoreDiskCritical) error {
+	v.Type = "gc.store.disk_critical"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeGcStoreDiskCritical performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeGcStoreDiskCritical
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeGcStoreDiskCritical(v TypedEventStreamEnvelopeGcStoreDiskCritical) error {
+	v.Type = "gc.store.disk_critical"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedEventStreamEnvelopeGcStoreDiskWarn returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeGcStoreDiskWarn
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeGcStoreDiskWarn() (TypedEventStreamEnvelopeGcStoreDiskWarn, error) {
+	var body TypedEventStreamEnvelopeGcStoreDiskWarn
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeGcStoreDiskWarn overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeGcStoreDiskWarn
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeGcStoreDiskWarn(v TypedEventStreamEnvelopeGcStoreDiskWarn) error {
+	v.Type = "gc.store.disk_warn"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeGcStoreDiskWarn performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeGcStoreDiskWarn
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeGcStoreDiskWarn(v TypedEventStreamEnvelopeGcStoreDiskWarn) error {
+	v.Type = "gc.store.disk_warn"
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -8571,6 +8745,10 @@ func (t TypedEventStreamEnvelope) ValueByDiscriminator() (interface{}, error) {
 		return t.AsTypedEventStreamEnvelopeExtmsgOutbound()
 	case "extmsg.unbound":
 		return t.AsTypedEventStreamEnvelopeExtmsgUnbound()
+	case "gc.store.disk_critical":
+		return t.AsTypedEventStreamEnvelopeGcStoreDiskCritical()
+	case "gc.store.disk_warn":
+		return t.AsTypedEventStreamEnvelopeGcStoreDiskWarn()
 	case "gc.store.maintenance.done":
 		return t.AsTypedEventStreamEnvelopeGcStoreMaintenanceDone()
 	case "gc.store.maintenance.failed":
@@ -9270,6 +9448,62 @@ func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeExtms
 // MergeTypedTaggedEventStreamEnvelopeExtmsgUnbound performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeExtmsgUnbound
 func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeExtmsgUnbound(v TypedTaggedEventStreamEnvelopeExtmsgUnbound) error {
 	v.Type = "extmsg.unbound"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeGcStoreDiskCritical returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeGcStoreDiskCritical
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeGcStoreDiskCritical() (TypedTaggedEventStreamEnvelopeGcStoreDiskCritical, error) {
+	var body TypedTaggedEventStreamEnvelopeGcStoreDiskCritical
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeGcStoreDiskCritical overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeGcStoreDiskCritical
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeGcStoreDiskCritical(v TypedTaggedEventStreamEnvelopeGcStoreDiskCritical) error {
+	v.Type = "gc.store.disk_critical"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeGcStoreDiskCritical performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeGcStoreDiskCritical
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeGcStoreDiskCritical(v TypedTaggedEventStreamEnvelopeGcStoreDiskCritical) error {
+	v.Type = "gc.store.disk_critical"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeGcStoreDiskWarn returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeGcStoreDiskWarn
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeGcStoreDiskWarn() (TypedTaggedEventStreamEnvelopeGcStoreDiskWarn, error) {
+	var body TypedTaggedEventStreamEnvelopeGcStoreDiskWarn
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeGcStoreDiskWarn overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeGcStoreDiskWarn
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeGcStoreDiskWarn(v TypedTaggedEventStreamEnvelopeGcStoreDiskWarn) error {
+	v.Type = "gc.store.disk_warn"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeGcStoreDiskWarn performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeGcStoreDiskWarn
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeGcStoreDiskWarn(v TypedTaggedEventStreamEnvelopeGcStoreDiskWarn) error {
+	v.Type = "gc.store.disk_warn"
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -10460,6 +10694,10 @@ func (t TypedTaggedEventStreamEnvelope) ValueByDiscriminator() (interface{}, err
 		return t.AsTypedTaggedEventStreamEnvelopeExtmsgOutbound()
 	case "extmsg.unbound":
 		return t.AsTypedTaggedEventStreamEnvelopeExtmsgUnbound()
+	case "gc.store.disk_critical":
+		return t.AsTypedTaggedEventStreamEnvelopeGcStoreDiskCritical()
+	case "gc.store.disk_warn":
+		return t.AsTypedTaggedEventStreamEnvelopeGcStoreDiskWarn()
 	case "gc.store.maintenance.done":
 		return t.AsTypedTaggedEventStreamEnvelopeGcStoreMaintenanceDone()
 	case "gc.store.maintenance.failed":

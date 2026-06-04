@@ -642,11 +642,17 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 	// Validate all duration strings in the fully-merged config.
 	prov.Warnings = append(prov.Warnings, ValidateDurations(root, path)...)
 	prov.Warnings = append(prov.Warnings, ValidateEventsRotation(root)...)
+	if err := ValidateBeadPolicyStorageCompatibility(root, path); err != nil {
+		return nil, nil, err
+	}
 
 	// Reject negative durations that parse cleanly but are silently
 	// destructive at runtime (e.g. a negative dolt_stop_timeout collapses
 	// the managed-dolt SIGTERM→SIGKILL grace to an immediate kill).
 	if err := ValidateNonNegativeDurations(root, path); err != nil {
+		return nil, nil, err
+	}
+	if err := ValidateDoltConfig(root, path); err != nil {
 		return nil, nil, err
 	}
 

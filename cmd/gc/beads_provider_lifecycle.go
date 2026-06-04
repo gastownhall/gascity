@@ -96,7 +96,12 @@ func isBreakerOpenError(err error) bool {
 }
 
 func cityDoltConfigHasLifecycleFields(cfg config.DoltConfig) bool {
-	return cfg.Host != "" || cfg.Port != 0 || cfg.ArchiveLevel != nil
+	return cfg.Host != "" ||
+		cfg.Port != 0 ||
+		cfg.ArchiveLevel != nil ||
+		cfg.MaxConnections != 0 ||
+		cfg.ReadTimeoutMillis != 0 ||
+		cfg.WriteTimeoutMillis != 0
 }
 
 func registerCityDoltConfig(cityPath string, cfg config.DoltConfig) {
@@ -659,7 +664,7 @@ func shouldRetryExecBdInit(err error) bool {
 	return strings.Contains(err.Error(), "bd schema not visible")
 }
 
-func isExecBeadsAlreadyInitializedError(err error) bool {
+func isBdAlreadyInitializedError(err error) bool {
 	if err == nil {
 		return false
 	}
@@ -810,7 +815,7 @@ func initBeadsForDir(cityPath, dir, prefix, doltDatabase string) error {
 				return err
 			}
 			if err := runProviderOpWithEnv(script, env, args...); err != nil {
-				if isExecBeadsAlreadyInitializedError(err) {
+				if isBdAlreadyInitializedError(err) {
 					return nil
 				}
 				return err
@@ -840,6 +845,9 @@ func initBeadsForDir(cityPath, dir, prefix, doltDatabase string) error {
 			}
 			env := overlayEnvEntries(baseEnv, overrides)
 			if err := runProviderOpWithEnv(script, env, args...); err != nil {
+				if isBdAlreadyInitializedError(err) {
+					return finalizeCanonicalBdScopeInit(cityPath, dir, prefix, canonicalDoltDatabase)
+				}
 				if shouldRetryExecBdInit(err) {
 					for attempt := 0; attempt < 3; attempt++ {
 						time.Sleep(time.Second)
@@ -927,6 +935,9 @@ func initDefaultRigBdStore(cityPath, dir, prefix, doltDatabase string) error {
 		args = append(args, "--database", canonicalDoltDatabase)
 	}
 	if _, err := beads.ExecCommandRunnerWithEnv(env)(dir, "bd", args...); err != nil {
+		if isBdAlreadyInitializedError(err) {
+			return finalizeCanonicalBdScopeInit(cityPath, dir, prefix, canonicalDoltDatabase)
+		}
 		return fmt.Errorf("bd init: %w", err)
 	}
 	return finalizeCanonicalBdScopeInit(cityPath, dir, prefix, canonicalDoltDatabase)
@@ -1973,6 +1984,9 @@ func providerLifecycleProcessEnvFromBase(cityPath, provider string, env []string
 		"GC_DOLT_LOCK_FILE",
 		"GC_DOLT_CONFIG_FILE",
 		"GC_DOLT_ARCHIVE_LEVEL",
+		"GC_DOLT_MAX_CONNECTIONS",
+		"GC_DOLT_READ_TIMEOUT_MILLIS",
+		"GC_DOLT_WRITE_TIMEOUT_MILLIS",
 	} {
 		env = removeEnvKey(env, key)
 	}
@@ -2002,6 +2016,15 @@ func providerLifecycleProcessEnvFromBase(cityPath, provider string, env []string
 		dc, _ := v.(config.DoltConfig)
 		if dc.ArchiveLevel != nil {
 			env = append(env, fmt.Sprintf("GC_DOLT_ARCHIVE_LEVEL=%d", *dc.ArchiveLevel))
+		}
+		if dc.MaxConnections > 0 {
+			env = append(env, fmt.Sprintf("GC_DOLT_MAX_CONNECTIONS=%d", dc.MaxConnections))
+		}
+		if dc.ReadTimeoutMillis > 0 {
+			env = append(env, fmt.Sprintf("GC_DOLT_READ_TIMEOUT_MILLIS=%d", dc.ReadTimeoutMillis))
+		}
+		if dc.WriteTimeoutMillis > 0 {
+			env = append(env, fmt.Sprintf("GC_DOLT_WRITE_TIMEOUT_MILLIS=%d", dc.WriteTimeoutMillis))
 		}
 	}
 	// `gc start` runs in the user's shell, which doesn't see vars set

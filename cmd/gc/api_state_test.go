@@ -1565,6 +1565,19 @@ func TestControllerStateUpdateClosesReplacedRigStores(t *testing.T) {
 	waitForCloseStoreSpy(t, oldStore)
 }
 
+func TestCloseBeadStoreHandleUnwrapsPolicyWrappedCachingStore(t *testing.T) {
+	backing := &closeStoreSpy{Store: beads.NewMemStore()}
+	cache := beads.NewCachingStore(backing, nil)
+	wrapped := wrapStoreWithBeadPolicies(cache, &config.City{})
+
+	if err := closeBeadStoreHandle(wrapped); err != nil {
+		t.Fatalf("closeBeadStoreHandle: %v", err)
+	}
+	if backing.closeCount() != 1 {
+		t.Fatalf("backing CloseStore calls = %d, want 1", backing.closeCount())
+	}
+}
+
 func TestControllerStateUpdateKeepsStaleRigStoreUsableDuringReload(t *testing.T) {
 	prevOpen := newControllerStateOpenCityStore
 	t.Cleanup(func() { newControllerStateOpenCityStore = prevOpen })
@@ -2210,9 +2223,10 @@ provider = "file"
 	if !factoryCalled {
 		t.Fatal("buildStores did not route bd-backed rig through store factory")
 	}
-	cached, ok := stores["frontend"].(*beads.CachingStore)
+	frontendStore := underlyingPolicyStoreForTest(stores["frontend"])
+	cached, ok := frontendStore.(*beads.CachingStore)
 	if !ok {
-		t.Fatalf("frontend store = %T, want caching store", stores["frontend"])
+		t.Fatalf("frontend store = %T, want caching store", frontendStore)
 	}
 	if cached.Backing() != nativeBacking {
 		t.Fatalf("frontend backing = %T, want native factory backing", cached.Backing())

@@ -142,6 +142,58 @@ func TestCloseSubtreeClosesLogicalRootMembersAndTheirChildren(t *testing.T) {
 	}
 }
 
+func TestCloseSubtreeClosesLogicalMembersAcrossStorageTiers(t *testing.T) {
+	store := beads.NewMemStore()
+	root, err := store.Create(beads.Bead{Title: "root", Type: "molecule"})
+	if err != nil {
+		t.Fatalf("create root: %v", err)
+	}
+	detached, err := store.Create(beads.Bead{
+		Title:     "ephemeral detached control",
+		Ephemeral: true,
+		Metadata: map[string]string{
+			"gc.root_bead_id": root.ID,
+		},
+	})
+	if err != nil {
+		t.Fatalf("create detached: %v", err)
+	}
+	ephemeralChild, err := store.Create(beads.Bead{
+		Title:     "ephemeral child",
+		ParentID:  detached.ID,
+		Ephemeral: true,
+	})
+	if err != nil {
+		t.Fatalf("create ephemeral child: %v", err)
+	}
+	noHistoryChild, err := store.Create(beads.Bead{
+		Title:     "no-history child",
+		ParentID:  ephemeralChild.ID,
+		NoHistory: true,
+	})
+	if err != nil {
+		t.Fatalf("create no-history child: %v", err)
+	}
+
+	closed, err := CloseSubtree(store, root.ID)
+	if err != nil {
+		t.Fatalf("CloseSubtree: %v", err)
+	}
+	if closed != 4 {
+		t.Fatalf("CloseSubtree closed %d beads, want 4", closed)
+	}
+
+	for _, id := range []string{root.ID, detached.ID, ephemeralChild.ID, noHistoryChild.ID} {
+		b, err := store.Get(id)
+		if err != nil {
+			t.Fatalf("Get(%s): %v", id, err)
+		}
+		if b.Status != "closed" {
+			t.Fatalf("%s status = %q, want closed", id, b.Status)
+		}
+	}
+}
+
 // TestCloseSubtreeOrdersBlockersBeforeBlocked models the typical
 // formula step subtree: a molecule root with N child step beads chained
 // by depends_on. CloseSubtree must emit closes in topological

@@ -29,6 +29,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ceiling for `gc dolt sync` (default 1800s, replacing the prior fixed 120s
   that SIGKILLed large first pushes). Metadata queries keep their own 120s
   bound.
+- **ENOSPC pre-flight for managed Dolt** (`GC_DOLT_MIN_FREE_BYTES`,
+  `GC_DOLT_WARN_FREE_BYTES`): managed-Dolt startup and the store-maintenance
+  compaction loop now check container free space via `statvfs(2)` before
+  performing disk-growing operations. Below the critical floor (default
+  500 MiB) startup is refused and compaction is skipped; below the soft floor
+  (default 2 GiB) a `gc.store.disk_warn` event is emitted and operations
+  proceed. Fails open on probe error and is disabled entirely when
+  `GC_DOLT_MIN_FREE_BYTES=0`. Uses `f_bavail` (APFS-safe — excludes purgeable
+  space). Addresses the root trigger of the 2026-06-01 fleet-drain incident.
 
 ### Fixed
 

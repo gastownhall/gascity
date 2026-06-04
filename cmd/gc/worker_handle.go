@@ -544,7 +544,7 @@ func resolvedWorkerRuntimeWithConfigAndMetadata(cityPath string, cfg *config.Cit
 	return &worker.ResolvedRuntime{
 		Command:    command,
 		WorkDir:    workDir,
-		Provider:   firstNonEmptyGCString(info.Provider, resolved.Name),
+		Provider:   resolvedWorkerRuntimeProviderLabel(resolved, transport, info),
 		SessionEnv: sessionEnv,
 		Hints: runtime.Config{
 			WorkDir:                workDir,
@@ -565,6 +565,13 @@ func resolvedWorkerRuntimeWithConfigAndMetadata(cityPath string, cfg *config.Cit
 			SessionIDFlag: resolved.SessionIDFlag,
 		},
 	}, nil
+}
+
+func resolvedWorkerRuntimeProviderLabel(resolved *config.ResolvedProvider, transport string, info session.Info) string {
+	if strings.TrimSpace(configuredWorkerRuntimeCommand(resolved, transport)) != "" {
+		return firstNonEmptyGCString(resolved.Name, info.Provider)
+	}
+	return firstNonEmptyGCString(info.Provider, resolved.Name)
 }
 
 func resolvedWorkerRuntimeCommandForTransport(cityPath string, resolved *config.ResolvedProvider, transport, storedCommand, fallbackProvider string, metadata map[string]string) string {

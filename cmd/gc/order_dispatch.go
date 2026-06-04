@@ -37,7 +37,11 @@ const (
 	labelTriggerEnvFailed = "trigger-env-failed"
 
 	orderTrackingSweepOrder                = "order-tracking-sweep"
+	orderTrackingBeadPolicyName            = "order_tracking"
 	defaultOrderTrackingSweepStaleAfter    = 10 * time.Minute
+	defaultOrderTrackingDeleteAfterClose   = 7 * 24 * time.Hour
+	minClosedOrderTrackingRetained         = 10
+	legacyOrderTrackingRetentionBucket     = "\x00legacy-unscoped-order-tracking"
 	orderTrackingSweepWatchdogInterval     = 30 * time.Second
 	orderTrackingSweepWatchdogStaleAfter   = 2 * time.Minute
 	orderTrackingSweepMetadataReason       = "stale-order-tracking"
@@ -461,14 +465,14 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 			storeKeysForGate = append(storeKeysForGate, orderStoreTargetKey(legacyOrderCityTarget(cityPath, m.cfg)))
 		}
 		scoped := a.ScopedName()
-		hasOpenWork, err := gateOpenWorkBounded(ctx, orderGateTimeout, scoped, func() (bool, error) {
-			return m.hasOpenWorkInStoresStrict(storesForGate, scoped)
+		hasOpenTracking, err := gateOpenWorkBounded(ctx, orderGateTimeout, scoped, func() (bool, error) {
+			return trackingIndex.hasOpenTracking(storesForGate, storeKeysForGate, scoped)
 		})
 		if err != nil {
 			logDispatchError(m.stderr, "gc: order dispatch: checking open work for %s: %v", scoped, err)
 			continue
 		}
-		if hasOpenWork {
+		if hasOpenTracking {
 			continue
 		}
 
@@ -506,7 +510,7 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 			trackingBead, createErr := store.Create(beads.Bead{
 				Title:     "order:" + scoped,
 				Labels:    []string{"order-run:" + scoped, labelOrderTracking, labelTriggerEnvFailed},
-				Ephemeral: true,
+				NoHistory: true,
 			})
 			if createErr != nil {
 				logDispatchError(m.stderr, "gc: order dispatch: creating trigger env failure tracking bead for %s: %v", scoped, createErr)
@@ -553,7 +557,7 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 		// Skip dispatch if previous work hasn't been processed yet.
 		// Bound the wisp-aware open-work gate (#2921) with our per-order
 		// timeout so a slow store can't starve later orders.
-		hasOpenWork, err = gateOpenWorkBounded(ctx, orderGateTimeout, scoped, func() (bool, error) {
+		hasOpenWork, err := gateOpenWorkBounded(ctx, orderGateTimeout, scoped, func() (bool, error) {
 			return trackingIndex.hasOpenWork(storesForGate, storeKeysForGate, scoped, m.hasOpenWorkInStoresStrict, true)
 		})
 		if err != nil {
@@ -569,7 +573,7 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 		trackingBead, err := store.Create(beads.Bead{
 			Title:     "order:" + scoped,
 			Labels:    []string{"order-run:" + scoped, labelOrderTracking},
-			Ephemeral: true,
+			NoHistory: true,
 		})
 		if err != nil {
 			logDispatchError(m.stderr, "gc: order dispatch: creating tracking bead for %s: %v", scoped, err)
@@ -667,6 +671,29 @@ func newOrderDispatchTrackingIndex() *orderDispatchTrackingIndex {
 		entries: make(map[string]map[string]orderTrackingSummary),
 		errs:    make(map[string]error),
 	}
+}
+
+func (idx *orderDispatchTrackingIndex) hasOpenTracking(
+	stores []beads.Store,
+	storeKeys []string,
+	scopedName string,
+) (bool, error) {
+	if idx == nil {
+		return false, nil
+	}
+	for i, store := range stores {
+		if store == nil {
+			continue
+		}
+		entries, err := idx.entriesForStore(store, indexStoreKey(storeKeys, i))
+		if err != nil {
+			return false, err
+		}
+		if entries[scopedName].openTracking {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func (idx *orderDispatchTrackingIndex) hasOpenWork(
@@ -1545,10 +1572,37 @@ func beadLabelsContain(labels []string, want string) bool {
 }
 
 type orderTrackingSweepResult struct {
-	trackingClosed int
-	wispClosed     int
-	storesSwept    int
-	sweptStoreKeys map[string]struct{}
+	trackingClosed  int
+	wispClosed      int
+	trackingDeleted int
+	storesSwept     int
+	sweptStoreKeys  map[string]struct{}
+}
+
+type orderTrackingRetentionSweepResult struct {
+	deleted     int
+	storesSwept int
+}
+
+type orderTrackingRetentionPolicy struct {
+	deleteAfterClose time.Duration
+	retainLast       int
+}
+
+func orderTrackingRetentionPolicyForConfig(cfg *config.City) orderTrackingRetentionPolicy {
+	policy := orderTrackingRetentionPolicy{
+		deleteAfterClose: defaultOrderTrackingDeleteAfterClose,
+		retainLast:       minClosedOrderTrackingRetained,
+	}
+	if cfg == nil {
+		return policy
+	}
+	if configured, ok := cfg.Beads.Policies[orderTrackingBeadPolicyName]; ok {
+		if duration := configured.DeleteAfterCloseDuration(); duration > 0 {
+			policy.deleteAfterClose = duration
+		}
+	}
+	return policy
 }
 
 // sweepStaleOrderTracking closes open order-tracking beads whose creation
@@ -1694,6 +1748,109 @@ func sweepStaleOrderTrackingWithOptionsLimit(store beads.Store, now time.Time, s
 		}
 	}
 	return result, nil
+}
+
+func sweepClosedOrderTrackingRetentionAcrossStores(stores []beads.Store, now time.Time, policy orderTrackingRetentionPolicy, onlyOrders map[string]struct{}) (orderTrackingRetentionSweepResult, error) {
+	result := orderTrackingRetentionSweepResult{}
+	var errs []error
+	for i, store := range stores {
+		if store == nil {
+			continue
+		}
+		n, err := sweepClosedOrderTrackingRetention(store, now, policy, onlyOrders)
+		result.deleted += n
+		if err != nil {
+			errs = append(errs, fmt.Errorf("pruning closed order-tracking %s: %w", orderTrackingSweepStoreLabel(store, i), err))
+			continue
+		}
+		result.storesSwept++
+	}
+	return result, errors.Join(errs...)
+}
+
+func sweepClosedOrderTrackingRetention(store beads.Store, now time.Time, policy orderTrackingRetentionPolicy, onlyOrders map[string]struct{}) (int, error) {
+	if store == nil {
+		return 0, fmt.Errorf("bead store unavailable")
+	}
+	if policy.deleteAfterClose <= 0 {
+		return 0, nil
+	}
+	// retainLast is intentionally package-internal and hardcoded; config can
+	// shorten the TTL but cannot remove the recent-history floor.
+	if policy.retainLast < minClosedOrderTrackingRetained {
+		policy.retainLast = minClosedOrderTrackingRetained
+	}
+	entries, err := beads.HandlesFor(store).Live.List(beads.ListQuery{
+		Status:   "closed",
+		Label:    labelOrderTracking,
+		Sort:     beads.SortCreatedDesc,
+		TierMode: beads.TierBoth,
+	})
+	if err != nil {
+		return 0, fmt.Errorf("listing closed order-tracking beads: %w", err)
+	}
+
+	byOrder := make(map[string][]beads.Bead)
+	for _, entry := range entries {
+		scopedName, ok := orderTrackingRetentionBucket(entry, onlyOrders)
+		if len(onlyOrders) > 0 {
+			if !ok {
+				continue
+			}
+		}
+		if !ok {
+			scopedName = legacyOrderTrackingRetentionBucket
+		}
+		byOrder[scopedName] = append(byOrder[scopedName], entry)
+	}
+
+	cutoff := now.Add(-policy.deleteAfterClose)
+	deleted := 0
+	var deleteErr error
+	for _, entries := range byOrder {
+		sort.Slice(entries, func(i, j int) bool {
+			left := orderTrackingClosedReferenceTime(entries[i])
+			right := orderTrackingClosedReferenceTime(entries[j])
+			if left.Equal(right) {
+				return entries[i].ID > entries[j].ID
+			}
+			return left.After(right)
+		})
+		if len(entries) <= policy.retainLast {
+			continue
+		}
+		for _, entry := range entries[policy.retainLast:] {
+			if !orderTrackingClosedReferenceTime(entry).Before(cutoff) {
+				continue
+			}
+			if err := deleteWorkflowBead(store, entry.ID); err != nil {
+				deleteErr = errors.Join(deleteErr, fmt.Errorf("deleting closed order-tracking bead %q: %w", entry.ID, err))
+				continue
+			}
+			deleted++
+		}
+	}
+	return deleted, deleteErr
+}
+
+func orderTrackingRetentionBucket(entry beads.Bead, onlyOrders map[string]struct{}) (string, bool) {
+	scopedName, ok := orderNameFromTrackingBead(entry)
+	if !ok {
+		return "", false
+	}
+	if len(onlyOrders) > 0 {
+		if _, ok := onlyOrders[scopedName]; !ok {
+			return "", false
+		}
+	}
+	return scopedName, true
+}
+
+func orderTrackingClosedReferenceTime(b beads.Bead) time.Time {
+	if !b.UpdatedAt.IsZero() {
+		return b.UpdatedAt
+	}
+	return b.CreatedAt
 }
 
 func sweepStaleOrderWispSubtrees(store beads.Store, cutoff time.Time, onlyOrders map[string]struct{}, initiator string) (int, error) {

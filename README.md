@@ -79,7 +79,9 @@ brew install gastownhall/gascity/gascity
 gc version
 ```
 
-Or build from source (requires `make` and Go 1.25+):
+Or build from source (requires `make`, Go 1.25+, and ICU for a transitive Dolt
+CGO dependency — `brew install icu4c` on macOS, `apt install libicu-dev` on
+Linux; on macOS the Makefile auto-detects the keg-only `icu4c` paths):
 
 ```bash
 make install

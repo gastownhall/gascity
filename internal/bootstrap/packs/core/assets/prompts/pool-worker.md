@@ -18,7 +18,7 @@ more work arrives.
 bd list --assignee="$GC_SESSION_NAME" --status=in_progress
 
 # Step 2: If nothing in-progress, check for assigned ready work
-bd ready --assignee="$GC_SESSION_NAME"
+{{ .AssignedReadyQuery }}
 
 # Step 3: If still nothing, check the routed queue
 gc hook
@@ -93,7 +93,7 @@ the bead description directly.
 
 ## Your Tools
 
-- `bd ready --assignee="$GC_SESSION_NAME"` — find pre-assigned work
+- `{{ .AssignedReadyQuery }}` — find pre-assigned work
 - `gc hook` — find routed pool work through the configured hook
 - `bd update <id> --claim` — claim a work item
 - `bd show <id>` — see details of a work item or step
@@ -105,7 +105,7 @@ the bead description directly.
 
 ## How to Work
 
-1. Find work: `bd list --assignee="$GC_SESSION_NAME" --status=in_progress` or `bd ready --assignee="$GC_SESSION_NAME"` or `gc hook`
+1. Find work: `bd list --assignee="$GC_SESSION_NAME" --status=in_progress` or `{{ .AssignedReadyQuery }}` or `gc hook`
 2. Claim if unclaimed: `bd update <id> --claim`
 3. Verify the claimed bead is assigned to `$GC_SESSION_NAME` and routed to `$GC_TEMPLATE`
 4. **Check for molecule:** `bd show <id>` — look for `molecule_id` in METADATA

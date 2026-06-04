@@ -87,6 +87,10 @@ var (
 	supervisorProcessGroupPollPeriod                    = 20 * time.Millisecond
 	supervisorRuntimeGOOS                               = goruntime.GOOS
 	supervisorWorkspaceServiceCleanupWarnings io.Writer = os.Stderr
+	// supervisorInstallForce is set true by --force on 'gc supervisor install'.
+	// It permits overwriting an existing service unit that references a
+	// different gc binary. Exposed as a var so tests can override it directly.
+	supervisorInstallForce bool
 )
 
 const supervisorServiceFileMode os.FileMode = 0o600
@@ -502,6 +506,94 @@ func platformSupervisorHomeOverrideError() (string, bool) {
 	return fmt.Sprintf("HOME override %q differs from the user home %q; platform supervisor requires the real HOME. Keep HOME unchanged and use GC_HOME for isolated runs", envHome, lookup.HomeDir), true
 }
 
+// supervisorSystemdExecStartBinary returns the gc binary path embedded in the
+// ExecStart line of a systemd unit file, or "" if the line is absent or
+// cannot be parsed. The path may be quoted (strconv.Quote format) or bare.
+func supervisorSystemdExecStartBinary(unit string) string {
+	const prefix = "ExecStart="
+	for _, line := range strings.Split(unit, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, prefix) {
+			continue
+		}
+		rest := strings.TrimPrefix(line, prefix)
+		if len(rest) == 0 {
+			return ""
+		}
+		if rest[0] == '"' {
+			// Find the closing quote, honoring backslash escapes.
+			i := 1
+			for i < len(rest) {
+				if rest[i] == '\\' {
+					i += 2
+					continue
+				}
+				if rest[i] == '"' {
+					i++
+					break
+				}
+				i++
+			}
+			unquoted, err := strconv.Unquote(rest[:i])
+			if err != nil {
+				return rest[:i]
+			}
+			return unquoted
+		}
+		// Unquoted: take up to the first space.
+		if idx := strings.IndexByte(rest, ' '); idx >= 0 {
+			return rest[:idx]
+		}
+		return rest
+	}
+	return ""
+}
+
+// supervisorLaunchdPlistGCPath returns the first ProgramArguments string
+// (the gc binary path) from a launchd plist, or "" if not found.
+func supervisorLaunchdPlistGCPath(plist string) string {
+	idx := strings.Index(plist, "<key>ProgramArguments</key>")
+	if idx < 0 {
+		return ""
+	}
+	rest := plist[idx:]
+	arrayStart := strings.Index(rest, "<array>")
+	if arrayStart < 0 {
+		return ""
+	}
+	rest = rest[arrayStart+len("<array>"):]
+	strStart := strings.Index(rest, "<string>")
+	if strStart < 0 {
+		return ""
+	}
+	rest = rest[strStart+len("<string>"):]
+	strEnd := strings.Index(rest, "</string>")
+	if strEnd < 0 {
+		return ""
+	}
+	raw := rest[:strEnd]
+	// Reverse xmlEscape: apply multi-char entities before &amp; to avoid
+	// double-unescaping sequences like &amp;lt;.
+	r := strings.NewReplacer("&lt;", "<", "&gt;", ">", "&quot;", "\"", "&apos;", "'", "&amp;", "&")
+	return r.Replace(raw)
+}
+
+// supervisorSameBinary reports whether path a and path b refer to the same
+// gc binary. It first compares cleaned string paths (handles both pointing
+// at the same location), then falls back to inode comparison (handles one
+// being a symlink to the other).
+func supervisorSameBinary(a, b string) bool {
+	if filepath.Clean(a) == filepath.Clean(b) {
+		return true
+	}
+	infoA, errA := os.Stat(a)
+	infoB, errB := os.Stat(b)
+	if errA == nil && errB == nil {
+		return os.SameFile(infoA, infoB)
+	}
+	return false
+}
+
 func waitForSupervisorPID() int {
 	deadline := time.Now().Add(supervisorReadyTimeout)
 	for {
@@ -592,7 +684,7 @@ func doSupervisorLogs(numLines int, follow bool, stdout, stderr io.Writer) int {
 }
 
 func newSupervisorInstallCmd(stdout, stderr io.Writer) *cobra.Command {
-	return &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   "install",
 		Short: "Install the supervisor as a platform service",
 		Long: `Install the machine-wide supervisor as a platform service that
@@ -605,6 +697,9 @@ starts on login.`,
 			return nil
 		},
 	}
+	cmd.Flags().BoolVar(&supervisorInstallForce, "force", false,
+		"overwrite an existing service unit even if it references a different gc binary")
+	return cmd
 }
 
 func doSupervisorInstall(stdout, stderr io.Writer) int {
@@ -1083,8 +1178,19 @@ func systemdEnv(name, value string) string {
 	return name + "=" + strconv.Quote(value)
 }
 
+// supervisorSystemdQuotePath quotes a path for use in a systemd ExecStart line.
+// Paths that contain no spaces, double-quotes, or backslashes are returned as-is;
+// all others are wrapped in strconv.Quote to produce Go-style double-quoted strings,
+// which systemd unit parsers understand as the quoted-exec-path format.
+func supervisorSystemdQuotePath(s string) string {
+	if strings.ContainsAny(s, " \"\\") {
+		return strconv.Quote(s)
+	}
+	return s
+}
+
 func renderSupervisorTemplate(tmplStr string, data *supervisorServiceData) (string, error) {
-	funcMap := template.FuncMap{"xmlesc": xmlEscape, "systemdenv": systemdEnv, "systemdpath": strconv.Quote}
+	funcMap := template.FuncMap{"xmlesc": xmlEscape, "systemdenv": systemdEnv, "systemdpath": supervisorSystemdQuotePath}
 	tmpl, err := template.New("service").Funcs(funcMap).Parse(tmplStr)
 	if err != nil {
 		return "", err
@@ -1439,6 +1545,17 @@ func installSupervisorLaunchd(data *supervisorServiceData, stdout, stderr io.Wri
 		fmt.Fprintf(stderr, "gc supervisor install: reading existing plist: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	if hadCurrent && !supervisorInstallForce {
+		if existingBinary := supervisorLaunchdPlistGCPath(string(existing)); existingBinary != "" && !supervisorSameBinary(existingBinary, data.GCPath) {
+			fmt.Fprintf(stderr, //nolint:errcheck // best-effort stderr
+				"gc supervisor install: existing plist %q references binary %q but the current gc binary resolves to %q; "+
+					"refusing to overwrite a plist installed from a different binary. "+
+					"Install gc to a stable location first (e.g. 'make install'), then rerun 'gc supervisor install'. "+
+					"To override, pass --force.\n",
+				path, existingBinary, data.GCPath)
+			return 1
+		}
+	}
 	if contentUnchanged && supervisorAliveHook() != 0 {
 		fmt.Fprintf(stdout, "Installed launchd service: %s\n", path) //nolint:errcheck // best-effort stdout
 		return 0
@@ -1556,6 +1673,27 @@ func stopSupervisorSystemdForWarmRefresh(service string) ([]string, error) {
 }
 
 func installSupervisorSystemd(data *supervisorServiceData, stdout, stderr io.Writer) int {
+	// Check the binary guard before probing systemd so a refused install
+	// emits no systemctl calls.
+	path := supervisorSystemdServicePath()
+	existing, err := os.ReadFile(path)
+	hadCurrent := err == nil
+	if err != nil && !os.IsNotExist(err) {
+		fmt.Fprintf(stderr, "gc supervisor install: reading existing unit: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if hadCurrent && !supervisorInstallForce {
+		if existingBinary := supervisorSystemdExecStartBinary(string(existing)); existingBinary != "" && !supervisorSameBinary(existingBinary, data.GCPath) {
+			fmt.Fprintf(stderr, //nolint:errcheck // best-effort stderr
+				"gc supervisor install: existing unit %q references binary %q but the current gc binary resolves to %q; "+
+					"refusing to overwrite a unit installed from a different binary. "+
+					"Install gc to a stable location first (e.g. 'make install'), then rerun 'gc supervisor install'. "+
+					"To override, pass --force.\n",
+				path, existingBinary, data.GCPath)
+			return 1
+		}
+	}
+
 	// Bail out before we touch the unit file when there is no per-user
 	// systemd manager to load it. Otherwise daemon-reload + enable both
 	// fail and the rollback path tries daemon-reload again, producing
@@ -1580,15 +1718,8 @@ func installSupervisorSystemd(data *supervisorServiceData, stdout, stderr io.Wri
 		return 1
 	}
 
-	path := supervisorSystemdServicePath()
 	service := supervisorSystemdServiceName()
 	legacyPresent := legacySupervisorTargetsCurrentHome(legacySupervisorSystemdServicePath())
-	existing, err := os.ReadFile(path)
-	hadCurrent := err == nil
-	if err != nil && !os.IsNotExist(err) {
-		fmt.Fprintf(stderr, "gc supervisor install: reading existing unit: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		fmt.Fprintf(stderr, "gc supervisor install: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1

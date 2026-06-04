@@ -9,7 +9,9 @@ into the [Tutorials](/tutorials/index) — what the major parts are, how work
 travels through the system, and how agents get spawned and talk to each other.
 
 You do **not** need to read any internal engineering notes to follow along.
-Everything here maps onto commands you can run with `gc`.
+Everything here maps onto commands you can run with `gc`. Once you have the
+mental model, the [Primitives Reference](/concepts/primitives) is the deeper,
+per-concept companion to this page — dip into it for any single building block.
 
 ## The core idea: work is the primitive
 
@@ -291,6 +293,8 @@ bd show <bead-id> --watch
 
 ## Where to go next
 
+- [Primitives Reference](/concepts/primitives) — the deeper, per-concept
+  reference for the nine building blocks introduced above.
 - [Quickstart](/getting-started/quickstart) — the same path above, in a few
   minutes.
 - [Tutorial 01: Cities and Rigs](/tutorials/01-cities-and-rigs) — start the

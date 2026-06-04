@@ -1,6 +1,20 @@
 description = """
 Detect and clean stale Dolt databases and orphan Dolt processes.
 
+After claiming this vapor wisp, run:
+
+```bash
+gc bd formula show mol-dog-stale-db --json
+```
+
+Follow the step descriptions in order. When finished, close this bead, then run:
+
+```bash
+gc runtime drain-ack
+```
+
+The drain-ack tells the controller this session is done.
+
 This formula shells out to `gc dolt-cleanup --json`, parses the
 `gc.dolt.cleanup.v1` envelope, and emits one summary line per stage
 to `gc events` so operators skimming a long scrollback can spot
@@ -51,6 +65,7 @@ separate agent interactions, so scan, decision, apply, and report state
 must stay inside one shell execution instead of relying on variables to
 cross step boundaries."""
 formula = "mol-dog-stale-db"
+phase = "vapor"
 
 [vars]
 [vars.max_orphans_for_sql]

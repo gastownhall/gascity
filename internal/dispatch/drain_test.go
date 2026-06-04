@@ -850,6 +850,47 @@ func TestEnsureDrainUnitConvoyRepairsExistingTrack(t *testing.T) {
 	}
 }
 
+type recordingDrainUnitStore struct {
+	beads.Store
+	listMetadataOpts [][]beads.QueryOpt
+}
+
+func (s *recordingDrainUnitStore) ListByMetadata(filters map[string]string, limit int, opts ...beads.QueryOpt) ([]beads.Bead, error) {
+	s.listMetadataOpts = append(s.listMetadataOpts, opts)
+	return s.Store.ListByMetadata(filters, limit, opts...)
+}
+
+func TestEnsureDrainUnitConvoyLooksAcrossBothTiers(t *testing.T) {
+	store := &recordingDrainUnitStore{Store: beads.NewMemStore()}
+	control, err := store.Create(beads.Bead{Title: "drain", Type: "task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent, err := store.Create(beads.Bead{Title: "parent", Type: "convoy"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	member, err := store.Create(beads.Bead{Title: "member", Type: "task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	row := drainManifestRow{
+		Index:    0,
+		MemberID: member.ID,
+		UnitKey:  "drain-unit:test:0:" + member.ID,
+	}
+
+	if _, _, err := ensureDrainUnitConvoy(store, control, parent.ID, 1, row, member); err != nil {
+		t.Fatalf("ensureDrainUnitConvoy: %v", err)
+	}
+	if len(store.listMetadataOpts) == 0 {
+		t.Fatal("ListByMetadata was not called")
+	}
+	if got := beads.TierModeFromOpts(store.listMetadataOpts[0]); got != beads.TierBoth {
+		t.Fatalf("ListByMetadata tier = %v, want TierBoth", got)
+	}
+}
+
 func TestProcessDrainExclusiveFailsClosedForInvalidItemFormula(t *testing.T) {
 	formulatest.EnableV2ForTest(t)
 	dir := t.TempDir()
