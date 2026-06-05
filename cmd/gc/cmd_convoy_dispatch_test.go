@@ -4326,6 +4326,75 @@ func TestRunControlDispatcherQuarantinesMalformedFanoutScopeBody(t *testing.T) {
 	}
 }
 
+func TestRunControlDispatcherQuarantinesRalphControlMissingIteration(t *testing.T) {
+	clearGCEnv(t)
+
+	// A ralph control bead with no iteration sub-DAG — the unprocessable
+	// shape left behind by the pre-seed-fix ralph-in-ralph re-spawn gap.
+	// The dispatcher must quarantine it as a malformed control graph and
+	// return nil so the serve loop keeps draining the rest of the queue.
+	// Regression for gastownhall/gascity#2798.
+	store := beads.NewMemStore()
+	workflow, err := store.Create(beads.Bead{
+		Title: "workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create workflow: %v", err)
+	}
+	control, err := store.Create(beads.Bead{
+		Title: "inner loop",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":          "ralph",
+			"gc.root_bead_id":  workflow.ID,
+			"gc.step_ref":      "mol-test.outer.iteration.2.inner",
+			"gc.step_id":       "inner",
+			"gc.max_attempts":  "3",
+			"gc.control_epoch": "1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create control: %v", err)
+	}
+
+	var stderr bytes.Buffer
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	if err := runControlDispatcherWithStoreAndConfig(t.TempDir(), t.TempDir(), store, control, control.ID, cfg, io.Discard, &stderr); err != nil {
+		t.Fatalf("runControlDispatcherWithStoreAndConfig: %v", err)
+	}
+
+	after, err := store.Get(control.ID)
+	if err != nil {
+		t.Fatalf("get control: %v", err)
+	}
+	if after.Status != "closed" {
+		t.Fatalf("control status = %q, want closed", after.Status)
+	}
+	if got := after.Metadata["gc.outcome"]; got != "fail" {
+		t.Fatalf("gc.outcome = %q, want fail", got)
+	}
+	if got := after.Metadata["gc.failure_reason"]; got != "malformed_control_graph" {
+		t.Fatalf("gc.failure_reason = %q, want malformed_control_graph", got)
+	}
+	if got := after.Metadata["gc.control_quarantined"]; got != "true" {
+		t.Fatalf("gc.control_quarantined = %q, want true", got)
+	}
+	if got := after.Metadata["gc.control_quarantine_reason"]; !strings.Contains(got, "no iteration found") {
+		t.Fatalf("gc.control_quarantine_reason = %q, want no iteration found", got)
+	}
+	if !slices.Contains(after.Labels, "gc:control-quarantined") {
+		t.Fatalf("labels = %#v, want gc:control-quarantined", after.Labels)
+	}
+	if got := stderr.String(); !strings.Contains(got, "control dispatch: quarantined bead="+control.ID) {
+		t.Fatalf("stderr = %q, want quarantine message", got)
+	}
+}
+
 func TestRunControlDispatcherQuarantinesGenericControlFailure(t *testing.T) {
 	clearGCEnv(t)
 
