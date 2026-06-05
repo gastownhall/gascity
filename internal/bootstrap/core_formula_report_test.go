@@ -7,8 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/gastownhall/gascity/internal/beads"
-	"github.com/gastownhall/gascity/internal/molecule"
+	"github.com/gastownhall/gascity/internal/formula"
 )
 
 func coreFormulaSearchPaths(t *testing.T) []string {
@@ -20,70 +19,62 @@ func coreFormulaSearchPaths(t *testing.T) []string {
 	return []string{filepath.Join(filepath.Dir(filename), "packs", "core", "formulas")}
 }
 
-func cookCorePolecatReport(t *testing.T) (*beads.MemStore, *molecule.Result) {
+func compileCorePolecatReport(t *testing.T) *formula.Recipe {
 	t.Helper()
-	store := beads.NewMemStore()
-	result, err := molecule.Cook(context.Background(), store, "mol-polecat-report", coreFormulaSearchPaths(t), molecule.Options{
-		Vars: map[string]string{
-			"issue":       "ga-source",
-			"base_branch": "main",
-		},
+	prev := formula.IsFormulaV2Enabled()
+	formula.SetFormulaV2Enabled(true)
+	t.Cleanup(func() { formula.SetFormulaV2Enabled(prev) })
+
+	recipe, err := formula.Compile(context.Background(), "mol-polecat-report", coreFormulaSearchPaths(t), map[string]string{
+		"convoy_id":   "gc-convoy",
+		"base_branch": "main",
 	})
 	if err != nil {
-		t.Fatalf("molecule.Cook mol-polecat-report: %v", err)
+		t.Fatalf("compile mol-polecat-report: %v", err)
 	}
-	return store, result
+	return recipe
 }
 
-func TestCoreMolPolecatReportCookCreatesWriteReportTerminalStep(t *testing.T) {
-	store, result := cookCorePolecatReport(t)
+func TestCoreMolPolecatReportCompilesWriteReportTerminalStep(t *testing.T) {
+	recipe := compileCorePolecatReport(t)
 
-	if result.RootID == "" {
-		t.Fatal("RootID is empty")
+	root := recipe.RootStep()
+	if root == nil {
+		t.Fatal("root step missing")
 	}
-	root, err := store.Get(result.RootID)
-	if err != nil {
-		t.Fatalf("get root: %v", err)
-	}
-	if root.Ref != "mol-polecat-report" {
-		t.Fatalf("root Ref = %q, want mol-polecat-report", root.Ref)
+	if got := root.Metadata["gc.formula_contract"]; got != "graph.v2" {
+		t.Fatalf("root gc.formula_contract = %q, want graph.v2", got)
 	}
 
-	writeReportID := result.IDMapping["mol-polecat-report.write-report"]
-	if writeReportID == "" {
-		t.Fatalf("IDMapping missing mol-polecat-report.write-report: %#v", result.IDMapping)
-	}
-	writeReport, err := store.Get(writeReportID)
-	if err != nil {
-		t.Fatalf("get write-report: %v", err)
-	}
-	if writeReport.ParentID != result.RootID {
-		t.Fatalf("write-report ParentID = %q, want root %q", writeReport.ParentID, result.RootID)
-	}
-	if writeReport.Metadata["gc.step_ref"] != "mol-polecat-report.write-report" {
-		t.Fatalf("write-report gc.step_ref = %q, want mol-polecat-report.write-report", writeReport.Metadata["gc.step_ref"])
+	writeReport := recipe.StepByID("mol-polecat-report.write-report")
+	if writeReport == nil {
+		t.Fatal("recipe missing mol-polecat-report.write-report step")
 	}
 
-	dependents, err := store.DepList(writeReportID, "up")
-	if err != nil {
-		t.Fatalf("DepList write-report up: %v", err)
-	}
-	if len(dependents) != 0 {
-		t.Fatalf("write-report should be terminal, but dependents = %+v", dependents)
+	// write-report must be terminal: only the synthetic graph.v2
+	// workflow-finalize step may depend on it.
+	for _, dep := range recipe.Deps {
+		if dep.DependsOnID != writeReport.ID || dep.Type != "blocks" {
+			continue
+		}
+		if dep.StepID == "mol-polecat-report.workflow-finalize" {
+			continue
+		}
+		t.Fatalf("write-report should be terminal, but %s depends on it", dep.StepID)
 	}
 }
 
 func TestCoreMolPolecatReportWriteReportStepRecordsNoteAndAvoidsPRFlow(t *testing.T) {
-	store, result := cookCorePolecatReport(t)
-	writeReportID := result.IDMapping["mol-polecat-report.write-report"]
-	writeReport, err := store.Get(writeReportID)
-	if err != nil {
-		t.Fatalf("get write-report: %v", err)
+	recipe := compileCorePolecatReport(t)
+	writeReport := recipe.StepByID("mol-polecat-report.write-report")
+	if writeReport == nil {
+		t.Fatal("recipe missing mol-polecat-report.write-report step")
 	}
 
 	description := writeReport.Description
 	for _, want := range []string{
-		"ga-source",
+		"gc convoy status {{convoy_id}}",
+		"WORK_BEAD_ID",
 		"bd update",
 		"--notes",
 		"bd close",
@@ -97,6 +88,7 @@ func TestCoreMolPolecatReportWriteReportStepRecordsNoteAndAvoidsPRFlow(t *testin
 	for _, forbidden := range []string{
 		"gh pr create",
 		"git push",
+		"{{issue}}",
 	} {
 		if strings.Contains(lowerDescription, forbidden) {
 			t.Fatalf("write-report description must not contain %q:\n%s", forbidden, description)

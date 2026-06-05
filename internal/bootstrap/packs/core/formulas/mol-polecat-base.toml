@@ -11,20 +11,27 @@ then add a terminal step (submit, commit, etc).
 
 | Variable | Source | Description |
 |----------|--------|-------------|
-| issue | caller | The work bead ID assigned to this polecat |
+| convoy_id | runtime | Input convoy tracking the single work bead |
 | base_branch | caller | Base branch to rebase on (default: main) |
 | setup_command | rig `formula_vars` | Setup/install command. Empty = skip. |
 | typecheck_command | rig `formula_vars` | Type check command. Empty = skip. |
 | test_command | rig `formula_vars` | Test command. Empty = skip. |
 | lint_command | rig `formula_vars` | Lint command. Empty = skip. |
-| build_command | rig `formula_vars` | Build command. Empty = skip. |"""
+| build_command | rig `formula_vars` | Build command. Empty = skip. |
+
+Steps run in independent shell contexts, so each step that needs the work
+bead re-derives it from the input convoy:
+
+```bash
+CONVOY_STATUS=$(gc convoy status {{convoy_id}} --json)
+WORK_BEAD_ID=$(printf '%s' "$CONVOY_STATUS" | jq -r 'if (.children | length) == 1 then .children[0].id else empty end')
+```"""
 formula = "mol-polecat-base"
 
-[vars]
-[vars.issue]
-description = "The work bead ID assigned to this polecat"
-required = true
+[requires]
+formula_compiler = ">=2.0.0"
 
+[vars]
 [vars.base_branch]
 description = "The base branch to rebase on and compare against (e.g., main, integration/convoy-id)"
 default = "main"
@@ -61,15 +68,21 @@ gc prime                    # Load role context
 bd prime                    # Load beads context
 ```
 
-**2. Check your hook:**
+**2. Derive your work bead and check your hook:**
 ```bash
+CONVOY_STATUS=$(gc convoy status {{convoy_id}} --json)
+WORK_BEAD_ID=$(printf '%s' "$CONVOY_STATUS" | jq -r 'if (.children | length) == 1 then .children[0].id else empty end')
+if [ -z "$WORK_BEAD_ID" ]; then
+  echo "mol-polecat-base requires an input convoy with exactly one tracked member" >&2
+  exit 1
+fi
 bd list --assignee=$GC_AGENT --status=in_progress
 ```
 
-The hook_bead is your assigned issue. Read it carefully:
+The work bead is your assigned issue. Read it carefully:
 ```bash
-bd show {{issue}}           # Full issue details
-bd show {{issue}} --json | jq '.[0].metadata'  # Check for existing metadata
+bd show "$WORK_BEAD_ID"           # Full issue details
+bd show "$WORK_BEAD_ID" --json | jq '.[0].metadata'  # Check for existing metadata
 ```
 
 **3. Check for rejection (IMPORTANT):**
@@ -98,7 +111,7 @@ gc mail inbox
 
 If blocked or unclear, mail Witness:
 ```bash
-gc mail send <rig>/witness -s "HELP: Unclear requirements" -m "Issue: {{issue}}
+gc mail send <rig>/witness -s "HELP: Unclear requirements" -m "Issue: $WORK_BEAD_ID
 Question: <what you need clarified>"
 ```
 
@@ -145,9 +158,11 @@ not your assignment.
 FORBIDDEN: Pushing to {{base_branch}}. FORBIDDEN: Fixing pre-existing failures.
 
 ```bash
+CONVOY_STATUS=$(gc convoy status {{convoy_id}} --json)
+WORK_BEAD_ID=$(printf '%s' "$CONVOY_STATUS" | jq -r 'if (.children | length) == 1 then .children[0].id else empty end')
 bd create --title "Pre-existing failure: <description>" --type bug --priority 1
 gc mail send <rig>/witness -s "NOTICE: {{base_branch}} has failing pre-flights" \
-  -m "Filed: <bead-id>. Proceeding with {{issue}}."
+  -m "Filed: <bead-id>. Proceeding with $WORK_BEAD_ID."
 ```
 
 **Exit criteria:** Pre-flights pass (or pre-existing bug filed), ready to implement."""
@@ -169,6 +184,12 @@ Do the actual implementation work.
 from load-context. Focus on fixing the specific issue that caused
 rejection — don't redo everything.
 
+Derive your work bead in this shell context:
+```bash
+CONVOY_STATUS=$(gc convoy status {{convoy_id}} --json)
+WORK_BEAD_ID=$(printf '%s' "$CONVOY_STATUS" | jq -r 'if (.children | length) == 1 then .children[0].id else empty end')
+```
+
 **Commit frequently with detailed messages.** Every commit gets a
 subject AND a body. The body is what makes the repo navigable a year
 from now — the reviewer (and future-you) needs to understand *why* the
@@ -177,7 +198,7 @@ the what.
 
 ```bash
 git add <files>
-git commit -m "<type>: <imperative subject> ({{issue}})" -m "$(cat <<'BODY'
+git commit -m "<type>: <imperative subject> ($WORK_BEAD_ID)" -m "$(cat <<'BODY'
 <1-3 paragraph explanation:>
 - The motivation: which bug, regression, design decision, or upstream
   request drove this commit
@@ -214,7 +235,7 @@ Do NOT fix unrelated issues in this branch.
 
 **If stuck (>15 minutes):**
 ```bash
-gc mail send <rig>/witness -s "HELP: Stuck on implementation" -m "Issue: {{issue}}
+gc mail send <rig>/witness -s "HELP: Stuck on implementation" -m "Issue: $WORK_BEAD_ID
 Problem: <what's blocking you>
 Tried: <what you've attempted>"
 ```
@@ -273,8 +294,10 @@ If uncommitted changes exist, commit them with a body explaining what
 slipped through the `implement` step (typically a self-review touch-up,
 test addition, or formatter run):
 ```bash
+CONVOY_STATUS=$(gc convoy status {{convoy_id}} --json)
+WORK_BEAD_ID=$(printf '%s' "$CONVOY_STATUS" | jq -r 'if (.children | length) == 1 then .children[0].id else empty end')
 git add -A
-git commit -m "<type>: <imperative subject> ({{issue}})" -m "$(cat <<'BODY'
+git commit -m "<type>: <imperative subject> ($WORK_BEAD_ID)" -m "$(cat <<'BODY'
 <Explain what these residual changes are: a self-review fix,
 test-only addition, formatter run, etc. Be specific.>
 BODY
