@@ -3779,7 +3779,7 @@ func TestReaperDoesNotCloseStaleWispWithClosedBlocksPredecessor(t *testing.T) {
 		t.Fatalf("ReadFile(dolt log): %v", err)
 	}
 	log := string(logData)
-	if strings.Contains(log, "UPDATE `beads`.wisps SET status='closed'") {
+	if strings.Contains(log, "reaper_wisp_candidates") {
 		t.Fatalf("reaper closed a stale wisp through an ordinary closed blocks predecessor:\n%s", log)
 	}
 
@@ -3844,6 +3844,9 @@ printf '%s\n' "$*" >> "$GC_CALL_LOG"
 exit 0
 `)
 	writeCityBeadsMetadata(t, cityDir, "beads")
+	rigDir := filepath.Join(cityDir, "rigs", "beads-rig")
+	writeCityBeadsMetadata(t, rigDir, "beads")
+	writeSiteRigBinding(t, cityDir, "beads-rig", rigDir)
 
 	env := map[string]string{
 		"BD_CALL_LOG":      bdLog,
@@ -3875,9 +3878,16 @@ exit 0
 		"'$.\"close_reason\"', 'stale inactive workflow root auto-closed by reaper'",
 		"JSON_UNQUOTE(JSON_EXTRACT(w.metadata, '$.\"gc.kind\"')) = 'workflow'",
 		"JSON_UNQUOTE(JSON_EXTRACT(w.metadata, '$.\"gc.formula_contract\"')) = 'graph.v2'",
+		"COALESCE(JSON_UNQUOTE(JSON_EXTRACT(w.metadata, '$.\"gc.root_bead_id\"')), '') IN ('', w.id)",
+		"COALESCE(JSON_UNQUOTE(JSON_EXTRACT(w.metadata, '$.\"gc.root_store_ref\"')), '') = ''",
+		"JSON_UNQUOTE(JSON_EXTRACT(w.metadata, '$.\"gc.root_store_ref\"')) = 'beads'",
+		"JSON_UNQUOTE(JSON_EXTRACT(w.metadata, '$.\"gc.root_store_ref\"')) IN ('rig:beads-rig')",
 		"JSON_UNQUOTE(JSON_EXTRACT(child_wisp.metadata, '$.\"gc.root_bead_id\"')) = root.id",
 		"JSON_UNQUOTE(JSON_EXTRACT(i.metadata, '$.\"gc.kind\"')) = 'workflow'",
 		"JSON_UNQUOTE(JSON_EXTRACT(i.metadata, '$.\"gc.formula_contract\"')) = 'graph.v2'",
+		"COALESCE(JSON_UNQUOTE(JSON_EXTRACT(i.metadata, '$.\"gc.root_bead_id\"')), '') IN ('', i.id)",
+		"JSON_UNQUOTE(JSON_EXTRACT(i.metadata, '$.\"gc.root_store_ref\"')) LIKE 'city:%'",
+		"JSON_UNQUOTE(JSON_EXTRACT(i.metadata, '$.\"gc.root_store_ref\"')) IN ('rig:beads-rig')",
 		"JSON_UNQUOTE(JSON_EXTRACT(child_issue.metadata, '$.\"gc.root_bead_id\"')) = root.id",
 		"COALESCE(w.assignee, '') = ''",
 		"COALESCE(i.assignee, '') = ''",
@@ -3913,7 +3923,8 @@ exit 0
 	if err != nil {
 		t.Fatalf("ReadFile(gc log): %v", err)
 	}
-	if !strings.Contains(string(gcData), "workflow_roots:2") {
+	if !strings.Contains(string(gcData), "workflow_roots:2") ||
+		!strings.Contains(string(gcData), "skipped_cross_store_workflow_roots:0") {
 		t.Fatalf("reaper summary did not report closed workflow roots:\n%s", gcData)
 	}
 }
@@ -3959,7 +3970,7 @@ case "$*" in
   *"WITH RECURSIVE workflow_issue_root_candidates"*"SELECT DISTINCT root.id"*)
     printf 'id\n'
     ;;
-  *"UPDATE "*"workflow_wisp_root_candidates"*"wisps SET status='closed'"*)
+  *"WITH RECURSIVE workflow_wisp_root_candidates"*"UPDATE "*"wisps SET status='closed'"*)
     printf 'workflow roots with live descendants must be preserved\n' >&2
     exit 42
     ;;
@@ -4052,7 +4063,7 @@ case "$*" in
   *"WITH RECURSIVE workflow_issue_root_candidates"*"SELECT DISTINCT root.id"*)
     printf 'id\nissue-close\n'
     ;;
-  *"UPDATE "*"workflow_wisp_root_candidates"*"wisps SET status='closed'"*)
+  *"WITH RECURSIVE workflow_wisp_root_candidates"*"UPDATE "*"wisps SET status='closed'"*)
     printf 'dry-run should not update workflow wisp roots\n' >&2
     exit 42
     ;;
@@ -6016,6 +6027,18 @@ func writeCityBeadsMetadata(t *testing.T, cityDir, db string) {
 	}
 }
 
+func writeSiteRigBinding(t *testing.T, cityDir, rigName, rigDir string) {
+	t.Helper()
+	gcDir := filepath.Join(cityDir, ".gc")
+	if err := os.MkdirAll(gcDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(%s): %v", gcDir, err)
+	}
+	content := fmt.Sprintf("[[rig]]\nname = %q\npath = %q\n", rigName, rigDir)
+	if err := os.WriteFile(filepath.Join(gcDir, "site.toml"), []byte(content), 0o644); err != nil {
+		t.Fatalf("WriteFile(site.toml): %v", err)
+	}
+}
+
 func writeMaintenanceDoltStub(t *testing.T, path string) {
 	t.Helper()
 	writeExecutable(t, path, `#!/bin/sh
@@ -6108,7 +6131,8 @@ close_fixture_matches() {
         printf '%s' "$*" | grep -F "gc.root_bead_id" >/dev/null 2>&1
       ;;
     blocks_closed_predecessor)
-      printf '%s' "$*" | grep -F "blocks" >/dev/null 2>&1
+      printf '%s' "$*" | grep -F "wisp_dependencies d" >/dev/null 2>&1 &&
+        printf '%s' "$*" | grep -F "blocks" >/dev/null 2>&1
       ;;
     *)
       return 1

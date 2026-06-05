@@ -99,8 +99,10 @@ review, and testing descendants as live protection states. A root is also
 preserved when any descendant has been updated within max_age. Workflow root
 descendant traversal is store-local and relies on `gc.root_store_ref`
 co-locating a workflow root, descendants, and graph dependencies in one bead
-store; if that invariant changes, this cleanup must become cross-store aware
-before it can close roots. Purging
+store. Rig store refs are matched through resolved rig bindings and each rig's
+`.beads/metadata.json`; roots stamped for another or unmapped store are
+preserved. If that invariant changes, this cleanup must become cross-store
+aware before it can close those roots. Purging
 deletes rows — irreversible but only targets already-closed wisps past
 retention. Its protection query may include `blocks` because over-protection
 only prevents deletion. Auto-close excludes P0/P1, epics, and issues with

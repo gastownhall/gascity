@@ -42,6 +42,9 @@ func TestReaperWorkflowRootCleanupRealDoltSemantics(t *testing.T) {
 	port := startDoltServerForMaintenanceTest(t, doltPath, dataDir)
 	waitForDoltServerForMaintenanceTest(t, doltPath, port, "citydb")
 	writeCityBeadsMetadata(t, cityDir, "citydb")
+	rigDir := filepath.Join(cityDir, "rigs", "rig-with-db-alias")
+	writeCityBeadsMetadata(t, rigDir, "rigdb")
+	writeSiteRigBinding(t, cityDir, "rig-with-db-alias", rigDir)
 
 	binDir := t.TempDir()
 	bdLog := filepath.Join(t.TempDir(), "bd.log")
@@ -95,7 +98,10 @@ exit 0
 	cityWispStatuses := queryMaintenanceStatusByID(t, doltPath, port, "citydb", "wisps")
 	requireMaintenanceStatuses(t, cityWispStatuses, map[string]string{
 		"wisp-close":               "closed",
+		"wisp-city-store-root":     "closed",
+		"wisp-cross-store-root":    "open",
 		"wisp-held":                "blocked",
+		"wisp-non-root-workflow":   "open",
 		"wisp-recent-root":         "open",
 		"wisp-nested-root":         "open",
 		"wisp-subroot":             "closed",
@@ -105,15 +111,20 @@ exit 0
 
 	cityIssueStatuses := queryMaintenanceStatusByID(t, doltPath, port, "citydb", "issues")
 	requireMaintenanceStatuses(t, cityIssueStatuses, map[string]string{
-		"issue-close":    "closed",
-		"issue-held":     "blocked",
-		"issue-dep-root": "open",
-		"issue-dep-live": "in_progress",
+		"issue-city-store-root":   "closed",
+		"issue-close":             "closed",
+		"issue-cross-store-root":  "open",
+		"issue-held":              "blocked",
+		"issue-dep-root":          "open",
+		"issue-dep-live":          "in_progress",
+		"issue-non-root-workflow": "open",
 	})
 
 	rigWispStatuses := queryMaintenanceStatusByID(t, doltPath, port, "rigdb", "wisps")
 	requireMaintenanceStatuses(t, rigWispStatuses, map[string]string{
-		"rig-wisp-close": "closed",
+		"rig-wisp-close":            "closed",
+		"rig-wisp-store-root":       "closed",
+		"rig-wisp-other-store-root": "open",
 	})
 
 	rigIssueStatuses := queryMaintenanceStatusByID(t, doltPath, port, "rigdb", "issues")
@@ -175,18 +186,24 @@ func maintenanceReaperCitySeedSQL() string {
 	return `
 INSERT INTO wisps (id, title, status, issue_type, priority, created_at, updated_at, assignee, metadata) VALUES
   ('wisp-close', 'closeable root', 'open', 'task', 2, '2026-01-01 00:00:00', '2026-01-01 00:00:00', '', '{"gc.kind":"workflow"}'),
+  ('wisp-city-store-root', 'closeable city-store root', 'open', 'task', 2, '2026-01-01 00:00:00', '2026-01-01 00:00:00', '', '{"gc.kind":"workflow","gc.root_store_ref":"city:test-city"}'),
+  ('wisp-cross-store-root', 'cross-store root preserved', 'open', 'task', 2, '2026-01-01 00:00:00', '2026-01-01 00:00:00', '', '{"gc.kind":"workflow","gc.root_store_ref":"rig:other"}'),
   ('wisp-held', 'held root', 'blocked', 'task', 2, '2026-01-01 00:00:00', '2026-01-01 00:00:00', '', '{"gc.kind":"workflow"}'),
+  ('wisp-non-root-workflow', 'non-root topology bead preserved', 'open', 'task', 2, '2026-01-01 00:00:00', '2026-01-01 00:00:00', '', '{"gc.kind":"workflow","gc.root_bead_id":"wisp-nested-root"}'),
   ('wisp-recent-root', 'recent descendant root', 'open', 'task', 2, '2026-01-01 00:00:00', '2026-01-01 00:00:00', '', '{"gc.kind":"workflow"}'),
   ('wisp-recent-closed-child', 'recent closed child', 'closed', 'task', 2, '2026-01-01 00:00:00', NOW(), '', '{"gc.root_bead_id":"wisp-recent-root"}'),
   ('wisp-nested-root', 'nested root', 'open', 'task', 2, '2026-01-01 00:00:00', '2026-01-01 00:00:00', '', '{"gc.kind":"workflow"}'),
   ('wisp-subroot', 'nested subroot', 'closed', 'task', 2, '2026-01-01 00:00:00', '2026-01-01 00:00:00', '', '{"gc.root_bead_id":"wisp-nested-root"}'),
-  ('wisp-live-grandchild', 'live nested child', 'in_progress', 'task', 2, '2026-01-01 00:00:00', '2026-01-01 00:00:00', '', '{"gc.root_bead_id":"wisp-subroot"}');
+  ('wisp-live-grandchild', 'live nested child', 'in_progress', 'task', 2, '2026-01-01 00:00:00', '2026-01-01 00:00:00', '', '{}');
 INSERT INTO wisp_dependencies (issue_id, depends_on_id, type) VALUES
   ('wisp-subroot', 'wisp-nested-root', 'tracks'),
   ('wisp-live-grandchild', 'wisp-subroot', 'tracks');
 INSERT INTO issues (id, title, status, issue_type, priority, created_at, updated_at, assignee, metadata) VALUES
   ('issue-close', 'closeable city issue root', 'open', 'task', 2, '2026-01-01 00:00:00', '2026-01-01 00:00:00', '', '{"gc.kind":"workflow"}'),
+  ('issue-city-store-root', 'closeable city-store issue root', 'open', 'task', 2, '2026-01-01 00:00:00', '2026-01-01 00:00:00', '', '{"gc.kind":"workflow","gc.root_store_ref":"city:test-city"}'),
+  ('issue-cross-store-root', 'cross-store issue root preserved', 'open', 'task', 1, '2026-01-01 00:00:00', '2026-01-01 00:00:00', '', '{"gc.kind":"workflow","gc.root_store_ref":"rig:other"}'),
   ('issue-held', 'held city issue root', 'blocked', 'task', 2, '2026-01-01 00:00:00', '2026-01-01 00:00:00', '', '{"gc.kind":"workflow"}'),
+  ('issue-non-root-workflow', 'non-root issue topology bead preserved', 'open', 'task', 1, '2026-01-01 00:00:00', '2026-01-01 00:00:00', '', '{"gc.kind":"workflow","gc.root_bead_id":"issue-dep-root"}'),
   ('issue-dep-root', 'dependency-protected issue root', 'open', 'task', 2, '2026-01-01 00:00:00', '2026-01-01 00:00:00', '', '{"gc.kind":"workflow"}'),
   ('issue-dep-live', 'live issue dependency child', 'in_progress', 'task', 2, '2026-01-01 00:00:00', '2026-01-01 00:00:00', '', '{}');
 INSERT INTO dependencies (issue_id, depends_on_id, type) VALUES
@@ -197,7 +214,9 @@ INSERT INTO dependencies (issue_id, depends_on_id, type) VALUES
 func maintenanceReaperRigSeedSQL() string {
 	return `
 INSERT INTO wisps (id, title, status, issue_type, priority, created_at, updated_at, assignee, metadata) VALUES
-  ('rig-wisp-close', 'closeable non-city wisp root', 'open', 'task', 2, '2026-01-01 00:00:00', '2026-01-01 00:00:00', '', '{"gc.kind":"workflow"}');
+  ('rig-wisp-close', 'closeable non-city wisp root', 'open', 'task', 2, '2026-01-01 00:00:00', '2026-01-01 00:00:00', '', '{"gc.kind":"workflow"}'),
+  ('rig-wisp-store-root', 'closeable rig-store wisp root', 'open', 'task', 2, '2026-01-01 00:00:00', '2026-01-01 00:00:00', '', '{"gc.kind":"workflow","gc.root_store_ref":"rig:rig-with-db-alias"}'),
+  ('rig-wisp-other-store-root', 'other rig-store root preserved', 'open', 'task', 2, '2026-01-01 00:00:00', '2026-01-01 00:00:00', '', '{"gc.kind":"workflow","gc.root_store_ref":"rig:other"}');
 INSERT INTO issues (id, title, status, issue_type, priority, created_at, updated_at, assignee, metadata) VALUES
   ('rig-issue-preserve', 'non-city issue root', 'open', 'task', 2, '2026-01-01 00:00:00', '2026-01-01 00:00:00', '', '{"gc.kind":"workflow"}');
 `
