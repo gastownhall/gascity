@@ -97,7 +97,21 @@ func legacySessionKind(metadata map[string]string) string {
 	return strings.TrimSpace(metadata["real_world_app_session_kind"])
 }
 
-func sessionResumeHints(resolved *config.ResolvedProvider, workDir string, sessionEnv map[string]string, mcpServers []runtime.MCPServerConfig) runtime.Config {
+// sessionResumeHints builds the resume runtime hints. The interactive flag gates
+// MouseOn: only an interactive, human-attached resume (session_origin=manual)
+// keeps the tmux wheel→copy-mode scrollback alive across suspend/resume +
+// crash-restart, symmetric with sessionCreateHints and the create path's
+// session_origin=="manual" gate in templateParamsToConfig (ga-c4w finding #2).
+//
+// A controller-polled pool/headless agent resolves mouse-OFF here. The resume
+// seam must never re-enable mouse on a polled session: the original assumption
+// that "headless agents re-resolve MouseOn mouse-off downstream via
+// template_resolve.go" does NOT hold for the API worker-factory resume path
+// (resolveWorkerSessionRuntimeWithMetadata builds runtime.Config directly and
+// never routes through template_resolve.go), so an unconditional MouseOn=true
+// leaked mouse-on onto resumed pool agents and broke ga-c4w's controller-poll
+// -safety invariant (regression ga-g7go).
+func sessionResumeHints(resolved *config.ResolvedProvider, workDir string, sessionEnv map[string]string, mcpServers []runtime.MCPServerConfig, interactive bool) runtime.Config {
 	return runtime.Config{
 		WorkDir:                workDir,
 		Lifecycle:              runtime.Lifecycle(resolved.Lifecycle),
@@ -106,16 +120,24 @@ func sessionResumeHints(resolved *config.ResolvedProvider, workDir string, sessi
 		ProcessNames:           resolved.ProcessNames,
 		EmitsPermissionWarning: resolved.EmitsPermissionWarning,
 		AcceptStartupDialogs:   resolved.AcceptStartupDialogs,
-		// ga-c4w finding #2: keep interactive (API-created) sessions mouse-on
-		// across suspend/resume + crash-restart, symmetric with sessionCreateHints.
-		// Without this the wheel→scrollback works on first create but is lost on
-		// the first resume. Headless agents are controller-owned and re-resolve
-		// MouseOn via cmd/gc/template_resolve.go (mouse-off), so this never enables
-		// mouse on a polled agent.
-		MouseOn:    true,
-		Env:        sessionEnv,
-		MCPServers: mcpServers,
+		MouseOn:                interactive,
+		Env:                    sessionEnv,
+		MCPServers:             mcpServers,
 	}
+}
+
+// sessionResumeInteractive reports whether a resumed session is interactive and
+// human-attached (session_origin=manual) versus a controller-polled pool/headless
+// agent. It mirrors the create-path gate templateParamsSessionOrigin(tp)=="manual"
+// in templateParamsToConfig so the resume seam resolves MouseOn the same way the
+// create seam does. Unknown/empty origins default to non-interactive: the safe
+// direction is never to enable mouse on a polled agent (ga-c4w poll-safety,
+// ga-g7go regression fix).
+func sessionResumeInteractive(metadata map[string]string) bool {
+	if metadata == nil {
+		return false
+	}
+	return strings.TrimSpace(metadata["session_origin"]) == "manual"
 }
 
 func resumeSessionIdentity(info session.Info, metadata map[string]string) string {
@@ -331,7 +353,7 @@ func (s *Server) buildSessionResume(info session.Info) (string, runtime.Config, 
 	resolvedInfo.ResumeStyle = resolved.ResumeStyle
 	resolvedInfo.ResumeCommand = resumeCommand
 	sessionEnv := cityAnchoredSessionEnv(s.state.CityPath(), resolved.Env)
-	return session.BuildResumeCommand(resolvedInfo), sessionResumeHints(resolved, workDir, sessionEnv, mcpServers), nil
+	return session.BuildResumeCommand(resolvedInfo), sessionResumeHints(resolved, workDir, sessionEnv, mcpServers, sessionResumeInteractive(metadata)), nil
 }
 
 func (s *Server) resolvedSessionRuntimeCommand(resolved *config.ResolvedProvider, transport, storedCommand string, metadata map[string]string) (string, error) {
@@ -454,7 +476,7 @@ func (s *Server) resolveWorkerSessionRuntimeWithMetadata(info session.Info, _ st
 		WorkDir:    firstNonEmptyString(info.WorkDir, workDir),
 		Provider:   firstNonEmptyString(info.Provider, resolved.Name),
 		SessionEnv: sessionEnv,
-		Hints:      sessionResumeHints(resolved, firstNonEmptyString(workDir, info.WorkDir), sessionEnv, mcpServers),
+		Hints:      sessionResumeHints(resolved, firstNonEmptyString(workDir, info.WorkDir), sessionEnv, mcpServers, sessionResumeInteractive(metadata)),
 		Resume: session.ProviderResume{
 			ResumeFlag:    firstNonEmptyString(resolved.ResumeFlag, info.ResumeFlag),
 			ResumeStyle:   firstNonEmptyString(resolved.ResumeStyle, info.ResumeStyle),
