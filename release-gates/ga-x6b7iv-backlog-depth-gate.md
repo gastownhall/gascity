@@ -21,7 +21,7 @@ uses the deployer release criteria from the active Gas City deployer prompt.
 | 3 | Tests pass | PASS | `go test ./cmd/gc -run 'TestClassifyBacklog|TestBacklogDepthCheck'` passed; `make test-fast-parallel` passed; `go vet ./...` passed. |
 | 4 | No high-severity review findings open | PASS | Review notes list no Critical findings and one non-blocking Minor coverage follow-up (`ga-j5n5xr`). Unresolved HIGH count: 0. |
 | 5 | Final branch is clean | PASS | Clean worktree before gate file: `git status --short --branch` reported only `## HEAD (no branch)`. Gate file is committed in the release-gate commit and the worktree is rechecked clean before push. |
-| 6 | Branch diverges cleanly from main | PASS | `git merge-tree --write-tree origin/main HEAD` returned tree `9318beced071d25caf924bc311ddc48ba53a649d`; GitHub reports `mergeable=MERGEABLE`. `mergeStateStatus=BLOCKED` is from pending CI/branch protection, not a content conflict. |
+| 6 | Branch diverges cleanly from main | PASS | `git merge-tree --write-tree origin/main HEAD` returned successfully before push and after the gate commits; GitHub reports `mergeable=MERGEABLE`. `mergeStateStatus=BLOCKED` is from pending CI/branch protection, not a content conflict. |
 | 7 | Single feature theme | PASS | Commit set touches only `cmd/gc/doctor_backlog_depth.go` and `cmd/gc/doctor_backlog_depth_test.go`; one subsystem and one user-visible behavior: `gc doctor` backlog-depth reporting. |
 
 ## Acceptance Evidence
