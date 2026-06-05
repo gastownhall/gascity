@@ -3786,6 +3786,107 @@ func TestReaperDoesNotCloseStaleWispWithClosedBlocksPredecessor(t *testing.T) {
 	}
 }
 
+func TestReaperClosesStaleInactiveWorkflowRoots(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	doltLog := filepath.Join(t.TempDir(), "dolt-args.log")
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+
+	writeExecutable(t, filepath.Join(binDir, "dolt"), `#!/bin/sh
+printf '%s\n' "$*" >> "$DOLT_ARGS_LOG"
+case "$*" in
+  *"SHOW TABLES FROM"*"LIKE 'wisps'"*)
+    printf 'Tables_in_db\nwisps\n'
+    ;;
+  *"SHOW DATABASES"*)
+    printf 'Database\nbeads\n'
+    ;;
+  *"SHOW COLUMNS FROM"*"dependencies"*)
+    printf 'Field,Type,Null,Key,Default,Extra\n'
+    printf 'issue_id,varchar,NO,,,\n'
+    printf 'depends_on_id,varchar,NO,,,\n'
+    printf 'type,varchar,NO,,,\n'
+    ;;
+  *"UPDATE "*"wisps SET status='closed'"*"gc.formula_contract"*"gc.root_bead_id"*)
+    printf 'ROW_COUNT()\n1\n'
+    ;;
+  *"UPDATE "*"issues SET status='closed'"*"gc.formula_contract"*"gc.root_bead_id"*)
+    printf 'ROW_COUNT()\n1\n'
+    ;;
+  *"COUNT(DISTINCT w.id)"*"gc.kind"*"gc.formula_contract"*"gc.root_bead_id"*)
+    printf 'COUNT(*)\n1\n'
+    ;;
+  *"COUNT(DISTINCT i.id)"*"gc.kind"*"gc.formula_contract"*"gc.root_bead_id"*)
+    printf 'COUNT(*)\n1\n'
+    ;;
+  *"SELECT COUNT(*) FROM "*"wisps"*"status IN ('open', 'hooked', 'in_progress')"*"created_at <"*)
+    printf 'COUNT(*)\n0\n'
+    ;;
+  *"COUNT("*)
+    printf 'COUNT(*)\n0\n'
+    ;;
+  *"SELECT id"*)
+    printf 'id\n'
+    ;;
+esac
+exit 0
+`)
+	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+exit 0
+`)
+
+	env := map[string]string{
+		"DOLT_ARGS_LOG":    doltLog,
+		"GC_CALL_LOG":      gcLog,
+		"GC_CITY":          cityDir,
+		"GC_CITY_PATH":     cityDir,
+		"GC_DOLT_HOST":     "127.0.0.1",
+		"GC_DOLT_PORT":     "3307",
+		"GC_DOLT_USER":     "root",
+		"GC_DOLT_PASSWORD": "",
+		"PATH":             binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+
+	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "reaper.sh"), env)
+
+	logData, err := os.ReadFile(doltLog)
+	if err != nil {
+		t.Fatalf("ReadFile(dolt log): %v", err)
+	}
+	log := string(logData)
+	for _, want := range []string{
+		"UPDATE `beads`.wisps SET status='closed', closed_at=NOW()",
+		"UPDATE `beads`.issues SET status='closed', closed_at=NOW()",
+		"JSON_UNQUOTE(JSON_EXTRACT(w.metadata, '$.\"gc.kind\"')) = 'workflow'",
+		"JSON_UNQUOTE(JSON_EXTRACT(w.metadata, '$.\"gc.formula_contract\"')) = 'graph.v2'",
+		"JSON_UNQUOTE(JSON_EXTRACT(child_wisp.metadata, '$.\"gc.root_bead_id\"')) = w.id",
+		"JSON_UNQUOTE(JSON_EXTRACT(i.metadata, '$.\"gc.kind\"')) = 'workflow'",
+		"JSON_UNQUOTE(JSON_EXTRACT(i.metadata, '$.\"gc.formula_contract\"')) = 'graph.v2'",
+		"JSON_UNQUOTE(JSON_EXTRACT(child_issue.metadata, '$.\"gc.root_bead_id\"')) = i.id",
+		"COALESCE(w.assignee, '') = ''",
+		"COALESCE(i.assignee, '') = ''",
+		"COALESCE(w.updated_at, w.created_at) < DATE_SUB(NOW(), INTERVAL",
+		"COALESCE(i.updated_at, i.created_at) < DATE_SUB(NOW(), INTERVAL",
+		"workflow_roots=2",
+	} {
+		if !strings.Contains(log, want) {
+			t.Fatalf("reaper workflow-root SQL missing %q:\n%s", want, log)
+		}
+	}
+	if strings.Contains(log, "parent_id") {
+		t.Fatalf("reaper workflow-root cleanup used removed parent_id column:\n%s", log)
+	}
+
+	gcData, err := os.ReadFile(gcLog)
+	if err != nil {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	if !strings.Contains(string(gcData), "workflow_roots:2") {
+		t.Fatalf("reaper summary did not report closed workflow roots:\n%s", gcData)
+	}
+}
+
 func TestReaperEscalatesDoltCommitFailure(t *testing.T) {
 	cityDir := t.TempDir()
 	binDir := t.TempDir()
@@ -4068,7 +4169,7 @@ exit 0
 	if !strings.Contains(log, "CALL DOLT_COMMIT") {
 		t.Fatalf("reaper did not commit successful close after failed purge:\n%s", log)
 	}
-	if !strings.Contains(log, "closed_wisps=1 purged=0") {
+	if !strings.Contains(log, "closed_wisps=1 workflow_roots=0 purged=0") {
 		t.Fatalf("reaper commit did not report only successful purge rows:\n%s", log)
 	}
 	if strings.Contains(log, "purged=1") {

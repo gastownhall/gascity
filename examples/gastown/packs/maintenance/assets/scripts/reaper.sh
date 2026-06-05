@@ -128,6 +128,8 @@ TOTAL_WOULD_CLOSE_WISPS=0
 TOTAL_WOULD_EXPIRE=0
 TOTAL_PURGED=0
 TOTAL_MAIL_WISPS=0
+TOTAL_WORKFLOW_ROOTS_CLOSED=0
+TOTAL_WOULD_CLOSE_WORKFLOW_ROOTS=0
 TOTAL_ISSUES_CLOSED=0
 TOTAL_STALE_ISSUES_SKIPPED=0
 TOTAL_EXPIRED_ISSUES_CLOSED=0
@@ -378,6 +380,7 @@ while IFS= read -r DB; do
     CLOSE_WISP_COUNT=0
     DB_CLOSED_WISPS=0
     DB_PURGED=0
+    DB_WORKFLOW_ROOTS_CLOSED=0
     while [ "$STALE_WISP_COUNT" -gt 0 ] && [ "$CLOSE_WISP_COUNT" -lt "$STALE_WISP_COUNT" ]; do
         get_sql_count "$DB" "schema-safe stale wisp" "
             SELECT COUNT(DISTINCT w.id) FROM \`$DB\`.wisps w
@@ -436,7 +439,138 @@ while IFS= read -r DB; do
         fi
     done
 
-    # Step 2: Purge — delete closed wisps past purge_age.
+    # Step 2: Close stale inactive workflow roots. These roots are topology
+    # beads, not user work; close only old, unassigned roots with no active
+    # root-owned children so a queued or running workflow is preserved.
+    get_sql_count "$DB" "stale inactive workflow wisp root" "
+        SELECT COUNT(DISTINCT w.id) FROM \`$DB\`.wisps w
+        WHERE w.status IN ('open', 'hooked', 'in_progress')
+        AND w.issue_type NOT IN ('message')
+        AND COALESCE(w.assignee, '') = ''
+        AND w.created_at < DATE_SUB(NOW(), INTERVAL $MAX_AGE_H HOUR)
+        AND COALESCE(w.updated_at, w.created_at) < DATE_SUB(NOW(), INTERVAL $MAX_AGE_H HOUR)
+        AND (
+            JSON_UNQUOTE(JSON_EXTRACT(w.metadata, '$.\"gc.kind\"')) = 'workflow'
+            OR JSON_UNQUOTE(JSON_EXTRACT(w.metadata, '$.\"gc.formula_contract\"')) = 'graph.v2'
+        )
+        AND NOT EXISTS (
+            SELECT 1 FROM \`$DB\`.wisps child_wisp
+            WHERE child_wisp.id != w.id
+            AND child_wisp.status IN ('open', 'hooked', 'in_progress')
+            AND JSON_UNQUOTE(JSON_EXTRACT(child_wisp.metadata, '$.\"gc.root_bead_id\"')) = w.id
+        )
+        AND NOT EXISTS (
+            SELECT 1 FROM \`$DB\`.issues child_issue
+            WHERE child_issue.id != w.id
+            AND child_issue.status IN ('open', 'in_progress')
+            AND JSON_UNQUOTE(JSON_EXTRACT(child_issue.metadata, '$.\"gc.root_bead_id\"')) = w.id
+        )
+    "
+    WORKFLOW_WISP_ROOT_COUNT=$SQL_COUNT_RESULT
+    if [ "$WORKFLOW_WISP_ROOT_COUNT" -gt 0 ]; then
+        if [ -n "$DRY_RUN" ]; then
+            TOTAL_WOULD_CLOSE_WORKFLOW_ROOTS=$((TOTAL_WOULD_CLOSE_WORKFLOW_ROOTS + WORKFLOW_WISP_ROOT_COUNT))
+        elif run_sql_change "$DB" "closing stale inactive workflow wisp roots" "
+            UPDATE \`$DB\`.wisps SET status='closed', closed_at=NOW()
+            WHERE id IN (
+                SELECT id FROM (
+                    SELECT w.id FROM \`$DB\`.wisps w
+                    WHERE w.status IN ('open', 'hooked', 'in_progress')
+                    AND w.issue_type NOT IN ('message')
+                    AND COALESCE(w.assignee, '') = ''
+                    AND w.created_at < DATE_SUB(NOW(), INTERVAL $MAX_AGE_H HOUR)
+                    AND COALESCE(w.updated_at, w.created_at) < DATE_SUB(NOW(), INTERVAL $MAX_AGE_H HOUR)
+                    AND (
+                        JSON_UNQUOTE(JSON_EXTRACT(w.metadata, '$.\"gc.kind\"')) = 'workflow'
+                        OR JSON_UNQUOTE(JSON_EXTRACT(w.metadata, '$.\"gc.formula_contract\"')) = 'graph.v2'
+                    )
+                    AND NOT EXISTS (
+                        SELECT 1 FROM \`$DB\`.wisps child_wisp
+                        WHERE child_wisp.id != w.id
+                        AND child_wisp.status IN ('open', 'hooked', 'in_progress')
+                        AND JSON_UNQUOTE(JSON_EXTRACT(child_wisp.metadata, '$.\"gc.root_bead_id\"')) = w.id
+                    )
+                    AND NOT EXISTS (
+                        SELECT 1 FROM \`$DB\`.issues child_issue
+                        WHERE child_issue.id != w.id
+                        AND child_issue.status IN ('open', 'in_progress')
+                        AND JSON_UNQUOTE(JSON_EXTRACT(child_issue.metadata, '$.\"gc.root_bead_id\"')) = w.id
+                    )
+                ) reaper_workflow_wisp_root_candidates
+            )
+        "; then
+            WORKFLOW_WISP_ROOT_ROWS=$SQL_CHANGE_ROWS_RESULT
+            DB_WORKFLOW_ROOTS_CLOSED=$((DB_WORKFLOW_ROOTS_CLOSED + WORKFLOW_WISP_ROOT_ROWS))
+            TOTAL_WORKFLOW_ROOTS_CLOSED=$((TOTAL_WORKFLOW_ROOTS_CLOSED + WORKFLOW_WISP_ROOT_ROWS))
+            DB_MUTATIONS=$((DB_MUTATIONS + WORKFLOW_WISP_ROOT_ROWS))
+        fi
+    fi
+
+    get_sql_count "$DB" "stale inactive workflow issue root" "
+        SELECT COUNT(DISTINCT i.id) FROM \`$DB\`.issues i
+        WHERE i.status IN ('open', 'in_progress')
+        AND i.issue_type NOT IN ('message', 'epic')
+        AND COALESCE(i.assignee, '') = ''
+        AND i.created_at < DATE_SUB(NOW(), INTERVAL $MAX_AGE_H HOUR)
+        AND COALESCE(i.updated_at, i.created_at) < DATE_SUB(NOW(), INTERVAL $MAX_AGE_H HOUR)
+        AND (
+            JSON_UNQUOTE(JSON_EXTRACT(i.metadata, '$.\"gc.kind\"')) = 'workflow'
+            OR JSON_UNQUOTE(JSON_EXTRACT(i.metadata, '$.\"gc.formula_contract\"')) = 'graph.v2'
+        )
+        AND NOT EXISTS (
+            SELECT 1 FROM \`$DB\`.wisps child_wisp
+            WHERE child_wisp.id != i.id
+            AND child_wisp.status IN ('open', 'hooked', 'in_progress')
+            AND JSON_UNQUOTE(JSON_EXTRACT(child_wisp.metadata, '$.\"gc.root_bead_id\"')) = i.id
+        )
+        AND NOT EXISTS (
+            SELECT 1 FROM \`$DB\`.issues child_issue
+            WHERE child_issue.id != i.id
+            AND child_issue.status IN ('open', 'in_progress')
+            AND JSON_UNQUOTE(JSON_EXTRACT(child_issue.metadata, '$.\"gc.root_bead_id\"')) = i.id
+        )
+    "
+    WORKFLOW_ISSUE_ROOT_COUNT=$SQL_COUNT_RESULT
+    if [ "$WORKFLOW_ISSUE_ROOT_COUNT" -gt 0 ]; then
+        if [ -n "$DRY_RUN" ]; then
+            TOTAL_WOULD_CLOSE_WORKFLOW_ROOTS=$((TOTAL_WOULD_CLOSE_WORKFLOW_ROOTS + WORKFLOW_ISSUE_ROOT_COUNT))
+        elif run_sql_change "$DB" "closing stale inactive workflow issue roots" "
+            UPDATE \`$DB\`.issues SET status='closed', closed_at=NOW()
+            WHERE id IN (
+                SELECT id FROM (
+                    SELECT i.id FROM \`$DB\`.issues i
+                    WHERE i.status IN ('open', 'in_progress')
+                    AND i.issue_type NOT IN ('message', 'epic')
+                    AND COALESCE(i.assignee, '') = ''
+                    AND i.created_at < DATE_SUB(NOW(), INTERVAL $MAX_AGE_H HOUR)
+                    AND COALESCE(i.updated_at, i.created_at) < DATE_SUB(NOW(), INTERVAL $MAX_AGE_H HOUR)
+                    AND (
+                        JSON_UNQUOTE(JSON_EXTRACT(i.metadata, '$.\"gc.kind\"')) = 'workflow'
+                        OR JSON_UNQUOTE(JSON_EXTRACT(i.metadata, '$.\"gc.formula_contract\"')) = 'graph.v2'
+                    )
+                    AND NOT EXISTS (
+                        SELECT 1 FROM \`$DB\`.wisps child_wisp
+                        WHERE child_wisp.id != i.id
+                        AND child_wisp.status IN ('open', 'hooked', 'in_progress')
+                        AND JSON_UNQUOTE(JSON_EXTRACT(child_wisp.metadata, '$.\"gc.root_bead_id\"')) = i.id
+                    )
+                    AND NOT EXISTS (
+                        SELECT 1 FROM \`$DB\`.issues child_issue
+                        WHERE child_issue.id != i.id
+                        AND child_issue.status IN ('open', 'in_progress')
+                        AND JSON_UNQUOTE(JSON_EXTRACT(child_issue.metadata, '$.\"gc.root_bead_id\"')) = i.id
+                    )
+                ) reaper_workflow_issue_root_candidates
+            )
+        "; then
+            WORKFLOW_ISSUE_ROOT_ROWS=$SQL_CHANGE_ROWS_RESULT
+            DB_WORKFLOW_ROOTS_CLOSED=$((DB_WORKFLOW_ROOTS_CLOSED + WORKFLOW_ISSUE_ROOT_ROWS))
+            TOTAL_WORKFLOW_ROOTS_CLOSED=$((TOTAL_WORKFLOW_ROOTS_CLOSED + WORKFLOW_ISSUE_ROOT_ROWS))
+            DB_MUTATIONS=$((DB_MUTATIONS + WORKFLOW_ISSUE_ROOT_ROWS))
+        fi
+    fi
+
+    # Step 3: Purge — delete closed wisps past purge_age.
     get_sql_count "$DB" "closed wisp purge" "
         SELECT COUNT(*) FROM \`$DB\`.wisps
         WHERE status = 'closed'
@@ -469,7 +603,7 @@ while IFS= read -r DB; do
         fi
     fi
 
-    # Step 3: Close nudge beads whose metadata.expires_at is in the past.
+    # Step 4: Close nudge beads whose metadata.expires_at is in the past.
     # Only beads labelled gc:nudge are candidates — other bead types that stamp
     # expires_at (e.g. gc:extmsg-binding session bindings) must not be closed
     # here.  The COALESCE handles whole-second RFC3339+Z, microsecond-width
@@ -543,7 +677,7 @@ while IFS= read -r DB; do
         fi
     fi
 
-    # Step 4: Auto-close stale issues (exclude P0/P1, epics, active deps).
+    # Step 5: Auto-close stale issues (exclude P0/P1, epics, active deps).
     DB_ISSUES_CLOSED=0
     get_sql_rows "$DB" "stale issue" "
         SELECT id FROM \`$DB\`.issues
@@ -592,7 +726,7 @@ while IFS= read -r DB; do
         fi
     fi
 
-    # Step 5a: Anomaly check — stale open wisp count. Fresh workflow load can
+    # Step 6a: Anomaly check — stale open wisp count. Fresh workflow load can
     # legitimately exceed the threshold on busy cities; only old non-message
     # rows indicate a reaper leak.
     get_sql_count "$DB" "stale open wisp anomaly" "
@@ -607,7 +741,7 @@ while IFS= read -r DB; do
         ANOMALIES="${ANOMALIES}$DB: $REAPABLE_WISPS stale open wisps (threshold: $ALERT_THRESHOLD, age: ${MAX_AGE})\n"
     fi
 
-    # Step 5b: Mail-wisp backlog count, observed separately from reapable wisps.
+    # Step 6b: Mail-wisp backlog count, observed separately from reapable wisps.
     get_sql_count "$DB" "open mail wisp" "
         SELECT COUNT(*) FROM \`$DB\`.wisps
         WHERE status IN ('open', 'hooked', 'in_progress')
@@ -627,7 +761,7 @@ while IFS= read -r DB; do
     if [ -z "$DRY_RUN" ] && [ "$DB_MUTATIONS" -gt 0 ]; then
         if ! COMMIT_OUTPUT=$(dolt_sql -q "
             USE \`$DB\`;
-            CALL DOLT_COMMIT('-Am', 'reaper: stale_wisps=$STALE_WISP_COUNT closed_wisps=$DB_CLOSED_WISPS purged=$DB_PURGED stale_issues=$DB_ISSUES_CLOSED expired_issues=$DB_EXPIRED_ISSUES_CLOSED', '--author', 'reaper <reaper@gastown.local>')
+            CALL DOLT_COMMIT('-Am', 'reaper: stale_wisps=$STALE_WISP_COUNT closed_wisps=$DB_CLOSED_WISPS workflow_roots=$DB_WORKFLOW_ROOTS_CLOSED purged=$DB_PURGED stale_issues=$DB_ISSUES_CLOSED expired_issues=$DB_EXPIRED_ISSUES_CLOSED', '--author', 'reaper <reaper@gastown.local>')
         " 2>&1); then
             case "$COMMIT_OUTPUT" in
                 *"nothing to commit"*|*"Nothing to commit"*)
@@ -695,9 +829,9 @@ if [ -n "$ANOMALIES" ]; then
         -m "$ANOMALIES" 2>/dev/null || true
 fi
 
-SUMMARY="reaper — stale_wisps:$TOTAL_STALE_WISPS, closed_wisps:$TOTAL_CLOSED_WISPS, purged:$TOTAL_PURGED, sessions-pruned:$TOTAL_SESSIONS_PRUNED, closed:$TOTAL_ISSUES_CLOSED, expired:$TOTAL_EXPIRED_ISSUES_CLOSED, expired_skipped:$TOTAL_EXPIRED_ISSUES_SKIPPED, skipped_non_city_issues:$TOTAL_STALE_ISSUES_SKIPPED, mail_wisps:$TOTAL_MAIL_WISPS"
+SUMMARY="reaper — stale_wisps:$TOTAL_STALE_WISPS, closed_wisps:$TOTAL_CLOSED_WISPS, workflow_roots:$TOTAL_WORKFLOW_ROOTS_CLOSED, purged:$TOTAL_PURGED, sessions-pruned:$TOTAL_SESSIONS_PRUNED, closed:$TOTAL_ISSUES_CLOSED, expired:$TOTAL_EXPIRED_ISSUES_CLOSED, expired_skipped:$TOTAL_EXPIRED_ISSUES_SKIPPED, skipped_non_city_issues:$TOTAL_STALE_ISSUES_SKIPPED, mail_wisps:$TOTAL_MAIL_WISPS"
 if [ -n "$DRY_RUN" ]; then
-    SUMMARY="$SUMMARY, would_close_wisps:$TOTAL_WOULD_CLOSE_WISPS, would_expire:$TOTAL_WOULD_EXPIRE (dry run)"
+    SUMMARY="$SUMMARY, would_close_wisps:$TOTAL_WOULD_CLOSE_WISPS, would_close_workflow_roots:$TOTAL_WOULD_CLOSE_WORKFLOW_ROOTS, would_expire:$TOTAL_WOULD_EXPIRE (dry run)"
 fi
 
 gc session nudge deacon/ "DOG_DONE: $SUMMARY" 2>/dev/null || true
