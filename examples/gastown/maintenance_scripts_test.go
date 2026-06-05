@@ -25,6 +25,16 @@ var (
 	rawDurationIntervalRe = regexp.MustCompile(`(?i)\bINTERVAL\s+\{\{(?:max_age|purge_age|stale_issue_age)\}\}`)
 )
 
+const reaperGraphCleanupEdgeSQL = "d.type IN ('parent-child', 'tracks', 'blocks')"
+
+func containsReaperGraphCleanupEdgePredicate(text string) bool {
+	if strings.Contains(text, reaperGraphCleanupEdgeSQL) {
+		return true
+	}
+	return strings.Contains(text, "WISP_CLEANUP_EDGE_TYPES=\"'parent-child', 'tracks', 'blocks'\"") &&
+		strings.Contains(text, "d.type IN ($WISP_CLEANUP_EDGE_TYPES)")
+}
+
 func TestMaintenanceCheckBinariesTreatsGhAsOptional(t *testing.T) {
 	binDir := t.TempDir()
 	bashPath, err := exec.LookPath("bash")
@@ -2385,8 +2395,8 @@ func TestReaperParentIDIsParentChildDependencyProjection(t *testing.T) {
 	if strings.Contains(script, "parent_id") {
 		t.Fatalf("reaper queried parent_id directly; Dolt ParentID is projected from parent-child dependencies:\n%s", script)
 	}
-	if !strings.Contains(script, "wisp_dependencies d") || !strings.Contains(script, "d.type = 'parent-child'") {
-		t.Fatalf("reaper does not follow the canonical Dolt parent-child projection:\n%s", script)
+	if !strings.Contains(script, "wisp_dependencies d") || !containsReaperGraphCleanupEdgePredicate(script) {
+		t.Fatalf("reaper does not follow the canonical Dolt cleanup-edge projection:\n%s", script)
 	}
 }
 
@@ -2472,7 +2482,7 @@ exit 0
 	} else {
 		purgeSQL := log[purgeIdx:]
 		if !strings.Contains(purgeSQL, "child_wisp.status IN ('open', 'hooked', 'in_progress')") ||
-			!strings.Contains(purgeSQL, "d.type = 'parent-child'") ||
+			!containsReaperGraphCleanupEdgePredicate(purgeSQL) ||
 			!strings.Contains(purgeSQL, "SELECT DISTINCT d.depends_on_id") {
 			t.Errorf("reaper purge can delete closed parents with non-closed children:\n%s", purgeSQL)
 		}
@@ -3342,7 +3352,7 @@ exit 0
 	}
 	log := string(logData)
 	if strings.Contains(log, "UPDATE `beads`.wisps SET status='closed'") && !strings.Contains(log, "wisp_dependencies d") {
-		t.Fatalf("reaper closed non-closed wisps by age alone instead of using parent-child dependencies:\n%s", log)
+		t.Fatalf("reaper closed non-closed wisps by age alone instead of using cleanup-edge dependencies:\n%s", log)
 	}
 
 	gcData, err := os.ReadFile(gcLog)
@@ -3431,8 +3441,8 @@ exit 0
 	if !strings.Contains(log, "COUNT(DISTINCT w.id)") {
 		t.Fatalf("reaper stale-wisp close count can be join-multiplied:\n%s", log)
 	}
-	if !strings.Contains(log, "wisp_dependencies d") || !strings.Contains(log, "d.type = 'parent-child'") {
-		t.Fatalf("reaper stale-wisp close path does not use parent-child dependencies:\n%s", log)
+	if !strings.Contains(log, "wisp_dependencies d") || !containsReaperGraphCleanupEdgePredicate(log) {
+		t.Fatalf("reaper stale-wisp close path does not use graph cleanup-edge dependencies:\n%s", log)
 	}
 	if !strings.Contains(log, "d.depends_on_id = parent_wisp.id") || !strings.Contains(log, "d.depends_on_id = parent_issue.id") {
 		t.Fatalf("reaper stale-wisp close path does not use bd 1.0.4 dependency target column:\n%s", log)

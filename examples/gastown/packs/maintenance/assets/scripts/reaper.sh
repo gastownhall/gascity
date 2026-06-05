@@ -28,6 +28,7 @@ SESSION_STATE_PRUNE_AGE="${GC_REAPER_SESSION_STATE_PRUNE_AGE:-24h}"
 ALERT_THRESHOLD="${GC_REAPER_ALERT_THRESHOLD:-500}"
 MAIL_ALERT_THRESHOLD="${GC_REAPER_MAIL_ALERT_THRESHOLD:-0}"  # 0 = disabled
 DRY_RUN="${GC_REAPER_DRY_RUN:-}"
+WISP_CLEANUP_EDGE_TYPES="'parent-child', 'tracks', 'blocks'"
 
 # Convert Go durations to SQL INTERVAL hours for Dolt.
 duration_to_hours() {
@@ -358,8 +359,8 @@ while IFS= read -r DB; do
     DB_MUTATIONS=0
 
     # Step 1: Count stale non-closed wisps, then close only candidates whose
-    # explicit parent-child edge points to a closed parent. Wisps
-    # without a parent edge are reported but not closed by age alone.
+    # explicit graph cleanup edge points to a closed parent. Wisps
+    # without a cleanup edge are reported but not closed by age alone.
     get_sql_count "$DB" "stale non-closed wisp" "
         SELECT COUNT(*) FROM \`$DB\`.wisps
         WHERE status IN ('open', 'hooked', 'in_progress')
@@ -379,7 +380,7 @@ while IFS= read -r DB; do
             SELECT COUNT(DISTINCT w.id) FROM \`$DB\`.wisps w
             INNER JOIN \`$DB\`.wisp_dependencies d
                 ON d.issue_id = w.id
-                AND d.type = 'parent-child'
+                AND d.type IN ($WISP_CLEANUP_EDGE_TYPES)
             LEFT JOIN \`$DB\`.wisps parent_wisp ON d.depends_on_id = parent_wisp.id
             LEFT JOIN \`$DB\`.issues parent_issue ON d.depends_on_id = parent_issue.id
             WHERE w.status IN ('open', 'hooked', 'in_progress')
@@ -407,7 +408,7 @@ while IFS= read -r DB; do
                     SELECT w.id FROM \`$DB\`.wisps w
                     INNER JOIN \`$DB\`.wisp_dependencies d
                         ON d.issue_id = w.id
-                        AND d.type = 'parent-child'
+                        AND d.type IN ($WISP_CLEANUP_EDGE_TYPES)
                     LEFT JOIN \`$DB\`.wisps parent_wisp ON d.depends_on_id = parent_wisp.id
                     LEFT JOIN \`$DB\`.issues parent_issue ON d.depends_on_id = parent_issue.id
                     WHERE w.status IN ('open', 'hooked', 'in_progress')
@@ -440,7 +441,7 @@ while IFS= read -r DB; do
         AND id NOT IN (
             SELECT DISTINCT d.depends_on_id FROM \`$DB\`.wisp_dependencies d
             INNER JOIN \`$DB\`.wisps child_wisp ON d.issue_id = child_wisp.id
-            WHERE d.type = 'parent-child'
+            WHERE d.type IN ($WISP_CLEANUP_EDGE_TYPES)
             AND child_wisp.status IN ('open', 'hooked', 'in_progress')
         )
     "
@@ -454,7 +455,7 @@ while IFS= read -r DB; do
             AND id NOT IN (
                 SELECT DISTINCT d.depends_on_id FROM \`$DB\`.wisp_dependencies d
                 INNER JOIN \`$DB\`.wisps child_wisp ON d.issue_id = child_wisp.id
-                WHERE d.type = 'parent-child'
+                WHERE d.type IN ($WISP_CLEANUP_EDGE_TYPES)
                 AND child_wisp.status IN ('open', 'hooked', 'in_progress')
             )
         "; then
