@@ -1897,6 +1897,10 @@
           "type": "string",
           "description": "Timeout overrides the per-order timeout. Go duration string."
         },
+        "idempotent": {
+          "type": "boolean",
+          "description": "Idempotent overrides whether the order's dispatch is safe to repeat.\nIdempotent orders fail open when the open-work gate times out (#2893)."
+        },
         "env": {
           "additionalProperties": {
             "type": "string"

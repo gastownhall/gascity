@@ -7177,7 +7177,7 @@ func TestStoreHasOpenDescendantsShortCircuitsOpenParentChildBeforeGraphReads(t *
 	}
 
 	store := depListFailStore{Store: base, failID: wispRoot.ID}
-	has, err := storeHasOpenDescendants(store, wispRoot.ID)
+	has, err := storeHasOpenDescendants(store, wispRoot.ID, nil)
 	if err != nil {
 		t.Fatalf("storeHasOpenDescendants: %v", err)
 	}

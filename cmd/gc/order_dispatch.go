@@ -469,8 +469,9 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 			return trackingIndex.hasOpenTracking(storesForGate, storeKeysForGate, scoped)
 		})
 		if err != nil {
-			logDispatchError(m.stderr, "gc: order dispatch: checking open work for %s: %v", scoped, err)
-			continue
+			if m.gateFailClosed(ctx, a, scoped, err) {
+				continue
+			}
 		}
 		if hasOpenTracking {
 			continue
@@ -561,8 +562,9 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 			return trackingIndex.hasOpenWork(storesForGate, storeKeysForGate, scoped, m.hasOpenWorkInStoresStrict, true)
 		})
 		if err != nil {
-			logDispatchError(m.stderr, "gc: order dispatch: checking open work for %s: %v", scoped, err)
-			continue
+			if m.gateFailClosed(ctx, a, scoped, err) {
+				continue
+			}
 		}
 		if hasOpenWork {
 			continue
@@ -1410,7 +1412,7 @@ func (m *memoryOrderDispatcher) hasOpenWorkStrict(store beads.Store, scopedName 
 		if isOrderRootOnlyWispCandidate(b) {
 			return true, nil
 		}
-		hasOpenDescendants, err := storeHasOpenDescendants(store, b.ID)
+		hasOpenDescendants, err := storeHasOpenDescendants(store, b.ID, isTransientNotificationBead)
 		if err != nil {
 			return false, fmt.Errorf("checking open descendants of wisp %s: %w", b.ID, err)
 		}
@@ -1432,12 +1434,28 @@ func isOrderRootOnlyWispCandidate(b beads.Bead) bool {
 	return b.Metadata["gc.kind"] == "wisp" && !beads.IsMoleculeType(b.Type)
 }
 
+// isTransientNotificationBead reports whether a bead is a short-lived delivery
+// chore (a nudge or a mail/message) rather than substantive order work. Such
+// beads inherit an order wisp's order-run label via the parent-child graph but
+// are reaped on their own TTL, so they must not keep the single-flight open-work
+// gate "open" and block the order from re-dispatching (#2893, de-noise).
+func isTransientNotificationBead(b beads.Bead) bool {
+	if b.Type == "message" {
+		return true
+	}
+	return b.Type == nudgeBeadType && beadLabelsContain(b.Labels, nudgeBeadLabel)
+}
+
 // storeHasOpenDescendants reports whether any transitive descendant of rootID
 // is non-closed. It includes closed intermediate nodes so nested molecule work
 // remains visible after a direct child step has completed. Graph-v2 workflows
 // can link children with dependency edges instead of ParentID, so descendants
-// include parent-child/tracks/blocks dependents too.
-func storeHasOpenDescendants(store beads.Store, rootID string) (bool, error) {
+// include parent-child/tracks/blocks dependents too. When skip is non-nil, an
+// open child for which skip returns true is not treated as blocking open work
+// (its subtree is still traversed) — the gate passes isTransientNotificationBead
+// so lingering nudge/mail chores don't wedge it; callers that want the raw
+// descendant view (e.g. the stale-wisp sweeper) pass nil.
+func storeHasOpenDescendants(store beads.Store, rootID string, skip func(beads.Bead) bool) (bool, error) {
 	seen := map[string]struct{}{rootID: {}}
 	queue := []string{rootID}
 	// ParentID queries and closed intermediate traversal require live reads:
@@ -1459,7 +1477,7 @@ func storeHasOpenDescendants(store beads.Store, rootID string) (bool, error) {
 				continue
 			}
 			seen[c.ID] = struct{}{}
-			if c.Status != "closed" {
+			if c.Status != "closed" && (skip == nil || !skip(c)) {
 				return true, nil
 			}
 			queue = append(queue, c.ID)
@@ -1477,7 +1495,7 @@ func storeHasOpenDescendants(store beads.Store, rootID string) (bool, error) {
 				continue
 			}
 			seen[c.ID] = struct{}{}
-			if c.Status != "closed" {
+			if c.Status != "closed" && (skip == nil || !skip(c)) {
 				return true, nil
 			}
 			queue = append(queue, c.ID)
@@ -1603,18 +1621,24 @@ func (m *memoryOrderDispatcher) hasOpenWorkInStoresStrict(stores []beads.Store, 
 // (storeHasOpenDescendants); under Dolt write contention one heavy order's gate
 // can block for minutes, and because dispatch iterates orders synchronously
 // that stalls every LATER order (feeders, nudger, route-reclaim) on the same
-// tick — the vc-6qh1 hang. Bounding the gate lets a slow order be skipped so
+// tick — the #2893 hang. Bounding the gate lets a slow order be skipped so
 // the rest of the sweep proceeds. Package-level var so it is tunable and
 // overridable in tests.
 var orderGateTimeout = 8 * time.Second
 
+// errGateTimeout marks an open-work gate error caused by the per-order
+// bound elapsing (the #2893 contention case), as opposed to ctx cancel or a
+// genuine store-read error. Only this case fails open for idempotent orders.
+var errGateTimeout = errors.New("open-work gate timed out")
+
 // gateOpenWorkBounded runs the open-work gate under a per-order timeout that
 // also honors the dispatch context. On timeout (or cancellation) it returns an
-// error so the caller skips THAT order and continues to the rest
-// (fail-closed-but-continue, vc-6qh1 mitigation #2): a heavy gate never starves
-// the feeders. gate is invoked in a goroutine; on timeout that goroutine is
-// left to finish on its own (its result is discarded via the buffered channel)
-// rather than blocking the dispatch loop.
+// error; the caller resolves that error through gateFailClosed, which applies
+// the per-order policy — non-idempotent orders are skipped (fail-closed) while
+// idempotent ones dispatch anyway (fail-open). Either way a heavy gate never
+// stalls the LATER orders on the tick (#2893). gate is invoked in a goroutine;
+// on timeout that goroutine is left to finish on its own (its result is
+// discarded via the buffered channel) rather than blocking the dispatch loop.
 func gateOpenWorkBounded(ctx context.Context, timeout time.Duration, scoped string, gate func() (bool, error)) (bool, error) {
 	type gateResult struct {
 		has bool
@@ -1631,10 +1655,45 @@ func gateOpenWorkBounded(ctx context.Context, timeout time.Duration, scoped stri
 	case r := <-done:
 		return r.has, r.err
 	case <-timer.C:
-		return false, fmt.Errorf("open-work gate for %s timed out after %s; skipping this order so later orders still dispatch (see vc-6qh1)", scoped, timeout)
+		return false, fmt.Errorf("open-work gate for %s timed out after %s; skipping this order so later orders still dispatch (see #2893): %w", scoped, timeout, errGateTimeout)
 	case <-ctx.Done():
 		return false, fmt.Errorf("open-work gate for %s aborted: %w", scoped, ctx.Err())
 	}
+}
+
+// gateFailClosed decides whether an open-work gate error must block dispatch of
+// this order, and logs the error. The blanket "skip on any gate error" was
+// wrong: idempotent sweep orders (feeders, nudger, route-reclaim) are safe to
+// double-dispatch, so a gate that times out under store contention must not
+// starve them forever (#2893 #2'). Policy:
+//   - dispatch context done (shutdown / tick deadline): always block — there is
+//     no point dispatching into a canceled context.
+//   - a per-order gate TIMEOUT (errGateTimeout): a non-idempotent order fails
+//     CLOSED (block, preserving single-flight); an idempotent order fails OPEN
+//     (dispatch anyway), since its re-run is a no-op.
+//   - any other gate error (e.g. a genuine store-read failure): always block.
+//     Only the bounded-gate timeout is the #2893 contention signal that is
+//     safe to relax; a real store/gate error is a different signal where the
+//     conservative response is to fail CLOSED, matching the pre-#2893 behavior.
+//
+// Failing open deliberately relaxes single-flight for idempotent orders: it may
+// dispatch while a prior run is still in flight. That is safe by the
+// idempotent contract (a duplicate run is a no-op) and each dispatch gets its
+// own tracking bead, so there is no shared-bead close race. It is also bounded
+// in practice — the cooldown trigger's rememberLastRun keeps an order from
+// re-firing within its interval, which is far longer than a feeder run — so a
+// genuinely concurrent second dispatch is rare, not per-tick. Re-adding an
+// open-work check here would reintroduce the #2893 starvation this fixes.
+func (m *memoryOrderDispatcher) gateFailClosed(ctx context.Context, a orders.Order, scoped string, err error) bool {
+	logDispatchError(m.stderr, "gc: order dispatch: checking open work for %s: %v", scoped, err)
+	if ctx.Err() != nil {
+		return true
+	}
+	if a.Idempotent && errors.Is(err, errGateTimeout) {
+		logDispatchError(m.stderr, "gc: order dispatch: %s open-work gate failed but order is idempotent; dispatching anyway (#2893)", scoped)
+		return false
+	}
+	return true
 }
 
 // sweepOrphanedOrderTracking closes any open order-tracking beads left
@@ -1986,7 +2045,7 @@ func sweepStaleOrderWispSubtrees(store beads.Store, cutoff time.Time, onlyOrders
 			continue
 		}
 		if !isOrderRootOnlyWispCandidate(root) {
-			openDescendants, err := storeHasOpenDescendants(store, root.ID)
+			openDescendants, err := storeHasOpenDescendants(store, root.ID, nil)
 			if err != nil {
 				return 0, fmt.Errorf("checking stale wisp descendants of %s: %w", root.ID, err)
 			}

@@ -2432,6 +2432,37 @@ func TestDeleteOrderOverride_NotFound(t *testing.T) {
 	}
 }
 
+func TestMergeOrderOverrideMergesIdempotent(t *testing.T) {
+	dir := t.TempDir()
+	path := writeTOML(t, dir, minimalCity())
+	ed := configedit.NewEditor(fsys.OSFS{}, path)
+
+	tru := true
+	if err := ed.SetOrderOverride(config.OrderOverride{Name: "unrouted-feeder", Idempotent: &tru}); err != nil {
+		t.Fatalf("SetOrderOverride: %v", err)
+	}
+
+	// A partial merge that does not mention idempotent must PRESERVE it.
+	trig := "cooldown"
+	if err := ed.MergeOrderOverride(config.OrderOverride{Name: "unrouted-feeder", Trigger: &trig}); err != nil {
+		t.Fatalf("MergeOrderOverride: %v", err)
+	}
+	cfg := readTOML(t, path)
+	if got := cfg.Orders.Overrides[0].Idempotent; got == nil || !*got {
+		t.Fatalf("idempotent should be preserved through a partial merge, got %v", got)
+	}
+
+	// An explicit idempotent=false must be APPLIED through the merge.
+	fls := false
+	if err := ed.MergeOrderOverride(config.OrderOverride{Name: "unrouted-feeder", Idempotent: &fls}); err != nil {
+		t.Fatalf("MergeOrderOverride: %v", err)
+	}
+	cfg = readTOML(t, path)
+	if got := cfg.Orders.Overrides[0].Idempotent; got == nil || *got {
+		t.Fatalf("idempotent=false should be applied through merge, got %v", got)
+	}
+}
+
 func TestMergeOrderOverrideNormalizesLegacyGateToTriggerOnWrite(t *testing.T) {
 	dir := t.TempDir()
 	path := writeTOML(t, dir, minimalCity()+`

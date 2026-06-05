@@ -1753,6 +1753,9 @@ type OrderOverride struct {
 	Pool *string `toml:"pool,omitempty"`
 	// Timeout overrides the per-order timeout. Go duration string.
 	Timeout *string `toml:"timeout,omitempty"`
+	// Idempotent overrides whether the order's dispatch is safe to repeat.
+	// Idempotent orders fail open when the open-work gate times out (#2893).
+	Idempotent *bool `toml:"idempotent,omitempty"`
 	// Env adds or overrides environment variables exported into an exec
 	// order's child process.
 	Env map[string]string `toml:"env,omitempty"`
