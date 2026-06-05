@@ -470,6 +470,53 @@ Target: $TARGET"
   exit 1
 }
 
+branch_has_real_change() {
+  # Shared false-completion predicate (0-diff/0-commit guard). Does
+  # <branch-ref> introduce a real change vs its merge-base with
+  # <target-ref>? Diff is authoritative — commit-count alone is a weaker
+  # proxy because a branch can carry commits that net-zero — so we use
+  # `git diff --quiet` and ALSO require >=1 commit beyond the base.
+  #   exit 0 = real change (safe to merge / open PR)
+  #   exit 1 = empty: no diff, or no commits, vs base (REFUSE close-as-merged)
+  #   exit 2 = base/diff could not be computed: merge-base failed OR `git diff`
+  #           itself errored (exit >1). Fail closed — a tool error is a suspect,
+  #           not a licence to merge — so the caller halts, never improvises.
+  bhrc_target="$1"
+  bhrc_branch="$2"
+  bhrc_base=$(git merge-base "$bhrc_target" "$bhrc_branch" 2>/dev/null) || return 2
+  git diff --quiet "$bhrc_base" "$bhrc_branch"
+  case "$?" in
+    0) return 1 ;;  # no diff -> empty -> refuse
+    1) : ;;         # diff present -> fall through to the commit-count check
+    *) return 2 ;;  # git diff errored -> suspect -> refuse (fail closed)
+  esac
+  [ "$(git rev-list --count "$bhrc_base..$bhrc_branch" 2>/dev/null || echo 0)" -ge 1 ] || return 1
+  return 0
+}
+
+halt_false_completion() {
+  # branch_has_real_change tripped: a close-as-merged would assert "work was
+  # merged" for a branch that merges to a no-op, which is definitionally
+  # false. Halt-and-escalate (NEVER silent retry): leave the bead blocked
+  # with a structured note, hand to human, nudge mayor + witness, then stop.
+  # This surfaces the transient cause (e.g. session starvation -> 0-commit
+  # polecat) instead of masking it.
+  fc_branch="$1"
+  fc_base="$2"
+  gc bd update $WORK \
+    --status=blocked \
+    --assignee="" \
+    --set-metadata merge_result=refused_false_completion \
+    --set-metadata gc.routed_to=human \
+    --set-metadata false_completion_suspected="branch $fc_branch no verified change vs $fc_base; refused merge-close"
+  gc session nudge mayor "FALSE-COMPLETION HALT: $WORK — branch $fc_branch no verified change vs $fc_base; refused close-as-merged. Bead left blocked; NEVER silent retry."
+  gc session nudge "${GC_RIG:+$GC_RIG/}{{binding_prefix}}witness" "FALSE-COMPLETION HALT: $WORK — branch $fc_branch no verified change vs $fc_base; refused close-as-merged."
+  echo "REFUSED close-as-merged: $WORK branch $fc_branch introduces no real change vs $fc_base."
+  echo "STOP. Bead left blocked + escalated to mayor/witness. NEVER silent retry."
+  gc runtime drain-ack
+  exit 1
+}
+
 pr_lookup_missing() {
   case "$1" in
     *"Could not resolve to a PullRequest"*|*"could not resolve to a PullRequest"*|*"no pull requests found"*|*"Not Found"*|*"not found"*|*"404"*) return 0 ;;
@@ -630,6 +677,17 @@ fi
 
 **If MERGE_STRATEGY = "direct" (default):**
 
+**0. Refuse a 0-diff branch (false-completion guard):**
+
+A close-as-merged asserts "work was merged"; a branch that introduces no
+change vs its merge-base merging is definitionally false. Refuse it before
+touching `$TARGET`. Legit no-op resolutions MUST use wontfix/duplicate/
+not-planned, never merged — so this never blocks a real merge.
+```bash
+branch_has_real_change "origin/$TARGET" temp || \
+  halt_false_completion "$BRANCH" "$(git merge-base "origin/$TARGET" temp 2>/dev/null || printf '%s' "origin/$TARGET")"
+```
+
 **1. Merge and push target branch:**
 ```bash
 git checkout $TARGET
@@ -677,6 +735,17 @@ If delete_merged_branches = "true": `git push origin --delete $BRANCH`
 
 Refinery does NOT land the branch directly. Instead it publishes a pull
 request and treats PR creation as the terminal handoff for this work bead.
+
+**0. Refuse a 0-diff branch (false-completion guard):**
+
+The same predicate covers the empty-PR / 0-commit concern: do not publish a
+pull request for a branch that introduces no change vs its merge-base. The
+PR handoff closes the bead, so an empty PR is the same false completion as
+an empty direct merge.
+```bash
+branch_has_real_change "origin/$TARGET" temp || \
+  halt_false_completion "$BRANCH" "$(git merge-base "origin/$TARGET" temp 2>/dev/null || printf '%s' "origin/$TARGET")"
+```
 
 **1. Push the rebased branch back to origin:**
 ```bash
