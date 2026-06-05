@@ -28,7 +28,7 @@ cgo_cppflags="${CGO_CPPFLAGS:-}"
 cgo_ldflags="${CGO_LDFLAGS:-}"
 if [[ "$(uname)" == "Darwin" ]]; then
   icu_prefix="$(brew --prefix icu4c 2>/dev/null || true)"
-  if [[ -n "$icu_prefix" ]]; then
+  if [[ -n "$icu_prefix" && "$cgo_cppflags" != *"-I${icu_prefix}/include"* ]]; then
     cgo_cppflags="${cgo_cppflags:+$cgo_cppflags }-I${icu_prefix}/include"
     cgo_ldflags="${cgo_ldflags:+$cgo_ldflags }-L${icu_prefix}/lib"
   fi

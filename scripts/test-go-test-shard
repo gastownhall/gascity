@@ -36,12 +36,13 @@ goroot_val="$(go env GOROOT)"
 # Mirror the Makefile's detection here so tests run via this script see the
 # same CGO paths as `make`. No-op on Linux and when icu4c is not installed.
 # When invoked from test-integration-shard, CGO_CPPFLAGS/CGO_LDFLAGS may
-# already be set by that script; augment rather than replace them.
+# already be set by that script; the duplicate-safe guard below prevents
+# double-adding when this script runs as a child of test-integration-shard.
 cgo_cppflags="${CGO_CPPFLAGS:-}"
 cgo_ldflags="${CGO_LDFLAGS:-}"
-if [[ "$(uname)" == "Darwin" && -z "$cgo_cppflags" ]]; then
+if [[ "$(uname)" == "Darwin" ]]; then
   icu_prefix="$(brew --prefix icu4c 2>/dev/null || true)"
-  if [[ -n "$icu_prefix" ]]; then
+  if [[ -n "$icu_prefix" && "$cgo_cppflags" != *"-I${icu_prefix}/include"* ]]; then
     cgo_cppflags="${cgo_cppflags:+$cgo_cppflags }-I${icu_prefix}/include"
     cgo_ldflags="${cgo_ldflags:+$cgo_ldflags }-L${icu_prefix}/lib"
   fi
