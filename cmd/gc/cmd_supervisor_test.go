@@ -6213,3 +6213,88 @@ func TestShouldTeeSupervisorLogAvoidsDoubleLoggingForRedirectedFDs(t *testing.T)
 		t.Errorf("nil logFile: shouldTeeSupervisorLog should return false")
 	}
 }
+
+const ephemeralPortThresholdForTest = 32768
+
+func freeEphemeralLoopbackPort(t *testing.T) int {
+	t.Helper()
+	for i := 0; i < 20; i++ {
+		l, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("Listen: %v", err)
+		}
+		port := l.Addr().(*net.TCPAddr).Port
+		_ = l.Close()
+		if port >= ephemeralPortThresholdForTest {
+			return port
+		}
+	}
+	t.Skip("could not allocate a port >= 32768 in 20 tries")
+	return 0
+}
+
+func freeLowLoopbackPort(t *testing.T) int {
+	t.Helper()
+	for port := 10000; port < ephemeralPortThresholdForTest; port += 37 {
+		l, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
+		if err == nil {
+			_ = l.Close()
+			return port
+		}
+	}
+	t.Skip("no free port below 32768 found in test probe range")
+	return 0
+}
+
+func TestRunSupervisorWarnsOnEphemeralAPIPort(t *testing.T) {
+	gcHome := t.TempDir()
+	t.Setenv("GC_HOME", gcHome)
+	port := freeEphemeralLoopbackPort(t)
+	cfg := "[supervisor]\nport = " + strconv.Itoa(port) + "\n"
+	if err := os.WriteFile(supervisor.ConfigPath(), []byte(cfg), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sockPath := filepath.Join(supervisor.RuntimeDir(), "supervisor.sock")
+	if err := os.MkdirAll(sockPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sockPath, "sentinel"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	_ = runSupervisor(&stdout, &stderr)
+	if !strings.Contains(stderr.String(), "WARNING: API binding to ephemeral port") {
+		t.Errorf("stderr = %q, want ephemeral-port warning for port %d", stderr.String(), port)
+	}
+	if !strings.Contains(stderr.String(), strconv.Itoa(port)) {
+		t.Errorf("stderr = %q, want port number %d in warning", stderr.String(), port)
+	}
+	if !strings.Contains(stdout.String(), "Supervisor API listening") {
+		t.Errorf("stdout = %q, want API listening message (warning must not make startup fatal)", stdout.String())
+	}
+}
+
+func TestRunSupervisorNoWarningForLowAPIPort(t *testing.T) {
+	gcHome := t.TempDir()
+	t.Setenv("GC_HOME", gcHome)
+	port := freeLowLoopbackPort(t)
+	cfg := "[supervisor]\nport = " + strconv.Itoa(port) + "\n"
+	if err := os.WriteFile(supervisor.ConfigPath(), []byte(cfg), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sockPath := filepath.Join(supervisor.RuntimeDir(), "supervisor.sock")
+	if err := os.MkdirAll(sockPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sockPath, "sentinel"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	_ = runSupervisor(&stdout, &stderr)
+	if strings.Contains(stderr.String(), "WARNING: API binding to ephemeral port") {
+		t.Errorf("stderr = %q, must not warn for low port %d (below threshold %d)", stderr.String(), port, ephemeralPortThresholdForTest)
+	}
+	if !strings.Contains(stdout.String(), "Supervisor API listening") {
+		t.Errorf("stdout = %q, want API listening message for low port", stdout.String())
+	}
+}
