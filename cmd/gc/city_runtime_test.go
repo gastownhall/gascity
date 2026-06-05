@@ -93,6 +93,40 @@ func TestSweepUndesiredPoolSessionBeads_KeepsRunningSessionsOpen(t *testing.T) {
 	}
 }
 
+func TestPoolSweepWouldDrain(t *testing.T) {
+	store := beads.NewMemStore()
+	bead, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:worker"},
+		Metadata: map[string]string{
+			"session_name":         "worker-bd-123",
+			"template":             "worker",
+			"agent_name":           "worker",
+			poolManagedMetadataKey: boolMetadata(true),
+			"state":                "active",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	snap := newSessionBeadSnapshot([]beads.Bead{bead})
+	cfg := &config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}}
+
+	if !poolSweepWouldDrain(snap, map[string]TemplateParams{}, cfg) {
+		t.Fatalf("want drainPending=true: an open pool session is absent from desiredState (sweep would close it)")
+	}
+	if poolSweepWouldDrain(snap, map[string]TemplateParams{"worker-bd-123": {}}, cfg) {
+		t.Fatalf("want drainPending=false: the session is in desiredState")
+	}
+	if poolSweepWouldDrain(newSessionBeadSnapshot(nil), map[string]TemplateParams{}, cfg) {
+		t.Fatalf("want drainPending=false: no open sessions")
+	}
+	if poolSweepWouldDrain(nil, nil, cfg) || poolSweepWouldDrain(snap, nil, nil) {
+		t.Fatalf("nil snapshot/cfg must be safe (no drain)")
+	}
+}
+
 func TestSweepUndesiredPoolSessionBeads_UsesProcessNameFallback(t *testing.T) {
 	store := beads.NewMemStore()
 	bead, err := store.Create(beads.Bead{

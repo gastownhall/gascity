@@ -15,14 +15,12 @@ review).
 
 | Variable | Source | Description |
 |----------|--------|-------------|
-| issue | caller | The work bead ID assigned to this agent |
+| convoy_id | runtime | Input convoy tracking the single work bead |
 """
 formula = "mol-do-work"
 
-[vars]
-[vars.issue]
-description = "The work bead ID assigned to this agent"
-required = true
+[requires]
+formula_compiler = ">=2.0.0"
 
 [[steps]]
 id = "do-work"
@@ -32,13 +30,21 @@ You have been assigned a work bead. Read it, do the work, verify it,
 commit relevant changes, and close it.
 
 **1. Read your assignment:**
+
+Derive the work bead from the input convoy, then read it:
 ```bash
-bd show {{issue}}
+CONVOY_STATUS=$(gc convoy status {{convoy_id}} --json)
+WORK_BEAD_ID=$(printf '%s' "$CONVOY_STATUS" | jq -r 'if (.children | length) == 1 then .children[0].id else empty end')
+if [ -z "$WORK_BEAD_ID" ]; then
+  echo "mol-do-work requires an input convoy with exactly one tracked member" >&2
+  exit 1
+fi
+bd show "$WORK_BEAD_ID"
 ```
 
 Read the bead's title and description carefully. This is your task.
 
-**Signal liveness:** run `gc bd heartbeat {{issue}}` now, and again before any
+**Signal liveness:** run `gc bd heartbeat "$WORK_BEAD_ID"` now, and again before any
 shell command you expect to run for many minutes (long builds, test sweeps).
 It stamps `gc.last_heartbeat_at` so the dashboard can tell you are alive and
 working rather than wedged.
@@ -70,17 +76,17 @@ uncommitted and mention that in your close notes.
 **3. Close the target bead when done:**
 ```bash
 COMMIT=$(git rev-parse --short HEAD 2>/dev/null || true)
-bd update {{issue}} --set-metadata gc.outcome=pass --status=closed --notes "Done: <brief summary of what you did>. Verification: <commands run>. Commit: ${COMMIT:-none}."
+bd update "$WORK_BEAD_ID" --set-metadata gc.outcome=pass --status=closed --notes "Done: <brief summary of what you did>. Verification: <commands run>. Commit: ${COMMIT:-none}."
 ```
 
 **4. Close this formula step:**
 
-If `GC_BEAD_ID` is set and is different from `{{issue}}`, close it too. This
+If `GC_BEAD_ID` is set and is different from `$WORK_BEAD_ID`, close it too. This
 prevents `mol-do-work` wrapper beads from remaining ready after the real work
 is complete.
 ```bash
-if [ -n "${GC_BEAD_ID:-}" ] && [ "$GC_BEAD_ID" != "{{issue}}" ]; then
-  bd update "$GC_BEAD_ID" --set-metadata gc.outcome=pass --status=closed --notes "Target {{issue}} completed. Commit: ${COMMIT:-none}."
+if [ -n "${GC_BEAD_ID:-}" ] && [ "$GC_BEAD_ID" != "$WORK_BEAD_ID" ]; then
+  bd update "$GC_BEAD_ID" --set-metadata gc.outcome=pass --status=closed --notes "Target $WORK_BEAD_ID completed. Commit: ${COMMIT:-none}."
 fi
 ```
 

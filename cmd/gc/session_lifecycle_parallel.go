@@ -783,6 +783,14 @@ func buildPreparedStartWithWorkDirResolver(
 	tp := candidate.tp
 	agentCfg := templateParamsToConfig(tp)
 
+	// Fold a per-dispatch reasoning effort from the session's assigned work
+	// bead (gc.reasoning metadata) into template_overrides["effort"], mirroring
+	// how schema option overrides are carried. Only providers with an "effort"
+	// option (codex) consume it; for codex this becomes
+	// `-c model_reasoning_effort=<effort>` via the existing resolution below.
+	// An explicit session-level effort override wins over the dispatch default.
+	applyDispatchReasoningOverride(candidate, cfg, store)
+
 	// Apply template_overrides from bead metadata. These are per-session
 	// schema option overrides (e.g., {"model":"opus","effort":"high"}) that
 	// override the agent's default CLI flags for specific options.
@@ -937,6 +945,48 @@ func buildPreparedStartWithWorkDirResolver(
 		coreBreakdown: coreBreakdown,
 		liveHash:      liveHash,
 	}, nil
+}
+
+// applyDispatchReasoningOverride reads the per-dispatch reasoning effort from
+// the session's assigned work bead and folds it into the in-memory session
+// template_overrides under the "effort" key, so the normal override resolution
+// (both fresh-start and resume command building) emits the provider's reasoning
+// flag. It is a no-op when the provider has no "effort" option, when no work
+// bead carries gc.reasoning, or when the session already pins an explicit
+// effort override (the more specific session value wins). The persisted bead is
+// not mutated; only the in-memory copy used for this launch is updated.
+func applyDispatchReasoningOverride(candidate startCandidate, cfg *config.City, store beads.Store) {
+	session := candidate.session
+	if session == nil {
+		return
+	}
+	tp := candidate.tp
+	effort := resolveDispatchReasoningEffort(store, tp.ResolvedProvider, taskWorkDirAssignees(candidate, cfg)...)
+	if effort == "" {
+		return
+	}
+	overrides := map[string]string{}
+	if raw := strings.TrimSpace(session.Metadata["template_overrides"]); raw != "" {
+		if err := json.Unmarshal([]byte(raw), &overrides); err != nil {
+			// Malformed override metadata is logged and surfaced by the main
+			// resolution block below; don't fold on top of unparseable JSON.
+			return
+		}
+	}
+	if _, ok := overrides["effort"]; ok {
+		// Explicit session-level effort override takes precedence over the
+		// per-dispatch default.
+		return
+	}
+	overrides["effort"] = effort
+	merged, err := json.Marshal(overrides)
+	if err != nil {
+		return
+	}
+	if session.Metadata == nil {
+		session.Metadata = map[string]string{}
+	}
+	session.Metadata["template_overrides"] = string(merged)
 }
 
 func resolvePreparedTaskWorkDir(

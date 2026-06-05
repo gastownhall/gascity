@@ -78,36 +78,32 @@ $ gc session peek mc-8sfd
   Run `gc prime` to initialize your context.
 
   # Code Reviewer Agent
-  You are an agent in a Gas City workspace. Claim routed work before executing it.
+  You are an agent in a Gas City workspace. Claim available work and execute it.
 
   ## Your tools
-  - `gc hook` — find routed work
-  - `bd update <id> --claim` — atomically claim unassigned work
-  - `bd show <id> --json` — verify assignee and metadata
-  - `bd close <id>` — mark work done
-  - `gc runtime drain-ack` — end the session when idle
+  - `gc hook --claim --json` — find and atomically claim one work item
+  - `bd show <id>` — see details of a work item
+  - `bd close <id>` — mark work as done
 
   ## How to work
-  1. Check assigned work: `bd ready --assignee="$GC_SESSION_NAME" --json --limit=1`
-  2. If none is assigned, run `gc hook`
-  3. Claim unassigned routed work with `bd update <id> --claim`
-  4. Verify `assignee` and `gc.continuation_group` metadata with `bd show <id> --json`
-  5. Review the code, write the requested feedback, and close the bead
-  6. If no assigned continuation work is ready, run `gc runtime drain-ack && exit`
+  1. Claim work: `gc hook --claim --json`
+  2. Read the claimed bead and execute the work described in its title
+  3. When done, close it: `bd close <id>`
+  4. Check for more work. Repeat until the queue is empty.
 
   ## Reviewing Code
   Read the code and provide feedback on bugs, security issues, and style.
 
 ... # content elided
 
-• Ran gc hook
+• Ran gc hook --claim --json
   └ warning: beads.role not configured (GH#2950).
       Fix: git config beads.role maintainer
     … +282 lines
       }
     ]
 
-• The ready queue has one task that is explicitly routed to the reviewer agent:
+• The hook claimed one task that is explicitly routed to the reviewer agent:
   mp-p956, “Review hello.py and write review.md with feedback.” I’m pulling the
   bead details and the target file now, then I’ll write the review and close
   that item.

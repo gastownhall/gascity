@@ -262,7 +262,7 @@ BeadsConfig holds bead store settings.
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `provider` | string |  | `bd` | Provider selects the bead store backend: "bd" (default), "file", or "exec:&lt;script&gt;" for a user-supplied script. |
+| `provider` | string |  | `bd` | Provider selects the bead store backend: "bd" (default, Dolt-backed), "file", "exec:&lt;script&gt;" for a user-supplied script, or "sqlite" for the built-in coordination store (pure-Go SQLite; use when Dolt is unavailable). "sqlite-cgo" is a deprecated alias for "sqlite". |
 | `backend` | string |  |  | Backend selects the bd storage engine when Provider is "bd". Empty defaults to "dolt"; T3Code uses "doltlite" for local dev stores. |
 | `event_hooks` | boolean |  | `true` | EventHooks controls installation of the bead event-forwarding hooks (.beads/hooks/on_create,on_update,on_close). Defaults to true. This config surface is staged ahead of the native bead-event support; current hook behavior remains unchanged until lifecycle code opts in. |
 | `bd_compatibility` | string |  |  | BDCompatibility selects the bd CLI semantics Gas City may rely on. Empty defaults to "bd-1.0.4", which keeps claimable work history-backed and avoids ready flags whose filtering is incomplete in bd 1.0.4. Enum: `bd-1.0.4`, `bd-1.0.5` |
@@ -541,6 +541,7 @@ OrderOverride modifies a scanned order's scheduling fields and exec env.
 | `on` | string |  |  | On overrides the event trigger event type. |
 | `pool` | string |  |  | Pool overrides the target session config. |
 | `timeout` | string |  |  | Timeout overrides the per-order timeout. Go duration string. |
+| `idempotent` | boolean |  |  | Idempotent overrides whether the order's dispatch is safe to repeat. Idempotent orders fail open when the open-work gate times out (#2893). |
 | `env` | map[string]string |  |  | Env adds or overrides environment variables exported into an exec order's child process. |
 
 ## OrdersConfig

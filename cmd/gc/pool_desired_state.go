@@ -19,6 +19,13 @@ type SessionRequest struct {
 	Tier          string
 	SessionBeadID string // concrete session to preserve for resume or in-flight new demand
 	WorkBeadID    string // the work bead driving this request
+	// FloorGuarantee marks a "new" request created to satisfy an agent's
+	// min_active_sessions floor (as opposed to elastic scale-check demand).
+	// The per-tick create-budget allocator reserves a token for each
+	// floor-bearing template before round-robining the remainder, so a cold
+	// pool's floor spawn cannot be starved by a warm pool's large elastic
+	// demand (follow-up to #2893).
+	FloorGuarantee bool
 }
 
 func beadPriority(b beads.Bead) int {
@@ -357,8 +364,9 @@ func applyNestedCaps(cfg *config.City, requests []SessionRequest, trace *session
 		minSess := agent.EffectiveMinActiveSessions()
 		for usage.agentCount[template] < minSess {
 			req := SessionRequest{
-				Template: template,
-				Tier:     "new",
+				Template:       template,
+				Tier:           "new",
+				FloorGuarantee: true,
 			}
 			if _, _, _, rejected := usage.rejection(req, limits); rejected {
 				break

@@ -134,10 +134,13 @@ func TestPrimeDefaultPromptContent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("gc prime failed: %v\n%s", err, out)
 	}
-	// The default prompt should mention the key bd commands.
-	for _, expected := range []string{"bd ready", "bd show", "bd close"} {
+	// The default prompt should mention the key claim/read/close commands.
+	for _, expected := range []string{"gc hook --claim --json", "bd show", "bd close"} {
 		if !strings.Contains(out, expected) {
 			t.Errorf("default prompt should mention %q, got:\n%s", expected, out)
 		}
+	}
+	if strings.Contains(out, "bd ready") {
+		t.Errorf("default prompt should use hook claim protocol instead of bd ready, got:\n%s", out)
 	}
 }

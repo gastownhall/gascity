@@ -1,6 +1,8 @@
 package config
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -251,5 +253,58 @@ func TestIncludeCacheName(t *testing.T) {
 	c := includeCacheName("git@github.com:org/other.git")
 	if a == c {
 		t.Errorf("collision: %q == %q for different sources", a, c)
+	}
+}
+
+func TestValidateInstalledRemoteCacheLockedMemoizesSuccess(t *testing.T) {
+	ResetRemoteCacheValidationCache()
+	t.Cleanup(ResetRemoteCacheValidationCache)
+
+	cacheRoot := t.TempDir()
+	commit := "abcdef1234567890abcdef1234567890abcdef12"
+	cacheDir := filepath.Join(cacheRoot, "repo")
+	if err := os.MkdirAll(filepath.Join(cacheDir, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cacheDir, ".git", "index"), []byte("idx"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var calls int
+	orig := runRepoCacheGit
+	runRepoCacheGit = func(_ string, args ...string) (string, error) {
+		calls++
+		if len(args) > 0 && args[0] == "rev-parse" {
+			return commit + "\n", nil
+		}
+		return "", nil // status --porcelain: clean
+	}
+	t.Cleanup(func() { runRepoCacheGit = orig })
+
+	const source = "git@github.com:example/pack"
+	if err := validateInstalledRemoteCacheLocked(source, cacheRoot, cacheDir, commit); err != nil {
+		t.Fatalf("first validate: %v", err)
+	}
+	first := calls
+	if first == 0 {
+		t.Fatal("first validation should run git (rev-parse + status)")
+	}
+
+	if err := validateInstalledRemoteCacheLocked(source, cacheRoot, cacheDir, commit); err != nil {
+		t.Fatalf("second validate: %v", err)
+	}
+	if calls != first {
+		t.Fatalf("second validation re-ran git (%d→%d); want cached (no new git)", first, calls)
+	}
+
+	// Touching the checkout invalidates the fingerprint → revalidate.
+	if err := os.WriteFile(filepath.Join(cacheDir, ".git", "index"), []byte("idx2-longer"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateInstalledRemoteCacheLocked(source, cacheRoot, cacheDir, commit); err != nil {
+		t.Fatalf("third validate: %v", err)
+	}
+	if calls == first {
+		t.Fatalf("changed checkout should re-run git; calls stayed %d", calls)
 	}
 }

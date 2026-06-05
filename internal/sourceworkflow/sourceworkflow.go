@@ -46,6 +46,12 @@ const SourceStoreRefMetadataKey = "gc.source_store_ref"
 // strict stores that require a human-readable close reason accept the cleanup.
 const WorkflowSubtreeClosedReason = "source workflow cleanup: subtree force-closed by CloseWorkflowSubtree"
 
+// WorkflowSpecSidecarClosedReason is stamped on generated spec sidecars when
+// their owning workflow root has closed. These beads are topology hints, not
+// executable work, so leaving them open after the root closes makes them appear
+// as leaked work.
+const WorkflowSpecSidecarClosedReason = "workflow cleanup: generated spec sidecar closed with workflow root"
+
 // WorkflowSkippedCloseReason is the canonical close_reason stamped on
 // workflow-subtree beads when they are force-closed via the
 // gc.outcome=skipped cleanup path (gc convoy delete --skip, force-replace
@@ -454,6 +460,146 @@ func CloseWorkflowSubtree(store beads.Store, rootID string) (int, error) {
 		"gc.outcome":   "skipped",
 		"close_reason": WorkflowSubtreeClosedReason,
 	})
+}
+
+// CloseSpecSidecarsForRoot closes open generated spec sidecars owned by the
+// workflow root. It is safe to call after the root has already been closed.
+func CloseSpecSidecarsForRoot(store beads.Store, rootID, reason string) (int, error) {
+	if store == nil {
+		return 0, fmt.Errorf("bead store unavailable")
+	}
+	rootID = strings.TrimSpace(rootID)
+	if rootID == "" {
+		return 0, nil
+	}
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		reason = WorkflowSpecSidecarClosedReason
+	}
+
+	matched, err := beads.HandlesFor(store).Live.List(beads.ListQuery{
+		IncludeClosed: true,
+		Metadata: map[string]string{
+			"gc.root_bead_id": rootID,
+		},
+		TierMode: beads.TierBoth,
+	})
+	if err != nil {
+		return 0, fmt.Errorf("listing workflow spec sidecars for %s: %w", rootID, err)
+	}
+	ids := make([]string, 0, len(matched))
+	for _, bead := range matched {
+		if bead.ID == "" || bead.Status == "closed" || !IsGeneratedSpecSidecar(bead) {
+			continue
+		}
+		ids = append(ids, bead.ID)
+	}
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	slices.Sort(ids)
+	ordered, err := closeorder.Order(store, ids)
+	if err != nil {
+		return 0, fmt.Errorf("ordering workflow spec sidecars for %s: %w", rootID, err)
+	}
+	return store.CloseAll(ordered, map[string]string{
+		"gc.outcome":   "pass",
+		"close_reason": reason,
+	})
+}
+
+// CloseSpecSidecarsForClosedRoots closes generated spec sidecars whose owning
+// workflow root is already closed. It repairs residues left by older workflow
+// finalizers and source-bead close hooks.
+func CloseSpecSidecarsForClosedRoots(store beads.Store, reason string) (int, error) {
+	if store == nil {
+		return 0, fmt.Errorf("bead store unavailable")
+	}
+	specs, err := generatedSpecSidecarCandidates(store)
+	if err != nil {
+		return 0, err
+	}
+	rootIDs := make(map[string]struct{})
+	for _, spec := range specs {
+		rootID := strings.TrimSpace(spec.Metadata["gc.root_bead_id"])
+		if rootID == "" {
+			continue
+		}
+		root, err := store.Get(rootID)
+		if err != nil {
+			if errors.Is(err, beads.ErrNotFound) {
+				continue
+			}
+			return 0, fmt.Errorf("loading workflow root %s for spec %s: %w", rootID, spec.ID, err)
+		}
+		if root.Status == "closed" && IsWorkflowRoot(root) {
+			rootIDs[rootID] = struct{}{}
+		}
+	}
+	if len(rootIDs) == 0 {
+		return 0, nil
+	}
+	orderedRoots := make([]string, 0, len(rootIDs))
+	for rootID := range rootIDs {
+		orderedRoots = append(orderedRoots, rootID)
+	}
+	slices.Sort(orderedRoots)
+
+	closed := 0
+	for _, rootID := range orderedRoots {
+		n, err := CloseSpecSidecarsForRoot(store, rootID, reason)
+		if err != nil {
+			return closed, err
+		}
+		closed += n
+	}
+	return closed, nil
+}
+
+func generatedSpecSidecarCandidates(store beads.Store) ([]beads.Bead, error) {
+	seen := map[string]struct{}{}
+	var out []beads.Bead
+	appendUnique := func(items []beads.Bead) {
+		for _, item := range items {
+			if item.ID == "" || item.Status == "closed" || !IsGeneratedSpecSidecar(item) {
+				continue
+			}
+			if _, ok := seen[item.ID]; ok {
+				continue
+			}
+			seen[item.ID] = struct{}{}
+			out = append(out, item)
+		}
+	}
+
+	typed, err := beads.HandlesFor(store).Live.List(beads.ListQuery{
+		Type:          "spec",
+		IncludeClosed: true,
+		TierMode:      beads.TierBoth,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("listing open spec sidecars by type: %w", err)
+	}
+	appendUnique(typed)
+
+	marked, err := beads.HandlesFor(store).Live.List(beads.ListQuery{
+		Metadata:      map[string]string{"gc.kind": "spec"},
+		IncludeClosed: true,
+		TierMode:      beads.TierBoth,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("listing open spec sidecars by metadata: %w", err)
+	}
+	appendUnique(marked)
+
+	return out, nil
+}
+
+// IsGeneratedSpecSidecar reports whether a bead is a generated workflow spec
+// sidecar rather than executable work.
+func IsGeneratedSpecSidecar(bead beads.Bead) bool {
+	return strings.EqualFold(strings.TrimSpace(bead.Metadata["gc.kind"]), "spec") ||
+		strings.EqualFold(strings.TrimSpace(bead.Type), "spec")
 }
 
 // WorkflowBeadSnapshot captures the mutable fields of a workflow subtree

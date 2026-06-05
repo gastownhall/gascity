@@ -48,6 +48,14 @@ type Order struct {
 	Timeout string `toml:"timeout,omitempty"`
 	// Enabled controls whether the order is active. Defaults to true.
 	Enabled *bool `toml:"enabled,omitempty"`
+	// Idempotent marks an order whose dispatch is safe to repeat (a sweep/
+	// feeder whose re-run is a no-op, e.g. routes only unrouted work, or
+	// nudges an idle pool). Such orders fail OPEN when the single-flight /
+	// open-work gate times out under store contention: they dispatch anyway
+	// rather than be starved, since a duplicate run causes no harm
+	// (gastownhall/gascity#2893). Non-idempotent orders (the
+	// default, false) keep failing CLOSED on gate timeout.
+	Idempotent bool `toml:"idempotent,omitempty"`
 	// Env is a map of environment variables exported into an exec
 	// order's child process. Use the `[order.env]` TOML table to
 	// override thresholds (e.g. GC_DOCTOR_LATENCY_WARN_S) without
@@ -88,6 +96,7 @@ type orderDecode struct {
 	Pool        string            `toml:"pool,omitempty"`
 	Timeout     string            `toml:"timeout,omitempty"`
 	Enabled     *bool             `toml:"enabled,omitempty"`
+	Idempotent  bool              `toml:"idempotent,omitempty"`
 	Env         map[string]string `toml:"env,omitempty"`
 }
 
@@ -109,6 +118,7 @@ func (d orderDecode) normalized() Order {
 		Pool:        d.Pool,
 		Timeout:     d.Timeout,
 		Enabled:     d.Enabled,
+		Idempotent:  d.Idempotent,
 		Env:         d.Env,
 	}
 }
