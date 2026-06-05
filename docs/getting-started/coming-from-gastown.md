@@ -20,7 +20,7 @@ This page is laid out as a deliberate sequence so you are never untangling sever
    2. [mechanisms](#mechanisms--behaviors-→-gas-city-equivalents)
    3. [filesystem/state](#filesystem--state-layout-→-gas-city-equivalents)
    4. [workflows](#workflows-→-gas-city-equivalents)
-   5. [commands](/reference/gastown-command-map).
+   5. commands — these live on a separate page, the [Gas Town → Gas City Command Map](/reference/gastown-command-map).
 
 The prose sections after the tables ([What Usually Maps Cleanly](#what-usually-maps-cleanly) and so on...) go deeper on the patterns that matter most.
 
@@ -126,13 +126,13 @@ For the full treatment of these building blocks, read the [Primitives Reference]
 
 ## Mapping Tables
 
-You have seen what Gas Town gives you and the building blocks Gas City offers in their place. The five following tables connect the two, one domain at a time, in the same order as the recap above:
+You have seen what Gas Town gives you and the building blocks Gas City offers in their place. The following tables connect the two, one domain at a time, in the same order as the recap above. The first four are on this page; the commands map is large enough that it lives on its own page:
 
 - [roles](#roles-→-gas-city-equivalents)
 - [mechanisms](#mechanisms--behaviors-→-gas-city-equivalents)
 - [filesystem/state](#filesystem--state-layout-→-gas-city-equivalents)
 - [workflows](#workflows-→-gas-city-equivalents)
-- [commands](/reference/gastown-command-map).
+- commands — on a separate page, the [Gas Town → Gas City Command Map](/reference/gastown-command-map).
 
 Each table is preceded by a one-sentence scope statement so you always know which domain you are in.
 
