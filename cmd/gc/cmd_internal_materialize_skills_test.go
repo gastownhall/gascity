@@ -800,3 +800,40 @@ func writeMaterializeTestMayor(t *testing.T, cityDir, body string) {
 		t.Fatalf("WriteFile(%s): %v", filepath.Join("agents", "mayor", "agent.toml"), err)
 	}
 }
+
+// TestInternalMaterializeSkillsBestEffortSkipsUnknownAgent guards the pre_start
+// robustness fix: a session identity that can't be resolved to a config template
+// (named/wisp expansions like "rig/executor-vc-eswi4") must be FATAL for a direct
+// call but a warn-and-exit-0 skip under --best-effort, so the materialize-skills
+// pre_start command can't make session start fatal.
+func TestInternalMaterializeSkillsBestEffortSkipsUnknownAgent(t *testing.T) {
+	clearGCEnv(t)
+	cityDir := t.TempDir()
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_HOME", t.TempDir())
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(.gc): %v", err)
+	}
+	writeMaterializeTestCityFile(t, cityDir, "city.toml", "[workspace]\nname = \"test-city\"\n\n[beads]\nprovider = \"file\"\n")
+	writeMaterializeTestMayor(t, cityDir, "provider = \"claude\"\nstart_command = \"echo\"\n")
+	writeMaterializeTestCityFile(t, cityDir, "pack.toml", "[pack]\nname = \"test\"\nversion = \"0.1.0\"\nschema = 2\n")
+
+	workdir := t.TempDir()
+	const unresolvable = "rig/executor-vc-eswi4"
+
+	// Direct call (no --best-effort): unresolvable agent is fatal.
+	var so, se bytes.Buffer
+	if code := run([]string{"internal", "materialize-skills", "--agent", unresolvable, "--workdir", workdir}, &so, &se); code == 0 {
+		t.Fatalf("unknown agent without --best-effort: got exit 0, want non-zero; stderr=%q", se.String())
+	}
+
+	// --best-effort: warn and exit 0 so pre_start (session start) is not fatal.
+	so.Reset()
+	se.Reset()
+	if code := run([]string{"internal", "materialize-skills", "--best-effort", "--agent", unresolvable, "--workdir", workdir}, &so, &se); code != 0 {
+		t.Fatalf("unknown agent with --best-effort: exit %d, want 0; stderr=%q", code, se.String())
+	}
+	if !strings.Contains(se.String(), "best-effort") {
+		t.Fatalf("expected a best-effort skip warning on stderr, got %q", se.String())
+	}
+}
