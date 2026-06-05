@@ -225,9 +225,10 @@ func slingFormula(opts SlingOpts, deps SlingDeps) (SlingResult, error) {
 	if mResult.GraphWorkflow || IsGraphWorkflowAttachment(deps.Store, mResult.RootID) {
 		wfResult, wfErr := doStartGraphWorkflow(mResult.RootID, "", a, method, deps)
 		wfResult.FormulaName = opts.BeadOrFormula
+		wfResult.Deprecations = append(wfResult.Deprecations, inv.Deprecations...)
 		return wfResult, wfErr
 	}
-	result := SlingResult{Target: a.QualifiedName(), FormulaName: opts.BeadOrFormula}
+	result := SlingResult{Target: a.QualifiedName(), FormulaName: opts.BeadOrFormula, Deprecations: inv.Deprecations}
 	return finalize(opts, deps, mResult.RootID, method, result)
 }
 
@@ -243,6 +244,7 @@ func slingOnFormula(opts SlingOpts, deps SlingDeps, querier BeadQuerier, beadID 
 	}
 	if isGraph {
 		formulaVars = graphInv.Vars
+		result.Deprecations = append(result.Deprecations, graphInv.Deprecations...)
 		if err := validateSlingFormulaRuntimeVars(context.Background(), opts.OnFormula, searchPaths, molecule.Options{
 			Title: opts.Title,
 			Vars:  formulaVars,
@@ -344,6 +346,7 @@ func slingDefaultFormula(opts SlingOpts, deps SlingDeps, querier BeadQuerier, be
 	}
 	if isGraph {
 		defaultVars = graphInv.Vars
+		result.Deprecations = append(result.Deprecations, graphInv.Deprecations...)
 		if err := validateSlingFormulaRuntimeVars(context.Background(), defaultFormula, searchPaths, molecule.Options{
 			Title: opts.Title,
 			Vars:  defaultVars,

@@ -833,6 +833,45 @@ func TestBdStoreUpdateEmptyOpts(t *testing.T) {
 	}
 }
 
+func TestBdStoreClaimReturnsClaimedBead(t *testing.T) {
+	var gotArgs []string
+	runner := func(_, name string, args ...string) ([]byte, error) {
+		if name != "bd" {
+			t.Fatalf("name = %q, want bd", name)
+		}
+		gotArgs = append([]string(nil), args...)
+		return []byte(`[{"id":"bd-42","title":"Do it","status":"in_progress","assignee":"worker-1","issue_type":"task","created_at":"2025-01-15T10:30:00Z"}]`), nil
+	}
+	s := beads.NewBdStore("/city", runner)
+	claimed, ok, err := s.Claim("bd-42")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok {
+		t.Fatal("Claim ok = false, want true")
+	}
+	if claimed.ID != "bd-42" || claimed.Status != "in_progress" || claimed.Assignee != "worker-1" {
+		t.Fatalf("claimed bead = %+v, want claimed bd-42 assigned to worker-1", claimed)
+	}
+	if got := strings.Join(gotArgs, " "); got != "update bd-42 --claim --json" {
+		t.Fatalf("args = %q, want bd claim update args", got)
+	}
+}
+
+func TestBdStoreClaimConflictReturnsFalse(t *testing.T) {
+	runner := func(_, _ string, _ ...string) ([]byte, error) {
+		return []byte(`{"error":"issue is already assigned to worker-2"}`), fmt.Errorf("exit status 1")
+	}
+	s := beads.NewBdStore("/city", runner)
+	claimed, ok, err := s.Claim("bd-42")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok {
+		t.Fatalf("Claim ok = true, want false; claimed=%+v", claimed)
+	}
+}
+
 func TestBdStoreUpdatePassesPriority(t *testing.T) {
 	var gotArgs []string
 	runner := func(_, _ string, args ...string) ([]byte, error) {
@@ -1738,7 +1777,7 @@ func TestBdStoreListEmptyOutputMeansNoBeads(t *testing.T) {
 	}
 }
 
-func TestBdStoreListSkipLabelsDoesNotEmitUnsupportedBd104Flag(t *testing.T) {
+func TestBdStoreListSkipLabelsEmitsFlag(t *testing.T) {
 	var gotCmd string
 	runner := func(_, name string, args ...string) ([]byte, error) {
 		gotCmd = name + " " + strings.Join(args, " ")
@@ -1748,8 +1787,8 @@ func TestBdStoreListSkipLabelsDoesNotEmitUnsupportedBd104Flag(t *testing.T) {
 	if _, err := s.List(beads.ListQuery{AllowScan: true, SkipLabels: true}); err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(gotCmd, "--skip-labels") {
-		t.Fatalf("bd list command = %q, --skip-labels is not supported by bd 1.0.4", gotCmd)
+	if !strings.Contains(gotCmd, "--skip-labels") {
+		t.Fatalf("bd list command = %q, want --skip-labels flag", gotCmd)
 	}
 }
 
@@ -1770,8 +1809,8 @@ func TestBdStoreListAcceptsBdListEnvelope(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(gotCmd, "--skip-labels") {
-		t.Fatalf("bd list command = %q, --skip-labels is not supported by bd 1.0.4", gotCmd)
+	if !strings.Contains(gotCmd, "--skip-labels") {
+		t.Fatalf("bd list command = %q, want --skip-labels flag", gotCmd)
 	}
 	if len(got) != 1 || got[0].ID != "bd-envelope" {
 		t.Fatalf("List() = %+v, want bd-envelope from envelope", got)

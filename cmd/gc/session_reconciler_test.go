@@ -920,6 +920,80 @@ func TestQueueDrainAckAsyncStopRecoversStopPanic(t *testing.T) {
 	}
 }
 
+// TestQueueDrainAckAsyncStopPokesAfterSuccessfulStop verifies that the
+// controller is poked once after an async drain-ack kill succeeds (or the
+// session is already gone), so Phase 2 (finalize + pool respawn) runs on the
+// next event tick instead of waiting for the patrol interval (ga-ryhnhd).
+// Not parallel — modifies the package-level drainAckAsyncStopPokeController seam.
+func TestQueueDrainAckAsyncStopPokesAfterSuccessfulStop(t *testing.T) {
+	var pokeCalls int
+	var pokeMu sync.Mutex
+	old := drainAckAsyncStopPokeController
+	drainAckAsyncStopPokeController = func(string) error {
+		pokeMu.Lock()
+		pokeCalls++
+		pokeMu.Unlock()
+		return nil
+	}
+	t.Cleanup(func() { drainAckAsyncStopPokeController = old })
+
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "worker", runtime.Config{Command: "test-cmd"}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	var stderr synchronizedBuffer
+	tracker := &asyncStartTracker{}
+	queueDrainAckAsyncStop("", store, sp, &config.City{}, "gc-worker", "worker", tracker, &stderr)
+	if !tracker.wait(time.Second) {
+		t.Fatal("async drain-ack stop did not complete")
+	}
+
+	pokeMu.Lock()
+	got := pokeCalls
+	pokeMu.Unlock()
+	if got != 1 {
+		t.Fatalf("poke count = %d, want 1 after successful stop", got)
+	}
+}
+
+// TestQueueDrainAckAsyncStopDoesNotPokeOnHardError verifies that the
+// controller is NOT poked when the async kill returns a hard (non-gone) error,
+// preventing a hot poke-loop on an unkillable session.
+// Not parallel — modifies the package-level drainAckAsyncStopPokeController seam.
+func TestQueueDrainAckAsyncStopDoesNotPokeOnHardError(t *testing.T) {
+	var pokeCalls int
+	var pokeMu sync.Mutex
+	old := drainAckAsyncStopPokeController
+	drainAckAsyncStopPokeController = func(string) error {
+		pokeMu.Lock()
+		pokeCalls++
+		pokeMu.Unlock()
+		return nil
+	}
+	t.Cleanup(func() { drainAckAsyncStopPokeController = old })
+
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "worker", runtime.Config{Command: "test-cmd"}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	sp.StopErrors = map[string]error{"worker": errors.New("hard kill error")}
+	var stderr synchronizedBuffer
+	tracker := &asyncStartTracker{}
+	queueDrainAckAsyncStop("", store, sp, &config.City{}, "gc-worker", "worker", tracker, &stderr)
+	if !tracker.wait(time.Second) {
+		t.Fatal("async drain-ack stop did not complete")
+	}
+
+	pokeMu.Lock()
+	got := pokeCalls
+	pokeMu.Unlock()
+	if got != 0 {
+		t.Fatalf("poke count = %d, want 0 (hard error must not poke)", got)
+	}
+}
+
 func TestCityRuntimeShutdownWaitsForTrackedAsyncDrainAckStopsBeforeStopSnapshot(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := newShutdownWaitStopProvider()

@@ -1548,6 +1548,7 @@ Finds routed work using the agent's work_query config.
 
 Without --inject: prints normalized ready-only output, exits 0 if work exists, 1 if empty.
 With --inject: silent legacy Stop-hook compatibility; skips the work query and always exits 0.
+With --claim: runs the standard startup claim protocol for one work item.
 
 		The agent is determined from $GC_AGENT or a positional argument.
 
@@ -1557,7 +1558,10 @@ gc hook [agent] [flags]
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
+| `--claim` | bool |  | atomically claim one routed work item for the current session |
+| `--drain-ack` | bool |  | with --claim, acknowledge runtime drain when no work is available |
 | `--inject` | bool |  | silent legacy Stop-hook compatibility; skip work query and exit 0 |
+| `--json` | bool |  | with --claim, emit a JSON protocol result |
 
 ## gc import
 

@@ -31,6 +31,23 @@ gomodcache_val="$(go env GOMODCACHE)"
 gotmpdir_val="$(go env GOTMPDIR)"
 goroot_val="$(go env GOROOT)"
 
+# macOS: icu4c (a transitive go-icu-regex/Dolt CGO dependency) is keg-only
+# under Homebrew, so its headers/libs are not on the default CGO search path.
+# Mirror the Makefile's detection here so tests run via this script see the
+# same CGO paths as `make`. No-op on Linux and when icu4c is not installed.
+# When invoked from test-integration-shard, CGO_CPPFLAGS/CGO_LDFLAGS may
+# already be set by that script; the duplicate-safe guard below prevents
+# double-adding when this script runs as a child of test-integration-shard.
+cgo_cppflags="${CGO_CPPFLAGS:-}"
+cgo_ldflags="${CGO_LDFLAGS:-}"
+if [[ "$(uname)" == "Darwin" ]]; then
+  icu_prefix="$(brew --prefix icu4c 2>/dev/null || true)"
+  if [[ -n "$icu_prefix" && "$cgo_cppflags" != *"-I${icu_prefix}/include"* ]]; then
+    cgo_cppflags="${cgo_cppflags:+$cgo_cppflags }-I${icu_prefix}/include"
+    cgo_ldflags="${cgo_ldflags:+$cgo_ldflags }-L${icu_prefix}/lib"
+  fi
+fi
+
 extra_env=()
 while IFS='=' read -r name _; do
   case "$name" in
@@ -67,7 +84,9 @@ run_go_test() {
     GOINSECURE="${GOINSECURE-}" \
     GOVCS="${GOVCS-}" \
     GOWORK="${GOWORK-}" \
-    GC_FAST_UNIT="${GC_FAST_UNIT:-0}"
+    GC_FAST_UNIT="${GC_FAST_UNIT:-0}" \
+    CGO_CPPFLAGS="${cgo_cppflags}" \
+    CGO_LDFLAGS="${cgo_ldflags}" \
     GC_TEST_SHARD_INDEX="${shard_index}" \
     GC_TEST_SHARD_TOTAL="${shard_total}"
   )

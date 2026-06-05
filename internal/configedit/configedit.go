@@ -1408,6 +1408,9 @@ func mergeOrderOverride(dst *config.OrderOverride, src config.OrderOverride) {
 	if src.Timeout != nil {
 		dst.Timeout = src.Timeout
 	}
+	if src.Idempotent != nil {
+		dst.Idempotent = src.Idempotent
+	}
 	if len(src.Env) > 0 {
 		if dst.Env == nil {
 			dst.Env = make(map[string]string, len(src.Env))

@@ -631,6 +631,11 @@ func ensureDrainItemRoot(store beads.Store, control, unit, member beads.Bead, co
 		}
 	}
 	vars[graphv2.ConvoyIDVar] = unit.ID
+	if !convoycore.IsUnresolvedTrackedItem(member) && strings.TrimSpace(member.ID) != "" {
+		// Deprecated one-release compat alias (#2941): item formulas that
+		// still reference {{issue}} resolve it to the unit's tracked member.
+		vars[graphv2.LegacyIssueVar] = member.ID
+	}
 	recipe, err := formula.CompileWithoutRuntimeVarValidation(context.Background(), itemFormula, opts.FormulaSearchPaths, vars)
 	if err != nil {
 		return "", false, fmt.Errorf("%w: %s: compiling drain item formula %q: %w", errDrainInvalidItemFormula, control.ID, itemFormula, err)

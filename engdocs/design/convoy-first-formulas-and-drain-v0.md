@@ -309,7 +309,11 @@ otherwise the item root itself is the default outcome bead.
 
 ## Migration
 
-Existing non-graph formulas remain bead-scoped.
+Out-of-tree non-graph formulas remain bead-scoped. Bundled and example
+formulas are all convoy-native graph.v2 formulas (#2941 completed the
+migration that this v0 started for `mol-scoped-work` and
+`mol-review-quorum`); a whole-pack test in `internal/bootstrap/` keeps it
+that way.
 
 Existing graph.v2 formulas must migrate:
 
@@ -320,12 +324,25 @@ Existing graph.v2 formulas must migrate:
 - Do not rely on graph.v2 success to close the input convoy or the original
   target bead.
 
+Deprecated compat alias (#2941, one release): a graph.v2 formula that still
+declares `vars.issue` or references `{{issue}}` is accepted with a
+deprecation warning, and the runtime resolves `issue` to the single tracked
+member of the input convoy (erroring when the convoy tracks more or fewer
+than one member). `bead_id` has no compat mapping and is rejected outright.
+Caller-supplied `--var issue=` values remain rejected — the value is always
+runtime-derived.
+
 Core formula changes in this v0:
 
 - `mol-scoped-work` receives `convoy_id`; when it needs a single underlying
   bead, it reads the convoy membership and requires exactly one tracked member.
 - `mol-review-quorum` receives `convoy_id` and no longer requires a bead-scoped
   `subject` value from graph.v2 callers.
+
+#2941 applied the same single-member derivation pattern to `mol-do-work`,
+`mol-polecat-base` and its variants (`mol-polecat-commit`,
+`mol-polecat-report`, gastown's `mol-polecat-work`), `mol-prompt-synth`, and
+gastown's `mol-review-leg`.
 
 ## Acceptance Criteria
 
@@ -335,8 +352,10 @@ Core formula changes in this v0:
   not expand members before formula materialization.
 - Targetless graph.v2 formulas that reference `convoy_id` or contain drain fail
   before creating work.
-- Caller or formula attempts to provide `convoy_id`, `issue`, or `bead_id` fail
-  before creating graph.v2 work.
+- Caller attempts to provide `convoy_id`, `issue`, or `bead_id` fail before
+  creating graph.v2 work. Formula declarations/references of `convoy_id` and
+  `bead_id` outside the contract fail too; formula usage of `issue` is
+  accepted for one release as a deprecation-warned compat alias (#2941).
 - Graph.v2 roots use `gc.input_convoy_id` and `gc.graphv2_root_key`, not
   `gc.source_bead_id`.
 - Repeated graph.v2 launches against a bare bead create separate one-item
@@ -347,7 +366,9 @@ Core formula changes in this v0:
   snapshot after later membership changes.
 - Drain creates one system-created drain-unit convoy and one item graph.v2 root per
   manifest row.
-- Drain item roots receive only `convoy_id` as their system variable.
+- Drain item roots receive only `convoy_id` as their system variable (plus
+  the deprecated `issue` alias resolved to the unit's tracked member during
+  the #2941 compat window).
 - Drain succeeds only after every item root is closed successfully, and fails
   after every reachable item root is terminal if any item root fails.
 - Graph.v2 item formulas receive only `convoy_id` and inspect convoy membership

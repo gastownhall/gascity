@@ -9,6 +9,18 @@ import (
 func boolPtr(b bool) *bool    { return &b }
 func strPtr(s string) *string { return &s }
 
+func TestApplyOverridesIdempotent(t *testing.T) {
+	t.Parallel()
+
+	aa := []Order{{Name: "unrouted-feeder"}}
+	if err := ApplyOverrides(aa, []Override{{Name: "unrouted-feeder", Idempotent: boolPtr(true)}}); err != nil {
+		t.Fatalf("ApplyOverrides: %v", err)
+	}
+	if !aa[0].Idempotent {
+		t.Error("override idempotent=true was not applied to the order")
+	}
+}
+
 func TestApplyOverrides(t *testing.T) {
 	t.Parallel()
 

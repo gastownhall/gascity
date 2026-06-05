@@ -16,10 +16,8 @@ or per-worktree scratch files.
 """
 formula = "mol-review-leg"
 
-[vars]
-[vars.issue]
-description = "The review task bead assigned to this worker"
-required = true
+[requires]
+formula_compiler = ">=2.0.0"
 
 [[steps]]
 id = "load-assignment"
@@ -33,10 +31,17 @@ gc prime
 gc bd prime
 ```
 
-**2. Read the bead and metadata:**
+**2. Derive the review bead from the input convoy and read it:**
 ```bash
-gc bd show {{issue}}
-gc bd show {{issue}} --json | jq '.[0].metadata'
+CONVOY_STATUS=$(gc convoy status {{convoy_id}} --json)
+WORK_BEAD_ID=$(printf '%s' "$CONVOY_STATUS" | jq -r 'if (.children | length) == 1 then .children[0].id else empty end')
+if [ -z "$WORK_BEAD_ID" ]; then
+  echo "mol-review-leg requires an input convoy with exactly one tracked member" >&2
+  gc runtime drain-ack
+  exit 1
+fi
+gc bd show "$WORK_BEAD_ID"
+gc bd show "$WORK_BEAD_ID" --json | jq '.[0].metadata'
 ```
 
 **Expected metadata:**
@@ -63,7 +68,9 @@ session exits.
 
 Suggested pattern:
 ```bash
-gc bd update {{issue}} --notes "$(cat <<'EOF'
+CONVOY_STATUS=$(gc convoy status {{convoy_id}} --json)
+WORK_BEAD_ID=$(printf '%s' "$CONVOY_STATUS" | jq -r 'if (.children | length) == 1 then .children[0].id else empty end')
+gc bd update "$WORK_BEAD_ID" --notes "$(cat <<'EOF'
 # <report title>
 
 ## Summary
@@ -90,12 +97,14 @@ needs = ["write-report"]
 description = """
 After the report is stored on the bead, notify the coordinator and close out.
 
-**1. Read metadata for the mail header:**
+**1. Derive the review bead and read metadata for the mail header:**
 ```bash
-COORD=$(gc bd show {{issue}} --json | jq -r '.[0].metadata.coordinator // empty')
-REVIEW_ID=$(gc bd show {{issue}} --json | jq -r '.[0].metadata.review_id // empty')
-PHASE=$(gc bd show {{issue}} --json | jq -r '.[0].metadata.review_phase // empty')
-LEG=$(gc bd show {{issue}} --json | jq -r '.[0].metadata.review_leg // empty')
+CONVOY_STATUS=$(gc convoy status {{convoy_id}} --json)
+WORK_BEAD_ID=$(printf '%s' "$CONVOY_STATUS" | jq -r 'if (.children | length) == 1 then .children[0].id else empty end')
+COORD=$(gc bd show "$WORK_BEAD_ID" --json | jq -r '.[0].metadata.coordinator // empty')
+REVIEW_ID=$(gc bd show "$WORK_BEAD_ID" --json | jq -r '.[0].metadata.review_id // empty')
+PHASE=$(gc bd show "$WORK_BEAD_ID" --json | jq -r '.[0].metadata.review_phase // empty')
+LEG=$(gc bd show "$WORK_BEAD_ID" --json | jq -r '.[0].metadata.review_leg // empty')
 ```
 
 **2. If `COORD` is present, mail completion:**
@@ -103,7 +112,7 @@ LEG=$(gc bd show {{issue}} --json | jq -r '.[0].metadata.review_leg // empty')
 gc mail send "$COORD" -s "IDEA_REVIEW $REVIEW_ID $PHASE $LEG complete" -m "$(cat <<EOF
 Review leg complete.
 
-Bead: {{issue}}
+Bead: $WORK_BEAD_ID
 Phase: $PHASE
 Leg: $LEG
 
@@ -114,7 +123,7 @@ EOF
 
 **3. Close the bead and drain:**
 ```bash
-gc bd update {{issue}} --status=closed
+gc bd update "$WORK_BEAD_ID" --status=closed
 gc runtime drain-ack
 ```
 

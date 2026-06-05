@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `gc nudge drain --inject` now prepends a one-line current-time stamp
+  (operator-local + UTC + epoch) to its `UserPromptSubmit` hook output, giving
+  agents a live clock in context every turn. The local zone follows the host
+  (`time.Local`/`$TZ`) or the `GC_OPERATOR_TZ` override; disable with
+  `GC_INJECT_CLOCK=0`. Folded into the existing nudge inject, so it adds zero
+  extra hook subprocesses per turn. See #3036.
 - The supervisor now merges a machine-local secrets file
   (`${GC_HOME}/secrets.env`, dotenv syntax) into the launchd plist / systemd
   unit environment on every service-file regeneration. This fixes provider
@@ -34,6 +40,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   space). Addresses the root trigger of the 2026-06-01 fleet-drain incident.
 
 ### Fixed
+
+- Pool respawn after `gc runtime drain-ack` no longer waits up to a full patrol
+  interval (default 60 s) before the replacement session starts. The async kill
+  goroutine now pokes the controller once after the session is gone so Phase 2
+  (finalize bead + spawn replacement) runs on the next event tick. Fixes the
+  `TestLifecycle_DrainAckResponsiveRespawn/prequeued_respawn_2364` Tier B
+  nightly regression (ga-ryhnhd, #2364, #2251).
 
 - `gc dolt sync` now emits per-mode diagnostics on push failure instead of a
   generic "push failed": a TIMEOUT message naming the ceiling and

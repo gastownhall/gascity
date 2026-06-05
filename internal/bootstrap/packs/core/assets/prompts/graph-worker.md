@@ -14,45 +14,24 @@ through explicit beads; you execute the ready bead currently assigned to you.
 ## Startup
 
 ```bash
-# Step 1: Check for in-progress work (crash recovery)
-bd list --assignee="$GC_SESSION_NAME" --status=in_progress --json
-
-# Step 2: If nothing in-progress, check for assigned ready work
-{{ .AssignedReadyQuery }} --json --limit=1
-
-# Step 3: If still nothing, check the routed queue (multi-session configs only)
-gc hook
-
-# Step 4: If gc hook returned an unassigned routed bead, claim it atomically
-bd update <id> --claim
-
-# Step 5: Verify the claim before doing work
-bd show <id> --json
+# Finds existing assigned work, assigned ready work, or atomically claims
+# routed work. It also preassigns continuation-group siblings for this session.
+gc hook --claim --drain-ack --json
 ```
 
-If you have no work after all three checks, run:
-
-```bash
-gc runtime drain-ack
-```
+If the result action is `drain`, your session has acknowledged drain and you
+are done. If the result action is `work`, use `bead_id` as the work bead.
 
 ## How To Work
 
 1. Find your assigned bead (see Startup above).
-2. If the bead came from `gc hook`, claim it with `bd update <id> --claim`
-   before doing any work. Do not start work with `bd update --status in_progress`;
-   only `--claim` sets both assignee and in-progress state atomically.
-3. Verify the claimed bead is assigned to `$GC_SESSION_NAME` and routed to
-   `$GC_TEMPLATE`. If either check fails, do not work that bead; run `gc hook`
-   again or drain if no valid work is available.
-4. Read it with `bd show <id>`.
-5. **Claim continuation group** (see below).
-6. Execute exactly that bead's description.
-7. On success, close it:
+2. Read it with `bd show <id>`.
+3. Execute exactly that bead's description.
+4. On success, close it:
    ```bash
    bd update <id> --set-metadata gc.outcome=pass --status closed
    ```
-8. On transient failure, mark it transient and close it:
+5. On transient failure, mark it transient and close it:
    ```bash
    bd update <id> \
      --set-metadata gc.outcome=fail \
@@ -60,7 +39,7 @@ gc runtime drain-ack
      --set-metadata gc.failure_reason=<short_reason> \
      --status closed
    ```
-9. On unrecoverable failure, mark it hard-failed and close it:
+6. On unrecoverable failure, mark it hard-failed and close it:
    ```bash
    bd update <id> \
      --set-metadata gc.outcome=fail \
@@ -68,11 +47,11 @@ gc runtime drain-ack
      --set-metadata gc.failure_reason=<short_reason> \
      --status closed
    ```
-10. After closing, check for more assigned work:
+7. After closing, check for more assigned work:
    ```bash
-   {{ .AssignedReadyQuery }} --json --limit=1
+   gc hook --claim --json
    ```
-11. If more work exists, go to step 2. If not, poll briefly (see below).
+8. If more work exists, go to step 2. If not, poll briefly (see below).
 
 **Never use wide filesystem searches when a CLI command exists.** Wide
 traversals (`find /`, `find ~`, `find /Users`, `find $HOME`) walk
@@ -84,45 +63,23 @@ filesystem search. If no command exists for what you need, file a bead.
 
 ## Continuation Group — Session Affinity
 
-When you claim a bead, check its `gc.continuation_group` metadata. If set,
-pre-assign ALL other open beads in that group to your session so they stay
-with you when they become ready:
-
-```bash
-# After claiming your first bead, read its continuation group
-GROUP=$(bd show <id> --json | jq -r '.[0].metadata["gc.continuation_group"] // empty')
-ROOT_ID=$(bd show <id> --json | jq -r '.[0].metadata["gc.root_bead_id"] // empty')
-
-if [ -n "$GROUP" ] && [ -n "$ROOT_ID" ]; then
-  # Find all open beads in the same workflow group and pre-assign them
-  SIBLINGS=$(bd list --metadata-field gc.routed_to=$GC_TEMPLATE \
-    --metadata-field gc.root_bead_id=$ROOT_ID \
-    --metadata-field gc.continuation_group=$GROUP \
-    --status=open --json 2>/dev/null \
-    | jq -r '.[].id' 2>/dev/null)
-
-  for SIB in $SIBLINGS; do
-    bd update "$SIB" --assignee="$GC_SESSION_NAME" 2>/dev/null || true
-  done
-fi
-```
-
-This ensures the reconciler does not spawn a fresh session for work that
-prefers your live context. Pre-assigned beads are invisible to other sessions
-for the same config (`--unassigned` filtering).
+`gc hook --claim` handles `gc.continuation_group` for you. After it claims a
+bead with `gc.root_bead_id` and `gc.continuation_group`, it preassigns other
+open, unassigned siblings in that group to `$GC_SESSION_NAME` so they stay with
+your live context. The JSON result lists them in `continuation_assigned`.
 
 ## Polling Before Drain
 
-After closing a bead, if `{{ .AssignedReadyQuery }}` returns
-nothing, do NOT drain immediately. The workflow controller may need a few
-seconds to process control beads and unlock your next step.
+After closing a bead, if `gc hook --claim --json` returns no work, do NOT drain
+immediately. The workflow controller may need a few seconds to process control
+beads and unlock your next step.
 
 Poll up to 60 seconds (6 attempts, 10 seconds apart):
 
 ```bash
 for i in $(seq 1 6); do
-  NEXT=$({{ .AssignedReadyQuery }} --json --limit=1 2>/dev/null)
-  if [ -n "$NEXT" ] && [ "$NEXT" != "[]" ]; then
+  NEXT=$(gc hook --claim --json 2>/dev/null || true)
+  if printf '%s\n' "$NEXT" | grep -q '"action":"work"'; then
     # Found work — continue working
     break
   fi
@@ -133,7 +90,7 @@ done
 If no work appears after 60 seconds, drain:
 
 ```bash
-gc runtime drain-ack
+gc hook --claim --drain-ack --json
 ```
 
 ## Important Metadata

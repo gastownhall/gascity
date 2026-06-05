@@ -46,9 +46,61 @@ title = "Indexed {{ index . \"issue\" }}"
 		t.Fatal("Compile succeeded, want reserved-variable error")
 	}
 	msg := err.Error()
-	for _, want := range []string{"issue is not available", "bead_id is not available"} {
-		if !strings.Contains(msg, want) {
-			t.Fatalf("error %q missing %q", msg, want)
+	if !strings.Contains(msg, "bead_id is not available") {
+		t.Fatalf("error %q missing %q", msg, "bead_id is not available")
+	}
+	// issue is a deprecated one-release compat alias (#2941): tolerated by
+	// validation, surfaced through GraphV2LegacyIssueRefsTransitively instead.
+	if strings.Contains(msg, "issue is not available") {
+		t.Fatalf("error %q rejects the deprecated issue alias; it must be tolerated for one release", msg)
+	}
+}
+
+func TestGraphV2LegacyIssueRefsReportDeprecatedSymbols(t *testing.T) {
+	prev := IsFormulaV2Enabled()
+	SetFormulaV2Enabled(true)
+	defer SetFormulaV2Enabled(prev)
+
+	dir := t.TempDir()
+	writeGraphV2Formula(t, dir, "deprecated.formula.toml", `
+formula = "deprecated"
+version = 1
+contract = "graph.v2"
+type = "workflow"
+
+[vars]
+[vars.issue]
+description = "legacy work bead"
+required = true
+
+[[steps]]
+id = "direct"
+title = "Direct {{issue}}"
+`)
+
+	parser := NewParser(dir)
+	loaded, err := parser.LoadByName("deprecated")
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	resolved, err := parser.Resolve(loaded)
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	refs := GraphV2LegacyIssueRefsTransitively(resolved, parser)
+	if len(refs) != 2 {
+		t.Fatalf("GraphV2LegacyIssueRefsTransitively = %v, want declaration + reference", refs)
+	}
+	for _, want := range []string{"vars.issue: issue", "steps[0].title: issue"} {
+		found := false
+		for _, ref := range refs {
+			if ref == want {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("refs %v missing %q", refs, want)
 		}
 	}
 }
@@ -149,10 +201,14 @@ func TestGraphV2RejectsReservedVariableDeclarations(t *testing.T) {
 		t.Fatal("ValidateGraphV2ReservedSymbols succeeded, want error")
 	}
 	msg := err.Error()
-	for _, want := range []string{"vars.convoy_id", "vars.issue", "vars.bead_id"} {
+	for _, want := range []string{"vars.convoy_id", "vars.bead_id"} {
 		if !strings.Contains(msg, want) {
 			t.Fatalf("error %q missing %q", msg, want)
 		}
+	}
+	// Declaring vars.issue is tolerated as a deprecated compat alias (#2941).
+	if strings.Contains(msg, "vars.issue") {
+		t.Fatalf("error %q rejects the deprecated vars.issue declaration; it must be tolerated for one release", msg)
 	}
 }
 

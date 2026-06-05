@@ -402,7 +402,7 @@ description = "Read and complete {{issue}}."
 	list := liveContractJSON[struct {
 		Items []beads.Bead `json:"items"`
 		Total int          `json:"total"`
-	}](t, baseURL, validator, http.MethodGet, cityBase+"/beads?label=real-world-app-contract&limit=50&rig="+url.QueryEscape(rigName), nil, http.StatusOK)
+	}](t, baseURL, validator, http.MethodGet, cityBase+"/beads?label=real-world-app-contract&limit=50&all=true&rig="+url.QueryEscape(rigName), nil, http.StatusOK)
 	if list.Total < 3 || !beadListContains(list.Items, rootBead.ID) || !beadListContains(list.Items, siblingBead.ID) {
 		t.Fatalf("filtered beads = %+v, want root and sibling", list)
 	}

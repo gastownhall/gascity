@@ -186,6 +186,10 @@ func drainAckAsyncStopKey(sessionID, name string) string {
 	return "name:" + strings.TrimSpace(name)
 }
 
+// drainAckAsyncStopPokeController is a mutable test seam over pokeController
+// for the async drain-ack stop path (see queueDrainAckAsyncStop).
+var drainAckAsyncStopPokeController = pokeController
+
 func queueDrainAckAsyncStop(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, sessionID, name string, tracker *asyncStartTracker, stderr io.Writer) {
 	name = strings.TrimSpace(name)
 	if name == "" || sp == nil {
@@ -208,6 +212,15 @@ func queueDrainAckAsyncStop(cityPath string, store beads.Store, sp runtime.Provi
 		}()
 		if err := workerKillSessionTargetWithConfig(cityPath, store, sp, cfg, name); err != nil && !runtime.IsSessionGone(err) {
 			fmt.Fprintf(stderr, "session reconciler: async drain-ack stop %s: %v\n", name, err) //nolint:errcheck
+			return
+		}
+		// The runtime session is now gone, but its pool session bead stays open
+		// (occupying the pool slot) until finalizeDrainAckStopPendingSessions
+		// closes it on a subsequent tick. Poke the controller so finalize +
+		// pool respawn runs on the next event-driven tick instead of waiting up
+		// to a full patrol interval (ga-ryhnhd). Mirrors the drain-ack CLI poke.
+		if perr := drainAckAsyncStopPokeController(cityPath); perr != nil {
+			fmt.Fprintf(stderr, "session reconciler: async drain-ack stop %s: poke failed: %v\n", name, perr) //nolint:errcheck
 		}
 	}()
 }
@@ -3664,6 +3677,125 @@ func resolveTaskWorkDir(store beads.Store, assignees ...string) string {
 		}
 	}
 	return ""
+}
+
+// dispatchReasoningMetadataKey is the work-bead metadata key that carries a
+// per-dispatch reasoning effort. It mirrors how other gc.* dispatch metadata
+// (e.g. gc.run_target) rides on the work bead and is folded into the session at
+// launch. Only providers that expose a reasoning "effort" option (codex)
+// consume it; see resolveDispatchReasoningEffort.
+const dispatchReasoningMetadataKey = "gc.reasoning"
+
+// isCodexProvider reports whether the resolved provider is the codex CLI or
+// derives from it. It prefers BuiltinAncestor (the canonical resolved family)
+// and falls back to the provider Name so callers that build a ResolvedProvider
+// without walking the builtin chain are still matched.
+func isCodexProvider(rp *config.ResolvedProvider) bool {
+	if rp == nil {
+		return false
+	}
+	return rp.BuiltinAncestor == "codex" || rp.Name == "codex"
+}
+
+// resolveDispatchReasoningEffort returns the reasoning effort requested by the
+// session's in-progress assigned work bead via the gc.reasoning metadata key,
+// validated against the provider's "effort" option schema. It mirrors
+// resolveTaskWorkDir: query each assignee identifier's in-progress work and use
+// the newest match. Providers without an "effort" option (everything but codex)
+// always return "" so the flag is never added. An invalid value is skipped and
+// logged rather than crashing — the launcher then falls back to the model
+// default.
+func resolveDispatchReasoningEffort(store beads.Store, rp *config.ResolvedProvider, assignees ...string) string {
+	if store == nil || rp == nil {
+		return ""
+	}
+	// gc.reasoning maps to codex's `-c model_reasoning_effort=<effort>` only.
+	// Other providers (e.g. claude) expose an unrelated "effort" option
+	// (`--effort`); never fold the dispatch reasoning value into those.
+	if !isCodexProvider(rp) {
+		return ""
+	}
+	effortOpt := providerEffortOption(rp)
+	if effortOpt == nil {
+		// Codex with no effort schema (custom strip): nothing to validate
+		// against, so emit nothing.
+		return ""
+	}
+	seen := make(map[string]bool, len(assignees))
+	for _, assignee := range assignees {
+		assignee = strings.TrimSpace(assignee)
+		if assignee == "" || seen[assignee] {
+			continue
+		}
+		seen[assignee] = true
+		assigned, err := store.List(beads.ListQuery{
+			Assignee: assignee,
+			Status:   "in_progress",
+			Live:     true,
+			TierMode: beads.TierBoth,
+			Sort:     beads.SortCreatedDesc,
+		})
+		if err != nil {
+			continue
+		}
+		for _, b := range assigned {
+			raw := strings.TrimSpace(b.Metadata[dispatchReasoningMetadataKey])
+			if raw == "" {
+				continue
+			}
+			if !effortChoiceIsValid(effortOpt, raw) {
+				log.Printf("work %s: invalid %s %q (want one of %s); skipping reasoning override",
+					b.ID, dispatchReasoningMetadataKey, raw, strings.Join(effortChoiceValues(effortOpt), ", "))
+				continue
+			}
+			return raw
+		}
+	}
+	return ""
+}
+
+// providerEffortOption returns the provider's "effort" option schema entry, or
+// nil when the provider exposes no reasoning-effort knob.
+func providerEffortOption(rp *config.ResolvedProvider) *config.ProviderOption {
+	if rp == nil {
+		return nil
+	}
+	for i := range rp.OptionsSchema {
+		if rp.OptionsSchema[i].Key == "effort" {
+			return &rp.OptionsSchema[i]
+		}
+	}
+	return nil
+}
+
+// effortChoiceIsValid reports whether value is a declared, non-empty choice of
+// the effort option (for codex: low, medium, high, xhigh). The empty "Default"
+// choice is intentionally rejected as an explicit override value.
+func effortChoiceIsValid(opt *config.ProviderOption, value string) bool {
+	if opt == nil || value == "" {
+		return false
+	}
+	for _, choice := range opt.Choices {
+		if choice.Value == value {
+			return true
+		}
+	}
+	return false
+}
+
+// effortChoiceValues lists the non-empty effort choice values for diagnostics.
+func effortChoiceValues(opt *config.ProviderOption) []string {
+	if opt == nil {
+		return nil
+	}
+	values := make([]string, 0, len(opt.Choices))
+	for _, choice := range opt.Choices {
+		if choice.Value == "" {
+			continue
+		}
+		values = append(values, choice.Value)
+	}
+	return values
 }
 
 type assignedTaskWorkDir struct {

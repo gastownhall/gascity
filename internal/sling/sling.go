@@ -153,6 +153,7 @@ type SlingResult struct {
 	AutoBurned     []string // IDs of auto-burned stale molecules
 	MetadataErrors []string // non-fatal metadata write failures
 	BeadWarnings   []string // pre-flight bead state warnings
+	Deprecations   []string // deprecated formula constructs (graph.v2 issue alias)
 
 	// Batch fields (populated by DoSlingBatch).
 	ContainerType string // "convoy", "epic", etc. (batch only)

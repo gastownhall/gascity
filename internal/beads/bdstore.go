@@ -663,6 +663,14 @@ func isBdNotFound(err error) bool {
 	return strings.Contains(msg, "not found") || strings.Contains(msg, "no issue found")
 }
 
+func isBdClaimConflictMessage(msg string) bool {
+	msg = strings.ToLower(msg)
+	return strings.Contains(msg, "already assigned") ||
+		strings.Contains(msg, "already claimed") ||
+		strings.Contains(msg, "claimed by") ||
+		strings.Contains(msg, "claim conflict")
+}
+
 // mapBdStatus maps bd's statuses to Gas City's 3. bd uses: open,
 // in_progress, blocked, review, testing, closed. Gas City uses:
 // open, in_progress, closed.
@@ -863,6 +871,48 @@ func (s *BdStore) Update(id string, opts UpdateOpts) error {
 		return fmt.Errorf("updating bead %q: %w", id, err)
 	}
 	return nil
+}
+
+// Claim atomically claims an open bead through bd update --claim.
+//
+// It returns ok=false when bd reports that another actor won the claim race.
+// The caller controls the claim actor through the store's CommandRunner
+// environment, typically BEADS_ACTOR.
+func (s *BdStore) Claim(id string) (Bead, bool, error) {
+	out, err := s.runBDTransientWriteOutput("update", id, "--claim", "--json")
+	if err != nil {
+		msg := strings.TrimSpace(string(out))
+		if isBdClaimConflictMessage(msg) || isBdClaimConflictMessage(err.Error()) {
+			return Bead{}, false, nil
+		}
+		if isBdNotFound(err) {
+			return Bead{}, false, fmt.Errorf("claiming bead %q: %w", id, ErrNotFound)
+		}
+		if msg != "" {
+			return Bead{}, false, fmt.Errorf("claiming bead %q: %w: %s", id, err, msg)
+		}
+		return Bead{}, false, fmt.Errorf("claiming bead %q: %w", id, err)
+	}
+	claimed, err := parseBDMutationBead("bd claim", out)
+	if err != nil {
+		return Bead{}, false, fmt.Errorf("claiming bead %q: %w", id, err)
+	}
+	return claimed, true, nil
+}
+
+func parseBDMutationBead(op string, out []byte) (Bead, error) {
+	issues, parseErr := parseIssuesTolerant(extractJSON(out))
+	if parseErr == nil && len(issues) > 0 {
+		return issues[0].toBead(), nil
+	}
+	var issue bdIssue
+	if err := json.Unmarshal(extractJSON(out), &issue); err == nil && strings.TrimSpace(issue.ID) != "" {
+		return issue.toBead(), nil
+	}
+	if parseErr != nil {
+		return Bead{}, fmt.Errorf("%s: parsing JSON: %w", op, parseErr)
+	}
+	return Bead{}, fmt.Errorf("%s returned no bead", op)
 }
 
 // UpdateAll modifies the same fields on multiple beads via one bd update
@@ -1656,6 +1706,9 @@ func (s *BdStore) listViaBDList(query ListQuery) ([]Bead, error) {
 		for _, k := range keys {
 			args = append(args, "--metadata-field", k+"="+serverQuery.Metadata[k])
 		}
+	}
+	if query.SkipLabels && serverQuery.Label == "" {
+		args = append(args, "--skip-labels")
 	}
 
 	out, err := s.runner(s.dir, "bd", args...)
