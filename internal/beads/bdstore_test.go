@@ -1738,7 +1738,7 @@ func TestBdStoreListEmptyOutputMeansNoBeads(t *testing.T) {
 	}
 }
 
-func TestBdStoreListSkipLabelsDoesNotEmitUnsupportedBd104Flag(t *testing.T) {
+func TestBdStoreListSkipLabelsEmitsFlag(t *testing.T) {
 	var gotCmd string
 	runner := func(_, name string, args ...string) ([]byte, error) {
 		gotCmd = name + " " + strings.Join(args, " ")
@@ -1748,8 +1748,8 @@ func TestBdStoreListSkipLabelsDoesNotEmitUnsupportedBd104Flag(t *testing.T) {
 	if _, err := s.List(beads.ListQuery{AllowScan: true, SkipLabels: true}); err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(gotCmd, "--skip-labels") {
-		t.Fatalf("bd list command = %q, --skip-labels is not supported by bd 1.0.4", gotCmd)
+	if !strings.Contains(gotCmd, "--skip-labels") {
+		t.Fatalf("bd list command = %q, want --skip-labels flag", gotCmd)
 	}
 }
 
@@ -1770,8 +1770,8 @@ func TestBdStoreListAcceptsBdListEnvelope(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(gotCmd, "--skip-labels") {
-		t.Fatalf("bd list command = %q, --skip-labels is not supported by bd 1.0.4", gotCmd)
+	if !strings.Contains(gotCmd, "--skip-labels") {
+		t.Fatalf("bd list command = %q, want --skip-labels flag", gotCmd)
 	}
 	if len(got) != 1 || got[0].ID != "bd-envelope" {
 		t.Fatalf("List() = %+v, want bd-envelope from envelope", got)

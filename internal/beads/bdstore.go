@@ -1657,6 +1657,9 @@ func (s *BdStore) listViaBDList(query ListQuery) ([]Bead, error) {
 			args = append(args, "--metadata-field", k+"="+serverQuery.Metadata[k])
 		}
 	}
+	if query.SkipLabels && serverQuery.Label == "" {
+		args = append(args, "--skip-labels")
+	}
 
 	out, err := s.runner(s.dir, "bd", args...)
 	if err != nil {
