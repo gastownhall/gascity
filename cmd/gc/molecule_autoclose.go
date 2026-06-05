@@ -184,7 +184,9 @@ func autocloseRootsForSourceBead(store beads.Store, storeRef string, rec events.
 	}
 	for _, root := range roots {
 		if terminal, _ := subtreeTerminalExcludingRoot(store, root.ID); terminal {
-			announceClosedMolecule(store, rec, root, moleculeSourceAutocloseReason, stdout)
+			if announceClosedMolecule(store, rec, root, moleculeSourceAutocloseReason, stdout) {
+				_, _ = sourceworkflow.CloseSpecSidecarsForRoot(store, root.ID, sourceworkflow.WorkflowSpecSidecarClosedReason)
+			}
 		}
 	}
 }
@@ -205,6 +207,9 @@ func subtreeTerminalExcludingRoot(store beads.Store, rootID string) (terminal bo
 		if b.ID == rootID {
 			continue
 		}
+		if sourceworkflow.IsGeneratedSpecSidecar(b) {
+			continue
+		}
 		descendants++
 		if !convoycore.IsTerminalStatus(b.Status) {
 			return false, descendants
@@ -217,9 +222,9 @@ func subtreeTerminalExcludingRoot(store beads.Store, rootID string) (terminal bo
 // BeadClosed event, and prints the auto-close announcement to stdout. Shared
 // by the step-terminal and source-bead-close triggers. Best-effort: a close
 // failure aborts silently without recording or announcing.
-func announceClosedMolecule(store beads.Store, rec events.Recorder, mol beads.Bead, reason string, stdout io.Writer) {
+func announceClosedMolecule(store beads.Store, rec events.Recorder, mol beads.Bead, reason string, stdout io.Writer) bool {
 	if err := closeMoleculeWithReason(store, mol.ID, reason); err != nil {
-		return
+		return false
 	}
 
 	rec.Record(events.Event{
@@ -229,6 +234,7 @@ func announceClosedMolecule(store beads.Store, rec events.Recorder, mol beads.Be
 	})
 
 	fmt.Fprintf(stdout, "Auto-closed molecule %s %q\n", mol.ID, mol.Title) //nolint:errcheck // best-effort stdout
+	return true
 }
 
 // closeMoleculeWithReason mirrors closeConvoyWithReason: stamps a

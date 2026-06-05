@@ -8,6 +8,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/sourceworkflow"
 )
 
 const mailReadMetadataKey = "mail.read"
@@ -72,6 +73,13 @@ func (m *memoryWispGC) runGC(store beads.Store, now time.Time) (int, error) {
 	purged := 0
 	var deleteErr error
 	if m.ttl > 0 {
+		closedSpecs, specErr := sourceworkflow.CloseSpecSidecarsForClosedRoots(store, sourceworkflow.WorkflowSpecSidecarClosedReason)
+		if specErr != nil {
+			deleteErr = errors.Join(deleteErr, fmt.Errorf("closing generated spec sidecars for closed workflow roots: %w", specErr))
+		} else if closedSpecs > 0 {
+			log.Printf("wisp gc: closed %d generated spec sidecars for closed workflow roots", closedSpecs)
+		}
+
 		entries, err := closedWispGCEntries(store)
 		if err != nil {
 			return 0, err

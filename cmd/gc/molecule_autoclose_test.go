@@ -323,6 +323,42 @@ func TestMoleculeAutocloseClosesWorkflowRootOnSourceBeadClose(t *testing.T) {
 	}
 }
 
+func TestMoleculeAutocloseClosesSpecSidecarsOnSourceBeadClose(t *testing.T) {
+	store := beads.NewMemStore()
+	work, _ := store.Create(beads.Bead{Title: "fix the bug", Type: "task"})
+	root, _ := store.Create(beads.Bead{
+		Title: "mol-focus-review",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+			"gc.source_bead_id":   work.ID,
+		},
+	})
+	spec, _ := store.Create(beads.Bead{
+		Title: "generated step spec",
+		Type:  "spec",
+		Metadata: map[string]string{
+			"gc.kind":         "spec",
+			"gc.root_bead_id": root.ID,
+			"gc.spec_for":     "implement",
+			"gc.spec_for_ref": "implement",
+		},
+	})
+
+	_ = store.Close(work.ID)
+	var out bytes.Buffer
+	doMoleculeAutocloseWith(store, "", events.Discard, work.ID, &out)
+
+	specAfter, _ := store.Get(spec.ID)
+	if specAfter.Status != "closed" {
+		t.Fatalf("spec status = %q, want closed", specAfter.Status)
+	}
+	if got := specAfter.Metadata["close_reason"]; got != sourceworkflow.WorkflowSpecSidecarClosedReason {
+		t.Fatalf("spec close_reason = %q, want %q", got, sourceworkflow.WorkflowSpecSidecarClosedReason)
+	}
+}
+
 // TestMoleculeAutocloseLeavesWorkflowRootOpenWhenStepOpenOnSourceClose asserts
 // the source-bead trigger does NOT close a multi-step workflow root that still
 // has genuine open work (e.g. an un-run review step). Only a root whose entire

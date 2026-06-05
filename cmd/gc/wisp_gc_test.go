@@ -11,6 +11,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/sourceworkflow"
 )
 
 func TestWispGC_NilSafe(t *testing.T) {
@@ -104,6 +105,68 @@ func TestWispGC_NothingExpired(t *testing.T) {
 	}
 	if len(store.deletedIDs) != 0 {
 		t.Fatalf("deleted = %v, want none", store.deletedIDs)
+	}
+}
+
+func TestWispGC_ClosesOpenSpecSidecarsForClosedWorkflowRoots(t *testing.T) {
+	now := time.Now()
+	store := newGCStore([]beads.Bead{
+		makeGCBeadWithMetadata("closed-workflow", now.Add(-30*time.Minute), "closed", "task", map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+		}),
+		makeGCBeadWithMetadata("closed-workflow-spec", now.Add(-30*time.Minute), "open", "spec", map[string]string{
+			"gc.kind":         "spec",
+			"gc.root_bead_id": "closed-workflow",
+			"gc.spec_for":     "implement",
+		}),
+		makeGCBeadWithMetadata("open-workflow", now.Add(-30*time.Minute), "open", "task", map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+		}),
+		makeGCBeadWithMetadata("open-workflow-spec", now.Add(-30*time.Minute), "open", "spec", map[string]string{
+			"gc.kind":         "spec",
+			"gc.root_bead_id": "open-workflow",
+			"gc.spec_for":     "review",
+		}),
+		makeGCBeadWithMetadata("closed-task", now.Add(-30*time.Minute), "closed", "task", nil),
+		makeGCBeadWithMetadata("closed-task-spec", now.Add(-30*time.Minute), "open", "spec", map[string]string{
+			"gc.kind":         "spec",
+			"gc.root_bead_id": "closed-task",
+		}),
+	})
+
+	wg := newWispGC(5*time.Minute, time.Hour, 0)
+	purged, err := wg.runGC(store, now)
+	if err != nil {
+		t.Fatalf("runGC: %v", err)
+	}
+	if purged != 0 {
+		t.Fatalf("purged = %d, want 0; spec repair should not count as purge", purged)
+	}
+	if len(store.deletedIDs) != 0 {
+		t.Fatalf("deleted = %v, want none", store.deletedIDs)
+	}
+
+	closedSpec, err := store.Get("closed-workflow-spec")
+	if err != nil {
+		t.Fatalf("Get(closed-workflow-spec): %v", err)
+	}
+	if closedSpec.Status != "closed" {
+		t.Fatalf("closed-workflow-spec status = %q, want closed", closedSpec.Status)
+	}
+	if got := closedSpec.Metadata["close_reason"]; got != sourceworkflow.WorkflowSpecSidecarClosedReason {
+		t.Fatalf("close_reason = %q, want %q", got, sourceworkflow.WorkflowSpecSidecarClosedReason)
+	}
+
+	for _, id := range []string{"open-workflow-spec", "closed-task-spec"} {
+		spec, err := store.Get(id)
+		if err != nil {
+			t.Fatalf("Get(%s): %v", id, err)
+		}
+		if spec.Status != "open" {
+			t.Fatalf("%s status = %q, want open", id, spec.Status)
+		}
 	}
 }
 
