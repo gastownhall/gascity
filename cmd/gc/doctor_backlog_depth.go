@@ -4,13 +4,12 @@ import (
 	"fmt"
 	"sort"
 	"strings"
-	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/doctor"
 )
 
-// backlogDepthCheck reports the city's true claimable backlog depth by
+// backlogDepthCheck reports the city store's claimable backlog depth by
 // classifying the raw open-bead population into actionable work versus
 // observability noise. `bd ready` (the beads CLI) lists control-plane session
 // beads and short-lived nudge/mail notification chores alongside real work, so
@@ -18,15 +17,14 @@ import (
 // claimable — the recurring "fleet idle / backlog huge" false alarm
 // (gastownhall/gascity#3021).
 //
-// The check is pure observability: it never mutates beads and never gates
+// The check reads the city beads store only; work tracked in rig stores is not
+// included. It is pure observability: it never mutates beads and never gates
 // (SeverityAdvisory). It does not touch the claiming path — agents' work
 // queries already filter this noise via the Ready-tier contract; the gap it
 // closes is the operator/dashboard view.
 type backlogDepthCheck struct {
 	cityPath string
 	newStore func(string) (beads.Store, error)
-	// now is injectable for tests; the zero value means time.Now().
-	now time.Time
 }
 
 func newBacklogDepthCheck(cityPath string, newStore func(string) (beads.Store, error)) *backlogDepthCheck {
@@ -49,7 +47,7 @@ type backlogBreakdown struct {
 	controlPlane int          // type=session / gc:session: the session registry
 	notification int          // nudge:/mail: chores, type=message, gc:nudge
 	epic         int          // epic parents: containers, not claimable leaves
-	other        int          // deferred, or other infra/excluded Ready-tier types
+	other        int          // deferred, dep-blocked, or other infra/excluded Ready-tier types
 	real         []beads.Bead // genuinely claimable Ready-tier work
 }
 
@@ -72,9 +70,10 @@ func isNotificationBacklogBead(b beads.Bead) bool {
 }
 
 // classifyBacklog partitions the raw open-bead population into one bucket each
-// (first match wins) so the buckets sum to total. "real" is the Ready-tier
-// contract (beads.IsReadyCandidateForTier) minus the noise classes above.
-func classifyBacklog(open []beads.Bead, now time.Time) backlogBreakdown {
+// (first match wins) so the buckets sum to total. "real" is the set of beads
+// whose IDs appear in readyIDs — the dep-checked Ready output from the store —
+// after subtracting the noise classes above.
+func classifyBacklog(open []beads.Bead, readyIDs map[string]bool) backlogBreakdown {
 	b := backlogBreakdown{total: len(open)}
 	for _, bead := range open {
 		switch {
@@ -84,7 +83,7 @@ func classifyBacklog(open []beads.Bead, now time.Time) backlogBreakdown {
 			b.notification++
 		case bead.Type == "epic":
 			b.epic++
-		case beads.IsReadyCandidateForTier(bead, now, beads.TierIssues):
+		case readyIDs[bead.ID]:
 			b.real = append(b.real, bead)
 		default:
 			b.other++
@@ -112,16 +111,22 @@ func (c *backlogDepthCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult {
 		res.Message = fmt.Sprintf("backlog depth unknown: listing open beads: %v", err)
 		return res
 	}
-
-	now := c.now
-	if now.IsZero() {
-		now = time.Now()
+	ready, err := store.Ready()
+	if err != nil {
+		res.Status = doctor.StatusWarning
+		res.Message = fmt.Sprintf("backlog depth unknown: listing ready beads: %v", err)
+		return res
 	}
-	b := classifyBacklog(open, now)
+
+	readyIDs := make(map[string]bool, len(ready))
+	for _, r := range ready {
+		readyIDs[r.ID] = true
+	}
+	b := classifyBacklog(open, readyIDs)
 
 	res.Status = doctor.StatusOK
 	res.Message = fmt.Sprintf(
-		"true backlog: %d claimable (of %d open — %d control-plane, %d notification, %d epic, %d other)",
+		"city store: %d claimable (of %d open — %d control-plane, %d notification, %d epic, %d other)",
 		len(b.real), b.total, b.controlPlane, b.notification, b.epic, b.other)
 
 	details := make([]string, 0, len(b.real))

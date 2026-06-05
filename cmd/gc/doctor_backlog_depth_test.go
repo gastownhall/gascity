@@ -11,8 +11,7 @@ import (
 )
 
 func TestClassifyBacklog(t *testing.T) {
-	now := time.Date(2026, 6, 4, 12, 0, 0, 0, time.UTC)
-	future := now.Add(24 * time.Hour)
+	future := time.Now().Add(24 * time.Hour)
 
 	open := []beads.Bead{
 		// control-plane: by type and by label
@@ -25,15 +24,21 @@ func TestClassifyBacklog(t *testing.T) {
 		{ID: "N-4", Title: "labeled nudge", Type: "task", Status: "open", Labels: []string{"gc:nudge"}},
 		// epic parents
 		{ID: "E-1", Title: "EPIC: self-healing", Type: "epic", Status: "open"},
-		// genuinely claimable real work
+		// genuinely claimable real work (unblocked, in readyIDs)
 		{ID: "R-1", Title: "fix the thing", Type: "task", Status: "open"},
 		{ID: "R-2", Title: "feature work", Type: "feature", Status: "open"},
-		// other: deferred (future), and an infra/excluded type
+		// other: deferred (future), infra/excluded type, and a blocked real-type bead
 		{ID: "O-1", Title: "deferred task", Type: "task", Status: "open", DeferUntil: &future},
 		{ID: "O-2", Title: "workflow container", Type: "molecule", Status: "open"},
+		// B-1 would pass IsReadyCandidateForTier but is dep-blocked: must go to other, not real.
+		{ID: "B-1", Title: "blocked work", Type: "task", Status: "open"},
 	}
 
-	b := classifyBacklog(open, now)
+	// readyIDs represents store.Ready() output: only R-1 and R-2 are dep-unblocked
+	// actionable work. B-1 is blocked (open dep), O-1 deferred, O-2 excluded type.
+	readyIDs := map[string]bool{"R-1": true, "R-2": true}
+
+	b := classifyBacklog(open, readyIDs)
 
 	if b.total != len(open) {
 		t.Errorf("total = %d, want %d", b.total, len(open))
@@ -47,8 +52,9 @@ func TestClassifyBacklog(t *testing.T) {
 	if b.epic != 1 {
 		t.Errorf("epic = %d, want 1", b.epic)
 	}
-	if b.other != 2 {
-		t.Errorf("other = %d, want 2", b.other)
+	// other = O-1 (deferred) + O-2 (molecule) + B-1 (dep-blocked) = 3
+	if b.other != 3 {
+		t.Errorf("other = %d, want 3 (deferred + molecule + dep-blocked)", b.other)
 	}
 	gotReal := make([]string, 0, len(b.real))
 	for _, r := range b.real {
@@ -61,17 +67,20 @@ func TestClassifyBacklog(t *testing.T) {
 }
 
 func TestBacklogDepthCheckRunReportsTrueDepth(t *testing.T) {
-	now := time.Date(2026, 6, 4, 12, 0, 0, 0, time.UTC)
+	// Store with one blocked bead (B-1 depends on R-1) to verify B-1 is not
+	// counted in the claimable total.
 	store := beads.NewMemStoreFrom(0, []beads.Bead{
 		{ID: "S-1", Title: "planner-1", Type: "session", Status: "open"},
 		{ID: "N-1", Title: "nudge:abc", Type: "chore", Status: "open"},
 		{ID: "N-2", Title: "nudge:def", Type: "chore", Status: "open"},
 		{ID: "E-1", Title: "EPIC", Type: "epic", Status: "open"},
 		{ID: "R-1", Title: "real work", Type: "task", Status: "open"},
-	}, nil)
+		{ID: "B-1", Title: "blocked work", Type: "task", Status: "open"},
+	}, []beads.Dep{
+		{IssueID: "B-1", DependsOnID: "R-1", Type: "blocks"},
+	})
 
 	check := newBacklogDepthCheck("/city", func(string) (beads.Store, error) { return store, nil })
-	check.now = now
 
 	res := check.Run(&doctor.CheckContext{})
 	if res.Status != doctor.StatusOK {
@@ -80,19 +89,23 @@ func TestBacklogDepthCheckRunReportsTrueDepth(t *testing.T) {
 	if res.Severity != doctor.SeverityAdvisory {
 		t.Fatalf("Severity = %v, want Advisory", res.Severity)
 	}
-	// Message must surface the real count (1) distinct from the raw open count (5).
-	for _, want := range []string{"1", "5"} {
+	// Message must surface real=1 (only R-1; B-1 is dep-blocked) and total=6.
+	for _, want := range []string{"1", "6"} {
 		if !strings.Contains(res.Message, want) {
 			t.Errorf("Message %q missing %q", res.Message, want)
 		}
+	}
+	// Message must scope to city store, not claim city-wide truth.
+	if !strings.Contains(res.Message, "city store") {
+		t.Errorf("Message %q missing scope qualifier 'city store'", res.Message)
 	}
 	details := strings.Join(res.Details, "\n")
 	if !strings.Contains(details, "R-1") {
 		t.Errorf("Details should name the real claimable bead R-1:\n%s", details)
 	}
-	for _, noise := range []string{"S-1", "N-1", "E-1"} {
+	for _, noise := range []string{"S-1", "N-1", "E-1", "B-1"} {
 		if strings.Contains(details, noise) {
-			t.Errorf("Details should not list noise bead %q:\n%s", noise, details)
+			t.Errorf("Details should not list noise/blocked bead %q:\n%s", noise, details)
 		}
 	}
 }
@@ -110,8 +123,7 @@ func TestBacklogDepthCheckStoreErrorIsGraceful(t *testing.T) {
 	if res.Status == doctor.StatusError {
 		t.Fatalf("store error should not be a blocking StatusError: %#v", res)
 	}
-	if !check.CanFix() == false {
-		// CanFix must be false: this is a read-only observability check.
-		t.Errorf("CanFix = %v, want false", check.CanFix())
+	if check.CanFix() {
+		t.Errorf("CanFix = true, want false (read-only observability check)")
 	}
 }
