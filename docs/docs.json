@@ -153,6 +153,7 @@
         "pages": [
           "reference/index",
           "reference/cli",
+          "reference/gastown-command-map",
           "reference/config",
           "reference/formula",
           "reference/trust-boundaries",
