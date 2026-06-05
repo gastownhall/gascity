@@ -47,20 +47,20 @@ storage backend.
 
 ## Architecture
 
-The bead store is a single interface with four implementations, selected
+The bead store is a single interface with five implementations, selected
 at startup by the `[beads].provider` config key or `GC_BEADS` env var.
 
 ```
-                        beads.Store (interface)
-                       /       |        \         \
-                      /        |         \         \
-               BdStore    FileStore   MemStore   exec.Store
-             (bd CLI)   (JSON file)  (in-mem)   (user script)
-                 |            |
-                 |        embeds MemStore
-                 |
-          ExecCommandRunner
-           (with telemetry)
+                           beads.Store (interface)
+                      /       |        \      \        \
+                     /        |         \      \        \
+              BdStore    FileStore   MemStore  exec.Store  SQLiteStore
+            (bd CLI)   (JSON file)  (in-mem) (user script) (coord store)
+                |            |
+                |        embeds MemStore
+                |
+         ExecCommandRunner
+          (with telemetry)
 ```
 
 **Provider resolution** (in `cmd/gc/main.go:openCityStore`):
@@ -69,8 +69,10 @@ at startup by the `[beads].provider` config key or `GC_BEADS` env var.
 2. `[beads].provider` in `city.toml`
 3. Default: `"bd"`
 
-Valid provider values: `"bd"` (BdStore), `"file"` (FileStore),
-`"exec:<script-path>"` (exec.Store).
+Valid provider values: `"bd"` (BdStore, default), `"file"` (FileStore),
+`"exec:<script-path>"` (exec.Store), `"sqlite"` (SQLiteStore — built-in
+coordination store using pure-Go SQLite; use when Dolt is unavailable).
+`"sqlite-cgo"` and `"coordstore"` are deprecated aliases for `"sqlite"`.
 
 ### Data Flow
 

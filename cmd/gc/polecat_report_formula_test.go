@@ -49,10 +49,10 @@ func TestPolecatReportFormulaParsesAndHasNoGHPRCreate(t *testing.T) {
 		}
 		if step.ID == "write-report" {
 			hasWriteReport = true
-			if strings.Contains(step.Description, "bd update {{issue}} --notes") {
+			if strings.Contains(step.Description, `bd update "$WORK_BEAD_ID" --notes`) {
 				hasWriteNotes = true
 			}
-			if strings.Contains(step.Description, "bd close {{issue}}") {
+			if strings.Contains(step.Description, `bd close "$WORK_BEAD_ID"`) {
 				hasClose = true
 			}
 			if strings.Contains(step.Description, "gc runtime drain-ack") {
@@ -67,10 +67,10 @@ func TestPolecatReportFormulaParsesAndHasNoGHPRCreate(t *testing.T) {
 		t.Error("mol-polecat-report formula missing 'write-report' step")
 	}
 	if !hasWriteNotes {
-		t.Error("write-report step must write findings with 'bd update {{issue}} --notes'")
+		t.Error(`write-report step must write findings with 'bd update "$WORK_BEAD_ID" --notes'`)
 	}
 	if !hasClose {
-		t.Error("write-report step must close the bead with 'bd close {{issue}}'")
+		t.Error(`write-report step must close the bead with 'bd close "$WORK_BEAD_ID"'`)
 	}
 	if !hasDrainAck {
 		t.Error("write-report step must signal the reconciler with 'gc runtime drain-ack'")

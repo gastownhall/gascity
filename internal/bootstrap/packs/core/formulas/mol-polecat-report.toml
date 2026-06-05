@@ -28,6 +28,9 @@ to `git push` or `gh pr create`.
 formula = "mol-polecat-report"
 extends = ["mol-polecat-base"]
 
+[requires]
+formula_compiler = ">=2.0.0"
+
 [[steps]]
 id = "workspace-setup"
 title = "Verify assignment (report-only, no worktree)"
@@ -43,9 +46,16 @@ re-pour with `mol-polecat-commit` or `mol-polecat-pr`.
 
 **1. Confirm scope:**
 
-Re-read the issue with fresh eyes:
+Derive your work bead from the input convoy, then re-read the issue with
+fresh eyes:
 ```bash
-bd show {{issue}}
+CONVOY_STATUS=$(gc convoy status {{convoy_id}} --json)
+WORK_BEAD_ID=$(printf '%s' "$CONVOY_STATUS" | jq -r 'if (.children | length) == 1 then .children[0].id else empty end')
+if [ -z "$WORK_BEAD_ID" ]; then
+  echo "mol-polecat-report requires an input convoy with exactly one tracked member" >&2
+  exit 1
+fi
+bd show "$WORK_BEAD_ID"
 ```
 
 **2. Prime environment:**
@@ -133,6 +143,8 @@ Compose a clear summary of your findings. Include:
 - Any open questions or caveats
 
 ```bash
+CONVOY_STATUS=$(gc convoy status {{convoy_id}} --json)
+WORK_BEAD_ID=$(printf '%s' "$CONVOY_STATUS" | jq -r 'if (.children | length) == 1 then .children[0].id else empty end')
 REPORT="$(cat <<'ENDREPORT'
 ## Findings
 
@@ -151,12 +163,12 @@ REPORT="$(cat <<'ENDREPORT'
 <unresolved items, caveats>
 ENDREPORT
 )"
-bd update {{issue}} --notes "$REPORT"
+bd update "$WORK_BEAD_ID" --notes "$REPORT"
 ```
 
 **2. Close the bead:**
 ```bash
-bd close {{issue}}
+bd close "$WORK_BEAD_ID"
 ```
 
 **3. Signal reconciler and exit.**

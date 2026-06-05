@@ -962,7 +962,7 @@
       "properties": {
         "provider": {
           "type": "string",
-          "description": "Provider selects the bead store backend: \"bd\" (default), \"file\",\nor \"exec:\u003cscript\u003e\" for a user-supplied script.",
+          "description": "Provider selects the bead store backend: \"bd\" (default, Dolt-backed),\n\"file\", \"exec:\u003cscript\u003e\" for a user-supplied script, or \"sqlite\" for\nthe built-in coordination store (pure-Go SQLite; use when Dolt is\nunavailable). \"sqlite-cgo\" is a deprecated alias for \"sqlite\".",
           "default": "bd"
         },
         "backend": {

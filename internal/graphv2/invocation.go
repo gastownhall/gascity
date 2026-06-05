@@ -27,6 +27,15 @@ const (
 	// formula invocations.
 	ConvoyIDVar = "convoy_id"
 
+	// LegacyIssueVar is the deprecated graph.v2 compat alias for the legacy
+	// bead-scoped work variable. For one release the runtime resolves it to
+	// the single tracked member of the input convoy so downstream formulas
+	// can migrate to convoy_id without a hard break (#2941).
+	LegacyIssueVar = "issue"
+
+	// legacyBeadIDVar is reserved alongside issue but has no compat mapping.
+	legacyBeadIDVar = "bead_id"
+
 	// RuntimeVarsMetadataKey stores the caller/runtime vars a graph.v2 workflow
 	// root received, excluding graph.v2 reserved variables injected by runtime.
 	RuntimeVarsMetadataKey = "gc.graphv2_vars.v1"
@@ -42,6 +51,11 @@ type Invocation struct {
 	InputConvoy string
 	Vars        map[string]string
 	Targeted    bool
+
+	// Deprecations lists deprecated legacy issue/bead_id usages found in the
+	// formula. Callers decide how to display them (CLI stderr, sling
+	// warnings).
+	Deprecations []string
 }
 
 // LoadFormula resolves a formula without compiling it to a recipe.
@@ -105,6 +119,11 @@ func PrepareInvocation(ctx context.Context, store beads.Store, formulaName strin
 		return Invocation{}, err
 	}
 	recipeRequiresTarget := formula.GraphV2RecipeReferencesInputConvoy(recipe)
+	legacyRefs := formula.GraphV2LegacyIssueRefsTransitively(resolved, parser)
+	if len(legacyRefs) == 0 {
+		legacyRefs = formula.GraphV2RecipeLegacyIssueRefs(recipe)
+	}
+	inv.Deprecations = legacyIssueDeprecations(formulaName, legacyRefs)
 	if !inv.Targeted {
 		if formulaRequiresTarget {
 			if err := formula.ValidateGraphV2ReservedSymbolsTransitively(resolved, parser, false); err != nil {
@@ -141,15 +160,56 @@ func PrepareInvocation(ctx context.Context, store beads.Store, formulaName strin
 	}
 	inv.InputConvoy = convoyID
 	inv.Vars[ConvoyIDVar] = convoyID
+	if len(legacyRefs) > 0 {
+		memberID, err := ResolveLegacyIssueAlias(store, convoyID)
+		if err != nil {
+			return Invocation{}, fmt.Errorf("resolving deprecated issue alias for graph.v2 formula %q: %w", formulaName, err)
+		}
+		inv.Vars[LegacyIssueVar] = memberID
+	}
 	return inv, nil
+}
+
+// legacyIssueDeprecations formats deprecation warnings for legacy issue and
+// bead_id usages in a graph.v2 formula.
+func legacyIssueDeprecations(formulaName string, refs []string) []string {
+	if len(refs) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(refs))
+	for _, ref := range refs {
+		out = append(out, fmt.Sprintf(
+			"formula %q: %s — deprecated in graph.v2 and removed next release; migrate to the convoy_id work-bead derivation (gastownhall/gascity#2941)",
+			formulaName, ref))
+	}
+	return out
+}
+
+// ResolveLegacyIssueAlias returns the work-bead ID the deprecated graph.v2
+// issue alias resolves to: the single tracked member of the input convoy.
+func ResolveLegacyIssueAlias(store beads.Store, inputConvoyID string) (string, error) {
+	if store == nil {
+		return "", fmt.Errorf("issue alias requires a bead store")
+	}
+	members, err := convoycore.Members(store, inputConvoyID, false)
+	if err != nil {
+		return "", fmt.Errorf("listing members of input convoy %s: %w", inputConvoyID, err)
+	}
+	if len(members) != 1 {
+		return "", fmt.Errorf("the deprecated issue alias requires an input convoy with exactly one tracked member; convoy %s has %d", inputConvoyID, len(members))
+	}
+	return members[0].ID, nil
 }
 
 func varsWithConvoyPlaceholder(vars map[string]string) map[string]string {
 	out := maps.Clone(vars)
 	if out == nil {
-		out = make(map[string]string, 1)
+		out = make(map[string]string, 2)
 	}
 	out[ConvoyIDVar] = "graphv2-validation-placeholder"
+	// The deprecated issue alias is runtime-injected like convoy_id, so
+	// formulas that still declare it as required must validate (#2941).
+	out[LegacyIssueVar] = "graphv2-validation-placeholder"
 	return out
 }
 
@@ -179,21 +239,13 @@ func compileValidationRecipe(ctx context.Context, formulaName string, searchPath
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	validationVars := nonReservedRuntimeVars(vars)
-	if validationVars == nil {
-		validationVars = make(map[string]string, 1)
-	}
-	validationVars[ConvoyIDVar] = "graphv2-validation-placeholder"
+	validationVars := varsWithConvoyPlaceholder(nonReservedRuntimeVars(vars))
 	return formula.CompileWithoutRuntimeVarValidation(ctx, formulaName, searchPaths, validationVars)
 }
 
 func validateDrainItemFormulas(parentName string, searchPaths []string, recipe *formula.Recipe, parentVars map[string]string) error {
 	for _, itemFormula := range drainItemFormulaNames(recipe) {
-		vars := nonReservedRuntimeVars(parentVars)
-		if vars == nil {
-			vars = make(map[string]string, 1)
-		}
-		vars[ConvoyIDVar] = "graphv2-validation-placeholder"
+		vars := varsWithConvoyPlaceholder(nonReservedRuntimeVars(parentVars))
 		recipe, err := formula.CompileWithoutRuntimeVarValidation(context.Background(), itemFormula, searchPaths, vars)
 		if err != nil {
 			return fmt.Errorf("validating drain item formula %q for graph.v2 formula %q: %w", itemFormula, parentName, err)
@@ -247,7 +299,7 @@ func nonReservedRuntimeVars(vars map[string]string) map[string]string {
 			continue
 		}
 		switch trimmed {
-		case ConvoyIDVar, "issue", "bead_id":
+		case ConvoyIDVar, LegacyIssueVar, legacyBeadIDVar:
 			continue
 		default:
 			out[trimmed] = value
@@ -287,7 +339,7 @@ func drainItemFormulaNames(recipe *formula.Recipe) []string {
 func ValidateNoReservedUserVars(vars map[string]string) error {
 	for key := range vars {
 		switch strings.TrimSpace(key) {
-		case ConvoyIDVar, "issue", "bead_id":
+		case ConvoyIDVar, LegacyIssueVar, legacyBeadIDVar:
 			return fmt.Errorf("graph.v2 reserved variable %q cannot be supplied by the caller", key)
 		}
 	}
@@ -415,10 +467,32 @@ func PreparePreviewInvocation(ctx context.Context, store beads.Store, formulaNam
 		inv.Vars = make(map[string]string, 1)
 	}
 	inv.Vars[ConvoyIDVar] = inputConvoyID
+	legacyRefs := formula.GraphV2LegacyIssueRefsTransitively(resolved, parser)
+	if len(legacyRefs) == 0 {
+		legacyRefs = formula.GraphV2RecipeLegacyIssueRefs(recipe)
+	}
+	inv.Deprecations = legacyIssueDeprecations(formulaName, legacyRefs)
+	if len(legacyRefs) > 0 {
+		memberID, err := previewLegacyIssueAlias(store, targetID, inputConvoyID)
+		if err != nil {
+			return Invocation{}, fmt.Errorf("resolving deprecated issue alias for graph.v2 formula %q: %w", formulaName, err)
+		}
+		inv.Vars[LegacyIssueVar] = memberID
+	}
 	if err := validateDrainItemFormulas(formulaName, searchPaths, recipe, inv.Vars); err != nil {
 		return Invocation{}, err
 	}
 	return inv, nil
+}
+
+// previewLegacyIssueAlias resolves the deprecated issue alias for preview
+// invocations, which never create input convoys: a non-convoy target is its
+// own work bead, while a convoy target must already track exactly one member.
+func previewLegacyIssueAlias(store beads.Store, targetID, inputConvoyID string) (string, error) {
+	if strings.HasPrefix(inputConvoyID, previewInputConvoyPrefix) {
+		return strings.TrimPrefix(inputConvoyID, previewInputConvoyPrefix), nil
+	}
+	return ResolveLegacyIssueAlias(store, strings.TrimSpace(targetID))
 }
 
 // PreviewInputConvoyID returns the read-only input convoy ID a graph.v2 preview
@@ -475,7 +549,10 @@ func varsFingerprint(vars map[string]string) string {
 	}
 	keys := make([]string, 0, len(vars))
 	for key := range vars {
-		if strings.TrimSpace(key) == ConvoyIDVar {
+		switch strings.TrimSpace(key) {
+		case ConvoyIDVar, LegacyIssueVar, legacyBeadIDVar:
+			// Runtime-injected/derived values; excluding them keeps root keys
+			// stable across the deprecated issue-alias window (#2941).
 			continue
 		}
 		keys = append(keys, key)

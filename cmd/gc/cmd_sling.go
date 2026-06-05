@@ -647,6 +647,9 @@ func printSlingWarnings(result sling.SlingResult, stderr io.Writer) {
 	for _, w := range result.BeadWarnings {
 		fmt.Fprintln(stderr, w) //nolint:errcheck
 	}
+	for _, d := range result.Deprecations {
+		fmt.Fprintf(stderr, "warning: %s\n", d) //nolint:errcheck
+	}
 	for _, id := range result.AutoBurned {
 		fmt.Fprintf(stderr, "Auto-burned stale molecule %s\n", id) //nolint:errcheck
 	}
@@ -706,6 +709,9 @@ func printBatchSlingResult(result sling.SlingResult, stdout, stderr io.Writer) {
 	// Warnings.
 	for _, w := range result.BeadWarnings {
 		fmt.Fprintln(stderr, w) //nolint:errcheck
+	}
+	for _, d := range result.Deprecations {
+		fmt.Fprintf(stderr, "warning: %s\n", d) //nolint:errcheck
 	}
 	for _, id := range result.AutoBurned {
 		fmt.Fprintf(stderr, "Auto-burned stale molecule %s\n", id) //nolint:errcheck
@@ -1000,6 +1006,7 @@ func slingJSONWarnings(result sling.SlingResult) []string {
 		warnings = append(warnings, "pool_empty")
 	}
 	warnings = append(warnings, result.BeadWarnings...)
+	warnings = append(warnings, result.Deprecations...)
 	warnings = append(warnings, result.MetadataErrors...)
 	return warnings
 }
