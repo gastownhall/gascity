@@ -1115,7 +1115,7 @@ func (t *Tmux) ListSessionIDs() (map[string]string, error) {
 // pane in copy-mode on wheel-up; tmux then routes subsequent send-keys into
 // copy-mode and the controller's keystrokes (nudges, prompts, mail, the 1/2/3
 // interaction responses) are silently dropped. Probing #{pane_in_mode} and
-// cancelling only when parked keeps the happy path untouched (no spurious
+// canceling only when parked keeps the happy path untouched (no spurious
 // cancel) and is a no-op for headless agent panes, which stay mouse-off and
 // are never wheel-parked. Probe and cancel errors are deliberately swallowed:
 // a copy-mode guard must never abort delivery on a pane that simply is not in
