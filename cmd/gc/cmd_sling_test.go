@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -848,6 +849,66 @@ func TestDoSlingSuspendedAgentForce(t *testing.T) {
 	}
 	if strings.Contains(stderr.String(), "suspended") {
 		t.Errorf("--force should suppress warning; stderr = %q", stderr.String())
+	}
+}
+
+func TestDoSlingSuspendedRigWarns(t *testing.T) {
+	runner := newFakeRunner()
+	sp := runtime.NewFake()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs:      []config.Rig{{Name: "myrig", Suspended: true}},
+	}
+	a := config.Agent{Name: "polecat", Dir: "myrig", MaxActiveSessions: intPtr(1)}
+
+	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
+	// Rig-scoped agents read their rig's store; match it so the
+	// cross-store route guard does not trip before the rig check.
+	deps.StoreRef = "rig:myrig"
+	opts := testOpts(a, "my-1")
+	code := doSling(opts, deps, nil, stdout, stderr)
+
+	if code != 0 {
+		t.Fatalf("doSling returned %d, want 0 (still routes)", code)
+	}
+	if !strings.Contains(stderr.String(), `rig "myrig" is suspended`) {
+		t.Errorf("stderr = %q, want suspended-rig warning", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "gc rig resume myrig") {
+		t.Errorf("stderr = %q, want resume hint", stderr.String())
+	}
+	assertStoreRoutedTo(t, deps.Store, "my-1", "myrig/polecat")
+}
+
+func TestDoSlingSuspendedRigForce(t *testing.T) {
+	runner := newFakeRunner()
+	sp := runtime.NewFake()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs:      []config.Rig{{Name: "myrig", Suspended: true}},
+	}
+	a := config.Agent{Name: "polecat", Dir: "myrig", MaxActiveSessions: intPtr(1)}
+
+	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
+	// Rig-scoped agents read their rig's store; match it so the
+	// cross-store route guard does not trip before the rig check.
+	deps.StoreRef = "rig:myrig"
+	opts := testOpts(a, "my-1")
+	opts.Force = true
+	code := doSling(opts, deps, nil, stdout, stderr)
+
+	if code != 0 {
+		t.Fatalf("doSling returned %d, want 0", code)
+	}
+	if strings.Contains(stderr.String(), "suspended") {
+		t.Errorf("--force should suppress warning; stderr = %q", stderr.String())
+	}
+}
+
+func TestSlingJSONWarningsSuspendedRig(t *testing.T) {
+	warnings := slingJSONWarnings(sling.SlingResult{SuspendedRig: "myrig"})
+	if !slices.Contains(warnings, "rig_suspended") {
+		t.Errorf("warnings = %v, want to contain rig_suspended", warnings)
 	}
 }
 

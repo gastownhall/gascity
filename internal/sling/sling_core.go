@@ -88,6 +88,9 @@ func preflight(opts SlingOpts, deps SlingDeps, querier BeadQuerier) (SlingResult
 	if a.Suspended && !opts.Force {
 		result.AgentSuspended = true
 	}
+	if !opts.Force && rigSuspended(deps.Cfg, a.Dir) {
+		result.SuspendedRig = a.Dir
+	}
 	sp := agentutil.ScaleParamsFor(&a)
 	if sp.Max == 0 && !opts.Force {
 		result.PoolEmpty = true
@@ -152,6 +155,21 @@ func preflight(opts SlingOpts, deps SlingDeps, querier BeadQuerier) (SlingResult
 	}
 
 	return result, nil
+}
+
+// rigSuspended reports whether the named rig is marked suspended in config.
+// The pool reconciler skips suspended rigs entirely, so a bead routed into
+// one stalls silently — no worker ever spawns to claim it.
+func rigSuspended(cfg *config.City, rigName string) bool {
+	if cfg == nil || rigName == "" {
+		return false
+	}
+	for _, r := range cfg.Rigs {
+		if r.Name == rigName {
+			return r.Suspended
+		}
+	}
+	return false
 }
 
 func shouldValidateExistingBead(opts SlingOpts) bool {
