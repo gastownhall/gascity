@@ -2,7 +2,7 @@
 title: Gas Town → Gas City Command Map
 description: The closest `gc` or `bd` equivalent for each `gt` command, for operators migrating from Gas Town.
 ---
-This `gt` commands map is a "closest-match" map as `gt` and `gc` CLIs have non-identical architectures.
+This is a closest-match map: the `gt` and `gc` CLIs have non-identical architectures, so each row gives the nearest `gc` or `bd` equivalent.
 
 Two rules help a lot to find the closest home (`gc` or `bd`) for a command equivalent:
 

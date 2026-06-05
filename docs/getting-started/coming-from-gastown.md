@@ -21,8 +21,8 @@ This page is laid out as a deliberate sequence so you are never untangling sever
 2. [How Gas City Works](#how-gas-city-works) does just that — presenting the small set of building blocks it offers in place of Gas Town's machinery
 3. [Mapping Tables](#mapping-tables) maps Gas Town onto Gas City one domain at a time:
    1. [roles](#roles-→-gas-city-equivalents)
-   2. [mechanisms](#mechanisms--behaviors-→-gas-city-equivalents)
-   3. [filesystem/state](#filesystem--state-layout-→-gas-city-equivalents)
+   2. [mechanisms](#mechanisms-/-behaviors-→-gas-city-equivalents)
+   3. [filesystem/state](#filesystem-/-state-layout-→-gas-city-equivalents)
    4. [workflows](#workflows-→-gas-city-equivalents)
    5. [commands](#commands-→-gas-city-equivalents).
 
@@ -102,7 +102,7 @@ Gas City gives you a small set of building blocks. There are **five primitives**
 - **Session** — start, stop, prompt, and observe agents, regardless of provider.
 - **Beads Store** — CRUD over work units. Everything durable is a bead: tasks, mail, molecules, convoys.
 - **Event Bus** — an append-only pub/sub log of all system activity.
-- **Config** — TOML files that activates capabilities progressively.
+- **Config** — TOML files that activate capabilities progressively.
 - **Prompt Templates** — the behavioral specification for what each role does.
 
 …and **four derived mechanisms** composed from them:
@@ -133,8 +133,8 @@ For the full treatment of these building blocks, read the [Primitives Reference]
 You have seen what Gas Town gives you and the building blocks Gas City offers in their place. The five following tables connect the two, one domain at a time, in the same order as the recap above:
 
 - [roles](#roles-→-gas-city-equivalents)
-- [mechanisms](#mechanisms--behaviors-→-gas-city-equivalents)
-- [filesystem/state](#filesystem--state-layout-→-gas-city-equivalents)
+- [mechanisms](#mechanisms-/-behaviors-→-gas-city-equivalents)
+- [filesystem/state](#filesystem-/-state-layout-→-gas-city-equivalents)
 - [workflows](#workflows-→-gas-city-equivalents)
 - [commands](#commands-→-gas-city-equivalents).
 
