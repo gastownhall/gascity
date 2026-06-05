@@ -3,6 +3,8 @@ title: Coming from Gas Town
 description: Recap what Gas Town gives you, see how Gas City works, then map Gas Town roles, mechanisms, layout, commands, and workflows onto Gas City primitives.
 ---
 
+## Why this page
+
 If you have run Gas Town, you already know its operational machinery — the roles, the directory layout, the `gt` commands, and the day-to-day moves you make to get work done.
 
 This page carries that knowledge across to Gas City.
@@ -10,6 +12,8 @@ This page carries that knowledge across to Gas City.
 Gas City is the SDK that operational machinery was extracted into, and that is the reason to care about it. Because Gas City is an SDK, a feature added to it lifts *every* orchestrator built on top of it — Gas Town included.
 
 Gas Town and Gas City produce the same kind of system; the change is where the logic lives. Instead of a fixed role tree baked into the binary, Gas City gives you a small set of primitives plus configuration, and _you express Gas Town (or any other orchestration) on top of them_.
+
+## Page Layout
 
 This page is laid out as a deliberate sequence so you are never untangling several kinds of mapping at once:
 
@@ -20,7 +24,7 @@ This page is laid out as a deliberate sequence so you are never untangling sever
    2. [mechanisms](#mechanisms--behaviors-→-gas-city-equivalents)
    3. [filesystem/state](#filesystem--state-layout-→-gas-city-equivalents)
    4. [workflows](#workflows-→-gas-city-equivalents)
-   5. commands — these live on a separate page, the [Gas Town → Gas City Command Map](/reference/gastown-command-map).
+   5. [commands](#commands-→-gas-city-equivalents).
 
 The prose sections after the tables ([What Usually Maps Cleanly](#what-usually-maps-cleanly) and so on...) go deeper on the patterns that matter most.
 
@@ -83,7 +87,7 @@ They are *not* Gas Town formulas; formulas are a mechanism (see above). This dom
 
 Everything is driven through the `gt` CLI — install, rig, session, sling, convoy, formula, mail, and dozens more.
 
-The full command-by-command translation lives in the [Gas Town → Gas City Command Map](/reference/gastown-command-map).
+The full command-by-command translation lives in [Commands → Gas City Equivalents](#commands-→-gas-city-equivalents).
 
 So we covered the parts Gas Town gives you. Next: the small set of building blocks Gas City offers in their place — and then the domain-by-domain map.
 
@@ -126,13 +130,13 @@ For the full treatment of these building blocks, read the [Primitives Reference]
 
 ## Mapping Tables
 
-You have seen what Gas Town gives you and the building blocks Gas City offers in their place. The following tables connect the two, one domain at a time, in the same order as the recap above. The first four are on this page; the commands map is large enough that it lives on its own page:
+You have seen what Gas Town gives you and the building blocks Gas City offers in their place. The five following tables connect the two, one domain at a time, in the same order as the recap above:
 
 - [roles](#roles-→-gas-city-equivalents)
 - [mechanisms](#mechanisms--behaviors-→-gas-city-equivalents)
 - [filesystem/state](#filesystem--state-layout-→-gas-city-equivalents)
 - [workflows](#workflows-→-gas-city-equivalents)
-- commands — on a separate page, the [Gas Town → Gas City Command Map](/reference/gastown-command-map).
+- [commands](#commands-→-gas-city-equivalents).
 
 Each table is preceded by a one-sentence scope statement so you always know which domain you are in.
 
@@ -194,16 +198,9 @@ Each table is preceded by a one-sentence scope statement so you always know whic
 `gc session peek` takes a `--lines` count for a point-in-time snapshot; there is no `--follow` flag. For a continuously updating live view, attach to the session with `gc session attach`. For the system-wide live feed, use `gc events --follow`.
 </Note>
 
-### Commands
+### Commands → Gas City Equivalents
 
-*Scope: the `gt` CLI mapped to its closest `gc` (or `bd`) home.* See the [CLI reference](/reference/cli) for the full surface. This is a closest-match map, not a claim that the two CLIs have identical architecture.
-
-Two rules help a lot:
-
-- if a `gt` command is about orchestration, sessions, routing, hooks, or runtime behavior, the closest home is usually `gc`
-- if a `gt` command is really about bead CRUD or bead content, the closest home is often still `bd`, not `gc`
-
-For the full `gt → gc` command table, see the **[Gas Town → Gas City Command Map](/reference/gastown-command-map)**.
+See the **[Gas Town → Gas City Command Map](/reference/gastown-command-map)** page for the full `gt` → `gc`/`bd` command mapping table.
 
 ## What Usually Maps Cleanly
 

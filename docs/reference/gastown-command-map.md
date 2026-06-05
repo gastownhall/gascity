@@ -2,13 +2,14 @@
 title: Gas Town → Gas City Command Map
 description: The closest `gc` or `bd` equivalent for each `gt` command, for operators migrating from Gas Town.
 ---
+This `gt` commands map is a "closest-match" map as `gt` and `gc` CLIs have non-identical architectures.
 
-*Scope: the `gt` CLI mapped to its closest `gc` (or `bd`) home.* See the [CLI reference](/reference/cli) for the full surface. This is a closest-match map, not a claim that the two CLIs have identical architecture.
+Two rules help a lot to find the closest home (`gc` or `bd`) for a command equivalent:
 
-Two rules help a lot:
+- the closest home is `gc` if the `gt` command is about _orchestration, sessions, routing, hooks, or runtime behavior_ 
+- the closest home is `bd` if the `gt` command is really about _bead CRUD or bead content_.
 
-- if a `gt` command is about orchestration, sessions, routing, hooks, or runtime behavior, the closest home is usually `gc`
-- if a `gt` command is really about bead CRUD or bead content, the closest home is often still `bd`, not `gc`
+See the [`gc` CLI reference](/reference/cli) and the [`bd` CLI reference](https://gastownhall.github.io/beads/cli-reference) for the full CLI surfaces.
 
 ## Workspace And Runtime
 
