@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/telemetry"
@@ -218,6 +219,9 @@ type BdStore struct {
 	runner      CommandRunner   // injectable for testing
 	purgeRunner PurgeRunnerFunc // injectable for testing; nil uses exec default
 	idPrefix    string          // bead ID prefix owned by this store, without trailing "-"
+
+	skipLabelsOnce      sync.Once // guards the one-time bd version probe below
+	skipLabelsSupported bool      // whether bd accepts `bd list --skip-labels` (bd 1.0.5+)
 }
 
 const bdTransientWriteAttempts = 3
@@ -1707,7 +1711,7 @@ func (s *BdStore) listViaBDList(query ListQuery) ([]Bead, error) {
 			args = append(args, "--metadata-field", k+"="+serverQuery.Metadata[k])
 		}
 	}
-	if query.SkipLabels && serverQuery.Label == "" {
+	if query.SkipLabels && serverQuery.Label == "" && s.supportsSkipLabels() {
 		args = append(args, "--skip-labels")
 	}
 
@@ -1733,6 +1737,31 @@ func (s *BdStore) listViaBDList(query ListQuery) ([]Bead, error) {
 		return filtered, &PartialResultError{Op: "bd list", Err: parseErr}
 	}
 	return filtered, nil
+}
+
+// bdSkipLabelsMinVersion is the first bd release whose `bd list` accepts
+// --skip-labels (be-w3n-1). bd 1.0.4 — the supported floor — rejects the
+// flag and fails the entire list call (see 29d457fe9).
+const bdSkipLabelsMinVersion = "1.0.5"
+
+// supportsSkipLabels reports whether the bd binary backing this store accepts
+// `bd list --skip-labels`. The version probe runs through the store's runner
+// once and is cached for the store's lifetime; any probe or parse failure
+// degrades to false so listing falls back to normal label hydration instead
+// of a hard bd CLI error.
+func (s *BdStore) supportsSkipLabels() bool {
+	s.skipLabelsOnce.Do(func() {
+		out, err := s.runner(s.dir, "bd", "version")
+		if err != nil {
+			return
+		}
+		ver, err := parseBDVersion(string(out))
+		if err != nil {
+			return
+		}
+		s.skipLabelsSupported = bdVersionAtLeast(ver, bdSkipLabelsMinVersion)
+	})
+	return s.skipLabelsSupported
 }
 
 func bdListRequiresClientLimit(query, serverQuery ListQuery, clientFilteredAssignees bool) bool {

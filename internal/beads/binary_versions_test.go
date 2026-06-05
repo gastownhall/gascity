@@ -38,6 +38,31 @@ func TestParseBDVersion(t *testing.T) {
 	}
 }
 
+func TestBDVersionAtLeast(t *testing.T) {
+	tests := []struct {
+		name             string
+		version, minimum string
+		want             bool
+	}{
+		{name: "equal", version: "1.0.5", minimum: "1.0.5", want: true},
+		{name: "patch above", version: "1.0.6", minimum: "1.0.5", want: true},
+		{name: "minor above", version: "1.1.0", minimum: "1.0.5", want: true},
+		{name: "major above", version: "2.0.0", minimum: "1.0.5", want: true},
+		{name: "patch below", version: "1.0.4", minimum: "1.0.5", want: false},
+		{name: "major below", version: "0.9.9", minimum: "1.0.5", want: false},
+		{name: "unparseable version", version: "garbage", minimum: "1.0.5", want: false},
+		{name: "empty version", version: "", minimum: "1.0.5", want: false},
+		{name: "two-part version", version: "1.0", minimum: "1.0.5", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := bdVersionAtLeast(tt.version, tt.minimum); got != tt.want {
+				t.Errorf("bdVersionAtLeast(%q, %q) = %v, want %v", tt.version, tt.minimum, got, tt.want)
+			}
+		})
+	}
+}
+
 // TestProbeVersionsAgainstHostBinaries is a best-effort smoke test: when bd and
 // dolt are on PATH (as in CI and dev shells), the probes return a digit-led
 // version. Skips cleanly when a binary is absent so the suite stays hermetic.
