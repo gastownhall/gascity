@@ -246,6 +246,20 @@ func slingFormula(opts SlingOpts, deps SlingDeps) (SlingResult, error) {
 		wfResult.Deprecations = append(wfResult.Deprecations, inv.Deprecations...)
 		return wfResult, wfErr
 	}
+	// Pool targets discover work through the supervisor's scale_check, but
+	// the wisp root is a molecule that readyExcludeTypes filters out of
+	// Ready() (per PR #1154). Stamp PoolDemandMetadataPair() — the same
+	// sentinel the gc order run writers use — so defaultScaleCheckCounts
+	// counts the wisp and spawns a pool worker. Failure is fatal: a routed
+	// wisp without the sentinel sits unserved forever (issue #2986).
+	if agentutil.IsMultiSessionAgent(&a) {
+		for k, v := range PoolDemandMetadataPair() {
+			if err := deps.Store.SetMetadata(mResult.RootID, k, v); err != nil {
+				return SlingResult{Target: a.QualifiedName(), FormulaName: opts.BeadOrFormula},
+					fmt.Errorf("setting %s on wisp %s: %w", k, mResult.RootID, err)
+			}
+		}
+	}
 	result := SlingResult{Target: a.QualifiedName(), FormulaName: opts.BeadOrFormula, Deprecations: inv.Deprecations}
 	return finalize(opts, deps, mResult.RootID, method, result)
 }

@@ -1078,6 +1078,65 @@ func TestDoSlingFormulaToAgent(t *testing.T) {
 	}
 }
 
+// TestDoSlingFormulaToPoolStampsPoolDemand asserts that slinging a formula
+// to a multi-session pool target stamps PoolDemandMetadataPair() on the wisp
+// root. The wisp lands as a molecule that readyExcludeTypes filters out of
+// Ready() (per PR #1154), so without the sentinel defaultScaleCheckCounts
+// sees zero demand and the pool never spawns a worker. Regression for
+// https://github.com/gastownhall/gascity/issues/2986.
+func TestDoSlingFormulaToPoolStampsPoolDemand(t *testing.T) {
+	runner := newFakeRunner()
+	sp := runtime.NewFake()
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	a := config.Agent{Name: "polecat", MaxActiveSessions: intPtr(3)}
+
+	deps := testDeps(cfg, sp, runner.run)
+	result, err := DoSling(SlingOpts{
+		Target:        a,
+		BeadOrFormula: "code-review",
+		IsFormula:     true,
+	}, deps, nil)
+	if err != nil {
+		t.Fatalf("DoSling error: %v", err)
+	}
+	root, err := deps.Store.Get(result.BeadID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", result.BeadID, err)
+	}
+	for k, v := range PoolDemandMetadataPair() {
+		if got := root.Metadata[k]; got != v {
+			t.Errorf("wisp root %s = %q, want %q (pool-slung formula wisps must carry the demand sentinel so defaultScaleCheckCounts can count them despite readyExcludeTypes filtering molecules out of Ready())", k, got, v)
+		}
+	}
+}
+
+// TestDoSlingFormulaToSingleSessionAgentSkipsPoolDemand asserts the demand
+// sentinel is pool-only: a formula slung at a fixed single-session agent
+// (woken by nudge, not scale_check counts) must not carry gc.pool_demand.
+func TestDoSlingFormulaToSingleSessionAgentSkipsPoolDemand(t *testing.T) {
+	runner := newFakeRunner()
+	sp := runtime.NewFake()
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
+
+	deps := testDeps(cfg, sp, runner.run)
+	result, err := DoSling(SlingOpts{
+		Target:        a,
+		BeadOrFormula: "code-review",
+		IsFormula:     true,
+	}, deps, nil)
+	if err != nil {
+		t.Fatalf("DoSling error: %v", err)
+	}
+	root, err := deps.Store.Get(result.BeadID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", result.BeadID, err)
+	}
+	if got, ok := root.Metadata[PoolDemandMetadataKey]; ok {
+		t.Errorf("wisp root %s = %q, want absent (single-session agents are woken by nudge, not pool scale_check demand)", PoolDemandMetadataKey, got)
+	}
+}
+
 func TestBuildSlingFormulaVarsSeedsRoutingNamespace(t *testing.T) {
 	deps := testDeps(&config.City{Workspace: config.Workspace{Name: "test"}}, runtime.NewFake(), newFakeRunner().run)
 

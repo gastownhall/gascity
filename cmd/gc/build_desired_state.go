@@ -1316,13 +1316,15 @@ func defaultScaleCheckCounts(targets []defaultScaleCheckTarget) (map[string]int,
 			counts[template]++
 		}
 
-		// Source 2: explicit pool-demand path. Two writers stamp the wisp
-		// when a.Pool != "" — doOrderRunWithJSON (cmd_order.go, the
-		// gc order run CLI path) and memoryOrderDispatcher.dispatchOne
-		// (order_dispatch.go, the supervisor's in-process cron path).
-		// Both write poolDemandMetadataPair() alongside the routing key,
-		// so cron-fired pool orders surface scale_check demand even when
-		// the wisp lands as a molecule that readyExcludeTypes filters out
+		// Source 2: explicit pool-demand path. Three writers stamp the
+		// wisp when it routes to a pool — doOrderRunWithJSON
+		// (cmd_order.go, the gc order run CLI path),
+		// memoryOrderDispatcher.dispatchOne (order_dispatch.go, the
+		// supervisor's in-process cron path), and slingFormula
+		// (internal/sling/sling_core.go, the gc sling --formula path —
+		// issue #2986). All write poolDemandMetadataPair() alongside the
+		// routing key, so pool-routed wisps surface scale_check demand
+		// even when they land as molecules that readyExcludeTypes filters out
 		// (per PR #1154 / issue #1039 — formula steps are not actionable
 		// work, the molecule is the container). The list filter is
 		// metadata-only (open + gc.pool_demand=<sentinel>); the
