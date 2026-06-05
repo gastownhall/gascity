@@ -146,3 +146,25 @@ consideration.
 - The gastown `WheelUpPane`/`WheelDownPane` binding (Part A — correct).
 - Centralizing the 4 MouseOn seams (see Open questions).
 - The human merge (`ga-5x9`) — out of our DoD.
+
+## Execution status
+
+All 4 micro-tasks green (2 red/green pairs; the red test commits at its
+green, so each pair shares one checkpoint commit). Full tmux suite green
+(188 passed, 0 failed); `go vet ./internal/runtime/tmux/` clean;
+`gofumpt -l`/`gofmt -l` empty on all touched files.
+
+- [x] T-001 — failing test `TestSendKeysCancelsCopyModeBeforeDelivery` (parked → probe+cancel before `-l`; unparked → no cancel) ✅ green at 2701bf0e0
+- [x] T-002 — `cancelCopyModeIfParked` helper + wired into `SendKeysDebounced` ✅ green at 2701bf0e0
+- [x] T-003 — failing test `TestRespondCancelsCopyModeBeforeDelivery` ✅ green at e9c1c1710
+- [x] T-004 — wired guard into `Respond`; updated `respondInteractionSeamResult` (now 4 tmux calls incl. the not-parked `#{pane_in_mode}` probe); full tmux suite green ✅ green at e9c1c1710
+
+**Implementation note.** The guard probes `#{pane_in_mode}` via
+`display-message` then issues `send-keys -X cancel` only when parked
+(mirrors the existing `IsSessionRunning`/`IsSessionAttached` house
+pattern), rather than an opaque `if-shell`. This makes the
+parked-vs-not behaviour observable to the fake-exec recorder, so the
+regression tests can assert the cancel is issued before delivery when
+parked and NOT issued otherwise. `cancelCopyModeIfParked` returns no
+error and swallows probe/cancel failures, structurally guaranteeing the
+guard can never abort delivery on a pane that simply is not in a mode.
