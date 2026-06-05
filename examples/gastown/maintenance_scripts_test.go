@@ -2056,6 +2056,9 @@ case "$*" in
   *"SHOW DATABASES"*)
     printf 'Database\nbeads\n'
     ;;
+  *"WITH RECURSIVE workflow_issue_root_candidates"*"SELECT DISTINCT root.id"*)
+    printf 'id\n'
+    ;;
   *"issue_type NOT IN"*)
     printf 'COUNT(*)\n0\n'
     ;;
@@ -2124,6 +2127,9 @@ case "$*" in
     ;;
   *"SHOW DATABASES"*)
     printf 'Database\nbeads\n'
+    ;;
+  *"WITH RECURSIVE workflow_issue_root_candidates"*"SELECT DISTINCT root.id"*)
+    printf 'id\n'
     ;;
   *"issue_type NOT IN"*"created_at < DATE_SUB"*)
     printf 'COUNT(*)\n0\n'
@@ -3790,6 +3796,7 @@ func TestReaperClosesStaleInactiveWorkflowRoots(t *testing.T) {
 	cityDir := t.TempDir()
 	binDir := t.TempDir()
 	doltLog := filepath.Join(t.TempDir(), "dolt-args.log")
+	bdLog := filepath.Join(t.TempDir(), "bd.log")
 	gcLog := filepath.Join(t.TempDir(), "gc.log")
 
 	writeExecutable(t, filepath.Join(binDir, "dolt"), `#!/bin/sh
@@ -3807,17 +3814,154 @@ case "$*" in
     printf 'depends_on_id,varchar,NO,,,\n'
     printf 'type,varchar,NO,,,\n'
     ;;
-  *"UPDATE "*"wisps SET status='closed'"*"gc.formula_contract"*"gc.root_bead_id"*)
+  *"WITH RECURSIVE workflow_wisp_root_candidates"*"UPDATE "*"wisps SET status='closed'"*"JSON_SET(COALESCE(metadata, JSON_OBJECT())"*)
     printf 'ROW_COUNT()\n1\n'
     ;;
-  *"UPDATE "*"issues SET status='closed'"*"gc.formula_contract"*"gc.root_bead_id"*)
-    printf 'ROW_COUNT()\n1\n'
-    ;;
-  *"COUNT(DISTINCT w.id)"*"gc.kind"*"gc.formula_contract"*"gc.root_bead_id"*)
+  *"WITH RECURSIVE workflow_wisp_root_candidates"*"SELECT COUNT(*) FROM ("*)
     printf 'COUNT(*)\n1\n'
     ;;
-  *"COUNT(DISTINCT i.id)"*"gc.kind"*"gc.formula_contract"*"gc.root_bead_id"*)
-    printf 'COUNT(*)\n1\n'
+  *"WITH RECURSIVE workflow_issue_root_candidates"*"SELECT DISTINCT root.id"*)
+    printf 'id\nissue-close\n'
+    ;;
+  *"SELECT COUNT(*) FROM "*"wisps"*"status IN ('open', 'hooked', 'in_progress')"*"created_at <"*)
+    printf 'COUNT(*)\n0\n'
+    ;;
+  *"COUNT("*)
+    printf 'COUNT(*)\n0\n'
+    ;;
+  *"SELECT id"*)
+    printf 'id\n'
+    ;;
+esac
+exit 0
+`)
+	writeExecutable(t, filepath.Join(binDir, "bd"), `#!/bin/sh
+printf '%s\n' "$*" >> "$BD_CALL_LOG"
+exit 0
+`)
+	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+exit 0
+`)
+	writeCityBeadsMetadata(t, cityDir, "beads")
+
+	env := map[string]string{
+		"BD_CALL_LOG":      bdLog,
+		"DOLT_ARGS_LOG":    doltLog,
+		"GC_CALL_LOG":      gcLog,
+		"GC_CITY":          cityDir,
+		"GC_CITY_PATH":     cityDir,
+		"GC_DOLT_HOST":     "127.0.0.1",
+		"GC_DOLT_PORT":     "3307",
+		"GC_DOLT_USER":     "root",
+		"GC_DOLT_PASSWORD": "",
+		"PATH":             binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+
+	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "reaper.sh"), env)
+
+	logData, err := os.ReadFile(doltLog)
+	if err != nil {
+		t.Fatalf("ReadFile(dolt log): %v", err)
+	}
+	log := string(logData)
+	for _, want := range []string{
+		"WITH RECURSIVE workflow_wisp_root_candidates",
+		"WITH RECURSIVE workflow_issue_root_candidates",
+		"workflow_descendants(root_id, id)",
+		"roots_with_live_descendants",
+		"UPDATE `beads`.wisps SET status='closed', closed_at=NOW(), metadata = JSON_SET(COALESCE(metadata, JSON_OBJECT())",
+		"'$.\"gc.outcome\"', 'skipped'",
+		"'$.\"close_reason\"', 'stale inactive workflow root auto-closed by reaper'",
+		"JSON_UNQUOTE(JSON_EXTRACT(w.metadata, '$.\"gc.kind\"')) = 'workflow'",
+		"JSON_UNQUOTE(JSON_EXTRACT(w.metadata, '$.\"gc.formula_contract\"')) = 'graph.v2'",
+		"JSON_UNQUOTE(JSON_EXTRACT(child_wisp.metadata, '$.\"gc.root_bead_id\"')) = root.id",
+		"JSON_UNQUOTE(JSON_EXTRACT(i.metadata, '$.\"gc.kind\"')) = 'workflow'",
+		"JSON_UNQUOTE(JSON_EXTRACT(i.metadata, '$.\"gc.formula_contract\"')) = 'graph.v2'",
+		"JSON_UNQUOTE(JSON_EXTRACT(child_issue.metadata, '$.\"gc.root_bead_id\"')) = root.id",
+		"COALESCE(w.assignee, '') = ''",
+		"COALESCE(i.assignee, '') = ''",
+		"COALESCE(w.updated_at, w.created_at) < DATE_SUB(NOW(), INTERVAL",
+		"COALESCE(i.updated_at, i.created_at) < DATE_SUB(NOW(), INTERVAL",
+		"descendant_wisp.status, descendant_issue.status) IN ('open', 'hooked', 'in_progress', 'blocked', 'deferred', 'pinned', 'review', 'testing')",
+		"roots_with_recent_descendants",
+		"child_dep.type IN ('parent-child', 'tracks', 'blocks')",
+		"child_dep.depends_on_id = root.id",
+		"child_dep.depends_on_id = parent.id",
+		"workflow_roots=2",
+	} {
+		if !strings.Contains(log, want) {
+			t.Fatalf("reaper workflow-root SQL missing %q:\n%s", want, log)
+		}
+	}
+	if strings.Contains(log, "parent_id") {
+		t.Fatalf("reaper workflow-root cleanup used removed parent_id column:\n%s", log)
+	}
+	if strings.Contains(log, "UPDATE `beads`.issues SET status='closed'") {
+		t.Fatalf("reaper closed city workflow issue roots with raw SQL instead of bd close:\n%s", log)
+	}
+
+	bdData, err := os.ReadFile(bdLog)
+	if err != nil {
+		t.Fatalf("ReadFile(bd log): %v", err)
+	}
+	if !strings.Contains(string(bdData), "close issue-close --reason stale inactive workflow root auto-closed by reaper") {
+		t.Fatalf("reaper did not close city workflow issue root through bd close:\n%s", bdData)
+	}
+
+	gcData, err := os.ReadFile(gcLog)
+	if err != nil {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	if !strings.Contains(string(gcData), "workflow_roots:2") {
+		t.Fatalf("reaper summary did not report closed workflow roots:\n%s", gcData)
+	}
+}
+
+func TestReaperWorkflowRootPredicateIsGeneratedFromOneHelper(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "reaper.sh"))
+	if err != nil {
+		t.Fatalf("ReadFile(reaper.sh): %v", err)
+	}
+	script := string(data)
+	if got := strings.Count(script, "workflow_descendants(root_id, id) AS"); got != 1 {
+		t.Fatalf("workflow-root recursive CTE body appears %d times, want one helper definition", got)
+	}
+	if got := strings.Count(script, "workflow_root_candidates_cte()"); got != 1 {
+		t.Fatalf("workflow-root candidate helper appears %d times, want one definition", got)
+	}
+}
+
+func TestReaperPreservesWorkflowRootsWithLiveDescendants(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	doltLog := filepath.Join(t.TempDir(), "dolt-args.log")
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+
+	writeExecutable(t, filepath.Join(binDir, "dolt"), `#!/bin/sh
+printf '%s\n' "$*" >> "$DOLT_ARGS_LOG"
+case "$*" in
+  *"SHOW TABLES FROM"*"LIKE 'wisps'"*)
+    printf 'Tables_in_db\nwisps\n'
+    ;;
+  *"SHOW DATABASES"*)
+    printf 'Database\nbeads\n'
+    ;;
+  *"SHOW COLUMNS FROM"*"dependencies"*)
+    printf 'Field,Type,Null,Key,Default,Extra\n'
+    printf 'issue_id,varchar,NO,,,\n'
+    printf 'depends_on_id,varchar,NO,,,\n'
+    printf 'type,varchar,NO,,,\n'
+    ;;
+  *"WITH RECURSIVE workflow_wisp_root_candidates"*"SELECT COUNT(*) FROM ("*)
+    printf 'COUNT(*)\n0\n'
+    ;;
+  *"WITH RECURSIVE workflow_issue_root_candidates"*"SELECT DISTINCT root.id"*)
+    printf 'id\n'
+    ;;
+  *"UPDATE "*"workflow_wisp_root_candidates"*"wisps SET status='closed'"*)
+    printf 'workflow roots with live descendants must be preserved\n' >&2
+    exit 42
     ;;
   *"SELECT COUNT(*) FROM "*"wisps"*"status IN ('open', 'hooked', 'in_progress')"*"created_at <"*)
     printf 'COUNT(*)\n0\n'
@@ -3835,6 +3979,7 @@ exit 0
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
 exit 0
 `)
+	writeCityBeadsMetadata(t, cityDir, "beads")
 
 	env := map[string]string{
 		"DOLT_ARGS_LOG":    doltLog,
@@ -3856,34 +4001,112 @@ exit 0
 	}
 	log := string(logData)
 	for _, want := range []string{
-		"UPDATE `beads`.wisps SET status='closed', closed_at=NOW()",
-		"UPDATE `beads`.issues SET status='closed', closed_at=NOW()",
-		"JSON_UNQUOTE(JSON_EXTRACT(w.metadata, '$.\"gc.kind\"')) = 'workflow'",
-		"JSON_UNQUOTE(JSON_EXTRACT(w.metadata, '$.\"gc.formula_contract\"')) = 'graph.v2'",
-		"JSON_UNQUOTE(JSON_EXTRACT(child_wisp.metadata, '$.\"gc.root_bead_id\"')) = w.id",
-		"JSON_UNQUOTE(JSON_EXTRACT(i.metadata, '$.\"gc.kind\"')) = 'workflow'",
-		"JSON_UNQUOTE(JSON_EXTRACT(i.metadata, '$.\"gc.formula_contract\"')) = 'graph.v2'",
-		"JSON_UNQUOTE(JSON_EXTRACT(child_issue.metadata, '$.\"gc.root_bead_id\"')) = i.id",
-		"COALESCE(w.assignee, '') = ''",
-		"COALESCE(i.assignee, '') = ''",
-		"COALESCE(w.updated_at, w.created_at) < DATE_SUB(NOW(), INTERVAL",
-		"COALESCE(i.updated_at, i.created_at) < DATE_SUB(NOW(), INTERVAL",
-		"workflow_roots=2",
+		"roots_with_live_descendants",
+		"roots_with_recent_descendants",
+		"workflow_descendants(root_id, id)",
+		"descendant_wisp.status, descendant_issue.status) IN ('open', 'hooked', 'in_progress', 'blocked', 'deferred', 'pinned', 'review', 'testing')",
+		"child_dep.type IN ('parent-child', 'tracks', 'blocks')",
 	} {
 		if !strings.Contains(log, want) {
-			t.Fatalf("reaper workflow-root SQL missing %q:\n%s", want, log)
+			t.Fatalf("reaper workflow-root preserve guard missing %q:\n%s", want, log)
 		}
 	}
-	if strings.Contains(log, "parent_id") {
-		t.Fatalf("reaper workflow-root cleanup used removed parent_id column:\n%s", log)
+	if strings.Contains(log, "UPDATE `beads`.wisps SET status='closed', closed_at=NOW(), metadata = JSON_SET") ||
+		strings.Contains(log, "UPDATE `beads`.issues SET status='closed'") {
+		t.Fatalf("reaper closed workflow roots after live-descendant counts returned zero:\n%s", log)
 	}
 
 	gcData, err := os.ReadFile(gcLog)
 	if err != nil {
 		t.Fatalf("ReadFile(gc log): %v", err)
 	}
-	if !strings.Contains(string(gcData), "workflow_roots:2") {
-		t.Fatalf("reaper summary did not report closed workflow roots:\n%s", gcData)
+	if strings.Contains(string(gcData), "workflow_roots:1") {
+		t.Fatalf("reaper summary reported closed workflow roots despite live descendants:\n%s", gcData)
+	}
+}
+
+func TestReaperDryRunReportsWouldCloseWorkflowRoots(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	doltLog := filepath.Join(t.TempDir(), "dolt-args.log")
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+
+	writeExecutable(t, filepath.Join(binDir, "dolt"), `#!/bin/sh
+printf '%s\n' "$*" >> "$DOLT_ARGS_LOG"
+case "$*" in
+  *"SHOW TABLES FROM"*"LIKE 'wisps'"*)
+    printf 'Tables_in_db\nwisps\n'
+    ;;
+  *"SHOW DATABASES"*)
+    printf 'Database\nbeads\n'
+    ;;
+  *"SHOW COLUMNS FROM"*"dependencies"*)
+    printf 'Field,Type,Null,Key,Default,Extra\n'
+    printf 'issue_id,varchar,NO,,,\n'
+    printf 'depends_on_id,varchar,NO,,,\n'
+    printf 'type,varchar,NO,,,\n'
+    ;;
+  *"WITH RECURSIVE workflow_wisp_root_candidates"*"SELECT COUNT(*) FROM ("*)
+    printf 'COUNT(*)\n1\n'
+    ;;
+  *"WITH RECURSIVE workflow_issue_root_candidates"*"SELECT DISTINCT root.id"*)
+    printf 'id\nissue-close\n'
+    ;;
+  *"UPDATE "*"workflow_wisp_root_candidates"*"wisps SET status='closed'"*)
+    printf 'dry-run should not update workflow wisp roots\n' >&2
+    exit 42
+    ;;
+  *"SELECT COUNT(*) FROM "*"wisps"*"status IN ('open', 'hooked', 'in_progress')"*"created_at <"*)
+    printf 'COUNT(*)\n0\n'
+    ;;
+  *"COUNT("*)
+    printf 'COUNT(*)\n0\n'
+    ;;
+  *"SELECT id"*)
+    printf 'id\n'
+    ;;
+esac
+exit 0
+`)
+	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+exit 0
+`)
+	writeCityBeadsMetadata(t, cityDir, "beads")
+
+	env := map[string]string{
+		"DOLT_ARGS_LOG":     doltLog,
+		"GC_CALL_LOG":       gcLog,
+		"GC_CITY":           cityDir,
+		"GC_CITY_PATH":      cityDir,
+		"GC_DOLT_HOST":      "127.0.0.1",
+		"GC_DOLT_PORT":      "3307",
+		"GC_DOLT_USER":      "root",
+		"GC_DOLT_PASSWORD":  "",
+		"GC_REAPER_DRY_RUN": "1",
+		"PATH":              binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+
+	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "reaper.sh"), env)
+
+	logData, err := os.ReadFile(doltLog)
+	if err != nil {
+		t.Fatalf("ReadFile(dolt log): %v", err)
+	}
+	if strings.Contains(string(logData), "UPDATE `beads`.wisps SET status='closed', closed_at=NOW(), metadata = JSON_SET") ||
+		strings.Contains(string(logData), "UPDATE `beads`.issues SET status='closed', closed_at=NOW(), metadata = JSON_SET") {
+		t.Fatalf("dry-run executed workflow-root update:\n%s", logData)
+	}
+
+	gcData, err := os.ReadFile(gcLog)
+	if err != nil {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	gcText := string(gcData)
+	if !strings.Contains(gcText, "workflow_roots:0") ||
+		!strings.Contains(gcText, "would_close_workflow_roots:2") ||
+		!strings.Contains(gcText, "(dry run)") {
+		t.Fatalf("dry-run summary did not report workflow-root would-close count:\n%s", gcText)
 	}
 }
 
