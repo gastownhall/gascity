@@ -348,6 +348,16 @@ func finalizeDrainAckStoppedSession(
 	if hasAssignedWork {
 		batch = sessionpkg.CompleteDrainPatch(clk.Now().UTC(), "idle", session.Metadata["wake_mode"] == "fresh")
 	}
+	// A drain-ack that completes a restart-request cycle (gc session reset →
+	// agent drain-ack) must also consume restart_requested. The drain-ack
+	// branch handles the stop and continues before the restart-requested
+	// branch runs, so nothing else clears the flag; if it survives in the
+	// store, a later cache-reconcile re-emission resurrects it and the
+	// controller honors it as a fresh restart request — a phantom second
+	// restart that rotates session_key and destroys resume continuity (#2574).
+	if session.Metadata["restart_requested"] == "true" {
+		batch["restart_requested"] = ""
+	}
 	if err := store.SetMetadataBatch(session.ID, batch); err != nil {
 		fmt.Fprintf(stderr, "session reconciler: finalizing drain-ack stopped %s: %v\n", name, err) //nolint:errcheck
 		return
