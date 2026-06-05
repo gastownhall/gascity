@@ -1934,6 +1934,19 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 		}
 		assignedWorkBeads, assignedWorkStoreRefs = filterReleasedAssignedWorkSnapshot(assignedWorkBeads, assignedWorkStoreRefs, released)
 	}
+	// Squatter guard (gastownhall/gascity#2930): a foreign Dolt that has bound
+	// this city's managed port returns zero demand, indistinguishable from a
+	// genuinely-idle fleet — and would drain every running pool. This runs on
+	// the steady-state tick (not just startup), before the sweep and the
+	// singleton reconcile below. The ctx-bounded @@datadir probe is paid only
+	// when the sweep would actually close a running pool session this tick (a
+	// scale-down event), so a steady warm fleet pays nothing; a confirmed
+	// data-dir mismatch marks the tick partial so the existing hold suppresses
+	// the drain. Fail-open in every other case.
+	if storeIdentityHold(ctx, cr.cityPath, poolSweepWouldDrain(sessionBeads, result.State, cr.cfg), cr.stderr) {
+		fmt.Fprintf(cr.stderr, "%s: managed dolt serves an unexpected data-dir (squatter on the managed port?); holding pools this tick — see gastownhall/gascity#2930\n", cr.logPrefix) //nolint:errcheck // best-effort stderr
+		result.StoreQueryPartial = true
+	}
 	// poolDesired determines how many sessions should be AWAKE. Uses the
 	// same scale_check counts that buildDesiredState already computed (no
 	// duplicate shell-outs). Resume tier from cross-referenced assigned
@@ -2313,6 +2326,32 @@ func (cr *CityRuntime) waitForAsyncStops() bool {
 		return false
 	}
 	return true
+}
+
+// poolSweepWouldDrain reports whether sweepUndesiredPoolSessionBeads would
+// close at least one running pool session this tick — i.e. an open pool session
+// bead is not present in desiredState. It mirrors the sweep's core candidate
+// filter (open, not desired, not a manual/named session); it intentionally
+// omits the sweep's transient create/post-create grace checks because an
+// over-inclusive answer only costs an extra identity probe, never a wrong hold.
+// Used to gate the managed-Dolt squatter probe to actual scale-down events.
+func poolSweepWouldDrain(sessionBeads *sessionBeadSnapshot, desiredState map[string]TemplateParams, cfg *config.City) bool {
+	if sessionBeads == nil || cfg == nil {
+		return false
+	}
+	for _, bead := range sessionBeads.Open() {
+		if bead.Status == "closed" {
+			continue
+		}
+		if _, desired := desiredState[bead.Metadata["session_name"]]; desired {
+			continue
+		}
+		if isManualSessionBead(bead) || isNamedSessionBead(bead) {
+			continue
+		}
+		return true
+	}
+	return false
 }
 
 func sweepUndesiredPoolSessionBeads(

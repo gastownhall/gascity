@@ -138,14 +138,16 @@
           "guides/capabilities-for-coding-agent-users",
           "guides/understanding-packs",
           "guides/shareable-packs",
-          "guides/using-json-from-gc"
+          "guides/using-json-from-gc",
+          "guides/multi-agent-engineering-environment"
         ]
       },
       {
         "group": "Troubleshooting",
         "pages": [
           "troubleshooting/gc-start-walkthrough",
-          "troubleshooting/dolt-bloat-recovery"
+          "troubleshooting/dolt-bloat-recovery",
+          "runbooks/managed-city-endpoints"
         ]
       },
       {
@@ -159,6 +161,7 @@
           "reference/api",
           "reference/events",
           "schema/index",
+          "reference/system-packs",
           "reference/exec-session-provider",
           "reference/exec-beads-provider"
         ]

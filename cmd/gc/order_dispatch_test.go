@@ -4532,6 +4532,185 @@ func TestSweepStaleOrderTrackingWithWispsSkipsFreshOpenDescendant(t *testing.T) 
 	}
 }
 
+func TestSweepStaleOrderTrackingWithWispsClosesGraphDependentSubtree(t *testing.T) {
+	store := beads.NewMemStore()
+
+	wispRoot, err := store.Create(beads.Bead{
+		Title:  "graph-workflow-digest",
+		Type:   "task",
+		Labels: []string{"order-run:digest"},
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(wisp root): %v", err)
+	}
+	step, err := store.Create(beads.Bead{
+		Title: "draft-digest",
+		Metadata: map[string]string{
+			"gc.root_bead_id": wispRoot.ID,
+			"gc.step_ref":     "draft",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(graph step): %v", err)
+	}
+	if err := store.DepAdd(step.ID, wispRoot.ID, "tracks"); err != nil {
+		t.Fatalf("DepAdd(tracks): %v", err)
+	}
+
+	closed, err := sweepStaleOrderWispSubtrees(
+		store,
+		step.CreatedAt.Add(time.Minute),
+		orderFilterForTest("digest"),
+		orderTrackingSweepMetadataInitiator,
+	)
+	if err != nil {
+		t.Fatalf("sweepStaleOrderWispSubtrees: %v", err)
+	}
+	if closed != 2 {
+		t.Fatalf("closed = %d, want root and graph step closed", closed)
+	}
+	for _, id := range []string{wispRoot.ID, step.ID} {
+		got, err := store.Get(id)
+		if err != nil {
+			t.Fatalf("Get(%s): %v", id, err)
+		}
+		if got.Status != "closed" {
+			t.Fatalf("%s status = %q, want closed", id, got.Status)
+		}
+	}
+}
+
+func TestSweepStaleOrderTrackingWithWispsClosesSameWorkflowGraphDependencyTypes(t *testing.T) {
+	for _, depType := range []string{"blocks", "parent-child"} {
+		t.Run(depType, func(t *testing.T) {
+			store := beads.NewMemStore()
+
+			wispRoot, err := store.Create(beads.Bead{
+				Title:  "graph-workflow-digest",
+				Type:   "task",
+				Labels: []string{"order-run:digest"},
+				Metadata: map[string]string{
+					"gc.kind":             "workflow",
+					"gc.formula_contract": "graph.v2",
+				},
+			})
+			if err != nil {
+				t.Fatalf("Create(wisp root): %v", err)
+			}
+			step, err := store.Create(beads.Bead{
+				Title: "draft-digest",
+				Metadata: map[string]string{
+					"gc.root_bead_id": wispRoot.ID,
+					"gc.step_ref":     "draft",
+				},
+			})
+			if err != nil {
+				t.Fatalf("Create(graph step): %v", err)
+			}
+			if err := store.DepAdd(step.ID, wispRoot.ID, depType); err != nil {
+				t.Fatalf("DepAdd(%s): %v", depType, err)
+			}
+
+			closed, err := sweepStaleOrderWispSubtrees(
+				store,
+				step.CreatedAt.Add(time.Minute),
+				orderFilterForTest("digest"),
+				orderTrackingSweepMetadataInitiator,
+			)
+			if err != nil {
+				t.Fatalf("sweepStaleOrderWispSubtrees: %v", err)
+			}
+			if closed != 2 {
+				t.Fatalf("closed = %d, want root and graph step closed", closed)
+			}
+			for _, id := range []string{wispRoot.ID, step.ID} {
+				got, err := store.Get(id)
+				if err != nil {
+					t.Fatalf("Get(%s): %v", id, err)
+				}
+				if got.Status != "closed" {
+					t.Fatalf("%s status = %q, want closed", id, got.Status)
+				}
+			}
+		})
+	}
+}
+
+func TestSweepStaleOrderTrackingWithWispsIgnoresForeignGraphDependents(t *testing.T) {
+	tests := []struct {
+		name     string
+		depType  string
+		metadata map[string]string
+	}{
+		{
+			name:    "external convoy tracks edge",
+			depType: "tracks",
+		},
+		{
+			name:    "unrelated downstream blocks edge",
+			depType: "blocks",
+			metadata: map[string]string{
+				"gc.root_bead_id": "other-workflow-root",
+				"gc.step_ref":     "external",
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := beads.NewMemStore()
+
+			wispRoot, err := store.Create(beads.Bead{
+				Title:  "graph-workflow-digest",
+				Type:   "task",
+				Labels: []string{"order-run:digest"},
+				Metadata: map[string]string{
+					"gc.kind":             "workflow",
+					"gc.formula_contract": "graph.v2",
+				},
+			})
+			if err != nil {
+				t.Fatalf("Create(wisp root): %v", err)
+			}
+			external, err := store.Create(beads.Bead{
+				Title:    "external-dependent",
+				Metadata: tt.metadata,
+			})
+			if err != nil {
+				t.Fatalf("Create(external): %v", err)
+			}
+			if err := store.DepAdd(external.ID, wispRoot.ID, tt.depType); err != nil {
+				t.Fatalf("DepAdd(%s): %v", tt.depType, err)
+			}
+
+			closed, err := sweepStaleOrderWispSubtrees(
+				store,
+				external.CreatedAt.Add(time.Minute),
+				orderFilterForTest("digest"),
+				orderTrackingSweepMetadataInitiator,
+			)
+			if err != nil {
+				t.Fatalf("sweepStaleOrderWispSubtrees: %v", err)
+			}
+			if closed != 0 {
+				t.Fatalf("closed = %d, want foreign dependent ignored", closed)
+			}
+			for _, id := range []string{wispRoot.ID, external.ID} {
+				got, err := store.Get(id)
+				if err != nil {
+					t.Fatalf("Get(%s): %v", id, err)
+				}
+				if got.Status != "open" {
+					t.Fatalf("%s status = %q, want open", id, got.Status)
+				}
+			}
+		})
+	}
+}
+
 func TestSweepStaleOrderTrackingWithWispsPropagatesDescendantListError(t *testing.T) {
 	base := beads.NewMemStore()
 
@@ -6731,6 +6910,146 @@ func TestHasOpenWorkStrictBlocksOnGraphWorkflowWispWithOpenDescendant(t *testing
 	}
 }
 
+func TestHasOpenWorkStrictBlocksOnGraphWorkflowTracksDependent(t *testing.T) {
+	store := beads.NewMemStore()
+
+	wispRoot, err := store.Create(beads.Bead{
+		Title:  "graph-workflow-digest",
+		Type:   "task",
+		Labels: []string{"order-run:digest"},
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	step, err := store.Create(beads.Bead{
+		Title: "draft-digest",
+		Metadata: map[string]string{
+			"gc.root_bead_id": wispRoot.ID,
+			"gc.step_ref":     "draft",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DepAdd(step.ID, wispRoot.ID, "tracks"); err != nil {
+		t.Fatal(err)
+	}
+
+	ad := &memoryOrderDispatcher{}
+	has, err := ad.hasOpenWorkStrict(store, "digest")
+	if err != nil {
+		t.Fatalf("hasOpenWorkStrict: %v", err)
+	}
+	if !has {
+		t.Fatal("graph workflow wisp with an open tracks dependent must count as in-flight work")
+	}
+}
+
+func TestHasOpenWorkStrictBlocksOnSameWorkflowGraphDependencyTypes(t *testing.T) {
+	for _, depType := range []string{"blocks", "parent-child"} {
+		t.Run(depType, func(t *testing.T) {
+			store := beads.NewMemStore()
+
+			wispRoot, err := store.Create(beads.Bead{
+				Title:  "graph-workflow-digest",
+				Type:   "task",
+				Labels: []string{"order-run:digest"},
+				Metadata: map[string]string{
+					"gc.kind":             "workflow",
+					"gc.formula_contract": "graph.v2",
+				},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			step, err := store.Create(beads.Bead{
+				Title: "draft-digest",
+				Metadata: map[string]string{
+					"gc.root_bead_id": wispRoot.ID,
+					"gc.step_ref":     "draft",
+				},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := store.DepAdd(step.ID, wispRoot.ID, depType); err != nil {
+				t.Fatal(err)
+			}
+
+			ad := &memoryOrderDispatcher{}
+			has, err := ad.hasOpenWorkStrict(store, "digest")
+			if err != nil {
+				t.Fatalf("hasOpenWorkStrict: %v", err)
+			}
+			if !has {
+				t.Fatalf("graph workflow wisp with an open %s dependent must count as in-flight work", depType)
+			}
+		})
+	}
+}
+
+func TestHasOpenWorkStrictIgnoresForeignGraphDependents(t *testing.T) {
+	tests := []struct {
+		name     string
+		depType  string
+		metadata map[string]string
+	}{
+		{
+			name:    "external convoy tracks edge",
+			depType: "tracks",
+		},
+		{
+			name:    "unrelated downstream blocks edge",
+			depType: "blocks",
+			metadata: map[string]string{
+				"gc.root_bead_id": "other-workflow-root",
+				"gc.step_ref":     "external",
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := beads.NewMemStore()
+
+			wispRoot, err := store.Create(beads.Bead{
+				Title:  "graph-workflow-digest",
+				Type:   "task",
+				Labels: []string{"order-run:digest"},
+				Metadata: map[string]string{
+					"gc.kind":             "workflow",
+					"gc.formula_contract": "graph.v2",
+				},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			external, err := store.Create(beads.Bead{
+				Title:    "external-dependent",
+				Metadata: tt.metadata,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := store.DepAdd(external.ID, wispRoot.ID, tt.depType); err != nil {
+				t.Fatal(err)
+			}
+
+			ad := &memoryOrderDispatcher{}
+			has, err := ad.hasOpenWorkStrict(store, "digest")
+			if err != nil {
+				t.Fatalf("hasOpenWorkStrict: %v", err)
+			}
+			if has {
+				t.Fatalf("foreign %s dependent must not count as in-flight order work", tt.depType)
+			}
+		})
+	}
+}
+
 func TestHasOpenWorkStrictBlocksOnRootOnlyWisp(t *testing.T) {
 	store := beads.NewMemStore()
 
@@ -6833,6 +7152,37 @@ func TestHasOpenWorkStrictPropagatesWispChildListError(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "checking open descendants of wisp") {
 		t.Fatalf("hasOpenWorkStrict err = %q, want wisp descendant context", err)
+	}
+}
+
+func TestStoreHasOpenDescendantsShortCircuitsOpenParentChildBeforeGraphReads(t *testing.T) {
+	base := beads.NewMemStore()
+
+	wispRoot, err := base.Create(beads.Bead{
+		Title: "graph-workflow-digest",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := base.Create(beads.Bead{
+		Title:    "direct-open-step",
+		ParentID: wispRoot.ID,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	store := depListFailStore{Store: base, failID: wispRoot.ID}
+	has, err := storeHasOpenDescendants(store, wispRoot.ID)
+	if err != nil {
+		t.Fatalf("storeHasOpenDescendants: %v", err)
+	}
+	if !has {
+		t.Fatal("direct open ParentID child must count as an open descendant")
 	}
 }
 
