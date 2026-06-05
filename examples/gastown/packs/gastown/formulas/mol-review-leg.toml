@@ -37,6 +37,7 @@ CONVOY_STATUS=$(gc convoy status {{convoy_id}} --json)
 WORK_BEAD_ID=$(printf '%s' "$CONVOY_STATUS" | jq -r 'if (.children | length) == 1 then .children[0].id else empty end')
 if [ -z "$WORK_BEAD_ID" ]; then
   echo "mol-review-leg requires an input convoy with exactly one tracked member" >&2
+  gc runtime drain-ack
   exit 1
 fi
 gc bd show "$WORK_BEAD_ID"
