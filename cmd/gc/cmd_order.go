@@ -1725,35 +1725,41 @@ func cmdOrderSweepNudgeMail(nudgeTTL, mailTTL time.Duration, dryRun, quiet bool,
 	}
 	defer closeBeadStoreHandle(store) //nolint:errcheck // best-effort
 
-	// Load nudge state to protect live nudge IDs from being swept. A failure
-	// here is non-fatal: if state is unavailable (e.g. controller not running),
-	// we treat all candidates as safe to sweep (nil state = no live IDs).
+	// Load nudge state to protect live nudge IDs from being swept. A missing
+	// state file is not an error (LoadState returns empty state), so any error
+	// here is a real read/parse failure: fail closed rather than sweeping with
+	// no live-ID protection, which could close beads for in-flight nudges.
 	nudgeState, stateErr := nudgequeue.LoadState(cityPath)
-	var statePtr *nudgequeue.State
-	if stateErr == nil {
-		statePtr = &nudgeState
+	if stateErr != nil {
+		fmt.Fprintf(stderr, "gc order sweep-nudge-mail: %v\n", stateErr) //nolint:errcheck // best-effort stderr
+		return 1
 	}
+	statePtr := &nudgeState
 
 	now := time.Now()
 	if dryRun {
-		cmdOrderSweepNudgeMailDryRun(store, statePtr, now, nudgeTTL, mailTTL, quiet, stdout)
-	} else {
-		cmdOrderSweepNudgeMailRun(store, statePtr, now, nudgeTTL, mailTTL, quiet, stdout, stderr)
+		return cmdOrderSweepNudgeMailDryRun(store, statePtr, now, nudgeTTL, mailTTL, quiet, stdout, stderr)
 	}
+	cmdOrderSweepNudgeMailRun(store, statePtr, now, nudgeTTL, mailTTL, quiet, stdout, stderr)
 	return 0
 }
 
-func cmdOrderSweepNudgeMailDryRun(store beads.Store, nudgeState *nudgequeue.State, now time.Time, nudgeTTL, mailTTL time.Duration, quiet bool, stdout io.Writer) {
-	counts, _ := countStaleNudgeMail(store, nudgeState, now, nudgeTTL, mailTTL, nudgeMailSweepCloseBudget)
+func cmdOrderSweepNudgeMailDryRun(store beads.Store, nudgeState *nudgequeue.State, now time.Time, nudgeTTL, mailTTL time.Duration, quiet bool, stdout, stderr io.Writer) int {
+	counts, err := countStaleNudgeMail(store, nudgeState, now, nudgeTTL, mailTTL, nudgeMailSweepCloseBudget)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc order sweep-nudge-mail: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	if quiet {
-		return
+		return 0
 	}
 	if counts.NudgeClosed == 0 && counts.MailClosed == 0 {
 		fmt.Fprintln(stdout, "nudge-mail-sweep: nothing to close (0 stale nudge beads, 0 stale mail beads)") //nolint:errcheck // best-effort stdout
-		return
+		return 0
 	}
 	fmt.Fprintf(stdout, "[DRY RUN] nudge-mail-sweep: would close %d nudge bead(s), %d mail bead(s)  (no changes made)\n", //nolint:errcheck
 		counts.NudgeClosed, counts.MailClosed)
+	return 0
 }
 
 func cmdOrderSweepNudgeMailRun(store beads.Store, nudgeState *nudgequeue.State, now time.Time, nudgeTTL, mailTTL time.Duration, quiet bool, stdout, stderr io.Writer) {

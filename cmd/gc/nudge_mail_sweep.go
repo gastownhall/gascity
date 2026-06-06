@@ -134,7 +134,7 @@ func sweepStaleNudgeMail(store beads.Store, nudgeState *nudgequeue.State, now ti
 }
 
 // countStaleNudgeMail returns what sweepStaleNudgeMail would close without
-// making any changes. Used by --dry-run to report candidatecount without side
+// making any changes. Used by --dry-run to report candidate count without side
 // effects. The limit parameter caps the count the same way sweepStaleNudgeMail
 // caps closes; pass 0 for no cap.
 func countStaleNudgeMail(store beads.Store, nudgeState *nudgequeue.State, now time.Time, nudgeTTL, mailTTL time.Duration, limit int) (nudgeMailSweepResult, error) {

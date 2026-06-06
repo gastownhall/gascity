@@ -1362,12 +1362,18 @@ func (cr *CityRuntime) runNudgeMailSweepWatchdog(now time.Time) {
 	if store == nil {
 		return
 	}
-	// Load nudge state to protect live nudge IDs. Non-fatal if unavailable.
+	// Load nudge state to protect live nudge IDs. A missing state file is not an
+	// error (LoadState returns empty state), so any error here is a real
+	// read/parse failure: fail closed and skip this sweep rather than sweeping
+	// without live-ID protection, which could close beads for in-flight nudges.
 	nudgeState, stateErr := nudgequeue.LoadState(cr.cityPath)
-	var statePtr *nudgequeue.State
-	if stateErr == nil {
-		statePtr = &nudgeState
+	if stateErr != nil {
+		if cr.stderr != nil {
+			fmt.Fprintf(cr.stderr, "%s: nudge-mail-sweep watchdog: load nudge state: %v\n", cr.logPrefix, stateErr) //nolint:errcheck // best-effort stderr
+		}
+		return
 	}
+	statePtr := &nudgeState
 
 	result, sweepErr := sweepStaleNudgeMail(store, statePtr, now, nudgeMailSweepDefaultNudgeTTL, nudgeMailSweepDefaultMailTTL, nudgeMailSweepWatchdogCloseBudget)
 	if sweepErr != nil && cr.stderr != nil {

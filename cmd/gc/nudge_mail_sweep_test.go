@@ -533,8 +533,8 @@ func TestCmdOrderSweepNudgeMailDryRun_NothingToClose(t *testing.T) {
 	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
 	store := beads.NewMemStoreFrom(100, nil, nil)
 
-	var stdout bytes.Buffer
-	cmdOrderSweepNudgeMailDryRun(store, nil, now, nudgeMailSweepDefaultNudgeTTL, nudgeMailSweepDefaultMailTTL, false, &stdout)
+	var stdout, stderr bytes.Buffer
+	cmdOrderSweepNudgeMailDryRun(store, nil, now, nudgeMailSweepDefaultNudgeTTL, nudgeMailSweepDefaultMailTTL, false, &stdout, &stderr)
 	if !strings.Contains(stdout.String(), "nothing to close") {
 		t.Errorf("expected 'nothing to close' for empty store dry-run, got: %q", stdout.String())
 	}
@@ -548,8 +548,8 @@ func TestCmdOrderSweepNudgeMailDryRun_ShowsWouldClose(t *testing.T) {
 	}
 	store := beads.NewMemStoreFrom(100, seed, nil)
 
-	var stdout bytes.Buffer
-	cmdOrderSweepNudgeMailDryRun(store, nil, now, nudgeMailSweepDefaultNudgeTTL, nudgeMailSweepDefaultMailTTL, false, &stdout)
+	var stdout, stderr bytes.Buffer
+	cmdOrderSweepNudgeMailDryRun(store, nil, now, nudgeMailSweepDefaultNudgeTTL, nudgeMailSweepDefaultMailTTL, false, &stdout, &stderr)
 	out := stdout.String()
 	if !strings.HasPrefix(out, "[DRY RUN]") {
 		t.Errorf("expected '[DRY RUN]' prefix, got: %q", out)
@@ -570,13 +570,54 @@ func TestCmdOrderSweepNudgeMailDryRun_NoBeadsClosed(t *testing.T) {
 	}
 	store := beads.NewMemStoreFrom(100, seed, nil)
 
-	var stdout bytes.Buffer
-	cmdOrderSweepNudgeMailDryRun(store, nil, now, nudgeMailSweepDefaultNudgeTTL, nudgeMailSweepDefaultMailTTL, false, &stdout)
+	var stdout, stderr bytes.Buffer
+	cmdOrderSweepNudgeMailDryRun(store, nil, now, nudgeMailSweepDefaultNudgeTTL, nudgeMailSweepDefaultMailTTL, false, &stdout, &stderr)
 
 	// The bead should remain open.
 	open, _ := store.ListOpen()
 	if len(open) != 1 {
 		t.Errorf("dry-run closed a bead; want 1 open bead, got %d", len(open))
+	}
+}
+
+// nudgeSweepFailingList wraps MemStore and forces List to fail, simulating an
+// unreadable/unavailable store during a candidate listing.
+type nudgeSweepFailingList struct {
+	*beads.MemStore
+}
+
+func (s *nudgeSweepFailingList) List(q beads.ListQuery) ([]beads.Bead, error) {
+	return nil, fmt.Errorf("store unavailable")
+}
+
+func TestCmdOrderSweepNudgeMailDryRun_ListErrorReturnsNonZero(t *testing.T) {
+	// A failed candidate listing in --dry-run must surface the error and signal
+	// failure (non-zero), not report "nothing to close".
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	store := &nudgeSweepFailingList{MemStore: beads.NewMemStoreFrom(100, nil, nil)}
+
+	var stdout, stderr bytes.Buffer
+	code := cmdOrderSweepNudgeMailDryRun(store, nil, now, nudgeMailSweepDefaultNudgeTTL, nudgeMailSweepDefaultMailTTL, false, &stdout, &stderr)
+	if code == 0 {
+		t.Errorf("expected non-zero exit code on list error, got %d", code)
+	}
+	if !strings.Contains(stderr.String(), "gc order sweep-nudge-mail:") {
+		t.Errorf("expected error on stderr, got: %q", stderr.String())
+	}
+	if strings.Contains(stdout.String(), "nothing to close") {
+		t.Errorf("must not report 'nothing to close' when the listing failed, got: %q", stdout.String())
+	}
+}
+
+func TestCountStaleNudgeMail_ListErrorPropagates(t *testing.T) {
+	// countStaleNudgeMail must return the underlying list error rather than a
+	// silent zero count, so callers can fail closed.
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	store := &nudgeSweepFailingList{MemStore: beads.NewMemStoreFrom(100, nil, nil)}
+
+	_, err := countStaleNudgeMail(store, nil, now, nudgeMailSweepDefaultNudgeTTL, nudgeMailSweepDefaultMailTTL, 0)
+	if err == nil {
+		t.Fatal("expected non-nil error when the store listing fails")
 	}
 }
 
