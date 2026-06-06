@@ -197,10 +197,10 @@ EOF
 	    fi
 	    ;;
 	  bd)
-    if [ "$2" = "list" ]; then
-      case "$*" in
-        *"--rig project"*)
-          cat <<'EOF'
+	    if [ "$2" = "list" ]; then
+	      case "$*" in
+	        *"--rig project"*)
+	          cat <<'EOF'
 [
   {"id":"ga-valid","status":"in_progress","assignee":"project/gastown.refinery"},
   {"id":"ga-pool","status":"in_progress","assignee":"project/gastown.polecat-3"},
@@ -211,12 +211,20 @@ EOF
         *)
           printf '[]\n'
           ;;
-      esac
-      exit 0
-    fi
-    if [ "$2" = "update" ]; then
-      exit 0
-    fi
+	      esac
+	      exit 0
+	    fi
+	    if [ "$2" = "show" ] && [ "$3" = "ga-orphan" ] && [ "$4" = "--json" ]; then
+	      cat <<'EOF'
+[
+  {"id":"ga-orphan","status":"in_progress","assignee":"project/gastown.missing"}
+]
+EOF
+	      exit 0
+	    fi
+	    if [ "$2" = "update" ]; then
+	      exit 0
+	    fi
     ;;
 esac
 exit 1
@@ -293,10 +301,10 @@ EOF
 	    fi
 	    ;;
 	  bd)
-    if [ "$2" = "list" ]; then
-      case "$*" in
-        *"--rig project"*)
-          cat <<'EOF'
+	    if [ "$2" = "list" ]; then
+	      case "$*" in
+	        *"--rig project"*)
+	          cat <<'EOF'
 [
   {"id":"ga-valid","status":"in_progress","assignee":"gastown.deacon"},
   {"id":"ga-pool","status":"in_progress","assignee":"gastown.polecat-3"},
@@ -307,12 +315,20 @@ EOF
         *)
           printf '[]\n'
           ;;
-      esac
-      exit 0
-    fi
-    if [ "$2" = "update" ]; then
-      exit 0
-    fi
+	      esac
+	      exit 0
+	    fi
+	    if [ "$2" = "show" ] && [ "$3" = "ga-orphan" ] && [ "$4" = "--json" ]; then
+	      cat <<'EOF'
+[
+  {"id":"ga-orphan","status":"in_progress","assignee":"gastown.missing"}
+]
+EOF
+	      exit 0
+	    fi
+	    if [ "$2" = "update" ]; then
+	      exit 0
+	    fi
     ;;
 esac
 exit 1
@@ -550,6 +566,189 @@ exit 1
 	}
 }
 
+func TestOrphanSweepRevalidatesWorkBeadBeforeReset(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+
+	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+case "$1" in
+  config)
+    if [ "$2" = "explain" ]; then
+      cat <<'EOF'
+Agent: project/worker
+  source: pack
+EOF
+      exit 0
+    fi
+    ;;
+  rig)
+    if [ "$2" = "list" ] && [ "$3" = "--json" ]; then
+      printf '{"rigs":[{"name":"hq","hq":true}]}\n'
+      exit 0
+    fi
+    ;;
+  session)
+    if [ "$2" = "list" ] && [ "$3" = "--json" ]; then
+      printf '{"sessions":[],"summary":{},"filters":{},"schema_version":"1"}\n'
+      exit 0
+    fi
+    ;;
+  bd)
+    if [ "$2" = "list" ]; then
+      cat <<'EOF'
+[
+  {"id":"ga-raced-closed","status":"in_progress","assignee":"project__worker-gc-mc-wisp-raced"}
+]
+EOF
+      exit 0
+    fi
+    if [ "$2" = "show" ] && [ "$3" = "ga-raced-closed" ] && [ "$4" = "--json" ]; then
+      cat <<'EOF'
+[
+  {"id":"ga-raced-closed","status":"closed","assignee":"project__worker-gc-mc-wisp-raced","metadata":{"gc.outcome":"pass"}}
+]
+EOF
+      exit 0
+    fi
+    if [ "$2" = "update" ]; then
+      exit 0
+    fi
+    ;;
+esac
+exit 1
+`)
+
+	env := map[string]string{
+		"GC_CITY":      cityDir,
+		"GC_CITY_PATH": cityDir,
+		"GC_CALL_LOG":  gcLog,
+		"PATH":         binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+
+	script := filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "orphan-sweep.sh")
+	cmd := exec.Command(script)
+	cmd.Env = mergeTestEnv(env)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("%s failed: %v\n%s", filepath.Base(script), err, out)
+	}
+	if strings.Contains(string(out), "orphan-sweep: reset") {
+		t.Fatalf("unexpected orphan reset output:\n%s", out)
+	}
+
+	logData, err := os.ReadFile(gcLog)
+	if err != nil {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	log := string(logData)
+	if !strings.Contains(log, "bd show ga-raced-closed --json") {
+		t.Fatalf("work bead was not revalidated before reset:\n%s", log)
+	}
+	if strings.Contains(log, "bd update ga-raced-closed ") {
+		t.Fatalf("closed work bead was reopened by orphan-sweep:\n%s", log)
+	}
+}
+
+func TestOrphanSweepUsesSessionBeadShowWhenSessionListLags(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+
+	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+case "$1" in
+  config)
+    if [ "$2" = "explain" ]; then
+      cat <<'EOF'
+Agent: project/worker
+  source: pack
+EOF
+      exit 0
+    fi
+    ;;
+  rig)
+    if [ "$2" = "list" ] && [ "$3" = "--json" ]; then
+      printf '{"rigs":[{"name":"hq","hq":true}]}\n'
+      exit 0
+    fi
+    ;;
+  session)
+    if [ "$2" = "list" ] && [ "$3" = "--json" ]; then
+      printf '{"sessions":[],"summary":{},"filters":{},"schema_version":"1"}\n'
+      exit 0
+    fi
+    ;;
+  bd)
+    if [ "$2" = "list" ]; then
+      cat <<'EOF'
+[
+  {"id":"ga-session-lag","status":"in_progress","assignee":"project__worker-gc-mc-wisp-live123"}
+]
+EOF
+      exit 0
+    fi
+    if [ "$2" = "show" ] && [ "$3" = "ga-session-lag" ] && [ "$4" = "--json" ]; then
+      cat <<'EOF'
+[
+  {"id":"ga-session-lag","status":"in_progress","assignee":"project__worker-gc-mc-wisp-live123","metadata":{"gc.session_name":"project__worker-gc-mc-wisp-live123"}}
+]
+EOF
+      exit 0
+    fi
+    if [ "$2" = "show" ] && [ "$3" = "mc-wisp-live123" ] && [ "$4" = "--json" ]; then
+      cat <<'EOF'
+[
+  {"id":"mc-wisp-live123","status":"open","issue_type":"session","metadata":{"state":"start-pending","session_name":"project__worker-gc-mc-wisp-live123"}}
+]
+EOF
+      exit 0
+    fi
+    if [ "$2" = "update" ]; then
+      exit 0
+    fi
+    ;;
+esac
+exit 1
+`)
+
+	env := map[string]string{
+		"GC_CITY":      cityDir,
+		"GC_CITY_PATH": cityDir,
+		"GC_CALL_LOG":  gcLog,
+		"PATH":         binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+
+	script := filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "orphan-sweep.sh")
+	cmd := exec.Command(script)
+	cmd.Env = mergeTestEnv(env)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("%s failed: %v\n%s", filepath.Base(script), err, out)
+	}
+	if strings.Contains(string(out), "orphan-sweep: reset") {
+		t.Fatalf("unexpected orphan reset output:\n%s", out)
+	}
+
+	logData, err := os.ReadFile(gcLog)
+	if err != nil {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	log := string(logData)
+	for _, want := range []string{
+		"bd show ga-session-lag --json",
+		"bd show mc-wisp-live123 --json",
+	} {
+		if !strings.Contains(log, want) {
+			t.Fatalf("missing required gc call %q:\n%s", want, log)
+		}
+	}
+	if strings.Contains(log, "bd update ga-session-lag ") {
+		t.Fatalf("session-list lag caused live assigned work to reset:\n%s", log)
+	}
+}
+
 func TestOrphanSweepPreservesRigScopedLiveEphemeralSessionAssigneesFromCurrentSchema(t *testing.T) {
 	cityDir := t.TempDir()
 	binDir := t.TempDir()
@@ -595,9 +794,9 @@ EOF
     fi
     ;;
   bd)
-    if [ "$2" = "list" ]; then
-      if [ "$4" = "project" ]; then
-        cat <<'EOF'
+	    if [ "$2" = "list" ]; then
+	      if [ "$4" = "project" ]; then
+	        cat <<'EOF'
 [
   {"id":"ga-rig-live-by-session-name","status":"in_progress","assignee":"project__worker-gc-rig123"},
   {"id":"ga-rig-live-by-id","status":"in_progress","assignee":"mc-live-rig-asleep"},
@@ -607,12 +806,28 @@ EOF
 EOF
       else
         printf '[]\n'
-      fi
-      exit 0
-    fi
-    if [ "$2" = "update" ]; then
-      exit 0
-    fi
+	      fi
+	      exit 0
+	    fi
+	    if [ "$2" = "show" ] && [ "$3" = "ga-rig-orphan" ] && [ "$4" = "--json" ]; then
+	      cat <<'EOF'
+[
+  {"id":"ga-rig-orphan","status":"in_progress","assignee":"missing-rig-session"}
+]
+EOF
+	      exit 0
+	    fi
+	    if [ "$2" = "show" ] && [ "$3" = "ga-rig-closed-default-filtered" ] && [ "$4" = "--json" ]; then
+	      cat <<'EOF'
+[
+  {"id":"ga-rig-closed-default-filtered","status":"in_progress","assignee":"project__worker-gc-closed"}
+]
+EOF
+	      exit 0
+	    fi
+	    if [ "$2" = "update" ]; then
+	      exit 0
+	    fi
     ;;
 esac
 exit 1
@@ -702,9 +917,9 @@ EOF
     fi
     ;;
   bd)
-    if [ "$2" = "list" ]; then
-      if [ "$3" = "--rig" ] && [ "$4" = "project" ]; then
-        cat <<'EOF'
+	    if [ "$2" = "list" ]; then
+	      if [ "$3" = "--rig" ] && [ "$4" = "project" ]; then
+	        cat <<'EOF'
 [
   {"id":"ga-live-by-id","status":"in_progress","assignee":"vgc-live-id"},
   {"id":"ga-live-by-session-name","status":"in_progress","assignee":"project__worker-vgc-live-name"},
@@ -714,12 +929,28 @@ EOF
 EOF
       else
         printf '[]\n'
-      fi
-      exit 0
-    fi
-    if [ "$2" = "update" ]; then
-      exit 0
-    fi
+	      fi
+	      exit 0
+	    fi
+	    if [ "$2" = "show" ] && [ "$3" = "ga-closed-session" ] && [ "$4" = "--json" ]; then
+	      cat <<'EOF'
+[
+  {"id":"ga-closed-session","status":"in_progress","assignee":"vgc-closed"}
+]
+EOF
+	      exit 0
+	    fi
+	    if [ "$2" = "show" ] && [ "$3" = "ga-missing-session" ] && [ "$4" = "--json" ]; then
+	      cat <<'EOF'
+[
+  {"id":"ga-missing-session","status":"in_progress","assignee":"missing-session"}
+]
+EOF
+	      exit 0
+	    fi
+	    if [ "$2" = "update" ]; then
+	      exit 0
+	    fi
     ;;
 esac
 exit 1
@@ -799,9 +1030,9 @@ EOF
     fi
     ;;
   bd)
-    if [ "$2" = "list" ]; then
-      if [ "$3" = "--rig" ] && [ "$4" = "broken" ]; then
-        cat <<'EOF'
+	    if [ "$2" = "list" ]; then
+	      if [ "$3" = "--rig" ] && [ "$4" = "broken" ]; then
+	        cat <<'EOF'
 [
   {"id":"ga-broken-orphan","status":"in_progress","assignee":"missing-broken-session"}
 ]
@@ -818,12 +1049,28 @@ EOF
   {"id":"ga-hq-orphan","status":"in_progress","assignee":"missing-hq-session"}
 ]
 EOF
-      fi
-      exit 0
-    fi
-    if [ "$2" = "update" ]; then
-      exit 0
-    fi
+	      fi
+	      exit 0
+	    fi
+	    if [ "$2" = "show" ] && [ "$3" = "ga-hq-orphan" ] && [ "$4" = "--json" ]; then
+	      cat <<'EOF'
+[
+  {"id":"ga-hq-orphan","status":"in_progress","assignee":"missing-hq-session"}
+]
+EOF
+	      exit 0
+	    fi
+	    if [ "$2" = "show" ] && [ "$3" = "ga-healthy-orphan" ] && [ "$4" = "--json" ]; then
+	      cat <<'EOF'
+[
+  {"id":"ga-healthy-orphan","status":"in_progress","assignee":"missing-healthy-session"}
+]
+EOF
+	      exit 0
+	    fi
+	    if [ "$2" = "update" ]; then
+	      exit 0
+	    fi
     ;;
 esac
 exit 1
@@ -976,6 +1223,7 @@ func TestOrphanSweepPreservesProtectedInProgressEphemeralMoleculeWisp(t *testing
 				rigSessionsJSON:    rigSessionsJSON,
 				configuredIdentity: tt.configuredIdentity,
 				orphanID:           tt.orphanID,
+				orphanAssignee:     tt.orphanAssignee,
 			})
 			assertOrphanSweepFakeGC(t, env, filepath.Join(binDir, "bash"), fakeGC, gcLog)
 
@@ -1021,6 +1269,7 @@ func TestOrphanSweepPreservesProtectedInProgressEphemeralMoleculeWisp(t *testing
 				"rig list --json",
 				"bd list --rig project-alpha --status=in_progress --json --limit=0",
 				"config explain",
+				"bd show " + tt.orphanID + " --json",
 				orphanUpdate,
 			} {
 				if countExactLine(lines, want) == 0 {
@@ -1072,6 +1321,10 @@ fi
 if [ "$*" = "bd update $ORPHAN_SWEEP_ORPHAN_ID --status=open --assignee=" ]; then
   exit 0
 fi
+if [ "$*" = "bd show $ORPHAN_SWEEP_ORPHAN_ID --json" ]; then
+  printf '[{"id":"%s","status":"in_progress","assignee":"%s","metadata":{}}]\n' "$ORPHAN_SWEEP_ORPHAN_ID" "$ORPHAN_SWEEP_ORPHAN_ASSIGNEE"
+  exit 0
+fi
 printf 'UNEXPECTED: %s\n' "$*" >> "$GC_CALL_LOG"
 printf 'UNEXPECTED: %s\n' "$*" >&2
 exit 2
@@ -1085,6 +1338,7 @@ type orphanSweepCleanroomEnvConfig struct {
 	rigSessionsJSON    string
 	configuredIdentity string
 	orphanID           string
+	orphanAssignee     string
 }
 
 func orphanSweepProtectedWispBeadsJSON(t *testing.T, protectedID, protectedAssignee, orphanID, orphanAssignee string) string {
@@ -1202,6 +1456,7 @@ func orphanSweepCleanroomEnv(t *testing.T, root, binDir, gcLog string, cfg orpha
 		"ORPHAN_SWEEP_RIG_SESSIONS_JSON=" + cfg.rigSessionsJSON,
 		"ORPHAN_SWEEP_CONFIGURED_IDENTITY=" + cfg.configuredIdentity,
 		"ORPHAN_SWEEP_ORPHAN_ID=" + cfg.orphanID,
+		"ORPHAN_SWEEP_ORPHAN_ASSIGNEE=" + cfg.orphanAssignee,
 		"PATH=" + binDir,
 	}
 }

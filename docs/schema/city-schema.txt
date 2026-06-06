@@ -980,7 +980,7 @@
             "bd-1.0.4",
             "bd-1.0.5"
           ],
-          "description": "BDCompatibility selects the bd CLI semantics Gas City may rely on.\nEmpty defaults to \"bd-1.0.4\", which keeps claimable work history-backed\nand avoids ready flags whose filtering is incomplete in bd 1.0.4."
+          "description": "BDCompatibility selects the bd CLI semantics Gas City may rely on.\nEmpty defaults to \"bd-1.0.4\", which keeps claimable work history-backed\nand avoids bd ready/list flags that are unavailable or incomplete in bd\n1.0.4."
         },
         "policies": {
           "additionalProperties": {

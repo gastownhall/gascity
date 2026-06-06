@@ -75,6 +75,16 @@ vulnerabilities:
       - "usr/local/bin/kubectl"
     expired_at: 2026-06-12
     statement: Upstream gh, bd, br, dolt, and kubectl embed Go 1.26.2 stdlib; remove once each rebuilds against 1.26.3+ (or 1.25.10+).
+  - id: CVE-2026-42504
+    paths:
+      - "usr/bin/gh"
+      - "usr/local/bin/bd"
+      - "usr/local/bin/br"
+      - "usr/local/bin/dolt"
+      - "usr/local/bin/gc"
+      - "usr/local/bin/kubectl"
+    expired_at: 2026-06-12
+    statement: Go stdlib MIME-header DoS (CVE-2026-42504), fixed in Go 1.26.4 / 1.25.11. Upstream gh, bd, br, dolt, and kubectl still embed an older Go stdlib; gc is our own binary (built with Go 1.26.3) and will be addressed by bumping to Go 1.26.4+ (tracked separately); remove entry once all binaries are rebuilt.
   - id: CVE-2026-41602
     paths:
       - "usr/local/bin/dolt"
