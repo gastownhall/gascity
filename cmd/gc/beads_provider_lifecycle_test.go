@@ -5248,6 +5248,12 @@ func TestInitAndHookDirAdoptsAlreadyInitializedDefaultRigBdStore(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	// doltlite city triggers shouldInitDefaultRigBdStore for the rig without
+	// setting a GC_BEADS scope-wide override that would shadow the rig's own
+	// metadata-based provider detection.
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[workspace]\nname = \"tincan-city\"\n\n[beads]\nprovider = \"doltlite\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.MkdirAll(filepath.Join(rigPath, ".beads"), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -5282,7 +5288,6 @@ esac
 		t.Fatal(err)
 	}
 
-	t.Setenv("GC_BEADS", "sqlite")
 	t.Setenv("PATH", strings.Join([]string{binDir, os.Getenv("PATH")}, string(os.PathListSeparator)))
 
 	if err := initAndHookDir(cityPath, rigPath, "tc"); err != nil {

@@ -1162,54 +1162,6 @@ func openCompatibleFileStore(scopeRoot, cityPath string) (*beads.FileStore, erro
 	return openScopeLocalFileStore(cityPath)
 }
 
-// openCoordStoreAt opens the pure-Go SQLite bead store at the coordstore
-// directory for the given scope root.
-func openCoordStoreAt(scopeRoot, cityPath string) (beads.Store, error) {
-	storeDir, err := canonicalCoordStoreDir(scopeRoot)
-	if err != nil {
-		return nil, err
-	}
-	cfg, err := loadCityConfig(cityPath, io.Discard)
-	if err != nil {
-		cfg = nil
-	}
-	return beads.OpenSQLiteStore(
-		storeDir,
-		beads.WithSQLiteStoreIDPrefix(issuePrefixForScope(scopeRoot, cityPath, cfg)),
-		beads.WithSQLiteStoreRetention(4*time.Hour, 30*time.Second),
-	)
-}
-
-func canonicalCoordStoreDir(scopeRoot string) (string, error) {
-	storeDir := filepath.Join(scopeRoot, ".gc", "coordstore")
-	abs, err := filepath.Abs(filepath.Clean(storeDir))
-	if err != nil {
-		return "", fmt.Errorf("resolving coordstore dir %q: %w", storeDir, err)
-	}
-	return abs, nil
-}
-
-func providerIsCoordStore(provider string) bool {
-	switch strings.TrimSpace(provider) {
-	case "sqlite", "sqlite-cgo", "coordstore":
-		return true
-	default:
-		return false
-	}
-}
-
-// coordStoreDeprecationWarning returns a non-empty warning message when
-// provider is a deprecated alias for the "sqlite" coordination store.
-func coordStoreDeprecationWarning(provider string) string {
-	switch strings.TrimSpace(provider) {
-	case "sqlite-cgo":
-		return `beads provider "sqlite-cgo" is deprecated; use provider = "sqlite" in city.toml`
-	case "coordstore":
-		return `beads provider "coordstore" is deprecated; use provider = "sqlite" in city.toml`
-	}
-	return ""
-}
-
 func openStoreAtForCity(storePath, cityPath string) (beads.Store, error) {
 	result, err := openStoreResultAtForCity(storePath, cityPath)
 	if err != nil {
@@ -1226,12 +1178,12 @@ func openStoreResultAtForCity(storePath, cityPath string) (beads.StoreOpenResult
 	cfg, _ := loadCityConfig(runtimeCityPath, io.Discard)
 	scopeRoot := resolveStoreScopeRoot(runtimeCityPath, storePath)
 	provider := rawBeadsProviderForScope(scopeRoot, runtimeCityPath)
-	if providerIsCoordStore(provider) {
-		if msg := coordStoreDeprecationWarning(provider); msg != "" {
-			fmt.Fprintln(os.Stderr, "WARNING: "+msg)
-		}
-		store, err := openCoordStoreAt(scopeRoot, runtimeCityPath)
-		return beads.StoreOpenResult{Store: wrapStoreWithBeadPolicies(store, cfg), Diagnostic: beads.BeadsDiagnostic{Store: "sqlite"}}, err
+	switch strings.TrimSpace(provider) {
+	case "sqlite", "sqlite-cgo", "coordstore":
+		return beads.StoreOpenResult{}, fmt.Errorf(
+			"beads provider %q is no longer supported: the sqlite coordination-store experiment has been removed; "+
+				"update provider in city.toml to a supported value such as %q, or remove the setting to use the default",
+			provider, "doltlite")
 	}
 	if strings.HasPrefix(provider, "exec:") && !providerUsesBdStoreContract(provider) {
 		store, err := openExecStoreAtForCity(provider, scopeRoot, runtimeCityPath)

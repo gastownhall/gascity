@@ -587,58 +587,26 @@ func TestPolicyReadPathsIncludeHistoryAndNoHistoryRows(t *testing.T) {
 	}
 }
 
-func TestOpenStoreResultAtForCityWrapsSQLiteWithBeadPolicies(t *testing.T) {
-	cityDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
-name = "sqlite-policy-city"
-prefix = "ga"
+func TestOpenStoreResultAtForCityRejectsRemovedSQLiteProvider(t *testing.T) {
+	for _, provider := range []string{"sqlite", "sqlite-cgo", "coordstore"} {
+		t.Run(provider, func(t *testing.T) {
+			cityDir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"removed-provider-city\"\nprefix = \"ga\"\n\n[beads]\nprovider = \""+provider+"\"\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
 
-[beads]
-provider = "sqlite"
-bd_compatibility = "bd-1.0.5"
-`), 0o644); err != nil {
-		t.Fatal(err)
+			_, err := openStoreResultAtForCity(cityDir, cityDir)
+			if err == nil {
+				t.Fatalf("openStoreResultAtForCity(%q) = nil error, want hard error for removed provider", provider)
+			}
+			if !strings.Contains(err.Error(), "no longer supported") {
+				t.Errorf("openStoreResultAtForCity(%q) error = %q, want message containing %q", provider, err.Error(), "no longer supported")
+			}
+			if !strings.Contains(err.Error(), "doltlite") {
+				t.Errorf("openStoreResultAtForCity(%q) error = %q, want migration hint mentioning %q", provider, err.Error(), "doltlite")
+			}
+		})
 	}
-
-	result, err := openStoreResultAtForCity(cityDir, cityDir)
-	if err != nil {
-		t.Fatalf("openStoreResultAtForCity: %v", err)
-	}
-	base, _, wrapped := unwrapBeadPolicyStore(result.Store)
-	if !wrapped {
-		t.Fatalf("openStoreResultAtForCity(sqlite) returned %T, want bead policy wrapper", result.Store)
-	}
-	defer func() {
-		if c, ok := base.(interface{ CloseStore() error }); ok {
-			c.CloseStore() //nolint:errcheck
-		}
-	}()
-
-	created, err := result.Store.Create(beads.Bead{
-		Title: "workflow root",
-		Type:  "task",
-		Metadata: map[string]string{
-			"gc.kind":             "workflow",
-			"gc.formula_contract": "graph.v2",
-		},
-	})
-	if err != nil {
-		t.Fatalf("Create(workflow): %v", err)
-	}
-	if !created.NoHistory {
-		t.Fatalf("created workflow = %+v, want policy-applied no_history storage", created)
-	}
-
-	ready, err := result.Store.Ready()
-	if err != nil {
-		t.Fatalf("Ready: %v", err)
-	}
-	for _, bead := range ready {
-		if bead.ID == created.ID {
-			return
-		}
-	}
-	t.Fatalf("Ready() = %+v, missing policy-created SQLite workflow %s", ready, created.ID)
 }
 
 func assertStorageClass(t *testing.T, got beads.StorageClass, want string) {
