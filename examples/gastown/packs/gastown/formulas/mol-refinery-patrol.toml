@@ -188,14 +188,14 @@ gc bd show $WORK --json | jq '.[0].metadata'
 The bead MUST have `metadata.branch`. If `metadata.target` is missing,
 use {{target_branch}} as default. Note the work bead ID and close this step.
 
-If NO work found: sleep before re-checking:
-```bash
-sleep {{event_timeout}}
+If NO work found:
+Write exactly:
 ```
-
-Re-check for assigned work. If found, close this step. Otherwise repeat the sleep.
-
-Note: previous implementation watched `gc events --type=bead.updated` for fast wake-up, but cache-reconcile fires that event constantly, turning the watch into a tight loop with no useful backoff. Fixed sleep gives predictable idle cost (~$0 vs ~$3.46/15min hot-loop measured 2026-04-29).
+IDLE: no work, exiting turn.
+```
+Then stop immediately. Do NOT sleep, call ScheduleWakeup, or use Monitor.
+The session_sleep policy will restart this session after the configured idle interval.
+When restarted, re-read formula steps — this step stays open until a work bead is found.
 
 **Do not close this step until you have a work bead with branch metadata.**"""
 
