@@ -119,15 +119,25 @@ var (
 		if err != nil {
 			return false
 		}
+		// Normalize wildcard binds to loopback before dialing, mirroring
+		// cmd_service.go: a 0.0.0.0/:: bind is not itself a dialable address
+		// (and 0.0.0.0 GETs fail on macOS).
+		bind := cfg.Supervisor.BindOrDefault()
+		switch bind {
+		case "", "0.0.0.0":
+			bind = "127.0.0.1"
+		case "::", "[::]":
+			bind = "::1"
+		}
 		url := fmt.Sprintf("http://%s/v0/cities",
-			net.JoinHostPort(cfg.Supervisor.BindOrDefault(), strconv.Itoa(cfg.Supervisor.PortOrDefault())))
+			net.JoinHostPort(bind, strconv.Itoa(cfg.Supervisor.PortOrDefault())))
 		client := &http.Client{Timeout: 750 * time.Millisecond}
 		resp, err := client.Get(url)
 		if err != nil {
 			return false
 		}
 		defer resp.Body.Close() //nolint:errcheck
-		return resp.StatusCode < 500
+		return resp.StatusCode >= 200 && resp.StatusCode < 300
 	}
 )
 
