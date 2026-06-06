@@ -409,12 +409,25 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 	}
 
 	stores := make(map[string]beads.Store)
+	// inFlight counts the dispatchOne goroutines launched by THIS tick that
+	// still hold handles from `stores`. The per-tick handles must not be closed
+	// until those goroutines finish using them: on a native store, CloseStore is
+	// a one-way latch (internal/beads/native_dolt_store.go) and the goroutine's
+	// post-tick tracking-bead writes would hit a closed handle (gascity#3157).
+	// drain() only waits at controller exit/reload, not at end of tick, so the
+	// close is handed to a detached closer scoped to this tick's launches. The
+	// closer never blocks the tick; when nothing was launched it closes
+	// immediately (Wait returns at once on a zero count).
+	var inFlight sync.WaitGroup
 	defer func() {
-		for _, st := range stores {
-			if err := closeBeadStoreHandle(st); err != nil {
-				logDispatchError(m.stderr, "gc: order dispatch: closing store: %v", err)
+		go func() {
+			inFlight.Wait()
+			for _, st := range stores {
+				if err := closeBeadStoreHandle(st); err != nil {
+					logDispatchError(m.stderr, "gc: order dispatch: closing store: %v", err)
+				}
 			}
-		}
+		}()
 	}()
 	trackingIndex := newOrderDispatchTrackingIndex()
 	budgetSpent := 0
@@ -595,7 +608,8 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 		// drain can wait for tracking-bead outcome persistence before
 		// controller exit or config reload.
 		m.addInflight()
-		m.launchDispatchOne(ctx, store, target, a, cityPath, trackingBead.ID)
+		inFlight.Add(1)
+		m.launchDispatchOne(ctx, store, target, a, cityPath, trackingBead.ID, inFlight.Done)
 		if spendDispatchBudget(idx) {
 			return
 		}
@@ -606,15 +620,28 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 // EITHER the caller's tick ctx OR m.dispatchCtx is done — required so
 // cancel() reaches goroutines whose tick ctx was context.Background().
 // Falls back to the bare caller ctx when m.dispatchCtx is nil (test
-// sites that don't initialize the cancel fields).
-func (m *memoryOrderDispatcher) launchDispatchOne(ctx context.Context, store beads.Store, target execStoreTarget, a orders.Order, cityPath, trackingID string) {
+// sites that don't initialize the cancel fields). onDone is invoked exactly
+// once after dispatchOne returns — i.e. after this goroutine's final store
+// call — so the caller can hold per-tick store handles open until the
+// goroutine releases them (gascity#3157). A nil onDone is treated as a no-op.
+func (m *memoryOrderDispatcher) launchDispatchOne(ctx context.Context, store beads.Store, target execStoreTarget, a orders.Order, cityPath, trackingID string, onDone func()) {
+	if onDone == nil {
+		onDone = func() {}
+	}
 	if m.dispatchCtx == nil {
-		go m.dispatchOne(ctx, store, target, a, cityPath, trackingID)
+		go func() {
+			defer onDone()
+			m.dispatchOne(ctx, store, target, a, cityPath, trackingID)
+		}()
 		return
 	}
 	mergedCtx, cancelMerged := context.WithCancel(ctx)
 	stopAfter := context.AfterFunc(m.dispatchCtx, cancelMerged)
 	go func() {
+		// onDone runs last (registered first → LIFO), after dispatchOne has
+		// returned, so the per-tick store-close barrier only fires once this
+		// goroutine has made its final store call (gascity#3157).
+		defer onDone()
 		defer stopAfter()
 		defer cancelMerged()
 		m.dispatchOne(mergedCtx, store, target, a, cityPath, trackingID)
