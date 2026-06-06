@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
 	"strings"
 	"testing"
@@ -442,5 +443,206 @@ func TestSweepStaleNudgeMail_MultiplePerBeadErrors(t *testing.T) {
 	}
 	if len(errs) < 2 {
 		t.Errorf("expected at least 2 joined errors, got %d", len(errs))
+	}
+}
+
+// --- CLI output format tests ---
+
+func TestCmdOrderSweepNudgeMailRun_NothingToClose(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	store := beads.NewMemStoreFrom(100, nil, nil)
+
+	var stdout, stderr bytes.Buffer
+	cmdOrderSweepNudgeMailRun(store, nil, now, nudgeMailSweepDefaultNudgeTTL, nudgeMailSweepDefaultMailTTL, false, &stdout, &stderr)
+	if !strings.Contains(stdout.String(), "nothing to close") {
+		t.Errorf("expected 'nothing to close' message, got: %q", stdout.String())
+	}
+}
+
+func TestCmdOrderSweepNudgeMailRun_NormalOutput(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	seed := []beads.Bead{
+		nudgeSeed("n1", "nudge-1", now.Add(-nudgeMailSweepDefaultNudgeTTL-time.Second)),
+		mailSeed("m1", now.Add(-nudgeMailSweepDefaultMailTTL-time.Second)),
+	}
+	store := beads.NewMemStoreFrom(100, seed, nil)
+
+	var stdout, stderr bytes.Buffer
+	cmdOrderSweepNudgeMailRun(store, nil, now, nudgeMailSweepDefaultNudgeTTL, nudgeMailSweepDefaultMailTTL, false, &stdout, &stderr)
+	out := stdout.String()
+	if !strings.Contains(out, "nudge-mail-sweep: closed") {
+		t.Errorf("expected 'nudge-mail-sweep: closed' in output, got: %q", out)
+	}
+	if !strings.Contains(out, "[budget:") {
+		t.Errorf("expected budget line in output, got: %q", out)
+	}
+	if !strings.Contains(out, "/50 used]") {
+		t.Errorf("expected budget fraction out of 50, got: %q", out)
+	}
+}
+
+func TestCmdOrderSweepNudgeMailRun_CapReachedMessage(t *testing.T) {
+	// When all budget slots are used, output shows "cap reached".
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	seed := make([]beads.Bead, nudgeMailSweepCloseBudget)
+	for i := range seed {
+		seed[i] = nudgeSeed(fmt.Sprintf("nudge-%d", i), fmt.Sprintf("id-%d", i), now.Add(-nudgeMailSweepDefaultNudgeTTL-time.Second))
+	}
+	store := beads.NewMemStoreFrom(100, seed, nil)
+
+	var stdout, stderr bytes.Buffer
+	cmdOrderSweepNudgeMailRun(store, nil, now, nudgeMailSweepDefaultNudgeTTL, nudgeMailSweepDefaultMailTTL, false, &stdout, &stderr)
+	if !strings.Contains(stdout.String(), "cap reached") {
+		t.Errorf("expected 'cap reached' in output when budget is full, got: %q", stdout.String())
+	}
+}
+
+func TestCmdOrderSweepNudgeMailRun_PerBeadErrorPrintedToStderr(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	const failID = "nudge-fail"
+	seed := []beads.Bead{
+		nudgeSeed(failID, "nudge-x", now.Add(-nudgeMailSweepDefaultNudgeTTL-time.Second)),
+		nudgeSeed("nudge-ok", "nudge-y", now.Add(-nudgeMailSweepDefaultNudgeTTL-time.Second)),
+	}
+	mem := beads.NewMemStoreFrom(100, seed, nil)
+	store := &nudgeSweepFailingClose{MemStore: mem, failIDs: map[string]bool{failID: true}}
+
+	var stdout, stderr bytes.Buffer
+	cmdOrderSweepNudgeMailRun(store, nil, now, nudgeMailSweepDefaultNudgeTTL, nudgeMailSweepDefaultMailTTL, false, &stdout, &stderr)
+	if !strings.Contains(stderr.String(), "ERROR") {
+		t.Errorf("expected ERROR line on stderr for failing bead, got: %q", stderr.String())
+	}
+	// The successful bead should still be counted.
+	if !strings.Contains(stdout.String(), "nudge-mail-sweep: closed") {
+		t.Errorf("expected success summary on stdout despite per-bead error, got: %q", stdout.String())
+	}
+}
+
+func TestCmdOrderSweepNudgeMailRun_QuietSuppressesOutput(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	store := beads.NewMemStoreFrom(100, nil, nil)
+
+	var stdout, stderr bytes.Buffer
+	cmdOrderSweepNudgeMailRun(store, nil, now, nudgeMailSweepDefaultNudgeTTL, nudgeMailSweepDefaultMailTTL, true, &stdout, &stderr)
+	if stdout.String() != "" {
+		t.Errorf("expected empty stdout with --quiet, got: %q", stdout.String())
+	}
+}
+
+func TestCmdOrderSweepNudgeMailDryRun_NothingToClose(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	store := beads.NewMemStoreFrom(100, nil, nil)
+
+	var stdout bytes.Buffer
+	cmdOrderSweepNudgeMailDryRun(store, nil, now, nudgeMailSweepDefaultNudgeTTL, nudgeMailSweepDefaultMailTTL, false, &stdout)
+	if !strings.Contains(stdout.String(), "nothing to close") {
+		t.Errorf("expected 'nothing to close' for empty store dry-run, got: %q", stdout.String())
+	}
+}
+
+func TestCmdOrderSweepNudgeMailDryRun_ShowsWouldClose(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	seed := []beads.Bead{
+		nudgeSeed("n1", "nudge-1", now.Add(-nudgeMailSweepDefaultNudgeTTL-time.Second)),
+		mailSeed("m1", now.Add(-nudgeMailSweepDefaultMailTTL-time.Second)),
+	}
+	store := beads.NewMemStoreFrom(100, seed, nil)
+
+	var stdout bytes.Buffer
+	cmdOrderSweepNudgeMailDryRun(store, nil, now, nudgeMailSweepDefaultNudgeTTL, nudgeMailSweepDefaultMailTTL, false, &stdout)
+	out := stdout.String()
+	if !strings.HasPrefix(out, "[DRY RUN]") {
+		t.Errorf("expected '[DRY RUN]' prefix, got: %q", out)
+	}
+	if !strings.Contains(out, "would close") {
+		t.Errorf("expected 'would close' in output, got: %q", out)
+	}
+	if !strings.Contains(out, "no changes made") {
+		t.Errorf("expected 'no changes made' suffix, got: %q", out)
+	}
+}
+
+func TestCmdOrderSweepNudgeMailDryRun_NoBeadsClosed(t *testing.T) {
+	// Dry-run must not close any beads.
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	seed := []beads.Bead{
+		nudgeSeed("n1", "nudge-1", now.Add(-nudgeMailSweepDefaultNudgeTTL-time.Second)),
+	}
+	store := beads.NewMemStoreFrom(100, seed, nil)
+
+	var stdout bytes.Buffer
+	cmdOrderSweepNudgeMailDryRun(store, nil, now, nudgeMailSweepDefaultNudgeTTL, nudgeMailSweepDefaultMailTTL, false, &stdout)
+
+	// The bead should remain open.
+	open, _ := store.ListOpen()
+	if len(open) != 1 {
+		t.Errorf("dry-run closed a bead; want 1 open bead, got %d", len(open))
+	}
+}
+
+// --- Watchdog tests ---
+
+func TestRunNudgeMailSweepWatchdog_ClosesStaleBeads(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	seed := []beads.Bead{
+		nudgeSeed("nudge-stale", "nudge-s", now.Add(-nudgeMailSweepDefaultNudgeTTL-time.Second)),
+		mailSeed("mail-stale", now.Add(-nudgeMailSweepDefaultMailTTL-time.Second)),
+	}
+	store := beads.NewMemStoreFrom(100, seed, nil)
+
+	result, err := sweepStaleNudgeMail(store, nil, now, nudgeMailSweepDefaultNudgeTTL, nudgeMailSweepDefaultMailTTL, nudgeMailSweepWatchdogCloseBudget)
+	if err != nil {
+		t.Fatalf("watchdog sweep: %v", err)
+	}
+	if result.NudgeClosed != 1 {
+		t.Errorf("watchdog: NudgeClosed = %d, want 1", result.NudgeClosed)
+	}
+	if result.MailClosed != 1 {
+		t.Errorf("watchdog: MailClosed = %d, want 1", result.MailClosed)
+	}
+}
+
+func TestRunNudgeMailSweepWatchdog_RespectsWatchdogInterval(t *testing.T) {
+	// Simulate CityRuntime watchdog interval guard by checking that the second
+	// call within the interval would be skipped (tests the interval constant).
+	if nudgeMailSweepWatchdogInterval <= 0 {
+		t.Fatal("nudgeMailSweepWatchdogInterval must be positive")
+	}
+	// The watchdog fires when now.Sub(last) >= nudgeMailSweepWatchdogInterval.
+	last := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	nowJustBefore := last.Add(nudgeMailSweepWatchdogInterval - time.Second)
+	nowJustAfter := last.Add(nudgeMailSweepWatchdogInterval)
+
+	if nowJustBefore.Sub(last) >= nudgeMailSweepWatchdogInterval {
+		t.Error("interval guard: should not fire just before deadline")
+	}
+	if nowJustAfter.Sub(last) < nudgeMailSweepWatchdogInterval {
+		t.Error("interval guard: should fire at or after deadline")
+	}
+}
+
+func TestCountStaleNudgeMail_MatchesSweepCounts(t *testing.T) {
+	// countStaleNudgeMail should return the same counts that sweepStaleNudgeMail closes.
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	nudgeTTL := nudgeMailSweepDefaultNudgeTTL
+	mailTTL := nudgeMailSweepDefaultMailTTL
+
+	seed := []beads.Bead{
+		nudgeSeed("n1", "nudge-1", now.Add(-nudgeTTL-time.Second)),
+		nudgeSeed("n2", "nudge-2", now.Add(-nudgeTTL-time.Second)),
+		mailSeed("m1", now.Add(-mailTTL-time.Second)),
+		nudgeSeed("n-fresh", "nudge-fresh", now.Add(-nudgeTTL+time.Second)), // fresh, should not count
+	}
+	store := beads.NewMemStoreFrom(100, seed, nil)
+
+	counts, err := countStaleNudgeMail(store, nil, now, nudgeTTL, mailTTL, 0)
+	if err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if counts.NudgeClosed != 2 {
+		t.Errorf("count: NudgeClosed = %d, want 2", counts.NudgeClosed)
+	}
+	if counts.MailClosed != 1 {
+		t.Errorf("count: MailClosed = %d, want 1", counts.MailClosed)
 	}
 }

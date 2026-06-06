@@ -11,6 +11,12 @@ import (
 )
 
 const (
+	nudgeMailSweepDefaultNudgeTTL     = 10 * time.Minute
+	nudgeMailSweepDefaultMailTTL      = 60 * time.Minute
+	nudgeMailSweepCloseBudget         = 50
+	nudgeMailSweepWatchdogInterval    = 5 * time.Minute
+	nudgeMailSweepWatchdogCloseBudget = 50
+
 	// nudgeMailSweepNudgeCloseReason is the close_reason stamped on stale nudge
 	// beads before close. The 20-character floor satisfies validation.on-close=error.
 	nudgeMailSweepNudgeCloseReason = "nudge gc-swept: stale nudge bead past gc retention window"
@@ -125,6 +131,73 @@ func sweepStaleNudgeMail(store beads.Store, nudgeState *nudgequeue.State, now ti
 	}
 
 	return result, errors.Join(beadErrs...)
+}
+
+// countStaleNudgeMail returns what sweepStaleNudgeMail would close without
+// making any changes. Used by --dry-run to report candidatecount without side
+// effects. The limit parameter caps the count the same way sweepStaleNudgeMail
+// caps closes; pass 0 for no cap.
+func countStaleNudgeMail(store beads.Store, nudgeState *nudgequeue.State, now time.Time, nudgeTTL, mailTTL time.Duration, limit int) (nudgeMailSweepResult, error) {
+	var result nudgeMailSweepResult
+
+	liveIDs := liveNudgeIDSet(nudgeState)
+
+	nudgeCutoff := now.Add(-nudgeTTL)
+	nudgeQueryLimit := limit
+	if nudgeQueryLimit < 0 {
+		nudgeQueryLimit = 0
+	}
+	nudgeCandidates, err := store.List(beads.ListQuery{
+		Label:         nudgeBeadLabel,
+		CreatedBefore: nudgeCutoff,
+		Limit:         nudgeQueryLimit,
+		Sort:          beads.SortCreatedAsc,
+	})
+	if err != nil {
+		return result, fmt.Errorf("nudge-mail-sweep (dry-run): listing stale nudge beads: %w", err)
+	}
+	for _, b := range nudgeCandidates {
+		if limit > 0 && result.NudgeClosed+result.MailClosed >= limit {
+			break
+		}
+		if b.Status != "open" {
+			continue
+		}
+		nudgeID := strings.TrimSpace(b.Metadata["nudge_id"])
+		if nudgeID != "" && liveIDs[nudgeID] {
+			continue
+		}
+		result.NudgeClosed++
+	}
+
+	mailCutoff := now.Add(-mailTTL)
+	remaining := limit - result.NudgeClosed - result.MailClosed
+	if limit == 0 || remaining > 0 {
+		mailQueryLimit := remaining
+		if limit == 0 {
+			mailQueryLimit = 0
+		}
+		mailCandidates, err := store.List(beads.ListQuery{
+			Type:          "message",
+			Label:         "read",
+			CreatedBefore: mailCutoff,
+			Limit:         mailQueryLimit,
+			Sort:          beads.SortCreatedAsc,
+		})
+		if err != nil {
+			return result, fmt.Errorf("nudge-mail-sweep (dry-run): listing read mail beads: %w", err)
+		}
+		for _, b := range mailCandidates {
+			if limit > 0 && result.NudgeClosed+result.MailClosed >= limit {
+				break
+			}
+			if b.Status != "open" {
+				continue
+			}
+			result.MailClosed++
+		}
+	}
+	return result, nil
 }
 
 // liveNudgeIDSet returns the set of nudge IDs currently in pending or in-flight state.
