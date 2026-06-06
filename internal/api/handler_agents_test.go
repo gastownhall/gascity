@@ -693,6 +693,26 @@ func TestFindAgentPoolMaxZero(t *testing.T) {
 	}
 }
 
+func TestFindAgent_QualifiedGenericRigScopedTemplate(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "reviewer", Scope: "rig"},
+		},
+		Rigs: []config.Rig{
+			{Name: "alpha"},
+			{Name: "beta"},
+		},
+	}
+
+	a, ok := findAgent(cfg, "alpha/reviewer")
+	if !ok {
+		t.Fatal("findAgent(alpha/reviewer) = false, want true")
+	}
+	if got := a.QualifiedName(); got != "alpha/reviewer" {
+		t.Fatalf("QualifiedName() = %q, want alpha/reviewer", got)
+	}
+}
+
 func TestAgentOutputNotRunning(t *testing.T) {
 	state := newFakeState(t)
 	srv := New(state)

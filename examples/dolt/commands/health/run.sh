@@ -115,8 +115,13 @@ fi
 
 # Cache metadata file paths once (avoids repeated gc calls and word-splitting).
 _meta_cache=$(mktemp)
+# Scratch file for the zombie scan's matched-server filter. The foreign-managed
+# decision runs in a `... | while read` subshell (so $zombie_count can't be
+# mutated through the pipe); the survivors are spooled here and read back in
+# the parent shell.
+_zombie_scan_out=$(mktemp)
 metadata_files > "$_meta_cache"
-trap 'rm -f "$_meta_cache"' EXIT
+trap 'rm -f "$_meta_cache" "$_zombie_scan_out"' EXIT
 
 # Collect database info.
 #
@@ -238,6 +243,16 @@ fi
 # Rig-local Dolt servers (configured via dolt.port in config.yaml)
 # are legitimate — exclude any PID listening on a known rig port.
 #
+# Foreign Dolt servers (managed by OTHER cities on the same host) are
+# also legitimate. We recognize them by parsing `--config <path>` from
+# the process command line and checking the sibling dolt.pid for a
+# self-reference. Without this, every patrol in every city flags the
+# others as zombies on shared dev hosts. The `--config` parse happens
+# inside the single bounded `ps -eo` + awk pass below (it already has
+# the full args line in hand); only the sibling dolt.pid read is left
+# to the shell loop, which iterates O(matched sql-servers) — never
+# O(all pids/zombies) — so the bounded-fork invariant still holds.
+#
 # GC_HEALTH_SKIP_ZOMBIE_SCAN is a test-only escape hatch. Zombie
 # enumeration spawns one `ps` per matching process, which on shared
 # dev machines with many accumulated dolt processes dominates the
@@ -260,17 +275,70 @@ if [ "${GC_HEALTH_SKIP_ZOMBIE_SCAN:-0}" != "1" ]; then
     [ -n "$rig_pid" ] && rig_dolt_pids="$rig_dolt_pids $rig_pid "
   done < "$_meta_cache"
 
-  for p in $(pgrep -x dolt 2>/dev/null || true); do
-    [ "$p" = "$server_pid" ] && continue
-    case "$rig_dolt_pids" in *" $p "*) continue ;; esac
-    cmd=$(ps -p "$p" -o args= 2>/dev/null || true)
-    case "$cmd" in
-      *sql-server*) ;;
-      *) continue ;;
-    esac
+  # Enumerate the process table ONCE, not one `ps -p <pid> -o args=` fork per
+  # `pgrep -x dolt` match. pgrep matches every dolt-named process including
+  # Z-state zombies, so under a non-reaping PID 1 the old per-PID fork became
+  # an O(zombies) `ps` storm re-paid on every 30s health tick (#2482). Collect
+  # the candidate PIDs from pgrep, then classify them in a single `ps`+`awk`
+  # pass: keep candidates that are dolt sql-server processes, skip Z-state
+  # zombies (a defunct dolt never carries sql-server args anyway), and exclude
+  # the managed city server and rig-local dolts. For each survivor the awk
+  # pass also extracts the dolt `--config <path>` (or `--config=<path>`) from
+  # the args line it already holds, and emits `pid<TAB>config_path` so the
+  # shell loop below can do the foreign-managed check without re-forking ps.
+  candidate_pids=" $(pgrep -x dolt 2>/dev/null | tr '\n' ' ' || true)"
+  ps -eo pid=,stat=,args= 2>/dev/null | awk \
+    -v server="$server_pid" -v rigs="$rig_dolt_pids" -v cands="$candidate_pids" '
+    BEGIN {
+      # Build an O(1) lookup set from the pgrep candidates once. The
+      # per-row membership test below was an index() substring scan
+      # re-paid for every process-table row, i.e. O(rows x candidate
+      # string length); the reported incident had ~41k candidate PIDs
+      # (#2618). Splitting into an associative set makes each lookup O(1).
+      n = split(cands, a, " ")
+      for (i = 1; i <= n; i++) if (a[i] != "") cand[a[i]] = 1
+    }
+    {
+      pid = $1
+      if (!(pid in cand)) next                   # not a pgrep -x dolt match
+      if (pid == server) next                     # the managed city server
+      if (index(rigs, " " pid " ") != 0) next     # a configured rig-local dolt
+      if ($2 ~ /Z/) next                          # Z-state zombie: never a server
+      if (index($0, "sql-server") == 0) next      # not a dolt sql-server
+      # Extract the dolt --config path from the args fields (args start at
+      # $3 after pid/stat). Accept both the space-separated `--config PATH`
+      # and the `--config=PATH` spellings. Emitted alongside the pid so the
+      # shell can read the sibling dolt.pid; empty when no --config is given.
+      config = ""
+      for (i = 3; i <= NF; i++) {
+        if ($i == "--config" && (i + 1) <= NF) { config = $(i+1); break }
+        if (index($i, "--config=") == 1) { config = substr($i, 10); break }
+      }
+      print pid "\t" config
+    }' > "$_zombie_scan_out" 2>/dev/null || true
+
+  # Iterate ONLY the matched sql-servers (O(matched servers)) the awk pass
+  # emitted — not the full candidate/zombie set. This loop is where the
+  # foreign-managed decision lives; keeping it bounded by the awk output is
+  # what preserves the bounded-fork invariant. Reading from the scratch file
+  # (not a pipe) keeps the loop in the parent shell so the zombie_count /
+  # zombie_pids accumulation survives.
+  _tab="$(printf '\t')"
+  while IFS="$_tab" read -r p config_path; do
+    [ -n "$p" ] || continue
+    # Foreign-managed check: if --config points at a yaml whose sibling
+    # dolt.pid claims this PID, the process is owned by another managed
+    # Dolt instance (another city on this host) — not a zombie.
+    if [ -n "$config_path" ] && [ -f "$config_path" ]; then
+      foreign_pid_file="$(dirname "$config_path")/dolt.pid"
+      if [ -f "$foreign_pid_file" ]; then
+        recorded_pid=$(head -1 "$foreign_pid_file" 2>/dev/null | tr -d ' \t\r\n')
+        [ "$recorded_pid" = "$p" ] && continue
+      fi
+    fi
     zombie_count=$((zombie_count + 1))
     zombie_pids="$zombie_pids $p"
-  done
+  done < "$_zombie_scan_out"
 fi
 
 # Output.

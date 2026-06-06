@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/BurntSushi/toml"
+	"github.com/gastownhall/gascity/internal/agentutil"
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/configedit"
@@ -119,6 +120,9 @@ func emitLoadCityConfigWarnings(w io.Writer, prov *config.Provenance) {
 // default tables are ambiguous even after normalization.
 func isNonFatalLoadConfigWarning(warning string) bool {
 	if config.IsLegacyV1SurfaceWarning(warning) {
+		return true
+	}
+	if config.IsDisabledNamedSessionWarning(warning) {
 		return true
 	}
 	if config.IsLegacyWorkspaceFieldWarning(warning) {
@@ -352,6 +356,9 @@ func findAgentByQualified(cfg *config.City, identity string) (config.Agent, bool
 			return a, true
 		}
 	}
+	if a, ok := agentutil.ResolveQualifiedRigScopedTemplate(cfg, identity); ok {
+		return a, true
+	}
 	return config.Agent{}, false
 }
 
@@ -500,7 +507,7 @@ func agentListItems(cfg *config.City) []AgentListItem {
 			Provider:             a.Provider,
 			Session:              a.Session,
 			Suspended:            a.Suspended,
-			WorkQuery:            a.EffectiveWorkQuery(),
+			WorkQuery:            a.EffectiveWorkQueryForBeads(cfg.Beads),
 			SlingQuery:           a.EffectiveSlingQuery(),
 			ConfiguredWorkQuery:  a.WorkQuery,
 			ConfiguredSlingQuery: a.SlingQuery,

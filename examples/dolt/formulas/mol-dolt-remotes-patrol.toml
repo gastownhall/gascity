@@ -7,7 +7,6 @@ trigger (default: 15m, matching gastown). Configured in
 
 Stages, commits, and pushes each dolt database to its configured remote."""
 formula = "mol-dolt-remotes-patrol"
-version = 1
 
 [[steps]]
 id = "sync"

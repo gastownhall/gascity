@@ -21,6 +21,24 @@ func writeFile(t *testing.T, dir, name, content string) {
 	}
 }
 
+type readCountingFS struct {
+	fsys.OSFS
+	reads map[string]int
+}
+
+func newReadCountingFS() *readCountingFS {
+	return &readCountingFS{reads: make(map[string]int)}
+}
+
+func (f *readCountingFS) ReadFile(name string) ([]byte, error) {
+	f.reads[filepath.Clean(name)]++
+	return f.OSFS.ReadFile(name)
+}
+
+func (f *readCountingFS) ReadCount(name string) int {
+	return f.reads[filepath.Clean(name)]
+}
+
 func TestExpandPacks_Basic(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, dir, "packs/gastown/pack.toml", `
@@ -61,6 +79,34 @@ name = "refinery"
 	// witness should have adjusted prompt_template path.
 	if !strings.Contains(cfg.Agents[0].PromptTemplate, "prompts/witness.md") {
 		t.Errorf("witness prompt_template = %q, want to contain prompts/witness.md", cfg.Agents[0].PromptTemplate)
+	}
+}
+
+func TestExpandPacksAllowsSemanticallyInvalidFlatOrder(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "packs/tools/pack.toml", `
+[pack]
+name = "tools"
+version = "1.0.0"
+schema = 1
+`)
+	writeFile(t, dir, "packs/tools/orders/deploy.toml", `
+[order]
+formula = "mol-deploy"
+trigger = "manual"
+
+[order.env]
+CUSTOM_ORDER_FLAG = "enabled"
+`)
+
+	cfg := &City{
+		Rigs: []Rig{
+			{Name: "demo", Path: "/work", Includes: []string{"packs/tools"}},
+		},
+	}
+
+	if err := ExpandPacks(cfg, fsys.OSFS{}, dir, nil); err != nil {
+		t.Fatalf("ExpandPacks: %v", err)
 	}
 }
 
@@ -900,6 +946,45 @@ func TestPackContentHashRecursive(t *testing.T) {
 	}
 }
 
+func TestPackContentHashRecursiveCachesUnchangedTree(t *testing.T) {
+	ResetPackContentHashCache()
+	t.Cleanup(ResetPackContentHashCache)
+
+	dir := t.TempDir()
+	writeFile(t, dir, "pack.toml", `name = "p"`)
+	writeFile(t, dir, "prompts/a.md", "prompt a")
+	writeFile(t, dir, "assets/big.txt", strings.Repeat("x", 4096))
+
+	cfs := newReadCountingFS()
+	bigPath := filepath.Join(dir, "assets/big.txt")
+
+	h1 := PackContentHashRecursive(cfs, dir)
+	if cfs.ReadCount(bigPath) == 0 {
+		t.Fatal("first hash should read file content")
+	}
+
+	// Second call on the unchanged tree: cache hit, zero additional content reads.
+	before := cfs.ReadCount(bigPath)
+	h2 := PackContentHashRecursive(cfs, dir)
+	if h2 != h1 {
+		t.Fatalf("cached hash mismatch: %q vs %q", h1, h2)
+	}
+	if after := cfs.ReadCount(bigPath); after != before {
+		t.Fatalf("cache hit re-read content (%d→%d), want no new reads (stat fingerprint should gate)", before, after)
+	}
+
+	// Mutating a file bumps its mtime/size → fingerprint changes → re-read + new hash.
+	writeFile(t, dir, "prompts/a.md", "prompt a (edited, longer)")
+	beforeChange := cfs.ReadCount(bigPath)
+	h3 := PackContentHashRecursive(cfs, dir)
+	if h3 == h1 {
+		t.Fatal("hash should change after content change")
+	}
+	if cfs.ReadCount(bigPath) == beforeChange {
+		t.Fatal("changed tree should be re-read, not served from cache")
+	}
+}
+
 func TestPackContentHashRecursiveIgnoresRuntimeDirs(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, dir, "pack.toml", "test")
@@ -914,6 +999,13 @@ func TestPackContentHashRecursiveIgnoresRuntimeDirs(t *testing.T) {
 	writeFile(t, dir, ".cache/tool/result.json", `{"cached":true}`)
 	writeFile(t, dir, ".git/HEAD", "ref: refs/heads/main")
 	writeFile(t, dir, "nested/__pycache__/helper.pyc", "compiled")
+	// gastownhall/gascity#2954: node_modules at any depth must be skipped.
+	// Packs anchored at monorepo roots previously dragged tens of thousands
+	// of node_modules files through the supervisor on every dirty reload.
+	writeFile(t, dir, "node_modules/.package-lock.json", `{"name":"x"}`)
+	writeFile(t, dir, "node_modules/lodash/index.js", "module.exports = {}")
+	writeFile(t, dir, "packages/foo/node_modules/lodash/index.js", "module.exports = {}")
+	writeFile(t, dir, "apps/bar/node_modules/.bun/install-cache.bin", "binary")
 	h2 := PackContentHashRecursive(fsys.OSFS{}, dir)
 	if h2 != h1 {
 		t.Fatalf("hash changed after runtime output writes: %q vs %q", h1, h2)
@@ -988,6 +1080,115 @@ includes = ["packs/gt"]
 	} else if !strings.Contains(src, "pack.toml") {
 		t.Errorf("witness provenance = %q, want to contain pack.toml", src)
 	}
+}
+
+func TestLoadWithIncludes_PackAgentDefaultsProviderAppliesToIncludedAgent(t *testing.T) {
+	dir := t.TempDir()
+
+	writeFile(t, dir, "packs/gt/pack.toml", `
+[pack]
+name = "gastown"
+version = "1.0.0"
+schema = 1
+
+[providers.claude]
+base = "builtin:claude"
+
+[providers.codex]
+base = "builtin:codex"
+
+[agent_defaults]
+provider = "codex"
+
+[[agent]]
+name = "worker"
+
+[[agent]]
+name = "reviewer"
+provider = "claude"
+`)
+
+	writeFile(t, dir, "city.toml", `
+[workspace]
+name = "test-city"
+provider = "gemini"
+includes = ["packs/gt"]
+
+[providers.gemini]
+base = "builtin:gemini"
+`)
+
+	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(dir, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+
+	var worker, reviewer *Agent
+	for i := range cfg.Agents {
+		switch cfg.Agents[i].QualifiedName() {
+		case "worker":
+			worker = &cfg.Agents[i]
+		case "reviewer":
+			reviewer = &cfg.Agents[i]
+		}
+	}
+	if worker == nil || reviewer == nil {
+		t.Fatalf("expected worker and reviewer, got worker=%v reviewer=%v", worker != nil, reviewer != nil)
+	}
+	if got := worker.Provider; got != "codex" {
+		t.Fatalf("worker Provider = %q, want pack default codex", got)
+	}
+	if got := reviewer.Provider; got != "claude" {
+		t.Fatalf("reviewer Provider = %q, want explicit claude", got)
+	}
+}
+
+func TestLoadWithIncludes_CityAgentDefaultsProviderOverridesIncludedPackDefault(t *testing.T) {
+	dir := t.TempDir()
+
+	writeFile(t, dir, "packs/gt/pack.toml", `
+[pack]
+name = "gastown"
+version = "1.0.0"
+schema = 1
+
+[providers.codex]
+base = "builtin:codex"
+
+[agent_defaults]
+provider = "codex"
+
+[[agent]]
+name = "worker"
+`)
+
+	writeFile(t, dir, "city.toml", `
+[workspace]
+name = "test-city"
+includes = ["packs/gt"]
+
+[agent_defaults]
+provider = "gemini"
+
+[providers.gemini]
+base = "builtin:gemini"
+`)
+
+	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(dir, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+
+	for _, a := range cfg.Agents {
+		if a.QualifiedName() != "worker" {
+			continue
+		}
+		if got := a.Provider; got != "gemini" {
+			t.Fatalf("worker Provider = %q, want city default gemini", got)
+		}
+		return
+	}
+	t.Fatal("worker agent not found")
 }
 
 func TestExpandPacks_OverrideEnv(t *testing.T) {
@@ -1147,8 +1348,14 @@ func TestHasPackRigs(t *testing.T) {
 	if HasPackRigs(nil) {
 		t.Error("nil rigs should return false")
 	}
-	if HasPackRigs([]Rig{{Name: "a", Path: "/a"}}) {
-		t.Error("rig without pack should return false")
+	if HasPackRigs([]Rig{{Name: "a"}}) {
+		t.Error("rig with no path and no includes should return false")
+	}
+	// A rig with only a path is treated as potentially having a pack (expandPacks
+	// will discover the root pack.toml if present). This enables the packV2
+	// convention where a rig root carries agents/ directories directly.
+	if !HasPackRigs([]Rig{{Name: "a", Path: "/a"}}) {
+		t.Error("rig with path should return true (may have root pack.toml)")
 	}
 	if !HasPackRigs([]Rig{{Name: "a", Path: "/a", Includes: []string{"topo"}}}) {
 		t.Error("rig with includes should return true")
@@ -2013,22 +2220,35 @@ scope = "rig"
 		t.Fatalf("ExpandPacks: %v", err)
 	}
 
-	// Should only have rig agents (witness, polecat), not city agents.
-	if len(cfg.Agents) != 2 {
-		t.Fatalf("got %d agents, want 2", len(cfg.Agents))
-	}
-	names := make(map[string]bool)
+	// Rig agents (witness, polecat) are stamped with the rig dir; city-scoped
+	// agents (mayor, deacon) are hoisted to city scope (dir cleared) rather
+	// than dropped.
+	byName := make(map[string]Agent)
 	for _, a := range cfg.Agents {
-		names[a.Name] = true
+		byName[a.Name] = a
+	}
+	if len(cfg.Agents) != 4 {
+		t.Fatalf("got %d agents, want 4 (2 rig + 2 hoisted city): %v", len(cfg.Agents), agentNamesOf(cfg.Agents))
+	}
+	for _, n := range []string{"witness", "polecat"} {
+		a, ok := byName[n]
+		if !ok {
+			t.Errorf("missing rig agent %q", n)
+			continue
+		}
 		if a.Dir != "hw" {
-			t.Errorf("rig agent %q: dir = %q, want %q", a.Name, a.Dir, "hw")
+			t.Errorf("rig agent %q: dir = %q, want %q", n, a.Dir, "hw")
 		}
 	}
-	if !names["witness"] || !names["polecat"] {
-		t.Errorf("agents = %v, want witness and polecat", names)
-	}
-	if names["mayor"] || names["deacon"] {
-		t.Error("city agents should be filtered out of rig pack expansion")
+	for _, n := range []string{"mayor", "deacon"} {
+		a, ok := byName[n]
+		if !ok {
+			t.Errorf("city-scoped agent %q was dropped, want hoisted to city scope", n)
+			continue
+		}
+		if a.Dir != "" {
+			t.Errorf("hoisted city agent %q: dir = %q, want empty (city scope)", n, a.Dir)
+		}
 	}
 }
 
@@ -2398,11 +2618,20 @@ scope = "rig"
 		t.Fatalf("ExpandPacks: %v", err)
 	}
 
-	if len(cfg.NamedSessions) != 1 {
-		t.Fatalf("NamedSessions = %d, want 1", len(cfg.NamedSessions))
+	// The rig-scoped witness session stays rig-qualified; the city-scoped
+	// mayor session is hoisted to city scope rather than dropped.
+	got := make(map[string]bool)
+	for i := range cfg.NamedSessions {
+		got[cfg.NamedSessions[i].QualifiedName()] = true
 	}
-	if got := cfg.NamedSessions[0].QualifiedName(); got != "frontend/witness" {
-		t.Fatalf("NamedSessions[0] = %q, want frontend/witness", got)
+	if len(cfg.NamedSessions) != 2 {
+		t.Fatalf("NamedSessions = %d, want 2 (rig witness + hoisted city mayor): %v", len(cfg.NamedSessions), got)
+	}
+	if !got["frontend/witness"] {
+		t.Errorf("expected rig-scoped named session frontend/witness, got %v", got)
+	}
+	if !got["mayor"] {
+		t.Errorf("expected city-scoped named session mayor to be hoisted, got %v", got)
 	}
 }
 
@@ -2778,13 +3007,583 @@ scope = "rig"
 		t.Fatalf("ExpandPacks: %v", err)
 	}
 
-	// Only scope="rig" agents should be kept (scope="city" excluded).
-	if len(cfg.Agents) != 1 {
-		t.Fatalf("got %d agents, want 1", len(cfg.Agents))
+	// The rig-scoped polecat is stamped with the rig dir; the city-scoped
+	// mayor is hoisted to city scope (dir cleared) rather than dropped.
+	byName := make(map[string]Agent)
+	for _, a := range cfg.Agents {
+		byName[a.Name] = a
 	}
-	if cfg.Agents[0].Name != "polecat" {
-		t.Errorf("agent name = %q, want polecat", cfg.Agents[0].Name)
+	if len(cfg.Agents) != 2 {
+		t.Fatalf("got %d agents, want 2 (rig polecat + hoisted city mayor)", len(cfg.Agents))
 	}
+	polecat, ok := byName["polecat"]
+	if !ok {
+		t.Fatal("expected rig-scoped polecat agent")
+	}
+	if polecat.Dir != "myrig" {
+		t.Errorf("polecat dir = %q, want myrig", polecat.Dir)
+	}
+	mayor, ok := byName["mayor"]
+	if !ok {
+		t.Fatal("expected city-scoped mayor to be hoisted from rig include")
+	}
+	if mayor.Dir != "" {
+		t.Errorf("hoisted mayor dir = %q, want \"\" (city scope)", mayor.Dir)
+	}
+}
+
+// TestExpandPacks_HoistCityScopedFromSingleRig verifies a city-scoped agent
+// (and named session) that lives in a pack reached only through a single
+// rig include is hoisted to city scope and registers, rather than being
+// silently dropped. This is the root-cause fix for ga-hy0co: a city-scoped
+// routing coordinator (e.g. "deacon") that ships in a rig-included pack must
+// still register, or autonomous routing never starts.
+func TestExpandPacks_HoistCityScopedFromSingleRig(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "packs/supervisor/pack.toml", `
+[pack]
+name = "supervisor"
+schema = 1
+
+[[agent]]
+name = "deacon"
+scope = "city"
+
+[[named_session]]
+template = "deacon"
+scope = "city"
+
+[[agent]]
+name = "polecat"
+scope = "rig"
+`)
+
+	cfg := &City{
+		Rigs: []Rig{
+			{Name: "gascity", Path: "/tmp/gascity", Includes: []string{"packs/supervisor"}},
+		},
+	}
+
+	if err := ExpandPacks(cfg, fsys.OSFS{}, dir, nil); err != nil {
+		t.Fatalf("ExpandPacks: %v", err)
+	}
+
+	var deacon *Agent
+	for i := range cfg.Agents {
+		if cfg.Agents[i].Name == "deacon" {
+			deacon = &cfg.Agents[i]
+		}
+	}
+	if deacon == nil {
+		t.Fatalf("city-scoped deacon was dropped, not hoisted; agents: %v", agentNamesOf(cfg.Agents))
+	}
+	if deacon.Dir != "" {
+		t.Errorf("hoisted deacon dir = %q, want \"\" (city scope)", deacon.Dir)
+	}
+	if deacon.Scope != "city" {
+		t.Errorf("hoisted deacon scope = %q, want city", deacon.Scope)
+	}
+
+	// The city-scoped named session is hoisted too.
+	var sawDeaconSession bool
+	for i := range cfg.NamedSessions {
+		if cfg.NamedSessions[i].QualifiedName() == "deacon" {
+			sawDeaconSession = true
+		}
+	}
+	if !sawDeaconSession {
+		t.Errorf("city-scoped deacon named session was dropped, not hoisted; sessions: %v", cfg.NamedSessions)
+	}
+}
+
+// TestExpandPacks_HoistCityScopedDedupAcrossRigs verifies the same pack
+// included by MULTIPLE rigs registers its city-scoped agent exactly ONCE
+// (dedup), instead of registering one copy per rig and colliding via
+// checkPackAgentCollisions / duplicate_agent_error.go. In this city
+// packs/actual/all is rig-included by four rigs; a naive hoist would
+// register "deacon" four times.
+func TestExpandPacks_HoistCityScopedDedupAcrossRigs(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "packs/supervisor/pack.toml", `
+[pack]
+name = "supervisor"
+schema = 1
+
+[[agent]]
+name = "deacon"
+scope = "city"
+
+[[named_session]]
+template = "deacon"
+scope = "city"
+
+[[agent]]
+name = "polecat"
+scope = "rig"
+`)
+
+	cfg := &City{
+		Rigs: []Rig{
+			{Name: "gascity", Path: "/tmp/gascity", Includes: []string{"packs/supervisor"}},
+			{Name: "mcdclient", Path: "/tmp/mcdclient", Includes: []string{"packs/supervisor"}},
+			{Name: "beads", Path: "/tmp/beads", Includes: []string{"packs/supervisor"}},
+			{Name: "wren", Path: "/tmp/wren", Includes: []string{"packs/supervisor"}},
+		},
+	}
+
+	// Must not error on the multi-rig collision; dedup makes it register once.
+	if err := ExpandPacks(cfg, fsys.OSFS{}, dir, nil); err != nil {
+		t.Fatalf("ExpandPacks (multi-rig dedup): %v", err)
+	}
+
+	var deaconCount int
+	for i := range cfg.Agents {
+		if cfg.Agents[i].Name == "deacon" {
+			deaconCount++
+		}
+	}
+	if deaconCount != 1 {
+		t.Fatalf("deacon registered %d times across 4 rigs, want exactly 1 (dedup); agents: %v", deaconCount, agentNamesOf(cfg.Agents))
+	}
+
+	var deaconSessions int
+	for i := range cfg.NamedSessions {
+		if cfg.NamedSessions[i].QualifiedName() == "deacon" {
+			deaconSessions++
+		}
+	}
+	if deaconSessions != 1 {
+		t.Fatalf("deacon named session registered %d times, want exactly 1 (dedup)", deaconSessions)
+	}
+
+	// Each rig still gets its own rig-scoped polecat.
+	var polecatCount int
+	for i := range cfg.Agents {
+		if cfg.Agents[i].Name == "polecat" {
+			polecatCount++
+		}
+	}
+	if polecatCount != 4 {
+		t.Errorf("polecat (rig-scoped) registered %d times, want 4 (one per rig)", polecatCount)
+	}
+}
+
+// TestExpandPacks_HoistDoesNotDuplicateCityScopeAgent verifies that when a
+// city-scoped agent already exists at city scope (here via city includes),
+// hoisting the same-named agent from a rig include does NOT add a duplicate:
+// the existing city-scope/city-root definition wins.
+func TestExpandPacks_HoistDoesNotDuplicateCityScopeAgent(t *testing.T) {
+	dir := t.TempDir()
+
+	// City pack defines deacon at city scope (the canonical definition).
+	writeFile(t, dir, "packs/citysup/pack.toml", `
+[pack]
+name = "citysup"
+schema = 1
+
+[[agent]]
+name = "deacon"
+scope = "city"
+prompt_template = "prompts/deacon.md"
+`)
+	writeFile(t, dir, "packs/citysup/prompts/deacon.md", "city-scope deacon")
+
+	// Rig pack ALSO defines a city-scoped deacon; reached via a rig include.
+	writeFile(t, dir, "packs/rigsup/pack.toml", `
+[pack]
+name = "rigsup"
+schema = 1
+
+[[agent]]
+name = "deacon"
+scope = "city"
+`)
+
+	writeFile(t, dir, "city.toml", `
+[workspace]
+name = "test"
+includes = ["packs/citysup"]
+
+[[rigs]]
+name = "gascity"
+path = "/tmp/gascity"
+includes = ["packs/rigsup"]
+`)
+
+	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(dir, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+
+	var deacons []Agent
+	for i := range cfg.Agents {
+		if cfg.Agents[i].Name == "deacon" {
+			deacons = append(deacons, cfg.Agents[i])
+		}
+	}
+	if len(deacons) != 1 {
+		t.Fatalf("deacon registered %d times, want exactly 1 (city-scope wins over hoist); agents: %v", len(deacons), agentNamesOf(cfg.Agents))
+	}
+	// The surviving deacon is the city-scope definition (has the prompt
+	// template), not the bare rig-pack one.
+	if !strings.Contains(deacons[0].PromptTemplate, "prompts/deacon.md") {
+		t.Errorf("surviving deacon prompt_template = %q, want the city-scope definition (prompts/deacon.md)", deacons[0].PromptTemplate)
+	}
+	if deacons[0].Dir != "" {
+		t.Errorf("surviving deacon dir = %q, want \"\" (city scope)", deacons[0].Dir)
+	}
+}
+
+func TestLoadWithIncludes_SkipsExtraIncludeReachableFromRigPackGraph(t *testing.T) {
+	dir := t.TempDir()
+
+	writeFile(t, dir, "packs/maintenance/pack.toml", `
+[pack]
+name = "maintenance"
+schema = 2
+`)
+	writeFile(t, dir, "packs/maintenance/agents/dog/agent.toml", `
+scope = "city"
+fallback = true
+`)
+
+	writeFile(t, dir, "packs/gastown/pack.toml", `
+[pack]
+name = "gastown"
+schema = 2
+
+[imports.maintenance]
+source = "../maintenance"
+`)
+	writeFile(t, dir, "packs/gastown/agents/polecat/agent.toml", `
+scope = "rig"
+`)
+
+	writeFile(t, dir, "city.toml", `
+[workspace]
+name = "test"
+
+[[rigs]]
+name = "gascity"
+path = "/tmp/gascity"
+includes = ["packs/gastown"]
+`)
+
+	cfg, _, err := LoadWithIncludes(
+		fsys.OSFS{},
+		filepath.Join(dir, "city.toml"),
+		filepath.Join(dir, "packs", "maintenance"),
+	)
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+
+	for _, packDir := range cfg.PackDirs {
+		if filepath.Base(packDir) == "maintenance" {
+			t.Fatalf("maintenance was injected at city scope despite being reachable from rig pack graph: PackDirs=%v RigPackDirs=%v",
+				cfg.PackDirs, cfg.RigPackDirs)
+		}
+	}
+	if got := cfg.RigPackDirs["gascity"]; len(got) != 2 {
+		t.Fatalf("rig pack graph dirs = %v, want gastown plus transitive maintenance", got)
+	}
+}
+
+func TestLoadWithIncludes_SkipsExtraIncludeReachableFromNamedRigPackGraph(t *testing.T) {
+	dir := t.TempDir()
+
+	writeFile(t, dir, "packs/maintenance/pack.toml", `
+[pack]
+name = "maintenance"
+schema = 2
+`)
+	writeFile(t, dir, "packs/maintenance/agents/dog/agent.toml", `
+scope = "city"
+fallback = true
+`)
+
+	writeFile(t, dir, ".gc/cache/packs/maintenance/pack.toml", `
+[pack]
+name = "maintenance"
+schema = 2
+`)
+	writeFile(t, dir, ".gc/cache/packs/maintenance/agents/dog/agent.toml", `
+scope = "city"
+fallback = true
+`)
+
+	writeFile(t, dir, ".gc/cache/packs/gastown/pack.toml", `
+[pack]
+name = "gastown"
+schema = 2
+
+[imports.maintenance]
+source = "../maintenance"
+`)
+	writeFile(t, dir, ".gc/cache/packs/gastown/agents/polecat/agent.toml", `
+scope = "rig"
+`)
+
+	writeFile(t, dir, "city.toml", `
+[workspace]
+name = "test"
+
+[packs.gastown]
+source = "https://example.com/gastown.git"
+
+[[rigs]]
+name = "gascity"
+path = "/tmp/gascity"
+includes = ["gastown"]
+`)
+
+	cfg, _, err := LoadWithIncludes(
+		fsys.OSFS{},
+		filepath.Join(dir, "city.toml"),
+		filepath.Join(dir, "packs", "maintenance"),
+	)
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+
+	for _, packDir := range cfg.PackDirs {
+		if filepath.Base(packDir) == "maintenance" {
+			t.Fatalf("maintenance was injected at city scope despite being reachable from named rig pack graph: PackDirs=%v RigPackDirs=%v",
+				cfg.PackDirs, cfg.RigPackDirs)
+		}
+	}
+	if got := cfg.RigPackDirs["gascity"]; len(got) != 2 {
+		t.Fatalf("rig pack graph dirs = %v, want gastown plus transitive maintenance", got)
+	}
+}
+
+func TestResolvedPackNames_ExpandsRepeatedSourceWhenAnyVisitIsTransitive(t *testing.T) {
+	dir := t.TempDir()
+
+	writeFile(t, dir, "packs/maintenance/pack.toml", `
+[pack]
+name = "maintenance"
+schema = 2
+`)
+	writeFile(t, dir, "packs/shared/pack.toml", `
+[pack]
+name = "shared"
+schema = 2
+
+[imports.maintenance]
+source = "../maintenance"
+`)
+	writeFile(t, dir, "packs/wrapper/pack.toml", `
+[pack]
+name = "wrapper"
+schema = 2
+
+[imports.shared]
+source = "../shared"
+transitive = false
+`)
+
+	names := resolvedPackNames([]string{"packs/wrapper"}, map[string]Import{
+		"shared": {Source: "packs/shared"},
+	}, fsys.OSFS{}, dir)
+
+	if !names["maintenance"] {
+		t.Fatalf("maintenance missing after mixed shallow/deep visits: names=%v", names)
+	}
+}
+
+func TestResolvedPackNames_NonTransitiveImportDoesNotCollectDeepDependency(t *testing.T) {
+	dir := t.TempDir()
+
+	writeFile(t, dir, "packs/maintenance/pack.toml", `
+[pack]
+name = "maintenance"
+schema = 2
+`)
+	writeFile(t, dir, "packs/shared/pack.toml", `
+[pack]
+name = "shared"
+schema = 2
+
+[imports.maintenance]
+source = "../maintenance"
+`)
+
+	transitiveFalse := false
+	names := resolvedPackNames(nil, map[string]Import{
+		"shared": {Source: "packs/shared", Transitive: &transitiveFalse},
+	}, fsys.OSFS{}, dir)
+
+	if !names["shared"] {
+		t.Fatalf("shared missing from non-transitive visit: names=%v", names)
+	}
+	if names["maintenance"] {
+		t.Fatalf("maintenance collected through non-transitive import: names=%v", names)
+	}
+}
+
+func TestResolvedPackNames_NonTransitiveImportDoesNotExposeNestedPack(t *testing.T) {
+	dir := t.TempDir()
+
+	writeFile(t, dir, "packs/maintenance/pack.toml", `
+[pack]
+name = "maintenance"
+schema = 2
+`)
+	writeFile(t, dir, "packs/middle/pack.toml", `
+[pack]
+name = "middle"
+schema = 2
+
+[imports.maintenance]
+source = "../maintenance"
+`)
+	writeFile(t, dir, "packs/root/pack.toml", `
+[pack]
+name = "root"
+schema = 2
+
+[imports.middle]
+source = "../middle"
+transitive = false
+`)
+
+	names := resolvedPackNames([]string{"packs/root"}, nil, fsys.OSFS{}, dir)
+	if !names["middle"] {
+		t.Fatalf("middle pack was not recorded: names=%v", names)
+	}
+	if names["maintenance"] {
+		t.Fatalf("non-transitive import exposed nested maintenance pack: names=%v", names)
+	}
+}
+
+func TestResolvedPackNames_RevisitsPackReachedFirstThroughNonTransitiveImport(t *testing.T) {
+	dir := t.TempDir()
+
+	writeFile(t, dir, "packs/maintenance/pack.toml", `
+[pack]
+name = "maintenance"
+schema = 2
+`)
+	writeFile(t, dir, "packs/middle/pack.toml", `
+[pack]
+name = "middle"
+schema = 2
+
+[imports.maintenance]
+source = "../maintenance"
+`)
+	writeFile(t, dir, "packs/shallow/pack.toml", `
+[pack]
+name = "shallow"
+schema = 2
+
+[imports.middle]
+source = "../middle"
+transitive = false
+`)
+	writeFile(t, dir, "packs/deep/pack.toml", `
+[pack]
+name = "deep"
+schema = 2
+
+[imports.middle]
+source = "../middle"
+`)
+
+	for _, includes := range [][]string{
+		{"packs/shallow", "packs/deep"},
+		{"packs/deep", "packs/shallow"},
+	} {
+		names := resolvedPackNames(includes, nil, fsys.OSFS{}, dir)
+		if !names["maintenance"] {
+			t.Fatalf("includes %v did not resolve transitive maintenance after shallow visit: names=%v", includes, names)
+		}
+	}
+}
+
+func TestResolvedPackNames_AvoidsRedundantPackReads(t *testing.T) {
+	t.Run("repeated shallow imports", func(t *testing.T) {
+		dir := t.TempDir()
+
+		writeFile(t, dir, "packs/shared/pack.toml", `
+[pack]
+name = "shared"
+schema = 2
+`)
+
+		transitiveFalse := false
+		countingFS := newReadCountingFS()
+		names := resolvedPackNames(nil, map[string]Import{
+			"shared_a": {Source: "packs/shared", Transitive: &transitiveFalse},
+			"shared_b": {Source: "packs/shared", Transitive: &transitiveFalse},
+		}, countingFS, dir)
+
+		if !names["shared"] {
+			t.Fatalf("shared missing from repeated shallow imports: names=%v", names)
+		}
+		if got := countingFS.ReadCount(filepath.Join(dir, "packs/shared/pack.toml")); got != 1 {
+			t.Fatalf("shared pack.toml read count = %d, want 1", got)
+		}
+	})
+
+	t.Run("diamond transitive imports", func(t *testing.T) {
+		dir := t.TempDir()
+
+		writeFile(t, dir, "packs/shared/pack.toml", `
+[pack]
+name = "shared"
+schema = 2
+`)
+		writeFile(t, dir, "packs/left/pack.toml", `
+[pack]
+name = "left"
+schema = 2
+
+[imports.shared]
+source = "../shared"
+`)
+		writeFile(t, dir, "packs/right/pack.toml", `
+[pack]
+name = "right"
+schema = 2
+
+[imports.shared]
+source = "../shared"
+`)
+		writeFile(t, dir, "packs/root/pack.toml", `
+[pack]
+name = "root"
+schema = 2
+
+[imports.left]
+source = "../left"
+
+[imports.right]
+source = "../right"
+`)
+
+		countingFS := newReadCountingFS()
+		names := resolvedPackNames([]string{"packs/root"}, nil, countingFS, dir)
+
+		for _, name := range []string{"root", "left", "right", "shared"} {
+			if !names[name] {
+				t.Fatalf("%s missing from diamond imports: names=%v", name, names)
+			}
+		}
+		if got := countingFS.ReadCount(filepath.Join(dir, "packs/shared/pack.toml")); got != 1 {
+			t.Fatalf("shared pack.toml read count = %d, want 1", got)
+		}
+	})
+}
+
+// agentNamesOf is a small test helper for readable failure messages.
+func agentNamesOf(agents []Agent) []string {
+	names := make([]string, 0, len(agents))
+	for i := range agents {
+		names = append(names, agents[i].QualifiedName())
+	}
+	return names
 }
 
 // ---------------------------------------------------------------------------
@@ -4497,5 +5296,100 @@ depends_on = ["db"]
 	// Validation should pass since deps are now qualified.
 	if err := ValidateAgents(cfg.Agents); err != nil {
 		t.Errorf("ValidateAgents failed after pack expansion: %v", err)
+	}
+}
+
+// TestMergeHoistedCityAgents_DedupAcrossBindings covers the topology where a
+// pack (here "maintenance") is imported at the city level under one binding
+// (e.g. "gastown") and ALSO transitively pulled in via rig includes that
+// restamp the binding to something else (e.g. "atlas"). The same underlying
+// agent — same (Dir, Name) — then appears twice with different binding
+// prefixes. Hoist dedup must collapse these by (Dir, Name) because
+// ValidateAgents keys collisions on (Dir, Name), not on QualifiedName.
+//
+// Before the fix, hoist dedup only checked QualifiedName, so "gastown.dog"
+// and "atlas.dog" both survived and ValidateAgents reported a duplicate.
+//
+// The shared Dir mirrors the production reproducer literally: both entries
+// resolve to the same on-disk pack (.../packs/maintenance), which is why the
+// original failure rendered the same path twice in its "duplicate name
+// (from X and X)" message.
+func TestMergeHoistedCityAgents_DedupAcrossBindings(t *testing.T) {
+	const maintenanceDir = "/home/user/.gc/packs/maintenance"
+	agents := []Agent{
+		{Name: "dog", Dir: maintenanceDir, BindingName: "gastown", Scope: "city"},
+	}
+	hoisted := []Agent{
+		{Name: "dog", Dir: maintenanceDir, BindingName: "atlas", Scope: "city"},
+	}
+
+	merged := mergeHoistedCityAgents(agents, hoisted)
+	if len(merged) != 1 {
+		t.Fatalf("merged length = %d, want 1 (city-scope dog should only appear once)", len(merged))
+	}
+	if merged[0].BindingName != "gastown" {
+		t.Errorf("first-occurrence-wins: BindingName = %q, want %q", merged[0].BindingName, "gastown")
+	}
+
+	if err := ValidateAgents(merged); err != nil {
+		t.Errorf("ValidateAgents failed after dedup: %v", err)
+	}
+}
+
+// TestMergeHoistedCityAgents_SameNameDifferentDirPreserved locks the dedup key
+// to (Dir, Name) rather than Name alone. Two agents that share a Name but
+// originate from different on-disk packs are genuinely distinct definitions,
+// so both must survive the hoist. This guards against a future regression that
+// collapses the key down to Name and silently drops a legitimate agent.
+func TestMergeHoistedCityAgents_SameNameDifferentDirPreserved(t *testing.T) {
+	agents := []Agent{
+		{Name: "dog", Dir: "/home/user/.gc/packs/maintenance", BindingName: "gastown", Scope: "city"},
+	}
+	hoisted := []Agent{
+		{Name: "dog", Dir: "/home/user/.gc/packs/atlas", BindingName: "atlas", Scope: "city"},
+	}
+
+	merged := mergeHoistedCityAgents(agents, hoisted)
+	if len(merged) != 2 {
+		t.Fatalf("merged length = %d, want 2 (same Name from different Dir are distinct definitions)", len(merged))
+	}
+}
+
+// TestMergeHoistedCityAgents_DistinctNamesPreserved guards against
+// over-aggressive dedup: hoisted agents with the same binding but different
+// names must all survive.
+func TestMergeHoistedCityAgents_DistinctNamesPreserved(t *testing.T) {
+	agents := []Agent{
+		{Name: "mayor", Dir: "", BindingName: "gastown", Scope: "city"},
+	}
+	hoisted := []Agent{
+		{Name: "deacon", Dir: "", BindingName: "atlas", Scope: "city"},
+		{Name: "boot", Dir: "", BindingName: "atlas", Scope: "city"},
+	}
+
+	merged := mergeHoistedCityAgents(agents, hoisted)
+	if len(merged) != 3 {
+		t.Fatalf("merged length = %d, want 3", len(merged))
+	}
+}
+
+// TestMergeHoistedCityNamedSessions_DedupAcrossBindings mirrors the agent
+// case for named sessions. ValidateNamedSessions does not currently key on
+// BindingName, so a duplicate (Dir, Template) under different bindings
+// would still wedge city startup once the hoist re-introduced the conflict.
+func TestMergeHoistedCityNamedSessions_DedupAcrossBindings(t *testing.T) {
+	sessions := []NamedSession{
+		{Template: "mayor", Dir: "", BindingName: "gastown", Scope: "city"},
+	}
+	hoisted := []NamedSession{
+		{Template: "mayor", Dir: "", BindingName: "atlas", Scope: "city"},
+	}
+
+	merged := mergeHoistedCityNamedSessions(sessions, hoisted)
+	if len(merged) != 1 {
+		t.Fatalf("merged length = %d, want 1", len(merged))
+	}
+	if merged[0].BindingName != "gastown" {
+		t.Errorf("first-occurrence-wins: BindingName = %q, want %q", merged[0].BindingName, "gastown")
 	}
 }

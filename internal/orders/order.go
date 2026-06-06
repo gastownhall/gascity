@@ -6,6 +6,7 @@ package orders
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/BurntSushi/toml"
@@ -23,6 +24,11 @@ type Order struct {
 	// Exec is a shell command run directly by the controller, bypassing
 	// the agent pipeline. Mutually exclusive with Formula.
 	Exec string `toml:"exec,omitempty"`
+	// Scope controls how the order is instantiated during pack expansion:
+	// "city" registers the order exactly once regardless of how many rigs
+	// import the pack; "rig" (the default when empty) registers it once per
+	// importing rig. Mirrors [[named_session]].scope.
+	Scope string `toml:"scope,omitempty"`
 	// Trigger is the order scheduler selector: "cooldown", "cron",
 	// "condition", "event", or "manual". This is distinct from the
 	// separate "gate" concepts used elsewhere in the system.
@@ -42,6 +48,21 @@ type Order struct {
 	Timeout string `toml:"timeout,omitempty"`
 	// Enabled controls whether the order is active. Defaults to true.
 	Enabled *bool `toml:"enabled,omitempty"`
+	// Idempotent marks an order whose dispatch is safe to repeat (a sweep/
+	// feeder whose re-run is a no-op, e.g. routes only unrouted work, or
+	// nudges an idle pool). Such orders fail OPEN when the single-flight /
+	// open-work gate times out under store contention: they dispatch anyway
+	// rather than be starved, since a duplicate run causes no harm
+	// (gastownhall/gascity#2893). Non-idempotent orders (the
+	// default, false) keep failing CLOSED on gate timeout.
+	Idempotent bool `toml:"idempotent,omitempty"`
+	// Env is a map of environment variables exported into an exec
+	// order's child process. Use the `[order.env]` TOML table to
+	// override thresholds (e.g. GC_DOCTOR_LATENCY_WARN_S) without
+	// editing the order's shell scripts or the controller's parent
+	// environment. Env is supported only for exec orders; controller-
+	// owned routing and identity keys are rejected before dispatch.
+	Env map[string]string `toml:"env,omitempty"`
 	// Source is the absolute file path to the discovered order file (set by scanner, not from TOML).
 	Source string `toml:"-"`
 	// FormulaLayer is the formula layer directory this order was
@@ -62,18 +83,21 @@ func (a *Order) ScopedName() string {
 }
 
 type orderDecode struct {
-	Description string `toml:"description,omitempty"`
-	Formula     string `toml:"formula,omitempty"`
-	Exec        string `toml:"exec,omitempty"`
-	Trigger     string `toml:"trigger,omitempty"`
-	Gate        string `toml:"gate,omitempty"`
-	Interval    string `toml:"interval,omitempty"`
-	Schedule    string `toml:"schedule,omitempty"`
-	Check       string `toml:"check,omitempty"`
-	On          string `toml:"on,omitempty"`
-	Pool        string `toml:"pool,omitempty"`
-	Timeout     string `toml:"timeout,omitempty"`
-	Enabled     *bool  `toml:"enabled,omitempty"`
+	Description string            `toml:"description,omitempty"`
+	Formula     string            `toml:"formula,omitempty"`
+	Exec        string            `toml:"exec,omitempty"`
+	Scope       string            `toml:"scope,omitempty"`
+	Trigger     string            `toml:"trigger,omitempty"`
+	Gate        string            `toml:"gate,omitempty"`
+	Interval    string            `toml:"interval,omitempty"`
+	Schedule    string            `toml:"schedule,omitempty"`
+	Check       string            `toml:"check,omitempty"`
+	On          string            `toml:"on,omitempty"`
+	Pool        string            `toml:"pool,omitempty"`
+	Timeout     string            `toml:"timeout,omitempty"`
+	Enabled     *bool             `toml:"enabled,omitempty"`
+	Idempotent  bool              `toml:"idempotent,omitempty"`
+	Env         map[string]string `toml:"env,omitempty"`
 }
 
 func (d orderDecode) normalized() Order {
@@ -85,6 +109,7 @@ func (d orderDecode) normalized() Order {
 		Description: d.Description,
 		Formula:     d.Formula,
 		Exec:        d.Exec,
+		Scope:       d.Scope,
 		Trigger:     trigger,
 		Interval:    d.Interval,
 		Schedule:    d.Schedule,
@@ -93,6 +118,8 @@ func (d orderDecode) normalized() Order {
 		Pool:        d.Pool,
 		Timeout:     d.Timeout,
 		Enabled:     d.Enabled,
+		Idempotent:  d.Idempotent,
+		Env:         d.Env,
 	}
 }
 
@@ -113,6 +140,13 @@ func (a *Order) IsEnabled() bool {
 // rather than formula (wisp) dispatch.
 func (a *Order) IsExec() bool {
 	return a.Exec != ""
+}
+
+// IsCityScoped reports whether the order is city-scoped, i.e. instantiated
+// exactly once during pack expansion regardless of how many rigs import the
+// pack. The default (empty Scope) is rig-scoped.
+func (a *Order) IsCityScoped() bool {
+	return a.Scope == "city"
 }
 
 // TimeoutOrDefault returns the order's configured timeout, or the
@@ -147,9 +181,26 @@ func Validate(a Order) error {
 	if a.Formula != "" && a.Exec != "" {
 		return fmt.Errorf("order %q: formula and exec are mutually exclusive", a.Name)
 	}
+	if len(a.Env) > 0 && a.Exec == "" {
+		return fmt.Errorf("order %q: env is supported only for exec orders", a.Name)
+	}
 	// Exec orders must not have a pool (no agent pipeline).
 	if a.Exec != "" && a.Pool != "" {
 		return fmt.Errorf("order %q: exec orders cannot have a pool", a.Name)
+	}
+	for key := range a.Env {
+		if strings.TrimSpace(key) == "" {
+			return fmt.Errorf("order %q: env key is required", a.Name)
+		}
+		if strings.Contains(key, "=") {
+			return fmt.Errorf("order %q: invalid env key %q: must not contain '='", a.Name, key)
+		}
+	}
+	// Scope, if set, must be a known value. Empty defaults to rig-scoped.
+	switch a.Scope {
+	case "", "city", "rig":
+	default:
+		return fmt.Errorf("order %q: unknown scope %q (want \"city\" or \"rig\")", a.Name, a.Scope)
 	}
 	// Validate timeout if set.
 	if a.Timeout != "" {

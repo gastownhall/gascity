@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/agent"
+	"github.com/gastownhall/gascity/internal/agentutil"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	workdirutil "github.com/gastownhall/gascity/internal/workdir"
@@ -262,6 +263,9 @@ func findAgent(cfg *config.City, name string) (config.Agent, bool) {
 				}
 			}
 		}
+	}
+	if a, ok := agentutil.ResolveQualifiedRigScopedTemplate(cfg, name); ok {
+		return a, true
 	}
 	return config.Agent{}, false
 }

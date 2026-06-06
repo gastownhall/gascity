@@ -25,6 +25,9 @@ import (
 // graphExecutionRouteMetaKey is an alias for sling.GraphExecutionRouteMetaKey.
 const graphExecutionRouteMetaKey = sling.GraphExecutionRouteMetaKey
 
+// graphExecutionRigContextMetaKey is an alias for sling.GraphExecutionRigContextMetaKey.
+const graphExecutionRigContextMetaKey = sling.GraphExecutionRigContextMetaKey
+
 // isControlDispatcherKind delegates to sling.IsControlDispatcherKind.
 func isControlDispatcherKind(kind string) bool {
 	return sling.IsControlDispatcherKind(kind)
@@ -52,7 +55,7 @@ func assignGraphStepRoute(step *formula.RecipeStep, executionBinding sling.Graph
 }
 
 // applyGraphRouting delegates to sling.ApplyGraphRouting with CLI interfaces.
-func applyGraphRouting(recipe *formula.Recipe, a *config.Agent, routedTo string, vars map[string]string, sourceBeadID, scopeKind, scopeRef, storeRef string, store beads.Store, cityName, cityPath string, cfg *config.City) error {
+func applyGraphRouting(recipe *formula.Recipe, a *config.Agent, routedTo string, vars map[string]string, scopeKind, scopeRef, storeRef string, store beads.Store, cityName, cityPath string, cfg *config.City) error {
 	deps := sling.SlingDeps{
 		CityName:              cityName,
 		CityPath:              cityPath,
@@ -62,7 +65,7 @@ func applyGraphRouting(recipe *formula.Recipe, a *config.Agent, routedTo string,
 		Resolver:              cliAgentResolver{},
 		DirectSessionResolver: cliDirectSessionResolver,
 	}
-	return sling.ApplyGraphRouting(recipe, a, routedTo, vars, sourceBeadID, scopeKind, scopeRef, storeRef, store, cityName, cfg, deps)
+	return sling.ApplyGraphRouting(recipe, a, routedTo, vars, "", scopeKind, scopeRef, storeRef, store, cityName, cfg, deps)
 }
 
 var (
@@ -322,9 +325,9 @@ func runWorkflowServe(agentName string, follow bool, _ io.Writer, stderr io.Writ
 	// Expand {{.Rig}}/{{.AgentBase}} once so the long-poll drain reuses the
 	// rig-scoped command instead of passing the literal template to the shell
 	// on every iteration. #793.
-	workQuery := expandAgentCommandTemplate(cityPath, cityName, &agentCfg, cfg.Rigs, "work_query", agentCfg.EffectiveWorkQuery(), stderr)
+	workQuery := expandAgentCommandTemplate(cityPath, cityName, &agentCfg, cfg.Rigs, "work_query", agentCfg.EffectiveWorkQueryForBeads(cfg.Beads), stderr)
 	if agentCfg.WorkQuery == "" && isWorkflowServeControlDispatcherAgent(agentCfg) {
-		workQuery = workflowServeControlReadyQuery(agentCfg, config.NamedSessionRuntimeName(cityName, cfg.Workspace, agentCfg.QualifiedName()))
+		workQuery = workflowServeControlReadyQueryForBeads(agentCfg, cfg.Beads, config.NamedSessionRuntimeName(cityName, cfg.Workspace, agentCfg.QualifiedName()))
 	}
 	workflowTracef("serve start agent=%s city=%s dir=%s", agentCfg.QualifiedName(), cityPath, workDir)
 	if !follow {
@@ -458,16 +461,9 @@ func drainWorkflowServeWork(agentCfg config.Agent, cityPath, storePath, workQuer
 		idlePolls = 0
 		processedThisCycle := false
 		pendingCount := 0
-		legacyOversizedCount := 0
-		unexpectedKindCount := 0
 		for _, candidate := range queue {
 			beadID := candidate.ID
 			kind := strings.TrimSpace(candidate.Metadata["gc.kind"])
-			if !isControlDispatcherKind(kind) {
-				unexpectedKindCount++
-				workflowTracef("serve unexpected-kind-skip bead=%s kind=%s", beadID, kind)
-				continue
-			}
 			workflowTracef("serve process bead=%s kind=%s store=%s", beadID, kind, storePath)
 			// controlDispatcherServe currently returns nil both when it
 			// successfully advanced a control bead AND when ProcessControl
@@ -492,10 +488,6 @@ func drainWorkflowServeWork(agentCfg config.Agent, cityPath, storePath, workQuer
 					workflowTracef("serve transient-error-pending bead=%s kind=%s err=%v", beadID, kind, err)
 					continue
 				}
-				if isLegacyOversizedControlEventError(err) {
-					legacyOversizedCount++
-					continue
-				}
 				return result, fmt.Errorf("processing control bead %s: %w", beadID, err)
 			}
 			workflowTracef("serve processed bead=%s kind=%s", beadID, kind)
@@ -509,25 +501,7 @@ func drainWorkflowServeWork(agentCfg config.Agent, cityPath, storePath, workQuer
 			workflowTracef("serve pending-queue agent=%s count=%d", agentCfg.QualifiedName(), pendingCount)
 			return result, nil
 		}
-		if legacyOversizedCount > 0 {
-			workflowTracef("serve legacy-oversized-queue agent=%s count=%d", agentCfg.QualifiedName(), legacyOversizedCount)
-			return result, nil
-		}
-		if unexpectedKindCount > 0 {
-			workflowTracef("serve unexpected-kind-queue agent=%s count=%d", agentCfg.QualifiedName(), unexpectedKindCount)
-			return result, nil
-		}
 	}
-}
-
-func isLegacyOversizedControlEventError(err error) bool {
-	if err == nil {
-		return false
-	}
-	msg := err.Error()
-	return strings.Contains(msg, "recording attempt log") &&
-		strings.Contains(msg, "old_value") &&
-		strings.Contains(msg, "too large")
 }
 
 func runWorkflowServeFollow(agentCfg config.Agent, cityPath, storePath, workQuery string, workEnv map[string]string, stderr io.Writer) error {
@@ -556,7 +530,20 @@ func runWorkflowServeFollow(agentCfg config.Agent, cityPath, storePath, workQuer
 	for {
 		drainResult, err := drainWorkflowServeWork(agentCfg, cityPath, storePath, workQuery, workEnv, stderr)
 		if err != nil {
-			return err
+			// A transient work-query/store failure — most commonly the
+			// work-query timeout (hookWorkQueryTimeout) when the bead store is
+			// briefly saturated — must NOT terminate this long-running serve
+			// loop. drainWorkflowServeWork already surfaced the failure on the
+			// event bus for reconciler visibility (#1496/#1497); returning here
+			// kills the dispatcher process (pane exits non-zero) and leaves the
+			// rig un-dispatched while its session bead still reports "active".
+			// Downgrade to a no-progress sweep so the idle backoff retries it;
+			// only genuinely fatal errors end the loop.
+			if !dispatch.IsTransientControllerError(err) {
+				return err
+			}
+			workflowTracef("serve drain-transient-retry agent=%s err=%v", agentCfg.QualifiedName(), err)
+			drainResult = workflowServeDrainResult{}
 		}
 		if drainResult.processedAny || drainResult.pendingAny {
 			idleSweeps = 0
@@ -676,11 +663,19 @@ func isWorkflowServeControlDispatcherAgent(agentCfg config.Agent) bool {
 }
 
 func workflowServeControlReadyQuery(agentCfg config.Agent, controlSessionNames ...string) string {
+	return workflowServeControlReadyQueryForBeads(agentCfg, config.BeadsConfig{}, controlSessionNames...)
+}
+
+func workflowServeControlReadyQueryForBeads(agentCfg config.Agent, beadsCfg config.BeadsConfig, controlSessionNames ...string) string {
 	target := strings.TrimSpace(agentCfg.QualifiedName())
 	if target == "" {
 		target = config.ControlDispatcherAgentName
 	}
 	limit := fmt.Sprintf("%d", workflowServeScanLimit)
+	includeEphemeral := ""
+	if beadsCfg.UsesBD105ReadySemantics() {
+		includeEphemeral = " --include-ephemeral"
+	}
 	queryPrefix := `BD_EXPORT_AUTO=false GC_CONTROL_TARGET=` + shellquote.Quote(target)
 	for _, name := range controlSessionNames {
 		name = strings.TrimSpace(name)
@@ -694,23 +689,26 @@ func workflowServeControlReadyQuery(agentCfg config.Agent, controlSessionNames .
 		queryPrefix += ` GC_CONTROL_LEGACY_TARGET=` + shellquote.Quote(legacy)
 	}
 	query := queryPrefix + ` sh -c '` +
-		`tmp=$(mktemp); trap "rm -f \"$tmp\"" EXIT; ` +
-		`emit_ready() { r=$("$@" 2>/dev/null || true); [ -n "$r" ] && [ "$r" != "[]" ] && printf "%s\n" "$r" >> "$tmp"; }; ` +
+		`set -e; ` +
+		`tmp=$(mktemp); seen="$tmp.seen"; err="$tmp.err"; : > "$seen"; trap "rm -f \"$tmp\" \"$seen\" \"$err\"" EXIT; ` +
+		`emit_ready() { r=$("$@" 2>"$err") || { status=$?; [ -n "$r" ] && printf "%s\n" "$r" >&2; cat "$err" >&2; return "$status"; }; [ -n "$r" ] && [ "$r" != "[]" ] && printf "%s\n" "$r" >> "$tmp"; return 0; }; ` +
+		`assignee_ready() { cand="$1"; [ -z "$cand" ] && return 0; if grep -Fxq "$cand" "$seen"; then return 0; fi; printf "%s\n" "$cand" >> "$seen"; ` +
+		`emit_ready bd --readonly --sandbox ready` + includeEphemeral + ` --assignee="$cand" --exclude-type=epic --json --limit=` + limit + `; }; ` +
+		`routed_ready() { route="$1"; [ -z "$route" ] && return 0; ` +
+		`emit_ready bd --readonly --sandbox ready` + includeEphemeral + ` --metadata-field "gc.run_target=$route" --unassigned --exclude-type=epic --json --sort oldest --limit=` + limit + `; ` +
+		`emit_ready bd --readonly --sandbox ready` + includeEphemeral + ` --metadata-field "gc.routed_to=$route" --unassigned --exclude-type=epic --json --sort oldest --limit=` + limit + `; ` +
+		`}; ` +
 		`for id in "$GC_CONTROL_SESSION_NAME" "$GC_SESSION_NAME" "$GC_ALIAS" "$GC_CONTROL_TARGET" "$GC_SESSION_ID"; do ` +
 		`[ -z "$id" ] && continue; ` +
 		`legacy=""; case "$id" in *control-dispatcher) legacy="${id%control-dispatcher}workflow-control";; esac; ` +
 		`for cand in "$id" "$legacy"; do ` +
 		`[ -z "$cand" ] && continue; ` +
-		`emit_ready bd --readonly --sandbox ready --assignee="$cand" --json --limit=` + limit + `; ` +
+		`assignee_ready "$cand"; ` +
 		`done; ` +
 		`done; ` +
-		`emit_ready bd --readonly --sandbox ready --metadata-field "gc.routed_to=$GC_CONTROL_TARGET" --unassigned --json --limit=` + limit + `; `
-	if legacy := workflowServeLegacyControlRoute(target); legacy != "" {
-		query += `emit_ready bd --readonly --sandbox ready --metadata-field "gc.routed_to=$GC_CONTROL_LEGACY_TARGET" --unassigned --json --limit=` + limit + `; `
-	} else {
-		query += `:; `
-	}
-	query += `[ -s "$tmp" ] && jq -s "reduce add[] as \$item ([]; if any(.[]; .id == \$item.id) then . else . + [\$item] end)" "$tmp" || printf "[]"` + `'`
+		`routed_ready "$GC_CONTROL_TARGET"; ` +
+		`routed_ready "${GC_CONTROL_LEGACY_TARGET:-}"; ` +
+		`if [ -s "$tmp" ]; then jq -s "reduce add[] as \$item ([]; if any(.[]; .id == \$item.id) then . else . + [\$item] end)" "$tmp"; else printf "[]"; fi` + `'`
 	return query
 }
 

@@ -26,13 +26,26 @@ LEGACY_STATE_FILE="$CITY/.gc/jsonl-export-state.json"
 # Configurable via environment (defaults match the old formula).
 SPIKE_THRESHOLD="${GC_JSONL_SPIKE_THRESHOLD:-20}"  # percentage (0-100)
 # Skip the percentage spike check when the previous record count is below
-# this absolute floor — small-N percentages are noise. Set to 0 to disable.
-MIN_PREV_FOR_SPIKE_CHECK="${GC_JSONL_MIN_PREV_FOR_SPIKE:-10}"
+# this absolute floor — small-N percentages are noise. A fresh bead store
+# growing 10→309 records during stand-up legitimately trips a 20% delta on
+# every cycle; raising the floor to 100 keeps the check meaningful on real
+# data while suppressing stand-up flares. Set to 0 to disable.
+MIN_PREV_FOR_SPIKE_CHECK="${GC_JSONL_MIN_PREV_FOR_SPIKE:-100}"
 MAX_PUSH_FAILURES="${GC_JSONL_MAX_PUSH_FAILURES:-3}"
 PUSH_RETRY_DELAY_MIN="${GC_JSONL_PUSH_RETRY_DELAY_MIN:-1}"
 PUSH_RETRY_DELAY_SPAN="${GC_JSONL_PUSH_RETRY_DELAY_SPAN:-4}"
 SCRUB="${GC_JSONL_SCRUB:-true}"
 ARCHIVE_REPO="${GC_JSONL_ARCHIVE_REPO:-$PACK_STATE_DIR/jsonl-archive}"
+# Re-log the archive mode at least this often (seconds) even without a mode
+# transition, so operators who missed the first line still see the current
+# configuration. Default one week.
+MODE_RELOG_INTERVAL_SECONDS="${GC_JSONL_MODE_RELOG_INTERVAL:-604800}"
+
+# Cached archive mode ("push" or "local-only"). Resolved once on the first
+# get_archive_mode call and reused thereafter so every push checkpoint in a
+# single run sees a consistent value even if an operator adds or removes the
+# origin remote mid-run.
+ARCHIVE_MODE=""
 
 # Count records in a `dolt sql -r json` payload. The output is `{"rows":[...]}`
 # on (typically) a single physical line, so `wc -l` measures formatting, not
@@ -273,18 +286,29 @@ archive_has_local_only_commits() {
 # Detect the archive's push mode from the live state of its remotes rather
 # than from a cached state field. Operators opt into off-box backup by adding
 # an `origin` remote; removing it reverts to local-only on the next run with
-# no extra command.
-get_archive_mode() {
+# no extra command. The result is memoized in ARCHIVE_MODE on first call so
+# every push checkpoint within a single run agrees, even if the remote changes
+# mid-run.
+resolve_archive_mode() {
+    if [ -n "$ARCHIVE_MODE" ]; then
+        return
+    fi
     if [ -d "$ARCHIVE_REPO/.git" ] \
         && git -C "$ARCHIVE_REPO" remote get-url origin >/dev/null 2>&1; then
-        echo "push"
+        ARCHIVE_MODE="push"
     else
-        echo "local-only"
+        ARCHIVE_MODE="local-only"
     fi
 }
 
+get_archive_mode() {
+    resolve_archive_mode
+    echo "$ARCHIVE_MODE"
+}
+
 should_attempt_push() {
-    [ "$(get_archive_mode)" = "push" ]
+    resolve_archive_mode
+    [ "$ARCHIVE_MODE" = "push" ]
 }
 
 # Log the archive mode on transitions and re-log weekly so operators who
@@ -303,7 +327,8 @@ log_archive_mode_if_needed() {
     local should_log=0
     local message
 
-    current_mode=$(get_archive_mode)
+    resolve_archive_mode
+    current_mode="$ARCHIVE_MODE"
     state_json=$(read_state_json)
     last_logged_mode=$(printf '%s\n' "$state_json" | jq -r '.last_logged_mode // empty')
     last_logged_at=$(printf '%s\n' "$state_json" | jq -r '.last_logged_at // empty')
@@ -318,7 +343,7 @@ log_archive_mode_if_needed() {
         should_log=1
     else
         last_ts=$(jq -n -r --arg ts "$last_logged_at" '$ts | try fromdateiso8601 catch 0')
-        if [ "$last_ts" = "0" ] || [ "$((now_ts - last_ts))" -gt 604800 ]; then
+        if [ "$last_ts" = "0" ] || [ "$((now_ts - last_ts))" -gt "$MODE_RELOG_INTERVAL_SECONDS" ]; then
             should_log=1
         fi
     fi
@@ -476,6 +501,15 @@ retry_pending_spike_alert() {
     fi
 }
 
+# Retain only the last ~20 lines of stderr so an extremely chatty failure
+# doesn't drown the escalation body.
+truncate_stderr_context() {
+    local raw="$1"
+
+    [ -z "$raw" ] && return 0
+    printf '%s\n' "$raw" | tail -n 20
+}
+
 push_archive_main() {
     local consecutive
     local fetch_err
@@ -483,15 +517,6 @@ push_archive_main() {
     local push_err
     local push_attempt
     local push_succeeded
-
-    # Retain only the last ~20 lines of stderr so an extremely chatty failure
-    # doesn't drown the escalation body.
-    truncate_stderr_context() {
-        local raw="$1"
-
-        [ -z "$raw" ] && return 0
-        printf '%s\n' "$raw" | tail -n 20
-    }
 
     record_archive_push_failure() {
         local message="$1"
@@ -690,7 +715,7 @@ retry_pending_spike_alert
 
 is_user_database() {
     case "$1" in
-        information_schema|mysql|dolt_cluster|performance_schema|sys|__gc_probe|benchdb|testdb_*|beads_pt*|beads_vr*|doctest_*|doctortest_*)
+        information_schema|mysql|dolt_cluster|performance_schema|sys|__gc_probe|benchdb|testdb_*|beads_pt*|beads_vr*|beads_test_bench_*|doctest_*|doctortest_*)
             return 1
             ;;
         beads_t*)
@@ -709,8 +734,8 @@ is_user_database() {
 # Discover databases. Exclude Dolt/MySQL system schemas, Gas City's internal
 # health-probe database, and test-fixture scratch databases (benchdb,
 # testdb_*, lowercase beads_t[0-9a-f]{8,}, beads_pt*, beads_vr*,
-# doctest_*, doctortest_* — matching the Go cleanup planner contract); the
-# remaining databases are expected to be bead stores.
+# beads_test_bench_*, doctest_*, doctortest_* — matching the Go cleanup
+# planner contract); the remaining databases are expected to be bead stores.
 DATABASES=$(
     while IFS= read -r db; do
         if is_user_database "$db"; then

@@ -156,9 +156,18 @@ func TestDiscoverPathKimiPrefersSessionKey(t *testing.T) {
 	}
 
 	got := DiscoverPath([]string{base}, "kimi/tmux-cli", workDir, "session-key")
-	if got != keyed {
+	if !samePath(got, keyed) {
 		t.Fatalf("DiscoverPath() = %q, want keyed Kimi transcript %q", got, keyed)
 	}
+}
+
+func samePath(a, b string) bool {
+	if a == b {
+		return true
+	}
+	resolvedA, errA := filepath.EvalSymlinks(a)
+	resolvedB, errB := filepath.EvalSymlinks(b)
+	return errA == nil && errB == nil && resolvedA == resolvedB
 }
 
 func TestDiscoverPathKimiSessionKeyMissDoesNotUseNewestWorkdirTranscript(t *testing.T) {

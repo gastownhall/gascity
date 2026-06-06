@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -144,6 +145,115 @@ func TestProcessRetryControlPassClosesWithSingleFinalMetadataUpdate(t *testing.T
 	}
 	if store.closeUpdateMetadata["gc.attempt_log"] == "" {
 		t.Fatal("close metadata missing gc.attempt_log")
+	}
+}
+
+func TestProcessRetryControlRetriesPassMissingRequiredArtifact(t *testing.T) {
+	t.Parallel()
+	store := beads.NewMemStore()
+
+	worktree := t.TempDir()
+	source := mustCreate(t, store, beads.Bead{
+		Title: "source",
+		Type:  "convoy",
+		Metadata: map[string]string{
+			"work_dir": worktree,
+		},
+	})
+	root := mustCreate(t, store, beads.Bead{
+		Title: "workflow",
+		Metadata: map[string]string{
+			"gc.kind":            "workflow",
+			"gc.input_convoy_id": source.ID,
+		},
+	})
+	missingReview := filepath.Join(worktree, "codex-review.md")
+	control := mustCreate(t, store, beads.Bead{
+		Title: "review",
+		Metadata: map[string]string{
+			"gc.kind":             "retry",
+			"gc.root_bead_id":     root.ID,
+			"gc.step_ref":         "mol-test.review",
+			"gc.step_id":          "review",
+			"gc.max_attempts":     "3",
+			"gc.on_exhausted":     "hard_fail",
+			"gc.source_step_spec": fmt.Sprintf(`{"id":"review","title":"Review","type":"task","metadata":{"gc.required_artifact":%q},"retry":{"max_attempts":3}}`, missingReview),
+			"gc.control_epoch":    "1",
+		},
+	})
+	attempt1 := mustCreate(t, store, beads.Bead{
+		Title: "review attempt 1",
+		Metadata: map[string]string{
+			"gc.root_bead_id":      root.ID,
+			"gc.step_ref":          "mol-test.review.attempt.1",
+			"gc.attempt":           "1",
+			"gc.outcome":           "pass",
+			"gc.required_artifact": missingReview,
+		},
+	})
+	mustClose(t, store, attempt1.ID)
+	mustDep(t, store, control.ID, attempt1.ID, "blocks")
+
+	result, err := processRetryControl(store, mustGet(t, store, control.ID), ProcessOptions{})
+	if err != nil {
+		t.Fatalf("processRetryControl: %v", err)
+	}
+	if !result.Processed || result.Action != "retry" {
+		t.Fatalf("result = %+v, want processed retry", result)
+	}
+
+	after := mustGet(t, store, control.ID)
+	if after.Status != "open" {
+		t.Fatalf("control status = %q, want open", after.Status)
+	}
+	if !strings.Contains(after.Metadata["gc.attempt_log"], "missing_required_artifact") {
+		t.Fatalf("attempt log = %q, want missing_required_artifact", after.Metadata["gc.attempt_log"])
+	}
+
+	var attempt2 beads.Bead
+	open, err := store.ListOpen()
+	if err != nil {
+		t.Fatalf("ListOpen: %v", err)
+	}
+	for _, bead := range open {
+		if bead.Metadata["gc.step_ref"] == "mol-test.review.attempt.2" {
+			attempt2 = bead
+			break
+		}
+	}
+	if attempt2.ID == "" {
+		t.Fatal("missing retry attempt 2")
+	}
+	if got := attempt2.Metadata["gc.required_artifact"]; got != missingReview {
+		t.Fatalf("attempt2 gc.required_artifact = %q, want %q", got, missingReview)
+	}
+
+	if err := store.SetMetadata(attempt2.ID, "gc.outcome", "pass"); err != nil {
+		t.Fatalf("set attempt2 outcome: %v", err)
+	}
+	mustClose(t, store, attempt2.ID)
+
+	result, err = processRetryControl(store, mustGet(t, store, control.ID), ProcessOptions{})
+	if err != nil {
+		t.Fatalf("processRetryControl attempt2: %v", err)
+	}
+	if !result.Processed || result.Action != "retry" {
+		t.Fatalf("attempt2 result = %+v, want processed retry", result)
+	}
+
+	var foundAttempt3 bool
+	open, err = store.ListOpen()
+	if err != nil {
+		t.Fatalf("ListOpen after attempt2: %v", err)
+	}
+	for _, bead := range open {
+		if bead.Metadata["gc.step_ref"] == "mol-test.review.attempt.3" {
+			foundAttempt3 = true
+			break
+		}
+	}
+	if !foundAttempt3 {
+		t.Fatal("missing retry attempt 3 after attempt2 required artifact miss")
 	}
 }
 
@@ -1274,6 +1384,8 @@ func TestIsTransientControllerError(t *testing.T) {
 		{name: "dolt invalid connection timeout", err: errors.New("failed to check for dependency cycle: invalid connection: i/o timeout"), want: true},
 		{name: "mysql lock timeout", err: errors.New("Error 1205 (HY000): lock wait timeout exceeded; try restarting transaction"), want: true},
 		{name: "mysql deadlock", err: errors.New("Error 1213 (40001): Deadlock found when trying to get lock; try restarting transaction"), want: true},
+		{name: "sqlite locked", err: errors.New("listing sqlite ready beads: database is locked (5) (SQLITE_BUSY)"), want: true},
+		{name: "sqlite table locked", err: errors.New("listing sqlite ready beads: database table is locked"), want: true},
 		{name: "bad step spec", err: errors.New("deserializing step spec: invalid character 'n'"), want: false},
 	}
 
@@ -2024,6 +2136,167 @@ func TestBuildAttemptRecipeRalphWithChildren(t *testing.T) {
 		if dep.Type == "parent-child" {
 			t.Errorf("unexpected parent-child dep: %s -> %s (causes deadlock)", dep.StepID, dep.DependsOnID)
 		}
+	}
+}
+
+func TestBuildAttemptRecipeSeedsNestedRalphFirstIteration(t *testing.T) {
+	t.Parallel()
+
+	// Outer ralph whose body contains an inner ralph (ralph-in-ralph). On outer
+	// iterations >= 2 the re-spawn path must seed the inner ralph's first
+	// iteration, mirroring compile-time expandNestedRalph. Without the seed,
+	// processRalphControl's findLatestAttempt returns empty and fatals
+	// ("no iteration found"), crash-looping all dispatch.
+	// Regression for gastownhall/gascity#2798.
+	inner := &formula.Step{
+		ID:    "inner-loop",
+		Title: "Inner loop",
+		Type:  "task",
+		Ralph: &formula.RalphSpec{
+			MaxAttempts: 3,
+			Check:       &formula.RalphCheckSpec{Mode: "exec", Path: "inner-check.sh"},
+		},
+	}
+	step := &formula.Step{
+		ID:    "outer-loop",
+		Title: "Outer loop",
+		Type:  "task",
+		Ralph: &formula.RalphSpec{
+			MaxAttempts: 5,
+			Check:       &formula.RalphCheckSpec{Mode: "exec", Path: "outer-check.sh"},
+		},
+		Children: []*formula.Step{inner},
+	}
+	control := beads.Bead{
+		ID: "gc-outer",
+		Metadata: map[string]string{
+			"gc.step_id":  "outer-loop",
+			"gc.step_ref": "mol-test.outer-loop",
+		},
+	}
+
+	// Outer iteration 2 — the iteration that crash-looped before the fix.
+	recipe := buildAttemptRecipe(step, control, 2)
+
+	innerControlID := "mol-test.outer-loop.iteration.2.inner-loop"
+	innerIterationID := innerControlID + ".iteration.1"
+
+	if recipe.StepByID(innerControlID) == nil {
+		t.Fatalf("missing inner ralph control %q", innerControlID)
+	}
+	seed := recipe.StepByID(innerIterationID)
+	if seed == nil {
+		t.Fatalf("inner ralph first iteration %q not seeded; deps=%+v", innerIterationID, recipe.Deps)
+	}
+	if got := seed.Metadata["gc.attempt"]; got != "1" {
+		t.Errorf("seed gc.attempt = %q, want 1", got)
+	}
+	if got := seed.Metadata["gc.step_ref"]; got != innerIterationID {
+		t.Errorf("seed gc.step_ref = %q, want %q", got, innerIterationID)
+	}
+	if got := seed.Metadata["gc.step_id"]; got != "inner-loop" {
+		t.Errorf("seed gc.step_id = %q, want inner-loop", got)
+	}
+	// The seed is merged into the outer attempt recipe, which already owns its
+	// root. molecule.Attach maps ANY IsRoot step to the attach root, so the
+	// seed must not carry IsRoot or it corrupts the iteration bead and breaks
+	// wiring. Regression guard for gastownhall/gascity#2798.
+	if seed.IsRoot {
+		t.Error("inner ralph seed iteration must have IsRoot=false")
+	}
+
+	// Inner control must block on its seeded first iteration, exactly as the
+	// compile-time control.Needs wiring does.
+	found := false
+	for _, dep := range recipe.Deps {
+		if dep.StepID == innerControlID && dep.DependsOnID == innerIterationID && dep.Type == "blocks" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("missing dep: inner control %q blocks on seed %q; deps=%+v",
+			innerControlID, innerIterationID, recipe.Deps)
+	}
+}
+
+func TestBuildAttemptRecipeSeedsNestedRalphWithChildren(t *testing.T) {
+	t.Parallel()
+
+	// The realistic ralph-in-ralph shape: an outer review/iterate loop whose body
+	// contains an inner bounded fix loop that itself has a body (apply + verify).
+	// On outer re-spawn the inner ralph's first iteration must be seeded as a
+	// scope wrapping its members. Regression for gastownhall/gascity#2798.
+	inner := &formula.Step{
+		ID:    "fix-loop",
+		Title: "Fix loop",
+		Type:  "task",
+		Ralph: &formula.RalphSpec{
+			MaxAttempts: 3,
+			Check:       &formula.RalphCheckSpec{Mode: "exec", Path: "fix-check.sh"},
+		},
+		Children: []*formula.Step{
+			{ID: "apply", Title: "Apply", Type: "task"},
+			{ID: "verify", Title: "Verify", Type: "task", Needs: []string{"apply"}},
+		},
+	}
+	step := &formula.Step{
+		ID:    "review-loop",
+		Title: "Review loop",
+		Type:  "task",
+		Ralph: &formula.RalphSpec{
+			MaxAttempts: 5,
+			Check:       &formula.RalphCheckSpec{Mode: "exec", Path: "review-check.sh"},
+		},
+		Children: []*formula.Step{inner},
+	}
+	control := beads.Bead{
+		ID: "gc-review",
+		Metadata: map[string]string{
+			"gc.step_id":  "review-loop",
+			"gc.step_ref": "mol-test.review-loop",
+		},
+	}
+
+	recipe := buildAttemptRecipe(step, control, 2)
+
+	innerControlID := "mol-test.review-loop.iteration.2.fix-loop"
+	innerIterationID := innerControlID + ".iteration.1"
+
+	scope := recipe.StepByID(innerIterationID)
+	if scope == nil {
+		t.Fatalf("inner ralph first iteration %q not seeded", innerIterationID)
+	}
+	if got := scope.Metadata["gc.kind"]; got != "scope" {
+		t.Errorf("inner iteration gc.kind = %q, want scope", got)
+	}
+	// Merged into the outer recipe, the seed scope must not be IsRoot —
+	// molecule.Attach maps any IsRoot step to the attach root, which would
+	// corrupt the iteration bead. Regression guard for gastownhall/gascity#2798.
+	if scope.IsRoot {
+		t.Error("inner ralph seed iteration scope must have IsRoot=false")
+	}
+
+	// Inner iteration members must be seeded under the inner iteration scope.
+	for _, member := range []string{"apply", "verify"} {
+		memberID := innerIterationID + "." + member
+		m := recipe.StepByID(memberID)
+		if m == nil {
+			t.Fatalf("missing inner iteration member %q", memberID)
+		}
+		if got := m.Metadata["gc.scope_ref"]; got != innerIterationID {
+			t.Errorf("member %q gc.scope_ref = %q, want %q", member, got, innerIterationID)
+		}
+	}
+
+	// Inner control blocks on its seeded first iteration.
+	found := false
+	for _, dep := range recipe.Deps {
+		if dep.StepID == innerControlID && dep.DependsOnID == innerIterationID && dep.Type == "blocks" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("missing dep: inner control %q blocks on seed %q", innerControlID, innerIterationID)
 	}
 }
 

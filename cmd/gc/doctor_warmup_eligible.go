@@ -38,6 +38,10 @@ func (c *v2RoutedToNamespaceCheck) WarmupEligible() bool { return false }
 
 // WarmupEligible returns false; this check is not part of the
 // `gc start` warm-up scan.
+func (v2FormulasDirCheck) WarmupEligible() bool { return false }
+
+// WarmupEligible returns false; this check is not part of the
+// `gc start` warm-up scan.
 func (v2AgentFormatCheck) WarmupEligible() bool { return false }
 
 // WarmupEligible returns false; this check is not part of the

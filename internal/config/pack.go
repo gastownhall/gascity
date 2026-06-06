@@ -4,12 +4,14 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	iofs "io/fs"
 	"log"
 	"path/filepath"
 	"slices"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/BurntSushi/toml"
 	"github.com/gastownhall/gascity/internal/fsys"
@@ -32,24 +34,28 @@ type deferredRigPatches struct {
 	overrides          []AgentOverride
 }
 
-// PackConfig is the TOML structure of a pack.toml file.
-// It has a [pack] metadata header and agent definitions.
+// PackConfig is the TOML structure of a pack.toml file. PackV2 agent
+// definitions are discovered from agents/<name>/agent.toml; the inline agent
+// list remains schema-visible for migration compatibility with legacy packs.
 type PackConfig struct {
-	Pack           PackMeta                `toml:"pack" jsonschema:"required"`
-	Imports        map[string]Import       `toml:"imports,omitempty"`
-	AgentDefaults  AgentDefaults           `toml:"agent_defaults,omitempty" jsonschema:"-"`
-	AgentsDefaults AgentDefaults           `toml:"agents,omitempty" jsonschema:"-"`
-	Defaults       PackDefaults            `toml:"defaults,omitempty" jsonschema:"-"`
-	Agents         []Agent                 `toml:"agent,omitempty"`
-	NamedSessions  []NamedSession          `toml:"named_session,omitempty"`
-	Services       []Service               `toml:"service,omitempty"`
-	Providers      map[string]ProviderSpec `toml:"providers,omitempty"`
-	Formulas       FormulasConfig          `toml:"formulas,omitempty" jsonschema:"-"`
-	Patches        PackPatches             `toml:"patches,omitempty"`
-	Doctor         []PackDoctorEntry       `toml:"doctor,omitempty"`
-	Commands       []PackCommandEntry      `toml:"commands,omitempty"`
-	Global         PackGlobal              `toml:"global,omitempty"`
-	Pricing        []pricing.ModelPricing  `toml:"pricing,omitempty"`
+	Pack           PackMeta          `toml:"pack" jsonschema:"required"`
+	Imports        map[string]Import `toml:"imports,omitempty"`
+	AgentDefaults  AgentDefaults     `toml:"agent_defaults,omitempty"`
+	AgentsDefaults AgentDefaults     `toml:"agents,omitempty" jsonschema:"-"`
+	Defaults       PackDefaults      `toml:"defaults,omitempty" jsonschema:"-"`
+	// Agents holds legacy inline agent templates accepted by the current
+	// loader. New PackV2 packs should define agents under
+	// agents/<name>/agent.toml instead.
+	Agents        []Agent                 `toml:"agent,omitempty"`
+	NamedSessions []NamedSession          `toml:"named_session,omitempty"`
+	Services      []Service               `toml:"service,omitempty"`
+	Providers     map[string]ProviderSpec `toml:"providers,omitempty"`
+	Formulas      FormulasConfig          `toml:"formulas,omitempty" jsonschema:"-"`
+	Patches       PackPatches             `toml:"patches,omitempty"`
+	Doctor        []PackDoctorEntry       `toml:"doctor,omitempty"`
+	Commands      []PackCommandEntry      `toml:"commands,omitempty"`
+	Global        PackGlobal              `toml:"global,omitempty"`
+	Pricing       []pricing.ModelPricing  `toml:"pricing,omitempty"`
 }
 
 // PackPatches holds the patch operations valid in pack.toml. City
@@ -98,12 +104,34 @@ func ExpandPacks(cfg *City, fs fsys.FS, cityRoot string, rigFormulaDirs map[stri
 
 func expandPacks(cfg *City, fs fsys.FS, cityRoot string, rigFormulaDirs map[string][]string, opts LoadOptions) error {
 	var expanded []Agent
+	// City-scoped agents and named sessions encountered through a rig-scope
+	// include/import are hoisted to city scope (deduped) rather than dropped,
+	// so a city-scoped agent that lives in a rig-included pack (e.g. a routing
+	// coordinator in a pack only ever rig-included) still registers. Collected
+	// here across all rigs and merged into cfg once below.
+	var hoistedAgents []Agent
+	var hoistedNamedSessions []NamedSession
 	for i := range cfg.Rigs {
 		rig := &cfg.Rigs[i]
 		cache := &packLoadCache{results: make(map[string]*packLoadResult)}
 		topoRefs := rig.Includes
 		if len(topoRefs) == 0 && len(rig.Imports) == 0 {
-			continue
+			// When a rig has only a path (no explicit includes/imports), treat
+			// the path directory itself as an implicit include if it contains a
+			// pack.toml. This supports the packV2 convention where a rig root
+			// can carry a pack.toml with agents/ directories.
+			if p := strings.TrimSpace(rig.Path); p != "" {
+				packPath := p
+				if !filepath.IsAbs(packPath) {
+					packPath = filepath.Join(cityRoot, packPath)
+				}
+				if _, sErr := fs.Stat(filepath.Join(packPath, packFile)); sErr == nil {
+					topoRefs = []string{packPath}
+				}
+			}
+			if len(topoRefs) == 0 {
+				continue
+			}
 		}
 
 		var rigAgents []Agent
@@ -175,7 +203,10 @@ func expandPacks(cfg *City, fs fsys.FS, cityRoot string, rigFormulaDirs map[stri
 			rigTopoDirs = appendUnique(rigTopoDirs, topoDirs...)
 			rigPackGraphOnlyDirs = appendUniqueLastWins(rigPackGraphOnlyDirs, topoDirs...)
 
-			// Keep only rig-scoped and unscoped agents for rig expansion.
+			// Keep only rig-scoped and unscoped agents for rig expansion;
+			// hoist city-scoped ones to city scope instead of dropping them.
+			hoistedAgents = append(hoistedAgents, hoistCityScopedAgents(agents)...)
+			hoistedNamedSessions = append(hoistedNamedSessions, hoistCityScopedNamedSessions(namedSessions)...)
 			agents = filterAgentsByScope(agents, false)
 			namedSessions = filterNamedSessionsByScope(namedSessions, false)
 
@@ -359,6 +390,10 @@ func expandPacks(cfg *City, fs fsys.FS, cityRoot string, rigFormulaDirs map[stri
 				rigTopoDirs = appendUnique(rigTopoDirs, topoDirs...)
 				rigImportPackDirs = prependUniqueBlock(rigImportPackDirs, mcpTopoDirs...)
 
+				// Hoist city-scoped agents/sessions to city scope instead of
+				// dropping them at the rig-import boundary.
+				hoistedAgents = append(hoistedAgents, hoistCityScopedAgents(agents)...)
+				hoistedNamedSessions = append(hoistedNamedSessions, hoistCityScopedNamedSessions(namedSessions)...)
 				agents = filterAgentsByScope(agents, false)
 				namedSessions = filterNamedSessionsByScope(namedSessions, false)
 
@@ -465,6 +500,14 @@ func expandPacks(cfg *City, fs fsys.FS, cityRoot string, rigFormulaDirs map[stri
 		cfg.NamedSessions = append(cfg.NamedSessions, rigNamedSessions...)
 	}
 	cfg.Agents = append(cfg.Agents, expanded...)
+	// Merge hoisted city-scoped agents/sessions (from rig includes/imports)
+	// into the city set, deduped by qualified name. The same pack is commonly
+	// included by several rigs; without dedup the same city-scoped agent would
+	// be registered once per rig and collide (see duplicate_agent_error.go).
+	// Any name already present at city scope (city-scope expansion, a city-root
+	// agents/<name>/, or an earlier hoist) wins; the hoisted copy is skipped.
+	cfg.Agents = mergeHoistedCityAgents(cfg.Agents, hoistedAgents)
+	cfg.NamedSessions = mergeHoistedCityNamedSessions(cfg.NamedSessions, hoistedNamedSessions)
 	if opts.deferRigPatches && opts.deferredRigPatches != nil {
 		for i := range *opts.deferredRigPatches {
 			(*opts.deferredRigPatches)[i].expectedAgentCount = len(cfg.Agents)
@@ -1750,6 +1793,9 @@ func applyInheritedPackAgentDefaults(agents []Agent, defaults AgentDefaults) {
 		}
 		// Includes compose from the inside out: once an included agent has
 		// inherited a scalar default, outer packs do not replace it.
+		if defaults.Provider != "" && agents[i].Provider == "" && agents[i].InheritedProvider == "" {
+			agents[i].InheritedProvider = defaults.Provider
+		}
 		if defaults.DefaultSlingFormula != "" && agents[i].DefaultSlingFormula == nil && agents[i].InheritedDefaultSlingFormula == nil {
 			agents[i].InheritedDefaultSlingFormula = copyStringPtr(&defaults.DefaultSlingFormula)
 		}
@@ -2419,6 +2465,92 @@ func filterNamedSessionsByScope(sessions []NamedSession, cityExpansion bool) []N
 	return result
 }
 
+// hoistCityScopedAgents returns copies of the city-scoped agents in the
+// given slice, restamped for city scope (Dir cleared — it was stamped to the
+// rig name during pack load). Used at rig include/import boundaries so a
+// city-scoped agent that lives in a rig-included pack is hoisted to city
+// scope instead of being silently dropped. BindingName is preserved so a
+// city-scoped agent imported under a binding keeps its qualified identity.
+func hoistCityScopedAgents(agents []Agent) []Agent {
+	var hoisted []Agent
+	for _, a := range agents {
+		if a.Scope != "city" {
+			continue
+		}
+		a.Dir = ""
+		hoisted = append(hoisted, a)
+	}
+	return hoisted
+}
+
+// hoistCityScopedNamedSessions mirrors hoistCityScopedAgents for named
+// sessions.
+func hoistCityScopedNamedSessions(sessions []NamedSession) []NamedSession {
+	var hoisted []NamedSession
+	for _, s := range sessions {
+		if s.Scope != "city" {
+			continue
+		}
+		s.Dir = ""
+		hoisted = append(hoisted, s)
+	}
+	return hoisted
+}
+
+// mergeHoistedCityAgents appends hoisted city-scoped agents to the city
+// agent set, skipping any whose qualified name is already present (from
+// city-scope expansion, a city-root agent, or an earlier hoist of the same
+// agent via another rig). First occurrence wins, so an existing city-scope
+// or city-root definition is preferred over a hoisted one. Identical
+// definitions reached through multiple rigs register exactly once.
+func mergeHoistedCityAgents(agents, hoisted []Agent) []Agent {
+	if len(hoisted) == 0 {
+		return agents
+	}
+	seenQN := make(map[string]bool, len(agents))
+	seenDirName := make(map[[2]string]bool, len(agents))
+	for i := range agents {
+		seenQN[agents[i].QualifiedName()] = true
+		seenDirName[[2]string{agents[i].Dir, agents[i].Name}] = true
+	}
+	for _, a := range hoisted {
+		qn := a.QualifiedName()
+		dn := [2]string{a.Dir, a.Name}
+		if seenQN[qn] || seenDirName[dn] {
+			continue
+		}
+		seenQN[qn] = true
+		seenDirName[dn] = true
+		agents = append(agents, a)
+	}
+	return agents
+}
+
+// mergeHoistedCityNamedSessions mirrors mergeHoistedCityAgents for named
+// sessions.
+func mergeHoistedCityNamedSessions(sessions, hoisted []NamedSession) []NamedSession {
+	if len(hoisted) == 0 {
+		return sessions
+	}
+	seenQN := make(map[string]bool, len(sessions))
+	seenTpl := make(map[[2]string]bool, len(sessions))
+	for i := range sessions {
+		seenQN[sessions[i].QualifiedName()] = true
+		seenTpl[[2]string{sessions[i].Dir, sessions[i].Template}] = true
+	}
+	for _, s := range hoisted {
+		qn := s.QualifiedName()
+		tpl := [2]string{s.Dir, s.Template}
+		if seenQN[qn] || seenTpl[tpl] {
+			continue
+		}
+		seenQN[qn] = true
+		seenTpl[tpl] = true
+		sessions = append(sessions, s)
+	}
+	return sessions
+}
+
 func applyDeferredRigPatches(cfg *City, deferred []deferredRigPatches) error {
 	for _, d := range deferred {
 		if d.agentStart < 0 || d.agentEnd < d.agentStart || d.agentEnd > len(cfg.Agents) {
@@ -2572,6 +2704,9 @@ func applyAgentOverride(a *Agent, ov *AgentOverride) {
 	if ov.WakeMode != nil {
 		a.WakeMode = *ov.WakeMode
 	}
+	if ov.MouseMode != nil {
+		a.MouseMode = *ov.MouseMode
+	}
 	if ov.InjectFragments != nil {
 		a.InjectFragments = append([]string(nil), (*ov.InjectFragments)...)
 	}
@@ -2654,10 +2789,66 @@ func PackContentHash(fs fsys.FS, topoDir string) string {
 // pack directory, recursively descending into subdirectories. File
 // paths are sorted for determinism and include the relative path from
 // topoDir.
+// packContentHashCache memoizes PackContentHashRecursive across calls. The
+// revision-snapshot capture (revision.go) hashes the full content of every pack
+// tree referenced by the city and every rig on every reconcile tick; with many
+// rigs sharing the same packs this re-reads and re-SHA256s the same trees many
+// times per tick and again every patrol, even though packs almost never change
+// between ticks. This was the dominant supervisor CPU cost once the dolt
+// connection churn was eliminated (gastownhall/gascity#1978 follow-up).
+//
+// The cache keys the content hash by absolute pack dir plus a cheap stat
+// fingerprint (per-file size+mtime, no content reads). An unchanged tree is
+// content-hashed once and reused — both for repeats within a single tick and
+// across ticks. Invalidation follows standard build-cache semantics: any file
+// add/remove, size change, or mtime bump (every normal edit and git checkout)
+// changes the fingerprint and forces a re-hash. The only blind spot is an edit
+// that preserves both size and mtime, which pack tooling does not do.
+var packContentHashCache sync.Map // absDir(string) -> packContentHashEntry
+
+type packContentHashEntry struct {
+	fingerprint uint64
+	hash        string
+}
+
+// ResetPackContentHashCache clears the memoized pack content hashes. Tests that
+// mutate a pack tree in place under a path a previous test already hashed call
+// this to avoid cross-test cache bleed.
+func ResetPackContentHashCache() {
+	packContentHashCache.Range(func(k, _ any) bool {
+		packContentHashCache.Delete(k)
+		return true
+	})
+}
+
+// PackContentHashRecursive returns a stable content hash of every file under
+// topoDir (ignoring runtime dirs). Results are memoized per directory and gated
+// by a cheap stat fingerprint, so an unchanged tree is hashed once and reused
+// across calls and reconcile ticks; see packContentHashCache.
 func PackContentHashRecursive(fs fsys.FS, topoDir string) string {
 	var paths []string
 	collectFiles(fs, topoDir, "", &paths)
 	sort.Strings(paths)
+
+	absDir, err := filepath.Abs(topoDir)
+	if err != nil {
+		absDir = topoDir
+	}
+
+	// Cheap stat fingerprint (no content reads) gates the full content hash.
+	fp := fnv.New64a()
+	for _, relPath := range paths {
+		fmt.Fprintf(fp, "%s\x00", relPath) //nolint:errcheck // hash.Write never errors
+		if info, statErr := fs.Stat(filepath.Join(topoDir, relPath)); statErr == nil {
+			fmt.Fprintf(fp, "%d\x00%d\x00", info.Size(), info.ModTime().UnixNano()) //nolint:errcheck
+		}
+	}
+	fpSum := fp.Sum64()
+	if v, ok := packContentHashCache.Load(absDir); ok {
+		if entry := v.(packContentHashEntry); entry.fingerprint == fpSum {
+			return entry.hash
+		}
+	}
 
 	h := sha256.New()
 	for _, relPath := range paths {
@@ -2670,7 +2861,9 @@ func PackContentHashRecursive(fs fsys.FS, topoDir string) string {
 		h.Write(data)            //nolint:errcheck // hash.Write never errors
 		h.Write([]byte{0})       //nolint:errcheck // hash.Write never errors
 	}
-	return fmt.Sprintf("%x", h.Sum(nil))
+	result := fmt.Sprintf("%x", h.Sum(nil))
+	packContentHashCache.Store(absDir, packContentHashEntry{fingerprint: fpSum, hash: result})
+	return result
 }
 
 // collectFiles recursively collects file paths relative to base.
@@ -2711,8 +2904,13 @@ func isIgnoredPackRuntimePath(path string) bool {
 	case ".beads", ".cache", ".gc", ".git", "state", "tmp":
 		return true
 	}
+	// Language-ecosystem dependency dirs are skipped at ANY depth. Pack
+	// hashing previously walked into node_modules for packs anchored at
+	// monorepo roots, opening tens of thousands of files into the
+	// supervisor every dirty reload (gastownhall/gascity#2954). Matches
+	// the existing __pycache__ precedent for Python ecosystems.
 	for _, part := range parts {
-		if part == "__pycache__" {
+		if part == "__pycache__" || part == "node_modules" {
 			return true
 		}
 	}
@@ -2784,9 +2982,14 @@ func decodePackName(data []byte) (string, error) {
 }
 
 // HasPackRigs reports whether any rig in the config uses a pack.
+// Rigs with only a path are included because expandPacks auto-discovers
+// their root pack.toml (if present) as an implicit include.
 func HasPackRigs(rigs []Rig) bool {
 	for _, r := range rigs {
 		if len(r.Includes) > 0 || len(r.Imports) > 0 {
+			return true
+		}
+		if strings.TrimSpace(r.Path) != "" {
 			return true
 		}
 	}

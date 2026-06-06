@@ -61,6 +61,7 @@ func (m *MemStore) snapshot() (int, []Bead, []Dep) {
 // and the store.
 func cloneBead(b Bead) Bead {
 	b.Priority = cloneIntPtr(b.Priority)
+	b.DeferUntil = cloneTimePtr(b.DeferUntil)
 	b.Metadata = maps.Clone(b.Metadata)
 	b.Labels = slices.Clone(b.Labels)
 	b.Needs = slices.Clone(b.Needs)
@@ -80,6 +81,7 @@ func (m *MemStore) Create(b Bead) (Bead, error) {
 		b.Type = "task"
 	}
 	b.CreatedAt = time.Now()
+	b.UpdatedAt = b.CreatedAt
 
 	stored := cloneBead(b)
 	m.beads = append(m.beads, stored)
@@ -154,6 +156,7 @@ func (m *MemStore) Update(id string, opts UpdateOpts) error {
 				}
 				m.beads[i].Labels = filtered
 			}
+			m.beads[i].UpdatedAt = time.Now()
 			return nil
 		}
 	}
@@ -167,7 +170,11 @@ func (m *MemStore) Close(id string) error {
 	defer m.mu.Unlock()
 	for i := range m.beads {
 		if m.beads[i].ID == id {
+			if m.beads[i].Status == "closed" {
+				return nil
+			}
 			m.beads[i].Status = "closed"
+			m.beads[i].UpdatedAt = time.Now()
 			return nil
 		}
 	}
@@ -181,7 +188,11 @@ func (m *MemStore) Reopen(id string) error {
 	defer m.mu.Unlock()
 	for i := range m.beads {
 		if m.beads[i].ID == id {
+			if m.beads[i].Status == "open" {
+				return nil
+			}
 			m.beads[i].Status = "open"
+			m.beads[i].UpdatedAt = time.Now()
 			return nil
 		}
 	}
@@ -202,6 +213,7 @@ func (m *MemStore) CloseAll(ids []string, metadata map[string]string) (int, erro
 			continue
 		}
 		m.beads[i].Status = "closed"
+		m.beads[i].UpdatedAt = time.Now()
 		if m.beads[i].Metadata == nil {
 			m.beads[i].Metadata = make(map[string]string, len(metadata))
 		}
@@ -256,14 +268,9 @@ func (m *MemStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 	}
 
 	var result []Bead
+	now := time.Now().UTC()
 	for _, b := range m.beads {
-		if b.Status != "open" {
-			continue
-		}
-		if b.Ephemeral {
-			continue
-		}
-		if IsReadyExcludedType(b.Type) {
+		if !IsReadyCandidateForTier(b, now, q.TierMode) {
 			continue
 		}
 		if q.Assignee != "" && b.Assignee != q.Assignee {
@@ -315,6 +322,7 @@ func (m *MemStore) Children(parentID string, opts ...QueryOpt) ([]Bead, error) {
 		ParentID:      parentID,
 		IncludeClosed: HasOpt(opts, IncludeClosed),
 		Sort:          SortCreatedAsc,
+		TierMode:      TierModeFromOpts(opts),
 	})
 }
 
@@ -366,6 +374,7 @@ func (m *MemStore) SetMetadata(id, key, value string) error {
 				m.beads[i].Metadata = make(map[string]string)
 			}
 			m.beads[i].Metadata[key] = value
+			m.beads[i].UpdatedAt = time.Now()
 			return nil
 		}
 	}
@@ -374,6 +383,9 @@ func (m *MemStore) SetMetadata(id, key, value string) error {
 
 // SetMetadataBatch atomically sets multiple key-value metadata pairs on a bead.
 func (m *MemStore) SetMetadataBatch(id string, kvs map[string]string) error {
+	if len(kvs) == 0 {
+		return nil
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for i, b := range m.beads {
@@ -384,6 +396,7 @@ func (m *MemStore) SetMetadataBatch(id string, kvs map[string]string) error {
 			for k, v := range kvs {
 				m.beads[i].Metadata[k] = v
 			}
+			m.beads[i].UpdatedAt = time.Now()
 			return nil
 		}
 	}
@@ -463,6 +476,23 @@ func (m *MemStore) DepList(id, direction string) ([]Dep, error) {
 			if d.IssueID == id {
 				result = append(result, d)
 			}
+		}
+	}
+	return result, nil
+}
+
+// DepListBatch returns "down" dependencies for multiple beads from memory.
+func (m *MemStore) DepListBatch(ids []string) (map[string][]Dep, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	idSet := make(map[string]struct{}, len(ids))
+	result := make(map[string][]Dep, len(ids))
+	for _, id := range ids {
+		idSet[id] = struct{}{}
+	}
+	for _, d := range m.deps {
+		if _, ok := idSet[d.IssueID]; ok {
+			result[d.IssueID] = append(result[d.IssueID], d)
 		}
 	}
 	return result, nil

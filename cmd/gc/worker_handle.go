@@ -105,6 +105,13 @@ func workerSessionCreateHints(resolved *config.ResolvedProvider) runtime.Config 
 		ProcessNames:           resolved.ProcessNames,
 		EmitsPermissionWarning: resolved.EmitsPermissionWarning,
 		AcceptStartupDialogs:   resolved.AcceptStartupDialogs,
+		// ga-c4w: the unmanaged `gc session new` direct-start path (controller
+		// down) builds its runtime hints here. Default interactive CLI creates to
+		// mouse-on so the tmux wheel drives copy-mode scrollback. Pool/headless
+		// agents never reach this function — they resolve MouseOn via the
+		// reconciler's templateParamsToConfig (cfgAgent.MouseModeOn()=false), so
+		// this does not weaken controller-poll safety.
+		MouseOn: true,
 	}
 }
 
@@ -284,9 +291,9 @@ func resolvedWorkerSessionConfigWithConfig(
 	// reseed at resolvedWorkerRuntimeWithConfigAndMetadata and the
 	// API-side seeding in internal/api/session_resolved_config.go.
 	// Regression for upstream gastownhall/gascity#101 (re-opened).
-	sessionEnv := resolved.Env
+	sessionEnv := mergeEnv(providerProcessPassthroughEnv(), resolved.Env)
 	if strings.TrimSpace(cityPath) != "" {
-		sessionEnv = mergeEnv(resolved.Env, cityIdentityAnchorsForCity(cityPath))
+		sessionEnv = mergeEnv(sessionEnv, cityIdentityAnchorsForCity(cityPath))
 	}
 	return worker.NormalizeResolvedSessionConfig(worker.ResolvedSessionConfig{
 		Alias:        alias,
@@ -308,6 +315,7 @@ func resolvedWorkerSessionConfigWithConfig(
 			},
 			Hints: func() runtime.Config {
 				hints := workerSessionCreateHints(resolved)
+				hints.Env = sessionEnv
 				hints.MCPServers = mcpServers
 				return hints
 			}(),
@@ -520,7 +528,7 @@ func resolvedWorkerRuntimeWithConfigAndMetadata(cityPath string, cfg *config.Cit
 	// dispatcher trace path is per-dispatcher-qualified and must not be
 	// overwritten with the city-uniform default here. template_resolve.go
 	// owns the qualified override for the CLI create path.
-	sessionEnv := mergeEnv(resolved.Env, cityIdentityAnchorsForCity(cityPath))
+	sessionEnv := mergeEnv(providerProcessPassthroughEnv(), resolved.Env, cityIdentityAnchorsForCity(cityPath))
 	// Resolve session_live so resumed sessions get re-themed (status bar,
 	// keybindings) the same way reconciler-started sessions do. Without this,
 	// `gc session attach` recreates the tmux runtime with an empty
@@ -543,10 +551,11 @@ func resolvedWorkerRuntimeWithConfigAndMetadata(cityPath string, cfg *config.Cit
 	return &worker.ResolvedRuntime{
 		Command:    command,
 		WorkDir:    workDir,
-		Provider:   firstNonEmptyGCString(info.Provider, resolved.Name),
+		Provider:   resolvedWorkerRuntimeProviderLabel(resolved, transport, info),
 		SessionEnv: sessionEnv,
 		Hints: runtime.Config{
 			WorkDir:                workDir,
+			Env:                    sessionEnv,
 			Lifecycle:              runtime.Lifecycle(resolved.Lifecycle),
 			ReadyPromptPrefix:      resolved.ReadyPromptPrefix,
 			ReadyDelayMs:           resolved.ReadyDelayMs,
@@ -563,6 +572,13 @@ func resolvedWorkerRuntimeWithConfigAndMetadata(cityPath string, cfg *config.Cit
 			SessionIDFlag: resolved.SessionIDFlag,
 		},
 	}, nil
+}
+
+func resolvedWorkerRuntimeProviderLabel(resolved *config.ResolvedProvider, transport string, info session.Info) string {
+	if strings.TrimSpace(configuredWorkerRuntimeCommand(resolved, transport)) != "" {
+		return firstNonEmptyGCString(resolved.Name, info.Provider)
+	}
+	return firstNonEmptyGCString(info.Provider, resolved.Name)
 }
 
 func resolvedWorkerRuntimeCommandForTransport(cityPath string, resolved *config.ResolvedProvider, transport, storedCommand, fallbackProvider string, metadata map[string]string) string {
@@ -746,6 +762,9 @@ func resolvedWorkerRuntimeTransport(info session.Info, resolved *config.Resolved
 	}
 	if storedWorkerSessionProvesACPTransport(resolved, configuredTransport, info.Command, metadata) {
 		return "acp"
+	}
+	if strings.TrimSpace(configuredTransport) == config.SessionTransportTmux {
+		return config.SessionTransportTmux
 	}
 	if strings.TrimSpace(info.Command) == "" {
 		return strings.TrimSpace(configuredTransport)

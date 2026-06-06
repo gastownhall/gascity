@@ -318,6 +318,7 @@ func findExistingAttach(store beads.Store, recipe *formula.Recipe, rootBeadID, a
 			"gc.idempotency_key": key,
 			"gc.root_bead_id":    rootBeadID,
 		},
+		TierMode: beads.TierBoth,
 	})
 	if err != nil {
 		return nil, err
@@ -402,6 +403,7 @@ func existingAttachIDMapping(store beads.Store, recipe *formula.Recipe, rootBead
 	}
 	all, err := store.List(beads.ListQuery{
 		Metadata: map[string]string{"gc.root_bead_id": rootBeadID},
+		TierMode: beads.TierBoth,
 	})
 	if err != nil {
 		return nil, err
@@ -461,7 +463,7 @@ func Instantiate(ctx context.Context, store beads.Store, recipe *formula.Recipe,
 		return nil, fmt.Errorf("recipe %q has no steps", recipe.Name)
 	}
 	if !opts.DeferAssignees && IsGraphApplyEnabled() {
-		if applier, ok := store.(beads.GraphApplyStore); ok {
+		if applier, ok := beads.GraphApplyFor(store); ok {
 			result, err := instantiateViaGraphApply(ctx, applier, recipe, opts)
 			if err == nil {
 				return result, nil
@@ -541,12 +543,19 @@ func Instantiate(ctx context.Context, store beads.Store, recipe *formula.Recipe,
 			if opts.ParentID != "" && step.Metadata["gc.kind"] != "workflow" {
 				b.ParentID = opts.ParentID
 			}
+			if b.Metadata == nil {
+				b.Metadata = make(map[string]string, 4)
+			}
+			if recipe.ContentHash != "" {
+				b.Metadata["gc.formula_hash"] = recipe.ContentHash
+			}
+			if recipe.FormulaSource != "" {
+				b.Metadata["gc.formula_source"] = recipe.FormulaSource
+			}
 			if opts.IdempotencyKey != "" {
-				if b.Metadata == nil {
-					b.Metadata = make(map[string]string, 1)
-				}
 				b.Metadata["idempotency_key"] = opts.IdempotencyKey
 			}
+			stampFormulaVars(vars, &b)
 		} else {
 			// graph.v2 workflows and their retry/Ralph attempt sub-recipes
 			// use step beads as independently routable actionable work, not
@@ -707,7 +716,7 @@ func InstantiateFragment(ctx context.Context, store beads.Store, recipe *formula
 		priorityOverride = clonePriority(root.Priority)
 	}
 	if IsGraphApplyEnabled() {
-		if applier, ok := store.(beads.GraphApplyStore); ok {
+		if applier, ok := beads.GraphApplyFor(store); ok {
 			opts.PriorityOverride = priorityOverride
 			return instantiateFragmentViaGraphApply(ctx, store, applier, recipe, opts)
 		}
@@ -998,11 +1007,11 @@ func validateTimeoutMetadataVars(stepID string, metadata map[string]string) erro
 }
 
 func deferBeadRouting(b *beads.Bead) {
-	beadType := b.Type
-	if beadType == "" {
-		beadType = "task"
-	}
-	if !beads.IsReadyExcludedType(beadType) {
+	if !beads.IsReadyExcludedBead(*b) {
+		beadType := b.Type
+		if beadType == "" {
+			beadType = "task"
+		}
 		ensureBeadMetadata(b)
 		b.Metadata[DeferredTypeMetadataKey] = beadType
 		b.Type = "gate"
@@ -1029,6 +1038,23 @@ func deferBeadMetadataValue(b *beads.Bead, sourceKey, deferredKey string) {
 func ensureBeadMetadata(b *beads.Bead) {
 	if b.Metadata == nil {
 		b.Metadata = make(map[string]string, 1)
+	}
+}
+
+const formulaVarMetadataPrefix = "gc.var."
+
+// stampFormulaVars records non-empty formula input vars on the root bead as
+// gc.var.<name> metadata so they are discoverable from the parent alone
+// without traversing sub-step descriptions.
+func stampFormulaVars(vars map[string]string, b *beads.Bead) {
+	if len(vars) == 0 {
+		return
+	}
+	ensureBeadMetadata(b)
+	for k, v := range vars {
+		if v != "" {
+			b.Metadata[formulaVarMetadataPrefix+k] = v
+		}
 	}
 }
 
@@ -1062,7 +1088,7 @@ func clonePriority(v *int) *int {
 // applyVarDefaults merges formula variable defaults with caller-provided
 // vars. Caller values take precedence over defaults.
 func applyVarDefaults(vars map[string]string, defs map[string]*formula.VarDef) map[string]string {
-	result := make(map[string]string, len(vars)+len(defs))
+	result := make(map[string]string)
 	for name, def := range defs {
 		if def != nil && def.Default != nil {
 			result[name] = *def.Default
@@ -1084,7 +1110,7 @@ func ValidateRecipeRuntimeVars(recipe *formula.Recipe, opts Options) error {
 	if len(validationErrs) == 0 && len(titleErrs) == 0 {
 		return nil
 	}
-	errs := make([]string, 0, len(validationErrs)+len(titleErrs))
+	errs := make([]string, 0)
 	errs = append(errs, validationErrs...)
 	errs = append(errs, titleErrs...)
 	return fmt.Errorf("variable validation failed:\n  - %s", strings.Join(errs, "\n  - "))
@@ -1098,7 +1124,7 @@ func runtimeValidationVars(recipe *formula.Recipe, opts Options) map[string]stri
 		return opts.Vars
 	}
 	vars := applyVarDefaults(opts.Vars, recipe.Vars)
-	result := make(map[string]string, len(vars)+1)
+	result := make(map[string]string)
 	for k, v := range vars {
 		result[k] = v
 	}
@@ -1210,6 +1236,7 @@ func trimAttemptSuffix(id, suffix string) (string, bool) {
 func existingLogicalBeadIDIndex(store beads.Store, rootID string) (map[string]string, error) {
 	all, err := store.List(beads.ListQuery{
 		Metadata: map[string]string{"gc.root_bead_id": rootID},
+		TierMode: beads.TierBoth,
 	})
 	if err != nil {
 		return nil, err

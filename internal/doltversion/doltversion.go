@@ -9,7 +9,7 @@ import (
 )
 
 // ManagedMin is the minimum Dolt version required for managed bd/Dolt operation.
-const ManagedMin = "1.86.2"
+const ManagedMin = "2.1.0"
 
 var (
 	// ErrPreRelease reports a Dolt version that is not a final release.

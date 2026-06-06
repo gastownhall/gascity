@@ -7,13 +7,25 @@
 # All agents use start_command (gc agent-script, driven by YAML
 # agent-scripts) for deterministic, reproducible demo recordings.
 #
-# To use: gc init --from examples/lifecycle ~/demo-city
+# To use:
+#   gc init --from examples/lifecycle ~/demo-city
+#   cd ~/demo-city
+#   gc start
+#
+#   # Add a rig (lifecycle pack is included automatically):
+#   gc rig add ~/demo-repo
+#
+#   # Route work to the polecat pool:
+#   gc sling demo-repo/polecat "Write hello world"
+#   bd show <bead-id> --watch
 
 [workspace]
 name = "lifecycle-demo"
 start_command = "true"
 # No workspace pack — all agents are rig-scoped.
-# Use: gc rig add <repo> --include packs/lifecycle
+
+[defaults.rig.imports.lifecycle]
+source = "packs/lifecycle"
 
 [daemon]
 patrol_interval = "10s"

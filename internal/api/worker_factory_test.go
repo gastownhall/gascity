@@ -15,6 +15,12 @@ import (
 )
 
 func TestResolveWorkerSessionRuntimePreservesStoredResolvedCommandAndBackfillsCurrentResumeSettings(t *testing.T) {
+	t.Setenv("ANTHROPIC_AUTH_TOKEN", "api-resume-anthropic-token")
+	t.Setenv("ANTHROPIC_BASE_URL", "https://process.example.test")
+	t.Setenv("OLLAMA_API_KEY", "api-resume-ollama-token")
+	t.Setenv("GC_RIG", "caller-rig")
+	t.Setenv("GC_SESSION_NAME", "caller-session")
+
 	fs := newSessionFakeState(t)
 	fs.cfg.Agents[0].Provider = "resolved-worker"
 	fs.cfg.Providers["resolved-worker"] = config.ProviderSpec{
@@ -26,6 +32,9 @@ func TestResolveWorkerSessionRuntimePreservesStoredResolvedCommandAndBackfillsCu
 		ResumeStyle:       "flag",
 		ResumeCommand:     "resolved resume {{.SessionKey}}",
 		SessionIDFlag:     "--session-id-resolved",
+		Env: map[string]string{
+			"ANTHROPIC_BASE_URL": "https://resolved.example.test",
+		},
 	}
 
 	srv := New(fs)
@@ -92,6 +101,26 @@ func TestResolveWorkerSessionRuntimePreservesStoredResolvedCommandAndBackfillsCu
 	// to the city-uniform value here.
 	if got, present := runtimeCfg.SessionEnv["GC_CONTROL_DISPATCHER_TRACE_DEFAULT"]; present {
 		t.Errorf("SessionEnv[GC_CONTROL_DISPATCHER_TRACE_DEFAULT] = %q present, want absent (identity-only)", got)
+	}
+	for key, want := range map[string]string{
+		"ANTHROPIC_AUTH_TOKEN": "api-resume-anthropic-token",
+		"ANTHROPIC_BASE_URL":   "https://resolved.example.test",
+		"OLLAMA_API_KEY":       "api-resume-ollama-token",
+	} {
+		if got := runtimeCfg.SessionEnv[key]; got != want {
+			t.Errorf("SessionEnv[%s] = %q, want %q", key, got, want)
+		}
+		if got := runtimeCfg.Hints.Env[key]; got != want {
+			t.Errorf("Hints.Env[%s] = %q, want %q", key, got, want)
+		}
+	}
+	for _, key := range []string{"GC_RIG", "GC_SESSION_NAME"} {
+		if got, present := runtimeCfg.SessionEnv[key]; present {
+			t.Errorf("SessionEnv[%s] = %q present, want absent caller context", key, got)
+		}
+		if got, present := runtimeCfg.Hints.Env[key]; present {
+			t.Errorf("Hints.Env[%s] = %q present, want absent caller context", key, got)
+		}
 	}
 	if got, want := runtimeCfg.Hints.Env["GC_CITY"], fs.cityPath; got != want {
 		t.Errorf("Hints.Env[GC_CITY] = %q, want %q", got, want)

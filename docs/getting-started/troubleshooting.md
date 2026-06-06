@@ -20,6 +20,37 @@ gc doctor --verbose   # extra detail
 gc doctor --fix       # attempt automatic repairs
 ```
 
+## Add City-Local Doctor Checks
+
+Use `[[doctor.check]]` in `city.toml` for a workspace-specific health check
+that does not need to be packaged as a reusable pack doctor. Provide the bare
+check name; `gc doctor` adds the `local:` prefix in output.
+
+```toml
+[doctor]
+
+[[doctor.check]]
+name = "gopath-symlink"
+description = "Verify the GOPATH symlink used by local build scripts"
+script = "scripts/check-gopath.sh"
+fix = "scripts/fix-gopath.sh"
+```
+
+The `script` and optional `fix` paths are relative to the city root. Absolute
+paths and paths that escape the city directory are rejected and reported as
+named `StatusError` check results.
+
+Local checks reuse the same script protocol as pack doctor checks:
+
+| Exit code | Result |
+|-----------|--------|
+| 0 | OK |
+| 1 | Warning |
+| 2 or higher | Error |
+
+The first stdout line becomes the check message. Additional stdout lines are
+shown by `gc doctor --verbose`.
+
 ## "command not found" After Install
 
 If `gc` is installed but your shell cannot find it, the binary is not on your
@@ -102,7 +133,7 @@ check.
 
 | Tool | Min version | macOS | Linux |
 |------|-------------|-------|-------|
-| dolt | 1.86.2 or newer | `brew install dolt` | [releases](https://github.com/dolthub/dolt/releases) |
+| dolt | 2.1.0 or newer | `brew install dolt` | [releases](https://github.com/dolthub/dolt/releases) |
 | bd | 1.0.0 | [releases](https://github.com/gastownhall/beads/releases) | [releases](https://github.com/gastownhall/beads/releases) |
 | flock | -- | `brew install flock` | `apt install util-linux` |
 
@@ -134,8 +165,9 @@ durable versioned storage and is recommended for real work.
 
 ## Dolt Version Too Old
 
-Gas City requires a final Dolt 1.86.2 or newer. Older and pre-release builds
-can miss the upstream GC/writer deadlock fix in dolthub/dolt commit
+Gas City requires a final Dolt 2.1.0 or newer. Older and pre-release builds
+are below the managed bd/Dolt compatibility floor; releases before 1.86.2 can
+also miss the upstream GC/writer deadlock fix in dolthub/dolt commit
 `ccf7bde206`, which can hang `dolt_backup sync` under heavy write load. Check
 your version:
 
@@ -159,6 +191,22 @@ bd version
 
 Upgrade via Homebrew (`brew upgrade beads`) or download a newer release from
 [gastownhall/beads/releases](https://github.com/gastownhall/beads/releases).
+
+## Native Store Falls Back Because Hooks Are Installed
+
+Native `bd` store selection intentionally falls back to the subprocess-backed
+store when executable `.beads/hooks/on_create`, `.beads/hooks/on_update`, or
+`.beads/hooks/on_close` scripts are present. Those hooks historically emitted
+bead events for external `bd` writes; the native in-process store does not run
+shell hooks.
+
+For controller-managed Gas City deployments, confirm that the controller is
+wrapping stores with `CachingStore` and emitting `bead.created`,
+`bead.updated`, `bead.closed`, and `bead.deleted` events to the event bus. After
+that migration is verified, remove the executable hook scripts from the city or
+rig `.beads/hooks/` directory to allow native store adoption. Keep
+`GC_BEADS_FORCE_FALLBACK=1` set when a deployment still depends on those hook
+scripts directly.
 
 ## flock Not Found (macOS)
 
@@ -204,6 +252,46 @@ of a clean version string, upgrade to Gas City v0.13.4 or later. This was a
 bug where remote pack fetches wrote git sideband output to the terminal,
 fixed in [PR #141](https://github.com/gastownhall/gascity/pull/141).
 
+## Provider Credentials Dropped When the Supervisor Starts
+
+Symptom: agents authenticate fine when you launch a city from your normal
+interactive shell, but fail to authenticate (or silently fall back to a
+different provider) when the city is started by the supervisor at login or
+after a reboot.
+
+Cause: the supervisor service file (launchd plist / systemd unit) captures
+provider credentials by snapshotting the environment of the shell that ran
+`gc start` (or `gc supervisor install`). A credential that is only present
+in an interactive shell — for example sourced from an rc file that the login
+service manager never reads — is not in that snapshot, so it never reaches
+the supervised process.
+
+Fix: put the durable credentials in a machine-local secrets file at
+`${GC_HOME}/secrets.env` (defaults to `~/.gc/secrets.env`). On every service
+file regeneration, `gc` merges this file into the supervisor environment, so
+the value survives a reboot regardless of which shell ran `gc start`.
+
+```bash
+# ~/.gc/secrets.env  (chmod 600)
+ANTHROPIC_API_KEY=sk-ant-...
+OPENAI_API_KEY=sk-...
+```
+
+The file uses dotenv syntax: `KEY=VALUE` per line, `#` comments, blank lines,
+an optional `export ` prefix, and optional surrounding quotes. Only keys that
+are already eligible for the supervisor environment are merged — provider
+credentials (recognized by their standard prefixes such as `ANTHROPIC_`,
+`OPENAI_`, `GEMINI_`) plus any keys you opt in via `GC_SUPERVISOR_ENV`; any
+other key in the file is ignored. A value exported in the calling shell still
+takes precedence over the file, and `GC_SUPERVISOR_OMIT_PROVIDER_CREDS=1`
+suppresses provider credentials from both sources.
+
+Apply the change by regenerating the service file:
+
+```bash
+gc service restart     # restarts the launchd/systemd service
+```
+
 ## JSONL Archive Push Failures
 
 The maintenance pack runs `jsonl-export` every 15 minutes to dump each bead
@@ -239,8 +327,8 @@ bead content and should not be shared across cities). Then:
 # Create a private repo on your git host (example: GitHub via gh)
 gh repo create my-city-jsonl-archive --private
 
-# Point the archive at it
-ARCHIVE=$(gc config get state_dir)/packs/maintenance/jsonl-archive
+# Point the archive at it (run from anywhere inside your city)
+ARCHIVE="$(gc status --json | jq -r '.city_path')/.gc/runtime/packs/maintenance/jsonl-archive"
 git -C "$ARCHIVE" remote add origin git@github.com:<you>/my-city-jsonl-archive.git
 
 # Seed the remote with the existing local history
@@ -359,7 +447,7 @@ managed city Dolt. Do **not** edit `.beads/dolt-server.port` or
 `bd dolt set port` directly; both self-revert.
 
 See the
-[Managed-city Dolt endpoints runbook](../runbooks/managed-city-endpoints.md)
+[Managed-city Dolt endpoints runbook](/runbooks/managed-city-endpoints)
 for the mental model, the forbidden edits, the sanctioned escape
 hatches (`gc rig set-endpoint --inherit`/`--self --force`/`--external`),
 and an end-to-end recovery recipe.

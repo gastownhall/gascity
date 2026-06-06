@@ -11,6 +11,19 @@ import (
 func TestMakeInstallFailsClosedWhenCopyFails(t *testing.T) {
 	repoRoot := repoRoot(t)
 	tmp := t.TempDir()
+	t.Cleanup(func() {
+		_ = filepath.WalkDir(tmp, func(path string, d os.DirEntry, err error) error {
+			if err != nil {
+				return nil
+			}
+			if d.IsDir() {
+				_ = os.Chmod(path, 0o755)
+			} else {
+				_ = os.Chmod(path, 0o644)
+			}
+			return nil
+		})
+	})
 	buildDir := filepath.Join(tmp, "build")
 	installDir := filepath.Join(tmp, "install")
 	binDir := filepath.Join(tmp, "bin")

@@ -48,7 +48,11 @@ func IsMergeablePath(relPath string) bool {
 //     1. "matcher" key → identity is the matcher value
 //     2. "command" key → identity is "cmd:<value>"
 //     3. "bash" key → identity is "bash:<value>"
-//     4. else → no identity, always append
+//     4. nested "hooks" array (Claude/Gemini wrapper shape with no top-level
+//     matcher/command) → identity is "inner:<canonical inner hooks>", so an
+//     overlay re-projecting an already-present command is a no-op instead of
+//     an unbounded append.
+//     5. else → no identity, always append
 //
 // Returns pretty-printed JSON.
 func MergeSettingsJSON(base, overlay []byte) ([]byte, error) {
@@ -207,7 +211,34 @@ func hookEntryKey(entry map[string]any) (string, bool) {
 		}
 		return "bash:" + s, true
 	}
+	// Claude/Gemini wrapper shape: { "hooks": [ {type, command}, ... ] } with
+	// no top-level matcher/command. Pack overlays (e.g. model-advisor's
+	// Stop/SubagentStop) use this shape, and without an identity key every
+	// re-projection appended another copy — accumulating unbounded across
+	// session starts. Key on the canonicalized inner hooks so that re-merging
+	// the same command(s) is idempotent (dedup by inner command content).
+	if v, ok := entry["hooks"]; ok {
+		if key, kok := innerHooksKey(v); kok {
+			return key, true
+		}
+	}
 	return "", false
+}
+
+// innerHooksKey derives a stable identity from the inner "hooks" array of a
+// wrapper-shape entry. The key is the canonical (sorted-key, HTML-unescaped)
+// JSON of the inner array, so two entries carrying identical command(s) collapse
+// to one regardless of key ordering or whitespace. Returns false if the value
+// is not a JSON array (leave such entries to the always-append fallback).
+func innerHooksKey(inner any) (string, bool) {
+	if _, ok := inner.([]any); !ok {
+		return "", false
+	}
+	canon, err := MarshalCanonicalJSON(inner)
+	if err != nil {
+		return "", false
+	}
+	return "inner:" + string(bytes.TrimRight(canon, "\n")), true
 }
 
 // toMapStringAny attempts to convert v to map[string]any.

@@ -8,6 +8,18 @@ mcp-agent-mail @ https://github.com/Dicklesworthstone/mcp_agent_mail/archive/327
 # line once mcp-agent-mail upstream pins GitPython>=3.1.50 itself.
 gitpython>=3.1.50
 
+# Security floor: urllib3 < 2.7.0 has GHSA-mf9v-mfxr-j63j (HIGH,
+# decompression-bomb safeguards bypassed in parts of the streaming API)
+# and GHSA-qccp-gfcp-xxvc (HIGH, sensitive headers forwarded across
+# origins in proxied low-level redirects). Pinning floor at 2.7.0 until
+# transitive constraints pull a patched version on their own.
+urllib3>=2.7.0
+
+# Security floor: idna < 3.15 has GHSA-65pc-fj4g-8rjx (MEDIUM, IDNA
+# bypass of the CVE-2024-3651 fix). Drop once transitive constraints
+# carry the patched version themselves.
+idna>=3.15
+
 # Authlib and FastMCP security floors live in
 # .github/requirements/mcp-agent-mail.overrides.txt because mcp-agent-mail
 # v0.3.2 still caps Authlib below the fixed release.

@@ -24,6 +24,23 @@
 #      continue only when table and database value hashes stay stable. Any
 #      value-hash drift, table-list drift, or row-count decrease is
 #      quarantined before full GC.
+#   4a. Local-verify HEAD-stability gate. The pre-flight stability loop cannot
+#      close the residual window between its final HEAD check and the flatten,
+#      nor the window during post-flatten verify, so a normal MVCC writer (the
+#      beads/mail workload) can still commit inside the flatten window. That
+#      legitimately adds rows and shifts value hashes versus the snapshot, which
+#      otherwise looks identical to the ambiguous gain+drift corruption signal.
+#      Quarantining that false positive blocks all future GC of the db and
+#      starves DOLT_GC until host memory is exhausted. So, mirroring the remote-
+#      push path's HEAD-stability defer, the gain+drift case is downgraded from
+#      a blocking quarantine to a skip-and-retry-next-run ONLY when a concurrent
+#      writer is proven. A writer is proven (and distinguished from the flatten's
+#      OWN commit) when either HEAD captured immediately before the mutating
+#      reset differs from the stable pre-flight HEAD (a writer landed in the
+#      preflight->reset window, before the flatten committed), or HEAD captured
+#      after verify moved past the flatten's own commit (a writer landed during/
+#      after verify). All other failures — and gain+drift with a stable HEAD —
+#      still quarantine. Probe failure leaves the race unproven and quarantines.
 #   5. Run CALL DOLT_GC('--full') to reclaim chunks orphaned by the flatten.
 #
 # Remote push failures are recorded in compact-pending-push markers and do not
@@ -61,12 +78,37 @@
 #   GC_DOLT_COMPACT_ONLY_DBS              (optional) — comma-separated list of
 #                                         database names to compact. When set,
 #                                         all other databases are skipped.
+#   GC_DOLT_MANAGED_LOCAL                 (optional) — 1 for gc-managed local
+#                                         runtime validation; 0 allows explicit
+#                                         loopback host/port targets and skips
+#                                         non-local external targets.
 #   GC_DOLT_REFSPEC_<DB_UPPER>            (optional) — compact remote push
 #                                         refspec in <local>:<remote> form.
 #                                         DB name is uppercased with '-'
 #                                         replaced by '_' to derive the env
 #                                         key; DB names that differ only by
 #                                         '-' vs '_' share that key.
+#   GC_DOLT_COMPACT_BARE_GC               (optional) — when set to a truthy
+#                                         value (1, true, yes — matching
+#                                         the GC_DOLT_MANAGED_LOCAL style),
+#                                         skip the commit-count threshold
+#                                         AND the flatten/full-GC path
+#                                         entirely, and run a bare
+#                                         CALL DOLT_GC() on each
+#                                         discovered database. Decouples
+#                                         the working-set GC pass (which
+#                                         resets the NBS journal range
+#                                         index that grows with write
+#                                         churn) from the threshold-gated
+#                                         flatten, so a memory-pressure
+#                                         caller can run a short-cadence
+#                                         GC without rewriting history.
+#                                         Honors GC_DOLT_COMPACT_ONLY_DBS,
+#                                         GC_DOLT_COMPACT_DRY_RUN, and the
+#                                         per-db quarantine marker; does
+#                                         NOT write pending-GC /
+#                                         pending-push markers (those are
+#                                         flatten-remediation state).
 set -eu
 
 : "${GC_CITY_PATH:?GC_CITY_PATH must be set}"
@@ -74,16 +116,54 @@ set -eu
 gc_dolt_port_input="$GC_DOLT_PORT"
 gc_dolt_host_input="${GC_DOLT_HOST:-}"
 
+compact_dolt_host_is_local() (
+  compact_host=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
+  case "$compact_host" in
+    ''|localhost|0.0.0.0|::1|::|'[::1]'|'[::]')
+      return 0
+      ;;
+    127.*.*.*)
+      IFS=.
+      set -- $compact_host
+      [ "$#" -eq 4 ] || return 1
+      [ "$1" = "127" ] || return 1
+      for compact_octet in "$2" "$3" "$4"; do
+        case "$compact_octet" in
+          ''|*[!0-9]*)
+            return 1
+            ;;
+        esac
+        [ "$compact_octet" -le 255 ] 2>/dev/null || return 1
+      done
+      return 0
+      ;;
+  esac
+  return 1
+)
+
+explicit_external_local_dolt=0
+case "${GC_DOLT_MANAGED_LOCAL:-}" in
+  0|false|FALSE|no|NO)
+    if [ -z "$gc_dolt_port_input" ]; then
+      printf 'compact: managed local Dolt runtime is not applicable and GC_DOLT_PORT is empty — skip\n'
+      exit 0
+    fi
+    if compact_dolt_host_is_local "$gc_dolt_host_input"; then
+      GC_DOLT_PORT="$gc_dolt_port_input"
+      explicit_external_local_dolt=1
+    else
+      printf 'compact: GC_DOLT_HOST=%s is not a local Dolt compaction target — skip\n' \
+        "$gc_dolt_host_input"
+      exit 0
+    fi
+    ;;
+esac
+
 PACK_DIR="${GC_PACK_DIR:-$(unset CDPATH; cd -- "$(dirname "$0")/.." && pwd)}"
 # shellcheck disable=SC1091
 . "$PACK_DIR/assets/scripts/runtime.sh"
-
-case "${GC_DOLT_MANAGED_LOCAL:-}" in
-  0|false|FALSE|no|NO)
-    printf 'compact: managed local Dolt runtime is not applicable for this order — skip\n'
-    exit 0
-    ;;
-esac
+# shellcheck disable=SC1091
+. "$PACK_DIR/assets/scripts/compact-gain-drift-proof.sh"
 
 if [ "${GC_DOLT_MANAGED_LOCAL:-}" = "1" ]; then
   managed_port=$(managed_runtime_port "$DOLT_STATE_FILE" "$DOLT_DATA_DIR" || true)
@@ -101,16 +181,14 @@ if [ "${GC_DOLT_MANAGED_LOCAL:-}" = "1" ]; then
   else
     GC_DOLT_PORT="$gc_dolt_port_input"
   fi
+elif [ "$explicit_external_local_dolt" = "1" ]; then
+  :
 elif [ -n "$gc_dolt_port_input" ]; then
-  case "$gc_dolt_host_input" in
-    ''|127.0.0.1|localhost|0.0.0.0|::1|::|'[::1]'|'[::]')
-      ;;
-    *)
-      printf 'compact: GC_DOLT_HOST=%s is not a local managed Dolt host — skip\n' \
-        "$gc_dolt_host_input"
-      exit 0
-      ;;
-  esac
+  if ! compact_dolt_host_is_local "$gc_dolt_host_input"; then
+    printf 'compact: GC_DOLT_HOST=%s is not a local managed Dolt host — skip\n' \
+      "$gc_dolt_host_input"
+    exit 0
+  fi
   managed_port=$(managed_runtime_port "$DOLT_STATE_FILE" "$DOLT_DATA_DIR" || true)
   if [ -z "$managed_port" ] || [ "$gc_dolt_port_input" != "$managed_port" ]; then
     printf 'compact: GC_DOLT_PORT=%s does not match managed runtime port=%s for data_dir=%s — skip\n' \
@@ -139,6 +217,20 @@ pending_push_max_age_secs="${GC_DOLT_COMPACT_PENDING_PUSH_MAX_AGE_SECS:-172800}"
 compact_remote="${GC_DOLT_COMPACT_REMOTE:-}"
 dry_run="${GC_DOLT_COMPACT_DRY_RUN:-}"
 only_dbs="${GC_DOLT_COMPACT_ONLY_DBS:-}"
+bare_gc_input="${GC_DOLT_COMPACT_BARE_GC:-}"
+case "$bare_gc_input" in
+  ''|0|false|FALSE|no|NO)
+    bare_gc=0
+    ;;
+  1|true|TRUE|yes|YES)
+    bare_gc=1
+    ;;
+  *)
+    printf 'compact: invalid GC_DOLT_COMPACT_BARE_GC=%s (must be 1/true/yes or 0/false/no)\n' \
+      "$bare_gc_input" >&2
+    exit 2
+    ;;
+esac
 
 case "$threshold_commits" in
   ''|*[!0-9]*)
@@ -192,11 +284,11 @@ esac
 # and a second compactor running concurrently would race on the
 # graph-rewrite step.
 lock_host=$(printf '%s' "$host" | tr '[:upper:]' '[:lower:]' | sed 's/^\[\(.*\)\]$/\1/')
-case "$lock_host" in
-  ''|127.0.0.1|localhost|0.0.0.0|::1|::)
-    lock_host="127.0.0.1"
-    ;;
-esac
+if compact_dolt_host_is_local "$lock_host"; then
+  # Deliberately collapse loopback aliases; over-serializing local endpoints is
+  # safer than allowing two compaction jobs to interleave on one local runtime.
+  lock_host="127.0.0.1"
+fi
 lock_key=$(printf '%s-%s' "$lock_host" "$GC_DOLT_PORT" | tr -c 'A-Za-z0-9_.-' '-')
 lock_root="/tmp/gc-dolt-compact"
 old_umask=$(umask)
@@ -381,6 +473,14 @@ discover_database_names() {
       db=${d%/}
       db=${db##*/}
       is_system_database "$db" && continue
+      emit_database_name "$db"
+    done
+  fi
+
+  if [ -n "$only_dbs" ]; then
+    printf '%s\n' "$only_dbs" | tr ',' '\n' | while IFS= read -r db; do
+      db=$(printf '%s' "$db" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+      [ -n "$db" ] || continue
       emit_database_name "$db"
     done
   fi
@@ -680,13 +780,19 @@ preflight_counts() {
 # Row-count decreases fail. Row-count increases are recorded as concurrent
 # writer evidence only when the table value hash stays stable. Any table hash
 # drift is quarantined before full GC because row-count gain alone cannot prove
-# pre-flight rows remain reachable. Sets verify_counts_saw_gain,
-# verify_counts_failure_reason, and verify_counts_failure_guidance for callers.
+# pre-flight rows remain reachable. Sets category flags plus
+# verify_counts_failure_reason and verify_counts_failure_guidance for callers.
 verify_counts() {
   db="$1"
   preflight="$2"
   fail=0
   verify_counts_saw_gain=0
+  verify_counts_saw_gain_hash_drift=0
+  verify_counts_gain_drift_tables=""
+  verify_counts_saw_row_decrease=0
+  verify_counts_saw_same_count_hash_drift=0
+  verify_counts_saw_table_list_change=0
+  verify_counts_saw_probe_failure=0
   verify_counts_failure_reason=""
   verify_counts_failure_guidance=""
   preflight_tables=""
@@ -699,6 +805,7 @@ verify_counts() {
     expected_hash=${rest#* }
     if ! actual=$(row_count "$db" "$t"); then
       printf 'compact: db=%s post-flatten row count failed for table=%s\n' "$db" "$t" >&2
+      verify_counts_saw_probe_failure=1
       if [ "$fail" -eq 0 ]; then
         fail=2
         verify_counts_failure_reason="post-flatten row count probe failed"
@@ -709,6 +816,7 @@ verify_counts() {
     case "$actual" in
       ''|*[!0-9]*)
         printf 'compact: db=%s post-flatten row count failed for table=%s\n' "$db" "$t" >&2
+        verify_counts_saw_probe_failure=1
         if [ "$fail" -eq 0 ]; then
           fail=2
           verify_counts_failure_reason="post-flatten row count probe failed"
@@ -719,6 +827,7 @@ verify_counts() {
     esac
     if ! actual_hash=$(table_value_hash "$db" "$t"); then
       printf 'compact: db=%s post-flatten table value hash failed for table=%s\n' "$db" "$t" >&2
+      verify_counts_saw_probe_failure=1
       if [ "$fail" -eq 0 ]; then
         fail=2
         verify_counts_failure_reason="post-flatten table value hash probe failed"
@@ -728,6 +837,7 @@ verify_counts() {
     fi
     if [ -z "$actual_hash" ]; then
       printf 'compact: db=%s post-flatten table value hash returned empty value for table=%s\n' "$db" "$t" >&2
+      verify_counts_saw_probe_failure=1
       if [ "$fail" -eq 0 ]; then
         fail=2
         verify_counts_failure_reason="post-flatten table value hash probe failed"
@@ -740,6 +850,7 @@ verify_counts() {
       if [ "$actual" -lt "$expected" ]; then
         printf 'compact: db=%s row count decreased after flatten table=%s before=%s after=%s\n' \
           "$db" "$t" "$expected" "$actual" >&2
+        verify_counts_saw_row_decrease=1
         if [ "$fail" -ne 1 ]; then
           fail=1
           verify_counts_failure_reason="post-flatten row count decreased"
@@ -754,6 +865,8 @@ verify_counts() {
     fi
     if [ "$actual_hash" != "$expected_hash" ]; then
       if [ "$table_gained_rows" = "1" ]; then
+        verify_counts_saw_gain_hash_drift=1
+        verify_counts_gain_drift_tables="$verify_counts_gain_drift_tables $t"
         printf 'compact: db=%s table=%s value hash changed with row-count increase before=%s after=%s — quarantine and investigate before GC\n' \
           "$db" "$t" "$expected_hash" "$actual_hash" >&2
         if [ "$fail" -ne 1 ]; then
@@ -764,6 +877,7 @@ verify_counts() {
       else
         printf 'compact: db=%s table=%s value hash changed after flatten without row-count increase before=%s after=%s — quarantine and investigate before GC\n' \
           "$db" "$t" "$expected_hash" "$actual_hash" >&2
+        verify_counts_saw_same_count_hash_drift=1
         if [ "$fail" -ne 1 ]; then
           fail=1
           verify_counts_failure_reason="post-flatten table value hash changed without row-count increase"
@@ -774,6 +888,7 @@ verify_counts() {
   done < "$preflight"
   post_tables_tmp=$(mktemp)
   if ! user_tables "$db" > "$post_tables_tmp"; then
+    verify_counts_saw_probe_failure=1
     if [ "$fail" -eq 0 ]; then
       fail=2
       verify_counts_failure_reason="post-flatten table list probe failed"
@@ -787,6 +902,7 @@ verify_counts() {
     if ! valid_table_name "$post_table"; then
       printf 'compact: db=%s invalid table name after flatten table=%s — quarantine and investigate before GC\n' \
         "$db" "$post_table" >&2
+      verify_counts_saw_table_list_change=1
       if [ "$fail" -ne 1 ]; then
         fail=1
         verify_counts_failure_reason="post-flatten table list changed"
@@ -799,6 +915,7 @@ verify_counts() {
       *)
         printf 'compact: db=%s table=%s appeared after pre-flight snapshot — quarantine and investigate before GC\n' \
           "$db" "$post_table" >&2
+        verify_counts_saw_table_list_change=1
         if [ "$fail" -ne 1 ]; then
           fail=1
           verify_counts_failure_reason="post-flatten table list changed"
@@ -947,6 +1064,25 @@ write_pending_push_marker() {
     "remote_branch=$remote_branch"
 }
 
+write_pending_gc_marker() {
+  _pg_db="$1"
+  _pg_reason="$2"
+  _pg_remote="${3:-}"
+  _pg_expected_remote_head="${4:-}"
+  _pg_expected_remote_head_verified="${5:-0}"
+  _pg_compacted_from_head="${6:-}"
+  _pg_local_branch="${7:-main}"
+  _pg_remote_branch="${8:-$_pg_local_branch}"
+
+  write_compact_marker "$pending_gc_dir" "$_pg_db" "$_pg_reason" \
+    "remote=$_pg_remote" \
+    "expected_remote_head=$_pg_expected_remote_head" \
+    "expected_remote_head_verified=$_pg_expected_remote_head_verified" \
+    "compacted_from_head=$_pg_compacted_from_head" \
+    "local_branch=$_pg_local_branch" \
+    "remote_branch=$_pg_remote_branch"
+}
+
 compact_marker_value() {
   dir="$1"
   db="$2"
@@ -991,6 +1127,72 @@ ensure_remote_push_retry_fresh() {
       "$db" "$marker_label" "$age_secs" "$pending_push_max_age_secs" >&2
     return 1
   fi
+  return 0
+}
+
+recover_legacy_pending_push_contract() {
+  db="$1"
+
+  legacy_remote=$(select_remote "$db") || return 1
+  if [ -z "$legacy_remote" ]; then
+    printf 'compact: db=%s legacy pending_push marker recovery found no remote — manual intervention required\n' \
+      "$db" >&2
+    return 1
+  fi
+  valid_remote_name "$legacy_remote" || {
+    printf 'compact: db=%s legacy pending_push marker recovery found invalid remote=%s — manual intervention required\n' \
+      "$db" "$legacy_remote" >&2
+    return 1
+  }
+
+  legacy_active=$(query_single_cell "$db" "active branch probe failed" "SELECT active_branch()" 2>/dev/null || true)
+  if [ -z "$legacy_active" ] || ! valid_branch_name "$legacy_active"; then
+    printf 'compact: db=%s legacy pending_push marker recovery requires resolved active branch — manual intervention required\n' \
+      "$db" >&2
+    return 1
+  fi
+
+  legacy_override=$(refspec_env_value "$db") || return 1
+  if [ -n "$legacy_override" ]; then
+    legacy_parts=$(refspec_parts "$legacy_override") || {
+      printf 'compact: db=%s legacy pending_push marker recovery found invalid refspec override=%s — manual intervention required\n' \
+        "$db" "$legacy_override" >&2
+      return 1
+    }
+    legacy_local_branch=$(printf '%s\n' "$legacy_parts" | sed -n '1p')
+    legacy_remote_branch=$(printf '%s\n' "$legacy_parts" | sed -n '2p')
+    if [ "$legacy_local_branch" != "$legacy_active" ]; then
+      printf 'compact: db=%s legacy pending_push marker recovery local branch=%s does not match active branch=%s — manual intervention required\n' \
+        "$db" "$legacy_local_branch" "$legacy_active" >&2
+      return 1
+    fi
+  else
+    legacy_local_branch="$legacy_active"
+    legacy_remote_branch="$legacy_active"
+  fi
+
+  legacy_remote_head=$(remote_branch_head "$db" "$legacy_remote" "$legacy_remote_branch") || return 1
+  if [ -z "$legacy_remote_head" ]; then
+    printf 'compact: db=%s legacy pending_push marker recovery requires non-empty remote HEAD — manual intervention required\n' \
+      "$db" >&2
+    return 1
+  fi
+  case "$legacy_remote_head" in
+    *[!A-Za-z0-9]*)
+      printf 'compact: db=%s legacy pending_push marker recovery found invalid remote HEAD=%s — manual intervention required\n' \
+        "$db" "$legacy_remote_head" >&2
+      return 1
+      ;;
+  esac
+
+  legacy_in_local=$(commit_exists_in_local_log "$db" "$legacy_remote_head") || return 1
+  if [ "$legacy_in_local" != "1" ]; then
+    printf 'compact: db=%s legacy pending_push marker recovery requires remote HEAD=%s in local history; got=%s — manual intervention required\n' \
+      "$db" "$legacy_remote_head" "${legacy_in_local:-<empty>}" >&2
+    return 1
+  fi
+
+  printf '%s\n%s\n%s\n%s\n' "$legacy_remote" "$legacy_local_branch" "$legacy_remote_branch" "$legacy_remote_head"
   return 0
 }
 
@@ -1225,11 +1427,56 @@ preserve_head_after_integrity_failure() {
   return 0
 }
 
+preserve_head_after_writer_race_defer() {
+  db="$1"
+  flatten_head="$2"
+  current_head=$(head_commit "$db" || true)
+  if [ -z "$current_head" ]; then
+    current_head="$flatten_head"
+  fi
+  printf 'compact: db=%s leaving post-flatten HEAD=%s in place after writer race; pending-GC marker will retry full GC next run\n' \
+    "$db" "${current_head:-<empty>}" >&2
+  return 0
+}
+
+defer_writer_race_after_flatten() {
+  db="$1"
+  flatten_head="$2"
+  defer_remote="$3"
+  defer_expected_remote_head="$4"
+  defer_expected_remote_head_verified="$5"
+  defer_compacted_from_head="$6"
+  defer_local_branch="$7"
+  defer_remote_branch="$8"
+  if ! write_pending_gc_marker "$db" "writer race during flatten deferred full GC" \
+    "$defer_remote" "$defer_expected_remote_head" "$defer_expected_remote_head_verified" \
+    "$defer_compacted_from_head" "$defer_local_branch" "$defer_remote_branch"; then
+    current_head=$(head_commit "$db" || true)
+    if [ -z "$current_head" ]; then
+      current_head="$flatten_head"
+    fi
+    printf 'compact: db=%s leaving post-flatten HEAD=%s in place after writer race; pending-GC marker write failed, manual repair required before compaction or GC\n' \
+      "$db" "${current_head:-<empty>}" >&2
+    return 1
+  fi
+  preserve_head_after_writer_race_defer "$db" "$flatten_head" || true
+  return 0
+}
+
 flatten_database() {
   db="$1"
   verify_counts_saw_gain=0
+  verify_counts_saw_gain_hash_drift=0
+  verify_counts_gain_drift_tables=""
+  verify_counts_saw_row_decrease=0
+  verify_counts_saw_same_count_hash_drift=0
+  verify_counts_saw_table_list_change=0
+  verify_counts_saw_probe_failure=0
   verify_counts_failure_reason=""
   verify_counts_failure_guidance=""
+  head_before_reset=""
+  post_verify_head=""
+  writer_race_detected=0
 
   if [ -n "$only_dbs" ]; then
     case ",$only_dbs," in
@@ -1242,8 +1489,11 @@ flatten_database() {
   fi
 
   if has_compact_marker "$quarantine_dir" "$db"; then
-    printf 'compact: db=%s integrity quarantine marker exists — manual intervention required before compaction or GC\n' \
-      "$db" >&2
+    quarantine_marker=$(compact_marker_path "$quarantine_dir" "$db")
+    quarantine_reason=$(compact_marker_value "$quarantine_dir" "$db" reason || true)
+    quarantine_created_at=$(compact_marker_value "$quarantine_dir" "$db" created_at || true)
+    printf 'compact: db=%s integrity quarantine marker exists at %s reason=%s created_at=%s — manual intervention required before compaction or GC\n' \
+      "$db" "$quarantine_marker" "${quarantine_reason:-<unknown>}" "${quarantine_created_at:-<unknown>}" >&2
     return 1
   fi
 
@@ -1319,10 +1569,7 @@ flatten_database() {
   fi
 
   if has_compact_marker "$pending_push_dir" "$db"; then
-    if [ -n "$dry_run" ]; then
-      printf 'compact: db=%s pending_push=present — dry-run (would retry remote push)\n' "$db"
-      return 0
-    fi
+    legacy_pending_push_recovered=0
     pending_remote=$(compact_marker_value "$pending_push_dir" "$db" remote || true)
     pending_expected_remote_head=$(compact_marker_value "$pending_push_dir" "$db" expected_remote_head || true)
     pending_expected_remote_head_verified=$(compact_marker_value "$pending_push_dir" "$db" expected_remote_head_verified || true)
@@ -1332,9 +1579,16 @@ flatten_database() {
     [ -n "$pending_local_branch" ] || pending_local_branch="main"
     [ -n "$pending_remote_branch" ] || pending_remote_branch="$pending_local_branch"
     if [ -z "$pending_remote" ]; then
-      printf 'compact: db=%s pending_push marker is missing remote — manual intervention required\n' \
-        "$db" >&2
-      return 1
+      legacy_contract=$(recover_legacy_pending_push_contract "$db") || return 1
+      pending_remote=$(printf '%s\n' "$legacy_contract" | sed -n '1p')
+      pending_local_branch=$(printf '%s\n' "$legacy_contract" | sed -n '2p')
+      pending_remote_branch=$(printf '%s\n' "$legacy_contract" | sed -n '3p')
+      pending_expected_remote_head=$(printf '%s\n' "$legacy_contract" | sed -n '4p')
+      pending_expected_remote_head_verified=1
+      pending_compacted_from_head=""
+      legacy_pending_push_recovered=1
+      printf 'compact: db=%s legacy pending_push marker recovered remote=%s local_branch=%s remote_branch=%s expected_remote_head=%s — retrying with live remote verification\n' \
+        "$db" "$pending_remote" "$pending_local_branch" "$pending_remote_branch" "$pending_expected_remote_head"
     fi
     if ! valid_branch_name "$pending_local_branch"; then
       printf 'compact: db=%s pending_push marker has invalid local_branch=%s — manual intervention required\n' \
@@ -1378,7 +1632,13 @@ flatten_database() {
           ;;
       esac
     fi
-    ensure_remote_push_retry_fresh "$pending_push_dir" "$db" "pending_push" || return 1
+    if [ "$legacy_pending_push_recovered" != "1" ]; then
+      ensure_remote_push_retry_fresh "$pending_push_dir" "$db" "pending_push" || return 1
+    fi
+    if [ -n "$dry_run" ]; then
+      printf 'compact: db=%s pending_push=present — dry-run (would retry remote push)\n' "$db"
+      return 0
+    fi
     printf 'compact: db=%s pending_push=present — retrying remote push before threshold check\n' "$db"
     push_remote_after_compaction "$db" "$pending_remote" "$pending_expected_remote_head" "${pending_expected_remote_head_verified:-0}" "retry" "$pending_compacted_from_head" "$pending_local_branch" "$pending_remote_branch"
     return $?
@@ -1574,6 +1834,16 @@ flatten_database() {
 
   start=$(date +%s)
 
+  # Capture HEAD one last time immediately before the mutating flatten. The
+  # preflight loop already proved HEAD == "$head" stayed stable across the
+  # snapshot gather, so this probe runs strictly BEFORE the flatten's own
+  # DOLT_RESET/DOLT_COMMIT — any difference from "$head" here can only be an
+  # external writer that committed inside the residual preflight->reset window,
+  # never the flatten's own commit (which has not happened yet). An empty/failed
+  # probe leaves head_before_reset empty, which the writer-race gate treats as
+  # "unproven" and therefore falls back to the safe quarantine behavior.
+  head_before_reset=$(head_commit "$db" || true)
+
   # Soft-reset to root + commit-everything is the flatten transaction.
   # Both run in a single dolt sql invocation so the session keeps the
   # USE selection across the two CALLs.
@@ -1609,9 +1879,93 @@ flatten_database() {
 
   verify_counts_rc=0
   verify_counts "$db" "$preflight_tmp" || verify_counts_rc=$?
+
+  # Writer-race gate (local-verify HEAD-stability). A normal MVCC writer (the
+  # beads/mail workload) can commit to this db inside the flatten window, which
+  # legitimately adds rows and changes value hashes versus the pre-flight
+  # snapshot. That is a benign, self-healing condition — the next scheduled run
+  # retries — and must NOT be quarantined (a quarantine marker blocks all future
+  # GC of the db and is the production memory-exhaustion bug).
+  #
+  # We distinguish a writer commit from the flatten's OWN commit using two
+  # independent signals, both anchored so the flatten's own commit never trips
+  # them:
+  #   * head_before_reset != head  — HEAD moved between the stable pre-flight
+  #     snapshot and the pre-reset probe. That probe runs before the flatten
+  #     mutates anything, so only an external writer can have moved HEAD.
+  #   * post_verify_head != flatten_head — HEAD moved past the flatten's own
+  #     commit during/after verify_counts. The script issues no commit between
+  #     the flatten and this probe, so only an external writer can have moved it.
+  # Either signal proves a concurrent writer. If a HEAD probe fails/returns
+  # empty we leave the corresponding value empty and the equality below cannot
+  # become true, so an unprovable race safely falls through to quarantine.
+  post_verify_head=$(head_commit "$db" || true)
+  writer_race_detected=0
+  if [ -n "$head" ] && [ -n "$head_before_reset" ] && [ "$head_before_reset" != "$head" ]; then
+    writer_race_detected=1
+    compacted_from_head="$head_before_reset"
+  fi
+  if [ -n "$flatten_head" ] && [ -n "$post_verify_head" ] && [ "$post_verify_head" != "$flatten_head" ]; then
+    writer_race_detected=1
+  fi
+
   if [ "$verify_counts_rc" -ne 0 ]; then
     integrity_reason="${verify_counts_failure_reason:-post-flatten integrity check failed}"
     integrity_guidance="${verify_counts_failure_guidance:-post-flatten integrity check failed; investigate before re-running}"
+    # Downgrade quarantine -> defer ONLY for the ambiguous gain+drift case when
+    # a concurrent writer is proven. Every other integrity failure (row-count
+    # decrease, same-count hash drift, table-list drift, probe failure) and the
+    # gain+drift case with a stable HEAD still quarantine below unchanged.
+    if [ "$writer_race_detected" = "1" ] && \
+       [ "${verify_counts_saw_gain:-0}" = "1" ] && \
+       [ "${verify_counts_saw_gain_hash_drift:-0}" = "1" ] && \
+       [ "${verify_counts_saw_row_decrease:-0}" != "1" ] && \
+       [ "${verify_counts_saw_same_count_hash_drift:-0}" != "1" ] && \
+       [ "${verify_counts_saw_table_list_change:-0}" != "1" ] && \
+       [ "${verify_counts_saw_probe_failure:-0}" != "1" ]; then
+      printf 'compact: db=%s writer race detected during flatten (snapshot_HEAD=%s pre_reset_HEAD=%s flatten_HEAD=%s post_verify_HEAD=%s) — table value hash drift with row-count increase is concurrent-writer data, not corruption; deferring, will retry next run\n' \
+        "$db" "$head" "${head_before_reset:-<empty>}" "$flatten_head" "${post_verify_head:-<empty>}" >&2
+      if ! defer_writer_race_after_flatten "$db" "$flatten_head" \
+        "$remote" "$expected_remote_head" "$expected_remote_head_verified" \
+        "$compacted_from_head" "$local_branch" "$remote_branch"; then
+        rm -f "$preflight_tmp"
+        return 1
+      fi
+      rm -f "$preflight_tmp"
+      return 0
+    fi
+    # Option A (#2846): HEAD movement is only a proxy for "pre-flight rows
+    # remain reachable". When gain+drift is the only failure category but no
+    # concurrent writer was HEAD-proven — the absorbed-writer race, where the
+    # writer's commit was folded into the flatten and left no HEAD fingerprint
+    # — prove preservation directly by diffing the pre-flight snapshot HEAD
+    # against the flatten commit for each gained+drifted table. Purely additive
+    # (no removed/modified rows) proves every pre-flight row survived; defer
+    # exactly as the HEAD-proven path above does. Any removed/modified row, or
+    # a diff-probe failure, fails closed and falls through to the quarantine.
+    if [ "${verify_counts_saw_gain:-0}" = "1" ] && \
+       [ "${verify_counts_saw_gain_hash_drift:-0}" = "1" ] && \
+       [ "${verify_counts_saw_row_decrease:-0}" != "1" ] && \
+       [ "${verify_counts_saw_same_count_hash_drift:-0}" != "1" ] && \
+       [ "${verify_counts_saw_table_list_change:-0}" != "1" ] && \
+       [ "${verify_counts_saw_probe_failure:-0}" != "1" ] && \
+       gain_drift_is_additive_only "$db" "$head" "$flatten_head" "$verify_counts_gain_drift_tables"; then
+      printf 'compact: db=%s gain+drift proven additive-only via DOLT_DIFF(%s..%s) for tables [%s] — pre-flight rows preserved (absorbed-writer race), not corruption; deferring, will retry next run\n' \
+        "$db" "$head" "$flatten_head" "${verify_counts_gain_drift_tables# }" >&2
+      if ! defer_writer_race_after_flatten "$db" "$flatten_head" \
+        "$remote" "$expected_remote_head" "$expected_remote_head_verified" \
+        "${compacted_from_head:-}" "$local_branch" "$remote_branch"; then
+        rm -f "$preflight_tmp"
+        return 1
+      fi
+      rm -f "$preflight_tmp"
+      return 0
+    fi
+    if [ "$writer_race_detected" = "1" ] && \
+       [ "${verify_counts_saw_gain_hash_drift:-0}" = "1" ]; then
+      printf 'compact: db=%s writer race detected during flatten (snapshot_HEAD=%s pre_reset_HEAD=%s flatten_HEAD=%s post_verify_HEAD=%s), but additional integrity failure category prevents defer; quarantine unchanged\n' \
+        "$db" "$head" "${head_before_reset:-<empty>}" "$flatten_head" "${post_verify_head:-<empty>}" >&2
+    fi
     printf 'compact: db=%s post-flatten INTEGRITY check failed — escalate (%s)\n' \
       "$db" "$integrity_guidance" >&2
     write_compact_marker "$quarantine_dir" "$db" "$integrity_reason" || {
@@ -1623,6 +1977,7 @@ flatten_database() {
     rm -f "$preflight_tmp"
     return 1
   fi
+  pre_db_hash_head=$(head_commit "$db" || true)
   if ! postflight_hash=$(db_value_hash "$db"); then
     printf 'compact: db=%s post-flatten value hash probe failed — quarantine and investigate before GC\n' \
       "$db" >&2
@@ -1647,8 +2002,65 @@ flatten_database() {
     rm -f "$preflight_tmp"
     return 1
   fi
+  post_db_hash_head=$(head_commit "$db" || true)
+  db_hash_writer_race_detected=0
+  if [ -n "$flatten_head" ] && [ -n "$pre_db_hash_head" ] && [ "$pre_db_hash_head" != "$flatten_head" ]; then
+    db_hash_writer_race_detected=1
+  fi
+  if [ -n "$flatten_head" ] && [ -n "$post_db_hash_head" ] && [ "$post_db_hash_head" != "$flatten_head" ]; then
+    db_hash_writer_race_detected=1
+  fi
+  if [ -n "$pre_db_hash_head" ] && [ -n "$post_db_hash_head" ] && [ "$post_db_hash_head" != "$pre_db_hash_head" ]; then
+    db_hash_writer_race_detected=1
+  fi
+  if [ "$db_hash_writer_race_detected" = "1" ]; then
+    writer_race_detected=1
+  fi
   if [ "$postflight_hash" != "$preflight_hash" ]; then
+    if [ "$db_hash_writer_race_detected" = "1" ]; then
+      # The DB hash probe runs after table-level verification has already
+      # passed. HEAD movement across this probe means an external writer may
+      # have changed any value without changing the checked table row counts.
+      db_hash_drift_detail="database value hash drift"
+      if [ "${verify_counts_saw_gain:-0}" = "1" ]; then
+        db_hash_drift_detail="database value hash drift with row-count increase"
+      fi
+      printf 'compact: db=%s writer race detected during flatten (snapshot_HEAD=%s pre_reset_HEAD=%s flatten_HEAD=%s post_verify_HEAD=%s pre_db_hash_HEAD=%s post_db_hash_HEAD=%s) — %s is concurrent-writer data, not corruption; deferring, will retry next run\n' \
+        "$db" "$head" "${head_before_reset:-<empty>}" "$flatten_head" "${post_verify_head:-<empty>}" "${pre_db_hash_head:-<empty>}" "${post_db_hash_head:-<empty>}" "$db_hash_drift_detail" >&2
+      if ! defer_writer_race_after_flatten "$db" "$flatten_head" \
+        "$remote" "$expected_remote_head" "$expected_remote_head_verified" \
+        "$compacted_from_head" "$local_branch" "$remote_branch"; then
+        rm -f "$preflight_tmp"
+        return 1
+      fi
+      rm -f "$preflight_tmp"
+      return 0
+    fi
     if [ "${verify_counts_saw_gain:-0}" = "1" ]; then
+      # Same writer-race downgrade as the per-table gain+drift case above: a
+      # proven concurrent writer that added rows also shifts the whole-database
+      # value hash. Defer instead of quarantining. A stable-HEAD gain+drift here
+      # is still a genuine anomaly and quarantines unchanged.
+      if [ "$writer_race_detected" = "1" ]; then
+        printf 'compact: db=%s writer race detected during flatten (snapshot_HEAD=%s pre_reset_HEAD=%s flatten_HEAD=%s post_verify_HEAD=%s) — database value hash drift with row-count increase is concurrent-writer data, not corruption; deferring, will retry next run\n' \
+          "$db" "$head" "${head_before_reset:-<empty>}" "$flatten_head" "${post_verify_head:-<empty>}" >&2
+        if ! defer_writer_race_after_flatten "$db" "$flatten_head" \
+          "$remote" "$expected_remote_head" "$expected_remote_head_verified" \
+          "$compacted_from_head" "$local_branch" "$remote_branch"; then
+          rm -f "$preflight_tmp"
+          return 1
+        fi
+        rm -f "$preflight_tmp"
+        return 0
+      fi
+      # Option A's per-table DOLT_DIFF preservation proof is intentionally NOT
+      # extended to this whole-database value-hash path. It is reachable only
+      # when per-table verify already PASSED (verify_counts_rc==0) yet the
+      # aggregate DB hash drifted with a row gain and no writer was HEAD-proven
+      # — a near-unreachable combination for real appends, since a genuine
+      # per-table row gain would have tripped the per-table gain+drift signal
+      # (proven additive-only and deferred above). Quarantine is the safe
+      # default here; revisit only if a real incident shows this path reachable.
       printf 'compact: db=%s value hash changed with row-count increase before=%s after=%s — quarantine and investigate before GC\n' \
         "$db" "$preflight_hash" "$postflight_hash" >&2
       write_compact_marker "$quarantine_dir" "$db" "post-flatten value hash changed with row-count increase" || {
@@ -1697,6 +2109,51 @@ flatten_database() {
     "local_branch=$local_branch" \
     "remote_branch=$remote_branch" || return 1
   return 1
+}
+
+bare_gc_database() {
+  db="$1"
+
+  if [ -n "$only_dbs" ]; then
+    case ",$only_dbs," in
+      *,"$db",*) ;;
+      *)
+        printf 'compact: db=%s not in GC_DOLT_COMPACT_ONLY_DBS — skip\n' "$db"
+        return 0
+        ;;
+    esac
+  fi
+
+  if has_compact_marker "$quarantine_dir" "$db"; then
+    quarantine_marker=$(compact_marker_path "$quarantine_dir" "$db")
+    quarantine_reason=$(compact_marker_value "$quarantine_dir" "$db" reason || true)
+    quarantine_created_at=$(compact_marker_value "$quarantine_dir" "$db" created_at || true)
+    printf 'compact: db=%s integrity quarantine marker exists at %s reason=%s created_at=%s — manual intervention required before compaction or GC\n' \
+      "$db" "$quarantine_marker" "${quarantine_reason:-<unknown>}" "${quarantine_created_at:-<unknown>}" >&2
+    return 1
+  fi
+
+  if [ -n "$dry_run" ]; then
+    printf 'compact: db=%s — dry-run (would bare GC)\n' "$db"
+    return 0
+  fi
+
+  start=$(date +%s)
+  gc_rc=0
+  gc_err_tmp=$(mktemp)
+  dolt_query "$db" "CALL DOLT_GC()" >/dev/null 2>"$gc_err_tmp" || gc_rc=$?
+  elapsed=$(( $(date +%s) - start ))
+  if [ "$gc_rc" -ne 0 ]; then
+    printf 'compact: db=%s bare-gc failed rc=%s duration=%ss\n' \
+      "$db" "$gc_rc" "$elapsed" >&2
+    emit_error_file "$db" "$gc_err_tmp"
+    rm -f "$gc_err_tmp"
+    return 1
+  fi
+  rm -f "$gc_err_tmp"
+
+  printf 'compact: db=%s bare-gc duration=%ss — ok\n' "$db" "$elapsed"
+  return 0
 }
 
 # shellcheck disable=SC2317
@@ -1868,6 +2325,21 @@ main() {
   done < "$_db_tmp"
 
   failed_count=0
+  if [ "$bare_gc" = "1" ]; then
+    while IFS= read -r db; do
+      [ -n "$db" ] || continue
+      if ! bare_gc_database "$db"; then
+        failed_count=$((failed_count + 1))
+      fi
+    done < "$_unique_db_tmp"
+
+    if [ "$failed_count" -gt 0 ]; then
+      printf 'compact: %s database(s) failed bare GC\n' "$failed_count" >&2
+      exit 1
+    fi
+    exit 0
+  fi
+
   while IFS= read -r db; do
     [ -n "$db" ] || continue
     if ! flatten_database "$db"; then

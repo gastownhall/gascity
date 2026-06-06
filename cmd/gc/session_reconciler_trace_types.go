@@ -84,6 +84,7 @@ const (
 	TraceSitePoolAccept                     TraceSiteCode = "reconciler.pool.accept"
 	TraceSitePoolMinFill                    TraceSiteCode = "reconciler.pool.min_fill"
 	TraceSitePoolInFlightReuse              TraceSiteCode = "reconciler.pool.inflight_reuse"
+	TraceSitePoolWakeKnownIdentity          TraceSiteCode = "reconciler.pool.wake_known_identity"
 	TraceSiteReconcilerUnknownState         TraceSiteCode = "reconciler.session.skip_unknown_state"
 	TraceSiteReconcilerOrphaned             TraceSiteCode = "reconciler.session.orphan_or_suspended"
 	TraceSiteReconcilerCloseOrphan          TraceSiteCode = "reconciler.session.close_orphan"
@@ -91,6 +92,8 @@ const (
 	TraceSiteReconcilerConfigDrift          TraceSiteCode = "reconciler.session.config_drift"
 	TraceSiteReconcilerIdleDrain            TraceSiteCode = "reconciler.session.idle_drain"
 	TraceSiteReconcilerIdleTimeout          TraceSiteCode = "reconciler.session.idle_timeout"
+	TraceSiteReconcilerResetStalled         TraceSiteCode = "reconciler.session.reset_stalled"
+	TraceSiteReconcilerProgressStallExempt  TraceSiteCode = "reconciler.session.progress_stall_exempt"
 	TraceSiteReconcilerWakeDecision         TraceSiteCode = "reconciler.session.wake_decision"
 	TraceSiteReconcilerDrainDecision        TraceSiteCode = "reconciler.session.drain"
 	TraceSiteDrainStale                     TraceSiteCode = "reconciler.drain.stale"
@@ -145,6 +148,7 @@ const (
 	TraceReasonStoreQueryPartial      TraceReasonCode = "store_query_partial"
 	TraceReasonNoWakeReason           TraceReasonCode = "no_wake_reason"
 	TraceReasonFSPressure             TraceReasonCode = "fs_pressure"
+	TraceReasonResetStalled           TraceReasonCode = "reset_stalled"
 )
 
 type TraceOutcomeCode string
@@ -575,6 +579,7 @@ func normalizeTraceSiteCode(raw string) (TraceSiteCode, string) {
 		TraceSitePoolAccept,
 		TraceSitePoolMinFill,
 		TraceSitePoolInFlightReuse,
+		TraceSitePoolWakeKnownIdentity,
 		TraceSiteReconcilerUnknownState,
 		TraceSiteReconcilerOrphaned,
 		TraceSiteReconcilerCloseOrphan,
@@ -582,6 +587,8 @@ func normalizeTraceSiteCode(raw string) (TraceSiteCode, string) {
 		TraceSiteReconcilerConfigDrift,
 		TraceSiteReconcilerIdleDrain,
 		TraceSiteReconcilerIdleTimeout,
+		TraceSiteReconcilerResetStalled,
+		TraceSiteReconcilerProgressStallExempt,
 		TraceSiteReconcilerWakeDecision,
 		TraceSiteReconcilerDrainDecision,
 		TraceSiteDrainStale,
@@ -647,7 +654,8 @@ func normalizeTraceReasonCode(raw string) (TraceReasonCode, string) {
 		TraceReasonDrainTimeout,
 		TraceReasonStoreQueryPartial,
 		TraceReasonNoWakeReason,
-		TraceReasonFSPressure:
+		TraceReasonFSPressure,
+		TraceReasonResetStalled:
 		return TraceReasonCode(raw), ""
 	default:
 		return TraceReasonUnknown, raw

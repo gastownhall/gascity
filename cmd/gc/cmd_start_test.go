@@ -761,19 +761,35 @@ func TestPassthroughEnvIncludesClaudeAuthContext(t *testing.T) {
 	t.Setenv("CLAUDE_CODE_OAUTH_TOKEN", "oauth-token")
 	t.Setenv("ANTHROPIC_API_KEY", "sk-ant-123")
 	t.Setenv("ANTHROPIC_AUTH_TOKEN", "anth-auth-token")
+	t.Setenv("ANTHROPIC_BASE_URL", "https://ollama.com")
+	t.Setenv("ANTHROPIC_DEFAULT_HAIKU_MODEL", "kimi-k2.5")
+	t.Setenv("ANTHROPIC_DEFAULT_SONNET_MODEL", "kimi-k2.5")
+	t.Setenv("ANTHROPIC_DEFAULT_OPUS_MODEL", "kimi-k2.5")
+	t.Setenv("CLAUDE_CODE_SUBAGENT_MODEL", "kimi-k2.5")
+	t.Setenv("CLAUDE_CODE_EFFORT_LEVEL", "auto")
+	t.Setenv("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1")
+	t.Setenv("OLLAMA_API_KEY", "ollama-token")
 
 	got := passthroughEnv()
 
 	for key, want := range map[string]string{
-		"HOME":                    "/tmp/gc-home",
-		"USER":                    "gcuser",
-		"LOGNAME":                 "gcuser",
-		"XDG_CONFIG_HOME":         "/tmp/gc-home/.config",
-		"XDG_STATE_HOME":          "/tmp/gc-home/.local/state",
-		"CLAUDE_CONFIG_DIR":       "/tmp/gc-home/.claude",
-		"CLAUDE_CODE_OAUTH_TOKEN": "oauth-token",
-		"ANTHROPIC_API_KEY":       "sk-ant-123",
-		"ANTHROPIC_AUTH_TOKEN":    "anth-auth-token",
+		"HOME":                                     "/tmp/gc-home",
+		"USER":                                     "gcuser",
+		"LOGNAME":                                  "gcuser",
+		"XDG_CONFIG_HOME":                          "/tmp/gc-home/.config",
+		"XDG_STATE_HOME":                           "/tmp/gc-home/.local/state",
+		"CLAUDE_CONFIG_DIR":                        "/tmp/gc-home/.claude",
+		"CLAUDE_CODE_OAUTH_TOKEN":                  "oauth-token",
+		"ANTHROPIC_API_KEY":                        "sk-ant-123",
+		"ANTHROPIC_AUTH_TOKEN":                     "anth-auth-token",
+		"ANTHROPIC_BASE_URL":                       "https://ollama.com",
+		"ANTHROPIC_DEFAULT_HAIKU_MODEL":            "kimi-k2.5",
+		"ANTHROPIC_DEFAULT_SONNET_MODEL":           "kimi-k2.5",
+		"ANTHROPIC_DEFAULT_OPUS_MODEL":             "kimi-k2.5",
+		"CLAUDE_CODE_SUBAGENT_MODEL":               "kimi-k2.5",
+		"CLAUDE_CODE_EFFORT_LEVEL":                 "auto",
+		"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+		"OLLAMA_API_KEY":                           "ollama-token",
 	} {
 		if got[key] != want {
 			t.Errorf("passthroughEnv()[%s] = %q, want %q", key, got[key], want)
@@ -875,6 +891,19 @@ func TestPassthroughEnvClearsClaudeNestingUnconditionally(t *testing.T) {
 	}
 	if v, ok := got["CLAUDE_CODE_ENTRYPOINT"]; !ok || v != "" {
 		t.Errorf("CLAUDE_CODE_ENTRYPOINT should be present and empty, got ok=%v v=%q", ok, v)
+	}
+}
+
+func TestPassthroughEnvStripsCodexSessionContext(t *testing.T) {
+	t.Setenv("CODEX_THREAD_ID", "thread-123")
+	t.Setenv("CODEX_CI", "1")
+
+	got := passthroughEnv()
+
+	for _, key := range []string{"CODEX_THREAD_ID", "CODEX_CI"} {
+		if v, ok := got[key]; !ok || v != "" {
+			t.Errorf("%s should be present and empty, got ok=%v v=%q", key, ok, v)
+		}
 	}
 }
 

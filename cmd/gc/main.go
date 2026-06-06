@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -247,10 +248,12 @@ func newRootCmd(stdout, stderr io.Writer) *cobra.Command {
 		newResumeCmd(stdout, stderr),
 		newRigCmd(stdout, stderr),
 		newMailCmd(stdout, stderr),
+		newMaintenanceCmd(stdout, stderr),
 		newNudgeCmd(stdout, stderr),
 		newWaitCmd(stdout, stderr),
 		newAgentCmd(stdout, stderr),
 		newAgentScriptCmd(stdout, stderr),
+		newGitHubCmd(stdout, stderr),
 		newEventCmd(stdout, stderr),
 		newEventsCmd(stdout, stderr),
 		newTraceCmd(stdout, stderr),
@@ -1085,7 +1088,15 @@ func openCityStoreWithPath(stderr io.Writer, cmdName string) (beads.Store, strin
 // authoritative; rerouting through cityForStoreDir would let inherited
 // GC_CITY override an explicit --city resolution.
 func openCityStoreAt(cityPath string) (beads.Store, error) {
-	return openStoreAtForCity(cityPath, cityPath)
+	result, err := openCityStoreResultAt(cityPath)
+	if err != nil {
+		return nil, err
+	}
+	return result.Store, nil
+}
+
+func openCityStoreResultAt(cityPath string) (beads.StoreOpenResult, error) {
+	return openStoreResultAtForCity(cityPath, cityPath)
 }
 
 const fileStoreLayoutScopedV1 = "scope-local-v1"
@@ -1151,51 +1162,142 @@ func openCompatibleFileStore(scopeRoot, cityPath string) (*beads.FileStore, erro
 	return openScopeLocalFileStore(cityPath)
 }
 
+// openCoordStoreAt opens the pure-Go SQLite bead store at the coordstore
+// directory for the given scope root.
+func openCoordStoreAt(scopeRoot, cityPath string) (beads.Store, error) {
+	storeDir, err := canonicalCoordStoreDir(scopeRoot)
+	if err != nil {
+		return nil, err
+	}
+	cfg, err := loadCityConfig(cityPath, io.Discard)
+	if err != nil {
+		cfg = nil
+	}
+	return beads.OpenSQLiteStore(
+		storeDir,
+		beads.WithSQLiteStoreIDPrefix(issuePrefixForScope(scopeRoot, cityPath, cfg)),
+		beads.WithSQLiteStoreRetention(4*time.Hour, 30*time.Second),
+	)
+}
+
+func canonicalCoordStoreDir(scopeRoot string) (string, error) {
+	storeDir := filepath.Join(scopeRoot, ".gc", "coordstore")
+	abs, err := filepath.Abs(filepath.Clean(storeDir))
+	if err != nil {
+		return "", fmt.Errorf("resolving coordstore dir %q: %w", storeDir, err)
+	}
+	return abs, nil
+}
+
+func providerIsCoordStore(provider string) bool {
+	switch strings.TrimSpace(provider) {
+	case "sqlite", "sqlite-cgo", "coordstore":
+		return true
+	default:
+		return false
+	}
+}
+
+// coordStoreDeprecationWarning returns a non-empty warning message when
+// provider is a deprecated alias for the "sqlite" coordination store.
+func coordStoreDeprecationWarning(provider string) string {
+	switch strings.TrimSpace(provider) {
+	case "sqlite-cgo":
+		return `beads provider "sqlite-cgo" is deprecated; use provider = "sqlite" in city.toml`
+	case "coordstore":
+		return `beads provider "coordstore" is deprecated; use provider = "sqlite" in city.toml`
+	}
+	return ""
+}
+
 func openStoreAtForCity(storePath, cityPath string) (beads.Store, error) {
+	result, err := openStoreResultAtForCity(storePath, cityPath)
+	if err != nil {
+		return nil, err
+	}
+	return result.Store, nil
+}
+
+func openStoreResultAtForCity(storePath, cityPath string) (beads.StoreOpenResult, error) {
 	runtimeCityPath := cityPath
 	if runtimeCityPath == "" {
 		runtimeCityPath = cityForStoreDir(storePath)
 	}
+	cfg, _ := loadCityConfig(runtimeCityPath, io.Discard)
 	scopeRoot := resolveStoreScopeRoot(runtimeCityPath, storePath)
 	provider := rawBeadsProviderForScope(scopeRoot, runtimeCityPath)
-	if strings.HasPrefix(provider, "exec:") {
-		target, err := resolveConfiguredExecStoreTarget(runtimeCityPath, scopeRoot)
-		if err != nil {
-			return nil, err
+	if providerIsCoordStore(provider) {
+		if msg := coordStoreDeprecationWarning(provider); msg != "" {
+			fmt.Fprintln(os.Stderr, "WARNING: "+msg)
 		}
-		env := gcExecStoreEnv(runtimeCityPath, target, provider)
-		if execProviderNeedsScopedDoltStoreEnv(provider) {
-			if target.ScopeKind == "rig" {
-				cfg, err := loadCityConfig(runtimeCityPath, io.Discard)
-				if err != nil {
-					return nil, err
-				}
-				projected, err := bdRuntimeEnvForRigWithError(runtimeCityPath, cfg, target.ScopeRoot)
-				if err != nil {
-					return nil, err
-				}
-				copyExecProjectedBackendEnv(env, projected)
-			} else {
-				projected, err := bdRuntimeEnvWithError(runtimeCityPath)
-				if err != nil {
-					return nil, err
-				}
-				copyExecProjectedBackendEnv(env, projected)
+		store, err := openCoordStoreAt(scopeRoot, runtimeCityPath)
+		return beads.StoreOpenResult{Store: wrapStoreWithBeadPolicies(store, cfg), Diagnostic: beads.BeadsDiagnostic{Store: "sqlite"}}, err
+	}
+	if strings.HasPrefix(provider, "exec:") && !providerUsesBdStoreContract(provider) {
+		store, err := openExecStoreAtForCity(provider, scopeRoot, runtimeCityPath)
+		return beads.StoreOpenResult{Store: wrapStoreWithBeadPolicies(store, cfg), Diagnostic: beads.ExecStoreDiagnostic()}, err
+	}
+	result, err := beads.OpenStoreAtForCity(context.Background(), beads.StoreOpenOptions{
+		ScopeRoot:        scopeRoot,
+		CityPath:         runtimeCityPath,
+		Provider:         provider,
+		PreflightChecker: newBeadsPreflightChecker(runtimeCityPath, provider),
+		Logger:           slog.Default(),
+		OpenFileStore: func() (beads.Store, error) {
+			return openCompatibleFileStore(scopeRoot, runtimeCityPath)
+		},
+		OpenBdStore: func() (beads.Store, error) {
+			if _, err := exec.LookPath("bd"); err != nil {
+				return nil, fmt.Errorf("bd not found in PATH (install beads or set GC_BEADS=file)")
 			}
-		}
-		store := beadsexec.NewStore(strings.TrimPrefix(provider, "exec:"))
-		store.SetEnv(env)
-		return store, nil
+			return openBdStoreAt(scopeRoot, runtimeCityPath)
+		},
+		OpenExecStore: func() (beads.Store, error) {
+			return openExecStoreAtForCity(provider, scopeRoot, runtimeCityPath)
+		},
+		OpenNativeStore: func() (beads.Store, error) {
+			env, err := nativeDoltOpenEnvForScope(runtimeCityPath, nil, scopeRoot)
+			if err != nil {
+				return nil, fmt.Errorf("project native store env %s: %w", scopeRoot, err)
+			}
+			return beads.OpenNativeDoltStoreAt(context.Background(), scopeRoot, env)
+		},
+	})
+	if err != nil {
+		return beads.StoreOpenResult{}, err
 	}
-	switch provider {
-	case "file":
-		return openCompatibleFileStore(scopeRoot, runtimeCityPath)
-	default: // "bd" or unrecognized → use bd
-		if _, err := exec.LookPath("bd"); err != nil {
-			return nil, fmt.Errorf("bd not found in PATH (install beads or set GC_BEADS=file)")
-		}
-		return openBdStoreAt(scopeRoot, runtimeCityPath)
+	result.Store = wrapStoreWithBeadPolicies(result.Store, cfg)
+	return result, nil
+}
+
+func openExecStoreAtForCity(provider, scopeRoot, runtimeCityPath string) (beads.Store, error) {
+	target, err := resolveConfiguredExecStoreTarget(runtimeCityPath, scopeRoot)
+	if err != nil {
+		return nil, err
 	}
+	env := gcExecStoreEnv(runtimeCityPath, target, provider)
+	if execProviderNeedsScopedDoltStoreEnv(provider) {
+		if target.ScopeKind == "rig" {
+			cfg, err := loadCityConfig(runtimeCityPath, io.Discard)
+			if err != nil {
+				return nil, err
+			}
+			projected, err := bdRuntimeEnvForRigWithError(runtimeCityPath, cfg, target.ScopeRoot)
+			if err != nil {
+				return nil, err
+			}
+			copyExecProjectedBackendEnv(env, projected)
+		} else {
+			projected, err := bdRuntimeEnvWithError(runtimeCityPath)
+			if err != nil {
+				return nil, err
+			}
+			copyExecProjectedBackendEnv(env, projected)
+		}
+	}
+	store := beadsexec.NewStore(strings.TrimPrefix(provider, "exec:"))
+	store.SetEnv(env)
+	return store, nil
 }
 
 // resolveStoreScopeRoot resolves a store's scope root under cityPath.
@@ -1218,11 +1320,19 @@ func resolveStoreScopeRoot(cityPath, storePath string) string {
 
 func openBdStoreAt(storePath, cityPath string) (beads.Store, error) {
 	if filepath.Clean(storePath) == filepath.Clean(cityPath) {
-		return bdStoreForCity(storePath, cityPath), nil
+		store := bdStoreForCity(storePath, cityPath)
+		if optimized, ok := openOptimizedDoltliteStore(storePath, store); ok {
+			return optimized, nil
+		}
+		return store, nil
 	}
 	cfg, err := loadCityConfig(cityPath, io.Discard)
 	if err != nil {
 		cfg = nil
 	}
-	return bdStoreForRig(storePath, cityPath, cfg), nil
+	store := bdStoreForRig(storePath, cityPath, cfg)
+	if optimized, ok := openOptimizedDoltliteStore(storePath, store); ok {
+		return optimized, nil
+	}
+	return store, nil
 }

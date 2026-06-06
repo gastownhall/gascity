@@ -260,6 +260,7 @@ func (a *Adapter) SetMetadataBatch(ctx context.Context, id string, kvs map[strin
 	for k, v := range kvs {
 		r.Metadata[k] = v
 	}
+	r.UpdatedAt = time.Now()
 	if a.persister != nil {
 		if err := a.persister.SaveRecord(ctx, r); err != nil {
 			return err
@@ -367,6 +368,55 @@ func (a *Adapter) PurgeExpired(ctx context.Context) (int, error) {
 		}
 		a.ephIdx.remove(r)
 		delete(a.ephemeral, id)
+	}
+	return len(ids), nil
+}
+
+// PurgeTerminal removes old terminal main-tier records.
+func (a *Adapter) PurgeTerminal(ctx context.Context, olderThan time.Duration) (int, error) {
+	if olderThan <= 0 {
+		return 0, nil
+	}
+	cutoff := time.Now().Add(-olderThan)
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	var ids []string
+	for id, r := range a.main {
+		if !coordstore.IsTerminalStatus(r.Status) {
+			continue
+		}
+		ref := r.UpdatedAt
+		if ref.IsZero() {
+			ref = r.CreatedAt
+		}
+		if !ref.IsZero() && ref.Before(cutoff) {
+			ids = append(ids, id)
+			if len(ids) >= coordstore.TerminalPurgeBatchSize {
+				break
+			}
+		}
+	}
+	for _, id := range ids {
+		r := a.main[id]
+		if a.persister != nil {
+			if err := a.persister.DeleteRecord(ctx, id, false); err != nil {
+				return 0, err
+			}
+		}
+		a.mainIdx.remove(r)
+		delete(a.main, id)
+		for k, d := range a.deps {
+			if d.FromID != id && d.ToID != id {
+				continue
+			}
+			if a.persister != nil {
+				if err := a.persister.DeleteDep(ctx, d.FromID, d.ToID); err != nil {
+					return 0, err
+				}
+			}
+			delete(a.deps, k)
+		}
 	}
 	return len(ids), nil
 }
@@ -490,6 +540,9 @@ func normalizeRecord(r coordstore.Record, nextID func() string) coordstore.Recor
 	if r.CreatedAt.IsZero() {
 		r.CreatedAt = time.Now()
 	}
+	if r.UpdatedAt.IsZero() {
+		r.UpdatedAt = r.CreatedAt
+	}
 	if r.Status == "" {
 		r.Status = "open"
 	}
@@ -518,6 +571,7 @@ func applyUpdate(r *coordstore.Record, u coordstore.Update) {
 			r.Metadata[k] = v
 		}
 	}
+	r.UpdatedAt = time.Now()
 }
 
 func matches(r coordstore.Record, q coordstore.Query) bool {

@@ -1,6 +1,20 @@
 description = """
 Generate activity digest for the mayor.
 
+After claiming this vapor wisp, run:
+
+```bash
+gc bd formula show mol-digest-generate --json
+```
+
+Follow the step descriptions in order. When finished, close this bead, then run:
+
+```bash
+gc runtime drain-ack
+```
+
+The drain-ack tells the controller this session is done.
+
 This is a **periodic formula** — dispatched by the deacon's
 `periodic-formulas` step when the cooldown trigger elapses. Configured
 in `city.toml` under `[formulas]`:
@@ -30,8 +44,7 @@ The digest is mailed to the mayor and archived as a digest bead.
 
 Read each step's description before acting — Config values override defaults."""
 formula = "mol-digest-generate"
-version = 2
-contract = "graph.v2"
+phase = "vapor"
 
 [vars]
 [vars.period]
@@ -68,12 +81,11 @@ UNTIL=$(date -u -d 'today 00:00' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || \
 
 Note the timestamps for the digest header.
 
-Close this step when the time range is established."""
+Continue to data collection when the time range is established."""
 
 [[steps]]
 id = "collect-data"
 title = "Collect activity data from all rigs"
-needs = ["determine-period"]
 description = """
 Gather activity data from each rig.
 
@@ -117,12 +129,11 @@ c) **Warrants filed:**
 gc bd list --label=warrant --created-after=$SINCE --json
 ```
 
-Close this step when all data is collected."""
+Continue to digest generation when all data is collected."""
 
 [[steps]]
 id = "generate-and-send"
 title = "Generate digest, send to mayor, archive"
-needs = ["collect-data"]
 description = """
 Transform data into a formatted digest and deliver it.
 

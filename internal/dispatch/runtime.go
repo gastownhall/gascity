@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 	"time"
@@ -38,7 +39,11 @@ type ProcessOptions struct {
 	StorePath          string
 	FormulaSearchPaths []string
 	PrepareFragment    func(*formula.FragmentRecipe, beads.Bead) error
+	PrepareRecipe      func(*formula.Recipe, beads.Bead) error
 	RecycleSession     func(beads.Bead) error
+	// RequiredArtifactStat checks required-artifact files. When nil, the
+	// dispatcher uses os.Stat.
+	RequiredArtifactStat func(path string) (os.FileInfo, error)
 	// ResolveStoreRef opens the bead store identified by a gc.source_store_ref
 	// value (e.g. "city:foo", "rig:alpha"). Used by processWorkflowFinalize to
 	// propagate successful workflow completion across store boundaries: when
@@ -123,6 +128,8 @@ func ProcessControl(store beads.Store, bead beads.Bead, opts ProcessOptions) (Co
 		return processRetryEval(store, bead, opts)
 	case "fanout":
 		return processFanout(store, bead, opts)
+	case "drain":
+		return processDrain(store, bead, opts)
 	case "scope-check":
 		return processScopeCheck(store, bead, opts)
 	case "workflow-finalize":
@@ -224,6 +231,10 @@ func processScopeCheck(store beads.Store, bead beads.Bead, opts ProcessOptions) 
 	}
 
 	if isRetryAttemptSubject(subject) {
+		if subject.Status != "closed" {
+			opts.tracef("scope-check bead=%s subject=%s pending status=%s", bead.ID, subject.ID, subject.Status)
+			return ControlResult{}, ErrControlPending
+		}
 		remainingOpen, err := tracePhase(opts, bead.ID, "check-open-members", func() (bool, error) {
 			return hasOpenScopeMembers(store, rootID, scopeRef, bead.ID)
 		})
@@ -235,6 +246,11 @@ func processScopeCheck(store beads.Store, bead beads.Bead, opts ProcessOptions) 
 			snapshot, err := loadScopeSnapshotForControl(store, rootID, scopeRef, body, subject, bead.ID, opts)
 			if err != nil {
 				return ControlResult{}, err
+			}
+			if err := tracePhaseErr(opts, bead.ID, "propagate-metadata", func() error {
+				return snapshot.propagateScopeMemberMetadata(store, body.ID)
+			}); err != nil {
+				return ControlResult{}, fmt.Errorf("%s: propagating scope metadata: %w", bead.ID, err)
 			}
 			outputJSON, err := tracePhase(opts, bead.ID, "resolve-output", func() (string, error) {
 				return snapshot.resolveScopeOutputJSON(subject)
@@ -411,7 +427,7 @@ func loadScopeSnapshotWithBody(store beads.Store, rootID, scopeRef string, body 
 }
 
 func listByWorkflowRootAndScope(store beads.Store, rootID, scopeRef string) ([]beads.Bead, error) {
-	return store.List(beads.ListQuery{
+	return beads.HandlesFor(store).Live.List(beads.ListQuery{
 		Metadata: map[string]string{
 			"gc.root_bead_id": rootID,
 			"gc.scope_ref":    scopeRef,
@@ -421,7 +437,7 @@ func listByWorkflowRootAndScope(store beads.Store, rootID, scopeRef string) ([]b
 }
 
 func listActiveByWorkflowRootAndScope(store beads.Store, rootID, scopeRef string) ([]beads.Bead, error) {
-	return store.List(beads.ListQuery{
+	return beads.HandlesFor(store).Live.List(beads.ListQuery{
 		Metadata: map[string]string{
 			"gc.root_bead_id": rootID,
 			"gc.scope_ref":    scopeRef,
@@ -583,26 +599,29 @@ func (s scopeSnapshot) skipOpenScopeMembers(store beads.Store, skipControlID str
 
 	skipped := 0
 	for len(pending) > 0 {
-		progress := false
-		for _, id := range sortedPendingIDs(pending) {
-			if !canSkipScopeMember(store, id, pending) {
+		ids := sortedPendingIDs(pending)
+		depsByID, err := loadDownDepsForScopeSkip(store, ids)
+		if err != nil {
+			return skipped, err
+		}
+		skippable := make([]string, 0, len(ids))
+		for _, id := range ids {
+			if !canSkipScopeMemberWithDeps(depsByID[id], pending) {
 				continue
 			}
-			status := "closed"
-			if err := store.Update(id, beads.UpdateOpts{
-				Status:   &status,
-				Metadata: map[string]string{"gc.outcome": "skipped"},
-			}); err != nil {
-				return skipped, fmt.Errorf("closing bead %q: %w", id, err)
-			}
+			skippable = append(skippable, id)
+		}
+		if len(skippable) == 0 {
+			return skipped, fmt.Errorf("unable to skip remaining scope members: %v", ids)
+		}
+		closed, err := skipScopeMembers(store, skippable)
+		if err != nil {
+			return skipped + closed, err
+		}
+		for _, id := range skippable {
 			delete(pending, id)
-			skipped++
-			progress = true
 		}
-		if progress {
-			continue
-		}
-		return skipped, fmt.Errorf("unable to skip remaining scope members: %v", sortedPendingIDs(pending))
+		skipped += closed
 	}
 
 	return skipped, nil
@@ -661,6 +680,9 @@ func processWorkflowFinalize(store beads.Store, bead beads.Bead, opts ProcessOpt
 			return ControlResult{Processed: true, Action: "workflow-missing_root"}, nil
 		}
 		return ControlResult{}, recordWorkflowFinalizeError(store, bead.ID, fmt.Errorf("%s: completing workflow head: %w", rootID, err))
+	}
+	if _, err := sourceworkflow.CloseSpecSidecarsForRoot(store, rootID, sourceworkflow.WorkflowSpecSidecarClosedReason); err != nil {
+		return ControlResult{}, recordWorkflowFinalizeError(store, bead.ID, fmt.Errorf("%s: closing workflow spec sidecars: %w", rootID, err))
 	}
 	if outcome == "pass" {
 		if err := closeSourceBeadChain(store, rootID, opts); err != nil {
@@ -892,7 +914,7 @@ func sourceWorkflowChildSources(store beads.Store, sourceBeadID, sourceStoreRef,
 	if store == nil || sourceBeadID == "" {
 		return nil, nil
 	}
-	candidates, err := store.List(beads.ListQuery{
+	candidates, err := beads.HandlesFor(store).Live.List(beads.ListQuery{
 		IncludeClosed: true,
 		Metadata: map[string]string{
 			"gc.source_bead_id": sourceBeadID,
@@ -1173,7 +1195,7 @@ func resolveScopeBodyOnce(store beads.Store, rootID, scopeRef string) (beads.Bea
 }
 
 func resolveScopeBodyByRole(store beads.Store, rootID, scopeRef string, includeClosed bool) (beads.Bead, bool, error) {
-	matches, err := store.List(beads.ListQuery{
+	matches, err := beads.HandlesFor(store).Live.List(beads.ListQuery{
 		Metadata: map[string]string{
 			"gc.root_bead_id": rootID,
 			"gc.kind":         "scope",
@@ -1192,11 +1214,7 @@ func resolveScopeBodyByRole(store beads.Store, rootID, scopeRef string, includeC
 	return beads.Bead{}, false, nil
 }
 
-func canSkipScopeMember(store beads.Store, beadID string, pending map[string]beads.Bead) bool {
-	deps, err := store.DepList(beadID, "down")
-	if err != nil {
-		return false
-	}
+func canSkipScopeMemberWithDeps(deps []beads.Dep, pending map[string]beads.Bead) bool {
 	for _, dep := range deps {
 		if dep.Type != "blocks" {
 			continue
@@ -1206,6 +1224,62 @@ func canSkipScopeMember(store beads.Store, beadID string, pending map[string]bea
 		}
 	}
 	return true
+}
+
+type scopeSkipDepBatchLister interface {
+	DepListBatch(ids []string) (map[string][]beads.Dep, error)
+}
+
+func loadDownDepsForScopeSkip(store beads.Store, ids []string) (map[string][]beads.Dep, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	if batch, ok := store.(scopeSkipDepBatchLister); ok {
+		deps, err := batch.DepListBatch(ids)
+		if err != nil {
+			return nil, fmt.Errorf("batch listing scope skip deps: %w", err)
+		}
+		if deps == nil {
+			deps = make(map[string][]beads.Dep, len(ids))
+		}
+		return deps, nil
+	}
+	depsByID := make(map[string][]beads.Dep, len(ids))
+	for _, id := range ids {
+		deps, err := store.DepList(id, "down")
+		if err != nil {
+			return nil, fmt.Errorf("listing deps for scope skip bead %q: %w", id, err)
+		}
+		depsByID[id] = deps
+	}
+	return depsByID, nil
+}
+
+type scopeSkipBatchUpdater interface {
+	UpdateAll(ids []string, opts beads.UpdateOpts) (int, error)
+}
+
+func skipScopeMembers(store beads.Store, ids []string) (int, error) {
+	status := "closed"
+	opts := beads.UpdateOpts{
+		Status:   &status,
+		Metadata: map[string]string{"gc.outcome": "skipped"},
+	}
+	if batch, ok := store.(scopeSkipBatchUpdater); ok {
+		updated, err := batch.UpdateAll(ids, opts)
+		if err != nil {
+			return updated, fmt.Errorf("closing skipped scope beads %v: %w", ids, err)
+		}
+		return updated, nil
+	}
+	closed := 0
+	for _, id := range ids {
+		if err := store.Update(id, opts); err != nil {
+			return closed, fmt.Errorf("closing bead %q: %w", id, err)
+		}
+		closed++
+	}
+	return closed, nil
 }
 
 func sortedPendingIDs(pending map[string]beads.Bead) []string {
@@ -1218,7 +1292,7 @@ func sortedPendingIDs(pending map[string]beads.Bead) []string {
 }
 
 func listByWorkflowRoot(store beads.Store, rootID string) ([]beads.Bead, error) {
-	all, err := store.List(beads.ListQuery{
+	all, err := beads.HandlesFor(store).Live.List(beads.ListQuery{
 		Metadata:      map[string]string{"gc.root_bead_id": rootID},
 		IncludeClosed: true,
 	})
@@ -1303,11 +1377,15 @@ func setOutcomeAndClose(store beads.Store, beadID, outcome string) error {
 	})
 }
 
-// reconcileClosedScopeMember re-reads the just-closed bead and delegates to
-// reconcileTerminalScopedMember. Callers invoke it immediately after
+// ReconcileClosedScopeMember re-reads a just-closed bead and delegates to
+// scope reconciliation. Callers invoke it immediately after
 // setOutcomeAndClose, so this relies on the store being read-after-write
 // consistent (true for MemStore today). If a future store becomes eventually
 // consistent, pass the in-memory closed bead directly instead of re-reading.
+func ReconcileClosedScopeMember(store beads.Store, beadID string) (ControlResult, error) {
+	return reconcileClosedScopeMember(store, beadID)
+}
+
 func reconcileClosedScopeMember(store beads.Store, beadID string) (ControlResult, error) {
 	return reconcileClosedScopeMemberWithOptions(store, beadID, ProcessOptions{})
 }

@@ -17,7 +17,6 @@ import (
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
-	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/orderdiscovery"
 	"github.com/gastownhall/gascity/internal/orders"
@@ -187,11 +186,16 @@ func newOrderSweepTrackingCmd(stdout, stderr io.Writer) *cobra.Command {
 	quiet := false
 	cmd := &cobra.Command{
 		Use:   "sweep-tracking [order ...]",
-		Short: "Close stale order-tracking beads",
-		Long: `Close stale open order-tracking beads.
+		Short: "Close stale and prune closed order-tracking beads",
+		Long: `Close stale open order-tracking beads and prune expired closed history.
 
 This is intended for maintenance exec orders. It only closes tracking beads
 older than --stale-after so a fresh in-flight order is not interrupted.
+Closed order-tracking history is deleted after
+[beads.policies.order_tracking].delete_after_close, defaulting to 7d, while
+always retaining at least the latest 10 closed tracking beads per order.
+The manual command runs to completion; controller startup and watchdog sweeps
+use bounded cleanup to avoid spending an unbounded tick on stale work.
 
 Use --include-wisps for operator recovery of abandoned order-run wisp
 subtrees whose open descendants are also older than --stale-after. Pass one
@@ -253,12 +257,7 @@ func loadAllOrdersWithCity(stderr io.Writer, cmdName string) (string, *config.Ci
 // loadAllOrders scans all configured orders and applies configured overrides.
 // Callers that execute or list active work should use loadActiveOrders instead.
 func loadAllOrders(cityPath string, cfg *config.City, stderr io.Writer, cmdName string) ([]orders.Order, int) {
-	allAA, err := orderdiscovery.ScanAll(cityPath, cfg, orderdiscovery.ScanOptions{
-		OnRigScanError: func(rigName string, err error) error {
-			fmt.Fprintf(stderr, "%s: rig %s: %v\n", cmdName, rigName, err) //nolint:errcheck // best-effort stderr
-			return nil
-		},
-	})
+	allAA, err := orderdiscovery.ScanAll(cityPath, cfg, orderScanOptions(stderr, cmdName))
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", cmdName, err) //nolint:errcheck // best-effort stderr
 		return nil, 1
@@ -277,12 +276,21 @@ func loadActiveOrdersForCity(cityPath string, cfg *config.City, stderr io.Writer
 // scanAllOrders returns the shared post-override discovery view used by command
 // tests and compatibility call sites.
 func scanAllOrders(cityPath string, cfg *config.City, stderr io.Writer, cmdName string) ([]orders.Order, error) {
-	return orderdiscovery.ScanAll(cityPath, cfg, orderdiscovery.ScanOptions{
+	return orderdiscovery.ScanAll(cityPath, cfg, orderScanOptions(stderr, cmdName))
+}
+
+func orderScanOptions(stderr io.Writer, cmdName string) orderdiscovery.ScanOptions {
+	return orderdiscovery.ScanOptions{
 		OnRigScanError: func(rigName string, err error) error {
 			fmt.Fprintf(stderr, "%s: rig %s: %v\n", cmdName, rigName, err) //nolint:errcheck // best-effort stderr
 			return nil
 		},
-	})
+		OnValidateError: func(orderName string, err error) error {
+			fmt.Fprintf(stderr, "%s: order %s: %v\n", cmdName, orderName, err) //nolint:errcheck // best-effort stderr
+			return nil
+		},
+		ValidateOrder: validateOrderExecEnvOverrides,
+	}
 }
 
 func cityOrderRoots(cityPath string, cfg *config.City) []orders.ScanRoot {
@@ -371,23 +379,24 @@ type orderShowJSON struct {
 }
 
 type orderJSON struct {
-	Name         string `json:"name"`
-	ScopedName   string `json:"scoped_name"`
-	Rig          string `json:"rig,omitempty"`
-	Description  string `json:"description,omitempty"`
-	Type         string `json:"type"`
-	Formula      string `json:"formula,omitempty"`
-	Exec         string `json:"exec,omitempty"`
-	Trigger      string `json:"trigger"`
-	Interval     string `json:"interval,omitempty"`
-	Schedule     string `json:"schedule,omitempty"`
-	Check        string `json:"check,omitempty"`
-	On           string `json:"on,omitempty"`
-	Target       string `json:"target,omitempty"`
-	Timeout      string `json:"timeout,omitempty"`
-	Enabled      bool   `json:"enabled"`
-	Source       string `json:"source,omitempty"`
-	FormulaLayer string `json:"formula_layer,omitempty"`
+	Name         string            `json:"name"`
+	ScopedName   string            `json:"scoped_name"`
+	Rig          string            `json:"rig,omitempty"`
+	Description  string            `json:"description,omitempty"`
+	Type         string            `json:"type"`
+	Formula      string            `json:"formula,omitempty"`
+	Exec         string            `json:"exec,omitempty"`
+	Trigger      string            `json:"trigger"`
+	Interval     string            `json:"interval,omitempty"`
+	Schedule     string            `json:"schedule,omitempty"`
+	Check        string            `json:"check,omitempty"`
+	On           string            `json:"on,omitempty"`
+	Target       string            `json:"target,omitempty"`
+	Timeout      string            `json:"timeout,omitempty"`
+	Enabled      bool              `json:"enabled"`
+	Source       string            `json:"source,omitempty"`
+	FormulaLayer string            `json:"formula_layer,omitempty"`
+	Env          map[string]string `json:"env,omitempty"`
 }
 
 func doOrderListJSON(cityPath string, cfg *config.City, aa []orders.Order, stdout io.Writer) int {
@@ -456,7 +465,17 @@ func orderToJSON(a orders.Order) orderJSON {
 		Enabled:      a.IsEnabled(),
 		Source:       a.Source,
 		FormulaLayer: a.FormulaLayer,
+		Env:          a.Env,
 	}
+}
+
+func sortedOrderEnvKeys(env map[string]string) []string {
+	keys := make([]string, 0, len(env))
+	for key := range env {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 // anyOrderHasRig returns true if any order in the list has a non-empty Rig.
@@ -522,6 +541,12 @@ func doOrderShow(aa []orders.Order, name, rig string, stdout, stderr io.Writer) 
 	}
 	if a.Pool != "" {
 		w(fmt.Sprintf("Target:      %s", a.Pool))
+	}
+	if len(a.Env) > 0 {
+		w("Env:")
+		for _, key := range sortedOrderEnvKeys(a.Env) {
+			w(fmt.Sprintf("  %s=%s", key, a.Env[key]))
+		}
 	}
 	w(fmt.Sprintf("Source:      %s", a.Source))
 	return 0
@@ -642,7 +667,7 @@ func doOrderRunWithJSON(aa []orders.Order, name, rig, cityPath string, store bea
 	if a.FormulaLayer != "" {
 		searchPaths = []string{a.FormulaLayer}
 	}
-	recipe, err := formula.CompileWithoutRuntimeVarValidation(context.Background(), a.Formula, searchPaths, nil)
+	recipe, err := prepareOrderWispRecipe(context.Background(), store, a, searchPaths)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc order run: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -662,7 +687,7 @@ func doOrderRunWithJSON(aa []orders.Order, name, rig, cityPath string, store bea
 	}
 
 	if a.Pool != "" && cfg != nil {
-		if err := applyGraphRouting(recipe, nil, pool, nil, "", "", "", "", store, cityName, cityPath, cfg); err != nil {
+		if err := applyGraphRouting(recipe, nil, pool, nil, "", "", "", store, cityName, cityPath, cfg); err != nil {
 			fmt.Fprintf(stderr, "gc order run: routing decoration failed: %v\n", err) //nolint:errcheck // best-effort stderr
 		}
 	}
@@ -686,7 +711,20 @@ func doOrderRunWithJSON(aa []orders.Order, name, rig, cityPath string, store bea
 		)
 	}
 	if a.Pool != "" {
+		// poolDemandMetadataPair() returns the explicit, type-independent
+		// signal that this wisp counts as scale_check demand for the
+		// routed pool — see cmd/gc/pool_demand.go for the value-choice
+		// rationale (bd's --set-metadata write path infers JSON type
+		// from the string, so a numeric-looking value would round-trip
+		// as an integer and silently miss the supervisor's metadata
+		// equality match). Same pair is written by
+		// memoryOrderDispatcher.dispatchOne in order_dispatch.go so
+		// both the CLI (gc order run) and supervisor cron paths land
+		// matching beads.
 		update.Metadata = map[string]string{"gc.routed_to": pool}
+		for k, v := range poolDemandMetadataPair() {
+			update.Metadata[k] = v
+		}
 	}
 	if err := store.Update(rootID, update); err != nil {
 		fmt.Fprintf(stderr, "gc order run: labeling wisp: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -728,7 +766,7 @@ func doOrderRunExecTracked(a orders.Order, cityPath string, cfg *config.City, st
 	tracking, err := store.Create(beads.Bead{
 		Title:     "order:" + scoped,
 		Labels:    []string{"order-run:" + scoped, labelOrderTracking},
-		Ephemeral: true,
+		NoHistory: true,
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "gc order run: creating exec tracking bead for %s: %v\n", scoped, err) //nolint:errcheck // best-effort stderr
@@ -966,6 +1004,10 @@ func doOrderCheckWithStoresResolverScopedJSON(cityPath string, cfg *config.City,
 			Orders:        make([]orderCheckJSONRow, 0, len(aa)),
 		}
 		for _, a := range aa {
+			if err := validateOrderCheckPreflight(a); err != nil {
+				fmt.Fprintf(stderr, "gc order check: %v\n", err) //nolint:errcheck // best-effort stderr
+				return 1
+			}
 			stores, err := resolveStores(a)
 			if err != nil {
 				fmt.Fprintf(stderr, "gc order check: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -1031,6 +1073,10 @@ func doOrderCheckWithStoresResolverScopedJSON(cityPath string, cfg *config.City,
 	}
 	anyDue := false
 	for _, a := range aa {
+		if err := validateOrderCheckPreflight(a); err != nil {
+			fmt.Fprintf(stderr, "gc order check: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
 		stores, err := resolveStores(a)
 		if err != nil {
 			fmt.Fprintf(stderr, "gc order check: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -1086,6 +1132,10 @@ func doOrderCheckWithStoresResolverScopedJSON(cityPath string, cfg *config.City,
 		return 0
 	}
 	return 1
+}
+
+func validateOrderCheckPreflight(a orders.Order) error {
+	return validateOrderExecEnvOverrides(a)
 }
 
 // --- gc order history ---
@@ -1443,6 +1493,10 @@ func cmdOrderSweepTracking(staleAfter time.Duration, includeWisps, quiet bool, o
 		return 1
 	}
 	onlyOrders := orderNameFilter(orderNames)
+	if includeWisps && len(onlyOrders) == 0 {
+		fmt.Fprintln(stderr, "gc order sweep-tracking: include-wisps requires at least one order name") //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	requiredTargets, err := orderTrackingSweepRequiredTargetKeysForOrders(cityPath, cfg, onlyOrders)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc order sweep-tracking: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -1457,10 +1511,13 @@ func cmdOrderSweepTracking(staleAfter time.Duration, includeWisps, quiet bool, o
 		}
 		return 1
 	}
-	result, sweepErr := sweepStaleOrderTrackingAcrossStores(stores, time.Now(), staleAfter, onlyOrders, orderTrackingSweepMetadataInitiator, includeWisps)
-	if err := errors.Join(openErr, sweepErr); err != nil {
+	now := time.Now()
+	result, sweepErr := sweepStaleOrderTrackingAcrossStores(stores, now, staleAfter, onlyOrders, includeWisps)
+	retentionResult, retentionErr := sweepClosedOrderTrackingRetentionAcrossStores(stores, now, orderTrackingRetentionPolicyForConfig(cfg), onlyOrders)
+	result.trackingDeleted = retentionResult.deleted
+	if err := errors.Join(openErr, sweepErr, retentionErr); err != nil {
 		fmt.Fprintf(stderr, "gc order sweep-tracking: %v\n", err) //nolint:errcheck // best-effort stderr
-		if result.storesSwept == 0 {
+		if orderTrackingSweepErrorIsFatal(result, retentionResult, retentionErr) {
 			return 1
 		}
 	}
@@ -1470,12 +1527,19 @@ func cmdOrderSweepTracking(staleAfter time.Duration, includeWisps, quiet bool, o
 	}
 	if !quiet {
 		if includeWisps {
-			fmt.Fprintf(stdout, "closed %d stale order-tracking bead(s), %d stale order wisp bead(s)\n", result.trackingClosed, result.wispClosed) //nolint:errcheck // best-effort stdout
+			fmt.Fprintf(stdout, "closed %d stale order-tracking bead(s), %d stale order wisp bead(s), deleted %d closed order-tracking bead(s)\n", result.trackingClosed, result.wispClosed, result.trackingDeleted) //nolint:errcheck // best-effort stdout
 		} else {
-			fmt.Fprintf(stdout, "closed %d stale order-tracking bead(s)\n", result.trackingClosed) //nolint:errcheck // best-effort stdout
+			fmt.Fprintf(stdout, "closed %d stale order-tracking bead(s), deleted %d closed order-tracking bead(s)\n", result.trackingClosed, result.trackingDeleted) //nolint:errcheck // best-effort stdout
 		}
 	}
 	return 0
+}
+
+func orderTrackingSweepErrorIsFatal(result orderTrackingSweepResult, retentionResult orderTrackingRetentionSweepResult, retentionErr error) bool {
+	if result.storesSwept == 0 {
+		return true
+	}
+	return retentionErr != nil && retentionResult.storesSwept == 0
 }
 
 func orderTrackingSweepRequiredTargetKeysForOrders(cityPath string, cfg *config.City, onlyOrders map[string]struct{}) (map[string][]string, error) {

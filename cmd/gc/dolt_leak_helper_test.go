@@ -439,6 +439,29 @@ func TestIsStaleCmdGCTestConfigPathUsesCurrentGCTOwnerPID(t *testing.T) {
 	}
 }
 
+func TestIsStaleCmdGCTestConfigPathUsesShardOwnerPID(t *testing.T) {
+	ownerPID := 12345
+	root := filepath.Join("/tmp", fmt.Sprintf("%s%d-current", testCmdGCShardTempRootPrefix, ownerPID))
+	configPath := filepath.Join(root, "TestCase", "001", ".gc", "runtime", "packs", "dolt", "dolt-config.yaml")
+
+	if isStaleCmdGCTestConfigPathWithPIDCheck(configPath, nil, "/tmp", func(pid int) bool {
+		if pid != ownerPID {
+			t.Fatalf("pidAlive called with pid %d, want %d", pid, ownerPID)
+		}
+		return true
+	}) {
+		t.Fatalf("live shard cmd/gc owner config path %q classified as stale", configPath)
+	}
+	if !isStaleCmdGCTestConfigPathWithPIDCheck(configPath, nil, "/tmp", func(pid int) bool {
+		if pid != ownerPID {
+			t.Fatalf("pidAlive called with pid %d, want %d", pid, ownerPID)
+		}
+		return false
+	}) {
+		t.Fatalf("dead shard cmd/gc owner config path %q not classified as stale", configPath)
+	}
+}
+
 func TestIsTestConfigPathRetainsLegacyGCTestAllowlistOnly(t *testing.T) {
 	legacyConfig := filepath.Join("/tmp", "gctest-legacy", "TestCase", ".gc", "runtime", "packs", "dolt", "dolt-config.yaml")
 	currentConfig := filepath.Join("/tmp", fmt.Sprintf("%s%d-current", testCmdGCTempRootPrefix, os.Getpid()), "TestCase", ".gc", "runtime", "packs", "dolt", "dolt-config.yaml")

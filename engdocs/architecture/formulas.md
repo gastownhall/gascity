@@ -67,10 +67,10 @@ Store.MolCook / Store.MolCookOn
 ### Review Quorum Formula
 
 `internal/bootstrap/packs/core/formulas/mol-review-quorum.toml` is a Gas
-City-owned review quorum formula scaffold. It is a core `graph.v2` formula,
-not a separate lifecycle controller. The graph has exactly two reviewer lanes,
-with lane IDs, providers, models, and dispatch targets supplied by formula
-variables, followed by a configured synthesis step.
+City-owned review quorum formula scaffold. It declares
+`formula_compiler = ">=2.0.0"`, not a separate lifecycle controller. The graph
+has exactly two reviewer lanes, with lane IDs, providers, models, and dispatch
+targets supplied by formula variables, followed by a configured synthesis step.
 
 The reviewer lane identity and runtime binding are intentionally configured in
 one obvious place: formula vars. `lane_one_id`, `lane_one_provider`,

@@ -55,6 +55,12 @@ func writeMalformedHistoryTranscript(t *testing.T, profile Profile) string {
 			`{"type":"message","id":"a1","parentId":"u1","timestamp":"2026-04-04T09:00:01Z","message":{"role":"assistant","content":[{"type":"text","text":"done"}]}}`,
 			`{"type":"message","id":"torn","message":`,
 		})
+	case ProfileAntigravityTmuxCLI:
+		return writeLinesFile(t, "transcript.jsonl", []string{
+			`{"step_index":0,"type":"USER_INPUT","created_at":"2026-04-04T09:00:00Z","content":"hello"}`,
+			`{"step_index":1,"type":"PLANNER_RESPONSE","created_at":"2026-04-04T09:00:01Z","content":"done"}`,
+			`{"step_index":2,"type":"PLANNER_RESPONSE","created_at":`,
+		})
 	default:
 		t.Fatalf("unsupported profile %s", profile.ID)
 		return ""
@@ -103,6 +109,11 @@ func writeInteractionHistoryTranscript(t *testing.T, profile Profile) string {
 		return writePiSessionTranscript(t, "pi-interaction-phase2", "/tmp/gascity/phase2/pi", []string{
 			`{"type":"message","id":"msg_user_1","parentId":null,"timestamp":"2026-04-04T09:00:00Z","message":{"role":"user","content":"run a tool"}}`,
 			`{"type":"message","id":"msg_assistant_1","parentId":"msg_user_1","timestamp":"2026-04-04T09:00:01Z","message":{"role":"assistant","content":[{"type":"interaction","request_id":"approval-1","kind":"approval","state":"pending","prompt":"Allow Read?","options":["approve","deny"],"metadata":{"tool_name":"Read"}}]}}`,
+		})
+	case ProfileAntigravityTmuxCLI:
+		return writeLinesFile(t, "transcript.jsonl", []string{
+			`{"step_index":0,"type":"USER_INPUT","created_at":"2026-04-04T09:00:00Z","content":"run a tool"}`,
+			`{"step_index":1,"type":"PLANNER_RESPONSE","created_at":"2026-04-04T09:00:01Z","content":"approval needed","interactions":[{"request_id":"approval-1","kind":"approval","state":"pending","prompt":"Allow Read?","options":["approve","deny"],"metadata":{"tool_name":"Read"}}]}`,
 		})
 	default:
 		t.Fatalf("unsupported profile %s", profile.ID)
@@ -159,6 +170,11 @@ func writeInteractionLifecycleTranscript(t *testing.T, profile Profile, finalSta
 		return writePiSessionTranscript(t, "pi-interaction-lifecycle-phase2", "/tmp/gascity/phase2/pi", []string{
 			`{"type":"message","id":"msg_assistant_1","parentId":null,"timestamp":"2026-04-04T09:00:00Z","message":{"role":"assistant","content":[{"type":"interaction","request_id":"approval-1","kind":"approval","state":"pending","prompt":"Allow Read?","options":["approve","deny"]}]}}`,
 			fmt.Sprintf(`{"type":"message","id":"msg_user_1","parentId":"msg_assistant_1","timestamp":"2026-04-04T09:00:01Z","message":{"role":"user","content":[{"type":"interaction","request_id":"approval-1","kind":"approval","state":%q,"action":%q}]}}`, finalStateText, finalAction),
+		})
+	case ProfileAntigravityTmuxCLI:
+		return writeLinesFile(t, "transcript.jsonl", []string{
+			`{"step_index":0,"type":"PLANNER_RESPONSE","created_at":"2026-04-04T09:00:00Z","content":"approval needed","interactions":[{"request_id":"approval-1","kind":"approval","state":"pending","prompt":"Allow Read?","options":["approve","deny"]}]}`,
+			fmt.Sprintf(`{"step_index":1,"type":"USER_INPUT","created_at":"2026-04-04T09:00:01Z","content":"interaction updated","interactions":[{"request_id":"approval-1","kind":"approval","state":%q,"action":%q}]}`, finalStateText, finalAction),
 		})
 	default:
 		t.Fatalf("unsupported profile %s", profile.ID)
@@ -247,6 +263,18 @@ func writeToolTranscript(t *testing.T, profile Profile, openTail bool) string {
 			)
 		}
 		return writePiSessionTranscript(t, "pi-tool-phase2", "/tmp/gascity/phase2/pi", entries)
+	case ProfileAntigravityTmuxCLI:
+		entries := []string{
+			`{"step_index":0,"type":"USER_INPUT","created_at":"2026-04-04T09:00:00Z","content":"read the file"}`,
+			`{"step_index":1,"type":"PLANNER_RESPONSE","created_at":"2026-04-04T09:00:01Z","content":"checking","tool_calls":[{"name":"Read","args":{"path":"README.md"}}]}`,
+		}
+		if !openTail {
+			entries = append(entries,
+				`{"step_index":2,"type":"READ_FILE","created_at":"2026-04-04T09:00:02Z","content":"file data"}`,
+				`{"step_index":3,"type":"PLANNER_RESPONSE","created_at":"2026-04-04T09:00:03Z","content":"done"}`,
+			)
+		}
+		return writeLinesFile(t, "transcript.jsonl", entries)
 	default:
 		t.Fatalf("unsupported profile %s", profile.ID)
 		return ""

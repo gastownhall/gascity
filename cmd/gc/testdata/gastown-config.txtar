@@ -83,6 +83,9 @@ exec gc stop $WORK/gastown-dogs
 name = "gastown"
 provider = "claude"
 
+[providers.claude]
+base = "builtin:claude"
+
 [daemon]
 patrol_interval = "30s"
 max_restarts = 5

@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/orders"
 )
 
@@ -273,6 +275,234 @@ interval = "1h"
 	}
 	if aa[0].Interval != "30m" {
 		t.Errorf("Interval = %q, want %q — override not applied", aa[0].Interval, "30m")
+	}
+}
+
+func TestOrderScanContractOverrideEnvMergedBeforeReturning(t *testing.T) {
+	cityPath, cityFormulasDir := contractCitySetup(t)
+	writeContractOrder(t, filepath.Join(cityPath, "orders"), "db-sync", `[order]
+exec = "scripts/db-sync.sh"
+trigger = "cooldown"
+interval = "1h"
+
+[order.env]
+KEEP = "source"
+OVERRIDE = "source"
+`)
+
+	cfg := &config.City{
+		FormulaLayers: config.FormulaLayers{
+			City: []string{cityFormulasDir},
+		},
+		Orders: config.OrdersConfig{
+			Overrides: []config.OrderOverride{
+				{Name: "db-sync", Env: map[string]string{"OVERRIDE": "city", "ADD": "city"}},
+			},
+		},
+	}
+
+	var stderr bytes.Buffer
+	aa, code := loadAllOrders(cityPath, cfg, &stderr, "test")
+	if code != 0 {
+		t.Fatalf("loadAllOrders code %d; stderr: %s", code, stderr.String())
+	}
+	if len(aa) != 1 {
+		t.Fatalf("got %d orders, want 1", len(aa))
+	}
+	if aa[0].Env["KEEP"] != "source" || aa[0].Env["OVERRIDE"] != "city" || aa[0].Env["ADD"] != "city" {
+		t.Fatalf("Env = %+v, want source env merged with override env", aa[0].Env)
+	}
+}
+
+func TestOrderScanContractOverrideEnvOnFormulaOrderIsSkipped(t *testing.T) {
+	cityPath, cityFormulasDir := contractCitySetup(t)
+	writeContractOrder(t, filepath.Join(cityPath, "orders"), "backup", `[order]
+exec = "scripts/backup.sh"
+trigger = "cooldown"
+interval = "1h"
+`)
+	writeContractOrder(t, filepath.Join(cityPath, "orders"), "deploy", `[order]
+formula = "mol-deploy"
+trigger = "manual"
+`)
+
+	cfg := &config.City{
+		FormulaLayers: config.FormulaLayers{
+			City: []string{cityFormulasDir},
+		},
+		Orders: config.OrdersConfig{
+			Overrides: []config.OrderOverride{
+				{Name: "deploy", Env: map[string]string{"CUSTOM_ORDER_FLAG": "enabled"}},
+			},
+		},
+	}
+
+	var stderr bytes.Buffer
+	aa, err := scanAllOrders(cityPath, cfg, &stderr, "test")
+	if err != nil {
+		t.Fatalf("scanAllOrders returned error: %v; stderr: %s", err, stderr.String())
+	}
+	if len(aa) != 1 {
+		t.Fatalf("got %d orders, want only the valid order", len(aa))
+	}
+	if aa[0].Name != "backup" {
+		t.Fatalf("remaining order = %q, want backup", aa[0].Name)
+	}
+	if got := stderr.String(); !strings.Contains(got, "deploy") || !strings.Contains(got, "env is supported only for exec orders") {
+		t.Fatalf("stderr = %q, want skipped deploy validation diagnostic", got)
+	}
+}
+
+func TestOrderScanContractLoadAllOrdersSkipsInvalidOverrideEnvOnFormulaOrder(t *testing.T) {
+	cityPath, cityFormulasDir := contractCitySetup(t)
+	writeContractOrder(t, filepath.Join(cityPath, "orders"), "backup", `[order]
+exec = "scripts/backup.sh"
+trigger = "cooldown"
+interval = "1h"
+`)
+	writeContractOrder(t, filepath.Join(cityPath, "orders"), "deploy", `[order]
+formula = "mol-deploy"
+trigger = "manual"
+`)
+
+	cfg := &config.City{
+		FormulaLayers: config.FormulaLayers{
+			City: []string{cityFormulasDir},
+		},
+		Orders: config.OrdersConfig{
+			Overrides: []config.OrderOverride{
+				{Name: "deploy", Env: map[string]string{"CUSTOM_ORDER_FLAG": "enabled"}},
+			},
+		},
+	}
+
+	var stderr bytes.Buffer
+	aa, code := loadAllOrders(cityPath, cfg, &stderr, "test")
+	if code != 0 {
+		t.Fatalf("loadAllOrders code %d; stderr: %s", code, stderr.String())
+	}
+	if len(aa) != 1 {
+		t.Fatalf("got %d orders, want only the valid order", len(aa))
+	}
+	if aa[0].Name != "backup" {
+		t.Fatalf("remaining order = %q, want backup", aa[0].Name)
+	}
+	if got := stderr.String(); !strings.Contains(got, "deploy") || !strings.Contains(got, "env is supported only for exec orders") {
+		t.Fatalf("stderr = %q, want skipped deploy validation diagnostic", got)
+	}
+}
+
+func TestOrderScanContractDispatcherSkipsInvalidOverrideEnvOnFormulaOrder(t *testing.T) {
+	cityPath, cityFormulasDir := contractCitySetup(t)
+	writeContractOrder(t, filepath.Join(cityPath, "orders"), "backup", `[order]
+exec = "scripts/backup.sh"
+trigger = "cooldown"
+interval = "1h"
+`)
+	writeContractOrder(t, filepath.Join(cityPath, "orders"), "deploy", `[order]
+formula = "mol-deploy"
+trigger = "manual"
+`)
+
+	cfg := &config.City{
+		FormulaLayers: config.FormulaLayers{
+			City: []string{cityFormulasDir},
+		},
+		Orders: config.OrdersConfig{
+			Overrides: []config.OrderOverride{
+				{Name: "deploy", Env: map[string]string{"CUSTOM_ORDER_FLAG": "enabled"}},
+			},
+		},
+	}
+
+	var stderr bytes.Buffer
+	snapshot, err := scanOrderSetSnapshotFS(fsys.OSFS{}, cityPath, cfg, &stderr, "test")
+	if err != nil {
+		t.Fatalf("scanOrderSetSnapshotFS returned error: %v; stderr: %s", err, stderr.String())
+	}
+	if len(snapshot.Orders) != 1 {
+		t.Fatalf("got %d orders, want only the valid order", len(snapshot.Orders))
+	}
+	if snapshot.Orders[0].Name != "backup" {
+		t.Fatalf("remaining order = %q, want backup", snapshot.Orders[0].Name)
+	}
+	if got := stderr.String(); !strings.Contains(got, "deploy") || !strings.Contains(got, "env is supported only for exec orders") {
+		t.Fatalf("stderr = %q, want skipped deploy validation diagnostic", got)
+	}
+}
+
+func TestOrderScanContractDispatcherSkipsInvalidCitySourceEnvOnFormulaOrder(t *testing.T) {
+	cityPath, cityFormulasDir := contractCitySetup(t)
+	writeContractOrder(t, filepath.Join(cityPath, "orders"), "backup", `[order]
+exec = "scripts/backup.sh"
+trigger = "cooldown"
+interval = "1h"
+`)
+	writeContractOrder(t, filepath.Join(cityPath, "orders"), "deploy", `[order]
+formula = "mol-deploy"
+trigger = "manual"
+
+[order.env]
+CUSTOM_ORDER_FLAG = "enabled"
+`)
+
+	cfg := &config.City{
+		FormulaLayers: config.FormulaLayers{
+			City: []string{cityFormulasDir},
+		},
+	}
+
+	var stderr bytes.Buffer
+	snapshot, err := scanOrderSetSnapshotFS(fsys.OSFS{}, cityPath, cfg, &stderr, "test")
+	if err != nil {
+		t.Fatalf("scanOrderSetSnapshotFS returned error: %v; stderr: %s", err, stderr.String())
+	}
+	if len(snapshot.Orders) != 1 {
+		t.Fatalf("got %d orders, want only the valid order", len(snapshot.Orders))
+	}
+	if snapshot.Orders[0].Name != "backup" {
+		t.Fatalf("remaining order = %q, want backup", snapshot.Orders[0].Name)
+	}
+	if got := stderr.String(); !strings.Contains(got, "deploy") || !strings.Contains(got, "env is supported only for exec orders") {
+		t.Fatalf("stderr = %q, want skipped deploy validation diagnostic", got)
+	}
+}
+
+func TestOrderScanContractLoadAllOrdersSkipsReservedOrderEnvKey(t *testing.T) {
+	cityPath, cityFormulasDir := contractCitySetup(t)
+	writeContractOrder(t, filepath.Join(cityPath, "orders"), "backup", `[order]
+exec = "scripts/backup.sh"
+trigger = "cooldown"
+interval = "1h"
+`)
+	writeContractOrder(t, filepath.Join(cityPath, "orders"), "bad-env", `[order]
+exec = "scripts/bad-env.sh"
+trigger = "cooldown"
+interval = "1h"
+
+[order.env]
+GC_CITY = "shadowed"
+`)
+
+	cfg := &config.City{
+		FormulaLayers: config.FormulaLayers{
+			City: []string{cityFormulasDir},
+		},
+	}
+
+	var stderr bytes.Buffer
+	aa, code := loadAllOrders(cityPath, cfg, &stderr, "test")
+	if code != 0 {
+		t.Fatalf("loadAllOrders code %d; stderr: %s", code, stderr.String())
+	}
+	if len(aa) != 1 {
+		t.Fatalf("got %d orders, want only the valid order", len(aa))
+	}
+	if aa[0].Name != "backup" {
+		t.Fatalf("remaining order = %q, want backup", aa[0].Name)
+	}
+	if got := stderr.String(); !strings.Contains(got, "bad-env") || !strings.Contains(got, `controller-owned env key "GC_CITY"`) {
+		t.Fatalf("stderr = %q, want reserved-key validation diagnostic", got)
 	}
 }
 

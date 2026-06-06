@@ -141,6 +141,13 @@ func TestExtractBdScopeFlags(t *testing.T) {
 }
 
 func TestResolveBdScopeTarget(t *testing.T) {
+	// Isolate cwd from any ambient `.beads/redirect` in the working tree
+	// (e.g. when `make test` runs from a polecat/crew worktree, the worktree's
+	// redirect resolves to a path outside the synthetic rig config below and
+	// `rigFromRedirectedBeadsDir` rejects it). t.TempDir's ancestry is /tmp,
+	// which is guaranteed to be free of city redirects.
+	setCwd(t, t.TempDir())
+
 	origProbe := bdBeadExists
 	defer func() { bdBeadExists = origProbe }()
 	bdBeadExists = func(_ string, _ execStoreTarget, beadID string) bool {
@@ -568,6 +575,9 @@ func TestGcBdSuppressesBdAutoExportInChildEnv(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o700); err != nil {
 		t.Fatal(err)
 	}
+	// See TestResolveBdScopeTarget for rationale: isolate cwd so any
+	// `.beads/redirect` in the ambient working tree doesn't surface here.
+	setCwd(t, cityDir)
 	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
 name = "demo"
 `), 0o644); err != nil {
@@ -700,6 +710,9 @@ prefix = "repo"
 `), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	// See TestResolveBdScopeTarget for rationale: isolate cwd so any
+	// `.beads/redirect` in the ambient working tree doesn't surface here.
+	setCwd(t, cityDir)
 
 	binDir := t.TempDir()
 	capture := filepath.Join(t.TempDir(), "gc-bd-city-env.txt")
@@ -780,6 +793,9 @@ name = "demo"
 `), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	// See TestResolveBdScopeTarget for rationale: isolate cwd so any
+	// `.beads/redirect` in the ambient working tree doesn't surface here.
+	setCwd(t, cityDir)
 	t.Setenv("GC_CITY_PATH", cityDir)
 	t.Setenv("GC_BEADS", "file")
 	// Clear any inherited scope pin so the GC_BEADS override applies to
@@ -816,6 +832,9 @@ provider = "file"
 `), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	// See TestResolveBdScopeTarget for rationale: isolate cwd so any
+	// `.beads/redirect` in the ambient working tree doesn't surface here.
+	setCwd(t, cityDir)
 	t.Setenv("GC_CITY_PATH", cityDir)
 
 	var stdout, stderr bytes.Buffer
@@ -2046,6 +2065,93 @@ func TestHeadLimitedWriter(t *testing.T) {
 		}
 		if got := w.String(); got != "" {
 			t.Fatalf("String() = %q, want empty", got)
+		}
+	})
+}
+
+// TestGcBdHeartbeatRewritesToMetadataUpdate pins the gastownhall/gascity#1855
+// worker-heartbeat write half: `gc bd heartbeat <id>` must forward to bd as
+// `update <id> --set-metadata gc.last_heartbeat_at=<RFC3339 UTC>`. The exact
+// key (with the _at suffix) is what the gas-city-dashboard will read
+// (dashboard #324) to tell a live worker from a dead one, and the stamp must
+// be valid RFC3339 in UTC even when the local clock is in another zone.
+func TestGcBdHeartbeatRewritesToMetadataUpdate(t *testing.T) {
+	origNow := bdHeartbeatNow
+	t.Cleanup(func() { bdHeartbeatNow = origNow })
+	// Pin the clock to a non-UTC zone to prove the rewrite normalizes to UTC.
+	fixed := time.Date(2026, 5, 31, 12, 0, 0, 0, time.FixedZone("PST", -8*3600))
+	bdHeartbeatNow = func() time.Time { return fixed }
+
+	// The fake bd captures its forwarded args so the assertion can inspect them.
+	capture := filepath.Join(t.TempDir(), "gc-bd-args.txt")
+	silentFallbackTestSetup(t, "#!/bin/sh\nprintf '%s' \"$*\" > \"${CAPTURE_PATH}\"\n")
+	t.Setenv("CAPTURE_PATH", capture)
+
+	var stdout, stderr bytes.Buffer
+	if got := doBd([]string{"heartbeat", "demo-abc"}, &stdout, &stderr); got != 0 {
+		t.Fatalf("doBd(heartbeat) = %d, want 0; stderr=%q", got, stderr.String())
+	}
+
+	data, err := os.ReadFile(capture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const prefix = "update demo-abc --set-metadata " + heartbeatMetadataKey + "="
+	gotArgs := string(data)
+	stamp, ok := strings.CutPrefix(gotArgs, prefix)
+	if !ok {
+		t.Fatalf("forwarded args = %q, want prefix %q", gotArgs, prefix)
+	}
+	parsed, err := time.Parse(time.RFC3339, stamp)
+	if err != nil {
+		t.Fatalf("heartbeat stamp %q is not valid RFC3339: %v", stamp, err)
+	}
+	if _, offset := parsed.Zone(); offset != 0 {
+		t.Fatalf("heartbeat stamp %q is not UTC (zone offset %d)", stamp, offset)
+	}
+	if want := fixed.UTC().Format(time.RFC3339); stamp != want {
+		t.Fatalf("heartbeat stamp = %q, want %q", stamp, want)
+	}
+}
+
+// TestRewriteBdHeartbeatArgs covers the arg-rewrite edge cases without the
+// full city/bd harness: exactly one issue id is required, and non-heartbeat
+// commands pass through untouched so the generic bd passthrough is intact.
+func TestRewriteBdHeartbeatArgs(t *testing.T) {
+	t.Run("rejects wrong arity, flag-as-id, or whitespace id", func(t *testing.T) {
+		for _, args := range [][]string{
+			{"heartbeat"},
+			{"heartbeat", "demo-abc", "extra"},
+			{"heartbeat", "--flag"},
+			{"heartbeat", ""},
+			{"heartbeat", "  "},        // all-whitespace
+			{"heartbeat", " demo-abc"}, // leading space
+			{"heartbeat", "demo-abc "}, // trailing space
+			{"heartbeat", "demo abc"},  // internal space
+		} {
+			got, err := rewriteBdHeartbeatArgs(args)
+			if err == nil {
+				t.Fatalf("rewriteBdHeartbeatArgs(%q) = (%q, nil), want usage error", args, got)
+			}
+		}
+	})
+	t.Run("rewrites a clean id to a set-metadata update", func(t *testing.T) {
+		out, err := rewriteBdHeartbeatArgs([]string{"heartbeat", "demo-abc"})
+		if err != nil {
+			t.Fatalf("rewriteBdHeartbeatArgs unexpected error: %v", err)
+		}
+		if len(out) != 4 || out[0] != "update" || out[1] != "demo-abc" || out[2] != "--set-metadata" {
+			t.Fatalf("rewriteBdHeartbeatArgs = %q, want [update demo-abc --set-metadata ...]", out)
+		}
+	})
+	t.Run("passes non-heartbeat args through unchanged", func(t *testing.T) {
+		in := []string{"list", "-s", "open"}
+		out, err := rewriteBdHeartbeatArgs(in)
+		if err != nil {
+			t.Fatalf("rewriteBdHeartbeatArgs(%q) unexpected error: %v", in, err)
+		}
+		if len(out) != len(in) || out[0] != "list" || out[2] != "open" {
+			t.Fatalf("rewriteBdHeartbeatArgs(%q) = %q, want passthrough", in, out)
 		}
 	})
 }

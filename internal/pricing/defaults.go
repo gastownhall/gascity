@@ -99,6 +99,18 @@ var claudeDefaults = []ModelPricing{
 			CacheCreationUSDPer1M: 6.25,
 		},
 	},
+	// Claude 4.8 Opus. Regular usage pricing is unchanged from Opus 4.7.
+	{
+		Provider:     "claude",
+		Model:        "claude-opus-4-8",
+		LastVerified: "2026-05-28",
+		Tier: Tier{
+			PromptUSDPer1M:        5.00,
+			CompletionUSDPer1M:    25.00,
+			CacheReadUSDPer1M:     0.50,
+			CacheCreationUSDPer1M: 6.25,
+		},
+	},
 	// Claude 4.5 Haiku.
 	{
 		Provider:     "claude",

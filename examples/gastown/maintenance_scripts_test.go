@@ -25,6 +25,33 @@ var (
 	rawDurationIntervalRe = regexp.MustCompile(`(?i)\bINTERVAL\s+\{\{(?:max_age|purge_age|stale_issue_age)\}\}`)
 )
 
+const (
+	reaperCloseCleanupEdgeSQL   = "(d.type = 'parent-child' OR (d.type = 'tracks' AND JSON_UNQUOTE(JSON_EXTRACT(w.metadata, '$.\"gc.root_bead_id\"')) = d.depends_on_id))"
+	reaperPurgeProtectEdgeSQL   = "d.type IN ('parent-child', 'tracks', 'blocks')"
+	reaperCloseCleanupPredicate = "WISP_CLOSE_EDGE_PREDICATE="
+	reaperPurgeProtectTypes     = "WISP_PURGE_PROTECT_EDGE_TYPES="
+)
+
+func containsReaperCloseCleanupEdgePredicate(text string) bool {
+	if containsSQLFragment(text, reaperCloseCleanupEdgeSQL) {
+		return true
+	}
+	return strings.Contains(text, reaperCloseCleanupPredicate) &&
+		strings.Contains(text, "$WISP_CLOSE_EDGE_PREDICATE")
+}
+
+func containsReaperPurgeProtectEdgePredicate(text string) bool {
+	if containsSQLFragment(text, reaperPurgeProtectEdgeSQL) {
+		return true
+	}
+	return strings.Contains(text, reaperPurgeProtectTypes) &&
+		strings.Contains(text, "d.type IN ($WISP_PURGE_PROTECT_EDGE_TYPES)")
+}
+
+func containsSQLFragment(text, fragment string) bool {
+	return strings.Contains(strings.Join(strings.Fields(text), ""), strings.Join(strings.Fields(fragment), ""))
+}
+
 func TestMaintenanceCheckBinariesTreatsGhAsOptional(t *testing.T) {
 	binDir := t.TempDir()
 	bashPath, err := exec.LookPath("bash")
@@ -523,7 +550,7 @@ exit 1
 	}
 }
 
-func TestOrphanSweepPreservesRigScopedLiveEphemeralSessionAssignees(t *testing.T) {
+func TestOrphanSweepPreservesRigScopedLiveEphemeralSessionAssigneesFromCurrentSchema(t *testing.T) {
 	cityDir := t.TempDir()
 	binDir := t.TempDir()
 	gcLog := filepath.Join(t.TempDir(), "gc.log")
@@ -557,7 +584,8 @@ EOF
       if [ "$rig" = "project" ]; then
         cat <<'EOF'
 {"sessions":[
-  {"id":"mc-live-rig","session_name":"project__worker-gc-rig123","alias":"project/worker-1","agent_name":"project/worker","closed":false}
+  {"id":"mc-live-rig","name":"project/worker-1","template":"project/worker","state":"active","session_name":"project__worker-gc-rig123","alias":"project/worker-1","agent_name":"project/worker","closed":false},
+  {"id":"mc-live-rig-asleep","name":"project/worker-2","template":"project/worker","state":"asleep","session_name":"project__worker-gc-asleep","alias":"project/worker-2","agent_name":"project/worker","closed":false}
 ],"summary":{},"filters":{},"schema_version":"1"}
 EOF
         exit 0
@@ -571,7 +599,9 @@ EOF
       if [ "$4" = "project" ]; then
         cat <<'EOF'
 [
-  {"id":"ga-rig-live","status":"in_progress","assignee":"project__worker-gc-rig123"},
+  {"id":"ga-rig-live-by-session-name","status":"in_progress","assignee":"project__worker-gc-rig123"},
+  {"id":"ga-rig-live-by-id","status":"in_progress","assignee":"mc-live-rig-asleep"},
+  {"id":"ga-rig-closed-default-filtered","status":"in_progress","assignee":"project__worker-gc-closed"},
   {"id":"ga-rig-orphan","status":"in_progress","assignee":"missing-rig-session"}
 ]
 EOF
@@ -602,7 +632,7 @@ exit 1
 	if err != nil {
 		t.Fatalf("%s failed: %v\n%s", filepath.Base(script), err, out)
 	}
-	if !strings.Contains(string(out), "orphan-sweep: reset 1 orphaned beads") {
+	if !strings.Contains(string(out), "orphan-sweep: reset 2 orphaned beads") {
 		t.Fatalf("unexpected orphan-sweep output:\n%s", out)
 	}
 
@@ -617,8 +647,116 @@ exit 1
 	if !strings.Contains(log, "bd update ga-rig-orphan --status=open --assignee=") {
 		t.Fatalf("rig orphan bead was not reset:\n%s", log)
 	}
-	if strings.Contains(log, "bd update ga-rig-live ") {
-		t.Fatalf("rig live ephemeral session assignee was reset:\n%s", log)
+	if !strings.Contains(log, "bd update ga-rig-closed-default-filtered --status=open --assignee=") {
+		t.Fatalf("closed/default-filtered session assignee was not reset:\n%s", log)
+	}
+	for _, preserved := range []string{"ga-rig-live-by-session-name", "ga-rig-live-by-id"} {
+		if strings.Contains(log, "bd update "+preserved+" ") {
+			t.Fatalf("rig live ephemeral session assignee %s was reset:\n%s", preserved, log)
+		}
+	}
+}
+
+func TestOrphanSweepPreservesPascalCaseLiveSessionIdentitiesAsForwardCompat(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+
+	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+if [ "$1" = "--rig" ]; then
+  rig="$2"
+  shift 2
+else
+  rig=""
+fi
+case "$1" in
+  config)
+    if [ "$2" = "explain" ]; then
+      cat <<'EOF'
+Agent: project/worker
+  source: pack
+EOF
+      exit 0
+    fi
+    ;;
+  rig)
+    if [ "$2" = "list" ] && [ "$3" = "--json" ]; then
+      printf '{"rigs":[{"name":"hq","hq":true},{"name":"project","hq":false}]}\n'
+      exit 0
+    fi
+    ;;
+  session)
+    if [ "$2" = "list" ] && [ "$3" = "--json" ]; then
+      if [ "$rig" = "project" ]; then
+        cat <<'EOF'
+{"sessions":[
+  {"ID":"vgc-live-id","SessionName":"project__worker-vgc-live-name","Alias":"project/worker-1","Template":"project/worker","State":"active","Closed":false},
+  {"ID":"vgc-closed","SessionName":"project__worker-vgc-closed","State":"closed","Closed":true}
+],"summary":{},"filters":{},"schema_version":"1"}
+EOF
+        exit 0
+      fi
+      printf '{"sessions":[],"summary":{},"filters":{},"schema_version":"1"}\n'
+      exit 0
+    fi
+    ;;
+  bd)
+    if [ "$2" = "list" ]; then
+      if [ "$3" = "--rig" ] && [ "$4" = "project" ]; then
+        cat <<'EOF'
+[
+  {"id":"ga-live-by-id","status":"in_progress","assignee":"vgc-live-id"},
+  {"id":"ga-live-by-session-name","status":"in_progress","assignee":"project__worker-vgc-live-name"},
+  {"id":"ga-closed-session","status":"in_progress","assignee":"vgc-closed"},
+  {"id":"ga-missing-session","status":"in_progress","assignee":"missing-session"}
+]
+EOF
+      else
+        printf '[]\n'
+      fi
+      exit 0
+    fi
+    if [ "$2" = "update" ]; then
+      exit 0
+    fi
+    ;;
+esac
+exit 1
+`)
+
+	env := map[string]string{
+		"GC_CITY":      cityDir,
+		"GC_CITY_PATH": cityDir,
+		"GC_CALL_LOG":  gcLog,
+		"PATH":         binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+
+	script := filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "orphan-sweep.sh")
+	cmd := exec.Command(script)
+	cmd.Env = mergeTestEnv(env)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("%s failed: %v\n%s", filepath.Base(script), err, out)
+	}
+	if !strings.Contains(string(out), "orphan-sweep: reset 2 orphaned beads") {
+		t.Fatalf("unexpected orphan-sweep output:\n%s", out)
+	}
+
+	logData, err := os.ReadFile(gcLog)
+	if err != nil {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	log := string(logData)
+	for _, preserved := range []string{"ga-live-by-id", "ga-live-by-session-name"} {
+		if strings.Contains(log, "bd update "+preserved+" ") {
+			t.Fatalf("forward-compatible PascalCase session assignee %s was reset:\n%s", preserved, log)
+		}
+	}
+	for _, reset := range []string{"ga-closed-session", "ga-missing-session"} {
+		if !strings.Contains(log, "bd update "+reset+" --status=open --assignee=") {
+			t.Fatalf("expected %s to be reset:\n%s", reset, log)
+		}
 	}
 }
 
@@ -800,7 +938,7 @@ func TestOrphanSweepPreservesProtectedInProgressEphemeralMoleculeWisp(t *testing
 			if err := os.MkdirAll(binDir, 0o755); err != nil {
 				t.Fatalf("MkdirAll(%s): %v", binDir, err)
 			}
-			for _, name := range []string{"bash", "cat", "mktemp", "jq", "awk", "grep", "sed", "rm"} {
+			for _, name := range []string{"bash", "cat", "dirname", "mktemp", "jq", "awk", "grep", "sed", "rm"} {
 				linkTestPathTool(t, binDir, name)
 			}
 
@@ -1717,7 +1855,7 @@ exit 0
 	}
 }
 
-func TestReaperNonMessageWispsAboveAlertThresholdStillTriggerReapFailureAnomaly(t *testing.T) {
+func TestReaperFreshNonMessageWispsAboveAlertThresholdDoNotTriggerReapFailureAnomaly(t *testing.T) {
 	cityDir := t.TempDir()
 	binDir := t.TempDir()
 	doltLog := filepath.Join(t.TempDir(), "dolt-args.log")
@@ -1732,10 +1870,88 @@ case "$*" in
   *"SHOW DATABASES"*)
     printf 'Database\nbeads\n'
     ;;
+  *"issue_type NOT IN"*"created_at < DATE_SUB"*)
+    printf 'COUNT(*)\n0\n'
+    ;;
   *"issue_type NOT IN"*)
     printf 'COUNT(*)\n600\n'
     ;;
   *"issue_type = 'message'"*)
+    printf 'COUNT(*)\n0\n'
+    ;;
+  *"status = 'closed'"*|*"closed_at <"*)
+    printf 'COUNT(*)\n0\n'
+    ;;
+  *"created_at < DATE_SUB"*)
+    printf 'COUNT(*)\n0\n'
+    ;;
+  *"status IN ('open', 'hooked', 'in_progress')"*)
+    printf 'COUNT(*)\n600\n'
+    ;;
+  *"COUNT("*)
+    printf 'COUNT(*)\n0\n'
+    ;;
+  *"SELECT id"*)
+    printf 'id\n'
+    ;;
+esac
+exit 0
+`)
+	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+exit 0
+`)
+
+	env := map[string]string{
+		"DOLT_ARGS_LOG":             doltLog,
+		"GC_CALL_LOG":               gcLog,
+		"GC_CITY":                   cityDir,
+		"GC_CITY_PATH":              cityDir,
+		"GC_DOLT_HOST":              "127.0.0.1",
+		"GC_DOLT_PORT":              "3307",
+		"GC_DOLT_USER":              "root",
+		"GC_DOLT_PASSWORD":          "",
+		"GC_REAPER_ALERT_THRESHOLD": "500",
+		"PATH":                      binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+
+	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "reaper.sh"), env)
+
+	gcData, err := os.ReadFile(gcLog)
+	if err != nil {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	gcLogText := string(gcData)
+	if strings.Contains(gcLogText, "ESCALATION") {
+		t.Fatalf("reaper fired false-positive escalation for fresh non-message wisps above alert threshold:\n%s", gcLogText)
+	}
+}
+
+func TestReaperStaleNonMessageWispsAboveAlertThresholdStillTriggerReapFailureAnomaly(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	doltLog := filepath.Join(t.TempDir(), "dolt-args.log")
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+
+	writeExecutable(t, filepath.Join(binDir, "dolt"), `#!/bin/sh
+printf '%s\n' "$*" >> "$DOLT_ARGS_LOG"
+case "$*" in
+  *"SHOW TABLES FROM"*"LIKE 'wisps'"*)
+    printf 'Tables_in_db\nwisps\n'
+    ;;
+  *"SHOW DATABASES"*)
+    printf 'Database\nbeads\n'
+    ;;
+  *"issue_type NOT IN"*"created_at < DATE_SUB"*)
+    printf 'COUNT(*)\n600\n'
+    ;;
+  *"issue_type NOT IN"*)
+    printf 'COUNT(*)\n600\n'
+    ;;
+  *"issue_type = 'message'"*)
+    printf 'COUNT(*)\n0\n'
+    ;;
+  *"status = 'closed'"*|*"closed_at <"*)
     printf 'COUNT(*)\n0\n'
     ;;
   *"created_at < DATE_SUB"*)
@@ -1781,8 +1997,8 @@ exit 0
 	if !strings.Contains(gcLogText, "ESCALATION: Reaper anomalies detected [MEDIUM]") {
 		t.Fatalf("reaper did not fire reap-failure anomaly for non-message wisps above threshold:\n%s", gcLogText)
 	}
-	if !strings.Contains(gcLogText, "open wisps (threshold: 500)") {
-		t.Fatalf("reaper anomaly body missing open wisp count format:\n%s", gcLogText)
+	if !strings.Contains(gcLogText, "stale open wisps (threshold: 500, age: 24h)") {
+		t.Fatalf("reaper anomaly body missing stale open wisp count format:\n%s", gcLogText)
 	}
 }
 
@@ -1854,7 +2070,7 @@ exit 0
 	if !strings.Contains(gcLogText, "open mail-wisps (mail threshold: 200)") {
 		t.Fatalf("reaper anomaly body missing mail backlog threshold format:\n%s", gcLogText)
 	}
-	if strings.Contains(gcLogText, "open wisps (threshold: 500)") {
+	if strings.Contains(gcLogText, "stale open wisps (threshold: 500") {
 		t.Fatalf("reaper fired reapable-wisp anomaly for message-only backlog:\n%s", gcLogText)
 	}
 }
@@ -1926,6 +2142,7 @@ func TestMaintenanceDoltScriptsSkipTestPatternDatabases(t *testing.T) {
 		"beads_t1234abcd9",
 		"beads_ptbaz",
 		"beads_vrqux",
+		"beads_test_bench_1780469138694213039",
 		"doctest_xyz",
 		"doctortest_abc",
 	}
@@ -2102,6 +2319,26 @@ func TestReaperFormulaSQLReflectsCurrentSchema(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadFile(%s): %v", path, err)
 	}
+	formula := string(data)
+
+	for _, stalePhrase := range []string{
+		"Total open wisps (for alert threshold)",
+		"If total open wisps",
+		"Open wisp count exceeding",
+	} {
+		if strings.Contains(formula, stalePhrase) {
+			t.Errorf("formula still describes total-open-wisp alerting with %q; reaper alerts on stale non-message open wisps", stalePhrase)
+		}
+	}
+	for _, required := range []string{
+		"Stale non-message open wisps (for alert threshold)",
+		"issue_type NOT IN ('message')",
+		"created_at < DATE_SUB(NOW(), INTERVAL <max_age_hours> HOUR)",
+	} {
+		if !strings.Contains(formula, required) {
+			t.Errorf("formula is missing stale-only alert text/query fragment %q", required)
+		}
+	}
 
 	// Extract every ```sql ... ``` fence body and scan only those — prose
 	// warnings about the deprecated patterns are intentional and must not
@@ -2116,8 +2353,8 @@ func TestReaperFormulaSQLReflectsCurrentSchema(t *testing.T) {
 		if strings.Contains(fence, "parent_id") {
 			t.Errorf("formula sql fence %d references parent_id (column does not exist in wisps):\n%s", i, fence)
 		}
-		if strings.Contains(fence, "depends_on_id") {
-			t.Errorf("formula sql fence %d references dependencies.depends_on_id instead of split target columns:\n%s", i, fence)
+		if strings.Contains(fence, "depends_on_wisp_id") || strings.Contains(fence, "depends_on_issue_id") {
+			t.Errorf("formula sql fence %d references split dependency target columns; bd 1.0.4 uses depends_on_id:\n%s", i, fence)
 		}
 		if strings.Contains(fence, "LEFT JOIN wisps parent ON") {
 			t.Errorf("formula sql fence %d still has the broken parent self-join:\n%s", i, fence)
@@ -2129,13 +2366,19 @@ func TestReaperFormulaSQLReflectsCurrentSchema(t *testing.T) {
 			t.Errorf("formula sql fence %d uses raw Go duration values in SQL INTERVAL; reaper.sh normalizes durations to integer hours:\n%s", i, fence)
 		}
 	}
+	if !containsReaperCloseCleanupEdgePredicate(formula) {
+		t.Fatalf("formula does not document the reaper close ownership predicate:\n%s", formula)
+	}
+	if !containsReaperPurgeProtectEdgePredicate(formula) {
+		t.Fatalf("formula does not document the reaper purge-protection predicate:\n%s", formula)
+	}
 }
 
 func TestReaperParentIDIsParentChildDependencyProjection(t *testing.T) {
 	runner := func(_, name string, args ...string) ([]byte, error) {
 		call := name + " " + strings.Join(args, " ")
 		switch call {
-		case "bd list --json --label=parent-projection --include-infra --include-gates --limit 50":
+		case "bd list --json --label=parent-projection --include-infra --include-gates --limit 0":
 			return []byte(`[
 				{
 					"id":"ga-child",
@@ -2175,8 +2418,8 @@ func TestReaperParentIDIsParentChildDependencyProjection(t *testing.T) {
 	if strings.Contains(script, "parent_id") {
 		t.Fatalf("reaper queried parent_id directly; Dolt ParentID is projected from parent-child dependencies:\n%s", script)
 	}
-	if !strings.Contains(script, "dependencies d") || !strings.Contains(script, "d.type = 'parent-child'") {
-		t.Fatalf("reaper does not follow the canonical Dolt parent-child projection:\n%s", script)
+	if !strings.Contains(script, "wisp_dependencies d") || !containsReaperCloseCleanupEdgePredicate(script) {
+		t.Fatalf("reaper does not follow the canonical Dolt cleanup-edge projection:\n%s", script)
 	}
 }
 
@@ -2219,8 +2462,10 @@ exit 0
 	if strings.Contains(log, "parent_id") {
 		t.Errorf("reaper SQL references parent_id (column does not exist in wisps):\n%s", log)
 	}
-	if strings.Contains(log, "depends_on_id") {
-		t.Errorf("reaper SQL references dependencies.depends_on_id instead of split target columns:\n%s", log)
+	for _, notWant := range []string{"depends_on_wisp_id", "depends_on_issue_id"} {
+		if strings.Contains(log, notWant) {
+			t.Errorf("reaper SQL references split dependency target column %q; bd 1.0.4 uses depends_on_id:\n%s", notWant, log)
+		}
 	}
 	// mail was removed: not a SQL table; messages are beads with type=message.
 	if strings.Contains(log, ".mail") {
@@ -2228,10 +2473,9 @@ exit 0
 	}
 	for _, want := range []string{
 		"SHOW COLUMNS FROM `beads`.dependencies",
-		"SELECT DISTINCT d.depends_on_wisp_id",
-		"d.depends_on_wisp_id IS NOT NULL",
-		"SELECT DISTINCT d.depends_on_issue_id",
-		"d.depends_on_issue_id IS NOT NULL",
+		"SHOW COLUMNS FROM `beads`.wisp_dependencies",
+		"FROM `beads`.wisp_dependencies d",
+		"SELECT DISTINCT d.depends_on_id",
 	} {
 		if !strings.Contains(log, want) {
 			t.Errorf("reaper SQL missing %q:\n%s", want, log)
@@ -2261,8 +2505,8 @@ exit 0
 	} else {
 		purgeSQL := log[purgeIdx:]
 		if !strings.Contains(purgeSQL, "child_wisp.status IN ('open', 'hooked', 'in_progress')") ||
-			!strings.Contains(purgeSQL, "d.type = 'parent-child'") ||
-			!strings.Contains(purgeSQL, "d.depends_on_wisp_id IS NOT NULL") {
+			!containsReaperPurgeProtectEdgePredicate(purgeSQL) ||
+			!strings.Contains(purgeSQL, "SELECT DISTINCT d.depends_on_id") {
 			t.Errorf("reaper purge can delete closed parents with non-closed children:\n%s", purgeSQL)
 		}
 	}
@@ -2276,7 +2520,7 @@ exit 0
 	}
 }
 
-func TestReaperSkipsDependencyQueriesWithoutSplitDependencyTargets(t *testing.T) {
+func TestReaperSkipsDependencyQueriesWithoutGenericDependencyTargets(t *testing.T) {
 	cityDir := t.TempDir()
 	binDir := t.TempDir()
 	doltLog := filepath.Join(t.TempDir(), "dolt-args.log")
@@ -2291,7 +2535,7 @@ exit 0
 	env := map[string]string{
 		"DOLT_ARGS_LOG":          doltLog,
 		"DOLT_DBS":               "beads",
-		"DOLT_DEPENDENCY_SCHEMA": "legacy",
+		"DOLT_DEPENDENCY_SCHEMA": "missing-target",
 		"GC_CALL_LOG":            gcLog,
 		"GC_CITY":                cityDir,
 		"GC_CITY_PATH":           cityDir,
@@ -2312,8 +2556,8 @@ exit 0
 	if !strings.Contains(log, "SHOW COLUMNS FROM `beads`.dependencies") {
 		t.Fatalf("reaper did not probe dependency target columns:\n%s", log)
 	}
-	if strings.Contains(log, "FROM `beads`.dependencies d") || strings.Contains(log, "JOIN `beads`.dependencies d") {
-		t.Fatalf("reaper ran dependency-aware queries against legacy dependency schema:\n%s", log)
+	if strings.Contains(log, "FROM `beads`.wisp_dependencies d") || strings.Contains(log, "JOIN `beads`.wisp_dependencies d") {
+		t.Fatalf("reaper ran dependency-aware queries against schema without depends_on_id:\n%s", log)
 	}
 
 	// A silently-skipped DB may make no gc calls at all, so a missing
@@ -2322,8 +2566,57 @@ exit 0
 	if err != nil && !os.IsNotExist(err) {
 		t.Fatalf("ReadFile(gc log): %v", err)
 	}
-	if strings.Contains(string(gcData), "dependencies table lacks split target columns") {
-		t.Errorf("reaper escalated the legacy dependency schema as an anomaly; the split-target gate must skip silently:\n%s", gcData)
+	if strings.Contains(string(gcData), "dependencies table lacks depends_on_id") {
+		t.Errorf("reaper escalated the dependency schema as an anomaly; the target-column gate must skip silently:\n%s", gcData)
+	}
+}
+
+func TestReaperSkipsDependencyQueriesWithoutWispDependencyTable(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	doltLog := filepath.Join(t.TempDir(), "dolt-args.log")
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+
+	writeMaintenanceDoltStub(t, filepath.Join(binDir, "dolt"))
+	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+exit 0
+`)
+
+	env := map[string]string{
+		"DOLT_ARGS_LOG":               doltLog,
+		"DOLT_DBS":                    "beads",
+		"DOLT_WISP_DEPENDENCY_SCHEMA": "missing-table",
+		"GC_CALL_LOG":                 gcLog,
+		"GC_CITY":                     cityDir,
+		"GC_CITY_PATH":                cityDir,
+		"GC_DOLT_HOST":                "127.0.0.1",
+		"GC_DOLT_PORT":                "3307",
+		"GC_DOLT_USER":                "root",
+		"GC_DOLT_PASSWORD":            "",
+		"PATH":                        binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+
+	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "reaper.sh"), env)
+
+	logData, err := os.ReadFile(doltLog)
+	if err != nil {
+		t.Fatalf("ReadFile(dolt log): %v", err)
+	}
+	log := string(logData)
+	if !strings.Contains(log, "SHOW COLUMNS FROM `beads`.wisp_dependencies") {
+		t.Fatalf("reaper did not probe wisp dependency target columns:\n%s", log)
+	}
+	if strings.Contains(log, "FROM `beads`.wisp_dependencies d") || strings.Contains(log, "JOIN `beads`.wisp_dependencies d") {
+		t.Fatalf("reaper ran dependency-aware queries without a wisp_dependencies table:\n%s", log)
+	}
+
+	gcData, err := os.ReadFile(gcLog)
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	if strings.Contains(string(gcData), "wisp_dependencies") {
+		t.Errorf("reaper escalated the missing wisp dependency table as an anomaly; the schema gate must skip silently:\n%s", gcData)
 	}
 }
 
@@ -2394,6 +2687,113 @@ exit 0
 	}
 }
 
+func TestReaperPrunesTerminalSessionStatesWithGcSessionPrune(t *testing.T) {
+	cityDir := t.TempDir()
+	if resolved, err := filepath.EvalSymlinks(cityDir); err == nil {
+		cityDir = resolved
+	}
+	writeCityBeadsMetadata(t, cityDir, "beads")
+	binDir := t.TempDir()
+	doltLog := filepath.Join(t.TempDir(), "dolt-args.log")
+	bdLog := filepath.Join(t.TempDir(), "bd.log")
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+
+	writeMaintenanceDoltStub(t, filepath.Join(binDir, "dolt"))
+	writeMaintenanceBdStub(t, filepath.Join(binDir, "bd"))
+	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+case "$*" in
+  "session prune --state drained --before 24h --json")
+    printf '{"action":"prune","count":5}\n'
+    ;;
+esac
+exit 0
+`)
+
+	env := map[string]string{
+		"BD_CALL_LOG":      bdLog,
+		"BD_PRUNE_COUNT":   "7",
+		"DOLT_ARGS_LOG":    doltLog,
+		"DOLT_DBS":         "beads",
+		"GC_CALL_LOG":      gcLog,
+		"GC_CITY":          cityDir,
+		"GC_CITY_PATH":     cityDir,
+		"GC_DOLT_HOST":     "127.0.0.1",
+		"GC_DOLT_PORT":     "3307",
+		"GC_DOLT_USER":     "root",
+		"GC_DOLT_PASSWORD": "",
+		"PATH":             binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+
+	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "reaper.sh"), env)
+
+	gcData, err := os.ReadFile(gcLog)
+	if err != nil {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	gcLogText := string(gcData)
+	if !strings.Contains(gcLogText, "session prune --state drained --before 24h --json") {
+		t.Fatalf("reaper did not call gc session prune for terminal drained sessions:\n%s", gcLogText)
+	}
+	if !strings.Contains(gcLogText, "sessions-pruned:12") {
+		t.Fatalf("reaper summary did not include bd and gc session prune counts:\n%s", gcLogText)
+	}
+}
+
+func TestReaperSessionStatePruneFailureEscalates(t *testing.T) {
+	cityDir := t.TempDir()
+	writeCityBeadsMetadata(t, cityDir, "beads")
+	binDir := t.TempDir()
+	doltLog := filepath.Join(t.TempDir(), "dolt-args.log")
+	bdLog := filepath.Join(t.TempDir(), "bd.log")
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+
+	writeMaintenanceDoltStub(t, filepath.Join(binDir, "dolt"))
+	writeMaintenanceBdStub(t, filepath.Join(binDir, "bd"))
+	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+case "$*" in
+  "session prune --state drained --before 24h --json")
+    printf 'session prune exploded\n' >&2
+    exit 42
+    ;;
+esac
+exit 0
+`)
+
+	env := map[string]string{
+		"BD_CALL_LOG":      bdLog,
+		"BD_PRUNE_COUNT":   "0",
+		"DOLT_ARGS_LOG":    doltLog,
+		"DOLT_DBS":         "beads",
+		"GC_CALL_LOG":      gcLog,
+		"GC_CITY":          cityDir,
+		"GC_CITY_PATH":     cityDir,
+		"GC_DOLT_HOST":     "127.0.0.1",
+		"GC_DOLT_PORT":     "3307",
+		"GC_DOLT_USER":     "root",
+		"GC_DOLT_PASSWORD": "",
+		"PATH":             binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+
+	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "reaper.sh"), env)
+
+	gcData, err := os.ReadFile(gcLog)
+	if err != nil {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	gcLogText := string(gcData)
+	if !strings.Contains(gcLogText, "mail send mayor/ -s ESCALATION: Reaper anomalies detected [MEDIUM]") {
+		t.Fatalf("reaper did not send escalation mail for session-state prune failure:\n%s", gcLogText)
+	}
+	if !strings.Contains(gcLogText, "gm: terminal session-state prune failed: session prune exploded") {
+		t.Fatalf("reaper escalation did not include session-state prune failure details:\n%s", gcLogText)
+	}
+	if !strings.Contains(gcLogText, "sessions-pruned:0") {
+		t.Fatalf("reaper summary counted failed session-state prune as success:\n%s", gcLogText)
+	}
+}
+
 func TestReaperSessionPruneDryRunOmitsForce(t *testing.T) {
 	cityDir := t.TempDir()
 	writeCityBeadsMetadata(t, cityDir, "beads")
@@ -2448,6 +2848,9 @@ exit 0
 	gcLogText := string(gcData)
 	if !strings.Contains(gcLogText, "sessions-pruned:3") || !strings.Contains(gcLogText, "(dry run)") {
 		t.Fatalf("reaper dry-run summary did not report session prune preview count:\n%s", gcLogText)
+	}
+	if strings.Contains(gcLogText, "session prune ") {
+		t.Fatalf("reaper dry-run called mutating gc session prune:\n%s", gcLogText)
 	}
 }
 
@@ -2688,6 +3091,80 @@ exit 0
 	}
 }
 
+func TestReaperDryRunReportsWouldCloseStaleWisps(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	doltLog := filepath.Join(t.TempDir(), "dolt-args.log")
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+
+	writeExecutable(t, filepath.Join(binDir, "dolt"), `#!/bin/sh
+printf '%s\n' "$*" >> "$DOLT_ARGS_LOG"
+case "$*" in
+  *"SHOW TABLES FROM"*"LIKE 'wisps'"*)
+    printf 'Tables_in_db\nwisps\n'
+    ;;
+  *"SHOW DATABASES"*)
+    printf 'Database\nbeads\n'
+    ;;
+  *"COUNT(DISTINCT w.id)"*)
+    printf 'COUNT(*)\n2\n'
+    ;;
+  *"UPDATE "*"wisps SET status='closed'"*)
+    printf 'dry-run should not update wisps\n' >&2
+    exit 42
+    ;;
+  *"SELECT COUNT(*) FROM "*"wisps"*"status IN ('open', 'hooked', 'in_progress')"*"created_at <"*)
+    printf 'COUNT(*)\n2\n'
+    ;;
+  *"COUNT("*)
+    printf 'COUNT(*)\n0\n'
+    ;;
+  *"SELECT id"*)
+    printf 'id\n'
+    ;;
+esac
+exit 0
+`)
+	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+exit 0
+`)
+
+	env := map[string]string{
+		"DOLT_ARGS_LOG":     doltLog,
+		"GC_CALL_LOG":       gcLog,
+		"GC_CITY":           cityDir,
+		"GC_CITY_PATH":      cityDir,
+		"GC_DOLT_HOST":      "127.0.0.1",
+		"GC_DOLT_PORT":      "3307",
+		"GC_DOLT_USER":      "root",
+		"GC_DOLT_PASSWORD":  "",
+		"GC_REAPER_DRY_RUN": "1",
+		"PATH":              binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+
+	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "reaper.sh"), env)
+
+	logData, err := os.ReadFile(doltLog)
+	if err != nil {
+		t.Fatalf("ReadFile(dolt log): %v", err)
+	}
+	if strings.Contains(string(logData), "UPDATE `beads`.wisps SET status='closed'") {
+		t.Fatalf("dry-run executed stale-wisp update:\n%s", logData)
+	}
+
+	gcData, err := os.ReadFile(gcLog)
+	if err != nil {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	gcText := string(gcData)
+	if !strings.Contains(gcText, "closed_wisps:0") ||
+		!strings.Contains(gcText, "would_close_wisps:2") ||
+		!strings.Contains(gcText, "(dry run)") {
+		t.Fatalf("dry-run summary did not report non-mutating would-close count:\n%s", gcText)
+	}
+}
+
 func TestReaperCountQueriesIgnoreSuccessfulStderrWarnings(t *testing.T) {
 	cityDir := t.TempDir()
 	binDir := t.TempDir()
@@ -2777,6 +3254,10 @@ case "$*" in
   *"SHOW DATABASES"*)
     printf 'Database\nbeads\n'
     ;;
+  *"STR_TO_DATE(JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.expires_at'))"*)
+    printf 'id\n'
+    printf 'non-fatal warning from dolt\n' >&2
+    ;;
   *"SELECT id FROM "*"issues"*)
     printf 'id\nga-old\n'
     printf 'non-fatal warning from dolt\n' >&2
@@ -2854,7 +3335,7 @@ case "$*" in
   *"UPDATE "*"wisps SET status='closed'"*)
     printf 'ROW_COUNT()\n1\n'
     ;;
-  *"COUNT("*"wisps w"*"dependencies d"*)
+  *"COUNT("*"wisps w"*"wisp_dependencies d"*)
     printf 'COUNT(*)\n0\n'
     ;;
   *"status IN ('open', 'hooked', 'in_progress')"*"created_at <"*)
@@ -2893,8 +3374,8 @@ exit 0
 		t.Fatalf("ReadFile(dolt log): %v", err)
 	}
 	log := string(logData)
-	if strings.Contains(log, "UPDATE `beads`.wisps SET status='closed'") && !strings.Contains(log, "dependencies d") {
-		t.Fatalf("reaper closed non-closed wisps by age alone instead of using parent-child dependencies:\n%s", log)
+	if strings.Contains(log, "UPDATE `beads`.wisps SET status='closed'") && !strings.Contains(log, "wisp_dependencies d") {
+		t.Fatalf("reaper closed non-closed wisps by age alone instead of using cleanup-edge dependencies:\n%s", log)
 	}
 
 	gcData, err := os.ReadFile(gcLog)
@@ -2925,7 +3406,7 @@ case "$*" in
   *"UPDATE "*"wisps SET status='closed'"*)
     printf 'ROW_COUNT()\n1\n'
     ;;
-  *"COUNT("*"wisps w"*"dependencies d"*)
+  *"COUNT("*"wisps w"*"wisp_dependencies d"*)
     n=0
     if [ -f "$CLOSE_COUNT_STATE" ]; then
       n=$(cat "$CLOSE_COUNT_STATE")
@@ -2983,11 +3464,11 @@ exit 0
 	if !strings.Contains(log, "COUNT(DISTINCT w.id)") {
 		t.Fatalf("reaper stale-wisp close count can be join-multiplied:\n%s", log)
 	}
-	if !strings.Contains(log, "dependencies d") || !strings.Contains(log, "d.type = 'parent-child'") {
-		t.Fatalf("reaper stale-wisp close path does not use parent-child dependencies:\n%s", log)
+	if !strings.Contains(log, "wisp_dependencies d") || !containsReaperCloseCleanupEdgePredicate(log) {
+		t.Fatalf("reaper stale-wisp close path does not use graph cleanup-edge dependencies:\n%s", log)
 	}
-	if !strings.Contains(log, "d.depends_on_wisp_id = parent_wisp.id") || !strings.Contains(log, "d.depends_on_issue_id = parent_issue.id") {
-		t.Fatalf("reaper stale-wisp close path does not use split dependency target columns:\n%s", log)
+	if !strings.Contains(log, "d.depends_on_id = parent_wisp.id") || !strings.Contains(log, "d.depends_on_id = parent_issue.id") {
+		t.Fatalf("reaper stale-wisp close path does not use bd 1.0.4 dependency target column:\n%s", log)
 	}
 	if strings.Contains(log, "parent_wisp.id IS NULL AND parent_issue.id IS NULL") {
 		t.Fatalf("reaper closes stale wisps when parent liveness is unresolved:\n%s", log)
@@ -3002,6 +3483,51 @@ exit 0
 	}
 	if !strings.Contains(string(gcData), "stale_wisps:2") || !strings.Contains(string(gcData), "closed_wisps:1") {
 		t.Fatalf("reaper summary did not report observed and closed wisp counts:\n%s", gcData)
+	}
+}
+
+func TestReaperClosesGraphWorkflowWispTrackedToClosedRoot(t *testing.T) {
+	doltLog, gcLog := runReaperCloseFixture(t, "tracks_owned_root")
+
+	logData, err := os.ReadFile(doltLog)
+	if err != nil {
+		t.Fatalf("ReadFile(dolt log): %v", err)
+	}
+	log := string(logData)
+	if !containsReaperCloseCleanupEdgePredicate(log) {
+		t.Fatalf("reaper close path does not require graph-v2 tracks ownership:\n%s", log)
+	}
+	if !strings.Contains(log, "UPDATE `beads`.wisps SET status='closed'") {
+		t.Fatalf("reaper did not close stale graph workflow wisp tracked to a closed root:\n%s", log)
+	}
+
+	gcData, err := os.ReadFile(gcLog)
+	if err != nil {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	if !strings.Contains(string(gcData), "stale_wisps:1") || !strings.Contains(string(gcData), "closed_wisps:1") {
+		t.Fatalf("reaper summary did not report tracked-root wisp close:\n%s", gcData)
+	}
+}
+
+func TestReaperDoesNotCloseStaleWispWithClosedBlocksPredecessor(t *testing.T) {
+	doltLog, gcLog := runReaperCloseFixture(t, "blocks_closed_predecessor")
+
+	logData, err := os.ReadFile(doltLog)
+	if err != nil {
+		t.Fatalf("ReadFile(dolt log): %v", err)
+	}
+	log := string(logData)
+	if strings.Contains(log, "UPDATE `beads`.wisps SET status='closed'") {
+		t.Fatalf("reaper closed a stale wisp through an ordinary closed blocks predecessor:\n%s", log)
+	}
+
+	gcData, err := os.ReadFile(gcLog)
+	if err != nil {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	if !strings.Contains(string(gcData), "stale_wisps:1") || !strings.Contains(string(gcData), "closed_wisps:0") {
+		t.Fatalf("reaper summary did not keep closed blocks predecessor as non-closing:\n%s", gcData)
 	}
 }
 
@@ -3142,6 +3668,73 @@ exit 0
 	}
 }
 
+func TestReaperFailureAnomalyPreservesDoltErrorTail(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+
+	writeExecutable(t, filepath.Join(binDir, "dolt"), `#!/bin/sh
+case "$*" in
+  *"SHOW TABLES FROM"*"LIKE 'wisps'"*)
+    printf 'Tables_in_db\nwisps\n'
+    ;;
+  *"SHOW DATABASES"*)
+    printf 'Database\nbeads\n'
+    ;;
+  *"DELETE FROM "*"wisps"*)
+    printf 'stdout-query-preview:'
+    i=0
+    while [ "$i" -lt 700 ]; do
+      printf 'Q'
+      i=$((i + 1))
+    done
+    printf '\n'
+    printf 'Error 1105 (HY000): wisp_dependencies.depends_on_id missing from schema\n' >&2
+    exit 42
+    ;;
+  *"status = 'closed'"*"closed_at <"*)
+    printf 'COUNT(*)\n1\n'
+    ;;
+  *"COUNT("*)
+    printf 'COUNT(*)\n0\n'
+    ;;
+  *"SELECT id"*)
+    printf 'id\n'
+    ;;
+esac
+exit 0
+`)
+	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+exit 0
+`)
+
+	env := map[string]string{
+		"GC_CALL_LOG":      gcLog,
+		"GC_CITY":          cityDir,
+		"GC_CITY_PATH":     cityDir,
+		"GC_DOLT_HOST":     "127.0.0.1",
+		"GC_DOLT_PORT":     "3307",
+		"GC_DOLT_USER":     "root",
+		"GC_DOLT_PASSWORD": "",
+		"PATH":             binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+
+	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "reaper.sh"), env)
+
+	gcData, err := os.ReadFile(gcLog)
+	if err != nil {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	gcLogText := string(gcData)
+	if !strings.Contains(gcLogText, "purging closed wisps failed for beads") {
+		t.Fatalf("reaper did not escalate failed purge:\n%s", gcLogText)
+	}
+	if !strings.Contains(gcLogText, "Error 1105 (HY000): wisp_dependencies.depends_on_id missing from schema") {
+		t.Fatalf("reaper escalation lost Dolt stderr error tail:\n%s", gcLogText)
+	}
+}
+
 func TestReaperCommitReportsOnlySuccessfulPurgeRows(t *testing.T) {
 	cityDir := t.TempDir()
 	binDir := t.TempDir()
@@ -3165,7 +3758,7 @@ case "$*" in
     printf 'delete failed\n' >&2
     exit 42
     ;;
-  *"COUNT("*"wisps w"*"dependencies d"*)
+  *"COUNT("*"wisps w"*"wisp_dependencies d"*)
     n=0
     if [ -f "$CLOSE_COUNT_STATE" ]; then
       n=$(cat "$CLOSE_COUNT_STATE")
@@ -3252,6 +3845,9 @@ case "$*" in
   *"SHOW DATABASES"*)
     printf 'Database\nbeads\n'
     ;;
+  *"STR_TO_DATE(JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.expires_at'))"*)
+    printf 'id\n'
+    ;;
   *"SELECT id FROM "*"issues"*)
     printf 'id\nga-old\n'
     ;;
@@ -3321,6 +3917,9 @@ case "$*" in
   *"SHOW DATABASES"*)
     printf 'Database\ncitydb\nrigdb\n'
     ;;
+  *"STR_TO_DATE(JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.expires_at'))"*)
+    printf 'id\n'
+    ;;
   *"SELECT id FROM "*"citydb"*"issues"*)
     printf 'id\nga-city\n'
     ;;
@@ -3382,6 +3981,251 @@ exit 0
 	}
 }
 
+func TestReaperDoesNotStaleCloseIssueWithFutureExpiresAt(t *testing.T) {
+	cityDir := t.TempDir()
+	writeCityBeadsMetadata(t, cityDir, "citydb")
+	binDir := t.TempDir()
+	doltLog := filepath.Join(t.TempDir(), "dolt-args.log")
+	bdLog := filepath.Join(t.TempDir(), "bd.log")
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+
+	writeExecutable(t, filepath.Join(binDir, "dolt"), `#!/bin/sh
+printf '%s\n' "$*" >> "$DOLT_ARGS_LOG"
+case "$*" in
+  *"SHOW TABLES FROM"*"LIKE 'wisps'"*)
+    printf 'Tables_in_db\nwisps\n'
+    ;;
+  *"SHOW DATABASES"*)
+    printf 'Database\ncitydb\n'
+    ;;
+  *"STR_TO_DATE(JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.expires_at'))"*)
+    printf 'id\n'
+    ;;
+  *"SELECT id FROM "*"citydb"*"issues"*)
+    case "$*" in
+      *"JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.expires_at')) = ''"*)
+        printf 'id\n'
+        ;;
+      *)
+        printf 'id\nga-future\n'
+        ;;
+    esac
+    ;;
+  *"COUNT("*)
+    printf 'COUNT(*)\n0\n'
+    ;;
+esac
+exit 0
+`)
+	writeExecutable(t, filepath.Join(binDir, "bd"), `#!/bin/sh
+printf '%s\n' "$*" >> "$BD_CALL_LOG"
+exit 0
+`)
+	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+exit 0
+`)
+
+	env := map[string]string{
+		"DOLT_ARGS_LOG":    doltLog,
+		"BD_CALL_LOG":      bdLog,
+		"GC_CALL_LOG":      gcLog,
+		"GC_CITY":          cityDir,
+		"GC_CITY_PATH":     cityDir,
+		"GC_DOLT_HOST":     "127.0.0.1",
+		"GC_DOLT_PORT":     "3307",
+		"GC_DOLT_USER":     "root",
+		"GC_DOLT_PASSWORD": "",
+		"PATH":             binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+
+	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "reaper.sh"), env)
+
+	bdData, err := os.ReadFile(bdLog)
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatalf("ReadFile(bd log): %v", err)
+	}
+	if strings.Contains(string(bdData), "close ga-future") {
+		t.Fatalf("reaper stale-closed issue with explicit future expires_at:\n%s", bdData)
+	}
+
+	gcData, err := os.ReadFile(gcLog)
+	if err != nil {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	gcLogText := string(gcData)
+	if !strings.Contains(gcLogText, "closed:0") || !strings.Contains(gcLogText, "expired:0") {
+		t.Fatalf("reaper summary reported an issue close despite future expires_at:\n%s", gcLogText)
+	}
+}
+
+func TestReaperClosesNudgeBeadWithElapsedExpiresAt(t *testing.T) {
+	cityDir := t.TempDir()
+	writeCityBeadsMetadata(t, cityDir, "citydb")
+	binDir := t.TempDir()
+	doltLog := filepath.Join(t.TempDir(), "dolt-args.log")
+	bdLog := filepath.Join(t.TempDir(), "bd.log")
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+
+	// The Step 3 close query is the only one that compares against
+	// UTC_TIMESTAMP(); the gc:nudge-scoped anomaly pre-scan ends in IS NULL.
+	// Returning a row from the close query exercises the positive TTL-expiry
+	// path: an elapsed nudge bead is closed with reason "ttl:expired by reaper"
+	// and counted in the summary as expired:1.
+	writeExecutable(t, filepath.Join(binDir, "dolt"), `#!/bin/sh
+printf '%s\n' "$*" >> "$DOLT_ARGS_LOG"
+case "$*" in
+  *"SHOW TABLES FROM"*"LIKE 'wisps'"*)
+    printf 'Tables_in_db\nwisps\n'
+    ;;
+  *"SHOW DATABASES"*)
+    printf 'Database\ncitydb\n'
+    ;;
+  *"UTC_TIMESTAMP()"*)
+    printf 'id\nga-expired\n'
+    ;;
+  *"gc:nudge"*)
+    printf 'id\n'
+    ;;
+  *"SELECT id FROM "*"citydb"*"issues"*)
+    printf 'id\n'
+    ;;
+  *"COUNT("*)
+    printf 'COUNT(*)\n0\n'
+    ;;
+esac
+exit 0
+`)
+	writeExecutable(t, filepath.Join(binDir, "bd"), `#!/bin/sh
+printf '%s\n' "$*" >> "$BD_CALL_LOG"
+exit 0
+`)
+	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+exit 0
+`)
+
+	env := map[string]string{
+		"DOLT_ARGS_LOG":    doltLog,
+		"BD_CALL_LOG":      bdLog,
+		"GC_CALL_LOG":      gcLog,
+		"GC_CITY":          cityDir,
+		"GC_CITY_PATH":     cityDir,
+		"GC_DOLT_HOST":     "127.0.0.1",
+		"GC_DOLT_PORT":     "3307",
+		"GC_DOLT_USER":     "root",
+		"GC_DOLT_PASSWORD": "",
+		"PATH":             binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+
+	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "reaper.sh"), env)
+
+	bdData, err := os.ReadFile(bdLog)
+	if err != nil {
+		t.Fatalf("ReadFile(bd log): %v", err)
+	}
+	bdLogText := string(bdData)
+	if !strings.Contains(bdLogText, "close ga-expired") {
+		t.Fatalf("reaper did not close elapsed nudge bead:\n%s", bdLogText)
+	}
+	if !strings.Contains(bdLogText, "ttl:expired by reaper") {
+		t.Fatalf("reaper closed nudge bead without ttl:expired reason:\n%s", bdLogText)
+	}
+
+	gcData, err := os.ReadFile(gcLog)
+	if err != nil {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	gcLogText := string(gcData)
+	if !strings.Contains(gcLogText, "expired:1") {
+		t.Fatalf("reaper summary did not report expired:1:\n%s", gcLogText)
+	}
+}
+
+func TestReaperDoesNotTTLCloseNonNudgeBeadWithElapsedExpiresAt(t *testing.T) {
+	cityDir := t.TempDir()
+	writeCityBeadsMetadata(t, cityDir, "citydb")
+	binDir := t.TempDir()
+	doltLog := filepath.Join(t.TempDir(), "dolt-args.log")
+	bdLog := filepath.Join(t.TempDir(), "bd.log")
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+
+	// ga-binding is an expired bead that is NOT labeled gc:nudge (e.g. a
+	// gc:extmsg-binding session binding). The Step 3 queries INNER JOIN on the
+	// gc:nudge label, so they return no rows for it, and the Step 4 stale path
+	// explicitly excludes any bead carrying expires_at. Only a query lacking
+	// both guards would surface ga-binding — which the reaper never issues — so
+	// the bead must never be closed.
+	writeExecutable(t, filepath.Join(binDir, "dolt"), `#!/bin/sh
+printf '%s\n' "$*" >> "$DOLT_ARGS_LOG"
+case "$*" in
+  *"SHOW TABLES FROM"*"LIKE 'wisps'"*)
+    printf 'Tables_in_db\nwisps\n'
+    ;;
+  *"SHOW DATABASES"*)
+    printf 'Database\ncitydb\n'
+    ;;
+  *"gc:nudge"*)
+    printf 'id\n'
+    ;;
+  *"SELECT id FROM "*"citydb"*"issues"*)
+    case "$*" in
+      *"JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.expires_at')) = ''"*)
+        printf 'id\n'
+        ;;
+      *)
+        printf 'id\nga-binding\n'
+        ;;
+    esac
+    ;;
+  *"COUNT("*)
+    printf 'COUNT(*)\n0\n'
+    ;;
+esac
+exit 0
+`)
+	writeExecutable(t, filepath.Join(binDir, "bd"), `#!/bin/sh
+printf '%s\n' "$*" >> "$BD_CALL_LOG"
+exit 0
+`)
+	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+exit 0
+`)
+
+	env := map[string]string{
+		"DOLT_ARGS_LOG":    doltLog,
+		"BD_CALL_LOG":      bdLog,
+		"GC_CALL_LOG":      gcLog,
+		"GC_CITY":          cityDir,
+		"GC_CITY_PATH":     cityDir,
+		"GC_DOLT_HOST":     "127.0.0.1",
+		"GC_DOLT_PORT":     "3307",
+		"GC_DOLT_USER":     "root",
+		"GC_DOLT_PASSWORD": "",
+		"PATH":             binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+
+	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "reaper.sh"), env)
+
+	bdData, err := os.ReadFile(bdLog)
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatalf("ReadFile(bd log): %v", err)
+	}
+	if strings.Contains(string(bdData), "ga-binding") {
+		t.Fatalf("reaper closed a non-nudge bead with expires_at:\n%s", bdData)
+	}
+
+	gcData, err := os.ReadFile(gcLog)
+	if err != nil {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	gcLogText := string(gcData)
+	if !strings.Contains(gcLogText, "closed:0") || !strings.Contains(gcLogText, "expired:0") {
+		t.Fatalf("reaper summary reported a close despite no eligible bead:\n%s", gcLogText)
+	}
+}
+
 func TestReaperCityDatabaseUsesGCCityPathFallback(t *testing.T) {
 	cityDir := t.TempDir()
 	writeCityBeadsMetadata(t, cityDir, "citydb")
@@ -3398,6 +4242,9 @@ case "$*" in
     ;;
   *"SHOW DATABASES"*)
     printf 'Database\ncitydb\n'
+    ;;
+  *"STR_TO_DATE(JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.expires_at'))"*)
+    printf 'id\n'
     ;;
   *"SELECT id FROM "*"citydb"*"issues"*)
     printf 'id\nga-city\n'
@@ -3482,6 +4329,9 @@ case "$*" in
   *"SHOW DATABASES"*)
     printf 'Database\ncitydb\n'
     ;;
+  *"STR_TO_DATE(JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.expires_at'))"*)
+    printf 'id\n'
+    ;;
   *"SELECT id FROM "*"citydb"*"issues"*)
     printf 'id\nga-city\n'
     ;;
@@ -3551,6 +4401,9 @@ case "$*" in
     ;;
   *"SHOW DATABASES"*)
     printf 'Database\ncitydb\nwrongdb\n'
+    ;;
+  *"STR_TO_DATE(JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.expires_at'))"*)
+    printf 'id\n'
     ;;
   *"SELECT id FROM "*"citydb"*"issues"*)
     printf 'id\nga-city\n'
@@ -3636,6 +4489,9 @@ case "$*" in
   *"SHOW DATABASES"*)
     printf 'Database\nbeads\n'
     ;;
+  *"STR_TO_DATE(JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.expires_at'))"*)
+    printf 'id\n'
+    ;;
   *"SELECT id FROM "*"issues"*)
     printf 'id\nga-old\n'
     ;;
@@ -3709,6 +4565,9 @@ case "$*" in
     ;;
   *"SHOW DATABASES"*)
     printf 'Database\ncitydb\n'
+    ;;
+  *"STR_TO_DATE(JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.expires_at'))"*)
+    printf 'id\n'
     ;;
   *"SELECT id FROM "*"citydb"*"issues"*)
     printf 'id\nga-city\n'
@@ -3787,6 +4646,9 @@ case "$*" in
   *"SHOW DATABASES"*)
     printf 'Database\nbeads\n'
     ;;
+  *"STR_TO_DATE(JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.expires_at'))"*)
+    printf 'id\n'
+    ;;
   *"SELECT id FROM "*"issues"*)
     printf 'id\nga-old\n'
     ;;
@@ -3856,6 +4718,9 @@ case "$*" in
     ;;
   *"SHOW DATABASES"*)
     printf 'Database\nbeads\nrigdb\n'
+    ;;
+  *"STR_TO_DATE(JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.expires_at'))"*)
+    printf 'id\n'
     ;;
   *"SELECT id FROM "*"issues"*)
     printf 'id\nga-old\n'
@@ -4511,6 +5376,36 @@ func runScriptResult(t *testing.T, script string, env map[string]string) ([]byte
 	return cmd.CombinedOutput()
 }
 
+func runReaperCloseFixture(t *testing.T, fixture string) (doltLog string, gcLog string) {
+	t.Helper()
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	doltLog = filepath.Join(t.TempDir(), "dolt-args.log")
+	gcLog = filepath.Join(t.TempDir(), "gc.log")
+
+	writeReaperCloseFixtureDoltStub(t, filepath.Join(binDir, "dolt"))
+	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+exit 0
+`)
+
+	env := map[string]string{
+		"DOLT_ARGS_LOG":        doltLog,
+		"GC_CALL_LOG":          gcLog,
+		"GC_CITY":              cityDir,
+		"GC_CITY_PATH":         cityDir,
+		"GC_DOLT_HOST":         "127.0.0.1",
+		"GC_DOLT_PORT":         "3307",
+		"GC_DOLT_USER":         "root",
+		"GC_DOLT_PASSWORD":     "",
+		"REAPER_CLOSE_FIXTURE": fixture,
+		"PATH":                 binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+
+	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "reaper.sh"), env)
+	return doltLog, gcLog
+}
+
 func writeExecutable(t *testing.T, path, body string) {
 	t.Helper()
 	if err := os.WriteFile(path, []byte(body), 0o755); err != nil {
@@ -4572,15 +5467,25 @@ case "$*" in
   ;;
 *"SHOW COLUMNS FROM"*"dependencies"*)
   printf 'Field,Type,Null,Key,Default,Extra\n'
-  if [ "${DOLT_DEPENDENCY_SCHEMA:-split}" = "legacy" ]; then
+  dependency_schema="${DOLT_DEPENDENCY_SCHEMA:-generic}"
+  case "$*" in
+    *"wisp_dependencies"*) dependency_schema="${DOLT_WISP_DEPENDENCY_SCHEMA:-$dependency_schema}" ;;
+  esac
+  if [ "$dependency_schema" = "missing-table" ]; then
+    printf 'table not found\n' >&2
+    exit 42
+  elif [ "$dependency_schema" = "missing-target" ]; then
     printf 'issue_id,varchar,NO,,,\n'
-    printf 'depends_on_id,varchar,NO,,,\n'
     printf 'type,varchar,NO,,,\n'
-  else
+  elif [ "$dependency_schema" = "split" ]; then
     printf 'issue_id,varchar,NO,,,\n'
     printf 'depends_on_issue_id,varchar,YES,,,\n'
     printf 'depends_on_wisp_id,varchar,YES,,,\n'
     printf 'depends_on_external,varchar,YES,,,\n'
+    printf 'type,varchar,NO,,,\n'
+  else
+    printf 'issue_id,varchar,NO,,,\n'
+    printf 'depends_on_id,varchar,NO,,,\n'
     printf 'type,varchar,NO,,,\n'
   fi
   ;;
@@ -4600,6 +5505,67 @@ case "$*" in
   else
     printf 'COUNT(*)\n0\n'
   fi
+  ;;
+*"COUNT("*)
+  printf 'COUNT(*)\n0\n'
+  ;;
+*"SELECT id"*)
+  printf 'id\n'
+  ;;
+esac
+exit 0
+	`)
+}
+
+func writeReaperCloseFixtureDoltStub(t *testing.T, path string) {
+	t.Helper()
+	writeExecutable(t, path, `#!/bin/sh
+printf '%s\n' "$*" >> "$DOLT_ARGS_LOG"
+
+close_fixture_matches() {
+  case "${REAPER_CLOSE_FIXTURE:-}" in
+    tracks_owned_root)
+      printf '%s' "$*" | grep -F "d.type = 'tracks'" >/dev/null 2>&1 &&
+        printf '%s' "$*" | grep -F "gc.root_bead_id" >/dev/null 2>&1
+      ;;
+    blocks_closed_predecessor)
+      printf '%s' "$*" | grep -F "blocks" >/dev/null 2>&1
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+case "$*" in
+*"SHOW DATABASES"*)
+  printf 'Database\nbeads\n'
+  ;;
+*"SHOW TABLES FROM"*"LIKE 'wisps'"*)
+  printf 'Tables_in_db\nwisps\n'
+  ;;
+*"SHOW COLUMNS FROM"*"dependencies"*)
+  printf 'Field,Type,Null,Key,Default,Extra\n'
+  printf 'issue_id,varchar,NO,,,\n'
+  printf 'depends_on_id,varchar,NO,,,\n'
+  printf 'type,varchar,NO,,,\n'
+  ;;
+*"UPDATE "*"wisps SET status='closed'"*)
+  if close_fixture_matches "$*"; then
+    printf 'ROW_COUNT()\n1\n'
+  else
+    printf 'ROW_COUNT()\n0\n'
+  fi
+  ;;
+*"COUNT("*"wisps w"*"wisp_dependencies d"*)
+  if close_fixture_matches "$*"; then
+    printf 'COUNT(*)\n1\n'
+  else
+    printf 'COUNT(*)\n0\n'
+  fi
+  ;;
+*"status IN ('open', 'hooked', 'in_progress')"*"created_at <"*)
+  printf 'COUNT(*)\n1\n'
   ;;
 *"COUNT("*)
   printf 'COUNT(*)\n0\n'
@@ -4751,10 +5717,30 @@ func writeMultiRecordDoltStub(t *testing.T, binDir string, currentCount int) {
 
 func writeIssuesPayloadDoltStub(t *testing.T, binDir, issuesPayload string) {
 	t.Helper()
+	writeIssuesPayloadDoltStubWithPrelude(t, binDir, issuesPayload, "")
+}
+
+func writeOriginRemovingMultiRecordDoltStub(t *testing.T, binDir string, currentCount int) {
+	t.Helper()
+	rows := make([]string, 0, currentCount)
+	for i := 0; i < currentCount; i++ {
+		rows = append(rows, fmt.Sprintf(`{"id":"c%d","title":"cur-%d"}`, i, i))
+	}
+	writeIssuesPayloadDoltStubWithPrelude(t, binDir, `{"rows":[`+strings.Join(rows, ",")+`]}`, `
+if [ -n "${DOLT_REMOVE_ORIGIN_FLAG:-}" ] && [ ! -e "$DOLT_REMOVE_ORIGIN_FLAG" ]; then
+  : > "$DOLT_REMOVE_ORIGIN_FLAG"
+  git -C "$GC_JSONL_ARCHIVE_REPO" remote remove origin 2>/dev/null || true
+fi
+`)
+}
+
+func writeIssuesPayloadDoltStubWithPrelude(t *testing.T, binDir, issuesPayload, prelude string) {
+	t.Helper()
 	body := "#!/bin/sh\n" +
 		"if [ -n \"${DOLT_ARGS_LOG:-}\" ]; then\n" +
 		"  printf '%s\\n' \"$*\" >> \"$DOLT_ARGS_LOG\"\n" +
 		"fi\n" +
+		prelude +
 		"case \"$*\" in\n" +
 		"  *\"SHOW TABLES FROM\"*\"LIKE 'wisps'\"*)\n" +
 		"    printf 'Tables_in_db\\nwisps\\n'\n" +
@@ -5141,7 +6127,7 @@ func TestJsonlExportSkipsSpikeCheckBelowMinPrev(t *testing.T) {
 	// Bug 2 (#1547): percent-delta with no absolute floor escalates on tiny
 	// counts. prev=2, current=1 → 50% delta would cross the 20% threshold.
 	// With the fix, no escalation when prev < GC_JSONL_MIN_PREV_FOR_SPIKE
-	// (default 10).
+	// (default 100).
 	cityDir := t.TempDir()
 	binDir := t.TempDir()
 	stateDir := t.TempDir()
@@ -7080,6 +8066,105 @@ func TestJsonlExportPushModeAttemptsPushWhenOriginConfigured(t *testing.T) {
 	}
 	if got := state["last_logged_mode"]; got != "push" {
 		t.Fatalf("last_logged_mode = %v, want push\nstate: %s", got, stateData)
+	}
+}
+
+func TestJsonlExportPushModeMemoizesOriginForRun(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	stateDir := t.TempDir()
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+	mailLog := filepath.Join(t.TempDir(), "gc-mail.log")
+	archiveRepo := filepath.Join(cityDir, "archive")
+	stateFile := filepath.Join(stateDir, "jsonl-export-state.json")
+	originRemovedFlag := filepath.Join(t.TempDir(), "origin-removed")
+
+	initSeedArchiveWithRemote(t, archiveRepo)
+	writeOriginRemovingMultiRecordDoltStub(t, binDir, 5)
+	writeJsonlExportGCStub(t, binDir)
+
+	env := jsonlExportEnv(t, cityDir, binDir, stateDir, archiveRepo, gcLog, mailLog)
+	env["GC_JSONL_MIN_PREV_FOR_SPIKE"] = "1000"
+	env["DOLT_REMOVE_ORIGIN_FLAG"] = originRemovedFlag
+
+	out, err := runScriptResult(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "jsonl-export.sh"), env)
+	if err != nil {
+		t.Fatalf("jsonl-export.sh: %v\n%s", err, out)
+	}
+
+	if !strings.Contains(string(out), "archive running in push mode") {
+		t.Fatalf("expected first mode probe to log push mode, got:\n%s", out)
+	}
+	if !strings.Contains(string(out), "push: failed") {
+		t.Fatalf("expected cached push mode to still attempt push after origin removal, got:\n%s", out)
+	}
+	if strings.Contains(string(out), "push: skipped (local-only)") {
+		t.Fatalf("cached push mode must not fall back to local-only mid-run, got:\n%s", out)
+	}
+
+	stateData, err := os.ReadFile(stateFile)
+	if err != nil {
+		t.Fatalf("ReadFile(state file): %v", err)
+	}
+	var state map[string]any
+	if err := json.Unmarshal(stateData, &state); err != nil {
+		t.Fatalf("Unmarshal(state file): %v\n%s", err, stateData)
+	}
+	if got := state["last_logged_mode"]; got != "push" {
+		t.Fatalf("last_logged_mode = %v, want push\nstate: %s", got, stateData)
+	}
+	if got, ok := state["consecutive_push_failures"].(float64); !ok || got != 1 {
+		t.Fatalf("consecutive_push_failures = %v, want 1\nstate: %s", state["consecutive_push_failures"], stateData)
+	}
+}
+
+func TestJsonlExportModeRelogIntervalOverrideRelogsSameMode(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	stateDir := t.TempDir()
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+	mailLog := filepath.Join(t.TempDir(), "gc-mail.log")
+	archiveRepo := filepath.Join(cityDir, "archive")
+	stateFile := filepath.Join(stateDir, "jsonl-export-state.json")
+
+	initSeedArchive(t, archiveRepo, 3)
+	writeMultiRecordDoltStub(t, binDir, 3)
+	writeJsonlExportGCStub(t, binDir)
+
+	if err := os.MkdirAll(filepath.Dir(stateFile), 0o755); err != nil {
+		t.Fatalf("MkdirAll(state dir): %v", err)
+	}
+	priorState := `{"last_logged_mode":"local-only","last_logged_at":"2026-05-01T00:00:00Z"}` + "\n"
+	if err := os.WriteFile(stateFile, []byte(priorState), 0o644); err != nil {
+		t.Fatalf("WriteFile(state file): %v", err)
+	}
+
+	env := jsonlExportEnv(t, cityDir, binDir, stateDir, archiveRepo, gcLog, mailLog)
+	env["GC_JSONL_MODE_RELOG_INTERVAL"] = "1"
+	delete(env, "GC_JSONL_MAX_PUSH_FAILURES")
+
+	out, err := runScriptResult(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "jsonl-export.sh"), env)
+	if err != nil {
+		t.Fatalf("jsonl-export.sh: %v\n%s", err, out)
+	}
+
+	if !strings.Contains(string(out), "archive running in local-only mode") {
+		t.Fatalf("expected expired override interval to re-log local-only mode, got:\n%s", out)
+	}
+
+	stateData, err := os.ReadFile(stateFile)
+	if err != nil {
+		t.Fatalf("ReadFile(state file): %v", err)
+	}
+	var state map[string]any
+	if err := json.Unmarshal(stateData, &state); err != nil {
+		t.Fatalf("Unmarshal(state file): %v\n%s", err, stateData)
+	}
+	if got := state["last_logged_mode"]; got != "local-only" {
+		t.Fatalf("last_logged_mode = %v, want local-only\nstate: %s", got, stateData)
+	}
+	if got := state["last_logged_at"]; got == "2026-05-01T00:00:00Z" {
+		t.Fatalf("last_logged_at not refreshed after interval expiry\nstate: %s", stateData)
 	}
 }
 

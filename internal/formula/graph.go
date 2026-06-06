@@ -122,7 +122,7 @@ func needsScopeCheck(step *Step) bool {
 		return false
 	}
 	switch step.Metadata["gc.kind"] {
-	case "scope", "scope-check", "workflow-finalize", "fanout", "check", "spec":
+	case "scope", "scope-check", "workflow-finalize", "fanout", "check", "drain", "spec":
 		return false
 	default:
 		return true

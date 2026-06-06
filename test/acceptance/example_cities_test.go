@@ -126,6 +126,24 @@ func TestExamplePacks_PackArtifacts(t *testing.T) {
 			}
 		}
 	})
+
+	t.Run("Lifecycle", func(t *testing.T) {
+		c := helpers.NewCity(t, testEnv)
+		c.InitFrom(filepath.Join(helpers.ExamplesDir(), "lifecycle"))
+
+		expected := []string{
+			"packs/lifecycle/pack.toml",
+			"packs/lifecycle/agents/polecat/agent.toml",
+			"packs/lifecycle/agents/refinery/agent.toml",
+			"packs/lifecycle/assets/scripts/lifecycle-polecat-claim-handoff.yaml",
+			"packs/lifecycle/assets/scripts/lifecycle-refinery-merge.yaml",
+		}
+		for _, rel := range expected {
+			if !c.HasFile(rel) {
+				t.Errorf("missing expected artifact: %s", rel)
+			}
+		}
+	})
 }
 
 // TestExampleDoctor_AllCities_RunWithoutCrash verifies that gc doctor

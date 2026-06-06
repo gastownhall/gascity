@@ -46,6 +46,18 @@ func Resolve(scopeRoot, fallbackUser, host string, port int) Resolved {
 // Projected BEADS_DOLT_PASSWORD is treated like an already-resolved fallback;
 // callers that switch auth scopes must clear stale projected passwords first.
 func ResolveFromEnv(scopeRoot, fallbackUser string, env map[string]string) Resolved {
+	return resolveFromEnv(scopeRoot, fallbackUser, env, true)
+}
+
+// ResolveScopedFromEnv returns effective Dolt auth for a GC-selected scope.
+// Unlike ResolveFromEnv, it does not fall back to ambient BEADS_DOLT_PASSWORD;
+// scoped GC projections must not let one external rig password contaminate
+// another scope's managed city/HQ connection.
+func ResolveScopedFromEnv(scopeRoot, fallbackUser string, env map[string]string) Resolved {
+	return resolveFromEnv(scopeRoot, fallbackUser, env, false)
+}
+
+func resolveFromEnv(scopeRoot, fallbackUser string, env map[string]string, allowAmbientBeadsPassword bool) Resolved {
 	host := strings.TrimSpace(env["GC_DOLT_HOST"])
 	port, ok := projectedPort(env)
 	if host == "" && ok {
@@ -61,7 +73,7 @@ func ResolveFromEnv(scopeRoot, fallbackUser string, env map[string]string) Resol
 	envPass := strings.TrimSpace(env["BEADS_DOLT_PASSWORD"])
 	return Resolved{
 		User:                    resolveUser(fallbackUser),
-		Password:                resolvePasswordWithEnv(envPass, scopeRoot, host, port, overridePath),
+		Password:                resolvePasswordWithEnv(envPass, scopeRoot, host, port, overridePath, allowAmbientBeadsPassword),
 		CredentialsFileOverride: overridePath,
 	}
 }
@@ -74,10 +86,10 @@ func resolveUser(fallbackUser string) string {
 }
 
 func resolvePassword(scopeRoot, host string, port int, overridePath string) string {
-	return resolvePasswordWithEnv("", scopeRoot, host, port, overridePath)
+	return resolvePasswordWithEnv("", scopeRoot, host, port, overridePath, true)
 }
 
-func resolvePasswordWithEnv(envPass, scopeRoot, host string, port int, overridePath string) string {
+func resolvePasswordWithEnv(envPass, scopeRoot, host string, port int, overridePath string, allowAmbientBeadsPassword bool) string {
 	if pass := strings.TrimSpace(os.Getenv("GC_DOLT_PASSWORD")); pass != "" {
 		return pass
 	}
@@ -87,8 +99,10 @@ func resolvePasswordWithEnv(envPass, scopeRoot, host string, port int, overrideP
 	if envPass != "" {
 		return envPass
 	}
-	if pass := strings.TrimSpace(os.Getenv("BEADS_DOLT_PASSWORD")); pass != "" {
-		return pass
+	if allowAmbientBeadsPassword {
+		if pass := strings.TrimSpace(os.Getenv("BEADS_DOLT_PASSWORD")); pass != "" {
+			return pass
+		}
 	}
 	host = strings.TrimSpace(host)
 	if host == "" || port <= 0 {

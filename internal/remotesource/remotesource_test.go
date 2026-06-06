@@ -67,6 +67,65 @@ func TestParseSourceForms(t *testing.T) {
 	}
 }
 
+func TestFormatGitHubTreeSource(t *testing.T) {
+	cases := []struct {
+		name    string
+		source  string
+		ref     string
+		subpath string
+		want    string
+		ok      bool
+	}{
+		{
+			name:    "https git suffix",
+			source:  "https://github.com/gastownhall/gascity-packs.git",
+			ref:     "main",
+			subpath: "flywheel/cass",
+			want:    "https://github.com/gastownhall/gascity-packs/tree/main/flywheel/cass",
+			ok:      true,
+		},
+		{
+			name:    "bare github",
+			source:  "github.com/gastownhall/gascity-packs",
+			ref:     "v1.2.3",
+			subpath: "/gascity/",
+			want:    "https://github.com/gastownhall/gascity-packs/tree/v1.2.3/gascity",
+			ok:      true,
+		},
+		{
+			name:    "slash ref stays legacy",
+			source:  "https://github.com/gastownhall/gascity-packs.git",
+			ref:     "design/gc-plan-pack",
+			subpath: "gc",
+			ok:      false,
+		},
+		{
+			name:    "ssh stays legacy",
+			source:  "git@github.com:gastownhall/gascity-packs.git",
+			ref:     "main",
+			subpath: "gascity",
+			ok:      false,
+		},
+		{
+			name:    "missing ref stays legacy",
+			source:  "https://github.com/gastownhall/gascity-packs.git",
+			subpath: "gascity",
+			ok:      false,
+		},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := FormatGitHubTreeSource(tt.source, tt.ref, tt.subpath)
+			if ok != tt.ok {
+				t.Fatalf("ok = %v, want %v", ok, tt.ok)
+			}
+			if got != tt.want {
+				t.Fatalf("got %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestParseGitHubTreeOrBlobRejectsNonGitHubTreeBlob(t *testing.T) {
 	if _, ok := ParseGitHubTreeOrBlob("https://github.com/org/repo/issues/1"); ok {
 		t.Fatal("ParseGitHubTreeOrBlob accepted issue URL")

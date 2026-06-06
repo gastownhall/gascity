@@ -505,6 +505,104 @@ func TestResolveTemplateCarriesOneShotLifecycleToRuntimeConfig(t *testing.T) {
 	}
 }
 
+func TestResolveTemplateCarriesMouseModeToRuntimeConfig(t *testing.T) {
+	cityPath := t.TempDir()
+	params := &agentBuildParams{
+		fs:         fsys.NewFake(),
+		cityName:   "bright-lights",
+		cityPath:   cityPath,
+		workspace:  &config.Workspace{Name: "bright-lights"},
+		beaconTime: testBeaconTime,
+		beadNames:  make(map[string]string),
+		stderr:     io.Discard,
+	}
+	agent := &config.Agent{
+		Name:         "operator",
+		StartCommand: "claude",
+		MouseMode:    "on",
+	}
+
+	tp, err := resolveTemplate(params, agent, agent.QualifiedName(), nil)
+	if err != nil {
+		t.Fatalf("resolveTemplate: %v", err)
+	}
+	if !tp.Hints.MouseOn {
+		t.Fatal("TemplateParams.Hints.MouseOn = false, want true")
+	}
+	if !templateParamsToConfig(tp).MouseOn {
+		t.Fatal("runtime config MouseOn = false, want true")
+	}
+}
+
+// TestResolveTemplateHeadlessAgentStaysMouseOff is the ga-c4w guard for
+// acceptance #2/#4: the new interactive mouse-on default (sessionCreateHints
+// in internal/api) must NOT bleed into the headless agent path. An agent with
+// no mouse_mode resolves MouseOn=false, so the runtime runs
+// disableMouseAndActivity and the session stays mouse-off — controller-poll
+// safety. This path derives MouseOn from cfgAgent.MouseModeOn(), independent
+// of sessionCreateHints, and is unchanged by this bead.
+func TestResolveTemplateHeadlessAgentStaysMouseOff(t *testing.T) {
+	cityPath := t.TempDir()
+	params := &agentBuildParams{
+		fs:         fsys.NewFake(),
+		cityName:   "bright-lights",
+		cityPath:   cityPath,
+		workspace:  &config.Workspace{Name: "bright-lights"},
+		beaconTime: testBeaconTime,
+		beadNames:  make(map[string]string),
+		stderr:     io.Discard,
+	}
+	agent := &config.Agent{
+		Name:         "pool-worker",
+		StartCommand: "claude",
+		// no MouseMode set → headless default (mouse-off)
+	}
+
+	tp, err := resolveTemplate(params, agent, agent.QualifiedName(), nil)
+	if err != nil {
+		t.Fatalf("resolveTemplate: %v", err)
+	}
+	if tp.Hints.MouseOn {
+		t.Fatal("TemplateParams.Hints.MouseOn = true, want false (headless agent must stay mouse-off)")
+	}
+	if templateParamsToConfig(tp).MouseOn {
+		t.Fatal("runtime config MouseOn = true, want false (headless agent must stay mouse-off)")
+	}
+}
+
+// TestTemplateParamsToConfigInteractiveSessionEnablesMouse locks ga-c4w finding
+// #1 for the MANAGED `gc session new` deferred-start path: the reconciler starts
+// a session_origin=manual bead through templateParamsToConfig (see
+// buildPreparedStartWithWorkDirResolver). A manual session must resolve
+// MouseOn=true even when the agent config sets no mouse_mode, while ephemeral
+// pool agents stay MouseOn=false (controller-poll safety). This is the seam the
+// original API-only fix missed: MouseOn for `gc session new` never flowed through
+// internal/api sessionCreateHints.
+//
+// Scope is deliberately session_origin=manual only. MouseOn is a core-fingerprint
+// field (locked by runtime.TestConfigFingerprintIncludesMouseOn), so auto-flipping
+// it for long-lived config-declared/named sessions would change their drift hash
+// and force a one-time reconciler restart; named sessions follow their resolved
+// Hints.MouseOn (mouse_mode) instead.
+func TestTemplateParamsToConfigInteractiveSessionEnablesMouse(t *testing.T) {
+	// Managed-deferred `gc session new` → session_origin=manual → ManualSession.
+	manual := TemplateParams{ManualSession: true}
+	if !templateParamsToConfig(manual).MouseOn {
+		t.Error("templateParamsToConfig(manual).MouseOn = false, want true (gc session new managed-deferred, ga-c4w)")
+	}
+	// Ephemeral pool agent has no interactive marker → stays mouse-off (poll-safe).
+	pool := TemplateParams{}
+	if templateParamsToConfig(pool).MouseOn {
+		t.Error("templateParamsToConfig(pool).MouseOn = true, want false (pool agent must stay mouse-off, ga-c4w)")
+	}
+	// Named/config sessions are intentionally out of scope: they must not gain a
+	// MouseOn drift from this default (they follow mouse_mode via Hints.MouseOn).
+	named := TemplateParams{ConfiguredNamedIdentity: "operator"}
+	if templateParamsToConfig(named).MouseOn {
+		t.Error("templateParamsToConfig(named).MouseOn = true, want false (named out of scope to avoid fingerprint drift, ga-c4w)")
+	}
+}
+
 func TestResolveTemplateFlagModeRetainsPromptForStartupDelivery(t *testing.T) {
 	cityPath := t.TempDir()
 	fs := fsys.NewFake()
@@ -719,7 +817,7 @@ func TestResolveTemplateKeepsConcreteProviderForOverlays(t *testing.T) {
 func TestResolveTemplateExpandsPromptCommandTemplates(t *testing.T) {
 	cityPath := filepath.Join(t.TempDir(), "demo-city")
 	fs := fsys.NewFake()
-	fs.Files[cityPath+"/prompts/worker.template.md"] = []byte("Work={{ .WorkQuery }}\nSling={{ .SlingQuery }}")
+	fs.Files[cityPath+"/prompts/worker.template.md"] = []byte("Work={{ .WorkQuery }}\nAssigned={{ .AssignedReadyQuery }}\nSling={{ .SlingQuery }}")
 
 	params := &agentBuildParams{
 		fs:              fs,
@@ -750,8 +848,47 @@ func TestResolveTemplateExpandsPromptCommandTemplates(t *testing.T) {
 	if !strings.Contains(tp.Prompt, "Work=echo demo-city demo worker") {
 		t.Fatalf("Prompt missing expanded WorkQuery: %q", tp.Prompt)
 	}
+	if !strings.Contains(tp.Prompt, "Assigned=echo demo-city demo worker") {
+		t.Fatalf("Prompt missing expanded AssignedReadyQuery: %q", tp.Prompt)
+	}
+	if strings.Contains(tp.Prompt, "gc.routed_to") {
+		t.Fatalf("Prompt assigned-ready query should not include routed pool demand: %q", tp.Prompt)
+	}
 	if !strings.Contains(tp.Prompt, "Sling=dispatch {} --route=demo/worker --city=demo-city") {
 		t.Fatalf("Prompt missing expanded SlingQuery: %q", tp.Prompt)
+	}
+}
+
+func TestResolveTemplateAssignedReadyQueryUsesBD105Compatibility(t *testing.T) {
+	cityPath := filepath.Join(t.TempDir(), "demo-city")
+	fs := fsys.NewFake()
+	fs.Files[cityPath+"/prompts/worker.template.md"] = []byte("Assigned={{ .AssignedReadyQuery }}")
+
+	params := &agentBuildParams{
+		city:            &config.City{Beads: config.BeadsConfig{BDCompatibility: config.BeadsBDCompatibility105}},
+		fs:              fs,
+		cityName:        "",
+		cityPath:        cityPath,
+		workspace:       &config.Workspace{Provider: "opencode"},
+		providers:       config.BuiltinProviders(),
+		lookPath:        func(string) (string, error) { return "/usr/bin/opencode", nil },
+		beaconTime:      testBeaconTime,
+		sessionTemplate: "",
+		beadNames:       make(map[string]string),
+		stderr:          io.Discard,
+	}
+	agent := &config.Agent{
+		Name:           "worker",
+		PromptTemplate: "prompts/worker.template.md",
+		Provider:       "opencode",
+	}
+
+	tp, err := resolveTemplate(params, agent, agent.QualifiedName(), nil)
+	if err != nil {
+		t.Fatalf("resolveTemplate: %v", err)
+	}
+	if !strings.Contains(tp.Prompt, `bd ready --include-ephemeral --assignee="$id" --json --limit=1`) {
+		t.Fatalf("Prompt missing bd-1.0.5 assigned ready query: %q", tp.Prompt)
 	}
 }
 
@@ -868,6 +1005,9 @@ func TestResolveTemplateCityAppendFragmentsApplyToImportedPackAgent(t *testing.T
 name = "test"
 includes = ["packs/imported"]
 
+[providers.claude]
+base = "builtin:claude"
+
 [agent_defaults]
 append_fragments = ["city-footer"]
 `)
@@ -906,7 +1046,7 @@ prompt_template = "agents/mayor/prompt.template.md"
 		cityName:        "test",
 		cityPath:        cityPath,
 		workspace:       &cfg.Workspace,
-		providers:       config.BuiltinProviders(),
+		providers:       cfg.Providers,
 		lookPath:        func(string) (string, error) { return "/usr/bin/claude", nil },
 		beaconTime:      testBeaconTime,
 		packDirs:        cfg.PackDirs,
@@ -925,6 +1065,68 @@ prompt_template = "agents/mayor/prompt.template.md"
 	}
 }
 
+func TestResolveTemplateScopesRigPackFragmentsByCurrentRig(t *testing.T) {
+	cityPath := t.TempDir()
+	write := func(rel, data string) {
+		path := filepath.Join(cityPath, rel)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("MkdirAll(%s): %v", path, err)
+		}
+		if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+			t.Fatalf("WriteFile(%s): %v", path, err)
+		}
+	}
+
+	write("agents/alpha-worker/prompt.template.md", `{{ template "work-query" . }}`)
+	write("agents/bravo-worker/prompt.template.md", `{{ template "work-query" . }}`)
+	write("packs/alpha/template-fragments/work-query.template.md", `{{ define "work-query" }}alpha-work-query{{ end }}`)
+	write("packs/bravo/template-fragments/work-query.template.md", `{{ define "work-query" }}bravo-work-query{{ end }}`)
+
+	cfg := &config.City{
+		Workspace: config.Workspace{Provider: "stub"},
+		Providers: map[string]config.ProviderSpec{
+			"stub": {Command: "/bin/echo"},
+		},
+		Rigs: []config.Rig{
+			{Name: "alpha", Path: "rigs/alpha"},
+			{Name: "bravo", Path: "rigs/bravo"},
+		},
+		RigPackDirs: map[string][]string{
+			"alpha": {filepath.Join(cityPath, "packs", "alpha")},
+			"bravo": {filepath.Join(cityPath, "packs", "bravo")},
+		},
+	}
+	alphaAgent := config.Agent{
+		Name:           "worker",
+		Dir:            "alpha",
+		Provider:       "stub",
+		PromptTemplate: "agents/alpha-worker/prompt.template.md",
+	}
+	bravoAgent := config.Agent{
+		Name:           "worker",
+		Dir:            "bravo",
+		Provider:       "stub",
+		PromptTemplate: "agents/bravo-worker/prompt.template.md",
+	}
+
+	params := newAgentBuildParams("test", cityPath, cfg, nil, testBeaconTime, nil, io.Discard)
+	alpha, err := resolveTemplate(params, &alphaAgent, alphaAgent.QualifiedName(), nil)
+	if err != nil {
+		t.Fatalf("resolveTemplate(alpha): %v", err)
+	}
+	if !strings.Contains(alpha.Prompt, "alpha-work-query") || strings.Contains(alpha.Prompt, "bravo-work-query") {
+		t.Fatalf("alpha prompt used wrong rig fragment: %q", alpha.Prompt)
+	}
+
+	bravo, err := resolveTemplate(params, &bravoAgent, bravoAgent.QualifiedName(), nil)
+	if err != nil {
+		t.Fatalf("resolveTemplate(bravo): %v", err)
+	}
+	if !strings.Contains(bravo.Prompt, "bravo-work-query") || strings.Contains(bravo.Prompt, "alpha-work-query") {
+		t.Fatalf("bravo prompt used wrong rig fragment: %q", bravo.Prompt)
+	}
+}
+
 func TestResolveTemplateConventionAgentAppendFragments(t *testing.T) {
 	cityPath := t.TempDir()
 	write := func(rel, data string) {
@@ -940,7 +1142,11 @@ func TestResolveTemplateConventionAgentAppendFragments(t *testing.T) {
 	write("city.toml", `
 	[workspace]
 	name = "test"
+	provider = "claude"
 	includes = ["packs/imported"]
+
+	[providers.claude]
+	base = "builtin:claude"
 	`)
 	write("packs/imported/pack.toml", `
 	[pack]
@@ -975,7 +1181,7 @@ func TestResolveTemplateConventionAgentAppendFragments(t *testing.T) {
 		cityName:        "test",
 		cityPath:        cityPath,
 		workspace:       &cfg.Workspace,
-		providers:       config.BuiltinProviders(),
+		providers:       cfg.Providers,
 		lookPath:        func(string) (string, error) { return "/usr/bin/claude", nil },
 		beaconTime:      testBeaconTime,
 		packDirs:        cfg.PackDirs,

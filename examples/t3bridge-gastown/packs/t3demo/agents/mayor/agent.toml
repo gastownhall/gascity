@@ -1,0 +1,3 @@
+scope = "city"
+nudge = "Check mail, then plan and dispatch the rig's work."
+idle_timeout = "1h"

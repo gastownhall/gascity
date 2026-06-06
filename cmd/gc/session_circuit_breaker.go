@@ -22,6 +22,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/session"
 )
 
 // sessionCircuitBreakerConfig controls the breaker thresholds. Zero values
@@ -45,7 +46,7 @@ const (
 )
 
 const (
-	sessionCircuitStateMetadata             = "session_circuit_state"
+	sessionCircuitStateMetadata             = session.SessionCircuitStateMetadataKey
 	sessionCircuitRestartsMetadata          = "session_circuit_restarts"
 	sessionCircuitLastRestartMetadata       = "session_circuit_last_restart"
 	sessionCircuitLastProgressMetadata      = "session_circuit_last_progress"
@@ -110,9 +111,9 @@ const (
 func (k circuitBreakerStateKind) String() string {
 	switch k {
 	case circuitOpen:
-		return "CIRCUIT_OPEN"
+		return session.SessionCircuitStateOpen
 	default:
-		return "CIRCUIT_CLOSED"
+		return session.SessionCircuitStateClosed
 	}
 }
 

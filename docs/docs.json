@@ -67,7 +67,7 @@
   "redirects": [
     {
       "source": "/packv2/migration",
-      "destination": "/guides/migrating-to-pack-vnext"
+      "destination": "/guides/shareable-packs"
     },
     {
       "source": "/tutorials/01-cities-and-rigs.md",
@@ -112,6 +112,13 @@
         ]
       },
       {
+        "group": "Concepts",
+        "pages": [
+          "concepts/architecture-overview",
+          "concepts/primitives"
+        ]
+      },
+      {
         "group": "Tutorials",
         "pages": [
           "tutorials/index",
@@ -128,16 +135,19 @@
         "group": "Guides",
         "pages": [
           "guides/index",
-          "guides/migrating-to-pack-vnext",
+          "guides/capabilities-for-coding-agent-users",
+          "guides/understanding-packs",
           "guides/shareable-packs",
-          "guides/using-json-from-gc"
+          "guides/using-json-from-gc",
+          "guides/multi-agent-engineering-environment"
         ]
       },
       {
         "group": "Troubleshooting",
         "pages": [
           "troubleshooting/gc-start-walkthrough",
-          "troubleshooting/dolt-bloat-recovery"
+          "troubleshooting/dolt-bloat-recovery",
+          "runbooks/managed-city-endpoints"
         ]
       },
       {
@@ -145,12 +155,14 @@
         "pages": [
           "reference/index",
           "reference/cli",
+          "reference/gastown-command-map",
           "reference/config",
           "reference/formula",
           "reference/trust-boundaries",
           "reference/api",
           "reference/events",
           "schema/index",
+          "reference/system-packs",
           "reference/exec-session-provider",
           "reference/exec-beads-provider"
         ]

@@ -929,6 +929,9 @@ schema = 1
 source = "../util"
 export = true
 
+[providers.claude]
+base = "builtin:claude"
+
 [[named_session]]
 template = "mayor"
 mode = "always"

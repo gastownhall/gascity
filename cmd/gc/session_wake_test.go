@@ -1097,6 +1097,103 @@ func TestAdvanceSessionDrains_OrphanedDrainCanceledForAssignedWork(t *testing.T)
 	}
 }
 
+func TestAdvanceSessionDrains_NoWakeDrainCanceledForAssignedWork(t *testing.T) {
+	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
+	clk := &clock.Fake{Time: now}
+	sp := runtime.NewFake()
+	store := beads.NewMemStore()
+	dt := newDrainTracker()
+
+	if err := sp.Start(context.Background(), "test-session", runtime.Config{}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if err := sp.SetMeta("test-session", "GC_DRAIN_ACK", "1"); err != nil {
+		t.Fatalf("SetMeta(GC_DRAIN_ACK): %v", err)
+	}
+	b, err := store.Create(beads.Bead{
+		Title:  "test",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name": "test-session",
+			"template":     "worker",
+			"provider":     "claude",
+			"work_dir":     t.TempDir(),
+			"generation":   "3",
+			"state":        "active",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	dt.set(b.ID, &drainState{
+		startedAt:  now.Add(-10 * time.Second),
+		deadline:   now.Add(20 * time.Second),
+		reason:     "no-wake-reason",
+		generation: 3,
+		ackSet:     true,
+	})
+	advanceSessionDrainsWithSessions(
+		dt,
+		sp,
+		store,
+		func(id string) *beads.Bead {
+			got, _ := store.Get(id)
+			return &got
+		},
+		[]beads.Bead{b},
+		map[string]wakeEvaluation{
+			b.ID: {
+				Reasons: []WakeReason{WakeWork},
+				Reason:  "assigned-work",
+			},
+		},
+		&config.City{Agents: []config.Agent{{Name: "worker"}}},
+		nil,
+		nil,
+		nil,
+		clk,
+	)
+
+	if ds := dt.get(b.ID); ds != nil {
+		t.Fatalf("drain = %+v, want canceled for assigned work", ds)
+	}
+	if ack, _ := sp.GetMeta("test-session", "GC_DRAIN_ACK"); ack != "" {
+		t.Fatalf("GC_DRAIN_ACK = %q, want cleared after assigned-work cancellation", ack)
+	}
+	if !sp.IsRunning("test-session") {
+		t.Fatal("session should stay running after assigned-work cancellation")
+	}
+	for _, call := range sp.Calls {
+		if call.Method == "Interrupt" || call.Method == "Stop" {
+			t.Fatalf("runtime call %s should not happen after assigned-work cancellation; calls=%#v", call.Method, sp.Calls)
+		}
+	}
+}
+
+func TestAssignedWorkDrainReasonCancelable(t *testing.T) {
+	tests := []struct {
+		reason string
+		want   bool
+	}{
+		{reason: "orphaned", want: true},
+		{reason: "no-wake-reason", want: true},
+		{reason: "idle", want: false},
+		{reason: "config-drift", want: false},
+		{reason: "suspended", want: false},
+		{reason: "", want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.reason, func(t *testing.T) {
+			if got := assignedWorkDrainReasonCancelable(tt.reason); got != tt.want {
+				t.Fatalf("assignedWorkDrainReasonCancelable(%q) = %v, want %v", tt.reason, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestAdvanceSessionDrains_DeferredInterrupt_CancelableNoSignal(t *testing.T) {
 	// For cancelable drains (no-wake-reason, idle), verify the drain is
 	// canceled before the deferred interrupt fires.

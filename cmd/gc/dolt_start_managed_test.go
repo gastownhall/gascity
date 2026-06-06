@@ -14,11 +14,12 @@ import (
 	"time"
 
 	bdpack "github.com/gastownhall/gascity/examples/bd"
+	"github.com/gastownhall/gascity/internal/processgroup/processgrouptest"
 )
 
 func TestDoltServerEnv_DoesNotInjectGCSchedulerDefault(t *testing.T) {
 	parent := []string{"PATH=/usr/bin", "HOME=/home/test"}
-	out := doltServerEnv(parent)
+	out := doltServerEnv("", parent)
 
 	for _, kv := range out {
 		if strings.HasPrefix(kv, "DOLT_GC_SCHEDULER=") {
@@ -42,7 +43,7 @@ func TestDoltServerEnv_DoesNotInjectGCSchedulerDefault(t *testing.T) {
 
 func TestDoltServerEnv_RespectsUserOverride(t *testing.T) {
 	parent := []string{"PATH=/usr/bin", "DOLT_GC_SCHEDULER=LOADAVG", "HOME=/home/test"}
-	out := doltServerEnv(parent)
+	out := doltServerEnv("", parent)
 
 	// User-provided value must be preserved exactly.
 	count := 0
@@ -61,9 +62,76 @@ func TestDoltServerEnv_RespectsUserOverride(t *testing.T) {
 
 func TestDoltServerEnv_PreservesEmptyUserValue(t *testing.T) {
 	parent := []string{"DOLT_GC_SCHEDULER="}
-	out := doltServerEnv(parent)
-	if len(out) != 1 || out[0] != "DOLT_GC_SCHEDULER=" {
+	out := doltServerEnv("", parent)
+	// The explicit empty-value parent entry must be preserved exactly, and the
+	// managed-server telemetry disable must be appended.
+	var hasParent, hasTelemetryDisable bool
+	for _, kv := range out {
+		switch kv {
+		case "DOLT_GC_SCHEDULER=":
+			hasParent = true
+		case "DOLT_DISABLE_EVENT_FLUSH=true":
+			hasTelemetryDisable = true
+		}
+	}
+	if !hasParent {
 		t.Fatalf("explicit empty-value env not preserved: %v", out)
+	}
+	if !hasTelemetryDisable {
+		t.Fatalf("managed Dolt env should disable telemetry event flush: %v", out)
+	}
+}
+
+func TestDoltServerEnv_UsesDoltConfigObjectOptOut(t *testing.T) {
+	cityPath := t.TempDir()
+	beadsDir := filepath.Join(cityPath, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(beadsDir, "config.yaml")
+	if err := os.WriteFile(configPath, []byte("dolt:\n  disable-event-flush: false\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	out := doltServerEnv(cityPath, []string{
+		"PATH=/usr/bin",
+		"DOLT_DISABLE_EVENT_FLUSH=true",
+	})
+
+	for _, kv := range out {
+		if strings.HasPrefix(kv, "DOLT_DISABLE_EVENT_FLUSH=") {
+			t.Fatalf("config opt-out should remove telemetry-disable env, got %v", out)
+		}
+	}
+}
+
+func TestDoltServerEnv_DefaultsDoltConfigObjectToDisableEventFlush(t *testing.T) {
+	cityPath := t.TempDir()
+	beadsDir := filepath.Join(cityPath, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(beadsDir, "config.yaml")
+	if err := os.WriteFile(configPath, []byte("issue_prefix: gc\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	out := doltServerEnv(cityPath, []string{
+		"PATH=/usr/bin",
+		"DOLT_DISABLE_EVENT_FLUSH=false",
+	})
+
+	count := 0
+	for _, kv := range out {
+		if kv == "DOLT_DISABLE_EVENT_FLUSH=true" {
+			count++
+		}
+		if kv == "DOLT_DISABLE_EVENT_FLUSH=false" {
+			t.Fatalf("default disable should replace inherited false env, got %v", out)
+		}
+	}
+	if count != 1 {
+		t.Fatalf("expected exactly one DOLT_DISABLE_EVENT_FLUSH=true entry, got %d in %v", count, out)
 	}
 }
 
@@ -175,8 +243,7 @@ func TestGCBeadsBDScript_InitForcesReinitOverPreSeededMetadata(t *testing.T) {
 	}
 	script := string(data)
 
-	guard := `if [ -f "$dir/.beads/metadata.json" ]; then
-        if ensure_database_registered "$dolt_database"; then`
+	guard := `if [ -f "$dir/.beads/metadata.json" ]; then`
 	if !strings.Contains(script, guard) {
 		t.Fatalf("gc-beads-bd.sh op_init must gate the already-initialized branch on the metadata.json file, not on project_id; " +
 			"gating on project_id leaves --force unset for gc-pre-seeded metadata and bd init aborts")
@@ -852,6 +919,56 @@ func TestResolveDoltArchiveLevel(t *testing.T) {
 	}
 }
 
+func TestResolveManagedDoltConfigForStartUsesCityListenerOverrides(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte(`
+[workspace]
+name = "test"
+
+[dolt]
+read_timeout_millis = 300000
+write_timeout_millis = 600000
+max_connections = 1024
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := resolveManagedDoltConfigForStart(dir, -1)
+	if err != nil {
+		t.Fatalf("resolveManagedDoltConfigForStart: %v", err)
+	}
+	if got.ReadTimeoutMillis != 300000 {
+		t.Fatalf("ReadTimeoutMillis = %d, want 300000", got.ReadTimeoutMillis)
+	}
+	if got.WriteTimeoutMillis != 600000 {
+		t.Fatalf("WriteTimeoutMillis = %d, want 600000", got.WriteTimeoutMillis)
+	}
+	if got.MaxConnections != 1024 {
+		t.Fatalf("MaxConnections = %d, want 1024", got.MaxConnections)
+	}
+}
+
+func TestResolveManagedDoltConfigForStartRejectsInvalidCityDoltConfig(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte(`
+[workspace]
+name = "test"
+
+[dolt]
+read_timeout_millis = -1
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := resolveManagedDoltConfigForStart(dir, -1)
+	if err == nil {
+		t.Fatal("resolveManagedDoltConfigForStart() error = nil, want invalid city dolt config rejection")
+	}
+	if got := err.Error(); !strings.Contains(got, "[dolt] read_timeout_millis must not be negative") {
+		t.Fatalf("error = %q, want negative read_timeout_millis rejection", got)
+	}
+}
+
 // TestTerminateManagedDoltPID_HonorsSubPollGrace asserts that terminate uses
 // the grace-clamped poll interval (managedDoltStopPollInterval) rather than a
 // fixed sleep: a SIGTERM-ignoring process with a tiny configured grace must be
@@ -986,6 +1103,7 @@ func TestTerminateManagedDoltTestPIDKillsProcessGroup(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX process-group signal semantics required")
 	}
+	processgrouptest.RequireRealProcessSignals(t)
 	dir := t.TempDir()
 	childFile := filepath.Join(dir, "child.pid")
 	// Shell becomes the new process group leader (Setpgid:true). It forks

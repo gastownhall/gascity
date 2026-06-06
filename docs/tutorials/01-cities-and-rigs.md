@@ -22,7 +22,7 @@ $ brew install gascity
 
 ~
 $ gc version
-0.13.4
+1.2.1
 ```
 
 > NOTE: the gascity installation is a great way to get the right dependencies in
@@ -310,9 +310,9 @@ Success! You just dispatched work to an AI agent and gotten results back.
 You've created a city, slung work to agents, added a project as a rig, and slung
 work to that rig. From here:
 
-- **[Agents](./02-agents.md)** — go deeper on agent configuration:
+- **[Agents](/tutorials/02-agents)** — go deeper on agent configuration:
   prompts, sessions, scope, working directories
-- **[Sessions](./03-sessions.md)** — interactive conversations with
+- **[Sessions](/tutorials/03-sessions)** — interactive conversations with
   agents, polecats and crew
-- **[Formulas](./05-formulas.md)** — multi-step workflow templates with
+- **[Formulas](/tutorials/05-formulas)** — multi-step workflow templates with
   dependencies and variables

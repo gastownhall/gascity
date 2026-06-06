@@ -115,30 +115,44 @@ func (g *GitRefSource) repoTopAndRelPath(path string) (string, string, bool) {
 	if err != nil {
 		return "", "", false
 	}
+	abs = filepath.Clean(abs)
 	queryDir := abs
 	if info, statErr := os.Stat(abs); statErr != nil || !info.IsDir() {
 		queryDir = filepath.Dir(abs)
 	}
-	top, cached := g.toplevelCache[queryDir]
+	cacheKey := canonicalExistingPath(queryDir)
+	top, cached := g.toplevelCache[cacheKey]
 	if !cached {
 		cmd := exec.Command("git", "rev-parse", "--show-toplevel")
 		cmd.Dir = queryDir
 		out, runErr := cmd.Output()
 		if runErr != nil {
-			g.toplevelCache[queryDir] = ""
+			g.toplevelCache[cacheKey] = ""
 			return "", "", false
 		}
-		top = strings.TrimSpace(string(out))
-		g.toplevelCache[queryDir] = top
+		top = filepath.Clean(strings.TrimSpace(string(out)))
+		g.toplevelCache[cacheKey] = top
 	}
 	if top == "" {
 		return "", "", false
 	}
-	rel, err := filepath.Rel(top, abs)
-	if err != nil || strings.HasPrefix(rel, "..") {
+	rel, err := filepath.Rel(canonicalExistingPath(top), canonicalExistingPath(abs))
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		return "", "", false
 	}
 	return top, filepath.ToSlash(rel), true
+}
+
+func canonicalExistingPath(path string) string {
+	path = filepath.Clean(path)
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		return filepath.Clean(resolved)
+	}
+	dir := filepath.Dir(path)
+	if resolved, err := filepath.EvalSymlinks(dir); err == nil {
+		return filepath.Join(filepath.Clean(resolved), filepath.Base(path))
+	}
+	return path
 }
 
 // Stat reports whether a regular blob exists at the configured ref

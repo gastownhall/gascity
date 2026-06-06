@@ -9,17 +9,20 @@ import (
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/materialize"
+	"github.com/gastownhall/gascity/internal/processenv"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	workdirutil "github.com/gastownhall/gascity/internal/workdir"
 	"github.com/gastownhall/gascity/internal/worker"
 )
 
-// cityAnchoredSessionEnv returns the provider env merged with the three
-// city-anchored env vars (GC_CITY, GC_CITY_PATH, GC_CITY_RUNTIME_DIR).
-// City anchors win on conflicts to mirror the canonical create-time
-// layering in cmd/gc/template_resolve.go where the per-agent env (which
-// carries the same anchors) is applied after the resolved provider env.
+// cityAnchoredSessionEnv returns the provider process baseline merged with the
+// resolved provider env and the three city-anchored env vars (GC_CITY,
+// GC_CITY_PATH, GC_CITY_RUNTIME_DIR). Resolved provider env overrides process
+// passthrough values, and city anchors win on conflicts to mirror the
+// canonical create-time layering in cmd/gc/template_resolve.go where the
+// per-agent env (which carries the same anchors) is applied after the resolved
+// provider env.
 //
 // Without these anchors, sessions spawned or restarted via the API code
 // paths cannot locate their city. Rig-scoped env remains a separate
@@ -34,11 +37,15 @@ import (
 // restarted through the API. Dispatcher-trace handling stays the
 // responsibility of the caller that knows the qualified agent name.
 func cityAnchoredSessionEnv(cityPath string, providerEnv map[string]string) map[string]string {
+	baseline := processenv.ProviderProcessPassthroughEnv()
 	anchors := citylayout.CityIdentityEnvMap(cityPath)
-	if len(providerEnv) == 0 && len(anchors) == 0 {
+	if len(baseline) == 0 && len(providerEnv) == 0 && len(anchors) == 0 {
 		return nil
 	}
-	out := make(map[string]string, len(providerEnv)+len(anchors))
+	out := make(map[string]string, len(baseline)+len(providerEnv)+len(anchors))
+	for k, v := range baseline {
+		out[k] = v
+	}
 	for k, v := range providerEnv {
 		out[k] = v
 	}
@@ -61,7 +68,7 @@ func (s *Server) sessionLogPaths() []string {
 	return worker.MergeSearchPaths(cfg.Daemon.ObservePaths)
 }
 
-func sessionCreateHints(resolved *config.ResolvedProvider, mcpServers []runtime.MCPServerConfig) runtime.Config {
+func sessionCreateHints(resolved *config.ResolvedProvider, sessionEnv map[string]string, mcpServers []runtime.MCPServerConfig) runtime.Config {
 	return runtime.Config{
 		Lifecycle:              runtime.Lifecycle(resolved.Lifecycle),
 		ReadyPromptPrefix:      resolved.ReadyPromptPrefix,
@@ -69,7 +76,17 @@ func sessionCreateHints(resolved *config.ResolvedProvider, mcpServers []runtime.
 		ProcessNames:           resolved.ProcessNames,
 		EmitsPermissionWarning: resolved.EmitsPermissionWarning,
 		AcceptStartupDialogs:   resolved.AcceptStartupDialogs,
-		MCPServers:             mcpServers,
+		// API session-create path (dashboard / real-world-app), NOT the
+		// `gc session new` CLI seam — the CLI resolves MouseOn in cmd/gc
+		// (workerSessionCreateHints + templateParamsToConfig, ga-c4w). MouseOn
+		// lets the runtime skip disableMouseAndActivity so the tmux wheel drives
+		// copy-mode scrollback. Agent-kind sessions can also flow through here,
+		// but they are CreateModeDeferred and re-resolved mouse-off by the
+		// reconciler, so this unconditional default never enables mouse on a
+		// polled agent (ga-c4w).
+		MouseOn:    true,
+		Env:        sessionEnv,
+		MCPServers: mcpServers,
 	}
 }
 
@@ -89,8 +106,15 @@ func sessionResumeHints(resolved *config.ResolvedProvider, workDir string, sessi
 		ProcessNames:           resolved.ProcessNames,
 		EmitsPermissionWarning: resolved.EmitsPermissionWarning,
 		AcceptStartupDialogs:   resolved.AcceptStartupDialogs,
-		Env:                    sessionEnv,
-		MCPServers:             mcpServers,
+		// ga-c4w finding #2: keep interactive (API-created) sessions mouse-on
+		// across suspend/resume + crash-restart, symmetric with sessionCreateHints.
+		// Without this the wheel→scrollback works on first create but is lost on
+		// the first resume. Headless agents are controller-owned and re-resolve
+		// MouseOn via cmd/gc/template_resolve.go (mouse-off), so this never enables
+		// mouse on a polled agent.
+		MouseOn:    true,
+		Env:        sessionEnv,
+		MCPServers: mcpServers,
 	}
 }
 

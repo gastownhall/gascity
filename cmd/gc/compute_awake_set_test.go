@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/config"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
 var now = time.Date(2026, 3, 31, 12, 0, 0, 0, time.UTC)
@@ -286,6 +287,106 @@ func TestNamedOnDemand_NoWork(t *testing.T) {
 	assertAsleep(t, result, "hello-world--refinery")
 }
 
+func TestNamedOnDemand_ResetPendingWakesWithoutDemand(t *testing.T) {
+	template := "fixture/build-agent"
+	identity := "fixture/reset-target"
+	sessionName := "fixture--reset-target"
+
+	result := ComputeAwakeSet(AwakeInput{
+		Agents:        []AwakeAgent{{QualifiedName: template}},
+		NamedSessions: []AwakeNamedSession{{Identity: identity, Template: template, Mode: "on_demand"}},
+		SessionBeads: []AwakeSessionBead{{
+			ID:                       "mc-reset",
+			SessionName:              sessionName,
+			Template:                 template,
+			State:                    "asleep",
+			NamedIdentity:            identity,
+			ContinuationResetPending: true,
+		}},
+		ScaleCheckCounts: map[string]int{template: 0},
+		Now:              now,
+	})
+
+	assertAwake(t, result, sessionName)
+	assertReason(t, result, sessionName, "reset-pending")
+}
+
+func TestNamedOnDemand_ResetPendingPreservesAssignedWorkDemand(t *testing.T) {
+	template := "fixture/build-agent"
+	identity := "fixture/reset-target"
+	sessionName := "fixture--reset-target"
+
+	result := ComputeAwakeSet(AwakeInput{
+		Agents:        []AwakeAgent{{QualifiedName: template}},
+		NamedSessions: []AwakeNamedSession{{Identity: identity, Template: template, Mode: "on_demand"}},
+		SessionBeads: []AwakeSessionBead{{
+			ID:                       "mc-reset",
+			SessionName:              sessionName,
+			Template:                 template,
+			State:                    "asleep",
+			NamedIdentity:            identity,
+			ContinuationResetPending: true,
+		}},
+		WorkBeads:        []AwakeWorkBead{{ID: "work-1", Assignee: identity, Status: "open", Ready: true}},
+		ScaleCheckCounts: map[string]int{template: 0},
+		Now:              now,
+	})
+
+	assertAwake(t, result, sessionName)
+	assertReason(t, result, sessionName, "reset-pending")
+	if !result[sessionName].HasAssignedWork {
+		t.Fatalf("HasAssignedWork = false, want true")
+	}
+}
+
+func TestNamedOnDemand_ResetPendingWaitHoldStaysAsleep(t *testing.T) {
+	template := "fixture/build-agent"
+	identity := "fixture/reset-target"
+	sessionName := "fixture--reset-target"
+
+	result := ComputeAwakeSet(AwakeInput{
+		Agents:        []AwakeAgent{{QualifiedName: template}},
+		NamedSessions: []AwakeNamedSession{{Identity: identity, Template: template, Mode: "on_demand"}},
+		SessionBeads: []AwakeSessionBead{{
+			ID:                       "mc-reset",
+			SessionName:              sessionName,
+			Template:                 template,
+			State:                    "asleep",
+			NamedIdentity:            identity,
+			ContinuationResetPending: true,
+			WaitHold:                 true,
+		}},
+		ScaleCheckCounts: map[string]int{template: 0},
+		Now:              now,
+	})
+
+	assertAsleep(t, result, sessionName)
+}
+
+func TestNamedOnDemand_ResetPendingWaitsForRestartRequestToClear(t *testing.T) {
+	template := "fixture/build-agent"
+	identity := "fixture/reset-target"
+	sessionName := "fixture--reset-target"
+
+	result := ComputeAwakeSet(AwakeInput{
+		Agents:        []AwakeAgent{{QualifiedName: template}},
+		NamedSessions: []AwakeNamedSession{{Identity: identity, Template: template, Mode: "on_demand"}},
+		SessionBeads: []AwakeSessionBead{{
+			ID:                       "mc-reset",
+			SessionName:              sessionName,
+			Template:                 template,
+			State:                    "asleep",
+			NamedIdentity:            identity,
+			RestartRequested:         true,
+			ContinuationResetPending: true,
+		}},
+		ScaleCheckCounts: map[string]int{template: 0},
+		Now:              now,
+	})
+
+	assertAsleep(t, result, sessionName)
+}
+
 func TestNamedOnDemand_ExactNamedIdentityAssigneeWakes(t *testing.T) {
 	result := ComputeAwakeSet(AwakeInput{
 		Agents:        []AwakeAgent{{QualifiedName: "hello-world/refinery"}},
@@ -479,7 +580,7 @@ func TestScaled_Demand2_OneActive(t *testing.T) {
 	assertAsleep(t, result, "polecat-mc-2") // asleep ephemerals not reused
 }
 
-func TestScaled_NewDemandDoesNotUseActiveAssignedSessions(t *testing.T) {
+func TestScaled_AssignedSessionsFillScaleSlotsBeforeCreatingSessions(t *testing.T) {
 	result := ComputeAwakeSet(AwakeInput{
 		Agents: []AwakeAgent{{QualifiedName: "hello-world/polecat"}},
 		SessionBeads: []AwakeSessionBead{
@@ -516,9 +617,21 @@ func TestScaled_NewDemandDoesNotUseActiveAssignedSessions(t *testing.T) {
 		suffix := strconv.Itoa(i)
 		assertAwake(t, result, "polecat-assigned-"+suffix)
 		assertReason(t, result, "polecat-assigned-"+suffix, "assigned-work")
-		assertAwake(t, result, "polecat-new-"+suffix)
-		assertReason(t, result, "polecat-new-"+suffix, "scaled:creating")
+		assertAsleep(t, result, "polecat-new-"+suffix)
 	}
+}
+
+func TestScaled_DemandCountsStartPendingAsCreating(t *testing.T) {
+	result := ComputeAwakeSet(AwakeInput{
+		Agents: []AwakeAgent{{QualifiedName: "hello-world/polecat"}},
+		SessionBeads: []AwakeSessionBead{
+			{ID: "mc-pending-1", SessionName: "polecat-pending-1", Template: "hello-world/polecat", State: string(sessionpkg.StateStartPending)},
+		},
+		ScaleCheckCounts: map[string]int{"hello-world/polecat": 1},
+		Now:              now,
+	})
+	assertAwake(t, result, "polecat-pending-1")
+	assertReason(t, result, "polecat-pending-1", "scaled:creating")
 }
 
 func TestScaled_Demand1_TwoActive(t *testing.T) {
@@ -716,6 +829,46 @@ func TestDrained_WithAssignedWork_Wakes(t *testing.T) {
 	})
 	assertAwake(t, result, "polecat-mc-1")
 	assertReason(t, result, "polecat-mc-1", "assigned-work")
+}
+
+func TestScaleDemandCountsAssignedSessionBeforeKeepingIdlePoolSibling(t *testing.T) {
+	result := ComputeAwakeSet(AwakeInput{
+		Agents: []AwakeAgent{{QualifiedName: "gascity/gc.run-operator"}},
+		SessionBeads: []AwakeSessionBead{
+			{ID: "mc-old", SessionName: "gc__run-operator-mc-old", Template: "gascity/gc.run-operator", State: "active"},
+			{ID: "mc-new", SessionName: "gc__run-operator-mc-new", Template: "gascity/gc.run-operator", State: "active"},
+		},
+		WorkBeads: []AwakeWorkBead{{
+			ID: "ga-work", Assignee: "gc__run-operator-mc-new", Status: "in_progress",
+		}},
+		ScaleCheckCounts: map[string]int{"gascity/gc.run-operator": 1},
+		RunningSessions:  map[string]bool{"gc__run-operator-mc-old": true, "gc__run-operator-mc-new": true},
+		Now:              now,
+	})
+
+	assertAsleep(t, result, "gc__run-operator-mc-old")
+	assertAwake(t, result, "gc__run-operator-mc-new")
+	assertReason(t, result, "gc__run-operator-mc-new", "assigned-work")
+}
+
+func TestScaleDemandCountsAssignedSessionBeforeKeepingStartPendingPoolSibling(t *testing.T) {
+	result := ComputeAwakeSet(AwakeInput{
+		Agents: []AwakeAgent{{QualifiedName: "gascity/gc.run-operator"}},
+		SessionBeads: []AwakeSessionBead{
+			{ID: "mc-pending", SessionName: "gc__run-operator-mc-pending", Template: "gascity/gc.run-operator", State: string(sessionpkg.StateStartPending)},
+			{ID: "mc-new", SessionName: "gc__run-operator-mc-new", Template: "gascity/gc.run-operator", State: "active"},
+		},
+		WorkBeads: []AwakeWorkBead{{
+			ID: "ga-work", Assignee: "gc__run-operator-mc-new", Status: "in_progress",
+		}},
+		ScaleCheckCounts: map[string]int{"gascity/gc.run-operator": 1},
+		RunningSessions:  map[string]bool{"gc__run-operator-mc-new": true},
+		Now:              now,
+	})
+
+	assertAsleep(t, result, "gc__run-operator-mc-pending")
+	assertAwake(t, result, "gc__run-operator-mc-new")
+	assertReason(t, result, "gc__run-operator-mc-new", "assigned-work")
 }
 
 func TestDrained_PinnedStaysAsleepUntilUndrained(t *testing.T) {
@@ -1540,6 +1693,19 @@ func TestWorkSet_FallsBackToCreating(t *testing.T) {
 		Agents: []AwakeAgent{{QualifiedName: "hello-world/polecat"}},
 		SessionBeads: []AwakeSessionBead{
 			{ID: "mc-1", SessionName: "polecat-mc-1", Template: "hello-world/polecat", State: "creating"},
+		},
+		WorkSet: map[string]bool{"hello-world/polecat": true},
+		Now:     now,
+	})
+	assertAwake(t, result, "polecat-mc-1")
+	assertReason(t, result, "polecat-mc-1", "work-query")
+}
+
+func TestWorkSet_FallsBackToStartPending(t *testing.T) {
+	result := ComputeAwakeSet(AwakeInput{
+		Agents: []AwakeAgent{{QualifiedName: "hello-world/polecat"}},
+		SessionBeads: []AwakeSessionBead{
+			{ID: "mc-1", SessionName: "polecat-mc-1", Template: "hello-world/polecat", State: string(sessionpkg.StateStartPending)},
 		},
 		WorkSet: map[string]bool{"hello-world/polecat": true},
 		Now:     now,

@@ -251,18 +251,19 @@ func driftCheckEnv(t *testing.T, supervisorBuildID string) (cityPath string, res
 	oldBaseURL := supervisorAPIBaseURLHook
 	oldActive := supervisorSystemctlActive
 	oldHelpers := restartHelpersHook
+	oldReadExe := readSupervisorExePathHook
 	t.Cleanup(func() {
 		supervisorAliveHook = oldAlive
 		supervisorAPIBaseURLHook = oldBaseURL
 		supervisorSystemctlActive = oldActive
 		restartHelpersHook = oldHelpers
+		readSupervisorExePathHook = oldReadExe
 	})
 
-	// Use the current process PID so readSupervisorExePath
-	// (/proc/<pid>/exe) succeeds without requiring root.
 	supervisorAliveHook = os.Getpid
 	supervisorAPIBaseURLHook = func() (string, error) { return srv.URL, nil }
 	supervisorSystemctlActive = func(string) bool { return false }
+	readSupervisorExePathHook = func(int) (string, error) { return "/tmp/gc-test-supervisor", nil }
 	restartHelpersHook = func() restartHelpers {
 		return restartHelpers{
 			Systemctl: func(...string) error { return nil },
@@ -307,6 +308,81 @@ func TestRunStartDriftCheck_RestartReturnsContinue(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "Drift detected:") {
 		t.Errorf("stdout missing drift report:\n%s", stdout.String())
+	}
+}
+
+// TestRunStartDriftCheck_DarwinLaunchdRestartDoesNotRequireProcExe pins the
+// macOS production upgrade path: launchd owns the supervisor lifecycle, so
+// binary drift restart must delegate to launchctl even though /proc/<pid>/exe
+// is unavailable on Darwin.
+func TestRunStartDriftCheck_DarwinLaunchdRestartDoesNotRequireProcExe(t *testing.T) {
+	cityPath, setCommit := driftCheckEnv(t, "old-build-id")
+	setCommit("new-build-id")
+
+	oldDry, oldNoAR := dryRunMode, noAutoRestartMode
+	dryRunMode, noAutoRestartMode = false, false
+	t.Cleanup(func() { dryRunMode, noAutoRestartMode = oldDry, oldNoAR })
+
+	oldGOOS := supervisorRuntimeGOOS
+	oldLaunchdActive := supervisorLaunchdActive
+	oldReadExe := readSupervisorExePathHook
+	oldHelpers := restartHelpersHook
+	t.Cleanup(func() {
+		supervisorRuntimeGOOS = oldGOOS
+		supervisorLaunchdActive = oldLaunchdActive
+		readSupervisorExePathHook = oldReadExe
+		restartHelpersHook = oldHelpers
+	})
+
+	supervisorRuntimeGOOS = "darwin"
+	supervisorLaunchdActive = func(label string) bool {
+		return label == supervisorLaunchdLabel()
+	}
+	readSupervisorExePathHook = func(pid int) (string, error) {
+		return "", fmt.Errorf("readlink /proc/%d/exe: no such file or directory", pid)
+	}
+	var launchctlArgs []string
+	restartHelpersHook = func() restartHelpers {
+		return restartHelpers{
+			Launchctl: func(args ...string) error {
+				launchctlArgs = append([]string(nil), args...)
+				return nil
+			},
+			Systemctl: func(...string) error {
+				t.Fatal("systemctl should not handle a Darwin launchd supervisor")
+				return nil
+			},
+			Kill: func(int) error {
+				t.Fatal("direct kill should not handle a Darwin launchd supervisor")
+				return nil
+			},
+			WaitExit: func(int) error { return nil },
+			Spawn: func(string, ...string) error {
+				t.Fatal("direct spawn should not handle a Darwin launchd supervisor")
+				return nil
+			},
+		}
+	}
+
+	var stdout, stderr bytes.Buffer
+	exitCode, cont := runStartDriftCheck(cityPath, &stdout, &stderr)
+	if exitCode != 0 {
+		t.Fatalf("exitCode = %d, want 0; stdout=%q stderr=%q", exitCode, stdout.String(), stderr.String())
+	}
+	if !cont {
+		t.Fatalf("cont = false after successful launchd restart; stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+	wantArgs := []string{"kickstart", "-k", supervisorLaunchdServiceTarget(supervisorLaunchdLabel())}
+	if len(launchctlArgs) != len(wantArgs) {
+		t.Fatalf("launchctl args = %v, want %v", launchctlArgs, wantArgs)
+	}
+	for i := range wantArgs {
+		if launchctlArgs[i] != wantArgs[i] {
+			t.Fatalf("launchctl arg %d = %q, want %q; full args=%v", i, launchctlArgs[i], wantArgs[i], launchctlArgs)
+		}
+	}
+	if strings.Contains(stderr.String(), "/proc/") {
+		t.Fatalf("stderr leaked /proc restart failure despite launchd management:\n%s", stderr.String())
 	}
 }
 
@@ -378,6 +454,8 @@ func TestDoStartJSONAlreadyRunningSupervisorKeepsStdoutJSONOnly(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("GC_DOLT", "skip")
+			t.Setenv("GC_BEADS", "file")
 			cityPath, setCommit := driftCheckEnv(t, tc.supervisorBuildID)
 			setCommit(tc.localBuildID)
 			if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {

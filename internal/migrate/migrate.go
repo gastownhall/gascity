@@ -101,6 +101,7 @@ type agentFile struct {
 	DependsOn              []string          `toml:"depends_on,omitempty"`
 	ResumeCommand          string            `toml:"resume_command,omitempty"`
 	WakeMode               string            `toml:"wake_mode,omitempty"`
+	MouseMode              string            `toml:"mouse_mode,omitempty"`
 }
 
 type usageCounts struct {
@@ -388,6 +389,9 @@ func normalizedPackAgentDefaults(packCfg packFile) config.AgentDefaults {
 }
 
 func mergeAgentDefaultsAliasForMigration(dst *config.AgentDefaults, src config.AgentDefaults, meta toml.MetaData) {
+	if !meta.IsDefined("agent_defaults", "provider") {
+		dst.Provider = src.Provider
+	}
 	if !meta.IsDefined("agent_defaults", "model") {
 		dst.Model = src.Model
 	}
@@ -415,6 +419,9 @@ func mergeAgentDefaultsAliasForMigration(dst *config.AgentDefaults, src config.A
 }
 
 func mergeMigratedAgentDefaults(dst *config.AgentDefaults, src config.AgentDefaults) {
+	if dst.Provider == "" {
+		dst.Provider = src.Provider
+	}
 	if dst.Model == "" {
 		dst.Model = src.Model
 	}
@@ -432,7 +439,8 @@ func mergeMigratedAgentDefaults(dst *config.AgentDefaults, src config.AgentDefau
 }
 
 func isZeroAgentDefaults(defaults config.AgentDefaults) bool {
-	return defaults.Model == "" &&
+	return defaults.Provider == "" &&
+		defaults.Model == "" &&
 		defaults.WakeMode == "" &&
 		defaults.DefaultSlingFormula == "" &&
 		len(defaults.AllowOverlay) == 0 &&
@@ -903,6 +911,7 @@ func agentConfigFromAgent(agent config.Agent) agentFile {
 		DependsOn:              agent.DependsOn,
 		ResumeCommand:          agent.ResumeCommand,
 		WakeMode:               agent.WakeMode,
+		MouseMode:              agent.MouseMode,
 	}
 }
 
@@ -952,7 +961,8 @@ func isZeroAgentConfig(cfg agentFile) bool {
 		cfg.Attach == nil &&
 		len(cfg.DependsOn) == 0 &&
 		cfg.ResumeCommand == "" &&
-		cfg.WakeMode == ""
+		cfg.WakeMode == "" &&
+		cfg.MouseMode == ""
 }
 
 func dedupeStrings(values []string) []string {

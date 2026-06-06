@@ -21,7 +21,42 @@ LDFLAGS := -X main.version=$(VERSION) \
            -X main.commit=$(COMMIT) \
            -X main.date=$(BUILD_TIME)
 
-.PHONY: build check check-all check-bd check-docker check-docs check-dolt check-routed-test-rows check-version-tag lint lint-full lint-new lint-changed fmt-check fmt vet test test-fast-parallel test-fsys-darwin-compile test-cmd-gc-process test-cmd-gc-process-shard test-cmd-gc-process-parallel test-worker-core test-worker-core-phase2 test-worker-core-phase2-real-transport setup-worker-inference test-worker-inference test-worker-inference-phase3 test-acceptance test-acceptance-b test-acceptance-c test-acceptance-all test-tutorial-goldens test-tutorial-regression test-tutorial test-integration test-integration-shards test-integration-shards-parallel test-integration-shards-cover test-integration-packages test-integration-packages-cover test-integration-review-formulas test-integration-review-formulas-cover test-integration-review-formulas-basic test-integration-review-formulas-basic-cover test-integration-review-formulas-retries test-integration-review-formulas-retries-cover test-integration-review-formulas-recovery test-integration-review-formulas-recovery-cover test-integration-bdstore test-integration-bdstore-cover test-integration-rest test-integration-rest-cover test-integration-rest-smoke test-integration-rest-smoke-cover test-integration-rest-full test-integration-rest-full-cover test-local-full-parallel test-mcp-mail test-docker test-k8s test-cover cover install install-tools install-buildx setup clean generate check-schema docker-base docker-agent docker-controller docs-dev diagrams-excalidraw dashboard-smoke
+# macOS: icu4c (a transitive Dolt / go-icu-regex CGO build dependency) is
+# keg-only under Homebrew, so its headers/libs are not on the default CGO
+# search path. Point CGO at them when icu4c is present. This is a no-op on
+# Linux and other platforms (where system ICU, e.g. libicu-dev, is found
+# normally) and a no-op on macOS when icu4c is not installed.
+ifeq ($(shell uname),Darwin)
+ICU_PREFIX := $(shell brew --prefix icu4c 2>/dev/null)
+ifneq ($(ICU_PREFIX),)
+CGO_CPPFLAGS += -I$(ICU_PREFIX)/include
+CGO_LDFLAGS += -L$(ICU_PREFIX)/lib
+export CGO_CPPFLAGS
+export CGO_LDFLAGS
+endif
+endif
+
+# Linux: some non-system compilers (Nix, Flox, etc.) don't search /usr/include
+# or /usr/lib by default. If system ICU headers exist but the compiler doesn't
+# see them, intentionally let system paths participate in the whole CGO build.
+ifeq ($(shell uname),Linux)
+SYS_USR_INCLUDE ?= /usr/include
+SYS_USR_LIB_ROOT ?= /usr/lib
+SYS_USR_LIB64_ROOT ?= /usr/lib64
+ifneq ($(wildcard $(SYS_USR_INCLUDE)/unicode/uregex.h),)
+ifeq ($(shell $(CC) -E -Wp,-v -x c /dev/null 2>&1 | sed 's/^[[:space:]]*//' | grep -F -x -q "$(SYS_USR_INCLUDE)" && echo yes),)
+SYS_USR_MULTIARCH_CANDIDATES := $(strip $(shell dpkg-architecture -q DEB_HOST_MULTIARCH 2>/dev/null) $(shell $(CC) -print-multiarch 2>/dev/null))
+SYS_USR_LIB_CANDIDATES := $(foreach arch,$(SYS_USR_MULTIARCH_CANDIDATES),$(SYS_USR_LIB_ROOT)/$(arch)) $(SYS_USR_LIB64_ROOT) $(SYS_USR_LIB_ROOT)
+SYS_USR_LIB_DIRS := $(strip $(foreach dir,$(SYS_USR_LIB_CANDIDATES),$(if $(wildcard $(dir)),$(dir))))
+CGO_CPPFLAGS += -I$(SYS_USR_INCLUDE)
+CGO_LDFLAGS += $(addprefix -L,$(SYS_USR_LIB_DIRS))
+export CGO_CPPFLAGS
+export CGO_LDFLAGS
+endif
+endif
+endif
+
+.PHONY: build check check-all check-bd check-docker check-docs check-dolt check-native-dependency-surface check-routed-test-rows check-version-tag lint lint-full lint-new lint-changed fmt-check fmt vet test test-fast-parallel test-fsys-darwin-compile test-pack-registry-live test-native-doltlite-beads test-cmd-gc-process test-cmd-gc-process-shard test-cmd-gc-process-parallel test-worker-core test-worker-core-phase2 test-worker-core-phase2-real-transport setup-worker-inference test-worker-inference test-worker-inference-phase3 test-acceptance test-acceptance-b test-acceptance-c test-acceptance-all test-tutorial-goldens test-tutorial-regression test-tutorial test-integration test-integration-shards test-integration-shards-parallel test-integration-shards-cover test-integration-packages test-integration-packages-cover test-integration-review-formulas test-integration-review-formulas-cover test-integration-review-formulas-basic test-integration-review-formulas-basic-cover test-integration-review-formulas-retries test-integration-review-formulas-retries-cover test-integration-review-formulas-recovery test-integration-review-formulas-recovery-cover test-integration-bdstore test-integration-bdstore-cover test-integration-rest test-integration-rest-cover test-integration-rest-smoke test-integration-rest-smoke-cover test-integration-rest-full test-integration-rest-full-cover test-local-full-parallel test-mcp-mail test-docker test-k8s test-cover cover install install-tools install-buildx setup clean generate check-schema docker-base docker-agent docker-controller docs-dev diagrams-excalidraw dashboard-smoke
 
 ## build: compile gc binary with version metadata
 build:
@@ -74,6 +109,10 @@ check: fmt-check lint vet check-routed-test-rows test
 ## api-404-error, controller-down, escape-hatch).
 check-routed-test-rows:
 	./scripts/check-routed-test-rows.sh
+
+## check-native-dependency-surface: guard native beads dependency and binary growth
+check-native-dependency-surface:
+	bash scripts/check-native-dependency-surface.sh
 
 ## check-bd: verify bd (beads CLI) is installed
 check-bd:
@@ -231,6 +270,8 @@ TEST_ENV = env -i \
 	CLAUDE_CODE_EFFORT_LEVEL="$${CLAUDE_CODE_EFFORT_LEVEL-}" \
 	CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC="$${CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC-}" \
 	OLLAMA_API_KEY="$${OLLAMA_API_KEY-}" \
+	CGO_CPPFLAGS="$${CGO_CPPFLAGS-}" \
+	CGO_LDFLAGS="$${CGO_LDFLAGS-}" \
 	$(EXTRA_TEST_ENV)
 
 ## test: run fast unit tests (skip integration-tagged and GC_FAST_UNIT-gated process tests)
@@ -256,6 +297,20 @@ test-fsys-darwin-compile:
 	@tmp=$$(mktemp -d); \
 	trap 'rm -rf "$$tmp"' EXIT; \
 	$(TEST_ENV) GOOS=darwin GOARCH=arm64 go test -c -o "$$tmp/fsys.test" ./internal/fsys
+
+## test-pack-registry-live: run the opt-in gascity-packs registry canary
+test-pack-registry-live:
+	@if [ -z "$${GC_TEST_GASCITY_PACKS_REGISTRY:-}" ]; then \
+		echo "Set GC_TEST_GASCITY_PACKS_REGISTRY to main or a gascity-packs registry.toml source"; \
+		echo "Example: GC_TEST_GASCITY_PACKS_REGISTRY=main make test-pack-registry-live"; \
+		exit 2; \
+	fi
+	$(TEST_ENV) GC_TEST_GASCITY_PACKS_REGISTRY="$${GC_TEST_GASCITY_PACKS_REGISTRY}" go test ./cmd/gc -run '^TestPackRegistryLiveGascityPacksCatalog$$' -count=1
+	$(TEST_ENV) GC_TEST_GASCITY_PACKS_REGISTRY="$${GC_TEST_GASCITY_PACKS_REGISTRY}" go test -tags acceptance_a -timeout 10m ./test/acceptance -run '^TestPackRegistryLiveImportsEveryCatalogPack$$' -count=1
+
+## test-native-doltlite-beads: compile and run the native DoltLite read-store suite
+test-native-doltlite-beads:
+	$(TEST_ENV) CGO_ENABLED=0 go test -tags gascity_native_beads ./internal/beads -count=1
 
 ## test-cmd-gc-process: run the full non-short cmd/gc suite, including the
 ## process-backed lifecycle coverage routed out of the default fast loop
@@ -307,8 +362,9 @@ test-acceptance:
 	$(TEST_ENV) go test -tags acceptance_a -timeout $(ACCEPTANCE_TIMEOUT) ./test/acceptance/...
 
 ## test-acceptance-b: run Tier B acceptance tests (lifecycle, ~5 min, nightly)
+ACCEPTANCE_B_TIMEOUT ?= 10m
 test-acceptance-b:
-	$(TEST_ENV) go test -tags acceptance_b -timeout 10m -v ./test/acceptance/tier_b/...
+	$(TEST_ENV) go test -tags acceptance_b -timeout $(ACCEPTANCE_B_TIMEOUT) -v ./test/acceptance/tier_b/...
 
 ## test-acceptance-c: run Tier C acceptance tests (real inference, ~30-40 min, manual/nightly)
 test-acceptance-c:
@@ -602,9 +658,9 @@ dashboard-ci: dashboard-check
 	fi
 
 ## spec-ci: regenerate the OpenAPI spec + generated Go client, fail on drift.
-## Used by CI to enforce that internal/api/openapi.json, docs/schema/openapi.{json,txt},
-## docs/schema/events.{json,txt}, and internal/api/genclient/client_gen.go are
-## all in lock-step with Huma.
+## Used by CI to enforce that internal/api/openapi.json, docs/schema JSON
+## artifacts, compatibility .txt mirrors, and internal/api/genclient/client_gen.go
+## are all in lock-step with Huma.
 spec-ci: install-oapi-codegen
 	go run ./cmd/genspec
 	go generate ./internal/api/genclient

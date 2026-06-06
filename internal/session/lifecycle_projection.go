@@ -15,6 +15,9 @@ const (
 	BaseStateNone BaseState = ""
 	// BaseStateCreating means the session is being started.
 	BaseStateCreating BaseState = "creating"
+	// BaseStateStartPending means a start is desired but no provider Start
+	// call has been committed yet.
+	BaseStateStartPending BaseState = "start-pending"
 	// BaseStateActive means the session is running and available.
 	BaseStateActive BaseState = "active"
 	// BaseStateAsleep means the session is intentionally stopped but resumable.
@@ -211,7 +214,18 @@ func (v LifecycleView) HasWakeCause(cause WakeCause) bool {
 	return false
 }
 
-const lifecycleResetPendingReason = "reset-pending"
+const (
+	// LifecycleReasonResetPending is the shared display reason for a live reset request.
+	LifecycleReasonResetPending = "reset-pending"
+	// LifecycleReasonCircuitOpen is the shared display reason for an open session circuit breaker.
+	LifecycleReasonCircuitOpen = "circuit-open"
+	// SessionCircuitStateMetadataKey is the durable metadata key for session circuit breaker state.
+	SessionCircuitStateMetadataKey = "session_circuit_state"
+	// SessionCircuitStateOpen is the durable metadata value for an open session circuit breaker.
+	SessionCircuitStateOpen = "CIRCUIT_OPEN"
+	// SessionCircuitStateClosed is the durable metadata value for a closed session circuit breaker.
+	SessionCircuitStateClosed = "CIRCUIT_CLOSED"
+)
 
 // LifecycleDisplayReason returns the user-facing reason for a non-closed
 // session's current lifecycle posture.
@@ -239,7 +253,7 @@ func LifecycleDisplayReasonWithLiveness(status string, metadata map[string]strin
 		Now:      now,
 	})
 	if lifecycleResetPendingReasonVisible(view, metadata, sessionName, isRunning) {
-		return lifecycleResetPendingReason
+		return LifecycleReasonResetPending
 	}
 	return lifecycleDisplayReasonFromView(view, metadata)
 }
@@ -264,6 +278,9 @@ func lifecycleDisplayReasonFromView(view LifecycleView, metadata map[string]stri
 	}
 	if view.BaseState == BaseStateArchived && !view.ContinuityEligible {
 		return ""
+	}
+	if strings.TrimSpace(metadata[SessionCircuitStateMetadataKey]) == SessionCircuitStateOpen {
+		return LifecycleReasonCircuitOpen
 	}
 	if reason := strings.TrimSpace(metadata["sleep_reason"]); reason != "" {
 		staleTimedQuarantine := (reason == "quarantine" || reason == "context-churn" || reason == "rate_limit") &&
@@ -411,6 +428,8 @@ func projectBaseState(status, storedState, sleepReason string) BaseState {
 	switch strings.TrimSpace(storedState) {
 	case "":
 		return BaseStateNone
+	case string(StateStartPending):
+		return BaseStateStartPending
 	case string(StateCreating):
 		return BaseStateCreating
 	case string(StateActive), string(StateAwake):
@@ -447,6 +466,8 @@ func projectBaseState(status, storedState, sleepReason string) BaseState {
 
 func compatStateForBase(base BaseState) State {
 	switch base {
+	case BaseStateStartPending:
+		return StateStartPending
 	case BaseStateCreating:
 		return StateCreating
 	case BaseStateActive:
@@ -550,12 +571,18 @@ func projectRuntimeProjection(input LifecycleInput, base BaseState, compat State
 	if base == BaseStateNone || base == BaseStateClosed || base == BaseStateClosing {
 		return RuntimeProjectionMissing, compat, false
 	}
-	// #1460: When base is BaseStateCreating, evaluate staleness first.
-	// pending_create_claim represents an in-flight create attempt and is
-	// honored only while the lease (StaleCreatingAfter) is fresh. Once the
-	// lease expires with no live runtime, the claim no longer protects the
-	// bead — otherwise a crashed creator strands the slot indefinitely.
+	if base == BaseStateStartPending {
+		return RuntimeProjectionStartRequested, StateStartPending, false
+	}
+	// #1460: A creating bead with last_woke_at represents an in-flight provider
+	// Start attempt and must age out through the stale-creating path. Legacy
+	// rows that never reached the start boundary have no last_woke_at; project
+	// those back to start-pending so the controller can safely start them.
 	if base == BaseStateCreating {
+		if strings.TrimSpace(input.Metadata["pending_create_claim"]) == "true" &&
+			strings.TrimSpace(input.Metadata["last_woke_at"]) == "" {
+			return RuntimeProjectionStartRequested, StateStartPending, false
+		}
 		if !creatingStateIsStale(input) {
 			if hasWakeCause(wakeCauses, WakeCausePendingCreate) {
 				return RuntimeProjectionStartRequested, StateCreating, false
@@ -568,7 +595,7 @@ func projectRuntimeProjection(input LifecycleInput, base BaseState, compat State
 		return RuntimeProjectionMissing, StateFailedCreate, false
 	}
 	if hasWakeCause(wakeCauses, WakeCausePendingCreate) {
-		return RuntimeProjectionStartRequested, StateCreating, false
+		return RuntimeProjectionStartRequested, StateStartPending, false
 	}
 	return RuntimeProjectionMissing, StateAsleep, shouldResetContinuation(base, input.Metadata, sleepReason)
 }
@@ -650,7 +677,7 @@ func projectDesiredState(input LifecycleInput, terminal bool, blockers []Lifecyc
 
 func countsAgainstCapacity(base BaseState) bool {
 	switch base {
-	case BaseStateCreating, BaseStateActive, BaseStateDraining, BaseStateQuarantined:
+	case BaseStateStartPending, BaseStateCreating, BaseStateActive, BaseStateDraining, BaseStateQuarantined:
 		return true
 	default:
 		return false

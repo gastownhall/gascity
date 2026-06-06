@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"log"
 	"path"
 	"strings"
@@ -138,7 +139,7 @@ func releaseOrphanedPoolAssignments(
 			continue
 		}
 		assignee := strings.TrimSpace(wb.Assignee)
-		template := strings.TrimSpace(wb.Metadata["gc.routed_to"])
+		template := routedToOrLegacyWorkflowTarget(wb)
 		if template == "" {
 			continue
 		}
@@ -179,15 +180,65 @@ func releaseOrphanedPoolAssignments(
 				continue
 			}
 		}
-		if !liveWorkAssignmentStillReleasable(ownerStore, wb.ID, assignee) {
+		if !liveWorkAssignmentStillReleasable(ownerStore, wb.ID, wb.Status, assignee) {
 			continue
 		}
-		if !releaseOrphanedPoolAssignment(ownerStore, wb.ID) {
+		allowsRelease, clearDetached := detachedProbeAllowsOrphanRelease(wb)
+		if !allowsRelease {
+			continue
+		}
+		if !releaseOrphanedPoolAssignment(ownerStore, wb.ID, clearDetached) {
 			continue
 		}
 		released = append(released, releasedPoolAssignment{ID: wb.ID, Index: i})
 	}
 	return released
+}
+
+func detachedProbeAllowsOrphanRelease(wb beads.Bead) (bool, bool) {
+	spec := strings.TrimSpace(wb.Metadata[detachedProbeMetadataKey])
+	if spec == "" {
+		clearDetachedProbeErrorCount(wb.ID)
+		return true, false
+	}
+
+	result := probeDetachedWork(context.Background(), spec)
+	switch result.Status {
+	case detachedProbeAlive:
+		clearDetachedProbeErrorCount(wb.ID)
+		log.Printf("releaseOrphanedPoolAssignments: skipping release: detached probe alive for %s: %s", wb.ID, spec)
+		return false, false
+	case detachedProbeDead:
+		clearDetachedProbeErrorCount(wb.ID)
+		log.Printf("releaseOrphanedPoolAssignments: releasing %s: detached probe dead: %s", wb.ID, spec)
+		return true, true
+	case detachedProbeError, detachedProbeTimeout:
+		count := incrementDetachedProbeErrorCount(wb.ID)
+		if count < detachedProbeErrorThreshold {
+			log.Printf("releaseOrphanedPoolAssignments: detached probe %s for %s: %v (error %d/%d)", result.Status, wb.ID, result.Err, count, detachedProbeErrorThreshold)
+			return false, false
+		}
+		clearDetachedProbeErrorCount(wb.ID)
+		log.Printf("releaseOrphanedPoolAssignments: releasing %s: detached probe %s after %d errors: %v", wb.ID, result.Status, count, result.Err)
+		return true, true
+	default:
+		count := incrementDetachedProbeErrorCount(wb.ID)
+		if count < detachedProbeErrorThreshold {
+			log.Printf("releaseOrphanedPoolAssignments: detached probe unknown result for %s: %q (error %d/%d)", wb.ID, result.Status, count, detachedProbeErrorThreshold)
+			return false, false
+		}
+		clearDetachedProbeErrorCount(wb.ID)
+		return true, true
+	}
+}
+
+func clearDetachedProbeMetadata(store beads.Store, id string) {
+	if store == nil || id == "" {
+		return
+	}
+	if err := store.SetMetadata(id, detachedProbeMetadataKey, ""); err != nil {
+		log.Printf("clearing detached probe metadata for %s: %v", id, err)
+	}
 }
 
 const unresolvedOpenSessionStoreRef = "\x00unresolved"
@@ -245,7 +296,8 @@ func storeForPoolAssignment(cfg *config.City, cityStore beads.Store, rigStores m
 	if cfg == nil || len(rigStores) == 0 {
 		return cityStore
 	}
-	if routed := strings.TrimSpace(wb.Metadata["gc.routed_to"]); routed != "" {
+	routed := routedToOrLegacyWorkflowTarget(wb)
+	if routed != "" {
 		if slash := strings.IndexByte(routed, '/'); slash > 0 {
 			if store := rigStores[routed[:slash]]; store != nil {
 				return store
@@ -267,7 +319,7 @@ func isRecoverableUnassignedInProgressPoolWork(cfg *config.City, wb beads.Bead) 
 	if wb.Status != "in_progress" || strings.TrimSpace(wb.Assignee) != "" {
 		return false
 	}
-	template := strings.TrimSpace(wb.Metadata["gc.routed_to"])
+	template := routedToOrLegacyWorkflowTarget(wb)
 	if template == "" {
 		return false
 	}
@@ -275,7 +327,7 @@ func isRecoverableUnassignedInProgressPoolWork(cfg *config.City, wb beads.Bead) 
 	return agentCfg != nil && agentCfg.SupportsGenericEphemeralSessions()
 }
 
-func releaseOrphanedPoolAssignment(store beads.Store, id string) bool {
+func releaseOrphanedPoolAssignment(store beads.Store, id string, clearDetached bool) bool {
 	if store == nil || id == "" {
 		return false
 	}
@@ -283,7 +335,14 @@ func releaseOrphanedPoolAssignment(store beads.Store, id string) bool {
 		Assignee: stringPtr(""),
 		Status:   stringPtr("open"),
 	}
-	return store.Update(id, opts) == nil
+	if clearDetached {
+		opts.Metadata = map[string]string{detachedProbeMetadataKey: ""}
+	}
+	if err := store.Update(id, opts); err != nil {
+		log.Printf("releaseOrphanedPoolAssignments: releasing orphaned pool assignment %s: %v", id, err)
+		return false
+	}
+	return true
 }
 
 func liveOpenSessionAssignmentExists(store beads.Store, assignee string) bool {
@@ -358,14 +417,24 @@ func directSessionBeadIDCandidates(assignee string) []string {
 	return candidates
 }
 
-func liveWorkAssignmentStillReleasable(store beads.Store, id, assignee string) bool {
+// liveWorkAssignmentStillReleasable confirms the snapshot is not stale
+// before clearing assignee. The expectedStatus must match the snapshot
+// status the caller observed: if the bead has since transitioned (e.g. a
+// concurrent claim moved open→in_progress, or another release moved
+// in_progress→open) the snapshot's release decision is no longer safe.
+// Open status is required for the issue #2793 path — graph.v2 step
+// beads stuck on a dead session's long-form assignee are status=open,
+// not in_progress.
+func liveWorkAssignmentStillReleasable(store beads.Store, id, expectedStatus, assignee string) bool {
 	id = strings.TrimSpace(id)
-	if store == nil || id == "" {
+	expectedStatus = strings.TrimSpace(expectedStatus)
+	if store == nil || id == "" || expectedStatus == "" {
 		return false
 	}
 	work, err := store.List(beads.ListQuery{
-		Status: "in_progress",
-		Live:   true,
+		Status:   expectedStatus,
+		Live:     true,
+		TierMode: beads.TierBoth,
 	})
 	if err != nil {
 		log.Printf("releaseOrphanedPoolAssignments: live work validation failed for %q: %v", id, err)

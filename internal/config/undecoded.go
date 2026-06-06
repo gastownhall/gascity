@@ -12,6 +12,7 @@ import (
 const agentsAliasWarning = "[agents] is a deprecated compatibility alias for [agent_defaults]; rewrite the table name to [agent_defaults]"
 
 var agentDefaultsCompatibilityOverlapKeys = []string{
+	"provider",
 	"model",
 	"wake_mode",
 	"default_sling_formula",
@@ -71,9 +72,6 @@ func validateCityAuthoringSurface(md toml.MetaData) error {
 }
 
 func validatePackAuthoringSurface(md toml.MetaData, source string) error {
-	if md.IsDefined("agent_defaults") {
-		return fmt.Errorf("%s: [agent_defaults] is a city.toml table, not a pack.toml field", source)
-	}
 	if md.IsDefined("agents") {
 		return fmt.Errorf("%s: [agents] is a city.toml compatibility alias for [agent_defaults], not a pack.toml field", source)
 	}
@@ -124,8 +122,6 @@ func agentDefaultsTablesOverlap(md toml.MetaData) bool {
 
 func specializedUndecodedWarning(source, key string) (string, bool) {
 	switch key {
-	case "agent_defaults.provider", "agents.provider":
-		return fmt.Sprintf("%s: %q is not supported in this release wave; keep setting provider per agent in agents/<name>/agent.toml", source, key), true
 	case "agent_defaults.scope", "agents.scope":
 		return fmt.Sprintf("%s: %q is not supported in this release wave; keep setting scope per agent in agents/<name>/agent.toml", source, key), true
 	case "agent_defaults.install_agent_hooks", "agents.install_agent_hooks":
@@ -204,6 +200,7 @@ func knownTOMLKeys() []string {
 		reflect.TypeOf(AgentPatch{}),
 		reflect.TypeOf(AgentOverride{}),
 		reflect.TypeOf(BeadsConfig{}),
+		reflect.TypeOf(BeadPolicyConfig{}),
 		reflect.TypeOf(SessionConfig{}),
 		reflect.TypeOf(MailConfig{}),
 		reflect.TypeOf(EventsConfig{}),

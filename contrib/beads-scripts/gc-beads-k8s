@@ -391,7 +391,21 @@ case "$op" in
     ;;
 
   ready)
-    run_bd ready --json --limit 0 | bd_list_to_gc
+    ready_args=(ready)
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --include-ephemeral)
+          ready_args+=(--include-ephemeral)
+          ;;
+        *)
+          echo "ready: unsupported argument: $1" >&2
+          exit 1
+          ;;
+      esac
+      shift
+    done
+    ready_args+=(--json --limit 0)
+    run_bd "${ready_args[@]}" | bd_list_to_gc
     ;;
 
   children)

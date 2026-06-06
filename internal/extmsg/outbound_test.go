@@ -107,6 +107,9 @@ func TestHandleOutbound_BindingPathUnchanged(t *testing.T) {
 	if len(adapter.publishs) != 1 {
 		t.Fatalf("adapter publishes = %d, want 1", len(adapter.publishs))
 	}
+	if adapter.publishs[0].SessionID != "sess-bound" {
+		t.Fatalf("adapter publish SessionID = %q, want sess-bound", adapter.publishs[0].SessionID)
+	}
 	if result.DeliveryContext == nil {
 		t.Fatalf("DeliveryContext = nil, want recorded")
 	}

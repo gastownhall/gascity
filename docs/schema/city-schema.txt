@@ -176,7 +176,7 @@
         },
         "min_active_sessions": {
           "type": "integer",
-          "description": "MinActiveSessions is the minimum number of sessions to keep alive.\nAgent-level only. Counts against rig/workspace caps. Replaces pool.min."
+          "description": "MinActiveSessions is the minimum number of sessions to keep alive.\nAgent-level only. Counts against rig/workspace caps. Replaces pool.min.\nThis controls pool sessions independently of [[named_session]]\nmode=\"always\"; both produce sessions, and gc doctor reports accidental\ncombinations."
         },
         "scale_check": {
           "type": "string",
@@ -298,7 +298,7 @@
         },
         "fallback": {
           "type": "boolean",
-          "description": "Fallback marks this agent as a fallback definition. During pack\ncomposition, a non-fallback agent with the same name wins silently.\nWhen two fallbacks collide, the first loaded (depth-first) wins.\nSee docs/guides/migrating-to-pack-vnext.md for migration guidance."
+          "description": "Fallback marks this agent as a fallback definition. During pack\ncomposition, a non-fallback agent with the same name wins silently.\nWhen two fallbacks collide, the first loaded (depth-first) wins.\nSee docs/guides/shareable-packs.md for pack layout guidance."
         },
         "depends_on": {
           "items": {
@@ -318,6 +318,14 @@
             "fresh"
           ],
           "description": "WakeMode controls context freshness across sleep/wake cycles.\n\"resume\" (default): reuse provider session key for conversation continuity.\n\"fresh\": start a new provider session on every wake (polecat pattern)."
+        },
+        "mouse_mode": {
+          "type": "string",
+          "enum": [
+            "on",
+            "off"
+          ],
+          "description": "MouseMode controls whether tmux mouse mode is preserved for this agent.\n\"on\" leaves the session's mouse setting alone for human-attached\nsessions; \"off\" or empty preserves the SDK's default mouse-off startup\nbehavior for headless sessions."
         }
       },
       "additionalProperties": false,
@@ -329,6 +337,10 @@
     },
     "AgentDefaults": {
       "properties": {
+        "provider": {
+          "type": "string",
+          "description": "Provider is the default provider name for agents that do not set their\nown provider. It also counts as a configured provider for implicit agent\ninjection."
+        },
         "model": {
           "type": "string",
           "description": "Model is the parsed/composed default model name for agents\n(e.g., \"claude-sonnet-4-6\"), but it is not yet auto-applied at\nruntime. Agents with their own model override would take precedence."
@@ -343,28 +355,28 @@
         },
         "default_sling_formula": {
           "type": "string",
-          "description": "DefaultSlingFormula is the city-level default formula used for agents\nthat inherit [agent_defaults]. Explicit agents only receive this value\nwhen agent_defaults.default_sling_formula is set; implicit multi-session\nconfigs are seeded with \"mol-do-work\" elsewhere when no explicit default is set."
+          "description": "DefaultSlingFormula is the default formula used for agents that inherit\n[agent_defaults]. Explicit agents only receive this value when\nagent_defaults.default_sling_formula is set; implicit multi-session\nconfigs are seeded with \"mol-do-work\" elsewhere when no explicit default is set."
         },
         "allow_overlay": {
           "items": {
             "type": "string"
           },
           "type": "array",
-          "description": "AllowOverlay is parsed and composed as a city-level allowlist for\nsession overlays, but it is not yet inherited onto agents\nautomatically at runtime."
+          "description": "AllowOverlay is parsed and composed as a config-level allowlist for\nsession overlays, but it is not yet inherited onto agents automatically\nat runtime."
         },
         "allow_env_override": {
           "items": {
             "type": "string"
           },
           "type": "array",
-          "description": "AllowEnvOverride is parsed and composed as a city-level allowlist for\nsession env overrides, but it is not yet inherited onto agents\nautomatically at runtime. Names must match ^[A-Z][A-Z0-9_]{0,127}$."
+          "description": "AllowEnvOverride is parsed and composed as a config-level allowlist for\nsession env overrides, but it is not yet inherited onto agents\nautomatically at runtime. Names must match ^[A-Z][A-Z0-9_]{0,127}$."
         },
         "append_fragments": {
           "items": {
             "type": "string"
           },
           "type": "array",
-          "description": "AppendFragments lists named template fragments to auto-append to\n.template.md prompts after rendering. Legacy .md.tmpl prompts are\nstill supported during the transition; plain .md remains inert.\nV2 migration convenience — replaces global_fragments/inject_fragments\nfor city-wide defaults."
+          "description": "AppendFragments lists named template fragments to auto-append to\n.template.md prompts after rendering. Legacy .md.tmpl prompts are\nstill supported during the transition; plain .md remains inert.\nV2 migration convenience — replaces global_fragments/inject_fragments\nfor config-wide defaults."
         },
         "skills": {
           "items": {
@@ -383,7 +395,7 @@
       },
       "additionalProperties": false,
       "type": "object",
-      "description": "AgentDefaults provides city-level agent defaults declared via [agent_defaults] in city.toml."
+      "description": "AgentDefaults provides agent defaults declared via [agent_defaults] in city.toml or pack.toml."
     },
     "AgentOverride": {
       "properties": {
@@ -612,6 +624,14 @@
             "fresh"
           ],
           "description": "WakeMode overrides the agent's wake mode (\"resume\" or \"fresh\")."
+        },
+        "mouse_mode": {
+          "type": "string",
+          "enum": [
+            "on",
+            "off"
+          ],
+          "description": "MouseMode overrides whether tmux mouse mode is preserved (\"on\" or \"off\")."
         },
         "inject_fragments_append": {
           "items": {
@@ -847,6 +867,14 @@
           ],
           "description": "WakeMode overrides the agent's wake mode (\"resume\" or \"fresh\")."
         },
+        "mouse_mode": {
+          "type": "string",
+          "enum": [
+            "on",
+            "off"
+          ],
+          "description": "MouseMode overrides whether tmux mouse mode is preserved (\"on\" or \"off\")."
+        },
         "pre_start_append": {
           "items": {
             "type": "string"
@@ -910,12 +938,56 @@
       ],
       "description": "AgentPatch modifies an existing agent identified by (Dir, Name)."
     },
+    "BeadPolicyConfig": {
+      "properties": {
+        "storage": {
+          "type": "string",
+          "enum": [
+            "history",
+            "no_history",
+            "ephemeral"
+          ],
+          "description": "Storage selects the intended persistence tier: \"history\", \"no_history\",\nor \"ephemeral\". Creation paths apply this incrementally as they opt in."
+        },
+        "delete_after_close": {
+          "type": "string",
+          "description": "DeleteAfterClose deletes matching GC-owned beads after they have been\nclosed for this duration. Accepts Go duration syntax plus whole-day \"d\"\nunits, e.g. \"7d\" or \"1d12h\". Empty means the policy is not GC-managed."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "BeadPolicyConfig holds storage and retention defaults for a named bead use."
+    },
     "BeadsConfig": {
       "properties": {
         "provider": {
           "type": "string",
-          "description": "Provider selects the bead store backend: \"bd\" (default), \"file\",\nor \"exec:\u003cscript\u003e\" for a user-supplied script.",
+          "description": "Provider selects the bead store backend: \"bd\" (default, Dolt-backed),\n\"file\", \"exec:\u003cscript\u003e\" for a user-supplied script, or \"sqlite\" for\nthe built-in coordination store (pure-Go SQLite; use when Dolt is\nunavailable). \"sqlite-cgo\" is a deprecated alias for \"sqlite\".",
           "default": "bd"
+        },
+        "backend": {
+          "type": "string",
+          "description": "Backend selects the bd storage engine when Provider is \"bd\".\nEmpty defaults to \"dolt\"; T3Code uses \"doltlite\" for local dev stores."
+        },
+        "event_hooks": {
+          "type": "boolean",
+          "description": "EventHooks controls installation of the bead event-forwarding hooks\n(.beads/hooks/on_create,on_update,on_close). Defaults to true.\nThis config surface is staged ahead of the native bead-event support;\ncurrent hook behavior remains unchanged until lifecycle code opts in.",
+          "default": true
+        },
+        "bd_compatibility": {
+          "type": "string",
+          "enum": [
+            "bd-1.0.4",
+            "bd-1.0.5"
+          ],
+          "description": "BDCompatibility selects the bd CLI semantics Gas City may rely on.\nEmpty defaults to \"bd-1.0.4\", which keeps claimable work history-backed\nand avoids ready flags whose filtering is incomplete in bd 1.0.4."
+        },
+        "policies": {
+          "additionalProperties": {
+            "$ref": "#/$defs/BeadPolicyConfig"
+          },
+          "type": "object",
+          "description": "Policies defines per-bead-use storage and garbage-collection defaults.\nPolicy names are interpreted by higher-level systems; unknown names are\npreserved so packs can stage future policy classes without breaking load."
         }
       },
       "additionalProperties": false,
@@ -952,13 +1024,6 @@
           },
           "type": "object",
           "description": "Providers defines named provider presets for agent startup."
-        },
-        "packs": {
-          "additionalProperties": {
-            "$ref": "#/$defs/PackSource"
-          },
-          "type": "object",
-          "description": "Packs defines named remote pack sources fetched via git (V1 mechanism)."
         },
         "imports": {
           "additionalProperties": {
@@ -1048,6 +1113,10 @@
           "$ref": "#/$defs/DoctorConfig",
           "description": "Doctor configures gc doctor thresholds and policy toggles\n(worktree size warnings, nested-worktree auto-prune)."
         },
+        "maintenance": {
+          "$ref": "#/$defs/MaintenanceConfig",
+          "description": "Maintenance configures periodic store-maintenance loops."
+        },
         "service": {
           "items": {
             "$ref": "#/$defs/Service"
@@ -1055,9 +1124,13 @@
           "type": "array",
           "description": "Services declares workspace-owned HTTP services mounted on the\ncontroller edge under /svc/{name}."
         },
+        "github": {
+          "$ref": "#/$defs/GitHubConfig",
+          "description": "GitHub configures GitHub-facing repository monitors."
+        },
         "agent_defaults": {
           "$ref": "#/$defs/AgentDefaults",
-          "description": "AgentDefaults provides city-level defaults for agents that don't\noverride them (canonical TOML key: agent_defaults). The runtime\ncurrently applies default_sling_formula and append_fragments; the\nattachment-list fields remain tombstones, and the other fields are\nparsed/composed but not yet inherited automatically."
+          "description": "AgentDefaults provides root city defaults for agents that don't override\nthem (canonical TOML key: agent_defaults). Pack-local defaults use the\nsame table shape in pack.toml. The runtime currently applies provider,\ndefault_sling_formula, and append_fragments; the attachment-list fields\nremain tombstones, and the other fields are parsed/composed but not yet\ninherited automatically."
         },
         "pricing": {
           "items": {
@@ -1095,11 +1168,12 @@
       "properties": {
         "formula_v2": {
           "type": "boolean",
-          "description": "FormulaV2 enables formula v2 graph workflow infrastructure:\nthe control-dispatcher implicit agent, graph.v2 formula compilation,\nand batch graph-apply bead creation. Requires bd with --graph support.\nDefault: false (opt-in while the feature stabilizes)."
+          "description": "FormulaV2 enables formula compiler v2 workflow infrastructure: the\ncontrol-dispatcher implicit agent and on-demand named session,\ncompiler-v2 workflow compilation, and batch graph-apply bead creation.\nThe implicit dispatcher follows normal session idle-sleep policy.\nRequires bd with --graph support. Default: true. Set false only for cities\npinned to formula compiler v1.",
+          "default": true
         },
         "graph_workflows": {
           "type": "boolean",
-          "description": "GraphWorkflows is the deprecated predecessor of FormulaV2. Retained\nfor backwards compatibility: if graph_workflows is true in TOML and\nformula_v2 is not set, FormulaV2 is promoted automatically during\nparsing."
+          "description": "GraphWorkflows is the deprecated predecessor of FormulaV2. Retained\nfor backwards compatibility as an alias. Explicit formula_v2 wins."
         },
         "patrol_interval": {
           "type": "string",
@@ -1144,6 +1218,11 @@
           "description": "DoltStopTimeout is the SIGTERM→SIGKILL grace period for the managed dolt\nsubprocess during stop, unregister, restart, and startup/recovery\ncleanup. Independent of ShutdownTimeout (which gates agent drain) so a\nslow session drain cannot steal dolt's flush window. Duration string\n(e.g., \"30s\", \"1m\"). A too-short value risks SIGKILL during a journal\nindex update or manifest rotation, which corrupts dolt's chunk journal\n(see gastownhall/gascity#2090). Defaults to \"30s\", which absorbs the\nlongest observed flush window on commodity SSDs without unduly delaying\nunregister. Set to \"0s\" for immediate SIGKILL with no grace. Negative\nvalues are rejected at config load. Note: when a city is stopped via the\ncontroller (`gc stop` while a controller is running), the standalone\ncontroller-stop wait budget is `shutdown_timeout` + 15s (20s at the\ndefault `shutdown_timeout` of \"5s\"); a `dolt_stop_timeout` larger than\nthat budget can be cut short on that path even though the direct\nstop/unregister path always honors the full grace.",
           "default": "30s"
         },
+        "dolt_start_address_in_use_retry_window": {
+          "type": "string",
+          "description": "DoltStartAddressInUseRetryWindow is how long the managed dolt start\npath waits on the originally requested port when bind fails with\n\"address already in use\" before falling back to a higher port. The\ncommon cause is a TIME_WAIT socket left by an abrupt stop of a sibling\ndolt subprocess (external SIGTERM, supervisor restart, OOM kill); on\nLinux the listening-socket slot typically frees within ~30s. Falling\nback immediately publishes the rebound port to provider state, after\nwhich `recoverManagedDoltShouldReuseExisting` keeps accepting the\nrebound instance as canonical and consumers hardcoded to the original\nport stay broken until the orphan is killed. Duration string (e.g.,\n\"30s\", \"1m\"). Set to \"0s\" to disable the retry (legacy fall-back-\nimmediately behavior). Defaults to \"30s\". Each port is waited on at\nmost once per startManagedDoltProcessWithOptions invocation, so the\nworst-case wall time per startup is bounded by\n(DoltStartAddressInUseRetryWindow + per-attempt-startup) × min(5,\ndistinct-ports-tried) rather than DoltStartAddressInUseRetryWindow × 5.\nNegative values are rejected at config load.",
+          "default": "30s"
+        },
         "wisp_gc_interval": {
           "type": "string",
           "description": "WispGCInterval is how often wisp GC runs. Duration string (e.g., \"5m\", \"1h\").\nWisp GC is disabled unless both WispGCInterval and WispTTL are set."
@@ -1171,7 +1250,7 @@
         },
         "max_wakes_per_tick": {
           "type": "integer",
-          "description": "MaxWakesPerTick caps how many sessions the reconciler may start in a\nsingle tick. Nil (unset) defaults to 5. Values \u003c= 0 are treated as the\ndefault — set a positive integer to override.",
+          "description": "MaxWakesPerTick caps how many sessions the reconciler may start in a\nsingle tick. Fresh generic pool session-bead creation uses the same\nbudget so the controller does not materialize more ordinary pool sessions\nthan it can wake. Bounded dependency-floor prerequisites are exempt.\nNil (unset) defaults to 5. Values \u003c= 0 are treated as the default — set a\npositive integer to override.",
           "default": 5
         },
         "nudge_dispatcher": {
@@ -1188,10 +1267,24 @@
           "description": "AutoRestartOnDrift controls whether `gc start` automatically restarts\nthe supervisor when it detects the running supervisor's binary or\npack snapshot has drifted from on-disk state. Nil (unset) defaults\nto true — operators get the correct-by-default behavior. Set to\nfalse as a global kill switch (e.g., for production cities where a\nrebuild on the host should not auto-restart the supervisor).",
           "default": true
         },
+        "auto_reap_closed_bead_worktrees": {
+          "type": "boolean",
+          "description": "AutoReapClosedBeadWorktrees controls whether the reconciler patrol\nautomatically removes per-bead git worktrees once their associated\nwork bead reaches closed status. Only worktrees with a clean working\ntree, no unpushed commits, and no stashes are removed; unsafe worktrees\nare logged as warnings and left in place for operator review. Session\nhome directories (agent template directories) are never touched.\nDefaults to false. Set to true to enable automated worktree cleanup.",
+          "default": false
+        },
         "start_ready_timeout": {
           "type": "string",
           "description": "StartReadyTimeout is how long `gc start` and `gc register` wait for\nthe supervisor to report the city as Running. Cities with many\nregistered or adopted sessions take longer to start because the\nper-tick wake budget (max_wakes_per_tick) throttles startup: wall\ntime to wake N sessions is roughly ceil(N / max_wakes_per_tick) *\npatrol_interval. At the defaults (5 wakes / 30s), ~40 sessions\nneed ~4 minutes. Duration string (e.g., \"5m\", \"10m\"). Defaults to\nDefaultStartReadyTimeout (5m). When set, this value replaces the\ndefault start/register budget; [session].startup_timeout may still\nextend the effective wait for a slow single session.",
           "default": "5m"
+        },
+        "tick_debounce": {
+          "type": "string",
+          "description": "TickDebounce coalesces bursty event-driven ticks (pokeCh,\ncontrolDispatcherCh) within this window. A first event in a quiet\nperiod arms a timer; subsequent events arriving before the timer\nfires are dropped (the single delayed tick re-reads authoritative\nstate covering all collapsed events). Zero (the default) disables\ndebouncing — each event fires its own tick, matching pre-existing\nbehavior. Duration string (e.g., \"250ms\", \"500ms\"). Trade-off:\nadds tick latency up to this value when set."
+        },
+        "auto_prune_worker_dir": {
+          "type": "boolean",
+          "description": "AutoPruneWorkerDir controls whether the reconciler removes a\npool-managed session's worker_dir (agent worktree) after the session\nbead is closed. Removal is gated on: path lives under the city's\n.gc/worktrees/ tree, clean working tree, no unpushed commits, no\nstashed work. Nil (unset) defaults to true so pool worktrees do not\naccumulate without bound across pool recycles. Set to false to\nretain worktrees for post-session diagnostics.",
+          "default": true
         }
       },
       "additionalProperties": false,
@@ -1214,6 +1307,13 @@
           "type": "boolean",
           "description": "NestedWorktreePrune escalates the nested-worktree-prune check\nfrom warning to error severity when safely-prunable nested\nworktrees are present, so CI / scripted doctor runs fail until\nthe operator runs `gc doctor --fix`. Actual removal still\nrequires --fix; this flag does not auto-prune. Safety is\nenforced by mechanical checks (no uncommitted changes, no\nunpushed commits, no stashes) — never by role identity.",
           "default": false
+        },
+        "check": {
+          "items": {
+            "$ref": "#/$defs/LocalDoctorCheck"
+          },
+          "type": "array",
+          "description": "Checks holds city-local inline doctor checks declared via\n[[doctor.check]] in city.toml."
         }
       },
       "additionalProperties": false,
@@ -1236,11 +1336,51 @@
           "type": "integer",
           "description": "ArchiveLevel controls Dolt's auto_gc archive aggressiveness.\n0 disables archive compaction (lower CPU on startup).\n1 enables archive compaction (higher CPU on startup).\nnil (omitted) defaults to 0.",
           "default": 0
+        },
+        "max_connections": {
+          "type": "integer",
+          "description": "MaxConnections overrides the managed Dolt listener max_connections.\n0 means use the managed default.",
+          "default": 256
+        },
+        "read_timeout_millis": {
+          "type": "integer",
+          "description": "ReadTimeoutMillis overrides the managed Dolt listener read_timeout_millis.\n0 means use the managed default.",
+          "default": 30000
+        },
+        "write_timeout_millis": {
+          "type": "integer",
+          "description": "WriteTimeoutMillis overrides the managed Dolt listener write_timeout_millis.\n0 means use the managed default.",
+          "default": 300000
         }
       },
       "additionalProperties": false,
       "type": "object",
       "description": "DoltConfig holds optional dolt server overrides."
+    },
+    "DoltMaintenance": {
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Enabled toggles the maintenance loop. Defaults to false (opt-in)."
+        },
+        "interval": {
+          "type": "string",
+          "description": "Interval is the cadence between maintenance runs as a duration\nstring (e.g., \"168h\"). Defaults to 168h (weekly).",
+          "default": "168h"
+        },
+        "alert_to": {
+          "type": "string",
+          "description": "AlertTo is the agent identity to mail on failure (e.g.,\n\"gascity/mayor\"). Empty disables alert mail."
+        },
+        "gc_timeout": {
+          "type": "string",
+          "description": "GCTimeout is the ceiling for CALL DOLT_GC() as a duration string.\nDefaults to 10m.",
+          "default": "10m"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "DoltMaintenance configures the periodic Dolt store maintenance loop."
     },
     "EventsConfig": {
       "properties": {
@@ -1294,15 +1434,171 @@
       "type": "object",
       "description": "FormulasConfig holds legacy formula directory settings."
     },
+    "GitHubConfig": {
+      "properties": {
+        "pr_monitor": {
+          "items": {
+            "$ref": "#/$defs/GitHubPRMonitor"
+          },
+          "type": "array",
+          "description": "PRMonitors declares GitHub pull-request readiness monitors."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "GitHubConfig groups GitHub-facing repository monitor declarations."
+    },
+    "GitHubPRMonitor": {
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Name is the stable monitor identity used by patches and diagnostics."
+        },
+        "owner": {
+          "type": "string",
+          "description": "Owner is the GitHub repository owner or organization."
+        },
+        "repo": {
+          "type": "string",
+          "description": "Repo is the GitHub repository name."
+        },
+        "base_branches": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "BaseBranches lists the base branches this monitor owns."
+        },
+        "rig": {
+          "type": "string",
+          "description": "Rig is the Gas City rig that owns repair work for this repository."
+        },
+        "notify": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "Notify lists session or mail recipients for readiness notifications."
+        },
+        "repair_route": {
+          "type": "string",
+          "description": "RepairRoute is the operator-supplied route target for repair work."
+        },
+        "webhook_secret_env": {
+          "type": "string",
+          "description": "WebhookSecretEnv is the environment variable containing the webhook\nHMAC secret. The secret value itself must not be stored in city.toml."
+        },
+        "webhook_secret_key": {
+          "type": "string",
+          "description": "WebhookSecretKey is an optional stable key for identifying the webhook\nsecret during rotation. When omitted, WebhookSecretEnv is the key."
+        },
+        "poll_interval": {
+          "type": "string",
+          "description": "PollInterval optionally enables bounded polling/backfill cadence."
+        },
+        "merge_queue": {
+          "type": "string",
+          "enum": [
+            "ignore",
+            "observe",
+            "repair"
+          ],
+          "description": "MergeQueuePolicy controls merge-queue signal handling. Empty defaults\nto \"observe\"; valid values are \"ignore\", \"observe\", and \"repair\"."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "name",
+        "owner",
+        "repo",
+        "base_branches",
+        "rig",
+        "repair_route"
+      ],
+      "description": "GitHubPRMonitor declares how one repository/base-branch set is monitored and where durable repair work should be routed when readiness fails."
+    },
+    "GitHubPRMonitorPatch": {
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Name is the monitor identity to patch."
+        },
+        "owner": {
+          "type": "string",
+          "description": "Owner overrides the GitHub repository owner or organization."
+        },
+        "repo": {
+          "type": "string",
+          "description": "Repo overrides the GitHub repository name."
+        },
+        "base_branches": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "BaseBranches replaces the monitored base branch list. An empty list\nclears the field and will fail validation unless another patch fills it."
+        },
+        "rig": {
+          "type": "string",
+          "description": "Rig overrides the owning rig."
+        },
+        "notify": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "Notify replaces notification recipients. An empty list clears recipients."
+        },
+        "notify_append": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "NotifyAppend appends notification recipients after Notify replacement."
+        },
+        "repair_route": {
+          "type": "string",
+          "description": "RepairRoute overrides the repair route target."
+        },
+        "webhook_secret_env": {
+          "type": "string",
+          "description": "WebhookSecretEnv overrides the env var containing the webhook secret."
+        },
+        "webhook_secret_key": {
+          "type": "string",
+          "description": "WebhookSecretKey overrides the stable webhook secret key."
+        },
+        "poll_interval": {
+          "type": "string",
+          "description": "PollInterval overrides the optional polling cadence."
+        },
+        "merge_queue": {
+          "type": "string",
+          "enum": [
+            "ignore",
+            "observe",
+            "repair"
+          ],
+          "description": "MergeQueuePolicy overrides merge-queue signal handling."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "name"
+      ],
+      "description": "GitHubPRMonitorPatch modifies an existing GitHub PR readiness monitor by name."
+    },
     "Import": {
       "properties": {
         "source": {
           "type": "string",
-          "description": "Source is the pack location: a local relative path (e.g.,\n\"./assets/imports/gastown\") or a remote URL (e.g.,\n\"github.com/gastownhall/gastown\"). Local paths have no version."
+          "description": "Source is the durable authored pack location: a local path, a remote git\nURL, or a dereferenceable GitHub tree URL for a pack below a repository\nroot, such as \"https://github.com/org/repo/tree/main/packs/foo\". Registry\nhandles are lookup-only in this release wave; authored [imports.*]\nentries store the resolved source plus optional version."
         },
         "version": {
           "type": "string",
-          "description": "Version is a semver constraint for remote imports (e.g., \"^1.2\").\nEmpty for local paths. \"sha:\u003chex\u003e\" for commit pinning."
+          "description": "Version is an optional semver constraint for git-backed imports (e.g.,\n\"^1.2\"). Empty for local paths. \"sha:\u003chex\u003e\" pins a specific commit."
         },
         "export": {
           "type": "boolean",
@@ -1372,16 +1668,58 @@
       "type": "object",
       "description": "K8sConfig holds native K8s session provider settings."
     },
+    "LocalDoctorCheck": {
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Name is the bare check name. The SDK injects the \"local:\" prefix;\ndo not include it here."
+        },
+        "script": {
+          "type": "string",
+          "description": "Script is the path to the check script, relative to the city root.\nExecution registration enforces containment within the city directory."
+        },
+        "description": {
+          "type": "string",
+          "description": "Description is optional human-readable text shown in verbose output."
+        },
+        "fix": {
+          "type": "string",
+          "description": "Fix is the optional path to a remediation script, relative to the\ncity root."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "name",
+        "script"
+      ],
+      "description": "LocalDoctorCheck is a city-local doctor check declared inline in city.toml via [[doctor.check]]."
+    },
     "MailConfig": {
       "properties": {
         "provider": {
           "type": "string",
           "description": "Provider selects the mail backend: \"fake\", \"fail\",\n\"exec:\u003cscript\u003e\", or \"\" (default: beadmail)."
+        },
+        "retention_ttl": {
+          "type": "string",
+          "description": "RetentionTTL is how long read messages are retained before purge. Empty\nor \"0\" disables read-message retention."
         }
       },
       "additionalProperties": false,
       "type": "object",
       "description": "MailConfig holds mail provider settings."
+    },
+    "MaintenanceConfig": {
+      "properties": {
+        "dolt": {
+          "$ref": "#/$defs/DoltMaintenance",
+          "description": "Dolt configures the weekly Dolt store maintenance loop\n(CALL DOLT_GC + backup snapshot)."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "MaintenanceConfig groups periodic store-maintenance subsections."
     },
     "ModelPricing": {
       "properties": {
@@ -1391,7 +1729,7 @@
         },
         "model": {
           "type": "string",
-          "description": "Model is the provider-specific model identifier (e.g. \"claude-opus-4-7\")."
+          "description": "Model is the provider-specific model identifier (e.g. \"claude-opus-4-8\")."
         },
         "tier": {
           "$ref": "#/$defs/Tier",
@@ -1440,7 +1778,7 @@
             "on_demand",
             "always"
           ],
-          "description": "Mode controls controller behavior for this named session.\n\"on_demand\" (default): reserve identity and materialize when work or\nan explicit reference requires it.\n\"always\": keep the canonical session controller-managed."
+          "description": "Mode controls when the controller ensures this named session is live.\n\"on_demand\" (default): reserve identity and materialize when work or\nan explicit reference requires it.\n\"always\": keep the canonical session controller-managed.\nNote: mode=\"always\" is independent of min_active_sessions; both produce\nsessions, and gc doctor reports accidental duplicate-pool combinations."
         }
       },
       "additionalProperties": false,
@@ -1449,6 +1787,33 @@
         "template"
       ],
       "description": "NamedSession defines a canonical persistent session backed by an agent template."
+    },
+    "NamedSessionPatch": {
+      "properties": {
+        "dir": {
+          "type": "string",
+          "description": "Dir is the targeting key. Empty targets a city-scoped named session."
+        },
+        "name": {
+          "type": "string",
+          "description": "Name is the canonical named-session identity. Use this to disambiguate\nsessions that share the same template."
+        },
+        "template": {
+          "type": "string",
+          "description": "Template is a compatibility targeting key when Name is omitted."
+        },
+        "mode": {
+          "type": "string",
+          "enum": [
+            "on_demand",
+            "always"
+          ],
+          "description": "Mode overrides the named-session controller mode (\"on_demand\" or \"always\")."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "NamedSessionPatch modifies an existing named session identified by canonical name or, for compatibility, by an unambiguous template."
     },
     "OptionChoice": {
       "properties": {
@@ -1531,6 +1896,17 @@
         "timeout": {
           "type": "string",
           "description": "Timeout overrides the per-order timeout. Go duration string."
+        },
+        "idempotent": {
+          "type": "boolean",
+          "description": "Idempotent overrides whether the order's dispatch is safe to repeat.\nIdempotent orders fail open when the open-work gate times out (#2893)."
+        },
+        "env": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object",
+          "description": "Env adds or overrides environment variables exported into an exec\norder's child process."
         }
       },
       "additionalProperties": false,
@@ -1538,7 +1914,7 @@
       "required": [
         "name"
       ],
-      "description": "OrderOverride modifies a scanned order's scheduling fields."
+      "description": "OrderOverride modifies a scanned order's scheduling fields and exec env."
     },
     "OrdersConfig": {
       "properties": {
@@ -1588,28 +1964,6 @@
       "type": "object",
       "description": "PackRigDefaults holds the [defaults.rig] block — defaults applied to rigs created from this pack."
     },
-    "PackSource": {
-      "properties": {
-        "source": {
-          "type": "string",
-          "description": "Source is the git repository URL."
-        },
-        "ref": {
-          "type": "string",
-          "description": "Ref is the git ref to checkout (branch, tag, or commit). Defaults to HEAD."
-        },
-        "path": {
-          "type": "string",
-          "description": "Path is a subdirectory within the repo containing the pack files."
-        }
-      },
-      "additionalProperties": false,
-      "type": "object",
-      "required": [
-        "source"
-      ],
-      "description": "PackSource defines a remote pack repository."
-    },
     "Patches": {
       "properties": {
         "agent": {
@@ -1618,6 +1972,13 @@
           },
           "type": "array",
           "description": "Agents targets agents by (dir, name)."
+        },
+        "named_session": {
+          "items": {
+            "$ref": "#/$defs/NamedSessionPatch"
+          },
+          "type": "array",
+          "description": "NamedSessions targets configured named sessions by (dir, template)."
         },
         "rigs": {
           "items": {
@@ -1632,6 +1993,13 @@
           },
           "type": "array",
           "description": "Providers targets providers by name."
+        },
+        "github_pr_monitor": {
+          "items": {
+            "$ref": "#/$defs/GitHubPRMonitorPatch"
+          },
+          "type": "array",
+          "description": "GitHubPRMonitors targets GitHub PR readiness monitors by name."
         }
       },
       "additionalProperties": false,
@@ -2234,6 +2602,10 @@
           "description": "StartupTimeout is how long to wait for each agent's Start() call before\ntreating it as failed. Duration string (e.g., \"60s\", \"2m\"). Defaults to \"60s\".",
           "default": "60s"
         },
+        "progress_stall_timeout": {
+          "type": "string",
+          "description": "ProgressStallTimeout, when set, enables progress-aware session recycling:\na desired, alive, claim-less session on a healthy provider whose last\nprovider-reported activity is older than this duration is restarted fresh.\nSuch a session has likely parked (e.g. its turn ended on a provider auth\nerror) and will not self-recover. Set this above the longest legitimate\nalive-idle period for the city; values below 5m are clamped to 5m.\nDuration string (e.g. \"30m\"). Unset/zero disables it."
+        },
         "socket": {
           "type": "string",
           "description": "Socket specifies the tmux socket name for per-city isolation.\nWhen set, all tmux commands use \"tmux -L \u003csocket\u003e\" to connect to\na dedicated server. When empty, defaults to the city name\n(workspace.name) — giving every city its own tmux server\nautomatically. Set explicitly to override."
@@ -2363,5 +2735,5 @@
     }
   },
   "title": "Gas City Configuration",
-  "description": "Schema for city.toml — the PackV2 deployment file for a Gas City instance. Pack definitions live in pack.toml and conventional pack directories such as agents/, formulas/, orders/, and commands/. Use [imports.*] for PackV2 composition; legacy includes, [packs.*], and [[agent]] fields remain visible for migration compatibility.\n\n\u003e **PackV2 format source of truth:** The public PackV2 format and loader semantics are specified in [Gas City Pack Specification (2.0)](/specs/pack-spec)."
+  "description": "Schema for city.toml — the PackV2 deployment file for a Gas City instance. Pack definitions live in pack.toml and conventional pack directories such as agents/, formulas/, orders/, and commands/. Use [imports.*] for PackV2 composition; legacy includes and [[agent]] fields remain visible for migration compatibility. Legacy [packs.*] entries are still accepted by the runtime for migration/fetch compatibility but are intentionally omitted from this public schema.\n\n\u003e **PackV2 format source of truth:** The public PackV2 format and loader semantics are specified in [Gas City Pack Specification (2.0)](/specs/pack-spec)."
 }

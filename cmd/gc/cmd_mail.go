@@ -20,6 +20,7 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/extmsg"
 	"github.com/gastownhall/gascity/internal/mail"
+	"github.com/gastownhall/gascity/internal/mail/beadmail"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/telemetry"
 	"github.com/spf13/cobra"
@@ -31,9 +32,11 @@ import (
 type nudgeFunc func(recipient string) error
 
 const (
-	mailInjectMaxMessages     = 3
-	mailInjectBodyPreviewSize = 240
-	mailInjectPreviewScanSize = 4096
+	mailInjectMaxMessages          = 3
+	mailInjectBodyPreviewSize      = 240
+	mailInjectPreviewScanSize      = 4096
+	mailCheckDegradedNotice        = "[mail check degraded — store slow; run 'gc mail inbox' when the factory load drops]"
+	mailCheckPartialDegradedNotice = "[mail check degraded — partial provider read; run 'gc mail inbox' after the provider recovers]"
 )
 
 type mailInboxJSONResult struct {
@@ -74,6 +77,7 @@ type mailActionResult struct {
 	Count         *int                 `json:"count,omitempty"`
 	AlreadyDone   bool                 `json:"already_done,omitempty"`
 	Notified      bool                 `json:"notified,omitempty"`
+	DryRun        bool                 `json:"dry_run,omitempty"`
 }
 
 type mailMessageSummary struct {
@@ -83,6 +87,19 @@ type mailMessageSummary struct {
 	Subject  string `json:"subject,omitempty"`
 	ThreadID string `json:"thread_id,omitempty"`
 	ReplyTo  string `json:"reply_to,omitempty"`
+}
+
+type mailArchiveSelectOptions struct {
+	Recipient       string
+	AllRecipients   bool
+	From            string
+	SubjectPrefix   string
+	SubjectContains string
+	EmptyBody       bool
+	Limit           int
+	IncludeRead     bool
+	DryRun          bool
+	CaseInsensitive bool
 }
 
 func summarizeMailMessage(m mail.Message) mailMessageSummary {
@@ -144,20 +161,32 @@ hooks to deliver mail notifications into agent prompts.`,
 
 func newMailArchiveCmd(stdout, stderr io.Writer) *cobra.Command {
 	var jsonOut bool
+	opts := mailArchiveSelectOptions{Limit: 100, CaseInsensitive: true}
 	cmd := &cobra.Command{
 		Use:   "archive <id>...",
 		Short: "Archive one or more messages without reading them",
-		Long: `Close one or more message beads without displaying their contents.
+		Long: `Remove one or more message beads without displaying their contents.
 
-Use this to dismiss messages without reading them. Each message is marked
-as closed and will no longer appear in mail check or inbox results. When
-multiple IDs are passed, they are archived in a single batch round-trip.`,
+Use this to dismiss messages without reading them. Each message is removed
+and will no longer appear in mail check or inbox results. When multiple IDs
+are passed, they are archived in input order.
+
+For large advisory backlogs, use --to or --all-recipients with
+--subject-prefix, --subject-contains, or --from to archive a bounded matching
+slice without enumerating IDs by hand.`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
 			code := 0
-			if jsonOut {
+			switch {
+			case opts.hasSelector():
+				if jsonOut {
+					code = cmdMailArchiveSelectedJSON(args, opts, true, stdout, stderr)
+				} else {
+					code = cmdMailArchiveSelectedJSON(args, opts, false, stdout, stderr)
+				}
+			case jsonOut:
 				code = cmdMailArchiveJSON(args, true, stdout, stderr)
-			} else {
+			default:
 				code = cmdMailArchive(args, stdout, stderr)
 			}
 			if code != 0 {
@@ -167,6 +196,15 @@ multiple IDs are passed, they are archived in a single batch round-trip.`,
 		},
 	}
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit JSONL result")
+	cmd.Flags().StringVar(&opts.Recipient, "to", "", "archive matching unread messages addressed to this recipient")
+	cmd.Flags().BoolVar(&opts.AllRecipients, "all-recipients", false, "archive matching messages across all recipients")
+	cmd.Flags().StringVar(&opts.From, "from", "", "archive matching unread messages from this exact sender")
+	cmd.Flags().StringVar(&opts.SubjectPrefix, "subject-prefix", "", "archive matching unread messages whose subject starts with this text")
+	cmd.Flags().StringVar(&opts.SubjectContains, "subject-contains", "", "archive matching unread messages whose subject contains this text")
+	cmd.Flags().BoolVar(&opts.EmptyBody, "empty-body", false, "only archive matching messages whose body is empty")
+	cmd.Flags().IntVar(&opts.Limit, "limit", opts.Limit, "maximum matching messages to archive in this run")
+	cmd.Flags().BoolVar(&opts.IncludeRead, "include-read", false, "include read-but-open messages when selecting by filter")
+	cmd.Flags().BoolVar(&opts.DryRun, "dry-run", false, "list matching messages without archiving them")
 	return cmd
 }
 
@@ -184,12 +222,131 @@ func cmdMailArchiveJSON(args []string, jsonOut bool, stdout, stderr io.Writer) i
 	return doMailArchiveJSON(mp, rec, args, jsonOut, stdout, stderr)
 }
 
-// doMailArchive closes one or more message beads. For a single ID the
+func (o mailArchiveSelectOptions) hasSelector() bool {
+	return strings.TrimSpace(o.Recipient) != "" ||
+		o.AllRecipients ||
+		strings.TrimSpace(o.From) != "" ||
+		strings.TrimSpace(o.SubjectPrefix) != "" ||
+		strings.TrimSpace(o.SubjectContains) != "" ||
+		o.EmptyBody ||
+		o.IncludeRead ||
+		o.DryRun
+}
+
+func (o mailArchiveSelectOptions) hasContentFilter() bool {
+	return strings.TrimSpace(o.From) != "" ||
+		strings.TrimSpace(o.SubjectPrefix) != "" ||
+		strings.TrimSpace(o.SubjectContains) != ""
+}
+
+func cmdMailArchiveSelectedJSON(args []string, opts mailArchiveSelectOptions, jsonOut bool, stdout, stderr io.Writer) int {
+	mp, code := openCityMailProvider(stderr, "gc mail archive")
+	if mp == nil {
+		return code
+	}
+	rec := openCityRecorder(stderr)
+	return doMailArchiveSelectedJSON(mp, rec, args, opts, jsonOut, stdout, stderr)
+}
+
+// doMailArchive archives one or more message beads. For a single ID the
 // behavior matches the pre-batch CLI byte-for-byte; for two or more IDs it
-// delegates to mp.ArchiveMany for a single-round-trip close and prints one
-// result line per id.
+// delegates to mp.ArchiveMany and prints one result line per id.
 func doMailArchive(mp mail.Provider, rec events.Recorder, args []string, stdout, stderr io.Writer) int {
 	return doMailArchiveJSON(mp, rec, args, false, stdout, stderr)
+}
+
+func doMailArchiveSelected(mp mail.Provider, rec events.Recorder, opts mailArchiveSelectOptions, stdout, stderr io.Writer) int {
+	return doMailArchiveSelectedJSON(mp, rec, nil, opts, false, stdout, stderr)
+}
+
+type archiveMatchingProvider interface {
+	ArchiveCandidates(beadmail.ArchiveFilter) ([]mail.Message, error)
+	ArchiveMatching(beadmail.ArchiveFilter) ([]mail.Message, []mail.ArchiveResult, error)
+}
+
+func doMailArchiveSelectedJSON(mp mail.Provider, rec events.Recorder, args []string, opts mailArchiveSelectOptions, jsonOut bool, stdout, stderr io.Writer) int {
+	if len(args) > 0 {
+		fmt.Fprintln(stderr, "gc mail archive: message IDs cannot be combined with --to/--from/--subject filters") //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	opts.Recipient = strings.TrimSpace(opts.Recipient)
+	if opts.Recipient != "" && opts.AllRecipients {
+		fmt.Fprintln(stderr, "gc mail archive: choose either --to or --all-recipients") //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if opts.Recipient == "" && !opts.AllRecipients {
+		fmt.Fprintln(stderr, "gc mail archive: --to or --all-recipients is required when using archive filters") //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if !opts.hasContentFilter() {
+		fmt.Fprintln(stderr, "gc mail archive: use --from, --subject-prefix, or --subject-contains to avoid archiving unrelated mail") //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if opts.Limit <= 0 {
+		fmt.Fprintln(stderr, "gc mail archive: --limit must be greater than zero") //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	archiver, ok := mp.(archiveMatchingProvider)
+	if !ok {
+		fmt.Fprintln(stderr, "gc mail archive: filtered archive requires the beadmail provider") //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	recipients := []string(nil)
+	if !opts.AllRecipients {
+		recipients = []string{opts.Recipient}
+	}
+	filter := beadmail.ArchiveFilter{
+		Recipients:      recipients,
+		From:            opts.From,
+		SubjectPrefix:   opts.SubjectPrefix,
+		SubjectContains: opts.SubjectContains,
+		EmptyBody:       opts.EmptyBody,
+		IncludeRead:     opts.IncludeRead,
+		CaseInsensitive: opts.CaseInsensitive,
+		Limit:           opts.Limit,
+	}
+	if opts.DryRun {
+		matches, err := archiver.ArchiveCandidates(filter)
+		if err != nil {
+			telemetry.RecordMailOp(context.Background(), "archive", err)
+			fmt.Fprintf(stderr, "gc mail archive: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		return renderMailArchiveSelection(matches, nil, opts, jsonOut, stdout, stderr)
+	}
+	matches, results, err := archiver.ArchiveMatching(filter)
+	if err != nil {
+		telemetry.RecordMailOp(context.Background(), "archive", err)
+		fmt.Fprintf(stderr, "gc mail archive: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	exit := 0
+	for _, r := range results {
+		switch {
+		case r.Err == nil:
+			telemetry.RecordMailOp(context.Background(), "archive", nil)
+			rec.Record(events.Event{
+				Type:    events.MailArchived,
+				Actor:   eventActor(),
+				Subject: r.ID,
+				Payload: mailEventPayload(nil),
+			})
+		case errors.Is(r.Err, mail.ErrAlreadyArchived):
+			// Candidate selection returns open messages, but preserve the
+			// idempotent batch contract if a concurrent archive wins the race.
+		default:
+			telemetry.RecordMailOp(context.Background(), "archive", r.Err)
+			fmt.Fprintf(stderr, "gc mail archive %s: %v\n", r.ID, r.Err) //nolint:errcheck // best-effort stderr
+			exit = 1
+		}
+	}
+	if jsonOut && exit != 0 {
+		return exit
+	}
+	if renderExit := renderMailArchiveSelection(matches, results, opts, jsonOut, stdout, stderr); renderExit != 0 && exit == 0 {
+		exit = renderExit
+	}
+	return exit
 }
 
 func doMailArchiveJSON(mp mail.Provider, rec events.Recorder, args []string, jsonOut bool, stdout, stderr io.Writer) int {
@@ -285,6 +442,51 @@ func doMailArchiveManyJSON(mp mail.Provider, rec events.Recorder, ids []string, 
 	return exit
 }
 
+func renderMailArchiveSelection(matches []mail.Message, results []mail.ArchiveResult, opts mailArchiveSelectOptions, jsonOut bool, stdout, stderr io.Writer) int {
+	ids := make([]string, 0, len(matches))
+	summaries := make([]mailMessageSummary, 0, len(matches))
+	for _, msg := range matches {
+		ids = append(ids, msg.ID)
+		summaries = append(summaries, summarizeMailMessage(msg))
+	}
+	if opts.DryRun {
+		if jsonOut {
+			return writeCLIJSONLineOrExit(stdout, stderr, "gc mail archive", mailActionResult{SchemaVersion: "1", OK: true, Command: "mail.archive", Action: "archive", IDs: ids, Messages: summaries, Count: intRef(len(matches)), DryRun: true})
+		}
+		if len(matches) == 0 {
+			fmt.Fprintln(stdout, "No matching messages") //nolint:errcheck // best-effort stdout
+			return 0
+		}
+		for _, msg := range matches {
+			fmt.Fprintf(stdout, "Would archive message %s\t%s\n", msg.ID, msg.Subject) //nolint:errcheck // best-effort stdout
+		}
+		return 0
+	}
+	archived := 0
+	already := 0
+	for _, r := range results {
+		switch {
+		case r.Err == nil:
+			archived++
+			if !jsonOut {
+				fmt.Fprintf(stdout, "Archived message %s\n", r.ID) //nolint:errcheck // best-effort stdout
+			}
+		case errors.Is(r.Err, mail.ErrAlreadyArchived):
+			already++
+			if !jsonOut {
+				fmt.Fprintf(stdout, "Already archived %s\n", r.ID) //nolint:errcheck // best-effort stdout
+			}
+		}
+	}
+	if len(matches) == 0 && !jsonOut {
+		fmt.Fprintln(stdout, "No matching messages") //nolint:errcheck // best-effort stdout
+	}
+	if jsonOut {
+		return writeCLIJSONLineOrExit(stdout, stderr, "gc mail archive", mailActionResult{SchemaVersion: "1", OK: true, Command: "mail.archive", Action: "archive", IDs: ids, Messages: summaries, Count: intRef(archived), AlreadyDone: already == len(results) && len(results) > 0})
+	}
+	return 0
+}
+
 func newMailCheckCmd(stdout, stderr io.Writer) *cobra.Command {
 	var inject bool
 	var hookFormat string
@@ -342,8 +544,11 @@ var mailCheckAPIClient = func(cityPath string) (*api.Client, string) {
 	return nil, apiClientFallbackReason(cityPath)
 }
 
-// routeMailCheck dispatches `mail check` to the supervisor API when a
-// controller is up; otherwise falls back to the local mail-provider path.
+// routeMailCheck dispatches non-injecting `mail check` to the supervisor API
+// when a controller is up; otherwise falls back to the local mail-provider path.
+// Injecting hooks probe the API for degraded-read notices, then use the local
+// path because provider-backed mail may need to perform delivery side effects
+// after successful injection.
 // Emits exactly one route=... log line per exit path (gated on GC_DEBUG).
 func routeMailCheck(_ string, args []string, inject bool, hookFormat string, c *api.Client, nilReason string, stdout, stderr io.Writer) int {
 	const cmdName = "mail check"
@@ -351,17 +556,43 @@ func routeMailCheck(_ string, args []string, inject bool, hookFormat string, c *
 	if len(args) > 0 {
 		recipient = strings.TrimSpace(args[0])
 	}
+	if inject {
+		if c != nil {
+			cr, err := c.ListMailInbox(recipient, "")
+			if err == nil {
+				if mailListHasPartial(cr.Body) {
+					logRoute(stderr, cmdName, "api", "error")
+					notice := formatMailCheckPartialDegradedNotice()
+					if mailListHasStoreSlowPartial(cr.Body) {
+						notice = formatMailCheckDegradedNotice()
+					}
+					_ = writeProviderHookContextForEvent(stdout, hookFormat, "UserPromptSubmit", notice)
+					return 0
+				}
+			} else if !api.ShouldFallbackForRead(err) {
+				logRoute(stderr, cmdName, "api", "error")
+				if api.IsStoreSlowError(err) {
+					_ = writeProviderHookContextForEvent(stdout, hookFormat, "UserPromptSubmit", formatMailCheckDegradedNotice())
+				}
+				return 0
+			}
+		}
+		logRoute(stderr, cmdName, "fallback", "inject-local-side-effects")
+		return doMailCheckFallback(args, inject, hookFormat, stdout, stderr)
+	}
 	if c != nil {
 		cr, err := c.ListMailInbox(recipient, "")
 		if err == nil {
+			if mailListHasPartial(cr.Body) {
+				logRoute(stderr, cmdName, "api", "error")
+				fmt.Fprintf(stderr, "gc mail check: %s\n", mailListPartialErrorDetail(cr.Body)) //nolint:errcheck // best-effort stderr
+				return 1
+			}
 			logRoute(stderr, cmdName, "api", "")
 			return renderMailCheckFromAPI(cr, recipient, inject, hookFormat, stdout)
 		}
 		if !api.ShouldFallbackForRead(err) {
 			logRoute(stderr, cmdName, "api", "error")
-			if inject {
-				return 0
-			}
 			fmt.Fprintf(stderr, "gc mail check: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
@@ -377,8 +608,8 @@ func routeMailCheck(_ string, args []string, inject bool, hookFormat string, c *
 // Without --inject, returns 0 if mail exists and 1 if empty, matching the
 // local fallback contract; human output appends a stale-read banner when the
 // supervisor cache is > 30 s old.
-func renderMailCheckFromAPI(cr api.CachedRead[[]mail.Message], recipient string, inject bool, hookFormat string, stdout io.Writer) int {
-	messages := cr.Body
+func renderMailCheckFromAPI(cr api.CachedRead[api.MailListView], recipient string, inject bool, hookFormat string, stdout io.Writer) int {
+	messages := cr.Body.Items
 	if inject {
 		if len(messages) > 0 {
 			_ = writeProviderHookContextForEvent(stdout, hookFormat, "UserPromptSubmit", formatInjectOutput(messages))
@@ -393,6 +624,53 @@ func renderMailCheckFromAPI(cr api.CachedRead[[]mail.Message], recipient string,
 		fmt.Fprintf(stdout, "(cache age: %.0fs — reconciler may be lagging)\n", cr.AgeSeconds) //nolint:errcheck // best-effort stdout
 	}
 	return 0
+}
+
+func mailListHasStoreSlowPartial(view api.MailListView) bool {
+	return mailPartialHasStoreSlow(view.Partial, view.PartialErrors)
+}
+
+func mailListHasPartial(view api.MailListView) bool {
+	return view.Partial || len(view.PartialErrors) > 0
+}
+
+func mailListPartialErrorDetail(view api.MailListView) string {
+	return mailPartialErrorDetail(view.PartialErrors, "partial mail read failed")
+}
+
+func mailCountHasPartial(view api.MailCountView) bool {
+	return view.Partial || len(view.PartialErrors) > 0
+}
+
+func mailCountPartialErrorDetail(view api.MailCountView) string {
+	return mailPartialErrorDetail(view.PartialErrors, "partial mail count failed")
+}
+
+func mailPartialHasStoreSlow(partial bool, partialErrors []string) bool {
+	if !partial {
+		return false
+	}
+	for _, msg := range partialErrors {
+		if strings.Contains(msg, api.StoreSlowErrorCode+":") || strings.HasPrefix(msg, api.StoreSlowErrorCode) {
+			return true
+		}
+	}
+	return false
+}
+
+func mailPartialErrorDetail(partialErrors []string, fallback string) string {
+	if len(partialErrors) == 0 {
+		return fallback
+	}
+	return strings.Join(partialErrors, "; ")
+}
+
+func formatMailCheckDegradedNotice() string {
+	return "<system-reminder>\n" + mailCheckDegradedNotice + "\n</system-reminder>\n"
+}
+
+func formatMailCheckPartialDegradedNotice() string {
+	return "<system-reminder>\n" + mailCheckPartialDegradedNotice + "\n</system-reminder>\n"
 }
 
 // doMailCheckFallback is the direct-bd path for `gc mail check`.
@@ -440,7 +718,15 @@ func doMailCheckTargetWithFormat(mp mail.Provider, target resolvedMailTarget, in
 
 	if inject {
 		if len(messages) > 0 {
-			_ = writeProviderHookContextForEvent(stdout, hookFormat, "UserPromptSubmit", formatInjectOutput(messages))
+			if err := writeProviderHookContextForEvent(stdout, hookFormat, "UserPromptSubmit", formatInjectOutput(messages)); err != nil {
+				fmt.Fprintf(stderr, "gc mail check: writing hook output: %v\n", err) //nolint:errcheck // best-effort stderr
+				return 0
+			}
+			injectedMessages := messages
+			if len(injectedMessages) > mailInjectMaxMessages {
+				injectedMessages = injectedMessages[:mailInjectMaxMessages]
+			}
+			archiveInjectedAutoHandoffMessages(mp, injectedMessages, stderr)
 		}
 		return 0 // --inject always exits 0
 	}
@@ -451,6 +737,24 @@ func doMailCheckTargetWithFormat(mp mail.Provider, target resolvedMailTarget, in
 	}
 	fmt.Fprintf(stdout, "%d unread message(s) for %s\n", len(messages), target.display) //nolint:errcheck // best-effort stdout
 	return 0
+}
+
+type injectedAutoHandoffArchiver interface {
+	ArchiveInjectedAutoHandoffs([]string) error
+}
+
+func archiveInjectedAutoHandoffMessages(mp mail.Provider, messages []mail.Message, stderr io.Writer) {
+	archiver, ok := mp.(injectedAutoHandoffArchiver)
+	if !ok {
+		return
+	}
+	ids := make([]string, 0, len(messages))
+	for _, msg := range messages {
+		ids = append(ids, msg.ID)
+	}
+	if err := archiver.ArchiveInjectedAutoHandoffs(ids); err != nil {
+		fmt.Fprintf(stderr, "gc mail check: archiving injected auto handoff mail: %v\n", err) //nolint:errcheck // best-effort stderr
+	}
 }
 
 // formatInjectOutput formats messages as a <system-reminder> block for
@@ -1143,7 +1447,7 @@ Use --all to broadcast to all live sessions (excluding sender and "human").`,
 			return nil
 		},
 	}
-	cmd.Flags().BoolVar(&notify, "notify", false, "nudge the recipient after sending")
+	cmd.Flags().BoolVar(&notify, "notify", false, "nudge the recipient about this message, even if earlier mail is still unread")
 	cmd.Flags().BoolVar(&notify, "nudge", false, "alias for --notify")
 	_ = cmd.Flags().MarkHidden("nudge")
 	cmd.Flags().BoolVar(&all, "all", false, "broadcast to all live sessions (excludes sender and human)")
@@ -1185,7 +1489,7 @@ func newMailReadCmd(stdout, stderr io.Writer) *cobra.Command {
 		Long: `Display a message and mark it as read.
 
 Shows the full message details (ID, sender, recipient, subject, date, body).
-The message stays in the store — use "gc mail archive" to permanently close it.`,
+The message stays in the store — use "gc mail archive" to remove it.`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
 			if cmdMailReadWithJSON(args, jsonOut, stdout, stderr) != 0 {
@@ -1248,7 +1552,7 @@ Use -s/--subject for the reply subject and -m/--message for the reply body.`,
 	}
 	cmd.Flags().StringVarP(&subject, "subject", "s", "", "reply subject line")
 	cmd.Flags().StringVarP(&message, "message", "m", "", "reply body text")
-	cmd.Flags().BoolVar(&notify, "notify", false, "nudge the recipient after replying")
+	cmd.Flags().BoolVar(&notify, "notify", false, "nudge the recipient about this reply, even if earlier mail is still unread")
 	cmd.Flags().BoolVar(&notify, "nudge", false, "alias for --notify")
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit JSONL result")
 	_ = cmd.Flags().MarkHidden("nudge")
@@ -2034,7 +2338,7 @@ func cmdMailDeleteJSON(args []string, jsonOut bool, stdout, stderr io.Writer) in
 	return doMailDeleteJSON(mp, rec, args, jsonOut, stdout, stderr)
 }
 
-// doMailDelete closes one or more message beads (same as archive but
+// doMailDelete deletes one or more message beads (same as archive but
 // different intent). Single-id behavior matches the pre-batch CLI
 // byte-for-byte; multi-id uses mp.DeleteMany to preserve provider delete
 // semantics.
@@ -2239,6 +2543,11 @@ func routeMailCount(_ string, args []string, c *api.Client, nilReason string, js
 	if c != nil {
 		cr, err := c.CountMail(recipient, "")
 		if err == nil {
+			if mailCountHasPartial(cr.Body) {
+				logRoute(stderr, cmdName, "api", "error")
+				fmt.Fprintf(stderr, "gc mail count: %s\n", mailCountPartialErrorDetail(cr.Body)) //nolint:errcheck // best-effort stderr
+				return 1
+			}
 			logRoute(stderr, cmdName, "api", "")
 			if jsonOut {
 				if err := writeCLIJSONLine(stdout, mailCountJSONResult{

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -14,6 +15,9 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beads/contract"
+	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/pidutil"
 )
 
@@ -63,6 +67,18 @@ var (
 	managedDoltTestProcessGroupKillWait = 2 * time.Second
 )
 
+// Indirections for the inner loop of startManagedDoltProcessWithOptions so
+// the address-in-use retry branch is exercisable by unit tests without
+// spawning a real dolt subprocess. Production wires these to the same
+// concrete functions invoked previously; tests in
+// dolt_start_address_in_use_retry_window_test.go drive the loop body by
+// stubbing them. Reassigning these in production code paths is a bug.
+var (
+	managedDoltStartSQLServerFn = startManagedDoltSQLServer
+	managedDoltWaitForReadyFn   = waitForManagedDoltReady
+	managedDoltLogSuffixFn      = managedDoltLogSuffix
+)
+
 // init is the re-entry point for the dolt-managed-test watchdog. The watchdog
 // is a sibling process the test framework re-exec's via this binary so the
 // managed `dolt sql-server` outlives the test parent and can be reliably
@@ -101,9 +117,13 @@ func startManagedDoltProcess(cityPath, host, port, user, logLevel string, timeou
 	return startManagedDoltProcessWithOptions(cityPath, host, port, user, logLevel, -1, timeout, true)
 }
 
+//nolint:unparam // archiveLevel is an explicit override hook; current callers use config/env fallback.
 func startManagedDoltProcessWithOptions(cityPath, host, port, user, logLevel string, archiveLevel int, timeout time.Duration, publish bool) (managedDoltStartReport, error) {
 	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
 	if err != nil {
+		return managedDoltStartReport{}, err
+	}
+	if err := checkManagedDoltDiskPreflight(layout.DataDir, doltDiskMinFreeBytes(), doltDiskWarnFreeBytes(), os.Stderr); err != nil {
 		return managedDoltStartReport{}, err
 	}
 	portNum, err := strconv.Atoi(strings.TrimSpace(port))
@@ -122,10 +142,24 @@ func startManagedDoltProcessWithOptions(cityPath, host, port, user, logLevel str
 	if timeout <= 0 {
 		timeout = 30 * time.Second
 	}
-	archiveLevel = resolveDoltArchiveLevel(archiveLevel)
-
 	report := managedDoltStartReport{}
+	doltConfig, err := resolveManagedDoltConfigForStart(cityPath, archiveLevel)
+	if err != nil {
+		return report, err
+	}
+
 	currentPort := portNum
+	// retryWindow is resolved once before the loop so an in-progress
+	// city.toml edit cannot change the wait policy mid-flight.
+	retryWindow := managedDoltStartAddressInUseRetryWindowFn(cityPath)
+	// waitedPorts records each port we have already slept on for the
+	// address-in-use retry. Each port gets at most ONE retry window's worth
+	// of wait — if dolt still cannot bind after that, we fall through to
+	// `nextAvailableManagedDoltPort` rather than burn another window. This
+	// bounds the worst-case wall time per startManagedDoltProcessWithOptions
+	// to (retryWindow + per-attempt-startup) × min(5, distinct-ports-tried)
+	// rather than (retryWindow × 5).
+	waitedPorts := make(map[int]bool, 5)
 	for attempt := 1; attempt <= 5; attempt++ {
 		report.Attempts = attempt
 		report.AddressInUse = false
@@ -133,7 +167,7 @@ func startManagedDoltProcessWithOptions(cityPath, host, port, user, logLevel str
 		if err := managedDoltPreflightCleanupFn(cityPath); err != nil {
 			return report, err
 		}
-		if err := writeManagedDoltConfigFile(layout.ConfigFile, host, strconv.Itoa(currentPort), layout.DataDir, logLevel, archiveLevel); err != nil {
+		if err := writeManagedDoltConfigFile(layout.ConfigFile, host, strconv.Itoa(currentPort), layout.DataDir, logLevel, doltConfig); err != nil {
 			return report, err
 		}
 
@@ -147,7 +181,7 @@ func startManagedDoltProcessWithOptions(cityPath, host, port, user, logLevel str
 			return report, fmt.Errorf("open log file: %w", err)
 		}
 
-		started, err := startManagedDoltSQLServer(cityPath, layout.ConfigFile, layout.LogFile, logFile)
+		started, err := managedDoltStartSQLServerFn(cityPath, layout.ConfigFile, layout.LogFile, logFile)
 		if err != nil {
 			_ = logFile.Close()
 			return report, err
@@ -176,7 +210,7 @@ func startManagedDoltProcessWithOptions(cityPath, host, port, user, logLevel str
 			return report, fmt.Errorf("write provider state: %w", err)
 		}
 
-		readyReport, readyErr := waitForManagedDoltReady(cityPath, host, strconv.Itoa(currentPort), user, started.PID, timeout, false)
+		readyReport, readyErr := managedDoltWaitForReadyFn(cityPath, host, strconv.Itoa(currentPort), user, started.PID, timeout, false)
 		if readyErr == nil && readyReport.Ready {
 			report.Ready = true
 			if publish {
@@ -210,10 +244,21 @@ func startManagedDoltProcessWithOptions(cityPath, host, port, user, logLevel str
 			StartedAt: time.Now().UTC().Format(time.RFC3339),
 		})
 
-		startupOutput, readErr := managedDoltLogSuffix(layout.LogFile, logOffset)
+		startupOutput, readErr := managedDoltLogSuffixFn(layout.LogFile, logOffset)
 		if readErr == nil && strings.Contains(strings.ToLower(startupOutput), "address already in use") {
 			report.AddressInUse = true
-			currentPort = nextAvailableManagedDoltPort(currentPort + 1)
+			// Wait briefly on the originally requested port to outlast a
+			// TIME_WAIT socket before bumping ports. See
+			// `DoltStartAddressInUseRetryWindow` doc for the design rationale.
+			// Each port gets at most one wait; if dolt still cannot bind
+			// after that, fall through to the next free port.
+			if retryWindow > 0 && !waitedPorts[currentPort] &&
+				managedDoltStartWaitForPortFree(host, currentPort, retryWindow) {
+				waitedPorts[currentPort] = true
+				continue // retry the same port without bumping
+			}
+			waitedPorts[currentPort] = true
+			currentPort = nextAvailableManagedDoltPortForHost(host, currentPort+1)
 			report.Port = currentPort
 			continue
 		}
@@ -226,6 +271,107 @@ func startManagedDoltProcessWithOptions(cityPath, host, port, user, logLevel str
 	return report, fmt.Errorf("dolt server could not find a free port after repeated address-in-use failures (last port %d)", report.Port)
 }
 
+// managedDoltStartAddressInUseRetryWindowFn resolves the configured retry window for
+// the address-in-use loop in startManagedDoltProcessWithOptions. It is a
+// package-level var so tests can shim the resolution without writing a
+// city.toml. Production points at resolveManagedDoltStartAddressInUseRetryWindow.
+var managedDoltStartAddressInUseRetryWindowFn = resolveManagedDoltStartAddressInUseRetryWindow
+
+// resolveManagedDoltStartAddressInUseRetryWindow returns how long the managed-dolt
+// start path should wait on the originally requested port before falling back
+// to a higher port when bind fails with "address already in use". Reads
+// `[daemon].dolt_start_address_in_use_retry_window` from city.toml when available;
+// falls back to config.DefaultDoltStartAddressInUseRetryWindow when the config
+// cannot be loaded.
+//
+// Mirrors resolveManagedDoltStopTimeout's empty-cityPath guard: recovery /
+// startup-cleanup callers may pass an empty cityPath, and loadCityConfig("",…)
+// would resolve "city.toml" relative to the current working directory,
+// materializing builtin packs under cwd and reading an unrelated config.
+func resolveManagedDoltStartAddressInUseRetryWindow(cityPath string) time.Duration {
+	if strings.TrimSpace(cityPath) == "" {
+		return config.DefaultDoltStartAddressInUseRetryWindow
+	}
+	cfg, err := loadCityConfig(cityPath, io.Discard)
+	if err != nil || cfg == nil {
+		return config.DefaultDoltStartAddressInUseRetryWindow
+	}
+	return cfg.Daemon.DoltStartAddressInUseRetryWindowDuration()
+}
+
+// managedDoltStartWaitForPortFree polls managedDoltPortAvailableFn for
+// host:port every managedDoltStartAddressInUsePollInterval(retryWindow) until
+// the port becomes free or retryWindow expires. Returns true if the port
+// became free within the window. A non-positive retryWindow returns false
+// immediately (no wait).
+//
+// The host argument matches the host dolt will bind to (typically "0.0.0.0"
+// in production); using the same host for the probe and the bind avoids
+// false-positive availability reports caused by interface-specific bind
+// states. The poll interval is shrunk to the retry window when the window is
+// shorter than the default 2s, so a sub-2s window still gets one check
+// before falling through. A final post-deadline check catches a port that
+// freed up between the last sleep and the deadline.
+func managedDoltStartWaitForPortFree(host string, port int, retryWindow time.Duration) bool {
+	if retryWindow <= 0 {
+		return false
+	}
+	poll := managedDoltStartAddressInUsePollInterval(retryWindow)
+	deadline := time.Now().Add(retryWindow)
+	for time.Now().Before(deadline) {
+		if managedDoltPortAvailableFn(host, port) {
+			return true
+		}
+		remain := time.Until(deadline)
+		if remain <= 0 {
+			break
+		}
+		if remain < poll {
+			time.Sleep(remain)
+		} else {
+			time.Sleep(poll)
+		}
+	}
+	return managedDoltPortAvailableFn(host, port)
+}
+
+// managedDoltStartAddressInUsePollInterval returns the per-iteration sleep for
+// managedDoltStartWaitForPortFree. Normally 2s; shrunk to the retry window
+// when the window is shorter so at least one check happens before the
+// deadline.
+func managedDoltStartAddressInUsePollInterval(retryWindow time.Duration) time.Duration {
+	const defaultPoll = 2 * time.Second
+	if retryWindow > 0 && retryWindow < defaultPoll {
+		return retryWindow
+	}
+	return defaultPoll
+}
+
+// managedDoltPortAvailableFn is a package-level indirection over the host:port
+// availability probe so tests can simulate TIME_WAIT clearing without holding
+// real sockets. Production points at managedDoltPortAvailableForHost, which
+// runs a real net.Listen probe on the same host dolt will bind to.
+var managedDoltPortAvailableFn = managedDoltPortAvailableForHost
+
+// managedDoltPortAvailableForHost reports whether host:port can currently be
+// bound by a Go net.Listen call. Mirrors managedDoltPortAvailable's check but
+// uses the configured host instead of forcing 127.0.0.1, so the probe is
+// faithful to what dolt's bind will attempt (interface-specific TIME_WAIT
+// state on a wildcard bind is not seen by a localhost probe). A blank or "*"
+// host is normalized to "0.0.0.0".
+func managedDoltPortAvailableForHost(host string, port int) bool {
+	host = strings.TrimSpace(host)
+	if host == "" || host == "*" {
+		host = "0.0.0.0"
+	}
+	listener, err := net.Listen("tcp", net.JoinHostPort(host, strconv.Itoa(port)))
+	if err != nil {
+		return false
+	}
+	_ = listener.Close() //nolint:errcheck // best-effort cleanup
+	return true
+}
+
 func startManagedDoltSQLServer(cityPath, configFile, logFilePath string, logFile *os.File) (managedDoltStartedProcess, error) {
 	if managedDoltTestWatchdogEnabled() {
 		return startManagedDoltSQLServerWithTestWatchdog(cityPath, configFile, logFilePath, logFile)
@@ -235,7 +381,7 @@ func startManagedDoltSQLServer(cityPath, configFile, logFilePath string, logFile
 	cmd.Stderr = logFile
 	cmd.Stdin = nil
 	cmd.SysProcAttr = managedDoltSQLServerSysProcAttr()
-	cmd.Env = doltServerEnv(os.Environ())
+	cmd.Env = doltServerEnv(cityPath, os.Environ())
 	if err := cmd.Start(); err != nil {
 		return managedDoltStartedProcess{}, fmt.Errorf("start dolt sql-server: %w", err)
 	}
@@ -252,7 +398,7 @@ func startManagedDoltSQLServerWithTestWatchdog(cityPath, configFile, logFilePath
 		_ = os.Remove(disarmFile)
 		return managedDoltStartedProcess{}, err
 	}
-	args := []string{managedDoltTestWatchdogArg, managedDoltTestParentPIDString(), configFile, logFilePath, disarmFile}
+	args := []string{managedDoltTestWatchdogArg, managedDoltTestParentPIDString(), configFile, logFilePath, disarmFile, cityPath}
 	var parentPipeRead *os.File
 	var parentPipeWrite *os.File
 	if !managedDoltTestHasExternalParent() {
@@ -266,7 +412,7 @@ func startManagedDoltSQLServerWithTestWatchdog(cityPath, configFile, logFilePath
 	cmd := exec.Command(watchdogExecutable, args...)
 	cmd.Stderr = logFile
 	cmd.Stdin = nil
-	cmd.Env = doltServerEnv(os.Environ())
+	cmd.Env = doltServerEnv(cityPath, os.Environ())
 	if parentPipeRead != nil {
 		cmd.ExtraFiles = []*os.File{parentPipeRead}
 	}
@@ -598,6 +744,55 @@ func managedDoltLogSuffix(path string, offset int64) (string, error) {
 	return string(data[offset:]), nil
 }
 
+func resolveManagedDoltConfigForStart(cityPath string, explicitArchiveLevel int) (config.DoltConfig, error) {
+	doltConfig := config.DoltConfig{}
+	if strings.TrimSpace(cityPath) != "" {
+		tomlPath := filepath.Join(cityPath, "city.toml")
+		if _, err := os.Stat(tomlPath); err != nil {
+			if !os.IsNotExist(err) {
+				return doltConfig, fmt.Errorf("stat city dolt config: %w", err)
+			}
+		} else {
+			if cfg, err := loadCityConfig(cityPath, io.Discard); err != nil {
+				return doltConfig, fmt.Errorf("load city dolt config: %w", err)
+			} else if cfg != nil {
+				doltConfig = cfg.Dolt
+			}
+		}
+	}
+	if explicitArchiveLevel >= 0 {
+		doltConfig.ArchiveLevel = &explicitArchiveLevel
+	} else if doltConfig.ArchiveLevel == nil {
+		if v := os.Getenv("GC_DOLT_ARCHIVE_LEVEL"); v != "" {
+			if parsed, err := strconv.Atoi(v); err == nil {
+				doltConfig.ArchiveLevel = &parsed
+			}
+		}
+	}
+	if doltConfig.MaxConnections <= 0 {
+		doltConfig.MaxConnections = positiveEnvInt("GC_DOLT_MAX_CONNECTIONS")
+	}
+	if doltConfig.ReadTimeoutMillis <= 0 {
+		doltConfig.ReadTimeoutMillis = positiveEnvInt("GC_DOLT_READ_TIMEOUT_MILLIS")
+	}
+	if doltConfig.WriteTimeoutMillis <= 0 {
+		doltConfig.WriteTimeoutMillis = positiveEnvInt("GC_DOLT_WRITE_TIMEOUT_MILLIS")
+	}
+	return doltConfig, nil
+}
+
+func positiveEnvInt(key string) int {
+	raw := os.Getenv(key)
+	if raw == "" {
+		return 0
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n <= 0 {
+		return 0
+	}
+	return n
+}
+
 // resolveDoltArchiveLevel resolves the archive level for dolt auto_gc.
 // Explicit non-negative values are returned as-is. Negative values trigger
 // env-var fallback (GC_DOLT_ARCHIVE_LEVEL), defaulting to 0.
@@ -652,8 +847,8 @@ func runManagedDoltTestWatchdog(args []string, stdout, stderr *os.File) int {
 		fmt.Fprintln(stderr, "managed dolt test watchdog is only available in managed Dolt test mode") //nolint:errcheck
 		return 2
 	}
-	if len(args) != 4 && len(args) != 5 {
-		fmt.Fprintf(stderr, "usage: %s <parent-pid> <config-file> <log-file> <disarm-file> [parent-pipe-fd]\n", managedDoltTestWatchdogArg) //nolint:errcheck
+	if len(args) < 4 || len(args) > 6 {
+		fmt.Fprintf(stderr, "usage: %s <parent-pid> <config-file> <log-file> <disarm-file> [city-path] [parent-pipe-fd]\n", managedDoltTestWatchdogArg) //nolint:errcheck
 		return 2
 	}
 	parentPID, err := strconv.Atoi(args[0])
@@ -664,9 +859,22 @@ func runManagedDoltTestWatchdog(args []string, stdout, stderr *os.File) int {
 	configFile := args[1]
 	logFilePath := args[2]
 	disarmFile := args[3]
-	var parentDone <-chan struct{}
+	cityPath := ""
+	parentPipeArg := ""
 	if len(args) == 5 {
-		done, closeParentDone, err := managedDoltTestParentDone(args[4])
+		if _, parseErr := strconv.Atoi(args[4]); parseErr == nil {
+			parentPipeArg = args[4]
+		} else {
+			cityPath = args[4]
+		}
+	}
+	if len(args) == 6 {
+		cityPath = args[4]
+		parentPipeArg = args[5]
+	}
+	var parentDone <-chan struct{}
+	if parentPipeArg != "" {
+		done, closeParentDone, err := managedDoltTestParentDone(parentPipeArg)
 		if err != nil {
 			fmt.Fprintf(stderr, "watch parent pipe: %v\n", err) //nolint:errcheck
 			return 2
@@ -691,7 +899,7 @@ func runManagedDoltTestWatchdog(args []string, stdout, stderr *os.File) int {
 	// archive workers) outlive their parent and leak across test runs
 	// (gastownhall/gascity#2313 follow-up M3).
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Env = doltServerEnv(os.Environ())
+	cmd.Env = doltServerEnv(cityPath, os.Environ())
 	if err := cmd.Start(); err != nil {
 		fmt.Fprintf(stderr, "start dolt sql-server: %v\n", err) //nolint:errcheck
 		return 1
@@ -761,6 +969,28 @@ func managedDoltTestParentDone(rawFD string) (<-chan struct{}, func(), error) {
 
 // doltServerEnv returns the environment applied to every managed dolt
 // sql-server we launch.
-func doltServerEnv(parent []string) []string {
-	return append([]string(nil), parent...)
+func doltServerEnv(cityPath string, parent []string) []string {
+	env := removeEnvKey(parent, "DOLT_DISABLE_EVENT_FLUSH")
+	if managedDoltDisableEventFlush(cityPath) {
+		// Disable Dolt usage telemetry for managed servers by default. The
+		// `dolt send-metrics` event-flush reporter spawns transient
+		// `dolt send-metrics` processes that were observed burning 80-94% CPU
+		// on a busy managed city. Operators can opt back in with
+		// `.beads/config.yaml`:
+		//   dolt:
+		//     disable-event-flush: false
+		env = append(env, "DOLT_DISABLE_EVENT_FLUSH=true")
+	}
+	return env
+}
+
+func managedDoltDisableEventFlush(cityPath string) bool {
+	if strings.TrimSpace(cityPath) == "" {
+		return true
+	}
+	cfg, _, err := contract.ReadDoltConfig(fsys.OSFS{}, filepath.Join(cityPath, ".beads", "config.yaml"))
+	if err != nil {
+		return true
+	}
+	return cfg.DisableEventFlushEnabled()
 }

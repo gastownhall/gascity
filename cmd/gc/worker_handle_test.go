@@ -268,6 +268,75 @@ func TestResolvedWorkerRuntimeWithConfigSeedsCityRuntimeEnv(t *testing.T) {
 	}
 }
 
+func TestResolvedWorkerRuntimeWithConfigIncludesProviderAuthPassthrough(t *testing.T) {
+	cityDir := t.TempDir()
+	gcDir := filepath.Join(cityDir, ".gc")
+	if err := os.MkdirAll(gcDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(gcDir, "settings.json"), []byte(`{}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ANTHROPIC_AUTH_TOKEN", "test-anthropic-auth-token")
+	t.Setenv("ANTHROPIC_BASE_URL", "https://ollama.example.test")
+	t.Setenv("ANTHROPIC_DEFAULT_SONNET_MODEL", "kimi-k2.5")
+	t.Setenv("CLAUDE_CODE_SUBAGENT_MODEL", "kimi-k2.5")
+	t.Setenv("OLLAMA_API_KEY", "test-ollama-token")
+	t.Setenv("GC_RIG", "caller-rig")
+	t.Setenv("GC_SESSION_NAME", "caller-session")
+
+	claude := config.BuiltinProviders()["claude"]
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:     "worker",
+			Provider: "claude",
+		}},
+		Providers: map[string]config.ProviderSpec{
+			"claude": claude,
+		},
+	}
+
+	resolved, err := resolvedWorkerRuntimeWithConfig(cityDir, cfg, session.Info{
+		Template: "worker",
+		WorkDir:  cityDir,
+	}, "")
+	if err != nil {
+		t.Fatalf("resolvedWorkerRuntimeWithConfig: %v", err)
+	}
+	if resolved == nil {
+		t.Fatal("resolvedWorkerRuntimeWithConfig() = nil")
+	}
+	for key, want := range map[string]string{
+		"ANTHROPIC_AUTH_TOKEN":           "test-anthropic-auth-token",
+		"ANTHROPIC_BASE_URL":             "https://ollama.example.test",
+		"ANTHROPIC_DEFAULT_SONNET_MODEL": "kimi-k2.5",
+		"CLAUDE_CODE_SUBAGENT_MODEL":     "kimi-k2.5",
+		"OLLAMA_API_KEY":                 "test-ollama-token",
+	} {
+		if got := resolved.SessionEnv[key]; got != want {
+			t.Errorf("SessionEnv[%s] = %q, want %q", key, got, want)
+		}
+		if got := resolved.Hints.Env[key]; got != want {
+			t.Errorf("Hints.Env[%s] = %q, want %q", key, got, want)
+		}
+	}
+	for _, key := range []string{"GC_RIG", "GC_SESSION_NAME"} {
+		if got, ok := resolved.SessionEnv[key]; ok {
+			t.Errorf("SessionEnv[%s] = %q, want absent caller context", key, got)
+		}
+		if got, ok := resolved.Hints.Env[key]; ok {
+			t.Errorf("Hints.Env[%s] = %q, want absent caller context", key, got)
+		}
+	}
+	if got := resolved.SessionEnv["GC_CITY"]; got != cityDir {
+		t.Errorf("SessionEnv[GC_CITY] = %q, want %q", got, cityDir)
+	}
+	if got := resolved.Hints.Env["GC_CITY"]; got != cityDir {
+		t.Errorf("Hints.Env[GC_CITY] = %q, want %q", got, cityDir)
+	}
+}
+
 // TestResolvedWorkerRuntimeWithConfigCityAnchorsBeatConflictingProviderEnv
 // pins the precedence contract: when the resolved provider env carries
 // its own GC_CITY (e.g. left over from a stale pool entry, or a
@@ -409,6 +478,69 @@ func TestResolvedWorkerSessionConfigWithConfigSeedsCityAnchorsOnCreatePath(t *te
 	}
 }
 
+func TestResolvedWorkerSessionConfigWithConfigIncludesProviderAuthPassthrough(t *testing.T) {
+	cityDir := t.TempDir()
+	gcDir := filepath.Join(cityDir, ".gc")
+	if err := os.MkdirAll(gcDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ANTHROPIC_AUTH_TOKEN", "test-anthropic-auth-token")
+	t.Setenv("ANTHROPIC_BASE_URL", "https://ollama.example.test")
+	t.Setenv("ANTHROPIC_DEFAULT_SONNET_MODEL", "kimi-k2.5")
+	t.Setenv("CLAUDE_CODE_SUBAGENT_MODEL", "kimi-k2.5")
+	t.Setenv("OLLAMA_API_KEY", "test-ollama-token")
+	t.Setenv("GC_RIG", "caller-rig")
+	t.Setenv("GC_SESSION_NAME", "caller-session")
+
+	cfg, err := resolvedWorkerSessionConfigWithConfig(
+		cityDir,
+		"",
+		"",
+		cityDir,
+		"worker",
+		"",
+		"worker",
+		"Worker",
+		"",
+		&config.ResolvedProvider{Name: "claude"},
+		map[string]string{"session_origin": "test"},
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("resolvedWorkerSessionConfigWithConfig: %v", err)
+	}
+	env := cfg.Runtime.SessionEnv
+	hintsEnv := cfg.Runtime.Hints.Env
+	for key, want := range map[string]string{
+		"ANTHROPIC_AUTH_TOKEN":           "test-anthropic-auth-token",
+		"ANTHROPIC_BASE_URL":             "https://ollama.example.test",
+		"ANTHROPIC_DEFAULT_SONNET_MODEL": "kimi-k2.5",
+		"CLAUDE_CODE_SUBAGENT_MODEL":     "kimi-k2.5",
+		"OLLAMA_API_KEY":                 "test-ollama-token",
+	} {
+		if got := env[key]; got != want {
+			t.Errorf("Runtime.SessionEnv[%s] = %q, want %q", key, got, want)
+		}
+		if got := hintsEnv[key]; got != want {
+			t.Errorf("Runtime.Hints.Env[%s] = %q, want %q", key, got, want)
+		}
+	}
+	for _, key := range []string{"GC_RIG", "GC_SESSION_NAME"} {
+		if got, ok := env[key]; ok {
+			t.Errorf("Runtime.SessionEnv[%s] = %q, want absent caller context", key, got)
+		}
+		if got, ok := hintsEnv[key]; ok {
+			t.Errorf("Runtime.Hints.Env[%s] = %q, want absent caller context", key, got)
+		}
+	}
+	if got := env["GC_CITY"]; got != cityDir {
+		t.Errorf("Runtime.SessionEnv[GC_CITY] = %q, want %q", got, cityDir)
+	}
+	if got := hintsEnv["GC_CITY"]; got != cityDir {
+		t.Errorf("Runtime.Hints.Env[GC_CITY] = %q, want %q", got, cityDir)
+	}
+}
+
 func TestShouldPreserveStoredRuntimeCommandForTransportRejectsExecutableOnlyMatch(t *testing.T) {
 	if shouldPreserveStoredRuntimeCommandForTransport(
 		"claude",
@@ -529,6 +661,45 @@ func TestResolvedWorkerRuntimeTransportUsesResumeMetadataForLegacyACPWithSameCom
 		"resume_flag": "--resume",
 	})
 	if got != "acp" {
+		t.Fatalf("resolvedWorkerRuntimeTransport() = %q, want acp", got)
+	}
+}
+
+func TestResolvedWorkerRuntimeTransportUsesConfiguredTmuxForCommandOnlyBead(t *testing.T) {
+	resolved := &config.ResolvedProvider{
+		Name:        "kimi",
+		Command:     "aimux",
+		Args:        []string{"run", "kimi"},
+		SupportsACP: true,
+		ACPCommand:  "kimi-acp",
+	}
+
+	got := resolvedWorkerRuntimeTransport(session.Info{
+		Template: "gascity/workflows.kimi",
+		Provider: "kimi",
+		Command:  "aimux run kimi -- --yolo --no-thinking --model kimi-k2.6",
+	}, resolved, config.SessionTransportTmux, nil)
+	if got != config.SessionTransportTmux {
+		t.Fatalf("resolvedWorkerRuntimeTransport() = %q, want tmux", got)
+	}
+}
+
+func TestResolvedWorkerRuntimeTransportUsesStoredACPCommandBeforeConfiguredTmux(t *testing.T) {
+	resolved := &config.ResolvedProvider{
+		Name:        "kimi",
+		Command:     "aimux",
+		Args:        []string{"run", "kimi"},
+		SupportsACP: true,
+		ACPCommand:  "kimi-acp",
+		ACPArgs:     []string{"run", "kimi"},
+	}
+
+	got := resolvedWorkerRuntimeTransport(session.Info{
+		Template: "gascity/workflows.kimi",
+		Provider: "kimi",
+		Command:  "kimi-acp run kimi --resume session-1",
+	}, resolved, config.SessionTransportTmux, nil)
+	if got != config.SessionTransportACP {
 		t.Fatalf("resolvedWorkerRuntimeTransport() = %q, want acp", got)
 	}
 }
@@ -721,6 +892,43 @@ func TestResolveWorkerRuntimeProviderWithConfigMetadataIdentifiesProviderSession
 	}
 	if got := resolved.Name; got != "agent-provider" {
 		t.Fatalf("agent resolved.Name = %q, want agent-provider", got)
+	}
+}
+
+func TestResolvedWorkerRuntimeWithConfigUsesCurrentAgentProviderOverStaleSessionProvider(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{
+			{Name: "worker", Dir: "myrig", Provider: "agent-provider"},
+		},
+		Providers: map[string]config.ProviderSpec{
+			"stale-provider": {
+				Command: "true",
+				Args:    []string{"stale"},
+			},
+			"agent-provider": {
+				Command: "true",
+				Args:    []string{"agent"},
+			},
+		},
+	}
+
+	resolved, err := resolvedWorkerRuntimeWithConfigAndMetadata("", cfg, session.Info{
+		Template: "myrig/worker",
+		Provider: "stale-provider",
+		WorkDir:  "/tmp/work",
+	}, "", map[string]string{
+		"session_origin": "ephemeral",
+		"agent_name":     "myrig/worker",
+	})
+	if err != nil {
+		t.Fatalf("resolvedWorkerRuntimeWithConfigAndMetadata: %v", err)
+	}
+	if resolved == nil {
+		t.Fatal("resolvedWorkerRuntimeWithConfigAndMetadata() = nil")
+	}
+	if got := resolved.Provider; got != "agent-provider" {
+		t.Fatalf("resolved.Provider = %q, want agent-provider", got)
 	}
 }
 
@@ -2127,5 +2335,20 @@ func TestWorkerSessionRuntimeResolverWithConfigFallsBackToPersistedProviderWhenC
 	}
 	if got, want := runtimeCfg.Provider, info.Provider; got != want {
 		t.Fatalf("Provider = %q, want %q", got, want)
+	}
+}
+
+// TestWorkerSessionCreateHintsEnablesMouse locks ga-c4w finding #1 for the
+// UNMANAGED `gc session new` direct-start path (controller down): the CLI builds
+// its runtime hints via workerSessionCreateHints, NOT the internal/api
+// sessionCreateHints seam the original fix patched. Without MouseOn here the
+// wheel→scrollback feature never reaches `gc session new` when the city runs
+// unmanaged. Pool/headless agents never use this function — they resolve MouseOn
+// via the reconciler's templateParamsToConfig (guarded by
+// TestResolveTemplateHeadlessAgentStaysMouseOff), so this stays poll-safe.
+func TestWorkerSessionCreateHintsEnablesMouse(t *testing.T) {
+	hints := workerSessionCreateHints(&config.ResolvedProvider{Name: "stub"})
+	if !hints.MouseOn {
+		t.Error("workerSessionCreateHints().MouseOn = false, want true (gc session new unmanaged-direct wheel→scrollback, ga-c4w)")
 	}
 }

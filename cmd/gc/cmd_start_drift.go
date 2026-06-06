@@ -181,6 +181,9 @@ var driftReadyTimeout = 5 * time.Second
 // the production kill+spawn (or systemctl) side effects.
 var restartHelpersHook = defaultRestartHelpers
 
+// readSupervisorExePathHook lets tests avoid platform-specific /proc lookups.
+var readSupervisorExePathHook = readSupervisorExePath
+
 // driftRestartLoopMax / driftRestartLoopWindow define the loop-guard
 // budget: at most 3 supervisor auto-restarts may occur within any
 // 60-second window. Persistence is via driftRestartHistoryPath so the
@@ -211,7 +214,7 @@ func runStartDriftCheck(cityPath string, stdout, stderr io.Writer) (int, bool) {
 		return 0, true
 	}
 
-	exePath, exeErr := readSupervisorExePath(pid)
+	exePath, exeErr := readSupervisorExePathHook(pid)
 	baseURL, urlErr := supervisorAPIBaseURLHook()
 	if urlErr != nil {
 		// Without a base URL we can't query /health. Don't block
@@ -281,7 +284,11 @@ func runStartDriftCheck(cityPath string, stdout, stderr io.Writer) (int, bool) {
 			SupervisorID: status.BuildID,
 			PackDrifted:  res.PackDrift,
 		})
-		if exeErr != nil {
+		serviceName := supervisorSystemdServiceName()
+		systemdManaged := supervisorSystemctlActive(serviceName)
+		launchdLabel := supervisorLaunchdLabel()
+		launchdManaged := supervisorRuntimeGOOS == "darwin" && supervisorLaunchdActive(launchdLabel)
+		if exeErr != nil && !systemdManaged && !launchdManaged {
 			// We can't safely auto-restart a supervisor whose
 			// /proc/<pid>/exe we can't read — the kernel readlink is
 			// the only reliable way to learn which binary to spawn,
@@ -292,25 +299,28 @@ func runStartDriftCheck(cityPath string, stdout, stderr io.Writer) (int, bool) {
 			// descriptive error rather than the silent
 			// `(unreadable)` fallback so the operator can fix the
 			// uid or opt out via --no-auto-restart.
-			fmt.Fprintf(stderr, "error: cannot auto-restart supervisor: /proc/%d/exe is owned by a different user (permission denied: %v). Either rerun gc start as the supervisor's uid, or pass --no-auto-restart to skip the restart and surface the drift as an error.\n", pid, exeErr) //nolint:errcheck // best-effort stderr
+			printUnreadableSupervisorRestartError(stderr, pid, exeErr)
 			return 1, false
 		}
 		if !recordDriftRestartAttempt(driftRestartHistoryPath(), driftRestartLoopMax, driftRestartLoopWindow, now) {
 			fmt.Fprintln(stderr, "error: supervisor restart loop detected (3 restarts in 60s); refusing further restarts. Investigate the stale state with 'gc trace' and consider 'gc stop --force'.") //nolint:errcheck // best-effort stderr
 			return 1, false
 		}
-		serviceName := supervisorSystemdServiceName()
-		systemdManaged := supervisorSystemctlActive(serviceName)
 		spec := restartSpec{
 			SystemdManaged: systemdManaged,
+			LaunchdManaged: launchdManaged,
 			PID:            pid,
 			ExePath:        exePath,
 			Argv:           []string{"supervisor", "run"},
 			ServiceName:    serviceName,
+			LaunchdLabel:   launchdLabel,
 		}
 		mode := "direct"
-		if systemdManaged {
+		switch {
+		case systemdManaged:
 			mode = "systemd-managed"
+		case launchdManaged:
+			mode = "launchd-managed"
 		}
 		fmt.Fprintf(stdout, "Restarting supervisor (%s)...", mode) //nolint:errcheck // best-effort stdout
 		t0 := time.Now()
@@ -337,7 +347,7 @@ func runStartDriftCheck(cityPath string, stdout, stderr io.Writer) (int, bool) {
 			// competing standalone during the brief window before the
 			// registry catches up.
 			justRestartedSupervisorPID = newPID
-			newExe, _ := readSupervisorExePath(newPID)
+			newExe, _ := readSupervisorExePathHook(newPID)
 			ctx2, cancel2 := context.WithTimeout(context.Background(), 2*time.Second)
 			defer cancel2()
 			newStatus, statusErr2 := newHTTPSupervisorClient(baseURL).Status(ctx2)
@@ -358,6 +368,14 @@ func runStartDriftCheck(cityPath string, stdout, stderr io.Writer) (int, bool) {
 	}
 	// Unreachable; decideDriftAction always sets exactly one disposition.
 	return 0, true
+}
+
+func printUnreadableSupervisorRestartError(stderr io.Writer, pid int, exeErr error) {
+	if supervisorRuntimeGOOS == "darwin" {
+		fmt.Fprintf(stderr, "error: cannot auto-restart supervisor: macOS cannot resolve the executable path for a direct supervisor (%v). If the supervisor is launchd-managed, rerun 'gc supervisor install' and then 'gc start'; otherwise stop the supervisor manually and rerun 'gc start', or pass --no-auto-restart to skip the restart and surface the drift as an error.\n", exeErr) //nolint:errcheck // best-effort stderr
+		return
+	}
+	fmt.Fprintf(stderr, "error: cannot auto-restart supervisor: /proc/%d/exe is owned by a different user (permission denied: %v). Either rerun gc start as the supervisor's uid, or pass --no-auto-restart to skip the restart and surface the drift as an error.\n", pid, exeErr) //nolint:errcheck // best-effort stderr
 }
 
 // readSupervisorExePath returns the resolved path of the supervisor's
@@ -397,6 +415,7 @@ func readDaemonAutoRestart(cityPath string) bool {
 func defaultRestartHelpers() restartHelpers {
 	return restartHelpers{
 		Systemctl: supervisorSystemctlRun,
+		Launchctl: supervisorLaunchctlRun,
 		Kill: func(pid int) error {
 			return syscall.Kill(pid, syscall.SIGTERM)
 		},

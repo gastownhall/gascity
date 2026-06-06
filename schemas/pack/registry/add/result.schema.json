@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "description": "Result payload for gc pack registry add.",
+  "required": ["schema_version", "ok", "name", "source", "validated", "cached"],
+  "properties": {
+    "schema_version": {
+      "const": "1",
+      "description": "Version of this command result schema."
+    },
+    "ok": {
+      "const": true,
+      "description": "Whether the command completed successfully."
+    },
+    "name": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-]*$",
+      "maxLength": 64,
+      "description": "Name of the registry that was added."
+    },
+    "source": {
+      "type": "string",
+      "description": "Catalog source recorded for the registry."
+    },
+    "validated": {
+      "type": "boolean",
+      "description": "Whether the catalog was fetched and validated before saving."
+    },
+    "cached": {
+      "type": "boolean",
+      "description": "Whether a catalog snapshot was written during the add operation."
+    }
+  },
+  "additionalProperties": false
+}

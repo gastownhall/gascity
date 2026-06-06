@@ -20,7 +20,6 @@ Formula instantiation happens via the CLI or the store interface:
 ```toml
 formula = "pancakes"
 description = "Make pancakes"
-version = 1
 
 [[steps]]
 id = "dry"
@@ -45,8 +44,17 @@ needs = ["dry", "wet"]
 |---|---|---|
 | `formula` | string | Unique formula name used by `gc formula cook`, `gc sling --formula`, and `Store.MolCook*` |
 | `description` | string | Human-readable description |
-| `version` | integer | Optional formula version marker |
+| `requires` | table | Optional host capability requirements such as `formula_compiler = ">=2.0.0"` |
 | `extends` | []string | Optional parent formulas to compose from |
+
+`[requires]` is composed through `extends` as a safety constraint. A child
+inherits every parent requirement, including requirements implied by legacy
+`contract = "graph.v2"`, and may only add tighter constraints. Non-overlapping
+parent/child requirements fail as `formula.compiler_requirement_conflict`
+before any durable work is written. `gc doctor` reports deprecated legacy
+contracts, missing v2 requirements, disabled `formula_v2` mismatches, invalid
+requirement axes, and inherited requirement conflicts across visible formula
+layers.
 
 ## Step Fields
 
@@ -65,11 +73,38 @@ molecule.
 | `check` | object | Runtime retry: `max_attempts` with a `check` script after each attempt |
 | `timeout` | duration string | Default timeout for this step's `check` script; `check.check.timeout` takes precedence |
 
-## Graph.v2 Review Quorum Formula
+### Description Files
+
+Use `description_file` when a step's instructions should live in a separate
+Markdown file instead of inline TOML. Non-asset paths resolve relative to the
+formula file.
+
+Paths using `../assets/...` resolve through the same low-to-high formula layer
+order as the formula itself. For example, a bundled formula can reference:
+
+```toml
+description_file = "../assets/workflows/review/local-review.md"
+```
+
+A city or higher-priority pack can override only that prose by providing the
+same asset path next to its formula layer:
+
+```text
+assets/workflows/review/local-review.md
+```
+
+The formula structure and step IDs remain inherited from the lower-priority
+pack; only the description file content is shadowed. Other relative or absolute
+paths that happen to contain an `assets` segment still use normal
+formula-relative or absolute path resolution. Description file reads use the
+same configured source as formula reads, so a parser pinned to a git ref also
+reads committed description file content from that ref.
+
+## Review Quorum Formula
 
 The core pack includes `mol-review-quorum`, a Gas City-owned review quorum
-formula scaffold. It is a `graph.v2` formula that fans out exactly two reviewer
-lanes and then routes synthesis for their durable outputs:
+formula scaffold. It declares `formula_compiler = ">=2.0.0"`, fans out exactly
+two reviewer lanes, and then routes synthesis for their durable outputs:
 
 - lane one, with ID, provider, model, and dispatch target supplied by formula
   variables

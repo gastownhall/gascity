@@ -7,6 +7,13 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/mail"
+
+	// Blank import: pgauth's init() registers PostgresCredentialResolvedPayload
+	// in the events registry. The api package never references pgauth's types
+	// directly (the payload bytes flow through events.Event.Payload as JSON),
+	// so the import exists solely to fire the registration before the registry-
+	// coverage tests run.
+	_ "github.com/gastownhall/gascity/internal/pgauth"
 )
 
 // API-layer event payload types. Every API emitter takes one of these
@@ -162,9 +169,9 @@ type CityLifecyclePayload struct {
 func (CityLifecyclePayload) IsEventPayload() {}
 
 // BeadEventPayload is the shape of every bead.* event payload
-// (BeadCreated, BeadUpdated, BeadClosed). The payload carries a full
-// snapshot of the bead as of the event; it is emitted by bd hooks and by
-// the beads CachingStore's reconcile loop when external changes are detected.
+// (BeadCreated, BeadUpdated, BeadClosed, BeadDeleted). The payload carries a
+// full snapshot of the bead as of the event; it is emitted by bd hooks and the
+// beads CachingStore for local writes and reconcile-detected external changes.
 type BeadEventPayload struct {
 	Bead beads.Bead `json:"bead"`
 }
@@ -327,7 +334,7 @@ type WorkerOperationEventPayload struct {
 	// best-effort. See the consumer contract on the type doc above.
 
 	// Model is the LLM model identifier observed in this operation
-	// (e.g. "claude-opus-4-7"). Sourced from session metadata.
+	// (e.g. "claude-opus-4-8"). Sourced from session metadata.
 	//
 	// Wired: TODO — follow-up will tail sessionlog at finish() to
 	// extract msg.Model.
@@ -444,6 +451,7 @@ func init() {
 	events.RegisterPayload(events.BeadCreated, BeadEventPayload{})
 	events.RegisterPayload(events.BeadUpdated, BeadEventPayload{})
 	events.RegisterPayload(events.BeadClosed, BeadEventPayload{})
+	events.RegisterPayload(events.BeadDeleted, BeadEventPayload{})
 
 	// session.* / convoy.* / controller.* / city.* / order.* /
 	// provider.* — these events carry no structured payload today;
@@ -463,7 +471,9 @@ func init() {
 	events.RegisterPayload(events.SessionUpdated, events.NoPayload{})
 	events.RegisterPayload(events.SessionDrainAckedWithAssignedWork, SessionDrainAckedWithAssignedWorkPayload{})
 	events.RegisterPayload(events.SessionStranded, events.NoPayload{})
+	events.RegisterPayload(events.SessionResetStalled, events.SessionResetStalledPayload{})
 	events.RegisterPayload(events.SessionWorkQueryFailed, SessionLifecyclePayload{})
+	events.RegisterPayload(events.SessionColdStartTimeout, events.NoPayload{})
 	events.RegisterPayload(events.ConvoyCreated, events.NoPayload{})
 	events.RegisterPayload(events.ConvoyClosed, events.NoPayload{})
 	events.RegisterPayload(events.ControllerStarted, events.NoPayload{})
@@ -494,4 +504,8 @@ func init() {
 	// gc.store.maintenance.* — supervisor StoreMaintenanceLoop outcomes.
 	events.RegisterPayload(events.StoreMaintenanceDone, events.StoreMaintenanceDonePayload{})
 	events.RegisterPayload(events.StoreMaintenanceFailed, events.StoreMaintenanceFailedPayload{})
+
+	// gc.store.disk_* — ENOSPC pre-flight events emitted before CALL DOLT_GC.
+	events.RegisterPayload(events.StoreDiskWarn, events.StoreDiskWarnPayload{})
+	events.RegisterPayload(events.StoreDiskCritical, events.StoreDiskCriticalPayload{})
 }

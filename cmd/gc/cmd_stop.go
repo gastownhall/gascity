@@ -300,6 +300,8 @@ func cmdStopBody(cityPath string, cfg *config.City, force bool, stdout, stderr i
 	// not in the current config).
 	stopOrphans(sp, desired, cfg, store, graceTimeout, recorder, stdout, stderr)
 
+	teardownServerForStop(sp, stderr)
+
 	// Stop bead store's backing service after agents.
 	if err := shutdownBeadsProviderForStop(cityPath); err != nil {
 		fmt.Fprintf(stderr, "gc stop: bead store: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -307,6 +309,16 @@ func cmdStopBody(cityPath string, cfg *config.City, force bool, stdout, stderr i
 	}
 
 	return code
+}
+
+func teardownServerForStop(sp runtime.Provider, stderr io.Writer) {
+	lifecycle, ok := sp.(runtime.ServerLifecycleProvider)
+	if !ok {
+		return
+	}
+	if err := lifecycle.TeardownServer(); err != nil {
+		fmt.Fprintf(stderr, "gc stop: teardown server: %v\n", err) //nolint:errcheck // best-effort stderr
+	}
 }
 
 func markCityStopSessionSleepReason(store beads.Store, stderr io.Writer) {

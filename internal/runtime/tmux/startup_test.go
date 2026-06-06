@@ -45,23 +45,26 @@ type fakeStartOps struct {
 	createErrs []error
 	createIdx  int
 
-	isSessionRunningResult   *bool
-	isRuntimeRunningResult   bool
-	killErr                  error
-	waitCommandErr           error
-	acceptStartupDialogsErr  error
-	waitReadyErr             error
-	waitCommandHook          func()
-	acceptStartupDialogsHook func()
-	waitReadyHook            func()
-	hasSessionHook           func()
-	sendKeysHook             func()
-	runSetupCommandHook      func(string)
-	hasSessionResult         bool
-	hasSessionErr            error
-	setRemainOnExitErr       error
-	runSetupCommandErr       error
-	sendKeysErr              error
+	isSessionRunningResult     *bool
+	isRuntimeRunningResult     bool
+	killErr                    error
+	waitCommandErr             error
+	acceptStartupDialogsErr    error
+	waitReadyErr               error
+	waitCommandHook            func()
+	acceptStartupDialogsHook   func()
+	waitReadyHook              func()
+	hasSessionHook             func()
+	sendKeysHook               func()
+	runSetupCommandHook        func(string)
+	hasSessionResult           bool
+	hasSessionErr              error
+	setRemainOnExitErr         error
+	disableMouseAndActivityErr error
+	runSetupCommandErr         error
+	sendKeysErr                error
+	capturePaneText            string
+	capturePaneErr             error
 }
 
 type errReader struct{}
@@ -165,6 +168,16 @@ func (f *fakeStartOps) setRemainOnExit(name string) error {
 	return f.setRemainOnExitErr
 }
 
+func (f *fakeStartOps) disableMouseAndActivity(name string) error {
+	f.calls = append(f.calls, startCall{method: "disableMouseAndActivity", name: name})
+	return f.disableMouseAndActivityErr
+}
+
+func (f *fakeStartOps) capturePane(name string, _ int) (string, error) {
+	f.calls = append(f.calls, startCall{method: "capturePane", name: name})
+	return f.capturePaneText, f.capturePaneErr
+}
+
 func (f *fakeStartOps) runSetupCommand(_ context.Context, cmd string, env map[string]string, timeout time.Duration) error {
 	f.calls = append(f.calls, startCall{
 		method:  "runSetupCommand",
@@ -204,6 +217,33 @@ func assertCallSequence(t *testing.T, ops *fakeStartOps, want []string) {
 	}
 }
 
+func containsMethod(methods []string, method string) bool {
+	return methodIndex(methods, method) >= 0
+}
+
+func methodIndex(methods []string, method string) int {
+	for i, got := range methods {
+		if got == method {
+			return i
+		}
+	}
+	return -1
+}
+
+func callsByMethod(t *testing.T, ops *fakeStartOps, method string, wantCount int) []startCall {
+	t.Helper()
+	var matches []startCall
+	for _, call := range ops.calls {
+		if call.method == method {
+			matches = append(matches, call)
+		}
+	}
+	if len(matches) != wantCount {
+		t.Fatalf("%s calls = %d, want %d; all calls = %v", method, len(matches), wantCount, ops.callMethods())
+	}
+	return matches
+}
+
 // ---------------------------------------------------------------------------
 // doStartSession tests
 // ---------------------------------------------------------------------------
@@ -219,8 +259,8 @@ func TestDoStartSession_FireAndForget(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	// No hints → createSession + setRemainOnExit (always called).
-	assertCallSequence(t, ops, []string{"createSession", "setRemainOnExit"})
+	// No hints → createSession + session-level tmux options.
+	assertCallSequence(t, ops, []string{"createSession", "setRemainOnExit", "disableMouseAndActivity"})
 
 	// Verify arguments were passed through.
 	c := ops.calls[0]
@@ -232,6 +272,46 @@ func TestDoStartSession_FireAndForget(t *testing.T) {
 	}
 	if c.command != "sleep 300" {
 		t.Errorf("createSession command = %q, want %q", c.command, "sleep 300")
+	}
+}
+
+func TestDoStartSession_MouseOffDefaultDisables(t *testing.T) {
+	ops := &fakeStartOps{}
+
+	err := doStartSession(context.Background(), ops, "test-sess", runtime.Config{
+		WorkDir: "/w",
+		Command: "sleep 300",
+	}, DefaultConfig().SetupTimeout)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	methods := ops.callMethods()
+	if !containsMethod(methods, "disableMouseAndActivity") {
+		t.Fatalf("disableMouseAndActivity not called; calls = %v", methods)
+	}
+	remainIdx := methodIndex(methods, "setRemainOnExit")
+	disableIdx := methodIndex(methods, "disableMouseAndActivity")
+	if remainIdx == -1 || disableIdx == -1 || disableIdx != remainIdx+1 {
+		t.Fatalf("disableMouseAndActivity should immediately follow setRemainOnExit; calls = %v", methods)
+	}
+}
+
+func TestDoStartSession_MouseOnSkipsDisable(t *testing.T) {
+	ops := &fakeStartOps{}
+
+	err := doStartSession(context.Background(), ops, "test-sess", runtime.Config{
+		WorkDir: "/w",
+		Command: "sleep 300",
+		MouseOn: true,
+	}, DefaultConfig().SetupTimeout)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	methods := ops.callMethods()
+	if containsMethod(methods, "disableMouseAndActivity") {
+		t.Fatalf("disableMouseAndActivity called with MouseOn=true; calls = %v", methods)
 	}
 }
 
@@ -300,11 +380,13 @@ func TestDoStartSession_FullSequence(t *testing.T) {
 	assertCallSequence(t, ops, []string{
 		"createSession",
 		"setRemainOnExit",
+		"disableMouseAndActivity",
 		"waitForCommand",
 		"acceptStartupDialogs",
 		"waitForReady",
 		"acceptStartupDialogs",
 		"hasSession",
+		"isSessionRunning",
 	})
 
 	// Verify createSession got full config.
@@ -327,15 +409,15 @@ func TestDoStartSession_FullSequence(t *testing.T) {
 	}
 
 	// Verify waitForCommand got the right timeout.
-	wfc := ops.calls[2]
+	wfc := ops.calls[3]
 	if wfc.timeout != 30*time.Second {
 		t.Errorf("waitForCommand timeout = %v, want %v", wfc.timeout, 30*time.Second)
 	}
 
 	// Verify waitForReady got correct RuntimeConfig and timeout.
-	wfr := ops.calls[4]
-	if wfr.timeout != 60*time.Second {
-		t.Errorf("waitForReady timeout = %v, want %v", wfr.timeout, 60*time.Second)
+	wfr := ops.calls[5]
+	if wfr.timeout != 10*time.Second {
+		t.Errorf("waitForReady timeout = %v, want %v", wfr.timeout, 10*time.Second)
 	}
 	if wfr.rc == nil || wfr.rc.Tmux == nil {
 		t.Fatal("waitForReady rc is nil")
@@ -375,6 +457,7 @@ func TestDoStartSession_ReturnsContextCanceledAfterBestEffortReadyWait(t *testin
 	assertCallSequence(t, ops, []string{
 		"createSession",
 		"setRemainOnExit",
+		"disableMouseAndActivity",
 		"waitForCommand",
 		"acceptStartupDialogs",
 		"waitForReady",
@@ -495,7 +578,7 @@ func TestDoStartSession_CreateRetriesNoServer(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	assertCallSequence(t, ops, []string{"createSession", "createSession", "setRemainOnExit"})
+	assertCallSequence(t, ops, []string{"createSession", "createSession", "setRemainOnExit", "disableMouseAndActivity"})
 }
 
 func TestDoStartSession_SessionDiesDuringStartup(t *testing.T) {
@@ -518,6 +601,163 @@ func TestDoStartSession_SessionDiesDuringStartup(t *testing.T) {
 	if !errors.Is(err, runtime.ErrSessionDiedDuringStartup) {
 		t.Errorf("error = %v, want ErrSessionDiedDuringStartup", err)
 	}
+}
+
+func TestDoStartSession_MissingFinalSessionDoesNotCapturePrefixSibling(t *testing.T) {
+	ops := &fakeStartOps{
+		hasSessionResult: false,
+		capturePaneText:  "prefix sibling output must not leak",
+	}
+
+	cfg := runtime.Config{
+		Command:      "codex",
+		ProcessNames: []string{"codex"},
+	}
+
+	err := doStartSession(context.Background(), ops, "mayor", cfg, DefaultConfig().SetupTimeout)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !errors.Is(err, runtime.ErrSessionDiedDuringStartup) {
+		t.Fatalf("error = %v, want ErrSessionDiedDuringStartup", err)
+	}
+	if !strings.Contains(err.Error(), "session \"mayor\"") {
+		t.Fatalf("error = %v, want session name", err)
+	}
+	if strings.Contains(err.Error(), "prefix sibling output") || strings.Contains(err.Error(), "last pane output") {
+		t.Fatalf("error = %v, should not include pane output for missing exact session", err)
+	}
+	assertCallSequence(t, ops, []string{
+		"createSession",
+		"setRemainOnExit",
+		"disableMouseAndActivity",
+		"waitForCommand",
+		"acceptStartupDialogs",
+		"acceptStartupDialogs",
+		"hasSession",
+	})
+}
+
+func TestDoStartSession_ReadyDeadlineWithDeadPaneReportsProviderCrash(t *testing.T) {
+	running := false
+	ops := &fakeStartOps{
+		waitReadyErr:           context.DeadlineExceeded,
+		hasSessionResult:       true,
+		isSessionRunningResult: &running,
+		capturePaneText: "WARNING: proceeding, even though we could not update PATH: Operation not permitted (os error 1)\n" +
+			"Error: Operation not permitted (os error 1)\n" +
+			"Pane is dead",
+	}
+
+	cfg := runtime.Config{
+		Command:           "codex",
+		ProcessNames:      []string{"codex"},
+		ReadyPromptPrefix: "› ",
+	}
+
+	err := doStartSession(context.Background(), ops, "mayor", cfg, DefaultConfig().SetupTimeout)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !errors.Is(err, runtime.ErrSessionDiedDuringStartup) {
+		t.Fatalf("error = %v, want ErrSessionDiedDuringStartup", err)
+	}
+	if strings.Contains(err.Error(), context.DeadlineExceeded.Error()) {
+		t.Fatalf("error = %v, should not surface generic deadline after pane died", err)
+	}
+	for _, want := range []string{"session \"mayor\"", "Operation not permitted", "Pane is dead"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error = %v, want substring %q", err, want)
+		}
+	}
+	assertCallSequence(t, ops, []string{
+		"createSession",
+		"setRemainOnExit",
+		"disableMouseAndActivity",
+		"waitForCommand",
+		"acceptStartupDialogs",
+		"waitForReady",
+		"hasSession",
+		"isSessionRunning",
+		"capturePane",
+	})
+}
+
+func TestDoStartSession_FinalDeadPaneReportsProviderCrash(t *testing.T) {
+	running := false
+	ops := &fakeStartOps{
+		hasSessionResult:       true,
+		isSessionRunningResult: &running,
+		capturePaneText:        "panic: startup failed\nPane is dead",
+	}
+
+	cfg := runtime.Config{
+		Command:      "codex",
+		ProcessNames: []string{"codex"},
+	}
+
+	err := doStartSession(context.Background(), ops, "mayor", cfg, DefaultConfig().SetupTimeout)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !errors.Is(err, runtime.ErrSessionDiedDuringStartup) {
+		t.Fatalf("error = %v, want ErrSessionDiedDuringStartup", err)
+	}
+	for _, want := range []string{"session \"mayor\"", "startup failed", "Pane is dead"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error = %v, want substring %q", err, want)
+		}
+	}
+	assertCallSequence(t, ops, []string{
+		"createSession",
+		"setRemainOnExit",
+		"disableMouseAndActivity",
+		"waitForCommand",
+		"acceptStartupDialogs",
+		"acceptStartupDialogs",
+		"hasSession",
+		"isSessionRunning",
+		"capturePane",
+	})
+}
+
+func TestDoStartSession_FinalDeadPaneCaptureErrorFallsBack(t *testing.T) {
+	running := false
+	ops := &fakeStartOps{
+		hasSessionResult:       true,
+		isSessionRunningResult: &running,
+		capturePaneErr:         errors.New("capture failed"),
+	}
+
+	cfg := runtime.Config{
+		Command:      "codex",
+		ProcessNames: []string{"codex"},
+	}
+
+	err := doStartSession(context.Background(), ops, "mayor", cfg, DefaultConfig().SetupTimeout)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !errors.Is(err, runtime.ErrSessionDiedDuringStartup) {
+		t.Fatalf("error = %v, want ErrSessionDiedDuringStartup", err)
+	}
+	if !strings.Contains(err.Error(), "session \"mayor\"") {
+		t.Fatalf("error = %v, want session name", err)
+	}
+	if strings.Contains(err.Error(), "last pane output") || strings.Contains(err.Error(), "capture failed") {
+		t.Fatalf("error = %v, want fallback without pane/capture detail", err)
+	}
+	assertCallSequence(t, ops, []string{
+		"createSession",
+		"setRemainOnExit",
+		"disableMouseAndActivity",
+		"waitForCommand",
+		"acceptStartupDialogs",
+		"acceptStartupDialogs",
+		"hasSession",
+		"isSessionRunning",
+		"capturePane",
+	})
 }
 
 func TestDoStartSession_HasSessionError(t *testing.T) {
@@ -563,10 +803,12 @@ func TestDoStartSession_ProcessNamesOnly(t *testing.T) {
 	assertCallSequence(t, ops, []string{
 		"createSession",
 		"setRemainOnExit",
+		"disableMouseAndActivity",
 		"waitForCommand",
 		"acceptStartupDialogs",
 		"acceptStartupDialogs",
 		"hasSession",
+		"isSessionRunning",
 	})
 
 	// Verify isRuntimeRunning sees the process names in zombie detection path.
@@ -594,9 +836,11 @@ func TestDoStartSession_KimiSkipsStartupDialogAcceptance(t *testing.T) {
 	assertCallSequence(t, ops, []string{
 		"createSession",
 		"setRemainOnExit",
+		"disableMouseAndActivity",
 		"waitForCommand",
 		"waitForReady",
 		"hasSession",
+		"isSessionRunning",
 	})
 }
 
@@ -625,7 +869,9 @@ func TestDoStartSessionReturnsNudgeDeliveryError(t *testing.T) {
 	assertCallSequence(t, ops, []string{
 		"createSession",
 		"setRemainOnExit",
+		"disableMouseAndActivity",
 		"hasSession",
+		"isSessionRunning",
 		"sendKeys",
 	})
 }
@@ -648,9 +894,11 @@ func TestDoStartSession_AcceptStartupDialogsOnly(t *testing.T) {
 	assertCallSequence(t, ops, []string{
 		"createSession",
 		"setRemainOnExit",
+		"disableMouseAndActivity",
 		"acceptStartupDialogs",
 		"acceptStartupDialogs",
 		"hasSession",
+		"isSessionRunning",
 	})
 }
 
@@ -729,12 +977,14 @@ func TestDoStartSession_ReadyPromptPrefixOnly(t *testing.T) {
 	assertCallSequence(t, ops, []string{
 		"createSession",
 		"setRemainOnExit",
+		"disableMouseAndActivity",
 		"waitForReady",
 		"hasSession",
+		"isSessionRunning",
 	})
 
 	// Verify RuntimeConfig carries the prefix.
-	wfr := ops.calls[2]
+	wfr := ops.calls[3]
 	if wfr.rc.Tmux.ReadyPromptPrefix != "❯ " {
 		t.Errorf("rc.ReadyPromptPrefix = %q, want %q", wfr.rc.Tmux.ReadyPromptPrefix, "❯ ")
 	}
@@ -758,15 +1008,94 @@ func TestDoStartSession_ReadyDelayOnly(t *testing.T) {
 	assertCallSequence(t, ops, []string{
 		"createSession",
 		"setRemainOnExit",
+		"disableMouseAndActivity",
 		"waitForReady",
 		"hasSession",
+		"isSessionRunning",
 	})
 
 	// Verify RuntimeConfig carries the delay.
-	wfr := ops.calls[2]
+	wfr := ops.calls[3]
 	if wfr.rc.Tmux.ReadyDelayMs != 3000 {
 		t.Errorf("rc.ReadyDelayMs = %d, want %d", wfr.rc.Tmux.ReadyDelayMs, 3000)
 	}
+}
+
+func TestDoStartSession_TreatsDeadlineAfterReadyAsSuccessWhenSessionAlive(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond)
+	defer cancel()
+	ops := &fakeStartOps{
+		hasSessionResult: true,
+		waitReadyHook: func() {
+			time.Sleep(5 * time.Millisecond)
+		},
+	}
+
+	cfg := runtime.Config{
+		WorkDir:                "/proj",
+		Command:                "claude",
+		ReadyPromptPrefix:      "> ",
+		ReadyDelayMs:           5000,
+		ProcessNames:           []string{"claude"},
+		EmitsPermissionWarning: true,
+	}
+
+	err := doStartSession(ctx, ops, "gc-city-mayor", cfg, DefaultConfig().SetupTimeout)
+	if err != nil {
+		t.Fatalf("err = %v, want nil", err)
+	}
+
+	assertCallSequence(t, ops, []string{
+		"createSession",
+		"setRemainOnExit",
+		"disableMouseAndActivity",
+		"waitForCommand",
+		"acceptStartupDialogs",
+		"waitForReady",
+		"hasSession",
+		"isSessionRunning",
+	})
+}
+
+func TestDoStartSession_TreatsDeadlineAfterPostReadyAsSuccessWhenSessionAlive(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond)
+	defer cancel()
+	postReadyCalls := 0
+	ops := &fakeStartOps{
+		hasSessionResult: true,
+		acceptStartupDialogsHook: func() {
+			postReadyCalls++
+			if postReadyCalls == 2 {
+				time.Sleep(5 * time.Millisecond)
+			}
+		},
+	}
+
+	cfg := runtime.Config{
+		WorkDir:                "/proj",
+		Command:                "claude",
+		ReadyPromptPrefix:      "> ",
+		ReadyDelayMs:           5000,
+		ProcessNames:           []string{"claude"},
+		EmitsPermissionWarning: true,
+	}
+
+	err := doStartSession(ctx, ops, "gc-city-mayor", cfg, DefaultConfig().SetupTimeout)
+	if err != nil {
+		t.Fatalf("err = %v, want nil", err)
+	}
+
+	assertCallSequence(t, ops, []string{
+		"createSession",
+		"setRemainOnExit",
+		"disableMouseAndActivity",
+		"waitForCommand",
+		"acceptStartupDialogs",
+		"waitForReady",
+		"acceptStartupDialogs",
+		"hasSession",
+		"isSessionRunning",
+	})
 }
 
 func TestDoStartSession_EmitsPermissionWarningOnly(t *testing.T) {
@@ -789,9 +1118,11 @@ func TestDoStartSession_EmitsPermissionWarningOnly(t *testing.T) {
 	assertCallSequence(t, ops, []string{
 		"createSession",
 		"setRemainOnExit",
+		"disableMouseAndActivity",
 		"acceptStartupDialogs",
 		"acceptStartupDialogs",
 		"hasSession",
+		"isSessionRunning",
 	})
 }
 
@@ -815,11 +1146,13 @@ func TestDoStartSession_ProcessNamesAndReadyPrefix(t *testing.T) {
 	assertCallSequence(t, ops, []string{
 		"createSession",
 		"setRemainOnExit",
+		"disableMouseAndActivity",
 		"waitForCommand",
 		"acceptStartupDialogs",
 		"waitForReady",
 		"acceptStartupDialogs",
 		"hasSession",
+		"isSessionRunning",
 	})
 }
 
@@ -843,14 +1176,16 @@ func TestDoStartSession_CursorReadinessHintsTriggerRuntimeWait(t *testing.T) {
 	assertCallSequence(t, ops, []string{
 		"createSession",
 		"setRemainOnExit",
+		"disableMouseAndActivity",
 		"waitForCommand",
 		"acceptStartupDialogs",
 		"waitForReady",
 		"acceptStartupDialogs",
 		"hasSession",
+		"isSessionRunning",
 	})
 
-	wfr := ops.calls[4]
+	wfr := ops.calls[5]
 	if wfr.rc.Tmux.ReadyPromptPrefix != "\u2192 " {
 		t.Errorf("rc.ReadyPromptPrefix = %q, want %q", wfr.rc.Tmux.ReadyPromptPrefix, "\u2192 ")
 	}
@@ -881,11 +1216,13 @@ func TestDoStartSession_ProcessNamesAndReadyDelayRechecksDialogs(t *testing.T) {
 	assertCallSequence(t, ops, []string{
 		"createSession",
 		"setRemainOnExit",
+		"disableMouseAndActivity",
 		"waitForCommand",
 		"acceptStartupDialogs",
 		"waitForReady",
 		"acceptStartupDialogs",
 		"hasSession",
+		"isSessionRunning",
 	})
 }
 
@@ -901,7 +1238,7 @@ func TestDoStartSession_SetRemainOnExit(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	assertCallSequence(t, ops, []string{"createSession", "setRemainOnExit"})
+	assertCallSequence(t, ops, []string{"createSession", "setRemainOnExit", "disableMouseAndActivity"})
 
 	// Verify session name passed through.
 	c := ops.calls[1]
@@ -924,7 +1261,26 @@ func TestDoStartSession_SetRemainOnExitErrorIgnored(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	assertCallSequence(t, ops, []string{"createSession", "setRemainOnExit"})
+	assertCallSequence(t, ops, []string{"createSession", "setRemainOnExit", "disableMouseAndActivity"})
+}
+
+func TestStartupReadyProbeTimeoutUsesReadyDelayBudget(t *testing.T) {
+	cfg := runtime.Config{
+		ReadyPromptPrefix: "> ",
+		ReadyDelayMs:      2500,
+	}
+	if got, want := startupReadyProbeTimeout(cfg), 7500*time.Millisecond; got != want {
+		t.Fatalf("startupReadyProbeTimeout() = %v, want %v", got, want)
+	}
+}
+
+func TestStartupReadyProbeTimeoutFallsBackForPromptOnly(t *testing.T) {
+	cfg := runtime.Config{
+		ReadyPromptPrefix: "> ",
+	}
+	if got, want := startupReadyProbeTimeout(cfg), 15*time.Second; got != want {
+		t.Fatalf("startupReadyProbeTimeout() = %v, want %v", got, want)
+	}
 }
 
 func TestDoStartSession_OneShotLifecycleSkipsPostStartNudgeChecks(t *testing.T) {
@@ -943,7 +1299,7 @@ func TestDoStartSession_OneShotLifecycleSkipsPostStartNudgeChecks(t *testing.T) 
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	assertCallSequence(t, ops, []string{"createSession", "setRemainOnExit"})
+	assertCallSequence(t, ops, []string{"createSession", "setRemainOnExit", "disableMouseAndActivity"})
 }
 
 // ---------------------------------------------------------------------------
@@ -977,20 +1333,22 @@ func TestDoStartSession_SessionSetupRunsAfterAlive(t *testing.T) {
 	assertCallSequence(t, ops, []string{
 		"createSession",
 		"setRemainOnExit",
+		"disableMouseAndActivity",
 		"waitForCommand",
 		"acceptStartupDialogs",
 		"acceptStartupDialogs",
 		"hasSession",
+		"isSessionRunning",
 		"runSetupCommand",
 		"runSetupCommand",
 	})
 
-	// Verify both commands were recorded.
-	cmd1 := ops.calls[6]
+	setupCalls := callsByMethod(t, ops, "runSetupCommand", 2)
+	cmd1 := setupCalls[0]
 	if cmd1.command != "tmux set-option -t test status-style 'bg=blue'" {
 		t.Errorf("setup cmd[0] = %q, want status-style command", cmd1.command)
 	}
-	cmd2 := ops.calls[7]
+	cmd2 := setupCalls[1]
 	if cmd2.command != "tmux set-option -t test mouse on" {
 		t.Errorf("setup cmd[1] = %q, want mouse command", cmd2.command)
 	}
@@ -1023,26 +1381,31 @@ func TestDoStartSession_SessionSetupScriptRunsAfterCommands(t *testing.T) {
 	assertCallSequence(t, ops, []string{
 		"createSession",
 		"setRemainOnExit",
+		"disableMouseAndActivity",
 		"waitForCommand",
 		"acceptStartupDialogs",
 		"acceptStartupDialogs",
 		"hasSession",
+		"isSessionRunning",
 		"runSetupCommand",
 		"runSetupCommand",
 		"sendKeys",
 	})
 
+	setupCalls := callsByMethod(t, ops, "runSetupCommand", 2)
+	nudgeCalls := callsByMethod(t, ops, "sendKeys", 1)
+
 	// First runSetupCommand = inline command.
-	if ops.calls[6].command != "tmux set mouse on" {
-		t.Errorf("setup[0] = %q, want inline command", ops.calls[6].command)
+	if setupCalls[0].command != "tmux set mouse on" {
+		t.Errorf("setup[0] = %q, want inline command", setupCalls[0].command)
 	}
 	// Second runSetupCommand = script.
-	if ops.calls[7].command != "/city/scripts/setup.sh" {
-		t.Errorf("setup[1] = %q, want script", ops.calls[7].command)
+	if setupCalls[1].command != "/city/scripts/setup.sh" {
+		t.Errorf("setup[1] = %q, want script", setupCalls[1].command)
 	}
 	// sendKeys = nudge.
-	if ops.calls[8].command != "start working" {
-		t.Errorf("nudge = %q, want %q", ops.calls[8].command, "start working")
+	if nudgeCalls[0].command != "start working" {
+		t.Errorf("nudge = %q, want %q", nudgeCalls[0].command, "start working")
 	}
 }
 
@@ -1171,7 +1534,7 @@ func TestDoStartSession_PreStartRunsBeforeCreate(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	assertCallSequence(t, ops, []string{"runSetupCommand", "createSession", "setRemainOnExit", "hasSession"})
+	assertCallSequence(t, ops, []string{"runSetupCommand", "createSession", "setRemainOnExit", "disableMouseAndActivity", "hasSession", "isSessionRunning"})
 
 	pre := ops.calls[0]
 	if pre.command != "setup-worktree" {

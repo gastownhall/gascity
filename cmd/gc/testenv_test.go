@@ -6,6 +6,8 @@ import (
 	"sort"
 	"strings"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/config"
 )
 
 // gcEnvVars lists the GC_* identity and session-routing variables that
@@ -102,6 +104,7 @@ func TestClearProcessLiveEnvForTestsUnsetsInheritedState(t *testing.T) {
 	}
 	preserved := []string{
 		"GC_FAST_UNIT",
+		"GC_REAL_PROCESS_SIGNAL_TESTS",
 		"GC_TEST_KEEP",
 	}
 
@@ -171,12 +174,19 @@ func liveEnvKeysForTests() []string {
 
 func preserveTestControlEnv(key string) bool {
 	return key == "GC_FAST_UNIT" ||
+		key == "GC_REAL_PROCESS_SIGNAL_TESTS" ||
 		key == managedDoltTestModeEnv ||
 		key == managedDoltTestParentPIDEnv ||
 		key == "GC_DOLT_REAL_BINARY" ||
 		strings.HasPrefix(key, "GC_LIVE_") ||
 		strings.HasPrefix(key, "GC_SESSION_CHAOS_") ||
 		strings.HasPrefix(key, "GC_TEST_")
+}
+
+func TestPreserveTestControlEnvKeepsRealProcessSignalGate(t *testing.T) {
+	if !preserveTestControlEnv("GC_REAL_PROCESS_SIGNAL_TESTS") {
+		t.Fatal("GC_REAL_PROCESS_SIGNAL_TESTS must survive cmd/gc test env scrubbing")
+	}
 }
 
 // isTestscriptCommandInvocation reports whether this process is a
@@ -234,6 +244,34 @@ func installTestProviderStubs() (string, error) {
 		}
 	}
 	return dir, nil
+}
+
+func builtinProviderAliasesForTest(names ...string) map[string]config.ProviderSpec {
+	providers := make(map[string]config.ProviderSpec, len(names))
+	for _, name := range names {
+		providers[name] = config.BuiltinProviderAlias(name)
+	}
+	return providers
+}
+
+func builtinProviderAliasTOMLForTest(names ...string) string {
+	var b strings.Builder
+	for _, name := range names {
+		b.WriteString("\n[providers.")
+		b.WriteString(name)
+		b.WriteString("]\nbase = \"builtin:")
+		b.WriteString(name)
+		b.WriteString("\"\n")
+	}
+	return b.String()
+}
+
+func withBuiltinProviderAliasesTOMLForTest(content string, names ...string) string {
+	content = strings.TrimRight(content, "\n")
+	if content == "" {
+		return strings.TrimLeft(builtinProviderAliasTOMLForTest(names...), "\n")
+	}
+	return content + "\n" + builtinProviderAliasTOMLForTest(names...)
 }
 
 func TestInstallTestProviderStubsUsesPIDPrefixedDir(t *testing.T) {

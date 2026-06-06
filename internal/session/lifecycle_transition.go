@@ -13,6 +13,9 @@ var freshWakeConversationResetKeys = []string{
 	startupDialogVerifiedKey,
 }
 
+// ResetCommittedAtKey records when a restart handoff durably committed.
+const ResetCommittedAtKey = "reset_committed_at"
+
 // MetadataPatch is an atomic set of metadata key updates for one lifecycle
 // transition. Empty values intentionally clear metadata keys in existing store
 // implementations.
@@ -71,7 +74,7 @@ func RequestExplicitWakePatch(reason string, now time.Time) MetadataPatch {
 // RequestWakePatch records a controller-owned one-shot create claim.
 func RequestWakePatch(reason string, now time.Time) MetadataPatch {
 	return MetadataPatch{
-		"state":                     string(StateCreating),
+		"state":                     string(StateStartPending),
 		"state_reason":              reason,
 		"pending_create_claim":      "true",
 		"pending_create_started_at": pendingCreateStartedAt(now),
@@ -99,13 +102,17 @@ type PreWakePatchInput struct {
 }
 
 // PreWakePatch records the metadata transition for a concrete runtime wake
-// attempt.
+// attempt. It intentionally owns the StateStartPending to StateCreating
+// provider-start boundary outside Transition because this patch is the atomic
+// reconciler commit made immediately before runtime start.
 func PreWakePatch(input PreWakePatchInput) MetadataPatch {
 	patch := MetadataPatch{
 		"instance_token":             input.InstanceToken,
 		"continuation_epoch":         fmt.Sprintf("%d", input.ContinuationEpoch),
 		"continuation_reset_pending": "",
 		"detached_at":                "",
+		"state":                      string(StateCreating),
+		"pending_create_started_at":  pendingCreateStartedAt(input.Now),
 		"last_woke_at":               input.Now.UTC().Format(time.RFC3339),
 		"sleep_reason":               input.SleepReason,
 		"sleep_intent":               "",
@@ -117,6 +124,17 @@ func PreWakePatch(input PreWakePatchInput) MetadataPatch {
 		patch["session_key"] = ""
 		applyFreshWakeConversationReset(patch)
 	}
+	return patch
+}
+
+// ContinuationResetWakePatch records a controller-owned fresh wake for a
+// session whose pending continuation reset was observed while a stale runtime
+// was still alive.
+func ContinuationResetWakePatch(now time.Time) MetadataPatch {
+	patch := RequestWakePatch("continuation-reset", now)
+	patch["session_key"] = ""
+	applyFreshWakeConversationReset(patch)
+	patch["continuation_reset_pending"] = "true"
 	return patch
 }
 
@@ -208,9 +226,10 @@ type CommitStartedPatchInput struct {
 // configuration hashes that future drift checks use.
 func CommitStartedPatch(input CommitStartedPatchInput) MetadataPatch {
 	patch := MetadataPatch{
-		"started_config_hash": input.CoreHash,
-		"live_hash":           input.LiveHash,
-		"started_live_hash":   input.LiveHash,
+		"started_config_hash":        input.CoreHash,
+		"live_hash":                  input.LiveHash,
+		"started_live_hash":          input.LiveHash,
+		"continuation_reset_pending": "",
 	}
 	if input.CoreBreakdown != "" {
 		patch["core_hash_breakdown"] = input.CoreBreakdown
@@ -218,6 +237,7 @@ func CommitStartedPatch(input CommitStartedPatchInput) MetadataPatch {
 	if input.ConfirmState {
 		patch["state"] = string(StateActive)
 		patch["state_reason"] = "creation_complete"
+		patch["pending_create_started_at"] = ""
 	}
 	// creation_complete_at tracks when the runtime was last confirmed started.
 	// Stamp it whenever Now is non-zero — the ConfirmState path marks the
@@ -266,6 +286,7 @@ func DrainAckStopPendingPatch(now time.Time) MetadataPatch {
 func SleepPatch(now time.Time, reason string) MetadataPatch {
 	return MetadataPatch{
 		"state":                     string(StateAsleep),
+		"state_reason":              "",
 		"sleep_reason":              reason,
 		"last_woke_at":              "",
 		"pending_create_claim":      "",
@@ -312,11 +333,15 @@ func CompleteDrainPatch(now time.Time, reason string, freshWake bool) MetadataPa
 // the next successful start rewrites them so restart-in-flight drift readers do
 // not observe an empty-hash backfill state. The caller owns stopping any
 // currently running runtime.
-func RestartRequestPatch(sessionKey string) MetadataPatch {
+func RestartRequestPatch(sessionKey string, now time.Time) MetadataPatch {
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
 	patch := MetadataPatch{
 		"restart_requested":          "",
 		"started_config_hash":        "",
 		"continuation_reset_pending": "true",
+		ResetCommittedAtKey:          now.UTC().Format(time.RFC3339),
 		"last_woke_at":               "",
 		"pending_create_claim":       "",
 		"pending_create_started_at":  "",
@@ -340,7 +365,7 @@ func ConfigDriftResetPatch(nextState State, sessionKey string, now time.Time) Me
 		"pending_create_started_at":  "",
 	}
 	applyFreshWakeConversationReset(patch)
-	if nextState == StateCreating {
+	if nextState == StateCreating || nextState == StateStartPending {
 		patch["pending_create_claim"] = "true"
 		patch["pending_create_started_at"] = pendingCreateStartedAt(now)
 	}

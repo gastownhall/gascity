@@ -82,6 +82,7 @@ function clearIssueDetailContent(): void {
     "issue-detail-type",
     "issue-detail-owner",
     "issue-detail-created",
+    "issue-detail-updated",
   ].forEach((id) => {
     const node = byId(id);
     if (node) node.textContent = "";
@@ -280,10 +281,28 @@ async function openIssueDetail(issueID: string): Promise<void> {
   byId("issue-detail-status")!.className = `issue-status ${issue.status ?? "open"}`;
   byId("issue-detail-type")!.textContent = issue.issue_type ? `Type: ${issue.issue_type}` : "";
   byId("issue-detail-owner")!.textContent = issue.assignee ? `Owner: ${issue.assignee}` : "Owner: unassigned";
-  byId("issue-detail-created")!.textContent = issue.created_at ? `Created: ${formatTimestamp(issue.created_at)}` : "";
+  renderIssueTimestamp("issue-detail-created", "Created", issue.created_at);
+  renderIssueTimestamp("issue-detail-updated", "Updated", updatedTimestampForDetail(issue));
 
   renderIssueActions(issue, options.agents);
   renderDependencies(depsR.data?.children ?? []);
+}
+
+function renderIssueTimestamp(elementID: string, label: string, timestamp: string | undefined | null): void {
+  const node = byId(elementID);
+  if (!node) return;
+  clear(node);
+  if (!timestamp) return;
+  node.append(`${label}: `, el("time", { datetime: timestamp }, [formatTimestamp(timestamp)]));
+}
+
+function updatedTimestampForDetail(issue: BeadRecord): string | undefined {
+  if (!issue.updated_at || !issue.created_at) return undefined;
+  const updatedMs = Date.parse(issue.updated_at);
+  const createdMs = Date.parse(issue.created_at);
+  if (!Number.isFinite(updatedMs) || !Number.isFinite(createdMs)) return undefined;
+  if (Math.abs(updatedMs - createdMs) <= 1000) return undefined;
+  return issue.updated_at;
 }
 
 function renderDependencies(children: BeadRecord[]): void {

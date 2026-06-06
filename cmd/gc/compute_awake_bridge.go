@@ -42,9 +42,10 @@ func buildAwakeInputFromReconciler(
 	for i := range cfg.Agents {
 		a := &cfg.Agents[i]
 		agent := AwakeAgent{
-			QualifiedName:  a.QualifiedName(),
-			Suspended:      isAgentEffectivelySuspended(cfg, a),
-			SleepAfterIdle: parseSleepDuration(a.SleepAfterIdle),
+			QualifiedName:     a.QualifiedName(),
+			Suspended:         isAgentEffectivelySuspended(cfg, a),
+			SleepAfterIdle:    parseSleepDuration(a.SleepAfterIdle),
+			MinActiveSessions: a.EffectiveMinActiveSessions(),
 		}
 		if len(a.DependsOn) > 0 {
 			agent.DependsOn = a.DependsOn
@@ -108,6 +109,9 @@ func buildAwakeInputFromReconciler(
 			Pinned:                 lifecycle.HasWakeCause(session.WakeCausePinned),
 			Drained:                lifecycle.BaseState == session.BaseStateDrained,
 			WaitHold:               b.Metadata["wait_hold"] == "true",
+			RestartRequested:       strings.TrimSpace(b.Metadata["restart_requested"]) == "true",
+			ContinuationResetPending: strings.TrimSpace(b.Metadata["continuation_reset_pending"]) == "true" &&
+				strings.TrimSpace(b.Metadata[session.ResetCommittedAtKey]) != "",
 		}
 		bead.HeldUntil = lifecycle.HeldUntil
 		bead.QuarantinedUntil = lifecycle.QuarantinedUntil
@@ -115,6 +119,23 @@ func buildAwakeInputFromReconciler(
 			bead.IdleSince = t
 		}
 		input.SessionBeads = append(input.SessionBeads, bead)
+	}
+
+	// Preserve the reconciler's existing wake continuity for already-materialized
+	// on-demand named sessions: when work_query matched the backing template and
+	// the canonical bead still exists, carry an explicit named-session work-query
+	// signal rather than waking ordinary siblings from the generic WorkSet path.
+	for _, ns := range input.NamedSessions {
+		if ns.Mode != "on_demand" || !input.WorkSet[ns.Template] {
+			continue
+		}
+		if resolveNamedSessionBeadName(input.SessionBeads, ns) == "" {
+			continue
+		}
+		if input.NamedSessionWorkQ == nil {
+			input.NamedSessionWorkQ = make(map[string]bool)
+		}
+		input.NamedSessionWorkQ[ns.Identity] = true
 	}
 
 	// Runtime liveness comes from wakeTargets. Attachment is probed only when
@@ -191,6 +212,8 @@ func awakeSetToWakeEvals(decisions map[string]AwakeDecision, sessionBeads []Awak
 				reasons = []WakeReason{WakeWait}
 			case "assigned-work", "named-demand", "work-query":
 				reasons = []WakeReason{WakeWork}
+			case "min-active":
+				reasons = []WakeReason{WakeConfig}
 			default:
 				reasons = []WakeReason{WakeConfig}
 			}

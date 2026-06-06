@@ -19,8 +19,22 @@ func writeFile(t *testing.T, path, content string) {
 	}
 }
 
+func newInstructionsFileCheckForTest(cfg *config.City, cityPath string) *InstructionsFileCheck {
+	if cfg != nil {
+		if cfg.Providers == nil {
+			cfg.Providers = map[string]config.ProviderSpec{}
+		}
+		for _, provider := range []string{"claude", "codex", "gemini"} {
+			if _, ok := cfg.Providers[provider]; !ok {
+				cfg.Providers[provider] = config.BuiltinProviderAlias(provider)
+			}
+		}
+	}
+	return NewInstructionsFileCheck(cfg, cityPath)
+}
+
 func TestInstructionsFileCheck_NilConfig(t *testing.T) {
-	r := NewInstructionsFileCheck(nil, "").Run(&CheckContext{})
+	r := newInstructionsFileCheckForTest(nil, "").Run(&CheckContext{})
 	if r.Status != StatusOK {
 		t.Fatalf("Status = %v, want StatusOK", r.Status)
 	}
@@ -28,7 +42,7 @@ func TestInstructionsFileCheck_NilConfig(t *testing.T) {
 
 func TestInstructionsFileCheck_NoRigs(t *testing.T) {
 	cfg := &config.City{Agents: []config.Agent{{Name: "a", Provider: "claude"}}}
-	r := NewInstructionsFileCheck(cfg, t.TempDir()).Run(&CheckContext{})
+	r := newInstructionsFileCheckForTest(cfg, t.TempDir()).Run(&CheckContext{})
 	if r.Status != StatusOK {
 		t.Fatalf("Status = %v, want StatusOK; details=%v", r.Status, r.Details)
 	}
@@ -44,7 +58,7 @@ func TestInstructionsFileCheck_AllFilesPresent(t *testing.T) {
 		Agents: []config.Agent{{Name: "a", Dir: "demo", Provider: "claude"}},
 		Rigs:   []config.Rig{{Name: "demo", Path: rig}},
 	}
-	r := NewInstructionsFileCheck(cfg, city).Run(&CheckContext{})
+	r := newInstructionsFileCheckForTest(cfg, city).Run(&CheckContext{})
 	if r.Status != StatusOK {
 		t.Fatalf("Status = %v, want StatusOK; details=%v", r.Status, r.Details)
 	}
@@ -61,7 +75,7 @@ func TestInstructionsFileCheck_FlagsMissingButRecoverable(t *testing.T) {
 		Agents: []config.Agent{{Name: "a", Dir: "demo", Provider: "codex"}},
 		Rigs:   []config.Rig{{Name: "demo", Path: rig}},
 	}
-	r := NewInstructionsFileCheck(cfg, city).Run(&CheckContext{})
+	r := newInstructionsFileCheckForTest(cfg, city).Run(&CheckContext{})
 	if r.Status != StatusWarning {
 		t.Fatalf("Status = %v, want StatusWarning; details=%v", r.Status, r.Details)
 	}
@@ -71,7 +85,7 @@ func TestInstructionsFileCheck_FlagsMissingButRecoverable(t *testing.T) {
 	if !strings.Contains(r.Details[0], `rig "demo"`) || !strings.Contains(r.Details[0], "AGENTS.md") || !strings.Contains(r.Details[0], "CLAUDE.md") {
 		t.Errorf("Details[0] missing expected components: %q", r.Details[0])
 	}
-	if !NewInstructionsFileCheck(cfg, city).CanFix() {
+	if !newInstructionsFileCheckForTest(cfg, city).CanFix() {
 		t.Error("expected CanFix() = true")
 	}
 }
@@ -89,7 +103,7 @@ func TestInstructionsFileCheck_NoFallbackNoWarning(t *testing.T) {
 		Agents: []config.Agent{{Name: "a", Dir: "bare", Provider: "codex"}},
 		Rigs:   []config.Rig{{Name: "bare", Path: rig}},
 	}
-	r := NewInstructionsFileCheck(cfg, city).Run(&CheckContext{})
+	r := newInstructionsFileCheckForTest(cfg, city).Run(&CheckContext{})
 	if r.Status != StatusOK {
 		t.Fatalf("Status = %v, want StatusOK; details=%v", r.Status, r.Details)
 	}
@@ -104,7 +118,7 @@ func TestInstructionsFileCheck_FixSymlinksFallback(t *testing.T) {
 		Agents: []config.Agent{{Name: "a", Dir: "demo", Provider: "codex"}},
 		Rigs:   []config.Rig{{Name: "demo", Path: rig}},
 	}
-	c := NewInstructionsFileCheck(cfg, city)
+	c := newInstructionsFileCheckForTest(cfg, city)
 	if err := c.Fix(&CheckContext{}); err != nil {
 		t.Fatalf("Fix() error: %v", err)
 	}
@@ -134,7 +148,7 @@ func TestInstructionsFileCheck_FixReportsExpectedDirectoryCollision(t *testing.T
 		Agents: []config.Agent{{Name: "a", Dir: "demo", Provider: "codex"}},
 		Rigs:   []config.Rig{{Name: "demo", Path: rig}},
 	}
-	c := NewInstructionsFileCheck(cfg, city)
+	c := newInstructionsFileCheckForTest(cfg, city)
 	r := c.Run(&CheckContext{})
 	if r.Status != StatusWarning {
 		t.Fatalf("Status = %v, want StatusWarning; details=%v", r.Status, r.Details)
@@ -164,7 +178,7 @@ func TestInstructionsFileCheck_RelativeRigPathResolves(t *testing.T) {
 		Agents: []config.Agent{{Name: "a", Dir: "rel", Provider: "codex"}},
 		Rigs:   []config.Rig{{Name: "rel", Path: rigRel}},
 	}
-	r := NewInstructionsFileCheck(cfg, city).Run(&CheckContext{})
+	r := newInstructionsFileCheckForTest(cfg, city).Run(&CheckContext{})
 	if r.Status != StatusWarning {
 		t.Fatalf("Status = %v, want StatusWarning; details=%v", r.Status, r.Details)
 	}
@@ -185,7 +199,7 @@ func TestInstructionsFileCheck_DeterministicOrdering(t *testing.T) {
 			{Name: "alpha", Path: filepath.Join(city, "rigs", "alpha")},
 		},
 	}
-	r := NewInstructionsFileCheck(cfg, city).Run(&CheckContext{})
+	r := newInstructionsFileCheckForTest(cfg, city).Run(&CheckContext{})
 	if r.Status != StatusWarning {
 		t.Fatalf("Status = %v; details=%v", r.Status, r.Details)
 	}
@@ -210,7 +224,7 @@ func TestInstructionsFileCheck_CityScopedAgentChecksCityRootOnly(t *testing.T) {
 		Agents: []config.Agent{{Name: "city-worker", Scope: "city", Provider: "codex"}},
 		Rigs:   []config.Rig{{Name: "unrelated", Path: rig}},
 	}
-	c := NewInstructionsFileCheck(cfg, city)
+	c := newInstructionsFileCheckForTest(cfg, city)
 	r := c.Run(&CheckContext{})
 	if r.Status != StatusWarning {
 		t.Fatalf("Status = %v, want StatusWarning; details=%v", r.Status, r.Details)
@@ -246,7 +260,7 @@ func TestInstructionsFileCheck_DefaultAgentChecksCityRoot(t *testing.T) {
 		Agents: []config.Agent{{Name: "default-worker", Provider: "codex"}},
 		Rigs:   []config.Rig{{Name: "unrelated", Path: rig}},
 	}
-	r := NewInstructionsFileCheck(cfg, city).Run(&CheckContext{})
+	r := newInstructionsFileCheckForTest(cfg, city).Run(&CheckContext{})
 	if r.Status != StatusWarning {
 		t.Fatalf("Status = %v, want StatusWarning; details=%v", r.Status, r.Details)
 	}
@@ -273,7 +287,7 @@ func TestInstructionsFileCheck_WorkDirOnlyAgentChecksWorkDirRoot(t *testing.T) {
 		Agents: []config.Agent{{Name: "workdir-worker", WorkDir: workDir, Provider: "codex"}},
 		Rigs:   []config.Rig{{Name: "unrelated", Path: rig}},
 	}
-	r := NewInstructionsFileCheck(cfg, city).Run(&CheckContext{})
+	r := newInstructionsFileCheckForTest(cfg, city).Run(&CheckContext{})
 	if r.Status != StatusWarning {
 		t.Fatalf("Status = %v, want StatusWarning; details=%v", r.Status, r.Details)
 	}
@@ -300,7 +314,7 @@ func TestInstructionsFileCheck_DanglingExpectedSymlinkCountsPresent(t *testing.T
 		Agents: []config.Agent{{Name: "worker", Dir: "demo", Provider: "codex"}},
 		Rigs:   []config.Rig{{Name: "demo", Path: rig}},
 	}
-	c := NewInstructionsFileCheck(cfg, city)
+	c := newInstructionsFileCheckForTest(cfg, city)
 	r := c.Run(&CheckContext{})
 	if r.Status != StatusOK {
 		t.Fatalf("Status = %v, want StatusOK for preexisting symlink; details=%v", r.Status, r.Details)
@@ -331,7 +345,7 @@ func TestInstructionsFileCheck_DanglingFallbackSymlinkNotRecoverable(t *testing.
 		Agents: []config.Agent{{Name: "worker", Dir: "demo", Provider: "codex"}},
 		Rigs:   []config.Rig{{Name: "demo", Path: rig}},
 	}
-	c := NewInstructionsFileCheck(cfg, city)
+	c := newInstructionsFileCheckForTest(cfg, city)
 	r := c.Run(&CheckContext{})
 	if r.Status != StatusOK {
 		t.Fatalf("Status = %v, want StatusOK for unusable fallback; details=%v", r.Status, r.Details)
@@ -356,7 +370,7 @@ func TestInstructionsFileCheck_MergesProvidersForSameGap(t *testing.T) {
 		},
 		Rigs: []config.Rig{{Name: "demo", Path: rig}},
 	}
-	r := NewInstructionsFileCheck(cfg, city).Run(&CheckContext{})
+	r := newInstructionsFileCheckForTest(cfg, city).Run(&CheckContext{})
 	if r.Status != StatusWarning {
 		t.Fatalf("Status = %v, want StatusWarning; details=%v", r.Status, r.Details)
 	}

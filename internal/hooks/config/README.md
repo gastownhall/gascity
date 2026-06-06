@@ -30,7 +30,7 @@ the event, or it does but Gas City has not opted in yet).
 | Canonical event | claude | codex | cursor | copilot | gemini | opencode | omp | pi |
 |---|---|---|---|---|---|---|---|---|
 | session start    | `SessionStart` ✓ | `SessionStart` ✓ | `sessionStart` ✓ | `sessionStart` ✓ | `SessionStart` ✓ | `session.created` ✓ | `session_start` ✓ | `session_start` ✓ |
-| pre-compaction   | `PreCompact` ✓   | `PreCompact` ✓   | `preCompact` ✓   | — (gap, #672)    | `PreCompress` ✓  | `session.compacted` ✓ | `session_compact` ✓ | `session_compact` ✓ |
+| pre-compaction   | `PreCompact` ✓   | `PreCompact` ✓   | `preCompact` ✓   | `preCompact` ✓   | `PreCompress` ✓  | `session.compacted` ✓ | `session_compact` ✓ | `session_compact` ✓ |
 | user prompt submit | `UserPromptSubmit` ✓ | `UserPromptSubmit` ✓ | `beforeSubmitPrompt` ✓ | `userPromptSubmitted` ✓ | — | — | — | — |
 | before agent run | —                | —                | —                | —                | `BeforeAgent` ✓  | —                | `before_agent_start` ✓ | `before_agent_start` ✓ |
 
@@ -64,8 +64,9 @@ this README only documents the event vocabulary, not the command shape.
 
 ## Known gaps
 
-- **copilot pre-compaction** — GitHub Copilot's hook config currently
-  exposes `sessionStart` and `userPromptSubmitted` but no documented
-  pre-compaction event. Tracked under the parent audit (#672 gap 3,
-  bead `ga-10l`). If/when Copilot adds such an event, append a row here
-  and wire `gc handoff --auto` to it.
+- **kiro pre-compaction** — Kiro's hook config (under
+  `.kiro/agents/gascity.json`) wires `agentSpawn` and `userPromptSubmit`
+  but has no pre-compaction event. Kiro does not currently document a
+  hook fired before context compaction; add a row here and wire
+  `gc handoff --auto` if/when Kiro exposes one. Tracked under the parent
+  audit (#672 gap 3).

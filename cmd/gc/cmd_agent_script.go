@@ -103,6 +103,27 @@ type agentScriptExecutor struct {
 	stderr     io.Writer
 	runCommand func(name string, args ...string) error
 	runShell   func(command string, env []string) error
+	// runCommandInStore runs a command in a specific working dir + env so a
+	// cross-store-eligible runner's bd write lands in the bead's own store
+	// (vp-kvp stage iii write half). Nil in tests/legacy paths → falls back to
+	// runCommand, leaving rig-agent behavior byte-for-byte unchanged.
+	runCommandInStore func(dir string, env []string, name string, args ...string) error
+	// resolveBeadStore returns the dir + env a bd write against beadID must use
+	// (ok=true) when the current runner must claim/update across stores; ok=false
+	// runs the write in the default (inherited) environment.
+	resolveBeadStore func(beadID string) (dir string, env []string, ok bool)
+}
+
+// runBDForBead runs a bd subprocess against beadID, redirecting it to the bead's
+// owning store when the runner is cross-store-eligible (vp-kvp stage iii write
+// half). Falls back to the default environment otherwise.
+func (e agentScriptExecutor) runBDForBead(beadID string, args ...string) error {
+	if e.resolveBeadStore != nil && e.runCommandInStore != nil {
+		if dir, env, ok := e.resolveBeadStore(strings.TrimSpace(beadID)); ok {
+			return e.runCommandInStore(dir, env, "bd", args...)
+		}
+	}
+	return e.runCommand("bd", args...)
 }
 
 func runAgentScript(scriptPath string, stdout, stderr io.Writer) int {
@@ -112,6 +133,10 @@ func runAgentScript(scriptPath string, stdout, stderr io.Writer) int {
 		runCommand: func(name string, args ...string) error {
 			return runAgentScriptCommand(stdout, stderr, name, args...)
 		},
+		runCommandInStore: func(dir string, env []string, name string, args ...string) error {
+			return runAgentScriptCommandInStore(stdout, stderr, dir, env, name, args...)
+		},
+		resolveBeadStore: agentScriptCrossStoreBeadEnv,
 	}
 	executor.runShell = executor.runShellCommand
 	return runAgentScriptWithRuntime(scriptPath, stdout, stderr, executor, agentScriptHookBead)
@@ -278,13 +303,17 @@ func (e agentScriptExecutor) runAction(action agentScriptAction, ctx agentScript
 			if actor := agentScriptClaimActor(); actor != "" {
 				args = append(args, "--actor", actor)
 			}
-			return nil, e.runCommand("bd", args...)
+			return nil, e.runBDForBead(id, args...)
 		case "bd_update":
 			args, err := agentScriptBDUpdateArgs(arg, ctx)
 			if err != nil {
 				return nil, err
 			}
-			return nil, e.runCommand("bd", args...)
+			beadID := ""
+			if len(args) >= 2 {
+				beadID = args[1]
+			}
+			return nil, e.runBDForBead(beadID, args...)
 		case "exit":
 			code, err := agentScriptIntArg(name, arg)
 			if err != nil {
@@ -700,11 +729,25 @@ func (e agentScriptExecutor) runShellCommand(command string, env []string) error
 }
 
 func runAgentScriptCommand(stdout, stderr io.Writer, name string, args ...string) error {
+	return runAgentScriptCommandInStore(stdout, stderr, "", nil, name, args...)
+}
+
+// runAgentScriptCommandInStore runs a command like runAgentScriptCommand but, when
+// dir/env are supplied, points the subprocess at a specific store so a
+// cross-store claim/update lands in the bead's own store (vp-kvp stage iii). An
+// empty dir / nil env preserves the inherited working dir and environment.
+func runAgentScriptCommandInStore(stdout, stderr io.Writer, dir string, env []string, name string, args ...string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), agentScriptActionTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.WaitDelay = 2 * time.Second
 	prepareProviderOpCommand(cmd)
+	if dir != "" {
+		cmd.Dir = dir
+	}
+	if env != nil {
+		cmd.Env = workQueryEnvForDir(env, dir)
+	}
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 	if err := cmd.Run(); err != nil {

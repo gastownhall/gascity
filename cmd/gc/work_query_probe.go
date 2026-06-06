@@ -143,12 +143,18 @@ func prefixedWorkQueryForProbeWithEnv(
 	if agentCfg == nil {
 		return ""
 	}
-	command := strings.TrimSpace(agentCfg.EffectiveWorkQuery())
+	beadsCfg := config.BeadsConfig{}
+	var rigs []config.Rig
+	if cfg != nil {
+		beadsCfg = cfg.Beads
+		rigs = cfg.Rigs
+	}
+	command := strings.TrimSpace(agentCfg.EffectiveWorkQueryForBeads(beadsCfg))
 	// Expand {{.Rig}}/{{.AgentBase}} so rig-scoped agents probe with
 	// rig-specific metadata. Mirrors the scale_check expansion in
 	// build_desired_state.go; #793. Malformed templates are logged to
 	// stderr (when supplied) and fall back to the raw command.
-	command = expandAgentCommandTemplate(cityPath, cityName, agentCfg, cfg.Rigs, "work_query", command, stderr)
+	command = expandAgentCommandTemplate(cityPath, cityName, agentCfg, rigs, "work_query", command, stderr)
 	if command == "" || agentCfg.SupportsMultipleSessions() {
 		return prefixShellEnv(queryEnv, command)
 	}

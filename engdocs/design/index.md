@@ -17,6 +17,7 @@ lives in the [Architecture](../architecture/index.md) section.
 | Document | Status | Notes |
 |---|---|---|
 | `machine-wide-supervisor-v0` | Accepted | Current supervisor direction |
+| `convoy-first-formulas-and-drain-v0` | Implemented | Convoy-first graph.v2 formula inputs and drain scatter semantics |
 | `api-ops-design` | Implemented | State-mutation API surface |
 | `agent-pools` | Implemented | Feature shipped before the current template existed |
 | `dependency-aware-bounded-parallel-lifecycle` | Implemented | Bounded parallel start/stop waves for session lifecycle |

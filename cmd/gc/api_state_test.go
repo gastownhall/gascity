@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -56,6 +57,54 @@ func (f *corruptCityAfterRenameFS) Rename(oldpath, newpath string) error {
 		}
 	}
 	return err
+}
+
+type blockingLatestEventProvider struct {
+	*events.Fake
+	latestCalled chan struct{}
+	allowLatest  chan struct{}
+	latestOnce   sync.Once
+}
+
+func newBlockingLatestEventProvider() *blockingLatestEventProvider {
+	return &blockingLatestEventProvider{
+		Fake:         events.NewFake(),
+		latestCalled: make(chan struct{}),
+		allowLatest:  make(chan struct{}),
+	}
+}
+
+func (p *blockingLatestEventProvider) LatestSeq() (uint64, error) {
+	p.latestOnce.Do(func() {
+		close(p.latestCalled)
+	})
+	<-p.allowLatest
+	return p.Fake.LatestSeq()
+}
+
+type failOnceWatchEventProvider struct {
+	*events.Fake
+	failed chan struct{}
+	once   sync.Once
+}
+
+func newFailOnceWatchEventProvider() *failOnceWatchEventProvider {
+	return &failOnceWatchEventProvider{
+		Fake:   events.NewFake(),
+		failed: make(chan struct{}),
+	}
+}
+
+func (p *failOnceWatchEventProvider) Watch(ctx context.Context, afterSeq uint64) (events.Watcher, error) {
+	var fail bool
+	p.once.Do(func() {
+		fail = true
+		close(p.failed)
+	})
+	if fail {
+		return nil, errors.New("injected watch setup failure")
+	}
+	return p.Fake.Watch(ctx, afterSeq)
 }
 
 type failAgentTomlRenameOSFS struct {
@@ -282,8 +331,11 @@ func TestControllerStateCreatedAgentVisibleAfterStaleRuntimeInterleaving(t *test
 	current := &config.City{
 		Workspace: config.Workspace{Name: "city1"},
 		Beads:     config.BeadsConfig{Provider: "file"},
-		Rigs:      []config.Rig{{Name: "alpha", Path: rigDir}},
-		Agents:    []config.Agent{{Name: "worker", Dir: "alpha", Provider: "bash"}},
+		Providers: map[string]config.ProviderSpec{
+			"bash": {Command: "bash"},
+		},
+		Rigs:   []config.Rig{{Name: "alpha", Path: rigDir}},
+		Agents: []config.Agent{{Name: "worker", Dir: "alpha", Provider: "bash"}},
 	}
 	content, err := current.Marshal()
 	if err != nil {
@@ -305,8 +357,11 @@ func TestControllerStateCreatedAgentVisibleAfterStaleRuntimeInterleaving(t *test
 	stale := &config.City{
 		Workspace: config.Workspace{Name: "city1"},
 		Beads:     config.BeadsConfig{Provider: "file"},
-		Rigs:      []config.Rig{{Name: "alpha", Path: rigDir}},
-		Agents:    []config.Agent{{Name: "worker", Dir: "alpha", Provider: "bash"}},
+		Providers: map[string]config.ProviderSpec{
+			"bash": {Command: "bash"},
+		},
+		Rigs:   []config.Rig{{Name: "alpha", Path: rigDir}},
+		Agents: []config.Agent{{Name: "worker", Dir: "alpha", Provider: "bash"}},
 	}
 	cs.updateFromRuntime(stale, runtime.NewFake(), pendingRev)
 	if got := cs.Config(); configHasAgent(got, "alpha/helper") {
@@ -896,7 +951,7 @@ func TestControllerStateMutationRollsBackAgentOverrideWhenRefreshFails(t *testin
 		t.Fatalf("write prompt template: %v", err)
 	}
 
-	original := []byte("[workspace]\nname = \"city1\"\n")
+	original := []byte("[workspace]\nname = \"city1\"\n\n[providers.claude]\nbase = \"builtin:claude\"\n")
 	tomlPath := filepath.Join(cityDir, "city.toml")
 	if err := os.WriteFile(tomlPath, original, 0o644); err != nil {
 		t.Fatalf("write city.toml: %v", err)
@@ -953,7 +1008,7 @@ func TestControllerStateMutationRestoresFullAgentScaffoldWhenRefreshFails(t *tes
 		}
 	}
 
-	original := []byte("[workspace]\nname = \"city1\"\n")
+	original := []byte("[workspace]\nname = \"city1\"\n\n[providers.claude]\nbase = \"builtin:claude\"\n")
 	tomlPath := filepath.Join(cityDir, "city.toml")
 	if err := os.WriteFile(tomlPath, original, 0o644); err != nil {
 		t.Fatalf("write city.toml: %v", err)
@@ -961,6 +1016,9 @@ func TestControllerStateMutationRestoresFullAgentScaffoldWhenRefreshFails(t *tes
 
 	cs := newControllerState(context.Background(), &config.City{
 		Workspace: config.Workspace{Name: "city1"},
+		Providers: map[string]config.ProviderSpec{
+			"claude": config.BuiltinProviderAlias("claude"),
+		},
 	}, runtime.NewFake(), events.NewFake(), "city1", cityDir)
 	cs.editor = configedit.NewEditor(&corruptCityAfterRemoveFS{
 		triggerPath: agentDir,
@@ -1075,12 +1133,16 @@ func TestControllerStateSchema2CreateThenUpdateConventionAgent(t *testing.T) {
 		t.Fatalf("write pack.toml: %v", err)
 	}
 	tomlPath := filepath.Join(cityDir, "city.toml")
-	if err := os.WriteFile(tomlPath, []byte("[workspace]\nname = \"city1\"\n"), 0o644); err != nil {
+	if err := os.WriteFile(tomlPath, []byte("[workspace]\nname = \"city1\"\n\n[providers.claude]\nbase = \"builtin:claude\"\n\n[providers.codex]\nbase = \"builtin:codex\"\n"), 0o644); err != nil {
 		t.Fatalf("write city.toml: %v", err)
 	}
 
 	cs := newControllerState(context.Background(), &config.City{
 		Workspace: config.Workspace{Name: "city1"},
+		Providers: map[string]config.ProviderSpec{
+			"claude": config.BuiltinProviderAlias("claude"),
+			"codex":  config.BuiltinProviderAlias("codex"),
+		},
 	}, runtime.NewFake(), events.NewFake(), "city1", cityDir)
 	cs.pokeCh = make(chan struct{}, 2)
 	cs.configDirty = &atomic.Bool{}
@@ -1135,12 +1197,15 @@ func TestControllerStateSchema2CreateRollsBackFreshConventionScaffoldWhenAgentTO
 		t.Fatalf("write pack.toml: %v", err)
 	}
 	tomlPath := filepath.Join(cityDir, "city.toml")
-	if err := os.WriteFile(tomlPath, []byte("[workspace]\nname = \"city1\"\n"), 0o644); err != nil {
+	if err := os.WriteFile(tomlPath, []byte("[workspace]\nname = \"city1\"\n\n[providers.claude]\nbase = \"builtin:claude\"\n"), 0o644); err != nil {
 		t.Fatalf("write city.toml: %v", err)
 	}
 
 	cs := newControllerState(context.Background(), &config.City{
 		Workspace: config.Workspace{Name: "city1"},
+		Providers: map[string]config.ProviderSpec{
+			"claude": config.BuiltinProviderAlias("claude"),
+		},
 	}, runtime.NewFake(), events.NewFake(), "city1", cityDir)
 	agentDir := filepath.Join(cityDir, "agents", "helper")
 	cs.editor = configedit.NewEditor(&failAgentTomlRenameOSFS{target: filepath.Join(agentDir, "agent.toml")}, tomlPath)
@@ -1265,12 +1330,15 @@ func TestControllerStateSchema2RejectsRigScopeConventionAgent(t *testing.T) {
 		t.Fatalf("write pack.toml: %v", err)
 	}
 	tomlPath := filepath.Join(cityDir, "city.toml")
-	if err := os.WriteFile(tomlPath, []byte("[workspace]\nname = \"city1\"\n"), 0o644); err != nil {
+	if err := os.WriteFile(tomlPath, []byte("[workspace]\nname = \"city1\"\n\n[providers.claude]\nbase = \"builtin:claude\"\n"), 0o644); err != nil {
 		t.Fatalf("write city.toml: %v", err)
 	}
 
 	cs := newControllerState(context.Background(), &config.City{
 		Workspace: config.Workspace{Name: "city1"},
+		Providers: map[string]config.ProviderSpec{
+			"claude": config.BuiltinProviderAlias("claude"),
+		},
 	}, runtime.NewFake(), events.NewFake(), "city1", cityDir)
 
 	if err := cs.CreateAgent(config.Agent{Name: "helper", Provider: "claude", Scope: "rig"}); !errors.Is(err, configedit.ErrValidation) {
@@ -1299,12 +1367,15 @@ func TestControllerStateSchema2CreateThenDeleteConventionAgent(t *testing.T) {
 		t.Fatalf("write pack.toml: %v", err)
 	}
 	tomlPath := filepath.Join(cityDir, "city.toml")
-	if err := os.WriteFile(tomlPath, []byte("[workspace]\nname = \"city1\"\n"), 0o644); err != nil {
+	if err := os.WriteFile(tomlPath, []byte("[workspace]\nname = \"city1\"\n\n[providers.claude]\nbase = \"builtin:claude\"\n"), 0o644); err != nil {
 		t.Fatalf("write city.toml: %v", err)
 	}
 
 	cs := newControllerState(context.Background(), &config.City{
 		Workspace: config.Workspace{Name: "city1"},
+		Providers: map[string]config.ProviderSpec{
+			"claude": config.BuiltinProviderAlias("claude"),
+		},
 	}, runtime.NewFake(), events.NewFake(), "city1", cityDir)
 	cs.pokeCh = make(chan struct{}, 2)
 	cs.configDirty = &atomic.Bool{}
@@ -1381,7 +1452,7 @@ func TestWrapWithCachingStoreCachesNonBdStore(t *testing.T) {
 		t.Fatalf("Create: %v", err)
 	}
 
-	store := wrapWithCachingStore(context.Background(), backing, nil)
+	store := wrapWithCachingStore(context.Background(), backing, nil, true)
 	cached, ok := store.(*beads.CachingStore)
 	if !ok {
 		t.Fatalf("store type = %T, want *beads.CachingStore", store)
@@ -1400,8 +1471,206 @@ func TestWrapWithCachingStoreCachesNonBdStore(t *testing.T) {
 }
 
 func TestWrapWithCachingStoreReturnsNilStore(t *testing.T) {
-	if got := wrapWithCachingStore(context.Background(), nil, nil); got != nil {
+	if got := wrapWithCachingStore(context.Background(), nil, nil, true); got != nil {
 		t.Fatalf("wrapWithCachingStore(nil) = %#v, want nil", got)
+	}
+}
+
+// TestWrapWithCachingStoreNoBackgroundRefresh covers the suspended-rig path:
+// with backgroundRefresh=false the cache still serves pre-primed reads but does
+// NOT start the reconcile loop (StaggerOffsetMs stays 0), so a suspended rig
+// stops costing a bd subprocess per reconcile cycle.
+func TestWrapWithCachingStoreNoBackgroundRefresh(t *testing.T) {
+	backing := beads.NewMemStore()
+	created, err := backing.Create(beads.Bead{Title: "suspended-rig bead"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	// Cancellable ctx so the refresh path is reachable (Background() always
+	// early-returns regardless of the flag).
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	store := wrapWithCachingStore(ctx, backing, nil, false)
+	cached, ok := store.(*beads.CachingStore)
+	if !ok {
+		t.Fatalf("store type = %T, want *beads.CachingStore", store)
+	}
+	// Pre-primed reads still work (on-demand access to a suspended rig).
+	items, err := cached.ListOpen()
+	if err != nil {
+		t.Fatalf("ListOpen: %v", err)
+	}
+	if len(items) != 1 || items[0].ID != created.ID {
+		t.Fatalf("ListOpen = %#v, want only %s", items, created.ID)
+	}
+	// Reconciler never armed: StartReconciler (which sets StaggerOffsetMs) was
+	// not called. Give any erroneously-spawned goroutine a moment to set it.
+	time.Sleep(50 * time.Millisecond)
+	if got := cached.Stats().StaggerOffsetMs; got != 0 {
+		t.Fatalf("StaggerOffsetMs = %d, want 0 (reconciler must not start when backgroundRefresh=false)", got)
+	}
+}
+
+type closeStoreSpy struct {
+	beads.Store
+	closed   atomic.Int32
+	closeErr error
+}
+
+func (s *closeStoreSpy) CloseStore() error {
+	s.closed.Add(1)
+	return s.closeErr
+}
+
+func (s *closeStoreSpy) Get(id string) (beads.Bead, error) {
+	if s.closeCount() > 0 {
+		return beads.Bead{}, fmt.Errorf("closeStoreSpy: %w", beads.ErrStoreClosed)
+	}
+	return s.Store.Get(id)
+}
+
+func (s *closeStoreSpy) closeCount() int {
+	return int(s.closed.Load())
+}
+
+func setControllerStateStoreCloseDelayForTest(t *testing.T, delay time.Duration) {
+	t.Helper()
+	prev := controllerStateStoreCloseDelay
+	controllerStateStoreCloseDelay = delay
+	t.Cleanup(func() { controllerStateStoreCloseDelay = prev })
+}
+
+func waitForCloseStoreSpy(t *testing.T, store *closeStoreSpy) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if got := store.closeCount(); got == 1 {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("CloseStore calls = %d, want 1", store.closeCount())
+}
+
+func TestControllerStateUpdateClosesReplacedCityStore(t *testing.T) {
+	prevOpen := newControllerStateOpenCityStore
+	t.Cleanup(func() { newControllerStateOpenCityStore = prevOpen })
+	setControllerStateStoreCloseDelayForTest(t, time.Millisecond)
+
+	replacement := beads.NewMemStore()
+	newControllerStateOpenCityStore = func(string) (beads.StoreOpenResult, error) {
+		return beads.StoreOpenResult{Store: replacement}, nil
+	}
+	oldStore := &closeStoreSpy{Store: beads.NewMemStore()}
+	cs := &controllerState{
+		cfg:           &config.City{},
+		cityPath:      t.TempDir(),
+		cityBeadStore: oldStore,
+		beadStores:    map[string]beads.Store{},
+	}
+
+	cs.update(&config.City{}, runtime.NewFake())
+
+	if cs.CityBeadStore() == oldStore {
+		t.Fatal("city bead store was not replaced")
+	}
+	waitForCloseStoreSpy(t, oldStore)
+}
+
+func TestControllerStateUpdateClosesReplacedRigStores(t *testing.T) {
+	prevOpen := newControllerStateOpenCityStore
+	t.Cleanup(func() { newControllerStateOpenCityStore = prevOpen })
+	setControllerStateStoreCloseDelayForTest(t, time.Millisecond)
+
+	newControllerStateOpenCityStore = func(string) (beads.StoreOpenResult, error) {
+		return beads.StoreOpenResult{}, nil
+	}
+	oldStore := &closeStoreSpy{Store: beads.NewMemStore()}
+	cs := &controllerState{
+		cfg:        &config.City{},
+		cityPath:   t.TempDir(),
+		beadStores: map[string]beads.Store{"frontend": oldStore},
+	}
+
+	cs.update(&config.City{}, runtime.NewFake())
+
+	if _, ok := cs.BeadStores()["frontend"]; ok {
+		t.Fatal("frontend rig store was not replaced")
+	}
+	waitForCloseStoreSpy(t, oldStore)
+}
+
+func TestCloseBeadStoreHandleUnwrapsPolicyWrappedCachingStore(t *testing.T) {
+	backing := &closeStoreSpy{Store: beads.NewMemStore()}
+	cache := beads.NewCachingStore(backing, nil)
+	wrapped := wrapStoreWithBeadPolicies(cache, &config.City{})
+
+	if err := closeBeadStoreHandle(wrapped); err != nil {
+		t.Fatalf("closeBeadStoreHandle: %v", err)
+	}
+	if backing.closeCount() != 1 {
+		t.Fatalf("backing CloseStore calls = %d, want 1", backing.closeCount())
+	}
+}
+
+func TestControllerStateUpdateKeepsStaleRigStoreUsableDuringReload(t *testing.T) {
+	prevOpen := newControllerStateOpenCityStore
+	t.Cleanup(func() { newControllerStateOpenCityStore = prevOpen })
+	setControllerStateStoreCloseDelayForTest(t, 200*time.Millisecond)
+
+	newControllerStateOpenCityStore = func(string) (beads.StoreOpenResult, error) {
+		return beads.StoreOpenResult{}, nil
+	}
+	oldStore := &closeStoreSpy{Store: beads.NewMemStore()}
+	created, err := oldStore.Create(beads.Bead{Title: "in-flight"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	cs := &controllerState{
+		cfg:        &config.City{},
+		cityPath:   t.TempDir(),
+		beadStores: map[string]beads.Store{"frontend": oldStore},
+	}
+
+	stale := cs.BeadStore("frontend")
+	cs.update(&config.City{}, runtime.NewFake())
+
+	got, err := stale.Get(created.ID)
+	if err != nil {
+		t.Fatalf("stale store Get after reload returned %v; want old handle usable during drain", err)
+	}
+	if got.ID != created.ID {
+		t.Fatalf("stale store Get ID = %q, want %q", got.ID, created.ID)
+	}
+	waitForCloseStoreSpy(t, oldStore)
+}
+
+func TestControllerStateUpdateReturnsTypedStoreClosedAfterReloadDrain(t *testing.T) {
+	prevOpen := newControllerStateOpenCityStore
+	t.Cleanup(func() { newControllerStateOpenCityStore = prevOpen })
+	setControllerStateStoreCloseDelayForTest(t, time.Millisecond)
+
+	newControllerStateOpenCityStore = func(string) (beads.StoreOpenResult, error) {
+		return beads.StoreOpenResult{}, nil
+	}
+	oldStore := &closeStoreSpy{Store: beads.NewMemStore()}
+	created, err := oldStore.Create(beads.Bead{Title: "in-flight"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	cs := &controllerState{
+		cfg:        &config.City{},
+		cityPath:   t.TempDir(),
+		beadStores: map[string]beads.Store{"frontend": oldStore},
+	}
+
+	stale := cs.BeadStore("frontend")
+	cs.update(&config.City{}, runtime.NewFake())
+	waitForCloseStoreSpy(t, oldStore)
+
+	if _, err := stale.Get(created.ID); !errors.Is(err, beads.ErrStoreClosed) {
+		t.Fatalf("stale store Get after reload drain returned %v, want ErrStoreClosed", err)
 	}
 }
 
@@ -1928,6 +2197,78 @@ provider = "file"
 	}
 }
 
+func TestControllerStateBuildStoresRoutesBdRigThroughStoreFactory(t *testing.T) {
+	t.Setenv("GC_BEADS", "")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+
+	prevOpen := controllerStateOpenRigStoreAtForCity
+	t.Cleanup(func() { controllerStateOpenRigStoreAtForCity = prevOpen })
+
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "frontend")
+	if err := os.MkdirAll(filepath.Join(rigDir, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
+name = "demo"
+
+[beads]
+provider = "file"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rigDir, ".beads", "metadata.json"), []byte(`{"database":"dolt","backend":"dolt","dolt_mode":"embedded","dolt_database":"fe"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	nativeBacking := beads.NewMemStore()
+	factoryCalled := false
+	controllerStateOpenRigStoreAtForCity = func(_ context.Context, opts beads.StoreOpenOptions) (beads.StoreOpenResult, error) {
+		factoryCalled = true
+		if opts.ScopeRoot != rigDir {
+			t.Fatalf("factory ScopeRoot = %q, want %q", opts.ScopeRoot, rigDir)
+		}
+		if opts.CityPath != cityDir {
+			t.Fatalf("factory CityPath = %q, want %q", opts.CityPath, cityDir)
+		}
+		if opts.Provider != "bd" {
+			t.Fatalf("factory Provider = %q, want bd", opts.Provider)
+		}
+		if opts.OpenBdStore == nil {
+			t.Fatal("factory OpenBdStore is nil")
+		}
+		return beads.StoreOpenResult{
+			Store: nativeBacking,
+			Diagnostic: beads.BeadsDiagnostic{
+				Store:               "NativeDoltStore",
+				NativeStoreEligible: true,
+			},
+		}, nil
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "demo"},
+		Rigs: []config.Rig{{
+			Name:   "frontend",
+			Path:   rigDir,
+			Prefix: "fe",
+		}},
+	}
+
+	cs := &controllerState{cityPath: cityDir, cfg: cfg}
+	stores := cs.buildStores(cfg)
+
+	if !factoryCalled {
+		t.Fatal("buildStores did not route bd-backed rig through store factory")
+	}
+	frontendStore := underlyingPolicyStoreForTest(stores["frontend"])
+	cached, ok := frontendStore.(*beads.CachingStore)
+	if !ok {
+		t.Fatalf("frontend store = %T, want caching store", frontendStore)
+	}
+	if cached.Backing() != nativeBacking {
+		t.Fatalf("frontend backing = %T, want native factory backing", cached.Backing())
+	}
+}
+
 func TestControllerStateBuildStoresUsesRigFileMarkerUnderLegacyFileCity(t *testing.T) {
 	t.Setenv("GC_BEADS", "")
 	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
@@ -2408,6 +2749,87 @@ func TestControllerStateMutationsPokeController(t *testing.T) {
 	}
 }
 
+func TestControllerStateCitySuspensionRecordsEvents(t *testing.T) {
+	cases := []struct {
+		name          string
+		initial       func(*config.City)
+		mutate        func(*controllerState) error
+		wantSuspended bool
+		wantEventType string
+		wantActor     string
+	}{
+		{
+			name: "suspend city",
+			mutate: func(cs *controllerState) error {
+				return cs.SuspendCity()
+			},
+			wantSuspended: true,
+			wantEventType: events.CitySuspended,
+			wantActor:     "gc",
+		},
+		{
+			name: "resume city",
+			initial: func(cfg *config.City) {
+				cfg.Workspace.Suspended = true
+			},
+			mutate: func(cs *controllerState) error {
+				return cs.ResumeCity()
+			},
+			wantEventType: events.CityResumed,
+			wantActor:     "gc",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cs, tomlPath := newControllerStateMutationHarness(t)
+			ep := events.NewFake()
+			cs.eventProv = ep
+
+			if tc.initial != nil {
+				cfg, err := config.Load(fsys.OSFS{}, tomlPath)
+				if err != nil {
+					t.Fatalf("load config: %v", err)
+				}
+				tc.initial(cfg)
+				content, err := cfg.Marshal()
+				if err != nil {
+					t.Fatalf("marshal initial config: %v", err)
+				}
+				if err := os.WriteFile(tomlPath, content, 0o644); err != nil {
+					t.Fatalf("write initial config: %v", err)
+				}
+			}
+
+			if err := tc.mutate(cs); err != nil {
+				t.Fatalf("mutation failed: %v", err)
+			}
+
+			gotCfg, err := config.Load(fsys.OSFS{}, tomlPath)
+			if err != nil {
+				t.Fatalf("reload config: %v", err)
+			}
+			if gotCfg.Workspace.Suspended != tc.wantSuspended {
+				t.Fatalf("workspace.suspended = %v, want %v", gotCfg.Workspace.Suspended, tc.wantSuspended)
+			}
+
+			gotEvents, err := ep.List(events.Filter{})
+			if err != nil {
+				t.Fatalf("list events: %v", err)
+			}
+			if len(gotEvents) != 1 {
+				t.Fatalf("recorded events = %+v, want exactly one %s event", gotEvents, tc.wantEventType)
+			}
+			if gotEvents[0].Type != tc.wantEventType {
+				t.Fatalf("recorded event type = %q, want %q", gotEvents[0].Type, tc.wantEventType)
+			}
+			if gotEvents[0].Actor != tc.wantActor {
+				t.Fatalf("recorded event actor = %q, want %q", gotEvents[0].Actor, tc.wantActor)
+			}
+		})
+	}
+}
+
 func TestControllerStateMutationErrorDoesNotPokeController(t *testing.T) {
 	cs, _ := newControllerStateMutationHarness(t)
 
@@ -2419,6 +2841,228 @@ func TestControllerStateMutationErrorDoesNotPokeController(t *testing.T) {
 		t.Fatal("failed mutation should not poke reconciler")
 	default:
 	}
+}
+
+func TestControllerStateEstablishesBeadEventCursorBeforePrimingStores(t *testing.T) {
+	ep := newBlockingLatestEventProvider()
+	var storeOpened atomic.Bool
+	prevCityStore := newControllerStateOpenCityStore
+	newControllerStateOpenCityStore = func(string) (beads.StoreOpenResult, error) {
+		storeOpened.Store(true)
+		return beads.StoreOpenResult{Store: beads.NewMemStore()}, nil
+	}
+	t.Cleanup(func() {
+		newControllerStateOpenCityStore = prevCityStore
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	returned := make(chan struct{})
+	go func() {
+		_ = newControllerState(ctx, &config.City{Workspace: config.Workspace{Name: "test-city"}}, runtime.NewFake(), ep, "test-city", t.TempDir())
+		close(returned)
+	}()
+
+	select {
+	case <-ep.latestCalled:
+	case <-time.After(time.Second):
+		t.Fatal("event watcher did not establish an initial cursor")
+	}
+	select {
+	case <-returned:
+		t.Fatal("newControllerState returned before the initial event cursor was established")
+	default:
+	}
+	if storeOpened.Load() {
+		t.Fatal("controller opened stores before establishing the initial event cursor")
+	}
+
+	close(ep.allowLatest)
+	select {
+	case <-returned:
+	case <-time.After(time.Second):
+		t.Fatal("newControllerState did not return after the initial event cursor was established")
+	}
+}
+
+func TestControllerStateBeadEventWatcherReplaysEventsAfterCachePrime(t *testing.T) {
+	backing := beads.NewMemStore()
+	prevCityStore := newControllerStateOpenCityStore
+	newControllerStateOpenCityStore = func(string) (beads.StoreOpenResult, error) {
+		return beads.StoreOpenResult{Store: backing}, nil
+	}
+	t.Cleanup(func() {
+		newControllerStateOpenCityStore = prevCityStore
+	})
+
+	ep := events.NewFake()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cs := newControllerState(ctx, &config.City{Workspace: config.Workspace{Name: "test-city"}}, runtime.NewFake(), ep, "test-city", t.TempDir())
+	cs.pokeCh = make(chan struct{}, 1)
+
+	created, err := backing.Create(beads.Bead{
+		Title: "queued work",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.routed_to": "claude",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create backing bead: %v", err)
+	}
+	payload, err := json.Marshal(map[string]beads.Bead{"bead": created})
+	if err != nil {
+		t.Fatalf("marshal bead event: %v", err)
+	}
+	ep.Record(events.Event{
+		Type:    events.BeadCreated,
+		Actor:   "bd-hook",
+		Subject: created.ID,
+		Payload: payload,
+	})
+	cs.startBeadEventWatcher(ctx)
+
+	select {
+	case <-cs.pokeCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("bead event written after watcher start did not poke controller")
+	}
+
+	counts, _, errs := defaultScaleCheckCounts([]defaultScaleCheckTarget{{
+		template: "claude",
+		store:    cs.cityBeadStore,
+	}})
+	if len(errs) != 0 {
+		t.Fatalf("defaultScaleCheckCounts errs = %v", errs)
+	}
+	if got := counts["claude"]; got != 1 {
+		t.Fatalf("defaultScaleCheckCounts[claude] = %d, want 1", got)
+	}
+}
+
+func TestControllerStateBeadEventWatcherRetriesSetupErrors(t *testing.T) {
+	backing := beads.NewMemStore()
+	prevCityStore := newControllerStateOpenCityStore
+	newControllerStateOpenCityStore = func(string) (beads.StoreOpenResult, error) {
+		return beads.StoreOpenResult{Store: backing}, nil
+	}
+	t.Cleanup(func() {
+		newControllerStateOpenCityStore = prevCityStore
+	})
+
+	prevRetryDelay := beadEventWatcherRetryDelay
+	beadEventWatcherRetryDelay = time.Millisecond
+	t.Cleanup(func() {
+		beadEventWatcherRetryDelay = prevRetryDelay
+	})
+
+	ep := newFailOnceWatchEventProvider()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cs := newControllerState(ctx, &config.City{Workspace: config.Workspace{Name: "test-city"}}, runtime.NewFake(), ep, "test-city", t.TempDir())
+	cs.pokeCh = make(chan struct{}, 1)
+	cs.startBeadEventWatcher(ctx)
+
+	select {
+	case <-ep.failed:
+	case <-time.After(time.Second):
+		t.Fatal("bead event watcher did not attempt initial watch")
+	}
+
+	created, err := backing.Create(beads.Bead{Title: "queued work", Type: "task"})
+	if err != nil {
+		t.Fatalf("Create backing bead: %v", err)
+	}
+	payload, err := json.Marshal(map[string]beads.Bead{"bead": created})
+	if err != nil {
+		t.Fatalf("marshal bead event: %v", err)
+	}
+	ep.Record(events.Event{
+		Type:    events.BeadCreated,
+		Actor:   "bd-hook",
+		Subject: created.ID,
+		Payload: payload,
+	})
+
+	select {
+	case <-cs.pokeCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("bead event watcher did not recover after setup watch error")
+	}
+}
+
+func TestControllerStateBeadEventWatcherConsumesExternalFileEvent(t *testing.T) {
+	backing := beads.NewMemStore()
+	prevCityStore := newControllerStateOpenCityStore
+	newControllerStateOpenCityStore = func(string) (beads.StoreOpenResult, error) {
+		return beads.StoreOpenResult{Store: backing}, nil
+	}
+	t.Cleanup(func() {
+		newControllerStateOpenCityStore = prevCityStore
+	})
+
+	eventPath := filepath.Join(t.TempDir(), "events.jsonl")
+	watchRecorder, err := events.NewFileRecorder(eventPath, io.Discard)
+	if err != nil {
+		t.Fatalf("NewFileRecorder(watcher): %v", err)
+	}
+	t.Cleanup(func() {
+		if err := watchRecorder.Close(); err != nil {
+			t.Fatalf("Close(watcher): %v", err)
+		}
+	})
+	writeRecorder, err := events.NewFileRecorder(eventPath, io.Discard)
+	if err != nil {
+		t.Fatalf("NewFileRecorder(writer): %v", err)
+	}
+	t.Cleanup(func() {
+		if err := writeRecorder.Close(); err != nil {
+			t.Fatalf("Close(writer): %v", err)
+		}
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	created, err := backing.Create(beads.Bead{Title: "queued work", Type: "task"})
+	if err != nil {
+		t.Fatalf("Create backing bead: %v", err)
+	}
+	cs := newControllerState(ctx, &config.City{Workspace: config.Workspace{Name: "test-city"}}, runtime.NewFake(), watchRecorder, "test-city", t.TempDir())
+	cs.pokeCh = make(chan struct{}, 1)
+	cs.startBeadEventWatcher(ctx)
+
+	if err := backing.SetMetadata(created.ID, "gc.routed_to", "claude"); err != nil {
+		t.Fatalf("SetMetadata backing bead: %v", err)
+	}
+	fresh, err := backing.Get(created.ID)
+	if err != nil {
+		t.Fatalf("Get backing bead: %v", err)
+	}
+	payload, err := json.Marshal(map[string]beads.Bead{"bead": fresh})
+	if err != nil {
+		t.Fatalf("marshal bead event: %v", err)
+	}
+	writeRecorder.Record(events.Event{
+		Type:    events.BeadUpdated,
+		Actor:   "bd-hook",
+		Subject: created.ID,
+		Payload: payload,
+	})
+
+	select {
+	case <-cs.pokeCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("external file bead event did not poke controller")
+	}
+
+	// This test's contract is that the watcher consumes the external file event
+	// and pokes the controller (asserted above). Demand-count behavior after an
+	// incremental cache apply is not asserted here: under the cache-only demand
+	// read model it depends on the store shape (an unprimed *CachingStore reports
+	// a partial, while a logical store is served directly), so it is covered by
+	// the dedicated defaultScaleCheckCounts tests instead.
 }
 
 func TestControllerStateApplyBeadEventPokesController(t *testing.T) {

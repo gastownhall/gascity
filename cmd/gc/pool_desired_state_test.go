@@ -181,6 +181,47 @@ func TestComputePoolDesiredStates_ResumeResolvesAssigneeByAlias(t *testing.T) {
 	}
 }
 
+func TestComputePoolDesiredStates_ResumeUsesLegacyWorkflowRunTarget(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{
+			poolAgent("claude", "rig", intPtr(2), 0),
+			poolAgent("reviewer", "rig", intPtr(2), 0),
+		},
+	}
+	work := []beads.Bead{{
+		ID:       "legacy-workflow-root",
+		Status:   "in_progress",
+		Assignee: "sess-1",
+		Priority: intPtr(5),
+		Metadata: map[string]string{
+			"gc.kind":       "workflow",
+			"gc.run_target": "rig/claude",
+		},
+	}}
+	sessions := []beads.Bead{{
+		ID:     "sess-1",
+		Status: "open",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			poolManagedMetadataKey: boolMetadata(true),
+		},
+	}}
+
+	result := ComputePoolDesiredStates(cfg, work, sessions, nil)
+
+	if len(result) != 1 {
+		t.Fatalf("len(result) = %d, want 1", len(result))
+	}
+	reqs := result[0].Requests
+	if len(reqs) != 1 {
+		t.Fatalf("len(requests) = %d, want 1 resume request", len(reqs))
+	}
+	if reqs[0].Tier != "resume" || reqs[0].SessionBeadID != "sess-1" {
+		t.Fatalf("request = %+v, want resume for sess-1", reqs[0])
+	}
+}
+
 func TestComputePoolDesiredStates_ResumeResolvesAssigneeByAliasHistory(t *testing.T) {
 	// Regression: alias rotation preserves prior aliases in alias_history.
 	// Work assigned under a prior alias must still resolve to its owning
@@ -528,6 +569,42 @@ func TestComputePoolDesiredStates_ScaleCheckMerge(t *testing.T) {
 		if r.Tier != "new" {
 			t.Errorf("request tier = %q, want new", r.Tier)
 		}
+	}
+}
+
+func TestComputePoolDesiredStates_ManualSessionDoesNotConsumeSingletonNewDemand(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{poolAgent("claude", "", intPtr(1), 0)},
+	}
+	manual := beads.Bead{
+		ID:     "manual-claude",
+		Status: "open",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:claude", "template:claude"},
+		Metadata: map[string]string{
+			"template":       "claude",
+			"agent_name":     "claude",
+			"session_name":   "s-manual-claude",
+			"state":          "start-pending",
+			"session_origin": "manual",
+			"manual_session": "true",
+		},
+	}
+
+	result := ComputePoolDesiredStates(cfg, nil, []beads.Bead{manual}, map[string]int{"claude": 1})
+
+	if len(result) != 1 {
+		t.Fatalf("len(result) = %d, want 1", len(result))
+	}
+	reqs := result[0].Requests
+	if len(reqs) != 1 {
+		t.Fatalf("len(requests) = %d, want 1 new pool request despite manual singleton session", len(reqs))
+	}
+	if reqs[0].Tier != "new" {
+		t.Fatalf("request tier = %q, want new", reqs[0].Tier)
+	}
+	if reqs[0].SessionBeadID != "" {
+		t.Fatalf("request SessionBeadID = %q, want anonymous new demand rather than reusing manual session", reqs[0].SessionBeadID)
 	}
 }
 

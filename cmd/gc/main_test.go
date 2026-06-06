@@ -24,6 +24,7 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/supervisor"
+	"github.com/gastownhall/gascity/test/tmuxtest"
 	"github.com/rogpeppe/go-internal/testscript"
 )
 
@@ -168,26 +169,54 @@ func configureFSPressureForTests() {
 }
 
 func TestMain(m *testing.M) {
-	if !isTestscriptCommandInvocation(os.Args[0]) {
-		clearProcessLiveEnvForTests()
+	// testscript re-executes the test binary as "gc" or "bd" for each txtar
+	// command. On that path we must not create a new temp root — the parent
+	// already owns the fixtures. Just configure hooks and forward.
+	if isTestscriptCommandInvocation(os.Args[0]) {
+		configureFSPressureForTests()
+		configureSupervisorHooksForTests()
+		testscript.Main(m, map[string]func(){
+			"gc": func() {
+				configureTestscriptEnvDefaults()
+				os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
+			},
+			"bd": bdTestCmd,
+		})
+		return
 	}
+
+	clearProcessLiveEnvForTests()
 	if err := os.Setenv(managedDoltTestModeEnv, "1"); err != nil {
 		panic(err)
 	}
 	if err := os.Setenv(managedDoltTestParentPIDEnv, fmt.Sprintf("%d", os.Getpid())); err != nil {
 		panic(err)
 	}
-	testTempRoot, err := os.MkdirTemp("/tmp", pidPrefixedTempPattern(testCmdGCTempRootPrefix))
+	// Sweep stale testTempRoot dirs in system /tmp before creating a new one.
+	// Sharded cmd/gc runs use a separate prefix so concurrent worktrees with
+	// older test harnesses cannot remove this package's active root.
+	testTempRootPrefix := cmdGCTestTempRootPrefix()
+	sweepOrphanPIDPrefixedDirs(os.TempDir(), testTempRootPrefix)
+	testTempRoot, err := os.MkdirTemp("/tmp", pidPrefixedTempPattern(testTempRootPrefix))
 	if err != nil {
 		panic(err)
 	}
+	if err := os.WriteFile(filepath.Join(testTempRoot, testActiveTempRootMarker), []byte(fmt.Sprintf("%d\n", os.Getpid())), 0o644); err != nil {
+		panic(err)
+	}
 	if err := os.Setenv("TMPDIR", testTempRoot); err != nil {
+		panic(err)
+	}
+	if err := tmuxtest.ConfigureProcessEnv(filepath.Join(testTempRoot, "tmux")); err != nil {
 		panic(err)
 	}
 	tmpRoot := os.TempDir()
 	sweepOrphanPIDPrefixedDirs(tmpRoot, testGCHomeDirPrefix)
 	sweepOrphanPIDPrefixedDirs(tmpRoot, testRuntimeDirPrefix)
 	sweepOrphanPIDPrefixedDirs(tmpRoot, testProviderStubDirPrefix)
+	sweepOrphanPIDPrefixedDirs(tmpRoot, testSlingFormulaDirPrefix)
+	sweepOrphanPIDPrefixedDirs(tmpRoot, testSlingCityDirPrefix)
+	initSharedSlingTestFixtures(testTempRoot)
 
 	gcHome, err := os.MkdirTemp("", pidPrefixedTempPattern(testGCHomeDirPrefix))
 	if err != nil {
@@ -216,7 +245,7 @@ func TestMain(m *testing.M) {
 	}
 	configureFSPressureForTests()
 	configureSupervisorHooksForTests()
-	testscript.Main(newDoltLeakGuardedTestingM(m, testTempRoot, testTempRoot, gcHome, runtimeDir, providerStubDir, sharedTestFormulaDir, sharedTestCityDir), map[string]func(){
+	testscript.Main(newDoltLeakGuardedTestingM(m, testTempRoot, testTempRoot, gcHome, runtimeDir, providerStubDir, sharedTestFixtureRoot), map[string]func(){
 		"gc": func() {
 			configureTestscriptEnvDefaults()
 			os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
@@ -244,7 +273,7 @@ func newTestscriptParams(t *testing.T, files ...string) testscript.Params {
 		WorkdirRoot: shortSocketTempDir(t, "gc-testscript-"),
 		Setup: func(env *testscript.Env) error {
 			gcHome := filepath.Join(env.WorkDir, ".gc-home")
-			runtimeDir := filepath.Join(env.WorkDir, ".runtime")
+			runtimeDir := filepath.Join(env.WorkDir, ".xdg-runtime")
 			if err := os.MkdirAll(gcHome, 0o755); err != nil {
 				return err
 			}
@@ -2724,6 +2753,15 @@ func TestDoInitWritesExpectedTOML(t *testing.T) {
 	// default mayor-only path). workspace.name lives in .gc/site.toml.
 	got := string(f.Files[filepath.Join("/bright-lights", "city.toml")])
 	want := `[workspace]
+
+[daemon]
+formula_v2 = true
+
+# [mail]
+# retention_ttl controls how long read messages are retained before purge.
+# 0 disables retention; use "168h" for 7 days.
+# "7d" is not a valid Go duration.
+# retention_ttl = "0"
 `
 	if got != want {
 		t.Errorf("city.toml content:\ngot:\n%s\nwant:\n%s", got, want)
@@ -2763,8 +2801,14 @@ func TestDoInitGastownWritesCanonicalPackV2Shape(t *testing.T) {
 	}
 
 	packToml := string(f.Files[filepath.Join("/bright-lights", "pack.toml")])
-	if !strings.Contains(packToml, "[imports.gastown]") || !strings.Contains(packToml, `source = ".gc/system/packs/gastown"`) {
+	if !strings.Contains(packToml, "[imports.gastown]") || !strings.Contains(packToml, `source = "`+config.PublicGastownPackSource+`"`) {
 		t.Fatalf("pack.toml missing gastown import:\n%s", packToml)
+	}
+	if !strings.Contains(packToml, `version = "`+config.PublicGastownPackVersion+`"`) {
+		t.Fatalf("pack.toml missing gastown version pin:\n%s", packToml)
+	}
+	if strings.Contains(packToml, ".gc/system/packs/gastown") {
+		t.Fatalf("pack.toml should not import legacy materialized gastown:\n%s", packToml)
 	}
 	if strings.Contains(packToml, `append_fragments = ["command-glossary", "operational-awareness"]`) {
 		t.Fatalf("pack.toml should not rewrite workspace.global_fragments into append_fragments:\n%s", packToml)
@@ -3054,9 +3098,43 @@ func TestSettingsArgsMissingFile(t *testing.T) {
 
 // --- runWizard ---
 
+func stubWizardProviderReadiness(t *testing.T, configured ...string) {
+	t.Helper()
+	configuredSet := make(map[string]bool, len(configured))
+	for _, provider := range configured {
+		configuredSet[provider] = true
+	}
+	oldProbe := initProbeProvidersReadiness
+	initProbeProvidersReadiness = func(_ context.Context, providers []string, fresh bool) (map[string]api.ReadinessItem, error) {
+		if !fresh {
+			t.Fatal("wizard provider readiness must use fresh probes")
+		}
+		out := make(map[string]api.ReadinessItem, len(providers))
+		for _, provider := range providers {
+			status := api.ProbeStatusNotInstalled
+			if configuredSet[provider] {
+				status = api.ProbeStatusConfigured
+			}
+			displayName := provider
+			if spec, ok := config.BuiltinProviders()[provider]; ok && spec.DisplayName != "" {
+				displayName = spec.DisplayName
+			}
+			out[provider] = api.ReadinessItem{
+				Name:        provider,
+				Kind:        api.ProbeKindProvider,
+				DisplayName: displayName,
+				Status:      status,
+			}
+		}
+		return out, nil
+	}
+	t.Cleanup(func() { initProbeProvidersReadiness = oldProbe })
+}
+
 func TestRunWizardDefaults(t *testing.T) {
-	// Two enters → default template (minimal) + default agent (claude).
-	stdin := strings.NewReader("\n\n")
+	stubWizardProviderReadiness(t, "claude")
+	// One configured provider is auto-selected after the template choice.
+	stdin := strings.NewReader("\n")
 	var stdout bytes.Buffer
 	wiz := runWizard(stdin, &stdout)
 
@@ -3066,8 +3144,11 @@ func TestRunWizardDefaults(t *testing.T) {
 	if wiz.configName != "minimal" {
 		t.Errorf("configName = %q, want %q", wiz.configName, "minimal")
 	}
-	if wiz.provider != "claude" {
-		t.Errorf("provider = %q, want %q", wiz.provider, "claude")
+	if wiz.defaultProvider != "claude" {
+		t.Errorf("defaultProvider = %q, want %q", wiz.defaultProvider, "claude")
+	}
+	if len(wiz.providers) != 1 || wiz.providers[0] != "claude" {
+		t.Errorf("providers = %v, want [claude]", wiz.providers)
 	}
 	// Verify both prompts were printed.
 	out := stdout.String()
@@ -3102,24 +3183,29 @@ func TestRunWizardNilStdin(t *testing.T) {
 }
 
 func TestRunWizardSelectGemini(t *testing.T) {
+	stubWizardProviderReadiness(t, "claude", "codex", "gemini")
 	// Default template + Gemini CLI.
-	stdin := strings.NewReader("\nGemini CLI\n")
+	stdin := strings.NewReader("\ngemini\n")
 	var stdout bytes.Buffer
 	wiz := runWizard(stdin, &stdout)
 
-	if wiz.provider != "gemini" {
-		t.Errorf("provider = %q, want %q", wiz.provider, "gemini")
+	if wiz.defaultProvider != "gemini" {
+		t.Errorf("defaultProvider = %q, want %q", wiz.defaultProvider, "gemini")
+	}
+	if got := strings.Join(wiz.providers, ","); got != "claude,codex,gemini" {
+		t.Errorf("providers = %v, want readiness-aware configured set", wiz.providers)
 	}
 }
 
 func TestRunWizardSelectCodex(t *testing.T) {
+	stubWizardProviderReadiness(t, "claude", "codex", "gemini")
 	// Default template + Codex by number.
 	stdin := strings.NewReader("\n2\n")
 	var stdout bytes.Buffer
 	wiz := runWizard(stdin, &stdout)
 
-	if wiz.provider != "codex" {
-		t.Errorf("provider = %q, want %q", wiz.provider, "codex")
+	if wiz.defaultProvider != "codex" {
+		t.Errorf("defaultProvider = %q, want %q", wiz.defaultProvider, "codex")
 	}
 }
 
@@ -3146,21 +3232,23 @@ func TestRunWizardCustomTemplate(t *testing.T) {
 }
 
 func TestRunWizardGastownTemplate(t *testing.T) {
+	stubWizardProviderReadiness(t, "claude")
 	// Select gastown template + default agent.
-	stdin := strings.NewReader("2\n\n")
+	stdin := strings.NewReader("2\n")
 	var stdout bytes.Buffer
 	wiz := runWizard(stdin, &stdout)
 
 	if wiz.configName != "gastown" {
 		t.Errorf("configName = %q, want %q", wiz.configName, "gastown")
 	}
-	if wiz.provider == "" {
-		t.Error("provider should be set to default for gastown")
+	if wiz.defaultProvider != "claude" {
+		t.Errorf("defaultProvider = %q, want claude", wiz.defaultProvider)
 	}
 }
 
 func TestRunWizardGastownByName(t *testing.T) {
-	stdin := strings.NewReader("gastown\n\n")
+	stubWizardProviderReadiness(t, "claude")
+	stdin := strings.NewReader("gastown\n")
 	var stdout bytes.Buffer
 	wiz := runWizard(stdin, &stdout)
 
@@ -3170,65 +3258,57 @@ func TestRunWizardGastownByName(t *testing.T) {
 }
 
 func TestRunWizardTutorialAliasMapsToMinimal(t *testing.T) {
-	stdin := strings.NewReader("tutorial\n\n")
+	stubWizardProviderReadiness(t, "claude")
+	stdin := strings.NewReader("tutorial\n")
 	var stdout bytes.Buffer
 	wiz := runWizard(stdin, &stdout)
 
 	if wiz.configName != "minimal" {
 		t.Errorf("configName = %q, want %q", wiz.configName, "minimal")
 	}
-	if wiz.provider != "claude" {
-		t.Errorf("provider = %q, want %q", wiz.provider, "claude")
+	if wiz.defaultProvider != "claude" {
+		t.Errorf("defaultProvider = %q, want %q", wiz.defaultProvider, "claude")
 	}
 }
 
-func TestRunWizardSelectCursorByNumber(t *testing.T) {
-	// Cursor is #6 in the order.
-	stdin := strings.NewReader("\n6\n")
+func TestRunWizardRequiresExplicitSelectionWhenMultipleProvidersConfigured(t *testing.T) {
+	stubWizardProviderReadiness(t, "claude", "codex")
+	stdin := strings.NewReader("\n\n")
 	var stdout bytes.Buffer
 	wiz := runWizard(stdin, &stdout)
 
-	if wiz.provider != "cursor" {
-		t.Errorf("provider = %q, want %q", wiz.provider, "cursor")
+	if wiz.err == nil {
+		t.Fatal("expected error when multiple providers are configured and no default is selected")
 	}
 }
 
-func TestRunWizardSelectCopilotByName(t *testing.T) {
-	stdin := strings.NewReader("\nGitHub Copilot\n")
+func TestRunWizardRejectsProviderOutsideReadinessSet(t *testing.T) {
+	stubWizardProviderReadiness(t, "claude", "codex", "gemini")
+	stdin := strings.NewReader("\ncursor\n")
 	var stdout bytes.Buffer
 	wiz := runWizard(stdin, &stdout)
 
-	if wiz.provider != "copilot" {
-		t.Errorf("provider = %q, want %q", wiz.provider, "copilot")
+	if wiz.err == nil {
+		t.Fatal("expected error for provider not present in readiness-aware choices")
 	}
 }
 
-func TestRunWizardSelectByProviderKey(t *testing.T) {
-	stdin := strings.NewReader("\namp\n")
+func TestRunWizardNoCustomCommandOption(t *testing.T) {
+	stubWizardProviderReadiness(t, "claude", "codex", "gemini")
+	stdin := strings.NewReader("\n4\n")
 	var stdout bytes.Buffer
 	wiz := runWizard(stdin, &stdout)
 
-	if wiz.provider != "amp" {
-		t.Errorf("provider = %q, want %q", wiz.provider, "amp")
+	if wiz.err == nil {
+		t.Fatal("expected error for non-existent fourth readiness provider")
 	}
-}
-
-func TestRunWizardCustomCommand(t *testing.T) {
-	// Default template + custom command (last option = len(providers)+1).
-	customNum := len(config.BuiltinProviderOrder()) + 1
-	stdin := strings.NewReader(fmt.Sprintf("\n%d\nmy-agent --auto --skip-confirm\n", customNum))
-	var stdout bytes.Buffer
-	wiz := runWizard(stdin, &stdout)
-
-	if wiz.provider != "" {
-		t.Errorf("provider = %q, want empty for custom command", wiz.provider)
-	}
-	if wiz.startCommand != "my-agent --auto --skip-confirm" {
-		t.Errorf("startCommand = %q, want %q", wiz.startCommand, "my-agent --auto --skip-confirm")
+	if wiz.startCommand != "" {
+		t.Errorf("startCommand = %q, want empty", wiz.startCommand)
 	}
 }
 
 func TestRunWizardEOFStdin(t *testing.T) {
+	stubWizardProviderReadiness(t, "claude")
 	stdin := strings.NewReader("")
 	var stdout bytes.Buffer
 	wiz := runWizard(stdin, &stdout)
@@ -3237,17 +3317,18 @@ func TestRunWizardEOFStdin(t *testing.T) {
 	if wiz.configName != "minimal" {
 		t.Errorf("configName = %q, want %q", wiz.configName, "minimal")
 	}
-	if wiz.provider != "claude" {
-		t.Errorf("provider = %q, want %q", wiz.provider, "claude")
+	if wiz.defaultProvider != "claude" {
+		t.Errorf("defaultProvider = %q, want %q", wiz.defaultProvider, "claude")
 	}
 }
 
 func TestDoInitWithWizardConfig(t *testing.T) {
 	f := fsys.NewFake()
 	wiz := wizardConfig{
-		interactive: true,
-		configName:  "minimal",
-		provider:    "claude",
+		interactive:     true,
+		configName:      "minimal",
+		defaultProvider: "claude",
+		providers:       []string{"claude", "codex"},
 	}
 
 	var stdout, stderr bytes.Buffer
@@ -3276,6 +3357,15 @@ func TestDoInitWithWizardConfig(t *testing.T) {
 	if raw.Workspace.Provider != "claude" {
 		t.Errorf("Workspace.Provider = %q, want %q", raw.Workspace.Provider, "claude")
 	}
+	for _, name := range []string{"claude", "codex"} {
+		spec, ok := raw.Providers[name]
+		if !ok {
+			t.Fatalf("city.toml missing provider alias %q:\n%s", name, data)
+		}
+		if spec.Base == nil || *spec.Base != "builtin:"+name {
+			t.Fatalf("providers.%s.base = %v, want builtin:%s", name, spec.Base, name)
+		}
+	}
 	cfg, err := loadCityConfigFS(f, filepath.Join("/bright-lights", "city.toml"))
 	if err != nil {
 		t.Fatalf("loading written config: %v", err)
@@ -3293,6 +3383,10 @@ func TestDoInitWithWizardConfig(t *testing.T) {
 	// Verify provider appears in TOML.
 	if !strings.Contains(string(data), `provider = "claude"`) {
 		t.Errorf("city.toml missing provider:\n%s", data)
+	}
+	packToml := string(f.Files[filepath.Join("/bright-lights", "pack.toml")])
+	if strings.Contains(packToml, "[providers.") {
+		t.Errorf("pack.toml should not contain generated provider aliases:\n%s", packToml)
 	}
 }
 
@@ -3395,9 +3489,7 @@ func TestDoInitWithCustomTemplate(t *testing.T) {
 		t.Fatalf("doInit = %d, want 0; stderr: %s", code, stderr.String())
 	}
 
-	// Custom template → DefaultCity (one mayor, no provider). The mayor
-	// now comes from the scaffolded agents/<name>/ tree rather than an
-	// inline pack.toml [[agent]].
+	// Custom template creates an empty providerless scaffold.
 	data := f.Files[filepath.Join("/my-city", "city.toml")]
 	raw, err := config.Parse(data)
 	if err != nil {
@@ -3411,11 +3503,8 @@ func TestDoInitWithCustomTemplate(t *testing.T) {
 		t.Fatalf("loading written config: %v", err)
 	}
 	explicit := explicitAgents(cfg.Agents)
-	if len(explicit) != 1 {
-		t.Fatalf("len(explicitAgents) = %d, want 1", len(explicit))
-	}
-	if explicit[0].Name != "mayor" {
-		t.Errorf("explicitAgents[0].Name = %q, want %q", explicit[0].Name, "mayor")
+	if len(explicit) != 0 {
+		t.Fatalf("len(explicitAgents) = %d, want 0", len(explicit))
 	}
 }
 
@@ -3554,6 +3643,143 @@ func TestInitWizardConfigRejectsUnknownProvider(t *testing.T) {
 	}
 }
 
+func TestInitWizardConfigFromFlagsRejectsUnknownTemplate(t *testing.T) {
+	cmd := newInitCmd(io.Discard, io.Discard)
+	if err := cmd.Flags().Set("template", "not-a-template"); err != nil {
+		t.Fatal(err)
+	}
+	template, _ := cmd.Flags().GetString("template")
+	if _, _, err := initWizardConfigFromFlags(cmd, "", "", nil, template, ""); err == nil {
+		t.Fatal("expected error for unknown template")
+	}
+}
+
+func TestCmdInitTemplateFlagSelectsGastown(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_DOLT", "skip")
+	configureIsolatedRuntimeEnv(t)
+
+	cityPath := filepath.Join(t.TempDir(), "bright-lights")
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"init", "--template", "gastown", "--default-provider", "claude", "--skip-provider-readiness", cityPath}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("run init --template gastown = %d; stderr=%q stdout=%q", code, stderr.String(), stdout.String())
+	}
+
+	data, err := os.ReadFile(filepath.Join(cityPath, "city.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Parse(data)
+	if err != nil {
+		t.Fatalf("parsing city.toml: %v", err)
+	}
+	if cfg.Workspace.Provider != "claude" {
+		t.Errorf("Workspace.Provider = %q, want claude", cfg.Workspace.Provider)
+	}
+	if _, ok := cfg.Providers["claude"]; !ok {
+		t.Fatalf("Providers = %v, want explicit claude alias", cfg.Providers)
+	}
+	if _, ok := cfg.Defaults.Rig.Imports["gastown"]; !ok {
+		t.Fatalf("Defaults.Rig.Imports = %v, want gastown import", cfg.Defaults.Rig.Imports)
+	}
+	packToml, err := os.ReadFile(filepath.Join(cityPath, "pack.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(packToml), "[imports.gastown]") {
+		t.Fatalf("pack.toml missing gastown import:\n%s", string(packToml))
+	}
+}
+
+func TestInitWizardConfigFromFlagsDefaultProviderInfersProviders(t *testing.T) {
+	cmd := newInitCmd(io.Discard, io.Discard)
+	if err := cmd.Flags().Set("default-provider", "codex"); err != nil {
+		t.Fatal(err)
+	}
+	defaultProvider, _ := cmd.Flags().GetString("default-provider")
+	wiz, mode, err := initWizardConfigFromFlags(cmd, "", defaultProvider, nil, "", "")
+	if err != nil {
+		t.Fatalf("initWizardConfigFromFlags: %v", err)
+	}
+	if mode != "provider" {
+		t.Fatalf("mode = %q, want provider", mode)
+	}
+	if wiz.defaultProvider != "codex" || len(wiz.providers) != 1 || wiz.providers[0] != "codex" {
+		t.Fatalf("wizard providers = default %q providers %v, want codex/[codex]", wiz.defaultProvider, wiz.providers)
+	}
+}
+
+func TestInitWizardConfigFromFlagsProvidersCanonicalOrder(t *testing.T) {
+	cmd := newInitCmd(io.Discard, io.Discard)
+	if err := cmd.Flags().Set("providers", "gemini,codex"); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Flags().Set("providers", "claude"); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Flags().Set("default-provider", "codex"); err != nil {
+		t.Fatal(err)
+	}
+	defaultProvider, _ := cmd.Flags().GetString("default-provider")
+	providers, _ := cmd.Flags().GetStringArray("providers")
+	wiz, _, err := initWizardConfigFromFlags(cmd, "", defaultProvider, providers, "", "")
+	if err != nil {
+		t.Fatalf("initWizardConfigFromFlags: %v", err)
+	}
+	if got := strings.Join(wiz.providers, ","); got != "claude,codex,gemini" {
+		t.Fatalf("providers = %v, want canonical readiness order", wiz.providers)
+	}
+}
+
+func TestInitWizardConfigFromFlagsProvidersRequireDefault(t *testing.T) {
+	cmd := newInitCmd(io.Discard, io.Discard)
+	if err := cmd.Flags().Set("providers", "claude,codex"); err != nil {
+		t.Fatal(err)
+	}
+	providers, _ := cmd.Flags().GetStringArray("providers")
+	if _, _, err := initWizardConfigFromFlags(cmd, "", "", providers, "", ""); err == nil {
+		t.Fatal("expected --providers without --default-provider to fail")
+	}
+}
+
+func TestInitWizardConfigFromFlagsRejectsProviderListTypo(t *testing.T) {
+	cmd := newInitCmd(io.Discard, io.Discard)
+	if err := cmd.Flags().Set("provider", "claude,codex"); err != nil {
+		t.Fatal(err)
+	}
+	provider, _ := cmd.Flags().GetString("provider")
+	_, _, err := initWizardConfigFromFlags(cmd, provider, "", nil, "", "")
+	if err == nil {
+		t.Fatal("expected deprecated --provider list typo to fail")
+	}
+	if !strings.Contains(err.Error(), "--providers claude,codex --default-provider") {
+		t.Fatalf("error = %v, want targeted --providers guidance", err)
+	}
+}
+
+func TestInitWizardConfigFromFlagsTemplateCustomRejectsProviders(t *testing.T) {
+	cmd := newInitCmd(io.Discard, io.Discard)
+	if err := cmd.Flags().Set("template", "custom"); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Flags().Set("default-provider", "claude"); err != nil {
+		t.Fatal(err)
+	}
+	template, _ := cmd.Flags().GetString("template")
+	defaultProvider, _ := cmd.Flags().GetString("default-provider")
+	if _, _, err := initWizardConfigFromFlags(cmd, "", defaultProvider, nil, template, ""); err == nil {
+		t.Fatal("expected --template custom with provider flags to fail")
+	}
+}
+
+func TestInitProviderFlagIsHidden(t *testing.T) {
+	cmd := newInitCmd(io.Discard, io.Discard)
+	if flag := cmd.Flags().Lookup("provider"); flag == nil || !flag.Hidden {
+		t.Fatalf("--provider hidden = %v, want true", flag != nil && flag.Hidden)
+	}
+}
+
 func TestInitWizardConfigNormalizesBootstrapAliases(t *testing.T) {
 	wiz, err := initWizardConfig("codex", "kubernetes")
 	if err != nil {
@@ -3580,7 +3806,7 @@ func TestCmdInitFromTOMLFileSuccess(t *testing.T) {
 	}
 
 	src := filepath.Join(dir, "my-config.toml")
-	tomlContent := []byte(`[workspace]
+	tomlContent := []byte(withBuiltinProviderAliasesTOMLForTest(`[workspace]
 name = "placeholder"
 provider = "claude"
 
@@ -3593,7 +3819,7 @@ name = "worker"
 min_active_sessions = 0
 max_active_sessions = 5
 scale_check = "echo 3"
-`)
+`, "claude"))
 	if err := os.WriteFile(src, tomlContent, 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -3817,7 +4043,7 @@ func TestCmdInitFromTOMLFilePreservesExistingFiles(t *testing.T) {
 	}
 
 	preExistingPack := []byte("[pack]\nname = \"user-authored\"\nschema = 2\nversion = \"9.9.9\"\n")
-	preExistingCity := []byte("[workspace]\nname = \"user-authored\"\nprovider = \"claude\"\n")
+	preExistingCity := []byte(withBuiltinProviderAliasesTOMLForTest("[workspace]\nname = \"user-authored\"\nprovider = \"claude\"\n", "claude"))
 	preExistingPrompt := []byte("user-authored mayor prompt\n")
 	for _, f := range []struct {
 		path string
@@ -3834,7 +4060,7 @@ func TestCmdInitFromTOMLFilePreservesExistingFiles(t *testing.T) {
 
 	src := filepath.Join(dir, "config.toml")
 	if err := os.WriteFile(src,
-		[]byte("[workspace]\nname = \"from-template\"\nprovider = \"claude\"\n\n[[agent]]\nname = \"mayor\"\nprompt_template = \"prompts/mayor.md\"\n"),
+		[]byte(withBuiltinProviderAliasesTOMLForTest("[workspace]\nname = \"from-template\"\nprovider = \"claude\"\n\n[[agent]]\nname = \"mayor\"\nprompt_template = \"prompts/mayor.md\"\n", "claude")),
 		0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -3880,12 +4106,12 @@ func TestCmdInitFromTOMLFilePreserveExistingLeavesRigSiteBindings(t *testing.T) 
 	}
 
 	preExistingPack := []byte("[pack]\nname = \"user-authored\"\nschema = 2\n")
-	preExistingCity := []byte(`[workspace]
+	preExistingCity := []byte(withBuiltinProviderAliasesTOMLForTest(`[workspace]
 provider = "claude"
 
 [[rigs]]
 name = "backend"
-`)
+`, "claude"))
 	preExistingSite := []byte(`[[rig]]
 name = "backend"
 path = "/existing/backend"
@@ -3905,14 +4131,14 @@ path = "/existing/backend"
 
 	src := filepath.Join(dir, "config.toml")
 	if err := os.WriteFile(src,
-		[]byte(`[workspace]
+		[]byte(withBuiltinProviderAliasesTOMLForTest(`[workspace]
 name = "from-template"
 provider = "claude"
 
 [[rigs]]
 name = "frontend"
 path = "/template/frontend"
-`),
+`, "claude")),
 		0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -4047,7 +4273,7 @@ func TestCmdInitFromFileWithOptionsUsesCWDWhenArgsEmpty(t *testing.T) {
 
 	src := filepath.Join(dir, "config.toml")
 	if err := os.WriteFile(src,
-		[]byte("[workspace]\nname = \"from-template\"\nprovider = \"claude\"\n"),
+		[]byte(withBuiltinProviderAliasesTOMLForTest("[workspace]\nname = \"from-template\"\nprovider = \"claude\"\n", "claude")),
 		0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -4111,7 +4337,7 @@ func TestDoInitFromDirSuccess(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(srcDir, "city.toml"),
-		[]byte("[workspace]\nname = \"template\"\nprovider = \"claude\"\n"), 0o644); err != nil {
+		[]byte("[workspace]\nname = \"template\"\nprovider = \"claude\"\n\n[providers.claude]\nbase = \"builtin:claude\"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(srcDir, "pack.toml"),
@@ -4210,7 +4436,7 @@ func TestDoInitFromDirMaterializesPackOverlayClaudeSettings(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(srcDir, "city.toml"),
-		[]byte("[workspace]\nname = \"template\"\nprovider = \"claude\"\n"), 0o644); err != nil {
+		[]byte("[workspace]\nname = \"template\"\nprovider = \"claude\"\n\n[providers.claude]\nbase = \"builtin:claude\"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(srcDir, "pack.toml"),
@@ -4303,7 +4529,7 @@ func TestInitNameFlagWithFrom(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(srcDir, "city.toml"),
-		[]byte("[workspace]\nname = \"template\"\nprovider = \"claude\"\n"), 0o644); err != nil {
+		[]byte(withBuiltinProviderAliasesTOMLForTest("[workspace]\nname = \"template\"\nprovider = \"claude\"\n", "claude")), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(srcDir, "pack.toml"),
@@ -4362,7 +4588,7 @@ func TestInitNameFlagWithFile(t *testing.T) {
 
 	tomlFile := filepath.Join(dir, "city.toml")
 	if err := os.WriteFile(tomlFile,
-		[]byte("[workspace]\nname = \"original\"\nprovider = \"claude\"\n\n[[agent]]\nname = \"mayor\"\nprompt_template = \"prompts/mayor.md\"\n"), 0o644); err != nil {
+		[]byte(withBuiltinProviderAliasesTOMLForTest("[workspace]\nname = \"original\"\nprovider = \"claude\"\n\n[[agent]]\nname = \"mayor\"\nprompt_template = \"prompts/mayor.md\"\n", "claude")), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -4433,7 +4659,7 @@ func TestInitFromDefaultsToTargetDirBasename(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(srcDir, "city.toml"),
-		[]byte("[workspace]\nname = \"template\"\nprovider = \"claude\"\n"), 0o644); err != nil {
+		[]byte(withBuiltinProviderAliasesTOMLForTest("[workspace]\nname = \"template\"\nprovider = \"claude\"\n", "claude")), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(srcDir, "pack.toml"),
@@ -4497,7 +4723,7 @@ func TestInitFromCopiesDefaultRigImportsToCityToml(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(srcDir, "city.toml"),
-		[]byte(`[workspace]
+		[]byte(withBuiltinProviderAliasesTOMLForTest(`[workspace]
 provider = "claude"
 
 [defaults.rig.imports.zeta]
@@ -4505,7 +4731,7 @@ source = "./packs/zeta"
 
 [defaults.rig.imports.alpha]
 source = "./packs/alpha"
-`), 0o644); err != nil {
+`, "claude")), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(srcDir, "pack.toml"), []byte(`[pack]
@@ -4555,7 +4781,7 @@ func TestInitFilePreservesDefaultRigImportsInCityToml(t *testing.T) {
 
 	dir := t.TempDir()
 	src := filepath.Join(dir, "source.toml")
-	if err := os.WriteFile(src, []byte(`[workspace]
+	if err := os.WriteFile(src, []byte(withBuiltinProviderAliasesTOMLForTest(`[workspace]
 provider = "claude"
 
 [defaults.rig.imports.zeta]
@@ -4563,7 +4789,7 @@ source = "./packs/zeta"
 
 [defaults.rig.imports.alpha]
 source = "./packs/alpha"
-`), 0o644); err != nil {
+`, "claude")), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -4602,7 +4828,7 @@ func TestInitFileKeepsCityOnlyPatchesOutOfPackToml(t *testing.T) {
 
 	dir := t.TempDir()
 	src := filepath.Join(dir, "source.toml")
-	if err := os.WriteFile(src, []byte(`[workspace]
+	if err := os.WriteFile(src, []byte(withBuiltinProviderAliasesTOMLForTest(`[workspace]
 provider = "claude"
 
 [providers.local]
@@ -4627,7 +4853,7 @@ prefix = "ga"
 [[patches.providers]]
 name = "local"
 command = "false"
-`), 0o644); err != nil {
+`, "claude")), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -4703,12 +4929,12 @@ func TestInitFromCopiesLegacyAgentDefaultsAliasToCityToml(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(srcDir, "city.toml"),
-		[]byte(`[workspace]
+		[]byte(withBuiltinProviderAliasesTOMLForTest(`[workspace]
 provider = "claude"
 
 [agents]
 append_fragments = ["legacy-footer"]
-`), 0o644); err != nil {
+`, "claude")), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(srcDir, "pack.toml"), []byte(`[pack]
@@ -4754,7 +4980,7 @@ func TestInitFromWithoutPackTomlPreservesLegacyWorkspaceIdentity(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(srcDir, "city.toml"),
-		[]byte("[workspace]\nname = \"template\"\nprovider = \"claude\"\n"), 0o644); err != nil {
+		[]byte(withBuiltinProviderAliasesTOMLForTest("[workspace]\nname = \"template\"\nprovider = \"claude\"\n", "claude")), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -6028,9 +6254,12 @@ func TestDoPrimeStrictAgentWithEmptyPromptTemplate(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Agent is in the config but has no prompt_template and isn't a pool
-	// or formula_v2 agent. Non-strict today emits defaultPrimePrompt.
+	// or compiler-v2 agent. Non-strict emits defaultPrimePrompt.
 	toml := `[workspace]
 name = "test-city"
+
+[daemon]
+formula_v2 = false
 
 [[agent]]
 name = "mayor"
@@ -6199,11 +6428,10 @@ prompt_template = "prompts/mayor.md"
 	}
 }
 
-// TestDoPrimeStrictHookModeDoesNotPersistSessionOnFailure verifies that
-// when --strict fails because the agent isn't found, hook-mode side
-// effects (persisting the session ID to .runtime/session_id) do NOT fire.
-// A failing strict invocation must not leave partial state behind.
-func TestDoPrimeStrictHookModeDoesNotPersistSessionOnFailure(t *testing.T) {
+// TestDoPrimeStrictHookModeUnknownAgentDoesNotCreateRuntimeSidecar verifies
+// that when --strict fails because the agent isn't found, hook-mode side
+// effects do not recreate the legacy provider hook sidecar.
+func TestDoPrimeStrictHookModeUnknownAgentDoesNotCreateRuntimeSidecar(t *testing.T) {
 	clearGCEnv(t)
 	disableManagedDoltRecoveryForTest(t)
 
@@ -6228,8 +6456,8 @@ name = "mayor"
 		t.Fatal(err)
 	}
 
-	// Present a session ID the way a runtime hook would.
 	t.Setenv("GC_SESSION_ID", "test-session-123")
+	t.Setenv("GC_PROVIDER_SESSION_ID", "provider-session-123")
 
 	var stdout, stderr bytes.Buffer
 	code := doPrimeWithMode([]string{"nonexistent"}, &stdout, &stderr, true, true)
@@ -6237,20 +6465,20 @@ name = "mayor"
 		t.Fatalf("doPrimeWithMode(strict=true, hook=true, unknown agent) = 0, want non-zero; stderr: %s", stderr.String())
 	}
 
-	// The critical assertion: no .runtime/session_id should have been created.
-	sessionFile := filepath.Join(dir, ".runtime", "session_id")
-	if _, err := os.Stat(sessionFile); !os.IsNotExist(err) {
-		t.Errorf("strict failure should not persist session id, but %s exists (err=%v)", sessionFile, err)
+	sidecarDir := filepath.Join(dir, ".runtime")
+	if _, err := os.Stat(sidecarDir); !os.IsNotExist(err) {
+		t.Fatalf("gc prime --hook created legacy sidecar directory %s (err=%v)", sidecarDir, err)
 	}
 }
 
-// TestDoPrimeStrictHookModeMissingTemplateDoesNotPersistSessionOnFailure
+// TestDoPrimeStrictHookModeMissingTemplateDoesNotUpdateProviderMetadataOnFailure
 // verifies that strict template validation also runs before hook-mode side
-// effects. A missing prompt_template is a strict failure, so it must not
-// leave behind a session id for the failed hook invocation.
-func TestDoPrimeStrictHookModeMissingTemplateDoesNotPersistSessionOnFailure(t *testing.T) {
+// effects. A missing prompt_template is a strict failure, so it must not leave
+// behind provider resume metadata for the failed hook invocation.
+func TestDoPrimeStrictHookModeMissingTemplateDoesNotUpdateProviderMetadataOnFailure(t *testing.T) {
 	clearGCEnv(t)
 	disableManagedDoltRecoveryForTest(t)
+	t.Setenv("GC_BEADS", "file")
 
 	dir := t.TempDir()
 	gcDir := filepath.Join(dir, ".gc")
@@ -6267,6 +6495,27 @@ prompt_template = "prompts/does-not-exist.md"
 	if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte(toml), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	store, err := openCityStoreAt(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessionBead, err := store.Create(beads.Bead{
+		Title: "mayor",
+		Type:  "task",
+		Labels: []string{
+			"gc:session",
+			"template:mayor",
+		},
+		Metadata: map[string]string{
+			"template":     "mayor",
+			"session_name": "mayor",
+			"state":        "active",
+			"work_dir":     dir,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	orig, _ := os.Getwd()
 	t.Cleanup(func() { _ = os.Chdir(orig) })
@@ -6274,7 +6523,8 @@ prompt_template = "prompts/does-not-exist.md"
 		t.Fatal(err)
 	}
 
-	t.Setenv("GC_SESSION_ID", "test-session-missing-template")
+	t.Setenv("GC_SESSION_ID", sessionBead.ID)
+	t.Setenv("GC_PROVIDER_SESSION_ID", "provider-session-missing-template")
 
 	var stdout, stderr bytes.Buffer
 	code := doPrimeWithMode([]string{"mayor"}, &stdout, &stderr, true, true)
@@ -6285,17 +6535,18 @@ prompt_template = "prompts/does-not-exist.md"
 		t.Errorf("stderr = %q, want to reference the missing template path", stderr.String())
 	}
 
-	sessionFile := filepath.Join(dir, ".runtime", "session_id")
-	if _, err := os.Stat(sessionFile); !os.IsNotExist(err) {
-		t.Errorf("strict template failure should not persist session id, but %s exists (err=%v)", sessionFile, err)
+	updated, err := store.Get(sessionBead.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.TrimSpace(updated.Metadata["session_key"]); got != "" {
+		t.Fatalf("session_key = %q, want empty after strict template failure", got)
 	}
 }
 
-// TestDoPrimeStrictHookModePersistsSessionOnSuccess is the contrast test:
-// when --strict + --hook succeeds (agent is found, prompt renders),
-// session-id persistence DOES fire — the deferral is not a regression of
-// hook behavior for the success path.
-func TestDoPrimeStrictHookModePersistsSessionOnSuccess(t *testing.T) {
+// TestDoPrimeStrictHookModeDoesNotCreateRuntimeSidecarOnSuccess verifies that
+// strict+hook success no longer writes the legacy provider hook sidecar.
+func TestDoPrimeStrictHookModeDoesNotCreateRuntimeSidecarOnSuccess(t *testing.T) {
 	clearGCEnv(t)
 	disableManagedDoltRecoveryForTest(t)
 
@@ -6335,13 +6586,9 @@ prompt_template = "prompts/mayor.md"
 	if code != 0 {
 		t.Fatalf("doPrimeWithMode(strict=true, hook=true, known agent) = %d, want 0; stderr: %s", code, stderr.String())
 	}
-	sessionFile := filepath.Join(dir, ".runtime", "session_id")
-	content, err := os.ReadFile(sessionFile)
-	if err != nil {
-		t.Fatalf("expected session id persisted to %s on strict success, got err: %v", sessionFile, err)
-	}
-	if !strings.Contains(string(content), "test-session-456") {
-		t.Errorf("session id file contents = %q, want to contain 'test-session-456'", string(content))
+	sidecarDir := filepath.Join(dir, ".runtime")
+	if _, err := os.Stat(sidecarDir); !os.IsNotExist(err) {
+		t.Fatalf("gc prime --hook created legacy sidecar directory %s (err=%v)", sidecarDir, err)
 	}
 }
 
@@ -6405,14 +6652,10 @@ prompt_template = "prompts/mayor.md"
 	}
 }
 
-// TestDoPrimeStrictHookModeOnSuspendedAgentPersistsSessionID guards a
-// behavior parity that was missed in the first pass: a suspended agent
-// is a legitimate quiet state, not a strict failure, so strict+hook on
-// a suspended agent must still persist the session-id (matching what
-// non-strict+hook does via its eager call at the top of the function).
-// Without this guard, the strict deferral silently drops session-id
-// persistence on the suspended-agent success path.
-func TestDoPrimeStrictHookModeOnSuspendedAgentPersistsSessionID(t *testing.T) {
+// TestDoPrimeStrictHookModeOnSuspendedAgentDoesNotCreateRuntimeSidecar guards
+// the suspended-agent hook path. A suspended agent is a legitimate quiet state,
+// but it still must not recreate the legacy provider hook sidecar.
+func TestDoPrimeStrictHookModeOnSuspendedAgentDoesNotCreateRuntimeSidecar(t *testing.T) {
 	clearGCEnv(t)
 	disableManagedDoltRecoveryForTest(t)
 
@@ -6448,13 +6691,9 @@ suspended = true
 	if stdout.String() != "" {
 		t.Errorf("stdout = %q, want empty (suspended)", stdout.String())
 	}
-	sessionFile := filepath.Join(dir, ".runtime", "session_id")
-	content, err := os.ReadFile(sessionFile)
-	if err != nil {
-		t.Fatalf("expected session id persisted to %s on strict+hook+suspended success, got err: %v", sessionFile, err)
-	}
-	if !strings.Contains(string(content), "test-session-suspended") {
-		t.Errorf("session id file contents = %q, want to contain 'test-session-suspended'", string(content))
+	sidecarDir := filepath.Join(dir, ".runtime")
+	if _, err := os.Stat(sidecarDir); !os.IsNotExist(err) {
+		t.Fatalf("gc prime --hook created legacy sidecar directory %s (err=%v)", sidecarDir, err)
 	}
 }
 
@@ -6495,6 +6734,9 @@ func TestDoPrimeBareName(t *testing.T) {
 	tomlContent := `[workspace]
 name = "test-city"
 
+[daemon]
+formula_v2 = false
+
 [[agent]]
 name = "polecat"
 dir = "myrig"
@@ -6533,6 +6775,9 @@ func TestDoPrimePoolAgentFallback(t *testing.T) {
 	}
 	tomlContent := `[workspace]
 name = "test-city"
+
+[daemon]
+formula_v2 = false
 
 [[agent]]
 name = "polecat"
@@ -6613,14 +6858,17 @@ max = -1
 		t.Fatalf("doPrime = %d, want 0; stderr: %s", code, stderr.String())
 	}
 	out := stdout.String()
-	if !strings.Contains(out, "gc hook") {
-		t.Fatalf("graph-worker prompt missing gc hook routed-queue lookup:\n%s", out)
+	if !strings.Contains(out, "gc hook --claim --drain-ack --json") {
+		t.Fatalf("graph-worker prompt missing gc hook claim startup protocol:\n%s", out)
 	}
-	if !strings.Contains(out, "bd update <id> --claim") {
-		t.Fatalf("graph-worker prompt missing atomic claim instruction:\n%s", out)
+	if !strings.Contains(out, "`gc hook --claim` handles `gc.continuation_group` for you") {
+		t.Fatalf("graph-worker prompt missing centralized continuation-group claim instruction:\n%s", out)
 	}
-	if !strings.Contains(out, "Do not start work with `bd update --status in_progress`") {
-		t.Fatalf("graph-worker prompt missing guard against unassigned in_progress work:\n%s", out)
+	if !strings.Contains(out, "continuation_assigned") {
+		t.Fatalf("graph-worker prompt missing continuation-assignment result guidance:\n%s", out)
+	}
+	if strings.Contains(out, "bd update <id> --claim") || strings.Contains(out, `ROOT_ID=$(bd show <id> --json`) {
+		t.Fatalf("graph-worker prompt still contains duplicated shell claim protocol:\n%s", out)
 	}
 }
 
@@ -6628,7 +6876,7 @@ func materializeBuiltinPrompts(cityPath string) error {
 	return MaterializeBuiltinPacks(cityPath)
 }
 
-func TestDoPrimeHookPersistsSessionID(t *testing.T) {
+func TestDoPrimeHookDoesNotCreateRuntimeSessionSidecar(t *testing.T) {
 	clearGCEnv(t)
 	disableManagedDoltRecoveryForTest(t)
 
@@ -6698,12 +6946,9 @@ prompt_template = "prompts/mayor.md"
 		t.Errorf("stdout = %q, hook beacon should not add manual gc prime instruction", out)
 	}
 
-	data, err := os.ReadFile(filepath.Join(dir, ".runtime", "session_id"))
-	if err != nil {
-		t.Fatalf("reading persisted session ID: %v", err)
-	}
-	if got := strings.TrimSpace(string(data)); got != "sess-123" {
-		t.Errorf("persisted session ID = %q, want %q", got, "sess-123")
+	sidecarDir := filepath.Join(dir, ".runtime")
+	if _, err := os.Stat(sidecarDir); !os.IsNotExist(err) {
+		t.Fatalf("gc prime --hook created legacy sidecar directory %s (err=%v)", sidecarDir, err)
 	}
 }
 
@@ -6723,6 +6968,9 @@ func TestDoPrimeGeminiHookPersistsProviderSessionKey(t *testing.T) {
 	toml := `[workspace]
 name = "test-city"
 provider = "gemini"
+
+[providers.gemini]
+base = "builtin:gemini"
 
 [[agent]]
 name = "probe"
@@ -6798,6 +7046,10 @@ func TestDoPrimeHookPersistsGenericProviderSessionKey(t *testing.T) {
 	toml := `[workspace]
 name = "test-city"
 provider = "omp"
+
+[providers.omp]
+command = "omp"
+prompt_mode = "none"
 
 [[agent]]
 name = "probe"

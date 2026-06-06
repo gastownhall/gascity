@@ -14,6 +14,7 @@ import (
 
 	workerpkg "github.com/gastownhall/gascity/internal/worker"
 	helpers "github.com/gastownhall/gascity/test/acceptance/helpers"
+	"github.com/gastownhall/gascity/test/tmuxtest"
 )
 
 var (
@@ -59,6 +60,9 @@ func TestMain(m *testing.M) {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			panic("worker-inference: " + err.Error())
 		}
+	}
+	if err := tmuxtest.ConfigureProcessEnv(filepath.Join(runtimeDir, "tmux")); err != nil {
+		panic("worker-inference: configuring tmux test env: " + err.Error())
 	}
 	if err := helpers.WriteSupervisorConfig(gcHome); err != nil {
 		panic("worker-inference: " + err.Error())

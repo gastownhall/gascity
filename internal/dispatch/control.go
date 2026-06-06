@@ -61,7 +61,10 @@ func processRetryControl(store beads.Store, bead beads.Bead, opts ProcessOptions
 	}
 
 	attemptNum, _ := strconv.Atoi(attempt.Metadata["gc.attempt"])
-	result := classifyRetryAttempt(attempt)
+	result, err := classifyRetryAttemptWithPostconditions(store, attempt, opts)
+	if err != nil {
+		return ControlResult{}, fmt.Errorf("%s: evaluating retry postconditions for %s: %w", bead.ID, attempt.ID, err)
+	}
 	attemptLog, err := appendAttemptLogValue(bead.Metadata["gc.attempt_log"], attemptNum, result.Outcome, result.Reason)
 	if err != nil {
 		return ControlResult{}, fmt.Errorf("%s: recording attempt log: %w", bead.ID, err)
@@ -329,6 +332,15 @@ func isPartialAttemptAttachError(err error) bool {
 	return errors.As(err, &partial)
 }
 
+var errTransientControllerBoundary = errors.New("transient controller boundary error")
+
+func markTransientControllerBoundaryError(err error) error {
+	if err == nil || errors.Is(err, errTransientControllerBoundary) {
+		return err
+	}
+	return fmt.Errorf("%w: %w", errTransientControllerBoundary, err)
+}
+
 // IsTransientControllerError is the dispatch/store transient classifier for
 // control spawn and spawn-state update boundaries. Prefer typed checks when
 // callers expose them; the string fallback covers wrapped Dolt/MySQL/tmux
@@ -338,6 +350,9 @@ func IsTransientControllerError(err error) bool {
 		return false
 	}
 	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	if errors.Is(err, errTransientControllerBoundary) {
 		return true
 	}
 	msg := strings.ToLower(err.Error())
@@ -353,6 +368,9 @@ func IsTransientControllerError(err error) bool {
 		"too many connections",
 		"lock wait timeout",
 		"deadlock found",
+		"database is locked",
+		"database table is locked",
+		"sqlite_busy",
 	}
 	for _, needle := range transientNeedles {
 		if strings.Contains(msg, needle) {
@@ -501,7 +519,7 @@ func failedAttemptAttachRootID(store beads.Store, control beads.Bead, attemptNum
 	if rootID == "" {
 		rootID = control.ID
 	}
-	matches, err := store.List(beads.ListQuery{
+	matches, err := beads.HandlesFor(store).Live.List(beads.ListQuery{
 		Metadata: map[string]string{
 			"gc.idempotency_key": fmt.Sprintf("%s:attempt:%d", control.ID, attemptNum),
 			"gc.root_bead_id":    rootID,
@@ -563,12 +581,15 @@ func buildAttemptRecipe(step *formula.Step, control beads.Bead, attemptNum int) 
 	if step.Ralph != nil && len(step.Children) > 0 {
 		rootKind = "scope"
 	}
-	rootMeta := map[string]string{
-		"gc.kind":     rootKind,
-		"gc.attempt":  strconv.Itoa(attemptNum),
-		"gc.step_id":  stepID,
-		"gc.step_ref": attemptPrefix,
+	rootMeta := make(map[string]string, len(step.Metadata))
+	// Preserve formula-specified retry metadata such as required artifacts.
+	for k, v := range step.Metadata {
+		rootMeta[k] = v
 	}
+	rootMeta["gc.kind"] = rootKind
+	rootMeta["gc.attempt"] = strconv.Itoa(attemptNum)
+	rootMeta["gc.step_id"] = stepID
+	rootMeta["gc.step_ref"] = attemptPrefix
 	if step.OnComplete != nil {
 		rootMeta["gc.output_json_required"] = "true"
 	}
@@ -597,6 +618,8 @@ func buildAttemptRecipe(step *formula.Step, control beads.Bead, attemptNum int) 
 	}
 	var fanoutSteps []formula.RecipeStep
 	var fanoutDeps []formula.RecipeDep
+	var nestedSeedSteps []formula.RecipeStep
+	var nestedSeedDeps []formula.RecipeDep
 
 	// For steps with children (scoped ralph), add children as sub-steps.
 	// Children may have retry/ralph config — propagate their metadata
@@ -667,6 +690,16 @@ func buildAttemptRecipe(step *formula.Step, control beads.Bead, attemptNum int) 
 				if step := newSpecRecipeStep(childID, child); step != nil {
 					recipe.Steps = append(recipe.Steps, *step)
 				}
+				// Seed the nested ralph's first iteration. At compile time
+				// expandNestedRalph seeds iteration.1; the re-spawn path must do
+				// the same so the inner ralph control finds a valid iteration on
+				// every outer iteration, not just the first. Without this seed,
+				// processRalphControl's findLatestAttempt returns empty and fatals
+				// ("no iteration found"), crash-looping all dispatch for the rig.
+				// See gastownhall/gascity#2798.
+				seedSteps, seedDeps := buildNestedControlSeed(child, childID)
+				nestedSeedSteps = append(nestedSeedSteps, seedSteps...)
+				nestedSeedDeps = append(nestedSeedDeps, seedDeps...)
 			}
 			childStep := formula.RecipeStep{
 				ID:          childID,
@@ -705,8 +738,54 @@ func buildAttemptRecipe(step *formula.Step, control beads.Bead, attemptNum int) 
 	applyAttemptRecipeScopeChecks(recipe)
 	recipe.Steps = append(recipe.Steps, fanoutSteps...)
 	recipe.Deps = append(recipe.Deps, fanoutDeps...)
+	// Nested-control seed steps are appended after the outer scope-check pass so
+	// their own scope-checks (already applied by the recursive buildAttemptRecipe
+	// call) are not double-processed against the outer iteration scope.
+	recipe.Steps = append(recipe.Steps, nestedSeedSteps...)
+	recipe.Deps = append(recipe.Deps, nestedSeedDeps...)
 
 	return recipe
+}
+
+// buildNestedControlSeed builds the first-iteration sub-DAG for a nested ralph
+// control re-created during an outer ralph re-spawn. It mirrors the compile-time
+// seeding performed by expandNestedRalph so the inner control starts in a valid
+// state on every outer iteration. childID is the fully namespaced ID of the inner
+// control bead (for example "mol.outer.iteration.2.inner"). The returned steps and
+// deps must be merged after the caller's scope-check pass, since the seed already
+// carries its own scope-checks. See gastownhall/gascity#2798.
+func buildNestedControlSeed(child *formula.Step, childID string) ([]formula.RecipeStep, []formula.RecipeDep) {
+	synthetic := beads.Bead{
+		ID: childID,
+		Metadata: map[string]string{
+			"gc.step_id":  child.ID,
+			"gc.step_ref": childID,
+		},
+	}
+	seed := buildAttemptRecipe(child, synthetic, 1)
+	// buildAttemptRecipe marks the seed's root step with IsRoot=true, but once
+	// these steps are merged into the outer attempt recipe they are no longer
+	// roots — the outer recipe already owns its root at Steps[0]. molecule.Attach
+	// applies the attach-root overrides (Type="molecule", Ref, ParentID) to ANY
+	// IsRoot step and maps it as an attach root, so a leftover IsRoot on the
+	// nested seed would corrupt the iteration bead's type/ref/parent and break
+	// dependency wiring. Clear it on every returned seed step. RootStep() below
+	// returns Steps[0] regardless of the flag, so the blocks dep wiring is
+	// unaffected. See gastownhall/gascity#2798.
+	for i := range seed.Steps {
+		seed.Steps[i].IsRoot = false
+	}
+	deps := append([]formula.RecipeDep{}, seed.Deps...)
+	if root := seed.RootStep(); root != nil {
+		// The inner control blocks on its first iteration, exactly as the
+		// compile-time control.Needs wiring does.
+		deps = append(deps, formula.RecipeDep{
+			StepID:      childID,
+			DependsOnID: root.ID,
+			Type:        "blocks",
+		})
+	}
+	return seed.Steps, deps
 }
 
 func buildAttemptRecipeFanoutControl(source formula.RecipeStep, onComplete *formula.OnCompleteSpec) (formula.RecipeStep, formula.RecipeDep, bool) {

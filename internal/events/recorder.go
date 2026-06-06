@@ -438,8 +438,15 @@ func (r *FileRecorder) ListTail(filter Filter, limit int) ([]Event, error) {
 
 // LatestSeq returns the highest sequence number in the event log.
 func (r *FileRecorder) LatestSeq() (uint64, error) {
+	seq, err := ReadLatestSeq(r.path)
+	if err != nil {
+		return 0, err
+	}
 	r.mu.Lock()
-	seq := r.seq
+	if seq > r.seq {
+		r.seq = seq
+	}
+	seq = r.seq
 	r.mu.Unlock()
 	return seq, nil
 }
@@ -453,14 +460,23 @@ func (r *FileRecorder) LatestSeq() (uint64, error) {
 func (r *FileRecorder) Watch(ctx context.Context, afterSeq uint64) (Watcher, error) {
 	var offset int64
 	var inode uint64
-	r.mu.Lock()
-	if afterSeq >= r.seq {
-		if info, err := r.file.Stat(); err == nil {
-			offset = info.Size()
-		}
-	}
+	var size int64
+	var haveStat bool
 	if info, err := os.Stat(r.path); err == nil {
+		size = info.Size()
 		inode = inodeOf(info)
+		haveStat = true
+	}
+	latestSeq, err := ReadLatestSeq(r.path)
+	if err != nil {
+		return nil, err
+	}
+	r.mu.Lock()
+	if latestSeq > r.seq {
+		r.seq = latestSeq
+	}
+	if haveStat && afterSeq >= latestSeq {
+		offset = size
 	}
 	r.mu.Unlock()
 	return &fileWatcher{

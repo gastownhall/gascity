@@ -44,6 +44,18 @@ the bead. No separate MR beads.
 
 Your formula: `mol-refinery-patrol`
 
+## Quality-Gate Fallback
+
+The `run-tests` step reads `setup_command`, `typecheck_command`,
+`lint_command`, `build_command`, and `test_command` from the wisp's
+vars. When the pack ships no commands for this rig (all of those vars
+are empty), do not silently skip the gates. Read this repo's
+project-instructions file, **`{{ .InstructionsFile }}`**, and run
+the quality gates documented there instead. Treat their failures the
+same as failures from configured commands (reject or file pre-existing
+bug, per the formula's `handle-failures` step). The fallback preserves
+the quality-gate intent even when pack-specific guidance is missing.
+
 ---
 
 ## Patrol Lifecycle Discipline
@@ -152,7 +164,7 @@ without catching the mismatch (upstream #1833).
 # (e.g. controller restart, host wake, claim race). Their branch ships
 # but you never see the mail. Scan metadata for orphans before the
 # normal patrol — these are real merge candidates that need rescuing.
-ORPHANS=$(gc bd list --metadata-field gc.routed_to="${GC_RIG:+$GC_RIG/}{{ .BindingPrefix }}refinery" --status=open --json 2>/dev/null \
+ORPHANS=$(gc bd list ${GC_RIG:+--rig="$GC_RIG"} --metadata-field gc.routed_to="${GC_RIG:+$GC_RIG/}{{ .BindingPrefix }}refinery" --status=open --json 2>/dev/null \
   | jq -r '.[] | select(.metadata.branch != null) | .id')
 for ORPHAN in $ORPHANS; do
   echo "orphan-merge candidate: $ORPHAN"
@@ -162,7 +174,7 @@ for ORPHAN in $ORPHANS; do
 done
 
 # Step 1: Check for an in-progress patrol wisp
-gc bd list --assignee="$GC_AGENT" --status=in_progress
+{{ .AssignedInProgressQuery }}
 
 # If none found, pour one (root-only — no child step beads) and assign it
 WISP=$(gc bd mol wisp mol-refinery-patrol --root-only --var target_branch={{ .DefaultBranch }} --var rig_name={{ .RigName }} --var binding_prefix={{ .BindingPrefix }} --json | jq -r '.new_epic_id')
@@ -298,7 +310,7 @@ alert the witness, not `gc mail send`.
 |------------|----------------|
 | Pour next wisp | `gc bd mol wisp mol-refinery-patrol --root-only --var target_branch={{ .DefaultBranch }} --var rig_name={{ .RigName }} --var binding_prefix={{ .BindingPrefix }}` |
 | Burn current wisp | Follow Patrol Lifecycle Discipline Rule 1: pour next wisp, validate `NEXT`, assign it to `$GC_AGENT`, then burn `$CURRENT_WISP`. Never run a standalone burn. |
-| Find assigned work | `gc bd list --assignee="$GC_AGENT" --status=open` |
+| Find assigned work | `gc bd list ${GC_RIG:+--rig="$GC_RIG"} --assignee="$GC_AGENT" --status=open` |
 | Snapshot event position | `gc events --seq` |
 | Wait for assignment | `gc events --watch --type=bead.updated --after=$SEQ` |
 | Read work metadata | `gc bd show $WORK --json \| jq '.[0].metadata'` |

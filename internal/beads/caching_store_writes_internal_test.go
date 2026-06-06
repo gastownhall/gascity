@@ -2,6 +2,7 @@ package beads
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 )
 
@@ -40,6 +41,12 @@ type txPreservingBackingStore struct {
 	Store
 	txCalls     int
 	updateCalls int
+}
+
+type cacheWriteNotification struct {
+	eventType string
+	beadID    string
+	payload   json.RawMessage
 }
 
 func (s *txPreservingBackingStore) Update(id string, opts UpdateOpts) error {
@@ -134,6 +141,122 @@ func assertTxPreservedBead(t *testing.T, got Bead) {
 	}
 }
 
+func TestCachingStoreSetMetadataBatchNotifiesBeadUpdated(t *testing.T) {
+	t.Parallel()
+
+	backing := NewMemStore()
+	bead, err := backing.Create(Bead{Title: "metadata"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	var notifications []cacheWriteNotification
+	cache := NewCachingStoreForTest(backing, func(eventType, beadID string, payload json.RawMessage) {
+		notifications = append(notifications, cacheWriteNotification{eventType: eventType, beadID: beadID, payload: payload})
+	})
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+
+	if err := cache.SetMetadataBatch(bead.ID, map[string]string{"review": "fixed"}); err != nil {
+		t.Fatalf("SetMetadataBatch: %v", err)
+	}
+
+	if len(notifications) != 1 {
+		t.Fatalf("notifications = %d, want 1: %#v", len(notifications), notifications)
+	}
+	if notifications[0].eventType != "bead.updated" || notifications[0].beadID != bead.ID {
+		t.Fatalf("notification = %#v, want bead.updated for %s", notifications[0], bead.ID)
+	}
+	updated, _, err := decodeCacheEvent(notifications[0].payload)
+	if err != nil {
+		t.Fatalf("decode notification: %v", err)
+	}
+	if updated.Metadata["review"] != "fixed" {
+		t.Fatalf("notification metadata = %#v, want review=fixed", updated.Metadata)
+	}
+}
+
+func TestCachingStoreDependencyWritesNotifyBeadUpdatedWithDeps(t *testing.T) {
+	t.Parallel()
+
+	backing := NewMemStore()
+	target, err := backing.Create(Bead{Title: "target"})
+	if err != nil {
+		t.Fatalf("Create target: %v", err)
+	}
+	blocker, err := backing.Create(Bead{Title: "blocker"})
+	if err != nil {
+		t.Fatalf("Create blocker: %v", err)
+	}
+	var notifications []cacheWriteNotification
+	cache := NewCachingStoreForTest(backing, func(eventType, beadID string, payload json.RawMessage) {
+		notifications = append(notifications, cacheWriteNotification{eventType: eventType, beadID: beadID, payload: payload})
+	})
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+
+	if err := cache.DepAdd(target.ID, blocker.ID, "blocks"); err != nil {
+		t.Fatalf("DepAdd: %v", err)
+	}
+	if err := cache.DepRemove(target.ID, blocker.ID); err != nil {
+		t.Fatalf("DepRemove: %v", err)
+	}
+
+	if len(notifications) != 2 {
+		t.Fatalf("notifications = %d, want 2: %#v", len(notifications), notifications)
+	}
+	added, _, err := decodeCacheEvent(notifications[0].payload)
+	if err != nil {
+		t.Fatalf("decode add notification: %v", err)
+	}
+	if notifications[0].eventType != "bead.updated" || len(added.Dependencies) != 1 || added.Dependencies[0].DependsOnID != blocker.ID {
+		t.Fatalf("add notification = %#v bead=%+v, want dependency snapshot", notifications[0], added)
+	}
+	removed, _, err := decodeCacheEvent(notifications[1].payload)
+	if err != nil {
+		t.Fatalf("decode remove notification: %v", err)
+	}
+	if notifications[1].eventType != "bead.updated" || len(removed.Dependencies) != 0 {
+		t.Fatalf("remove notification = %#v bead=%+v, want empty dependency snapshot", notifications[1], removed)
+	}
+}
+
+func TestCachingStoreDeleteNotifiesBeadDeleted(t *testing.T) {
+	t.Parallel()
+
+	backing := NewMemStore()
+	bead, err := backing.Create(Bead{Title: "delete"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	var notifications []cacheWriteNotification
+	cache := NewCachingStoreForTest(backing, func(eventType, beadID string, payload json.RawMessage) {
+		notifications = append(notifications, cacheWriteNotification{eventType: eventType, beadID: beadID, payload: payload})
+	})
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+
+	if err := cache.Delete(bead.ID); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+
+	if len(notifications) != 1 {
+		t.Fatalf("notifications = %d, want 1: %#v", len(notifications), notifications)
+	}
+	if notifications[0].eventType != "bead.deleted" || notifications[0].beadID != bead.ID {
+		t.Fatalf("notification = %#v, want bead.deleted for %s", notifications[0], bead.ID)
+	}
+	deleted, _, err := decodeCacheEvent(notifications[0].payload)
+	if err != nil {
+		t.Fatalf("decode notification: %v", err)
+	}
+	if deleted.ID != bead.ID || deleted.Title != "delete" {
+		t.Fatalf("deleted payload = %+v, want deleted bead snapshot", deleted)
+	}
+}
+
 func stringSliceContains(values []string, want string) bool {
 	for _, value := range values {
 		if value == want {
@@ -172,6 +295,78 @@ func TestCachingStoreSetMetadataSkipsBackingWhenCachedValueMatches(t *testing.T)
 		t.Errorf("backing.SetMetadata called %d times; want 0 (no-op write must short-circuit)",
 			backing.setMetadataCalls)
 	}
+}
+
+func TestCachingStoreSetMetadataFallsThroughWhenCacheStateCannotProveNoop(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		state cacheState
+	}{
+		{name: "uninitialized", state: cacheUninitialized},
+		{name: "degraded", state: cacheDegraded},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name+"/single", func(t *testing.T) {
+			t.Parallel()
+
+			backing := &countingBackingStore{Store: NewMemStore()}
+			bead := createBeadWithMetadata(t, backing, map[string]string{"foo": "bar"})
+			cache := staleMatchingMetadataCache(backing, bead, tt.state)
+			backing.setMetadataCalls = 0
+
+			if err := cache.SetMetadata(bead.ID, "foo", "bar"); err != nil {
+				t.Fatalf("SetMetadata: %v", err)
+			}
+			if backing.setMetadataCalls != 1 {
+				t.Fatalf("backing.SetMetadata called %d times; want 1", backing.setMetadataCalls)
+			}
+		})
+
+		t.Run(tt.name+"/batch", func(t *testing.T) {
+			t.Parallel()
+
+			backing := &countingBackingStore{Store: NewMemStore()}
+			bead := createBeadWithMetadata(t, backing, map[string]string{"foo": "bar", "baz": "qux"})
+			cache := staleMatchingMetadataCache(backing, bead, tt.state)
+			backing.setMetadataBatchCalls = 0
+
+			if err := cache.SetMetadataBatch(bead.ID, map[string]string{"foo": "bar", "baz": "qux"}); err != nil {
+				t.Fatalf("SetMetadataBatch: %v", err)
+			}
+			if backing.setMetadataBatchCalls != 1 {
+				t.Fatalf("backing.SetMetadataBatch called %d times; want 1", backing.setMetadataBatchCalls)
+			}
+		})
+	}
+}
+
+func createBeadWithMetadata(t *testing.T, backing Store, metadata map[string]string) Bead {
+	t.Helper()
+
+	bead, err := backing.Create(Bead{Title: "test"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := backing.SetMetadataBatch(bead.ID, metadata); err != nil {
+		t.Fatalf("seed SetMetadataBatch: %v", err)
+	}
+	bead, err = backing.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	return bead
+}
+
+func staleMatchingMetadataCache(backing Store, bead Bead, state cacheState) *CachingStore {
+	cache := NewCachingStoreForTest(backing, nil)
+	cache.mu.Lock()
+	cache.beads[bead.ID] = cloneBead(bead)
+	cache.state = state
+	cache.mu.Unlock()
+	return cache
 }
 
 // TestCachingStoreSetMetadataFallsThroughOnValueMismatch verifies that a

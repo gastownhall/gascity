@@ -1,0 +1,153 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "ok",
+    "city_path",
+    "monitor_count",
+    "result_count",
+    "actionable_count",
+    "results"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1"
+    },
+    "ok": {
+      "const": true
+    },
+    "city_path": {
+      "type": "string"
+    },
+    "monitor_count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "result_count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "actionable_count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "results": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "monitor",
+          "owner",
+          "repo",
+          "number",
+          "base_ref_name",
+          "state",
+          "actionable",
+          "rig",
+          "repair_route"
+        ],
+        "properties": {
+          "monitor": {
+            "type": "string"
+          },
+          "owner": {
+            "type": "string"
+          },
+          "repo": {
+            "type": "string"
+          },
+          "number": {
+            "type": "integer"
+          },
+          "title": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string"
+          },
+          "base_ref_name": {
+            "type": "string"
+          },
+          "head_ref_name": {
+            "type": "string"
+          },
+          "head_sha": {
+            "type": "string"
+          },
+          "merge_state_status": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string"
+          },
+          "failure_kind": {
+            "type": "string"
+          },
+          "actionable": {
+            "type": "boolean"
+          },
+          "failed_checks": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "pending_checks": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "rig": {
+            "type": "string"
+          },
+          "repair_route": {
+            "type": "string"
+          },
+          "notify": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "additionalProperties": true
+      }
+    },
+    "repair_beads": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "pr", "created"],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "pr": {
+            "type": "integer"
+          },
+          "url": {
+            "type": "string"
+          },
+          "created": {
+            "type": "boolean"
+          },
+          "route": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": true
+      }
+    },
+    "existing_repairs": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "created_repairs": {
+      "type": "integer",
+      "minimum": 0
+    }
+  },
+  "additionalProperties": true
+}

@@ -169,6 +169,9 @@ func sessionWithinDesiredConfig(session beads.Bead, cfg *config.City, poolDesire
 }
 
 func sessionStartRequested(session beads.Bead, clk clock.Clock) bool {
+	if strings.TrimSpace(session.Metadata["state"]) == string(sessionpkg.StateStartPending) {
+		return true
+	}
 	if strings.TrimSpace(session.Metadata["pending_create_claim"]) == "true" {
 		return true
 	}
@@ -186,10 +189,24 @@ func sessionStartRequested(session beads.Bead, clk clock.Clock) bool {
 // reached preWakeCommit use pendingCreateNeverStartedTimeout instead.
 const staleCreatingStateTimeout = time.Minute
 
+// stalePendingCreateTimeout is the longer grace window applied by
+// reapStaleSessionBeads to a started pending-create bead — one that holds
+// pending_create_claim=true AND has a last_woke_at (it reached preWakeCommit).
+// Such a bead may legitimately be mid-start or mid-rollback, so it is given
+// more time than a plain creating bead before being reaped. Without an upper
+// bound, a bead whose rollback never completes (e.g. a transient store error
+// on closeBead) would stay open as a phantom forever — the leak tracked by
+// gc-5tyf5. Never-started pending creates (no last_woke_at) instead defer to
+// pendingCreateNeverStartedTimeout, so a slow provider.Start() is not reaped
+// out from under the reconciler's still-active never-started lease.
+const stalePendingCreateTimeout = 5 * time.Minute
+
 func sessionMetadataState(session beads.Bead) string {
 	switch state := strings.TrimSpace(session.Metadata["state"]); state {
 	case "awake":
 		return "active"
+	case string(sessionpkg.StateStartPending):
+		return "creating"
 	case "drained":
 		return "asleep"
 	default:
@@ -262,7 +279,7 @@ func capWakeConfigByDemand(sessions []beads.Bead, cfg *config.City, evals map[st
 
 		state := sessionMetadataState(session)
 		switch state {
-		case "active", "creating":
+		case "active", "start-pending", "creating":
 			// Already running or starting — counts against desired.
 			b.active++
 		default:
@@ -967,9 +984,10 @@ func healStatePatchWithRollback(session beads.Bead, alive bool, clk clock.Clock,
 		if alive {
 			target = string(sessionpkg.StateAwake)
 		} else if sessionStartRequested(session, clk) {
-			target = string(sessionpkg.StateCreating)
+			target = string(sessionpkg.StateStartPending)
 		}
 	}
+	stalePendingCreateRollback := false
 	// failed-create is a terminal rollback marker written by
 	// rollbackPendingCreate when a start attempt failed. A bead in this state
 	// whose runtime is not alive must heal toward asleep, even if
@@ -1002,8 +1020,10 @@ func healStatePatchWithRollback(session beads.Bead, alive bool, clk clock.Clock,
 	// rollbackAvailable=false means the caller deferred the formal rollback
 	// (e.g. storeQueryPartial); preserve the claim so the next complete tick
 	// can drive attemptRollbackPendingCreate properly.
-	if rollbackAvailable && !alive && view.RuntimeProjection == sessionpkg.RuntimeProjectionStaleCreating {
+	if rollbackAvailable && !alive && strings.TrimSpace(meta["state"]) == "creating" {
 		if pendingCreateLeaseExpiredForRollback(session, clk, startupTimeout) {
+			target = string(sessionpkg.StateAsleep)
+			stalePendingCreateRollback = true
 			clearPendingCreateLease(meta, batch)
 		}
 	}
@@ -1012,7 +1032,7 @@ func healStatePatchWithRollback(session beads.Bead, alive bool, clk clock.Clock,
 	}
 	if meta["state"] != target {
 		batch["state"] = target
-		if target == string(sessionpkg.StateAsleep) && view.ResetContinuation && strings.TrimSpace(meta["sleep_reason"]) == "" {
+		if target == string(sessionpkg.StateAsleep) && (view.ResetContinuation || stalePendingCreateRollback) && strings.TrimSpace(meta["sleep_reason"]) == "" {
 			batch["sleep_reason"] = sleepReasonRuntimeMissing
 		}
 	}
@@ -1020,7 +1040,7 @@ func healStatePatchWithRollback(session beads.Bead, alive bool, clk clock.Clock,
 		if strings.TrimSpace(meta["sleep_reason"]) == "" && strings.TrimSpace(meta["state"]) == "failed-create" {
 			batch["sleep_reason"] = "failed-create"
 		}
-		if view.ResetContinuation {
+		if view.ResetContinuation || stalePendingCreateRollback {
 			if !isNamedSessionBead(session) || namedSessionMode(session) != "always" {
 				batch["session_key"] = ""
 				batch["started_config_hash"] = ""
@@ -1198,6 +1218,7 @@ var knownSessionStates = map[string]bool{
 	"orphaned":                           true,
 	"closed":                             true,
 	"quarantined":                        true,
+	string(sessionpkg.StateStartPending): true,
 	"creating":                           true,
 	"drained":                            true,
 	string(sessionpkg.StateFailedCreate): true, // processed so skip/orphan-close can release the slot

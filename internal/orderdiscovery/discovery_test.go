@@ -198,6 +198,65 @@ interval = "1h"
 	}
 }
 
+func TestScanAllOverrideHandlerStillValidatesPartiallyModifiedOrders(t *testing.T) {
+	cityPath, cityLayer := orderDiscoveryCity(t)
+	writeOrderDiscoveryFile(t, filepath.Join(cityPath, "orders"), "backup", `[order]
+exec = "scripts/backup.sh"
+trigger = "cooldown"
+interval = "1h"
+`)
+	writeOrderDiscoveryFile(t, filepath.Join(cityPath, "orders"), "deploy", `[order]
+formula = "mol-deploy"
+trigger = "manual"
+
+[order.env]
+CUSTOM_ORDER_FLAG = "enabled"
+`)
+
+	interval := "15m"
+	cfg := &config.City{
+		FormulaLayers: config.FormulaLayers{
+			City: []string{cityLayer},
+		},
+		Orders: config.OrdersConfig{
+			Overrides: []config.OrderOverride{
+				{Name: "backup", Interval: &interval},
+				{Name: "missing"},
+			},
+		},
+	}
+
+	var overrideHandled, validationHandled string
+	aa, err := ScanAll(cityPath, cfg, ScanOptions{
+		OnOverrideError: func(err error) error {
+			overrideHandled = err.Error()
+			return nil
+		},
+		OnValidateError: func(orderName string, err error) error {
+			validationHandled = orderName + ": " + err.Error()
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("ScanAll returned error: %v", err)
+	}
+	if !strings.Contains(overrideHandled, `order "missing" not found`) {
+		t.Fatalf("handled override error = %q, want missing-order error", overrideHandled)
+	}
+	if !strings.Contains(validationHandled, `deploy`) || !strings.Contains(validationHandled, "env is supported only for exec orders") {
+		t.Fatalf("handled validation error = %q, want deploy env-on-formula diagnostic", validationHandled)
+	}
+	if len(aa) != 1 {
+		t.Fatalf("got %d orders, want only the valid order", len(aa))
+	}
+	if aa[0].Name != "backup" {
+		t.Fatalf("remaining order = %q, want backup", aa[0].Name)
+	}
+	if aa[0].Interval != "15m" {
+		t.Fatalf("Interval = %q, want partially applied override %q", aa[0].Interval, "15m")
+	}
+}
+
 func TestScanAllOverrideHandlerCanAbortInvalidOverride(t *testing.T) {
 	cityPath, cityLayer := orderDiscoveryCity(t)
 	writeOrderDiscoveryFile(t, filepath.Join(cityPath, "orders"), "backup", `[order]
@@ -223,6 +282,92 @@ interval = "1h"
 	})
 	if !errors.Is(err, handlerErr) {
 		t.Fatalf("ScanAll error = %v, want handler error", err)
+	}
+}
+
+func TestScanAllValidationHandlerSkipsInvalidOrderAfterOverrides(t *testing.T) {
+	cityPath, cityLayer := orderDiscoveryCity(t)
+	writeOrderDiscoveryFile(t, filepath.Join(cityPath, "orders"), "backup", `[order]
+exec = "scripts/backup.sh"
+trigger = "cooldown"
+interval = "1h"
+`)
+	writeOrderDiscoveryFile(t, filepath.Join(cityPath, "orders"), "deploy", `[order]
+formula = "mol-deploy"
+trigger = "manual"
+`)
+
+	cfg := &config.City{
+		FormulaLayers: config.FormulaLayers{
+			City: []string{cityLayer},
+		},
+		Orders: config.OrdersConfig{
+			Overrides: []config.OrderOverride{
+				{Name: "deploy", Env: map[string]string{"CUSTOM_ORDER_FLAG": "enabled"}},
+			},
+		},
+	}
+
+	var handled string
+	aa, err := ScanAll(cityPath, cfg, ScanOptions{
+		OnValidateError: func(orderName string, err error) error {
+			handled = orderName + ": " + err.Error()
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("ScanAll returned error: %v", err)
+	}
+	if !strings.Contains(handled, `deploy`) || !strings.Contains(handled, "env is supported only for exec orders") {
+		t.Fatalf("handled validation error = %q, want deploy env-on-formula diagnostic", handled)
+	}
+	if len(aa) != 1 {
+		t.Fatalf("got %d orders, want only the valid order", len(aa))
+	}
+	if aa[0].Name != "backup" {
+		t.Fatalf("remaining order = %q, want backup", aa[0].Name)
+	}
+}
+
+func TestScanAllValidationHandlerSkipsInvalidCitySourceOrder(t *testing.T) {
+	cityPath, cityLayer := orderDiscoveryCity(t)
+	writeOrderDiscoveryFile(t, filepath.Join(cityPath, "orders"), "backup", `[order]
+exec = "scripts/backup.sh"
+trigger = "cooldown"
+interval = "1h"
+`)
+	writeOrderDiscoveryFile(t, filepath.Join(cityPath, "orders"), "deploy", `[order]
+formula = "mol-deploy"
+trigger = "manual"
+
+[order.env]
+CUSTOM_ORDER_FLAG = "enabled"
+`)
+
+	cfg := &config.City{
+		FormulaLayers: config.FormulaLayers{
+			City: []string{cityLayer},
+		},
+	}
+
+	var handled string
+	aa, err := ScanAll(cityPath, cfg, ScanOptions{
+		OnValidateError: func(orderName string, err error) error {
+			handled = orderName + ": " + err.Error()
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("ScanAll returned error: %v", err)
+	}
+	if !strings.Contains(handled, `deploy`) || !strings.Contains(handled, "env is supported only for exec orders") {
+		t.Fatalf("handled validation error = %q, want deploy env-on-formula diagnostic", handled)
+	}
+	if len(aa) != 1 {
+		t.Fatalf("got %d orders, want only the valid order", len(aa))
+	}
+	if aa[0].Name != "backup" {
+		t.Fatalf("remaining order = %q, want backup", aa[0].Name)
 	}
 }
 
@@ -584,5 +729,65 @@ func writeOrderDiscoveryFile(t *testing.T, dir, name, content string) {
 	}
 	if err := os.WriteFile(filepath.Join(dir, name+".toml"), []byte(content), 0o644); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestScanAllCityScopedOrderRegistersOnceAcrossRigs(t *testing.T) {
+	cityPath, cityLayer := orderDiscoveryCity(t)
+	packDir := filepath.Join(t.TempDir(), "mixed-pack")
+	// A scope=city order must register exactly once no matter how many rigs
+	// import the pack.
+	writeOrderDiscoveryFile(t, filepath.Join(packDir, "orders"), "city-sweep", `[order]
+scope = "city"
+exec = "scripts/sweep.sh"
+trigger = "cooldown"
+interval = "5m"
+`)
+	// An unscoped (rig-default) order still registers once per importing rig.
+	writeOrderDiscoveryFile(t, filepath.Join(packDir, "orders"), "rig-health", `[order]
+exec = "scripts/health.sh"
+trigger = "cooldown"
+interval = "5m"
+`)
+
+	cfg := &config.City{
+		FormulaLayers: config.FormulaLayers{
+			City: []string{cityLayer},
+			Rigs: map[string][]string{
+				"alpha": {cityLayer},
+				"beta":  {cityLayer},
+			},
+		},
+		RigPackDirs: map[string][]string{
+			"alpha": {packDir},
+			"beta":  {packDir},
+		},
+	}
+
+	aa, err := ScanAll(cityPath, cfg, ScanOptions{})
+	if err != nil {
+		t.Fatalf("ScanAll returned error: %v", err)
+	}
+
+	citySweepCount := 0
+	citySweepRig := "<unset>"
+	rigHealth := map[string]int{}
+	for _, a := range aa {
+		switch a.Name {
+		case "city-sweep":
+			citySweepCount++
+			citySweepRig = a.Rig
+		case "rig-health":
+			rigHealth[a.Rig]++
+		}
+	}
+	if citySweepCount != 1 {
+		t.Fatalf("city-scoped order registered %d times, want 1: %#v", citySweepCount, aa)
+	}
+	if citySweepRig != "" {
+		t.Fatalf("city-scoped order Rig = %q, want \"\" (city-scoped)", citySweepRig)
+	}
+	if rigHealth["alpha"] != 1 || rigHealth["beta"] != 1 {
+		t.Fatalf("rig-scoped order counts = %v, want one per importing rig", rigHealth)
 	}
 }

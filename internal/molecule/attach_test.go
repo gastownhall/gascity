@@ -484,6 +484,56 @@ func TestAttachIdempotency(t *testing.T) {
 	}
 }
 
+func TestAttachIdempotencyFindsEphemeralExistingRoot(t *testing.T) {
+	store := beads.NewMemStore()
+	root := setupWorkflow(t, store)
+	control := setupWorkflowChild(t, store, root.ID, "Control")
+	existingRoot, err := store.Create(beads.Bead{
+		Title:     "attempt",
+		Type:      "task",
+		Ephemeral: true,
+		Metadata: map[string]string{
+			"gc.kind":            "workflow",
+			"gc.idempotency_key": "attempt:1",
+			"gc.root_bead_id":    root.ID,
+			"gc.step_ref":        "attempt",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create existing ephemeral root: %v", err)
+	}
+	existingRun, err := store.Create(beads.Bead{
+		Title:     "run",
+		Type:      "task",
+		Ephemeral: true,
+		ParentID:  existingRoot.ID,
+		Metadata: map[string]string{
+			"gc.root_bead_id": root.ID,
+			"gc.step_ref":     "attempt.run",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create existing ephemeral child: %v", err)
+	}
+
+	result, err := Attach(context.Background(), store, makeWorkflowRecipe("attempt", "run"), control.ID, AttachOptions{
+		IdempotencyKey: "attempt:1",
+	})
+	if err != nil {
+		t.Fatalf("Attach duplicate: %v", err)
+	}
+	if !result.Duplicate {
+		t.Fatal("Attach duplicate should report Duplicate for ephemeral existing root")
+	}
+	if result.RootID != existingRoot.ID {
+		t.Fatalf("RootID = %q, want existing ephemeral root %q", result.RootID, existingRoot.ID)
+	}
+	if result.IDMapping["attempt"] != existingRoot.ID || result.IDMapping["attempt.run"] != existingRun.ID {
+		t.Fatalf("IDMapping = %#v, want existing ephemeral root and child", result.IDMapping)
+	}
+	assertBlockingDep(t, store, control.ID, existingRoot.ID)
+}
+
 // Test 13: Different idempotency keys create separate sub-DAGs
 func TestAttachDifferentKeysCreateSeparate(t *testing.T) {
 	store := beads.NewMemStore()

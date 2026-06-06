@@ -244,6 +244,8 @@ func TestRestartLoopGuard(t *testing.T) {
 type fakeRestartHelpers struct {
 	systemctlArgs []string
 	systemctlErr  error
+	launchctlArgs []string
+	launchctlErr  error
 	killedPID     int
 	killErr       error
 	spawnExe      string
@@ -254,6 +256,11 @@ type fakeRestartHelpers struct {
 func (f *fakeRestartHelpers) Systemctl(args ...string) error {
 	f.systemctlArgs = append([]string(nil), args...)
 	return f.systemctlErr
+}
+
+func (f *fakeRestartHelpers) Launchctl(args ...string) error {
+	f.launchctlArgs = append([]string(nil), args...)
+	return f.launchctlErr
 }
 
 func (f *fakeRestartHelpers) Kill(pid int) error {
@@ -294,6 +301,39 @@ func TestRestartSupervisor_SystemdManaged(t *testing.T) {
 	if h.spawnExe != "" {
 		t.Errorf("Spawn called for systemd-managed restart; should delegate to systemd only")
 	}
+	if len(h.launchctlArgs) != 0 {
+		t.Errorf("launchctl invoked for systemd-managed restart: %v", h.launchctlArgs)
+	}
+}
+
+func TestRestartSupervisor_LaunchdManaged(t *testing.T) {
+	h := &fakeRestartHelpers{}
+	spec := restartSpec{
+		LaunchdManaged: true,
+		PID:            12345,
+		LaunchdLabel:   "com.gascity.supervisor.test",
+	}
+	if err := restartSupervisor(spec, restartHelpersFromFake(h)); err != nil {
+		t.Fatalf("restartSupervisor: %v", err)
+	}
+	wantArgs := []string{"kickstart", "-k", supervisorLaunchdServiceTarget("com.gascity.supervisor.test")}
+	if len(h.launchctlArgs) != len(wantArgs) {
+		t.Fatalf("launchctl args = %v, want %v", h.launchctlArgs, wantArgs)
+	}
+	for i := range wantArgs {
+		if h.launchctlArgs[i] != wantArgs[i] {
+			t.Errorf("launchctl arg %d = %q, want %q", i, h.launchctlArgs[i], wantArgs[i])
+		}
+	}
+	if len(h.systemctlArgs) != 0 {
+		t.Errorf("systemctl invoked for launchd-managed restart: %v", h.systemctlArgs)
+	}
+	if h.killedPID != 0 {
+		t.Errorf("Kill called for launchd-managed restart (pid=%d); should delegate to launchd only", h.killedPID)
+	}
+	if h.spawnExe != "" {
+		t.Errorf("Spawn called for launchd-managed restart; should delegate to launchd only")
+	}
 }
 
 func TestRestartSupervisor_DirectLaunch(t *testing.T) {
@@ -309,6 +349,9 @@ func TestRestartSupervisor_DirectLaunch(t *testing.T) {
 	}
 	if len(h.systemctlArgs) != 0 {
 		t.Errorf("systemctl invoked for direct restart: %v", h.systemctlArgs)
+	}
+	if len(h.launchctlArgs) != 0 {
+		t.Errorf("launchctl invoked for direct restart: %v", h.launchctlArgs)
 	}
 	if h.killedPID != 12345 {
 		t.Errorf("Kill called with pid %d, want 12345", h.killedPID)
@@ -366,6 +409,7 @@ func TestRestartSupervisor_DirectKillFailureSurfaces(t *testing.T) {
 func restartHelpersFromFake(f *fakeRestartHelpers) restartHelpers {
 	return restartHelpers{
 		Systemctl: f.Systemctl,
+		Launchctl: f.Launchctl,
 		Kill:      f.Kill,
 		Spawn:     f.Spawn,
 	}

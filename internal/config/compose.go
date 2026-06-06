@@ -95,9 +95,12 @@ type LoadOptions struct {
 	// SuppressDeprecatedOrderWarnings suppresses only legacy order-path
 	// migration warnings produced while discovering pack orders.
 	SuppressDeprecatedOrderWarnings bool
-	deferRigPatches                 bool
-	deferredRigPatches              *[]deferredRigPatches
-	allowLegacyOrderLayouts         bool
+	// AllowMissingProviderReferences leaves provider-reference catalog errors
+	// non-fatal for repair tools that need to inspect broken configs.
+	AllowMissingProviderReferences bool
+	deferRigPatches                bool
+	deferredRigPatches             *[]deferredRigPatches
+	allowLegacyOrderLayouts        bool
 }
 
 // LoadWithIncludes loads a city.toml and merges all included fragments.
@@ -382,7 +385,7 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 		prov.Warnings = append(prov.Warnings, fragWarnings...)
 		if legacyV1SurfaceWarningsEnabled {
 			if err := LegacyV1SurfaceError(frag, fragPath, fragData); err != nil {
-				return nil, nil, err
+				return nil, nil, &fragmentLegacyV1SurfaceError{include: inc, err: err}
 			}
 			prov.Warnings = append(prov.Warnings, legacyWorkspaceIdentitySurfaceWarnings(frag, fragPath)...)
 			prov.Warnings = append(prov.Warnings, legacyRigPathSurfaceWarnings(frag, fragPath)...)
@@ -415,7 +418,13 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 	rootIncludes := append([]string{}, rootPackIncludes...)
 	rootIncludes = append(rootIncludes, root.Workspace.LegacyIncludes()...)
 	root.Workspace.SetLegacyIncludes(rootIncludes)
-	existingPacks := resolvedPackNames(root.Workspace.LegacyIncludes(), root.Imports, fs, cityRoot)
+
+	// Resolve named pack references before computing reachability so builtin
+	// injection sees the same cache paths that pack expansion will use.
+	resolveNamedPacks(root, cityRoot)
+	rootIncludes = root.Workspace.LegacyIncludes()
+
+	existingPacks := resolvedConfigPackNames(root, fs, cityRoot)
 	for _, inc := range packIncludes {
 		name := readPackNameFromDir(inc)
 		if name != "" && existingPacks[name] {
@@ -427,9 +436,6 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 
 	adjustPatchPaths(&root.Patches, cityRoot, cityRoot)
 	adjustRigOverridePaths(root.Rigs, cityRoot, cityRoot)
-
-	// Resolve named pack references to cache paths before any expansion.
-	resolveNamedPacks(root, cityRoot)
 
 	implicitImports, implicitPath, implicitData, implicitErr := readImplicitImportsWithData()
 	if implicitErr != nil {
@@ -589,6 +595,13 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 	// Apply [agent_defaults] values to all agents (explicit and implicit)
 	// that don't set their own override. Deprecated [agents] aliases are
 	// normalized during parse/load before composition reaches this point.
+	if root.AgentDefaults.Provider != "" {
+		for i := range root.Agents {
+			if root.Agents[i].BindingName == "" {
+				root.Agents[i].InheritedProvider = ""
+			}
+		}
+	}
 	if root.AgentDefaults.DefaultSlingFormula != "" {
 		for i := range root.Agents {
 			if root.Agents[i].BindingName == "" {
@@ -608,16 +621,30 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 	}
 	prov.Warnings = append(prov.Warnings, siteBindingWarnings...)
 
+	// Inline scope="rig" named sessions are generic declarations until the
+	// city's rig set is finalized. Stamp them after site bindings so the
+	// controller sees one concrete identity per rig.
+	ExpandGenericRigNamedSessions(root)
+
 	// Validate named session declarations after pack expansion and site
 	// binding resolution so stamped identities and deterministic runtime
 	// names reflect the effective workspace identity.
-	if err := ValidateNamedSessions(root); err != nil {
+	namedSessionWarnings, err := ValidateNamedSessions(root)
+	if err != nil {
+		return nil, nil, err
+	}
+	prov.Warnings = append(prov.Warnings, namedSessionWarnings...)
+
+	if err := ValidateGitHubPRMonitors(root); err != nil {
 		return nil, nil, err
 	}
 
 	// Validate all duration strings in the fully-merged config.
 	prov.Warnings = append(prov.Warnings, ValidateDurations(root, path)...)
 	prov.Warnings = append(prov.Warnings, ValidateEventsRotation(root)...)
+	if err := ValidateBeadPolicyStorageCompatibility(root, path); err != nil {
+		return nil, nil, err
+	}
 
 	// Reject negative durations that parse cleanly but are silently
 	// destructive at runtime (e.g. a negative dolt_stop_timeout collapses
@@ -625,8 +652,16 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 	if err := ValidateNonNegativeDurations(root, path); err != nil {
 		return nil, nil, err
 	}
+	if err := ValidateDoltConfig(root, path); err != nil {
+		return nil, nil, err
+	}
 
 	// Validate cross-entity semantic constraints.
+	if !opts.AllowMissingProviderReferences {
+		if err := ValidateProviderReferences(root); err != nil {
+			return nil, nil, err
+		}
+	}
 	prov.Warnings = append(prov.Warnings, ValidateSemantics(root, path)...)
 	prov.Warnings = append(prov.Warnings, DetectLegacyProviderInheritance(root, path)...)
 	prov.Warnings = append(prov.Warnings, detectLegacyWorkspaceFields(root, path, prov.Workspace)...)
@@ -645,11 +680,6 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 
 	// Load namepool files for pool agents.
 	loadNamepools(fs, root, cityRoot)
-
-	// Backwards compat: promote deprecated graph_workflows → formula_v2.
-	if root.Daemon.GraphWorkflows && !root.Daemon.FormulaV2 {
-		root.Daemon.FormulaV2 = true
-	}
 
 	// v0.15.1: emit a one-time deprecation warning if the loaded config
 	// still populates the v0.15.0 attachment-list tombstone fields. The
@@ -910,6 +940,10 @@ func mergeFragment(base, fragment *City, fragMeta toml.MetaData, fragPath string
 	// Services: concatenate.
 	base.Services = append(base.Services, fragment.Services...)
 
+	// GitHub PR monitors: concatenate. Validation rejects duplicate repo/base
+	// ownership after patches have had a chance to adjust declarations.
+	base.GitHub.PRMonitors = append(base.GitHub.PRMonitors, fragment.GitHub.PRMonitors...)
+
 	// Providers: deep-merge per-field.
 	mergeProviders(base, fragment, fragMeta, fragPath, prov)
 
@@ -927,8 +961,10 @@ func mergeFragment(base, fragment *City, fragMeta toml.MetaData, fragPath string
 
 	// Patches: accumulate from fragments (applied after all merges).
 	base.Patches.Agents = append(base.Patches.Agents, fragment.Patches.Agents...)
+	base.Patches.NamedSessions = append(base.Patches.NamedSessions, fragment.Patches.NamedSessions...)
 	base.Patches.Rigs = append(base.Patches.Rigs, fragment.Patches.Rigs...)
 	base.Patches.Providers = append(base.Patches.Providers, fragment.Patches.Providers...)
+	base.Patches.GitHubPRMonitors = append(base.Patches.GitHubPRMonitors, fragment.Patches.GitHubPRMonitors...)
 
 	// Simple sections: last-writer-wins if fragment defines them.
 	if fragMeta.IsDefined("beads") {
@@ -941,7 +977,13 @@ func mergeFragment(base, fragment *City, fragMeta toml.MetaData, fragPath string
 		base.Formulas = fragment.Formulas
 	}
 	if fragMeta.IsDefined("daemon") {
+		formulaV2 := base.Daemon.FormulaV2
+		formulaV2Set := base.Daemon.formulaV2Set
 		base.Daemon = fragment.Daemon
+		if !fragMeta.IsDefined("daemon", "formula_v2") && !fragMeta.IsDefined("daemon", "graph_workflows") {
+			base.Daemon.FormulaV2 = formulaV2
+			base.Daemon.formulaV2Set = formulaV2Set
+		}
 	}
 	if fragMeta.IsDefined("session") {
 		base.Session = fragment.Session
@@ -961,6 +1003,9 @@ func mergeFragment(base, fragment *City, fragMeta toml.MetaData, fragPath string
 	mergeSessionSleep(base, fragment, fragMeta, fragPath, prov)
 	if fragMeta.IsDefined("convergence") {
 		base.Convergence = fragment.Convergence
+	}
+	if fragMeta.IsDefined("maintenance") {
+		base.Maintenance = fragment.Maintenance
 	}
 	if fragMeta.IsDefined("agent_defaults") || fragMeta.IsDefined("agents") {
 		mergeAgentDefaults(&base.AgentDefaults, fragment.AgentDefaults, fragPath, prov)
@@ -1314,6 +1359,7 @@ func parseWithMeta(data []byte, source string) (*City, toml.MetaData, []string, 
 		return nil, md, nil, fmt.Errorf("parsing config: %w", err)
 	}
 	normalizeAgentDefaultsAlias(&cfg, md)
+	applyDaemonFormulaV2Default(&cfg, md)
 	warnings := agentDefaultsCompatibilityWarnings(md, source)
 	normalizeLegacyOrderOverrideAliases(&cfg)
 	warnings = append(warnings, CheckUndecodedKeys(md, source)...)
@@ -1541,28 +1587,35 @@ func trackWorkspace(prov *Provenance, meta toml.MetaData, source string) {
 }
 
 // resolvedPackNames collects pack names that are reachable from a set of
-// top-level include paths and imports. It walks both legacy [pack].includes
-// and V2 [imports] transitively so builtin system-pack injection can be
-// skipped when a user pack already brings the same pack into the city
-// closure.
+// top-level include paths and imports. It walks legacy [pack].includes and V2
+// [imports] according to each import's transitive setting so builtin system-pack
+// injection can be skipped when a user pack already brings the same pack into
+// the city closure.
 func resolvedPackNames(includes []string, imports map[string]Import, sysFS fsys.FS, cityRoot string) map[string]bool {
 	names := make(map[string]bool, len(includes)+len(imports))
-	seenDirs := make(map[string]bool)
+	seenShallowDirs := make(map[string]bool)
+	expandedDirs := make(map[string]bool)
 
-	var visit func(ref, declDir string)
-	visit = func(ref, declDir string) {
-		dir, err := resolvePackRef(ref, declDir, cityRoot)
-		if err != nil {
-			return
-		}
+	var visitDir func(dir string, transitive bool)
+	var visitInclude func(ref, declDir string, transitive bool)
+	var visitImport func(ref, declDir string, transitive bool)
+
+	visitDir = func(dir string, transitive bool) {
 		absDir, absErr := filepath.Abs(dir)
 		if absErr != nil {
 			absDir = dir
 		}
-		if seenDirs[absDir] {
-			return
+		if transitive {
+			if expandedDirs[absDir] {
+				return
+			}
+		} else {
+			// Shallow visits record the pack name but must not block a later
+			// transitive visit from expanding the pack's children.
+			if seenShallowDirs[absDir] || expandedDirs[absDir] {
+				return
+			}
 		}
-		seenDirs[absDir] = true
 
 		data, err := sysFS.ReadFile(filepath.Join(dir, packFile))
 		if err != nil {
@@ -1580,20 +1633,61 @@ func resolvedPackNames(includes []string, imports map[string]Import, sysFS fsys.
 		}
 
 		names[pc.Pack.Name] = true
+		if !transitive {
+			seenShallowDirs[absDir] = true
+			return
+		}
+		expandedDirs[absDir] = true
 		for _, sub := range pc.Pack.Includes {
-			visit(sub, dir)
+			visitInclude(sub, dir, true)
 		}
 		for _, imp := range pc.Imports {
-			visit(imp.Source, dir)
+			visitImport(imp.Source, dir, imp.ImportIsTransitive())
 		}
 	}
 
+	visitInclude = func(ref, declDir string, transitive bool) {
+		dir, err := resolvePackRef(ref, declDir, cityRoot)
+		if err != nil {
+			return
+		}
+		visitDir(dir, transitive)
+	}
+
+	visitImport = func(ref, declDir string, transitive bool) {
+		dir, err := resolveImportPackRef(ref, declDir, cityRoot)
+		if err != nil {
+			return
+		}
+		visitDir(dir, transitive)
+	}
+
 	for _, inc := range includes {
-		visit(inc, cityRoot)
+		visitInclude(inc, cityRoot, true)
 	}
 	for _, imp := range imports {
-		visit(imp.Source, cityRoot)
+		visitImport(imp.Source, cityRoot, imp.ImportIsTransitive())
 	}
+	return names
+}
+
+// resolvedConfigPackNames collects all pack names reachable from the city,
+// rig, and default-rig pack graphs before builtin extra includes are injected.
+func resolvedConfigPackNames(cfg *City, sysFS fsys.FS, cityRoot string) map[string]bool {
+	names := resolvedPackNames(cfg.Workspace.LegacyIncludes(), cfg.Imports, sysFS, cityRoot)
+	add := func(more map[string]bool) {
+		for name := range more {
+			names[name] = true
+		}
+	}
+
+	for _, rig := range cfg.Rigs {
+		add(resolvedPackNames(rig.Includes, rig.Imports, sysFS, cityRoot))
+	}
+
+	add(resolvedPackNames(cfg.Workspace.LegacyDefaultRigIncludes(), nil, sysFS, cityRoot))
+	add(resolvedPackNames(nil, cfg.DefaultRigImports, sysFS, cityRoot))
+
 	return names
 }
 

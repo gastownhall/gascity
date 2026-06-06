@@ -43,3 +43,31 @@ func TestReassignOpenWorkAssignedToSession_UsesLiveOpenOwnership(t *testing.T) {
 		t.Fatalf("Assignee = %q, want %q; stale open ownership should not be overwritten", got.Assignee, reassigned)
 	}
 }
+
+func TestReassignOpenWorkAssignedToSession_IncludesEphemeralWork(t *testing.T) {
+	t.Parallel()
+
+	store := beads.NewMemStore()
+	work, err := store.Create(beads.Bead{
+		Title:     "wisp work",
+		Type:      "task",
+		Status:    "in_progress",
+		Assignee:  "retired-session",
+		Ephemeral: true,
+	})
+	if err != nil {
+		t.Fatalf("Create(work): %v", err)
+	}
+
+	if err := reassignOpenWorkAssignedToSession(store, "retired-session", "new-canonical"); err != nil {
+		t.Fatalf("reassignOpenWorkAssignedToSession: %v", err)
+	}
+
+	got, err := store.Get(work.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", work.ID, err)
+	}
+	if got.Assignee != "new-canonical" {
+		t.Fatalf("Assignee = %q, want new-canonical", got.Assignee)
+	}
+}

@@ -10,12 +10,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/overlay"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/runtime/proctable"
 	"github.com/gastownhall/gascity/internal/shellquote"
 )
 
@@ -37,6 +39,8 @@ var (
 	_ runtime.ImmediateNudgeProvider        = (*Provider)(nil)
 	_ runtime.InterruptBoundaryWaitProvider = (*Provider)(nil)
 	_ runtime.InterruptedTurnResetProvider  = (*Provider)(nil)
+	_ runtime.ProcessTableScanner           = (*Provider)(nil)
+	_ runtime.ServerLifecycleProvider       = (*Provider)(nil)
 )
 
 // NewProvider returns a [Provider] backed by a real tmux installation
@@ -217,7 +221,12 @@ func (p *Provider) RunLive(name string, cfg runtime.Config) error {
 // IsRunning calls see the updated state immediately.
 func (p *Provider) Stop(name string) error {
 	p.tm.CloseHiddenAttachClient(name)
-	err := p.tm.KillSessionWithProcesses(name)
+	// Exclude the calling process from the kill set. When `gc session close`
+	// runs from inside the pane it is tearing down (the self-close path), the
+	// caller is a descendant of the pane leader; without exclusion it would be
+	// SIGTERMed mid-cleanup, leaving the agent alive and the bead un-closed.
+	// Excluding a caller that lives outside the pane is a harmless no-op.
+	err := p.tm.KillSessionWithProcessesExcluding(name, []string{strconv.Itoa(os.Getpid())})
 	if err != nil && (errors.Is(err, ErrSessionNotFound) || errors.Is(err, ErrNoServer)) {
 		return nil // idempotent
 	}
@@ -291,6 +300,51 @@ func (p *Provider) ProcessAlive(name string, processNames []string) bool {
 		return true
 	}
 	return p.cache.ProcessAlive(name, processNames)
+}
+
+// FindRuntimesBySessionID implements [runtime.ProcessTableScanner].
+func (p *Provider) FindRuntimesBySessionID(id string) ([]runtime.LiveRuntime, error) {
+	found, scanErr := proctable.ScanBySessionID(id)
+	running, listErr := p.ListRunning("")
+	if listErr != nil {
+		for i := range found {
+			found[i].IsTracked = true
+		}
+		return found, errors.Join(scanErr, fmt.Errorf("tmux list running: %w", listErr))
+	}
+
+	tracked := make(map[string]string)
+	for _, name := range running {
+		sessionID, err := p.GetMeta(name, "GC_SESSION_ID")
+		if err == nil && strings.TrimSpace(sessionID) != "" {
+			tracked[sessionID] = name
+		}
+	}
+	for i := range found {
+		if name, ok := tracked[found[i].SessionID]; ok {
+			found[i].IsTracked = true
+			found[i].ProviderName = name
+		}
+	}
+	return found, scanErr
+}
+
+// TerminateRuntime implements [runtime.ProcessTableScanner].
+func (p *Provider) TerminateRuntime(r runtime.LiveRuntime) error {
+	if r.PID <= 1 {
+		return fmt.Errorf("tmux: invalid PID %d for session %s", r.PID, r.SessionID)
+	}
+	if err := proctable.KillByPID(r.PID); err != nil {
+		return fmt.Errorf("tmux: terminate runtime PID %d for session %s: %w", r.PID, r.SessionID, err)
+	}
+	return nil
+}
+
+// ForgetSession removes provider metadata for name without stopping its tmux
+// process. Tests use this to simulate an OS-live process orphaned from the
+// provider's registry.
+func (p *Provider) ForgetSession(name string) {
+	_ = p.RemoveMeta(name, "GC_SESSION_ID")
 }
 
 // ObserveLiveness reports both pane presence and agent-process presence for a
@@ -625,8 +679,21 @@ func (p *Provider) CopyTo(name, src, relDst string) error {
 }
 
 // Attach connects the user's terminal to the named tmux session.
-// This hands stdin/stdout/stderr to tmux and blocks until detach.
+// It returns [runtime.ErrSessionNotFound] when the session is absent and
+// refuses to attach to tmux remain-on-exit dead panes with a tmux-specific
+// message-only error. Pane-state query failures fall through to tmux attach.
 func (p *Provider) Attach(name string) error {
+	has, err := p.tm.HasSession(name)
+	if err != nil {
+		return fmt.Errorf("checking tmux session before attach: %w", err)
+	}
+	if !has {
+		return fmt.Errorf("%w: %w: %s", runtime.ErrSessionNotFound, ErrSessionNotFound, name)
+	}
+	dead, err := p.tm.IsPaneDead(name)
+	if err == nil && dead {
+		return fmt.Errorf("refusing to attach to dead pane for session %q", name)
+	}
 	args := []string{"-u"}
 	if p.cfg.SocketName != "" {
 		args = append(args, "-L", p.cfg.SocketName)
@@ -645,6 +712,16 @@ func (p *Provider) Tmux() *Tmux {
 	return p.tm
 }
 
+// ConfigureServer applies tmux server-level configuration.
+func (p *Provider) ConfigureServer() error {
+	return p.tm.ConfigureServer()
+}
+
+// TeardownServer terminates the tmux server after all sessions are drained.
+func (p *Provider) TeardownServer() error {
+	return p.tm.TeardownServer()
+}
+
 // ---------------------------------------------------------------------------
 // Multi-step startup orchestration
 // ---------------------------------------------------------------------------
@@ -660,13 +737,23 @@ type startOps interface {
 	acceptStartupDialogs(ctx context.Context, name string) error
 	waitForReady(ctx context.Context, name string, rc *RuntimeConfig, timeout time.Duration) error
 	hasSession(name string) (bool, error)
+	capturePane(name string, lines int) (string, error)
 	sendKeys(name, text string) error
 	setRemainOnExit(name string) error
+	disableMouseAndActivity(name string) error
 	runSetupCommand(ctx context.Context, cmd string, env map[string]string, timeout time.Duration) error
 }
 
 // tmuxStartOps adapts [*Tmux] to the [startOps] interface.
 type tmuxStartOps struct{ tm *Tmux }
+
+const (
+	defaultReadyProbeTimeout = 15 * time.Second
+	minReadyProbeTimeout     = 5 * time.Second
+	maxReadyProbeTimeout     = 60 * time.Second
+	readyProbeSlack          = 5 * time.Second
+	startupPaneCaptureLines  = 80
+)
 
 func (o *tmuxStartOps) createSession(name, workDir, command string, env map[string]string) error {
 	if command != "" || len(env) > 0 {
@@ -713,12 +800,22 @@ func (o *tmuxStartOps) hasSession(name string) (bool, error) {
 	return o.tm.HasSession(name)
 }
 
+func (o *tmuxStartOps) capturePane(name string, lines int) (string, error) {
+	return o.tm.CapturePane(name, lines)
+}
+
 func (o *tmuxStartOps) sendKeys(name, text string) error {
 	return o.tm.NudgeSession(name, text)
 }
 
 func (o *tmuxStartOps) setRemainOnExit(name string) error {
 	return o.tm.SetRemainOnExit(name, true)
+}
+
+func (o *tmuxStartOps) disableMouseAndActivity(name string) error {
+	o.tm.run("set-option", "-t", name, "mouse", "off")             //nolint:errcheck
+	o.tm.run("set-option", "-wt", name, "monitor-activity", "off") //nolint:errcheck
+	return nil
 }
 
 func (o *tmuxStartOps) runSetupCommand(ctx context.Context, cmd string, env map[string]string, timeout time.Duration) error {
@@ -738,6 +835,70 @@ func (o *tmuxStartOps) runSetupCommand(ctx context.Context, cmd string, env map[
 		c.Env = append(c.Env, "GC_TMUX_SOCKET="+o.tm.cfg.SocketName)
 	}
 	return c.Run()
+}
+
+func startupReadyProbeTimeout(cfg runtime.Config) time.Duration {
+	if cfg.ReadyDelayMs <= 0 {
+		if cfg.ReadyPromptPrefix != "" {
+			return defaultReadyProbeTimeout
+		}
+		return 0
+	}
+	timeout := time.Duration(cfg.ReadyDelayMs)*time.Millisecond + readyProbeSlack
+	if timeout < minReadyProbeTimeout {
+		timeout = minReadyProbeTimeout
+	}
+	if timeout > maxReadyProbeTimeout {
+		timeout = maxReadyProbeTimeout
+	}
+	return timeout
+}
+
+func ignoreDeadlineIfSessionAlive(ops startOps, name string, err error) error {
+	if !errors.Is(err, context.DeadlineExceeded) {
+		return err
+	}
+	alive, hasErr := ops.hasSession(name)
+	if hasErr != nil {
+		return fmt.Errorf("verifying session after ready deadline: %w", hasErr)
+	}
+	if alive && ops.isSessionRunning(name) {
+		return nil
+	}
+	if alive {
+		return startupDeadSessionError(ops, name)
+	}
+	return err
+}
+
+func startupDeadSessionError(ops startOps, name string) error {
+	pane, err := ops.capturePane(name, startupPaneCaptureLines)
+	if err != nil {
+		return startupSessionDiedError(name)
+	}
+	pane = strings.TrimSpace(pane)
+	if pane == "" {
+		return startupSessionDiedError(name)
+	}
+	return fmt.Errorf("%w: session %q; last pane output:\n%s", runtime.ErrSessionDiedDuringStartup, name, pane)
+}
+
+func startupSessionDiedError(name string) error {
+	return fmt.Errorf("%w: session %q", runtime.ErrSessionDiedDuringStartup, name)
+}
+
+func failIfSessionDiedDuringStartupProbe(ops startOps, name string) error {
+	alive, err := ops.hasSession(name)
+	if err != nil {
+		return fmt.Errorf("verifying session after startup probe: %w", err)
+	}
+	if alive && ops.isSessionRunning(name) {
+		return nil
+	}
+	if alive {
+		return startupDeadSessionError(ops, name)
+	}
+	return nil
 }
 
 // doStartSession is the pure startup orchestration logic.
@@ -764,6 +925,11 @@ func doStartSession(ctx context.Context, ops startOps, name string, cfg runtime.
 
 	// Enable remain-on-exit for crash forensics. Best-effort.
 	_ = ops.setRemainOnExit(name)
+	// Headless sessions disable mouse tracking and monitor-activity to avoid
+	// terminal escape sequences leaking into agent stdin during controller polls.
+	if !cfg.MouseOn {
+		_ = ops.disableMouseAndActivity(name)
+	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -806,9 +972,13 @@ func doStartSession(ctx context.Context, ops startOps, name string, cfg runtime.
 			ReadyDelayMs:      cfg.ReadyDelayMs,
 			ProcessNames:      cfg.ProcessNames,
 		}}
-		_ = ops.waitForReady(ctx, name, rc, 60*time.Second) // best-effort
+		if err := ops.waitForReady(ctx, name, rc, startupReadyProbeTimeout(cfg)); err != nil {
+			if deadErr := failIfSessionDiedDuringStartupProbe(ops, name); deadErr != nil {
+				return deadErr
+			}
+		}
 		if err := ctx.Err(); err != nil {
-			return err
+			return ignoreDeadlineIfSessionAlive(ops, name, err)
 		}
 	}
 
@@ -818,7 +988,7 @@ func doStartSession(ctx context.Context, ops startOps, name string, cfg runtime.
 	if shouldAcceptStartupDialogs(cfg) {
 		_ = ops.acceptStartupDialogs(ctx, name) // best-effort
 		if err := ctx.Err(); err != nil {
-			return err
+			return ignoreDeadlineIfSessionAlive(ops, name, err)
 		}
 	}
 
@@ -828,7 +998,10 @@ func doStartSession(ctx context.Context, ops startOps, name string, cfg runtime.
 		return fmt.Errorf("verifying session: %w", err)
 	}
 	if !alive {
-		return fmt.Errorf("%w: session %q", runtime.ErrSessionDiedDuringStartup, name)
+		return startupSessionDiedError(name)
+	}
+	if !ops.isSessionRunning(name) {
+		return startupDeadSessionError(ops, name)
 	}
 
 	// Step 5.5: Run session setup commands and script.

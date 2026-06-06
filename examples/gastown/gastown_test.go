@@ -8,6 +8,7 @@ package gastown_test
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -82,6 +83,63 @@ func assertCurrentWispBurnsGuarded(t *testing.T, name, body string) {
 		}
 		if prev != `if [ -n "$CURRENT_WISP" ]; then` {
 			t.Fatalf("%s burns CURRENT_WISP without a non-empty guard near line %d", name, i+1)
+		}
+	}
+}
+
+func refineryMergePushDescription(t *testing.T) string {
+	t.Helper()
+	parser := formula.NewParser(gastownFormulaSearchPaths()...)
+	f, err := parser.ParseFile(filepath.Join(exampleDir(), "packs", "gastown", "formulas", "mol-refinery-patrol.toml"))
+	if err != nil {
+		t.Fatalf("parsing refinery formula: %v", err)
+	}
+	for _, step := range f.Steps {
+		if step.ID == "merge-push" {
+			return step.Description
+		}
+	}
+	t.Fatal("refinery formula missing merge-push step")
+	return ""
+}
+
+func extractBetween(t *testing.T, body, startMarker, endMarker string) string {
+	t.Helper()
+	start := strings.Index(body, startMarker)
+	if start == -1 {
+		t.Fatalf("missing start marker %q", startMarker)
+	}
+	end := strings.Index(body[start:], endMarker)
+	if end == -1 {
+		t.Fatalf("missing end marker %q after %q", endMarker, startMarker)
+	}
+	return body[start : start+end]
+}
+
+func refineryPRHelpers(t *testing.T) string {
+	t.Helper()
+	return extractBetween(t, refineryMergePushDescription(t), "pr_lookup_missing() {", "\nif [ \"$MERGE_STRATEGY\" = \"mr\" ]")
+}
+
+func refineryPRSetupHelpers(t *testing.T) string {
+	t.Helper()
+	return extractBetween(t, refineryMergePushDescription(t), "block_existing_pr() {", "\nif [ \"$MERGE_STRATEGY\" = \"mr\" ]")
+}
+
+func refineryExistingPRValidationBlock(t *testing.T) string {
+	t.Helper()
+	return extractBetween(t, refineryMergePushDescription(t), `if [ "$MERGE_STRATEGY" = "mr" ] && [ -n "$EXISTING_PR" ]; then`, "\n```\n\n**If MERGE_STRATEGY")
+}
+
+func linkTestCommands(t *testing.T, binDir string, names ...string) {
+	t.Helper()
+	for _, name := range names {
+		path, err := exec.LookPath(name)
+		if err != nil {
+			t.Fatalf("finding %s: %v", name, err)
+		}
+		if err := os.Symlink(path, filepath.Join(binDir, name)); err != nil {
+			t.Fatalf("linking %s: %v", name, err)
 		}
 	}
 }
@@ -169,18 +227,21 @@ func renderGastownPromptForPack(t *testing.T, rel, agentName, templateName, rigN
 	}
 
 	ctx := map[string]string{
-		"AgentName":     agentName,
-		"BindingName":   bindingName,
-		"BindingPrefix": bindingPrefix,
-		"CityRoot":      "/city",
-		"DefaultBranch": "main",
-		"IssuePrefix":   "demo",
-		"RigName":       rigName,
-		"RigRoot":       "/repos/" + rigName,
-		"SlingQuery":    "bd ready --metadata-field gc.routed_to=<canonical> --unassigned",
-		"TemplateName":  templateName,
-		"WorkDir":       "/repos/" + rigName,
-		"WorkQuery":     "bd ready",
+		"AgentName":               agentName,
+		"AssignedInProgressQuery": `bd list --include-ephemeral --status in_progress --assignee="$GC_SESSION_ID"; bd list --include-ephemeral --status in_progress --assignee="$GC_SESSION_NAME"; bd list --include-ephemeral --status in_progress --assignee="$GC_ALIAS"`,
+		"AssignedReadyQuery":      "bd ready --include-ephemeral --assignee=<session>",
+		"BindingName":             bindingName,
+		"BindingPrefix":           bindingPrefix,
+		"CityRoot":                "/city",
+		"DefaultBranch":           "main",
+		"IssuePrefix":             "demo",
+		"RigName":                 rigName,
+		"RigRoot":                 "/repos/" + rigName,
+		"RoutedPoolQuery":         "bd ready --metadata-field gc.routed_to=<canonical> --unassigned",
+		"SlingQuery":              "bd ready --metadata-field gc.routed_to=<canonical> --unassigned",
+		"TemplateName":            templateName,
+		"WorkDir":                 "/repos/" + rigName,
+		"WorkQuery":               "bd ready",
 	}
 	var buf bytes.Buffer
 	if err := tmpl.Execute(&buf, ctx); err != nil {
@@ -285,6 +346,30 @@ func TestPromptFilesExist(t *testing.T) {
 	}
 }
 
+// TestTmuxKeybindingsScrollWheel locks ga-c4w Part A: the gastown tmux
+// keybindings must bind the mouse wheel to copy-mode scrollback (root table),
+// so the "mouse on" set in tmux-theme.sh drives tmux scrollback instead of
+// leaking the wheel to the focused TUI. It must NOT reintroduce the po-vtg2
+// client-attached set-hook stopgap (acceptance #5) — the interactive MouseOn
+// default in internal/api (sessionCreateHints) replaces it.
+func TestTmuxKeybindingsScrollWheel(t *testing.T) {
+	dir := exampleDir()
+	path := filepath.Join(dir, "packs", "gastown", "assets", "scripts", "tmux-keybindings.sh")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading tmux-keybindings.sh: %v", err)
+	}
+	script := string(data)
+	for _, want := range []string{"WheelUpPane", "WheelDownPane"} {
+		if !strings.Contains(script, want) {
+			t.Errorf("tmux-keybindings.sh missing %q wheel binding (ga-c4w Part A):\n%s", want, script)
+		}
+	}
+	if strings.Contains(script, "client-attached") {
+		t.Error("tmux-keybindings.sh contains the po-vtg2 client-attached set-hook stopgap; the interactive MouseOn default replaces it (ga-c4w acceptance #5)")
+	}
+}
+
 func TestOverlayDirsExist(t *testing.T) {
 	dir := exampleDir()
 	cfg := loadExpanded(t)
@@ -324,6 +409,8 @@ func TestRefineryFormulaSupportsMergeStrategies(t *testing.T) {
 	for _, want := range []string{
 		".metadata.merge_strategy // \"direct\"",
 		"gh pr create",
+		"git credential fill",
+		"https://api.github.com/repos/$OWNER/$REPO",
 		"Pull request ready:",
 		"merge_strategy=local",
 	} {
@@ -380,6 +467,153 @@ func TestRefineryFormulaChainsMergeMetadataWithClose(t *testing.T) {
 		"--unset-metadata rejection_reason &&",
 		`gc bd close $WORK --reason "Pull request ready: $PR_URL"`,
 	)
+}
+
+// TestRefineryFormulaRefusesZeroDiffMerge guards the false-completion
+// fix (gco-hu0p / upstream #3048): nothing previously stopped the refinery
+// from recording a 0-commit / no-diff branch as close-as-merged, producing
+// a false completion and silent work loss (seen as a session-starved
+// polecat handing off 0 commits). The merge-push step now defines ONE
+// shared predicate, branch_has_real_change (git merge-base + git diff
+// --quiet + >=1 commit), and calls it from BOTH terminal handoffs — the
+// direct close-as-merged AND the mr/pr publication that also closes the
+// bead — halting-and-escalating (never silent retry) on an empty branch.
+//
+// The guard must run BEFORE each handoff's bead-closing command, so a
+// regression that drops or reorders it can never close an empty branch.
+func TestRefineryFormulaRefusesZeroDiffMerge(t *testing.T) {
+	dir := exampleDir()
+	path := filepath.Join(dir, "packs", "gastown", "formulas", "mol-refinery-patrol.toml")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading refinery formula: %v", err)
+	}
+	body := string(data)
+
+	// ONE shared predicate, defined exactly once, using the authoritative
+	// diff check (commit-count alone is a weaker proxy).
+	if count := strings.Count(body, "branch_has_real_change() {"); count != 1 {
+		t.Fatalf("expected exactly one branch_has_real_change definition, found %d", count)
+	}
+	assertContainsInOrder(t, body,
+		"branch_has_real_change() {",
+		`bhrc_base=$(git merge-base "$bhrc_target" "$bhrc_branch"`,
+		`git diff --quiet "$bhrc_base" "$bhrc_branch"`,
+		`0) return 1 ;;`, // no diff -> empty -> refuse
+		`*) return 2 ;;`, // git diff errored -> suspect -> refuse (fail closed)
+	)
+
+	// Halt-and-escalate, never silent retry: blocked + structured note +
+	// mayor/witness nudges, defined once.
+	if count := strings.Count(body, "halt_false_completion() {"); count != 1 {
+		t.Fatalf("expected exactly one halt_false_completion definition, found %d", count)
+	}
+	assertContainsInOrder(t, body,
+		"halt_false_completion() {",
+		"--status=blocked",
+		`--set-metadata false_completion_suspected="branch $fc_branch no verified change vs $fc_base; refused merge-close"`,
+		"gc session nudge mayor",
+		"{{binding_prefix}}witness",
+		"gc runtime drain-ack",
+	)
+
+	// Both terminal handoffs call the shared predicate before closing.
+	if count := strings.Count(body, `branch_has_real_change "origin/$TARGET" temp ||`); count != 2 {
+		t.Fatalf("expected the guard at both the direct-merge and mr/pr handoff sites, found %d call sites", count)
+	}
+
+	// Direct close-as-merged path: guard precedes the merge and the close.
+	assertContainsInOrder(t, body,
+		`**If MERGE_STRATEGY = "direct" (default):**`,
+		`branch_has_real_change "origin/$TARGET" temp ||`,
+		"git merge --ff-only temp",
+		`gc bd close $WORK --reason "Merged to $TARGET at $MERGED_SHORT"`,
+	)
+
+	// mr/pr publication path: guard precedes the push and the close.
+	assertContainsInOrder(t, body,
+		`**If MERGE_STRATEGY = "mr":**`,
+		`branch_has_real_change "origin/$TARGET" temp ||`,
+		"git push origin HEAD:$BRANCH --force-with-lease",
+		`gc bd close $WORK --reason "Pull request ready: $PR_URL"`,
+	)
+}
+
+// TestRefineryBranchHasRealChangeExec runs the extracted predicate against
+// real git repositories — the production code path, not just its formula
+// text (the static assertions above lock structure; this proves behavior).
+// It certifies the contract the #3048 guard depends on: diff is the
+// authority (a net-zero branch carrying commits is still "empty"), and a
+// tool error fails closed (exit 2) rather than reading as "safe to merge".
+func TestRefineryBranchHasRealChangeExec(t *testing.T) {
+	fn := extractBetween(t, refineryMergePushDescription(t),
+		"branch_has_real_change() {", "\nhalt_false_completion() {")
+
+	repo := t.TempDir()
+	git := func(args ...string) {
+		runCmd(t, repo, "git", append([]string{"-C", repo}, args...)...)
+	}
+	commit := func(msg string) {
+		git("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", msg)
+	}
+	write := func(name, content string) {
+		if err := os.WriteFile(filepath.Join(repo, name), []byte(content), 0o644); err != nil {
+			t.Fatalf("writing %s: %v", name, err)
+		}
+	}
+
+	git("init", "-q", "-b", "main")
+	write("base.txt", "base\n")
+	git("add", "base.txt")
+	commit("base")
+
+	// empty: no commits beyond main -> no diff.
+	git("branch", "empty")
+
+	// real: one commit that adds a file -> a real diff.
+	git("checkout", "-q", "-b", "real", "main")
+	write("f.txt", "x\n")
+	git("add", "f.txt")
+	commit("add f")
+
+	// netzero: two commits that cancel -> commits exist, but the diff vs
+	// main is empty. Diff must win over commit-count.
+	git("checkout", "-q", "-b", "netzero", "main")
+	write("g.txt", "y\n")
+	git("add", "g.txt")
+	commit("add g")
+	git("rm", "-q", "g.txt")
+	commit("remove g")
+
+	git("checkout", "-q", "main")
+
+	cases := []struct {
+		name, base, branch string
+		want               int
+	}{
+		{"empty_refuses", "main", "empty", 1},
+		{"real_allows", "main", "real", 0},
+		{"netzero_refuses", "main", "netzero", 1},
+		{"uncomputable_base_refuses", "does-not-exist", "real", 2},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			script := fn + "\nbranch_has_real_change \"" + c.base + "\" \"" + c.branch + "\"\n"
+			cmd := exec.Command("sh", "-c", script)
+			cmd.Dir = repo
+			got := 0
+			if err := cmd.Run(); err != nil {
+				var ee *exec.ExitError
+				if !errors.As(err, &ee) {
+					t.Fatalf("running predicate: %v", err)
+				}
+				got = ee.ExitCode()
+			}
+			if got != c.want {
+				t.Fatalf("branch_has_real_change %q %q exit=%d, want %d", c.base, c.branch, got, c.want)
+			}
+		})
+	}
 }
 
 // TestRefineryPromptRejectionFlowEnforcesClearOnMerge guards against
@@ -476,14 +710,14 @@ func TestPolecatFormulaSignalsRefineryAfterReassign(t *testing.T) {
 	nudge := `gc session nudge "$REFINERY_TARGET" "Run 'gc prime' to check merge queue and begin processing." || true`
 
 	assertContainsInOrder(t, body,
-		"**5. Reassign to refinery:**",
+		"**6. Reassign to refinery:**",
 		refineryTarget,
-		`gc bd update {{issue}} --status=open --assignee="$REFINERY_TARGET" --set-metadata gc.routed_to=""`,
-		"**6. Signal refinery to check for work immediately",
+		`gc bd update "$WORK_BEAD_ID" --status=open --assignee="$REFINERY_TARGET" --set-metadata gc.routed_to=""`,
+		"**7. Signal refinery to check for work immediately",
 		refineryTarget,
 		`gc session wake "$REFINERY_TARGET" || true`,
 		nudge,
-		"**7. Signal reconciler and exit.**",
+		"**8. Signal reconciler and exit.**",
 	)
 
 	for _, bad := range []string{
@@ -498,6 +732,70 @@ func TestPolecatFormulaSignalsRefineryAfterReassign(t *testing.T) {
 	if strings.Contains(body, `--assignee="$REFINERY_TARGET" --set-metadata gc.routed_to="$REFINERY_TARGET"`) {
 		t.Fatal("polecat formula must clear gc.routed_to instead of routing to the refinery named session")
 	}
+}
+
+// TestPolecatFormulaSubmitHasBranchShapeGate is the regression test
+// for gastownhall/gascity#2082: the submit-and-exit step must include
+// a fail-closed gate that refuses to reassign to refinery when the
+// current branch isn't `polecat/<bead-id>`. Without this gate, a
+// provider that skipped workspace-setup (observed with codex)
+// silently strands work on its agent home branch — metadata.branch
+// never points at a valid polecat/<bead-id> merge target, so the
+// refinery's bead-driven handoff finds nothing to merge.
+func TestPolecatFormulaSubmitHasBranchShapeGate(t *testing.T) {
+	dir := exampleDir()
+	path := filepath.Join(dir, "packs", "gastown", "formulas", "mol-polecat-work.toml")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading polecat formula: %v", err)
+	}
+	body := string(data)
+
+	// The gate body must appear before the push (so a divergent
+	// branch never reaches origin) and before the refinery reassign
+	// (so a divergent branch never advances the bead state).
+	assertContainsInOrder(t, body,
+		"**1. Branch-shape gate (fails closed",
+		`CURRENT_BRANCH=$(git branch --show-current)`,
+		`EXPECTED_BRANCH="polecat/$WORK_BEAD_ID"`,
+		`if [ "$CURRENT_BRANCH" != "$EXPECTED_BRANCH" ]; then`,
+		`BRANCH SHAPE GATE FAILED`,
+		`gc runtime drain-ack`,
+		`exit 1`,
+		"**2. Final clean-state verification (safeguard):**",
+		"**3. Push your branch:**",
+		"**6. Reassign to refinery:**",
+	)
+
+	// The metadata.branch reconciliation must also be present so a
+	// workspace-setup step that ran but failed to record the branch
+	// is repaired before refinery handoff.
+	assertContainsInOrder(t, body,
+		`METADATA_BRANCH=$(gc bd show "$WORK_BEAD_ID" --json | jq -r '.[0].metadata.branch // empty')`,
+		`gc bd update "$WORK_BEAD_ID" --set-metadata branch="$EXPECTED_BRANCH"`,
+	)
+}
+
+// TestPolecatPromptInlinesBranchConvention asserts the polecat agent
+// prompt embeds the polecat/<bead-id> convention verbatim in a
+// CRITICAL section, so a provider that skips reading the formula
+// (observed with codex on #2082) still sees the rule inline.
+func TestPolecatPromptInlinesBranchConvention(t *testing.T) {
+	dir := exampleDir()
+	path := filepath.Join(dir, "packs", "gastown", "agents", "polecat", "prompt.template.md")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading polecat prompt: %v", err)
+	}
+	body := string(data)
+
+	assertContainsInOrder(t, body,
+		"## CRITICAL: Branch Convention",
+		"`polecat/<bead-id>`",
+		"`metadata.branch`",
+		"handoff contract is broken",
+		"gastownhall/gascity#2082",
+	)
 }
 
 func TestPolecatFormulaSelfReviewRendersAffectedTestModes(t *testing.T) {
@@ -578,6 +876,98 @@ func TestPolecatPromptDoneSequenceSignalsRefinery(t *testing.T) {
 	}
 }
 
+// TestPolecatPromptHaltsOnAutoPushFalse asserts the done sequence respects
+// mol-pr-from-issue's auto_push=false halt-at-branch-ready contract. The
+// gate must run BEFORE `git push origin HEAD` so a false signal prevents
+// the push and refinery handoff entirely. Regression for gco-ded / gc-m3j:
+// prompt's done sequence was structurally overriding the formula's
+// auto_push gate (BYPASS rate hit 75%).
+func TestPolecatPromptHaltsOnAutoPushFalse(t *testing.T) {
+	dir := exampleDir()
+	path := filepath.Join(dir, "packs", "gastown", "agents", "polecat", "prompt.template.md")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading polecat prompt: %v", err)
+	}
+	body := string(data)
+
+	assertContainsInOrder(t, body,
+		"## FINAL REMINDER: RUN THE DONE SEQUENCE",
+		`AUTO_PUSH=$(gc bd show <work-bead> --json | jq -r '.[0].metadata | if has("auto_push") then (.auto_push | tostring) else "" end')`,
+		`if [ "$AUTO_PUSH" = "false" ]; then`,
+		`BRANCH=$(git branch --show-current)`,
+		`gc bd update <work-bead> \`,
+		`--status=open --assignee=""`,
+		`--set-metadata branch="$BRANCH"`,
+		`--set-metadata target={{ .DefaultBranch }}`,
+		`--set-metadata branch_ready=true`,
+		`--set-metadata halt_reason=auto_push_false`,
+		`--set-metadata gc.routed_to=""`,
+		`gc runtime drain-ack`,
+		"exit 0",
+		"fi",
+		"git push origin HEAD",
+	)
+}
+
+func TestPolecatRenderedApprovalFallacyHaltsOnAutoPushFalse(t *testing.T) {
+	body := renderGastownPromptForPack(t,
+		"packs/gastown/agents/polecat/prompt.template.md",
+		"polecat",
+		"polecat",
+		"gascity",
+		"gastown",
+		"gastown.",
+	)
+	doneSequence := sectionBetween(t, body, "### The Done Sequence", "This pushes your branch")
+
+	assertContainsInOrder(t, doneSequence,
+		`AUTO_PUSH=$(gc bd show <work-bead> --json | jq -r '.[0].metadata | if has("auto_push") then (.auto_push | tostring) else "" end')`,
+		`if [ "$AUTO_PUSH" = "false" ]; then`,
+		`BRANCH=$(git branch --show-current)`,
+		`gc bd update <work-bead> \`,
+		`--status=open --assignee=""`,
+		`--set-metadata branch="$BRANCH"`,
+		`--set-metadata target=main`,
+		`--set-metadata branch_ready=true`,
+		`--set-metadata halt_reason=auto_push_false`,
+		`--set-metadata gc.routed_to=""`,
+		`gc runtime drain-ack`,
+		"exit 0",
+		"fi",
+		"git push origin HEAD",
+	)
+}
+
+func TestPolecatFormulaHaltsOnAutoPushFalse(t *testing.T) {
+	dir := exampleDir()
+	path := filepath.Join(dir, "packs", "gastown", "formulas", "mol-polecat-work.toml")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading polecat formula: %v", err)
+	}
+	body := string(data)
+	submit := sectionBetween(t, body, `id = "submit-and-exit"`, "The refinery will pick this up")
+
+	assertContainsInOrder(t, submit,
+		"Push your branch:",
+		`AUTO_PUSH=$(gc bd show "$WORK_BEAD_ID" --json | jq -r '.[0].metadata | if has("auto_push") then (.auto_push | tostring) else "" end')`,
+		`if [ "$AUTO_PUSH" = "false" ]; then`,
+		`BRANCH=$(git branch --show-current)`,
+		`gc bd update "$WORK_BEAD_ID" \`,
+		`--status=open --assignee=""`,
+		`--set-metadata branch="$BRANCH"`,
+		`--set-metadata target={{base_branch}}`,
+		`--set-metadata branch_ready=true`,
+		`--set-metadata halt_reason=auto_push_false`,
+		`--set-metadata gc.routed_to=""`,
+		`gc runtime drain-ack`,
+		"exit 0",
+		"fi",
+		"git push origin HEAD",
+	)
+}
+
 func TestRefineryFormulaRespectsExistingPRMetadata(t *testing.T) {
 	dir := exampleDir()
 	path := filepath.Join(dir, "packs", "gastown", "formulas", "mol-refinery-patrol.toml")
@@ -588,7 +978,11 @@ func TestRefineryFormulaRespectsExistingPRMetadata(t *testing.T) {
 	body := string(data)
 	for _, want := range []string{
 		`EXISTING_PR=$(gc bd show $WORK --json | jq -r '.[0].metadata.existing_pr // empty')`,
-		`ORIGIN_REPO=$(gh repo view --json nameWithOwner -q '.nameWithOwner')`,
+		`if command -v gh >/dev/null 2>&1; then`,
+		`ORIGIN_REPO=$(gh repo view --json nameWithOwner -q '.nameWithOwner' 2>&1)`,
+		`ORIGIN_REPO_ERROR="gh repo view failed while resolving origin repository: $ORIGIN_REPO"`,
+		`ORIGIN_REPO=$(printf '%s\n' "$ORIGIN_URL"`,
+		`GitHub REST fallback supports only github.com origin remotes`,
 		`metadata.existing_pr requires pull-request handoff; using merge_strategy=mr`,
 		`block_existing_pr()`,
 		`--assignee=""`,
@@ -601,9 +995,17 @@ func TestRefineryFormulaRespectsExistingPRMetadata(t *testing.T) {
 		`if [ -n "$CURRENT_WISP" ]; then`,
 		`gc bd mol burn "$CURRENT_WISP" --force`,
 		`pr_lookup_missing()`,
+		`pr_lookup_repo_mismatch()`,
+		`resolve_github_token()`,
+		`TOKEN="${GH_TOKEN:-${GITHUB_TOKEN:-${GIT_TOKEN:-}}}"`,
+		`init_github_rest()`,
+		`curl_gh_api()`,
+		`-H "Content-Type: application/json"`,
+		`lookup_pr_info()`,
 		`EXISTING_PR_ERR=$(mktemp)`,
-		`EXISTING_PR_INFO=$(gh pr view --json url,number,state,headRefName,baseRefName,headRepositoryOwner,headRepository -- "$EXISTING_PR" 2>"$EXISTING_PR_ERR")`,
+		`EXISTING_PR_INFO=$(lookup_pr_info "$EXISTING_PR" "$EXISTING_PR_ERR")`,
 		`EXISTING_PR_STATUS=$?`,
+		`if pr_lookup_repo_mismatch "$EXISTING_PR_ERROR"; then`,
 		`if pr_lookup_missing "$EXISTING_PR_ERROR"; then`,
 		`Existing PR $EXISTING_PR was not found or is not accessible.`,
 		`Could not resolve existing PR $EXISTING_PR. STOP. Debug and retry without mutating bead state.`,
@@ -621,6 +1023,16 @@ func TestRefineryFormulaRespectsExistingPRMetadata(t *testing.T) {
 		`PR_REF="$EXISTING_PR"`,
 		`PR_STATUS=$?`,
 		`if [ -n "$EXISTING_PR" ] && pr_lookup_missing "$PR_ERROR"; then`,
+		`command -v gh >/dev/null 2>&1`,
+		`printf 'protocol=https\nhost=github.com\n\n'`,
+		`git credential fill 2>/dev/null`,
+		`PR_NUMBER=$(printf '%s\n' "$ref" | sed -nE`,
+		`--data-urlencode "head=$OWNER:$BRANCH"`,
+		`-X POST "$API/pulls"`,
+		`PR_NUMBER=$(printf '%s\n' "$CREATED" | jq -r '.number // empty')`,
+		`GitHub API request failed while creating a PR for $BRANCH.`,
+		`state:(.state | ascii_upcase)`,
+		`headRepositoryOwner:{login:.head.repo.owner.login}`,
 		`PR_REPO=$(printf '%s\n' "$PR_URL" | sed -E 's#^https://github.com/([^/]+/[^/]+)/pull/[0-9]+$#\\1#')`,
 		`Existing PR $EXISTING_PR belongs to repo $PR_REPO, want $ORIGIN_REPO`,
 		`if [ -n "$EXISTING_PR" ]; then`,
@@ -631,10 +1043,327 @@ func TestRefineryFormulaRespectsExistingPRMetadata(t *testing.T) {
 	}
 	assertContainsInOrder(t, body,
 		`EXISTING_PR=$(gc bd show $WORK --json | jq -r '.[0].metadata.existing_pr // empty')`,
-		`EXISTING_PR_INFO=$(gh pr view --json url,number,state,headRefName,baseRefName,headRepositoryOwner,headRepository -- "$EXISTING_PR" 2>"$EXISTING_PR_ERR")`,
+		`EXISTING_PR_INFO=$(lookup_pr_info "$EXISTING_PR" "$EXISTING_PR_ERR")`,
 		`git push origin HEAD:$BRANCH --force-with-lease`,
 		`gh pr create`,
+		`PR_INFO=$(lookup_pr_info "$PR_REF" "$PR_ERR")`,
 	)
+}
+
+func TestRefineryFormulaExistingPRNoGhUsesSharedRESTLookup(t *testing.T) {
+	dir := exampleDir()
+	path := filepath.Join(dir, "packs", "gastown", "formulas", "mol-refinery-patrol.toml")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading refinery formula: %v", err)
+	}
+	body := string(data)
+
+	assertContainsInOrder(t, body,
+		`lookup_pr_info() {`,
+		`if command -v gh >/dev/null 2>&1; then`,
+		`gh pr view --json url,number,state,headRefName,baseRefName,headRepositoryOwner,headRepository -- "$ref"`,
+		`if ! init_github_rest 2>"$err_file"; then`,
+		`PR_NUMBER=$(printf '%s\n' "$ref" | sed -nE`,
+		`--data-urlencode "head=$OWNER:$ref"`,
+		`PR_RAW=$(curl_gh_api "$err_file" "$API/pulls/$PR_NUMBER") || return 1`,
+		`jq '{url:.html_url, number, state:(.state | ascii_upcase), headRefName:.head.ref, baseRefName:.base.ref, headRepositoryOwner:{login:.head.repo.owner.login}, headRepository:{name:.head.repo.name}}'`,
+	)
+	assertContainsInOrder(t, body,
+		`if [ "$MERGE_STRATEGY" = "mr" ] && [ -n "$EXISTING_PR" ]; then`,
+		`EXISTING_PR_INFO=$(lookup_pr_info "$EXISTING_PR" "$EXISTING_PR_ERR")`,
+		`git push origin HEAD:$BRANCH --force-with-lease`,
+		`PR_INFO=$(lookup_pr_info "$PR_REF" "$PR_ERR")`,
+	)
+	if strings.Contains(body, `EXISTING_PR_INFO=$(gh pr view`) {
+		t.Fatal("existing_pr validation must go through lookup_pr_info so the no-gh REST fallback is reachable")
+	}
+	if strings.Contains(body, `eval value=`) {
+		t.Fatal("GitHub token discovery should avoid eval-based env indirection")
+	}
+}
+
+func TestRefineryFormulaExistingPRNoGhRejectsCrossRepoFullURL(t *testing.T) {
+	helpers := refineryPRHelpers(t)
+
+	tmp := t.TempDir()
+	binDir := filepath.Join(tmp, "bin")
+	if err := os.Mkdir(binDir, 0o755); err != nil {
+		t.Fatalf("creating bin dir: %v", err)
+	}
+	linkTestCommands(t, binDir, "cat", "grep", "head", "jq", "sed")
+	curlPath := filepath.Join(binDir, "curl")
+	curlStub := `#!/bin/sh
+case "$*" in
+  *"/repos/origin/repo/pulls/42"*)
+    cat <<'JSON'
+{"html_url":"https://github.com/origin/repo/pull/42","number":42,"state":"open","head":{"ref":"feature","repo":{"owner":{"login":"origin"},"name":"repo"}},"base":{"ref":"main"}}
+JSON
+    ;;
+  *)
+    echo "unexpected curl arguments: $*" >&2
+    exit 2
+    ;;
+esac
+`
+	if err := os.WriteFile(curlPath, []byte(curlStub), 0o755); err != nil {
+		t.Fatalf("writing curl stub: %v", err)
+	}
+
+	script := `set -eu
+ORIGIN_REPO="origin/repo"
+ORIGIN_REPO_ERROR=""
+GH_TOKEN="test-token"
+TARGET="main"
+` + helpers + `
+err_file="$PWD/lookup.err"
+if out=$(lookup_pr_info "https://github.com/other/repo/pull/42" "$err_file"); then
+  echo "lookup_pr_info unexpectedly resolved cross-repo URL: $out"
+  exit 1
+fi
+if ! grep -q "belongs to repo other/repo, want origin/repo" "$err_file"; then
+  cat "$err_file"
+  exit 1
+fi
+`
+	cmd := exec.Command("sh", "-c", script)
+	cmd.Dir = tmp
+	cmd.Env = []string{"PATH=" + binDir, "HOME=" + tmp}
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("cross-repo full URL lookup should fail before origin REST lookup: %v\n%s", err, out)
+	}
+}
+
+func TestRefineryFormulaNoGhRESTLookupExecutesNumberAndBranchPaths(t *testing.T) {
+	helpers := refineryPRHelpers(t)
+
+	tmp := t.TempDir()
+	binDir := filepath.Join(tmp, "bin")
+	if err := os.Mkdir(binDir, 0o755); err != nil {
+		t.Fatalf("creating bin dir: %v", err)
+	}
+	linkTestCommands(t, binDir, "cat", "head", "jq", "sed")
+	curlPath := filepath.Join(binDir, "curl")
+	curlStub := `#!/bin/sh
+case "$*" in
+  *"/repos/origin/repo/pulls/42"*)
+    cat <<'JSON'
+{"html_url":"https://github.com/origin/repo/pull/42","number":42,"state":"open","head":{"ref":"feature","repo":{"owner":{"login":"origin"},"name":"repo"}},"base":{"ref":"main"}}
+JSON
+    ;;
+  *"--get https://api.github.com/repos/origin/repo/pulls"*head=origin:feature*base=main*)
+    cat <<'JSON'
+[{"number":43}]
+JSON
+    ;;
+  *"/repos/origin/repo/pulls/43"*)
+    cat <<'JSON'
+{"html_url":"https://github.com/origin/repo/pull/43","number":43,"state":"open","head":{"ref":"feature","repo":{"owner":{"login":"origin"},"name":"repo"}},"base":{"ref":"main"}}
+JSON
+    ;;
+  *)
+    echo "unexpected curl arguments: $*" >&2
+    exit 2
+    ;;
+esac
+`
+	if err := os.WriteFile(curlPath, []byte(curlStub), 0o755); err != nil {
+		t.Fatalf("writing curl stub: %v", err)
+	}
+
+	script := `set -eu
+ORIGIN_REPO="origin/repo"
+ORIGIN_REPO_ERROR=""
+GH_TOKEN="test-token"
+TARGET="main"
+` + helpers + `
+err_file="$PWD/lookup.err"
+number_out=$(lookup_pr_info "42" "$err_file")
+printf '%s\n' "$number_out" | jq -e '.url == "https://github.com/origin/repo/pull/42" and .state == "OPEN"' >/dev/null
+branch_out=$(lookup_pr_info "feature" "$err_file")
+printf '%s\n' "$branch_out" | jq -e '.url == "https://github.com/origin/repo/pull/43" and .headRefName == "feature"' >/dev/null
+`
+	cmd := exec.Command("sh", "-c", script)
+	cmd.Dir = tmp
+	cmd.Env = []string{"PATH=" + binDir, "HOME=" + tmp}
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("REST lookup should resolve numeric and branch refs: %v\n%s", err, out)
+	}
+}
+
+func TestRefineryFormulaNoGhPRCreateSendsJSONContentType(t *testing.T) {
+	helpers := refineryPRHelpers(t)
+
+	tmp := t.TempDir()
+	binDir := filepath.Join(tmp, "bin")
+	if err := os.Mkdir(binDir, 0o755); err != nil {
+		t.Fatalf("creating bin dir: %v", err)
+	}
+	linkTestCommands(t, binDir, "cat", "head", "jq", "sed")
+	curlPath := filepath.Join(binDir, "curl")
+	curlStub := `#!/bin/sh
+saw_content_type=0
+for arg in "$@"; do
+  if [ "$arg" = "Content-Type: application/json" ]; then
+    saw_content_type=1
+  fi
+done
+if [ "$saw_content_type" -ne 1 ]; then
+  echo "missing JSON content type: $*" >&2
+  exit 2
+fi
+case "$*" in
+  *"-X POST https://api.github.com/repos/origin/repo/pulls"*)
+    cat <<'JSON'
+{"number":44}
+JSON
+    ;;
+  *)
+    echo "unexpected curl arguments: $*" >&2
+    exit 2
+    ;;
+esac
+`
+	if err := os.WriteFile(curlPath, []byte(curlStub), 0o755); err != nil {
+		t.Fatalf("writing curl stub: %v", err)
+	}
+
+	script := `set -eu
+ORIGIN_REPO="origin/repo"
+ORIGIN_REPO_ERROR=""
+GH_TOKEN="test-token"
+TARGET="main"
+` + helpers + `
+err_file="$PWD/create.err"
+init_github_rest 2>"$err_file"
+CREATE_PAYLOAD=$(jq -n \
+  --arg title "Demo (ga-test)" \
+  --arg head "feature" \
+  --arg base "main" \
+  --arg body "body" \
+  '{title:$title, head:$head, base:$base, body:$body}')
+created=$(curl_gh_api "$err_file" -X POST "$API/pulls" -d "$CREATE_PAYLOAD")
+[ "$(printf '%s\n' "$created" | jq -r '.number')" = "44" ]
+`
+	cmd := exec.Command("sh", "-c", script)
+	cmd.Dir = tmp
+	cmd.Env = []string{"PATH=" + binDir, "HOME=" + tmp}
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("REST create should send JSON content type: %v\n%s", err, out)
+	}
+}
+
+func TestRefineryFormulaResolveGithubTokenUsesNonInteractiveCredentialFill(t *testing.T) {
+	helpers := refineryPRHelpers(t)
+
+	tmp := t.TempDir()
+	binDir := filepath.Join(tmp, "bin")
+	if err := os.Mkdir(binDir, 0o755); err != nil {
+		t.Fatalf("creating bin dir: %v", err)
+	}
+	linkTestCommands(t, binDir, "cat", "head", "sed")
+	gitPath := filepath.Join(binDir, "git")
+	gitStub := `#!/bin/sh
+if [ "$1" != "credential" ] || [ "$2" != "fill" ]; then
+  echo "unexpected git arguments: $*" >&2
+  exit 2
+fi
+if [ "${GIT_TERMINAL_PROMPT:-}" != "0" ]; then
+  echo "GIT_TERMINAL_PROMPT was not disabled" >&2
+  exit 2
+fi
+input=$(cat)
+case "$input" in
+  *"protocol=https"*host=github.com*)
+    printf 'protocol=https\nhost=github.com\nusername=test\npassword=credential-token\n\n'
+    ;;
+  *)
+    echo "unexpected credential input: $input" >&2
+    exit 2
+    ;;
+esac
+`
+	if err := os.WriteFile(gitPath, []byte(gitStub), 0o755); err != nil {
+		t.Fatalf("writing git stub: %v", err)
+	}
+
+	script := `set -eu
+ORIGIN_REPO="origin/repo"
+ORIGIN_REPO_ERROR=""
+TARGET="main"
+unset GH_TOKEN GITHUB_TOKEN GIT_TOKEN
+` + helpers + `
+[ "$(resolve_github_token)" = "credential-token" ]
+`
+	cmd := exec.Command("sh", "-c", script)
+	cmd.Dir = tmp
+	cmd.Env = []string{"PATH=" + binDir, "HOME=" + tmp}
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("credential fallback should be non-interactive: %v\n%s", err, out)
+	}
+}
+
+func TestRefineryFormulaExistingPRNoGhCrossRepoEscalatesToHuman(t *testing.T) {
+	helpers := refineryPRSetupHelpers(t)
+	existingPRBlock := refineryExistingPRValidationBlock(t)
+
+	tmp := t.TempDir()
+	binDir := filepath.Join(tmp, "bin")
+	if err := os.Mkdir(binDir, 0o755); err != nil {
+		t.Fatalf("creating bin dir: %v", err)
+	}
+	linkTestCommands(t, binDir, "cat", "grep", "head", "jq", "mktemp", "rm", "sed")
+	gcPath := filepath.Join(binDir, "gc")
+	gcStub := `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_LOG"
+if [ "$1" = "bd" ] && [ "$2" = "mol" ] && [ "$3" = "wisp" ]; then
+  printf '{"new_epic_id":"next-wisp"}\n'
+fi
+exit 0
+`
+	if err := os.WriteFile(gcPath, []byte(gcStub), 0o755); err != nil {
+		t.Fatalf("writing gc stub: %v", err)
+	}
+	curlPath := filepath.Join(binDir, "curl")
+	if err := os.WriteFile(curlPath, []byte("#!/bin/sh\necho unexpected curl >&2\nexit 2\n"), 0o755); err != nil {
+		t.Fatalf("writing curl stub: %v", err)
+	}
+
+	script := `set +e
+ORIGIN_REPO="origin/repo"
+ORIGIN_REPO_ERROR=""
+GH_TOKEN="test-token"
+TARGET="main"
+BRANCH="feature"
+MERGE_STRATEGY="mr"
+EXISTING_PR="https://github.com/other/repo/pull/42"
+WORK="ga-work"
+GC_AGENT="refinery-agent"
+GC_BEAD_ID="current-wisp"
+` + helpers + `
+(
+` + existingPRBlock + `
+)
+status=$?
+if [ "$status" -eq 0 ]; then
+  echo "expected validation block to stop after human escalation"
+  exit 1
+fi
+grep -q -- "--set-metadata gc.routed_to=human" "$GC_LOG" || exit 1
+grep -q -- "ESCALATION: invalid existing_pr" "$GC_LOG" || exit 1
+grep -q -- "runtime drain-ack" "$GC_LOG" || exit 1
+`
+	cmd := exec.Command("sh", "-c", script)
+	cmd.Dir = tmp
+	cmd.Env = []string{"PATH=" + binDir, "HOME=" + tmp, "GC_LOG=" + filepath.Join(tmp, "gc.log")}
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("cross-repo existing_pr should route to human on no-gh hosts: %v\n%s", err, out)
+	}
 }
 
 func TestWorktreeSetupKeepsIgnoresLocal(t *testing.T) {
@@ -681,7 +1410,6 @@ func TestWorktreeSetupKeepsIgnoresLocal(t *testing.T) {
 		".beads/redirect",
 		".beads/hooks/",
 		".beads/formulas/",
-		".runtime/",
 		".logs/",
 		"worktrees/",
 		"__pycache__/",
@@ -705,7 +1433,6 @@ func TestWorktreeSetupKeepsIgnoresLocal(t *testing.T) {
 		filepath.Join(worktree, ".opencode", "plugins", "gascity.js"):      "module.exports = {};\n",
 		filepath.Join(worktree, ".github", "hooks", "gascity.json"):        "{}\n",
 		filepath.Join(worktree, ".github", "copilot-instructions.md"):      "copilot\n",
-		filepath.Join(worktree, ".runtime", "state.json"):                  "{}\n",
 		filepath.Join(worktree, ".logs", "session.log"):                    "log\n",
 		filepath.Join(worktree, "__pycache__", "module.cpython-313.pyc"):   "pyc\n",
 		filepath.Join(worktree, "state.json"):                              "{}\n",
@@ -1079,6 +1806,339 @@ func TestGastownWarrantCreateCommandsUseCreateMetadata(t *testing.T) {
 				inCreate = false
 			}
 		}
+	}
+}
+
+func TestDogAndDigestVaporFormulasHaveNoCompilerRequirement(t *testing.T) {
+	dir := exampleDir()
+	checks := []struct {
+		rel     string
+		formula string
+	}{
+		{"../dolt/formulas/mol-dog-backup.toml", "mol-dog-backup"},
+		{"../dolt/formulas/mol-dog-doctor.toml", "mol-dog-doctor"},
+		{"../dolt/formulas/mol-dog-phantom-db.toml", "mol-dog-phantom-db"},
+		{"../dolt/formulas/mol-dog-stale-db.toml", "mol-dog-stale-db"},
+		{"packs/maintenance/formulas/mol-dog-jsonl.toml", "mol-dog-jsonl"},
+		{"packs/maintenance/formulas/mol-dog-reaper.toml", "mol-dog-reaper"},
+		{"packs/maintenance/formulas/mol-shutdown-dance.toml", "mol-shutdown-dance"},
+		{"packs/gastown/formulas/mol-digest-generate.toml", "mol-digest-generate"},
+	}
+	for _, check := range checks {
+		path := filepath.Join(dir, check.rel)
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("reading %s: %v", check.rel, err)
+		}
+		body := string(data)
+		var decoded struct {
+			Formula  string            `toml:"formula"`
+			Phase    string            `toml:"phase"`
+			Requires map[string]string `toml:"requires"`
+			Steps    []struct {
+				ID          string   `toml:"id"`
+				Needs       []string `toml:"needs"`
+				Description string   `toml:"description"`
+			} `toml:"steps"`
+		}
+		if _, err := toml.Decode(body, &decoded); err != nil {
+			t.Fatalf("decoding %s: %v", check.rel, err)
+		}
+		if decoded.Formula != check.formula {
+			t.Errorf("%s formula = %q, want %q", check.rel, decoded.Formula, check.formula)
+		}
+		if decoded.Phase != "vapor" {
+			t.Errorf("%s phase = %q, want vapor", check.rel, decoded.Phase)
+		}
+		if decoded.Requires["formula_compiler"] != "" || strings.Contains(body, "formula_compiler") {
+			t.Errorf("%s must not require formula_compiler", check.rel)
+		}
+		assertContainsInOrder(t, body,
+			"After claiming this vapor wisp",
+			"gc bd formula show "+check.formula+" --json",
+			"gc runtime drain-ack",
+		)
+		if strings.Contains(body, "needs =") {
+			t.Errorf("%s vapor formula must not declare child-step needs edges", check.rel)
+		}
+		if strings.Contains(strings.ToLower(body), "close this step") {
+			t.Errorf("%s vapor formula must not instruct workers to close non-materialized steps", check.rel)
+		}
+		if strings.Contains(body, "read the `preflight` bead") {
+			t.Errorf("%s vapor formula must not read a non-materialized preflight bead", check.rel)
+		}
+		for _, step := range decoded.Steps {
+			if len(step.Needs) > 0 {
+				t.Errorf("%s step %s needs = %v; vapor steps are not materialized", check.rel, step.ID, step.Needs)
+			}
+		}
+	}
+}
+
+func TestDogStartupPromptUsesSplitClaimFirstQueries(t *testing.T) {
+	dir := exampleDir()
+	checks := []string{
+		"packs/maintenance/agents/dog/prompt.template.md",
+		"packs/maintenance/template-fragments/propulsion.template.md",
+		"packs/gastown/template-fragments/propulsion.template.md",
+	}
+	for _, rel := range checks {
+		data, err := os.ReadFile(filepath.Join(dir, rel))
+		if err != nil {
+			t.Fatalf("reading %s: %v", rel, err)
+		}
+		body := string(data)
+		dogBody := body
+		if strings.Contains(rel, "template-fragments/propulsion.template.md") {
+			dogBody = sectionBetween(t, body, `{{ define "propulsion-dog" }}`, `{{ end }}`)
+		}
+		for _, want := range []string{
+			"{{ .AssignedInProgressQuery }}",
+			"{{ .AssignedReadyQuery }}",
+			"{{ .RoutedPoolQuery }}",
+		} {
+			if !strings.Contains(dogBody, want) {
+				t.Errorf("%s missing split query placeholder %q", rel, want)
+			}
+		}
+		if strings.Contains(dogBody, `gc bd ready --assignee="$GC_SESSION_NAME"`) {
+			t.Errorf("%s hardcodes assigned-ready bd command instead of compatibility-aware placeholder", rel)
+		}
+		if strings.Contains(dogBody, `gc bd list --assignee="$GC_SESSION_NAME" --status=in_progress`) {
+			t.Errorf("%s hardcodes weak in-progress recovery instead of compatibility-aware placeholder", rel)
+		}
+		for _, want := range []string{
+			"For Step 1a/1b candidates",
+			"Assigned work may have no",
+			"For Step 1c candidates",
+		} {
+			if !strings.Contains(dogBody, want) {
+				t.Errorf("%s missing source-aware dog verification text %q", rel, want)
+			}
+		}
+	}
+
+	dogPrompt, err := os.ReadFile(filepath.Join(dir, "packs/maintenance/agents/dog/prompt.template.md"))
+	if err != nil {
+		t.Fatalf("reading dog prompt: %v", err)
+	}
+	assertContainsInOrder(t, string(dogPrompt),
+		"## Startup Protocol",
+		"CLAIM-FIRST INVARIANT",
+		"{{ .AssignedInProgressQuery }}",
+		"{{ .AssignedReadyQuery }}",
+		"{{ .RoutedPoolQuery }}",
+		"gc bd update <id> --claim",
+		"gc bd show <id> --json",
+	)
+
+	renderedDogPrompt := renderGastownPromptForPack(t,
+		"packs/maintenance/agents/dog/prompt.template.md",
+		"maintenance/dog",
+		"dog",
+		"demo",
+		"maintenance",
+		"maintenance.",
+	)
+	assertContainsInOrder(t, renderedDogPrompt,
+		"CLAIM-FIRST INVARIANT",
+		"# Step 1a: Check for assigned in-progress work",
+		`bd list --include-ephemeral --status in_progress --assignee="$GC_SESSION_ID"`,
+		`bd list --include-ephemeral --status in_progress --assignee="$GC_SESSION_NAME"`,
+		`bd list --include-ephemeral --status in_progress --assignee="$GC_ALIAS"`,
+		"# Step 1b: If none, check for assigned ready work",
+		"bd ready --include-ephemeral --assignee=<session>",
+		"# Step 1c: If none, find routed pool work",
+		"bd ready --metadata-field gc.routed_to=<canonical> --unassigned",
+		"For Step 1a/1b candidates",
+		"Assigned work may have no",
+		"For Step 1c candidates",
+		"`metadata.gc.routed_to` is `$GC_TEMPLATE`",
+	)
+	if strings.Contains(renderedDogPrompt, "{{ .AssignedReadyQuery }}") {
+		t.Fatal("rendered dog prompt still contains AssignedReadyQuery placeholder")
+	}
+	if strings.Contains(renderedDogPrompt, "{{ .AssignedInProgressQuery }}") {
+		t.Fatal("rendered dog prompt still contains AssignedInProgressQuery placeholder")
+	}
+	if strings.Contains(renderedDogPrompt, "{{ .RoutedPoolQuery }}") {
+		t.Fatal("rendered dog prompt still contains RoutedPoolQuery placeholder")
+	}
+}
+
+func TestNonDogStartupPromptsUseAssignedInProgressQuery(t *testing.T) {
+	dir := exampleDir()
+	checks := []struct {
+		rel     string
+		start   string
+		end     string
+		want    string
+		forbid  []string
+		render  bool
+		agent   string
+		tmpl    string
+		rig     string
+		binding string
+	}{
+		{
+			rel:    "packs/gastown/template-fragments/propulsion.template.md",
+			start:  `{{ define "propulsion-mayor" }}`,
+			end:    `{{ define "propulsion-crew" }}`,
+			want:   "{{ .AssignedInProgressQuery }}",
+			forbid: []string{`gc bd list --assignee="$GC_ALIAS" --status=in_progress`},
+		},
+		{
+			rel:    "packs/gastown/template-fragments/propulsion.template.md",
+			start:  `{{ define "propulsion-crew" }}`,
+			end:    `{{ define "propulsion-deacon" }}`,
+			want:   "{{ .AssignedInProgressQuery }}",
+			forbid: []string{`gc bd list --assignee="$GC_SESSION_NAME" --status=in_progress`},
+		},
+		{
+			rel:    "packs/gastown/template-fragments/propulsion.template.md",
+			start:  `{{ define "propulsion-deacon" }}`,
+			end:    `{{ define "propulsion-witness" }}`,
+			want:   "{{ .AssignedInProgressQuery }}",
+			forbid: []string{`gc bd list --assignee="$GC_ALIAS" --status=in_progress`},
+		},
+		{
+			rel:    "packs/gastown/template-fragments/propulsion.template.md",
+			start:  `{{ define "propulsion-witness" }}`,
+			end:    `{{ define "propulsion-polecat" }}`,
+			want:   "{{ .AssignedInProgressQuery }}",
+			forbid: []string{`gc bd list --assignee="$GC_ALIAS" --status=in_progress`},
+		},
+		{
+			rel:    "packs/gastown/template-fragments/propulsion.template.md",
+			start:  `{{ define "propulsion-polecat" }}`,
+			end:    `{{ define "propulsion-refinery" }}`,
+			want:   "{{ .AssignedInProgressQuery }}",
+			forbid: []string{`gc bd list --assignee="$GC_SESSION_NAME" --status=in_progress`},
+		},
+		{
+			rel:    "packs/gastown/template-fragments/propulsion.template.md",
+			start:  `{{ define "propulsion-refinery" }}`,
+			end:    `{{ define "propulsion-dog" }}`,
+			want:   "{{ .AssignedInProgressQuery }}",
+			forbid: []string{`gc bd list --assignee="$GC_ALIAS" --status=in_progress`},
+		},
+		{
+			rel:    "packs/maintenance/template-fragments/propulsion.template.md",
+			start:  `{{ define "propulsion-mayor" }}`,
+			end:    `{{ define "propulsion-crew" }}`,
+			want:   "{{ .AssignedInProgressQuery }}",
+			forbid: []string{`gc bd list --assignee=$GC_AGENT --status=in_progress`},
+		},
+		{
+			rel:    "packs/maintenance/template-fragments/propulsion.template.md",
+			start:  `{{ define "propulsion-crew" }}`,
+			end:    `{{ define "propulsion-deacon" }}`,
+			want:   "{{ .AssignedInProgressQuery }}",
+			forbid: []string{`gc bd list --assignee=$GC_AGENT --status=in_progress`},
+		},
+		{
+			rel:    "packs/maintenance/template-fragments/propulsion.template.md",
+			start:  `{{ define "propulsion-deacon" }}`,
+			end:    `{{ define "propulsion-witness" }}`,
+			want:   "{{ .AssignedInProgressQuery }}",
+			forbid: []string{`gc bd list --assignee=$GC_AGENT --status=in_progress`},
+		},
+		{
+			rel:    "packs/maintenance/template-fragments/propulsion.template.md",
+			start:  `{{ define "propulsion-witness" }}`,
+			end:    `{{ define "propulsion-polecat" }}`,
+			want:   "{{ .AssignedInProgressQuery }}",
+			forbid: []string{`gc bd list --assignee=$GC_AGENT --status=in_progress`},
+		},
+		{
+			rel:    "packs/maintenance/template-fragments/propulsion.template.md",
+			start:  `{{ define "propulsion-polecat" }}`,
+			end:    `{{ define "propulsion-refinery" }}`,
+			want:   "{{ .AssignedInProgressQuery }}",
+			forbid: []string{`gc bd list --assignee=$GC_AGENT --status=in_progress`},
+		},
+		{
+			rel:    "packs/maintenance/template-fragments/propulsion.template.md",
+			start:  `{{ define "propulsion-refinery" }}`,
+			end:    `{{ define "propulsion-dog" }}`,
+			want:   "{{ .AssignedInProgressQuery }}",
+			forbid: []string{`gc bd list --assignee=$GC_AGENT --status=in_progress`},
+		},
+		{
+			rel:     "packs/gastown/agents/polecat/prompt.template.md",
+			start:   "## Startup Protocol",
+			end:     "## Context Exhaustion",
+			want:    "{{ .AssignedInProgressQuery }}",
+			forbid:  []string{`gc bd list --assignee="$GC_SESSION_NAME" --status=in_progress`},
+			render:  true,
+			agent:   "gastown/polecat",
+			tmpl:    "polecat",
+			rig:     "gastown",
+			binding: "gastown.",
+		},
+		{
+			rel:     "packs/gastown/agents/deacon/prompt.template.md",
+			start:   "## Startup Protocol",
+			end:     "**Hook ->",
+			want:    "{{ .AssignedInProgressQuery }}",
+			forbid:  []string{`gc bd list --assignee="$GC_ALIAS" --status=in_progress`},
+			render:  true,
+			agent:   "gastown/deacon",
+			tmpl:    "deacon",
+			rig:     "gastown",
+			binding: "gastown.",
+		},
+		{
+			rel:     "packs/gastown/agents/witness/prompt.template.md",
+			start:   "## Startup Protocol",
+			end:     "**Hook ->",
+			want:    "{{ .AssignedInProgressQuery }}",
+			forbid:  []string{`gc bd list --assignee="$GC_ALIAS" --status=in_progress`},
+			render:  true,
+			agent:   "gastown/witness",
+			tmpl:    "witness",
+			rig:     "gastown",
+			binding: "gastown.",
+		},
+		{
+			rel:     "packs/gastown/agents/refinery/prompt.template.md",
+			start:   "# Step 1: Check for an in-progress patrol wisp",
+			end:     "Then follow the formula.",
+			want:    "{{ .AssignedInProgressQuery }}",
+			forbid:  []string{`gc bd list --assignee="$GC_AGENT" --status=in_progress`},
+			render:  true,
+			agent:   "gastown/refinery",
+			tmpl:    "refinery",
+			rig:     "gastown",
+			binding: "gastown.",
+		},
+	}
+	for _, check := range checks {
+		t.Run(check.rel+"/"+check.start, func(t *testing.T) {
+			data, err := os.ReadFile(filepath.Join(dir, check.rel))
+			if err != nil {
+				t.Fatalf("reading %s: %v", check.rel, err)
+			}
+			body := sectionBetween(t, string(data), check.start, check.end)
+			if !strings.Contains(body, check.want) {
+				t.Fatalf("%s section %q missing %q", check.rel, check.start, check.want)
+			}
+			for _, forbidden := range check.forbid {
+				if strings.Contains(body, forbidden) {
+					t.Fatalf("%s section %q hardcodes %q", check.rel, check.start, forbidden)
+				}
+			}
+			if !check.render {
+				return
+			}
+			rendered := renderGastownPromptForPack(t, check.rel, check.agent, check.tmpl, "demo", check.rig, check.binding)
+			if strings.Contains(rendered, check.want) {
+				t.Fatalf("%s rendered prompt still contains %q", check.rel, check.want)
+			}
+			if !strings.Contains(rendered, `bd list --include-ephemeral --status in_progress --assignee="$GC_SESSION_ID"`) {
+				t.Fatalf("%s rendered prompt missing compatibility-aware in-progress query: %q", check.rel, rendered)
+			}
+		})
 	}
 }
 
@@ -1972,9 +3032,9 @@ func TestReviewLegFormulaPersistsReportAndNotifiesCoordinator(t *testing.T) {
 	for _, want := range []string{
 		`formula = "mol-review-leg"`,
 		`coordinator`,
-		`gc bd update {{issue}} --notes`,
+		`gc bd update "$WORK_BEAD_ID" --notes`,
 		`gc mail send "$COORD"`,
-		`gc bd update {{issue}} --status=closed`,
+		`gc bd update "$WORK_BEAD_ID" --status=closed`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("review-leg formula missing %q", want)
@@ -2062,10 +3122,11 @@ func TestWitnessPatrolLivenessProcedureUsesExactSessionIdentity(t *testing.T) {
 		}
 	}
 	for _, want := range []string{
-		`$s.ID`,
-		`$s.SessionName`,
-		`$s.Alias`,
-		`$s.AgentName`,
+		`$s.id`,
+		`$s.name`,
+		`$s.session_name`,
+		`$s.alias`,
+		`$s.agent_name`,
 		`configured_named_identity`,
 	} {
 		if !strings.Contains(body, want) {
@@ -2713,6 +3774,33 @@ func TestDeaconPatrolDetectsQueueStarvation(t *testing.T) {
 	)
 }
 
+func TestDeaconPatrolNextIterationBurnsCurrentBeforeBackoff(t *testing.T) {
+	dir := exampleDir()
+	path := filepath.Join(dir, "packs", "gastown", "formulas", "mol-deacon-patrol.toml")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading deacon formula: %v", err)
+	}
+	body := string(data)
+	section := sectionBetween(t, body, `id = "next-iteration"`, "")
+
+	assertContainsInOrder(t, section,
+		`CURRENT_WISP=${GC_BEAD_ID:-}`,
+		`if [ -z "$CURRENT_WISP" ]; then`,
+		`CURRENT_WISP=$(gc bd list --assignee="$GC_AGENT" --status=in_progress --type=wisp --limit=1 --json | jq -r '.[0].id // empty')`,
+		`NEXT=$(gc bd mol wisp mol-deacon-patrol --root-only --var binding_prefix='{{binding_prefix}}' --json | jq -r '.new_epic_id // empty')`,
+		`if [ -z "$NEXT" ]; then`,
+		`if ! gc bd update "$NEXT" --assignee="$GC_AGENT"; then`,
+		`if [ -n "$CURRENT_WISP" ]; then`,
+		`gc bd mol burn "$CURRENT_WISP" --force`,
+		`sleep {{event_timeout}}`,
+		`gc hook`,
+	)
+	if strings.Contains(section, "<this-wisp-id>") {
+		t.Fatal("next-iteration still uses placeholder burn target")
+	}
+}
+
 // TestRefineryPromptUsesCanonicalAgentIdentity verifies the refinery
 // prompt's wisp lookup and assignment commands use $GC_AGENT, which the
 // session harness guarantees (internal/session/lifecycle.go). $GC_ALIAS
@@ -2730,7 +3818,7 @@ func TestRefineryPromptUsesCanonicalAgentIdentity(t *testing.T) {
 	for _, want := range []string{
 		`gc bd list --assignee="$GC_AGENT" --status=in_progress`,
 		`gc bd update "$WISP" --assignee="$GC_AGENT"`,
-		`| Find assigned work | ` + "`" + `gc bd list --assignee="$GC_AGENT" --status=open` + "`" + ` |`,
+		`| Find assigned work | ` + "`" + `gc bd list ${GC_RIG:+--rig="$GC_RIG"} --assignee="$GC_AGENT" --status=open` + "`" + ` |`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("refinery prompt missing canonical $GC_AGENT usage %q", want)
@@ -2741,6 +3829,100 @@ func TestRefineryPromptUsesCanonicalAgentIdentity(t *testing.T) {
 	// (it can be empty; the harness-guaranteed identity is $GC_AGENT).
 	if strings.Contains(body, `--assignee="$GC_ALIAS"`) {
 		t.Errorf("refinery prompt still uses $GC_ALIAS for its own identity; switch to $GC_AGENT")
+	}
+}
+
+// TestRefineryAssignedWorkQueriesUsePortableRigScope verifies every refinery
+// work-bead lookup added for rig scope uses an attached --rig=value token.
+func TestRefineryAssignedWorkQueriesUsePortableRigScope(t *testing.T) {
+	dir := exampleDir()
+	promptPath := filepath.Join(dir, "packs", "gastown", "agents", "refinery", "prompt.template.md")
+	promptData, err := os.ReadFile(promptPath)
+	if err != nil {
+		t.Fatalf("reading refinery prompt: %v", err)
+	}
+	prompt := string(promptData)
+
+	formulaPath := filepath.Join(dir, "packs", "gastown", "formulas", "mol-refinery-patrol.toml")
+	formulaData, err := os.ReadFile(formulaPath)
+	if err != nil {
+		t.Fatalf("reading refinery formula: %v", err)
+	}
+	formula := string(formulaData)
+
+	for _, check := range []struct {
+		name string
+		body string
+		want string
+	}{
+		{
+			name: "prompt orphan scan",
+			body: prompt,
+			want: `ORPHANS=$(gc bd list ${GC_RIG:+--rig="$GC_RIG"} --metadata-field gc.routed_to="${GC_RIG:+$GC_RIG/}{{ .BindingPrefix }}refinery" --status=open --json 2>/dev/null \`,
+		},
+		{
+			name: "prompt quick reference",
+			body: prompt,
+			want: `| Find assigned work | ` + "`" + `gc bd list ${GC_RIG:+--rig="$GC_RIG"} --assignee="$GC_AGENT" --status=open` + "`" + ` |`,
+		},
+		{
+			name: "formula find-work step",
+			body: formula,
+			want: `WORK=$(gc bd list ${GC_RIG:+--rig="$GC_RIG"} --assignee=$GC_AGENT --status=open \`,
+		},
+		{
+			name: "formula explanation",
+			body: formula,
+			want: "`${GC_RIG:+--rig=\"$GC_RIG\"}` scopes the query to this refinery's rig",
+		},
+	} {
+		if !strings.Contains(check.body, check.want) {
+			t.Errorf("%s missing portable rig-scoped assigned-work query %q", check.name, check.want)
+		}
+	}
+
+	for _, check := range []struct {
+		name string
+		body string
+	}{
+		{name: "prompt", body: prompt},
+		{name: "formula", body: formula},
+	} {
+		splitFlag := `${GC_RIG:+--rig ` + `"$GC_RIG"` + `}`
+		if strings.Contains(check.body, splitFlag) {
+			t.Errorf("%s still uses shell-dependent split rig flag", check.name)
+		}
+	}
+}
+
+// TestAttachedRigScopeShellToken verifies the refinery's conditional rig flag
+// expands to the single argv token parsed by gc bd in both sh and zsh.
+func TestAttachedRigScopeShellToken(t *testing.T) {
+	for _, shell := range []string{"sh", "zsh"} {
+		t.Run(shell, func(t *testing.T) {
+			path, err := exec.LookPath(shell)
+			if err != nil {
+				t.Skipf("%s not installed", shell)
+			}
+
+			cmd := exec.Command(path, "-c", `GC_RIG=gascity; for arg in ${GC_RIG:+--rig="$GC_RIG"}; do printf '<%s>\n' "$arg"; done`)
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("%s expansion failed: %v\n%s", shell, err, out)
+			}
+			if got, want := strings.TrimSpace(string(out)), "<--rig=gascity>"; got != want {
+				t.Fatalf("%s non-empty expansion = %q, want %q", shell, got, want)
+			}
+
+			cmd = exec.Command(path, "-c", `unset GC_RIG; for arg in ${GC_RIG:+--rig="$GC_RIG"}; do printf '<%s>\n' "$arg"; done`)
+			out, err = cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("%s empty expansion failed: %v\n%s", shell, err, out)
+			}
+			if got := strings.TrimSpace(string(out)); got != "" {
+				t.Fatalf("%s empty expansion = %q, want empty", shell, got)
+			}
+		})
 	}
 }
 

@@ -155,6 +155,10 @@ func (s *transcriptService) List(ctx context.Context, input ListTranscriptInput)
 		after = 0
 	}
 	limit := clampTranscriptLimit(input.Limit)
+	order, err := normalizeTranscriptOrder(input.Order)
+	if err != nil {
+		return nil, err
+	}
 	var out []ConversationTranscriptRecord
 	err = withBindingLock(s.locks, ref, func() error {
 		state, err := s.findStateLocked(ref)
@@ -165,7 +169,7 @@ func (s *transcriptService) List(ctx context.Context, input ListTranscriptInput)
 			out = nil
 			return nil
 		}
-		out, err = s.listTranscriptLocked(ref, after, limit)
+		out, err = s.listTranscriptLocked(ref, after, limit, order)
 		return err
 	})
 	return out, err
@@ -548,7 +552,7 @@ func (s *transcriptService) ListBackfill(ctx context.Context, input ListBackfill
 		if after == 0 && membership.BackfillPolicy == MembershipBackfillSinceJoin {
 			after = membership.JoinedSequence
 		}
-		out, err = s.listTranscriptLocked(ref, after, limit)
+		out, err = s.listTranscriptLocked(ref, after, limit, TranscriptOrderAsc)
 		return err
 	})
 	return out, err
@@ -817,7 +821,7 @@ func (s *transcriptService) findActiveMembershipLocked(ref ConversationRef, sess
 	return out, nil
 }
 
-func (s *transcriptService) listTranscriptLocked(ref ConversationRef, after int64, limit int) ([]ConversationTranscriptRecord, error) {
+func (s *transcriptService) listTranscriptLocked(ref ConversationRef, after int64, limit int, order TranscriptOrder) ([]ConversationTranscriptRecord, error) {
 	state, err := s.ensureStateLocked(ref)
 	if err != nil {
 		return nil, err
@@ -835,11 +839,12 @@ func (s *transcriptService) listTranscriptLocked(ref ConversationRef, after int6
 	}
 	startBucket := transcriptBucket(startSeq)
 	endBucket := transcriptBucket(endSeq)
+	descending := order == TranscriptOrderDesc
 	records := make([]ConversationTranscriptRecord, 0, limit)
-	for bucket := startBucket; bucket <= endBucket && len(records) < limit; bucket++ {
+	appendBucket := func(bucket int64) error {
 		items, err := s.store.List(beads.ListQuery{Label: transcriptBucketLabel(ref, bucket)})
 		if err != nil {
-			return nil, fmt.Errorf("list transcript bucket %d: %w", bucket, err)
+			return fmt.Errorf("list transcript bucket %d: %w", bucket, err)
 		}
 		bucketRecords := make([]ConversationTranscriptRecord, 0, len(items))
 		for _, item := range items {
@@ -848,31 +853,61 @@ func (s *transcriptService) listTranscriptLocked(ref ConversationRef, after int6
 			}
 			record, err := decodeTranscriptBead(item)
 			if err != nil {
-				return nil, err
+				return err
 			}
 			if !sameConversationRef(record.Conversation, ref) || record.Sequence <= after {
 				continue
 			}
 			bucketRecords = append(bucketRecords, record)
 		}
-		slices.SortFunc(bucketRecords, func(a, b ConversationTranscriptRecord) int {
-			switch {
-			case a.Sequence < b.Sequence:
-				return -1
-			case a.Sequence > b.Sequence:
-				return 1
-			default:
-				return strings.Compare(a.ID, b.ID)
-			}
-		})
+		sortTranscriptRecords(bucketRecords, descending)
 		for _, record := range bucketRecords {
 			if len(records) >= limit {
 				break
 			}
 			records = append(records, record)
 		}
+		return nil
+	}
+	// Descending walks newest bucket first so the most recent entries are
+	// collected without scanning the entire stream on busy conversations.
+	if descending {
+		for bucket := endBucket; bucket >= startBucket && len(records) < limit; bucket-- {
+			if err := appendBucket(bucket); err != nil {
+				return nil, err
+			}
+		}
+	} else {
+		for bucket := startBucket; bucket <= endBucket && len(records) < limit; bucket++ {
+			if err := appendBucket(bucket); err != nil {
+				return nil, err
+			}
+		}
 	}
 	return records, nil
+}
+
+// sortTranscriptRecords orders records by sequence (ID as tiebreaker),
+// ascending by default or descending when newest-first is requested.
+func sortTranscriptRecords(records []ConversationTranscriptRecord, descending bool) {
+	slices.SortFunc(records, func(a, b ConversationTranscriptRecord) int {
+		cmp := compareTranscriptRecords(a, b)
+		if descending {
+			return -cmp
+		}
+		return cmp
+	})
+}
+
+func compareTranscriptRecords(a, b ConversationTranscriptRecord) int {
+	switch {
+	case a.Sequence < b.Sequence:
+		return -1
+	case a.Sequence > b.Sequence:
+		return 1
+	default:
+		return strings.Compare(a.ID, b.ID)
+	}
 }
 
 func decodeTranscriptBead(b beads.Bead) (ConversationTranscriptRecord, error) {
@@ -1138,6 +1173,19 @@ func requireControllerCaller(caller Caller) error {
 		return ErrUnauthorized
 	}
 	return nil
+}
+
+// normalizeTranscriptOrder validates the requested order, defaulting empty to
+// ascending (oldest-first) for backwards compatibility.
+func normalizeTranscriptOrder(order TranscriptOrder) (TranscriptOrder, error) {
+	switch order {
+	case "", TranscriptOrderAsc:
+		return TranscriptOrderAsc, nil
+	case TranscriptOrderDesc:
+		return TranscriptOrderDesc, nil
+	default:
+		return "", fmt.Errorf("%w: invalid transcript order %q", ErrInvalidInput, order)
+	}
 }
 
 func clampTranscriptLimit(limit int) int {

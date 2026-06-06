@@ -31,7 +31,7 @@ func TestTutorial03Sessions(t *testing.T) {
 		}
 	}
 
-	if out, err := ws.runShell("gc agent add --name reviewer --dir my-project", ""); err != nil {
+	if out, err := ws.runShell("gc agent add --name reviewer", ""); err != nil {
 		t.Fatalf("seed reviewer scaffold: %v\n%s", err, out)
 	}
 	writeFile(t, filepath.Join(myCity, "agents", "reviewer", "agent.toml"), "dir = \"my-project\"\nprovider = \""+tutorialReviewerProvider()+"\"\n", 0o644)
