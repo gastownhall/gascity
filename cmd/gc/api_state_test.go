@@ -2086,6 +2086,7 @@ func TestControllerStateLegacyFileProviderUsesSharedCityStoreWithoutCreatingRigS
 }
 
 func TestControllerStateLegacyFileProviderSharesRigStoreHandle(t *testing.T) {
+	clearGCEnv(t)
 	t.Setenv("GC_BEADS", "file")
 
 	cityDir := t.TempDir()
