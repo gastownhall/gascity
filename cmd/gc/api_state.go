@@ -1054,14 +1054,14 @@ func (cs *controllerState) ResumeAgent(name string) error {
 	})
 }
 
-// SuspendRig writes suspended=true on the rig in city.toml.
+// SuspendRig writes a machine-local runtime suspension override for the rig.
 func (cs *controllerState) SuspendRig(name string) error {
 	return cs.mutateAndPoke(func() error {
 		return cs.editor.SuspendRig(name)
 	})
 }
 
-// ResumeRig clears suspended on the rig in city.toml.
+// ResumeRig writes a machine-local runtime resume override for the rig.
 func (cs *controllerState) ResumeRig(name string) error {
 	return cs.mutateAndPoke(func() error {
 		return cs.editor.ResumeRig(name)

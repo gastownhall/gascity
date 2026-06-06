@@ -836,6 +836,12 @@ func shouldIgnoreConfigWatchEvent(path string) bool {
 	if clean == "" || clean == "." {
 		return false
 	}
+	// .gc is runtime-owned and normally ignored by the config watcher, but
+	// .gc/site.toml is part of the effective config because LoadWithIncludes
+	// overlays it onto workspace and rig settings.
+	if filepath.Base(clean) == "site.toml" && filepath.Base(filepath.Dir(clean)) == ".gc" {
+		return false
+	}
 	sepGC := string(filepath.Separator) + ".gc"
 	sepBeads := string(filepath.Separator) + ".beads"
 	return clean == ".gc" ||

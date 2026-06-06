@@ -159,8 +159,9 @@ type SiteBinding struct {
 
 // RigSiteBinding binds a declared rig name to a machine-local path.
 type RigSiteBinding struct {
-	Name string `toml:"name"`
-	Path string `toml:"path,omitempty"`
+	Name      string `toml:"name"`
+	Path      string `toml:"path,omitempty"`
+	Suspended *bool  `toml:"suspended,omitempty"`
 }
 
 // LoadSiteBinding reads .gc/site.toml. Missing files return an empty binding.
@@ -184,17 +185,17 @@ func LoadSiteBinding(fs fsys.FS, cityRoot string) (*SiteBinding, error) {
 // precedence, but legacy city.toml rig paths still flow through as a
 // compatibility fallback until users migrate them into .gc/site.toml.
 func ApplySiteBindings(fs fsys.FS, cityRoot string, cfg *City) ([]string, error) {
-	return applySiteBindings(fs, cityRoot, cfg, false)
+	return applySiteBindings(fs, cityRoot, cfg, false, true)
 }
 
 // ApplySiteBindingsForEdit overlays .gc/site.toml for config-edit flows but
 // retains raw city.toml paths as a fallback so edit commands can migrate them
 // into .gc/site.toml on write.
 func ApplySiteBindingsForEdit(fs fsys.FS, cityRoot string, cfg *City) ([]string, error) {
-	return applySiteBindings(fs, cityRoot, cfg, true)
+	return applySiteBindings(fs, cityRoot, cfg, true, false)
 }
 
-func applySiteBindings(fs fsys.FS, cityRoot string, cfg *City, keepLegacy bool) ([]string, error) {
+func applySiteBindings(fs fsys.FS, cityRoot string, cfg *City, keepLegacy, applyRuntimeState bool) ([]string, error) {
 	if cfg == nil {
 		return nil, nil
 	}
@@ -203,14 +204,16 @@ func applySiteBindings(fs fsys.FS, cityRoot string, cfg *City, keepLegacy bool) 
 		return nil, err
 	}
 	applyWorkspaceIdentityBinding(cityRoot, binding, cfg)
-	paths := make(map[string]string, len(binding.Rigs))
+	bindings := make(map[string]RigSiteBinding, len(binding.Rigs))
 	for _, rig := range binding.Rigs {
 		name := strings.TrimSpace(rig.Name)
 		path := strings.TrimSpace(rig.Path)
-		if name == "" || path == "" {
+		if name == "" {
 			continue
 		}
-		paths[name] = path
+		rig.Name = name
+		rig.Path = path
+		bindings[name] = rig
 	}
 
 	var warnings []string
@@ -219,23 +222,26 @@ func applySiteBindings(fs fsys.FS, cityRoot string, cfg *City, keepLegacy bool) 
 		name := cfg.Rigs[i].Name
 		seen[name] = struct{}{}
 		legacyPath := strings.TrimSpace(cfg.Rigs[i].Path)
-		if path, ok := paths[name]; ok {
-			cfg.Rigs[i].Path = path
-			continue
-		}
-		if keepLegacy || legacyPath != "" {
+		binding, hasBinding := bindings[name]
+		switch {
+		case hasBinding && binding.Path != "":
+			cfg.Rigs[i].Path = binding.Path
+		case keepLegacy || legacyPath != "":
 			cfg.Rigs[i].Path = legacyPath
 			if legacyPath != "" && !keepLegacy {
 				warnings = append(warnings, legacyRigPathSiteBindingWarning(name))
 			}
-			continue
+		default:
+			cfg.Rigs[i].Path = ""
+			if !keepLegacy {
+				warnings = append(warnings, missingRigSiteBindingWarning(name))
+			}
 		}
-		cfg.Rigs[i].Path = ""
-		if !keepLegacy {
-			warnings = append(warnings, missingRigSiteBindingWarning(name))
+		if applyRuntimeState && hasBinding && binding.Suspended != nil {
+			cfg.Rigs[i].Suspended = *binding.Suspended
 		}
 	}
-	for name := range paths {
+	for name := range bindings {
 		if _, ok := seen[name]; ok {
 			continue
 		}
@@ -298,6 +304,16 @@ func persistRigSiteBindings(fs fsys.FS, cityRoot string, rigs []Rig, removedRigN
 	if err != nil {
 		return err
 	}
+	existingRigs := make(map[string]RigSiteBinding, len(existing.Rigs))
+	for _, rig := range existing.Rigs {
+		name := strings.TrimSpace(rig.Name)
+		if name == "" {
+			continue
+		}
+		rig.Name = name
+		rig.Path = strings.TrimSpace(rig.Path)
+		existingRigs[name] = rig
+	}
 	declaredNames := make(map[string]struct{}, len(rigs))
 	binding := SiteBinding{
 		WorkspaceName:   strings.TrimSpace(existing.WorkspaceName),
@@ -311,15 +327,19 @@ func persistRigSiteBindings(fs fsys.FS, cityRoot string, rigs []Rig, removedRigN
 			continue
 		}
 		declaredNames[name] = struct{}{}
-		if path == "" {
+		siteRig := RigSiteBinding{Name: name, Path: path}
+		if existingRig, ok := existingRigs[name]; ok {
+			siteRig.Suspended = existingRig.Suspended
+		}
+		if siteRig.Path == "" && siteRig.Suspended == nil {
 			continue
 		}
-		binding.Rigs = append(binding.Rigs, RigSiteBinding{Name: name, Path: path})
+		binding.Rigs = append(binding.Rigs, siteRig)
 	}
 	for _, rig := range existing.Rigs {
 		name := strings.TrimSpace(rig.Name)
 		path := strings.TrimSpace(rig.Path)
-		if name == "" || path == "" {
+		if name == "" || (path == "" && rig.Suspended == nil) {
 			continue
 		}
 		if _, removed := removedRigNames[name]; removed {
@@ -328,7 +348,7 @@ func persistRigSiteBindings(fs fsys.FS, cityRoot string, rigs []Rig, removedRigN
 		if _, ok := declaredNames[name]; ok {
 			continue
 		}
-		binding.Rigs = append(binding.Rigs, RigSiteBinding{Name: name, Path: path})
+		binding.Rigs = append(binding.Rigs, RigSiteBinding{Name: name, Path: path, Suspended: rig.Suspended})
 	}
 	sort.Slice(binding.Rigs, func(i, j int) bool {
 		if binding.Rigs[i].Name != binding.Rigs[j].Name {
@@ -337,6 +357,57 @@ func persistRigSiteBindings(fs fsys.FS, cityRoot string, rigs []Rig, removedRigN
 		return binding.Rigs[i].Path < binding.Rigs[j].Path
 	})
 
+	return persistSiteBinding(fs, cityRoot, binding)
+}
+
+// PersistRigSuspensionOverride writes the operator/runtime suspended override
+// for a rig into .gc/site.toml. Authored city.toml suspended defaults remain
+// source-owned; this machine-local override is merged only for runtime loads.
+// If path is non-empty, it is stored alongside the runtime override so legacy
+// city.toml rig paths continue migrating into the machine-local binding layer.
+func PersistRigSuspensionOverride(fs fsys.FS, cityRoot, name, path string, suspended bool) error {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return fmt.Errorf("persisting rig suspension override: empty rig name")
+	}
+	path = strings.TrimSpace(path)
+	existing, err := LoadSiteBinding(fs, cityRoot)
+	if err != nil {
+		return err
+	}
+	binding := SiteBinding{
+		WorkspaceName:   strings.TrimSpace(existing.WorkspaceName),
+		WorkspacePrefix: strings.TrimSpace(existing.WorkspacePrefix),
+		Rigs:            make([]RigSiteBinding, 0, len(existing.Rigs)+1),
+	}
+	found := false
+	for _, rig := range existing.Rigs {
+		rig.Name = strings.TrimSpace(rig.Name)
+		rig.Path = strings.TrimSpace(rig.Path)
+		if rig.Name == "" {
+			continue
+		}
+		if rig.Name == name {
+			if path != "" {
+				rig.Path = path
+			}
+			rig.Suspended = &suspended
+			found = true
+		}
+		if rig.Path == "" && rig.Suspended == nil {
+			continue
+		}
+		binding.Rigs = append(binding.Rigs, rig)
+	}
+	if !found {
+		binding.Rigs = append(binding.Rigs, RigSiteBinding{Name: name, Path: path, Suspended: &suspended})
+	}
+	sort.Slice(binding.Rigs, func(i, j int) bool {
+		if binding.Rigs[i].Name != binding.Rigs[j].Name {
+			return binding.Rigs[i].Name < binding.Rigs[j].Name
+		}
+		return binding.Rigs[i].Path < binding.Rigs[j].Path
+	})
 	return persistSiteBinding(fs, cityRoot, binding)
 }
 

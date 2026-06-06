@@ -2687,7 +2687,7 @@ gc rig restart [name]
 
 ## gc rig resume
 
-Resume a suspended rig by clearing suspended in city.toml.
+Resume a suspended rig by setting a local runtime override in .gc/site.toml.
 
 The reconciler will start the rig's agents on its next tick.
 
@@ -2753,7 +2753,7 @@ gc rig status [name] [flags]
 
 ## gc rig suspend
 
-Suspend a rig by setting suspended=true in city.toml.
+Suspend a rig by setting a local runtime override in .gc/site.toml.
 
 All agents scoped to the suspended rig are effectively suspended —
 the reconciler skips them and gc hook returns empty. The rig's beads

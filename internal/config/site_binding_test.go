@@ -227,6 +227,125 @@ path = "/site/frontend"
 	}
 }
 
+func TestLoadWithIncludes_AppliesRigSuspensionSiteBinding(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/city.toml"] = []byte(`
+[workspace]
+name = "test-city"
+
+[[rigs]]
+name = "frontend"
+`)
+	fs.Files[SiteBindingPath("/city")] = []byte(`
+[[rig]]
+name = "frontend"
+path = "/site/frontend"
+suspended = true
+`)
+
+	cfg, prov, err := LoadWithIncludes(fs, "/city/city.toml")
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+	if !cfg.Rigs[0].Suspended {
+		t.Fatalf("Suspended = false, want runtime site binding override")
+	}
+	if cfg.Rigs[0].Path != "/site/frontend" {
+		t.Fatalf("Path = %q, want site binding path", cfg.Rigs[0].Path)
+	}
+	if len(prov.Warnings) != 0 {
+		t.Fatalf("warnings = %v, want none", prov.Warnings)
+	}
+}
+
+func TestApplySiteBindingsForEdit_DoesNotApplyRigSuspensionOverride(t *testing.T) {
+	fs := fsys.NewFake()
+	cfg := &City{
+		Workspace: Workspace{Name: "test-city"},
+		Rigs:      []Rig{{Name: "frontend", Path: "/legacy/frontend"}},
+	}
+	fs.Files[SiteBindingPath("/city")] = []byte(`
+[[rig]]
+name = "frontend"
+suspended = true
+`)
+
+	warnings, err := ApplySiteBindingsForEdit(fs, "/city", cfg)
+	if err != nil {
+		t.Fatalf("ApplySiteBindingsForEdit: %v", err)
+	}
+	if cfg.Rigs[0].Suspended {
+		t.Fatalf("Suspended = true, want edit loads to keep source-authored suspended value")
+	}
+	if cfg.Rigs[0].Path != "/legacy/frontend" {
+		t.Fatalf("Path = %q, want legacy edit path preserved", cfg.Rigs[0].Path)
+	}
+	if len(warnings) != 0 {
+		t.Fatalf("warnings = %v, want none", warnings)
+	}
+}
+
+func TestPersistRigSuspensionOverridePreservesSiteBindingPath(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files[SiteBindingPath("/city")] = []byte(`
+workspace_name = "site-city"
+
+[[rig]]
+name = "frontend"
+path = "/site/frontend"
+`)
+
+	if err := PersistRigSuspensionOverride(fs, "/city", "frontend", "", true); err != nil {
+		t.Fatalf("PersistRigSuspensionOverride: %v", err)
+	}
+
+	binding, err := LoadSiteBinding(fs, "/city")
+	if err != nil {
+		t.Fatalf("LoadSiteBinding: %v", err)
+	}
+	if binding.WorkspaceName != "site-city" {
+		t.Fatalf("WorkspaceName = %q, want preserved site-city", binding.WorkspaceName)
+	}
+	if len(binding.Rigs) != 1 {
+		t.Fatalf("binding.Rigs = %+v, want one rig", binding.Rigs)
+	}
+	rig := binding.Rigs[0]
+	if rig.Name != "frontend" || rig.Path != "/site/frontend" {
+		t.Fatalf("binding.Rigs[0] = %+v, want frontend path preserved", rig)
+	}
+	if rig.Suspended == nil || !*rig.Suspended {
+		t.Fatalf("Suspended = %v, want true override", rig.Suspended)
+	}
+}
+
+func TestPersistRigSiteBindingsPreservesRigSuspensionOverride(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files[SiteBindingPath("/city")] = []byte(`
+[[rig]]
+name = "frontend"
+suspended = true
+`)
+
+	if err := PersistRigSiteBindings(fs, "/city", []Rig{{Name: "frontend", Path: "/site/frontend"}}); err != nil {
+		t.Fatalf("PersistRigSiteBindings: %v", err)
+	}
+
+	binding, err := LoadSiteBinding(fs, "/city")
+	if err != nil {
+		t.Fatalf("LoadSiteBinding: %v", err)
+	}
+	if len(binding.Rigs) != 1 {
+		t.Fatalf("binding.Rigs = %+v, want one rig", binding.Rigs)
+	}
+	rig := binding.Rigs[0]
+	if rig.Path != "/site/frontend" {
+		t.Fatalf("Path = %q, want updated site path", rig.Path)
+	}
+	if rig.Suspended == nil || !*rig.Suspended {
+		t.Fatalf("Suspended = %v, want preserved true override", rig.Suspended)
+	}
+}
+
 func TestLoadWithIncludes_AppliesWorkspaceIdentitySiteBinding(t *testing.T) {
 	fs := fsys.NewFake()
 	fs.Files["/city/city.toml"] = []byte(`

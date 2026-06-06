@@ -207,9 +207,16 @@ func TestRigAnywhere_CmdRigSuspendFromRigDir(t *testing.T) {
 				t.Fatalf("stdout = %q, want rig suspend confirmation", stdout.String())
 			}
 
-			cfg, err := config.Load(fsys.OSFS{}, filepath.Join(fx.cityPath, "city.toml"))
+			raw, err := config.Load(fsys.OSFS{}, filepath.Join(fx.cityPath, "city.toml"))
 			if err != nil {
 				t.Fatalf("load city config: %v", err)
+			}
+			if len(raw.Rigs) != 1 || raw.Rigs[0].Suspended {
+				t.Fatalf("city.toml suspended = %v, want source-owned false/omitted", raw.Rigs)
+			}
+			cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(fx.cityPath, "city.toml"))
+			if err != nil {
+				t.Fatalf("load effective city config: %v", err)
 			}
 			if len(cfg.Rigs) != 1 || !cfg.Rigs[0].Suspended {
 				t.Fatalf("rig suspended = %v, want true", cfg.Rigs)
@@ -281,9 +288,16 @@ func TestRigAnywhere_CmdRigResumeFromRigDir(t *testing.T) {
 				t.Fatalf("stdout = %q, want rig resume confirmation", stdout.String())
 			}
 
-			cfg, err := config.Load(fsys.OSFS{}, filepath.Join(fx.cityPath, "city.toml"))
+			raw, err := config.Load(fsys.OSFS{}, filepath.Join(fx.cityPath, "city.toml"))
 			if err != nil {
 				t.Fatalf("load city config: %v", err)
+			}
+			if len(raw.Rigs) != 1 || !raw.Rigs[0].Suspended {
+				t.Fatalf("city.toml suspended = %v, want authored true preserved", raw.Rigs)
+			}
+			cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(fx.cityPath, "city.toml"))
+			if err != nil {
+				t.Fatalf("load effective city config: %v", err)
 			}
 			if len(cfg.Rigs) != 1 || cfg.Rigs[0].Suspended {
 				t.Fatalf("rig suspended = %v, want false", cfg.Rigs)

@@ -913,6 +913,67 @@ func TestWatchConfigDirs_CityRootIgnoresRuntimeTraceWrites(t *testing.T) {
 	}
 }
 
+func TestWatchConfigDirs_RuntimeSiteBindingWritesDirty(t *testing.T) {
+	old := debounceDelay
+	debounceDelay = 5 * time.Millisecond
+	t.Cleanup(func() { debounceDelay = old })
+
+	dir := t.TempDir()
+	runtimeDir := filepath.Join(dir, ".gc")
+	if err := os.MkdirAll(runtimeDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll runtime dir: %v", err)
+	}
+	sitePath := filepath.Join(runtimeDir, "site.toml")
+	if err := os.WriteFile(sitePath, []byte("workspace_name = \"before\"\n"), 0o644); err != nil {
+		t.Fatalf("seed site binding: %v", err)
+	}
+	runtimeStatePath := filepath.Join(runtimeDir, "runtime-state.json")
+
+	if shouldIgnoreConfigWatchEvent(sitePath) {
+		t.Fatalf("shouldIgnoreConfigWatchEvent(%q) = true, want false", sitePath)
+	}
+	if !shouldIgnoreConfigWatchEvent(runtimeStatePath) {
+		t.Fatalf("shouldIgnoreConfigWatchEvent(%q) = false, want true", runtimeStatePath)
+	}
+
+	var dirty atomic.Bool
+	pokeCh := make(chan struct{}, 1)
+	var stderr bytes.Buffer
+	cleanup := watchConfigTargets([]config.WatchTarget{{Path: runtimeDir}}, &dirty, pokeCh, &stderr)
+	defer cleanup()
+
+	select {
+	case <-pokeCh:
+	default:
+	}
+	dirty.Store(false)
+
+	if err := os.WriteFile(sitePath, []byte("workspace_name = \"after\"\n"), 0o644); err != nil {
+		t.Fatalf("rewrite site binding: %v", err)
+	}
+	select {
+	case <-pokeCh:
+	case <-time.After(3 * time.Second):
+		t.Fatalf("timed out waiting for watcher poke after site binding write; stderr=%q", stderr.String())
+	}
+	if !dirty.Load() {
+		t.Fatalf("dirty flag not set after site binding write; stderr=%q", stderr.String())
+	}
+
+	dirty.Store(false)
+	if err := os.WriteFile(runtimeStatePath, []byte("{}\n"), 0o644); err != nil {
+		t.Fatalf("write runtime state: %v", err)
+	}
+	select {
+	case <-pokeCh:
+		t.Fatalf("unexpected watcher poke after runtime state write; stderr=%q", stderr.String())
+	case <-time.After(250 * time.Millisecond):
+	}
+	if dirty.Load() {
+		t.Fatalf("dirty flag set after runtime state write; stderr=%q", stderr.String())
+	}
+}
+
 func TestWatchConfigDirs_SymlinkSeedDirWatchesNestedPreExistingDir(t *testing.T) {
 	old := debounceDelay
 	debounceDelay = 5 * time.Millisecond

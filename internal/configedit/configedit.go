@@ -599,18 +599,41 @@ func removeLocalDiscoveredAgentConfig(fs fsys.FS, cityRoot string, agent config.
 	return nil
 }
 
-// SuspendRig suspends a rig by setting suspended=true in city.toml.
+// SuspendRig suspends a rig by setting a machine-local runtime override.
 func (e *Editor) SuspendRig(name string) error {
-	return e.Edit(func(cfg *config.City) error {
-		return SetRigSuspended(cfg, name, true)
-	})
+	return e.setRigSuspensionOverride(name, true)
 }
 
-// ResumeRig resumes a rig by clearing suspended in city.toml.
+// ResumeRig resumes a rig by setting a machine-local runtime override.
 func (e *Editor) ResumeRig(name string) error {
-	return e.Edit(func(cfg *config.City) error {
-		return SetRigSuspended(cfg, name, false)
-	})
+	return e.setRigSuspensionOverride(name, false)
+}
+
+func (e *Editor) setRigSuspensionOverride(name string, suspended bool) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	cfg, err := e.loadForEdit()
+	if err != nil {
+		return err
+	}
+	rigPath := ""
+	found := false
+	for i := range cfg.Rigs {
+		if cfg.Rigs[i].Name == name {
+			rigPath = cfg.Rigs[i].Path
+			cfg.Rigs[i].Suspended = suspended
+			found = true
+			break
+		}
+	}
+	if !found {
+		return fmt.Errorf("%w: rig %q", ErrNotFound, name)
+	}
+	if err := validateCityForEdit(cfg); err != nil {
+		return err
+	}
+	return config.PersistRigSuspensionOverride(e.fs, filepath.Dir(e.tomlPath), name, rigPath, suspended)
 }
 
 // SuspendCity sets workspace.suspended = true.

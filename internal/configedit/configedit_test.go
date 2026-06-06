@@ -879,9 +879,20 @@ func TestSuspendRig(t *testing.T) {
 		t.Fatalf("SuspendRig: %v", err)
 	}
 
-	cfg := readTOML(t, path)
+	raw := readTOML(t, path)
+	if raw.Rigs[0].Suspended {
+		t.Error("expected city.toml rig suspended default to remain false")
+	}
+	cfg := readEffectiveTOML(t, path)
 	if !cfg.Rigs[0].Suspended {
-		t.Error("expected my-rig to be suspended")
+		t.Error("expected effective my-rig to be suspended")
+	}
+	binding := readSiteBinding(t, dir)
+	if len(binding.Rigs) != 1 || binding.Rigs[0].Suspended == nil || !*binding.Rigs[0].Suspended {
+		t.Fatalf("site binding should contain suspended=true override, got %+v", binding.Rigs)
+	}
+	if binding.Rigs[0].Path != "/tmp/my-rig" {
+		t.Fatalf("site binding path = %q, want preserved path", binding.Rigs[0].Path)
 	}
 }
 
@@ -902,9 +913,17 @@ suspended = true
 		t.Fatalf("ResumeRig: %v", err)
 	}
 
-	cfg := readTOML(t, path)
+	raw := readTOML(t, path)
+	if !raw.Rigs[0].Suspended {
+		t.Error("expected city.toml authored suspended default to remain true")
+	}
+	cfg := readEffectiveTOML(t, path)
 	if cfg.Rigs[0].Suspended {
-		t.Error("expected my-rig to not be suspended")
+		t.Error("expected effective my-rig to not be suspended")
+	}
+	binding := readSiteBinding(t, dir)
+	if len(binding.Rigs) != 1 || binding.Rigs[0].Suspended == nil || *binding.Rigs[0].Suspended {
+		t.Fatalf("site binding should contain suspended=false override, got %+v", binding.Rigs)
 	}
 }
 

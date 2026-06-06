@@ -81,6 +81,84 @@ name = "changed"
 	}
 }
 
+func TestRevision_UsesLoadedSiteBindingSnapshot(t *testing.T) {
+	dir := t.TempDir()
+	cityPath := filepath.Join(dir, "city.toml")
+	writeFile(t, dir, "city.toml", `
+[[rigs]]
+name = "frontend"
+`)
+	writeFile(t, dir, ".gc/site.toml", `
+[[rig]]
+name = "frontend"
+path = "/site/frontend-one"
+`)
+
+	cfg, prov, err := LoadWithIncludes(fsys.OSFS{}, cityPath)
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+	if cfg.Rigs[0].Path != "/site/frontend-one" {
+		t.Fatalf("loaded rig path = %q, want original site binding", cfg.Rigs[0].Path)
+	}
+	loadedRevision := Revision(fsys.OSFS{}, prov, cfg, dir)
+
+	writeFile(t, dir, ".gc/site.toml", `
+[[rig]]
+name = "frontend"
+path = "/site/frontend-two"
+`)
+	afterWriteRevision := Revision(fsys.OSFS{}, prov, cfg, dir)
+	if afterWriteRevision != loadedRevision {
+		t.Fatalf("revision changed after site binding write; got %q, want loaded snapshot %q", afterWriteRevision, loadedRevision)
+	}
+
+	reloadedCfg, reloadedProv, err := LoadWithIncludes(fsys.OSFS{}, cityPath)
+	if err != nil {
+		t.Fatalf("reloading config: %v", err)
+	}
+	if reloadedCfg.Rigs[0].Path != "/site/frontend-two" {
+		t.Fatalf("reloaded rig path = %q, want changed site binding", reloadedCfg.Rigs[0].Path)
+	}
+	reloadedRevision := Revision(fsys.OSFS{}, reloadedProv, reloadedCfg, dir)
+	if reloadedRevision == loadedRevision {
+		t.Fatal("revision did not change after reloading changed site binding")
+	}
+}
+
+func TestRevision_ChangesWhenSiteBindingAppears(t *testing.T) {
+	dir := t.TempDir()
+	cityPath := filepath.Join(dir, "city.toml")
+	writeFile(t, dir, "city.toml", `
+[[rigs]]
+name = "frontend"
+path = "/legacy/frontend"
+`)
+
+	cfg, prov, err := LoadWithIncludes(fsys.OSFS{}, cityPath)
+	if err != nil {
+		t.Fatalf("LoadWithIncludes without site binding: %v", err)
+	}
+	withoutSiteBinding := Revision(fsys.OSFS{}, prov, cfg, dir)
+
+	writeFile(t, dir, ".gc/site.toml", `
+[[rig]]
+name = "frontend"
+path = "/site/frontend"
+`)
+	reloadedCfg, reloadedProv, err := LoadWithIncludes(fsys.OSFS{}, cityPath)
+	if err != nil {
+		t.Fatalf("LoadWithIncludes with site binding: %v", err)
+	}
+	if reloadedCfg.Rigs[0].Path != "/site/frontend" {
+		t.Fatalf("reloaded rig path = %q, want site binding", reloadedCfg.Rigs[0].Path)
+	}
+	withSiteBinding := Revision(fsys.OSFS{}, reloadedProv, reloadedCfg, dir)
+	if withSiteBinding == withoutSiteBinding {
+		t.Fatal("revision did not change after site binding was created")
+	}
+}
+
 func TestRevision_UsesLoadedSnapshotForResolvedInputs(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -477,6 +555,33 @@ func TestWatchDirs_ConfigOnly(t *testing.T) {
 	}
 	if dirs[0] != dir {
 		t.Errorf("dir = %q, want %q", dirs[0], dir)
+	}
+}
+
+func TestWatchTargets_IncludesSiteBindingDirWhenPresent(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, ".gc/site.toml", `workspace_name = "site-city"
+`)
+	prov := &Provenance{
+		Sources: []string{filepath.Join(dir, "city.toml")},
+	}
+
+	targets := WatchTargets(prov, &City{}, dir)
+	var found bool
+	for _, target := range targets {
+		if target.Path != filepath.Join(dir, ".gc") {
+			continue
+		}
+		found = true
+		if target.Recursive {
+			t.Fatalf("site binding watch target = %#v, want shallow watch", target)
+		}
+		if target.DiscoverConventions {
+			t.Fatalf("site binding watch target = %#v, want no convention discovery", target)
+		}
+	}
+	if !found {
+		t.Fatalf("watch targets = %#v, want .gc site binding dir", targets)
 	}
 }
 

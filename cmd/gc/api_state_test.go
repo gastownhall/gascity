@@ -2744,6 +2744,9 @@ func TestControllerStateMutationsPokeController(t *testing.T) {
 			if err != nil {
 				t.Fatalf("reload config: %v", err)
 			}
+			if _, err := config.ApplySiteBindings(fsys.OSFS{}, filepath.Dir(tomlPath), got); err != nil {
+				t.Fatalf("apply site bindings: %v", err)
+			}
 			tc.verify(t, got)
 		})
 	}

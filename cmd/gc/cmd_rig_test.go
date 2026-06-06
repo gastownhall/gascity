@@ -1113,13 +1113,29 @@ func TestDoRigSuspend(t *testing.T) {
 		t.Errorf("output = %q, want suspend message", stdout.String())
 	}
 
-	// Verify config written with suspended=true.
-	cfg, err := config.Load(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
+	raw, err := config.Load(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(raw.Rigs) != 1 || raw.Rigs[0].Suspended {
+		t.Errorf("city.toml should remain source-owned, got %+v", raw.Rigs)
+	}
+	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(cfg.Rigs) != 1 || !cfg.Rigs[0].Suspended {
-		t.Errorf("rig should be suspended, got %+v", cfg.Rigs)
+		t.Errorf("effective rig should be suspended, got %+v", cfg.Rigs)
+	}
+	binding, err := config.LoadSiteBinding(fsys.OSFS{}, cityPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(binding.Rigs) != 1 || binding.Rigs[0].Suspended == nil || !*binding.Rigs[0].Suspended {
+		t.Fatalf("site binding should contain suspended=true override, got %+v", binding.Rigs)
+	}
+	if binding.Rigs[0].Path != "/some/path" {
+		t.Fatalf("site binding path = %q, want preserved path", binding.Rigs[0].Path)
 	}
 }
 
@@ -1165,13 +1181,26 @@ func TestDoRigResume(t *testing.T) {
 		t.Errorf("output = %q, want resume message", stdout.String())
 	}
 
-	// Verify config written with suspended=false.
-	cfg, err := config.Load(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
+	raw, err := config.Load(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(raw.Rigs) != 1 || !raw.Rigs[0].Suspended {
+		t.Errorf("city.toml authored suspended default should be preserved, got %+v", raw.Rigs)
+	}
+	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(cfg.Rigs) != 1 || cfg.Rigs[0].Suspended {
-		t.Errorf("rig should not be suspended, got %+v", cfg.Rigs)
+		t.Errorf("effective rig should not be suspended, got %+v", cfg.Rigs)
+	}
+	binding, err := config.LoadSiteBinding(fsys.OSFS{}, cityPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(binding.Rigs) != 1 || binding.Rigs[0].Suspended == nil || *binding.Rigs[0].Suspended {
+		t.Fatalf("site binding should contain suspended=false override, got %+v", binding.Rigs)
 	}
 }
 
@@ -2445,6 +2474,13 @@ dir = "myrig"
 	if strings.Contains(data, "pack-worker") {
 		t.Errorf("city.toml should NOT contain expanded pack agent:\n%s", data)
 	}
+	if strings.Contains(data, "suspended") {
+		t.Errorf("city.toml should not contain runtime rig suspension state:\n%s", data)
+	}
+	site := string(f.Files[config.SiteBindingPath("/city")])
+	if !strings.Contains(site, "suspended = true") {
+		t.Errorf("site.toml should contain runtime suspension override:\n%s", site)
+	}
 }
 
 func TestDoRigResumePreservesConfig(t *testing.T) {
@@ -2478,6 +2514,13 @@ dir = "myrig"
 	}
 	if strings.Contains(data, "pack-worker") {
 		t.Errorf("city.toml should NOT contain expanded pack agent:\n%s", data)
+	}
+	if !strings.Contains(data, "suspended = true") {
+		t.Errorf("city.toml should preserve authored suspended default:\n%s", data)
+	}
+	site := string(f.Files[config.SiteBindingPath("/city")])
+	if !strings.Contains(site, "suspended = false") {
+		t.Errorf("site.toml should contain runtime resume override:\n%s", site)
 	}
 }
 

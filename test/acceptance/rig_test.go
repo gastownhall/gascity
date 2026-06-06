@@ -116,16 +116,23 @@ func TestRigLifecycle(t *testing.T) {
 			t.Fatalf("gc rig suspend %s: %v\n%s", rigName, err, out)
 		}
 
-		// Verify suspended state in config.
-		toml := c.ReadFile("city.toml")
-		if !strings.Contains(toml, "suspended") {
-			t.Error("city.toml should contain 'suspended' after rig suspend")
+		cityToml := c.ReadFile("city.toml")
+		if strings.Contains(cityToml, "suspended") {
+			t.Errorf("city.toml should not contain runtime suspension state after rig suspend:\n%s", cityToml)
+		}
+		siteToml := c.ReadFile(".gc/site.toml")
+		if !strings.Contains(siteToml, "suspended = true") {
+			t.Errorf(".gc/site.toml should contain runtime suspended override after rig suspend:\n%s", siteToml)
 		}
 
 		// Resume.
 		out, err = c.GC("rig", "resume", rigName)
 		if err != nil {
 			t.Fatalf("gc rig resume %s: %v\n%s", rigName, err, out)
+		}
+		siteToml = c.ReadFile(".gc/site.toml")
+		if !strings.Contains(siteToml, "suspended = false") {
+			t.Errorf(".gc/site.toml should contain runtime resumed override after rig resume:\n%s", siteToml)
 		}
 	})
 

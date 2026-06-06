@@ -1182,7 +1182,7 @@ func newRigSuspendCmd(stdout, stderr io.Writer) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "suspend [name]",
 		Short: "Suspend a rig (reconciler will skip its agents)",
-		Long: `Suspend a rig by setting suspended=true in city.toml.
+		Long: `Suspend a rig by setting a local runtime override in .gc/site.toml.
 
 All agents scoped to the suspended rig are effectively suspended —
 the reconciler skips them and gc hook returns empty. The rig's beads
@@ -1249,7 +1249,7 @@ func cmdRigSuspend(args []string, stdout, stderr io.Writer) int {
 	return doRigSuspend(fsys.OSFS{}, cityPath, rigName, stdout, stderr)
 }
 
-// doRigSuspend sets suspended=true on the named rig in city.toml.
+// doRigSuspend sets a local runtime suspended=true override for the named rig.
 // Accepts an injected FS for testability.
 func doRigSuspend(fs fsys.FS, cityPath, rigName string, stdout, stderr io.Writer) int {
 	tomlPath := filepath.Join(cityPath, "city.toml")
@@ -1260,9 +1260,10 @@ func doRigSuspend(fs fsys.FS, cityPath, rigName string, stdout, stderr io.Writer
 	}
 
 	found := false
-	for i := range cfg.Rigs {
-		if cfg.Rigs[i].Name == rigName {
-			cfg.Rigs[i].Suspended = true
+	rigPath := ""
+	for _, rig := range cfg.Rigs {
+		if rig.Name == rigName {
+			rigPath = rig.Path
 			found = true
 			break
 		}
@@ -1272,7 +1273,7 @@ func doRigSuspend(fs fsys.FS, cityPath, rigName string, stdout, stderr io.Writer
 		return 1
 	}
 
-	if err := writeCityConfigForEditFS(fs, tomlPath, cfg); err != nil {
+	if err := config.PersistRigSuspensionOverride(fs, cityPath, rigName, rigPath, true); err != nil {
 		fmt.Fprintf(stderr, "gc rig suspend: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -1286,7 +1287,7 @@ func newRigResumeCmd(stdout, stderr io.Writer) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "resume [name]",
 		Short: "Resume a suspended rig",
-		Long: `Resume a suspended rig by clearing suspended in city.toml.
+		Long: `Resume a suspended rig by setting a local runtime override in .gc/site.toml.
 
 The reconciler will start the rig's agents on its next tick.`,
 		Args: cobra.ArbitraryArgs,
@@ -1351,7 +1352,7 @@ func cmdRigResume(args []string, stdout, stderr io.Writer) int {
 	return doRigResume(fsys.OSFS{}, cityPath, rigName, stdout, stderr)
 }
 
-// doRigResume clears suspended on the named rig in city.toml.
+// doRigResume sets a local runtime suspended=false override for the named rig.
 // Accepts an injected FS for testability.
 func doRigResume(fs fsys.FS, cityPath, rigName string, stdout, stderr io.Writer) int {
 	tomlPath := filepath.Join(cityPath, "city.toml")
@@ -1362,9 +1363,10 @@ func doRigResume(fs fsys.FS, cityPath, rigName string, stdout, stderr io.Writer)
 	}
 
 	found := false
-	for i := range cfg.Rigs {
-		if cfg.Rigs[i].Name == rigName {
-			cfg.Rigs[i].Suspended = false
+	rigPath := ""
+	for _, rig := range cfg.Rigs {
+		if rig.Name == rigName {
+			rigPath = rig.Path
 			found = true
 			break
 		}
@@ -1374,7 +1376,7 @@ func doRigResume(fs fsys.FS, cityPath, rigName string, stdout, stderr io.Writer)
 		return 1
 	}
 
-	if err := writeCityConfigForEditFS(fs, tomlPath, cfg); err != nil {
+	if err := config.PersistRigSuspensionOverride(fs, cityPath, rigName, rigPath, false); err != nil {
 		fmt.Fprintf(stderr, "gc rig resume: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}

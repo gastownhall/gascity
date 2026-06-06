@@ -49,6 +49,12 @@ func Revision(fs fsys.FS, prov *Provenance, cfg *City, cityRoot string) string {
 		h.Write([]byte{0})    //nolint:errcheck // hash.Write never errors
 	}
 
+	// Hash machine-local site bindings because LoadWithIncludes overlays
+	// .gc/site.toml onto the effective workspace and rig config. Without
+	// this, rig suspend/resume and path-binding changes can leave a running
+	// controller with stale effective config even after gc reload.
+	writeOptionalRevisionFile(h, prov, fs, "site-binding", SiteBindingPath(cityRoot))
+
 	// Hash rig pack directory contents (all pack sources).
 	rigs := cfg.Rigs
 	for _, r := range rigs {
@@ -123,9 +129,17 @@ func (p *Provenance) captureRevisionSnapshot(fs fsys.FS, cfg *City, cityRoot str
 		fileContents: make(map[string][]byte),
 		fileKnown:    make(map[string]bool),
 	}
+	recordFile := func(path string) {
+		snap.fileKnown[path] = true
+		if data, err := fs.ReadFile(path); err == nil {
+			snap.fileContents[path] = cloneBytes(data)
+		}
+	}
 	recordDir := func(label, dir string) {
 		snap.dirHashes[label] = PackContentHashRecursive(fs, dir)
 	}
+
+	recordFile(SiteBindingPath(cityRoot))
 
 	for _, r := range cfg.Rigs {
 		for _, ref := range r.Includes {
@@ -139,10 +153,7 @@ func (p *Provenance) captureRevisionSnapshot(fs fsys.FS, cfg *City, cityRoot str
 	}
 	if tracksPackV2Imports(cfg) {
 		lockPath := filepath.Join(cityRoot, "packs.lock")
-		snap.fileKnown[lockPath] = true
-		if data, err := fs.ReadFile(lockPath); err == nil {
-			snap.fileContents[lockPath] = cloneBytes(data)
-		}
+		recordFile(lockPath)
 	}
 	for _, dir := range cfg.PackDirs {
 		if strings.TrimSpace(dir) == "" {
@@ -192,6 +203,21 @@ func writeRevisionDirHash(h hash.Hash, prov *Provenance, label string, fs fsys.F
 		topoHash = PackContentHashRecursive(fs, dir)
 	}
 	writeRevisionBytes(h, label, []byte(topoHash))
+}
+
+func writeOptionalRevisionFile(h hash.Hash, prov *Provenance, fs fsys.FS, label, path string) {
+	if strings.TrimSpace(path) == "" {
+		return
+	}
+	if data, known, exists := revisionSnapshotFile(prov, path); known {
+		if exists {
+			writeRevisionBytes(h, label+":"+path, data)
+		}
+		return
+	}
+	if data, err := fs.ReadFile(path); err == nil {
+		writeRevisionBytes(h, label+":"+path, data)
+	}
 }
 
 func writeRevisionBytes(h hash.Hash, label string, data []byte) {
@@ -266,6 +292,11 @@ func WatchTargets(prov *Provenance, cfg *City, cityRoot string) []WatchTarget {
 		for _, src := range prov.Sources {
 			dir := filepath.Dir(src)
 			addTarget(dir, false, pathutil.SamePath(dir, cityRoot))
+		}
+	}
+	if siteDir := filepath.Dir(SiteBindingPath(cityRoot)); strings.TrimSpace(siteDir) != "" {
+		if info, err := os.Stat(siteDir); err == nil && info.IsDir() {
+			addTarget(siteDir, false, false)
 		}
 	}
 
