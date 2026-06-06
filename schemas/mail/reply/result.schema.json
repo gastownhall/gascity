@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "message": {
+      "type": "object",
+      "required": ["id"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "from": { "type": "string" },
+        "to": { "type": "string" },
+        "subject": { "type": "string" },
+        "thread_id": { "type": "string" },
+        "reply_to": { "type": "string" }
+      },
+      "additionalProperties": false
+    }
+  },
+  "type": "object",
+  "required": ["schema_version", "ok", "command", "action", "id", "message", "messages", "count"],
+  "properties": {
+    "schema_version": { "const": "1" },
+    "ok": { "const": true },
+    "command": { "const": "mail.reply" },
+    "action": { "const": "reply" },
+    "id": { "type": "string", "minLength": 1 },
+    "message": { "$ref": "#/$defs/message" },
+    "messages": { "type": "array", "items": { "$ref": "#/$defs/message" } },
+    "count": { "type": "integer", "minimum": 1 },
+    "notified": { "type": "boolean" }
+  },
+  "additionalProperties": true
+}

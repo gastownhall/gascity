@@ -28,6 +28,11 @@ source = "github.com/gastownhall/gc-import"
 version = "0.2.0"
 commit = "abc123"
 
+[imports.core]
+source = "github.com/gastownhall/gc-core"
+version = "0.1.0"
+commit = "beef123"
+
 [imports.registry]
 source = "github.com/gastownhall/gc-registry"
 version = "0.1.0"
@@ -52,6 +57,9 @@ commit = "deadbeef"
 	text := string(data)
 	if strings.Contains(text, "[imports.import]") {
 		t.Fatalf("retired import entry should be pruned:\n%s", text)
+	}
+	if strings.Contains(text, "[imports.core]") {
+		t.Fatalf("retired core entry should be pruned:\n%s", text)
 	}
 	if strings.Contains(text, "[imports.registry]") {
 		t.Fatalf("retired registry entry should be pruned:\n%s", text)

@@ -43,10 +43,14 @@ type TransitionCommand string
 
 const (
 	// CmdCreate writes a new session bead.
-	// Transitions: (nil) → StateCreating → StateActive.
+	// Transitions: (nil) → StateStartPending.
 	CmdCreate TransitionCommand = "create"
 
 	// CmdReady confirms the runtime process is alive.
+	// The provider-start boundary from StateStartPending to StateCreating is
+	// intentionally owned by PreWakePatch, not this advisory command table,
+	// because it is an internal reconciler metadata commit immediately before
+	// runtime start rather than an operator/API command.
 	// Transitions: StateCreating → StateActive.
 	CmdReady TransitionCommand = "ready"
 
@@ -91,7 +95,7 @@ const StateClosed State = "closed"
 
 // StateNone is the virtual state before a session is created. Used as the
 // source state for CmdCreate — transitions from StateNone can only go to
-// StateCreating (via CmdCreate) and nothing else.
+// StateStartPending (via CmdCreate) and nothing else.
 const StateNone State = ""
 
 // anyState is a sentinel used in the transitions table to mean "any non-none
@@ -101,7 +105,7 @@ const anyState State = "*"
 // transitions is the allowed (command, from-state) → to-state table.
 var transitions = map[TransitionCommand]map[State]State{
 	CmdCreate: {
-		StateNone: StateCreating,
+		StateNone: StateStartPending,
 	},
 	CmdReady: {
 		StateCreating: StateActive,

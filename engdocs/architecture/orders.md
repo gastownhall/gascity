@@ -247,8 +247,10 @@ Violations indicate bugs.
 
 - **Event trigger uses cursor-based deduplication**: Event orders track
   the highest processed event sequence number via `seq:<N>` labels on
-  wisp beads. Subsequent trigger checks use `AfterSeq` filtering to avoid
-  reprocessing already-handled events.
+  order-run beads. Formula orders stamp the wisp root or failure tracking
+  bead; exec orders stamp the tracking bead before the command runs. Subsequent
+  trigger checks use `AfterSeq` filtering to avoid reprocessing
+  already-handled events.
 
 - **Dispatch goroutines are drained on controller exit**: Each due
   order launches a goroutine whose completion is tracked by an
@@ -383,10 +385,14 @@ boundaries.
   `sh -c <check>` synchronously during trigger evaluation. A slow check
   command blocks evaluation of subsequent orders on that tick.
 
-- **Event trigger cursor is per-wisp, not per-dispatch**: The cursor
-  position is computed from `seq:<N>` labels on existing wisp beads via
-  `MaxSeqFromLabels()`. If wisp creation fails, the cursor is not
-  advanced, which may cause duplicate event processing on retry.
+- **Event trigger cursor is per-run, not per-dispatch**: The cursor
+  position is computed from `seq:<N>` labels on existing order-run beads via
+  `MaxSeqFromLabels()`. The controller and `gc order run` fail closed when the
+  current event head cannot be read. For side-effecting exec orders, the cursor
+  is persisted before the command runs so a crash after execution does not
+  replay the same event. Trade-off: a controller crash after the cursor stamp
+  and before exec start drops that event for idempotent exec orders; for
+  non-idempotent exec orders this is the safer failure mode.
 
 - **No hot-add of orders**: Order discovery runs on controller
   start and config reload (via fsnotify). Adding a new

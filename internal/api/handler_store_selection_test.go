@@ -78,7 +78,8 @@ func TestConvoyCreateUsesCityStoreWhenAvailableWithoutRig(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reload city item: %v", err)
 	}
-	if updatedItem.ParentID != convoy.ID {
-		t.Fatalf("city item parent = %q, want %q", updatedItem.ParentID, convoy.ID)
+	if updatedItem.ParentID != "" {
+		t.Fatalf("city item parent = %q, want unchanged empty parent", updatedItem.ParentID)
 	}
+	requireAPITracksDep(t, state.cityBeadStore, convoy.ID, item.ID)
 }

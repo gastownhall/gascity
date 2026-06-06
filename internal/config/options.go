@@ -144,6 +144,179 @@ func ResolveExplicitOptions(schema []ProviderOption, overrides map[string]string
 	return extraArgs, nil
 }
 
+func completeResumeCommandDefaults(command, resumeFlag, resumeStyle string, schema []ProviderOption, effectiveDefaults map[string]string) string {
+	if strings.TrimSpace(command) == "" || len(schema) == 0 || len(effectiveDefaults) == 0 {
+		return command
+	}
+	missingArgs := missingDefaultArgsForCommand(command, schema, effectiveDefaults)
+	if len(missingArgs) == 0 {
+		return command
+	}
+	tokens := shellquote.Split(command)
+	insertAt := len(tokens)
+	if resumeStyle == "subcommand" && resumeFlag != "" {
+		insertAt = subcommandResumeInsertIndex(tokens, resumeFlag)
+	}
+	out := make([]string, 0, len(tokens)+len(missingArgs))
+	out = append(out, tokens[:insertAt]...)
+	out = append(out, missingArgs...)
+	out = append(out, tokens[insertAt:]...)
+	joined := shellquote.Join(out)
+	return strings.ReplaceAll(joined, "'{{.SessionKey}}'", "{{.SessionKey}}")
+}
+
+func subcommandResumeInsertIndex(tokens []string, resumeFlag string) int {
+	sessionIndex := -1
+	for i, token := range tokens {
+		if token == "{{.SessionKey}}" {
+			sessionIndex = i
+			break
+		}
+	}
+	if sessionIndex >= 0 {
+		for i := sessionIndex - 1; i >= 0; i-- {
+			if tokens[i] == resumeFlag {
+				return i + 1
+			}
+		}
+		return sessionIndex
+	}
+	for i := len(tokens) - 1; i >= 0; i-- {
+		if tokens[i] == resumeFlag {
+			return i + 1
+		}
+	}
+	return len(tokens)
+}
+
+func missingDefaultArgsForCommand(command string, schema []ProviderOption, effectiveDefaults map[string]string) []string {
+	tokens := shellquote.Split(command)
+	var missing []string
+	for _, opt := range schema {
+		if commandContainsOption(tokens, opt) {
+			continue
+		}
+		value := effectiveDefaults[opt.Key]
+		if value == "" {
+			value = opt.Default
+		}
+		if value == "" {
+			continue
+		}
+		choice := findChoice(opt.Choices, value)
+		if choice == nil || len(choice.FlagArgs) == 0 {
+			continue
+		}
+		missing = append(missing, choice.FlagArgs...)
+	}
+	return missing
+}
+
+func commandContainsOption(tokens []string, opt ProviderOption) bool {
+	for _, choice := range opt.Choices {
+		if commandContainsChoice(tokens, choice) {
+			return true
+		}
+	}
+	return false
+}
+
+func commandContainsChoice(tokens []string, choice OptionChoice) bool {
+	for _, groups := range choiceGroupedFlagSequences(choice) {
+		if len(groups) == 0 {
+			continue
+		}
+		if len(groups) == 1 {
+			if tokenSequenceShapeContains(tokens, groups[0]) {
+				return true
+			}
+			continue
+		}
+		if tokenSequenceGroupsShapeContain(tokens, groups) {
+			return true
+		}
+	}
+	return false
+}
+
+func tokenSequenceShapeContains(tokens, seq []string) bool {
+	for i := 0; i+len(seq) <= len(tokens); i++ {
+		if tokenSequenceShapeMatchesAt(tokens, i, seq, nil) {
+			return true
+		}
+	}
+	return false
+}
+
+func tokenSequenceGroupsShapeContain(tokens []string, groups [][]string) bool {
+	used := make([]bool, len(tokens))
+	for _, group := range groups {
+		start, ok := findTokenSequenceShapeInArgs(tokens, group, used)
+		if !ok {
+			return false
+		}
+		for i := start; i < start+len(group); i++ {
+			used[i] = true
+		}
+	}
+	return true
+}
+
+func findTokenSequenceShapeInArgs(args, seq []string, used []bool) (int, bool) {
+	for i := 0; i+len(seq) <= len(args); i++ {
+		if tokenSequenceShapeMatchesAt(args, i, seq, used) {
+			return i, true
+		}
+	}
+	return 0, false
+}
+
+func tokenSequenceShapeMatchesAt(tokens []string, start int, seq []string, used []bool) bool {
+	if len(seq) == 0 || start+len(seq) > len(tokens) {
+		return false
+	}
+	for i, want := range seq {
+		if used != nil && used[start+i] {
+			return false
+		}
+		got := tokens[start+i]
+		if i == 0 || strings.HasPrefix(want, "-") {
+			if prefix, ok := assignmentPrefix(want); ok {
+				if !strings.HasPrefix(got, prefix) {
+					return false
+				}
+				continue
+			}
+			if got != want {
+				return false
+			}
+			continue
+		}
+		if prefix, ok := assignmentPrefix(want); ok {
+			if !strings.HasPrefix(got, prefix) {
+				return false
+			}
+			continue
+		}
+		if got == "" || strings.HasPrefix(got, "-") || isTemplateToken(got) {
+			return false
+		}
+	}
+	return true
+}
+
+func isTemplateToken(token string) bool {
+	return strings.HasPrefix(token, "{{") && strings.HasSuffix(token, "}}")
+}
+
+func assignmentPrefix(token string) (string, bool) {
+	idx := strings.Index(token, "=")
+	if idx <= 0 {
+		return "", false
+	}
+	return token[:idx+1], true
+}
+
 // ReplaceSchemaFlags strips all CLI flags associated with the provider's
 // OptionsSchema from the command, then appends the given override flags.
 func ReplaceSchemaFlags(command string, schema []ProviderOption, overrideArgs []string) string {
@@ -256,11 +429,17 @@ func StripFlags(command string, flags [][]string) string {
 // in declaration order.
 //
 // When a flag is stripped and it maps to a known choice value, if
-// inferDefaults is non-nil and the corresponding key is not already
-// present, the inferred value is set. This preserves user intent
-// during the Args-to-OptionDefaults migration (review major 3.1).
+// inferDefaults is non-nil the inferred value is set. Explicit provider args
+// are the leaf layer in provider inheritance, so they must override defaults
+// inherited from a base provider.
 func stripArgsSlice(args []string, flags [][]string, schema []ProviderOption, inferDefaults map[string]string) []string {
-	var result []string
+	if args == nil {
+		return nil
+	}
+	if inferDefaults != nil {
+		inferChoicesFromArgs(schema, args, inferDefaults)
+	}
+	result := make([]string, 0, len(args))
 	i := 0
 	for i < len(args) {
 		matched := false
@@ -279,9 +458,6 @@ func stripArgsSlice(args []string, flags [][]string, schema []ProviderOption, in
 				}
 			}
 			if match {
-				if inferDefaults != nil {
-					inferChoiceFromFlags(schema, seq, inferDefaults)
-				}
 				i += len(seq)
 				matched = true
 				break
@@ -295,31 +471,155 @@ func stripArgsSlice(args []string, flags [][]string, schema []ProviderOption, in
 	return result
 }
 
-// inferChoiceFromFlags finds which schema option+choice produced the given flag
-// sequence and, if the key is not already present in defaults, sets the
-// inferred value. Only infers from exact full FlagArgs or FlagAliases matches to
-// avoid ambiguity with partial multi-flag matches.
-func inferChoiceFromFlags(schema []ProviderOption, flagSeq []string, defaults map[string]string) {
-	for _, opt := range schema {
-		if _, exists := defaults[opt.Key]; exists {
+func inferChoicesFromArgs(schema []ProviderOption, args []string, defaults map[string]string) {
+	covered, groupedLastStart := inferGroupedChoicesFromArgs(schema, args, defaults)
+	for i := 0; i < len(args); {
+		if covered[i] {
+			i++
 			continue
 		}
-		for _, choice := range opt.Choices {
-			if choiceHasFlagSequence(choice, flagSeq) {
-				defaults[opt.Key] = choice.Value
-				return
-			}
+		match, ok := longestChoiceMatchAt(schema, args, i, covered)
+		if !ok {
+			i++
+			continue
 		}
+		if lastStart, ok := groupedLastStart[match.key]; ok && i < lastStart {
+			i += match.length
+			continue
+		}
+		defaults[match.key] = match.value
+		i += match.length
 	}
 }
 
-func choiceHasFlagSequence(choice OptionChoice, flagSeq []string) bool {
-	for _, seq := range choiceFullFlagSequences(choice) {
-		if flagsEqual(seq, flagSeq) {
-			return true
+type tokenSpan struct {
+	start int
+	end   int
+}
+
+type groupedChoiceMatch struct {
+	key        string
+	value      string
+	spans      []tokenSpan
+	tokenCount int
+	lastStart  int
+}
+
+func inferGroupedChoicesFromArgs(schema []ProviderOption, args []string, defaults map[string]string) ([]bool, map[string]int) {
+	covered := make([]bool, len(args))
+	groupedLastStart := make(map[string]int)
+	for _, opt := range schema {
+		var best groupedChoiceMatch
+		found := false
+		for _, choice := range opt.Choices {
+			for _, groups := range choiceGroupedFlagSequences(choice) {
+				if len(groups) < 2 {
+					continue
+				}
+				spans, ok := findFlagGroupsInArgs(args, groups)
+				if !ok {
+					continue
+				}
+				candidate := groupedChoiceMatch{
+					key:   opt.Key,
+					value: choice.Value,
+					spans: spans,
+				}
+				for _, span := range spans {
+					candidate.tokenCount += span.end - span.start
+					if span.start > candidate.lastStart {
+						candidate.lastStart = span.start
+					}
+				}
+				if !found || betterGroupedChoice(candidate, best) {
+					best = candidate
+					found = true
+				}
+			}
+		}
+		if !found {
+			continue
+		}
+		defaults[best.key] = best.value
+		groupedLastStart[best.key] = best.lastStart
+		for _, span := range best.spans {
+			for i := span.start; i < span.end; i++ {
+				covered[i] = true
+			}
 		}
 	}
-	return false
+	return covered, groupedLastStart
+}
+
+func betterGroupedChoice(candidate, current groupedChoiceMatch) bool {
+	if candidate.tokenCount != current.tokenCount {
+		return candidate.tokenCount > current.tokenCount
+	}
+	return candidate.lastStart > current.lastStart
+}
+
+func choiceGroupedFlagSequences(choice OptionChoice) [][][]string {
+	var sequences [][][]string
+	if groups := splitFlagArgs(choice.FlagArgs); len(groups) > 0 {
+		sequences = append(sequences, groups)
+	}
+	for _, alias := range choice.FlagAliases {
+		if groups := splitFlagArgs(alias); len(groups) > 0 {
+			sequences = append(sequences, groups)
+		}
+	}
+	return sequences
+}
+
+func findFlagGroupsInArgs(args []string, groups [][]string) ([]tokenSpan, bool) {
+	used := make([]bool, len(args))
+	spans := make([]tokenSpan, 0, len(groups))
+	for _, group := range groups {
+		start, ok := findTokenSequenceInArgs(args, group, used)
+		if !ok {
+			return nil, false
+		}
+		end := start + len(group)
+		for i := start; i < end; i++ {
+			used[i] = true
+		}
+		spans = append(spans, tokenSpan{start: start, end: end})
+	}
+	return spans, true
+}
+
+func findTokenSequenceInArgs(args, seq []string, used []bool) (int, bool) {
+	for i := 0; i+len(seq) <= len(args); i++ {
+		if tokenSequenceMatchesAt(args, i, seq, used) {
+			return i, true
+		}
+	}
+	return 0, false
+}
+
+type choiceMatch struct {
+	key    string
+	value  string
+	length int
+}
+
+func longestChoiceMatchAt(schema []ProviderOption, args []string, start int, covered []bool) (choiceMatch, bool) {
+	var best choiceMatch
+	for _, opt := range schema {
+		for _, choice := range opt.Choices {
+			for _, seq := range choiceFullFlagSequences(choice) {
+				if len(seq) <= best.length || !tokenSequenceMatchesAt(args, start, seq, covered) {
+					continue
+				}
+				best = choiceMatch{
+					key:    opt.Key,
+					value:  choice.Value,
+					length: len(seq),
+				}
+			}
+		}
+	}
+	return best, best.length > 0
 }
 
 func choiceFullFlagSequences(choice OptionChoice) [][]string {
@@ -335,12 +635,15 @@ func choiceFullFlagSequences(choice OptionChoice) [][]string {
 	return sequences
 }
 
-func flagsEqual(a, b []string) bool {
-	if len(a) != len(b) {
+func tokenSequenceMatchesAt(tokens []string, start int, seq []string, covered []bool) bool {
+	if len(seq) == 0 || start+len(seq) > len(tokens) {
 		return false
 	}
-	for i := range a {
-		if a[i] != b[i] {
+	for i, want := range seq {
+		if covered != nil && covered[start+i] {
+			return false
+		}
+		if tokens[start+i] != want {
 			return false
 		}
 	}

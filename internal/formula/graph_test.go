@@ -6,7 +6,6 @@ func TestApplyGraphControlsRecursesIntoNestedChildren(t *testing.T) {
 	t.Parallel()
 
 	f := &Formula{
-		Version: 2,
 		Steps: []*Step{
 			{
 				ID:    "parent",
@@ -78,7 +77,6 @@ func TestApplyGraphControlsRalphOnCompleteOnlyControlsLogicalStep(t *testing.T) 
 	t.Parallel()
 
 	f := &Formula{
-		Version: 2,
 		Steps: []*Step{
 			{
 				ID:    "review-loop",
@@ -163,7 +161,6 @@ func TestApplyGraphControlsSimpleRalphInsideScopeDoesNotCreateRunScopeCheck(t *t
 	t.Parallel()
 
 	f := &Formula{
-		Version: 2,
 		Steps: []*Step{
 			{
 				ID:    "review-loop",
@@ -215,7 +212,6 @@ func TestApplyGraphControls_TallyInjected(t *testing.T) {
 	t.Parallel()
 
 	f := &Formula{
-		Version: 2,
 		Steps: []*Step{
 			{
 				ID:    "ask",
@@ -286,7 +282,6 @@ func TestApplyGraphControls_TallyDefaultMode(t *testing.T) {
 	t.Parallel()
 
 	f := &Formula{
-		Version: 2,
 		Steps: []*Step{
 			{
 				ID:    "vote",
@@ -316,7 +311,6 @@ func TestApplyGraphControls_NoTallyWhenFieldAbsent(t *testing.T) {
 	t.Parallel()
 
 	f := &Formula{
-		Version: 2,
 		Steps: []*Step{
 			{
 				ID:    "ask",

@@ -7,13 +7,13 @@ The `gc` supervisor exposes a single, typed HTTP control plane
 described by an OpenAPI 3.1 document. Everything the CLI does, any
 third-party client can do too — there is no hidden surface.
 
-## Download the spec
+## Get the spec
 
-- **<a href="/schema/openapi.txt" download="openapi.json">Download openapi.json</a>** —
+- **<a href="https://raw.githubusercontent.com/gastownhall/gascity/main/docs/schema/openapi.json" target="_blank" rel="noopener">openapi.json</a>** —
   the authoritative contract. Drop it into Stoplight, Postman,
   Swagger UI, or any OpenAPI-aware tool to browse operations
   interactively.
-- **<a href="/schema/events.txt" download="events.json">Download events.json</a>** —
+- **<a href="https://raw.githubusercontent.com/gastownhall/gascity/main/docs/schema/events.json" target="_blank" rel="noopener">events.json</a>** —
   the `gc events` JSONL line schema. It references DTO components in
   `openapi.json`, so the API remains the source of truth.
 
@@ -240,6 +240,17 @@ behavior, heartbeat suppression, and the `--seq` plain-text cursor format, see
 [gc events Formats](/reference/events).
 
 ### City Scope
+
+Per-city routes are available only after the supervisor marks the city
+`running=true` in `GET /v0/cities`. During startup reconciliation, a city can
+appear in the city list with `running=false` and `status=starting_agents`; in
+that window typed `/v0/city/{cityName}/...` routes return `404` with
+`not_found: city not found or not running: <cityName>`. The raw
+`/v0/city/{cityName}/svc/*` workspace-service proxy is outside the Huma-typed
+API surface and returns the static readiness detail
+`not_found: city not found or not running`. Clients should use the supervisor
+city list or lifecycle events as the readiness boundary before issuing per-city
+requests.
 
 - `GET /v0/city/{cityName}/events`
   returns `ListBodyWireEvent` and includes `X-GC-Index`.

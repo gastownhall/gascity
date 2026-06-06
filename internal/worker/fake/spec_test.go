@@ -27,7 +27,7 @@ func TestLoadProfileJSON(t *testing.T) {
     "env": {"CLAUDE_CODE_ENTRYPOINT": "fake"},
     "startup": {"outcome": "ready", "ready_after": "250ms"}
   },
-  "transcript": {"format": "jsonl", "path": ".runtime/transcript.jsonl"},
+  "transcript": {"format": "jsonl", "path": ".gc/runtime/transcript.jsonl"},
   "continuation": {"mode": "handle", "handle_env": "FAKE_CONT_HANDLE", "same_conversation": true},
   "interactions": [{"kind": "tool_call", "required": true}]
 }`

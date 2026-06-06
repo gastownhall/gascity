@@ -365,6 +365,11 @@ func (fs *FileStore) SetMetadataBatch(id string, kvs map[string]string) error {
 	return nil
 }
 
+// Tx executes fn sequentially against the FileStore.
+func (fs *FileStore) Tx(_ string, fn func(Tx) error) error {
+	return runSequentialTx(fs, fn)
+}
+
 // Get reloads the on-disk store before reading a bead by ID.
 func (fs *FileStore) Get(id string) (Bead, error) {
 	fs.fmu.Lock()
@@ -396,13 +401,13 @@ func (fs *FileStore) ListOpen(status ...string) ([]Bead, error) {
 }
 
 // Ready reloads the on-disk store before listing ready beads.
-func (fs *FileStore) Ready() ([]Bead, error) {
+func (fs *FileStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 	fs.fmu.Lock()
 	defer fs.fmu.Unlock()
 	if err := fs.refreshReadStateLocked(); err != nil {
 		return nil, err
 	}
-	return fs.MemStore.Ready()
+	return fs.MemStore.Ready(query...)
 }
 
 // Children reloads the on-disk store before listing child beads.
@@ -510,6 +515,16 @@ func (fs *FileStore) DepList(id, direction string) ([]Dep, error) {
 		return nil, err
 	}
 	return fs.MemStore.DepList(id, direction)
+}
+
+// DepListBatch reloads the on-disk store before listing batched dependencies.
+func (fs *FileStore) DepListBatch(ids []string) (map[string][]Dep, error) {
+	fs.fmu.Lock()
+	defer fs.fmu.Unlock()
+	if err := fs.refreshReadStateLocked(); err != nil {
+		return nil, err
+	}
+	return fs.MemStore.DepListBatch(ids)
 }
 
 // memSnapshot holds a snapshot of MemStore state for rollback.

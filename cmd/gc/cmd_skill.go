@@ -50,6 +50,7 @@ name collision. For the materialized set, inspect the
 func newSkillListCmd(stdout, stderr io.Writer) *cobra.Command {
 	var agentName string
 	var sessionID string
+	var jsonOut bool
 	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List visible skills",
@@ -85,13 +86,31 @@ func newSkillListCmd(stdout, stderr io.Writer) *cobra.Command {
 				fmt.Fprintf(stderr, "gc skill list: %v\n", err) //nolint:errcheck // best-effort stderr
 				return errExit
 			}
+			if jsonOut {
+				return writeCLIJSONLineOrErr(stdout, stderr, "gc skill list", skillListJSONResult{
+					SchemaVersion: "1",
+					Agent:         strings.TrimSpace(agentName),
+					Session:       strings.TrimSpace(sessionID),
+					Count:         len(entries),
+					Entries:       entries,
+				})
+			}
 			writeVisibilityEntries(stdout, entries)
 			return nil
 		},
 	}
 	cmd.Flags().StringVar(&agentName, "agent", "", "show the effective skill view for this agent")
 	cmd.Flags().StringVar(&sessionID, "session", "", "show the effective skill view for this session")
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit JSON summary")
 	return cmd
+}
+
+type skillListJSONResult struct {
+	SchemaVersion string            `json:"schema_version"`
+	Agent         string            `json:"agent,omitempty"`
+	Session       string            `json:"session,omitempty"`
+	Count         int               `json:"count"`
+	Entries       []visibilityEntry `json:"entries"`
 }
 
 func listVisibleSkillEntries(cityPath string, cfg *config.City, store beads.Store, agentName, sessionID string) ([]visibilityEntry, error) {
@@ -149,9 +168,9 @@ func discoverBootstrapSkillEntries() []visibilityEntry {
 }
 
 type visibilityEntry struct {
-	Name   string
-	Source string
-	Path   string
+	Name   string `json:"name"`
+	Source string `json:"source"`
+	Path   string `json:"path"`
 }
 
 func resolveVisibilityAgent(cityPath string, cfg *config.City, store beads.Store, agentName, sessionID string) (*config.Agent, error) {

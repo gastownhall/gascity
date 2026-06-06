@@ -1,6 +1,0 @@
-[order]
-description = "Periodic CALL DOLT_GC() to bound commit-graph size (Dolt's auto-GC doesn't fire on bd workloads)"
-trigger = "cooldown"
-interval = "1h"
-exec = "gc dolt gc-nudge"
-timeout = "24h"

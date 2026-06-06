@@ -118,17 +118,17 @@ func (p *proxyProcessInstance) HandleHTTP(w http.ResponseWriter, r *http.Request
 	}
 
 	target := &url.URL{Scheme: "http", Host: "gc-service"}
-	proxy := httputil.NewSingleHostReverseProxy(target)
-	proxy.Transport = transport
-	proxy.ErrorHandler = func(w http.ResponseWriter, _ *http.Request, err error) {
-		http.Error(w, fmt.Sprintf("service unavailable: %v", err), http.StatusBadGateway)
-	}
-	originalDirector := proxy.Director
-	proxy.Director = func(req *http.Request) {
-		originalDirector(req)
-		req.URL.Path = subpath
-		req.URL.RawPath = subpath
-		req.Host = ""
+	proxy := &httputil.ReverseProxy{
+		Transport: transport,
+		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {
+			http.Error(w, fmt.Sprintf("service unavailable: %v", err), http.StatusBadGateway)
+		},
+		Rewrite: func(req *httputil.ProxyRequest) {
+			req.SetURL(target)
+			req.Out.URL.Path = subpath
+			req.Out.URL.RawPath = subpath
+			req.Out.Host = ""
+		},
 	}
 	proxy.ServeHTTP(w, r)
 	return true
@@ -198,13 +198,13 @@ func (p *proxyProcessInstance) start(now time.Time) error {
 
 	cmd := exec.Command(p.svc.Process.Command[0], p.svc.Process.Command[1:]...)
 	cmd.Dir = p.commandDir()
-	cmd.Env = append(os.Environ(), citylayout.CityRuntimeEnv(p.rt.CityPath())...)
+	cmd.Env = append(os.Environ(), citylayout.CityRuntimeEnvForRuntimeDir(p.rt.CityPath(), citylayout.TrustedAmbientCityRuntimeDir(p.rt.CityPath()))...)
 	cmd.Env = append(cmd.Env,
 		"GC_SERVICE_NAME="+p.svc.Name,
 		"GC_SERVICE_STATE_ROOT="+p.absStateRoot,
 		"GC_SERVICE_RUN_ROOT="+filepath.Join(p.absStateRoot, "run"),
 		"GC_SERVICE_SOCKET="+p.socketPath,
-		"GC_SERVICE_URL_PREFIX="+p.svc.MountPathOrDefault(),
+		"GC_SERVICE_URL_PREFIX="+citylayout.PublicServiceMountPath(p.rt.CityName(), p.svc.Name),
 		"GC_SERVICE_PUBLIC_URL="+p.publication.URL,
 		"GC_SERVICE_VISIBILITY="+p.publication.Visibility,
 		"GC_PUBLISHED_SERVICES_DIR="+citylayout.PublishedServicesDir(p.rt.CityPath()),

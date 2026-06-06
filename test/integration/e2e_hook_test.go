@@ -57,12 +57,14 @@ func TestE2E_Hook_WithWork(t *testing.T) {
 // compatibility and does not run the configured work query.
 func TestE2E_Hook_Inject(t *testing.T) {
 	const markerName = "inject-work-query-ran"
+	const armEnv = "GC_E2E_HOOK_INJECT_ARM"
+	armValue := uniqueCityName()
 	city := e2eCity{
 		Agents: []e2eAgent{
 			{
 				Name:         "injectee",
 				StartCommand: e2eSleepScript(),
-				WorkQuery:    "touch .gc/" + markerName + " && echo 'inject hook work items'",
+				WorkQuery:    "if [ \"${" + armEnv + ":-}\" = \"" + armValue + "\" ]; then touch .gc/" + markerName + " && echo 'inject hook work items'; fi",
 			},
 		},
 	}
@@ -74,7 +76,9 @@ func TestE2E_Hook_Inject(t *testing.T) {
 		t.Fatalf("checking pre-hook work_query marker: %v", err)
 	}
 
-	out, err := gc(cityDir, "hook", "--inject", "injectee")
+	env := commandEnvForDir(cityDir, false)
+	env = append(env, armEnv+"="+armValue)
+	out, err := runGCWithEnv(env, cityDir, "hook", "--inject", "injectee")
 	if err != nil {
 		t.Fatalf("gc hook --inject should exit 0: %v\noutput: %s", err, out)
 	}
@@ -86,5 +90,25 @@ func TestE2E_Hook_Inject(t *testing.T) {
 		t.Fatalf("gc hook --inject ran work_query; marker exists at %s", markerPath)
 	} else if !os.IsNotExist(err) {
 		t.Fatalf("checking work_query marker: %v", err)
+	}
+
+	hookEnv := filterEnvMany(commandEnvForDir(cityDir, false),
+		"GC_RIG",
+		"GC_RIG_ROOT",
+		"GC_CITY",
+		"GC_CITY_PATH",
+		"GC_CITY_ROOT",
+		"GC_CITY_RUNTIME_DIR",
+	)
+	hookEnv = append(hookEnv, armEnv+"="+armValue)
+	out, err = runGCWithEnv(hookEnv, cityDir, "hook", "injectee")
+	if err != nil {
+		t.Fatalf("gc hook should run armed work_query: %v\noutput: %s", err, out)
+	}
+	if !strings.Contains(out, "inject hook work items") {
+		t.Fatalf("gc hook output missing armed work query result:\n%s", out)
+	}
+	if _, err := os.Stat(markerPath); err != nil {
+		t.Fatalf("normal gc hook did not create work_query marker: %v", err)
 	}
 }

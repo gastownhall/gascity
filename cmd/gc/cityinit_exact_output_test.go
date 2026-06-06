@@ -12,7 +12,7 @@ import (
 func TestCityInitExactOutput_DefaultScaffold(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 
-	code := doInit(fsys.NewFake(), "/bright-lights", defaultWizardConfig(), "", &stdout, &stderr)
+	code := doInit(fsys.NewFake(), "/bright-lights", defaultWizardConfig(), "", &stdout, &stderr, false)
 
 	if code != 0 {
 		t.Fatalf("doInit code = %d, want 0", code)
@@ -45,7 +45,7 @@ func TestCityInitExactOutput_CommandProviderSkipReadiness(t *testing.T) {
 	t.Cleanup(func() { registerCityWithSupervisorTestHook = oldRegister })
 
 	var stdout, stderr bytes.Buffer
-	code := cmdInitWithOptions([]string{filepath.Join(t.TempDir(), "bright-lights")}, "codex", "", "", &stdout, &stderr, true)
+	code := cmdInitWithOptions([]string{filepath.Join(t.TempDir(), "bright-lights")}, "codex", "", "", &stdout, &stderr, true, false)
 
 	if code != 0 {
 		t.Fatalf("cmdInitWithOptions code = %d, want 0", code)

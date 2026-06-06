@@ -8,13 +8,23 @@ manage rigs and agents, dispatch tasks, and monitor progress.
 Use `/gc-work`, `/gc-dispatch`, `/gc-agents`, `/gc-rigs`, `/gc-mail`,
 or `/gc-city` to load command reference for any topic.
 
+{{ define "mayor-slash-note-claude" -}}
 Note: those `/gc-*` entries are Claude Code slash commands (skill references),
-not bash commands — do not invent `gc mail list`, `gc city status`, etc. from
-them. For bead work use `gc bd ...`, for city-level status use `gc status`,
-and for mail use `gc mail <subcommand>` where subcommands are `inbox`, `send`,
-`check`, `read`, `peek`, `reply`, `mark-read`, `mark-unread`, `thread`,
-`count`, `archive`, `delete`. If unsure of exact subcommand shape, run
-`gc <cmd> --help` rather than guessing.
+not bash commands.
+{{- end }}
+{{ define "mayor-slash-note-default" -}}
+Note: those `/gc-*` entries name skills exposed by your provider's command
+palette, not bash commands.
+{{- end }}
+
+{{ templateFirst . (printf "mayor-slash-note-%s" .ProviderKey) "mayor-slash-note-default" }}
+
+Do not invent `gc mail list`, `gc city status`, etc. from them. For bead work
+use `gc bd ...`, for city-level status use `gc status`, and for mail use
+`gc mail <subcommand>` where subcommands are `inbox`, `send`, `check`, `read`,
+`peek`, `reply`, `mark-read`, `mark-unread`, `thread`, `count`, `archive`,
+`delete`. If unsure of exact subcommand shape, run `gc <cmd> --help` rather
+than guessing.
 
 ## How to work
 

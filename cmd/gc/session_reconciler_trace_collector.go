@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"testing"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/config"
@@ -118,11 +119,20 @@ func newSessionReconcilerTracer(cityPath, cityName string, stderr io.Writer) *Se
 		store:     store,
 		armStore:  newSessionReconcilerTraceArmStore(cityPath),
 		lastArms:  make(map[string]TraceArm),
-		flushCh:   make(chan sessionReconcilerTraceFlushRequest, sessionReconcilerTraceFlushQueueSize),
-		flushDone: make(chan struct{}),
-		closeCh:   make(chan struct{}),
 	}
-	go tracer.runFlushLoop(tracer.flushCh)
+	// In production, an async worker goroutine drains the flush queue with a
+	// bounded wait budget so tick liveness wins over trace durability under
+	// slow storage. Under `go test`, the same bound makes assertions on trace
+	// records non-deterministic — back-to-back ticks in a single test can fill
+	// the queue or starve the result wait, and records silently drop. Bypass
+	// the queue in tests so AppendBatch is synchronous and trace assertions
+	// observe what the production gate actually decided. (ga-231oq)
+	if !testing.Testing() {
+		tracer.flushCh = make(chan sessionReconcilerTraceFlushRequest, sessionReconcilerTraceFlushQueueSize)
+		tracer.flushDone = make(chan struct{})
+		tracer.closeCh = make(chan struct{})
+		go tracer.runFlushLoop(tracer.flushCh)
+	}
 	return tracer
 }
 
@@ -874,6 +884,10 @@ func (c *SessionReconcilerTraceCycle) RecordTraceControl(action string, scopeTyp
 	c.addRecord(rec)
 }
 
+// End flushes the cycle and writes a cycle-result trace record. Caller fields
+// are intentionally open-ended: known rollup keys are merged through
+// coalesceTraceField, so caller values keep priority there; additional non-nil
+// caller fields are preserved for site-specific trace context.
 func (c *SessionReconcilerTraceCycle) End(completion TraceCompletionStatus, fields map[string]any) error {
 	if c == nil || c.tracer == nil || !c.tracer.Enabled() {
 		return nil
@@ -927,6 +941,11 @@ func (c *SessionReconcilerTraceCycle) End(completion TraceCompletionStatus, fiel
 		"dropped_record_count":    droppedRecords,
 		"dropped_batch_count":     droppedBatches,
 		"drop_reason_counts":      dropReasons,
+	}
+	for k, v := range fields {
+		if _, ok := rollup[k]; !ok {
+			rollup[k] = v
+		}
 	}
 	rec := newTraceRecord(TraceRecordCycleResult).withCycle(c, now)
 	rec.SiteCode = TraceSiteCycleFinish

@@ -153,6 +153,49 @@ name = "test-city"
 	_ = os.RemoveAll(outputDir)
 }
 
+func TestBuildImageRoutesContextWarningsToStderr(t *testing.T) {
+	cityDir := t.TempDir()
+	targetDir := t.TempDir()
+
+	if err := os.MkdirAll(filepath.Join(cityDir, ".claude", "skills"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
+name = "test-city"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(targetDir, "skill.md"), []byte("# skill"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(targetDir, filepath.Join(cityDir, ".claude", "skills", "core.gc-agents")); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doBuildImage(
+		[]string{cityDir},
+		"",
+		"gc-agent:latest",
+		nil,
+		false,
+		true,
+		&stdout, &stderr,
+	)
+	if code != 0 {
+		t.Fatalf("doBuildImage returned %d; stderr: %s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "skipping symlinked directory") {
+		t.Fatalf("stderr = %q, want skipped directory symlink diagnostic", stderr.String())
+	}
+
+	line := strings.TrimSpace(stdout.String())
+	parts := strings.SplitN(line, ": ", 2)
+	if len(parts) == 2 {
+		_ = os.RemoveAll(parts[1])
+	}
+}
+
 func TestBuildImageCLIRegistered(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	root := newRootCmd(&stdout, &stderr)

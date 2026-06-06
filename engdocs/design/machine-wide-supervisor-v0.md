@@ -176,6 +176,11 @@ The supervisor reads a global config at `~/.gc/supervisor.toml`:
 port = 8080
 bind = "127.0.0.1"
 
+# Additional Host headers accepted beyond localhost/127.0.0.1/[::1].
+# Use only when intentionally exposing the supervisor through a named
+# local proxy or private network endpoint.
+allowed_hosts = ["city-admin.local"]
+
 # Patrol interval for the supervisor's own reconciliation
 # (checking city health, not agent health -- that's per-city).
 patrol_interval = "10s"

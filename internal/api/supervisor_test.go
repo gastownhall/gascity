@@ -20,12 +20,13 @@ import (
 // fakeCityResolver implements CityResolver for testing.
 type fakeCityResolver struct {
 	cities             map[string]*fakeState // keyed by city name
+	listed             []CityInfo
 	pending            map[string]string
 	supervisorRecorder events.Recorder
 }
 
 func (f *fakeCityResolver) ListCities() []CityInfo {
-	var out []CityInfo
+	out := append([]CityInfo(nil), f.listed...)
 	for name := range f.cities {
 		s := f.cities[name]
 		out = append(out, CityInfo{
@@ -67,8 +68,13 @@ func (f *fakeCityResolver) SupervisorEventRecorder() events.Recorder {
 
 func newTestSupervisorMux(t *testing.T, cities map[string]*fakeState) *SupervisorMux {
 	t.Helper()
+	return newTestSupervisorMuxWithBuildID(t, cities, "")
+}
+
+func newTestSupervisorMuxWithBuildID(t *testing.T, cities map[string]*fakeState, buildID string) *SupervisorMux {
+	t.Helper()
 	resolver := &fakeCityResolver{cities: cities}
-	return NewSupervisorMux(resolver, nil, false, "test", time.Now())
+	return NewSupervisorMux(resolver, nil, false, "test", buildID, time.Now())
 }
 
 func TestSupervisorCitiesList(t *testing.T) {
@@ -103,6 +109,22 @@ func TestSupervisorCitiesList(t *testing.T) {
 	// Sorted by name.
 	if resp.Items[0].Name != "alpha" || resp.Items[1].Name != "beta" {
 		t.Errorf("items = %v, want alpha then beta", resp.Items)
+	}
+}
+
+func TestSupervisorCityServiceProxy404sUntilCityRunning(t *testing.T) {
+	sm := newTestSupervisorMux(t, map[string]*fakeState{})
+	req := httptest.NewRequest(http.MethodGet, "/v0/city/starting/svc/review-intake/healthz", nil)
+	rec := httptest.NewRecorder()
+
+	sm.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusNotFound)
+	}
+	const want = `{"status":404,"title":"Not Found","detail":"not_found: city not found or not running"}`
+	if strings.TrimSpace(rec.Body.String()) != want {
+		t.Fatalf("body = %s, want %s", rec.Body.String(), want)
 	}
 }
 
@@ -222,6 +244,30 @@ func TestSupervisorCityNamespacedRoute(t *testing.T) {
 	}
 }
 
+func TestSupervisorCityScopedRoute404sUntilCityRunning(t *testing.T) {
+	resolver := &fakeCityResolver{
+		cities: map[string]*fakeState{},
+		listed: []CityInfo{{
+			Name:    "bright-lights",
+			Path:    "/tmp/bright-lights",
+			Running: false,
+			Status:  "starting_agents",
+		}},
+	}
+	sm := NewSupervisorMux(resolver, nil, false, "test", "", time.Now())
+
+	req := httptest.NewRequest("GET", "/v0/city/bright-lights/agents", nil)
+	rec := httptest.NewRecorder()
+	sm.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusNotFound, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), CityNotFoundOrNotRunningDetail("bright-lights")) {
+		t.Fatalf("body missing not-running detail: %s", rec.Body.String())
+	}
+}
+
 func TestSupervisorCityDetail(t *testing.T) {
 	s := newFakeState(t)
 	s.cityName = "bright-lights"
@@ -316,6 +362,7 @@ func TestSupervisorHandlerAllowsCityScopedDirectServiceMutationWithoutCSRF(t *te
 	})
 
 	req := httptest.NewRequest(http.MethodPost, "/v0/city/bright-lights/svc/github-webhook/v0/github/webhook", strings.NewReader(`{}`))
+	req.Host = "localhost"
 	req.RemoteAddr = "198.51.100.10:9000"
 	rec := httptest.NewRecorder()
 	sm.Handler().ServeHTTP(rec, req)
@@ -354,6 +401,53 @@ func TestSupervisorHealth(t *testing.T) {
 	}
 	if resp["cities_running"] != float64(1) {
 		t.Errorf("cities_running = %v, want 1", resp["cities_running"])
+	}
+}
+
+// TestSupervisorHealthIncludesBuildID asserts /health surfaces the
+// supervisor's build identity. Drift detection in `gc start` reads this
+// field to compare against the local gc binary's build hash; an empty
+// or missing field disables binary-drift detection.
+func TestSupervisorHealthIncludesBuildID(t *testing.T) {
+	const wantBuildID = "abc123ef"
+	s := newFakeState(t)
+	sm := newTestSupervisorMuxWithBuildID(t, map[string]*fakeState{"test-city": s}, wantBuildID)
+
+	req := httptest.NewRequest("GET", "/health", nil)
+	rec := httptest.NewRecorder()
+	sm.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+	var resp map[string]any
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got, _ := resp["build_id"].(string); got != wantBuildID {
+		t.Fatalf("build_id = %q, want %q\nbody: %s", got, wantBuildID, rec.Body.String())
+	}
+}
+
+// TestSupervisorHealthEmptyBuildID confirms that when the supervisor
+// has no buildID (e.g., `go run`-style launches that lack VCS info),
+// the field is omitted rather than surfacing a misleading empty
+// string. This matches `omitempty` JSON semantics — an empty buildID
+// is the same as "no buildID known."
+func TestSupervisorHealthEmptyBuildID(t *testing.T) {
+	s := newFakeState(t)
+	sm := newTestSupervisorMuxWithBuildID(t, map[string]*fakeState{"test-city": s}, "")
+
+	req := httptest.NewRequest("GET", "/health", nil)
+	rec := httptest.NewRecorder()
+	sm.ServeHTTP(rec, req)
+
+	var resp map[string]any
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if _, present := resp["build_id"]; present {
+		t.Fatalf("build_id key present in response despite empty buildID; got: %v", resp["build_id"])
 	}
 }
 
@@ -407,6 +501,46 @@ func TestSupervisorPerCityEventStream(t *testing.T) {
 	ct := rec.Header().Get("Content-Type")
 	if ct != "text/event-stream" {
 		t.Errorf("Content-Type = %q, want text/event-stream", ct)
+	}
+}
+
+func TestSupervisorEventStreamsFlushHeadersBeforeFirstEvent(t *testing.T) {
+	s := newFakeState(t)
+	s.cityName = "gc-work"
+
+	sm := newTestSupervisorMux(t, map[string]*fakeState{
+		"gc-work": s,
+	})
+	srv := httptest.NewServer(sm)
+	t.Cleanup(srv.Close)
+
+	for _, path := range []string{
+		"/v0/events/stream",
+		"/v0/city/gc-work/events/stream",
+	} {
+		t.Run(path, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+
+			req, err := http.NewRequestWithContext(ctx, http.MethodGet, srv.URL+path, nil)
+			if err != nil {
+				t.Fatalf("build request: %v", err)
+			}
+			req.Header.Set("Accept", "text/event-stream")
+
+			resp, err := srv.Client().Do(req)
+			if err != nil {
+				t.Fatalf("GET %s: %v", path, err)
+			}
+			defer resp.Body.Close() //nolint:errcheck
+
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusOK)
+			}
+			if ct := resp.Header.Get("Content-Type"); ct != "text/event-stream" {
+				t.Fatalf("Content-Type = %q, want text/event-stream", ct)
+			}
+		})
 	}
 }
 
@@ -537,14 +671,18 @@ func TestSupervisorGlobalEventList(t *testing.T) {
 	}
 
 	var resp struct {
-		Items []events.TaggedEvent `json:"items"`
-		Total int                  `json:"total"`
+		EventCursor string               `json:"event_cursor"`
+		Items       []events.TaggedEvent `json:"items"`
+		Total       int                  `json:"total"`
 	}
 	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
 	if resp.Total != 2 {
 		t.Errorf("total = %d, want 2", resp.Total)
+	}
+	if resp.EventCursor != "alpha:1,beta:1" {
+		t.Fatalf("event_cursor = %q, want alpha:1,beta:1", resp.EventCursor)
 	}
 
 	// Verify events are tagged with city names.
@@ -655,6 +793,32 @@ func TestSupervisorEventListsIncludeCustomEventTypes(t *testing.T) {
 	payload := assertJSONPayloadObject(t, custom["payload"])
 	if payload["source"] != "test" {
 		t.Fatalf("custom payload = %v, want source=test", payload)
+	}
+}
+
+func TestSupervisorEventListFilterIsEmptyMatchesEventsFilterZeroValue(t *testing.T) {
+	if !supervisorEventListFilterIsEmpty(events.Filter{}) {
+		t.Fatal("zero-value filter reported non-empty")
+	}
+
+	tests := []struct {
+		name   string
+		filter events.Filter
+	}{
+		{name: "type", filter: events.Filter{Type: events.BeadCreated}},
+		{name: "actor", filter: events.Filter{Actor: "human"}},
+		{name: "subject", filter: events.Filter{Subject: "gc-1"}},
+		{name: "since", filter: events.Filter{Since: time.Unix(1, 0)}},
+		{name: "until", filter: events.Filter{Until: time.Unix(1, 0)}},
+		{name: "after_seq", filter: events.Filter{AfterSeq: 1}},
+		{name: "limit", filter: events.Filter{Limit: 1}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if supervisorEventListFilterIsEmpty(tt.filter) {
+				t.Fatalf("filter %+v reported empty", tt.filter)
+			}
+		})
 	}
 }
 

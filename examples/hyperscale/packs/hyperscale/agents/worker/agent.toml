@@ -1,5 +1,6 @@
 scope = "rig"
-start_command = "assets/scripts/mock-worker.sh"
+start_command = "gc agent-script --script {{.ConfigDir}}/assets/scripts/hyperscale-worker.yaml"
+lifecycle = "one_shot"
 nudge = "Check your hook for work."
 idle_timeout = "5m"
 min_active_sessions = 0

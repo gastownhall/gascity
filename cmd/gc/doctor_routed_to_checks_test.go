@@ -56,6 +56,38 @@ func TestV2RoutedToNamespaceCheckWarnsOnShortBoundRoutes(t *testing.T) {
 	}
 }
 
+func TestV2RoutedToNamespaceCheckUsesTargetedRouteQueries(t *testing.T) {
+	cityDir := t.TempDir()
+	cfg := &config.City{
+		Agents: []config.Agent{{Name: "dog", BindingName: "gastown"}},
+	}
+	store := &routeQuerySpyStore{Store: beads.NewMemStoreFrom(0, []beads.Bead{
+		{ID: "CITY-1", Title: "warrant", Type: "task", Status: "open", Metadata: map[string]string{"gc.routed_to": "dog"}},
+	}, nil)}
+
+	result := newV2RoutedToNamespaceCheck(cfg, cityDir, func(path string) (beads.Store, error) {
+		if path != cityDir {
+			return nil, fmt.Errorf("unexpected store path %q", path)
+		}
+		return store, nil
+	}).Run(&doctor.CheckContext{})
+
+	if result.Status != doctor.StatusWarning {
+		t.Fatalf("status = %v, want warning: %#v", result.Status, result)
+	}
+	if len(store.queries) == 0 {
+		t.Fatal("expected at least one route query")
+	}
+	for _, query := range store.queries {
+		if query.AllowScan {
+			t.Fatalf("query %+v used AllowScan; route namespace check should use targeted metadata lookups", query)
+		}
+		if got := query.Metadata["gc.routed_to"]; got == "" {
+			t.Fatalf("query %+v missing gc.routed_to metadata filter", query)
+		}
+	}
+}
+
 func TestV2RoutedToNamespaceCheckAllowsCanonicalRoutes(t *testing.T) {
 	cityDir := t.TempDir()
 	cfg := &config.City{
@@ -177,4 +209,14 @@ type routeListErrorStore struct {
 
 func (s routeListErrorStore) List(beads.ListQuery) ([]beads.Bead, error) {
 	return nil, s.err
+}
+
+type routeQuerySpyStore struct {
+	beads.Store
+	queries []beads.ListQuery
+}
+
+func (s *routeQuerySpyStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	s.queries = append(s.queries, query)
+	return s.Store.List(query)
 }

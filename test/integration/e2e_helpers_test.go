@@ -480,6 +480,9 @@ func setupE2ECityNoStart(t *testing.T, city e2eCity) string {
 	if err != nil {
 		t.Fatalf("gc stop after init failed: %v\noutput: %s", err, out)
 	}
+	if err := os.RemoveAll(filepath.Join(cityDir, ".gc-reports")); err != nil {
+		t.Fatalf("removing stale reports after init stop: %v", err)
+	}
 	restartIsolatedSupervisor(t, env)
 
 	t.Cleanup(func() {

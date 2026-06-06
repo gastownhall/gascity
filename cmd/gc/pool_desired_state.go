@@ -6,15 +6,26 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
 // SessionRequest represents a single session the reconciler should start.
 type SessionRequest struct {
-	Template      string // agent template qualified name (e.g., "gascity/claude")
-	BeadPriority  int    // priority of the driving work bead
-	Tier          string // "resume" (in-progress work with assigned session) or "new" (ready unassigned work)
-	SessionBeadID string // for resume tier: the session bead to restart
+	Template     string // agent template qualified name (e.g., "gascity/claude")
+	BeadPriority int    // priority of the driving work bead
+	// Tier is "resume" for in-progress work with a live session,
+	// "wake-known-identity" for in-progress work whose session exited but
+	// template is configured, or "new" for ready unassigned work.
+	Tier          string
+	SessionBeadID string // concrete session to preserve for resume or in-flight new demand
 	WorkBeadID    string // the work bead driving this request
+	// FloorGuarantee marks a "new" request created to satisfy an agent's
+	// min_active_sessions floor (as opposed to elastic scale-check demand).
+	// The per-tick create-budget allocator reserves a token for each
+	// floor-bearing template before round-robining the remainder, so a cold
+	// pool's floor spawn cannot be starved by a warm pool's large elastic
+	// demand (follow-up to #2893).
+	FloorGuarantee bool
 }
 
 func beadPriority(b beads.Bead) int {
@@ -83,27 +94,32 @@ func computePoolDesiredStates(
 	trace *sessionReconcilerTraceCycle,
 ) []PoolDesiredState {
 	// Build reverse lookup: any identifier → session bead ID.
-	// Assignee on work beads may be a bead ID, session name, or alias.
+	// Assignee on work beads may be a bead ID, session name, alias, or
+	// a prior alias preserved in alias_history. Resume-tier dispatch
+	// drops in-progress work whose owning session can't be resolved
+	// from this map, so missing identities cause live sessions to look
+	// orphaned and let a duplicate spawn for the same bead.
 	assigneeToSessionBeadID := make(map[string]string)
 	sessionBeadTemplate := make(map[string]string)
+	namedSessionBeadIDs := make(map[string]bool)
 	for _, sb := range sessionBeads {
 		if sb.Status == "closed" {
 			continue
 		}
-		template := strings.TrimSpace(sb.Metadata["template"])
+		template := strings.TrimSpace(normalizedSessionTemplate(sb, cfg))
 		if template != "" {
 			sessionBeadTemplate[sb.ID] = template
 		}
-		assigneeToSessionBeadID[sb.ID] = sb.ID
-		if sn := strings.TrimSpace(sb.Metadata["session_name"]); sn != "" {
-			assigneeToSessionBeadID[sn] = sb.ID
+		for _, id := range sessionBeadAssigneeIdentities(sb) {
+			assigneeToSessionBeadID[id] = sb.ID
 		}
-		if ni := strings.TrimSpace(sb.Metadata["configured_named_identity"]); ni != "" {
-			assigneeToSessionBeadID[ni] = sb.ID
+		if isNamedSessionBead(sb) {
+			namedSessionBeadIDs[sb.ID] = true
 		}
 	}
 
 	var resumeRequests []SessionRequest
+	wakeRequestedTemplates := make(map[string]struct{})
 
 	for i := range cfg.Agents {
 		agent := &cfg.Agents[i]
@@ -118,7 +134,7 @@ func computePoolDesiredStates(
 		// Resume tier: actionable assigned work beads whose assignee resolves
 		// to a non-closed session bead. These sessions must stay alive.
 		for _, wb := range assignedWorkBeads {
-			routedTo := wb.Metadata["gc.routed_to"]
+			routedTo := routedToOrLegacyWorkflowTarget(wb)
 			if wb.Status != "in_progress" && wb.Status != "open" {
 				continue
 			}
@@ -133,10 +149,25 @@ func computePoolDesiredStates(
 					routedTo = cfg.Agents[0].QualifiedName()
 				}
 			}
+			if sessionBeadID != "" {
+				sessionTemplate := strings.TrimSpace(sessionBeadTemplate[sessionBeadID])
+				if sessionTemplate != "" && routedTo != "" && routedTo != sessionTemplate {
+					continue
+				}
+			}
 			if routedTo != template {
 				continue
 			}
 			if sessionBeadID != "" {
+				// Named-session beads are materialized by the named-session
+				// loop in buildDesiredState, not by the pool path. Skipping
+				// here prevents realizePoolDesiredSessions from renaming the
+				// canonical named identity to a phantom "{name}-1" pool
+				// instance — which would create two desired sessions for the
+				// same agent even when max_active_sessions=1.
+				if namedSessionBeadIDs[sessionBeadID] {
+					continue
+				}
 				resumeRequests = append(resumeRequests, SessionRequest{
 					Template:      template,
 					BeadPriority:  beadPriority(wb),
@@ -144,20 +175,49 @@ func computePoolDesiredStates(
 					SessionBeadID: sessionBeadID,
 					WorkBeadID:    wb.ID,
 				})
+				continue
 			}
-			// Else: assignee set but session closed/unknown — orphaned
-			// work, not our job to respawn.
+			if assignee != template || !isKnownPoolTemplate(assignee, cfg) {
+				// Assignee set but session closed/unknown and not a configured
+				// pool template — orphaned work, not our job to respawn.
+				continue
+			}
+			if _, ok := wakeRequestedTemplates[template]; ok {
+				continue
+			}
+			wakeRequestedTemplates[template] = struct{}{}
+			resumeRequests = append(resumeRequests, SessionRequest{
+				Template:     template,
+				BeadPriority: beadPriority(wb),
+				Tier:         "wake-known-identity",
+				WorkBeadID:   wb.ID,
+			})
+			if trace != nil {
+				trace.recordDecision(string(TraceSitePoolWakeKnownIdentity), template, "", "assigned_work", "scheduled", traceRecordPayload{
+					"tier":      "wake-known-identity",
+					"work_bead": wb.ID,
+				}, nil, "")
+			}
 		}
 	}
 
 	limits := newNestedCapLimits(cfg)
 	usage := acceptedNestedCapUsage(limits, resumeRequests)
 	allRequests := append([]SessionRequest(nil), resumeRequests...)
+	resumeSessionBeadIDs := make(map[string]struct{}, len(resumeRequests))
+	for _, req := range resumeRequests {
+		if req.SessionBeadID != "" {
+			resumeSessionBeadIDs[req.SessionBeadID] = struct{}{}
+		}
+	}
+	inFlightNewRequests := poolInFlightNewRequests(cfg, sessionBeads, resumeSessionBeadIDs)
 
 	// Merge scale_check demand. In bead-backed reconciliation, scale_check is
 	// the authoritative signal for new unassigned demand only; resume requests
 	// are calculated independently from assigned work and must not be deducted
-	// from that count.
+	// from that count. Pool-created sessions that have not claimed work yet
+	// represent already-spent new demand, so they occupy the first new-demand
+	// slots explicitly before anonymous creates are materialized.
 	if len(scaleCheckCounts) > 0 {
 		for i := range cfg.Agents {
 			agent := &cfg.Agents[i]
@@ -170,7 +230,22 @@ func computePoolDesiredStates(
 				continue
 			}
 			newCount := capNewDemandCount(limits, usage, agent, scaleCount)
-			for j := 0; j < newCount; j++ {
+			inFlight := inFlightNewRequests[template]
+			inFlightCount := minInt(len(inFlight), newCount)
+			if scaleCount > 0 && len(inFlight) > 0 && trace != nil {
+				trace.recordDecision(string(TraceSitePoolInFlightReuse), template, "", string(TraceReasonInFlightReuse), "accepted", traceRecordPayload{
+					"scale_check":   scaleCount,
+					"in_flight":     len(inFlight),
+					"reused":        inFlightCount,
+					"anonymous_new": newCount - inFlightCount,
+				}, nil, "")
+			}
+			for j := 0; j < inFlightCount; j++ {
+				req := inFlight[j]
+				allRequests = append(allRequests, req)
+				usage.accept(req, limits)
+			}
+			for j := inFlightCount; j < newCount; j++ {
 				req := SessionRequest{
 					Template: template,
 					Tier:     "new",
@@ -184,6 +259,58 @@ func computePoolDesiredStates(
 	return applyNestedCaps(cfg, allRequests, trace)
 }
 
+func poolInFlightNewRequests(cfg *config.City, sessionBeads []beads.Bead, resumeSessionBeadIDs map[string]struct{}) map[string][]SessionRequest {
+	requests := make(map[string][]SessionRequest)
+	sortedSessionBeads := append([]beads.Bead(nil), sessionBeads...)
+	sort.SliceStable(sortedSessionBeads, func(i, j int) bool {
+		if !sortedSessionBeads[i].CreatedAt.Equal(sortedSessionBeads[j].CreatedAt) {
+			return sortedSessionBeads[i].CreatedAt.Before(sortedSessionBeads[j].CreatedAt)
+		}
+		return sortedSessionBeads[i].ID < sortedSessionBeads[j].ID
+	})
+	for i := range cfg.Agents {
+		agent := &cfg.Agents[i]
+		if agent.Suspended || !agent.SupportsGenericEphemeralSessions() {
+			continue
+		}
+		template := agent.QualifiedName()
+		for _, sb := range sortedSessionBeads {
+			if sb.ID == "" || sb.Status == "closed" {
+				continue
+			}
+			if _, ok := resumeSessionBeadIDs[sb.ID]; ok {
+				continue
+			}
+			if !isEphemeralSessionBeadForAgent(sb, agent) || !isPoolManagedSessionBead(sb) {
+				continue
+			}
+			if normalizedSessionTemplate(sb, cfg) != template {
+				continue
+			}
+			if !poolSessionConsumesNewDemand(sb) {
+				continue
+			}
+			requests[template] = append(requests[template], SessionRequest{
+				Template:      template,
+				Tier:          "new",
+				SessionBeadID: sb.ID,
+			})
+		}
+	}
+	return requests
+}
+
+func poolSessionConsumesNewDemand(session beads.Bead) bool {
+	if strings.TrimSpace(session.Metadata["pending_create_claim"]) == boolMetadata(true) {
+		return true
+	}
+	// This pure desired-state pass has no reconciler clock. Creating sessions
+	// still represent already-spent new demand; lifecycle code owns stale
+	// creating recovery with its clock-aware predicate.
+	state := strings.TrimSpace(session.Metadata["state"])
+	return state == "creating" || state == string(sessionpkg.StateStartPending)
+}
+
 // applyNestedCaps enforces workspace, rig, and agent max_active_sessions caps.
 // Accepts requests in priority order, rejecting any that would exceed a cap.
 func applyNestedCaps(cfg *config.City, requests []SessionRequest, trace *sessionReconcilerTraceCycle) []PoolDesiredState {
@@ -192,9 +319,9 @@ func applyNestedCaps(cfg *config.City, requests []SessionRequest, trace *session
 		if requests[i].BeadPriority != requests[j].BeadPriority {
 			return requests[i].BeadPriority > requests[j].BeadPriority
 		}
-		// Resume tier before new tier at same priority.
+		// Resume-like tiers before new tier at same priority.
 		if requests[i].Tier != requests[j].Tier {
-			return requests[i].Tier == "resume"
+			return isResumeLikeTier(requests[i].Tier) && !isResumeLikeTier(requests[j].Tier)
 		}
 		return false
 	})
@@ -207,7 +334,7 @@ func applyNestedCaps(cfg *config.City, requests []SessionRequest, trace *session
 
 	for _, req := range requests {
 		template := req.Template
-		if usage.isDuplicateResume(req) {
+		if usage.isDuplicateSessionRequest(req) {
 			continue
 		}
 		if site, reason, payload, rejected := usage.rejection(req, limits); rejected {
@@ -237,8 +364,9 @@ func applyNestedCaps(cfg *config.City, requests []SessionRequest, trace *session
 		minSess := agent.EffectiveMinActiveSessions()
 		for usage.agentCount[template] < minSess {
 			req := SessionRequest{
-				Template: template,
-				Tier:     "new",
+				Template:       template,
+				Tier:           "new",
+				FloorGuarantee: true,
 			}
 			if _, _, _, rejected := usage.rejection(req, limits); rejected {
 				break
@@ -331,7 +459,7 @@ func acceptedNestedCapUsage(limits nestedCapLimits, requests []SessionRequest) n
 			return sorted[i].BeadPriority > sorted[j].BeadPriority
 		}
 		if sorted[i].Tier != sorted[j].Tier {
-			return sorted[i].Tier == "resume"
+			return isResumeLikeTier(sorted[i].Tier) && !isResumeLikeTier(sorted[j].Tier)
 		}
 		return false
 	})
@@ -371,15 +499,15 @@ func capNewDemandCount(limits nestedCapLimits, usage nestedCapUsage, agent *conf
 }
 
 func (u nestedCapUsage) canAccept(req SessionRequest, limits nestedCapLimits) bool {
-	if u.isDuplicateResume(req) {
+	if u.isDuplicateSessionRequest(req) {
 		return false
 	}
 	_, _, _, rejected := u.rejection(req, limits)
 	return !rejected
 }
 
-func (u nestedCapUsage) isDuplicateResume(req SessionRequest) bool {
-	return req.Tier == "resume" && req.SessionBeadID != "" && u.seenSessionBead[req.SessionBeadID]
+func (u nestedCapUsage) isDuplicateSessionRequest(req SessionRequest) bool {
+	return req.SessionBeadID != "" && u.seenSessionBead[req.SessionBeadID]
 }
 
 func (u nestedCapUsage) rejection(req SessionRequest, limits nestedCapLimits) (string, string, traceRecordPayload, bool) {
@@ -422,7 +550,7 @@ func (u *nestedCapUsage) accept(req SessionRequest, limits nestedCapLimits) {
 		u.rigCount[rig]++
 	}
 	u.workspaceCount++
-	if req.Tier == "resume" && req.SessionBeadID != "" {
+	if req.SessionBeadID != "" {
 		u.seenSessionBead[req.SessionBeadID] = true
 	}
 }
@@ -432,4 +560,25 @@ func minInt(a, b int) int {
 		return a
 	}
 	return b
+}
+
+func isKnownPoolTemplate(assignee string, cfg *config.City) bool {
+	assignee = strings.TrimSpace(assignee)
+	if assignee == "" || cfg == nil {
+		return false
+	}
+	for i := range cfg.Agents {
+		agent := &cfg.Agents[i]
+		if agent.Suspended || !agent.SupportsGenericEphemeralSessions() {
+			continue
+		}
+		if assignee == agent.QualifiedName() {
+			return true
+		}
+	}
+	return false
+}
+
+func isResumeLikeTier(tier string) bool {
+	return tier == "resume" || tier == "wake-known-identity"
 }

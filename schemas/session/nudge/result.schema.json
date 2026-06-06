@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["schema_version", "ok", "target", "delivery", "queued", "outcome"],
+  "properties": {
+    "schema_version": { "const": "1" },
+    "ok": { "const": true },
+    "target": { "type": "string" },
+    "session_id": { "type": "string" },
+    "session_name": { "type": "string" },
+    "delivery": { "type": "string", "enum": ["immediate", "wait-idle", "queue"] },
+    "queued": { "type": "boolean" },
+    "outcome": { "type": "string", "enum": ["delivered", "queued"] }
+  },
+  "additionalProperties": true
+}

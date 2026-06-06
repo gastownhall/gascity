@@ -31,8 +31,34 @@ gomodcache_val="$(go env GOMODCACHE)"
 gotmpdir_val="$(go env GOTMPDIR)"
 goroot_val="$(go env GOROOT)"
 
+# macOS: icu4c (a transitive go-icu-regex/Dolt CGO dependency) is keg-only
+# under Homebrew, so its headers/libs are not on the default CGO search path.
+# Mirror the Makefile's detection here so tests run via this script see the
+# same CGO paths as `make`. No-op on Linux and when icu4c is not installed.
+# When invoked from test-integration-shard, CGO_CPPFLAGS/CGO_LDFLAGS may
+# already be set by that script; the duplicate-safe guard below prevents
+# double-adding when this script runs as a child of test-integration-shard.
+cgo_cppflags="${CGO_CPPFLAGS:-}"
+cgo_ldflags="${CGO_LDFLAGS:-}"
+if [[ "$(uname)" == "Darwin" ]]; then
+  icu_prefix="$(brew --prefix icu4c 2>/dev/null || true)"
+  if [[ -n "$icu_prefix" && "$cgo_cppflags" != *"-I${icu_prefix}/include"* ]]; then
+    cgo_cppflags="${cgo_cppflags:+$cgo_cppflags }-I${icu_prefix}/include"
+    cgo_ldflags="${cgo_ldflags:+$cgo_ldflags }-L${icu_prefix}/lib"
+  fi
+fi
+
+extra_env=()
+while IFS='=' read -r name _; do
+  case "$name" in
+    ANTHROPIC_*|CLAUDE_CODE_*|GC_ACCEPTANCE_KEEP|GC_TIERC_FORCE|GC_TUTORIAL_GOLDENS_USE_CLAUDE_FOR_CODEX)
+      extra_env+=("${name}=${!name}")
+      ;;
+  esac
+done < <(env)
+
 run_go_test() {
-  env -i \
+  local base_env=(
     PATH="${PATH}" \
     HOME="${HOME:-}" \
     USER="${USER:-}" \
@@ -59,7 +85,16 @@ run_go_test() {
     GOVCS="${GOVCS-}" \
     GOWORK="${GOWORK-}" \
     GC_FAST_UNIT="${GC_FAST_UNIT:-0}" \
-    go test "$@"
+    CGO_CPPFLAGS="${cgo_cppflags}" \
+    CGO_LDFLAGS="${cgo_ldflags}" \
+    GC_TEST_SHARD_INDEX="${shard_index}" \
+    GC_TEST_SHARD_TOTAL="${shard_total}"
+  )
+  if (( ${#extra_env[@]} > 0 )); then
+    env -i "${base_env[@]}" "${extra_env[@]}" go test "$@"
+  else
+    env -i "${base_env[@]}" go test "$@"
+  fi
 }
 
 go_test_args=(-timeout "$timeout")
@@ -73,11 +108,18 @@ if [[ -n "${GO_TEST_COVERPROFILE:-}" ]]; then
   go_test_args+=(-coverpkg=./... -coverprofile "$GO_TEST_COVERPROFILE")
 fi
 
+list_output="$(run_go_test "${go_test_args[@]}" "$test_pkg" -list '^Test' 2>&1)"
 tests=()
 while IFS= read -r line; do
   [[ "$line" == Test* ]] || continue
   tests+=("$line")
-done < <(run_go_test "${go_test_args[@]}" "$test_pkg" -list '^Test')
+done <<< "$list_output"
+
+if [[ ${#tests[@]} -eq 0 ]]; then
+  echo "no tests discovered for ${test_pkg}; go test -list output:" >&2
+  printf '%s\n' "$list_output" >&2
+  exit 1
+fi
 
 selected=()
 for i in "${!tests[@]}"; do

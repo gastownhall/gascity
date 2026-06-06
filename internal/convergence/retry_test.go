@@ -52,6 +52,20 @@ func setupTerminatedHandler(t *testing.T, terminalReason string, extraMeta map[s
 	return handler, store, emitter
 }
 
+func TestRetryHandler_CarriesRigForward(t *testing.T) {
+	handler, store, _ := setupTerminatedHandler(t, TerminalStopped,
+		map[string]string{FieldRig: "gascity-prod"})
+
+	result, err := handler.RetryHandler(context.Background(), "source-1", "alice", 10)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	meta, _ := store.GetMetadata(result.NewBeadID)
+	if meta[FieldRig] != "gascity-prod" {
+		t.Errorf("retry bead rig = %q, want %q (rig must carry forward)", meta[FieldRig], "gascity-prod")
+	}
+}
+
 func TestRetryHandler_Success(t *testing.T) {
 	handler, store, _ := setupTerminatedHandler(t, TerminalStopped, nil)
 

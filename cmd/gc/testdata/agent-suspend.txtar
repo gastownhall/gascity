@@ -1,4 +1,4 @@
-# Agent suspend/resume and --dir tests with fake session provider.
+# Agent suspend/resume and city-scoped add tests with fake session provider.
 
 env GC_SESSION=fake
 env GC_BEADS=file
@@ -16,31 +16,31 @@ stdout 'mayor'
 stdout 'builder'
 stdout 'suspended = true'
 
-# 3. gc agent resume clears suspended (use qualified name).
-exec gc agent resume hello-world/builder
+# 3. gc agent resume clears suspended.
+exec gc agent resume builder
 stdout 'Resumed agent'
 
 # 4. After resume, gc start spawns the agent.
 exec gc start $WORK/city
 stdout 'City started.'
 
-# 5. gc agent suspend sets suspended (use qualified name).
-exec gc agent suspend hello-world/builder
+# 5. gc agent suspend sets suspended.
+exec gc agent suspend builder
 stdout 'Suspended agent'
 
 # 6. gc config show confirms suspended status.
 exec gc config show
 stdout 'suspended = true'
 
-# 7. gc agent add --dir --suspended registers correctly.
-exec gc agent add --name tester --dir other-project --suspended
+# 7. gc agent add --suspended registers a city-scoped agent correctly.
+exec gc agent add --name tester --suspended
 stdout 'Scaffolded agent'
 
 exec gc config show
 stdout 'tester'
 
-# 8. gc agent add --dir without --suspended.
-exec gc agent add --name reviewer --dir hello-world
+# 8. gc agent add without --suspended.
+exec gc agent add --name reviewer
 stdout 'Scaffolded agent'
 
 exec gc config show
@@ -55,21 +55,19 @@ stderr 'not found'
 stderr 'not found'
 
 -- city/.gc/.keep --
+-- city/.gc/site.toml --
+workspace_name = "bright-lights"
 -- city/rigs/.keep --
 -- city/city.toml --
 [workspace]
-name = "bright-lights"
-
-[[agent]]
-name = "mayor"
-start_command = "echo hello"
-
-[[agent]]
-name = "builder"
-dir = "hello-world"
-suspended = true
-start_command = "echo hello"
 -- city/pack.toml --
 [pack]
 name = "bright-lights"
 schema = 2
+-- city/agents/mayor/agent.toml --
+start_command = "echo hello"
+-- city/agents/builder/agent.toml --
+suspended = true
+start_command = "echo hello"
+-- city/agents/builder/prompt.template.md --
+You are the builder.

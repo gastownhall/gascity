@@ -749,7 +749,11 @@ case "$op" in
     ;;
 
   thread)
-    thread_id="${1:?usage: gc-mail-mcp-agent-mail thread <thread-id>}"
+    id="${1:?usage: gc-mail-mcp-agent-mail thread <id>}"
+    thread_id="$(get_cached_thread_id "$id")"
+    if [ -z "$thread_id" ]; then
+      thread_id="$id"
+    fi
     # mcp_agent_mail doesn't have a native thread query.
     # Search local cache for messages with matching thread ID.
     result="[]"

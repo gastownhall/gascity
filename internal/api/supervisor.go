@@ -104,12 +104,16 @@ type cachedCityServer struct {
 // to per-city Server.mux. Workspace services own their own HTTP
 // contracts and are explicitly excluded from the typed control plane.
 type SupervisorMux struct {
-	resolver    CityResolver
-	initializer cityInitializer
-	readOnly    bool
-	version     string
-	startedAt   time.Time
-	server      *http.Server
+	resolver       CityResolver
+	initializer    cityInitializer
+	readOnly       bool
+	version        string
+	buildID        string
+	startedAt      time.Time
+	allowedOrigins []string
+	allowedHosts   []string
+	allowAnyHost   bool
+	server         *http.Server
 
 	// Single Huma API (Phase 3.5 — Topology 1). Owns every typed
 	// operation: supervisor-scope (/v0/cities, /health, /v0/readiness,
@@ -131,14 +135,18 @@ type SupervisorMux struct {
 // resolved by the given CityResolver. The initializer is invoked by the
 // POST /v0/city handler to scaffold new cities in-process; passing nil
 // is allowed for tests that don't exercise city creation (the handler
-// returns 501 Not Implemented in that case).
-func NewSupervisorMux(resolver CityResolver, initializer cityInitializer, readOnly bool, version string, startedAt time.Time) *SupervisorMux {
+// returns 501 Not Implemented in that case). buildID identifies the gc
+// binary the supervisor was built from (typically the short git commit hash
+// with a "-dirty" suffix when built from an unclean tree); empty disables
+// binary-drift comparison on the client side.
+func NewSupervisorMux(resolver CityResolver, initializer cityInitializer, readOnly bool, version, buildID string, startedAt time.Time) *SupervisorMux {
 	humaMux := http.NewServeMux()
 	sm := &SupervisorMux{
 		resolver:    resolver,
 		initializer: initializer,
 		readOnly:    readOnly,
 		version:     version,
+		buildID:     buildID,
 		startedAt:   startedAt,
 		humaMux:     humaMux,
 		humaAPI:     newSupervisorHumaAPI(humaMux, readOnly),
@@ -193,7 +201,44 @@ func (sm *SupervisorMux) serveCitySvcProxy(w http.ResponseWriter, r *http.Reques
 //     their own publication rules).
 func (sm *SupervisorMux) Handler() http.Handler {
 	root := http.HandlerFunc(sm.ServeHTTP)
-	return withLogging(withRecovery(withRequestID(withCORS(root))))
+	audit := requestAuditConfig{
+		recorder:       sm.supervisorEventRecorder(),
+		allowedOrigins: sm.allowedOrigins,
+	}
+	return withLogging(withRecovery(withRequestID(withHostAllowing(sm.allowAnyHost, sm.allowedHosts, audit, withCORSAllowing(sm.allowedOrigins, root)))), audit)
+}
+
+// WithAllowedOrigins sets extra CORS origins accepted beyond localhost and
+// rebuilds the internal http.Server handler. Must be called before Serve.
+func (sm *SupervisorMux) WithAllowedOrigins(origins []string) *SupervisorMux {
+	sm.allowedOrigins = origins
+	sm.server = &http.Server{Handler: sm.Handler()}
+	return sm
+}
+
+// WithAllowedHosts sets extra HTTP Host header names accepted beyond loopback
+// hosts and rebuilds the internal http.Server handler. Must be called before
+// Serve.
+func (sm *SupervisorMux) WithAllowedHosts(hosts []string) *SupervisorMux {
+	sm.allowedHosts = hosts
+	sm.server = &http.Server{Handler: sm.Handler()}
+	return sm
+}
+
+// WithAnyHostAllowed disables Host header validation. This preserves the
+// legacy standalone city API behavior; machine-wide supervisor mode should
+// keep Host validation enabled and use WithAllowedHosts for explicit names.
+func (sm *SupervisorMux) WithAnyHostAllowed() *SupervisorMux {
+	sm.allowAnyHost = true
+	sm.server = &http.Server{Handler: sm.Handler()}
+	return sm
+}
+
+func (sm *SupervisorMux) supervisorEventRecorder() events.Recorder {
+	if supSrc, ok := sm.resolver.(SupervisorEventSource); ok {
+		return supSrc.SupervisorEventRecorder()
+	}
+	return nil
 }
 
 // StartPprof starts a pprof HTTP server on 127.0.0.1:<port> if GC_PPROF=1

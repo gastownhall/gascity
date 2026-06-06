@@ -36,17 +36,32 @@ class RunnerPolicyTests(unittest.TestCase):
             "push",
             "julianknutsen",
             {"julianknutsen"},
+            force_blacksmith=False,
         )
 
         self.assertFalse(use_blacksmith)
         self.assertIn("approved pull requests", reason)
         self.assertEqual(runners["runner_32vcpu"], "ubuntu-latest")
 
+    def test_forced_workflow_call_uses_blacksmith(self) -> None:
+        use_blacksmith, reason, runners = runner_policy.select_runners(
+            "workflow_call",
+            "",
+            set(),
+            force_blacksmith=True,
+        )
+
+        self.assertTrue(use_blacksmith)
+        self.assertIn("forced", reason)
+        self.assertEqual(runners["runner_16vcpu"], "blacksmith-16vcpu-ubuntu-2404")
+        self.assertEqual(runners["runner_macos"], "blacksmith-12vcpu-macos-15")
+
     def test_unlisted_pull_request_author_uses_github(self) -> None:
         use_blacksmith, reason, runners = runner_policy.select_runners(
             "pull_request",
             "external-contributor",
             {"julianknutsen"},
+            force_blacksmith=False,
         )
 
         self.assertFalse(use_blacksmith)

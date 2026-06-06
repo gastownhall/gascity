@@ -7,10 +7,13 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/dispatch"
 	"github.com/gastownhall/gascity/internal/events"
@@ -21,6 +24,9 @@ import (
 
 // graphExecutionRouteMetaKey is an alias for sling.GraphExecutionRouteMetaKey.
 const graphExecutionRouteMetaKey = sling.GraphExecutionRouteMetaKey
+
+// graphExecutionRigContextMetaKey is an alias for sling.GraphExecutionRigContextMetaKey.
+const graphExecutionRigContextMetaKey = sling.GraphExecutionRigContextMetaKey
 
 // isControlDispatcherKind delegates to sling.IsControlDispatcherKind.
 func isControlDispatcherKind(kind string) bool {
@@ -49,7 +55,7 @@ func assignGraphStepRoute(step *formula.RecipeStep, executionBinding sling.Graph
 }
 
 // applyGraphRouting delegates to sling.ApplyGraphRouting with CLI interfaces.
-func applyGraphRouting(recipe *formula.Recipe, a *config.Agent, routedTo string, vars map[string]string, sourceBeadID, scopeKind, scopeRef, storeRef string, store beads.Store, cityName, cityPath string, cfg *config.City) error {
+func applyGraphRouting(recipe *formula.Recipe, a *config.Agent, routedTo string, vars map[string]string, scopeKind, scopeRef, storeRef string, store beads.Store, cityName, cityPath string, cfg *config.City) error {
 	deps := sling.SlingDeps{
 		CityName:              cityName,
 		CityPath:              cityPath,
@@ -59,7 +65,7 @@ func applyGraphRouting(recipe *formula.Recipe, a *config.Agent, routedTo string,
 		Resolver:              cliAgentResolver{},
 		DirectSessionResolver: cliDirectSessionResolver,
 	}
-	return sling.ApplyGraphRouting(recipe, a, routedTo, vars, sourceBeadID, scopeKind, scopeRef, storeRef, store, cityName, cfg, deps)
+	return sling.ApplyGraphRouting(recipe, a, routedTo, vars, "", scopeKind, scopeRef, storeRef, store, cityName, cfg, deps)
 }
 
 var (
@@ -77,6 +83,26 @@ var (
 	workflowServeWakeSweepInterval = 1 * time.Second
 	workflowServeMaxIdleSleep      = 30 * time.Second
 	workflowServeWaitForWake       = waitForRelevantWorkflowWakeWithTrace
+	workflowTraceNow               = time.Now
+	// The trace helper is intentionally process-global because workflowTracef
+	// does not carry per-invocation context. Nested installs (serve ->
+	// runControlDispatcherWithStore) reuse the active dedup map so one bad trace
+	// path warns once per command invocation instead of once per control bead.
+	// The newest installed scope owns the active writer; the most recent scope
+	// for a given writer reuses that writer's dedupe map, and out-of-order
+	// restores reactivate the newest remaining scope instead of panicking.
+	// This assumes top-level callers are nested, not concurrently active from
+	// separate goroutines in the same process.
+	workflowTraceWarnings = struct {
+		mu     sync.Mutex
+		writer io.Writer
+		warned map[string]struct{}
+		scopes []workflowTraceWarningScope
+		nextID uint64
+	}{
+		writer: os.Stderr,
+		warned: map[string]struct{}{},
+	}
 )
 
 // followSleepDuration returns the sleep interval the --follow loop should use
@@ -119,6 +145,12 @@ type hookBead struct {
 	Metadata hookBeadMetadata `json:"metadata"`
 }
 
+type workflowTraceWarningScope struct {
+	id     uint64
+	writer io.Writer
+	warned map[string]struct{}
+}
+
 // hookBeadMetadata handles metadata where values may be JSON strings,
 // numbers, or booleans (bd writes numbers for numeric-looking values).
 // Normalizes everything to strings on unmarshal.
@@ -145,17 +177,114 @@ func (m *hookBeadMetadata) UnmarshalJSON(data []byte) error {
 func workflowTracef(format string, args ...any) {
 	path := strings.TrimSpace(os.Getenv("GC_WORKFLOW_TRACE"))
 	if path == "" {
+		path = strings.TrimSpace(os.Getenv("GC_SLING_TRACE"))
+	}
+	if path == "" {
 		return
 	}
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
+		workflowTraceWarnOpenFailure(path, err)
 		return
 	}
-	defer f.Close()                                                                                //nolint:errcheck // best-effort trace log
-	fmt.Fprintf(f, "%s %s\n", time.Now().UTC().Format(time.RFC3339), fmt.Sprintf(format, args...)) //nolint:errcheck
+	defer f.Close()                                                                                            //nolint:errcheck // best-effort trace log
+	fmt.Fprintf(f, "%s %s\n", workflowTraceNow().UTC().Format(time.RFC3339Nano), fmt.Sprintf(format, args...)) //nolint:errcheck
+}
+
+func workflowTraceWarnOpenFailure(path string, err error) {
+	if strings.TrimSpace(path) == "" || err == nil {
+		return
+	}
+	workflowTraceWarnings.mu.Lock()
+	writer := workflowTraceWarnings.writer
+	workflowTraceWarnings.mu.Unlock()
+	workflowTraceWarnf(writer, "trace-open:"+normalizePathForCompare(path), "gc convoy control --serve: warning: opening workflow trace %q: %v\n", path, err)
+}
+
+func workflowTraceWarnf(writer io.Writer, dedupeKey, format string, args ...any) {
+	if writer == nil {
+		return
+	}
+	workflowTraceWarnings.mu.Lock()
+	warned := workflowTraceWarnings.warned
+	if workflowTraceWarnings.writer != writer || warned == nil {
+		warned = nil
+		for i := len(workflowTraceWarnings.scopes) - 1; i >= 0; i-- {
+			if workflowTraceWarnings.scopes[i].writer == writer {
+				warned = workflowTraceWarnings.scopes[i].warned
+				break
+			}
+		}
+	}
+	if warned != nil {
+		if _, alreadyWarned := warned[dedupeKey]; alreadyWarned {
+			workflowTraceWarnings.mu.Unlock()
+			return
+		}
+		warned[dedupeKey] = struct{}{}
+	}
+	workflowTraceWarnings.mu.Unlock()
+	fmt.Fprintf(writer, format, args...) //nolint:errcheck // best-effort stderr
+}
+
+// useWorkflowTraceWarnings installs a per-command warning sink. Nested callers
+// that share a writer reuse the same dedupe map so a single command invocation
+// warns once per path. Restores may arrive out of order; the newest remaining
+// scope stays active so helper reuse cannot panic the process.
+func useWorkflowTraceWarnings(writer io.Writer) func() {
+	workflowTraceWarnings.mu.Lock()
+	workflowTraceWarnings.nextID++
+	restoreID := workflowTraceWarnings.nextID
+	warned := map[string]struct{}{}
+	for i := len(workflowTraceWarnings.scopes) - 1; i >= 0; i-- {
+		if workflowTraceWarnings.scopes[i].writer == writer {
+			warned = workflowTraceWarnings.scopes[i].warned
+			break
+		}
+	}
+	workflowTraceWarnings.scopes = append(workflowTraceWarnings.scopes, workflowTraceWarningScope{
+		id:     restoreID,
+		writer: writer,
+		warned: warned,
+	})
+	workflowTraceWarnings.writer = writer
+	workflowTraceWarnings.warned = warned
+	workflowTraceWarnings.mu.Unlock()
+	return func() {
+		workflowTraceWarnings.mu.Lock()
+		defer workflowTraceWarnings.mu.Unlock()
+		restoreIdx := -1
+		for i := len(workflowTraceWarnings.scopes) - 1; i >= 0; i-- {
+			if workflowTraceWarnings.scopes[i].id == restoreID {
+				restoreIdx = i
+				break
+			}
+		}
+		if restoreIdx < 0 {
+			return
+		}
+		workflowTraceWarnings.scopes = append(workflowTraceWarnings.scopes[:restoreIdx], workflowTraceWarnings.scopes[restoreIdx+1:]...)
+		if n := len(workflowTraceWarnings.scopes); n > 0 {
+			top := workflowTraceWarnings.scopes[n-1]
+			workflowTraceWarnings.writer = top.writer
+			workflowTraceWarnings.warned = top.warned
+			return
+		}
+		workflowTraceWarnings.writer = os.Stderr
+		workflowTraceWarnings.warned = map[string]struct{}{}
+	}
 }
 
 func runWorkflowServe(agentName string, follow bool, _ io.Writer, stderr io.Writer) error {
+	restoreTraceWarnings := useWorkflowTraceWarnings(stderr)
+	defer restoreTraceWarnings()
+
+	if follow {
+		if err := requireWorkflowServeFollowSessionEnv(); err != nil {
+			return err
+		}
+	}
+
 	cityPath, err := resolveCity()
 	if err != nil {
 		return err
@@ -164,6 +293,8 @@ func runWorkflowServe(agentName string, follow bool, _ io.Writer, stderr io.Writ
 	if err != nil {
 		return err
 	}
+	resolveRigPaths(cityPath, cfg.Rigs)
+	warnLegacyWorkflowTracePath(cityPath, cfg.Rigs, stderr)
 	if agentName == "" {
 		agentName = os.Getenv("GC_ALIAS")
 	}
@@ -186,14 +317,17 @@ func runWorkflowServe(agentName string, follow bool, _ io.Writer, stderr io.Writ
 		return fmt.Errorf("agent %q not found in config", agentName)
 	}
 	workDir := agentCommandDir(cityPath, &agentCfg, cfg.Rigs)
-	workEnv := controllerWorkQueryEnv(cityPath, cfg, &agentCfg)
+	workEnv, err := controllerWorkQueryEnv(cityPath, cfg, &agentCfg)
+	if err != nil {
+		return fmt.Errorf("building work query env: %w", err)
+	}
 	cityName := loadedCityName(cfg, cityPath)
 	// Expand {{.Rig}}/{{.AgentBase}} once so the long-poll drain reuses the
 	// rig-scoped command instead of passing the literal template to the shell
 	// on every iteration. #793.
-	workQuery := expandAgentCommandTemplate(cityPath, cityName, &agentCfg, cfg.Rigs, "work_query", agentCfg.EffectiveWorkQuery(), stderr)
+	workQuery := expandAgentCommandTemplate(cityPath, cityName, &agentCfg, cfg.Rigs, "work_query", agentCfg.EffectiveWorkQueryForBeads(cfg.Beads), stderr)
 	if agentCfg.WorkQuery == "" && isWorkflowServeControlDispatcherAgent(agentCfg) {
-		workQuery = workflowServeControlReadyQuery(agentCfg, config.NamedSessionRuntimeName(cityName, cfg.Workspace, agentCfg.QualifiedName()))
+		workQuery = workflowServeControlReadyQueryForBeads(agentCfg, cfg.Beads, config.NamedSessionRuntimeName(cityName, cfg.Workspace, agentCfg.QualifiedName()))
 	}
 	workflowTracef("serve start agent=%s city=%s dir=%s", agentCfg.QualifiedName(), cityPath, workDir)
 	if !follow {
@@ -201,6 +335,93 @@ func runWorkflowServe(agentName string, follow bool, _ io.Writer, stderr io.Writ
 		return err
 	}
 	return runWorkflowServeFollow(agentCfg, cityPath, workDir, workQuery, workEnv, stderr)
+}
+
+func requireWorkflowServeFollowSessionEnv() error {
+	var missing []string
+	for _, key := range []string{"GC_SESSION_ID", "GC_SESSION_NAME"} {
+		if strings.TrimSpace(os.Getenv(key)) == "" {
+			missing = append(missing, key)
+		}
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf("control dispatcher follow mode requires managed session env (%s not set)", strings.Join(missing, ", "))
+	}
+	return nil
+}
+
+func legacyWorkflowTracePaths(cityPath string, rigs []config.Rig) []string {
+	paths := make([]string, 0, len(rigs)+1)
+	seen := make(map[string]struct{}, len(rigs)+1)
+	appendTracePath := func(root string) {
+		root = strings.TrimSpace(root)
+		if root == "" || !pathIsWithin(cityPath, root) {
+			return
+		}
+		tracePath := filepath.Join(root, "control-dispatcher-trace.log")
+		normalized := normalizePathForCompare(tracePath)
+		if normalized == "" {
+			return
+		}
+		if _, exists := seen[normalized]; exists {
+			return
+		}
+		seen[normalized] = struct{}{}
+		paths = append(paths, tracePath)
+	}
+
+	appendTracePath(cityPath)
+	for _, rig := range rigs {
+		appendTracePath(rig.Path)
+	}
+	appendTracePath(os.Getenv("GC_RIG_ROOT"))
+	return paths
+}
+
+func warnLegacyWorkflowTracePath(cityPath string, rigs []config.Rig, stderr io.Writer) {
+	if stderr == nil {
+		return
+	}
+	legacyTracePaths := legacyWorkflowTracePaths(cityPath, rigs)
+	nextTracePath := strings.TrimSpace(os.Getenv("GC_CONTROL_DISPATCHER_TRACE_DEFAULT"))
+	if nextTracePath == "" {
+		nextTracePath = citylayout.ControlDispatcherTraceDefaultPath(cityPath)
+	}
+	current := strings.TrimSpace(os.Getenv("GC_WORKFLOW_TRACE"))
+	if current != "" {
+		for _, legacyTracePath := range legacyTracePaths {
+			if samePath(current, legacyTracePath) {
+				workflowTraceWarnf(
+					stderr,
+					"legacy-trace-path:"+normalizePathForCompare(current),
+					"gc convoy control --serve: warning: legacy control-dispatcher trace path %q matches a watcher-visible legacy location; change or unset GC_WORKFLOW_TRACE so this session adopts %q, or restart/recycle the session if this value was inherited before the upgrade\n",
+					current,
+					nextTracePath,
+				)
+				return
+			}
+		}
+	}
+	activeTracePath := current
+	if activeTracePath == "" {
+		activeTracePath = nextTracePath
+	}
+	for _, legacyTracePath := range legacyTracePaths {
+		if samePath(activeTracePath, legacyTracePath) {
+			continue
+		}
+		info, err := os.Stat(legacyTracePath)
+		if err != nil || info.IsDir() {
+			continue
+		}
+		workflowTraceWarnf(
+			stderr,
+			"legacy-trace-file:"+normalizePathForCompare(legacyTracePath),
+			"gc convoy control --serve: warning: legacy control-dispatcher trace file %q still exists; writes to it can wake the city watcher. If it is still growing, restart or recycle the control-dispatcher session so it adopts %q.\n",
+			legacyTracePath,
+			nextTracePath,
+		)
+	}
 }
 
 type workflowServeDrainResult struct {
@@ -216,9 +437,15 @@ func drainWorkflowServeWork(agentCfg config.Agent, cityPath, storePath, workQuer
 	result := workflowServeDrainResult{}
 	idlePolls := 0
 	for {
-		queue, err := workflowServeList(workflowServeWorkQuery(agentCfg, workQuery), storePath, workEnv)
+		serveQuery := workflowServeWorkQuery(agentCfg, workQuery)
+		queue, err := workflowServeList(serveQuery, storePath, workEnv)
 		if err != nil {
 			workflowTracef("serve query-error agent=%s err=%v", agentCfg.QualifiedName(), err)
+			// Surface a killed/timed-out control work query on the event
+			// bus so the reconciler has a named cause to escalate on
+			// rather than the session dying silently (issues #1496/#1497).
+			emitCityWorkQueryFailure(cityPath, stderr,
+				os.Getenv("GC_SESSION_ID"), os.Getenv("GC_TEMPLATE"), serveQuery, err)
 			return result, fmt.Errorf("querying control work for %s: %w", agentCfg.QualifiedName(), err)
 		}
 		if len(queue) == 0 {
@@ -234,14 +461,9 @@ func drainWorkflowServeWork(agentCfg config.Agent, cityPath, storePath, workQuer
 		idlePolls = 0
 		processedThisCycle := false
 		pendingCount := 0
-		legacyOversizedCount := 0
 		for _, candidate := range queue {
 			beadID := candidate.ID
 			kind := strings.TrimSpace(candidate.Metadata["gc.kind"])
-			if !isControlDispatcherKind(kind) {
-				workflowTracef("serve unexpected-kind bead=%s kind=%s", beadID, kind)
-				return result, fmt.Errorf("bead %s has unexpected non-control kind %q", beadID, kind)
-			}
 			workflowTracef("serve process bead=%s kind=%s store=%s", beadID, kind, storePath)
 			// controlDispatcherServe currently returns nil both when it
 			// successfully advanced a control bead AND when ProcessControl
@@ -260,8 +482,10 @@ func drainWorkflowServeWork(agentCfg config.Agent, cityPath, storePath, workQuer
 					continue
 				}
 				workflowTracef("serve process-error bead=%s kind=%s err=%v", beadID, kind, err)
-				if isLegacyOversizedControlEventError(err) {
-					legacyOversizedCount++
+				if dispatch.IsTransientControllerError(err) {
+					pendingCount++
+					result.pendingAny = true
+					workflowTracef("serve transient-error-pending bead=%s kind=%s err=%v", beadID, kind, err)
 					continue
 				}
 				return result, fmt.Errorf("processing control bead %s: %w", beadID, err)
@@ -277,21 +501,7 @@ func drainWorkflowServeWork(agentCfg config.Agent, cityPath, storePath, workQuer
 			workflowTracef("serve pending-queue agent=%s count=%d", agentCfg.QualifiedName(), pendingCount)
 			return result, nil
 		}
-		if legacyOversizedCount > 0 {
-			workflowTracef("serve legacy-oversized-queue agent=%s count=%d", agentCfg.QualifiedName(), legacyOversizedCount)
-			return result, nil
-		}
 	}
-}
-
-func isLegacyOversizedControlEventError(err error) bool {
-	if err == nil {
-		return false
-	}
-	msg := err.Error()
-	return strings.Contains(msg, "recording attempt log") &&
-		strings.Contains(msg, "old_value") &&
-		strings.Contains(msg, "too large")
 }
 
 func runWorkflowServeFollow(agentCfg config.Agent, cityPath, storePath, workQuery string, workEnv map[string]string, stderr io.Writer) error {
@@ -320,7 +530,20 @@ func runWorkflowServeFollow(agentCfg config.Agent, cityPath, storePath, workQuer
 	for {
 		drainResult, err := drainWorkflowServeWork(agentCfg, cityPath, storePath, workQuery, workEnv, stderr)
 		if err != nil {
-			return err
+			// A transient work-query/store failure — most commonly the
+			// work-query timeout (hookWorkQueryTimeout) when the bead store is
+			// briefly saturated — must NOT terminate this long-running serve
+			// loop. drainWorkflowServeWork already surfaced the failure on the
+			// event bus for reconciler visibility (#1496/#1497); returning here
+			// kills the dispatcher process (pane exits non-zero) and leaves the
+			// rig un-dispatched while its session bead still reports "active".
+			// Downgrade to a no-progress sweep so the idle backoff retries it;
+			// only genuinely fatal errors end the loop.
+			if !dispatch.IsTransientControllerError(err) {
+				return err
+			}
+			workflowTracef("serve drain-transient-retry agent=%s err=%v", agentCfg.QualifiedName(), err)
+			drainResult = workflowServeDrainResult{}
 		}
 		if drainResult.processedAny || drainResult.pendingAny {
 			idleSweeps = 0
@@ -440,11 +663,19 @@ func isWorkflowServeControlDispatcherAgent(agentCfg config.Agent) bool {
 }
 
 func workflowServeControlReadyQuery(agentCfg config.Agent, controlSessionNames ...string) string {
+	return workflowServeControlReadyQueryForBeads(agentCfg, config.BeadsConfig{}, controlSessionNames...)
+}
+
+func workflowServeControlReadyQueryForBeads(agentCfg config.Agent, beadsCfg config.BeadsConfig, controlSessionNames ...string) string {
 	target := strings.TrimSpace(agentCfg.QualifiedName())
 	if target == "" {
 		target = config.ControlDispatcherAgentName
 	}
 	limit := fmt.Sprintf("%d", workflowServeScanLimit)
+	includeEphemeral := ""
+	if beadsCfg.UsesBD105ReadySemantics() {
+		includeEphemeral = " --include-ephemeral"
+	}
 	queryPrefix := `BD_EXPORT_AUTO=false GC_CONTROL_TARGET=` + shellquote.Quote(target)
 	for _, name := range controlSessionNames {
 		name = strings.TrimSpace(name)
@@ -458,22 +689,26 @@ func workflowServeControlReadyQuery(agentCfg config.Agent, controlSessionNames .
 		queryPrefix += ` GC_CONTROL_LEGACY_TARGET=` + shellquote.Quote(legacy)
 	}
 	query := queryPrefix + ` sh -c '` +
+		`set -e; ` +
+		`tmp=$(mktemp); seen="$tmp.seen"; err="$tmp.err"; : > "$seen"; trap "rm -f \"$tmp\" \"$seen\" \"$err\"" EXIT; ` +
+		`emit_ready() { r=$("$@" 2>"$err") || { status=$?; [ -n "$r" ] && printf "%s\n" "$r" >&2; cat "$err" >&2; return "$status"; }; [ -n "$r" ] && [ "$r" != "[]" ] && printf "%s\n" "$r" >> "$tmp"; return 0; }; ` +
+		`assignee_ready() { cand="$1"; [ -z "$cand" ] && return 0; if grep -Fxq "$cand" "$seen"; then return 0; fi; printf "%s\n" "$cand" >> "$seen"; ` +
+		`emit_ready bd --readonly --sandbox ready` + includeEphemeral + ` --assignee="$cand" --exclude-type=epic --json --limit=` + limit + `; }; ` +
+		`routed_ready() { route="$1"; [ -z "$route" ] && return 0; ` +
+		`emit_ready bd --readonly --sandbox ready` + includeEphemeral + ` --metadata-field "gc.run_target=$route" --unassigned --exclude-type=epic --json --sort oldest --limit=` + limit + `; ` +
+		`emit_ready bd --readonly --sandbox ready` + includeEphemeral + ` --metadata-field "gc.routed_to=$route" --unassigned --exclude-type=epic --json --sort oldest --limit=` + limit + `; ` +
+		`}; ` +
 		`for id in "$GC_CONTROL_SESSION_NAME" "$GC_SESSION_NAME" "$GC_ALIAS" "$GC_CONTROL_TARGET" "$GC_SESSION_ID"; do ` +
 		`[ -z "$id" ] && continue; ` +
 		`legacy=""; case "$id" in *control-dispatcher) legacy="${id%control-dispatcher}workflow-control";; esac; ` +
 		`for cand in "$id" "$legacy"; do ` +
 		`[ -z "$cand" ] && continue; ` +
-		`r=$(bd --readonly --sandbox ready --assignee="$cand" --json --limit=` + limit + ` 2>/dev/null); ` +
-		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
+		`assignee_ready "$cand"; ` +
 		`done; ` +
 		`done; ` +
-		`r=$(bd --readonly --sandbox ready --metadata-field "gc.routed_to=$GC_CONTROL_TARGET" --unassigned --json --limit=` + limit + ` 2>/dev/null); ` +
-		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; `
-	if legacy := workflowServeLegacyControlRoute(target); legacy != "" {
-		query += `bd --readonly --sandbox ready --metadata-field "gc.routed_to=$GC_CONTROL_LEGACY_TARGET" --unassigned --json --limit=` + limit + ` 2>/dev/null'`
-	} else {
-		query += `printf "[]"` + `'`
-	}
+		`routed_ready "$GC_CONTROL_TARGET"; ` +
+		`routed_ready "${GC_CONTROL_LEGACY_TARGET:-}"; ` +
+		`if [ -s "$tmp" ]; then jq -s "reduce add[] as \$item ([]; if any(.[]; .id == \$item.id) then . else . + [\$item] end)" "$tmp"; else printf "[]"; fi` + `'`
 	return query
 }
 

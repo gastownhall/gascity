@@ -224,8 +224,9 @@ operations.
 
 ### Health patrol during execution
 
-While the agent works, the controller's reconciliation loop
-(`doReconcileAgents()` in `cmd/gc/reconcile.go`) monitors agent health.
+While the agent works, the controller's bead-driven session reconciler
+(`reconcileSessionBeads()` in `cmd/gc/session_reconciler.go`) monitors
+session health.
 If an agent crashes mid-execution, the bead persists in its current state
 (NDI -- Nondeterministic Idempotence). When the agent restarts, it
 rediscovers the in-progress bead through its hook and resumes. The bead
@@ -333,7 +334,11 @@ order fires, a bead is created with label `order-run:<name>`.
 On the next tick, `Store.ListByLabel("order-run:<name>", 1)` finds
 the most recent run. If it is younger than the cooldown period, the
 order is suppressed. The tracking bead's afterlife IS the cooldown
-mechanism.
+mechanism. Closed tracking history beyond
+`[beads.policies.order_tracking].delete_after_close` is pruned by
+`gc order sweep-tracking` and the maintenance exec order, defaulting
+to 7d while always keeping at least the latest 10 closed tracking
+beads per order.
 
 ## State Transition Summary
 

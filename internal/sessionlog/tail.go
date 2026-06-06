@@ -9,6 +9,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/gastownhall/gascity/internal/pathutil"
 )
 
 // TailMeta holds metadata extracted from the tail of a session file.
@@ -77,7 +79,7 @@ func validateSearchPathFile(searchPaths []string, path string) (string, error) {
 			continue
 		}
 		rel, err := filepath.Rel(cleanRoot, cleanPath)
-		if err != nil || rel == "." || filepath.IsAbs(rel) || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+		if err != nil || rel == "." || filepath.IsAbs(rel) || pathutil.IsOutsideDir(rel) {
 			continue
 		}
 		return cleanPath, nil

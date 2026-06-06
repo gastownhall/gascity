@@ -5,6 +5,7 @@
 | Channel | Mechanism | Automatic? |
 |---------|-----------|------------|
 | **GitHub Release** | GoReleaser via `release.yml` on tag push | Yes |
+| **GitHub draft prerelease** | GoReleaser via `rc-release.yml` on RC tag push or manual dispatch | Yes |
 | **Homebrew tap** (`gastownhall/gascity`) | `release.yml` writes an asset-based formula after archives upload | Yes |
 | **Homebrew core** (`Homebrew/homebrew-core`) | BrewTestBot autobump, once listed | Yes (~3h delay) |
 
@@ -19,6 +20,35 @@ The homebrew-core submission is [in progress](https://github.com/Homebrew/homebr
 ```
 
 This rewrites the `[Unreleased]` section of `CHANGELOG.md` into `[X.Y.Z] - YYYY-MM-DD`, commits, tags `vX.Y.Z`, and pushes. GitHub Actions takes it from there.
+
+### Release candidates
+
+Use the **RC Release** workflow to produce downloadable release-candidate
+archives for manual verification without updating Homebrew or publishing the
+stable release.
+
+Recommended path:
+
+1. Run the RC gate on the intended release branch or commit.
+2. Open **Actions → RC Release → Run workflow**.
+3. Set `tag_name` to an RC tag such as `v1.2.0-rc1`.
+4. Set `target_ref` to the exact RC-gate-passing commit SHA.
+
+The workflow creates the annotated RC tag if needed, builds GoReleaser
+archives for linux/darwin × amd64/arm64, and creates a GitHub **draft
+prerelease** with generated GoReleaser notes and downloadable assets. It does
+not update the Homebrew tap, create attestations, or mark the release latest.
+
+You can also push an existing RC tag manually:
+
+```bash
+git tag -a vX.Y.Z-rcN <commit> -m "Release vX.Y.Z-rcN"
+git push origin vX.Y.Z-rcN
+```
+
+Pushing an RC tag triggers `rc-release.yml`. The stable `release.yml` jobs
+skip tags containing a prerelease suffix, so RC tags do not run the Homebrew
+or stable publishing path.
 
 ### Manual
 
@@ -41,10 +71,11 @@ Version numbers live **only** in the git tag — there is no `Version` constant 
 
 ## What Happens After Tag Push
 
-`.github/workflows/release.yml` fires on any `v*` tag and runs, in order:
+`.github/workflows/release.yml` fires on stable `vMAJOR.MINOR.PATCH` tags and
+runs, in order:
 
 1. **Reject `replace` directives in `go.mod`** — they break `go install ...@latest` and bottle builds in homebrew-core.
-2. **`make check-version-tag`** — asserts the tag is a clean `vMAJOR.MINOR.PATCH` with no pre-release suffix. RC/beta tags will fail the release. Pre-release tags should be cut on a dedicated branch or not trigger this workflow.
+2. **`make check-version-tag`** — asserts the tag is a clean `vMAJOR.MINOR.PATCH` with no pre-release suffix. RC/beta tags are handled by `rc-release.yml` instead.
 3. **GoReleaser** — builds binaries for linux/darwin × amd64/arm64 and creates the GitHub Release with grouped changelog (`feat:` → Features, `fix:` → Bug Fixes, others → Others).
 4. **Release attestations** — downloads the published checksum manifest, uploads an SPDX SBOM asset, and creates GitHub artifact attestations for the release archives.
 5. **Homebrew tap update** — downloads the published checksums and writes an asset-based formula to `gastownhall/homebrew-gascity`.
@@ -100,9 +131,11 @@ Manual `brew bump-formula-pr` is refused for autobump formulae. If the bot stall
 
 ## Troubleshooting
 
-### `make check-version-tag` fails with "pre-release suffix"
+### Stable release workflow skipped an RC tag
 
-The tag has a suffix (`-rc1`, `-beta`, `-alpha.1`). The release workflow only publishes stable releases. Either retag without the suffix, or don't trigger `release.yml` for this tag.
+This is expected. Tags with suffixes such as `-rc1`, `-beta`, or `-alpha.1`
+are intentionally excluded from the stable `release.yml` publishing jobs. Use
+the **RC Release** workflow for release candidates.
 
 ### GoReleaser fails with "replace directives"
 

@@ -38,10 +38,18 @@ def load_allowlist(path: Path = ALLOWLIST_PATH) -> set[str]:
     return allowlist
 
 
-def select_runners(event_name: str, author: str, allowlist: set[str]) -> tuple[bool, str, dict[str, str]]:
+def select_runners(
+    event_name: str,
+    author: str,
+    allowlist: set[str],
+    *,
+    force_blacksmith: bool = False,
+) -> tuple[bool, str, dict[str, str]]:
     """Return whether to use Blacksmith, the reason, and runner labels."""
     normalized_event = event_name.strip()
     normalized_author = author.strip()
+    if force_blacksmith:
+        return True, "Blacksmith forced by workflow input", BLACKSMITH_RUNNERS
     if normalized_event == "pull_request" and normalized_author.lower() in allowlist:
         return True, "pull request author is in .github/blacksmith-allowlist.txt", BLACKSMITH_RUNNERS
     if normalized_event != "pull_request":
@@ -85,7 +93,13 @@ def append_summary(use_blacksmith: bool, reason: str, event_name: str, author: s
 def main() -> None:
     event_name = os.environ["EVENT_NAME"]
     author = os.environ.get("PR_AUTHOR", "").strip()
-    use_blacksmith, reason, runners = select_runners(event_name, author, load_allowlist())
+    force_blacksmith = os.environ.get("FORCE_BLACKSMITH", "").strip().lower() == "true"
+    use_blacksmith, reason, runners = select_runners(
+        event_name,
+        author,
+        load_allowlist(),
+        force_blacksmith=force_blacksmith,
+    )
     append_outputs(use_blacksmith, reason, runners)
     append_summary(use_blacksmith, reason, event_name, author)
 

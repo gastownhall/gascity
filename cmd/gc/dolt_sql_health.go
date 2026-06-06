@@ -51,6 +51,7 @@ var (
 var managedDoltSystemDatabases = map[string]struct{}{
 	"information_schema":     {},
 	"mysql":                  {},
+	"dolt":                   {},
 	"dolt_cluster":           {},
 	"performance_schema":     {},
 	"sys":                    {},
@@ -97,7 +98,7 @@ func managedDoltQueryProbe(host, port, user string) error {
 	if managedDoltPassword() != "" {
 		return managedDoltQueryProbeDirectFn(host, port, user)
 	}
-	_, err := runManagedDoltSQL(host, port, user, "-q", "SELECT active_branch()")
+	_, err := runManagedDoltSQL(host, port, user, "-r", "csv", "-q", "SELECT COUNT(*) AS cnt FROM information_schema.SCHEMATA")
 	if err == nil {
 		return nil
 	}
@@ -296,8 +297,8 @@ func managedDoltQueryProbeDirect(host, port, user string) error {
 	if err := db.PingContext(ctx); err != nil {
 		return err
 	}
-	var branch sql.NullString
-	if err := db.QueryRowContext(ctx, "SELECT active_branch()").Scan(&branch); err != nil {
+	var cnt int64
+	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) AS cnt FROM information_schema.SCHEMATA").Scan(&cnt); err != nil {
 		return err
 	}
 	return nil
@@ -443,6 +444,13 @@ func managedDoltDropProbeTableSQLFor(db string) string {
 }
 
 func runManagedDoltSQL(host, port, user string, args ...string) (string, error) {
+	return runManagedDoltSQLContext(context.Background(), host, port, user, args...)
+}
+
+// runManagedDoltSQLContext is the context-aware form of runManagedDoltSQL: the
+// command is bounded by both managedDoltSQLCommandTimeout and the caller's ctx,
+// so a hung server cannot outlive a canceled reconcile tick.
+func runManagedDoltSQLContext(parent context.Context, host, port, user string, args ...string) (string, error) {
 	host = managedDoltConnectHost(host)
 	port = strings.TrimSpace(port)
 	if port == "" {
@@ -460,7 +468,7 @@ func runManagedDoltSQL(host, port, user string, args ...string) (string, error) 
 		"--no-tls",
 		"sql",
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), managedDoltSQLCommandTimeout)
+	ctx, cancel := context.WithTimeout(parent, managedDoltSQLCommandTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "dolt", append(baseArgs, args...)...)
 	out, err := cmd.CombinedOutput()

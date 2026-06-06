@@ -125,6 +125,120 @@ func TestDefaultBranch_FromOriginHEAD(t *testing.T) {
 	}
 }
 
+// TestDefaultBranch_OriginHEADUnsetWithMasterRef covers the master-default
+// rig case from gc-8cowk: a clone where refs/remotes/origin/HEAD is not set
+// but refs/remotes/origin/master exists. The hardcoded "main" fallback
+// strands polecats on master-default rigs (added before PR#1554) with
+// metadata.target=main, causing refinery rejection loops.
+func TestDefaultBranch_OriginHEADUnsetWithMasterRef(t *testing.T) {
+	tests := []struct {
+		name        string
+		remoteRefs  []string
+		wantBranch  string
+		description string
+	}{
+		{
+			name:        "origin/master only",
+			remoteRefs:  []string{"master"},
+			wantBranch:  "master",
+			description: "master-default rig: must detect master without origin/HEAD",
+		},
+		{
+			name:        "origin/main only",
+			remoteRefs:  []string{"main"},
+			wantBranch:  "main",
+			description: "main-default rig with unset origin/HEAD must still detect main",
+		},
+		{
+			name:        "both main and master",
+			remoteRefs:  []string{"main", "master"},
+			wantBranch:  "main",
+			description: "when ambiguous, prefer main (matches the hardcoded historical default)",
+		},
+		{
+			name:        "neither candidate exists",
+			remoteRefs:  []string{"develop"},
+			wantBranch:  "main",
+			description: "last-resort fallback remains main when no known candidate is on origin",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			bare := t.TempDir()
+			runGit(t, bare, "init", "--bare")
+
+			clone := t.TempDir()
+			runGit(t, clone, "clone", bare, ".")
+			runGit(t, clone, "config", "user.email", "test@test.com")
+			runGit(t, clone, "config", "user.name", "Test")
+			runGit(t, clone, "commit", "--allow-empty", "-m", "init")
+
+			// Populate refs/remotes/origin/<name> for each requested ref
+			// but DO NOT wire refs/remotes/origin/HEAD. This mirrors the
+			// state of rig clones added before gc rig add auto-detected
+			// the default branch.
+			for _, ref := range tt.remoteRefs {
+				runGit(t, clone, "update-ref", "refs/remotes/origin/"+ref, "HEAD")
+			}
+			// Defensive: ensure no origin/HEAD symref lingers from clone.
+			_ = exec.Command("git", "-C", clone, "symbolic-ref", "--delete", "refs/remotes/origin/HEAD").Run()
+
+			g := New(clone)
+			got, err := g.DefaultBranch()
+			if err != nil {
+				t.Fatalf("DefaultBranch: %v", err)
+			}
+			if got != tt.wantBranch {
+				t.Errorf("%s: DefaultBranch() = %q, want %q",
+					tt.description, got, tt.wantBranch)
+			}
+		})
+	}
+}
+
+func TestProbeDefaultBranch_FromOriginHEAD(t *testing.T) {
+	bare := t.TempDir()
+	runGit(t, bare, "init", "--bare")
+
+	clone := t.TempDir()
+	runGit(t, clone, "clone", bare, ".")
+	runGit(t, clone, "config", "user.email", "test@test.com")
+	runGit(t, clone, "config", "user.name", "Test")
+	runGit(t, clone, "commit", "--allow-empty", "-m", "init")
+
+	target := "refs/remotes/origin/master"
+	runGit(t, clone, "update-ref", target, "HEAD")
+	runGit(t, clone, "symbolic-ref", "refs/remotes/origin/HEAD", target)
+
+	g := New(clone)
+	got := g.ProbeDefaultBranch()
+	if got != "master" {
+		t.Errorf("ProbeDefaultBranch() = %q, want %q", got, "master")
+	}
+}
+
+func TestProbeDefaultBranch_FallsBackToCurrentBranch(t *testing.T) {
+	repo := initTestRepo(t)
+	// Force a known branch name; the test repo's default may be "main"
+	// or "master" depending on the host's git init.defaultBranch.
+	runGit(t, repo, "checkout", "-b", "develop")
+	g := New(repo)
+	got := g.ProbeDefaultBranch()
+	if got != "develop" {
+		t.Errorf("ProbeDefaultBranch() = %q, want %q (current branch fallback)", got, "develop")
+	}
+}
+
+func TestProbeDefaultBranch_NoRepo(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("GIT_CEILING_DIRECTORIES", filepath.Dir(dir))
+	g := New(dir)
+	got := g.ProbeDefaultBranch()
+	if got != "" {
+		t.Errorf("ProbeDefaultBranch() = %q, want empty (no repo)", got)
+	}
+}
+
 func TestWorktreeRemove(t *testing.T) {
 	repo := initTestRepo(t)
 	g := New(repo)

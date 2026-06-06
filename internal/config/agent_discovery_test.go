@@ -26,6 +26,9 @@ func TestAgentDiscovery_BasicDirectory(t *testing.T) {
 [pack]
 name = "mypk"
 schema = 1
+
+[providers.codex]
+base = "builtin:codex"
 `)
 	writeTestFile(t, agentDir, "prompt.md", `You are a worker agent.`)
 
@@ -37,6 +40,9 @@ schema = 1
 [workspace]
 name = "test"
 includes = ["../mypk"]
+
+[providers.codex]
+base = "builtin:codex"
 `)
 
 	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityDir, "city.toml"))
@@ -84,6 +90,9 @@ schema = 1
 [workspace]
 name = "test"
 includes = ["../mypk"]
+
+[providers.codex]
+base = "builtin:codex"
 `)
 
 	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityDir, "city.toml"))
@@ -127,6 +136,9 @@ schema = 1
 [workspace]
 name = "test"
 includes = ["../mypk"]
+
+[providers.codex]
+base = "builtin:codex"
 `)
 
 	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityDir, "city.toml"))
@@ -220,6 +232,9 @@ provider = "codex"
 [workspace]
 name = "test"
 includes = ["../mypk"]
+
+[providers.codex]
+base = "builtin:codex"
 `)
 
 	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityDir, "city.toml"))
@@ -262,6 +277,12 @@ schema = 1
 name = "mayor"
 scope = "city"
 provider = "claude"
+
+[providers.claude]
+base = "builtin:claude"
+
+[providers.codex]
+base = "builtin:codex"
 `)
 	writeTestFile(t, agentDir, "agent.toml", `
 scope = "rig"
@@ -615,6 +636,9 @@ schema = 2
 [[agent]]
 name = "ada"
 provider = "claude"
+
+[providers.claude]
+base = "builtin:claude"
 `)
 	writeTestFile(t, agentDir, "prompt.template.md", `You are {{ .AgentName }}.`)
 	writeTestFile(t, agentDir, "overlay/CLAUDE.md", `# overlay`)

@@ -3,7 +3,7 @@ title: "Controller"
 ---
 
 
-> Last verified against code: 2026-03-01
+> Last verified against code: 2026-04-25
 
 ## Summary
 
@@ -53,7 +53,7 @@ automations, and garbage-collects expired wisps.
 
 The controller is implemented entirely in `cmd/gc/` as a set of
 collaborating functions and interfaces -- not as a standalone package.
-It composes primitives (Agent Protocol, Config, Event Bus, Beads, Prompts)
+It composes primitives (Session, Config, Event Bus, Beads, Prompts)
 into the runtime orchestration loop.
 
 ### Data Flow
@@ -83,7 +83,7 @@ gc start --foreground
   │           └─ ticker loop:
   │                 ├─ if dirty: tryReloadConfig() + rebuild trackers
   │                 ├─ buildAgents(cfg)  →  evaluate pools in parallel
-  │                 ├─ doReconcileAgents()
+  │                 ├─ reconcileSessionBeads()
   │                 ├─ wispGC.runGC()
   │                 └─ orderDispatcher.dispatch()
   │
@@ -111,8 +111,8 @@ Each tick of `controllerLoop()` (`cmd/gc/controller.go:268-320`) performs:
    individually. Each agent gets its environment, prompt, hooks, overlay,
    and session setup expanded.
 
-3. **Reconciliation** (`doReconcileAgents()`): Declarative convergence --
-   make running sessions match the desired list. See
+3. **Reconciliation** (`reconcileSessionBeads()`): Declarative convergence --
+   make session beads and running sessions match the desired list. See
    [Health Patrol](health-patrol.md) for the reconciliation state machine,
    crash loop quarantine, and idle tracking details.
 
@@ -179,7 +179,7 @@ indicate bugs.
   goroutines. Results are processed sequentially after `wg.Wait()`.
 
 - **Supervisor-managed and standalone runtimes share reconciliation code**:
-  `CityRuntime.run()` and `doReconcileAgents()` power both the
+  `CityRuntime.run()` and `reconcileSessionBeads()` power both the
   machine-wide supervisor path and the hidden standalone
   `gc start --foreground` path.
 
@@ -235,7 +235,8 @@ All controller implementation lives in `cmd/gc/`:
 | `cmd/gc/cmd_supervisor.go` | Machine-wide supervisor lifecycle, registry reconciliation, API hosting, and child `CityRuntime` management |
 | `cmd/gc/cmd_stop.go` | `cmdStop()`, `tryStopController()` (Unix socket IPC), `doStop()`, `gracefulStopAll()` |
 | `cmd/gc/cmd_suspend.go` | `doSuspendCity()` (sets `workspace.suspended` in TOML), `citySuspended()`, `isAgentEffectivelySuspended()` |
-| `cmd/gc/reconcile.go` | `reconcileOps` interface, `doReconcileAgents()` (4-state reconciliation + parallel starts + orphan cleanup) |
+| `cmd/gc/session_reconciler.go` | `reconcileSessionBeads()` bead-driven state machine for desired/live convergence, orphan/suspended drains, crash handling, idle drains, and config-drift repair |
+| `cmd/gc/session_lifecycle_parallel.go` | Dependency-aware bounded parallel session starts and force-stops |
 | `cmd/gc/pool.go` | `evaluatePool()`, `poolAgents()`, `expandSessionSetup()`, `expandDirTemplate()` |
 | `cmd/gc/providers.go` | `newSessionProvider()`, `beadsProvider()`, `newMailProvider()`, `newEventsProvider()` |
 | `cmd/gc/beads_provider_lifecycle.go` | `ensureBeadsProvider()`, `shutdownBeadsProvider()`, `initBeadsForDir()` |
@@ -305,7 +306,8 @@ Controller tests use in-memory fakes and require no external infrastructure:
 | Test file | Coverage |
 |---|---|
 | `cmd/gc/controller_test.go` | Controller loop tick behavior, config reload, dirty flag, fsnotify debounce, tracker rebuild on reload, order dispatch integration |
-| `cmd/gc/reconcile_test.go` | All reconciliation states, parallel starts, zombie capture, crash quarantine integration, idle restart, pool drain, suspended agent handling, orphan cleanup |
+| `cmd/gc/session_reconciler_test.go` | Session reconciliation states, zombie capture, crash quarantine integration, idle drains, pool drain, suspended session handling, orphan cleanup |
+| `cmd/gc/session_lifecycle_parallel_test.go` | Dependency-aware bounded parallel starts and force-stops |
 | `cmd/gc/pool_test.go` | `evaluatePool()` (clamping, error handling), `poolAgents()` (naming, deep-copy), `expandSessionSetup()`, `expandDirTemplate()` |
 | `cmd/gc/formula_resolve_test.go` | Layer priority, symlink creation/update/cleanup, idempotence, real file preservation |
 | `cmd/gc/wisp_gc_test.go` | TTL-based purging, `shouldRun()` interval, empty list handling |

@@ -75,7 +75,7 @@ type TemplateParams struct {
 	RigRoot string
 	// WakeMode controls whether the next wake resumes or starts fresh conversation state.
 	WakeMode string
-	// IsACP is true if session = "acp".
+	// IsACP is true when the resolved session transport is SessionTransportACP.
 	IsACP bool
 	// HookEnabled reports whether provider hooks are installed for this agent.
 	// Hooks complement startup delivery but do not replace the initial
@@ -83,6 +83,12 @@ type TemplateParams struct {
 	// metadata, and start background helpers, but they do not initiate the
 	// first model turn on their own.
 	HookEnabled bool
+	// SessionOverride is the per-agent session provider override (e.g., "acp",
+	// "tmux", "exec:..."). Empty means use the city-level default.
+	SessionOverride string
+	// EffectiveSessionProvider is the actual session provider after applying
+	// city-level defaults.
+	EffectiveSessionProvider string
 	// DependencyOnly marks a realized cold slot kept only so dependency wake
 	// has something concrete to wake even when pool check wants zero.
 	DependencyOnly bool
@@ -131,8 +137,14 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	}
 	sessionTransport := config.ResolveSessionCreateTransport(cfgAgent.Session, resolved)
 	// Step 2: Validate session vs provider compatibility.
-	if sessionTransport == "acp" && !resolved.SupportsACP {
-		return TemplateParams{}, fmt.Errorf("agent %q: session = \"acp\" but provider %q does not support ACP (set supports_acp = true on the provider)", qualifiedName, resolved.Name)
+	switch sessionTransport {
+	case config.SessionTransportACP:
+		if !resolved.SupportsACP {
+			return TemplateParams{}, fmt.Errorf("agent %q: session = \"acp\" but provider %q does not support ACP (set supports_acp = true on the provider)", qualifiedName, resolved.Name)
+		}
+	case "", config.SessionTransportTmux:
+	default:
+		return TemplateParams{}, fmt.Errorf("agent %q: unknown session transport %q", qualifiedName, sessionTransport)
 	}
 
 	// Step 3: Expand dir template.
@@ -151,10 +163,13 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	// Step 5: Build copy_files and command with settings args + schema defaults.
 	var copyFiles []runtime.CopyEntry
 	var command string
-	if sessionTransport == "acp" {
+	switch sessionTransport {
+	case config.SessionTransportACP:
 		command = resolved.ACPCommandString()
-	} else {
+	case "", config.SessionTransportTmux:
 		command = resolved.CommandString()
+	default:
+		return TemplateParams{}, fmt.Errorf("agent %q: unknown session transport %q", qualifiedName, sessionTransport)
 	}
 	// Append schema-derived default args (e.g., --dangerously-skip-permissions
 	// from EffectiveDefaults["permission_mode"] = "unrestricted").
@@ -162,6 +177,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		command = command + " " + shellquote.Join(defaultArgs)
 	}
 	providerFamily := resolvedProviderLaunchFamily(resolved)
+	installHooks := config.ResolveInstallHooks(cfgAgent, p.workspace)
 	sa, err := ensureClaudeSettingsArgs(p.fs, p.cityPath, providerFamily, p.stderr)
 	if err != nil {
 		return TemplateParams{}, fmt.Errorf("agent %q: %w", qualifiedName, err)
@@ -183,7 +199,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 			Probed: true, ContentHash: runtime.HashPathContent(scriptsDir),
 		})
 	}
-	copyFiles = stageHookFiles(copyFiles, p.cityPath, workDir)
+	copyFiles = stageHookFiles(copyFiles, p.cityPath, workDir, hookFileProvidersForResolved(resolved, installHooks, p.providers))
 
 	// Step 6: Compute session name.
 	// Uses bead-derived naming ("s-{beadID}") when a bead store is available,
@@ -243,14 +259,30 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		// Rig-scoped agents override the rig-specific keys below.
 		"GT_ROOT": p.cityPath,
 	}
-	for key, value := range citylayout.CityRuntimeEnvMap(p.cityPath) {
+	for key, value := range cityRuntimeEnvMapForCity(p.cityPath) {
 		agentEnv[key] = value
+	}
+	// Override the city-uniform GC_CONTROL_DISPATCHER_TRACE_DEFAULT with a
+	// per-dispatcher path so each control-dispatcher writes to its own
+	// trace file (closes #1650). Goes in agentEnv (last in mergeEnv) so it
+	// wins over both passthroughEnv and the uniform city default seeded by
+	// cityRuntimeEnvMapForCity above.
+	if cfgAgent.Name == config.ControlDispatcherAgentName {
+		agentEnv["GC_CONTROL_DISPATCHER_TRACE_DEFAULT"] = citylayout.ControlDispatcherTraceDefaultPathForRuntimeDirAndName(
+			p.cityPath,
+			agentEnv["GC_CITY_RUNTIME_DIR"],
+			qualifiedName,
+		)
 	}
 	agentEnv["GC_BEADS"] = rawBeadsProviderForScope(rigRoot, p.cityPath)
 	if exe, err := os.Executable(); err == nil && exe != "" {
 		agentEnv["GC_BIN"] = exe
 	}
-	for key, value := range sessionDoltEnv(p.cityPath, rigRoot, p.rigs) {
+	sessionBackendEnv, err := sessionBackendEnvWithError(p.cityPath, rigRoot, p.rigs)
+	if err != nil {
+		return TemplateParams{}, fmt.Errorf("agent %q: building session backend env: %w", qualifiedName, err)
+	}
+	for key, value := range sessionBackendEnv {
 		agentEnv[key] = value
 	}
 	if rigName != "" {
@@ -272,26 +304,45 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		cfgAgent.InheritedAppendFragments,
 		p.appendFragments,
 	)
+	providerKey, providerDisplayName := providerInfoForAgent(cfgAgent, p.workspace, p.providers)
+	packDirs := p.packDirs
+	if p.city != nil {
+		packDirs = p.city.PackDirsForRig(rigName)
+	}
+	beadsCfg := config.BeadsConfig{}
+	if p.city != nil {
+		beadsCfg = p.city.Beads
+	}
 	prompt = renderPrompt(p.fs, p.cityPath, p.cityName, cfgAgent.PromptTemplate, PromptContext{
-		CityRoot:      p.cityPath,
-		AgentName:     qualifiedName,
-		TemplateName:  cfgAgent.Name,
-		BindingName:   cfgAgent.BindingName,
-		BindingPrefix: cfgAgent.BindingPrefix(),
-		RigName:       rigName,
-		RigRoot:       rigRoot,
-		WorkDir:       workDir,
-		IssuePrefix:   findRigPrefix(rigName, p.rigs),
-		DefaultBranch: defaultBranchFor(workDir),
-		WorkQuery:     expandAgentCommandTemplate(p.cityPath, p.cityName, cfgAgent, p.rigs, "work_query", cfgAgent.EffectiveWorkQuery(), p.stderr),
-		SlingQuery:    expandAgentCommandTemplate(p.cityPath, p.cityName, cfgAgent, p.rigs, "sling_query", cfgAgent.EffectiveSlingQuery(), p.stderr),
-		Env:           cfgAgent.Env,
-	}, p.sessionTemplate, p.stderr, p.packDirs, fragments, p.beadStore)
+		CityRoot:                p.cityPath,
+		AgentName:               qualifiedName,
+		TemplateName:            cfgAgent.Name,
+		BindingName:             cfgAgent.BindingName,
+		BindingPrefix:           cfgAgent.BindingPrefix(),
+		RigName:                 rigName,
+		RigRoot:                 rigRoot,
+		WorkDir:                 workDir,
+		IssuePrefix:             findRigPrefix(rigName, p.rigs),
+		DefaultBranch:           defaultBranchForRig(rigName, p.rigs, workDir),
+		AssignedInProgressQuery: expandAgentCommandTemplate(p.cityPath, p.cityName, cfgAgent, p.rigs, "assigned_in_progress_query", cfgAgent.EffectiveAssignedInProgressQueryForBeads(beadsCfg), p.stderr),
+		AssignedReadyQuery:      expandAgentCommandTemplate(p.cityPath, p.cityName, cfgAgent, p.rigs, "assigned_ready_query", cfgAgent.EffectiveAssignedReadyQueryForBeads(beadsCfg), p.stderr),
+		RoutedPoolQuery:         expandAgentCommandTemplate(p.cityPath, p.cityName, cfgAgent, p.rigs, "routed_pool_query", cfgAgent.EffectiveRoutedPoolQueryForBeads(beadsCfg), p.stderr),
+		WorkQuery:               expandAgentCommandTemplate(p.cityPath, p.cityName, cfgAgent, p.rigs, "work_query", cfgAgent.EffectiveWorkQueryForBeads(beadsCfg), p.stderr),
+		SlingQuery:              expandAgentCommandTemplate(p.cityPath, p.cityName, cfgAgent, p.rigs, "sling_query", cfgAgent.EffectiveSlingQuery(), p.stderr),
+		ProviderKey:             providerKey,
+		ProviderDisplayName:     providerDisplayName,
+		InstructionsFile:        instructionsFileForAgent(cfgAgent, p.workspace, p.providers),
+		Env:                     cfgAgent.Env,
+	}, p.sessionTemplate, p.stderr, packDirs, fragments, p.beadStore)
 	hasHooks := config.AgentHasHooks(cfgAgent, p.workspace, resolved.Name, p.providers)
 	beacon := runtime.FormatBeaconAt(p.cityName, qualifiedName, !hasHooks, p.beaconTime)
-	if prompt != "" {
+	suppressStartupPrompt := suppressStartupPromptForAgent(cfgAgent)
+	switch {
+	case suppressStartupPrompt:
+		prompt = ""
+	case prompt != "":
 		prompt = beacon + "\n\n" + prompt
-	} else {
+	default:
 		prompt = beacon
 	}
 
@@ -313,7 +364,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	// subprocess with WorkDir ≠ scope root — because subprocess
 	// doesn't execute PreStart) get no appendix; we'd be lying to
 	// them. Discovered via the pass-1 Codex review.
-	if effectiveInjectAssignedSkills(cfgAgent) {
+	if !suppressStartupPrompt && effectiveInjectAssignedSkills(cfgAgent) {
 		wsProvider := ""
 		if p.workspace != nil {
 			wsProvider = p.workspace.Provider
@@ -343,8 +394,14 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		}
 	}
 
-	// Step 10: Merge environment layers.
-	env := mergeEnv(passthroughEnv(), expandEnvMap(resolved.Env), expandEnvMap(cfgAgent.Env), agentEnv)
+	// Step 10: Merge environment layers. Workspace.Env sits between
+	// passthrough and provider so a per-provider/agent/patch entry can
+	// still override a workspace-wide default.
+	var workspaceEnv map[string]string
+	if p.workspace != nil {
+		workspaceEnv = p.workspace.Env
+	}
+	env := mergeEnv(passthroughEnv(), expandEnvMap(workspaceEnv), expandEnvMap(resolved.Env), expandEnvMap(cfgAgent.Env), agentEnv)
 	prependGCBinDirToPATH(env, env["GC_BIN"])
 	env = convergence.ScrubTokenEnv(env)
 
@@ -369,7 +426,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		command = expanded[0]
 	}
 	expandedSetup := expandSessionSetup(cfgAgent.SessionSetup, setupCtx)
-	resolvedScript := resolveSetupScript(cfgAgent.SessionSetupScript, cfgAgent.SourceDir, p.cityPath)
+	resolvedScript := config.ResolveSessionSetupScriptPath(p.cityPath, cfgAgent.SourceDir, cfgAgent.SessionSetupScript)
 	expandedPreStart := expandSessionSetup(cfgAgent.PreStart, setupCtx)
 	expandedLive := expandSessionSetup(cfgAgent.SessionLive, setupCtx)
 
@@ -481,29 +538,44 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		}
 	}
 	var mcpServers []runtime.MCPServerConfig
-	if sessionTransport == "acp" {
+	if sessionTransport == config.SessionTransportACP {
 		mcpServers = materialize.RuntimeMCPServers(mcpCatalog.Servers)
 	}
 
 	// Step 12: Build startup hints.
+	nudge := cfgAgent.Nudge
+	acceptStartupDialogs := resolved.AcceptStartupDialogs
+	if suppressStartupPrompt {
+		// Implicit start-command infrastructure agents are deterministic
+		// subprocesses, not interactive model providers. Keep ProcessNames for
+		// liveness without routing startup through prompt, nudge, or
+		// trust-dialog handling.
+		nudge = ""
+		accept := false
+		acceptStartupDialogs = &accept
+	}
 	hints := agent.StartupHints{
+		Lifecycle:              runtime.Lifecycle(resolved.Lifecycle),
 		ReadyPromptPrefix:      resolved.ReadyPromptPrefix,
 		ReadyDelayMs:           resolved.ReadyDelayMs,
 		ProcessNames:           resolved.ProcessNames,
 		EmitsPermissionWarning: resolved.EmitsPermissionWarning,
-		Nudge:                  cfgAgent.Nudge,
+		AcceptStartupDialogs:   acceptStartupDialogs,
+		MouseOn:                cfgAgent.MouseModeOn(),
+		Nudge:                  nudge,
 		PreStart:               expandedPreStart,
 		SessionSetup:           expandedSetup,
 		SessionSetupScript:     resolvedScript,
 		SessionLive:            expandedLive,
 		ProviderName:           resolvedProviderLaunchFamily(resolved),
-		InstallAgentHooks:      config.ResolveInstallHooks(cfgAgent, p.workspace),
+		ProviderOverlayName:    strings.TrimSpace(resolved.Name),
+		InstallAgentHooks:      installHooks,
 		PackOverlayDirs:        effectiveOverlayDirs(p.packOverlayDirs, p.rigOverlayDirs, rigName),
 		OverlayDir:             overlayDir,
 		CopyFiles:              copyFiles,
 	}
 
-	return TemplateParams{
+	params := TemplateParams{
 		Command:          command,
 		Prompt:           prompt,
 		Env:              env,
@@ -518,37 +590,74 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		RigName:          rigName,
 		RigRoot:          rigRoot,
 		WakeMode:         cfgAgent.WakeMode,
-		IsACP:            sessionTransport == "acp",
+		IsACP:            sessionTransport == config.SessionTransportACP,
 		HookEnabled:      hasHooks,
 		MCPServers:       mcpServers,
-	}, nil
+	}
+	params.SessionOverride = cfgAgent.Session
+	params.EffectiveSessionProvider = effectiveSessionProvider(cfgAgent.Session, p.sessionProvider)
+	return params, nil
 }
 
-func sessionDoltEnv(cityPath, rigRoot string, rigs []config.Rig) map[string]string {
+func suppressStartupPromptForAgent(cfgAgent *config.Agent) bool {
+	return cfgAgent != nil &&
+		cfgAgent.Implicit &&
+		strings.TrimSpace(cfgAgent.StartCommand) != "" &&
+		strings.TrimSpace(cfgAgent.Provider) == ""
+}
+
+func sessionBackendEnvWithError(cityPath, rigRoot string, rigs []config.Rig) (map[string]string, error) {
 	env := map[string]string{
 		// Suppress bd's built-in Dolt auto-start. The gc controller manages
 		// the server; bd's CLI auto-start launches rogue servers from the
 		// agent's cwd with the wrong data_dir.
 		"BEADS_DOLT_AUTO_START": "0",
 	}
+	applyBdCLIRemoteSyncOptOut(env)
 	// Explicit empty values let tmux unset stale Dolt vars inherited from
 	// the server environment when the current city/rig does not use them.
 	setProjectedDoltEnvEmpty(env)
+	ensureProjectedPostgresEnvExplicit(env)
 
 	// Session env projection must not trigger provider recovery. Session setup
 	// only publishes the currently resolved target; store operations use the
 	// bd runtime env when recovery is allowed.
 	if rigRoot == "" {
+		if cityUsesBdStoreContract(cityPath) {
+			if usedPostgres, err := applyCityPostgresBackendEnv(env, cityPath); err != nil {
+				// On PG projection errors, keep explicit empty keys so tmux
+				// clears stale inherited backend variables for the session.
+				clearProjectedDoltEnv(env)
+				clearProjectedPostgresEnv(env)
+				mirrorBeadsDoltEnv(env)
+				ensureProjectedDoltEnvExplicit(env)
+				ensureProjectedPostgresEnvExplicit(env)
+				return env, err
+			} else if usedPostgres {
+				ensureProjectedDoltEnvExplicit(env)
+				return env, nil
+			}
+		}
 		if err := applyResolvedCityDoltEnv(env, cityPath, false); err != nil {
 			mirrorBeadsDoltEnv(env)
+			ensureProjectedPostgresEnvExplicit(env)
+			if !isRecoverableManagedDoltEnvError(err) {
+				return env, err
+			}
 		}
-		return env
+		ensureProjectedPostgresEnvExplicit(env)
+		return env, nil
 	}
 
 	if err := applyResolvedRigDoltEnv(env, cityPath, rigRoot, rigConfigForScopeRoot(cityPath, rigRoot, rigs), false); err != nil {
 		mirrorBeadsDoltEnv(env)
+		ensureProjectedPostgresEnvExplicit(env)
+		if !isRecoverableManagedDoltEnvError(err) {
+			return env, err
+		}
 	}
-	return env
+	ensureProjectedPostgresEnvExplicit(env)
+	return env, nil
 }
 
 // templateParamsToConfig converts TemplateParams to the runtime.Config
@@ -565,14 +674,14 @@ func templateParamsToConfig(tp TemplateParams) runtime.Config {
 		// SessionStart hooks can enrich context, but the startup prompt still
 		// needs a first-turn delivery mechanism. Without argv/flag/nudge
 		// delivery, freshly spawned workers sit idle at the provider prompt.
-		if tp.ResolvedProvider != nil && tp.ResolvedProvider.PromptMode == "none" {
-			if nudge != "" {
-				nudge = tp.Prompt + "\n\n---\n\n" + nudge
-			} else {
-				nudge = tp.Prompt
-			}
+		switch {
+		case tp.IsACP:
+			nudge = prependStartupPromptToNudge(tp.Prompt, nudge)
 			startupPromptDelivered = true
-		} else {
+		case tp.ResolvedProvider != nil && tp.ResolvedProvider.PromptMode == "none":
+			nudge = prependStartupPromptToNudge(tp.Prompt, nudge)
+			startupPromptDelivered = true
+		default:
 			promptSuffix = shellquote.Quote(tp.Prompt)
 			startupPromptDelivered = promptSuffix != ""
 			if tp.ResolvedProvider != nil && tp.ResolvedProvider.PromptMode == "flag" {
@@ -590,7 +699,7 @@ func templateParamsToConfig(tp TemplateParams) runtime.Config {
 		}
 		env[startupPromptDeliveredEnv] = "1"
 	}
-	return runtime.Config{
+	cfg := runtime.Config{
 		Command:      tp.Command,
 		PromptSuffix: promptSuffix,
 		PromptFlag:   promptFlag,
@@ -602,20 +711,44 @@ func templateParamsToConfig(tp TemplateParams) runtime.Config {
 			return nil
 		}(),
 		WorkDir:                tp.WorkDir,
+		Lifecycle:              tp.Hints.Lifecycle,
 		ReadyPromptPrefix:      tp.Hints.ReadyPromptPrefix,
 		ReadyDelayMs:           tp.Hints.ReadyDelayMs,
 		ProcessNames:           tp.Hints.ProcessNames,
 		EmitsPermissionWarning: tp.Hints.EmitsPermissionWarning,
-		Nudge:                  nudge,
-		PreStart:               tp.Hints.PreStart,
-		SessionSetup:           tp.Hints.SessionSetup,
-		SessionSetupScript:     tp.Hints.SessionSetupScript,
-		SessionLive:            tp.Hints.SessionLive,
-		ProviderName:           tp.Hints.ProviderName,
-		InstallAgentHooks:      tp.Hints.InstallAgentHooks,
-		PackOverlayDirs:        tp.Hints.PackOverlayDirs,
-		OverlayDir:             tp.Hints.OverlayDir,
-		CopyFiles:              tp.Hints.CopyFiles,
-		FingerprintExtra:       tp.FPExtra,
+		AcceptStartupDialogs:   tp.Hints.AcceptStartupDialogs,
+		// ga-c4w: interactive `gc session new` sessions (session_origin=manual)
+		// resolve mouse-on so the tmux wheel drives copy-mode scrollback, even
+		// when the agent config sets no mouse_mode. This is the managed,
+		// reconciler-deferred start seam the original API-only fix missed. Scoped
+		// to manual on purpose: MouseOn is a core-fingerprint field (locked by
+		// runtime.TestConfigFingerprintIncludesMouseOn), so auto-flipping it for
+		// long-lived config-declared/named sessions would force a one-time drift
+		// restart — they follow their resolved Hints.MouseOn (mouse_mode) instead.
+		// Ephemeral pool agents are likewise mouse-off (controller-poll safety).
+		MouseOn:             tp.Hints.MouseOn || templateParamsSessionOrigin(tp) == "manual",
+		Nudge:               nudge,
+		PreStart:            tp.Hints.PreStart,
+		SessionSetup:        tp.Hints.SessionSetup,
+		SessionSetupScript:  tp.Hints.SessionSetupScript,
+		SessionLive:         tp.Hints.SessionLive,
+		ProviderName:        tp.Hints.ProviderName,
+		ProviderOverlayName: tp.Hints.ProviderOverlayName,
+		InstallAgentHooks:   tp.Hints.InstallAgentHooks,
+		PackOverlayDirs:     tp.Hints.PackOverlayDirs,
+		OverlayDir:          tp.Hints.OverlayDir,
+		CopyFiles:           tp.Hints.CopyFiles,
+		FingerprintExtra:    tp.FPExtra,
 	}
+	applyT3BridgeRuntimeConfig(tp, env)
+	return cfg
 }
+
+func prependStartupPromptToNudge(prompt, nudge string) string {
+	if nudge != "" {
+		return prompt + startupPromptNudgeSeparator + nudge
+	}
+	return prompt
+}
+
+const startupPromptNudgeSeparator = "\n\n---\n\n"

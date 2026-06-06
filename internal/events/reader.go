@@ -3,10 +3,13 @@ package events
 import (
 	"bufio"
 	"bytes"
+	"compress/gzip"
 	"encoding/json"
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
+	"sort"
 	"time"
 )
 
@@ -14,23 +17,115 @@ import (
 type Filter struct {
 	Type     string    // match events with this Type
 	Actor    string    // match events with this Actor
+	Subject  string    // match events with this Subject
 	Since    time.Time // match events at or after this time
+	Until    time.Time // match events at or before this time
 	AfterSeq uint64    // match events with Seq > AfterSeq (0 = no filter)
+	Limit    int       // cap results at this count (0 or negative = unlimited)
 }
 
-// ReadAll reads all events from the JSONL file at path.
-// Returns (nil, nil) if the file is missing or empty.
+// matchesFilter reports whether e satisfies all non-zero predicates in f.
+// It does not enforce Limit — that is applied by the caller.
+func matchesFilter(e Event, f Filter) bool {
+	if f.AfterSeq > 0 && e.Seq <= f.AfterSeq {
+		return false
+	}
+	if f.Type != "" && e.Type != f.Type {
+		return false
+	}
+	if f.Actor != "" && e.Actor != f.Actor {
+		return false
+	}
+	if f.Subject != "" && e.Subject != f.Subject {
+		return false
+	}
+	if !f.Since.IsZero() && e.Ts.Before(f.Since) {
+		return false
+	}
+	if !f.Until.IsZero() && e.Ts.After(f.Until) {
+		return false
+	}
+	return true
+}
+
+// ApplyFilter returns events matching all non-zero predicates in filter.
+// It preserves input order and applies a positive Limit after matching.
+func ApplyFilter(evts []Event, filter Filter) []Event {
+	var result []Event
+	for _, e := range evts {
+		if !matchesFilter(e, filter) {
+			continue
+		}
+		result = append(result, e)
+		if limitReached(len(result), filter) {
+			break
+		}
+	}
+	return result
+}
+
+func limitReached(count int, filter Filter) bool {
+	return filter.Limit > 0 && count >= filter.Limit
+}
+
+// ReadAll reads all events from the JSONL file at path, transparently
+// walking sibling archives produced by rotation. Archives are read in
+// seq order before the active file, yielding a single chronological
+// stream. Returns (nil, nil) if neither the active file nor any
+// archives exist.
 func ReadAll(path string) ([]Event, error) {
+	return ReadFiltered(path, Filter{})
+}
+
+// ReadFiltered reads events from path and sibling archives, returning
+// only those matching all non-zero fields in filter. Archives whose
+// seq window is fully excluded by the filter's AfterSeq predicate are
+// skipped without gunzipping. Returns (nil, nil) if no events exist.
+// Scanner errors return the events parsed before the error alongside
+// the error.
+func ReadFiltered(path string, filter Filter) ([]Event, error) {
+	dir := filepath.Dir(path)
+	archives, err := archiveFilesIn(dir)
+	if err != nil {
+		// Listing the dir failed (most often: dir doesn't exist).
+		// Fall through to the active-file path; if that also fails,
+		// the caller gets a single error.
+		archives = nil
+	}
+
+	var result []Event
+	for _, info := range archives {
+		if !archiveOverlapsFilter(info, filter) {
+			continue
+		}
+		archivePath := filepath.Join(dir, info.Basename)
+		err := streamArchive(archivePath, filter, func(e Event) bool {
+			if !matchesFilter(e, filter) {
+				return true
+			}
+			result = append(result, e)
+			return !limitReached(len(result), filter)
+		})
+		if err != nil {
+			return result, fmt.Errorf("reading archive %q: %w", info.Basename, err)
+		}
+		if limitReached(len(result), filter) {
+			return result, nil
+		}
+	}
+
 	f, err := os.Open(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, nil
+			if len(result) == 0 {
+				return nil, nil
+			}
+			return result, nil
 		}
-		return nil, fmt.Errorf("reading events: %w", err)
+		return result, fmt.Errorf("reading events: %w", err)
 	}
 	defer f.Close() //nolint:errcheck // read-only file
 
-	var events []Event
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024) // handle lines up to 1MB
 	for scanner.Scan() {
@@ -38,30 +133,79 @@ func ReadAll(path string) ([]Event, error) {
 		if err := json.Unmarshal(scanner.Bytes(), &e); err != nil {
 			continue // skip malformed lines
 		}
-		events = append(events, e)
+		if !matchesFilter(e, filter) {
+			continue
+		}
+		result = append(result, e)
+		if limitReached(len(result), filter) {
+			break
+		}
 	}
 	if err := scanner.Err(); err != nil {
-		return events, fmt.Errorf("scanning events: %w", err)
+		return result, fmt.Errorf("scanning events: %w", err)
 	}
-	return events, nil
+	return result, nil
 }
 
-// ReadFiltered reads events from path and returns only those matching
-// all non-zero fields in filter. Returns (nil, nil) if the file is
-// missing or empty.
-func ReadFiltered(path string, filter Filter) ([]Event, error) {
-	all, err := ReadAll(path)
+// archiveFilesIn lists canonical events archives in dir, sorted by
+// FirstSeq ascending so callers can read them in chronological order.
+// Files that don't match the canonical name pattern (legacy archives,
+// unrelated files) are silently skipped — a corrupt archive in the
+// dir must not poison the read path.
+func archiveFilesIn(dir string) ([]archiveInfo, error) {
+	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, err
 	}
+	var archives []archiveInfo
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		info, err := parseArchiveBasename(e.Name())
+		if err != nil {
+			continue
+		}
+		archives = append(archives, info)
+	}
+	sort.Slice(archives, func(i, j int) bool {
+		return archives[i].FirstSeq < archives[j].FirstSeq
+	})
+	return archives, nil
+}
 
-	var result []Event
-	for _, e := range all {
-		if eventMatchesFilter(e, filter) {
-			result = append(result, e)
+// streamArchive gunzip-streams the file at path, decoding each line
+// as an Event and invoking fn for every event. fn returns false to
+// abort iteration early. Returns nil if iteration completed cleanly
+// or fn requested abort; errors from gzip / scanner are wrapped.
+func streamArchive(path string, _ Filter, fn func(Event) bool) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close() //nolint:errcheck // read-only file
+
+	gr, err := gzip.NewReader(f)
+	if err != nil {
+		return fmt.Errorf("gunzip: %w", err)
+	}
+	defer gr.Close() //nolint:errcheck // read-only stream
+
+	scanner := bufio.NewScanner(gr)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	for scanner.Scan() {
+		var e Event
+		if err := json.Unmarshal(scanner.Bytes(), &e); err != nil {
+			continue
+		}
+		if !fn(e) {
+			return nil
 		}
 	}
-	return result, nil
+	if err := scanner.Err(); err != nil {
+		return fmt.Errorf("scanning archive: %w", err)
+	}
+	return nil
 }
 
 // ReadFilteredTail reads the trailing matching events from path. A positive
@@ -125,7 +269,7 @@ func readFilteredTailFromFile(f *os.File, size int64, filter Filter, limit int) 
 			if err := json.Unmarshal(line, &e); err != nil {
 				continue
 			}
-			if eventMatchesFilter(e, filter) {
+			if matchesFilter(e, filter) {
 				reversed = append(reversed, e)
 			}
 		}
@@ -137,27 +281,28 @@ func readFilteredTailFromFile(f *os.File, size int64, filter Filter, limit int) 
 	return reversed, nil
 }
 
-func eventMatchesFilter(e Event, filter Filter) bool {
-	if filter.AfterSeq > 0 && e.Seq <= filter.AfterSeq {
-		return false
+// ReadLatestSeq returns the highest complete event Seq visible in the
+// active events file or any canonical sibling archive. Event logs are
+// append-only and sequence numbers are monotonic, so the active file
+// is read backward from the tail and archives contribute their
+// filename-encoded LastSeq without being gunzipped.
+func ReadLatestSeq(path string) (uint64, error) {
+	seq, err := readLatestActiveSeq(path)
+	if err != nil {
+		return 0, err
 	}
-	if filter.Type != "" && e.Type != filter.Type {
-		return false
+	archives, err := archiveFilesIn(filepath.Dir(path))
+	if err == nil {
+		for _, info := range archives {
+			if info.LastSeq > seq {
+				seq = info.LastSeq
+			}
+		}
 	}
-	if filter.Actor != "" && e.Actor != filter.Actor {
-		return false
-	}
-	if !filter.Since.IsZero() && e.Ts.Before(filter.Since) {
-		return false
-	}
-	return true
+	return seq, nil
 }
 
-// ReadLatestSeq returns the latest complete event Seq in the events file, or
-// 0 if the file is missing or empty. Event logs are append-only and sequence
-// numbers are monotonic, so this reads backward from the tail instead of
-// parsing historical events on every recorder open.
-func ReadLatestSeq(path string) (uint64, error) {
+func readLatestActiveSeq(path string) (uint64, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		if os.IsNotExist(err) {

@@ -92,7 +92,7 @@ func collectCacheKeyParts(v reflect.Value, parts *[]string) {
 			continue
 		}
 		fv := v.Field(i)
-		if fv.Kind() == reflect.Ptr {
+		if fv.Kind() == reflect.Pointer {
 			if fv.IsNil() {
 				continue
 			}

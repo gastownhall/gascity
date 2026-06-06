@@ -606,7 +606,8 @@ for d in "$data_dir"/*/; do
   name="$(basename "$d")"
   case "$(printf '%s' "$name" | tr '[:upper:]' '[:lower:]')" in information_schema|mysql|dolt_cluster|__gc_probe) continue ;; esac
   case "$referenced" in *" $name "*) continue ;; esac
-  size_bytes=$(du -sb "$d" 2>/dev/null | cut -f1 || echo 0)
+  size_kb=$(du -sk "$d" 2>/dev/null | cut -f1)
+  size_bytes=$(( ${size_kb:-0} * 1024 ))
   size="${size_bytes} B"
   orphans="$orphans$name|$size|$d
 "

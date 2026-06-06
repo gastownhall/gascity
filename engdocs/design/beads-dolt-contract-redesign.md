@@ -661,6 +661,7 @@ Canonical keys owned by GC:
 
 - `issue_prefix`
 - `dolt.auto-start`
+- `dolt.disable-event-flush` (serialized as `dolt: { disable-event-flush: ... }`)
 - `gc.endpoint_origin`
 - `gc.endpoint_status`
 - external-only:
@@ -700,6 +701,8 @@ interoperability.
 issue_prefix: gc
 issue-prefix: gc
 dolt.auto-start: false
+dolt:
+  disable-event-flush: true
 gc.endpoint_origin: managed_city
 gc.endpoint_status: verified
 ```
@@ -723,6 +726,8 @@ gc.endpoint_status: verified
 issue_prefix: gc
 issue-prefix: gc
 dolt.auto-start: false
+dolt:
+  disable-event-flush: true
 gc.endpoint_origin: city_canonical
 gc.endpoint_status: verified
 dolt.host: db.example.com
@@ -749,6 +754,8 @@ dolt.user: root
 issue_prefix: fe
 issue-prefix: fe
 dolt.auto-start: false
+dolt:
+  disable-event-flush: true
 gc.endpoint_origin: inherited_city
 gc.endpoint_status: verified
 ```
@@ -772,6 +779,8 @@ gc.endpoint_status: verified
 issue_prefix: fe
 issue-prefix: fe
 dolt.auto-start: false
+dolt:
+  disable-event-flush: true
 gc.endpoint_origin: inherited_city
 gc.endpoint_status: verified
 dolt.host: db.example.com
@@ -798,6 +807,8 @@ dolt.user: root
 issue_prefix: fe
 issue-prefix: fe
 dolt.auto-start: false
+dolt:
+  disable-event-flush: true
 gc.endpoint_origin: explicit
 gc.endpoint_status: unverified
 dolt.host: rig-db.example.com

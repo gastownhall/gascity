@@ -41,6 +41,10 @@ type PackScriptCheck struct {
 	PackDir string
 	// PackName is the logical pack name used for runtime env injection.
 	PackName string
+	// Warmup, when true, opts this check into the `gc start` warm-up scan.
+	// Populated from pack.toml `[[doctor]] warmup = true` or from
+	// `doctor.toml`'s `warmup` field. Default false.
+	Warmup bool
 }
 
 // Name returns the check's fully-qualified name.
@@ -50,6 +54,10 @@ func (c *PackScriptCheck) Name() string { return c.CheckName }
 // When true, `gc doctor --fix` will dispatch to FixScript after the
 // check returns a non-OK status.
 func (c *PackScriptCheck) CanFix() bool { return c.FixScript != "" }
+
+// WarmupEligible reports whether this check opts into the `gc start`
+// warm-up scan. Reflects the pack manifest's `warmup` field.
+func (c *PackScriptCheck) WarmupEligible() bool { return c.Warmup }
 
 // Fix runs the pack's fix script with the same environment contract as
 // Run. Returns nil on exit 0 (remediation succeeded); returns an error

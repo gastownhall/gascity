@@ -102,6 +102,9 @@ func TestRunDashboardServeUsesStandaloneControllerAPI(t *testing.T) {
 name = "alpha"
 provider = "claude"
 
+[providers.claude]
+base = "builtin:claude"
+
 [api]
 port = 9123
 `), 0o644); err != nil {

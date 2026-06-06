@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["schema_version", "ok", "command", "action", "message", "city_path"],
+  "properties": {
+    "schema_version": { "const": "1" },
+    "ok": { "const": true },
+    "command": { "const": "suspend" },
+    "action": { "const": "suspend" },
+    "message": { "type": "string" },
+    "city_path": { "type": "string" }
+  },
+  "additionalProperties": true
+}

@@ -405,6 +405,27 @@ func RunProviderTests(t *testing.T, newProvider func(t *testing.T) mail.Provider
 		}
 	})
 
+	t.Run("Thread_ReturnsAllForMessageID", func(t *testing.T) {
+		p := newProvider(t)
+		sent, err := p.Send("alice", "bob", "Hello", "first")
+		if err != nil {
+			t.Fatalf("Send: %v", err)
+		}
+		reply, err := p.Reply(sent.ID, "bob", "RE: Hello", "second")
+		if err != nil {
+			t.Fatalf("Reply: %v", err)
+		}
+		for _, id := range []string{sent.ID, reply.ID} {
+			msgs, err := p.Thread(id)
+			if err != nil {
+				t.Fatalf("Thread(%q): %v", id, err)
+			}
+			if len(msgs) != 2 {
+				t.Fatalf("Thread(%q) = %d messages, want 2", id, len(msgs))
+			}
+		}
+	})
+
 	t.Run("Thread_Empty", func(t *testing.T) {
 		p := newProvider(t)
 		msgs, err := p.Thread("nonexistent-thread")

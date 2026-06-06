@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "x-gc-jsonl": {},
+  "type": "object",
+  "properties": {
+    "schema_version": { "const": "1" },
+    "ok": { "const": true },
+    "command": { "const": "session prune" },
+    "action": { "const": "prune" },
+    "count": { "type": "integer", "minimum": 0 },
+    "before": { "type": "string", "minLength": 1 },
+    "cutoff": { "type": "string", "format": "date-time" }
+  },
+  "required": ["schema_version", "ok", "command", "action", "count", "before", "cutoff"],
+  "additionalProperties": true
+}

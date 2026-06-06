@@ -14,8 +14,11 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/nudgepoller"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
+	"github.com/gastownhall/gascity/internal/pidutil"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/sessionlog"
 )
 
 const (
@@ -110,7 +113,7 @@ func (m *Manager) submit(ctx context.Context, id, message, resumeCommand string,
 			return m.interruptAndSubmitLocked(ctx, id, b, sessName, message, resumeCommand, hints)
 		default:
 			running := m.sp.IsRunning(sessName)
-			if State(b.Metadata["state"]) == StateCreating && !running {
+			if (State(b.Metadata["state"]) == StateStartPending || State(b.Metadata["state"]) == StateCreating) && !running {
 				if err := m.enqueueDeferredSubmitLocked(b, sessName, message); err != nil {
 					return err
 				}
@@ -135,6 +138,25 @@ func (m *Manager) interruptAndSubmitLocked(ctx context.Context, id string, b bea
 	running := State(b.Metadata["state"]) != StateSuspended && m.sp.IsRunning(sessName)
 	if !running {
 		return m.sendLocked(ctx, id, b, sessName, message, resumeCommand, hints, true)
+	}
+	if requiresHardRestartInterrupt(b) {
+		piTranscriptPath, err := piPendingTurnPath(b, hints)
+		if err != nil {
+			return err
+		}
+		if err := m.sp.Stop(sessName); err != nil {
+			return fmt.Errorf("stopping session for interrupt replacement: %w", err)
+		}
+		if err := discardPiPendingTurn(piTranscriptPath, hints); err != nil {
+			// Pi must be stopped before transcript truncation so it cannot race the
+			// write. If truncation fails, restart on the dirty transcript; the
+			// caller's retry will repeat this stop-and-discard sequence.
+			if restartErr := m.restoreAfterHardRestartFailureLocked(ctx, id, b, sessName, resumeCommand, hints); restartErr != nil {
+				return fmt.Errorf("%w; additionally failed to restore session: %w", err, restartErr)
+			}
+			return err
+		}
+		return m.restartAndSendLocked(ctx, id, b, sessName, message, resumeCommand, hints)
 	}
 	interruptStartedAt := time.Now()
 	if err := m.stopTurnLocked(b, sessName); err != nil {
@@ -172,7 +194,7 @@ func (m *Manager) restartAndSendLocked(ctx context.Context, id string, b beads.B
 	if err := m.waitUntilRunningLocked(ctx, id, sessName, 2*time.Second); err != nil {
 		return err
 	}
-	if waiter, ok := m.sp.(runtime.IdleWaitProvider); ok {
+	if waiter, ok := m.sp.(runtime.IdleWaitProvider); ok && waitsForIdleAfterHardRestart(b) {
 		if err := waiter.WaitForIdle(ctx, sessName, 15*time.Second); err != nil && !errors.Is(err, runtime.ErrInteractionUnsupported) {
 			return fmt.Errorf("waiting for restarted session to become idle: %w", err)
 		}
@@ -260,38 +282,43 @@ func (m *Manager) waitForInterruptBoundaryLocked(ctx context.Context, b beads.Be
 	return nil
 }
 
-// providerKind returns the canonical provider kind for a session bead.
+// ProviderFamilyFromMetadata returns the canonical provider family for session
+// metadata. It prefers metadata stamped at session-bead creation over raw
+// provider names so wrapped custom aliases inherit their built-in family.
 // Preference order:
 //  1. builtin_ancestor — stamped from ResolvedProvider.BuiltinAncestor
 //     at session-bead creation for custom providers with explicit
 //     `base = "builtin:..."` (see cmd/gc session-bead creation sites).
 //  2. provider_kind — stamped for command-matched custom aliases
 //     (legacy Phase A auto-inheritance path).
-//  3. provider — raw provider metadata value as a last-resort fallback.
+//  3. provider — normalized through sessionlog.ProviderFamily as a
+//     last-resort fallback.
 //
 // Callers that branch on Claude/Codex/Gemini-family behavior
 // (idle-wait-after-interrupt, soft-escape interrupt, default submit,
 // etc.) consume this helper so wrapped custom aliases inherit the
 // correct family behavior without every call site re-deriving it.
-func providerKindFromMetadata(meta map[string]string, fallback string) string {
+func ProviderFamilyFromMetadata(meta map[string]string, fallback string) string {
 	if ancestor := strings.TrimSpace(meta["builtin_ancestor"]); ancestor != "" {
-		return ancestor
+		return sessionlog.ProviderFamily(ancestor)
 	}
 	if kind := strings.TrimSpace(meta["provider_kind"]); kind != "" {
-		return kind
+		return sessionlog.ProviderFamily(kind)
 	}
 	if provider := strings.TrimSpace(meta["provider"]); provider != "" {
-		return provider
+		return sessionlog.ProviderFamily(provider)
 	}
-	return strings.TrimSpace(fallback)
+	return sessionlog.ProviderFamily(fallback)
 }
 
 func providerKind(b beads.Bead) string {
-	return providerKindFromMetadata(b.Metadata, "")
+	return ProviderFamilyFromMetadata(b.Metadata, "")
 }
 
 func wrappedProviderFamily(b beads.Bead, family string) bool {
-	ancestor := strings.TrimSpace(b.Metadata["builtin_ancestor"])
+	ancestor := sessionlog.ProviderFamily(b.Metadata["builtin_ancestor"])
+	// Leave provider raw: normalizing it would collapse wrapped aliases such as
+	// "my-pi" onto their family and hide that the provider is wrapped.
 	provider := strings.TrimSpace(b.Metadata["provider"])
 	return ancestor == family && provider != "" && provider != family
 }
@@ -304,7 +331,7 @@ func usesSoftEscapeInterrupt(b beads.Bead) bool {
 		return true
 	}
 	switch providerKind(b) {
-	case "codex":
+	case "codex", "kimi":
 		return true
 	default:
 		return false
@@ -319,7 +346,7 @@ func waitsForIdleAfterInterrupt(b beads.Bead) bool {
 		return false
 	}
 	switch providerKind(b) {
-	case "claude", "codex", "gemini":
+	case "claude", "codex", "gemini", "kimi":
 		return true
 	default:
 		return false
@@ -388,6 +415,78 @@ func requiresInterruptBoundaryWait(b beads.Bead) bool {
 	return providerKind(b) == "codex"
 }
 
+func requiresHardRestartInterrupt(b beads.Bead) bool {
+	if transportFromMetadata(b) == "acp" {
+		return false
+	}
+	return providerKind(b) == "pi"
+}
+
+func waitsForIdleAfterHardRestart(b beads.Bead) bool {
+	if transportFromMetadata(b) == "acp" {
+		return false
+	}
+	return providerKind(b) != "pi"
+}
+
+func (m *Manager) restoreAfterHardRestartFailureLocked(ctx context.Context, id string, b beads.Bead, sessName, resumeCommand string, hints runtime.Config) error {
+	if err := m.ensureRunning(ctx, id, b, sessName, resumeCommand, hints); err != nil {
+		return err
+	}
+	return m.waitUntilRunningLocked(ctx, id, sessName, 2*time.Second)
+}
+
+func piPendingTurnPath(b beads.Bead, hints runtime.Config) (string, error) {
+	searchPaths := piSessionSearchPaths(hints)
+	workDir := b.Metadata["work_dir"]
+	if sessionKey := strings.TrimSpace(b.Metadata["session_key"]); sessionKey != "" {
+		if path := strings.TrimSpace(sessionlog.FindPiSessionFileByID(searchPaths, workDir, sessionKey)); path != "" {
+			return path, nil
+		}
+		fallback, err := sessionlog.FindPiSessionFileStrict(searchPaths, workDir)
+		if err != nil {
+			if errors.Is(err, sessionlog.ErrAmbiguousPiSessionFile) {
+				return "", fmt.Errorf("resolving pi interrupted transcript for session_key %q workdir %q: %w", sessionKey, workDir, err)
+			}
+			return "", err
+		}
+		if fallback != "" {
+			return "", fmt.Errorf("resolving pi interrupted transcript for session_key %q workdir %q: keyed transcript not found; refusing same-workdir fallback %q", sessionKey, workDir, fallback)
+		}
+		return "", nil
+	}
+	path, err := sessionlog.FindPiSessionFileStrict(searchPaths, workDir)
+	if err != nil {
+		if errors.Is(err, sessionlog.ErrAmbiguousPiSessionFile) {
+			return "", fmt.Errorf("resolving pi interrupted transcript for workdir %q: %w", workDir, err)
+		}
+		return "", err
+	}
+	return strings.TrimSpace(path), nil
+}
+
+func discardPiPendingTurn(path string, hints runtime.Config) error {
+	if strings.TrimSpace(path) == "" {
+		return nil
+	}
+	if err := sessionlog.ResetPiInterruptedTurn(path, strings.TrimSpace(hints.Env["GC_PI_TRANSCRIPT_DIR"])); err != nil {
+		return fmt.Errorf("discarding pi interrupted turn: %w", err)
+	}
+	return nil
+}
+
+func piSessionSearchPaths(hints runtime.Config) []string {
+	var paths []string
+	if dir := strings.TrimSpace(hints.Env["PI_CODING_AGENT_SESSION_DIR"]); dir != "" {
+		paths = append(paths, dir)
+	}
+	if dir := strings.TrimSpace(hints.Env["PI_CODING_AGENT_DIR"]); dir != "" {
+		paths = append(paths, filepath.Join(dir, "sessions"))
+	}
+	paths = append(paths, sessionlog.DefaultPiSearchPaths()...)
+	return paths
+}
+
 func usesImmediateDefaultSubmit(b beads.Bead, resuming ...bool) bool {
 	isResuming := len(resuming) > 0 && resuming[0]
 	if transportFromMetadata(b) == "acp" {
@@ -437,7 +536,7 @@ func (m *Manager) enqueueDeferredSubmitLocked(b beads.Bead, sessName, message st
 		return fmt.Errorf("queueing deferred submit: %w", err)
 	}
 	if m.supportsFollowUpLocked(b) {
-		_ = startSessionSubmitPoller(m.cityPath, deferredSubmitAgentKey(b), sessName)
+		_ = startSessionSubmitPoller(m.cityPath, deferredSubmitPollerKey(b), sessName)
 	}
 	return nil
 }
@@ -458,21 +557,31 @@ func deferredSubmitAgentKey(b beads.Bead) string {
 	return b.Title
 }
 
-var startSessionSubmitPoller = ensureSessionSubmitPoller
+func deferredSubmitPollerKey(b beads.Bead) string {
+	return PollerKeyFromBead(b)
+}
+
+var (
+	startSessionSubmitPoller      = ensureSessionSubmitPoller
+	sessionSubmitPollerExecutable = os.Executable
+)
 
 func ensureSessionSubmitPoller(cityPath, agentName, sessionName string) error {
-	pidPath := sessionSubmitPollerPIDPath(cityPath, sessionName)
+	pidPath := sessionSubmitPollerPIDPath(cityPath, sessionName, agentName)
 	return withSessionSubmitPollerPIDLock(pidPath, func() error {
-		if running, _ := existingSessionSubmitPollerPID(pidPath); running {
+		if running, _ := existingSessionSubmitPollerPID(pidPath, cityPath, sessionName, agentName); running {
 			return nil
 		}
-		exe, err := os.Executable()
+		exe, err := sessionSubmitPollerExecutable()
 		if err != nil {
 			return err
 		}
-		cmd := exec.Command(exe, "nudge", "poll", "--city", cityPath, "--session", sessionName, agentName)
+		if isGoTestExecutable(exe) {
+			return fmt.Errorf("refusing to start nudge poller with Go test binary %q", exe)
+		}
+		cmd := exec.Command(exe, nudgepoller.CommandArgs(cityPath, sessionName, agentName)...)
 		cmd.Env = os.Environ()
-		logFile, err := os.OpenFile(sessionSubmitPollerLogPath(cityPath, sessionName), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+		logFile, err := os.OpenFile(sessionSubmitPollerLogPath(cityPath, sessionName, agentName), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
 		if err != nil {
 			return err
 		}
@@ -492,15 +601,19 @@ func ensureSessionSubmitPoller(cityPath, agentName, sessionName string) error {
 	})
 }
 
-func sessionSubmitPollerPIDPath(cityPath, sessionName string) string {
-	return citylayout.RuntimePath(cityPath, "nudges", "pollers", sessionName+".pid")
+func isGoTestExecutable(path string) bool {
+	return strings.HasSuffix(filepath.Base(path), ".test")
 }
 
-func sessionSubmitPollerLogPath(cityPath, sessionName string) string {
-	return citylayout.RuntimePath(cityPath, "nudges", "pollers", sessionName+".log")
+func sessionSubmitPollerPIDPath(cityPath, sessionName, agentName string) string {
+	return citylayout.RuntimePath(cityPath, "nudges", "pollers", nudgepoller.PollerFileStem(sessionName, agentName)+".pid")
 }
 
-func existingSessionSubmitPollerPID(pidPath string) (bool, error) {
+func sessionSubmitPollerLogPath(cityPath, sessionName, agentName string) string {
+	return citylayout.RuntimePath(cityPath, "nudges", "pollers", nudgepoller.PollerFileStem(sessionName, agentName)+".log")
+}
+
+func existingSessionSubmitPollerPID(pidPath, cityPath, sessionName, agentName string) (bool, error) {
 	data, err := os.ReadFile(pidPath)
 	if errors.Is(err, os.ErrNotExist) {
 		return false, nil
@@ -516,7 +629,10 @@ func existingSessionSubmitPollerPID(pidPath string) (bool, error) {
 	if _, err := fmt.Sscanf(pidText, "%d", &pid); err != nil || pid <= 0 {
 		return false, nil
 	}
-	if err := syscall.Kill(pid, 0); err == nil || errors.Is(err, syscall.EPERM) {
+	if cityPath == "" || sessionName == "" || agentName == "" {
+		return false, nil
+	}
+	if pidutil.AliveWithCmdline(pid, nudgepoller.CmdlineMatcher(cityPath, sessionName, agentName)) {
 		return true, nil
 	}
 	return false, nil

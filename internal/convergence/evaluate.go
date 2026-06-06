@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+
+	"github.com/gastownhall/gascity/internal/pathutil"
 )
 
 // EvaluateStepName is the reserved step name for the controller-injected
@@ -50,7 +52,7 @@ func ResolveEvaluateStep(cityPath string, formula Formula) (EvaluateStep, error)
 
 	// Prevent path traversal: the resolved path must stay under cityPath.
 	rel, err := filepath.Rel(canonCity, resolved)
-	if err != nil || isOutsideDir(rel) {
+	if err != nil || pathutil.IsOutsideDir(rel) {
 		return EvaluateStep{}, fmt.Errorf("evaluate prompt path escapes city directory: %s", promptPath)
 	}
 

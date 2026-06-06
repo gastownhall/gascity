@@ -11,7 +11,7 @@ import (
 // - provider compatibility boundary
 // - Phase 1 internal unification with compatibility veneers
 
-func TestPhase0ProviderCompatibility_CreateKeepsResponseKindButDoesNotPersistSpecialSessionKind(t *testing.T) {
+func TestPhase0ProviderCompatibility_CreateKeepsResponseKind(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
 	h := newTestCityHandlerWith(t, fs, srv)

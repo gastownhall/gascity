@@ -387,6 +387,49 @@ func TestStartStagesSingleFileCopyIntoWorkDirRoot(t *testing.T) {
 	}
 }
 
+func TestStartStagesKiroPackOverlayBeforeLaunch(t *testing.T) {
+	workDir := t.TempDir()
+	packOverlay := t.TempDir()
+	agentConfig := filepath.Join(packOverlay, "per-provider", "kiro", ".kiro", "agents", "gascity.json")
+	if err := os.MkdirAll(filepath.Dir(agentConfig), 0o755); err != nil {
+		t.Fatalf("MkdirAll(%q): %v", filepath.Dir(agentConfig), err)
+	}
+	if err := os.WriteFile(agentConfig, []byte(`{"name":"gascity"}`), 0o644); err != nil {
+		t.Fatalf("WriteFile(%q): %v", agentConfig, err)
+	}
+	fallbackInstructions := filepath.Join(packOverlay, "per-provider", "kiro", "AGENTS.md")
+	if err := os.WriteFile(fallbackInstructions, []byte("fallback instructions"), 0o644); err != nil {
+		t.Fatalf("WriteFile(%q): %v", fallbackInstructions, err)
+	}
+	projectInstructions := filepath.Join(workDir, "AGENTS.md")
+	if err := os.WriteFile(projectInstructions, []byte("project instructions"), 0o600); err != nil {
+		t.Fatalf("WriteFile(%q): %v", projectInstructions, err)
+	}
+
+	p := newTestProvider(t)
+	err := p.Start(context.Background(), "kiro-overlay", runtime.Config{
+		Command:         "sleep 3600",
+		WorkDir:         workDir,
+		ProviderName:    "kiro",
+		PackOverlayDirs: []string{packOverlay},
+	})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer p.Stop("kiro-overlay") //nolint:errcheck
+
+	if _, err := os.Stat(filepath.Join(workDir, ".kiro", "agents", "gascity.json")); err != nil {
+		t.Fatalf("expected Kiro agent config to be staged: %v", err)
+	}
+	data, err := os.ReadFile(projectInstructions)
+	if err != nil {
+		t.Fatalf("read AGENTS.md: %v", err)
+	}
+	if string(data) != "project instructions" {
+		t.Fatalf("AGENTS.md = %q, want project instructions preserved", string(data))
+	}
+}
+
 func TestStartFailsWhenCopyFileCannotBeStaged(t *testing.T) {
 	workDir := t.TempDir()
 	srcDir := t.TempDir()

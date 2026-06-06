@@ -7,6 +7,7 @@ import (
 
 	"github.com/BurntSushi/toml"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/pathutil"
 )
 
 // DiscoveredDoctor is a convention-discovered pack doctor check.
@@ -23,12 +24,16 @@ type DiscoveredDoctor struct {
 	PackDir     string
 	PackName    string
 	BindingName string
+	// Warmup mirrors `doctor.toml`'s `warmup` field. False by default.
+	Warmup bool
 }
 
 type doctorManifest struct {
 	Description string `toml:"description"`
 	Run         string `toml:"run"`
 	Fix         string `toml:"fix"`
+	// Warmup opts this check into the `gc start` warm-up scan. Default false.
+	Warmup bool `toml:"warmup"`
 }
 
 func resolveContainedDoctorPath(kind, packDir, checkDir, relPath string) (string, error) {
@@ -49,7 +54,7 @@ func resolveContainedDoctorPath(kind, packDir, checkDir, relPath string) (string
 	if err != nil {
 		return "", err
 	}
-	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+	if pathutil.IsOutsideDir(rel) {
 		return "", fmt.Errorf("%s path %q escapes the pack directory", kind, relPath)
 	}
 	return candidate, nil
@@ -100,6 +105,7 @@ func discoveredDoctorFromDir(fs fsys.FS, packDir, checkDir, name, packName strin
 	runRel := "run.sh"
 	description := ""
 	fixRel := ""
+	warmup := false
 
 	manifestPath := filepath.Join(checkDir, "doctor.toml")
 	if data, err := fs.ReadFile(manifestPath); err == nil {
@@ -114,6 +120,7 @@ func discoveredDoctorFromDir(fs fsys.FS, packDir, checkDir, name, packName strin
 		if manifest.Fix != "" {
 			fixRel = manifest.Fix
 		}
+		warmup = manifest.Warmup
 	}
 
 	runPath, err := resolveContainedDoctorRunPath(packDir, checkDir, runRel)
@@ -161,5 +168,6 @@ func discoveredDoctorFromDir(fs fsys.FS, packDir, checkDir, name, packName strin
 		SourceDir:   checkDir,
 		PackDir:     packDir,
 		PackName:    packName,
+		Warmup:      warmup,
 	}, true, nil
 }

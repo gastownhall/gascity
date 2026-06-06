@@ -1,8 +1,8 @@
 # Lifecycle — polecat workers + refinery singleton.
 #
 # Each polecat creates its own worktree, makes a feature branch, commits,
-# and hands off to the refinery which merges to main. Both use bash scripts
-# for deterministic demo recordings.
+# and hands off to the refinery which merges to main. Both run the
+# gc agent-script YAML scripts for deterministic demo recordings.
 #
 # All agents are rig-scoped (no city agents).
 

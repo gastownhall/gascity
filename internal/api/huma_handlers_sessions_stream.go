@@ -87,9 +87,9 @@ func (s *Server) streamSession(hctx huma.Context, input *SessionStreamInput, sen
 		if err != nil {
 			// Invariant violation: precheck passed, body resolve failed.
 			// Session vanished between precheck and streaming start, or a
-			// race we didn't anticipate. Headers are already committed so
-			// we can't return an HTTP error — log so the next debugger has
-			// a starting point instead of a mute disconnect.
+			// race we didn't anticipate. The SSE body callback cannot
+			// return a typed HTTP error at this point, so log before the
+			// response closes without events.
 			log.Printf("api: session-stream: resolve failed after precheck city=%s id=%s: %v",
 				input.CityName, input.ID, err)
 			return
@@ -110,6 +110,7 @@ func (s *Server) streamSession(hctx huma.Context, input *SessionStreamInput, sen
 	if !running {
 		hctx.SetHeader("GC-Session-Status", "stopped")
 	}
+	flushSSEHeaders(hctx)
 
 	if info.Closed {
 		if format == "raw" {
@@ -136,17 +137,7 @@ func (s *Server) streamSession(hctx huma.Context, input *SessionStreamInput, sen
 			s.streamSessionTranscriptLogHuma(reqCtx, send, info, handle, history)
 		}
 	case format == "raw":
-		if running {
-			s.streamSessionPeekRawHuma(reqCtx, send, info)
-		} else {
-			_ = send(sse.Message{ID: 1, Data: SessionStreamRawMessageEvent{
-				ID:       info.ID,
-				Template: info.Template,
-				Provider: info.Provider,
-				Format:   "raw",
-				Messages: []SessionRawMessageFrame{},
-			}})
-		}
+		s.streamSessionPeekRawHuma(reqCtx, send, info)
 	default:
 		s.streamSessionPeekHuma(reqCtx, send, info)
 	}

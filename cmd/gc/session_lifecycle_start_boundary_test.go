@@ -50,8 +50,8 @@ func TestExecutePreparedStartWaveUsesWorkerBoundaryForKnownSession(t *testing.T)
 	if err != nil {
 		t.Fatalf("Get session: %v", err)
 	}
-	if got.State != sessionpkg.StateCreating {
-		t.Fatalf("state = %q, want %q before commit", got.State, sessionpkg.StateCreating)
+	if got.State != sessionpkg.StateStartPending {
+		t.Fatalf("state = %q, want %q before lifecycle commit", got.State, sessionpkg.StateStartPending)
 	}
 	updatedBead, err := store.Get(info.ID)
 	if err != nil {

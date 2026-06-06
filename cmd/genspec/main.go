@@ -11,9 +11,9 @@
 //
 //	internal/api/openapi.json   — drift-check source of truth
 //	docs/schema/openapi.json    — committed docs copy
-//	docs/schema/openapi.txt     — Mint-served download mirror
+//	docs/schema/openapi.txt     — compatibility mirror kept in sync
 //	docs/schema/events.json     — gc events JSONL line schema
-//	docs/schema/events.txt      — Mint-served download mirror
+//	docs/schema/events.txt      — compatibility mirror kept in sync
 //
 // Pass -out <path> to write a single file instead, or -stdout to
 // emit to stdout (useful for ad-hoc inspection or legacy tooling).
@@ -46,7 +46,7 @@ func main() {
 	// Spec generation does not exercise city creation; nil Initializer
 	// leaves POST /v0/city returning 501 in the live spec, which is
 	// not observable at spec generation time.
-	sm := api.NewSupervisorMux(emptyResolver{}, nil, false, "", time.Time{})
+	sm := api.NewSupervisorMux(emptyResolver{}, nil, false, "", "", time.Time{})
 	req := httptest.NewRequest(http.MethodGet, "/openapi.json", nil)
 	rec := httptest.NewRecorder()
 	sm.ServeHTTP(rec, req)

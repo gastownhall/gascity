@@ -8,6 +8,7 @@ import (
 func TestValidateSemanticsNoWarnings(t *testing.T) {
 	cfg := &City{
 		Workspace: Workspace{Provider: "claude"},
+		Providers: explicitBuiltins("claude", "codex"),
 		Agents: []Agent{
 			{Name: "mayor", Provider: "claude"},
 			{Name: "worker", Provider: "codex"},
@@ -65,6 +66,35 @@ func TestValidateSemanticsUnknownWorkspaceProvider(t *testing.T) {
 	}
 }
 
+func TestValidateSemanticsUnknownAgentDefaultsProvider(t *testing.T) {
+	cfg := &City{
+		AgentDefaults: AgentDefaults{Provider: "cdoex"},
+	}
+	warnings := ValidateSemantics(cfg, "city.toml")
+	if len(warnings) != 1 {
+		t.Fatalf("expected 1 warning, got %d: %v", len(warnings), warnings)
+	}
+	if !strings.Contains(warnings[0], "[agent_defaults]") {
+		t.Errorf("warning should mention agent_defaults: %s", warnings[0])
+	}
+	if !strings.Contains(warnings[0], "cdoex") {
+		t.Errorf("warning should mention bad provider: %s", warnings[0])
+	}
+}
+
+func TestValidateSemanticsAgentDefaultsCustomProviderOK(t *testing.T) {
+	cfg := &City{
+		AgentDefaults: AgentDefaults{Provider: "local-llm"},
+		Providers: map[string]ProviderSpec{
+			"local-llm": {Command: "local-llm"},
+		},
+	}
+	warnings := ValidateSemantics(cfg, "city.toml")
+	if len(warnings) != 0 {
+		t.Errorf("expected no warnings for custom agent default provider, got: %v", warnings)
+	}
+}
+
 func TestValidateSemanticsStartCommandSkipsProviderCheck(t *testing.T) {
 	cfg := &City{
 		Agents: []Agent{
@@ -74,6 +104,35 @@ func TestValidateSemanticsStartCommandSkipsProviderCheck(t *testing.T) {
 	warnings := ValidateSemantics(cfg, "city.toml")
 	if len(warnings) != 0 {
 		t.Errorf("start_command should skip provider check, got: %v", warnings)
+	}
+}
+
+func TestValidateSemanticsAgentSessionTransportAllowsTmux(t *testing.T) {
+	cfg := &City{
+		Providers: explicitBuiltins("claude"),
+		Agents: []Agent{
+			{Name: "worker", Provider: "claude", Session: "tmux"},
+		},
+	}
+	warnings := ValidateSemantics(cfg, "city.toml")
+	if len(warnings) != 0 {
+		t.Fatalf("expected no warnings for tmux session transport, got: %v", warnings)
+	}
+}
+
+func TestValidateSemanticsAgentSessionTransportRejectsUnknown(t *testing.T) {
+	cfg := &City{
+		Providers: explicitBuiltins("claude"),
+		Agents: []Agent{
+			{Name: "worker", Provider: "claude", Session: "stdio"},
+		},
+	}
+	warnings := ValidateSemantics(cfg, "city.toml")
+	if len(warnings) != 1 {
+		t.Fatalf("expected 1 warning, got %d: %v", len(warnings), warnings)
+	}
+	if !strings.Contains(warnings[0], "stdio") || !strings.Contains(warnings[0], "tmux") {
+		t.Fatalf("warning should mention bad value and allowed transports: %s", warnings[0])
 	}
 }
 
@@ -197,6 +256,21 @@ func TestValidateAgentsPromptModeValidValues(t *testing.T) {
 		if err := ValidateAgents(agents); err != nil {
 			t.Errorf("prompt_mode %q should be valid, got: %v", mode, err)
 		}
+	}
+}
+
+func TestValidateAgentsLifecycleValues(t *testing.T) {
+	for _, lifecycle := range []string{"", AgentLifecycleOneShot} {
+		if err := ValidateAgents([]Agent{{Name: "ok", Lifecycle: lifecycle}}); err != nil {
+			t.Errorf("lifecycle %q should be valid, got: %v", lifecycle, err)
+		}
+	}
+	err := ValidateAgents([]Agent{{Name: "bad", Lifecycle: "short_lived"}})
+	if err == nil {
+		t.Fatal("expected error for bad lifecycle")
+	}
+	if !strings.Contains(err.Error(), "short_lived") {
+		t.Errorf("error should mention bad value: %v", err)
 	}
 }
 

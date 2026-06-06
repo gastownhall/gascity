@@ -42,6 +42,7 @@ var BootstrapPacks []Entry
 // wrote into ~/.gc/implicit-import.toml. EnsureBootstrap prunes matching
 // entries so upgraded installs stop carrying stale launch-only state forever.
 var RetiredBootstrapPacks = []Entry{
+	{Name: "core", Source: "github.com/gastownhall/gc-core"},
 	{Name: "import", Source: "github.com/gastownhall/gc-import"},
 	{Name: "registry", Source: "github.com/gastownhall/gc-registry"},
 }

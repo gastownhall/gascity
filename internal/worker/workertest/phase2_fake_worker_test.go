@@ -253,7 +253,15 @@ func fakeWorkerBinary(t *testing.T) string {
 		cmd.Stderr = &stderr
 		if err := cmd.Run(); err != nil {
 			fakeWorkerBinaryErr = fmt.Errorf("build fake worker: %w: %s", err, strings.TrimSpace(stderr.String()))
+			return
 		}
+		// Pre-exec the freshly built binary to absorb OS first-exec costs
+		// (notably macOS Gatekeeper / syspolicyd validation) before any
+		// timed measurement. The invocation has no config and exits
+		// immediately via failf, so its only purpose is to warm the OS.
+		warm := exec.Command(fakeWorkerBinaryPath)
+		warm.Env = append(os.Environ(), "GC_FAKE_WORKER_CONFIG=")
+		_ = warm.Run()
 	})
 
 	if fakeWorkerBinaryErr != nil {

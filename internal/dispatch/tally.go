@@ -35,12 +35,20 @@ func processTallyControl(store beads.Store, bead beads.Bead, _ ProcessOptions) (
 		return ControlResult{}, fmt.Errorf("%s: listing workflow beads: %w", bead.ID, err)
 	}
 	fanoutRef := sourceRef + "-fanout"
-	fanoutBead, err := resolveWorkflowStepByRefFromBeads(workflowBeads, rootID, fanoutRef)
+	fanoutBead, err := resolveWorkflowStepByRefFromBeads(workflowBeads, rootID, fanoutRef, workflowStepMatchOptions{})
 	if err != nil {
 		return ControlResult{}, fmt.Errorf("%s: resolving fanout bead %q: %w", bead.ID, fanoutRef, err)
 	}
 	if fanoutBead.Status != "closed" {
 		return ControlResult{}, fmt.Errorf("%w: fanout %s not yet closed", ErrControlPending, fanoutBead.ID)
+	}
+
+	// Resolve the source step bead. The fanout Needs its source step, so the
+	// source appears as a "blocks" down-dep of the fanout alongside the voter
+	// sinks — it must be excluded from the vote count.
+	sourceBead, err := resolveWorkflowStepByRefFromBeads(workflowBeads, rootID, sourceRef, workflowStepMatchOptions{})
+	if err != nil {
+		return ControlResult{}, fmt.Errorf("%s: resolving source bead %q: %w", bead.ID, sourceRef, err)
 	}
 
 	// Collect voter votes via the fanout's "blocks" deps.
@@ -54,13 +62,22 @@ func processTallyControl(store beads.Store, bead beads.Bead, _ ProcessOptions) (
 		if dep.Type != "blocks" {
 			continue
 		}
+		if dep.DependsOnID == sourceBead.ID {
+			continue // the fanout Needs its source step; that edge is not a voter
+		}
 		voter, err := store.Get(dep.DependsOnID)
 		if err != nil {
 			return ControlResult{}, fmt.Errorf("%s: fetching voter %s: %w", bead.ID, dep.DependsOnID, err)
 		}
-		vote, err := extractVote(voter, voteField)
-		if err != nil {
-			return ControlResult{}, fmt.Errorf("%s: extracting vote from %s: %w", bead.ID, voter.ID, err)
+		var vote string
+		if mode == "any-pass" {
+			// any-pass is defined over voter gc.outcome, independent of vote_field.
+			vote = voter.Metadata["gc.outcome"]
+		} else {
+			vote, err = extractVote(voter, voteField)
+			if err != nil {
+				return ControlResult{}, fmt.Errorf("%s: extracting vote from %s: %w", bead.ID, voter.ID, err)
+			}
 		}
 		votes = append(votes, vote)
 	}

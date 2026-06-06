@@ -72,6 +72,32 @@ func TestWriteProviderHookContextCodexAdditionalContext(t *testing.T) {
 	}
 }
 
+func TestWriteProviderHookContextCodexDefaultsSessionStartFromEnv(t *testing.T) {
+	t.Setenv("GC_HOOK_EVENT_NAME", "SessionStart")
+
+	var out bytes.Buffer
+	err := writeProviderHookContext(&out, "codex", "<system-reminder>\nhello\n</system-reminder>\n")
+	if err != nil {
+		t.Fatalf("writeProviderHookContext: %v", err)
+	}
+
+	var payload struct {
+		HookSpecificOutput struct {
+			HookEventName     string `json:"hookEventName"`
+			AdditionalContext string `json:"additionalContext"`
+		} `json:"hookSpecificOutput"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &payload); err != nil {
+		t.Fatalf("unmarshal output: %v\n%s", err, out.String())
+	}
+	if got, want := payload.HookSpecificOutput.HookEventName, "SessionStart"; got != want {
+		t.Fatalf("hookEventName = %q, want %q", got, want)
+	}
+	if got, want := payload.HookSpecificOutput.AdditionalContext, "<system-reminder>\nhello\n</system-reminder>"; got != want {
+		t.Fatalf("additionalContext = %q, want %q", got, want)
+	}
+}
+
 func TestWriteProviderHookContextPlain(t *testing.T) {
 	var out bytes.Buffer
 	err := writeProviderHookContext(&out, "", "<system-reminder>\nhello\n</system-reminder>\n")

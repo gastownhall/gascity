@@ -17,6 +17,10 @@ type reconcileRaceStore struct {
 	mu    sync.Mutex
 	block bool
 	once  sync.Once
+
+	afterStaleDepListID string
+	afterStaleDepList   func()
+	depOnce             sync.Once
 }
 
 func (s *reconcileRaceStore) List(query ListQuery) ([]Bead, error) {
@@ -38,6 +42,14 @@ func (s *reconcileRaceStore) List(query ListQuery) ([]Bead, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return append([]Bead(nil), s.stale...), nil
+}
+
+func (s *reconcileRaceStore) DepList(id, direction string) ([]Dep, error) {
+	deps, err := s.Store.DepList(id, direction)
+	if err == nil && id == s.afterStaleDepListID && s.afterStaleDepList != nil {
+		s.depOnce.Do(s.afterStaleDepList)
+	}
+	return deps, err
 }
 
 func TestCachingStoreReconciliationPreservesConcurrentMutation(t *testing.T) {
@@ -130,6 +142,53 @@ func TestCachingStoreReconciliationPreservesConcurrentEvent(t *testing.T) {
 	}
 	if len(items) != 1 || items[0].Title != eventBead.Title {
 		t.Fatalf("ListOpen = %#v, want event title %q", items, eventBead.Title)
+	}
+}
+
+func TestCachingStoreReconciliationPreservesConcurrentDependencyInvalidation(t *testing.T) {
+	mem := NewMemStore()
+	blocker, err := mem.Create(Bead{Title: "blocker"})
+	if err != nil {
+		t.Fatalf("Create(blocker): %v", err)
+	}
+	target, err := mem.Create(Bead{Title: "target"})
+	if err != nil {
+		t.Fatalf("Create(target): %v", err)
+	}
+
+	backing := &reconcileRaceStore{Store: mem}
+	cs := NewCachingStoreForTest(backing, nil)
+	if err := cs.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+
+	backing.afterStaleDepListID = target.ID
+	backing.afterStaleDepList = func() {
+		if err := mem.DepAdd(target.ID, blocker.ID, "blocks"); err != nil {
+			t.Errorf("DepAdd: %v", err)
+			return
+		}
+		payload, err := json.Marshal(target)
+		if err != nil {
+			t.Errorf("Marshal: %v", err)
+			return
+		}
+		cs.ApplyEvent("bead.updated", payload)
+	}
+
+	cs.runReconciliation()
+
+	if ready, ok := cs.CachedReady(); ok {
+		t.Fatalf("CachedReady answered from stale dependency cache after concurrent invalidation: %v", ready)
+	}
+	ready, err := cs.Ready()
+	if err != nil {
+		t.Fatalf("Ready: %v", err)
+	}
+	for _, bead := range ready {
+		if bead.ID == target.ID {
+			t.Fatalf("Ready includes %s after backing dependency add; ready=%v", target.ID, ready)
+		}
 	}
 }
 
@@ -317,5 +376,90 @@ func TestCachingStoreReconciliationMergesFreshDataWithConcurrentMutation(t *test
 	}
 	if gotTitles[refreshed.ID] != refreshedTitle {
 		t.Fatalf("refreshed title = %q, want %q", gotTitles[refreshed.ID], refreshedTitle)
+	}
+}
+
+// TestRunReconciliationLogsSuccess asserts the per-reconcile success log
+// line surfaces a heartbeat after the cache refreshes. Before this line
+// existed, a reconciler running silently on stale data produced no
+// operator-visible signal — the T7920 incident 2026-05-26 went undetected
+// for 2h 31m.
+func TestRunReconciliationLogsSuccess(t *testing.T) {
+	logBuf := captureLog(t)
+
+	mem := NewMemStore()
+	if _, err := mem.Create(Bead{Title: "heartbeat target"}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	cs := NewCachingStoreForTestWithPrefix(mem, "test-rig", nil)
+	if err := cs.Prime(t.Context()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+
+	cs.runReconciliation()
+
+	out := logBuf.String()
+	if !strings.Contains(out, "beads cache: reconciled") {
+		t.Fatalf("expected reconcile success line, got:\n%s", out)
+	}
+	if !strings.Contains(out, "rig=test-rig") {
+		t.Errorf("missing rig identity in log; out=%q", out)
+	}
+	for _, want := range []string{"beads=", "adds=", "updates=", "removes=", "took=", "cadence="} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing field %q in log; out=%q", want, out)
+		}
+	}
+}
+
+// TestRunReconciliationLogRateLimited asserts the success log line is
+// rate-limited to cacheReconcileSuccessLogWindow (one minute). Two
+// back-to-back reconciles emit exactly one line.
+func TestRunReconciliationLogRateLimited(t *testing.T) {
+	logBuf := captureLog(t)
+
+	mem := NewMemStore()
+	cs := NewCachingStoreForTestWithPrefix(mem, "test-rig", nil)
+	if err := cs.Prime(t.Context()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+
+	cs.runReconciliation()
+	cs.runReconciliation()
+	cs.runReconciliation()
+
+	out := logBuf.String()
+	count := strings.Count(out, "beads cache: reconciled")
+	if count != 1 {
+		t.Errorf("expected 1 reconciled line within rate-limit window, got %d:\n%s", count, out)
+	}
+}
+
+// TestRunReconciliationLogEmitsAgainAfterWindow asserts the success log
+// line is re-emitted once the rate-limit window has elapsed. The test
+// reaches into lastReconcileLogAt to advance the simulated clock without
+// sleeping a real minute.
+func TestRunReconciliationLogEmitsAgainAfterWindow(t *testing.T) {
+	logBuf := captureLog(t)
+
+	mem := NewMemStore()
+	cs := NewCachingStoreForTestWithPrefix(mem, "test-rig", nil)
+	if err := cs.Prime(t.Context()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+
+	cs.runReconciliation()
+
+	// Backdate the rate-limit gate beyond the window so the next emit fires.
+	cs.mu.Lock()
+	cs.lastReconcileLogAt = cs.lastReconcileLogAt.Add(-2 * cacheReconcileSuccessLogWindow)
+	cs.mu.Unlock()
+
+	cs.runReconciliation()
+
+	out := logBuf.String()
+	count := strings.Count(out, "beads cache: reconciled")
+	if count != 2 {
+		t.Errorf("expected 2 reconciled lines after window elapsed, got %d:\n%s", count, out)
 	}
 }

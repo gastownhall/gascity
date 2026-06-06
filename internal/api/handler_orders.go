@@ -18,24 +18,25 @@ var (
 )
 
 type orderResponse struct {
-	Name          string `json:"name"`
-	ScopedName    string `json:"scoped_name"`
-	Description   string `json:"description,omitempty"`
-	Type          string `json:"type"`
-	Trigger       string `json:"trigger,omitempty"`
-	Gate          string `json:"gate,omitempty" deprecated:"true"`
-	Interval      string `json:"interval,omitempty"`
-	Schedule      string `json:"schedule,omitempty"`
-	Check         string `json:"check,omitempty"`
-	On            string `json:"on,omitempty"`
-	Formula       string `json:"formula,omitempty"`
-	Exec          string `json:"exec,omitempty"`
-	Pool          string `json:"pool,omitempty"`
-	Timeout       string `json:"timeout,omitempty"`
-	TimeoutMs     int64  `json:"timeout_ms"`
-	Enabled       bool   `json:"enabled"`
-	Rig           string `json:"rig,omitempty"`
-	CaptureOutput bool   `json:"capture_output"`
+	Name          string            `json:"name"`
+	ScopedName    string            `json:"scoped_name"`
+	Description   string            `json:"description,omitempty"`
+	Type          string            `json:"type"`
+	Trigger       string            `json:"trigger,omitempty"`
+	Gate          string            `json:"gate,omitempty" deprecated:"true"`
+	Interval      string            `json:"interval,omitempty"`
+	Schedule      string            `json:"schedule,omitempty"`
+	Check         string            `json:"check,omitempty"`
+	On            string            `json:"on,omitempty"`
+	Formula       string            `json:"formula,omitempty"`
+	Exec          string            `json:"exec,omitempty"`
+	Pool          string            `json:"pool,omitempty"`
+	Timeout       string            `json:"timeout,omitempty"`
+	TimeoutMs     int64             `json:"timeout_ms"`
+	Enabled       bool              `json:"enabled"`
+	Rig           string            `json:"rig,omitempty"`
+	CaptureOutput bool              `json:"capture_output"`
+	Env           map[string]string `json:"env,omitempty"`
 }
 
 func resolveOrder(aa []orders.Order, name string) (*orders.Order, error) {
@@ -90,13 +91,14 @@ func toOrderResponse(a orders.Order) orderResponse {
 		Enabled:       a.IsEnabled(),
 		Rig:           a.Rig,
 		CaptureOutput: a.IsExec(), // exec orders capture output
+		Env:           a.Env,
 	}
 }
 
 // lastRunOutcomeFromLabels extracts the run outcome from bead labels.
 func lastRunOutcomeFromLabels(labels []string) string {
 	switch {
-	case containsString(labels, "exec-failed"), containsString(labels, "wisp-failed"):
+	case orderLabelsContainExecFailure(labels), orderLabelsContainTriggerEnvFailure(labels), containsString(labels, "wisp-failed"):
 		return "failed"
 	case containsString(labels, "wisp-canceled"):
 		return "canceled"

@@ -150,9 +150,13 @@ the JSON shape:
 
 The same rule applies to both list mode and stream mode.
 
+`--payload-match` accepts top-level fields and dotted paths into nested
+payload objects. For example, use
+`--payload-match bead.issue_type=task` to match bead events by issue type.
+
 ## Machine-Readable Schema
 
-The downloadable <a href="/schema/events.txt" download="events.json">events.json</a>
+The <a href="https://raw.githubusercontent.com/gastownhall/gascity/main/docs/schema/events.json" target="_blank" rel="noopener">events.json</a>
 schema validates one JSON object line from list, watch, or follow mode. It
 contains only framing metadata and `$ref`s into `openapi.json`:
 

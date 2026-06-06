@@ -41,7 +41,6 @@ type formulaVarDefResponse struct {
 type formulaSummaryResponse struct {
 	Name        string                     `json:"name"`
 	Description string                     `json:"description"`
-	Version     string                     `json:"version"`
 	VarDefs     []formulaVarDefResponse    `json:"var_defs"`
 	RunCount    int                        `json:"run_count"`
 	RecentRuns  []formulaRecentRunResponse `json:"recent_runs"`
@@ -90,7 +89,6 @@ type FormulaStepResponse struct {
 type formulaDetailResponse struct {
 	Name        string                       `json:"name"`
 	Description string                       `json:"description"`
-	Version     string                       `json:"version"`
 	VarDefs     []formulaVarDefResponse      `json:"var_defs"`
 	Steps       []FormulaStepResponse        `json:"steps"`
 	Deps        []formulaPreviewEdgeResponse `json:"deps"`

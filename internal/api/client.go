@@ -25,7 +25,9 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/api/genclient"
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/mail"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/workspacesvc"
 )
@@ -69,10 +71,143 @@ func (e *clientInitError) Error() string {
 }
 func (e *clientInitError) Unwrap() error { return e.err }
 
+// cacheNotLiveError indicates the supervisor returned 503 because its
+// read-path CachingStore has not yet reached the live state. Read handlers
+// return this shape during startup/reconcile rather than serve stale or
+// empty data; the CLI classifies it as fallbackable so reads land on raw
+// bd instead.
+type cacheNotLiveError struct {
+	msg string
+}
+
+func (e *cacheNotLiveError) Error() string {
+	if e.msg == "" {
+		return "cache not yet live"
+	}
+	return e.msg
+}
+
+// storeSlowError indicates the supervisor returned 503 because a mail read
+// exceeded its internal store deadline. It is intentionally not fallbackable:
+// the local store path is affected by the same contention.
+type storeSlowError struct {
+	msg string
+}
+
+// StoreSlowErrorCode is the stable problem-detail prefix for mail read
+// timeouts that must not fall back to the local store path.
+const StoreSlowErrorCode = "store_slow"
+
+func (e *storeSlowError) Error() string {
+	if e.msg == "" {
+		return "store slow: try again when load drops"
+	}
+	return e.msg
+}
+
+// IsStoreSlowError reports whether err originated from an API mail store
+// timeout. Callers must not fall back to the local store for this error.
+func IsStoreSlowError(err error) bool {
+	var sse *storeSlowError
+	return errors.As(err, &sse)
+}
+
+// MaintenanceInProgressError indicates the supervisor returned 409 because
+// a Dolt store maintenance cycle is already executing. StartedAt carries
+// the in-flight run's start time from the server's typed body so CLI
+// callers can display it verbatim. Callers classify it via IsMaintenanceInProgress.
+type MaintenanceInProgressError struct {
+	StartedAt string // RFC3339 UTC; empty when server did not include it
+	msg       string
+}
+
+// Error implements the error interface. The rendered message always leads
+// with "already in progress" so callers can grep for it reliably; the raw
+// server detail (in e.msg) is retained for debugging but not shown in the
+// user-facing text.
+func (e *MaintenanceInProgressError) Error() string {
+	if e == nil {
+		return "<nil maintenance-in-progress>"
+	}
+	if e.StartedAt == "" {
+		return "maintenance already in progress"
+	}
+	return fmt.Sprintf("maintenance already in progress (started %s)", e.StartedAt)
+}
+
+// IsMaintenanceInProgress reports whether err originates from a 409 with a
+// maintenance-in-progress typed body, so the CLI can emit exit code 3 and
+// a targeted message instead of a generic error.
+func IsMaintenanceInProgress(err error) bool {
+	var e *MaintenanceInProgressError
+	return errors.As(err, &e)
+}
+
+// MaintenanceDisabledError indicates the server returned 503 because
+// [maintenance.dolt] enabled=false in city.toml. The CLI surfaces this as
+// a short message pointing at the runbook rather than rolling the 503 into
+// the generic cache-not-live fallback bucket (no local fallback path
+// exists for maintenance operations).
+type MaintenanceDisabledError struct{}
+
+// Error implements the error interface.
+func (e *MaintenanceDisabledError) Error() string {
+	return "maintenance disabled: set [maintenance.dolt] enabled = true in city.toml and restart the controller"
+}
+
+// IsMaintenanceDisabled reports whether err indicates the server rejected
+// a maintenance request because the loop is not enabled.
+func IsMaintenanceDisabled(err error) bool {
+	var e *MaintenanceDisabledError
+	return errors.As(err, &e)
+}
+
+// serverError indicates a generic 5xx API response without a recognized
+// 503 detail prefix such as cache_not_live or store_slow. Read-path callers
+// classify it as fallbackable via ShouldFallbackForRead so the CLI lands on
+// direct bd when the supervisor is unhealthy. Mutation callers continue to
+// surface it as a hard error (ShouldFallback returns false) because writes
+// with unknown server-side state are unsafe to silently retry locally.
+type serverError struct {
+	status int
+	msg    string
+}
+
+func (e *serverError) Error() string {
+	if e.msg == "" {
+		return fmt.Sprintf("API returned %d", e.status)
+	}
+	return e.msg
+}
+
+// Status reports the HTTP status carried by the server error (always 5xx).
+func (e *serverError) Status() int { return e.status }
+
+// IsServerError reports whether err originates from a 5xx API response the
+// read-path CLI should treat as fallbackable. Independent of ShouldFallback
+// so mutation paths retain their strict no-fallback-on-5xx semantics.
+func IsServerError(err error) bool {
+	var se *serverError
+	return errors.As(err, &se)
+}
+
+// ShouldFallbackForRead reports whether err indicates a read-path command
+// should fall back to direct bd. Read-path commands tolerate generic 5xx
+// server errors (IsServerError) in addition to the cases ShouldFallback
+// already covers.
+func ShouldFallbackForRead(err error) bool {
+	if ShouldFallback(err) {
+		return true
+	}
+	return IsServerError(err)
+}
+
 // ShouldFallback reports whether err indicates the CLI should fall back to
-// direct file mutation. This is true for transport-level failures (connection
-// refused, timeout), read-only API rejections (server bound to non-localhost,
-// mutations disabled), and client-init failures (malformed base URL).
+// direct file mutation (or, for reads, to raw bd). True for transport-level
+// failures (connection refused, timeout), read-only API rejections (server
+// bound to non-localhost, mutations disabled), client-init failures
+// (malformed base URL), and cache-not-live 503 responses during supervisor
+// priming.
 func ShouldFallback(err error) bool {
 	if IsConnError(err) {
 		return true
@@ -82,7 +217,39 @@ func ShouldFallback(err error) bool {
 		return true
 	}
 	var ci *clientInitError
-	return errors.As(err, &ci)
+	if errors.As(err, &ci) {
+		return true
+	}
+	var cnl *cacheNotLiveError
+	return errors.As(err, &cnl)
+}
+
+// FallbackReason returns a stable reason code for err when
+// ShouldFallbackForRead(err) is true. The set is closed: "cache-not-live",
+// "read-only", "client-init", "conn-refused". Generic 5xx server errors
+// collapse to "conn-refused" since from the CLI's read-path perspective an
+// unhealthy server is equivalent to an unreachable one. Non-fallbackable error
+// types such as store_slow are intentionally absent from this set. Returns
+// "unknown" for non-fallbackable errors so callers that invoke FallbackReason
+// unconditionally produce a token instead of panicking; gate on
+// ShouldFallbackForRead first to avoid that sentinel.
+func FallbackReason(err error) string {
+	var cnl *cacheNotLiveError
+	if errors.As(err, &cnl) {
+		return "cache-not-live"
+	}
+	var ro *readOnlyError
+	if errors.As(err, &ro) {
+		return "read-only"
+	}
+	var ci *clientInitError
+	if errors.As(err, &ci) {
+		return "client-init"
+	}
+	if IsConnError(err) || IsServerError(err) {
+		return "conn-refused"
+	}
+	return "unknown"
 }
 
 // Client is an HTTP client for the Gas City API server. It wraps the
@@ -348,6 +515,482 @@ func (c *Client) ListServices() ([]workspacesvc.Status, error) {
 	return out, nil
 }
 
+// GetOrderHistory fetches order run history via
+// GET /v0/city/{cityName}/orders/history. scopedName is required (the
+// handler returns 400 when empty); limit=0 selects the server default;
+// before is an optional RFC3339 upper bound. The CachedRead.AgeSeconds
+// field carries the supervisor CachingStore age so callers can surface
+// _cache_age_s on --json output and a staleness banner on human output.
+func (c *Client) GetOrderHistory(scopedName string, limit int, before string) (CachedRead[[]OrderHistoryView], error) {
+	if err := c.requireCityScope(); err != nil {
+		return CachedRead[[]OrderHistoryView]{}, err
+	}
+	params := &genclient.GetV0CityByCityNameOrdersHistoryParams{
+		ScopedName: scopedName,
+	}
+	if limit > 0 {
+		l := int64(limit)
+		params.Limit = &l
+	}
+	if before != "" {
+		params.Before = &before
+	}
+	resp, err := c.cw.GetV0CityByCityNameOrdersHistoryWithResponse(context.Background(), c.cityName, params)
+	if err != nil {
+		return CachedRead[[]OrderHistoryView]{}, &connError{err: fmt.Errorf("request failed: %w", err)}
+	}
+	if resp == nil {
+		return CachedRead[[]OrderHistoryView]{}, &connError{err: fmt.Errorf("nil response")}
+	}
+	if err := apiErrorFromResponse(resp.StatusCode(), resp.ApplicationproblemJSONDefault); err != nil {
+		return CachedRead[[]OrderHistoryView]{}, err
+	}
+	return CachedRead[[]OrderHistoryView]{
+		Body:       orderHistoryFromGenList(resp.JSON200),
+		AgeSeconds: cacheAgeFromResponse(resp.HTTPResponse),
+	}, nil
+}
+
+// GetMaintenanceStatus fetches the Dolt store maintenance loop state via
+// GET /v0/city/{cityName}/maintenance/status. The CachedRead.AgeSeconds
+// field carries the supervisor CachingStore age from the X-GC-Cache-Age-S
+// response header so callers can surface _cache_age_s on --json output
+// and a staleness banner on human output. Returns
+// *MaintenanceDisabledError when the loop is disabled in city.toml.
+func (c *Client) GetMaintenanceStatus() (CachedRead[MaintenanceStatusView], error) {
+	if err := c.requireCityScope(); err != nil {
+		return CachedRead[MaintenanceStatusView]{}, err
+	}
+	resp, err := c.cw.GetV0CityByCityNameMaintenanceStatusWithResponse(context.Background(), c.cityName)
+	if err != nil {
+		return CachedRead[MaintenanceStatusView]{}, &connError{err: fmt.Errorf("request failed: %w", err)}
+	}
+	if resp == nil {
+		return CachedRead[MaintenanceStatusView]{}, &connError{err: fmt.Errorf("nil response")}
+	}
+	if err := apiErrorFromResponse(resp.StatusCode(), resp.ApplicationproblemJSONDefault); err != nil {
+		return CachedRead[MaintenanceStatusView]{}, err
+	}
+	return CachedRead[MaintenanceStatusView]{
+		Body:       maintenanceStatusViewFromGen(resp.JSON200),
+		AgeSeconds: cacheAgeFromResponse(resp.HTTPResponse),
+	}, nil
+}
+
+// TriggerMaintenanceDoltGC posts POST /v0/city/{cityName}/maintenance/dolt-gc.
+// With wait=true the call blocks until the run completes and returns the
+// full MaintenanceTriggerView; with wait=false it returns 202 Accepted with
+// the synthesized started_at token. Returns *MaintenanceInProgressError on
+// 409 Conflict and *MaintenanceDisabledError on 503 maintenance_disabled.
+func (c *Client) TriggerMaintenanceDoltGC(wait bool) (MaintenanceTriggerView, error) {
+	if err := c.requireCityScope(); err != nil {
+		return MaintenanceTriggerView{}, err
+	}
+	params := &genclient.TriggerMaintenanceDoltGcParams{}
+	if wait {
+		w := true
+		params.Wait = &w
+	}
+	resp, err := c.cw.TriggerMaintenanceDoltGcWithResponse(context.Background(), c.cityName, params)
+	if err != nil {
+		return MaintenanceTriggerView{}, &connError{err: fmt.Errorf("request failed: %w", err)}
+	}
+	if resp == nil {
+		return MaintenanceTriggerView{}, &connError{err: fmt.Errorf("nil response")}
+	}
+	if err := apiErrorFromResponse(resp.StatusCode(), resp.ApplicationproblemJSONDefault); err != nil {
+		return MaintenanceTriggerView{}, err
+	}
+	return maintenanceTriggerViewFromGen(resp.JSON202), nil
+}
+
+// ListSessions fetches the current set of sessions via
+// GET /v0/city/{cityName}/sessions. The stateFilter and templateFilter
+// arguments correspond to the state/template query parameters (empty means
+// omit). peek controls the optional last-output preview. The
+// CachedRead.AgeSeconds field carries the supervisor CachingStore age from
+// the X-GC-Cache-Age-S response header so callers can surface _cache_age_s
+// on --json output and a staleness banner on human output.
+func (c *Client) ListSessions(stateFilter, templateFilter string, peek bool) (CachedRead[[]SessionView], error) {
+	if err := c.requireCityScope(); err != nil {
+		return CachedRead[[]SessionView]{}, err
+	}
+	params := &genclient.GetV0CityByCityNameSessionsParams{}
+	if stateFilter != "" {
+		params.State = &stateFilter
+	}
+	if templateFilter != "" {
+		params.Template = &templateFilter
+	}
+	if peek {
+		params.Peek = &peek
+	}
+	resp, err := c.cw.GetV0CityByCityNameSessionsWithResponse(context.Background(), c.cityName, params)
+	if err != nil {
+		return CachedRead[[]SessionView]{}, &connError{err: fmt.Errorf("request failed: %w", err)}
+	}
+	if resp == nil {
+		return CachedRead[[]SessionView]{}, &connError{err: fmt.Errorf("nil response")}
+	}
+	if err := apiErrorFromResponse(resp.StatusCode(), resp.ApplicationproblemJSONDefault); err != nil {
+		return CachedRead[[]SessionView]{}, err
+	}
+	return CachedRead[[]SessionView]{
+		Body:       sessionsFromGenList(resp.JSON200),
+		AgeSeconds: cacheAgeFromResponse(resp.HTTPResponse),
+	}, nil
+}
+
+// GetSession fetches one session by ID or alias via
+// GET /v0/city/{cityName}/session/{id}. peek=true asks the server to include
+// the last-output preview; peekLines selects the preview line count (0 means
+// "use the server default").
+func (c *Client) GetSession(id string, peek bool, peekLines int) (CachedRead[SessionView], error) {
+	if err := c.requireCityScope(); err != nil {
+		return CachedRead[SessionView]{}, err
+	}
+	params := &genclient.GetV0CityByCityNameSessionByIdParams{}
+	if peek {
+		params.Peek = &peek
+	}
+	if peekLines > 0 {
+		pl := int64(peekLines)
+		params.PeekLines = &pl
+	}
+	resp, err := c.cw.GetV0CityByCityNameSessionByIdWithResponse(context.Background(), c.cityName, id, params)
+	if err != nil {
+		return CachedRead[SessionView]{}, &connError{err: fmt.Errorf("request failed: %w", err)}
+	}
+	if resp == nil {
+		return CachedRead[SessionView]{}, &connError{err: fmt.Errorf("nil response")}
+	}
+	if err := apiErrorFromResponse(resp.StatusCode(), resp.ApplicationproblemJSONDefault); err != nil {
+		return CachedRead[SessionView]{}, err
+	}
+	if resp.JSON200 == nil {
+		return CachedRead[SessionView]{}, fmt.Errorf("API returned %d with no body", resp.StatusCode())
+	}
+	return CachedRead[SessionView]{
+		Body:       sessionViewFromGen(*resp.JSON200),
+		AgeSeconds: cacheAgeFromResponse(resp.HTTPResponse),
+	}, nil
+}
+
+// ListRigs fetches the current set of configured rigs via
+// GET /v0/city/{cityName}/rigs. The CachedRead.AgeSeconds field carries the
+// supervisor CachingStore age from the X-GC-Cache-Age-S response header so
+// callers can surface _cache_age_s on --json output and a staleness banner
+// on human output.
+func (c *Client) ListRigs() (CachedRead[[]RigView], error) {
+	if err := c.requireCityScope(); err != nil {
+		return CachedRead[[]RigView]{}, err
+	}
+	resp, err := c.cw.GetV0CityByCityNameRigsWithResponse(context.Background(), c.cityName, &genclient.GetV0CityByCityNameRigsParams{})
+	if err != nil {
+		return CachedRead[[]RigView]{}, &connError{err: fmt.Errorf("request failed: %w", err)}
+	}
+	if resp == nil {
+		return CachedRead[[]RigView]{}, &connError{err: fmt.Errorf("nil response")}
+	}
+	if err := apiErrorFromResponse(resp.StatusCode(), resp.ApplicationproblemJSONDefault); err != nil {
+		return CachedRead[[]RigView]{}, err
+	}
+	return CachedRead[[]RigView]{
+		Body:       rigsFromGenList(resp.JSON200),
+		AgeSeconds: cacheAgeFromResponse(resp.HTTPResponse),
+	}, nil
+}
+
+// ListConvoys fetches the open convoys across all rigs via
+// GET /v0/city/{cityName}/convoys. The CachedRead.AgeSeconds field carries the
+// supervisor CachingStore age from the X-GC-Cache-Age-S response header so
+// callers can surface _cache_age_s on --json output and a staleness banner
+// on human output.
+func (c *Client) ListConvoys() (CachedRead[[]beads.Bead], error) {
+	if err := c.requireCityScope(); err != nil {
+		return CachedRead[[]beads.Bead]{}, err
+	}
+	resp, err := c.cw.GetV0CityByCityNameConvoysWithResponse(context.Background(), c.cityName, &genclient.GetV0CityByCityNameConvoysParams{})
+	if err != nil {
+		return CachedRead[[]beads.Bead]{}, &connError{err: fmt.Errorf("request failed: %w", err)}
+	}
+	if resp == nil {
+		return CachedRead[[]beads.Bead]{}, &connError{err: fmt.Errorf("nil response")}
+	}
+	if err := apiErrorFromResponse(resp.StatusCode(), resp.ApplicationproblemJSONDefault); err != nil {
+		return CachedRead[[]beads.Bead]{}, err
+	}
+	return CachedRead[[]beads.Bead]{
+		Body:       convoysFromGenList(resp.JSON200),
+		AgeSeconds: cacheAgeFromResponse(resp.HTTPResponse),
+	}, nil
+}
+
+// GetConvoy fetches one convoy by ID via
+// GET /v0/city/{cityName}/convoy/{id}. Returns the convoy bead, its direct
+// children, and progress counts. Workflow/graph convoys produce an empty
+// Convoy (ID == "") — callers should treat that as "not a simple convoy" and
+// fall back to the local path.
+func (c *Client) GetConvoy(id string) (CachedRead[ConvoyStatusView], error) {
+	if err := c.requireCityScope(); err != nil {
+		return CachedRead[ConvoyStatusView]{}, err
+	}
+	resp, err := c.cw.GetV0CityByCityNameConvoyByIdWithResponse(context.Background(), c.cityName, id)
+	if err != nil {
+		return CachedRead[ConvoyStatusView]{}, &connError{err: fmt.Errorf("request failed: %w", err)}
+	}
+	if resp == nil {
+		return CachedRead[ConvoyStatusView]{}, &connError{err: fmt.Errorf("nil response")}
+	}
+	if err := apiErrorFromResponse(resp.StatusCode(), resp.ApplicationproblemJSONDefault); err != nil {
+		return CachedRead[ConvoyStatusView]{}, err
+	}
+	if resp.JSON200 == nil {
+		return CachedRead[ConvoyStatusView]{}, fmt.Errorf("API returned %d with no body", resp.StatusCode())
+	}
+	return CachedRead[ConvoyStatusView]{
+		Body:       convoyStatusFromGen(resp.JSON200),
+		AgeSeconds: cacheAgeFromResponse(resp.HTTPResponse),
+	}, nil
+}
+
+// CheckConvoy fetches one convoy's completion status via
+// GET /v0/city/{cityName}/convoy/{id}/check. Returns child totals and a
+// Complete flag that is true when total > 0 and all children are closed.
+func (c *Client) CheckConvoy(id string) (CachedRead[ConvoyCheckView], error) {
+	if err := c.requireCityScope(); err != nil {
+		return CachedRead[ConvoyCheckView]{}, err
+	}
+	resp, err := c.cw.GetV0CityByCityNameConvoyByIdCheckWithResponse(context.Background(), c.cityName, id)
+	if err != nil {
+		return CachedRead[ConvoyCheckView]{}, &connError{err: fmt.Errorf("request failed: %w", err)}
+	}
+	if resp == nil {
+		return CachedRead[ConvoyCheckView]{}, &connError{err: fmt.Errorf("nil response")}
+	}
+	if err := apiErrorFromResponse(resp.StatusCode(), resp.ApplicationproblemJSONDefault); err != nil {
+		return CachedRead[ConvoyCheckView]{}, err
+	}
+	if resp.JSON200 == nil {
+		return CachedRead[ConvoyCheckView]{}, fmt.Errorf("API returned %d with no body", resp.StatusCode())
+	}
+	return CachedRead[ConvoyCheckView]{
+		Body:       convoyCheckFromGen(resp.JSON200),
+		AgeSeconds: cacheAgeFromResponse(resp.HTTPResponse),
+	}, nil
+}
+
+// ListBeadsOpts is the optional filter set for ListBeads. All fields are
+// zero-valued by default; the server falls back to its own defaults when a
+// field is empty. All mirrors the CLI --all flag and maps to the server's
+// IncludeClosed query semantic.
+type ListBeadsOpts struct {
+	Status   string
+	Type     string
+	Label    string
+	Assignee string
+	Rig      string
+	Limit    int
+	All      bool
+}
+
+// ListBeads fetches beads across all rigs via
+// GET /v0/city/{cityName}/beads. Server-side filters mirror the BeadListInput
+// query parameters. The CachedRead.AgeSeconds field carries the supervisor
+// CachingStore age from the X-GC-Cache-Age-S response header so callers can
+// surface _cache_age_s on --json output and a staleness banner on human
+// output.
+func (c *Client) ListBeads(opts ListBeadsOpts) (CachedRead[[]beads.Bead], error) {
+	if err := c.requireCityScope(); err != nil {
+		return CachedRead[[]beads.Bead]{}, err
+	}
+	params := &genclient.GetV0CityByCityNameBeadsParams{}
+	if opts.Status != "" {
+		params.Status = &opts.Status
+	}
+	if opts.Type != "" {
+		params.Type = &opts.Type
+	}
+	if opts.Label != "" {
+		params.Label = &opts.Label
+	}
+	if opts.Assignee != "" {
+		params.Assignee = &opts.Assignee
+	}
+	if opts.Rig != "" {
+		params.Rig = &opts.Rig
+	}
+	if opts.Limit > 0 {
+		lim := int64(opts.Limit)
+		params.Limit = &lim
+	}
+	if opts.All {
+		t := true
+		params.All = &t
+	}
+	resp, err := c.cw.GetV0CityByCityNameBeadsWithResponse(context.Background(), c.cityName, params)
+	if err != nil {
+		return CachedRead[[]beads.Bead]{}, &connError{err: fmt.Errorf("request failed: %w", err)}
+	}
+	if resp == nil {
+		return CachedRead[[]beads.Bead]{}, &connError{err: fmt.Errorf("nil response")}
+	}
+	if err := apiErrorFromResponse(resp.StatusCode(), resp.ApplicationproblemJSONDefault); err != nil {
+		return CachedRead[[]beads.Bead]{}, err
+	}
+	return CachedRead[[]beads.Bead]{
+		Body:       beadsFromGenList(resp.JSON200),
+		AgeSeconds: cacheAgeFromResponse(resp.HTTPResponse),
+	}, nil
+}
+
+// GetBead fetches one bead by ID via
+// GET /v0/city/{cityName}/bead/{id}. Returns the bead detail with cache age
+// so callers can attach _cache_age_s (JSON) or a staleness banner (human).
+func (c *Client) GetBead(id string) (CachedRead[beads.Bead], error) {
+	if err := c.requireCityScope(); err != nil {
+		return CachedRead[beads.Bead]{}, err
+	}
+	resp, err := c.cw.GetV0CityByCityNameBeadByIdWithResponse(context.Background(), c.cityName, id)
+	if err != nil {
+		return CachedRead[beads.Bead]{}, &connError{err: fmt.Errorf("request failed: %w", err)}
+	}
+	if resp == nil {
+		return CachedRead[beads.Bead]{}, &connError{err: fmt.Errorf("nil response")}
+	}
+	if err := apiErrorFromResponse(resp.StatusCode(), resp.ApplicationproblemJSONDefault); err != nil {
+		return CachedRead[beads.Bead]{}, err
+	}
+	if resp.JSON200 == nil {
+		return CachedRead[beads.Bead]{}, fmt.Errorf("API returned %d with no body", resp.StatusCode())
+	}
+	return CachedRead[beads.Bead]{
+		Body:       beadFromGenPtr(resp.JSON200),
+		AgeSeconds: cacheAgeFromResponse(resp.HTTPResponse),
+	}, nil
+}
+
+// GetStatus fetches the city-wide status snapshot via
+// GET /v0/city/{cityName}/status. The CachedRead.AgeSeconds field carries
+// the supervisor CachingStore age from the X-GC-Cache-Age-S response header
+// so callers can surface _cache_age_s on --json output and a staleness
+// banner on human output.
+func (c *Client) GetStatus() (CachedRead[StatusView], error) {
+	if err := c.requireCityScope(); err != nil {
+		return CachedRead[StatusView]{}, err
+	}
+	resp, err := c.cw.GetV0CityByCityNameStatusWithResponse(context.Background(), c.cityName, &genclient.GetV0CityByCityNameStatusParams{})
+	if err != nil {
+		return CachedRead[StatusView]{}, &connError{err: fmt.Errorf("request failed: %w", err)}
+	}
+	if resp == nil {
+		return CachedRead[StatusView]{}, &connError{err: fmt.Errorf("nil response")}
+	}
+	if err := apiErrorFromResponse(resp.StatusCode(), resp.ApplicationproblemJSONDefault); err != nil {
+		return CachedRead[StatusView]{}, err
+	}
+	return CachedRead[StatusView]{
+		Body:       statusViewFromGen(resp.JSON200),
+		AgeSeconds: cacheAgeFromResponse(resp.HTTPResponse),
+	}, nil
+}
+
+// ListMailInbox fetches unread messages for the given agent recipient via
+// GET /v0/city/{cityName}/mail. An empty agent lets the server choose the
+// default caller identity (same resolution path the CLI would take locally).
+// rig narrows the query to a single rig's provider when set. The returned
+// MailListView preserves partial aggregate-read metadata so callers do not
+// silently treat a degraded all-rig read as authoritative. The
+// CachedRead.AgeSeconds field carries the supervisor CachingStore age so
+// callers can surface _cache_age_s on --json output and a staleness banner
+// on human output.
+func (c *Client) ListMailInbox(agent, rig string) (CachedRead[MailListView], error) {
+	if err := c.requireCityScope(); err != nil {
+		return CachedRead[MailListView]{}, err
+	}
+	params := &genclient.GetV0CityByCityNameMailParams{}
+	if agent != "" {
+		params.Agent = &agent
+	}
+	if rig != "" {
+		params.Rig = &rig
+	}
+	resp, err := c.cw.GetV0CityByCityNameMailWithResponse(context.Background(), c.cityName, params)
+	if err != nil {
+		return CachedRead[MailListView]{}, &connError{err: fmt.Errorf("request failed: %w", err)}
+	}
+	if resp == nil {
+		return CachedRead[MailListView]{}, &connError{err: fmt.Errorf("nil response")}
+	}
+	if err := apiErrorFromResponse(resp.StatusCode(), resp.ApplicationproblemJSONDefault); err != nil {
+		return CachedRead[MailListView]{}, err
+	}
+	return CachedRead[MailListView]{
+		Body:       mailListFromGen(resp.JSON200),
+		AgeSeconds: cacheAgeFromResponse(resp.HTTPResponse),
+	}, nil
+}
+
+// GetMail fetches a single message by ID via GET /v0/city/{cityName}/mail/{id}.
+// rig is an optional hint for O(1) lookup when the caller already knows which
+// rig owns the message.
+func (c *Client) GetMail(id, rig string) (CachedRead[mail.Message], error) {
+	if err := c.requireCityScope(); err != nil {
+		return CachedRead[mail.Message]{}, err
+	}
+	params := &genclient.GetV0CityByCityNameMailByIdParams{}
+	if rig != "" {
+		params.Rig = &rig
+	}
+	resp, err := c.cw.GetV0CityByCityNameMailByIdWithResponse(context.Background(), c.cityName, id, params)
+	if err != nil {
+		return CachedRead[mail.Message]{}, &connError{err: fmt.Errorf("request failed: %w", err)}
+	}
+	if resp == nil {
+		return CachedRead[mail.Message]{}, &connError{err: fmt.Errorf("nil response")}
+	}
+	if err := apiErrorFromResponse(resp.StatusCode(), resp.ApplicationproblemJSONDefault); err != nil {
+		return CachedRead[mail.Message]{}, err
+	}
+	if resp.JSON200 == nil {
+		return CachedRead[mail.Message]{}, fmt.Errorf("API returned %d with no body", resp.StatusCode())
+	}
+	return CachedRead[mail.Message]{
+		Body:       mailMessageFromGen(*resp.JSON200),
+		AgeSeconds: cacheAgeFromResponse(resp.HTTPResponse),
+	}, nil
+}
+
+// CountMail fetches total/unread message counts via
+// GET /v0/city/{cityName}/mail/count. An empty agent lets the server choose
+// the default caller identity; rig narrows to a single rig's provider.
+func (c *Client) CountMail(agent, rig string) (CachedRead[MailCountView], error) {
+	if err := c.requireCityScope(); err != nil {
+		return CachedRead[MailCountView]{}, err
+	}
+	params := &genclient.GetV0CityByCityNameMailCountParams{}
+	if agent != "" {
+		params.Agent = &agent
+	}
+	if rig != "" {
+		params.Rig = &rig
+	}
+	resp, err := c.cw.GetV0CityByCityNameMailCountWithResponse(context.Background(), c.cityName, params)
+	if err != nil {
+		return CachedRead[MailCountView]{}, &connError{err: fmt.Errorf("request failed: %w", err)}
+	}
+	if resp == nil {
+		return CachedRead[MailCountView]{}, &connError{err: fmt.Errorf("nil response")}
+	}
+	if err := apiErrorFromResponse(resp.StatusCode(), resp.ApplicationproblemJSONDefault); err != nil {
+		return CachedRead[MailCountView]{}, err
+	}
+	return CachedRead[MailCountView]{
+		Body:       mailCountFromGen(resp.JSON200),
+		AgeSeconds: cacheAgeFromResponse(resp.HTTPResponse),
+	}, nil
+}
+
 // GetService fetches one current workspace service status.
 func (c *Client) GetService(name string) (workspacesvc.Status, error) {
 	if err := c.requireCityScope(); err != nil {
@@ -566,7 +1209,7 @@ func isNil(v any) bool {
 		return true
 	}
 	rv := reflect.ValueOf(v)
-	return rv.Kind() == reflect.Ptr && rv.IsNil()
+	return rv.Kind() == reflect.Pointer && rv.IsNil()
 }
 
 // pdOf extracts the generated client's decoded Problem Details pointer
@@ -585,7 +1228,7 @@ func pdOf(resp any) *genclient.ErrorModel {
 		return nil
 	}
 	rv := reflect.ValueOf(resp)
-	if rv.Kind() == reflect.Ptr {
+	if rv.Kind() == reflect.Pointer {
 		if rv.IsNil() {
 			return nil
 		}
@@ -627,6 +1270,44 @@ func apiErrorFromResponse(status int, pd *genclient.ErrorModel) error {
 		}
 		return &readOnlyError{msg: msg}
 	}
+	if status == http.StatusServiceUnavailable {
+		if strings.HasPrefix(detail, "cache_not_live") {
+			msg := detail
+			if msg == "" {
+				msg = "cache not yet live"
+			}
+			return &cacheNotLiveError{msg: msg}
+		}
+		if strings.HasPrefix(detail, StoreSlowErrorCode) {
+			msg := detail
+			if msg == "" {
+				msg = "store slow: try again when load drops"
+			}
+			return &storeSlowError{msg: msg}
+		}
+		if strings.HasPrefix(detail, "maintenance_disabled") {
+			return &MaintenanceDisabledError{}
+		}
+	}
+	if status == http.StatusConflict && strings.HasPrefix(detail, "maintenance-in-progress") {
+		startedAt := extractMaintenanceStartedAt(detail)
+		return &MaintenanceInProgressError{StartedAt: startedAt, msg: detail}
+	}
+	// Generic 5xx (500/501/502/504/... plus 503 without a cache_not_live,
+	// store_slow, or maintenance_disabled prefix) wraps into a serverError so
+	// read-path callers can classify it as fallbackable via
+	// ShouldFallbackForRead. Mutation callers continue to see it as
+	// non-fallbackable (ShouldFallback excludes it).
+	if status >= 500 {
+		msg := detail
+		if msg == "" {
+			msg = title
+		}
+		if msg == "" {
+			return &serverError{status: status}
+		}
+		return &serverError{status: status, msg: fmt.Sprintf("API error: %s", msg)}
+	}
 	if detail != "" {
 		return fmt.Errorf("API error: %s", detail)
 	}
@@ -634,6 +1315,29 @@ func apiErrorFromResponse(status int, pd *genclient.ErrorModel) error {
 		return fmt.Errorf("API error: %s", title)
 	}
 	return fmt.Errorf("API returned %d", status)
+}
+
+// extractMaintenanceStartedAt parses the JSON body that the
+// maintenance 409 handler appends after the "maintenance-in-progress: "
+// prefix and returns the started_at field, or empty when absent or
+// malformed. The server always emits this prefix via maintenanceConflictFromError,
+// so a missing started_at means the in-flight run had a zero-value
+// StartedAt (a race during supervisor startup) rather than a protocol
+// violation.
+func extractMaintenanceStartedAt(detail string) string {
+	const prefix = "maintenance-in-progress: "
+	idx := strings.Index(detail, prefix)
+	if idx < 0 {
+		return ""
+	}
+	payload := detail[idx+len(prefix):]
+	var body struct {
+		StartedAt string `json:"started_at"`
+	}
+	if err := json.Unmarshal([]byte(payload), &body); err != nil {
+		return ""
+	}
+	return body.StartedAt
 }
 
 // cityInfoFromGen copies the generated CityInfo (which uses pointer

@@ -32,10 +32,10 @@ func TestE2E_Pool_InstanceNaming(t *testing.T) {
 	}
 }
 
-// TestE2E_Pool_MaxOneStillUsesPoolIdentity verifies that max=1 pool configs
-// still use concrete pool instance naming rather than collapsing into a
-// singleton template identity.
-func TestE2E_Pool_MaxOneStillUsesPoolIdentity(t *testing.T) {
+// TestE2E_Pool_MaxOneUsesCanonicalIdentity verifies that max=1 pool configs
+// use the canonical singleton identity rather than concrete pool instance
+// naming.
+func TestE2E_Pool_MaxOneUsesCanonicalIdentity(t *testing.T) {
 	city := e2eCity{
 		Agents: []e2eAgent{
 			{
@@ -47,9 +47,9 @@ func TestE2E_Pool_MaxOneStillUsesPoolIdentity(t *testing.T) {
 	}
 	cityDir := setupE2ECity(t, nil, city)
 
-	report := waitForReport(t, cityDir, "singleton-1", e2eDefaultTimeout())
-	if !report.has("GC_AGENT", "singleton-1") {
-		t.Errorf("singleton-1 GC_AGENT: got %v, want [singleton-1]", report.getAll("GC_AGENT"))
+	report := waitForReport(t, cityDir, "singleton", e2eDefaultTimeout())
+	if !report.has("GC_AGENT", "singleton") {
+		t.Errorf("singleton GC_AGENT: got %v, want [singleton]", report.getAll("GC_AGENT"))
 	}
 }
 

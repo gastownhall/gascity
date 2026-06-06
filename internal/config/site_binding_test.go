@@ -1,11 +1,28 @@
 package config
 
 import (
+	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/fsys"
 )
+
+type failSiteRenameFS struct {
+	fsys.OSFS
+	target string
+	failed bool
+}
+
+func (f *failSiteRenameFS) Rename(oldpath, newpath string) error {
+	if !f.failed && filepath.Clean(newpath) == filepath.Clean(f.target) {
+		f.failed = true
+		return errors.New("injected site binding failure")
+	}
+	return f.OSFS.Rename(oldpath, newpath)
+}
 
 func TestMarshalForWrite_StripsRigPaths(t *testing.T) {
 	cfg := &City{
@@ -76,6 +93,90 @@ workspace_prefix = "sc"
 	}
 	if len(binding.Rigs) != 1 || binding.Rigs[0].Name != "frontend" {
 		t.Fatalf("binding.Rigs = %+v, want preserved workspace identity plus frontend rig", binding.Rigs)
+	}
+}
+
+func TestWriteCityAndRigSiteBindingsForEditRemovingRigsDropsDeletedBinding(t *testing.T) {
+	dir := t.TempDir()
+	cityPath := filepath.Join(dir, "city.toml")
+	if err := os.WriteFile(cityPath, []byte(`[workspace]
+name = "test-city"
+
+[[rigs]]
+name = "frontend"
+path = "/srv/frontend"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(SiteBindingPath(dir), []byte(`[[rig]]
+name = "frontend"
+path = "/site/frontend"
+
+[[rig]]
+name = "archived"
+path = "/site/archived"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &City{
+		Workspace: Workspace{Name: "test-city"},
+		Rigs:      []Rig{{Name: "frontend", Path: "/site/frontend"}},
+	}
+	if err := WriteCityAndRigSiteBindingsForEditRemovingRigs(fsys.OSFS{}, cityPath, cfg, "archived"); err != nil {
+		t.Fatalf("WriteCityAndRigSiteBindingsForEditRemovingRigs: %v", err)
+	}
+
+	binding, err := LoadSiteBinding(fsys.OSFS{}, dir)
+	if err != nil {
+		t.Fatalf("LoadSiteBinding: %v", err)
+	}
+	if len(binding.Rigs) != 1 {
+		t.Fatalf("binding.Rigs = %+v, want only frontend", binding.Rigs)
+	}
+	if binding.Rigs[0].Name != "frontend" || binding.Rigs[0].Path != "/site/frontend" {
+		t.Fatalf("binding.Rigs[0] = %+v, want frontend binding", binding.Rigs[0])
+	}
+}
+
+func TestWriteCityAndRigSiteBindingsForEditRestoresCityWhenSiteBindingFails(t *testing.T) {
+	dir := t.TempDir()
+	cityPath := filepath.Join(dir, "city.toml")
+	original := []byte(`[workspace]
+name = "test-city"
+
+[[rigs]]
+name = "frontend"
+path = "/srv/frontend"
+`)
+	if err := os.WriteFile(cityPath, original, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &City{
+		Workspace: Workspace{Name: "test-city"},
+		Rigs:      []Rig{{Name: "frontend", Path: "/srv/frontend"}},
+	}
+	fs := &failSiteRenameFS{target: SiteBindingPath(dir)}
+
+	err := WriteCityAndRigSiteBindingsForEdit(fs, cityPath, cfg)
+	if err == nil {
+		t.Fatal("WriteCityAndRigSiteBindingsForEdit succeeded, want injected site binding failure")
+	}
+	if !strings.Contains(err.Error(), "restored city.toml") {
+		t.Fatalf("error = %v, want rollback guidance", err)
+	}
+	restored, readErr := os.ReadFile(cityPath)
+	if readErr != nil {
+		t.Fatalf("read city.toml: %v", readErr)
+	}
+	if string(restored) != string(original) {
+		t.Fatalf("city.toml = %q, want restored original %q", restored, original)
+	}
+	if _, statErr := os.Stat(SiteBindingPath(dir)); !os.IsNotExist(statErr) {
+		t.Fatalf("site.toml stat err = %v, want not exist", statErr)
 	}
 }
 
@@ -162,6 +263,164 @@ workspace_prefix = "sc"
 	}
 	if len(prov.Warnings) != 0 {
 		t.Fatalf("warnings = %v, want none", prov.Warnings)
+	}
+}
+
+func TestLegacySiteBindingSurfaceErrorAggregatesViolations(t *testing.T) {
+	data := []byte(`[[rigs]]
+name = "frontend"
+path = "/legacy/frontend"
+`)
+	cfg := &City{
+		Workspace: Workspace{Name: "legacy-city", Prefix: "lc"},
+		Rigs: []Rig{{
+			Name: "frontend",
+			Path: "/legacy/frontend",
+		}},
+	}
+
+	err := LegacySiteBindingSurfaceError(cfg, "city.toml", data)
+	if err == nil {
+		t.Fatal("LegacySiteBindingSurfaceError returned nil, want aggregated error")
+	}
+	for _, want := range []string{
+		"pre-1.0 site-binding fields are no longer supported",
+		`city.toml:3: unsupported pre-1.0 rig.path for rig "frontend"`,
+		packV1MigrationDocsURL,
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error = %v, want substring %q", err, want)
+		}
+	}
+	if got := strings.Count(err.Error(), packV1MigrationDocsURL); got != 1 {
+		t.Fatalf("error = %v, want one docs pointer, got %d", err, got)
+	}
+
+	warnings := legacyWorkspaceIdentitySurfaceWarnings(cfg, "city.toml")
+	if len(warnings) != 1 {
+		t.Fatalf("warnings = %v, want one workspace identity warning", warnings)
+	}
+	if !strings.Contains(warnings[0], "workspace identity fields are deprecated in v2; move them to .gc/site.toml (workspace.name, workspace.prefix)") {
+		t.Fatalf("warning = %q, want workspace identity guidance", warnings[0])
+	}
+}
+
+func TestLoadWithIncludes_RejectsLegacyRigPathInSchema2City(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/city.toml"] = []byte(`
+[[rigs]]
+name = "frontend"
+path = "/legacy/frontend"
+`)
+	fs.Files["/city/pack.toml"] = []byte(`
+[pack]
+name = "city"
+schema = 2
+`)
+
+	_, _, err := LoadWithIncludes(fs, "/city/city.toml")
+	if err == nil {
+		t.Fatal("LoadWithIncludes succeeded, want hard error for legacy rig.path")
+	}
+	for _, want := range []string{
+		`/city/city.toml:4: unsupported pre-1.0 rig.path for rig "frontend"`,
+		packV1MigrationDocsURL,
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error = %v, want substring %q", err, want)
+		}
+	}
+}
+
+func TestLoadWithIncludes_WarnsOnLegacyWorkspaceIdentityInSchema2City(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/city.toml"] = []byte(`
+[workspace]
+name = "legacy-city"
+prefix = "lc"
+`)
+	fs.Files["/city/pack.toml"] = []byte(`
+[pack]
+name = "city"
+schema = 2
+`)
+
+	_, prov, err := LoadWithIncludes(fs, "/city/city.toml")
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+	var found bool
+	for _, warning := range prov.Warnings {
+		if strings.Contains(warning, "workspace identity fields are deprecated in v2; move them to .gc/site.toml (workspace.name, workspace.prefix)") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("warnings = %v, want legacy workspace identity guidance", prov.Warnings)
+	}
+}
+
+func TestLoadWithIncludes_WarnsOnLegacyWorkspaceIdentityInSchema2Fragments(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/city.toml"] = []byte(`
+include = ["fragments/legacy.toml"]
+`)
+	fs.Files["/city/pack.toml"] = []byte(`
+[pack]
+name = "city"
+schema = 2
+`)
+	fs.Files["/city/fragments/legacy.toml"] = []byte(`
+[workspace]
+name = "fragment-city"
+`)
+
+	_, prov, err := LoadWithIncludes(fs, "/city/city.toml")
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+	var found bool
+	for _, warning := range prov.Warnings {
+		if strings.Contains(warning, "/city/fragments/legacy.toml: workspace identity fields are deprecated in v2; move them to .gc/site.toml (workspace.name)") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("warnings = %v, want fragment workspace identity guidance", prov.Warnings)
+	}
+}
+
+func TestLoadWithIncludes_WarnsOnLegacyRigPathInSchema2Fragment(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/city.toml"] = []byte(`
+include = ["fragments/legacy.toml"]
+`)
+	fs.Files["/city/pack.toml"] = []byte(`
+[pack]
+name = "city"
+schema = 2
+`)
+	fs.Files["/city/fragments/legacy.toml"] = []byte(`
+[[rigs]]
+name = "frontend"
+path = "/legacy/frontend"
+`)
+
+	_, prov, err := LoadWithIncludes(fs, "/city/city.toml")
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+	var found bool
+	for _, warning := range prov.Warnings {
+		if strings.Contains(warning, `/city/fragments/legacy.toml: rig.path is deprecated in v2; move it to .gc/site.toml for rig "frontend"`) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("warnings = %v, want fragment rig.path guidance", prov.Warnings)
 	}
 }
 

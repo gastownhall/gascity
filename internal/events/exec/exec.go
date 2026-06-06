@@ -32,6 +32,13 @@ type Provider struct {
 	stderr  io.Writer
 }
 
+type listScriptFilter struct {
+	Type     string
+	Actor    string
+	Since    time.Time
+	AfterSeq uint64
+}
+
 // NewProvider returns an exec events provider that delegates to the given script.
 // Errors from best-effort operations (Record) are logged to stderr.
 func NewProvider(script string, stderr io.Writer) *Provider {
@@ -56,10 +63,17 @@ func (p *Provider) Record(e events.Event) {
 	}
 }
 
-// List delegates to: script list with JSON filter on stdin.
+// List delegates to: script list with JSON filter on stdin, then applies the
+// SDK filter locally so optional script filtering cannot weaken the contract.
 func (p *Provider) List(filter events.Filter) ([]events.Event, error) {
 	p.ensureRunning()
-	data, err := json.Marshal(filter)
+	scriptFilter := listScriptFilter{
+		Type:     filter.Type,
+		Actor:    filter.Actor,
+		Since:    filter.Since,
+		AfterSeq: filter.AfterSeq,
+	}
+	data, err := json.Marshal(scriptFilter)
 	if err != nil {
 		return nil, fmt.Errorf("exec events provider: marshal filter: %w", err)
 	}
@@ -70,7 +84,11 @@ func (p *Provider) List(filter events.Filter) ([]events.Event, error) {
 	if out == "" {
 		return nil, nil
 	}
-	return unmarshalEvents(out)
+	evts, err := unmarshalEvents(out)
+	if err != nil {
+		return nil, err
+	}
+	return events.ApplyFilter(evts, filter), nil
 }
 
 // LatestSeq delegates to: script latest-seq

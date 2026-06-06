@@ -69,17 +69,20 @@ func newShellRemoveCmd(stdout, stderr io.Writer) *cobra.Command {
 }
 
 func newShellStatusCmd(stdout, stderr io.Writer) *cobra.Command {
-	return &cobra.Command{
+	var jsonOutput bool
+	cmd := &cobra.Command{
 		Use:   "status",
 		Short: "Show shell integration status",
 		Args:  cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
-			if cmdShellStatus(stdout, stderr) != 0 {
+			if cmdShellStatus(jsonOutput, stdout, stderr) != 0 {
 				return errExit
 			}
 			return nil
 		},
 	}
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Output one JSONL result record")
+	return cmd
 }
 
 // detectShell returns "bash", "zsh", or "fish" from the SHELL env var.
@@ -321,8 +324,25 @@ func cmdShellRemove(stdout, stderr io.Writer) int {
 	return 0
 }
 
-func cmdShellStatus(stdout, _ io.Writer) int {
+type shellStatusJSON struct {
+	SchemaVersion string                 `json:"schema_version"`
+	Installed     bool                   `json:"installed"`
+	Shells        []shellStatusShellJSON `json:"shells"`
+}
+
+type shellStatusShellJSON struct {
+	Shell                  string `json:"shell"`
+	Status                 string `json:"status"`
+	Installed              bool   `json:"installed"`
+	CompletionScriptPath   string `json:"completion_script_path"`
+	CompletionScriptExists bool   `json:"completion_script_exists"`
+	RCPath                 string `json:"rc_path"`
+	RCHookPresent          bool   `json:"rc_hook_present"`
+}
+
+func cmdShellStatus(jsonOutput bool, stdout, stderr io.Writer) int {
 	found := false
+	statuses := make([]shellStatusShellJSON, 0, 3)
 	for _, sh := range []string{"bash", "zsh", "fish"} {
 		compFile, err := completionFile(sh)
 		if err != nil {
@@ -359,10 +379,39 @@ func cmdShellStatus(stdout, _ io.Writer) int {
 			} else if !hasScript && hasHook {
 				status = "RC hook present but completion script missing"
 			}
+			statuses = append(statuses, shellStatusShellJSON{
+				Shell:                  sh,
+				Status:                 status,
+				Installed:              hasScript && hasHook,
+				CompletionScriptPath:   compFile,
+				CompletionScriptExists: hasScript,
+				RCPath:                 rcFile,
+				RCHookPresent:          hasHook,
+			})
+			if jsonOutput {
+				continue
+			}
 			fmt.Fprintf(stdout, "%s: %s\n", sh, status)     //nolint:errcheck // best-effort stdout
 			fmt.Fprintf(stdout, "  script: %s\n", compFile) //nolint:errcheck // best-effort stdout
 			fmt.Fprintf(stdout, "  rc:     %s\n", rcFile)   //nolint:errcheck // best-effort stdout
+		} else {
+			statuses = append(statuses, shellStatusShellJSON{
+				Shell:                  sh,
+				Status:                 "not installed",
+				Installed:              false,
+				CompletionScriptPath:   compFile,
+				CompletionScriptExists: false,
+				RCPath:                 rcFile,
+				RCHookPresent:          false,
+			})
 		}
+	}
+	if jsonOutput {
+		return writeCLIJSONLineOrExit(stdout, stderr, "gc shell status", shellStatusJSON{
+			SchemaVersion: "1",
+			Installed:     found,
+			Shells:        statuses,
+		})
 	}
 	if !found {
 		fmt.Fprintln(stdout, "Shell integration is not installed.") //nolint:errcheck // best-effort stdout

@@ -1,9 +1,11 @@
 package buildimage
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/citylayout"
@@ -112,7 +114,7 @@ name = "test-city"
 	writeFile(t, cityDir, filepath.Join(citylayout.CachePacksRoot, "remote", ".git", "HEAD"), "ref: refs/heads/main\n")
 	writeFile(t, cityDir, filepath.Join(citylayout.RuntimeRoot, "runtime", "artifact.txt"), "runtime")
 	writeFile(t, cityDir, filepath.Join(".gc", "prompts", "mayor.md"), "old prompt")
-	writeFile(t, cityDir, filepath.Join(".gc", "formulas", "legacy.formula.toml"), "name = \"legacy\"\n")
+	writeFile(t, cityDir, filepath.Join(".gc", "formulas", "legacy.toml"), "name = \"legacy\"\n")
 	writeFile(t, cityDir, filepath.Join(".gc", "settings.json"), "{}")
 	writeFile(t, cityDir, filepath.Join(".gc", "scripts", "setup.sh"), "#!/bin/sh\n")
 
@@ -129,7 +131,7 @@ name = "test-city"
 	assertFileNotExists(t, outputDir, filepath.Join("workspace", citylayout.CachePacksRoot, "remote", ".git", "HEAD"))
 	assertFileNotExists(t, outputDir, filepath.Join("workspace", citylayout.RuntimeRoot, "runtime", "artifact.txt"))
 	assertFileNotExists(t, outputDir, filepath.Join("workspace", ".gc", "prompts", "mayor.md"))
-	assertFileNotExists(t, outputDir, filepath.Join("workspace", ".gc", "formulas", "legacy.formula.toml"))
+	assertFileNotExists(t, outputDir, filepath.Join("workspace", ".gc", "formulas", "legacy.toml"))
 	assertFileNotExists(t, outputDir, filepath.Join("workspace", ".gc", "scripts", "setup.sh"))
 	assertFileNotExists(t, outputDir, filepath.Join("workspace", ".gc", "settings.json"))
 }
@@ -189,6 +191,250 @@ prompt_template = "prompts/mayor.md"
 	assertFileExists(t, outputDir, "workspace/fragments/ops.toml")
 	assertFileExists(t, outputDir, "workspace/my-formulas/custom.toml")
 	assertFileExists(t, outputDir, "workspace/prompts/mayor.md")
+}
+
+func TestAssembleContextSkipsSymlinkedDirs(t *testing.T) {
+	cityDir := t.TempDir()
+	outputDir := t.TempDir()
+	targetDir := t.TempDir()
+
+	writeFile(t, cityDir, "city.toml", `[workspace]
+name = "test-city"
+`)
+	// Create a symlink to a directory (simulates .claude/skills/core.gc-agents).
+	writeFile(t, targetDir, "skill.md", "# skill")
+	writeFile(t, cityDir, ".claude/skills/local.md", "# local")
+	mkdirAll(t, cityDir, ".claude/skills")
+	if err := os.Symlink(targetDir, filepath.Join(cityDir, ".claude", "skills", "core.gc-agents")); err != nil {
+		t.Fatal(err)
+	}
+
+	var stderr bytes.Buffer
+	err := AssembleContext(Options{
+		CityPath:  cityDir,
+		OutputDir: outputDir,
+		Stderr:    &stderr,
+	})
+	if err != nil {
+		t.Fatalf("AssembleContext: %v", err)
+	}
+	if !strings.Contains(stderr.String(), "skipping symlinked directory") ||
+		!strings.Contains(stderr.String(), filepath.Join(".claude", "skills", "core.gc-agents")) {
+		t.Fatalf("stderr = %q, want skipped directory symlink diagnostic", stderr.String())
+	}
+
+	// Symlinked directory should be skipped, not cause an error.
+	assertFileNotExists(t, outputDir, "workspace/.claude/skills/core.gc-agents")
+	assertFileExists(t, outputDir, "workspace/.claude/skills/local.md")
+}
+
+func TestAssembleContextCopiesRegularFileSymlink(t *testing.T) {
+	cityDir := t.TempDir()
+	outputDir := t.TempDir()
+
+	writeFile(t, cityDir, "city.toml", `[workspace]
+name = "test-city"
+`)
+	writeFile(t, cityDir, "targets/source.txt", "linked content")
+	if err := os.Chmod(filepath.Join(cityDir, "targets", "source.txt"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	mkdirAll(t, cityDir, "prompts")
+	if err := os.Symlink(filepath.Join(cityDir, "targets", "source.txt"), filepath.Join(cityDir, "prompts", "linked.txt")); err != nil {
+		t.Fatal(err)
+	}
+
+	err := AssembleContext(Options{
+		CityPath:  cityDir,
+		OutputDir: outputDir,
+	})
+	if err != nil {
+		t.Fatalf("AssembleContext: %v", err)
+	}
+
+	got, err := os.ReadFile(filepath.Join(outputDir, "workspace", "prompts", "linked.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "linked content" {
+		t.Fatalf("linked file content = %q, want linked content", got)
+	}
+	info, err := os.Stat(filepath.Join(outputDir, "workspace", "prompts", "linked.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf("linked file mode = %v, want 0600", got)
+	}
+}
+
+func TestAssembleContextCopiesAbsoluteFileSymlinkFromRelativeCityPath(t *testing.T) {
+	parentDir := t.TempDir()
+	cityDir := filepath.Join(parentDir, "city")
+	outputDir := filepath.Join(parentDir, "out")
+	targetDir := t.TempDir()
+	targetFile := filepath.Join(targetDir, "source.txt")
+
+	writeFile(t, cityDir, "city.toml", `[workspace]
+name = "test-city"
+`)
+	writeFile(t, targetDir, "source.txt", "linked content")
+	mkdirAll(t, cityDir, "prompts")
+	if err := os.Symlink(targetFile, filepath.Join(cityDir, "prompts", "linked.txt")); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Chdir(parentDir)
+	err := AssembleContext(Options{
+		CityPath:  "city",
+		OutputDir: outputDir,
+	})
+	if err != nil {
+		t.Fatalf("AssembleContext: %v", err)
+	}
+
+	got, err := os.ReadFile(filepath.Join(outputDir, "workspace", "prompts", "linked.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "linked content" {
+		t.Fatalf("linked file content = %q, want linked content", got)
+	}
+}
+
+func TestAssembleContextCopiesAbsoluteFileSymlinkFromRelativeRigPath(t *testing.T) {
+	parentDir := t.TempDir()
+	cityDir := filepath.Join(parentDir, "city")
+	rigDir := filepath.Join(parentDir, "rig")
+	outputDir := filepath.Join(parentDir, "out")
+	targetDir := t.TempDir()
+	targetFile := filepath.Join(targetDir, "source.txt")
+
+	writeFile(t, cityDir, "city.toml", `[workspace]
+name = "test-city"
+`)
+	writeFile(t, targetDir, "source.txt", "linked rig content")
+	mkdirAll(t, rigDir, "docs")
+	if err := os.Symlink(targetFile, filepath.Join(rigDir, "docs", "linked.txt")); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Chdir(parentDir)
+	err := AssembleContext(Options{
+		CityPath:  "city",
+		OutputDir: outputDir,
+		RigPaths:  map[string]string{"demo": "rig"},
+	})
+	if err != nil {
+		t.Fatalf("AssembleContext: %v", err)
+	}
+
+	got, err := os.ReadFile(filepath.Join(outputDir, "workspace", "demo", "docs", "linked.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "linked rig content" {
+		t.Fatalf("linked rig file content = %q, want linked rig content", got)
+	}
+}
+
+func TestAssembleContextSkipsFileSymlinkToExcludedTarget(t *testing.T) {
+	cityDir := t.TempDir()
+	outputDir := t.TempDir()
+
+	writeFile(t, cityDir, "city.toml", `[workspace]
+name = "test-city"
+`)
+	writeFile(t, cityDir, filepath.Join(citylayout.RuntimeRoot, "runtime", "private.txt"), "do not bake")
+	mkdirAll(t, cityDir, "prompts")
+	if err := os.Symlink(filepath.Join(cityDir, citylayout.RuntimeRoot, "runtime", "private.txt"), filepath.Join(cityDir, "prompts", "public.md")); err != nil {
+		t.Fatal(err)
+	}
+
+	err := AssembleContext(Options{
+		CityPath:  cityDir,
+		OutputDir: outputDir,
+	})
+	if err != nil {
+		t.Fatalf("AssembleContext: %v", err)
+	}
+
+	assertFileNotExists(t, outputDir, "workspace/prompts/public.md")
+	assertFileExists(t, outputDir, "workspace/city.toml")
+}
+
+func TestAssembleContextSkipsFileSymlinkToExternalGCRuntimeTarget(t *testing.T) {
+	cityDir := t.TempDir()
+	outputDir := t.TempDir()
+	externalDir := t.TempDir()
+
+	writeFile(t, cityDir, "city.toml", `[workspace]
+name = "test-city"
+`)
+	writeFile(t, externalDir, filepath.Join(".gc", "agents", "worker", "identity"), "do not bake")
+	mkdirAll(t, cityDir, "prompts")
+	if err := os.Symlink(filepath.Join(externalDir, ".gc", "agents", "worker", "identity"), filepath.Join(cityDir, "prompts", "public.md")); err != nil {
+		t.Fatal(err)
+	}
+
+	err := AssembleContext(Options{
+		CityPath:  cityDir,
+		OutputDir: outputDir,
+	})
+	if err != nil {
+		t.Fatalf("AssembleContext: %v", err)
+	}
+
+	assertFileNotExists(t, outputDir, "workspace/prompts/public.md")
+	assertFileExists(t, outputDir, "workspace/city.toml")
+}
+
+func TestAssembleContextSkipsBrokenSymlink(t *testing.T) {
+	cityDir := t.TempDir()
+	outputDir := t.TempDir()
+
+	writeFile(t, cityDir, "city.toml", `[workspace]
+name = "test-city"
+`)
+	writeFile(t, cityDir, "prompts/keep.md", "# keep")
+	if err := os.Symlink(filepath.Join(cityDir, "missing.md"), filepath.Join(cityDir, "prompts", "missing.md")); err != nil {
+		t.Fatal(err)
+	}
+
+	err := AssembleContext(Options{
+		CityPath:  cityDir,
+		OutputDir: outputDir,
+	})
+	if err != nil {
+		t.Fatalf("AssembleContext: %v", err)
+	}
+
+	assertFileExists(t, outputDir, "workspace/prompts/keep.md")
+	assertFileNotExists(t, outputDir, "workspace/prompts/missing.md")
+}
+
+func TestAssembleContextErrorsForSymlinkLoop(t *testing.T) {
+	cityDir := t.TempDir()
+	outputDir := t.TempDir()
+
+	writeFile(t, cityDir, "city.toml", `[workspace]
+name = "test-city"
+`)
+	mkdirAll(t, cityDir, "prompts")
+	if err := os.Symlink("loop.md", filepath.Join(cityDir, "prompts", "loop.md")); err != nil {
+		t.Fatal(err)
+	}
+
+	err := AssembleContext(Options{
+		CityPath:  cityDir,
+		OutputDir: outputDir,
+	})
+	if err == nil {
+		t.Fatal("AssembleContext succeeded with symlink loop, want error")
+	}
+	if !strings.Contains(err.Error(), "resolving symlink") {
+		t.Fatalf("AssembleContext error = %q, want symlink resolution context", err)
+	}
 }
 
 func TestAssembleContextRequiresCityPath(t *testing.T) {

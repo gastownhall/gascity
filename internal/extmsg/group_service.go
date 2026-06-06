@@ -434,6 +434,51 @@ func (s *groupService) ResolveInbound(ctx context.Context, event ExternalInbound
 	return &GroupRouteDecision{Match: GroupRouteNoMatch}, nil
 }
 
+// ResolveOutbound authorizes an outbound publish from sessionID against the
+// conversation's group. Unlike ResolveInbound (which routes a message to a
+// participant by handle), ResolveOutbound checks whether sessionID is itself
+// a participant of the group bound to ref. This mirrors the authorization
+// boundary established by bind-room: any session that is a group participant
+// is authorized to publish on behalf of the conversation.
+//
+// Returns a decision with Match == GroupRouteParticipantMatch and the matching
+// participant when sessionID is a participant. Returns Match == GroupRouteNoMatch
+// when no group is bound or sessionID is not a participant.
+func (s *groupService) ResolveOutbound(ctx context.Context, ref ConversationRef, sessionID string) (*GroupOutboundDecision, error) {
+	if err := checkContext(ctx); err != nil {
+		return nil, err
+	}
+	validatedRef, err := validateConversationRef(ref)
+	if err != nil {
+		return nil, err
+	}
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return nil, fmt.Errorf("%w: session_id required", ErrInvalidInput)
+	}
+	group, err := s.findGroupByRoot(validatedRef)
+	if err != nil {
+		return nil, err
+	}
+	if group == nil {
+		return &GroupOutboundDecision{Match: GroupRouteNoMatch}, nil
+	}
+	participants, err := s.listParticipants(group.ID)
+	if err != nil {
+		return nil, err
+	}
+	for _, participant := range participants {
+		if participant.SessionID == sessionID {
+			return &GroupOutboundDecision{
+				Match:       GroupRouteParticipantMatch,
+				GroupID:     group.ID,
+				Participant: participant,
+			}, nil
+		}
+	}
+	return &GroupOutboundDecision{Match: GroupRouteNoMatch, GroupID: group.ID}, nil
+}
+
 func (s *groupService) UpdateCursor(ctx context.Context, caller Caller, input UpdateCursorInput) error {
 	if err := checkContext(ctx); err != nil {
 		return err

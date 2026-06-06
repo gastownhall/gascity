@@ -17,6 +17,66 @@ but all its roles are hardwired in Go code. Steve realized the MEOW stack
 configuration. Gas City extracts that insight into an SDK where Gas Town
 becomes one configuration among many.
 
+## Current integration mission
+
+This fork is integrating **Gas City + T3 Code + a DoltLite-backed beads
+store**. The target is not a permanent divergence from upstream Gas City.
+The target is a maintainable integration branch whose useful changes can
+track upstream easily and whose fork-specific behavior is isolated behind
+small, obvious ownership boundaries.
+
+When working here, assume three codebases matter:
+
+- **This repo** (`/data/projects/gascity`): the Gas City SDK and the fork
+  integration layer.
+- **T3 Code** (`/data/projects/t3code` when present): the UI/runtime that
+  hosts visible agent threads through the `t3bridge` runtime provider.
+- **Beads / bd with DoltLite**: the work ledger backend. Gas City should use
+  the normal beads abstractions and keep DoltLite-specific read/write behavior
+  contained in beads/provider boundaries.
+
+### Upstream alignment rules
+
+- Keep `upstream/main` easy to merge. Prefer new files, small adapters,
+  and fork-owned packages over broad edits to upstream-owned code.
+- If upstream code must change, make the patch minimal and idiomatic so it
+  can be rebased, dropped, or proposed upstream cleanly.
+- Do not bury T3 Code or DoltLite assumptions in generic SDK paths. Put
+  provider-specific behavior behind the existing runtime, config, or beads
+  backend boundaries.
+- Before rebuilding a missing feature from scratch, search history. This
+  fork has repeatedly lost working code during branch churn; older branches
+  and commits often already contain the fix.
+- Treat archived plans and audits as evidence, not gospel. Confirm against
+  current code and current upstream before porting.
+
+### Feature archaeology workflow
+
+Use git history deliberately when a feature appears missing or regressed:
+
+```bash
+git remote -v
+git fetch upstream
+git log --all --oneline --decorate --grep '<keyword>'
+git log --all --oneline --decorate -- <path>
+git show <commit>:<path>
+git diff upstream/main...HEAD -- <path>
+git range-diff upstream/main...HEAD
+```
+
+Useful search targets:
+
+- T3 bridge/runtime: `t3bridge`, `T3Bridge`, `internal/runtime/t3bridge`,
+  `cmd/gc/template_resolve_t3bridge.go`
+- DoltLite/beads backend: `doltlite`, `DoltLite`, `internal/beads`,
+  `providers.go`, `beads_provider_lifecycle`
+- Prior parity work: `engdocs/archive/analysis/gastown-upstream-audit.md`,
+  `engdocs/archive/analysis/feature-parity.md`,
+  `engdocs/contributors/dolt-regression-audit.md`
+
+If history contains working code, prefer porting the smallest proven slice
+instead of inventing a parallel mechanism.
+
 ## Development approach
 
 **TDD.** Write the test first, watch it fail, make it pass. Every package
@@ -41,8 +101,13 @@ mechanism is provably composable from the primitives.
 
 **Five primitives (Layer 0-1):**
 
-1. **Agent Protocol** — start/stop/prompt/observe agents regardless of
-   provider. Identity, pools, sandboxes, resume, crash adoption.
+1. **Session** — start/stop/prompt/observe sessions regardless of
+   provider. Identity (via `agent.SessionNameFor`), pools, sandboxes,
+   resume, crash adoption. Lifecycle is a bead-backed projection
+   (`internal/session/lifecycle_projection.go`). Runtime providers
+   (tmux, subprocess, exec, k8s, fake) plus routing layers (acp,
+   auto, hybrid) live under `internal/runtime/` and plug in behind
+   the Session surface.
 2. **Task Store (Beads)** — CRUD + Hook + Dependencies + Labels + Query
    over work units. Everything is a bead: tasks, mail, molecules, convoys.
 3. **Event Bus** — append-only pub/sub log of all system activity. Two
@@ -55,13 +120,16 @@ mechanism is provably composable from the primitives.
 **Four derived mechanisms (Layer 2-4):**
 
 6. **Messaging** — Mail = `TaskStore.Create(bead{type:"message"})`.
-   Nudge = `AgentProtocol.SendPrompt()`. No new primitive needed.
+   Nudge = a session-layer operation implemented via
+   `runtime.Provider.Nudge()` (and exposed through
+   `worker.Handle.Nudge()` at the worker boundary). No new
+   primitive needed.
 7. **Formulas & Molecules** — Formula = TOML parsed by Config. Molecule =
    root bead + child step beads in Task Store. Wisps = ephemeral molecules.
    Orders = formulas with gate conditions on Event Bus.
 8. **Dispatch (Sling)** — composed: find/spawn agent → select formula →
    create molecule → hook to agent → nudge → create convoy → log event.
-9. **Health Patrol** — ping agents (Agent Protocol), compare thresholds
+9. **Health Patrol** — probe sessions (Session), compare thresholds
    (Config), publish stalls (Event Bus), restart with backoff.
 
 ### Layering invariants
@@ -80,7 +148,7 @@ Capabilities activate progressively via config presence.
 
 | Level | Adds                   |
 | ----- | ---------------------- |
-| 0-1   | Agent + tasks          |
+| 0-1   | Session + tasks        |
 | 2     | Task loop              |
 | 3     | Multiple agents + pool |
 | 4     | Messaging              |
@@ -108,10 +176,11 @@ Load-bearing invariants enforced by CI (violating any fails the
 build; full rationale is in the architecture docs):
 
 - **Object model at the center.** `internal/{beads, mail, convoy,
-formula, agent, events, session, sling, ...}` is the canonical
+  formula, events, session, worker, sling, ...}` is the canonical
   domain. The CLI (`cmd/gc/`) and the HTTP+SSE API
   (`internal/api/`) are projections over it. Neither re-implements
-  domain logic.
+  domain logic. `internal/agent/` is a small helper package
+  (session-name utilities, startup hints) — not a primitive.
 - **Typed wire.** No hand-written JSON on any HTTP or SSE wire
   path; no `map[string]any` or `json.RawMessage` on wire types
   (documented exceptions live in the API control-plane doc). All
@@ -123,6 +192,36 @@ formula, agent, events, session, sling, ...}` is the canonical
   `events.NoPayload` for events whose envelope fields alone
   capture the semantics. Enforced by
   `TestEveryKnownEventTypeHasRegisteredPayload`.
+
+## Active migrations
+
+These migrations are in flight. New code on affected paths must take
+the canonical route, not the legacy route.
+
+- **Worker boundary (started `12a0a848` on Apr 17 2026, in progress).**
+  `internal/worker/handle.go` is the canonical boundary for session
+  creation and lifecycle operations. Production `cmd/gc/*.go` files
+  must route through `worker.Handle` — enforced by
+  `TestGCNonTestFilesStayOnWorkerBoundary` in
+  `cmd/gc/worker_boundary_import_test.go`, which forbids non-test
+  files from importing `session.NewManager(`, `worker.SessionHandle`,
+  `sessionlog`, and similar bypass paths in `cmd/gc`. The remaining
+  manager-construction/direct-create bypasses are split by category:
+  `internal/api/session_manager.go` constructs `session.Manager` values
+  for API handlers, and `internal/api/session_resolution.go` still calls
+  `mgr.CreateAliasedNamedWithTransportAndMetadata(...)` directly. This
+  list is not a sessionlog read-site inventory; stream and transcript
+  readers in `internal/api/` and `internal/session/` still read
+  session logs directly. Package-internal helpers in `internal/session/`
+  may construct and use `session.Manager`; tests may construct it
+  directly. Do not add new non-test direct `session.Manager.Create*` call
+  sites outside the worker boundary.
+- **Session-first (completed `dd90ac0a` on Mar 8 2026).** The former
+  Agent Protocol primitive was removed; responsibilities moved to
+  `internal/session/` (lifecycle) and `internal/runtime/` (providers).
+  `internal/agent/` is now a helper package with session-name utilities
+  and startup hints — not a primitive. Do not reconstruct the
+  `Agent` / `Handle` interfaces.
 
 ## Design decisions (settled)
 
@@ -210,6 +309,11 @@ Lesson test — it becomes LESS useful as models improve.
   in `cmd/gc/pool.go`. `TestAgentFieldSync` enforces this for the struct
   definitions; the apply functions and pool deep-copy must be checked
   manually.
+- **Adding rig config fields:** When adding a field to `config.Rig`, also
+  add the corresponding optional field to `RigPatch` and wire the merge
+  into `applyRigPatch` so layered configs (fragments, patches) can
+  override it. No field-sync test exists for Rig today; the patch path
+  must be checked manually.
 
 - `TESTING.md` — testing philosophy, tier boundaries, and sharded local
   runners. Read before writing any test. For broad local sweeps, prefer the
@@ -298,10 +402,12 @@ bd close <id>         # Complete work
 4. **PUSH TO REMOTE** - This is MANDATORY:
    ```bash
    git pull --rebase
-   bd dolt push
    git push
    git status  # MUST show "up to date with origin"
    ```
+   NOTE: gascity Dolt is LOCAL-ONLY (no remote). Do NOT run `bd dolt push`,
+   `bd dolt pull`, or `bd dolt remote add` here -- they fail and re-introduce
+   a doomed `origin` remote (ga-9wsri). Use `git push` only.
 5. **Clean up** - Clear stashes, prune remote branches
 6. **Verify** - All changes committed AND pushed
 7. **Hand off** - Provide context for next session
@@ -354,8 +460,8 @@ These apply to all code in this project — frontend and server:
   requirements only.
 - **Layered Architecture** - organize code into clear tiers where each layer
   depends only on the one(s) below it, keeping logic cleanly separated.
-- **Use Non-Nullable Variables** when possible; use nullability only when
-  there is NO other possiblity.
+- **Use Non-Nullable Variables** when possible; use nullability only when there
+  is NO other possibility.
 - **Use Async Notifications** when possible over inefficient polling.
 - **Eliminate Race Conditions** that might cause dropped or corrupted data
 - **Write for Maintainability** so that the code is clear and readable and easy
@@ -373,3 +479,5 @@ These apply to all code in this project — frontend and server:
   static checking (linting, compilers, etc) is that they surface issues at
   build-time so that they can be fixed now instead of lead to errors at runtime.
   Take advantage of that feedback to fix those errors!
+- **Use Centralized Semantic Constant Values** using enums and constants instead
+  of spreading magic numbers throughout the code.

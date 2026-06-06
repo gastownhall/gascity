@@ -77,26 +77,44 @@ func (c *v2RoutedToNamespaceCheck) scanScope(findings, skipped *[]string, aliase
 		*skipped = append(*skipped, fmt.Sprintf("%s skipped: opening bead store: %v", label, err))
 		return
 	}
-	items, err := store.List(beads.ListQuery{AllowScan: true})
-	if err != nil {
-		*skipped = append(*skipped, fmt.Sprintf("%s skipped: listing beads: %v", label, err))
+	seen := make(map[string]bool)
+	routes := make([]string, 0, len(aliases))
+	for route := range aliases {
+		routes = append(routes, route)
+	}
+	sort.Strings(routes)
+	for _, route := range routes {
+		items, err := store.List(beads.ListQuery{
+			Metadata: map[string]string{"gc.routed_to": route},
+		})
+		if err != nil {
+			*skipped = append(*skipped, fmt.Sprintf("%s skipped: listing beads: %v", label, err))
+			return
+		}
+		for _, bead := range items {
+			if seen[bead.ID] {
+				continue
+			}
+			seen[bead.ID] = true
+			c.scanRoutedToBead(findings, aliases, label, bead)
+		}
+	}
+}
+
+func (c *v2RoutedToNamespaceCheck) scanRoutedToBead(findings *[]string, aliases map[string][]string, label string, bead beads.Bead) {
+	route := strings.TrimSpace(bead.Metadata["gc.routed_to"])
+	if route == "" {
 		return
 	}
-	for _, bead := range items {
-		route := strings.TrimSpace(bead.Metadata["gc.routed_to"])
-		if route == "" {
-			continue
-		}
-		canonicals, ok := aliases[route]
-		if !ok {
-			continue
-		}
-		switch len(canonicals) {
-		case 1:
-			*findings = append(*findings, fmt.Sprintf("%s bead %s has gc.routed_to=%q; use %q", label, bead.ID, route, canonicals[0]))
-		default:
-			*findings = append(*findings, fmt.Sprintf("%s bead %s has gc.routed_to=%q; use one of %s", label, bead.ID, route, strings.Join(canonicals, ", ")))
-		}
+	canonicals, ok := aliases[route]
+	if !ok {
+		return
+	}
+	switch len(canonicals) {
+	case 1:
+		*findings = append(*findings, fmt.Sprintf("%s bead %s has gc.routed_to=%q; use %q", label, bead.ID, route, canonicals[0]))
+	default:
+		*findings = append(*findings, fmt.Sprintf("%s bead %s has gc.routed_to=%q; use one of %s", label, bead.ID, route, strings.Join(canonicals, ", ")))
 	}
 }
 
