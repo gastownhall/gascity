@@ -4109,6 +4109,13 @@ func TestOnFormulaAttachesAndRoutes(t *testing.T) {
 	if b.Ref != "code-review" {
 		t.Errorf("wisp Ref = %q, want %q", b.Ref, "code-review")
 	}
+	// Attached wisps route the source bead, not the molecule root: the wisp
+	// root must stay unrouted so it is not independently claimed. Moving
+	// routed_to onto the molecule (gastownhall/gascity#2848) would orphan the
+	// work, since the attached root is privatized out of Ready().
+	if got := b.Metadata["gc.routed_to"]; got != "" {
+		t.Errorf("wisp root gc.routed_to = %q, want empty (attached wisp routes the source, not the molecule)", got)
+	}
 }
 
 func TestOnRootOnlyFormulaKeepsAttachedWispPrivate(t *testing.T) {
