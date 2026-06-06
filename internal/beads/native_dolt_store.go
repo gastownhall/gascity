@@ -120,10 +120,11 @@ type NativeDoltStore struct {
 }
 
 var (
-	_ Store                    = (*NativeDoltStore)(nil)
-	_ GraphApplyStore          = (*NativeDoltStore)(nil)
-	_ StorageGraphApplyStore   = (*NativeDoltStore)(nil)
-	_ EphemeralGraphApplyStore = (*NativeDoltStore)(nil)
+	_ Store                         = (*NativeDoltStore)(nil)
+	_ ConditionalAssignmentReleaser = (*NativeDoltStore)(nil)
+	_ GraphApplyStore               = (*NativeDoltStore)(nil)
+	_ StorageGraphApplyStore        = (*NativeDoltStore)(nil)
+	_ EphemeralGraphApplyStore      = (*NativeDoltStore)(nil)
 )
 
 func newNativeDoltStoreWithStorage(storage beadslib.Storage, actor string) *NativeDoltStore {
@@ -482,6 +483,44 @@ func (s *NativeDoltStore) Update(id string, opts UpdateOpts) error {
 		return nativeStoreError(id, err)
 	}
 	return nil
+}
+
+// ReleaseIfCurrent clears an in-progress assignment only when the bead still
+// has the expected assignee inside one native Dolt transaction.
+func (s *NativeDoltStore) ReleaseIfCurrent(id, expectedAssignee string) (bool, error) {
+	storage, release, err := s.acquireStorage()
+	if err != nil {
+		return false, err
+	}
+	defer release()
+	ctx, cancel := nativeDoltOperationContext(context.TODO())
+	defer cancel()
+	released := false
+	err = storage.RunInTransaction(ctx, fmt.Sprintf("gc: release bead %s if current", id), func(tx beadslib.Transaction) error {
+		issue, err := tx.GetIssue(ctx, id)
+		if err != nil {
+			err = nativeStoreError(id, err)
+			if errors.Is(err, ErrNotFound) {
+				return nil
+			}
+			return err
+		}
+		if issue == nil || issue.Status != beadslib.StatusInProgress || issue.Assignee != expectedAssignee {
+			return nil
+		}
+		if err := tx.UpdateIssue(ctx, id, map[string]interface{}{
+			"status":   "open",
+			"assignee": "",
+		}, s.actor); err != nil {
+			return nativeStoreError(id, err)
+		}
+		released = true
+		return nil
+	})
+	if err != nil {
+		return false, err
+	}
+	return released, nil
 }
 
 // Close sets a bead's status to closed through the upstream beads storage layer.

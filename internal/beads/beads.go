@@ -23,6 +23,18 @@ var ErrStoreClosed = errors.New("bead store closed")
 // concurrent reparent before the caller's projection wait could converge.
 var ErrParentProjectionSuperseded = errors.New("parent projection superseded by concurrent update")
 
+// ErrConditionalReleaseUnsupported reports that a store cannot atomically
+// release an assignment based on the current status and assignee.
+var ErrConditionalReleaseUnsupported = errors.New("conditional assignment release unsupported")
+
+// ErrBDSilentFallback reports that a bd-backed store operation saw bd exit
+// successfully after falling back to on-disk JSONL auto-import mode. BdStore
+// surfaces this as an error for reads and writes because the command may have
+// observed or mutated an empty fallback database instead of the configured
+// backend. Detection requires bd's paired fallback markers: "auto-importing"
+// and "into empty database".
+var ErrBDSilentFallback = errors.New("bd silent fallback to on-disk auto-import")
+
 // Bead is a single unit of work in Gas City. Everything is a bead: tasks,
 // mail, molecules, convoys.
 type Bead struct {
@@ -70,6 +82,13 @@ type UpdateOpts struct {
 	Labels       []string // append these labels (nil = no change)
 	RemoveLabels []string // remove these labels (nil = no change)
 	Metadata     map[string]string
+}
+
+// ConditionalAssignmentReleaser is implemented by stores that can release an
+// in-progress assignment only when the current status and assignee still match
+// the expected snapshot.
+type ConditionalAssignmentReleaser interface {
+	ReleaseIfCurrent(id, expectedAssignee string) (bool, error)
 }
 
 // Tx is the write surface available inside a Store.Tx callback.

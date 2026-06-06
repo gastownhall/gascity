@@ -80,6 +80,8 @@ type CachingStore struct {
 	applyEventBeforeCommitForTest func()
 }
 
+var _ ConditionalAssignmentReleaser = (*CachingStore)(nil)
+
 type cacheState int
 
 const (

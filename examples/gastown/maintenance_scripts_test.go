@@ -222,7 +222,8 @@ EOF
 EOF
 	      exit 0
 	    fi
-	    if [ "$2" = "update" ]; then
+	    if [ "$2" = "release-if-current" ]; then
+	      printf 'released\n'
 	      exit 0
 	    fi
     ;;
@@ -253,11 +254,11 @@ exit 1
 		t.Fatalf("ReadFile(gc log): %v", err)
 	}
 	log := string(logData)
-	if !strings.Contains(log, "bd update ga-orphan --status=open --assignee=") {
+	if !strings.Contains(log, "bd release-if-current ga-orphan project/gastown.missing") {
 		t.Fatalf("orphan bead was not reset:\n%s", log)
 	}
 	for _, preserved := range []string{"ga-valid", "ga-pool"} {
-		if strings.Contains(log, "bd update "+preserved+" ") {
+		if strings.Contains(log, "bd release-if-current "+preserved+" ") {
 			t.Fatalf("valid assignee %s was reset:\n%s", preserved, log)
 		}
 	}
@@ -326,7 +327,8 @@ EOF
 EOF
 	      exit 0
 	    fi
-	    if [ "$2" = "update" ]; then
+	    if [ "$2" = "release-if-current" ]; then
+	      printf 'released\n'
 	      exit 0
 	    fi
     ;;
@@ -360,11 +362,11 @@ exit 1
 	if !strings.Contains(log, "config show") {
 		t.Fatalf("fallback config show path was not exercised:\n%s", log)
 	}
-	if !strings.Contains(log, "bd update ga-orphan --status=open --assignee=") {
+	if !strings.Contains(log, "bd release-if-current ga-orphan gastown.missing") {
 		t.Fatalf("orphan bead was not reset:\n%s", log)
 	}
 	for _, preserved := range []string{"ga-valid", "ga-pool"} {
-		if strings.Contains(log, "bd update "+preserved+" ") {
+		if strings.Contains(log, "bd release-if-current "+preserved+" ") {
 			t.Fatalf("valid assignee %s was reset:\n%s", preserved, log)
 		}
 	}
@@ -651,6 +653,106 @@ exit 1
 	}
 }
 
+func TestOrphanSweepUsesConditionalResetAfterRevalidation(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+
+	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+case "$1" in
+  config)
+    if [ "$2" = "explain" ]; then
+      cat <<'EOF'
+Agent: project/worker
+  source: pack
+EOF
+      exit 0
+    fi
+    ;;
+  rig)
+    if [ "$2" = "list" ] && [ "$3" = "--json" ]; then
+      printf '{"rigs":[{"name":"hq","hq":true}]}\n'
+      exit 0
+    fi
+    ;;
+  session)
+    if [ "$2" = "list" ] && [ "$3" = "--json" ]; then
+      printf '{"sessions":[],"summary":{},"filters":{},"schema_version":"1"}\n'
+      exit 0
+    fi
+    ;;
+  bd)
+    if [ "$2" = "list" ]; then
+      cat <<'EOF'
+[
+  {"id":"ga-raced-after-show","status":"in_progress","assignee":"project__worker-gc-mc-wisp-raced"}
+]
+EOF
+      exit 0
+    fi
+    if [ "$2" = "show" ] && [ "$3" = "ga-raced-after-show" ] && [ "$4" = "--json" ]; then
+      cat <<'EOF'
+[
+  {"id":"ga-raced-after-show","status":"in_progress","assignee":"project__worker-gc-mc-wisp-raced","metadata":{}}
+]
+EOF
+      exit 0
+    fi
+    if [ "$2" = "show" ] && [ "$3" = "mc-wisp-raced" ] && [ "$4" = "--json" ]; then
+      cat <<'EOF'
+[
+  {"id":"mc-wisp-raced","status":"closed","issue_type":"session","metadata":{"state":"closed"}}
+]
+EOF
+      exit 0
+    fi
+    if [ "$2" = "release-if-current" ] && [ "$3" = "ga-raced-after-show" ] && [ "$4" = "project__worker-gc-mc-wisp-raced" ]; then
+      printf 'skipped\n'
+      exit 0
+    fi
+    if [ "$2" = "update" ]; then
+      exit 0
+    fi
+    ;;
+esac
+exit 1
+`)
+
+	env := map[string]string{
+		"GC_CITY":      cityDir,
+		"GC_CITY_PATH": cityDir,
+		"GC_CALL_LOG":  gcLog,
+		"PATH":         binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+
+	script := filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "orphan-sweep.sh")
+	cmd := exec.Command(script)
+	cmd.Env = mergeTestEnv(env)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("%s failed: %v\n%s", filepath.Base(script), err, out)
+	}
+	if strings.Contains(string(out), "orphan-sweep: reset") {
+		t.Fatalf("conditional reset skip was counted as a reset:\n%s", out)
+	}
+
+	logData, err := os.ReadFile(gcLog)
+	if err != nil {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	log := string(logData)
+	if !strings.Contains(log, "bd show ga-raced-after-show --json") {
+		t.Fatalf("work bead was not revalidated before reset:\n%s", log)
+	}
+	if !strings.Contains(log, "bd release-if-current ga-raced-after-show project__worker-gc-mc-wisp-raced") {
+		t.Fatalf("work bead reset did not use conditional helper:\n%s", log)
+	}
+	if strings.Contains(log, "bd update ga-raced-after-show ") {
+		t.Fatalf("stale bead was reset with unconditional update:\n%s", log)
+	}
+}
+
 func TestOrphanSweepUsesSessionBeadShowWhenSessionListLags(t *testing.T) {
 	cityDir := t.TempDir()
 	binDir := t.TempDir()
@@ -749,6 +851,218 @@ exit 1
 	}
 }
 
+func TestOrphanSweepPreservesWorkWhenSessionBeadProbeErrors(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+
+	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+case "$1" in
+  config)
+    if [ "$2" = "explain" ]; then
+      cat <<'EOF'
+Agent: project/worker
+  source: pack
+EOF
+      exit 0
+    fi
+    ;;
+  rig)
+    if [ "$2" = "list" ] && [ "$3" = "--json" ]; then
+      printf '{"rigs":[{"name":"hq","hq":true}]}\n'
+      exit 0
+    fi
+    ;;
+  session)
+    if [ "$2" = "list" ] && [ "$3" = "--json" ]; then
+      printf '{"sessions":[],"summary":{},"filters":{},"schema_version":"1"}\n'
+      exit 0
+    fi
+    ;;
+  bd)
+    if [ "$2" = "list" ]; then
+      cat <<'EOF'
+[
+  {"id":"ga-session-probe-error","status":"in_progress","assignee":"project__worker-gc-mc-wisp-live123"}
+]
+EOF
+      exit 0
+    fi
+    if [ "$2" = "show" ] && [ "$3" = "ga-session-probe-error" ] && [ "$4" = "--json" ]; then
+      cat <<'EOF'
+[
+  {"id":"ga-session-probe-error","status":"in_progress","assignee":"project__worker-gc-mc-wisp-live123","metadata":{"gc.session_name":"project__worker-gc-mc-wisp-live123"}}
+]
+EOF
+      exit 0
+    fi
+    if [ "$2" = "show" ] && [ "$3" = "mc-wisp-live123" ] && [ "$4" = "--json" ]; then
+      printf 'transient read failure\n' >&2
+      exit 2
+    fi
+    if [ "$2" = "release-if-current" ]; then
+      printf 'released\n'
+      exit 0
+    fi
+    ;;
+esac
+exit 1
+`)
+
+	env := map[string]string{
+		"GC_CITY":      cityDir,
+		"GC_CITY_PATH": cityDir,
+		"GC_CALL_LOG":  gcLog,
+		"PATH":         binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+
+	script := filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "orphan-sweep.sh")
+	cmd := exec.Command(script)
+	cmd.Env = mergeTestEnv(env)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("%s failed: %v\n%s", filepath.Base(script), err, out)
+	}
+	if !strings.Contains(string(out), "orphan-sweep: reset 0 orphaned beads, skipped 1 unverifiable") {
+		t.Fatalf("unexpected orphan-sweep output:\n%s", out)
+	}
+
+	logData, err := os.ReadFile(gcLog)
+	if err != nil {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	log := string(logData)
+	if !strings.Contains(log, "bd show mc-wisp-live123 --json") {
+		t.Fatalf("session bead candidate was not probed:\n%s", log)
+	}
+	if strings.Contains(log, "bd release-if-current ga-session-probe-error ") {
+		t.Fatalf("session probe error fell through to reset:\n%s", log)
+	}
+}
+
+func TestOrphanSweepUsesDirectSessionBeadCandidatesWhenSessionListLags(t *testing.T) {
+	tests := []struct {
+		name      string
+		workID    string
+		assignee  string
+		sessionID string
+	}{
+		{
+			name:      "bare session bead assignee",
+			workID:    "ga-bare-session-bead",
+			assignee:  "mc-live-rig-asleep",
+			sessionID: "mc-live-rig-asleep",
+		},
+		{
+			name:      "generic mc suffix",
+			workID:    "ga-generic-mc-suffix",
+			assignee:  "project__worker-gc-mc-live-rig-asleep",
+			sessionID: "mc-live-rig-asleep",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cityDir := t.TempDir()
+			binDir := t.TempDir()
+			gcLog := filepath.Join(t.TempDir(), "gc.log")
+
+			writeExecutable(t, filepath.Join(binDir, "gc"), fmt.Sprintf(`#!/bin/sh
+printf '%%s\n' "$*" >> "$GC_CALL_LOG"
+case "$1" in
+  config)
+    if [ "$2" = "explain" ]; then
+      cat <<'EOF'
+Agent: project/worker
+  source: pack
+EOF
+      exit 0
+    fi
+    ;;
+  rig)
+    if [ "$2" = "list" ] && [ "$3" = "--json" ]; then
+      printf '{"rigs":[{"name":"hq","hq":true}]}\n'
+      exit 0
+    fi
+    ;;
+  session)
+    if [ "$2" = "list" ] && [ "$3" = "--json" ]; then
+      printf '{"sessions":[],"summary":{},"filters":{},"schema_version":"1"}\n'
+      exit 0
+    fi
+    ;;
+  bd)
+    if [ "$2" = "list" ]; then
+      cat <<'EOF'
+[
+  {"id":%q,"status":"in_progress","assignee":%q}
+]
+EOF
+      exit 0
+    fi
+    if [ "$2" = "show" ] && [ "$3" = %q ] && [ "$4" = "--json" ]; then
+      cat <<'EOF'
+[
+  {"id":%q,"status":"in_progress","assignee":%q}
+]
+EOF
+      exit 0
+    fi
+    if [ "$2" = "show" ] && [ "$3" = %q ] && [ "$4" = "--json" ]; then
+      cat <<'EOF'
+[
+  {"id":%q,"status":"open","issue_type":"session","metadata":{"state":"active","session_name":%q}}
+]
+EOF
+      exit 0
+    fi
+    if [ "$2" = "update" ]; then
+      exit 0
+    fi
+    ;;
+esac
+exit 1
+`, tt.workID, tt.assignee, tt.workID, tt.workID, tt.assignee, tt.sessionID, tt.sessionID, tt.assignee))
+
+			env := map[string]string{
+				"GC_CITY":      cityDir,
+				"GC_CITY_PATH": cityDir,
+				"GC_CALL_LOG":  gcLog,
+				"PATH":         binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+			}
+
+			script := filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "orphan-sweep.sh")
+			cmd := exec.Command(script)
+			cmd.Env = mergeTestEnv(env)
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("%s failed: %v\n%s", filepath.Base(script), err, out)
+			}
+			if strings.Contains(string(out), "orphan-sweep: reset") {
+				t.Fatalf("unexpected orphan reset output:\n%s", out)
+			}
+
+			logData, err := os.ReadFile(gcLog)
+			if err != nil {
+				t.Fatalf("ReadFile(gc log): %v", err)
+			}
+			log := string(logData)
+			for _, want := range []string{
+				"bd show " + tt.workID + " --json",
+				"bd show " + tt.sessionID + " --json",
+			} {
+				if !strings.Contains(log, want) {
+					t.Fatalf("missing required gc call %q:\n%s", want, log)
+				}
+			}
+			if strings.Contains(log, "bd update "+tt.workID+" ") {
+				t.Fatalf("session-list lag caused live assigned work to reset:\n%s", log)
+			}
+		})
+	}
+}
+
 func TestOrphanSweepPreservesRigScopedLiveEphemeralSessionAssigneesFromCurrentSchema(t *testing.T) {
 	cityDir := t.TempDir()
 	binDir := t.TempDir()
@@ -825,7 +1139,8 @@ EOF
 EOF
 	      exit 0
 	    fi
-	    if [ "$2" = "update" ]; then
+	    if [ "$2" = "release-if-current" ]; then
+	      printf 'released\n'
 	      exit 0
 	    fi
     ;;
@@ -859,14 +1174,14 @@ exit 1
 	if !strings.Contains(log, "--rig project session list --json") {
 		t.Fatalf("rig-scoped session list was not queried:\n%s", log)
 	}
-	if !strings.Contains(log, "bd update ga-rig-orphan --status=open --assignee=") {
+	if !strings.Contains(log, "bd release-if-current ga-rig-orphan missing-rig-session") {
 		t.Fatalf("rig orphan bead was not reset:\n%s", log)
 	}
-	if !strings.Contains(log, "bd update ga-rig-closed-default-filtered --status=open --assignee=") {
+	if !strings.Contains(log, "bd release-if-current ga-rig-closed-default-filtered project__worker-gc-closed") {
 		t.Fatalf("closed/default-filtered session assignee was not reset:\n%s", log)
 	}
 	for _, preserved := range []string{"ga-rig-live-by-session-name", "ga-rig-live-by-id"} {
-		if strings.Contains(log, "bd update "+preserved+" ") {
+		if strings.Contains(log, "bd release-if-current "+preserved+" ") {
 			t.Fatalf("rig live ephemeral session assignee %s was reset:\n%s", preserved, log)
 		}
 	}
@@ -948,7 +1263,8 @@ EOF
 EOF
 	      exit 0
 	    fi
-	    if [ "$2" = "update" ]; then
+	    if [ "$2" = "release-if-current" ]; then
+	      printf 'released\n'
 	      exit 0
 	    fi
     ;;
@@ -980,12 +1296,15 @@ exit 1
 	}
 	log := string(logData)
 	for _, preserved := range []string{"ga-live-by-id", "ga-live-by-session-name"} {
-		if strings.Contains(log, "bd update "+preserved+" ") {
+		if strings.Contains(log, "bd release-if-current "+preserved+" ") {
 			t.Fatalf("forward-compatible PascalCase session assignee %s was reset:\n%s", preserved, log)
 		}
 	}
-	for _, reset := range []string{"ga-closed-session", "ga-missing-session"} {
-		if !strings.Contains(log, "bd update "+reset+" --status=open --assignee=") {
+	for reset, assignee := range map[string]string{
+		"ga-closed-session":  "vgc-closed",
+		"ga-missing-session": "missing-session",
+	} {
+		if !strings.Contains(log, "bd release-if-current "+reset+" "+assignee) {
 			t.Fatalf("expected %s to be reset:\n%s", reset, log)
 		}
 	}
@@ -1068,7 +1387,8 @@ EOF
 EOF
 	      exit 0
 	    fi
-	    if [ "$2" = "update" ]; then
+	    if [ "$2" = "release-if-current" ]; then
+	      printf 'released\n'
 	      exit 0
 	    fi
     ;;
@@ -1099,12 +1419,15 @@ exit 1
 		t.Fatalf("ReadFile(gc log): %v", err)
 	}
 	log := string(logData)
-	for _, reset := range []string{"ga-hq-orphan", "ga-healthy-orphan"} {
-		if !strings.Contains(log, "bd update "+reset+" --status=open --assignee=") {
+	for reset, assignee := range map[string]string{
+		"ga-hq-orphan":      "missing-hq-session",
+		"ga-healthy-orphan": "missing-healthy-session",
+	} {
+		if !strings.Contains(log, "bd release-if-current "+reset+" "+assignee) {
 			t.Fatalf("expected %s to be reset after partial rig failure:\n%s", reset, log)
 		}
 	}
-	if strings.Contains(log, "bd update ga-broken-orphan ") {
+	if strings.Contains(log, "bd release-if-current ga-broken-orphan ") {
 		t.Fatalf("bead from rig with unknown session liveness was reset:\n%s", log)
 	}
 }
@@ -1244,11 +1567,11 @@ func TestOrphanSweepPreservesProtectedInProgressEphemeralMoleculeWisp(t *testing
 			}
 			log := string(logData)
 			lines := nonEmptyLogLines(log)
-			orphanUpdate := "bd update " + tt.orphanID + " --status=open --assignee="
+			orphanUpdate := "bd release-if-current " + tt.orphanID + " " + tt.orphanAssignee
 			if got := countExactLine(lines, orphanUpdate); got != 1 {
 				t.Fatalf("orphan update count = %d, want 1 for %q\n%s", got, orphanUpdate, orphanSweepFailureContext(out, gcLog))
 			}
-			if strings.Contains(log, "bd update "+tt.protectedID+" ") {
+			if strings.Contains(log, "bd release-if-current "+tt.protectedID+" ") {
 				t.Fatalf("protected wisp %s was reset\n%s", tt.protectedID, orphanSweepFailureContext(out, gcLog))
 			}
 			if strings.Contains(log, "UNEXPECTED:") {
@@ -1318,12 +1641,16 @@ if [ "$*" = "session list --json" ]; then
   fi
   exit 0
 fi
-if [ "$*" = "bd update $ORPHAN_SWEEP_ORPHAN_ID --status=open --assignee=" ]; then
+if [ "$*" = "bd release-if-current $ORPHAN_SWEEP_ORPHAN_ID $ORPHAN_SWEEP_ORPHAN_ASSIGNEE" ]; then
+  printf 'released\n'
   exit 0
 fi
 if [ "$*" = "bd show $ORPHAN_SWEEP_ORPHAN_ID --json" ]; then
   printf '[{"id":"%s","status":"in_progress","assignee":"%s","metadata":{}}]\n' "$ORPHAN_SWEEP_ORPHAN_ID" "$ORPHAN_SWEEP_ORPHAN_ASSIGNEE"
   exit 0
+fi
+if [ "$*" = "bd show $ORPHAN_SWEEP_ORPHAN_ASSIGNEE --json" ]; then
+  exit 1
 fi
 printf 'UNEXPECTED: %s\n' "$*" >> "$GC_CALL_LOG"
 printf 'UNEXPECTED: %s\n' "$*" >&2

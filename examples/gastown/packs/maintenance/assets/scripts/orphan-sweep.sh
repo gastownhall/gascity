@@ -19,8 +19,6 @@ esac
 # shellcheck disable=SC1091
 . "$__SCRIPT_DIR/_bd_trace.sh" "orphan-sweep"
 
-CITY="${GC_CITY:-.}"
-
 # Step 1: Collect in-progress beads from HQ and every rig whose session
 # liveness can be determined.
 # `gc bd list` without --rig is HQ-scoped from the city cwd, so per-rig
@@ -184,13 +182,21 @@ work_bead_still_resettable() {
     current_status=$(printf '%s\n' "$CURRENT_BEAD_JSON" | jq -r "$first_bead_jq | .status // empty" 2>/dev/null) || return 1
     current_assignee=$(printf '%s\n' "$CURRENT_BEAD_JSON" | jq -r "$first_bead_jq | .assignee // empty" 2>/dev/null) || return 1
 
-    [ "$current_status" = "in_progress" ] || return 1
-    [ "$current_assignee" = "$expected_assignee" ] || return 1
+    [ "$current_status" = "in_progress" ] || return 2
+    [ "$current_assignee" = "$expected_assignee" ] || return 2
 }
 
 session_bead_candidates() {
     local assignee="$1"
     local work_json="$2"
+
+    if [ -n "$assignee" ]; then
+        printf '%s\n' "$assignee"
+    fi
+
+    if [[ "$assignee" == *-mc-* ]]; then
+        printf 'mc-%s\n' "${assignee##*-mc-}"
+    fi
 
     printf '%s\n' "$work_json" | jq -r "$first_bead_jq | [
         .metadata[\"gc.session_id\"],
@@ -201,17 +207,35 @@ session_bead_candidates() {
     printf '%s\n' "$assignee" | grep -Eo '[[:alnum:]]+-wisp-[[:alnum:]][[:alnum:]-]*$' || true
 }
 
+session_probe_failure_is_unverifiable() {
+    local session_id="$1"
+    local assignee="$2"
+
+    [ "$session_id" != "$assignee" ] && return 0
+    [[ "$session_id" == mc-* ]] && return 0
+    return 1
+}
+
 session_bead_shows_live_assignment() {
     local assignee="$1"
     local work_json="$2"
     local session_id
     local session_json
     local live_match
+    local probe_failed=0
 
     while IFS= read -r session_id; do
         [ -n "$session_id" ] || continue
-        session_json=$(gc bd show "$session_id" --json 2>/dev/null) || continue
-        live_match=$(printf '%s\n' "$session_json" | jq -r --arg assignee "$assignee" --arg session_id "$session_id" "
+        if ! session_json=$(gc bd show "$session_id" --json 2>/dev/null); then
+            if session_probe_failure_is_unverifiable "$session_id" "$assignee"; then
+                probe_failed=1
+            fi
+            continue
+        fi
+        # Any live session bead at a probed candidate preserves the work. The
+        # CLI does not expose every Go-side identity field, so the fail-safe
+        # direction is to treat candidate liveness as sufficient.
+        if ! live_match=$(printf '%s\n' "$session_json" | jq -r --arg assignee "$assignee" --arg session_id "$session_id" "
             $first_bead_jq
             | select((.issue_type // \"\") == \"session\")
             | select((.status // \"\") != \"closed\")
@@ -227,13 +251,32 @@ session_bead_shows_live_assignment() {
                 or (\$assignee | contains(\$session_id))
             )
             | .id // empty
-        " 2>/dev/null) || live_match=""
+        " 2>/dev/null); then
+            probe_failed=1
+            continue
+        fi
         if [ -n "$live_match" ]; then
             return 0
         fi
     done < <(session_bead_candidates "$assignee" "$work_json")
 
+    [ "$probe_failed" -eq 0 ] || return 2
     return 1
+}
+
+reset_orphan_if_current() {
+    local bead_id="$1"
+    local expected_assignee="$2"
+    local reset_output
+    local reset_state
+
+    reset_output=$(gc bd release-if-current "$bead_id" "$expected_assignee" 2>/dev/null) || return 1
+    reset_state=$(printf '%s\n' "$reset_output" | awk 'NF { print $1; exit }')
+    case "$reset_state" in
+        released) return 0 ;;
+        skipped) return 2 ;;
+        *) return 1 ;;
+    esac
 }
 
 # Step 3: Find orphaned beads (assigned to non-existent agents).
@@ -266,23 +309,44 @@ is_known_agent() {
 }
 
 ORPHANED=0
+UNVERIFIABLE=0
 # Process substitution (not a pipe) keeps the loop body in the parent
 # shell so $ORPHANED survives for the summary message below.
 while IFS=$'\t' read -r bead_id assignee; do
     if ! is_known_agent "$assignee"; then
-        if ! work_bead_still_resettable "$bead_id" "$assignee"; then
+        if work_bead_still_resettable "$bead_id" "$assignee"; then
+            :
+        else
+            recheck_status=$?
+            if [ "$recheck_status" != "2" ]; then
+                UNVERIFIABLE=$((UNVERIFIABLE + 1))
+            fi
             continue
         fi
         if session_bead_shows_live_assignment "$assignee" "$CURRENT_BEAD_JSON"; then
             continue
+        else
+            session_status=$?
+            if [ "$session_status" = "2" ]; then
+                UNVERIFIABLE=$((UNVERIFIABLE + 1))
+                continue
+            fi
         fi
-        # `gc bd update` auto-resolves the bead's prefix to the right rig
-        # store, so HQ and rig beads update in the correct database.
-        gc bd update "$bead_id" --status=open --assignee="" 2>/dev/null || true
-        ORPHANED=$((ORPHANED + 1))
+        if reset_orphan_if_current "$bead_id" "$assignee"; then
+            ORPHANED=$((ORPHANED + 1))
+        else
+            reset_status=$?
+            if [ "$reset_status" != "2" ]; then
+                UNVERIFIABLE=$((UNVERIFIABLE + 1))
+            fi
+        fi
     fi
 done < <(echo "$IN_PROGRESS" | jq -r '.[] | select(.assignee != null and .assignee != "") | "\(.id)\t\(.assignee)"' 2>/dev/null)
 
-if [ "$ORPHANED" -gt 0 ]; then
-    echo "orphan-sweep: reset $ORPHANED orphaned beads"
+if [ "$ORPHANED" -gt 0 ] || [ "$UNVERIFIABLE" -gt 0 ]; then
+    SUMMARY="orphan-sweep: reset $ORPHANED orphaned beads"
+    if [ "$UNVERIFIABLE" -gt 0 ]; then
+        SUMMARY="$SUMMARY, skipped $UNVERIFIABLE unverifiable"
+    fi
+    echo "$SUMMARY"
 fi
