@@ -30,8 +30,8 @@ func TestFatalFormattingRoutesV1V2DuplicateNamesToMigration(t *testing.T) {
 }
 
 func TestFatalFormattingReplacesMigrationGuideRepoPath(t *testing.T) {
-	line := FormatFatalLine(`agent "worker": pack v1/v2 layout collision To migrate, see: docs/guides/migrating-to-pack-vnext.md`)
-	want := `gc-fatal: agent "worker": pack v1/v2 layout collision To migrate, see: ` + WalkthroughURL["duplicate_name_v1v2"]
+	line := FormatFatalLine(`agent "worker": pack v1/v2 layout collision Run gc doctor, then see: docs/guides/shareable-packs.md`)
+	want := `gc-fatal: agent "worker": pack v1/v2 layout collision Run gc doctor, then see: ` + WalkthroughURL["duplicate_name_v1v2"]
 	if got := line; got != want {
 		t.Fatalf("FormatFatalLine() = %q, want %q", got, want)
 	}

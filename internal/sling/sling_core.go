@@ -13,6 +13,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
 	"github.com/gastownhall/gascity/internal/formula"
+	"github.com/gastownhall/gascity/internal/graphv2"
 	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
 	"github.com/gastownhall/gascity/internal/telemetry"
@@ -87,6 +88,9 @@ func preflight(opts SlingOpts, deps SlingDeps, querier BeadQuerier) (SlingResult
 	if a.Suspended && !opts.Force {
 		result.AgentSuspended = true
 	}
+	if !opts.Force && rigSuspended(deps.Cfg, a.Dir) {
+		result.SuspendedRig = a.Dir
+	}
 	sp := agentutil.ScaleParamsFor(&a)
 	if sp.Max == 0 && !opts.Force {
 		result.PoolEmpty = true
@@ -99,6 +103,13 @@ func preflight(opts SlingOpts, deps SlingDeps, querier BeadQuerier) (SlingResult
 	}
 	if shouldGuardCrossRig(opts) {
 		if err := CrossRigRouteError(opts.BeadOrFormula, a, deps.Cfg); err != nil {
+			return result, err
+		}
+	}
+
+	// Dependency cycle check: reject slings that would create a deadlock.
+	if shouldCheckDepCycle(opts) {
+		if err := DetectCycle(opts.BeadOrFormula, deps.Store); err != nil {
 			return result, err
 		}
 	}
@@ -153,6 +164,21 @@ func preflight(opts SlingOpts, deps SlingDeps, querier BeadQuerier) (SlingResult
 	return result, nil
 }
 
+// rigSuspended reports whether the named rig is marked suspended in config.
+// The pool reconciler skips suspended rigs entirely, so a bead routed into
+// one stalls silently — no worker ever spawns to claim it.
+func rigSuspended(cfg *config.City, rigName string) bool {
+	if cfg == nil || rigName == "" {
+		return false
+	}
+	for _, r := range cfg.Rigs {
+		if r.Name == rigName {
+			return r.Suspended
+		}
+	}
+	return false
+}
+
 func shouldValidateExistingBead(opts SlingOpts) bool {
 	if opts.IsFormula || (opts.DryRun && opts.InlineText) {
 		return false
@@ -162,6 +188,13 @@ func shouldValidateExistingBead(opts SlingOpts) bool {
 
 func usesFormulaBackedRoute(opts SlingOpts) bool {
 	return opts.OnFormula != "" || (!opts.NoFormula && opts.Target.EffectiveDefaultSlingFormula() != "")
+}
+
+func shouldCheckDepCycle(opts SlingOpts) bool {
+	// Only meaningful for plain-bead slinging where a bead ID is known.
+	// Formula slinging creates new molecules whose deps aren't bead-graph deps.
+	// Force and dry-run bypass cycle detection intentionally.
+	return !opts.IsFormula && opts.OnFormula == "" && !opts.Force && !opts.DryRun && !opts.InlineText
 }
 
 func shouldGuardCrossRig(opts SlingOpts) bool {
@@ -206,20 +239,42 @@ func validateExistingBeadInQuerier(beadID, storeRef string, querier BeadQuerier)
 func slingFormula(opts SlingOpts, deps SlingDeps) (SlingResult, error) {
 	a := opts.Target
 	method := "formula"
+	inv, isGraph, err := prepareGraphV2FormulaInvocation(context.Background(), opts.BeadOrFormula, "", opts, deps, a)
+	if err != nil {
+		return SlingResult{Target: a.QualifiedName()}, fmt.Errorf("instantiating formula %q: %w", opts.BeadOrFormula, err)
+	}
 	formulaVars := BuildSlingFormulaVars(opts.BeadOrFormula, "", opts.Vars, a, deps)
+	if isGraph {
+		formulaVars = inv.Vars
+	}
 	mResult, err := InstantiateSlingFormula(context.Background(), opts.BeadOrFormula, SlingFormulaSearchPaths(deps, a), molecule.Options{
 		Title: opts.Title,
 		Vars:  formulaVars,
-	}, "", opts.ScopeKind, opts.ScopeRef, a, deps)
+	}, "", opts.ScopeKind, opts.ScopeRef, a, deps, opts.Force)
 	if err != nil {
 		return SlingResult{Target: a.QualifiedName()}, fmt.Errorf("instantiating formula %q: %w", opts.BeadOrFormula, err)
 	}
 	if mResult.GraphWorkflow || IsGraphWorkflowAttachment(deps.Store, mResult.RootID) {
 		wfResult, wfErr := doStartGraphWorkflow(mResult.RootID, "", a, method, deps)
 		wfResult.FormulaName = opts.BeadOrFormula
+		wfResult.Deprecations = append(wfResult.Deprecations, inv.Deprecations...)
 		return wfResult, wfErr
 	}
-	result := SlingResult{Target: a.QualifiedName(), FormulaName: opts.BeadOrFormula}
+	// Pool targets discover work through the supervisor's scale_check, but
+	// the wisp root is a molecule that readyExcludeTypes filters out of
+	// Ready() (per PR #1154). Stamp PoolDemandMetadataPair() — the same
+	// sentinel the gc order run writers use — so defaultScaleCheckCounts
+	// counts the wisp and spawns a pool worker. Failure is fatal: a routed
+	// wisp without the sentinel sits unserved forever (issue #2986).
+	if agentutil.IsMultiSessionAgent(&a) {
+		for k, v := range PoolDemandMetadataPair() {
+			if err := deps.Store.SetMetadata(mResult.RootID, k, v); err != nil {
+				return SlingResult{Target: a.QualifiedName(), FormulaName: opts.BeadOrFormula},
+					fmt.Errorf("setting %s on wisp %s: %w", k, mResult.RootID, err)
+			}
+		}
+	}
+	result := SlingResult{Target: a.QualifiedName(), FormulaName: opts.BeadOrFormula, Deprecations: inv.Deprecations}
 	return finalize(opts, deps, mResult.RootID, method, result)
 }
 
@@ -229,9 +284,47 @@ func slingOnFormula(opts SlingOpts, deps SlingDeps, querier BeadQuerier, beadID 
 	method := "on-formula"
 	formulaVars := BuildSlingFormulaVars(opts.OnFormula, beadID, opts.Vars, a, deps)
 	searchPaths := SlingFormulaSearchPaths(deps, a)
-	isGraph, err := isGraphSlingFormula(context.Background(), opts.OnFormula, searchPaths, formulaVars)
+	graphInv, isGraph, err := prepareGraphV2FormulaInvocation(context.Background(), opts.OnFormula, beadID, opts, deps, a)
 	if err != nil {
 		return result, fmt.Errorf("instantiating formula %q on %s: %w", opts.OnFormula, beadID, err)
+	}
+	if isGraph {
+		formulaVars = graphInv.Vars
+		result.Deprecations = append(result.Deprecations, graphInv.Deprecations...)
+		if err := validateSlingFormulaRuntimeVars(context.Background(), opts.OnFormula, searchPaths, molecule.Options{
+			Title: opts.Title,
+			Vars:  formulaVars,
+		}); err != nil {
+			return result, fmt.Errorf("instantiating formula %q on %s: %w", opts.OnFormula, beadID, err)
+		}
+		return withGraphV2SourceWorkflowLock(context.Background(), deps, beadID, func() (SlingResult, error) {
+			if err := CheckNoMoleculeChildrenAllowLiveWorkflow(querier, beadID, deps.Store, &result); err != nil {
+				return result, fmt.Errorf("%w", err)
+			}
+			if err := checkLegacySourceWorkflowConflict(deps, beadID); err != nil {
+				return result, fmt.Errorf("%w", err)
+			}
+			replacedSnapshot, err := snapshotGraphV2ReplacementRoot(deps.Store, opts.OnFormula, formulaVars, opts.ScopeKind, opts.ScopeRef, opts.Force)
+			if err != nil {
+				return result, fmt.Errorf("instantiating formula %q on %s: %w", opts.OnFormula, beadID, err)
+			}
+			mResult, err := InstantiateSlingFormula(context.Background(), opts.OnFormula, searchPaths, molecule.Options{
+				Title:            opts.Title,
+				Vars:             formulaVars,
+				PriorityOverride: BeadPriorityOverride(deps.Store, graphInv.InputConvoy),
+			}, "", opts.ScopeKind, opts.ScopeRef, a, deps, opts.Force)
+			if err != nil {
+				return result, fmt.Errorf("instantiating formula %q on %s: %w", opts.OnFormula, beadID, err)
+			}
+			wfResult, wfErr := doStartGraphWorkflow(mResult.RootID, "", a, method, deps)
+			wfResult.FormulaName = opts.OnFormula
+			if wfErr != nil {
+				if rollbackErr := rollbackGraphV2ReplacementLaunch(deps.Store, mResult.RootID, replacedSnapshot); rollbackErr != nil {
+					return wfResult, errors.Join(wfErr, rollbackErr)
+				}
+			}
+			return wfResult, wfErr
+		})
 	}
 	if err := validateSlingFormulaRuntimeVars(context.Background(), opts.OnFormula, searchPaths, molecule.Options{
 		Title: opts.Title,
@@ -293,9 +386,47 @@ func slingDefaultFormula(opts SlingOpts, deps SlingDeps, querier BeadQuerier, be
 	defaultFormula := a.EffectiveDefaultSlingFormula()
 	defaultVars := BuildSlingFormulaVars(defaultFormula, beadID, opts.Vars, a, deps)
 	searchPaths := SlingFormulaSearchPaths(deps, a)
-	isGraph, err := isGraphSlingFormula(context.Background(), defaultFormula, searchPaths, defaultVars)
+	graphInv, isGraph, err := prepareGraphV2FormulaInvocation(context.Background(), defaultFormula, beadID, opts, deps, a)
 	if err != nil {
 		return result, fmt.Errorf("instantiating default formula %q on %s: %w", defaultFormula, beadID, err)
+	}
+	if isGraph {
+		defaultVars = graphInv.Vars
+		result.Deprecations = append(result.Deprecations, graphInv.Deprecations...)
+		if err := validateSlingFormulaRuntimeVars(context.Background(), defaultFormula, searchPaths, molecule.Options{
+			Title: opts.Title,
+			Vars:  defaultVars,
+		}); err != nil {
+			return result, fmt.Errorf("instantiating default formula %q on %s: %w", defaultFormula, beadID, err)
+		}
+		return withGraphV2SourceWorkflowLock(context.Background(), deps, beadID, func() (SlingResult, error) {
+			if err := CheckNoMoleculeChildrenAllowLiveWorkflow(querier, beadID, deps.Store, &result); err != nil {
+				return result, fmt.Errorf("%w", err)
+			}
+			if err := checkLegacySourceWorkflowConflict(deps, beadID); err != nil {
+				return result, fmt.Errorf("%w", err)
+			}
+			replacedSnapshot, err := snapshotGraphV2ReplacementRoot(deps.Store, defaultFormula, defaultVars, opts.ScopeKind, opts.ScopeRef, opts.Force)
+			if err != nil {
+				return result, fmt.Errorf("instantiating default formula %q on %s: %w", defaultFormula, beadID, err)
+			}
+			mResult, err := InstantiateSlingFormula(context.Background(), defaultFormula, searchPaths, molecule.Options{
+				Title:            opts.Title,
+				Vars:             defaultVars,
+				PriorityOverride: BeadPriorityOverride(deps.Store, graphInv.InputConvoy),
+			}, "", opts.ScopeKind, opts.ScopeRef, a, deps, opts.Force)
+			if err != nil {
+				return result, fmt.Errorf("instantiating default formula %q on %s: %w", defaultFormula, beadID, err)
+			}
+			wfResult, wfErr := doStartGraphWorkflow(mResult.RootID, "", a, method, deps)
+			wfResult.FormulaName = defaultFormula
+			if wfErr != nil {
+				if rollbackErr := rollbackGraphV2ReplacementLaunch(deps.Store, mResult.RootID, replacedSnapshot); rollbackErr != nil {
+					return wfResult, errors.Join(wfErr, rollbackErr)
+				}
+			}
+			return wfResult, wfErr
+		})
 	}
 	if err := validateSlingFormulaRuntimeVars(context.Background(), defaultFormula, searchPaths, molecule.Options{
 		Title: opts.Title,
@@ -786,6 +917,20 @@ func withSourceWorkflowLaunchLock(ctx context.Context, deps SlingDeps, sourceBea
 	return result, err
 }
 
+func withGraphV2SourceWorkflowLock(ctx context.Context, deps SlingDeps, sourceBeadID string, fn func() (SlingResult, error)) (SlingResult, error) {
+	sourceBeadID = sourceworkflow.NormalizeSourceBeadID(sourceBeadID)
+	if sourceBeadID == "" {
+		return fn()
+	}
+	var result SlingResult
+	err := sourceworkflow.WithLock(ctx, deps.CityPath, sourceWorkflowLockScope(deps), sourceBeadID, func() error {
+		var err error
+		result, err = fn()
+		return err
+	})
+	return result, err
+}
+
 func waitForSourceWorkflowLaunchVisible(ctx context.Context, deps SlingDeps, sourceBeadID, workflowID, storeRef string) ([]sourceWorkflowRoot, error) {
 	var roots []sourceWorkflowRoot
 	for attempt := 1; attempt <= sourceWorkflowLaunchVisibilityAttempts; attempt++ {
@@ -943,11 +1088,29 @@ func attachBatchFormula(ctx context.Context, opts SlingOpts, deps SlingDeps, chi
 }
 
 func isGraphSlingFormula(ctx context.Context, formulaName string, searchPaths []string, vars map[string]string) (bool, error) {
+	isGraph, _, err := graphv2.IsGraphV2Formula(formulaName, searchPaths)
+	if err != nil {
+		return false, err
+	}
+	if isGraph {
+		return true, nil
+	}
 	recipe, err := formula.CompileWithoutRuntimeVarValidation(ctx, formulaName, searchPaths, vars)
 	if err != nil {
 		return false, err
 	}
 	return IsCompiledGraphWorkflow(recipe), nil
+}
+
+func prepareGraphV2FormulaInvocation(ctx context.Context, formulaName, targetID string, opts SlingOpts, deps SlingDeps, a config.Agent) (graphv2.Invocation, bool, error) {
+	searchPaths := SlingFormulaSearchPaths(deps, a)
+	vars := buildGraphV2SlingFormulaVars(formulaName, targetID, opts.Vars, a, deps)
+	inv, err := graphv2.PrepareInvocation(ctx, deps.Store, formulaName, searchPaths, targetID, vars)
+	if err != nil {
+		return graphv2.Invocation{}, false, err
+	}
+	isGraph := formula.UsesGraphCompiler(inv.Formula)
+	return inv, isGraph, nil
 }
 
 func validateSlingFormulaRuntimeVars(ctx context.Context, formulaName string, searchPaths []string, opts molecule.Options) error {
@@ -956,6 +1119,20 @@ func validateSlingFormulaRuntimeVars(ctx context.Context, formulaName string, se
 		return err
 	}
 	return molecule.ValidateRecipeRuntimeVars(recipe, opts)
+}
+
+func checkLegacySourceWorkflowConflict(deps SlingDeps, beadID string) error {
+	roots, err := listSourceWorkflowRoots(deps, beadID)
+	if err != nil {
+		return fmt.Errorf("list live workflows for %s: %w", beadID, err)
+	}
+	if len(roots) == 0 {
+		return nil
+	}
+	return &sourceworkflow.ConflictError{
+		SourceBeadID: beadID,
+		WorkflowIDs:  blockingWorkflowIDs(roots),
+	}
 }
 
 func validateBatchSlingFormulaRuntimeVars(ctx context.Context, formulaName string, searchPaths []string, opts SlingOpts, open []beads.Bead, a config.Agent, deps SlingDeps) error {
@@ -1038,12 +1215,29 @@ func DoSlingBatch(opts SlingOpts, deps SlingDeps, querier BeadChildQuerier) (Sli
 		return SlingResult{}, fmt.Errorf("bead %s is an epic; first-class support is for convoys only", b.ID)
 	}
 
+	useFormula := opts.OnFormula
+	if useFormula == "" && !opts.IsFormula && !opts.NoFormula && a.EffectiveDefaultSlingFormula() != "" {
+		useFormula = a.EffectiveDefaultSlingFormula()
+	}
+
 	if !beads.IsContainerType(b.Type) {
 		singleOpts := opts
 		singleOpts.IsFormula = false
 		singleDeps := deps
 		singleDeps.ValidationQuerier = containerQuerier
 		return DoSling(singleOpts, singleDeps, querier)
+	}
+
+	if useFormula != "" {
+		_, isGraph, err := prepareGraphV2FormulaInvocation(context.Background(), useFormula, b.ID, opts, deps, a)
+		if err != nil {
+			return SlingResult{}, fmt.Errorf("instantiating formula %q on %s %s: %w", useFormula, b.Type, b.ID, err)
+		}
+		if isGraph {
+			singleDeps := deps
+			singleDeps.ValidationQuerier = containerQuerier
+			return DoSling(opts, singleDeps, containerQuerier)
+		}
 	}
 
 	children, err := listContainerChildren(querier, b.ID, true)
@@ -1090,10 +1284,6 @@ func DoSlingBatch(opts SlingOpts, deps SlingDeps, querier BeadChildQuerier) (Sli
 	batchResult.Target = a.QualifiedName()
 	batchResult.BeadID = b.ID
 	batchResult.ContainerType = b.Type
-	useFormula := opts.OnFormula
-	if useFormula == "" && !opts.IsFormula && !opts.NoFormula && a.EffectiveDefaultSlingFormula() != "" {
-		useFormula = a.EffectiveDefaultSlingFormula()
-	}
 	// isGraph is computed once per batch and threaded into every per-child
 	// attachBatchFormula call. Previously the helper compiled the formula
 	// once here and again per child, turning an O(1) compile into O(N) disk

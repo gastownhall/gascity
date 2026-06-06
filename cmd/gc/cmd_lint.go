@@ -297,6 +297,10 @@ func lintPrompt(packDir string, packDirs []string, providers map[string]config.P
 		diagnostics = append(diagnostics, lintLoadSharedTemplates(tmpl, filepath.Join(dir, "prompts", "shared"))...)
 		diagnostics = append(diagnostics, lintLoadSharedTemplates(tmpl, filepath.Join(dir, "template-fragments"))...)
 	}
+	if sourcePackRoot := promptSourcePackRoot(packDir, sourcePath); sourcePackRoot != "" {
+		diagnostics = append(diagnostics, lintLoadSharedTemplates(tmpl, filepath.Join(sourcePackRoot, "prompts", "shared"))...)
+		diagnostics = append(diagnostics, lintLoadSharedTemplates(tmpl, filepath.Join(sourcePackRoot, "template-fragments"))...)
+	}
 	diagnostics = append(diagnostics, lintLoadSharedTemplates(tmpl, filepath.Join(packDir, "prompts", "shared"))...)
 	diagnostics = append(diagnostics, lintLoadSharedTemplates(tmpl, filepath.Join(packDir, "template-fragments"))...)
 	diagnostics = append(diagnostics, lintLoadSharedTemplates(tmpl, filepath.Join(filepath.Dir(sourcePath), "shared"))...)
@@ -356,22 +360,25 @@ func lintPromptContext(packDir string, agentCfg config.Agent, providers map[stri
 	}
 	providerKey := agentCfg.Provider
 	return PromptContext{
-		CityRoot:            packDir,
-		AgentName:           qualifiedName,
-		TemplateName:        lintFirstNonEmpty(agentCfg.Name, "lint-agent"),
-		BindingName:         agentCfg.BindingName,
-		BindingPrefix:       agentCfg.BindingPrefix(),
-		RigName:             lintFirstNonEmpty(agentCfg.Dir, "lint-rig"),
-		RigRoot:             filepath.Join(packDir, "rigs", lintFirstNonEmpty(agentCfg.Dir, "lint-rig")),
-		WorkDir:             packDir,
-		IssuePrefix:         "lint",
-		Branch:              "feature/lint",
-		DefaultBranch:       "main",
-		WorkQuery:           agentCfg.EffectiveWorkQuery(),
-		SlingQuery:          agentCfg.EffectiveSlingQuery(),
-		ProviderKey:         providerKey,
-		ProviderDisplayName: providerDisplayNameFor(providerKey, providers),
-		Env:                 env,
+		CityRoot:                packDir,
+		AgentName:               qualifiedName,
+		TemplateName:            lintFirstNonEmpty(agentCfg.Name, "lint-agent"),
+		BindingName:             agentCfg.BindingName,
+		BindingPrefix:           agentCfg.BindingPrefix(),
+		RigName:                 lintFirstNonEmpty(agentCfg.Dir, "lint-rig"),
+		RigRoot:                 filepath.Join(packDir, "rigs", lintFirstNonEmpty(agentCfg.Dir, "lint-rig")),
+		WorkDir:                 packDir,
+		IssuePrefix:             "lint",
+		Branch:                  "feature/lint",
+		DefaultBranch:           "main",
+		AssignedInProgressQuery: agentCfg.EffectiveAssignedInProgressQueryForBeads(config.BeadsConfig{}),
+		AssignedReadyQuery:      agentCfg.EffectiveAssignedReadyQueryForBeads(config.BeadsConfig{}),
+		RoutedPoolQuery:         agentCfg.EffectiveRoutedPoolQueryForBeads(config.BeadsConfig{}),
+		WorkQuery:               agentCfg.EffectiveWorkQueryForBeads(config.BeadsConfig{}),
+		SlingQuery:              agentCfg.EffectiveSlingQuery(),
+		ProviderKey:             providerKey,
+		ProviderDisplayName:     providerDisplayNameFor(providerKey, providers),
+		Env:                     env,
 	}
 }
 

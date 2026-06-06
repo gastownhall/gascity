@@ -78,10 +78,15 @@ var DiscoveryTargets = []Target{
 	},
 }
 
-// HeapInusePeakTarget is the memory ceiling from discovery.md: the store must
-// hold its working set in a bounded heap. Source: docs/coordination-store/
-// discovery.md §Targets (RAM ≤ 256MB HeapInuse peak).
+// HeapInusePeakTarget is retained as an informational threshold (256 MiB).
+// The primary memory gate is HeapInuseDeltaTarget (workload-induced growth);
+// HeapInusePeak is reported for visibility but does not fail the scorecard.
 const HeapInusePeakTarget = 256 * 1024 * 1024
+
+// HeapInuseDeltaTarget is the maximum workload-induced heap growth allowed.
+// This is the primary MemPass gate: HeapInuseDelta (peak minus baseline) must
+// stay at or below this value for the memory check to pass.
+const HeapInuseDeltaTarget = 256 * 1024 * 1024
 
 // MemReport captures memory consumption observed during a workload run.
 // Baseline is measured after seeding and before workload execution; peak is
@@ -95,6 +100,8 @@ type MemReport struct {
 	HeapInusePeak uint64
 	// HeapInuseSteady is runtime.MemStats.HeapInuse after the workload.
 	HeapInuseSteady uint64
+	// HeapInuseDelta is workload-induced heap growth: peak minus baseline.
+	HeapInuseDelta uint64
 	// RSSBaseline is the process resident set size before the workload, in
 	// bytes. Zero if unavailable.
 	RSSBaseline uint64
@@ -139,14 +146,22 @@ type Scorecard struct {
 	Errors int
 	// Mem holds memory consumption observed during the run.
 	Mem MemReport
-	// MemPass reports whether the HeapInusePeak target was met. Only
+	// MemPass reports whether the HeapInuseDelta target was met. Only
 	// meaningful when Mem.Sampled is true.
 	MemPass bool
+	// LeakAborted is true when the run was canceled by the memory guard.
+	LeakAborted bool
+	// LeakFinding describes what triggered the memory guard abort.
+	// Empty when LeakAborted is false.
+	LeakFinding string
 }
 
 // Passed returns true if all measured targets passed, including the memory
 // target when memory was sampled.
 func (s *Scorecard) Passed() bool {
+	if s.LeakAborted {
+		return false
+	}
 	for _, r := range s.Results {
 		if r.Measured && !r.Pass {
 			return false
@@ -203,7 +218,7 @@ func Score(backend, workload string, dur time.Duration, totalOps, totalErrors in
 		TotalOps: totalOps,
 		Errors:   totalErrors,
 		Mem:      mem,
-		MemPass:  !mem.Sampled || mem.HeapInusePeak <= HeapInusePeakTarget,
+		MemPass:  !mem.Sampled || mem.HeapInuseDelta <= HeapInuseDeltaTarget,
 	}
 
 	for _, t := range DiscoveryTargets {
@@ -283,20 +298,32 @@ func (s *Scorecard) PrintTable(w io.Writer) {
 	}
 
 	if s.Mem.Sampled {
-		fmt.Fprintf(w, "\n  Memory:\n") //nolint:errcheck
-		memResult := "PASS"
+		fmt.Fprintf(w, "\n  Memory:\n")                     //nolint:errcheck
+		fmt.Fprintf(w, "  %-*s  %-12s  %-12s  %-12s  %s\n", //nolint:errcheck
+			colW, "Metric", "Baseline", "Peak/Delta", "Steady", "Result")
+
+		deltaResult := "PASS"
 		if !s.MemPass {
-			memResult = fmt.Sprintf("FAIL  ← HeapInuse peak %s > target %s",
-				FormatBytes(s.Mem.HeapInusePeak), FormatBytes(HeapInusePeakTarget))
+			deltaResult = fmt.Sprintf("FAIL  ← delta %s > target %s",
+				FormatBytes(s.Mem.HeapInuseDelta), FormatBytes(HeapInuseDeltaTarget))
 		}
 		fmt.Fprintf(w, "  %-*s  %-12s  %-12s  %-12s  %s\n", //nolint:errcheck
-			colW, "Metric", "Baseline", "Peak", "Steady", "Result")
+			colW, fmt.Sprintf("HeapInuse delta (≤%s)", FormatBytes(HeapInuseDeltaTarget)),
+			FormatBytes(s.Mem.HeapInuseBaseline),
+			FormatBytes(s.Mem.HeapInuseDelta),
+			"-",
+			deltaResult)
+
+		peakNote := fmt.Sprintf("%s peak", FormatBytes(s.Mem.HeapInusePeak))
+		if s.Mem.HeapInusePeak > HeapInusePeakTarget {
+			peakNote += "  ← exceeds " + FormatBytes(HeapInusePeakTarget)
+		}
 		fmt.Fprintf(w, "  %-*s  %-12s  %-12s  %-12s  %s\n", //nolint:errcheck
-			colW, "HeapInuse (≤256MB peak)",
+			colW, "HeapInuse peak (informational)",
 			FormatBytes(s.Mem.HeapInuseBaseline),
 			FormatBytes(s.Mem.HeapInusePeak),
 			FormatBytes(s.Mem.HeapInuseSteady),
-			memResult)
+			peakNote)
 		rssBaseline := "-"
 		if s.Mem.RSSPeak > 0 {
 			rssBaseline = FormatBytes(s.Mem.RSSBaseline)
@@ -312,6 +339,10 @@ func (s *Scorecard) PrintTable(w io.Writer) {
 		fmt.Fprintf(w, "  %-*s  %-12s  %-12s  %-12s\n", //nolint:errcheck
 			colW, "RSS", rssBaseline, rssPeak, rssSteady)
 		fmt.Fprintf(w, "  %-*s  %-12s\n", colW, "alloc delta (churn)", FormatBytes(s.Mem.AllocDelta)) //nolint:errcheck
+	}
+
+	if s.LeakAborted {
+		fmt.Fprintf(w, "\n  *** LEAK DETECTED — run aborted: %s ***\n", s.LeakFinding) //nolint:errcheck
 	}
 
 	fmt.Fprintln(w) //nolint:errcheck

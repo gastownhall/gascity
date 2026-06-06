@@ -90,10 +90,10 @@ func orderV1V2(a, b Agent) (v1, v2 Agent, ok bool) {
 	return Agent{}, Agent{}, false
 }
 
-// migrationGuideDocPath is the repository-relative user-facing guide for the
-// v1→v2 pack migration, so operators can copy-paste it without fighting an
-// FQDN.
-const migrationGuideDocPath = "docs/guides/migrating-to-pack-vnext.md"
+// migrationGuideDocPath is the repository-relative user-facing guide for
+// current pack layout guidance, so operators can copy-paste it without
+// fighting an FQDN.
+const migrationGuideDocPath = "docs/guides/shareable-packs.md"
 
 // formatV1V2MigrationError renders the migration-guidance variant of
 // the duplicate-agent-name error. The headline is byte-stable; the
@@ -106,7 +106,7 @@ func formatV1V2MigrationError(v1, v2 Agent) error {
 			"  v1 source: %s\n"+
 			"  v2 source: %s\n"+
 			"A v1 [[agent]] block coexists with a v2 agents/<name>/agent.toml of the same name.\n"+
-			"To migrate, see: %s",
+			"Run gc doctor to inspect migration issues, then see: %s",
 		v1.QualifiedName(),
 		v1Source,
 		v2Source,

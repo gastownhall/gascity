@@ -19,6 +19,13 @@ type SessionRequest struct {
 	Tier          string
 	SessionBeadID string // concrete session to preserve for resume or in-flight new demand
 	WorkBeadID    string // the work bead driving this request
+	// FloorGuarantee marks a "new" request created to satisfy an agent's
+	// min_active_sessions floor (as opposed to elastic scale-check demand).
+	// The per-tick create-budget allocator reserves a token for each
+	// floor-bearing template before round-robining the remainder, so a cold
+	// pool's floor spawn cannot be starved by a warm pool's large elastic
+	// demand (follow-up to #2893).
+	FloorGuarantee bool
 }
 
 func beadPriority(b beads.Bead) int {
@@ -127,15 +134,7 @@ func computePoolDesiredStates(
 		// Resume tier: actionable assigned work beads whose assignee resolves
 		// to a non-closed session bead. These sessions must stay alive.
 		for _, wb := range assignedWorkBeads {
-			// Prefer gc.run_target (per-step target stamped by the cooker
-			// from formula step metadata) over gc.routed_to (convoy entry
-			// agent), mirroring the precedence in dispatch/fanout.go and
-			// dispatch/control.go. Falls back to gc.routed_to for beads
-			// authored before the gc.run_target migration (commit adaf6ec).
-			routedTo := strings.TrimSpace(wb.Metadata["gc.run_target"])
-			if routedTo == "" {
-				routedTo = strings.TrimSpace(wb.Metadata["gc.routed_to"])
-			}
+			routedTo := routedToOrLegacyWorkflowTarget(wb)
 			if wb.Status != "in_progress" && wb.Status != "open" {
 				continue
 			}
@@ -365,8 +364,9 @@ func applyNestedCaps(cfg *config.City, requests []SessionRequest, trace *session
 		minSess := agent.EffectiveMinActiveSessions()
 		for usage.agentCount[template] < minSess {
 			req := SessionRequest{
-				Template: template,
-				Tier:     "new",
+				Template:       template,
+				Tier:           "new",
+				FloorGuarantee: true,
 			}
 			if _, _, _, rejected := usage.rejection(req, limits); rejected {
 				break

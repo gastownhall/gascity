@@ -49,6 +49,15 @@ func TestOrderTrackingExecEnvFailedClassifiesAsFailedExec(t *testing.T) {
 	}
 }
 
+func TestWorkflowProjectionTargetKeepsRunTargetMigrationFallback(t *testing.T) {
+	root := beads.Bead{Metadata: map[string]string{
+		"gc.run_target": "gascity/reviewer",
+	}}
+	if got := workflowProjectionTarget(root); got != "gascity/reviewer" {
+		t.Fatalf("workflowProjectionTarget = %q, want gc.run_target fallback", got)
+	}
+}
+
 func TestOrderTrackingTriggerEnvFailedClassifiesOpenAndClosedAsFailed(t *testing.T) {
 	for _, status := range []string{"open", "closed"} {
 		t.Run(status, func(t *testing.T) {

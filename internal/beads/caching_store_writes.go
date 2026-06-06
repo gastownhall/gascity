@@ -8,7 +8,25 @@ import (
 
 // Create passes through to the backing store and updates the cache.
 func (c *CachingStore) Create(b Bead) (Bead, error) {
-	created, err := c.backing.Create(b)
+	return c.createWith(func() (Bead, error) {
+		return c.backing.Create(b)
+	})
+}
+
+// CreateWithStorage passes through a policy-selected storage class to backing
+// stores that support table-specific creates, then updates the cache.
+func (c *CachingStore) CreateWithStorage(b Bead, storage StorageClass) (Bead, error) {
+	storageBacking, ok := c.backing.(StorageCreateStore)
+	if !ok {
+		return c.Create(b)
+	}
+	return c.createWith(func() (Bead, error) {
+		return storageBacking.CreateWithStorage(b, storage)
+	})
+}
+
+func (c *CachingStore) createWith(create func() (Bead, error)) (Bead, error) {
+	created, err := create()
 	if err != nil {
 		return created, err
 	}
@@ -52,6 +70,41 @@ func (c *CachingStore) Update(id string, opts UpdateOpts) error {
 	fresh, err := c.backing.Get(id)
 	if err != nil {
 		c.mu.Lock()
+		seq := c.noteLocalMutationLocked(id)
+		if errors.Is(err, ErrNotFound) {
+			var closed Bead
+			notifyClosed := false
+			if current, ok := c.beads[id]; ok && current.Status != "closed" {
+				closed = cloneBead(current)
+				closed.Status = "closed"
+				notifyClosed = true
+			}
+			delete(c.beads, id)
+			delete(c.deps, id)
+			delete(c.dirty, id)
+			delete(c.beadSeq, id)
+			delete(c.localBeadAt, id)
+			c.deletedSeq[id] = seq
+			c.markFreshLocked(time.Now())
+			c.updateStatsLocked()
+			c.mu.Unlock()
+			if notifyClosed {
+				c.notifyChange("bead.closed", closed)
+			}
+			return nil
+		}
+		if current, ok := c.beads[id]; ok {
+			fresh = applyUpdateOptsToBead(current, opts)
+			c.beads[id] = cloneBead(fresh)
+			c.deps[id] = depsFromBeadFields(fresh)
+			c.dirty[id] = struct{}{}
+			delete(c.deletedSeq, id)
+			c.updateStatsLocked()
+			c.mu.Unlock()
+			c.recordProblem("refresh bead after update", fmt.Errorf("%s: %w", id, err))
+			c.notifyChange("bead.updated", fresh)
+			return nil
+		}
 		c.dirty[id] = struct{}{}
 		c.mu.Unlock()
 		c.recordProblem("refresh bead after update", fmt.Errorf("%s: %w", id, err))
@@ -524,6 +577,9 @@ func (c *CachingStore) updateMatchesCached(id string, opts UpdateOpts) bool {
 	if c.state != cacheLive && c.state != cachePartial {
 		return false
 	}
+	if _, dirty := c.dirty[id]; dirty {
+		return false
+	}
 	b, ok := c.beads[id]
 	if !ok {
 		return false
@@ -598,6 +654,9 @@ func (c *CachingStore) closeAlreadyMatchesCached(id string) bool {
 	if c.state != cacheLive && c.state != cachePartial {
 		return false
 	}
+	if _, dirty := c.dirty[id]; dirty {
+		return false
+	}
 	b, ok := c.beads[id]
 	if !ok {
 		return false
@@ -617,6 +676,12 @@ func (c *CachingStore) metadataAlreadyMatchesCached(id string, kvs map[string]st
 	}
 	c.mu.RLock()
 	defer c.mu.RUnlock()
+	if c.state != cacheLive && c.state != cachePartial {
+		return false
+	}
+	if _, dirty := c.dirty[id]; dirty {
+		return false
+	}
 	b, ok := c.beads[id]
 	if !ok {
 		return false

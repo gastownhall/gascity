@@ -332,8 +332,11 @@ func TestControllerStateCreatedAgentVisibleAfterStaleRuntimeInterleaving(t *test
 	current := &config.City{
 		Workspace: config.Workspace{Name: "city1"},
 		Beads:     config.BeadsConfig{Provider: "file"},
-		Rigs:      []config.Rig{{Name: "alpha", Path: rigDir}},
-		Agents:    []config.Agent{{Name: "worker", Dir: "alpha", Provider: "bash"}},
+		Providers: map[string]config.ProviderSpec{
+			"bash": {Command: "bash"},
+		},
+		Rigs:   []config.Rig{{Name: "alpha", Path: rigDir}},
+		Agents: []config.Agent{{Name: "worker", Dir: "alpha", Provider: "bash"}},
 	}
 	content, err := current.Marshal()
 	if err != nil {
@@ -355,8 +358,11 @@ func TestControllerStateCreatedAgentVisibleAfterStaleRuntimeInterleaving(t *test
 	stale := &config.City{
 		Workspace: config.Workspace{Name: "city1"},
 		Beads:     config.BeadsConfig{Provider: "file"},
-		Rigs:      []config.Rig{{Name: "alpha", Path: rigDir}},
-		Agents:    []config.Agent{{Name: "worker", Dir: "alpha", Provider: "bash"}},
+		Providers: map[string]config.ProviderSpec{
+			"bash": {Command: "bash"},
+		},
+		Rigs:   []config.Rig{{Name: "alpha", Path: rigDir}},
+		Agents: []config.Agent{{Name: "worker", Dir: "alpha", Provider: "bash"}},
 	}
 	cs.updateFromRuntime(stale, runtime.NewFake(), pendingRev)
 	if got := cs.Config(); configHasAgent(got, "alpha/helper") {
@@ -946,7 +952,7 @@ func TestControllerStateMutationRollsBackAgentOverrideWhenRefreshFails(t *testin
 		t.Fatalf("write prompt template: %v", err)
 	}
 
-	original := []byte("[workspace]\nname = \"city1\"\n")
+	original := []byte("[workspace]\nname = \"city1\"\n\n[providers.claude]\nbase = \"builtin:claude\"\n")
 	tomlPath := filepath.Join(cityDir, "city.toml")
 	if err := os.WriteFile(tomlPath, original, 0o644); err != nil {
 		t.Fatalf("write city.toml: %v", err)
@@ -1003,7 +1009,7 @@ func TestControllerStateMutationRestoresFullAgentScaffoldWhenRefreshFails(t *tes
 		}
 	}
 
-	original := []byte("[workspace]\nname = \"city1\"\n")
+	original := []byte("[workspace]\nname = \"city1\"\n\n[providers.claude]\nbase = \"builtin:claude\"\n")
 	tomlPath := filepath.Join(cityDir, "city.toml")
 	if err := os.WriteFile(tomlPath, original, 0o644); err != nil {
 		t.Fatalf("write city.toml: %v", err)
@@ -1011,6 +1017,9 @@ func TestControllerStateMutationRestoresFullAgentScaffoldWhenRefreshFails(t *tes
 
 	cs := newControllerState(context.Background(), &config.City{
 		Workspace: config.Workspace{Name: "city1"},
+		Providers: map[string]config.ProviderSpec{
+			"claude": config.BuiltinProviderAlias("claude"),
+		},
 	}, runtime.NewFake(), events.NewFake(), "city1", cityDir)
 	cs.editor = configedit.NewEditor(&corruptCityAfterRemoveFS{
 		triggerPath: agentDir,
@@ -1125,12 +1134,16 @@ func TestControllerStateSchema2CreateThenUpdateConventionAgent(t *testing.T) {
 		t.Fatalf("write pack.toml: %v", err)
 	}
 	tomlPath := filepath.Join(cityDir, "city.toml")
-	if err := os.WriteFile(tomlPath, []byte("[workspace]\nname = \"city1\"\n"), 0o644); err != nil {
+	if err := os.WriteFile(tomlPath, []byte("[workspace]\nname = \"city1\"\n\n[providers.claude]\nbase = \"builtin:claude\"\n\n[providers.codex]\nbase = \"builtin:codex\"\n"), 0o644); err != nil {
 		t.Fatalf("write city.toml: %v", err)
 	}
 
 	cs := newControllerState(context.Background(), &config.City{
 		Workspace: config.Workspace{Name: "city1"},
+		Providers: map[string]config.ProviderSpec{
+			"claude": config.BuiltinProviderAlias("claude"),
+			"codex":  config.BuiltinProviderAlias("codex"),
+		},
 	}, runtime.NewFake(), events.NewFake(), "city1", cityDir)
 	cs.pokeCh = make(chan struct{}, 2)
 	cs.configDirty = &atomic.Bool{}
@@ -1185,12 +1198,15 @@ func TestControllerStateSchema2CreateRollsBackFreshConventionScaffoldWhenAgentTO
 		t.Fatalf("write pack.toml: %v", err)
 	}
 	tomlPath := filepath.Join(cityDir, "city.toml")
-	if err := os.WriteFile(tomlPath, []byte("[workspace]\nname = \"city1\"\n"), 0o644); err != nil {
+	if err := os.WriteFile(tomlPath, []byte("[workspace]\nname = \"city1\"\n\n[providers.claude]\nbase = \"builtin:claude\"\n"), 0o644); err != nil {
 		t.Fatalf("write city.toml: %v", err)
 	}
 
 	cs := newControllerState(context.Background(), &config.City{
 		Workspace: config.Workspace{Name: "city1"},
+		Providers: map[string]config.ProviderSpec{
+			"claude": config.BuiltinProviderAlias("claude"),
+		},
 	}, runtime.NewFake(), events.NewFake(), "city1", cityDir)
 	agentDir := filepath.Join(cityDir, "agents", "helper")
 	cs.editor = configedit.NewEditor(&failAgentTomlRenameOSFS{target: filepath.Join(agentDir, "agent.toml")}, tomlPath)
@@ -1315,12 +1331,15 @@ func TestControllerStateSchema2RejectsRigScopeConventionAgent(t *testing.T) {
 		t.Fatalf("write pack.toml: %v", err)
 	}
 	tomlPath := filepath.Join(cityDir, "city.toml")
-	if err := os.WriteFile(tomlPath, []byte("[workspace]\nname = \"city1\"\n"), 0o644); err != nil {
+	if err := os.WriteFile(tomlPath, []byte("[workspace]\nname = \"city1\"\n\n[providers.claude]\nbase = \"builtin:claude\"\n"), 0o644); err != nil {
 		t.Fatalf("write city.toml: %v", err)
 	}
 
 	cs := newControllerState(context.Background(), &config.City{
 		Workspace: config.Workspace{Name: "city1"},
+		Providers: map[string]config.ProviderSpec{
+			"claude": config.BuiltinProviderAlias("claude"),
+		},
 	}, runtime.NewFake(), events.NewFake(), "city1", cityDir)
 
 	if err := cs.CreateAgent(config.Agent{Name: "helper", Provider: "claude", Scope: "rig"}); !errors.Is(err, configedit.ErrValidation) {
@@ -1349,12 +1368,15 @@ func TestControllerStateSchema2CreateThenDeleteConventionAgent(t *testing.T) {
 		t.Fatalf("write pack.toml: %v", err)
 	}
 	tomlPath := filepath.Join(cityDir, "city.toml")
-	if err := os.WriteFile(tomlPath, []byte("[workspace]\nname = \"city1\"\n"), 0o644); err != nil {
+	if err := os.WriteFile(tomlPath, []byte("[workspace]\nname = \"city1\"\n\n[providers.claude]\nbase = \"builtin:claude\"\n"), 0o644); err != nil {
 		t.Fatalf("write city.toml: %v", err)
 	}
 
 	cs := newControllerState(context.Background(), &config.City{
 		Workspace: config.Workspace{Name: "city1"},
+		Providers: map[string]config.ProviderSpec{
+			"claude": config.BuiltinProviderAlias("claude"),
+		},
 	}, runtime.NewFake(), events.NewFake(), "city1", cityDir)
 	cs.pokeCh = make(chan struct{}, 2)
 	cs.configDirty = &atomic.Bool{}
@@ -1431,7 +1453,7 @@ func TestWrapWithCachingStoreCachesNonBdStore(t *testing.T) {
 		t.Fatalf("Create: %v", err)
 	}
 
-	store := wrapWithCachingStore(context.Background(), backing, nil)
+	store := wrapWithCachingStore(context.Background(), backing, nil, true)
 	cached, ok := store.(*beads.CachingStore)
 	if !ok {
 		t.Fatalf("store type = %T, want *beads.CachingStore", store)
@@ -1450,8 +1472,44 @@ func TestWrapWithCachingStoreCachesNonBdStore(t *testing.T) {
 }
 
 func TestWrapWithCachingStoreReturnsNilStore(t *testing.T) {
-	if got := wrapWithCachingStore(context.Background(), nil, nil); got != nil {
+	if got := wrapWithCachingStore(context.Background(), nil, nil, true); got != nil {
 		t.Fatalf("wrapWithCachingStore(nil) = %#v, want nil", got)
+	}
+}
+
+// TestWrapWithCachingStoreNoBackgroundRefresh covers the suspended-rig path:
+// with backgroundRefresh=false the cache still serves pre-primed reads but does
+// NOT start the reconcile loop (StaggerOffsetMs stays 0), so a suspended rig
+// stops costing a bd subprocess per reconcile cycle.
+func TestWrapWithCachingStoreNoBackgroundRefresh(t *testing.T) {
+	backing := beads.NewMemStore()
+	created, err := backing.Create(beads.Bead{Title: "suspended-rig bead"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	// Cancellable ctx so the refresh path is reachable (Background() always
+	// early-returns regardless of the flag).
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	store := wrapWithCachingStore(ctx, backing, nil, false)
+	cached, ok := store.(*beads.CachingStore)
+	if !ok {
+		t.Fatalf("store type = %T, want *beads.CachingStore", store)
+	}
+	// Pre-primed reads still work (on-demand access to a suspended rig).
+	items, err := cached.ListOpen()
+	if err != nil {
+		t.Fatalf("ListOpen: %v", err)
+	}
+	if len(items) != 1 || items[0].ID != created.ID {
+		t.Fatalf("ListOpen = %#v, want only %s", items, created.ID)
+	}
+	// Reconciler never armed: StartReconciler (which sets StaggerOffsetMs) was
+	// not called. Give any erroneously-spawned goroutine a moment to set it.
+	time.Sleep(50 * time.Millisecond)
+	if got := cached.Stats().StaggerOffsetMs; got != 0 {
+		t.Fatalf("StaggerOffsetMs = %d, want 0 (reconciler must not start when backgroundRefresh=false)", got)
 	}
 }
 
@@ -1542,6 +1600,19 @@ func TestControllerStateUpdateClosesReplacedRigStores(t *testing.T) {
 		t.Fatal("frontend rig store was not replaced")
 	}
 	waitForCloseStoreSpy(t, oldStore)
+}
+
+func TestCloseBeadStoreHandleUnwrapsPolicyWrappedCachingStore(t *testing.T) {
+	backing := &closeStoreSpy{Store: beads.NewMemStore()}
+	cache := beads.NewCachingStore(backing, nil)
+	wrapped := wrapStoreWithBeadPolicies(cache, &config.City{})
+
+	if err := closeBeadStoreHandle(wrapped); err != nil {
+		t.Fatalf("closeBeadStoreHandle: %v", err)
+	}
+	if backing.closeCount() != 1 {
+		t.Fatalf("backing CloseStore calls = %d, want 1", backing.closeCount())
+	}
 }
 
 func TestControllerStateUpdateKeepsStaleRigStoreUsableDuringReload(t *testing.T) {
@@ -2189,9 +2260,10 @@ provider = "file"
 	if !factoryCalled {
 		t.Fatal("buildStores did not route bd-backed rig through store factory")
 	}
-	cached, ok := stores["frontend"].(*beads.CachingStore)
+	frontendStore := underlyingPolicyStoreForTest(stores["frontend"])
+	cached, ok := frontendStore.(*beads.CachingStore)
 	if !ok {
-		t.Fatalf("frontend store = %T, want caching store", stores["frontend"])
+		t.Fatalf("frontend store = %T, want caching store", frontendStore)
 	}
 	if cached.Backing() != nativeBacking {
 		t.Fatalf("frontend backing = %T, want native factory backing", cached.Backing())
@@ -2714,6 +2786,98 @@ func TestControllerStateMutationsPokeController(t *testing.T) {
 	}
 }
 
+func TestControllerStateCitySuspensionRecordsEvents(t *testing.T) {
+	cases := []struct {
+		name          string
+		initial       func(*config.City)
+		mutate        func(*controllerState) error
+		wantSuspended bool
+		wantEventType string
+		wantActor     string
+	}{
+		{
+			name: "suspend city",
+			mutate: func(cs *controllerState) error {
+				return cs.SuspendCity()
+			},
+			wantSuspended: true,
+			wantEventType: events.CitySuspended,
+			wantActor:     "gc",
+		},
+		{
+			name: "resume city",
+			initial: func(cfg *config.City) {
+				cfg.Workspace.SuspendedOnStart = true
+			},
+			mutate: func(cs *controllerState) error {
+				return cs.ResumeCity()
+			},
+			wantEventType: events.CityResumed,
+			wantActor:     "gc",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cs, tomlPath := newControllerStateMutationHarness(t)
+			ep := events.NewFake()
+			cs.eventProv = ep
+
+			if tc.initial != nil {
+				cfg, err := config.Load(fsys.OSFS{}, tomlPath)
+				if err != nil {
+					t.Fatalf("load config: %v", err)
+				}
+				tc.initial(cfg)
+				content, err := cfg.Marshal()
+				if err != nil {
+					t.Fatalf("marshal initial config: %v", err)
+				}
+				if err := os.WriteFile(tomlPath, content, 0o644); err != nil {
+					t.Fatalf("write initial config: %v", err)
+				}
+			}
+
+			if err := tc.mutate(cs); err != nil {
+				t.Fatalf("mutation failed: %v", err)
+			}
+
+			// Suspend/resume record the change in runtime state, not
+			// committed config: city.toml's workspace must stay
+			// untouched and the explicit preference lands in
+			// .gc/runtime/suspension-state.json.
+			gotCfg, err := config.Load(fsys.OSFS{}, tomlPath)
+			if err != nil {
+				t.Fatalf("reload config: %v", err)
+			}
+			if gotCfg.Workspace.Suspended {
+				t.Fatalf("city.toml workspace.suspended must remain unset, got %+v", gotCfg.Workspace)
+			}
+			st, err := suspensionstate.Load(fsys.OSFS{}, filepath.Dir(tomlPath))
+			if err != nil {
+				t.Fatalf("load suspension state: %v", err)
+			}
+			if v, ok := suspensionstate.ExplicitCity(st); !ok || v != tc.wantSuspended {
+				t.Fatalf("runtime state ExplicitCity = (%v, %v), want (%v, true)", v, ok, tc.wantSuspended)
+			}
+
+			gotEvents, err := ep.List(events.Filter{})
+			if err != nil {
+				t.Fatalf("list events: %v", err)
+			}
+			if len(gotEvents) != 1 {
+				t.Fatalf("recorded events = %+v, want exactly one %s event", gotEvents, tc.wantEventType)
+			}
+			if gotEvents[0].Type != tc.wantEventType {
+				t.Fatalf("recorded event type = %q, want %q", gotEvents[0].Type, tc.wantEventType)
+			}
+			if gotEvents[0].Actor != tc.wantActor {
+				t.Fatalf("recorded event actor = %q, want %q", gotEvents[0].Actor, tc.wantActor)
+			}
+		})
+	}
+}
+
 func TestControllerStateMutationErrorDoesNotPokeController(t *testing.T) {
 	cs, _ := newControllerStateMutationHarness(t)
 
@@ -2941,16 +3105,12 @@ func TestControllerStateBeadEventWatcherConsumesExternalFileEvent(t *testing.T) 
 		t.Fatal("external file bead event did not poke controller")
 	}
 
-	counts, _, errs := defaultScaleCheckCounts([]defaultScaleCheckTarget{{
-		template: "claude",
-		store:    cs.cityBeadStore,
-	}})
-	if len(errs) != 0 {
-		t.Fatalf("defaultScaleCheckCounts errs = %v", errs)
-	}
-	if got := counts["claude"]; got != 1 {
-		t.Fatalf("defaultScaleCheckCounts[claude] = %d, want 1", got)
-	}
+	// This test's contract is that the watcher consumes the external file event
+	// and pokes the controller (asserted above). Demand-count behavior after an
+	// incremental cache apply is not asserted here: under the cache-only demand
+	// read model it depends on the store shape (an unprimed *CachingStore reports
+	// a partial, while a logical store is served directly), so it is covered by
+	// the dedicated defaultScaleCheckCounts tests instead.
 }
 
 func TestControllerStateApplyBeadEventPokesController(t *testing.T) {

@@ -149,12 +149,15 @@ func TestRigEnrichmentUsesProcessNamesForRuntimeFalseNegative(t *testing.T) {
 	}
 }
 
-func TestRigEnrichmentUsesProviderlessDetectedProcessNames(t *testing.T) {
+func TestRigEnrichmentUsesExplicitProviderDetectedProcessNames(t *testing.T) {
 	putExecutableOnPath(t, "codex")
 	base := newFakeState(t)
 	base.cfg.Workspace.Provider = ""
+	base.cfg.Providers = map[string]config.ProviderSpec{
+		"codex": config.BuiltinProviderAlias("codex"),
+	}
 	base.cfg.Agents = []config.Agent{
-		{Name: "worker", Dir: "myrig", MaxActiveSessions: intPtr(1)},
+		{Name: "worker", Dir: "myrig", Provider: "codex", MaxActiveSessions: intPtr(1)},
 	}
 	sp := &falseNegativeSessionProvider{Fake: runtime.NewFake()}
 	if err := sp.Start(context.Background(), "myrig--worker", runtime.Config{ProcessNames: []string{"codex"}}); err != nil {

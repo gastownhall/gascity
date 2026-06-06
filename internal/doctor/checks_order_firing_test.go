@@ -8,8 +8,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/orders"
 )
 
 func TestOrderFiringCurrent_NeverFired_BeyondUptime(t *testing.T) {
@@ -158,6 +160,127 @@ func TestOrderFiringCurrent_FiredRecently(t *testing.T) {
 	}
 	if !strings.Contains(strings.Join(result.Details, "\n"), "last fired 1h ago, expected every 4h") {
 		t.Fatalf("details = %v, want recent-fire detail", result.Details)
+	}
+}
+
+func TestOrderFiringCurrent_UsesNewestOrderRunHistory(t *testing.T) {
+	// Manual `gc order run` creates order-run beads even when no controller
+	// order.fired event is emitted. Doctor must therefore merge bead history
+	// with event history and select the newest execution, not a stale event.
+	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
+	cityPath, cfg := orderFiringTestCity(t)
+	writeOrderFiringTestOrder(t, cityPath, "mol-dog-stale-db", "cron", "0 */4 * * *")
+	writeOrderFiringTestEvents(t, cityPath,
+		events.Event{Type: events.ControllerStarted, Ts: now.Add(-24 * time.Hour)},
+		events.Event{Type: events.OrderFired, Subject: "mol-dog-stale-db", Ts: now.Add(-13 * time.Hour)},
+	)
+	store := beads.NewMemStoreFrom(2, []beads.Bead{
+		{
+			ID:        "old-run",
+			Title:     "old mol-dog-stale-db",
+			Status:    "closed",
+			Type:      "molecule",
+			Labels:    []string{"order-run:mol-dog-stale-db"},
+			CreatedAt: now.Add(-13 * time.Hour),
+		},
+		{
+			ID:        "new-run",
+			Title:     "new mol-dog-stale-db",
+			Status:    "closed",
+			Type:      "molecule",
+			Labels:    []string{"order-run:mol-dog-stale-db"},
+			CreatedAt: now.Add(-1 * time.Hour),
+		},
+	}, nil)
+
+	check := NewOrderFiringCurrentCheck(cfg, cityPath, WithOrderFiringCurrentLastRunFunc(func(order orders.Order) (time.Time, error) {
+		return orders.LastRunFuncForStore(store)(order.ScopedName())
+	}))
+	check.clock = func() time.Time { return now }
+	result := check.Run(&CheckContext{CityPath: cityPath})
+
+	if result.Status != StatusOK {
+		t.Fatalf("status = %v, want OK; msg = %s; details = %v", result.Status, result.Message, result.Details)
+	}
+	if !strings.Contains(strings.Join(result.Details, "\n"), "last fired 1h ago, expected every 4h") {
+		t.Fatalf("details = %v, want newest order-run bead to win over stale event", result.Details)
+	}
+}
+
+func TestOrderFiringCurrent_SkipsSuspendedRigOrders(t *testing.T) {
+	// The dispatcher intentionally skips suspended rigs. Doctor should not turn
+	// their paused recurring orders into blocking stale-order failures.
+	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
+	cityPath, cfg := orderFiringTestCity(t)
+	rigPath := filepath.Join(cityPath, "rigs", "parked")
+	rigFormulas := filepath.Join(rigPath, "formulas")
+	rigOrders := filepath.Join(rigPath, "orders")
+	if err := os.MkdirAll(rigOrders, 0o755); err != nil {
+		t.Fatalf("creating rig orders dir: %v", err)
+	}
+	cfg.Rigs = []config.Rig{{Name: "parked", Path: rigPath, Suspended: true}}
+	cfg.FormulaLayers.Rigs = map[string][]string{"parked": {cfg.FormulaLayers.City[0], rigFormulas}}
+	writeOrderFiringTestOrderInDir(t, rigOrders, "gate-sweep", "cooldown", "1m")
+	writeOrderFiringTestEvents(t, cityPath,
+		events.Event{Type: events.ControllerStarted, Ts: now.Add(-24 * time.Hour)},
+		events.Event{Type: events.OrderFired, Subject: "gate-sweep:rig:parked", Ts: now.Add(-24 * time.Hour)},
+	)
+
+	result := runOrderFiringCurrentTest(t, cfg, cityPath, now)
+	if result.Status != StatusOK {
+		t.Fatalf("status = %v, want OK for paused rig; msg = %s; details = %v", result.Status, result.Message, result.Details)
+	}
+	if strings.Contains(strings.Join(result.Details, "\n"), "parked") {
+		t.Fatalf("details = %v, suspended rig order should be skipped", result.Details)
+	}
+}
+
+func TestOrderFiringCurrent_SkipsSuspendedRigOverrides(t *testing.T) {
+	// Suspended rig orders are pruned from the doctor scan; matching overrides
+	// must be pruned with them so a harmless paused rig does not become a scan
+	// error before the stale-order filter can skip it.
+	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
+	cityPath, cfg := orderFiringTestCity(t)
+	rigPath := filepath.Join(cityPath, "rigs", "parked")
+	rigFormulas := filepath.Join(rigPath, "formulas")
+	rigOrders := filepath.Join(rigPath, "orders")
+	if err := os.MkdirAll(rigOrders, 0o755); err != nil {
+		t.Fatalf("creating rig orders dir: %v", err)
+	}
+	cfg.Rigs = []config.Rig{{Name: "parked", Path: rigPath, Suspended: true}}
+	cfg.FormulaLayers.Rigs = map[string][]string{"parked": {cfg.FormulaLayers.City[0], rigFormulas}}
+	interval := "2m"
+	cfg.Orders.Overrides = []config.OrderOverride{{Name: "gate-sweep", Rig: "parked", Interval: &interval}}
+	writeOrderFiringTestOrderInDir(t, rigOrders, "gate-sweep", "cooldown", "1m")
+	writeOrderFiringTestEvents(t, cityPath, events.Event{Type: events.ControllerStarted, Ts: now.Add(-24 * time.Hour)})
+
+	result := runOrderFiringCurrentTest(t, cfg, cityPath, now)
+	if result.Status != StatusOK {
+		t.Fatalf("status = %v, want OK for paused rig override; msg = %s; details = %v", result.Status, result.Message, result.Details)
+	}
+}
+
+func TestOrderFiringCurrent_SkipsWildcardOverridesForSuspendedOnlyOrders(t *testing.T) {
+	// Wildcard overrides should not turn a suspended-only order into a scan
+	// error after the doctor prunes that suspended rig from the active view.
+	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
+	cityPath, cfg := orderFiringTestCity(t)
+	rigPath := filepath.Join(cityPath, "rigs", "parked")
+	rigFormulas := filepath.Join(rigPath, "formulas")
+	rigOrders := filepath.Join(rigPath, "orders")
+	if err := os.MkdirAll(rigOrders, 0o755); err != nil {
+		t.Fatalf("creating rig orders dir: %v", err)
+	}
+	cfg.Rigs = []config.Rig{{Name: "parked", Path: rigPath, Suspended: true}}
+	cfg.FormulaLayers.Rigs = map[string][]string{"parked": {cfg.FormulaLayers.City[0], rigFormulas}}
+	interval := "2m"
+	cfg.Orders.Overrides = []config.OrderOverride{{Name: "gate-sweep", Rig: orders.RigWildcard, Interval: &interval}}
+	writeOrderFiringTestOrderInDir(t, rigOrders, "gate-sweep", "cooldown", "1m")
+	writeOrderFiringTestEvents(t, cityPath, events.Event{Type: events.ControllerStarted, Ts: now.Add(-24 * time.Hour)})
+
+	result := runOrderFiringCurrentTest(t, cfg, cityPath, now)
+	if result.Status != StatusOK {
+		t.Fatalf("status = %v, want OK for wildcard override targeting only a paused rig; msg = %s; details = %v", result.Status, result.Message, result.Details)
 	}
 }
 
@@ -383,6 +506,11 @@ func orderFiringTestCity(t *testing.T) (string, *config.City) {
 
 func writeOrderFiringTestOrder(t *testing.T, cityPath, name, trigger, timing string) {
 	t.Helper()
+	writeOrderFiringTestOrderInDir(t, filepath.Join(cityPath, "orders"), name, trigger, timing)
+}
+
+func writeOrderFiringTestOrderInDir(t *testing.T, orderDir, name, trigger, timing string) {
+	t.Helper()
 	var body string
 	switch trigger {
 	case "cron":
@@ -415,7 +543,7 @@ exec = "true"
 trigger = "` + trigger + `"
 `
 	}
-	if err := os.WriteFile(filepath.Join(cityPath, "orders", name+".toml"), []byte(body), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(orderDir, name+".toml"), []byte(body), 0o644); err != nil {
 		t.Fatalf("writing order %s: %v", name, err)
 	}
 }

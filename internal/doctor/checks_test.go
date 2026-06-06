@@ -3099,10 +3099,10 @@ func writeDoctorManagedDoltConfig(t *testing.T, cityPath string, overrides map[s
 		"listener": map[string]any{
 			"port":                           "3307",
 			"host":                           "127.0.0.1",
-			"max_connections":                1000,
+			"max_connections":                256,
 			"back_log":                       50,
 			"max_connections_timeout_millis": 5000,
-			"read_timeout_millis":            300000,
+			"read_timeout_millis":            30000,
 			"write_timeout_millis":           300000,
 		},
 		"data_dir": filepath.Join(cityPath, ".beads", "dolt"),
@@ -3265,6 +3265,37 @@ func TestDoltConfigCheck_AcceptsDisabledWaitTimeout(t *testing.T) {
 	r := c.Run(&CheckContext{})
 	if r.Status != StatusOK {
 		t.Fatalf("status = %d, want OK for disabled wait_timeout; msg = %s", r.Status, r.Message)
+	}
+}
+
+func TestDoltConfigCheck_AcceptsCityConfiguredListenerOverrides(t *testing.T) {
+	dir := setupManagedDoltCity(t)
+	if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte(`[workspace]
+name = "demo"
+
+[beads]
+provider = "bd"
+
+[dolt]
+read_timeout_millis = 300000
+write_timeout_millis = 600000
+max_connections = 1024
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(fsys.OSFS{}, filepath.Join(dir, "city.toml"))
+	if err != nil {
+		t.Fatalf("Load city.toml: %v", err)
+	}
+	writeDoctorManagedDoltConfig(t, dir, map[string]any{
+		"listener.read_timeout_millis":  300000,
+		"listener.write_timeout_millis": 600000,
+		"listener.max_connections":      1024,
+	})
+	c := NewDoltConfigCheckForConfig(dir, false, cfg, nil)
+	r := c.Run(&CheckContext{})
+	if r.Status != StatusOK {
+		t.Fatalf("status = %d, want OK for city-configured listener overrides; msg = %s", r.Status, r.Message)
 	}
 }
 
@@ -3578,24 +3609,24 @@ func TestCompareDoltVersion(t *testing.T) {
 
 func TestDoltVersionCheck_OK(t *testing.T) {
 	c := NewDoltVersionCheck()
-	c.versionOutput = func() (string, error) { return "dolt version 2.0.7\n", nil }
+	c.versionOutput = func() (string, error) { return "dolt version 2.1.1\n", nil }
 	r := c.Run(&CheckContext{})
 	if r.Status != StatusOK {
 		t.Fatalf("status = %d, want OK; msg = %s", r.Status, r.Message)
 	}
-	if !strings.Contains(r.Message, "2.0.7") {
+	if !strings.Contains(r.Message, "2.1.1") {
 		t.Errorf("message = %q, want version in message", r.Message)
 	}
 }
 
 func TestDoltVersionCheck_OK_AtMinimum(t *testing.T) {
 	c := NewDoltVersionCheck()
-	c.versionOutput = func() (string, error) { return "dolt version 2.0.7\n", nil }
+	c.versionOutput = func() (string, error) { return "dolt version 2.1.0\n", nil }
 	r := c.Run(&CheckContext{})
 	if r.Status != StatusOK {
 		t.Fatalf("status = %d, want OK; msg = %s", r.Status, r.Message)
 	}
-	if !strings.Contains(r.Message, "2.0.7") {
+	if !strings.Contains(r.Message, "2.1.0") {
 		t.Errorf("message = %q, want version in message", r.Message)
 	}
 }
@@ -3626,11 +3657,10 @@ func TestDoltVersionCheck_Error_BelowMinimum(t *testing.T) {
 
 func TestDoltVersionCheck_Error_PreReleaseAtFloor(t *testing.T) {
 	cases := []string{
-		"dolt version 2.0.7-rc1\n",
-		"dolt version 2.0.7-rc1+build.5\n",
-		"dolt version 2.0.7-dev.0\n",
-		"dolt version 2.0.8-rc1\n",
 		"dolt version 2.1.0-rc1\n",
+		"dolt version 2.1.0-rc1+build.5\n",
+		"dolt version 2.1.0-dev.0\n",
+		"dolt version 2.1.1-rc1\n",
 	}
 	for _, version := range cases {
 		t.Run(strings.TrimSpace(version), func(t *testing.T) {
@@ -3640,7 +3670,7 @@ func TestDoltVersionCheck_Error_PreReleaseAtFloor(t *testing.T) {
 			if r.Status != StatusError {
 				t.Fatalf("status = %d, want Error; msg = %s", r.Status, r.Message)
 			}
-			if !strings.Contains(r.Message, "pre-release") || !strings.Contains(r.Message, "2.0.7") {
+			if !strings.Contains(r.Message, "pre-release") || !strings.Contains(r.Message, "2.1.0") {
 				t.Errorf("message = %q, want pre-release and minimum version text", r.Message)
 			}
 		})

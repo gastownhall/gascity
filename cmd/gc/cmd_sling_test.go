@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -19,6 +20,8 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	convoycore "github.com/gastownhall/gascity/internal/convoy"
+	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/pgauth"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/shellquote"
@@ -328,17 +331,20 @@ func assertStoreRoutedTo(t *testing.T, store beads.Store, beadID, want string) {
 // sharedTestFormulaDir is a package-level temp directory containing minimal
 // formula TOML files for all formula names commonly used in sling tests.
 var (
-	sharedTestFormulaDir string
-	sharedTestCityDir    string
+	sharedTestFixtureRoot string
+	sharedTestFormulaDir  string
+	sharedTestCityDir     string
 )
 
-func init() {
-	tmpRoot := os.TempDir()
-	sweepOrphanPIDPrefixedDirs(tmpRoot, testSlingFormulaDirPrefix)
-	sweepOrphanPIDPrefixedDirs(tmpRoot, testSlingCityDirPrefix)
-
-	dir, err := os.MkdirTemp("", pidPrefixedTempPattern(testSlingFormulaDirPrefix))
+func initSharedSlingTestFixtures(root string) {
+	fixtureRoot, err := os.MkdirTemp(root, pidPrefixedTempPattern(testSharedFixtureDirPrefix))
 	if err != nil {
+		panic(err)
+	}
+	sharedTestFixtureRoot = fixtureRoot
+
+	dir := filepath.Join(fixtureRoot, "formulas")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		panic(err)
 	}
 	for _, name := range []string{
@@ -353,8 +359,8 @@ func init() {
 	}
 	sharedTestFormulaDir = dir
 
-	cityDir, err := os.MkdirTemp("", pidPrefixedTempPattern(testSlingCityDirPrefix))
-	if err != nil {
+	cityDir := filepath.Join(fixtureRoot, "city")
+	if err := os.MkdirAll(cityDir, 0o755); err != nil {
 		panic(err)
 	}
 	sharedTestCityDir = cityDir
@@ -722,7 +728,7 @@ func TestCliBeadRouterAllowsSameStoreRoute(t *testing.T) {
 	}
 }
 
-func TestCliBeadRouterAllowsHQTargetFromHQStore(t *testing.T) {
+func TestCliBeadRouterAllowsCityTargetFromCityStore(t *testing.T) {
 	cityPath := t.TempDir()
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "test-city"},
@@ -844,6 +850,66 @@ func TestDoSlingSuspendedAgentForce(t *testing.T) {
 	}
 	if strings.Contains(stderr.String(), "suspended") {
 		t.Errorf("--force should suppress warning; stderr = %q", stderr.String())
+	}
+}
+
+func TestDoSlingSuspendedRigWarns(t *testing.T) {
+	runner := newFakeRunner()
+	sp := runtime.NewFake()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs:      []config.Rig{{Name: "myrig", Suspended: true}},
+	}
+	a := config.Agent{Name: "polecat", Dir: "myrig", MaxActiveSessions: intPtr(1)}
+
+	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
+	// Rig-scoped agents read their rig's store; match it so the
+	// cross-store route guard does not trip before the rig check.
+	deps.StoreRef = "rig:myrig"
+	opts := testOpts(a, "my-1")
+	code := doSling(opts, deps, nil, stdout, stderr)
+
+	if code != 0 {
+		t.Fatalf("doSling returned %d, want 0 (still routes)", code)
+	}
+	if !strings.Contains(stderr.String(), `rig "myrig" is suspended`) {
+		t.Errorf("stderr = %q, want suspended-rig warning", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "gc rig resume myrig") {
+		t.Errorf("stderr = %q, want resume hint", stderr.String())
+	}
+	assertStoreRoutedTo(t, deps.Store, "my-1", "myrig/polecat")
+}
+
+func TestDoSlingSuspendedRigForce(t *testing.T) {
+	runner := newFakeRunner()
+	sp := runtime.NewFake()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs:      []config.Rig{{Name: "myrig", Suspended: true}},
+	}
+	a := config.Agent{Name: "polecat", Dir: "myrig", MaxActiveSessions: intPtr(1)}
+
+	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
+	// Rig-scoped agents read their rig's store; match it so the
+	// cross-store route guard does not trip before the rig check.
+	deps.StoreRef = "rig:myrig"
+	opts := testOpts(a, "my-1")
+	opts.Force = true
+	code := doSling(opts, deps, nil, stdout, stderr)
+
+	if code != 0 {
+		t.Fatalf("doSling returned %d, want 0", code)
+	}
+	if strings.Contains(stderr.String(), "suspended") {
+		t.Errorf("--force should suppress warning; stderr = %q", stderr.String())
+	}
+}
+
+func TestSlingJSONWarningsSuspendedRig(t *testing.T) {
+	warnings := slingJSONWarnings(sling.SlingResult{SuspendedRig: "myrig"})
+	if !slices.Contains(warnings, "rig_suspended") {
+		t.Errorf("warnings = %v, want to contain rig_suspended", warnings)
 	}
 }
 
@@ -1059,7 +1125,8 @@ func TestDoSlingNudgePoolMemberUsesBeadDerivedSessionName(t *testing.T) {
 	sp.Calls = nil
 
 	cfg := &config.City{
-		Workspace: config.Workspace{Name: "test-city"},
+		Workspace: config.Workspace{Name: "test-city", Provider: "claude"},
+		Providers: builtinProviderAliasesForTest("claude"),
 		Agents: []config.Agent{{
 			Name: "polecat",
 			Dir:  "hw",
@@ -1650,16 +1717,52 @@ max_active_sessions = 1
 		t.Fatalf("session bead count = %d, want 0 after sling; sessions=%#v", len(sessions), sessions)
 	}
 
-	counts, _, errs := defaultScaleCheckCounts([]defaultScaleCheckTarget{{
-		template: "worker",
-		storeKey: "city",
-		store:    store,
-	}})
-	if len(errs) != 0 {
-		t.Fatalf("defaultScaleCheckCounts errs = %v", errs)
+	// mol-do-work is a graph.v2 formula (#2941): the default-formula sling
+	// creates a one-item input convoy plus a workflow root instead of
+	// routing the bare work bead.
+	all, err := store.List(beads.ListQuery{AllowScan: true, TierMode: beads.TierBoth})
+	if err != nil {
+		t.Fatalf("store.List: %v", err)
 	}
-	if got := counts["worker"]; got != 1 {
-		t.Fatalf("defaultScaleCheckCounts[worker] = %d, want 1 routed work bead demand", got)
+	var root *beads.Bead
+	for i := range all {
+		if all[i].Metadata["gc.kind"] == "workflow" {
+			root = &all[i]
+			break
+		}
+	}
+	if root == nil {
+		t.Fatalf("no graph.v2 workflow root created; beads=%#v", all)
+	}
+	inputConvoyID := root.Metadata["gc.input_convoy_id"]
+	if inputConvoyID == "" {
+		t.Fatalf("workflow root %s missing gc.input_convoy_id: %v", root.ID, root.Metadata)
+	}
+	members, err := convoycore.Members(store, inputConvoyID, true)
+	if err != nil {
+		t.Fatalf("convoycore.Members(%s): %v", inputConvoyID, err)
+	}
+	if len(members) != 1 || members[0].Title != "ship feature" {
+		t.Fatalf("input convoy members = %#v, want the slung work bead", members)
+	}
+
+	// Demand surfaces through the assigned-work path: the routed graph step
+	// bead makes the reconciler desire a worker session even though sling
+	// itself materialized nothing.
+	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityDir, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+	var dsErr bytes.Buffer
+	ds := buildDesiredState("demo", cityDir, time.Now().UTC(), cfg, runtime.NewFake(), store, &dsErr)
+	desiredWorkers := 0
+	for name := range ds.State {
+		if strings.HasPrefix(name, "worker-") {
+			desiredWorkers++
+		}
+	}
+	if desiredWorkers != 1 {
+		t.Fatalf("desired worker sessions = %d, want 1 from routed graph step demand; state=%v stderr=%s", desiredWorkers, ds.State, dsErr.String())
 	}
 }
 
@@ -1781,6 +1884,8 @@ func installCaptureBdRunner(t *testing.T) *[]bdInvocation {
 			case len(args) >= 2 && args[0] == "show" && args[1] == "--json":
 				return nil, fmt.Errorf("issue not found")
 			case len(args) >= 2 && args[0] == "list" && args[1] == "--json":
+				return []byte(`[]`), nil
+			case len(args) >= 2 && args[0] == "query" && args[1] == "--json":
 				return []byte(`[]`), nil
 			default:
 				t.Errorf("unexpected bd subcommand args=%v — fake must be extended if sling now invokes this", args)
@@ -3537,7 +3642,6 @@ func TestCheckBeadStateForceSkipsCheck(t *testing.T) {
 
 func TestCheckBeadStateFormulaChecksResolvedBead(t *testing.T) {
 	runner := newFakeRunner()
-	runner.on("bd mol cook", "WP-99\n", nil)
 	sp := runtime.NewFake()
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
 	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
@@ -3723,7 +3827,6 @@ func TestDoSlingBatchRegularBeadPassthrough(t *testing.T) {
 
 func TestDoSlingBatchFormulaPassthrough(t *testing.T) {
 	runner := newFakeRunner()
-	runner.on("bd mol cook", "WP-1\n", nil)
 	sp := runtime.NewFake()
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
 	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
@@ -4174,7 +4277,7 @@ func TestOnFormulaCopiesSourcePriorityToCreatedBeads(t *testing.T) {
 		t.Fatal("workflow root has no descendants")
 	}
 
-	all, err := deps.Store.ListOpen()
+	all, err := deps.Store.List(beads.ListQuery{AllowScan: true, TierMode: beads.TierBoth})
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
@@ -4239,10 +4342,35 @@ title = "Do work"
 	if got := parent.Status; got != "open" {
 		t.Fatalf("parent status = %q, want open", got)
 	}
-	rootID := parent.Metadata["workflow_id"]
-	if rootID == "" {
-		t.Fatal("parent workflow_id missing")
+	if got := parent.Metadata["workflow_id"]; got != "" {
+		t.Fatalf("parent workflow_id = %q, want empty for convoy-first graph.v2", got)
 	}
+	inputConvoys, err := deps.Store.List(beads.ListQuery{Type: "convoy"})
+	if err != nil {
+		t.Fatalf("list input convoys: %v", err)
+	}
+	var inputConvoy beads.Bead
+	for _, candidate := range inputConvoys {
+		members, err := convoycore.Members(deps.Store, candidate.ID, true)
+		if err != nil {
+			t.Fatalf("members(%s): %v", candidate.ID, err)
+		}
+		if len(members) == 1 && members[0].ID == "BL-42" {
+			inputConvoy = candidate
+			break
+		}
+	}
+	if inputConvoy.ID == "" {
+		t.Fatalf("input convoy for BL-42 not found in %+v", inputConvoys)
+	}
+	roots, err := deps.Store.ListByMetadata(map[string]string{"gc.input_convoy_id": inputConvoy.ID, "gc.kind": "workflow"}, 1)
+	if err != nil {
+		t.Fatalf("list workflow roots: %v", err)
+	}
+	if len(roots) != 1 {
+		t.Fatalf("workflow root count = %d, want 1", len(roots))
+	}
+	rootID := roots[0].ID
 
 	root, err := deps.Store.Get(rootID)
 	if err != nil {
@@ -4251,11 +4379,17 @@ title = "Do work"
 	if got := root.Status; got != "in_progress" {
 		t.Fatalf("root status = %q, want in_progress", got)
 	}
-	if got := root.Metadata["gc.run_target"]; got != "mayor" {
-		t.Fatalf("root gc.run_target = %q, want mayor", got)
+	// #2763 / ga-eld2x: the root persists gc.routed_to — the sole canonical
+	// delivery key the worker claim path reads — so a pool-routed root is
+	// claimable and not idle-reaped. gc.run_target is no longer stamped.
+	if got := root.Metadata["gc.routed_to"]; got != "mayor" {
+		t.Fatalf("root gc.routed_to = %q, want mayor", got)
 	}
-	if got := root.Metadata["gc.source_bead_id"]; got != "BL-42" {
-		t.Fatalf("root gc.source_bead_id = %q, want BL-42", got)
+	if _, ok := root.Metadata["gc.run_target"]; ok {
+		t.Fatalf("root still carries retired gc.run_target = %q", root.Metadata["gc.run_target"])
+	}
+	if got := root.Metadata["gc.source_bead_id"]; got != "" {
+		t.Fatalf("root gc.source_bead_id = %q, want empty", got)
 	}
 	if got := root.Metadata["gc.scope_kind"]; got != "city" {
 		t.Fatalf("root gc.scope_kind = %q, want city", got)
@@ -4263,13 +4397,13 @@ title = "Do work"
 	if got := root.Metadata["gc.scope_ref"]; got != "test-city" {
 		t.Fatalf("root gc.scope_ref = %q, want test-city", got)
 	}
-	if got := root.Metadata[sourceworkflow.SourceStoreRefMetadataKey]; got != "city:test-city" {
-		t.Fatalf("root %s = %q, want city:test-city", sourceworkflow.SourceStoreRefMetadataKey, got)
+	if got := root.Metadata[sourceworkflow.SourceStoreRefMetadataKey]; got != "" {
+		t.Fatalf("root %s = %q, want empty", sourceworkflow.SourceStoreRefMetadataKey, got)
 	}
 	if got := root.Metadata["gc.root_store_ref"]; got != "city:test-city" {
 		t.Fatalf("root gc.root_store_ref = %q, want city:test-city", got)
 	}
-	all, err := deps.Store.ListOpen()
+	all, err := deps.Store.List(beads.ListQuery{AllowScan: true, TierMode: beads.TierBoth})
 	if err != nil {
 		t.Fatalf("list workflow beads: %v", err)
 	}
@@ -4305,7 +4439,7 @@ title = "Do work"
 		}
 	}
 	if assigned == 0 {
-		t.Fatal("expected at least one assigned workflow bead")
+		t.Fatalf("expected at least one assigned workflow bead; rows=%#v", all)
 	}
 	if !strings.Contains(stdout.String(), "Attached workflow") {
 		t.Fatalf("stdout = %q, want attached workflow message", stdout.String())
@@ -4356,17 +4490,10 @@ title = "Do work"
 	code := doSling(opts, deps, nil, stdout, stderr)
 
 	if code != 3 {
-		t.Fatalf("doSling returned %d, want 3; stderr: %s", code, stderr.String())
+		t.Fatalf("doSling returned %d, want 3 for legacy source workflow conflict; stderr: %s", code, stderr.String())
 	}
-	if got := stdout.String(); got != "" {
-		t.Fatalf("stdout = %q, want empty", got)
-	}
-	errText := stderr.String()
-	if !strings.Contains(errText, "source bead BL-42 already has live workflow(s): wf-existing") {
-		t.Fatalf("stderr = %q, want blocking workflow ids", errText)
-	}
-	if !strings.Contains(errText, "gc workflow delete-source BL-42 --store-ref city:test-city --apply") {
-		t.Fatalf("stderr = %q, want cleanup hint", errText)
+	if !strings.Contains(stderr.String(), "already has live workflow") {
+		t.Fatalf("stderr = %q, want live workflow conflict", stderr.String())
 	}
 }
 
@@ -4419,8 +4546,15 @@ title = "Do work"
 	if err != nil {
 		t.Fatalf("Get(BL-1): %v", err)
 	}
-	if child.Metadata["workflow_id"] == "" {
-		t.Fatal("child workflow_id missing")
+	if got := child.Metadata["workflow_id"]; got != "" {
+		t.Fatalf("child workflow_id = %q, want empty; convoy is graph.v2 input", got)
+	}
+	roots, err := deps.Store.ListByMetadata(map[string]string{"gc.input_convoy_id": "CVY-1", "gc.kind": "workflow"}, 1)
+	if err != nil {
+		t.Fatalf("list workflow roots: %v", err)
+	}
+	if len(roots) != 1 {
+		t.Fatalf("workflow root count = %d, want 1", len(roots))
 	}
 	out := stdout.String()
 	if !strings.Contains(out, "Attached workflow") {
@@ -4479,30 +4613,21 @@ title = "Do work"
 	opts.OnFormula = "graph-work"
 	code := doSlingBatch(opts, deps, q, stdout, stderr)
 
-	// Batch conflicts must use the same exit-3 contract as single-bead
-	// conflicts so users see the cleanup hint and know to run
-	// `gc workflow delete-source`. Before the adoption-review fixups
-	// batch returned exit 1 with no hint; that was the bug this PR
-	// exists to close for the batch path as well.
-	if code != 3 {
-		t.Fatalf("doSlingBatch returned %d, want 3 (exit-3 contract for batch conflict); stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	if code != 0 {
+		t.Fatalf("doSlingBatch returned %d, want 0 under convoy-first graph.v2; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
 	}
 	if len(runner.calls) != 0 {
 		t.Fatalf("graph workflow runner calls = %d, want 0; calls=%v", len(runner.calls), runner.calls)
-	}
-	errText := stderr.String()
-	if !strings.Contains(errText, "Failed BL-1: source bead BL-1 already has live workflow(s): wf-existing") {
-		t.Fatalf("stderr = %q, want per-child conflict summary", errText)
-	}
-	if !strings.Contains(errText, "gc workflow delete-source BL-1") {
-		t.Fatalf("stderr = %q, want cleanup hint for conflicted child", errText)
 	}
 	child, err := deps.Store.Get("BL-1")
 	if err != nil {
 		t.Fatalf("Get(BL-1): %v", err)
 	}
 	if got := child.Metadata["workflow_id"]; got != "" {
-		t.Fatalf("child workflow_id = %q, want unchanged empty metadata", got)
+		t.Fatalf("child workflow_id = %q, want empty; convoy is graph.v2 input", got)
+	}
+	if !strings.Contains(stdout.String(), "Attached workflow") {
+		t.Fatalf("stdout = %q, want attached workflow", stdout.String())
 	}
 }
 
@@ -5246,7 +5371,6 @@ func TestOnFormulaCleanBead(t *testing.T) {
 
 func TestOnFormulaNilQuerier(t *testing.T) {
 	runner := newFakeRunner()
-	runner.on("bd mol cook", "WP-1\n", nil)
 	sp := runtime.NewFake()
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
 	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
@@ -5736,7 +5860,6 @@ func TestBatchOnPartialCookFailure(t *testing.T) {
 
 func TestBatchOnNudgeOnce(t *testing.T) {
 	runner := newFakeRunner()
-	runner.on("bd mol cook", "WP-1\n", nil)
 	sp := runtime.NewFake()
 	_ = sp.Start(context.Background(), "mayor", runtime.Config{})
 	sp.Calls = nil
@@ -5917,7 +6040,7 @@ func TestDryRunFormula(t *testing.T) {
 	if !strings.Contains(out, "Name: code-review") {
 		t.Errorf("stdout missing formula name: %s", out)
 	}
-	if !strings.Contains(out, "Would run: bd mol cook --formula=code-review") {
+	if !strings.Contains(out, "Would run: gc formula cook code-review") {
 		t.Errorf("stdout missing cook command: %s", out)
 	}
 	if !strings.Contains(out, "'<wisp-root>'") {
@@ -5951,7 +6074,7 @@ func TestDryRunOnFormula(t *testing.T) {
 	if !strings.Contains(out, "Attach formula:") {
 		t.Errorf("stdout missing attach section: %s", out)
 	}
-	if !strings.Contains(out, "Would run: bd mol cook --formula=code-review --on=BL-42") {
+	if !strings.Contains(out, "Would run: gc formula cook code-review --attach BL-42") {
 		t.Errorf("stdout missing cook command: %s", out)
 	}
 	if !strings.Contains(out, "Pre-check: BL-42 has no existing molecule/wisp children") {
@@ -6161,7 +6284,7 @@ func TestDryRunLeafTaskViaBatchDispatchOnFormula(t *testing.T) {
 	if !strings.Contains(out, "Attach formula:") {
 		t.Errorf("stdout missing single-bead attach section: %s", out)
 	}
-	if !strings.Contains(out, "Would run: bd mol cook --formula=code-review --on=BL-42") {
+	if !strings.Contains(out, "Would run: gc formula cook code-review --attach BL-42") {
 		t.Errorf("stdout missing cook command: %s", out)
 	}
 	if !strings.Contains(out, "bd update 'BL-42' --set-metadata gc.routed_to=hw/polecat") {
@@ -6200,13 +6323,13 @@ func TestDryRunBatchOnFormula(t *testing.T) {
 	}
 	out := stdout.String()
 	// Per-child cook commands.
-	if !strings.Contains(out, "bd mol cook --formula=code-review --on=BL-1") {
+	if !strings.Contains(out, "gc formula cook code-review --attach BL-1") {
 		t.Errorf("stdout missing BL-1 cook command: %s", out)
 	}
-	if !strings.Contains(out, "bd mol cook --formula=code-review --on=BL-3") {
+	if !strings.Contains(out, "gc formula cook code-review --attach BL-3") {
 		t.Errorf("stdout missing BL-3 cook command: %s", out)
 	}
-	if strings.Contains(out, "bd mol cook --formula=code-review --on=BL-2") {
+	if strings.Contains(out, "gc formula cook code-review --attach BL-2") {
 		t.Errorf("stdout should not cook for closed BL-2: %s", out)
 	}
 	// Route commands.
@@ -6742,7 +6865,6 @@ func TestDoSlingIdempotentForceOverrides(t *testing.T) {
 
 func TestDoSlingIdempotentWithOnFormula(t *testing.T) {
 	runner := newFakeRunner()
-	runner.on("bd mol cook", "WP-1\n", nil)
 	sp := runtime.NewFake()
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
 	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
@@ -7162,7 +7284,6 @@ func TestDryRunBatchCrossRigSection(t *testing.T) {
 
 func TestDoSlingCrossRigFormulaExempt(t *testing.T) {
 	runner := newFakeRunner()
-	runner.on("bd mol cook", "WP-1\n", nil)
 	sp := runtime.NewFake()
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "test-city"},
@@ -7244,7 +7365,6 @@ func TestDoSlingOnFormulaCrossRigBlocked(t *testing.T) {
 
 func TestDoSlingOnFormulaCrossRigForceOverrides(t *testing.T) {
 	runner := newFakeRunner()
-	runner.on("bd mol cook", "WP-1\n", nil)
 	sp := runtime.NewFake()
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "test-city"},

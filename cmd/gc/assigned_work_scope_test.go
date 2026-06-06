@@ -52,6 +52,39 @@ func TestFilterAssignedWorkBeadsForSessionWakeKeepsOnlyReachableAssigneeSources(
 	}
 }
 
+func TestFilterAssignedWorkBeadsForSessionWakeCityScopedAgentIsCrossStoreEligible(t *testing.T) {
+	// vp-kvp: a city-scoped singleton legitimately serves per-rig routed work.
+	// Its assigned work may live in ANY store, so reachability must federate
+	// across stores — gating it to its own configured rig is the cross-store
+	// dead-drop this fixes. Rig-scoped agents stay single-store (unchanged).
+	cityPath := t.TempDir()
+	rigPath := filepath.Join(cityPath, "riga")
+	cfg := &config.City{
+		Rigs: []config.Rig{{Name: "riga", Path: rigPath}},
+		Agents: []config.Agent{{
+			Name:  "auditor",
+			Scope: "city",
+		}},
+		NamedSessions: []config.NamedSession{{
+			Template: "auditor",
+			Scope:    "city",
+			Mode:     "on_demand",
+		}},
+	}
+	identity := cfg.NamedSessions[0].QualifiedName()
+	work := []beads.Bead{
+		{ID: "city-work", Status: "open", Assignee: identity},
+		{ID: "rig-work", Status: "open", Assignee: identity},
+	}
+	storeRefs := []string{"", "riga"} // city store + rig store
+
+	got := filterAssignedWorkBeadsForSessionWake(cfg, cityPath, nil, work, storeRefs)
+
+	if len(got) != 2 {
+		t.Fatalf("city-scoped %q must be reachable from BOTH stores; got %d: %#v", identity, len(got), got)
+	}
+}
+
 func TestFilterAssignedWorkBeadsForPoolDemandKeepsDirectAssigneeAfterTemplateFallback(t *testing.T) {
 	cfg := &config.City{
 		Agents: []config.Agent{{
@@ -78,6 +111,29 @@ func TestFilterAssignedWorkBeadsForPoolDemandKeepsDirectAssigneeAfterTemplateFal
 
 	if len(got) != 1 || got[0].ID != "direct-assigned" {
 		t.Fatalf("filtered work = %#v, want direct-assigned work preserved through template fallback", got)
+	}
+}
+
+func TestFilterAssignedWorkBeadsForPoolDemandKeepsLegacyWorkflowRunTarget(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{{
+			Name: "worker",
+		}},
+	}
+	work := []beads.Bead{{
+		ID:       "legacy-workflow-root",
+		Status:   "in_progress",
+		Assignee: "worker-dead",
+		Metadata: map[string]string{
+			"gc.kind":       "workflow",
+			"gc.run_target": "worker",
+		},
+	}}
+
+	got := filterAssignedWorkBeadsForPoolDemand(cfg, "", nil, work, []string{""})
+
+	if len(got) != 1 || got[0].ID != "legacy-workflow-root" {
+		t.Fatalf("filtered work = %#v, want legacy workflow root preserved through run_target fallback", got)
 	}
 }
 
@@ -343,5 +399,102 @@ func TestAgentReachableStoreLabel(t *testing.T) {
 	}
 	if got := agentutil.AgentReachableStoreLabel(hqAgent, cityPath, "test-city", nil); got != "" {
 		t.Errorf("nil cfg label = %q, want empty", got)
+	}
+}
+
+func TestSessionHasOpenAssignedWorkIncludesReachableAssignedWisp(t *testing.T) {
+	cityPath := t.TempDir()
+	rigPath := filepath.Join(cityPath, "riga")
+	cfg := &config.City{
+		Rigs: []config.Rig{{Name: "riga", Path: rigPath}},
+		Agents: []config.Agent{{
+			Name: "worker",
+			Dir:  "riga",
+		}},
+	}
+	cityStore := beads.NewMemStore()
+	rigStore := beads.NewMemStore()
+	session := beads.Bead{
+		ID:     "session-1",
+		Type:   sessionBeadType,
+		Status: "open",
+		Metadata: map[string]string{
+			"template":     "riga/worker",
+			"session_name": "worker-session",
+		},
+	}
+	wisp, err := rigStore.Create(beads.Bead{
+		ID:        "rig-wisp-work",
+		Title:     "active workflow step",
+		Type:      "task",
+		Status:    "in_progress",
+		Assignee:  session.Metadata["session_name"],
+		Ephemeral: true,
+	})
+	if err != nil {
+		t.Fatalf("Create rig wisp work: %v", err)
+	}
+	inProgress := "in_progress"
+	if err := rigStore.Update(wisp.ID, beads.UpdateOpts{Status: &inProgress}); err != nil {
+		t.Fatalf("mark rig wisp in progress: %v", err)
+	}
+
+	has, err := sessionHasOpenAssignedWorkForReachableStore(cityPath, cfg, cityStore, map[string]beads.Store{"riga": rigStore}, session)
+	if err != nil {
+		t.Fatalf("sessionHasOpenAssignedWorkForReachableStore: %v", err)
+	}
+	if !has {
+		t.Fatal("reachable assigned wisp work should count before closing a session")
+	}
+}
+
+func TestFirstOpenAssignedWorkBeadIncludesAssignedWisp(t *testing.T) {
+	store := beads.NewMemStore()
+	wisp, err := store.Create(beads.Bead{
+		Title:     "active workflow step",
+		Type:      "task",
+		Assignee:  "worker-session",
+		Ephemeral: true,
+	})
+	if err != nil {
+		t.Fatalf("Create wisp work: %v", err)
+	}
+	inProgress := "in_progress"
+	if err := store.Update(wisp.ID, beads.UpdateOpts{Status: &inProgress}); err != nil {
+		t.Fatalf("mark wisp in progress: %v", err)
+	}
+
+	got, found, err := firstOpenAssignedWorkBeadInStoreByIdentifiers(store, []string{"worker-session"})
+	if err != nil {
+		t.Fatalf("firstOpenAssignedWorkBeadInStoreByIdentifiers: %v", err)
+	}
+	if !found {
+		t.Fatal("assigned wisp work should be found for session diagnostics")
+	}
+	if got.ID != wisp.ID {
+		t.Fatalf("first assigned work ID = %q, want %q", got.ID, wisp.ID)
+	}
+}
+
+func TestResolveTaskWorkDirIncludesAssignedWisp(t *testing.T) {
+	workDir := t.TempDir()
+	store := beads.NewMemStore()
+	wisp, err := store.Create(beads.Bead{
+		Title:     "active workflow step",
+		Type:      "task",
+		Assignee:  "worker-session",
+		Metadata:  map[string]string{"work_dir": workDir},
+		Ephemeral: true,
+	})
+	if err != nil {
+		t.Fatalf("Create wisp work: %v", err)
+	}
+	inProgress := "in_progress"
+	if err := store.Update(wisp.ID, beads.UpdateOpts{Status: &inProgress}); err != nil {
+		t.Fatalf("mark wisp in progress: %v", err)
+	}
+
+	if got := resolveTaskWorkDir(store, "worker-session"); got != workDir {
+		t.Fatalf("resolveTaskWorkDir = %q, want assigned wisp work_dir %q", got, workDir)
 	}
 }

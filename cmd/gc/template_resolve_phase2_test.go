@@ -154,6 +154,7 @@ func resolvePhase2Template(t *testing.T, tc phase2ProviderCase) TemplateParams {
 		cityName:   "phase2-city",
 		cityPath:   cityPath,
 		workspace:  &config.Workspace{Provider: tc.family},
+		providers:  builtinProviderAliasesForTest(tc.family),
 		lookPath:   func(name string) (string, error) { return filepath.Join("/usr/bin", name), nil },
 		fs:         fsys.OSFS{},
 		beaconTime: time.Unix(0, 0),

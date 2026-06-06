@@ -153,6 +153,7 @@ func TestBuildAwakeInputPropagatesMinActiveSessions(t *testing.T) {
 	minSess := 1
 	input := buildAwakeInputFromReconciler(
 		&config.City{Agents: []config.Agent{{Name: "pl", MinActiveSessions: &minSess}}},
+		"", // cityPath: empty exercises zero suspension state
 		nil, nil, nil, nil, nil, nil, nil, nil,
 		time.Now().UTC(),
 	)

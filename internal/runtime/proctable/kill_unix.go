@@ -43,10 +43,14 @@ func KillByPID(pid int) error {
 }
 
 func signalPID(pid int, sig syscall.Signal) error {
-	if err := syscall.Kill(-pid, sig); err == nil {
+	return signalPIDWith(pid, sig, syscall.Kill)
+}
+
+func signalPIDWith(pid int, sig syscall.Signal, kill func(int, syscall.Signal) error) error {
+	if err := kill(-pid, sig); err == nil {
 		return nil
 	}
-	err := syscall.Kill(pid, sig)
+	err := kill(pid, sig)
 	if errors.Is(err, syscall.ESRCH) {
 		return nil
 	}

@@ -9,7 +9,7 @@ Use these sources in order:
 
 | Need | Source |
 |---|---|
-| Current user-facing migration guidance | `docs/guides/migrating-to-pack-vnext.md` |
+| Current user-facing pack guidance | `docs/guides/shareable-packs.md` |
 | Current user-facing shareable-pack guidance | `docs/guides/shareable-packs.md` |
 | Generated config reference | `docs/reference/config.md` |
 | PackV2 rollout/design history | this directory |

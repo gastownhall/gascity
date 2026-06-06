@@ -168,6 +168,12 @@ func SupportsProviderReadiness(name string) bool {
 	return ok
 }
 
+// ProviderReadinessNames returns the readiness-aware provider names in
+// canonical onboarding order.
+func ProviderReadinessNames() []string {
+	return append([]string(nil), defaultProviderReadinessItems...)
+}
+
 // ProbeProviders returns readiness results for the requested provider names.
 // Provider names must be supported by the readiness registry.
 func ProbeProviders(ctx context.Context, providers []string, fresh bool) (map[string]ReadinessItem, error) {

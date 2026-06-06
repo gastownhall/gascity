@@ -33,8 +33,9 @@ func writeTestFile(t *testing.T, dir, name, content string) {
 	}
 }
 
-func stubCleanRepoCacheGit(t *testing.T, commit string) {
+func stubCleanRepoCacheGit(t *testing.T) string {
 	t.Helper()
+	const commit = "abc123def456"
 	prev := runRepoCacheGit
 	runRepoCacheGit = func(dir string, args ...string) (string, error) {
 		if len(args) >= 2 && args[0] == "rev-parse" && args[1] == "HEAD" {
@@ -46,6 +47,7 @@ func stubCleanRepoCacheGit(t *testing.T, commit string) {
 		return prev(dir, args...)
 	}
 	t.Cleanup(func() { runRepoCacheGit = prev })
+	return commit
 }
 
 //nolint:unparam // test helper keeps the permission explicit at each call site.
@@ -116,7 +118,7 @@ scope = "city"
 	}
 }
 
-func TestImport_RejectsPackAgentDefaultsDefaultSlingFormula(t *testing.T) {
+func TestImport_PackAgentDefaultsApplyToImportedAgents(t *testing.T) {
 	dir := t.TempDir()
 	cityDir := filepath.Join(dir, "city")
 	importDir := filepath.Join(dir, "tools")
@@ -140,24 +142,113 @@ source = "../tools"
 name = "tools"
 schema = 1
 
+[providers.claude]
+base = "builtin:claude"
+
+[providers.codex]
+base = "builtin:codex"
+
 [agent_defaults]
+provider = "codex"
 default_sling_formula = "mol-pack-default"
+
+[[agent]]
+name = "worker"
+scope = "city"
+
+[[agent]]
+name = "reviewer"
+scope = "city"
+provider = "claude"
+`)
+
+	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityDir, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+
+	var worker, reviewer *Agent
+	for i := range cfg.Agents {
+		switch cfg.Agents[i].QualifiedName() {
+		case "tools.worker":
+			worker = &cfg.Agents[i]
+		case "tools.reviewer":
+			reviewer = &cfg.Agents[i]
+		}
+	}
+	if worker == nil || reviewer == nil {
+		t.Fatalf("expected imported worker and reviewer, got worker=%v reviewer=%v", worker != nil, reviewer != nil)
+	}
+	if got := worker.Provider; got != "codex" {
+		t.Fatalf("worker Provider = %q, want codex", got)
+	}
+	if got := worker.EffectiveDefaultSlingFormula(); got != "mol-pack-default" {
+		t.Fatalf("worker EffectiveDefaultSlingFormula = %q, want mol-pack-default", got)
+	}
+	if got := reviewer.Provider; got != "claude" {
+		t.Fatalf("reviewer Provider = %q, want explicit claude", got)
+	}
+}
+
+func TestImport_PackAgentDefaultsProviderOverridesCityDefaultForImportedAgent(t *testing.T) {
+	dir := t.TempDir()
+	cityDir := filepath.Join(dir, "city")
+	importDir := filepath.Join(dir, "tools")
+	mustMkdirAll(t, cityDir, 0o755)
+	mustMkdirAll(t, importDir, 0o755)
+
+	writeTestFile(t, cityDir, "city.toml", `
+[workspace]
+name = "test"
+
+[providers.codex]
+base = "builtin:codex"
+
+[providers.gemini]
+base = "builtin:gemini"
+
+[agent_defaults]
+provider = "gemini"
+`)
+	writeTestFile(t, cityDir, "pack.toml", `
+[pack]
+name = "test"
+schema = 1
+
+[imports.tools]
+source = "../tools"
+`)
+	writeTestFile(t, importDir, "pack.toml", `
+[pack]
+name = "tools"
+schema = 1
+
+[providers.codex]
+base = "builtin:codex"
+
+[agent_defaults]
+provider = "codex"
 
 [[agent]]
 name = "worker"
 scope = "city"
 `)
 
-	_, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityDir, "city.toml"))
-	if err == nil {
-		t.Fatal("expected LoadWithIncludes to reject imported pack [agent_defaults]")
+	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityDir, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
 	}
-	if !strings.Contains(err.Error(), "[agent_defaults] is a city.toml table, not a pack.toml field") {
-		t.Fatalf("error = %v, want pack authoring surface rejection", err)
+
+	for _, a := range cfg.Agents {
+		if a.QualifiedName() != "tools.worker" {
+			continue
+		}
+		if got := a.Provider; got != "codex" {
+			t.Fatalf("tools.worker Provider = %q, want imported pack default codex", got)
+		}
+		return
 	}
-	if !strings.Contains(err.Error(), filepath.Join(importDir, "pack.toml")) {
-		t.Fatalf("error = %v, want offending imported pack path", err)
-	}
+	t.Fatalf("imported agent tools.worker not found: %+v", explicitAgents(cfg.Agents))
 }
 
 func TestImport_CityAgentDefaultsDefaultSlingFormulaAppliesToImportedAgent(t *testing.T) {
@@ -621,8 +712,7 @@ func TestImport_RootPackRemoteImportFromLockfileCache(t *testing.T) {
 	mustMkdirAll(t, cityDir, 0o755)
 
 	source := "https://github.com/example/gastown.git"
-	commit := "abc123def456"
-	stubCleanRepoCacheGit(t, commit)
+	commit := stubCleanRepoCacheGit(t)
 	cacheKey := fmt.Sprintf("%x", sha256.Sum256([]byte(source+commit)))
 	cacheDir := filepath.Join(home, ".gc", "cache", "repos", cacheKey)
 	mustMkdirAll(t, filepath.Join(cacheDir, ".git"), 0o755)
@@ -899,8 +989,7 @@ func TestImport_RootPackRemoteSubpathImportFromLockfileCache(t *testing.T) {
 	cityDir := filepath.Join(dir, "city")
 	mustMkdirAll(t, cityDir, 0o755)
 
-	commit := "abc123def456"
-	stubCleanRepoCacheGit(t, commit)
+	commit := stubCleanRepoCacheGit(t)
 	cacheKey := fmt.Sprintf("%x", sha256.Sum256([]byte("file:///tmp/repo.git"+commit)))
 	cacheDir := filepath.Join(home, ".gc", "cache", "repos", cacheKey)
 	mustMkdirAll(t, filepath.Join(cacheDir, ".git"), 0o755)
@@ -960,8 +1049,7 @@ func TestImport_RootPackGitHubTreeImportFromLockfileCache(t *testing.T) {
 	cityDir := filepath.Join(dir, "city")
 	mustMkdirAll(t, cityDir, 0o755)
 
-	commit := "abc123def456"
-	stubCleanRepoCacheGit(t, commit)
+	commit := stubCleanRepoCacheGit(t)
 	cacheKey := fmt.Sprintf("%x", sha256.Sum256([]byte("https://github.com/example/repo.git"+commit)))
 	cacheDir := filepath.Join(home, ".gc", "cache", "repos", cacheKey)
 	mustMkdirAll(t, filepath.Join(cacheDir, ".git"), 0o755)
@@ -1009,6 +1097,51 @@ scope = "city"
 	}
 	if !found["base.scout"] {
 		t.Errorf("missing base.scout; got: %v", found)
+	}
+}
+
+func TestResolvedPackNamesResolvesGitHubTreeImportsFromLockfileCache(t *testing.T) {
+	dir := t.TempDir()
+	home := filepath.Join(dir, "home")
+	t.Setenv("HOME", home)
+
+	cityDir := filepath.Join(dir, "city")
+	mustMkdirAll(t, cityDir, 0o755)
+
+	source := "https://github.com/example/repo/tree/main/gastown"
+	commit := stubCleanRepoCacheGit(t)
+	cacheDir := filepath.Join(home, ".gc", "cache", "repos", RepoCacheKey(source, commit))
+	mustMkdirAll(t, filepath.Join(cacheDir, ".git"), 0o755)
+	writeTestFile(t, cityDir, "packs.lock", fmt.Sprintf(`
+schema = 1
+
+[packs.%q]
+version = "1.2.3"
+commit = %q
+fetched = "2026-04-10T00:00:00Z"
+`, source, commit))
+	writeTestFile(t, filepath.Join(cacheDir, "gastown"), "pack.toml", `
+[pack]
+name = "gastown"
+schema = 2
+
+[imports.maintenance]
+source = "../maintenance"
+`)
+	writeTestFile(t, filepath.Join(cacheDir, "maintenance"), "pack.toml", `
+[pack]
+name = "maintenance"
+schema = 2
+`)
+
+	names := resolvedPackNames(nil, map[string]Import{
+		"gastown": {Source: source, Version: "^1.2"},
+	}, fsys.OSFS{}, cityDir)
+
+	for _, name := range []string{"gastown", "maintenance"} {
+		if !names[name] {
+			t.Fatalf("resolved pack names = %#v, missing %q", names, name)
+		}
 	}
 }
 

@@ -2402,6 +2402,18 @@ func TestPaneContainsBusyIndicator(t *testing.T) {
 		{"gemini auth spinner", []string{"Waiting for authentication... (Press Esc or Ctrl+C to cancel)"}, true},
 		{"gemini shell tool panel", []string{"│ ?  Shell sleep 12 [current working directory /tmp/city] (Sleep … │"}, true},
 		{"no indicator", []string{"some output", "building..."}, false},
+		// Current Claude Code (bypass mode) shows a live spinner with an elapsed
+		// timer + token stream, not "esc to interrupt", while working.
+		{"claude busy spinner token footer", []string{"· Boogieing… (2m 28s · ↓ 10.9k tokens)"}, true},
+		{"claude busy spinner long turn", []string{"✶ Investigating… (31m 40s · ↓ 108.6k tokens)"}, true},
+		{"claude busy spinner thinking", []string{"✢ Clauding… (56s · ↓ 1.7k tokens · thinking with max effort)"}, true},
+		{"codex busy spinner bullet", []string{"◦ Working (2m 48s • esc to interrupt)"}, true},
+		// Idle/done markers and status chrome must NOT read as busy — a false
+		// positive makes WaitForIdle never return, so the agent is never nudged.
+		{"claude done marker", []string{"✻ Worked for 1m 49s", "❯ "}, false},
+		{"claude status bar time", []string{"🧠 Sonnet 4.6 | 📁 witness | ⏱️  Jun 3 20:10:09"}, false},
+		{"scrollback truncation parens", []string{"  … +9 lines (ctrl+o to expand)"}, false},
+		{"git branch in status bar", []string{"  🚀 Opus 4.8 | 📁 thriva | (main) | ⏱️  Jun 4 02:57:04"}, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

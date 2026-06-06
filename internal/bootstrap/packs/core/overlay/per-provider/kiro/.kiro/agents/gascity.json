@@ -2,6 +2,7 @@
   "name": "gascity",
   "description": "Gas City orchestration agent",
   "prompt": "file://../../AGENTS.md",
+  "tools": ["*"],
   "hooks": {
     "agentSpawn": [
       {

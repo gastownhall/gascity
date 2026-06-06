@@ -122,6 +122,9 @@ func isNonFatalLoadConfigWarning(warning string) bool {
 	if config.IsLegacyV1SurfaceWarning(warning) {
 		return true
 	}
+	if config.IsDisabledNamedSessionWarning(warning) {
+		return true
+	}
 	if config.IsLegacyWorkspaceFieldWarning(warning) {
 		return true
 	}
@@ -504,7 +507,7 @@ func agentListItems(cfg *config.City) []AgentListItem {
 			Provider:             a.Provider,
 			Session:              a.Session,
 			Suspended:            a.Suspended,
-			WorkQuery:            a.EffectiveWorkQuery(),
+			WorkQuery:            a.EffectiveWorkQueryForBeads(cfg.Beads),
 			SlingQuery:           a.EffectiveSlingQuery(),
 			ConfiguredWorkQuery:  a.WorkQuery,
 			ConfiguredSlingQuery: a.SlingQuery,

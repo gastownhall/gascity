@@ -8,6 +8,7 @@ package runtime //nolint:revive // shadows stdlib runtime; isolated to internal
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -283,6 +284,14 @@ type InterruptBoundaryWaitProvider interface {
 type LiveRuntime struct {
 	// SessionID is the GC_SESSION_ID value from the process environment.
 	SessionID string
+	// City is the GC_CITY_PATH value from the process environment (falling
+	// back to GC_CITY). Empty when neither is readable. The process-table scan
+	// is supervisor-wide (it walks all of /proc), but session beads and tmux
+	// runtime tracking are per-city. A consumer that owns only one city's
+	// store MUST filter scan results to City == its own city before reaping,
+	// or it will mistake another city's live session for an orphan and kill
+	// it.
+	City string
 	// Epoch is the GC_RUNTIME_EPOCH from the process environment, if readable.
 	// Zero if the variable is absent or unparseable.
 	Epoch int
@@ -316,6 +325,22 @@ type ProcessTableScanner interface {
 	// TerminateRuntime stops the process or infrastructure unit identified by r.
 	// It returns nil when the runtime is already gone.
 	TerminateRuntime(r LiveRuntime) error
+}
+
+// ServerLifecycleProvider is an optional extension for providers that own
+// server-level lifecycle alongside individual session management.
+//
+// This interface must not be added to [Provider]: providers backed by
+// subprocesses, Kubernetes, fakes, or other non-server runtimes do not have a
+// shared server to configure or tear down.
+type ServerLifecycleProvider interface {
+	// ConfigureServer applies server-level configuration. Implementations must
+	// be idempotent, and callers should treat errors as best-effort warnings.
+	ConfigureServer() error
+
+	// TeardownServer terminates the shared server after all sessions have been
+	// drained. Implementations should return nil when the server is already gone.
+	TeardownServer() error
 }
 
 // CopyEntry describes a file or directory to stage in the session's
@@ -450,6 +475,10 @@ type Config struct {
 	// MCPServers is the effective ACP session/new MCP server list for this
 	// session. Non-ACP providers ignore it.
 	MCPServers []MCPServerConfig
+
+	// StartupEnvelope carries provider-specific startup metadata used by
+	// the T3 bridge path. It is excluded from the core fingerprint.
+	StartupEnvelope json.RawMessage
 
 	// Startup reliability hints (all optional — zero values skip).
 

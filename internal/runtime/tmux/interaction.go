@@ -265,6 +265,11 @@ func (t *Tmux) Respond(name string, response runtime.InteractionResponse) error 
 		return fmt.Errorf("unknown action %q", response.Action)
 	}
 
+	// Exit copy-mode first if the pane is parked (the ga-c4w wheel binding),
+	// so the approval keystroke reaches the prompt instead of being swallowed
+	// by copy-mode.
+	t.cancelCopyModeIfParked(name)
+
 	// Send the keystroke once.
 	if _, err := t.run("send-keys", "-t", name, "-l", key); err != nil {
 		if errors.Is(err, ErrSessionNotFound) {

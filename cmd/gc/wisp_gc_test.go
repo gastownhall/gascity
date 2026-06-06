@@ -1,13 +1,17 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
+	"log"
 	"sort"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/sourceworkflow"
 )
 
 func TestWispGC_NilSafe(t *testing.T) {
@@ -18,18 +22,18 @@ func TestWispGC_NilSafe(t *testing.T) {
 }
 
 func TestWispGC_DisabledReturnsNil(t *testing.T) {
-	wg := newWispGC(0, time.Hour)
+	wg := newWispGC(0, time.Hour, 0)
 	if wg != nil {
 		t.Error("zero interval should return nil")
 	}
-	wg = newWispGC(time.Hour, 0)
+	wg = newWispGC(time.Hour, 0, 0)
 	if wg != nil {
 		t.Error("zero TTL should return nil")
 	}
 }
 
 func TestWispGC_ShouldRunRespectsInterval(t *testing.T) {
-	wg := newWispGC(5*time.Minute, time.Hour)
+	wg := newWispGC(5*time.Minute, time.Hour, 0)
 	now := time.Now()
 
 	if !wg.shouldRun(now) {
@@ -47,6 +51,24 @@ func TestWispGC_ShouldRunRespectsInterval(t *testing.T) {
 	}
 }
 
+func TestWispGCForConfigUsesMailRetentionTTL(t *testing.T) {
+	cfg := &config.City{}
+	cfg.Daemon.WispGCInterval = "5m"
+	cfg.Mail.RetentionTTL = "1h"
+
+	wg := newWispGCForConfig(cfg)
+	if wg == nil {
+		t.Fatal("newWispGCForConfig returned nil")
+	}
+	memory := wg.(*memoryWispGC)
+	if memory.ttl != 0 {
+		t.Fatalf("ttl = %v, want 0", memory.ttl)
+	}
+	if memory.mailRetentionTTL != time.Hour {
+		t.Fatalf("mailRetentionTTL = %v, want 1h", memory.mailRetentionTTL)
+	}
+}
+
 func TestWispGC_PurgesExpiredMolecules(t *testing.T) {
 	now := time.Now()
 	store := newGCStore([]beads.Bead{
@@ -56,7 +78,7 @@ func TestWispGC_PurgesExpiredMolecules(t *testing.T) {
 		makeGCBead("mol-3", now.Add(-3*time.Hour), "closed", "molecule"),
 	})
 
-	wg := newWispGC(5*time.Minute, time.Hour)
+	wg := newWispGC(5*time.Minute, time.Hour, 0)
 	purged, err := wg.runGC(store, now)
 	if err != nil {
 		t.Fatalf("runGC: %v", err)
@@ -73,7 +95,7 @@ func TestWispGC_NothingExpired(t *testing.T) {
 		makeGCBead("mol-1", now.Add(-10*time.Minute), "closed", "molecule"),
 	})
 
-	wg := newWispGC(5*time.Minute, time.Hour)
+	wg := newWispGC(5*time.Minute, time.Hour, 0)
 	purged, err := wg.runGC(store, now)
 	if err != nil {
 		t.Fatalf("runGC: %v", err)
@@ -86,9 +108,156 @@ func TestWispGC_NothingExpired(t *testing.T) {
 	}
 }
 
+func TestWispGC_ClosesOpenSpecSidecarsForClosedWorkflowRoots(t *testing.T) {
+	now := time.Now()
+	store := newGCStore([]beads.Bead{
+		makeGCBeadWithMetadata("closed-workflow", now.Add(-30*time.Minute), "closed", "task", map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+		}),
+		makeGCBeadWithMetadata("closed-workflow-spec", now.Add(-30*time.Minute), "open", "spec", map[string]string{
+			"gc.kind":         "spec",
+			"gc.root_bead_id": "closed-workflow",
+			"gc.spec_for":     "implement",
+		}),
+		makeGCBeadWithMetadata("open-workflow", now.Add(-30*time.Minute), "open", "task", map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+		}),
+		makeGCBeadWithMetadata("open-workflow-spec", now.Add(-30*time.Minute), "open", "spec", map[string]string{
+			"gc.kind":         "spec",
+			"gc.root_bead_id": "open-workflow",
+			"gc.spec_for":     "review",
+		}),
+		makeGCBeadWithMetadata("closed-task", now.Add(-30*time.Minute), "closed", "task", nil),
+		makeGCBeadWithMetadata("closed-task-spec", now.Add(-30*time.Minute), "open", "spec", map[string]string{
+			"gc.kind":         "spec",
+			"gc.root_bead_id": "closed-task",
+		}),
+	})
+
+	wg := newWispGC(5*time.Minute, time.Hour, 0)
+	purged, err := wg.runGC(store, now)
+	if err != nil {
+		t.Fatalf("runGC: %v", err)
+	}
+	if purged != 0 {
+		t.Fatalf("purged = %d, want 0; spec repair should not count as purge", purged)
+	}
+	if len(store.deletedIDs) != 0 {
+		t.Fatalf("deleted = %v, want none", store.deletedIDs)
+	}
+
+	closedSpec, err := store.Get("closed-workflow-spec")
+	if err != nil {
+		t.Fatalf("Get(closed-workflow-spec): %v", err)
+	}
+	if closedSpec.Status != "closed" {
+		t.Fatalf("closed-workflow-spec status = %q, want closed", closedSpec.Status)
+	}
+	if got := closedSpec.Metadata["close_reason"]; got != sourceworkflow.WorkflowSpecSidecarClosedReason {
+		t.Fatalf("close_reason = %q, want %q", got, sourceworkflow.WorkflowSpecSidecarClosedReason)
+	}
+
+	for _, id := range []string{"open-workflow-spec", "closed-task-spec"} {
+		spec, err := store.Get(id)
+		if err != nil {
+			t.Fatalf("Get(%s): %v", id, err)
+		}
+		if spec.Status != "open" {
+			t.Fatalf("%s status = %q, want open", id, spec.Status)
+		}
+	}
+}
+
+func TestWispGC_PurgesExpiredReadMessageRetention(t *testing.T) {
+	now := time.Now()
+	store := newGCStore([]beads.Bead{
+		makeGCMessageWisp("read-old", now.Add(-2*time.Hour), map[string]string{mailReadMetadataKey: "true"}),
+		makeGCMessageWisp("unread-old", now.Add(-2*time.Hour), map[string]string{mailReadMetadataKey: "false"}),
+		makeGCMessageWisp("unset-old", now.Add(-2*time.Hour), nil),
+		makeGCMessageWisp("read-recent", now.Add(-30*time.Minute), map[string]string{mailReadMetadataKey: "true"}),
+		{
+			ID:        "read-main-tier",
+			Status:    "open",
+			Type:      "message",
+			CreatedAt: now.Add(-2 * time.Hour),
+			Metadata:  map[string]string{mailReadMetadataKey: "true"},
+		},
+		{
+			ID:        "read-task-wisp",
+			Status:    "open",
+			Type:      "task",
+			CreatedAt: now.Add(-2 * time.Hour),
+			Metadata:  map[string]string{mailReadMetadataKey: "true"},
+			Ephemeral: true,
+		},
+	})
+
+	wg := newWispGC(5*time.Minute, 0, time.Hour)
+	if wg == nil {
+		t.Fatal("mail retention should enable wisp GC when interval is configured")
+	}
+	purged, err := wg.runGC(store, now)
+	if err != nil {
+		t.Fatalf("runGC: %v", err)
+	}
+	if purged != 1 {
+		t.Fatalf("purged = %d, want 1", purged)
+	}
+	assertDeletedIDs(t, store.deletedIDs, "read-old")
+	for _, id := range []string{"unread-old", "unset-old", "read-recent", "read-main-tier", "read-task-wisp"} {
+		if _, err := store.Get(id); err != nil {
+			t.Fatalf("%s should be preserved: %v", id, err)
+		}
+	}
+}
+
+func TestWispGC_ReadMessageRetentionZeroDisablesAndSuppressesLog(t *testing.T) {
+	now := time.Now()
+	store := newGCStore([]beads.Bead{
+		makeGCMessageWisp("read-old", now.Add(-2*time.Hour), map[string]string{mailReadMetadataKey: "true"}),
+	})
+
+	logOutput := captureWispGCLog(t, func() {
+		wg := newWispGC(5*time.Minute, time.Hour, 0)
+		purged, err := wg.runGC(store, now)
+		if err != nil {
+			t.Fatalf("runGC: %v", err)
+		}
+		if purged != 0 {
+			t.Fatalf("purged = %d, want 0", purged)
+		}
+	})
+	if strings.Contains(logOutput, "read message wisps") {
+		t.Fatalf("log output = %q, want no read-message purge log", logOutput)
+	}
+	if _, err := store.Get("read-old"); err != nil {
+		t.Fatalf("read-old should be preserved: %v", err)
+	}
+}
+
+func TestWispGC_ReadMessageRetentionLogsCountAndTTL(t *testing.T) {
+	now := time.Now()
+	store := newGCStore([]beads.Bead{
+		makeGCMessageWisp("read-old", now.Add(-2*time.Hour), map[string]string{mailReadMetadataKey: "true"}),
+	})
+
+	logOutput := captureWispGCLog(t, func() {
+		wg := newWispGC(5*time.Minute, 0, time.Hour)
+		if _, err := wg.runGC(store, now); err != nil {
+			t.Fatalf("runGC: %v", err)
+		}
+	})
+	want := "wisp gc: purged 1 read message wisps (retention_ttl=1h)"
+	if !strings.Contains(logOutput, want) {
+		t.Fatalf("log output = %q, want %q", logOutput, want)
+	}
+}
+
 func TestWispGC_EmptyList(t *testing.T) {
 	store := newGCStore(nil)
-	wg := newWispGC(5*time.Minute, time.Hour)
+	wg := newWispGC(5*time.Minute, time.Hour, 0)
 	purged, err := wg.runGC(store, time.Now())
 	if err != nil {
 		t.Fatalf("runGC: %v", err)
@@ -106,7 +275,7 @@ func TestWispGC_DeleteErrorIsSurfacedAndContinues(t *testing.T) {
 	})
 	store.deleteErrors["mol-1"] = fmt.Errorf("delete failed")
 
-	wg := newWispGC(5*time.Minute, time.Hour)
+	wg := newWispGC(5*time.Minute, time.Hour, 0)
 	purged, err := wg.runGC(store, now)
 	if err == nil {
 		t.Fatal("expected delete error to be surfaced")
@@ -146,7 +315,7 @@ func TestWispGC_PurgesExpiredMoleculeChildrenWithRoot(t *testing.T) {
 		t.Fatalf("DepAdd(mol-1.2->mol-1.1): %v", err)
 	}
 
-	wg := newWispGC(5*time.Minute, time.Hour)
+	wg := newWispGC(5*time.Minute, time.Hour, 0)
 	purged, err := wg.runGC(store, now)
 	if err != nil {
 		t.Fatalf("runGC: %v", err)
@@ -160,6 +329,60 @@ func TestWispGC_PurgesExpiredMoleculeChildrenWithRoot(t *testing.T) {
 			t.Fatalf("Get(%s) succeeded after GC delete", id)
 		}
 	}
+}
+
+func TestWispGC_PurgesExpiredClosureAcrossStorageTiers(t *testing.T) {
+	now := time.Now()
+	store := newGCStore([]beads.Bead{
+		{
+			ID:        "wisp-root",
+			Status:    "closed",
+			Type:      "task",
+			CreatedAt: now.Add(-2 * time.Hour),
+			Metadata:  map[string]string{"gc.kind": "wisp"},
+			Ephemeral: true,
+		},
+		{
+			ID:        "metadata-child",
+			Status:    "open",
+			Type:      "task",
+			CreatedAt: now.Add(-2 * time.Hour),
+			Metadata:  map[string]string{"gc.root_bead_id": "wisp-root"},
+			Ephemeral: true,
+		},
+		{
+			ID:        "parent-child",
+			Status:    "open",
+			Type:      "task",
+			CreatedAt: now.Add(-2 * time.Hour),
+			ParentID:  "wisp-root",
+			Ephemeral: true,
+		},
+		{
+			ID:        "no-history-child",
+			Status:    "open",
+			Type:      "task",
+			CreatedAt: now.Add(-2 * time.Hour),
+			ParentID:  "metadata-child",
+			NoHistory: true,
+		},
+	})
+	if err := store.DepAdd("parent-child", "wisp-root", "parent-child"); err != nil {
+		t.Fatalf("DepAdd(parent-child->wisp-root): %v", err)
+	}
+	if err := store.DepAdd("no-history-child", "metadata-child", "parent-child"); err != nil {
+		t.Fatalf("DepAdd(no-history-child->metadata-child): %v", err)
+	}
+
+	wg := newWispGC(5*time.Minute, time.Hour, 0)
+	purged, err := wg.runGC(store, now)
+	if err != nil {
+		t.Fatalf("runGC: %v", err)
+	}
+	if purged != 1 {
+		t.Fatalf("purged = %d, want 1 root purge accounting", purged)
+	}
+	assertDeletedIDs(t, store.deletedIDs, "wisp-root", "metadata-child", "parent-child", "no-history-child")
 }
 
 func TestWispGC_DoesNotDeleteExternalDependents(t *testing.T) {
@@ -182,7 +405,7 @@ func TestWispGC_DoesNotDeleteExternalDependents(t *testing.T) {
 		t.Fatalf("DepAdd(external-1->mol-1.1): %v", err)
 	}
 
-	wg := newWispGC(5*time.Minute, time.Hour)
+	wg := newWispGC(5*time.Minute, time.Hour, 0)
 	purged, err := wg.runGC(store, now)
 	if err != nil {
 		t.Fatalf("runGC: %v", err)
@@ -221,7 +444,7 @@ func TestWispGC_PurgesParentChildOwnedDependentsWithoutMetadata(t *testing.T) {
 		t.Fatalf("DepAdd(mol-1.2->mol-1.1): %v", err)
 	}
 
-	wg := newWispGC(5*time.Minute, time.Hour)
+	wg := newWispGC(5*time.Minute, time.Hour, 0)
 	purged, err := wg.runGC(store, now)
 	if err != nil {
 		t.Fatalf("runGC: %v", err)
@@ -249,7 +472,7 @@ func TestWispGC_LeavesRootWhenChildDeleteFails(t *testing.T) {
 	}
 	store.deleteErrors["mol-1.1"] = fmt.Errorf("delete failed")
 
-	wg := newWispGC(5*time.Minute, time.Hour)
+	wg := newWispGC(5*time.Minute, time.Hour, 0)
 	purged, err := wg.runGC(store, now)
 	if err == nil {
 		t.Fatal("expected child delete error")
@@ -308,7 +531,7 @@ func TestWispGC_PartialChildDeleteRemainsRetryable(t *testing.T) {
 	}
 	store.deleteErrors["mol-1.2"] = fmt.Errorf("delete failed")
 
-	wg := newWispGC(5*time.Minute, time.Hour)
+	wg := newWispGC(5*time.Minute, time.Hour, 0)
 	purged, err := wg.runGC(store, now)
 	if err == nil {
 		t.Fatal("expected first pass child delete error")
@@ -345,7 +568,7 @@ func TestWispGC_PartialChildDeleteRemainsRetryable(t *testing.T) {
 	}
 }
 
-func TestWispGC_PurgesExpiredTrackingBeads(t *testing.T) {
+func TestWispGC_PreservesOrderTrackingBeads(t *testing.T) {
 	now := time.Now()
 	store := newGCStore([]beads.Bead{
 		makeGCBead("mol-1", now.Add(-2*time.Hour), "closed", "molecule"),
@@ -354,18 +577,23 @@ func TestWispGC_PurgesExpiredTrackingBeads(t *testing.T) {
 		makeGCBeadWithLabels("track-open", now.Add(-5*time.Hour), "open", "task", labelOrderTracking),
 	})
 
-	wg := newWispGC(5*time.Minute, time.Hour)
+	wg := newWispGC(5*time.Minute, time.Hour, 0)
 	purged, err := wg.runGC(store, now)
 	if err != nil {
 		t.Fatalf("runGC: %v", err)
 	}
-	if purged != 2 {
-		t.Fatalf("purged = %d, want 2", purged)
+	if purged != 1 {
+		t.Fatalf("purged = %d, want 1", purged)
 	}
-	assertDeletedIDs(t, store.deletedIDs, "mol-1", "track-old")
+	assertDeletedIDs(t, store.deletedIDs, "mol-1")
+	for _, id := range []string{"track-old", "track-new", "track-open"} {
+		if _, err := store.Get(id); err != nil {
+			t.Fatalf("%s should be preserved for order-tracking retention: %v", id, err)
+		}
+	}
 }
 
-func TestWispGC_PurgesLegacyIssuesTierTrackingBeads(t *testing.T) {
+func TestWispGC_PreservesLegacyIssuesTierTrackingBeads(t *testing.T) {
 	now := time.Now()
 	store := newGCStore([]beads.Bead{
 		{
@@ -377,18 +605,20 @@ func TestWispGC_PurgesLegacyIssuesTierTrackingBeads(t *testing.T) {
 		},
 	})
 
-	wg := newWispGC(5*time.Minute, time.Hour)
+	wg := newWispGC(5*time.Minute, time.Hour, 0)
 	purged, err := wg.runGC(store, now)
 	if err != nil {
 		t.Fatalf("runGC: %v", err)
 	}
-	if purged != 1 {
-		t.Fatalf("purged = %d, want 1", purged)
+	if purged != 0 {
+		t.Fatalf("purged = %d, want 0", purged)
 	}
-	assertDeletedIDs(t, store.deletedIDs, "track-legacy")
+	if _, err := store.Get("track-legacy"); err != nil {
+		t.Fatalf("legacy tracking bead should be preserved: %v", err)
+	}
 }
 
-func TestWispGC_TrackingListErrorIsSurfacedAndMoleculePurgeContinues(t *testing.T) {
+func TestWispGC_DoesNotListOrderTrackingBeads(t *testing.T) {
 	now := time.Now()
 	store := newGCStore([]beads.Bead{
 		makeGCBead("mol-1", now.Add(-2*time.Hour), "closed", "molecule"),
@@ -396,18 +626,18 @@ func TestWispGC_TrackingListErrorIsSurfacedAndMoleculePurgeContinues(t *testing.
 	})
 	store.listErrors[gcQueryKey{Status: "closed", Label: labelOrderTracking}] = fmt.Errorf("tracking list failed")
 
-	wg := newWispGC(5*time.Minute, time.Hour)
+	wg := newWispGC(5*time.Minute, time.Hour, 0)
 	purged, err := wg.runGC(store, now)
-	if err == nil {
-		t.Fatal("expected tracking list error to be surfaced")
+	if err != nil {
+		t.Fatalf("runGC: %v", err)
 	}
 	if purged != 1 {
 		t.Fatalf("purged = %d, want 1", purged)
 	}
-	if !strings.Contains(err.Error(), "tracking list failed") {
-		t.Fatalf("err = %v, want tracking list failure to be included", err)
-	}
 	assertDeletedIDs(t, store.deletedIDs, "mol-1")
+	if _, err := store.Get("track-old"); err != nil {
+		t.Fatalf("order-tracking bead should be preserved: %v", err)
+	}
 }
 
 func TestWispGC_TrackingBeadsDoNotDeleteParentChildDescendants(t *testing.T) {
@@ -426,17 +656,21 @@ func TestWispGC_TrackingBeadsDoNotDeleteParentChildDescendants(t *testing.T) {
 		t.Fatalf("DepAdd(track-child->track-old): %v", err)
 	}
 
-	wg := newWispGC(5*time.Minute, time.Hour)
+	wg := newWispGC(5*time.Minute, time.Hour, 0)
 	purged, err := wg.runGC(store, now)
 	if err != nil {
 		t.Fatalf("runGC: %v", err)
 	}
-	if purged != 1 {
-		t.Fatalf("purged = %d, want 1", purged)
+	if purged != 0 {
+		t.Fatalf("purged = %d, want 0", purged)
 	}
-	assertDeletedIDs(t, store.deletedIDs, "track-old")
-	if _, err := store.Get("track-child"); err != nil {
-		t.Fatalf("tracking child was deleted: %v", err)
+	if len(store.deletedIDs) != 0 {
+		t.Fatalf("deleted IDs = %v, want none", store.deletedIDs)
+	}
+	for _, id := range []string{"track-old", "track-child"} {
+		if _, err := store.Get(id); err != nil {
+			t.Fatalf("%s should be preserved: %v", id, err)
+		}
 	}
 }
 
@@ -444,7 +678,7 @@ func TestWispGC_ListErrorFailsRun(t *testing.T) {
 	store := newGCStore(nil)
 	store.listErrors[gcQueryKey{Status: "closed", Type: "molecule"}] = fmt.Errorf("molecule list failed")
 
-	wg := newWispGC(5*time.Minute, time.Hour)
+	wg := newWispGC(5*time.Minute, time.Hour, 0)
 	_, err := wg.runGC(store, time.Now())
 	if err == nil {
 		t.Fatal("expected list error")
@@ -497,12 +731,12 @@ func makeGCBead(id string, createdAt time.Time, status, beadType string) beads.B
 }
 
 func makeGCBeadWithLabels(id string, createdAt time.Time, status, beadType string, labels ...string) beads.Bead {
-	// Order-tracking beads live in the ephemeral (wisps) tier in production;
+	// Order-tracking beads live in the no-history tier in production;
 	// mirror that here so wisp_gc's tier-aware queries see them.
-	ephemeral := false
+	noHistory := false
 	for _, l := range labels {
 		if l == labelOrderTracking {
-			ephemeral = true
+			noHistory = true
 			break
 		}
 	}
@@ -512,7 +746,7 @@ func makeGCBeadWithLabels(id string, createdAt time.Time, status, beadType strin
 		Type:      beadType,
 		CreatedAt: createdAt,
 		Labels:    labels,
-		Ephemeral: ephemeral,
+		NoHistory: noHistory,
 	}
 }
 
@@ -520,6 +754,32 @@ func makeGCBeadWithMetadata(id string, createdAt time.Time, status, beadType str
 	bead := makeGCBead(id, createdAt, status, beadType)
 	bead.Metadata = metadata
 	return bead
+}
+
+func makeGCMessageWisp(id string, createdAt time.Time, metadata map[string]string) beads.Bead {
+	return beads.Bead{
+		ID:        id,
+		Status:    "open",
+		Type:      "message",
+		CreatedAt: createdAt,
+		Metadata:  metadata,
+		Ephemeral: true,
+	}
+}
+
+func captureWispGCLog(t *testing.T, fn func()) string {
+	t.Helper()
+	var buf bytes.Buffer
+	previousWriter := log.Writer()
+	previousFlags := log.Flags()
+	log.SetOutput(&buf)
+	log.SetFlags(0)
+	defer func() {
+		log.SetOutput(previousWriter)
+		log.SetFlags(previousFlags)
+	}()
+	fn()
+	return buf.String()
 }
 
 func metadataQueryKey(metadata map[string]string) string {

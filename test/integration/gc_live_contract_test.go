@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/pb33f/libopenapi"
 	openapivalidator "github.com/pb33f/libopenapi-validator"
 )
@@ -401,7 +402,7 @@ description = "Read and complete {{issue}}."
 	list := liveContractJSON[struct {
 		Items []beads.Bead `json:"items"`
 		Total int          `json:"total"`
-	}](t, baseURL, validator, http.MethodGet, cityBase+"/beads?label=real-world-app-contract&limit=50&rig="+url.QueryEscape(rigName), nil, http.StatusOK)
+	}](t, baseURL, validator, http.MethodGet, cityBase+"/beads?label=real-world-app-contract&limit=50&all=true&rig="+url.QueryEscape(rigName), nil, http.StatusOK)
 	if list.Total < 3 || !beadListContains(list.Items, rootBead.ID) || !beadListContains(list.Items, siblingBead.ID) {
 		t.Fatalf("filtered beads = %+v, want root and sibling", list)
 	}
@@ -709,6 +710,10 @@ func closeLiveContractRigSessions(t *testing.T, baseURL string, v openapivalidat
 				continue
 			}
 			if sess.Rig != rigName && !strings.HasPrefix(sess.Template, rigName+"/") {
+				continue
+			}
+			if sess.Template == config.ControlDispatcherAgentName ||
+				strings.HasSuffix(sess.Template, "/"+config.ControlDispatcherAgentName) {
 				continue
 			}
 			remaining++

@@ -6,6 +6,7 @@
 
 <p align="center">
   <a href="https://github.com/gastownhall/gascity/actions/workflows/ci.yml?query=branch%3Amain"><img src="https://img.shields.io/github/actions/workflow/status/gastownhall/gascity/ci.yml?branch=main&label=Build&style=for-the-badge" alt="Build status"></a>
+  <a href="https://docs.gascityhall.com"><img src="https://img.shields.io/badge/Docs-latest-c9a84c.svg?style=for-the-badge" alt="Documentation"></a>
   <a href="https://github.com/gastownhall/gascity/releases"><img src="https://img.shields.io/github/v/release/gastownhall/gascity?include_prereleases&style=for-the-badge" alt="GitHub release"></a>
   <a href="https://discord.gg/xHpUGUzZp2"><img src="https://img.shields.io/discord/1462817445562814505?label=Discord&logo=discord&logoColor=white&color=5865F2&style=for-the-badge" alt="Discord"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg?style=for-the-badge" alt="MIT License"></a>
@@ -55,7 +56,7 @@ Gas City requires the following tools on your system. `gc init` and
 | jq | Always | — | `brew install jq` | `apt install jq` |
 | pgrep | Always | — | (included in macOS) | `apt install procps` |
 | lsof | Always | — | (included in macOS) | `apt install lsof` |
-| dolt | Beads provider `bd` | 2.0.7 or newer | `brew install dolt` | [releases](https://github.com/dolthub/dolt/releases) |
+| dolt | Beads provider `bd` | 2.1.0 or newer | `brew install dolt` | [releases](https://github.com/dolthub/dolt/releases) |
 | bd | Beads provider `bd` | 1.0.0 | [releases](https://github.com/gastownhall/beads/releases) | [releases](https://github.com/gastownhall/beads/releases) |
 | flock | Beads provider `bd` | — | `brew install flock` | `apt install util-linux` |
 | gh | Optional GitHub gates | — | `brew install gh` | [cli.github.com](https://cli.github.com/) |
@@ -65,7 +66,7 @@ The `bd` (beads) provider is the default. To use a file-based store instead
 (no dolt/bd/flock needed), set `GC_BEADS=file` or add `[beads] provider = "file"`
 to your `city.toml`.
 
-Managed Dolt checks require a final Dolt 2.0.7 or newer. Older and
+Managed Dolt checks require a final Dolt 2.1.0 or newer. Older and
 pre-release builds are below Gas City's managed bd/Dolt compatibility floor;
 releases before 1.86.2 can also miss the upstream GC/writer deadlock fix in
 dolthub/dolt commit `ccf7bde206`, which can hang `dolt_backup sync` under
@@ -78,7 +79,9 @@ brew install gastownhall/gascity/gascity
 gc version
 ```
 
-Or build from source (requires `make` and Go 1.25+):
+Or build from source (requires `make`, Go 1.25+, and ICU for a transitive Dolt
+CGO dependency — `brew install icu4c` on macOS, `apt install libicu-dev` on
+Linux; on macOS the Makefile auto-detects the keg-only `icu4c` paths):
 
 ```bash
 make install
@@ -100,6 +103,8 @@ For the longer walkthrough, start with
 [Tutorial 01](docs/tutorials/01-cities-and-rigs.md).
 
 ## Documentation
+
+📖 **Read the docs online: [docs.gascityhall.com](https://docs.gascityhall.com)**
 
 The docs now use a Mintlify structure rooted in [`docs/`](docs/README.md).
 

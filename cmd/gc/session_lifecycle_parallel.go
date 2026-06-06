@@ -8,6 +8,7 @@ import (
 	"io"
 	"log"
 	"runtime/debug"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -145,6 +146,32 @@ type startCandidate struct {
 
 func (c startCandidate) name() string {
 	return c.session.Metadata["session_name"]
+}
+
+// wakeFairnessTime is the ordering key for the per-tick wake budget: the time the
+// session was last woken (last_woke_at), falling back to its creation time so a
+// brand-new session does not jump ahead of one that has been waiting for a slot.
+// Oldest sorts first so the longest-waiting candidates spend the budget first.
+func wakeFairnessTime(c startCandidate) time.Time {
+	if c.session != nil && c.session.Metadata != nil {
+		if t, err := time.Parse(time.RFC3339, c.session.Metadata["last_woke_at"]); err == nil {
+			return t
+		}
+	}
+	if c.session != nil && !c.session.CreatedAt.IsZero() {
+		return c.session.CreatedAt
+	}
+	return time.Time{}
+}
+
+// sortCandidatesByWakeFairness orders candidates least-recently-woken first so a
+// budget-limited tick rotates wakes across sessions instead of always deferring
+// the same back-of-order sessions. Stable on the original order for ties. Callers
+// must only sort within a dependency wave (every candidate's deps are satisfied).
+func sortCandidatesByWakeFairness(candidates []startCandidate) {
+	sort.SliceStable(candidates, func(i, j int) bool {
+		return wakeFairnessTime(candidates[i]).Before(wakeFairnessTime(candidates[j]))
+	})
 }
 
 func (c startCandidate) logicalTemplate(cfg *config.City) string {
@@ -756,6 +783,14 @@ func buildPreparedStartWithWorkDirResolver(
 	tp := candidate.tp
 	agentCfg := templateParamsToConfig(tp)
 
+	// Fold a per-dispatch reasoning effort from the session's assigned work
+	// bead (gc.reasoning metadata) into template_overrides["effort"], mirroring
+	// how schema option overrides are carried. Only providers with an "effort"
+	// option (codex) consume it; for codex this becomes
+	// `-c model_reasoning_effort=<effort>` via the existing resolution below.
+	// An explicit session-level effort override wins over the dispatch default.
+	applyDispatchReasoningOverride(candidate, cfg, store)
+
 	// Apply template_overrides from bead metadata. These are per-session
 	// schema option overrides (e.g., {"model":"opus","effort":"high"}) that
 	// override the agent's default CLI flags for specific options.
@@ -910,6 +945,48 @@ func buildPreparedStartWithWorkDirResolver(
 		coreBreakdown: coreBreakdown,
 		liveHash:      liveHash,
 	}, nil
+}
+
+// applyDispatchReasoningOverride reads the per-dispatch reasoning effort from
+// the session's assigned work bead and folds it into the in-memory session
+// template_overrides under the "effort" key, so the normal override resolution
+// (both fresh-start and resume command building) emits the provider's reasoning
+// flag. It is a no-op when the provider has no "effort" option, when no work
+// bead carries gc.reasoning, or when the session already pins an explicit
+// effort override (the more specific session value wins). The persisted bead is
+// not mutated; only the in-memory copy used for this launch is updated.
+func applyDispatchReasoningOverride(candidate startCandidate, cfg *config.City, store beads.Store) {
+	session := candidate.session
+	if session == nil {
+		return
+	}
+	tp := candidate.tp
+	effort := resolveDispatchReasoningEffort(store, tp.ResolvedProvider, taskWorkDirAssignees(candidate, cfg)...)
+	if effort == "" {
+		return
+	}
+	overrides := map[string]string{}
+	if raw := strings.TrimSpace(session.Metadata["template_overrides"]); raw != "" {
+		if err := json.Unmarshal([]byte(raw), &overrides); err != nil {
+			// Malformed override metadata is logged and surfaced by the main
+			// resolution block below; don't fold on top of unparseable JSON.
+			return
+		}
+	}
+	if _, ok := overrides["effort"]; ok {
+		// Explicit session-level effort override takes precedence over the
+		// per-dispatch default.
+		return
+	}
+	overrides["effort"] = effort
+	merged, err := json.Marshal(overrides)
+	if err != nil {
+		return
+	}
+	if session.Metadata == nil {
+		session.Metadata = map[string]string{}
+	}
+	session.Metadata["template_overrides"] = string(merged)
 }
 
 func resolvePreparedTaskWorkDir(
@@ -1567,6 +1644,19 @@ func commitStartResultTraced(
 			return false
 		}
 		if result.rollbackPending {
+			if errors.Is(result.err, context.DeadlineExceeded) {
+				rec.Record(events.Event{
+					Type:    events.SessionColdStartTimeout,
+					Actor:   "controller",
+					Subject: name,
+					Message: fmt.Sprintf("session %q cold start timed out", name),
+				})
+			}
+			// A rolled-back pending create is closed and recreated fresh on the
+			// next tick, so it deliberately does not record a wake failure (see
+			// TestReconcileSessionBeads_RollsBackPendingCreateOnProviderError).
+			// Genuine wake-failure accounting happens on the non-rollback path
+			// below via recordWakeFailure.
 			if trace != nil {
 				trace.recordOperation("reconciler.start.rollback_pending", tp.TemplateName, name, "", "start", result.outcome, traceRecordPayload{
 					"error": formatLifecycleError(result.err),
@@ -1925,6 +2015,12 @@ func executePlannedStartsTraced(
 			}
 			ready = append(ready, candidate)
 		}
+		// Fairness: spend a budget-limited tick on the least-recently-woken
+		// candidates first. The wave order is a stable dependency topo-sort, so
+		// without this the same back-of-order sessions are deferred_by_wake_budget
+		// every tick. Sorting within the dependency wave is safe: every
+		// candidate here already has its dependencies satisfied.
+		sortCandidatesByWakeFairness(ready)
 		for offset := 0; offset < len(ready); {
 			if wakeCount >= maxWakes {
 				for _, candidate := range ready[offset:] {

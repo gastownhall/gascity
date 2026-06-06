@@ -74,6 +74,23 @@ func TestParseInvalid(t *testing.T) {
 	}
 }
 
+func TestParseIdempotent(t *testing.T) {
+	on, err := Parse([]byte("[order]\nexec = \"true\"\ntrigger = \"cooldown\"\ninterval = \"1m\"\nidempotent = true\n"))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if !on.Idempotent {
+		t.Error("Idempotent = false, want true")
+	}
+	off, err := Parse([]byte("[order]\nexec = \"true\"\ntrigger = \"cooldown\"\ninterval = \"1m\"\n"))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if off.Idempotent {
+		t.Error("Idempotent = true, want false (default)")
+	}
+}
+
 func TestValidateCooldown(t *testing.T) {
 	a := Order{Name: "digest", Formula: "mol-digest", Trigger: "cooldown", Interval: "24h"}
 	if err := Validate(a); err != nil {
@@ -398,5 +415,76 @@ trigger = "manual"
 	}
 	if len(a.Env) != 0 {
 		t.Errorf("Env = %v, want empty when absent", a.Env)
+	}
+}
+
+func TestParseScope(t *testing.T) {
+	data := []byte(`
+[order]
+scope = "city"
+exec = "scripts/sweep.sh"
+trigger = "cooldown"
+interval = "5m"
+`)
+	a, err := Parse(data)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if a.Scope != "city" {
+		t.Errorf("Scope = %q, want %q", a.Scope, "city")
+	}
+	if !a.IsCityScoped() {
+		t.Error("IsCityScoped() = false, want true for scope=city")
+	}
+}
+
+func TestParseScopeDefaultsToRig(t *testing.T) {
+	data := []byte(`
+[order]
+exec = "scripts/health.sh"
+trigger = "cooldown"
+interval = "5m"
+`)
+	a, err := Parse(data)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if a.Scope != "" {
+		t.Errorf("Scope = %q, want empty (rig default)", a.Scope)
+	}
+	if a.IsCityScoped() {
+		t.Error("IsCityScoped() = true, want false for unscoped order")
+	}
+}
+
+func TestValidateRejectsUnknownScope(t *testing.T) {
+	a := Order{
+		Name:     "bad-scope",
+		Exec:     "scripts/x.sh",
+		Trigger:  "cooldown",
+		Interval: "5m",
+		Scope:    "global",
+	}
+	err := Validate(a)
+	if err == nil {
+		t.Fatal("Validate succeeded, want unknown-scope rejection")
+	}
+	if !strings.Contains(err.Error(), "scope") {
+		t.Fatalf("Validate error = %q, want scope context", err.Error())
+	}
+}
+
+func TestValidateAcceptsCityAndRigScope(t *testing.T) {
+	for _, scope := range []string{"", "city", "rig"} {
+		a := Order{
+			Name:     "scoped",
+			Exec:     "scripts/x.sh",
+			Trigger:  "cooldown",
+			Interval: "5m",
+			Scope:    scope,
+		}
+		if err := Validate(a); err != nil {
+			t.Errorf("Validate(scope=%q) = %v, want nil", scope, err)
+		}
 	}
 }

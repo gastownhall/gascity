@@ -266,6 +266,9 @@ const supervisorPreserveSessionsOnSignalEnv = "GC_SUPERVISOR_PRESERVE_SESSIONS_O
 // around `gc supervisor run` that sources a credentials file).
 const supervisorOmitProviderCredsEnv = "GC_SUPERVISOR_OMIT_PROVIDER_CREDS"
 
+// 32768 is the Linux kernel default for net.ipv4.ip_local_port_range lower bound.
+const supervisorEphemeralPortWarningThreshold = 32768
+
 var supervisorShutdownSettleDelay = 50 * time.Millisecond
 
 var supervisorSignalNotify = signal.Notify
@@ -452,6 +455,13 @@ type shutdownState struct {
 
 type shutdownResult struct {
 	err error
+}
+
+func supervisorShutdownExitCode(shutErr error) int {
+	if shutErr != nil {
+		return 1
+	}
+	return 0
 }
 
 func newShutdownState() *shutdownState {
@@ -1037,7 +1047,7 @@ func runSupervisor(stdout, stderr io.Writer) int {
 	// lock-free (atomic pointer load); mutations go through citiesMu.
 	registry := newCityRegistry()
 	supEvPath := filepath.Join(supervisor.RuntimeDir(), "events.jsonl")
-	if supFR, supErr := events.NewFileRecorder(supEvPath, stderr); supErr == nil {
+	if supFR, supErr := newFileEventsRecorder(supEvPath, config.EventsConfig{}, stderr); supErr == nil {
 		registry.SetSupervisorRecorder(supFR)
 		defer supFR.Close() //nolint:errcheck
 	}
@@ -1094,6 +1104,9 @@ func runSupervisor(stdout, stderr io.Writer) int {
 	if len(supCfg.Supervisor.AllowedOrigins) > 0 {
 		apiMux.WithAllowedOrigins(supCfg.Supervisor.AllowedOrigins)
 	}
+	if len(supCfg.Supervisor.AllowedHosts) > 0 {
+		apiMux.WithAllowedHosts(supCfg.Supervisor.AllowedHosts)
+	}
 
 	pprofSrv, pprofErr := api.StartPprof("")
 	if pprofErr != nil {
@@ -1112,6 +1125,11 @@ func runSupervisor(stdout, stderr io.Writer) int {
 	if apiErr != nil {
 		fmt.Fprintf(stderr, "gc supervisor: api: listen %s failed: %v\n", addr, apiErr) //nolint:errcheck
 		return 1
+	}
+	if port >= supervisorEphemeralPortWarningThreshold {
+		_, _ = fmt.Fprintf(stderr,
+			"gc supervisor: WARNING: API binding to ephemeral port %d -- "+
+				"set port = 8372 in ~/.gc/supervisor.toml\n", port)
 	}
 	go func() {
 		if err := apiMux.Serve(apiLis); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -1247,7 +1265,7 @@ func runSupervisor(stdout, stderr io.Writer) int {
 			}
 			shut.finish(shutErr)
 			fmt.Fprintln(stdout, "Supervisor stopped.") //nolint:errcheck
-			return 0
+			return supervisorShutdownExitCode(shutErr)
 		}
 	}
 }

@@ -715,7 +715,7 @@ retry_pending_spike_alert
 
 is_user_database() {
     case "$1" in
-        information_schema|mysql|dolt_cluster|performance_schema|sys|__gc_probe|benchdb|testdb_*|beads_pt*|beads_vr*|doctest_*|doctortest_*)
+        information_schema|mysql|dolt_cluster|performance_schema|sys|__gc_probe|benchdb|testdb_*|beads_pt*|beads_vr*|beads_test_bench_*|doctest_*|doctortest_*)
             return 1
             ;;
         beads_t*)
@@ -734,8 +734,8 @@ is_user_database() {
 # Discover databases. Exclude Dolt/MySQL system schemas, Gas City's internal
 # health-probe database, and test-fixture scratch databases (benchdb,
 # testdb_*, lowercase beads_t[0-9a-f]{8,}, beads_pt*, beads_vr*,
-# doctest_*, doctortest_* — matching the Go cleanup planner contract); the
-# remaining databases are expected to be bead stores.
+# beads_test_bench_*, doctest_*, doctortest_* — matching the Go cleanup
+# planner contract); the remaining databases are expected to be bead stores.
 DATABASES=$(
     while IFS= read -r db; do
         if is_user_database "$db"; then

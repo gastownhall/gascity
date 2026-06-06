@@ -10,6 +10,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/convergence"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/graphv2"
 	"github.com/gastownhall/gascity/internal/molecule"
 )
 
@@ -43,7 +44,7 @@ func (a *convergenceStoreAdapter) populateIndex() error {
 			continue
 		}
 		state := b.Metadata[convergence.FieldState]
-		if state == convergence.StateActive || state == convergence.StateWaitingManual {
+		if state == convergence.StateActive || state == convergence.StateWaitingManual || state == convergence.StateWaitingTrigger {
 			idx[b.ID] = b.Metadata[convergence.FieldTarget]
 		}
 	}
@@ -94,7 +95,7 @@ func (a *convergenceStoreAdapter) SetMetadata(id, key, value string) error {
 	// Maintain active index on state transitions.
 	if a.activeIndex != nil && key == convergence.FieldState {
 		switch value {
-		case convergence.StateActive, convergence.StateWaitingManual:
+		case convergence.StateActive, convergence.StateWaitingManual, convergence.StateWaitingTrigger:
 			// Add to index. Read target if not already indexed.
 			if _, ok := a.activeIndex[id]; !ok {
 				b, err := a.store.Get(id)
@@ -180,6 +181,13 @@ func (a *convergenceStoreAdapter) pourWisp(parentID, formula, idempotencyKey str
 	}
 	if evaluatePrompt != "" {
 		cookVars["evaluate_prompt"] = evaluatePrompt
+	}
+	isGraphV2, _, err := graphv2.IsGraphV2Formula(formula, a.formulaSearchPaths)
+	if err != nil {
+		return "", fmt.Errorf("checking graph.v2 contract for convergence wisp %q: %w", formula, err)
+	}
+	if isGraphV2 {
+		return "", fmt.Errorf("convergence wisps do not support graph.v2 formula %q; use a non-graph formula until convergence has an explicit input convoy target", formula)
 	}
 	result, err := molecule.Cook(context.Background(), a.store, formula, a.formulaSearchPaths, molecule.Options{
 		Vars:           cookVars,
@@ -299,7 +307,7 @@ func (a *convergenceStoreAdapter) CountActiveConvergenceLoops(targetAgent string
 		}
 		state := b.Metadata[convergence.FieldState]
 		target := b.Metadata[convergence.FieldTarget]
-		if (state == convergence.StateActive || state == convergence.StateWaitingManual) && target == targetAgent {
+		if (state == convergence.StateActive || state == convergence.StateWaitingManual || state == convergence.StateWaitingTrigger) && target == targetAgent {
 			count++
 		}
 	}

@@ -45,8 +45,31 @@ func TestBuildPrimeContextExpandsTemplateCommands(t *testing.T) {
 	if ctx.WorkQuery != "echo demo-city demo worker" {
 		t.Fatalf("WorkQuery = %q, want %q", ctx.WorkQuery, "echo demo-city demo worker")
 	}
+	if ctx.AssignedInProgressQuery != "echo demo-city demo worker" {
+		t.Fatalf("AssignedInProgressQuery = %q, want expanded custom query", ctx.AssignedInProgressQuery)
+	}
+	if ctx.AssignedReadyQuery != "echo demo-city demo worker" {
+		t.Fatalf("AssignedReadyQuery = %q, want expanded custom query", ctx.AssignedReadyQuery)
+	}
+	if ctx.RoutedPoolQuery != "echo demo-city demo worker" {
+		t.Fatalf("RoutedPoolQuery = %q, want expanded custom query", ctx.RoutedPoolQuery)
+	}
 	if ctx.SlingQuery != "dispatch {} --route=demo/worker --city=demo-city" {
 		t.Fatalf("SlingQuery = %q, want %q", ctx.SlingQuery, "dispatch {} --route=demo/worker --city=demo-city")
+	}
+}
+
+func TestBuildPrimeContextUsesBD105ReadyCompatibility(t *testing.T) {
+	cityPath := filepath.Join(t.TempDir(), "demo-city")
+	ctx := buildPrimeContextForBeads(cityPath, "", &config.Agent{
+		Name: "worker",
+	}, nil, config.BeadsConfig{BDCompatibility: config.BeadsBDCompatibility105}, nil)
+
+	if !strings.Contains(ctx.AssignedReadyQuery, `bd ready --include-ephemeral --assignee="$id"`) {
+		t.Fatalf("AssignedReadyQuery = %q, want bd-1.0.5-compatible assigned ready query", ctx.AssignedReadyQuery)
+	}
+	if !strings.Contains(ctx.WorkQuery, "bd ready --include-ephemeral") {
+		t.Fatalf("WorkQuery = %q, want bd-1.0.5-compatible ready probes", ctx.WorkQuery)
 	}
 }
 
@@ -547,6 +570,8 @@ func TestDoPrimeWithHookFormat_FormatsDefaultFallback(t *testing.T) {
 	t.Setenv("GC_CITY", filepath.Join(t.TempDir(), "missing-city"))
 	t.Setenv("GC_ALIAS", "")
 	t.Setenv("GC_AGENT", "")
+	t.Setenv("GC_SESSION_NAME", "")
+	t.Setenv("GC_TEMPLATE", "")
 
 	var stdout, stderr bytes.Buffer
 	code := doPrimeWithHookFormat(nil, &stdout, &stderr, true, hookOutputFormatCodex, false)
@@ -568,6 +593,29 @@ func TestDoPrimeWithHookFormat_FormatsDefaultFallback(t *testing.T) {
 	}
 	if !strings.Contains(payload.HookSpecificOutput.AdditionalContext, "# Gas City Agent") {
 		t.Fatalf("additionalContext = %q, want default prime prompt", payload.HookSpecificOutput.AdditionalContext)
+	}
+	for _, want := range []string{
+		"You are an agent in a Gas City workspace. Claim available work and execute it.",
+		"`gc hook --claim --json`",
+		"`bd show <id>`",
+		"`bd close <id>`",
+		"Read the claimed bead and execute the work described in its title",
+		"Check for more work. Repeat until the queue is empty.",
+	} {
+		if !strings.Contains(payload.HookSpecificOutput.AdditionalContext, want) {
+			t.Fatalf("additionalContext missing %q:\n%s", want, payload.HookSpecificOutput.AdditionalContext)
+		}
+	}
+	for _, stale := range []string{
+		"managed runtime session",
+		"If $GC_SESSION_NAME is empty",
+		"bd update <id> --claim",
+		"gc runtime drain-ack",
+		"bd ready",
+	} {
+		if strings.Contains(payload.HookSpecificOutput.AdditionalContext, stale) {
+			t.Fatalf("additionalContext contains stale fallback protocol %q:\n%s", stale, payload.HookSpecificOutput.AdditionalContext)
+		}
 	}
 }
 

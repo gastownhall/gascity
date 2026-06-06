@@ -297,6 +297,78 @@ func TestCachingStoreSetMetadataSkipsBackingWhenCachedValueMatches(t *testing.T)
 	}
 }
 
+func TestCachingStoreSetMetadataFallsThroughWhenCacheStateCannotProveNoop(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		state cacheState
+	}{
+		{name: "uninitialized", state: cacheUninitialized},
+		{name: "degraded", state: cacheDegraded},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name+"/single", func(t *testing.T) {
+			t.Parallel()
+
+			backing := &countingBackingStore{Store: NewMemStore()}
+			bead := createBeadWithMetadata(t, backing, map[string]string{"foo": "bar"})
+			cache := staleMatchingMetadataCache(backing, bead, tt.state)
+			backing.setMetadataCalls = 0
+
+			if err := cache.SetMetadata(bead.ID, "foo", "bar"); err != nil {
+				t.Fatalf("SetMetadata: %v", err)
+			}
+			if backing.setMetadataCalls != 1 {
+				t.Fatalf("backing.SetMetadata called %d times; want 1", backing.setMetadataCalls)
+			}
+		})
+
+		t.Run(tt.name+"/batch", func(t *testing.T) {
+			t.Parallel()
+
+			backing := &countingBackingStore{Store: NewMemStore()}
+			bead := createBeadWithMetadata(t, backing, map[string]string{"foo": "bar", "baz": "qux"})
+			cache := staleMatchingMetadataCache(backing, bead, tt.state)
+			backing.setMetadataBatchCalls = 0
+
+			if err := cache.SetMetadataBatch(bead.ID, map[string]string{"foo": "bar", "baz": "qux"}); err != nil {
+				t.Fatalf("SetMetadataBatch: %v", err)
+			}
+			if backing.setMetadataBatchCalls != 1 {
+				t.Fatalf("backing.SetMetadataBatch called %d times; want 1", backing.setMetadataBatchCalls)
+			}
+		})
+	}
+}
+
+func createBeadWithMetadata(t *testing.T, backing Store, metadata map[string]string) Bead {
+	t.Helper()
+
+	bead, err := backing.Create(Bead{Title: "test"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := backing.SetMetadataBatch(bead.ID, metadata); err != nil {
+		t.Fatalf("seed SetMetadataBatch: %v", err)
+	}
+	bead, err = backing.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	return bead
+}
+
+func staleMatchingMetadataCache(backing Store, bead Bead, state cacheState) *CachingStore {
+	cache := NewCachingStoreForTest(backing, nil)
+	cache.mu.Lock()
+	cache.beads[bead.ID] = cloneBead(bead)
+	cache.state = state
+	cache.mu.Unlock()
+	return cache
+}
+
 // TestCachingStoreSetMetadataFallsThroughOnValueMismatch verifies that a
 // real value change still propagates to the backing store.
 func TestCachingStoreSetMetadataFallsThroughOnValueMismatch(t *testing.T) {

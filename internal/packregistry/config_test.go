@@ -47,8 +47,43 @@ func TestLoadConfigValidatesRegistrySources(t *testing.T) {
 	}
 }
 
+func TestLoadConfigRejectsWindowsRegistrySources(t *testing.T) {
+	cases := []struct {
+		name    string
+		source  string
+		wantErr string
+	}{
+		{
+			name:    "drive letter",
+			source:  `C:\packs\registry.toml`,
+			wantErr: "registry source uses a Windows drive-letter path",
+		},
+		{
+			name:    "unc",
+			source:  `\\server\share\registry.toml`,
+			wantErr: "registry source uses a UNC path",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			home := t.TempDir()
+			if err := os.MkdirAll(filepath.Dir(ConfigPath(home)), 0o755); err != nil {
+				t.Fatalf("MkdirAll: %v", err)
+			}
+			body := "schema = 1\n\n[[registry]]\nname = \"main\"\nsource = " + tomlQuoteForTest(tc.source) + "\n"
+			if err := os.WriteFile(ConfigPath(home), []byte(body), 0o644); err != nil {
+				t.Fatalf("WriteFile: %v", err)
+			}
+			if _, err := LoadConfig(home); err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("LoadConfig err = %v, want %q", err, tc.wantErr)
+			}
+		})
+	}
+}
+
 func TestAddRegistryWithCacheDoesNotConfigureWhenCacheWriteFails(t *testing.T) {
 	home := t.TempDir()
+	saveEmptyConfigForTest(t, home)
 	cacheParent := filepath.Join(home, "registry-cache", "main")
 	if err := os.MkdirAll(filepath.Dir(cacheParent), 0o755); err != nil {
 		t.Fatalf("MkdirAll: %v", err)
@@ -69,7 +104,7 @@ func TestAddRegistryWithCacheDoesNotConfigureWhenCacheWriteFails(t *testing.T) {
 	}
 }
 
-func TestLoadConfigAbsentReturnsEmptyConfig(t *testing.T) {
+func TestLoadConfigAbsentReturnsDefaultRegistry(t *testing.T) {
 	home := t.TempDir()
 	cfg, err := LoadConfig(home)
 	if err != nil {
@@ -77,6 +112,52 @@ func TestLoadConfigAbsentReturnsEmptyConfig(t *testing.T) {
 	}
 	if cfg.Schema != ConfigSchema {
 		t.Fatalf("schema = %d, want %d", cfg.Schema, ConfigSchema)
+	}
+	if len(cfg.Registries) != 1 || cfg.Registries[0].Name != DefaultRegistryName || cfg.Registries[0].Source != DefaultRegistrySource {
+		t.Fatalf("registries = %+v, want default main registry", cfg.Registries)
+	}
+}
+
+func TestLoadConfigExplicitEmptyFileReturnsEmptyConfig(t *testing.T) {
+	home := t.TempDir()
+	saveEmptyConfigForTest(t, home)
+	cfg, err := LoadConfig(home)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.Schema != ConfigSchema {
+		t.Fatalf("schema = %d, want %d", cfg.Schema, ConfigSchema)
+	}
+	if len(cfg.Registries) != 0 {
+		t.Fatalf("registries = %+v, want none", cfg.Registries)
+	}
+}
+
+func TestEnsureDefaultRegistryConfigCreatesFreshConfig(t *testing.T) {
+	home := t.TempDir()
+	if err := EnsureDefaultRegistryConfig(home); err != nil {
+		t.Fatalf("EnsureDefaultRegistryConfig: %v", err)
+	}
+	cfg, err := LoadConfig(home)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if len(cfg.Registries) != 1 || cfg.Registries[0] != DefaultRegistry() {
+		t.Fatalf("registries = %+v, want default registry", cfg.Registries)
+	}
+}
+
+func TestEnsureDefaultRegistryConfigPreservesExistingEmptyConfig(t *testing.T) {
+	home := t.TempDir()
+	if err := SaveConfig(home, Config{}); err != nil {
+		t.Fatalf("SaveConfig: %v", err)
+	}
+	if err := EnsureDefaultRegistryConfig(home); err != nil {
+		t.Fatalf("EnsureDefaultRegistryConfig: %v", err)
+	}
+	cfg, err := LoadConfig(home)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
 	}
 	if len(cfg.Registries) != 0 {
 		t.Fatalf("registries = %+v, want none", cfg.Registries)
@@ -124,6 +205,7 @@ func TestValidateRegistryName(t *testing.T) {
 
 func TestConcurrentAddRegistryWritesValidTOML(t *testing.T) {
 	home := t.TempDir()
+	saveEmptyConfigForTest(t, home)
 	var wg sync.WaitGroup
 	errCh := make(chan error, 8)
 	for _, name := range []string{"r1", "r2", "r3", "r4", "r5", "r6", "r7", "r8"} {
@@ -151,9 +233,7 @@ func TestConcurrentAddRegistryWritesValidTOML(t *testing.T) {
 
 func TestConfigLockIgnoresUnlockedSidecarFile(t *testing.T) {
 	home := t.TempDir()
-	if err := os.MkdirAll(filepath.Dir(ConfigPath(home)), 0o755); err != nil {
-		t.Fatalf("MkdirAll: %v", err)
-	}
+	saveEmptyConfigForTest(t, home)
 	if err := os.WriteFile(ConfigPath(home)+".lock", []byte("stale\n"), 0o644); err != nil {
 		t.Fatalf("WriteFile(lock): %v", err)
 	}
@@ -196,4 +276,15 @@ func TestAtomicWritePreservesPreviousOnRenameError(t *testing.T) {
 	if string(after) != string(before) {
 		t.Fatalf("config changed after failed save:\n before=%s\n after=%s", before, after)
 	}
+}
+
+func saveEmptyConfigForTest(t *testing.T, home string) {
+	t.Helper()
+	if err := SaveConfig(home, Config{}); err != nil {
+		t.Fatalf("SaveConfig(empty): %v", err)
+	}
+}
+
+func tomlQuoteForTest(value string) string {
+	return `"` + strings.ReplaceAll(value, `\`, `\\`) + `"`
 }

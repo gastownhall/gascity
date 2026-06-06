@@ -105,6 +105,13 @@ func workerSessionCreateHints(resolved *config.ResolvedProvider) runtime.Config 
 		ProcessNames:           resolved.ProcessNames,
 		EmitsPermissionWarning: resolved.EmitsPermissionWarning,
 		AcceptStartupDialogs:   resolved.AcceptStartupDialogs,
+		// ga-c4w: the unmanaged `gc session new` direct-start path (controller
+		// down) builds its runtime hints here. Default interactive CLI creates to
+		// mouse-on so the tmux wheel drives copy-mode scrollback. Pool/headless
+		// agents never reach this function — they resolve MouseOn via the
+		// reconciler's templateParamsToConfig (cfgAgent.MouseModeOn()=false), so
+		// this does not weaken controller-poll safety.
+		MouseOn: true,
 	}
 }
 
@@ -544,7 +551,7 @@ func resolvedWorkerRuntimeWithConfigAndMetadata(cityPath string, cfg *config.Cit
 	return &worker.ResolvedRuntime{
 		Command:    command,
 		WorkDir:    workDir,
-		Provider:   firstNonEmptyGCString(info.Provider, resolved.Name),
+		Provider:   resolvedWorkerRuntimeProviderLabel(resolved, transport, info),
 		SessionEnv: sessionEnv,
 		Hints: runtime.Config{
 			WorkDir:                workDir,
@@ -565,6 +572,13 @@ func resolvedWorkerRuntimeWithConfigAndMetadata(cityPath string, cfg *config.Cit
 			SessionIDFlag: resolved.SessionIDFlag,
 		},
 	}, nil
+}
+
+func resolvedWorkerRuntimeProviderLabel(resolved *config.ResolvedProvider, transport string, info session.Info) string {
+	if strings.TrimSpace(configuredWorkerRuntimeCommand(resolved, transport)) != "" {
+		return firstNonEmptyGCString(resolved.Name, info.Provider)
+	}
+	return firstNonEmptyGCString(info.Provider, resolved.Name)
 }
 
 func resolvedWorkerRuntimeCommandForTransport(cityPath string, resolved *config.ResolvedProvider, transport, storedCommand, fallbackProvider string, metadata map[string]string) string {

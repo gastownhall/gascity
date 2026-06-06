@@ -4,7 +4,7 @@ sidebarTitle: 04 - Communication
 description: How agents coordinate through mail, slung work, and hooks — without direct connections.
 ---
 
-In [Tutorial 03](./03-sessions.md), you saw how to peek at agent output in
+In [Tutorial 03](/tutorials/03-sessions), you saw how to peek at agent output in
 polecat sessions, attach to crew sessions, and nudge them with messages. All of
 that was you talking to agents. This tutorial covers how agents talk to _each
 other_.
@@ -170,6 +170,6 @@ Without hooks, you'd have to manually tell each agent to run `gc mail check` and
 You've seen the two coordination mechanisms — mail for messages and slung beads
 for work — and the hook infrastructure that wires it all together. From here:
 
-- **[Formulas](./05-formulas.md)** — multi-step workflow templates with
+- **[Formulas](/tutorials/05-formulas)** — multi-step workflow templates with
   dependencies and variables
-- **[Beads](./06-beads.md)** — the work tracking system underneath it all
+- **[Beads](/tutorials/06-beads)** — the work tracking system underneath it all

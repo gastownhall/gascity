@@ -254,6 +254,54 @@ func TestCachingStoreIgnoresStaleUpdateEventAfterLocalUpdate(t *testing.T) {
 	}
 }
 
+// TestCachingStoreCachedReadyDeclinesAfterDroppedRoutingEvent reproduces the
+// cold-pool strand (gastownhall/gascity#2927). A bead flagged locally mutated
+// by a prior applied event (present in beadSeq, no recent local write) takes
+// the #2210 verify-then-apply branch when a conflicting event arrives; if the
+// backing read loses a write-through race the event is dropped, leaving a
+// stale open ready-candidate row in the cache. CachedReady must then decline
+// (ok=false) so the demand path falls back to the authoritative ReadyLive
+// query rather than counting pool demand off the stale row. Before the fix
+// CachedReady answered ok=true carrying the stale row, stranding the bead
+// until the next full reconcile.
+func TestCachingStoreCachedReadyDeclinesAfterDroppedRoutingEvent(t *testing.T) {
+	backing := &staleReadsAfterUpdateStore{Store: beads.NewMemStore()}
+	cs := beads.NewCachingStoreForTest(backing, nil)
+	if err := cs.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+
+	// A worker bead arrives via a remote bead.created event carrying a complete
+	// snapshot (title/status/created_at/type), so the cache keeps depsComplete
+	// true and lands the bead as an open ready candidate, flagged locally
+	// mutated (beadSeq) with no local write (recentLocalMutation false).
+	created, err := backing.Create(beads.Bead{Title: "route me"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	openSnapshot := created
+	cs.ApplyEvent("bead.created", json.RawMessage(`{"id":"`+created.ID+`","title":"route me","status":"open","created_at":"2026-01-01T00:00:00Z","type":"task"}`))
+	if ready, ok := cs.CachedReady(); !ok || !containsBeadID(ready, created.ID) {
+		t.Fatalf("precondition: CachedReady should answer with the fresh candidate (ok=%v, present=%v)", ok, containsBeadID(ready, created.ID))
+	}
+
+	// The claim lands in the backing (open -> in_progress); the matching
+	// bead.updated event then arrives, but the verify read loses the
+	// write-through race and sees the pre-claim row, so the #2210 branch cannot
+	// confirm the event. The demand path queries CachedReady directly (no
+	// intervening Get), so the stale row is what the scale-check would see.
+	if err := backing.Update(created.ID, beads.UpdateOpts{Status: strPtr("in_progress")}); err != nil {
+		t.Fatalf("Update backing: %v", err)
+	}
+	backing.stale = openSnapshot
+	backing.staleReadCount = 1
+	cs.ApplyEvent("bead.updated", json.RawMessage(`{"id":"`+created.ID+`","status":"in_progress"}`))
+
+	if _, ok := cs.CachedReady(); ok {
+		t.Fatal("CachedReady answered from a stale ready-candidate row (ok=true); want ok=false to force the authoritative ReadyLive fallback")
+	}
+}
+
 func TestCachingStoreIgnoresStaleClosedEventAfterLocalReopen(t *testing.T) {
 	mem := beads.NewMemStore()
 	created, err := mem.Create(beads.Bead{Title: "reopen me"})
@@ -545,7 +593,7 @@ func TestCachingStoreParentListDoesNotResurrectConcurrentDelete(t *testing.T) {
 	}
 }
 
-func TestCachingStoreDirtyGetPreservesConcurrentEvent(t *testing.T) {
+func TestCachingStoreUpdateRefreshFailureAppliesWriteThroughState(t *testing.T) {
 	mem := beads.NewMemStore()
 	original, err := mem.Create(beads.Bead{Title: "before"})
 	if err != nil {
@@ -565,59 +613,12 @@ func TestCachingStoreDirtyGetPreservesConcurrentEvent(t *testing.T) {
 		t.Fatalf("Update(first): %v", err)
 	}
 
-	stale, err := mem.Get(original.ID)
-	if err != nil {
-		t.Fatalf("Get(backing stale): %v", err)
-	}
-	backing.mu.Lock()
-	backing.stale = stale
-	backing.started = make(chan struct{})
-	backing.release = make(chan struct{})
-	backing.blockNextGet = true
-	backing.mu.Unlock()
-
-	gotCh := make(chan beads.Bead, 1)
-	errCh := make(chan error, 1)
-	go func() {
-		got, getErr := cs.Get(original.ID)
-		if getErr != nil {
-			errCh <- getErr
-			return
-		}
-		gotCh <- got
-	}()
-
-	<-backing.started
-	secondTitle := "after concurrent event"
-	if err := mem.Update(original.ID, beads.UpdateOpts{Title: &secondTitle}); err != nil {
-		t.Fatalf("Update(backing second): %v", err)
-	}
-	eventBead, err := mem.Get(original.ID)
-	if err != nil {
-		t.Fatalf("Get(backing second): %v", err)
-	}
-	payload, err := json.Marshal(eventBead)
-	if err != nil {
-		t.Fatalf("Marshal: %v", err)
-	}
-	cs.ApplyEvent("bead.updated", payload)
-	close(backing.release)
-
-	select {
-	case getErr := <-errCh:
-		t.Fatalf("Get: %v", getErr)
-	case got := <-gotCh:
-		if got.Title != secondTitle {
-			t.Fatalf("Get title = %q, want %q", got.Title, secondTitle)
-		}
-	}
-
 	got, err := cs.Get(original.ID)
 	if err != nil {
-		t.Fatalf("Get cached: %v", err)
+		t.Fatalf("Get after refresh failure: %v", err)
 	}
-	if got.Title != secondTitle {
-		t.Fatalf("cached title = %q, want %q", got.Title, secondTitle)
+	if got.Title != firstTitle {
+		t.Fatalf("Get title after refresh failure = %q, want %q", got.Title, firstTitle)
 	}
 }
 
@@ -858,6 +859,117 @@ func TestCachingStoreLiveListDoesNotOverwriteRecentLocalWriteWithStaleBackingRow
 	}
 }
 
+func TestCachingStoreLiveListDoesNotOverwriteRecentLocalWriteWhenBackingOmitsRow(t *testing.T) {
+	mem := beads.NewMemStore()
+	original, err := mem.Create(beads.Bead{
+		Title:    "claimed work",
+		Assignee: "worker",
+		Status:   "open",
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	store := &omittingLiveListGetStore{Store: mem}
+	cs := beads.NewCachingStoreForTest(store, nil)
+	if err := cs.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+
+	status := "in_progress"
+	if err := cs.Update(original.ID, beads.UpdateOpts{Status: &status}); err != nil {
+		t.Fatalf("Update local status: %v", err)
+	}
+	store.omitLiveListOnce()
+	store.returnStaleGetOnce(original)
+
+	if _, err := cs.List(beads.ListQuery{Status: "in_progress", Assignee: "worker", Live: true}); err != nil {
+		t.Fatalf("Live list refresh: %v", err)
+	}
+	cs.ApplyEvent("bead.updated", json.RawMessage(`{"id":"`+original.ID+`","status":"open"}`))
+
+	got, err := cs.Get(original.ID)
+	if err != nil {
+		t.Fatalf("Get after omitted live row: %v", err)
+	}
+	if got.Status != "in_progress" {
+		t.Fatalf("status after omitted live row = %q, want in_progress", got.Status)
+	}
+}
+
+func TestCachingStoreLiveListRemovesDeletedRowsMissingFromBacking(t *testing.T) {
+	mem := beads.NewMemStore()
+	original, err := mem.Create(beads.Bead{
+		Title:    "delete me",
+		Assignee: "worker",
+		Status:   "open",
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	cs := beads.NewCachingStoreForTest(mem, nil)
+	if err := cs.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	if err := mem.Delete(original.ID); err != nil {
+		t.Fatalf("Delete backing: %v", err)
+	}
+
+	live, err := cs.List(beads.ListQuery{Status: "open", Assignee: "worker", Live: true})
+	if err != nil {
+		t.Fatalf("Live list refresh: %v", err)
+	}
+	if len(live) != 0 {
+		t.Fatalf("live list after backing delete = %+v, want no rows", live)
+	}
+
+	cached, err := cs.Handles().Cached.List(beads.ListQuery{Status: "open", Assignee: "worker"})
+	if err != nil {
+		t.Fatalf("Cached List after backing delete: %v", err)
+	}
+	if len(cached) != 0 {
+		t.Fatalf("cached list after backing delete = %+v, want no rows", cached)
+	}
+	if got, err := cs.Get(original.ID); !errors.Is(err, beads.ErrNotFound) {
+		t.Fatalf("Get after backing delete = (%+v, %v), want ErrNotFound", got, err)
+	}
+}
+
+func TestCachingStoreLiveListDoesNotRemoveRecentLocalWriteWhenBackingReportsNotFound(t *testing.T) {
+	mem := beads.NewMemStore()
+	original, err := mem.Create(beads.Bead{
+		Title:    "claimed work",
+		Assignee: "worker",
+		Status:   "open",
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	store := &omittingLiveListGetStore{Store: mem}
+	cs := beads.NewCachingStoreForTest(store, nil)
+	if err := cs.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+
+	status := "in_progress"
+	if err := cs.Update(original.ID, beads.UpdateOpts{Status: &status}); err != nil {
+		t.Fatalf("Update local status: %v", err)
+	}
+	store.omitLiveListOnce()
+	store.returnNotFoundGetOnce(original.ID)
+
+	if _, err := cs.List(beads.ListQuery{Status: "in_progress", Assignee: "worker", Live: true}); err != nil {
+		t.Fatalf("Live list refresh: %v", err)
+	}
+
+	cached, err := cs.Handles().Cached.List(beads.ListQuery{Status: "in_progress", Assignee: "worker"})
+	if err != nil {
+		t.Fatalf("Cached List after omitted live row: %v", err)
+	}
+	if len(cached) != 1 || cached[0].ID != original.ID {
+		t.Fatalf("cached list after omitted live row = %+v, want locally updated row %s", cached, original.ID)
+	}
+}
+
 func TestCachingStoreUpdateDoesNotDuplicateAuthoritativeLabels(t *testing.T) {
 	mem := beads.NewMemStore()
 	original, err := mem.Create(beads.Bead{
@@ -1010,6 +1122,64 @@ func (s *staleListAfterUpdateStore) List(query beads.ListQuery) ([]beads.Bead, e
 	return s.Store.List(query)
 }
 
+type omittingLiveListGetStore struct {
+	beads.Store
+	mu               sync.Mutex
+	omitLiveCount    int
+	staleGet         beads.Bead
+	staleGetCount    int
+	notFoundGetID    string
+	notFoundGetCount int
+}
+
+func (s *omittingLiveListGetStore) omitLiveListOnce() {
+	s.mu.Lock()
+	s.omitLiveCount = 1
+	s.mu.Unlock()
+}
+
+func (s *omittingLiveListGetStore) returnStaleGetOnce(stale beads.Bead) {
+	s.mu.Lock()
+	s.staleGet = stale
+	s.staleGetCount = 1
+	s.mu.Unlock()
+}
+
+func (s *omittingLiveListGetStore) returnNotFoundGetOnce(id string) {
+	s.mu.Lock()
+	s.notFoundGetID = id
+	s.notFoundGetCount = 1
+	s.mu.Unlock()
+}
+
+func (s *omittingLiveListGetStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	s.mu.Lock()
+	if s.omitLiveCount > 0 && query.Live {
+		s.omitLiveCount--
+		s.mu.Unlock()
+		return nil, nil
+	}
+	s.mu.Unlock()
+	return s.Store.List(query)
+}
+
+func (s *omittingLiveListGetStore) Get(id string) (beads.Bead, error) {
+	s.mu.Lock()
+	if s.staleGetCount > 0 && id == s.staleGet.ID {
+		s.staleGetCount--
+		stale := s.staleGet
+		s.mu.Unlock()
+		return stale, nil
+	}
+	if s.notFoundGetCount > 0 && id == s.notFoundGetID {
+		s.notFoundGetCount--
+		s.mu.Unlock()
+		return beads.Bead{}, beads.ErrNotFound
+	}
+	s.mu.Unlock()
+	return s.Store.Get(id)
+}
+
 type nonBdCachingBacking struct {
 	beads.Store
 	listCalls int
@@ -1061,34 +1231,19 @@ func (s *parentListRaceStore) List(query beads.ListQuery) ([]beads.Bead, error) 
 
 type dirtyGetRaceStore struct {
 	beads.Store
-	mu           sync.Mutex
-	failNextGet  bool
-	blockNextGet bool
-	started      chan struct{}
-	release      chan struct{}
-	stale        beads.Bead
+	mu          sync.Mutex
+	failNextGet bool
 }
 
 func (s *dirtyGetRaceStore) Get(id string) (beads.Bead, error) {
 	s.mu.Lock()
-	switch {
-	case s.failNextGet:
+	if s.failNextGet {
 		s.failNextGet = false
 		s.mu.Unlock()
 		return beads.Bead{}, errors.New("transient get failure")
-	case s.blockNextGet && id == s.stale.ID:
-		s.blockNextGet = false
-		started := s.started
-		release := s.release
-		stale := s.stale
-		s.mu.Unlock()
-		close(started)
-		<-release
-		return stale, nil
-	default:
-		s.mu.Unlock()
-		return s.Store.Get(id)
 	}
+	s.mu.Unlock()
+	return s.Store.Get(id)
 }
 
 type updateRefreshStore struct {
@@ -1229,6 +1384,108 @@ func TestCachingStoreCachedReadyUsesPrimedDependencies(t *testing.T) {
 	if !ids[blocker.ID] || !ids[ready.ID] || ids[blocked.ID] {
 		t.Fatalf("CachedReady ids = %v, want blocker and ready only", ids)
 	}
+}
+
+// TestCachingStoreCachedReadyExcludesFutureDeferredBead pins that the cached
+// read model honors defer_until the same way bd ready does: a bead deferred
+// into the future is not "ready" even though it is open with no blocking deps,
+// while a past/nil defer is ready. Regression guard for the cross-batch defer
+// being bypassed by the scale-check's CachedReady path.
+func TestCachingStoreCachedReadyExcludesFutureDeferredBead(t *testing.T) {
+	t.Parallel()
+	mem := beads.NewMemStore()
+	ready, err := mem.Create(beads.Bead{Title: "Ready"})
+	if err != nil {
+		t.Fatalf("Create(ready): %v", err)
+	}
+	future := time.Now().UTC().Add(24 * time.Hour)
+	deferred, err := mem.Create(beads.Bead{Title: "Deferred", DeferUntil: &future})
+	if err != nil {
+		t.Fatalf("Create(deferred): %v", err)
+	}
+	past := time.Now().UTC().Add(-24 * time.Hour)
+	pastDeferred, err := mem.Create(beads.Bead{Title: "PastDeferred", DeferUntil: &past})
+	if err != nil {
+		t.Fatalf("Create(pastDeferred): %v", err)
+	}
+
+	cache := beads.NewCachingStoreForTest(mem, nil)
+	if err := cache.PrimeActive(); err != nil {
+		t.Fatalf("PrimeActive: %v", err)
+	}
+	got, ok := cache.CachedReady()
+	if !ok {
+		t.Fatal("CachedReady reported cache unavailable")
+	}
+	ids := map[string]bool{}
+	for _, b := range got {
+		ids[b.ID] = true
+	}
+	if !ids[ready.ID] {
+		t.Errorf("CachedReady omitted non-deferred bead %s; ids=%v", ready.ID, ids)
+	}
+	if ids[deferred.ID] {
+		t.Errorf("CachedReady included future-deferred bead %s; ids=%v", deferred.ID, ids)
+	}
+	if !ids[pastDeferred.ID] {
+		t.Errorf("CachedReady omitted past-deferred (ready) bead %s; ids=%v", pastDeferred.ID, ids)
+	}
+
+	gotReady, err := cache.Ready()
+	if err != nil {
+		t.Fatalf("Ready: %v", err)
+	}
+	readyIDs := map[string]bool{}
+	for _, b := range gotReady {
+		readyIDs[b.ID] = true
+	}
+	if !readyIDs[ready.ID] || !readyIDs[pastDeferred.ID] {
+		t.Fatalf("Ready ids = %v, want ready and past-deferred beads", readyIDs)
+	}
+	if readyIDs[deferred.ID] {
+		t.Fatalf("Ready ids = %v, future-deferred bead %s must be hidden", readyIDs, deferred.ID)
+	}
+}
+
+func TestCachingStoreApplyEventUpdatesCachedReadyFields(t *testing.T) {
+	t.Parallel()
+	mem := beads.NewMemStore()
+	deferredByEvent, err := mem.Create(beads.Bead{Title: "Deferred by event"})
+	if err != nil {
+		t.Fatalf("Create(deferredByEvent): %v", err)
+	}
+	ephemeralByEvent, err := mem.Create(beads.Bead{Title: "Ephemeral by event"})
+	if err != nil {
+		t.Fatalf("Create(ephemeralByEvent): %v", err)
+	}
+
+	cache := beads.NewCachingStoreForTest(mem, nil)
+	if err := cache.PrimeActive(); err != nil {
+		t.Fatalf("PrimeActive: %v", err)
+	}
+	assertCachedReadyHas(t, cache, deferredByEvent.ID, true)
+	assertCachedReadyHas(t, cache, ephemeralByEvent.ID, true)
+
+	future := time.Now().UTC().Add(24 * time.Hour)
+	cache.ApplyEvent("bead.updated", []byte(`{"id":"`+deferredByEvent.ID+`","defer_until":"`+future.Format(time.RFC3339Nano)+`"}`))
+	cache.ApplyEvent("bead.updated", []byte(`{"id":"`+ephemeralByEvent.ID+`","ephemeral":true}`))
+
+	got, err := cache.Get(deferredByEvent.ID)
+	if err != nil {
+		t.Fatalf("Get(deferredByEvent): %v", err)
+	}
+	if got.DeferUntil == nil || !got.DeferUntil.Equal(future) {
+		t.Fatalf("DeferUntil after event = %v, want %s", got.DeferUntil, future.Format(time.RFC3339Nano))
+	}
+	got, err = cache.Get(ephemeralByEvent.ID)
+	if err != nil {
+		t.Fatalf("Get(ephemeralByEvent): %v", err)
+	}
+	if !got.Ephemeral {
+		t.Fatal("Ephemeral after event = false, want true")
+	}
+	assertCachedReadyHas(t, cache, deferredByEvent.ID, false)
+	assertCachedReadyHas(t, cache, ephemeralByEvent.ID, false)
 }
 
 func TestCachingStoreCachedReadyUsesWriteThroughDependencies(t *testing.T) {
@@ -2300,6 +2557,25 @@ func requireCachedBead(t *testing.T, cs *beads.CachingStore, id string, includeC
 	return beads.Bead{}
 }
 
+func assertCachedReadyHas(t *testing.T, cs *beads.CachingStore, id string, want bool) {
+	t.Helper()
+	ready, ok := cs.CachedReady()
+	if !ok {
+		t.Fatal("CachedReady reported cache unavailable")
+	}
+	for _, b := range ready {
+		if b.ID == id {
+			if !want {
+				t.Fatalf("CachedReady included %s, want absent; ready=%v", id, ready)
+			}
+			return
+		}
+	}
+	if want {
+		t.Fatalf("CachedReady omitted %s; ready=%v", id, ready)
+	}
+}
+
 func TestCachingStoreApplyEventIgnoredWhenDegraded(t *testing.T) {
 	t.Parallel()
 	mem := beads.NewMemStore()
@@ -2401,7 +2677,7 @@ func TestCachingStoreListByMetadata(t *testing.T) {
 	}
 }
 
-func TestCachingStoreListIncludeClosedFallsBackToCachedMatches(t *testing.T) {
+func TestCachingStoreListIncludeClosedReturnsPartialErrorOnBackingFailure(t *testing.T) {
 	t.Parallel()
 	backing := &failingIncludeClosedMetadataStore{MemStore: beads.NewMemStore()}
 	match, _ := backing.Create(beads.Bead{Title: "A"})
@@ -2418,8 +2694,9 @@ func TestCachingStoreListIncludeClosedFallsBackToCachedMatches(t *testing.T) {
 		Metadata:      map[string]string{"gc.kind": "workflow"},
 		IncludeClosed: true,
 	})
-	if err != nil {
-		t.Fatalf("List(include closed): %v", err)
+	var partial *beads.PartialResultError
+	if !errors.As(err, &partial) {
+		t.Fatalf("List(include closed) error = %v, want *PartialResultError", err)
 	}
 	if len(results) != 1 || results[0].ID != match.ID {
 		t.Fatalf("results = %v, want only %s", results, match.ID)

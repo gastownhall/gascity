@@ -235,7 +235,6 @@ including one remediation command and one default-rig syntax.
 - `engdocs/design/packv2/doc-loader-v2.md`
 - `engdocs/design/packv2/doc-conformance-matrix.md`
 - `engdocs/design/packv2/skew-analysis.md`
-- `docs/guides/migrating-to-pack-vnext.md`
 - `docs/guides/shareable-packs.md`
 
 #### Checkpoint C

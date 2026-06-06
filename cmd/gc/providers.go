@@ -24,6 +24,7 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionacp "github.com/gastownhall/gascity/internal/runtime/acp"
 	sessionauto "github.com/gastownhall/gascity/internal/runtime/auto"
+	sessioncloudflare "github.com/gastownhall/gascity/internal/runtime/cloudflare"
 	sessionexec "github.com/gastownhall/gascity/internal/runtime/exec"
 	sessionhybrid "github.com/gastownhall/gascity/internal/runtime/hybrid"
 	sessionk8s "github.com/gastownhall/gascity/internal/runtime/k8s"
@@ -149,6 +150,8 @@ func newSessionProviderByName(name string, sc config.SessionConfig, cityName, ci
 		return sessionacp.NewProvider(cfg), nil
 	case "t3bridge":
 		return sessiont3bridge.NewProvider(), nil
+	case "cloudflare":
+		return sessioncloudflare.NewProvider()
 	case "k8s":
 		return sessionk8s.NewProvider()
 	case "hybrid":
@@ -180,12 +183,12 @@ func newSessionProviderForCity(cfg *config.City, cityPath string) runtime.Provid
 
 func newStatusSessionProviderForCity(cfg *config.City, cityPath string) runtime.Provider {
 	ctx := sessionProviderContextForCity(cfg, cityPath, os.Getenv("GC_SESSION"))
-	return newSessionProviderFromContext(ctx, nil)
+	return newBoundedStatusProvider(newSessionProviderFromContext(ctx, nil))
 }
 
 func newStatusSessionProviderForCityWithSnapshot(cfg *config.City, cityPath string, sessionBeads *sessionBeadSnapshot) runtime.Provider {
 	ctx := sessionProviderContextForCity(cfg, cityPath, os.Getenv("GC_SESSION"))
-	return newSessionProviderFromContext(ctx, sessionBeads)
+	return newBoundedStatusProvider(newSessionProviderFromContext(ctx, sessionBeads))
 }
 
 func registerStatusProviderACPRoutes(sp runtime.Provider, snapshot *sessionBeadSnapshot, cityName string, cfg *config.City) {
@@ -519,12 +522,35 @@ func rawBeadsProviderFromConfig(cityPath string) string {
 	return "bd"
 }
 
+func configuredBeadsBackendValue(cityPath string) string {
+	if v := strings.TrimSpace(os.Getenv("GC_BEADS_BACKEND")); v != "" {
+		return v
+	}
+	return strings.TrimSpace(peekBeadsBackend(filepath.Join(cityPath, "city.toml")))
+}
+
+func beadsBackend(cityPath string) string {
+	backend := strings.ToLower(configuredBeadsBackendValue(cityPath))
+	if backend == "" {
+		return "dolt"
+	}
+	return backend
+}
+
+func cityUsesDoltliteBeadsBackend(cityPath string) bool {
+	return beadsBackend(cityPath) == "doltlite"
+}
+
 func providerUsesBdStoreContract(provider string) bool {
 	return contract.ProviderUsesBDContract(provider)
 }
 
 func cityUsesBdStoreContract(cityPath string) bool {
 	return providerUsesBdStoreContract(rawBeadsProvider(cityPath))
+}
+
+func cityUsesManagedDoltBeadsLifecycle(cityPath string) bool {
+	return cityUsesBdStoreContract(cityPath) && !cityUsesDoltliteBeadsBackend(cityPath)
 }
 
 func rawBeadsProviderForScope(scopeRoot, cityPath string) string {

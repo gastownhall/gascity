@@ -444,6 +444,13 @@ func managedDoltDropProbeTableSQLFor(db string) string {
 }
 
 func runManagedDoltSQL(host, port, user string, args ...string) (string, error) {
+	return runManagedDoltSQLContext(context.Background(), host, port, user, args...)
+}
+
+// runManagedDoltSQLContext is the context-aware form of runManagedDoltSQL: the
+// command is bounded by both managedDoltSQLCommandTimeout and the caller's ctx,
+// so a hung server cannot outlive a canceled reconcile tick.
+func runManagedDoltSQLContext(parent context.Context, host, port, user string, args ...string) (string, error) {
 	host = managedDoltConnectHost(host)
 	port = strings.TrimSpace(port)
 	if port == "" {
@@ -461,7 +468,7 @@ func runManagedDoltSQL(host, port, user string, args ...string) (string, error) 
 		"--no-tls",
 		"sql",
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), managedDoltSQLCommandTimeout)
+	ctx, cancel := context.WithTimeout(parent, managedDoltSQLCommandTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "dolt", append(baseArgs, args...)...)
 	out, err := cmd.CombinedOutput()

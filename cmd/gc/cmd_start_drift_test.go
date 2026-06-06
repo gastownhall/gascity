@@ -454,6 +454,8 @@ func TestDoStartJSONAlreadyRunningSupervisorKeepsStdoutJSONOnly(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("GC_DOLT", "skip")
+			t.Setenv("GC_BEADS", "file")
 			cityPath, setCommit := driftCheckEnv(t, tc.supervisorBuildID)
 			setCommit(tc.localBuildID)
 			if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {

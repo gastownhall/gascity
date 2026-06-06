@@ -99,10 +99,19 @@ For small installations where merge review is unnecessary.
 gc sling <agent> <bead-id> --on mol-polecat-commit
 ```
 
+**mol-polecat-report** — Report-only variant. No git checkout, no feature
+branch, no push, no PR. The agent investigates, writes findings as bead
+notes, and exits. Use for analysis or investigation tasks where the output
+is a written report, not a code change.
+
+```
+gc sling <agent> <bead-id> --on mol-polecat-report
+```
+
 **mol-polecat-base** — Shared base for polecat work formulas. Defines
 the common steps (load context, preflight, implement, self-review) that
 variant formulas extend. Not typically used directly — use a variant
-like mol-polecat-commit or mol-polecat-work instead.
+like mol-polecat-commit, mol-polecat-report, or mol-polecat-work instead.
 
 ### Gastown pack formulas (work variants)
 

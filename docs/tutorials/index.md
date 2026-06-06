@@ -12,10 +12,10 @@ workflows.
 
 | Tutorial                     | Description                         |
 | ---------------------------- | ----------------------------------- |
-| [Cities and Rigs](./01-cities-and-rigs.md) | Creating and managing a workspace   |
-| [Agents](./02-agents.md)          | Configuring agent templates         |
-| [Sessions](./03-sessions.md)      | Running and interacting with agents |
-| [Communication](./04-communication.md) | Agent-to-agent coordination    |
-| [Formulas](./05-formulas.md)      | Declarative workflow templates      |
-| [Beads](./06-beads.md)            | The universal work primitive        |
-| [Orders](./07-orders.md)          | Scheduled and event-driven dispatch |
+| [Cities and Rigs](/tutorials/01-cities-and-rigs) | Creating and managing a workspace   |
+| [Agents](/tutorials/02-agents)          | Configuring agent templates         |
+| [Sessions](/tutorials/03-sessions)      | Running and interacting with agents |
+| [Communication](/tutorials/04-communication) | Agent-to-agent coordination    |
+| [Formulas](/tutorials/05-formulas)      | Declarative workflow templates      |
+| [Beads](/tutorials/06-beads)            | The universal work primitive        |
+| [Orders](/tutorials/07-orders)          | Scheduled and event-driven dispatch |

@@ -1193,7 +1193,7 @@ func dispatchReadyWaitNudgesWithSnapshot(cityPath string, cfg *config.City, stor
 		// already surface as their built-in family here. The provider
 		// fallback covers sessions created before provider_kind was stamped.
 		if waitNudgeProviderNeedsPoller(sessionBead) && !nudgeDispatcherIsSupervisor(cfg) {
-			if err := startNudgePoller(cityPath, waitNudgeAgent(sessionBead), sessionBead.Metadata["session_name"]); err != nil {
+			if err := startNudgePoller(cityPath, waitNudgePollerKey(sessionBead), sessionBead.Metadata["session_name"]); err != nil {
 				return fmt.Errorf("starting wait nudge poller: %w", err)
 			}
 		}
@@ -1343,6 +1343,10 @@ func waitNudgeAgent(sessionBead beads.Bead) string {
 		return agent
 	}
 	return sessionBead.Metadata["template"]
+}
+
+func waitNudgePollerKey(sessionBead beads.Bead) string {
+	return sessionpkg.PollerKeyFromBead(sessionBead)
 }
 
 // sessionProviderFamily returns the built-in provider family for a session bead.

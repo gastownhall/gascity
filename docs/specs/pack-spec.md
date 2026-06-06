@@ -237,7 +237,7 @@ Pack imports are named dependencies.
 ```toml
 [imports.gascity]
 source = "https://github.com/gastownhall/gascity-packs/tree/main/gascity"
-version = "sha:d3617d1319a1206ac85f69ba024ec395c49c6f4b"
+version = "^1"
 ```
 
 The binding name is local to the importing file. Current loader behavior uses
@@ -251,7 +251,7 @@ selector are part of the same source string.
 
 | Field | Type | Required | Rule |
 |---|---|---|---|
-| `source` | string | yes | Durable resolver coordinate for the pack root. Must not be empty. |
+| `source` | string | yes | Durable source for the pack root. Must not be empty. GitHub-hosted packs below a repository root should use dereferenceable `/tree/<ref>/<path>` URLs. |
 | `version` | string | no | Compatibility constraint for versioned sources. |
 
 Public import TOML must not use fields named `path`, `ref`, `commit`, or
@@ -628,7 +628,6 @@ New packs should use these authoring constructs:
 > | `[[doctor]]` | Legacy loader compatibility. | `doctor/<name>/run.sh` with optional `doctor.toml`. |
 > | `[[commands]]` | Legacy loader compatibility. | `commands/<path>/run.sh` with optional `command.toml`. |
 > | `[pack].includes` | Legacy loader compatibility. | `[imports.<binding>]`. |
-> | `[agent_defaults]` | Invalid in `pack.toml`; city-level only. | `city.toml` `[agent_defaults]`. |
 > | `[agents]` | Invalid in `pack.toml`; city-level compatibility alias only. | `city.toml` `[agent_defaults]`. |
 > | `[defaults.rig.imports]` | Invalid in `pack.toml`; city-level only. | `city.toml` `[defaults.rig.imports.<binding>]`. |
 > | `[formulas].dir` | Invalid in `pack.toml`. | `formulas/`. |
@@ -872,24 +871,36 @@ The patch/default order is:
 6. Rig overrides apply.
 7. Pack globals apply.
 8. Implicit agents are injected.
-9. City `[agent_defaults]` applies.
+9. Root city `[agent_defaults]` applies.
 
 If a patch target does not exist when the patch runs, loading fails.
 
 ### 2.7. Defaults
 
-`[agent_defaults]` is a city-level `city.toml` table. It is not a pack
-`pack.toml` table.
+`[agent_defaults]` is valid in both root `city.toml` and `pack.toml`. In
+`pack.toml`, it supplies pack-scoped defaults for agents loaded from that pack.
+In root `city.toml`, it supplies city defaults after pack expansion and implicit
+agent injection.
 
 The current default application step actively applies
+`agent_defaults.provider` to agents whose `provider` is still unset and
 `agent_defaults.default_sling_formula` to agents whose `default_sling_formula`
-is still unset. It skips the control-dispatcher infrastructure agent.
+is still unset. `agent_defaults.provider` also counts as a configured provider
+for implicit provider-agent injection. The default application step skips the
+control-dispatcher infrastructure agent.
+
+For unbound city `includes`, a root city `agent_defaults.provider` overrides a
+pack-scoped provider default. For bound `[imports.<binding>]` and
+`[rigs.imports.<binding>]`, a pack-scoped provider default is preserved for the
+imported agents, matching the imported-pack inheritance behavior of
+`default_sling_formula` and `append_fragments`. An explicit per-agent `provider`
+always wins over either default.
 
 The current runtime also applies shared attachment defaults for
 `append_fragments`. Attachment-list fields such as `skills` and `mcp` are
 parsed as compatibility tombstones but ignored by active materialization.
 Other fields in the `AgentDefaults` structure may be parsed and composed by the
-city config loader, but they are not specified here as pack defaults.
+config loader, but they are not specified here as active inherited defaults.
 
 Defaults run after pack expansion, patches, rig overrides, pack globals, and
 implicit agent injection. Defaults fill blank fields only; they do not override

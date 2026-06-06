@@ -31,8 +31,9 @@ Run this from a coordinator workspace that has the target repo checked out
 The goal is parity of outcome, not a verbatim port of upstream's convoy DSL.
 """
 formula = "mol-idea-to-plan"
-version = 2
-contract = "graph.v2"
+
+[requires]
+formula_compiler = ">=2.0.0"
 
 [vars]
 [vars.binding_prefix]

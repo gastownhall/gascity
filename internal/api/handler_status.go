@@ -247,11 +247,14 @@ func (s *Server) buildStatusBody() StatusBody {
 	}
 
 	uptime := int(time.Since(s.state.StartedAt()).Seconds())
+	versions := s.resolveComponentVersions()
 
 	return StatusBody{
 		Name:                cityName,
 		Path:                s.state.CityPath(),
 		Version:             s.state.Version(),
+		DoltVersion:         versions.Dolt,
+		BeadsVersion:        versions.Beads,
 		UptimeSec:           uptime,
 		Suspended:           suspensionstate.EffectiveCitySuspended(citySt, cfg.Workspace.EffectiveSuspendedOnStart()),
 		AgentCount:          ac.Total,

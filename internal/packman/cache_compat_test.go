@@ -16,7 +16,7 @@ func TestCacheKeyAlignment(t *testing.T) {
 		source string
 		commit string
 	}{
-		{"github.com/gastownhall/gastown", "abc123"},
+		{"https://github.com/gastownhall/gascity-packs/tree/main/gastown", "abc123"},
 		{"https://github.com/org/repo.git", "def456"},
 		{"git@github.com:org/repo.git", "789abc"},
 		{"https://github.com/org/repo/tree/v1.0/packs/base", "aaa111"},

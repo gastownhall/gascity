@@ -73,6 +73,34 @@ func TestTestFastParallelUsesSanitizedEnvironment(t *testing.T) {
 	}
 }
 
+func TestNativeDoltliteBeadsTargetRunsTaggedSuite(t *testing.T) {
+	repoRoot := repoRoot(t)
+	cmd := exec.Command("make", "-n", "test-native-doltlite-beads")
+	cmd.Dir = repoRoot
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("make -n test-native-doltlite-beads failed: %v\n%s", err, out)
+	}
+	command := string(out)
+	for _, want := range []string{
+		"CGO_ENABLED=0",
+		"-tags gascity_native_beads",
+		"./internal/beads",
+	} {
+		if !strings.Contains(command, want) {
+			t.Fatalf("test-native-doltlite-beads recipe missing %q:\n%s", want, command)
+		}
+	}
+	for _, banned := range []string{
+		"CGO_ENABLED=1",
+		"cgo,gascity_native_beads",
+	} {
+		if strings.Contains(command, banned) {
+			t.Fatalf("test-native-doltlite-beads recipe must not contain %q (doltlite store now uses pure-Go modernc):\n%s", banned, command)
+		}
+	}
+}
+
 func TestLocalParallelAllowlistIncludesObservableEnv(t *testing.T) {
 	repoRoot := repoRoot(t)
 	script, err := os.ReadFile(filepath.Join(repoRoot, "scripts", "test-local-parallel"))

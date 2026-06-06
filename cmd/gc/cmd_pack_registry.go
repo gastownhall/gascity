@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"slices"
 	"strings"
 	"time"
@@ -11,6 +12,7 @@ import (
 	"github.com/gastownhall/gascity/internal/deps"
 	"github.com/gastownhall/gascity/internal/gchome"
 	"github.com/gastownhall/gascity/internal/packregistry"
+	"github.com/gastownhall/gascity/internal/shellquote"
 	"github.com/spf13/cobra"
 )
 
@@ -242,7 +244,12 @@ type packRegistryReleaseJSON struct {
 }
 
 func doPackRegistryList(jsonOutput bool, stdout, stderr io.Writer) int {
-	cfg, err := packregistry.LoadConfig(gchome.Default())
+	home := gchome.Default()
+	if err := packregistry.EnsureDefaultRegistryConfig(home); err != nil {
+		fmt.Fprintf(stderr, "gc pack registry list: %v\n", err) //nolint:errcheck
+		return 1
+	}
+	cfg, err := packregistry.LoadConfig(home)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc pack registry list: %v\n", err) //nolint:errcheck
 		return 1
@@ -289,6 +296,12 @@ func doPackRegistryAdd(name, source string, noValidate, jsonOutput bool, stdout,
 		}
 		catalogData = data
 	}
+	if name != packregistry.DefaultRegistryName {
+		if err := packregistry.EnsureDefaultRegistryConfig(home); err != nil {
+			fmt.Fprintf(stderr, "gc pack registry add: %v\n", err) //nolint:errcheck
+			return 1
+		}
+	}
 	if err := packregistry.AddRegistryWithCache(home, reg, catalogData); err != nil {
 		fmt.Fprintf(stderr, "gc pack registry add: %v\n", err) //nolint:errcheck
 		return 1
@@ -312,6 +325,16 @@ func doPackRegistryAdd(name, source string, noValidate, jsonOutput bool, stdout,
 
 func doPackRegistryRemove(name string, jsonOutput bool, stdout, stderr io.Writer) int {
 	home := gchome.Default()
+	if err := packregistry.ValidateRegistryName(name); err != nil {
+		fmt.Fprintf(stderr, "gc pack registry remove: %v\n", err) //nolint:errcheck
+		return 1
+	}
+	if name == packregistry.DefaultRegistryName {
+		if err := packregistry.EnsureDefaultRegistryConfig(home); err != nil {
+			fmt.Fprintf(stderr, "gc pack registry remove: %v\n", err) //nolint:errcheck
+			return 1
+		}
+	}
 	removed, err := packregistry.RemoveRegistry(home, name)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc pack registry remove: %v\n", err) //nolint:errcheck
@@ -338,6 +361,10 @@ func doPackRegistryRemove(name string, jsonOutput bool, stdout, stderr io.Writer
 
 func doPackRegistryRefresh(name string, jsonOutput bool, stdout, stderr io.Writer) int {
 	home := gchome.Default()
+	if err := packregistry.EnsureDefaultRegistryConfig(home); err != nil {
+		fmt.Fprintf(stderr, "gc pack registry refresh: %v\n", err) //nolint:errcheck
+		return 1
+	}
 	cfg, err := packregistry.LoadConfig(home)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc pack registry refresh: %v\n", err) //nolint:errcheck
@@ -413,6 +440,10 @@ type registrySearchResult struct {
 
 func doPackRegistrySearch(query, registry string, refresh bool, limit int, all bool, jsonOutput bool, stdout, stderr io.Writer) int {
 	home := gchome.Default()
+	if err := packregistry.EnsureDefaultRegistryConfig(home); err != nil {
+		fmt.Fprintf(stderr, "gc pack registry search: %v\n", err) //nolint:errcheck
+		return 1
+	}
 	cfg, err := packregistry.LoadConfig(home)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc pack registry search: %v\n", err) //nolint:errcheck
@@ -435,7 +466,7 @@ func doPackRegistrySearch(query, registry string, refresh bool, limit int, all b
 				fmt.Fprintf(stderr, "warning: registry %s refresh failed: %v\n", reg.Name, err) //nolint:errcheck
 			}
 		}
-		catalog, _, err := packregistry.ReadCachedRegistryCatalog(home, reg)
+		catalog, err := readPackRegistryCatalogForCommand(context.Background(), home, reg, !refresh)
 		if err != nil {
 			failures++
 			cacheFailures = append(cacheFailures, packRegistryFailureJSON{Name: reg.Name, Message: err.Error()})
@@ -518,6 +549,10 @@ func doPackRegistrySearch(query, registry string, refresh bool, limit int, all b
 
 func doPackRegistryShow(target string, refresh bool, jsonOutput bool, stdout, stderr io.Writer) int {
 	home := gchome.Default()
+	if err := packregistry.EnsureDefaultRegistryConfig(home); err != nil {
+		fmt.Fprintf(stderr, "gc pack registry show: %v\n", err) //nolint:errcheck
+		return 1
+	}
 	cfg, err := packregistry.LoadConfig(home)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc pack registry show: %v\n", err) //nolint:errcheck
@@ -544,7 +579,7 @@ func doPackRegistryShow(target string, refresh bool, jsonOutput bool, stdout, st
 				fmt.Fprintf(stderr, "warning: registry %s refresh failed: %v\n", reg.Name, err) //nolint:errcheck
 			}
 		}
-		catalog, _, err := packregistry.ReadCachedRegistryCatalog(home, reg)
+		catalog, err := readPackRegistryCatalogForCommand(context.Background(), home, reg, !refresh)
 		if err != nil {
 			unavailable = append(unavailable, reg.Name)
 			continue
@@ -597,7 +632,14 @@ func doPackRegistryShow(target string, refresh bool, jsonOutput bool, stdout, st
 	fmt.Fprintf(stdout, "Description: %s\n", match.pack.Description)             //nolint:errcheck
 	fmt.Fprintf(stdout, "Source:      %s\n", match.pack.Source)                  //nolint:errcheck
 	fmt.Fprintf(stdout, "Source kind: %s\n", match.pack.SourceKind)              //nolint:errcheck
-	fmt.Fprintf(stdout, "Latest:      %s\n", latestVersion(match.pack))          //nolint:errcheck
+	latest := latestVersion(match.pack)
+	fmt.Fprintf(stdout, "Latest:      %s\n", latest) //nolint:errcheck
+	if latest != "" {
+		floating, exact := importCommandSuggestions(match.pack, latest)
+		fmt.Fprintln(stdout, "Import commands:")                       //nolint:errcheck
+		fmt.Fprintf(stdout, "  This version or later: %s\n", floating) //nolint:errcheck
+		fmt.Fprintf(stdout, "  Exactly this version:  %s\n", exact)    //nolint:errcheck
+	}
 	if len(match.pack.Releases) > 0 {
 		fmt.Fprintln(stdout, "Releases:") //nolint:errcheck
 		for _, release := range match.pack.Releases {
@@ -609,6 +651,24 @@ func doPackRegistryShow(target string, refresh bool, jsonOutput bool, stdout, st
 		}
 	}
 	return 0
+}
+
+func importCommandSuggestions(pack packregistry.CatalogPack, latest string) (string, string) {
+	base := []string{"import", "add", pack.Source, "--name", pack.Name, "--version"}
+	floating := append([]string{"gc"}, append(base, ">="+latest)...)
+	exact := append([]string{"gc"}, append(base, latest)...)
+	return shellquote.Join(floating), shellquote.Join(exact)
+}
+
+func readPackRegistryCatalogForCommand(ctx context.Context, home string, reg packregistry.Registry, refreshMissing bool) (packregistry.Catalog, error) {
+	catalog, _, err := packregistry.ReadCachedRegistryCatalog(home, reg)
+	if err == nil {
+		return catalog, nil
+	}
+	if !refreshMissing || !os.IsNotExist(err) {
+		return packregistry.Catalog{}, err
+	}
+	return packregistry.RefreshRegistry(ctx, home, reg, packregistry.FetchOptions{})
 }
 
 func warnStaleRegistryCache(home, registry string, stderr io.Writer) {

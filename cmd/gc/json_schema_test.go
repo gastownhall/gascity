@@ -412,6 +412,7 @@ func TestJSONSchemaResultForGraphConvergeOrderFormulaActions(t *testing.T) {
 		{"converge", "iterate"},
 		{"converge", "stop"},
 		{"converge", "test-gate"},
+		{"converge", "test-trigger"},
 		{"converge", "retry"},
 		{"formula", "cook"},
 		{"order", "history"},

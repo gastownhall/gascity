@@ -7,14 +7,18 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	goruntime "runtime"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/nudgepoller"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
+	"github.com/gastownhall/gascity/internal/pidutil"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/worker"
@@ -1575,6 +1579,61 @@ func TestSendMailNotifyWithWorkerManagedQueueFailureDoesNotWake(t *testing.T) {
 	}
 }
 
+// TestSendMailNotifyQueuesIndependentRemindersForEachMail is a regression
+// guard for the deferred-reminder race in gc-ub7: every `gc mail send --notify`
+// to a non-live recipient must queue its own reminder, even when an earlier
+// mail reminder for the same recipient is still pending (unread). The
+// queued-nudge layer must not collapse distinct mail arrivals — neither by ID
+// dedup nor by supersession — so the recipient learns about each mail rather
+// than only the first that crossed the no-unread -> has-unread boundary.
+func TestSendMailNotifyQueuesIndependentRemindersForEachMail(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	store := openNudgeBeadStore(dir)
+	fake := runtime.NewFake()
+	mgr := newSessionManagerWithConfig(dir, store, fake, nil)
+
+	info, err := mgr.Create(context.Background(), "mayor", "Mayor", "claude", dir, "claude", nil, session.ProviderResume{}, runtime.Config{WorkDir: dir})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	// Recipient is not live, so notify falls back to a queued reminder.
+	if err := mgr.Suspend(info.ID); err != nil {
+		t.Fatalf("Suspend: %v", err)
+	}
+
+	// City is not managed, so the wake path is skipped and notify takes the
+	// plain queued-reminder fallback — the path a real idle recipient hits.
+	prevManaged := nudgeCityUsesManagedReconciler
+	nudgeCityUsesManagedReconciler = func(string) bool { return false }
+	t.Cleanup(func() { nudgeCityUsesManagedReconciler = prevManaged })
+
+	target := nudgeTarget{
+		cityPath:    dir,
+		cfg:         &config.City{Agents: []config.Agent{{Name: "mayor", Provider: "claude"}}},
+		sessionID:   info.ID,
+		sessionName: info.SessionName,
+		identity:    "mayor",
+		agent:       config.Agent{Name: "mayor", Provider: "claude"},
+	}
+
+	// Two mails arrive back to back; the first reminder is still pending
+	// (unread) when the second arrives.
+	for i := 0; i < 2; i++ {
+		if err := sendMailNotifyWithWorker(target, store, fake, "human"); err != nil {
+			t.Fatalf("sendMailNotifyWithWorker(call %d): %v", i+1, err)
+		}
+	}
+
+	pending, inFlight, dead, err := listQueuedNudgesForTarget(dir, target, time.Now())
+	if err != nil {
+		t.Fatalf("listQueuedNudgesForTarget: %v", err)
+	}
+	if len(pending) != 2 {
+		t.Fatalf("pending reminders = %d, want 2 (the second mail must not be deduped against the still-unread first); pending=%#v inFlight=%#v dead=%#v", len(pending), pending, inFlight, dead)
+	}
+}
+
 func TestSendMailNotifyWithWorkerManagedWakeFailureRollsBackQueuedNudge(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	dir := t.TempDir()
@@ -1916,7 +1975,7 @@ func TestSendMailNotifyWithProviderStartsClaudePollerWhenQueueingRunningSession(
 	}
 }
 
-func TestSendMailNotifyWithWorkerStartsPollerByAliasForAliasedTarget(t *testing.T) {
+func TestSendMailNotifyWithWorkerStartsPollerBySessionIDForAliasedTarget(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	dir := t.TempDir()
 	store := openNudgeBeadStore(dir)
@@ -1945,9 +2004,7 @@ func TestSendMailNotifyWithWorkerStartsPollerByAliasForAliasedTarget(t *testing.
 	prev := startNudgePoller
 	startNudgePoller = func(cityPath, agentName, sessionName string) error {
 		called = true
-		// The queued nudge carries the session fence, so the poller registration
-		// key can follow the operator-facing alias.
-		if cityPath != dir || agentName != "mayor" || sessionName != info.SessionName {
+		if cityPath != dir || agentName != info.ID || sessionName != info.SessionName {
 			t.Fatalf("unexpected poller args city=%q agent=%q session=%q", cityPath, agentName, sessionName)
 		}
 		return nil
@@ -2336,6 +2393,100 @@ func TestTryDeliverQueuedNudgesByPollerDeliversAndAcks(t *testing.T) {
 	}
 }
 
+func TestTryDeliverQueuedNudgesByPollerSkipsStaleSessionGeneration(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	now := time.Now().Add(-1 * time.Minute)
+
+	store := openNudgeBeadStore(dir)
+	oldSession, err := store.Create(beads.Bead{
+		Title:  "Old worker",
+		Type:   session.BeadType,
+		Status: "closed",
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"alias":              "worker",
+			"session_name":       "sess-worker",
+			"provider":           "codex",
+			"continuation_epoch": "1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create old session: %v", err)
+	}
+	newSession, err := store.Create(beads.Bead{
+		Title:  "New worker",
+		Type:   session.BeadType,
+		Status: "open",
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"alias":              "worker",
+			"session_name":       "sess-worker",
+			"provider":           "codex",
+			"continuation_epoch": "2",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create new session: %v", err)
+	}
+	if err := enqueueQueuedNudge(dir, newQueuedNudgeWithOptions("worker", "old fenced reminder", "session", now, queuedNudgeOptions{
+		SessionID:         oldSession.ID,
+		ContinuationEpoch: "1",
+	})); err != nil {
+		t.Fatalf("enqueueQueuedNudge: %v", err)
+	}
+
+	fake := runtime.NewFake()
+	if err := fake.Start(context.Background(), "sess-worker", runtime.Config{Env: map[string]string{
+		"GC_SESSION_ID":         newSession.ID,
+		"GC_CONTINUATION_EPOCH": "2",
+	}}); err != nil {
+		t.Fatalf("Start new runtime: %v", err)
+	}
+	if err := fake.SetMeta("sess-worker", "GC_SESSION_ID", newSession.ID); err != nil {
+		t.Fatalf("SetMeta(GC_SESSION_ID): %v", err)
+	}
+	if err := fake.SetMeta("sess-worker", "GC_CONTINUATION_EPOCH", "2"); err != nil {
+		t.Fatalf("SetMeta(GC_CONTINUATION_EPOCH): %v", err)
+	}
+	idleSince := time.Now().Add(-10 * time.Second)
+	fake.SetActivity("sess-worker", idleSince)
+
+	target := nudgeTarget{
+		cityPath:          dir,
+		agent:             config.Agent{Name: "worker"},
+		sessionID:         oldSession.ID,
+		continuationEpoch: "1",
+		resolved:          &config.ResolvedProvider{Name: "codex"},
+		sessionName:       "sess-worker",
+	}
+
+	obs, err := workerObserveNudgeTarget(target, store, fake)
+	if err != nil {
+		t.Fatalf("workerObserveNudgeTarget: %v", err)
+	}
+	if obs.Running {
+		delivered, err := tryDeliverQueuedNudgesByPoller(target, store, fake, 3*time.Second, obs)
+		if err != nil {
+			t.Fatalf("tryDeliverQueuedNudgesByPoller: %v", err)
+		}
+		if delivered {
+			t.Fatal("delivered = true, want stale poller to skip reused runtime session name")
+		}
+	}
+
+	if calls := fake.CountCalls("Nudge", "sess-worker"); calls != 0 {
+		t.Fatalf("Nudge calls = %d, want stale poller not to deliver to new session", calls)
+	}
+	pending, inFlight, dead, err := listQueuedNudgesForTarget(dir, target, time.Now())
+	if err != nil {
+		t.Fatalf("listQueuedNudgesForTarget: %v", err)
+	}
+	if len(pending) != 1 || len(inFlight) != 0 || len(dead) != 0 {
+		t.Fatalf("pending/inFlight/dead = %d/%d/%d, want 1/0/0", len(pending), len(inFlight), len(dead))
+	}
+}
+
 func TestTryDeliverQueuedNudgesByPollerLeavesACPDeliveryUnwrapped(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	dir := t.TempDir()
@@ -2607,8 +2758,8 @@ func TestDeliverSlingNudgeQueuesFencedReminderAndStartsPollerForAsleepSession(t 
 	if pending[0].ContinuationEpoch != "7" {
 		t.Fatalf("queued nudge continuation_epoch = %q, want 7", pending[0].ContinuationEpoch)
 	}
-	if pollerCityPath != dir || pollerAgent != target.agentKey() || pollerSession != target.sessionName {
-		t.Fatalf("startNudgePoller = (%q, %q, %q), want (%q, %q, %q)", pollerCityPath, pollerAgent, pollerSession, dir, target.agentKey(), target.sessionName)
+	if pollerCityPath != dir || pollerAgent != target.sessionID || pollerSession != target.sessionName {
+		t.Fatalf("startNudgePoller = (%q, %q, %q), want (%q, %q, %q)", pollerCityPath, pollerAgent, pollerSession, dir, target.sessionID, target.sessionName)
 	}
 }
 
@@ -2880,10 +3031,51 @@ func TestFailedQueuedNudge_DeadLettersFenceMismatch(t *testing.T) {
 	}
 }
 
+func TestNudgeTargetPollerKeyFallbackOrder(t *testing.T) {
+	cases := []struct {
+		name   string
+		target nudgeTarget
+		want   string
+	}{
+		{
+			name:   "session id wins over alias",
+			target: nudgeTarget{alias: "alias", sessionID: "session-id", sessionName: "sess-worker"},
+			want:   "session-id",
+		},
+		{
+			name:   "alias fallback",
+			target: nudgeTarget{alias: "alias", sessionName: "sess-worker"},
+			want:   "alias",
+		},
+		{
+			name:   "qualified agent fallback",
+			target: nudgeTarget{agent: config.Agent{Dir: "rig", Name: "worker"}, sessionName: "sess-worker"},
+			want:   "rig/worker",
+		},
+		{
+			name:   "identity fallback",
+			target: nudgeTarget{identity: "identity", sessionName: "sess-worker"},
+			want:   "identity",
+		},
+		{
+			name:   "session name fallback",
+			target: nudgeTarget{sessionName: "sess-worker"},
+			want:   "sess-worker",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.target.pollerKey(); got != tc.want {
+				t.Fatalf("pollerKey() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestAcquireNudgePollerLeaseAllowsBootstrapPID(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	dir := t.TempDir()
-	pidPath := nudgePollerPIDPath(dir, "sess-worker")
+	pidPath := nudgePollerPIDPath(dir, "sess-worker", "session-id")
 	if err := os.MkdirAll(filepath.Dir(pidPath), 0o755); err != nil {
 		t.Fatalf("MkdirAll: %v", err)
 	}
@@ -2891,7 +3083,7 @@ func TestAcquireNudgePollerLeaseAllowsBootstrapPID(t *testing.T) {
 		t.Fatalf("WriteFile: %v", err)
 	}
 
-	release, err := acquireNudgePollerLease(dir, "sess-worker")
+	release, err := acquireNudgePollerLease(dir, "sess-worker", "session-id")
 	if err != nil {
 		t.Fatalf("acquireNudgePollerLease: %v", err)
 	}
@@ -2901,6 +3093,178 @@ func TestAcquireNudgePollerLeaseAllowsBootstrapPID(t *testing.T) {
 	if !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("pid file still exists after release: %v", err)
 	}
+}
+
+func TestExistingPollerPIDRejectsUnrelatedLivePID(t *testing.T) {
+	if goruntime.GOOS != "linux" {
+		t.Skip("poller ownership check uses /proc on linux")
+	}
+	dir := t.TempDir()
+	pidPath := nudgePollerPIDPath(dir, "sess-worker", "session-id")
+	if err := os.MkdirAll(filepath.Dir(pidPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(pidPath, []byte(fmt.Sprintf("%d\n", os.Getpid())), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	running, err := existingPollerPID(pidPath, dir, "sess-worker", "session-id")
+	if err != nil {
+		t.Fatalf("existingPollerPID: %v", err)
+	}
+	if running {
+		t.Fatalf("existingPollerPID(%q) = true for unrelated live PID %d", pidPath, os.Getpid())
+	}
+}
+
+func TestExistingPollerPIDAcceptsMatchingCitySession(t *testing.T) {
+	if goruntime.GOOS != "linux" {
+		t.Skip("poller ownership check uses /proc on linux")
+	}
+	cityPath := t.TempDir()
+	sessionName := "sess-worker"
+	pidPath := nudgePollerPIDPath(cityPath, sessionName, "session-id")
+	cmd := startPollerLikeProcess(t, cityPath, "session-id")
+	if err := os.MkdirAll(filepath.Dir(pidPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(pidPath, []byte(fmt.Sprintf("%d\n", cmd.Process.Pid)), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	running, err := existingPollerPID(pidPath, cityPath, sessionName, "session-id")
+	if err != nil {
+		t.Fatalf("existingPollerPID: %v", err)
+	}
+	if !running {
+		t.Fatalf("existingPollerPID(%q) = false for matching poller PID %d", pidPath, cmd.Process.Pid)
+	}
+}
+
+func TestExistingPollerPIDRejectsDifferentCitySameSession(t *testing.T) {
+	if goruntime.GOOS != "linux" {
+		t.Skip("poller ownership check uses /proc on linux")
+	}
+	cityPath := t.TempDir()
+	otherCityPath := t.TempDir()
+	sessionName := "sess-worker"
+	pidPath := nudgePollerPIDPath(cityPath, sessionName, "session-id")
+	cmd := startPollerLikeProcess(t, otherCityPath, "session-id")
+	if err := os.MkdirAll(filepath.Dir(pidPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(pidPath, []byte(fmt.Sprintf("%d\n", cmd.Process.Pid)), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	running, err := existingPollerPID(pidPath, cityPath, sessionName, "session-id")
+	if err != nil {
+		t.Fatalf("existingPollerPID: %v", err)
+	}
+	if running {
+		t.Fatalf("existingPollerPID(%q) = true for same-session poller in different city", pidPath)
+	}
+}
+
+func TestExistingPollerPIDRejectsDifferentTargetSameCitySession(t *testing.T) {
+	if goruntime.GOOS != "linux" {
+		t.Skip("poller ownership check uses /proc on linux")
+	}
+	cityPath := t.TempDir()
+	sessionName := "sess-worker"
+	pidPath := nudgePollerPIDPath(cityPath, sessionName, "session-id")
+	cmd := startPollerLikeProcess(t, cityPath, "old-alias")
+	if err := os.MkdirAll(filepath.Dir(pidPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(pidPath, []byte(fmt.Sprintf("%d\n", cmd.Process.Pid)), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	running, err := existingPollerPID(pidPath, cityPath, sessionName, "session-id")
+	if err != nil {
+		t.Fatalf("existingPollerPID: %v", err)
+	}
+	if running {
+		t.Fatalf("existingPollerPID(%q) = true for same-session poller with different target key", pidPath)
+	}
+}
+
+func TestExistingPollerPIDPreservesSameTargetAfterDifferentTarget(t *testing.T) {
+	if goruntime.GOOS != "linux" {
+		t.Skip("poller ownership check uses /proc on linux")
+	}
+	cityPath := t.TempDir()
+	sessionName := "sess-worker"
+	targetA := "session-a"
+	targetB := "session-b"
+	pidPathA := nudgePollerPIDPath(cityPath, sessionName, targetA)
+	pidPathB := nudgePollerPIDPath(cityPath, sessionName, targetB)
+	if pidPathA == pidPathB {
+		t.Fatalf("nudgePollerPIDPath returned the same path for distinct targets: %q", pidPathA)
+	}
+	cmdA := startPollerLikeProcess(t, cityPath, targetA)
+	cmdB := startPollerLikeProcess(t, cityPath, targetB)
+	for _, entry := range []struct {
+		path string
+		pid  int
+	}{
+		{path: pidPathA, pid: cmdA.Process.Pid},
+		{path: pidPathB, pid: cmdB.Process.Pid},
+	} {
+		if err := os.MkdirAll(filepath.Dir(entry.path), 0o755); err != nil {
+			t.Fatalf("MkdirAll: %v", err)
+		}
+		if err := os.WriteFile(entry.path, []byte(fmt.Sprintf("%d\n", entry.pid)), 0o644); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
+	}
+
+	running, err := existingPollerPID(pidPathA, cityPath, sessionName, targetA)
+	if err != nil {
+		t.Fatalf("existingPollerPID: %v", err)
+	}
+	if !running {
+		t.Fatalf("existingPollerPID(%q) = false for still-running target A after target B started", pidPathA)
+	}
+}
+
+func startPollerLikeProcess(t *testing.T, cityPath, agentName string) *exec.Cmd {
+	t.Helper()
+	const sessionName = "sess-worker"
+	scriptPath := filepath.Join(t.TempDir(), "gc-fake")
+	if err := os.WriteFile(scriptPath, []byte("#!/bin/sh\nread _hold\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile(fake poller): %v", err)
+	}
+	cmd := exec.Command(scriptPath, nudgepoller.CommandArgs(cityPath, sessionName, agentName)...)
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatalf("StdinPipe(fake poller): %v", err)
+	}
+	if err := cmd.Start(); err != nil {
+		_ = stdin.Close()
+		t.Fatalf("Start(fake poller): %v", err)
+	}
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_ = stdin.Close()
+		_ = cmd.Wait()
+	})
+	waitForPollerCmdline(t, cmd.Process.Pid, cityPath, sessionName, agentName)
+	return cmd
+}
+
+func waitForPollerCmdline(t *testing.T, pid int, cityPath, sessionName, agentName string) {
+	t.Helper()
+	matches := nudgepoller.CmdlineMatcher(cityPath, sessionName, agentName)
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if pidutil.AliveWithCmdline(pid, matches) {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("poller PID %d did not expose matching command line", pid)
 }
 
 func TestSplitQueuedNudgesForTarget_RejectsFencedNudgesWithoutResolvedSession(t *testing.T) {

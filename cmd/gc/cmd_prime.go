@@ -24,19 +24,18 @@ import (
 // inside a rig without being a managed agent.
 const defaultPrimePrompt = `# Gas City Agent
 
-You are an agent in a Gas City workspace. Check for available work
-and execute it.
+You are an agent in a Gas City workspace. Claim available work and execute it.
 
 ## Your tools
 
-- ` + "`bd ready`" + ` — see available work items
+- ` + "`gc hook --claim --json`" + ` — find and atomically claim one work item
 - ` + "`bd show <id>`" + ` — see details of a work item
 - ` + "`bd close <id>`" + ` — mark work as done
 
 ## How to work
 
-1. Check for available work: ` + "`bd ready`" + `
-2. Pick a bead and execute the work described in its title
+1. Claim work: ` + "`gc hook --claim --json`" + `
+2. Read the claimed bead and execute the work described in its title
 3. When done, close it: ` + "`bd close <id>`" + `
 4. Check for more work. Repeat until the queue is empty.
 `
@@ -46,12 +45,10 @@ const primeHookReadTimeout = 500 * time.Millisecond
 var primeStdin = func() *os.File { return os.Stdin }
 
 type primeHookInput struct {
-	SessionID string `json:"session_id"`
-	Source    string `json:"source"`
+	Source string `json:"source"`
 }
 
 type primeHookContext struct {
-	SessionID     string
 	Source        string
 	HookEventName string
 }
@@ -145,10 +142,10 @@ func doPrime(args []string, stdout, stderr io.Writer) int { //nolint:unparam // 
 // strict is a debugging aid, not a stricter mode for the whole command.
 //
 // Hook-mode side effects under --strict are deferred until we know the
-// invocation is not a strict failure, so a failing --strict cannot leave
-// session-id state behind for an agent that doesn't exist. Suspended
-// paths still run side effects because suspension is a legitimate quiet
-// state, not a failure.
+// invocation is not a strict failure, so a failing --strict cannot update
+// provider resume metadata for an agent that doesn't exist. Suspended paths
+// still run side effects because suspension is a legitimate quiet state, not a
+// failure.
 func doPrimeWithMode(args []string, stdout, stderr io.Writer, hookMode, strictMode bool) int {
 	return doPrimeWithHookFormat(args, stdout, stderr, hookMode, "", strictMode)
 }
@@ -176,7 +173,7 @@ func primeInvocationAgentName(args []string) (string, bool) {
 
 func doPrimeWithHookFormat(args []string, stdout, stderr io.Writer, hookMode bool, hookFormat string, strictMode bool) int {
 	agentName, sessionTemplateContext := primeInvocationAgentName(args)
-	hookContext := primeHookContext{}
+	var hookContext primeHookContext
 	suppressHookPrompt := false
 	if hookMode {
 		hookContext = readPrimeHookContext()
@@ -184,14 +181,11 @@ func doPrimeWithHookFormat(args []string, stdout, stderr io.Writer, hookMode boo
 	}
 	// In non-strict mode, hook side effects fire eagerly (existing behavior).
 	// In strict mode, we defer them until after strict checks pass so that a
-	// failing --strict invocation does not persist a session-id for failed
-	// agent resolution or template validation.
+	// failing --strict invocation does not update provider resume metadata for
+	// failed agent resolution or template validation.
 	runHookSideEffects := func() {
 		if !hookMode {
 			return
-		}
-		if sessionID := hookContext.SessionID; sessionID != "" {
-			persistPrimeHookSessionID(sessionID)
 		}
 		persistPrimeHookProviderSessionKey()
 	}
@@ -279,7 +273,7 @@ func doPrimeWithHookFormat(args []string, stdout, stderr io.Writer, hookMode boo
 				return 1
 			}
 		}
-		// Strict preconditions passed; now it's safe to persist session-id.
+		// Strict preconditions passed; now it's safe to update provider resume metadata.
 		runHookSideEffects()
 	}
 
@@ -305,7 +299,7 @@ func doPrimeWithHookFormat(args []string, stdout, stderr io.Writer, hookMode boo
 		}
 		var ctx PromptContext
 		if a.PromptTemplate != "" || hookMode || sessionTemplateContext {
-			ctx = buildPrimeContext(cityPath, cityName, &a, cfg.Rigs, stderr)
+			ctx = buildPrimeContextForBeads(cityPath, cityName, &a, cfg.Rigs, cfg.Beads, stderr)
 			ctx.ProviderKey, ctx.ProviderDisplayName = providerInfoForAgent(&a, &cfg.Workspace, cfg.Providers)
 			ctx.InstructionsFile = instructionsFileForAgent(&a, &cfg.Workspace, cfg.Providers)
 		}
@@ -484,13 +478,7 @@ func readPrimeHookContext() primeHookContext {
 			if source := strings.TrimSpace(input.Source); source != "" {
 				ctx.Source = source
 			}
-			ctx.SessionID = strings.TrimSpace(input.SessionID)
 		}
-	}
-	if id := strings.TrimSpace(os.Getenv("GC_SESSION_ID")); id != "" {
-		ctx.SessionID = id
-	} else if id := strings.TrimSpace(os.Getenv("CLAUDE_SESSION_ID")); id != "" {
-		ctx.SessionID = id
 	}
 	return ctx
 }
@@ -540,21 +528,6 @@ func readPrimeHookStdin() *primeHookInput {
 		return nil
 	}
 	return &input
-}
-
-func persistPrimeHookSessionID(sessionID string) {
-	if sessionID == "" {
-		return
-	}
-	cwd, err := os.Getwd()
-	if err != nil {
-		return
-	}
-	runtimeDir := filepath.Join(cwd, ".runtime")
-	if err := os.MkdirAll(runtimeDir, 0o755); err != nil {
-		return
-	}
-	_ = os.WriteFile(filepath.Join(runtimeDir, "session_id"), []byte(sessionID+"\n"), 0o644)
 }
 
 func persistPrimeHookProviderSessionKey() {
@@ -635,6 +608,10 @@ func findAgentByName(cfg *config.City, name string) (config.Agent, bool) {
 // environment variables when running inside a managed session, falls back
 // to currentRigContext when run manually.
 func buildPrimeContext(cityPath, cityName string, a *config.Agent, rigs []config.Rig, stderr io.Writer) PromptContext {
+	return buildPrimeContextForBeads(cityPath, cityName, a, rigs, config.BeadsConfig{}, stderr)
+}
+
+func buildPrimeContextForBeads(cityPath, cityName string, a *config.Agent, rigs []config.Rig, beadsCfg config.BeadsConfig, stderr io.Writer) PromptContext {
 	ctx := PromptContext{
 		CityRoot:      cityPath,
 		TemplateName:  a.Name,
@@ -673,7 +650,10 @@ func buildPrimeContext(cityPath, cityName string, a *config.Agent, rigs []config
 
 	ctx.Branch = os.Getenv("GC_BRANCH")
 	ctx.DefaultBranch = defaultBranchForRig(ctx.RigName, rigs, ctx.WorkDir)
-	ctx.WorkQuery = expandAgentCommandTemplate(cityPath, cityName, a, rigs, "work_query", a.EffectiveWorkQuery(), stderr)
+	ctx.WorkQuery = expandAgentCommandTemplate(cityPath, cityName, a, rigs, "work_query", a.EffectiveWorkQueryForBeads(beadsCfg), stderr)
+	ctx.AssignedInProgressQuery = expandAgentCommandTemplate(cityPath, cityName, a, rigs, "assigned_in_progress_query", a.EffectiveAssignedInProgressQueryForBeads(beadsCfg), stderr)
+	ctx.AssignedReadyQuery = expandAgentCommandTemplate(cityPath, cityName, a, rigs, "assigned_ready_query", a.EffectiveAssignedReadyQueryForBeads(beadsCfg), stderr)
+	ctx.RoutedPoolQuery = expandAgentCommandTemplate(cityPath, cityName, a, rigs, "routed_pool_query", a.EffectiveRoutedPoolQueryForBeads(beadsCfg), stderr)
 	ctx.SlingQuery = expandAgentCommandTemplate(cityPath, cityName, a, rigs, "sling_query", a.EffectiveSlingQuery(), stderr)
 	return ctx
 }

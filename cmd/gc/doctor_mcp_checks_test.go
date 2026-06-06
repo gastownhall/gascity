@@ -11,6 +11,9 @@ func TestMCPConfigDoctorCheckReportsTemplateExpansionErrors(t *testing.T) {
 	clearGCEnv(t)
 	cityDir := t.TempDir()
 	writeProjectedMCPCity(t, cityDir, `
+[workspace]
+provider = "gemini"
+
 [beads]
 provider = "file"
 
@@ -48,11 +51,17 @@ func TestMCPConfigDoctorCheckReportsUndeliverableTargets(t *testing.T) {
 	clearGCEnv(t)
 	cityDir := t.TempDir()
 	writeProjectedMCPCity(t, cityDir, `
+[workspace]
+provider = "gemini"
+
 [beads]
 provider = "file"
 
 [session]
 provider = "subprocess"
+
+[daemon]
+formula_v2 = false
 
 [providers.gemini]
 command = "echo"
@@ -85,6 +94,9 @@ func TestMCPSharedTargetDoctorCheckReportsConflicts(t *testing.T) {
 	clearGCEnv(t)
 	cityDir := t.TempDir()
 	writeProjectedMCPCity(t, cityDir, `
+[workspace]
+provider = "gemini"
+
 [beads]
 provider = "file"
 

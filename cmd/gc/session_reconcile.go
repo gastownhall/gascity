@@ -22,6 +22,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
@@ -188,6 +189,18 @@ func sessionStartRequested(session beads.Bead, clk clock.Clock) bool {
 // fresh window each time the bead is reopened. Pending creates that never
 // reached preWakeCommit use pendingCreateNeverStartedTimeout instead.
 const staleCreatingStateTimeout = time.Minute
+
+// stalePendingCreateTimeout is the longer grace window applied by
+// reapStaleSessionBeads to a started pending-create bead — one that holds
+// pending_create_claim=true AND has a last_woke_at (it reached preWakeCommit).
+// Such a bead may legitimately be mid-start or mid-rollback, so it is given
+// more time than a plain creating bead before being reaped. Without an upper
+// bound, a bead whose rollback never completes (e.g. a transient store error
+// on closeBead) would stay open as a phantom forever — the leak tracked by
+// gc-5tyf5. Never-started pending creates (no last_woke_at) instead defer to
+// pendingCreateNeverStartedTimeout, so a slow provider.Start() is not reaped
+// out from under the reconciler's still-active never-started lease.
+const stalePendingCreateTimeout = 5 * time.Minute
 
 func sessionMetadataState(session beads.Bead) string {
 	switch state := strings.TrimSpace(session.Metadata["state"]); state {
@@ -419,6 +432,10 @@ func computeWorkSet(cfg *config.City, runner ScaleCheckRunner, cityName, cityDir
 	var probes []probeWork
 	work := make(map[string]bool)
 	seen := make(map[string]bool) // deduplicate pool instances
+	// Load runtime suspension state once against the in-scope city
+	// directory so the per-agent checks resolve suspension against the
+	// controlled city rather than the process cwd.
+	suspState, _ := loadSuspensionState(fsys.OSFS{}, cityDir)
 	for i := range cfg.Agents {
 		a := &cfg.Agents[i]
 		qn := a.QualifiedName()
@@ -426,7 +443,7 @@ func computeWorkSet(cfg *config.City, runner ScaleCheckRunner, cityName, cityDir
 			continue
 		}
 		seen[qn] = true
-		if isAgentEffectivelySuspended(cfg, a) {
+		if isAgentEffectivelySuspendedWith(cfg, a, suspState) {
 			continue
 		}
 		probeEnv, err := controllerQueryRuntimeEnv(cityDir, cfg, a)
@@ -975,6 +992,7 @@ func healStatePatchWithRollback(session beads.Bead, alive bool, clk clock.Clock,
 			target = string(sessionpkg.StateStartPending)
 		}
 	}
+	stalePendingCreateRollback := false
 	// failed-create is a terminal rollback marker written by
 	// rollbackPendingCreate when a start attempt failed. A bead in this state
 	// whose runtime is not alive must heal toward asleep, even if
@@ -1007,7 +1025,6 @@ func healStatePatchWithRollback(session beads.Bead, alive bool, clk clock.Clock,
 	// rollbackAvailable=false means the caller deferred the formal rollback
 	// (e.g. storeQueryPartial); preserve the claim so the next complete tick
 	// can drive attemptRollbackPendingCreate properly.
-	stalePendingCreateRollback := false
 	if rollbackAvailable && !alive && strings.TrimSpace(meta["state"]) == "creating" {
 		if pendingCreateLeaseExpiredForRollback(session, clk, startupTimeout) {
 			target = string(sessionpkg.StateAsleep)

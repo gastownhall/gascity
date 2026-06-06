@@ -1,6 +1,8 @@
 formula = "ralph-retry-demo"
-contract = "graph.v2"
 description = "Inline Check demo that fails once and then passes"
+
+[requires]
+formula_compiler = ">=2.0.0"
 
 [[steps]]
 id = "implement"

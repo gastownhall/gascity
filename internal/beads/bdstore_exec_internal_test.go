@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/processgroup/processgrouptest"
 	otellog "go.opentelemetry.io/otel/log"
 	otellogglobal "go.opentelemetry.io/otel/log/global"
 	sdklog "go.opentelemetry.io/otel/sdk/log"
@@ -130,6 +131,8 @@ printf '[]\n'
 // the same assertion against a 50ms timeout, which lost on macOS where
 // first-exec of a new script file pays a ~150ms validation tax.
 func TestKillCommandTreeKillsProcessGroup(t *testing.T) {
+	processgrouptest.RequireRealProcessSignals(t)
+
 	if _, err := exec.LookPath("sh"); err != nil {
 		t.Skip("sh unavailable")
 	}

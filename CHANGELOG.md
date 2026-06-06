@@ -9,12 +9,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `gc nudge drain --inject` now prepends a one-line current-time stamp
+  (operator-local + UTC + epoch) to its `UserPromptSubmit` hook output, giving
+  agents a live clock in context every turn. The local zone follows the host
+  (`time.Local`/`$TZ`) or the `GC_OPERATOR_TZ` override; disable with
+  `GC_INJECT_CLOCK=0`. Folded into the existing nudge inject, so it adds zero
+  extra hook subprocesses per turn. See #3036.
+- The supervisor now merges a machine-local secrets file
+  (`${GC_HOME}/secrets.env`, dotenv syntax) into the launchd plist / systemd
+  unit environment on every service-file regeneration. This fixes provider
+  credentials being dropped when `gc start` runs from a shell that did not
+  export them (e.g. at login or after a reboot), which previously caused
+  silent provider auth failures. Only keys already eligible for the supervisor
+  environment are merged (provider credentials plus `GC_SUPERVISOR_ENV`
+  opt-ins); a value exported in the calling shell still takes precedence, and
+  `GC_SUPERVISOR_OMIT_PROVIDER_CREDS=1` suppresses provider credentials from
+  both sources.
 - `GC_DOLT_SYNC_PUSH_TIMEOUT_SECS` configures the SQL-mode push wall-clock
   ceiling for `gc dolt sync` (default 1800s, replacing the prior fixed 120s
   that SIGKILLed large first pushes). Metadata queries keep their own 120s
   bound.
+- **ENOSPC pre-flight for managed Dolt** (`GC_DOLT_MIN_FREE_BYTES`,
+  `GC_DOLT_WARN_FREE_BYTES`): managed-Dolt startup and the store-maintenance
+  compaction loop now check container free space via `statvfs(2)` before
+  performing disk-growing operations. Below the critical floor (default
+  500 MiB) startup is refused and compaction is skipped; below the soft floor
+  (default 2 GiB) a `gc.store.disk_warn` event is emitted and operations
+  proceed. Fails open on probe error and is disabled entirely when
+  `GC_DOLT_MIN_FREE_BYTES=0`. Uses `f_bavail` (APFS-safe — excludes purgeable
+  space). Addresses the root trigger of the 2026-06-01 fleet-drain incident.
 
 ### Fixed
+
+- Pool respawn after `gc runtime drain-ack` no longer waits up to a full patrol
+  interval (default 60 s) before the replacement session starts. The async kill
+  goroutine now pokes the controller once after the session is gone so Phase 2
+  (finalize bead + spawn replacement) runs on the next event tick. Fixes the
+  `TestLifecycle_DrainAckResponsiveRespawn/prequeued_respawn_2364` Tier B
+  nightly regression (ga-ryhnhd, #2364, #2251).
 
 - `gc dolt sync` now emits per-mode diagnostics on push failure instead of a
   generic "push failed": a TIMEOUT message naming the ceiling and
@@ -22,10 +54,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   other failures, and the underlying dolt stderr. The replayed stderr cannot
   leak `GC_DOLT_PASSWORD`: the password reaches dolt via the `DOLT_CLI_PASSWORD`
   environment variable, never as an argv flag. `GC_DOLT_SYNC_PUSH_TIMEOUT_SECS`
-  rejects every numeric-zero form (`0`, `00`, `000`, …) — not just the literal
-  `0` — because GNU `timeout` treats a zero duration as "disable the timeout",
-  which would push unbounded. A failure to create the stderr-capture temp file
-  now degrades to a per-database error rather than aborting the whole run.
+  rejects every numeric-zero form (`0`, `00`, `000`, ...) -- not just the
+  literal `0` -- because GNU `timeout` treats a zero duration as "disable the
+  timeout", which would push unbounded. A failure to create the stderr-capture
+  temp file now degrades to a per-database error rather than aborting the whole
+  run.
+- Interactive `gc session new` tmux sessions now scroll tmux scrollback on the
+  mouse wheel instead of leaking the wheel to the focused TUI (Claude Code's own
+  history, a pager, or the shell). The gastown pack binds `WheelUpPane`→copy-mode
+  and `WheelDownPane`→passthrough, and the runtime resolves interactive sessions
+  to mouse-on across every create seam so tmux preserves the `mouse on` set at
+  session create: the `gc session new` CLI — both the managed-deferred reconciler
+  start (`templateParamsToConfig`, for `session_origin=manual` sessions) and the
+  unmanaged direct start (`workerSessionCreateHints`) — plus the API
+  provider/named paths (`sessionCreateHints`). Resume keeps mouse-on too
+  (`sessionResumeHints`), so the wheel survives suspend/restart. Headless agent
+  sessions stay mouse-off (controller-poll safety) — they resolve `MouseOn` from
+  the agent template path (`cfgAgent.MouseModeOn()`), which is unchanged and has
+  neither the `manual`/`named` interactive marker. Replaces the portharbour
+  po-vtg2 city-local `set-hook` stopgap with the in-source fix. Refs: ga-c4w.
+
+## [1.2.1] - 2026-05-31
+
+### Fixed
+
+- Built-in pack auto-includes now skip packs already reachable from rig pack
+  graphs, preventing duplicate maintenance agents when a rig pack imports a
+  built-in pack transitively.
+- CI, docs, the managed minimum check, and install helpers now pin Dolt 2.1.0
+  so hotfix validation and runtime dependency checks use the same Dolt floor.
 
 ## [1.2.0] - 2026-05-25
 
@@ -68,9 +125,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   matching `gc mail send`. Operators should use `gc mail` commands or
   explicit both-tier/wisp-aware bead queries for mail visibility; default
   issue-tier `bd list` output and git sync do not include wisp-tier messages.
-- Built-in pack auto-includes now skip packs already reachable from rig pack
-  graphs, preventing duplicate maintenance agents when a rig pack imports a
-  built-in pack transitively.
+- Built-in pack auto-include graph traversal now avoids redundant pack reads
+  while preserving non-transitive import boundaries and later transitive
+  expansion of shallow-seen packs.
 
 ## [1.2.0] - 2026-05-25
 
@@ -91,6 +148,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `gc runtime drain-ack` now pokes the city controller socket after setting
+  the drain-ack flag, so the reconciler stops and respawns a drained pool
+  worker on the current patrol tick instead of waiting up to four ticks
+  (~120 s/step → ~30–90 s/step). Closes #2364 (pre-queued work) and #2251
+  (cold-pool arrival after drain-ack), which shared the same missing-poke
+  root cause.
 - `gc --json-schema` manifest output no longer includes the removed
   `transport` field. Consumers should use each role schema's `x-gc-jsonl`
   extension, when present, to determine JSONL record-count behavior.

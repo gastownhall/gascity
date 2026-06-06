@@ -1594,7 +1594,6 @@ func installDefaultPoolInferenceGitBaseline(cityDir string) error {
 	ignorePath := filepath.Join(cityDir, ".gitignore")
 	ignore := strings.Join([]string{
 		".gc/",
-		".runtime/",
 		"",
 	}, "\n")
 	if err := os.WriteFile(ignorePath, []byte(ignore), 0o644); err != nil {

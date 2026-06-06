@@ -4,6 +4,9 @@
 name = "t3bridge-gastown"
 provider = "codex"
 
+[providers.codex]
+base = "builtin:codex"
+
 [session]
 provider = "t3bridge"
 startup_timeout = "2m"

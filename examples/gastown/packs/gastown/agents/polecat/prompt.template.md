@@ -33,7 +33,7 @@ Stay in your worktree. Install deps there if needed (`npm install`). Commit and 
 
 Every commit must land on a per-bead branch named `polecat/<bead-id>`,
 created from `origin/<base_branch>`. The refinery finds work by bead
-assignment (`gc bd list --assignee=...`) and merges the branch recorded
+assignment and merges the branch recorded
 in the bead's `metadata.branch`, which must follow the `polecat/<bead-id>`
 convention. Commit on anything else (your agent home branch, a stray
 local checkout) and the handoff contract is broken — `metadata.branch`
@@ -135,7 +135,7 @@ Your formula: `mol-polecat-work`
 
 ```bash
 # Step 1a: Check for assigned in-progress work (already claimed — no race)
-gc bd list --assignee="$GC_SESSION_NAME" --status=in_progress
+{{ .AssignedInProgressQuery }}
 
 # Step 1b: If none, find pool work
 {{ .WorkQuery }}

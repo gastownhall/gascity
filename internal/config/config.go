@@ -17,6 +17,7 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/gastownhall/gascity/internal/pricing"
+	"github.com/gastownhall/gascity/internal/remotesource"
 	"github.com/gastownhall/gascity/internal/shellquote"
 )
 
@@ -228,11 +229,12 @@ type City struct {
 	Services []Service `toml:"service,omitempty"`
 	// GitHub configures GitHub-facing repository monitors.
 	GitHub GitHubConfig `toml:"github,omitempty"`
-	// AgentDefaults provides city-level defaults for agents that don't
-	// override them (canonical TOML key: agent_defaults). The runtime
-	// currently applies default_sling_formula and append_fragments; the
-	// attachment-list fields remain tombstones, and the other fields are
-	// parsed/composed but not yet inherited automatically.
+	// AgentDefaults provides root city defaults for agents that don't override
+	// them (canonical TOML key: agent_defaults). Pack-local defaults use the
+	// same table shape in pack.toml. The runtime currently applies provider,
+	// default_sling_formula, and append_fragments; the attachment-list fields
+	// remain tombstones, and the other fields are parsed/composed but not yet
+	// inherited automatically.
 	AgentDefaults AgentDefaults `toml:"agent_defaults,omitempty"`
 	// AgentsDefaults is a temporary compatibility alias for [agent_defaults].
 	// Parse/load normalize it into AgentDefaults and prefer [agent_defaults]
@@ -378,10 +380,12 @@ type NamedSession struct {
 	// Dir is the identity prefix for rig-scoped named sessions after pack
 	// expansion. Empty means city-scoped.
 	Dir string `toml:"dir,omitempty"`
-	// Mode controls controller behavior for this named session.
+	// Mode controls when the controller ensures this named session is live.
 	// "on_demand" (default): reserve identity and materialize when work or
 	// an explicit reference requires it.
 	// "always": keep the canonical session controller-managed.
+	// Note: mode="always" is independent of min_active_sessions; both produce
+	// sessions, and gc doctor reports accidental duplicate-pool combinations.
 	Mode string `toml:"mode,omitempty" jsonschema:"enum=on_demand,enum=always"`
 	// SourceDir is the directory where this named session's config was
 	// defined. Set during pack/fragment loading; empty for inline config.
@@ -715,10 +719,10 @@ type PackSource struct {
 // optional version/export/transitive controls.
 type Import struct {
 	// Source is the durable authored pack location: a local path, a remote git
-	// URL, or a remote git URL with a monorepo subpath such as
-	// "github.com/org/repo//packs/foo". Registry handles are lookup-only in
-	// this release wave; authored [imports.*] entries store the resolved source
-	// plus optional version.
+	// URL, or a dereferenceable GitHub tree URL for a pack below a repository
+	// root, such as "https://github.com/org/repo/tree/main/packs/foo". Registry
+	// handles are lookup-only in this release wave; authored [imports.*]
+	// entries store the resolved source plus optional version.
 	Source string `toml:"source" jsonschema:"required"`
 	// Version is an optional semver constraint for git-backed imports (e.g.,
 	// "^1.2"). Empty for local paths. "sha:<hex>" pins a specific commit.
@@ -829,6 +833,9 @@ func legacyImportSourceFor(include string, packs map[string]PackSource) string {
 	if spec, ok := packs[include]; ok {
 		source := spec.Source
 		if spec.Path != "" {
+			if treeURL, ok := remotesource.FormatGitHubTreeSource(source, spec.Ref, spec.Path); ok {
+				return treeURL
+			}
 			source += "//" + strings.TrimPrefix(spec.Path, "/")
 		}
 		if spec.Ref != "" {
@@ -1155,7 +1162,7 @@ type Workspace struct {
 	// InstallAgentHooks lists provider names whose hooks should be installed
 	// into agent working directories. Agent-level overrides workspace-level
 	// (replace, not additive). Supported: "claude", "codex", "gemini",
-	// "kiro", "opencode", "copilot", "cursor", "pi", "omp".
+	// "kiro", "opencode", "groq", "copilot", "cursor", "pi", "omp".
 	InstallAgentHooks []string `toml:"install_agent_hooks,omitempty"`
 	// GlobalFragments lists named template fragments injected into every
 	// agent's rendered prompt. Applied before per-agent InjectFragments.
@@ -1215,10 +1222,124 @@ func (w *Workspace) EffectiveSuspendedOnStart() bool {
 
 // BeadsConfig holds bead store settings.
 type BeadsConfig struct {
-	// Provider selects the bead store backend: "bd" (default), "file",
-	// or "exec:<script>" for a user-supplied script.
+	// Provider selects the bead store backend: "bd" (default, Dolt-backed),
+	// "file", "exec:<script>" for a user-supplied script, or "sqlite" for
+	// the built-in coordination store (pure-Go SQLite; use when Dolt is
+	// unavailable). "sqlite-cgo" is a deprecated alias for "sqlite".
 	Provider string `toml:"provider,omitempty" jsonschema:"default=bd"`
+	// Backend selects the bd storage engine when Provider is "bd".
+	// Empty defaults to "dolt"; T3Code uses "doltlite" for local dev stores.
+	Backend string `toml:"backend,omitempty"`
+	// EventHooks controls installation of the bead event-forwarding hooks
+	// (.beads/hooks/on_create,on_update,on_close). Defaults to true.
+	// This config surface is staged ahead of the native bead-event support;
+	// current hook behavior remains unchanged until lifecycle code opts in.
+	EventHooks *bool `toml:"event_hooks,omitempty" jsonschema:"default=true"`
+	// BDCompatibility selects the bd CLI semantics Gas City may rely on.
+	// Empty defaults to "bd-1.0.4", which keeps claimable work history-backed
+	// and avoids ready flags whose filtering is incomplete in bd 1.0.4.
+	BDCompatibility string `toml:"bd_compatibility,omitempty" jsonschema:"enum=bd-1.0.4,enum=bd-1.0.5"`
+	// Policies defines per-bead-use storage and garbage-collection defaults.
+	// Policy names are interpreted by higher-level systems; unknown names are
+	// preserved so packs can stage future policy classes without breaking load.
+	Policies map[string]BeadPolicyConfig `toml:"policies,omitempty"`
 }
+
+// EventHooksEnabled reports whether bead event hooks should be installed.
+// Unset preserves the current default of enabled hooks.
+func (b BeadsConfig) EventHooksEnabled() bool {
+	return b.EventHooks == nil || *b.EventHooks
+}
+
+const (
+	// BeadsBDCompatibility104 preserves behavior supported by installed bd
+	// 1.0.4, where ready filtering is reliable only for history-backed rows.
+	BeadsBDCompatibility104 = "bd-1.0.4"
+	// BeadsBDCompatibility105 opts into bd 1.0.5 ready/storage semantics.
+	BeadsBDCompatibility105 = "bd-1.0.5"
+)
+
+// NormalizedBDCompatibility returns the configured bd compatibility mode.
+// Empty and unknown values are treated as bd 1.0.4 by runtime code; validation
+// reports unknown values separately when loading user config.
+func (b BeadsConfig) NormalizedBDCompatibility() string {
+	switch b.BDCompatibility {
+	case "", BeadsBDCompatibility104:
+		return BeadsBDCompatibility104
+	case BeadsBDCompatibility105:
+		return BeadsBDCompatibility105
+	default:
+		return BeadsBDCompatibility104
+	}
+}
+
+// UsesBD105ReadySemantics reports whether generated bd ready commands may use
+// flags whose complete filter semantics require bd 1.0.5 or newer.
+func (b BeadsConfig) UsesBD105ReadySemantics() bool {
+	return b.NormalizedBDCompatibility() == BeadsBDCompatibility105
+}
+
+// BeadPolicyConfig holds storage and retention defaults for a named bead use.
+type BeadPolicyConfig struct {
+	// Storage selects the intended persistence tier: "history", "no_history",
+	// or "ephemeral". Creation paths apply this incrementally as they opt in.
+	Storage string `toml:"storage,omitempty" jsonschema:"enum=history,enum=no_history,enum=ephemeral"`
+	// DeleteAfterClose deletes matching GC-owned beads after they have been
+	// closed for this duration. Accepts Go duration syntax plus whole-day "d"
+	// units, e.g. "7d" or "1d12h". Empty means the policy is not GC-managed.
+	DeleteAfterClose string `toml:"delete_after_close,omitempty"`
+}
+
+const (
+	// BeadStorageHistory stores beads in the normal history-tracked table.
+	BeadStorageHistory = "history"
+	// BeadStorageNoHistory stores beads without Dolt history while keeping
+	// non-ephemeral semantics.
+	BeadStorageNoHistory = "no_history"
+	// BeadStorageEphemeral stores beads as ephemeral wisps.
+	BeadStorageEphemeral = "ephemeral"
+)
+
+// NormalizeBeadPolicyStorage returns the configured bead policy storage value.
+// Storage spellings are intentionally canonical so runtime validation matches
+// the generated schema enum.
+func NormalizeBeadPolicyStorage(storage string) string {
+	return storage
+}
+
+// ValidBeadPolicyStorage reports whether storage is one of the supported bead
+// storage classes. Empty storage is valid and means use the default.
+func ValidBeadPolicyStorage(storage string) bool {
+	switch NormalizeBeadPolicyStorage(storage) {
+	case "", BeadStorageHistory, BeadStorageNoHistory, BeadStorageEphemeral:
+		return true
+	default:
+		return false
+	}
+}
+
+// NormalizedStorage returns the canonical storage class for this policy.
+func (p BeadPolicyConfig) NormalizedStorage() string {
+	return NormalizeBeadPolicyStorage(p.Storage)
+}
+
+// DeleteAfterCloseDuration returns DeleteAfterClose as a duration. It accepts
+// ordinary Go durations plus a whole-day "d" unit, e.g. "7d" and "1d12h".
+func (p BeadPolicyConfig) DeleteAfterCloseDuration() time.Duration {
+	if p.DeleteAfterClose == "" {
+		return 0
+	}
+	dur, err := parseConfigDurationWithDays(p.DeleteAfterClose)
+	if err != nil || dur <= 0 {
+		return 0
+	}
+	return dur
+}
+
+// ProgressStallTimeoutMinimum is the minimum positive progress-stall recycle
+// timeout. Values below this floor are clamped so an opt-in automated restart
+// loop cannot spin faster than the storm-protection backstops can observe.
+const ProgressStallTimeoutMinimum = 5 * time.Minute
 
 // SessionConfig holds session provider settings.
 type SessionConfig struct {
@@ -1250,6 +1371,14 @@ type SessionConfig struct {
 	// StartupTimeout is how long to wait for each agent's Start() call before
 	// treating it as failed. Duration string (e.g., "60s", "2m"). Defaults to "60s".
 	StartupTimeout string `toml:"startup_timeout,omitempty" jsonschema:"default=60s"`
+	// ProgressStallTimeout, when set, enables progress-aware session recycling:
+	// a desired, alive, claim-less session on a healthy provider whose last
+	// provider-reported activity is older than this duration is restarted fresh.
+	// Such a session has likely parked (e.g. its turn ended on a provider auth
+	// error) and will not self-recover. Set this above the longest legitimate
+	// alive-idle period for the city; values below 5m are clamped to 5m.
+	// Duration string (e.g. "30m"). Unset/zero disables it.
+	ProgressStallTimeout string `toml:"progress_stall_timeout,omitempty"`
 	// Socket specifies the tmux socket name for per-city isolation.
 	// When set, all tmux commands use "tmux -L <socket>" to connect to
 	// a dedicated server. When empty, defaults to the city name
@@ -1324,6 +1453,29 @@ func (s *SessionConfig) StartupTimeoutDuration() time.Duration {
 	d, err := time.ParseDuration(s.StartupTimeout)
 	if err != nil {
 		return 60 * time.Second
+	}
+	return d
+}
+
+// ProgressStallTimeoutDuration returns the progress-stall recycle timeout, or
+// 0 when unset, zero, negative, or unparseable. Positive values below
+// ProgressStallTimeoutMinimum are clamped to that floor. Zero disables
+// progress-aware recycling (the default): only a city that explicitly opts in
+// by setting a duration above its agents' longest legitimate quiet period gets
+// the behavior.
+func (s *SessionConfig) ProgressStallTimeoutDuration() time.Duration {
+	if s.ProgressStallTimeout == "" {
+		return 0
+	}
+	d, err := time.ParseDuration(s.ProgressStallTimeout)
+	if err != nil {
+		return 0
+	}
+	if d <= 0 {
+		return 0
+	}
+	if d < ProgressStallTimeoutMinimum {
+		return ProgressStallTimeoutMinimum
 	}
 	return d
 }
@@ -1421,6 +1573,26 @@ type MailConfig struct {
 	// Provider selects the mail backend: "fake", "fail",
 	// "exec:<script>", or "" (default: beadmail).
 	Provider string `toml:"provider,omitempty"`
+	// RetentionTTL is how long read messages are retained before purge. Empty
+	// or "0" disables read-message retention.
+	RetentionTTL string `toml:"retention_ttl,omitempty"`
+}
+
+// RetentionTTLDuration parses RetentionTTL as a Go time.Duration. Empty or
+// zero disables read-message retention.
+func (m MailConfig) RetentionTTLDuration() (time.Duration, error) {
+	raw := strings.TrimSpace(m.RetentionTTL)
+	if raw == "" {
+		return 0, nil
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil {
+		return 0, fmt.Errorf("[mail] retention_ttl %q is not a valid Go duration: %w", raw, err)
+	}
+	if d < 0 {
+		return 0, fmt.Errorf("[mail] retention_ttl must not be negative: got %q", raw)
+	}
+	return d, nil
 }
 
 // EventsConfig holds events provider settings.
@@ -1510,6 +1682,15 @@ func (c EventsRotationConfig) ArchiveRetainAgeDuration() time.Duration {
 	return d
 }
 
+const (
+	// DefaultDoltMaxConnections is the managed Dolt listener connection cap.
+	DefaultDoltMaxConnections = 256
+	// DefaultDoltReadTimeoutMillis is the managed Dolt listener read timeout.
+	DefaultDoltReadTimeoutMillis = 30000
+	// DefaultDoltWriteTimeoutMillis is the managed Dolt listener write timeout.
+	DefaultDoltWriteTimeoutMillis = 300000
+)
+
 // DoltConfig holds optional dolt server overrides.
 // When present in city.toml, these override the defaults.
 type DoltConfig struct {
@@ -1523,6 +1704,48 @@ type DoltConfig struct {
 	// 1 enables archive compaction (higher CPU on startup).
 	// nil (omitted) defaults to 0.
 	ArchiveLevel *int `toml:"archive_level,omitempty" jsonschema:"default=0"`
+	// MaxConnections overrides the managed Dolt listener max_connections.
+	// 0 means use the managed default.
+	MaxConnections int `toml:"max_connections,omitempty" jsonschema:"default=256"`
+	// ReadTimeoutMillis overrides the managed Dolt listener read_timeout_millis.
+	// 0 means use the managed default.
+	ReadTimeoutMillis int `toml:"read_timeout_millis,omitempty" jsonschema:"default=30000"`
+	// WriteTimeoutMillis overrides the managed Dolt listener write_timeout_millis.
+	// 0 means use the managed default.
+	WriteTimeoutMillis int `toml:"write_timeout_millis,omitempty" jsonschema:"default=300000"`
+}
+
+// EffectiveArchiveLevel returns the configured Dolt archive level, defaulting
+// omitted values to 0.
+func (d DoltConfig) EffectiveArchiveLevel() int {
+	if d.ArchiveLevel != nil {
+		return *d.ArchiveLevel
+	}
+	return 0
+}
+
+// EffectiveMaxConnections returns the managed Dolt listener max_connections.
+func (d DoltConfig) EffectiveMaxConnections() int {
+	if d.MaxConnections > 0 {
+		return d.MaxConnections
+	}
+	return DefaultDoltMaxConnections
+}
+
+// EffectiveReadTimeoutMillis returns the managed Dolt listener read timeout.
+func (d DoltConfig) EffectiveReadTimeoutMillis() int {
+	if d.ReadTimeoutMillis > 0 {
+		return d.ReadTimeoutMillis
+	}
+	return DefaultDoltReadTimeoutMillis
+}
+
+// EffectiveWriteTimeoutMillis returns the managed Dolt listener write timeout.
+func (d DoltConfig) EffectiveWriteTimeoutMillis() int {
+	if d.WriteTimeoutMillis > 0 {
+		return d.WriteTimeoutMillis
+	}
+	return DefaultDoltWriteTimeoutMillis
 }
 
 // FormulasConfig holds legacy formula directory settings.
@@ -1573,6 +1796,9 @@ type OrderOverride struct {
 	Pool *string `toml:"pool,omitempty"`
 	// Timeout overrides the per-order timeout. Go duration string.
 	Timeout *string `toml:"timeout,omitempty"`
+	// Idempotent overrides whether the order's dispatch is safe to repeat.
+	// Idempotent orders fail open when the open-work gate times out (#2893).
+	Idempotent *bool `toml:"idempotent,omitempty"`
 	// Env adds or overrides environment variables exported into an exec
 	// order's child process.
 	Env map[string]string `toml:"env,omitempty"`
@@ -1853,15 +2079,19 @@ func (d DoltMaintenance) GCTimeoutOrDefault() time.Duration {
 
 // DaemonConfig holds controller daemon settings.
 type DaemonConfig struct {
-	// FormulaV2 enables formula v2 graph workflow infrastructure:
-	// the control-dispatcher implicit agent, graph.v2 formula compilation,
-	// and batch graph-apply bead creation. Requires bd with --graph support.
-	// Default: false (opt-in while the feature stabilizes).
-	FormulaV2 bool `toml:"formula_v2,omitempty"`
+	// formulaV2Set keeps DaemonConfig non-zero when a file explicitly sets
+	// formula_v2=false, so the TOML encoder preserves that operator choice.
+	formulaV2Set bool `toml:"-" json:"-" jsonschema:"-"`
+
+	// FormulaV2 enables formula compiler v2 workflow infrastructure: the
+	// control-dispatcher implicit agent and on-demand named session,
+	// compiler-v2 workflow compilation, and batch graph-apply bead creation.
+	// The implicit dispatcher follows normal session idle-sleep policy.
+	// Requires bd with --graph support. Default: true. Set false only for cities
+	// pinned to formula compiler v1.
+	FormulaV2 bool `toml:"formula_v2" jsonschema:"default=true"`
 	// GraphWorkflows is the deprecated predecessor of FormulaV2. Retained
-	// for backwards compatibility: if graph_workflows is true in TOML and
-	// formula_v2 is not set, FormulaV2 is promoted automatically during
-	// parsing.
+	// for backwards compatibility as an alias. Explicit formula_v2 wins.
 	GraphWorkflows bool `toml:"graph_workflows,omitempty"`
 	// PatrolInterval is the health patrol interval. Duration string (e.g., "30s", "5m", "1h"). Defaults to "30s".
 	PatrolInterval string `toml:"patrol_interval,omitempty" jsonschema:"default=30s"`
@@ -1966,6 +2196,14 @@ type DaemonConfig struct {
 	// false as a global kill switch (e.g., for production cities where a
 	// rebuild on the host should not auto-restart the supervisor).
 	AutoRestartOnDrift *bool `toml:"auto_restart_on_drift,omitempty" jsonschema:"default=true"`
+	// AutoReapClosedBeadWorktrees controls whether the reconciler patrol
+	// automatically removes per-bead git worktrees once their associated
+	// work bead reaches closed status. Only worktrees with a clean working
+	// tree, no unpushed commits, and no stashes are removed; unsafe worktrees
+	// are logged as warnings and left in place for operator review. Session
+	// home directories (agent template directories) are never touched.
+	// Defaults to false. Set to true to enable automated worktree cleanup.
+	AutoReapClosedBeadWorktrees *bool `toml:"auto_reap_closed_bead_worktrees,omitempty" jsonschema:"default=false"`
 	// StartReadyTimeout is how long `gc start` and `gc register` wait for
 	// the supervisor to report the city as Running. Cities with many
 	// registered or adopted sessions take longer to start because the
@@ -1986,6 +2224,14 @@ type DaemonConfig struct {
 	// behavior. Duration string (e.g., "250ms", "500ms"). Trade-off:
 	// adds tick latency up to this value when set.
 	TickDebounce string `toml:"tick_debounce,omitempty"`
+	// AutoPruneWorkerDir controls whether the reconciler removes a
+	// pool-managed session's worker_dir (agent worktree) after the session
+	// bead is closed. Removal is gated on: path lives under the city's
+	// .gc/worktrees/ tree, clean working tree, no unpushed commits, no
+	// stashed work. Nil (unset) defaults to true so pool worktrees do not
+	// accumulate without bound across pool recycles. Set to false to
+	// retain worktrees for post-session diagnostics.
+	AutoPruneWorkerDir *bool `toml:"auto_prune_worker_dir,omitempty" jsonschema:"default=true"`
 }
 
 // AutoRestartOnDriftEnabled reports whether the supervisor should be
@@ -1998,6 +2244,29 @@ func (d *DaemonConfig) AutoRestartOnDriftEnabled() bool {
 		return true
 	}
 	return *d.AutoRestartOnDrift
+}
+
+// AutoReapClosedBeadWorktreesEnabled reports whether the patrol should
+// automatically remove per-bead git worktrees for closed beads. Defaults
+// to false when the field is unset (nil). Set to true in city.toml to
+// enable automated cleanup.
+func (d *DaemonConfig) AutoReapClosedBeadWorktreesEnabled() bool {
+	if d.AutoReapClosedBeadWorktrees == nil {
+		return false
+	}
+	return *d.AutoReapClosedBeadWorktrees
+}
+
+// AutoPruneWorkerDirEnabled reports whether the reconciler should remove a
+// pool-managed session's worker_dir after the session bead is closed. The
+// default is true: pool worktrees are transient by design and accumulate
+// without bound otherwise. Removal is still gated on per-worktree safety
+// probes (clean tree, no unpushed commits, no stashes).
+func (d *DaemonConfig) AutoPruneWorkerDirEnabled() bool {
+	if d.AutoPruneWorkerDir == nil {
+		return true
+	}
+	return *d.AutoPruneWorkerDir
 }
 
 // PatrolIntervalDuration returns the patrol interval as a time.Duration.
@@ -2260,6 +2529,68 @@ func (d *DaemonConfig) WispGCEnabled() bool {
 	return d.WispGCIntervalDuration() > 0 && d.WispTTLDuration() > 0
 }
 
+// parseConfigDurationWithDays extends time.ParseDuration with a whole-day "d"
+// unit. It accepts ordinary Go durations unchanged and supports one leading day
+// component such as "7d" or "1d12h".
+func parseConfigDurationWithDays(raw string) (time.Duration, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return 0, fmt.Errorf("empty duration")
+	}
+	dayIdx := strings.IndexByte(raw, 'd')
+	if dayIdx < 0 {
+		return time.ParseDuration(raw)
+	}
+	days, err := parsePositiveDurationDays(raw[:dayIdx])
+	if err != nil {
+		return 0, err
+	}
+	dayDuration := time.Duration(days) * 24 * time.Hour
+	rest := raw[dayIdx+1:]
+	if rest == "" {
+		return dayDuration, nil
+	}
+	dur, err := time.ParseDuration(rest)
+	if err != nil {
+		return 0, err
+	}
+	return addConfigDurations(dayDuration, dur)
+}
+
+func parsePositiveDurationDays(raw string) (int64, error) {
+	if raw == "" {
+		return 0, fmt.Errorf("missing day count")
+	}
+	for _, r := range raw {
+		if r < '0' || r > '9' {
+			return 0, fmt.Errorf("invalid day count %q", raw)
+		}
+	}
+	days, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil {
+		return 0, err
+	}
+	if days <= 0 {
+		return 0, fmt.Errorf("day count must be positive")
+	}
+	if days > maxConfigDurationDays {
+		return 0, fmt.Errorf("day count %q exceeds maximum %d", raw, maxConfigDurationDays)
+	}
+	return days, nil
+}
+
+const maxConfigDurationDays = int64(1<<63-1) / int64(24*time.Hour)
+
+func addConfigDurations(a, b time.Duration) (time.Duration, error) {
+	if b > 0 && a > time.Duration(1<<63-1)-b {
+		return 0, fmt.Errorf("duration exceeds maximum")
+	}
+	if b < 0 && a < time.Duration(-1<<63)-b {
+		return 0, fmt.Errorf("duration is below minimum")
+	}
+	return a + b, nil
+}
+
 // FormulasDir returns the formulas directory, defaulting to "formulas".
 func (c *City) FormulasDir() string {
 	if c.Formulas.Dir != "" {
@@ -2300,11 +2631,15 @@ func (c *City) PackDirsForRig(rigName string) []string {
 	return dirs
 }
 
-// AgentDefaults provides city-level agent defaults declared via
-// [agent_defaults] in city.toml. The runtime currently applies
-// default_sling_formula and append_fragments; the remaining fields are
-// parsed and composed but are not yet inherited onto agents automatically.
+// AgentDefaults provides agent defaults declared via [agent_defaults] in
+// city.toml or pack.toml. The runtime currently applies provider,
+// default_sling_formula, and append_fragments; the remaining fields are parsed
+// and composed but are not yet inherited onto agents automatically.
 type AgentDefaults struct {
+	// Provider is the default provider name for agents that do not set their
+	// own provider. It also counts as a configured provider for implicit agent
+	// injection.
+	Provider string `toml:"provider,omitempty"`
 	// Model is the parsed/composed default model name for agents
 	// (e.g., "claude-sonnet-4-6"), but it is not yet auto-applied at
 	// runtime. Agents with their own model override would take precedence.
@@ -2312,16 +2647,16 @@ type AgentDefaults struct {
 	// WakeMode is the parsed/composed default wake mode ("resume" or
 	// "fresh"), but it is not yet auto-applied at runtime.
 	WakeMode string `toml:"wake_mode,omitempty" jsonschema:"enum=resume,enum=fresh"`
-	// DefaultSlingFormula is the city-level default formula used for agents
-	// that inherit [agent_defaults]. Explicit agents only receive this value
-	// when agent_defaults.default_sling_formula is set; implicit multi-session
+	// DefaultSlingFormula is the default formula used for agents that inherit
+	// [agent_defaults]. Explicit agents only receive this value when
+	// agent_defaults.default_sling_formula is set; implicit multi-session
 	// configs are seeded with "mol-do-work" elsewhere when no explicit default is set.
 	DefaultSlingFormula string `toml:"default_sling_formula,omitempty"`
-	// AllowOverlay is parsed and composed as a city-level allowlist for
-	// session overlays, but it is not yet inherited onto agents
-	// automatically at runtime.
+	// AllowOverlay is parsed and composed as a config-level allowlist for
+	// session overlays, but it is not yet inherited onto agents automatically
+	// at runtime.
 	AllowOverlay []string `toml:"allow_overlay,omitempty"`
-	// AllowEnvOverride is parsed and composed as a city-level allowlist for
+	// AllowEnvOverride is parsed and composed as a config-level allowlist for
 	// session env overrides, but it is not yet inherited onto agents
 	// automatically at runtime. Names must match ^[A-Z][A-Z0-9_]{0,127}$.
 	AllowEnvOverride []string `toml:"allow_env_override,omitempty"`
@@ -2329,7 +2664,7 @@ type AgentDefaults struct {
 	// .template.md prompts after rendering. Legacy .md.tmpl prompts are
 	// still supported during the transition; plain .md remains inert.
 	// V2 migration convenience — replaces global_fragments/inject_fragments
-	// for city-wide defaults.
+	// for config-wide defaults.
 	AppendFragments []string `toml:"append_fragments,omitempty"`
 	// Skills is a tombstone field retained for v0.15.1 backwards
 	// compatibility. Parsed and composed for migration visibility, but
@@ -2343,6 +2678,9 @@ type AgentDefaults struct {
 }
 
 func mergeAgentDefaultsAliasPreferCanonical(dst *AgentDefaults, src AgentDefaults, meta toml.MetaData) {
+	if !meta.IsDefined("agent_defaults", "provider") {
+		dst.Provider = src.Provider
+	}
 	if !meta.IsDefined("agent_defaults", "model") {
 		dst.Model = src.Model
 	}
@@ -2439,6 +2777,9 @@ type Agent struct {
 	Session string `toml:"session,omitempty" jsonschema:"enum=acp"`
 	// Provider names the provider preset to use for this agent.
 	Provider string `toml:"provider,omitempty"`
+	// InheritedProvider records the pack-scoped default provider for agents
+	// loaded from imported packs. Runtime-only.
+	InheritedProvider string `toml:"-" json:"-"`
 	// StartCommand overrides the provider's command for this agent.
 	StartCommand string `toml:"start_command,omitempty"`
 	// Lifecycle controls runtime lifetime semantics. Empty uses the default
@@ -2472,6 +2813,9 @@ type Agent struct {
 	MaxActiveSessions *int `toml:"max_active_sessions,omitempty"`
 	// MinActiveSessions is the minimum number of sessions to keep alive.
 	// Agent-level only. Counts against rig/workspace caps. Replaces pool.min.
+	// This controls pool sessions independently of [[named_session]]
+	// mode="always"; both produce sessions, and gc doctor reports accidental
+	// combinations.
 	MinActiveSessions *int `toml:"min_active_sessions,omitempty"`
 	// ScaleCheck is a shell command template whose output reports new
 	// unassigned session demand. In bead-backed reconciliation this is
@@ -2656,7 +3000,7 @@ type Agent struct {
 	// Fallback marks this agent as a fallback definition. During pack
 	// composition, a non-fallback agent with the same name wins silently.
 	// When two fallbacks collide, the first loaded (depth-first) wins.
-	// See docs/guides/migrating-to-pack-vnext.md for migration guidance.
+	// See docs/guides/shareable-packs.md for pack layout guidance.
 	Fallback bool `toml:"fallback,omitempty"`
 	// DependsOn lists agent names that must be awake before this agent wakes.
 	// Used for dependency-ordered startup and shutdown. Validated for cycles
@@ -2825,84 +3169,136 @@ func (a *Agent) AttachEnabled() bool {
 	return a.Attach == nil || *a.Attach
 }
 
-// poolDemandKeys lists the routing metadata keys the pool-demand predicate
-// consults, in precedence order. gc.run_target — the canonical per-step
-// target stamped by the graph.v2 stamper (and, since #2386, the legacy
-// stamper) — is preferred; gc.routed_to is the compatibility fallback for
-// beads authored before the gc.run_target migration. The worker claim path
-// (EffectiveWorkQuery Tier 3) and the reconciler demand path
-// (EffectivePoolDemandQuery) walk these in the same order so that a graph.v2
-// workflow root stamping only gc.run_target is both spawned-for and
-// claimable (#2763 — completes the reader migration #2386 began;
-// bdReadyPoolDemandShell was the one reader site it missed).
-var poolDemandKeys = []string{"gc.run_target", "gc.routed_to"}
-
-// bdReadyPoolDemandShell returns the bd ready predicate for unassigned,
-// non-epic pool demand matched on metadata field key=target, where key and
-// target are shell variables scoped by the caller. This is the
-// one-source-of-truth for the "is there work on this routed queue?" question
-// that both the worker (via EffectiveWorkQuery Tier 3) and the reconciler (via
-// EffectivePoolDemandQuery, count-form) ask. Diverging the two re-introduces
-// the protocol-mismatch class; see the "scale_check ↔ work_query
-// correspondence" note in engdocs/architecture/dispatch.md.
-//
-// bd ready cannot express a single "match key A or key B" predicate
-// (--metadata-field is AND-combined and there is no key-absent filter), so the
-// run_target/routed_to precedence is composed at the shell layer by
-// poolDemandFirstRowFunctionScript (work_query) and poolDemandCountShell
-// (count-form), which call this helper once per key in poolDemandKeys order.
+// bdReadyPoolDemandShell returns the canonical bd ready predicate for
+// unassigned, non-epic pool demand routed to target. gc.routed_to is the
+// canonical persisted routing key: the graph.v2 stamper and the legacy stamper
+// both stamp it on every routable bead, including the workflow root (ga-eld2x
+// retired the short-lived gc.run_target wire field). This predicate is the main
+// source of truth for "is there work on this routed queue?" that both the
+// worker (via EffectiveWorkQuery Tier 3) and the reconciler (via
+// EffectivePoolDemandQuery, count-form) ask; diverging the two re-introduces
+// the protocol-mismatch class (see the "scale_check ↔ work_query
+// correspondence" note in engdocs/architecture/dispatch.md).
 //
 // target is passed as a positional argument to the outer sh -c command, not
 // interpolated into the nested shell body. That keeps routes containing shell
 // metacharacters as data instead of executable syntax.
-func bdReadyPoolDemandShell(limitFlag string) string {
-	return `bd ready --metadata-field "$key=$target" --unassigned --exclude-type=epic --json ` + limitFlag
+func bdReadyIncludeEphemeralArg(includeEphemeralReady bool) string {
+	if includeEphemeralReady {
+		return " --include-ephemeral"
+	}
+	return ""
 }
 
-func poolDemandKeyListShell() string {
-	return shellquote.Join(poolDemandKeys)
+func bdReadyPoolDemandShell(limitFlag string, includeEphemeralReady bool) string {
+	return `bd ready` + bdReadyIncludeEphemeralArg(includeEphemeralReady) + ` --metadata-field "gc.routed_to=$target" --unassigned --exclude-type=epic --json ` + limitFlag
+}
+
+// bdReadyPoolDemandMigrationShell is a temporary raw compatibility probe for
+// graph.v2 workflow roots created before gc.routed_to root stamping shipped.
+// It is scoped to workflow roots so gc.run_target remains an authoring hint
+// everywhere else. Callers must pass its output through
+// poolDemandMigrationFilterJQ so a stale divergent gc.run_target cannot remain
+// visible once a root carries gc.routed_to. This retirement-window fallback
+// requires jq in the default worker/reconciler environment; remove it with the
+// Go-side legacy candidates after the backfill completion tracked by ga-dhf44.
+func bdReadyPoolDemandMigrationShell(limitFlag string, includeEphemeralReady bool) string {
+	return `bd ready` + bdReadyIncludeEphemeralArg(includeEphemeralReady) + ` --metadata-field "gc.run_target=$target" --metadata-field "gc.kind=workflow" --unassigned --exclude-type=epic --json --sort oldest ` + limitFlag
+}
+
+func poolDemandMigrationFilterJQ(limit int) string {
+	filter := `[.[] | select((.metadata["gc.routed_to"] // "") == "")]`
+	if limit > 0 {
+		filter += ` | .[:` + strconv.Itoa(limit) + `]`
+	}
+	return shellquote.Join([]string{"jq", filter})
+}
+
+func bdQueryEphemeralStatusShell(status string) string {
+	return `bd query --json ` + shellquote.Quote("ephemeral=true AND status="+status) + ` --limit=0`
+}
+
+func bdQueryEphemeralStatusQuietShell(status string) string {
+	return bdQueryEphemeralStatusShell(status) + ` 2>/dev/null`
+}
+
+func legacyEphemeralReadyFilterJQ(selector string, limit int) string {
+	filter := `[.[] | ` + selector +
+		` | select(((.issue_type // .type // "") != "epic"))` +
+		` | select(([ (.dependencies // [])[]` +
+		` | select((.type // .dep_type // "") as $t | ($t == "blocks" or $t == "waits-for" or $t == "conditional-blocks"))` +
+		` | select((.status // .depends_on_status // "") != "closed") ] | length) == 0)]` +
+		` | sort_by(.created_at // "")`
+	if limit > 0 {
+		filter += ` | .[:` + strconv.Itoa(limit) + `]`
+	}
+	return filter
+}
+
+func legacyEphemeralPoolDemandShell(limit int, includeEphemeralReady, quiet bool) string {
+	if includeEphemeralReady {
+		return `printf "[]"`
+	}
+	filter := legacyEphemeralReadyFilterJQ(
+		`select((.assignee // "") == "")`+
+			` | select(((.metadata["gc.routed_to"] // "") == $target) or (((.metadata["gc.routed_to"] // "") == "") and ((.metadata["gc.run_target"] // "") == $target) and ((.metadata["gc.kind"] // "") == "workflow")))`,
+		limit,
+	)
+	query := bdQueryEphemeralStatusShell("open")
+	if quiet {
+		query = bdQueryEphemeralStatusQuietShell("open")
+	}
+	jqStderr := ""
+	if quiet {
+		jqStderr = ` 2>/dev/null`
+	}
+	return `{ ` + query + ` | jq --arg target "$target" ` + shellquote.Quote(filter) + jqStderr + `; } || printf "[]"`
 }
 
 // poolDemandFirstRowFunctionScript emits the work_query Tier 3 function: it
-// tries each routing key in poolDemandKeys precedence order at --limit=1,
-// printing the first non-empty JSON array and exiting 0. The target comes from
-// the function's first argument, so callers can reuse the same script for both
-// primary and legacy workflow-control routes without embedding dynamic targets
-// inside the shell body.
-func poolDemandFirstRowFunctionScript() string {
+// reads the first ready, unassigned, routed bead for the supplied target,
+// prints it, and exits 0. The caller appends a terminal fallthrough
+// (printf "[]") for the empty case.
+func poolDemandFirstRowFunctionScript(includeEphemeralReady bool) string {
 	return `probe_pool_demand() { ` +
 		`target="$1"; ` +
 		`[ -z "$target" ] && return 1; ` +
-		`for key in ` + poolDemandKeyListShell() + `; do ` +
-		`r=$(` + bdReadyPoolDemandShell("--limit=1") + ` 2>/dev/null); ` +
+		`r=$(` + routedReadyTierCommand(includeEphemeralReady) + `); ` +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
-		`done; ` +
+		`legacy_candidates=$(` + bdReadyPoolDemandMigrationShell("--limit=20", includeEphemeralReady) + ` 2>/dev/null); ` +
+		`r=$(printf "%s" "$legacy_candidates" | ` + poolDemandMigrationFilterJQ(1) + ` 2>/dev/null); ` +
+		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
+		`legacy_ephemeral_candidates=$(` + legacyEphemeralPoolDemandShell(20, includeEphemeralReady, true) + `); ` +
+		`r=$(printf "%s" "$legacy_ephemeral_candidates" | jq '.[0:1]' 2>/dev/null); ` +
+		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
 		`return 1; ` +
 		`}; `
 }
 
+func routedReadyTierCommand(includeEphemeralReady bool) string {
+	// The shared predicate stays order-free so the count-form does no wasted
+	// sorting; the worker first-row path asks bd for the oldest candidate.
+	return bdReadyPoolDemandShell("--sort oldest --limit=1", includeEphemeralReady) + ` 2>/dev/null`
+}
+
 // poolDemandCountShell emits the reconciler count-form for target: it counts
-// ready demand under the first routing key in poolDemandKeys that yields a
-// non-empty result (gc.run_target preferred, gc.routed_to fallback) and prints
-// the array length. Precedence mirrors poolDemandFirstRowFunctionScript so the
-// reconciler's spawn decision and the worker's claim decision agree — the
-// worker drains the preferred tier first, then the count surfaces the fallback
-// tier on the next pass.
+// ready, unassigned, routed demand and prints the array length. It shares the
+// canonical and migration predicates with poolDemandFirstRowFunctionScript so
+// the reconciler's spawn decision and the worker's claim decision read the
+// same demand shape.
 //
-// Unlike the work_query probes, this form must NOT redirect bd stderr or
-// default to zero: a failed `bd ready` has to surface as an error rather than
+// Unlike the work_query probe, this form must NOT redirect bd stderr or default
+// to zero: a failed `bd ready` has to surface as an error rather than
 // masquerade as "no demand", which would silently stop the pool from spawning.
-// Every query is chained with && so any non-zero bd exit short-circuits the
-// whole expression (TestEffectiveScaleCheckUsesReadyOnly).
-func poolDemandCountShell(target string) string {
+// The && chain ensures any non-zero bd exit short-circuits the whole expression
+// (TestEffectiveScaleCheckUsesReadyOnly).
+func poolDemandCountShell(target string, includeEphemeralReady bool) string {
 	script := `target="$1"; ` +
-		`ready_json="[]"; ` +
-		`for key in ` + poolDemandKeyListShell() + `; do ` +
-		`cur=$(` + bdReadyPoolDemandShell("--limit 0") + `) || exit $?; ` +
-		`if [ "$cur" != "[]" ]; then ready_json="$cur"; break; fi; ` +
-		`ready_json="$cur"; ` +
-		`done; ` +
-		`printf "%s\n" "$ready_json" | jq "length"`
+		`ready_json=$(` + bdReadyPoolDemandShell("--limit 0", includeEphemeralReady) + `) || exit $?; ` +
+		`legacy_candidates=$(` + bdReadyPoolDemandMigrationShell("--limit 0", includeEphemeralReady) + `) || exit $?; ` +
+		`legacy_json=$(printf "%s" "$legacy_candidates" | ` + poolDemandMigrationFilterJQ(0) + `) || exit $?; ` +
+		`legacy_ephemeral_json=$(` + legacyEphemeralPoolDemandShell(0, includeEphemeralReady, false) + `); ` +
+		`printf "%s\n%s\n%s\n" "$ready_json" "$legacy_json" "$legacy_ephemeral_json" | jq -s "(add // []) | unique_by(.id) | length"`
 	return shellquote.Join([]string{"sh", "-c", script, "--", target})
 }
 
@@ -2914,38 +3310,75 @@ func (a *Agent) poolDemandTarget() string {
 	return target
 }
 
-func standardAssignedWorkQueryScript() string {
+func standardAssignedWorkQueryScript(includeEphemeralReady bool) string {
+	return standardAssignedInProgressWorkQueryScript(includeEphemeralReady) +
+		standardAssignedReadyWorkQueryScript(includeEphemeralReady)
+}
+
+func standardAssignedInProgressWorkQueryScript(includeEphemeralReady bool) string {
 	return `for id in "$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"; do ` +
 		`[ -z "$id" ] && continue; ` +
-		`r=$(bd list --status in_progress --assignee="$id" --exclude-type=epic --json --limit=1 2>/dev/null); ` +
+		`r=$(bd list --status in_progress --assignee="$id" --json --limit=1 2>/dev/null); ` +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
-		`done; ` +
-		`for id in "$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"; do ` +
-		`[ -z "$id" ] && continue; ` +
-		`r=$(bd ready --assignee="$id" --exclude-type=epic --json --limit=1 2>/dev/null); ` +
-		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
+		ephemeralAssignedInProgressProbeScript("id", includeEphemeralReady) +
 		`done; `
 }
 
-func legacyControlAssignedWorkQueryScript() string {
+func standardAssignedReadyWorkQueryScript(includeEphemeralReady bool) string {
+	return `for id in "$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"; do ` +
+		`[ -z "$id" ] && continue; ` +
+		`r=$(bd ready` + bdReadyIncludeEphemeralArg(includeEphemeralReady) + ` --assignee="$id" --json --limit=1 2>/dev/null); ` +
+		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
+		ephemeralAssignedReadyProbeScript("id", includeEphemeralReady) +
+		`done; `
+}
+
+func legacyControlAssignedWorkQueryScript(includeEphemeralReady bool) string {
+	return legacyControlAssignedInProgressWorkQueryScript(includeEphemeralReady) +
+		legacyControlAssignedReadyWorkQueryScript(includeEphemeralReady)
+}
+
+func legacyControlAssignedInProgressWorkQueryScript(includeEphemeralReady bool) string {
 	return `for id in "$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"; do ` +
 		`[ -z "$id" ] && continue; ` +
 		`legacy=""; case "$id" in *control-dispatcher) legacy="${id%control-dispatcher}workflow-control";; esac; ` +
 		`for cand in "$id" "$legacy"; do ` +
 		`[ -z "$cand" ] && continue; ` +
-		`r=$(bd list --status in_progress --assignee="$cand" --exclude-type=epic --json --limit=1 2>/dev/null); ` +
+		`r=$(bd list --status in_progress --assignee="$cand" --json --limit=1 2>/dev/null); ` +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
+		ephemeralAssignedInProgressProbeScript("cand", includeEphemeralReady) +
 		`done; ` +
-		`done; ` +
-		`for id in "$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"; do ` +
+		`done; `
+}
+
+func legacyControlAssignedReadyWorkQueryScript(includeEphemeralReady bool) string {
+	return `for id in "$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"; do ` +
 		`[ -z "$id" ] && continue; ` +
 		`legacy=""; case "$id" in *control-dispatcher) legacy="${id%control-dispatcher}workflow-control";; esac; ` +
 		`for cand in "$id" "$legacy"; do ` +
 		`[ -z "$cand" ] && continue; ` +
-		`r=$(bd ready --assignee="$cand" --exclude-type=epic --json --limit=1 2>/dev/null); ` +
+		`r=$(bd ready` + bdReadyIncludeEphemeralArg(includeEphemeralReady) + ` --assignee="$cand" --json --limit=1 2>/dev/null); ` +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
+		ephemeralAssignedReadyProbeScript("cand", includeEphemeralReady) +
 		`done; ` +
 		`done; `
+}
+
+func ephemeralAssignedInProgressProbeScript(shellVar string, includeEphemeralReady bool) string {
+	_ = includeEphemeralReady
+	return `r=$(` + bdQueryEphemeralStatusQuietShell("in_progress") + ` | ` +
+		`jq --arg id "$` + shellVar + `" '[.[] | select((.assignee // "") == $id)] | .[:1]' 2>/dev/null); ` +
+		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; `
+}
+
+func ephemeralAssignedReadyProbeScript(shellVar string, includeEphemeralReady bool) string {
+	if includeEphemeralReady {
+		return ""
+	}
+	filter := legacyEphemeralReadyFilterJQ(`select((.assignee // "") == $id)`, 1)
+	return `r=$(` + bdQueryEphemeralStatusQuietShell("open") + ` | ` +
+		`jq --arg id "$` + shellVar + `" ` + shellquote.Quote(filter) + ` 2>/dev/null); ` +
+		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; `
 }
 
 func poolDemandOriginGateScript() string {
@@ -2953,6 +3386,20 @@ func poolDemandOriginGateScript() string {
 		`ephemeral|"") ;; ` +
 		`*) exit 0 ;; ` +
 		`esac; `
+}
+
+func routedPoolWorkQueryProbeScript(includeEphemeralReady bool, targetCount int) string {
+	script := poolDemandOriginGateScript() + poolDemandFirstRowFunctionScript(includeEphemeralReady)
+	for i := 1; i <= targetCount; i++ {
+		script += fmt.Sprintf(`probe_pool_demand "$%d"; `, i)
+	}
+	return script + `printf "[]"`
+}
+
+func routedPoolWorkQueryCommand(includeEphemeralReady bool, targets ...string) string {
+	args := []string{"sh", "-c", routedPoolWorkQueryProbeScript(includeEphemeralReady, len(targets)), "--"}
+	args = append(args, targets...)
+	return shellquote.Join(args)
 }
 
 // EffectiveWorkQuery returns the work query command for this agent.
@@ -2966,13 +3413,21 @@ func poolDemandOriginGateScript() string {
 //
 // State priority: in_progress+assigned (crash recovery) >
 // ready+assigned (pre-assigned) > ready+unassigned+routed_to (pool).
-// Formula roots that are themselves executable must be represented as ready()
-// work (for example type=wisp); molecule containers are not routable demand.
+// Executable formula roots can be epic-typed; the bead storage policy decides
+// whether those roots are history-backed, no-history, or ephemeral for the
+// configured bd compatibility mode. Molecule containers are not routable
+// demand.
 //
-// Parent epics are excluded from every tier (--exclude-type=epic). An epic
-// has no executable spec — its semantic is "all children done" — so a worker
-// claiming an epic does undefined work (gc-udx). Roles that legitimately
-// process epics (oversight, reviewers, closers) opt in by setting an explicit
+// Parent epics are excluded from the routed (pool) tier only
+// (--exclude-type=epic). An unassigned parent epic has no executable spec —
+// its semantic is "all children done" — so a pool worker claiming one does
+// undefined work (gc-udx; the repro is a routed parent epic, see
+// TestEffectiveWorkQuerySkipsEpicLeafScenario). The assigned tiers do NOT
+// exclude epics: work already assigned to this agent is owned, and the
+// patrol-loop pattern (gastown witness/refinery/deacon) can self-assign an
+// epic wisp that the agent must resume after a session restart. Excluding
+// epics there silently stranded those wisps (gc hook exited 1 with empty
+// output). Roles that need different behavior still opt in via an explicit
 // work_query in their agent config; that custom query is returned unchanged
 // above.
 //
@@ -2980,30 +3435,115 @@ func poolDemandOriginGateScript() string {
 // context), all identity vars are empty → assignee tiers skip → only
 // the routed_to tier fires to detect new demand.
 //
-// Tier 3's predicate is shared with EffectivePoolDemandQuery via
-// bdReadyPoolDemandShell so reconciler spawn decisions and worker claim
+// Tier 3's canonical and migration predicates are shared with
+// EffectivePoolDemandQuery so reconciler spawn decisions and worker claim
 // decisions stay symmetric.
 func (a *Agent) EffectiveWorkQuery() string {
+	return a.effectiveWorkQuery(false)
+}
+
+// EffectiveWorkQueryForBeads returns the default work query using the bd
+// compatibility semantics configured for the city.
+func (a *Agent) EffectiveWorkQueryForBeads(beads BeadsConfig) string {
+	return a.effectiveWorkQuery(beads.UsesBD105ReadySemantics())
+}
+
+func (a *Agent) effectiveWorkQuery(includeEphemeralReady bool) string {
 	if a.WorkQuery != "" {
 		return a.WorkQuery
 	}
 	target := a.poolDemandTarget()
 	legacyTarget := legacyWorkflowControlQualifiedName(target)
 	if legacyTarget == "" {
-		script := standardAssignedWorkQueryScript() +
+		script := standardAssignedWorkQueryScript(includeEphemeralReady) +
 			poolDemandOriginGateScript() +
-			poolDemandFirstRowFunctionScript() +
+			poolDemandFirstRowFunctionScript(includeEphemeralReady) +
 			`probe_pool_demand "$1"; ` +
 			`printf "[]"`
 		return shellquote.Join([]string{"sh", "-c", script, "--", target})
 	}
-	script := legacyControlAssignedWorkQueryScript() +
+	script := legacyControlAssignedWorkQueryScript(includeEphemeralReady) +
 		poolDemandOriginGateScript() +
-		poolDemandFirstRowFunctionScript() +
+		poolDemandFirstRowFunctionScript(includeEphemeralReady) +
 		`probe_pool_demand "$1"; ` +
 		`probe_pool_demand "$2"; ` +
 		`printf "[]"`
 	return shellquote.Join([]string{"sh", "-c", script, "--", target, legacyTarget})
+}
+
+// EffectiveAssignedInProgressQuery returns the assigned-in-progress-only command
+// for prompt templates that spell out crash recovery as a separate startup tier.
+// A custom WorkQuery is treated as the caller-owned full discovery contract, so
+// split-tier prompts may run that same custom command in each query slot.
+func (a *Agent) EffectiveAssignedInProgressQuery() string {
+	return a.effectiveAssignedInProgressQuery(false)
+}
+
+// EffectiveAssignedInProgressQueryForBeads returns the assigned-in-progress
+// query using the bd compatibility semantics configured for the city.
+func (a *Agent) EffectiveAssignedInProgressQueryForBeads(beads BeadsConfig) string {
+	return a.effectiveAssignedInProgressQuery(beads.UsesBD105ReadySemantics())
+}
+
+func (a *Agent) effectiveAssignedInProgressQuery(includeEphemeralReady bool) string {
+	if a.WorkQuery != "" {
+		return a.WorkQuery
+	}
+	target := a.poolDemandTarget()
+	if legacyWorkflowControlQualifiedName(target) != "" {
+		return shellquote.Join([]string{"sh", "-c", legacyControlAssignedInProgressWorkQueryScript(includeEphemeralReady) + `printf "[]"`})
+	}
+	return shellquote.Join([]string{"sh", "-c", standardAssignedInProgressWorkQueryScript(includeEphemeralReady) + `printf "[]"`})
+}
+
+// EffectiveAssignedReadyQuery returns the assigned-ready-only command for
+// prompt templates that spell out claim-first startup in separate tiers. A
+// custom WorkQuery is treated as the caller-owned full discovery contract, so
+// split-tier prompts may run that same custom command in each query slot.
+func (a *Agent) EffectiveAssignedReadyQuery() string {
+	return a.effectiveAssignedReadyQuery(false)
+}
+
+// EffectiveAssignedReadyQueryForBeads returns the assigned-ready-only query
+// using the bd compatibility semantics configured for the city.
+func (a *Agent) EffectiveAssignedReadyQueryForBeads(beads BeadsConfig) string {
+	return a.effectiveAssignedReadyQuery(beads.UsesBD105ReadySemantics())
+}
+
+func (a *Agent) effectiveAssignedReadyQuery(includeEphemeralReady bool) string {
+	if a.WorkQuery != "" {
+		return a.WorkQuery
+	}
+	target := a.poolDemandTarget()
+	if legacyWorkflowControlQualifiedName(target) != "" {
+		return shellquote.Join([]string{"sh", "-c", legacyControlAssignedReadyWorkQueryScript(includeEphemeralReady) + `printf "[]"`})
+	}
+	return shellquote.Join([]string{"sh", "-c", standardAssignedReadyWorkQueryScript(includeEphemeralReady) + `printf "[]"`})
+}
+
+// EffectiveRoutedPoolQuery returns the routed-pool-only command for prompt
+// templates that spell out claim-first startup in separate tiers. It is the
+// prompt-side counterpart to EffectiveWorkQuery's routed pool tier.
+func (a *Agent) EffectiveRoutedPoolQuery() string {
+	return a.effectiveRoutedPoolQuery(false)
+}
+
+// EffectiveRoutedPoolQueryForBeads returns the routed-pool-only command using
+// the bd compatibility semantics configured for the city.
+func (a *Agent) EffectiveRoutedPoolQueryForBeads(beads BeadsConfig) string {
+	return a.effectiveRoutedPoolQuery(beads.UsesBD105ReadySemantics())
+}
+
+func (a *Agent) effectiveRoutedPoolQuery(includeEphemeralReady bool) string {
+	if a.WorkQuery != "" {
+		return a.WorkQuery
+	}
+	target := a.poolDemandTarget()
+	legacyTarget := legacyWorkflowControlQualifiedName(target)
+	if legacyTarget == "" {
+		return routedPoolWorkQueryCommand(includeEphemeralReady, target)
+	}
+	return routedPoolWorkQueryCommand(includeEphemeralReady, target, legacyTarget)
 }
 
 func legacyWorkflowControlQualifiedName(target string) string {
@@ -3067,7 +3607,7 @@ func (a *Agent) DrainTimeoutDuration() time.Duration {
 // EffectivePoolDemandQuery returns the count-form pool-demand query the
 // reconciler runs to detect new unassigned routed work. It is the
 // reconciler-side counterpart to EffectiveWorkQuery's Tier 3 (the worker
-// claim path): both derive their predicate from bdReadyPoolDemandShell so
+// claim path): both derive their predicates from the same helpers so
 // any future change to the pool-demand shape flows to both paths
 // simultaneously.
 //
@@ -3081,11 +3621,21 @@ func (a *Agent) DrainTimeoutDuration() time.Duration {
 // correspondence" and the protocol-mismatch class regression addressed
 // by PR #1516.
 func (a *Agent) EffectivePoolDemandQuery() string {
+	return a.effectivePoolDemandQuery(false)
+}
+
+// EffectivePoolDemandQueryForBeads returns the count-form demand query using
+// the bd compatibility semantics configured for the city.
+func (a *Agent) EffectivePoolDemandQueryForBeads(beads BeadsConfig) string {
+	return a.effectivePoolDemandQuery(beads.UsesBD105ReadySemantics())
+}
+
+func (a *Agent) effectivePoolDemandQuery(includeEphemeralReady bool) string {
 	if a.ScaleCheck != "" {
 		return a.ScaleCheck
 	}
 	target := a.poolDemandTarget()
-	return poolDemandCountShell(target)
+	return poolDemandCountShell(target, includeEphemeralReady)
 }
 
 // EffectiveScaleCheck returns the scale check command for this agent.
@@ -3239,6 +3789,16 @@ func (a *Agent) ResolvedMaxActiveSessions(cfg *City) *int {
 // If OnDeath is set, returns it. Otherwise returns the default recovery hook
 // that unclaims in-progress work assigned to this concrete agent identity.
 func (a *Agent) EffectiveOnDeath() string {
+	return a.effectiveOnDeath(false)
+}
+
+// EffectiveOnDeathForBeads returns the default on_death command using the bd
+// compatibility semantics configured for the city.
+func (a *Agent) EffectiveOnDeathForBeads(beads BeadsConfig) string {
+	return a.effectiveOnDeath(beads.UsesBD105ReadySemantics())
+}
+
+func (a *Agent) effectiveOnDeath(includeEphemeralInProgress bool) string {
 	if a.OnDeath != "" {
 		return a.OnDeath
 	}
@@ -3246,20 +3806,26 @@ func (a *Agent) EffectiveOnDeath() string {
 	if a.PoolName != "" {
 		route = a.PoolName
 	}
+	_ = includeEphemeralInProgress
+	ephemeralRead := bdQueryEphemeralStatusQuietShell("in_progress") + ` | ` +
+		`jq -r --arg assignee ` + shellquote.Quote(a.QualifiedName()) + ` '.[] | select((.assignee // "") == $assignee) | [.id, (.metadata["gc.run_target"] // ""), (.metadata["gc.routed_to"] // "")] | @tsv' 2>/dev/null; `
 	// Reset both assignee and status: clearing assignee alone leaves the bead
 	// invisible to every work_query tier (Tier 1 needs assignee match, Tiers
-	// 2/3 only match "ready" status). The next worker re-claims via Tier 3
-	// (gc.routed_to + --unassigned). If routed metadata is missing entirely,
-	// backfill the fallback route so reopened direct-assigned work does not
-	// stay invisible.
-	return `bd list --assignee=` + a.QualifiedName() +
+	// 2/3 only match "ready" status). The next worker re-claims via Tier 3.
+	// If routed metadata is missing entirely, backfill the canonical
+	// gc.run_target route so reopened direct-assigned work does not stay
+	// invisible.
+	return `{ ` +
+		`bd list --assignee=` + a.QualifiedName() +
 		` --status=in_progress --json 2>/dev/null | ` +
-		`jq -r '.[] | [.id, (.metadata["gc.routed_to"] // "")] | @tsv' 2>/dev/null | ` +
-		`while IFS="$(printf '\t')" read -r id current_route; do ` +
+		`jq -r '.[] | [.id, (.metadata["gc.run_target"] // ""), (.metadata["gc.routed_to"] // "")] | @tsv' 2>/dev/null; ` +
+		ephemeralRead +
+		`} | ` +
+		`while IFS="$(printf '\t')" read -r id run_target routed_to; do ` +
 		`[ -z "$id" ] && continue; ` +
-		`if [ -n "$current_route" ]; then ` +
+		`if [ -n "$run_target" ] || [ -n "$routed_to" ]; then ` +
 		`bd update "$id" --assignee "" --status open 2>/dev/null; ` +
-		`else bd update "$id" --assignee "" --status open --set-metadata gc.routed_to=` + route + ` 2>/dev/null; ` +
+		`else bd update "$id" --assignee "" --status open --set-metadata ` + shellquote.Quote("gc.run_target="+route) + ` 2>/dev/null; ` +
 		`fi; ` +
 		`done`
 }
@@ -3268,6 +3834,16 @@ func (a *Agent) EffectiveOnDeath() string {
 // If OnBoot is set, returns it. Otherwise returns the default recovery hook
 // that unclaims in-progress work routed to this backing config.
 func (a *Agent) EffectiveOnBoot() string {
+	return a.effectiveOnBoot(false)
+}
+
+// EffectiveOnBootForBeads returns the default on_boot command using the bd
+// compatibility semantics configured for the city.
+func (a *Agent) EffectiveOnBootForBeads(beads BeadsConfig) string {
+	return a.effectiveOnBoot(beads.UsesBD105ReadySemantics())
+}
+
+func (a *Agent) effectiveOnBoot(includeEphemeralInProgress bool) string {
 	if a.OnBoot != "" {
 		return a.OnBoot
 	}
@@ -3275,21 +3851,28 @@ func (a *Agent) EffectiveOnBoot() string {
 	if a.PoolName != "" {
 		template = a.PoolName
 	}
-	return `bd list --metadata-field gc.routed_to=` + template +
-		` --status=in_progress --no-assignee --json 2>/dev/null | ` +
-		`jq -r '.[].id' 2>/dev/null | ` +
+	_ = includeEphemeralInProgress
+	ephemeralRead := bdQueryEphemeralStatusQuietShell("in_progress") + ` | ` +
+		`jq -r --arg template "$template" '.[] | select((.assignee // "") == "") | select(((.metadata["gc.routed_to"] // "") == $template) or (((.metadata["gc.routed_to"] // "") == "") and ((.metadata["gc.run_target"] // "") == $template) and ((.metadata["gc.kind"] // "") == "workflow"))) | .id' 2>/dev/null; `
+	return `template=` + shellquote.Quote(template) + `; ` +
+		`{ ` +
+		`bd list --metadata-field "gc.routed_to=$template" --status=in_progress --no-assignee --json 2>/dev/null | ` +
+		`jq -r '.[].id' 2>/dev/null; ` +
+		`bd list --metadata-field "gc.run_target=$template" --metadata-field "gc.kind=workflow" --status=in_progress --no-assignee --json 2>/dev/null | ` +
+		`jq -r '.[] | select((.metadata["gc.routed_to"] // "") == "") | .id' 2>/dev/null; ` +
+		ephemeralRead +
+		`} | awk 'NF && !seen[$0]++' | ` +
 		`xargs -rI{} bd update {} --status open 2>/dev/null`
 }
 
-// InjectImplicitAgents adds on-demand agents for each configured provider at
-// both city scope and each rig scope. A provider is "configured" if it
-// appears in cfg.Providers OR is named by cfg.Workspace.Provider — so the
-// common single-provider case (workspace.provider = "claude") works without
-// a redundant [providers.claude] section. Unconfigured built-in providers
-// are skipped. Pool min=0, max=-1 (unlimited) so they are available as
-// sling targets without an explicit [[agent]] entry. Explicit agents always
-// win — if city.toml defines [[agent]] name="claude" (or a rig-scoped
-// equivalent), no implicit agent is added for that scope.
+// InjectImplicitAgents adds on-demand agents for each explicitly configured
+// provider at both city scope and each rig scope. A provider is configured
+// only when it appears in cfg.Providers; workspace.provider selects the
+// default from that catalog but does not create a catalog entry. Pool min=0,
+// max=-1 (unlimited) so they are available as sling targets without an
+// explicit [[agent]] entry. Explicit agents always win — if city.toml defines
+// [[agent]] name="claude" (or a rig-scoped equivalent), no implicit agent is
+// added for that scope.
 // agentKey identifies an agent by its rig directory and name.
 type agentKey struct{ dir, name string }
 
@@ -3361,6 +3944,31 @@ func InjectImplicitAgents(cfg *City) {
 // pack defaults take precedence over the root city default.
 func ApplyAgentDefaults(cfg *City) {
 	applyAgentSharedAttachmentDefaults(cfg.Agents, cfg.AgentDefaults)
+
+	provider := cfg.AgentDefaults.Provider
+	if provider != "" {
+		for i := range cfg.Agents {
+			if cfg.Agents[i].Name == ControlDispatcherAgentName {
+				continue
+			}
+			if cfg.Agents[i].Provider == "" {
+				if cfg.Agents[i].InheritedProvider != "" {
+					cfg.Agents[i].Provider = cfg.Agents[i].InheritedProvider
+				} else {
+					cfg.Agents[i].Provider = provider
+				}
+			}
+		}
+	} else {
+		for i := range cfg.Agents {
+			if cfg.Agents[i].Name == ControlDispatcherAgentName {
+				continue
+			}
+			if cfg.Agents[i].Provider == "" && cfg.Agents[i].InheritedProvider != "" {
+				cfg.Agents[i].Provider = cfg.Agents[i].InheritedProvider
+			}
+		}
+	}
 
 	formula := cfg.AgentDefaults.DefaultSlingFormula
 	if formula != "" {
@@ -3449,6 +4057,12 @@ func hasDeprecatedAttachmentFields(cfg *City) bool {
 // mergeAgentDefaults merges src into dst using later-layer precedence for
 // scalars and additive append semantics for list fields.
 func mergeAgentDefaults(dst *AgentDefaults, src AgentDefaults, label string, prov *Provenance) {
+	if src.Provider != "" {
+		if prov != nil && dst.Provider != "" && dst.Provider != src.Provider {
+			prov.Warnings = append(prov.Warnings, fmt.Sprintf("agent_defaults.provider redefined by %q", label))
+		}
+		dst.Provider = src.Provider
+	}
 	if src.Model != "" {
 		if prov != nil && dst.Model != "" && dst.Model != src.Model {
 			prov.Warnings = append(prov.Warnings, fmt.Sprintf("agent_defaults.model redefined by %q", label))
@@ -3502,7 +4116,7 @@ func injectControlDispatcherAgents(cfg *City, existing map[agentKey]bool) {
 		if !existingNS[ControlDispatcherAgentName] {
 			cfg.NamedSessions = append(cfg.NamedSessions, NamedSession{
 				Template: ControlDispatcherAgentName,
-				Mode:     "always",
+				Mode:     "on_demand",
 			})
 		}
 	}
@@ -3514,7 +4128,7 @@ func injectControlDispatcherAgents(cfg *City, existing map[agentKey]bool) {
 				cfg.NamedSessions = append(cfg.NamedSessions, NamedSession{
 					Template: ControlDispatcherAgentName,
 					Dir:      rig.Name,
-					Mode:     "always",
+					Mode:     "on_demand",
 				})
 			}
 		}
@@ -3531,7 +4145,7 @@ func newControlDispatcherAgent(dir string) Agent {
 	a := Agent{
 		Name:              ControlDispatcherAgentName,
 		Dir:               dir,
-		Description:       "Built-in deterministic graph.v2 workflow control worker",
+		Description:       "Built-in deterministic compiler-v2 workflow control worker",
 		StartCommand:      ControlDispatcherStartCommandFor(qualifiedName),
 		ProcessNames:      []string{"gc"},
 		MaxActiveSessions: &one,
@@ -3540,24 +4154,12 @@ func newControlDispatcherAgent(dir string) Agent {
 	return a
 }
 
-// configuredProviders returns the merged set of providers that are explicitly
-// configured: the union of cfg.Providers keys and cfg.Workspace.Provider.
-// workspace.provider is only included if it names a built-in provider or one
-// already defined in cfg.Providers — a non-builtin workspace.provider without
-// a matching [providers.X] section is ignored (it would create an implicit
-// agent that fails at resolution time).
+// configuredProviders returns the providers that are explicitly configured in
+// the provider catalog.
 func configuredProviders(cfg *City) map[string]ProviderSpec {
-	merged := make(map[string]ProviderSpec, len(cfg.Providers)+1)
+	merged := make(map[string]ProviderSpec, len(cfg.Providers))
 	for k, v := range cfg.Providers {
 		merged[k] = v
-	}
-	if wp := cfg.Workspace.Provider; wp != "" {
-		if _, ok := merged[wp]; !ok {
-			// Only promote workspace.provider if it's a known builtin.
-			if _, builtin := BuiltinProviders()[wp]; builtin {
-				merged[wp] = ProviderSpec{}
-			}
-		}
 	}
 	return merged
 }
@@ -3668,16 +4270,24 @@ func ValidateAgents(agents []Agent) error {
 }
 
 // ValidateNamedSessions checks named session declarations after pack expansion.
-func ValidateNamedSessions(cfg *City) error {
+// It returns non-fatal warnings (e.g. a named session whose backing template
+// did not resolve) alongside any fatal structural error.
+func ValidateNamedSessions(cfg *City) (warnings []string, err error) {
 	return validateNamedSessions(cfg, true)
 }
 
 // validateNamedSessions checks named session declarations for structural
-// errors. When requireBackingTemplate is true, it also requires every named
-// session to resolve to an expanded backing agent template.
-func validateNamedSessions(cfg *City, requireBackingTemplate bool) error {
+// errors. When requireBackingTemplate is true, a named session whose backing
+// agent template does not resolve after pack expansion is reported as a
+// non-fatal warning and the session is skipped, rather than failing the whole
+// config load. This keeps one broken named session from bricking every command
+// (a typo'd template should not stop `gc session attach <other>`). The session
+// still errors clearly when a command actually targets it, at materialization
+// time. Genuine structural problems (duplicate identity, invalid scope/mode,
+// name collisions, capacity overflow) remain fatal.
+func validateNamedSessions(cfg *City, requireBackingTemplate bool) (warnings []string, err error) {
 	if cfg == nil || len(cfg.NamedSessions) == 0 {
-		return nil
+		return nil, nil
 	}
 	type sessionKey struct{ dir, identity string }
 	seen := make(map[sessionKey]bool, len(cfg.NamedSessions))
@@ -3687,53 +4297,56 @@ func validateNamedSessions(cfg *City, requireBackingTemplate bool) error {
 	for i := range cfg.NamedSessions {
 		s := &cfg.NamedSessions[i]
 		if s.Template == "" {
-			return fmt.Errorf("named_session[%d]: template is required", i)
+			return nil, fmt.Errorf("named_session[%d]: template is required", i)
 		}
 		if !validNamedSessionTemplate.MatchString(s.Template) {
-			return fmt.Errorf("named_session[%d]: template %q must match [a-zA-Z0-9][a-zA-Z0-9_-]* or binding.agent", i, s.Template)
+			return nil, fmt.Errorf("named_session[%d]: template %q must match [a-zA-Z0-9][a-zA-Z0-9_-]* or binding.agent", i, s.Template)
 		}
 		if s.Name != "" && !validAgentName.MatchString(s.Name) {
-			return fmt.Errorf("named_session[%d]: name %q must match [a-zA-Z0-9][a-zA-Z0-9_-]*", i, s.Name)
+			return nil, fmt.Errorf("named_session[%d]: name %q must match [a-zA-Z0-9][a-zA-Z0-9_-]*", i, s.Name)
 		}
 		switch s.Scope {
 		case "", "city", "rig":
 			// valid
 		default:
-			return fmt.Errorf("named_session %q: scope must be \"city\", \"rig\", or empty, got %q", s.QualifiedName(), s.Scope)
+			return nil, fmt.Errorf("named_session %q: scope must be \"city\", \"rig\", or empty, got %q", s.QualifiedName(), s.Scope)
 		}
 		switch s.ModeOrDefault() {
 		case "on_demand", "always":
 			// valid
 		default:
-			return fmt.Errorf("named_session %q: mode must be \"on_demand\", \"always\", or empty, got %q", s.QualifiedName(), s.Mode)
+			return nil, fmt.Errorf("named_session %q: mode must be \"on_demand\", \"always\", or empty, got %q", s.QualifiedName(), s.Mode)
 		}
 		key := sessionKey{dir: s.Dir, identity: s.IdentityName()}
 		if seen[key] {
-			return fmt.Errorf("named_session %q: duplicate identity", s.QualifiedName())
+			return nil, fmt.Errorf("named_session %q: duplicate identity", s.QualifiedName())
 		}
 		seen[key] = true
 		agent := FindAgent(cfg, s.TemplateQualifiedName())
-		if agent == nil {
-			if requireBackingTemplate {
-				return fmt.Errorf("named_session %q: referenced template not found after pack expansion", s.QualifiedName())
-			}
+		if agent == nil && requireBackingTemplate {
+			// Non-fatal: a named session whose backing template did not
+			// resolve is skipped, not a hard error. Skipping here also
+			// keeps it out of the name-reservation and always-mode capacity
+			// bookkeeping below, since a disabled session holds no slot.
+			warnings = append(warnings, disabledNamedSessionWarning(s))
+			continue
 		}
 		identity := s.QualifiedName()
 		sessionName := NamedSessionRuntimeName(cfg.EffectiveCityName(), cfg.Workspace, identity)
 		if other, ok := reservedAliases[sessionName]; ok && other != identity {
-			return fmt.Errorf(
+			return nil, fmt.Errorf(
 				"named_session %q: reserved alias collides with deterministic session_name for %q (%q)",
 				identity, other, sessionName,
 			)
 		}
 		if other, ok := reservedSessionNames[identity]; ok && other != identity {
-			return fmt.Errorf(
+			return nil, fmt.Errorf(
 				"named_session %q: reserved alias collides with deterministic session_name for %q (%q)",
 				identity, other, identity,
 			)
 		}
 		if other, ok := reservedSessionNames[sessionName]; ok && other != identity {
-			return fmt.Errorf(
+			return nil, fmt.Errorf(
 				"named_session %q: deterministic session_name %q collides with configured named session %q",
 				identity, sessionName, other,
 			)
@@ -3743,21 +4356,44 @@ func validateNamedSessions(cfg *City, requireBackingTemplate bool) error {
 		if s.ModeOrDefault() == "always" && agent != nil {
 			alwaysByTemplate[agent.QualifiedName()]++
 			if maxActive := agent.EffectiveMaxActiveSessions(); maxActive != nil && *maxActive < alwaysByTemplate[agent.QualifiedName()] {
-				return fmt.Errorf(
+				return nil, fmt.Errorf(
 					"named_session %q: mode %q exceeds max_active_sessions capacity %d on template %q",
 					s.QualifiedName(), s.ModeOrDefault(), *maxActive, agent.QualifiedName(),
 				)
 			}
 			policy := ResolveSessionSleepPolicy(cfg, agent)
 			if normalized := NormalizeSleepAfterIdle(policy.Value); normalized != "" && normalized != SessionSleepOff {
-				return fmt.Errorf(
+				return nil, fmt.Errorf(
 					"named_session %q: mode %q is incompatible with sleep_after_idle=%q on template %q",
 					s.QualifiedName(), s.ModeOrDefault(), normalized, agent.QualifiedName(),
 				)
 			}
 		}
 	}
-	return nil
+	return warnings, nil
+}
+
+// disabledNamedSessionMarker is a stable suffix on the warning emitted when a
+// named session is skipped because its backing template did not resolve after
+// pack expansion. CLI warning classification keys off this marker, so keep it
+// in sync with IsDisabledNamedSessionWarning.
+const disabledNamedSessionMarker = "; named session disabled until its template resolves"
+
+// disabledNamedSessionWarning formats the non-fatal warning for a named session
+// whose backing template could not be resolved.
+func disabledNamedSessionWarning(s *NamedSession) string {
+	return fmt.Sprintf(
+		"named_session %q: backing template %q not found after pack expansion%s",
+		s.QualifiedName(), s.TemplateQualifiedName(), disabledNamedSessionMarker,
+	)
+}
+
+// IsDisabledNamedSessionWarning reports whether a load warning is the non-fatal
+// notice that a named session was skipped because its backing template did not
+// resolve. CLI warning filters use this to print the notice and keep it
+// non-fatal in strict mode.
+func IsDisabledNamedSessionWarning(warning string) bool {
+	return strings.HasSuffix(warning, disabledNamedSessionMarker)
 }
 
 // validateDependsOn checks that all depends_on references are valid agent
@@ -3866,6 +4502,7 @@ func ValidateRigs(rigs []Rig, hqPrefix string) error {
 func DefaultCity(name string) City {
 	return City{
 		Workspace:     Workspace{Name: name},
+		Daemon:        DaemonConfig{FormulaV2: true},
 		Agents:        []Agent{{Name: "mayor", PromptTemplate: "prompts/mayor.md"}},
 		NamedSessions: []NamedSession{{Template: "mayor", Mode: "always"}},
 	}
@@ -3873,11 +4510,46 @@ func DefaultCity(name string) City {
 
 func defaultInstallAgentHooksForProvider(provider string) []string {
 	switch strings.TrimSpace(provider) {
-	case "kiro", "opencode":
+	case "kiro", "opencode", "groq":
 		return []string{strings.TrimSpace(provider)}
 	default:
 		return nil
 	}
+}
+
+func defaultInstallAgentHooksForProviders(providers []string) []string {
+	seen := map[string]bool{}
+	var hooks []string
+	for _, provider := range providers {
+		for _, hook := range defaultInstallAgentHooksForProvider(provider) {
+			if seen[hook] {
+				continue
+			}
+			seen[hook] = true
+			hooks = append(hooks, hook)
+		}
+	}
+	return hooks
+}
+
+func builtinProviderAliases(providers []string) map[string]ProviderSpec {
+	out := make(map[string]ProviderSpec)
+	for _, provider := range providers {
+		provider = strings.TrimSpace(provider)
+		if provider == "" {
+			continue
+		}
+		out[provider] = BuiltinProviderAlias(provider)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// EmptyCity returns a providerless city scaffold with no managed agents.
+func EmptyCity(name string) City {
+	return City{Workspace: Workspace{Name: name}}
 }
 
 // WizardCity returns a City with the given name, a workspace-level provider
@@ -3888,12 +4560,29 @@ func WizardCity(name, provider, startCommand string) City {
 	ws := Workspace{Name: name}
 	if startCommand != "" {
 		ws.StartCommand = startCommand
-	} else {
-		ws.Provider = provider
-		ws.InstallAgentHooks = defaultInstallAgentHooksForProvider(provider)
+		return City{
+			Workspace: ws,
+			Agents: []Agent{
+				{Name: "mayor", PromptTemplate: "prompts/mayor.md"},
+			},
+			NamedSessions: []NamedSession{{Template: "mayor", Mode: "always"}},
+		}
 	}
+	return WizardCityWithProviders(name, provider, []string{provider})
+}
+
+// WizardCityWithProviders returns a minimal managed city whose default
+// provider is selected from an explicit built-in provider catalog.
+func WizardCityWithProviders(name, defaultProvider string, providers []string) City {
+	ws := Workspace{Name: name}
+	if defaultProvider != "" {
+		ws.Provider = defaultProvider
+	}
+	ws.InstallAgentHooks = defaultInstallAgentHooksForProviders(providers)
 	return City{
 		Workspace: ws,
+		Daemon:    DaemonConfig{FormulaV2: true},
+		Providers: builtinProviderAliases(providers),
 		Agents: []Agent{
 			{Name: "mayor", PromptTemplate: "prompts/mayor.md"},
 		},
@@ -3914,13 +4603,30 @@ func GastownCity(name, provider, startCommand string) City {
 	}
 	if startCommand != "" {
 		ws.StartCommand = startCommand
-	} else if provider != "" {
-		ws.Provider = provider
-		ws.InstallAgentHooks = defaultInstallAgentHooksForProvider(provider)
+		return gastownCityWithWorkspace(name, ws, nil)
 	}
+	return GastownCityWithProviders(name, provider, []string{provider})
+}
+
+// GastownCityWithProviders returns a Gas Town city whose default provider is
+// selected from an explicit built-in provider catalog.
+func GastownCityWithProviders(name, defaultProvider string, providers []string) City {
+	ws := Workspace{
+		Name:            name,
+		GlobalFragments: []string{"command-glossary", "operational-awareness"},
+	}
+	if defaultProvider != "" {
+		ws.Provider = defaultProvider
+	}
+	ws.InstallAgentHooks = defaultInstallAgentHooksForProviders(providers)
+	return gastownCityWithWorkspace(name, ws, builtinProviderAliases(providers))
+}
+
+func gastownCityWithWorkspace(_ string, ws Workspace, providers map[string]ProviderSpec) City {
 	maxRestarts := 5
 	return City{
 		Workspace: ws,
+		Providers: providers,
 		Imports: map[string]Import{
 			"gastown": {
 				Source:  PublicGastownPackSource,
@@ -3935,6 +4641,7 @@ func GastownCity(name, provider, startCommand string) City {
 		},
 		DefaultRigImportOrder: []string{"gastown"},
 		Daemon: DaemonConfig{
+			FormulaV2:       true,
 			PatrolInterval:  "30s",
 			MaxRestarts:     &maxRestarts,
 			RestartWindow:   "1h",
@@ -3987,10 +4694,13 @@ func Load(fs fsys.FS, path string) (*City, error) {
 	// Load intentionally skips include and pack expansion, so validate the
 	// direct named-session declarations without requiring pack-provided
 	// backing templates to be present yet.
-	if err := validateNamedSessions(cfg, false); err != nil {
+	if _, err := validateNamedSessions(cfg, false); err != nil {
 		return nil, err
 	}
 	if err := ValidateGitHubPRMonitors(cfg); err != nil {
+		return nil, err
+	}
+	if err := ValidateDoltConfig(cfg, path); err != nil {
 		return nil, err
 	}
 	return cfg, nil
@@ -4004,12 +4714,9 @@ func Parse(data []byte) (*City, error) {
 		return nil, fmt.Errorf("parsing config: %w", err)
 	}
 	normalizeAgentDefaultsAlias(&cfg, md)
+	applyDaemonFormulaV2Default(&cfg, md)
 	normalizeLegacyOrderOverrideAliases(&cfg)
 	NormalizeSessionSleepFields(&cfg)
-	// Backwards compat: promote deprecated graph_workflows → formula_v2.
-	if cfg.Daemon.GraphWorkflows && !cfg.Daemon.FormulaV2 {
-		cfg.Daemon.FormulaV2 = true
-	}
 	// Stamp source=sourceInline on agents declared via [[agent]] in
 	// the parsed TOML. These are city.toml inline agents (or test
 	// fixtures using Parse directly); pack agents go through a
@@ -4019,4 +4726,22 @@ func Parse(data []byte) (*City, error) {
 		cfg.Agents[i].source = sourceInline
 	}
 	return &cfg, nil
+}
+
+func applyDaemonFormulaV2Default(cfg *City, md toml.MetaData) {
+	if cfg == nil {
+		return
+	}
+	if md.IsDefined("daemon", "formula_v2") {
+		cfg.Daemon.formulaV2Set = true
+		return
+	}
+	if md.IsDefined("daemon", "graph_workflows") {
+		cfg.Daemon.FormulaV2 = cfg.Daemon.GraphWorkflows
+		if !cfg.Daemon.FormulaV2 {
+			cfg.Daemon.formulaV2Set = true
+		}
+		return
+	}
+	cfg.Daemon.FormulaV2 = true
 }

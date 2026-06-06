@@ -233,6 +233,17 @@ func TestMCPTemplateDataUsesBackingTemplateName(t *testing.T) {
 	if got["TOKEN"] != "abc" {
 		t.Fatalf("TOKEN = %q, want abc", got["TOKEN"])
 	}
+	for _, key := range []string{"AssignedInProgressQuery", "AssignedReadyQuery", "RoutedPoolQuery"} {
+		if got[key] == "" {
+			t.Fatalf("%s = empty, want template data query value", key)
+		}
+	}
+	if strings.Contains(got["AssignedReadyQuery"], "gc.routed_to") {
+		t.Fatalf("AssignedReadyQuery includes routed pool demand: %q", got["AssignedReadyQuery"])
+	}
+	if !strings.Contains(got["RoutedPoolQuery"], "gc.routed_to") {
+		t.Fatalf("RoutedPoolQuery missing routed pool demand: %q", got["RoutedPoolQuery"])
+	}
 }
 
 func TestMCPTemplateDataUsesPoolNameForPoolInstances(t *testing.T) {
@@ -245,6 +256,20 @@ func TestMCPTemplateDataUsesPoolNameForPoolInstances(t *testing.T) {
 	got := MCPTemplateData(&config.City{}, "/tmp/city", agent, "worker-3", "/tmp/work")
 	if got["TemplateName"] != "worker" {
 		t.Fatalf("TemplateName = %q, want %q", got["TemplateName"], "worker")
+	}
+}
+
+func TestMCPTemplateDataUsesBD105WorkQuery(t *testing.T) {
+	t.Parallel()
+
+	cfg := &config.City{
+		Beads: config.BeadsConfig{BDCompatibility: config.BeadsBDCompatibility105},
+	}
+	agent := &config.Agent{Name: "worker"}
+
+	got := MCPTemplateData(cfg, "/tmp/city", agent, "worker", "/tmp/work")
+	if !strings.Contains(got["WorkQuery"], "bd ready --include-ephemeral") {
+		t.Fatalf("WorkQuery = %q, want bd-1.0.5 ephemeral-ready probe", got["WorkQuery"])
 	}
 }
 

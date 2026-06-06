@@ -14,7 +14,7 @@ wakes up every 30 seconds (a _tick_), checks the state of the city, and takes
 action. One of the things it does on each tick is evaluate the triggers that
 unblock an order from running. That periodic check is what makes orders work.
 
-We'll pick up where [Tutorial 06](./06-beads.md) left off. You should
+We'll pick up where [Tutorial 06](/tutorials/06-beads) left off. You should
 have `my-city` running with agents and formulas configured.
 
 If you've been dispatching formulas by hand with `gc sling`, orders are the next
@@ -298,6 +298,37 @@ max_timeout = "120s"
 
 The effective timeout is the lesser of the per-order timeout and the global cap.
 
+## Order scope
+
+When a pack is imported into more than one rig, its orders are instantiated
+**once per rig** by default — the same way per-rig agents are. That's usually
+what you want for an order that acts on a single rig's work. But some orders are
+city-wide: a sweep or health probe that already iterates over every rig
+internally would then run redundantly, once per rig.
+
+Mark such an order city-scoped so it registers exactly once, no matter how many
+rigs import the pack:
+
+```toml
+[order]
+description = "Sweep merged convoys across the whole city"
+trigger = "cooldown"
+interval = "5m"
+exec = "scripts/convoy-sweep.sh"
+scope = "city"
+```
+
+`scope` accepts `"city"` or `"rig"`. The default (when omitted) is `"rig"`, so
+existing orders are unaffected. A `scope = "city"` order appears once in `gc
+order list` with no rig qualifier; rig-scoped orders appear once per importing
+rig. This mirrors the `scope` field on `[[named_session]]`.
+
+Use `scope = "city"` for orders that live in a **shared pack** imported by
+several rigs — that's where the per-rig duplication it collapses comes from. A
+city-scoped order keeps the formula layer of the pack it was scanned from, so
+its formula must resolve from that pack rather than from any one rig's local
+`orders/` directory.
+
 ## Disabling and skipping orders
 
 An order can be disabled in its own definition:
@@ -508,7 +539,7 @@ Here's a city with two orders: a frequent lint check (exec, no agent needed) and
 weekly release notes (formula, dispatched to an agent).
 
 Assume you've already created a `worker` agent as in
-[Tutorial 05](./05-formulas.md). The remaining pieces are just the order
+[Tutorial 05](/tutorials/05-formulas). The remaining pieces are just the order
 files and the formula they dispatch.
 
 ```toml

@@ -5,6 +5,7 @@ import { renderCrew, installCrewInteractions, closeLogDrawerExternal, resetCrewN
 import { renderIssues, installIssueInteractions, resetIssuesNoCity } from "./panels/issues";
 import { renderMail, installMailInteractions, resetMailNoCity } from "./panels/mail";
 import { renderConvoys, installConvoyInteractions, resetConvoysNoCity } from "./panels/convoys";
+import { renderComms, resetComms, ingestCommsEvent } from "./panels/comms";
 import { eventTypeFromMessage, loadActivityHistory, resetActivity, startActivityStream, stopActivityStream, installActivityInteractions } from "./panels/activity";
 import { renderAdminPanels, installAdminInteractions, renderAdminEmptyStates } from "./panels/admin";
 import { invalidateOptions } from "./panels/options";
@@ -30,6 +31,7 @@ const CITY_SCOPED_PANEL_IDS = [
   "convoy-panel",
   "crew-panel",
   "rigged-panel",
+  "comms-panel",
   "mail-panel",
   "escalations-panel",
   "services-panel",
@@ -77,6 +79,9 @@ function wireSSE(): void {
     (msg) => {
       const eventType = eventTypeFromMessage(msg);
       if (!eventType || eventType === "heartbeat") return;
+      // Feed the comms graph live from the same stream (self-filters to
+      // mail.* frames) so we animate packets without a second SSE.
+      ingestCommsEvent(msg);
       // Always mark the dirty set — the pause guard only defers the
       // render. Without this, events that arrive while a modal is open
       // get dropped and panels stay stale after the modal closes.
@@ -261,6 +266,7 @@ async function refreshVisibleResources(force = false): Promise<void> {
     queueRefresh(tasks, dirty, "crew", () => renderCrew());
     queueRefresh(tasks, dirty, "issues", () => renderIssues());
     queueRefresh(tasks, dirty, "mail", () => renderMail());
+    queueRefresh(tasks, dirty, "comms", () => renderComms());
     queueRefresh(tasks, dirty, "convoys", () => renderConvoys());
     queueRefresh(tasks, dirty, "admin", () => renderAdminPanels());
   }
@@ -281,6 +287,7 @@ function resetCityScopedResourceViews(): void {
   resetCrewNoCity();
   resetIssuesNoCity();
   resetMailNoCity();
+  resetComms();
   renderAdminEmptyStates();
 }
 

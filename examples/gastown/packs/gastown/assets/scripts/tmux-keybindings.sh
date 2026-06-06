@@ -20,3 +20,14 @@ existing=$(gcmux list-keys -T root MouseDown1StatusRight 2>/dev/null || true)
 if ! printf '%s' "$existing" | grep -qF "$mail_popup"; then
     gcmux bind-key -T root MouseDown1StatusRight "$mail_popup"
 fi
+
+# ── Mouse-wheel scrollback (root table) ───────────────────────────────
+# Make the wheel drive tmux copy-mode scrollback instead of leaking to the
+# focused app. Without this, "mouse on" (set in tmux-theme.sh) hands the wheel
+# to mouse-reporting TUIs — Claude Code scrolls its own history, a pager/shell
+# gets Up-arrows — and only a bare prompt reaches copy-mode. Force copy-mode
+# even over mouse-reporting apps (no mouse_any_flag check) so scrollback wins;
+# once in copy-mode the wheel passes through (-M) for normal scrolling, and -e
+# exits at the bottom. Shift+wheel still does native terminal selection.
+gcmux bind-key -T root WheelUpPane   if-shell -F -t= "#{pane_in_mode}" "send-keys -M" "copy-mode -e"
+gcmux bind-key -T root WheelDownPane send-keys -M

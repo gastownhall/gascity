@@ -287,6 +287,24 @@ func TestFakeRemoveMeta(t *testing.T) {
 	}
 }
 
+func TestFakeRemoveMetaErrorForSessionKey(t *testing.T) {
+	f := NewFake()
+	_ = f.SetMeta("session-a", "GC_DRAIN", "123")
+	f.RemoveMetaErrors["session-a"] = map[string]error{"GC_DRAIN": errors.New("remove denied")}
+
+	if err := f.RemoveMeta("session-a", "GC_DRAIN"); err == nil {
+		t.Fatal("RemoveMeta error = nil, want configured error")
+	}
+	val, _ := f.GetMeta("session-a", "GC_DRAIN")
+	if val != "123" {
+		t.Errorf("GetMeta after failed remove = %q, want original value", val)
+	}
+
+	if err := f.RemoveMeta("session-a", "OTHER"); err != nil {
+		t.Fatalf("RemoveMeta unrelated key: %v", err)
+	}
+}
+
 func TestFakeListRunning(t *testing.T) {
 	f := NewFake()
 	_ = f.Start(context.Background(), "gc-city-mayor", Config{})
@@ -605,6 +623,34 @@ func TestFakeFindRuntimesBySessionID_TrackedUsesProviderNameAndSessionID(t *test
 	}
 	if !r.IsTracked {
 		t.Error("tracked runtime IsTracked = false, want true")
+	}
+}
+
+func TestFakeFindRuntimesBySessionID_TrackedUsesCityFromEnv(t *testing.T) {
+	f := NewFake()
+	_ = f.Start(context.Background(), "path-city", Config{Env: map[string]string{
+		"GC_SESSION_ID": "sess-path",
+		"GC_CITY_PATH":  "/tmp/path-city",
+		"GC_CITY":       "/tmp/fallback-city",
+	}})
+	_ = f.Start(context.Background(), "fallback-city", Config{Env: map[string]string{
+		"GC_SESSION_ID": "sess-fallback",
+		"GC_CITY":       "/tmp/fallback-city",
+	}})
+
+	runtimes, err := f.FindRuntimesBySessionID("")
+	if err != nil {
+		t.Fatalf("FindRuntimesBySessionID: %v", err)
+	}
+	cities := map[string]string{}
+	for _, r := range runtimes {
+		cities[r.SessionID] = r.City
+	}
+	if cities["sess-path"] != "/tmp/path-city" {
+		t.Errorf("City for sess-path = %q, want GC_CITY_PATH value", cities["sess-path"])
+	}
+	if cities["sess-fallback"] != "/tmp/fallback-city" {
+		t.Errorf("City for sess-fallback = %q, want GC_CITY fallback value", cities["sess-fallback"])
 	}
 }
 

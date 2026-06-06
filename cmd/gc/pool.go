@@ -103,14 +103,18 @@ type scaleParams struct {
 // scaleParamsFor extracts scaling parameters from an Agent's fields.
 //
 // Check is the count-form pool-demand query (EffectivePoolDemandQuery).
-// It shares the bd ready predicate with EffectiveWorkQuery's Tier 3 via
-// bdReadyPoolDemandShell, keeping reconciler spawn decisions and worker
-// claim decisions structurally symmetric. See engdocs/architecture/dispatch.md
-// "scale_check ↔ work_query correspondence".
+// It shares the canonical and temporary migration bd ready predicates with
+// EffectiveWorkQuery's Tier 3 via config helpers, keeping reconciler spawn
+// decisions and worker claim decisions structurally symmetric. See
+// engdocs/architecture/dispatch.md "scale_check ↔ work_query correspondence".
 func scaleParamsFor(a *config.Agent) scaleParams {
+	return scaleParamsForBeads(a, config.BeadsConfig{})
+}
+
+func scaleParamsForBeads(a *config.Agent, beadsCfg config.BeadsConfig) scaleParams {
 	sp := scaleParams{
 		Min:   a.EffectiveMinActiveSessions(),
-		Check: a.EffectivePoolDemandQuery(),
+		Check: a.EffectivePoolDemandQueryForBeads(beadsCfg),
 	}
 	if m := a.EffectiveMaxActiveSessions(); m != nil {
 		sp.Max = *m
@@ -227,6 +231,7 @@ func deepCopyAgent(src *config.Agent, name, dir string) config.Agent {
 		Scope:             src.Scope,
 		Session:           src.Session,
 		Provider:          src.Provider,
+		InheritedProvider: src.InheritedProvider,
 		PromptTemplate:    src.PromptTemplate,
 		Nudge:             src.Nudge,
 		StartCommand:      src.StartCommand,
@@ -372,7 +377,7 @@ func runPoolOnBoot(cfg *config.City, cityPath string, runner ScaleCheckRunner, s
 		if !a.SupportsInstanceExpansion() || a.Implicit {
 			continue
 		}
-		cmd := a.EffectiveOnBoot()
+		cmd := a.EffectiveOnBootForBeads(cfg.Beads)
 		if cmd == "" {
 			continue
 		}

@@ -9,7 +9,8 @@ description: Create a city, sling work to an agent, add a rig, and configure mul
 First, you'll need to install at least one CLI coding agent (which Gas City
 calls "providers") and make sure that they're on the PATH. Gas City supports
 many providers, including but not limited to Claude Code (`claude`), Codex
-(`codex`) and Gemini (`gemini`). Make sure you've configured each of your chosen
+(`codex`), Gemini (`gemini`), OpenCode (`opencode`), Groq (`groq`), and
+Cerebras (`cerebras`). Make sure you've configured each of your chosen
 providers (the more the merrier!) with the appropriate token and/or API key so
 that they can each run and do things for you.
 
@@ -22,7 +23,7 @@ $ brew install gascity
 
 ~
 $ gc version
-0.13.4
+1.2.1
 ```
 
 > NOTE: the gascity installation is a great way to get the right dependencies in
@@ -70,10 +71,12 @@ Choose your coding agent:
   5. GitHub Copilot
   6. Sourcegraph AMP
   7. OpenCode
-  8. Auggie CLI
-  9. Pi Coding Agent
-  10. Oh My Pi (OMP)
-  11. Custom command
+  8. Groq (OpenCode)
+  9. Cerebras (OpenCode)
+  10. Auggie CLI
+  11. Pi Coding Agent
+  12. Oh My Pi (OMP)
+  13. Custom command
 Agent [1]:
 [1/8] Creating runtime scaffold
 [2/8] Installing hooks (Claude Code)
@@ -310,9 +313,9 @@ Success! You just dispatched work to an AI agent and gotten results back.
 You've created a city, slung work to agents, added a project as a rig, and slung
 work to that rig. From here:
 
-- **[Agents](./02-agents.md)** — go deeper on agent configuration:
+- **[Agents](/tutorials/02-agents)** — go deeper on agent configuration:
   prompts, sessions, scope, working directories
-- **[Sessions](./03-sessions.md)** — interactive conversations with
+- **[Sessions](/tutorials/03-sessions)** — interactive conversations with
   agents, polecats and crew
-- **[Formulas](./05-formulas.md)** — multi-step workflow templates with
+- **[Formulas](/tutorials/05-formulas)** — multi-step workflow templates with
   dependencies and variables

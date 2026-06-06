@@ -45,9 +45,6 @@ func TestParse_BasicFormula(t *testing.T) {
 	if formula.Description != "Test workflow" {
 		t.Errorf("Description = %q, want 'Test workflow'", formula.Description)
 	}
-	if formula.Version != 1 {
-		t.Errorf("Version = %d, want 1", formula.Version)
-	}
 	if formula.Type != TypeWorkflow {
 		t.Errorf("Type = %q, want workflow", formula.Type)
 	}
@@ -183,6 +180,53 @@ description_file = "descriptions/work.md"
 	}
 	if got := formula.Steps[0].Description; got != "relative instructions" {
 		t.Fatalf("description = %q, want relative description file", got)
+	}
+}
+
+func TestParseFileDescriptionFileResolvesRelativeToSymlinkTarget(t *testing.T) {
+	dir := t.TempDir()
+	packFormulaDir := filepath.Join(dir, "pack", "formulas")
+	packPromptDir := filepath.Join(dir, "pack", "prompts")
+	cityFormulaDir := filepath.Join(dir, "city", "formulas")
+	for _, path := range []string{packFormulaDir, packPromptDir, cityFormulaDir} {
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", path, err)
+		}
+	}
+
+	promptPath := filepath.Join(packPromptDir, "operator.md")
+	if err := os.WriteFile(promptPath, []byte("embedded pack prompt\n"), 0o644); err != nil {
+		t.Fatalf("write prompt: %v", err)
+	}
+
+	formulaPath := filepath.Join(packFormulaDir, "symlink-description.toml")
+	formulaText := `formula = "symlink-description"
+version = 1
+
+[[steps]]
+id = "work"
+title = "Work"
+description_file = "../prompts/operator.md"
+`
+	if err := os.WriteFile(formulaPath, []byte(formulaText), 0o644); err != nil {
+		t.Fatalf("write formula: %v", err)
+	}
+
+	linkPath := filepath.Join(cityFormulaDir, "symlink-description.formula.toml")
+	if err := os.Symlink(formulaPath, linkPath); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+
+	p := NewParser(cityFormulaDir)
+	parsed, err := p.ParseFile(linkPath)
+	if err != nil {
+		t.Fatalf("ParseFile: %v", err)
+	}
+	if len(parsed.Steps) != 1 {
+		t.Fatalf("len(Steps) = %d, want 1", len(parsed.Steps))
+	}
+	if got := parsed.Steps[0].Description; got != "embedded pack prompt\n" {
+		t.Fatalf("step description = %q, want embedded pack prompt", got)
 	}
 }
 
@@ -365,10 +409,68 @@ func TestDescriptionAssetRelPath(t *testing.T) {
 	}
 }
 
+func TestParseFileOversizedDescriptionFileWritesPromptReference(t *testing.T) {
+	dir := t.TempDir()
+	promptPath := filepath.Join(dir, "operator.md")
+	largePrompt := strings.Repeat("large prompt body\n", descriptionFileInlineMaxBytes/16+128)
+	if len([]byte(largePrompt)) <= descriptionFileInlineMaxBytes {
+		t.Fatalf("test prompt length = %d, want > %d", len([]byte(largePrompt)), descriptionFileInlineMaxBytes)
+	}
+	if err := os.WriteFile(promptPath, []byte(largePrompt), 0o644); err != nil {
+		t.Fatalf("write prompt: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "oversized-desc.toml"), []byte(`
+formula = "oversized-desc"
+version = 1
+contract = "graph.v2"
+type = "workflow"
+
+[vars]
+pack_root = "/tmp/workflows"
+pr_url = "https://github.com/example/repo/pull/1"
+
+[[steps]]
+id = "work"
+title = "Work"
+description_file = "operator.md"
+`), 0o644); err != nil {
+		t.Fatalf("write formula: %v", err)
+	}
+
+	loaded, err := NewParser(dir).LoadByName("oversized-desc")
+	if err != nil {
+		t.Fatalf("LoadByName: %v", err)
+	}
+	step := loaded.Steps[0]
+	if step.DescriptionFile != "" {
+		t.Fatalf("DescriptionFile = %q, want consumed oversized reference", step.DescriptionFile)
+	}
+	if len(step.Description) >= len(largePrompt) {
+		t.Fatalf("Description length = %d, want compact reference shorter than prompt %d", len(step.Description), len(largePrompt))
+	}
+	for _, want := range []string{
+		"External Prompt Required",
+		"you MUST read the file",
+		"normal runtime and lifecycle protocol",
+		"does not replace the startup prompt",
+		promptPath,
+		"Original formula description_file: `operator.md`",
+		"pack_root=\"{{pack_root}}\"",
+		"pr_url=\"{{pr_url}}\"",
+		"Treat the file contents as the authoritative task prompt",
+	} {
+		if !strings.Contains(step.Description, want) {
+			t.Fatalf("Description missing %q:\n%s", want, step.Description)
+		}
+	}
+	if strings.Contains(step.Description, "large prompt body\nlarge prompt body\n") {
+		t.Fatalf("Description unexpectedly inlined oversized prompt:\n%s", step.Description)
+	}
+}
+
 func TestValidate_ValidFormula(t *testing.T) {
 	formula := &Formula{
 		Formula: "mol-valid",
-		Version: 1,
 		Type:    TypeWorkflow,
 		Steps: []*Step{
 			{ID: "step1", Title: "Step 1"},
@@ -383,9 +485,8 @@ func TestValidate_ValidFormula(t *testing.T) {
 
 func TestValidate_MissingName(t *testing.T) {
 	formula := &Formula{
-		Version: 1,
-		Type:    TypeWorkflow,
-		Steps:   []*Step{{ID: "step1", Title: "Step 1"}},
+		Type:  TypeWorkflow,
+		Steps: []*Step{{ID: "step1", Title: "Step 1"}},
 	}
 
 	err := formula.Validate()
@@ -397,7 +498,6 @@ func TestValidate_MissingName(t *testing.T) {
 func TestValidate_DuplicateStepID(t *testing.T) {
 	formula := &Formula{
 		Formula: "mol-dup",
-		Version: 1,
 		Type:    TypeWorkflow,
 		Steps: []*Step{
 			{ID: "step1", Title: "Step 1"},
@@ -414,7 +514,6 @@ func TestValidate_DuplicateStepID(t *testing.T) {
 func TestValidate_InvalidDependency(t *testing.T) {
 	formula := &Formula{
 		Formula: "mol-bad-dep",
-		Version: 1,
 		Type:    TypeWorkflow,
 		Steps: []*Step{
 			{ID: "step1", Title: "Step 1", DependsOn: []string{"nonexistent"}},
@@ -430,7 +529,6 @@ func TestValidate_InvalidDependency(t *testing.T) {
 func TestValidate_RequiredWithDefault(t *testing.T) {
 	formula := &Formula{
 		Formula: "mol-bad-var",
-		Version: 1,
 		Type:    TypeWorkflow,
 		Vars: map[string]*VarDef{
 			"bad": {Required: true, Default: StringPtr("value")}, // can't have both
@@ -448,7 +546,6 @@ func TestValidate_InvalidPriority(t *testing.T) {
 	p := 10 // invalid: must be 0-4
 	formula := &Formula{
 		Formula: "mol-bad-priority",
-		Version: 1,
 		Type:    TypeWorkflow,
 		Steps: []*Step{
 			{ID: "step1", Title: "Step 1", Priority: &p},
@@ -461,10 +558,9 @@ func TestValidate_InvalidPriority(t *testing.T) {
 	}
 }
 
-func TestValidate_GraphRetryWorkflowRequiresContract(t *testing.T) {
+func TestValidateRetryWorkflowWithoutRequirementUsesLegacySyntax(t *testing.T) {
 	formula := &Formula{
-		Formula: "mol-implicit-v2",
-		Version: 2,
+		Formula: "mol-legacy-retry",
 		Type:    TypeWorkflow,
 		Steps: []*Step{
 			{
@@ -475,19 +571,14 @@ func TestValidate_GraphRetryWorkflowRequiresContract(t *testing.T) {
 		},
 	}
 
-	err := formula.Validate()
-	if err == nil {
-		t.Fatal("Validate should reject graph-only v2 workflow without contract")
-	}
-	if !strings.Contains(err.Error(), `contract = "graph.v2"`) {
-		t.Fatalf("Validate error = %v, want explicit graph.v2 contract guidance", err)
+	if err := formula.Validate(); err != nil {
+		t.Fatalf("Validate failed for legacy retry syntax without compiler requirement: %v", err)
 	}
 }
 
-func TestValidate_GraphOnCompleteWorkflowRequiresContract(t *testing.T) {
+func TestValidateOnCompleteWithoutRequirementUsesLegacySyntax(t *testing.T) {
 	formula := &Formula{
-		Formula: "mol-implicit-fanout",
-		Version: 2,
+		Formula: "mol-legacy-fanout",
 		Type:    TypeWorkflow,
 		Steps: []*Step{
 			{
@@ -501,19 +592,14 @@ func TestValidate_GraphOnCompleteWorkflowRequiresContract(t *testing.T) {
 		},
 	}
 
-	err := formula.Validate()
-	if err == nil {
-		t.Fatal("Validate should reject graph-only on_complete workflow without contract")
-	}
-	if !strings.Contains(err.Error(), `contract = "graph.v2"`) {
-		t.Fatalf("Validate error = %v, want explicit graph.v2 contract guidance", err)
+	if err := formula.Validate(); err != nil {
+		t.Fatalf("Validate failed for legacy on_complete syntax without compiler requirement: %v", err)
 	}
 }
 
-func TestValidate_Version1DetachedGraphMetadataRequiresContract(t *testing.T) {
+func TestValidate_DetachedGraphMetadataRequiresContract(t *testing.T) {
 	formula := &Formula{
 		Formula: "mol-detached-v1",
-		Version: 1,
 		Type:    TypeWorkflow,
 		Steps: []*Step{
 			{
@@ -536,7 +622,6 @@ func TestValidate_Version1DetachedGraphMetadataRequiresContract(t *testing.T) {
 func TestValidate_ValidTimeout(t *testing.T) {
 	formula := &Formula{
 		Formula: "mol-timeout",
-		Version: 1,
 		Type:    TypeWorkflow,
 		Steps: []*Step{
 			{ID: "build", Title: "Build", Timeout: "5m", Ralph: validTestRalphSpec()},
@@ -555,7 +640,6 @@ func TestValidate_AllowsUnresolvedTimeoutPlaceholders(t *testing.T) {
 	check.Check.Timeout = "{{check_timeout}}"
 	formula := &Formula{
 		Formula: "mol-placeholder-timeout",
-		Version: 1,
 		Type:    TypeWorkflow,
 		Steps: []*Step{
 			{ID: "step1", Title: "Step 1", Timeout: "{step_timeout}", Ralph: check},
@@ -580,7 +664,6 @@ func validTestRalphSpec() *RalphSpec {
 func TestValidate_TimeoutRequiresRalph(t *testing.T) {
 	formula := &Formula{
 		Formula: "mol-timeout-without-ralph",
-		Version: 1,
 		Type:    TypeWorkflow,
 		Steps: []*Step{
 			{ID: "step1", Title: "Step 1", Timeout: "5m"},
@@ -610,7 +693,6 @@ func TestValidate_InvalidTimeout(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			formula := &Formula{
 				Formula: "mol-bad-timeout",
-				Version: 1,
 				Type:    TypeWorkflow,
 				Steps: []*Step{
 					{ID: "step1", Title: "Step 1", Timeout: tt.timeout, Ralph: validTestRalphSpec()},
@@ -641,7 +723,6 @@ func TestValidate_InvalidRalphCheckTimeout(t *testing.T) {
 			check.Check.Timeout = tt.timeout
 			formula := &Formula{
 				Formula: "mol-bad-check-timeout",
-				Version: 1,
 				Type:    TypeWorkflow,
 				Steps: []*Step{
 					{ID: "step1", Title: "Step 1", Ralph: check},
@@ -673,7 +754,6 @@ func TestValidate_InvalidTimeoutInChild(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			formula := &Formula{
 				Formula: "mol-bad-child-timeout",
-				Version: 1,
 				Type:    TypeWorkflow,
 				Steps: []*Step{
 					{
@@ -697,7 +777,6 @@ func TestValidate_InvalidTimeoutInChild(t *testing.T) {
 func TestValidate_InvalidTimeoutInLoopBody(t *testing.T) {
 	formula := &Formula{
 		Formula: "mol-bad-loop-timeout",
-		Version: 1,
 		Type:    TypeWorkflow,
 		Steps: []*Step{
 			{
@@ -730,7 +809,6 @@ func TestValidate_InvalidTimeoutInLoopBody(t *testing.T) {
 func TestValidate_LoopBodyTimeoutAllowsLoopVariable(t *testing.T) {
 	formula := &Formula{
 		Formula: "mol-loop-timeout-var",
-		Version: 1,
 		Type:    TypeWorkflow,
 		Steps: []*Step{
 			{
@@ -760,7 +838,6 @@ func TestValidate_LoopBodyTimeoutAllowsLoopVariable(t *testing.T) {
 func TestValidate_ChildSteps(t *testing.T) {
 	formula := &Formula{
 		Formula: "mol-children",
-		Version: 1,
 		Type:    TypeWorkflow,
 		Steps: []*Step{
 			{
@@ -782,7 +859,6 @@ func TestValidate_ChildSteps(t *testing.T) {
 func TestValidate_ChildStepsInvalidDependsOn(t *testing.T) {
 	formula := &Formula{
 		Formula: "mol-bad-child-dep",
-		Version: 1,
 		Type:    TypeWorkflow,
 		Steps: []*Step{
 			{
@@ -806,7 +882,6 @@ func TestValidate_ChildStepsInvalidPriority(t *testing.T) {
 	p := 10 // invalid
 	formula := &Formula{
 		Formula: "mol-bad-child-priority",
-		Version: 1,
 		Type:    TypeWorkflow,
 		Steps: []*Step{
 			{
@@ -828,7 +903,6 @@ func TestValidate_ChildStepsInvalidPriority(t *testing.T) {
 func TestValidate_BondPoints(t *testing.T) {
 	formula := &Formula{
 		Formula: "mol-compose",
-		Version: 1,
 		Type:    TypeWorkflow,
 		Steps: []*Step{
 			{ID: "step1", Title: "Step 1"},
@@ -850,7 +924,6 @@ func TestValidate_BondPoints(t *testing.T) {
 func TestValidate_BondPointBothAnchors(t *testing.T) {
 	formula := &Formula{
 		Formula: "mol-bad-bond",
-		Version: 1,
 		Type:    TypeWorkflow,
 		Steps:   []*Step{{ID: "step1", Title: "Step 1"}},
 		Compose: &ComposeRules{
@@ -1517,7 +1590,6 @@ func TestValidate_NeedsField(t *testing.T) {
 	// Valid needs reference
 	formula := &Formula{
 		Formula: "mol-needs",
-		Version: 1,
 		Type:    TypeWorkflow,
 		Steps: []*Step{
 			{ID: "step1", Title: "Step 1"},
@@ -1532,7 +1604,6 @@ func TestValidate_NeedsField(t *testing.T) {
 	// Invalid needs reference
 	formulaBad := &Formula{
 		Formula: "mol-bad-needs",
-		Version: 1,
 		Type:    TypeWorkflow,
 		Steps: []*Step{
 			{ID: "step1", Title: "Step 1"},
@@ -1551,7 +1622,6 @@ func TestValidate_WaitsForField(t *testing.T) {
 	// Valid waits_for value
 	formula := &Formula{
 		Formula: "mol-waits-for",
-		Version: 1,
 		Type:    TypeWorkflow,
 		Steps: []*Step{
 			{ID: "fanout", Title: "Fanout"},
@@ -1566,7 +1636,6 @@ func TestValidate_WaitsForField(t *testing.T) {
 	// Invalid waits_for value
 	formulaBad := &Formula{
 		Formula: "mol-bad-waits-for",
-		Version: 1,
 		Type:    TypeWorkflow,
 		Steps: []*Step{
 			{ID: "step1", Title: "Step 1", WaitsFor: "invalid-gate"},
@@ -1584,7 +1653,6 @@ func TestValidate_WaitsForChildrenOf(t *testing.T) {
 	// Valid children-of() syntax
 	formula := &Formula{
 		Formula: "mol-children-of",
-		Version: 1,
 		Type:    TypeWorkflow,
 		Steps: []*Step{
 			{ID: "survey-workers", Title: "Survey Workers"},
@@ -1599,7 +1667,6 @@ func TestValidate_WaitsForChildrenOf(t *testing.T) {
 	// Invalid: reference to unknown step
 	formulaBad := &Formula{
 		Formula: "mol-bad-children-of",
-		Version: 1,
 		Type:    TypeWorkflow,
 		Steps: []*Step{
 			{ID: "step1", Title: "Step 1", WaitsFor: "children-of(unknown-step)"},
@@ -1613,7 +1680,6 @@ func TestValidate_WaitsForChildrenOf(t *testing.T) {
 	// Invalid: empty step ID
 	formulaEmpty := &Formula{
 		Formula: "mol-empty-children-of",
-		Version: 1,
 		Type:    TypeWorkflow,
 		Steps: []*Step{
 			{ID: "step1", Title: "Step 1", WaitsFor: "children-of()"},
@@ -1667,7 +1733,6 @@ func TestParseWaitsFor(t *testing.T) {
 func TestValidate_ChildNeedsAndWaitsFor(t *testing.T) {
 	formula := &Formula{
 		Formula: "mol-child-fields",
-		Version: 1,
 		Type:    TypeWorkflow,
 		Steps: []*Step{
 			{
@@ -1688,7 +1753,6 @@ func TestValidate_ChildNeedsAndWaitsFor(t *testing.T) {
 	// Invalid child needs
 	formulaBadNeeds := &Formula{
 		Formula: "mol-bad-child-needs",
-		Version: 1,
 		Type:    TypeWorkflow,
 		Steps: []*Step{
 			{
@@ -1708,7 +1772,6 @@ func TestValidate_ChildNeedsAndWaitsFor(t *testing.T) {
 	// Invalid child waits_for
 	formulaBadWaitsFor := &Formula{
 		Formula: "mol-bad-child-waits-for",
-		Version: 1,
 		Type:    TypeWorkflow,
 		Steps: []*Step{
 			{
@@ -1825,7 +1888,6 @@ func TestParse_OnComplete(t *testing.T) {
 func TestValidate_OnComplete_Valid(t *testing.T) {
 	formula := &Formula{
 		Formula: "mol-valid",
-		Version: 1,
 		Type:    TypeWorkflow,
 		Steps: []*Step{
 			{
@@ -1847,7 +1909,6 @@ func TestValidate_OnComplete_Valid(t *testing.T) {
 func TestValidate_OnComplete_MissingBond(t *testing.T) {
 	formula := &Formula{
 		Formula: "mol-invalid",
-		Version: 1,
 		Type:    TypeWorkflow,
 		Steps: []*Step{
 			{
@@ -1873,7 +1934,6 @@ func TestValidate_OnComplete_MissingBond(t *testing.T) {
 func TestValidate_OnComplete_MissingForEach(t *testing.T) {
 	formula := &Formula{
 		Formula: "mol-invalid",
-		Version: 1,
 		Type:    TypeWorkflow,
 		Steps: []*Step{
 			{
@@ -1899,7 +1959,6 @@ func TestValidate_OnComplete_MissingForEach(t *testing.T) {
 func TestValidate_OnComplete_InvalidForEachPath(t *testing.T) {
 	formula := &Formula{
 		Formula: "mol-invalid",
-		Version: 1,
 		Type:    TypeWorkflow,
 		Steps: []*Step{
 			{
@@ -1925,7 +1984,6 @@ func TestValidate_OnComplete_InvalidForEachPath(t *testing.T) {
 func TestValidate_OnComplete_ParallelAndSequential(t *testing.T) {
 	formula := &Formula{
 		Formula: "mol-invalid",
-		Version: 1,
 		Type:    TypeWorkflow,
 		Steps: []*Step{
 			{
@@ -1953,7 +2011,6 @@ func TestValidate_OnComplete_ParallelAndSequential(t *testing.T) {
 func TestValidate_OnComplete_Sequential(t *testing.T) {
 	formula := &Formula{
 		Formula: "mol-valid",
-		Version: 1,
 		Type:    TypeWorkflow,
 		Steps: []*Step{
 			{
@@ -1976,7 +2033,6 @@ func TestValidate_OnComplete_Sequential(t *testing.T) {
 func TestValidate_OnComplete_InChildren(t *testing.T) {
 	formula := &Formula{
 		Formula: "mol-valid",
-		Version: 1,
 		Type:    TypeWorkflow,
 		Steps: []*Step{
 			{
@@ -2644,7 +2700,6 @@ path = "scripts/verify.sh"
 func TestValidateRalphUsesCheckTerminology(t *testing.T) {
 	formula := &Formula{
 		Formula: "mol-bad-check",
-		Version: 1,
 		Type:    TypeWorkflow,
 		Steps: []*Step{
 			{
@@ -3231,5 +3286,95 @@ title = "Test"
 		if v.Description != "A required variable" {
 			t.Errorf("required_var.Description = %q, want 'A required variable'", v.Description)
 		}
+	}
+}
+
+func TestParseFile_ContentHash(t *testing.T) {
+	dir := t.TempDir()
+	content := []byte(`formula = "mol-hash-test"
+version = 3
+
+[[steps]]
+id = "do-thing"
+title = "Do the thing"
+`)
+	path := filepath.Join(dir, "mol-hash-test.toml")
+	if err := os.WriteFile(path, content, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	p := NewParser(dir)
+	f, err := p.ParseFile(path)
+	if err != nil {
+		t.Fatalf("ParseFile: %v", err)
+	}
+
+	if f.ContentHash == "" {
+		t.Fatal("ContentHash should be set after ParseFile")
+	}
+
+	// Hash should be deterministic
+	want := ContentHash(content)
+	if f.ContentHash != want {
+		t.Errorf("ContentHash = %q, want %q", f.ContentHash, want)
+	}
+
+	// Hash should be 64 hex chars (SHA-256)
+	if len(f.ContentHash) != 64 {
+		t.Errorf("ContentHash length = %d, want 64", len(f.ContentHash))
+	}
+}
+
+func TestParseFile_ContentHashChangesWithContent(t *testing.T) {
+	dir := t.TempDir()
+	v1 := []byte(`formula = "mol-evolve"
+version = 1
+
+[[steps]]
+id = "step-a"
+title = "Step A"
+`)
+	v2 := []byte(`formula = "mol-evolve"
+version = 2
+
+[[steps]]
+id = "step-a"
+title = "Step A (updated)"
+`)
+	path := filepath.Join(dir, "mol-evolve.toml")
+	if err := os.WriteFile(path, v1, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	p1 := NewParser(dir)
+	f1, err := p1.ParseFile(path)
+	if err != nil {
+		t.Fatalf("ParseFile v1: %v", err)
+	}
+
+	if err := os.WriteFile(path, v2, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	p2 := NewParser(dir)
+	f2, err := p2.ParseFile(path)
+	if err != nil {
+		t.Fatalf("ParseFile v2: %v", err)
+	}
+
+	if f1.ContentHash == f2.ContentHash {
+		t.Error("content hash should differ between v1 and v2")
+	}
+}
+
+func TestParse_InMemory_NoContentHash(t *testing.T) {
+	p := NewParser()
+	f, err := p.Parse([]byte(`{"formula":"mol-inmem","steps":[]}`))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+
+	if f.ContentHash != "" {
+		t.Errorf("ContentHash should be empty for in-memory parse, got %q", f.ContentHash)
 	}
 }

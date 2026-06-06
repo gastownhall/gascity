@@ -9,18 +9,11 @@ import (
 // List returns beads matching the query. Active-bead queries are served from
 // cache when available. IncludeClosed queries merge cached active results with
 // backing-store history when possible, preserving partial backing rows when bd
-// reports corrupt entries and retaining cache-only fallback for transient
-// non-partial bd failures.
+// reports corrupt entries and returning partial-result errors when backing
+// history cannot be fully read.
 func (c *CachingStore) List(query ListQuery) ([]Bead, error) {
 	if !query.HasFilter() && !query.AllowScan {
 		return nil, fmt.Errorf("listing beads: %w", ErrQueryRequiresScan)
-	}
-	// The cache only holds the issues tier (PrimeActive/Prime call the
-	// backing store without a TierMode). Wisps and union queries must
-	// reach the backing store directly so we do not return a stale or
-	// incomplete snapshot of the wisps table.
-	if query.TierMode != TierIssues {
-		return c.backing.List(query)
 	}
 	if query.Live || query.ParentID != "" {
 		c.mu.RLock()
@@ -77,7 +70,11 @@ func (c *CachingStore) List(query ListQuery) ([]Bead, error) {
 		all, err := c.backing.List(liveListQuery(query))
 		if err != nil {
 			if !IsPartialResult(err) {
-				return finish(cached, nil)
+				c.recordProblem("list include closed backing failure", err)
+				return finish(cached, &PartialResultError{
+					Op:  "cache list include closed",
+					Err: err,
+				})
 			}
 		}
 
@@ -104,12 +101,10 @@ func liveListQuery(query ListQuery) ListQuery {
 }
 
 // CachedList returns query results from the in-memory cache only. The boolean
-// reports whether the cache was initialized enough to answer without touching
-// the backing store. Dirty entries are returned from the last observed
-// snapshot; callers must treat this as a read model that may lag writes or
-// reconciliation by one tick.
+// reports whether the cache was initialized and clean enough to answer without
+// touching the backing store.
 func (c *CachingStore) CachedList(query ListQuery) ([]Bead, bool) {
-	if query.TierMode != TierIssues {
+	if query.IncludesClosed() {
 		return nil, false
 	}
 	c.mu.RLock()
@@ -117,7 +112,7 @@ func (c *CachingStore) CachedList(query ListQuery) ([]Bead, bool) {
 	if c.state != cacheLive && c.state != cachePartial {
 		return nil, false
 	}
-	if c.primePartialErr != nil {
+	if c.primePartialErr != nil || len(c.dirty) > 0 {
 		return nil, false
 	}
 	cached := make([]Bead, 0, len(c.beads))
@@ -137,6 +132,8 @@ func (c *CachingStore) CachedList(query ListQuery) ([]Bead, bool) {
 func (c *CachingStore) refreshCachedBeads(query ListQuery, startSeq uint64, items []Bead) []Bead {
 	refreshedParents := make(map[string]Bead)
 	removedParents := make(map[string]struct{})
+	refreshedLiveMissing := make(map[string]Bead)
+	removedLiveMissing := make(map[string]struct{})
 	for _, id := range c.staleParentCacheIDs(query.ParentID, items) {
 		fresh, err := c.backing.Get(id)
 		switch {
@@ -148,7 +145,19 @@ func (c *CachingStore) refreshCachedBeads(query ListQuery, startSeq uint64, item
 			c.recordProblem("refresh parent cache during list", fmt.Errorf("%s: %w", id, err))
 		}
 	}
-	if len(items) == 0 && len(refreshedParents) == 0 && len(removedParents) == 0 {
+	for _, id := range c.staleLiveCacheIDs(query, items) {
+		fresh, err := c.backing.Get(id)
+		switch {
+		case err == nil:
+			refreshedLiveMissing[id] = cloneBead(fresh)
+		case errors.Is(err, ErrNotFound):
+			removedLiveMissing[id] = struct{}{}
+		default:
+			c.recordProblem("refresh live cache during list", fmt.Errorf("%s: %w", id, err))
+		}
+	}
+	if len(items) == 0 && len(refreshedParents) == 0 && len(removedParents) == 0 &&
+		len(refreshedLiveMissing) == 0 && len(removedLiveMissing) == 0 {
 		return items
 	}
 	c.mu.Lock()
@@ -182,7 +191,9 @@ func (c *CachingStore) refreshCachedBeads(query ListQuery, startSeq uint64, item
 			}
 		}
 		c.beads[item.ID] = cloneBead(item)
-		c.deps[item.ID] = depsFromBeadFields(item)
+		if beadCarriesDependencyFields(item) {
+			c.deps[item.ID] = depsFromBeadFields(item)
+		}
 		delete(c.dirty, item.ID)
 		delete(c.deletedSeq, item.ID)
 		if !recentLocalMutation(c.localBeadAt[item.ID], now) {
@@ -201,7 +212,9 @@ func (c *CachingStore) refreshCachedBeads(query ListQuery, startSeq uint64, item
 			continue
 		}
 		c.beads[id] = bead
-		c.deps[id] = depsFromBeadFields(bead)
+		if beadCarriesDependencyFields(bead) {
+			c.deps[id] = depsFromBeadFields(bead)
+		}
 		delete(c.dirty, id)
 		delete(c.deletedSeq, id)
 		if !recentLocalMutation(c.localBeadAt[id], now) {
@@ -210,6 +223,38 @@ func (c *CachingStore) refreshCachedBeads(query ListQuery, startSeq uint64, item
 		}
 	}
 	for id := range removedParents {
+		if c.deletedSeq[id] > startSeq || c.beadSeq[id] > startSeq {
+			continue
+		}
+		if current, ok := c.beads[id]; ok && current.Status != "closed" && recentLocalMutation(c.localBeadAt[id], now) {
+			continue
+		}
+		delete(c.beads, id)
+		delete(c.deps, id)
+		delete(c.dirty, id)
+		delete(c.deletedSeq, id)
+		delete(c.beadSeq, id)
+		delete(c.localBeadAt, id)
+	}
+	for id, bead := range refreshedLiveMissing {
+		if c.deletedSeq[id] > startSeq || c.beadSeq[id] > startSeq {
+			continue
+		}
+		if _, keep := c.recentLocalBeadConflictLocked(id, bead, now, false); keep {
+			continue
+		}
+		c.beads[id] = bead
+		if beadCarriesDependencyFields(bead) {
+			c.deps[id] = depsFromBeadFields(bead)
+		}
+		delete(c.dirty, id)
+		delete(c.deletedSeq, id)
+		if !recentLocalMutation(c.localBeadAt[id], now) {
+			delete(c.beadSeq, id)
+			delete(c.localBeadAt, id)
+		}
+	}
+	for id := range removedLiveMissing {
 		if c.deletedSeq[id] > startSeq || c.beadSeq[id] > startSeq {
 			continue
 		}
@@ -250,6 +295,35 @@ func (c *CachingStore) staleParentCacheIDs(parentID string, fresh []Bead) []stri
 			continue
 		}
 		if _, ok := freshIDs[id]; ok {
+			continue
+		}
+		stale = append(stale, id)
+	}
+	return stale
+}
+
+func (c *CachingStore) staleLiveCacheIDs(query ListQuery, fresh []Bead) []string {
+	if !query.Live || query.Limit > 0 || query.IncludesClosed() {
+		return nil
+	}
+
+	freshIDs := make(map[string]struct{}, len(fresh))
+	for _, item := range fresh {
+		freshIDs[item.ID] = struct{}{}
+	}
+
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if c.state != cacheLive && c.state != cachePartial {
+		return nil
+	}
+
+	var stale []string
+	for id, bead := range c.beads {
+		if _, ok := freshIDs[id]; ok {
+			continue
+		}
+		if !query.Matches(bead) {
 			continue
 		}
 		stale = append(stale, id)
@@ -349,9 +423,10 @@ func (c *CachingStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 		statusByID := make(map[string]string, len(c.beads))
 		depsByID := make(map[string][]Dep, len(c.deps))
 		openBeads := make([]Bead, 0, len(c.beads))
+		now := time.Now().UTC()
 		for _, b := range c.beads {
 			statusByID[b.ID] = b.Status
-			if b.Status == "open" && !b.Ephemeral && !IsReadyExcludedType(b.Type) {
+			if IsReadyCandidate(b, now) {
 				openBeads = append(openBeads, cloneBead(b))
 			}
 		}
@@ -363,19 +438,7 @@ func (c *CachingStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 
 		var result []Bead
 		for _, b := range openBeads {
-			blocked := false
-			for _, dep := range depsByID[b.ID] {
-				switch dep.Type {
-				case "blocks", "waits-for", "conditional-blocks":
-				default:
-					continue
-				}
-				if status, ok := statusByID[dep.DependsOnID]; ok && status != "closed" {
-					blocked = true
-					break
-				}
-			}
-			if !blocked {
+			if cachedBeadReady(statusByID, depsByID[b.ID]) {
 				result = append(result, cloneBead(b))
 			}
 		}
@@ -401,9 +464,10 @@ func (c *CachingStore) CachedReady() ([]Bead, bool) {
 
 	statusByID := make(map[string]string, len(c.beads))
 	openBeads := make([]Bead, 0, len(c.beads))
+	now := time.Now().UTC()
 	for _, b := range c.beads {
 		statusByID[b.ID] = b.Status
-		if b.Status == "open" && !b.Ephemeral && !IsReadyExcludedType(b.Type) {
+		if IsReadyCandidate(b, now) {
 			openBeads = append(openBeads, cloneBead(b))
 		}
 	}
@@ -427,9 +491,7 @@ func (c *CachingStore) CachedReady() ([]Bead, bool) {
 
 func cachedBeadReady(statusByID map[string]string, deps []Dep) bool {
 	for _, dep := range deps {
-		switch dep.Type {
-		case "blocks", "waits-for", "conditional-blocks":
-		default:
+		if !isReadyBlockingDependencyType(dep.Type) {
 			continue
 		}
 		if status, ok := statusByID[dep.DependsOnID]; ok && status != "closed" {

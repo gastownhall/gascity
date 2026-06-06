@@ -10,9 +10,19 @@ import (
 
 // ApplyGraphPlan creates a bead graph via a single hidden bd command so the
 // full graph becomes visible only after the underlying transaction commits.
-func (s *BdStore) ApplyGraphPlan(_ context.Context, plan *GraphApplyPlan) (*GraphApplyResult, error) {
+func (s *BdStore) ApplyGraphPlan(ctx context.Context, plan *GraphApplyPlan) (*GraphApplyResult, error) {
+	return s.ApplyGraphPlanWithStorage(ctx, plan, StorageDefault)
+}
+
+// ApplyGraphPlanWithStorage creates a bead graph in a storage tier selected by
+// policy middleware.
+func (s *BdStore) ApplyGraphPlanWithStorage(_ context.Context, plan *GraphApplyPlan, storage StorageClass) (*GraphApplyResult, error) {
 	if plan == nil {
 		return nil, fmt.Errorf("graph apply plan is nil")
+	}
+	ephemeral, noHistory, err := graphStorageFlags(storage)
+	if err != nil {
+		return nil, fmt.Errorf("bd create --graph: %w", err)
 	}
 
 	data, err := json.Marshal(plan)
@@ -40,7 +50,14 @@ func (s *BdStore) ApplyGraphPlan(_ context.Context, plan *GraphApplyPlan) (*Grap
 		return nil, fmt.Errorf("closing graph apply temp file: %w", err)
 	}
 
-	out, err := s.runner(s.dir, "bd", "create", "--graph", tmpPath, "--json")
+	args := []string{"create", "--graph", tmpPath, "--json"}
+	if ephemeral {
+		args = append(args, "--ephemeral")
+	}
+	if noHistory {
+		args = append(args, "--no-history")
+	}
+	out, err := s.runner(s.dir, "bd", args...)
 	if err != nil {
 		return nil, fmt.Errorf("bd create --graph: %w", err)
 	}
@@ -53,4 +70,23 @@ func (s *BdStore) ApplyGraphPlan(_ context.Context, plan *GraphApplyPlan) (*Grap
 		return nil, fmt.Errorf("bd create --graph: %w", err)
 	}
 	return &result, nil
+}
+
+func graphStorageFlags(storage StorageClass) (ephemeral bool, noHistory bool, err error) {
+	switch storage {
+	case StorageDefault, StorageHistory:
+		return false, false, nil
+	case StorageNoHistory:
+		return false, true, nil
+	case StorageEphemeral:
+		return true, false, nil
+	default:
+		return false, false, fmt.Errorf("unknown storage class %q", storage)
+	}
+}
+
+// SupportsEphemeralGraphApply reports whether this store can apply a whole
+// graph directly into ephemeral storage.
+func (s *BdStore) SupportsEphemeralGraphApply() bool {
+	return true
 }

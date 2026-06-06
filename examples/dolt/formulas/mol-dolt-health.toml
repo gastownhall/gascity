@@ -9,7 +9,6 @@ Runs the structured health check so patrol can surface server reachability,
 latency, backup freshness, orphan databases, and zombie processes without
 mutating the Dolt lifecycle on a transient status failure."""
 formula = "mol-dolt-health"
-version = 1
 
 [[steps]]
 id = "check"

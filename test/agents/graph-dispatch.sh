@@ -395,7 +395,7 @@ while true; do
     ref=$(printf '%s\n' "$bead_json" | json_payload | jq_bead '.ref // .metadata["gc.step_ref"] // ""')
     kind=$(printf '%s\n' "$bead_json" | json_payload | jq_bead '.metadata["gc.kind"] // ""')
     root_id=$(printf '%s\n' "$bead_json" | json_payload | jq_bead '.metadata["gc.root_bead_id"] // ""')
-    source_id=""
+    target_id=""
     work_dir=""
     if [ -n "$root_id" ]; then
         if ! root_json=$(timeout 10 bd show --json "$root_id" 2>/dev/null); then
@@ -403,15 +403,15 @@ while true; do
             sleep 1
             continue
         fi
-        source_id=$(printf '%s\n' "$root_json" | json_payload | jq_bead '.metadata["gc.source_bead_id"]')
+        target_id=$(printf '%s\n' "$root_json" | json_payload | jq_bead '.metadata["gc.input_convoy_id"]')
     fi
-    if [ -n "$source_id" ]; then
-        if ! source_json=$(timeout 10 bd show --json "$source_id" 2>/dev/null); then
-            trace "source-show-failed bead=$bead_id source=$source_id"
+    if [ -n "$target_id" ]; then
+        if ! target_json=$(timeout 10 bd show --json "$target_id" 2>/dev/null); then
+            trace "target-show-failed bead=$bead_id target=$target_id"
             sleep 1
             continue
         fi
-        work_dir=$(printf '%s\n' "$source_json" | json_payload | jq_bead '.metadata.work_dir')
+        work_dir=$(printf '%s\n' "$target_json" | json_payload | jq_bead '.metadata.work_dir')
     fi
 
     if is_currently_blocked "$bead_id" "$root_id"; then
@@ -482,7 +482,7 @@ while true; do
     # does not appear in the report. Writing here would violate
     # TestGraphWorkflowFailureRunsCleanup's "report should not include
     # .implement after abort" invariant.
-    trace "run bead=$bead_id ref=$ref kind=$kind source=$source_id work_dir=$work_dir"
+    trace "run bead=$bead_id ref=$ref kind=$kind target=$target_id work_dir=$work_dir"
     trace_store
 
     # Abort-propagation defense for TestGraphWorkflowFailureRunsCleanup.
@@ -528,10 +528,10 @@ while true; do
     case "$ref" in
         *.workspace-setup*)
             if [ -z "$work_dir" ]; then
-                work_dir="$GC_CITY/worktrees/$source_id"
+                work_dir="$GC_CITY/worktrees/$target_id"
                 mkdir -p "$work_dir"
-                bd update "$source_id" --set-metadata "work_dir=$work_dir"
-                trace "workspace-setup source=$source_id work_dir=$work_dir"
+                bd update "$target_id" --set-metadata "work_dir=$work_dir"
+                trace "workspace-setup target=$target_id work_dir=$work_dir"
             fi
             ;;
         *.preflight-tests*)
@@ -555,16 +555,16 @@ while true; do
             printf 'implemented\n' > "$work_dir/implemented.txt"
             ;;
         *.submit*)
-            bd update "$source_id" --set-metadata "submitted=true"
-            trace "submitted source=$source_id"
+            bd update "$target_id" --set-metadata "submitted=true"
+            trace "submitted target=$target_id"
             ;;
         *.cleanup-worktree*)
             if [ -n "$work_dir" ] && [ -d "$work_dir" ]; then
                 rm -rf "$work_dir"
                 trace "cleanup removed work_dir=$work_dir"
             fi
-            bd update "$source_id" --unset-metadata work_dir
-            trace "cleanup unset work_dir source=$source_id"
+            bd update "$target_id" --unset-metadata work_dir
+            trace "cleanup unset work_dir target=$target_id"
             ;;
     esac
 

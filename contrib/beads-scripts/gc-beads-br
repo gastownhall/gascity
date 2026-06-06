@@ -277,6 +277,23 @@ case "$op" in
     ;;
 
   ready)
+    include_ephemeral=false
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --include-ephemeral)
+          include_ephemeral=true
+          ;;
+        *)
+          echo "ready: unsupported argument: $1" >&2
+          exit 1
+          ;;
+      esac
+      shift
+    done
+    if [ "$include_ephemeral" = "true" ]; then
+      echo "ready: --include-ephemeral is not supported by gc-beads-br because br cannot return ready ephemeral rows" >&2
+      exit 1
+    fi
     br ready --json | br_list_to_gc
     ;;
 

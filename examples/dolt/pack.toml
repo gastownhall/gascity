@@ -5,7 +5,7 @@
 #
 # Dog-backed formulas and orders rely on the city's maintenance pack.
 #
-# Minimum dolt version: 2.0.7. This is the managed bd/Dolt compatibility
+# Minimum dolt version: 2.1.0. This is the managed bd/Dolt compatibility
 # floor and preserves the original guard for the GC/writer deadlock fixed in
 # dolthub/dolt commit ccf7bde206 (PR #10876). The doctor check
 # (doctor/check-dolt) fails closed; mol-dog-backup preflight records the same

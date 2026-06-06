@@ -10,11 +10,15 @@ set -euo pipefail
 
 PACK_DIR="${GC_PACK_DIR:-$(CDPATH= cd -- "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 . "$PACK_DIR/assets/scripts/runtime.sh"
+. "$PACK_DIR/assets/scripts/latency.sh"
 
 PORT="$GC_DOLT_PORT"
 HOST="${GC_DOLT_HOST:-127.0.0.1}"
 USER="${GC_DOLT_USER:-root}"
-LATENCY_WARN_S="${GC_DOCTOR_LATENCY_WARN_S:-1}"
+# Latency warn threshold in milliseconds. GC_DOCTOR_LATENCY_WARN_MS takes
+# precedence; otherwise derive from the legacy seconds knob (default 1s ->
+# 1000ms) for backward compatibility.
+LATENCY_WARN_MS="${GC_DOCTOR_LATENCY_WARN_MS:-$(( ${GC_DOCTOR_LATENCY_WARN_S:-1} * 1000 ))}"
 CONN_MAX="${GC_DOCTOR_CONN_MAX:-50}"
 CONN_WARN_PCT="${GC_DOCTOR_CONN_WARN_PCT:-80}"
 BACKUP_STALE_S="${GC_DOCTOR_BACKUP_STALE_S:-43200}"  # 2x 6h backup interval
@@ -85,7 +89,7 @@ send_mayor_mail() {
 
 # --- Step 1: Probe connectivity and measure latency ---
 
-PROBE_START=$(date +%s)
+PROBE_START_MS=$(now_ms)
 if ! dolt_sql -q "SELECT active_branch()" >/dev/null 2>&1; then
     if send_mayor_mail \
         -s "ESCALATION: Dolt server unreachable on port $PORT [CRITICAL]" \
@@ -98,11 +102,11 @@ if ! dolt_sql -q "SELECT active_branch()" >/dev/null 2>&1; then
     fi
     exit 0
 fi
-PROBE_END=$(date +%s)
-LATENCY_S=$((PROBE_END - PROBE_START))
+PROBE_END_MS=$(now_ms)
+LATENCY_MS=$((PROBE_END_MS - PROBE_START_MS))
 LATENCY_WARN=""
-if [ "$LATENCY_S" -ge "$LATENCY_WARN_S" ]; then
-    LATENCY_WARN=" [WARN: latency ${LATENCY_S}s >= threshold ${LATENCY_WARN_S}s]"
+if latency_should_warn "$LATENCY_MS" "$LATENCY_WARN_MS"; then
+    LATENCY_WARN=" [WARN: latency ${LATENCY_MS}ms >= threshold ${LATENCY_WARN_MS}ms]"
 fi
 
 # --- Step 2: Check resource conditions ---
@@ -175,7 +179,7 @@ WARNINGS="${LATENCY_WARN}${CONN_WARN}${ORPHAN_WARN}${BACKUP_STALE}"
 if [ -n "$WARNINGS" ]; then
     if ! send_mayor_mail \
         -s "Dolt health advisory [MEDIUM]" \
-        -m "Latency: ${LATENCY_S}s${LATENCY_WARN}
+        -m "Latency: ${LATENCY_MS}ms${LATENCY_WARN}
 Connections: ${CONN_COUNT}/${CONN_MAX}${CONN_WARN}
 Disk: ${DISK_USAGE}
 Orphan DBs: ${ORPHAN_COUNT}${ORPHAN_WARN}${BACKUP_STALE}"; then
@@ -183,6 +187,6 @@ Orphan DBs: ${ORPHAN_COUNT}${ORPHAN_WARN}${BACKUP_STALE}"; then
     fi
 fi
 
-SUMMARY="doctor — server: ok, latency: ${LATENCY_S}s, conns: ${CONN_COUNT}/${CONN_MAX}, disk: ${DISK_USAGE}, orphans: ${ORPHAN_COUNT}"
+SUMMARY="doctor — server: ok, latency: ${LATENCY_MS}ms, conns: ${CONN_COUNT}/${CONN_MAX}, disk: ${DISK_USAGE}, orphans: ${ORPHAN_COUNT}"
 gc session nudge deacon/ "DOG_DONE: $SUMMARY" 2>/dev/null || true
 echo "doctor: $SUMMARY"
