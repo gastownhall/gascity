@@ -2,6 +2,9 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"io"
 	"os"
 	"os/exec"
@@ -838,6 +841,33 @@ func TestMaterializeBuiltinPacks_PruneIgnoresAtomicTempFilesForDesiredAssets(t *
 	}
 }
 
+func TestPruneStaleGeneratedPackFiles_PreservesPackHashManifestFiles(t *testing.T) {
+	dst := t.TempDir()
+
+	writeFileForTest(t, filepath.Join(dst, "kept.txt"), []byte("embedded"), 0o644)
+	writeFileForTest(t, filepath.Join(dst, testPackHashManifestFile), []byte(`{"kept.txt":"hash"}`), 0o644)
+	writeFileForTest(t, filepath.Join(dst, testPackHashManifestFile+".tmp.123.456"), []byte(`{"partial":true}`), 0o644)
+	writeFileForTest(t, filepath.Join(dst, "stale.txt"), []byte("stale"), 0o644)
+
+	desired := map[string]struct{}{"kept.txt": {}}
+	if err := pruneStaleGeneratedPackFiles(dst, desired); err != nil {
+		t.Fatalf("pruneStaleGeneratedPackFiles: %v", err)
+	}
+
+	for _, path := range []string{
+		filepath.Join(dst, "kept.txt"),
+		filepath.Join(dst, testPackHashManifestFile),
+		filepath.Join(dst, testPackHashManifestFile+".tmp.123.456"),
+	} {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("expected prune to preserve %s: %v", filepath.Base(path), err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(dst, "stale.txt")); !os.IsNotExist(err) {
+		t.Fatalf("stale generated file still exists: %v", err)
+	}
+}
+
 func TestLoadCityConfigMaterializesBuiltinPacks(t *testing.T) {
 	dir := t.TempDir()
 	if err := writeBuiltinPackLoadTestCity(dir); err != nil {
@@ -1486,6 +1516,281 @@ func TestBuiltinPackIncludes_AlwaysIncludesMaintenance(t *testing.T) {
 	}
 }
 
+const testPackHashManifestFile = ".gc-pack-hashes.json"
+
+func TestEmbedShadowingRefreshesUnmodifiedNonRequiredPackFile(t *testing.T) {
+	dst := t.TempDir()
+	const rel = "commands/health/run.sh"
+	const v1 = "#!/bin/sh\necho old-health\n"
+	const v2 = "#!/bin/sh\necho new-health\n"
+
+	materializeFSForTest(t, fstest.MapFS{
+		rel: {Data: []byte(v1), Mode: 0o755},
+	}, dst, true, nil)
+	assertFileContentForTest(t, filepath.Join(dst, filepath.FromSlash(rel)), v1)
+
+	var warnings bytes.Buffer
+	materializeFSForTest(t, fstest.MapFS{
+		rel: {Data: []byte(v2), Mode: 0o755},
+	}, dst, true, &warnings)
+
+	assertFileContentForTest(t, filepath.Join(dst, filepath.FromSlash(rel)), v2)
+	assertNoWarningForTest(t, warnings.String())
+	manifest := readPackHashManifestForTest(t, dst)
+	if got, want := manifest[rel], sha256HexForTest([]byte(v2)); got != want {
+		t.Fatalf("manifest[%q] = %q, want %q", rel, got, want)
+	}
+}
+
+func TestEmbedShadowingRequiredPackRefreshes(t *testing.T) {
+	dst := t.TempDir()
+	const rel = "skills/gc-work/SKILL.md"
+	const v1 = "old required content\n"
+	const v2 = "new required content\n"
+
+	materializeFSForTest(t, fstest.MapFS{
+		rel: {Data: []byte(v1), Mode: 0o644},
+	}, dst, false, nil)
+
+	var warnings bytes.Buffer
+	materializeFSForTest(t, fstest.MapFS{
+		rel: {Data: []byte(v2), Mode: 0o644},
+	}, dst, false, &warnings)
+
+	assertFileContentForTest(t, filepath.Join(dst, filepath.FromSlash(rel)), v2)
+	assertNoWarningForTest(t, warnings.String())
+}
+
+func TestMaterializeFS_ManifestSeedsOnFirstWrite(t *testing.T) {
+	dst := t.TempDir()
+	embedded := fstest.MapFS{
+		"a.txt":     {Data: []byte("embedded-a"), Mode: 0o644},
+		"sub/b.txt": {Data: []byte("embedded-b"), Mode: 0o644},
+	}
+
+	desired := materializeFSForTest(t, embedded, dst, true, nil)
+	if _, ok := desired[testPackHashManifestFile]; ok {
+		t.Fatalf("desired set includes manifest metadata file %q", testPackHashManifestFile)
+	}
+
+	manifest := readPackHashManifestForTest(t, dst)
+	want := map[string]string{
+		"a.txt":     sha256HexForTest([]byte("embedded-a")),
+		"sub/b.txt": sha256HexForTest([]byte("embedded-b")),
+	}
+	assertManifestEqualsForTest(t, manifest, want)
+}
+
+func TestMaterializeFS_ManifestPreservesOperatorEdit(t *testing.T) {
+	dst := t.TempDir()
+	const rel = "commands/run.sh"
+	const original = "#!/bin/sh\necho original\n"
+	const updated = "#!/bin/sh\necho updated\n"
+	const operatorEdit = "#!/bin/sh\necho operator\n"
+
+	materializeFSForTest(t, fstest.MapFS{
+		rel: {Data: []byte(original), Mode: 0o755},
+	}, dst, true, nil)
+	originalHash := readPackHashManifestForTest(t, dst)[rel]
+
+	writeFileForTest(t, filepath.Join(dst, filepath.FromSlash(rel)), []byte(operatorEdit), 0o755)
+
+	var warnings bytes.Buffer
+	materializeFSForTest(t, fstest.MapFS{
+		rel: {Data: []byte(updated), Mode: 0o755},
+	}, dst, true, &warnings)
+
+	assertFileContentForTest(t, filepath.Join(dst, filepath.FromSlash(rel)), operatorEdit)
+	warningText := warnings.String()
+	for _, want := range []string{"local edits", "newer version available", rel} {
+		if !strings.Contains(warningText, want) {
+			t.Fatalf("warning = %q, want substring %q", warningText, want)
+		}
+	}
+
+	manifest := readPackHashManifestForTest(t, dst)
+	if got := manifest[rel]; got != originalHash {
+		t.Fatalf("manifest[%q] = %q, want original embedded hash %q", rel, got, originalHash)
+	}
+	for _, forbidden := range []string{sha256HexForTest([]byte(operatorEdit)), sha256HexForTest([]byte(updated))} {
+		if manifest[rel] == forbidden {
+			t.Fatalf("manifest[%q] was updated to %q, want preserved original hash %q", rel, forbidden, originalHash)
+		}
+	}
+}
+
+func TestMaterializeFS_ManifestConservativePreserveWithoutEntry(t *testing.T) {
+	dst := t.TempDir()
+	const rel = "config/default.toml"
+	const local = "operator-or-pre-fix-content\n"
+	writeFileForTest(t, filepath.Join(dst, filepath.FromSlash(rel)), []byte(local), 0o644)
+
+	var warnings bytes.Buffer
+	materializeFSForTest(t, fstest.MapFS{
+		rel: {Data: []byte("current embedded content\n"), Mode: 0o644},
+	}, dst, true, &warnings)
+
+	assertFileContentForTest(t, filepath.Join(dst, filepath.FromSlash(rel)), local)
+	assertNoWarningForTest(t, warnings.String())
+	manifest := readPackHashManifestForTest(t, dst)
+	if _, ok := manifest[rel]; ok {
+		t.Fatalf("manifest contains conservative-preserved file %q: %#v", rel, manifest)
+	}
+	if len(manifest) != 0 {
+		t.Fatalf("manifest = %#v, want empty map for conservative preserve without entries", manifest)
+	}
+}
+
+func TestMaterializeFS_ManifestEmitsNoWarningOnStaleEmbed(t *testing.T) {
+	dst := t.TempDir()
+	const rel = "commands/sync/run.sh"
+	const v1 = "#!/bin/sh\necho sync-v1\n"
+	const v2 = "#!/bin/sh\necho sync-v2\n"
+
+	materializeFSForTest(t, fstest.MapFS{
+		rel: {Data: []byte(v1), Mode: 0o755},
+	}, dst, true, nil)
+
+	var warnings bytes.Buffer
+	materializeFSForTest(t, fstest.MapFS{
+		rel: {Data: []byte(v2), Mode: 0o755},
+	}, dst, true, &warnings)
+
+	assertFileContentForTest(t, filepath.Join(dst, filepath.FromSlash(rel)), v2)
+	assertNoWarningForTest(t, warnings.String())
+	manifest := readPackHashManifestForTest(t, dst)
+	if got, want := manifest[rel], sha256HexForTest([]byte(v2)); got != want {
+		t.Fatalf("manifest[%q] = %q, want refreshed hash %q", rel, got, want)
+	}
+}
+
+func TestMaterializeFS_ManifestCorruptTreatedAsEmpty(t *testing.T) {
+	dst := t.TempDir()
+	const rel = "commands/doctor/run.sh"
+	const local = "#!/bin/sh\necho local\n"
+
+	writeFileForTest(t, filepath.Join(dst, filepath.FromSlash(rel)), []byte(local), 0o755)
+	writeFileForTest(t, filepath.Join(dst, testPackHashManifestFile), []byte("{not-json"), 0o644)
+
+	var warnings bytes.Buffer
+	materializeFSForTest(t, fstest.MapFS{
+		rel: {Data: []byte("#!/bin/sh\necho embedded\n"), Mode: 0o755},
+	}, dst, true, &warnings)
+
+	assertFileContentForTest(t, filepath.Join(dst, filepath.FromSlash(rel)), local)
+	assertNoWarningForTest(t, warnings.String())
+	manifest := readPackHashManifestForTest(t, dst)
+	if len(manifest) != 0 {
+		t.Fatalf("manifest = %#v, want corrupt manifest treated as empty", manifest)
+	}
+}
+
+func TestMaterializeFS_ManifestWriteFailureIsNonFatal(t *testing.T) {
+	dst := t.TempDir()
+	if err := os.Mkdir(filepath.Join(dst, testPackHashManifestFile), 0o755); err != nil {
+		t.Fatalf("Mkdir manifest path: %v", err)
+	}
+
+	var warnings bytes.Buffer
+	materializeFSForTest(t, fstest.MapFS{
+		"a.txt": {Data: []byte("embedded-a"), Mode: 0o644},
+	}, dst, true, &warnings)
+
+	assertFileContentForTest(t, filepath.Join(dst, "a.txt"), "embedded-a")
+	if !strings.Contains(warnings.String(), "pack hash manifest") {
+		t.Fatalf("warning = %q, want manifest write failure warning", warnings.String())
+	}
+}
+
+func TestMaterializeFS_ManifestPrunesStaleEntriesWhenEmbedFileRemoved(t *testing.T) {
+	dst := t.TempDir()
+	materializeFSForTest(t, fstest.MapFS{
+		"a.txt": {Data: []byte("embedded-a"), Mode: 0o644},
+		"b.txt": {Data: []byte("embedded-b"), Mode: 0o644},
+	}, dst, true, nil)
+
+	materializeFSForTest(t, fstest.MapFS{
+		"a.txt": {Data: []byte("embedded-a"), Mode: 0o644},
+	}, dst, true, nil)
+
+	manifest := readPackHashManifestForTest(t, dst)
+	want := map[string]string{"a.txt": sha256HexForTest([]byte("embedded-a"))}
+	assertManifestEqualsForTest(t, manifest, want)
+	if _, err := os.Stat(filepath.Join(dst, "b.txt")); err != nil {
+		t.Fatalf("b.txt should remain on disk for pruneStaleGeneratedPackFiles to handle: %v", err)
+	}
+}
+
+func materializeFSForTest(t *testing.T, embedded fstest.MapFS, dstDir string, preserveOperatorEdits bool, warnings io.Writer) map[string]struct{} {
+	t.Helper()
+	desired, err := materializeFS(embedded, dstDir, preserveOperatorEdits, warnings)
+	if err != nil {
+		t.Fatalf("materializeFS: %v", err)
+	}
+	return desired
+}
+
+func readPackHashManifestForTest(t *testing.T, dstDir string) map[string]string {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(dstDir, testPackHashManifestFile))
+	if err != nil {
+		t.Fatalf("ReadFile(%s): %v", testPackHashManifestFile, err)
+	}
+	var manifest map[string]string
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		t.Fatalf("manifest JSON = %q, want object: %v", data, err)
+	}
+	if manifest == nil {
+		return map[string]string{}
+	}
+	return manifest
+}
+
+func assertManifestEqualsForTest(t *testing.T, got, want map[string]string) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("manifest = %#v, want %#v", got, want)
+	}
+	for key, wantHash := range want {
+		if gotHash := got[key]; gotHash != wantHash {
+			t.Fatalf("manifest[%q] = %q, want %q; full manifest %#v", key, gotHash, wantHash, got)
+		}
+	}
+}
+
+func sha256HexForTest(data []byte) string {
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
+}
+
+func writeFileForTest(t *testing.T, path string, data []byte, mode os.FileMode) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("MkdirAll(%s): %v", filepath.Dir(path), err)
+	}
+	if err := os.WriteFile(path, data, mode); err != nil {
+		t.Fatalf("WriteFile(%s): %v", path, err)
+	}
+}
+
+func assertFileContentForTest(t *testing.T, path, want string) {
+	t.Helper()
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile(%s): %v", path, err)
+	}
+	if string(got) != want {
+		t.Fatalf("content %s = %q, want %q", filepath.Base(path), got, want)
+	}
+}
+
+func assertNoWarningForTest(t *testing.T, got string) {
+	t.Helper()
+	if got != "" {
+		t.Fatalf("warning = %q, want none", got)
+	}
+}
+
 // TestMaterializeFS_PreservesExistingFiles asserts that an existing on-disk
 // file is not overwritten by a subsequent materialize call. This is the
 // regression guard for gastownhall/gascity#2429 — `gc bd …` subcommands
@@ -1503,10 +1808,7 @@ func TestMaterializeFS_PreservesExistingFiles(t *testing.T) {
 	}
 
 	// Initial materialize: writes all three files since dst is empty.
-	desired, err := materializeFS(embedded, dst, true)
-	if err != nil {
-		t.Fatalf("first materializeFS: %v", err)
-	}
+	desired := materializeFSForTest(t, embedded, dst, true, nil)
 	for _, wantPath := range []string{"a.txt", "b.txt", "sub/c.txt"} {
 		if _, ok := desired[wantPath]; !ok {
 			t.Fatalf("desired set missing %q", wantPath)
@@ -1528,9 +1830,7 @@ func TestMaterializeFS_PreservesExistingFiles(t *testing.T) {
 	}
 
 	// Second materialize: should NOT overwrite the operator's edit.
-	if _, err := materializeFS(embedded, dst, true); err != nil {
-		t.Fatalf("second materializeFS: %v", err)
-	}
+	materializeFSForTest(t, embedded, dst, true, nil)
 	got, err := os.ReadFile(filepath.Join(dst, "b.txt"))
 	if err != nil {
 		t.Fatalf("read b.txt after second materialize: %v", err)
@@ -1557,9 +1857,7 @@ func TestMaterializeFS_PreservesExistingFiles(t *testing.T) {
 	if err := os.Remove(filepath.Join(dst, "b.txt")); err != nil {
 		t.Fatalf("remove b.txt: %v", err)
 	}
-	if _, err := materializeFS(embedded, dst, true); err != nil {
-		t.Fatalf("third materializeFS: %v", err)
-	}
+	materializeFSForTest(t, embedded, dst, true, nil)
 	got, err = os.ReadFile(filepath.Join(dst, "b.txt"))
 	if err != nil {
 		t.Fatalf("read b.txt after third materialize: %v", err)
