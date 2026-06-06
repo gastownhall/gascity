@@ -30,8 +30,9 @@ func (e *CycleError) Error() string {
 // (depends-on) edges. It returns a CycleError if a cycle is reachable from
 // startID, or nil if the reachable subgraph is acyclic.
 //
-// Only "blocks" and "waits-for" dependency types are cycle-sensitive; other
-// relation types (e.g. "relates-to", "tracks") are informational and skipped.
+// Only scheduling-relevant dependency types are cycle-sensitive
+// ("blocks", "waits-for", "conditional-blocks", "parent-child", and the
+// empty default); informational types ("relates-to", "tracks") are skipped.
 func DetectCycle(startID string, dl DepLister) error {
 	// Three-color DFS: white (unvisited), gray (in stack), black (done).
 	const (
