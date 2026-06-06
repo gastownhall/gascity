@@ -40,6 +40,7 @@ func newInternalCmd(stdout, stderr io.Writer) *cobra.Command {
 // build desired set → materialize. Never invoked by humans directly.
 func newInternalMaterializeSkillsCmd(stdout, stderr io.Writer) *cobra.Command {
 	var agentName, workdir, sharedCatalogSnapshot, sharedCatalogSnapshotFile string
+	var bestEffort bool
 	cmd := &cobra.Command{
 		Use:    "materialize-skills",
 		Short:  "Materialize skills for one agent into one workdir",
@@ -66,6 +67,17 @@ func newInternalMaterializeSkillsCmd(stdout, stderr io.Writer) *cobra.Command {
 			}
 			agent, ok := resolveAgentIdentity(cfg, agentName, currentRigContext(cfg))
 			if !ok {
+				if bestEffort {
+					// Named/wisp session expansions pass a session identity
+					// (e.g. "rig/executor-vc-eswi4") that can't be resolved back
+					// to a config template. Skills materialization is best-effort
+					// session preparation, not a hard prerequisite, so in
+					// best-effort mode (the pre_start caller) warn and exit 0
+					// rather than failing the whole session start (the session
+					// runs without a freshly materialized skill catalog).
+					fmt.Fprintf(stderr, "gc internal materialize-skills: unknown agent %q; skipping (best-effort)\n", agentName) //nolint:errcheck // best-effort stderr
+					return nil
+				}
 				fmt.Fprintf(stderr, "gc internal materialize-skills: unknown agent %q\n", agentName) //nolint:errcheck // best-effort stderr
 				return errExit
 			}
@@ -116,6 +128,7 @@ func newInternalMaterializeSkillsCmd(stdout, stderr io.Writer) *cobra.Command {
 	cmd.Flags().StringVar(&workdir, "workdir", "", "agent working directory (skills materialize into workdir/.<vendor>/skills/)")
 	cmd.Flags().StringVar(&sharedCatalogSnapshot, "shared-catalog-snapshot", "", "base64-encoded shared catalog snapshot from the controller")
 	cmd.Flags().StringVar(&sharedCatalogSnapshotFile, "shared-catalog-snapshot-file", "", "path to a file containing the base64-encoded shared catalog snapshot (preferred over --shared-catalog-snapshot for large catalogs to avoid argv/env limits)")
+	cmd.Flags().BoolVar(&bestEffort, "best-effort", false, "warn and exit 0 instead of failing when the agent can't be resolved; used by pre_start so an unresolvable session identity (named/wisp expansion) doesn't make session start fatal")
 	return cmd
 }
 
