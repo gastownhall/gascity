@@ -162,7 +162,7 @@ func TestCityStatusSuspended(t *testing.T) {
 	sp := runtime.NewFake()
 	dops := newFakeDrainOps()
 	cfg := &config.City{
-		Workspace: config.Workspace{Name: "city", Suspended: true, MaxActiveSessions: intPtr(1)},
+		Workspace: config.Workspace{Name: "city", SuspendedOnStart: true, MaxActiveSessions: intPtr(1)},
 		Agents:    []config.Agent{{Name: "mayor", MaxActiveSessions: intPtr(1)}},
 	}
 
@@ -265,7 +265,7 @@ func TestCityStatusRigs(t *testing.T) {
 		Agents:    []config.Agent{{Name: "mayor", MaxActiveSessions: intPtr(1)}},
 		Rigs: []config.Rig{
 			{Name: "hello-world", Path: "/home/user/hello-world"},
-			{Name: "frontend", Path: "/home/user/frontend", Suspended: true},
+			{Name: "frontend", Path: "/home/user/frontend", SuspendedOnStart: true},
 		},
 	}
 
@@ -670,7 +670,7 @@ func TestCityStatusAgentSuspendedByRig(t *testing.T) {
 			{Name: "polecat", Dir: "myrig", MaxActiveSessions: intPtr(1)},
 		},
 		Rigs: []config.Rig{
-			{Name: "myrig", Path: "/tmp/myrig", Suspended: true},
+			{Name: "myrig", Path: "/tmp/myrig", SuspendedOnStart: true},
 		},
 	}
 

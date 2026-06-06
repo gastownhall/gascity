@@ -76,8 +76,17 @@ func sessionCreateHints(resolved *config.ResolvedProvider, sessionEnv map[string
 		ProcessNames:           resolved.ProcessNames,
 		EmitsPermissionWarning: resolved.EmitsPermissionWarning,
 		AcceptStartupDialogs:   resolved.AcceptStartupDialogs,
-		Env:                    sessionEnv,
-		MCPServers:             mcpServers,
+		// API session-create path (dashboard / real-world-app), NOT the
+		// `gc session new` CLI seam — the CLI resolves MouseOn in cmd/gc
+		// (workerSessionCreateHints + templateParamsToConfig, ga-c4w). MouseOn
+		// lets the runtime skip disableMouseAndActivity so the tmux wheel drives
+		// copy-mode scrollback. Agent-kind sessions can also flow through here,
+		// but they are CreateModeDeferred and re-resolved mouse-off by the
+		// reconciler, so this unconditional default never enables mouse on a
+		// polled agent (ga-c4w).
+		MouseOn:    true,
+		Env:        sessionEnv,
+		MCPServers: mcpServers,
 	}
 }
 
@@ -97,8 +106,15 @@ func sessionResumeHints(resolved *config.ResolvedProvider, workDir string, sessi
 		ProcessNames:           resolved.ProcessNames,
 		EmitsPermissionWarning: resolved.EmitsPermissionWarning,
 		AcceptStartupDialogs:   resolved.AcceptStartupDialogs,
-		Env:                    sessionEnv,
-		MCPServers:             mcpServers,
+		// ga-c4w finding #2: keep interactive (API-created) sessions mouse-on
+		// across suspend/resume + crash-restart, symmetric with sessionCreateHints.
+		// Without this the wheel→scrollback works on first create but is lost on
+		// the first resume. Headless agents are controller-owned and re-resolve
+		// MouseOn via cmd/gc/template_resolve.go (mouse-off), so this never enables
+		// mouse on a polled agent.
+		MouseOn:    true,
+		Env:        sessionEnv,
+		MCPServers: mcpServers,
 	}
 }
 

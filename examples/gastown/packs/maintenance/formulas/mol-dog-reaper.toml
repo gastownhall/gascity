@@ -15,16 +15,17 @@ gc runtime drain-ack
 
 The drain-ack tells the controller this session is done.
 
-The Reaper Dog closes stale non-closed wisps only when parent-child
-dependency data proves the parent is closed, purges closed wisps
-older than the purge threshold, and auto-closes stale issues only in the city
+The Reaper Dog closes stale non-closed wisps only when ownership dependency
+data proves the parent or workflow root is closed, purges closed wisps older
+than the purge threshold, and auto-closes stale issues only in the city
 database where `bd close` is correctly scoped. This keeps the wisps table from
 growing unbounded without closing active wisps by age alone.
 
 Current behavior:
 - Observes open/hooked/in_progress wisps older than max_age (default 24h)
 - Closes only the subset whose parent-child dependency points to a closed
-  parent
+  parent, or whose graph-v2 `tracks` edge points to its `gc.root_bead_id`
+  workflow root after that root is closed
 - Purges (deletes) closed wisps past purge_age (default 7 days)
 - Auto-closes stale city issues open >30 days with no status change
 - Reports stale issue candidates in non-city databases without closing them
@@ -35,10 +36,13 @@ mail cleanup must go through `bd`, never Dolt. BD-backed mail retention is
 tracked separately as `ga-w9jfl5`; until that lands, Reaper intentionally does
 not delete mail. Wisp parentage is no longer carried on the wisps row; it
 lives in `wisp_dependencies` rows with `type='parent-child'` and a
-`depends_on_id` target column in the bd 1.0.4 schema. For the Dolt-backed bead
-store, `ParentID` is a projection from those parent-child dependencies, not a
-separate `parent_id` column for Reaper to query. Non-closed wisps without that
-parentage signal are reported only; they are not closed by age alone.
+`depends_on_id` target column in the bd 1.0.4 schema. Graph-v2 workflow wisps
+are owned through `tracks` edges from the child to the workflow root, with the
+child's `gc.root_bead_id` metadata matching `depends_on_id`. For the
+Dolt-backed bead store, `ParentID` is a projection from parent-child
+dependencies, not a separate `parent_id` column for Reaper to query.
+Non-closed wisps without an ownership signal are reported only; they are not
+closed by age alone.
 Legacy `mail_delete_age` overrides do not apply to Reaper and should be
 removed or moved to the BD-backed mail cleanup tool. Legacy `databases`
 overrides from earlier formula drafts are also no longer accepted; the script
@@ -49,7 +53,7 @@ database patterns.
 
 This is infrastructure work. You:
 1. Scan all production databases for candidates
-2. Report non-closed wisps past max_age and close only wisps whose parent is closed
+2. Report non-closed wisps past max_age and close only wisps whose parent/root is closed
 3. Purge (delete) closed wisps past purge_age
 4. Auto-close stale city issues (with exclusions)
 5. Report findings and flag anomalies
@@ -74,9 +78,13 @@ examples below use `<max_age_hours>`, `<purge_age_hours>`, and
 ## Safety
 
 Non-closed wisps are closed only when a parent-child dependency points to a
-closed parent. Wisps without a parent-child edge, or with an unresolved parent
-record, are observed, not closed by age alone. Purging deletes rows —
-irreversible but only targets already-closed wisps past retention. Auto-close
+closed parent, or when a graph-v2 `tracks` edge points to the child's own
+`gc.root_bead_id` workflow root and that root is closed. Ordinary `blocks`
+dependencies are sequencing edges and must never close a live wisp. Wisps
+without an ownership edge, or with an unresolved parent/root record, are
+observed, not closed by age alone. Purging deletes rows — irreversible but
+only targets already-closed wisps past retention. Its protection query may
+include `blocks` because over-protection only prevents deletion. Auto-close
 excludes P0/P1, epics, and issues with active dependencies. Non-city database
 issue candidates are report-only until the maintenance pack has an explicit
 DB-to-`BEADS_DIR` routing map for scoped `bd close`. If the canonical city
@@ -138,11 +146,17 @@ SELECT COUNT(*) FROM wisps
 WHERE status IN ('open', 'hooked', 'in_progress')
 AND created_at < DATE_SUB(NOW(), INTERVAL <max_age_hours> HOUR);
 
--- Schema-safe close candidates: stale child wisps with closed parent
+-- Schema-safe close candidates: stale child wisps with closed parent/root
 SELECT COUNT(DISTINCT w.id) FROM wisps w
 INNER JOIN wisp_dependencies d
   ON d.issue_id = w.id
-  AND d.type = 'parent-child'
+  AND (
+    d.type = 'parent-child'
+    OR (
+      d.type = 'tracks'
+      AND JSON_UNQUOTE(JSON_EXTRACT(w.metadata, '$."gc.root_bead_id"')) = d.depends_on_id
+    )
+  )
 LEFT JOIN wisps parent_wisp ON d.depends_on_id = parent_wisp.id
 LEFT JOIN issues parent_issue ON d.depends_on_id = parent_issue.id
 WHERE w.status IN ('open', 'hooked', 'in_progress')
@@ -161,7 +175,7 @@ AND closed_at < DATE_SUB(NOW(), INTERVAL <purge_age_hours> HOUR)
 AND id NOT IN (
   SELECT DISTINCT d.depends_on_id FROM wisp_dependencies d
   INNER JOIN wisps child_wisp ON d.issue_id = child_wisp.id
-  WHERE d.type = 'parent-child'
+  WHERE d.type IN ('parent-child', 'tracks', 'blocks')
   AND child_wisp.status IN ('open', 'hooked', 'in_progress')
 );
 
@@ -187,16 +201,17 @@ beads with Type=message; any mail cleanup goes through `bd`.
 
 [[steps]]
 id = "reap"
-title = "Close stale wisps with closed parents"
+title = "Close stale wisps with closed parents or roots"
 description = """
 Report wisps past max_age and close only the schema-safe subset whose
-parent-child dependency points to a closed parent.
+ownership dependency points to a closed parent or workflow root.
 
 Wisp parentage no longer lives on the wisps row (the schema has no
 `parent_id` column); parentage is in `wisp_dependencies` rows with
 `type='parent-child'` and `depends_on_id`. The SDK `ParentID` field is
-projected from those rows for Dolt-backed beads. Do not close non-closed wisps
-by age alone.
+projected from those rows for Dolt-backed beads. Graph-v2 workflow ownership
+uses a `tracks` edge from the child to the root and must match the child's
+`gc.root_bead_id` metadata. Do not close non-closed wisps by age alone.
 `wisp-compact.sh` promotes non-closed wisps past TTL for stuck detection.
 The close step repeats until no schema-safe candidates remain, so a stale
 multi-level child chain whose root is closed converges in one reaper run.
@@ -208,7 +223,7 @@ WHERE status IN ('open', 'hooked', 'in_progress')
 AND created_at < DATE_SUB(NOW(), INTERVAL <max_age_hours> HOUR);
 ```
 
-**2. Close only stale wisps with closed parents, repeating to a fixpoint:**
+**2. Close only stale wisps with closed parents or roots, repeating to a fixpoint:**
 ```sql
 UPDATE wisps SET status='closed', closed_at=NOW()
 WHERE status IN ('open', 'hooked', 'in_progress')
@@ -218,7 +233,13 @@ AND id IN (
     SELECT w.id FROM wisps w
     INNER JOIN wisp_dependencies d
       ON d.issue_id = w.id
-      AND d.type = 'parent-child'
+      AND (
+        d.type = 'parent-child'
+        OR (
+          d.type = 'tracks'
+          AND JSON_UNQUOTE(JSON_EXTRACT(w.metadata, '$."gc.root_bead_id"')) = d.depends_on_id
+        )
+      )
     LEFT JOIN wisps parent_wisp ON d.depends_on_id = parent_wisp.id
     LEFT JOIN issues parent_issue ON d.depends_on_id = parent_issue.id
     WHERE w.status IN ('open', 'hooked', 'in_progress')
@@ -233,7 +254,7 @@ AND id IN (
 
 **3. Record results:**
 - Count stale non-closed wisps per database
-- Count closed-parent stale wisps closed per database
+- Count closed-parent/root stale wisps closed per database
 - Any errors encountered
 
 **4. Alert check:**
@@ -241,7 +262,7 @@ If stale non-message open wisps across all databases exceed
 {{alert_threshold}}, log a warning and consider escalating. Fresh workflow load
 can legitimately exceed the raw open-wisp threshold on busy cities.
 
-**Exit criteria:** Stale non-closed wisps counted; only stale wisps with closed parents closed."""
+**Exit criteria:** Stale non-closed wisps counted; only stale wisps with closed parents or roots closed."""
 
 [[steps]]
 id = "purge"
@@ -257,7 +278,7 @@ AND closed_at < DATE_SUB(NOW(), INTERVAL <purge_age_hours> HOUR)
 AND id NOT IN (
   SELECT DISTINCT d.depends_on_id FROM wisp_dependencies d
   INNER JOIN wisps child_wisp ON d.issue_id = child_wisp.id
-  WHERE d.type = 'parent-child'
+  WHERE d.type IN ('parent-child', 'tracks', 'blocks')
   AND child_wisp.status IN ('open', 'hooked', 'in_progress')
 );
 ```
@@ -268,7 +289,8 @@ AND id NOT IN (
 
 **Safety:** Only deletes wisps that are already closed AND past the
 retention window, and never deletes a closed parent wisp while any
-non-closed child wisp still depends on it. Active wisps are never touched.
+non-closed child wisp still depends on it through cleanup or sequencing edges.
+Active wisps are never touched.
 Mail messages live as beads (Type=message), not in a SQL table — use `bd`
 for any mail cleanup, never DELETE FROM mail.
 
@@ -328,7 +350,7 @@ Generate summary and signal completion.
 **1. Generate report summary:**
 - Databases scanned
 - Stale non-closed wisps observed
-- Closed-parent stale wisps closed
+- Closed-parent/root stale wisps closed
 - Wisps purged (deleted old closed wisps)
 - City issues auto-closed (stale past {{stale_issue_age}}, excl. epics/P0-P1/deps)
 - Non-city stale issue candidates skipped as report-only

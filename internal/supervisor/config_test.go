@@ -117,6 +117,7 @@ func TestLoadConfigExplicit(t *testing.T) {
 port = 9090
 bind = "0.0.0.0"
 patrol_interval = "5s"
+allowed_hosts = ["city-admin.local", "192.168.1.58"]
 
 [publication]
 provider = "hosted"
@@ -141,6 +142,9 @@ policy_ref = "platform-sso"
 	}
 	if cfg.Supervisor.PatrolIntervalDuration() != 5*time.Second {
 		t.Errorf("expected patrol 5s, got %v", cfg.Supervisor.PatrolIntervalDuration())
+	}
+	if got := cfg.Supervisor.AllowedHosts; len(got) != 2 || got[0] != "city-admin.local" || got[1] != "192.168.1.58" {
+		t.Errorf("Supervisor.AllowedHosts = %#v, want city-admin.local and 192.168.1.58", got)
 	}
 	if cfg.Publication.ProviderOrDefault() != "hosted" {
 		t.Errorf("Publication.ProviderOrDefault() = %q, want hosted", cfg.Publication.ProviderOrDefault())

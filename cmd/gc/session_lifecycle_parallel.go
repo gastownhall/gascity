@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"path/filepath"
 	"runtime/debug"
 	"sort"
 	"strconv"
@@ -23,6 +24,7 @@ import (
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/shellquote"
 	"github.com/gastownhall/gascity/internal/worker"
+	workertranscript "github.com/gastownhall/gascity/internal/worker/transcript"
 )
 
 const (
@@ -840,6 +842,26 @@ func buildPreparedStartWithWorkDirResolver(
 	} else if wd := session.Metadata["work_dir"]; wd != "" {
 		agentCfg.WorkDir = wd
 	}
+	// Pre-flight stale-resume guard: if the bead carries a session_key whose
+	// keyed transcript is no longer on disk (provider session retention
+	// disabled, manual cleanup, worktree rebuild), a resume would hard-fail
+	// (e.g. claude's "No conversation found") and the pane would die ~2s after
+	// spawn. Post-start observation can miss the death (tmux state cache TTL
+	// race), so the bead stays asleep and every subsequent wake re-fires the
+	// same broken command. Clear the stale key here so the regen block below
+	// mints a fresh one and resolveSessionCommand uses --session-id (which
+	// creates a new conversation) instead of --resume (which can't).
+	//
+	// The "is the keyed transcript present" decision is delegated to the
+	// transcript layer so each provider keeps its own resumability rules; for
+	// providers whose resume state we cannot probe on disk (codex/gemini/...)
+	// the probe reports !probeable and we leave their metadata untouched.
+	if sk := strings.TrimSpace(session.Metadata["session_key"]); sk != "" && agentCfg.WorkDir != "" {
+		provider := sessionTranscriptProvider(tp.ResolvedProvider, session.Metadata)
+		if present, probeable := staleResumeKeyProbe(provider, agentCfg.WorkDir, sk); probeable && !present {
+			clearStaleResumeKeyMetadata(session, store)
+		}
+	}
 	if session.Metadata["session_key"] == "" && tp.ResolvedProvider != nil && tp.ResolvedProvider.SessionIDFlag != "" {
 		sessionKey, err := sessionpkg.GenerateSessionKey()
 		if err != nil {
@@ -1574,6 +1596,80 @@ func observeRuntimeProviderLiveness(sp runtime.Provider, name string, processNam
 	}
 	obs := runtime.ObserveLiveness(sp, name, processNames)
 	return obs.Running, obs.Alive
+}
+
+// staleResumeKeyProbe reports whether the keyed transcript a resume would
+// reattach to is present (present), and whether the provider exposes a keyed
+// transcript that can be probed on disk at all (probeable). It is a package var
+// so tests can model a present or absent transcript without materializing
+// provider-specific transcript trees. Production delegates to the transcript
+// discovery layer, which knows each provider's on-disk layout and merges each
+// provider's own default roots on top of the supplied claude default, so
+// claude/kimi/pi each probe their real location.
+var staleResumeKeyProbe = func(provider, workDir, sessionKey string) (present, probeable bool) {
+	return workertranscript.HasKeyedTranscript(worker.DefaultSearchPaths(), provider, workDir, sessionKey)
+}
+
+// sessionTranscriptProvider resolves the provider-family identifier consumed by
+// the transcript discovery layer, preferring the resolved provider's builtin
+// ancestor and falling back to its start command and then the session's
+// recorded provider metadata.
+func sessionTranscriptProvider(rp *config.ResolvedProvider, metadata map[string]string) string {
+	if rp != nil {
+		if v := strings.TrimSpace(rp.BuiltinAncestor); v != "" {
+			return v
+		}
+		if base := providerCommandBaseName(rp); base != "" {
+			return base
+		}
+	}
+	if v := strings.TrimSpace(metadata["provider_kind"]); v != "" {
+		return v
+	}
+	return strings.TrimSpace(metadata["provider"])
+}
+
+// providerCommandBaseName returns the first token of the provider's start
+// command (e.g. "claude" from "claude --dangerously-skip-permissions ..."),
+// stripped of quoting and path prefix.
+func providerCommandBaseName(rp *config.ResolvedProvider) string {
+	if rp == nil {
+		return ""
+	}
+	cmd := strings.TrimSpace(rp.Command)
+	if cmd == "" {
+		return ""
+	}
+	parts := shellquote.Split(cmd)
+	if len(parts) == 0 {
+		return ""
+	}
+	return filepath.Base(parts[0])
+}
+
+// clearStaleResumeKeyMetadata wipes the resume-tracking metadata for a bead
+// whose stored session_key references a transcript that no longer exists. Mirrors
+// the clears performed by recordWakeFailure (cmd/gc/session_reconcile.go) and
+// Manager.clearStaleResumeMetadata (internal/session/chat.go), so downstream
+// breaker / churn logic treats this as the same kind of recovery cycle.
+func clearStaleResumeKeyMetadata(session *beads.Bead, store beads.Store) {
+	if session == nil {
+		return
+	}
+	patch := map[string]string{
+		"session_key":                "",
+		"started_config_hash":        "",
+		"continuation_reset_pending": "true",
+	}
+	if store != nil && strings.TrimSpace(session.ID) != "" {
+		_ = store.SetMetadataBatch(session.ID, patch)
+	}
+	if session.Metadata == nil {
+		session.Metadata = make(map[string]string, len(patch))
+	}
+	for k, v := range patch {
+		session.Metadata[k] = v
+	}
 }
 
 func commitStartResult(

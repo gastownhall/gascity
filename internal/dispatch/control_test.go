@@ -733,6 +733,81 @@ func TestProcessRetryControlInvariantViolation(t *testing.T) {
 	}
 }
 
+func TestProcessRetryControlMissingAttemptIsGraphMalformed(t *testing.T) {
+	t.Parallel()
+	store := beads.NewMemStore()
+
+	root := mustCreate(t, store, beads.Bead{
+		Title:    "workflow",
+		Metadata: map[string]string{"gc.kind": "workflow"},
+	})
+	// A retry control whose attempt sub-DAG is absent. Waiting cannot make
+	// an attempt appear, so the condition must classify as a malformed
+	// control graph so the dispatcher quarantines the bead instead of
+	// crash-looping the serve loop. See gastownhall/gascity#2798.
+	control := mustCreate(t, store, beads.Bead{
+		Title: "review",
+		Metadata: map[string]string{
+			"gc.kind":          "retry",
+			"gc.root_bead_id":  root.ID,
+			"gc.step_ref":      "mol-test.review",
+			"gc.step_id":       "review",
+			"gc.max_attempts":  "3",
+			"gc.control_epoch": "1",
+		},
+	})
+
+	_, err := processRetryControl(store, mustGet(t, store, control.ID), ProcessOptions{})
+	if !errors.Is(err, ErrControlGraphMalformed) {
+		t.Fatalf("error = %v, want ErrControlGraphMalformed", err)
+	}
+}
+
+func TestProcessRalphControlMissingIterationIsGraphMalformed(t *testing.T) {
+	t.Parallel()
+	store := beads.NewMemStore()
+
+	root := mustCreate(t, store, beads.Bead{
+		Title:    "workflow",
+		Metadata: map[string]string{"gc.kind": "workflow"},
+	})
+	// A ralph control whose first iteration was never seeded — the
+	// pre-seed-fix re-spawn gap, manual bead surgery, or a seed attach
+	// marked molecule_failed. Waiting cannot make an iteration appear, so
+	// the condition must classify as a malformed control graph for the
+	// dispatcher quarantine rather than fatal out of the serve loop.
+	// Regression for gastownhall/gascity#2798.
+	control := mustCreate(t, store, beads.Bead{
+		Title: "inner loop",
+		Metadata: map[string]string{
+			"gc.kind":          "ralph",
+			"gc.root_bead_id":  root.ID,
+			"gc.step_ref":      "mol-test.outer.iteration.2.inner",
+			"gc.step_id":       "inner",
+			"gc.max_attempts":  "3",
+			"gc.control_epoch": "1",
+		},
+	})
+
+	var traced []string
+	opts := ProcessOptions{Tracef: func(format string, args ...any) {
+		traced = append(traced, fmt.Sprintf(format, args...))
+	}}
+	_, err := processRalphControl(store, mustGet(t, store, control.ID), opts)
+	if !errors.Is(err, ErrControlGraphMalformed) {
+		t.Fatalf("error = %v, want ErrControlGraphMalformed", err)
+	}
+	found := false
+	for _, line := range traced {
+		if strings.Contains(line, control.ID) && strings.Contains(line, "no_iteration_found") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("trace lines = %#v, want structured warning naming bead %s and no_iteration_found", traced, control.ID)
+	}
+}
+
 func TestProcessRetryControlPendingAttemptAddsBlockingDep(t *testing.T) {
 	t.Parallel()
 	store := beads.NewMemStore()

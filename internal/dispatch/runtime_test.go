@@ -1812,6 +1812,58 @@ func TestProcessWorkflowFinalizeClosesWorkflow(t *testing.T) {
 	}
 }
 
+func TestProcessWorkflowFinalizeClosesOpenSpecSidecars(t *testing.T) {
+	t.Parallel()
+
+	store := beads.NewMemStore()
+	workflow := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+		},
+	})
+	spec := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "generated step spec",
+		Type:  "spec",
+		Metadata: map[string]string{
+			"gc.kind":         "spec",
+			"gc.root_bead_id": workflow.ID,
+			"gc.spec_for":     "implement",
+			"gc.spec_for_ref": "implement",
+		},
+	})
+	finalizer := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "Finalize workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":         "workflow-finalize",
+			"gc.root_bead_id": workflow.ID,
+		},
+	})
+	mustDepAdd(t, store, workflow.ID, finalizer.ID, "blocks")
+
+	result, err := ProcessControl(store, finalizer, ProcessOptions{})
+	if err != nil {
+		t.Fatalf("ProcessControl(workflow-finalize): %v", err)
+	}
+	if !result.Processed || result.Action != "workflow-pass" {
+		t.Fatalf("workflow result = %+v, want processed workflow-pass", result)
+	}
+
+	specAfter := mustGetBead(t, store, spec.ID)
+	if specAfter.Status != "closed" {
+		t.Fatalf("spec status = %q, want closed", specAfter.Status)
+	}
+	if got := specAfter.Metadata["gc.outcome"]; got != "pass" {
+		t.Fatalf("spec gc.outcome = %q, want pass", got)
+	}
+	if got := specAfter.Metadata["close_reason"]; got != sourceworkflow.WorkflowSpecSidecarClosedReason {
+		t.Fatalf("spec close_reason = %q, want %q", got, sourceworkflow.WorkflowSpecSidecarClosedReason)
+	}
+}
+
 func TestProcessWorkflowFinalizeTreatsQuarantinedControlAsFailure(t *testing.T) {
 	t.Parallel()
 

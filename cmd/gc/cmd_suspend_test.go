@@ -9,10 +9,14 @@ import (
 
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/suspensionstate"
 )
 
 // --- doSuspendCity ---
 
+// TestSuspendResume exercises the canonical suspend → resume cycle.
+// Suspension state is recorded in .gc/runtime/suspension-state.json
+// and city.toml stays untouched.
 func TestSuspendResume(t *testing.T) {
 	f := fsys.NewFake()
 	cfg := config.DefaultCity("bright-lights")
@@ -21,7 +25,9 @@ func TestSuspendResume(t *testing.T) {
 		t.Fatal(err)
 	}
 	cityPath := "/city"
-	f.Files[filepath.Join(cityPath, "city.toml")] = data
+	cityTOMLPath := filepath.Join(cityPath, "city.toml")
+	f.Files[cityTOMLPath] = data
+	originalTOML := append([]byte(nil), data...)
 
 	// Suspend.
 	var stdout, stderr bytes.Buffer
@@ -33,17 +39,18 @@ func TestSuspendResume(t *testing.T) {
 		t.Errorf("stdout = %q, want suspend message", stdout.String())
 	}
 
-	// Verify config was updated.
-	written := f.Files[filepath.Join(cityPath, "city.toml")]
-	got, err := config.Parse(written)
+	// city.toml must stay byte-for-byte identical: suspension lives in
+	// .gc/runtime/suspension-state.json, never in committed config.
+	if !bytes.Equal(f.Files[cityTOMLPath], originalTOML) {
+		t.Errorf("city.toml mutated by suspend; want byte-identical:\n got:  %s\n want: %s",
+			f.Files[cityTOMLPath], originalTOML)
+	}
+	st, err := suspensionstate.Load(f, cityPath)
 	if err != nil {
-		t.Fatalf("parsing written config: %v", err)
+		t.Fatalf("suspensionstate.Load: %v", err)
 	}
-	if !got.Workspace.Suspended {
-		t.Error("Workspace.Suspended = false after suspend, want true")
-	}
-	if !strings.Contains(string(written), "suspended = true") {
-		t.Errorf("written TOML missing 'suspended = true':\n%s", written)
+	if !suspensionstate.IsCitySuspended(st) {
+		t.Error("runtime state should record explicit suspend after doSuspendCity(true)")
 	}
 
 	// Resume.
@@ -56,21 +63,22 @@ func TestSuspendResume(t *testing.T) {
 	if !strings.Contains(stdout.String(), "City resumed") {
 		t.Errorf("stdout = %q, want resume message", stdout.String())
 	}
-
-	// Verify config was updated (suspended field dropped via omitempty).
-	written = f.Files[filepath.Join(cityPath, "city.toml")]
-	got, err = config.Parse(written)
+	if !bytes.Equal(f.Files[cityTOMLPath], originalTOML) {
+		t.Errorf("city.toml mutated by resume; want byte-identical:\n got:  %s\n want: %s",
+			f.Files[cityTOMLPath], originalTOML)
+	}
+	st, err = suspensionstate.Load(f, cityPath)
 	if err != nil {
-		t.Fatalf("parsing written config: %v", err)
+		t.Fatalf("suspensionstate.Load: %v", err)
 	}
-	if got.Workspace.Suspended {
-		t.Error("Workspace.Suspended = true after resume, want false")
-	}
-	if strings.Contains(string(written), "suspended") {
-		t.Errorf("written TOML should omit 'suspended' when false:\n%s", written)
+	if v, ok := suspensionstate.ExplicitCity(st); !ok || v {
+		t.Errorf("runtime state should record explicit resume after doSuspendCity(false); got (%v, %v)", v, ok)
 	}
 }
 
+// TestSuspendJSON pins the JSON-output contract for `gc suspend --json`:
+// suspending a city writes a structured lifecycleActionJSON envelope to
+// stdout and nothing to stderr.
 func TestSuspendJSON(t *testing.T) {
 	f := fsys.NewFake()
 	cfg := config.DefaultCity("bright-lights")
@@ -98,10 +106,12 @@ func TestSuspendJSON(t *testing.T) {
 	}
 }
 
+// TestSuspendAlreadySuspended pins the idempotency contract: calling
+// suspend twice succeeds and leaves the runtime state alone.
 func TestSuspendAlreadySuspended(t *testing.T) {
 	f := fsys.NewFake()
 	cfg := config.City{
-		Workspace: config.Workspace{Name: "bright-lights", Suspended: true},
+		Workspace: config.Workspace{Name: "bright-lights"},
 		Agents:    []config.Agent{{Name: "mayor", MaxActiveSessions: intPtr(1)}},
 	}
 	data, err := cfg.Marshal()
@@ -109,6 +119,10 @@ func TestSuspendAlreadySuspended(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.Files[filepath.Join("/city", "city.toml")] = data
+	want := true
+	if err := suspensionstate.SetCitySuspended(f, "/city", &want); err != nil {
+		t.Fatalf("pre-suspend: %v", err)
+	}
 
 	var stdout, stderr bytes.Buffer
 	code := doSuspendCity(f, "/city", true, false, &stdout, &stderr)
@@ -117,6 +131,8 @@ func TestSuspendAlreadySuspended(t *testing.T) {
 	}
 }
 
+// TestResumeAlreadyResumed pins resume idempotency: calling resume on
+// a city with no recorded state succeeds.
 func TestResumeAlreadyResumed(t *testing.T) {
 	f := fsys.NewFake()
 	cfg := config.DefaultCity("bright-lights")
@@ -133,11 +149,15 @@ func TestResumeAlreadyResumed(t *testing.T) {
 	}
 }
 
-// --- Pack preservation: suspend/resume must not expand includes ---
+// --- Pack preservation: suspend/resume must not touch city.toml ---
 
+// TestDoSuspendCityPreservesConfig pins the invariant that suspending
+// the city never modifies city.toml — so include directives and
+// other committable content can never get expanded or churned by a
+// transient runtime-state change.
 func TestDoSuspendCityPreservesConfig(t *testing.T) {
 	f := fsys.NewFake()
-	f.Files["/city/city.toml"] = []byte(`include = ["packs/mypack/agents.toml"]
+	original := []byte(`include = ["packs/mypack/agents.toml"]
 
 [workspace]
 name = "test-city"
@@ -145,6 +165,7 @@ name = "test-city"
 [[agent]]
 name = "inline-agent"
 `)
+	f.Files["/city/city.toml"] = append([]byte(nil), original...)
 	f.Files["/city/packs/mypack/agents.toml"] = []byte(`[[agent]]
 name = "pack-worker"
 dir = "myrig"
@@ -155,16 +176,16 @@ dir = "myrig"
 	if code != 0 {
 		t.Fatalf("suspend code = %d, want 0; stderr: %s", code, stderr.String())
 	}
-
-	data := string(f.Files["/city/city.toml"])
-	if !strings.Contains(data, "packs/mypack/agents.toml") {
-		t.Errorf("city.toml should preserve include directive:\n%s", data)
+	if !bytes.Equal(f.Files["/city/city.toml"], original) {
+		t.Errorf("city.toml mutated by suspend:\n got:  %s\n want: %s",
+			f.Files["/city/city.toml"], original)
 	}
-	if strings.Contains(data, "pack-worker") {
-		t.Errorf("city.toml should NOT contain expanded pack agent:\n%s", data)
+	st, err := suspensionstate.Load(f, "/city")
+	if err != nil {
+		t.Fatalf("suspensionstate.Load: %v", err)
 	}
-	if !strings.Contains(data, "suspended = true") {
-		t.Errorf("city.toml should contain suspended = true:\n%s", data)
+	if !suspensionstate.IsCitySuspended(st) {
+		t.Error("runtime state should record explicit suspend")
 	}
 
 	// Resume should also preserve.
@@ -174,31 +195,66 @@ dir = "myrig"
 	if code != 0 {
 		t.Fatalf("resume code = %d, want 0; stderr: %s", code, stderr.String())
 	}
-	data = string(f.Files["/city/city.toml"])
-	if !strings.Contains(data, "packs/mypack/agents.toml") {
-		t.Errorf("city.toml should preserve include after resume:\n%s", data)
-	}
-	if strings.Contains(data, "pack-worker") {
-		t.Errorf("city.toml should NOT contain pack agent after resume:\n%s", data)
+	if !bytes.Equal(f.Files["/city/city.toml"], original) {
+		t.Errorf("city.toml mutated by resume:\n got:  %s\n want: %s",
+			f.Files["/city/city.toml"], original)
 	}
 }
 
 // --- citySuspended ---
 
+// TestCitySuspendedFromConfig confirms workspace.suspended_on_start
+// flows through citySuspendedWithState when no runtime override is
+// present.
 func TestCitySuspendedFromConfig(t *testing.T) {
 	cfg := &config.City{
-		Workspace: config.Workspace{Name: "test", Suspended: true},
+		Workspace: config.Workspace{Name: "test", SuspendedOnStart: true},
 	}
-	if !citySuspended(cfg) {
-		t.Error("citySuspended = false, want true when config is suspended")
+	if !citySuspendedWithState(cfg, suspensionstate.State{}) {
+		t.Error("citySuspendedWithState = false, want true with workspace.suspended_on_start=true")
 	}
-
-	cfg.Workspace.Suspended = false
-	if citySuspended(cfg) {
-		t.Error("citySuspended = true, want false when config is not suspended")
+	cfg.Workspace.SuspendedOnStart = false
+	if citySuspendedWithState(cfg, suspensionstate.State{}) {
+		t.Error("citySuspendedWithState = true, want false when nothing flags the city as suspended")
 	}
 }
 
+// TestCitySuspendedRuntimeOverridesConfig pins the merge precedence:
+// an explicit runtime resume must beat suspended_on_start=true.
+func TestCitySuspendedRuntimeOverridesConfig(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test", SuspendedOnStart: true},
+	}
+	resume := false
+	st := suspensionstate.State{City: suspensionstate.Override{Suspended: &resume}}
+	if citySuspendedWithState(cfg, st) {
+		t.Error("explicit runtime resume must beat workspace.suspended_on_start=true")
+	}
+
+	suspend := true
+	cfg.Workspace.SuspendedOnStart = false
+	st = suspensionstate.State{City: suspensionstate.Override{Suspended: &suspend}}
+	if !citySuspendedWithState(cfg, st) {
+		t.Error("explicit runtime suspend must beat workspace.suspended_on_start=false")
+	}
+}
+
+// TestCitySuspended_LegacyFieldIsAlias pins the migration contract:
+// the deprecated workspace.suspended field is honored as an alias for
+// suspended_on_start so existing cities with `suspended = true`
+// continue to start suspended after upgrade. Doctor warns and offers
+// `--fix` to rename.
+func TestCitySuspended_LegacyFieldIsAlias(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test", Suspended: true},
+	}
+	if !citySuspendedWithState(cfg, suspensionstate.State{}) {
+		t.Error("legacy [workspace] suspended = true must keep starting the city suspended after upgrade (alias for suspended_on_start)")
+	}
+}
+
+// TestCitySuspendedEnvOverride verifies GC_SUSPENDED=1 still forces
+// city-level suspension regardless of config or runtime state.
 func TestCitySuspendedEnvOverride(t *testing.T) {
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "test"},
@@ -216,7 +272,7 @@ func TestAgentEffectivelySuspendedDirect(t *testing.T) {
 		Workspace: config.Workspace{Name: "test"},
 		Agents:    []config.Agent{{Name: "worker", Suspended: true}},
 	}
-	if !isAgentEffectivelySuspended(cfg, &cfg.Agents[0]) {
+	if !isAgentEffectivelySuspendedWith(cfg, &cfg.Agents[0], suspensionstate.State{}) {
 		t.Error("agent with Suspended=true should be effectively suspended")
 	}
 }
@@ -225,20 +281,20 @@ func TestAgentEffectivelySuspendedViaRig(t *testing.T) {
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "test"},
 		Agents:    []config.Agent{{Name: "polecat", Dir: "myrig"}},
-		Rigs:      []config.Rig{{Name: "myrig", Path: "/tmp/myrig", Suspended: true}},
+		Rigs:      []config.Rig{{Name: "myrig", Path: "/tmp/myrig", SuspendedOnStart: true}},
 	}
-	if !isAgentEffectivelySuspended(cfg, &cfg.Agents[0]) {
-		t.Error("agent in suspended rig should be effectively suspended")
+	if !isAgentEffectivelySuspendedWith(cfg, &cfg.Agents[0], suspensionstate.State{}) {
+		t.Error("agent in rig with suspended_on_start=true should be effectively suspended")
 	}
 }
 
 func TestAgentEffectivelySuspendedViaCity(t *testing.T) {
 	cfg := &config.City{
-		Workspace: config.Workspace{Name: "test", Suspended: true},
+		Workspace: config.Workspace{Name: "test", SuspendedOnStart: true},
 		Agents:    []config.Agent{{Name: "worker"}},
 	}
-	if !isAgentEffectivelySuspended(cfg, &cfg.Agents[0]) {
-		t.Error("agent in suspended city should be effectively suspended")
+	if !isAgentEffectivelySuspendedWith(cfg, &cfg.Agents[0], suspensionstate.State{}) {
+		t.Error("agent in city with suspended_on_start=true should be effectively suspended")
 	}
 }
 
@@ -247,7 +303,7 @@ func TestAgentEffectivelySuspendedNot(t *testing.T) {
 		Workspace: config.Workspace{Name: "test"},
 		Agents:    []config.Agent{{Name: "worker"}},
 	}
-	if isAgentEffectivelySuspended(cfg, &cfg.Agents[0]) {
+	if isAgentEffectivelySuspendedWith(cfg, &cfg.Agents[0], suspensionstate.State{}) {
 		t.Error("non-suspended agent should not be effectively suspended")
 	}
 }
@@ -256,7 +312,7 @@ func TestAgentEffectivelySuspendedNot(t *testing.T) {
 
 func TestSuspendInheritance(t *testing.T) {
 	cfg := &config.City{
-		Workspace: config.Workspace{Name: "test", Suspended: true},
+		Workspace: config.Workspace{Name: "test", SuspendedOnStart: true},
 		Agents: []config.Agent{
 			{Name: "mayor", MaxActiveSessions: intPtr(1)}, // city-scoped
 			{Name: "polecat", Dir: "myrig"},               // rig-scoped
@@ -266,9 +322,10 @@ func TestSuspendInheritance(t *testing.T) {
 			{Name: "myrig", Path: "/tmp/myrig"},
 		},
 	}
-	for _, a := range cfg.Agents {
-		if !isAgentEffectivelySuspended(cfg, &a) {
-			t.Errorf("agent %q should be suspended when city is suspended", a.QualifiedName())
+	for i := range cfg.Agents {
+		a := &cfg.Agents[i]
+		if !isAgentEffectivelySuspendedWith(cfg, a, suspensionstate.State{}) {
+			t.Errorf("agent %q should be suspended when city has suspended_on_start=true", a.QualifiedName())
 		}
 	}
 }

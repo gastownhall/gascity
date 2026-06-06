@@ -18,6 +18,7 @@ deprecated-attachment-fields
 dolt-topology
 dolt-drift
 config-valid
+legacy-suspended-field
 config-refs
 stale-local-pack-dirs
 pre-start-scripts

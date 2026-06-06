@@ -2337,3 +2337,18 @@ func TestWorkerSessionRuntimeResolverWithConfigFallsBackToPersistedProviderWhenC
 		t.Fatalf("Provider = %q, want %q", got, want)
 	}
 }
+
+// TestWorkerSessionCreateHintsEnablesMouse locks ga-c4w finding #1 for the
+// UNMANAGED `gc session new` direct-start path (controller down): the CLI builds
+// its runtime hints via workerSessionCreateHints, NOT the internal/api
+// sessionCreateHints seam the original fix patched. Without MouseOn here the
+// wheel→scrollback feature never reaches `gc session new` when the city runs
+// unmanaged. Pool/headless agents never use this function — they resolve MouseOn
+// via the reconciler's templateParamsToConfig (guarded by
+// TestResolveTemplateHeadlessAgentStaysMouseOff), so this stays poll-safe.
+func TestWorkerSessionCreateHintsEnablesMouse(t *testing.T) {
+	hints := workerSessionCreateHints(&config.ResolvedProvider{Name: "stub"})
+	if !hints.MouseOn {
+		t.Error("workerSessionCreateHints().MouseOn = false, want true (gc session new unmanaged-direct wheel→scrollback, ga-c4w)")
+	}
+}

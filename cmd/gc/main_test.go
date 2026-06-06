@@ -6858,23 +6858,17 @@ max = -1
 		t.Fatalf("doPrime = %d, want 0; stderr: %s", code, stderr.String())
 	}
 	out := stdout.String()
-	if !strings.Contains(out, "gc hook") {
-		t.Fatalf("graph-worker prompt missing gc hook routed-queue lookup:\n%s", out)
+	if !strings.Contains(out, "gc hook --claim --drain-ack --json") {
+		t.Fatalf("graph-worker prompt missing gc hook claim startup protocol:\n%s", out)
 	}
-	if !strings.Contains(out, "bd update <id> --claim") {
-		t.Fatalf("graph-worker prompt missing atomic claim instruction:\n%s", out)
+	if !strings.Contains(out, "`gc hook --claim` handles `gc.continuation_group` for you") {
+		t.Fatalf("graph-worker prompt missing centralized continuation-group claim instruction:\n%s", out)
 	}
-	if !strings.Contains(out, "Do not start work with `bd update --status in_progress`") {
-		t.Fatalf("graph-worker prompt missing guard against unassigned in_progress work:\n%s", out)
+	if !strings.Contains(out, "continuation_assigned") {
+		t.Fatalf("graph-worker prompt missing continuation-assignment result guidance:\n%s", out)
 	}
-	if !strings.Contains(out, `ROOT_ID=$(bd show <id> --json | jq -r '.[0].metadata["gc.root_bead_id"] // empty')`) {
-		t.Fatalf("graph-worker prompt missing continuation-group root lookup:\n%s", out)
-	}
-	if !strings.Contains(out, `--metadata-field gc.root_bead_id=$ROOT_ID`) {
-		t.Fatalf("graph-worker prompt continuation-group sibling claim is not root-scoped:\n%s", out)
-	}
-	if !strings.Contains(out, `if [ -n "$GROUP" ] && [ -n "$ROOT_ID" ]; then`) {
-		t.Fatalf("graph-worker prompt should require group and root before preassigning siblings:\n%s", out)
+	if strings.Contains(out, "bd update <id> --claim") || strings.Contains(out, `ROOT_ID=$(bd show <id> --json`) {
+		t.Fatalf("graph-worker prompt still contains duplicated shell claim protocol:\n%s", out)
 	}
 }
 

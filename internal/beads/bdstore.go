@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/telemetry"
@@ -218,6 +219,9 @@ type BdStore struct {
 	runner      CommandRunner   // injectable for testing
 	purgeRunner PurgeRunnerFunc // injectable for testing; nil uses exec default
 	idPrefix    string          // bead ID prefix owned by this store, without trailing "-"
+
+	skipLabelsOnce      sync.Once // guards the one-time bd version probe below
+	skipLabelsSupported bool      // whether bd accepts `bd list --skip-labels` (bd 1.0.5+)
 }
 
 const bdTransientWriteAttempts = 3
@@ -663,6 +667,14 @@ func isBdNotFound(err error) bool {
 	return strings.Contains(msg, "not found") || strings.Contains(msg, "no issue found")
 }
 
+func isBdClaimConflictMessage(msg string) bool {
+	msg = strings.ToLower(msg)
+	return strings.Contains(msg, "already assigned") ||
+		strings.Contains(msg, "already claimed") ||
+		strings.Contains(msg, "claimed by") ||
+		strings.Contains(msg, "claim conflict")
+}
+
 // mapBdStatus maps bd's statuses to Gas City's 3. bd uses: open,
 // in_progress, blocked, review, testing, closed. Gas City uses:
 // open, in_progress, closed.
@@ -863,6 +875,48 @@ func (s *BdStore) Update(id string, opts UpdateOpts) error {
 		return fmt.Errorf("updating bead %q: %w", id, err)
 	}
 	return nil
+}
+
+// Claim atomically claims an open bead through bd update --claim.
+//
+// It returns ok=false when bd reports that another actor won the claim race.
+// The caller controls the claim actor through the store's CommandRunner
+// environment, typically BEADS_ACTOR.
+func (s *BdStore) Claim(id string) (Bead, bool, error) {
+	out, err := s.runBDTransientWriteOutput("update", id, "--claim", "--json")
+	if err != nil {
+		msg := strings.TrimSpace(string(out))
+		if isBdClaimConflictMessage(msg) || isBdClaimConflictMessage(err.Error()) {
+			return Bead{}, false, nil
+		}
+		if isBdNotFound(err) {
+			return Bead{}, false, fmt.Errorf("claiming bead %q: %w", id, ErrNotFound)
+		}
+		if msg != "" {
+			return Bead{}, false, fmt.Errorf("claiming bead %q: %w: %s", id, err, msg)
+		}
+		return Bead{}, false, fmt.Errorf("claiming bead %q: %w", id, err)
+	}
+	claimed, err := parseBDMutationBead("bd claim", out)
+	if err != nil {
+		return Bead{}, false, fmt.Errorf("claiming bead %q: %w", id, err)
+	}
+	return claimed, true, nil
+}
+
+func parseBDMutationBead(op string, out []byte) (Bead, error) {
+	issues, parseErr := parseIssuesTolerant(extractJSON(out))
+	if parseErr == nil && len(issues) > 0 {
+		return issues[0].toBead(), nil
+	}
+	var issue bdIssue
+	if err := json.Unmarshal(extractJSON(out), &issue); err == nil && strings.TrimSpace(issue.ID) != "" {
+		return issue.toBead(), nil
+	}
+	if parseErr != nil {
+		return Bead{}, fmt.Errorf("%s: parsing JSON: %w", op, parseErr)
+	}
+	return Bead{}, fmt.Errorf("%s returned no bead", op)
 }
 
 // UpdateAll modifies the same fields on multiple beads via one bd update
@@ -1657,7 +1711,7 @@ func (s *BdStore) listViaBDList(query ListQuery) ([]Bead, error) {
 			args = append(args, "--metadata-field", k+"="+serverQuery.Metadata[k])
 		}
 	}
-	if query.SkipLabels && serverQuery.Label == "" {
+	if query.SkipLabels && serverQuery.Label == "" && s.supportsSkipLabels() {
 		args = append(args, "--skip-labels")
 	}
 
@@ -1683,6 +1737,31 @@ func (s *BdStore) listViaBDList(query ListQuery) ([]Bead, error) {
 		return filtered, &PartialResultError{Op: "bd list", Err: parseErr}
 	}
 	return filtered, nil
+}
+
+// bdSkipLabelsMinVersion is the first bd release whose `bd list` accepts
+// --skip-labels (be-w3n-1). bd 1.0.4 — the supported floor — rejects the
+// flag and fails the entire list call (see 29d457fe9).
+const bdSkipLabelsMinVersion = "1.0.5"
+
+// supportsSkipLabels reports whether the bd binary backing this store accepts
+// `bd list --skip-labels`. The version probe runs through the store's runner
+// once and is cached for the store's lifetime; any probe or parse failure
+// degrades to false so listing falls back to normal label hydration instead
+// of a hard bd CLI error.
+func (s *BdStore) supportsSkipLabels() bool {
+	s.skipLabelsOnce.Do(func() {
+		out, err := s.runner(s.dir, "bd", "version")
+		if err != nil {
+			return
+		}
+		ver, err := parseBDVersion(string(out))
+		if err != nil {
+			return
+		}
+		s.skipLabelsSupported = bdVersionAtLeast(ver, bdSkipLabelsMinVersion)
+	})
+	return s.skipLabelsSupported
 }
 
 func bdListRequiresClientLimit(query, serverQuery ListQuery, clientFilteredAssignees bool) bool {

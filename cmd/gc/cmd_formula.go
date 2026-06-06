@@ -499,6 +499,14 @@ func formulaSearchPathsForList(cfg *config.City) []string {
 	return all
 }
 
+// printGraphV2Deprecations surfaces deprecated graph.v2 constructs (the legacy
+// issue alias, #2941) found while preparing an invocation.
+func printGraphV2Deprecations(stderr io.Writer, deprecations []string) {
+	for _, d := range deprecations {
+		fmt.Fprintf(stderr, "warning: %s\n", d) //nolint:errcheck
+	}
+}
+
 func formulaCommandError(stderr io.Writer, command string, jsonOutput bool, err error) error {
 	if err == nil || jsonOutput {
 		return err
@@ -635,6 +643,7 @@ bead into a sub-workflow at runtime.`,
 						if err != nil {
 							return fmt.Errorf("prepare graph.v2 invocation: %w", err)
 						}
+						printGraphV2Deprecations(stderr, inv.Deprecations)
 						cookVars = inv.Vars
 						recipe, err := formula.CompileWithoutRuntimeVarValidation(cmd.Context(), args[0], scope.searchPaths, cookVars)
 						if err != nil {
@@ -727,6 +736,7 @@ bead into a sub-workflow at runtime.`,
 				if err != nil {
 					return formulaCommandError(stderr, "gc formula cook", jsonOutput, fmt.Errorf("prepare graph.v2 invocation: %w", err))
 				}
+				printGraphV2Deprecations(stderr, inv.Deprecations)
 				cookVars = inv.Vars
 				recipe, err := formula.CompileWithoutRuntimeVarValidation(cmd.Context(), args[0], scope.searchPaths, cookVars)
 				if err != nil {
@@ -775,6 +785,7 @@ bead into a sub-workflow at runtime.`,
 			if err != nil {
 				return formulaCommandError(stderr, "gc formula cook", jsonOutput, fmt.Errorf("prepare graph.v2 invocation: %w", err))
 			}
+			printGraphV2Deprecations(stderr, inv.Deprecations)
 			cookVars = inv.Vars
 
 			result, err := molecule.Cook(cmd.Context(), store, args[0], scope.searchPaths, molecule.Options{

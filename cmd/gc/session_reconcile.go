@@ -22,6 +22,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
@@ -431,6 +432,10 @@ func computeWorkSet(cfg *config.City, runner ScaleCheckRunner, cityName, cityDir
 	var probes []probeWork
 	work := make(map[string]bool)
 	seen := make(map[string]bool) // deduplicate pool instances
+	// Load runtime suspension state once against the in-scope city
+	// directory so the per-agent checks resolve suspension against the
+	// controlled city rather than the process cwd.
+	suspState, _ := loadSuspensionState(fsys.OSFS{}, cityDir)
 	for i := range cfg.Agents {
 		a := &cfg.Agents[i]
 		qn := a.QualifiedName()
@@ -438,7 +443,7 @@ func computeWorkSet(cfg *config.City, runner ScaleCheckRunner, cityName, cityDir
 			continue
 		}
 		seen[qn] = true
-		if isAgentEffectivelySuspended(cfg, a) {
+		if isAgentEffectivelySuspendedWith(cfg, a, suspState) {
 			continue
 		}
 		probeEnv, err := controllerQueryRuntimeEnv(cityDir, cfg, a)

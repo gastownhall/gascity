@@ -186,6 +186,27 @@
           <div class="panel-body activity-feed" id="activity-feed"></div>
         </div>
 
+        <div class="panel panel-full" id="comms-panel">
+          <div class="panel-header">
+            <h2>📡 Agent Comms</h2>
+            <span class="count" id="comms-count">0</span>
+            <button class="collapse-btn" aria-label="Toggle panel">▼</button>
+            <button class="expand-btn">Expand</button>
+          </div>
+          <div class="panel-body comms-body" id="comms-body">
+            <canvas id="comms-canvas" class="comms-canvas"></canvas>
+            <div class="comms-foot">
+              <div class="comms-legend">
+                <span><b id="comms-agents">0</b> agents</span>
+                <span><b id="comms-links">0</b> links</span>
+                <span><b id="comms-msgs">0</b> messages</span>
+              </div>
+              <div class="comms-live">live</div>
+            </div>
+            <div class="comms-ticker" id="comms-ticker"></div>
+          </div>
+        </div>
+
         <div class="panel" id="mail-panel">
           <div class="panel-header">
             <h2>✉️ Mail</h2>

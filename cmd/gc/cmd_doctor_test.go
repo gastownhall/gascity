@@ -13,6 +13,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doctor"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/suspensionstate"
 )
 
 func prependDoctorJSONStubBinaries(t *testing.T, names ...string) {
@@ -879,13 +880,13 @@ func TestDoctorSkipsSuspendedRigChecks(t *testing.T) {
 
 	rigs := []config.Rig{
 		{Name: "active-rig", Path: activeDir},
-		{Name: "suspended-rig", Path: suspendedDir, Suspended: true},
+		{Name: "suspended-rig", Path: suspendedDir, SuspendedOnStart: true},
 	}
 
 	// Mirror the per-rig registration logic from doDoctor.
 	d := &doctor.Doctor{}
 	for _, rig := range rigs {
-		if rig.Suspended {
+		if suspensionstate.EffectiveRigSuspended(suspensionstate.State{}, rig.Name, rig.SuspendedOnStart) {
 			continue
 		}
 		d.Register(doctor.NewRigPathCheck(rig))

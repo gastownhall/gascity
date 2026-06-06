@@ -23,6 +23,7 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/sessionlog"
 	"github.com/gastownhall/gascity/internal/shellquote"
 )
 
@@ -6386,5 +6387,162 @@ func TestStopTargetThroughWorkerBoundary_CityStopLeavesSessionAsleep(t *testing.
 	}
 	if got.Metadata["suspended_at"] != "" {
 		t.Fatalf("suspended_at = %q, want empty", got.Metadata["suspended_at"])
+	}
+}
+
+func TestClearStaleResumeKeyMetadata(t *testing.T) {
+	store := beads.NewMemStore()
+	seed := beads.Bead{
+		Metadata: map[string]string{
+			"session_key":         "11111111-2222-3333-4444-555555555555",
+			"started_config_hash": "v1:deadbeef",
+			"resume_flag":         "--resume",
+		},
+	}
+	created, err := store.Create(seed)
+	if err != nil {
+		t.Fatalf("create bead: %v", err)
+	}
+	bead := &beads.Bead{
+		ID:       created.ID,
+		Metadata: map[string]string{},
+	}
+	for k, v := range seed.Metadata {
+		bead.Metadata[k] = v
+	}
+	// Seed the same metadata into the store so the read-back assertion isn't
+	// purely about the in-memory bead.
+	if err := store.SetMetadataBatch(bead.ID, bead.Metadata); err != nil {
+		t.Fatalf("seed metadata: %v", err)
+	}
+
+	clearStaleResumeKeyMetadata(bead, store)
+
+	if got := bead.Metadata["session_key"]; got != "" {
+		t.Fatalf("in-memory session_key = %q, want empty", got)
+	}
+	if got := bead.Metadata["started_config_hash"]; got != "" {
+		t.Fatalf("in-memory started_config_hash = %q, want empty", got)
+	}
+	if got := bead.Metadata["continuation_reset_pending"]; got != "true" {
+		t.Fatalf("in-memory continuation_reset_pending = %q, want true", got)
+	}
+	// resume_flag should be untouched — it's a provider property, not stale state.
+	if got := bead.Metadata["resume_flag"]; got != "--resume" {
+		t.Fatalf("in-memory resume_flag = %q, want preserved", got)
+	}
+
+	persisted, err := store.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got := persisted.Metadata["session_key"]; got != "" {
+		t.Fatalf("persisted session_key = %q, want empty", got)
+	}
+	if got := persisted.Metadata["continuation_reset_pending"]; got != "true" {
+		t.Fatalf("persisted continuation_reset_pending = %q, want true", got)
+	}
+}
+
+func TestClearStaleResumeKeyMetadataNilSafety(t *testing.T) {
+	// Should not panic on a nil bead or a bead with nil metadata + nil store.
+	clearStaleResumeKeyMetadata(nil, nil)
+
+	bead := &beads.Bead{ID: "ch-nilmeta"}
+	clearStaleResumeKeyMetadata(bead, nil)
+	if bead.Metadata == nil {
+		t.Fatalf("bead.Metadata should be initialized")
+	}
+	if got := bead.Metadata["continuation_reset_pending"]; got != "true" {
+		t.Fatalf("continuation_reset_pending = %q, want true", got)
+	}
+}
+
+func TestSessionTranscriptProvider(t *testing.T) {
+	cases := []struct {
+		name     string
+		rp       *config.ResolvedProvider
+		metadata map[string]string
+		want     string
+	}{
+		{
+			name: "builtin ancestor wins",
+			rp:   &config.ResolvedProvider{BuiltinAncestor: "claude", Command: "claude-wrapper"},
+			want: "claude",
+		},
+		{
+			name: "command base name fallback",
+			rp:   &config.ResolvedProvider{Command: "/usr/local/bin/claude --dangerously-skip-permissions"},
+			want: "claude",
+		},
+		{
+			name:     "metadata provider_kind fallback",
+			rp:       &config.ResolvedProvider{},
+			metadata: map[string]string{"provider_kind": "kimi"},
+			want:     "kimi",
+		},
+		{
+			name:     "metadata provider fallback",
+			rp:       nil,
+			metadata: map[string]string{"provider": "codex"},
+			want:     "codex",
+		},
+		{
+			name: "empty when nothing resolves",
+			rp:   nil,
+			want: "",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := sessionTranscriptProvider(tc.rp, tc.metadata)
+			if got != tc.want {
+				t.Fatalf("sessionTranscriptProvider() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestStaleResumeKeyProbe(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	// os.UserHomeDir consults USERPROFILE first on some platforms; clear it so
+	// the test is reproducible.
+	t.Setenv("USERPROFILE", "")
+
+	workDir := "/tmp/projects/example_one"
+	key := "11111111-2222-3333-4444-555555555555"
+
+	// Missing transcript: claude is probeable and reports absent, so the guard
+	// would treat the resume key as stale.
+	if present, probeable := staleResumeKeyProbe("claude", workDir, key); !probeable || present {
+		t.Fatalf("missing claude transcript: probeable=%v present=%v, want probeable && !present", probeable, present)
+	}
+
+	// Create the keyed transcript where claude would store it (canonical slug:
+	// '/' and '.' map to '-', '_' is preserved).
+	slug := sessionlog.ProjectSlug(workDir)
+	projDir := filepath.Join(home, ".claude", "projects", slug)
+	if err := os.MkdirAll(projDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(projDir, key+".jsonl"), []byte("{}\n"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if present, probeable := staleResumeKeyProbe("claude", workDir, key); !probeable || !present {
+		t.Fatalf("present claude transcript: probeable=%v present=%v, want probeable && present", probeable, present)
+	}
+
+	// Codex resolves transcripts by cwd/date, not a keyed file, so it is never
+	// probeable and the guard leaves its metadata untouched.
+	if _, probeable := staleResumeKeyProbe("codex", workDir, key); probeable {
+		t.Fatal("codex probeable = true, want false")
+	}
+	// Empty inputs are not probeable.
+	if _, probeable := staleResumeKeyProbe("claude", "", key); probeable {
+		t.Fatal("empty workDir probeable = true, want false")
+	}
+	if _, probeable := staleResumeKeyProbe("claude", workDir, ""); probeable {
+		t.Fatal("empty key probeable = true, want false")
 	}
 }

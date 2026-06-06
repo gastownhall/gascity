@@ -14,6 +14,7 @@ func TestBuildAwakeInputFromReconcilerUsesLifecycleProjectionForCompatibilitySta
 	now := time.Now().UTC()
 	input := buildAwakeInputFromReconciler(
 		&config.City{},
+		"", // cityPath: empty exercises zero suspension state
 		[]beads.Bead{{
 			ID:     "mc-session-1",
 			Status: "open",
@@ -46,6 +47,7 @@ func TestBuildAwakeInputFromReconcilerCarriesResetPendingMetadata(t *testing.T) 
 	now := time.Now().UTC()
 	input := buildAwakeInputFromReconciler(
 		&config.City{},
+		"", // cityPath: empty exercises zero suspension state
 		[]beads.Bead{{
 			ID:     "mc-session-1",
 			Status: "open",
@@ -102,6 +104,7 @@ func TestBuildAwakeInputFromReconcilerPopulatesPendingInteractions(t *testing.T)
 
 	input := buildAwakeInputFromReconciler(
 		&config.City{Agents: []config.Agent{{Name: "worker"}}},
+		"", // cityPath: empty exercises zero suspension state
 		[]beads.Bead{session},
 		nil,
 		nil,
@@ -186,6 +189,7 @@ func TestBuildAwakeInputFromReconcilerCarriesNamedSessionDemand(t *testing.T) {
 
 	input := buildAwakeInputFromReconciler(
 		cfg,
+		"", // cityPath: empty exercises zero suspension state
 		[]beads.Bead{sessionBead},
 		map[string]int{"worker": 1},
 		map[string]bool{"primary": true},
@@ -236,6 +240,7 @@ func TestBuildAwakeInputFromReconciler_RigNamedWorkQueryDemandWakesCanonicalSess
 
 	input := buildAwakeInputFromReconciler(
 		cfg,
+		"", // cityPath: empty exercises zero suspension state
 		[]beads.Bead{sessionBead},
 		nil,
 		nil,
@@ -295,6 +300,7 @@ func TestBuildAwakeInputFromReconcilerNamedAlwaysPostChurnRewakes(t *testing.T) 
 
 	input := buildAwakeInputFromReconciler(
 		cfg,
+		"", // cityPath: empty exercises zero suspension state
 		[]beads.Bead{postChurnBead},
 		nil, nil, nil, nil, nil, nil,
 		runtime.NewFake(),

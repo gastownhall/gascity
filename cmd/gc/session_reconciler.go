@@ -348,6 +348,16 @@ func finalizeDrainAckStoppedSession(
 	if hasAssignedWork {
 		batch = sessionpkg.CompleteDrainPatch(clk.Now().UTC(), "idle", session.Metadata["wake_mode"] == "fresh")
 	}
+	// A drain-ack that completes a restart-request cycle (gc session reset →
+	// agent drain-ack) must also consume restart_requested. The drain-ack
+	// branch handles the stop and continues before the restart-requested
+	// branch runs, so nothing else clears the flag; if it survives in the
+	// store, a later cache-reconcile re-emission resurrects it and the
+	// controller honors it as a fresh restart request — a phantom second
+	// restart that rotates session_key and destroys resume continuity (#2574).
+	if session.Metadata["restart_requested"] == "true" {
+		batch["restart_requested"] = ""
+	}
 	if err := store.SetMetadataBatch(session.ID, batch); err != nil {
 		fmt.Fprintf(stderr, "session reconciler: finalizing drain-ack stopped %s: %v\n", name, err) //nolint:errcheck
 		return
@@ -1586,6 +1596,33 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						exempt = true
 					}
 				}
+				// Min-floor idle workers are legitimately unclaimed: they hold no
+				// bead because they are waiting for routed work to arrive, not
+				// because they parked on an error. Exempt them before the
+				// I/O-bound claim and provider-health checks so those queries
+				// are skipped entirely for floor workers every reconcile tick.
+				if !exempt && cfg != nil {
+					if cfgAgent := findAgentByTemplate(cfg, tp.TemplateName); cfgAgent != nil {
+						minFloor := cfgAgent.EffectiveMinActiveSessions()
+						if minFloor > 0 {
+							openInPool := 0
+							for j := range ordered {
+								if ordered[j].Status != "closed" && normalizedSessionTemplate(ordered[j], cfg) == tp.TemplateName {
+									openInPool++
+								}
+							}
+							if isMinFloorIdleWorker(minFloor, openInPool) {
+								exempt = true
+								if trace != nil {
+									trace.recordDecision(string(TraceSiteReconcilerProgressStallExempt), tp.TemplateName, name, "min_floor_idle_worker", "exempt", traceRecordPayload{
+										"pool_min":  minFloor,
+										"pool_open": openInPool,
+									}, nil, "")
+								}
+							}
+						}
+					}
+				}
 				holdsClaim := false
 				if !exempt {
 					has, err := sessionHasInProgressAssignedWorkForConfig(store, rigStores, *session, cfg)
@@ -2188,7 +2225,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 	// Use ComputeAwakeSet for the wake/sleep decision.
 	phaseStart = time.Now()
 	awakeInput := buildAwakeInputFromReconciler(
-		cfg, ordered, poolDesired, namedSessionDemand, workSet, readyWaitSet,
+		cfg, cityPath, ordered, poolDesired, namedSessionDemand, workSet, readyWaitSet,
 		assignedWorkBeads, wakeTargets, sp, clk.Now(),
 	)
 	awakeDecisions := ComputeAwakeSet(awakeInput)

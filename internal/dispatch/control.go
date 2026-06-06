@@ -36,7 +36,13 @@ func processRetryControl(store beads.Store, bead beads.Bead, opts ProcessOptions
 		return ControlResult{}, fmt.Errorf("%s: finding latest attempt: %w", bead.ID, err)
 	}
 	if attempt.ID == "" {
-		return ControlResult{}, fmt.Errorf("%s: no attempt found", bead.ID)
+		// A retry control with no attempt sub-DAG cannot become valid by
+		// waiting — the graph is malformed (missing seed or a seed attach
+		// marked molecule_failed). Classify for the dispatcher quarantine
+		// instead of fataling the serve loop. See gastownhall/gascity#2798.
+		opts.tracef("process-control bead=%s kind=retry quarantine reason=no_attempt_found root=%s",
+			bead.ID, bead.Metadata["gc.root_bead_id"])
+		return ControlResult{}, fmt.Errorf("%w: %s: no attempt found", ErrControlGraphMalformed, bead.ID)
 	}
 	if attempt.Status != "closed" {
 		if err := ensureBlockingDependency(store, bead.ID, attempt.ID); err != nil {
@@ -160,7 +166,14 @@ func processRalphControl(store beads.Store, bead beads.Bead, opts ProcessOptions
 		return ControlResult{}, fmt.Errorf("%s: finding latest iteration: %w", bead.ID, err)
 	}
 	if iteration.ID == "" {
-		return ControlResult{}, fmt.Errorf("%s: no iteration found", bead.ID)
+		// A ralph control with no iteration sub-DAG cannot become valid by
+		// waiting — the graph is malformed (missing first-iteration seed or
+		// a seed attach marked molecule_failed). Classify for the dispatcher
+		// quarantine instead of fataling the serve loop, which crash-looped
+		// all dispatch for the rig. See gastownhall/gascity#2798.
+		opts.tracef("process-control bead=%s kind=ralph quarantine reason=no_iteration_found root=%s",
+			bead.ID, bead.Metadata["gc.root_bead_id"])
+		return ControlResult{}, fmt.Errorf("%w: %s: no iteration found", ErrControlGraphMalformed, bead.ID)
 	}
 	if iteration.Status != "closed" {
 		if err := ensureBlockingDependency(store, bead.ID, iteration.ID); err != nil {

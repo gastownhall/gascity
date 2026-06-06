@@ -534,6 +534,75 @@ func TestResolveTemplateCarriesMouseModeToRuntimeConfig(t *testing.T) {
 	}
 }
 
+// TestResolveTemplateHeadlessAgentStaysMouseOff is the ga-c4w guard for
+// acceptance #2/#4: the new interactive mouse-on default (sessionCreateHints
+// in internal/api) must NOT bleed into the headless agent path. An agent with
+// no mouse_mode resolves MouseOn=false, so the runtime runs
+// disableMouseAndActivity and the session stays mouse-off — controller-poll
+// safety. This path derives MouseOn from cfgAgent.MouseModeOn(), independent
+// of sessionCreateHints, and is unchanged by this bead.
+func TestResolveTemplateHeadlessAgentStaysMouseOff(t *testing.T) {
+	cityPath := t.TempDir()
+	params := &agentBuildParams{
+		fs:         fsys.NewFake(),
+		cityName:   "bright-lights",
+		cityPath:   cityPath,
+		workspace:  &config.Workspace{Name: "bright-lights"},
+		beaconTime: testBeaconTime,
+		beadNames:  make(map[string]string),
+		stderr:     io.Discard,
+	}
+	agent := &config.Agent{
+		Name:         "pool-worker",
+		StartCommand: "claude",
+		// no MouseMode set → headless default (mouse-off)
+	}
+
+	tp, err := resolveTemplate(params, agent, agent.QualifiedName(), nil)
+	if err != nil {
+		t.Fatalf("resolveTemplate: %v", err)
+	}
+	if tp.Hints.MouseOn {
+		t.Fatal("TemplateParams.Hints.MouseOn = true, want false (headless agent must stay mouse-off)")
+	}
+	if templateParamsToConfig(tp).MouseOn {
+		t.Fatal("runtime config MouseOn = true, want false (headless agent must stay mouse-off)")
+	}
+}
+
+// TestTemplateParamsToConfigInteractiveSessionEnablesMouse locks ga-c4w finding
+// #1 for the MANAGED `gc session new` deferred-start path: the reconciler starts
+// a session_origin=manual bead through templateParamsToConfig (see
+// buildPreparedStartWithWorkDirResolver). A manual session must resolve
+// MouseOn=true even when the agent config sets no mouse_mode, while ephemeral
+// pool agents stay MouseOn=false (controller-poll safety). This is the seam the
+// original API-only fix missed: MouseOn for `gc session new` never flowed through
+// internal/api sessionCreateHints.
+//
+// Scope is deliberately session_origin=manual only. MouseOn is a core-fingerprint
+// field (locked by runtime.TestConfigFingerprintIncludesMouseOn), so auto-flipping
+// it for long-lived config-declared/named sessions would change their drift hash
+// and force a one-time reconciler restart; named sessions follow their resolved
+// Hints.MouseOn (mouse_mode) instead.
+func TestTemplateParamsToConfigInteractiveSessionEnablesMouse(t *testing.T) {
+	// Managed-deferred `gc session new` → session_origin=manual → ManualSession.
+	manual := TemplateParams{ManualSession: true}
+	if !templateParamsToConfig(manual).MouseOn {
+		t.Error("templateParamsToConfig(manual).MouseOn = false, want true (gc session new managed-deferred, ga-c4w)")
+	}
+	// Ephemeral pool agent has no interactive marker → stays mouse-off (poll-safe).
+	pool := TemplateParams{}
+	if templateParamsToConfig(pool).MouseOn {
+		t.Error("templateParamsToConfig(pool).MouseOn = true, want false (pool agent must stay mouse-off, ga-c4w)")
+	}
+	// Named/config sessions are intentionally out of scope: they must not gain a
+	// MouseOn drift from this default (they follow mouse_mode via Hints.MouseOn).
+	named := TemplateParams{ConfiguredNamedIdentity: "operator"}
+	if templateParamsToConfig(named).MouseOn {
+		t.Error("templateParamsToConfig(named).MouseOn = true, want false (named out of scope to avoid fingerprint drift, ga-c4w)")
+	}
+}
+
 func TestResolveTemplateFlagModeRetainsPromptForStartupDelivery(t *testing.T) {
 	cityPath := t.TempDir()
 	fs := fsys.NewFake()

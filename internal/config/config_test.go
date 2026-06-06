@@ -7587,3 +7587,21 @@ func TestPackDirsForRig(t *testing.T) {
 		t.Fatalf("PackDirsForRig(missing) = %v, want %v", got, want)
 	}
 }
+
+func TestDefaultInstallAgentHooksForProvider(t *testing.T) {
+	cases := []struct {
+		provider string
+		want     []string
+	}{
+		{"opencode", []string{"opencode"}},
+		{"kiro", []string{"kiro"}},
+		{"groq", []string{"groq"}},
+		{"claude", nil},
+	}
+	for _, tc := range cases {
+		got := defaultInstallAgentHooksForProvider(tc.provider)
+		if !reflect.DeepEqual(got, tc.want) {
+			t.Errorf("defaultInstallAgentHooksForProvider(%q) = %v, want %v", tc.provider, got, tc.want)
+		}
+	}
+}

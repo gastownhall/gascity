@@ -79,7 +79,7 @@ func countBeadStoreRows(store beads.Store) int {
 	if store == nil {
 		return 0
 	}
-	list, err := store.List(beads.ListQuery{AllowScan: true, IncludeClosed: true})
+	list, err := statusListStoreWithTimeout(store, beads.ListQuery{AllowScan: true, IncludeClosed: true})
 	if err != nil {
 		return 0
 	}

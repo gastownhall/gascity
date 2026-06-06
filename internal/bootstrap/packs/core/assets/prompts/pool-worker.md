@@ -14,37 +14,13 @@ more work arrives.
 ## Startup Protocol
 
 ```bash
-# Step 1: Check for in-progress work (crash recovery)
-bd list --assignee="$GC_SESSION_NAME" --status=in_progress
-
-# Step 2: If nothing in-progress, check for assigned ready work
-{{ .AssignedReadyQuery }}
-
-# Step 3: If still nothing, check the routed queue
-gc hook
-
-# Step 4: Claim it ATOMICALLY — and STOP if you lost the race.
-# `bd update --claim` is a dolt-layer CAS (assignee IS NULL -> you); a
-# sibling pool session may have claimed this bead first. On a lost claim
-# the CLI exits NON-ZERO (gastownhall/gascity#1052). Never proceed on a
-# failed claim — that is the duplicate-execution bug.
-if ! bd update <id> --claim; then
-  # Lost the race. Do NOT work this bead. Return to the hook for the next
-  # unclaimed item (restart from Step 3); drain if none remains. Do NOT
-  # continue to Step 5/6 for this <id>.
-  gc hook   # or: gc runtime drain-ack  (no valid work left)
-else
-  # Step 5: Verify the claim actually landed on you before doing work. If
-  # assignee != $GC_SESSION_NAME (or routed_to != $GC_TEMPLATE), do NOT
-  # work it — re-enter at Step 3 (gc hook) or drain.
-  bd show <id> --json   # assignee must be $GC_SESSION_NAME; routed_to == $GC_TEMPLATE
-
-  # Step 6: Read the bead and check for molecule_id in METADATA
-  bd show <id>
-fi
+# Finds existing assigned work, assigned ready work, or atomically claims
+# routed work. If nothing is available, it acknowledges runtime drain.
+gc hook --claim --drain-ack --json
 ```
 
-If nothing is available, run `gc runtime drain-ack` to end your session.
+If the result action is `drain`, your session is done. If the action is `work`,
+read the returned `bead_id` with `bd show <id>`.
 
 ## Following Your Formula
 
@@ -93,9 +69,7 @@ the bead description directly.
 
 ## Your Tools
 
-- `{{ .AssignedReadyQuery }}` — find pre-assigned work
-- `gc hook` — find routed pool work through the configured hook
-- `bd update <id> --claim` — claim a work item
+- `gc hook --claim --json` — find and atomically claim work
 - `bd show <id>` — see details of a work item or step
 - `bd mol current <molecule-id>` — show position in molecule workflow
 - `bd mol progress <molecule-id>` — show molecule progress summary
@@ -105,14 +79,13 @@ the bead description directly.
 
 ## How to Work
 
-1. Find work: `bd list --assignee="$GC_SESSION_NAME" --status=in_progress` or `{{ .AssignedReadyQuery }}` or `gc hook`
-2. Claim if unclaimed: `bd update <id> --claim`
-3. Verify the claimed bead is assigned to `$GC_SESSION_NAME` and routed to `$GC_TEMPLATE`
-4. **Check for molecule:** `bd show <id>` — look for `molecule_id` in METADATA
-5. **If molecule exists:** `bd mol current <mol-id>` → work each step in order (show → do → close → repeat)
-6. **If no molecule:** execute the work directly from the bead description
-7. When all work is done, close the bead: `bd close <id>`
-8. **MANDATORY — run this exact command as your final action:**
+1. Find and claim work: `gc hook --claim --drain-ack --json`
+2. If the action is `drain`, exit. If the action is `work`, read `bead_id`.
+3. **Check for molecule:** `bd show <id>` — look for `molecule_id` in METADATA
+4. **If molecule exists:** `bd mol current <mol-id>` → work each step in order (show → do → close → repeat)
+5. **If no molecule:** execute the work directly from the bead description
+6. When all work is done, close the bead: `bd close <id>`
+7. **MANDATORY — run this exact command as your final action:**
    ```bash
    gc runtime drain-ack
    ```

@@ -88,6 +88,9 @@ func preflight(opts SlingOpts, deps SlingDeps, querier BeadQuerier) (SlingResult
 	if a.Suspended && !opts.Force {
 		result.AgentSuspended = true
 	}
+	if !opts.Force && rigSuspended(deps.Cfg, a.Dir) {
+		result.SuspendedRig = a.Dir
+	}
 	sp := agentutil.ScaleParamsFor(&a)
 	if sp.Max == 0 && !opts.Force {
 		result.PoolEmpty = true
@@ -100,6 +103,13 @@ func preflight(opts SlingOpts, deps SlingDeps, querier BeadQuerier) (SlingResult
 	}
 	if shouldGuardCrossRig(opts) {
 		if err := CrossRigRouteError(opts.BeadOrFormula, a, deps.Cfg); err != nil {
+			return result, err
+		}
+	}
+
+	// Dependency cycle check: reject slings that would create a deadlock.
+	if shouldCheckDepCycle(opts) {
+		if err := DetectCycle(opts.BeadOrFormula, deps.Store); err != nil {
 			return result, err
 		}
 	}
@@ -154,6 +164,21 @@ func preflight(opts SlingOpts, deps SlingDeps, querier BeadQuerier) (SlingResult
 	return result, nil
 }
 
+// rigSuspended reports whether the named rig is marked suspended in config.
+// The pool reconciler skips suspended rigs entirely, so a bead routed into
+// one stalls silently — no worker ever spawns to claim it.
+func rigSuspended(cfg *config.City, rigName string) bool {
+	if cfg == nil || rigName == "" {
+		return false
+	}
+	for _, r := range cfg.Rigs {
+		if r.Name == rigName {
+			return r.Suspended
+		}
+	}
+	return false
+}
+
 func shouldValidateExistingBead(opts SlingOpts) bool {
 	if opts.IsFormula || (opts.DryRun && opts.InlineText) {
 		return false
@@ -163,6 +188,13 @@ func shouldValidateExistingBead(opts SlingOpts) bool {
 
 func usesFormulaBackedRoute(opts SlingOpts) bool {
 	return opts.OnFormula != "" || (!opts.NoFormula && opts.Target.EffectiveDefaultSlingFormula() != "")
+}
+
+func shouldCheckDepCycle(opts SlingOpts) bool {
+	// Only meaningful for plain-bead slinging where a bead ID is known.
+	// Formula slinging creates new molecules whose deps aren't bead-graph deps.
+	// Force and dry-run bypass cycle detection intentionally.
+	return !opts.IsFormula && opts.OnFormula == "" && !opts.Force && !opts.DryRun && !opts.InlineText
 }
 
 func shouldGuardCrossRig(opts SlingOpts) bool {
@@ -225,9 +257,24 @@ func slingFormula(opts SlingOpts, deps SlingDeps) (SlingResult, error) {
 	if mResult.GraphWorkflow || IsGraphWorkflowAttachment(deps.Store, mResult.RootID) {
 		wfResult, wfErr := doStartGraphWorkflow(mResult.RootID, "", a, method, deps)
 		wfResult.FormulaName = opts.BeadOrFormula
+		wfResult.Deprecations = append(wfResult.Deprecations, inv.Deprecations...)
 		return wfResult, wfErr
 	}
-	result := SlingResult{Target: a.QualifiedName(), FormulaName: opts.BeadOrFormula}
+	// Pool targets discover work through the supervisor's scale_check, but
+	// the wisp root is a molecule that readyExcludeTypes filters out of
+	// Ready() (per PR #1154). Stamp PoolDemandMetadataPair() — the same
+	// sentinel the gc order run writers use — so defaultScaleCheckCounts
+	// counts the wisp and spawns a pool worker. Failure is fatal: a routed
+	// wisp without the sentinel sits unserved forever (issue #2986).
+	if agentutil.IsMultiSessionAgent(&a) {
+		for k, v := range PoolDemandMetadataPair() {
+			if err := deps.Store.SetMetadata(mResult.RootID, k, v); err != nil {
+				return SlingResult{Target: a.QualifiedName(), FormulaName: opts.BeadOrFormula},
+					fmt.Errorf("setting %s on wisp %s: %w", k, mResult.RootID, err)
+			}
+		}
+	}
+	result := SlingResult{Target: a.QualifiedName(), FormulaName: opts.BeadOrFormula, Deprecations: inv.Deprecations}
 	return finalize(opts, deps, mResult.RootID, method, result)
 }
 
@@ -243,6 +290,7 @@ func slingOnFormula(opts SlingOpts, deps SlingDeps, querier BeadQuerier, beadID 
 	}
 	if isGraph {
 		formulaVars = graphInv.Vars
+		result.Deprecations = append(result.Deprecations, graphInv.Deprecations...)
 		if err := validateSlingFormulaRuntimeVars(context.Background(), opts.OnFormula, searchPaths, molecule.Options{
 			Title: opts.Title,
 			Vars:  formulaVars,
@@ -344,6 +392,7 @@ func slingDefaultFormula(opts SlingOpts, deps SlingDeps, querier BeadQuerier, be
 	}
 	if isGraph {
 		defaultVars = graphInv.Vars
+		result.Deprecations = append(result.Deprecations, graphInv.Deprecations...)
 		if err := validateSlingFormulaRuntimeVars(context.Background(), defaultFormula, searchPaths, molecule.Options{
 			Title: opts.Title,
 			Vars:  defaultVars,

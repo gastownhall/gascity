@@ -47,7 +47,7 @@ func TestHandleCityGet(t *testing.T) {
 
 func TestHandleCityGet_Suspended(t *testing.T) {
 	fs := newFakeState(t)
-	fs.cfg.Workspace.Suspended = true
+	fs.cfg.Workspace.SuspendedOnStart = true
 	h := newTestCityHandler(t, fs)
 
 	req := httptest.NewRequest("GET", cityURL(fs, ""), nil)

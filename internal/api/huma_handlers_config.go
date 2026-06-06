@@ -5,6 +5,8 @@ import (
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/suspensionstate"
 	"github.com/gastownhall/gascity/internal/workspacesvc"
 )
 
@@ -29,13 +31,14 @@ func (s *Server) humaHandleConfigGet(_ context.Context, _ *ConfigGetInput) (*Ind
 		})
 	}
 
+	rigSuspState, _ := suspensionstate.Load(fsys.OSFS{}, s.state.CityPath())
 	rigs := make([]configRigResponse, 0, len(cfg.Rigs))
 	for _, r := range cfg.Rigs {
 		rigs = append(rigs, configRigResponse{
 			Name:      r.Name,
 			Path:      r.Path,
 			Prefix:    r.Prefix,
-			Suspended: r.Suspended,
+			Suspended: suspensionstate.EffectiveRigSuspended(rigSuspState, r.Name, r.EffectiveSuspendedOnStart()),
 		})
 	}
 
@@ -44,6 +47,7 @@ func (s *Server) humaHandleConfigGet(_ context.Context, _ *ConfigGetInput) (*Ind
 		providers[name] = providerSpecJSONFrom(spec)
 	}
 
+	citySt, _ := suspensionstate.Load(fsys.OSFS{}, s.state.CityPath())
 	resp := configResponse{
 		Workspace: workspaceResponse{
 			Name:              name,
@@ -51,7 +55,7 @@ func (s *Server) humaHandleConfigGet(_ context.Context, _ *ConfigGetInput) (*Ind
 			DeclaredName:      strings.TrimSpace(cfg.Workspace.Name),
 			DeclaredPrefix:    strings.TrimSpace(cfg.Workspace.Prefix),
 			Provider:          cfg.Workspace.Provider,
-			Suspended:         cfg.Workspace.Suspended,
+			Suspended:         suspensionstate.EffectiveCitySuspended(citySt, cfg.Workspace.EffectiveSuspendedOnStart()),
 			SessionTemplate:   cfg.Workspace.SessionTemplate,
 			MaxActiveSessions: cfg.Workspace.MaxActiveSessions,
 		},

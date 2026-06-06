@@ -346,6 +346,30 @@ func TestPromptFilesExist(t *testing.T) {
 	}
 }
 
+// TestTmuxKeybindingsScrollWheel locks ga-c4w Part A: the gastown tmux
+// keybindings must bind the mouse wheel to copy-mode scrollback (root table),
+// so the "mouse on" set in tmux-theme.sh drives tmux scrollback instead of
+// leaking the wheel to the focused TUI. It must NOT reintroduce the po-vtg2
+// client-attached set-hook stopgap (acceptance #5) — the interactive MouseOn
+// default in internal/api (sessionCreateHints) replaces it.
+func TestTmuxKeybindingsScrollWheel(t *testing.T) {
+	dir := exampleDir()
+	path := filepath.Join(dir, "packs", "gastown", "assets", "scripts", "tmux-keybindings.sh")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading tmux-keybindings.sh: %v", err)
+	}
+	script := string(data)
+	for _, want := range []string{"WheelUpPane", "WheelDownPane"} {
+		if !strings.Contains(script, want) {
+			t.Errorf("tmux-keybindings.sh missing %q wheel binding (ga-c4w Part A):\n%s", want, script)
+		}
+	}
+	if strings.Contains(script, "client-attached") {
+		t.Error("tmux-keybindings.sh contains the po-vtg2 client-attached set-hook stopgap; the interactive MouseOn default replaces it (ga-c4w acceptance #5)")
+	}
+}
+
 func TestOverlayDirsExist(t *testing.T) {
 	dir := exampleDir()
 	cfg := loadExpanded(t)
@@ -688,7 +712,7 @@ func TestPolecatFormulaSignalsRefineryAfterReassign(t *testing.T) {
 	assertContainsInOrder(t, body,
 		"**6. Reassign to refinery:**",
 		refineryTarget,
-		`gc bd update {{issue}} --status=open --assignee="$REFINERY_TARGET" --set-metadata gc.routed_to=""`,
+		`gc bd update "$WORK_BEAD_ID" --status=open --assignee="$REFINERY_TARGET" --set-metadata gc.routed_to=""`,
 		"**7. Signal refinery to check for work immediately",
 		refineryTarget,
 		`gc session wake "$REFINERY_TARGET" || true`,
@@ -733,7 +757,7 @@ func TestPolecatFormulaSubmitHasBranchShapeGate(t *testing.T) {
 	assertContainsInOrder(t, body,
 		"**1. Branch-shape gate (fails closed",
 		`CURRENT_BRANCH=$(git branch --show-current)`,
-		`EXPECTED_BRANCH="polecat/{{issue}}"`,
+		`EXPECTED_BRANCH="polecat/$WORK_BEAD_ID"`,
 		`if [ "$CURRENT_BRANCH" != "$EXPECTED_BRANCH" ]; then`,
 		`BRANCH SHAPE GATE FAILED`,
 		`gc runtime drain-ack`,
@@ -747,8 +771,8 @@ func TestPolecatFormulaSubmitHasBranchShapeGate(t *testing.T) {
 	// workspace-setup step that ran but failed to record the branch
 	// is repaired before refinery handoff.
 	assertContainsInOrder(t, body,
-		`METADATA_BRANCH=$(gc bd show {{issue}} --json | jq -r '.[0].metadata.branch // empty')`,
-		`gc bd update {{issue}} --set-metadata branch="$EXPECTED_BRANCH"`,
+		`METADATA_BRANCH=$(gc bd show "$WORK_BEAD_ID" --json | jq -r '.[0].metadata.branch // empty')`,
+		`gc bd update "$WORK_BEAD_ID" --set-metadata branch="$EXPECTED_BRANCH"`,
 	)
 }
 
@@ -927,10 +951,10 @@ func TestPolecatFormulaHaltsOnAutoPushFalse(t *testing.T) {
 
 	assertContainsInOrder(t, submit,
 		"Push your branch:",
-		`AUTO_PUSH=$(gc bd show {{issue}} --json | jq -r '.[0].metadata | if has("auto_push") then (.auto_push | tostring) else "" end')`,
+		`AUTO_PUSH=$(gc bd show "$WORK_BEAD_ID" --json | jq -r '.[0].metadata | if has("auto_push") then (.auto_push | tostring) else "" end')`,
 		`if [ "$AUTO_PUSH" = "false" ]; then`,
 		`BRANCH=$(git branch --show-current)`,
-		`gc bd update {{issue}} \`,
+		`gc bd update "$WORK_BEAD_ID" \`,
 		`--status=open --assignee=""`,
 		`--set-metadata branch="$BRANCH"`,
 		`--set-metadata target={{base_branch}}`,
@@ -3008,9 +3032,9 @@ func TestReviewLegFormulaPersistsReportAndNotifiesCoordinator(t *testing.T) {
 	for _, want := range []string{
 		`formula = "mol-review-leg"`,
 		`coordinator`,
-		`gc bd update {{issue}} --notes`,
+		`gc bd update "$WORK_BEAD_ID" --notes`,
 		`gc mail send "$COORD"`,
-		`gc bd update {{issue}} --status=closed`,
+		`gc bd update "$WORK_BEAD_ID" --status=closed`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("review-leg formula missing %q", want)

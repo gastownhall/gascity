@@ -681,6 +681,73 @@ func TestReconcileSessionBeads_DrainAckKeepsBeadOpen(t *testing.T) {
 	}
 }
 
+// TestReconcileSessionBeads_DrainAckConsumesRestartRequested covers the
+// chained reset → drain-ack sequence from #2574: `gc session reset` sets
+// restart_requested=true on the bead, the agent acknowledges the drain, and
+// the drain-ack finalize must consume the flag. If the flag survives in the
+// store, a later cache-reconcile re-emission resurrects it and the controller
+// honors it as a fresh restart request — a phantom second restart that
+// rotates session_key and destroys resume continuity.
+func TestReconcileSessionBeads_DrainAckConsumesRestartRequested(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{
+		Agents: []config.Agent{{Name: "worker", SleepAfterIdle: config.SessionSleepOff}},
+	}
+	env.addDesired("worker", "worker", true)
+	session := env.createSessionBead("worker", "worker")
+	env.markSessionActive(&session)
+	env.setSessionMetadata(&session, map[string]string{
+		"restart_requested": "true",
+		"session_key":       "original-key",
+	})
+	if err := env.sp.SetMeta("worker", "GC_SESSION_ID", session.ID); err != nil {
+		t.Fatalf("SetMeta(GC_SESSION_ID): %v", err)
+	}
+
+	dops := newFakeDrainOps()
+	if err := dops.setDrainAck("worker"); err != nil {
+		t.Fatalf("setDrainAck: %v", err)
+	}
+
+	woken := reconcileSessionBeads(
+		context.Background(),
+		[]beads.Bead{session},
+		env.desiredState,
+		map[string]bool{"worker": true},
+		env.cfg,
+		env.sp,
+		env.store,
+		dops,
+		nil,
+		nil,
+		env.dt,
+		nil,
+		false,
+		nil,
+		"",
+		nil,
+		env.clk,
+		env.rec,
+		0,
+		0,
+		&env.stdout,
+		&env.stderr,
+	)
+	if woken != 0 {
+		t.Fatalf("woken = %d, want 0", woken)
+	}
+	got := env.reconcileStopPendingToTerminal(t, env.sp, session, dops, map[string]bool{"worker": true})
+	if got.Metadata["state"] != "drained" {
+		t.Fatalf("state = %q, want drained", got.Metadata["state"])
+	}
+	if got.Metadata["restart_requested"] != "" {
+		t.Fatalf("restart_requested = %q, want consumed by drain-ack finalize", got.Metadata["restart_requested"])
+	}
+	if got.Metadata["session_key"] != "original-key" {
+		t.Fatalf("session_key = %q, want preserved for resume continuity", got.Metadata["session_key"])
+	}
+}
+
 func TestReconcileSessionBeads_DesiredFastPathSkipsAttachmentActivityObservation(t *testing.T) {
 	env := newReconcilerTestEnv()
 	env.cfg = &config.City{

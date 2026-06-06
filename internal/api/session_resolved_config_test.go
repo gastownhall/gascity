@@ -127,6 +127,36 @@ func TestSessionCreateHintsSeedsRuntimeEnv(t *testing.T) {
 	}
 }
 
+// TestSessionCreateHintsEnablesMouse locks the ga-c4w contract for the API
+// session-create paths (provider-adhoc + named): they must resolve mouse-on so
+// the tmux wheel drives copy-mode scrollback instead of leaking to the focused
+// TUI. The runtime skips disableMouseAndActivity only when MouseOn is true (the
+// guard in internal/runtime/tmux adapter), so this seam flips both API callers;
+// the `gc session new` CLI resolves MouseOn separately in cmd/gc
+// (workerSessionCreateHints + templateParamsToConfig). Headless agent sessions
+// resolve MouseOn from cmd/gc/template_resolve.go and are unaffected (guarded
+// separately in template_resolve_prompt_test.go).
+func TestSessionCreateHintsEnablesMouse(t *testing.T) {
+	hints := sessionCreateHints(&config.ResolvedProvider{Name: "stub"}, nil, nil)
+	if !hints.MouseOn {
+		t.Error("sessionCreateHints().MouseOn = false, want true (interactive wheel→scrollback, ga-c4w)")
+	}
+}
+
+// TestSessionResumeHintsEnablesMouse locks ga-c4w finding #2: an interactive
+// (API-created) session that is suspended/resumed or crash-restarted must keep
+// mouse-on so the tmux wheel still drives copy-mode scrollback after resume —
+// symmetric with sessionCreateHints. Without it the wheel works on first create
+// but is silently lost on the first resume. Headless agents are controller-owned
+// and re-resolve MouseOn via cmd/gc/template_resolve.go (mouse-off), so resume
+// mouse-on never reaches a polled agent.
+func TestSessionResumeHintsEnablesMouse(t *testing.T) {
+	hints := sessionResumeHints(&config.ResolvedProvider{Name: "stub"}, "", nil, nil)
+	if !hints.MouseOn {
+		t.Error("sessionResumeHints().MouseOn = false, want true (interactive wheel survives resume, ga-c4w)")
+	}
+}
+
 // TestResolvedSessionConfigForProviderSeedsCityRuntimeEnv is a
 // regression test for upstream gastownhall/gascity#101 (re-opened):
 // session-create paths through the API resolver dropped the

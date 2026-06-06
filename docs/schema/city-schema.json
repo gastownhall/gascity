@@ -1897,6 +1897,10 @@
           "type": "string",
           "description": "Timeout overrides the per-order timeout. Go duration string."
         },
+        "idempotent": {
+          "type": "boolean",
+          "description": "Idempotent overrides whether the order's dispatch is safe to repeat.\nIdempotent orders fail open when the open-work gate times out (#2893)."
+        },
         "env": {
           "additionalProperties": {
             "type": "string"
@@ -2344,7 +2348,11 @@
         },
         "suspended": {
           "type": "boolean",
-          "description": "Suspended prevents the reconciler from spawning agents in this rig. Toggle with gc rig suspend/resume."
+          "description": "Suspended is the deprecated pre-runtime-state suspension flag.\nParsed for backwards compatibility and treated as an alias for\nSuspendedOnStart by [Rig.EffectiveSuspendedOnStart], so existing\ncities with `suspended = true` continue to start their rigs\nsuspended after upgrade. Live suspend/resume commands no longer\nwrite this field. `gc doctor` flags it and offers `--fix` to\nrename to suspended_on_start."
+        },
+        "suspended_on_start": {
+          "type": "boolean",
+          "description": "SuspendedOnStart is the rig's desired suspension state at city\nstart. When true and no explicit entry exists for this rig in\n.gc/runtime/suspension-state.json, the rig is treated as\nsuspended. Once the user has explicitly suspended or resumed the\nrig via `gc rig suspend/resume`, the runtime state wins."
         },
         "formulas_dir": {
           "type": "string",
@@ -2433,7 +2441,11 @@
         },
         "suspended": {
           "type": "boolean",
-          "description": "Suspended overrides the rig's suspended state."
+          "description": "Suspended is the deprecated, pre-runtime-state suspension override.\nParsed for backwards compatibility; `gc doctor` surfaces it as a\nwarning and recommends the rename to SuspendedOnStart. No behavioral\ncode path reads it."
+        },
+        "suspended_on_start": {
+          "type": "boolean",
+          "description": "SuspendedOnStart overrides the rig's desired suspension state at\ncity start. Mirrors Rig.SuspendedOnStart."
         },
         "formula_vars": {
           "additionalProperties": {
@@ -2679,7 +2691,11 @@
         },
         "suspended": {
           "type": "boolean",
-          "description": "Suspended controls whether the city is suspended. When true, all\nagents are effectively suspended: the reconciler won't spawn them,\nand gc hook/prime return empty. Inherits downward — individual\nagent/rig suspended fields are checked independently."
+          "description": "Suspended is the deprecated pre-runtime-state city suspension\nflag. Parsed for backwards compatibility and treated as an alias\nfor SuspendedOnStart by [Workspace.EffectiveSuspendedOnStart], so\nexisting cities with `suspended = true` continue to start\nsuspended after upgrade. Live suspend/resume commands no longer\nwrite this field. `gc doctor` flags it and offers `--fix` to\nrename to suspended_on_start."
+        },
+        "suspended_on_start": {
+          "type": "boolean",
+          "description": "SuspendedOnStart is the city's desired suspension state at start.\nWhen true and no explicit entry exists in\n.gc/runtime/suspension-state.json, the city is treated as\nsuspended. Once the user has explicitly suspended or resumed via\n`gc suspend/resume`, the runtime state wins."
         },
         "max_active_sessions": {
           "type": "integer",
@@ -2694,7 +2710,7 @@
             "type": "string"
           },
           "type": "array",
-          "description": "InstallAgentHooks lists provider names whose hooks should be installed\ninto agent working directories. Agent-level overrides workspace-level\n(replace, not additive). Supported: \"claude\", \"codex\", \"gemini\",\n\"kiro\", \"opencode\", \"copilot\", \"cursor\", \"pi\", \"omp\"."
+          "description": "InstallAgentHooks lists provider names whose hooks should be installed\ninto agent working directories. Agent-level overrides workspace-level\n(replace, not additive). Supported: \"claude\", \"codex\", \"gemini\",\n\"kiro\", \"opencode\", \"groq\", \"copilot\", \"cursor\", \"pi\", \"omp\"."
         },
         "global_fragments": {
           "items": {
