@@ -2451,12 +2451,12 @@ func TestPackPromptFilesExist(t *testing.T) {
 }
 
 func TestCityAgentsFilter(t *testing.T) {
-	// Verify config.LoadWithIncludes with both packs produces
-	// only city-scoped agents when no rigs are registered.
-	// Effective dog from gastown override + mayor/deacon/boot = 4.
+	// Verify config.LoadWithIncludes with all packs produces only
+	// city-scoped agents when no rigs are registered. Effective dog from
+	// gastown override + mayor/deacon/boot + the argos watchdog = 5.
 	cfg := loadExpanded(t)
 
-	cityAgents := map[string]bool{"mayor": true, "deacon": true, "boot": true, "dog": true}
+	cityAgents := map[string]bool{"mayor": true, "deacon": true, "boot": true, "dog": true, "argos": true}
 	var explicit int
 	for _, a := range cfg.Agents {
 		if a.Implicit {
@@ -2470,8 +2470,8 @@ func TestCityAgentsFilter(t *testing.T) {
 			t.Errorf("city agent %q: dir = %q, want empty", a.Name, a.Dir)
 		}
 	}
-	if explicit != 4 {
-		t.Errorf("got %d explicit agents, want 4 city-scoped agents", explicit)
+	if explicit != 5 {
+		t.Errorf("got %d explicit agents, want 5 city-scoped agents", explicit)
 	}
 }
 

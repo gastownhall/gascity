@@ -1,0 +1,33 @@
+# Argos — rate-limit-recovery watchdog pack.
+#
+# Argos is the city's watchdog: an LLM agent that watches every live
+# session and recovers the ones that have stalled (rate-limit walls,
+# frozen panes). Named after Odysseus's hound.
+#
+# Argos is GENERIC, role-agnostic infrastructure — it enumerates
+# `gc session list` and judges from live state, so it composes alongside
+# any domain pack (gastown, swarm, ...) the same way `maintenance` does.
+# That is why it is its own pack and not a member of the gastown roster:
+# the watchdog is not a Gas Town role, it is a reusable capability a city
+# opts into.
+#
+# This pack is the SCAFFOLD stage: the agent wakes each patrol tick, logs
+# a one-line session-count summary, drain-acks, and exits. Detection and
+# recovery land in later steps — the prompt deliberately contains neither
+# yet.
+#
+# Compose it by importing from a city's root pack:
+#   [imports.argos]
+#   source = "packs/argos"
+
+[pack]
+name = "argos"
+schema = 2
+
+# Keep the `argos` identity resident. The reconciler re-wakes it each
+# patrol tick (`mode = "always"`); `wake_mode = "fresh"` in the agent.toml
+# gives every wake a clean provider context for single-pass triage.
+[[named_session]]
+template = "argos"
+scope = "city"
+mode = "always"

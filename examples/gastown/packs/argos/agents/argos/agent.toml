@@ -1,0 +1,4 @@
+scope = "city"
+wake_mode = "fresh"
+work_dir = ".gc/agents/argos"
+max_active_sessions = 1

@@ -10,5 +10,11 @@ schema = 2
 [imports.gastown]
 source = "packs/gastown"
 
+# Argos — generic rate-limit-recovery watchdog. Composed at city scope
+# (alongside the gastown roster) the same way maintenance is; its
+# city-scoped, always-resident named session comes up as a city agent.
+[imports.argos]
+source = "packs/argos"
+
 [defaults.rig.imports.gastown]
 source = "packs/gastown"
