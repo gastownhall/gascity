@@ -15,7 +15,13 @@ builds:
       - arm64
 
 archives:
-  - formats: [tar.gz]
+  - id: gc-archive
+    formats: [tar.gz]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+
+checksum:
+  name_template: "{{ .ProjectName }}_{{ .Version }}_checksums.txt"
+  algorithm: sha256
 
 release:
   prerelease: auto

@@ -1,0 +1,7 @@
+scope = "rig"
+provider = "codex"
+wake_mode = "resume"
+work_dir = ".gc/worktrees/{{.Rig}}/refinery"
+nudge = "Review pushed polecat branches and merge only clean work into the integration branch."
+pre_start = ["{{.ConfigDir}}/assets/scripts/worktree-setup.sh {{.RigRoot}} {{.WorkDir}} {{.AgentBase}} --sync"]
+max_active_sessions = 1

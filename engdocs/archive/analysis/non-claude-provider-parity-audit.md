@@ -64,12 +64,12 @@ if (firstStart || forceFresh) && rp.SessionIDFlag != "" {
 }
 ```
 
-**Severity:** Show-stopper for providers that *do* have a session-id CLI
+**Severity:** Show-stopper for providers that _do_ have a session-id CLI
 (Codex does: `codex --session-id <uuid>`), friction for those that don't.
 
 Without `SessionIDFlag`, Gas City can't pre-assign a session key and has to
 discover it after the fact. This matters whenever the reconciler or external
-client (Mission Control) needs to address a session by a key it minted.
+client (real-world app) needs to address a session by a key it minted.
 
 **To fix:** add `SessionIDFlag` for Codex at minimum; document which
 providers genuinely lack this capability and use a fallback discovery
@@ -120,6 +120,7 @@ Claude's compiled-in assumption (hooks do the work) means Amp/Auggie users
 silently get a much worse product.
 
 **To fix options:**
+
 1. Investigate whether Amp/Auggie have any hook-like mechanism (lifecycle
    scripts, startup commands) we can piggy-back on.
 2. Add a runtime-side fallback that periodically polls for queued work
@@ -140,16 +141,16 @@ is the right model for Amp/Auggie too.
 
 Each provider's hook config uses a different event naming:
 
-| Provider | Session start | Per-prompt | Session end | Compact |
-|----------|---------------|------------|-------------|---------|
-| claude | `SessionStart` | `UserPromptSubmit` | `Stop` | `PreCompact` |
-| codex | `SessionStart` | `UserPromptSubmit` | `Stop` | *(missing)* |
-| gemini | `SessionStart` | `BeforeAgent` | `SessionEnd` | `PreCompress` |
-| cursor | `sessionStart` | `beforeSubmitPrompt` | `stop` | `preCompact` |
-| copilot | `sessionStart` | `userPromptSubmitted` | `sessionEnd` | *(missing)* |
+| Provider | Session start     | Per-prompt                           | Session end       | Compact             |
+| -------- | ----------------- | ------------------------------------ | ----------------- | ------------------- |
+| claude   | `SessionStart`    | `UserPromptSubmit`                   | `Stop`            | `PreCompact`        |
+| codex    | `SessionStart`    | `UserPromptSubmit`                   | `Stop`            | _(missing)_         |
+| gemini   | `SessionStart`    | `BeforeAgent`                        | `SessionEnd`      | `PreCompress`       |
+| cursor   | `sessionStart`    | `beforeSubmitPrompt`                 | `stop`            | `preCompact`        |
+| copilot  | `sessionStart`    | `userPromptSubmitted`                | `sessionEnd`      | _(missing)_         |
 | opencode | `session.created` | `experimental.chat.system.transform` | `session.deleted` | `session.compacted` |
-| pi | (plugin file) | (plugin file) | (plugin file) | (plugin file) |
-| omp | (plugin file) | (plugin file) | (plugin file) | (plugin file) |
+| pi       | (plugin file)     | (plugin file)                        | (plugin file)     | (plugin file)       |
+| omp      | (plugin file)     | (plugin file)                        | (plugin file)     | (plugin file)       |
 
 **Severity:** Polish (developer/maintenance friction)
 
@@ -194,7 +195,7 @@ reference) and in the `w-d4dba7b056` quality-gate fallback (PR #78).
 **Severity:** Friction
 
 `InstructionsFile` is a hint (`"CLAUDE.md"` vs `"AGENTS.md"`) used when
-*generating* quality-gate hints for agents. It is **not** used to copy or
+_generating_ quality-gate hints for agents. It is **not** used to copy or
 generate an actual instructions file in the agent's workdir — if a provider
 expects `AGENTS.md` and the repo only ships `CLAUDE.md` (gastown's
 convention), non-Claude agents start with no project instructions.
@@ -217,8 +218,9 @@ start.
 **Severity:** Friction
 
 `gc doctor` and `gc doctor --verbose` today check that required binaries
-exist, runtime deps are present, and city config resolves. It does *not*
+exist, runtime deps are present, and city config resolves. It does _not_
 flag:
+
 - `SupportsHooks: false` on a provider the user just added a rig for.
 - `ResumeFlag == ""` when the rig's provider would need it for the
   reconciler's resume path.
@@ -234,21 +236,21 @@ subcommand.
 
 ## Summary punch list (priority order)
 
-| # | Gap | Severity | Affected providers |
-|---|-----|----------|---------------------|
-| 1 | Session resume silent no-op | **Show-stopper** | All non-Claude |
-| 2 | `SessionIDFlag` missing | **Show-stopper** (Codex) / Friction | All non-Claude |
-| 4 | Amp / Auggie have no hook mechanism | **Show-stopper** | amp, auggie |
-| 3 | Missing PreCompact equivalent | Friction → Show-stopper long-session | codex, copilot |
-| 7 | `InstructionsFile` not materialized in workdir | Friction | All non-Claude |
-| 5 | Hook event vocabulary undocumented | Polish | All non-Claude (maint) |
-| 6 | `PrintArgs` unused | Polish | codex, gemini (claude) |
-| 8 | `gc doctor` misses provider capability gaps | Friction | All non-Claude |
+| #   | Gap                                            | Severity                             | Affected providers     |
+| --- | ---------------------------------------------- | ------------------------------------ | ---------------------- |
+| 1   | Session resume silent no-op                    | **Show-stopper**                     | All non-Claude         |
+| 2   | `SessionIDFlag` missing                        | **Show-stopper** (Codex) / Friction  | All non-Claude         |
+| 4   | Amp / Auggie have no hook mechanism            | **Show-stopper**                     | amp, auggie            |
+| 3   | Missing PreCompact equivalent                  | Friction → Show-stopper long-session | codex, copilot         |
+| 7   | `InstructionsFile` not materialized in workdir | Friction                             | All non-Claude         |
+| 5   | Hook event vocabulary undocumented             | Polish                               | All non-Claude (maint) |
+| 6   | `PrintArgs` unused                             | Polish                               | codex, gemini (claude) |
+| 8   | `gc doctor` misses provider capability gaps    | Friction                             | All non-Claude         |
 
 ## Not gaps (verified intentional)
 
 - **Claude having the most wiring** is by design; it was first and is the
-  reference. The audit is about bringing others *up*, not cutting Claude
+  reference. The audit is about bringing others _up_, not cutting Claude
   down.
 - **`SupportsACP` differing** across providers is correct — ACP genuinely
   isn't supported by most.
@@ -258,6 +260,7 @@ subcommand.
 ## Next steps for maintainers
 
 Ship in this order for biggest user-visible impact:
+
 1. Fix resume for Codex (has a documented `resume` subcommand) — closes
    the most-hit show-stopper.
 2. Decide Amp/Auggie strategy (polling fallback vs. first-class "no hooks"

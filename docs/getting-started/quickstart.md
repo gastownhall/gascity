@@ -32,7 +32,7 @@ starts the controller. The city is running as soon as init completes.
 ## 2. Add a Rig
 
 ```bash
-mkdir ~/hello-world && cd ~/hello-world && git init
+mkdir ~/hello-world && cd ~/hello-world && git init && cd -
 gc rig add ~/hello-world
 ```
 

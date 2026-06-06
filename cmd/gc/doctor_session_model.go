@@ -33,7 +33,7 @@ func (c *sessionModelDoctorCheck) Run(_ *doctor.CheckContext) *doctor.CheckResul
 		r.Message = fmt.Sprintf("session model diagnostics skipped: %v", err)
 		return r
 	}
-	all, err := store.List(beads.ListQuery{AllowScan: true, IncludeClosed: true, Sort: beads.SortCreatedAsc})
+	all, err := loadSessionModelDoctorBeads(store)
 	if err != nil {
 		r.Status = doctor.StatusWarning
 		r.Message = fmt.Sprintf("session model diagnostics skipped: %v", err)
@@ -120,6 +120,59 @@ func (c *sessionModelDoctorCheck) Run(_ *doctor.CheckContext) *doctor.CheckResul
 	r.Message = fmt.Sprintf("%d session model finding(s)", len(findings))
 	r.Details = findings
 	return r
+}
+
+func loadSessionModelDoctorBeads(store beads.Store) ([]beads.Bead, error) {
+	type listStep struct {
+		name  string
+		query beads.ListQuery
+	}
+	steps := []listStep{
+		{
+			name:  "open work",
+			query: beads.ListQuery{Status: "open", Sort: beads.SortCreatedAsc},
+		},
+		{
+			name:  "in-progress work",
+			query: beads.ListQuery{Status: "in_progress", Sort: beads.SortCreatedAsc},
+		},
+	}
+
+	seen := make(map[string]bool)
+	var all []beads.Bead
+	// Union of Type=session and Label=gc:session beads, deduped by ID.
+	// Replaces two separate listStep entries that re-implemented the same
+	// union; ListAllSessionBeads is now the single source of truth so a
+	// future shape (e.g. typed but unlabeled production beads) is handled
+	// consistently across the CLI.
+	sessionBeads, err := session.ListAllSessionBeads(store, beads.ListQuery{
+		IncludeClosed: true,
+		Sort:          beads.SortCreatedAsc,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("session beads: %w", err)
+	}
+	for _, item := range sessionBeads {
+		if seen[item.ID] {
+			continue
+		}
+		seen[item.ID] = true
+		all = append(all, item)
+	}
+	for _, step := range steps {
+		items, err := store.List(step.query)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", step.name, err)
+		}
+		for _, item := range items {
+			if seen[item.ID] {
+				continue
+			}
+			seen[item.ID] = true
+			all = append(all, item)
+		}
+	}
+	return all, nil
 }
 
 func isRetiredSessionModelOwner(b beads.Bead) bool {

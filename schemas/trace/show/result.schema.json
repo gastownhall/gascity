@@ -1,0 +1,71 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "ok",
+    "city_path",
+    "count",
+    "records"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1"
+    },
+    "ok": {
+      "const": true
+    },
+    "city_path": {
+      "type": "string"
+    },
+    "count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "records": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "trace_schema_version": {
+            "type": "integer"
+          },
+          "seq": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "trace_id": {
+            "type": "string"
+          },
+          "tick_id": {
+            "type": "string"
+          },
+          "record_id": {
+            "type": "string"
+          },
+          "record_type": {
+            "type": "string"
+          },
+          "template": {
+            "type": "string"
+          },
+          "session_name": {
+            "type": "string"
+          },
+          "reason_code": {
+            "type": "string"
+          },
+          "outcome_code": {
+            "type": "string"
+          },
+          "ts": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "additionalProperties": true
+      }
+    }
+  },
+  "additionalProperties": false
+}

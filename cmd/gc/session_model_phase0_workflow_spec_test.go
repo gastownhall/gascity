@@ -231,8 +231,11 @@ func TestPhase0WorkflowRouting_ControlStepPreservesExecutionConfigLane(t *testin
 	if check == nil {
 		t.Fatal("scope-check step missing after decorate")
 	}
-	if got := check.Metadata["gc.routed_to"]; got != "frontend/control-dispatcher" {
-		t.Fatalf("scope-check gc.routed_to = %q, want frontend/control-dispatcher", got)
+	if got := check.Assignee; got != "frontend--control-dispatcher" {
+		t.Fatalf("scope-check assignee = %q, want frontend--control-dispatcher", got)
+	}
+	if got := check.Metadata["gc.routed_to"]; got != "" {
+		t.Fatalf("scope-check gc.routed_to = %q, want empty direct dispatcher assignee", got)
 	}
 	if got := check.Metadata[graphExecutionRouteMetaKey]; got != "frontend/codex" {
 		t.Fatalf("scope-check execution route = %q, want frontend/codex", got)

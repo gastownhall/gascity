@@ -1,27 +1,19 @@
-// Package cityinit is the domain contract for city scaffolding and
-// finalization. It defines the typed request, result, and sentinel
-// errors that both projections — the CLI (cmd/gc/cmd_init.go) and the
-// HTTP API (internal/api/huma_handlers_supervisor.go:humaHandleCityCreate) —
-// use when creating a new city.
+// Package cityinit owns the typed city scaffolding/finalization service
+// used by the CLI and HTTP API projections.
 //
-// The Initializer interface is implemented in cmd/gc (where the
-// scaffold + finalize body currently lives) and injected into the
-// HTTP supervisor at construction. The HTTP handler calls
-// Initializer.Init in-process; there is no subprocess, no
-// 30-second deadline, no stderr-scraping for error dispatch.
+// The scaffold + finalize bodies are still being split out of cmd/gc,
+// so Service receives those side-effecting operations as dependencies.
+// The orchestration, validation, rollback, and lifecycle event emission
+// now live here instead of in the transport layers.
 //
-// A follow-up refactor will physically move the scaffold/finalize
-// body into this package so the domain logic lives in internal/
-// (per engdocs/architecture/api-control-plane.md §1). Until then, injecting the
-// implementation from cmd/gc at startup preserves the architectural
-// intent that "the CLI and the HTTP API are projections over the
-// shared object model" — both surfaces drive the same code path via
-// the same typed contract.
+// The HTTP handler calls Service.Scaffold in-process; there is no
+// subprocess, no 30-second deadline, and no stderr-scraping for error
+// dispatch.
 package cityinit
 
 import (
-	"context"
 	"errors"
+	"fmt"
 )
 
 // Typed sentinel errors. Both projections map them to their own
@@ -35,9 +27,13 @@ var (
 	// surface, depending on flags.
 	ErrAlreadyInitialized = errors.New("city already initialized")
 
+	// ErrInvalidDirectory indicates the requested city directory is
+	// missing or not absolute. The HTTP API maps this to 422
+	// Unprocessable Entity.
+	ErrInvalidDirectory = errors.New("invalid city directory")
+
 	// ErrInvalidProvider indicates an unknown builtin provider. The
-	// HTTP API maps this to 400 Bad Request (or 422 Unprocessable
-	// Entity at the typed-input layer).
+	// HTTP API maps this to 422 Unprocessable Entity.
 	ErrInvalidProvider = errors.New("invalid provider")
 
 	// ErrInvalidBootstrapProfile indicates an unrecognized
@@ -63,11 +59,16 @@ var (
 	// Usually a bug in the scaffold step; maps to 500.
 	ErrConfigLoad = errors.New("loading city config")
 
-	// ErrNotWired indicates the HTTP handler was called before a
-	// concrete Initializer was injected into the supervisor. This
-	// is a programmer-bug tripwire: every SupervisorMux constructed
-	// at runtime must have a non-nil Initializer.
-	ErrNotWired = errors.New("cityinit: no Initializer wired into supervisor")
+	// ErrPostRegisterFailure indicates the city was committed to the
+	// supervisor registry before a later scaffold-side effect failed.
+	// HTTP callers keep the 202 request_id contract and receive the
+	// failure through request.failed instead of a synchronous error.
+	ErrPostRegisterFailure = errors.New("post-register city init failure")
+
+	// ErrNotWired indicates the service was constructed without a
+	// required dependency. This is a programmer-bug tripwire for
+	// process wiring.
+	ErrNotWired = errors.New("cityinit: service dependency not wired")
 
 	// ErrNotRegistered indicates Unregister was called for a city
 	// that is not in the supervisor registry. Maps to 404 Not Found
@@ -75,9 +76,17 @@ var (
 	ErrNotRegistered = errors.New("city not registered with supervisor")
 )
 
+// NewPostRegisterFailure wraps err with ErrPostRegisterFailure.
+func NewPostRegisterFailure(err error) error {
+	if err == nil {
+		return nil
+	}
+	return fmt.Errorf("%w: %w", ErrPostRegisterFailure, err)
+}
+
 // InitRequest is the typed input. Both projections populate it from
 // their own surface (CLI flags, HTTP request body) and hand it to
-// Initializer.Init; neither duplicates validation or logic.
+// Service.Init or Service.Scaffold; neither duplicates validation or logic.
 type InitRequest struct {
 	// Dir is the absolute path of the new city directory. Callers
 	// resolve relative paths before invoking Init (the CLI uses
@@ -104,10 +113,9 @@ type InitRequest struct {
 
 	// SkipProviderReadiness skips the provider-auth preflight when
 	// true. The async HTTP create handler defaults to true and
-	// surfaces dependency/provider blockers later via the terminal
-	// city.init_failed event on /v0/events/stream. The CLI defaults
-	// to false so first-time users see auth-needed errors
-	// immediately.
+	// surfaces dependency/provider blockers later via request.failed
+	// on /v0/events/stream. The CLI defaults to false so first-time
+	// users see auth-needed errors immediately.
 	SkipProviderReadiness bool
 
 	// ConfigName selects the scaffold template. One of "tutorial"
@@ -134,62 +142,13 @@ type InitResult struct {
 	// Resumed is true when Init detected an existing scaffold and
 	// skipped to finalization only.
 	Resumed bool
+
+	// ReloadWarning is non-empty when the supervisor reload after
+	// scaffold succeeded but returned a best-effort error.
+	ReloadWarning string
 }
 
-// Initializer is the domain contract for city lifecycle on the
-// supervisor: scaffolding, finalization, and unregistration. Exactly
-// one implementation exists per process, supplied at supervisor
-// construction (see internal/api.NewSupervisorMux). Both projections
-// — CLI and HTTP API — drive the same code path via this interface.
-type Initializer interface {
-	// Init scaffolds + finalizes a new city.
-	//
-	// Preconditions: req.Dir is an absolute path; exactly one of
-	// req.Provider / req.StartCommand is set; req.BootstrapProfile
-	// is a known value.
-	//
-	// Postconditions on nil error: the directory contains a
-	// complete city scaffold; the bead provider is initialized; the
-	// city is registered with any running supervisor.
-	//
-	// Errors returned wrap one of the ErrXxx sentinels in this
-	// package so callers can dispatch via errors.Is.
-	Init(ctx context.Context, req InitRequest) (*InitResult, error)
-
-	// Scaffold writes the new city's on-disk shape and registers it
-	// with the supervisor — the fast portion of Init. Used by the
-	// HTTP API handler behind POST /v0/city so it can return 202
-	// Accepted immediately instead of blocking on the slow finalize
-	// work. The supervisor reconciler takes over from there; city
-	// readiness is signaled via city.ready / city.init_failed
-	// events on the supervisor event bus, not via the handler's
-	// response body.
-	//
-	// The implementation emits a city.created event before
-	// returning so subscribers of /v0/events/stream observe the
-	// new city before Finalize begins.
-	Scaffold(ctx context.Context, req InitRequest) (*InitResult, error)
-
-	// Unregister removes the city from the supervisor's registry
-	// and signals the supervisor to reconcile. Used by the HTTP API
-	// handler behind POST /v0/city/{cityName}/unregister so it can
-	// return 202 Accepted immediately while the reconciler stops
-	// the controller asynchronously.
-	//
-	// Returns ErrNotRegistered if the named city is not in the
-	// registry. On nil error, emits a city.unregister_requested
-	// event to the city's event log so subscribers of
-	// /v0/events/stream observe the start of the teardown. The
-	// terminal completion event (city.unregistered or
-	// city.unregister_failed) is emitted by the supervisor
-	// reconciler once the city's controller finishes stopping.
-	//
-	// The city directory itself is NOT touched. Users that want to
-	// purge the directory remove it separately.
-	Unregister(ctx context.Context, req UnregisterRequest) (*UnregisterResult, error)
-}
-
-// UnregisterRequest is the typed input for Initializer.Unregister.
+// UnregisterRequest is the typed input for Service.Unregister.
 type UnregisterRequest struct {
 	// CityName is the supervisor-registered name (effective name,
 	// e.g. workspace.name from city.toml, or directory basename if
@@ -207,4 +166,8 @@ type UnregisterResult struct {
 	// removed from the registry. Useful for clients that want to
 	// filter completion events by path as well as name.
 	CityPath string
+
+	// ReloadWarning is non-empty when the supervisor reload after
+	// unregister succeeded but returned a best-effort error.
+	ReloadWarning string
 }

@@ -63,6 +63,12 @@ func registerTypedEventEnvelopeSchema(r huma.Registry, cfg typedEventEnvelopeSch
 			oneOf = append(oneOf, &huma.Schema{Ref: ref})
 			mapping[variant.eventType] = ref
 		}
+		customName := cfg.name + "Custom"
+		customRef := schemaRefPrefix + customName
+		if _, ok := r.Map()[customName]; !ok {
+			r.Map()[customName] = customEventEnvelopeVariantSchema(r, cfg)
+		}
+		oneOf = append(oneOf, &huma.Schema{Ref: customRef})
 		r.Map()[cfg.name] = &huma.Schema{
 			Title:       cfg.title,
 			Description: cfg.description,
@@ -135,6 +141,51 @@ func typedEventEnvelopeVariantSchema(r huma.Registry, variant typedEventEnvelope
 	}
 	return &huma.Schema{
 		Title:                cfg.name + " " + variant.eventType,
+		Type:                 huma.TypeObject,
+		AdditionalProperties: false,
+		Properties:           properties,
+		Required:             required,
+	}
+}
+
+func customEventEnvelopeVariantSchema(r huma.Registry, cfg typedEventEnvelopeSchemaConfig) *huma.Schema {
+	knownTypes := make([]any, 0, len(events.KnownEventTypes))
+	for _, eventType := range events.KnownEventTypes {
+		knownTypes = append(knownTypes, eventType)
+	}
+	properties := map[string]*huma.Schema{
+		"seq": {
+			Type:    huma.TypeInteger,
+			Format:  "int64",
+			Minimum: float64Ptr(0),
+		},
+		"type": {
+			Type: huma.TypeString,
+			Not:  &huma.Schema{Enum: knownTypes},
+		},
+		"ts": {
+			Type:   huma.TypeString,
+			Format: "date-time",
+		},
+		"actor": {
+			Type: huma.TypeString,
+		},
+		"subject": {
+			Type: huma.TypeString,
+		},
+		"message": {
+			Type: huma.TypeString,
+		},
+		"workflow": r.Schema(reflect.TypeOf(workflowEventProjection{}), true, "WorkflowEventProjection"),
+		"payload":  {},
+	}
+	required := []string{"seq", "type", "ts", "actor", "payload"}
+	if cfg.includeCity {
+		properties["city"] = &huma.Schema{Type: huma.TypeString}
+		required = append(required, "city")
+	}
+	return &huma.Schema{
+		Title:                cfg.name + " custom",
 		Type:                 huma.TypeObject,
 		AdditionalProperties: false,
 		Properties:           properties,

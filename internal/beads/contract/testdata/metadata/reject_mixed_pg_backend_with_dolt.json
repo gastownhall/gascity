@@ -1,0 +1,9 @@
+{
+  "database": "beads",
+  "backend": "postgres",
+  "dolt_database": "stale",
+  "postgres_host": "db.example.com",
+  "postgres_port": "5432",
+  "postgres_user": "bd",
+  "postgres_database": "beads_pwu"
+}

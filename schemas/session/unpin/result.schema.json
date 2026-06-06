@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "x-gc-jsonl": {},
+  "type": "object",
+  "properties": {
+    "schema_version": { "const": "1" },
+    "ok": { "const": true },
+    "command": { "const": "session unpin" },
+    "action": { "const": "unpin" },
+    "session_id": { "type": "string", "minLength": 1 },
+    "pinned": { "const": false }
+  },
+  "required": ["schema_version", "ok", "command", "action", "session_id", "pinned"],
+  "additionalProperties": true
+}

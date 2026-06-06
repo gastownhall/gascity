@@ -1,0 +1,9 @@
+{"role":"_system_prompt","content":"system prompt"}
+{"role":"_checkpoint","id":0}
+{"role":"user","content":"Summarize the Kimi worker transcript contract."}
+{"role":"_checkpoint","id":1}
+{"role":"assistant","content":"Kimi phase 1 validates the native context JSONL transcript contract."}
+{"role":"_usage","token_count":1000}
+{"role":"user","content":"Repeat the exact Kimi phase-1 summary from earlier before answering."}
+{"role":"_checkpoint","id":2}
+{"role":"assistant","content":"Kimi phase 1 validates the native context JSONL transcript contract."}

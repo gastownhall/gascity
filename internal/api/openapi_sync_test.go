@@ -23,7 +23,7 @@ import (
 // yields the authoritative contract for every HTTP endpoint the control
 // plane exposes.
 func TestOpenAPISpecInSync(t *testing.T) {
-	sm := api.NewSupervisorMux(emptyTestResolver{}, nil, false, "", time.Time{})
+	sm := api.NewSupervisorMux(emptyTestResolver{}, nil, false, "", "", time.Time{})
 	req := httptest.NewRequest(http.MethodGet, "/openapi.json", nil)
 	rec := httptest.NewRecorder()
 	sm.ServeHTTP(rec, req)
@@ -44,9 +44,8 @@ func TestOpenAPISpecInSync(t *testing.T) {
 
 	// Every tracked copy of the spec must match the live server. The internal
 	// copy (internal/api/openapi.json) feeds the Go client generator. The
-	// docs copies (docs/schema/openapi.{json,txt}) are what Mintlify publishes
-	// for external consumers. All three must agree or external readers see a
-	// different contract than the code enforces.
+	// docs/schema/openapi.json is the published docs artifact. The .txt copy is
+	// a compatibility mirror kept in sync with the served JSON contract.
 	tracked := []string{
 		"openapi.json",
 		filepath.Join("..", "..", "docs", "schema", "openapi.json"),
@@ -95,8 +94,8 @@ func TestEventsSchemaPublished(t *testing.T) {
 	}
 
 	wantRefs := []string{
-		"openapi.json#/components/schemas/WireEvent",
-		"openapi.json#/components/schemas/WireTaggedEvent",
+		"openapi.json#/components/schemas/TypedEventStreamEnvelope",
+		"openapi.json#/components/schemas/TypedTaggedEventStreamEnvelope",
 		"openapi.json#/components/schemas/EventStreamEnvelope",
 		"openapi.json#/components/schemas/TaggedEventStreamEnvelope",
 	}
@@ -125,15 +124,68 @@ func TestEventsSchemaPublished(t *testing.T) {
 	if err := json.Unmarshal(openAPIData, &openAPI); err != nil {
 		t.Fatalf("parse openapi.json: %v", err)
 	}
-	for _, component := range []string{"WireEvent", "WireTaggedEvent", "EventStreamEnvelope", "TaggedEventStreamEnvelope"} {
+	for _, component := range []string{"TypedEventStreamEnvelope", "TypedTaggedEventStreamEnvelope", "EventStreamEnvelope", "TaggedEventStreamEnvelope"} {
 		if _, ok := openAPI.Components.Schemas[component]; !ok {
 			t.Errorf("events schema references missing OpenAPI component %q", component)
 		}
 	}
 }
 
+func TestAsyncAcceptedRequestIDDescriptionsNameTypedResultEvents(t *testing.T) {
+	sm := api.NewSupervisorMux(emptyTestResolver{}, nil, false, "", "", time.Time{})
+	req := httptest.NewRequest(http.MethodGet, "/openapi.json", nil)
+	rec := httptest.NewRecorder()
+	sm.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /openapi.json returned %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var openAPI struct {
+		Components struct {
+			Schemas map[string]struct {
+				Properties map[string]struct {
+					Description string `json:"description"`
+				} `json:"properties"`
+			} `json:"schemas"`
+		} `json:"components"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &openAPI); err != nil {
+		t.Fatalf("parse openapi: %v", err)
+	}
+
+	assertDescription := func(schema, want string) {
+		t.Helper()
+		got := openAPI.Components.Schemas[schema].Properties["request_id"].Description
+		if !bytes.Contains([]byte(got), []byte(want)) {
+			t.Fatalf("%s request_id description = %q, want to mention %q", schema, got, want)
+		}
+	}
+	assertDescription("AsyncAcceptedBody", "request.result.session.create")
+	assertDescription("AsyncAcceptedBody", "request.result.session.message")
+	assertDescription("AsyncAcceptedBody", "request.result.session.submit")
+	assertDescription("AsyncAcceptedResponse", "request.result.city.create")
+	assertDescription("AsyncAcceptedResponse", "request.result.city.unregister")
+
+	assertCursorDescription := func(schema, want string) {
+		t.Helper()
+		got := openAPI.Components.Schemas[schema].Properties["event_cursor"].Description
+		if !bytes.Contains([]byte(got), []byte(want)) {
+			t.Fatalf("%s event_cursor description = %q, want to mention %q", schema, got, want)
+		}
+	}
+	assertCursorDescription("AsyncAcceptedBody", "after_seq")
+	assertCursorDescription("AsyncAcceptedResponse", "after_cursor")
+	assertCursorDescription("AsyncAcceptedBody", "no event provider")
+	assertCursorDescription("AsyncAcceptedResponse", "no event provider")
+
+	got := openAPI.Components.Schemas["SessionCreateSucceededPayload"].Properties["session"].Description
+	if !bytes.Contains([]byte(got), []byte("lifecycle commands")) {
+		t.Fatalf("SessionCreateSucceededPayload session description = %q, want to mention lifecycle commands", got)
+	}
+}
+
 func TestOrderResponseSchemaKeepsMigrationFieldsOptional(t *testing.T) {
-	sm := api.NewSupervisorMux(emptyTestResolver{}, nil, false, "", time.Time{})
+	sm := api.NewSupervisorMux(emptyTestResolver{}, nil, false, "", "", time.Time{})
 	req := httptest.NewRequest(http.MethodGet, "/openapi.json", nil)
 	rec := httptest.NewRecorder()
 	sm.ServeHTTP(rec, req)

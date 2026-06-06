@@ -2,12 +2,12 @@
 title: "Dispatch (Sling)"
 ---
 
-> Last verified against code: 2026-03-01
+> Last verified against code: 2026-05-21
 
 ## Summary
 
 Dispatch is Gas City's work routing mechanism -- a Layer 2-4 derived
-mechanism that composes primitives (Agent Protocol, Bead Store, Event Bus,
+mechanism that composes primitives (Session, Bead Store, Event Bus,
 Config) to route work to agents. The `gc sling` command resolves a target
 agent or pool, optionally instantiates a formula as a wisp, executes the
 agent's sling query to route each bead, optionally wraps single beads in
@@ -51,6 +51,13 @@ expanded to their open children before routing.
   materialized to `.gc/system-formulas/` at startup. System formulas
   are always overwritten to stay in sync with the binary version. Stale
   files are cleaned up. Implemented in `cmd/gc/system_formulas.go`.
+
+- **Review Quorum Formula**: `mol-review-quorum` is a core pack
+  compiler-v2 formula that dispatches exactly two read-only reviewer
+  lanes using formula-supplied lane IDs, providers, models, and targets,
+  and then routes a synthesis step. Dispatch treats it like any other
+  formula-backed wisp; it does not give
+  `dx-review` lifecycle ownership.
 
 ## Architecture
 
@@ -133,6 +140,73 @@ CLI layer (cmd/gc/cmd_sling.go)
   `SlingQuery` field and `EffectiveSlingQuery()` method that determines
   how beads are routed to this agent.
 
+## scale_check ↔ work_query correspondence
+
+Dispatch has two read sides that must stay symmetric:
+
+- **Reconciler (spawn side)**: when deciding whether a pool template
+  needs another session, the controller invokes
+  `Agent.EffectivePoolDemandQuery` (a thin pass-through that
+  `EffectiveScaleCheck` also returns) and parses the count.
+- **Worker (claim side)**: when an ephemeral session boots, `gc hook`
+  invokes `Agent.EffectiveWorkQuery`, whose Tier 3 fires for unassigned
+  routed work after the assignee tiers fall through.
+
+Both forms answer the same question — "is there ready, unassigned,
+non-epic work routed to this pool-demand target?" — and must therefore
+observe the bead store through the same filters. They share target
+resolution and predicates: `bdReadyPoolDemandShell(limitFlag)` reads the
+canonical `gc.routed_to=<target>` route with `--include-ephemeral`, and
+the temporary migration predicate reads `gc.run_target=<target>` only on
+`gc.kind=workflow` roots that predate root `gc.routed_to` stamping. The
+work-query form appends `--sort oldest --limit=1` to the canonical probe
+and prints the first match, then filters the migration probe to roots with
+empty `gc.routed_to`. That is an intentional routed-queue policy:
+unassigned routed pool work is FIFO before priority, so newer
+high-priority work does not jump ahead of older ready work already queued
+for the same target. The count form unions canonical and migration
+probes and deduplicates by bead ID before piping through `jq 'length'`.
+Targets resolve to `Agent.PoolName` when set and
+`Agent.QualifiedName()` otherwise, so pool instances and pool templates
+land on the same routed queue.
+
+Supported handoff forms are intentionally distinct. Generic pool demand is
+ready work with `assignee=""` and `gc.routed_to=<target>`; assigning the
+pool template itself is not pool demand. Direct named-session delivery is
+ready work with `assignee=<named-session-identity>` and no generic route
+metadata, so the reconciler does not also treat the handoff as generic pool
+demand.
+
+The shared predicate is the agreement substrate. Failure envelopes
+intentionally differ: the worker path suppresses `bd ready` stderr and
+returns `[]` so a session exits cleanly, while the count form propagates
+the failure to `evaluatePool`, which records telemetry and falls back to
+the pool minimum.
+
+Diverging the two — for example, by adding a state filter to the
+work-query without updating the count form — re-introduces the
+protocol-mismatch class. Pre-PR #1516 symptom: the reconciler counted
+molecule-typed beads as demand while the worker's `bd ready` skipped
+them, so spawned sessions exited immediately and the reconciler
+re-spawned, producing spawn storms.
+
+PR #1516 retired the old molecule-counting tier from the count form. A
+later gc-udx change added `--exclude-type=epic` to the worker claim
+path, leaving the default count form one filter behind. This refactor
+does two things: routes both paths through shared predicate helpers and
+adds `--exclude-type=epic` to the default count form. During the
+`gc.run_target` retirement window, `gc doctor --fix` backfills legacy
+workflow roots and both shell predicates keep unbackfilled roots visible;
+the controller's in-process demand readers share that same
+workflow-root-only fallback. The fallback intentionally does not prefer
+`gc.run_target` on child beads: current stampers write `gc.routed_to` for
+routable children, and the migration audit found no open non-root bead with a
+divergent `gc.routed_to` / `gc.run_target` pair. Custom `scale_check`
+overrides are unchanged. Future predicate changes should be single-helper
+changes; tests `TestPoolDemandPredicateSharedWithWorkQuery` (structural) and
+`TestPoolDemandAndWorkQueryAgreeOnRoutedSemantics` (behavioral) guard against
+regressions.
+
 ## Invariants
 
 1. **Sling query placeholder is always `{}`.** The `buildSlingCommand`
@@ -176,6 +250,32 @@ CLI layer (cmd/gc/cmd_sling.go)
     `bd update {} --label=pool:<name>`. Custom `sling_query` overrides
     the default entirely.
 
+11. **scale_check ↔ work_query correspondence.** The reconciler's
+    pool-demand-detection path (`Agent.EffectivePoolDemandQuery`, count
+    form) and the worker's claim path (`Agent.EffectiveWorkQuery`, Tier
+    3 first-row form) MUST derive their `bd ready --include-ephemeral
+    --metadata-field gc.routed_to=<target> --unassigned --exclude-type=epic
+    --json` canonical predicate from the same target-resolution helper and
+    `bdReadyPoolDemandShell` helper in `internal/config/config.go`. The
+    worker and reconciler must also share the temporary migration predicate
+    for `gc.run_target=<target>` on `gc.kind=workflow` roots with empty
+    `gc.routed_to`; only the worker's first-row form adds native
+    `bd ready --sort oldest --limit=1` selection to the canonical probe.
+    Any pool-demand predicate change to one (added filter, modified target
+    resolution, new state) MUST be reflected in the other. Diverging the two
+    re-introduces the protocol-mismatch class — the reconciler
+    spawning sessions for work the worker can't claim, or the worker idle
+    while new demand sits unspawned. The legacy `workflow-control` fallback is
+    worker-only for pre-rename `control-dispatcher` graphs and intentionally
+    lives outside the shared primary pool-demand predicate. Enforced by
+    `TestPoolDemandPredicateSharedWithWorkQuery` and
+    `TestPoolDemandAndWorkQueryAgreeOnRoutedSemantics` in
+    `internal/config/config_test.go`. Historical context: PR #1516
+    removed the old molecule-counting tier from the count form; a later
+    gc-udx change added `--exclude-type=epic` to the worker path; this
+    refactor adds that filter to the default count form and makes the
+    equivalence structural rather than coincidental.
+
 ## Interactions
 
 | Depends on | How |
@@ -183,7 +283,8 @@ CLI layer (cmd/gc/cmd_sling.go)
 | `internal/beads` (Store) | `MolCook` for wisp instantiation, `Create` for auto-convoy, `Get`/`Children` for container expansion, `Update` for ParentID linking, `SetMetadata` for merge strategy |
 | `internal/config` | Agent resolution, `EffectiveSlingQuery`, pool detection via `IsPool`, `PoolConfig` for sizing, `Suspended` flag |
 | `internal/runtime` | `Provider.IsRunning` and `Provider.Nudge` for agent nudging via `doSlingNudge` |
-| `internal/agent` | `SessionNameFor` to compute session names, `agent.New` + `Nudge` to deliver nudge text |
+| `internal/agent` | `SessionNameFor` to compute session names |
+| `internal/worker` | `Handle.Nudge` at the worker boundary for direct nudge delivery |
 | `internal/telemetry` | `RecordSling` for metrics and log events on every dispatch |
 | `cmd/gc/cmd_agent.go` | `resolveAgentIdentity` for 2-step target resolution (literal then contextual) |
 
@@ -204,7 +305,7 @@ CLI layer (cmd/gc/cmd_sling.go)
 | `cmd/gc/system_formulas.go` | `MaterializeSystemFormulas`, `ListEmbeddedSystemFormulas`, stale file cleanup |
 | `cmd/gc/system_formulas_test.go` | Tests for materialization: empty FS, write, overwrite, stale cleanup, idempotency, orders |
 | `cmd/gc/pool.go` | `evaluatePool` (scale check), `poolAgents` (instance expansion), `expandSessionSetup` (template context) |
-| `internal/config/config.go` | `Agent.SlingQuery`, `Agent.EffectiveSlingQuery()`, `Agent.EffectiveWorkQuery()`, `Agent.IsPool()` |
+| `internal/config/config.go` | `Agent.SlingQuery`, `Agent.EffectiveSlingQuery()`, `Agent.EffectiveWorkQuery()`, `Agent.EffectivePoolDemandQuery()`, `Agent.EffectiveScaleCheck()`, `bdReadyPoolDemandShell()`, `Agent.IsPool()` |
 | `internal/beads/beads.go` | `IsContainerType`, `Store.MolCook`, `Store.Children`, `Store.SetMetadata` |
 | `internal/beads/bdstore.go` | `BdStore.MolCook` and `BdStore.MolCookOn` -- formula-backed wisp instantiation via `bd mol wisp` / `bd mol bond` |
 | `internal/telemetry/recorder.go` | `RecordSling` -- metrics counter + structured log event for each dispatch |
@@ -238,13 +339,31 @@ Pool agents with default queries:
 name = "coder"
 pool = { min = 1, max = 3, check = "echo 2" }
 # Default sling_query: bd update {} --set-metadata gc.routed_to=coder
-# Default work_query:  bd ready --metadata-field gc.routed_to=coder --unassigned --limit=1
+# Default work_query: bd ready --include-ephemeral --metadata-field gc.routed_to=coder
+#   --unassigned --exclude-type=epic --json --sort oldest --limit=1,
+#   then a temporary gc.run_target workflow-root migration fallback
 ```
 
 System formulas are embedded in the `gc` binary and materialized to
 `.gc/system-formulas/` at startup. They form the lowest-priority formula
 layer (Layer 0) in the formula resolution stack. Pack and city-level
 formulas override system formulas by name.
+
+`mol-review-quorum` is provided by the core pack formula layer. Its reviewer
+lane IDs, providers, models, and dispatch targets are all supplied through
+formula vars; the synthesis target is configured separately with
+`synthesis_target`. Each reviewer lane is expected to produce durable structured
+output with verdict, findings, evidence, usage, failure classification, and
+read-only mutation-baseline delta.
+The synthesis step writes the combined `review-quorum.summary.v1` state for
+future consumers such as `dx-review summarize`. The `internal/reviewquorum`
+Go finalizer defines the durable contract but is not invoked by formula
+synthesis yet.
+
+Read-only mutation checks are baseline-relative. Dispatch and review consumers
+must compare reviewer after-state to the reviewer-recorded before baseline, not
+to an absolute clean-worktree expectation; pre-existing untracked files are not
+reviewer-created mutations.
 
 ## Testing
 

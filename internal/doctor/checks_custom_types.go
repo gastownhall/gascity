@@ -2,11 +2,15 @@ package doctor
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
+
+	"github.com/gastownhall/gascity/internal/beads"
 )
 
 // RequiredCustomTypes lists the bead types that Gas City requires
@@ -16,10 +20,16 @@ import (
 // (internal/convergence/create.go) creates beads with type="convergence"
 // as the root of every convergence loop. Without it registered, every
 // `gc converge create` call fails with "invalid issue type: convergence".
+//
+// "step" is included because formula instantiation creates non-root
+// step beads with type="step" (internal/molecule/molecule.go Instantiate)
+// so Ready() and `bd ready` can exclude formula scaffolding from actionable
+// work queues. Without it registered, formula dispatch fails with
+// "invalid issue type: step" (#1039).
 var RequiredCustomTypes = []string{
 	"molecule", "convoy", "message", "event", "gate",
 	"merge-request", "agent", "role", "rig", "session", "spec",
-	"convergence",
+	"convergence", "step",
 }
 
 // CustomTypesCheck verifies that all required Gas City custom bead
@@ -149,9 +159,21 @@ func mergeCustomTypes(current, required []string) []string {
 // the human-readable "types.custom (not set)" sentinel (which would
 // otherwise be persisted as a fake custom type when Fix() merges).
 func getCustomTypes(dir string) ([]string, error) {
-	cmd := exec.Command("bd", "config", "get", "--json", "types.custom")
+	start := time.Now()
+	args := []string{"config", "get", "--json", "types.custom"}
+	cmd := exec.Command("bd", args...)
 	cmd.Dir = dir
 	out, err := cmd.Output()
+	exitCode := 0
+	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			exitCode = exitErr.ExitCode()
+		} else {
+			exitCode = -1
+		}
+	}
+	beads.TraceBDCall("go:doctor.getCustomTypes", dir, args, start, exitCode, err)
 	if err != nil {
 		return nil, err
 	}
@@ -176,9 +198,22 @@ func parseCustomTypesJSON(out []byte) ([]string, error) {
 
 // setCustomTypes writes the types.custom config to a bd store.
 func setCustomTypes(dir, types string) error {
-	cmd := exec.Command("bd", "config", "set", "types.custom", types)
+	start := time.Now()
+	args := []string{"config", "set", "types.custom", types}
+	cmd := exec.Command("bd", args...)
 	cmd.Dir = dir
-	return cmd.Run()
+	err := cmd.Run()
+	exitCode := 0
+	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			exitCode = exitErr.ExitCode()
+		} else {
+			exitCode = -1
+		}
+	}
+	beads.TraceBDCall("go:doctor.setCustomTypes", dir, args, start, exitCode, err)
+	return err
 }
 
 // dirExists checks if a directory exists.

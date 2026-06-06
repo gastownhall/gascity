@@ -125,7 +125,7 @@ func (s *Server) humaHandleExtMsgOutbound(ctx context.Context, input *ExtMsgOutb
 			notifyConversation = result.Receipt.Conversation
 		}
 		sourceDisplay := s.extmsgSessionHandleForSelector(input.Body.SessionID)
-		go s.extmsgNotifyMembers(s.backgroundCtx(), notifyConversation, sourceDisplay, "agent", input.Body.Text, input.Body.SessionID)
+		go s.extmsgNotifyMembers(s.backgroundCtx(), notifyConversation, sourceDisplay, "agent", input.Body.Text, input.Body.SessionID, "")
 	}
 	out := &ExtMsgOutboundOutput{}
 	if result != nil {
@@ -351,8 +351,11 @@ func (s *Server) humaHandleExtMsgTranscriptList(ctx context.Context, input *ExtM
 
 	caller := extmsg.Caller{Kind: extmsg.CallerController, ID: "api"}
 	entries, err := svc.Transcript.List(ctx, extmsg.ListTranscriptInput{
-		Caller:       caller,
-		Conversation: ref,
+		Caller:        caller,
+		Conversation:  ref,
+		AfterSequence: input.AfterSequence,
+		Limit:         input.Limit,
+		Order:         extmsg.TranscriptOrder(input.Order),
 	})
 	if err != nil {
 		return nil, huma.Error500InternalServerError(err.Error())

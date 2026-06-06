@@ -11,8 +11,21 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/extmsg"
+	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 )
+
+type noBroadAPISessionRetireStore struct {
+	*beads.MemStore
+	t *testing.T
+}
+
+func (s *noBroadAPISessionRetireStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	if query.Label == session.LabelSession && len(query.Metadata) == 0 {
+		s.t.Fatalf("continuity retirement used broad session label scan: %+v", query)
+	}
+	return s.MemStore.List(query)
+}
 
 // Phase 0 spec coverage from engdocs/design/session-model-unification.md:
 // - Materialization contract
@@ -275,9 +288,11 @@ func TestPhase0HandleSessionWake_NamedIdentitySkipsContinuityIneligibleHistorica
 
 func TestPhase0RetireContinuityIneligibleNamedSessionIdentifiersDoesNotRestampRetiredHistory(t *testing.T) {
 	fs := newSessionFakeState(t)
+	store := &noBroadAPISessionRetireStore{MemStore: beads.NewMemStore(), t: t}
+	fs.cityBeadStore = store
 	srv := New(fs)
 	archivedAt := "2026-03-01T12:00:00Z"
-	historical, err := fs.cityBeadStore.Create(beads.Bead{
+	historical, err := store.Create(beads.Bead{
 		Type:   session.BeadType,
 		Labels: []string{session.LabelSession},
 		Metadata: map[string]string{
@@ -296,7 +311,7 @@ func TestPhase0RetireContinuityIneligibleNamedSessionIdentifiersDoesNotRestampRe
 		t.Fatalf("Create(historical): %v", err)
 	}
 
-	retired, err := srv.retireContinuityIneligibleNamedSessionIdentifiers(fs.cityBeadStore, apiNamedSessionSpec{Identity: "worker"})
+	retired, err := srv.retireContinuityIneligibleNamedSessionIdentifiers(store, apiNamedSessionSpec{Identity: "worker"})
 	if err != nil {
 		t.Fatalf("retireContinuityIneligibleNamedSessionIdentifiers: %v", err)
 	}
@@ -318,7 +333,6 @@ func TestPhase0RetireContinuityIneligibleNamedSessionIdentifiersDoesNotRestampRe
 func TestPhase0HandleSessionWake_ContinuityEligibleArchivedBeadRequestsStart(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
-	h := newTestCityHandlerWith(t, fs, srv)
 	id := phase0MaterializeCityScopedNamedWorker(t, srv, fs)
 	if err := fs.cityBeadStore.SetMetadataBatch(id, map[string]string{
 		"state":               "archived",
@@ -328,6 +342,13 @@ func TestPhase0HandleSessionWake_ContinuityEligibleArchivedBeadRequestsStart(t *
 		t.Fatalf("SetMetadataBatch(archived): %v", err)
 	}
 
+	unblockStart := make(chan struct{})
+	provider := &blockingStartProvider{Fake: runtime.NewFake(), unblock: unblockStart}
+	wrappedState := &stateWithSessionProvider{fakeState: fs, provider: provider}
+	t.Cleanup(func() { close(unblockStart) })
+
+	srv = New(wrappedState)
+	h := newTestCityHandlerWith(t, wrappedState, srv)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, newPostRequest(cityURL(fs, "/session/"+id+"/wake"), nil))
 	if rec.Code != http.StatusOK {
@@ -338,11 +359,20 @@ func TestPhase0HandleSessionWake_ContinuityEligibleArchivedBeadRequestsStart(t *
 	if err != nil {
 		t.Fatalf("Get(%s): %v", id, err)
 	}
-	if got := updated.Metadata["state"]; got != "creating" {
-		t.Fatalf("state = %q, want creating", got)
+	if got := updated.Metadata["state"]; got != "archived" {
+		t.Fatalf("state = %q, want archived before reconciler processes wake request", got)
 	}
-	if got := updated.Metadata["pending_create_claim"]; got != "true" {
-		t.Fatalf("pending_create_claim = %q, want true", got)
+	if claim := updated.Metadata["pending_create_claim"]; claim != "" {
+		t.Fatalf("pending_create_claim = %q, want empty before reconciler claims start", claim)
+	}
+	if got := updated.Metadata["wake_request"]; got != "explicit" {
+		t.Fatalf("wake_request = %q, want explicit", got)
+	}
+	if got := updated.Metadata["archived_at"]; got != "" {
+		t.Fatalf("archived_at = %q, want cleared after continuity wake", got)
+	}
+	if got := updated.Metadata["continuity_eligible"]; got != "true" {
+		t.Fatalf("continuity_eligible = %q, want true", got)
 	}
 }
 
@@ -469,17 +499,18 @@ func TestPhase0ProviderCompatibility_CreateWritesManualOrigin(t *testing.T) {
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusCreated, rec.Body.String())
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusAccepted, rec.Body.String())
 	}
 
-	var resp sessionResponse
-	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
-		t.Fatalf("decode: %v", err)
+	accepted := decodeAsyncAccepted(t, rec.Body)
+	success, failure := waitForSessionCreateResult(t, fs.eventProv, accepted.RequestID)
+	if success == nil {
+		t.Fatalf("session create failed: %s: %s", failure.ErrorCode, failure.ErrorMessage)
 	}
-	bead, err := fs.cityBeadStore.Get(resp.ID)
+	bead, err := fs.cityBeadStore.Get(success.Session.ID)
 	if err != nil {
-		t.Fatalf("Get(%s): %v", resp.ID, err)
+		t.Fatalf("Get(%s): %v", success.Session.ID, err)
 	}
 	if got := bead.Metadata["session_origin"]; got != "manual" {
 		t.Fatalf("session_origin = %q, want manual", got)

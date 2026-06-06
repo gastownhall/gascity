@@ -1,0 +1,80 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "x-gc-jsonl": {},
+  "type": "object",
+  "required": [
+    "ok",
+    "passed",
+    "warned",
+    "failed",
+    "fixed",
+    "results"
+  ],
+  "properties": {
+    "ok": {
+      "const": true
+    },
+    "passed": {
+      "type": "integer"
+    },
+    "warned": {
+      "type": "integer"
+    },
+    "failed": {
+      "type": "integer"
+    },
+    "fixed": {
+      "type": "integer"
+    },
+    "results": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "name",
+          "status",
+          "message"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "ok",
+              "warning",
+              "error",
+              "unknown"
+            ]
+          },
+          "message": {
+            "type": "string"
+          },
+          "fix_hint": {
+            "type": "string"
+          },
+          "details": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "fix_attempted": {
+            "type": "boolean"
+          },
+          "fix_error": {
+            "type": "string"
+          },
+          "fixed": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": true
+      }
+    },
+    "error": {
+      "type": "string"
+    }
+  },
+  "additionalProperties": true
+}

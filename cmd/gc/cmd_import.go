@@ -101,7 +101,29 @@ func newImportAddCmd(stdout, stderr io.Writer) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "add <source>",
 		Short: "Add a pack import",
-		Args:  cobra.ExactArgs(1),
+		Long: `Add a pack import.
+
+The source argument is resolved once and written as a durable [imports.<name>]
+entry using source plus optional version. Supported sources are:
+
+- local paths outside git worktrees: stored as plain paths, with no lock entry
+- local paths inside git worktrees at HEAD: promoted to a file:// repo source
+  with the pack subpath and locked to the current commit
+- remote git repositories: cloned and locked; --version accepts a semver
+  constraint or sha:<commit>
+- remote GitHub repository subpaths: use dereferenceable tree URLs such as
+  https://github.com/org/repo/tree/main/packs/foo
+
+Registry catalog handles are lookup shortcuts in this wave, not durable
+[imports.*] field values. After lookup, authored TOML stores the resolved
+source and optional version.`,
+		Example: `gc import add ./packs/review
+gc import add https://github.com/org/repo/tree/main/packs/review --version '^1.2.0'
+
+# For uncommitted packs inside a git worktree, edit TOML directly:
+# [imports.review]
+# source = "/Users/you/shared-packs/packs/review"`,
+		Args: cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			cityPath, err := resolveImportRoot()
 			if err != nil {
@@ -368,14 +390,12 @@ func collectAllImportsFS(fs fsys.FS, cityPath string) (map[string]config.Import,
 	for name, imp := range packManifest.Imports {
 		all["pack:"+name] = imp
 	}
-	if len(packManifest.Defaults.Rig.Imports) > 0 {
-		defaults, err := config.LoadRootPackDefaultRigImports(fs, cityPath)
-		if err != nil {
-			return nil, err
-		}
-		for _, bound := range defaults {
-			all["default-rig:"+bound.Binding] = bound.Import
-		}
+	defaults, err := config.LoadRootPackDefaultRigImports(fs, cityPath)
+	if err != nil {
+		return nil, err
+	}
+	for _, bound := range defaults {
+		all["default-rig:"+bound.Binding] = bound.Import
 	}
 
 	if _, err := fs.Stat(filepath.Join(cityPath, "city.toml")); err != nil {
@@ -593,16 +613,27 @@ func removeRootDefaultRigImportFS(fs fsys.FS, cityPath string, scope *importScop
 		return false, nil
 	}
 	defaultName := strings.TrimPrefix(name, "default-rig:")
-	manifest, err := loadCityPackManifestFS(fs, cityPath)
+	cfg, err := loadCityImportManifestFS(fs, cityPath)
 	if err != nil {
 		return false, err
 	}
-	if _, ok := manifest.Defaults.Rig.Imports[defaultName]; !ok {
-		return false, nil
+	if _, ok := cfg.Defaults.Rig.Imports[defaultName]; !ok {
+		manifest, err := loadCityPackManifestFS(fs, cityPath)
+		if err != nil {
+			return false, err
+		}
+		if _, ok := manifest.Defaults.Rig.Imports[defaultName]; !ok {
+			return false, nil
+		}
+		delete(manifest.Defaults.Rig.Imports, defaultName)
+		scope.save = func() error {
+			return writeCityPackManifest(fs, cityPath, manifest)
+		}
+		return true, nil
 	}
-	delete(manifest.Defaults.Rig.Imports, defaultName)
+	delete(cfg.Defaults.Rig.Imports, defaultName)
 	scope.save = func() error {
-		return writeCityPackManifest(fs, cityPath, manifest)
+		return writeCityImportManifestFS(fs, cityPath, cfg)
 	}
 	return true, nil
 }
@@ -1259,9 +1290,6 @@ func isRemoteImportSource(source string) bool {
 }
 
 func hasRepositoryRefInSource(source string) bool {
-	if strings.Contains(source, "/tree/") {
-		return true
-	}
 	if i := strings.Index(source, "://"); i >= 0 {
 		return strings.Contains(source[i+3:], "#")
 	}

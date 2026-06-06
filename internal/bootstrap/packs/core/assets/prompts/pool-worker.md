@@ -14,23 +14,13 @@ more work arrives.
 ## Startup Protocol
 
 ```bash
-# Step 1: Check for in-progress work (crash recovery)
-bd list --assignee="$GC_SESSION_NAME" --status=in_progress
-
-# Step 2: If nothing in-progress, check for assigned ready work
-bd ready --assignee="$GC_SESSION_NAME"
-
-# Step 3: If still nothing, check the pool queue
-bd ready --metadata-field gc.routed_to=$GC_TEMPLATE --unassigned
-
-# Step 4: Claim it
-bd update <id> --claim
-
-# Step 5: Read the bead and check for molecule_id in METADATA
-bd show <id>
+# Finds existing assigned work, assigned ready work, or atomically claims
+# routed work. If nothing is available, it acknowledges runtime drain.
+gc hook --claim --drain-ack --json
 ```
 
-If nothing is available, run `gc runtime drain-ack` to end your session.
+If the result action is `drain`, your session is done. If the action is `work`,
+read the returned `bead_id` with `bd show <id>`.
 
 ## Following Your Formula
 
@@ -43,6 +33,14 @@ Do NOT skip ahead. Do NOT claim steps done without actually doing them.
 
 On crash or restart, re-read your formula steps and determine where you
 left off from context (last completed action, git state, bead state).
+
+**Never use wide filesystem searches when a CLI command exists.** Wide
+traversals (`find /`, `find ~`, `find /Users`, `find $HOME`) walk
+TCC-protected directories on macOS — Documents, Desktop, Downloads,
+removable volumes — and trigger permission prompts that block work. If
+you don't know how to locate a formula, recipe, bead, mail, or Dolt
+state, the answer is a `gc` / `bd` introspection command, not a
+filesystem search. If no command exists for what you need, file a bead.
 
 ## Molecules — STOP, check BEFORE you start working
 
@@ -71,9 +69,7 @@ the bead description directly.
 
 ## Your Tools
 
-- `bd ready --assignee="$GC_SESSION_NAME"` — find pre-assigned work
-- `bd ready --metadata-field gc.routed_to=$GC_TEMPLATE --unassigned` — find pool work
-- `bd update <id> --claim` — claim a work item
+- `gc hook --claim --json` — find and atomically claim work
 - `bd show <id>` — see details of a work item or step
 - `bd mol current <molecule-id>` — show position in molecule workflow
 - `bd mol progress <molecule-id>` — show molecule progress summary
@@ -83,8 +79,8 @@ the bead description directly.
 
 ## How to Work
 
-1. Find work: `bd list --assignee="$GC_SESSION_NAME" --status=in_progress` or `bd ready --assignee="$GC_SESSION_NAME"` or `bd ready --metadata-field gc.routed_to=$GC_TEMPLATE --unassigned`
-2. Claim if unclaimed: `bd update <id> --claim`
+1. Find and claim work: `gc hook --claim --drain-ack --json`
+2. If the action is `drain`, exit. If the action is `work`, read `bead_id`.
 3. **Check for molecule:** `bd show <id>` — look for `molecule_id` in METADATA
 4. **If molecule exists:** `bd mol current <mol-id>` → work each step in order (show → do → close → repeat)
 5. **If no molecule:** execute the work directly from the bead description

@@ -29,6 +29,25 @@ func TestSingletonSessionMigrationWarnings_SkipsNamedBackedTemplates(t *testing.
 	if !strings.Contains(warnings[0], `agent "worker"`) {
 		t.Fatalf("warning = %q, want worker guidance", warnings[0])
 	}
+	if !strings.Contains(warnings[0], "creates a canonical singleton") {
+		t.Fatalf("warning = %q, want canonical singleton guidance", warnings[0])
+	}
+	if strings.Contains(warnings[0], "does not create a persistent singleton") {
+		t.Fatalf("warning = %q, contains stale singleton guidance", warnings[0])
+	}
+}
+
+func TestSingletonSessionMigrationWarnings_SkipsNamepoolSingleton(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{
+			{Name: "worker", MaxActiveSessions: intPtr(1), NamepoolNames: []string{"alpha"}},
+		},
+	}
+
+	if warnings := singletonSessionMigrationWarnings(cfg); len(warnings) != 0 {
+		t.Fatalf("warnings = %v, want none for namepool-backed max-one agent", warnings)
+	}
 }
 
 func TestValidateLegacyFormulaConfigRoutes_RejectsTemplateAssignee(t *testing.T) {
@@ -37,9 +56,11 @@ func TestValidateLegacyFormulaConfigRoutes_RejectsTemplateAssignee(t *testing.T)
 	if err := os.MkdirAll(formulasDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	writeFile(t, filepath.Join(formulasDir, "legacy.formula.toml"), `
+	writeFile(t, filepath.Join(formulasDir, "legacy.toml"), `
 formula = "legacy"
-version = 2
+
+[requires]
+formula_compiler = ">=2.0.0"
 
 [[steps]]
 id = "work"
@@ -67,15 +88,45 @@ assignee = "worker"
 	}
 }
 
+func TestValidateLegacyFormulaConfigRoutes_AllowsTemplateAssigneeWithoutCompilerV2Requirement(t *testing.T) {
+	dir := t.TempDir()
+	formulasDir := filepath.Join(dir, "formulas")
+	if err := os.MkdirAll(formulasDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(formulasDir, "legacy.toml"), `
+formula = "legacy"
+
+[[steps]]
+id = "work"
+title = "Work"
+assignee = "worker"
+`)
+
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents:    []config.Agent{{Name: "worker"}},
+		FormulaLayers: config.FormulaLayers{
+			City: []string{formulasDir},
+		},
+	}
+
+	if errs := validateLegacyFormulaConfigRoutes(cfg); len(errs) != 0 {
+		t.Fatalf("errs = %v, want none for formula without compiler-v2 requirement", errs)
+	}
+}
+
 func TestValidateLegacyFormulaConfigRoutes_AllowsNamedSessionAssignee(t *testing.T) {
 	dir := t.TempDir()
 	formulasDir := filepath.Join(dir, "formulas")
 	if err := os.MkdirAll(formulasDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	writeFile(t, filepath.Join(formulasDir, "named.formula.toml"), `
+	writeFile(t, filepath.Join(formulasDir, "named.toml"), `
 formula = "named"
-version = 2
+
+[requires]
+formula_compiler = ">=2.0.0"
 
 [[steps]]
 id = "review"

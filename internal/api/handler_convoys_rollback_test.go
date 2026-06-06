@@ -11,10 +11,9 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 )
 
-// humaHandleConvoyCreate applies per-item Update calls after creating
-// the convoy bead. If the nth Update fails, earlier successful updates
-// must be rolled back so items don't end up pointing at the deleted
-// convoy ID. Round 2 (R2-9) extended the Add/Remove rollback to Create.
+// humaHandleConvoyCreate links items to the new convoy after creating the
+// convoy bead. If the nth link fails, earlier successful links must be
+// rolled back so items don't end up tracked by a deleted convoy ID.
 func TestConvoyCreateRollsBackOnLinkFailure(t *testing.T) {
 	fs := newMutatorState(t)
 	store := fs.stores["myrig"]
@@ -31,11 +30,11 @@ func TestConvoyCreateRollsBackOnLinkFailure(t *testing.T) {
 		t.Fatalf("seed b: %v", err)
 	}
 
-	boom := errors.New("simulated update failure")
-	// Wrap the store so Update fails specifically on itemB.
+	boom := errors.New("simulated dep add failure")
+	// Wrap the store so DepAdd fails specifically on itemB.
 	fs.stores["myrig"] = &failingBeadStore{
 		Store:        store,
-		updateFailAt: map[string]error{itemB.ID: boom},
+		depAddFailAt: map[string]error{itemB.ID: boom},
 	}
 
 	h := newTestCityHandler(t, fs.fakeState)
@@ -52,14 +51,23 @@ func TestConvoyCreateRollsBackOnLinkFailure(t *testing.T) {
 		t.Errorf("body = %q, want 'failed to link' mention", rec.Body.String())
 	}
 
-	// itemA was re-parented before the failure; rollback must restore
-	// its original parent, NOT leave it pointing at the deleted convoy.
+	// itemA's parent should never be changed, and rollback must remove the
+	// tracks dependency added before itemB failed.
 	restored, err := store.Get(itemA.ID)
 	if err != nil {
 		t.Fatalf("get itemA: %v", err)
 	}
 	if restored.ParentID != oldParent {
-		t.Errorf("itemA.ParentID = %q, want %q (rollback should restore original parent)", restored.ParentID, oldParent)
+		t.Errorf("itemA.ParentID = %q, want %q", restored.ParentID, oldParent)
+	}
+	deps, err := store.DepList(itemA.ID, "up")
+	if err != nil {
+		t.Fatalf("DepList(itemA): %v", err)
+	}
+	for _, dep := range deps {
+		if dep.Type == "tracks" {
+			t.Fatalf("itemA still has tracks dep after rollback: %v", deps)
+		}
 	}
 
 	// The convoy bead itself must not survive as an orphan.

@@ -22,6 +22,12 @@ func stageFiles(ctx context.Context, ops k8sOps, podName string, cfg runtime.Con
 		return err
 	}
 
+	// Wait for exec endpoint to be ready. The kubelet reports Running
+	// before the CRI exec handler is set up, so we poll a trivial command.
+	if err := waitForExecReady(ctx, ops, podName, 120*time.Second); err != nil {
+		return err
+	}
+
 	// Copy rig work_dir into the pod.
 	podWorkDir := "/workspace"
 	if ctrlCity != "" && cfg.WorkDir != "" && cfg.WorkDir != ctrlCity {
@@ -35,18 +41,8 @@ func stageFiles(ctx context.Context, ops k8sOps, podName string, cfg runtime.Con
 		}
 	}
 
-	// Copy pack-level overlays (lower priority, merged additively).
-	for _, od := range cfg.PackOverlayDirs {
-		if err := copyDirToPod(ctx, ops, podName, "stage", od, "/workspace"); err != nil {
-			fmt.Fprintf(warn, "gc: warning: staging pack overlay %s: %v\n", od, err) //nolint:errcheck
-		}
-	}
-
-	// Copy agent overlay_dir (highest priority, overwrites on conflict).
-	if cfg.OverlayDir != "" {
-		if err := copyDirToPod(ctx, ops, podName, "stage", cfg.OverlayDir, "/workspace"); err != nil {
-			fmt.Fprintf(warn, "gc: warning: staging overlay %s: %v\n", cfg.OverlayDir, err) //nolint:errcheck
-		}
+	if err := stageProviderOverlaysToPod(ctx, ops, podName, cfg, podWorkDir, warn); err != nil {
+		return err
 	}
 
 	// Copy each copy_files entry.
@@ -72,6 +68,65 @@ func stageFiles(ctx context.Context, ops k8sOps, podName string, cfg runtime.Con
 	return err
 }
 
+func stageProviderOverlaysToPod(ctx context.Context, ops k8sOps, podName string, cfg runtime.Config, podWorkDir string, warn io.Writer) error {
+	if len(cfg.PackOverlayDirs) == 0 && cfg.OverlayDir == "" {
+		return nil
+	}
+	if podWorkDir == "" {
+		podWorkDir = "/workspace"
+	}
+
+	stageDir, err := os.MkdirTemp("", "gc-k8s-overlays-")
+	if err != nil {
+		return fmt.Errorf("preparing provider overlays: %w", err)
+	}
+	defer os.RemoveAll(stageDir) //nolint:errcheck
+
+	seedExistingInstructions(cfg.WorkDir, stageDir, warn)
+	providers := runtime.OverlayProviderNames(cfg)
+	for _, od := range cfg.PackOverlayDirs {
+		if err := stageProviderOverlay(od, stageDir, providers, "pack overlay", warn); err != nil {
+			return err
+		}
+	}
+	if cfg.OverlayDir != "" {
+		if err := stageProviderOverlay(cfg.OverlayDir, stageDir, providers, "overlay", warn); err != nil {
+			return err
+		}
+	}
+	if err := copyDirToPod(ctx, ops, podName, "stage", stageDir, podWorkDir); err != nil {
+		return fmt.Errorf("staging provider overlays: %w", err)
+	}
+	return nil
+}
+
+func seedExistingInstructions(workDir, stageDir string, warn io.Writer) {
+	if workDir == "" {
+		return
+	}
+	src := filepath.Join(workDir, "AGENTS.md")
+	if _, err := os.Stat(src); os.IsNotExist(err) {
+		return
+	} else if err != nil {
+		fmt.Fprintf(warn, "gc: warning: checking existing AGENTS.md: %v\n", err) //nolint:errcheck
+		return
+	}
+	if err := runtime.StagePath(src, filepath.Join(stageDir, "AGENTS.md")); err != nil {
+		fmt.Fprintf(warn, "gc: warning: preserving existing AGENTS.md: %v\n", err) //nolint:errcheck
+	}
+}
+
+func stageProviderOverlay(srcDir, dstDir string, providers []string, label string, warn io.Writer) error {
+	var warnings bytes.Buffer
+	if err := runtime.StageProviderOverlayDir(srcDir, dstDir, providers, &warnings); err != nil {
+		return fmt.Errorf("staging %s %s: %w", label, srcDir, err)
+	}
+	if warnings.Len() > 0 {
+		fmt.Fprintf(warn, "gc: warning: staging %s %s: %s\n", label, srcDir, strings.TrimSpace(warnings.String())) //nolint:errcheck
+	}
+	return nil
+}
+
 // waitForInitContainer waits for the init container to be running.
 func waitForInitContainer(ctx context.Context, ops k8sOps, podName string, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
@@ -94,6 +149,46 @@ func waitForInitContainer(ctx context.Context, ops k8sOps, podName string, timeo
 		time.Sleep(time.Second)
 	}
 	return fmt.Errorf("init container not running in pod %s after %s", podName, timeout)
+}
+
+// waitForExecReady polls exec with a trivial command until it succeeds.
+// The kubelet reports a container as Running before the CRI exec handler
+// (SPDY) is fully set up, causing "container not found" errors if we
+// exec too early. This is especially common on K3s with containerd.
+func waitForExecReady(ctx context.Context, ops k8sOps, podName string, timeout time.Duration) error {
+	const container = "stage"
+
+	deadline := time.Now().Add(timeout)
+	var lastErr error
+	for time.Now().Before(deadline) {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+		_, err := ops.execInPod(ctx, podName, container, []string{"true"}, nil)
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+
+		delay := 500 * time.Millisecond
+		if remaining := time.Until(deadline); remaining < delay {
+			delay = remaining
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(delay):
+		}
+	}
+	if lastErr != nil {
+		return fmt.Errorf("exec not ready in %s/%s after %s: %w", podName, container, timeout, lastErr)
+	}
+	return fmt.Errorf("exec not ready in %s/%s after %s", podName, container, timeout)
 }
 
 // copyDirToPod copies a local directory into the pod via tar-based exec.

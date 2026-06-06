@@ -16,16 +16,16 @@ import (
 )
 
 type message struct {
-	JSONRPC string           `json:"jsonrpc"`
-	ID      *int64           `json:"id,omitempty"`
-	Method  string           `json:"method,omitempty"`
-	Params  json.RawMessage  `json:"params,omitempty"`
-	Result  json.RawMessage  `json:"result,omitempty"`
+	JSONRPC string          `json:"jsonrpc"`
+	ID      *int64          `json:"id,omitempty"`
+	Method  string          `json:"method,omitempty"`
+	Params  json.RawMessage `json:"params,omitempty"`
+	Result  json.RawMessage `json:"result,omitempty"`
 }
 
 type promptParams struct {
-	SessionID string           `json:"sessionId"`
-	Messages  []promptMessage  `json:"messages"`
+	SessionID string          `json:"sessionId"`
+	Messages  []promptMessage `json:"messages"`
 }
 
 type promptMessage struct {
@@ -42,14 +42,18 @@ func respond(id *int64, result any) {
 	data, _ := json.Marshal(result)
 	msg := message{JSONRPC: "2.0", ID: id, Result: data}
 	out, _ := json.Marshal(msg)
-	fmt.Fprintln(os.Stdout, string(out))
+	if _, err := fmt.Fprintln(os.Stdout, string(out)); err != nil {
+		return
+	}
 }
 
 func notify(method string, params any) {
 	data, _ := json.Marshal(params)
 	msg := message{JSONRPC: "2.0", Method: method, Params: data}
 	out, _ := json.Marshal(msg)
-	fmt.Fprintln(os.Stdout, string(out))
+	if _, err := fmt.Fprintln(os.Stdout, string(out)); err != nil {
+		return
+	}
 }
 
 func main() {
@@ -103,7 +107,10 @@ func main() {
 				}
 				notify("session/update", map[string]any{
 					"sessionId": sessionID,
-					"content":   []contentBlock{{Type: "text", Text: "echo: " + text}},
+					"update": map[string]any{
+						"sessionUpdate": "agent_message_chunk",
+						"content":       map[string]any{"type": "text", "text": "echo: " + text},
+					},
 				})
 			}
 			respond(msg.ID, map[string]any{})

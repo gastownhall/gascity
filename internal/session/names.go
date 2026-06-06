@@ -325,10 +325,13 @@ func ensureSessionNameAvailableForSelfAndOwner(store beads.Store, name, selfID, 
 	if name == "" {
 		return nil
 	}
-	all, err := store.List(beads.ListQuery{
-		Label:         LabelSession,
-		IncludeClosed: true,
-	})
+	all, err := ExactMetadataSessionCandidates(store, true,
+		map[string]string{"session_name": name},
+		map[string]string{"alias": name},
+		map[string]string{"agent_name": name},
+		map[string]string{"template": name},
+		map[string]string{"common_name": name},
+	)
 	if err != nil {
 		return fmt.Errorf("listing sessions: %w", err)
 	}
@@ -337,6 +340,9 @@ func ensureSessionNameAvailableForSelfAndOwner(store beads.Store, name, selfID, 
 			continue
 		}
 		if b.ID == selfID {
+			continue
+		}
+		if failedCreateIdentityReleased(b) {
 			continue
 		}
 		// Explicit session names are permanent identities; once claimed by any
@@ -386,7 +392,14 @@ func ensureSessionNameAvailableForSelfAndOwner(store beads.Store, name, selfID, 
 	return nil
 }
 
+func failedCreateIdentityReleased(b beads.Bead) bool {
+	return strings.TrimSpace(b.Metadata["state"]) == string(StateFailedCreate)
+}
+
 func continuityIneligibleConfiguredOwner(b beads.Bead, selfOwner string) bool {
+	if failedCreateIdentityReleased(b) {
+		return false
+	}
 	if selfOwner == "" || strings.TrimSpace(b.Metadata["configured_named_identity"]) != selfOwner {
 		return false
 	}
@@ -515,15 +528,21 @@ func isConfiguredNamedSessionRuntimeName(cfg *config.City, name, owner string) b
 // ensureSessionNameAvailableForSelf so the legacy-bypass path cannot
 // suppress rejections from live alias or identifier collisions.
 func noLiveSessionNameCollisions(store beads.Store, name, selfID, selfOwner string) bool {
-	all, err := store.List(beads.ListQuery{
-		Label:         LabelSession,
-		IncludeClosed: true,
-	})
+	all, err := ExactMetadataSessionCandidates(store, true,
+		map[string]string{"session_name": name},
+		map[string]string{"alias": name},
+		map[string]string{"agent_name": name},
+		map[string]string{"template": name},
+		map[string]string{"common_name": name},
+	)
 	if err != nil {
 		return false
 	}
 	for _, b := range all {
 		if !IsSessionBeadOrRepairable(b) || b.ID == selfID {
+			continue
+		}
+		if failedCreateIdentityReleased(b) {
 			continue
 		}
 		// A live bead holding the name as session_name blocks.
@@ -565,14 +584,19 @@ func ensureSessionAliasAvailable(store beads.Store, cfg *config.City, alias, sel
 			hasSelfBead = true
 		}
 	}
-	all, err := store.List(beads.ListQuery{
-		Label: LabelSession,
-	})
+	all, err := ExactMetadataSessionCandidates(store, false,
+		map[string]string{"session_name": alias},
+		map[string]string{"alias": alias},
+		map[string]string{"agent_name": alias},
+	)
 	if err != nil {
 		return fmt.Errorf("listing sessions: %w", err)
 	}
 	for _, b := range all {
 		if !IsSessionBeadOrRepairable(b) || b.ID == selfID {
+			continue
+		}
+		if failedCreateIdentityReleased(b) {
 			continue
 		}
 		if b.Status == "closed" {

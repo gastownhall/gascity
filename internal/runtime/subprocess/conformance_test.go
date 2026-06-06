@@ -13,7 +13,7 @@ import (
 )
 
 func TestSubprocessConformance(t *testing.T) {
-	p := NewProviderWithDir(filepath.Join(t.TempDir(), "pids"))
+	p := NewProviderWithDir(filepath.Join(shortTempDir(t), "pids"))
 	var counter int64
 
 	runtimetest.RunProviderTests(t, func(t *testing.T) (runtime.Provider, runtime.Config, string) {

@@ -10,7 +10,7 @@ func applyResolvedDoltAuthEnv(env map[string]string, authScopeRoot, fallbackUser
 	if env == nil {
 		return
 	}
-	auth := doltauth.ResolveFromEnv(authScopeRoot, fallbackUser, env)
+	auth := doltauth.ResolveScopedFromEnv(authScopeRoot, fallbackUser, env)
 	applyResolvedAuthValue(env, "GC_DOLT_USER", auth.User)
 	applyResolvedAuthValue(env, "GC_DOLT_PASSWORD", auth.Password)
 	applyResolvedAuthValue(env, "BEADS_CREDENTIALS_FILE", auth.CredentialsFileOverride)

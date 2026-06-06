@@ -10,7 +10,7 @@ import (
 )
 
 func resolvedSessionConfigForProvider(
-	alias, explicitName, template, title, transport string,
+	cityPath, alias, explicitName, template, title, transport string,
 	metadata map[string]string,
 	resolved *config.ResolvedProvider,
 	command, workDir string,
@@ -36,6 +36,7 @@ func resolvedSessionConfigForProvider(
 	if transport == "acp" {
 		resolvedCommand = resolved.ACPCommandString()
 	}
+	sessionEnv := cityAnchoredSessionEnv(cityPath, resolved.Env)
 	return worker.NormalizeResolvedSessionConfig(worker.ResolvedSessionConfig{
 		Alias:        alias,
 		ExplicitName: explicitName,
@@ -47,14 +48,14 @@ func resolvedSessionConfigForProvider(
 			Command:    firstNonEmptyString(command, resolvedCommand, resolved.Name),
 			WorkDir:    workDir,
 			Provider:   resolved.Name,
-			SessionEnv: resolved.Env,
+			SessionEnv: sessionEnv,
 			Resume: session.ProviderResume{
 				ResumeFlag:    resolved.ResumeFlag,
 				ResumeStyle:   resolved.ResumeStyle,
 				ResumeCommand: resolved.ResumeCommand,
 				SessionIDFlag: resolved.SessionIDFlag,
 			},
-			Hints: sessionCreateHints(resolved, mcpServers),
+			Hints: sessionCreateHints(resolved, sessionEnv, mcpServers),
 		},
 	})
 }

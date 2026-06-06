@@ -1,0 +1,6 @@
+scope = "rig"
+wake_mode = "fresh"
+work_dir = ".gc/agents/{{.Rig}}/refinery"
+nudge = "Run 'gc prime' to check the merge queue, then begin processing."
+idle_timeout = "2h"
+max_active_sessions = 1

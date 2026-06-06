@@ -63,6 +63,12 @@ func bdTestCmd() {
 		code = doBdShow(store, rest)
 	case "ready":
 		code = doBdReady(store, rest)
+	case "init", "config", "migrate":
+		// No-op stubs used by gc-beads-bd.sh during finalize. The
+		// file-backed store does not need schema seeding, so accept
+		// these and exit 0 to keep finalize green for tests that
+		// exercise the real localInitializer + finalizeInit path.
+		code = 0
 	default:
 		fmt.Fprintf(os.Stderr, "bd: unknown subcommand %q\n", subcmd)
 		code = 1

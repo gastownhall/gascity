@@ -78,6 +78,15 @@ func resolveSleepCapability(sp runtime.Provider, name string) runtime.SessionSle
 	}
 }
 
+func sessionActivityReportable(sp runtime.Provider, name string) bool {
+	if sp == nil || name == "" {
+		return false
+	}
+	sleepCapability := resolveSleepCapability(sp, name)
+	return sleepCapability != runtime.SessionSleepCapabilityDisabled &&
+		(sleepCapability != runtime.SessionSleepCapabilityTimedOnly || sp.Capabilities().CanReportActivity)
+}
+
 func sessionSleepFingerprint(agent *config.Agent, policy resolvedSessionSleepPolicy) string {
 	if agent == nil {
 		return ""

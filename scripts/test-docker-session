@@ -112,7 +112,7 @@ chmod +x "$BUILD_CTX/scroll-entrypoint.sh"
 
 # Primary image: Alpine + procps + tmux.
 cat > "$BUILD_CTX/Dockerfile" <<'DOCKERFILE'
-FROM alpine:latest
+FROM alpine:3.22@sha256:310c62b5e7ca5b08167e4384c68db0fd2905dd9c7493756d356e893909057601
 RUN apk add --no-cache procps tmux bash
 COPY entrypoint.sh /entrypoint.sh
 COPY delay-entrypoint.sh /delay-entrypoint.sh
@@ -125,7 +125,7 @@ echo "  OK: built $TEST_IMAGE (with tmux)"
 
 # Secondary image: no tmux (for requirement check test).
 cat > "$BUILD_CTX/Dockerfile.notmux" <<'DOCKERFILE'
-FROM alpine:latest
+FROM alpine:3.22@sha256:310c62b5e7ca5b08167e4384c68db0fd2905dd9c7493756d356e893909057601
 RUN apk add --no-cache procps
 CMD ["sleep", "300"]
 DOCKERFILE

@@ -84,7 +84,7 @@ func TestPhase0SessionResolution_ConfiguredNamedConflictFailsClosed(t *testing.T
 }
 
 func TestPhase0SessionResolution_DoesNotImplicitlyMaterializeSingletonConfig(t *testing.T) {
-	t.Setenv("GC_SESSION", "phase0")
+	t.Setenv("GC_SESSION", "fake")
 
 	store := beads.NewMemStore()
 	cfg := &config.City{
@@ -111,7 +111,7 @@ func TestPhase0SessionResolution_DoesNotImplicitlyMaterializeSingletonConfig(t *
 }
 
 func TestPhase0SessionResolution_RigScopedBareNamedIdentityRequiresAmbientRig(t *testing.T) {
-	t.Setenv("GC_SESSION", "phase0")
+	t.Setenv("GC_SESSION", "fake")
 	t.Setenv("GC_DIR", t.TempDir())
 
 	store := beads.NewMemStore()
@@ -170,7 +170,7 @@ func TestPhase0CanonicalMetadata_ManualCreateWritesSessionOrigin(t *testing.T) {
 }
 
 func TestPhase0CanonicalMetadata_NamedMaterializationWritesNamedOriginWithoutLegacyManualFlag(t *testing.T) {
-	t.Setenv("GC_SESSION", "phase0")
+	t.Setenv("GC_SESSION", "fake")
 
 	store := beads.NewMemStore()
 	cfg := &config.City{
@@ -202,7 +202,7 @@ func TestPhase0CanonicalMetadata_NamedMaterializationWritesNamedOriginWithoutLeg
 }
 
 func TestPhase0CanonicalMetadata_TemplateFactoryMaterializationWritesEphemeralOriginWithoutLegacyPoolFlags(t *testing.T) {
-	t.Setenv("GC_SESSION", "phase0")
+	t.Setenv("GC_SESSION", "fake")
 
 	store := beads.NewMemStore()
 	cfg := &config.City{

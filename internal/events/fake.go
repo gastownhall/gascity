@@ -54,23 +54,36 @@ func (f *Fake) List(filter Filter) ([]Event, error) {
 	if f.broken {
 		return nil, fmt.Errorf("events provider unavailable")
 	}
-	var result []Event
-	for _, e := range f.Events {
-		if filter.AfterSeq > 0 && e.Seq <= filter.AfterSeq {
-			continue
-		}
-		if filter.Type != "" && e.Type != filter.Type {
-			continue
-		}
-		if filter.Actor != "" && e.Actor != filter.Actor {
-			continue
-		}
-		if !filter.Since.IsZero() && e.Ts.Before(filter.Since) {
-			continue
-		}
-		result = append(result, e)
+	return ApplyFilter(f.Events, filter), nil
+}
+
+// ListTail returns the trailing matching events from the in-memory store.
+func (f *Fake) ListTail(filter Filter, limit int) ([]Event, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.broken {
+		return nil, fmt.Errorf("events provider unavailable")
 	}
-	return result, nil
+	if limit <= 0 {
+		var result []Event
+		for _, e := range f.Events {
+			if matchesFilter(e, filter) {
+				result = append(result, e)
+			}
+		}
+		return result, nil
+	}
+	reversed := make([]Event, 0, limit)
+	for i := len(f.Events) - 1; i >= 0 && len(reversed) < limit; i-- {
+		e := f.Events[i]
+		if matchesFilter(e, filter) {
+			reversed = append(reversed, e)
+		}
+	}
+	for i, j := 0, len(reversed)-1; i < j; i, j = i+1, j-1 {
+		reversed[i], reversed[j] = reversed[j], reversed[i]
+	}
+	return reversed, nil
 }
 
 // LatestSeq returns the highest sequence number, or 0 if empty.

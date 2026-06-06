@@ -3,6 +3,7 @@ package runtime
 import (
 	"bytes"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,15 +11,44 @@ import (
 	"github.com/gastownhall/gascity/internal/overlay"
 )
 
-// StageWorkDir applies overlay and CopyFiles staging before a provider starts
-// the session process.
+// StageWorkDir applies a legacy overlay directory and CopyFiles staging before
+// a provider starts the session process.
 func StageWorkDir(workDir, overlayDir string, copyFiles []CopyEntry) error {
 	if overlayDir != "" && workDir != "" {
 		if err := stageDirStrict(overlayDir, workDir); err != nil {
 			return fmt.Errorf("overlay %q -> %q: %w", overlayDir, workDir, err)
 		}
 	}
+	return stageCopyFiles(workDir, copyFiles)
+}
 
+// StageSessionWorkDir applies provider-aware pack overlays, the agent overlay,
+// and CopyFiles staging before a provider starts the session process.
+func StageSessionWorkDir(cfg Config) error {
+	return StageSessionWorkDirWithWarnings(cfg, os.Stderr)
+}
+
+// StageSessionWorkDirWithWarnings applies provider-aware pack overlays, the
+// agent overlay, and CopyFiles staging before a provider starts the session
+// process. Nonfatal overlay preservation warnings are written to warnings.
+func StageSessionWorkDirWithWarnings(cfg Config, warnings io.Writer) error {
+	if cfg.WorkDir != "" {
+		overlayProviders := OverlayProviderNames(cfg)
+		for _, od := range cfg.PackOverlayDirs {
+			if err := StageProviderOverlayDir(od, cfg.WorkDir, overlayProviders, warnings); err != nil {
+				return fmt.Errorf("pack overlay %q -> %q: %w", od, cfg.WorkDir, err)
+			}
+		}
+		if cfg.OverlayDir != "" {
+			if err := StageProviderOverlayDir(cfg.OverlayDir, cfg.WorkDir, overlayProviders, warnings); err != nil {
+				return fmt.Errorf("overlay %q -> %q: %w", cfg.OverlayDir, cfg.WorkDir, err)
+			}
+		}
+	}
+	return stageCopyFiles(cfg.WorkDir, cfg.CopyFiles)
+}
+
+func stageCopyFiles(workDir string, copyFiles []CopyEntry) error {
 	for _, cf := range copyFiles {
 		dst := workDir
 		if cf.RelDst != "" {
@@ -37,6 +67,44 @@ func StageWorkDir(workDir, overlayDir string, copyFiles []CopyEntry) error {
 	}
 
 	return nil
+}
+
+// StageProviderOverlayDir copies a provider-aware overlay directory into a
+// work directory and writes nonfatal preservation warnings to warnings.
+func StageProviderOverlayDir(srcDir, dstDir string, providers []string, warnings io.Writer) error {
+	var stderr bytes.Buffer
+	if err := overlay.CopyDirForProviders(srcDir, dstDir, providers, &stderr); err != nil {
+		return err
+	}
+	nonfatal, fatal := splitOverlayWarnings(stderr.String())
+	if nonfatal != "" && warnings != nil {
+		fmt.Fprintln(warnings, nonfatal) //nolint:errcheck // best-effort warning emission
+	}
+	if fatal != "" {
+		return fmt.Errorf("%s", fatal)
+	}
+	return nil
+}
+
+func splitOverlayWarnings(raw string) (string, string) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", ""
+	}
+	var nonfatal []string
+	var fatal []string
+	for _, line := range strings.Split(raw, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if overlay.IsPreserveExistingWarning(line) {
+			nonfatal = append(nonfatal, line)
+			continue
+		}
+		fatal = append(fatal, line)
+	}
+	return strings.Join(nonfatal, "\n"), strings.Join(fatal, "\n")
 }
 
 func stageDirStrict(srcDir, dstDir string) error {

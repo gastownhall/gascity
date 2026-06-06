@@ -10,11 +10,11 @@ if [ -z "$staged_go_files" ] && [ -z "$staged_web_src" ] && [ -z "$staged_docs" 
 fi
 
 if [ -n "$staged_go_files" ]; then
-  golangci-lint fmt ./... 2>/dev/null
-  echo "$staged_go_files" | xargs git add
+  printf '%s\n' "$staged_go_files" | scripts/precommit-format-staged-go
+  printf '%s\n' "$staged_go_files" | xargs git add
 
-  golangci-lint run --new-from-rev=HEAD --fix || exit 1
-  echo "$staged_go_files" | xargs git add
+  make lint-changed LINT_CHANGED_SCOPE=staged LINT_FLAGS="--new-from-rev=HEAD --whole-files --fix" || exit 1
+  printf '%s\n' "$staged_go_files" | xargs git add
 
   # Regenerate the OpenAPI spec from the live Huma API and stage both
   # canonical copies. Keeps the committed spec and the published
@@ -32,9 +32,8 @@ if [ -n "$staged_go_files" ]; then
   go run ./cmd/genschema
   git add docs/schema/city-schema.json docs/schema/city-schema.txt docs/reference/config.md docs/reference/cli.md
 
-  make lint
   make vet
-  make test
+  make test-fast-parallel
 fi
 
 if [ -n "$staged_docs" ]; then
@@ -54,6 +53,7 @@ if command -v npm >/dev/null 2>&1; then
     # Vite preview so a bundle that builds but won't serve is caught
     # before CI.
     make dashboard-check dashboard-smoke
+    git add -f cmd/gc/dashboard/web/src/generated
     git add cmd/gc/dashboard/web/dist
   fi
 else

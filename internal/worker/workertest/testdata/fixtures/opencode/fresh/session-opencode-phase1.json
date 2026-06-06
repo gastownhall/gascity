@@ -1,0 +1,31 @@
+{
+  "info": {
+    "id": "ses_opencode_phase1",
+    "directory": "/tmp/gascity/phase1/opencode"
+  },
+  "messages": [
+    {
+      "info": {
+        "id": "msg_user_1",
+        "sessionID": "ses_opencode_phase1",
+        "role": "user",
+        "time": {"created": 1770000000000}
+      },
+      "parts": [
+        {"id": "part_user_1", "type": "text", "text": "Summarize the OpenCode worker transcript contract."}
+      ]
+    },
+    {
+      "info": {
+        "id": "msg_assistant_1",
+        "sessionID": "ses_opencode_phase1",
+        "role": "assistant",
+        "parentID": "msg_user_1",
+        "time": {"created": 1770000001000}
+      },
+      "parts": [
+        {"id": "part_assistant_1", "type": "text", "text": "OpenCode phase 1 validates the tmux CLI transcript contract."}
+      ]
+    }
+  ]
+}

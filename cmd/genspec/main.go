@@ -11,9 +11,9 @@
 //
 //	internal/api/openapi.json   — drift-check source of truth
 //	docs/schema/openapi.json    — committed docs copy
-//	docs/schema/openapi.txt     — Mint-served download mirror
+//	docs/schema/openapi.txt     — compatibility mirror kept in sync
 //	docs/schema/events.json     — gc events JSONL line schema
-//	docs/schema/events.txt      — Mint-served download mirror
+//	docs/schema/events.txt      — compatibility mirror kept in sync
 //
 // Pass -out <path> to write a single file instead, or -stdout to
 // emit to stdout (useful for ad-hoc inspection or legacy tooling).
@@ -46,7 +46,7 @@ func main() {
 	// Spec generation does not exercise city creation; nil Initializer
 	// leaves POST /v0/city returning 501 in the live spec, which is
 	// not observable at spec generation time.
-	sm := api.NewSupervisorMux(emptyResolver{}, nil, false, "", time.Time{})
+	sm := api.NewSupervisorMux(emptyResolver{}, nil, false, "", "", time.Time{})
 	req := httptest.NewRequest(http.MethodGet, "/openapi.json", nil)
 	rec := httptest.NewRecorder()
 	sm.ServeHTTP(rec, req)
@@ -100,15 +100,15 @@ func eventsSpec() ([]byte, error) {
 			"The referenced DTO schemas live in the supervisor OpenAPI document; the API remains the source of truth. " +
 			"`gc events --seq` emits a plain-text cursor and is documented in /reference/events.",
 		"anyOf": []any{
-			map[string]any{"$ref": "openapi.json#/components/schemas/WireEvent"},
-			map[string]any{"$ref": "openapi.json#/components/schemas/WireTaggedEvent"},
+			map[string]any{"$ref": "openapi.json#/components/schemas/TypedEventStreamEnvelope"},
+			map[string]any{"$ref": "openapi.json#/components/schemas/TypedTaggedEventStreamEnvelope"},
 			map[string]any{"$ref": "openapi.json#/components/schemas/EventStreamEnvelope"},
 			map[string]any{"$ref": "openapi.json#/components/schemas/TaggedEventStreamEnvelope"},
 		},
 		"$defs": map[string]any{
 			"cityListLine": map[string]any{
 				"description": "A JSONL line from `gc events` when a city is in scope.",
-				"$ref":        "openapi.json#/components/schemas/WireEvent",
+				"$ref":        "openapi.json#/components/schemas/TypedEventStreamEnvelope",
 			},
 			"cityStreamLine": map[string]any{
 				"description": "A JSONL line from `gc events --watch` or `gc events --follow` when a city is in scope.",
@@ -116,7 +116,7 @@ func eventsSpec() ([]byte, error) {
 			},
 			"supervisorListLine": map[string]any{
 				"description": "A JSONL line from `gc events` when no city is in scope.",
-				"$ref":        "openapi.json#/components/schemas/WireTaggedEvent",
+				"$ref":        "openapi.json#/components/schemas/TypedTaggedEventStreamEnvelope",
 			},
 			"supervisorStreamLine": map[string]any{
 				"description": "A JSONL line from `gc events --watch` or `gc events --follow` when no city is in scope.",
@@ -125,7 +125,7 @@ func eventsSpec() ([]byte, error) {
 		},
 		"x-gc-events": map[string]any{
 			"sourceOfTruth":        "openapi.json",
-			"listMode":             []string{"WireEvent", "WireTaggedEvent"},
+			"listMode":             []string{"TypedEventStreamEnvelope", "TypedTaggedEventStreamEnvelope"},
 			"streamMode":           []string{"EventStreamEnvelope", "TaggedEventStreamEnvelope"},
 			"heartbeatSuppression": "HeartbeatEvent SSE frames are consumed internally and are not written to stdout.",
 			"cursorMode":           "`gc events --seq` is not JSONL; it writes the current city index or supervisor composite cursor as text.",

@@ -56,7 +56,7 @@ export async function renderMail(): Promise<void> {
   restoreMailView();
 }
 
-function resetMailNoCity(): void {
+export function resetMailNoCity(): void {
   const loading = byId("mail-loading");
   const threadsEl = byId("mail-threads");
   const empty = byId("mail-empty");

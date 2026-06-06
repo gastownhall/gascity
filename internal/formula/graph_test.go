@@ -6,7 +6,6 @@ func TestApplyGraphControlsRecursesIntoNestedChildren(t *testing.T) {
 	t.Parallel()
 
 	f := &Formula{
-		Version: 2,
 		Steps: []*Step{
 			{
 				ID:    "parent",
@@ -78,7 +77,6 @@ func TestApplyGraphControlsRalphOnCompleteOnlyControlsLogicalStep(t *testing.T) 
 	t.Parallel()
 
 	f := &Formula{
-		Version: 2,
 		Steps: []*Step{
 			{
 				ID:    "review-loop",
@@ -163,7 +161,6 @@ func TestApplyGraphControlsSimpleRalphInsideScopeDoesNotCreateRunScopeCheck(t *t
 	t.Parallel()
 
 	f := &Formula{
-		Version: 2,
 		Steps: []*Step{
 			{
 				ID:    "review-loop",
@@ -208,6 +205,130 @@ func TestApplyGraphControlsSimpleRalphInsideScopeDoesNotCreateRunScopeCheck(t *t
 	}
 	if scopeCheck := findGraphStepByID(steps, "review-loop.iteration.1-scope-check"); scopeCheck != nil {
 		t.Fatalf("unexpected run scope-check control: %+v", scopeCheck)
+	}
+}
+
+func TestApplyGraphControls_TallyInjected(t *testing.T) {
+	t.Parallel()
+
+	f := &Formula{
+		Steps: []*Step{
+			{
+				ID:    "ask",
+				Title: "Ask voters",
+				OnComplete: &OnCompleteSpec{
+					ForEach: "output.voters",
+					Bond:    "mol-voter",
+				},
+				Tally: &TallySpec{
+					VoteField: "answer",
+					Mode:      "majority",
+				},
+			},
+			{
+				ID:    "summarize",
+				Title: "Summarize",
+				Needs: []string{"ask"},
+			},
+		},
+	}
+
+	ApplyGraphControls(f)
+
+	steps := collectGraphSteps(f.Steps)
+
+	fanout := findGraphStepByID(steps, "ask-fanout")
+	if fanout == nil {
+		t.Fatal("missing ask-fanout control")
+	}
+	if got := fanout.Metadata["gc.kind"]; got != "fanout" {
+		t.Errorf("ask-fanout gc.kind = %q, want fanout", got)
+	}
+
+	tally := findGraphStepByID(steps, "ask-tally")
+	if tally == nil {
+		t.Fatal("missing ask-tally control step")
+	}
+	if got := tally.Metadata["gc.kind"]; got != "tally" {
+		t.Errorf("ask-tally gc.kind = %q, want tally", got)
+	}
+	if got := tally.Metadata["gc.control_for"]; got != "ask" {
+		t.Errorf("ask-tally gc.control_for = %q, want ask", got)
+	}
+	if got := tally.Metadata["gc.tally_mode"]; got != "majority" {
+		t.Errorf("ask-tally gc.tally_mode = %q, want majority", got)
+	}
+	if got := tally.Metadata["gc.vote_field"]; got != "answer" {
+		t.Errorf("ask-tally gc.vote_field = %q, want answer", got)
+	}
+	if !containsString(tally.Needs, "ask-fanout") {
+		t.Errorf("ask-tally.Needs = %v, want ask-fanout", tally.Needs)
+	}
+
+	// Downstream step should be rewritten to wait for ask-tally, not ask.
+	summarize := findGraphStepByID(steps, "summarize")
+	if summarize == nil {
+		t.Fatal("missing summarize step")
+	}
+	if containsString(summarize.Needs, "ask") {
+		t.Error("summarize.Needs still contains ask — should have been rewritten to ask-tally")
+	}
+	if !containsString(summarize.Needs, "ask-tally") {
+		t.Errorf("summarize.Needs = %v, want ask-tally", summarize.Needs)
+	}
+}
+
+func TestApplyGraphControls_TallyDefaultMode(t *testing.T) {
+	t.Parallel()
+
+	f := &Formula{
+		Steps: []*Step{
+			{
+				ID:    "vote",
+				Title: "Vote",
+				OnComplete: &OnCompleteSpec{
+					ForEach: "output.items",
+					Bond:    "mol-voter",
+				},
+				Tally: &TallySpec{},
+			},
+		},
+	}
+
+	ApplyGraphControls(f)
+
+	steps := collectGraphSteps(f.Steps)
+	tally := findGraphStepByID(steps, "vote-tally")
+	if tally == nil {
+		t.Fatal("missing vote-tally")
+	}
+	if got := tally.Metadata["gc.tally_mode"]; got != "majority" {
+		t.Errorf("gc.tally_mode = %q, want majority (default)", got)
+	}
+}
+
+func TestApplyGraphControls_NoTallyWhenFieldAbsent(t *testing.T) {
+	t.Parallel()
+
+	f := &Formula{
+		Steps: []*Step{
+			{
+				ID:    "ask",
+				Title: "Ask",
+				OnComplete: &OnCompleteSpec{
+					ForEach: "output.items",
+					Bond:    "mol-voter",
+				},
+				// No Tally field.
+			},
+		},
+	}
+
+	ApplyGraphControls(f)
+
+	steps := collectGraphSteps(f.Steps)
+	if tally := findGraphStepByID(steps, "ask-tally"); tally != nil {
+		t.Errorf("unexpected ask-tally control when Tally is nil: %+v", tally)
 	}
 }
 

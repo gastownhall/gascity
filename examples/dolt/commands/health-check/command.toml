@@ -1,0 +1,1 @@
+description = "Fail when a Dolt health JSON report contains critical failures"

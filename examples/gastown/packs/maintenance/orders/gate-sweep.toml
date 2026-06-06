@@ -1,10 +1,8 @@
-# Replaces deacon patrol step: check-gates
-#
-# Gate evaluation is 100% mechanical — timer comparison, cron matching,
-# condition exit codes. No LLM judgment needed. The controller runs this
+# Gate evaluation is 100% mechanical — timer comparison and GitHub API
+# status decoding. No LLM judgment needed. The controller runs this
 # directly via exec instead of burning agent context.
 [order]
-description = "Evaluate and close pending gates (timer, condition, GitHub)"
+description = "Evaluate and close pending gates (timer, GitHub)"
 trigger = "cooldown"
 interval = "30s"
 exec = "$PACK_DIR/assets/scripts/gate-sweep.sh"

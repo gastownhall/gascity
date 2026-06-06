@@ -41,10 +41,7 @@ func (h *SessionHandle) LiveObservation(_ context.Context) (LiveObservation, err
 	if err != nil {
 		return LiveObservation{}, err
 	}
-	runtimeObs, err := h.manager.ObserveRuntime(id, h.runtimeHints().ProcessNames)
-	if err != nil {
-		return LiveObservation{}, err
-	}
+	runtimeObs := h.manager.ObserveRuntimeForInfo(info, h.runtimeHints().ProcessNames)
 	obs := LiveObservation{
 		Running:          runtimeObs.Running,
 		Alive:            runtimeObs.Alive,

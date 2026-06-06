@@ -32,6 +32,131 @@ func TestValidateRigEndpointOptionsRejectsWildcardExternalHost(t *testing.T) {
 	}
 }
 
+func TestValidateRigEndpointOptionsSelfRequiresPort(t *testing.T) {
+	err := validateRigEndpointOptions(rigEndpointOptions{Self: true})
+	if err == nil || !strings.Contains(err.Error(), "--self requires --port") {
+		t.Fatalf("validateRigEndpointOptions(Self without port) error = %v", err)
+	}
+}
+
+func TestValidateRigEndpointOptionsSelfRejectsHost(t *testing.T) {
+	err := validateRigEndpointOptions(rigEndpointOptions{Self: true, Port: "28232", Host: "db.example.com"})
+	if err == nil || !strings.Contains(err.Error(), "--self") || !strings.Contains(err.Error(), "--host") {
+		t.Fatalf("validateRigEndpointOptions(Self+Host) error = %v", err)
+	}
+}
+
+func TestValidateRigEndpointOptionsSelfRejectsUser(t *testing.T) {
+	err := validateRigEndpointOptions(rigEndpointOptions{Self: true, Port: "28232", User: "someone"})
+	if err == nil || !strings.Contains(err.Error(), "--self") || !strings.Contains(err.Error(), "--user") {
+		t.Fatalf("validateRigEndpointOptions(Self+User) error = %v", err)
+	}
+}
+
+func TestValidateRigEndpointOptionsForceRequiresSelf(t *testing.T) {
+	err := validateRigEndpointOptions(rigEndpointOptions{External: true, Host: "db.example.com", Port: "3307", Force: true})
+	if err == nil || !strings.Contains(err.Error(), "--force") {
+		t.Fatalf("validateRigEndpointOptions(External+Force) error = %v", err)
+	}
+}
+
+func TestValidateRigEndpointOptionsRejectsMultipleModes(t *testing.T) {
+	err := validateRigEndpointOptions(rigEndpointOptions{Inherit: true, Self: true, Port: "28232"})
+	if err == nil || !strings.Contains(err.Error(), "exactly one") {
+		t.Fatalf("validateRigEndpointOptions(Inherit+Self) error = %v", err)
+	}
+}
+
+func TestDoRigSetEndpointSelfManagedCityRequiresForce(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(t.TempDir(), "frontend")
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeRigEndpointCityConfig(t, cityDir, rigDir)
+	writeRigEndpointMetadata(t, cityDir, "hq")
+	writeRigEndpointMetadata(t, rigDir, "fe")
+	writeRigEndpointRuntimeState(t, cityDir, 3311)
+	writeRigEndpointCanonicalConfig(t, rigDir, contract.ConfigState{
+		IssuePrefix:    "fe",
+		EndpointOrigin: contract.EndpointOriginInheritedCity,
+		EndpointStatus: contract.EndpointStatusVerified,
+	})
+
+	var stdout, stderr bytes.Buffer
+	code := doRigSetEndpoint(fsys.OSFS{}, cityDir, "frontend", rigEndpointOptions{
+		Self: true,
+		Port: "28232",
+	}, &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("doRigSetEndpoint(Self, managed_city, no --force) exit = 0, want non-zero")
+	}
+	if !strings.Contains(stderr.String(), "--force") {
+		t.Errorf("want stderr to mention --force, got:\n%s", stderr.String())
+	}
+	// Canonical config must not have been mutated.
+	state := readRigEndpointConfigState(t, rigDir)
+	if state.EndpointOrigin != contract.EndpointOriginInheritedCity {
+		t.Fatalf("EndpointOrigin = %q, want unchanged %q", state.EndpointOrigin, contract.EndpointOriginInheritedCity)
+	}
+}
+
+func TestDoRigSetEndpointSelfWithForceSucceeds(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(t.TempDir(), "frontend")
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeRigEndpointCityConfig(t, cityDir, rigDir)
+	writeRigEndpointMetadata(t, cityDir, "hq")
+	writeRigEndpointMetadata(t, rigDir, "fe")
+	writeRigEndpointRuntimeState(t, cityDir, 3311)
+	writeRigEndpointCanonicalConfig(t, rigDir, contract.ConfigState{
+		IssuePrefix:    "fe",
+		EndpointOrigin: contract.EndpointOriginInheritedCity,
+		EndpointStatus: contract.EndpointStatusVerified,
+	})
+	rigPortFile := filepath.Join(rigDir, ".beads", "dolt-server.port")
+	if err := os.WriteFile(rigPortFile, []byte("3311\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	origVerify := verifyRigExternalEndpoint
+	defer func() { verifyRigExternalEndpoint = origVerify }()
+	verifyRigExternalEndpoint = func(contract.ConfigState, string, string) error { return nil }
+
+	var stdout, stderr bytes.Buffer
+	code := doRigSetEndpoint(fsys.OSFS{}, cityDir, "frontend", rigEndpointOptions{
+		Self:  true,
+		Port:  "28232",
+		Force: true,
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doRigSetEndpoint(Self+Force, managed_city) = %d, stderr = %s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "WARN") {
+		t.Errorf("want WARN in stderr, got:\n%s", stderr.String())
+	}
+
+	state := readRigEndpointConfigState(t, rigDir)
+	if state.EndpointOrigin != contract.EndpointOriginExplicit {
+		t.Fatalf("EndpointOrigin = %q, want %q", state.EndpointOrigin, contract.EndpointOriginExplicit)
+	}
+	if state.DoltHost != "127.0.0.1" {
+		t.Fatalf("DoltHost = %q, want 127.0.0.1", state.DoltHost)
+	}
+	if state.DoltPort != "28232" {
+		t.Fatalf("DoltPort = %q, want 28232", state.DoltPort)
+	}
+	if _, err := os.Stat(rigPortFile); !os.IsNotExist(err) {
+		t.Fatalf("rig port file after --self --force: err = %v, want not exist", err)
+	}
+}
+
 func TestDoRigSetEndpointInheritWritesManagedInheritedRigConfig(t *testing.T) {
 	t.Setenv("GC_BEADS", "bd")
 
@@ -728,6 +853,54 @@ func TestDoRigSetEndpointInheritManagedUnavailableDoesNotWriteFiles(t *testing.T
 	}
 }
 
+func TestDoRigSetEndpointInheritPostgresCityIgnoresStaleManagedRuntime(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(t.TempDir(), "frontend")
+	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(rigDir, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeRigEndpointCityConfig(t, cityDir, rigDir)
+	writeRigEndpointMetadata(t, rigDir, "fe")
+	writeRigEndpointCanonicalConfig(t, cityDir, contract.ConfigState{
+		IssuePrefix:    "gc",
+		EndpointOrigin: contract.EndpointOriginManagedCity,
+		EndpointStatus: contract.EndpointStatusVerified,
+	})
+	if err := os.WriteFile(filepath.Join(cityDir, ".beads", "metadata.json"), []byte(`{"database":"beads","backend":"postgres","postgres_host":"db.example.test","postgres_port":"5432","postgres_user":"bd","postgres_database":"beads_pg"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeRigEndpointCanonicalConfig(t, rigDir, contract.ConfigState{
+		IssuePrefix:    "fe",
+		EndpointOrigin: contract.EndpointOriginExplicit,
+		EndpointStatus: contract.EndpointStatusVerified,
+		DoltHost:       "old-db.example.com",
+		DoltPort:       "3307",
+		DoltUser:       "old-user",
+	})
+	writeRigEndpointRuntimeState(t, cityDir, 3311)
+
+	beforeConfig := mustReadFile(t, filepath.Join(rigDir, ".beads", "config.yaml"))
+	var stdout, stderr bytes.Buffer
+	code := doRigSetEndpoint(fsys.OSFS{}, cityDir, "frontend", rigEndpointOptions{Inherit: true}, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("doRigSetEndpoint() = %d, want 1", code)
+	}
+	if got := mustReadFile(t, filepath.Join(rigDir, ".beads", "config.yaml")); string(got) != string(beforeConfig) {
+		t.Fatalf("config.yaml changed after stale postgres managed runtime:\n%s", got)
+	}
+	if _, err := os.Stat(filepath.Join(rigDir, ".beads", "dolt-server.port")); !os.IsNotExist(err) {
+		t.Fatalf("stale managed port should not be copied to postgres-backed rig, stat err = %v", err)
+	}
+	if !strings.Contains(stderr.String(), "managed city endpoint unavailable") {
+		t.Fatalf("stderr = %q, want managed city endpoint unavailable", stderr.String())
+	}
+}
+
 func TestReadManagedRuntimePublishedPortRejectsDeadState(t *testing.T) {
 	cityDir := t.TempDir()
 	runtimeDir := filepath.Join(cityDir, ".gc", "runtime", "packs", "dolt")
@@ -1065,6 +1238,53 @@ func TestCanonicalValidationPasswordUsesCredentialsFileOverride(t *testing.T) {
 	}
 }
 
+func TestReadCanonicalProjectIDReadsL1Authoritatively(t *testing.T) {
+	scopeRoot := t.TempDir()
+	writeRigEndpointMetadata(t, scopeRoot, "hq")
+	metadataPath := filepath.Join(scopeRoot, ".beads", "metadata.json")
+	writeMetadataProjectID(t, metadataPath, "legacy-l2")
+	if err := contract.WriteProjectIdentity(fsys.OSFS{}, scopeRoot, "canonical-l1"); err != nil {
+		t.Fatalf("WriteProjectIdentity: %v", err)
+	}
+
+	got, err := readCanonicalProjectID(metadataPath)
+	if err != nil {
+		t.Fatalf("readCanonicalProjectID: %v", err)
+	}
+	if got != "canonical-l1" {
+		t.Fatalf("readCanonicalProjectID() = %q, want canonical-l1", got)
+	}
+}
+
+func TestReadCanonicalProjectIDFallsBackToL2WhenL1Absent(t *testing.T) {
+	scopeRoot := t.TempDir()
+	writeRigEndpointMetadata(t, scopeRoot, "hq")
+	metadataPath := filepath.Join(scopeRoot, ".beads", "metadata.json")
+	writeMetadataProjectID(t, metadataPath, "legacy-l2")
+
+	got, err := readCanonicalProjectID(metadataPath)
+	if err != nil {
+		t.Fatalf("readCanonicalProjectID: %v", err)
+	}
+	if got != "legacy-l2" {
+		t.Fatalf("readCanonicalProjectID() = %q, want legacy-l2", got)
+	}
+}
+
+func TestReadCanonicalProjectIDReturnsEmptyWhenL1AndL2Missing(t *testing.T) {
+	scopeRoot := t.TempDir()
+	writeRigEndpointMetadata(t, scopeRoot, "hq")
+	metadataPath := filepath.Join(scopeRoot, ".beads", "metadata.json")
+
+	got, err := readCanonicalProjectID(metadataPath)
+	if err != nil {
+		t.Fatalf("readCanonicalProjectID: %v", err)
+	}
+	if got != "" {
+		t.Fatalf("readCanonicalProjectID() = %q, want empty", got)
+	}
+}
+
 func TestVerifyExternalDoltEndpointRejectsEmptyExternalDoltDatabase(t *testing.T) {
 	skipSlowCmdGCTest(t, "requires a managed external dolt endpoint; run make test-cmd-gc-process for full coverage")
 	doltPath, err := exec.LookPath("dolt")
@@ -1172,8 +1392,10 @@ func TestVerifyExternalDoltEndpointRejectsProjectIdentityMismatch(t *testing.T) 
 	if err != nil {
 		t.Skip("dolt not installed")
 	}
+	bdPath := waitTestRealBDPath(t)
+	gcBin := currentGCBinaryForTests(t)
 	oldResolve := resolveProviderLifecycleGCBinary
-	resolveProviderLifecycleGCBinary = func() string { return currentGCBinaryForTests(t) }
+	resolveProviderLifecycleGCBinary = func() string { return gcBin }
 	t.Cleanup(func() { resolveProviderLifecycleGCBinary = oldResolve })
 
 	cityDir := t.TempDir()
@@ -1200,7 +1422,7 @@ func TestVerifyExternalDoltEndpointRejectsProjectIdentityMismatch(t *testing.T) 
 	t.Setenv("GC_CITY_PATH", cityDir)
 	t.Setenv("GC_BEADS", "bd")
 	t.Setenv("GC_DOLT", "")
-	t.Setenv("PATH", strings.Join([]string{"/home/ubuntu/.local/bin", filepath.Dir(doltPath), os.Getenv("PATH")}, string(os.PathListSeparator)))
+	t.Setenv("PATH", strings.Join([]string{filepath.Dir(bdPath), filepath.Dir(doltPath), os.Getenv("PATH")}, string(os.PathListSeparator)))
 
 	if err := ensureBeadsProvider(cityDir); err != nil {
 		t.Fatalf("ensureBeadsProvider: %v", err)
@@ -1243,14 +1465,8 @@ func TestVerifyExternalDoltEndpointRejectsProjectIdentityMismatch(t *testing.T) 
 	if _, err := db.ExecContext(ctx, "INSERT INTO metadata (`key`, value) VALUES ('_project_id', ?) ON DUPLICATE KEY UPDATE value = VALUES(value)", originalProjectID); err != nil {
 		t.Fatalf("seed database _project_id: %v", err)
 	}
-	meta["project_id"] = "different-project-id"
-	patched, err := json.MarshalIndent(meta, "", "  ")
-	if err != nil {
-		t.Fatalf("MarshalIndent(metadata.json): %v", err)
-	}
-	patched = append(patched, '\n')
-	if err := os.WriteFile(metadataPath, patched, 0o644); err != nil {
-		t.Fatalf("WriteFile(metadata.json): %v", err)
+	if err := contract.WriteProjectIdentity(fsys.OSFS{}, cityDir, "different-project-id"); err != nil {
+		t.Fatalf("WriteProjectIdentity: %v", err)
 	}
 
 	state := contract.ConfigState{
@@ -1268,6 +1484,9 @@ func TestVerifyExternalDoltEndpointRejectsProjectIdentityMismatch(t *testing.T) 
 	if !strings.Contains(strings.ToLower(err.Error()), "project identity mismatch") {
 		t.Fatalf("verifyExternalDoltEndpoint() error = %v", err)
 	}
+	if !strings.Contains(err.Error(), "different-project-id") || !strings.Contains(err.Error(), originalProjectID) {
+		t.Fatalf("verifyExternalDoltEndpoint() error = %v, want both project ids", err)
+	}
 }
 
 func TestVerifyExternalDoltEndpointRejectsMissingLocalProjectID(t *testing.T) {
@@ -1276,8 +1495,10 @@ func TestVerifyExternalDoltEndpointRejectsMissingLocalProjectID(t *testing.T) {
 	if err != nil {
 		t.Skip("dolt not installed")
 	}
+	bdPath := waitTestRealBDPath(t)
+	gcBin := currentGCBinaryForTests(t)
 	oldResolve := resolveProviderLifecycleGCBinary
-	resolveProviderLifecycleGCBinary = func() string { return currentGCBinaryForTests(t) }
+	resolveProviderLifecycleGCBinary = func() string { return gcBin }
 	t.Cleanup(func() { resolveProviderLifecycleGCBinary = oldResolve })
 
 	cityDir := t.TempDir()
@@ -1304,7 +1525,7 @@ func TestVerifyExternalDoltEndpointRejectsMissingLocalProjectID(t *testing.T) {
 	t.Setenv("GC_CITY_PATH", cityDir)
 	t.Setenv("GC_BEADS", "bd")
 	t.Setenv("GC_DOLT", "")
-	t.Setenv("PATH", strings.Join([]string{"/home/ubuntu/.local/bin", filepath.Dir(doltPath), os.Getenv("PATH")}, string(os.PathListSeparator)))
+	t.Setenv("PATH", strings.Join([]string{filepath.Dir(bdPath), filepath.Dir(doltPath), os.Getenv("PATH")}, string(os.PathListSeparator)))
 
 	if err := ensureBeadsProvider(cityDir); err != nil {
 		t.Fatalf("ensureBeadsProvider: %v", err)
@@ -1342,6 +1563,9 @@ func TestVerifyExternalDoltEndpointRejectsMissingLocalProjectID(t *testing.T) {
 	if err := os.WriteFile(metadataPath, patched, 0o644); err != nil {
 		t.Fatalf("WriteFile(metadata.json): %v", err)
 	}
+	if err := os.Remove(contract.ProjectIdentityPath(cityDir)); err != nil && !os.IsNotExist(err) {
+		t.Fatalf("Remove(identity.toml): %v", err)
+	}
 
 	db, err := sql.Open("mysql", fmt.Sprintf("root@tcp(127.0.0.1:%s)/hq", port))
 	if err != nil {
@@ -1366,7 +1590,7 @@ func TestVerifyExternalDoltEndpointRejectsMissingLocalProjectID(t *testing.T) {
 	if err == nil {
 		t.Fatal("verifyExternalDoltEndpoint() unexpectedly succeeded for missing local project_id")
 	}
-	if !strings.Contains(strings.ToLower(err.Error()), "missing project_id") {
+	if !strings.Contains(err.Error(), "neither .beads/identity.toml nor .beads/metadata.json carry a project_id") {
 		t.Fatalf("verifyExternalDoltEndpoint() error = %v", err)
 	}
 }
@@ -1415,7 +1639,16 @@ func writeRigEndpointCityConfig(t *testing.T, cityDir, rigDir string) {
 	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	content := fmt.Sprintf("[workspace]\nname = \"test-city\"\n\n[[rigs]]\nname = \"frontend\"\npath = %q\nprefix = \"fe\"\n", rigDir)
+	if err := os.WriteFile(filepath.Join(cityDir, "pack.toml"), []byte("[pack]\nname = \"test-city\"\nschema = 2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := config.PersistWorkspaceSiteBinding(fsys.OSFS{}, cityDir, "test-city", ""); err != nil {
+		t.Fatalf("PersistWorkspaceSiteBinding: %v", err)
+	}
+	if err := config.PersistRigSiteBindings(fsys.OSFS{}, cityDir, []config.Rig{{Name: "frontend", Path: rigDir}}); err != nil {
+		t.Fatalf("PersistRigSiteBindings: %v", err)
+	}
+	content := "[workspace]\n\n[[rigs]]\nname = \"frontend\"\nprefix = \"fe\"\n"
 	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -1454,6 +1687,24 @@ func writeRigEndpointMetadata(t *testing.T, dir, doltDatabase string) {
 		DoltMode:     "server",
 		DoltDatabase: doltDatabase,
 	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func writeMetadataProjectID(t *testing.T, metadataPath string, projectID string) {
+	t.Helper()
+	data := mustReadFile(t, metadataPath)
+	var meta map[string]any
+	if err := json.Unmarshal(data, &meta); err != nil {
+		t.Fatal(err)
+	}
+	meta["project_id"] = projectID
+	encoded, err := json.MarshalIndent(meta, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded = append(encoded, '\n')
+	if err := os.WriteFile(metadataPath, encoded, 0o644); err != nil {
 		t.Fatal(err)
 	}
 }

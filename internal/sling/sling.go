@@ -8,8 +8,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
-	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -18,9 +16,13 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/formula"
+	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/graphv2"
 	"github.com/gastownhall/gascity/internal/molecule"
+	"github.com/gastownhall/gascity/internal/pathutil"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/shellquote"
+	"github.com/gastownhall/gascity/internal/sourceworkflow"
 	workdirutil "github.com/gastownhall/gascity/internal/workdir"
 )
 
@@ -51,6 +53,12 @@ type SlingOpts struct {
 	Nudge         bool
 	Force         bool
 	DryRun        bool
+	// Reassign clears any existing human assignee on the bead before
+	// routing so the target pool/agent can claim it. Without this, a
+	// bead claimed by a human (`bd update --claim`) stays invisible
+	// to the pool's claim filter even after sling sets gc.routed_to.
+	// See gastownhall/gascity#1007.
+	Reassign bool
 	// InlineText is set only by the CLI path for ad-hoc task text. API
 	// callers always provide explicit bead or formula references.
 	InlineText bool
@@ -96,6 +104,7 @@ type RouteRequest struct {
 	Metadata map[string]string // gc.routed_to, pool label, etc.
 	WorkDir  string            // rig directory for command execution
 	Env      map[string]string // extra env vars (GC_SLING_TARGET, etc.)
+	Force    bool              // allow best-effort routing when the bead is absent
 }
 
 // SlingDeps bundles infrastructure dependencies for sling operations.
@@ -113,7 +122,7 @@ type SlingDeps struct {
 	// SourceWorkflowStores lists every bead store that may contain workflow
 	// roots for source-workflow singleton checks and recovery.
 	SourceWorkflowStores func() ([]SourceWorkflowStore, error)
-	Stderr               io.Writer
+	Tracer               func(format string, args ...any)
 
 	// Narrow interfaces (matches established internal package patterns).
 	Resolver AgentResolver  // agent name resolution
@@ -140,10 +149,12 @@ type SlingResult struct {
 
 	// Structured warnings (callers decide how to display).
 	AgentSuspended bool     // target agent is suspended
+	SuspendedRig   string   // non-empty: name of the target's rig, which is suspended
 	PoolEmpty      bool     // pool max=0
 	AutoBurned     []string // IDs of auto-burned stale molecules
 	MetadataErrors []string // non-fatal metadata write failures
 	BeadWarnings   []string // pre-flight bead state warnings
+	Deprecations   []string // deprecated formula constructs (graph.v2 issue alias)
 
 	// Batch fields (populated by DoSlingBatch).
 	ContainerType string // "convoy", "epic", etc. (batch only)
@@ -289,18 +300,21 @@ type ScaleInfo struct {
 // extra env vars and returns combined output.
 type SlingRunner func(dir, command string, env map[string]string) (string, error)
 
-// SlingTracef writes to the sling trace log if GC_SLING_TRACE is set.
+// SlingTracef calls the package-level trace function if set. Wire via
+// SetTracer at process startup; the domain package never opens files or
+// reads environment variables directly.
 func SlingTracef(format string, args ...any) {
-	path := strings.TrimSpace(os.Getenv("GC_SLING_TRACE"))
-	if path == "" {
-		return
+	if globalTracer != nil {
+		globalTracer(format, args...)
 	}
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
-	if err != nil {
-		return
-	}
-	defer f.Close()                                                                                    //nolint:errcheck // best-effort trace log
-	fmt.Fprintf(f, "%s %s\n", time.Now().UTC().Format(time.RFC3339Nano), fmt.Sprintf(format, args...)) //nolint:errcheck
+}
+
+var globalTracer func(format string, args ...any)
+
+// SetTracer installs the package-level trace function. Call once at
+// process startup from the CLI edge.
+func SetTracer(fn func(format string, args ...any)) {
+	globalTracer = fn
 }
 
 // FindRigByPrefix finds a rig whose effective prefix matches (case-insensitive).
@@ -324,9 +338,10 @@ func IsHQPrefix(cfg *config.City, prefix string) bool {
 }
 
 // RigDirForBead resolves the rig directory for a bead ID by extracting
-// the bead prefix and looking up the rig path.
+// the bead prefix and looking up the rig path. Honors hyphenated rig
+// prefixes via BeadPrefixForCity.
 func RigDirForBead(cfg *config.City, beadID string) string {
-	bp := BeadPrefix(beadID)
+	bp := BeadPrefixForCity(cfg, beadID)
 	if bp == "" {
 		return ""
 	}
@@ -337,13 +352,14 @@ func RigDirForBead(cfg *config.City, beadID string) string {
 }
 
 // RigDirForAgent returns the rig directory for an agent by matching its Dir
-// field to a rig Name.
+// field to a rig name or configured rig path.
 func RigDirForAgent(cfg *config.City, a config.Agent) string {
-	if a.Dir == "" {
+	rigName := rigNameForAgent(cfg, a)
+	if rigName == "" {
 		return ""
 	}
 	for _, r := range cfg.Rigs {
-		if r.Name == a.Dir {
+		if r.Name == rigName {
 			return r.Path
 		}
 	}
@@ -366,22 +382,22 @@ func BuildSlingCommand(template, beadID string) string {
 
 // BuildSlingCommandForAgent expands any PathContext placeholders in a custom
 // sling_query, then replaces {} with the bead ID. Malformed templates fall back
-// to the raw sling_query so routing behavior remains non-fatal.
-func BuildSlingCommandForAgent(fieldName, template, beadID, cityPath, cityName string, a config.Agent, rigs []config.Rig, stderr io.Writer) string {
+// to the raw sling_query so routing behavior remains non-fatal. The returned
+// warning is non-empty when template expansion failed and the raw template was
+// used as fallback.
+func BuildSlingCommandForAgent(fieldName, template, beadID, cityPath, cityName string, a config.Agent, rigs []config.Rig) (command, warning string) {
 	if strings.Contains(template, "{{") {
 		expanded, err := workdirutil.ExpandCommandTemplate(template, cityPath, cityName, a, rigs)
 		if err != nil {
-			if stderr != nil {
-				if fieldName == "" {
-					fieldName = "sling_query"
-				}
-				fmt.Fprintf(stderr, "BuildSlingCommandForAgent: agent %q field %q: %v (using raw command)\n", a.QualifiedName(), fieldName, err) //nolint:errcheck
+			if fieldName == "" {
+				fieldName = "sling_query"
 			}
+			warning = fmt.Sprintf("BuildSlingCommandForAgent: agent %q field %q: %v (using raw command)", a.QualifiedName(), fieldName, err)
 		} else {
 			template = expanded
 		}
 	}
-	return BuildSlingCommand(template, beadID)
+	return BuildSlingCommand(template, beadID), warning
 }
 
 // FormatBeadLabel formats a bead ID with optional title for display.
@@ -392,15 +408,188 @@ func FormatBeadLabel(id, title string) string {
 	return id
 }
 
-// BeadPrefix extracts the rig prefix from a bead ID by taking the lowercase
-// letters before the first dash. "HW-7" → "hw", "FE-123" → "fe".
-// Returns "" if the ID has no dash (can't determine prefix).
+// BeadPrefix extracts the rig prefix from a bead ID using a config-free
+// last-hyphen heuristic. "HW-7" -> "hw", "pieces-annotator-x8o" ->
+// "pieces-annotator".
+//
+// If the final segment looks word-like rather than ID-like, it falls back to
+// the first dash so ordinary prose such as "code-review-please" still resolves
+// as "code". Callers with city config should use BeadPrefixForCity for
+// deterministic longest-prefix resolution.
 func BeadPrefix(beadID string) string {
-	i := strings.Index(beadID, "-")
-	if i <= 0 {
+	return beadPrefixHeuristic(beadID)
+}
+
+func beadPrefixHeuristic(beadID string) string {
+	beadID = strings.TrimSpace(beadID)
+	lastIdx := strings.LastIndex(beadID, "-")
+	if lastIdx <= 0 {
 		return ""
 	}
-	return strings.ToLower(beadID[:i])
+	suffix := beadID[lastIdx+1:]
+	if suffix == "" {
+		return strings.ToLower(strings.TrimRight(beadID[:lastIdx], "-"))
+	}
+	base := suffix
+	if dot := strings.IndexByte(suffix, '.'); dot > 0 {
+		base = suffix[:dot]
+	}
+	if isBeadNumeric(base) || isBeadHash(base) {
+		return strings.ToLower(strings.TrimRight(beadID[:lastIdx], "-"))
+	}
+	firstIdx := strings.Index(beadID, "-")
+	if firstIdx <= 0 {
+		return ""
+	}
+	return strings.ToLower(beadID[:firstIdx])
+}
+
+func isBeadNumeric(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, c := range s {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// isBeadHash is only the config-free BeadPrefix heuristic's suffix gate. It
+// intentionally rejects longer all-letter words so prose like
+// "code-review-please" falls back to the first dash instead of being treated
+// as a hyphenated rig prefix. Config-aware routing must use BeadPrefixForCity
+// and the configured-prefix matchers instead.
+func isBeadHash(s string) bool {
+	if len(s) < 3 || len(s) > 8 {
+		return false
+	}
+	hasDigit := len(s) == 3
+	for _, c := range s {
+		if c >= '0' && c <= '9' {
+			hasDigit = true
+			continue
+		}
+		if (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') {
+			return false
+		}
+	}
+	return hasDigit
+}
+
+// BeadPrefixForCity returns the configured rig (or HQ) prefix that beadID
+// belongs to, preferring the longest match so hyphenated rig prefixes resolve
+// correctly. It does not require the suffix to pass the short bead-ID shape
+// gate; callers that need to decide bead ID vs inline text should use
+// LooksLikeConfiguredBeadID. Falls back to BeadPrefix when no configured
+// prefix matches. Returns "" if the bead has no dash and no configured-prefix
+// match.
+func BeadPrefixForCity(cfg *config.City, beadID string) string {
+	if p := matchConfiguredBeadPrefixCandidate(cfg, beadID); p != "" {
+		return p
+	}
+	return BeadPrefix(beadID)
+}
+
+// LooksLikeConfiguredBeadID reports whether s parses as a bead ID whose
+// prefix matches the city's HQ prefix or any configured rig's effective
+// prefix. Unlike BeadIDParts, it accepts hyphenated rig prefixes
+// (e.g. "agent-diagnostics-hnn" with rig "agent-diagnostics"). The
+// trailing suffix must be alphanumeric (allowing an optional ".child"
+// hierarchical part) and at most 8 characters long.
+func LooksLikeConfiguredBeadID(cfg *config.City, s string) bool {
+	return matchConfiguredBeadPrefix(cfg, s) != ""
+}
+
+// matchConfiguredBeadPrefix returns the longest configured prefix
+// (HQ or rig) that beadID begins with, provided the trailing suffix
+// passes the bead-suffix shape gate. Match is case-insensitive on the
+// prefix; the returned value is the lower-cased configured prefix.
+// Returns "" if no configured prefix matches.
+func matchConfiguredBeadPrefix(cfg *config.City, beadID string) string {
+	return matchConfiguredBeadPrefixBySuffix(cfg, beadID, true)
+}
+
+func matchConfiguredBeadPrefixCandidate(cfg *config.City, beadID string) string {
+	return matchConfiguredBeadPrefixBySuffix(cfg, beadID, false)
+}
+
+func matchConfiguredBeadPrefixBySuffix(cfg *config.City, beadID string, requireValidSuffix bool) string {
+	beadID = strings.TrimSpace(beadID)
+	if cfg == nil || beadID == "" || strings.ContainsAny(beadID, " \t\n") {
+		return ""
+	}
+	candidates := configuredBeadPrefixes(cfg)
+	// Track the longest matching prefix; equal-length ties keep the first
+	// match, matching the order semantics of FindRigByPrefix.
+	best := ""
+	bestLen := 0
+	lower := strings.ToLower(beadID)
+	for _, p := range candidates {
+		lp := strings.ToLower(p)
+		if len(lp) <= bestLen {
+			continue
+		}
+		if !strings.HasPrefix(lower, lp+"-") {
+			continue
+		}
+		if requireValidSuffix {
+			suffix := beadID[len(lp)+1:]
+			if !validBeadSuffix(suffix) {
+				continue
+			}
+		}
+		best = lp
+		bestLen = len(lp)
+	}
+	return best
+}
+
+// configuredBeadPrefixes returns every prefix the city accepts for bead
+// IDs: the city's HQ prefix plus each rig's effective prefix. Empty
+// entries are skipped. The caller picks the longest match; order only
+// matters when equal-length matches tie, in which case the first match
+// (HQ before rigs, then cfg.Rigs declaration order) is kept. Note that
+// config validation rejects duplicate prefixes, so ties should not
+// appear in valid configs.
+func configuredBeadPrefixes(cfg *config.City) []string {
+	if cfg == nil {
+		return nil
+	}
+	out := make([]string, 0, len(cfg.Rigs)+1)
+	if hq := config.EffectiveHQPrefix(cfg); hq != "" {
+		out = append(out, hq)
+	}
+	for i := range cfg.Rigs {
+		if p := cfg.Rigs[i].EffectivePrefix(); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// validBeadSuffix reports whether suffix is a plausible bead-ID suffix:
+// a non-empty alphanumeric base of at most 8 characters, optionally
+// followed by ".child" hierarchical parts. The hierarchical portion is
+// not validated, matching BeadIDParts which truncates at the first dot before
+// validating the base. This is the configured-prefix suffix gate for
+// LooksLikeConfiguredBeadID; it does not try to distinguish hash-like IDs from
+// prose because the prefix has already matched city config.
+func validBeadSuffix(suffix string) bool {
+	base := suffix
+	if dot := strings.IndexByte(suffix, '.'); dot > 0 {
+		base = suffix[:dot]
+	}
+	if base == "" || len(base) > 8 {
+		return false
+	}
+	for _, c := range base {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') {
+			return false
+		}
+	}
+	return true
 }
 
 // RigPrefixForAgent returns the rig prefix that an agent's rig uses for bead IDs.
@@ -445,7 +634,7 @@ func CrossRigRouteError(beadID string, a config.Agent, cfg *config.City) *CrossR
 	if cfg == nil || a.Dir == "" {
 		return nil
 	}
-	bp := BeadPrefix(beadID)
+	bp := BeadPrefixForCity(cfg, beadID)
 	if bp == "" {
 		return nil
 	}
@@ -462,6 +651,33 @@ func CrossRigRouteError(beadID string, a config.Agent, cfg *config.City) *CrossR
 		Target:     a.QualifiedName(),
 		RigPrefix:  rp,
 	}
+}
+
+// CrossStoreRouteError reports that a target agent cannot read the workflow
+// store containing the routed bead.
+type CrossStoreRouteError struct {
+	BeadID            string
+	StoreRef          string
+	Target            string
+	ReachableStoreRef string
+}
+
+// Error returns the cross-store routing diagnostic.
+func (e *CrossStoreRouteError) Error() string {
+	source := routeStoreLabel(e.StoreRef)
+	reachable := routeStoreLabel(e.ReachableStoreRef)
+	return fmt.Sprintf(
+		"gc sling: refusing cross-store route: bead %s lives in %s but target %q reads %s; "+
+			"re-file the bead in %s (or pick a target reachable from %s). "+
+			"Cross-store routes silently wedge pools — see tr-6s7yx",
+		e.BeadID, source, e.Target, reachable, reachable, source)
+}
+
+func routeStoreLabel(storeRef string) string {
+	if strings.TrimSpace(storeRef) == "" {
+		return "<unclassified store>"
+	}
+	return storeRef
 }
 
 // ProbeBeadInStore checks if a bead exists in the given store and surfaces
@@ -643,11 +859,58 @@ func BeadMetadataTarget(store beads.Store, beadID string) string {
 
 // SlingFormulaSearchPaths returns the formula search paths for the current
 // sling context.
+//
+// FormulaLayers.SearchPaths is keyed by rig NAME, but agent.Dir may be
+// either a rig name OR a filesystem path (the docs/examples allow both).
+// Resolve to the rig name first so pack-imported formula layers (under
+// fl.Rigs[<name>]) are reachable when an agent is configured with a path
+// instead of a name. Without this resolution the lookup silently falls
+// back to fl.City and pack-imported formulas appear "not found in search
+// paths" — `gc formula list` would still find them by scanning every
+// configured search path (city + every rig), so the lookup-versus-list
+// asymmetry is the surface symptom. See gastownhall/gascity#1801.
 func SlingFormulaSearchPaths(deps SlingDeps, a config.Agent) []string {
 	if deps.Cfg == nil {
 		return nil
 	}
-	return deps.Cfg.FormulaLayers.SearchPaths(a.Dir)
+	rigName := rigNameForAgent(deps.Cfg, a)
+	return deps.Cfg.FormulaLayers.SearchPaths(rigName)
+}
+
+// rigNameForAgent returns the rig name for an agent. Handles both
+// configuration shapes:
+//   - a.Dir is a rig name (`dir = "gascity"`) — return as-is after a
+//     defensive existence check against cfg.Rigs.
+//   - a.Dir is a filesystem path (`dir = "/home/ds/gascity"`) — find the
+//     rig whose Path matches (after symlink resolution + normalization)
+//     and return its Name.
+//
+// Returns "" when the agent is city-scoped (a.Dir empty) or no rig
+// matches; SearchPaths handles "" by returning city-level layers.
+func rigNameForAgent(cfg *config.City, a config.Agent) string {
+	dir := strings.TrimSpace(a.Dir)
+	if dir == "" {
+		return ""
+	}
+	for _, r := range cfg.Rigs {
+		if r.Name == dir {
+			return r.Name
+		}
+	}
+	for _, r := range cfg.Rigs {
+		if strings.TrimSpace(r.Path) == "" {
+			continue
+		}
+		// Use SamePath so paths that differ only by trailing slashes,
+		// symlink resolution (/tmp vs /private/tmp on macOS), or other
+		// normalization quirks still match. Strict string equality
+		// would re-introduce the #1801 fall-through under those
+		// conditions.
+		if pathutil.SamePath(r.Path, dir) {
+			return r.Name
+		}
+	}
+	return ""
 }
 
 // SlingFormulaUsesBaseBranch reports whether the formula conventionally
@@ -667,19 +930,38 @@ func SlingFormulaUsesTargetBranch(formulaName string) bool {
 func SlingFormulaRepoDir(beadID string, deps SlingDeps, a config.Agent) string {
 	if deps.Cfg != nil {
 		if dir := RigDirForBead(deps.Cfg, beadID); dir != "" {
-			return dir
+			return resolveScopeRoot(deps.CityPath, dir)
 		}
 		if dir := RigDirForAgent(deps.Cfg, a); dir != "" {
-			return dir
+			return resolveScopeRoot(deps.CityPath, dir)
 		}
 	}
-	return deps.CityPath
+	return resolveScopeRoot(deps.CityPath, deps.CityPath)
+}
+
+func resolveScopeRoot(cityPath, storePath string) string {
+	scopeRoot := strings.TrimSpace(storePath)
+	if scopeRoot == "" {
+		scopeRoot = cityPath
+	}
+	if !filepath.IsAbs(scopeRoot) {
+		scopeRoot = filepath.Join(cityPath, scopeRoot)
+	}
+	return filepath.Clean(scopeRoot)
 }
 
 // SlingFormulaTargetBranch resolves the target branch for formula variables.
+// Resolution order:
+//  1. metadata.target on the work bead (per-bead override)
+//  2. DefaultBranch recorded on the bead's rig in city.toml (set by gc rig add)
+//  3. DefaultBranch recorded on the agent's rig in city.toml
+//  4. Live probe via deps.Branches.DefaultBranch (git symbolic-ref origin/HEAD)
 func SlingFormulaTargetBranch(beadID string, deps SlingDeps, a config.Agent) string {
 	if target := BeadMetadataTarget(deps.Store, beadID); target != "" {
 		return target
+	}
+	if branch := rigStoredDefaultBranch(deps.Cfg, beadID, a); branch != "" {
+		return branch
 	}
 	if deps.Branches != nil {
 		return deps.Branches.DefaultBranch(SlingFormulaRepoDir(beadID, deps, a))
@@ -687,15 +969,55 @@ func SlingFormulaTargetBranch(beadID string, deps SlingDeps, a config.Agent) str
 	return ""
 }
 
+// rigStoredDefaultBranch returns the DefaultBranch recorded on the rig the
+// bead/agent belongs to, or empty string if no match has a stored value.
+// Bead lookup wins over agent lookup so cross-rig sling targets still pick
+// the right rig.
+func rigStoredDefaultBranch(cfg *config.City, beadID string, a config.Agent) string {
+	if cfg == nil {
+		return ""
+	}
+	if beadID != "" {
+		if bp := BeadPrefixForCity(cfg, beadID); bp != "" && !IsHQPrefix(cfg, bp) {
+			if rig, ok := FindRigByPrefix(cfg, bp); ok {
+				if branch := rig.EffectiveDefaultBranch(); branch != "" {
+					return branch
+				}
+			}
+		}
+	}
+	if rigName := rigNameForAgent(cfg, a); rigName != "" {
+		for _, r := range cfg.Rigs {
+			if r.Name == rigName {
+				if branch := r.EffectiveDefaultBranch(); branch != "" {
+					return branch
+				}
+			}
+		}
+	}
+	return ""
+}
+
 // BuildSlingFormulaVars builds the variable map for formula instantiation.
+// Precedence (highest wins): explicit --var > rig.formula_vars > routing-injected
+// defaults (issue/rig_name/base_branch/...) > formula-level [vars.*].default.
 func BuildSlingFormulaVars(formulaName, beadID string, userVars []string, a config.Agent, deps SlingDeps) map[string]string {
-	vars := make(map[string]string, len(userVars)+3)
+	return buildSlingFormulaVars(formulaName, beadID, userVars, a, deps, true)
+}
+
+func buildGraphV2SlingFormulaVars(formulaName, beadID string, userVars []string, a config.Agent, deps SlingDeps) map[string]string {
+	return buildSlingFormulaVars(formulaName, beadID, userVars, a, deps, false)
+}
+
+func buildSlingFormulaVars(formulaName, beadID string, userVars []string, a config.Agent, deps SlingDeps, includeIssue bool) map[string]string {
+	vars := make(map[string]string, len(userVars)+6)
 	for _, v := range userVars {
 		key, value, ok := strings.Cut(v, "=")
 		if ok && key != "" {
 			vars[key] = value
 		}
 	}
+	mergeRigFormulaVars(vars, deps.Cfg, a)
 	addVar := func(key, value string) {
 		if value == "" {
 			return
@@ -705,10 +1027,19 @@ func BuildSlingFormulaVars(formulaName, beadID string, userVars []string, a conf
 		}
 		vars[key] = value
 	}
+	addRoutingVar := func(key, value string) {
+		if _, explicit := vars[key]; explicit {
+			return
+		}
+		vars[key] = value
+	}
 
-	if beadID != "" {
+	if includeIssue && beadID != "" {
 		addVar("issue", beadID)
 	}
+	addRoutingVar("rig_name", a.Dir)
+	addRoutingVar("binding_name", a.BindingName)
+	addRoutingVar("binding_prefix", a.BindingPrefix())
 
 	autoBranch := SlingFormulaTargetBranch(beadID, deps, a)
 	if SlingFormulaUsesBaseBranch(formulaName) {
@@ -721,13 +1052,107 @@ func BuildSlingFormulaVars(formulaName, beadID string, userVars []string, a conf
 	return vars
 }
 
+// mergeRigFormulaVars folds rig-scoped formula_vars defaults into vars.
+// Explicit --var entries already in vars are preserved. The lookup uses
+// rigNameForAgent so agents whose Dir is a filesystem path still resolve
+// to the correct rig.
+func mergeRigFormulaVars(vars map[string]string, cfg *config.City, a config.Agent) {
+	if cfg == nil {
+		return
+	}
+	rigName := rigNameForAgent(cfg, a)
+	if rigName == "" {
+		return
+	}
+	for i := range cfg.Rigs {
+		if cfg.Rigs[i].Name != rigName {
+			continue
+		}
+		for k, v := range cfg.Rigs[i].FormulaVars {
+			if _, explicit := vars[k]; explicit {
+				continue
+			}
+			vars[k] = v
+		}
+		return
+	}
+}
+
 // ResolveSlingEnv returns extra env vars for the sling command.
-func ResolveSlingEnv(a config.Agent, deps SlingDeps) map[string]string {
-	if agentutil.IsMultiSessionAgent(&a) {
+//
+// Two env vars are projected:
+//   - GC_SLING_TARGET: the concrete session name, for single-session
+//     agents only (pool/polecat agents resolve their session name per
+//     claim and do not need this).
+//   - GC_ARTIFACT_DIR: a molecule-scoped artifact directory rooted under
+//     <cityPath>/.gc/molecules/<rootID>/artifacts/<beadID>/. Set only when
+//     the bead carries gc.root_bead_id metadata, so that ralph-loop and
+//     other stateful steps survive worker (polecat) teardown and
+//     re-sling.
+//
+// Callers that already have the bead fetched should prefer
+// ResolveSlingEnvForBead to avoid a redundant store lookup.
+func ResolveSlingEnv(a config.Agent, deps SlingDeps, beadID string) map[string]string {
+	var bead beads.Bead
+	if deps.Store != nil && strings.TrimSpace(beadID) != "" {
+		if got, err := deps.Store.Get(beadID); err == nil {
+			bead = got
+		}
+	}
+	return ResolveSlingEnvForBead(a, deps, bead)
+}
+
+// ResolveSlingEnvForBead is the bead-already-fetched variant of
+// ResolveSlingEnv. A zero-value bead disables molecule artifact
+// resolution; callers without the bead should use ResolveSlingEnv.
+func ResolveSlingEnvForBead(a config.Agent, deps SlingDeps, bead beads.Bead) map[string]string {
+	env := map[string]string{}
+
+	if !agentutil.IsMultiSessionAgent(&a) {
+		var sessionTemplate string
+		if deps.Cfg != nil {
+			sessionTemplate = deps.Cfg.Workspace.SessionTemplate
+		}
+		sn := agentutil.LookupSessionName(deps.Store, deps.CityName, a.QualifiedName(), sessionTemplate)
+		env["GC_SLING_TARGET"] = sn
+	}
+
+	if dir := resolveMoleculeArtifactDir(deps, bead); dir != "" {
+		env["GC_ARTIFACT_DIR"] = dir
+	}
+
+	// Preserve nil-vs-empty contract for callers that forward env to
+	// exec.Command — TestDoSlingEnvPassthrough asserts pool agents with
+	// no molecule context receive nil env so the subprocess inherits the
+	// parent environment unmodified.
+	if len(env) == 0 {
 		return nil
 	}
-	sn := agentutil.LookupSessionName(deps.Store, deps.CityName, a.QualifiedName(), deps.Cfg.Workspace.SessionTemplate)
-	return map[string]string{"GC_SLING_TARGET": sn}
+	return env
+}
+
+// resolveMoleculeArtifactDir returns the per-bead molecule artifact
+// directory when the bead is a molecule member, or the empty string
+// otherwise. The directory is created eagerly so pack scripts can write
+// to it immediately after dispatch.
+//
+// Best-effort: any failure (empty bead, no molecule context, mkdir error)
+// yields "" and the env var is omitted. Pack scripts that rely on
+// GC_ARTIFACT_DIR must handle its absence gracefully (typically by
+// falling back to worktree-local storage).
+func resolveMoleculeArtifactDir(deps SlingDeps, bead beads.Bead) string {
+	if strings.TrimSpace(bead.ID) == "" || strings.TrimSpace(deps.CityPath) == "" {
+		return ""
+	}
+	rootID := strings.TrimSpace(bead.Metadata["gc.root_bead_id"])
+	if rootID == "" {
+		return ""
+	}
+	dir, err := molecule.EnsureArtifactDir(fsys.OSFS{}, deps.CityPath, rootID, bead.ID)
+	if err != nil {
+		return ""
+	}
+	return dir
 }
 
 // TargetType returns a human-readable label for the agent type.
@@ -785,7 +1210,7 @@ func IsGraphWorkflowAttachment(store beads.Store, rootID string) bool {
 
 // InstantiateSlingFormula compiles and instantiates a formula, applying
 // graph routing if the formula is a graph.v2 workflow.
-func InstantiateSlingFormula(ctx context.Context, formulaName string, searchPaths []string, opts molecule.Options, sourceBeadID, scopeKind, scopeRef string, a config.Agent, deps SlingDeps) (*molecule.Result, error) {
+func InstantiateSlingFormula(ctx context.Context, formulaName string, searchPaths []string, opts molecule.Options, sourceBeadID, scopeKind, scopeRef string, a config.Agent, deps SlingDeps, forceGraphV2Replace ...bool) (*molecule.Result, error) {
 	SlingTracef("instantiate start formula=%s source=%s agent=%s parent=%s", formulaName, sourceBeadID, a.QualifiedName(), opts.ParentID)
 	if opts.PriorityOverride == nil && sourceBeadID != "" {
 		opts.PriorityOverride = BeadPriorityOverride(deps.Store, sourceBeadID)
@@ -800,19 +1225,272 @@ func InstantiateSlingFormula(ctx context.Context, formulaName string, searchPath
 		SlingTracef("instantiate validate-error formula=%s err=%v", formulaName, err)
 		return nil, err
 	}
+	graphWorkflow := IsCompiledGraphWorkflow(recipe)
+	if graphWorkflow {
+		stampGraphV2RootMetadata(recipe, formulaName, opts.Vars, scopeKind, scopeRef)
+		sourceBeadID = ""
+		if key := strings.TrimSpace(recipe.Steps[0].Metadata["gc.graphv2_root_key"]); key != "" {
+			unlock := lockGraphV2Root(key)
+			defer unlock()
+		}
+	}
 	SlingTracef("instantiate compiled formula=%s dur=%s steps=%d", formulaName, time.Since(compileStart), len(recipe.Steps))
 	if err := ApplyGraphRouting(recipe, &a, a.QualifiedName(), opts.Vars, sourceBeadID, scopeKind, scopeRef, deps.StoreRef, deps.Store, deps.CityName, deps.Cfg, deps); err != nil {
 		SlingTracef("instantiate decorate-error formula=%s err=%v", formulaName, err)
 		return nil, err
 	}
+	privatizeAttachedRootOnlyWisp(recipe, sourceBeadID)
+	var replacedRootID string
+	if graphWorkflow {
+		if err := closeFailedGraphV2Roots(deps.Store, recipe); err != nil {
+			return nil, err
+		}
+		if existing, err := existingGraphV2Root(deps.Store, recipe); err != nil {
+			return nil, err
+		} else if existing != nil {
+			if len(forceGraphV2Replace) > 0 && forceGraphV2Replace[0] {
+				replacedRootID = existing.RootID
+			} else {
+				SlingTracef("instantiate graphv2 idempotent formula=%s root=%s", formulaName, existing.RootID)
+				return existing, nil
+			}
+		}
+	}
 	instantiateStart := time.Now()
+	var replacedSnapshots []sourceworkflow.WorkflowBeadSnapshot
+	if replacedRootID != "" {
+		var err error
+		replacedSnapshots, err = closeReplacedGraphV2Root(deps.Store, replacedRootID)
+		if err != nil {
+			return nil, err
+		}
+	}
 	result, err := molecule.Instantiate(ctx, deps.Store, recipe, opts)
 	if err != nil {
 		SlingTracef("instantiate molecule-error formula=%s dur=%s err=%v", formulaName, time.Since(instantiateStart), err)
+		if len(replacedSnapshots) > 0 {
+			var rollbackErr error
+			if cleanupErr := closeFailedGraphV2Roots(deps.Store, recipe); cleanupErr != nil {
+				rollbackErr = errors.Join(rollbackErr, cleanupErr)
+			}
+			if restoreErr := sourceworkflow.RestoreWorkflowBeads(deps.Store, replacedSnapshots); restoreErr != nil {
+				rollbackErr = errors.Join(rollbackErr, fmt.Errorf("restore replaced graph.v2 root %s: %w", replacedRootID, restoreErr))
+			}
+			if rollbackErr != nil {
+				return nil, errors.Join(err, rollbackErr)
+			}
+		} else if graphWorkflow {
+			if cleanupErr := closeFailedGraphV2Roots(deps.Store, recipe); cleanupErr != nil {
+				return nil, errors.Join(err, cleanupErr)
+			}
+		}
 		return nil, err
 	}
 	SlingTracef("instantiate done formula=%s dur=%s root=%s created=%d graph=%t", formulaName, time.Since(instantiateStart), result.RootID, result.Created, result.GraphWorkflow)
 	return result, nil
+}
+
+func lockGraphV2Root(key string) func() {
+	return graphv2.LockKey(key)
+}
+
+func closeReplacedGraphV2Root(store beads.Store, rootID string) ([]sourceworkflow.WorkflowBeadSnapshot, error) {
+	root, err := store.Get(rootID)
+	if err != nil {
+		return nil, fmt.Errorf("loading replaced graph.v2 root %s: %w", rootID, err)
+	}
+	if root.Status == "closed" {
+		return nil, nil
+	}
+	snapshots, err := sourceworkflow.SnapshotOpenWorkflowBeads(store, rootID)
+	if err != nil {
+		return nil, fmt.Errorf("snapshot replaced graph.v2 root %s: %w", rootID, err)
+	}
+	if _, err := sourceworkflow.CloseWorkflowSubtree(store, rootID); err != nil {
+		restoreErr := sourceworkflow.RestoreWorkflowBeads(store, snapshots)
+		return nil, errors.Join(
+			fmt.Errorf("closing replaced graph.v2 subtree %s: %w", rootID, err),
+			restoreErr,
+		)
+	}
+	if err := store.SetMetadata(rootID, "gc.failure_reason", "graphv2_force_replaced"); err != nil {
+		if restoreErr := sourceworkflow.RestoreWorkflowBeads(store, snapshots); restoreErr != nil {
+			return nil, errors.Join(fmt.Errorf("marking replaced graph.v2 root %s: %w", rootID, err), restoreErr)
+		}
+		return nil, fmt.Errorf("marking replaced graph.v2 root %s: %w", rootID, err)
+	}
+	return snapshots, nil
+}
+
+type graphV2ReplacementSnapshot struct {
+	rootID    string
+	snapshots []sourceworkflow.WorkflowBeadSnapshot
+}
+
+func snapshotGraphV2ReplacementRoot(store beads.Store, formulaName string, vars map[string]string, scopeKind, scopeRef string, force bool) (graphV2ReplacementSnapshot, error) {
+	if !force || store == nil {
+		return graphV2ReplacementSnapshot{}, nil
+	}
+	inputConvoyID := strings.TrimSpace(vars[graphv2.ConvoyIDVar])
+	if inputConvoyID == "" {
+		return graphV2ReplacementSnapshot{}, nil
+	}
+	key := graphv2.RootKey(inputConvoyID, formulaName, vars, scopeKind, scopeRef)
+	if key == "" {
+		return graphV2ReplacementSnapshot{}, nil
+	}
+	if err := closeFailedGraphV2RootsByKey(store, key); err != nil {
+		return graphV2ReplacementSnapshot{}, err
+	}
+	matches, err := store.ListByMetadata(map[string]string{"gc.graphv2_root_key": key}, 2, beads.WithBothTiers)
+	if err != nil {
+		return graphV2ReplacementSnapshot{}, fmt.Errorf("looking up graph.v2 root key %s: %w", key, err)
+	}
+	if len(matches) == 0 {
+		return graphV2ReplacementSnapshot{}, nil
+	}
+	if len(matches) > 1 {
+		return graphV2ReplacementSnapshot{}, fmt.Errorf("graph.v2 root key %s has multiple live roots: %s, %s", key, matches[0].ID, matches[1].ID)
+	}
+	snapshots, err := sourceworkflow.SnapshotOpenWorkflowBeads(store, matches[0].ID)
+	if err != nil {
+		return graphV2ReplacementSnapshot{}, fmt.Errorf("snapshot replaced graph.v2 root %s: %w", matches[0].ID, err)
+	}
+	if len(snapshots) == 0 {
+		return graphV2ReplacementSnapshot{}, nil
+	}
+	return graphV2ReplacementSnapshot{
+		rootID:    matches[0].ID,
+		snapshots: snapshots,
+	}, nil
+}
+
+func rollbackGraphV2ReplacementLaunch(store beads.Store, replacementRootID string, snapshot graphV2ReplacementSnapshot) error {
+	if store == nil || snapshot.rootID == "" || len(snapshot.snapshots) == 0 {
+		return nil
+	}
+	var rollbackErr error
+	replacementRootID = strings.TrimSpace(replacementRootID)
+	if replacementRootID != "" && replacementRootID != snapshot.rootID {
+		if _, err := sourceworkflow.CloseWorkflowSubtree(store, replacementRootID); err != nil {
+			rollbackErr = errors.Join(rollbackErr, fmt.Errorf("close replacement graph.v2 root %s: %w", replacementRootID, err))
+		}
+	}
+	if err := sourceworkflow.RestoreWorkflowBeads(store, snapshot.snapshots); err != nil {
+		rollbackErr = errors.Join(rollbackErr, fmt.Errorf("restore replaced graph.v2 root %s: %w", snapshot.rootID, err))
+	}
+	return rollbackErr
+}
+
+func closeFailedGraphV2Roots(store beads.Store, recipe *formula.Recipe) error {
+	if store == nil || recipe == nil || len(recipe.Steps) == 0 {
+		return nil
+	}
+	key := strings.TrimSpace(recipe.Steps[0].Metadata["gc.graphv2_root_key"])
+	if key == "" {
+		return nil
+	}
+	return closeFailedGraphV2RootsByKey(store, key)
+}
+
+func closeFailedGraphV2RootsByKey(store beads.Store, key string) error {
+	matches, err := store.ListByMetadata(map[string]string{"gc.graphv2_root_key": key}, 0, beads.WithBothTiers)
+	if err != nil {
+		return fmt.Errorf("looking up failed graph.v2 roots for key %s: %w", key, err)
+	}
+	for _, root := range matches {
+		if root.Status == "closed" || root.Metadata["molecule_failed"] != "true" {
+			continue
+		}
+		if _, err := sourceworkflow.CloseWorkflowSubtree(store, root.ID); err != nil {
+			return fmt.Errorf("closing failed graph.v2 root %s: %w", root.ID, err)
+		}
+	}
+	return nil
+}
+
+func stampGraphV2RootMetadata(recipe *formula.Recipe, formulaName string, vars map[string]string, scopeKind, scopeRef string) {
+	if recipe == nil || len(recipe.Steps) == 0 {
+		return
+	}
+	inputConvoyID := strings.TrimSpace(vars[graphv2.ConvoyIDVar])
+	if inputConvoyID == "" {
+		return
+	}
+	root := &recipe.Steps[0]
+	if root.Metadata == nil {
+		root.Metadata = make(map[string]string)
+	}
+	root.Metadata["gc.input_convoy_id"] = inputConvoyID
+	root.Metadata["gc.graphv2_root_key"] = graphv2.RootKey(inputConvoyID, formulaName, vars, scopeKind, scopeRef)
+	runtimeVars := graphv2.RuntimeVarsMetadata(vars)
+	if runtimeVars == "" {
+		return
+	}
+	root.Metadata[graphv2.RuntimeVarsMetadataKey] = runtimeVars
+	for i := range recipe.Steps {
+		if recipe.Steps[i].Metadata["gc.kind"] != "drain" {
+			continue
+		}
+		if recipe.Steps[i].Metadata == nil {
+			recipe.Steps[i].Metadata = make(map[string]string)
+		}
+		recipe.Steps[i].Metadata[graphv2.RuntimeVarsMetadataKey] = runtimeVars
+	}
+}
+
+func existingGraphV2Root(store beads.Store, recipe *formula.Recipe) (*molecule.Result, error) {
+	if store == nil || recipe == nil || len(recipe.Steps) == 0 {
+		return nil, nil
+	}
+	key := strings.TrimSpace(recipe.Steps[0].Metadata["gc.graphv2_root_key"])
+	if key == "" {
+		return nil, nil
+	}
+	matches, err := store.ListByMetadata(map[string]string{"gc.graphv2_root_key": key}, 2, beads.WithBothTiers)
+	if err != nil {
+		return nil, fmt.Errorf("looking up graph.v2 root key %s: %w", key, err)
+	}
+	if len(matches) == 0 {
+		return nil, nil
+	}
+	if len(matches) > 1 {
+		return nil, fmt.Errorf("graph.v2 root key %s has multiple live roots: %s, %s", key, matches[0].ID, matches[1].ID)
+	}
+	return &molecule.Result{
+		RootID:        matches[0].ID,
+		GraphWorkflow: true,
+		IDMapping:     map[string]string{recipe.RootStep().ID: matches[0].ID},
+	}, nil
+}
+
+func privatizeAttachedRootOnlyWisp(recipe *formula.Recipe, sourceBeadID string) {
+	if recipe == nil || !recipe.RootOnly || strings.TrimSpace(sourceBeadID) == "" || len(recipe.Steps) == 0 {
+		return
+	}
+	root := &recipe.Steps[0]
+	if root.Metadata["gc.kind"] != "wisp" {
+		return
+	}
+	root.Type = "molecule"
+	root.Metadata = mapsCloneWithout(root.Metadata, "gc.kind")
+}
+
+func mapsCloneWithout(in map[string]string, drop string) map[string]string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(in))
+	for key, value := range in {
+		if key == drop {
+			continue
+		}
+		out[key] = value
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // ShouldPromoteWorkflowLaunchStatus reports whether a bead's status should
@@ -848,4 +1526,9 @@ func PromoteWorkflowLaunchBead(store beads.Store, beadID string) error {
 type BeadCheckResult struct {
 	Idempotent bool
 	Warnings   []string
+}
+
+// BeadCheckOptions configures pre-flight bead state checks for a route.
+type BeadCheckOptions struct {
+	NoConvoy bool
 }

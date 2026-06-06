@@ -59,6 +59,19 @@ func TestSuggestSimilar(t *testing.T) {
 	}
 }
 
+func TestSuggestSimilarNeverEchoesInput(t *testing.T) {
+	// When a candidate equals the input exactly, the suggester must skip it.
+	// Otherwise the user sees a useless "agent X not found; did you mean X?".
+	candidates := []string{"ar.interface-lead", "ar.principal"}
+	if got := suggestSimilar("ar.interface-lead", candidates); got != "" {
+		t.Errorf("suggestSimilar should not echo the input; got %q", got)
+	}
+	// And the suggester should still suggest a close non-equal match.
+	if got := suggestSimilar("ar.interfac-lead", candidates); !strings.Contains(got, "ar.interface-lead") {
+		t.Errorf("suggestSimilar should suggest the closest non-equal match; got %q", got)
+	}
+}
+
 func TestSuggestSimilarEmptyCandidates(t *testing.T) {
 	got := suggestSimilar("mayor", nil)
 	if got != "" {

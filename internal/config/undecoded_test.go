@@ -157,6 +157,38 @@ func TestKnownTOMLKeysNotEmpty(t *testing.T) {
 	}
 }
 
+func TestCheckUndecodedKeysSuggestsBeadPolicyKey(t *testing.T) {
+	input := `
+[workspace]
+name = "test"
+
+[beads.policies.control]
+delete_after_cloes = "1d"
+`
+	var cfg City
+	md, err := toml.Decode(input, &cfg)
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+
+	warnings := CheckUndecodedKeys(md, "city.toml")
+	if len(warnings) == 0 {
+		t.Fatal("expected warning for bead policy typo")
+	}
+	found := false
+	for _, w := range warnings {
+		if strings.Contains(w, "delete_after_cloes") {
+			found = true
+			if !strings.Contains(w, `did you mean "delete_after_close"`) {
+				t.Errorf("warning should suggest delete_after_close, got: %s", w)
+			}
+		}
+	}
+	if !found {
+		t.Errorf("no warning about delete_after_cloes in: %v", warnings)
+	}
+}
+
 func TestParseWithMetaWarnings(t *testing.T) {
 	input := `
 [workspace]
@@ -302,10 +334,10 @@ func TestParseWithMetaSkipsMixedTableWarningWhenOverlapIsOnlyUnsupportedFutureKe
 name = "test"
 
 [agent_defaults]
-provider = "claude"
+scope = "rig"
 
 [agents]
-provider = "codex"
+scope = "city"
 `
 	_, _, warnings, err := parseWithMeta([]byte(input), "test.toml")
 	if err != nil {
@@ -319,8 +351,11 @@ provider = "codex"
 	foundUnsupported := false
 	foundAlias := false
 	for _, w := range warnings {
-		if strings.Contains(w, `keep using workspace.provider`) {
+		if strings.Contains(w, `keep setting scope per agent in agents/<name>/agent.toml`) {
 			foundUnsupported = true
+		}
+		if strings.Contains(w, `workspace.scope`) {
+			t.Fatalf("unsupported-key guidance should not point back to workspace.scope: %v", warnings)
 		}
 		if strings.Contains(w, agentsAliasWarning) {
 			foundAlias = true
@@ -341,17 +376,6 @@ func TestParseWithMetaWarnsOnUnsupportedAgentDefaultsMigrationKeys(t *testing.T)
 		want  string
 	}{
 		{
-			name: "provider",
-			input: `
-[workspace]
-name = "test"
-
-[agent_defaults]
-provider = "claude"
-`,
-			want: `keep using workspace.provider`,
-		},
-		{
 			name: "scope",
 			input: `
 [workspace]
@@ -371,7 +395,7 @@ name = "test"
 [agent_defaults]
 install_agent_hooks = ["hooks/gascity.json"]
 `,
-			want: `keep using workspace.install_agent_hooks`,
+			want: `keep setting install_agent_hooks per agent in agents/<name>/agent.toml`,
 		},
 	}
 
@@ -389,6 +413,9 @@ install_agent_hooks = ["hooks/gascity.json"]
 				if strings.Contains(w, tt.want) {
 					found = true
 				}
+				if strings.Contains(w, "workspace.provider") || strings.Contains(w, "workspace.install_agent_hooks") {
+					t.Fatalf("unsupported-key guidance should not point back to deprecated workspace fields for %s: %v", tt.name, warnings)
+				}
 				if strings.Contains(w, "unknown field") {
 					t.Fatalf("got generic unknown-field warning for %s: %v", tt.name, warnings)
 				}
@@ -400,24 +427,67 @@ install_agent_hooks = ["hooks/gascity.json"]
 	}
 }
 
+func TestParseWithMetaAcceptsAgentDefaultsProvider(t *testing.T) {
+	input := `
+[workspace]
+name = "test"
+
+[agent_defaults]
+provider = "codex"
+`
+	cfg, _, warnings, err := parseWithMeta([]byte(input), "test.toml")
+	if err != nil {
+		t.Fatalf("parseWithMeta: %v", err)
+	}
+	if got := cfg.AgentDefaults.Provider; got != "codex" {
+		t.Fatalf("AgentDefaults.Provider = %q, want codex", got)
+	}
+	for _, w := range warnings {
+		if strings.Contains(w, "agent_defaults.provider") || strings.Contains(w, "unknown field") {
+			t.Fatalf("provider should be a supported agent default, got warnings: %v", warnings)
+		}
+	}
+}
+
+func TestParseWithMetaAgentDefaultsProviderAliasPrefersCanonical(t *testing.T) {
+	input := `
+[workspace]
+name = "test"
+
+[agent_defaults]
+provider = "codex"
+
+[agents]
+provider = "claude"
+`
+	cfg, _, warnings, err := parseWithMeta([]byte(input), "test.toml")
+	if err != nil {
+		t.Fatalf("parseWithMeta: %v", err)
+	}
+	if got := cfg.AgentDefaults.Provider; got != "codex" {
+		t.Fatalf("AgentDefaults.Provider = %q, want canonical codex", got)
+	}
+
+	foundOverlap := false
+	for _, w := range warnings {
+		if strings.Contains(w, "both [agent_defaults] and [agents] are present") {
+			foundOverlap = true
+		}
+		if strings.Contains(w, "agent_defaults.provider") || strings.Contains(w, "unknown field") {
+			t.Fatalf("provider should be a supported agent default, got warnings: %v", warnings)
+		}
+	}
+	if !foundOverlap {
+		t.Fatalf("expected mixed-table warning, got: %v", warnings)
+	}
+}
+
 func TestParsePackConfigWithMetaWarnsOnPackLocalUnsupportedAgentDefaultsKeys(t *testing.T) {
 	tests := []struct {
 		name  string
 		input string
 		want  string
 	}{
-		{
-			name: "provider",
-			input: `
-[pack]
-name = "test"
-schema = 2
-
-[agent_defaults]
-provider = "claude"
-`,
-			want: `keep setting provider per agent in agents/<name>/agent.toml`,
-		},
 		{
 			name: "install_agent_hooks",
 			input: `

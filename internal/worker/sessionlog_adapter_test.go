@@ -1,6 +1,8 @@
 package worker
 
 import (
+	"crypto/md5"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -68,6 +70,89 @@ func TestSessionLogAdapterLoadHistoryClaude(t *testing.T) {
 	}
 }
 
+func TestSessionLogAdapterLoadHistoryAntigravityOpenToolUseIDs(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "transcript.jsonl")
+	writeLines(t, path,
+		`{"step_index":1,"type":"PLANNER_RESPONSE","created_at":"2026-04-04T09:00:01Z","content":"checking","tool_calls":[{"id":"call-open","name":"Read","args":{"path":"README.md"}}]}`,
+	)
+
+	snapshot, err := SessionLogAdapter{}.LoadHistory(LoadRequest{
+		Provider:       "antigravity/tmux-cli",
+		TranscriptPath: path,
+	})
+	if err != nil {
+		t.Fatalf("LoadHistory() error = %v", err)
+	}
+
+	if len(snapshot.TailState.OpenToolUseIDs) != 1 || snapshot.TailState.OpenToolUseIDs[0] != "call-open" {
+		t.Fatalf("OpenToolUseIDs = %#v, want [call-open]", snapshot.TailState.OpenToolUseIDs)
+	}
+}
+
+func TestSessionLogAdapterLoadHistoryAntigravityCompletedToolUseIDs(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "transcript.jsonl")
+	writeLines(t, path,
+		`{"step_index":1,"type":"PLANNER_RESPONSE","created_at":"2026-04-04T09:00:01Z","content":"checking","tool_calls":[{"id":"call-done","name":"Read","args":{"path":"README.md"}}]}`,
+		`{"step_index":2,"type":"READ_FILE","created_at":"2026-04-04T09:00:02Z","tool_call_id":"call-done","content":"file data"}`,
+	)
+
+	snapshot, err := SessionLogAdapter{}.LoadHistory(LoadRequest{
+		Provider:       "antigravity/tmux-cli",
+		TranscriptPath: path,
+	})
+	if err != nil {
+		t.Fatalf("LoadHistory() error = %v", err)
+	}
+
+	if len(snapshot.TailState.OpenToolUseIDs) != 0 {
+		t.Fatalf("OpenToolUseIDs = %#v, want none for completed tool use", snapshot.TailState.OpenToolUseIDs)
+	}
+}
+
+func TestSessionLogAdapterReadTranscriptAntigravityHonorsCursors(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "transcript.jsonl")
+	writeLines(t, path,
+		`{"step_index":0,"type":"USER_INPUT","created_at":"2026-04-04T09:00:00Z","content":"first"}`,
+		`{"step_index":1,"type":"PLANNER_RESPONSE","created_at":"2026-04-04T09:00:01Z","content":"second"}`,
+		`{"step_index":2,"type":"USER_INPUT","created_at":"2026-04-04T09:00:02Z","content":"third"}`,
+		`{"step_index":3,"type":"PLANNER_RESPONSE","created_at":"2026-04-04T09:00:03Z","content":"fourth"}`,
+	)
+
+	older, err := SessionLogAdapter{}.ReadTranscript(TranscriptRequest{
+		Provider:       "antigravity/tmux-cli",
+		TranscriptPath: path,
+		BeforeEntryID:  "agy-2",
+	})
+	if err != nil {
+		t.Fatalf("ReadTranscript older: %v", err)
+	}
+	if got := transcriptEntryIDs(older); strings.Join(got, ",") != "agy-0,agy-1" {
+		t.Fatalf("older Antigravity transcript IDs = %v, want [agy-0 agy-1]", got)
+	}
+
+	rawNewer, err := SessionLogAdapter{}.ReadTranscript(TranscriptRequest{
+		Provider:       "antigravity/tmux-cli",
+		TranscriptPath: path,
+		AfterEntryID:   "agy-2",
+		Raw:            true,
+	})
+	if err != nil {
+		t.Fatalf("ReadTranscript raw newer: %v", err)
+	}
+	if got := transcriptEntryIDs(rawNewer); strings.Join(got, ",") != "agy-3" {
+		t.Fatalf("raw newer Antigravity transcript IDs = %v, want [agy-3]", got)
+	}
+	if len(rawNewer.RawMessages) != 1 {
+		t.Fatalf("raw newer RawMessages = %d, want 1", len(rawNewer.RawMessages))
+	}
+}
+
 func TestSessionLogAdapterDiscoverTranscriptExplicitIDFailsClosed(t *testing.T) {
 	t.Parallel()
 
@@ -91,6 +176,75 @@ func TestSessionLogAdapterDiscoverTranscriptExplicitIDFailsClosed(t *testing.T) 
 	}
 }
 
+func transcriptEntryIDs(result *TranscriptResult) []string {
+	ids := make([]string, 0, len(result.Session.Messages))
+	for _, entry := range result.Session.Messages {
+		ids = append(ids, entry.UUID)
+	}
+	return ids
+}
+
+func TestSessionLogAdapterDiscoverTranscriptKimiKeyedMissFailsClosed(t *testing.T) {
+	t.Parallel()
+
+	workDir := "/tmp/kimi-project"
+	base := t.TempDir()
+	workHash := kimiTestWorkDirHash(workDir)
+	otherPath := filepath.Join(base, "sessions", workHash, "different-session", "context.jsonl")
+	if err := os.MkdirAll(filepath.Dir(otherPath), 0o755); err != nil {
+		t.Fatalf("mkdir kimi transcript dir: %v", err)
+	}
+	writeLines(t, otherPath, `{"role":"user","content":"not this session"}`)
+
+	adapter := SessionLogAdapter{SearchPaths: []string{base}}
+	discovered := adapter.DiscoverTranscript("kimi/tmux-cli", workDir, "missing-session")
+	if discovered != "" {
+		t.Fatalf("DiscoverTranscript() = %q, want empty string when explicit Kimi session ID is missing", discovered)
+	}
+}
+
+func TestSessionLogAdapterDiscoverTranscriptKimiEmptyKeyFailsClosedWhenAmbiguous(t *testing.T) {
+	t.Parallel()
+
+	workDir := "/tmp/kimi-project"
+	base := t.TempDir()
+	workHash := kimiTestWorkDirHash(workDir)
+	firstPath := filepath.Join(base, "sessions", workHash, "first-session", "context.jsonl")
+	secondPath := filepath.Join(base, "sessions", workHash, "second-session", "context.jsonl")
+	if err := os.MkdirAll(filepath.Dir(firstPath), 0o755); err != nil {
+		t.Fatalf("mkdir first kimi transcript dir: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(secondPath), 0o755); err != nil {
+		t.Fatalf("mkdir second kimi transcript dir: %v", err)
+	}
+	writeLines(t, firstPath, `{"role":"user","content":"first"}`)
+	writeLines(t, secondPath, `{"role":"user","content":"second"}`)
+
+	adapter := SessionLogAdapter{SearchPaths: []string{base}}
+	discovered := adapter.DiscoverTranscript("kimi/tmux-cli", workDir, "")
+	if discovered != "" {
+		t.Fatalf("DiscoverTranscript() = %q, want empty string when Kimi workdir has multiple sessions and no key", discovered)
+	}
+}
+
+func TestSessionLogAdapterDiscoverTranscriptPiExplicitIDFailsClosed(t *testing.T) {
+	t.Parallel()
+
+	workDir := filepath.Join(t.TempDir(), "pi-project")
+	base := t.TempDir()
+	path := filepath.Join(base, "other.jsonl")
+	writeLines(t, path,
+		fmt.Sprintf(`{"type":"session","id":"other-session","cwd":%q}`, workDir),
+		`{"type":"message","id":"u1","message":{"role":"user","content":"pending"}}`,
+	)
+
+	adapter := SessionLogAdapter{SearchPaths: []string{base}}
+	discovered := adapter.DiscoverTranscript("pi/tmux-cli", workDir, "missing-session")
+	if discovered != "" {
+		t.Fatalf("DiscoverTranscript() = %q, want empty string when explicit Pi session ID is missing", discovered)
+	}
+}
+
 func TestSessionLogAdapterLoadHistoryCodex(t *testing.T) {
 	t.Parallel()
 
@@ -105,8 +259,8 @@ func TestSessionLogAdapterLoadHistoryCodex(t *testing.T) {
 	lines := []string{
 		fmt.Sprintf(`{"timestamp":"2026-01-02T00:00:00Z","type":"session_meta","payload":{"cwd":%q}}`, workDir),
 		`{"timestamp":"2026-01-02T00:00:01Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"text":"hello codex"}]}}`,
-		`{"timestamp":"2026-01-02T00:00:02Z","type":"response_item","payload":{"type":"function_call","call_id":"call-1","name":"Read"}}`,
-		`{"timestamp":"2026-01-02T00:00:03Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call-1","output":"file"}}`,
+		`{"timestamp":"2026-01-02T00:00:02Z","type":"response_item","payload":{"type":"custom_tool_call","call_id":"call-1","name":"apply_patch","input":{"patch":"*** Begin Patch\n*** End Patch"}}}`,
+		`{"timestamp":"2026-01-02T00:00:03Z","type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"call-1","output":{"output":"Success. Updated files."}}}`,
 		`{"timestamp":"2026-01-02T00:00:04Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"text":"done"}]}}`,
 	}
 	writeLines(t, path, lines...)
@@ -138,11 +292,14 @@ func TestSessionLogAdapterLoadHistoryCodex(t *testing.T) {
 	if snapshot.Entries[1].Blocks[0].Kind != BlockKindToolUse {
 		t.Fatalf("function call block kind = %q, want %q", snapshot.Entries[1].Blocks[0].Kind, BlockKindToolUse)
 	}
+	if got := strings.TrimSpace(string(snapshot.Entries[1].Blocks[0].Input)); got != `{"patch":"*** Begin Patch\n*** End Patch"}` {
+		t.Fatalf("custom tool call input = %s, want patch payload", got)
+	}
 	if snapshot.Entries[2].Blocks[0].Kind != BlockKindToolResult {
 		t.Fatalf("function output block kind = %q, want %q", snapshot.Entries[2].Blocks[0].Kind, BlockKindToolResult)
 	}
-	if !snapshot.Entries[2].Blocks[0].Derived {
-		t.Fatalf("expected codex tool_result block to be derived")
+	if got := strings.TrimSpace(string(snapshot.Entries[2].Blocks[0].Content)); got != `{"output":"Success. Updated files."}` {
+		t.Fatalf("custom tool output content = %s, want output payload", got)
 	}
 }
 
@@ -488,4 +645,9 @@ func writeLines(t *testing.T, path string, lines ...string) {
 	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
 		t.Fatalf("write %s: %v", path, err)
 	}
+}
+
+func kimiTestWorkDirHash(workDir string) string {
+	sum := md5.Sum([]byte(workDir))
+	return hex.EncodeToString(sum[:])
 }

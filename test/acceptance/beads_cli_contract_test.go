@@ -671,7 +671,18 @@ func TestBdBasicCRUD(t *testing.T) {
 	// --- Config ---
 
 	t.Run("ConfigSet", func(t *testing.T) {
-		requireBD(t, dir, "config", "set", "issue_prefix", "ct")
+		requireBD(t, dir, "config", "set", "export.auto", "false")
+		out := requireBD(t, dir, "config", "get", "export.auto")
+		if strings.TrimSpace(out) != "false" {
+			t.Fatalf("bd config get export.auto = %q, want false", strings.TrimSpace(out))
+		}
+	})
+
+	t.Run("ConfigGetIssuePrefix", func(t *testing.T) {
+		out := requireBD(t, dir, "config", "get", "issue_prefix")
+		if strings.TrimSpace(out) != "ct" {
+			t.Fatalf("bd config get issue_prefix = %q, want ct", strings.TrimSpace(out))
+		}
 	})
 }
 

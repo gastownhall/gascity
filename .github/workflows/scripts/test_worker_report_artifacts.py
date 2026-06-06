@@ -1,6 +1,5 @@
 import json
 import os
-import subprocess
 import sys
 import tempfile
 import unittest
@@ -126,43 +125,6 @@ class WorkerReportArtifactTests(unittest.TestCase):
             self.assertIn("top evidence", content)
             self.assertIn("planned hooks", content)
             self.assertIn("transcript_path=/tmp/transcript.jsonl", content)
-
-    def test_manual_only_script_emits_unsupported_phase3_report(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            report_dir = Path(tmp) / "reports"
-            env = os.environ.copy()
-            env["PROFILE"] = "codex/tmux-cli"
-
-            subprocess.run(
-                [
-                    sys.executable,
-                    str(SCRIPT_DIR / "worker_report_manual_only.py"),
-                    str(report_dir),
-                    "worker-inference-phase3",
-                ],
-                check=True,
-                env=env,
-            )
-
-            reports = sorted(report_dir.glob("*.json"))
-            self.assertEqual(len(reports), 1)
-            payload = json.loads(reports[0].read_text(encoding="utf-8"))
-            self.assertEqual(payload["summary"]["status"], "unsupported")
-            self.assertEqual(payload["metadata"]["profile_filter"], "codex/tmux-cli")
-            self.assertTrue(payload["metadata"]["manual_only"])
-            self.assertEqual(payload["summary"]["unsupported"], 6)
-            self.assertEqual(
-                [result["requirement"] for result in payload["results"]],
-                [
-                    "WI-START-001",
-                    "WI-TOOL-001",
-                    "WI-MTURN-001",
-                    "WI-CONT-001",
-                    "WI-RESET-001",
-                    "WI-INT-001",
-                ],
-            )
-            self.assertTrue(all(result["status"] == "unsupported" for result in payload["results"]))
 
     def test_rollup_builds_baseline_delta_and_hooks(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

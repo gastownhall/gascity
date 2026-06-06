@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"strconv"
 	"strings"
 	"sync"
@@ -17,8 +18,20 @@ import (
 )
 
 // staleKeyDetectDelay is how long to wait after starting a session before
-// checking if it died immediately (stale resume key detection).
-const staleKeyDetectDelay = 2 * time.Second
+// checking if it died immediately (stale resume key detection). Tests that
+// drive the start path through a fake runtime can shorten this via
+// SetStaleKeyDetectDelayForTest to keep their wall-clock down.
+var staleKeyDetectDelay = 2 * time.Second
+
+// SetStaleKeyDetectDelayForTest overrides the stale-key detection delay used
+// by ensureRunning/ensureRunningRuntimeOnly. The returned func restores the
+// previous value. Intended for tests only; production code should not call
+// this.
+func SetStaleKeyDetectDelayForTest(d time.Duration) func() {
+	prev := staleKeyDetectDelay
+	staleKeyDetectDelay = d
+	return func() { staleKeyDetectDelay = prev }
+}
 
 const waitIdleNudgeTimeout = 30 * time.Second
 
@@ -27,7 +40,13 @@ const waitIdleNudgeTimeout = 30 * time.Second
 var ErrStateSync = errors.New("session state sync failed")
 
 // stripResumeFlag removes the resume flag and session key from a command
-// string, returning a command suitable for a fresh start.
+// string, returning a command suitable for a fresh start. When the strip
+// is a no-op (the flag/key isn't in cmd, or either argument is empty),
+// the original cmd is returned exactly — TrimSpace only runs when a
+// replacement actually happened. Callers rely on exact equality with
+// the input to detect the no-op case; trimming on a non-replacement
+// path would corrupt that signal when cmd has leading/trailing
+// whitespace.
 func stripResumeFlag(cmd, resumeFlag, sessionKey string) string {
 	if resumeFlag == "" || sessionKey == "" {
 		return cmd
@@ -39,7 +58,83 @@ func stripResumeFlag(cmd, resumeFlag, sessionKey string) string {
 		// Try without the leading space (flag at start of args).
 		result = strings.Replace(cmd, target+" ", "", 1)
 	}
+	if result == cmd {
+		return cmd
+	}
 	return strings.TrimSpace(result)
+}
+
+// stripResumeFlagArg removes the generated resume flag/key pair from cmd,
+// regardless of the key's value. It is the value-agnostic fallback for
+// stripResumeFlag: when the session_key embedded in the resume command at build
+// time has diverged from the bead's current session_key — a concurrent fresh
+// start minted a new key, or a stale store read — the keyed strip is a no-op,
+// and we must still produce a clean fresh-start command rather than wedge the
+// session. Returns cmd unchanged when the generated resume shape is not present
+// (in which case the command already carries no generated resume key and is
+// itself a valid fresh-start command).
+func stripResumeFlagArg(cmd, resumeFlag, resumeStyle string) string {
+	if resumeFlag == "" {
+		return cmd
+	}
+	if resumeStyle == "subcommand" {
+		return stripInsertedResumeSubcommandArg(cmd, resumeFlag)
+	}
+	return stripTrailingResumeFlagArg(cmd, resumeFlag)
+}
+
+func stripTrailingResumeFlagArg(cmd, resumeFlag string) string {
+	trimmed := strings.TrimRight(cmd, " ")
+	keyStart := strings.LastIndexByte(trimmed, ' ')
+	if keyStart < 0 {
+		return cmd
+	}
+	beforeKey := strings.TrimRight(trimmed[:keyStart], " ")
+	flagStart := strings.LastIndexByte(beforeKey, ' ')
+	if flagStart < 0 {
+		return cmd
+	}
+	if beforeKey[flagStart+1:] != resumeFlag {
+		return cmd
+	}
+	return strings.TrimSpace(beforeKey[:flagStart])
+}
+
+func stripInsertedResumeSubcommandArg(cmd, resumeFlag string) string {
+	trimmed := strings.TrimSpace(cmd)
+	binaryEnd := strings.IndexByte(trimmed, ' ')
+	if binaryEnd < 0 {
+		return cmd
+	}
+	binary := trimmed[:binaryEnd]
+	rest := strings.TrimLeft(trimmed[binaryEnd+1:], " ")
+	needle := resumeFlag + " "
+	if !strings.HasPrefix(rest, needle) {
+		return cmd
+	}
+	afterFlag := strings.TrimLeft(rest[len(needle):], " ")
+	keyEnd := strings.IndexByte(afterFlag, ' ')
+	if keyEnd < 0 {
+		return binary
+	}
+	afterKey := strings.TrimLeft(afterFlag[keyEnd+1:], " ")
+	if afterKey == "" {
+		return binary
+	}
+	return strings.TrimSpace(binary + " " + afterKey)
+}
+
+func freshStartCommandFromMetadata(metadata map[string]string, fallback string) string {
+	if metadata == nil {
+		return fallback
+	}
+	if cmd := metadata["command"]; cmd != "" {
+		return cmd
+	}
+	if provider := metadata["provider"]; provider != "" {
+		return provider
+	}
+	return fallback
 }
 
 func (m *Manager) clearStaleResumeMetadata(id string, b *beads.Bead) error {
@@ -73,20 +168,40 @@ func (m *Manager) retryFreshStartAfterStaleKey(
 	if b.Metadata["session_key"] == "" {
 		return false, nil
 	}
-	freshCmd := stripResumeFlag(resumeCommand, b.Metadata["resume_flag"], b.Metadata["session_key"])
+	resumeFlag := b.Metadata["resume_flag"]
+	freshCmd := stripResumeFlag(resumeCommand, resumeFlag, b.Metadata["session_key"])
 	if err := m.clearStaleResumeMetadata(id, b); err != nil {
 		if unroute != nil {
 			unroute()
 		}
 		return false, err
 	}
-	if freshCmd == resumeCommand {
-		if unroute != nil {
-			unroute()
+	// An empty resume_flag means the command was never resume-capable
+	// (e.g. a named-always session whose start command carries no
+	// --resume-style flag). stripResumeFlag is intentionally a no-op in
+	// that case, and the command is already a valid fresh start.
+	//
+	// A non-empty resume_flag whose keyed strip was a no-op means the
+	// session_key embedded in resumeCommand diverged from the bead's
+	// current session_key (a concurrent fresh start minted a new key, or a
+	// stale store read). Fall back to a value-agnostic strip so we still
+	// produce a clean fresh-start command. Refusing to retry here is what
+	// wedged the session into a respawn/SIGTERM loop: the embedded resume
+	// key was always stale, the keyed strip could never match it, and the
+	// dead remain-on-exit pane lingered because we returned before
+	// killExistingOrphans. If even the generic strip finds nothing, the
+	// command carries no resume flag and is itself a fresh-start command.
+	if resumeFlag != "" && freshCmd == resumeCommand {
+		if b.Metadata["resume_command"] != "" {
+			log.Printf("session: resume key for %q diverged from explicit resume_command; falling back to stored start command", id)
+			freshCmd = freshStartCommandFromMetadata(b.Metadata, resumeCommand)
+		} else {
+			log.Printf("session: resume key for %q diverged from bead metadata; falling back to generated resume strip", id)
+			freshCmd = stripResumeFlagArg(resumeCommand, resumeFlag, b.Metadata["resume_style"])
 		}
-		return false, fmt.Errorf("fresh start after stale key: resume command could not be stripped")
 	}
 	cfg.Command = freshCmd
+	m.killExistingOrphans(ctx, id)
 	if err := m.sp.Start(ctx, sessName, cfg); err != nil {
 		if unroute != nil {
 			unroute()
@@ -103,6 +218,8 @@ var (
 	ErrSessionClosed = errors.New("session is closed")
 	// ErrSessionInactive reports that the requested session has no live runtime.
 	ErrSessionInactive = errors.New("session is not active")
+	// ErrSessionActive reports that the requested session currently has or is starting a live runtime.
+	ErrSessionActive = errors.New("session is active")
 	// ErrResumeRequired reports that the session cannot be resumed without an
 	// explicit resume command.
 	ErrResumeRequired = errors.New("session requires resume command")
@@ -129,6 +246,11 @@ var (
 	sessionMutationLocksMu sync.Mutex
 	sessionMutationLocks   = map[string]*sessionMutationLockEntry{}
 )
+
+// WithSessionMutationLock serializes metadata mutations for one session bead.
+func WithSessionMutationLock(id string, fn func() error) error {
+	return withSessionMutationLock(id, fn)
+}
 
 func withSessionMutationLock(id string, fn func() error) error {
 	lock := acquireSessionMutationLock(id)
@@ -248,6 +370,7 @@ func (m *Manager) ensureRunning(ctx context.Context, id string, b beads.Bead, se
 	}
 	cfg = runtime.SyncWorkDirEnv(cfg)
 	started := false
+	m.killExistingOrphans(ctx, id)
 	if err := m.sp.Start(ctx, sessName, cfg); err != nil {
 		if errors.Is(err, runtime.ErrSessionDiedDuringStartup) && b.Metadata["session_key"] != "" {
 			retried, err := m.retryFreshStartAfterStaleKey(ctx, id, &b, sessName, resumeCommand, cfg, unroute)
@@ -358,6 +481,7 @@ func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, id string, b bea
 	}
 	cfg = runtime.SyncWorkDirEnv(cfg)
 	started := false
+	m.killExistingOrphans(ctx, id)
 	if err := m.sp.Start(ctx, sessName, cfg); err != nil {
 		switch {
 		case errors.Is(err, runtime.ErrSessionDiedDuringStartup) && b.Metadata["session_key"] != "":
@@ -399,12 +523,13 @@ func (m *Manager) confirmLiveSessionState(id string, b *beads.Bead) error {
 	}
 	batch := make(map[string]string)
 	switch State(b.Metadata["state"]) {
-	case "", StateCreating, StateAsleep, StateSuspended:
+	case "", StateStartPending, StateCreating, StateAsleep, StateSuspended:
 		batch["state"] = string(StateActive)
 		batch["state_reason"] = "creation_complete"
 	}
 	if strings.TrimSpace(b.Metadata["pending_create_claim"]) != "" {
 		batch["pending_create_claim"] = ""
+		batch["pending_create_started_at"] = ""
 	}
 	if len(batch) == 0 {
 		return nil
@@ -734,6 +859,17 @@ func (m *Manager) Pending(id string) (*runtime.PendingInteraction, bool, error) 
 	if err != nil {
 		return nil, false, err
 	}
+	return m.PendingByName(sessName)
+}
+
+// PendingByName probes the provider for a pending interaction using an
+// already-resolved runtime session name, skipping the bead-store lookup that
+// Pending performs to map an id to a name. Callers that aggregate across many
+// sessions (e.g. the city-wide pending snapshot) already hold each session's
+// name and would otherwise pay a redundant store.Get per session. Error
+// mapping mirrors Pending: unsupported -> (nil, false, nil); a gone runtime
+// session -> (nil, true, nil); any other error -> (nil, true, error).
+func (m *Manager) PendingByName(sessName string) (*runtime.PendingInteraction, bool, error) {
 	ip, ok := m.sp.(runtime.InteractionProvider)
 	if !ok {
 		return nil, false, nil
@@ -742,6 +878,10 @@ func (m *Manager) Pending(id string) (*runtime.PendingInteraction, bool, error) 
 	if err != nil {
 		if errors.Is(err, runtime.ErrInteractionUnsupported) {
 			return nil, false, nil
+		}
+		if errors.Is(err, runtime.ErrSessionNotFound) {
+			log.Printf("session: pending interaction runtime session gone for %q: %v", sessName, err)
+			return nil, true, nil
 		}
 		return nil, true, fmt.Errorf("getting pending interaction: %w", err)
 	}
@@ -764,6 +904,10 @@ func (m *Manager) Respond(id string, response runtime.InteractionResponse) error
 			if errors.Is(err, runtime.ErrInteractionUnsupported) {
 				return ErrInteractionUnsupported
 			}
+			if errors.Is(err, runtime.ErrSessionNotFound) {
+				log.Printf("session: respond pending probe runtime session gone for %q: %v", sessName, err)
+				return ErrNoPendingInteraction
+			}
 			return fmt.Errorf("getting pending interaction: %w", err)
 		}
 		if pending == nil {
@@ -781,6 +925,10 @@ func (m *Manager) Respond(id string, response runtime.InteractionResponse) error
 		if err := ip.Respond(sessName, response); err != nil {
 			if errors.Is(err, runtime.ErrInteractionUnsupported) {
 				return ErrInteractionUnsupported
+			}
+			if errors.Is(err, runtime.ErrSessionNotFound) {
+				log.Printf("session: respond runtime session gone for %q: %v", sessName, err)
+				return ErrNoPendingInteraction
 			}
 			return fmt.Errorf("responding to pending interaction: %w", err)
 		}
@@ -812,7 +960,8 @@ func (m *Manager) TranscriptPath(id string, searchPaths []string) (string, error
 	}
 
 	all, err := m.store.List(beads.ListQuery{
-		Label: LabelSession,
+		Label:         LabelSession,
+		IncludeClosed: b.Status == "closed",
 	})
 	if err != nil {
 		return "", fmt.Errorf("listing sessions: %w", err)
@@ -822,12 +971,17 @@ func (m *Manager) TranscriptPath(id string, searchPaths []string) (string, error
 		if !IsSessionBeadOrRepairable(other) {
 			continue
 		}
-		// Only count active sessions — closed historical sessions should not
-		// make the lookup ambiguous for the one live session.
-		if other.Status == "closed" {
+		// For a live target, closed historical sessions should not make the
+		// lookup ambiguous. For a closed target, historical siblings sharing
+		// the same workdir are the ambiguity we need to preserve.
+		if b.Status != "closed" && other.Status == "closed" {
 			continue
 		}
-		if provider != "" && strings.TrimSpace(other.Metadata["provider"]) != provider {
+		otherProvider := strings.TrimSpace(other.Metadata["provider_kind"])
+		if otherProvider == "" {
+			otherProvider = strings.TrimSpace(other.Metadata["provider"])
+		}
+		if provider != "" && otherProvider != provider {
 			continue
 		}
 		if other.Metadata["work_dir"] == workDir {

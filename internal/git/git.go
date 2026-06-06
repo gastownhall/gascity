@@ -52,18 +52,57 @@ func (g *Git) CurrentBranchCtx(ctx context.Context) (string, error) {
 	return strings.TrimSpace(out), nil
 }
 
-// DefaultBranch returns the default branch name via the origin HEAD symref.
-// Falls back to "main" if no remote is configured.
+// DefaultBranch returns the default branch name via the origin HEAD symref,
+// with a candidate-ref fallback when origin/HEAD is unset.
+//
+// Resolution order:
+//  1. refs/remotes/origin/HEAD symref (the configured default)
+//  2. refs/remotes/origin/main when it exists locally
+//  3. refs/remotes/origin/master when it exists locally
+//  4. "main" as a last resort
+//
+// The candidate-ref pass at step 2-3 prevents master-default rigs from
+// silently inheriting "main" when origin/HEAD has not been wired by the
+// clone (e.g., rigs added before gc rig add auto-detected the default
+// branch). See gc-8cowk / gc-ao9t.
 func (g *Git) DefaultBranch() (string, error) {
-	out, err := g.run("symbolic-ref", "refs/remotes/origin/HEAD")
-	if err != nil {
-		return "main", nil
+	if out, err := g.run("symbolic-ref", "refs/remotes/origin/HEAD"); err == nil {
+		ref := strings.TrimSpace(out)
+		if branch := strings.TrimPrefix(ref, "refs/remotes/origin/"); branch != "" {
+			return branch, nil
+		}
 	}
-	// Output is like "refs/remotes/origin/main" or
-	// "refs/remotes/origin/user/feature". Strip the full prefix so branch
-	// names containing slashes are preserved.
-	ref := strings.TrimSpace(out)
-	return strings.TrimPrefix(ref, "refs/remotes/origin/"), nil
+	for _, candidate := range []string{"main", "master"} {
+		if _, err := g.run("show-ref", "--verify", "--quiet", "refs/remotes/origin/"+candidate); err == nil {
+			return candidate, nil
+		}
+	}
+	return "main", nil
+}
+
+// ProbeDefaultBranch returns the repo's mainline branch name with a richer
+// fallback chain than DefaultBranch:
+//  1. refs/remotes/origin/HEAD symref (the configured default)
+//  2. the currently checked-out branch (when origin/HEAD is unset, the
+//     first branch is usually the mainline)
+//  3. empty string (caller decides)
+//
+// Use this at registration time (gc rig add) where we want to record the
+// repo's actual mainline rather than a generic "main" placeholder.
+func (g *Git) ProbeDefaultBranch() string {
+	if out, err := g.run("symbolic-ref", "refs/remotes/origin/HEAD"); err == nil {
+		ref := strings.TrimSpace(out)
+		if branch := strings.TrimPrefix(ref, "refs/remotes/origin/"); branch != "" {
+			return branch
+		}
+	}
+	if branch, err := g.CurrentBranch(); err == nil {
+		branch = strings.TrimSpace(branch)
+		if branch != "" && branch != "HEAD" {
+			return branch
+		}
+	}
+	return ""
 }
 
 // WorktreeRemove removes a worktree. If force is true, removes even with
@@ -103,21 +142,43 @@ func (g *Git) HasUncommittedWork() bool {
 // HasUnpushedCommits reports whether HEAD has commits not reachable from
 // any remote tracking branch. Used as a safety check before removing a
 // worktree — unpushed commits represent completed work that would be lost.
+// If the probe fails, it returns true to fail closed.
 func (g *Git) HasUnpushedCommits() bool {
+	has, err := g.HasUnpushedCommitsResult()
+	if err != nil {
+		return true
+	}
+	return has
+}
+
+// HasUnpushedCommitsResult is like HasUnpushedCommits but preserves git
+// probe errors for callers that need to expose the precise failure reason.
+func (g *Git) HasUnpushedCommitsResult() (bool, error) {
 	out, err := g.run("log", "HEAD", "--oneline", "--not", "--remotes")
 	if err != nil {
-		return false // can't determine; assume clean
+		return false, fmt.Errorf("checking unpushed commits: %w", err)
 	}
-	return strings.TrimSpace(out) != ""
+	return strings.TrimSpace(out) != "", nil
 }
 
 // HasStashes reports whether the repository has stashed work.
+// If the probe fails, it returns true to fail closed.
 func (g *Git) HasStashes() bool {
+	has, err := g.HasStashesResult()
+	if err != nil {
+		return true
+	}
+	return has
+}
+
+// HasStashesResult is like HasStashes but preserves git probe errors for
+// callers that need to expose the precise failure reason.
+func (g *Git) HasStashesResult() (bool, error) {
 	out, err := g.run("stash", "list")
 	if err != nil {
-		return false // can't determine; assume clean
+		return false, fmt.Errorf("checking stashes: %w", err)
 	}
-	return strings.TrimSpace(out) != ""
+	return strings.TrimSpace(out) != "", nil
 }
 
 // SubmoduleInit initializes and updates submodules recursively.

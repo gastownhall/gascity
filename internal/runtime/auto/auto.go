@@ -26,6 +26,7 @@ type Provider struct {
 
 var (
 	_ runtime.Provider                      = (*Provider)(nil)
+	_ runtime.DeadRuntimeSessionChecker     = (*Provider)(nil)
 	_ runtime.InteractionProvider           = (*Provider)(nil)
 	_ runtime.InterruptBoundaryWaitProvider = (*Provider)(nil)
 	_ runtime.InterruptedTurnResetProvider  = (*Provider)(nil)
@@ -173,6 +174,30 @@ func (p *Provider) IsRunning(name string) bool {
 		return p.defaultSP.IsRunning(name)
 	}
 	return p.acpSP.IsRunning(name)
+}
+
+// IsDeadRuntimeSession checks both backends for a positive dead-artifact
+// report because ListRunning is also merged across both backends.
+func (p *Provider) IsDeadRuntimeSession(name string) (bool, error) {
+	primary := p.route(name)
+	if dead, err := providerDeadRuntimeSession(primary, name); dead || err != nil {
+		return dead, err
+	}
+	p.mu.RLock()
+	isACP := p.routes[name]
+	p.mu.RUnlock()
+	if isACP {
+		return providerDeadRuntimeSession(p.defaultSP, name)
+	}
+	return providerDeadRuntimeSession(p.acpSP, name)
+}
+
+func providerDeadRuntimeSession(sp runtime.Provider, name string) (bool, error) {
+	checker, ok := sp.(runtime.DeadRuntimeSessionChecker)
+	if !ok {
+		return false, nil
+	}
+	return checker.IsDeadRuntimeSession(name)
 }
 
 // IsAttached delegates to the routed backend.

@@ -168,7 +168,7 @@ type, and created_at from the same bead it already found.
 ### Gap 5: Last output / peek preview
 
 Dashboards want a quick preview of what the agent is doing without a
-separate peek call. MC uses this for question detection and status display.
+separate peek call. real-world app uses this for question detection and status display.
 
 **Add to `agentResponse`:**
 
@@ -405,18 +405,18 @@ endpoint (medium), wire summary fields into agent response (small).
 
 ## What this does NOT include (and why)
 
-- **AI-generated summaries.** This is a consumer-layer feature. MC
+- **AI-generated summaries.** This is a consumer-layer feature. real-world app
   generates summaries by calling Claude on session data. GC could store
   summaries as bead metadata, but generating them is not an SDK concern.
 
 - **Stale/orphan process detection.** Once GC owns process metadata (Gap
   3), a dashboard can compare GC's agent list against its own OS process
   scan. But GC shouldn't scan for orphans itself — it knows exactly which
-  agents it manages. "Stale" is an MC concept for processes outside any
+  agents it manages. "Stale" is a real-world app concept for processes outside any
   orchestrator's control.
 
 - **System stats (RAM, CPU, disk).** OS-level monitoring is not GC's job.
-  A separate system monitoring service/API is the right home for this. MC
+  A separate system monitoring service/API is the right home for this. real-world app
   gets this via `free`, `os.loadavg()`, `df` and should continue to.
 
 ---

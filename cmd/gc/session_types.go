@@ -1,6 +1,7 @@
 package main
 
 import (
+	"strings"
 	"sync"
 	"time"
 
@@ -74,13 +75,15 @@ type drainTracker struct {
 	mu              sync.Mutex
 	drains          map[string]*drainState     // session bead ID -> drain state
 	idleProbes      map[string]*idleProbeState // session bead ID -> async idle probe
+	resetStalls     map[string]bool            // session bead ID -> reset stall event emitted
 	idleProbeCursor int
 }
 
 func newDrainTracker() *drainTracker {
 	return &drainTracker{
-		drains:     make(map[string]*drainState),
-		idleProbes: make(map[string]*idleProbeState),
+		drains:      make(map[string]*drainState),
+		idleProbes:  make(map[string]*idleProbeState),
+		resetStalls: make(map[string]bool),
 	}
 }
 
@@ -181,6 +184,28 @@ func (dt *drainTracker) clearIdleProbe(beadID string) {
 	delete(dt.idleProbes, beadID)
 }
 
+func (dt *drainTracker) markResetStall(beadID string) bool {
+	if dt == nil || strings.TrimSpace(beadID) == "" {
+		return true
+	}
+	dt.mu.Lock()
+	defer dt.mu.Unlock()
+	if dt.resetStalls[beadID] {
+		return false
+	}
+	dt.resetStalls[beadID] = true
+	return true
+}
+
+func (dt *drainTracker) clearResetStall(beadID string) {
+	if dt == nil || strings.TrimSpace(beadID) == "" {
+		return
+	}
+	dt.mu.Lock()
+	defer dt.mu.Unlock()
+	delete(dt.resetStalls, beadID)
+}
+
 // Reconciler tuning defaults.
 const (
 	// stabilityThreshold is how long a session must survive after wake
@@ -210,9 +235,22 @@ const (
 	// after exceeding max wake failures.
 	defaultQuarantineDuration = 5 * time.Minute
 
+	// defaultRateLimitQuarantineDuration is how long to hold a session when
+	// the pane shows a provider rate-limit screen. This is intentionally
+	// longer than crash-loop quarantine because immediate retries cannot help;
+	// 30m limits noisy respawn cycles for common minute-scale provider limits
+	// while still re-detecting and re-quarantining during longer windows.
+	defaultRateLimitQuarantineDuration = 30 * time.Minute
+
 	// defaultMaxWakeAttempts is how many consecutive wake failures before
 	// quarantine.
 	defaultMaxWakeAttempts = 5
+
+	// rateLimitPeekLines is the amount of pane scrollback inspected before a
+	// rapid dead process is classified as a crash. Known provider rate-limit
+	// screens are short, so 120 lines favors robust detection over shaving a
+	// cheap pane read.
+	rateLimitPeekLines = 120
 
 	// churnProductivityThreshold is how long a session must run to be
 	// considered productive. Sessions that survive past stabilityThreshold

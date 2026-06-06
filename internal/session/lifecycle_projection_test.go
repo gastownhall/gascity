@@ -37,6 +37,15 @@ func TestProjectLifecycleNormalizesCompatibilityStates(t *testing.T) {
 			wantState: StateAsleep,
 		},
 		{
+			name: "failed-create projects as typed cleanup state",
+			metadata: map[string]string{
+				"state":        string(StateFailedCreate),
+				"session_name": "s-worker",
+			},
+			wantBase:  BaseStateFailedCreate,
+			wantState: StateFailedCreate,
+		},
+		{
 			name: "asleep with drained sleep reason projects as drained",
 			metadata: map[string]string{
 				"state":        "asleep",
@@ -105,6 +114,20 @@ func TestProjectLifecycleDesiredStateAndBlockers(t *testing.T) {
 			wantCauses:  []WakeCause{WakeCausePendingCreate},
 		},
 		{
+			name: "explicit wake request is a durable wake cause",
+			input: LifecycleInput{
+				Status: "open",
+				Metadata: map[string]string{
+					"state":        "asleep",
+					"session_name": "s-worker",
+					"wake_request": "explicit",
+				},
+				Now: now,
+			},
+			wantDesired: DesiredStateRunning,
+			wantCauses:  []WakeCause{WakeCauseExplicit},
+		},
+		{
 			name: "future hold blocks an otherwise runnable create claim",
 			input: LifecycleInput{
 				Status: "open",
@@ -156,6 +179,29 @@ func TestProjectLifecycleDesiredStateAndBlockers(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestProjectLifecycleCreatingStalenessUsesPendingCreateStartedAt(t *testing.T) {
+	now := time.Date(2026, 5, 3, 9, 0, 0, 0, time.UTC)
+	view := ProjectLifecycle(LifecycleInput{
+		Status: "open",
+		Metadata: map[string]string{
+			"state":                     string(StateCreating),
+			"session_name":              "s-worker",
+			"pending_create_started_at": now.Add(-30 * time.Second).UTC().Format(time.RFC3339),
+		},
+		Runtime:            RuntimeFacts{Observed: true, Alive: false},
+		CreatedAt:          now.Add(-2 * time.Minute),
+		StaleCreatingAfter: time.Minute,
+		Now:                now,
+	})
+
+	if view.RuntimeProjection != RuntimeProjectionFreshCreating {
+		t.Fatalf("RuntimeProjection = %q, want %q", view.RuntimeProjection, RuntimeProjectionFreshCreating)
+	}
+	if view.ReconciledState != StateCreating {
+		t.Fatalf("ReconciledState = %q, want %q", view.ReconciledState, StateCreating)
 	}
 }
 
@@ -346,6 +392,40 @@ func TestProjectLifecycleRuntimeLivenessProjection(t *testing.T) {
 			wantReset:           true,
 		},
 		{
+			name: "dead active runtime with rate-limit reason preserves resume identity",
+			input: LifecycleInput{
+				Status: "open",
+				Metadata: map[string]string{
+					"state":               "active",
+					"session_name":        "s-worker",
+					"session_key":         "provider-conversation",
+					"started_config_hash": "config",
+					"sleep_reason":        "rate_limit",
+				},
+				Runtime: RuntimeFacts{Observed: true, Alive: false},
+				Now:     now,
+			},
+			wantRuntime:         RuntimeProjectionMissing,
+			wantReconciledState: StateAsleep,
+		},
+		{
+			name: "dead active runtime with runtime-missing reason preserves resume identity",
+			input: LifecycleInput{
+				Status: "open",
+				Metadata: map[string]string{
+					"state":               "active",
+					"session_name":        "s-worker",
+					"session_key":         "provider-conversation",
+					"started_config_hash": "config",
+					"sleep_reason":        "runtime-missing",
+				},
+				Runtime: RuntimeFacts{Observed: true, Alive: false},
+				Now:     now,
+			},
+			wantRuntime:         RuntimeProjectionMissing,
+			wantReconciledState: StateAsleep,
+		},
+		{
 			name: "fresh creating state stays creating after restart",
 			input: LifecycleInput{
 				Status: "open",
@@ -380,11 +460,35 @@ func TestProjectLifecycleRuntimeLivenessProjection(t *testing.T) {
 			wantReset:           true,
 		},
 		{
-			name: "pending create claim keeps stale creating state in creating",
+			// Regression for #1460: a pending_create_claim left behind by a
+			// crashed creator must not protect a stale-creating bead forever.
+			// Once the lease window (StaleCreatingAfter) elapses with no live
+			// runtime, the bead heals to asleep and the claim no longer wins.
+			name: "stale creating heals to asleep even with pending_create_claim",
 			input: LifecycleInput{
 				Status: "open",
 				Metadata: map[string]string{
 					"state":                "creating",
+					"session_name":         "s-worker",
+					"session_key":          "old-provider-conversation",
+					"pending_create_claim": "true",
+					"last_woke_at":         now.Add(-2 * time.Minute).UTC().Format(time.RFC3339),
+				},
+				Runtime:            RuntimeFacts{Observed: true, Alive: false},
+				CreatedAt:          now.Add(-2 * time.Minute),
+				StaleCreatingAfter: time.Minute,
+				Now:                now,
+			},
+			wantRuntime:         RuntimeProjectionStaleCreating,
+			wantReconciledState: StateAsleep,
+			wantReset:           true,
+		},
+		{
+			name: "start-pending with pending_create_claim stays start-pending",
+			input: LifecycleInput{
+				Status: "open",
+				Metadata: map[string]string{
+					"state":                string(StateStartPending),
 					"session_name":         "s-worker",
 					"pending_create_claim": "true",
 				},
@@ -394,7 +498,60 @@ func TestProjectLifecycleRuntimeLivenessProjection(t *testing.T) {
 				Now:                now,
 			},
 			wantRuntime:         RuntimeProjectionStartRequested,
+			wantReconciledState: StateStartPending,
+		},
+		{
+			// Counterpart: while the lease is still fresh, pending_create_claim
+			// continues to short-circuit so an in-flight create attempt is not
+			// raced.
+			name: "fresh creating with pending_create_claim stays in creating",
+			input: LifecycleInput{
+				Status: "open",
+				Metadata: map[string]string{
+					"state":                "creating",
+					"session_name":         "s-worker",
+					"pending_create_claim": "true",
+					"last_woke_at":         now.Add(-30 * time.Second).UTC().Format(time.RFC3339),
+				},
+				Runtime:            RuntimeFacts{Observed: true, Alive: false},
+				CreatedAt:          now.Add(-30 * time.Second),
+				StaleCreatingAfter: time.Minute,
+				Now:                now,
+			},
+			wantRuntime:         RuntimeProjectionStartRequested,
 			wantReconciledState: StateCreating,
+		},
+		{
+			name: "failed-create with pending_create_claim stays failed-create",
+			input: LifecycleInput{
+				Status: "open",
+				Metadata: map[string]string{
+					"state":                string(StateFailedCreate),
+					"session_name":         "s-worker",
+					"pending_create_claim": "true",
+				},
+				Runtime:            RuntimeFacts{Observed: true, Alive: false},
+				CreatedAt:          now.Add(-30 * time.Second),
+				StaleCreatingAfter: time.Minute,
+				Now:                now,
+			},
+			wantRuntime:         RuntimeProjectionMissing,
+			wantReconciledState: StateFailedCreate,
+		},
+		{
+			name: "non-creating pending_create_claim remains start requested",
+			input: LifecycleInput{
+				Status: "open",
+				Metadata: map[string]string{
+					"state":                "active",
+					"session_name":         "s-worker",
+					"pending_create_claim": "true",
+				},
+				Runtime: RuntimeFacts{Observed: true, Alive: false},
+				Now:     now,
+			},
+			wantRuntime:         RuntimeProjectionStartRequested,
+			wantReconciledState: StateStartPending,
 		},
 	}
 
@@ -474,6 +631,14 @@ func TestLifecycleDisplayReasonUsesOnlyActiveLifecycleReasons(t *testing.T) {
 		want string
 	}{
 		{
+			name: "circuit open wins",
+			meta: map[string]string{
+				SessionCircuitStateMetadataKey: SessionCircuitStateOpen,
+				"sleep_reason":                 "user-hold",
+			},
+			want: LifecycleReasonCircuitOpen,
+		},
+		{
 			name: "sleep reason wins",
 			meta: map[string]string{
 				"sleep_reason":      "wait-hold",
@@ -508,6 +673,14 @@ func TestLifecycleDisplayReasonUsesOnlyActiveLifecycleReasons(t *testing.T) {
 			name: "expired production context churn reason is not visible",
 			meta: map[string]string{
 				"sleep_reason":      "context-churn",
+				"quarantined_until": past,
+			},
+			want: "",
+		},
+		{
+			name: "expired rate-limit reason is not visible",
+			meta: map[string]string{
+				"sleep_reason":      "rate_limit",
 				"quarantined_until": past,
 			},
 			want: "",
@@ -568,6 +741,55 @@ func TestLifecycleDisplayReasonSuppressesTerminalStatus(t *testing.T) {
 		"sleep_reason": "user-hold",
 	}, time.Date(2026, 4, 15, 12, 0, 0, 0, time.UTC)); got != "" {
 		t.Fatalf("LifecycleDisplayReason = %q, want empty for closed status", got)
+	}
+}
+
+func TestLifecycleDisplayReasonWithLivenessShowsResetPending(t *testing.T) {
+	got := LifecycleDisplayReasonWithLiveness("open", map[string]string{
+		"restart_requested": "true",
+		"session_name":      "worker-live",
+		"sleep_reason":      "user-hold",
+	}, time.Date(2026, 4, 15, 12, 0, 0, 0, time.UTC), "", func(name string) bool {
+		return name == "worker-live"
+	})
+	if got != "reset-pending" {
+		t.Fatalf("LifecycleDisplayReasonWithLiveness = %q, want reset-pending", got)
+	}
+}
+
+func TestLifecycleDisplayReasonWithLivenessShowsCircuitOpenBeforeLifecycleReason(t *testing.T) {
+	got := LifecycleDisplayReasonWithLiveness("open", map[string]string{
+		SessionCircuitStateMetadataKey: SessionCircuitStateOpen,
+		"sleep_reason":                 "user-hold",
+	}, time.Date(2026, 4, 15, 12, 0, 0, 0, time.UTC), "", nil)
+	if got != LifecycleReasonCircuitOpen {
+		t.Fatalf("LifecycleDisplayReasonWithLiveness = %q, want circuit-open", got)
+	}
+}
+
+func TestLifecycleDisplayReasonWithLivenessShowsContinuationResetPending(t *testing.T) {
+	got := LifecycleDisplayReasonWithLiveness("open", map[string]string{
+		"continuation_reset_pending": "true",
+		"session_name":               "worker-live",
+		"sleep_reason":               "user-hold",
+	}, time.Date(2026, 4, 15, 12, 0, 0, 0, time.UTC), "", func(name string) bool {
+		return name == "worker-live"
+	})
+	if got != "reset-pending" {
+		t.Fatalf("LifecycleDisplayReasonWithLiveness = %q, want reset-pending", got)
+	}
+}
+
+func TestLifecycleDisplayReasonWithLivenessSuppressesTerminalResetPending(t *testing.T) {
+	got := LifecycleDisplayReasonWithLiveness("closed", map[string]string{
+		"restart_requested": "true",
+		"session_name":      "worker-live",
+		"sleep_reason":      "user-hold",
+	}, time.Date(2026, 4, 15, 12, 0, 0, 0, time.UTC), "", func(string) bool {
+		return true
+	})
+	if got != "" {
+		t.Fatalf("LifecycleDisplayReasonWithLiveness = %q, want empty for closed status", got)
 	}
 }
 

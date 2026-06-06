@@ -68,6 +68,7 @@ The `start` operation receives a JSON object on stdin:
   "work_dir": "/path/to/working/directory",
   "command": "claude --dangerously-skip-permissions",
   "env": {"GC_AGENT": "mayor", "GC_CITY": "/home/user/bright-lights"},
+  "lifecycle": "one_shot",
   "process_names": ["claude", "node"],
   "nudge": "initial prompt text",
   "pre_start": ["mkdir -p /workspace", "git clone repo /workspace"]
@@ -88,6 +89,10 @@ hints or ignore them:
   agent "started." A script can implement this by polling its backend's
   process tree after session creation, or ignore it for fire-and-forget
   behavior (like the subprocess provider does).
+
+- **`lifecycle`** — `"one_shot"` marks a short-lived command that is
+  expected to exit after handling its prompt. Providers should not require
+  a persistent post-start process for one-shot starts.
 
 - **`nudge`** — text that the tmux adapter types into the session after
   the agent is ready. Scripts that support interactive input can handle

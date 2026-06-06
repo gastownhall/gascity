@@ -88,6 +88,12 @@ func (r *Reconciler) reconcileBead(ctx context.Context, beadID string) Reconcile
 		// Path 3: state=waiting_manual.
 		return r.reconcileWaitingManual(beadID, meta)
 
+	case StateWaitingTrigger:
+		// Path 3t: state=waiting_trigger. No wisp is in flight while waiting
+		// on the external trigger, so recovery only completes an interrupted
+		// stop; otherwise the controller tick re-evaluates the trigger.
+		return r.reconcileWaitingTrigger(beadID, meta)
+
 	case StateActive:
 		// Path 4: state=active.
 		return r.reconcileActive(ctx, beadID, meta)
@@ -220,7 +226,7 @@ func (r *Reconciler) reconcileCreating(beadID string) ReconcileDetail {
 			Error: fmt.Errorf("setting state to terminated: %w", err),
 		}
 	}
-	if err := r.Handler.Store.CloseBead(beadID); err != nil {
+	if err := r.Handler.Store.CloseBead(beadID, CloseReasonReconcileDone); err != nil {
 		return ReconcileDetail{
 			BeadID: beadID, Action: "completed_terminal",
 			Error: fmt.Errorf("closing bead: %w", err),
@@ -279,7 +285,7 @@ func (r *Reconciler) reconcileTerminatedNotClosed(beadID string, meta map[string
 	r.emitRecoveryEvent(EventTerminated, EventIDTerminated(beadID), beadID, termPayload)
 
 	// Close the bead.
-	if err := r.Handler.Store.CloseBead(beadID); err != nil {
+	if err := r.Handler.Store.CloseBead(beadID, CloseReasonReconcileDone); err != nil {
 		return ReconcileDetail{
 			BeadID: beadID, Action: "completed_terminal",
 			Error: fmt.Errorf("closing bead: %w", err),
@@ -362,6 +368,19 @@ func (r *Reconciler) reconcileWaitingManual(beadID string, meta map[string]strin
 		return ReconcileDetail{BeadID: beadID, Action: "repaired_state"}
 	}
 
+	return ReconcileDetail{BeadID: beadID, Action: "no_action"}
+}
+
+// --- Path 3t: state=waiting_trigger ---
+
+func (r *Reconciler) reconcileWaitingTrigger(beadID string, meta map[string]string) ReconcileDetail {
+	// A stop requested while waiting on the trigger may have crashed before
+	// the terminal transition completed.
+	if meta[FieldTerminalReason] != "" {
+		return r.completeTerminalTransition(beadID, meta)
+	}
+	// Otherwise nothing to repair: no wisp is in flight and the controller
+	// tick re-evaluates the trigger condition.
 	return ReconcileDetail{BeadID: beadID, Action: "no_action"}
 }
 
@@ -561,7 +580,7 @@ func (r *Reconciler) completeTerminalTransition(beadID string, meta map[string]s
 	}
 
 	// Close the bead.
-	if err := r.Handler.Store.CloseBead(beadID); err != nil {
+	if err := r.Handler.Store.CloseBead(beadID, CloseReasonReconcileDone); err != nil {
 		return ReconcileDetail{
 			BeadID: beadID, Action: "completed_terminal",
 			Error: fmt.Errorf("closing bead: %w", err),
@@ -667,5 +686,5 @@ func (r *Reconciler) emitRecoveryEvent(eventType, eventID, beadID string, payloa
 	if r.Handler.Emitter == nil {
 		return
 	}
-	r.Handler.Emitter.Emit(eventType, eventID, beadID, MarshalPayload(payload), true)
+	r.Handler.Emitter.Emit(eventType, eventID, beadID, MarshalPayload(r.Handler.withEventRig(beadID, payload)), true)
 }

@@ -8,10 +8,14 @@ import "fmt"
 type Patches struct {
 	// Agents targets agents by (dir, name).
 	Agents []AgentPatch `toml:"agent,omitempty"`
+	// NamedSessions targets configured named sessions by (dir, template).
+	NamedSessions []NamedSessionPatch `toml:"named_session,omitempty"`
 	// Rigs targets rigs by name.
 	Rigs []RigPatch `toml:"rigs,omitempty"`
 	// Providers targets providers by name.
 	Providers []ProviderPatch `toml:"providers,omitempty"`
+	// GitHubPRMonitors targets GitHub PR readiness monitors by name.
+	GitHubPRMonitors []GitHubPRMonitorPatch `toml:"github_pr_monitor,omitempty"`
 }
 
 // AgentPatch modifies an existing agent identified by (Dir, Name).
@@ -24,6 +28,9 @@ type AgentPatch struct {
 	Name string `toml:"name" jsonschema:"required"`
 	// WorkDir overrides the agent's session working directory.
 	WorkDir *string `toml:"work_dir,omitempty"`
+	// TmuxAlias overrides the tmux session name template
+	// (see Agent.TmuxAlias for semantics).
+	TmuxAlias *string `toml:"tmux_alias,omitempty"`
 	// Scope overrides the agent's scope ("city" or "rig").
 	Scope *string `toml:"scope,omitempty"`
 	// Suspended overrides the agent's suspended state.
@@ -37,18 +44,25 @@ type AgentPatch struct {
 	// PreStart overrides the agent's pre_start commands.
 	PreStart []string `toml:"pre_start,omitempty"`
 	// PromptTemplate overrides the prompt template path.
-	// Relative paths resolve against the city directory.
+	// Relative paths resolve against the declaring config file's directory
+	// (pack-safe). Paths prefixed with "//" resolve against the city root.
 	PromptTemplate *string `toml:"prompt_template,omitempty"`
-	// Session overrides the session transport ("acp").
+	// Session overrides the session transport ("acp" or "tmux").
 	Session *string `toml:"session,omitempty"`
 	// Provider overrides the provider name.
 	Provider *string `toml:"provider,omitempty"`
 	// StartCommand overrides the start command.
 	StartCommand *string `toml:"start_command,omitempty"`
+	// Lifecycle overrides the runtime lifecycle ("one_shot" or empty).
+	Lifecycle *string `toml:"lifecycle,omitempty" jsonschema:"enum=one_shot"`
 	// Nudge overrides the nudge text.
 	Nudge *string `toml:"nudge,omitempty"`
 	// IdleTimeout overrides the idle timeout. Duration string (e.g., "30s", "5m", "1h").
 	IdleTimeout *string `toml:"idle_timeout,omitempty"`
+	// MaxSessionAge overrides the max session age. Duration string (e.g., "5h").
+	MaxSessionAge *string `toml:"max_session_age,omitempty"`
+	// MaxSessionAgeJitter overrides the max session age jitter. Duration string (e.g., "15m").
+	MaxSessionAgeJitter *string `toml:"max_session_age_jitter,omitempty"`
 	// SleepAfterIdle overrides idle sleep policy for this agent. Accepts a
 	// duration string or "off".
 	SleepAfterIdle *string `toml:"sleep_after_idle,omitempty"`
@@ -91,12 +105,16 @@ type AgentPatch struct {
 	SessionLive []string `toml:"session_live,omitempty"`
 	// OverlayDir overrides the agent's overlay_dir path. Copies contents
 	// additively into the agent's working directory at startup.
-	// Relative paths resolve against the city directory.
+	// Relative paths resolve against the declaring config file's directory
+	// (pack-safe). Paths prefixed with "//" resolve against the city root.
 	OverlayDir *string `toml:"overlay_dir,omitempty"`
 	// DefaultSlingFormula overrides the default sling formula.
 	DefaultSlingFormula *string `toml:"default_sling_formula,omitempty"`
-	// InjectFragments overrides the agent's inject_fragments list.
-	InjectFragments []string `toml:"inject_fragments,omitempty"`
+	// InjectFragments overrides the agent's inject_fragments list. Leave this
+	// field unset to keep inherited fragments; JSON callers may send null for
+	// the same no-op. Set an empty list to clear fragments; set a populated
+	// list to replace fragments.
+	InjectFragments *[]string `toml:"inject_fragments,omitempty"`
 	// AppendFragments overrides the agent's append_fragments list.
 	AppendFragments []string `toml:"append_fragments,omitempty"`
 	// Attach overrides the agent's attach setting.
@@ -107,6 +125,8 @@ type AgentPatch struct {
 	ResumeCommand *string `toml:"resume_command,omitempty"`
 	// WakeMode overrides the agent's wake mode ("resume" or "fresh").
 	WakeMode *string `toml:"wake_mode,omitempty" jsonschema:"enum=resume,enum=fresh"`
+	// MouseMode overrides whether tmux mouse mode is preserved ("on" or "off").
+	MouseMode *string `toml:"mouse_mode,omitempty" jsonschema:"enum=on,enum=off"`
 	// PreStartAppend appends commands to the agent's pre_start list
 	// (instead of replacing). Applied after PreStart if both are set.
 	PreStartAppend []string `toml:"pre_start_append,omitempty"`
@@ -122,15 +142,29 @@ type AgentPatch struct {
 	MaxActiveSessions *int `toml:"max_active_sessions,omitempty"`
 	// MinActiveSessions overrides the minimum number of sessions to keep alive.
 	MinActiveSessions *int `toml:"min_active_sessions,omitempty"`
-	// ScaleCheck overrides the command template whose output determines desired
-	// session count. Supports the same Go template placeholders as
-	// Agent.scale_check.
+	// ScaleCheck overrides the command template whose output reports new
+	// unassigned session demand for bead-backed reconciliation. Supports the
+	// same Go template placeholders as Agent.scale_check.
 	ScaleCheck *string `toml:"scale_check,omitempty"`
 	// OptionDefaults adds or overrides provider option defaults for this agent.
 	// Keys are option keys, values are choice values. Merges additively
 	// (patch keys win over existing agent keys).
 	// Example: option_defaults = { model = "sonnet" }
 	OptionDefaults map[string]string `toml:"option_defaults,omitempty"`
+}
+
+// NamedSessionPatch modifies an existing named session identified by canonical
+// name or, for compatibility, by an unambiguous template.
+type NamedSessionPatch struct {
+	// Dir is the targeting key. Empty targets a city-scoped named session.
+	Dir string `toml:"dir,omitempty"`
+	// Name is the canonical named-session identity. Use this to disambiguate
+	// sessions that share the same template.
+	Name string `toml:"name,omitempty"`
+	// Template is a compatibility targeting key when Name is omitted.
+	Template string `toml:"template,omitempty"`
+	// Mode overrides the named-session controller mode ("on_demand" or "always").
+	Mode *string `toml:"mode,omitempty" jsonschema:"enum=on_demand,enum=always"`
 }
 
 // PoolOverride modifies legacy [pool] fields that map to session scaling. Nil fields are not changed.
@@ -160,8 +194,14 @@ type RigPatch struct {
 	Path *string `toml:"path,omitempty"`
 	// Prefix overrides the bead ID prefix.
 	Prefix *string `toml:"prefix,omitempty"`
+	// DefaultBranch overrides the rig's recorded mainline branch.
+	DefaultBranch *string `toml:"default_branch,omitempty"`
 	// Suspended overrides the rig's suspended state.
 	Suspended *bool `toml:"suspended,omitempty"`
+	// FormulaVars adds or overrides rig-scoped formula var defaults.
+	// Additive merge: patch keys win over existing rig keys, unspecified
+	// keys are preserved.
+	FormulaVars map[string]string `toml:"formula_vars,omitempty"`
 }
 
 // ProviderPatch modifies an existing provider identified by Name.
@@ -196,6 +236,8 @@ type ProviderPatch struct {
 	PromptFlag *string `toml:"prompt_flag,omitempty"`
 	// ReadyDelayMs overrides the ready delay in milliseconds.
 	ReadyDelayMs *int `toml:"ready_delay_ms,omitempty" jsonschema:"minimum=0"`
+	// AcceptStartupDialogs overrides startup dialog acceptance behavior.
+	AcceptStartupDialogs *bool `toml:"accept_startup_dialogs,omitempty"`
 	// Env adds or overrides environment variables.
 	Env map[string]string `toml:"env,omitempty"`
 	// EnvRemove lists env var keys to remove.
@@ -204,9 +246,68 @@ type ProviderPatch struct {
 	Replace bool `toml:"_replace,omitempty"`
 }
 
+// GitHubPRMonitorPatch modifies an existing GitHub PR readiness monitor by
+// name. Pointer fields distinguish "not set" from "set to zero value."
+type GitHubPRMonitorPatch struct {
+	// Name is the monitor identity to patch.
+	Name string `toml:"name" jsonschema:"required"`
+	// Owner overrides the GitHub repository owner or organization.
+	Owner *string `toml:"owner,omitempty"`
+	// Repo overrides the GitHub repository name.
+	Repo *string `toml:"repo,omitempty"`
+	// BaseBranches replaces the monitored base branch list. An empty list
+	// clears the field and will fail validation unless another patch fills it.
+	BaseBranches *[]string `toml:"base_branches,omitempty"`
+	// Rig overrides the owning rig.
+	Rig *string `toml:"rig,omitempty"`
+	// Notify replaces notification recipients. An empty list clears recipients.
+	Notify *[]string `toml:"notify,omitempty"`
+	// NotifyAppend appends notification recipients after Notify replacement.
+	NotifyAppend []string `toml:"notify_append,omitempty"`
+	// RepairRoute overrides the repair route target.
+	RepairRoute *string `toml:"repair_route,omitempty"`
+	// WebhookSecretEnv overrides the env var containing the webhook secret.
+	WebhookSecretEnv *string `toml:"webhook_secret_env,omitempty"`
+	// WebhookSecretKey overrides the stable webhook secret key.
+	WebhookSecretKey *string `toml:"webhook_secret_key,omitempty"`
+	// PollInterval overrides the optional polling cadence.
+	PollInterval *string `toml:"poll_interval,omitempty"`
+	// MergeQueuePolicy overrides merge-queue signal handling.
+	MergeQueuePolicy *string `toml:"merge_queue,omitempty" jsonschema:"enum=ignore,enum=observe,enum=repair"`
+}
+
 // IsEmpty reports whether p has no patch operations.
 func (p *Patches) IsEmpty() bool {
-	return len(p.Agents) == 0 && len(p.Rigs) == 0 && len(p.Providers) == 0
+	return len(p.Agents) == 0 &&
+		len(p.NamedSessions) == 0 &&
+		len(p.Rigs) == 0 &&
+		len(p.Providers) == 0 &&
+		len(p.GitHubPRMonitors) == 0
+}
+
+// Fragments returns a pointer to the given inject_fragments list for use
+// in AgentPatch and AgentOverride literals. Mirrors the three
+// presence-aware states of InjectFragments:
+//
+//	Fragments()                 // empty list: clear
+//	Fragments("frag-a")         // single item: replace with one fragment
+//	Fragments("frag-a", "...")  // populated list: replace with all fragments
+//	nil                         // leave unchanged; do not call Fragments
+//
+// Calling Fragments() with no arguments is the canonical clear; it
+// makes the intent visible at the call site without ad-hoc
+// `&[]string{}` literals.
+func Fragments(items ...string) *[]string {
+	if items == nil {
+		items = []string{}
+	}
+	out := append([]string(nil), items...)
+	if out == nil {
+		// `append(nil, ...empty...)` returns nil; force a non-nil empty
+		// slice so the pointer dereferences to the clear signal.
+		out = []string{}
+	}
+	return &out
 }
 
 // ApplyPatches applies all patches to the config. Patches target existing
@@ -219,6 +320,11 @@ func ApplyPatches(cfg *City, patches Patches) error {
 			return fmt.Errorf("patches.agent[%d]: %w", i, err)
 		}
 	}
+	for i, p := range patches.NamedSessions {
+		if err := applyNamedSessionPatch(cfg, &p); err != nil {
+			return fmt.Errorf("patches.named_session[%d]: %w", i, err)
+		}
+	}
 	for i, p := range patches.Rigs {
 		if err := applyRigPatch(cfg, &p); err != nil {
 			return fmt.Errorf("patches.rigs[%d]: %w", i, err)
@@ -229,7 +335,59 @@ func ApplyPatches(cfg *City, patches Patches) error {
 			return fmt.Errorf("patches.providers[%d]: %w", i, err)
 		}
 	}
+	for i, p := range patches.GitHubPRMonitors {
+		if err := applyGitHubPRMonitorPatch(cfg, &p); err != nil {
+			return fmt.Errorf("patches.github_pr_monitor[%d]: %w", i, err)
+		}
+	}
 	return nil
+}
+
+func applyNamedSessionPatch(cfg *City, patch *NamedSessionPatch) error {
+	target, matches, err := namedSessionPatchMatches(cfg, patch)
+	if err != nil {
+		return err
+	}
+	if len(matches) == 0 {
+		return fmt.Errorf("named_session %q not found in merged config", target)
+	}
+	if len(matches) > 1 {
+		return fmt.Errorf("named_session patch target %q is ambiguous; set name to the named_session identity", target)
+	}
+	applyNamedSessionPatchFields(&cfg.NamedSessions[matches[0]], patch)
+	return nil
+}
+
+func namedSessionPatchMatches(cfg *City, patch *NamedSessionPatch) (string, []int, error) {
+	if patch.Name == "" && patch.Template == "" {
+		return "", nil, fmt.Errorf("named_session patch: name or template is required")
+	}
+	if patch.Name != "" {
+		target := qualifiedNameFromPatch(patch.Dir, patch.Name)
+		matches := make([]int, 0, 1)
+		for i := range cfg.NamedSessions {
+			if cfg.NamedSessions[i].QualifiedName() == target {
+				matches = append(matches, i)
+			}
+		}
+		return target, matches, nil
+	}
+
+	target := qualifiedNameFromPatch(patch.Dir, patch.Template)
+	matches := make([]int, 0, 1)
+	for i := range cfg.NamedSessions {
+		s := &cfg.NamedSessions[i]
+		if s.QualifiedName() == target || s.TemplateQualifiedName() == target {
+			matches = append(matches, i)
+		}
+	}
+	return target, matches, nil
+}
+
+func applyNamedSessionPatchFields(s *NamedSession, p *NamedSessionPatch) {
+	if p.Mode != nil {
+		s.Mode = *p.Mode
+	}
 }
 
 // applyAgentPatch finds an agent by (dir, name) and applies the patch.
@@ -259,6 +417,9 @@ func applyAgentPatchFields(a *Agent, p *AgentPatch) {
 	if p.WorkDir != nil {
 		a.WorkDir = *p.WorkDir
 	}
+	if p.TmuxAlias != nil {
+		a.TmuxAlias = *p.TmuxAlias
+	}
 	if p.Scope != nil {
 		a.Scope = *p.Scope
 	}
@@ -283,11 +444,20 @@ func applyAgentPatchFields(a *Agent, p *AgentPatch) {
 	if p.StartCommand != nil {
 		a.StartCommand = *p.StartCommand
 	}
+	if p.Lifecycle != nil {
+		a.Lifecycle = *p.Lifecycle
+	}
 	if p.Nudge != nil {
 		a.Nudge = *p.Nudge
 	}
 	if p.IdleTimeout != nil {
 		a.IdleTimeout = *p.IdleTimeout
+	}
+	if p.MaxSessionAge != nil {
+		a.MaxSessionAge = *p.MaxSessionAge
+	}
+	if p.MaxSessionAgeJitter != nil {
+		a.MaxSessionAgeJitter = *p.MaxSessionAgeJitter
 	}
 	if p.SleepAfterIdle != nil {
 		a.SleepAfterIdle = NormalizeSleepAfterIdle(*p.SleepAfterIdle)
@@ -342,8 +512,24 @@ func applyAgentPatchFields(a *Agent, p *AgentPatch) {
 	if p.WakeMode != nil {
 		a.WakeMode = *p.WakeMode
 	}
-	if len(p.InjectFragments) > 0 {
-		a.InjectFragments = append([]string(nil), p.InjectFragments...)
+	if p.MouseMode != nil {
+		a.MouseMode = *p.MouseMode
+	}
+	// InjectFragments uses presence-aware semantics via *[]string: a nil
+	// pointer means "leave unchanged"; a non-nil pointer (even to an
+	// empty slice) means "replace the agent's list with exactly this
+	// value". The pointer travels through TOML write/read intact —
+	// `inject_fragments = []` in a [[patches.agent]] block survives
+	// round-trip and clears an inherited list. Without this, downstream
+	// editors that want to clear a pack-baseline inject_fragments
+	// silently no-op because TOML's omitempty drops `[]string{}` on
+	// encode. The existing `len > 0` pattern remains for `depends_on`,
+	// `pre_start`, `session_setup`, and other list fields whose UX
+	// hasn't asked for clearing yet (see TODO above) — the same
+	// presence-aware pattern can be adopted field by field as the need
+	// arises.
+	if p.InjectFragments != nil {
+		a.InjectFragments = append([]string(nil), (*p.InjectFragments)...)
 	}
 	if len(p.AppendFragments) > 0 {
 		a.AppendFragments = append([]string(nil), p.AppendFragments...)
@@ -424,13 +610,73 @@ func applyRigPatch(cfg *City, patch *RigPatch) error {
 			if patch.Prefix != nil {
 				r.Prefix = *patch.Prefix
 			}
+			if patch.DefaultBranch != nil {
+				r.DefaultBranch = *patch.DefaultBranch
+			}
 			if patch.Suspended != nil {
 				r.Suspended = *patch.Suspended
+			}
+			if len(patch.FormulaVars) > 0 {
+				if r.FormulaVars == nil {
+					r.FormulaVars = make(map[string]string, len(patch.FormulaVars))
+				}
+				for k, v := range patch.FormulaVars {
+					r.FormulaVars[k] = v
+				}
 			}
 			return nil
 		}
 	}
 	return fmt.Errorf("rig %q not found in merged config", patch.Name)
+}
+
+// applyGitHubPRMonitorPatch finds a GitHub PR monitor by name and applies
+// the patch.
+func applyGitHubPRMonitorPatch(cfg *City, patch *GitHubPRMonitorPatch) error {
+	if patch.Name == "" {
+		return fmt.Errorf("github pr monitor patch: name is required")
+	}
+	for i := range cfg.GitHub.PRMonitors {
+		monitor := &cfg.GitHub.PRMonitors[i]
+		if monitor.Name != patch.Name {
+			continue
+		}
+		if patch.Owner != nil {
+			monitor.Owner = *patch.Owner
+		}
+		if patch.Repo != nil {
+			monitor.Repo = *patch.Repo
+		}
+		if patch.BaseBranches != nil {
+			monitor.BaseBranches = append([]string(nil), (*patch.BaseBranches)...)
+		}
+		if patch.Rig != nil {
+			monitor.Rig = *patch.Rig
+		}
+		if patch.Notify != nil {
+			monitor.Notify = append([]string(nil), (*patch.Notify)...)
+		}
+		if len(patch.NotifyAppend) > 0 {
+			monitor.Notify = append(monitor.Notify, patch.NotifyAppend...)
+		}
+		if patch.RepairRoute != nil {
+			monitor.RepairRoute = *patch.RepairRoute
+		}
+		if patch.WebhookSecretEnv != nil {
+			monitor.WebhookSecretEnv = *patch.WebhookSecretEnv
+		}
+		if patch.WebhookSecretKey != nil {
+			monitor.WebhookSecretKey = *patch.WebhookSecretKey
+		}
+		if patch.PollInterval != nil {
+			monitor.PollInterval = *patch.PollInterval
+		}
+		if patch.MergeQueuePolicy != nil {
+			monitor.MergeQueuePolicy = *patch.MergeQueuePolicy
+		}
+		return nil
+	}
+	return fmt.Errorf("github pr monitor %q not found in merged config", patch.Name)
 }
 
 // applyProviderPatch modifies a provider. If Replace is true, replaces the
@@ -482,6 +728,9 @@ func applyProviderPatch(cfg *City, patch *ProviderPatch) error {
 		if patch.ReadyDelayMs != nil {
 			newSpec.ReadyDelayMs = *patch.ReadyDelayMs
 		}
+		if patch.AcceptStartupDialogs != nil {
+			newSpec.AcceptStartupDialogs = cloneBoolPtr(patch.AcceptStartupDialogs)
+		}
 		if len(patch.Env) > 0 {
 			newSpec.Env = make(map[string]string, len(patch.Env))
 			for k, v := range patch.Env {
@@ -524,6 +773,9 @@ func applyProviderPatch(cfg *City, patch *ProviderPatch) error {
 	}
 	if patch.ReadyDelayMs != nil {
 		spec.ReadyDelayMs = *patch.ReadyDelayMs
+	}
+	if patch.AcceptStartupDialogs != nil {
+		spec.AcceptStartupDialogs = cloneBoolPtr(patch.AcceptStartupDialogs)
 	}
 	// Env: additive merge.
 	if len(patch.Env) > 0 {

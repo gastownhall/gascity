@@ -1,7 +1,7 @@
 {
   "$defs": {
     "cityListLine": {
-      "$ref": "openapi.json#/components/schemas/WireEvent",
+      "$ref": "openapi.json#/components/schemas/TypedEventStreamEnvelope",
       "description": "A JSONL line from `gc events` when a city is in scope."
     },
     "cityStreamLine": {
@@ -9,7 +9,7 @@
       "description": "A JSONL line from `gc events --watch` or `gc events --follow` when a city is in scope."
     },
     "supervisorListLine": {
-      "$ref": "openapi.json#/components/schemas/WireTaggedEvent",
+      "$ref": "openapi.json#/components/schemas/TypedTaggedEventStreamEnvelope",
       "description": "A JSONL line from `gc events` when no city is in scope."
     },
     "supervisorStreamLine": {
@@ -21,10 +21,10 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "anyOf": [
     {
-      "$ref": "openapi.json#/components/schemas/WireEvent"
+      "$ref": "openapi.json#/components/schemas/TypedEventStreamEnvelope"
     },
     {
-      "$ref": "openapi.json#/components/schemas/WireTaggedEvent"
+      "$ref": "openapi.json#/components/schemas/TypedTaggedEventStreamEnvelope"
     },
     {
       "$ref": "openapi.json#/components/schemas/EventStreamEnvelope"
@@ -39,8 +39,8 @@
     "cursorMode": "`gc events --seq` is not JSONL; it writes the current city index or supervisor composite cursor as text.",
     "heartbeatSuppression": "HeartbeatEvent SSE frames are consumed internally and are not written to stdout.",
     "listMode": [
-      "WireEvent",
-      "WireTaggedEvent"
+      "TypedEventStreamEnvelope",
+      "TypedTaggedEventStreamEnvelope"
     ],
     "sourceOfTruth": "openapi.json",
     "streamMode": [

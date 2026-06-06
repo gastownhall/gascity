@@ -14,6 +14,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/git"
+	"github.com/gastownhall/gascity/internal/promptmeta"
 )
 
 const (
@@ -23,18 +24,54 @@ const (
 
 // PromptContext holds template data for prompt rendering.
 type PromptContext struct {
-	CityRoot      string
-	AgentName     string // qualified: "rig/polecat-1" or "mayor"
-	TemplateName  string // config name: "polecat" (template) or "mayor" (named backing template)
-	RigName       string
-	RigRoot       string
-	WorkDir       string
-	IssuePrefix   string
-	Branch        string
-	DefaultBranch string            // e.g. "main" — from git symbolic-ref origin/HEAD
-	WorkQuery     string            // command to find available work (from Agent.EffectiveWorkQuery)
-	SlingQuery    string            // command template to route work to this agent (from Agent.EffectiveSlingQuery)
-	Env           map[string]string // from Agent.Env — custom vars
+	CityRoot                string
+	AgentName               string // qualified: "rig/polecat-1" or "mayor"
+	TemplateName            string // config name: "polecat" (template) or "mayor" (named backing template)
+	BindingName             string
+	BindingPrefix           string
+	RigName                 string
+	RigRoot                 string
+	WorkDir                 string
+	IssuePrefix             string
+	Branch                  string
+	DefaultBranch           string // e.g. "main" — from git symbolic-ref origin/HEAD
+	WorkQuery               string // command to find available work (from Agent.EffectiveWorkQuery)
+	AssignedInProgressQuery string // command to find assigned in-progress work (from Agent.EffectiveAssignedInProgressQuery)
+	AssignedReadyQuery      string // command to find pre-assigned ready work (from Agent.EffectiveAssignedReadyQuery)
+	RoutedPoolQuery         string // command to find unassigned routed pool work (from Agent.EffectiveRoutedPoolQuery)
+	SlingQuery              string // command template to route work to this agent (from Agent.EffectiveSlingQuery)
+	// ProviderKey is the resolved provider name for this agent (e.g. "claude",
+	// "codex", or a custom provider name from the city's [providers] section).
+	// Templates can branch on this via {{ .ProviderKey }} or feed it to
+	// {{ templateFirst }} for per-provider fragment selection.
+	ProviderKey string
+	// ProviderDisplayName is the human-readable name for the resolved provider
+	// (e.g. "Claude Code", "Codex CLI"). Resolved from city providers, then
+	// builtins, then the builtin family of a custom provider; falls back to
+	// ProviderKey when nothing else matches.
+	ProviderDisplayName string
+	// InstructionsFile is the filename the resolved provider reads for project
+	// instructions (e.g. "CLAUDE.md" for claude, "AGENTS.md" for codex/kiro).
+	// Resolved from city providers, then builtins, then the builtin family of a
+	// custom provider; defaults to "AGENTS.md" when no provider is configured.
+	// Templates use {{ .InstructionsFile }} as a provider-aware fallback when
+	// pack-specific guidance (e.g. quality-gate commands) is missing or empty.
+	InstructionsFile string
+	Env              map[string]string // from Agent.Env — custom vars
+}
+
+// PromptRenderResult holds the rendered text plus the version and rendered
+// content SHA introduced by issue #1256 (1e).
+//
+// Version comes from the template's `version` frontmatter field — a human
+// label that surfaces in dashboards and `gc analyze` output. SHA is the
+// SHA-256 of the rendered text (after text/template substitution); two
+// runs with the same Version but diverging SHAs reveal an unbumped
+// template edit.
+type PromptRenderResult struct {
+	Text    string
+	Version string
+	SHA     string
 }
 
 // renderPrompt reads a prompt template file and renders it with the given
@@ -48,37 +85,74 @@ type PromptContext struct {
 // or the file doesn't exist. On parse or execute error, logs a warning to
 // stderr and returns the raw text (graceful fallback).
 func renderPrompt(fs fsys.FS, cityPath, cityName, templatePath string, ctx PromptContext, sessionTemplate string, stderr io.Writer, packDirs []string, injectFragments []string, store beads.Store) string {
+	return renderPromptWithMeta(fs, cityPath, cityName, templatePath, ctx, sessionTemplate, stderr, packDirs, injectFragments, store).Text
+}
+
+// renderPromptWithMeta is renderPrompt's variant that additionally returns
+// the template's frontmatter version and the SHA of the rendered output.
+// Callers persisting prompt provenance (session metadata, WorkerOperation
+// payloads) should use this entry point.
+func renderPromptWithMeta(fs fsys.FS, cityPath, cityName, templatePath string, ctx PromptContext, sessionTemplate string, stderr io.Writer, packDirs []string, injectFragments []string, store beads.Store) PromptRenderResult {
 	if templatePath == "" {
-		return ""
+		return PromptRenderResult{}
 	}
 	sourcePath := promptTemplateSourcePath(cityPath, templatePath)
 	data, err := fs.ReadFile(sourcePath)
 	if err != nil {
-		return ""
+		return PromptRenderResult{}
 	}
 	raw := string(data)
+	fm, body := promptmeta.Parse(raw)
 
 	// Canonical prompt templates use .template.md. Legacy .md.tmpl files
-	// remain supported temporarily for compatibility; plain .md files are
-	// returned as-is.
+	// remain supported temporarily for compatibility; plain .md files skip
+	// template execution but still strip frontmatter before hashing/returning.
 	if !isPromptTemplatePath(templatePath) {
-		return raw
+		return PromptRenderResult{
+			Text:    body,
+			Version: fm.Version,
+			SHA:     promptmeta.SHA(body),
+		}
 	}
 
-	tmpl := template.New("prompt").
-		Funcs(promptFuncMap(cityName, sessionTemplate, store)).
+	// templateFirst (registered via promptFuncMap) needs to call tmpl.Lookup
+	// at execute time. The closure captures &tmpl by reference so the func
+	// observes the parsed template (with all fragments registered) rather
+	// than nil at funcmap-construction time.
+	var tmpl *template.Template
+	tmpl = template.New("prompt").
+		Funcs(promptFuncMap(cityName, sessionTemplate, store, func() *template.Template { return tmpl })).
 		Option("missingkey=zero")
 
 	// Load shared templates from pack dirs (lower priority).
 	// Each pack directory may contain prompts/shared/ and/or
 	// template-fragments/ subdirectories.
+	loadedPackFragmentRoots := make(map[string]struct{}, len(packDirs)+1)
 	for _, dir := range packDirs {
+		cleanDir := filepath.Clean(dir)
+		loadedPackFragmentRoots[cleanDir] = struct{}{}
 		sharedDir := filepath.Join(dir, "prompts", "shared")
 		loadSharedTemplates(fs, tmpl, sharedDir, stderr)
 		// V2: template-fragments/ at pack level.
 		fragDir := filepath.Join(dir, "template-fragments")
 		loadSharedTemplates(fs, tmpl, fragDir, stderr)
 	}
+	if sourcePackRoot := promptSourcePackRoot(cityPath, sourcePath); sourcePackRoot != "" {
+		if _, ok := loadedPackFragmentRoots[sourcePackRoot]; !ok {
+			loadSharedTemplates(fs, tmpl, filepath.Join(sourcePackRoot, "prompts", "shared"), stderr)
+			loadSharedTemplates(fs, tmpl, filepath.Join(sourcePackRoot, "template-fragments"), stderr)
+		}
+	}
+
+	// Load shared templates from the city root itself. cfg.PackDirs is
+	// populated only from imported packs, so a root city pack with no
+	// [imports.*] blocks would otherwise silently ignore its own
+	// prompts/shared/ and template-fragments/ directories. Loaded after
+	// imported-pack fragments (so city-root wins on name collision with
+	// imports) but before sibling shared/ and per-agent fragments below
+	// (which keep their existing higher precedence).
+	loadSharedTemplates(fs, tmpl, filepath.Join(cityPath, "prompts", "shared"), stderr)
+	loadSharedTemplates(fs, tmpl, filepath.Join(cityPath, "template-fragments"), stderr)
 
 	// Load shared templates from sibling shared/ directory (highest priority —
 	// wins on name collision with cross-pack templates).
@@ -92,17 +166,27 @@ func renderPrompt(fs fsys.FS, cityPath, cityName, templatePath string, ctx Promp
 	loadSharedTemplates(fs, tmpl, agentFragDir, stderr)
 
 	// Parse main template last — its body becomes the "prompt" template.
-	tmpl, err = tmpl.Parse(raw)
+	// Frontmatter is stripped before parsing so it doesn't appear in
+	// rendered output.
+	tmpl, err = tmpl.Parse(body)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc: prompt template %q: %v\n", templatePath, err) //nolint:errcheck // best-effort stderr
-		return raw
+		return PromptRenderResult{
+			Text:    body,
+			Version: fm.Version,
+			SHA:     promptmeta.SHA(body),
+		}
 	}
 
 	td := buildTemplateData(ctx)
 	var buf bytes.Buffer
 	if err := tmpl.Execute(&buf, td); err != nil {
 		fmt.Fprintf(stderr, "gc: prompt template %q: %v\n", templatePath, err) //nolint:errcheck // best-effort stderr
-		return raw
+		return PromptRenderResult{
+			Text:    body,
+			Version: fm.Version,
+			SHA:     promptmeta.SHA(body),
+		}
 	}
 
 	// Append injected fragments.
@@ -121,7 +205,12 @@ func renderPrompt(fs fsys.FS, cityPath, cityName, templatePath string, ctx Promp
 		buf.Write(fbuf.Bytes())
 	}
 
-	return buf.String()
+	rendered := buf.String()
+	return PromptRenderResult{
+		Text:    rendered,
+		Version: fm.Version,
+		SHA:     promptmeta.SHA(rendered),
+	}
 }
 
 func promptTemplateSourcePath(cityPath, templatePath string) string {
@@ -129,6 +218,21 @@ func promptTemplateSourcePath(cityPath, templatePath string) string {
 		return templatePath
 	}
 	return filepath.Join(cityPath, templatePath)
+}
+
+func promptSourcePackRoot(cityPath, sourcePath string) string {
+	cleanCityPath := filepath.Clean(cityPath)
+	cleanSourcePath := filepath.Clean(sourcePath)
+	agentDir := filepath.Dir(cleanSourcePath)
+	agentsDir := filepath.Dir(agentDir)
+	if filepath.Base(agentsDir) != "agents" {
+		return ""
+	}
+	packRoot := filepath.Clean(filepath.Dir(agentsDir))
+	if packRoot == cleanCityPath {
+		return ""
+	}
+	return packRoot
 }
 
 func isCanonicalPromptTemplatePath(path string) bool {
@@ -211,7 +315,7 @@ func effectivePromptFragments(global, inject, appendFragments, inherited, defaul
 // buildTemplateData merges Env (lower priority) with SDK fields (higher
 // priority) into a single map for template execution.
 func buildTemplateData(ctx PromptContext) map[string]string {
-	m := make(map[string]string, len(ctx.Env)+8)
+	m := make(map[string]string, len(ctx.Env)+19)
 	for k, v := range ctx.Env {
 		m[k] = v
 	}
@@ -219,6 +323,8 @@ func buildTemplateData(ctx PromptContext) map[string]string {
 	m["CityRoot"] = ctx.CityRoot
 	m["AgentName"] = ctx.AgentName
 	m["TemplateName"] = ctx.TemplateName
+	m["BindingName"] = ctx.BindingName
+	m["BindingPrefix"] = ctx.BindingPrefix
 	m["RigName"] = ctx.RigName
 	m["RigRoot"] = ctx.RigRoot
 	m["WorkDir"] = ctx.WorkDir
@@ -226,7 +332,13 @@ func buildTemplateData(ctx PromptContext) map[string]string {
 	m["Branch"] = ctx.Branch
 	m["DefaultBranch"] = ctx.DefaultBranch
 	m["WorkQuery"] = ctx.WorkQuery
+	m["AssignedInProgressQuery"] = ctx.AssignedInProgressQuery
+	m["AssignedReadyQuery"] = ctx.AssignedReadyQuery
+	m["RoutedPoolQuery"] = ctx.RoutedPoolQuery
 	m["SlingQuery"] = ctx.SlingQuery
+	m["ProviderKey"] = ctx.ProviderKey
+	m["ProviderDisplayName"] = ctx.ProviderDisplayName
+	m["InstructionsFile"] = ctx.InstructionsFile
 	return m
 }
 
@@ -252,11 +364,32 @@ func defaultBranchFor(dir string) string {
 	return branch
 }
 
+// defaultBranchForRig returns the rig's recorded DefaultBranch when set,
+// falling back to a runtime probe of dir. Use this in prompt/template
+// rendering so polecats and the refinery target the rig's true mainline
+// even when origin/HEAD is unset on the local clone.
+func defaultBranchForRig(rigName string, rigs []config.Rig, dir string) string {
+	if rigName != "" {
+		for i := range rigs {
+			if rigs[i].Name == rigName {
+				if branch := rigs[i].EffectiveDefaultBranch(); branch != "" {
+					return branch
+				}
+				break
+			}
+		}
+	}
+	return defaultBranchFor(dir)
+}
+
 // promptFuncMap returns template functions available in prompt templates.
 // sessionTemplate is the custom session naming template (empty = default).
 // store is used by the "session" function to look up bead-derived session
-// names; nil falls back to legacy naming.
-func promptFuncMap(cityName, sessionTemplate string, store beads.Store) template.FuncMap {
+// names; nil falls back to legacy naming. parentTmpl is a getter for the
+// template being rendered; it is invoked at execute time (not at funcmap
+// construction time) so functions can look up fragments parsed after the
+// funcmap was wired.
+func promptFuncMap(cityName, sessionTemplate string, store beads.Store, parentTmpl func() *template.Template) template.FuncMap {
 	return template.FuncMap{
 		"cmd": func() string {
 			return filepath.Base(os.Args[0])
@@ -268,5 +401,107 @@ func promptFuncMap(cityName, sessionTemplate string, store beads.Store) template
 			_, name := config.ParseQualifiedName(qualifiedName)
 			return name
 		},
+		// templateFirst executes the first registered template fragment whose
+		// name matches one of the provided candidates, using `data` as the
+		// template context. Returns "" when no candidate is registered (silent
+		// fallback — pass a guaranteed-present "default" name last to enforce
+		// a match). Empty candidate names are skipped.
+		//
+		// Typical use:
+		//   {{ templateFirst . (printf "slash-note-%s" .ProviderKey) "slash-note-default" }}
+		"templateFirst": func(data any, names ...string) (string, error) {
+			t := parentTmpl()
+			if t == nil {
+				return "", nil
+			}
+			for _, name := range names {
+				if name == "" {
+					continue
+				}
+				frag := t.Lookup(name)
+				if frag == nil {
+					continue
+				}
+				var buf bytes.Buffer
+				if err := frag.Execute(&buf, data); err != nil {
+					return "", err
+				}
+				return buf.String(), nil
+			}
+			return "", nil
+		},
 	}
+}
+
+// providerInfoForAgent returns the resolved provider key and human-readable
+// display name for an agent, without performing PATH lookups (which the full
+// config.ResolveProvider performs and which are inappropriate for prompt
+// rendering). Resolution chain: agent.Provider > workspace.Provider. Returns
+// empty strings when no provider name is configured.
+func providerInfoForAgent(a *config.Agent, ws *config.Workspace, cityProviders map[string]config.ProviderSpec) (key, displayName string) {
+	if a == nil {
+		return "", ""
+	}
+	name := a.Provider
+	if name == "" && ws != nil {
+		name = ws.Provider
+	}
+	if name == "" {
+		return "", ""
+	}
+	return name, providerDisplayNameFor(name, cityProviders)
+}
+
+// instructionsFileForAgent returns the project-instructions filename the
+// resolved provider expects (e.g. "CLAUDE.md", "AGENTS.md"). It mirrors the
+// resolution chain used by providerInfoForAgent (agent.Provider >
+// workspace.Provider) and looks the filename up via the same precedence as
+// config.ResolveProvider (city providers > builtin spec > builtin family).
+// Returns "AGENTS.md" — the same default config.resolveProvider uses — when no
+// provider is configured or the resolved spec leaves InstructionsFile empty.
+func instructionsFileForAgent(a *config.Agent, ws *config.Workspace, cityProviders map[string]config.ProviderSpec) string {
+	const defaultInstructionsFile = "AGENTS.md"
+	if a == nil {
+		return defaultInstructionsFile
+	}
+	name := a.Provider
+	if name == "" && ws != nil {
+		name = ws.Provider
+	}
+	if name == "" {
+		return defaultInstructionsFile
+	}
+	if spec, ok := cityProviders[name]; ok && spec.InstructionsFile != "" {
+		return spec.InstructionsFile
+	}
+	if spec, ok := config.BuiltinProviders()[name]; ok && spec.InstructionsFile != "" {
+		return spec.InstructionsFile
+	}
+	if family := config.BuiltinFamily(name, cityProviders); family != "" && family != name {
+		if spec, ok := config.BuiltinProviders()[family]; ok && spec.InstructionsFile != "" {
+			return spec.InstructionsFile
+		}
+	}
+	return defaultInstructionsFile
+}
+
+// providerDisplayNameFor returns the human-readable name for a provider.
+// Resolution: city providers (explicit DisplayName) > builtin spec for the
+// raw name > builtin spec for the BuiltinFamily ancestor > the name itself.
+func providerDisplayNameFor(name string, cityProviders map[string]config.ProviderSpec) string {
+	if name == "" {
+		return ""
+	}
+	if spec, ok := cityProviders[name]; ok && spec.DisplayName != "" {
+		return spec.DisplayName
+	}
+	if spec, ok := config.BuiltinProviders()[name]; ok && spec.DisplayName != "" {
+		return spec.DisplayName
+	}
+	if family := config.BuiltinFamily(name, cityProviders); family != "" && family != name {
+		if spec, ok := config.BuiltinProviders()[family]; ok && spec.DisplayName != "" {
+			return spec.DisplayName
+		}
+	}
+	return name
 }

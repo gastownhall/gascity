@@ -87,7 +87,7 @@ func (h *Handler) ApproveHandler(_ context.Context, beadID, username, _ string) 
 	}
 	h.emitEvent(EventTerminated, EventIDTerminated(beadID), beadID, termPayload)
 
-	if err := h.Store.CloseBead(beadID); err != nil {
+	if err := h.Store.CloseBead(beadID, CloseReasonManualApprove); err != nil {
 		return HandlerResult{}, fmt.Errorf("closing bead %q: %w", beadID, err)
 	}
 
@@ -254,11 +254,11 @@ func (h *Handler) StopHandler(ctx context.Context, beadID, username, _ string) (
 		}, nil
 	}
 
-	// Must be active or waiting_manual.
-	if state != StateActive && state != StateWaitingManual {
+	// Must be active, waiting_manual, or waiting_trigger.
+	if state != StateActive && state != StateWaitingManual && state != StateWaitingTrigger {
 		return HandlerResult{}, fmt.Errorf(
-			"cannot stop bead %q: state is %q, expected %q or %q",
-			beadID, state, StateActive, StateWaitingManual,
+			"cannot stop bead %q: state is %q, expected %q, %q, or %q",
+			beadID, state, StateActive, StateWaitingManual, StateWaitingTrigger,
 		)
 	}
 
@@ -332,7 +332,7 @@ func (h *Handler) StopHandler(ctx context.Context, beadID, username, _ string) (
 			}
 		}
 		if activeWisp != "" && wispInfo.Status != "closed" {
-			if err := h.Store.CloseBead(activeWisp); err != nil {
+			if err := h.Store.CloseBead(activeWisp, CloseReasonManualSupersede); err != nil {
 				return HandlerResult{}, fmt.Errorf("force-closing active wisp %q: %w", activeWisp, err)
 			}
 			forceClosedWisp = true
@@ -412,7 +412,7 @@ func (h *Handler) StopHandler(ctx context.Context, beadID, username, _ string) (
 	h.emitEvent(EventTerminated, EventIDTerminated(beadID), beadID, termPayload)
 
 	// Step 8: CloseBead.
-	if err := h.Store.CloseBead(beadID); err != nil {
+	if err := h.Store.CloseBead(beadID, CloseReasonManualStop); err != nil {
 		return HandlerResult{}, fmt.Errorf("closing bead %q: %w", beadID, err)
 	}
 

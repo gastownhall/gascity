@@ -2,26 +2,27 @@ package api
 
 import (
 	"context"
+	"os/exec"
 	"strings"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/agent"
-	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	gitpkg "github.com/gastownhall/gascity/internal/git"
+	"github.com/gastownhall/gascity/internal/runtime"
 	workdirutil "github.com/gastownhall/gascity/internal/workdir"
-	"github.com/gastownhall/gascity/internal/worker"
 )
 
 type rigResponse struct {
-	Name         string     `json:"name"`
-	Path         string     `json:"path"`
-	Suspended    bool       `json:"suspended"`
-	Prefix       string     `json:"prefix,omitempty"`
-	AgentCount   int        `json:"agent_count"`
-	RunningCount int        `json:"running_count"`
-	LastActivity *time.Time `json:"last_activity,omitempty"`
-	Git          *gitStatus `json:"git,omitempty"`
+	Name          string     `json:"name"`
+	Path          string     `json:"path"`
+	Suspended     bool       `json:"suspended"`
+	Prefix        string     `json:"prefix,omitempty"`
+	DefaultBranch string     `json:"default_branch,omitempty"`
+	AgentCount    int        `json:"agent_count"`
+	RunningCount  int        `json:"running_count"`
+	LastActivity  *time.Time `json:"last_activity,omitempty"`
+	Git           *gitStatus `json:"git,omitempty"`
 }
 
 type gitStatus struct {
@@ -33,7 +34,7 @@ type gitStatus struct {
 }
 
 // buildRigResponse creates a rigResponse with agent counts and last activity.
-func (s *Server) buildRigResponse(cfg *config.City, rig config.Rig, store beads.Store, sp sessionLister, cityName, cityPath string) rigResponse {
+func (s *Server) buildRigResponse(cfg *config.City, rig config.Rig, sp runtime.Provider, cityName, cityPath string) rigResponse {
 	tmpl := cfg.Workspace.SessionTemplate
 	var agentCount, runningCount int
 	var maxActivity time.Time
@@ -42,12 +43,12 @@ func (s *Server) buildRigResponse(cfg *config.City, rig config.Rig, store beads.
 		if workdirutil.ConfiguredRigName(cityPath, a, cfg.Rigs) != rig.Name {
 			continue
 		}
+		processNames := config.AgentProcessNames(cfg, a, exec.LookPath)
 		expanded := expandAgent(a, cityName, tmpl, sp)
 		for _, ea := range expanded {
 			agentCount++
 			sessionName := agent.SessionNameFor(cityName, ea.qualifiedName, tmpl)
-			handle, _ := s.workerHandleForSessionTarget(store, sessionName)
-			obs, _ := worker.ObserveHandle(context.Background(), handle)
+			obs := observeProviderSession(sp, sessionName, processNames)
 			if obs.Running {
 				runningCount++
 			}
@@ -58,12 +59,13 @@ func (s *Server) buildRigResponse(cfg *config.City, rig config.Rig, store beads.
 	}
 
 	resp := rigResponse{
-		Name:         rig.Name,
-		Path:         rig.Path,
-		Suspended:    s.rigSuspended(cfg, rig, store, sp, cityName, cityPath),
-		Prefix:       rig.Prefix,
-		AgentCount:   agentCount,
-		RunningCount: runningCount,
+		Name:          rig.Name,
+		Path:          rig.Path,
+		Suspended:     s.rigSuspended(cfg, rig, sp, cityName, cityPath),
+		Prefix:        rig.Prefix,
+		DefaultBranch: rig.DefaultBranch,
+		AgentCount:    agentCount,
+		RunningCount:  runningCount,
 	}
 	if !maxActivity.IsZero() {
 		resp.LastActivity = &maxActivity
@@ -74,7 +76,7 @@ func (s *Server) buildRigResponse(cfg *config.City, rig config.Rig, store beads.
 // rigSuspended computes effective suspended state for a rig by merging config
 // and runtime session metadata. A rig is suspended if the config says so, or
 // if all its agents are runtime-suspended via session metadata.
-func (s *Server) rigSuspended(cfg *config.City, rig config.Rig, store beads.Store, sp sessionLister, cityName, cityPath string) bool {
+func (s *Server) rigSuspended(cfg *config.City, rig config.Rig, sp runtime.Provider, cityName, cityPath string) bool {
 	if rig.Suspended {
 		return true
 	}
@@ -84,12 +86,12 @@ func (s *Server) rigSuspended(cfg *config.City, rig config.Rig, store beads.Stor
 		if workdirutil.ConfiguredRigName(cityPath, a, cfg.Rigs) != rig.Name {
 			continue
 		}
+		processNames := config.AgentProcessNames(cfg, a, exec.LookPath)
 		expanded := expandAgent(a, cityName, tmpl, sp)
 		for _, ea := range expanded {
 			agentCount++
 			sessionName := agent.SessionNameFor(cityName, ea.qualifiedName, tmpl)
-			handle, _ := s.workerHandleForSessionTarget(store, sessionName)
-			obs, _ := worker.ObserveHandle(context.Background(), handle)
+			obs := observeProviderSession(sp, sessionName, processNames)
 			if obs.Suspended {
 				suspendedCount++
 			}

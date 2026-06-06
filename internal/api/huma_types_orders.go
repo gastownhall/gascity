@@ -28,6 +28,7 @@ type OrderGetInput struct {
 // OrderCheckInput is the Huma input for GET /v0/city/{cityName}/orders/check.
 type OrderCheckInput struct {
 	CityScope
+	Fresh bool `query:"fresh" required:"false" doc:"Bypass cached order-check responses and cached order history."`
 }
 
 // OrderHistoryInput is the Huma input for GET /v0/city/{cityName}/orders/history.

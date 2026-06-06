@@ -135,10 +135,10 @@ func TestCmdOrderHistoryUsesProviderAwareCityStore(t *testing.T) {
 	writeProviderAwareTestCity(t, cityDir, `[workspace]
 name = "demo"
 `)
-	if err := os.MkdirAll(filepath.Join(cityDir, "orders", "digest"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(cityDir, "orders"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(cityDir, "orders", "digest", "order.toml"), []byte(`[order]
+	if err := os.WriteFile(filepath.Join(cityDir, "orders", "digest.toml"), []byte(`[order]
 formula = "mol-digest"
 trigger = "manual"
 `), 0o644); err != nil {
@@ -249,10 +249,10 @@ func TestCmdOrderRunExecSkipsStoreOpenForScopedFileProvider(t *testing.T) {
 	writeProviderAwareTestCity(t, cityDir, `[workspace]
 name = "demo"
 `)
-	if err := os.MkdirAll(filepath.Join(cityDir, "orders", "poll"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(cityDir, "orders"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(cityDir, "orders", "poll", "order.toml"), []byte(`[order]
+	if err := os.WriteFile(filepath.Join(cityDir, "orders", "poll.toml"), []byte(`[order]
 exec = "printf 'exec ok\\n'"
 trigger = "manual"
 `), 0o644); err != nil {
@@ -261,7 +261,7 @@ trigger = "manual"
 	chdirProviderAwareTest(t, cityDir)
 
 	var stdout, stderr bytes.Buffer
-	code := cmdOrderRun("poll", "", &stdout, &stderr)
+	code := cmdOrderRun("poll", "", false, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("cmdOrderRun(exec) = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -281,10 +281,10 @@ func TestCmdOrderRunFormulaUsesProviderAwareCityStore(t *testing.T) {
 	writeProviderAwareTestCity(t, cityDir, `[workspace]
 name = "demo"
 `)
-	if err := os.MkdirAll(filepath.Join(cityDir, "orders", "digest"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(cityDir, "orders"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(cityDir, "orders", "digest", "order.toml"), []byte(`[order]
+	if err := os.WriteFile(filepath.Join(cityDir, "orders", "digest.toml"), []byte(`[order]
 formula = "mol-digest"
 trigger = "manual"
 pool = "dog"
@@ -294,11 +294,11 @@ pool = "dog"
 	if err := os.MkdirAll(filepath.Join(cityDir, "formulas"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	formulaText, err := os.ReadFile(filepath.Join(sharedTestFormulaDir, "mol-digest.formula.toml"))
+	formulaText, err := os.ReadFile(filepath.Join(sharedTestFormulaDir, "mol-digest.toml"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(cityDir, "formulas", "mol-digest.formula.toml"), formulaText, 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(cityDir, "formulas", "mol-digest.toml"), formulaText, 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if err := ensurePersistedScopeLocalFileStore(cityDir); err != nil {
@@ -307,7 +307,7 @@ pool = "dog"
 	chdirProviderAwareTest(t, cityDir)
 
 	var stdout, stderr bytes.Buffer
-	code := cmdOrderRun("digest", "", &stdout, &stderr)
+	code := cmdOrderRun("digest", "", false, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("cmdOrderRun(formula) = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -331,6 +331,15 @@ pool = "dog"
 func TestDoConvoyAutocloseUsesBeadsDirStoreRoot(t *testing.T) {
 	configureIsolatedRuntimeEnv(t)
 	t.Setenv("GC_BEADS", "file")
+
+	envCityDir := t.TempDir()
+	if err := ensureScopedFileStoreLayout(envCityDir); err != nil {
+		t.Fatal(err)
+	}
+	writeProviderAwareTestCity(t, envCityDir, `[workspace]
+name = "ambient"
+`)
+	t.Setenv("GC_CITY", envCityDir)
 
 	cityDir := t.TempDir()
 	if err := ensureScopedFileStoreLayout(cityDir); err != nil {
@@ -390,9 +399,44 @@ name = "demo"
 	}
 }
 
+func TestAutocloseCityPathForStoreRootPrefersStoreRootCityOverInheritedGCCity(t *testing.T) {
+	configureIsolatedRuntimeEnv(t)
+
+	envCityDir := t.TempDir()
+	if err := ensureScopedFileStoreLayout(envCityDir); err != nil {
+		t.Fatal(err)
+	}
+	writeProviderAwareTestCity(t, envCityDir, `[workspace]
+name = "ambient"
+`)
+	t.Setenv("GC_CITY", envCityDir)
+
+	storeCityDir := t.TempDir()
+	if err := ensureScopedFileStoreLayout(storeCityDir); err != nil {
+		t.Fatal(err)
+	}
+	writeProviderAwareTestCity(t, storeCityDir, `[workspace]
+name = "store"
+`)
+
+	got := autocloseCityPathForStoreRoot(storeCityDir)
+	if canonicalTestPath(got) != canonicalTestPath(storeCityDir) {
+		t.Fatalf("autocloseCityPathForStoreRoot(%q) = %q, want store-root city %q", storeCityDir, got, storeCityDir)
+	}
+}
+
 func TestDoWispAutocloseUsesBeadsDirStoreRoot(t *testing.T) {
 	configureIsolatedRuntimeEnv(t)
 	t.Setenv("GC_BEADS", "file")
+
+	envCityDir := t.TempDir()
+	if err := ensureScopedFileStoreLayout(envCityDir); err != nil {
+		t.Fatal(err)
+	}
+	writeProviderAwareTestCity(t, envCityDir, `[workspace]
+name = "ambient"
+`)
+	t.Setenv("GC_CITY", envCityDir)
 
 	cityDir := t.TempDir()
 	if err := ensureScopedFileStoreLayout(cityDir); err != nil {

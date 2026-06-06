@@ -27,6 +27,19 @@ trace() {
     printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >> "$TRACE_FILE"
 }
 
+if ! command -v timeout >/dev/null 2>&1; then
+    if command -v gtimeout >/dev/null 2>&1; then
+        timeout() {
+            gtimeout "$@"
+        }
+    else
+        timeout() {
+            shift
+            "$@"
+        }
+    fi
+fi
+
 current_port_file() {
     if [ -f "$GC_CITY/.beads/dolt-server.port" ]; then
         tr -d '\n' < "$GC_CITY/.beads/dolt-server.port"
@@ -69,7 +82,7 @@ ref_matches_suffix_list() {
     for suffix in "${suffixes[@]}"; do
         suffix=$(trim_spaces "$suffix")
         [ -n "$suffix" ] || continue
-        if [[ "$ref" == *"$suffix"* ]]; then
+        if [[ "$ref" == *"$suffix" ]]; then
             return 0
         fi
     done
@@ -382,7 +395,7 @@ while true; do
     ref=$(printf '%s\n' "$bead_json" | json_payload | jq_bead '.ref // .metadata["gc.step_ref"] // ""')
     kind=$(printf '%s\n' "$bead_json" | json_payload | jq_bead '.metadata["gc.kind"] // ""')
     root_id=$(printf '%s\n' "$bead_json" | json_payload | jq_bead '.metadata["gc.root_bead_id"] // ""')
-    source_id=""
+    target_id=""
     work_dir=""
     if [ -n "$root_id" ]; then
         if ! root_json=$(timeout 10 bd show --json "$root_id" 2>/dev/null); then
@@ -390,15 +403,15 @@ while true; do
             sleep 1
             continue
         fi
-        source_id=$(printf '%s\n' "$root_json" | json_payload | jq_bead '.metadata["gc.source_bead_id"]')
+        target_id=$(printf '%s\n' "$root_json" | json_payload | jq_bead '.metadata["gc.input_convoy_id"]')
     fi
-    if [ -n "$source_id" ]; then
-        if ! source_json=$(timeout 10 bd show --json "$source_id" 2>/dev/null); then
-            trace "source-show-failed bead=$bead_id source=$source_id"
+    if [ -n "$target_id" ]; then
+        if ! target_json=$(timeout 10 bd show --json "$target_id" 2>/dev/null); then
+            trace "target-show-failed bead=$bead_id target=$target_id"
             sleep 1
             continue
         fi
-        work_dir=$(printf '%s\n' "$source_json" | json_payload | jq_bead '.metadata.work_dir')
+        work_dir=$(printf '%s\n' "$target_json" | json_payload | jq_bead '.metadata.work_dir')
     fi
 
     if is_currently_blocked "$bead_id" "$root_id"; then
@@ -469,16 +482,56 @@ while true; do
     # does not appear in the report. Writing here would violate
     # TestGraphWorkflowFailureRunsCleanup's "report should not include
     # .implement after abort" invariant.
-    trace "run bead=$bead_id ref=$ref kind=$kind source=$source_id work_dir=$work_dir"
+    trace "run bead=$bead_id ref=$ref kind=$kind target=$target_id work_dir=$work_dir"
     trace_store
+
+    # Abort-propagation defense for TestGraphWorkflowFailureRunsCleanup.
+    # Without this, a worker that picked up .implement or .submit after
+    # preflight closed with fail, but before the controller's
+    # skipOpenScopeMembers pass ran, could race the controller:
+    #   1. Outcome race: worker closes a skipped step with pass before the
+    #      controller's skip lands. bd allows overwrites on closed beads,
+    #      so whoever writes last wins.
+    #   2. Side-effect race: .submit mutates the source issue before this
+    #      worker notices the abort.
+    #   3. Report race: worker writes the ref to REPORT_FILE between its
+    #      own outcome check and close.
+    # Defense: detect any sibling hard failure in the same workflow before
+    # step side effects and close this bead as skipped.
+    # Scoped to gc.failure_class="hard" so retry-flavor transient failures
+    # (which the controller DOESN'T use to skip siblings) don't trigger
+    # false positives. Teardown beads must still run after body failure.
+    sibling_hard_fail="false"
+    if [ "$kind" != "cleanup" ] && [ -n "$root_id" ]; then
+        if sibling_json=$(timeout 10 bd list --all --limit=0 --json 2>/dev/null); then
+            if printf '%s\n' "$sibling_json" | json_payload | jq -e \
+                --arg root "$root_id" --arg self "$bead_id" '
+                    if type == "array" then
+                        any(.[]?; (.metadata // {})["gc.root_bead_id"] == $root
+                                    and .id != $self
+                                    and .status == "closed"
+                                    and (.metadata // {})["gc.outcome"] == "fail"
+                                    and (.metadata // {})["gc.failure_class"] == "hard")
+                    else false
+                    end' >/dev/null 2>&1; then
+                sibling_hard_fail="true"
+            fi
+        fi
+    fi
+    if [ "$sibling_hard_fail" = "true" ] && [[ "$ref" != *.cleanup-worktree* ]]; then
+        trace "skip-sibling-hard-fail bead=$bead_id ref=$ref root=$root_id (sibling has outcome=fail class=hard; closing self as skipped)"
+        bd update "$bead_id" --set-metadata "gc.outcome=skipped" --status closed 2>/dev/null || \
+            trace "skip-close-failed bead=$bead_id ref=$ref"
+        continue
+    fi
 
     case "$ref" in
         *.workspace-setup*)
             if [ -z "$work_dir" ]; then
-                work_dir="$GC_CITY/worktrees/$source_id"
+                work_dir="$GC_CITY/worktrees/$target_id"
                 mkdir -p "$work_dir"
-                bd update "$source_id" --set-metadata "work_dir=$work_dir"
-                trace "workspace-setup source=$source_id work_dir=$work_dir"
+                bd update "$target_id" --set-metadata "work_dir=$work_dir"
+                trace "workspace-setup target=$target_id work_dir=$work_dir"
             fi
             ;;
         *.preflight-tests*)
@@ -502,16 +555,16 @@ while true; do
             printf 'implemented\n' > "$work_dir/implemented.txt"
             ;;
         *.submit*)
-            bd update "$source_id" --set-metadata "submitted=true"
-            trace "submitted source=$source_id"
+            bd update "$target_id" --set-metadata "submitted=true"
+            trace "submitted target=$target_id"
             ;;
         *.cleanup-worktree*)
             if [ -n "$work_dir" ] && [ -d "$work_dir" ]; then
                 rm -rf "$work_dir"
                 trace "cleanup removed work_dir=$work_dir"
             fi
-            bd update "$source_id" --unset-metadata work_dir
-            trace "cleanup unset work_dir source=$source_id"
+            bd update "$target_id" --unset-metadata work_dir
+            trace "cleanup unset work_dir target=$target_id"
             ;;
     esac
 
@@ -557,46 +610,6 @@ while true; do
     elif [ "$status_before" != "open" ]; then
         trace "skip-before-close bead=$bead_id ref=$ref status=$status_before outcome=$outcome_before"
         sleep 0.2
-        continue
-    fi
-
-    # Abort-propagation defense for TestGraphWorkflowFailureRunsCleanup.
-    # Without this, a worker that picked up .implement after preflight
-    # closed with fail — but before the controller's skipOpenScopeMembers
-    # pass ran — could race the controller in two ways:
-    #   1. Outcome race: worker closes .implement with pass before the
-    #      controller's skip lands. bd allows overwrites on closed beads,
-    #      so whoever writes last wins.
-    #   2. Report race: worker writes .implement to REPORT_FILE between
-    #      its own outcome check and the close.
-    # Defense: detect any sibling hard failure in the same workflow and
-    # close this bead as skipped ourselves instead of closing with pass.
-    # Scoped to gc.failure_class="hard" so retry-flavor transient
-    # failures (which the controller DOESN'T use to skip siblings) don't
-    # trigger false positives.
-    # Teardown beads must still run after body failure; only body members get
-    # the sibling-hard-fail short-circuit.
-    sibling_hard_fail="false"
-    if [ "$kind" != "cleanup" ] && [ -n "$root_id" ]; then
-        if sibling_json=$(timeout 10 bd list --all --limit=0 --json 2>/dev/null); then
-            if printf '%s\n' "$sibling_json" | json_payload | jq -e \
-                --arg root "$root_id" --arg self "$bead_id" '
-                    if type == "array" then
-                        any(.[]?; (.metadata // {})["gc.root_bead_id"] == $root
-                                    and .id != $self
-                                    and .status == "closed"
-                                    and (.metadata // {})["gc.outcome"] == "fail"
-                                    and (.metadata // {})["gc.failure_class"] == "hard")
-                    else false
-                    end' >/dev/null 2>&1; then
-                sibling_hard_fail="true"
-            fi
-        fi
-    fi
-    if [ "$sibling_hard_fail" = "true" ] && [[ "$ref" != *.cleanup-worktree* ]]; then
-        trace "skip-sibling-hard-fail bead=$bead_id ref=$ref root=$root_id (sibling has outcome=fail class=hard; closing self as skipped)"
-        bd update "$bead_id" --set-metadata "gc.outcome=skipped" --status closed 2>/dev/null || \
-            trace "skip-close-failed bead=$bead_id ref=$ref"
         continue
     fi
 

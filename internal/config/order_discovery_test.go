@@ -1,8 +1,7 @@
 package config
 
 import (
-	"bytes"
-	"log"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -10,36 +9,38 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 )
 
-func TestLoadWithIncludes_WarnsForDeprecatedPackOrderDirectory(t *testing.T) {
-	dir := t.TempDir()
-	packDir := filepath.Join(dir, "mypk")
-	writeTestFile(t, packDir, "pack.toml", `
+func TestLoadWithIncludes_RejectsDeprecatedPackOrderDirectoryForAllPackSchemas(t *testing.T) {
+	for _, schema := range []int{1, 2} {
+		t.Run(fmt.Sprintf("schema-%d", schema), func(t *testing.T) {
+			dir := t.TempDir()
+			packDir := filepath.Join(dir, "mypk")
+			writeTestFile(t, packDir, "pack.toml", fmt.Sprintf(`
 [pack]
 name = "mypk"
-schema = 1
-`)
-	writeTestFile(t, filepath.Join(packDir, "orders", "health-check"), "order.toml", `
+schema = %d
+`, schema))
+			writeTestFile(t, filepath.Join(packDir, "orders", "health-check"), "order.toml", `
 [order]
 formula = "health-check"
 trigger = "cron"
 schedule = "*/5 * * * *"
 `)
 
-	cityDir := filepath.Join(dir, "city")
-	writeTestFile(t, cityDir, "city.toml", `
+			cityDir := filepath.Join(dir, "city")
+			writeTestFile(t, cityDir, "city.toml", `
 [workspace]
 name = "test"
 includes = ["../mypk"]
 `)
 
-	logs := captureConfigLogs(t, func() {
-		if _, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityDir, "city.toml")); err != nil {
-			t.Fatalf("LoadWithIncludes: %v", err)
-		}
-	})
-
-	if !strings.Contains(logs, "rename to orders/health-check.toml") {
-		t.Fatalf("logs = %q, want rename warning", logs)
+			_, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityDir, "city.toml"))
+			if err == nil {
+				t.Fatal("LoadWithIncludes succeeded, want hard error for deprecated order directory")
+			}
+			if !strings.Contains(err.Error(), "rename to orders/health-check.toml") {
+				t.Fatalf("error = %v, want rename guidance", err)
+			}
+		})
 	}
 }
 
@@ -65,33 +66,7 @@ name = "test"
 includes = ["../mypk"]
 `)
 
-	logs := captureConfigLogs(t, func() {
-		if _, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityDir, "city.toml")); err != nil {
-			t.Fatalf("LoadWithIncludes: %v", err)
-		}
-	})
-
-	if strings.Contains(logs, "health-check.toml") {
-		t.Fatalf("logs = %q, want no order deprecation warning", logs)
+	if _, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityDir, "city.toml")); err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
 	}
-}
-
-func captureConfigLogs(t *testing.T, fn func()) string {
-	t.Helper()
-
-	var buf bytes.Buffer
-	origWriter := log.Writer()
-	origFlags := log.Flags()
-	origPrefix := log.Prefix()
-	log.SetOutput(&buf)
-	log.SetFlags(0)
-	log.SetPrefix("")
-	defer func() {
-		log.SetOutput(origWriter)
-		log.SetFlags(origFlags)
-		log.SetPrefix(origPrefix)
-	}()
-
-	fn()
-	return buf.String()
 }

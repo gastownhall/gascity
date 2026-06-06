@@ -1,3 +1,7 @@
+ignore:
+  # Generated from internal/api/openapi.json and verified by TestGeneratedClientInSync.
+  - "internal/api/genclient/client_gen.go"
+
 coverage:
   status:
     default_rules:

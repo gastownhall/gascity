@@ -1,0 +1,5 @@
+{"role":"_system_prompt","content":"system prompt"}
+{"role":"_checkpoint","id":0}
+{"role":"user","content":"Repeat the exact Kimi phase-1 summary from earlier before answering."}
+{"role":"_checkpoint","id":1}
+{"role":"assistant","content":"I cannot repeat the earlier Kimi summary because this session started fresh."}

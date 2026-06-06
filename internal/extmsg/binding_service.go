@@ -2,6 +2,7 @@ package extmsg
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"reflect"
 	"slices"
@@ -512,7 +513,16 @@ func ReassignSessionBindings(ctx context.Context, store beads.Store, oldSessionI
 	return nil
 }
 
-// CloseSessionBindings terminates active bindings for a retired session bead ID.
+// CloseSessionBindings terminates active bindings, group participants, AND any
+// residual conversation memberships for a retired session bead ID.
+//
+// The Unbind cascade only closes memberships through the binding seed loop, so
+// a session whose only extmsg state is a participant-driven membership (e.g.
+// created via POST /extmsg/participants by gc slack bind-room, with no
+// corresponding gc:extmsg-binding bead) is left as a zombie. Worse, the
+// gc:extmsg-participant beads themselves stay open and remain visible to
+// ResolveInbound / ResolveOutbound, so group routing can still target the
+// dead session. Sweep both explicitly.
 func CloseSessionBindings(ctx context.Context, store beads.Store, sessionID string, now time.Time) error {
 	if err := checkContext(ctx); err != nil {
 		return err
@@ -524,11 +534,94 @@ func CloseSessionBindings(ctx context.Context, store beads.Store, sessionID stri
 	if sessionID == "" {
 		return nil
 	}
-	_, err := NewServices(store).Bindings.Unbind(ctx, Caller{Kind: CallerController, ID: "session-retirement"}, UnbindInput{
+	caller := Caller{Kind: CallerController, ID: "session-retirement"}
+	svc := NewServices(store)
+	if _, err := svc.Bindings.Unbind(ctx, caller, UnbindInput{
 		SessionID: sessionID,
 		Now:       now,
-	})
-	return err
+	}); err != nil {
+		return err
+	}
+	if err := closeSessionParticipants(ctx, store, svc, caller, sessionID); err != nil {
+		return err
+	}
+	return closeSessionMemberships(ctx, svc, caller, sessionID, now)
+}
+
+// closeSessionParticipants closes every gc:extmsg-participant bead labeled
+// for sessionID by delegating to RemoveParticipant, which also cleans up the
+// group-owned portion of the corresponding membership.
+func closeSessionParticipants(ctx context.Context, store beads.Store, svc Services, caller Caller, sessionID string) error {
+	items, err := store.List(beads.ListQuery{Label: groupParticipantSessionLabel(sessionID)})
+	if err != nil {
+		return fmt.Errorf("list residual participants for retired session %s: %w", sessionID, err)
+	}
+	type pair struct {
+		groupID string
+		handle  string
+	}
+	seen := make(map[pair]struct{}, len(items))
+	for _, item := range items {
+		if !hasLabel(item, "gc:extmsg-participant") || item.Status == "closed" {
+			continue
+		}
+		record, decodeErr := decodeParticipantBead(item)
+		if decodeErr != nil {
+			return fmt.Errorf("decode residual participant %s: %w", item.ID, decodeErr)
+		}
+		if record.SessionID != sessionID {
+			continue
+		}
+		key := pair{groupID: record.GroupID, handle: record.Handle}
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		removeErr := svc.Groups.RemoveParticipant(ctx, caller, RemoveParticipantInput{
+			GroupID: record.GroupID,
+			Handle:  record.Handle,
+		})
+		if removeErr == nil || errors.Is(removeErr, ErrGroupRouteNotFound) {
+			continue
+		}
+		return fmt.Errorf("remove residual participant %s (group=%s handle=%s) for retired session %s: %w", record.ID, record.GroupID, record.Handle, sessionID, removeErr)
+	}
+	return nil
+}
+
+// closeSessionMemberships closes any membership bead still listing sessionID
+// after the binding and participant sweeps. Catches binding-owned memberships
+// whose binding bead never existed (legacy data) and any other orphan paths.
+func closeSessionMemberships(ctx context.Context, svc Services, caller Caller, sessionID string, now time.Time) error {
+	memberships, err := svc.Transcript.ListConversationsBySession(ctx, caller, sessionID)
+	if err != nil {
+		return fmt.Errorf("list residual memberships for retired session %s: %w", sessionID, err)
+	}
+	for _, m := range memberships {
+		// Iterate stored owners so removeMembershipLocked decrements the
+		// owners slice to empty and closes the bead. Legacy beads with
+		// empty owners still need closing; passing any single owner
+		// triggers removeMembershipLocked's empty-owners substitution
+		// path (transcript_service.go) which closes the bead in one call.
+		owners := m.Owners
+		if len(owners) == 0 {
+			owners = []MembershipOwner{MembershipOwnerManual}
+		}
+		for _, owner := range owners {
+			removeErr := svc.Transcript.RemoveMembership(ctx, RemoveMembershipInput{
+				Caller:       caller,
+				Conversation: m.Conversation,
+				SessionID:    sessionID,
+				Owner:        owner,
+				Now:          now,
+			})
+			if removeErr == nil || errors.Is(removeErr, ErrMembershipNotFound) {
+				continue
+			}
+			return fmt.Errorf("remove residual membership %s (owner=%s) for retired session %s: %w", m.ID, owner, sessionID, removeErr)
+		}
+	}
+	return nil
 }
 
 func activeBindingExistsForSession(store beads.Store, ref ConversationRef, currentID, sessionID string) (bool, error) {

@@ -327,6 +327,59 @@ func TestPublishManagedDoltRuntimeStateSucceedsWhenAlreadyValid(t *testing.T) {
 	}
 }
 
+func TestPublishManagedDoltRuntimeStateSkipsWhenManagedDoltNotOwned(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "metadata.json"), []byte(`{"database":"beads","backend":"postgres","postgres_host":"db.example.test","postgres_port":"5432","postgres_user":"bd","postgres_database":"beads_pg"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeDoltRuntimeStateFile(providerManagedDoltStatePath(cityPath), doltRuntimeState{
+		Running:   true,
+		PID:       os.Getpid(),
+		Port:      33123,
+		DataDir:   filepath.Join(cityPath, ".beads", "dolt"),
+		StartedAt: time.Now().UTC().Format(time.RFC3339),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := publishManagedDoltRuntimeState(cityPath); err != nil {
+		t.Fatalf("publishManagedDoltRuntimeState: %v", err)
+	}
+	if _, err := os.Stat(managedDoltStatePath(cityPath)); !os.IsNotExist(err) {
+		t.Fatalf("published managed Dolt state should not exist when lifecycle is not owned, stat err = %v", err)
+	}
+}
+
+func TestReadPublishedDoltRuntimeStateHintSkipsWhenManagedDoltNotOwned(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "metadata.json"), []byte(`{"database":"beads","backend":"postgres","postgres_host":"db.example.test","postgres_port":"5432","postgres_user":"bd","postgres_database":"beads_pg"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeDoltRuntimeStateFile(managedDoltStatePath(cityPath), doltRuntimeState{
+		Running:   true,
+		PID:       os.Getpid(),
+		Port:      33123,
+		DataDir:   filepath.Join(cityPath, ".beads", "dolt"),
+		StartedAt: time.Now().UTC().Format(time.RFC3339),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	_, found, err := readPublishedDoltRuntimeStateHint(cityPath)
+	if err != nil {
+		t.Fatalf("readPublishedDoltRuntimeStateHint: %v", err)
+	}
+	if found {
+		t.Fatal("readPublishedDoltRuntimeStateHint() found stale state for postgres city, want false")
+	}
+}
+
 // TestPublishManagedDoltRuntimeStateFailsWhenDoltNotRunning verifies that
 // publishManagedDoltRuntimeState returns an error when dolt is not running
 // (stale PID, no port holder) and does not create a dolt-state.json.

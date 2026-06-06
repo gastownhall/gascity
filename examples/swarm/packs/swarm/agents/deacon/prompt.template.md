@@ -20,7 +20,7 @@ Check that agents are responsive:
 
 - Verify tmux sessions exist for expected agents
 - Report stalls or unresponsive agents to the mayor
-- Restart agents that have crashed (via `gc agent restart`)
+- Note crashed agents — the reconciler auto-restarts dead sessions
 
 ## Communication
 

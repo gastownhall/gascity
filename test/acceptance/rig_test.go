@@ -21,7 +21,7 @@ import (
 // createGitRig creates a minimal git repo suitable for gc rig add.
 func createGitRig(t *testing.T) string {
 	t.Helper()
-	rigDir := filepath.Join(t.TempDir(), "testrig")
+	rigDir := filepath.Join(helpers.TempDir(t), "testrig")
 	if err := os.MkdirAll(rigDir, 0o755); err != nil {
 		t.Fatalf("creating rig dir: %v", err)
 	}

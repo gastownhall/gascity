@@ -83,7 +83,7 @@ Unit tests for all four branches (eligible-scope-root, eligible-worktree, k8s, a
 **Files:** extend `test/acceptance/skill_test.go` with the full matrix from the spec (city skill delivered, agent-local delivered, mixed-provider sinks, user-placed content preserved, collision blocks start, k8s/ACP skipped with log line). New `test/integration/skill_lifecycle_test.go` — full add/edit/delete lifecycle with drain/restart observation.
 
 ### 4C. Schema + docs + migration guide updates
-**Files:** `docs/schema/city-schema.json` (mark `skills`, `mcp`, `skills_append`, `mcp_append`, `shared_skills` as deprecated with description pointing to removal in v0.16), `docs/reference/config.md` (same), `docs/guides/migrating-to-pack-vnext.md` (update Skills/MCP section to describe the materialization semantics).
+**Files:** `docs/schema/city-schema.json` (mark `skills`, `mcp`, `skills_append`, `mcp_append`, `shared_skills` as deprecated with description pointing to removal in v0.16), `docs/reference/config.md` (same), `docs/guides/shareable-packs.md` (update Skills/MCP section to describe the materialization semantics).
 
 **Phase 4 review boundary:** final `/review-pr`. Fix/iterate until approved.
 
