@@ -586,7 +586,7 @@ type nudgeSweepFailingList struct {
 	*beads.MemStore
 }
 
-func (s *nudgeSweepFailingList) List(q beads.ListQuery) ([]beads.Bead, error) {
+func (s *nudgeSweepFailingList) List(_ beads.ListQuery) ([]beads.Bead, error) {
 	return nil, fmt.Errorf("store unavailable")
 }
 
