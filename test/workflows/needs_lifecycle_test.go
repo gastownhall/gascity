@@ -261,6 +261,40 @@ func TestNeedsStatusLabelCreatesVisibleIdempotentRequestForReporter(t *testing.T
 	}
 }
 
+func TestNeedsStatusLabelReapplyPostsFreshRequestForReporter(t *testing.T) {
+	repo := repoRoot(t)
+	scripts := workflowScriptsFor(t, repo, "issues", "labeled", func(workflowScript) bool {
+		return true
+	})
+	if len(scripts) == 0 {
+		t.Fatal("no issues/labeled github-script workflow found for needs-info or needs-repro requests")
+	}
+
+	now := time.Date(2026, 6, 6, 12, 0, 0, 0, time.UTC)
+	for _, label := range needsLabels {
+		t.Run(label, func(t *testing.T) {
+			labelTimes := []string{
+				now.Add(-20 * 24 * time.Hour).Format(time.RFC3339),
+				now.Add(-time.Minute).Format(time.RFC3339),
+			}
+			comments := []map[string]any{
+				requestComment(now.Add(-19*24*time.Hour), label),
+			}
+			state := lifecycleState(now, label, labelTimes, comments, false)
+
+			result := runScripts(t, scripts, labeledContext(label), state)
+			if result.hasErrors() {
+				t.Fatalf("workflow scripts errored on re-label run:\n%s", result.debugString())
+			}
+
+			requests := visibleRequestComments(result.ops(), label)
+			if len(requests) != 1 {
+				t.Fatalf("visible request comment count = %d, want 1 for %s (stale request before latest label must not suppress)\n%s", len(requests), label, result.debugString())
+			}
+		})
+	}
+}
+
 func TestCloseStaleNeedsLabelsRequiresVisibleRequestAfterLatestLabelEvent(t *testing.T) {
 	repo := repoRoot(t)
 	scripts := workflowScriptsFor(t, repo, "schedule", "", func(script workflowScript) bool {
