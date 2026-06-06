@@ -129,6 +129,32 @@ func TestPreflightPassesOnHealthyDolt(t *testing.T) {
 	}
 }
 
+func TestPreflightProxiedServerFallsBackToBdStore(t *testing.T) {
+	// Proxied-server must NOT make the native store eligible: the native store
+	// rejects gascity's session-tracking beads (issue type "session"), which
+	// breaks session spawning. The gate fails so the city uses the bd-subprocess
+	// store (which still routes through the pooling proxy). The message must be
+	// the explicit bd-fallback reason, not the scary "unsupported dolt mode".
+	scope := "/city"
+	checker := testPreflightChecker(preflightMetadataJSON(`{
+		"backend": "dolt",
+		"dolt_mode": "proxied-server",
+		"dolt_database": "gascity",
+		"project_id": "gc-local"
+	}`), PreflightBDContext{Backend: "dolt", DoltMode: "proxied-server"}, "gc-local")
+
+	result, err := checker.Check(scope)
+	if err != nil {
+		t.Fatalf("Check() error = %v", err)
+	}
+
+	assertCheckState(t, result, PreflightCheckDoltModeSafe, PreflightCheckFail)
+	check := findPreflightCheck(t, result, PreflightCheckDoltModeSafe)
+	if strings.Contains(check.Summary, "unsupported dolt mode") {
+		t.Fatalf("proxied-server should not report 'unsupported dolt mode': %q", check.Summary)
+	}
+}
+
 func TestPreflightAcceptsExecGcBeadsBdProviderPath(t *testing.T) {
 	scope := "/city"
 	checker := testPreflightChecker(preflightMetadataJSON(`{
