@@ -44,9 +44,12 @@ func TestWalkthroughURLStringsStayInContractFile(t *testing.T) {
 			switch d.Name() {
 			case ".git", ".gc", "node_modules":
 				return filepath.SkipDir
-			default:
-				return nil
 			}
+			// Skip git worktrees embedded in the repo (have a .git file, not dir).
+			if fi, serr := os.Stat(filepath.Join(path, ".git")); serr == nil && !fi.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
 		}
 		if !strings.HasSuffix(path, ".go") {
 			return nil

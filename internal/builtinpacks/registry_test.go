@@ -141,9 +141,12 @@ func TestMaterializeSyntheticRepoProductionCallersStayInPackman(t *testing.T) {
 			switch entry.Name() {
 			case ".git", ".gc", "node_modules", "worktrees":
 				return filepath.SkipDir
-			default:
-				return nil
 			}
+			// Skip git worktrees embedded in the repo (have a .git file, not dir).
+			if fi, serr := os.Stat(filepath.Join(path, ".git")); serr == nil && !fi.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
 		}
 		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
 			return nil
