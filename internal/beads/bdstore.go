@@ -13,7 +13,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/telemetry"
@@ -220,20 +219,37 @@ type BdStore struct {
 	purgeRunner PurgeRunnerFunc // injectable for testing; nil uses exec default
 	idPrefix    string          // bead ID prefix owned by this store, without trailing "-"
 
-	skipLabelsOnce      sync.Once // guards the one-time bd version probe below
-	skipLabelsSupported bool      // whether bd accepts `bd list --skip-labels` (bd 1.0.5+)
+	listSkipLabelsEnabled bool // whether bd list may receive --skip-labels
 }
 
 const bdTransientWriteAttempts = 3
 
+// BdStoreOption configures optional bd CLI behavior for a BdStore.
+type BdStoreOption func(*BdStore)
+
+// WithBdStoreListSkipLabels controls whether List may pass --skip-labels to bd.
+// Keep disabled unless the caller has opted into bd 1.0.5-compatible CLI
+// semantics; bd 1.0.4 rejects the flag.
+func WithBdStoreListSkipLabels(enabled bool) BdStoreOption {
+	return func(s *BdStore) {
+		s.listSkipLabelsEnabled = enabled
+	}
+}
+
 // NewBdStore creates a BdStore rooted at dir using the given runner.
-func NewBdStore(dir string, runner CommandRunner) *BdStore {
-	return NewBdStoreWithPrefix(dir, runner, "")
+func NewBdStore(dir string, runner CommandRunner, opts ...BdStoreOption) *BdStore {
+	return NewBdStoreWithPrefix(dir, runner, "", opts...)
 }
 
 // NewBdStoreWithPrefix creates a BdStore with an explicit owned bead ID prefix.
-func NewBdStoreWithPrefix(dir string, runner CommandRunner, idPrefix string) *BdStore {
-	return &BdStore{dir: dir, runner: runner, idPrefix: normalizeIDPrefix(idPrefix)}
+func NewBdStoreWithPrefix(dir string, runner CommandRunner, idPrefix string, opts ...BdStoreOption) *BdStore {
+	s := &BdStore{dir: dir, runner: runner, idPrefix: normalizeIDPrefix(idPrefix)}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(s)
+		}
+	}
+	return s
 }
 
 // IDPrefix returns the bead ID prefix owned by this store, without trailing "-".
@@ -242,6 +258,12 @@ func (s *BdStore) IDPrefix() string {
 		return ""
 	}
 	return s.idPrefix
+}
+
+// ListSkipLabelsEnabled reports whether this store may ask bd list to skip
+// label hydration.
+func (s *BdStore) ListSkipLabelsEnabled() bool {
+	return s != nil && s.listSkipLabelsEnabled
 }
 
 func (s *BdStore) listIncludesCompleteDependencies() bool {
@@ -1711,7 +1733,7 @@ func (s *BdStore) listViaBDList(query ListQuery) ([]Bead, error) {
 			args = append(args, "--metadata-field", k+"="+serverQuery.Metadata[k])
 		}
 	}
-	if query.SkipLabels && serverQuery.Label == "" && s.supportsSkipLabels() {
+	if query.SkipLabels && serverQuery.Label == "" && s.listSkipLabelsEnabled {
 		args = append(args, "--skip-labels")
 	}
 
@@ -1737,31 +1759,6 @@ func (s *BdStore) listViaBDList(query ListQuery) ([]Bead, error) {
 		return filtered, &PartialResultError{Op: "bd list", Err: parseErr}
 	}
 	return filtered, nil
-}
-
-// bdSkipLabelsMinVersion is the first bd release whose `bd list` accepts
-// --skip-labels (be-w3n-1). bd 1.0.4 — the supported floor — rejects the
-// flag and fails the entire list call (see 29d457fe9).
-const bdSkipLabelsMinVersion = "1.0.5"
-
-// supportsSkipLabels reports whether the bd binary backing this store accepts
-// `bd list --skip-labels`. The version probe runs through the store's runner
-// once and is cached for the store's lifetime; any probe or parse failure
-// degrades to false so listing falls back to normal label hydration instead
-// of a hard bd CLI error.
-func (s *BdStore) supportsSkipLabels() bool {
-	s.skipLabelsOnce.Do(func() {
-		out, err := s.runner(s.dir, "bd", "version")
-		if err != nil {
-			return
-		}
-		ver, err := parseBDVersion(string(out))
-		if err != nil {
-			return
-		}
-		s.skipLabelsSupported = bdVersionAtLeast(ver, bdSkipLabelsMinVersion)
-	})
-	return s.skipLabelsSupported
 }
 
 func bdListRequiresClientLimit(query, serverQuery ListQuery, clientFilteredAssignees bool) bool {

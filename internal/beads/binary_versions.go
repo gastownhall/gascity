@@ -61,21 +61,6 @@ func probeBinaryVersion(name string) (string, error) {
 	return string(out), nil
 }
 
-// bdVersionAtLeast reports whether version (a semantic-version token such as
-// parseBDVersion returns) is at or above minimum. Unparseable versions report
-// false so callers fail toward bd 1.0.4-compatible behavior.
-func bdVersionAtLeast(version, minimum string) bool {
-	v, err := doltversion.Parse(version)
-	if err != nil {
-		return false
-	}
-	m, err := doltversion.Parse(minimum)
-	if err != nil {
-		return false
-	}
-	return doltversion.Compare(v, m) >= 0
-}
-
 // parseBDVersion extracts the semantic version token from `bd version` output
 // (e.g. "bd version 1.0.4 (ce242a879)" -> "1.0.4"). Mirrors doltversion.Parse's
 // leniency: the "bd version " prefix, a leading "v", and any trailing
