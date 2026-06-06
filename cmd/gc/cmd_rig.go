@@ -1186,7 +1186,7 @@ func newRigSuspendCmd(stdout, stderr io.Writer) *cobra.Command {
 		Use:   "suspend [name]",
 		Short: "Suspend a rig (reconciler will skip its agents)",
 		Long: `Suspend a rig by recording the suspension in the runtime state file
-(.gc/runtime/rig-state.json).
+(.gc/runtime/suspension-state.json).
 
 All agents scoped to the suspended rig are effectively suspended —
 the reconciler skips them and gc hook returns empty. The rig's beads
@@ -1304,7 +1304,7 @@ func newRigResumeCmd(stdout, stderr io.Writer) *cobra.Command {
 		Use:   "resume [name]",
 		Short: "Resume a suspended rig",
 		Long: `Resume a suspended rig by recording an explicit "resumed" preference
-in .gc/runtime/rig-state.json. The override sticks across city restarts
+in .gc/runtime/suspension-state.json. The override sticks across city restarts
 even when the rig declares suspended_on_start = true.
 
 The reconciler will start the rig's agents on its next tick.`,
@@ -1371,7 +1371,7 @@ func cmdRigResume(args []string, stdout, stderr io.Writer) int {
 }
 
 // doRigResume removes rig suspension from the runtime state file.
-// Records an explicit "resumed" preference in .gc/runtime/rig-state.json.
+// Records an explicit "resumed" preference in .gc/runtime/suspension-state.json.
 // The legacy `suspended` field in city.toml is left untouched — `gc doctor`
 // flags it as a deprecated-field warning and users migrate by renaming
 // it to suspended_on_start (or removing it).

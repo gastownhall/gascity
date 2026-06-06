@@ -236,7 +236,7 @@ func SetAgentSuspended(cfg *config.City, name string, suspended bool) error {
 // SetRigSuspendedOnStart sets the suspended_on_start field on an
 // inline rig. This is the committable "default suspension state at city
 // start" — the explicit runtime override in
-// .gc/runtime/rig-state.json still wins when present. Returns an error
+// .gc/runtime/suspension-state.json still wins when present. Returns an error
 // if the rig is not found in the config.
 func SetRigSuspendedOnStart(cfg *config.City, name string, suspended bool) error {
 	for i := range cfg.Rigs {
@@ -604,7 +604,7 @@ func removeLocalDiscoveredAgentConfig(fs fsys.FS, cityRoot string, agent config.
 }
 
 // SuspendRig suspends a rig by recording an explicit "suspended"
-// preference in the runtime state file (.gc/runtime/rig-state.json).
+// preference in the runtime state file (.gc/runtime/suspension-state.json).
 // The rig must exist in the config. The legacy `suspended` field in
 // city.toml is no longer touched — `gc doctor` warns about it
 // separately.
@@ -645,7 +645,7 @@ func (e *Editor) ResumeRig(name string) error {
 }
 
 // SuspendCity records an explicit "suspended" preference for the city
-// in .gc/runtime/city-state.json. The legacy `[workspace] suspended`
+// in .gc/runtime/suspension-state.json. The legacy `[workspace] suspended`
 // field in city.toml is no longer touched.
 func (e *Editor) SuspendCity() error {
 	cityPath := filepath.Dir(e.tomlPath)

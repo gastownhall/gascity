@@ -2690,7 +2690,7 @@ gc rig restart [name]
 ## gc rig resume
 
 Resume a suspended rig by recording an explicit "resumed" preference
-in .gc/runtime/rig-state.json. The override sticks across city restarts
+in .gc/runtime/suspension-state.json. The override sticks across city restarts
 even when the rig declares suspended_on_start = true.
 
 The reconciler will start the rig's agents on its next tick.
@@ -2758,7 +2758,7 @@ gc rig status [name] [flags]
 ## gc rig suspend
 
 Suspend a rig by recording the suspension in the runtime state file
-(.gc/runtime/rig-state.json).
+(.gc/runtime/suspension-state.json).
 
 All agents scoped to the suspended rig are effectively suspended —
 the reconciler skips them and gc hook returns empty. The rig's beads
