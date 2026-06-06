@@ -1740,8 +1740,7 @@ func cmdOrderSweepNudgeMail(nudgeTTL, mailTTL time.Duration, dryRun, quiet bool,
 	if dryRun {
 		return cmdOrderSweepNudgeMailDryRun(store, statePtr, now, nudgeTTL, mailTTL, quiet, stdout, stderr)
 	}
-	cmdOrderSweepNudgeMailRun(store, statePtr, now, nudgeTTL, mailTTL, quiet, stdout, stderr)
-	return 0
+	return cmdOrderSweepNudgeMailRun(store, statePtr, now, nudgeTTL, mailTTL, quiet, stdout, stderr)
 }
 
 func cmdOrderSweepNudgeMailDryRun(store beads.Store, nudgeState *nudgequeue.State, now time.Time, nudgeTTL, mailTTL time.Duration, quiet bool, stdout, stderr io.Writer) int {
@@ -1762,29 +1761,33 @@ func cmdOrderSweepNudgeMailDryRun(store beads.Store, nudgeState *nudgequeue.Stat
 	return 0
 }
 
-func cmdOrderSweepNudgeMailRun(store beads.Store, nudgeState *nudgequeue.State, now time.Time, nudgeTTL, mailTTL time.Duration, quiet bool, stdout, stderr io.Writer) {
+func cmdOrderSweepNudgeMailRun(store beads.Store, nudgeState *nudgequeue.State, now time.Time, nudgeTTL, mailTTL time.Duration, quiet bool, stdout, stderr io.Writer) int {
 	result, sweepErr := sweepStaleNudgeMail(store, nudgeState, now, nudgeTTL, mailTTL, nudgeMailSweepCloseBudget)
 
-	// Per-bead errors: print each to stderr and continue; the overall sweep is not fatal.
 	if sweepErr != nil {
+		// Per-bead errors are joined via errors.Join (Unwrap() []error): print each
+		// to stderr and continue; the overall sweep is not fatal. A fatal list error
+		// is a single wrapped error that does not implement that interface: surface
+		// it and fail so an unreadable store does not silently "succeed".
 		type unwrapper interface{ Unwrap() []error }
 		if u, ok := sweepErr.(unwrapper); ok {
 			for _, e := range u.Unwrap() {
 				fmt.Fprintf(stderr, "nudge-mail-sweep: ERROR %v — skipping\n", e) //nolint:errcheck // best-effort stderr
 			}
 		} else {
-			fmt.Fprintf(stderr, "nudge-mail-sweep: ERROR %v\n", sweepErr) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, "gc order sweep-nudge-mail: %v\n", sweepErr) //nolint:errcheck // best-effort stderr
+			return 1
 		}
 	}
 
 	if quiet {
-		return
+		return 0
 	}
 
 	total := result.NudgeClosed + result.MailClosed
 	if total == 0 {
 		fmt.Fprintln(stdout, "nudge-mail-sweep: nothing to close (0 stale nudge beads, 0 stale mail beads)") //nolint:errcheck // best-effort stdout
-		return
+		return 0
 	}
 	budgetLine := fmt.Sprintf("[budget: %d/%d used]", total, nudgeMailSweepCloseBudget)
 	if total >= nudgeMailSweepCloseBudget {
@@ -1792,4 +1795,5 @@ func cmdOrderSweepNudgeMailRun(store beads.Store, nudgeState *nudgequeue.State, 
 	}
 	fmt.Fprintf(stdout, "nudge-mail-sweep: closed %d nudge bead(s), %d mail bead(s)  %s\n", //nolint:errcheck // best-effort stdout
 		result.NudgeClosed, result.MailClosed, budgetLine)
+	return 0
 }

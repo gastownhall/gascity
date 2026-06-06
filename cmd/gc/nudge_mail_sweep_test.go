@@ -609,6 +609,29 @@ func TestCmdOrderSweepNudgeMailDryRun_ListErrorReturnsNonZero(t *testing.T) {
 	}
 }
 
+func TestCmdOrderSweepNudgeMailRun_ListErrorReturnsNonZero(t *testing.T) {
+	// A fatal candidate-listing failure on the normal (non-dry-run) path must
+	// surface the error and signal failure (non-zero), not print a success
+	// summary — the symmetric counterpart of the dry-run list-error test.
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	store := &nudgeSweepFailingList{MemStore: beads.NewMemStoreFrom(100, nil, nil)}
+
+	var stdout, stderr bytes.Buffer
+	code := cmdOrderSweepNudgeMailRun(store, nil, now, nudgeMailSweepDefaultNudgeTTL, nudgeMailSweepDefaultMailTTL, false, &stdout, &stderr)
+	if code == 0 {
+		t.Errorf("expected non-zero exit code on list error, got %d", code)
+	}
+	if !strings.Contains(stderr.String(), "gc order sweep-nudge-mail:") {
+		t.Errorf("expected error on stderr, got: %q", stderr.String())
+	}
+	if strings.Contains(stdout.String(), "closed") {
+		t.Errorf("must not print a success summary when the listing failed, got: %q", stdout.String())
+	}
+	if strings.Contains(stdout.String(), "nothing to close") {
+		t.Errorf("must not report 'nothing to close' when the listing failed, got: %q", stdout.String())
+	}
+}
+
 func TestCountStaleNudgeMail_ListErrorPropagates(t *testing.T) {
 	// countStaleNudgeMail must return the underlying list error rather than a
 	// silent zero count, so callers can fail closed.

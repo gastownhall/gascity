@@ -55,11 +55,13 @@ func sweepStaleNudgeMail(store beads.Store, nudgeState *nudgequeue.State, now ti
 	if nudgeQueryLimit < 0 {
 		nudgeQueryLimit = 0
 	}
+	// nudge/mail beads are NoHistory (wisp-tier); read both tiers explicitly.
 	nudgeCandidates, err := store.List(beads.ListQuery{
 		Label:         nudgeBeadLabel,
 		CreatedBefore: nudgeCutoff,
 		Limit:         nudgeQueryLimit,
 		Sort:          beads.SortCreatedAsc,
+		TierMode:      beads.TierBoth,
 	})
 	if err != nil {
 		return result, fmt.Errorf("nudge-mail-sweep: listing stale nudge beads: %w", err)
@@ -107,6 +109,7 @@ func sweepStaleNudgeMail(store beads.Store, nudgeState *nudgequeue.State, now ti
 			CreatedBefore: mailCutoff,
 			Limit:         mailQueryLimit,
 			Sort:          beads.SortCreatedAsc,
+			TierMode:      beads.TierBoth,
 		})
 		if err != nil {
 			return result, fmt.Errorf("nudge-mail-sweep: listing read mail beads: %w", err)
@@ -152,6 +155,7 @@ func countStaleNudgeMail(store beads.Store, nudgeState *nudgequeue.State, now ti
 		CreatedBefore: nudgeCutoff,
 		Limit:         nudgeQueryLimit,
 		Sort:          beads.SortCreatedAsc,
+		TierMode:      beads.TierBoth,
 	})
 	if err != nil {
 		return result, fmt.Errorf("nudge-mail-sweep (dry-run): listing stale nudge beads: %w", err)
@@ -183,6 +187,7 @@ func countStaleNudgeMail(store beads.Store, nudgeState *nudgequeue.State, now ti
 			CreatedBefore: mailCutoff,
 			Limit:         mailQueryLimit,
 			Sort:          beads.SortCreatedAsc,
+			TierMode:      beads.TierBoth,
 		})
 		if err != nil {
 			return result, fmt.Errorf("nudge-mail-sweep (dry-run): listing read mail beads: %w", err)
