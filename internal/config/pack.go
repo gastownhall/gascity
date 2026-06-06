@@ -4,12 +4,14 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	iofs "io/fs"
 	"log"
 	"path/filepath"
 	"slices"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/BurntSushi/toml"
 	"github.com/gastownhall/gascity/internal/fsys"
@@ -114,7 +116,22 @@ func expandPacks(cfg *City, fs fsys.FS, cityRoot string, rigFormulaDirs map[stri
 		cache := &packLoadCache{results: make(map[string]*packLoadResult)}
 		topoRefs := rig.Includes
 		if len(topoRefs) == 0 && len(rig.Imports) == 0 {
-			continue
+			// When a rig has only a path (no explicit includes/imports), treat
+			// the path directory itself as an implicit include if it contains a
+			// pack.toml. This supports the packV2 convention where a rig root
+			// can carry a pack.toml with agents/ directories.
+			if p := strings.TrimSpace(rig.Path); p != "" {
+				packPath := p
+				if !filepath.IsAbs(packPath) {
+					packPath = filepath.Join(cityRoot, packPath)
+				}
+				if _, sErr := fs.Stat(filepath.Join(packPath, packFile)); sErr == nil {
+					topoRefs = []string{packPath}
+				}
+			}
+			if len(topoRefs) == 0 {
+				continue
+			}
 		}
 
 		var rigAgents []Agent
@@ -2772,10 +2789,66 @@ func PackContentHash(fs fsys.FS, topoDir string) string {
 // pack directory, recursively descending into subdirectories. File
 // paths are sorted for determinism and include the relative path from
 // topoDir.
+// packContentHashCache memoizes PackContentHashRecursive across calls. The
+// revision-snapshot capture (revision.go) hashes the full content of every pack
+// tree referenced by the city and every rig on every reconcile tick; with many
+// rigs sharing the same packs this re-reads and re-SHA256s the same trees many
+// times per tick and again every patrol, even though packs almost never change
+// between ticks. This was the dominant supervisor CPU cost once the dolt
+// connection churn was eliminated (gastownhall/gascity#1978 follow-up).
+//
+// The cache keys the content hash by absolute pack dir plus a cheap stat
+// fingerprint (per-file size+mtime, no content reads). An unchanged tree is
+// content-hashed once and reused — both for repeats within a single tick and
+// across ticks. Invalidation follows standard build-cache semantics: any file
+// add/remove, size change, or mtime bump (every normal edit and git checkout)
+// changes the fingerprint and forces a re-hash. The only blind spot is an edit
+// that preserves both size and mtime, which pack tooling does not do.
+var packContentHashCache sync.Map // absDir(string) -> packContentHashEntry
+
+type packContentHashEntry struct {
+	fingerprint uint64
+	hash        string
+}
+
+// ResetPackContentHashCache clears the memoized pack content hashes. Tests that
+// mutate a pack tree in place under a path a previous test already hashed call
+// this to avoid cross-test cache bleed.
+func ResetPackContentHashCache() {
+	packContentHashCache.Range(func(k, _ any) bool {
+		packContentHashCache.Delete(k)
+		return true
+	})
+}
+
+// PackContentHashRecursive returns a stable content hash of every file under
+// topoDir (ignoring runtime dirs). Results are memoized per directory and gated
+// by a cheap stat fingerprint, so an unchanged tree is hashed once and reused
+// across calls and reconcile ticks; see packContentHashCache.
 func PackContentHashRecursive(fs fsys.FS, topoDir string) string {
 	var paths []string
 	collectFiles(fs, topoDir, "", &paths)
 	sort.Strings(paths)
+
+	absDir, err := filepath.Abs(topoDir)
+	if err != nil {
+		absDir = topoDir
+	}
+
+	// Cheap stat fingerprint (no content reads) gates the full content hash.
+	fp := fnv.New64a()
+	for _, relPath := range paths {
+		fmt.Fprintf(fp, "%s\x00", relPath) //nolint:errcheck // hash.Write never errors
+		if info, statErr := fs.Stat(filepath.Join(topoDir, relPath)); statErr == nil {
+			fmt.Fprintf(fp, "%d\x00%d\x00", info.Size(), info.ModTime().UnixNano()) //nolint:errcheck
+		}
+	}
+	fpSum := fp.Sum64()
+	if v, ok := packContentHashCache.Load(absDir); ok {
+		if entry := v.(packContentHashEntry); entry.fingerprint == fpSum {
+			return entry.hash
+		}
+	}
 
 	h := sha256.New()
 	for _, relPath := range paths {
@@ -2788,7 +2861,9 @@ func PackContentHashRecursive(fs fsys.FS, topoDir string) string {
 		h.Write(data)            //nolint:errcheck // hash.Write never errors
 		h.Write([]byte{0})       //nolint:errcheck // hash.Write never errors
 	}
-	return fmt.Sprintf("%x", h.Sum(nil))
+	result := fmt.Sprintf("%x", h.Sum(nil))
+	packContentHashCache.Store(absDir, packContentHashEntry{fingerprint: fpSum, hash: result})
+	return result
 }
 
 // collectFiles recursively collects file paths relative to base.
@@ -2829,8 +2904,13 @@ func isIgnoredPackRuntimePath(path string) bool {
 	case ".beads", ".cache", ".gc", ".git", "state", "tmp":
 		return true
 	}
+	// Language-ecosystem dependency dirs are skipped at ANY depth. Pack
+	// hashing previously walked into node_modules for packs anchored at
+	// monorepo roots, opening tens of thousands of files into the
+	// supervisor every dirty reload (gastownhall/gascity#2954). Matches
+	// the existing __pycache__ precedent for Python ecosystems.
 	for _, part := range parts {
-		if part == "__pycache__" {
+		if part == "__pycache__" || part == "node_modules" {
 			return true
 		}
 	}
@@ -2902,9 +2982,14 @@ func decodePackName(data []byte) (string, error) {
 }
 
 // HasPackRigs reports whether any rig in the config uses a pack.
+// Rigs with only a path are included because expandPacks auto-discovers
+// their root pack.toml (if present) as an implicit include.
 func HasPackRigs(rigs []Rig) bool {
 	for _, r := range rigs {
 		if len(r.Includes) > 0 || len(r.Imports) > 0 {
+			return true
+		}
+		if strings.TrimSpace(r.Path) != "" {
 			return true
 		}
 	}

@@ -616,6 +616,16 @@ bd_runtime_schema_ready() {
     server_sql "USE \`$db\`; SELECT 1 FROM config LIMIT 1" >/dev/null 2>&1
 }
 
+# server_reachable reports whether the managed Dolt server answers a
+# trivial query. Used to distinguish a transient connection failure
+# (port drift, an exclusive lock held by a stale dolt, a slow server
+# start) from a genuinely missing schema/registration before deciding to
+# force a destructive reinit. server_sql carries the connect target, so
+# this stays in lockstep with bd_runtime_schema_ready / ensure_database_registered.
+server_reachable() {
+    server_sql "SELECT 1" >/dev/null 2>&1
+}
+
 wait_for_bd_runtime_schema() {
     local db="$1"
     local attempt backoff_ms
@@ -1144,11 +1154,29 @@ kill_imposter() {
 # Overwritten on each server start. Without read/write timeouts, CLOSE_WAIT connections
 # accumulate and the server enters unrecoverable read-only mode.
 write_config_yaml() {
-    local archive_level gc_bin raw_wait_timeout wait_timeout_line
+    local archive_level gc_bin raw_wait_timeout wait_timeout_line max_connections read_timeout_millis write_timeout_millis
     archive_level=${GC_DOLT_ARCHIVE_LEVEL:-0}
     case "$archive_level" in
         ''|*[!0-9]*)
             archive_level=0
+            ;;
+    esac
+    max_connections=${GC_DOLT_MAX_CONNECTIONS:-256}
+    case "$max_connections" in
+        ''|*[!0-9]*|0)
+            max_connections=256
+            ;;
+    esac
+    read_timeout_millis=${GC_DOLT_READ_TIMEOUT_MILLIS:-30000}
+    case "$read_timeout_millis" in
+        ''|*[!0-9]*|0)
+            read_timeout_millis=30000
+            ;;
+    esac
+    write_timeout_millis=${GC_DOLT_WRITE_TIMEOUT_MILLIS:-300000}
+    case "$write_timeout_millis" in
+        ''|*[!0-9]*|0)
+            write_timeout_millis=300000
             ;;
     esac
     gc_bin=$(resolve_gc_helper_bin)
@@ -1159,7 +1187,10 @@ write_config_yaml() {
             --port "$DOLT_PORT" \
             --data-dir "$DATA_DIR" \
             --log-level "$DOLT_LOGLEVEL" \
-            --archive-level "$archive_level" || die "failed to write managed dolt config via gc helper $gc_bin"
+            --archive-level "$archive_level" \
+            --max-connections "$max_connections" \
+            --read-timeout-millis "$read_timeout_millis" \
+            --write-timeout-millis "$write_timeout_millis" || die "failed to write managed dolt config via gc helper $gc_bin"
         return 0
     fi
     wait_timeout_line='  wait_timeout: "30"'
@@ -1194,11 +1225,11 @@ log_level: $DOLT_LOGLEVEL
 listener:
   port: $DOLT_PORT
   host: $DOLT_HOST
-  max_connections: 1000
+  max_connections: $max_connections
   back_log: 50
   max_connections_timeout_millis: 5000
-  read_timeout_millis: 300000
-  write_timeout_millis: 300000
+  read_timeout_millis: $read_timeout_millis
+  write_timeout_millis: $write_timeout_millis
 
 data_dir: "$DATA_DIR"
 
@@ -2402,6 +2433,20 @@ op_init() {
     # instead breaks fresh init: gc-pre-seeded metadata has no project_id, so
     # --force is never set and bd init aborts.
     if [ -f "$dir/.beads/metadata.json" ]; then
+        # A pre-existing metadata.json means the store may already be
+        # initialized. Both checks below run SQL against the managed Dolt
+        # server, so a transient server-unreachable blip (port drift, an
+        # exclusive lock held by a stale dolt process, a slow server start)
+        # is indistinguishable from "schema missing" / "not registered" —
+        # and both of those branches react by forcing a DESTRUCTIVE reinit
+        # (--force), which trips bd's remote-history guard and aborts city
+        # init on an otherwise healthy store. Confirm the server actually
+        # answers before trusting a negative result; otherwise fail closed
+        # so the caller's retry loop waits for the server to come up instead
+        # of reinitializing live data.
+        if ! server_reachable; then
+            die "managed Dolt server unreachable while inspecting existing store '$dolt_database'; refusing to force-reinitialize (data-safety). retry once the Dolt server is reachable."
+        fi
         if ensure_database_registered "$dolt_database"; then
             if bd_runtime_schema_ready "$dolt_database"; then
                 # GC owns canonical metadata/config normalization after this backend

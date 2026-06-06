@@ -36,6 +36,7 @@ args = ["notes-mcp"]
 	cfg := &config.City{
 		PackMCPDir: filepath.Join(cityPath, "mcp"),
 		Session:    config.SessionConfig{Provider: "tmux"},
+		Providers:  builtinProviderAliasesForTest("gemini"),
 		Agents: []config.Agent{
 			{Name: "mayor", Scope: "city", Provider: "gemini"},
 		},
@@ -106,7 +107,8 @@ command = "uvx"
 `)
 
 	cfg := &config.City{
-		Session: config.SessionConfig{Provider: "tmux"},
+		Session:   config.SessionConfig{Provider: "tmux"},
+		Providers: builtinProviderAliasesForTest("claude"),
 		Agents: []config.Agent{
 			{Name: "mayor", Scope: "city", Provider: "claude", MCPDir: filepath.Dir(agentLocal)},
 			{Name: "deputy", Scope: "city", Provider: "claude"},

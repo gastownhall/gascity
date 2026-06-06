@@ -5,6 +5,7 @@ description: Practical guides for common Gas City workflows.
 
 These guides are task-oriented and current.
 
+- [Capabilities for Coding Agent Users](/guides/capabilities-for-coding-agent-users)
 - [Understanding Packs](/guides/understanding-packs)
 - [Shareable Packs](/guides/shareable-packs)
 - [Using JSON from the Gas City CLI (`gc`)](/guides/using-json-from-gc)

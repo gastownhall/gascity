@@ -114,6 +114,18 @@ type WorkloadConfig struct {
 	// Concurrency is the number of concurrent goroutines issuing requests.
 	// Matches the number of concurrent agents in a typical HQ city (~20).
 	Concurrency int
+
+	// MaxRSSBytes is the process RSS ceiling in bytes. When the process RSS
+	// exceeds this value during a run, the runner cancels the workload and
+	// reports a "leak detected" finding. Zero disables the guard (default).
+	MaxRSSBytes uint64
+
+	// MaxRSSGrowthBytesPerSec is the mean RSS growth rate ceiling in bytes/second,
+	// computed after a warm-up period. If the mean growth rate from the
+	// warm-up checkpoint to now exceeds this value, the runner cancels the
+	// workload and reports a "leak detected" finding. Zero disables (default).
+	// Inactive for runs shorter than memGuardWarmUp (30 s); intended for long soak runs.
+	MaxRSSGrowthBytesPerSec uint64
 }
 
 // SoakPhase identifies a long-running soak benchmark phase.
@@ -148,6 +160,14 @@ type SoakConfig struct {
 	// single-city scale (v1 default); ~10x for future 100-rig calibration run
 	// (empirical, not hard-coded).
 	ScaleFactor float64
+
+	// MaxRSSBytes is the process RSS ceiling for this soak run. When set, it
+	// overrides the workload's MaxRSSBytes. Zero means no override.
+	MaxRSSBytes uint64
+
+	// MaxRSSGrowthBytesPerSec is the growth-rate ceiling for this soak run.
+	// When set, it overrides the workload's MaxRSSGrowthBytesPerSec.
+	MaxRSSGrowthBytesPerSec uint64
 }
 
 // ScaledWorkload returns a copy of base scaled by ScaleFactor.
@@ -177,6 +197,12 @@ func (c SoakConfig) ScaledWorkload(base WorkloadConfig) WorkloadConfig {
 	wl.Concurrency = scaleCount(base.Concurrency, scale)
 	if c.SoakDuration > 0 {
 		wl.Duration = c.SoakDuration
+	}
+	if c.MaxRSSBytes > 0 {
+		wl.MaxRSSBytes = c.MaxRSSBytes
+	}
+	if c.MaxRSSGrowthBytesPerSec > 0 {
+		wl.MaxRSSGrowthBytesPerSec = c.MaxRSSGrowthBytesPerSec
 	}
 	return wl
 }

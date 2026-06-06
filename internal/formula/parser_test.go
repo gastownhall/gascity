@@ -183,6 +183,53 @@ description_file = "descriptions/work.md"
 	}
 }
 
+func TestParseFileDescriptionFileResolvesRelativeToSymlinkTarget(t *testing.T) {
+	dir := t.TempDir()
+	packFormulaDir := filepath.Join(dir, "pack", "formulas")
+	packPromptDir := filepath.Join(dir, "pack", "prompts")
+	cityFormulaDir := filepath.Join(dir, "city", "formulas")
+	for _, path := range []string{packFormulaDir, packPromptDir, cityFormulaDir} {
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", path, err)
+		}
+	}
+
+	promptPath := filepath.Join(packPromptDir, "operator.md")
+	if err := os.WriteFile(promptPath, []byte("embedded pack prompt\n"), 0o644); err != nil {
+		t.Fatalf("write prompt: %v", err)
+	}
+
+	formulaPath := filepath.Join(packFormulaDir, "symlink-description.toml")
+	formulaText := `formula = "symlink-description"
+version = 1
+
+[[steps]]
+id = "work"
+title = "Work"
+description_file = "../prompts/operator.md"
+`
+	if err := os.WriteFile(formulaPath, []byte(formulaText), 0o644); err != nil {
+		t.Fatalf("write formula: %v", err)
+	}
+
+	linkPath := filepath.Join(cityFormulaDir, "symlink-description.formula.toml")
+	if err := os.Symlink(formulaPath, linkPath); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+
+	p := NewParser(cityFormulaDir)
+	parsed, err := p.ParseFile(linkPath)
+	if err != nil {
+		t.Fatalf("ParseFile: %v", err)
+	}
+	if len(parsed.Steps) != 1 {
+		t.Fatalf("len(Steps) = %d, want 1", len(parsed.Steps))
+	}
+	if got := parsed.Steps[0].Description; got != "embedded pack prompt\n" {
+		t.Fatalf("step description = %q, want embedded pack prompt", got)
+	}
+}
+
 func TestLoadByNameDescriptionFileKeepsFormulaLocalAssetsPath(t *testing.T) {
 	tmp := t.TempDir()
 	coreFormulas := filepath.Join(tmp, "core", "formulas")
@@ -359,6 +406,65 @@ func TestDescriptionAssetRelPath(t *testing.T) {
 				t.Fatalf("descriptionAssetRelPath(%q) = %q, %v; want %q, %v", tt.raw, got, ok, tt.want, tt.wantOK)
 			}
 		})
+	}
+}
+
+func TestParseFileOversizedDescriptionFileWritesPromptReference(t *testing.T) {
+	dir := t.TempDir()
+	promptPath := filepath.Join(dir, "operator.md")
+	largePrompt := strings.Repeat("large prompt body\n", descriptionFileInlineMaxBytes/16+128)
+	if len([]byte(largePrompt)) <= descriptionFileInlineMaxBytes {
+		t.Fatalf("test prompt length = %d, want > %d", len([]byte(largePrompt)), descriptionFileInlineMaxBytes)
+	}
+	if err := os.WriteFile(promptPath, []byte(largePrompt), 0o644); err != nil {
+		t.Fatalf("write prompt: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "oversized-desc.toml"), []byte(`
+formula = "oversized-desc"
+version = 1
+contract = "graph.v2"
+type = "workflow"
+
+[vars]
+pack_root = "/tmp/workflows"
+pr_url = "https://github.com/example/repo/pull/1"
+
+[[steps]]
+id = "work"
+title = "Work"
+description_file = "operator.md"
+`), 0o644); err != nil {
+		t.Fatalf("write formula: %v", err)
+	}
+
+	loaded, err := NewParser(dir).LoadByName("oversized-desc")
+	if err != nil {
+		t.Fatalf("LoadByName: %v", err)
+	}
+	step := loaded.Steps[0]
+	if step.DescriptionFile != "" {
+		t.Fatalf("DescriptionFile = %q, want consumed oversized reference", step.DescriptionFile)
+	}
+	if len(step.Description) >= len(largePrompt) {
+		t.Fatalf("Description length = %d, want compact reference shorter than prompt %d", len(step.Description), len(largePrompt))
+	}
+	for _, want := range []string{
+		"External Prompt Required",
+		"you MUST read the file",
+		"normal runtime and lifecycle protocol",
+		"does not replace the startup prompt",
+		promptPath,
+		"Original formula description_file: `operator.md`",
+		"pack_root=\"{{pack_root}}\"",
+		"pr_url=\"{{pr_url}}\"",
+		"Treat the file contents as the authoritative task prompt",
+	} {
+		if !strings.Contains(step.Description, want) {
+			t.Fatalf("Description missing %q:\n%s", want, step.Description)
+		}
+	}
+	if strings.Contains(step.Description, "large prompt body\nlarge prompt body\n") {
+		t.Fatalf("Description unexpectedly inlined oversized prompt:\n%s", step.Description)
 	}
 }
 
@@ -3180,5 +3286,95 @@ title = "Test"
 		if v.Description != "A required variable" {
 			t.Errorf("required_var.Description = %q, want 'A required variable'", v.Description)
 		}
+	}
+}
+
+func TestParseFile_ContentHash(t *testing.T) {
+	dir := t.TempDir()
+	content := []byte(`formula = "mol-hash-test"
+version = 3
+
+[[steps]]
+id = "do-thing"
+title = "Do the thing"
+`)
+	path := filepath.Join(dir, "mol-hash-test.toml")
+	if err := os.WriteFile(path, content, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	p := NewParser(dir)
+	f, err := p.ParseFile(path)
+	if err != nil {
+		t.Fatalf("ParseFile: %v", err)
+	}
+
+	if f.ContentHash == "" {
+		t.Fatal("ContentHash should be set after ParseFile")
+	}
+
+	// Hash should be deterministic
+	want := ContentHash(content)
+	if f.ContentHash != want {
+		t.Errorf("ContentHash = %q, want %q", f.ContentHash, want)
+	}
+
+	// Hash should be 64 hex chars (SHA-256)
+	if len(f.ContentHash) != 64 {
+		t.Errorf("ContentHash length = %d, want 64", len(f.ContentHash))
+	}
+}
+
+func TestParseFile_ContentHashChangesWithContent(t *testing.T) {
+	dir := t.TempDir()
+	v1 := []byte(`formula = "mol-evolve"
+version = 1
+
+[[steps]]
+id = "step-a"
+title = "Step A"
+`)
+	v2 := []byte(`formula = "mol-evolve"
+version = 2
+
+[[steps]]
+id = "step-a"
+title = "Step A (updated)"
+`)
+	path := filepath.Join(dir, "mol-evolve.toml")
+	if err := os.WriteFile(path, v1, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	p1 := NewParser(dir)
+	f1, err := p1.ParseFile(path)
+	if err != nil {
+		t.Fatalf("ParseFile v1: %v", err)
+	}
+
+	if err := os.WriteFile(path, v2, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	p2 := NewParser(dir)
+	f2, err := p2.ParseFile(path)
+	if err != nil {
+		t.Fatalf("ParseFile v2: %v", err)
+	}
+
+	if f1.ContentHash == f2.ContentHash {
+		t.Error("content hash should differ between v1 and v2")
+	}
+}
+
+func TestParse_InMemory_NoContentHash(t *testing.T) {
+	p := NewParser()
+	f, err := p.Parse([]byte(`{"formula":"mol-inmem","steps":[]}`))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+
+	if f.ContentHash != "" {
+		t.Errorf("ContentHash should be empty for in-memory parse, got %q", f.ContentHash)
 	}
 }

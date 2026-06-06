@@ -36,7 +36,13 @@ func processRetryControl(store beads.Store, bead beads.Bead, opts ProcessOptions
 		return ControlResult{}, fmt.Errorf("%s: finding latest attempt: %w", bead.ID, err)
 	}
 	if attempt.ID == "" {
-		return ControlResult{}, fmt.Errorf("%s: no attempt found", bead.ID)
+		// A retry control with no attempt sub-DAG cannot become valid by
+		// waiting — the graph is malformed (missing seed or a seed attach
+		// marked molecule_failed). Classify for the dispatcher quarantine
+		// instead of fataling the serve loop. See gastownhall/gascity#2798.
+		opts.tracef("process-control bead=%s kind=retry quarantine reason=no_attempt_found root=%s",
+			bead.ID, bead.Metadata["gc.root_bead_id"])
+		return ControlResult{}, fmt.Errorf("%w: %s: no attempt found", ErrControlGraphMalformed, bead.ID)
 	}
 	if attempt.Status != "closed" {
 		if err := ensureBlockingDependency(store, bead.ID, attempt.ID); err != nil {
@@ -160,7 +166,14 @@ func processRalphControl(store beads.Store, bead beads.Bead, opts ProcessOptions
 		return ControlResult{}, fmt.Errorf("%s: finding latest iteration: %w", bead.ID, err)
 	}
 	if iteration.ID == "" {
-		return ControlResult{}, fmt.Errorf("%s: no iteration found", bead.ID)
+		// A ralph control with no iteration sub-DAG cannot become valid by
+		// waiting — the graph is malformed (missing first-iteration seed or
+		// a seed attach marked molecule_failed). Classify for the dispatcher
+		// quarantine instead of fataling the serve loop, which crash-looped
+		// all dispatch for the rig. See gastownhall/gascity#2798.
+		opts.tracef("process-control bead=%s kind=ralph quarantine reason=no_iteration_found root=%s",
+			bead.ID, bead.Metadata["gc.root_bead_id"])
+		return ControlResult{}, fmt.Errorf("%w: %s: no iteration found", ErrControlGraphMalformed, bead.ID)
 	}
 	if iteration.Status != "closed" {
 		if err := ensureBlockingDependency(store, bead.ID, iteration.ID); err != nil {
@@ -332,6 +345,15 @@ func isPartialAttemptAttachError(err error) bool {
 	return errors.As(err, &partial)
 }
 
+var errTransientControllerBoundary = errors.New("transient controller boundary error")
+
+func markTransientControllerBoundaryError(err error) error {
+	if err == nil || errors.Is(err, errTransientControllerBoundary) {
+		return err
+	}
+	return fmt.Errorf("%w: %w", errTransientControllerBoundary, err)
+}
+
 // IsTransientControllerError is the dispatch/store transient classifier for
 // control spawn and spawn-state update boundaries. Prefer typed checks when
 // callers expose them; the string fallback covers wrapped Dolt/MySQL/tmux
@@ -341,6 +363,9 @@ func IsTransientControllerError(err error) bool {
 		return false
 	}
 	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	if errors.Is(err, errTransientControllerBoundary) {
 		return true
 	}
 	msg := strings.ToLower(err.Error())
@@ -356,6 +381,9 @@ func IsTransientControllerError(err error) bool {
 		"too many connections",
 		"lock wait timeout",
 		"deadlock found",
+		"database is locked",
+		"database table is locked",
+		"sqlite_busy",
 	}
 	for _, needle := range transientNeedles {
 		if strings.Contains(msg, needle) {
@@ -567,6 +595,7 @@ func buildAttemptRecipe(step *formula.Step, control beads.Bead, attemptNum int) 
 		rootKind = "scope"
 	}
 	rootMeta := make(map[string]string, len(step.Metadata))
+	// Preserve formula-specified retry metadata such as required artifacts.
 	for k, v := range step.Metadata {
 		rootMeta[k] = v
 	}

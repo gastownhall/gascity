@@ -144,7 +144,7 @@ func computePoolDeathHandlers(cfg *config.City, cityName, cityPath string, sp ru
 		for _, qualifiedInstance := range discoverPoolInstances(a.Name, a.Dir, sp0, &a, cityName, st, sp) {
 			_, instanceName := config.ParseQualifiedName(qualifiedInstance)
 			instance := deepCopyAgent(&a, instanceName, a.Dir)
-			cmd := instance.EffectiveOnDeath()
+			cmd := instance.EffectiveOnDeathForBeads(cfg.Beads)
 			if cmd == "" {
 				continue
 			}
@@ -899,7 +899,7 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 	awakeAssignedWorkBeads := filterAssignedWorkBeadsForSessionWake(cfg, cityPath, open, dsResult.AssignedWorkBeads, dsResult.AssignedWorkStoreRefs)
 	reconcileSessionBeadsAtPathWithNamedDemand(
 		sigCtx, cityPath, open, ds, cfgNames, cfg, sp, oneShotStore,
-		nil, awakeAssignedWorkBeads, rigStores, nil, dt, poolDesired,
+		nil, awakeAssignedWorkBeads, rigStores, nil, dt, nil, poolDesired,
 		dsResult.NamedSessionDemand,
 		dsResult.snapshotQueryPartial(),
 		nil, cityName,

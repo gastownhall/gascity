@@ -1,6 +1,7 @@
 package coordstore
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"os"
@@ -80,4 +81,96 @@ type statsOnlyAdapter struct {
 
 func (a statsOnlyAdapter) Stats(context.Context) map[string]int64 {
 	return a.stats
+}
+
+func TestRecorderSampleIncludesHeapInuseDeltaBytes(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "ts.jsonl")
+
+	recorder := NewTimeSeriesRecorder(TimeSeriesRecorderConfig{
+		Path: path,
+	})
+	if err := recorder.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	// Force a second sample so delta has a chance to appear in the record.
+	if err := recorder.RecordOnce(ctx); err != nil {
+		t.Fatalf("RecordOnce: %v", err)
+	}
+	if err := recorder.Stop(); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read file: %v", err)
+	}
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		if line == "" {
+			continue
+		}
+		var raw map[string]any
+		if err := json.Unmarshal([]byte(line), &raw); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if _, ok := raw["heap_inuse_delta_bytes"]; !ok {
+			t.Fatalf("heap_inuse_delta_bytes absent from JSONL sample: %s", line)
+		}
+	}
+}
+
+func TestRecorderSampleLiveObjectCountPresentWhenAdapterReports(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "ts.jsonl")
+
+	recorder := NewTimeSeriesRecorder(TimeSeriesRecorderConfig{
+		Path:    path,
+		Adapter: statsOnlyAdapter{stats: map[string]int64{"live_objects": 42, "other": 9}},
+	})
+	if err := recorder.RecordOnce(ctx); err != nil {
+		t.Fatalf("RecordOnce: %v", err)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read file: %v", err)
+	}
+	var sample TelemetrySample
+	if err := json.Unmarshal(bytes.TrimSpace(data), &sample); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if sample.LiveObjectCount != 42 {
+		t.Errorf("LiveObjectCount = %d, want 42", sample.LiveObjectCount)
+	}
+	if sample.AdapterStats["other"] != 9 {
+		t.Errorf("AdapterStats[other] = %d, want 9", sample.AdapterStats["other"])
+	}
+}
+
+func TestRecorderSampleLiveObjectCountAbsentWhenAdapterDoesNotReport(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "ts.jsonl")
+
+	recorder := NewTimeSeriesRecorder(TimeSeriesRecorderConfig{
+		Path:    path,
+		Adapter: statsOnlyAdapter{stats: map[string]int64{"backend_records": 3}},
+	})
+	if err := recorder.RecordOnce(ctx); err != nil {
+		t.Fatalf("RecordOnce: %v", err)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read file: %v", err)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(bytes.TrimSpace(data), &raw); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if _, ok := raw["live_object_count"]; ok {
+		t.Errorf("live_object_count present in JSONL when adapter does not report it")
+	}
 }

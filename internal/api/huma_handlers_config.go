@@ -41,17 +41,7 @@ func (s *Server) humaHandleConfigGet(_ context.Context, _ *ConfigGetInput) (*Ind
 
 	providers := make(map[string]providerSpecJSON, len(cfg.Providers))
 	for name, spec := range cfg.Providers {
-		providers[name] = providerSpecJSON{
-			DisplayName:  spec.DisplayName,
-			Command:      spec.Command,
-			ACPCommand:   spec.ACPCommand,
-			Args:         spec.Args,
-			ACPArgs:      optionalStringSlice(spec.ACPArgs),
-			PromptMode:   spec.PromptMode,
-			PromptFlag:   spec.PromptFlag,
-			ReadyDelayMs: spec.ReadyDelayMs,
-			Env:          spec.Env,
-		}
+		providers[name] = providerSpecJSONFrom(spec)
 	}
 
 	resp := configResponse{
@@ -205,6 +195,51 @@ func (s *Server) humaHandleConfigValidate(_ context.Context, _ *ConfigValidateIn
 	resp.Body.Errors = errors
 	resp.Body.Warnings = warnings
 	return resp, nil
+}
+
+// humaHandleConfigDefaults is the Huma-typed handler for
+// GET /v0/city/{cityName}/config/defaults. It returns the recommended
+// baseline configuration — defaults only, no overrides — for the
+// requested city, in the same shape as GET /config. Clients diff the
+// loaded config against this baseline to see, per field, what the
+// recommended default is and whether the loaded value is defaulted or
+// overridden (the config-level generalization of the store_health
+// recommended-vs-actual pair the dashboard already renders).
+//
+// Defaults are sourced from the existing default derivations
+// (config.DeriveBeadsPrefix for the name-derived workspace prefix,
+// config.BuiltinProviders for the provider presets) — there is no
+// duplicated default table. The baseline carries no agents or rigs:
+// a city with no overrides declares none. Because the prefix default is
+// derived from the city name, the baseline is computed against the
+// requested city scope, not a static global document.
+func (s *Server) humaHandleConfigDefaults(_ context.Context, _ *ConfigDefaultsInput) (*IndexOutput[configResponse], error) {
+	cfg := s.state.Config()
+	name := strings.TrimSpace(s.state.CityName())
+	if name == "" {
+		name = config.EffectiveCityName(cfg, "")
+	}
+
+	builtins := config.BuiltinProviders()
+	providers := make(map[string]providerSpecJSON, len(builtins))
+	for n, spec := range builtins {
+		providers[n] = providerSpecJSONFrom(spec)
+	}
+
+	resp := configResponse{
+		Workspace: workspaceResponse{
+			Name:   name,
+			Prefix: config.DeriveBeadsPrefix(name),
+		},
+		Agents:    []configAgentResponse{},
+		Rigs:      []configRigResponse{},
+		Providers: providers,
+	}
+
+	return &IndexOutput[configResponse]{
+		Index: s.latestIndex(),
+		Body:  resp,
+	}, nil
 }
 
 // --- Response types used by config explain ---

@@ -12,11 +12,27 @@ import (
 	"time"
 )
 
+// shortSocketPath returns a unix-socket path under a short tmp dir (not
+// t.TempDir(), whose macOS /var/folders path overflows sun_path's 104-byte
+// limit). Registers cleanup.
+func shortSocketPath(t *testing.T, name string) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("/tmp", "cx")
+	if err != nil {
+		t.Fatalf("mkdtemp: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	p := filepath.Join(dir, name)
+	if len(p) >= 104 {
+		t.Fatalf("socket path too long for sun_path: %d >= 104: %s", len(p), p)
+	}
+	return p
+}
+
 func TestChaosClientForwardsCreateAndPersistsAckBeforeReturn(t *testing.T) {
 	ctx := context.Background()
-	dir := t.TempDir()
-	socketPath := filepath.Join(dir, "chaos.sock")
-	ledgerPath := filepath.Join(dir, "acked-writes.jsonl")
+	socketPath := shortSocketPath(t, "chaos.sock")
+	ledgerPath := filepath.Join(t.TempDir(), "acked-writes.jsonl")
 
 	ln, err := net.Listen("unix", socketPath)
 	if err != nil {
@@ -113,8 +129,7 @@ func assertAckLedgerLine(t *testing.T, path, method, id string) {
 
 func TestChaosClientMapsRemoteNotFoundToErrNotFound(t *testing.T) {
 	ctx := context.Background()
-	dir := t.TempDir()
-	socketPath := filepath.Join(dir, "chaos.sock")
+	socketPath := shortSocketPath(t, "chaos.sock")
 	ln, err := net.Listen("unix", socketPath)
 	if err != nil {
 		t.Fatalf("listen unix: %v", err)

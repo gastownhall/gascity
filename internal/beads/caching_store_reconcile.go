@@ -277,7 +277,7 @@ func (c *CachingStore) runReconciliation() {
 		freshByID[b.ID] = cloneBead(b)
 	}
 
-	c.recoverMissingFromList(freshByID)
+	confirmedClosed := c.recoverMissingFromList(freshByID)
 
 	depMap, depsComplete, depErr := c.fetchDepsForBeads(freshByID)
 	if depErr != nil {
@@ -355,6 +355,9 @@ func (c *CachingStore) runReconciliation() {
 			if old.Status != "closed" {
 				closed := cloneBead(old)
 				closed.Status = "closed"
+				if freshClosed, ok := confirmedClosed[id]; ok {
+					closed = cloneBead(freshClosed)
+				}
 				notifications = append(notifications, cacheNotification{
 					eventType: "bead.closed",
 					bead:      closed,
@@ -452,6 +455,9 @@ func (c *CachingStore) runReconciliation() {
 			}
 			closed := cloneBead(old)
 			closed.Status = "closed"
+			if freshClosed, ok := confirmedClosed[id]; ok {
+				closed = cloneBead(freshClosed)
+			}
 			notifications = append(notifications, cacheNotification{
 				eventType: "bead.closed",
 				bead:      closed,
@@ -542,11 +548,13 @@ func (c *CachingStore) depsForReconcileLocked(id string, freshBead Bead, depMap 
 // synthesize a spurious bead.closed event for it.
 //
 // On ErrNotFound the bead is left absent so the diff path can emit
-// bead.closed as before. On any other error the cached entry is merged
-// back conservatively, deferring the close to a later scan when the
-// backing store's state is unambiguous. Callers must own freshByID and not
-// access it concurrently while recovery is running.
-func (c *CachingStore) recoverMissingFromList(freshByID map[string]Bead) {
+// bead.closed as before. When Get confirms a closed bead, the returned map
+// carries that fresh row so the diff path can emit an authoritative close
+// payload instead of a stale cached status flip. On any other error the cached
+// entry is merged back conservatively, deferring the close to a later scan
+// when the backing store's state is unambiguous. Callers must own freshByID
+// and not access it concurrently while recovery is running.
+func (c *CachingStore) recoverMissingFromList(freshByID map[string]Bead) map[string]Bead {
 	c.mu.RLock()
 	candidates := make(map[string]Bead)
 	for id, b := range c.beads {
@@ -560,8 +568,9 @@ func (c *CachingStore) recoverMissingFromList(freshByID map[string]Bead) {
 	}
 	c.mu.RUnlock()
 	if len(candidates) == 0 {
-		return
+		return nil
 	}
+	var confirmedClosed map[string]Bead
 	var recoveredAlive int64
 	var deferredClose int64
 	for id, cached := range candidates {
@@ -578,6 +587,10 @@ func (c *CachingStore) recoverMissingFromList(freshByID map[string]Bead) {
 				continue
 			}
 			if bead.Status == "closed" {
+				if confirmedClosed == nil {
+					confirmedClosed = make(map[string]Bead)
+				}
+				confirmedClosed[id] = cloneBead(bead)
 				continue
 			}
 			freshByID[id] = cloneBead(bead)
@@ -599,4 +612,5 @@ func (c *CachingStore) recoverMissingFromList(freshByID map[string]Bead) {
 		c.stats.ReconcileCloseDeferrals += deferredClose
 		c.mu.Unlock()
 	}
+	return confirmedClosed
 }

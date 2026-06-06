@@ -49,6 +49,9 @@ name = "testcity"
 provider = "claude"
 includes = ["packs/main"]
 
+[providers.claude]
+base = "builtin:claude"
+
 [daemon]
 patrol_interval = "30s"
 

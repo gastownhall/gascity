@@ -1,4 +1,4 @@
-//go:build cgo && gascity_native_beads
+//go:build gascity_native_beads
 
 package beads
 
@@ -14,7 +14,7 @@ import (
 	"sync"
 	"time"
 
-	_ "github.com/mattn/go-sqlite3"
+	_ "modernc.org/sqlite" // pure-Go SQLite driver, CGO_ENABLED=0 safe
 )
 
 // DoltliteReadStore serves hot read paths in-process for bd/doltlite stores.
@@ -131,7 +131,7 @@ func NewDoltliteReadStore(dir string, backing *BdStore) (*DoltliteReadStore, err
 	if _, err := os.Stat(dbPath); err != nil {
 		return nil, err
 	}
-	db, err := sql.Open("sqlite3", "file:"+dbPath+"?mode=ro&_busy_timeout=10000")
+	db, err := sql.Open("sqlite", "file:"+dbPath+"?mode=ro&_busy_timeout=10000")
 	if err != nil {
 		return nil, err
 	}
@@ -1019,6 +1019,7 @@ func parseTimeString(s string) time.Time {
 	for _, layout := range []string{
 		time.RFC3339Nano,
 		"2006-01-02 15:04:05.999999999-07:00",
+		"2006-01-02 15:04:05.999999999 -0700 MST", // time.Time.String() — modernc default write format
 		"2006-01-02 15:04:05.999999999",
 		"2006-01-02 15:04:05",
 	} {

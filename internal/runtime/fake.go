@@ -79,6 +79,18 @@ func (f *Fake) CountCalls(method, name string) int {
 	return count
 }
 
+// SnapshotCalls returns a copy of the recorded calls taken under lock. Range
+// over this instead of the exported Calls field when other goroutines may
+// still be invoking the fake; reading Calls directly while a concurrent
+// method appends to it is a data race.
+func (f *Fake) SnapshotCalls() []Call {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]Call, len(f.Calls))
+	copy(out, f.Calls)
+	return out
+}
+
 // NewFake returns a ready-to-use [Fake].
 func NewFake() *Fake {
 	return &Fake{

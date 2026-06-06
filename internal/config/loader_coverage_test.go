@@ -358,6 +358,9 @@ name = "full-pipeline-city"
 provider = "claude"
 includes = ["packs/mypk"]
 
+[providers.claude]
+base = "builtin:claude"
+
 [[agent]]
 name = "mayor"
 scope = "city"
@@ -742,6 +745,9 @@ func TestLoadWithIncludes_AgentDefaultsFlowThrough(t *testing.T) {
 [workspace]
 name = "test"
 provider = "claude"
+
+[providers.claude]
+base = "builtin:claude"
 
 [[agent]]
 name = "worker"

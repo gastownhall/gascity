@@ -25,14 +25,16 @@ type OpSnapshot struct {
 
 // TelemetrySample is one JSONL row emitted by TimeSeriesRecorder.
 type TelemetrySample struct {
-	Timestamp      time.Time             `json:"timestamp"`
-	HeapAllocBytes uint64                `json:"heap_alloc_bytes"`
-	HeapInuseBytes uint64                `json:"heap_inuse_bytes"`
-	RSSBytes       uint64                `json:"rss_bytes,omitempty"`
-	Goroutines     int                   `json:"goroutines"`
-	StoreSizeBytes int64                 `json:"store_size_bytes"`
-	AdapterStats   map[string]int64      `json:"adapter_stats,omitempty"`
-	Operations     map[string]OpSnapshot `json:"operations,omitempty"`
+	Timestamp           time.Time             `json:"timestamp"`
+	HeapAllocBytes      uint64                `json:"heap_alloc_bytes"`
+	HeapInuseBytes      uint64                `json:"heap_inuse_bytes"`
+	HeapInuseDeltaBytes uint64                `json:"heap_inuse_delta_bytes"`
+	RSSBytes            uint64                `json:"rss_bytes,omitempty"`
+	Goroutines          int                   `json:"goroutines"`
+	StoreSizeBytes      int64                 `json:"store_size_bytes"`
+	LiveObjectCount     int64                 `json:"live_object_count,omitempty"`
+	AdapterStats        map[string]int64      `json:"adapter_stats,omitempty"`
+	Operations          map[string]OpSnapshot `json:"operations,omitempty"`
 }
 
 // TimeSeriesRecorderConfig configures a telemetry JSONL recorder.
@@ -49,10 +51,11 @@ type TimeSeriesRecorderConfig struct {
 type TimeSeriesRecorder struct {
 	cfg TimeSeriesRecorderConfig
 
-	mu     sync.Mutex
-	file   *os.File
-	stopCh chan struct{}
-	doneCh chan struct{}
+	mu                sync.Mutex
+	file              *os.File
+	stopCh            chan struct{}
+	doneCh            chan struct{}
+	heapInuseBaseline uint64 // HeapInuse at Start(); used to compute HeapInuseDeltaBytes
 }
 
 // NewTimeSeriesRecorder returns a recorder for cfg.
@@ -63,14 +66,18 @@ func NewTimeSeriesRecorder(cfg TimeSeriesRecorderConfig) *TimeSeriesRecorder {
 	return &TimeSeriesRecorder{cfg: cfg}
 }
 
-// Start opens the JSONL file, writes an immediate sample, and starts periodic
-// sampling until Stop is called or ctx is canceled.
+// Start opens the JSONL file, records the HeapInuse baseline, writes an
+// immediate sample, and starts periodic sampling until Stop is called or ctx
+// is canceled.
 func (r *TimeSeriesRecorder) Start(ctx context.Context) error {
 	r.mu.Lock()
 	if r.file != nil {
 		r.mu.Unlock()
 		return nil
 	}
+	var ms runtime.MemStats
+	runtime.ReadMemStats(&ms)
+	r.heapInuseBaseline = ms.HeapInuse
 	file, err := openRecorderFile(r.cfg.Path)
 	if err != nil {
 		r.mu.Unlock()
@@ -184,18 +191,27 @@ func (r *TimeSeriesRecorder) sample(ctx context.Context) (TelemetrySample, error
 	if err != nil {
 		return TelemetrySample{}, err
 	}
+	delta := uint64(0)
+	if ms.HeapInuse > r.heapInuseBaseline {
+		delta = ms.HeapInuse - r.heapInuseBaseline
+	}
 	sample := TelemetrySample{
-		Timestamp:      time.Now().UTC(),
-		HeapAllocBytes: ms.HeapAlloc,
-		HeapInuseBytes: ms.HeapInuse,
-		Goroutines:     runtime.NumGoroutine(),
-		StoreSizeBytes: size,
+		Timestamp:           time.Now().UTC(),
+		HeapAllocBytes:      ms.HeapAlloc,
+		HeapInuseBytes:      ms.HeapInuse,
+		HeapInuseDeltaBytes: delta,
+		Goroutines:          runtime.NumGoroutine(),
+		StoreSizeBytes:      size,
 	}
 	if rss, ok := readRSSBytes(); ok {
 		sample.RSSBytes = rss
 	}
 	if r.cfg.Adapter != nil {
-		sample.AdapterStats = copyStats(r.cfg.Adapter.Stats(ctx))
+		adapterStats := r.cfg.Adapter.Stats(ctx)
+		sample.AdapterStats = copyStats(adapterStats)
+		if v, ok := adapterStats["live_objects"]; ok {
+			sample.LiveObjectCount = v
+		}
 	}
 	if r.cfg.HistogramSnapshot != nil {
 		sample.Operations = snapshotOperations(r.cfg.HistogramSnapshot())

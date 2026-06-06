@@ -37,6 +37,62 @@ type StoreMaintenanceFailedPayload struct {
 // IsEventPayload marks StoreMaintenanceFailedPayload as an events.Payload variant.
 func (StoreMaintenanceFailedPayload) IsEventPayload() {}
 
+// BeadWorktreeReapedPayload is the typed payload for bead.worktree.reaped
+// events. Emitted when the worktree reaper successfully removes a merged
+// worktree and its branch after a bead is closed.
+type BeadWorktreeReapedPayload struct {
+	BeadID string `json:"bead_id"`
+	Path   string `json:"path"`
+	Rig    string `json:"rig"`
+	Branch string `json:"branch"`
+}
+
+// IsEventPayload marks BeadWorktreeReapedPayload as an events.Payload variant.
+func (BeadWorktreeReapedPayload) IsEventPayload() {}
+
+// BeadWorktreeReapSkippedPayload is the typed payload for
+// bead.worktree.reap_skipped events. Emitted when the worktree reaper
+// decides not to remove a worktree (e.g., unmerged changes, open bead).
+type BeadWorktreeReapSkippedPayload struct {
+	BeadID string `json:"bead_id"`
+	Path   string `json:"path"`
+	Rig    string `json:"rig"`
+	Reason string `json:"reason"`
+}
+
+// IsEventPayload marks BeadWorktreeReapSkippedPayload as an events.Payload variant.
+func (BeadWorktreeReapSkippedPayload) IsEventPayload() {}
+
+func init() {
+	RegisterPayload(BeadWorktreeReaped, BeadWorktreeReapedPayload{})
+	RegisterPayload(BeadWorktreeReapSkipped, BeadWorktreeReapSkippedPayload{})
+}
+
+// StoreDiskWarnPayload is the typed payload for gc.store.disk_warn events.
+// Emitted before CALL DOLT_GC when free space is below GC_DOLT_WARN_FREE_BYTES
+// but above GC_DOLT_MIN_FREE_BYTES; the GC proceeds.
+type StoreDiskWarnPayload struct {
+	FreeBytes  int64  `json:"free_bytes"`
+	WarnBytes  int64  `json:"warn_bytes"`
+	FloorBytes int64  `json:"floor_bytes"`
+	DataDir    string `json:"data_dir"`
+}
+
+// IsEventPayload marks StoreDiskWarnPayload as an events.Payload variant.
+func (StoreDiskWarnPayload) IsEventPayload() {}
+
+// StoreDiskCriticalPayload is the typed payload for gc.store.disk_critical
+// events. Emitted before CALL DOLT_GC when free space is below
+// GC_DOLT_MIN_FREE_BYTES; the GC is skipped to avoid growing the store.
+type StoreDiskCriticalPayload struct {
+	FreeBytes  int64  `json:"free_bytes"`
+	FloorBytes int64  `json:"floor_bytes"`
+	DataDir    string `json:"data_dir"`
+}
+
+// IsEventPayload marks StoreDiskCriticalPayload as an events.Payload variant.
+func (StoreDiskCriticalPayload) IsEventPayload() {}
+
 // SessionResetStalledPayload is the typed payload for
 // session.reset_stalled events. It identifies the session whose reset
 // completion has stalled and the reset timestamp used to compute the

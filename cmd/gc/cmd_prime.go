@@ -24,19 +24,18 @@ import (
 // inside a rig without being a managed agent.
 const defaultPrimePrompt = `# Gas City Agent
 
-You are an agent in a Gas City workspace. Check for available work
-and execute it.
+You are an agent in a Gas City workspace. Claim available work and execute it.
 
 ## Your tools
 
-- ` + "`bd ready`" + ` — see available work items
+- ` + "`gc hook --claim --json`" + ` — find and atomically claim one work item
 - ` + "`bd show <id>`" + ` — see details of a work item
 - ` + "`bd close <id>`" + ` — mark work as done
 
 ## How to work
 
-1. Check for available work: ` + "`bd ready`" + `
-2. Pick a bead and execute the work described in its title
+1. Claim work: ` + "`gc hook --claim --json`" + `
+2. Read the claimed bead and execute the work described in its title
 3. When done, close it: ` + "`bd close <id>`" + `
 4. Check for more work. Repeat until the queue is empty.
 `
@@ -300,7 +299,7 @@ func doPrimeWithHookFormat(args []string, stdout, stderr io.Writer, hookMode boo
 		}
 		var ctx PromptContext
 		if a.PromptTemplate != "" || hookMode || sessionTemplateContext {
-			ctx = buildPrimeContext(cityPath, cityName, &a, cfg.Rigs, stderr)
+			ctx = buildPrimeContextForBeads(cityPath, cityName, &a, cfg.Rigs, cfg.Beads, stderr)
 			ctx.ProviderKey, ctx.ProviderDisplayName = providerInfoForAgent(&a, &cfg.Workspace, cfg.Providers)
 			ctx.InstructionsFile = instructionsFileForAgent(&a, &cfg.Workspace, cfg.Providers)
 		}
@@ -609,6 +608,10 @@ func findAgentByName(cfg *config.City, name string) (config.Agent, bool) {
 // environment variables when running inside a managed session, falls back
 // to currentRigContext when run manually.
 func buildPrimeContext(cityPath, cityName string, a *config.Agent, rigs []config.Rig, stderr io.Writer) PromptContext {
+	return buildPrimeContextForBeads(cityPath, cityName, a, rigs, config.BeadsConfig{}, stderr)
+}
+
+func buildPrimeContextForBeads(cityPath, cityName string, a *config.Agent, rigs []config.Rig, beadsCfg config.BeadsConfig, stderr io.Writer) PromptContext {
 	ctx := PromptContext{
 		CityRoot:      cityPath,
 		TemplateName:  a.Name,
@@ -647,7 +650,10 @@ func buildPrimeContext(cityPath, cityName string, a *config.Agent, rigs []config
 
 	ctx.Branch = os.Getenv("GC_BRANCH")
 	ctx.DefaultBranch = defaultBranchForRig(ctx.RigName, rigs, ctx.WorkDir)
-	ctx.WorkQuery = expandAgentCommandTemplate(cityPath, cityName, a, rigs, "work_query", a.EffectiveWorkQuery(), stderr)
+	ctx.WorkQuery = expandAgentCommandTemplate(cityPath, cityName, a, rigs, "work_query", a.EffectiveWorkQueryForBeads(beadsCfg), stderr)
+	ctx.AssignedInProgressQuery = expandAgentCommandTemplate(cityPath, cityName, a, rigs, "assigned_in_progress_query", a.EffectiveAssignedInProgressQueryForBeads(beadsCfg), stderr)
+	ctx.AssignedReadyQuery = expandAgentCommandTemplate(cityPath, cityName, a, rigs, "assigned_ready_query", a.EffectiveAssignedReadyQueryForBeads(beadsCfg), stderr)
+	ctx.RoutedPoolQuery = expandAgentCommandTemplate(cityPath, cityName, a, rigs, "routed_pool_query", a.EffectiveRoutedPoolQueryForBeads(beadsCfg), stderr)
 	ctx.SlingQuery = expandAgentCommandTemplate(cityPath, cityName, a, rigs, "sling_query", a.EffectiveSlingQuery(), stderr)
 	return ctx
 }

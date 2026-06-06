@@ -475,19 +475,46 @@ func TestRenderPromptWorkQuery(t *testing.T) {
 	}
 }
 
+func TestRenderPromptAssignedReadyQuery(t *testing.T) {
+	f := fsys.NewFake()
+	f.Files["/city/prompts/test.md.tmpl"] = []byte("Assigned: {{ .AssignedReadyQuery }}")
+	ctx := PromptContext{AssignedReadyQuery: "bd ready --assignee=worker"}
+	got := renderPrompt(f, "/city", "", "prompts/test.md.tmpl", ctx, "", io.Discard, nil, nil, nil)
+	if got != "Assigned: bd ready --assignee=worker" {
+		t.Errorf("renderPrompt(AssignedReadyQuery) = %q", got)
+	}
+}
+
+func TestRenderPromptSplitWorkQueries(t *testing.T) {
+	f := fsys.NewFake()
+	f.Files["/city/prompts/test.md.tmpl"] = []byte("Recovery: {{ .AssignedInProgressQuery }}\nPool: {{ .RoutedPoolQuery }}")
+	ctx := PromptContext{
+		AssignedInProgressQuery: "bd list --status=in_progress --assignee=worker",
+		RoutedPoolQuery:         "bd ready --metadata-field gc.routed_to=worker --unassigned",
+	}
+	got := renderPrompt(f, "/city", "", "prompts/test.md.tmpl", ctx, "", io.Discard, nil, nil, nil)
+	want := "Recovery: bd list --status=in_progress --assignee=worker\nPool: bd ready --metadata-field gc.routed_to=worker --unassigned"
+	if got != want {
+		t.Errorf("renderPrompt(split queries) = %q, want %q", got, want)
+	}
+}
+
 func TestBuildTemplateData(t *testing.T) {
 	ctx := PromptContext{
-		CityRoot:      "/city",
-		AgentName:     "a/b",
-		TemplateName:  "b",
-		BindingName:   "dep",
-		BindingPrefix: "dep.",
-		RigName:       "a",
-		WorkDir:       "/city/a",
-		IssuePrefix:   "te-",
-		Branch:        "main",
-		DefaultBranch: "main",
-		Env:           map[string]string{"Custom": "val", "CityRoot": "override"},
+		CityRoot:                "/city",
+		AgentName:               "a/b",
+		TemplateName:            "b",
+		BindingName:             "dep",
+		BindingPrefix:           "dep.",
+		RigName:                 "a",
+		WorkDir:                 "/city/a",
+		IssuePrefix:             "te-",
+		Branch:                  "main",
+		DefaultBranch:           "main",
+		AssignedInProgressQuery: "bd list --assignee=a/b --status=in_progress",
+		AssignedReadyQuery:      "bd ready --assignee=a/b",
+		RoutedPoolQuery:         "bd ready --metadata-field gc.routed_to=a/b --unassigned",
+		Env:                     map[string]string{"Custom": "val", "CityRoot": "override"},
 	}
 	data := buildTemplateData(ctx)
 	// SDK vars override Env.
@@ -508,6 +535,15 @@ func TestBuildTemplateData(t *testing.T) {
 	}
 	if data["DefaultBranch"] != "main" {
 		t.Errorf("DefaultBranch = %q, want %q", data["DefaultBranch"], "main")
+	}
+	if data["AssignedReadyQuery"] != "bd ready --assignee=a/b" {
+		t.Errorf("AssignedReadyQuery = %q, want %q", data["AssignedReadyQuery"], "bd ready --assignee=a/b")
+	}
+	if data["AssignedInProgressQuery"] != "bd list --assignee=a/b --status=in_progress" {
+		t.Errorf("AssignedInProgressQuery = %q, want %q", data["AssignedInProgressQuery"], "bd list --assignee=a/b --status=in_progress")
+	}
+	if data["RoutedPoolQuery"] != "bd ready --metadata-field gc.routed_to=a/b --unassigned" {
+		t.Errorf("RoutedPoolQuery = %q, want %q", data["RoutedPoolQuery"], "bd ready --metadata-field gc.routed_to=a/b --unassigned")
 	}
 }
 
@@ -800,6 +836,59 @@ func TestFormulaFilesystemSearchGuidanceCoversPromptSources(t *testing.T) {
 				if !strings.Contains(text, want) {
 					t.Fatalf("%s missing %q", rel, want)
 				}
+			}
+		})
+	}
+}
+
+func TestCoreWorkerPromptsUseHookClaimProtocol(t *testing.T) {
+	repoRoot, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatalf("filepath.Abs(repo root): %v", err)
+	}
+
+	for _, rel := range []string{
+		"internal/bootstrap/packs/core/assets/prompts/pool-worker.md",
+		"internal/bootstrap/packs/core/assets/prompts/graph-worker.md",
+	} {
+		t.Run(rel, func(t *testing.T) {
+			data, err := os.ReadFile(filepath.Join(repoRoot, rel))
+			if err != nil {
+				t.Fatalf("ReadFile(%s): %v", rel, err)
+			}
+			text := string(data)
+			if !strings.Contains(text, "gc hook --claim --drain-ack --json") {
+				t.Fatalf("%s missing drain-aware hook claim startup protocol", rel)
+			}
+			if !strings.Contains(text, "gc hook --claim --json") {
+				t.Fatalf("%s missing hook claim polling protocol", rel)
+			}
+			if strings.Contains(text, "{{ .AssignedReadyQuery }}") {
+				t.Fatalf("%s still uses AssignedReadyQuery instead of hook claim protocol", rel)
+			}
+			if strings.Contains(text, "bd ready") {
+				t.Fatalf("%s hardcodes bd ready instead of hook claim protocol", rel)
+			}
+			if strings.Contains(text, "bd ready --include-ephemeral --assignee") {
+				t.Fatalf("%s hardcodes bd ready --include-ephemeral instead of hook claim protocol", rel)
+			}
+		})
+	}
+
+	for _, rel := range []string{
+		"internal/bootstrap/packs/core/overlay/per-provider/kiro/AGENTS.md",
+		"internal/bootstrap/packs/core/skills/gc-work/SKILL.md",
+		"examples/gastown/packs/gastown/agents/mayor/prompt.template.md",
+		"examples/hyperscale/packs/hyperscale/agents/worker/prompt.template.md",
+		"examples/swarm/packs/swarm/agents/coder/prompt.template.md",
+	} {
+		t.Run(rel, func(t *testing.T) {
+			data, err := os.ReadFile(filepath.Join(repoRoot, rel))
+			if err != nil {
+				t.Fatalf("ReadFile(%s): %v", rel, err)
+			}
+			if strings.Contains(string(data), "bd ready --include-ephemeral") {
+				t.Fatalf("%s hardcodes bd ready --include-ephemeral in static prompt guidance", rel)
 			}
 		})
 	}

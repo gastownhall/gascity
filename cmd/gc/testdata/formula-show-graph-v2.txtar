@@ -93,6 +93,9 @@ stdout 'missing-root'
 name = "no-v2"
 provider = "claude"
 
+[providers.claude]
+base = "builtin:claude"
+
 [daemon]
 formula_v2 = false
 
@@ -126,6 +129,9 @@ needs = ["lane"]
 [workspace]
 name = "with-v2"
 provider = "claude"
+
+[providers.claude]
+base = "builtin:claude"
 
 [daemon]
 formula_v2 = true

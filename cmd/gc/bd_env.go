@@ -864,6 +864,19 @@ func resolvedRuntimeCityDoltTarget(cityPath string, allowRecovery bool) (contrac
 			}
 		}
 	}
+	// Last-resort: when all other recovery paths have been exhausted but the
+	// managed Dolt lifecycle is owned, attempt to read the port directly from
+	// provider state using the symlink-aware validation path. This handles the
+	// case where currentPublishedOrRecoveredManagedDoltPort encounters a publish
+	// failure (e.g., write permission error, post-publish re-validation failure)
+	// while the server is still accessible.
+	if allowRecovery {
+		if owned, _ := managedDoltLifecycleOwned(cityPath); owned {
+			if port := currentResolvableManagedDoltPort(cityPath); port != "" {
+				return contract.DoltConnectionTarget{Host: defaultManagedDoltHost, Port: port}, true, nil
+			}
+		}
+	}
 	if recoveryErr != nil {
 		return contract.DoltConnectionTarget{}, false, recoveryErr
 	}

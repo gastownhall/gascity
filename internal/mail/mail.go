@@ -18,6 +18,12 @@ var ErrAlreadyArchived = errors.New("already archived")
 var ErrNotFound = errors.New("message not found")
 
 const (
+	// AutoHandoffLabel marks mail created by gc handoff --auto for provider
+	// context-cycle delivery.
+	AutoHandoffLabel = "gc:auto-handoff"
+	// ArchiveAfterInjectLabel marks system mail that should be archived after
+	// successful hook injection.
+	ArchiveAfterInjectLabel = "gc:archive-after-inject"
 	// FromSessionIDMetadataKey stores the stable session bead ID used for
 	// reply routing when a message's display sender may later be renamed.
 	FromSessionIDMetadataKey = "mail.from_session_id"

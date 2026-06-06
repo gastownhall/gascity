@@ -13,13 +13,6 @@ type legacyWorkspaceFieldRule struct {
 
 var legacyWorkspaceFieldRules = []legacyWorkspaceFieldRule{
 	{
-		field:      "provider",
-		suggestion: "Use `[agent_defaults] provider` for a city-wide default, or set provider per agent in agents/<name>/agent.toml.",
-		defined: func(ws Workspace, _ map[string]string) bool {
-			return ws.Provider != ""
-		},
-	},
-	{
 		field:      "start_command",
 		suggestion: "Use per-agent `start_command` in `agent.toml` instead.",
 		defined: func(ws Workspace, _ map[string]string) bool {
@@ -72,7 +65,6 @@ func IsLegacyWorkspaceFieldWarning(warning string) bool {
 // declaration order below so warning text is stable across runs.
 //
 // Detection rules per field:
-//   - workspace.provider: warn when non-empty.
 //   - workspace.start_command: warn when non-empty.
 //   - workspace.suspended: warn when true, or when load provenance shows the
 //     field was explicitly defined.

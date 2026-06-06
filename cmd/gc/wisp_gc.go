@@ -8,6 +8,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/sourceworkflow"
 )
 
 const mailReadMetadataKey = "mail.read"
@@ -72,6 +73,13 @@ func (m *memoryWispGC) runGC(store beads.Store, now time.Time) (int, error) {
 	purged := 0
 	var deleteErr error
 	if m.ttl > 0 {
+		closedSpecs, specErr := sourceworkflow.CloseSpecSidecarsForClosedRoots(store, sourceworkflow.WorkflowSpecSidecarClosedReason)
+		if specErr != nil {
+			deleteErr = errors.Join(deleteErr, fmt.Errorf("closing generated spec sidecars for closed workflow roots: %w", specErr))
+		} else if closedSpecs > 0 {
+			log.Printf("wisp gc: closed %d generated spec sidecars for closed workflow roots", closedSpecs)
+		}
+
 		entries, err := closedWispGCEntries(store)
 		if err != nil {
 			return 0, err
@@ -81,15 +89,6 @@ func (m *memoryWispGC) runGC(store beads.Store, now time.Time) (int, error) {
 		closurePurged, closureDeleteErr := purgeExpiredBeadClosures(store, entries, cutoff)
 		purged += closurePurged
 		deleteErr = errors.Join(deleteErr, closureDeleteErr)
-
-		trackEntries, trackErr := store.List(beads.ListQuery{Status: "closed", Label: labelOrderTracking, TierMode: beads.TierBoth})
-		if trackErr == nil {
-			trackPurged, trackDeleteErr := purgeExpiredBeadRoots(store, trackEntries, cutoff)
-			purged += trackPurged
-			deleteErr = errors.Join(deleteErr, trackDeleteErr)
-		} else {
-			deleteErr = errors.Join(deleteErr, fmt.Errorf("listing closed order-tracking beads: %w", trackErr))
-		}
 	}
 
 	if m.mailRetentionTTL > 0 {
@@ -124,12 +123,12 @@ func closedWispGCEntries(store beads.Store) ([]beads.Bead, error) {
 			entries = append(entries, item)
 		}
 	}
-	molecules, err := store.List(beads.ListQuery{Status: "closed", Type: "molecule"})
+	molecules, err := store.List(beads.ListQuery{Status: "closed", Type: "molecule", TierMode: beads.TierBoth})
 	if err != nil {
 		return nil, fmt.Errorf("listing closed molecule roots: %w", err)
 	}
 	appendUnique(molecules)
-	wisps, err := store.List(beads.ListQuery{Status: "closed", Metadata: map[string]string{"gc.kind": "wisp"}})
+	wisps, err := store.List(beads.ListQuery{Status: "closed", Metadata: map[string]string{"gc.kind": "wisp"}, TierMode: beads.TierBoth})
 	if err != nil {
 		return nil, fmt.Errorf("listing closed wisp roots: %w", err)
 	}
@@ -198,6 +197,7 @@ func collectExpiredBeadClosure(store beads.Store, rootID string) ([]string, erro
 	related, err := store.List(beads.ListQuery{
 		Metadata:      map[string]string{"gc.root_bead_id": rootID},
 		IncludeClosed: true,
+		TierMode:      beads.TierBoth,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("list workflow-owned beads for %s: %w", rootID, err)
@@ -232,7 +232,7 @@ func collectExpiredBeadClosure(store beads.Store, rootID string) ([]string, erro
 		// beads are linked only by ParentID / parent-child deps and do not carry
 		// gc.root_bead_id metadata, so GC must follow those ownership edges while
 		// still ignoring non-ownership deps such as blocks or waits-for.
-		children, err := store.Children(id, beads.IncludeClosed)
+		children, err := store.Children(id, beads.IncludeClosed, beads.WithBothTiers)
 		if err != nil {
 			return fmt.Errorf("list children for %s: %w", id, err)
 		}

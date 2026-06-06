@@ -25,7 +25,7 @@ args = ["notes-mcp"]
 
 	cityCfg := &config.City{
 		Workspace:  config.Workspace{Provider: "gemini"},
-		Providers:  map[string]config.ProviderSpec{"gemini": {Command: "echo", PromptMode: "none"}, "cursor": {Command: "echo", PromptMode: "none"}},
+		Providers:  map[string]config.ProviderSpec{"gemini": {Command: "echo", PromptMode: "none"}, "cursor": {Command: "echo", PromptMode: "none"}, "copilot": {Command: "echo", PromptMode: "none"}},
 		PackMCPDir: filepath.Join(cityPath, "mcp"),
 	}
 

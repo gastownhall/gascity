@@ -22,6 +22,46 @@ queued formula.
 
 {{ template "following-mol" . }}
 
+## Startup Protocol
+
+> **The Universal Propulsion Principle: If your hook/work query finds work, YOU RUN IT.**
+
+> **CLAIM-FIRST INVARIANT:** Once a ready candidate from Step 1b or 1c is
+> identified, your **next** tool call MUST be `gc bd update <id> --claim`. Do
+> not read formula details, show metadata, inspect sessions, run diagnostics,
+> or run any other Bash before the claim succeeds. The claim flips bd status to
+> in_progress atomically; without it, the pool reconciler can recycle you
+> mid-read and another dog can race-claim the same bead. Close the window. Work
+> from Step 1a is already in_progress and assigned to this session; verify it,
+> then resume directly.
+
+```bash
+# Step 1a: Check for assigned in-progress work (already claimed, no race)
+{{ .AssignedInProgressQuery }}
+
+# Step 1b: If none, check for assigned ready work
+{{ .AssignedReadyQuery }}
+
+# Step 1c: If none, find routed pool work
+{{ .RoutedPoolQuery }}
+
+# Step 1d: If Step 1b or 1c returned a candidate, claim immediately.
+gc bd update <id> --claim
+
+# Step 2: Verify source-aware ownership before doing formula work.
+gc bd show <id> --json
+```
+
+For Step 1a/1b candidates, verify `assignee` matches one of
+`$GC_SESSION_ID`, `$GC_SESSION_NAME`, or `$GC_ALIAS`. Assigned work may have no
+`metadata.gc.routed_to`; do not reject it solely because route metadata is
+empty.
+
+For Step 1c candidates, verify `assignee` is `$GC_SESSION_NAME` and
+`metadata.gc.routed_to` is `$GC_TEMPLATE`. If either check fails, do not work
+that bead; run the work query again or `gc runtime drain-ack` if no valid work
+is available.
+
 ### Available Formulas
 
 | Formula | Purpose |
@@ -32,10 +72,10 @@ queued formula.
 
 Additional formulas available from included packs (e.g. dolt).
 
-If your wisp names a formula not listed above (one that an included
-pack provides, or one the daemon assigned), read its recipe with
-`gc bd formula show <formula-name>`. **Never** locate formula files
-with whole-filesystem searches (`find /`, `find ~`) — they trigger
+If your wisp names a formula, read its recipe with
+`gc bd formula show <formula-name> --json` and follow the step descriptions in
+order. **Never** locate formula files with whole-filesystem searches (`find /`,
+`find ~`) — they trigger
 macOS TCC permission prompts on protected directories (Documents,
 Desktop, Downloads, removable volumes, network mounts) and produce
 no useful signal a `gc` introspection command can't already provide.
@@ -118,11 +158,13 @@ gc session nudge {{"{{requester}}"}}/ "DOG_DONE: <target> — <outcome>"
 
 | Want to... | Correct command |
 |------------|----------------|
-| Read formula steps | `gc bd show <wisp-id>` (shows formula ref) |
-| Read formula recipe | `gc bd formula show <formula-name>` (NOT `find /`) |
-| Find pool work | `{{ .WorkQuery }}` |
-| Claim pool work | `gc bd update <id> --claim` |
-| View work details | `gc bd show <id> --json` |
+| Check existing claim | `{{ .AssignedInProgressQuery }}` |
+| Check assigned ready work | `{{ .AssignedReadyQuery }}` |
+| Read formula ref | `gc bd show <wisp-id>` |
+| Read formula recipe | `gc bd formula show <formula-name> --json` (NOT `find /`) |
+| Find pool work | `{{ .RoutedPoolQuery }}` |
+| Claim pool work before inspection | `gc bd update <id> --claim` |
+| Verify claimed work | `gc bd show <id> --json` |
 | Close completed work | `gc bd close <id> --reason "..."` |
 | Request target restart | `gc session kill <target>` |
 | List orphan databases | `gc dolt cleanup` |

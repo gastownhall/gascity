@@ -19,6 +19,23 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
+// shortSocketPath returns a unix-socket path under a short tmp dir (not
+// t.TempDir(), whose macOS /var/folders path overflows sun_path's 104-byte
+// limit). Registers cleanup.
+func shortSocketPath(t *testing.T, name string) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("/tmp", "cx")
+	if err != nil {
+		t.Fatalf("mkdtemp: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	p := filepath.Join(dir, name)
+	if len(p) >= 104 {
+		t.Fatalf("socket path too long for sun_path: %d >= 104: %s", len(p), p)
+	}
+	return p
+}
+
 func TestChaosProcessReexecKillAndRestart(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -26,7 +43,7 @@ func TestChaosProcessReexecKillAndRestart(t *testing.T) {
 	dir := t.TempDir()
 	process := coordstore.NewChaosProcess(coordstore.ChaosProcessConfig{
 		Backend:         "authorcore",
-		SocketPath:      filepath.Join(dir, "chaos.sock"),
+		SocketPath:      shortSocketPath(t, "chaos.sock"),
 		DataDir:         filepath.Join(dir, "store"),
 		AckedWritesPath: filepath.Join(dir, "acked-writes.jsonl"),
 	})
@@ -77,7 +94,7 @@ func TestChaosClientResetAckLedgerClearsSeedWrites(t *testing.T) {
 	dir := t.TempDir()
 	process := coordstore.NewChaosProcess(coordstore.ChaosProcessConfig{
 		Backend:    "authorcore",
-		SocketPath: filepath.Join(dir, "chaos.sock"),
+		SocketPath: shortSocketPath(t, "chaos.sock"),
 		DataDir:    filepath.Join(dir, "store"),
 	})
 	if err := process.Start(ctx); err != nil {

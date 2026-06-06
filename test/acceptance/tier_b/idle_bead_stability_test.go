@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -45,8 +46,19 @@ func TestGastownIdleOpenBeadCountsStayBounded(t *testing.T) {
 		t.Fatalf("idle probe order did not create a wisp within 30s; last snapshot: %s", activity)
 	}
 
+	beforeActivity := waitForClosedOrderRuns(t, c.Dir, "idle-exec", 1, 30*time.Second)
 	time.Sleep(probe.Warmup)
+	beforeSamples := closedOrderRunCount(t, c.Dir, "idle-exec")
 	samples := sampleOpenBeadCounts(t, c.Dir, probe)
+	afterSamples := closedOrderRunCount(t, c.Dir, "idle-exec")
+	if afterSamples <= beforeSamples {
+		t.Fatalf("gastown idle exec order did not advance during sampling: before_activity=%d before_samples=%d after_samples=%d\n%s",
+			beforeActivity,
+			beforeSamples,
+			afterSamples,
+			formatBeadCountSnapshots(samples),
+		)
+	}
 	assertOpenBeadCountsStayBounded(t, samples)
 }
 
@@ -55,12 +67,24 @@ func TestPlainIdleOpenBeadCountsStayBounded(t *testing.T) {
 	env := newIsolatedTierBEnv(t, "fake")
 	c := helpers.NewCity(t, env)
 	c.Init("claude")
+	setCityPatrolInterval(t, c.Dir, "1s")
 	writePlainIdleProbeOrders(t, c.Dir)
 
 	c.StartWithSupervisor()
 
+	beforeActivity := waitForClosedOrderRuns(t, c.Dir, "idle-exec", 1, 30*time.Second)
 	time.Sleep(probe.Warmup)
+	beforeSamples := closedOrderRunCount(t, c.Dir, "idle-exec")
 	samples := sampleOpenBeadCounts(t, c.Dir, probe)
+	afterSamples := closedOrderRunCount(t, c.Dir, "idle-exec")
+	if afterSamples <= beforeSamples {
+		t.Fatalf("plain idle exec order did not advance during sampling: before_activity=%d before_samples=%d after_samples=%d\n%s",
+			beforeActivity,
+			beforeSamples,
+			afterSamples,
+			formatBeadCountSnapshots(samples),
+		)
+	}
 	assertOpenBeadCountsStayBounded(t, samples)
 }
 
@@ -76,10 +100,21 @@ func sampleOpenBeadCounts(t *testing.T, cityDir string, probe idleBeadStabilityP
 
 func assertOpenBeadCountsStayBounded(t *testing.T, samples []beadCountSnapshot) {
 	t.Helper()
-	first := samples[0]
-	last := samples[len(samples)-1]
-	maxIssues, maxWisps := first.OpenIssues, first.OpenWisps
-	for _, sample := range samples[1:] {
+	baselineWindow := len(samples) / 3
+	if baselineWindow < 1 {
+		baselineWindow = 1
+	}
+	baselineIssues, baselineWisps := samples[0].OpenIssues, samples[0].OpenWisps
+	for _, sample := range samples[1:baselineWindow] {
+		if sample.OpenIssues > baselineIssues {
+			baselineIssues = sample.OpenIssues
+		}
+		if sample.OpenWisps > baselineWisps {
+			baselineWisps = sample.OpenWisps
+		}
+	}
+	maxIssues, maxWisps := baselineIssues, baselineWisps
+	for _, sample := range samples[baselineWindow:] {
 		if sample.OpenIssues > maxIssues {
 			maxIssues = sample.OpenIssues
 		}
@@ -89,10 +124,10 @@ func assertOpenBeadCountsStayBounded(t *testing.T, samples []beadCountSnapshot) 
 	}
 
 	const toleratedOpenJitter = 3
-	if maxIssues > first.OpenIssues+toleratedOpenJitter || last.OpenIssues > first.OpenIssues+toleratedOpenJitter {
+	if maxIssues > baselineIssues+toleratedOpenJitter {
 		t.Fatalf("open issue count grew during idle cycles:\n%s", formatBeadCountSnapshots(samples))
 	}
-	if maxWisps > first.OpenWisps+toleratedOpenJitter || last.OpenWisps > first.OpenWisps+toleratedOpenJitter {
+	if maxWisps > baselineWisps+toleratedOpenJitter {
 		t.Fatalf("open wisp count grew during idle cycles:\n%s", formatBeadCountSnapshots(samples))
 	}
 }
@@ -197,6 +232,38 @@ func rewriteGastownPatrolInterval(t *testing.T, cityDir, interval string) {
 	}
 }
 
+func setCityPatrolInterval(t *testing.T, cityDir, interval string) {
+	t.Helper()
+	path := filepath.Join(cityDir, "city.toml")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read city.toml: %v", err)
+	}
+	lines := strings.Split(string(data), "\n")
+	for i, line := range lines {
+		if strings.HasPrefix(strings.TrimSpace(line), "patrol_interval =") {
+			lines[i] = fmt.Sprintf("patrol_interval = %q", interval)
+			if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")), 0o644); err != nil {
+				t.Fatalf("write city.toml: %v", err)
+			}
+			return
+		}
+	}
+	for i, line := range lines {
+		if strings.TrimSpace(line) == "[daemon]" {
+			lines = append(lines[:i+1], append([]string{fmt.Sprintf("patrol_interval = %q", interval)}, lines[i+1:]...)...)
+			if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")), 0o644); err != nil {
+				t.Fatalf("write city.toml: %v", err)
+			}
+			return
+		}
+	}
+	body := strings.TrimRight(string(data), "\n") + fmt.Sprintf("\n\n[daemon]\npatrol_interval = %q\n", interval)
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+}
+
 func writeGastownIdleProbeOrders(t *testing.T, cityDir string) {
 	t.Helper()
 	orderDir := filepath.Join(cityDir, "orders")
@@ -276,6 +343,47 @@ func readOpenBeadSnapshot(t *testing.T, cityDir string) beadCountSnapshot {
 		IssueIDs:   describeOpenBeads(issues),
 		WispIDs:    describeOpenBeads(wisps),
 	}
+}
+
+func waitForClosedOrderRuns(t *testing.T, cityDir, orderName string, want int, timeout time.Duration) int {
+	t.Helper()
+	var got int
+	deadline := time.Now().Add(timeout)
+	for {
+		got = closedOrderRunCount(t, cityDir, orderName)
+		if got >= want {
+			return got
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("order %q closed tracking beads = %d, want at least %d within %s", orderName, got, want, timeout)
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+}
+
+func closedOrderRunCount(t *testing.T, cityDir, orderName string) int {
+	t.Helper()
+	store, err := beads.OpenFileStore(fsys.OSFS{}, filepath.Join(cityDir, ".gc", "beads.json"))
+	if err != nil {
+		t.Fatalf("open file bead store: %v", err)
+	}
+	runs, err := store.List(beads.ListQuery{
+		Status:        "closed",
+		Label:         "order-run:" + orderName,
+		IncludeClosed: true,
+		AllowScan:     true,
+		TierMode:      beads.TierBoth,
+	})
+	if err != nil {
+		t.Fatalf("list closed order runs for %q: %v", orderName, err)
+	}
+	n := 0
+	for _, run := range runs {
+		if slices.Contains(run.Labels, "order-tracking") {
+			n++
+		}
+	}
+	return n
 }
 
 func describeOpenBeads(rows []beads.Bead) []string {

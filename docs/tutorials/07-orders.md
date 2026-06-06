@@ -298,6 +298,37 @@ max_timeout = "120s"
 
 The effective timeout is the lesser of the per-order timeout and the global cap.
 
+## Order scope
+
+When a pack is imported into more than one rig, its orders are instantiated
+**once per rig** by default — the same way per-rig agents are. That's usually
+what you want for an order that acts on a single rig's work. But some orders are
+city-wide: a sweep or health probe that already iterates over every rig
+internally would then run redundantly, once per rig.
+
+Mark such an order city-scoped so it registers exactly once, no matter how many
+rigs import the pack:
+
+```toml
+[order]
+description = "Sweep merged convoys across the whole city"
+trigger = "cooldown"
+interval = "5m"
+exec = "scripts/convoy-sweep.sh"
+scope = "city"
+```
+
+`scope` accepts `"city"` or `"rig"`. The default (when omitted) is `"rig"`, so
+existing orders are unaffected. A `scope = "city"` order appears once in `gc
+order list` with no rig qualifier; rig-scoped orders appear once per importing
+rig. This mirrors the `scope` field on `[[named_session]]`.
+
+Use `scope = "city"` for orders that live in a **shared pack** imported by
+several rigs — that's where the per-rig duplication it collapses comes from. A
+city-scoped order keeps the formula layer of the pack it was scanned from, so
+its formula must resolve from that pack rather than from any one rig's local
+`orders/` directory.
+
 ## Disabling and skipping orders
 
 An order can be disabled in its own definition:

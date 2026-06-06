@@ -174,17 +174,11 @@ func runRalphCheck(store beads.Store, bead, subject beads.Bead, attempt int, opt
 		} else {
 			resolvedWorkDir = filepath.Clean(filepath.Join(storePath, workDir))
 		}
-		// work_dir flows from bead metadata, which can be populated via
-		// sling API vars (internal/api/handler_sling.go →
-		// internal/sling/sling.go → internal/molecule/molecule.go → bead
-		// metadata). cityPath and storePath are operator-controlled by the
-		// dispatcher; work_dir is the only path input on this hot path that
-		// originates outside that surface. Require it to stay inside the
-		// city OR store roots so the OR-containment relaxation in
-		// convergence.ResolveConditionPath (gastownhall/gascity#2354) cannot
-		// be weaponised by a caller-supplied work_dir that escapes both
-		// operator-controlled trees.
-		if !pathutil.PathWithin(cityPath, resolvedWorkDir) && !pathutil.PathWithin(storePath, resolvedWorkDir) {
+		// work_dir is inherited from bead metadata. For relative check paths
+		// it becomes the script resolution base, so it must remain under an
+		// operator-controlled tree. Absolute check paths are validated against
+		// trusted roots below; for those, work_dir is only the process cwd.
+		if !filepath.IsAbs(checkPath) && !pathutil.PathWithin(cityPath, resolvedWorkDir) && !pathutil.PathWithin(storePath, resolvedWorkDir) {
 			return convergence.GateResult{}, fmt.Errorf("%s: work_dir %q escapes both city and store roots", bead.ID, workDir)
 		}
 	}
@@ -396,7 +390,7 @@ func appendRalphRetry(store beads.Store, logicalID string, prevSubject, prevChec
 	}
 	cfg := loadAttemptRouteConfig(opts.CityPath)
 	if molecule.IsGraphApplyEnabled() {
-		if applier, ok := store.(beads.GraphApplyStore); ok {
+		if applier, ok := beads.GraphApplyFor(store); ok {
 			return appendRalphRetryViaGraphApply(store, applier, logicalID, prevSubject, prevCheck, attemptSet, oldAttempt, nextAttempt, oldScopeRef, newScopeRef, cfg, opts)
 		}
 	}

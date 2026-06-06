@@ -45,6 +45,9 @@ refinery. Resume the existing branch — don't redo all the work.
 formula = "mol-polecat-work"
 extends = ["mol-polecat-base"]
 
+[requires]
+formula_compiler = ">=2.0.0"
+
 [vars]
 [vars.binding_prefix]
 description = "Import binding prefix for gastown agent identities, including trailing dot when bound."
@@ -70,16 +73,23 @@ Every check is idempotent — safe to re-run after crash/restart.
 2. `metadata.target` on the parent convoy chain
 3. the rig repo's default branch
 
-**1. Fetch latest:**
+**1. Fetch latest and derive your work bead:**
 ```bash
 git fetch --prune origin
+CONVOY_STATUS=$(gc convoy status {{convoy_id}} --json)
+WORK_BEAD_ID=$(printf '%s' "$CONVOY_STATUS" | jq -r 'if (.children | length) == 1 then .children[0].id else empty end')
+if [ -z "$WORK_BEAD_ID" ]; then
+  echo "mol-polecat-work requires an input convoy with exactly one tracked member" >&2
+  gc runtime drain-ack
+  exit 1
+fi
 ```
 
 **2. Ensure worktree exists.**
 
 Check if `metadata.work_dir` already records your worktree path:
 ```bash
-WORKTREE=$(gc bd show {{issue}} --json | jq -r '.[0].metadata.work_dir // empty')
+WORKTREE=$(gc bd show "$WORK_BEAD_ID" --json | jq -r '.[0].metadata.work_dir // empty')
 ```
 
 **If worktree path exists in metadata** — reuse it:
@@ -91,13 +101,13 @@ to create a new one.
 
 **If no worktree** — create one scoped to the bead, not the agent:
 ```bash
-WORKTREE_PATH=$(pwd)/worktrees/{{issue}}
+WORKTREE_PATH=$(pwd)/worktrees/"$WORK_BEAD_ID"
 git worktree add "$WORKTREE_PATH" --detach origin/{{base_branch}}
 cd "$WORKTREE_PATH"
 ```
 Record immediately so restarts and witness recovery can find it:
 ```bash
-gc bd update {{issue}} --set-metadata work_dir="$WORKTREE_PATH"
+gc bd update "$WORK_BEAD_ID" --set-metadata work_dir="$WORKTREE_PATH"
 ```
 
 Worktrees are scoped to the work bead (not the agent name) so that:
@@ -109,7 +119,7 @@ Worktrees are scoped to the work bead (not the agent name) so that:
 
 Check if `metadata.branch` already records a branch:
 ```bash
-BRANCH=$(gc bd show {{issue}} --json | jq -r '.[0].metadata.branch // empty')
+BRANCH=$(gc bd show "$WORK_BEAD_ID" --json | jq -r '.[0].metadata.branch // empty')
 ```
 
 **If branch exists in metadata** — treat it as authoritative. This
@@ -143,12 +153,12 @@ fi
 ```
 If resuming a rejected branch, rebase onto latest base:
 ```bash
-REJECTION=$(gc bd show {{issue}} --json | jq -r '.[0].metadata.rejection_reason // empty')
+REJECTION=$(gc bd show "$WORK_BEAD_ID" --json | jq -r '.[0].metadata.rejection_reason // empty')
 if [ -n "$REJECTION" ]; then
     git rebase origin/{{base_branch}}
     # If conflicts: resolve them (this is likely the rejection reason)
     # After resolving: git rebase --continue
-    gc bd update {{issue}} --unset-metadata rejection_reason
+    gc bd update "$WORK_BEAD_ID" --unset-metadata rejection_reason
 fi
 ```
 
@@ -162,10 +172,10 @@ refinery rebase to reject for spurious "duplicate" conflicts.
 
 ```bash
 git fetch origin {{base_branch}}                     # ensure origin ref is current
-BRANCH="polecat/{{issue}}"
+BRANCH="polecat/$WORK_BEAD_ID"
 git branch -D "$BRANCH" 2>/dev/null || true          # drop any stale local branch with the same name
 git checkout -B "$BRANCH" "origin/{{base_branch}}"   # force-create from the freshly-fetched remote tip
-gc bd update {{issue}} --set-metadata branch="$BRANCH"
+gc bd update "$WORK_BEAD_ID" --set-metadata branch="$BRANCH"
 ```
 
 Recording the branch early means:
@@ -256,8 +266,10 @@ If uncommitted changes exist, commit them with a body explaining what
 slipped through the `implement` step (typically a self-review touch-up,
 test addition, or formatter run):
 ```bash
+CONVOY_STATUS=$(gc convoy status {{convoy_id}} --json)
+WORK_BEAD_ID=$(printf '%s' "$CONVOY_STATUS" | jq -r 'if (.children | length) == 1 then .children[0].id else empty end')
 git add -A
-git commit -m "<type>: <imperative subject> ({{issue}})" -m "$(cat <<'BODY'
+git commit -m "<type>: <imperative subject> ($WORK_BEAD_ID)" -m "$(cat <<'BODY'
 <Explain what these residual changes are: a self-review fix,
 test-only addition, formatter run, etc. Be specific.>
 BODY
@@ -286,8 +298,10 @@ handoff contract is broken and the bead is permanently stranded as
 "assigned to refinery, no merge target". See gastownhall/gascity#2082.
 
 ```bash
+CONVOY_STATUS=$(gc convoy status {{convoy_id}} --json)
+WORK_BEAD_ID=$(printf '%s' "$CONVOY_STATUS" | jq -r 'if (.children | length) == 1 then .children[0].id else empty end')
 CURRENT_BRANCH=$(git branch --show-current)
-EXPECTED_BRANCH="polecat/{{issue}}"
+EXPECTED_BRANCH="polecat/$WORK_BEAD_ID"
 if [ "$CURRENT_BRANCH" != "$EXPECTED_BRANCH" ]; then
     echo "BRANCH SHAPE GATE FAILED"
     echo "  current branch:  $CURRENT_BRANCH"
@@ -297,7 +311,7 @@ if [ "$CURRENT_BRANCH" != "$EXPECTED_BRANCH" ]; then
     echo "Pushing this commit and reassigning to refinery would strand the work."
     echo ""
     echo "Recover by re-running the workspace-setup step:"
-    echo "  - Create the per-bead worktree at \\$(pwd)/worktrees/{{issue}}"
+    echo "  - Create the per-bead worktree at \\$(pwd)/worktrees/$WORK_BEAD_ID"
     echo "  - Create branch '$EXPECTED_BRANCH' from origin/{{base_branch}}"
     echo "  - Cherry-pick your commits from $CURRENT_BRANCH onto the new branch"
     echo "  - Re-run submit-and-exit"
@@ -312,9 +326,9 @@ Also confirm `metadata.branch` reflects this branch (workspace-setup
 recorded it, but a divergent local state would be invisible to the
 refinery without this re-check):
 ```bash
-METADATA_BRANCH=$(gc bd show {{issue}} --json | jq -r '.[0].metadata.branch // empty')
+METADATA_BRANCH=$(gc bd show "$WORK_BEAD_ID" --json | jq -r '.[0].metadata.branch // empty')
 if [ "$METADATA_BRANCH" != "$EXPECTED_BRANCH" ]; then
-    gc bd update {{issue}} --set-metadata branch="$EXPECTED_BRANCH"
+    gc bd update "$WORK_BEAD_ID" --set-metadata branch="$EXPECTED_BRANCH"
 fi
 ```
 
@@ -325,7 +339,7 @@ git status --porcelain
 If ANY output (untracked files, uncommitted changes):
 ```bash
 git add -A
-git commit -m "chore: capture remaining work ({{issue}})" -m "$(cat <<'BODY'
+git commit -m "chore: capture remaining work ($WORK_BEAD_ID)" -m "$(cat <<'BODY'
 <Explain the remaining changes discovered by final clean-state
 verification and why they are safe to hand off.>
 BODY
@@ -336,11 +350,11 @@ but we never push with untracked work left behind.
 
 **3. Push your branch:**
 ```bash
-AUTO_PUSH=$(gc bd show {{issue}} --json | jq -r '.[0].metadata | if has("auto_push") then (.auto_push | tostring) else "" end')
+AUTO_PUSH=$(gc bd show "$WORK_BEAD_ID" --json | jq -r '.[0].metadata | if has("auto_push") then (.auto_push | tostring) else "" end')
 if [ "$AUTO_PUSH" = "false" ]; then
   echo "auto_push=false: halting at branch-ready (no push, no refinery handoff)"
   BRANCH=$(git branch --show-current)
-  gc bd update {{issue}} \
+  gc bd update "$WORK_BEAD_ID" \
     --status=open --assignee="" \
     --set-metadata branch="$BRANCH" \
     --set-metadata target={{base_branch}} \
@@ -363,7 +377,7 @@ git branch -D "$BRANCH"              # Branch is pushed; refinery owns it now
 
 **5. Update metadata on the work bead:**
 ```bash
-gc bd update {{issue}} \
+gc bd update "$WORK_BEAD_ID" \
   --set-metadata target={{base_branch}} \
   --notes "Implemented: <brief summary>"
 ```
@@ -376,7 +390,7 @@ the PR is open and matches the branch, base, and origin repository.
 **6. Reassign to refinery:**
 ```bash
 REFINERY_TARGET="${GC_RIG:+$GC_RIG/}{{binding_prefix}}refinery"
-gc bd update {{issue}} --status=open --assignee="$REFINERY_TARGET" --set-metadata gc.routed_to=""
+gc bd update "$WORK_BEAD_ID" --status=open --assignee="$REFINERY_TARGET" --set-metadata gc.routed_to=""
 ```
 
 `${GC_RIG:+$GC_RIG/}{{binding_prefix}}refinery` resolves to

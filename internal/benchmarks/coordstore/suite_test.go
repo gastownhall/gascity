@@ -424,13 +424,38 @@ func soakConfigFromEnv(t *testing.T, defaultDuration time.Duration) coordstore.S
 		}
 		chaosDuration = parsed
 	}
+
+	// RSS ceiling: default 8 GiB; override with COORDSTORE_SOAK_MAX_RSS_BYTES.
+	const defaultMaxRSSBytes = 8 * 1024 * 1024 * 1024 // 8 GiB
+	maxRSSBytes := uint64(defaultMaxRSSBytes)
+	if raw := os.Getenv("COORDSTORE_SOAK_MAX_RSS_BYTES"); raw != "" {
+		parsed, err := strconv.ParseUint(raw, 10, 64)
+		if err != nil {
+			t.Fatalf("invalid COORDSTORE_SOAK_MAX_RSS_BYTES %q: %v", raw, err)
+		}
+		maxRSSBytes = parsed
+	}
+
+	// Growth-rate ceiling: default 50 MiB/s; override with COORDSTORE_SOAK_MAX_RSS_GROWTH_BYTES_PER_SEC.
+	const defaultMaxRSSGrowthBytesPerSec = 50 * 1024 * 1024 // 50 MiB/s
+	maxRSSGrowthBytesPerSec := uint64(defaultMaxRSSGrowthBytesPerSec)
+	if raw := os.Getenv("COORDSTORE_SOAK_MAX_RSS_GROWTH_BYTES_PER_SEC"); raw != "" {
+		parsed, err := strconv.ParseUint(raw, 10, 64)
+		if err != nil {
+			t.Fatalf("invalid COORDSTORE_SOAK_MAX_RSS_GROWTH_BYTES_PER_SEC %q: %v", raw, err)
+		}
+		maxRSSGrowthBytesPerSec = parsed
+	}
+
 	return coordstore.SoakConfig{
-		SoakPhase:      coordstore.SoakPhaseA,
-		SoakDuration:   duration,
-		ChaosDuration:  chaosDuration,
-		SampleInterval: sampleInterval,
-		ResultsDir:     resultsDir,
-		ScaleFactor:    scale,
+		SoakPhase:               coordstore.SoakPhaseA,
+		SoakDuration:            duration,
+		ChaosDuration:           chaosDuration,
+		SampleInterval:          sampleInterval,
+		ResultsDir:              resultsDir,
+		ScaleFactor:             scale,
+		MaxRSSBytes:             maxRSSBytes,
+		MaxRSSGrowthBytesPerSec: maxRSSGrowthBytesPerSec,
 	}
 }
 

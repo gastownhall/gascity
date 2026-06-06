@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -29,6 +30,7 @@ func newFormulaCmd(stdout, stderr io.Writer) *cobra.Command {
 	cmd.AddCommand(newFormulaShowCmd(stdout, stderr))
 	cmd.AddCommand(newFormulaCatalogCmd(stdout, stderr))
 	cmd.AddCommand(newFormulaCookCmd(stdout, stderr))
+	cmd.AddCommand(newFormulaVersionCheckCmd(stdout, stderr))
 	return cmd
 }
 
@@ -497,6 +499,14 @@ func formulaSearchPathsForList(cfg *config.City) []string {
 	return all
 }
 
+// printGraphV2Deprecations surfaces deprecated graph.v2 constructs (the legacy
+// issue alias, #2941) found while preparing an invocation.
+func printGraphV2Deprecations(stderr io.Writer, deprecations []string) {
+	for _, d := range deprecations {
+		fmt.Fprintf(stderr, "warning: %s\n", d) //nolint:errcheck
+	}
+}
+
 func formulaCommandError(stderr io.Writer, command string, jsonOutput bool, err error) error {
 	if err == nil || jsonOutput {
 		return err
@@ -633,6 +643,7 @@ bead into a sub-workflow at runtime.`,
 						if err != nil {
 							return fmt.Errorf("prepare graph.v2 invocation: %w", err)
 						}
+						printGraphV2Deprecations(stderr, inv.Deprecations)
 						cookVars = inv.Vars
 						recipe, err := formula.CompileWithoutRuntimeVarValidation(cmd.Context(), args[0], scope.searchPaths, cookVars)
 						if err != nil {
@@ -725,6 +736,7 @@ bead into a sub-workflow at runtime.`,
 				if err != nil {
 					return formulaCommandError(stderr, "gc formula cook", jsonOutput, fmt.Errorf("prepare graph.v2 invocation: %w", err))
 				}
+				printGraphV2Deprecations(stderr, inv.Deprecations)
 				cookVars = inv.Vars
 				recipe, err := formula.CompileWithoutRuntimeVarValidation(cmd.Context(), args[0], scope.searchPaths, cookVars)
 				if err != nil {
@@ -773,6 +785,7 @@ bead into a sub-workflow at runtime.`,
 			if err != nil {
 				return formulaCommandError(stderr, "gc formula cook", jsonOutput, fmt.Errorf("prepare graph.v2 invocation: %w", err))
 			}
+			printGraphV2Deprecations(stderr, inv.Deprecations)
 			cookVars = inv.Vars
 
 			result, err := molecule.Cook(cmd.Context(), store, args[0], scope.searchPaths, molecule.Options{
@@ -1072,4 +1085,112 @@ func rigFormulaVarsForScope(cfg *config.City, cityPath string) map[string]string
 		}
 	}
 	return map[string]string{}
+}
+
+// formulaVersionCheckResult holds the output for --json mode.
+type formulaVersionCheckResult struct {
+	BeadID      string `json:"bead_id"`
+	FormulaName string `json:"formula_name"`
+	BeadHash    string `json:"bead_hash"`
+	DiskHash    string `json:"disk_hash"`
+	Match       bool   `json:"match"`
+	FormulaPath string `json:"formula_path,omitempty"`
+}
+
+func newFormulaVersionCheckCmd(stdout, stderr io.Writer) *cobra.Command {
+	var jsonOutput bool
+	cmd := &cobra.Command{
+		Use:   "version-check <bead-id>",
+		Short: "Check if a bead's formula matches the current on-disk version",
+		Long: `Compare the formula content hash stored on a molecule/workflow bead
+against the current on-disk formula file. Exits 0 if they match, 1 if
+they diverge.
+
+The bead must have gc.formula_hash metadata (set during instantiation).
+The formula is located via the bead's Ref field and the current formula
+search paths.
+
+Use this to detect whether a running session's formula has been updated
+since it was spawned.`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			beadID := args[0]
+
+			cityPath, err := resolveCity()
+			if err != nil {
+				return err
+			}
+			cfg, err := loadCityConfig(cityPath, stderr)
+			if err != nil {
+				return err
+			}
+			scope, err := resolveFormulaScope(cfg, cityPath)
+			if err != nil {
+				return err
+			}
+
+			store, err := openStoreAtForCity(scope.storeRoot, cityPath)
+			if err != nil {
+				return err
+			}
+
+			bead, err := store.Get(beadID)
+			if err != nil {
+				return fmt.Errorf("reading bead %s: %w", beadID, err)
+			}
+
+			beadHash := bead.Metadata["gc.formula_hash"]
+			if beadHash == "" {
+				return fmt.Errorf("bead %s has no gc.formula_hash metadata (created before hash tracking)", beadID)
+			}
+
+			formulaName := bead.Ref
+			if formulaName == "" {
+				return fmt.Errorf("bead %s has no Ref (formula name)", beadID)
+			}
+
+			recipe, err := formula.Compile(cmd.Context(), formulaName, scope.searchPaths, nil)
+			if err != nil {
+				return fmt.Errorf("compiling formula %q from disk: %w", formulaName, err)
+			}
+
+			diskHash := recipe.ContentHash
+			match := beadHash == diskHash
+
+			result := formulaVersionCheckResult{
+				BeadID:      beadID,
+				FormulaName: formulaName,
+				BeadHash:    beadHash,
+				DiskHash:    diskHash,
+				Match:       match,
+				FormulaPath: recipe.FormulaSource,
+			}
+
+			switch {
+			case jsonOutput:
+				enc := json.NewEncoder(stdout)
+				enc.SetIndent("", "  ")
+				if err := enc.Encode(result); err != nil {
+					return err
+				}
+			case match:
+				_, _ = fmt.Fprintf(stdout, "✓ formula %s: bead %s matches on-disk version (hash %s)\n", formulaName, beadID, beadHash[:12])
+			default:
+				_, _ = fmt.Fprintf(stdout, "✗ formula %s: bead %s DIVERGES from on-disk version\n", formulaName, beadID)
+				_, _ = fmt.Fprintf(stdout, "  bead hash: %s\n", beadHash)
+				_, _ = fmt.Fprintf(stdout, "  disk hash: %s\n", diskHash)
+				if result.FormulaPath != "" {
+					_, _ = fmt.Fprintf(stdout, "  formula path: %s\n", result.FormulaPath)
+				}
+			}
+
+			if !match {
+				return errExit
+			}
+			return nil
+		},
+	}
+
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "output result as JSON")
+	return cmd
 }

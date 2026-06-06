@@ -84,6 +84,15 @@ type Server struct {
 	storeHealthExpires  time.Time
 	storeHealthComputer func() *StatusStoreHealth
 
+	// componentVersions caches the dolt engine and bd CLI versions the
+	// supervisor drives for /v0/status. Binary versions are immutable for
+	// the process lifetime, so they are resolved once on first read.
+	// componentVersionsProbe overrides the real subprocess probe in tests;
+	// nil uses the PATH-resolved binaries.
+	componentVersionsOnce  sync.Once
+	componentVersionsValue componentVersions
+	componentVersionsProbe func() componentVersions
+
 	// LookPathFunc can be overridden in tests. Defaults to exec.LookPath.
 	LookPathFunc func(string) (string, error)
 
@@ -273,6 +282,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	sm := NewSupervisorMux(&singleStateResolver{state: s.state}, nil, s.readOnly, "test", "", time.Now())
+	sm.WithAnyHostAllowed()
 	sm.cacheMu.Lock()
 	sm.cache[s.state.CityName()] = cachedCityServer{state: s.state, srv: s}
 	sm.cacheMu.Unlock()

@@ -25,6 +25,57 @@ func setupReconciler(t *testing.T) (*Reconciler, *fakeStore, *fakeEmitter) {
 	return &Reconciler{Handler: handler}, store, emitter
 }
 
+// --- Path 3t: waiting_trigger ---
+
+func TestReconcile_WaitingTrigger_NoAction(t *testing.T) {
+	rec, store, _ := setupReconciler(t)
+	store.addBead("root-1", "in_progress", "", "", map[string]string{
+		FieldState:            StateWaitingTrigger,
+		FieldFormula:          "test-formula",
+		FieldMaxIterations:    "5",
+		FieldTarget:           "test-agent",
+		FieldTrigger:          TriggerEvent,
+		FieldTriggerCondition: "/scripts/check",
+	})
+
+	report, err := rec.ReconcileBeads(context.Background(), []string{"root-1"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(report.Details) != 1 || report.Details[0].Action != "no_action" {
+		t.Errorf("action = %+v, want no_action", report.Details)
+	}
+	// State must be preserved so the tick re-evaluates the trigger.
+	meta, _ := store.GetMetadata("root-1")
+	if meta[FieldState] != StateWaitingTrigger {
+		t.Errorf("state = %q, want %q", meta[FieldState], StateWaitingTrigger)
+	}
+}
+
+func TestReconcile_WaitingTrigger_CompletesInterruptedStop(t *testing.T) {
+	rec, store, _ := setupReconciler(t)
+	store.addBead("root-1", "in_progress", "", "", map[string]string{
+		FieldState:          StateWaitingTrigger,
+		FieldFormula:        "test-formula",
+		FieldMaxIterations:  "5",
+		FieldTarget:         "test-agent",
+		FieldTrigger:        TriggerEvent,
+		FieldTerminalReason: TerminalStopped,
+	})
+
+	report, err := rec.ReconcileBeads(context.Background(), []string{"root-1"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(report.Details) != 1 || report.Details[0].Action != "completed_terminal" {
+		t.Errorf("action = %+v, want completed_terminal", report.Details)
+	}
+	info, _ := store.GetBead("root-1")
+	if info.Status != "closed" {
+		t.Errorf("status = %q, want closed", info.Status)
+	}
+}
+
 // --- Path 1: Missing state ---
 
 func TestReconcile_MissingState_NoWisps_PoursFirst(t *testing.T) {

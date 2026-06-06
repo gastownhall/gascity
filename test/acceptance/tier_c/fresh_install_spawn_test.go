@@ -74,7 +74,7 @@ func runFreshInitSlingClaudeWork(t *testing.T, prompt, outputRel string) freshIn
 
 	c := helpers.NewCity(t, testEnvC)
 	c.Init("claude")
-	applyTierCAcceptanceConfig(c)
+	applyTierCAcceptanceConfig(t, c)
 	// The built-in maintenance dog pool is auto-included; this fixture needs
 	// a generic claude pool target for mol-do-work.
 	configureFreshInitClaudePool(t, c)

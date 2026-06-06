@@ -11,8 +11,8 @@ import (
 // sweep never reaps — the host's real agent processes.
 var scanRoot = "/proc"
 
-// liveScanRoot returns the procfs root to scan, or an error when a `go test`
-// run would scan the live "/proc" without injecting a fake root first.
+// liveScanGuard returns an error when a `go test` run would scan the live
+// "/proc" without injecting a fake root first.
 //
 // Why this guard exists (gastownhall/gascity#2839): the process-table scanner
 // reads the real /proc, and the orphan sweep SIGTERMs any runtime that is not
@@ -23,12 +23,12 @@ var scanRoot = "/proc"
 // fires on a machine running a real fleet. Refusing the live scan under test
 // closes that hole; a test that genuinely needs the scanner must inject a fake
 // procfs via SetScanRootForTesting.
-func liveScanRoot() (string, error) {
+func liveScanGuard() error {
 	if scanRoot == "/proc" && testing.Testing() {
-		return "", fmt.Errorf("proctable: refusing to scan the live /proc under go test; " +
+		return fmt.Errorf("proctable: refusing to scan the live /proc under go test; " +
 			"inject a fake procfs root with SetScanRootForTesting (guards against reaping real agent runtimes — see gastownhall/gascity#2839)")
 	}
-	return scanRoot, nil
+	return nil
 }
 
 // SetScanRootForTesting overrides the procfs root used by ScanBySessionID and

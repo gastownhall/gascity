@@ -78,17 +78,16 @@ $ gc session peek mc-8sfd
   Run `gc prime` to initialize your context.
 
   # Code Reviewer Agent
-  You are an agent in a Gas City workspace. Check for available work and
-  execute it.
+  You are an agent in a Gas City workspace. Claim available work and execute it.
 
   ## Your tools
-  - `bd ready` — see available work items
+  - `gc hook --claim --json` — find and atomically claim one work item
   - `bd show <id>` — see details of a work item
   - `bd close <id>` — mark work as done
 
   ## How to work
-  1. Check for available work: `bd ready`
-  2. Pick a bead and execute the work described in its title
+  1. Claim work: `gc hook --claim --json`
+  2. Read the claimed bead and execute the work described in its title
   3. When done, close it: `bd close <id>`
   4. Check for more work. Repeat until the queue is empty.
 
@@ -97,14 +96,14 @@ $ gc session peek mc-8sfd
 
 ... # content elided
 
-• Ran bd ready --json
+• Ran gc hook --claim --json
   └ warning: beads.role not configured (GH#2950).
       Fix: git config beads.role maintainer
     … +282 lines
       }
     ]
 
-• The ready queue has one task that is explicitly routed to the reviewer agent:
+• The hook claimed one task that is explicitly routed to the reviewer agent:
   mp-p956, “Review hello.py and write review.md with feedback.” I’m pulling the
   bead details and the target file now, then I’ll write the review and close
   that item.

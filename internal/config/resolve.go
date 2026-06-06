@@ -23,9 +23,9 @@ type LookPathFunc func(string) (string, error)
 //
 // Resolution chain:
 //  1. agent.StartCommand set? Escape hatch → ResolvedProvider{Command: startCommand}
-//  2. Determine provider name: agent.Provider > workspace.Provider > auto-detect
+//  2. Determine provider name: agent.Provider > workspace.Provider
 //     (workspace.StartCommand is escape hatch if no provider name found)
-//  3. Look up ProviderSpec: cityProviders[name] > BuiltinProviders()[name]
+//  3. Look up ProviderSpec from the explicit city provider catalog
 //     (verify binary exists in PATH via lookPath)
 //  4. Merge agent-level overrides: non-zero agent fields replace base spec fields
 //     (env merges additively — agent env adds to/overrides base env)
@@ -73,12 +73,10 @@ func ResolveProvider(agent *Agent, ws *Workspace, cityProviders map[string]Provi
 		if ws != nil && ws.StartCommand != "" {
 			return &ResolvedProvider{Command: ws.StartCommand, PromptMode: "none"}, nil
 		}
-		// Auto-detect: scan PATH for known binaries.
-		detected, err := detectProviderName(lookPath)
-		if err != nil {
-			return nil, err
-		}
-		name = detected
+		return nil, fmt.Errorf("%w: provider is required; set agent.provider or workspace.provider to a key in [providers]", ErrProviderNotFound)
+	}
+	if _, ok := cityProviders[name]; !ok {
+		return nil, fmt.Errorf("%w: provider %q is not in the explicit provider catalog", ErrProviderNotFound, name)
 	}
 
 	// Step 3: look up the ProviderSpec.
@@ -188,6 +186,11 @@ func lookupProvider(name string, cityProviders map[string]ProviderSpec, lookPath
 					return nil, err
 				}
 				merged := resolvedChainToSpec(resolved, spec)
+				if merged.Command != "" {
+					if _, err := lookPath(merged.pathCheckBinary()); err != nil {
+						return nil, fmt.Errorf("%w: provider %q command %q", ErrProviderNotInPATH, name, merged.pathCheckBinary())
+					}
+				}
 				return &merged, nil
 			}
 			// Phase A legacy: layer city overrides on top of the built-in

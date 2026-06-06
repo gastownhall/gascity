@@ -118,12 +118,13 @@ type HandlerAction string
 
 // HandlerAction values describing the outcome of wisp_closed processing.
 const (
-	ActionIterate       HandlerAction = "iterate"
-	ActionApproved      HandlerAction = "approved"
-	ActionNoConvergence HandlerAction = "no_convergence"
-	ActionWaitingManual HandlerAction = "waiting_manual"
-	ActionStopped       HandlerAction = "stopped"
-	ActionSkipped       HandlerAction = "skipped"
+	ActionIterate        HandlerAction = "iterate"
+	ActionApproved       HandlerAction = "approved"
+	ActionNoConvergence  HandlerAction = "no_convergence"
+	ActionWaitingManual  HandlerAction = "waiting_manual"
+	ActionWaitingTrigger HandlerAction = "waiting_trigger"
+	ActionStopped        HandlerAction = "stopped"
+	ActionSkipped        HandlerAction = "skipped"
 )
 
 // HandlerResult holds the outcome of HandleWispClosed.
@@ -221,6 +222,11 @@ func (h *Handler) HandleWispClosed(ctx context.Context, rootBeadID, wispID strin
 		return HandlerResult{}, fmt.Errorf("parsing gate config: %w", err)
 	}
 
+	triggerConfig, err := ParseTriggerConfig(meta)
+	if err != nil {
+		return HandlerResult{}, fmt.Errorf("parsing trigger config: %w", err)
+	}
+
 	nextIteration := wispIteration + 1
 	nextKey := IdempotencyKey(rootBeadID, nextIteration)
 
@@ -242,7 +248,10 @@ func (h *Handler) HandleWispClosed(ctx context.Context, rootBeadID, wispID strin
 	var speculativePourErr error
 	needsManualWithoutGate := gateConfig.Mode == GateModeManual ||
 		(gateConfig.Mode == GateModeHybrid && HybridNeedsManual(gateConfig))
-	if wispIteration < maxIterations && !needsManualWithoutGate && speculativeWispID == "" {
+	// A trigger-gated loop defers the next pour to HandleTrigger, so no
+	// speculative successor wisp is created here.
+	skipSpeculativePour := needsManualWithoutGate || triggerConfig.Enabled()
+	if wispIteration < maxIterations && !skipSpeculativePour && speculativeWispID == "" {
 		formula := meta[FieldFormula]
 		vars := ExtractVars(meta)
 		evaluatePrompt := meta[FieldEvaluatePrompt]
@@ -362,6 +371,11 @@ func (h *Handler) HandleWispClosed(ctx context.Context, rootBeadID, wispID strin
 		if speculativePourErr != nil {
 			return h.handleSlingFailure(rootBeadID, wispID, wispIteration,
 				gateConfig, gateResult, meta, now)
+		}
+		// Iteration gate: a trigger-gated loop holds in waiting_trigger until
+		// the trigger condition passes, rather than pouring the next wisp now.
+		if triggerConfig.Enabled() {
+			return h.transitionToWaitingTrigger(rootBeadID, wispID, wispIteration, gateConfig, gateResult, meta)
 		}
 		// Iterate: clear verdict and use speculatively poured wisp.
 		return h.iterate(ctx, rootBeadID, wispID, wispIteration, gateConfig, gateResult, meta, now, speculativeWispID)
@@ -555,6 +569,68 @@ func (h *Handler) iterate(
 		Iteration:   iteration,
 		GateOutcome: gateOutcome,
 		NextWispID:  nextWispID,
+	}, nil
+}
+
+// transitionToWaitingTrigger holds a trigger-gated loop after a non-terminal
+// gate outcome. The gate has already decided to iterate; the loop now waits in
+// waiting_trigger until HandleTrigger observes the trigger condition pass and
+// pours the next wisp. No successor wisp is poured here (the speculative pour
+// was skipped for trigger-gated loops).
+func (h *Handler) transitionToWaitingTrigger(
+	rootBeadID, wispID string,
+	iteration int,
+	gateConfig GateConfig,
+	gateResult GateResult,
+	meta map[string]string,
+) (HandlerResult, error) {
+	// Clear the verdict consumed by this iteration's gate so it cannot leak
+	// into the next wisp (which HandleTrigger pours fresh).
+	if meta[FieldAgentVerdictWisp] == wispID {
+		if err := h.Store.SetMetadata(rootBeadID, FieldAgentVerdict, ""); err != nil {
+			return HandlerResult{}, fmt.Errorf("clearing agent verdict: %w", err)
+		}
+		if err := h.Store.SetMetadata(rootBeadID, FieldAgentVerdictWisp, ""); err != nil {
+			return HandlerResult{}, fmt.Errorf("clearing agent verdict wisp: %w", err)
+		}
+	}
+
+	iterDur, cumDur := h.computeDurations(rootBeadID, wispID)
+	verdict := ""
+	if meta[FieldAgentVerdictWisp] == wispID {
+		verdict = NormalizeVerdict(meta[FieldAgentVerdict])
+	}
+
+	// Step 8: Emit ConvergenceIteration event recording the hold.
+	iterPayload := IterationPayload{
+		Iteration:            iteration,
+		WispID:               wispID,
+		AgentVerdict:         verdict,
+		GateMode:             gateConfig.Mode,
+		GateOutcome:          NullableString(gateResult.Outcome),
+		GateResult:           GateResultToPayload(gateResult),
+		GateRetryCount:       gateResult.RetryCount,
+		Action:               string(ActionWaitingTrigger),
+		IterationDurationMs:  iterDur.Milliseconds(),
+		CumulativeDurationMs: cumDur.Milliseconds(),
+	}
+	h.emitEvent(EventIteration, EventIDIteration(rootBeadID, iteration), rootBeadID, iterPayload)
+
+	// Step 9: Commit point. Write last_processed_wisp LAST (dedup marker).
+	if err := h.Store.SetMetadata(rootBeadID, FieldActiveWisp, ""); err != nil {
+		return HandlerResult{}, fmt.Errorf("clearing active wisp: %w", err)
+	}
+	if err := h.Store.SetMetadata(rootBeadID, FieldState, StateWaitingTrigger); err != nil {
+		return HandlerResult{}, fmt.Errorf("setting state to waiting_trigger: %w", err)
+	}
+	if err := h.Store.SetMetadata(rootBeadID, FieldLastProcessedWisp, wispID); err != nil {
+		return HandlerResult{}, fmt.Errorf("setting last processed wisp: %w", err)
+	}
+
+	return HandlerResult{
+		Action:      ActionWaitingTrigger,
+		Iteration:   iteration,
+		GateOutcome: gateResult.Outcome,
 	}, nil
 }
 

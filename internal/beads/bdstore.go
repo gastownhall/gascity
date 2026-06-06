@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/telemetry"
@@ -218,6 +219,9 @@ type BdStore struct {
 	runner      CommandRunner   // injectable for testing
 	purgeRunner PurgeRunnerFunc // injectable for testing; nil uses exec default
 	idPrefix    string          // bead ID prefix owned by this store, without trailing "-"
+
+	skipLabelsOnce      sync.Once // guards the one-time bd version probe below
+	skipLabelsSupported bool      // whether bd accepts `bd list --skip-labels` (bd 1.0.5+)
 }
 
 const bdTransientWriteAttempts = 3
@@ -464,6 +468,7 @@ type bdIssue struct {
 	Metadata     StringMap    `json:"metadata,omitempty"`
 	Dependencies []bdIssueDep `json:"dependencies,omitempty"`
 	Ephemeral    bool         `json:"ephemeral,omitempty"`
+	NoHistory    bool         `json:"no_history,omitempty"`
 	DeferUntil   *time.Time   `json:"defer_until,omitempty"`
 }
 
@@ -512,15 +517,16 @@ func IsPartialResult(err error) bool {
 	return errors.As(err, &partial)
 }
 
-// parseIssuesTolerant unmarshals a JSON array of bdIssue objects, skipping
-// any entries that fail to parse (e.g. corrupt metadata with non-string values).
+// parseIssuesTolerant unmarshals bd list output, skipping any entries that
+// fail to parse (e.g. corrupt metadata with non-string values). bd 1.0.4 emits
+// a top-level array; bd 1.0.5 may emit an object envelope with an issues array.
 // This prevents a single bad bead from breaking all list operations.
 func parseIssuesTolerant(data []byte) ([]bdIssue, error) {
 	if len(bytes.TrimSpace(data)) == 0 {
 		return nil, nil
 	}
-	var raw []json.RawMessage
-	if err := json.Unmarshal(data, &raw); err != nil {
+	raw, err := bdListIssueRows(data)
+	if err != nil {
 		// Include a snippet of the raw bd output so the failure surface is
 		// diagnosable. Historical case (gascity #1726): bd returned the
 		// literal string "None" and the unwrapped error was the opaque
@@ -554,6 +560,27 @@ func parseIssuesTolerant(data []byte) ([]bdIssue, error) {
 		return result, fmt.Errorf("skipped %d corrupt %s: %w", skipped, beadNoun, parseErr)
 	}
 	return result, nil
+}
+
+func bdListIssueRows(data []byte) ([]json.RawMessage, error) {
+	var raw []json.RawMessage
+	arrayErr := json.Unmarshal(data, &raw)
+	if arrayErr == nil {
+		return raw, nil
+	}
+
+	var envelope map[string]json.RawMessage
+	if err := json.Unmarshal(data, &envelope); err != nil {
+		return nil, arrayErr
+	}
+	rawIssues, ok := envelope["issues"]
+	if !ok {
+		return nil, fmt.Errorf("JSON object missing issues field")
+	}
+	if err := json.Unmarshal(rawIssues, &raw); err != nil {
+		return nil, fmt.Errorf("issues field: %w", err)
+	}
+	return raw, nil
 }
 
 // toBead converts a bdIssue to a Gas City Bead. CreatedAt is truncated to
@@ -592,6 +619,7 @@ func (b *bdIssue) toBead() Bead {
 		Metadata:     b.Metadata,
 		Dependencies: deps,
 		Ephemeral:    b.Ephemeral,
+		NoHistory:    b.NoHistory,
 		DeferUntil:   cloneTimePtr(b.DeferUntil),
 	}
 }
@@ -639,6 +667,14 @@ func isBdNotFound(err error) bool {
 	return strings.Contains(msg, "not found") || strings.Contains(msg, "no issue found")
 }
 
+func isBdClaimConflictMessage(msg string) bool {
+	msg = strings.ToLower(msg)
+	return strings.Contains(msg, "already assigned") ||
+		strings.Contains(msg, "already claimed") ||
+		strings.Contains(msg, "claimed by") ||
+		strings.Contains(msg, "claim conflict")
+}
+
 // mapBdStatus maps bd's statuses to Gas City's 3. bd uses: open,
 // in_progress, blocked, review, testing, closed. Gas City uses:
 // open, in_progress, closed.
@@ -655,6 +691,19 @@ func mapBdStatus(s string) string {
 
 // Create persists a new bead via bd create.
 func (s *BdStore) Create(b Bead) (Bead, error) {
+	return s.CreateWithStorage(b, StorageDefault)
+}
+
+// CreateWithStorage persists a new bead via bd create using a storage tier
+// selected by policy middleware.
+func (s *BdStore) CreateWithStorage(b Bead, storage StorageClass) (Bead, error) {
+	effectiveEphemeral, effectiveNoHistory, err := effectiveStorageFlags(b, storage)
+	if err != nil {
+		return Bead{}, fmt.Errorf("bd create: %w", err)
+	}
+	if effectiveEphemeral && effectiveNoHistory {
+		return Bead{}, fmt.Errorf("bd create: ephemeral and no-history storage are mutually exclusive")
+	}
 	typ := b.Type
 	if typ == "" {
 		typ = "task"
@@ -683,8 +732,11 @@ func (s *BdStore) Create(b Bead) (Bead, error) {
 	if b.ParentID != "" {
 		args = append(args, "--parent", b.ParentID)
 	}
-	if b.Ephemeral {
+	if effectiveEphemeral {
 		args = append(args, "--ephemeral")
+	}
+	if effectiveNoHistory {
+		args = append(args, "--no-history")
 	}
 	if b.DeferUntil != nil {
 		args = append(args, "--defer", b.DeferUntil.Format(time.RFC3339))
@@ -728,7 +780,28 @@ func (s *BdStore) Create(b Bead) (Bead, error) {
 			created.Metadata = maps.Clone(metadata)
 		}
 	}
+	if effectiveEphemeral {
+		created.Ephemeral = true
+	}
+	if effectiveNoHistory {
+		created.NoHistory = true
+	}
 	return created, nil
+}
+
+func effectiveStorageFlags(b Bead, storage StorageClass) (ephemeral bool, noHistory bool, err error) {
+	switch storage {
+	case StorageDefault:
+		return b.Ephemeral, b.NoHistory, nil
+	case StorageHistory:
+		return false, false, nil
+	case StorageNoHistory:
+		return false, true, nil
+	case StorageEphemeral:
+		return true, false, nil
+	default:
+		return false, false, fmt.Errorf("unknown storage class %q", storage)
+	}
 }
 
 // Get retrieves a bead by ID via bd show.
@@ -802,6 +875,48 @@ func (s *BdStore) Update(id string, opts UpdateOpts) error {
 		return fmt.Errorf("updating bead %q: %w", id, err)
 	}
 	return nil
+}
+
+// Claim atomically claims an open bead through bd update --claim.
+//
+// It returns ok=false when bd reports that another actor won the claim race.
+// The caller controls the claim actor through the store's CommandRunner
+// environment, typically BEADS_ACTOR.
+func (s *BdStore) Claim(id string) (Bead, bool, error) {
+	out, err := s.runBDTransientWriteOutput("update", id, "--claim", "--json")
+	if err != nil {
+		msg := strings.TrimSpace(string(out))
+		if isBdClaimConflictMessage(msg) || isBdClaimConflictMessage(err.Error()) {
+			return Bead{}, false, nil
+		}
+		if isBdNotFound(err) {
+			return Bead{}, false, fmt.Errorf("claiming bead %q: %w", id, ErrNotFound)
+		}
+		if msg != "" {
+			return Bead{}, false, fmt.Errorf("claiming bead %q: %w: %s", id, err, msg)
+		}
+		return Bead{}, false, fmt.Errorf("claiming bead %q: %w", id, err)
+	}
+	claimed, err := parseBDMutationBead("bd claim", out)
+	if err != nil {
+		return Bead{}, false, fmt.Errorf("claiming bead %q: %w", id, err)
+	}
+	return claimed, true, nil
+}
+
+func parseBDMutationBead(op string, out []byte) (Bead, error) {
+	issues, parseErr := parseIssuesTolerant(extractJSON(out))
+	if parseErr == nil && len(issues) > 0 {
+		return issues[0].toBead(), nil
+	}
+	var issue bdIssue
+	if err := json.Unmarshal(extractJSON(out), &issue); err == nil && strings.TrimSpace(issue.ID) != "" {
+		return issue.toBead(), nil
+	}
+	if parseErr != nil {
+		return Bead{}, fmt.Errorf("%s: parsing JSON: %w", op, parseErr)
+	}
+	return Bead{}, fmt.Errorf("%s returned no bead", op)
 }
 
 // UpdateAll modifies the same fields on multiple beads via one bd update
@@ -1546,25 +1661,17 @@ func (s *BdStore) List(query ListQuery) ([]Bead, error) {
 
 	switch query.TierMode {
 	case TierWisps:
-		return s.listEphemeral(query)
+		return s.listWispsTier(query)
 	case TierBoth:
-		if bdListCoversBothTiers(query) {
-			return s.listViaBDList(query)
-		}
 		return s.listBothTiers(query)
 	}
-
 	return s.listViaBDList(query)
-}
-
-func bdListCoversBothTiers(query ListQuery) bool {
-	return query.Type == "message"
 }
 
 func (s *BdStore) listViaBDList(query ListQuery) ([]Bead, error) {
 	serverQuery, clientFilteredAssignees := bdServerQueryForAssignees(query)
 	limit := serverQuery.Limit
-	if serverQuery.Sort == SortCreatedAsc || clientFilteredAssignees {
+	if bdListRequiresClientLimit(query, serverQuery, clientFilteredAssignees) {
 		limit = 0
 	}
 	args := []string{"list", "--json"}
@@ -1586,7 +1693,11 @@ func (s *BdStore) listViaBDList(query ListQuery) ([]Bead, error) {
 	if !serverQuery.CreatedBefore.IsZero() {
 		args = append(args, "--created-before", serverQuery.CreatedBefore.Format(time.RFC3339Nano))
 	}
-	args = append(args, "--include-infra", "--include-gates", "--limit", fmt.Sprintf("%d", limit))
+	args = append(args, "--include-infra", "--include-gates")
+	if bdListShouldIncludeTemplates(query) {
+		args = append(args, "--include-templates")
+	}
+	args = append(args, "--limit", fmt.Sprintf("%d", limit))
 	if serverQuery.ParentID != "" {
 		args = append(args, "--parent", serverQuery.ParentID)
 	}
@@ -1599,6 +1710,9 @@ func (s *BdStore) listViaBDList(query ListQuery) ([]Bead, error) {
 		for _, k := range keys {
 			args = append(args, "--metadata-field", k+"="+serverQuery.Metadata[k])
 		}
+	}
+	if query.SkipLabels && serverQuery.Label == "" && s.supportsSkipLabels() {
+		args = append(args, "--skip-labels")
 	}
 
 	out, err := s.runner(s.dir, "bd", args...)
@@ -1625,6 +1739,48 @@ func (s *BdStore) listViaBDList(query ListQuery) ([]Bead, error) {
 	return filtered, nil
 }
 
+// bdSkipLabelsMinVersion is the first bd release whose `bd list` accepts
+// --skip-labels (be-w3n-1). bd 1.0.4 — the supported floor — rejects the
+// flag and fails the entire list call (see 29d457fe9).
+const bdSkipLabelsMinVersion = "1.0.5"
+
+// supportsSkipLabels reports whether the bd binary backing this store accepts
+// `bd list --skip-labels`. The version probe runs through the store's runner
+// once and is cached for the store's lifetime; any probe or parse failure
+// degrades to false so listing falls back to normal label hydration instead
+// of a hard bd CLI error.
+func (s *BdStore) supportsSkipLabels() bool {
+	s.skipLabelsOnce.Do(func() {
+		out, err := s.runner(s.dir, "bd", "version")
+		if err != nil {
+			return
+		}
+		ver, err := parseBDVersion(string(out))
+		if err != nil {
+			return
+		}
+		s.skipLabelsSupported = bdVersionAtLeast(ver, bdSkipLabelsMinVersion)
+	})
+	return s.skipLabelsSupported
+}
+
+func bdListRequiresClientLimit(query, serverQuery ListQuery, clientFilteredAssignees bool) bool {
+	if query.TierMode == TierIssues || query.TierMode == TierWisps {
+		return true
+	}
+	if serverQuery.Sort == SortCreatedAsc || clientFilteredAssignees {
+		return true
+	}
+	if len(serverQuery.Metadata) > 0 || !serverQuery.CreatedBefore.IsZero() || !serverQuery.UpdatedBefore.IsZero() {
+		return true
+	}
+	return false
+}
+
+func bdListShouldIncludeTemplates(query ListQuery) bool {
+	return query.TierMode == TierWisps || (query.TierMode == TierBoth && query.Type != "message")
+}
+
 func bdServerQueryForAssignees(query ListQuery) (ListQuery, bool) {
 	serverQuery := query
 	if query.Assignee != "" {
@@ -1644,9 +1800,21 @@ func bdServerQueryForAssignees(query ListQuery) (ListQuery, bool) {
 	}
 }
 
-// listEphemeral reads only the wisps tier using `bd query "ephemeral=true AND
-// <filters>"`. For most bead types, bd query is the canonical way to reach the
-// wisps table (mirrors gastown's internal/beads/beads.go listEphemeral path).
+func (s *BdStore) listWispsTier(query ListQuery) ([]Bead, error) {
+	listQ := query
+	listQ.TierMode = TierWisps
+	listResult, listErr := s.listViaBDList(listQ)
+
+	ephemeralQ := query
+	ephemeralQ.TierMode = TierWisps
+	ephemeralResult, ephemeralErr := s.listEphemeral(ephemeralQ)
+
+	return mergeListTierResults(query, "bd list wisps tier", listResult, listErr, ephemeralResult, ephemeralErr)
+}
+
+// listEphemeral reads only ephemeral rows using `bd query "ephemeral=true AND
+// <filters>"`. The installed bd list surface does not expose ephemeral rows, so
+// TierWisps and TierBoth must union this path with bd list results.
 func (s *BdStore) listEphemeral(query ListQuery) ([]Bead, error) {
 	serverQuery, clientFilteredAssignees := bdServerQueryForAssignees(query)
 	clauses := []string{"ephemeral=true"}
@@ -1669,18 +1837,18 @@ func (s *BdStore) listEphemeral(query ListQuery) ([]Bead, error) {
 
 	out, err := s.runner(s.dir, "bd", args...)
 	if err != nil {
+		if isBdQueryUnsupported(err) {
+			return nil, nil
+		}
 		return nil, fmt.Errorf("bd query (wisps): %w", err)
 	}
 	issues, parseErr := parseIssuesTolerant(extractJSON(out))
 	result := make([]Bead, len(issues))
 	for i := range issues {
 		result[i] = issues[i].toBead()
-		// bd query against wisps returns ephemeral beads; tolerate older bd
-		// versions that omit the ephemeral field in JSON.
 		result[i].Ephemeral = true
+		result[i].NoHistory = false
 	}
-	// Re-apply filters client-side (defense in depth against bd-query DSL
-	// drift) and re-cap Limit after client-only filters/sorts.
 	filtered := applyListQuery(result, query)
 	if parseErr != nil {
 		if len(filtered) > 0 {
@@ -1691,9 +1859,21 @@ func (s *BdStore) listEphemeral(query ListQuery) ([]Bead, error) {
 	return filtered, nil
 }
 
+func isBdQueryUnsupported(err error) bool {
+	if err == nil {
+		return false
+	}
+	text := strings.ToLower(err.Error())
+	return strings.Contains(text, "unknown subcommand \"query\"") ||
+		strings.Contains(text, "unknown command \"query\"") ||
+		strings.Contains(text, "unknown subcommand query") ||
+		strings.Contains(text, "unknown command query")
+}
+
 func canApplyWispsServerLimit(query ListQuery) bool {
 	return (query.Sort == SortDefault || query.Sort == SortCreatedDesc) &&
 		query.CreatedBefore.IsZero() &&
+		query.UpdatedBefore.IsZero() &&
 		len(query.Metadata) == 0
 }
 
@@ -1707,8 +1887,6 @@ func appendBdQueryClause(clauses []string, serverFilteredOnly bool, field, value
 	return append(clauses, field+"="+value), serverFilteredOnly
 }
 
-// isBareBdQueryValue reports whether value can be emitted unquoted into the bd
-// query DSL. Values outside this narrow token set are filtered client-side.
 func isBareBdQueryValue(value string) bool {
 	upper := strings.ToUpper(value)
 	if upper == "AND" || upper == "OR" || upper == "NOT" {
@@ -1727,65 +1905,60 @@ func isBareBdQueryValue(value string) bool {
 	return true
 }
 
-// listBothTiers unions the issues and wisps tiers in a single logical query.
-// Each tier is queried with its own TierMode; results are deduped by ID and
-// re-sorted under the caller-supplied Sort.
-//
-// Partial failure: if exactly one tier errors, the other tier's rows are
-// returned along with a non-nil error so callers can decide whether to
-// degrade or fail. When survivor rows exist, the error is a PartialResultError
-// so controller demand paths can retain those rows while still reporting the
-// incomplete read. Silently swallowing the failure would let dispatch paths see
-// "no in-flight work" and double-fire.
 func (s *BdStore) listBothTiers(query ListQuery) ([]Bead, error) {
-	issuesQ := query
-	issuesQ.TierMode = TierIssues
-	issuesResult, issuesErr := s.List(issuesQ)
+	listQ := query
+	listQ.TierMode = TierBoth
+	listResult, listErr := s.listViaBDList(listQ)
 
-	wispsQ := query
-	wispsQ.TierMode = TierWisps
-	wispsResult, wispsErr := s.List(wispsQ)
+	ephemeralQ := query
+	ephemeralQ.TierMode = TierWisps
+	ephemeralResult, ephemeralErr := s.listEphemeral(ephemeralQ)
 
-	if issuesErr != nil && wispsErr != nil {
-		return nil, errors.Join(issuesErr, wispsErr)
+	return mergeListTierResults(query, "bd list both tiers", listResult, listErr, ephemeralResult, ephemeralErr)
+}
+
+func mergeListTierResults(query ListQuery, op string, primary []Bead, primaryErr error, ephemeral []Bead, ephemeralErr error) ([]Bead, error) {
+	if primaryErr != nil && ephemeralErr != nil {
+		return nil, errors.Join(primaryErr, ephemeralErr)
 	}
 
-	merged := make([]Bead, 0, len(issuesResult)+len(wispsResult))
-	seen := make(map[string]struct{}, len(issuesResult)+len(wispsResult))
-	for _, b := range issuesResult {
-		if _, ok := seen[b.ID]; ok {
-			continue
+	merged := make([]Bead, 0, len(primary)+len(ephemeral))
+	seen := make(map[string]int, len(primary)+len(ephemeral))
+	add := func(b Bead) {
+		if idx, ok := seen[b.ID]; ok {
+			if b.Ephemeral && !merged[idx].Ephemeral {
+				merged[idx] = b
+			}
+			return
 		}
-		seen[b.ID] = struct{}{}
+		seen[b.ID] = len(merged)
 		merged = append(merged, b)
 	}
-	for _, b := range wispsResult {
-		if _, ok := seen[b.ID]; ok {
-			continue
-		}
-		seen[b.ID] = struct{}{}
-		merged = append(merged, b)
+	for _, b := range primary {
+		add(b)
+	}
+	for _, b := range ephemeral {
+		add(b)
 	}
 	sortBeadsForQuery(merged, query.Sort)
 	if query.Limit > 0 && len(merged) > query.Limit {
 		merged = merged[:query.Limit]
 	}
 
-	// Surface single-tier failure so callers don't mistake a partial
-	// result for a complete one.
 	switch {
-	case issuesErr != nil:
+	case primaryErr != nil:
 		if len(merged) > 0 {
-			return merged, &PartialResultError{Op: "bd list both tiers", Err: fmt.Errorf("issues tier: %w", issuesErr)}
+			return merged, &PartialResultError{Op: op, Err: fmt.Errorf("bd list: %w", primaryErr)}
 		}
-		return merged, fmt.Errorf("bd list both tiers: issues tier: %w", issuesErr)
-	case wispsErr != nil:
+		return merged, fmt.Errorf("%s: bd list: %w", op, primaryErr)
+	case ephemeralErr != nil:
 		if len(merged) > 0 {
-			return merged, &PartialResultError{Op: "bd list both tiers", Err: fmt.Errorf("wisps tier: %w", wispsErr)}
+			return merged, &PartialResultError{Op: op, Err: fmt.Errorf("bd query: %w", ephemeralErr)}
 		}
-		return merged, fmt.Errorf("bd list both tiers: wisps tier: %w", wispsErr)
+		return merged, fmt.Errorf("%s: bd query: %w", op, ephemeralErr)
+	default:
+		return merged, nil
 	}
-	return merged, nil
 }
 
 // ListOpen returns non-closed beads via bd list. Pass a status to filter further.

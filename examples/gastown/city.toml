@@ -27,6 +27,9 @@ name = "gastown"
 provider = "claude"
 global_fragments = ["command-glossary", "operational-awareness"]
 
+[providers.claude]
+base = "builtin:claude"
+
 [defaults.rig.imports.gastown]
 source = "packs/gastown"
 

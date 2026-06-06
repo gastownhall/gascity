@@ -52,6 +52,39 @@ func TestFilterAssignedWorkBeadsForSessionWakeKeepsOnlyReachableAssigneeSources(
 	}
 }
 
+func TestFilterAssignedWorkBeadsForSessionWakeCityScopedAgentIsCrossStoreEligible(t *testing.T) {
+	// vp-kvp: a city-scoped singleton legitimately serves per-rig routed work.
+	// Its assigned work may live in ANY store, so reachability must federate
+	// across stores — gating it to its own configured rig is the cross-store
+	// dead-drop this fixes. Rig-scoped agents stay single-store (unchanged).
+	cityPath := t.TempDir()
+	rigPath := filepath.Join(cityPath, "riga")
+	cfg := &config.City{
+		Rigs: []config.Rig{{Name: "riga", Path: rigPath}},
+		Agents: []config.Agent{{
+			Name:  "auditor",
+			Scope: "city",
+		}},
+		NamedSessions: []config.NamedSession{{
+			Template: "auditor",
+			Scope:    "city",
+			Mode:     "on_demand",
+		}},
+	}
+	identity := cfg.NamedSessions[0].QualifiedName()
+	work := []beads.Bead{
+		{ID: "city-work", Status: "open", Assignee: identity},
+		{ID: "rig-work", Status: "open", Assignee: identity},
+	}
+	storeRefs := []string{"", "riga"} // city store + rig store
+
+	got := filterAssignedWorkBeadsForSessionWake(cfg, cityPath, nil, work, storeRefs)
+
+	if len(got) != 2 {
+		t.Fatalf("city-scoped %q must be reachable from BOTH stores; got %d: %#v", identity, len(got), got)
+	}
+}
+
 func TestFilterAssignedWorkBeadsForPoolDemandKeepsDirectAssigneeAfterTemplateFallback(t *testing.T) {
 	cfg := &config.City{
 		Agents: []config.Agent{{

@@ -464,6 +464,141 @@ func TestMergeSettingsJSON_NoIdentityAlwaysAppends(t *testing.T) {
 	}
 }
 
+// maHookEntry is the wrapper shape used by packs like model-advisor: a Claude
+// hook entry with NO top-level "matcher" and the command nested inside an inner
+// "hooks" array. Before the dedup fix this shape had no identity key and was
+// appended unconditionally on every re-projection, accumulating without bound.
+const maHookEntry = `{"hooks":[{"type":"command","command":"bash $CLAUDE_PROJECT_DIR/packs/model-advisor/hooks/capture-invocation.sh"}]}`
+
+func stopEntries(t *testing.T, merged []byte) []any {
+	t.Helper()
+	var doc map[string]any
+	if err := json.Unmarshal(merged, &doc); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+	hooks, ok := doc["hooks"].(map[string]any)
+	if !ok {
+		t.Fatalf("result has no hooks object: %s", merged)
+	}
+	arr, ok := hooks["Stop"].([]any)
+	if !ok {
+		t.Fatalf("result has no Stop array: %s", merged)
+	}
+	return arr
+}
+
+func TestMergeSettingsJSON_MatcherlessWrapper_DedupsIdenticalCommand(t *testing.T) {
+	// Regression: overlay re-projects a Stop hook that already exists in the
+	// target. The matcherless wrapper must be deduped by its inner command(s),
+	// not appended again. (Bug: 60-1000+ duplicate capture-invocation.sh hooks.)
+	base := `{"hooks":{"Stop":[` + maHookEntry + `]}}`
+	over := `{"hooks":{"Stop":[` + maHookEntry + `]}}`
+
+	result, err := MergeSettingsJSON([]byte(base), []byte(over))
+	if err != nil {
+		t.Fatalf("MergeSettingsJSON: %v", err)
+	}
+	if got := len(stopEntries(t, result)); got != 1 {
+		t.Errorf("Stop entries = %d, want 1 (identical command must not duplicate)", got)
+	}
+}
+
+func TestMergeSettingsJSON_MatcherlessWrapper_IdempotentAcrossManyMerges(t *testing.T) {
+	// N re-projections of the same overlay must converge to exactly 1 copy,
+	// not N copies. This is the session-start accumulation that broke prod.
+	doc := []byte(`{"hooks":{"Stop":[` + maHookEntry + `]}}`)
+	merged := doc
+	for i := 0; i < 25; i++ {
+		var err error
+		merged, err = MergeSettingsJSON(merged, doc)
+		if err != nil {
+			t.Fatalf("merge iteration %d: %v", i, err)
+		}
+	}
+	if got := len(stopEntries(t, merged)); got != 1 {
+		t.Errorf("Stop entries after 25 merges = %d, want 1 (idempotent)", got)
+	}
+}
+
+func TestMergeSettingsJSON_MatcherlessWrapper_DistinctCommandsCoexist(t *testing.T) {
+	// A genuinely different matcherless command must still be added, and two
+	// distinct commands must coexist (dedup keys on command content, not shape).
+	other := `{"hooks":[{"type":"command","command":"bash $CLAUDE_PROJECT_DIR/packs/other/hooks/run.sh"}]}`
+	base := `{"hooks":{"Stop":[` + maHookEntry + `]}}`
+	over := `{"hooks":{"Stop":[` + other + `]}}`
+
+	result, err := MergeSettingsJSON([]byte(base), []byte(over))
+	if err != nil {
+		t.Fatalf("MergeSettingsJSON: %v", err)
+	}
+	if got := len(stopEntries(t, result)); got != 2 {
+		t.Errorf("Stop entries = %d, want 2 (distinct commands coexist)", got)
+	}
+}
+
+func TestMergeSettingsJSON_MatcherlessWrapper_PreservesCoreHook(t *testing.T) {
+	// Core (non-overlay) hooks projected by gc itself use a "matcher" wrapper.
+	// Merging a matcherless pack hook must preserve the core entry and append
+	// the pack entry exactly once (ordering: core first).
+	core := `{"matcher":"","hooks":[{"type":"command","command":"gc hook --inject"}]}`
+	base := `{"hooks":{"Stop":[` + core + `]}}`
+	over := `{"hooks":{"Stop":[` + maHookEntry + `]}}`
+
+	result, err := MergeSettingsJSON([]byte(base), []byte(over))
+	if err != nil {
+		t.Fatalf("MergeSettingsJSON: %v", err)
+	}
+	arr := stopEntries(t, result)
+	if len(arr) != 2 {
+		t.Fatalf("Stop entries = %d, want 2 (core preserved + pack appended)", len(arr))
+	}
+	first, _ := arr[0].(map[string]any)
+	if _, hasMatcher := first["matcher"]; !hasMatcher {
+		t.Errorf("core hook (with matcher) must remain first; got %v", arr[0])
+	}
+	// Re-merging the overlay again must not add a third entry.
+	result2, err := MergeSettingsJSON(result, []byte(over))
+	if err != nil {
+		t.Fatalf("second MergeSettingsJSON: %v", err)
+	}
+	if got := len(stopEntries(t, result2)); got != 2 {
+		t.Errorf("Stop entries after re-merge = %d, want 2 (still idempotent with core present)", got)
+	}
+}
+
+func TestMergeSettingsJSON_MatcherlessWrapper_RealWorldRecovery(t *testing.T) {
+	// Reproduce the observed corrupt state: a Stop array already bloated with
+	// many identical matcherless entries. Re-projecting the overlay must not
+	// grow it further (the fix is forward-looking; it stops accumulation).
+	bloat := make([]string, 50)
+	for i := range bloat {
+		bloat[i] = maHookEntry
+	}
+	base := `{"hooks":{"Stop":[` + joinJSON(bloat) + `]}}`
+	over := `{"hooks":{"Stop":[` + maHookEntry + `]}}`
+
+	result, err := MergeSettingsJSON([]byte(base), []byte(over))
+	if err != nil {
+		t.Fatalf("MergeSettingsJSON: %v", err)
+	}
+	// The overlay's single copy collapses into the existing duplicates: count
+	// must not increase past the pre-existing bloat (no new append).
+	if got := len(stopEntries(t, result)); got > 50 {
+		t.Errorf("Stop entries = %d, want <= 50 (overlay must not append to existing bloat)", got)
+	}
+}
+
+func joinJSON(parts []string) string {
+	out := ""
+	for i, p := range parts {
+		if i > 0 {
+			out += ","
+		}
+		out += p
+	}
+	return out
+}
+
 func TestMergeSettingsJSON_EmptyArrayPreservesBase(t *testing.T) {
 	// Union-only semantics: an empty overlay array does NOT remove base entries.
 	base := `{

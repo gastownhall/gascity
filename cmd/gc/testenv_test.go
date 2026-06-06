@@ -6,6 +6,8 @@ import (
 	"sort"
 	"strings"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/config"
 )
 
 // gcEnvVars lists the GC_* identity and session-routing variables that
@@ -242,6 +244,34 @@ func installTestProviderStubs() (string, error) {
 		}
 	}
 	return dir, nil
+}
+
+func builtinProviderAliasesForTest(names ...string) map[string]config.ProviderSpec {
+	providers := make(map[string]config.ProviderSpec, len(names))
+	for _, name := range names {
+		providers[name] = config.BuiltinProviderAlias(name)
+	}
+	return providers
+}
+
+func builtinProviderAliasTOMLForTest(names ...string) string {
+	var b strings.Builder
+	for _, name := range names {
+		b.WriteString("\n[providers.")
+		b.WriteString(name)
+		b.WriteString("]\nbase = \"builtin:")
+		b.WriteString(name)
+		b.WriteString("\"\n")
+	}
+	return b.String()
+}
+
+func withBuiltinProviderAliasesTOMLForTest(content string, names ...string) string {
+	content = strings.TrimRight(content, "\n")
+	if content == "" {
+		return strings.TrimLeft(builtinProviderAliasTOMLForTest(names...), "\n")
+	}
+	return content + "\n" + builtinProviderAliasTOMLForTest(names...)
 }
 
 func TestInstallTestProviderStubsUsesPIDPrefixedDir(t *testing.T) {

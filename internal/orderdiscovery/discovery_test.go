@@ -731,3 +731,63 @@ func writeOrderDiscoveryFile(t *testing.T, dir, name, content string) {
 		t.Fatal(err)
 	}
 }
+
+func TestScanAllCityScopedOrderRegistersOnceAcrossRigs(t *testing.T) {
+	cityPath, cityLayer := orderDiscoveryCity(t)
+	packDir := filepath.Join(t.TempDir(), "mixed-pack")
+	// A scope=city order must register exactly once no matter how many rigs
+	// import the pack.
+	writeOrderDiscoveryFile(t, filepath.Join(packDir, "orders"), "city-sweep", `[order]
+scope = "city"
+exec = "scripts/sweep.sh"
+trigger = "cooldown"
+interval = "5m"
+`)
+	// An unscoped (rig-default) order still registers once per importing rig.
+	writeOrderDiscoveryFile(t, filepath.Join(packDir, "orders"), "rig-health", `[order]
+exec = "scripts/health.sh"
+trigger = "cooldown"
+interval = "5m"
+`)
+
+	cfg := &config.City{
+		FormulaLayers: config.FormulaLayers{
+			City: []string{cityLayer},
+			Rigs: map[string][]string{
+				"alpha": {cityLayer},
+				"beta":  {cityLayer},
+			},
+		},
+		RigPackDirs: map[string][]string{
+			"alpha": {packDir},
+			"beta":  {packDir},
+		},
+	}
+
+	aa, err := ScanAll(cityPath, cfg, ScanOptions{})
+	if err != nil {
+		t.Fatalf("ScanAll returned error: %v", err)
+	}
+
+	citySweepCount := 0
+	citySweepRig := "<unset>"
+	rigHealth := map[string]int{}
+	for _, a := range aa {
+		switch a.Name {
+		case "city-sweep":
+			citySweepCount++
+			citySweepRig = a.Rig
+		case "rig-health":
+			rigHealth[a.Rig]++
+		}
+	}
+	if citySweepCount != 1 {
+		t.Fatalf("city-scoped order registered %d times, want 1: %#v", citySweepCount, aa)
+	}
+	if citySweepRig != "" {
+		t.Fatalf("city-scoped order Rig = %q, want \"\" (city-scoped)", citySweepRig)
+	}
+	if rigHealth["alpha"] != 1 || rigHealth["beta"] != 1 {
+		t.Fatalf("rig-scoped order counts = %v, want one per importing rig", rigHealth)
+	}
+}

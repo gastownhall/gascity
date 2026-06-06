@@ -1330,12 +1330,17 @@ func cmdWorkflowReopenSource(sourceBeadID string, selector sourceWorkflowStoreSe
 		if err := target.storeView.store.SetMetadata(currentSource.ID, "workflow_id", ""); err != nil {
 			return err
 		}
-		// Clear gc.routed_to so a subsequent re-sling is not silently
-		// short-circuited by CheckBeadState's idempotency fast-path.
-		// CheckBeadState treats a bead with gc.routed_to == target as
-		// already routed; a recovered bead must look like a fresh
-		// candidate for assignment.
-		if err := target.storeView.store.SetMetadata(currentSource.ID, "gc.routed_to", ""); err != nil {
+		// Pre-route to gc.run_target so the bead is never left unrouted
+		// between the reopen and the caller's follow-up re-sling (vp-nq8 /
+		// FR-C0.1). A blank gc.routed_to is invisible to route-reclaim (which
+		// only heals set-but-dead/stuck routes) and causes unrouted-feeder to
+		// mis-route to the rig planner instead of the correct next step, so an
+		// unset route orphans the bead if the re-sling fails to land.
+		//
+		// When gc.run_target is empty (legacy beads created before the field
+		// was stamped), we fall back to blank for backward compatibility.
+		nextRoute := strings.TrimSpace(currentSource.Metadata["gc.run_target"])
+		if err := target.storeView.store.SetMetadata(currentSource.ID, "gc.routed_to", nextRoute); err != nil {
 			return err
 		}
 		if err := target.storeView.store.Update(currentSource.ID, beads.UpdateOpts{

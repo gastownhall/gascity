@@ -162,6 +162,8 @@ esac
 PACK_DIR="${GC_PACK_DIR:-$(unset CDPATH; cd -- "$(dirname "$0")/.." && pwd)}"
 # shellcheck disable=SC1091
 . "$PACK_DIR/assets/scripts/runtime.sh"
+# shellcheck disable=SC1091
+. "$PACK_DIR/assets/scripts/compact-gain-drift-proof.sh"
 
 if [ "${GC_DOLT_MANAGED_LOCAL:-}" = "1" ]; then
   managed_port=$(managed_runtime_port "$DOLT_STATE_FILE" "$DOLT_DATA_DIR" || true)
@@ -786,6 +788,7 @@ verify_counts() {
   fail=0
   verify_counts_saw_gain=0
   verify_counts_saw_gain_hash_drift=0
+  verify_counts_gain_drift_tables=""
   verify_counts_saw_row_decrease=0
   verify_counts_saw_same_count_hash_drift=0
   verify_counts_saw_table_list_change=0
@@ -863,6 +866,7 @@ verify_counts() {
     if [ "$actual_hash" != "$expected_hash" ]; then
       if [ "$table_gained_rows" = "1" ]; then
         verify_counts_saw_gain_hash_drift=1
+        verify_counts_gain_drift_tables="$verify_counts_gain_drift_tables $t"
         printf 'compact: db=%s table=%s value hash changed with row-count increase before=%s after=%s — quarantine and investigate before GC\n' \
           "$db" "$t" "$expected_hash" "$actual_hash" >&2
         if [ "$fail" -ne 1 ]; then
@@ -1463,6 +1467,7 @@ flatten_database() {
   db="$1"
   verify_counts_saw_gain=0
   verify_counts_saw_gain_hash_drift=0
+  verify_counts_gain_drift_tables=""
   verify_counts_saw_row_decrease=0
   verify_counts_saw_same_count_hash_drift=0
   verify_counts_saw_table_list_change=0
@@ -1929,6 +1934,33 @@ flatten_database() {
       rm -f "$preflight_tmp"
       return 0
     fi
+    # Option A (#2846): HEAD movement is only a proxy for "pre-flight rows
+    # remain reachable". When gain+drift is the only failure category but no
+    # concurrent writer was HEAD-proven — the absorbed-writer race, where the
+    # writer's commit was folded into the flatten and left no HEAD fingerprint
+    # — prove preservation directly by diffing the pre-flight snapshot HEAD
+    # against the flatten commit for each gained+drifted table. Purely additive
+    # (no removed/modified rows) proves every pre-flight row survived; defer
+    # exactly as the HEAD-proven path above does. Any removed/modified row, or
+    # a diff-probe failure, fails closed and falls through to the quarantine.
+    if [ "${verify_counts_saw_gain:-0}" = "1" ] && \
+       [ "${verify_counts_saw_gain_hash_drift:-0}" = "1" ] && \
+       [ "${verify_counts_saw_row_decrease:-0}" != "1" ] && \
+       [ "${verify_counts_saw_same_count_hash_drift:-0}" != "1" ] && \
+       [ "${verify_counts_saw_table_list_change:-0}" != "1" ] && \
+       [ "${verify_counts_saw_probe_failure:-0}" != "1" ] && \
+       gain_drift_is_additive_only "$db" "$head" "$flatten_head" "$verify_counts_gain_drift_tables"; then
+      printf 'compact: db=%s gain+drift proven additive-only via DOLT_DIFF(%s..%s) for tables [%s] — pre-flight rows preserved (absorbed-writer race), not corruption; deferring, will retry next run\n' \
+        "$db" "$head" "$flatten_head" "${verify_counts_gain_drift_tables# }" >&2
+      if ! defer_writer_race_after_flatten "$db" "$flatten_head" \
+        "$remote" "$expected_remote_head" "$expected_remote_head_verified" \
+        "${compacted_from_head:-}" "$local_branch" "$remote_branch"; then
+        rm -f "$preflight_tmp"
+        return 1
+      fi
+      rm -f "$preflight_tmp"
+      return 0
+    fi
     if [ "$writer_race_detected" = "1" ] && \
        [ "${verify_counts_saw_gain_hash_drift:-0}" = "1" ]; then
       printf 'compact: db=%s writer race detected during flatten (snapshot_HEAD=%s pre_reset_HEAD=%s flatten_HEAD=%s post_verify_HEAD=%s), but additional integrity failure category prevents defer; quarantine unchanged\n' \
@@ -2021,6 +2053,14 @@ flatten_database() {
         rm -f "$preflight_tmp"
         return 0
       fi
+      # Option A's per-table DOLT_DIFF preservation proof is intentionally NOT
+      # extended to this whole-database value-hash path. It is reachable only
+      # when per-table verify already PASSED (verify_counts_rc==0) yet the
+      # aggregate DB hash drifted with a row gain and no writer was HEAD-proven
+      # — a near-unreachable combination for real appends, since a genuine
+      # per-table row gain would have tripped the per-table gain+drift signal
+      # (proven additive-only and deferred above). Quarantine is the safe
+      # default here; revisit only if a real incident shows this path reachable.
       printf 'compact: db=%s value hash changed with row-count increase before=%s after=%s — quarantine and investigate before GC\n' \
         "$db" "$preflight_hash" "$postflight_hash" >&2
       write_compact_marker "$quarantine_dir" "$db" "post-flatten value hash changed with row-count increase" || {

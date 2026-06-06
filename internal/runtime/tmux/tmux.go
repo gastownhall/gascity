@@ -215,7 +215,31 @@ type Tmux struct {
 	configureOnce        sync.Once
 	hiddenAttachMu       sync.Mutex
 	hiddenAttachClients  map[string]*hiddenAttachClient
+
+	// pokeMu guards pokes, which tracks gc's own send-keys per session so
+	// GetSessionActivity can discount activity that is only our poke's echo
+	// (see discountPokeActivity).
+	pokeMu sync.Mutex
+	pokes  map[string]pokeInfo
 }
+
+// pokeInfo records a gc-initiated send-keys ("poke", e.g. a wake or nudge) to a
+// session: when it happened, and the genuine session activity observed just
+// before it.
+type pokeInfo struct {
+	at    time.Time // when gc sent the keystrokes
+	prior time.Time // genuine GetSessionActivity immediately before the poke
+}
+
+const (
+	// pokeEcho is the window within which raw tmux activity is treated as the
+	// poke's own keystroke echo rather than agent output.
+	pokeEcho = 3 * time.Second
+	// pokeGrace is how long a just-poked agent still counts as active, so a
+	// responsive agent about to reply is not flipped to idle. After it elapses
+	// with no agent output, the poke is discounted.
+	pokeGrace = 15 * time.Second
+)
 
 type hiddenAttachClient struct {
 	cancel  context.CancelFunc
@@ -1086,6 +1110,24 @@ func (t *Tmux) ListSessionIDs() (map[string]string, error) {
 	return result, nil
 }
 
+// cancelCopyModeIfParked exits copy-mode on the target session's active pane
+// before key delivery. The ga-c4w WheelUpPane binding parks an interactive
+// pane in copy-mode on wheel-up; tmux then routes subsequent send-keys into
+// copy-mode and the controller's keystrokes (nudges, prompts, mail, the 1/2/3
+// interaction responses) are silently dropped. Probing #{pane_in_mode} and
+// canceling only when parked keeps the happy path untouched (no spurious
+// cancel) and is a no-op for headless agent panes, which stay mouse-off and
+// are never wheel-parked. Probe and cancel errors are deliberately swallowed:
+// a copy-mode guard must never abort delivery on a pane that simply is not in
+// a mode.
+func (t *Tmux) cancelCopyModeIfParked(session string) {
+	inMode, err := t.run("display-message", "-t", session, "-p", "#{pane_in_mode}")
+	if err != nil || strings.TrimSpace(inMode) != "1" {
+		return
+	}
+	_, _ = t.run("send-keys", "-t", session, "-X", "cancel")
+}
+
 // SendKeys sends keystrokes to a session and presses Enter.
 // Always sends Enter as a separate command for reliability.
 // Uses a debounce delay between paste and Enter to ensure paste completes.
@@ -1097,6 +1139,14 @@ func (t *Tmux) SendKeys(session, keys string) error {
 // The debounceMs parameter controls how long to wait after paste before sending Enter.
 // This prevents race conditions where Enter arrives before paste is processed.
 func (t *Tmux) SendKeysDebounced(session, keys string, debounceMs int) error {
+	// A human may have scrolled this pane into copy-mode (the ga-c4w wheel
+	// binding); exit it first so the keystrokes reach the program instead of
+	// being swallowed by copy-mode.
+	t.cancelCopyModeIfParked(session)
+	// Record this poke (and the genuine activity just before it) so that
+	// GetSessionActivity can later discount our own keystroke echo for an
+	// agent that never actually responds. See discountPokeActivity.
+	t.recordPoke(session)
 	// Send text using literal mode (-l) to handle special chars
 	if _, err := t.run("send-keys", "-t", session, "-l", keys); err != nil {
 		return err
@@ -1926,13 +1976,37 @@ func (t *Tmux) IsSessionRunning(session string) bool {
 	return !dead
 }
 
-// GetSessionActivity returns the last meaningful activity time for a session.
+// GetSessionActivity returns the last genuine agent activity time for a session.
+//
+// It is built on tmux per-window activity (rawSessionActivity) but discounts
+// activity that is only gc's own send-keys echo. gc wakes/nudges agents by
+// sending keystrokes into the pane, which advances #{window_activity} even when
+// the agent never runs a turn (the park-on-wake loop). Without discounting, a
+// woken-but-unresponsive agent looks perpetually active, misleading last_active
+// and the idle / auto-suspend / reconciler logic keyed off it. See
+// discountPokeActivity. This is LLM-agnostic: purely gc input vs pane output, so
+// it holds for Claude Code, Codex, or any agent CLI running in the pane.
+func (t *Tmux) GetSessionActivity(session string) (time.Time, error) {
+	wa, err := t.rawSessionActivity(session)
+	if err != nil {
+		return time.Time{}, err
+	}
+	t.pokeMu.Lock()
+	pk, ok := t.pokes[session]
+	t.pokeMu.Unlock()
+	if !ok {
+		return wa, nil
+	}
+	return discountPokeActivity(wa, pk, time.Now()), nil
+}
+
+// rawSessionActivity returns the most recent tmux per-window activity timestamp.
 //
 // For detached agent sessions, tmux's #{session_activity} does not advance on
 // pane I/O — it effectively sticks to creation/attach time. Query per-window
 // activity instead and take the most recent timestamp so detached output and
-// send-keys both count as activity.
-func (t *Tmux) GetSessionActivity(session string) (time.Time, error) {
+// send-keys both count.
+func (t *Tmux) rawSessionActivity(session string) (time.Time, error) {
 	out, err := t.run("list-windows", "-t", session, "-F", "#{window_activity}")
 	if err != nil {
 		return time.Time{}, err
@@ -1943,6 +2017,42 @@ func (t *Tmux) GetSessionActivity(session string) (time.Time, error) {
 		return time.Time{}, err
 	}
 	return time.Unix(timestamp, 0), nil
+}
+
+// recordPoke snapshots the genuine session activity and timestamps a
+// gc-initiated send-keys ("poke", e.g. a wake/nudge), so a later
+// GetSessionActivity can discount the poke's own keystroke echo.
+func (t *Tmux) recordPoke(session string) {
+	prior, err := t.GetSessionActivity(session)
+	if err != nil {
+		prior = time.Time{}
+	}
+	t.pokeMu.Lock()
+	if t.pokes == nil {
+		t.pokes = make(map[string]pokeInfo)
+	}
+	t.pokes[session] = pokeInfo{at: time.Now(), prior: prior}
+	t.pokeMu.Unlock()
+}
+
+// discountPokeActivity resolves the genuine activity time from the raw tmux
+// window activity (wa), the last recorded gc poke (pk) and the current time.
+//
+// If wa is only the poke's own keystroke echo (within pokeEcho of the poke) AND
+// the grace window has elapsed with no later agent output, it returns the
+// activity seen before the poke — revealing that the agent never actually
+// responded. Otherwise wa stands (a real post-poke turn, or a still-in-grace
+// recent poke). Pure function for testability.
+func discountPokeActivity(wa time.Time, pk pokeInfo, now time.Time) time.Time {
+	if pk.at.IsZero() || pk.prior.IsZero() {
+		return wa
+	}
+	echoOnly := wa.Sub(pk.at).Abs() <= pokeEcho
+	graceElapsed := now.Sub(pk.at) >= pokeGrace
+	if echoOnly && graceElapsed {
+		return pk.prior
+	}
+	return wa
 }
 
 func latestActivityTimestamp(out string) (int64, error) {
@@ -2772,14 +2882,26 @@ func codexTranscriptTailContainsTurnAborted(tail string) bool {
 	return false
 }
 
-// paneContainsBusyIndicator checks captured pane lines for signs that the
-// agent is actively processing. Claude Code displays "esc to interrupt" in
-// the status bar while running tools or generating responses.
+// claudeBusySpinnerRe matches Claude Code's live "working" spinner footer: an
+// elapsed timer with a token-stream / interrupt suffix in parentheses, e.g.
+// "(2m 28s · ↓ 10.9k tokens)" or "(28m 11s • esc to interrupt)". Current Claude
+// Code (notably bypass-permissions mode) shows this spinner instead of a bare
+// "esc to interrupt" string while busy. Anchored on "(<digits><m|s>" before the
+// "·"/"•" separator so it does NOT match idle chrome — "(ctrl+o to expand)",
+// "(main)", "⏱️ Jun 4 02:57:04", or the "✻ Worked for 3m 38s" done marker.
+var claudeBusySpinnerRe = regexp.MustCompile(`\([0-9]+[ms][^)]*[·•]`)
+
+// paneContainsBusyIndicator checks captured pane lines for signs that the agent
+// is actively processing. Agent TUIs surface this differently: older Claude Code
+// and Codex show "esc to interrupt"; current Claude Code shows a live spinner
+// with an elapsed timer + token stream (claudeBusySpinnerRe); Gemini shows its
+// own cancel / shell-tool strings.
 func paneContainsBusyIndicator(lines []string) bool {
 	for _, line := range lines {
 		if strings.Contains(line, "esc to interrupt") ||
 			strings.Contains(line, "Press Esc or Ctrl+C to cancel") ||
-			strings.Contains(line, "[current working directory ") {
+			strings.Contains(line, "[current working directory ") ||
+			claudeBusySpinnerRe.MatchString(line) {
 			return true
 		}
 	}

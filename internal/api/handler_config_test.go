@@ -526,3 +526,103 @@ func TestHandleConfigExplain_PackDerivedAgent(t *testing.T) {
 		t.Errorf("agent origin = %q, want %q", agent0["origin"], "pack-derived")
 	}
 }
+
+// TestHandleConfigDefaults_FullyDefaultedCity verifies the baseline a
+// city with no overrides would have: name-derived prefix, builtin
+// providers, and no declared agents or rigs.
+func TestHandleConfigDefaults_FullyDefaultedCity(t *testing.T) {
+	fs := newFakeState(t)
+	h := newTestCityHandler(t, fs)
+
+	req := httptest.NewRequest("GET", cityURL(fs, "/config/defaults"), nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusOK, w.Body.String())
+	}
+
+	var resp configResponse
+	json.NewDecoder(w.Body).Decode(&resp) //nolint:errcheck
+
+	if resp.Workspace.Name != "test-city" {
+		t.Errorf("workspace.name = %q, want %q", resp.Workspace.Name, "test-city")
+	}
+	// Default prefix is the name-derived value, sourced from
+	// config.DeriveBeadsPrefix — not a static constant.
+	if resp.Workspace.Prefix != config.DeriveBeadsPrefix("test-city") {
+		t.Errorf("workspace.prefix = %q, want %q", resp.Workspace.Prefix, config.DeriveBeadsPrefix("test-city"))
+	}
+	// The baseline declares no agents or rigs.
+	if len(resp.Agents) != 0 {
+		t.Errorf("agents count = %d, want 0", len(resp.Agents))
+	}
+	if len(resp.Rigs) != 0 {
+		t.Errorf("rigs count = %d, want 0", len(resp.Rigs))
+	}
+	// Providers are exactly the builtin presets.
+	builtins := config.BuiltinProviders()
+	if len(resp.Providers) != len(builtins) {
+		t.Errorf("providers count = %d, want %d (builtins)", len(resp.Providers), len(builtins))
+	}
+	for name := range builtins {
+		if _, ok := resp.Providers[name]; !ok {
+			t.Errorf("expected builtin provider %q in defaults baseline", name)
+		}
+	}
+}
+
+// TestHandleConfigDefaults_OverriddenCitySurfacesDrift verifies that the
+// defaults baseline is independent of the loaded config's overrides, so a
+// client diffing GET /config against GET /config/defaults sees the drift.
+func TestHandleConfigDefaults_OverriddenCitySurfacesDrift(t *testing.T) {
+	fs := newFakeState(t)
+	fs.cfg.Workspace.Prefix = "override"
+	fs.cfg.Providers = map[string]config.ProviderSpec{
+		"custom": {DisplayName: "Custom", Command: "custom-cli"},
+	}
+	h := newTestCityHandler(t, fs)
+
+	// Loaded config reflects the overrides.
+	var loaded configResponse
+	reqLoaded := httptest.NewRequest("GET", cityURL(fs, "/config"), nil)
+	wLoaded := httptest.NewRecorder()
+	h.ServeHTTP(wLoaded, reqLoaded)
+	if wLoaded.Code != http.StatusOK {
+		t.Fatalf("/config status = %d, want %d", wLoaded.Code, http.StatusOK)
+	}
+	json.NewDecoder(wLoaded.Body).Decode(&loaded) //nolint:errcheck
+
+	// Defaults baseline reflects only the recommended defaults.
+	var defaults configResponse
+	reqDefaults := httptest.NewRequest("GET", cityURL(fs, "/config/defaults"), nil)
+	wDefaults := httptest.NewRecorder()
+	h.ServeHTTP(wDefaults, reqDefaults)
+	if wDefaults.Code != http.StatusOK {
+		t.Fatalf("/config/defaults status = %d, want %d", wDefaults.Code, http.StatusOK)
+	}
+	json.NewDecoder(wDefaults.Body).Decode(&defaults) //nolint:errcheck
+
+	// Prefix drift: loaded is overridden, default is name-derived.
+	if loaded.Workspace.Prefix != "override" {
+		t.Errorf("loaded prefix = %q, want %q", loaded.Workspace.Prefix, "override")
+	}
+	if defaults.Workspace.Prefix != config.DeriveBeadsPrefix("test-city") {
+		t.Errorf("default prefix = %q, want %q", defaults.Workspace.Prefix, config.DeriveBeadsPrefix("test-city"))
+	}
+	if loaded.Workspace.Prefix == defaults.Workspace.Prefix {
+		t.Error("expected prefix drift between loaded and default, got equal values")
+	}
+
+	// Provider drift: the custom override is absent from the baseline,
+	// which carries the builtins instead.
+	if _, ok := loaded.Providers["custom"]; !ok {
+		t.Error("expected loaded providers to include override 'custom'")
+	}
+	if _, ok := defaults.Providers["custom"]; ok {
+		t.Error("defaults baseline must not include the 'custom' override")
+	}
+	if _, ok := defaults.Providers["claude"]; !ok {
+		t.Error("expected defaults baseline to include builtin 'claude'")
+	}
+}

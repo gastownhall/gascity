@@ -39,6 +39,8 @@ const (
 	FieldGateDurationMs    = "convergence.gate_duration_ms"
 	FieldGateTruncated     = "convergence.gate_truncated"
 	FieldPendingNextWisp   = "convergence.pending_next_wisp"
+	FieldTrigger           = "convergence.trigger"
+	FieldTriggerCondition  = "convergence.trigger_condition"
 )
 
 // VarPrefix is the metadata key prefix for template variables.
@@ -46,10 +48,18 @@ const VarPrefix = "var."
 
 // State values for convergence.state.
 const (
-	StateCreating      = "creating" // set immediately after bead creation; reconciler terminates partial creations
-	StateActive        = "active"
-	StateWaitingManual = "waiting_manual"
-	StateTerminated    = "terminated"
+	StateCreating       = "creating" // set immediately after bead creation; reconciler terminates partial creations
+	StateActive         = "active"
+	StateWaitingManual  = "waiting_manual"
+	StateWaitingTrigger = "waiting_trigger" // entry/iteration gated on an external trigger condition
+	StateTerminated     = "terminated"
+)
+
+// Trigger mode values for convergence.trigger. The empty string means no
+// trigger: the loop uses the default wisp-close-driven iteration semantic.
+const (
+	TriggerNone  = ""      // default: no external trigger
+	TriggerEvent = "event" // gate iterations on a trigger condition evaluated as beads change
 )
 
 // GateMode values for convergence.gate_mode.

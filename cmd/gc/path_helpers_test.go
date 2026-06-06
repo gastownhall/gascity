@@ -252,11 +252,14 @@ func isStaleCmdGCTestConfigPathWithPIDCheck(configPath string, activeRoots []str
 }
 
 func cmdGCTestConfigOwnerPID(configPath string, tempParent string) (int, bool) {
-	root, ok := activeTestRootUnder(filepath.Clean(configPath), filepath.Clean(tempParent), []string{testCmdGCTempRootPrefix})
-	if !ok {
-		return 0, false
+	for _, prefix := range []string{testCmdGCTempRootPrefix, testCmdGCShardTempRootPrefix} {
+		root, ok := activeTestRootUnder(filepath.Clean(configPath), filepath.Clean(tempParent), []string{prefix})
+		if !ok {
+			continue
+		}
+		return pidFromPrefixedDirName(filepath.Base(root), prefix)
 	}
-	return pidFromPrefixedDirName(filepath.Base(root), testCmdGCTempRootPrefix)
+	return 0, false
 }
 
 func snapshotDoltProcessesForConfigRoot(enumerate func() ([]DoltProcInfo, error), root string) (map[int]DoltProcInfo, error) {

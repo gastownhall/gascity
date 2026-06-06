@@ -28,23 +28,18 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/configedit"
+	"github.com/gastownhall/gascity/internal/fsys"
 	helpers "github.com/gastownhall/gascity/test/acceptance/helpers"
 	"github.com/gastownhall/gascity/test/tmuxtest"
 )
 
 var testEnvC *helpers.Env
 
-const tierCAcceptanceConfig = `
-[session]
-startup_timeout = "3m"
+const tierCStartupTimeout = "3m"
 
-# Tier C runs Claude Code headlessly through the Ollama-compatible endpoint.
-# Keep tool approvals non-interactive even if the provider surfaces an edit
-# prompt despite the unrestricted permission-mode default.
-[providers.claude]
-base = "builtin:claude"
-args_append = ["--allowedTools", "Bash,Edit,MultiEdit,Write"]
-`
+var tierCClaudeArgsAppend = []string{"--allowedTools", "Bash,Edit,MultiEdit,Write"}
 
 func TestMain(m *testing.M) {
 	// Tier C needs real inference. Accept either:
@@ -190,7 +185,7 @@ func TestSwarm_SlingWorkCoderCommits(t *testing.T) {
 	// Init a swarm city.
 	c := helpers.NewCity(t, testEnvC)
 	c.InitFrom(filepath.Join(helpers.ExamplesDir(), "swarm"))
-	applyTierCAcceptanceConfig(c)
+	applyTierCAcceptanceConfig(t, c)
 
 	// Add the rig via gc rig add (initializes beads, hooks, routes).
 	c.RigAdd(rigDir, "packs/swarm")
@@ -473,15 +468,31 @@ func newGastownAcceptanceCity(t *testing.T) *helpers.City {
 	t.Helper()
 	c := helpers.NewCity(t, testEnvC)
 	c.InitFrom(filepath.Join(helpers.ExamplesDir(), "gastown"))
-	applyTierCAcceptanceConfig(c)
+	applyTierCAcceptanceConfig(t, c)
 	seedClaudeProjectState(t, c, filepath.Join(c.Dir, ".gc", "agents", "mayor"))
 	seedClaudeProjectState(t, c, filepath.Join(c.Dir, ".gc", "agents", "deacon"))
 	seedClaudeProjectState(t, c, filepath.Join(c.Dir, ".gc", "agents", "boot"))
 	return c
 }
 
-func applyTierCAcceptanceConfig(c *helpers.City) {
-	c.AppendToConfig(tierCAcceptanceConfig)
+func applyTierCAcceptanceConfig(t *testing.T, c *helpers.City) {
+	t.Helper()
+
+	err := configedit.NewEditor(fsys.OSFS{}, filepath.Join(c.Dir, "city.toml")).Edit(func(cfg *config.City) error {
+		cfg.Session.StartupTimeout = tierCStartupTimeout
+		if cfg.Providers == nil {
+			cfg.Providers = make(map[string]config.ProviderSpec, 1)
+		}
+		spec, ok := cfg.Providers["claude"]
+		if !ok {
+			base := config.BasePrefixBuiltin + "claude"
+			spec.Base = &base
+		}
+		spec.ArgsAppend = append([]string(nil), tierCClaudeArgsAppend...)
+		cfg.Providers["claude"] = spec
+		return nil
+	})
+	require.NoError(t, err, "applying Tier C acceptance config")
 }
 
 func swarmRigAgent(rigName, agent string) string {
