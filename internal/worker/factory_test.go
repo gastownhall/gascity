@@ -136,8 +136,8 @@ func TestFactorySessionByIDResolvesSessionRuntime(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateBeadOnly: %v", err)
 	}
-	if err := store.SetMetadata(info.ID, "mc_session_kind", "provider"); err != nil {
-		t.Fatalf("SetMetadata(mc_session_kind): %v", err)
+	if err := store.SetMetadata(info.ID, "real_world_app_session_kind", "provider"); err != nil {
+		t.Fatalf("SetMetadata(real_world_app_session_kind): %v", err)
 	}
 	if err := store.SetMetadata(info.ID, "worker_profile", string(ProfileClaudeTmuxCLI)); err != nil {
 		t.Fatalf("SetMetadata(worker_profile): %v", err)
@@ -148,7 +148,7 @@ func TestFactorySessionByIDResolvesSessionRuntime(t *testing.T) {
 	factory, err := NewFactory(FactoryConfig{
 		Store:    store,
 		Provider: sp,
-		ResolveSessionRuntime: func(_ sessionpkg.Info, sessionKind string) (*ResolvedRuntime, error) {
+		ResolveSessionRuntime: func(_ sessionpkg.Info, sessionKind string, _ map[string]string) (*ResolvedRuntime, error) {
 			gotSessionKind = sessionKind
 			return &ResolvedRuntime{
 				Command:  "/bin/echo",
@@ -205,6 +205,64 @@ func TestFactorySessionByIDResolvesSessionRuntime(t *testing.T) {
 	}
 }
 
+func TestFactoryTransportResolverReceivesProviderForLegacyProviderSession(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	manager := sessionpkg.NewManager(store, sp)
+
+	info, err := manager.CreateBeadOnly(
+		"opencode",
+		"Probe",
+		"",
+		t.TempDir(),
+		"opencode",
+		"",
+		nil,
+		sessionpkg.ProviderResume{},
+	)
+	if err != nil {
+		t.Fatalf("CreateBeadOnly: %v", err)
+	}
+	if err := store.SetMetadata(info.ID, "mc_session_kind", "provider"); err != nil {
+		t.Fatalf("SetMetadata(mc_session_kind): %v", err)
+	}
+
+	var gotTemplate, gotProvider string
+	factory, err := NewFactory(FactoryConfig{
+		Store:    store,
+		Provider: sp,
+		ResolveTransport: func(template, provider string) string {
+			gotTemplate = template
+			gotProvider = provider
+			if provider == "opencode" {
+				return "acp"
+			}
+			return ""
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewFactory: %v", err)
+	}
+
+	catalog, err := factory.Catalog()
+	if err != nil {
+		t.Fatalf("Catalog: %v", err)
+	}
+	got, err := catalog.Get(info.ID)
+	if err != nil {
+		t.Fatalf("catalog.Get(%q): %v", info.ID, err)
+	}
+	if gotTemplate != "opencode" {
+		t.Fatalf("ResolveTransport template = %q, want %q", gotTemplate, "opencode")
+	}
+	if gotProvider != "opencode" {
+		t.Fatalf("ResolveTransport provider = %q, want %q", gotProvider, "opencode")
+	}
+	if got.Transport != "acp" {
+		t.Fatalf("catalog.Get(%q).Transport = %q, want %q", info.ID, got.Transport, "acp")
+	}
+}
+
 func TestFactorySessionByIDPropagatesResolvedRuntimeError(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
@@ -228,7 +286,7 @@ func TestFactorySessionByIDPropagatesResolvedRuntimeError(t *testing.T) {
 	factory, err := NewFactory(FactoryConfig{
 		Store:    store,
 		Provider: sp,
-		ResolveSessionRuntime: func(sessionpkg.Info, string) (*ResolvedRuntime, error) {
+		ResolveSessionRuntime: func(sessionpkg.Info, string, map[string]string) (*ResolvedRuntime, error) {
 			return nil, wantErr
 		},
 	})

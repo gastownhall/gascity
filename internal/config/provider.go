@@ -1,6 +1,8 @@
 package config
 
 import (
+	"strings"
+
 	"github.com/gastownhall/gascity/internal/shellquote"
 	workerbuiltin "github.com/gastownhall/gascity/internal/worker/builtin"
 )
@@ -27,6 +29,9 @@ type OptionChoice struct {
 	// json:"-" is intentional: FlagArgs must never appear in the public API DTO
 	// (security boundary — prevents clients from seeing internal CLI flags).
 	FlagArgs []string `toml:"flag_args" json:"-"`
+	// FlagAliases are equivalent CLI argument sequences stripped from legacy
+	// provider args. Like FlagArgs, they stay server-side only.
+	FlagAliases [][]string `toml:"flag_aliases,omitempty" json:"-"`
 }
 
 // ProviderSpec defines a named provider's startup parameters.
@@ -50,7 +55,11 @@ type ProviderSpec struct {
 	DisplayName string `toml:"display_name,omitempty"`
 	// Command is the executable to run for this provider.
 	Command string `toml:"command,omitempty"`
-	// Args are default command-line arguments passed to the provider.
+	// Args are default command-line arguments passed to the provider. The
+	// built-in Kiro provider defaults to
+	// ["chat", "--no-interactive", "--agent", "gascity", "--trust-all-tools"];
+	// remove or replace "--trust-all-tools" by defining [providers.kiro].args
+	// explicitly in city.toml.
 	Args []string `toml:"args,omitempty"`
 	// PromptMode controls how prompts are delivered: "arg", "flag", or "none".
 	PromptMode string `toml:"prompt_mode,omitempty" jsonschema:"enum=arg,enum=flag,enum=none,default=arg"`
@@ -65,6 +74,10 @@ type ProviderSpec struct {
 	// EmitsPermissionWarning is tri-state: nil = inherit, &true = enable,
 	// &false = explicit disable.
 	EmitsPermissionWarning *bool `toml:"emits_permission_warning,omitempty"`
+	// AcceptStartupDialogs is tri-state: nil = default startup dialog handling,
+	// &true = force dialog acceptance, &false = suppress it for providers that
+	// handle permissions entirely through launch flags.
+	AcceptStartupDialogs *bool `toml:"accept_startup_dialogs,omitempty"`
 	// Env sets additional environment variables for the provider process.
 	Env map[string]string `toml:"env,omitempty"`
 	// PathCheck overrides the binary name used for PATH detection.
@@ -92,9 +105,13 @@ type ProviderSpec struct {
 	//   "subcommand" → command resume <key>
 	ResumeStyle string `toml:"resume_style,omitempty"`
 	// ResumeCommand is the full shell command to run when resuming a session.
-	// Supports {{.SessionKey}} template variable. When set, takes precedence
-	// over ResumeFlag/ResumeStyle. Example:
+	// Supports only the {{.SessionKey}} template variable. When set, takes precedence
+	// over ResumeFlag/ResumeStyle. When schema-managed defaults are inserted, the
+	// resolver tokenizes and re-emits the command; for subcommand-style resume it
+	// inserts after the ResumeFlag token that precedes {{.SessionKey}}. Example:
 	//   "claude --resume {{.SessionKey}} --dangerously-skip-permissions"
+	// Schema-managed defaults missing from a subcommand-style resume command
+	// are inserted before {{.SessionKey}} during provider resolution.
 	ResumeCommand string `toml:"resume_command,omitempty"`
 	// SessionIDFlag is the CLI flag for creating a session with a specific ID.
 	// Enables the Generate & Pass strategy for session key management.
@@ -103,7 +120,7 @@ type ProviderSpec struct {
 	// PermissionModes maps permission mode names to CLI flags.
 	// Example: {"unrestricted": "--dangerously-skip-permissions", "plan": "--permission-mode plan"}
 	// This is a config-only lookup table consumed by external clients
-	// (e.g., Mission Control) to populate permission mode dropdowns.
+	// (e.g., real-world app) to populate permission mode dropdowns.
 	// Launch-time flag substitution is planned for a follow-up PR —
 	// currently no runtime code reads this field.
 	PermissionModes map[string]string `toml:"permission_modes,omitempty"`
@@ -120,13 +137,19 @@ type ProviderSpec struct {
 	// PrintArgs are CLI arguments that enable one-shot non-interactive mode.
 	// The provider prints its response to stdout and exits. When empty, the
 	// provider does not support one-shot invocation.
-	// Examples: ["-p"] (claude, gemini), ["exec"] (codex)
+	// Examples: ["-p"] (claude, gemini), ["exec"] (codex), ["--quiet", "--prompt"] (kimi)
 	PrintArgs []string `toml:"print_args,omitempty"`
 	// TitleModel is the OptionsSchema model key used for title generation.
 	// Resolved via the "model" option in OptionsSchema to get FlagArgs.
 	// Defaults to the cheapest/fastest model for each provider.
 	// Examples: "haiku" (claude), "o4-mini" (codex), "gemini-2.5-flash" (gemini)
 	TitleModel string `toml:"title_model,omitempty"`
+	// ACPCommand overrides Command when the session transport is ACP.
+	// When empty, Command is used for both tmux and ACP transports.
+	ACPCommand string `toml:"acp_command,omitempty"`
+	// ACPArgs overrides Args when the session transport is ACP.
+	// When nil, Args is used for both tmux and ACP transports.
+	ACPArgs []string `toml:"acp_args,omitempty"`
 }
 
 // Reserved prefixes for the Base field.
@@ -168,6 +191,7 @@ type ResolvedProvider struct {
 	// Provenance records per-field and per-map-key layer attribution.
 	Provenance             ProviderProvenance
 	Command                string
+	Lifecycle              string
 	Args                   []string
 	PromptMode             string
 	PromptFlag             string
@@ -175,6 +199,7 @@ type ResolvedProvider struct {
 	ReadyPromptPrefix      string
 	ProcessNames           []string
 	EmitsPermissionWarning bool
+	AcceptStartupDialogs   *bool
 	Env                    map[string]string
 	SupportsACP            bool
 	SupportsHooks          bool
@@ -187,11 +212,31 @@ type ResolvedProvider struct {
 	OptionsSchema          []ProviderOption
 	PrintArgs              []string
 	TitleModel             string
+	ACPCommand             string
+	ACPArgs                []string
 	// EffectiveDefaults is the fully-merged option default map.
 	// Computed from: schema Default -> provider OptionDefaults -> agent OptionDefaults.
 	// Used by ResolveDefaultArgs() to produce CLI flags and by the API to
-	// tell MC what pre-selections to show.
+	// tell real-world apps what pre-selections to show.
 	EffectiveDefaults map[string]string
+}
+
+const (
+	// SessionTransportACP creates sessions through the Agent Client Protocol.
+	SessionTransportACP = "acp"
+	// SessionTransportTmux creates sessions through the tmux-backed CLI path.
+	SessionTransportTmux = "tmux"
+)
+
+// IsValidSessionTransport reports whether transport is a recognized explicit
+// session transport. The empty string is valid and means provider default.
+func IsValidSessionTransport(transport string) bool {
+	switch strings.TrimSpace(transport) {
+	case "", SessionTransportACP, SessionTransportTmux:
+		return true
+	default:
+		return false
+	}
 }
 
 // CommandString returns the full command line: command followed by args.
@@ -200,6 +245,89 @@ func (rp *ResolvedProvider) CommandString() string {
 		return rp.Command
 	}
 	return rp.Command + " " + shellquote.Join(rp.Args)
+}
+
+// ACPCommandString returns the command line for ACP transport sessions.
+// Each field falls back independently: ACPCommand defaults to Command,
+// and ACPArgs defaults to Args, so partial overrides are supported.
+func (rp *ResolvedProvider) ACPCommandString() string {
+	cmd := rp.ACPCommand
+	args := rp.ACPArgs
+	if cmd == "" {
+		cmd = rp.Command
+	}
+	if args == nil {
+		args = rp.Args
+	}
+	if len(args) == 0 {
+		return cmd
+	}
+	return cmd + " " + shellquote.Join(args)
+}
+
+// DefaultSessionTransport returns the transport used for provider-backed
+// sessions when no template-level session override exists.
+func (rp *ResolvedProvider) DefaultSessionTransport() string {
+	if rp == nil || !rp.SupportsACP {
+		return ""
+	}
+	family := strings.TrimSpace(rp.BuiltinAncestor)
+	if family == "" {
+		family = strings.TrimSpace(rp.Kind)
+	}
+	if family == "" {
+		family = strings.TrimSpace(rp.Name)
+	}
+	if family == "opencode" {
+		return SessionTransportACP
+	}
+	return ""
+}
+
+// ProviderSessionCreateTransport returns the transport to use when creating a
+// provider-backed session without any template-level session override.
+func (rp *ResolvedProvider) ProviderSessionCreateTransport() string {
+	if rp == nil || !rp.SupportsACP {
+		return ""
+	}
+	if transport := rp.DefaultSessionTransport(); transport != "" {
+		return transport
+	}
+	family := strings.TrimSpace(rp.BuiltinAncestor)
+	if family == "" {
+		family = strings.TrimSpace(rp.Kind)
+	}
+	if family == "" {
+		family = strings.TrimSpace(rp.Name)
+	}
+	if family == "kiro" {
+		// Kiro supports explicit ACP sessions, but its chat transport carries
+		// the non-interactive tool trust contract required by coding agents.
+		return ""
+	}
+	if strings.TrimSpace(rp.ACPCommand) != "" || rp.ACPArgs != nil {
+		return SessionTransportACP
+	}
+	return ""
+}
+
+// ResolveSessionCreateTransport returns the transport to use when creating a
+// fresh session from an agent/template configuration.
+func ResolveSessionCreateTransport(agentSession string, resolved *ResolvedProvider) string {
+	agentSession = strings.TrimSpace(agentSession)
+	switch agentSession {
+	case SessionTransportACP:
+		return SessionTransportACP
+	case SessionTransportTmux:
+		return SessionTransportTmux
+	case "":
+		if resolved == nil {
+			return ""
+		}
+		return strings.TrimSpace(resolved.ProviderSessionCreateTransport())
+	default:
+		return agentSession
+	}
 }
 
 // TitleModelFlagArgs resolves the TitleModel key against the "model"
@@ -269,7 +397,6 @@ func BuiltinProviderOrder() []string {
 }
 
 // BuiltinProviders returns the built-in provider presets.
-// These are available without any [providers] section in city.toml.
 func BuiltinProviders() map[string]ProviderSpec {
 	specs := workerbuiltin.BuiltinProviders()
 	out := make(map[string]ProviderSpec, len(specs))
@@ -277,6 +404,13 @@ func BuiltinProviders() map[string]ProviderSpec {
 		out[name] = providerSpecFromWorker(spec)
 	}
 	return out
+}
+
+// BuiltinProviderAlias returns the thin explicit catalog entry used to expose
+// a built-in provider under its canonical key.
+func BuiltinProviderAlias(name string) ProviderSpec {
+	base := BasePrefixBuiltin + strings.TrimSpace(name)
+	return ProviderSpec{Base: &base}
 }
 
 func providerSpecFromWorker(spec workerbuiltin.BuiltinProviderSpec) ProviderSpec {
@@ -293,6 +427,7 @@ func providerSpecFromWorker(spec workerbuiltin.BuiltinProviderSpec) ProviderSpec
 		ReadyPromptPrefix:      spec.ReadyPromptPrefix,
 		ProcessNames:           cloneStrings(spec.ProcessNames),
 		EmitsPermissionWarning: boolPtr(spec.EmitsPermissionWarning),
+		AcceptStartupDialogs:   cloneBoolPtr(spec.AcceptStartupDialogs),
 		Env:                    cloneStringMap(spec.Env),
 		PathCheck:              spec.PathCheck,
 		SupportsACP:            boolPtr(spec.SupportsACP),
@@ -307,6 +442,8 @@ func providerSpecFromWorker(spec workerbuiltin.BuiltinProviderSpec) ProviderSpec
 		OptionsSchema:          providerOptionsFromWorker(spec.OptionsSchema),
 		PrintArgs:              cloneStrings(spec.PrintArgs),
 		TitleModel:             spec.TitleModel,
+		ACPCommand:             spec.ACPCommand,
+		ACPArgs:                cloneStrings(spec.ACPArgs),
 	}
 }
 
@@ -334,9 +471,10 @@ func providerChoicesFromWorker(choices []workerbuiltin.BuiltinOptionChoice) []Op
 	out := make([]OptionChoice, len(choices))
 	for i, choice := range choices {
 		out[i] = OptionChoice{
-			Value:    choice.Value,
-			Label:    choice.Label,
-			FlagArgs: cloneStrings(choice.FlagArgs),
+			Value:       choice.Value,
+			Label:       choice.Label,
+			FlagArgs:    cloneStrings(choice.FlagArgs),
+			FlagAliases: cloneStringSlices(choice.FlagAliases),
 		}
 	}
 	return out
@@ -353,11 +491,30 @@ func cloneStringMap(values map[string]string) map[string]string {
 	return out
 }
 
+func cloneBoolPtr(value *bool) *bool {
+	if value == nil {
+		return nil
+	}
+	cloned := *value
+	return &cloned
+}
+
 func cloneStrings(values []string) []string {
 	if values == nil {
 		return nil
 	}
 	out := make([]string, len(values))
 	copy(out, values)
+	return out
+}
+
+func cloneStringSlices(values [][]string) [][]string {
+	if values == nil {
+		return nil
+	}
+	out := make([][]string, len(values))
+	for i := range values {
+		out[i] = cloneStrings(values[i])
+	}
 	return out
 }

@@ -289,11 +289,10 @@ func metadataDefault(meta map[string]string, key, def string) string {
 }
 
 func withMetadata(base map[string]string, extra map[string]string) map[string]string {
-	size := len(base) + len(extra)
-	if size == 0 {
+	if len(base) == 0 && len(extra) == 0 {
 		return nil
 	}
-	out := make(map[string]string, size)
+	out := make(map[string]string)
 	for k, v := range base {
 		out[k] = v
 	}
@@ -319,7 +318,7 @@ func appendUniqueCopy(slice []string, item string) []string {
 			return out
 		}
 	}
-	out := make([]string, 0, len(slice)+1)
+	out := make([]string, 0, len(slice))
 	out = append(out, slice...)
 	out = append(out, item)
 	return out

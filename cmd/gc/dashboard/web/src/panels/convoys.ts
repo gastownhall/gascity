@@ -100,7 +100,7 @@ export async function renderConvoys(): Promise<void> {
   ]));
 }
 
-function resetConvoysNoCity(): void {
+export function resetConvoysNoCity(): void {
   const container = byId("convoy-list");
   const detail = byId("convoy-detail");
   const create = byId("convoy-create-form");

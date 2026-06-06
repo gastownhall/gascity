@@ -13,7 +13,9 @@ type providerResponse struct {
 	Name         string            `json:"name"`
 	DisplayName  string            `json:"display_name,omitempty"`
 	Command      string            `json:"command,omitempty"`
+	ACPCommand   string            `json:"acp_command,omitempty"`
 	Args         []string          `json:"args,omitempty"`
+	ACPArgs      *[]string         `json:"acp_args,omitempty"`
 	PromptMode   string            `json:"prompt_mode,omitempty"`
 	PromptFlag   string            `json:"prompt_flag,omitempty"`
 	ReadyDelayMs int               `json:"ready_delay_ms,omitempty"`
@@ -40,7 +42,9 @@ func providerFromSpec(name string, spec config.ProviderSpec, builtin, cityLevel 
 		Name:         name,
 		DisplayName:  spec.DisplayName,
 		Command:      spec.Command,
+		ACPCommand:   spec.ACPCommand,
 		Args:         spec.Args,
+		ACPArgs:      optionalStringSlice(spec.ACPArgs),
 		PromptMode:   spec.PromptMode,
 		PromptFlag:   spec.PromptFlag,
 		ReadyDelayMs: spec.ReadyDelayMs,
@@ -48,6 +52,15 @@ func providerFromSpec(name string, spec config.ProviderSpec, builtin, cityLevel 
 		Builtin:      builtin,
 		CityLevel:    cityLevel,
 	}
+}
+
+func optionalStringSlice(values []string) *[]string {
+	if values == nil {
+		return nil
+	}
+	cloned := make([]string, len(values))
+	copy(cloned, values)
+	return &cloned
 }
 
 // toProviderPublicResponse builds the browser-safe DTO from a MERGED

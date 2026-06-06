@@ -31,10 +31,15 @@ Run this from a coordinator workspace that has the target repo checked out
 The goal is parity of outcome, not a verbatim port of upstream's convoy DSL.
 """
 formula = "mol-idea-to-plan"
-version = 2
-contract = "graph.v2"
+
+[requires]
+formula_compiler = ">=2.0.0"
 
 [vars]
+[vars.binding_prefix]
+description = "Import binding prefix for gastown agent identities, including trailing dot when bound."
+default = ""
+
 [vars.problem]
 description = "Raw feature idea, problem statement, or request"
 required = true
@@ -44,7 +49,7 @@ description = "Additional context: constraints, prior decisions, related code, l
 default = ""
 
 [vars.review_target]
-description = "Agent or pool that should execute review legs (for example, my-rig/polecat). Empty means derive $GC_RIG/polecat."
+description = "Agent or pool that should execute review legs (for example, my-rig/{{binding_prefix}}polecat). Empty means derive $GC_RIG/{{binding_prefix}}polecat."
 default = ""
 
 [vars.review_formula]
@@ -78,9 +83,9 @@ cd "$REPO_ROOT"
 REVIEW_TARGET="{{review_target}}"
 if [ -z "$REVIEW_TARGET" ]; then
   if [ -n "$GC_RIG" ]; then
-    REVIEW_TARGET="$GC_RIG/polecat"
+    REVIEW_TARGET="$GC_RIG/{{binding_prefix}}polecat"
   else
-    echo "Pass --var review_target=<rig>/polecat when not running inside a rig session."
+    echo "Pass --var review_target=<rig>/{{binding_prefix}}polecat when not running inside a rig session."
   fi
 fi
 COORDINATOR="$GC_AGENT"

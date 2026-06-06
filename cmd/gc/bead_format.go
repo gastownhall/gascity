@@ -105,6 +105,32 @@ func writeBeadsJSON(bs []beads.Bead, stdout io.Writer) {
 	fmt.Fprintln(stdout, string(data)) //nolint:errcheck // best-effort stdout
 }
 
+// writeBeadJSONWithCache writes a single bead as indented JSON wrapped in
+// an envelope that carries the API-path _cache_age_s staleness signal.
+// Used only on the API routing path; the fallback path omits the envelope
+// by calling writeBeadJSON.
+func writeBeadJSONWithCache(b beads.Bead, cacheAgeS float64, stdout io.Writer) {
+	env := struct {
+		Bead      beads.Bead `json:"bead"`
+		CacheAgeS float64    `json:"_cache_age_s"`
+	}{b, cacheAgeS}
+	data, _ := json.MarshalIndent(env, "", "  ")
+	fmt.Fprintln(stdout, string(data)) //nolint:errcheck // best-effort stdout
+}
+
+// writeBeadsJSONWithCache writes a bead list as indented JSON wrapped in
+// an envelope that carries the API-path _cache_age_s staleness signal.
+// Used only on the API routing path; the fallback path omits the envelope
+// by calling writeBeadsJSON.
+func writeBeadsJSONWithCache(bs []beads.Bead, cacheAgeS float64, stdout io.Writer) {
+	env := struct {
+		Beads     []beads.Bead `json:"beads"`
+		CacheAgeS float64      `json:"_cache_age_s"`
+	}{bs, cacheAgeS}
+	data, _ := json.MarshalIndent(env, "", "  ")
+	fmt.Fprintln(stdout, string(data)) //nolint:errcheck // best-effort stdout
+}
+
 // writeBeadDetail writes a single bead in human-readable detail format.
 func writeBeadDetail(b beads.Bead, stdout io.Writer) {
 	w := func(s string) { fmt.Fprintln(stdout, s) } //nolint:errcheck // best-effort stdout

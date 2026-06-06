@@ -11,11 +11,11 @@ type flakyReadyStore struct {
 	failReady error
 }
 
-func (s *flakyReadyStore) Ready() ([]Bead, error) {
+func (s *flakyReadyStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 	if s.failReady != nil {
 		return nil, s.failReady
 	}
-	return s.MemStore.Ready()
+	return s.MemStore.Ready(query...)
 }
 
 func TestReadyLiveBypassesCachingStore(t *testing.T) {

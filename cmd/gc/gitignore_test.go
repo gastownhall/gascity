@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -12,14 +14,19 @@ import (
 func TestEnsureGitignoreEntries_CreatesNewFile(t *testing.T) {
 	f := fsys.NewFake()
 
-	if err := ensureGitignoreEntries(f, "/city", []string{".gc/", ".beads/*", "!.beads/config.yaml", "!.beads/metadata.json"}); err != nil {
+	if err := ensureGitignoreEntries(f, "/city", cityGitignoreEntries); err != nil {
 		t.Fatalf("ensureGitignoreEntries: %v", err)
 	}
 
 	got := string(f.Files[filepath.Join("/city", ".gitignore")])
-	for _, want := range []string{".gc/", ".beads/*", "!.beads/config.yaml", "!.beads/metadata.json"} {
+	for _, want := range cityGitignoreEntries {
 		if !strings.Contains(got, want) {
 			t.Errorf(".gitignore missing %q; got:\n%s", want, got)
+		}
+	}
+	for _, forbidden := range []string{"!.beads/config.yaml", "!.beads/metadata.json"} {
+		if strings.Contains(got, forbidden) {
+			t.Errorf(".gitignore should keep %q ignored; got:\n%s", forbidden, got)
 		}
 	}
 	if !strings.Contains(got, "# Gas City") {
@@ -27,7 +34,7 @@ func TestEnsureGitignoreEntries_CreatesNewFile(t *testing.T) {
 	}
 }
 
-func TestEnsureGitignoreEntries_RigEntriesTrackCanonicalBeadsFilesOnly(t *testing.T) {
+func TestEnsureGitignoreEntries_RigEntriesKeepBeadsRuntimeIgnored(t *testing.T) {
 	f := fsys.NewFake()
 
 	if err := ensureGitignoreEntries(f, "/rig", rigGitignoreEntries); err != nil {
@@ -40,18 +47,68 @@ func TestEnsureGitignoreEntries_RigEntriesTrackCanonicalBeadsFilesOnly(t *testin
 			t.Errorf("rig .gitignore missing %q; got:\n%s", want, got)
 		}
 	}
-	for _, forbidden := range []string{".gc/", "hooks/", ".runtime/"} {
+	for _, forbidden := range []string{".gc/", "hooks/", "!.beads/config.yaml", "!.beads/metadata.json"} {
 		if strings.Contains(got, forbidden) {
 			t.Errorf("rig .gitignore should not contain %q; got:\n%s", forbidden, got)
 		}
 	}
 }
 
+func TestEnsureGitignoreEntries_BeadsRuntimeFilesSurviveGitClean(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git binary not available")
+	}
+
+	repo := t.TempDir()
+	runGit(t, repo, "init", "-q")
+
+	if err := ensureGitignoreEntries(fsys.OSFS{}, repo, rigGitignoreEntries); err != nil {
+		t.Fatalf("ensureGitignoreEntries: %v", err)
+	}
+	runGit(t, repo, "add", ".gitignore")
+
+	beadsDir := filepath.Join(repo, ".beads")
+	if err := os.MkdirAll(filepath.Join(beadsDir, "dolt"), 0o755); err != nil {
+		t.Fatalf("mkdir .beads/dolt: %v", err)
+	}
+	for _, rel := range []string{
+		filepath.Join(".beads", "config.yaml"),
+		filepath.Join(".beads", "metadata.json"),
+		filepath.Join(".beads", "dolt", "db"),
+	} {
+		if err := os.WriteFile(filepath.Join(repo, rel), []byte("local runtime state\n"), 0o644); err != nil {
+			t.Fatalf("write %s: %v", rel, err)
+		}
+	}
+
+	out := runGit(t, repo, "clean", "-fdn")
+	for _, forbidden := range []string{
+		filepath.Join(".beads", "config.yaml"),
+		filepath.Join(".beads", "metadata.json"),
+		filepath.Join(".beads", "dolt"),
+	} {
+		if strings.Contains(out, forbidden) {
+			t.Fatalf("git clean -fd would remove %s; dry-run output:\n%s", forbidden, out)
+		}
+	}
+}
+
+func runGit(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
+	}
+	return string(out)
+}
+
 func TestEnsureGitignoreEntries_SkipsExisting(t *testing.T) {
 	f := fsys.NewFake()
-	f.Files[filepath.Join("/city", ".gitignore")] = []byte(".gc/\n.beads/\n/.beads/\nnode_modules/\n")
+	f.Files[filepath.Join("/city", ".gitignore")] = []byte(".gc/\n.beads/\n/.beads/\n!.beads/config.yaml\n!.beads/metadata.json\nnode_modules/\n")
 
-	if err := ensureGitignoreEntries(f, "/city", []string{".gc/", ".beads/*", "!.beads/config.yaml", "!.beads/metadata.json"}); err != nil {
+	if err := ensureGitignoreEntries(f, "/city", cityGitignoreEntries); err != nil {
 		t.Fatalf("ensureGitignoreEntries: %v", err)
 	}
 
@@ -61,12 +118,12 @@ func TestEnsureGitignoreEntries_SkipsExisting(t *testing.T) {
 		t.Errorf(".gc/ appears %d times, want 1; got:\n%s", strings.Count(got, ".gc/"), got)
 	}
 	// Canonical .beads rules should be added.
-	for _, want := range []string{".beads/*", "!.beads/config.yaml", "!.beads/metadata.json"} {
+	for _, want := range []string{".beads/*", "!.beads/identity.toml"} {
 		if !strings.Contains(got, want) {
 			t.Errorf(".gitignore missing %q; got:\n%s", want, got)
 		}
 	}
-	for _, legacy := range []string{"\n.beads/\n", "\n/.beads/\n"} {
+	for _, legacy := range []string{"\n.beads/\n", "\n/.beads/\n", "\n!.beads/config.yaml\n", "\n!.beads/metadata.json\n"} {
 		if strings.Contains("\n"+got, legacy) {
 			t.Errorf("legacy .beads ignore %q should be removed; got:\n%s", strings.TrimSpace(legacy), got)
 		}
@@ -98,7 +155,7 @@ func TestEnsureGitignoreEntries_Idempotent(t *testing.T) {
 
 func TestEnsureGitignoreEntries_NoOpWhenAllPresent(t *testing.T) {
 	f := fsys.NewFake()
-	original := ".gc/\n.beads/*\n!.beads/config.yaml\n!.beads/metadata.json\nhooks/\n.runtime/\n"
+	original := ".gc/\n.beads/*\n!.beads/identity.toml\nhooks/\n"
 	f.Files[filepath.Join("/city", ".gitignore")] = []byte(original)
 
 	if err := ensureGitignoreEntries(f, "/city", cityGitignoreEntries); err != nil {
@@ -115,7 +172,7 @@ func TestDoInit_WritesGitignoreEntries(t *testing.T) {
 	f := fsys.NewFake()
 
 	var stdout, stderr bytes.Buffer
-	code := doInit(f, "/bright-lights", defaultWizardConfig(), "", &stdout, &stderr)
+	code := doInit(f, "/bright-lights", defaultWizardConfig(), "", &stdout, &stderr, false)
 	if code != 0 {
 		t.Fatalf("doInit = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -137,7 +194,7 @@ func TestDoInit_GitignoreIdempotent(t *testing.T) {
 	f := fsys.NewFake()
 
 	var stdout, stderr bytes.Buffer
-	code := doInit(f, "/bright-lights", defaultWizardConfig(), "", &stdout, &stderr)
+	code := doInit(f, "/bright-lights", defaultWizardConfig(), "", &stdout, &stderr, false)
 	if code != 0 {
 		t.Fatalf("first doInit = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -152,6 +209,68 @@ func TestDoInit_GitignoreIdempotent(t *testing.T) {
 	second := string(f.Files[filepath.Join("/bright-lights", ".gitignore")])
 	if first != second {
 		t.Errorf("gitignore changed on second pass;\nfirst:  %q\nsecond: %q", first, second)
+	}
+}
+
+// TestEnsureGitignoreEntries_IdentityTomlNegationPresent locks designer §6:
+// both city- and rig-rendered .gitignore must contain
+// "!.beads/identity.toml" so the identity file remains commit-eligible while
+// runtime bead state stays ignored.
+func TestEnsureGitignoreEntries_IdentityTomlNegationPresent(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		dir     string
+		entries []string
+	}{
+		{"city", "/city", cityGitignoreEntries},
+		{"rig", "/rig", rigGitignoreEntries},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := fsys.NewFake()
+			if err := ensureGitignoreEntries(f, tc.dir, tc.entries); err != nil {
+				t.Fatalf("ensureGitignoreEntries: %v", err)
+			}
+			got := string(f.Files[filepath.Join(tc.dir, ".gitignore")])
+			if !strings.Contains(got, "!.beads/identity.toml") {
+				t.Errorf("%s .gitignore missing %q; got:\n%s", tc.name, "!.beads/identity.toml", got)
+			}
+		})
+	}
+}
+
+// TestEnsureGitignoreEntries_IdentityTomlNegationAfterGlob locks the
+// ordering invariant: "!.beads/identity.toml" must appear AFTER
+// ".beads/*" in the rendered output, otherwise the negation is inert.
+// This catches the most common regression — alphabetical reorders of
+// the slice.
+func TestEnsureGitignoreEntries_IdentityTomlNegationAfterGlob(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		dir     string
+		entries []string
+	}{
+		{"city", "/city", cityGitignoreEntries},
+		{"rig", "/rig", rigGitignoreEntries},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := fsys.NewFake()
+			if err := ensureGitignoreEntries(f, tc.dir, tc.entries); err != nil {
+				t.Fatalf("ensureGitignoreEntries: %v", err)
+			}
+			got := string(f.Files[filepath.Join(tc.dir, ".gitignore")])
+			globIdx := strings.Index(got, ".beads/*")
+			negIdx := strings.Index(got, "!.beads/identity.toml")
+			if globIdx < 0 {
+				t.Fatalf("%s .gitignore missing %q; got:\n%s", tc.name, ".beads/*", got)
+			}
+			if negIdx < 0 {
+				t.Fatalf("%s .gitignore missing %q; got:\n%s", tc.name, "!.beads/identity.toml", got)
+			}
+			if negIdx < globIdx {
+				t.Errorf("%s .gitignore: %q must appear AFTER %q (negation requires it); got:\n%s",
+					tc.name, "!.beads/identity.toml", ".beads/*", got)
+			}
+		})
 	}
 }
 

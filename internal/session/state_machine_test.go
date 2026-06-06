@@ -16,7 +16,7 @@ func TestTransitionLegalMoves(t *testing.T) {
 		cmd  TransitionCommand
 		to   State
 	}{
-		{StateNone, CmdCreate, StateCreating},
+		{StateNone, CmdCreate, StateStartPending},
 		{StateCreating, CmdReady, StateActive},
 
 		{StateActive, CmdSuspend, StateSuspended},
@@ -45,6 +45,7 @@ func TestTransitionLegalMoves(t *testing.T) {
 		{StateAsleep, CmdClose, StateClosed},
 		{StateSuspended, CmdClose, StateClosed},
 		{StateDraining, CmdClose, StateClosed},
+		{StateStartPending, CmdClose, StateClosed},
 		{StateCreating, CmdClose, StateClosed},
 		{StateArchived, CmdClose, StateClosed},
 		{StateQuarantined, CmdClose, StateClosed},

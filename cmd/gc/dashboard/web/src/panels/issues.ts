@@ -27,7 +27,7 @@ export async function renderIssues(): Promise<void> {
     api.GET("/v0/city/{cityName}/beads", {
       params: { path: { cityName: city }, query: { status: "in_progress", limit: 500 } },
     }),
-    getOptions(true),
+    getOptions(),
   ]);
   if ((openR.error && progressR.error) || (!openR.data?.items && !progressR.data?.items)) {
     clear(issuesList);
@@ -35,14 +35,10 @@ export async function renderIssues(): Promise<void> {
     return;
   }
 
-  allIssues = [...(openR.data?.items ?? []), ...(progressR.data?.items ?? [])]
-    .filter((bead) => !isInternalBead(bead))
-    .sort((a, b) => {
-      const pa = beadPriority(a.priority);
-      const pb = beadPriority(b.priority);
-      if (pa !== pb) return pa - pb;
-      return (b.created_at ?? "").localeCompare(a.created_at ?? "");
-    });
+  allIssues = sortIssues(
+    [...(openR.data?.items ?? []), ...(progressR.data?.items ?? [])]
+      .filter((bead) => !isInternalBead(bead)),
+  );
   byId("issues-count")!.textContent = String(allIssues.length);
 
   const rigTabs = byId("rig-filter-tabs");
@@ -55,7 +51,7 @@ export async function renderIssues(): Promise<void> {
   renderIssueTable();
 }
 
-function resetIssuesNoCity(): void {
+export function resetIssuesNoCity(): void {
   const issuesList = byId("issues-list");
   const rigTabs = byId("rig-filter-tabs");
   const detail = byId("issue-detail");
@@ -65,6 +61,7 @@ function resetIssuesNoCity(): void {
   const detailOpen = detail.style.display === "block";
   detail.style.display = "none";
   issuesList.style.display = "block";
+  clearIssueDetailContent();
   clear(issuesList);
   issuesList.append(el("div", { class: "empty-state" }, [el("p", {}, ["Select a city to view beads"])]));
   clear(rigTabs);
@@ -74,6 +71,33 @@ function resetIssuesNoCity(): void {
   rigTabs.append(rigButton("all", true));
   byId("issues-count")!.textContent = "0";
   if (detailOpen) popPause();
+}
+
+function clearIssueDetailContent(): void {
+  [
+    "issue-detail-id",
+    "issue-detail-title-text",
+    "issue-detail-description",
+    "issue-detail-status",
+    "issue-detail-type",
+    "issue-detail-owner",
+    "issue-detail-created",
+    "issue-detail-updated",
+  ].forEach((id) => {
+    const node = byId(id);
+    if (node) node.textContent = "";
+  });
+  const priority = byId("issue-detail-priority");
+  if (priority) {
+    priority.className = "badge";
+    priority.textContent = "";
+  }
+  ["issue-detail-actions", "issue-detail-depends-on", "issue-detail-blocks"].forEach((id) => {
+    const node = byId(id);
+    if (node) clear(node);
+  });
+  byId("issue-detail-deps")?.style.setProperty("display", "none");
+  byId("issue-detail-blocks-section")?.style.setProperty("display", "none");
 }
 
 function renderIssueTable(): void {
@@ -153,6 +177,15 @@ function inferRig(issue: BeadRecord): string {
 function isInternalBead(issue: BeadRecord): boolean {
   if ((issue.issue_type ?? "").toLowerCase() === "convoy") return true;
   return (issue.labels ?? []).some((label) => label.startsWith("gc:queue") || label.startsWith("gc:message"));
+}
+
+function sortIssues(issues: BeadRecord[]): BeadRecord[] {
+  return [...issues].sort((a, b) => {
+    const pa = beadPriority(a.priority);
+    const pb = beadPriority(b.priority);
+    if (pa !== pb) return pa - pb;
+    return (b.created_at ?? "").localeCompare(a.created_at ?? "");
+  });
 }
 
 export function installIssueInteractions(): void {
@@ -248,10 +281,28 @@ async function openIssueDetail(issueID: string): Promise<void> {
   byId("issue-detail-status")!.className = `issue-status ${issue.status ?? "open"}`;
   byId("issue-detail-type")!.textContent = issue.issue_type ? `Type: ${issue.issue_type}` : "";
   byId("issue-detail-owner")!.textContent = issue.assignee ? `Owner: ${issue.assignee}` : "Owner: unassigned";
-  byId("issue-detail-created")!.textContent = issue.created_at ? `Created: ${formatTimestamp(issue.created_at)}` : "";
+  renderIssueTimestamp("issue-detail-created", "Created", issue.created_at);
+  renderIssueTimestamp("issue-detail-updated", "Updated", updatedTimestampForDetail(issue));
 
   renderIssueActions(issue, options.agents);
   renderDependencies(depsR.data?.children ?? []);
+}
+
+function renderIssueTimestamp(elementID: string, label: string, timestamp: string | undefined | null): void {
+  const node = byId(elementID);
+  if (!node) return;
+  clear(node);
+  if (!timestamp) return;
+  node.append(`${label}: `, el("time", { datetime: timestamp }, [formatTimestamp(timestamp)]));
+}
+
+function updatedTimestampForDetail(issue: BeadRecord): string | undefined {
+  if (!issue.updated_at || !issue.created_at) return undefined;
+  const updatedMs = Date.parse(issue.updated_at);
+  const createdMs = Date.parse(issue.created_at);
+  if (!Number.isFinite(updatedMs) || !Number.isFinite(createdMs)) return undefined;
+  if (Math.abs(updatedMs - createdMs) <= 1000) return undefined;
+  return issue.updated_at;
 }
 
 function renderDependencies(children: BeadRecord[]): void {
@@ -311,7 +362,7 @@ function actionButton(label: string, klass: string, onClick: () => void): HTMLEl
 }
 
 function prioritySelect(issueID: string, current: number | undefined): HTMLElement {
-  const select = el("select", { class: "issue-action-select", id: "issue-action-priority" }) as HTMLSelectElement;
+  const select = el("select", { class: "issue-action-select", id: "issue-action-priority", "aria-label": "Priority" }) as HTMLSelectElement;
   [1, 2, 3, 4].forEach((priority) => {
     const option = el("option", { value: priority, selected: beadPriority(current) === priority }, [`P${priority}`]) as HTMLOptionElement;
     select.append(option);
@@ -323,7 +374,7 @@ function prioritySelect(issueID: string, current: number | undefined): HTMLEleme
 }
 
 function assigneeSelect(issueID: string, current: string | undefined, agents: string[]): HTMLElement {
-  const select = el("select", { class: "issue-action-select", id: "issue-action-assignee" }) as HTMLSelectElement;
+  const select = el("select", { class: "issue-action-select", id: "issue-action-assignee", "aria-label": "Assignee" }) as HTMLSelectElement;
   select.append(el("option", { value: "" }, ["Unassigned"]));
   agents.forEach((agent) => {
     select.append(el("option", { value: agent, selected: current === agent }, [agent]));

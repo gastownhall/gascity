@@ -183,6 +183,9 @@ func deepCopyResolvedProvider(r ResolvedProvider) ResolvedProvider {
 					if c.FlagArgs != nil {
 						nc.FlagArgs = append([]string(nil), c.FlagArgs...)
 					}
+					if c.FlagAliases != nil {
+						nc.FlagAliases = cloneStringSlices(c.FlagAliases)
+					}
 					nopt.Choices[j] = nc
 				}
 			}

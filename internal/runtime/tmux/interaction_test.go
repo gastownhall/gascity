@@ -1,6 +1,7 @@
 package tmux
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -191,6 +192,35 @@ func TestPhase2ProviderPendingInteractionSeam(t *testing.T) {
 	reporter.Require(t, pendingInteractionSeamResult(session, pending, err, fe.calls))
 }
 
+func TestProviderPendingMapsTmuxSessionNotFoundToRuntimeSentinel(t *testing.T) {
+	provider := &Provider{
+		tm: &Tmux{
+			exec: &fakeExecutor{err: ErrSessionNotFound},
+		},
+	}
+
+	pending, err := provider.Pending("missing")
+	if pending != nil {
+		t.Fatalf("Pending = %#v, want nil", pending)
+	}
+	if !errors.Is(err, runtime.ErrSessionNotFound) {
+		t.Fatalf("Pending error = %v, want runtime.ErrSessionNotFound", err)
+	}
+}
+
+func TestProviderRespondMapsTmuxSessionNotFoundToRuntimeSentinel(t *testing.T) {
+	provider := &Provider{
+		tm: &Tmux{
+			exec: &fakeExecutor{err: ErrSessionNotFound},
+		},
+	}
+
+	err := provider.Respond("missing", runtime.InteractionResponse{Action: "approve"})
+	if !errors.Is(err, runtime.ErrSessionNotFound) {
+		t.Fatalf("Respond error = %v, want runtime.ErrSessionNotFound", err)
+	}
+}
+
 func TestPhase2ProviderRespondRejectsMismatchedRequest(t *testing.T) {
 	reporter := workertest.NewSuiteReporter(t, "phase2-tmux-reject", map[string]string{
 		"tier":      "worker-core",
@@ -221,9 +251,10 @@ func TestPhase2ProviderRespondApprovesAndClearsPrompt(t *testing.T) {
 	session := "phase2-approve"
 	fe := &fakeExecutor{
 		outs: []string{
-			approvalPromptPane(),
-			"",
-			`assistant ready`,
+			approvalPromptPane(), // pre-verify capture: prompt present
+			"0",                  // #{pane_in_mode} probe -> not parked (no cancel)
+			"",                   // send-keys -l result (ignored)
+			`assistant ready`,    // poll capture: prompt cleared
 		},
 	}
 	provider := &Provider{
@@ -387,12 +418,17 @@ func respondInteractionSeamResult(session string, err error, calls [][]string) w
 		evidence["error"] = err.Error()
 		return workertest.Fail(profile, workertest.RequirementInteractionRespond, fmt.Sprintf("Respond: %v", err)).WithEvidence(evidence)
 	}
-	if len(calls) != 3 {
+	if len(calls) != 4 {
 		return workertest.Fail(profile, workertest.RequirementInteractionRespond,
-			fmt.Sprintf("tmux calls = %d, want 3", len(calls))).WithEvidence(evidence)
+			fmt.Sprintf("tmux calls = %d, want 4", len(calls))).WithEvidence(evidence)
 	}
+	// The #{pane_in_mode} probe is the ga-c4w major #2 copy-mode guard: Respond
+	// checks whether the pane is parked in copy-mode before delivering the
+	// keystroke. Here the probe reports not-parked ("0"), so no -X cancel is
+	// issued and delivery is otherwise unchanged.
 	wantCalls := [][]string{
 		{"-u", "-L", "phase2-sock", "capture-pane", "-p", "-t", session, "-S", "-40"},
+		{"-u", "-L", "phase2-sock", "display-message", "-t", session, "-p", "#{pane_in_mode}"},
 		{"-u", "-L", "phase2-sock", "send-keys", "-t", session, "-l", "1"},
 		{"-u", "-L", "phase2-sock", "capture-pane", "-p", "-t", session, "-S", "-40"},
 	}
@@ -407,6 +443,7 @@ func respondInteractionSeamResult(session string, err error, calls [][]string) w
 		strings.Join(calls[0], " "),
 		strings.Join(calls[1], " "),
 		strings.Join(calls[2], " "),
+		strings.Join(calls[3], " "),
 	}, " | ")
 	return workertest.Pass(profile, workertest.RequirementInteractionRespond, "tmux provider approved the interaction and cleared the prompt").WithEvidence(evidence)
 }

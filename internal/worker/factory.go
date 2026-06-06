@@ -13,7 +13,7 @@ import (
 
 // SessionRuntimeResolver resolves provider/runtime details for an existing
 // session-backed worker without exposing SessionSpec mutation to callers.
-type SessionRuntimeResolver func(info sessionpkg.Info, sessionKind string) (*ResolvedRuntime, error)
+type SessionRuntimeResolver func(info sessionpkg.Info, sessionKind string, metadata map[string]string) (*ResolvedRuntime, error)
 
 // FactoryConfig constructs worker-owned session handles and catalogs without
 // leaking session.Manager setup into higher layers.
@@ -23,7 +23,7 @@ type FactoryConfig struct {
 	CityPath              string
 	SearchPaths           []string
 	Recorder              events.Recorder
-	ResolveTransport      func(template string) string
+	ResolveTransport      func(template, provider string) string
 	ResolveSessionRuntime SessionRuntimeResolver
 }
 
@@ -44,7 +44,12 @@ func NewFactory(cfg FactoryConfig) (*Factory, error) {
 	var manager *sessionpkg.Manager
 	switch {
 	case cfg.ResolveTransport != nil:
-		manager = sessionpkg.NewManagerWithTransportResolverAndCityPath(cfg.Store, cfg.Provider, cfg.CityPath, cfg.ResolveTransport)
+		manager = sessionpkg.NewManagerWithTransportResolverAndCityPath(
+			cfg.Store,
+			cfg.Provider,
+			cfg.CityPath,
+			cfg.ResolveTransport,
+		)
 	case cfg.CityPath != "":
 		manager = sessionpkg.NewManagerWithCityPath(cfg.Store, cfg.Provider, cfg.CityPath)
 	default:
@@ -93,13 +98,23 @@ func (f *Factory) Session(spec SessionSpec) (*SessionHandle, error) {
 // SessionByID rebuilds a session-backed worker handle from persisted session
 // metadata and the factory's optional resolved-runtime hook.
 func (f *Factory) SessionByID(id string) (Handle, error) {
-	info, err := f.manager.Get(id)
+	info, bead, err := f.manager.GetWithBead(id)
 	if err != nil {
 		return nil, err
 	}
+	return f.sessionFromInfoAndBead(info, bead)
+}
 
+// SessionByLoadedBead is like SessionByID but uses an already-loaded bead,
+// avoiding a redundant store.Get for callers that just resolved it (e.g.
+// via session.ResolveSessionBeadByExactID).
+func (f *Factory) SessionByLoadedBead(bead beads.Bead) (Handle, error) {
+	return f.sessionFromInfoAndBead(f.manager.SessionInfoFromBead(bead), bead)
+}
+
+func (f *Factory) sessionFromInfoAndBead(info sessionpkg.Info, bead beads.Bead) (Handle, error) {
 	spec := SessionSpec{
-		ID:       id,
+		ID:       info.ID,
 		Template: info.Template,
 		Title:    info.Title,
 		Alias:    info.Alias,
@@ -112,17 +127,13 @@ func (f *Factory) SessionByID(id string) (Handle, error) {
 			ResumeCommand: info.ResumeCommand,
 		},
 	}
-	sessionKind := ""
-	if f.store != nil {
-		if bead, beadErr := f.store.Get(id); beadErr == nil {
-			sessionKind = strings.TrimSpace(bead.Metadata["mc_session_kind"])
-			if profile := strings.TrimSpace(bead.Metadata["worker_profile"]); profile != "" {
-				spec.Profile = Profile(profile)
-			}
-		}
+	sessionKind := strings.TrimSpace(bead.Metadata["real_world_app_session_kind"])
+	if profile := strings.TrimSpace(bead.Metadata["worker_profile"]); profile != "" {
+		spec.Profile = Profile(profile)
 	}
+	metadata := cloneStringMap(bead.Metadata)
 	if f.resolveSessionRuntime != nil {
-		resolved, err := f.resolveSessionRuntime(info, sessionKind)
+		resolved, err := f.resolveSessionRuntime(info, sessionKind, metadata)
 		if err != nil {
 			return nil, err
 		}

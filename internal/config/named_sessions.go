@@ -54,7 +54,39 @@ func FindAgent(cfg *City, identity string) *Agent {
 			return &cfg.Agents[i]
 		}
 	}
-	return nil
+	dir, name := ParseQualifiedName(identity)
+	if dir == "" || name == "" {
+		return nil
+	}
+	if !hasRigNamed(cfg, dir) {
+		return nil
+	}
+	var match *Agent
+	for i := range cfg.Agents {
+		a := &cfg.Agents[i]
+		if a.Name != name || a.Dir != "" || a.Scope != "rig" {
+			continue
+		}
+		if match != nil {
+			return nil
+		}
+		match = a
+	}
+	if match == nil {
+		return nil
+	}
+	synth := *match
+	synth.Dir = dir
+	return &synth
+}
+
+func hasRigNamed(cfg *City, name string) bool {
+	for _, rig := range cfg.Rigs {
+		if rig.Name == name {
+			return true
+		}
+	}
+	return false
 }
 
 // EffectiveCityName returns the name used for deterministic runtime naming.

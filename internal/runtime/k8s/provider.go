@@ -37,10 +37,21 @@ type Provider struct {
 	memRequest         string
 	cpuLimit           string
 	memLimit           string
-	serviceAccount     string        // pod service account name (GC_K8S_SERVICE_ACCOUNT)
-	prebaked           bool          // skip staging + init container for prebaked images
-	postStartSettle    time.Duration // settle time before post-start liveness check
-	stderr             io.Writer     // warning output (default os.Stderr)
+	serviceAccount     string              // pod service account name (GC_K8S_SERVICE_ACCOUNT)
+	prebaked           bool                // skip staging + init container for prebaked images
+	nodeSelector       map[string]string   // GC_K8S_NODE_SELECTOR (JSON)
+	tolerations        []corev1.Toleration // GC_K8S_TOLERATIONS (JSON)
+	affinity           *corev1.Affinity    // GC_K8S_AFFINITY (JSON)
+	priorityClassName  string              // GC_K8S_PRIORITY_CLASS_NAME
+	postStartSettle    time.Duration       // settle time before post-start liveness check
+	stderr             io.Writer           // warning output (default os.Stderr)
+}
+
+type schedulingFields struct {
+	nodeSelector      map[string]string
+	tolerations       []corev1.Toleration
+	affinity          *corev1.Affinity
+	priorityClassName string
 }
 
 // NewProvider creates a K8s session provider.
@@ -79,6 +90,11 @@ func NewProvider() (*Provider, error) {
 		return nil, err
 	}
 
+	scheduling, err := parseSchedulingEnv()
+	if err != nil {
+		return nil, err
+	}
+
 	return &Provider{
 		ops: &realK8sOps{
 			clientset:  clientset,
@@ -98,7 +114,32 @@ func NewProvider() (*Provider, error) {
 		prebaked:           os.Getenv("GC_K8S_PREBAKED") == "true",
 		postStartSettle:    3 * time.Second,
 		stderr:             os.Stderr,
+		nodeSelector:       scheduling.nodeSelector,
+		tolerations:        scheduling.tolerations,
+		affinity:           scheduling.affinity,
+		priorityClassName:  scheduling.priorityClassName,
 	}, nil
+}
+
+func parseSchedulingEnv() (schedulingFields, error) {
+	var scheduling schedulingFields
+	if v := os.Getenv("GC_K8S_NODE_SELECTOR"); v != "" {
+		if err := json.Unmarshal([]byte(v), &scheduling.nodeSelector); err != nil {
+			return schedulingFields{}, fmt.Errorf("parsing GC_K8S_NODE_SELECTOR: %w", err)
+		}
+	}
+	if v := os.Getenv("GC_K8S_TOLERATIONS"); v != "" {
+		if err := json.Unmarshal([]byte(v), &scheduling.tolerations); err != nil {
+			return schedulingFields{}, fmt.Errorf("parsing GC_K8S_TOLERATIONS: %w", err)
+		}
+	}
+	if v := os.Getenv("GC_K8S_AFFINITY"); v != "" {
+		if err := json.Unmarshal([]byte(v), &scheduling.affinity); err != nil {
+			return schedulingFields{}, fmt.Errorf("parsing GC_K8S_AFFINITY: %w", err)
+		}
+	}
+	scheduling.priorityClassName = os.Getenv("GC_K8S_PRIORITY_CLASS_NAME")
+	return scheduling, nil
 }
 
 // newProviderWithOps creates a provider with a custom k8sOps (for testing).
@@ -238,12 +279,19 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		}
 	}
 
-	// Post-start liveness check: verify the session survived startup.
+	requiresPostStartLiveness := k8sRequiresPostStartLiveness(cfg)
+
+	// Post-start liveness check: verify interactive sessions survived startup.
 	// Agents that fail immediately (e.g. --resume with a stale session key)
 	// exit within a second. A brief settle lets us detect this before
 	// returning success to the reconciler, which triggers recordWakeFailure
 	// and the crash-loop recovery (clear session_key, bump continuation_epoch).
-	if p.postStartSettle > 0 {
+	//
+	// Some configured commands are intentionally one-turn processes. Those
+	// should return from Start after the first tmux appearance and let normal
+	// session reconciliation observe completion, rather than converting clean
+	// command exit into startup failure.
+	if requiresPostStartLiveness && p.postStartSettle > 0 {
 		timer := time.NewTimer(p.postStartSettle)
 		defer timer.Stop()
 		select {
@@ -253,12 +301,14 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		case <-timer.C:
 		}
 	}
-	_, tmuxErr := p.ops.execInPod(ctx, podName, "agent",
-		[]string{"tmux", "has-session", "-t", tmuxSession}, nil)
-	if tmuxErr != nil {
-		cleanup("session died immediately after startup")
-		return fmt.Errorf("%w: session %q died immediately after startup: %w",
-			runtime.ErrSessionDiedDuringStartup, name, tmuxErr)
+	if requiresPostStartLiveness {
+		_, tmuxErr := p.ops.execInPod(ctx, podName, "agent",
+			[]string{"tmux", "has-session", "-t", tmuxSession}, nil)
+		if tmuxErr != nil {
+			cleanup("session died immediately after startup")
+			return fmt.Errorf("%w: session %q died immediately after startup: %w",
+				runtime.ErrSessionDiedDuringStartup, name, tmuxErr)
+		}
 	}
 
 	// Send initial nudge if configured (matches tmux adapter step 6).
@@ -267,6 +317,13 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	}
 
 	return nil
+}
+
+func k8sRequiresPostStartLiveness(cfg runtime.Config) bool {
+	if cfg.Lifecycle == runtime.LifecycleOneShot {
+		return false
+	}
+	return runtime.HasManagedStartupHints(cfg)
 }
 
 // Stop deletes the pod for the named session. Idempotent.
@@ -747,7 +804,7 @@ func initBeadsInPod(ctx context.Context, ops k8sOps, podName string, cfg runtime
 			`else PREFIX=$(echo '%s' | base64 -d) && `+
 			`DOLT_HOST=$(echo '%s' | base64 -d) && `+
 			`DOLT_PORT=$(echo '%s' | base64 -d) && `+
-			`yes | bd init --server --server-host "$DOLT_HOST" --server-port "$DOLT_PORT" -p "$PREFIX" --skip-hooks --skip-agents; fi`,
+			`yes | BEADS_DIR="$WD/.beads" bd init --server --server-host "$DOLT_HOST" --server-port "$DOLT_PORT" -p "$PREFIX" --skip-hooks --skip-agents; fi`,
 		storeRootB64, patchB64, prefixB64,
 		base64.StdEncoding.EncodeToString([]byte(doltHost)),
 		base64.StdEncoding.EncodeToString([]byte(doltPort)),

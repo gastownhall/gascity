@@ -3,4 +3,11 @@ wake_mode = "fresh"
 work_dir = ".gc/agents/{{.Rig}}/witness"
 nudge = "Run 'gc prime' to check worker status and begin patrol cycle."
 idle_timeout = "1h"
+# Preemptively cycle the witness before the typical provider cred-cache
+# lifetime. Claude Code (Bedrock) caches AWS creds at session start and can
+# wedge once the underlying STS/SSO token expires (~8h). Restarting under
+# 8h picks up fresh creds without user intervention. Controller gates this
+# on idle: a mid-turn witness is left alone until it settles. See gascity#2025.
+max_session_age = "5h"
+max_session_age_jitter = "15m"
 max_active_sessions = 1

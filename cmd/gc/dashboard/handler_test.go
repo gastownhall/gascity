@@ -132,3 +132,38 @@ func TestStaticHandlerAcceptsClientLogs(t *testing.T) {
 		t.Fatalf("client log output missing details: %s", logs.String())
 	}
 }
+
+func TestStaticHandlerAcceptsClientLogBatches(t *testing.T) {
+	h, err := NewStaticHandler("http://127.0.0.1:8372")
+	if err != nil {
+		t.Fatalf("NewStaticHandler: %v", err)
+	}
+
+	var logs bytes.Buffer
+	oldWriter := log.Writer()
+	oldFlags := log.Flags()
+	log.SetOutput(&logs)
+	log.SetFlags(0)
+	t.Cleanup(func() {
+		log.SetOutput(oldWriter)
+		log.SetFlags(oldFlags)
+	})
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/__client-log", strings.NewReader(`[
+		{"level":"warn","scope":"sse","message":"refresh delayed","details":{"pending":2}},
+		{"level":"error","scope":"api","message":"request failed","details":{"status":500}}
+	]`))
+	req.Header.Set("Content-Type", "application/json")
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("POST /__client-log: %d %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(logs.String(), `client[warn]`) || !strings.Contains(logs.String(), `scope=sse`) {
+		t.Fatalf("client log batch missing warn entry: %s", logs.String())
+	}
+	if !strings.Contains(logs.String(), `client[error]`) || !strings.Contains(logs.String(), `scope=api`) {
+		t.Fatalf("client log batch missing error entry: %s", logs.String())
+	}
+}

@@ -3,7 +3,7 @@ package bd
 
 import "embed"
 
-// PackFS contains the bd pack files: pack.toml, doctor/, template-fragments/, and assets/.
+// PackFS contains the bd pack files, including assets/scripts/gc-beads-bd.sh.
 //
 //go:embed pack.toml doctor template-fragments all:assets
 var PackFS embed.FS

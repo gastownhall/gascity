@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+status=0
+
+while IFS= read -r file; do
+  if [ -z "$file" ] || [ ! -f "$file" ]; then
+    continue
+  fi
+
+  tmp=$(mktemp "${TMPDIR:-/tmp}/gc-precommit-fmt.XXXXXX")
+  if ! golangci-lint fmt --stdin <"$file" >"$tmp"; then
+    rm -f "$tmp"
+    status=1
+    continue
+  fi
+
+  if cmp -s "$file" "$tmp"; then
+    rm -f "$tmp"
+    continue
+  fi
+
+  cat "$tmp" >"$file"
+  rm -f "$tmp"
+done
+
+if [ "$status" -ne 0 ]; then
+  echo "pre-commit: golangci-lint fmt failed for one or more staged Go files" >&2
+fi
+
+exit "$status"

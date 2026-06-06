@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"log"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -17,13 +19,15 @@ type mockFetcher struct {
 	mu       sync.Mutex
 	calls    int
 	sessions map[string]bool
+	state    runtimeStateSnapshot
 	err      error
 	delay    time.Duration
 }
 
-func (m *mockFetcher) FetchRunning(ctx context.Context) (map[string]bool, error) {
+func (m *mockFetcher) FetchState(ctx context.Context) (runtimeStateSnapshot, error) {
 	m.mu.Lock()
 	m.calls++
+	state := m.state
 	sessions := m.sessions
 	err := m.err
 	delay := m.delay
@@ -33,10 +37,16 @@ func (m *mockFetcher) FetchRunning(ctx context.Context) (map[string]bool, error)
 		select {
 		case <-time.After(delay):
 		case <-ctx.Done():
-			return nil, ctx.Err()
+			return runtimeStateSnapshot{}, ctx.Err()
 		}
 	}
-	return sessions, err
+	if state.Sessions == nil && sessions != nil {
+		state.Sessions = make(map[string]sessionRuntimeState, len(sessions))
+		for name, running := range sessions {
+			state.Sessions[name] = sessionRuntimeState{Running: running}
+		}
+	}
+	return state, err
 }
 
 func (m *mockFetcher) getCalls() int {
@@ -49,7 +59,41 @@ func (m *mockFetcher) setResult(sessions map[string]bool, err error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.sessions = sessions
+	m.state = runtimeStateSnapshot{}
 	m.err = err
+}
+
+type controlledRefreshFetcher struct {
+	mu        sync.Mutex
+	calls     int
+	state     runtimeStateSnapshot
+	blockCall int
+	entered   chan struct{}
+	release   chan struct{}
+}
+
+func (f *controlledRefreshFetcher) FetchState(ctx context.Context) (runtimeStateSnapshot, error) {
+	f.mu.Lock()
+	f.calls++
+	call := f.calls
+	state := f.state
+	f.mu.Unlock()
+
+	if call == f.blockCall {
+		close(f.entered)
+		select {
+		case <-f.release:
+		case <-ctx.Done():
+			return runtimeStateSnapshot{}, ctx.Err()
+		}
+	}
+	return state, nil
+}
+
+func (f *controlledRefreshFetcher) getCalls() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.calls
 }
 
 func TestStateCache_FreshCacheReturnsCorrectState(t *testing.T) {
@@ -134,6 +178,103 @@ func TestStateCache_ConcurrentCallersCoalesceIntoOneFetch(t *testing.T) {
 	}
 }
 
+func TestStateCache_ProcessAliveUsesFreshSnapshot(t *testing.T) {
+	f := &mockFetcher{
+		state: runtimeStateSnapshot{
+			Sessions: map[string]sessionRuntimeState{
+				"agent-1": {
+					Running: true,
+					Panes: []paneRuntimeState{{
+						Command: "claude",
+						PID:     "101",
+					}},
+				},
+			},
+			Processes: newProcessSnapshot([]processRuntimeState{{
+				PID:     "101",
+				PPID:    "1",
+				Command: "claude",
+				Args:    "claude --dangerously-skip-permissions",
+			}}),
+		},
+	}
+	cache := NewStateCache(f, 2*time.Second)
+
+	if !cache.ProcessAlive("agent-1", []string{"claude"}) {
+		t.Fatal("ProcessAlive(agent-1, claude) = false, want true")
+	}
+	if !cache.IsRunning("agent-1") {
+		t.Fatal("IsRunning(agent-1) = false, want true from same snapshot")
+	}
+	if cache.ProcessAlive("agent-1", []string{"codex"}) {
+		t.Fatal("ProcessAlive(agent-1, codex) = true, want false")
+	}
+	if got := f.getCalls(); got != 1 {
+		t.Fatalf("fetch calls = %d, want 1 across ProcessAlive and IsRunning", got)
+	}
+}
+
+func TestStateCache_ProcessAliveMatchesShellDescendantFromSnapshot(t *testing.T) {
+	f := &mockFetcher{
+		state: runtimeStateSnapshot{
+			Sessions: map[string]sessionRuntimeState{
+				"agent-1": {
+					Running: true,
+					Panes: []paneRuntimeState{{
+						Command: "bash",
+						PID:     "101",
+					}},
+				},
+			},
+			Processes: newProcessSnapshot([]processRuntimeState{
+				{PID: "101", PPID: "1", Command: "bash", Args: "bash -lc codex"},
+				{PID: "102", PPID: "101", Command: "node", Args: "node /usr/local/bin/codex"},
+			}),
+		},
+	}
+	cache := NewStateCache(f, 2*time.Second)
+
+	if !cache.ProcessAlive("agent-1", []string{"codex"}) {
+		t.Fatal("ProcessAlive(agent-1, codex) = false, want true from cached descendant snapshot")
+	}
+	if got := f.getCalls(); got != 1 {
+		t.Fatalf("fetch calls = %d, want 1", got)
+	}
+}
+
+func TestProviderObserveLivenessUsesCacheProcessSnapshot(t *testing.T) {
+	f := &mockFetcher{
+		state: runtimeStateSnapshot{
+			Sessions: map[string]sessionRuntimeState{
+				"agent-1": {
+					Running: true,
+					Panes: []paneRuntimeState{{
+						Command: "bash",
+						PID:     "101",
+					}},
+				},
+			},
+			Processes: newProcessSnapshot([]processRuntimeState{
+				{PID: "101", PPID: "1", Command: "bash", Args: "bash -lc codex"},
+				{PID: "102", PPID: "101", Command: "node", Args: "node /usr/local/bin/codex"},
+			}),
+		},
+	}
+	provider := &Provider{cache: NewStateCache(f, time.Hour)}
+
+	got := provider.ObserveLiveness("agent-1", []string{"codex"})
+	if !got.Running || !got.Alive {
+		t.Fatalf("ObserveLiveness = %+v, want running and alive from cache", got)
+	}
+	got = provider.ObserveLiveness("agent-1", []string{"codex"})
+	if !got.Running || !got.Alive {
+		t.Fatalf("second ObserveLiveness = %+v, want running and alive from cache", got)
+	}
+	if calls := f.getCalls(); calls != 1 {
+		t.Fatalf("fetch calls = %d, want 1 across repeated ObserveLiveness calls", calls)
+	}
+}
+
 func TestStateCache_RefreshFailurePreservesLastKnownGood(t *testing.T) {
 	f := &mockFetcher{
 		sessions: map[string]bool{"agent-1": true},
@@ -161,6 +302,51 @@ func TestStateCache_RefreshFailurePreservesLastKnownGood(t *testing.T) {
 	cache.mu.RUnlock()
 	if lastErr == nil {
 		t.Error("expected lastError to be set after refresh failure")
+	}
+}
+
+func TestStateCache_DiscardRefreshAfterEvictSession(t *testing.T) {
+	state := runtimeStateSnapshot{
+		Sessions: map[string]sessionRuntimeState{
+			"agent-1": {Running: true},
+		},
+	}
+	f := &controlledRefreshFetcher{
+		state:     state,
+		blockCall: 2,
+		entered:   make(chan struct{}),
+		release:   make(chan struct{}),
+	}
+	cache := NewStateCache(f, time.Nanosecond)
+
+	if !cache.IsRunning("agent-1") {
+		t.Fatal("expected agent-1 running after prime")
+	}
+	time.Sleep(time.Millisecond)
+
+	result := make(chan bool, 1)
+	go func() {
+		result <- cache.IsRunning("agent-1")
+	}()
+
+	select {
+	case <-f.entered:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for refresh to start")
+	}
+	cache.EvictSession("agent-1")
+	close(f.release)
+
+	select {
+	case got := <-result:
+		if got {
+			t.Fatal("IsRunning(agent-1) = true after concurrent eviction, want false")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for IsRunning result")
+	}
+	if calls := f.getCalls(); calls != 2 {
+		t.Fatalf("fetch calls = %d, want 2", calls)
 	}
 }
 
@@ -227,6 +413,237 @@ func TestStateCache_EmptySessionsMap(t *testing.T) {
 
 	if cache.IsRunning("anything") {
 		t.Error("expected false for any session when tmux has no sessions")
+	}
+}
+
+func TestFetchProcessSnapshotCanceledContextReturnsError(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := fetchProcessSnapshot(ctx)
+	if err == nil {
+		t.Fatal("fetchProcessSnapshot canceled context returned nil error")
+	}
+}
+
+func TestParseProcessSnapshotLineFixedColumns(t *testing.T) {
+	cases := []struct {
+		name     string
+		line     string
+		wantPID  string
+		wantPPID string
+		wantCmd  string
+		wantArgs string
+	}{
+		{
+			name:     "typical line",
+			line:     fmt.Sprintf("%10s %10s %-64s %s", "123", "1", "claude code", "claude code --print"),
+			wantPID:  "123",
+			wantPPID: "1",
+			wantCmd:  "claude code",
+			wantArgs: "claude code --print",
+		},
+		{
+			// Linux comm can also contain internal whitespace —
+			// applications can set thread names via prctl(PR_SET_NAME)
+			// to strings like "Renderer Main" or "I/O Worker". The
+			// fixed-column slice preserves them; a whitespace
+			// tokenizer would not.
+			name:     "comm with internal spaces (PR_SET_NAME style)",
+			line:     fmt.Sprintf("%10s %10s %-64s %s", "456", "1", "Renderer Main", "/opt/app/bin/renderer --headless"),
+			wantPID:  "456",
+			wantPPID: "1",
+			wantCmd:  "Renderer Main",
+			wantArgs: "/opt/app/bin/renderer --headless",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := parseProcessSnapshotLineFixedColumns(tc.line)
+			if !ok {
+				t.Fatalf("returned ok=false for %q", tc.line)
+			}
+			if got.PID != tc.wantPID {
+				t.Errorf("PID = %q, want %q", got.PID, tc.wantPID)
+			}
+			if got.PPID != tc.wantPPID {
+				t.Errorf("PPID = %q, want %q", got.PPID, tc.wantPPID)
+			}
+			if got.Command != tc.wantCmd {
+				t.Errorf("Command = %q, want %q", got.Command, tc.wantCmd)
+			}
+			if got.Args != tc.wantArgs {
+				t.Errorf("Args = %q, want %q", got.Args, tc.wantArgs)
+			}
+		})
+	}
+}
+
+func TestParseProcessSnapshotLineDarwin(t *testing.T) {
+	// macOS omits fixed-width modifiers because its ps rejects Linux's
+	// `:N=` syntax. The Darwin snapshot asks for pid, ppid, and args only;
+	// the command name is derived from argv[0] instead of guessing where an
+	// unbounded comm column ends.
+	cases := []struct {
+		name     string
+		line     string
+		wantPID  string
+		wantPPID string
+		wantCmd  string
+		wantArgs string
+	}{
+		{
+			name:     "short argv0 with dynamic numeric columns",
+			line:     "  123     1 /sbin/launchd --boot",
+			wantPID:  "123",
+			wantPPID: "1",
+			wantCmd:  "launchd",
+			wantArgs: "/sbin/launchd --boot",
+		},
+		{
+			name:     "dynamic columns with no comm width dependency",
+			line:     "  489     1 /usr/sbin/coreaudiod Core Audio Driver (MSTeamsAudioDevice.driver)",
+			wantPID:  "489",
+			wantPPID: "1",
+			wantCmd:  "coreaudiod",
+			wantArgs: "/usr/sbin/coreaudiod Core Audio Driver (MSTeamsAudioDevice.driver)",
+		},
+		{
+			name:     "wide pid and ppid columns",
+			line:     "123456 98765 /opt/app/bin/renderer --headless",
+			wantPID:  "123456",
+			wantPPID: "98765",
+			wantCmd:  "renderer",
+			wantArgs: "/opt/app/bin/renderer --headless",
+		},
+		{
+			name:     "args preserves internal multi-space",
+			line:     "  456     1 /usr/local/bin/claude a  b   c",
+			wantPID:  "456",
+			wantPPID: "1",
+			wantCmd:  "claude",
+			wantArgs: "/usr/local/bin/claude a  b   c",
+		},
+		{
+			name:     "outer args whitespace is normalized",
+			line:     "  789     1    /bin/zsh -l   ",
+			wantPID:  "789",
+			wantPPID: "1",
+			wantCmd:  "zsh",
+			wantArgs: "/bin/zsh -l",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := parseProcessSnapshotLineDarwin(tc.line)
+			if !ok {
+				t.Fatalf("returned ok=false for %q", tc.line)
+			}
+			if got.PID != tc.wantPID {
+				t.Errorf("PID = %q, want %q", got.PID, tc.wantPID)
+			}
+			if got.PPID != tc.wantPPID {
+				t.Errorf("PPID = %q, want %q", got.PPID, tc.wantPPID)
+			}
+			if got.Command != tc.wantCmd {
+				t.Errorf("Command = %q, want %q", got.Command, tc.wantCmd)
+			}
+			if got.Args != tc.wantArgs {
+				t.Errorf("Args = %q, want %q", got.Args, tc.wantArgs)
+			}
+		})
+	}
+}
+
+func TestParseProcessSnapshotLineDarwinRejectsMalformed(t *testing.T) {
+	// Inputs the parser must NOT accept — empty, too few columns to
+	// extract pid/ppid/comm. Returning ok=false lets the caller skip
+	// the row instead of recording garbage.
+	cases := []struct {
+		name string
+		line string
+	}{
+		{"empty line", ""},
+		{"whitespace only", "       "},
+		{"pid only", "  123"},
+		{"pid and ppid only", "  123     1"},
+		{"pid, ppid, separator, no args", "  123     1 "},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, ok := parseProcessSnapshotLineDarwin(tc.line); ok {
+				t.Errorf("expected ok=false for %q", tc.line)
+			}
+		})
+	}
+}
+
+func TestParseDarwinProcessSnapshotPreservesCommWhenArgv0IsRewritten(t *testing.T) {
+	argsOut := strings.Join([]string{
+		"  101     1 /bin/zsh -l",
+		"  102   101 2.1.30 --print",
+	}, "\n")
+	commOut := strings.Join([]string{
+		"  101     1 zsh",
+		"  102   101 /usr/local/bin/claude",
+	}, "\n")
+
+	snapshot := parseDarwinProcessSnapshot(argsOut, commOut)
+	process, ok := snapshot.byPID["102"]
+	if !ok {
+		t.Fatal("process 102 missing from Darwin snapshot")
+	}
+	if process.Command != "/usr/local/bin/claude" {
+		t.Fatalf("Command = %q, want comm path", process.Command)
+	}
+	if process.Args != "2.1.30 --print" {
+		t.Fatalf("Args = %q, want rewritten argv[0] args", process.Args)
+	}
+	if !snapshot.processMatchesNames("102", processNameSet([]string{"claude"})) {
+		t.Fatal("processMatchesNames(102, claude) = false, want true from comm")
+	}
+}
+
+func TestParseDarwinProcessSnapshotTraversesThroughEmptyArgsRows(t *testing.T) {
+	argsOut := strings.Join([]string{
+		"  101     1 /bin/bash -l",
+		"  102   101 ",
+		"  103   102 /usr/local/bin/claude --print",
+	}, "\n")
+	commOut := strings.Join([]string{
+		"  101     1 bash",
+		"  102   101 launchd helper",
+		"  103   102 claude",
+	}, "\n")
+
+	snapshot := parseDarwinProcessSnapshot(argsOut, commOut)
+	process, ok := snapshot.byPID["102"]
+	if !ok {
+		t.Fatal("process 102 missing from Darwin snapshot")
+	}
+	if process.Command != "launchd helper" {
+		t.Fatalf("Command = %q, want comm for empty-args process", process.Command)
+	}
+	if process.Args != "" {
+		t.Fatalf("Args = %q, want empty args", process.Args)
+	}
+	if !snapshot.hasDescendantWithNames("101", processNameSet([]string{"claude"}), 0) {
+		t.Fatal("hasDescendantWithNames(101, claude) = false, want traversal through empty-args row")
+	}
+}
+
+func TestProcessSnapshotPSArgsRejectsLinuxSyntaxOnDarwin(t *testing.T) {
+	// Regression: macOS ps rejects the BSD `:N=` column-width form. Confirm
+	// we don't emit it on Darwin. Skip elsewhere — Linux ps accepts both
+	// forms so verifying the wide form there is just a tautology.
+	if runtime.GOOS != "darwin" {
+		t.Skip("Darwin-specific syntax guard")
+	}
+	args := processSnapshotPSArgs()
+	for _, a := range args {
+		if strings.Contains(a, ":") {
+			t.Fatalf("processSnapshotPSArgs returned %v on darwin; contains Linux-only `:N=` width specifier", args)
+		}
 	}
 }
 

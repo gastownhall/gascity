@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["schema_version", "ok", "command", "action", "name", "rig", "suspended"],
+  "properties": {
+    "schema_version": { "const": "1" },
+    "ok": { "const": true },
+    "command": { "const": "rig resume" },
+    "action": { "const": "resume" },
+    "name": { "type": "string" },
+    "rig": { "type": "string" },
+    "suspended": { "const": false }
+  },
+  "additionalProperties": true
+}

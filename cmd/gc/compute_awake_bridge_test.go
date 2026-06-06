@@ -7,6 +7,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/session"
 )
 
 func TestBuildAwakeInputFromReconcilerUsesLifecycleProjectionForCompatibilityStates(t *testing.T) {
@@ -29,6 +30,7 @@ func TestBuildAwakeInputFromReconcilerUsesLifecycleProjectionForCompatibilitySta
 		nil,
 		nil,
 		nil,
+		nil,
 		now,
 	)
 
@@ -37,6 +39,45 @@ func TestBuildAwakeInputFromReconcilerUsesLifecycleProjectionForCompatibilitySta
 	}
 	if got := input.SessionBeads[0].State; got != "asleep" {
 		t.Fatalf("State = %q, want asleep-compatible projection for stopped", got)
+	}
+}
+
+func TestBuildAwakeInputFromReconcilerCarriesResetPendingMetadata(t *testing.T) {
+	now := time.Now().UTC()
+	input := buildAwakeInputFromReconciler(
+		&config.City{},
+		[]beads.Bead{{
+			ID:     "mc-session-1",
+			Status: "open",
+			Type:   "session",
+			Metadata: map[string]string{
+				"state":                      "stopped",
+				"session_name":               "s-reset-target",
+				"template":                   "build-agent",
+				"restart_requested":          "true",
+				"continuation_reset_pending": "true",
+				session.ResetCommittedAtKey:  now.Format(time.RFC3339),
+			},
+		}},
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		now,
+	)
+
+	if len(input.SessionBeads) != 1 {
+		t.Fatalf("SessionBeads length = %d, want 1", len(input.SessionBeads))
+	}
+	got := input.SessionBeads[0]
+	if !got.RestartRequested {
+		t.Fatalf("RestartRequested = false, want true")
+	}
+	if !got.ContinuationResetPending {
+		t.Fatalf("ContinuationResetPending = false, want true")
 	}
 }
 
@@ -66,6 +107,7 @@ func TestBuildAwakeInputFromReconcilerPopulatesPendingInteractions(t *testing.T)
 		nil,
 		nil,
 		nil,
+		nil,
 		[]wakeTarget{{session: &session, alive: true}},
 		sp,
 		now,
@@ -78,5 +120,207 @@ func TestBuildAwakeInputFromReconcilerPopulatesPendingInteractions(t *testing.T)
 	got := decisions["s-worker"]
 	if !got.ShouldWake || got.Reason != "pending" {
 		t.Fatalf("decision = %+v, want pending wake", got)
+	}
+}
+
+func TestAwakeSetToWakeEvalsPreservesDecisionReason(t *testing.T) {
+	evals := awakeSetToWakeEvals(
+		map[string]AwakeDecision{
+			"s-worker": {ShouldWake: true, Reason: "assigned-work"},
+		},
+		[]AwakeSessionBead{{
+			ID:          "mc-session-1",
+			SessionName: "s-worker",
+		}},
+	)
+
+	got := evals["mc-session-1"]
+	if got.Reason != "assigned-work" {
+		t.Fatalf("Reason = %q, want assigned-work", got.Reason)
+	}
+	if !containsWakeReason(got.Reasons, WakeWork) {
+		t.Fatalf("Reasons = %v, want WakeWork", got.Reasons)
+	}
+}
+
+func TestAwakeSetToWakeEvalsMapsMinActiveToWakeConfig(t *testing.T) {
+	evals := awakeSetToWakeEvals(
+		map[string]AwakeDecision{
+			"s-worker": {ShouldWake: true, Reason: "min-active"},
+		},
+		[]AwakeSessionBead{{
+			ID:          "mc-session-1",
+			SessionName: "s-worker",
+		}},
+	)
+
+	got := evals["mc-session-1"]
+	if got.Reason != "min-active" {
+		t.Fatalf("Reason = %q, want min-active", got.Reason)
+	}
+	if !containsWakeReason(got.Reasons, WakeConfig) {
+		t.Fatalf("Reasons = %v, want WakeConfig", got.Reasons)
+	}
+}
+
+func TestBuildAwakeInputFromReconcilerCarriesNamedSessionDemand(t *testing.T) {
+	now := time.Now().UTC()
+	cfg := &config.City{
+		Agents: []config.Agent{{Name: "worker"}},
+		NamedSessions: []config.NamedSession{
+			{Name: "primary", Template: "worker", Mode: "on_demand"},
+		},
+	}
+	sessionBead := beads.Bead{
+		ID:     "mc-session-1",
+		Status: "open",
+		Type:   "session",
+		Metadata: map[string]string{
+			"state":                     "asleep",
+			"session_name":              "primary",
+			"template":                  "worker",
+			"configured_named_identity": "primary",
+			"configured_named_mode":     "on_demand",
+		},
+	}
+
+	input := buildAwakeInputFromReconciler(
+		cfg,
+		[]beads.Bead{sessionBead},
+		map[string]int{"worker": 1},
+		map[string]bool{"primary": true},
+		nil,
+		nil,
+		nil,
+		nil,
+		runtime.NewFake(),
+		now,
+	)
+
+	if !input.NamedSessionDemand["primary"] {
+		t.Fatalf("NamedSessionDemand[primary] = false, want true")
+	}
+	decisions := ComputeAwakeSet(input)
+	got := decisions["primary"]
+	if !got.ShouldWake || got.Reason != "named-demand" {
+		t.Fatalf("decision = %+v, want named-demand wake", got)
+	}
+}
+
+func TestBuildAwakeInputFromReconciler_RigNamedWorkQueryDemandWakesCanonicalSession(t *testing.T) {
+	now := time.Now().UTC()
+	cfg := &config.City{
+		ResolvedWorkspaceName: "gc-test",
+		Agents: []config.Agent{
+			{Name: "worker", Scope: "rig", WorkQuery: "echo 1"},
+		},
+		NamedSessions: []config.NamedSession{
+			{Name: "refinery", Template: "worker", Mode: "on_demand", Scope: "rig", Dir: "rig-a"},
+		},
+	}
+	identity := "rig-a/refinery"
+	runtimeName := config.NamedSessionRuntimeName(cfg.EffectiveCityName(), cfg.Workspace, identity)
+	sessionBead := beads.Bead{
+		ID:     "mc-session-1",
+		Status: "open",
+		Type:   "session",
+		Metadata: map[string]string{
+			"configured_named_session":  "true",
+			"state":                     "asleep",
+			"session_name":              runtimeName,
+			"template":                  "rig-a/worker",
+			"configured_named_identity": identity,
+			"configured_named_mode":     "on_demand",
+		},
+	}
+
+	input := buildAwakeInputFromReconciler(
+		cfg,
+		[]beads.Bead{sessionBead},
+		nil,
+		nil,
+		map[string]bool{"rig-a/worker": true},
+		nil,
+		nil,
+		nil,
+		runtime.NewFake(),
+		now,
+	)
+
+	decisions := ComputeAwakeSet(input)
+	got, ok := decisions[runtimeName]
+	if !ok {
+		t.Fatal("decision for rig named session missing from awake set")
+	}
+	if !got.ShouldWake {
+		t.Fatalf("decision = %+v, want wake", got)
+	}
+	if got.Reason != "work-query" {
+		t.Fatalf("Reason = %q, want work-query", got.Reason)
+	}
+}
+
+// TestBuildAwakeInputFromReconcilerNamedAlwaysPostChurnRewakes pins the
+// contract for a mode=always named session that was put to sleep after churn:
+// if named-session metadata survives, the next awake-set pass must re-wake it.
+func TestBuildAwakeInputFromReconcilerNamedAlwaysPostChurnRewakes(t *testing.T) {
+	now := time.Now().UTC()
+	cfg := &config.City{
+		Agents: []config.Agent{{Name: "worker"}},
+		NamedSessions: []config.NamedSession{
+			{Name: "worker", Template: "worker", Mode: "always"},
+		},
+	}
+	postChurnBead := beads.Bead{
+		ID:     "mc-session-1",
+		Status: "open",
+		Type:   "session",
+		Metadata: map[string]string{
+			"state":                      "asleep",
+			"sleep_reason":               "",
+			"state_reason":               "creation_complete",
+			"last_woke_at":               "",
+			"wake_attempts":              "0",
+			"churn_count":                "1",
+			"session_key":                "",
+			"continuation_reset_pending": "",
+			"pending_create_claim":       "",
+			"pin_awake":                  "",
+			"session_name":               "worker",
+			"template":                   "worker",
+			"configured_named_identity":  "worker",
+			"configured_named_mode":      "always",
+		},
+	}
+
+	input := buildAwakeInputFromReconciler(
+		cfg,
+		[]beads.Bead{postChurnBead},
+		nil, nil, nil, nil, nil, nil,
+		runtime.NewFake(),
+		now,
+	)
+
+	if len(input.SessionBeads) != 1 {
+		t.Fatalf("SessionBeads length = %d, want 1", len(input.SessionBeads))
+	}
+	bead := input.SessionBeads[0]
+	if bead.NamedIdentity != "worker" {
+		t.Errorf("projected NamedIdentity = %q, want worker (configured_named_identity should survive churn)", bead.NamedIdentity)
+	}
+	if bead.State != "asleep" {
+		t.Errorf("projected State = %q, want asleep", bead.State)
+	}
+
+	decisions := ComputeAwakeSet(input)
+	got, ok := decisions["worker"]
+	if !ok {
+		t.Fatal("decision for 'worker' missing from awake set")
+	}
+	if !got.ShouldWake {
+		t.Fatalf("post-churn named-always session should wake; got decision = %+v", got)
+	}
+	if got.Reason != "named-always" {
+		t.Errorf("wake reason = %q, want named-always", got.Reason)
 	}
 }

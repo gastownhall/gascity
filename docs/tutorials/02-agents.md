@@ -20,7 +20,7 @@ creating a rig-scoped reviewer:
 
 ```shell
 ~/my-city
-$ gc agent add --name reviewer --dir my-project
+$ gc agent add --name reviewer
 Scaffolded agent 'reviewer'
 
 ~/my-city
@@ -30,60 +30,69 @@ provider = "codex"
 EOF
 ```
 
-This creates `agents/reviewer/prompt.template.md`. Add
-`agents/reviewer/agent.toml` when you want per-agent overrides. Here we use it
-to scope the reviewer to the `my-project` rig and switch it from the city's
-default `claude` provider to `codex`.
+This creates the `agents/reviewer/` scaffold. The `agent.toml` file scopes the
+reviewer to `my-project` and switches it from the city's default `claude`
+provider to `codex`.
 
-You'll want to create a prompt for the new agent. Let's take a look at the
-default GC prompt if you don't provide one:
+<Note>
+This section sets `provider = "codex"`. If you don't have Codex installed and
+configured, substitute another provider you do have (e.g., `provider =
+"claude"`); the rest of the walkthrough is the same.
+</Note>
+
+You'll want to create a prompt for the new agent. Let's first see what
+`gc prime` returns when you don't name an agent — without an agent argument,
+it falls back to a generic worker prompt useful for a single-shot CLI
+invocation:
 
 ```shell
 ~/my-city
 $ gc prime
 # Gas City Agent
 
-You are an agent in a Gas City workspace. Check for available work
-and execute it.
+You are an agent in a Gas City workspace. Claim available work and execute it.
 
 ## Your tools
 
-- `bd ready` — see available work items
+- `gc hook --claim --json` — find and atomically claim one work item
 - `bd show <id>` — see details of a work item
 - `bd close <id>` — mark work as done
 
 ## How to work
 
-1. Check for available work: `bd ready`
-2. Pick a bead and execute the work described in its title
+1. Claim work: `gc hook --claim --json`
+2. Read the claimed bead and execute the work described in its title
 3. When done, close it: `bd close <id>`
 4. Check for more work. Repeat until the queue is empty.
 ```
 
-The `gc prime` command let's an agent running in GC how to behave, specially how
-to look for work that's been assigned to it. In [tutorial
-01](/tutorials/01-cities-and-rigs), we learned that slinging work to an agent created a
-bead. Looking here at the default prompt, it should be clear how the agent can
-actually pick up work that was slung its way.
+The `gc prime` command tells you the prompt an agent is running with. In
+[tutorial 01](/tutorials/01-cities-and-rigs) we learned that slinging work to
+an agent created a bead; the agent's prompt is what tells it how to pick up
+and act on that work. Pass an agent name to inspect a specific agent:
+`gc prime mayor` would print the mayor's prompt;
+`gc prime my-project/reviewer` would print the reviewer's prompt once we've
+written one.
 
-What we want to do is to preserve the instructions on how to be an agent in GC,
-but also add the specifics for being a review agent. To do that, create the
-reviewer prompt to look like the following:
+To make the reviewer useful, we'll write a prompt that tells it how to
+discover work (the standard Gas City "find and execute" loop) and then
+layer on the specifics of being a review agent. Create the reviewer prompt
+to look like the following:
 
 ```shell
 ~/my-city
 $ cat > agents/reviewer/prompt.template.md << 'EOF'
 # Code Reviewer Agent
-You are an agent in a Gas City workspace. Check for available work and execute it.
+You are an agent in a Gas City workspace. Claim available work and execute it.
 
 ## Your tools
-- `bd ready` — see available work items
+- `gc hook --claim --json` — find and atomically claim one work item
 - `bd show <id>` — see details of a work item
 - `bd close <id>` — mark work as done
 
 ## How to work
-1. Check for available work: `bd ready`
-2. Pick a bead and execute the work described in its title
+1. Claim work: `gc hook --claim --json`
+2. Read the claimed bead and execute the work described in its title
 3. When done, close it: `bd close <id>`
 4. Check for more work. Repeat until the queue is empty.
 
@@ -92,7 +101,7 @@ Read the code and provide feedback on bugs, security issues, and style.
 EOF
 $ gc prime my-project/reviewer
 # Code Reviewer Agent
-You are an agent in a Gas City workspace. Check for available work and execute it.
+You are an agent in a Gas City workspace. Claim available work and execute it.
 ... # contents elided as identical to the above
 ```
 

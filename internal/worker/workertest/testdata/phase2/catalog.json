@@ -38,6 +38,18 @@
       "scenario_id": "input-override-defaults"
     },
     {
+      "code": "WC-INPUT-004",
+      "group": "input_delivery",
+      "description": "A resumed session with in-progress assigned work receives a restart turn instead of landing idle when no explicit nudge is configured.",
+      "scenario_id": "input-in-progress-resume-restart"
+    },
+    {
+      "code": "WC-INPUT-005",
+      "group": "input_delivery",
+      "description": "A resumed session with pre-claim work demand receives a restart turn instead of landing idle when no explicit nudge is configured.",
+      "scenario_id": "input-pre-claim-resume-restart"
+    },
+    {
       "code": "WC-TX-003",
       "group": "transcript",
       "description": "Malformed or torn transcript data is reported as degraded history or a fail-closed load error instead of clean normalized history.",

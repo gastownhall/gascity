@@ -166,6 +166,32 @@ func (f *Fake) Delete(id string) error {
 	return f.Archive(id)
 }
 
+// ArchiveMany archives a batch of messages by looping over [Fake.Archive],
+// preserving per-id error reporting including [ErrAlreadyArchived].
+func (f *Fake) ArchiveMany(ids []string) ([]ArchiveResult, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	results := make([]ArchiveResult, len(ids))
+	for i, id := range ids {
+		results[i] = ArchiveResult{ID: id, Err: f.Archive(id)}
+	}
+	return results, nil
+}
+
+// DeleteMany deletes a batch of messages by looping over [Fake.Delete],
+// preserving per-id error reporting including [ErrAlreadyArchived].
+func (f *Fake) DeleteMany(ids []string) ([]ArchiveResult, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	results := make([]ArchiveResult, len(ids))
+	for i, id := range ids {
+		results[i] = ArchiveResult{ID: id, Err: f.Delete(id)}
+	}
+	return results, nil
+}
+
 // All returns all open messages (read and unread) for the recipient.
 func (f *Fake) All(recipient string) ([]Message, error) {
 	f.mu.Lock()
@@ -229,11 +255,19 @@ func (f *Fake) Reply(id, from, subject, body string) (Message, error) {
 }
 
 // Thread returns all messages sharing a thread ID, ordered by time.
-func (f *Fake) Thread(threadID string) ([]Message, error) {
+// id may be either the thread ID or any message ID in that thread.
+func (f *Fake) Thread(id string) ([]Message, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.broken {
 		return nil, fmt.Errorf("mail provider unavailable")
+	}
+	threadID := id
+	for _, fm := range f.messages {
+		if fm.msg.ID == id {
+			threadID = fm.msg.ThreadID
+			break
+		}
 	}
 	var result []Message
 	for _, fm := range f.messages {

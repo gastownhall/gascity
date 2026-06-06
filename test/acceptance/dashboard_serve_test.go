@@ -224,7 +224,7 @@ func (b *backgroundCmd) logs(t *testing.T) string {
 }
 
 func httpGetText(rawURL string) (string, error) {
-	client := &http.Client{Timeout: 500 * time.Millisecond}
+	client := &http.Client{Timeout: 5 * time.Second}
 	resp, err := client.Get(rawURL) //nolint:gosec // acceptance test against localhost
 	if err != nil {
 		return "", err

@@ -85,6 +85,11 @@ func (s *Server) extmsgSessionHandleForResolvedID(resolvedID, fallback string) s
 // extmsgNotifyMembers sends a peer-publication reminder to transcript members
 // via the session message API. This treats membership as the routing truth and
 // lets session resolution materialize or wake named sessions on first receive.
+//
+// explicitTarget, when non-empty, carries the address-by-handle target so
+// peer members can self-silence on off-target messages (see #2484). Outbound
+// reply broadcasts and self-update notifications pass "" because they are
+// not addressed to a specific agent.
 func (s *Server) extmsgNotifyMembers(
 	ctx context.Context,
 	conv extmsg.ConversationRef,
@@ -92,6 +97,7 @@ func (s *Server) extmsgNotifyMembers(
 	actorKind string,
 	text string,
 	excludeSelector string,
+	explicitTarget string,
 ) {
 	svc := s.state.ExtMsgServices()
 	store := s.state.CityBeadStore()
@@ -99,6 +105,7 @@ func (s *Server) extmsgNotifyMembers(
 		return
 	}
 	caller := extmsg.Caller{Kind: extmsg.CallerController, ID: "extmsg-notify"}
+	explicitTargetSessionID := extmsgNotifyExplicitTargetSessionID(ctx, svc, conv, explicitTarget)
 	members, err := svc.Transcript.ListMemberships(ctx, caller, conv)
 	if err != nil {
 		log.Printf("extmsg: ListMemberships failed for %s/%s: %v", conv.Provider, conv.ConversationID, err)
@@ -118,18 +125,18 @@ func (s *Server) extmsgNotifyMembers(
 
 	notifyResolved := func(sessionSelector, resolvedID string) {
 		handle := s.extmsgSessionHandleForResolvedID(resolvedID, sessionSelector)
-		nudge := fmt.Sprintf("<system-reminder>\nNew message in shared conversation %s/%s:\n\n"+
-			"- %s (%s): %s\n\n"+
-			"To reply in Discord, write your response to a file and run:\n"+
-			"  gc discord reply-current --conversation-id %s --body-file <path>\n"+
-			"Prefix your reply with your agent handle in bold (e.g., **%s:** your message).\n"+
-			"Run 'gc transcript read --ack' after responding to mark as read.\n"+
-			"</system-reminder>",
-			conv.Provider, conv.ConversationID,
-			actorDisplayName, actorKind, text,
-			conv.ConversationID,
-			handle,
-		)
+		nudge := formatExtmsgNotifyReminder(extmsgNotifyReminder{
+			Provider:                conv.Provider,
+			ConversationID:          conv.ConversationID,
+			ActorDisplay:            actorDisplayName,
+			ActorKind:               actorKind,
+			Text:                    text,
+			RecipientSelector:       sessionSelector,
+			RecipientSessionID:      resolvedID,
+			Handle:                  handle,
+			ExplicitTarget:          explicitTarget,
+			ExplicitTargetSessionID: explicitTargetSessionID,
+		})
 		if err := s.sendBackgroundMessageToSession(ctx, store, resolvedID, nudge); err != nil {
 			log.Printf("extmsg: notify %s failed: %v", sessionSelector, err)
 		}
@@ -168,10 +175,119 @@ func (s *Server) extmsgNotifyMembers(
 	wg.Wait()
 }
 
+func extmsgNotifyExplicitTargetSessionID(ctx context.Context, svc *extmsg.Services, conv extmsg.ConversationRef, explicitTarget string) string {
+	if strings.TrimSpace(explicitTarget) == "" || svc == nil || svc.Groups == nil {
+		return ""
+	}
+	route, err := svc.Groups.ResolveInbound(ctx, extmsg.ExternalInboundMessage{
+		Conversation:   conv,
+		ExplicitTarget: explicitTarget,
+	})
+	if err != nil {
+		log.Printf("extmsg: resolve explicit target %q for %s/%s failed: %v", explicitTarget, conv.Provider, conv.ConversationID, err)
+		return ""
+	}
+	if route == nil || route.Match != extmsg.GroupRouteExplicitTarget {
+		return ""
+	}
+	return strings.TrimSpace(route.TargetSessionID)
+}
+
 func (s *Server) extmsgNotifyInboundMembers(ctx context.Context, msg extmsg.ExternalInboundMessage) {
 	actorKind := "agent"
 	if !msg.Actor.IsBot {
 		actorKind = "human"
 	}
-	s.extmsgNotifyMembers(ctx, msg.Conversation, msg.Actor.DisplayName, actorKind, msg.Text, "")
+	s.extmsgNotifyMembers(ctx, msg.Conversation, msg.Actor.DisplayName, actorKind, msg.Text, "", msg.ExplicitTarget)
+}
+
+// titleCaseProvider uppercases the first ASCII byte of a provider name.
+// Used to avoid a golang.org/x/text/cases dependency just for one
+// capitalization in the inbound nudge — provider names are always
+// short lowercase ASCII identifiers (slack, discord, ...).
+func titleCaseProvider(name string) string {
+	if name == "" {
+		return ""
+	}
+	first := name[0]
+	if first >= 'a' && first <= 'z' {
+		return string(first-'a'+'A') + name[1:]
+	}
+	return name
+}
+
+// extmsgNotifyReminder collects the inputs the inbound-message
+// <system-reminder> block is constructed from. Externally-supplied fields
+// (ActorDisplay, Text, ExplicitTarget) are sanitized via
+// extmsg.SanitizeForSystemReminder inside formatExtmsgNotifyReminder before
+// interpolation; callers should not pre-sanitize.
+//
+// ExplicitTarget carries the provider-resolved address-by-handle target (set
+// when an inbound was addressed to a specific agent via @handle: prefix or a
+// subteam mention). When non-empty and not routed to the receiving session,
+// formatExtmsgNotifyReminder emits a "do not reply" discriminator line so
+// peer sessions can self-silence on off-target messages. See
+// gastownhall/gascity#2484.
+type extmsgNotifyReminder struct {
+	Provider                string
+	ConversationID          string
+	ActorDisplay            string
+	ActorKind               string
+	Text                    string
+	RecipientSelector       string
+	RecipientSessionID      string
+	Handle                  string
+	ExplicitTarget          string
+	ExplicitTargetSessionID string
+}
+
+// formatExtmsgNotifyReminder builds the inbound-message reminder body.
+// Attacker-controllable fields (ActorDisplay, Text, ExplicitTarget) are
+// stripped of literal <system-reminder> open/close sequences before being
+// interpolated into the reminder block. Without this guard, an external
+// sender can inject the sequence and break out of the legitimate reminder,
+// injecting attacker-controlled instructions into the receiving agent's
+// prompt. See gastownhall/gascity#2195.
+//
+// When ExplicitTarget is non-empty and does not target the receiving session,
+// a discriminator line is appended so peer sessions can self-silence on
+// messages addressed to a different agent. See gastownhall/gascity#2484.
+func formatExtmsgNotifyReminder(r extmsgNotifyReminder) string {
+	providerCLI := strings.ToLower(r.Provider)
+	providerDisplay := titleCaseProvider(providerCLI)
+	safeActor := extmsg.SanitizeForSystemReminder(r.ActorDisplay)
+	safeText := extmsg.SanitizeForSystemReminder(r.Text)
+
+	var b strings.Builder
+	fmt.Fprintf(&b,
+		"<system-reminder>\nNew message in shared conversation %s/%s:\n\n"+
+			"- %s (%s): %s\n\n",
+		r.Provider, r.ConversationID,
+		safeActor, r.ActorKind, safeText,
+	)
+	if target := strings.TrimSpace(r.ExplicitTarget); target != "" && !extmsgNotifyReminderTargetsRecipient(r, target) {
+		safeTarget := extmsg.SanitizeForSystemReminder(target)
+		fmt.Fprintf(&b,
+			"Addressed to: @%s — if that is not you, do not reply.\n\n",
+			safeTarget,
+		)
+	}
+	fmt.Fprintf(&b,
+		"To reply in %s, write your response to a file and run:\n"+
+			"  gc %s reply-current --conversation-id %s --body-file <path>\n"+
+			"Prefix your reply with your agent handle in bold (e.g., **%s:** your message).\n"+
+			"</system-reminder>",
+		providerDisplay,
+		providerCLI, r.ConversationID,
+		r.Handle,
+	)
+	return b.String()
+}
+
+func extmsgNotifyReminderTargetsRecipient(r extmsgNotifyReminder, target string) bool {
+	if targetSessionID := strings.TrimSpace(r.ExplicitTargetSessionID); targetSessionID != "" {
+		return strings.TrimSpace(r.RecipientSessionID) == targetSessionID ||
+			apiNormalizeSessionTarget(r.RecipientSelector) == apiNormalizeSessionTarget(targetSessionID)
+	}
+	return strings.EqualFold(target, strings.TrimSpace(r.Handle))
 }

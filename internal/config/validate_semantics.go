@@ -13,11 +13,8 @@ import (
 func ValidateSemantics(cfg *City, source string) []string {
 	var warnings []string
 
-	// Build known provider name set: built-in + city-defined.
+	// Build known provider name set from the explicit catalog.
 	knownProviders := make(map[string]bool)
-	for name := range BuiltinProviders() {
-		knownProviders[name] = true
-	}
 	for name := range cfg.Providers {
 		knownProviders[name] = true
 	}
@@ -29,7 +26,7 @@ func ValidateSemantics(cfg *City, source string) []string {
 		}
 		if !knownProviders[a.Provider] {
 			warnings = append(warnings, fmt.Sprintf(
-				"%s: agent %q: provider %q is not a built-in or city-defined provider",
+				"%s: agent %q: provider %q is not defined in [providers]",
 				source, a.QualifiedName(), a.Provider))
 		}
 	}
@@ -38,16 +35,25 @@ func ValidateSemantics(cfg *City, source string) []string {
 	if p := cfg.Workspace.Provider; p != "" {
 		if !knownProviders[p] {
 			warnings = append(warnings, fmt.Sprintf(
-				"%s: [workspace] provider %q is not a built-in or city-defined provider",
+				"%s: [workspace] provider %q is not defined in [providers]",
+				source, p))
+		}
+	}
+
+	// Check agent default provider.
+	if p := cfg.AgentDefaults.Provider; p != "" {
+		if !knownProviders[p] {
+			warnings = append(warnings, fmt.Sprintf(
+				"%s: [agent_defaults] provider %q is not a built-in or city-defined provider",
 				source, p))
 		}
 	}
 
 	// Check agent session field.
 	for _, a := range cfg.Agents {
-		if a.Session != "" && a.Session != "acp" {
+		if !IsValidSessionTransport(a.Session) {
 			warnings = append(warnings, fmt.Sprintf(
-				"%s: agent %q: session %q is not a valid session transport (use \"acp\" or omit)",
+				"%s: agent %q: session %q is not a valid session transport (use \"acp\", \"tmux\", or omit)",
 				source, a.QualifiedName(), a.Session))
 		}
 	}

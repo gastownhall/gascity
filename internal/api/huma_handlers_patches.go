@@ -59,6 +59,7 @@ func (s *Server) humaHandleAgentPatchSet(_ context.Context, input *AgentPatchSet
 		Dir:       input.Body.Dir,
 		Name:      input.Body.Name,
 		WorkDir:   input.Body.WorkDir,
+		TmuxAlias: input.Body.TmuxAlias,
 		Scope:     input.Body.Scope,
 		Suspended: input.Body.Suspended,
 		Env:       input.Body.Env,
@@ -146,10 +147,11 @@ func (s *Server) humaHandleRigPatchSet(_ context.Context, input *RigPatchSetInpu
 	}
 
 	patch := config.RigPatch{
-		Name:      input.Body.Name,
-		Path:      input.Body.Path,
-		Prefix:    input.Body.Prefix,
-		Suspended: input.Body.Suspended,
+		Name:          input.Body.Name,
+		Path:          input.Body.Path,
+		Prefix:        input.Body.Prefix,
+		DefaultBranch: input.Body.DefaultBranch,
+		Suspended:     input.Body.Suspended,
 	}
 
 	if patch.Name == "" {
@@ -220,13 +222,16 @@ func (s *Server) humaHandleProviderPatchSet(_ context.Context, input *ProviderPa
 	}
 
 	patch := config.ProviderPatch{
-		Name:         input.Body.Name,
-		Command:      input.Body.Command,
-		Args:         input.Body.Args,
-		PromptMode:   input.Body.PromptMode,
-		PromptFlag:   input.Body.PromptFlag,
-		ReadyDelayMs: input.Body.ReadyDelayMs,
-		Env:          input.Body.Env,
+		Name:                 input.Body.Name,
+		Command:              input.Body.Command,
+		ACPCommand:           input.Body.ACPCommand,
+		Args:                 input.Body.Args,
+		ACPArgs:              input.Body.ACPArgs,
+		PromptMode:           input.Body.PromptMode,
+		PromptFlag:           input.Body.PromptFlag,
+		ReadyDelayMs:         input.Body.ReadyDelayMs,
+		AcceptStartupDialogs: input.Body.AcceptStartupDialogs,
+		Env:                  input.Body.Env,
 	}
 
 	if patch.Name == "" {

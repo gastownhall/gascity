@@ -11,10 +11,18 @@ type Report struct {
 	Passed int
 	// Warned is the number of checks with StatusWarning.
 	Warned int
-	// Failed is the number of checks with StatusError.
+	// Failed is the number of checks with StatusError (any severity).
 	Failed int
+	// BlockingFailed is the number of failed checks whose Severity is
+	// SeverityBlocking — the subset of Failed that should gate dispatch,
+	// CLI exit codes, and other automation.
+	BlockingFailed int
 	// Fixed is the number of checks remediated by --fix.
 	Fixed int
+	// Results holds the per-check results in the order they ran. Populated
+	// by Run so callers that need structured output (e.g. `gc doctor --json`)
+	// can project every result without re-running checks.
+	Results []*CheckResult
 }
 
 // Doctor runs registered health checks and reports results.
@@ -29,8 +37,34 @@ func (d *Doctor) Register(c Check) {
 
 // Run executes all registered checks, streaming results to w as each
 // completes. When fix is true, fixable checks that fail are remediated
-// and re-run. Returns a summary report.
+// and re-run. Returns a summary report whose Results field holds every
+// check result in execution order.
 func (d *Doctor) Run(ctx *CheckContext, w io.Writer, fix bool) *Report {
+	return d.run(ctx, w, fix, true)
+}
+
+// RunCollect executes all registered checks without streaming per-check
+// output. The returned Report's Results field holds every check result in
+// execution order so callers can render structured output (e.g. JSON).
+// Fix semantics match Run.
+func (d *Doctor) RunCollect(ctx *CheckContext, fix bool) *Report {
+	return d.run(ctx, io.Discard, fix, false)
+}
+
+func (d *Doctor) run(ctx *CheckContext, w io.Writer, fix, stream bool) *Report {
+	// Normalize ctx so individual checks always get a non-nil context with
+	// an Output writer set. Done here so both Run and RunCollect benefit
+	// — RunCollect routes Output to io.Discard so a check that writes to
+	// ctx.Output incidentally won't disturb the JSON-collect path.
+	if ctx == nil {
+		ctx = &CheckContext{}
+	}
+	runCtx := *ctx
+	if runCtx.Output == nil {
+		runCtx.Output = w
+	}
+	ctx = &runCtx
+
 	r := &Report{}
 	for _, c := range d.checks {
 		result := c.Run(ctx)
@@ -51,7 +85,13 @@ func (d *Doctor) Run(ctx *CheckContext, w io.Writer, fix bool) *Report {
 			}
 		}
 
-		printResult(w, result, ctx.Verbose)
+		if stream {
+			printResult(w, result, ctx.Verbose)
+			if r, ok := c.(Renderer); ok {
+				r.RenderExtras(ctx, w)
+			}
+		}
+		r.Results = append(r.Results, result)
 
 		switch {
 		case result.Fixed:
@@ -63,6 +103,9 @@ func (d *Doctor) Run(ctx *CheckContext, w io.Writer, fix bool) *Report {
 			r.Warned++
 		case result.Status == StatusError:
 			r.Failed++
+			if result.Severity == SeverityBlocking {
+				r.BlockingFailed++
+			}
 		}
 	}
 	return r
@@ -113,6 +156,9 @@ func PrintSummary(w io.Writer, r *Report) {
 	}
 	if r.Failed > 0 {
 		parts = append(parts, fmt.Sprintf("%d failed", r.Failed))
+	}
+	if advisory := r.Failed - r.BlockingFailed; advisory > 0 {
+		parts = append(parts, fmt.Sprintf("%d advisory", advisory))
 	}
 	if r.Fixed > 0 {
 		parts = append(parts, fmt.Sprintf("%d fixed", r.Fixed))

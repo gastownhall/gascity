@@ -21,7 +21,7 @@ for d in "$data_dir"/*/; do
   name="$(basename "$d")"
   # Skip system databases.
   case "$(printf '%s' "$name" | tr '[:upper:]' '[:lower:]')" in
-    information_schema|mysql|dolt_cluster|__gc_probe) continue ;;
+    information_schema|mysql|dolt_cluster|performance_schema|sys|__gc_probe) continue ;;
   esac
   printf "%s\t%s\n" "$name" "$d"
   found=$((found + 1))

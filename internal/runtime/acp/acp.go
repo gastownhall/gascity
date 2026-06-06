@@ -67,8 +67,9 @@ type Provider struct {
 
 // Compile-time check.
 var (
-	_ runtime.Provider            = (*Provider)(nil)
-	_ runtime.InteractionProvider = (*Provider)(nil)
+	_ runtime.Provider                    = (*Provider)(nil)
+	_ runtime.InteractionProvider         = (*Provider)(nil)
+	_ runtime.TransportCapabilityProvider = (*Provider)(nil)
 )
 
 // NewProvider returns an ACP [Provider] that stores socket files in
@@ -94,6 +95,12 @@ func NewProviderWithDir(dir string, cfg Config) *Provider {
 		workDirs: make(map[string]string),
 		cfg:      cfg,
 	}
+}
+
+// SupportsTransport reports whether this provider can host the requested
+// session transport.
+func (p *Provider) SupportsTransport(transport string) bool {
+	return transport == "acp"
 }
 
 // Start spawns an ACP agent process, performs the JSON-RPC handshake, and
@@ -143,7 +150,7 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		p.mu.Unlock()
 	}
 
-	if err := runtime.StageWorkDir(cfg.WorkDir, cfg.OverlayDir, cfg.CopyFiles); err != nil {
+	if err := runtime.StageSessionWorkDir(cfg); err != nil {
 		clearSentinel()
 		return fmt.Errorf("staging workdir for %q: %w", name, err)
 	}
@@ -263,7 +270,7 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	hsTimeoutCtx, hsTimeoutCancel := context.WithTimeout(hsCtx, p.cfg.handshakeTimeout())
 	defer hsTimeoutCancel()
 
-	if err := p.handshake(hsTimeoutCtx, sc); err != nil {
+	if err := p.handshake(hsTimeoutCtx, sc, cfg.WorkDir, cfg.MCPServers); err != nil {
 		// Handshake failed — kill the process. The monitor goroutine
 		// handles listener/socket cleanup when the process exits.
 		_ = stdinPipe.Close()
@@ -301,7 +308,7 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 }
 
 // handshake performs the ACP initialize → initialized → session/new sequence.
-func (p *Provider) handshake(ctx context.Context, sc *sessionConn) error {
+func (p *Provider) handshake(ctx context.Context, sc *sessionConn, workDir string, mcpServers []runtime.MCPServerConfig) error {
 	// Step 1: Send "initialize" request.
 	initReq, _ := newInitializeRequest()
 	ch, err := sc.sendRequest(initReq)
@@ -328,7 +335,7 @@ func (p *Provider) handshake(ctx context.Context, sc *sessionConn) error {
 	}
 
 	// Step 3: Send "session/new" request.
-	newReq, _ := newSessionNewRequest()
+	newReq, _ := newSessionNewRequest(workDir, mcpServers)
 	ch, err = sc.sendRequest(newReq)
 	if err != nil {
 		return fmt.Errorf("sending session/new: %w", err)
@@ -447,14 +454,15 @@ func (p *Provider) ProcessAlive(name string, processNames []string) bool {
 }
 
 // Nudge sends a session/prompt to the named session. Waits for the agent to
-// become idle before sending. Returns nil if the session doesn't exist or
-// the agent process exits during the send (best-effort).
+// become idle before sending. Returns ErrSessionNotFound when this provider
+// instance does not own the in-memory ACP connection. Returns nil if the
+// agent process exits during the send (best-effort).
 func (p *Provider) Nudge(name string, content []runtime.ContentBlock) error {
 	p.mu.Lock()
 	sc, ok := p.conns[name]
 	p.mu.Unlock()
 	if !ok {
-		return nil
+		return fmt.Errorf("%w: ACP provider does not own session %q", runtime.ErrSessionNotFound, name)
 	}
 	if !sc.alive() {
 		return nil

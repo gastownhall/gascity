@@ -1,5 +1,5 @@
 [order]
-description = "Check dolt server health and restart on failure"
+description = "Check dolt server health without restarting it"
 trigger = "cooldown"
 interval = "30s"
-exec = "gc dolt status >/dev/null 2>&1 || gc dolt start"
+exec = "gc dolt health --json | gc dolt health-check"

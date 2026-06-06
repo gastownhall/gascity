@@ -41,8 +41,19 @@ func TestCityTomlParses(t *testing.T) {
 	if cfg.Workspace.Name != "swarm" {
 		t.Errorf("Workspace.Name = %q, want %q", cfg.Workspace.Name, "swarm")
 	}
-	if len(cfg.Workspace.Includes) != 1 || cfg.Workspace.Includes[0] != "packs/swarm" {
-		t.Errorf("Workspace.Includes = %v, want [packs/swarm]", cfg.Workspace.Includes)
+	if len(cfg.Workspace.LegacyIncludes()) != 0 {
+		t.Errorf("Workspace.Includes = %v, want empty", cfg.Workspace.LegacyIncludes())
+	}
+}
+
+func TestRootPackOwnsSwarmImport(t *testing.T) {
+	dir := exampleDir()
+	packCfg, err := config.Load(fsys.OSFS{}, filepath.Join(dir, "pack.toml"))
+	if err != nil {
+		t.Fatalf("config.Load(pack.toml): %v", err)
+	}
+	if got := packCfg.Imports["swarm"].Source; got != "packs/swarm" {
+		t.Fatalf("pack import swarm = %q, want %q", got, "packs/swarm")
 	}
 }
 
@@ -126,10 +137,11 @@ func TestCombinedPackParses(t *testing.T) {
 		t.Errorf("[pack] schema = %d, want 2", tc.Pack.Schema)
 	}
 
-	// Expect 5 agents: mayor, deacon, dog (city), coder, committer (rig).
+	// Expect 4 locally-defined agents: mayor, deacon (city), coder, committer (rig).
+	// The initialized city picks up dog from the system-provided maintenance pack.
 	agents := discoverPackAgents(t, filepath.Join("packs", "swarm"))
 	want := map[string]bool{
-		"mayor": false, "deacon": false, "dog": false,
+		"mayor": false, "deacon": false,
 		"coder": false, "committer": false,
 	}
 	for _, a := range agents {
@@ -144,12 +156,12 @@ func TestCombinedPackParses(t *testing.T) {
 			t.Errorf("missing pack agent %q", name)
 		}
 	}
-	if len(agents) != 5 {
-		t.Errorf("pack has %d agents, want 5", len(agents))
+	if len(agents) != 4 {
+		t.Errorf("pack has %d locally-defined agents, want 4", len(agents))
 	}
 
-	// Verify city-scoped agents have scope = "city".
-	wantCity := map[string]bool{"mayor": true, "deacon": true, "dog": true}
+	// Verify the pack's local city-scoped agents have scope = "city".
+	wantCity := map[string]bool{"mayor": true, "deacon": true}
 	for _, a := range agents {
 		if wantCity[a.Name] && a.Scope != "city" {
 			t.Errorf("agent %q: scope = %q, want %q", a.Name, a.Scope, "city")
@@ -158,10 +170,11 @@ func TestCombinedPackParses(t *testing.T) {
 }
 
 func TestCityAgentsFilter(t *testing.T) {
-	// Without rigs, only city-scoped agents appear.
+	// In the raw source-tree config, only Swarm's own city-scoped agents appear.
+	// The initialized city later gains a maintenance dog from system packs.
 	cfg := loadExpanded(t)
 
-	cityAgents := map[string]bool{"mayor": true, "deacon": true, "dog": true}
+	cityAgents := map[string]bool{"mayor": true, "deacon": true}
 	var explicit int
 	for _, a := range cfg.Agents {
 		if a.Implicit {
@@ -175,8 +188,8 @@ func TestCityAgentsFilter(t *testing.T) {
 			t.Errorf("city agent %q: dir = %q, want empty", a.Name, a.Dir)
 		}
 	}
-	if explicit != 3 {
-		t.Errorf("got %d explicit agents, want 3 city-scoped agents", explicit)
+	if explicit != 2 {
+		t.Errorf("got %d explicit agents, want 2 source-tree city-scoped agents", explicit)
 	}
 }
 
@@ -230,8 +243,8 @@ func TestAllPromptTemplatesExist(t *testing.T) {
 		}
 	}
 
-	if count != 5 {
-		t.Errorf("found %d prompt template files, want 5", count)
+	if count != 4 {
+		t.Errorf("found %d local prompt template files, want 4", count)
 	}
 }
 

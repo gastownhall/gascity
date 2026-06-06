@@ -9,8 +9,7 @@ import (
 )
 
 // SlingOutput is the Huma response for POST /v0/sling.
-// The HTTP status code varies (200 for direct sling, 201 for workflow launch),
-// so we use a custom status field.
+// The HTTP status code is supplied by the domain sling result.
 type SlingOutput struct {
 	Status int `header:"_status" doc:"HTTP status code."`
 	Body   slingResponse
@@ -128,6 +127,14 @@ func (s *Server) humaHandleSling(ctx context.Context, input *SlingInput) (*Sling
 		if code == "cross_rig" {
 			return nil, &huma.ErrorModel{
 				Type:   slingCrossRigProblemType,
+				Status: http.StatusBadRequest,
+				Title:  http.StatusText(http.StatusBadRequest),
+				Detail: message,
+			}
+		}
+		if code == "cross_store" {
+			return nil, &huma.ErrorModel{
+				Type:   slingCrossStoreRouteProblemType,
 				Status: http.StatusBadRequest,
 				Title:  http.StatusText(http.StatusBadRequest),
 				Detail: message,

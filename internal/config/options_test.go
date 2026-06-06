@@ -1,6 +1,7 @@
 package config
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -115,6 +116,101 @@ func TestResolveOptions_EffectiveDefaultsOverrideSchemaDefaults(t *testing.T) {
 		if args[i] != w {
 			t.Errorf("args[%d]=%q, want %q", i, args[i], w)
 		}
+	}
+}
+
+func TestReplaceSchemaFlagsStripsCodexAliases(t *testing.T) {
+	codex := BuiltinProviders()["codex"]
+	defaultArgs := []string{
+		"--dangerously-bypass-approvals-and-sandbox",
+		"--model", "gpt-5.5",
+		"-c", "model_reasoning_effort=xhigh",
+	}
+
+	got := ReplaceSchemaFlags(
+		`aimux run codex -- -m gpt-5.5 -c 'model_reasoning_effort="xhigh"'`,
+		codex.OptionsSchema,
+		defaultArgs,
+	)
+
+	if strings.Count(got, "gpt-5.5") != 1 {
+		t.Fatalf("ReplaceSchemaFlags() = %q, want one model flag", got)
+	}
+	if strings.Count(got, "model_reasoning_effort") != 1 {
+		t.Fatalf("ReplaceSchemaFlags() = %q, want one effort flag", got)
+	}
+	if !strings.Contains(got, "--model gpt-5.5") {
+		t.Fatalf("ReplaceSchemaFlags() = %q, want canonical model flag", got)
+	}
+	if strings.Contains(got, "-m gpt-5.5") || strings.Contains(got, `model_reasoning_effort=\"xhigh\"`) {
+		t.Fatalf("ReplaceSchemaFlags() = %q, retained non-canonical schema flag", got)
+	}
+}
+
+func TestCollectAllSchemaFlagsUsesDeclaredFlagAliases(t *testing.T) {
+	schema := []ProviderOption{
+		{
+			Key: "model",
+			Choices: []OptionChoice{
+				{
+					Value:       "opus",
+					FlagArgs:    []string{"--model", "opus"},
+					FlagAliases: [][]string{{"-m", "opus"}},
+				},
+			},
+		},
+	}
+
+	flags := CollectAllSchemaFlags(schema)
+	got := StripFlags("agent -m opus --other", flags)
+
+	if got != "agent --other" {
+		t.Fatalf("StripFlags() = %q, want alias stripped", got)
+	}
+}
+
+func TestCollectAllSchemaFlagsDoesNotInferUndeclaredProviderAliases(t *testing.T) {
+	schema := []ProviderOption{
+		{
+			Key: "model",
+			Choices: []OptionChoice{
+				{Value: "opus", FlagArgs: []string{"--model", "opus"}},
+			},
+		},
+	}
+
+	flags := CollectAllSchemaFlags(schema)
+	got := StripFlags("agent -m opus --other", flags)
+
+	if got != "agent -m opus --other" {
+		t.Fatalf("StripFlags() = %q, want undeclared alias preserved", got)
+	}
+}
+
+func TestStripArgsSliceInfersChoiceFromDeclaredAlias(t *testing.T) {
+	schema := []ProviderOption{
+		{
+			Key: "model",
+			Choices: []OptionChoice{
+				{
+					Value:       "opus",
+					FlagArgs:    []string{"--model", "opus"},
+					FlagAliases: [][]string{{"-m", "opus"}},
+				},
+			},
+		},
+	}
+	flags := CollectAllSchemaFlags(schema)
+	inferred := make(map[string]string)
+
+	got := stripArgsSlice([]string{"run", "-m", "opus", "--other"}, flags, schema, inferred)
+
+	want := []string{"run", "--other"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("stripArgsSlice() = %v, want %v", got, want)
+	}
+	if inferred["model"] != "opus" {
+		t.Fatalf("inferred model = %q, want opus", inferred["model"])
 	}
 }
 
@@ -234,7 +330,7 @@ func TestResolveExplicitOptions_OnlyExplicit(t *testing.T) {
 			Default: "",
 			Choices: []OptionChoice{
 				{Value: "", Label: "Default", FlagArgs: nil},
-				{Value: "opus", Label: "Opus", FlagArgs: []string{"--model", "claude-opus-4-6"}},
+				{Value: "opus", Label: "Opus", FlagArgs: []string{"--model", "claude-opus-4-7"}},
 			},
 		},
 	}
@@ -397,7 +493,7 @@ func TestResolveExplicitOptions_SubsetOfOptions(t *testing.T) {
 			Default: "",
 			Choices: []OptionChoice{
 				{Value: "", Label: "Default", FlagArgs: nil},
-				{Value: "opus", Label: "Opus", FlagArgs: []string{"--model", "claude-opus-4-6"}},
+				{Value: "opus", Label: "Opus", FlagArgs: []string{"--model", "claude-opus-4-7"}},
 			},
 		},
 	}
@@ -409,7 +505,7 @@ func TestResolveExplicitOptions_SubsetOfOptions(t *testing.T) {
 	}
 
 	// Should only return model flags, not permission_mode defaults.
-	wantArgs := []string{"--model", "claude-opus-4-6"}
+	wantArgs := []string{"--model", "claude-opus-4-7"}
 	if len(args) != len(wantArgs) {
 		t.Fatalf("got args=%v, want %v", args, wantArgs)
 	}
@@ -601,27 +697,163 @@ func TestStripArgsSlice_MultiTokenFlag(t *testing.T) {
 	}
 }
 
-func TestStripArgsSlice_ExistingDefaultNotOverridden(t *testing.T) {
+func TestStripArgsSlice_ExplicitArgsOverrideExistingDefault(t *testing.T) {
 	schema := []ProviderOption{
 		{
 			Key: "permission_mode",
 			Choices: []OptionChoice{
 				{Value: "unrestricted", FlagArgs: []string{"--dangerously-skip-permissions"}},
+				{Value: "plan", FlagArgs: []string{"--permission-mode", "plan"}},
 			},
 		},
 	}
 	flags := CollectAllSchemaFlags(schema)
 
 	args := []string{"--dangerously-skip-permissions"}
-	// Pre-populate with an existing default -- should not be overridden.
+	// Pre-populate with an inherited default. The explicit arg is the leaf
+	// provider layer and should override it.
 	inferDefaults := map[string]string{"permission_mode": "plan"}
 	result := stripArgsSlice(args, flags, schema, inferDefaults)
 
 	if len(result) != 0 {
 		t.Errorf("got %v, want []", result)
 	}
-	if inferDefaults["permission_mode"] != "plan" {
-		t.Errorf("existing default should be preserved, got %q", inferDefaults["permission_mode"])
+	if result == nil {
+		t.Fatal("stripArgsSlice returned nil; want non-nil empty slice for explicit args that strip to zero")
+	}
+	if inferDefaults["permission_mode"] != "unrestricted" {
+		t.Errorf("inferred permission_mode: got %q, want unrestricted", inferDefaults["permission_mode"])
+	}
+}
+
+func TestCompleteResumeCommandDefaultsTreatsCustomFlagValueAsPresent(t *testing.T) {
+	schema := []ProviderOption{
+		{
+			Key: "model",
+			Choices: []OptionChoice{
+				{Value: "opus", FlagArgs: []string{"--model", "claude-opus-4-7"}, FlagAliases: [][]string{{"-m", "claude-opus-4-7"}}},
+			},
+		},
+	}
+	defaults := map[string]string{"model": "opus"}
+
+	got := completeResumeCommandDefaults(
+		"claude --resume {{.SessionKey}} --model claude-future-5",
+		"--resume",
+		"flag",
+		schema,
+		defaults,
+	)
+	want := "claude --resume {{.SessionKey}} --model claude-future-5"
+	if got != want {
+		t.Fatalf("completeResumeCommandDefaults() = %q, want %q", got, want)
+	}
+}
+
+func TestCompleteResumeCommandDefaultsTreatsCompoundFlagPrefixAsPresent(t *testing.T) {
+	schema := []ProviderOption{
+		{
+			Key: "effort",
+			Choices: []OptionChoice{
+				{Value: "high", FlagArgs: []string{"-c", "model_reasoning_effort=high"}},
+			},
+		},
+	}
+	defaults := map[string]string{"effort": "high"}
+
+	got := completeResumeCommandDefaults(
+		"codex resume {{.SessionKey}} -c model_reasoning_effort=experimental",
+		"resume",
+		"subcommand",
+		schema,
+		defaults,
+	)
+	want := "codex resume {{.SessionKey}} -c model_reasoning_effort=experimental"
+	if got != want {
+		t.Fatalf("completeResumeCommandDefaults() = %q, want %q", got, want)
+	}
+}
+
+func TestCompleteResumeCommandDefaultsFlagStyleAppendsDefaults(t *testing.T) {
+	schema := []ProviderOption{
+		{
+			Key: "model",
+			Choices: []OptionChoice{
+				{Value: "opus", FlagArgs: []string{"--model", "claude-opus-4-7"}},
+			},
+		},
+	}
+	defaults := map[string]string{"model": "opus"}
+
+	got := completeResumeCommandDefaults(
+		"claude --resume {{.SessionKey}} --dangerously-skip-permissions",
+		"--resume",
+		"flag",
+		schema,
+		defaults,
+	)
+	want := "claude --resume {{.SessionKey}} --dangerously-skip-permissions --model claude-opus-4-7"
+	if got != want {
+		t.Fatalf("completeResumeCommandDefaults() = %q, want %q", got, want)
+	}
+}
+
+func TestCompleteResumeCommandDefaultsDoesNotTreatOverlappingSandboxAsPermissionMode(t *testing.T) {
+	schema := []ProviderOption{
+		{
+			Key: "permission_mode",
+			Choices: []OptionChoice{
+				{Value: "suggest", FlagArgs: []string{"--ask-for-approval", "untrusted", "--sandbox", "read-only"}},
+				{Value: "unrestricted", FlagArgs: []string{"--dangerously-bypass-approvals-and-sandbox"}},
+			},
+		},
+		{
+			Key: "sandbox",
+			Choices: []OptionChoice{
+				{Value: "read-only", FlagArgs: []string{"--sandbox", "read-only"}},
+			},
+		},
+	}
+	defaults := map[string]string{
+		"permission_mode": "unrestricted",
+		"sandbox":         "read-only",
+	}
+
+	got := completeResumeCommandDefaults(
+		"codex resume {{.SessionKey}} --sandbox read-only",
+		"resume",
+		"subcommand",
+		schema,
+		defaults,
+	)
+	want := "codex resume --dangerously-bypass-approvals-and-sandbox {{.SessionKey}} --sandbox read-only"
+	if got != want {
+		t.Fatalf("completeResumeCommandDefaults() = %q, want %q", got, want)
+	}
+}
+
+func TestCompleteResumeCommandDefaultsDoesNotTreatBareMultiTokenFlagAsPresent(t *testing.T) {
+	schema := []ProviderOption{
+		{
+			Key: "permission_mode",
+			Choices: []OptionChoice{
+				{Value: "suggest", FlagArgs: []string{"--ask-for-approval", "untrusted", "--sandbox", "read-only"}},
+				{Value: "unrestricted", FlagArgs: []string{"--dangerously-bypass-approvals-and-sandbox"}},
+			},
+		},
+	}
+	defaults := map[string]string{"permission_mode": "unrestricted"}
+
+	got := completeResumeCommandDefaults(
+		"codex resume {{.SessionKey}} --ask-for-approval",
+		"resume",
+		"subcommand",
+		schema,
+		defaults,
+	)
+	want := "codex resume --dangerously-bypass-approvals-and-sandbox {{.SessionKey}} --ask-for-approval"
+	if got != want {
+		t.Fatalf("completeResumeCommandDefaults() = %q, want %q", got, want)
 	}
 }
 
@@ -647,6 +879,177 @@ func TestStripArgsSlice_PartialOverlap_CodexSuggest(t *testing.T) {
 
 	if len(result) != 1 || result[0] != "--other" {
 		t.Errorf("partial multi-flag should be stripped, got %v, want [--other]", result)
+	}
+}
+
+func TestStripArgsSliceInfersLongestOverlappingCodexChoice(t *testing.T) {
+	schema := []ProviderOption{
+		{
+			Key: "permission_mode",
+			Choices: []OptionChoice{
+				{Value: "suggest", FlagArgs: []string{"--ask-for-approval", "untrusted", "--sandbox", "read-only"}},
+				{Value: "unrestricted", FlagArgs: []string{"--dangerously-bypass-approvals-and-sandbox"}},
+			},
+		},
+		{
+			Key: "sandbox",
+			Choices: []OptionChoice{
+				{Value: "read-only", FlagArgs: []string{"--sandbox", "read-only"}},
+			},
+		},
+	}
+	flags := CollectAllSchemaFlags(schema)
+	inferDefaults := map[string]string{"permission_mode": "unrestricted"}
+
+	result := stripArgsSlice(
+		[]string{"run", "codex", "--", "--ask-for-approval", "untrusted", "--sandbox", "read-only", "--other"},
+		flags,
+		schema,
+		inferDefaults,
+	)
+
+	want := []string{"run", "codex", "--", "--other"}
+	if !reflect.DeepEqual(result, want) {
+		t.Fatalf("stripArgsSlice() = %v, want %v", result, want)
+	}
+	if got := inferDefaults["permission_mode"]; got != "suggest" {
+		t.Fatalf("inferred permission_mode = %q, want suggest", got)
+	}
+	if _, ok := inferDefaults["sandbox"]; ok {
+		t.Fatalf("inferred overlapping sandbox default = %q, want no separate sandbox default", inferDefaults["sandbox"])
+	}
+}
+
+func TestStripArgsSliceInfersCodexSuggestFromReversedGroups(t *testing.T) {
+	schema := []ProviderOption{
+		{
+			Key: "permission_mode",
+			Choices: []OptionChoice{
+				{Value: "suggest", FlagArgs: []string{"--ask-for-approval", "untrusted", "--sandbox", "read-only"}},
+				{Value: "unrestricted", FlagArgs: []string{"--dangerously-bypass-approvals-and-sandbox"}},
+			},
+		},
+		{
+			Key: "sandbox",
+			Choices: []OptionChoice{
+				{Value: "read-only", FlagArgs: []string{"--sandbox", "read-only"}},
+			},
+		},
+	}
+	flags := CollectAllSchemaFlags(schema)
+	inferDefaults := map[string]string{"permission_mode": "unrestricted"}
+
+	result := stripArgsSlice(
+		[]string{"--sandbox", "read-only", "--ask-for-approval", "untrusted", "--other"},
+		flags,
+		schema,
+		inferDefaults,
+	)
+
+	want := []string{"--other"}
+	if !reflect.DeepEqual(result, want) {
+		t.Fatalf("stripArgsSlice() = %v, want %v", result, want)
+	}
+	if got := inferDefaults["permission_mode"]; got != "suggest" {
+		t.Fatalf("inferred permission_mode = %q, want suggest", got)
+	}
+	if _, ok := inferDefaults["sandbox"]; ok {
+		t.Fatalf("inferred overlapping sandbox default = %q, want no separate sandbox default", inferDefaults["sandbox"])
+	}
+}
+
+func TestStripArgsSliceInfersCodexSuggestFromSeparatedGroups(t *testing.T) {
+	schema := []ProviderOption{
+		{
+			Key: "permission_mode",
+			Choices: []OptionChoice{
+				{Value: "suggest", FlagArgs: []string{"--ask-for-approval", "untrusted", "--sandbox", "read-only"}},
+				{Value: "unrestricted", FlagArgs: []string{"--dangerously-bypass-approvals-and-sandbox"}},
+			},
+		},
+		{
+			Key: "sandbox",
+			Choices: []OptionChoice{
+				{Value: "read-only", FlagArgs: []string{"--sandbox", "read-only"}},
+			},
+		},
+	}
+	flags := CollectAllSchemaFlags(schema)
+	inferDefaults := map[string]string{"permission_mode": "unrestricted"}
+
+	result := stripArgsSlice(
+		[]string{"--ask-for-approval", "untrusted", "--profile", "safe", "--sandbox", "read-only"},
+		flags,
+		schema,
+		inferDefaults,
+	)
+
+	want := []string{"--profile", "safe"}
+	if !reflect.DeepEqual(result, want) {
+		t.Fatalf("stripArgsSlice() = %v, want %v", result, want)
+	}
+	if got := inferDefaults["permission_mode"]; got != "suggest" {
+		t.Fatalf("inferred permission_mode = %q, want suggest", got)
+	}
+	if _, ok := inferDefaults["sandbox"]; ok {
+		t.Fatalf("inferred overlapping sandbox default = %q, want no separate sandbox default", inferDefaults["sandbox"])
+	}
+}
+
+func TestCompleteResumeCommandDefaultsSubcommandOrdersMultipleMissingDefaults(t *testing.T) {
+	schema := []ProviderOption{
+		{
+			Key: "model",
+			Choices: []OptionChoice{
+				{Value: "gpt-5.3-codex-spark", FlagArgs: []string{"--model", "gpt-5.3-codex-spark"}},
+			},
+		},
+		{
+			Key: "effort",
+			Choices: []OptionChoice{
+				{Value: "medium", FlagArgs: []string{"-c", "model_reasoning_effort=medium"}},
+			},
+		},
+	}
+	defaults := map[string]string{
+		"model":  "gpt-5.3-codex-spark",
+		"effort": "medium",
+	}
+
+	got := completeResumeCommandDefaults(
+		"codex resume {{.SessionKey}}",
+		"resume",
+		"subcommand",
+		schema,
+		defaults,
+	)
+	want := "codex resume --model gpt-5.3-codex-spark -c model_reasoning_effort=medium {{.SessionKey}}"
+	if got != want {
+		t.Fatalf("completeResumeCommandDefaults() = %q, want %q", got, want)
+	}
+}
+
+func TestCompleteResumeCommandDefaultsSubcommandUsesSessionResumeToken(t *testing.T) {
+	schema := []ProviderOption{
+		{
+			Key: "model",
+			Choices: []OptionChoice{
+				{Value: "gpt-5.3-codex-spark", FlagArgs: []string{"--model", "gpt-5.3-codex-spark"}},
+			},
+		},
+	}
+	defaults := map[string]string{"model": "gpt-5.3-codex-spark"}
+
+	got := completeResumeCommandDefaults(
+		"aimux run resume codex -- resume {{.SessionKey}}",
+		"resume",
+		"subcommand",
+		schema,
+		defaults,
+	)
+	want := "aimux run resume codex -- resume --model gpt-5.3-codex-spark {{.SessionKey}}"
+	if got != want {
+		t.Fatalf("completeResumeCommandDefaults() = %q, want %q", got, want)
 	}
 }
 
@@ -736,6 +1139,55 @@ func TestBuiltinProviders_GeminiHasNilArgsAndOptionDefaults(t *testing.T) {
 	if gemini.OptionDefaults["permission_mode"] != "unrestricted" {
 		t.Errorf("gemini OptionDefaults[permission_mode] = %q, want unrestricted",
 			gemini.OptionDefaults["permission_mode"])
+	}
+}
+
+func TestBuiltinProviders_OpenCodeHasModelOptions(t *testing.T) {
+	builtins := BuiltinProviders()
+	opencode := builtins["opencode"]
+
+	tests := []struct {
+		name  string
+		model string
+		args  []string
+	}{
+		{name: "Default"},
+		{name: "DeepSeek V4 Flash Free", model: "opencode/deepseek-v4-flash-free", args: []string{"--model", "opencode/deepseek-v4-flash-free"}},
+		{name: "Nemotron 3 Super Free", model: "opencode/nemotron-3-super-free", args: []string{"--model", "opencode/nemotron-3-super-free"}},
+		{name: "Big Pickle", model: "opencode/big-pickle", args: []string{"--model", "opencode/big-pickle"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if !schemaHasChoice(opencode.OptionsSchema, "model", tt.model) {
+				t.Fatalf("opencode OptionsSchema missing model choice %q", tt.model)
+			}
+			args, metadata, err := ResolveOptions(opencode.OptionsSchema, map[string]string{
+				"model": tt.model,
+			}, nil)
+			if err != nil {
+				t.Fatalf("ResolveOptions(opencode model %q): %v", tt.model, err)
+			}
+			if !reflect.DeepEqual(args, tt.args) {
+				t.Fatalf("model args = %v, want %v", args, tt.args)
+			}
+			if metadata["opt_model"] != tt.model {
+				t.Fatalf("metadata[opt_model] = %q, want %q", metadata["opt_model"], tt.model)
+			}
+
+			if tt.model == "" {
+				return
+			}
+			legacy := normalizeProviderLayerArgsForSchema(ProviderSpec{
+				Args: []string{"-m", tt.model},
+			}, opencode.OptionsSchema)
+			if len(legacy.Args) != 0 {
+				t.Fatalf("normalized legacy args = %v, want empty", legacy.Args)
+			}
+			if legacy.OptionDefaults["model"] != tt.model {
+				t.Fatalf("inferred model = %q, want %q", legacy.OptionDefaults["model"], tt.model)
+			}
+		})
 	}
 }
 

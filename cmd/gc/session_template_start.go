@@ -119,7 +119,12 @@ func materializeSessionForTemplateWithOptions(
 		if err != nil {
 			return "", err
 		}
-		sessionCommand, err := resolvedSessionCommand(cityPath, resolved, nil)
+		sessionTransport := config.ResolveSessionCreateTransport(spec.Agent.Session, resolved)
+		sp := newSessionProvider()
+		if err := validateResolvedSessionTransport(resolved, sessionTransport, sp); err != nil {
+			return "", err
+		}
+		sessionCommand, err := resolvedSessionCommand(cityPath, resolved, nil, sessionTransport)
 		if err != nil {
 			return "", err
 		}
@@ -129,7 +134,6 @@ func materializeSessionForTemplateWithOptions(
 			return "", err
 		}
 
-		sp := newSessionProvider()
 		title := spec.Identity
 		templateIdentity := namedSessionBackingTemplate(spec)
 		extraMeta := map[string]string{
@@ -169,7 +173,7 @@ func materializeSessionForTemplateWithOptions(
 			sessionCommand,
 			providerName,
 			workDir,
-			spec.Agent.Session,
+			sessionTransport,
 			resolved,
 			extraMeta,
 		)
@@ -272,11 +276,17 @@ func materializeSessionForAgentConfig(cityPath string, cfg *config.City, store b
 	if err != nil {
 		return "", err
 	}
-	sessionCommand, err := resolvedSessionCommand(cityPath, resolved, nil)
+	sessionTransport := config.ResolveSessionCreateTransport(agentCfg.Session, resolved)
+	sp := newSessionProvider()
+	if err := validateResolvedSessionTransport(resolved, sessionTransport, sp); err != nil {
+		return "", err
+	}
+	sessionCommand, err := resolvedSessionCommand(cityPath, resolved, nil, sessionTransport)
 	if err != nil {
 		return "", err
 	}
-	explicitName, err := sessionExplicitNameForNewSession(agentCfg, "")
+	cityName := config.EffectiveCityName(cfg, filepath.Base(cityPath))
+	explicitName, err := sessionExplicitNameForNewSession(cityPath, cityName, cfg.Rigs, agentCfg, "")
 	if err != nil {
 		return "", err
 	}
@@ -291,7 +301,6 @@ func materializeSessionForAgentConfig(cityPath string, cfg *config.City, store b
 		return "", err
 	}
 
-	sp := newSessionProvider()
 	title := agentCfg.QualifiedName()
 	extraMeta := map[string]string{
 		"agent_name":     sessionQualifiedName,
@@ -315,7 +324,7 @@ func materializeSessionForAgentConfig(cityPath string, cfg *config.City, store b
 		sessionCommand,
 		agentCfg.Provider,
 		workDir,
-		agentCfg.Session,
+		sessionTransport,
 		resolved,
 		extraMeta,
 	)

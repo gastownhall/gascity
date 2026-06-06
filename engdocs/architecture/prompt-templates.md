@@ -25,8 +25,9 @@ prompt dynamically customized to its deployment context.
 - **PromptContext**: The data available to templates during rendering.
   Includes CityRoot, AgentName (qualified: `rig/agent-1`),
   TemplateName (config name: `agent` for pool template), RigName,
-  WorkDir, IssuePrefix, Branch, DefaultBranch, WorkQuery, SlingQuery,
-  and custom Env vars from agent config.
+  WorkDir, IssuePrefix, Branch, DefaultBranch, WorkQuery,
+  AssignedInProgressQuery, AssignedReadyQuery, RoutedPoolQuery,
+  SlingQuery, and custom Env vars from agent config.
 
 - **Shared Templates**: Reusable template partials in a `shared/`
   directory next to the prompt templates. Automatically loaded and
@@ -34,9 +35,13 @@ prompt dynamically customized to its deployment context.
   conventions like command glossaries and architecture context.
 
 - **Appended Fragments**: Named template fragments that are rendered and
-  appended after the main prompt body. These are configured through
-  `append_fragments` in `[agent_defaults]`. Per-agent appended fragments
-  still come from `inject_fragments` on the agent. Explicit
+  appended after the main prompt body. Configured through
+  `append_fragments` on either `[agent_defaults]` (city- and pack-wide)
+  or per-agent on an `[[agent]]` block / `agents/<name>/agent.toml`.
+  Per-agent `append_fragments` layers in front of imported-pack and
+  city-level `[agent_defaults].append_fragments`. `inject_fragments` on
+  an agent is the legacy per-agent spelling; it still appends, but new
+  configs should prefer `append_fragments`. Explicit
   `{{template "name" .}}` calls still control in-body placement;
   appended fragment settings do not.
 
@@ -63,6 +68,7 @@ prompt dynamically customized to its deployment context.
   │ RigName      │            │  (text/template)  │
   │ WorkDir      │            └────────┬──────────┘
   │ WorkQuery    │                     │
+  │ Assigned...  │                     │
   │ SlingQuery   │                     ▼
   │ Env          │              Rendered Markdown
   └──────────────┘              (agent's prompt)
@@ -169,6 +175,9 @@ append_fragments = ["safety"]
 | `Branch` | Current git branch | `feature-x` |
 | `DefaultBranch` | Default branch | `main` |
 | `WorkQuery` | Work discovery command | `bd ready --assignee=...` |
+| `AssignedInProgressQuery` | Assigned in-progress recovery command | `bd list --include-ephemeral --status in_progress ...` |
+| `AssignedReadyQuery` | Assigned ready-work command | `bd ready --include-ephemeral --assignee=...` |
+| `RoutedPoolQuery` | Unassigned routed pool-work command | `bd ready --metadata-field gc.routed_to=... --unassigned` |
 | `SlingQuery` | Work routing command | `gc sling ...` |
 
 ### Template Functions
@@ -188,7 +197,8 @@ prompt:
 |---|---|---|
 | `{{ template "name" . }}` | inside `prompt.template.md` | Places fragment content exactly where referenced |
 | `append_fragments = ["name"]` | `[agent_defaults]` | Appends fragment content after the rendered prompt body |
-| `inject_fragments = ["name"]` | per-agent settings | Appends fragment content after the rendered prompt body |
+| `append_fragments = ["name"]` | per-agent (`[[agent]]` or `agents/<name>/agent.toml`) | Appends fragment content after the rendered prompt body; layers in front of `[agent_defaults]` |
+| `inject_fragments = ["name"]` | per-agent settings (legacy) | Appends fragment content after the rendered prompt body; retained for migration, new configs should use `append_fragments` |
 
 ## Testing
 
@@ -209,7 +219,7 @@ prompt:
 
 ## See Also
 
-- [Agent Protocol](agent-protocol.md) — how rendered prompts are
+- [Session](session.md) — how rendered prompts are
   delivered to agents via runtime.Provider
 - [Config System](config.md) — how Agent.PromptTemplate and Agent.Env
   are resolved through override layers

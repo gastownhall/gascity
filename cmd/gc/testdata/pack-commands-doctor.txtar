@@ -47,7 +47,6 @@ stdout 'passed'
 
 -- city.toml.custom --
 [workspace]
-name = "testcity"
 
 [imports.ops]
 source = "../packs/ops"

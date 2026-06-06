@@ -3,6 +3,7 @@ package beads_test
 import (
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/beadstest"
@@ -149,6 +150,45 @@ func TestMemStoreChildrenExcludeClosedByDefault(t *testing.T) {
 	}
 }
 
+func TestMemStoreChildrenHonorTierOptions(t *testing.T) {
+	s := beads.NewMemStore()
+
+	parent, err := s.Create(beads.Bead{Title: "parent"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	historyChild, err := s.Create(beads.Bead{Title: "history", ParentID: parent.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	noHistoryChild, err := s.Create(beads.Bead{Title: "no-history", ParentID: parent.ID, NoHistory: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ephemeralChild, err := s.Create(beads.Bead{Title: "ephemeral", ParentID: parent.ID, Ephemeral: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := s.Children(parent.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertMemStoreIDs(t, got, historyChild.ID, noHistoryChild.ID)
+
+	got, err = s.Children(parent.ID, beads.WithEphemeral)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertMemStoreIDs(t, got, noHistoryChild.ID, ephemeralChild.ID)
+
+	got, err = s.Children(parent.ID, beads.WithBothTiers)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertMemStoreIDs(t, got, historyChild.ID, noHistoryChild.ID, ephemeralChild.ID)
+}
+
 func TestMemStoreListByLabelRequiresIncludeClosed(t *testing.T) {
 	s := beads.NewMemStore()
 
@@ -178,6 +218,22 @@ func TestMemStoreListByLabelRequiresIncludeClosed(t *testing.T) {
 	}
 	if len(got) != 2 {
 		t.Fatalf("ListByLabel(IncludeClosed) = %d items, want 2", len(got))
+	}
+}
+
+func assertMemStoreIDs(t *testing.T, got []beads.Bead, want ...string) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("got %d beads (%v), want %v", len(got), got, want)
+	}
+	seen := make(map[string]bool, len(got))
+	for _, bead := range got {
+		seen[bead.ID] = true
+	}
+	for _, id := range want {
+		if !seen[id] {
+			t.Fatalf("got %v, want id %s", got, id)
+		}
 	}
 }
 
@@ -522,6 +578,66 @@ func TestMemStoreReadyPreservesBlocksWhenParentChildSharesPair(t *testing.T) {
 	}
 }
 
+func TestMemStoreReadySkipsEphemeralOpenTasks(t *testing.T) {
+	s := beads.NewMemStore()
+
+	ready, err := s.Create(beads.Bead{Title: "ready", Type: "task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ephemeral, err := s.Create(beads.Bead{Title: "tracking", Type: "task", Ephemeral: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := s.Ready()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].ID != ready.ID {
+		t.Fatalf("Ready() = %+v, want only non-ephemeral task %s", got, ready.ID)
+	}
+	for _, bead := range got {
+		if bead.ID == ephemeral.ID {
+			t.Fatalf("ephemeral bead %s leaked into Ready(): %+v", ephemeral.ID, got)
+		}
+	}
+}
+
+func TestMemStoreReadyExcludesFutureDeferredBeads(t *testing.T) {
+	s := beads.NewMemStore()
+
+	ready, err := s.Create(beads.Bead{Title: "ready"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	future := time.Now().UTC().Add(24 * time.Hour)
+	futureDeferred, err := s.Create(beads.Bead{Title: "future", DeferUntil: &future})
+	if err != nil {
+		t.Fatal(err)
+	}
+	past := time.Now().UTC().Add(-24 * time.Hour)
+	pastDeferred, err := s.Create(beads.Bead{Title: "past", DeferUntil: &past})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := s.Ready()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids := map[string]bool{}
+	for _, bead := range got {
+		ids[bead.ID] = true
+	}
+	if !ids[ready.ID] || !ids[pastDeferred.ID] {
+		t.Fatalf("Ready() ids = %v, want ready and past-deferred beads", ids)
+	}
+	if ids[futureDeferred.ID] {
+		t.Fatalf("Ready() ids = %v, future-deferred bead %s must be hidden", ids, futureDeferred.ID)
+	}
+}
+
 func TestMemStoreDepListDefaultDirection(t *testing.T) {
 	s := beads.NewMemStore()
 	_ = s.DepAdd("a", "b", "blocks")
@@ -533,5 +649,50 @@ func TestMemStoreDepListDefaultDirection(t *testing.T) {
 	}
 	if len(deps) != 1 {
 		t.Errorf("DepList(a, '') = %d deps, want 1", len(deps))
+	}
+}
+
+func TestMemStoreEphemeralTierPartitioning(t *testing.T) {
+	m := beads.NewMemStore()
+	plain, err := m.Create(beads.Bead{Title: "plain", Labels: []string{"k"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wisp, err := m.Create(beads.Bead{Title: "wisp", Labels: []string{"k"}, Ephemeral: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !wisp.Ephemeral {
+		t.Fatalf("wisp.Ephemeral = false, want true")
+	}
+
+	cases := []struct {
+		name    string
+		tier    beads.TierMode
+		wantIDs []string
+	}{
+		{"issues only (default)", beads.TierIssues, []string{plain.ID}},
+		{"wisps only", beads.TierWisps, []string{wisp.ID}},
+		{"both tiers", beads.TierBoth, []string{plain.ID, wisp.ID}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := m.List(beads.ListQuery{Label: "k", TierMode: tc.tier})
+			if err != nil {
+				t.Fatal(err)
+			}
+			gotIDs := make(map[string]bool, len(got))
+			for _, b := range got {
+				gotIDs[b.ID] = true
+			}
+			if len(gotIDs) != len(tc.wantIDs) {
+				t.Fatalf("got %d beads (%v), want %v", len(gotIDs), gotIDs, tc.wantIDs)
+			}
+			for _, id := range tc.wantIDs {
+				if !gotIDs[id] {
+					t.Errorf("missing %s in result", id)
+				}
+			}
+		})
 	}
 }

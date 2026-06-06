@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "description": "Result payload for gc pack registry refresh.",
+  "required": ["schema_version", "ok", "refreshed", "failures", "pruned_caches"],
+  "properties": {
+    "schema_version": {
+      "const": "1",
+      "description": "Version of this command result schema."
+    },
+    "ok": {
+      "const": true,
+      "description": "Whether the command completed successfully."
+    },
+    "target": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-]*$",
+      "maxLength": 64,
+      "description": "Requested registry name, or omitted when all configured registries were targeted."
+    },
+    "refreshed": {
+      "type": "array",
+      "description": "Registries whose catalog snapshots were refreshed successfully.",
+      "items": {
+        "type": "object",
+        "description": "One successful registry refresh.",
+        "required": ["name", "pack_count"],
+        "properties": {
+          "name": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9-]*$",
+            "maxLength": 64,
+            "description": "Name of the refreshed registry."
+          },
+          "pack_count": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Number of packs in the refreshed catalog."
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "failures": {
+      "type": "array",
+      "description": "Registries that could not be refreshed.",
+      "items": {
+        "type": "object",
+        "description": "One registry refresh failure.",
+        "required": ["name", "message"],
+        "properties": {
+          "name": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9-]*$",
+            "maxLength": 64,
+            "description": "Name of the registry that failed."
+          },
+          "message": {
+            "type": "string",
+            "description": "Human-readable refresh failure message."
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "pruned_caches": {
+      "type": "boolean",
+      "description": "Whether caches for removed registries were pruned during this refresh."
+    }
+  },
+  "additionalProperties": false
+}

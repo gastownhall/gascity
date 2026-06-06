@@ -3,8 +3,10 @@ package main
 import (
 	"fmt"
 	"io"
+	"strings"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/spf13/cobra"
@@ -12,7 +14,8 @@ import (
 
 // newSessionWakeCmd creates the "gc session wake <id-or-alias>" command.
 func newSessionWakeCmd(stdout, stderr io.Writer) *cobra.Command {
-	return &cobra.Command{
+	var jsonOutput bool
+	cmd := &cobra.Command{
 		Use:   "wake <session-id-or-alias>",
 		Short: "Wake a session (request start and clear holds)",
 		Long: `Request wake for a session and release user hold or crash-loop quarantine metadata.
@@ -26,16 +29,20 @@ Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).`,
   gc session wake mayor`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
-			if cmdSessionWake(args, stdout, stderr) != 0 {
+			if cmdSessionWake(args, stdout, stderr, jsonOutput) != 0 {
 				return errExit
 			}
 			return nil
 		},
+		ValidArgsFunction: completeSessionIDs,
 	}
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "emit JSONL")
+	return cmd
 }
 
 // cmdSessionWake is the CLI entry point for "gc session wake".
-func cmdSessionWake(args []string, stdout, stderr io.Writer) int {
+func cmdSessionWake(args []string, stdout, stderr io.Writer, jsonOutput ...bool) int {
+	asJSON := sessionJSONRequested(jsonOutput)
 	store, code := openCityStore(stderr, "gc session wake")
 	if store == nil {
 		return code
@@ -61,6 +68,7 @@ func cmdSessionWake(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gc session wake: %s is not a session\n", id) //nolint:errcheck
 		return 1
 	}
+	hasRunnableTemplate := sessionWakeHasRunnableTemplate(b, cfg)
 	session.RepairEmptyType(store, &b)
 	nudgeIDs, err := session.WakeSession(store, b, time.Now().UTC())
 	if err != nil {
@@ -70,6 +78,19 @@ func cmdSessionWake(args []string, stdout, stderr io.Writer) int {
 		}
 		fmt.Fprintf(stderr, "gc session wake: updating metadata: %v\n", err) //nolint:errcheck
 		return 1
+	}
+	if !hasRunnableTemplate && sessionWakeRequestedCreate(b) {
+		if err := store.SetMetadataBatch(id, map[string]string{
+			"state":                     string(session.StateAsleep),
+			"state_reason":              "",
+			"pending_create_claim":      "",
+			"pending_create_started_at": "",
+			"wake_request":              "",
+			"wake_requested_at":         "",
+		}); err != nil {
+			fmt.Fprintf(stderr, "gc session wake: updating metadata: %v\n", err) //nolint:errcheck
+			return 1
+		}
 	}
 	if cityErr == nil {
 		if err := withdrawQueuedWaitNudges(cityPath, nudgeIDs); err != nil {
@@ -82,6 +103,34 @@ func cmdSessionWake(args []string, stdout, stderr io.Writer) int {
 		}
 	}
 
+	if asJSON {
+		if err := writeSessionActionJSON(stdout, sessionActionResult{
+			Action:              "wake",
+			SessionID:           id,
+			State:               "wake_requested",
+			WaitNudgesWithdrawn: len(nudgeIDs),
+		}); err != nil {
+			fmt.Fprintf(stderr, "gc session wake: %v\n", err) //nolint:errcheck
+			return 1
+		}
+		return 0
+	}
 	fmt.Fprintf(stdout, "Session %s: wake requested.\n", id) //nolint:errcheck
 	return 0
+}
+
+func sessionWakeHasRunnableTemplate(b beads.Bead, cfg *config.City) bool {
+	if cfg == nil {
+		return true
+	}
+	template := normalizedSessionTemplate(b, cfg)
+	if template == "" {
+		template = b.Metadata["template"]
+	}
+	return findAgentByTemplate(cfg, template) != nil
+}
+
+func sessionWakeRequestedCreate(b beads.Bead) bool {
+	state := session.State(strings.TrimSpace(b.Metadata["state"]))
+	return state == session.StateSuspended || state == session.StateDrained
 }

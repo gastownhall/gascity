@@ -1,0 +1,100 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "ok",
+    "city_path",
+    "city_name",
+    "rig",
+    "agents"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1"
+    },
+    "ok": {
+      "const": true
+    },
+    "city_path": {
+      "type": "string"
+    },
+    "city_name": {
+      "type": "string"
+    },
+    "rig": {
+      "type": "object",
+      "required": [
+        "name",
+        "path",
+        "prefix",
+        "suspended",
+        "beads"
+      ],
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "prefix": {
+          "type": "string"
+        },
+        "default_branch": {
+          "type": "string"
+        },
+        "suspended": {
+          "type": "boolean"
+        },
+        "beads": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": true
+    },
+    "agents": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "name",
+          "qualified_name",
+          "runtime_session_name",
+          "running",
+          "suspended",
+          "draining",
+          "status"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "qualified_name": {
+            "type": "string"
+          },
+          "runtime_session_name": {
+            "type": "string"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "running": {
+            "type": "boolean"
+          },
+          "suspended": {
+            "type": "boolean"
+          },
+          "draining": {
+            "type": "boolean"
+          },
+          "status": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": true
+      }
+    }
+  },
+  "additionalProperties": true
+}

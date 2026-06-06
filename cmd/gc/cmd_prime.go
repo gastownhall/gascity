@@ -24,19 +24,18 @@ import (
 // inside a rig without being a managed agent.
 const defaultPrimePrompt = `# Gas City Agent
 
-You are an agent in a Gas City workspace. Check for available work
-and execute it.
+You are an agent in a Gas City workspace. Claim available work and execute it.
 
 ## Your tools
 
-- ` + "`bd ready`" + ` — see available work items
+- ` + "`gc hook --claim --json`" + ` — find and atomically claim one work item
 - ` + "`bd show <id>`" + ` — see details of a work item
 - ` + "`bd close <id>`" + ` — mark work as done
 
 ## How to work
 
-1. Check for available work: ` + "`bd ready`" + `
-2. Pick a bead and execute the work described in its title
+1. Claim work: ` + "`gc hook --claim --json`" + `
+2. Read the claimed bead and execute the work described in its title
 3. When done, close it: ` + "`bd close <id>`" + `
 4. Check for more work. Repeat until the queue is empty.
 `
@@ -46,12 +45,10 @@ const primeHookReadTimeout = 500 * time.Millisecond
 var primeStdin = func() *os.File { return os.Stdin }
 
 type primeHookInput struct {
-	SessionID string `json:"session_id"`
-	Source    string `json:"source"`
+	Source string `json:"source"`
 }
 
 type primeHookContext struct {
-	SessionID     string
 	Source        string
 	HookEventName string
 }
@@ -61,6 +58,7 @@ func newPrimeCmd(stdout, stderr io.Writer) *cobra.Command {
 	var hookMode bool
 	var hookFormat string
 	var strictMode bool
+	var jsonOut bool
 	cmd := &cobra.Command{
 		Use:   "prime [agent-name]",
 		Short: "Output the behavioral prompt for an agent",
@@ -92,6 +90,21 @@ to empty output from valid conditional logic, or on suspended states
 		Args: cobra.MaximumNArgs(1),
 	}
 	cmd.RunE = func(_ *cobra.Command, args []string) error {
+		if jsonOut {
+			var buf strings.Builder
+			if doPrimeWithHookFormat(args, &buf, stderr, hookMode, hookFormat, strictMode) != 0 {
+				return errExit
+			}
+			agentName, _ := primeInvocationAgentName(args)
+			return writeCLIJSONLineOrErr(stdout, stderr, "gc prime", primeJSONResult{
+				SchemaVersion: "1",
+				Agent:         agentName,
+				Hook:          hookMode,
+				HookFormat:    hookFormat,
+				Content:       buf.String(),
+				Bytes:         buf.Len(),
+			})
+		}
 		if doPrimeWithHookFormat(args, stdout, stderr, hookMode, hookFormat, strictMode) != 0 {
 			return errExit
 		}
@@ -100,7 +113,17 @@ to empty output from valid conditional logic, or on suspended states
 	cmd.Flags().BoolVar(&hookMode, "hook", false, "compatibility mode for runtime hook invocations")
 	cmd.Flags().StringVar(&hookFormat, "hook-format", "", "format hook output for a provider")
 	cmd.Flags().BoolVar(&strictMode, "strict", false, "fail on missing city, missing or unknown agent, or unreadable prompt_template instead of falling back to the default prompt")
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit JSON summary")
 	return cmd
+}
+
+type primeJSONResult struct {
+	SchemaVersion string `json:"schema_version"`
+	Agent         string `json:"agent,omitempty"`
+	Hook          bool   `json:"hook"`
+	HookFormat    string `json:"hook_format,omitempty"`
+	Content       string `json:"content"`
+	Bytes         int    `json:"bytes"`
 }
 
 // doPrime exists as the public non-strict entry point so callers don't
@@ -119,15 +142,15 @@ func doPrime(args []string, stdout, stderr io.Writer) int { //nolint:unparam // 
 // strict is a debugging aid, not a stricter mode for the whole command.
 //
 // Hook-mode side effects under --strict are deferred until we know the
-// invocation is not a strict failure, so a failing --strict cannot leave
-// session-id state behind for an agent that doesn't exist. Suspended
-// paths still run side effects because suspension is a legitimate quiet
-// state, not a failure.
+// invocation is not a strict failure, so a failing --strict cannot update
+// provider resume metadata for an agent that doesn't exist. Suspended paths
+// still run side effects because suspension is a legitimate quiet state, not a
+// failure.
 func doPrimeWithMode(args []string, stdout, stderr io.Writer, hookMode, strictMode bool) int {
 	return doPrimeWithHookFormat(args, stdout, stderr, hookMode, "", strictMode)
 }
 
-func doPrimeWithHookFormat(args []string, stdout, stderr io.Writer, hookMode bool, hookFormat string, strictMode bool) int {
+func primeInvocationAgentName(args []string) (string, bool) {
 	agentName := os.Getenv("GC_ALIAS")
 	if agentName == "" {
 		agentName = os.Getenv("GC_AGENT")
@@ -145,8 +168,12 @@ func doPrimeWithHookFormat(args []string, stdout, stderr io.Writer, hookMode boo
 	if len(args) > 0 {
 		agentName = args[0]
 	}
+	return strings.TrimSpace(agentName), sessionTemplateContext
+}
 
-	hookContext := primeHookContext{}
+func doPrimeWithHookFormat(args []string, stdout, stderr io.Writer, hookMode bool, hookFormat string, strictMode bool) int {
+	agentName, sessionTemplateContext := primeInvocationAgentName(args)
+	var hookContext primeHookContext
 	suppressHookPrompt := false
 	if hookMode {
 		hookContext = readPrimeHookContext()
@@ -154,14 +181,11 @@ func doPrimeWithHookFormat(args []string, stdout, stderr io.Writer, hookMode boo
 	}
 	// In non-strict mode, hook side effects fire eagerly (existing behavior).
 	// In strict mode, we defer them until after strict checks pass so that a
-	// failing --strict invocation does not persist a session-id for failed
-	// agent resolution or template validation.
+	// failing --strict invocation does not update provider resume metadata for
+	// failed agent resolution or template validation.
 	runHookSideEffects := func() {
 		if !hookMode {
 			return
-		}
-		if sessionID := hookContext.SessionID; sessionID != "" {
-			persistPrimeHookSessionID(sessionID)
 		}
 		persistPrimeHookProviderSessionKey()
 	}
@@ -175,7 +199,7 @@ func doPrimeWithHookFormat(args []string, stdout, stderr io.Writer, hookMode boo
 			fmt.Fprintf(stderr, "gc prime: no city config found: %v\n", err) //nolint:errcheck
 			return 1
 		}
-		fmt.Fprint(stdout, defaultPrimePrompt) //nolint:errcheck // best-effort stdout
+		writePrimePromptWithFormat(stdout, "", "", defaultPrimePrompt, hookMode, hookFormat, suppressHookPrompt)
 		return 0
 	}
 	cfg, err := loadCityConfig(cityPath, stderr)
@@ -184,7 +208,7 @@ func doPrimeWithHookFormat(args []string, stdout, stderr io.Writer, hookMode boo
 			fmt.Fprintf(stderr, "gc prime: loading city config: %v\n", err) //nolint:errcheck
 			return 1
 		}
-		fmt.Fprint(stdout, defaultPrimePrompt) //nolint:errcheck // best-effort stdout
+		writePrimePromptWithFormat(stdout, "", "", defaultPrimePrompt, hookMode, hookFormat, suppressHookPrompt)
 		return 0
 	}
 	resolveRigPaths(cityPath, cfg.Rigs)
@@ -200,6 +224,9 @@ func doPrimeWithHookFormat(args []string, stdout, stderr io.Writer, hookMode boo
 	}
 
 	cityName := loadedCityName(cfg, cityPath)
+	if hookMode && strings.TrimSpace(agentName) == "" {
+		agentName = primeHookAgentFromWorkDir(cfg)
+	}
 
 	// Look up agent in config. First try qualified identity resolution
 	// (handles "rig/agent" and rig-context matching), then fall back to
@@ -246,7 +273,7 @@ func doPrimeWithHookFormat(args []string, stdout, stderr io.Writer, hookMode boo
 				return 1
 			}
 		}
-		// Strict preconditions passed; now it's safe to persist session-id.
+		// Strict preconditions passed; now it's safe to update provider resume metadata.
 		runHookSideEffects()
 	}
 
@@ -272,7 +299,9 @@ func doPrimeWithHookFormat(args []string, stdout, stderr io.Writer, hookMode boo
 		}
 		var ctx PromptContext
 		if a.PromptTemplate != "" || hookMode || sessionTemplateContext {
-			ctx = buildPrimeContext(cityPath, cityName, &a, cfg.Rigs, stderr)
+			ctx = buildPrimeContextForBeads(cityPath, cityName, &a, cfg.Rigs, cfg.Beads, stderr)
+			ctx.ProviderKey, ctx.ProviderDisplayName = providerInfoForAgent(&a, &cfg.Workspace, cfg.Providers)
+			ctx.InstructionsFile = instructionsFileForAgent(&a, &cfg.Workspace, cfg.Providers)
 		}
 		if a.PromptTemplate != "" {
 			fragments := effectivePromptFragments(
@@ -282,8 +311,9 @@ func doPrimeWithHookFormat(args []string, stdout, stderr io.Writer, hookMode boo
 				a.InheritedAppendFragments,
 				cfg.AgentDefaults.AppendFragments,
 			)
+			packDirs := cfg.PackDirsForRig(ctx.RigName)
 			prompt := renderPrompt(fsys.OSFS{}, cityPath, cityName, a.PromptTemplate, ctx, cfg.Workspace.SessionTemplate, stderr,
-				cfg.PackDirs, fragments, nil)
+				packDirs, fragments, nil)
 			if prompt != "" {
 				writePrimePromptWithFormat(stdout, cityName, ctx.AgentName, prompt, hookMode, hookFormat, suppressHookPrompt)
 				return 0
@@ -317,7 +347,7 @@ func doPrimeWithHookFormat(args []string, stdout, stderr io.Writer, hookMode boo
 	// when the agent has no prompt_template and doesn't match a builtin
 	// worker prompt — a supported config shape, so the default prompt is
 	// the correct output even under --strict.
-	fmt.Fprint(stdout, defaultPrimePrompt) //nolint:errcheck // best-effort stdout
+	writePrimePromptWithFormat(stdout, cityName, agentName, defaultPrimePrompt, hookMode, hookFormat, suppressHookPrompt)
 	return 0
 }
 
@@ -365,6 +395,42 @@ func primeHookSessionTemplate(cityPath string) string {
 	return strings.TrimSpace(sessionBead.Metadata["common_name"])
 }
 
+func primeHookAgentFromWorkDir(cfg *config.City) string {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return ""
+	}
+	candidates := primeHookAgentCandidatesFromPath(cwd)
+	if cfg != nil {
+		rigContext := currentRigContext(cfg)
+		for _, candidate := range candidates {
+			if a, ok := resolveAgentIdentity(cfg, candidate, rigContext); ok {
+				return a.QualifiedName()
+			}
+		}
+	}
+	if len(candidates) == 0 {
+		return ""
+	}
+	return candidates[len(candidates)-1]
+}
+
+func primeHookAgentCandidatesFromPath(path string) []string {
+	clean := filepath.Clean(path)
+	parts := strings.Split(clean, string(os.PathSeparator))
+	for i := 0; i+2 < len(parts); i++ {
+		if parts[i] == ".gc" && parts[i+1] == "agents" {
+			remaining := parts[i+2:]
+			candidates := make([]string, 0, len(remaining))
+			for end := len(remaining); end >= 1; end-- {
+				candidates = append(candidates, strings.Join(remaining[:end], "/"))
+			}
+			return candidates
+		}
+	}
+	return nil
+}
+
 func prependHookBeacon(cityName, agentName, prompt string) string {
 	if cityName == "" || agentName == "" {
 		return prompt
@@ -396,7 +462,7 @@ func writePrimePromptWithFormat(stdout io.Writer, cityName, agentName, prompt st
 		prompt = prependHookBeacon(cityName, agentName, prompt)
 	}
 	if hookMode && hookFormat != "" {
-		_ = writeProviderHookContext(stdout, hookFormat, prompt)
+		_ = writeProviderHookContextForEvent(stdout, hookFormat, "SessionStart", prompt)
 		return
 	}
 	fmt.Fprint(stdout, prompt) //nolint:errcheck // best-effort stdout
@@ -412,13 +478,7 @@ func readPrimeHookContext() primeHookContext {
 			if source := strings.TrimSpace(input.Source); source != "" {
 				ctx.Source = source
 			}
-			ctx.SessionID = strings.TrimSpace(input.SessionID)
 		}
-	}
-	if id := strings.TrimSpace(os.Getenv("GC_SESSION_ID")); id != "" {
-		ctx.SessionID = id
-	} else if id := strings.TrimSpace(os.Getenv("CLAUDE_SESSION_ID")); id != "" {
-		ctx.SessionID = id
 	}
 	return ctx
 }
@@ -470,24 +530,12 @@ func readPrimeHookStdin() *primeHookInput {
 	return &input
 }
 
-func persistPrimeHookSessionID(sessionID string) {
-	if sessionID == "" {
-		return
-	}
-	cwd, err := os.Getwd()
-	if err != nil {
-		return
-	}
-	runtimeDir := filepath.Join(cwd, ".runtime")
-	if err := os.MkdirAll(runtimeDir, 0o755); err != nil {
-		return
-	}
-	_ = os.WriteFile(filepath.Join(runtimeDir, "session_id"), []byte(sessionID+"\n"), 0o644)
-}
-
 func persistPrimeHookProviderSessionKey() {
 	gcSessionID := strings.TrimSpace(os.Getenv("GC_SESSION_ID"))
-	providerSessionID := strings.TrimSpace(os.Getenv("GEMINI_SESSION_ID"))
+	providerSessionID := strings.TrimSpace(os.Getenv("GC_PROVIDER_SESSION_ID"))
+	if providerSessionID == "" {
+		providerSessionID = strings.TrimSpace(os.Getenv("GEMINI_SESSION_ID"))
+	}
 	if gcSessionID == "" || providerSessionID == "" || gcSessionID == providerSessionID {
 		return
 	}
@@ -541,7 +589,7 @@ func findAgentByName(cfg *config.City, name string) (config.Agent, bool) {
 	}
 	// Pool suffix stripping: "polecat-3" → try "polecat" if it's a pool.
 	for _, a := range cfg.Agents {
-		if a.SupportsInstanceExpansion() {
+		if a.SupportsInstanceExpansion() && !a.UsesCanonicalSingletonPoolIdentity() {
 			sp := scaleParamsFor(&a)
 			prefix := a.Name + "-"
 			if strings.HasPrefix(name, prefix) {
@@ -560,10 +608,16 @@ func findAgentByName(cfg *config.City, name string) (config.Agent, bool) {
 // environment variables when running inside a managed session, falls back
 // to currentRigContext when run manually.
 func buildPrimeContext(cityPath, cityName string, a *config.Agent, rigs []config.Rig, stderr io.Writer) PromptContext {
+	return buildPrimeContextForBeads(cityPath, cityName, a, rigs, config.BeadsConfig{}, stderr)
+}
+
+func buildPrimeContextForBeads(cityPath, cityName string, a *config.Agent, rigs []config.Rig, beadsCfg config.BeadsConfig, stderr io.Writer) PromptContext {
 	ctx := PromptContext{
-		CityRoot:     cityPath,
-		TemplateName: a.Name,
-		Env:          a.Env,
+		CityRoot:      cityPath,
+		TemplateName:  a.Name,
+		BindingName:   a.BindingName,
+		BindingPrefix: a.BindingPrefix(),
+		Env:           a.Env,
 	}
 
 	// Agent identity: prefer GC_ALIAS, then GC_AGENT, else config.
@@ -595,8 +649,11 @@ func buildPrimeContext(cityPath, cityName string, a *config.Agent, rigs []config
 	}
 
 	ctx.Branch = os.Getenv("GC_BRANCH")
-	ctx.DefaultBranch = defaultBranchFor(ctx.WorkDir)
-	ctx.WorkQuery = expandAgentCommandTemplate(cityPath, cityName, a, rigs, "work_query", a.EffectiveWorkQuery(), stderr)
+	ctx.DefaultBranch = defaultBranchForRig(ctx.RigName, rigs, ctx.WorkDir)
+	ctx.WorkQuery = expandAgentCommandTemplate(cityPath, cityName, a, rigs, "work_query", a.EffectiveWorkQueryForBeads(beadsCfg), stderr)
+	ctx.AssignedInProgressQuery = expandAgentCommandTemplate(cityPath, cityName, a, rigs, "assigned_in_progress_query", a.EffectiveAssignedInProgressQueryForBeads(beadsCfg), stderr)
+	ctx.AssignedReadyQuery = expandAgentCommandTemplate(cityPath, cityName, a, rigs, "assigned_ready_query", a.EffectiveAssignedReadyQueryForBeads(beadsCfg), stderr)
+	ctx.RoutedPoolQuery = expandAgentCommandTemplate(cityPath, cityName, a, rigs, "routed_pool_query", a.EffectiveRoutedPoolQueryForBeads(beadsCfg), stderr)
 	ctx.SlingQuery = expandAgentCommandTemplate(cityPath, cityName, a, rigs, "sling_query", a.EffectiveSlingQuery(), stderr)
 	return ctx
 }

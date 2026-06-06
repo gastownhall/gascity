@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -24,7 +25,7 @@ func TestSuspendResume(t *testing.T) {
 
 	// Suspend.
 	var stdout, stderr bytes.Buffer
-	code := doSuspendCity(f, cityPath, true, &stdout, &stderr)
+	code := doSuspendCity(f, cityPath, true, false, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("suspend code = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -48,7 +49,7 @@ func TestSuspendResume(t *testing.T) {
 	// Resume.
 	stdout.Reset()
 	stderr.Reset()
-	code = doSuspendCity(f, cityPath, false, &stdout, &stderr)
+	code = doSuspendCity(f, cityPath, false, false, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("resume code = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -70,6 +71,33 @@ func TestSuspendResume(t *testing.T) {
 	}
 }
 
+func TestSuspendJSON(t *testing.T) {
+	f := fsys.NewFake()
+	cfg := config.DefaultCity("bright-lights")
+	data, err := cfg.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cityPath := "/city"
+	f.Files[filepath.Join(cityPath, "city.toml")] = data
+
+	var stdout, stderr bytes.Buffer
+	code := doSuspendCity(f, cityPath, true, true, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("suspend code = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q", stderr.String())
+	}
+	var got lifecycleActionJSON
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatalf("stdout is not JSON: %v\n%s", err, stdout.String())
+	}
+	if got.SchemaVersion != "1" || !got.OK || got.Command != "suspend" || got.CityPath != cityPath {
+		t.Fatalf("payload = %+v", got)
+	}
+}
+
 func TestSuspendAlreadySuspended(t *testing.T) {
 	f := fsys.NewFake()
 	cfg := config.City{
@@ -83,7 +111,7 @@ func TestSuspendAlreadySuspended(t *testing.T) {
 	f.Files[filepath.Join("/city", "city.toml")] = data
 
 	var stdout, stderr bytes.Buffer
-	code := doSuspendCity(f, "/city", true, &stdout, &stderr)
+	code := doSuspendCity(f, "/city", true, false, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("suspend code = %d, want 0 (idempotent)", code)
 	}
@@ -99,7 +127,7 @@ func TestResumeAlreadyResumed(t *testing.T) {
 	f.Files[filepath.Join("/city", "city.toml")] = data
 
 	var stdout, stderr bytes.Buffer
-	code := doSuspendCity(f, "/city", false, &stdout, &stderr)
+	code := doSuspendCity(f, "/city", false, false, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("resume code = %d, want 0 (idempotent)", code)
 	}
@@ -123,7 +151,7 @@ dir = "myrig"
 `)
 
 	var stdout, stderr bytes.Buffer
-	code := doSuspendCity(f, "/city", true, &stdout, &stderr)
+	code := doSuspendCity(f, "/city", true, false, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("suspend code = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -142,7 +170,7 @@ dir = "myrig"
 	// Resume should also preserve.
 	stdout.Reset()
 	stderr.Reset()
-	code = doSuspendCity(f, "/city", false, &stdout, &stderr)
+	code = doSuspendCity(f, "/city", false, false, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("resume code = %d, want 0; stderr: %s", code, stderr.String())
 	}

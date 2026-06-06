@@ -14,8 +14,12 @@ import (
 )
 
 type namedSessionListEntry struct {
-	Template    string `json:"Template"`
-	SessionName string `json:"SessionName"`
+	Template    string `json:"template"`
+	SessionName string `json:"session_name"`
+}
+
+type namedSessionListEnvelope struct {
+	Sessions []namedSessionListEntry `json:"sessions"`
 }
 
 func TestImportedNamedSessionsUseSafeRuntimeNames(t *testing.T) {
@@ -80,16 +84,14 @@ mode = "always"
 
 	c.StartForeground()
 
-	var sessions []namedSessionListEntry
 	deadline := time.Now().Add(20 * time.Second)
 	for time.Now().Before(deadline) {
 		out, err := c.GC("session", "list", "--json")
 		if err == nil {
-			if unmarshalErr := json.Unmarshal([]byte(out), &sessions); unmarshalErr == nil {
-				if hasNamedSession(sessions, "gs.captain", "gs__captain") &&
-					hasNamedSession(sessions, "repo/gs.watcher", "repo--gs__watcher") {
-					return
-				}
+			sessions := decodeSessionListJSON([]byte(out))
+			if hasNamedSession(sessions, "gs.captain", "gs__captain") &&
+				hasNamedSession(sessions, "repo/gs.watcher", "repo--gs__watcher") {
+				return
 			}
 		}
 		time.Sleep(500 * time.Millisecond)
@@ -124,6 +126,30 @@ func hasNamedSession(sessions []namedSessionListEntry, template, sessionName str
 		}
 	}
 	return false
+}
+
+// decodeSessionListJSON parses both the fallback (bare array with PascalCase
+// fields) and the API (envelope object with snake_case fields) shapes emitted
+// by `gc session list --json`. The routed-read migration (ADR 0001) wraps
+// the API path in an envelope; fallback still returns the legacy bare array.
+func decodeSessionListJSON(raw []byte) []namedSessionListEntry {
+	type envelopeShape struct {
+		Sessions []struct {
+			Template    string `json:"template"`
+			SessionName string `json:"session_name"`
+		} `json:"sessions"`
+	}
+	var env envelopeShape
+	if err := json.Unmarshal(raw, &env); err == nil && env.Sessions != nil {
+		out := make([]namedSessionListEntry, 0, len(env.Sessions))
+		for _, s := range env.Sessions {
+			out = append(out, namedSessionListEntry{Template: s.Template, SessionName: s.SessionName})
+		}
+		return out
+	}
+	var legacy []namedSessionListEntry
+	_ = json.Unmarshal(raw, &legacy)
+	return legacy
 }
 
 func mustWriteTestFile(t *testing.T, path, contents string) {

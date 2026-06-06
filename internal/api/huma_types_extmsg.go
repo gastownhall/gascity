@@ -155,6 +155,9 @@ type ExtMsgTranscriptListInput struct {
 	ConversationID       string `query:"conversation_id" required:"false" doc:"Conversation ID."`
 	ParentConversationID string `query:"parent_conversation_id" required:"false" doc:"Parent conversation ID."`
 	Kind                 string `query:"kind" required:"false" doc:"Conversation kind."`
+	AfterSequence        int64  `query:"after_sequence" required:"false" doc:"Return entries with sequence greater than this cursor (default 0)."`
+	Limit                int    `query:"limit" required:"false" doc:"Maximum number of entries to return (default 100, max 500)."`
+	Order                string `query:"order" required:"false" enum:"asc,desc" doc:"Sort order by sequence: asc (oldest-first, default) or desc (newest-first)."`
 }
 
 // ExtMsgTranscriptAckInput is the Huma input for POST /v0/city/{cityName}/extmsg/transcript/ack.

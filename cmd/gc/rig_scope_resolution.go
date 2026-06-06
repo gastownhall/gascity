@@ -30,7 +30,19 @@ func resolveRigForDir(cfg *config.City, cityPath, dir string) (config.Rig, bool,
 }
 
 func rigFromRedirectedBeadsDir(cfg *config.City, cityPath, dir string) (config.Rig, bool, error) {
+	// Redirect resolution is meaningful only when cwd lies inside cityPath.
+	// When tests or commands run with a cwd outside the declared city tree
+	// (e.g., a polecat worktree under a different gc city), walking up the
+	// cwd chain would pick up unrelated .beads/redirect files and either
+	// mis-route the command or hard-error against the test's fake cfg.
+	cityScope := normalizePathForCompare(cityPath)
+	if !pathWithinScope(normalizePathForCompare(dir), cityScope) {
+		return config.Rig{}, false, nil
+	}
 	for current := dir; current != "" && current != filepath.Dir(current); current = filepath.Dir(current) {
+		if !pathWithinScope(normalizePathForCompare(current), cityScope) {
+			break
+		}
 		redirectPath := filepath.Join(current, ".beads", "redirect")
 		redirectTarget, err := os.ReadFile(redirectPath)
 		if err != nil {

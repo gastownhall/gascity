@@ -1,0 +1,28 @@
+[pack]
+name = "t3bridge-gastown"
+schema = 2
+
+[global]
+session_live = [
+    "printf 'gc session=%s agent=%s workdir=%s\n' '{{.Session}}' '{{.Agent}}' '{{.WorkDir}}'",
+]
+
+[[named_session]]
+template = "witness"
+scope = "rig"
+mode = "always"
+
+[[named_session]]
+template = "refinery"
+scope = "rig"
+mode = "on_demand"
+
+[[named_session]]
+template = "crew"
+scope = "rig"
+mode = "always"
+
+[[named_session]]
+template = "convoymaster"
+scope = "rig"
+mode = "on_demand"

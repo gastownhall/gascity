@@ -9,13 +9,14 @@ import (
 // Convergence event type constants. These match the event_type discriminator
 // values in the Event Contracts spec section.
 const (
-	EventCreated       = "convergence.created"
-	EventIteration     = "convergence.iteration"
-	EventTerminated    = "convergence.terminated"
-	EventWaitingManual = "convergence.waiting_manual"
-	EventManualApprove = "convergence.manual_approve"
-	EventManualIterate = "convergence.manual_iterate"
-	EventManualStop    = "convergence.manual_stop"
+	EventCreated        = "convergence.created"
+	EventIteration      = "convergence.iteration"
+	EventTerminated     = "convergence.terminated"
+	EventWaitingManual  = "convergence.waiting_manual"
+	EventManualApprove  = "convergence.manual_approve"
+	EventManualIterate  = "convergence.manual_iterate"
+	EventManualStop     = "convergence.manual_stop"
+	EventTriggerAdvance = "convergence.trigger_advance"
 )
 
 // Event delivery tiers.
@@ -70,10 +71,20 @@ func EventIDManualStop(beadID string) string {
 	return fmt.Sprintf("converge:%s:manual_stop", beadID)
 }
 
+// EventIDTriggerAdvance returns the stable event ID for a ConvergenceTriggerAdvance
+// event. N is the iteration number of the NEW wisp poured when the trigger fired.
+// It is deliberately distinct from EventIDIteration so the trigger-driven advance
+// cannot collide with the per-wisp iteration event that the same iteration's wisp
+// emits when it closes (both would otherwise derive converge:<bead>:iter:N:iteration).
+func EventIDTriggerAdvance(beadID string, iteration int) string {
+	return fmt.Sprintf("converge:%s:iter:%d:trigger_advance", beadID, iteration)
+}
+
 // CreatedPayload is the structured payload for ConvergenceCreated events.
 type CreatedPayload struct {
 	Formula       string  `json:"formula"`
 	Target        string  `json:"target"`
+	Rig           string  `json:"rig,omitempty"`
 	GateMode      string  `json:"gate_mode"`
 	MaxIterations int     `json:"max_iterations"`
 	Title         string  `json:"title"`
@@ -92,6 +103,7 @@ type GateResultPayload struct {
 
 // IterationPayload is the structured payload for ConvergenceIteration events.
 type IterationPayload struct {
+	Rig                  string             `json:"rig,omitempty"`
 	Iteration            int                `json:"iteration"`
 	WispID               string             `json:"wisp_id"`
 	AgentVerdict         string             `json:"agent_verdict"`
@@ -110,6 +122,7 @@ type IterationPayload struct {
 
 // TerminatedPayload is the structured payload for ConvergenceTerminated events.
 type TerminatedPayload struct {
+	Rig                  string `json:"rig,omitempty"`
 	TerminalReason       string `json:"terminal_reason"` // approved|no_convergence|stopped
 	TotalIterations      int    `json:"total_iterations"`
 	FinalStatus          string `json:"final_status"` // always "closed"
@@ -119,6 +132,7 @@ type TerminatedPayload struct {
 
 // WaitingManualPayload is the structured payload for ConvergenceWaitingManual events.
 type WaitingManualPayload struct {
+	Rig                  string             `json:"rig,omitempty"`
 	Iteration            int                `json:"iteration"`
 	WispID               string             `json:"wisp_id"`
 	AgentVerdict         string             `json:"agent_verdict"`
@@ -130,10 +144,12 @@ type WaitingManualPayload struct {
 	CumulativeDurationMs int64              `json:"cumulative_duration_ms"`
 }
 
-// ManualActionPayload is the structured payload for ConvergenceManualApprove,
-// ConvergenceManualIterate, and ConvergenceManualStop events.
+// ManualActionPayload is the structured payload for the state-transition
+// events ConvergenceManualApprove, ConvergenceManualIterate, ConvergenceManualStop
+// (operator-driven), and ConvergenceTriggerAdvance (controller-driven).
 type ManualActionPayload struct {
-	Actor      string  `json:"actor"` // operator:<username>
+	Rig        string  `json:"rig,omitempty"`
+	Actor      string  `json:"actor"` // operator:<username>, or "controller" for trigger_advance
 	PriorState string  `json:"prior_state"`
 	NewState   string  `json:"new_state"`
 	Iteration  int     `json:"iteration"`

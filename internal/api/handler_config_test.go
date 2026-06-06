@@ -16,7 +16,12 @@ func TestHandleConfigGet(t *testing.T) {
 	fs.cfg.Agents[0].MinActiveSessions = intPtr(0)
 	fs.cfg.Agents[0].MaxActiveSessions = intPtr(3)
 	fs.cfg.Providers = map[string]config.ProviderSpec{
-		"custom": {DisplayName: "Custom", Command: "custom-cli"},
+		"custom": {
+			DisplayName: "Custom",
+			Command:     "custom-cli",
+			ACPCommand:  "custom-cli-acp",
+			ACPArgs:     []string{"rpc", "--stdio"},
+		},
 	}
 	h := newTestCityHandler(t, fs)
 
@@ -52,6 +57,65 @@ func TestHandleConfigGet(t *testing.T) {
 	if _, ok := resp.Providers["custom"]; !ok {
 		t.Error("expected 'custom' in providers")
 	}
+	if resp.Providers["custom"].ACPCommand != "custom-cli-acp" {
+		t.Errorf("providers.custom.acp_command = %q, want %q", resp.Providers["custom"].ACPCommand, "custom-cli-acp")
+	}
+	if resp.Providers["custom"].ACPArgs == nil || len(*resp.Providers["custom"].ACPArgs) != 2 || (*resp.Providers["custom"].ACPArgs)[0] != "rpc" || (*resp.Providers["custom"].ACPArgs)[1] != "--stdio" {
+		t.Errorf("providers.custom.acp_args = %#v, want [rpc --stdio]", resp.Providers["custom"].ACPArgs)
+	}
+}
+
+func TestHandleConfigGet_ExposesWorkspaceMaxActiveSessions(t *testing.T) {
+	// The city-level cap is a *int tri-state: nil = unset (field omitted),
+	// -1 = unlimited, any other value = the explicit cap. The handler must
+	// pass the pointer through verbatim — never coerce nil/-1 to 0.
+	cases := []struct {
+		name        string
+		cap         *int
+		wantPresent bool
+		wantValue   int
+	}{
+		{name: "unset", cap: nil, wantPresent: false},
+		{name: "explicit cap", cap: intPtr(5), wantPresent: true, wantValue: 5},
+		{name: "unlimited", cap: intPtr(-1), wantPresent: true, wantValue: -1},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fs := newFakeState(t)
+			fs.cfg.Workspace.MaxActiveSessions = tc.cap
+			h := newTestCityHandler(t, fs)
+
+			req := httptest.NewRequest("GET", cityURL(fs, "/config"), nil)
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, req)
+
+			if w.Code != http.StatusOK {
+				t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusOK, w.Body.String())
+			}
+			body := w.Body.String()
+
+			var resp configResponse
+			json.NewDecoder(strings.NewReader(body)).Decode(&resp) //nolint:errcheck
+
+			if !tc.wantPresent {
+				if resp.Workspace.MaxActiveSessions != nil {
+					t.Errorf("workspace.max_active_sessions = %v, want nil", *resp.Workspace.MaxActiveSessions)
+				}
+				if strings.Contains(body, "max_active_sessions") {
+					t.Errorf("expected max_active_sessions omitted from JSON, got body = %s", body)
+				}
+				return
+			}
+
+			if resp.Workspace.MaxActiveSessions == nil {
+				t.Fatalf("workspace.max_active_sessions = nil, want %d", tc.wantValue)
+			}
+			if got := *resp.Workspace.MaxActiveSessions; got != tc.wantValue {
+				t.Errorf("workspace.max_active_sessions = %d, want %d", got, tc.wantValue)
+			}
+		})
+	}
 }
 
 func TestHandleConfigGet_UsesEffectiveWorkspaceIdentity(t *testing.T) {
@@ -83,6 +147,46 @@ func TestHandleConfigGet_UsesEffectiveWorkspaceIdentity(t *testing.T) {
 	}
 	if resp.Workspace.DeclaredPrefix != "dc" {
 		t.Errorf("workspace.declared_prefix = %q, want %q", resp.Workspace.DeclaredPrefix, "dc")
+	}
+}
+
+func TestHandleConfigGetPreservesExplicitEmptyACPArgs(t *testing.T) {
+	fs := newFakeState(t)
+	fs.cfg.Providers = map[string]config.ProviderSpec{
+		"custom": {
+			Command:    "custom-cli",
+			ACPCommand: "custom-cli-acp",
+			ACPArgs:    []string{},
+		},
+	}
+	h := newTestCityHandler(t, fs)
+
+	req := httptest.NewRequest("GET", cityURL(fs, "/config"), nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusOK, w.Body.String())
+	}
+
+	var resp map[string]any
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	providers, ok := resp["providers"].(map[string]any)
+	if !ok {
+		t.Fatal("expected providers map")
+	}
+	custom, ok := providers["custom"].(map[string]any)
+	if !ok {
+		t.Fatal("expected custom provider")
+	}
+	acpArgs, ok := custom["acp_args"].([]any)
+	if !ok {
+		t.Fatalf("acp_args = %#v, want empty array field", custom["acp_args"])
+	}
+	if len(acpArgs) != 0 {
+		t.Fatalf("acp_args len = %d, want 0", len(acpArgs))
 	}
 }
 
@@ -166,7 +270,12 @@ func TestHandleConfigExplain(t *testing.T) {
 	fs.cfg.Agents[0].MinActiveSessions = intPtr(0)
 	fs.cfg.Agents[0].MaxActiveSessions = intPtr(3)
 	fs.cfg.Providers = map[string]config.ProviderSpec{
-		"claude": {DisplayName: "My Claude", Command: "my-claude"},
+		"claude": {
+			DisplayName: "My Claude",
+			Command:     "my-claude",
+			ACPCommand:  "my-claude-acp",
+			ACPArgs:     []string{"rpc"},
+		},
 	}
 	h := newTestCityHandler(t, fs)
 
@@ -205,6 +314,13 @@ func TestHandleConfigExplain(t *testing.T) {
 	claude := providers["claude"].(map[string]any)
 	if claude["origin"] != "builtin+city" {
 		t.Errorf("claude origin = %q, want %q", claude["origin"], "builtin+city")
+	}
+	if claude["acp_command"] != "my-claude-acp" {
+		t.Errorf("claude acp_command = %q, want %q", claude["acp_command"], "my-claude-acp")
+	}
+	acpArgs, ok := claude["acp_args"].([]any)
+	if !ok || len(acpArgs) != 1 || acpArgs[0] != "rpc" {
+		t.Errorf("claude acp_args = %#v, want [rpc]", claude["acp_args"])
 	}
 	// A builtin-only provider should have origin "builtin".
 	codex := providers["codex"].(map[string]any)
@@ -295,7 +411,7 @@ func TestHandleConfigGet_V2BindingNameIncludedInAgentName(t *testing.T) {
 	// V2 imported agents carry a BindingName that's runtime-only (json:"-").
 	// The config response still needs to expose it so clients can
 	// reconstruct the same qualified identity that appears in
-	// session.template — otherwise downstream filters (e.g. gasworks-gui's
+	// session.template — otherwise downstream filters (e.g. a real-world app's
 	// CityInfo session bucket) compare "mayor" against "gastown.mayor" and
 	// drop the session.
 	fs := newFakeState(t)
@@ -408,5 +524,105 @@ func TestHandleConfigExplain_PackDerivedAgent(t *testing.T) {
 	agent0 := agents[0].(map[string]any)
 	if agent0["origin"] != "pack-derived" {
 		t.Errorf("agent origin = %q, want %q", agent0["origin"], "pack-derived")
+	}
+}
+
+// TestHandleConfigDefaults_FullyDefaultedCity verifies the baseline a
+// city with no overrides would have: name-derived prefix, builtin
+// providers, and no declared agents or rigs.
+func TestHandleConfigDefaults_FullyDefaultedCity(t *testing.T) {
+	fs := newFakeState(t)
+	h := newTestCityHandler(t, fs)
+
+	req := httptest.NewRequest("GET", cityURL(fs, "/config/defaults"), nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusOK, w.Body.String())
+	}
+
+	var resp configResponse
+	json.NewDecoder(w.Body).Decode(&resp) //nolint:errcheck
+
+	if resp.Workspace.Name != "test-city" {
+		t.Errorf("workspace.name = %q, want %q", resp.Workspace.Name, "test-city")
+	}
+	// Default prefix is the name-derived value, sourced from
+	// config.DeriveBeadsPrefix — not a static constant.
+	if resp.Workspace.Prefix != config.DeriveBeadsPrefix("test-city") {
+		t.Errorf("workspace.prefix = %q, want %q", resp.Workspace.Prefix, config.DeriveBeadsPrefix("test-city"))
+	}
+	// The baseline declares no agents or rigs.
+	if len(resp.Agents) != 0 {
+		t.Errorf("agents count = %d, want 0", len(resp.Agents))
+	}
+	if len(resp.Rigs) != 0 {
+		t.Errorf("rigs count = %d, want 0", len(resp.Rigs))
+	}
+	// Providers are exactly the builtin presets.
+	builtins := config.BuiltinProviders()
+	if len(resp.Providers) != len(builtins) {
+		t.Errorf("providers count = %d, want %d (builtins)", len(resp.Providers), len(builtins))
+	}
+	for name := range builtins {
+		if _, ok := resp.Providers[name]; !ok {
+			t.Errorf("expected builtin provider %q in defaults baseline", name)
+		}
+	}
+}
+
+// TestHandleConfigDefaults_OverriddenCitySurfacesDrift verifies that the
+// defaults baseline is independent of the loaded config's overrides, so a
+// client diffing GET /config against GET /config/defaults sees the drift.
+func TestHandleConfigDefaults_OverriddenCitySurfacesDrift(t *testing.T) {
+	fs := newFakeState(t)
+	fs.cfg.Workspace.Prefix = "override"
+	fs.cfg.Providers = map[string]config.ProviderSpec{
+		"custom": {DisplayName: "Custom", Command: "custom-cli"},
+	}
+	h := newTestCityHandler(t, fs)
+
+	// Loaded config reflects the overrides.
+	var loaded configResponse
+	reqLoaded := httptest.NewRequest("GET", cityURL(fs, "/config"), nil)
+	wLoaded := httptest.NewRecorder()
+	h.ServeHTTP(wLoaded, reqLoaded)
+	if wLoaded.Code != http.StatusOK {
+		t.Fatalf("/config status = %d, want %d", wLoaded.Code, http.StatusOK)
+	}
+	json.NewDecoder(wLoaded.Body).Decode(&loaded) //nolint:errcheck
+
+	// Defaults baseline reflects only the recommended defaults.
+	var defaults configResponse
+	reqDefaults := httptest.NewRequest("GET", cityURL(fs, "/config/defaults"), nil)
+	wDefaults := httptest.NewRecorder()
+	h.ServeHTTP(wDefaults, reqDefaults)
+	if wDefaults.Code != http.StatusOK {
+		t.Fatalf("/config/defaults status = %d, want %d", wDefaults.Code, http.StatusOK)
+	}
+	json.NewDecoder(wDefaults.Body).Decode(&defaults) //nolint:errcheck
+
+	// Prefix drift: loaded is overridden, default is name-derived.
+	if loaded.Workspace.Prefix != "override" {
+		t.Errorf("loaded prefix = %q, want %q", loaded.Workspace.Prefix, "override")
+	}
+	if defaults.Workspace.Prefix != config.DeriveBeadsPrefix("test-city") {
+		t.Errorf("default prefix = %q, want %q", defaults.Workspace.Prefix, config.DeriveBeadsPrefix("test-city"))
+	}
+	if loaded.Workspace.Prefix == defaults.Workspace.Prefix {
+		t.Error("expected prefix drift between loaded and default, got equal values")
+	}
+
+	// Provider drift: the custom override is absent from the baseline,
+	// which carries the builtins instead.
+	if _, ok := loaded.Providers["custom"]; !ok {
+		t.Error("expected loaded providers to include override 'custom'")
+	}
+	if _, ok := defaults.Providers["custom"]; ok {
+		t.Error("defaults baseline must not include the 'custom' override")
+	}
+	if _, ok := defaults.Providers["claude"]; !ok {
+		t.Error("expected defaults baseline to include builtin 'claude'")
 	}
 }

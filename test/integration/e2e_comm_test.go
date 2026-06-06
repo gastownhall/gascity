@@ -40,7 +40,11 @@ func TestE2E_Drain_SetAndCheck(t *testing.T) {
 }
 
 // TestE2E_Drain_Ack verifies that gc runtime drain-ack sets the GC_DRAIN_ACK
-// metadata flag.
+// metadata flag. It is not a respawn-timing venue: there is no running
+// controller/reconciler here, so drain-ack's controller-socket poke (#2364)
+// has no listener and emits a best-effort "poke failed" WARN to stderr that
+// does not affect exit status. Respawn timing is covered in tier B by
+// TestLifecycle_DrainAckResponsiveRespawn.
 func TestE2E_Drain_Ack(t *testing.T) {
 	city := e2eCity{
 		Agents: []e2eAgent{
@@ -203,20 +207,27 @@ func TestE2E_ConfigDrift(t *testing.T) {
 		t.Fatalf("initial CUSTOM_VERSION: got %v, want [v1]", report.getAll("CUSTOM_VERSION"))
 	}
 
+	// Remove old report so we can detect a new one.
+	reportPath := strings.ReplaceAll("drifter", "/", "__")
+	reportDir := cityDir + "/.gc-reports"
+	_ = removeFile(reportDir + "/" + reportPath + ".report")
+
 	// Change config by mutating the fingerprinted start_command. Custom env
 	// keys are intentionally ignored by the runtime fingerprint, so changing
 	// Env alone should not imply restart.
 	city.Agents[0].StartCommand = "CUSTOM_VERSION=v2 " + e2eReportScript()
 	rewriteE2ETomlPreservingNamedSessions(t, cityDir, city)
 
-	// Remove old report so we can detect a new one.
-	reportPath := strings.ReplaceAll("drifter", "/", "__")
-	reportDir := cityDir + "/.gc-reports"
-	_ = removeFile(reportDir + "/" + reportPath + ".report")
+	out, err := gc(cityDir, "reload", "--timeout", "45s")
+	if err != nil {
+		t.Fatalf("gc reload after config drift failed: %v\noutput: %s", err, out)
+	}
 
-	// The controller is already running. Writing city.toml should trigger a
-	// config reload and reconcile via the watcher/patrol loop.
-	report2 := waitForReport(t, cityDir, "drifter", e2eDefaultTimeout())
+	// The controller is already running. Reloading city.toml should reconcile
+	// and restart the drifted session. Named sessions can defer config drift
+	// while recent activity cannot be ruled out, so allow the bounded deferral
+	// window to expire on slower providers.
+	report2 := waitForReport(t, cityDir, "drifter", 3*time.Minute)
 	if !report2.has("CUSTOM_VERSION", "v2") {
 		t.Errorf("post-drift CUSTOM_VERSION: got %v, want [v2]", report2.getAll("CUSTOM_VERSION"))
 	}

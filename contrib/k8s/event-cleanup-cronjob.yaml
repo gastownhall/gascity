@@ -28,9 +28,24 @@ spec:
         spec:
           serviceAccountName: gc-controller
           restartPolicy: Never
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1001
+            runAsGroup: 1001
+            fsGroup: 1001
+            seccompProfile:
+              type: RuntimeDefault
           containers:
           - name: cleanup
-            image: bitnami/kubectl:latest
+            image: bitnami/kubectl:1.36.0
+            env:
+            - name: HOME
+              value: /tmp
+            securityContext:
+              allowPrivilegeEscalation: false
+              capabilities:
+                drop: ["ALL"]
+              readOnlyRootFilesystem: true
             command:
             - sh
             - -c
@@ -53,3 +68,9 @@ spec:
               limits:
                 cpu: 200m
                 memory: 128Mi
+            volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+          volumes:
+          - name: tmp
+            emptyDir: {}

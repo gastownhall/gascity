@@ -50,6 +50,281 @@ name = "changed"
 	}
 }
 
+func TestRevision_UsesLoadedSourceSnapshot(t *testing.T) {
+	dir := t.TempDir()
+	cityPath := filepath.Join(dir, "city.toml")
+	writeFile(t, dir, "city.toml", `[workspace]
+name = "test"
+`)
+
+	cfg, prov, err := LoadWithIncludes(fsys.OSFS{}, cityPath)
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+	loadedRevision := Revision(fsys.OSFS{}, prov, cfg, dir)
+
+	writeFile(t, dir, "city.toml", `[workspace]
+name = "changed"
+`)
+	afterWriteRevision := Revision(fsys.OSFS{}, prov, cfg, dir)
+	if afterWriteRevision != loadedRevision {
+		t.Fatalf("revision changed after source file write; got %q, want loaded snapshot %q", afterWriteRevision, loadedRevision)
+	}
+
+	reloadedCfg, reloadedProv, err := LoadWithIncludes(fsys.OSFS{}, cityPath)
+	if err != nil {
+		t.Fatalf("reloading config: %v", err)
+	}
+	reloadedRevision := Revision(fsys.OSFS{}, reloadedProv, reloadedCfg, dir)
+	if reloadedRevision == loadedRevision {
+		t.Fatal("revision did not change after reloading changed source file")
+	}
+}
+
+func TestRevision_UsesLoadedSnapshotForResolvedInputs(t *testing.T) {
+	tests := []struct {
+		name   string
+		setup  func(t *testing.T, dir string)
+		mutate func(t *testing.T, dir string)
+	}{
+		{
+			name: "fragment",
+			setup: func(t *testing.T, dir string) {
+				writeFile(t, dir, "city.toml", `
+include = ["agents.toml"]
+
+[workspace]
+name = "test"
+`)
+				writeFile(t, dir, "agents.toml", `[[agent]]
+name = "builder"
+`)
+			},
+			mutate: func(t *testing.T, dir string) {
+				writeFile(t, dir, "agents.toml", `[[agent]]
+name = "builder-renamed"
+`)
+			},
+		},
+		{
+			name: "city pack.toml",
+			setup: func(t *testing.T, dir string) {
+				writeFile(t, dir, "city.toml", `[workspace]
+name = "test"
+`)
+				writeFile(t, dir, "pack.toml", `[pack]
+name = "citypack"
+schema = 1
+
+[[agent]]
+name = "builder"
+`)
+			},
+			mutate: func(t *testing.T, dir string) {
+				writeFile(t, dir, "pack.toml", `[pack]
+name = "citypack"
+schema = 1
+
+[[agent]]
+name = "builder-renamed"
+`)
+			},
+		},
+		{
+			name: "implicit imports file",
+			setup: func(t *testing.T, dir string) {
+				gcHome := filepath.Join(dir, "gc-home")
+				t.Setenv("GC_HOME", gcHome)
+				writeFile(t, gcHome, "implicit-import.toml", `schema = 1
+
+[imports.core]
+source = "github.com/gastownhall/gc-core"
+version = "0.1.0"
+`)
+				writeFile(t, dir, "city.toml", `[workspace]
+name = "test"
+`)
+			},
+			mutate: func(t *testing.T, dir string) {
+				writeFile(t, filepath.Join(dir, "gc-home"), "implicit-import.toml", `schema = 1
+
+[imports.core]
+source = "github.com/gastownhall/gc-core"
+version = "0.1.1"
+`)
+			},
+		},
+		{
+			name: "legacy city include pack tree",
+			setup: func(t *testing.T, dir string) {
+				writeFile(t, dir, "city.toml", `[workspace]
+name = "test"
+includes = ["packs/shared"]
+`)
+				writeFile(t, dir, "packs/shared/pack.toml", `[pack]
+name = "shared"
+schema = 1
+
+[[agent]]
+name = "builder"
+prompt_template = "prompts/builder.template.md"
+`)
+				writeFile(t, dir, "packs/shared/prompts/builder.template.md", "first prompt\n")
+			},
+			mutate: func(t *testing.T, dir string) {
+				writeFile(t, dir, "packs/shared/prompts/builder.template.md", "second prompt\n")
+			},
+		},
+		{
+			name: "legacy rig include pack tree",
+			setup: func(t *testing.T, dir string) {
+				writeFile(t, dir, "city.toml", `[workspace]
+name = "test"
+
+[[rigs]]
+name = "frontend"
+path = "../frontend"
+includes = ["packs/rig"]
+`)
+				writeFile(t, dir, "packs/rig/pack.toml", `[pack]
+name = "rigpack"
+schema = 1
+
+[[agent]]
+name = "runner"
+scope = "rig"
+prompt_template = "prompts/runner.template.md"
+`)
+				writeFile(t, dir, "packs/rig/prompts/runner.template.md", "first prompt\n")
+			},
+			mutate: func(t *testing.T, dir string) {
+				writeFile(t, dir, "packs/rig/prompts/runner.template.md", "second prompt\n")
+			},
+		},
+		{
+			name: "packs.lock",
+			setup: func(t *testing.T, dir string) {
+				writeFile(t, dir, "city.toml", `[workspace]
+name = "test"
+
+[imports.shared]
+source = "./packs/shared"
+`)
+				writeFile(t, dir, "packs/shared/pack.toml", `[pack]
+name = "shared"
+schema = 1
+`)
+				writeFile(t, dir, "packs.lock", `schema = 1
+
+[packs."./packs/shared"]
+version = "1.0.0"
+commit = "aaaa"
+`)
+			},
+			mutate: func(t *testing.T, dir string) {
+				writeFile(t, dir, "packs.lock", `schema = 1
+
+[packs."./packs/shared"]
+version = "1.0.1"
+commit = "bbbb"
+`)
+			},
+		},
+		{
+			name: "PackV2 city import tree",
+			setup: func(t *testing.T, dir string) {
+				writeFile(t, dir, "city.toml", `[workspace]
+name = "test"
+
+[imports.shared]
+source = "./packs/shared"
+`)
+				writeFile(t, dir, "packs/shared/pack.toml", `[pack]
+name = "shared"
+schema = 1
+
+[[agent]]
+name = "builder"
+prompt_template = "prompts/builder.template.md"
+`)
+				writeFile(t, dir, "packs/shared/prompts/builder.template.md", "first prompt\n")
+			},
+			mutate: func(t *testing.T, dir string) {
+				writeFile(t, dir, "packs/shared/prompts/builder.template.md", "second prompt\n")
+			},
+		},
+		{
+			name: "PackV2 rig import tree",
+			setup: func(t *testing.T, dir string) {
+				writeFile(t, dir, "city.toml", `[workspace]
+name = "test"
+
+[[rigs]]
+name = "frontend"
+path = "../frontend"
+
+[rigs.imports.shared]
+source = "./packs/shared"
+`)
+				writeFile(t, dir, "packs/shared/pack.toml", `[pack]
+name = "shared"
+schema = 1
+
+[[agent]]
+name = "runner"
+scope = "rig"
+prompt_template = "prompts/runner.template.md"
+`)
+				writeFile(t, dir, "packs/shared/prompts/runner.template.md", "first prompt\n")
+			},
+			mutate: func(t *testing.T, dir string) {
+				writeFile(t, dir, "packs/shared/prompts/runner.template.md", "second prompt\n")
+			},
+		},
+		{
+			name: "convention discovery tree",
+			setup: func(t *testing.T, dir string) {
+				writeFile(t, dir, "city.toml", `[workspace]
+name = "test"
+`)
+				writeFile(t, dir, "agents/builder/prompt.template.md", "first prompt\n")
+			},
+			mutate: func(t *testing.T, dir string) {
+				writeFile(t, dir, "agents/builder/prompt.template.md", "second prompt\n")
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			cityPath := filepath.Join(dir, "city.toml")
+			tt.setup(t, dir)
+
+			cfg, prov, err := LoadWithIncludes(fsys.OSFS{}, cityPath)
+			if err != nil {
+				t.Fatalf("LoadWithIncludes: %v", err)
+			}
+			loadedRevision := Revision(fsys.OSFS{}, prov, cfg, dir)
+
+			tt.mutate(t, dir)
+			afterWriteRevision := Revision(fsys.OSFS{}, prov, cfg, dir)
+			if afterWriteRevision != loadedRevision {
+				t.Fatalf("revision changed after post-load mutation; got %q, want loaded snapshot %q", afterWriteRevision, loadedRevision)
+			}
+
+			reloadedCfg, reloadedProv, err := LoadWithIncludes(fsys.OSFS{}, cityPath)
+			if err != nil {
+				t.Fatalf("reloading config: %v", err)
+			}
+			reloadedRevision := Revision(fsys.OSFS{}, reloadedProv, reloadedCfg, dir)
+			if reloadedRevision == loadedRevision {
+				t.Fatal("revision did not change after reloading changed input")
+			}
+		})
+	}
+}
+
 func TestRevision_IncludesFragments(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, dir, "city.toml", `[workspace]

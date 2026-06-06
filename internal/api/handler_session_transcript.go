@@ -70,11 +70,18 @@ func (s *Server) handleSessionTranscript(w http.ResponseWriter, r *http.Request)
 			}
 		}
 		before := r.URL.Query().Get("before")
+		after := r.URL.Query().Get("after")
+
+		if before != "" && after != "" {
+			writeError(w, http.StatusUnprocessableEntity, "invalid_params", "before and after are mutually exclusive")
+			return
+		}
 
 		if wantRaw {
 			transcript, err := handle.Transcript(r.Context(), worker.TranscriptRequest{
 				TailCompactions: tail,
 				BeforeEntryID:   before,
+				AfterEntryID:    after,
 				Raw:             true,
 			})
 			if err != nil {
@@ -94,6 +101,7 @@ func (s *Server) handleSessionTranscript(w http.ResponseWriter, r *http.Request)
 		transcript, err := handle.Transcript(r.Context(), worker.TranscriptRequest{
 			TailCompactions: tail,
 			BeforeEntryID:   before,
+			AfterEntryID:    after,
 		})
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "internal", "reading session log: "+err.Error())

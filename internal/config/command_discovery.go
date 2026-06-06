@@ -7,6 +7,7 @@ import (
 
 	"github.com/BurntSushi/toml"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/pathutil"
 )
 
 // DiscoveredCommand is a convention-discovered pack command.
@@ -46,7 +47,7 @@ func resolveContainedRunPath(packDir, nodeDir, runRel string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+	if pathutil.IsOutsideDir(rel) {
 		return "", fmt.Errorf("run path %q escapes the pack directory", runRel)
 	}
 	return candidate, nil

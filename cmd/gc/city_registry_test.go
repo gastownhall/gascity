@@ -1,13 +1,16 @@
 package main
 
 import (
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/supervisor"
 )
@@ -23,6 +26,123 @@ func TestCityRegistryEmptySnapshot(t *testing.T) {
 	}
 	if snap.gen != 0 {
 		t.Fatalf("expected gen=0, got %d", snap.gen)
+	}
+}
+
+func TestCityRegistryPendingRequestIDCanonicalizesPath(t *testing.T) {
+	t.Setenv("GC_HOME", t.TempDir())
+	reg := newCityRegistry()
+	cityPath := filepath.Join(t.TempDir(), "city")
+	if err := os.MkdirAll(cityPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	linkPath := filepath.Join(t.TempDir(), "city-link")
+	if err := os.Symlink(cityPath, linkPath); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := reg.StorePendingRequestID(linkPath, "req-city"); err != nil {
+		t.Fatal(err)
+	}
+
+	got, ok, err := reg.ConsumePendingRequestID(cityPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok {
+		t.Fatal("pending request ID not found by canonical path")
+	}
+	if got != "req-city" {
+		t.Fatalf("request ID = %q, want req-city", got)
+	}
+}
+
+func TestCityRegistryStorePendingRequestIDRejectsDuplicatePath(t *testing.T) {
+	t.Setenv("GC_HOME", t.TempDir())
+	reg := newCityRegistry()
+	cityPath := filepath.Join(t.TempDir(), "city")
+	if err := os.MkdirAll(cityPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := reg.StorePendingRequestID(cityPath, "req-first"); err != nil {
+		t.Fatal(err)
+	}
+	err := reg.StorePendingRequestID(cityPath, "req-second")
+	if !errors.Is(err, api.ErrPendingRequestExists) {
+		t.Fatalf("StorePendingRequestID duplicate error = %v, want ErrPendingRequestExists", err)
+	}
+
+	got, ok, err := reg.ConsumePendingRequestID(cityPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok || got != "req-first" {
+		t.Fatalf("consumed pending request = (%q, %t), want req-first true", got, ok)
+	}
+}
+
+func TestCityRegistryConsumePendingRequestIDIsAtomic(t *testing.T) {
+	t.Setenv("GC_HOME", t.TempDir())
+	reg := newCityRegistry()
+	cityPath := filepath.Join(t.TempDir(), "city")
+	if err := os.MkdirAll(cityPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := reg.StorePendingRequestID(cityPath, "req-city"); err != nil {
+		t.Fatal(err)
+	}
+
+	lockPath := supervisor.RegistryPath() + ".lock"
+	lockFile, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lockFile.Close() //nolint:errcheck
+	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX); err != nil {
+		t.Fatal(err)
+	}
+
+	type result struct {
+		id  string
+		ok  bool
+		err error
+	}
+	start := make(chan struct{})
+	results := make(chan result, 2)
+	for range 2 {
+		go func() {
+			<-start
+			id, ok, err := reg.ConsumePendingRequestID(cityPath)
+			results <- result{id: id, ok: ok, err: err}
+		}()
+	}
+
+	close(start)
+	time.Sleep(50 * time.Millisecond)
+	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN); err != nil {
+		t.Fatal(err)
+	}
+
+	first := <-results
+	second := <-results
+	if first.err != nil {
+		t.Fatal(first.err)
+	}
+	if second.err != nil {
+		t.Fatal(second.err)
+	}
+	consumed := 0
+	for _, got := range []result{first, second} {
+		if got.ok {
+			consumed++
+			if got.id != "req-city" {
+				t.Fatalf("request ID = %q, want req-city", got.id)
+			}
+		}
+	}
+	if consumed != 1 {
+		t.Fatalf("consumed request ID %d times, want exactly once; first=%+v second=%+v", consumed, first, second)
 	}
 }
 

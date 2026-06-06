@@ -58,6 +58,8 @@ func TestLoadConfigSeedsIsolatedGCHomeConfig(t *testing.T) {
 }
 
 func TestShouldSeedIsolatedSupervisorConfigFalseForCanonicalDefaultUnderSymlinkedHome(t *testing.T) {
+	setProgramName(t, "gc")
+
 	root := t.TempDir()
 	realHome := filepath.Join(root, "real-home")
 	if err := os.MkdirAll(realHome, 0o755); err != nil {
@@ -70,9 +72,41 @@ func TestShouldSeedIsolatedSupervisorConfigFalseForCanonicalDefaultUnderSymlinke
 
 	t.Setenv("HOME", linkHome)
 	t.Setenv("GC_HOME", filepath.Join(realHome, ".gc"))
+	t.Setenv("GC_ISOLATED", "")
 	if shouldSeedIsolatedSupervisorConfig(ConfigPath()) {
 		t.Fatal("shouldSeedIsolatedSupervisorConfig() = true, want false for canonical default GC_HOME under symlinked HOME")
 	}
+}
+
+func TestShouldSeedIsolatedSupervisorConfigFalseForNonTestBinaryWithoutGCIsolated(t *testing.T) {
+	setProgramName(t, "gc")
+
+	t.Setenv("GC_ISOLATED", "")
+	t.Setenv("GC_HOME", filepath.Join(t.TempDir(), ".gc"))
+
+	if shouldSeedIsolatedSupervisorConfig(ConfigPath()) {
+		t.Fatal("shouldSeedIsolatedSupervisorConfig() = true, want false for non-test binary without GC_ISOLATED=1")
+	}
+}
+
+func TestShouldSeedIsolatedSupervisorConfigTrueForNonTestBinaryWithGCIsolated(t *testing.T) {
+	setProgramName(t, "gc")
+
+	t.Setenv("GC_ISOLATED", "1")
+	t.Setenv("GC_HOME", filepath.Join(t.TempDir(), ".gc"))
+
+	if !shouldSeedIsolatedSupervisorConfig(ConfigPath()) {
+		t.Fatal("shouldSeedIsolatedSupervisorConfig() = false, want true for non-test binary with GC_ISOLATED=1")
+	}
+}
+
+func setProgramName(t *testing.T, name string) {
+	t.Helper()
+	oldArgs := os.Args
+	os.Args = append([]string{name}, oldArgs[1:]...)
+	t.Cleanup(func() {
+		os.Args = oldArgs
+	})
 }
 
 func TestLoadConfigExplicit(t *testing.T) {
@@ -83,6 +117,7 @@ func TestLoadConfigExplicit(t *testing.T) {
 port = 9090
 bind = "0.0.0.0"
 patrol_interval = "5s"
+allowed_hosts = ["city-admin.local", "192.168.1.58"]
 
 [publication]
 provider = "hosted"
@@ -107,6 +142,9 @@ policy_ref = "platform-sso"
 	}
 	if cfg.Supervisor.PatrolIntervalDuration() != 5*time.Second {
 		t.Errorf("expected patrol 5s, got %v", cfg.Supervisor.PatrolIntervalDuration())
+	}
+	if got := cfg.Supervisor.AllowedHosts; len(got) != 2 || got[0] != "city-admin.local" || got[1] != "192.168.1.58" {
+		t.Errorf("Supervisor.AllowedHosts = %#v, want city-admin.local and 192.168.1.58", got)
 	}
 	if cfg.Publication.ProviderOrDefault() != "hosted" {
 		t.Errorf("Publication.ProviderOrDefault() = %q, want hosted", cfg.Publication.ProviderOrDefault())

@@ -288,6 +288,11 @@ func assertTypedEventEnvelopeUnion(t *testing.T, spec map[string]any, schemaName
 		if !ok {
 			t.Fatalf("%s variant %s type property missing", schemaName, ref)
 		}
+		if _, ok := typeProperty["not"].(map[string]any); ok {
+			assertCustomEventEnvelopeVariant(t, schemaName, ref, cityField, properties, variant, typeProperty)
+			seen[""]++
+			continue
+		}
 		eventType := constOrSingleEnum(t, typeProperty)
 		wantPayloadRef, ok := expectedPayloadRefs[eventType]
 		if !ok {
@@ -335,11 +340,70 @@ func assertTypedEventEnvelopeUnion(t *testing.T, spec map[string]any, schemaName
 	if len(discriminator) != len(events.KnownEventTypes) {
 		t.Fatalf("%s discriminator mapping count = %d, want %d", schemaName, len(discriminator), len(events.KnownEventTypes))
 	}
+	if seen[""] != 1 {
+		t.Fatalf("%s custom event branch count = %d, want 1", schemaName, seen[""])
+	}
 	for eventType := range discriminator {
 		if seen[eventType] == 0 {
 			t.Fatalf("%s discriminator maps unknown event type %q", schemaName, eventType)
 		}
 	}
+}
+
+func assertCustomEventEnvelopeVariant(
+	t *testing.T,
+	schemaName string,
+	ref string,
+	cityField bool,
+	properties map[string]any,
+	variant map[string]any,
+	typeProperty map[string]any,
+) {
+	t.Helper()
+
+	notSchema, ok := typeProperty["not"].(map[string]any)
+	if !ok {
+		t.Fatalf("%s custom variant %s missing type.not schema", schemaName, ref)
+	}
+	rawEnum, ok := notSchema["enum"].([]any)
+	if !ok {
+		t.Fatalf("%s custom variant %s type.not.enum missing", schemaName, ref)
+	}
+	blocked := make(map[string]bool, len(rawEnum))
+	for _, raw := range rawEnum {
+		eventType, ok := raw.(string)
+		if !ok {
+			t.Fatalf("%s custom variant %s type.not.enum contains non-string %#v", schemaName, ref, raw)
+		}
+		blocked[eventType] = true
+	}
+	for _, eventType := range events.KnownEventTypes {
+		if !blocked[eventType] {
+			t.Fatalf("%s custom variant %s does not exclude known event type %q", schemaName, ref, eventType)
+		}
+	}
+	if _, ok := typeProperty["const"]; ok {
+		t.Fatalf("%s custom variant %s type schema must not have const", schemaName, ref)
+	}
+	if _, ok := typeProperty["enum"]; ok {
+		t.Fatalf("%s custom variant %s type schema must not have enum", schemaName, ref)
+	}
+	payloadProperty, ok := properties["payload"].(map[string]any)
+	if !ok {
+		t.Fatalf("%s custom variant %s payload property missing", schemaName, ref)
+	}
+	if len(payloadProperty) != 0 {
+		t.Fatalf("%s custom variant %s payload schema = %#v, want unconstrained custom JSON", schemaName, ref, payloadProperty)
+	}
+
+	wantRequired := []string{"seq", "type", "ts", "actor", "payload"}
+	wantProperties := []string{"seq", "type", "ts", "actor", "subject", "message", "workflow", "payload"}
+	if cityField {
+		wantRequired = append(wantRequired, "city")
+		wantProperties = append(wantProperties, "city")
+	}
+	assertProperties(t, schemaName, "custom", properties, wantProperties)
+	assertRequiredFields(t, schemaName, "custom", variant, wantRequired)
 }
 
 func typedEventDiscriminatorMapping(t *testing.T, union map[string]any, schemaName string) map[string]string {

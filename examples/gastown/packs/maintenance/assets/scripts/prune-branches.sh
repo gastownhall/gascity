@@ -12,7 +12,7 @@ CITY="${GC_CITY:-.}"
 PRUNED=0
 
 # Get all rig paths.
-RIGS=$(gc rig list --json 2>/dev/null | jq -r '.[].path' 2>/dev/null) || exit 0
+RIGS=$(gc rig list --json 2>/dev/null | jq -r '.rigs[].path' 2>/dev/null) || exit 0
 if [ -z "$RIGS" ]; then
     exit 0
 fi

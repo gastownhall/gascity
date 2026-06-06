@@ -1,0 +1,1 @@
+description = "Stop and start the Dolt server (force restart when start would no-op)"

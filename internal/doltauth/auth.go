@@ -31,6 +31,8 @@ func AuthScopeRoot(cityRoot, scopeRoot string, target contract.DoltConnectionTar
 }
 
 // Resolve returns the effective Dolt auth for a scope and target.
+// Ambient BEADS_DOLT_PASSWORD is an intentional fallback for operators and
+// non-bd callers, after scope-local .beads/.env and before credentials files.
 func Resolve(scopeRoot, fallbackUser, host string, port int) Resolved {
 	overridePath := strings.TrimSpace(os.Getenv("BEADS_CREDENTIALS_FILE"))
 	return Resolved{
@@ -41,7 +43,21 @@ func Resolve(scopeRoot, fallbackUser, host string, port int) Resolved {
 }
 
 // ResolveFromEnv returns effective Dolt auth using projected environment values.
+// Projected BEADS_DOLT_PASSWORD is treated like an already-resolved fallback;
+// callers that switch auth scopes must clear stale projected passwords first.
 func ResolveFromEnv(scopeRoot, fallbackUser string, env map[string]string) Resolved {
+	return resolveFromEnv(scopeRoot, fallbackUser, env, true)
+}
+
+// ResolveScopedFromEnv returns effective Dolt auth for a GC-selected scope.
+// Unlike ResolveFromEnv, it does not fall back to ambient BEADS_DOLT_PASSWORD;
+// scoped GC projections must not let one external rig password contaminate
+// another scope's managed city/HQ connection.
+func ResolveScopedFromEnv(scopeRoot, fallbackUser string, env map[string]string) Resolved {
+	return resolveFromEnv(scopeRoot, fallbackUser, env, false)
+}
+
+func resolveFromEnv(scopeRoot, fallbackUser string, env map[string]string, allowAmbientBeadsPassword bool) Resolved {
 	host := strings.TrimSpace(env["GC_DOLT_HOST"])
 	port, ok := projectedPort(env)
 	if host == "" && ok {
@@ -50,7 +66,16 @@ func ResolveFromEnv(scopeRoot, fallbackUser string, env map[string]string) Resol
 	if !ok {
 		port = 0
 	}
-	return Resolve(scopeRoot, fallbackUser, host, port)
+	overridePath := strings.TrimSpace(env["BEADS_CREDENTIALS_FILE"])
+	if overridePath == "" {
+		overridePath = strings.TrimSpace(os.Getenv("BEADS_CREDENTIALS_FILE"))
+	}
+	envPass := strings.TrimSpace(env["BEADS_DOLT_PASSWORD"])
+	return Resolved{
+		User:                    resolveUser(fallbackUser),
+		Password:                resolvePasswordWithEnv(envPass, scopeRoot, host, port, overridePath, allowAmbientBeadsPassword),
+		CredentialsFileOverride: overridePath,
+	}
 }
 
 func resolveUser(fallbackUser string) string {
@@ -61,11 +86,23 @@ func resolveUser(fallbackUser string) string {
 }
 
 func resolvePassword(scopeRoot, host string, port int, overridePath string) string {
+	return resolvePasswordWithEnv("", scopeRoot, host, port, overridePath, true)
+}
+
+func resolvePasswordWithEnv(envPass, scopeRoot, host string, port int, overridePath string, allowAmbientBeadsPassword bool) string {
 	if pass := strings.TrimSpace(os.Getenv("GC_DOLT_PASSWORD")); pass != "" {
 		return pass
 	}
 	if pass := ReadStoreLocalPassword(scopeRoot); pass != "" {
 		return pass
+	}
+	if envPass != "" {
+		return envPass
+	}
+	if allowAmbientBeadsPassword {
+		if pass := strings.TrimSpace(os.Getenv("BEADS_DOLT_PASSWORD")); pass != "" {
+			return pass
+		}
 	}
 	host = strings.TrimSpace(host)
 	if host == "" || port <= 0 {

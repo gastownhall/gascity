@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["schema_version", "ok", "command", "action", "convoy_id"],
+  "properties": {
+    "schema_version": { "const": "1" },
+    "ok": { "const": true },
+    "command": { "const": "convoy.close" },
+    "action": { "const": "close" },
+    "convoy_id": { "type": "string", "minLength": 1 }
+  },
+  "additionalProperties": true
+}

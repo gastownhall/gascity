@@ -114,10 +114,54 @@ func TestMailLifecycle(t *testing.T) {
 		}
 	})
 
-	t.Run("Delete_NonexistentID", func(t *testing.T) {
-		_, err := c.GC("mail", "delete", "no-such-msg-xyz")
-		if err == nil {
-			t.Fatal("expected error deleting nonexistent message")
+	t.Run("Delete_NonexistentIDIsIdempotent", func(t *testing.T) {
+		out, err := c.GC("mail", "delete", "no-such-msg-xyz")
+		if err != nil {
+			t.Fatalf("gc mail delete no-such-msg-xyz: %v\n%s", err, out)
+		}
+		if !strings.Contains(out, "Already deleted no-such-msg-xyz") {
+			t.Errorf("output = %q, want 'Already deleted no-such-msg-xyz'", out)
+		}
+	})
+
+	t.Run("Delete_MultiID_BatchClose", func(t *testing.T) {
+		var ids []string
+		for i := 0; i < 3; i++ {
+			sendOut, sendErr := c.GC("mail", "send", "mayor", "--from", "human",
+				"-s", "batch", "-m", "batch body")
+			if sendErr != nil {
+				t.Fatalf("gc mail send[%d]: %v\n%s", i, sendErr, sendOut)
+			}
+		}
+		inboxOut, inboxErr := c.GC("mail", "inbox", "mayor")
+		if inboxErr != nil {
+			t.Fatalf("gc mail inbox mayor: %v\n%s", inboxErr, inboxOut)
+		}
+		for _, line := range strings.Split(inboxOut, "\n") {
+			fields := strings.Fields(line)
+			if len(fields) == 0 {
+				continue
+			}
+			candidate := fields[0]
+			if strings.Contains(candidate, "-") && len(candidate) >= 4 && len(candidate) <= 20 {
+				ids = append(ids, candidate)
+			}
+			if len(ids) == 3 {
+				break
+			}
+		}
+		if len(ids) < 3 {
+			t.Fatalf("could not collect 3 message IDs from inbox:\n%s", inboxOut)
+		}
+		args := append([]string{"mail", "delete"}, ids...)
+		delOut, delErr := c.GC(args...)
+		if delErr != nil {
+			t.Fatalf("gc mail delete %v: %v\n%s", ids, delErr, delOut)
+		}
+		for _, id := range ids {
+			if !strings.Contains(delOut, "Deleted message "+id) {
+				t.Errorf("delete output missing %q:\n%s", "Deleted message "+id, delOut)
+			}
 		}
 	})
 }

@@ -28,7 +28,7 @@ func TestSanitizedBaseEnv_StripsGCPrefixed(t *testing.T) {
 	env := sanitizedBaseEnv()
 
 	for _, kv := range env {
-		if strings.HasPrefix(kv, "GC_") {
+		if strings.HasPrefix(kv, "GC_") && !isSanitizedBaseEnvTestControl(kv) {
 			t.Errorf("sanitizedBaseEnv leaked GC_* var: %q", kv)
 		}
 	}
@@ -152,7 +152,10 @@ func TestSanitizedBaseEnv_MatchesExactlyGCAndBEADSPrefixes(t *testing.T) {
 
 	env := sanitizedBaseEnv()
 	for _, kv := range env {
-		if strings.HasPrefix(kv, "GC_") || strings.HasPrefix(kv, "BEADS_") {
+		if strings.HasPrefix(kv, "BEADS_") {
+			t.Errorf("sanitizedBaseEnv kept %q; BEADS_* must be filtered", kv)
+		}
+		if strings.HasPrefix(kv, "GC_") && !isSanitizedBaseEnvTestControl(kv) {
 			t.Errorf("sanitizedBaseEnv kept %q; both GC_* and BEADS_* must be filtered", kv)
 		}
 	}
@@ -170,4 +173,27 @@ func TestSanitizedBaseEnv_MatchesExactlyGCAndBEADSPrefixes(t *testing.T) {
 	if !found {
 		t.Error("sanitizedBaseEnv stripped a var whose key merely contained GC_ as a substring")
 	}
+}
+
+func TestSanitizedBaseEnv_AddsManagedDoltTestControl(t *testing.T) {
+	env := sanitizedBaseEnv()
+	values := map[string]string{}
+	for _, kv := range env {
+		key, value, ok := strings.Cut(kv, "=")
+		if ok {
+			values[key] = value
+		}
+	}
+
+	if got := values[managedDoltTestModeEnv]; got != "1" {
+		t.Fatalf("%s = %q, want 1", managedDoltTestModeEnv, got)
+	}
+	if got := values[managedDoltTestParentPIDEnv]; got == "" {
+		t.Fatalf("%s missing from sanitizedBaseEnv", managedDoltTestParentPIDEnv)
+	}
+}
+
+func isSanitizedBaseEnvTestControl(kv string) bool {
+	return strings.HasPrefix(kv, managedDoltTestModeEnv+"=") ||
+		strings.HasPrefix(kv, managedDoltTestParentPIDEnv+"=")
 }

@@ -85,13 +85,28 @@ or you can ask `gc` to enumerate them for you.
 ```shell
 ~/my-city
 $ gc formula list
-cooking
 mol-do-work
+mol-dog-backup
+mol-dog-compactor
+mol-dog-doctor
+mol-dog-jsonl
+mol-dog-phantom-db
+mol-dog-reaper
+mol-dog-stale-db
+mol-dolt-health
+mol-dolt-remotes-patrol
 mol-polecat-base
 mol-polecat-commit
 mol-scoped-work
+mol-shutdown-dance
 pancakes
 ```
+
+Your fresh city carries many built-in `mol-*` formulas that ship with the
+tutorial template (dolt-watchdog workflows, polecat worker scaffolds, etc.).
+The list above shows those built-ins alongside the `pancakes` you just
+defined — the exact set may grow as new built-ins land, so expect your
+output to include additional `mol-*` entries.
 
 To see the compiled recipe for a specific formula:
 
@@ -233,7 +248,7 @@ Formula: greeting
 Variables:
   {{name}}:  (default=world)
 
-Steps (2):
+Steps (1):
   └── greeting.say-hello: Say hello to Alice
 ```
 

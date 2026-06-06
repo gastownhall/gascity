@@ -32,18 +32,19 @@ invariants.
 
 City initialization is a worked example: the HTTP handler for
 `POST /v0/city` does **not** shell out to `gc init`; it calls
-`cityinit.Initializer.Scaffold` in-process, which is the same
-entry point the CLI drives. The scaffolded city registers with
+`cityinit.Service.Scaffold` in-process, and the CLI drives the same
+`cityinit.Service.Init` contract. The scaffolded city registers with
 the supervisor synchronously before `202 Accepted` returns; the
-reconciler runs the slow finalize later and publishes `city.ready`
-/ `city.init_failed` events. Both projections live on the same
-typed contract and error sentinels
-(`cityinit.ErrAlreadyInitialized`, `ErrInvalidProvider`,
-`ErrMissingDependency`, `ErrProviderNotReady`,
+reconciler runs the slow finalize later and publishes a
+`request.result` event. Both projections live on the same typed
+contract and error sentinels (`cityinit.ErrAlreadyInitialized`,
+`ErrInvalidProvider`, `ErrMissingDependency`, `ErrProviderNotReady`,
 `ErrInvalidBootstrapProfile`). Long-running mutations in general
-follow this shape: scaffold synchronously, return 202, publish
-completion events — subscribers watch the event stream instead of
-polling.
+follow this shape: validate and create intent synchronously, return
+202 with a `request_id`, run the expensive work in a background
+goroutine, publish a `request.result` event on completion or
+failure — subscribers watch the event stream instead of polling.
+See `engdocs/design/async-request-result.md` for the full pattern.
 
 ```
 cmd/gc/cmd_*.go               internal/api/handler_*.go
@@ -106,6 +107,14 @@ boundary we didn't create."
 Every HTTP + SSE endpoint is registered through Huma against
 annotated Go types. Huma generates the OpenAPI 3.1 spec from those
 types; the spec drives everything downstream.
+
+Per-city routes are available only after the supervisor resolver
+returns a running `State` for that city. During supervisor startup a
+city may appear in `GET /v0/cities` with `running=false` and a startup
+status such as `starting_agents`; `/v0/city/{cityName}/...` requests in
+that window return `404` with the typed not-found problem detail. The
+city list and lifecycle events are the readiness boundary for clients
+that need to issue per-city requests.
 
 ### The generated Go client
 
@@ -644,7 +653,7 @@ rename or remove a cited symbol (`events.KnownEventTypes`,
 `EventPayloadUnion`, `TestEveryKnownEventTypeHasRegisteredPayload`,
 `cmd/gc/apiroute.go:apiClient()`, `addMutationCSRFParam`,
 `registerFrameworkHeaders`, `sseResponseHeaders`,
-`OptionalParam`, `cityinit.Initializer`, `cityinit.InitRequest`,
+`OptionalParam`, `cityinit.Service`, `cityinit.InitRequest`,
 `cityinit.InitResult`, `cityinit.UnregisterRequest`,
 `cityinit.UnregisterResult`, `cityinit.ErrNotRegistered`,
 `TransientCityEventSource`, etc.), **update this document in the same

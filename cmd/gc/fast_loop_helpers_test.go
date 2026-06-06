@@ -14,7 +14,10 @@ import (
 
 func skipSlowCmdGCTest(t *testing.T, reason string) {
 	t.Helper()
-	if os.Getenv("GC_FAST_UNIT") == "1" || testing.Short() {
+	if testing.Short() || strings.TrimSpace(os.Getenv("GC_FAST_UNIT")) != "0" {
+		if strings.TrimSpace(os.Getenv("GC_FAST_UNIT")) == "" && !strings.Contains(reason, "test-cmd-gc-process") {
+			reason += "; set GC_FAST_UNIT=0 or run make test-cmd-gc-process for full process coverage"
+		}
 		t.Skip(reason)
 	}
 }
@@ -35,6 +38,10 @@ func sanitizedBaseEnv(extra ...string) []string {
 		}
 		filtered = append(filtered, kv)
 	}
+	filtered = append(filtered,
+		managedDoltTestModeEnv+"=1",
+		managedDoltTestParentPIDEnv+"="+strconv.Itoa(os.Getpid()),
+	)
 	return append(filtered, extra...)
 }
 
@@ -42,19 +49,27 @@ func sanitizedBaseEnv(extra ...string) []string {
 // If stderrMsg is non-empty, the script writes it to stderr before exiting.
 func writeTestScript(t *testing.T, _ string, exitCode int, stderrMsg string) string {
 	t.Helper()
-	dir := t.TempDir()
-	script := filepath.Join(dir, "test-beads.sh")
-
 	content := "#!/bin/sh\n"
 	if stderrMsg != "" {
 		content += "echo '" + stderrMsg + "' >&2\n"
 	}
 	content += "exit " + itoa(exitCode) + "\n"
+	return writeNamedTestScript(t, "test-beads.sh", content)
+}
 
+func writeNamedTestScript(t *testing.T, name, content string) string {
+	t.Helper()
+	dir := t.TempDir()
+	script := filepath.Join(dir, name)
 	if err := os.WriteFile(script, []byte(content), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	return script
+}
+
+func writeManagedBdTestScript(t *testing.T, content string) string {
+	t.Helper()
+	return writeNamedTestScript(t, "gc-beads-bd.sh", content)
 }
 
 func itoa(n int) string {
@@ -80,6 +95,7 @@ func reserveRandomTCPPort(t *testing.T) int {
 
 func startTCPListenerProcess(t *testing.T, port int) *exec.Cmd {
 	t.Helper()
+	skipSlowCmdGCTest(t, "spawns a TCP listener process to emulate managed dolt; run make test-cmd-gc-process for full coverage")
 	cmd := exec.Command("python3", "-c", `
 import signal
 import socket

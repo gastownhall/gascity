@@ -34,6 +34,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/runtime/proctable"
 )
 
 // Provider manages agent sessions as child processes.
@@ -54,7 +55,10 @@ type sessionConn struct {
 }
 
 // Compile-time check.
-var _ runtime.Provider = (*Provider)(nil)
+var (
+	_ runtime.Provider            = (*Provider)(nil)
+	_ runtime.ProcessTableScanner = (*Provider)(nil)
+)
 
 // NewProvider returns a subprocess [Provider] that stores socket files in
 // a default temporary directory. Suitable for production use.
@@ -100,7 +104,7 @@ func (p *Provider) Start(_ context.Context, name string, cfg runtime.Config) err
 		delete(p.workDirs, name)
 	}
 
-	if err := runtime.StageWorkDir(cfg.WorkDir, cfg.OverlayDir, cfg.CopyFiles); err != nil {
+	if err := runtime.StageSessionWorkDir(cfg); err != nil {
 		clearWorkDir()
 		return fmt.Errorf("staging workdir for %q: %w", name, err)
 	}
@@ -159,6 +163,15 @@ func (p *Provider) Start(_ context.Context, name string, cfg runtime.Config) err
 		clearWorkDir()
 		return fmt.Errorf("creating control socket for %q: %w", name, err)
 	}
+	if err := p.persistStartMetadata(name, cfg.Env); err != nil {
+		lis.Close() //nolint:errcheck
+		_ = os.Remove(p.sockPath(name))
+		_ = os.Remove(p.sockNamePath(name))
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		clearWorkDir()
+		return fmt.Errorf("storing metadata for %q: %w", name, err)
+	}
 
 	go func() {
 		_ = cmd.Wait()
@@ -167,6 +180,7 @@ func (p *Provider) Start(_ context.Context, name string, cfg runtime.Config) err
 		lis.Close()                 //nolint:errcheck
 		os.Remove(p.sockPath(name)) //nolint:errcheck
 		_ = os.Remove(p.sockNamePath(name))
+		p.clearSessionMeta(name)
 		close(done)
 	}()
 
@@ -250,6 +264,53 @@ func (p *Provider) ProcessAlive(name string, processNames []string) bool {
 	return p.IsRunning(name)
 }
 
+// FindRuntimesBySessionID implements [runtime.ProcessTableScanner].
+func (p *Provider) FindRuntimesBySessionID(id string) ([]runtime.LiveRuntime, error) {
+	found, scanErr := proctable.ScanBySessionID(id)
+
+	p.mu.Lock()
+	trackedBySessionID := make(map[string]string)
+	for name, sc := range p.procs {
+		if sc == nil || sc.cmd == nil || !sc.alive() {
+			continue
+		}
+		if sessionID := envValue(sc.cmd.Env, "GC_SESSION_ID"); sessionID != "" {
+			trackedBySessionID[sessionID] = name
+		}
+	}
+	p.mu.Unlock()
+
+	for i := range found {
+		if name, ok := trackedBySessionID[found[i].SessionID]; ok {
+			found[i].IsTracked = true
+			found[i].ProviderName = name
+		}
+	}
+	return found, scanErr
+}
+
+// TerminateRuntime implements [runtime.ProcessTableScanner].
+func (p *Provider) TerminateRuntime(r runtime.LiveRuntime) error {
+	if r.PID <= 1 {
+		return fmt.Errorf("subprocess: invalid PID %d for session %s", r.PID, r.SessionID)
+	}
+	if err := proctable.KillByPID(r.PID); err != nil {
+		return fmt.Errorf("subprocess: terminate runtime PID %d for session %s: %w", r.PID, r.SessionID, err)
+	}
+	return nil
+}
+
+func envValue(env []string, key string) string {
+	prefix := key + "="
+	for i := len(env) - 1; i >= 0; i-- {
+		value := env[i]
+		if strings.HasPrefix(value, prefix) {
+			return value[len(prefix):]
+		}
+	}
+	return ""
+}
+
 // Nudge is not supported by the subprocess provider — there is no
 // interactive terminal to send messages to. Returns nil (best-effort).
 func (p *Provider) Nudge(_ string, _ []runtime.ContentBlock) error {
@@ -298,6 +359,17 @@ func (p *Provider) RemoveMeta(name, key string) error {
 		return nil
 	}
 	return err
+}
+
+func (p *Provider) persistStartMetadata(name string, env map[string]string) error {
+	p.clearSessionMeta(name)
+	for key, value := range env {
+		if err := p.SetMeta(name, key, value); err != nil {
+			p.clearSessionMeta(name)
+			return err
+		}
+	}
+	return nil
 }
 
 // GetLastActivity returns zero time — subprocess provider does not
@@ -367,6 +439,16 @@ func (p *Provider) ListRunning(prefix string) ([]string, error) {
 
 func (p *Provider) metaPath(name, key string) string {
 	return filepath.Join(p.dir, metaFilePrefix(name)+".meta."+metaFileKey(key))
+}
+
+func (p *Provider) clearSessionMeta(name string) {
+	matches, err := filepath.Glob(filepath.Join(p.dir, metaFilePrefix(name)+".meta.*"))
+	if err != nil {
+		return
+	}
+	for _, path := range matches {
+		_ = os.Remove(path)
+	}
 }
 
 func metaFilePrefix(name string) string {

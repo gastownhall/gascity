@@ -146,15 +146,15 @@ minutes — far beyond the 10-minute test timeout.
 
 ---
 
-### RC-3: Agent lifecycle events not emitted with exec provider (MEDIUM)
+### RC-3: Session lifecycle events not emitted with exec provider (MEDIUM)
 
 **Impact:** 1 Docker failure (TestE2E_AgentLifecycleEvents)
 
-`gc events --type agent.started` returns empty output after `gc start`.
+`gc events --type session.woke` returns empty output after `gc start`.
 The events may only be emitted by the controller loop (not one-shot
 start), or the exec provider path in `doStart` may skip event recording.
 
-**Investigation needed:** Check if `doStart` records agent.started events
+**Investigation needed:** Check if `doStart` records `session.woke` events
 for exec session providers. The one-shot path may return before events
 are flushed.
 
@@ -271,7 +271,7 @@ Remaining failures would be:
    Use `-timeout 120m` for K8s runs, or create a K8s-specific test
    subset.
 
-4. **[P2] Investigate agent.started event emission for exec providers**
+4. **[P2] Investigate `session.woke` event emission for exec providers**
    May need to record events in the one-shot `doStart` path.
 
 5. **[P2] Consider test parallelization**

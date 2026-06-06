@@ -24,6 +24,8 @@ const (
 	MCPTransportStdio MCPTransport = "stdio"
 	// MCPTransportHTTP is a streamable HTTP MCP server.
 	MCPTransportHTTP MCPTransport = "http"
+	// MCPTransportSSE is an SSE-connected MCP server.
+	MCPTransportSSE MCPTransport = "sse"
 )
 
 // MCPServer is the canonical neutral MCP model after parsing,

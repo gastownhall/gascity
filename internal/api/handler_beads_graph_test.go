@@ -138,6 +138,46 @@ func TestBeadGraphIncludesParentChildChildrenAndEdges(t *testing.T) {
 	}
 }
 
+func TestBeadGraphIncludesTracksConvoyMembersAndEdges(t *testing.T) {
+	state := newFakeState(t)
+	store := state.stores["myrig"]
+	h := newTestCityHandler(t, state)
+
+	convoy, err := store.Create(beads.Bead{Title: "Convoy", Type: "convoy"})
+	if err != nil {
+		t.Fatalf("Create(convoy): %v", err)
+	}
+	child, err := store.Create(beads.Bead{Title: "Child", Type: "task"})
+	if err != nil {
+		t.Fatalf("Create(child): %v", err)
+	}
+	if err := store.DepAdd(convoy.ID, child.ID, "tracks"); err != nil {
+		t.Fatalf("DepAdd(tracks): %v", err)
+	}
+
+	rec, resp := getGraph(t, h, state, convoy.ID)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	beadIDs := map[string]bool{}
+	for _, b := range resp.Beads {
+		beadIDs[b.ID] = true
+	}
+	for _, id := range []string{convoy.ID, child.ID} {
+		if !beadIDs[id] {
+			t.Fatalf("graph beads missing %s; got %#v", id, resp.Beads)
+		}
+	}
+
+	for _, dep := range resp.Deps {
+		if dep.From == child.ID && dep.To == convoy.ID && dep.Kind == "tracks" {
+			return
+		}
+	}
+	t.Fatalf("missing tracks edge %s -> %s; deps=%#v", child.ID, convoy.ID, resp.Deps)
+}
+
 func TestBeadGraphReturnsErrorWhenGraphListFails(t *testing.T) {
 	state := newFakeState(t)
 	base := state.stores["myrig"]

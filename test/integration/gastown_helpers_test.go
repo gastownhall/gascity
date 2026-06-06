@@ -49,14 +49,22 @@ func setupGasTownCity(t *testing.T, guard *tmuxtest.Guard, agents []gasTownAgent
 	}
 
 	cityDir := filepath.Join(t.TempDir(), cityName)
-	configPath := filepath.Join(t.TempDir(), cityName+".toml")
-	if err := os.WriteFile(configPath, []byte(renderGasTownToml(cityName, agents)), 0o644); err != nil {
+	sourceDir := filepath.Join(t.TempDir(), cityName+"-source")
+	if err := os.MkdirAll(sourceDir, 0o755); err != nil {
+		t.Fatalf("creating init source: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(sourceDir, "city.toml"), []byte(renderGasTownToml(cityName, agents)), 0o644); err != nil {
 		t.Fatalf("writing init config: %v", err)
 	}
+	pack := fmt.Sprintf("[pack]\nname = %s\nschema = 2\n", quote(cityName))
+	if err := os.WriteFile(filepath.Join(sourceDir, "pack.toml"), []byte(pack), 0o644); err != nil {
+		t.Fatalf("writing init pack: %v", err)
+	}
+	writeGasTownAgentFiles(t, sourceDir, agents)
 
-	out, err := runGCWithEnv(env, "", "init", "--skip-provider-readiness", "--file", configPath, cityDir)
+	out, err := runGCWithEnv(env, "", "init", "--skip-provider-readiness", "--from", sourceDir, cityDir)
 	if err != nil {
-		t.Fatalf("gc init --file failed: %v\noutput: %s", err, out)
+		t.Fatalf("gc init --from failed: %v\noutput: %s", err, out)
 	}
 	registerCityCommandEnv(cityDir, env)
 	waitForExpectedTmuxSessions(t, cityDir, gasTownExpectedSessions(agents))
@@ -106,28 +114,6 @@ func renderGasTownToml(cityName string, agents []gasTownAgent) string {
 	fmt.Fprintf(&b, "\n[daemon]\npatrol_interval = \"100ms\"\n")
 
 	for _, a := range agents {
-		fmt.Fprintf(&b, "\n[[agent]]\nname = %s\n", quote(a.Name))
-		fmt.Fprintf(&b, "start_command = %s\n", quote(a.StartCommand))
-		if a.Dir != "" {
-			fmt.Fprintf(&b, "dir = %s\n", quote(a.Dir))
-		}
-		if a.Suspended {
-			fmt.Fprintf(&b, "suspended = true\n")
-		}
-		if a.Pool != nil {
-			fmt.Fprintf(&b, "min_active_sessions = %d\n", a.Pool.Min)
-			fmt.Fprintf(&b, "max_active_sessions = %d\n", a.Pool.Max)
-			fmt.Fprintf(&b, "scale_check = %s\n", quote(a.Pool.Check))
-		}
-		if len(a.Env) > 0 {
-			b.WriteString("\n[agent.env]\n")
-			for k, v := range a.Env {
-				fmt.Fprintf(&b, "%s = %s\n", k, quote(v))
-			}
-		}
-	}
-
-	for _, a := range agents {
 		if a.Pool != nil {
 			continue
 		}
@@ -138,6 +124,41 @@ func renderGasTownToml(cityName string, agents []gasTownAgent) string {
 	}
 
 	return b.String()
+}
+
+func writeGasTownAgentFiles(t *testing.T, cityDir string, agents []gasTownAgent) {
+	t.Helper()
+	for _, a := range agents {
+		agentDir := filepath.Join(cityDir, "agents", a.Name)
+		if err := os.MkdirAll(agentDir, 0o755); err != nil {
+			t.Fatalf("creating agent dir %s: %v", a.Name, err)
+		}
+
+		var b strings.Builder
+		if a.StartCommand != "" {
+			fmt.Fprintf(&b, "start_command = %s\n", quote(a.StartCommand))
+		}
+		if a.Dir != "" {
+			fmt.Fprintf(&b, "dir = %s\n", quote(a.Dir))
+		}
+		if a.Suspended {
+			b.WriteString("suspended = true\n")
+		}
+		if a.Pool != nil {
+			fmt.Fprintf(&b, "min_active_sessions = %d\n", a.Pool.Min)
+			fmt.Fprintf(&b, "max_active_sessions = %d\n", a.Pool.Max)
+			fmt.Fprintf(&b, "scale_check = %s\n", quote(a.Pool.Check))
+		}
+		if len(a.Env) > 0 {
+			b.WriteString("\n[env]\n")
+			for k, v := range a.Env {
+				fmt.Fprintf(&b, "%s = %s\n", k, quote(v))
+			}
+		}
+		if err := os.WriteFile(filepath.Join(agentDir, "agent.toml"), []byte(b.String()), 0o644); err != nil {
+			t.Fatalf("writing agent.toml for %s: %v", a.Name, err)
+		}
+	}
 }
 
 // waitForBeadStatus polls until a bead reaches the expected status or times out.
@@ -178,14 +199,16 @@ func sessionAssigneeForTemplate(t *testing.T, cityDir, template string) string {
 	for time.Now().Before(deadline) {
 		out, err := gc(cityDir, "session", "list", "--json", "--template", template)
 		if err == nil {
-			var sessions []struct {
-				Template    string
-				Closed      bool
-				State       string
-				SessionName string
+			var sessionList struct {
+				Sessions []struct {
+					Template    string `json:"template"`
+					Closed      bool   `json:"closed"`
+					State       string `json:"state"`
+					SessionName string `json:"session_name"`
+				} `json:"sessions"`
 			}
-			if jsonErr := json.Unmarshal([]byte(strings.TrimSpace(out)), &sessions); jsonErr == nil {
-				for _, session := range sessions {
+			if jsonErr := json.Unmarshal([]byte(strings.TrimSpace(out)), &sessionList); jsonErr == nil {
+				for _, session := range sessionList.Sessions {
 					if session.Closed || strings.TrimSpace(session.Template) != template {
 						continue
 					}
@@ -230,14 +253,84 @@ func tailText(s string, maxLines int) string {
 // city.toml configuration.
 func initBd(t *testing.T, dir string) string {
 	t.Helper()
+	env := standaloneBdEnv(t, dir)
+
+	if _, err := os.Stat(filepath.Join(dir, ".git")); err != nil {
+		if !os.IsNotExist(err) {
+			t.Fatalf("stat %s/.git: %v", dir, err)
+		}
+		gitCmd := exec.Command("git", "init", "--quiet")
+		gitCmd.Dir = dir
+		gitCmd.Env = env
+		if out, err := gitCmd.CombinedOutput(); err != nil {
+			t.Fatalf("git init in %s failed: %v\noutput: %s", dir, err, out)
+		}
+	}
+
 	prefix := uniqueCityName()
-	cmd := exec.Command(bdBinary, "init", "-p", prefix, "--skip-hooks", "-q")
+	cmd := exec.Command(bdBinary, "init", "-p", prefix, "--skip-hooks", "--skip-agents", "-q")
 	cmd.Dir = dir
-	cmd.Env = os.Environ()
+	cmd.Env = env
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("bd init in %s failed: %v\noutput: %s", dir, err, out)
 	}
+	registerCityCommandEnv(dir, env)
+	t.Cleanup(func() { unregisterCityCommandEnv(dir) })
 	return prefix
+}
+
+func standaloneBdEnv(t *testing.T, dir string) []string {
+	t.Helper()
+
+	env := newIsolatedToolEnv(t, false)
+	env = filterEnvMany(env,
+		"GC_CITY",
+		"GC_CITY_PATH",
+		"GC_CITY_ROOT",
+		"GC_CITY_RUNTIME_DIR",
+		"GC_RIG",
+		"GC_RIG_ROOT",
+		"GC_BEADS",
+		"GC_BEADS_SCOPE_ROOT",
+		"GC_DOLT",
+		"GC_DOLT_HOST",
+		"GC_DOLT_PORT",
+		"GC_DOLT_USER",
+		"GC_DOLT_PASSWORD",
+		"BEADS_DIR",
+		"BEADS_DOLT_AUTO_START",
+		"BEADS_DOLT_SERVER_HOST",
+		"BEADS_DOLT_SERVER_PORT",
+		"BEADS_DOLT_SERVER_USER",
+		"BEADS_DOLT_PASSWORD",
+	)
+	if gcHome := parseEnvList(env)["GC_HOME"]; gcHome != "" {
+		env = replaceEnv(env, "HOME", gcHome)
+	}
+	env = replaceEnv(env, "BD_NON_INTERACTIVE", "1")
+	env = append(env, "BEADS_DIR="+filepath.Join(dir, ".beads"))
+	return env
+}
+
+func bdStandalone(t testing.TB, dir string, args ...string) (string, error) {
+	t.Helper()
+	return runCommand(dir, standaloneBDEnvForDir(dir), integrationBDCommandTimeout, bdBinary, args...)
+}
+
+func TestInitBdAllowsStandaloneCreate(t *testing.T) {
+	requireDoltIntegration(t)
+
+	dir := t.TempDir()
+	prefix := initBd(t, dir)
+
+	out, err := bd(dir, "create", "standalone bead")
+	if err != nil {
+		t.Fatalf("bd create failed: %v\noutput: %s", err, out)
+	}
+	beadID := extractBeadID(t, out)
+	if !strings.HasPrefix(beadID, prefix) {
+		t.Fatalf("bead ID %q should start with prefix %q", beadID, prefix)
+	}
 }
 
 // createBead creates a bead and returns its ID.

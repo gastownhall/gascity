@@ -1,0 +1,9 @@
+# Closes stale order tracking beads left behind by crashed or resource-starved
+# exec dispatches, and prunes expired closed tracking history according to
+# [beads.policies.order_tracking].delete_after_close. Fresh tracking beads are
+# left alone so in-flight orders keep their normal single-flight protection.
+[order]
+description = "Close stale order-tracking beads and prune expired tracking history"
+trigger = "cooldown"
+interval = "1m"
+exec = "gc order sweep-tracking --stale-after 10m --quiet"

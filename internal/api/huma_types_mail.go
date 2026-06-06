@@ -28,8 +28,9 @@ type MailListBody struct {
 
 // MailListOutput is the response envelope for mail list and thread endpoints.
 type MailListOutput struct {
-	Index uint64 `header:"X-GC-Index" doc:"Latest event sequence number."`
-	Body  MailListBody
+	Index     uint64  `header:"X-GC-Index" doc:"Latest event sequence number."`
+	CacheAgeS float64 `header:"X-GC-Cache-Age-S" doc:"Age in seconds of the CachingStore snapshot that served this response (0 if not applicable)."`
+	Body      MailListBody
 }
 
 // --- Mail types ---
@@ -107,7 +108,7 @@ type MailDeleteInput struct {
 // MailThreadInput is the Huma input for GET /v0/city/{cityName}/mail/thread/{id}.
 type MailThreadInput struct {
 	CityScope
-	ID  string `path:"id" doc:"Thread ID."`
+	ID  string `path:"id" doc:"Thread ID, or any message ID in the thread."`
 	Rig string `query:"rig" required:"false" doc:"Filter by rig."`
 }
 
@@ -124,7 +125,8 @@ type MailCountInput struct {
 // the shortfall rather than returning 500 and losing the count
 // entirely.
 type MailCountOutput struct {
-	Body struct {
+	CacheAgeS float64 `header:"X-GC-Cache-Age-S" doc:"Age in seconds of the CachingStore snapshot that served this response (0 if not applicable)."`
+	Body      struct {
 		Total         int      `json:"total" doc:"Total message count."`
 		Unread        int      `json:"unread" doc:"Unread message count."`
 		Partial       bool     `json:"partial,omitempty" doc:"True when one or more rig providers failed and the counts are not authoritative."`

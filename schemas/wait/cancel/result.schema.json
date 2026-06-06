@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["schema_version", "ok", "command", "action", "name", "state"],
+  "properties": {
+    "schema_version": { "const": "1" },
+    "ok": { "const": true },
+    "command": { "const": "wait cancel" },
+    "action": { "const": "cancel" },
+    "name": { "type": "string" },
+    "state": { "const": "canceled" }
+  },
+  "additionalProperties": true
+}

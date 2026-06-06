@@ -19,6 +19,8 @@ var managedMCPGitignoreEntries = []string{
 	".mcp.json",
 	filepath.ToSlash(filepath.Join(".gemini", "settings.json")),
 	filepath.ToSlash(filepath.Join(".codex", "config.toml")),
+	filepath.ToSlash(filepath.Join(".cursor", "mcp.json")),
+	"opencode.json",
 }
 
 type mcpTargetSpec struct {
@@ -38,27 +40,13 @@ type resolvedMCPProjection struct {
 	Projection   materialize.MCPProjection
 }
 
-func buildMCPTemplateData(cityPath, qualifiedName, workDir string, agent *config.Agent, rigs []config.Rig) map[string]string {
-	rigName := configuredRigName(cityPath, agent, rigs)
-	rigRoot := rigRootForName(rigName, rigs)
-	return buildTemplateData(PromptContext{
-		CityRoot:      cityPath,
-		AgentName:     qualifiedName,
-		TemplateName:  templateNameFor(agent, qualifiedName),
-		RigName:       rigName,
-		RigRoot:       rigRoot,
-		WorkDir:       workDir,
-		IssuePrefix:   findRigPrefix(rigName, rigs),
-		DefaultBranch: defaultBranchFor(workDir),
-		WorkQuery:     agent.EffectiveWorkQuery(),
-		SlingQuery:    agent.EffectiveSlingQuery(),
-		Env:           agent.Env,
-	})
-}
-
 func supportsMCPProviderKind(kind string) bool {
 	switch strings.TrimSpace(kind) {
-	case materialize.MCPProviderClaude, materialize.MCPProviderCodex, materialize.MCPProviderGemini:
+	case materialize.MCPProviderClaude,
+		materialize.MCPProviderCodex,
+		materialize.MCPProviderGemini,
+		materialize.MCPProviderOpenCode,
+		materialize.MCPProviderCursor:
 		return true
 	default:
 		return false
@@ -71,8 +59,7 @@ func loadEffectiveMCPForAgent(
 	agent *config.Agent,
 	qualifiedName, workDir string,
 ) (materialize.MCPCatalog, error) {
-	templateData := buildMCPTemplateData(cityPath, qualifiedName, workDir, agent, cfg.Rigs)
-	catalog, err := materialize.EffectiveMCPForAgent(cfg, agent, templateData)
+	catalog, err := materialize.EffectiveMCPForSession(cfg, cityPath, agent, qualifiedName, workDir)
 	if err != nil {
 		return materialize.MCPCatalog{}, fmt.Errorf("loading effective MCP: %w", err)
 	}
@@ -91,6 +78,9 @@ func resolveAgentMCPProjection(
 		return materialize.MCPCatalog{}, materialize.MCPProjection{}, err
 	}
 	if !supportsMCPProviderKind(providerKind) {
+		if shouldSkipImplicitStartCommandMCP(agent, providerKind) {
+			return materialize.MCPCatalog{}, materialize.MCPProjection{}, nil
+		}
 		if len(catalog.Servers) > 0 {
 			return materialize.MCPCatalog{}, materialize.MCPProjection{}, fmt.Errorf(
 				"effective MCP requires a supported provider family, got %q", providerKind)
@@ -102,6 +92,19 @@ func resolveAgentMCPProjection(
 		return materialize.MCPCatalog{}, materialize.MCPProjection{}, err
 	}
 	return catalog, projection, nil
+}
+
+// shouldSkipImplicitStartCommandMCP matches implicit infrastructure agents that
+// run from StartCommand without a provider family. Provider-backed implicit
+// agents injected for coverage set Provider and must still project inherited
+// MCP; validateStage2TargetClaimants can skip implicit peers more broadly
+// because it is only checking conflicts from other agents.
+func shouldSkipImplicitStartCommandMCP(agent *config.Agent, providerKind string) bool {
+	return agent != nil &&
+		agent.Implicit &&
+		strings.TrimSpace(agent.StartCommand) != "" &&
+		strings.TrimSpace(agent.Provider) == "" &&
+		strings.TrimSpace(providerKind) == ""
 }
 
 func mergeMCPFingerprintEntry(fpExtra map[string]string, projection materialize.MCPProjection) map[string]string {

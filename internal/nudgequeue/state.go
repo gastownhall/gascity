@@ -2,6 +2,7 @@
 package nudgequeue
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,6 +15,11 @@ import (
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/fsys"
 )
+
+// wakeSocketPathLimit caps the canonical socket path length below the
+// platform sockaddr_un limit (108 bytes on Linux, 104 on macOS). Matches
+// the controllerSocketPathLimit pattern in cmd/gc/controller.go.
+const wakeSocketPathLimit = 100
 
 // Reference links a queued nudge back to the object that produced it.
 type Reference struct {
@@ -143,4 +149,27 @@ func StatePath(cityPath string) string {
 // LockPath returns the queue state lock path for a city.
 func LockPath(cityPath string) string {
 	return citylayout.RuntimePath(cityPath, "nudges", "state.lock")
+}
+
+// WakeSocketPath returns the path to the supervisor nudge-dispatcher wake
+// socket. Producers connect to this path after enqueue to trigger immediate
+// dispatch; the supervisor listens on it when daemon.nudge_dispatcher is
+// "supervisor".
+//
+// Preserves the legacy `<city>/.gc/runtime/nudges/wake.sock` location for
+// short city paths but falls back to a deterministic short temp-path
+// when the legacy pathname is too close to the platform sockaddr_un
+// limit. Mirrors the controllerSocketPath pattern in cmd/gc/controller.go.
+func WakeSocketPath(cityPath string) string {
+	legacy := citylayout.RuntimePath(cityPath, "nudges", "wake.sock")
+	if len(legacy) <= wakeSocketPathLimit {
+		return legacy
+	}
+	canonical, err := filepath.Abs(cityPath)
+	if err != nil {
+		canonical = cityPath
+	}
+	canonical = filepath.Clean(canonical)
+	sum := sha256.Sum256([]byte(canonical))
+	return filepath.Join("/tmp", "gascity-nudge", fmt.Sprintf("%x.sock", sum[:16]))
 }

@@ -37,12 +37,70 @@ scripts, and the large `gc-beads-bd` provider suite are routed out of the
 default path so local `make check` and CI `Check` stay focused on quick
 feedback. If you need that full `cmd/gc` scenario coverage locally, run
 `make test-cmd-gc-process`. In CI, the required non-short path is the
-`test-integration-packages` shard. If you need the heavier package
+dedicated Linux `cmd/gc process` job. The generic integration package
+shards keep `GC_FAST_UNIT=1` for `cmd/gc` unless explicitly overridden,
+so they exercise the fast package sweep without duplicating the slow
+process-backed suite. If you need the heavier package
 coverage sweep locally, use `make test-integration-packages-cover` or
 `make test-integration-shards-cover`. As a result, `coverage.txt` is the
 fast unit-only baseline; the integration contribution comes from the
 shard-specific `coverage.integration-*.txt` profiles and their matching
 Codecov flags.
+
+#### Sharded local runners
+
+For broad local runs, prefer the repo's sharded wrappers over raw `go test`
+commands. They use the same buckets as CI, run under a scrubbed environment,
+and split single-package bottlenecks such as `cmd/gc` across multiple
+processes.
+
+Use these as the default entry points:
+
+```bash
+# Fast unit baseline, with cmd/gc split into shards.
+make test-fast-parallel
+
+# Full process-backed cmd/gc suite, sharded.
+make test-cmd-gc-process-parallel
+
+# CI integration buckets, sharded.
+make test-integration-shards-parallel
+
+# Fast + process-backed cmd/gc + integration shards.
+make test-local-full-parallel
+```
+
+On large local machines, tune parallelism explicitly:
+
+```bash
+LOCAL_TEST_JOBS=48 CMD_GC_PROCESS_TOTAL=12 make test-local-full-parallel
+```
+
+For one package, shard top-level Go tests directly:
+
+```bash
+GO_TEST_COUNT=1 GO_TEST_TIMEOUT=20m ./scripts/test-go-test-shard ./cmd/gc 1 6
+GO_TEST_TAGS=acceptance_b GO_TEST_TIMEOUT=10m ./scripts/test-go-test-shard ./test/acceptance/tier_b 2 3
+```
+
+For integration buckets, use the named shard runner:
+
+```bash
+./scripts/test-integration-shard packages-cmd-gc-3-of-6
+./scripts/test-integration-shard review-formulas-retries-1-of-2
+./scripts/test-integration-shard rest-full-4-of-8
+```
+
+To force the process-backed `cmd/gc` tests through the package shard for
+diagnostics, override the default explicitly:
+
+```bash
+GC_FAST_UNIT=0 ./scripts/test-integration-shard packages-cmd-gc-3-of-6
+```
+
+Raw `go test` is still appropriate for a focused package or a single failing
+test. Do not use it as the default for full local sweeps when a sharded target
+exists.
 
 ### 2. Testscript (`.txtar` files in `cmd/gc/testdata/`)
 
@@ -109,6 +167,68 @@ subprocess. Proves the whole stack — build tags, Huma registration,
 listener bootstrap, socket paths — wires end-to-end through a real
 binary. Run with `make test-integration-huma` or
 `go test -tags integration -run TestHumaBinary ./test/integration/`.
+
+**Supervisor API contract tests** (`test/integration/gc_live_contract_test.go`
+and focused cases in `test/integration/huma_binary_test.go`): build the real
+`gc` binary, start `gc supervisor run` against an isolated `GC_HOME` and
+runtime dir, then exercise the HTTP API as a client would. These tests are
+not handler unit tests and are not CLI tutorial tests; they prove that the
+published API contract survives the full control plane: Huma registration,
+OpenAPI generation, supervisor routing, city lifecycle, event publication,
+storage providers, and asynchronous request completion.
+
+The live API contract test has a few load-bearing rules:
+
+- Validate responses against the supervisor's live `/openapi.json`. If the
+  server says a route returns a schema, the integration test should prove the
+  real response matches that schema.
+- Exercise API mutations through HTTP only. Set `X-GC-Request` for mutating
+  calls and observe durable results through API reads or events, not by
+  reaching into internal Go state.
+- Treat asynchronous operations as two-step contracts: the HTTP call returns
+  quickly with `202 Accepted` and a `request_id`, then a `request.result.*`
+  or `request.failed` event appears. Focused Huma binary tests should use
+  `/v0/events/stream` for the critical async paths; broader coverage may poll
+  event-list endpoints when the thing being tested is the API surface rather
+  than SSE framing.
+- Prefer self-provisioned fixtures. The test should create its own city, rig,
+  provider/agent/session, beads, mail, formulas, convoys, and order-history
+  fixtures where practical, then clean them up through the API.
+- Keep the test hermetic. It must not depend on the developer's machine-wide
+  supervisor, personal `~/.gc`, default tmux server, or a pre-existing city.
+  Use isolated `GC_HOME`, runtime dir, ports, and process cleanup.
+- Lock compatibility surfaces explicitly. If generated clients rely on an
+  operation ID, method, path template, status code, or response schema, add an
+  assertion for that contract rather than relying only on incidental behavior.
+- Keep generated-read sweeps read-only. A sweep over OpenAPI GET routes is
+  useful for schema and routing drift, but any GET route with unbound identity
+  parameters still needs an explicit fixture-backed test.
+
+Use supervisor API contract tests for externally visible behavior that only
+exists when the real supervisor process is running: async city/session request
+results, event streams, OpenAPI/response agreement, cross-route lifecycle
+coherence, and end-to-end provider wiring. Do not put low-level edge cases
+here. Corrupt files, exact parser failures, request validation branches, and
+single handler error cases belong in unit tests next to the implementation.
+
+#### Live worker inference tests (`//go:build acceptance_c`)
+
+`test/acceptance/worker_inference` runs live Claude/Codex/Gemini/OpenCode CLI
+sessions through tmux and requires local or CI-provided provider auth. It is
+not part of PR CI. Run it deliberately when validating provider behavior:
+
+```bash
+make setup-worker-inference PROFILE=claude/tmux-cli
+make test-worker-inference PROFILE=claude/tmux-cli
+```
+
+Supported profiles are `claude/tmux-cli`, `codex/tmux-cli`,
+`gemini/tmux-cli`, and `opencode/tmux-cli`. OpenCode live tests use Gemini via
+`--model google/gemini-2.5-flash` by default; set
+`GC_WORKER_INFERENCE_OPENCODE_MODEL` to override it and provide
+`GOOGLE_GENERATIVE_AI_API_KEY`, `GEMINI_API_KEY`, or `GOOGLE_API_KEY` for auth.
+Nightly CI runs the configured profile matrix with its credentials and uploads
+worker report artifacts.
 
 ### 4. Documentation sync tests (`test/docsync`)
 
@@ -238,7 +358,7 @@ error handling, concurrency). They deliberately don't test lifecycle ordering
 or cross-provider coordination — that's what coordination tests are for.
 
 For the new 0.15 config surface, use
-`docs/packv2/doc-conformance-matrix.md` as the release-gating ledger for
+`engdocs/design/packv2/doc-conformance-matrix.md` as the release-gating ledger for
 what should block CI now, what should start blocking once warning plumbing
 lands, and what remains tracked but non-gating.
 

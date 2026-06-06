@@ -8,8 +8,16 @@ func profileFamily(profile Profile) string {
 		return "codex"
 	case ProfileGeminiTmuxCLI:
 		return "gemini"
+	case ProfileKimiTmuxCLI:
+		return "kimi"
+	case ProfileOpenCodeTmuxCLI:
+		return "opencode"
+	case ProfilePiTmuxCLI:
+		return "pi"
 	case ProfileClaudeTmuxCLI:
 		return "claude"
+	case ProfileAntigravityTmuxCLI:
+		return "antigravity"
 	default:
 		return ""
 	}
@@ -44,6 +52,7 @@ func mergeStringMaps(base, extra map[string]string) map[string]string {
 
 func cloneRuntimeConfig(cfg runtime.Config) runtime.Config {
 	cfg.Env = cloneStringMap(cfg.Env)
+	cfg.MCPServers = runtime.NormalizeMCPServerConfigs(cfg.MCPServers)
 	cfg.ProcessNames = append([]string(nil), cfg.ProcessNames...)
 	cfg.PreStart = append([]string(nil), cfg.PreStart...)
 	cfg.SessionSetup = append([]string(nil), cfg.SessionSetup...)

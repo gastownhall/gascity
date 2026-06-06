@@ -2,14 +2,14 @@
 title: "Messaging"
 ---
 
-> Last verified against code: 2026-03-04
+> Last verified against code: 2026-04-25
 
 ## Summary
 
 Messaging is a Layer 2-4 derived mechanism that provides inter-agent
 communication without introducing new primitives. Mail is composed
 from the Bead Store (`TaskStore.Create(bead{type:"message"})`), and
-nudge is composed from the Agent Protocol
+nudge is composed from the Session primitive
 (`runtime.Provider.Nudge()`). No new infrastructure is needed — messaging
 is a thin composition layer proving the primitives are sufficient.
 
@@ -193,6 +193,6 @@ Send → [unread, open]
 
 - [Bead Store](beads.md) — messages are stored as beads; understanding
   bead lifecycle explains mail lifecycle
-- [Agent Protocol](agent-protocol.md) — Nudge() delivery mechanism
+- [Session](session.md) — Nudge() delivery mechanism
 - [Glossary](glossary.md) — authoritative definitions of mail, nudge,
   and related terms

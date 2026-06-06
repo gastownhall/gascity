@@ -56,10 +56,10 @@ func TestStripResumeFlag(t *testing.T) {
 	}{
 		{
 			name:       "removes resume flag and key",
-			cmd:        "claude --model claude-opus-4-6 --resume abc-123",
+			cmd:        "claude --model claude-opus-4-7 --resume abc-123",
 			resumeFlag: "--resume",
 			sessionKey: "abc-123",
-			want:       "claude --model claude-opus-4-6",
+			want:       "claude --model claude-opus-4-7",
 		},
 		{
 			name:       "resume flag at end",
@@ -89,6 +89,17 @@ func TestStripResumeFlag(t *testing.T) {
 			sessionKey: "",
 			want:       "claude --resume abc-123",
 		},
+		{
+			// PR #2035 review: callers rely on freshCmd == cmd to detect
+			// a no-op strip. TrimSpace on a non-replacement path would
+			// silently change the return value when cmd has padding,
+			// breaking that signal.
+			name:       "no strip preserves leading and trailing whitespace",
+			cmd:        "  claude --model sonnet  ",
+			resumeFlag: "--resume",
+			sessionKey: "abc-123",
+			want:       "  claude --model sonnet  ",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -96,6 +107,74 @@ func TestStripResumeFlag(t *testing.T) {
 			if got != tt.want {
 				t.Errorf("stripResumeFlag(%q, %q, %q) = %q, want %q",
 					tt.cmd, tt.resumeFlag, tt.sessionKey, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestStripResumeFlagArg(t *testing.T) {
+	tests := []struct {
+		name        string
+		cmd         string
+		resumeFlag  string
+		resumeStyle string
+		want        string
+	}{
+		{
+			// The diverged-key case: the embedded key differs from the
+			// bead's current session_key, so the keyed strip was a no-op.
+			// The value-agnostic strip must still remove the generated
+			// trailing "--resume <key>" suffix.
+			name:        "flag style removes generated trailing resume key",
+			cmd:         `claude --settings "x" --resume diverged-key-999`,
+			resumeFlag:  "--resume",
+			resumeStyle: "flag",
+			want:        `claude --settings "x"`,
+		},
+		{
+			name:        "flag style preserves earlier resume text",
+			cmd:         `claude --label "--resume keep-me" --resume diverged-key-999`,
+			resumeFlag:  "--resume",
+			resumeStyle: "flag",
+			want:        `claude --label "--resume keep-me"`,
+		},
+		{
+			name:        "flag style preserves non-generated resume flag",
+			cmd:         "claude --resume abc-123 --model sonnet",
+			resumeFlag:  "--resume",
+			resumeStyle: "flag",
+			want:        "claude --resume abc-123 --model sonnet",
+		},
+		{
+			name:        "subcommand-style resume token",
+			cmd:         "codex resume key-abc --model o3",
+			resumeFlag:  "resume",
+			resumeStyle: "subcommand",
+			want:        "codex --model o3",
+		},
+		{
+			// No resume flag present: command is already a fresh start, so
+			// it must be returned unchanged (callers launch it as-is).
+			name:        "no resume flag returns command unchanged",
+			cmd:         "claude --model sonnet",
+			resumeFlag:  "--resume",
+			resumeStyle: "flag",
+			want:        "claude --model sonnet",
+		},
+		{
+			name:        "empty resume flag returns command unchanged",
+			cmd:         "claude --resume abc-123",
+			resumeFlag:  "",
+			resumeStyle: "flag",
+			want:        "claude --resume abc-123",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := stripResumeFlagArg(tt.cmd, tt.resumeFlag, tt.resumeStyle)
+			if got != tt.want {
+				t.Errorf("stripResumeFlagArg(%q, %q, %q) = %q, want %q",
+					tt.cmd, tt.resumeFlag, tt.resumeStyle, got, tt.want)
 			}
 		})
 	}
