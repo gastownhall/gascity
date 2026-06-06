@@ -12,6 +12,7 @@ import (
 // mergeablePaths is the set of relative paths that get JSON-level merge
 // instead of file-level overwrite when both base and overlay exist.
 var mergeablePaths = map[string]bool{
+	filepath.Join(".agents", "hooks.json"):            true,
 	filepath.Join(".claude", "settings.json"):         true,
 	filepath.Join(".gemini", "settings.json"):         true,
 	filepath.Join(".codex", "hooks.json"):             true,

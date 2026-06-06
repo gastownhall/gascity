@@ -1082,6 +1082,35 @@ func TestStageHookFilesSkipsUnrequestedWorkDirHooks(t *testing.T) {
 	}
 }
 
+func TestStageHookFilesIncludesAntigravityHooks(t *testing.T) {
+	cityDir := filepath.Join(t.TempDir(), "city")
+	workDir := filepath.Join(cityDir, "worker")
+	hookPath := filepath.Join(workDir, ".agents", "hooks.json")
+	if err := os.MkdirAll(filepath.Dir(hookPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll(%q): %v", hookPath, err)
+	}
+	if err := os.WriteFile(hookPath, []byte("{}"), 0o644); err != nil {
+		t.Fatalf("WriteFile(%q): %v", hookPath, err)
+	}
+
+	got := stageHookFiles(nil, cityDir, workDir, []string{"antigravity"})
+	for _, entry := range got {
+		if entry.RelDst == path.Join("worker", ".agents", "hooks.json") {
+			if entry.Src != hookPath {
+				t.Fatalf("stageHookFiles() staged %q, want %q", entry.Src, hookPath)
+			}
+			if !entry.Probed {
+				t.Fatal("stageHookFiles() .agents/hooks.json not marked Probed")
+			}
+			if entry.ContentHash == "" {
+				t.Fatal("stageHookFiles() .agents/hooks.json has empty ContentHash")
+			}
+			return
+		}
+	}
+	t.Fatal("stageHookFiles() did not stage Antigravity .agents/hooks.json")
+}
+
 func TestConfiguredRigNameMatchesRigByPathWithoutCreatingDirs(t *testing.T) {
 	cityPath := t.TempDir()
 	rigRoot := filepath.Join(cityPath, "repos", "demo")
