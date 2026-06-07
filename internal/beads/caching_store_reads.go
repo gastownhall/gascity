@@ -1,6 +1,7 @@
 package beads
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"time"
@@ -98,6 +99,43 @@ func (c *CachingStore) List(query ListQuery) ([]Bead, error) {
 func liveListQuery(query ListQuery) ListQuery {
 	query.Live = true
 	return query
+}
+
+// Count returns the number of beads List would return for query, minus
+// beads whose Type is in excludeTypes. Active-bead queries are answered
+// from the in-memory cache when it is live and clean; everything else
+// (Live queries, ParentID lookups, closed history, dirty/unprimed cache)
+// delegates to the backing store's Counter. Backing stores without a
+// Counter return ErrCountUnsupported so callers can fall back to List.
+func (c *CachingStore) Count(ctx context.Context, query ListQuery, excludeTypes ...string) (int, error) {
+	if !query.HasFilter() && !query.AllowScan {
+		return 0, fmt.Errorf("counting beads: %w", ErrQueryRequiresScan)
+	}
+	if !query.Live && query.ParentID == "" && !query.IncludesClosed() {
+		c.mu.RLock()
+		cacheClean := (c.state == cacheLive || c.state == cachePartial) &&
+			len(c.dirty) == 0 && c.primePartialErr == nil
+		if cacheClean {
+			excluded := make(map[string]bool, len(excludeTypes))
+			for _, t := range excludeTypes {
+				excluded[t] = true
+			}
+			n := 0
+			for _, b := range c.beads {
+				if query.Matches(b) && !excluded[b.Type] {
+					n++
+				}
+			}
+			c.mu.RUnlock()
+			return n, nil
+		}
+		c.mu.RUnlock()
+	}
+	counter, ok := c.backing.(Counter)
+	if !ok {
+		return 0, fmt.Errorf("counting beads: backing store: %w", ErrCountUnsupported)
+	}
+	return counter.Count(ctx, liveListQuery(query), excludeTypes...)
 }
 
 // CachedList returns query results from the in-memory cache only. The boolean

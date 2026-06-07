@@ -623,6 +623,51 @@ func (s *NativeDoltStore) List(query ListQuery) ([]Bead, error) {
 	return ApplyListQuery(beads, query), nil
 }
 
+// Count returns the number of beads List would return for query, minus
+// beads whose Type is in excludeTypes, using SQL COUNT instead of hydrating
+// rows. CountIssues mirrors SearchIssues' wisps-table merge, so no-history
+// and ephemeral rows stay visible to the same tiers List exposes.
+//
+// Query shapes whose List semantics depend on post-hydration filtering
+// (Limit, Assignees, UpdatedBefore, Metadata, TierWisps) return
+// ErrCountUnsupported. The caller's ctx bounds the backing query; a
+// canceled ctx aborts the SQL call and releases its connection.
+func (s *NativeDoltStore) Count(ctx context.Context, query ListQuery, excludeTypes ...string) (int, error) {
+	if !query.HasFilter() && !query.AllowScan {
+		return 0, fmt.Errorf("counting beads: %w", ErrQueryRequiresScan)
+	}
+	if query.Limit > 0 || len(query.Assignees) > 0 || !query.UpdatedBefore.IsZero() ||
+		len(query.Metadata) > 0 || query.TierMode == TierWisps {
+		return 0, fmt.Errorf("counting beads: %w", ErrCountUnsupported)
+	}
+	switch query.Status {
+	case "", "open", "in_progress", "closed":
+	default:
+		// mapBdStatus normalizes every upstream status to one of the three
+		// Gas City statuses, so List never returns beads with any other
+		// status value. Mirror that without a query.
+		return 0, nil
+	}
+	storage, release, err := s.acquireStorage()
+	if err != nil {
+		return 0, err
+	}
+	defer release()
+	filter := nativeIssueFilterFromListQuery(query)
+	filter.Limit = 0
+	filter.IncludeDependencies = false
+	for _, t := range excludeTypes {
+		filter.ExcludeTypes = append(filter.ExcludeTypes, beadslib.IssueType(t))
+	}
+	opCtx, cancel := nativeDoltOperationContext(ctx)
+	defer cancel()
+	n, err := storage.CountIssues(opCtx, "", filter)
+	if err != nil {
+		return 0, err
+	}
+	return int(n), nil
+}
+
 // ListOpen returns non-closed beads by default, or beads with the given status.
 func (s *NativeDoltStore) ListOpen(status ...string) ([]Bead, error) {
 	query := ListQuery{AllowScan: true}
