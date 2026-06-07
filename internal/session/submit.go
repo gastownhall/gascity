@@ -114,6 +114,9 @@ func (m *Manager) submit(ctx context.Context, id, message, resumeCommand string,
 			outcome.Queued = true
 			return nil
 		case SubmitIntentInterruptNow:
+			if !supportsInterruptNowForMetadata(b.Metadata) {
+				return ErrInteractionUnsupported
+			}
 			return m.interruptAndSubmitLocked(ctx, id, b, sessName, message, resumeCommand, hints)
 		default:
 			running := m.sp.IsRunning(sessName)

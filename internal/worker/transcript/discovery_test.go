@@ -388,6 +388,33 @@ func TestHasKeyedTranscript(t *testing.T) {
 		}
 	})
 
+	t.Run("antigravity present", func(t *testing.T) {
+		t.Setenv("HOME", t.TempDir())
+		brainRoot := filepath.Join(t.TempDir(), "brain")
+		sessionID := "750fa972-4c56-4215-99b9-893382aee2b4"
+		targetPath := filepath.Join(brainRoot, sessionID, ".system_generated", "logs", "transcript.jsonl")
+		if err := os.MkdirAll(filepath.Dir(targetPath), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(targetPath, []byte(`{}`+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		exists, probeable := HasKeyedTranscript([]string{brainRoot}, "antigravity/tmux-cli", "some-workdir", sessionID)
+		if !probeable || !exists {
+			t.Fatalf("HasKeyedTranscript() = (exists=%v, probeable=%v), want (true, true)", exists, probeable)
+		}
+	})
+
+	t.Run("antigravity missing", func(t *testing.T) {
+		t.Setenv("HOME", t.TempDir())
+		brainRoot := filepath.Join(t.TempDir(), "brain")
+		sessionID := "750fa972-4c56-4215-99b9-893382aee2b4"
+		exists, probeable := HasKeyedTranscript([]string{brainRoot}, "antigravity/tmux-cli", "some-workdir", sessionID)
+		if !probeable || exists {
+			t.Fatalf("HasKeyedTranscript() = (exists=%v, probeable=%v), want (false, true)", exists, probeable)
+		}
+	})
+
 	t.Run("empty inputs", func(t *testing.T) {
 		if _, probeable := HasKeyedTranscript([]string{base}, "claude/tmux-cli", "", "gc-present"); probeable {
 			t.Fatal("empty workDir probeable = true, want false")

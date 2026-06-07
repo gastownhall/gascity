@@ -147,6 +147,7 @@ func TestWorkerInferenceSmoke(t *testing.T) {
 	})
 
 	if liveSetup.SetupError != "" {
+		t.Logf("SETUP ERROR: %s", liveSetup.SetupError)
 		reporter.Record(workertest.EnvironmentError(profileID, workertest.RequirementInferenceFreshSpawn, liveSetup.SetupError).WithEvidence(map[string]string{
 			"profile":  string(liveSetup.Profile),
 			"provider": liveSetup.Provider,

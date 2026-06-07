@@ -115,7 +115,7 @@ func HasKeyedTranscript(searchPaths []string, provider, workDir, sessionKey stri
 // never clears a resume key for a provider whose transcript we cannot verify.
 func providerHasKeyedTranscript(provider string) bool {
 	switch sessionlog.ProviderFamily(provider) {
-	case "kimi", "pi":
+	case "kimi", "pi", "antigravity":
 		return true
 	}
 	// claude and claude-eco fall through ProviderFamily unchanged; match them
