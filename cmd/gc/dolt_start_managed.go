@@ -863,15 +863,11 @@ func terminateManagedDoltPID(cityPath string, pid int) error {
 		time.Sleep(pollInterval)
 	}
 	if dataDir := terminateManagedDoltDataDir(cityPath); dataDir != "" {
-		lockDeadline := time.Now().Add(managedDoltLockReleaseTimeoutFn(cityPath))
-		for pidAlive(pid) && managedDoltDataDirLockHolder(dataDir) != "" && time.Now().Before(lockDeadline) {
-			time.Sleep(pollInterval)
+		if err := waitManagedDoltSIGKILLLockGate(pid, dataDir, pidAlive, gracePeriod, managedDoltLockReleaseTimeoutFn(cityPath), pollInterval); err != nil {
+			return err
 		}
 		if !pidAlive(pid) {
 			return nil
-		}
-		if holder := managedDoltDataDirLockHolder(dataDir); holder != "" {
-			return fmt.Errorf("pid %d did not exit within %s and a live process still holds dolt exclusive store lock %s; refusing SIGKILL mid-journal-write (gastownhall/gascity#3174)", pid, gracePeriod, holder)
 		}
 	}
 	_ = process.Signal(syscall.SIGKILL)

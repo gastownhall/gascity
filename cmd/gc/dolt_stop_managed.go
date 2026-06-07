@@ -105,16 +105,10 @@ func stopManagedDoltProcessWithOptions(cityPath, port string, clearPublishedStat
 		// The process outlived the SIGTERM grace. SIGKILL is only safe when
 		// the dolt exclusive store lock is free — a holder is mid-flush, and
 		// killing it tears the noms journal (gastownhall/gascity#3174).
-		// Extend the wait by the lock-release window while the lock is held;
-		// if the holder still has not finished, fail rather than corrupt.
-		lockDeadline := time.Now().Add(lockWindow)
-		for managedStopPIDAlive(targetPID) && managedDoltDataDirLockHolder(layout.DataDir) != "" && time.Now().Before(lockDeadline) {
-			time.Sleep(pollInterval)
+		if err := waitManagedDoltSIGKILLLockGate(targetPID, layout.DataDir, managedStopPIDAlive, gracePeriod, lockWindow, pollInterval); err != nil {
+			return report, err
 		}
 		if managedStopPIDAlive(targetPID) {
-			if holder := managedDoltDataDirLockHolder(layout.DataDir); holder != "" {
-				return report, fmt.Errorf("pid %d did not exit within %s and a live process still holds dolt exclusive store lock %s; refusing SIGKILL mid-journal-write (gastownhall/gascity#3174)", targetPID, gracePeriod, holder)
-			}
 			report.Forced = true
 			if err := syscall.Kill(targetPID, syscall.SIGKILL); err != nil && err != syscall.ESRCH {
 				return report, fmt.Errorf("signal %d with SIGKILL: %w", targetPID, err)

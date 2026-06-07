@@ -1173,6 +1173,16 @@ dolt_data_lock_holder() {
     return 1
 }
 
+# lock_release_timeout_ms prints LOCK_RELEASE_TIMEOUT_MS sanitized to a
+# non-negative integer, defaulting to 60000 — matching the gc helper's
+# config.DefaultDoltLockReleaseTimeout (1m).
+lock_release_timeout_ms() {
+    case "$LOCK_RELEASE_TIMEOUT_MS" in
+        ''|*[!0-9]*) printf '60000\n' ;;
+        *) printf '%s\n' "$LOCK_RELEASE_TIMEOUT_MS" ;;
+    esac
+}
+
 # wait_dolt_data_lock_free blocks until no live process holds a dolt
 # exclusive store lock under DATA_DIR, or LOCK_RELEASE_TIMEOUT_MS elapses.
 # Lock release on a clean dolt shutdown happens only after the chunk journal
@@ -1180,12 +1190,7 @@ dolt_data_lock_holder() {
 # Returns 1 (fail closed) when a lock is still held at the deadline.
 wait_dolt_data_lock_free() {
     local timeout_ms deadline_ms now_ms holder
-    timeout_ms="$LOCK_RELEASE_TIMEOUT_MS"
-    case "$timeout_ms" in
-        ''|*[!0-9]*)
-            timeout_ms=60000
-            ;;
-    esac
+    timeout_ms=$(lock_release_timeout_ms)
     holder=$(dolt_data_lock_holder) || return 0
     now_ms=$(current_time_ms) || return 1
     deadline_ms=$((now_ms + timeout_ms))
@@ -1207,7 +1212,7 @@ wait_dolt_data_lock_free() {
 # released so a follow-up start cannot bind the data_dir mid-flush. Returns 1
 # (fail closed) when the process survives while still holding the lock.
 graceful_stop_owned_pid() {
-    local pid="$1" waited=0 holder lock_window_ms lock_waited_ms
+    local pid="$1" waited=0 holder lock_window_ms lock_deadline_ms now_ms
     [ -n "$pid" ] || return 0
     kill "$pid" 2>/dev/null || true
     while [ "$waited" -lt 60 ] && kill -0 "$pid" 2>/dev/null; do
@@ -1218,16 +1223,13 @@ graceful_stop_owned_pid() {
         # The process outlived the SIGTERM grace. Extend the wait by the
         # lock-release window while the store lock is held — the holder is
         # mid-flush — then force-kill only once the lock is free.
-        lock_window_ms="$LOCK_RELEASE_TIMEOUT_MS"
-        case "$lock_window_ms" in
-            ''|*[!0-9]*)
-                lock_window_ms=60000
-                ;;
-        esac
-        lock_waited_ms=0
-        while kill -0 "$pid" 2>/dev/null && dolt_data_lock_holder >/dev/null && [ "$lock_waited_ms" -lt "$lock_window_ms" ]; do
+        lock_window_ms=$(lock_release_timeout_ms)
+        now_ms=$(current_time_ms) || now_ms=0
+        lock_deadline_ms=$((now_ms + lock_window_ms))
+        while kill -0 "$pid" 2>/dev/null && dolt_data_lock_holder >/dev/null; do
+            now_ms=$(current_time_ms) || break
+            [ "$now_ms" -lt "$lock_deadline_ms" ] || break
             sleep_ms 250 2>/dev/null || sleep 1
-            lock_waited_ms=$((lock_waited_ms + 250))
         done
         if kill -0 "$pid" 2>/dev/null; then
             if holder=$(dolt_data_lock_holder); then

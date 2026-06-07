@@ -101,6 +101,26 @@ func waitForManagedDoltDataDirLockFree(dataDir string, timeout time.Duration) er
 	return fmt.Errorf("dolt exclusive store lock %s is still held by a live process after %s; a prior dolt sql-server has not released the data dir", holder, timeout)
 }
 
+// waitManagedDoltSIGKILLLockGate gates a SIGKILL on the dolt exclusive store
+// lock being free. It blocks until no live process holds a lock under
+// dataDir, pid exits, or lockWindow elapses — whichever comes first. A nil
+// return means SIGKILL is safe (lock free or pid already gone); an error
+// names the held lock so callers fail closed instead of tearing the holder's
+// journal mid-flush (gastownhall/gascity#3174). gracePeriod is the SIGTERM
+// grace that already elapsed, reported in the error for context.
+func waitManagedDoltSIGKILLLockGate(pid int, dataDir string, alive func(int) bool, gracePeriod, lockWindow, pollInterval time.Duration) error {
+	holder := managedDoltDataDirLockHolder(dataDir)
+	lockDeadline := time.Now().Add(lockWindow)
+	for alive(pid) && holder != "" && time.Now().Before(lockDeadline) {
+		time.Sleep(pollInterval)
+		holder = managedDoltDataDirLockHolder(dataDir)
+	}
+	if alive(pid) && holder != "" {
+		return fmt.Errorf("pid %d did not exit within %s and a live process still holds dolt exclusive store lock %s; refusing SIGKILL mid-journal-write (gastownhall/gascity#3174)", pid, gracePeriod, holder)
+	}
+	return nil
+}
+
 // resolveManagedDoltLockReleaseTimeout returns the configured wait window for
 // dolt's on-disk exclusive lock. Reads `[daemon].dolt_lock_release_timeout`
 // from city.toml when available; falls back to
