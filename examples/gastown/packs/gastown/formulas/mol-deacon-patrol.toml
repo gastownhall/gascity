@@ -319,7 +319,7 @@ are wedged (the latter is what first prompted this check to exist).
 | `databases[].commits > 50000` | 50 k | Compactor dog may have stalled |
 | `backups.dolt_stale == true` | >30 min | Backup dog may have failed |
 | `processes.zombie_count > 0` | any | Zombie Dolt servers detected |
-| `orphans` non-empty | any | Orphan databases accumulating |
+| `orphans` non-empty | any | Advisory only — NEVER act on this count directly; verify with `gc dolt-cleanup` (hyphen, dry-run) first |
 
 **Step 3: React to alerts**
 
@@ -352,12 +352,26 @@ Kill zombie Dolt servers not on the expected port:
 kill <zombie_pid>
 ```
 
-**Orphan DBs:**
-Run cleanup:
+**Orphan DBs (`orphans` non-empty):**
+Do NOT act on the health `orphans` count directly — the reporter can
+false-positive live rig databases as orphans, and a forced removal on that
+count would destroy a live rig ledger (unrecoverable). Confirm against the
+rig-protected dry-run authority first:
 ```bash
-gc dolt cleanup
+gc dolt-cleanup --json    # hyphen, Go-side: dry-run, rig-protected
 ```
-If orphan count exceeds safety limit, escalate to mayor.
+Real orphans are exactly the databases it lists under `dropped.names`
+(`rigs_protected` are already excluded). If `dropped.names` is empty, there
+is nothing to clean — the health `orphans` entries are live rig DBs (a
+reporter false-positive); log and move on. `gc dolt-cleanup` (hyphen,
+the Go-side command) is dry-run by default; removal happens only under
+`--force`. Do NOT rely on the `gc dolt cleanup` (space) pack-script's
+defaults — always use the hyphen command for orphan inspection/cleanup.
+Reclaim confirmed orphans only via human-approved
+`gc dolt-cleanup --force` escalated to mayor — never run a destructive
+`--force` automatically from this step, and never
+`gc dolt cleanup --force --server-down-ok` against a reachable server (it can
+`rm -rf` an open database and corrupt NBS, #1549).
 
 **If everything is healthy:**
 Log `Dolt health: OK` and move on.

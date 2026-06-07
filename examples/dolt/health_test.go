@@ -213,6 +213,103 @@ func TestHealthScriptDoesNotInvokeDoltLog(t *testing.T) {
 	}
 }
 
+// TestHealthOrphansFromCleanupAuthority pins #3200: the orphan list is
+// sourced from `gc dolt-cleanup --json` (.dropped.names), the rig-protected
+// dry-run authority — never from health's own metadata scan, which flagged
+// every live rig DB as an orphan when rig metadata was sparse/unreachable. A
+// live rig DB present on disk but absent from dropped.names must NOT appear in
+// orphans (acting on that false positive could delete a live rig ledger).
+func TestHealthOrphansFromCleanupAuthority(t *testing.T) {
+	if _, err := exec.LookPath("dolt"); err != nil {
+		t.Skip("dolt not installed; skipping")
+	}
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skip("jq not installed; skipping")
+	}
+	if _, errT := exec.LookPath("timeout"); errT != nil {
+		if _, errG := exec.LookPath("gtimeout"); errG != nil {
+			t.Skip("neither timeout nor gtimeout installed; skipping")
+		}
+	}
+
+	// TCP-reachable but never speaks MySQL → server.reachable=false, so the
+	// per-database (open_beads) probe is skipped and we exercise the orphan
+	// path in isolation.
+	port, cleanup := startDeadTCPListener(t)
+	defer cleanup()
+
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "metadata.json"),
+		[]byte(`{"database":"dolt","backend":"dolt","dolt_database":"hq"}`), 0o644); err != nil {
+		t.Fatalf("write metadata: %v", err)
+	}
+
+	// Dolt data dir: three live rig DBs plus one genuine orphan.
+	dataDir := t.TempDir()
+	for _, db := range []string{"hq", "gco", "tga", "stale_orphan"} {
+		if err := os.MkdirAll(filepath.Join(dataDir, db, ".dolt"), 0o755); err != nil {
+			t.Fatalf("mkdir db %s: %v", db, err)
+		}
+	}
+
+	// Stub `gc` on PATH. `gc dolt-cleanup --json` returns the rig-protected
+	// dry-run authority: stale_orphan is the only drop candidate; the live rig
+	// DBs are protected. Any other gc call (e.g. `gc rig list`) is a no-op.
+	binDir := t.TempDir()
+	stub := "#!/bin/sh\n" +
+		"if [ \"$1\" = \"dolt-cleanup\" ]; then\n" +
+		"  printf '%s' '{\"ok\":true,\"rigs_protected\":[{\"rig\":\"gchq\",\"db\":\"hq\"},{\"rig\":\"gco\",\"db\":\"gco\"},{\"rig\":\"tga\",\"db\":\"tga\"}],\"dropped\":{\"count\":1,\"names\":[\"stale_orphan\"]}}'\n" +
+		"fi\n" +
+		"exit 0\n"
+	if err := os.WriteFile(filepath.Join(binDir, "gc"), []byte(stub), 0o755); err != nil {
+		t.Fatalf("write gc stub: %v", err)
+	}
+
+	root := repoRoot(t)
+	script := filepath.Join(root, healthScript)
+	cmd := exec.Command("sh", script, "--json")
+	cmd.Env = append(filteredEnv("GC_DOLT_PORT", "PATH", "GC_DOLT_DATA_DIR"),
+		"PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"GC_CITY_PATH="+cityPath,
+		"GC_PACK_DIR="+root,
+		"GC_DOLT_DATA_DIR="+dataDir,
+		"GC_DOLT_HOST=127.0.0.1",
+		"GC_DOLT_PORT="+strconv.Itoa(port),
+		"GC_DOLT_USER=root",
+		"GC_DOLT_PASSWORD=",
+		"GC_HEALTH_SKIP_ZOMBIE_SCAN=1",
+	)
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("health.sh --json failed: %v\n%s", err, out)
+	}
+
+	var report struct {
+		Orphans []struct {
+			Name string `json:"name"`
+		} `json:"orphans"`
+	}
+	if err := json.Unmarshal(out, &report); err != nil {
+		t.Fatalf("parse health JSON: %v\n%s", err, out)
+	}
+	got := make([]string, 0, len(report.Orphans))
+	for _, o := range report.Orphans {
+		got = append(got, o.Name)
+	}
+	if len(got) != 1 || got[0] != "stale_orphan" {
+		t.Errorf("orphans = %v, want [stale_orphan] (from cleanup authority)", got)
+	}
+	for _, o := range got {
+		switch o {
+		case "hq", "gco", "tga":
+			t.Errorf("live rig DB %q misclassified as orphan", o)
+		}
+	}
+}
+
 func TestRuntimeScriptPortPrecedence(t *testing.T) {
 	tests := []struct {
 		name       string

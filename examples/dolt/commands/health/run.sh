@@ -167,19 +167,18 @@ if [ -d "$data_dir" ] && [ "$server_reachable" = true ]; then
     case "$commits" in
       ''|*[!0-9]*) commits=0 ;;
     esac
-    # Count open beads (best-effort).
-    open_beads=0
-    while IFS= read -r meta; do
-      [ -f "$meta" ] || continue
-      db=$(metadata_db "$meta")
-      if [ "$db" = "$name" ]; then
-        beads_dir="$(dirname "$meta")"
-        if [ -f "$beads_dir/beads.jsonl" ]; then
-          open_beads=$(grep -c '"status":"open"' "$beads_dir/beads.jsonl" 2>/dev/null || echo 0)
-        fi
-        break
-      fi
-    done < "$_meta_cache"
+    # Count open beads from the running server (authoritative). Under managed
+    # Dolt the beads live in the server's `issues` table, not an on-disk
+    # beads.jsonl — that file is absent or stale, so the old file grep reported
+    # open_beads=0 for every live database (#3200). 0 on timeout, error, or a
+    # database without an `issues` table (a non-beads DB) — same fail-soft
+    # contract as the commit count above.
+    open_csv=$(run_bounded 5 dolt $conn_args sql --result-format csv \
+      -q "USE \`$name\`; SELECT COUNT(*) FROM issues WHERE status='open';" 2>/dev/null || true)
+    open_beads=$(printf '%s\n' "$open_csv" | grep -E '^[0-9]+$' | head -1)
+    case "$open_beads" in
+      ''|*[!0-9]*) open_beads=0 ;;
+    esac
     db_info="$db_info$name|$commits|$open_beads
 "
   done
@@ -205,20 +204,56 @@ if [ -n "$newest_backup" ]; then
 fi
 
 # Find orphan databases.
+#
+# Authoritative source: `gc dolt-cleanup` (HYPHEN — the Go-side command,
+# dry-run by default, rig-protected). Its dry-run drop candidates
+# (`dropped.names`) are the real orphans: every registered rig DB is excluded
+# via city config, so a live rig DB is never listed. The previous
+# metadata-only scan flagged every live rig DB as an orphan whenever a rig's
+# metadata.json was sparse or unreachable (e.g. externally-pathed rigs) — a
+# false positive the deacon patrol could act on destructively (#3200). Reuse
+# the cleanup authority; fall back to the metadata scan only when gc/jq are
+# unavailable (gc itself may be the failure this patrol is detecting).
 orphan_list=""
 orphan_count=0
 if [ -d "$data_dir" ]; then
-  referenced=""
-  while IFS= read -r meta; do
-    [ -f "$meta" ] || continue
-    db=$(metadata_db "$meta")
-    [ -n "$db" ] && referenced="$referenced $db "
-  done < "$_meta_cache"
-  for d in "$data_dir"/*/; do
-    [ ! -d "$d/.dolt" ] && continue
-    name="$(basename "$d")"
-    case "$(printf '%s' "$name" | tr '[:upper:]' '[:lower:]')" in information_schema|mysql|dolt_cluster|performance_schema|sys|__gc_probe) continue ;; esac
-    case "$referenced" in *" $name "*) continue ;; esac
+  orphan_names=""
+  cleanup_ok=false
+  if command -v gc >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+    cleanup_json=$(run_bounded 10 gc dolt-cleanup --json 2>/dev/null) || true
+    if [ -n "$cleanup_json" ] && printf '%s' "$cleanup_json" | jq -e '.dropped.names' >/dev/null 2>&1; then
+      orphan_names=$(printf '%s' "$cleanup_json" | jq -r '.dropped.names[]? // empty' 2>/dev/null)
+      cleanup_ok=true
+    fi
+  fi
+
+  if [ "$cleanup_ok" != true ]; then
+    # Fallback: approximate orphans from rig metadata (every DB whose name is
+    # not referenced by a rig's metadata.json dolt_database). Less reliable
+    # than the cleanup authority — used only when gc/jq are unavailable.
+    referenced=""
+    while IFS= read -r meta; do
+      [ -f "$meta" ] || continue
+      db=$(metadata_db "$meta")
+      [ -n "$db" ] && referenced="$referenced $db "
+    done < "$_meta_cache"
+    for d in "$data_dir"/*/; do
+      [ ! -d "$d/.dolt" ] && continue
+      name="$(basename "$d")"
+      case "$(printf '%s' "$name" | tr '[:upper:]' '[:lower:]')" in information_schema|mysql|dolt_cluster|performance_schema|sys|__gc_probe) continue ;; esac
+      case "$referenced" in *" $name "*) continue ;; esac
+      orphan_names="$orphan_names$name
+"
+    done
+  fi
+
+  # Materialize the orphan list with on-disk sizes, from whichever source
+  # produced the names. Only names that still exist as a Dolt database
+  # directory are reported.
+  for name in $orphan_names; do
+    [ -n "$name" ] || continue
+    d="$data_dir/$name"
+    [ -d "$d/.dolt" ] || continue
     size_kb=$(du -sk "$d" 2>/dev/null | cut -f1)
     size_bytes=$(( ${size_kb:-0} * 1024 ))
     if [ "$size_bytes" -ge 1048576 ]; then
