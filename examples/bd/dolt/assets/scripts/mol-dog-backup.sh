@@ -165,19 +165,12 @@ TOTAL=$(printf '%s\n' "$DATABASES" | awk 'NF {count++} END {print count + 0}')
 SYNCED=0
 FAILED=0
 FAILED_DBS=""
-REMOTE_FAILED_DBS=""
 
 for db in $DATABASES; do
     if ! ensure_backup_remote "$db"; then
         append_failed_db "$db(backup add failed)"
-        REMOTE_FAILED_DBS="$REMOTE_FAILED_DBS $db "
+        continue
     fi
-done
-
-for db in $DATABASES; do
-    case "$REMOTE_FAILED_DBS" in
-        *" $db "*) continue ;; # already counted as failed above
-    esac
     db_dir="$DOLT_DATA_DIR/$db"
     if [ ! -d "$db_dir" ]; then
         append_failed_db "$db(not found)"

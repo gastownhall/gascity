@@ -1779,6 +1779,16 @@ func (d DoltConfig) EffectiveAutoGCEnabled() bool {
 	return true
 }
 
+// AutoGCSysVar returns the dolt_auto_gc_enabled system-variable value
+// ("ON"/"OFF") matching EffectiveAutoGCEnabled, so the config writer and the
+// doctor contract derive it from one place.
+func (d DoltConfig) AutoGCSysVar() string {
+	if d.EffectiveAutoGCEnabled() {
+		return "ON"
+	}
+	return "OFF"
+}
+
 // EffectiveMaxConnections returns the managed Dolt listener max_connections.
 func (d DoltConfig) EffectiveMaxConnections() int {
 	if d.MaxConnections > 0 {

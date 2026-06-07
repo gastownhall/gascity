@@ -134,10 +134,7 @@ func writeManagedDoltConfigFile(path, host, port, dataDir, logLevel string, dolt
 	}
 	archiveLevel := doltConfig.EffectiveArchiveLevel()
 	autoGCEnabled := doltConfig.EffectiveAutoGCEnabled()
-	autoGCSysVar := "ON"
-	if !autoGCEnabled {
-		autoGCSysVar = "OFF"
-	}
+	autoGCSysVar := doltConfig.AutoGCSysVar()
 	maxConnections := doltConfig.EffectiveMaxConnections()
 	readTimeoutMillis := doltConfig.EffectiveReadTimeoutMillis()
 	writeTimeoutMillis := doltConfig.EffectiveWriteTimeoutMillis()
