@@ -2058,10 +2058,8 @@ func sweepClosedOrderTrackingRetentionAcrossStoresBounded(stores []beads.Store, 
 		if remaining <= 0 {
 			break
 		}
-		// Borrow the per-store function but cap via a patched policy that limits
-		// the deleteAfterClose so the store-level function returns early once
-		// the budget is spent. We implement budget enforcement by limiting via
-		// a bounded wrapper around the per-store call.
+		// Enforce the global budget by passing the remaining allowance to the
+		// per-store bounded sweep, which stops deleting once it is spent.
 		n, err := sweepClosedOrderTrackingRetentionBounded(store, now, policy, onlyOrders, remaining)
 		deleted += n
 		if err != nil {
