@@ -257,6 +257,7 @@ func newCityRuntime(p CityRuntimeParams) *CityRuntime {
 		} else if n > 0 {
 			fmt.Fprintf(p.Stderr, "gc start: closed %d orphaned order-tracking beads\n", n) //nolint:errcheck // best-effort stderr
 		}
+		warnIfClosedOrderTrackingBacklogLarge(sweepStore, p.Stderr)
 	}()
 
 	od, orderSnapshot := buildOrderDispatcherWithSnapshot(p.CityPath, p.Cfg, p.Rec, p.Stderr, "gc start: order scan")
@@ -1383,6 +1384,41 @@ func (cr *CityRuntime) runOrderTrackingRetentionWatchdog(now time.Time) {
 	if deleted > 0 && cr.stderr != nil {
 		fmt.Fprintf(cr.stderr, "%s: order-tracking retention watchdog: pruned %d closed bead(s)\n", cr.logPrefix, deleted) //nolint:errcheck // best-effort stderr
 	}
+}
+
+const (
+	// orderTrackingRetentionStartupWarnThreshold is the minimum number of closed
+	// order-tracking beads in the city store that triggers a startup advisory.
+	// The watchdog prunes automatically; this warning surfaces cities that have
+	// accumulated a visible backlog before the first watchdog cycle completes.
+	orderTrackingRetentionStartupWarnThreshold = 100
+	// orderTrackingRetentionStartupListLimit caps the startup List query so the
+	// advisory does not scan unbounded closed-bead history on large stores.
+	orderTrackingRetentionStartupListLimit = 1001
+)
+
+// warnIfClosedOrderTrackingBacklogLarge writes a one-line advisory to stderr
+// when the city store holds more than orderTrackingRetentionStartupWarnThreshold
+// closed order-tracking beads. It is best-effort: a nil store or a List error is
+// silently ignored so startup is never blocked.
+func warnIfClosedOrderTrackingBacklogLarge(store beads.Store, stderr io.Writer) {
+	if store == nil {
+		return
+	}
+	closed, err := beads.HandlesFor(store).Live.List(beads.ListQuery{
+		Status:   "closed",
+		Label:    labelOrderTracking,
+		TierMode: beads.TierBoth,
+		Limit:    orderTrackingRetentionStartupListLimit,
+	})
+	if err != nil || len(closed) <= orderTrackingRetentionStartupWarnThreshold {
+		return
+	}
+	countStr := fmt.Sprintf("%d", len(closed))
+	if len(closed) >= orderTrackingRetentionStartupListLimit {
+		countStr = "≥1001"
+	}
+	fmt.Fprintf(stderr, "gc start: %s closed order-tracking beads detected — retention watchdog will prune automatically (7d TTL default; configure: [beads.policies.order_tracking].delete_after_close). For immediate cleanup: gc order sweep-tracking\n", countStr) //nolint:errcheck // best-effort stderr
 }
 
 func (cr *CityRuntime) runNudgeMailSweepWatchdog(now time.Time) {

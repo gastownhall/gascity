@@ -53,6 +53,7 @@ beads-store
 v2-routed-to-namespace
 run-target-routed-to-backfill
 backlog-depth
+order-tracking-retention
 session-model
 dolt-server
 dolt-noms-size
