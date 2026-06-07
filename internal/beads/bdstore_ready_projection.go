@@ -3,7 +3,6 @@ package beads
 import (
 	"encoding/json"
 	"fmt"
-	"strings"
 
 	"github.com/gastownhall/gascity/internal/deps"
 )
@@ -87,39 +86,37 @@ func (s *BdStore) bdReadyProjectionEnabled() (bool, error) {
 
 func (s *BdStore) fetchReadyProjection(ids []string) (map[string]bool, error) {
 	result := make(map[string]bool, len(ids))
-	for start := 0; start < len(ids); start += 500 {
-		end := start + 500
-		if end > len(ids) {
-			end = len(ids)
+	wanted := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		if id != "" {
+			wanted[id] = struct{}{}
 		}
-		query := readyProjectionSQL(ids[start:end])
-		out, err := s.runner(s.dir, "bd", "sql", query, "--json")
-		if err != nil {
-			return nil, fmt.Errorf("bd sql ready projection: %w", err)
+	}
+	if len(wanted) == 0 {
+		return result, nil
+	}
+
+	out, err := s.runner(s.dir, "bd", "sql", readyProjectionSQL(), "--json")
+	if err != nil {
+		return nil, fmt.Errorf("bd sql ready projection: %w", err)
+	}
+	var rows []bdReadyProjectionRow
+	if err := json.Unmarshal(extractJSON(out), &rows); err != nil {
+		return nil, fmt.Errorf("bd sql ready projection: parsing JSON: %w", err)
+	}
+	for _, row := range rows {
+		if row.ID == "" || !row.IsBlocked.set {
+			continue
 		}
-		var rows []bdReadyProjectionRow
-		if err := json.Unmarshal(extractJSON(out), &rows); err != nil {
-			return nil, fmt.Errorf("bd sql ready projection: parsing JSON: %w", err)
+		if _, ok := wanted[row.ID]; !ok {
+			continue
 		}
-		for _, row := range rows {
-			if row.ID == "" || !row.IsBlocked.set {
-				continue
-			}
-			result[row.ID] = row.IsBlocked.value
-		}
+		result[row.ID] = row.IsBlocked.value
 	}
 	return result, nil
 }
 
-func readyProjectionSQL(ids []string) string {
-	quoted := make([]string, 0, len(ids))
-	for _, id := range ids {
-		if id == "" {
-			continue
-		}
-		quoted = append(quoted, "'"+strings.ReplaceAll(id, "'", "''")+"'")
-	}
-	inClause := strings.Join(quoted, ",")
-	return "select id,is_blocked from issues where id in (" + inClause + ") " +
-		"union all select id,is_blocked from wisps where id in (" + inClause + ")"
+func readyProjectionSQL() string {
+	return "select id,is_blocked from issues where status in ('open','in_progress') " +
+		"union all select id,is_blocked from wisps where status in ('open','in_progress')"
 }
