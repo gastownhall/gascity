@@ -42,10 +42,11 @@ Mail is NOT a SQL table — mail messages are beads (Type=message). Any
 mail cleanup must go through `bd`, never Dolt. BD-backed mail retention is
 tracked separately as `ga-w9jfl5`; until that lands, Reaper intentionally does
 not delete mail. Wisp parentage is no longer carried on the wisps row; it
-lives in `wisp_dependencies` rows with `type='parent-child'` and a
-`depends_on_id` target column in the bd 1.0.4 schema. Graph-v2 workflow wisps
-are owned through `tracks` edges from the child to the workflow root, with the
-child's `gc.root_bead_id` metadata matching `depends_on_id`. For the
+lives in `wisp_dependencies` rows with `type='parent-child'` and the split
+typed target columns (`depends_on_issue_id`, `depends_on_wisp_id`,
+`depends_on_external`). Graph-v2 workflow wisps are owned through `tracks`
+edges from the child to the workflow root, with the child's `gc.root_bead_id`
+metadata matching the typed target via COALESCE. For the
 Dolt-backed bead store, `ParentID` is a projection from parent-child
 dependencies, not a separate `parent_id` column for Reaper to query.
 Non-closed wisps without an ownership signal are reported only; they are not
@@ -175,11 +176,11 @@ INNER JOIN wisp_dependencies d
     d.type = 'parent-child'
     OR (
       d.type = 'tracks'
-      AND JSON_UNQUOTE(JSON_EXTRACT(w.metadata, '$."gc.root_bead_id"')) = d.depends_on_id
+      AND JSON_UNQUOTE(JSON_EXTRACT(w.metadata, '$."gc.root_bead_id"')) = COALESCE(d.depends_on_issue_id, d.depends_on_wisp_id, d.depends_on_external)
     )
   )
-LEFT JOIN wisps parent_wisp ON d.depends_on_id = parent_wisp.id
-LEFT JOIN issues parent_issue ON d.depends_on_id = parent_issue.id
+LEFT JOIN wisps parent_wisp ON d.depends_on_wisp_id = parent_wisp.id
+LEFT JOIN issues parent_issue ON d.depends_on_issue_id = parent_issue.id
 WHERE w.status IN ('open', 'hooked', 'in_progress')
 AND w.created_at < DATE_SUB(NOW(), INTERVAL <max_age_hours> HOUR)
 AND (
@@ -194,7 +195,7 @@ SELECT COUNT(*) FROM wisps
 WHERE status = 'closed'
 AND closed_at < DATE_SUB(NOW(), INTERVAL <purge_age_hours> HOUR)
 AND id NOT IN (
-  SELECT DISTINCT d.depends_on_id FROM wisp_dependencies d
+  SELECT DISTINCT d.depends_on_wisp_id FROM wisp_dependencies d
   INNER JOIN wisps child_wisp ON d.issue_id = child_wisp.id
   WHERE d.type IN ('parent-child', 'tracks', 'blocks')
   AND child_wisp.status IN ('open', 'hooked', 'in_progress')
@@ -229,10 +230,12 @@ ownership dependency points to a closed parent or workflow root.
 
 Wisp parentage no longer lives on the wisps row (the schema has no
 `parent_id` column); parentage is in `wisp_dependencies` rows with
-`type='parent-child'` and `depends_on_id`. The SDK `ParentID` field is
+`type='parent-child'` and the typed target columns (`depends_on_issue_id`,
+`depends_on_wisp_id`, `depends_on_external`). The SDK `ParentID` field is
 projected from those rows for Dolt-backed beads. Graph-v2 workflow ownership
 uses a `tracks` edge from the child to the root and must match the child's
-`gc.root_bead_id` metadata. Do not close non-closed wisps by age alone.
+`gc.root_bead_id` metadata via COALESCE over the typed target. Do not close
+non-closed wisps by age alone.
 `wisp-compact.sh` promotes non-closed wisps past TTL for stuck detection.
 The close step repeats until no schema-safe candidates remain, so a stale
 multi-level child chain whose root is closed converges in one reaper run.
@@ -258,11 +261,11 @@ AND id IN (
         d.type = 'parent-child'
         OR (
           d.type = 'tracks'
-          AND JSON_UNQUOTE(JSON_EXTRACT(w.metadata, '$."gc.root_bead_id"')) = d.depends_on_id
+          AND JSON_UNQUOTE(JSON_EXTRACT(w.metadata, '$."gc.root_bead_id"')) = COALESCE(d.depends_on_issue_id, d.depends_on_wisp_id, d.depends_on_external)
         )
       )
-    LEFT JOIN wisps parent_wisp ON d.depends_on_id = parent_wisp.id
-    LEFT JOIN issues parent_issue ON d.depends_on_id = parent_issue.id
+    LEFT JOIN wisps parent_wisp ON d.depends_on_wisp_id = parent_wisp.id
+    LEFT JOIN issues parent_issue ON d.depends_on_issue_id = parent_issue.id
     WHERE w.status IN ('open', 'hooked', 'in_progress')
     AND w.created_at < DATE_SUB(NOW(), INTERVAL <max_age_hours> HOUR)
     AND (
@@ -297,7 +300,7 @@ DELETE FROM wisps
 WHERE status = 'closed'
 AND closed_at < DATE_SUB(NOW(), INTERVAL <purge_age_hours> HOUR)
 AND id NOT IN (
-  SELECT DISTINCT d.depends_on_id FROM wisp_dependencies d
+  SELECT DISTINCT d.depends_on_wisp_id FROM wisp_dependencies d
   INNER JOIN wisps child_wisp ON d.issue_id = child_wisp.id
   WHERE d.type IN ('parent-child', 'tracks', 'blocks')
   AND child_wisp.status IN ('open', 'hooked', 'in_progress')
@@ -341,10 +344,10 @@ AND issue_type != 'epic'
 AND id NOT IN (
   -- Exclude issues with active dependencies
   SELECT DISTINCT d.issue_id FROM dependencies d
-  INNER JOIN issues i ON d.depends_on_id = i.id
+  INNER JOIN issues i ON d.depends_on_issue_id = i.id
   WHERE i.status IN ('open', 'in_progress')
   UNION
-  SELECT DISTINCT d.depends_on_id FROM dependencies d
+  SELECT DISTINCT d.depends_on_issue_id FROM dependencies d
   INNER JOIN issues i ON d.issue_id = i.id
   WHERE i.status IN ('open', 'in_progress')
 )

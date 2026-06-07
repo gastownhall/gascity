@@ -30,7 +30,7 @@ MAIL_ALERT_THRESHOLD="${GC_REAPER_MAIL_ALERT_THRESHOLD:-0}"  # 0 = disabled
 DRY_RUN="${GC_REAPER_DRY_RUN:-}"
 # Closing follows only ownership edges. `blocks` is sequencing, not ownership;
 # purge protection may include it because that only prevents deletion.
-WISP_CLOSE_EDGE_PREDICATE="(d.type = 'parent-child' OR (d.type = 'tracks' AND JSON_UNQUOTE(JSON_EXTRACT(w.metadata, '$.\"gc.root_bead_id\"')) = d.depends_on_id))"
+WISP_CLOSE_EDGE_PREDICATE="(d.type = 'parent-child' OR (d.type = 'tracks' AND JSON_UNQUOTE(JSON_EXTRACT(w.metadata, '$.\"gc.root_bead_id\"')) = COALESCE(d.depends_on_issue_id, d.depends_on_wisp_id, d.depends_on_external)))"
 WISP_PURGE_PROTECT_EDGE_TYPES="'parent-child', 'tracks', 'blocks'"
 WORKFLOW_ROOT_CLOSE_STATUSES="'open', 'hooked', 'in_progress'"
 WORKFLOW_ROOT_LIVE_STATUSES="'open', 'hooked', 'in_progress', 'blocked', 'deferred', 'pinned', 'review', 'testing'"
@@ -491,7 +491,9 @@ has_dependency_target_column() {
     fi
 
     printf '%s\n' "$fields" | grep -qx 'issue_id' || return 1
-    printf '%s\n' "$fields" | grep -qx 'depends_on_id' || return 1
+    printf '%s\n' "$fields" | grep -qx 'depends_on_issue_id' || return 1
+    printf '%s\n' "$fields" | grep -qx 'depends_on_wisp_id' || return 1
+    printf '%s\n' "$fields" | grep -qx 'depends_on_external' || return 1
 }
 
 workflow_root_candidates_cte() {
@@ -540,28 +542,28 @@ $(workflow_root_store_ref_local_condition "$db" "$alias")
             FROM $candidate_cte root
             INNER JOIN \`$db\`.wisp_dependencies child_dep
                 ON child_dep.type IN ($WORKFLOW_ROOT_DESCENDANT_DEP_TYPES)
-                AND child_dep.depends_on_id = root.id
+                AND COALESCE(child_dep.depends_on_issue_id, child_dep.depends_on_wisp_id, child_dep.depends_on_external) = root.id
                 AND child_dep.issue_id != root.id
             UNION
             SELECT root.id, child_dep.issue_id
             FROM $candidate_cte root
             INNER JOIN \`$db\`.dependencies child_dep
                 ON child_dep.type IN ($WORKFLOW_ROOT_DESCENDANT_DEP_TYPES)
-                AND child_dep.depends_on_id = root.id
+                AND COALESCE(child_dep.depends_on_issue_id, child_dep.depends_on_wisp_id, child_dep.depends_on_external) = root.id
                 AND child_dep.issue_id != root.id
             UNION
             SELECT parent.root_id, child_dep.issue_id
             FROM workflow_descendants parent
             INNER JOIN \`$db\`.wisp_dependencies child_dep
                 ON child_dep.type IN ($WORKFLOW_ROOT_DESCENDANT_DEP_TYPES)
-                AND child_dep.depends_on_id = parent.id
+                AND COALESCE(child_dep.depends_on_issue_id, child_dep.depends_on_wisp_id, child_dep.depends_on_external) = parent.id
                 AND child_dep.issue_id != parent.id
             UNION
             SELECT parent.root_id, child_dep.issue_id
             FROM workflow_descendants parent
             INNER JOIN \`$db\`.dependencies child_dep
                 ON child_dep.type IN ($WORKFLOW_ROOT_DESCENDANT_DEP_TYPES)
-                AND child_dep.depends_on_id = parent.id
+                AND COALESCE(child_dep.depends_on_issue_id, child_dep.depends_on_wisp_id, child_dep.depends_on_external) = parent.id
                 AND child_dep.issue_id != parent.id
         ),
         roots_with_live_descendants AS (
@@ -759,8 +761,8 @@ while IFS= read -r DB; do
             INNER JOIN \`$DB\`.wisp_dependencies d
                 ON d.issue_id = w.id
                 AND $WISP_CLOSE_EDGE_PREDICATE
-            LEFT JOIN \`$DB\`.wisps parent_wisp ON d.depends_on_id = parent_wisp.id
-            LEFT JOIN \`$DB\`.issues parent_issue ON d.depends_on_id = parent_issue.id
+            LEFT JOIN \`$DB\`.wisps parent_wisp ON d.depends_on_wisp_id = parent_wisp.id
+            LEFT JOIN \`$DB\`.issues parent_issue ON d.depends_on_issue_id = parent_issue.id
             WHERE w.status IN ('open', 'hooked', 'in_progress')
             AND w.created_at < DATE_SUB(NOW(), INTERVAL $MAX_AGE_H HOUR)
             AND (
@@ -787,8 +789,8 @@ while IFS= read -r DB; do
                     INNER JOIN \`$DB\`.wisp_dependencies d
                         ON d.issue_id = w.id
                         AND $WISP_CLOSE_EDGE_PREDICATE
-                    LEFT JOIN \`$DB\`.wisps parent_wisp ON d.depends_on_id = parent_wisp.id
-                    LEFT JOIN \`$DB\`.issues parent_issue ON d.depends_on_id = parent_issue.id
+                    LEFT JOIN \`$DB\`.wisps parent_wisp ON d.depends_on_wisp_id = parent_wisp.id
+                    LEFT JOIN \`$DB\`.issues parent_issue ON d.depends_on_issue_id = parent_issue.id
                     WHERE w.status IN ('open', 'hooked', 'in_progress')
                     AND w.created_at < DATE_SUB(NOW(), INTERVAL $MAX_AGE_H HOUR)
                     AND (
@@ -872,7 +874,7 @@ while IFS= read -r DB; do
         WHERE status = 'closed'
         AND closed_at < DATE_SUB(NOW(), INTERVAL $PURGE_AGE_H HOUR)
         AND id NOT IN (
-            SELECT DISTINCT d.depends_on_id FROM \`$DB\`.wisp_dependencies d
+            SELECT DISTINCT d.depends_on_wisp_id FROM \`$DB\`.wisp_dependencies d
             INNER JOIN \`$DB\`.wisps child_wisp ON d.issue_id = child_wisp.id
             WHERE d.type IN ($WISP_PURGE_PROTECT_EDGE_TYPES)
             AND child_wisp.status IN ('open', 'hooked', 'in_progress')
@@ -886,7 +888,7 @@ while IFS= read -r DB; do
             WHERE status = 'closed'
             AND closed_at < DATE_SUB(NOW(), INTERVAL $PURGE_AGE_H HOUR)
             AND id NOT IN (
-                SELECT DISTINCT d.depends_on_id FROM \`$DB\`.wisp_dependencies d
+                SELECT DISTINCT d.depends_on_wisp_id FROM \`$DB\`.wisp_dependencies d
                 INNER JOIN \`$DB\`.wisps child_wisp ON d.issue_id = child_wisp.id
                 WHERE d.type IN ($WISP_PURGE_PROTECT_EDGE_TYPES)
                 AND child_wisp.status IN ('open', 'hooked', 'in_progress')
@@ -987,10 +989,10 @@ while IFS= read -r DB; do
         )
         AND id NOT IN (
             SELECT DISTINCT d.issue_id FROM \`$DB\`.dependencies d
-            INNER JOIN \`$DB\`.issues i ON d.depends_on_id = i.id
+            INNER JOIN \`$DB\`.issues i ON d.depends_on_issue_id = i.id
             WHERE i.status IN ('open', 'in_progress')
             UNION
-            SELECT DISTINCT d.depends_on_id FROM \`$DB\`.dependencies d
+            SELECT DISTINCT d.depends_on_issue_id FROM \`$DB\`.dependencies d
             INNER JOIN \`$DB\`.issues i ON d.issue_id = i.id
             WHERE i.status IN ('open', 'in_progress')
         )

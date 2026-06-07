@@ -26,7 +26,7 @@ var (
 )
 
 const (
-	reaperCloseCleanupEdgeSQL   = "(d.type = 'parent-child' OR (d.type = 'tracks' AND JSON_UNQUOTE(JSON_EXTRACT(w.metadata, '$.\"gc.root_bead_id\"')) = d.depends_on_id))"
+	reaperCloseCleanupEdgeSQL   = "(d.type = 'parent-child' OR (d.type = 'tracks' AND JSON_UNQUOTE(JSON_EXTRACT(w.metadata, '$.\"gc.root_bead_id\"')) = COALESCE(d.depends_on_issue_id, d.depends_on_wisp_id, d.depends_on_external)))"
 	reaperPurgeProtectEdgeSQL   = "d.type IN ('parent-child', 'tracks', 'blocks')"
 	reaperCloseCleanupPredicate = "WISP_CLOSE_EDGE_PREDICATE="
 	reaperPurgeProtectTypes     = "WISP_PURGE_PROTECT_EDGE_TYPES="
@@ -3089,8 +3089,8 @@ func TestReaperFormulaSQLReflectsCurrentSchema(t *testing.T) {
 		if strings.Contains(fence, "parent_id") {
 			t.Errorf("formula sql fence %d references parent_id (column does not exist in wisps):\n%s", i, fence)
 		}
-		if strings.Contains(fence, "depends_on_wisp_id") || strings.Contains(fence, "depends_on_issue_id") {
-			t.Errorf("formula sql fence %d references split dependency target columns; bd 1.0.4 uses depends_on_id:\n%s", i, fence)
+		if strings.Contains(fence, "depends_on_id") && !strings.Contains(fence, "depends_on_issue_id") && !strings.Contains(fence, "depends_on_wisp_id") {
+			t.Errorf("formula sql fence %d references removed depends_on_id column; schema uses typed split columns:\n%s", i, fence)
 		}
 		if strings.Contains(fence, "LEFT JOIN wisps parent ON") {
 			t.Errorf("formula sql fence %d still has the broken parent self-join:\n%s", i, fence)
@@ -3198,9 +3198,9 @@ exit 0
 	if strings.Contains(log, "parent_id") {
 		t.Errorf("reaper SQL references parent_id (column does not exist in wisps):\n%s", log)
 	}
-	for _, notWant := range []string{"depends_on_wisp_id", "depends_on_issue_id"} {
-		if strings.Contains(log, notWant) {
-			t.Errorf("reaper SQL references split dependency target column %q; bd 1.0.4 uses depends_on_id:\n%s", notWant, log)
+	for _, want := range []string{"depends_on_wisp_id", "depends_on_issue_id"} {
+		if !strings.Contains(log, want) {
+			t.Errorf("reaper SQL missing split dependency target column %q; schema uses typed columns:\n%s", want, log)
 		}
 	}
 	// mail was removed: not a SQL table; messages are beads with type=message.
@@ -3211,7 +3211,7 @@ exit 0
 		"SHOW COLUMNS FROM `beads`.dependencies",
 		"SHOW COLUMNS FROM `beads`.wisp_dependencies",
 		"FROM `beads`.wisp_dependencies d",
-		"SELECT DISTINCT d.depends_on_id",
+		"SELECT DISTINCT d.depends_on_wisp_id",
 	} {
 		if !strings.Contains(log, want) {
 			t.Errorf("reaper SQL missing %q:\n%s", want, log)
@@ -3242,7 +3242,7 @@ exit 0
 		purgeSQL := log[purgeIdx:]
 		if !strings.Contains(purgeSQL, "child_wisp.status IN ('open', 'hooked', 'in_progress')") ||
 			!containsReaperPurgeProtectEdgePredicate(purgeSQL) ||
-			!strings.Contains(purgeSQL, "SELECT DISTINCT d.depends_on_id") {
+			!strings.Contains(purgeSQL, "SELECT DISTINCT d.depends_on_wisp_id") {
 			t.Errorf("reaper purge can delete closed parents with non-closed children:\n%s", purgeSQL)
 		}
 	}
@@ -3293,7 +3293,7 @@ exit 0
 		t.Fatalf("reaper did not probe dependency target columns:\n%s", log)
 	}
 	if strings.Contains(log, "FROM `beads`.wisp_dependencies d") || strings.Contains(log, "JOIN `beads`.wisp_dependencies d") {
-		t.Fatalf("reaper ran dependency-aware queries against schema without depends_on_id:\n%s", log)
+		t.Fatalf("reaper ran dependency-aware queries against schema without typed dependency target columns:\n%s", log)
 	}
 
 	// A silently-skipped DB may make no gc calls at all, so a missing
@@ -3302,7 +3302,7 @@ exit 0
 	if err != nil && !os.IsNotExist(err) {
 		t.Fatalf("ReadFile(gc log): %v", err)
 	}
-	if strings.Contains(string(gcData), "dependencies table lacks depends_on_id") {
+	if strings.Contains(string(gcData), "dependencies table lacks") {
 		t.Errorf("reaper escalated the dependency schema as an anomaly; the target-column gate must skip silently:\n%s", gcData)
 	}
 }
@@ -3353,6 +3353,72 @@ exit 0
 	}
 	if strings.Contains(string(gcData), "wisp_dependencies") {
 		t.Errorf("reaper escalated the missing wisp dependency table as an anomaly; the schema gate must skip silently:\n%s", gcData)
+	}
+}
+
+func TestReaperSplitSchemaQueriesUseSplitColumns(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	doltLog := filepath.Join(t.TempDir(), "dolt-args.log")
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+
+	writeMaintenanceDoltStub(t, filepath.Join(binDir, "dolt"))
+	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+exit 0
+`)
+
+	env := map[string]string{
+		"DOLT_ARGS_LOG":               doltLog,
+		"GC_CALL_LOG":                 gcLog,
+		"DOLT_DBS":                    "beads",
+		"DOLT_DEPENDENCY_SCHEMA":      "split",
+		"DOLT_WISP_DEPENDENCY_SCHEMA": "split",
+		"GC_CITY":                     cityDir,
+		"GC_CITY_PATH":                cityDir,
+		"GC_DOLT_HOST":                "127.0.0.1",
+		"GC_DOLT_PORT":                "3307",
+		"GC_DOLT_USER":                "root",
+		"GC_DOLT_PASSWORD":            "",
+		"DOLT_PURGE_COUNT":            "1",
+		"PATH":                        binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+
+	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "reaper.sh"), env)
+
+	logData, err := os.ReadFile(doltLog)
+	if err != nil {
+		t.Fatalf("ReadFile(dolt log): %v", err)
+	}
+	log := string(logData)
+
+	for _, want := range []string{
+		"SHOW COLUMNS FROM `beads`.dependencies",
+		"SHOW COLUMNS FROM `beads`.wisp_dependencies",
+		"FROM `beads`.wisp_dependencies d",
+	} {
+		if !strings.Contains(log, want) {
+			t.Errorf("reaper split-schema log missing %q:\n%s", want, log)
+		}
+	}
+
+	for _, splitCol := range []string{"depends_on_issue_id", "depends_on_wisp_id"} {
+		if !strings.Contains(log, splitCol) {
+			t.Errorf("reaper split-schema log missing split column %q:\n%s", splitCol, log)
+		}
+	}
+
+	// With split schema, queries against dependencies must not use the removed depends_on_id column.
+	// Filter out SHOW COLUMNS lines (which contain the table name, not the column reference in queries).
+	var queryLines []string
+	for _, line := range strings.Split(log, "\n") {
+		if !strings.Contains(line, "SHOW COLUMNS") {
+			queryLines = append(queryLines, line)
+		}
+	}
+	queryLog := strings.Join(queryLines, "\n")
+	if strings.Contains(queryLog, "d.depends_on_id") {
+		t.Errorf("reaper split-schema queries reference removed column d.depends_on_id:\n%s", queryLog)
 	}
 }
 
@@ -4203,8 +4269,8 @@ exit 0
 	if !strings.Contains(log, "wisp_dependencies d") || !containsReaperCloseCleanupEdgePredicate(log) {
 		t.Fatalf("reaper stale-wisp close path does not use graph cleanup-edge dependencies:\n%s", log)
 	}
-	if !strings.Contains(log, "d.depends_on_id = parent_wisp.id") || !strings.Contains(log, "d.depends_on_id = parent_issue.id") {
-		t.Fatalf("reaper stale-wisp close path does not use bd 1.0.4 dependency target column:\n%s", log)
+	if !strings.Contains(log, "d.depends_on_wisp_id = parent_wisp.id") || !strings.Contains(log, "d.depends_on_issue_id = parent_issue.id") {
+		t.Fatalf("reaper stale-wisp close path does not use typed dependency target columns:\n%s", log)
 	}
 	if strings.Contains(log, "parent_wisp.id IS NULL AND parent_issue.id IS NULL") {
 		t.Fatalf("reaper closes stale wisps when parent liveness is unresolved:\n%s", log)
@@ -4286,7 +4352,9 @@ case "$*" in
   *"SHOW COLUMNS FROM"*"dependencies"*)
     printf 'Field,Type,Null,Key,Default,Extra\n'
     printf 'issue_id,varchar,NO,,,\n'
-    printf 'depends_on_id,varchar,NO,,,\n'
+    printf 'depends_on_issue_id,varchar,YES,,,\n'
+    printf 'depends_on_wisp_id,varchar,YES,,,\n'
+    printf 'depends_on_external,varchar,YES,,,\n'
     printf 'type,varchar,NO,,,\n'
     ;;
   *"WITH RECURSIVE workflow_wisp_root_candidates"*"UPDATE "*"wisps SET status='closed'"*"JSON_SET(COALESCE(metadata, JSON_OBJECT())"*)
@@ -4371,8 +4439,8 @@ exit 0
 		"descendant_wisp.status, descendant_issue.status) IN ('open', 'hooked', 'in_progress', 'blocked', 'deferred', 'pinned', 'review', 'testing')",
 		"roots_with_recent_descendants",
 		"child_dep.type IN ('parent-child', 'tracks', 'blocks')",
-		"child_dep.depends_on_id = root.id",
-		"child_dep.depends_on_id = parent.id",
+		"COALESCE(child_dep.depends_on_issue_id, child_dep.depends_on_wisp_id, child_dep.depends_on_external) = root.id",
+		"COALESCE(child_dep.depends_on_issue_id, child_dep.depends_on_wisp_id, child_dep.depends_on_external) = parent.id",
 		"workflow_roots=2",
 	} {
 		if !strings.Contains(log, want) {
@@ -4436,7 +4504,9 @@ case "$*" in
   *"SHOW COLUMNS FROM"*"dependencies"*)
     printf 'Field,Type,Null,Key,Default,Extra\n'
     printf 'issue_id,varchar,NO,,,\n'
-    printf 'depends_on_id,varchar,NO,,,\n'
+    printf 'depends_on_issue_id,varchar,YES,,,\n'
+    printf 'depends_on_wisp_id,varchar,YES,,,\n'
+    printf 'depends_on_external,varchar,YES,,,\n'
     printf 'type,varchar,NO,,,\n'
     ;;
   *"WITH RECURSIVE workflow_wisp_root_candidates"*"SELECT COUNT(*) FROM ("*)
@@ -4529,7 +4599,9 @@ case "$*" in
   *"SHOW COLUMNS FROM"*"dependencies"*)
     printf 'Field,Type,Null,Key,Default,Extra\n'
     printf 'issue_id,varchar,NO,,,\n'
-    printf 'depends_on_id,varchar,NO,,,\n'
+    printf 'depends_on_issue_id,varchar,YES,,,\n'
+    printf 'depends_on_wisp_id,varchar,YES,,,\n'
+    printf 'depends_on_external,varchar,YES,,,\n'
     printf 'type,varchar,NO,,,\n'
     ;;
   *"WITH RECURSIVE workflow_wisp_root_candidates"*"SELECT COUNT(*) FROM ("*)
@@ -6544,7 +6616,7 @@ case "$*" in
   ;;
 *"SHOW COLUMNS FROM"*"dependencies"*)
   printf 'Field,Type,Null,Key,Default,Extra\n'
-  dependency_schema="${DOLT_DEPENDENCY_SCHEMA:-generic}"
+  dependency_schema="${DOLT_DEPENDENCY_SCHEMA:-split}"
   case "$*" in
     *"wisp_dependencies"*) dependency_schema="${DOLT_WISP_DEPENDENCY_SCHEMA:-$dependency_schema}" ;;
   esac
@@ -6562,7 +6634,9 @@ case "$*" in
     printf 'type,varchar,NO,,,\n'
   else
     printf 'issue_id,varchar,NO,,,\n'
-    printf 'depends_on_id,varchar,NO,,,\n'
+    printf 'depends_on_issue_id,varchar,YES,,,\n'
+    printf 'depends_on_wisp_id,varchar,YES,,,\n'
+    printf 'depends_on_external,varchar,YES,,,\n'
     printf 'type,varchar,NO,,,\n'
   fi
   ;;
@@ -6625,7 +6699,9 @@ case "$*" in
 *"SHOW COLUMNS FROM"*"dependencies"*)
   printf 'Field,Type,Null,Key,Default,Extra\n'
   printf 'issue_id,varchar,NO,,,\n'
-  printf 'depends_on_id,varchar,NO,,,\n'
+  printf 'depends_on_issue_id,varchar,YES,,,\n'
+  printf 'depends_on_wisp_id,varchar,YES,,,\n'
+  printf 'depends_on_external,varchar,YES,,,\n'
   printf 'type,varchar,NO,,,\n'
   ;;
 *"UPDATE "*"wisps SET status='closed'"*)
