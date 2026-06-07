@@ -308,6 +308,14 @@ EOF
     fi
     ;;
   bd)
+    if [ "$2" = "show" ] && [ "$3" = "ga-bare" ] && [ "$4" = "--json" ]; then
+      cat <<'EOF'
+[
+  {"id":"ga-bare","status":"in_progress","assignee":"backend_dev"}
+]
+EOF
+      exit 0
+    fi
     if [ "$2" = "list" ]; then
       cat <<'EOF'
 [
@@ -316,7 +324,8 @@ EOF
 EOF
       exit 0
     fi
-    if [ "$2" = "update" ]; then
+    if [ "$2" = "release-if-current" ]; then
+      printf 'released\n'
       exit 0
     fi
     ;;
@@ -359,7 +368,7 @@ func TestOrphanSweepPreservesBareShortFormOfLiveQualifiedAgent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadFile(gc log): %v", err)
 	}
-	if log := string(logData); strings.Contains(log, "bd update ga-bare ") {
+	if log := string(logData); strings.Contains(log, "bd release-if-current ga-bare ") {
 		t.Fatalf("bare-short-form bead of live qualified agent was reset:\n%s", log)
 	}
 }
@@ -398,7 +407,7 @@ func TestOrphanSweepResetsBareShortFormWhenQualifiedAgentDead(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadFile(gc log): %v", err)
 	}
-	if log := string(logData); !strings.Contains(log, "bd update ga-bare --status=open --assignee=") {
+	if log := string(logData); !strings.Contains(log, "bd release-if-current ga-bare backend_dev") {
 		t.Fatalf("orphan bead was not reset:\n%s", log)
 	}
 }
