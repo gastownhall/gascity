@@ -771,122 +771,6 @@ func refreshConfiguredNamedStartCandidate(
 	return candidate
 }
 
-// perDispatchModelSourceKey records, on a session bead, the routing model that
-// maybeApplyPerDispatchModelOverride auto-stamped into template_overrides. Its
-// presence distinguishes an auto-stamped model (which a later dispatch may
-// switch or clear) from a genuine operator/dashboard override (which routing
-// metadata must never touch). An empty/absent value means "not auto-stamped".
-const perDispatchModelSourceKey = "gc.per_dispatch_model"
-
-// maybeApplyPerDispatchModelOverride reconciles the per-dispatch model requested
-// by a candidate session's assigned work bead (its advisory "gc.model" metadata)
-// with the session's own template_overrides, so the existing override pipeline
-// turns it into a --model flag at launch. Because sessions go asleep and
-// re-spawn to claim new work, this runs on every start and must be able to
-// switch or clear a model it previously stamped, not only stamp it once.
-//
-// Precedence, given the parsed template_overrides ("existing"), the prior
-// provenance marker ("prev", see perDispatchModelSourceKey), and the model
-// advised by the current work bead ("model"):
-//   - the resolved provider must expose a "model" option in its schema, else
-//     this is a no-op;
-//   - an explicit operator/dashboard model (existing["model"] set with no
-//     provenance marker) always wins — routing metadata never overrides it;
-//   - a previously auto-stamped model is re-resolved: a new valid model
-//     replaces it, an absent model clears it (falling back to the agent's
-//     configured default), and an invalid model leaves the prior value in
-//     place;
-//   - with nothing stamped yet, a valid advised model is stamped.
-//
-// An unknown/invalid gc.model value is logged and ignored rather than failing
-// the start, so an advisory value the running provider doesn't recognize never
-// blocks a session from launching. The override and its provenance are
-// persisted on the session bead (not just applied in memory) so config-drift
-// hashing via sessionCoreConfigForHash and the launch command stay consistent.
-func maybeApplyPerDispatchModelOverride(candidate startCandidate, cfg *config.City, store beads.Store) {
-	session := candidate.session
-	if store == nil || session == nil || session.ID == "" {
-		return
-	}
-	tp := candidate.tp
-	if tp.ResolvedProvider == nil || len(tp.ResolvedProvider.OptionsSchema) == 0 {
-		return
-	}
-	existing, err := sessionpkg.ParseTemplateOverrides(session.Metadata)
-	if err != nil {
-		// A malformed template_overrides blob is repaired by the existing
-		// override pipeline; don't compound it here.
-		return
-	}
-	_, hasModel := existing["model"]
-	prev := strings.TrimSpace(session.Metadata[perDispatchModelSourceKey])
-
-	// A genuine operator/dashboard override carries no auto-stamp provenance
-	// and always wins over routing metadata.
-	if hasModel && prev == "" {
-		return
-	}
-
-	model := resolveTaskModel(store, taskWorkDirAssignees(candidate, cfg)...)
-
-	// Work on a private copy so a marshal/persist failure never mutates the
-	// session's in-memory overrides.
-	overrides := make(map[string]string, len(existing))
-	for k, v := range existing {
-		overrides[k] = v
-	}
-
-	if model == "" {
-		// Nothing advised this dispatch. Clear a prior auto-stamp so the agent
-		// falls back to its configured default; otherwise there is nothing to do.
-		if prev == "" {
-			return
-		}
-		delete(overrides, "model")
-		if err := persistPerDispatchModelOverride(session, store, overrides, ""); err != nil {
-			log.Printf("session %s: clearing per-dispatch model override: %v", session.ID, err)
-		}
-		return
-	}
-
-	// Validate against the resolved provider's schema before persisting. An
-	// invalid value would otherwise surface only as a template_overrides
-	// resolution error at launch, so log and ignore it, leaving any prior
-	// auto-stamped model in place.
-	if _, err := config.ResolveExplicitOptions(tp.ResolvedProvider.OptionsSchema, map[string]string{"model": model}); err != nil {
-		log.Printf("session %s: ignoring work bead gc.model=%q: %v", session.ID, model, err)
-		return
-	}
-	overrides["model"] = model
-	if err := persistPerDispatchModelOverride(session, store, overrides, model); err != nil {
-		log.Printf("session %s: persisting per-dispatch model override: %v", session.ID, err)
-	}
-}
-
-// persistPerDispatchModelOverride writes the session's template_overrides blob
-// and the per-dispatch provenance marker together, then mirrors both into the
-// in-memory session bead so the in-flight start and config-drift hashing stay
-// consistent with what was persisted. A source of "" clears the provenance
-// marker, recording that no model is currently auto-stamped.
-func persistPerDispatchModelOverride(session *beads.Bead, store beads.Store, overrides map[string]string, source string) error {
-	raw, err := json.Marshal(overrides)
-	if err != nil {
-		return err
-	}
-	if err := store.SetMetadataBatch(session.ID, map[string]string{
-		"template_overrides":      string(raw),
-		perDispatchModelSourceKey: source,
-	}); err != nil {
-		return err
-	}
-	if session.Metadata == nil {
-		session.Metadata = make(map[string]string, 2)
-	}
-	session.Metadata["template_overrides"] = string(raw)
-	session.Metadata[perDispatchModelSourceKey] = source
-	return nil
-}
-
 func buildPreparedStart(
 	candidate startCandidate,
 	cfg *config.City,
@@ -904,28 +788,6 @@ func buildPreparedStartWithWorkDirResolver(
 	session := candidate.session
 	tp := candidate.tp
 	agentCfg := templateParamsToConfig(tp)
-
-	// Per-dispatch model: fold a work bead's advisory "gc.model" metadata into
-	// this session's template_overrides before they are applied below. The
-	// model-advisor pack and the mol-review-quorum formula already write
-	// gc.model on work beads; persisting it as a per-session override here is
-	// what makes an advised model take effect per task/shape instead of only
-	// per agent. An explicit per-session model override always wins, so an
-	// operator/dashboard choice is never overridden by routing metadata, and
-	// the session bead remains the single source of truth so config-drift
-	// hashing (sessionCoreConfigForHash) stays consistent with the launch
-	// command. Default behavior is unchanged when no work bead carries
-	// gc.model.
-	maybeApplyPerDispatchModelOverride(candidate, cfg, store)
-
-	// Fold a per-dispatch reasoning effort from the session's assigned work
-	// bead (gc.reasoning metadata) into template_overrides["effort"], mirroring
-	// how schema option overrides are carried. Only providers with an "effort"
-	// option (codex) consume it; for codex this becomes
-	// `-c model_reasoning_effort=<effort>` via the existing resolution below.
-	// An explicit session-level effort override wins over the dispatch default.
-	// This knob is independent of the per-dispatch model above; both run here.
-	applyDispatchReasoningOverride(candidate, cfg, store)
 
 	// Apply template_overrides from bead metadata. These are per-session
 	// schema option overrides (e.g., {"model":"opus","effort":"high"}) that
@@ -1101,48 +963,6 @@ func buildPreparedStartWithWorkDirResolver(
 		coreBreakdown: coreBreakdown,
 		liveHash:      liveHash,
 	}, nil
-}
-
-// applyDispatchReasoningOverride reads the per-dispatch reasoning effort from
-// the session's assigned work bead and folds it into the in-memory session
-// template_overrides under the "effort" key, so the normal override resolution
-// (both fresh-start and resume command building) emits the provider's reasoning
-// flag. It is a no-op when the provider has no "effort" option, when no work
-// bead carries gc.reasoning, or when the session already pins an explicit
-// effort override (the more specific session value wins). The persisted bead is
-// not mutated; only the in-memory copy used for this launch is updated.
-func applyDispatchReasoningOverride(candidate startCandidate, cfg *config.City, store beads.Store) {
-	session := candidate.session
-	if session == nil {
-		return
-	}
-	tp := candidate.tp
-	effort := resolveDispatchReasoningEffort(store, tp.ResolvedProvider, taskWorkDirAssignees(candidate, cfg)...)
-	if effort == "" {
-		return
-	}
-	overrides := map[string]string{}
-	if raw := strings.TrimSpace(session.Metadata["template_overrides"]); raw != "" {
-		if err := json.Unmarshal([]byte(raw), &overrides); err != nil {
-			// Malformed override metadata is logged and surfaced by the main
-			// resolution block below; don't fold on top of unparseable JSON.
-			return
-		}
-	}
-	if _, ok := overrides["effort"]; ok {
-		// Explicit session-level effort override takes precedence over the
-		// per-dispatch default.
-		return
-	}
-	overrides["effort"] = effort
-	merged, err := json.Marshal(overrides)
-	if err != nil {
-		return
-	}
-	if session.Metadata == nil {
-		session.Metadata = map[string]string{}
-	}
-	session.Metadata["template_overrides"] = string(merged)
 }
 
 func resolvePreparedTaskWorkDir(
