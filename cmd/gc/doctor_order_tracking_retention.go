@@ -67,8 +67,12 @@ func (c *orderTrackingRetentionCheck) Run(_ *doctor.CheckContext) *doctor.CheckR
 	}
 	count := len(entries)
 	if count >= orderTrackingRetentionCheckThreshold {
+		countStr := fmt.Sprintf("%d", count)
+		if count >= orderTrackingRetentionCheckListLimit {
+			countStr = "≥" + fmt.Sprintf("%d", orderTrackingRetentionCheckListLimit)
+		}
 		res.Status = doctor.StatusWarning
-		res.Message = fmt.Sprintf("%d closed order-tracking beads: retention watchdog will prune automatically (7d TTL default; configure [beads.policies.order_tracking].delete_after_close)", count)
+		res.Message = fmt.Sprintf("%s closed order-tracking beads: retention watchdog will prune automatically (7d TTL default; configure [beads.policies.order_tracking].delete_after_close)", countStr)
 		return res
 	}
 	res.Status = doctor.StatusOK

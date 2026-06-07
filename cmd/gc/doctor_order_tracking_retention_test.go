@@ -55,6 +55,20 @@ func TestOrderTrackingRetentionCheck_WarningAboveThreshold(t *testing.T) {
 	}
 }
 
+func TestOrderTrackingRetentionCheck_CapFormatAtListLimit(t *testing.T) {
+	// 501 closed beads (the list cap): count displays as "≥501", not exact.
+	store := beads.NewMemStoreFrom(700, makeClosedOrderTrackingBeads(501), nil)
+	check := newOrderTrackingRetentionCheck("/city", func(string) (beads.Store, error) { return store, nil })
+
+	res := check.Run(&doctor.CheckContext{})
+	if res.Status != doctor.StatusWarning {
+		t.Fatalf("Status = %v, want Warning at list cap: %s", res.Status, res.Message)
+	}
+	if !strings.Contains(res.Message, "≥501") {
+		t.Fatalf("Message = %q, want ≥501 cap format", res.Message)
+	}
+}
+
 func TestOrderTrackingRetentionCheck_OKWhenNoStore(t *testing.T) {
 	check := newOrderTrackingRetentionCheck("", nil)
 	res := check.Run(&doctor.CheckContext{})
