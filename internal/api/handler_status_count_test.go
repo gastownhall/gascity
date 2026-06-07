@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
@@ -134,6 +135,14 @@ func TestHandleStatusCounterFailureReportsPartialWithoutListRetry(t *testing.T) 
 }
 
 func TestHandleStatusServesRecentResponseDespiteIndexAdvance(t *testing.T) {
+	// Pin the time-bucket cache off so the TTL floor alone carries the
+	// assertion: with the default 2s bucket both requests would land in the
+	// same bucket and the bucket cache would serve the body before the floor
+	// is ever consulted, masking a floor regression.
+	oldTTL := timeBucketResponseCacheTTL
+	timeBucketResponseCacheTTL = time.Nanosecond // bucket rolls every request
+	t.Cleanup(func() { timeBucketResponseCacheTTL = oldTTL })
+
 	state := newFakeState(t)
 	counter := &counterBeadStore{
 		Store:         beads.NewMemStore(),

@@ -52,8 +52,8 @@ type StatusInput struct {
 	// Lite trims the body to the cheap fleet-overview fields for
 	// high-frequency dashboard polls, omitting the expensive per-request
 	// blocks: StoreHealth (full closed-history Dolt scan), the
-	// session-count detail, and the per-rig work loop. The default/full
-	// body that `gc status` renders is unchanged (gascity#3186).
+	// session-count detail, and the per-rig work-count fan-out. The
+	// default/full body that `gc status` renders is unchanged (gascity#3186).
 	Lite bool `query:"lite" required:"false" doc:"When true, omit the expensive store-health, session-count, and work-count blocks for low-cost dashboard polls."`
 }
 
