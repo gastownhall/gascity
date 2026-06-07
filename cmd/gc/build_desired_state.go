@@ -1550,6 +1550,10 @@ func readyForControllerDemandQuery(store beads.Store, query beads.ReadyQuery) ([
 	if err != nil && !beads.IsPartialResult(err) {
 		rows = nil
 	}
+	// The live Ready read is the cross-process freshness replacement for the
+	// retired gc.pool_demand sentinel. Each controller demand group pays at
+	// most one live backing-store Ready query per reconciliation pass and shares
+	// that result across every template backed by the same store.
 	liveRows, liveErr := handles.Live.Ready(query)
 	if liveErr == nil {
 		// A complete live read is authoritative; cached rows only preserve
