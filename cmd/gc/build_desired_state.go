@@ -547,7 +547,19 @@ func buildDesiredStateWithSessionBeads(
 			// not create a parallel generic worker for the same backing template.
 			poolDir := agentCommandDir(cityPath, &cfg.Agents[i], cfg.Rigs)
 			if store != nil && !hasCustomScaleCheck {
-				defaultNamedScaleTargets = append(defaultNamedScaleTargets, defaultScaleCheckTargetForAgent(cityPath, cfg, &cfg.Agents[i], store, rigStores))
+				ownTarget := defaultScaleCheckTargetForAgent(cityPath, cfg, &cfg.Agents[i], store, rigStores)
+				defaultNamedScaleTargets = append(defaultNamedScaleTargets, ownTarget)
+				// Cross-store cold-wake for named-backing pools (vp-cl4): mirror the
+				// generic-pool guard (vp-s37 / #3078 line ~598). A cold rig pool that
+				// backs a named session and has no custom scale_check must also probe
+				// the city store so that routed demand delivered there (vp-kvp) can
+				// wake the pool. Same guard conditions apply: healthy own rig store,
+				// not city-aliased, not city-scoped. defaultNamedSessionDemand
+				// aggregates targets by storeKey; the city group discovers demand via
+				// Ready() independently from the rig-store group.
+				if isCold && ownTarget.storeKey != "city" && ownTarget.store != nil && ownTarget.err == nil && ownTarget.store != store {
+					defaultNamedScaleTargets = append(defaultNamedScaleTargets, defaultScaleCheckTarget{template: template, store: store, storeKey: "city"})
+				}
 				continue
 			}
 			if store != nil && isCold {
