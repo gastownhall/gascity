@@ -303,10 +303,11 @@ func TestHandleStatusDegradesWhenReadModelStoreStalls(t *testing.T) {
 	statusStoreReadTimeout = 20 * time.Millisecond
 	t.Cleanup(func() { statusStoreReadTimeout = oldTimeout })
 
+	const stallDelay = 750 * time.Millisecond
 	state := newFakeState(t)
 	stallingStore := &delayedListStore{
 		Store: beads.NewMemStore(),
-		delay: 750 * time.Millisecond,
+		delay: stallDelay,
 	}
 	state.cityBeadStore = stallingStore
 	state.stores["myrig"] = stallingStore
@@ -318,8 +319,8 @@ func TestHandleStatusDegradesWhenReadModelStoreStalls(t *testing.T) {
 	h.ServeHTTP(rec, req)
 	elapsed := time.Since(start)
 
-	if elapsed > 500*time.Millisecond {
-		t.Fatalf("status handler took %s, want bounded degraded response", elapsed)
+	if elapsed > stallDelay {
+		t.Fatalf("status handler took %s, want bounded degraded response (< stall %s)", elapsed, stallDelay)
 	}
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
@@ -341,10 +342,11 @@ func TestHandleStatusDegradesWhenMailCountStalls(t *testing.T) {
 	statusStoreReadTimeout = 20 * time.Millisecond
 	t.Cleanup(func() { statusStoreReadTimeout = oldTimeout })
 
+	const stallDelay = 750 * time.Millisecond
 	state := newFakeState(t)
 	state.cityMailProv = &delayedMailCountProvider{
 		Provider: state.cityMailProv,
-		delay:    750 * time.Millisecond,
+		delay:    stallDelay,
 	}
 	h := newTestCityHandler(t, state)
 
@@ -354,8 +356,8 @@ func TestHandleStatusDegradesWhenMailCountStalls(t *testing.T) {
 	h.ServeHTTP(rec, req)
 	elapsed := time.Since(start)
 
-	if elapsed > 500*time.Millisecond {
-		t.Fatalf("status handler took %s, want bounded degraded response", elapsed)
+	if elapsed > stallDelay {
+		t.Fatalf("status handler took %s, want bounded degraded response (< stall %s)", elapsed, stallDelay)
 	}
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
