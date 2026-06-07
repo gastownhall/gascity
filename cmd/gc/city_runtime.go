@@ -83,8 +83,9 @@ type CityRuntime struct {
 	orderRescanLast         time.Time
 	trace                   *sessionReconcilerTraceManager
 
-	orderSweepWatchdogLast     time.Time
-	nudgeMailSweepWatchdogLast time.Time
+	orderSweepWatchdogLast             time.Time
+	orderTrackingRetentionWatchdogLast time.Time
+	nudgeMailSweepWatchdogLast         time.Time
 
 	rec events.Recorder
 	cs  *controllerState // nil when controller-managed bead stores are unavailable
@@ -1222,6 +1223,7 @@ func (cr *CityRuntime) dispatchOrders(ctx context.Context, cityRoot string) {
 	now := time.Now()
 	cr.rescanOrderDispatcherIfDue(ctx, cityRoot, now)
 	cr.runOrderTrackingSweepWatchdog(now)
+	cr.runOrderTrackingRetentionWatchdog(now)
 	cr.runNudgeMailSweepWatchdog(now)
 	if cr.od != nil {
 		cr.od.dispatch(ctx, cityRoot, now)
@@ -1352,6 +1354,37 @@ func (cr *CityRuntime) runOrderTrackingSweepWatchdog(now time.Time) {
 	}
 }
 
+// runOrderTrackingRetentionWatchdog deletes closed order-tracking beads that
+// are past their TTL (defaulting to 7d) and beyond the retain-10 floor, at
+// most once every orderTrackingRetentionWatchdogInterval. It deletes at most
+// orderTrackingRetentionWatchdogDeleteBudget beads per invocation.
+func (cr *CityRuntime) runOrderTrackingRetentionWatchdog(now time.Time) {
+	if !cr.orderTrackingRetentionWatchdogLast.IsZero() &&
+		now.Sub(cr.orderTrackingRetentionWatchdogLast) < orderTrackingRetentionWatchdogInterval {
+		return
+	}
+	cr.orderTrackingRetentionWatchdogLast = now
+
+	stores, _, closeOpened, storeErr := cr.orderTrackingSweepStores()
+	defer closeOpened()
+	if len(stores) == 0 {
+		if storeErr != nil && cr.stderr != nil {
+			fmt.Fprintf(cr.stderr, "%s: order-tracking retention watchdog: %v\n", cr.logPrefix, storeErr) //nolint:errcheck // best-effort stderr
+		}
+		return
+	}
+
+	policy := orderTrackingRetentionPolicyForConfig(cr.cfg)
+	deleted, sweepErr := sweepClosedOrderTrackingRetentionAcrossStoresBounded(
+		stores, now, policy, nil, orderTrackingRetentionWatchdogDeleteBudget)
+	if err := errors.Join(storeErr, sweepErr); err != nil && cr.stderr != nil {
+		fmt.Fprintf(cr.stderr, "%s: order-tracking retention watchdog: %v\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
+	}
+	if deleted > 0 && cr.stderr != nil {
+		fmt.Fprintf(cr.stderr, "%s: order-tracking retention watchdog: pruned %d closed bead(s)\n", cr.logPrefix, deleted) //nolint:errcheck // best-effort stderr
+	}
+}
+
 func (cr *CityRuntime) runNudgeMailSweepWatchdog(now time.Time) {
 	if !cr.nudgeMailSweepWatchdogLast.IsZero() && now.Sub(cr.nudgeMailSweepWatchdogLast) < nudgeMailSweepWatchdogInterval {
 		return
@@ -1385,7 +1418,7 @@ func (cr *CityRuntime) runNudgeMailSweepWatchdog(now time.Time) {
 	}
 }
 
-func (cr *CityRuntime) orderTrackingSweepStores() ([]beads.Store, []orderTrackingSweepTarget, func(), error) {
+func (cr *CityRuntime) orderTrackingSweepStores() ([]beads.Store, []orderTrackingSweepTarget, func(), error) { //nolint:unparam // targets slice returned for callers that need sweep scope metadata; current call sites discard it
 	targets := orderTrackingSweepTargetsForConfig(cr.cityPath, cr.cfg)
 	rigStores := cr.rigBeadStores()
 	var freshlyOpened []beads.Store
