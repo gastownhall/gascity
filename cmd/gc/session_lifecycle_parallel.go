@@ -918,6 +918,15 @@ func buildPreparedStartWithWorkDirResolver(
 	// gc.model.
 	maybeApplyPerDispatchModelOverride(candidate, cfg, store)
 
+	// Fold a per-dispatch reasoning effort from the session's assigned work
+	// bead (gc.reasoning metadata) into template_overrides["effort"], mirroring
+	// how schema option overrides are carried. Only providers with an "effort"
+	// option (codex) consume it; for codex this becomes
+	// `-c model_reasoning_effort=<effort>` via the existing resolution below.
+	// An explicit session-level effort override wins over the dispatch default.
+	// This knob is independent of the per-dispatch model above; both run here.
+	applyDispatchReasoningOverride(candidate, cfg, store)
+
 	// Apply template_overrides from bead metadata. These are per-session
 	// schema option overrides (e.g., {"model":"opus","effort":"high"}) that
 	// override the agent's default CLI flags for specific options.
