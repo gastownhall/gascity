@@ -37,6 +37,14 @@ var (
 	// bdGraphApplyCommandTimeout bounds atomic graph creation below callers'
 	// outer command budgets so transient Dolt stalls can retry or fall back.
 	bdGraphApplyCommandTimeout = 45 * time.Second
+	// bdQueryCommandTimeout bounds the `bd query` subcommand, which reads the
+	// ephemeral (wisp) tier. gc reload and gc doctor run a sequence of these
+	// ephemeral/order-run reads; under the 120s general timeout an
+	// intermittently slow child blocked those commands for minutes (#3191).
+	// A bound well below that lets the runner kill the slow child quickly so
+	// the tier-merge degrades to the durable tier and the lookups continue
+	// instead of blocking. Normal ephemeral reads return in ~2s.
+	bdQueryCommandTimeout = 30 * time.Second
 	// bdSlowTelemetryThreshold is fixed in production via telemetry.BDSlowThreshold:
 	// high enough to avoid normal bd list calls, but below the wrapper timeout.
 	bdSlowTelemetryThreshold = telemetry.BDSlowThreshold
@@ -182,6 +190,8 @@ func bdCommandTimeoutFor(name string, args []string) time.Duration {
 	switch args[0] {
 	case "count", "list", "ready", "show", "stats":
 		return bdReadCommandTimeout
+	case "query":
+		return bdQueryCommandTimeout
 	default:
 		return bdCommandTimeout
 	}

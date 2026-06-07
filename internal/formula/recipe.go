@@ -114,6 +114,19 @@ func (r *Recipe) RootStep() *RecipeStep {
 	return &r.Steps[0]
 }
 
+// RecipeHasReadySurface reports whether instantiating recipe creates a root
+// bead that Ready queries can see and route directly.
+func RecipeHasReadySurface(recipe *Recipe) bool {
+	if recipe == nil {
+		return false
+	}
+	if recipe.RootOnly {
+		return true
+	}
+	root := recipe.RootStep()
+	return root != nil && root.Metadata["gc.kind"] == "workflow"
+}
+
 // StepByID returns the step with the given ID, or nil if not found.
 func (r *Recipe) StepByID(id string) *RecipeStep {
 	for i := range r.Steps {

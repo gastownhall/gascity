@@ -413,13 +413,17 @@ func cmdNudgeDrainWithFormat(args []string, inject bool, hookFormat string, stdo
 		}
 		return 1
 	}
+	deliveryStore := openNudgeBeadStore(target.cityPath)
 	items, rejected := splitQueuedNudgesForTarget(target, items)
 	if len(rejected) > 0 {
-		_ = recordQueuedNudgeFailure(target.cityPath, queuedNudgeIDs(rejected), errNudgeSessionFenceMismatch, time.Now())
+		_ = recordQueuedNudgeFailureWithStore(target.cityPath, deliveryStore, queuedNudgeIDs(rejected), errNudgeSessionFenceMismatch, time.Now())
 	}
-	deliveryStore := openNudgeBeadStore(target.cityPath)
-	items, blocked, err := splitQueuedNudgesForDelivery(deliveryStore, items)
+	candidates := items
+	items, blocked, err := splitQueuedNudgesForDelivery(deliveryStore, candidates)
 	if err != nil {
+		// Release the claims so the next drain or poller pass retries
+		// promptly instead of waiting out the in-flight lease.
+		_ = releaseQueuedNudgeClaims(target.cityPath, queuedNudgeIDs(candidates))
 		if inject {
 			fmt.Fprintf(stderr, "gc nudge drain: validating claimed nudges: %v\n", err) //nolint:errcheck
 			return 0
@@ -429,12 +433,10 @@ func cmdNudgeDrainWithFormat(args []string, inject bool, hookFormat string, stdo
 	}
 	if len(blocked) > 0 {
 		if err := terminalizeBlockedQueuedNudges(target.cityPath, blocked); err != nil {
-			if inject {
-				fmt.Fprintf(stderr, "gc nudge drain: withdrawing blocked nudges: %v\n", err) //nolint:errcheck
-				return 0
-			}
+			// Best-effort: blocked-item bookkeeping must not abort delivery
+			// of the remaining items. The blocked items stay in-flight and
+			// lease expiry returns them to pending for a later pass.
 			fmt.Fprintf(stderr, "gc nudge drain: withdrawing blocked nudges: %v\n", err) //nolint:errcheck
-			return 1
 		}
 	}
 	if len(items) == 0 {
@@ -460,7 +462,7 @@ func cmdNudgeDrainWithFormat(args []string, inject bool, hookFormat string, stdo
 		_, writeErr = io.WriteString(stdout, out)
 	}
 	if writeErr != nil {
-		_ = recordQueuedNudgeFailure(target.cityPath, queuedNudgeIDs(items), writeErr, time.Now())
+		_ = recordQueuedNudgeFailureWithStore(target.cityPath, deliveryStore, queuedNudgeIDs(items), writeErr, time.Now())
 		if inject {
 			return 0
 		}
@@ -533,9 +535,23 @@ func cmdNudgePoll(args []string, sessionName string, interval, quiescence time.D
 	}
 	var missingSince time.Time
 	for {
-		obs, err := workerObserveNudgeTarget(target, store, sp)
+		obs, err := nudgeObserveTarget(target, store, sp)
 		if err != nil {
 			fmt.Fprintf(stderr, "gc nudge poll: %v\n", err) //nolint:errcheck
+			// Transient observation failures (store hiccup, runtime probe
+			// race) must not kill the poller while queued work is pending:
+			// for an idle session this sidecar is the only delivery path, so
+			// exiting here strands the queue until something re-launches a
+			// poller. Reuse the missing-session grace window; persistent
+			// failures still exit once it elapses or the queue drains.
+			now := time.Now()
+			if shouldKeepNudgePollerAlive(target, missingSince, now) {
+				if missingSince.IsZero() {
+					missingSince = now
+				}
+				time.Sleep(interval)
+				continue
+			}
 			return 1
 		}
 		if !obs.Running {
@@ -1039,27 +1055,34 @@ func tryDeliverQueuedNudgesByPoller(target nudgeTarget, store beads.Store, sp ru
 	if err != nil || len(items) == 0 {
 		return false, err
 	}
-	items, rejected := splitQueuedNudgesForTarget(target, items)
-	if len(rejected) > 0 {
-		if recErr := recordQueuedNudgeFailure(target.cityPath, queuedNudgeIDs(rejected), errNudgeSessionFenceMismatch, time.Now()); recErr != nil {
-			return false, recErr
-		}
-	}
 	deliveryStore := store
 	if deliveryStore == nil {
 		deliveryStore = openNudgeBeadStore(target.cityPath)
 	}
-	items, blocked, err := splitQueuedNudgesForDelivery(deliveryStore, items)
+	// Bookkeeping for fence-mismatched and blocked items is best-effort: a
+	// failure there must not abort delivery of the remaining claimable items.
+	// Items whose bookkeeping failed stay in-flight; lease expiry returns
+	// them to pending and a later pass retries.
+	var bookkeepErr error
+	items, rejected := splitQueuedNudgesForTarget(target, items)
+	if len(rejected) > 0 {
+		if recErr := recordQueuedNudgeFailureWithStore(target.cityPath, deliveryStore, queuedNudgeIDs(rejected), errNudgeSessionFenceMismatch, time.Now()); recErr != nil {
+			bookkeepErr = fmt.Errorf("dead-lettering fence-mismatched nudges: %w", recErr)
+		}
+	}
+	candidates := items
+	items, blocked, err := splitQueuedNudgesForDelivery(deliveryStore, candidates)
 	if err != nil {
-		return false, err
+		relErr := releaseQueuedNudgeClaims(target.cityPath, queuedNudgeIDs(candidates))
+		return false, errors.Join(bookkeepErr, err, relErr)
 	}
 	if len(blocked) > 0 {
-		if err := terminalizeBlockedQueuedNudges(target.cityPath, blocked); err != nil {
-			return false, err
+		if termErr := terminalizeBlockedQueuedNudges(target.cityPath, blocked); termErr != nil {
+			bookkeepErr = errors.Join(bookkeepErr, fmt.Errorf("withdrawing blocked nudges: %w", termErr))
 		}
 	}
 	if len(items) == 0 {
-		return false, nil
+		return false, bookkeepErr
 	}
 	var msg string
 	if target.sessionTransport() == "acp" {
@@ -1069,7 +1092,8 @@ func tryDeliverQueuedNudgesByPoller(target nudgeTarget, store beads.Store, sp ru
 	}
 	handle, err := workerHandleForNudgeTarget(target, store, sp)
 	if err != nil {
-		return false, err
+		relErr := releaseQueuedNudgeClaims(target.cityPath, queuedNudgeIDs(items))
+		return false, errors.Join(bookkeepErr, err, relErr)
 	}
 	result, err := handle.Nudge(context.Background(), worker.NudgeRequest{
 		Text:     msg,
@@ -1081,21 +1105,25 @@ func tryDeliverQueuedNudgesByPoller(target nudgeTarget, store beads.Store, sp ru
 		telemetry.RecordNudge(context.Background(), target.agentKey(), err)
 		if errors.Is(err, runtime.ErrSessionNotFound) {
 			if recErr := releaseQueuedNudgeClaims(target.cityPath, queuedNudgeIDs(items)); recErr != nil {
-				return false, recErr
+				return false, errors.Join(bookkeepErr, recErr)
 			}
-			return false, nil
+			return false, bookkeepErr
 		}
-		if recErr := recordQueuedNudgeFailure(target.cityPath, queuedNudgeIDs(items), err, time.Now()); recErr != nil {
-			return false, recErr
+		if recErr := recordQueuedNudgeFailureWithStore(target.cityPath, deliveryStore, queuedNudgeIDs(items), err, time.Now()); recErr != nil {
+			return false, errors.Join(bookkeepErr, recErr)
 		}
-		return false, nil
+		return false, bookkeepErr
 	}
 	if !result.Delivered {
-		return false, nil
+		// The runtime declined without an error (e.g. the session stopped
+		// between observation and delivery). Release the claims so the next
+		// pass retries promptly instead of waiting out the in-flight lease.
+		relErr := releaseQueuedNudgeClaims(target.cityPath, queuedNudgeIDs(items))
+		return false, errors.Join(bookkeepErr, relErr)
 	}
 	telemetry.RecordNudge(context.Background(), target.agentKey(), nil)
 	stampLastNudgeDeliveredAt(deliveryStore, target.sessionID, time.Now())
-	return true, ackQueuedNudges(target.cityPath, queuedNudgeIDs(items))
+	return true, errors.Join(bookkeepErr, ackQueuedNudges(target.cityPath, queuedNudgeIDs(items)))
 }
 
 func stampLastNudgeDeliveredAt(store beads.Store, sessionID string, t time.Time) {
@@ -1415,12 +1443,6 @@ func queuedNudgeClaimableForTarget(target nudgeTarget, item queuedNudge) bool {
 		return false
 	}
 	return true
-}
-
-func claimDueQueuedNudges(cityPath, agentName string, now time.Time) ([]queuedNudge, error) {
-	return claimDueQueuedNudgesMatching(cityPath, now, func(item queuedNudge) bool {
-		return item.Agent == agentName
-	})
 }
 
 func claimDueQueuedNudgesForTarget(cityPath string, target nudgeTarget, now time.Time) ([]queuedNudge, error) {
@@ -1766,21 +1788,28 @@ func releaseQueuedNudgeClaims(cityPath string, ids []string) error {
 }
 
 func recordQueuedNudgeFailure(cityPath string, ids []string, cause error, now time.Time) error {
-	_, err := recordQueuedNudgeFailureDetailed(cityPath, ids, cause, now)
+	return recordQueuedNudgeFailureWithStore(cityPath, nil, ids, cause, now)
+}
+
+func recordQueuedNudgeFailureWithStore(cityPath string, store beads.Store, ids []string, cause error, now time.Time) error {
+	_, err := recordQueuedNudgeFailureDetailed(cityPath, store, ids, cause, now)
 	return err
 }
 
-func recordQueuedNudgeFailureDetailed(cityPath string, ids []string, cause error, now time.Time) ([]queuedNudge, error) {
+func recordQueuedNudgeFailureDetailed(cityPath string, store beads.Store, ids []string, cause error, now time.Time) ([]queuedNudge, error) {
 	if len(ids) == 0 {
 		return nil, nil
 	}
-	store := openNudgeBeadStore(cityPath)
+	if store == nil {
+		store = openNudgeBeadStore(cityPath)
+	}
 	want := make(map[string]bool, len(ids))
 	for _, id := range ids {
 		want[id] = true
 	}
 	var deadLettered []queuedNudge
 	err := withNudgeQueueState(cityPath, func(state *nudgeQueueState) error {
+		deadLettered = deadLettered[:0]
 		if err := recoverExpiredInFlightNudges(state, store, now); err != nil {
 			return err
 		}
@@ -1824,15 +1853,24 @@ func recordQueuedNudgeFailureDetailed(cityPath string, ids []string, cause error
 		state.InFlight = inFlight
 		state.Pending = append(state.Pending, requeued...)
 		state.Dead = append(state.Dead, dead...)
-		for _, item := range dead {
-			if err := markQueuedNudgeTerminal(store, item, "failed", item.LastError, "", now); err != nil {
-				return err
-			}
-		}
 		sortQueuedNudges(state)
 		return nil
 	})
-	return deadLettered, err
+	if err != nil {
+		return nil, err
+	}
+	// Mark backing beads terminal outside the queue lock, best-effort. The
+	// dead-letter transition above is authoritative; a failed bead write must
+	// not roll it back, or the items bounce between InFlight and Pending
+	// forever and stale backlogs wedge every delivery pass that claims them.
+	// pruneDeadQueuedNudges repairs dead entries whose backing bead missed
+	// terminal state, so drift converges on later queue operations.
+	for _, item := range deadLettered {
+		if markErr := markQueuedNudgeTerminal(store, item, "failed", item.LastError, "", now); markErr != nil && nudgeWarningWriter != nil {
+			fmt.Fprintf(nudgeWarningWriter, "gc nudge: warning: marking dead-lettered nudge %q terminal: %v\n", item.ID, markErr) //nolint:errcheck
+		}
+	}
+	return deadLettered, nil
 }
 
 func failedQueuedNudge(item queuedNudge, cause error, now time.Time) (queuedNudge, bool) {

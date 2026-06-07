@@ -211,6 +211,7 @@ type startResult struct {
 // session_key is set, CommitRefresh only on the async path).
 type startPhaseTimings struct {
 	StartCall         time.Duration // startPreparedStartCandidate total (provider Start + any ErrStateSync recovery)
+	ZombieRecycle     time.Duration // provider Stop of a running session whose agent process died (subset of StartCall; ga-yms)
 	StateSyncRecovery time.Duration // workerSessionTargetRunningWithConfig branch when provider Start returned ErrStateSync (subset of StartCall; gc-9ha)
 	PostStartObserve  time.Duration // staleKeyDetectDelay + workerObserveSessionTarget when session_key present
 	CommitRefresh     time.Duration // refreshAsyncStartResult bead reload (async path only)
@@ -227,12 +228,15 @@ type startPhaseTimings struct {
 // 0.5ms doesn't print as "...=0s" (which would be misleading and
 // defeat the elision intent). Sub-ms durations are dropped entirely.
 func (p startPhaseTimings) formatLog() string {
-	if p.StartCall == 0 && p.StateSyncRecovery == 0 && p.PostStartObserve == 0 && p.CommitRefresh == 0 {
+	if p.StartCall == 0 && p.ZombieRecycle == 0 && p.StateSyncRecovery == 0 && p.PostStartObserve == 0 && p.CommitRefresh == 0 {
 		return ""
 	}
 	var parts []string
 	if r := p.StartCall.Round(time.Millisecond); r > 0 {
 		parts = append(parts, fmt.Sprintf("start_call=%s", r))
+	}
+	if r := p.ZombieRecycle.Round(time.Millisecond); r > 0 {
+		parts = append(parts, fmt.Sprintf("zombie_recycle=%s", r))
 	}
 	if r := p.StateSyncRecovery.Round(time.Millisecond); r > 0 {
 		parts = append(parts, fmt.Sprintf("state_sync_recovery=%s", r))
@@ -1120,7 +1124,7 @@ func runPreparedStartCandidate(
 	defer cancel()
 	var phases startPhaseTimings
 	startCallBegin := time.Now()
-	startedFresh, err := startPreparedStartCandidate(startCtx, item, cityPath, store, sp, cfg)
+	startedFresh, err := startPreparedStartCandidate(startCtx, item, cityPath, store, sp, cfg, &phases)
 	startCtxErr := startCtx.Err()
 	// Split start_call into provider.Start and the ErrStateSync recovery
 	// branch (gc-9ha). The recovery branch hits the worker observation
@@ -1549,18 +1553,37 @@ func startPreparedStartCandidate(
 	store beads.Store,
 	sp runtime.Provider,
 	cfg *config.City,
+	phases *startPhaseTimings,
 ) (bool, error) {
 	name := item.candidate.name()
 	if sp != nil {
 		running, alive := observeRuntimeProviderLiveness(sp, name, item.cfg.ProcessNames)
 		if running {
-			if shouldRollbackPendingCreate(item.candidate.session) && !runningSessionMatchesPendingCreate(item.candidate.session, name, sp) {
-				return false, fmt.Errorf("%w: session %q", runtime.ErrSessionExists, name)
-			}
 			if alive {
+				if shouldRollbackPendingCreate(item.candidate.session) && !runningSessionMatchesPendingCreate(item.candidate.session, name, sp) {
+					return false, fmt.Errorf("%w: session %q", runtime.ErrSessionExists, name)
+				}
 				return false, nil
 			}
-			return false, fmt.Errorf("session %q died during startup", name)
+			// Zombie: the runtime container (e.g. tmux pane) is up but the
+			// agent process is gone — typically a session that survived a
+			// supervisor restart and whose CLI exited back to the wrapping
+			// shell. Failing here wedges the reconciler in a collide-loop:
+			// the stale session keeps the name occupied, every retry hits
+			// the same state, and templates depending on this session never
+			// start (ga-yms). A dead agent process has nothing left to
+			// preserve — identity mismatch included, since rolling a pending
+			// create back just recreates the bead next tick against the same
+			// zombie — so recycle it: stop the stale session and fall
+			// through to a fresh start.
+			recycleBegin := time.Now()
+			stopErr := sp.Stop(name)
+			if phases != nil {
+				phases.ZombieRecycle = time.Since(recycleBegin)
+			}
+			if stopErr != nil && !runtime.IsSessionGone(stopErr) {
+				return false, fmt.Errorf("recycling session %q with dead agent process: %w", name, stopErr)
+			}
 		}
 	}
 	if store == nil || item.candidate.session == nil || strings.TrimSpace(item.candidate.session.ID) == "" {

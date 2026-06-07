@@ -30,6 +30,7 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/supervisor"
+	"github.com/gastownhall/gascity/internal/suspensionstate"
 	"github.com/gastownhall/gascity/internal/workspacesvc"
 )
 
@@ -190,28 +191,41 @@ func wrapWithCachingStore(ctx context.Context, store beads.Store, ep events.Prov
 	}
 	// Full prime runs async — backfills remaining beads for List()
 	// callers (convergence reconcile, sweep, API handlers).
-	go func() {
-		log.Printf("caching-store: priming ...")
-		if err := cs.Prime(ctx); err != nil {
-			log.Printf("caching-store: prime FAILED: %v (reads will use bd subprocess)", err)
-			return
-		}
-		if ctx.Err() != nil {
-			return
-		}
-		cs.StartReconciler(ctx, beads.WithStaggerAuto(), os.Getenv("GC_AGENT"))
-	}()
+	go primeThenStartReconciler(ctx, cs, os.Getenv("GC_AGENT"))
 	if policyWrapped {
 		return wrapStoreWithBeadPolicies(cs, policyStore.cfg)
 	}
 	return cs
 }
 
+// primeThenStartReconciler runs the async full prime and then arms the
+// watchdog reconciler. The reconciler starts even when the prime fails:
+// its periodic full scan loads the same snapshot a successful prime
+// would and promotes the cache to live, so a transient prime failure at
+// startup heals on the next reconcile cycle. Without this, one failed
+// prime left the store serving its PrimeActive-era snapshot for the
+// life of the controller — kept fresh only by event-bus writes — so
+// storage-level state created before a restart (e.g. routed pool work
+// feeding scale-check demand) stayed invisible until something else
+// touched the bead. Only shutdown (ctx canceled) skips the reconciler.
+func primeThenStartReconciler(ctx context.Context, cs *beads.CachingStore, agentID string) {
+	log.Printf("caching-store: priming ...")
+	if err := cs.Prime(ctx); err != nil {
+		log.Printf("caching-store: prime FAILED: %v (reads use bd subprocess until the reconciler converges)", err)
+	}
+	if ctx.Err() != nil {
+		return
+	}
+	cs.StartReconciler(ctx, beads.WithStaggerAuto(), agentID)
+}
+
 // buildStores creates bead stores for each rig in cfg.
 // Mail providers are NOT built here — all mail uses the city-level store.
-// Pure function of cfg — does not read or write cs fields (safe to call unlocked).
+// Does not read or write mutable cs fields (safe to call unlocked); reads
+// the runtime suspension state file to gate per-rig cache refresh.
 func (cs *controllerState) buildStores(cfg *config.City) map[string]beads.Store {
 	cityProvider := rawBeadsProviderForScope(cs.cityPath, cs.cityPath)
+	suspState := loadSuspensionStateBestEffort(cs.cityPath)
 	stores := make(map[string]beads.Store, len(cfg.Rigs))
 
 	var sharedLegacyFileStore beads.Store
@@ -245,9 +259,24 @@ func (cs *controllerState) buildStores(cfg *config.City) map[string]beads.Store 
 			continue
 		}
 		store = cs.openRigStore(scopeProvider, rig.Name, scopeRoot, rig.EffectivePrefix(), cfg)
-		stores[rig.Name] = wrapWithCachingStore(cs.cacheCtx, store, cs.eventProv, !rig.Suspended)
+		stores[rig.Name] = wrapWithCachingStore(cs.cacheCtx, store, cs.eventProv, rigStoreBackgroundRefresh(suspState, rig))
 	}
 	return stores
+}
+
+// rigStoreBackgroundRefresh reports whether the controller should run
+// the continuous cache refresh (async full prime + watchdog reconciler)
+// for a rig's bead store. Suspended rigs skip it: they spawn no agents,
+// so nothing writes locally and reconciling them every cycle is pure
+// cost (gastownhall/gascity #1978 follow-up). Suspension here is the
+// EFFECTIVE state — the runtime suspend/resume override layered over the
+// rig's committable suspended_on_start default — not the deprecated raw
+// [[rigs]] suspended field alone. Gating on the raw field misfires both
+// ways: a rig resumed at runtime keeps refreshing only by accident of
+// which config spelling it used, and a suspended_on_start rig never gets
+// the skip at all.
+func rigStoreBackgroundRefresh(suspState suspensionstate.State, rig config.Rig) bool {
+	return !suspensionstate.EffectiveRigSuspended(suspState, rig.Name, rig.EffectiveSuspendedOnStart())
 }
 
 // openRigStore creates a bead store for a rig path using the given provider.
@@ -687,11 +716,18 @@ func storeMetadataSignature(cityPath string, cfg *config.City) string {
 	if cfg == nil {
 		return b.String()
 	}
+	// The per-rig refresh gate is part of the signature: the captured
+	// signature is compared against a recomputed one on reload
+	// (runtimeUpdateCanReuseCurrentStores), so a runtime suspend/resume
+	// flip invalidates store reuse and the next reload rebuilds stores
+	// with the correct background-refresh gate.
+	suspState := loadSuspensionStateBestEffort(cityPath)
 	for _, rig := range cfg.Rigs {
 		if strings.TrimSpace(rig.Path) == "" {
 			continue
 		}
-		appendScopeMetadataSignature("rig:"+rig.Name, rig.Path)
+		label := fmt.Sprintf("rig:%s:refresh=%t", rig.Name, rigStoreBackgroundRefresh(suspState, rig))
+		appendScopeMetadataSignature(label, rig.Path)
 	}
 	return b.String()
 }

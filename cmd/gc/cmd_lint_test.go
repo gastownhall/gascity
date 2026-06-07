@@ -326,6 +326,88 @@ func appendLintFile(t *testing.T, path, content string) {
 	}
 }
 
+func TestLintFormulaOutputJSONWarning(t *testing.T) {
+	packDir := t.TempDir()
+	writeLintPack(t, packDir, "mypack", "worker", "prompts/worker.template.md")
+	writeLintFile(t, filepath.Join(packDir, "prompts", "worker.template.md"), "hello {{.AgentName}}\n")
+
+	formulaDir := filepath.Join(packDir, "formulas")
+	writeLintFile(t, filepath.Join(formulaDir, "legacy.formula.toml"), strings.TrimSpace(`
+formula = "legacy-fanout"
+version = 1
+contract = "graph.v2"
+[[steps]]
+id = "worker"
+prompt = "do work"
+[steps.metadata]
+"gc.output_json_required" = "true"
+`)+"\n")
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"lint", packDir}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("gc lint = %d, want 0 (warnings-only exits 0)\nstdout:\n%s\nstderr:\n%s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "gc.output_json is legacy") {
+		t.Errorf("stderr = %q, want gc.output_json warning", stderr.String())
+	}
+}
+
+func TestLintFormulaNoWarningForDrain(t *testing.T) {
+	packDir := t.TempDir()
+	writeLintPack(t, packDir, "mypack", "worker", "prompts/worker.template.md")
+	writeLintFile(t, filepath.Join(packDir, "prompts", "worker.template.md"), "hello {{.AgentName}}\n")
+
+	formulaDir := filepath.Join(packDir, "formulas")
+	writeLintFile(t, filepath.Join(formulaDir, "drain.formula.toml"), strings.TrimSpace(`
+formula = "drain-fanout"
+version = 1
+contract = "graph.v2"
+[[steps]]
+id = "worker"
+prompt = "do work"
+[steps.drain]
+context = "separate"
+formula = "mol-do-work"
+member_access = "exclusive"
+`)+"\n")
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"lint", packDir}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("gc lint = %d, want 0\nstdout:\n%s\nstderr:\n%s", code, stdout.String(), stderr.String())
+	}
+	if strings.Contains(stderr.String(), "gc.output_json") {
+		t.Errorf("stderr = %q, must not warn about gc.output_json for drain formula", stderr.String())
+	}
+}
+
+func TestLintFormulaNoWarningForGraphV1(t *testing.T) {
+	packDir := t.TempDir()
+	writeLintPack(t, packDir, "mypack", "worker", "prompts/worker.template.md")
+	writeLintFile(t, filepath.Join(packDir, "prompts", "worker.template.md"), "hello {{.AgentName}}\n")
+
+	formulaDir := filepath.Join(packDir, "formulas")
+	writeLintFile(t, filepath.Join(formulaDir, "v1.formula.toml"), strings.TrimSpace(`
+formula = "v1-fanout"
+version = 1
+[[steps]]
+id = "worker"
+prompt = "do work"
+[steps.metadata]
+"gc.output_json_required" = "true"
+`)+"\n")
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"lint", packDir}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("gc lint = %d, want 0\nstdout:\n%s\nstderr:\n%s", code, stdout.String(), stderr.String())
+	}
+	if strings.Contains(stderr.String(), "gc.output_json") {
+		t.Errorf("stderr = %q, must not warn about gc.output_json for graph.v1 formula", stderr.String())
+	}
+}
+
 func validateLintJSONSchema(t *testing.T, data []byte) {
 	t.Helper()
 	rawSchema, err := readBuiltinSchema([]string{"lint"}, jsonSchemaResultRole)

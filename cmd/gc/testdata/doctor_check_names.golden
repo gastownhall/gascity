@@ -32,6 +32,7 @@ instructions-file
 skill-collision
 order-firing-current
 codex-hooks-drift
+beads-proxied-capability
 rig-pack-coverage
 mcp-config
 mcp-shared-target

@@ -1250,6 +1250,10 @@ func bdRuntimeEnvWithError(cityPath string) (map[string]string, error) {
 	// large datasets.
 	env["BD_EXPORT_AUTO"] = "false"
 	applyBdCLIRemoteSyncOptOut(env)
+	// Opt-in: route bd through the pooling db-proxy (no-op unless [beads] proxied
+	// and bd supports it). Covers agent AND controller bd calls (rig env builds
+	// on this base).
+	applyProxiedPoolEnv(env, cityPath)
 	if !cityUsesBdStoreContract(cityPath) {
 		return env, nil
 	}
@@ -1325,6 +1329,9 @@ func cityRuntimeProcessEnvWithError(cityPath string) ([]string, error) {
 			}
 		}
 	}
+	// Opt-in: carry the proxied/pool env to the gc-beads-bd provider script and
+	// any bd it forks (no-op unless [beads] proxied and bd supports it).
+	applyProxiedPoolEnv(overrides, cityPath)
 	return mergeRuntimeEnv(processEnvSnapshotExcludingNativeDoltOpen(), overrides), projectionErr
 }
 

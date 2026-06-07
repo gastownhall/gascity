@@ -1078,27 +1078,62 @@ func TestDoSlingFormulaToAgent(t *testing.T) {
 	}
 }
 
-func TestDoSlingFormulaToPoolSkipsDeprecatedPoolDemand(t *testing.T) {
+func TestDoSlingFormulaToPoolRejectsLegacyMoleculeRoot(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
 	a := config.Agent{Name: "polecat", MaxActiveSessions: intPtr(3)}
 
 	deps := testDeps(cfg, sp, runner.run)
-	result, err := DoSling(SlingOpts{
+	_, err := DoSling(SlingOpts{
 		Target:        a,
 		BeadOrFormula: "code-review",
+		IsFormula:     true,
+	}, deps, nil)
+	if err == nil {
+		t.Fatal("DoSling error = nil, want legacy molecule-root pool rejection")
+	}
+	if !strings.Contains(err.Error(), "root is a molecule container") {
+		t.Fatalf("DoSling error = %q, want Ready-visible root guidance", err.Error())
+	}
+}
+
+func TestDoSlingFormulaToPoolAllowsRootOnlyReadySurface(t *testing.T) {
+	formulaDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(formulaDir, "root-only.toml"), []byte(`
+formula = "root-only"
+version = 1
+phase = "vapor"
+
+[[steps]]
+id = "work"
+title = "Work"
+`), 0o644); err != nil {
+		t.Fatalf("write root-only formula: %v", err)
+	}
+
+	runner := newFakeRunner()
+	sp := runtime.NewFake()
+	cfg := &config.City{
+		Workspace:     config.Workspace{Name: "test-city"},
+		FormulaLayers: config.FormulaLayers{City: []string{formulaDir}},
+	}
+	a := config.Agent{Name: "agent-a", MaxActiveSessions: intPtr(3)}
+
+	deps := testDeps(cfg, sp, runner.run)
+	result, err := DoSling(SlingOpts{
+		Target:        a,
+		BeadOrFormula: "root-only",
 		IsFormula:     true,
 	}, deps, nil)
 	if err != nil {
 		t.Fatalf("DoSling error: %v", err)
 	}
-	root, err := deps.Store.Get(result.BeadID)
-	if err != nil {
-		t.Fatalf("Get(%s): %v", result.BeadID, err)
+	if result.Method != "formula" {
+		t.Errorf("Method = %q, want formula", result.Method)
 	}
-	if got, ok := root.Metadata["gc.pool_demand"]; ok {
-		t.Errorf("wisp root gc.pool_demand = %q, want absent", got)
+	if result.BeadID == "" {
+		t.Fatal("expected non-empty root-only wisp ID")
 	}
 }
 

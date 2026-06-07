@@ -470,6 +470,54 @@ func TestDoctor_BlockingFailedSeverityAccounting(t *testing.T) {
 	}
 }
 
+// TestDoctor_AdvisoryPerCheckLine verifies the per-check output line includes
+// "(advisory)" when the result has SeverityAdvisory and StatusWarning/Error,
+// and that the suffix is absent for OK results and for blocking failures.
+func TestDoctor_AdvisoryPerCheckLine(t *testing.T) {
+	tests := []struct {
+		name       string
+		check      *mockCheck
+		wantLabel  string
+		wantAbsent string
+	}{
+		{
+			name:      "advisory-warning-has-suffix",
+			check:     &mockCheck{name: "check-a", status: StatusWarning, severity: SeverityAdvisory, msg: "heads up"},
+			wantLabel: "(advisory)",
+		},
+		{
+			name:      "advisory-error-has-suffix",
+			check:     &mockCheck{name: "check-b", status: StatusError, severity: SeverityAdvisory, msg: "note"},
+			wantLabel: "(advisory)",
+		},
+		{
+			name:       "advisory-ok-no-suffix",
+			check:      &mockCheck{name: "check-c", status: StatusOK, severity: SeverityAdvisory, msg: "fine"},
+			wantAbsent: "(advisory)",
+		},
+		{
+			name:       "blocking-warning-no-suffix",
+			check:      &mockCheck{name: "check-d", status: StatusWarning, severity: SeverityBlocking, msg: "bad"},
+			wantAbsent: "(advisory)",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			d := &Doctor{}
+			d.Register(tt.check)
+			var buf bytes.Buffer
+			d.Run(&CheckContext{CityPath: "/tmp"}, &buf, false)
+			out := buf.String()
+			if tt.wantLabel != "" && !strings.Contains(out, tt.wantLabel) {
+				t.Errorf("output = %q, want %q in line", out, tt.wantLabel)
+			}
+			if tt.wantAbsent != "" && strings.Contains(out, tt.wantAbsent) {
+				t.Errorf("output = %q, must not contain %q", out, tt.wantAbsent)
+			}
+		})
+	}
+}
+
 // TestPrintSummary_AdvisoryRenderedSeparately confirms advisory failures get
 // their own component in the summary line so operators can tell at a glance
 // that a doctor pass had non-blocking findings.

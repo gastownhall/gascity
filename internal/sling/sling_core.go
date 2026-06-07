@@ -239,6 +239,7 @@ func validateExistingBeadInQuerier(beadID, storeRef string, querier BeadQuerier)
 func slingFormula(opts SlingOpts, deps SlingDeps) (SlingResult, error) {
 	a := opts.Target
 	method := "formula"
+	searchPaths := SlingFormulaSearchPaths(deps, a)
 	inv, isGraph, err := prepareGraphV2FormulaInvocation(context.Background(), opts.BeadOrFormula, "", opts, deps, a)
 	if err != nil {
 		return SlingResult{Target: a.QualifiedName()}, fmt.Errorf("instantiating formula %q: %w", opts.BeadOrFormula, err)
@@ -247,7 +248,14 @@ func slingFormula(opts SlingOpts, deps SlingDeps) (SlingResult, error) {
 	if isGraph {
 		formulaVars = inv.Vars
 	}
-	mResult, err := InstantiateSlingFormula(context.Background(), opts.BeadOrFormula, SlingFormulaSearchPaths(deps, a), molecule.Options{
+	recipe, err := formula.CompileWithoutRuntimeVarValidation(context.Background(), opts.BeadOrFormula, searchPaths, formulaVars)
+	if err != nil {
+		return SlingResult{Target: a.QualifiedName()}, fmt.Errorf("instantiating formula %q: %w", opts.BeadOrFormula, err)
+	}
+	if a.SupportsMultipleSessions() && !formula.RecipeHasReadySurface(recipe) {
+		return SlingResult{Target: a.QualifiedName(), FormulaName: opts.BeadOrFormula, Deprecations: inv.Deprecations}, fmt.Errorf("formula %q root is a molecule container, not Ready-visible work; scale-from-zero pools will not wake for this wisp. Convert the formula to phase=\"vapor\"/root-only or graph.v2 before routing it to a pool", opts.BeadOrFormula)
+	}
+	mResult, err := InstantiateSlingFormula(context.Background(), opts.BeadOrFormula, searchPaths, molecule.Options{
 		Title: opts.Title,
 		Vars:  formulaVars,
 	}, "", opts.ScopeKind, opts.ScopeRef, a, deps, opts.Force)
@@ -346,6 +354,16 @@ func slingOnFormula(opts SlingOpts, deps SlingDeps, querier BeadQuerier, beadID 
 		}
 		result.WispRootID = wispRootID
 		result.FormulaName = opts.OnFormula
+		// Route the SOURCE bead, not wispRootID. An attached wisp (--on
+		// <formula>) is driven through its source bead: the source carries
+		// gc.routed_to + molecule_id and is the claimable unit of work, while
+		// the wisp root is deliberately left unrouted (and, when root-only,
+		// privatized out of Ready() by privatizeAttachedRootOnlyWisp).
+		// ApplyGraphRouting likewise stamps no routing on an attached recipe
+		// (graphroute: sourceBeadID != "" early-return). This is the
+		// intentional counterpart to slingFormula, which routes the standalone
+		// wisp root. Do not "fix" this to wispRootID — it would orphan the
+		// work. See gastownhall/gascity#2848 and TestOnFormulaAttachesAndRoutes.
 		return finalize(opts, deps, beadID, method, result)
 	}
 	runGraph := func() (pendingSourceWorkflowLaunch, error) {
@@ -448,6 +466,10 @@ func slingDefaultFormula(opts SlingOpts, deps SlingDeps, querier BeadQuerier, be
 		}
 		result.WispRootID = wispRootID
 		result.FormulaName = defaultFormula
+		// Route the SOURCE bead, not wispRootID — see the matching note in
+		// slingOnFormula. The default formula attaches the wisp to the source
+		// bead, which stays the routed, claimable unit of work; the wisp root
+		// is intentionally left unrouted. Do not "fix" this to wispRootID.
 		return finalize(opts, deps, beadID, method, result)
 	}
 	runGraph := func() (pendingSourceWorkflowLaunch, error) {

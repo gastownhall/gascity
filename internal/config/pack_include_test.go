@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -306,5 +307,90 @@ func TestValidateInstalledRemoteCacheLockedMemoizesSuccess(t *testing.T) {
 	}
 	if calls == first {
 		t.Fatalf("changed checkout should re-run git; calls stayed %d", calls)
+	}
+}
+
+// setupLockedPackRefTest fabricates a city with a packs.lock entry for ref and
+// a valid installed repo cache for it under a temp HOME, with git stubbed out.
+func setupLockedPackRefTest(t *testing.T, ref, commit string) (cityDir, cacheDir string) {
+	t.Helper()
+	ResetRemoteCacheValidationCache()
+	t.Cleanup(ResetRemoteCacheValidationCache)
+
+	dir := t.TempDir()
+	home := filepath.Join(dir, "home")
+	t.Setenv("HOME", home)
+	cityDir = filepath.Join(dir, "city")
+	mustMkdirAll(t, cityDir, 0o755)
+	writeTestFile(t, cityDir, "packs.lock", fmt.Sprintf(`
+schema = 1
+
+[packs.%q]
+version = "sha:%s"
+commit = %q
+fetched = "2026-06-06T00:00:00Z"
+`, ref, commit, commit))
+
+	cacheDir = filepath.Join(home, ".gc", "cache", "repos", RepoCacheKey(ref, commit))
+	mustMkdirAll(t, filepath.Join(cacheDir, ".git"), 0o755)
+	if err := os.WriteFile(filepath.Join(cacheDir, ".git", "index"), []byte("idx"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	orig := runRepoCacheGit
+	runRepoCacheGit = func(_ string, args ...string) (string, error) {
+		if len(args) > 0 && args[0] == "rev-parse" {
+			return commit + "\n", nil
+		}
+		return "", nil // status --porcelain: clean
+	}
+	t.Cleanup(func() { runRepoCacheGit = orig })
+	return cityDir, cacheDir
+}
+
+func TestResolvePackRefUsesLockedImportForGitHubTreeURL(t *testing.T) {
+	const ref = "https://github.com/example/packs/tree/main/gastown"
+	const commit = "abcdef1234567890abcdef1234567890abcdef12"
+	cityDir, cacheDir := setupLockedPackRefTest(t, ref, commit)
+
+	got, err := resolvePackRef(ref, cityDir, cityDir)
+	if err != nil {
+		t.Fatalf("resolvePackRef: %v", err)
+	}
+	want := filepath.Join(cacheDir, "gastown")
+	if got != want {
+		t.Fatalf("resolvePackRef = %q, want %q", got, want)
+	}
+}
+
+func TestResolvePackRefUsesLockedImportForRefRemoteInclude(t *testing.T) {
+	const ref = "git@github.com:example/packs//gastown#main"
+	const commit = "abcdef1234567890abcdef1234567890abcdef12"
+	cityDir, cacheDir := setupLockedPackRefTest(t, ref, commit)
+
+	got, err := resolvePackRef(ref, cityDir, cityDir)
+	if err != nil {
+		t.Fatalf("resolvePackRef: %v", err)
+	}
+	want := filepath.Join(cacheDir, "gastown")
+	if got != want {
+		t.Fatalf("resolvePackRef = %q, want %q", got, want)
+	}
+}
+
+func TestResolvePackRefFallsBackToIncludeCacheWhenUnlocked(t *testing.T) {
+	dir := t.TempDir()
+	home := filepath.Join(dir, "home")
+	t.Setenv("HOME", home)
+	cityDir := filepath.Join(dir, "city")
+	mustMkdirAll(t, cityDir, 0o755)
+
+	const ref = "https://github.com/example/packs/tree/main/gastown"
+	_, err := resolvePackRef(ref, cityDir, cityDir)
+	if err == nil {
+		t.Fatal("expected uncached include error for unlocked remote ref")
+	}
+	if !strings.Contains(err.Error(), "is not cached") {
+		t.Fatalf("error = %v, want legacy include-cache miss", err)
 	}
 }

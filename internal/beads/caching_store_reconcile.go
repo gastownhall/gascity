@@ -374,9 +374,7 @@ func (c *CachingStore) runReconciliation() {
 		c.syncFailures = 0
 		c.depsComplete = nextDepsComplete
 		c.primePartialErr = nil
-		if c.state == cacheDegraded {
-			c.state = cacheLive
-		}
+		c.promoteLiveLocked()
 		durMs := float64(time.Since(start).Microseconds()) / 1000.0
 		c.stats.LastReconcileAt = now
 		c.stats.LastReconcileMs = durMs
@@ -474,9 +472,7 @@ func (c *CachingStore) runReconciliation() {
 	c.deletedSeq = make(map[string]uint64)
 	c.syncFailures = 0
 	c.primePartialErr = nil
-	if c.state == cacheDegraded {
-		c.state = cacheLive
-	}
+	c.promoteLiveLocked()
 
 	durMs := float64(time.Since(start).Microseconds()) / 1000.0
 	c.stats.LastReconcileAt = now
@@ -494,6 +490,21 @@ func (c *CachingStore) runReconciliation() {
 		log.Print(logLine)
 	}
 	c.notifyChanges(notifications)
+}
+
+// promoteLiveLocked marks the cache live after a clean full-scan
+// reconciliation. A successful reconcile loads the same complete active
+// snapshot (identical ListQuery and dep fetch) a successful Prime would,
+// so it promotes unconditionally — not just degraded→live but also
+// partial/uninitialized→live. This makes the reconciler a convergence
+// path for stores whose initial full prime failed or never ran: without
+// it such a store serves its PrimeActive-era snapshot indefinitely while
+// only event-bus writes update it, and storage-level state created
+// before the controller started (e.g. routed pool work awaiting pickup)
+// stays invisible until something happens to touch the bead. Caller must
+// hold c.mu (write lock).
+func (c *CachingStore) promoteLiveLocked() {
+	c.state = cacheLive
 }
 
 // reconcileSuccessLogLocked composes the per-reconcile success log line

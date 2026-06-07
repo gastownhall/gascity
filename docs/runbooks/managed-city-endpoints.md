@@ -7,7 +7,7 @@ description: Mental model, forbidden edits, sanctioned escape hatches, and recov
 
 This runbook is for mayors and operators. It covers the endpoint
 architecture introduced in the
-[beads-and-Dolt contract redesign](../../engdocs/design/beads-dolt-contract-redesign.md)
+[beads-and-Dolt contract redesign](https://github.com/gastownhall/gascity/blob/main/engdocs/design/beads-dolt-contract-redesign.md)
 — specifically the case where rigs **inherit** their Dolt endpoint
 from a single city-managed server. If you came here because `gc sling`
 is dropping work, `supervisor.log` shows `rigStores=0`, or your port
@@ -264,7 +264,7 @@ the `supervisor.log` slice covering the last sling attempt.
 
 ## References
 
-- Design: [Beads-and-Dolt contract redesign](../../engdocs/design/beads-dolt-contract-redesign.md)
+- Design: [Beads-and-Dolt contract redesign](https://github.com/gastownhall/gascity/blob/main/engdocs/design/beads-dolt-contract-redesign.md)
   — the authoritative architecture document.
 - Code: [`cmd/gc/cmd_doctor_drift.go`](https://github.com/gastownhall/gascity/blob/main/cmd/gc/cmd_doctor_drift.go)
   — drift detector.

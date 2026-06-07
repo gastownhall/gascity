@@ -261,6 +261,13 @@ func NewCachingStoreForTestWithPrefix(backing Store, idPrefix string, onChange f
 	return newCachingStore(backing, idPrefix, onChange)
 }
 
+// SetPrimeRetryDelayForTest overrides the inter-attempt backoff Prime
+// uses when the backing store's full scan fails, so tests can exercise
+// prime-failure paths without real multi-second sleeps. Test-only.
+func (c *CachingStore) SetPrimeRetryDelayForTest(fn func(attempt int) time.Duration) {
+	c.primeRetryDelay = fn
+}
+
 func newCachingStore(backing Store, idPrefix string, onChange func(eventType, beadID string, payload json.RawMessage)) *CachingStore {
 	return &CachingStore{
 		backing:     backing,

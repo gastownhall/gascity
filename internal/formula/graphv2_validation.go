@@ -785,3 +785,31 @@ func isGraphV2ReservedVarName(name string) bool {
 	_, ok := graphV2ReservedVarNames[strings.TrimSpace(name)]
 	return ok
 }
+
+// GraphV2OutputJSONWarnings returns one warning string per step in a graph.v2
+// formula that sets gc.output_json_required without using drain. graph.v1
+// formulas and steps that use drain are not flagged — drain is the graph.v2
+// canonical fan-out primitive.
+func GraphV2OutputJSONWarnings(f *Formula) []string {
+	if !UsesGraphCompiler(f) {
+		return nil
+	}
+	var warnings []string
+	collectOutputJSONWarnings(f.Steps, f.Formula, &warnings)
+	return warnings
+}
+
+func collectOutputJSONWarnings(steps []*Step, formulaName string, out *[]string) {
+	for _, step := range steps {
+		if step.Drain == nil && strings.TrimSpace(step.Metadata["gc.output_json_required"]) == "true" {
+			*out = append(*out, fmt.Sprintf(
+				"formula %s step %s: gc.output_json is legacy; use drain in graph.v2 formulas (see: engdocs/drain-fanout.md)",
+				formulaName, step.ID,
+			))
+		}
+		collectOutputJSONWarnings(step.Children, formulaName, out)
+		if step.Loop != nil {
+			collectOutputJSONWarnings(step.Loop.Body, formulaName, out)
+		}
+	}
+}

@@ -487,9 +487,16 @@ func normalizeCanonicalBdScopeFilesForInit(cityPath, dir, prefix, doltDatabase s
 		// Preserve legacy probe metadata during startup normalization so old
 		// scopes can still boot and migrate deliberately. New init paths still
 		// reject this reserved name when it is not already pinned in metadata.
-		return ensureCanonicalScopeMetadataForInit(fsys.OSFS{}, dir, doltDatabase)
+		if err := ensureCanonicalScopeMetadataForInit(fsys.OSFS{}, dir, doltDatabase); err != nil {
+			return err
+		}
+	} else if err := enforceCanonicalScopeMetadataForInit(fsys.OSFS{}, dir, doltDatabase); err != nil {
+		return err
 	}
-	return enforceCanonicalScopeMetadataForInit(fsys.OSFS{}, dir, doltDatabase)
+	// Opt-in proxied-server overlay (no-op/revert when the city does not opt in
+	// or bd lacks support). cfg load failure falls back to server mode (safe).
+	cfg, _ := loadCityConfig(cityPath, io.Discard)
+	return applyProxiedServerScopeOverlay(fsys.OSFS{}, cityPath, dir, proxiedServerScopeActive(cfg))
 }
 
 // initAndHookDir is the atomic unit of bead store initialization:
@@ -1532,6 +1539,8 @@ func normalizeCanonicalBdScopeFiles(cityPath string, cfg *config.City, warns ...
 				}
 			} else if err := ensureCanonicalScopeMetadataForInit(fsys.OSFS{}, cityPath, doltDatabase); err != nil {
 				return fmt.Errorf("canonicalizing city metadata: %w", err)
+			} else if err := applyProxiedServerScopeOverlay(fsys.OSFS{}, cityPath, cityPath, proxiedServerScopeActive(cfg)); err != nil {
+				return fmt.Errorf("applying proxied overlay to city: %w", err)
 			}
 		}
 	}
@@ -1549,6 +1558,8 @@ func normalizeCanonicalBdScopeFiles(cityPath string, cfg *config.City, warns ...
 				}
 			} else if err := ensureCanonicalScopeMetadataForInit(fsys.OSFS{}, cfg.Rigs[i].Path, doltDatabase); err != nil {
 				return fmt.Errorf("canonicalizing rig %q metadata: %w", cfg.Rigs[i].Name, err)
+			} else if err := applyProxiedServerScopeOverlay(fsys.OSFS{}, cityPath, cfg.Rigs[i].Path, proxiedServerScopeActive(cfg)); err != nil {
+				return fmt.Errorf("applying proxied overlay to rig %q: %w", cfg.Rigs[i].Name, err)
 			}
 		}
 	}

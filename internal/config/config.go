@@ -1244,6 +1244,30 @@ type BeadsConfig struct {
 	// and avoids bd ready/list flags that are unavailable or incomplete in bd
 	// 1.0.4.
 	BDCompatibility string `toml:"bd_compatibility,omitempty" jsonschema:"enum=bd-1.0.4,enum=bd-1.0.5"`
+	// Proxied routes bd through the pooling db-proxy (ProxiedServerMode,
+	// external backend) instead of direct ServerMode, eliminating the per-call
+	// bd→dolt connection churn (#1978: ~71 new connections/sec to the managed
+	// dolt server). Defaults to false = current direct ServerMode, byte-for-byte
+	// identical, so existing cities are unaffected. Requires a bd build that
+	// supports `bd init --proxied-server` (external); when the resolved bd lacks
+	// it, gascity falls back to server mode and a doctor check flags it, so a
+	// city paired with a standard bd never breaks.
+	Proxied *bool `toml:"proxied,omitempty" jsonschema:"default=false"`
+	// ProxyPoolSize is the warm backend-connection pool size the db-proxy keeps
+	// per (capabilities, database) key when Proxied is true. Defaults to 4.
+	// The proxy is shared per workspace root, so all agents of a scope share one
+	// warm pool; the size is frozen by the first bd invocation that spawns the
+	// proxy (changing it requires restarting the db-proxy-child).
+	ProxyPoolSize *int `toml:"proxy_pool_size,omitempty" jsonschema:"default=4"`
+	// ProxyIdleTimeout is how long a db-proxy-child stays alive with no active
+	// client before it shuts down. The bd default (30s) is tuned for one busy
+	// workspace; gascity touches many scopes sparsely (controller patrol probes
+	// every rig once per interval), starving each proxy below 30s so it spawns,
+	// serves one op, idle-dies, and respawns on the next touch — pure churn that
+	// never reaches the warm-pool steady state. A longer timeout keeps proxies
+	// warm across sparse bursts. Go duration string; defaults to "10m". Read by
+	// bd as BEADS_PROXY_IDLE_TIMEOUT.
+	ProxyIdleTimeout *string `toml:"proxy_idle_timeout,omitempty" jsonschema:"default=10m"`
 	// Policies defines per-bead-use storage and garbage-collection defaults.
 	// Policy names are interpreted by higher-level systems; unknown names are
 	// preserved so packs can stage future policy classes without breaking load.
@@ -1254,6 +1278,41 @@ type BeadsConfig struct {
 // Unset preserves the current default of enabled hooks.
 func (b BeadsConfig) EventHooksEnabled() bool {
 	return b.EventHooks == nil || *b.EventHooks
+}
+
+// ProxiedEnabled reports whether bd should run in pooling ProxiedServerMode.
+// Unset preserves the current default of direct ServerMode (false).
+func (b BeadsConfig) ProxiedEnabled() bool {
+	return b.Proxied != nil && *b.Proxied
+}
+
+// defaultBeadsProxyPoolSize is the warm pool size used when Proxied is on and
+// ProxyPoolSize is unset or non-positive.
+const defaultBeadsProxyPoolSize = 4
+
+// ProxyPoolSizeOrDefault returns the configured pool size, or the default when
+// unset/non-positive.
+func (b BeadsConfig) ProxyPoolSizeOrDefault() int {
+	if b.ProxyPoolSize != nil && *b.ProxyPoolSize > 0 {
+		return *b.ProxyPoolSize
+	}
+	return defaultBeadsProxyPoolSize
+}
+
+// defaultBeadsProxyIdleTimeout is the proxy idle-shutdown timeout used when
+// Proxied is on and ProxyIdleTimeout is unset/blank. Chosen well above the
+// controller patrol interval so warm proxies survive between sparse probes.
+const defaultBeadsProxyIdleTimeout = "10m"
+
+// ProxyIdleTimeoutOrDefault returns the configured proxy idle timeout, or the
+// default when unset/blank.
+func (b BeadsConfig) ProxyIdleTimeoutOrDefault() string {
+	if b.ProxyIdleTimeout != nil {
+		if v := strings.TrimSpace(*b.ProxyIdleTimeout); v != "" {
+			return v
+		}
+	}
+	return defaultBeadsProxyIdleTimeout
 }
 
 const (

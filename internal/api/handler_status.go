@@ -28,10 +28,40 @@ type (
 
 var statusStoreReadTimeout = time.Second
 
+// statusResponseCacheTTL bounds how long a built /status body is reused.
+//
+// Unlike the shared response cache (which keys on the event sequence and so
+// misses on every poll of a busy city — the sequence advances each tick),
+// /status keys its cache entry on a TIME bucket of this width. /status is a
+// coarse operator overview where a few seconds of staleness is acceptable
+// (the response already reports X-GC-Cache-Age-S), so on a busy city the
+// dashboard's high-frequency polls hit the cache instead of rebuilding the
+// O(store-size) body every time (gascity#3186). Strict-freshness callers
+// (blocking ?index=&wait= requests) bypass this cache; see humaHandleStatus.
+var statusResponseCacheTTL = 2 * time.Second
+
+// statusCacheBucket returns a monotonically increasing generation that only
+// changes once per statusResponseCacheTTL window. Passing it where the shared
+// cache expects an event index makes /status's cache entry survive across the
+// event-sequence churn of a busy city while still expiring on a wall-clock TTL.
+func statusCacheBucket(now time.Time) uint64 {
+	ttl := statusResponseCacheTTL
+	if ttl <= 0 {
+		return uint64(now.UnixNano())
+	}
+	return uint64(now.UnixNano() / int64(ttl))
+}
+
 // StatusInput is the Huma input for GET /v0/status.
 type StatusInput struct {
 	CityScope
 	BlockingParam
+	// Lite trims the body to the cheap fleet-overview fields for
+	// high-frequency dashboard polls, omitting the expensive per-request
+	// blocks: StoreHealth (full closed-history Dolt scan), the
+	// session-count detail, and the per-rig work loop. The default/full
+	// body that `gc status` renders is unchanged (gascity#3186).
+	Lite bool `query:"lite" required:"false" doc:"When true, omit the expensive store-health, session-count, and work-count blocks for low-cost dashboard polls."`
 }
 
 // humaHandleStatus is the Huma-typed handler for GET /v0/status.
@@ -47,25 +77,51 @@ func (s *Server) humaHandleStatus(ctx context.Context, input *StatusInput) (*Ind
 		return nil, err
 	}
 	bp := input.toBlockingParams()
-	if bp.isBlocking() {
+	blocking := bp.isBlocking()
+	if blocking {
 		waitForChange(ctx, s.state.EventProvider(), bp)
 	}
 	index := s.latestIndex()
 
-	// Check typed response cache (Fix 3l).
+	// /status keys its response cache on a TIME bucket, not the event index:
+	// on a busy city the sequence advances every poll, so an index-keyed
+	// entry would miss on nearly every request and force a full O(store-size)
+	// rebuild (gascity#3186). The bucket changes only once per
+	// statusResponseCacheTTL, so high-frequency dashboard polls reuse the
+	// built body. The ?lite variant caches under its own key (the shared
+	// cache map keys on the string key, so the suffix is enough).
+	//
+	// Strict-freshness callers (blocking ?index=&wait=) bypass this cache so
+	// the body they receive reflects the event they waited for, never a body
+	// built before it.
 	cacheKey := "status"
-	if body, ok := cachedResponseAs[StatusBody](s, cacheKey, index); ok {
-		return &IndexOutput[StatusBody]{Index: index, CacheAgeS: cacheAgeSeconds(store), Body: body}, nil
+	if input.Lite {
+		cacheKey = "status?lite"
+	}
+	bucket := statusCacheBucket(time.Now())
+	if !blocking {
+		if body, ok := cachedResponseAs[StatusBody](s, cacheKey, bucket); ok {
+			return &IndexOutput[StatusBody]{Index: index, CacheAgeS: cacheAgeSeconds(store), Body: body}, nil
+		}
 	}
 
-	resp := s.buildStatusBody()
-	s.storeResponse(cacheKey, index, resp)
+	resp := s.buildStatusBody(input.Lite)
+	if !blocking {
+		s.storeResponse(cacheKey, bucket, resp)
+	}
 
 	return &IndexOutput[StatusBody]{Index: index, CacheAgeS: cacheAgeSeconds(store), Body: resp}, nil
 }
 
 // buildStatusBody constructs the status response body.
-func (s *Server) buildStatusBody() StatusBody {
+//
+// When lite is true the expensive per-request blocks are omitted for
+// high-frequency dashboard polls (gascity#3186): the per-rig work-count loop
+// (a scan of every rig store), the StoreHealth block (a full closed-history
+// Dolt row scan), and the session-count detail. The session snapshot itself
+// is still read because agent running/suspended state depends on it. The full
+// (non-lite) body that `gc status` renders is unchanged.
+func (s *Server) buildStatusBody(lite bool) StatusBody {
 	cfg := s.state.Config()
 	sp := s.state.SessionProvider()
 	cityName := s.state.CityName()
@@ -175,36 +231,39 @@ func (s *Server) buildStatusBody() StatusBody {
 		})
 	}
 
-	// Count work items (best-effort).
+	// Count work items (best-effort). Skipped in lite mode: scanning every
+	// rig store is one of the per-request costs the lite poll avoids.
 	var wc workCounts
-	stores := s.state.BeadStores()
-	seenStores := make(map[string]bool)
-	for _, rigName := range sortedRigNames(stores) {
-		store := stores[rigName]
-		key := fmt.Sprintf("%p", store)
-		if seenStores[key] {
-			continue
-		}
-		seenStores[key] = true
-		list, err := statusListStoreWithTimeout(store, beads.ListQuery{AllowScan: true})
-		if err != nil {
-			partialErrors = append(partialErrors, fmt.Sprintf("rig %s work: %v", rigName, err))
-			if !beads.IsPartialResult(err) || len(list) == 0 {
+	if !lite {
+		stores := s.state.BeadStores()
+		seenStores := make(map[string]bool)
+		for _, rigName := range sortedRigNames(stores) {
+			store := stores[rigName]
+			key := fmt.Sprintf("%p", store)
+			if seenStores[key] {
 				continue
 			}
-		}
-		for _, b := range list {
-			switch b.Type {
-			case "message", "convoy", "convergence":
-				continue
+			seenStores[key] = true
+			list, err := statusListStoreWithTimeout(store, beads.ListQuery{AllowScan: true})
+			if err != nil {
+				partialErrors = append(partialErrors, fmt.Sprintf("rig %s work: %v", rigName, err))
+				if !beads.IsPartialResult(err) || len(list) == 0 {
+					continue
+				}
 			}
-			switch b.Status {
-			case "in_progress":
-				wc.InProgress++
-			case "ready":
-				wc.Ready++
-			case "open":
-				wc.Open++
+			for _, b := range list {
+				switch b.Type {
+				case "message", "convoy", "convergence":
+					continue
+				}
+				switch b.Status {
+				case "in_progress":
+					wc.InProgress++
+				case "ready":
+					wc.Ready++
+				case "open":
+					wc.Open++
+				}
 			}
 		}
 	}
@@ -239,9 +298,10 @@ func (s *Server) buildStatusBody() StatusBody {
 		})
 	}
 
-	// Session counts: walk the city bead store for session beads.
+	// Session counts: walk the city bead store for session beads. Omitted in
+	// lite mode (detail block, not needed for the high-frequency overview).
 	var sessionCounts *StatusSessionCountsDetail
-	if len(sessionSnapshot.bySessionName) > 0 {
+	if !lite && len(sessionSnapshot.bySessionName) > 0 {
 		active, suspended := s.countSessions(sessionSnapshot)
 		if active > 0 || suspended > 0 {
 			sessionCounts = &StatusSessionCountsDetail{Active: active, Suspended: suspended}
@@ -250,6 +310,13 @@ func (s *Server) buildStatusBody() StatusBody {
 
 	uptime := int(time.Since(s.state.StartedAt()).Seconds())
 	versions := s.resolveComponentVersions()
+
+	// StoreHealth carries a full closed-history Dolt row scan (behind a 30s
+	// sub-cache). Omitted in lite mode so a cold lite poll never triggers it.
+	var storeHealth *StatusStoreHealth
+	if !lite {
+		storeHealth = s.cachedStoreHealth(time.Now())
+	}
 
 	return StatusBody{
 		Name:                cityName,
@@ -268,7 +335,7 @@ func (s *Server) buildStatusBody() StatusBody {
 		Mail:                mc,
 		Partial:             len(partialErrors) > 0,
 		PartialErrors:       partialErrors,
-		StoreHealth:         s.cachedStoreHealth(time.Now()),
+		StoreHealth:         storeHealth,
 		Beads:               s.cityBeadsDiagnostic(),
 		AgentDetails:        agentDetails,
 		RigDetails:          rigDetails,
