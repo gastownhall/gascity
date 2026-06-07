@@ -36,7 +36,6 @@ func (s *Server) humaHandleBeadList(ctx context.Context, input *BeadListInput) (
 	}
 	if input.Cursor != "" {
 		pp.Offset = decodeCursor(input.Cursor)
-		pp.IsPaging = true
 	}
 
 	// all=true reads bypass the CachingStore (closed history lives only in
@@ -132,36 +131,19 @@ func (s *Server) humaHandleBeadList(ctx context.Context, input *BeadListInput) (
 
 	index := s.latestIndex()
 	cacheAge := cacheAgeSeconds(cityStore)
-	var body ListBody[beads.Bead]
-	if pp.IsPaging {
-		page, total, nextCursor := paginate(all, pp)
-		if page == nil {
-			page = []beads.Bead{}
-		}
-		body = ListBody[beads.Bead]{
-			Items:         page,
-			Total:         total,
-			NextCursor:    nextCursor,
-			Partial:       pa.partial(),
-			PartialErrors: pa.messages(),
-		}
-	} else {
-		total := len(all)
-		nextCursor := ""
-		if pp.Limit < len(all) {
-			// A truncated first page carries the continuation cursor too:
-			// without it the remainder of a limit-bounded read is
-			// unfetchable by design (#3208).
-			all = all[:pp.Limit]
-			nextCursor = encodeCursor(pp.Limit)
-		}
-		body = ListBody[beads.Bead]{
-			Items:         all,
-			Total:         total,
-			NextCursor:    nextCursor,
-			Partial:       pa.partial(),
-			PartialErrors: pa.messages(),
-		}
+	// A non-cursor request is offset-0 paging: a truncated first page carries
+	// the continuation cursor too, otherwise the remainder of a limit-bounded
+	// read is unfetchable by design (#3208).
+	page, total, nextCursor := paginate(all, pp)
+	if page == nil {
+		page = []beads.Bead{}
+	}
+	body := ListBody[beads.Bead]{
+		Items:         page,
+		Total:         total,
+		NextCursor:    nextCursor,
+		Partial:       pa.partial(),
+		PartialErrors: pa.messages(),
 	}
 	if cacheKey != "" {
 		s.storeResponse(cacheKey, bucket, body)

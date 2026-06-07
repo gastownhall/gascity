@@ -817,6 +817,38 @@ func TestDoltliteReadStoreLimitCutsDeterministicPrefixOnCreatedAtTies(t *testing
 	}
 }
 
+// TestDoltliteReadStoreReadyLimitCutsDeterministicPrefixOnTies pins the same
+// (#3208) tie-cut contract for the Ready path, whose custom ORDER BY
+// (priority, created_at) also needs the id tiebreaker for a deterministic
+// LIMIT prefix when rows share both keys.
+func TestDoltliteReadStoreReadyLimitCutsDeterministicPrefixOnTies(t *testing.T) {
+	store, closeStore := newTestDoltliteReadStore(t)
+	defer closeStore()
+	writer := openTestDoltliteWriter(t, store.db)
+	defer writer.Close() //nolint:errcheck // test cleanup
+
+	tie := doltliteSQLiteTime(time.Date(2026, 6, 7, 12, 0, 0, 0, time.UTC))
+	// Insert in an order (c, a, b) that differs from both id directions so
+	// an insertion-ordered tie-cut cannot accidentally match the contract.
+	for _, id := range []string{"gc-rtie-c", "gc-rtie-a", "gc-rtie-b"} {
+		if _, err := writer.Exec(`INSERT INTO issues (
+			id, title, status, issue_type, priority, created_at, updated_at,
+			assignee, description, design, acceptance_criteria, notes, metadata
+		) VALUES (?, ?, 'open', 'task', 2, ?, ?, 'rig/rtie-order', '', '', '', '', '{}')`,
+			id, id, tie, tie); err != nil {
+			t.Fatalf("insert ready tie issue %s: %v", id, err)
+		}
+	}
+
+	top2, err := store.Ready(ReadyQuery{Assignee: "rig/rtie-order", Limit: 2})
+	if err != nil {
+		t.Fatalf("Ready limit 2: %v", err)
+	}
+	if got := testBeadIDs(top2); !slices.Equal(got, []string{"gc-rtie-a", "gc-rtie-b"}) {
+		t.Fatalf("ready limit-2 ids = %v, want [gc-rtie-a gc-rtie-b]", got)
+	}
+}
+
 func TestDoltliteCachingStoreLiveFastReadDoesNotEraseDependencyCache(t *testing.T) {
 	store, closeStore := newTestDoltliteReadStore(t)
 	defer closeStore()

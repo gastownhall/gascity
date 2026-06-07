@@ -307,7 +307,9 @@ func (s *DoltliteReadStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 		q.Limit = rq.Limit
 	}
 	readyWhere, readyArgs := s.doltliteReadyIssueWhere(doltliteIssueTables)
-	out, err := s.queryIssuesOrdered(q, readyWhere, readyArgs, q.Limit, "ORDER BY COALESCE(i.priority, 2) ASC, i.created_at ASC")
+	// The id tiebreaker keeps a LIMIT deterministic when rows share
+	// (priority, created_at) — same bug class as queryIssueTable (#3208).
+	out, err := s.queryIssuesOrdered(q, readyWhere, readyArgs, q.Limit, "ORDER BY COALESCE(i.priority, 2) ASC, i.created_at ASC, i.id ASC")
 	if err != nil {
 		return nil, err
 	}
