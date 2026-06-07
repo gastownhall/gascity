@@ -433,6 +433,29 @@ func TestResolveProviderKimiStartupDialogPolicyInheritedByWrapper(t *testing.T) 
 	}
 }
 
+func TestResolveProviderKiroStartupDialogPolicyInheritedByWrapper(t *testing.T) {
+	base := "builtin:kiro"
+	agent := &Agent{Name: "scout", Provider: "wrapped-kiro"}
+	cityProviders := map[string]ProviderSpec{
+		"wrapped-kiro": {
+			Base:      &base,
+			Command:   "sh",
+			Args:      []string{"-c", "exec kiro-cli chat --no-interactive --agent gascity --trust-all-tools"},
+			PathCheck: "kiro-cli",
+		},
+	}
+	rp, err := ResolveProvider(agent, nil, cityProviders, lookPathOnly("kiro-cli"))
+	if err != nil {
+		t.Fatalf("ResolveProvider: %v", err)
+	}
+	if rp.BuiltinAncestor != "kiro" {
+		t.Fatalf("BuiltinAncestor = %q, want kiro", rp.BuiltinAncestor)
+	}
+	if rp.AcceptStartupDialogs == nil || *rp.AcceptStartupDialogs {
+		t.Fatalf("AcceptStartupDialogs = %v, want false inherited from builtin kiro", rp.AcceptStartupDialogs)
+	}
+}
+
 func TestResolveProviderKiroAgentArgsOverride(t *testing.T) {
 	agent := &Agent{
 		Name:     "scout",

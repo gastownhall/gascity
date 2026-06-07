@@ -170,6 +170,72 @@ live_session_match() {
         && printf '%s\n' "$LIVE_SESSION_IDS" | grep -Fxq -- "$candidate"
 }
 
+CURRENT_BEAD_JSON=""
+
+first_bead_jq='if type == "array" then .[0] else . end'
+
+work_bead_still_resettable() {
+    local bead_id="$1"
+    local expected_assignee="$2"
+    local current_status
+    local current_assignee
+
+    CURRENT_BEAD_JSON=$(gc bd show "$bead_id" --json 2>/dev/null) || return 1
+    current_status=$(printf '%s\n' "$CURRENT_BEAD_JSON" | jq -r "$first_bead_jq | .status // empty" 2>/dev/null) || return 1
+    current_assignee=$(printf '%s\n' "$CURRENT_BEAD_JSON" | jq -r "$first_bead_jq | .assignee // empty" 2>/dev/null) || return 1
+
+    [ "$current_status" = "in_progress" ] || return 1
+    [ "$current_assignee" = "$expected_assignee" ] || return 1
+}
+
+session_bead_candidates() {
+    local assignee="$1"
+    local work_json="$2"
+
+    printf '%s\n' "$work_json" | jq -r "$first_bead_jq | [
+        .metadata[\"gc.session_id\"],
+        .metadata[\"gc.session_bead_id\"],
+        .metadata[\"session_id\"]
+    ] | .[]? | select(. != null and . != \"\")" 2>/dev/null || true
+
+    printf '%s\n' "$assignee" | grep -Eo '[[:alnum:]]+-wisp-[[:alnum:]][[:alnum:]-]*$' || true
+}
+
+session_bead_shows_live_assignment() {
+    local assignee="$1"
+    local work_json="$2"
+    local session_id
+    local session_json
+    local live_match
+
+    while IFS= read -r session_id; do
+        [ -n "$session_id" ] || continue
+        session_json=$(gc bd show "$session_id" --json 2>/dev/null) || continue
+        live_match=$(printf '%s\n' "$session_json" | jq -r --arg assignee "$assignee" --arg session_id "$session_id" "
+            $first_bead_jq
+            | select((.issue_type // \"\") == \"session\")
+            | select((.status // \"\") != \"closed\")
+            | ((.metadata.state // \"\") | ascii_downcase) as \$state
+            | select(\$state != \"closed\" and \$state != \"orphaned\" and \$state != \"failed-create\" and \$state != \"failed_create\")
+            | select(((.metadata.closed // \"\") | tostring | ascii_downcase) != \"true\")
+            | select(
+                (.id // \"\") == \$assignee
+                or (.id // \"\") == \$session_id
+                or (.metadata.session_name // \"\") == \$assignee
+                or (.metadata.alias // \"\") == \$assignee
+                or (.metadata.agent_name // \"\") == \$assignee
+                or (\$assignee | contains(\$session_id))
+            )
+            | .id // empty
+        " 2>/dev/null) || live_match=""
+        if [ -n "$live_match" ]; then
+            return 0
+        fi
+    done < <(session_bead_candidates "$assignee" "$work_json")
+
+    return 1
+}
+
 # Step 3: Find orphaned beads (assigned to non-existent agents).
 # Pool instances use names like "worker-3"; strip the -N suffix to match
 # the template name from config.
@@ -204,6 +270,12 @@ ORPHANED=0
 # shell so $ORPHANED survives for the summary message below.
 while IFS=$'\t' read -r bead_id assignee; do
     if ! is_known_agent "$assignee"; then
+        if ! work_bead_still_resettable "$bead_id" "$assignee"; then
+            continue
+        fi
+        if session_bead_shows_live_assignment "$assignee" "$CURRENT_BEAD_JSON"; then
+            continue
+        fi
         # `gc bd update` auto-resolves the bead's prefix to the right rig
         # store, so HQ and rig beads update in the correct database.
         gc bd update "$bead_id" --status=open --assignee="" 2>/dev/null || true

@@ -143,17 +143,20 @@ func TestSessionCreateHintsEnablesMouse(t *testing.T) {
 	}
 }
 
-// TestSessionResumeHintsEnablesMouse locks ga-c4w finding #2: an interactive
-// (API-created) session that is suspended/resumed or crash-restarted must keep
-// mouse-on so the tmux wheel still drives copy-mode scrollback after resume —
-// symmetric with sessionCreateHints. Without it the wheel works on first create
-// but is silently lost on the first resume. Headless agents are controller-owned
-// and re-resolve MouseOn via cmd/gc/template_resolve.go (mouse-off), so resume
-// mouse-on never reaches a polled agent.
+// TestSessionResumeHintsEnablesMouse locks ga-c4w finding #2 and its ga-g7go
+// follow-up: an interactive (session_origin=manual) session that is suspended/
+// resumed or crash-restarted must keep mouse-on so the tmux wheel still drives
+// copy-mode scrollback after resume — symmetric with sessionCreateHints. A
+// controller-polled pool/headless resume must resolve mouse-OFF instead: the
+// resume seam may not re-enable mouse on a polled agent. The earlier form proved
+// only the interactive case and let the unconditional MouseOn=true default leak
+// mouse-on onto resumed pool agents (ga-g7go).
 func TestSessionResumeHintsEnablesMouse(t *testing.T) {
-	hints := sessionResumeHints(&config.ResolvedProvider{Name: "stub"}, "", nil, nil)
-	if !hints.MouseOn {
-		t.Error("sessionResumeHints().MouseOn = false, want true (interactive wheel survives resume, ga-c4w)")
+	if hints := sessionResumeHints(&config.ResolvedProvider{Name: "stub"}, "", nil, nil, true); !hints.MouseOn {
+		t.Error("sessionResumeHints(interactive=true).MouseOn = false, want true (interactive wheel survives resume, ga-c4w)")
+	}
+	if hints := sessionResumeHints(&config.ResolvedProvider{Name: "stub"}, "", nil, nil, false); hints.MouseOn {
+		t.Error("sessionResumeHints(interactive=false).MouseOn = true, want false (polled pool agent stays mouse-off, ga-g7go)")
 	}
 }
 

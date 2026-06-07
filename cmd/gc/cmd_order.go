@@ -18,6 +18,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/molecule"
+	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/orderdiscovery"
 	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/spf13/cobra"
@@ -38,7 +39,7 @@ tick and dispatches work when a trigger opens.`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
 			if len(args) == 0 {
-				fmt.Fprintln(stderr, "gc order: missing subcommand (list, show, run, check, history, sweep-tracking)") //nolint:errcheck // best-effort stderr
+				fmt.Fprintln(stderr, "gc order: missing subcommand (list, show, run, check, history, sweep-tracking, sweep-nudge-mail)") //nolint:errcheck // best-effort stderr
 			} else {
 				fmt.Fprintf(stderr, "gc order: unknown subcommand %q\n", args[0]) //nolint:errcheck // best-effort stderr
 			}
@@ -52,6 +53,7 @@ tick and dispatches work when a trigger opens.`,
 		newOrderCheckCmd(stdout, stderr),
 		newOrderHistoryCmd(stdout, stderr),
 		newOrderSweepTrackingCmd(stdout, stderr),
+		newOrderSweepNudgeMailCmd(stdout, stderr),
 	)
 	return cmd
 }
@@ -1666,4 +1668,132 @@ func bdCursorAcrossStores(orderName string, stores ...beads.Store) (uint64, erro
 		}
 	}
 	return maxSeq, nil
+}
+
+// --- gc order sweep-nudge-mail ---
+
+func newOrderSweepNudgeMailCmd(stdout, stderr io.Writer) *cobra.Command {
+	nudgeTTL := nudgeMailSweepDefaultNudgeTTL
+	mailTTL := nudgeMailSweepDefaultMailTTL
+	dryRun := false
+	quiet := false
+	cmd := &cobra.Command{
+		Use:   "sweep-nudge-mail",
+		Short: "Close stale delivered nudge beads and read mail beads",
+		Long: `Close stale delivered nudge beads and read mail beads.
+
+Nudge beads that are past --nudge-ttl and not in the live nudge queue are
+closed. Read mail beads past --mail-ttl are closed. A budget cap of ` + fmt.Sprintf("%d", nudgeMailSweepCloseBudget) + ` closes
+per invocation prevents runaway sweeps under load.
+
+Use --dry-run to log what would be closed without making any changes.
+The controller watchdog also runs this sweep automatically every 5 minutes.`,
+		Args: cobra.NoArgs,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			if cmdOrderSweepNudgeMail(nudgeTTL, mailTTL, dryRun, quiet, stdout, stderr) != 0 {
+				return errExit
+			}
+			return nil
+		},
+	}
+	cmd.Flags().DurationVar(&nudgeTTL, "nudge-ttl", nudgeMailSweepDefaultNudgeTTL, "min age before a delivered nudge bead is GC'd")
+	cmd.Flags().DurationVar(&mailTTL, "mail-ttl", nudgeMailSweepDefaultMailTTL, "min age before a read mail bead is GC'd")
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "log what would be closed; make no changes")
+	cmd.Flags().BoolVar(&quiet, "quiet", false, "suppress success output")
+	return cmd
+}
+
+func cmdOrderSweepNudgeMail(nudgeTTL, mailTTL time.Duration, dryRun, quiet bool, stdout, stderr io.Writer) int {
+	if nudgeTTL <= 0 {
+		fmt.Fprintln(stderr, "gc order sweep-nudge-mail: --nudge-ttl must be positive") //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if mailTTL <= 0 {
+		fmt.Fprintln(stderr, "gc order sweep-nudge-mail: --mail-ttl must be positive") //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	cityPath, err := resolveCity()
+	if err != nil {
+		fmt.Fprintf(stderr, "gc order sweep-nudge-mail: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	store, err := openStoreAtForCity(cityPath, cityPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc order sweep-nudge-mail: %v\n", err)     //nolint:errcheck // best-effort stderr
+		fmt.Fprintln(stderr, "hint: run \"gc doctor\" for diagnostics") //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	defer closeBeadStoreHandle(store) //nolint:errcheck // best-effort
+
+	// Load nudge state to protect live nudge IDs from being swept. A missing
+	// state file is not an error (LoadState returns empty state), so any error
+	// here is a real read/parse failure: fail closed rather than sweeping with
+	// no live-ID protection, which could close beads for in-flight nudges.
+	nudgeState, stateErr := nudgequeue.LoadState(cityPath)
+	if stateErr != nil {
+		fmt.Fprintf(stderr, "gc order sweep-nudge-mail: %v\n", stateErr) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	statePtr := &nudgeState
+
+	now := time.Now()
+	if dryRun {
+		return cmdOrderSweepNudgeMailDryRun(store, statePtr, now, nudgeTTL, mailTTL, quiet, stdout, stderr)
+	}
+	return cmdOrderSweepNudgeMailRun(store, statePtr, now, nudgeTTL, mailTTL, quiet, stdout, stderr)
+}
+
+func cmdOrderSweepNudgeMailDryRun(store beads.Store, nudgeState *nudgequeue.State, now time.Time, nudgeTTL, mailTTL time.Duration, quiet bool, stdout, stderr io.Writer) int {
+	counts, err := countStaleNudgeMail(store, nudgeState, now, nudgeTTL, mailTTL, nudgeMailSweepCloseBudget)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc order sweep-nudge-mail: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if quiet {
+		return 0
+	}
+	if counts.NudgeClosed == 0 && counts.MailClosed == 0 {
+		fmt.Fprintln(stdout, "nudge-mail-sweep: nothing to close (0 stale nudge beads, 0 stale mail beads)") //nolint:errcheck // best-effort stdout
+		return 0
+	}
+	fmt.Fprintf(stdout, "[DRY RUN] nudge-mail-sweep: would close %d nudge bead(s), %d mail bead(s)  (no changes made)\n", //nolint:errcheck
+		counts.NudgeClosed, counts.MailClosed)
+	return 0
+}
+
+func cmdOrderSweepNudgeMailRun(store beads.Store, nudgeState *nudgequeue.State, now time.Time, nudgeTTL, mailTTL time.Duration, quiet bool, stdout, stderr io.Writer) int {
+	result, sweepErr := sweepStaleNudgeMail(store, nudgeState, now, nudgeTTL, mailTTL, nudgeMailSweepCloseBudget)
+
+	if sweepErr != nil {
+		// Per-bead errors are joined via errors.Join (Unwrap() []error): print each
+		// to stderr and continue; the overall sweep is not fatal. A fatal list error
+		// is a single wrapped error that does not implement that interface: surface
+		// it and fail so an unreadable store does not silently "succeed".
+		type unwrapper interface{ Unwrap() []error }
+		if u, ok := sweepErr.(unwrapper); ok {
+			for _, e := range u.Unwrap() {
+				fmt.Fprintf(stderr, "nudge-mail-sweep: ERROR %v — skipping\n", e) //nolint:errcheck // best-effort stderr
+			}
+		} else {
+			fmt.Fprintf(stderr, "gc order sweep-nudge-mail: %v\n", sweepErr) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+	}
+
+	if quiet {
+		return 0
+	}
+
+	total := result.NudgeClosed + result.MailClosed
+	if total == 0 {
+		fmt.Fprintln(stdout, "nudge-mail-sweep: nothing to close (0 stale nudge beads, 0 stale mail beads)") //nolint:errcheck // best-effort stdout
+		return 0
+	}
+	budgetLine := fmt.Sprintf("[budget: %d/%d used]", total, nudgeMailSweepCloseBudget)
+	if total >= nudgeMailSweepCloseBudget {
+		budgetLine = fmt.Sprintf("[budget: %d/%d — cap reached, re-run to continue]", total, nudgeMailSweepCloseBudget)
+	}
+	fmt.Fprintf(stdout, "nudge-mail-sweep: closed %d nudge bead(s), %d mail bead(s)  %s\n", //nolint:errcheck // best-effort stdout
+		result.NudgeClosed, result.MailClosed, budgetLine)
+	return 0
 }

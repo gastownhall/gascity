@@ -9,6 +9,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	osuser "os/user"
@@ -91,6 +93,52 @@ var (
 	// It permits overwriting an existing service unit that references a
 	// different gc binary. Exposed as a var so tests can override it directly.
 	supervisorInstallForce bool
+
+	// supervisorServiceManagerActive reports whether the platform service
+	// manager (launchd on macOS, systemd --user on Linux) considers the
+	// supervisor running. Fallback liveness signal when the control-socket
+	// ping fails (gascity#2984).
+	supervisorServiceManagerActive = func() bool {
+		switch supervisorRuntimeGOOS {
+		case "darwin":
+			return supervisorLaunchdActive(supervisorLaunchdLabel())
+		case "linux":
+			if !supervisorSystemctlUserAvailable() {
+				return false
+			}
+			return supervisorSystemctlActive(supervisorSystemdServiceName())
+		default:
+			return false
+		}
+	}
+	// supervisorAPIReachable reports whether the supervisor HTTP API answers
+	// on its configured loopback address. Complements the service-manager
+	// signal for supervisors not managed by launchd/systemd (gascity#2984).
+	supervisorAPIReachable = func() bool {
+		cfg, err := supervisorLoadConfig(supervisor.ConfigPath())
+		if err != nil {
+			return false
+		}
+		// Normalize wildcard binds to loopback before dialing, mirroring
+		// cmd_service.go: a 0.0.0.0/:: bind is not itself a dialable address
+		// (and 0.0.0.0 GETs fail on macOS).
+		bind := cfg.Supervisor.BindOrDefault()
+		switch bind {
+		case "", "0.0.0.0":
+			bind = "127.0.0.1"
+		case "::", "[::]":
+			bind = "::1"
+		}
+		url := fmt.Sprintf("http://%s/v0/cities",
+			net.JoinHostPort(bind, strconv.Itoa(cfg.Supervisor.PortOrDefault())))
+		client := &http.Client{Timeout: 750 * time.Millisecond}
+		resp, err := client.Get(url)
+		if err != nil {
+			return false
+		}
+		defer resp.Body.Close() //nolint:errcheck
+		return resp.StatusCode >= 200 && resp.StatusCode < 300
+	}
 )
 
 const supervisorServiceFileMode os.FileMode = 0o600

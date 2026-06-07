@@ -16,16 +16,23 @@ gc runtime drain-ack
 The drain-ack tells the controller this session is done.
 
 The Reaper Dog closes stale non-closed wisps only when ownership dependency
-data proves the parent or workflow root is closed, purges closed wisps older
-than the purge threshold, and auto-closes stale issues only in the city
-database where `bd close` is correctly scoped. This keeps the wisps table from
-growing unbounded without closing active wisps by age alone.
+data proves the parent or workflow root is closed, closes stale inactive
+workflow roots whose graph subtree is quiescent, purges closed wisps older than
+the purge threshold, and auto-closes stale issues only in the city database
+where `bd close` is correctly scoped. This keeps workflow root and wisp tables
+from growing unbounded without closing active work by age alone.
 
 Current behavior:
 - Observes open/hooked/in_progress wisps older than max_age (default 24h)
 - Closes only the subset whose parent-child dependency points to a closed
   parent, or whose graph-v2 `tracks` edge points to its `gc.root_bead_id`
   workflow root after that root is closed
+- Closes unassigned open/hooked/in_progress workflow wisp roots older than
+  max_age only when their stamped and graph-dependency subtree has no live or
+  recently updated descendants
+- Closes stale inactive workflow issue roots only in the resolved city
+  database through `bd close`, and reports non-city workflow issue-root
+  candidates without closing them
 - Purges (deletes) closed wisps past purge_age (default 7 days)
 - Auto-closes stale city issues open >30 days with no status change
 - Reports stale issue candidates in non-city databases without closing them
@@ -54,10 +61,14 @@ database patterns.
 This is infrastructure work. You:
 1. Scan all production databases for candidates
 2. Report non-closed wisps past max_age and close only wisps whose parent/root is closed
-3. Purge (delete) closed wisps past purge_age
-4. Auto-close stale city issues (with exclusions)
-5. Report findings and flag anomalies
-6. Return to kennel
+3. Close stale inactive workflow wisp roots only when no live or recent
+   descendants are visible through root metadata or parent-child/tracks/blocks
+   dependencies
+4. Close stale inactive workflow issue roots only in the resolved city database
+5. Purge (delete) closed wisps past purge_age
+6. Auto-close stale city issues (with exclusions)
+7. Report findings and flag anomalies
+8. Return to kennel
 
 ## Variables
 
@@ -82,16 +93,26 @@ closed parent, or when a graph-v2 `tracks` edge points to the child's own
 `gc.root_bead_id` workflow root and that root is closed. Ordinary `blocks`
 dependencies are sequencing edges and must never close a live wisp. Wisps
 without an ownership edge, or with an unresolved parent/root record, are
-observed, not closed by age alone. Purging deletes rows — irreversible but
-only targets already-closed wisps past retention. Its protection query may
-include `blocks` because over-protection only prevents deletion. Auto-close
-excludes P0/P1, epics, and issues with active dependencies. Non-city database
-issue candidates are report-only until the maintenance pack has an explicit
-DB-to-`BEADS_DIR` routing map for scoped `bd close`. If the canonical city
-database cannot be resolved from bead metadata, a `GC_REAPER_CITY_DATABASE`
-override does not match that metadata, or the resolved database is not present
-in the discovered database list, stale issue auto-close is disabled for that
-run and reported as an anomaly.
+observed, not closed by age alone. Workflow root cleanup only targets
+unassigned open/hooked/in_progress roots and treats blocked, deferred, pinned,
+review, and testing descendants as live protection states. A root is also
+preserved when any descendant has been updated within max_age. Workflow root
+descendant traversal is store-local and relies on `gc.root_store_ref`
+co-locating a workflow root, descendants, and graph dependencies in one bead
+store. Rig store refs are matched through resolved rig bindings and each rig's
+`.beads/metadata.json`; roots stamped for another or unmapped store are
+preserved. If that invariant changes, this cleanup must become cross-store
+aware before it can close those roots. Purging
+deletes rows — irreversible but only targets already-closed wisps past
+retention. Its protection query may include `blocks` because over-protection
+only prevents deletion. Auto-close excludes P0/P1, epics, and issues with
+active dependencies. Non-city database issue candidates are report-only until
+the maintenance pack has an explicit DB-to-`BEADS_DIR` routing map for scoped
+`bd close`. If the canonical city database cannot be resolved from bead
+metadata, a `GC_REAPER_CITY_DATABASE` override does not match that metadata, or
+the resolved database is not present in the discovered database list, stale
+issue auto-close and workflow issue-root close are disabled for that run and
+reported as an anomaly when candidates exist.
 
 ## Anomaly Detection
 

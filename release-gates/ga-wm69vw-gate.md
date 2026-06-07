@@ -62,8 +62,8 @@ Diagnostic note: a raw non-sharded `go test -timeout=240s ./cmd/gc/... ./interna
   - `cmd/gc/dolt_cleanup_drop_test.go`
   - `cmd/gc/dolt_cleanup_human_test.go`
   - `cmd/gc/dolt_cleanup_purge_test.go`
-  - `docs/plans/dolt-cleanup-live-session-probe.md`
-  - `docs/plans/dolt-port-resolve-helper.md`
+  - `engdocs/plans/dolt-cleanup-live-session-probe.md`
+  - `engdocs/plans/dolt-port-resolve-helper.md`
   - `internal/api/client.go`
   - `internal/api/response_cache.go`
 

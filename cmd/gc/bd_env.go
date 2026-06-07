@@ -57,7 +57,12 @@ func bdStoreForCity(dir, cityPath string) *beads.BdStore {
 		cfg = nil
 	}
 	reapStaleBdExportJSONL(dir)
-	return beads.NewBdStoreWithPrefix(dir, bdCommandRunnerForCity(cityPath), issuePrefixForScope(dir, cityPath, cfg))
+	return beads.NewBdStoreWithPrefix(
+		dir,
+		bdCommandRunnerForCity(cityPath),
+		issuePrefixForScope(dir, cityPath, cfg),
+		bdStoreOptionsForConfig(cfg)...,
+	)
 }
 
 // bdStoreForRig opens a bead store at rigDir using rig-level Dolt config
@@ -74,7 +79,19 @@ func bdStoreForRig(rigDir, cityPath string, cfg *config.City, knownPrefix ...str
 		}
 	}
 	reapStaleBdExportJSONL(rigDir)
-	return beads.NewBdStoreWithPrefix(rigDir, bdCommandRunnerForRig(cityPath, cfg, rigDir), prefix)
+	return beads.NewBdStoreWithPrefix(
+		rigDir,
+		bdCommandRunnerForRig(cityPath, cfg, rigDir),
+		prefix,
+		bdStoreOptionsForConfig(cfg)...,
+	)
+}
+
+func bdStoreOptionsForConfig(cfg *config.City) []beads.BdStoreOption {
+	if cfg != nil && cfg.Beads.UsesBD105CLISemantics() {
+		return []beads.BdStoreOption{beads.WithBdStoreListSkipLabels(true)}
+	}
+	return nil
 }
 
 // reapStaleBdExportJSONL removes .beads/issues.jsonl best-effort when the
@@ -159,7 +176,12 @@ func scopeIsGCManaged(scopeRoot string) bool {
 
 func controlBdStoreForCity(dir, cityPath string, cfg *config.City) *beads.BdStore {
 	reapStaleBdExportJSONL(dir)
-	return beads.NewBdStoreWithPrefix(dir, controlBdCommandRunnerForCity(cityPath), issuePrefixForScope(dir, cityPath, cfg))
+	return beads.NewBdStoreWithPrefix(
+		dir,
+		controlBdCommandRunnerForCity(cityPath),
+		issuePrefixForScope(dir, cityPath, cfg),
+		bdStoreOptionsForConfig(cfg)...,
+	)
 }
 
 func controlBdStoreForRig(rigDir, cityPath string, cfg *config.City, knownPrefix ...string) *beads.BdStore {
@@ -173,7 +195,12 @@ func controlBdStoreForRig(rigDir, cityPath string, cfg *config.City, knownPrefix
 		}
 	}
 	reapStaleBdExportJSONL(rigDir)
-	return beads.NewBdStoreWithPrefix(rigDir, controlBdCommandRunnerForRig(cityPath, cfg, rigDir), prefix)
+	return beads.NewBdStoreWithPrefix(
+		rigDir,
+		controlBdCommandRunnerForRig(cityPath, cfg, rigDir),
+		prefix,
+		bdStoreOptionsForConfig(cfg)...,
+	)
 }
 
 func controlBdCommandRunnerForCity(cityPath string) beads.CommandRunner {

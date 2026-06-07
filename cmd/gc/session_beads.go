@@ -200,18 +200,26 @@ func stampResolvedProviderSessionMetadata(meta map[string]string, resolved *conf
 	}
 }
 
-func queueMissingResolvedProviderSessionMetadata(existing map[string]string, queue func(string, string), resolved *config.ResolvedProvider) {
+// queueChangedResolvedProviderSessionMetadata queues the resolved-provider
+// projection fields (provider, provider_kind, builtin_ancestor) whenever the
+// freshly resolved value differs from what is stored, mirroring the command
+// refresh so a provider switch in agent.toml is reflected on the session bead
+// (gc-rhp36). It is diff-gated (no write when unchanged, honoring the
+// write-if-changed reconcile contract) and never clobbers a stored value with
+// an empty resolved one — a transient resolution failure must not wipe good
+// metadata.
+func queueChangedResolvedProviderSessionMetadata(existing map[string]string, queue func(string, string), resolved *config.ResolvedProvider) {
 	if queue == nil || resolved == nil {
 		return
 	}
 	name := strings.TrimSpace(resolved.Name)
-	if existing["provider"] == "" && name != "" {
+	if name != "" && existing["provider"] != name {
 		queue("provider", name)
 	}
-	if family := resolvedProviderFamilyMetadata(resolved); existing["provider_kind"] == "" && family != "" {
+	if family := resolvedProviderFamilyMetadata(resolved); family != "" && existing["provider_kind"] != family {
 		queue("provider_kind", family)
 	}
-	if ancestor := strings.TrimSpace(resolved.BuiltinAncestor); existing["builtin_ancestor"] == "" && ancestor != "" && ancestor != name {
+	if ancestor := strings.TrimSpace(resolved.BuiltinAncestor); ancestor != "" && ancestor != name && existing["builtin_ancestor"] != ancestor {
 		queue("builtin_ancestor", ancestor)
 	}
 }
@@ -1339,26 +1347,29 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 		if b.Metadata["continuation_epoch"] == "" {
 			queueMeta("continuation_epoch", strconv.Itoa(session.DefaultContinuationEpoch))
 		}
-		// Refresh command and resume fields. The stored command is used for
-		// `gc session attach` and — on legacy code paths — can act as the
-		// authoritative command source for respawn. If agent config changes
-		// (e.g., adding `[option_defaults] model = "opus"`), the freshly
-		// resolved tp.Command will differ from the stored value; sync here
-		// so the bead matches the current config. An empty tp.Command is
-		// ignored to avoid clobbering the stored value when resolution fails
-		// transiently.
+		// Refresh command, provider, and resume fields. The stored command is
+		// used for `gc session attach` and — on legacy code paths — can act as
+		// the authoritative command source for respawn. If agent config changes
+		// (e.g., adding `[option_defaults] model = "opus"`, or switching the
+		// agent's provider), the freshly resolved values differ from the stored
+		// ones; sync here so the bead matches the current config. Empty resolved
+		// values are ignored to avoid clobbering stored values when resolution
+		// fails transiently. The provider/resume projection fields follow the
+		// same diff-gated, clobber-safe refresh as command (gc-rhp36); without
+		// it they freeze at their creation-time provider after an agent.toml
+		// provider switch while command alone follows.
 		if tp.Command != "" && b.Metadata["command"] != tp.Command {
 			queueMeta("command", tp.Command)
 		}
 		if tp.ResolvedProvider != nil {
-			queueMissingResolvedProviderSessionMetadata(b.Metadata, queueMeta, tp.ResolvedProvider)
-			if b.Metadata["resume_flag"] == "" && tp.ResolvedProvider.ResumeFlag != "" {
+			queueChangedResolvedProviderSessionMetadata(b.Metadata, queueMeta, tp.ResolvedProvider)
+			if tp.ResolvedProvider.ResumeFlag != "" && b.Metadata["resume_flag"] != tp.ResolvedProvider.ResumeFlag {
 				queueMeta("resume_flag", tp.ResolvedProvider.ResumeFlag)
 			}
-			if b.Metadata["resume_style"] == "" && tp.ResolvedProvider.ResumeStyle != "" {
+			if tp.ResolvedProvider.ResumeStyle != "" && b.Metadata["resume_style"] != tp.ResolvedProvider.ResumeStyle {
 				queueMeta("resume_style", tp.ResolvedProvider.ResumeStyle)
 			}
-			if b.Metadata["resume_command"] == "" && tp.ResolvedProvider.ResumeCommand != "" {
+			if tp.ResolvedProvider.ResumeCommand != "" && b.Metadata["resume_command"] != tp.ResolvedProvider.ResumeCommand {
 				queueMeta("resume_command", tp.ResolvedProvider.ResumeCommand)
 			}
 		}

@@ -332,6 +332,9 @@ func TestBuiltinProvidersKiro(t *testing.T) {
 	if !derefBool(p.SupportsHooks) {
 		t.Error("SupportsHooks = false, want true")
 	}
+	if p.AcceptStartupDialogs == nil || *p.AcceptStartupDialogs {
+		t.Errorf("AcceptStartupDialogs = %v, want false (kiro launches --trust-all-tools, shows no startup dialogs)", p.AcceptStartupDialogs)
+	}
 }
 
 // TestBuiltinProvidersOpenCodePromptModeRegression guards against switching

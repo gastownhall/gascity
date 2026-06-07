@@ -1231,13 +1231,17 @@ type BeadsConfig struct {
 	// Empty defaults to "dolt"; T3Code uses "doltlite" for local dev stores.
 	Backend string `toml:"backend,omitempty"`
 	// EventHooks controls installation of the bead event-forwarding hooks
-	// (.beads/hooks/on_create,on_update,on_close). Defaults to true.
-	// This config surface is staged ahead of the native bead-event support;
-	// current hook behavior remains unchanged until lifecycle code opts in.
+	// (.beads/hooks/on_create,on_update,on_close) that shell out to
+	// `gc event emit` on every bead write. Defaults to true. Set to false
+	// once the controller's native cache-events already observe bead changes
+	// (the bd_hooks doctor gate): the lifecycle then removes the event hooks
+	// (leaving git hooks untouched) and stops reinstalling them, clearing the
+	// per-write churn and the native-store gate.
 	EventHooks *bool `toml:"event_hooks,omitempty" jsonschema:"default=true"`
 	// BDCompatibility selects the bd CLI semantics Gas City may rely on.
 	// Empty defaults to "bd-1.0.4", which keeps claimable work history-backed
-	// and avoids ready flags whose filtering is incomplete in bd 1.0.4.
+	// and avoids bd ready/list flags that are unavailable or incomplete in bd
+	// 1.0.4.
 	BDCompatibility string `toml:"bd_compatibility,omitempty" jsonschema:"enum=bd-1.0.4,enum=bd-1.0.5"`
 	// Policies defines per-bead-use storage and garbage-collection defaults.
 	// Policy names are interpreted by higher-level systems; unknown names are
@@ -1255,7 +1259,7 @@ const (
 	// BeadsBDCompatibility104 preserves behavior supported by installed bd
 	// 1.0.4, where ready filtering is reliable only for history-backed rows.
 	BeadsBDCompatibility104 = "bd-1.0.4"
-	// BeadsBDCompatibility105 opts into bd 1.0.5 ready/storage semantics.
+	// BeadsBDCompatibility105 opts into bd 1.0.5 CLI/storage semantics.
 	BeadsBDCompatibility105 = "bd-1.0.5"
 )
 
@@ -1273,10 +1277,16 @@ func (b BeadsConfig) NormalizedBDCompatibility() string {
 	}
 }
 
+// UsesBD105CLISemantics reports whether bd-backed code may rely on bd 1.0.5
+// command-line behavior.
+func (b BeadsConfig) UsesBD105CLISemantics() bool {
+	return b.NormalizedBDCompatibility() == BeadsBDCompatibility105
+}
+
 // UsesBD105ReadySemantics reports whether generated bd ready commands may use
 // flags whose complete filter semantics require bd 1.0.5 or newer.
 func (b BeadsConfig) UsesBD105ReadySemantics() bool {
-	return b.NormalizedBDCompatibility() == BeadsBDCompatibility105
+	return b.UsesBD105CLISemantics()
 }
 
 // BeadPolicyConfig holds storage and retention defaults for a named bead use.

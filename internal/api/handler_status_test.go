@@ -6,9 +6,12 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/mail"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 )
@@ -295,6 +298,80 @@ func TestHandleStatusUsesPartialSessionRows(t *testing.T) {
 	}
 }
 
+func TestHandleStatusDegradesWhenReadModelStoreStalls(t *testing.T) {
+	oldTimeout := statusStoreReadTimeout
+	statusStoreReadTimeout = 20 * time.Millisecond
+	t.Cleanup(func() { statusStoreReadTimeout = oldTimeout })
+
+	state := newFakeState(t)
+	stallingStore := &delayedListStore{
+		Store: beads.NewMemStore(),
+		delay: 750 * time.Millisecond,
+	}
+	state.cityBeadStore = stallingStore
+	state.stores["myrig"] = stallingStore
+	h := newTestCityHandler(t, state)
+
+	req := httptest.NewRequest("GET", cityURL(state, "/status"), nil)
+	rec := httptest.NewRecorder()
+	start := time.Now()
+	h.ServeHTTP(rec, req)
+	elapsed := time.Since(start)
+
+	if elapsed > 500*time.Millisecond {
+		t.Fatalf("status handler took %s, want bounded degraded response", elapsed)
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+	var resp statusResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !resp.Partial {
+		t.Fatalf("Partial = false, want true for stalled read model")
+	}
+	if !statusPartialErrorsContain(resp.PartialErrors, "timed out") {
+		t.Fatalf("PartialErrors = %#v, want timeout diagnostic", resp.PartialErrors)
+	}
+}
+
+func TestHandleStatusDegradesWhenMailCountStalls(t *testing.T) {
+	oldTimeout := statusStoreReadTimeout
+	statusStoreReadTimeout = 20 * time.Millisecond
+	t.Cleanup(func() { statusStoreReadTimeout = oldTimeout })
+
+	state := newFakeState(t)
+	state.cityMailProv = &delayedMailCountProvider{
+		Provider: state.cityMailProv,
+		delay:    750 * time.Millisecond,
+	}
+	h := newTestCityHandler(t, state)
+
+	req := httptest.NewRequest("GET", cityURL(state, "/status"), nil)
+	rec := httptest.NewRecorder()
+	start := time.Now()
+	h.ServeHTTP(rec, req)
+	elapsed := time.Since(start)
+
+	if elapsed > 500*time.Millisecond {
+		t.Fatalf("status handler took %s, want bounded degraded response", elapsed)
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+	var resp statusResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !resp.Partial {
+		t.Fatalf("Partial = false, want true for stalled mail count")
+	}
+	if !statusPartialErrorsContain(resp.PartialErrors, "mail: count timed out") {
+		t.Fatalf("PartialErrors = %#v, want mail count timeout diagnostic", resp.PartialErrors)
+	}
+}
+
 func TestHandleStatusUsesNewestSessionBeadForDuplicateSessionName(t *testing.T) {
 	state := newFakeState(t)
 	store := beads.NewMemStore()
@@ -495,4 +572,33 @@ func TestHandleStatusOnlyUsesProviderLiveness(t *testing.T) {
 	if resp.Running != 1 {
 		t.Fatalf("Running = %d, want 1", resp.Running)
 	}
+}
+
+type delayedListStore struct {
+	beads.Store
+	delay time.Duration
+}
+
+func (s *delayedListStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	time.Sleep(s.delay)
+	return s.Store.List(query)
+}
+
+type delayedMailCountProvider struct {
+	mail.Provider
+	delay time.Duration
+}
+
+func (p *delayedMailCountProvider) Count(recipient string) (int, int, error) {
+	time.Sleep(p.delay)
+	return p.Provider.Count(recipient)
+}
+
+func statusPartialErrorsContain(errors []string, substr string) bool {
+	for _, err := range errors {
+		if strings.Contains(err, substr) {
+			return true
+		}
+	}
+	return false
 }

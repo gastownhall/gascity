@@ -23,6 +23,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionauto "github.com/gastownhall/gascity/internal/runtime/auto"
@@ -82,7 +83,8 @@ type CityRuntime struct {
 	orderRescanLast         time.Time
 	trace                   *sessionReconcilerTraceManager
 
-	orderSweepWatchdogLast time.Time
+	orderSweepWatchdogLast     time.Time
+	nudgeMailSweepWatchdogLast time.Time
 
 	rec events.Recorder
 	cs  *controllerState // nil when controller-managed bead stores are unavailable
@@ -1220,6 +1222,7 @@ func (cr *CityRuntime) dispatchOrders(ctx context.Context, cityRoot string) {
 	now := time.Now()
 	cr.rescanOrderDispatcherIfDue(ctx, cityRoot, now)
 	cr.runOrderTrackingSweepWatchdog(now)
+	cr.runNudgeMailSweepWatchdog(now)
 	if cr.od != nil {
 		cr.od.dispatch(ctx, cityRoot, now)
 	}
@@ -1346,6 +1349,39 @@ func (cr *CityRuntime) runOrderTrackingSweepWatchdog(now time.Time) {
 	n := result.trackingClosed
 	if n > 0 && cr.stderr != nil {
 		fmt.Fprintf(cr.stderr, "%s: order tracking sweep watchdog closed %d stale tracking bead(s)\n", cr.logPrefix, n) //nolint:errcheck // best-effort stderr
+	}
+}
+
+func (cr *CityRuntime) runNudgeMailSweepWatchdog(now time.Time) {
+	if !cr.nudgeMailSweepWatchdogLast.IsZero() && now.Sub(cr.nudgeMailSweepWatchdogLast) < nudgeMailSweepWatchdogInterval {
+		return
+	}
+	cr.nudgeMailSweepWatchdogLast = now
+
+	store := cr.cityBeadStore()
+	if store == nil {
+		return
+	}
+	// Load nudge state to protect live nudge IDs. A missing state file is not an
+	// error (LoadState returns empty state), so any error here is a real
+	// read/parse failure: fail closed and skip this sweep rather than sweeping
+	// without live-ID protection, which could close beads for in-flight nudges.
+	nudgeState, stateErr := nudgequeue.LoadState(cr.cityPath)
+	if stateErr != nil {
+		if cr.stderr != nil {
+			fmt.Fprintf(cr.stderr, "%s: nudge-mail-sweep watchdog: load nudge state: %v\n", cr.logPrefix, stateErr) //nolint:errcheck // best-effort stderr
+		}
+		return
+	}
+	statePtr := &nudgeState
+
+	result, sweepErr := sweepStaleNudgeMail(store, statePtr, now, nudgeMailSweepDefaultNudgeTTL, nudgeMailSweepDefaultMailTTL, nudgeMailSweepWatchdogCloseBudget)
+	if sweepErr != nil && cr.stderr != nil {
+		fmt.Fprintf(cr.stderr, "%s: nudge-mail-sweep watchdog: %v\n", cr.logPrefix, sweepErr) //nolint:errcheck // best-effort stderr
+	}
+	total := result.NudgeClosed + result.MailClosed
+	if total > 0 && cr.stderr != nil {
+		fmt.Fprintf(cr.stderr, "%s: nudge-mail-sweep watchdog closed %d nudge bead(s), %d mail bead(s)\n", cr.logPrefix, result.NudgeClosed, result.MailClosed) //nolint:errcheck // best-effort stderr
 	}
 }
 

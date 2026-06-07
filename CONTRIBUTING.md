@@ -187,6 +187,37 @@ Run this after changing build/packaging scripts or upgrading the Go toolchain.
 - Keep the first line under 72 characters
 - Reference issues when relevant
 
+## Issue Triage Labels
+
+When you file an issue, automation may apply labels that indicate missing
+information. Here is what to expect.
+
+### `status/needs-repro`
+
+Applied when the issue cannot be investigated without a minimal reproduction.
+Automation will leave a request comment explaining what is needed. Please reply
+within 14 days — the 14-day window starts from that comment, not from when
+the label was applied.
+
+### `status/needs-info`
+
+Applied when additional details are required. Automation will leave a request
+comment explaining what information is needed. Please reply within 14 days of
+that comment.
+
+### What happens next
+
+- **You reply or open a PR that addresses the question**: automation removes
+  the label and the stale-close path is canceled. You can always respond even
+  after the 14 days have passed.
+- **14 days pass with no response**: the issue is closed as "not planned"
+  with a comment that references the original request. Replying to the closed
+  issue reopens the conversation; include the requested details so triage can
+  continue.
+
+Both labels are removed automatically when the original reporter comments on
+the issue or pushes a synchronizing commit to a linked pull request.
+
 ## Questions
 
 Open an issue if you need clarification before a larger change.

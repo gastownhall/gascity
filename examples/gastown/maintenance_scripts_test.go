@@ -197,10 +197,10 @@ EOF
 	    fi
 	    ;;
 	  bd)
-    if [ "$2" = "list" ]; then
-      case "$*" in
-        *"--rig project"*)
-          cat <<'EOF'
+	    if [ "$2" = "list" ]; then
+	      case "$*" in
+	        *"--rig project"*)
+	          cat <<'EOF'
 [
   {"id":"ga-valid","status":"in_progress","assignee":"project/gastown.refinery"},
   {"id":"ga-pool","status":"in_progress","assignee":"project/gastown.polecat-3"},
@@ -211,12 +211,20 @@ EOF
         *)
           printf '[]\n'
           ;;
-      esac
-      exit 0
-    fi
-    if [ "$2" = "update" ]; then
-      exit 0
-    fi
+	      esac
+	      exit 0
+	    fi
+	    if [ "$2" = "show" ] && [ "$3" = "ga-orphan" ] && [ "$4" = "--json" ]; then
+	      cat <<'EOF'
+[
+  {"id":"ga-orphan","status":"in_progress","assignee":"project/gastown.missing"}
+]
+EOF
+	      exit 0
+	    fi
+	    if [ "$2" = "update" ]; then
+	      exit 0
+	    fi
     ;;
 esac
 exit 1
@@ -293,10 +301,10 @@ EOF
 	    fi
 	    ;;
 	  bd)
-    if [ "$2" = "list" ]; then
-      case "$*" in
-        *"--rig project"*)
-          cat <<'EOF'
+	    if [ "$2" = "list" ]; then
+	      case "$*" in
+	        *"--rig project"*)
+	          cat <<'EOF'
 [
   {"id":"ga-valid","status":"in_progress","assignee":"gastown.deacon"},
   {"id":"ga-pool","status":"in_progress","assignee":"gastown.polecat-3"},
@@ -307,12 +315,20 @@ EOF
         *)
           printf '[]\n'
           ;;
-      esac
-      exit 0
-    fi
-    if [ "$2" = "update" ]; then
-      exit 0
-    fi
+	      esac
+	      exit 0
+	    fi
+	    if [ "$2" = "show" ] && [ "$3" = "ga-orphan" ] && [ "$4" = "--json" ]; then
+	      cat <<'EOF'
+[
+  {"id":"ga-orphan","status":"in_progress","assignee":"gastown.missing"}
+]
+EOF
+	      exit 0
+	    fi
+	    if [ "$2" = "update" ]; then
+	      exit 0
+	    fi
     ;;
 esac
 exit 1
@@ -550,6 +566,189 @@ exit 1
 	}
 }
 
+func TestOrphanSweepRevalidatesWorkBeadBeforeReset(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+
+	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+case "$1" in
+  config)
+    if [ "$2" = "explain" ]; then
+      cat <<'EOF'
+Agent: project/worker
+  source: pack
+EOF
+      exit 0
+    fi
+    ;;
+  rig)
+    if [ "$2" = "list" ] && [ "$3" = "--json" ]; then
+      printf '{"rigs":[{"name":"hq","hq":true}]}\n'
+      exit 0
+    fi
+    ;;
+  session)
+    if [ "$2" = "list" ] && [ "$3" = "--json" ]; then
+      printf '{"sessions":[],"summary":{},"filters":{},"schema_version":"1"}\n'
+      exit 0
+    fi
+    ;;
+  bd)
+    if [ "$2" = "list" ]; then
+      cat <<'EOF'
+[
+  {"id":"ga-raced-closed","status":"in_progress","assignee":"project__worker-gc-mc-wisp-raced"}
+]
+EOF
+      exit 0
+    fi
+    if [ "$2" = "show" ] && [ "$3" = "ga-raced-closed" ] && [ "$4" = "--json" ]; then
+      cat <<'EOF'
+[
+  {"id":"ga-raced-closed","status":"closed","assignee":"project__worker-gc-mc-wisp-raced","metadata":{"gc.outcome":"pass"}}
+]
+EOF
+      exit 0
+    fi
+    if [ "$2" = "update" ]; then
+      exit 0
+    fi
+    ;;
+esac
+exit 1
+`)
+
+	env := map[string]string{
+		"GC_CITY":      cityDir,
+		"GC_CITY_PATH": cityDir,
+		"GC_CALL_LOG":  gcLog,
+		"PATH":         binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+
+	script := filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "orphan-sweep.sh")
+	cmd := exec.Command(script)
+	cmd.Env = mergeTestEnv(env)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("%s failed: %v\n%s", filepath.Base(script), err, out)
+	}
+	if strings.Contains(string(out), "orphan-sweep: reset") {
+		t.Fatalf("unexpected orphan reset output:\n%s", out)
+	}
+
+	logData, err := os.ReadFile(gcLog)
+	if err != nil {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	log := string(logData)
+	if !strings.Contains(log, "bd show ga-raced-closed --json") {
+		t.Fatalf("work bead was not revalidated before reset:\n%s", log)
+	}
+	if strings.Contains(log, "bd update ga-raced-closed ") {
+		t.Fatalf("closed work bead was reopened by orphan-sweep:\n%s", log)
+	}
+}
+
+func TestOrphanSweepUsesSessionBeadShowWhenSessionListLags(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+
+	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+case "$1" in
+  config)
+    if [ "$2" = "explain" ]; then
+      cat <<'EOF'
+Agent: project/worker
+  source: pack
+EOF
+      exit 0
+    fi
+    ;;
+  rig)
+    if [ "$2" = "list" ] && [ "$3" = "--json" ]; then
+      printf '{"rigs":[{"name":"hq","hq":true}]}\n'
+      exit 0
+    fi
+    ;;
+  session)
+    if [ "$2" = "list" ] && [ "$3" = "--json" ]; then
+      printf '{"sessions":[],"summary":{},"filters":{},"schema_version":"1"}\n'
+      exit 0
+    fi
+    ;;
+  bd)
+    if [ "$2" = "list" ]; then
+      cat <<'EOF'
+[
+  {"id":"ga-session-lag","status":"in_progress","assignee":"project__worker-gc-mc-wisp-live123"}
+]
+EOF
+      exit 0
+    fi
+    if [ "$2" = "show" ] && [ "$3" = "ga-session-lag" ] && [ "$4" = "--json" ]; then
+      cat <<'EOF'
+[
+  {"id":"ga-session-lag","status":"in_progress","assignee":"project__worker-gc-mc-wisp-live123","metadata":{"gc.session_name":"project__worker-gc-mc-wisp-live123"}}
+]
+EOF
+      exit 0
+    fi
+    if [ "$2" = "show" ] && [ "$3" = "mc-wisp-live123" ] && [ "$4" = "--json" ]; then
+      cat <<'EOF'
+[
+  {"id":"mc-wisp-live123","status":"open","issue_type":"session","metadata":{"state":"start-pending","session_name":"project__worker-gc-mc-wisp-live123"}}
+]
+EOF
+      exit 0
+    fi
+    if [ "$2" = "update" ]; then
+      exit 0
+    fi
+    ;;
+esac
+exit 1
+`)
+
+	env := map[string]string{
+		"GC_CITY":      cityDir,
+		"GC_CITY_PATH": cityDir,
+		"GC_CALL_LOG":  gcLog,
+		"PATH":         binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+
+	script := filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "orphan-sweep.sh")
+	cmd := exec.Command(script)
+	cmd.Env = mergeTestEnv(env)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("%s failed: %v\n%s", filepath.Base(script), err, out)
+	}
+	if strings.Contains(string(out), "orphan-sweep: reset") {
+		t.Fatalf("unexpected orphan reset output:\n%s", out)
+	}
+
+	logData, err := os.ReadFile(gcLog)
+	if err != nil {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	log := string(logData)
+	for _, want := range []string{
+		"bd show ga-session-lag --json",
+		"bd show mc-wisp-live123 --json",
+	} {
+		if !strings.Contains(log, want) {
+			t.Fatalf("missing required gc call %q:\n%s", want, log)
+		}
+	}
+	if strings.Contains(log, "bd update ga-session-lag ") {
+		t.Fatalf("session-list lag caused live assigned work to reset:\n%s", log)
+	}
+}
+
 func TestOrphanSweepPreservesRigScopedLiveEphemeralSessionAssigneesFromCurrentSchema(t *testing.T) {
 	cityDir := t.TempDir()
 	binDir := t.TempDir()
@@ -595,9 +794,9 @@ EOF
     fi
     ;;
   bd)
-    if [ "$2" = "list" ]; then
-      if [ "$4" = "project" ]; then
-        cat <<'EOF'
+	    if [ "$2" = "list" ]; then
+	      if [ "$4" = "project" ]; then
+	        cat <<'EOF'
 [
   {"id":"ga-rig-live-by-session-name","status":"in_progress","assignee":"project__worker-gc-rig123"},
   {"id":"ga-rig-live-by-id","status":"in_progress","assignee":"mc-live-rig-asleep"},
@@ -607,12 +806,28 @@ EOF
 EOF
       else
         printf '[]\n'
-      fi
-      exit 0
-    fi
-    if [ "$2" = "update" ]; then
-      exit 0
-    fi
+	      fi
+	      exit 0
+	    fi
+	    if [ "$2" = "show" ] && [ "$3" = "ga-rig-orphan" ] && [ "$4" = "--json" ]; then
+	      cat <<'EOF'
+[
+  {"id":"ga-rig-orphan","status":"in_progress","assignee":"missing-rig-session"}
+]
+EOF
+	      exit 0
+	    fi
+	    if [ "$2" = "show" ] && [ "$3" = "ga-rig-closed-default-filtered" ] && [ "$4" = "--json" ]; then
+	      cat <<'EOF'
+[
+  {"id":"ga-rig-closed-default-filtered","status":"in_progress","assignee":"project__worker-gc-closed"}
+]
+EOF
+	      exit 0
+	    fi
+	    if [ "$2" = "update" ]; then
+	      exit 0
+	    fi
     ;;
 esac
 exit 1
@@ -702,9 +917,9 @@ EOF
     fi
     ;;
   bd)
-    if [ "$2" = "list" ]; then
-      if [ "$3" = "--rig" ] && [ "$4" = "project" ]; then
-        cat <<'EOF'
+	    if [ "$2" = "list" ]; then
+	      if [ "$3" = "--rig" ] && [ "$4" = "project" ]; then
+	        cat <<'EOF'
 [
   {"id":"ga-live-by-id","status":"in_progress","assignee":"vgc-live-id"},
   {"id":"ga-live-by-session-name","status":"in_progress","assignee":"project__worker-vgc-live-name"},
@@ -714,12 +929,28 @@ EOF
 EOF
       else
         printf '[]\n'
-      fi
-      exit 0
-    fi
-    if [ "$2" = "update" ]; then
-      exit 0
-    fi
+	      fi
+	      exit 0
+	    fi
+	    if [ "$2" = "show" ] && [ "$3" = "ga-closed-session" ] && [ "$4" = "--json" ]; then
+	      cat <<'EOF'
+[
+  {"id":"ga-closed-session","status":"in_progress","assignee":"vgc-closed"}
+]
+EOF
+	      exit 0
+	    fi
+	    if [ "$2" = "show" ] && [ "$3" = "ga-missing-session" ] && [ "$4" = "--json" ]; then
+	      cat <<'EOF'
+[
+  {"id":"ga-missing-session","status":"in_progress","assignee":"missing-session"}
+]
+EOF
+	      exit 0
+	    fi
+	    if [ "$2" = "update" ]; then
+	      exit 0
+	    fi
     ;;
 esac
 exit 1
@@ -799,9 +1030,9 @@ EOF
     fi
     ;;
   bd)
-    if [ "$2" = "list" ]; then
-      if [ "$3" = "--rig" ] && [ "$4" = "broken" ]; then
-        cat <<'EOF'
+	    if [ "$2" = "list" ]; then
+	      if [ "$3" = "--rig" ] && [ "$4" = "broken" ]; then
+	        cat <<'EOF'
 [
   {"id":"ga-broken-orphan","status":"in_progress","assignee":"missing-broken-session"}
 ]
@@ -818,12 +1049,28 @@ EOF
   {"id":"ga-hq-orphan","status":"in_progress","assignee":"missing-hq-session"}
 ]
 EOF
-      fi
-      exit 0
-    fi
-    if [ "$2" = "update" ]; then
-      exit 0
-    fi
+	      fi
+	      exit 0
+	    fi
+	    if [ "$2" = "show" ] && [ "$3" = "ga-hq-orphan" ] && [ "$4" = "--json" ]; then
+	      cat <<'EOF'
+[
+  {"id":"ga-hq-orphan","status":"in_progress","assignee":"missing-hq-session"}
+]
+EOF
+	      exit 0
+	    fi
+	    if [ "$2" = "show" ] && [ "$3" = "ga-healthy-orphan" ] && [ "$4" = "--json" ]; then
+	      cat <<'EOF'
+[
+  {"id":"ga-healthy-orphan","status":"in_progress","assignee":"missing-healthy-session"}
+]
+EOF
+	      exit 0
+	    fi
+	    if [ "$2" = "update" ]; then
+	      exit 0
+	    fi
     ;;
 esac
 exit 1
@@ -976,6 +1223,7 @@ func TestOrphanSweepPreservesProtectedInProgressEphemeralMoleculeWisp(t *testing
 				rigSessionsJSON:    rigSessionsJSON,
 				configuredIdentity: tt.configuredIdentity,
 				orphanID:           tt.orphanID,
+				orphanAssignee:     tt.orphanAssignee,
 			})
 			assertOrphanSweepFakeGC(t, env, filepath.Join(binDir, "bash"), fakeGC, gcLog)
 
@@ -1021,6 +1269,7 @@ func TestOrphanSweepPreservesProtectedInProgressEphemeralMoleculeWisp(t *testing
 				"rig list --json",
 				"bd list --rig project-alpha --status=in_progress --json --limit=0",
 				"config explain",
+				"bd show " + tt.orphanID + " --json",
 				orphanUpdate,
 			} {
 				if countExactLine(lines, want) == 0 {
@@ -1072,6 +1321,10 @@ fi
 if [ "$*" = "bd update $ORPHAN_SWEEP_ORPHAN_ID --status=open --assignee=" ]; then
   exit 0
 fi
+if [ "$*" = "bd show $ORPHAN_SWEEP_ORPHAN_ID --json" ]; then
+  printf '[{"id":"%s","status":"in_progress","assignee":"%s","metadata":{}}]\n' "$ORPHAN_SWEEP_ORPHAN_ID" "$ORPHAN_SWEEP_ORPHAN_ASSIGNEE"
+  exit 0
+fi
 printf 'UNEXPECTED: %s\n' "$*" >> "$GC_CALL_LOG"
 printf 'UNEXPECTED: %s\n' "$*" >&2
 exit 2
@@ -1085,6 +1338,7 @@ type orphanSweepCleanroomEnvConfig struct {
 	rigSessionsJSON    string
 	configuredIdentity string
 	orphanID           string
+	orphanAssignee     string
 }
 
 func orphanSweepProtectedWispBeadsJSON(t *testing.T, protectedID, protectedAssignee, orphanID, orphanAssignee string) string {
@@ -1202,6 +1456,7 @@ func orphanSweepCleanroomEnv(t *testing.T, root, binDir, gcLog string, cfg orpha
 		"ORPHAN_SWEEP_RIG_SESSIONS_JSON=" + cfg.rigSessionsJSON,
 		"ORPHAN_SWEEP_CONFIGURED_IDENTITY=" + cfg.configuredIdentity,
 		"ORPHAN_SWEEP_ORPHAN_ID=" + cfg.orphanID,
+		"ORPHAN_SWEEP_ORPHAN_ASSIGNEE=" + cfg.orphanAssignee,
 		"PATH=" + binDir,
 	}
 }
@@ -1801,6 +2056,9 @@ case "$*" in
   *"SHOW DATABASES"*)
     printf 'Database\nbeads\n'
     ;;
+  *"WITH RECURSIVE workflow_issue_root_candidates"*"SELECT DISTINCT root.id"*)
+    printf 'id\n'
+    ;;
   *"issue_type NOT IN"*)
     printf 'COUNT(*)\n0\n'
     ;;
@@ -1869,6 +2127,9 @@ case "$*" in
     ;;
   *"SHOW DATABASES"*)
     printf 'Database\nbeads\n'
+    ;;
+  *"WITH RECURSIVE workflow_issue_root_candidates"*"SELECT DISTINCT root.id"*)
+    printf 'id\n'
     ;;
   *"issue_type NOT IN"*"created_at < DATE_SUB"*)
     printf 'COUNT(*)\n0\n'
@@ -3518,7 +3779,7 @@ func TestReaperDoesNotCloseStaleWispWithClosedBlocksPredecessor(t *testing.T) {
 		t.Fatalf("ReadFile(dolt log): %v", err)
 	}
 	log := string(logData)
-	if strings.Contains(log, "UPDATE `beads`.wisps SET status='closed'") {
+	if strings.Contains(log, "reaper_wisp_candidates") {
 		t.Fatalf("reaper closed a stale wisp through an ordinary closed blocks predecessor:\n%s", log)
 	}
 
@@ -3528,6 +3789,335 @@ func TestReaperDoesNotCloseStaleWispWithClosedBlocksPredecessor(t *testing.T) {
 	}
 	if !strings.Contains(string(gcData), "stale_wisps:1") || !strings.Contains(string(gcData), "closed_wisps:0") {
 		t.Fatalf("reaper summary did not keep closed blocks predecessor as non-closing:\n%s", gcData)
+	}
+}
+
+func TestReaperClosesStaleInactiveWorkflowRoots(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	doltLog := filepath.Join(t.TempDir(), "dolt-args.log")
+	bdLog := filepath.Join(t.TempDir(), "bd.log")
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+
+	writeExecutable(t, filepath.Join(binDir, "dolt"), `#!/bin/sh
+printf '%s\n' "$*" >> "$DOLT_ARGS_LOG"
+case "$*" in
+  *"SHOW TABLES FROM"*"LIKE 'wisps'"*)
+    printf 'Tables_in_db\nwisps\n'
+    ;;
+  *"SHOW DATABASES"*)
+    printf 'Database\nbeads\n'
+    ;;
+  *"SHOW COLUMNS FROM"*"dependencies"*)
+    printf 'Field,Type,Null,Key,Default,Extra\n'
+    printf 'issue_id,varchar,NO,,,\n'
+    printf 'depends_on_id,varchar,NO,,,\n'
+    printf 'type,varchar,NO,,,\n'
+    ;;
+  *"WITH RECURSIVE workflow_wisp_root_candidates"*"UPDATE "*"wisps SET status='closed'"*"JSON_SET(COALESCE(metadata, JSON_OBJECT())"*)
+    printf 'ROW_COUNT()\n1\n'
+    ;;
+  *"WITH RECURSIVE workflow_wisp_root_candidates"*"SELECT COUNT(*) FROM ("*)
+    printf 'COUNT(*)\n1\n'
+    ;;
+  *"WITH RECURSIVE workflow_issue_root_candidates"*"SELECT DISTINCT root.id"*)
+    printf 'id\nissue-close\n'
+    ;;
+  *"SELECT COUNT(*) FROM "*"wisps"*"status IN ('open', 'hooked', 'in_progress')"*"created_at <"*)
+    printf 'COUNT(*)\n0\n'
+    ;;
+  *"COUNT("*)
+    printf 'COUNT(*)\n0\n'
+    ;;
+  *"SELECT id"*)
+    printf 'id\n'
+    ;;
+esac
+exit 0
+`)
+	writeExecutable(t, filepath.Join(binDir, "bd"), `#!/bin/sh
+printf '%s\n' "$*" >> "$BD_CALL_LOG"
+exit 0
+`)
+	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+exit 0
+`)
+	writeCityBeadsMetadata(t, cityDir, "beads")
+	rigDir := filepath.Join(cityDir, "rigs", "beads-rig")
+	writeCityBeadsMetadata(t, rigDir, "beads")
+	writeSiteRigBinding(t, cityDir, "beads-rig", rigDir)
+
+	env := map[string]string{
+		"BD_CALL_LOG":      bdLog,
+		"DOLT_ARGS_LOG":    doltLog,
+		"GC_CALL_LOG":      gcLog,
+		"GC_CITY":          cityDir,
+		"GC_CITY_PATH":     cityDir,
+		"GC_DOLT_HOST":     "127.0.0.1",
+		"GC_DOLT_PORT":     "3307",
+		"GC_DOLT_USER":     "root",
+		"GC_DOLT_PASSWORD": "",
+		"PATH":             binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+
+	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "reaper.sh"), env)
+
+	logData, err := os.ReadFile(doltLog)
+	if err != nil {
+		t.Fatalf("ReadFile(dolt log): %v", err)
+	}
+	log := string(logData)
+	for _, want := range []string{
+		"WITH RECURSIVE workflow_wisp_root_candidates",
+		"WITH RECURSIVE workflow_issue_root_candidates",
+		"workflow_descendants(root_id, id)",
+		"roots_with_live_descendants",
+		"UPDATE `beads`.wisps SET status='closed', closed_at=NOW(), metadata = JSON_SET(COALESCE(metadata, JSON_OBJECT())",
+		"'$.\"gc.outcome\"', 'skipped'",
+		"'$.\"close_reason\"', 'stale inactive workflow root auto-closed by reaper'",
+		"JSON_UNQUOTE(JSON_EXTRACT(w.metadata, '$.\"gc.kind\"')) = 'workflow'",
+		"JSON_UNQUOTE(JSON_EXTRACT(w.metadata, '$.\"gc.formula_contract\"')) = 'graph.v2'",
+		"COALESCE(JSON_UNQUOTE(JSON_EXTRACT(w.metadata, '$.\"gc.root_bead_id\"')), '') IN ('', w.id)",
+		"COALESCE(JSON_UNQUOTE(JSON_EXTRACT(w.metadata, '$.\"gc.root_store_ref\"')), '') = ''",
+		"JSON_UNQUOTE(JSON_EXTRACT(w.metadata, '$.\"gc.root_store_ref\"')) = 'beads'",
+		"JSON_UNQUOTE(JSON_EXTRACT(w.metadata, '$.\"gc.root_store_ref\"')) IN ('rig:beads-rig')",
+		"JSON_UNQUOTE(JSON_EXTRACT(child_wisp.metadata, '$.\"gc.root_bead_id\"')) = root.id",
+		"JSON_UNQUOTE(JSON_EXTRACT(i.metadata, '$.\"gc.kind\"')) = 'workflow'",
+		"JSON_UNQUOTE(JSON_EXTRACT(i.metadata, '$.\"gc.formula_contract\"')) = 'graph.v2'",
+		"COALESCE(JSON_UNQUOTE(JSON_EXTRACT(i.metadata, '$.\"gc.root_bead_id\"')), '') IN ('', i.id)",
+		"JSON_UNQUOTE(JSON_EXTRACT(i.metadata, '$.\"gc.root_store_ref\"')) LIKE 'city:%'",
+		"JSON_UNQUOTE(JSON_EXTRACT(i.metadata, '$.\"gc.root_store_ref\"')) IN ('rig:beads-rig')",
+		"JSON_UNQUOTE(JSON_EXTRACT(child_issue.metadata, '$.\"gc.root_bead_id\"')) = root.id",
+		"COALESCE(w.assignee, '') = ''",
+		"COALESCE(i.assignee, '') = ''",
+		"COALESCE(w.updated_at, w.created_at) < DATE_SUB(NOW(), INTERVAL",
+		"COALESCE(i.updated_at, i.created_at) < DATE_SUB(NOW(), INTERVAL",
+		"descendant_wisp.status, descendant_issue.status) IN ('open', 'hooked', 'in_progress', 'blocked', 'deferred', 'pinned', 'review', 'testing')",
+		"roots_with_recent_descendants",
+		"child_dep.type IN ('parent-child', 'tracks', 'blocks')",
+		"child_dep.depends_on_id = root.id",
+		"child_dep.depends_on_id = parent.id",
+		"workflow_roots=2",
+	} {
+		if !strings.Contains(log, want) {
+			t.Fatalf("reaper workflow-root SQL missing %q:\n%s", want, log)
+		}
+	}
+	if strings.Contains(log, "parent_id") {
+		t.Fatalf("reaper workflow-root cleanup used removed parent_id column:\n%s", log)
+	}
+	if strings.Contains(log, "UPDATE `beads`.issues SET status='closed'") {
+		t.Fatalf("reaper closed city workflow issue roots with raw SQL instead of bd close:\n%s", log)
+	}
+
+	bdData, err := os.ReadFile(bdLog)
+	if err != nil {
+		t.Fatalf("ReadFile(bd log): %v", err)
+	}
+	if !strings.Contains(string(bdData), "close issue-close --reason stale inactive workflow root auto-closed by reaper") {
+		t.Fatalf("reaper did not close city workflow issue root through bd close:\n%s", bdData)
+	}
+
+	gcData, err := os.ReadFile(gcLog)
+	if err != nil {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	if !strings.Contains(string(gcData), "workflow_roots:2") ||
+		!strings.Contains(string(gcData), "skipped_cross_store_workflow_roots:0") {
+		t.Fatalf("reaper summary did not report closed workflow roots:\n%s", gcData)
+	}
+}
+
+func TestReaperWorkflowRootPredicateIsGeneratedFromOneHelper(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "reaper.sh"))
+	if err != nil {
+		t.Fatalf("ReadFile(reaper.sh): %v", err)
+	}
+	script := string(data)
+	if got := strings.Count(script, "workflow_descendants(root_id, id) AS"); got != 1 {
+		t.Fatalf("workflow-root recursive CTE body appears %d times, want one helper definition", got)
+	}
+	if got := strings.Count(script, "workflow_root_candidates_cte()"); got != 1 {
+		t.Fatalf("workflow-root candidate helper appears %d times, want one definition", got)
+	}
+}
+
+func TestReaperPreservesWorkflowRootsWithLiveDescendants(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	doltLog := filepath.Join(t.TempDir(), "dolt-args.log")
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+
+	writeExecutable(t, filepath.Join(binDir, "dolt"), `#!/bin/sh
+printf '%s\n' "$*" >> "$DOLT_ARGS_LOG"
+case "$*" in
+  *"SHOW TABLES FROM"*"LIKE 'wisps'"*)
+    printf 'Tables_in_db\nwisps\n'
+    ;;
+  *"SHOW DATABASES"*)
+    printf 'Database\nbeads\n'
+    ;;
+  *"SHOW COLUMNS FROM"*"dependencies"*)
+    printf 'Field,Type,Null,Key,Default,Extra\n'
+    printf 'issue_id,varchar,NO,,,\n'
+    printf 'depends_on_id,varchar,NO,,,\n'
+    printf 'type,varchar,NO,,,\n'
+    ;;
+  *"WITH RECURSIVE workflow_wisp_root_candidates"*"SELECT COUNT(*) FROM ("*)
+    printf 'COUNT(*)\n0\n'
+    ;;
+  *"WITH RECURSIVE workflow_issue_root_candidates"*"SELECT DISTINCT root.id"*)
+    printf 'id\n'
+    ;;
+  *"WITH RECURSIVE workflow_wisp_root_candidates"*"UPDATE "*"wisps SET status='closed'"*)
+    printf 'workflow roots with live descendants must be preserved\n' >&2
+    exit 42
+    ;;
+  *"SELECT COUNT(*) FROM "*"wisps"*"status IN ('open', 'hooked', 'in_progress')"*"created_at <"*)
+    printf 'COUNT(*)\n0\n'
+    ;;
+  *"COUNT("*)
+    printf 'COUNT(*)\n0\n'
+    ;;
+  *"SELECT id"*)
+    printf 'id\n'
+    ;;
+esac
+exit 0
+`)
+	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+exit 0
+`)
+	writeCityBeadsMetadata(t, cityDir, "beads")
+
+	env := map[string]string{
+		"DOLT_ARGS_LOG":    doltLog,
+		"GC_CALL_LOG":      gcLog,
+		"GC_CITY":          cityDir,
+		"GC_CITY_PATH":     cityDir,
+		"GC_DOLT_HOST":     "127.0.0.1",
+		"GC_DOLT_PORT":     "3307",
+		"GC_DOLT_USER":     "root",
+		"GC_DOLT_PASSWORD": "",
+		"PATH":             binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+
+	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "reaper.sh"), env)
+
+	logData, err := os.ReadFile(doltLog)
+	if err != nil {
+		t.Fatalf("ReadFile(dolt log): %v", err)
+	}
+	log := string(logData)
+	for _, want := range []string{
+		"roots_with_live_descendants",
+		"roots_with_recent_descendants",
+		"workflow_descendants(root_id, id)",
+		"descendant_wisp.status, descendant_issue.status) IN ('open', 'hooked', 'in_progress', 'blocked', 'deferred', 'pinned', 'review', 'testing')",
+		"child_dep.type IN ('parent-child', 'tracks', 'blocks')",
+	} {
+		if !strings.Contains(log, want) {
+			t.Fatalf("reaper workflow-root preserve guard missing %q:\n%s", want, log)
+		}
+	}
+	if strings.Contains(log, "UPDATE `beads`.wisps SET status='closed', closed_at=NOW(), metadata = JSON_SET") ||
+		strings.Contains(log, "UPDATE `beads`.issues SET status='closed'") {
+		t.Fatalf("reaper closed workflow roots after live-descendant counts returned zero:\n%s", log)
+	}
+
+	gcData, err := os.ReadFile(gcLog)
+	if err != nil {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	if strings.Contains(string(gcData), "workflow_roots:1") {
+		t.Fatalf("reaper summary reported closed workflow roots despite live descendants:\n%s", gcData)
+	}
+}
+
+func TestReaperDryRunReportsWouldCloseWorkflowRoots(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	doltLog := filepath.Join(t.TempDir(), "dolt-args.log")
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+
+	writeExecutable(t, filepath.Join(binDir, "dolt"), `#!/bin/sh
+printf '%s\n' "$*" >> "$DOLT_ARGS_LOG"
+case "$*" in
+  *"SHOW TABLES FROM"*"LIKE 'wisps'"*)
+    printf 'Tables_in_db\nwisps\n'
+    ;;
+  *"SHOW DATABASES"*)
+    printf 'Database\nbeads\n'
+    ;;
+  *"SHOW COLUMNS FROM"*"dependencies"*)
+    printf 'Field,Type,Null,Key,Default,Extra\n'
+    printf 'issue_id,varchar,NO,,,\n'
+    printf 'depends_on_id,varchar,NO,,,\n'
+    printf 'type,varchar,NO,,,\n'
+    ;;
+  *"WITH RECURSIVE workflow_wisp_root_candidates"*"SELECT COUNT(*) FROM ("*)
+    printf 'COUNT(*)\n1\n'
+    ;;
+  *"WITH RECURSIVE workflow_issue_root_candidates"*"SELECT DISTINCT root.id"*)
+    printf 'id\nissue-close\n'
+    ;;
+  *"WITH RECURSIVE workflow_wisp_root_candidates"*"UPDATE "*"wisps SET status='closed'"*)
+    printf 'dry-run should not update workflow wisp roots\n' >&2
+    exit 42
+    ;;
+  *"SELECT COUNT(*) FROM "*"wisps"*"status IN ('open', 'hooked', 'in_progress')"*"created_at <"*)
+    printf 'COUNT(*)\n0\n'
+    ;;
+  *"COUNT("*)
+    printf 'COUNT(*)\n0\n'
+    ;;
+  *"SELECT id"*)
+    printf 'id\n'
+    ;;
+esac
+exit 0
+`)
+	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+exit 0
+`)
+	writeCityBeadsMetadata(t, cityDir, "beads")
+
+	env := map[string]string{
+		"DOLT_ARGS_LOG":     doltLog,
+		"GC_CALL_LOG":       gcLog,
+		"GC_CITY":           cityDir,
+		"GC_CITY_PATH":      cityDir,
+		"GC_DOLT_HOST":      "127.0.0.1",
+		"GC_DOLT_PORT":      "3307",
+		"GC_DOLT_USER":      "root",
+		"GC_DOLT_PASSWORD":  "",
+		"GC_REAPER_DRY_RUN": "1",
+		"PATH":              binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+
+	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "reaper.sh"), env)
+
+	logData, err := os.ReadFile(doltLog)
+	if err != nil {
+		t.Fatalf("ReadFile(dolt log): %v", err)
+	}
+	if strings.Contains(string(logData), "UPDATE `beads`.wisps SET status='closed', closed_at=NOW(), metadata = JSON_SET") ||
+		strings.Contains(string(logData), "UPDATE `beads`.issues SET status='closed', closed_at=NOW(), metadata = JSON_SET") {
+		t.Fatalf("dry-run executed workflow-root update:\n%s", logData)
+	}
+
+	gcData, err := os.ReadFile(gcLog)
+	if err != nil {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	gcText := string(gcData)
+	if !strings.Contains(gcText, "workflow_roots:0") ||
+		!strings.Contains(gcText, "would_close_workflow_roots:2") ||
+		!strings.Contains(gcText, "(dry run)") {
+		t.Fatalf("dry-run summary did not report workflow-root would-close count:\n%s", gcText)
 	}
 }
 
@@ -3813,7 +4403,7 @@ exit 0
 	if !strings.Contains(log, "CALL DOLT_COMMIT") {
 		t.Fatalf("reaper did not commit successful close after failed purge:\n%s", log)
 	}
-	if !strings.Contains(log, "closed_wisps=1 purged=0") {
+	if !strings.Contains(log, "closed_wisps=1 workflow_roots=0 purged=0") {
 		t.Fatalf("reaper commit did not report only successful purge rows:\n%s", log)
 	}
 	if strings.Contains(log, "purged=1") {
@@ -5437,6 +6027,18 @@ func writeCityBeadsMetadata(t *testing.T, cityDir, db string) {
 	}
 }
 
+func writeSiteRigBinding(t *testing.T, cityDir, rigName, rigDir string) {
+	t.Helper()
+	gcDir := filepath.Join(cityDir, ".gc")
+	if err := os.MkdirAll(gcDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(%s): %v", gcDir, err)
+	}
+	content := fmt.Sprintf("[[rig]]\nname = %q\npath = %q\n", rigName, rigDir)
+	if err := os.WriteFile(filepath.Join(gcDir, "site.toml"), []byte(content), 0o644); err != nil {
+		t.Fatalf("WriteFile(site.toml): %v", err)
+	}
+}
+
 func writeMaintenanceDoltStub(t *testing.T, path string) {
 	t.Helper()
 	writeExecutable(t, path, `#!/bin/sh
@@ -5529,7 +6131,8 @@ close_fixture_matches() {
         printf '%s' "$*" | grep -F "gc.root_bead_id" >/dev/null 2>&1
       ;;
     blocks_closed_predecessor)
-      printf '%s' "$*" | grep -F "blocks" >/dev/null 2>&1
+      printf '%s' "$*" | grep -F "wisp_dependencies d" >/dev/null 2>&1 &&
+        printf '%s' "$*" | grep -F "blocks" >/dev/null 2>&1
       ;;
     *)
       return 1
