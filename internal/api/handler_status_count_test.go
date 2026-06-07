@@ -43,7 +43,13 @@ func (s *counterBeadStore) List(q beads.ListQuery) ([]beads.Bead, error) {
 
 func getStatus(t *testing.T, state *fakeState) statusResponse {
 	t.Helper()
-	h := newTestCityHandler(t, state)
+	return getStatusFrom(t, newTestCityHandler(t, state), state)
+}
+
+// getStatusFrom fetches /status through an existing handler so tests can
+// issue multiple requests against one handler's response cache.
+func getStatusFrom(t *testing.T, h http.Handler, state *fakeState) statusResponse {
+	t.Helper()
 	req := httptest.NewRequest("GET", cityURL(state, "/status"), nil)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -140,22 +146,7 @@ func TestHandleStatusServesRecentResponseDespiteIndexAdvance(t *testing.T) {
 	state.stores["myrig"] = counter
 	h := newTestCityHandler(t, state)
 
-	get := func() statusResponse {
-		t.Helper()
-		req := httptest.NewRequest("GET", cityURL(state, "/status"), nil)
-		rec := httptest.NewRecorder()
-		h.ServeHTTP(rec, req)
-		if rec.Code != http.StatusOK {
-			t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
-		}
-		var resp statusResponse
-		if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
-			t.Fatalf("decode: %v", err)
-		}
-		return resp
-	}
-
-	first := get()
+	first := getStatusFrom(t, h, state)
 	if first.Work.Open != 2 {
 		t.Fatalf("Work.Open = %d, want 2", first.Work.Open)
 	}
@@ -166,7 +157,7 @@ func TestHandleStatusServesRecentResponseDespiteIndexAdvance(t *testing.T) {
 	state.eventProv.(*events.Fake).Record(events.Event{Type: "test.event", Actor: "test"})
 	counter.counts["open"] = 7
 
-	second := get()
+	second := getStatusFrom(t, h, state)
 	if second.Work.Open != 2 {
 		t.Fatalf("Work.Open = %d, want 2 (cached within TTL floor)", second.Work.Open)
 	}

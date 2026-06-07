@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 )
 
@@ -116,13 +117,9 @@ func (c *CachingStore) Count(ctx context.Context, query ListQuery, excludeTypes 
 		cacheClean := (c.state == cacheLive || c.state == cachePartial) &&
 			len(c.dirty) == 0 && c.primePartialErr == nil
 		if cacheClean {
-			excluded := make(map[string]bool, len(excludeTypes))
-			for _, t := range excludeTypes {
-				excluded[t] = true
-			}
 			n := 0
 			for _, b := range c.beads {
-				if query.Matches(b) && !excluded[b.Type] {
+				if query.Matches(b) && !slices.Contains(excludeTypes, b.Type) {
 					n++
 				}
 			}
