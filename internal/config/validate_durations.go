@@ -90,6 +90,7 @@ func ValidateDurations(cfg *City, source string) []string {
 
 	// Chat sessions config durations.
 	check("[chat_sessions]", "idle_timeout", cfg.ChatSessions.IdleTimeout)
+	check("[chat_sessions]", "grace_period", cfg.ChatSessions.GracePeriod)
 
 	// Maintenance (dolt) config durations.
 	check("[maintenance.dolt]", "interval", cfg.Maintenance.Dolt.Interval)

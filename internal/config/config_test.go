@@ -5043,6 +5043,92 @@ func TestMaxSessionAgeOmittedWhenEmpty(t *testing.T) {
 	}
 }
 
+// --- ChatSessionsConfig tests ---
+
+func TestChatSessionsIdleTimeoutDurationEmpty(t *testing.T) {
+	c := ChatSessionsConfig{}
+	if got := c.IdleTimeoutDuration(); got != 0 {
+		t.Errorf("IdleTimeoutDuration() = %v, want 0", got)
+	}
+}
+
+func TestChatSessionsIdleTimeoutDurationValid(t *testing.T) {
+	c := ChatSessionsConfig{IdleTimeout: "30m"}
+	if got := c.IdleTimeoutDuration(); got != 30*time.Minute {
+		t.Errorf("IdleTimeoutDuration() = %v, want 30m", got)
+	}
+}
+
+func TestChatSessionsIdleTimeoutDurationInvalid(t *testing.T) {
+	c := ChatSessionsConfig{IdleTimeout: "not-a-duration"}
+	if got := c.IdleTimeoutDuration(); got != 0 {
+		t.Errorf("IdleTimeoutDuration() = %v, want 0 for invalid", got)
+	}
+}
+
+func TestGracePeriodDurationDefault(t *testing.T) {
+	c := ChatSessionsConfig{}
+	if got := c.GracePeriodDuration(); got != DefaultManualGracePeriod {
+		t.Errorf("GracePeriodDuration() = %v, want %v", got, DefaultManualGracePeriod)
+	}
+}
+
+func TestGracePeriodDurationExplicitZero(t *testing.T) {
+	for _, val := range []string{"0", "0s"} {
+		c := ChatSessionsConfig{GracePeriod: val}
+		if got := c.GracePeriodDuration(); got != 0 {
+			t.Errorf("GracePeriodDuration(%q) = %v, want 0", val, got)
+		}
+	}
+}
+
+func TestGracePeriodDurationValid(t *testing.T) {
+	c := ChatSessionsConfig{GracePeriod: "5m"}
+	if got := c.GracePeriodDuration(); got != 5*time.Minute {
+		t.Errorf("GracePeriodDuration() = %v, want 5m", got)
+	}
+}
+
+func TestGracePeriodDurationInvalid(t *testing.T) {
+	c := ChatSessionsConfig{GracePeriod: "bogus"}
+	if got := c.GracePeriodDuration(); got != DefaultManualGracePeriod {
+		t.Errorf("GracePeriodDuration() = %v, want %v for invalid", got, DefaultManualGracePeriod)
+	}
+}
+
+func TestGracePeriodRoundTrip(t *testing.T) {
+	c := City{
+		Workspace:    Workspace{Name: "test"},
+		Agents:       []Agent{{Name: "mayor"}},
+		ChatSessions: ChatSessionsConfig{GracePeriod: "15m"},
+	}
+	data, err := c.Marshal()
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	got, err := Parse(data)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if got.ChatSessions.GracePeriod != "15m" {
+		t.Errorf("GracePeriod after round-trip = %q, want %q", got.ChatSessions.GracePeriod, "15m")
+	}
+}
+
+func TestGracePeriodOmittedWhenEmpty(t *testing.T) {
+	c := City{
+		Workspace: Workspace{Name: "test"},
+		Agents:    []Agent{{Name: "mayor"}},
+	}
+	data, err := c.Marshal()
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if strings.Contains(string(data), "grace_period") {
+		t.Errorf("TOML output should omit grace_period when empty, got:\n%s", data)
+	}
+}
+
 // --- install_agent_hooks ---
 
 func TestParseInstallAgentHooksWorkspace(t *testing.T) {

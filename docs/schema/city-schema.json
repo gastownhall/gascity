@@ -1014,6 +1014,10 @@
         "idle_timeout": {
           "type": "string",
           "description": "IdleTimeout is the duration after which a detached chat session\nis auto-suspended. Duration string (e.g., \"30m\", \"1h\"). 0 = disabled."
+        },
+        "grace_period": {
+          "type": "string",
+          "description": "GracePeriod is the duration after creation during which a manual\nsession is protected from idle-sleep scale-to-zero. Duration string\n(e.g., \"10m\"). Empty = use default (10m). \"0\" = disabled."
         }
       },
       "additionalProperties": false,

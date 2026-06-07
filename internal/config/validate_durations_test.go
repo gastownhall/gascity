@@ -373,3 +373,19 @@ func TestValidateDurationsIncludesSource(t *testing.T) {
 		t.Errorf("warning should include source path: %s", warnings[0])
 	}
 }
+
+func TestValidateDurationsBadChatSessionsGracePeriod(t *testing.T) {
+	cfg := &City{
+		ChatSessions: ChatSessionsConfig{GracePeriod: "bogus"},
+	}
+	warnings := ValidateDurations(cfg, "city.toml")
+	if len(warnings) != 1 {
+		t.Fatalf("expected 1 warning, got %d: %v", len(warnings), warnings)
+	}
+	if !strings.Contains(warnings[0], "grace_period") {
+		t.Errorf("warning should mention field name: %s", warnings[0])
+	}
+	if !strings.Contains(warnings[0], "bogus") {
+		t.Errorf("warning should mention bad value: %s", warnings[0])
+	}
+}

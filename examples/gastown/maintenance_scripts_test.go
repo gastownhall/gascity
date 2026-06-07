@@ -264,6 +264,154 @@ exit 1
 	}
 }
 
+// orphanSweepBareShortFormGCStub writes a gc stub whose only live session is
+// the qualified agent "thriva/devpipeline.backend_dev", while the sole
+// in-progress bead is assigned to the bare short form "backend_dev". When
+// sessionLive is false the session list is empty, so the canonical agent looks
+// dead. The bare assignee never matches a configured name, a pool template, a
+// dot-stripped form, or a live session identity directly — it can only be
+// resolved through the qualified-agent-is-live path under test.
+func orphanSweepBareShortFormGCStub(t *testing.T, binDir string, sessionLive bool) {
+	t.Helper()
+	sessionList := `{"sessions":[],"summary":{},"filters":{},"schema_version":"1"}`
+	if sessionLive {
+		sessionList = `{"sessions":[` +
+			`{"id":"mc-bare-live","session_name":"thriva__devpipeline-backend-dev",` +
+			`"alias":"backend_dev-1","agent_name":"thriva/devpipeline.backend_dev","closed":false}` +
+			`],"summary":{},"filters":{},"schema_version":"1"}`
+	}
+	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+if [ "$1" = "--rig" ]; then
+  shift 2
+fi
+case "$1" in
+  config)
+    if [ "$2" = "explain" ]; then
+      cat <<'EOF'
+Agent: thriva/devpipeline.backend_dev
+  source: pack
+EOF
+      exit 0
+    fi
+    ;;
+  rig)
+    if [ "$2" = "list" ] && [ "$3" = "--json" ]; then
+      printf '{"rigs":[{"name":"hq","hq":true}]}\n'
+      exit 0
+    fi
+    ;;
+  session)
+    if [ "$2" = "list" ] && [ "$3" = "--json" ]; then
+      printf '%s\n' '`+sessionList+`'
+      exit 0
+    fi
+    ;;
+  bd)
+    if [ "$2" = "show" ] && [ "$3" = "ga-bare" ] && [ "$4" = "--json" ]; then
+      cat <<'EOF'
+[
+  {"id":"ga-bare","status":"in_progress","assignee":"backend_dev"}
+]
+EOF
+      exit 0
+    fi
+    if [ "$2" = "list" ]; then
+      cat <<'EOF'
+[
+  {"id":"ga-bare","status":"in_progress","assignee":"backend_dev"}
+]
+EOF
+      exit 0
+    fi
+    if [ "$2" = "release-if-current" ]; then
+      printf 'released\n'
+      exit 0
+    fi
+    ;;
+esac
+exit 1
+`)
+}
+
+// TestOrphanSweepPreservesBareShortFormOfLiveQualifiedAgent verifies that a
+// bead assigned to the bare short form "backend_dev" is preserved when the
+// configured qualified agent "thriva/devpipeline.backend_dev" has a live
+// session known only by its qualified name. Without the qualified-agent-is-live
+// resolution, the live owner's in-progress work would be reset every cycle.
+func TestOrphanSweepPreservesBareShortFormOfLiveQualifiedAgent(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+
+	orphanSweepBareShortFormGCStub(t, binDir, true)
+
+	env := map[string]string{
+		"GC_CITY":      cityDir,
+		"GC_CITY_PATH": cityDir,
+		"GC_CALL_LOG":  gcLog,
+		"PATH":         binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+
+	script := filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "orphan-sweep.sh")
+	cmd := exec.Command(script)
+	cmd.Env = mergeTestEnv(env)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("%s failed: %v\n%s", filepath.Base(script), err, out)
+	}
+	if strings.Contains(string(out), "orphan-sweep: reset") {
+		t.Fatalf("live qualified agent's bare-short-form assignee was swept:\n%s", out)
+	}
+
+	logData, err := os.ReadFile(gcLog)
+	if err != nil {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	if log := string(logData); strings.Contains(log, "bd release-if-current ga-bare ") {
+		t.Fatalf("bare-short-form bead of live qualified agent was reset:\n%s", log)
+	}
+}
+
+// TestOrphanSweepResetsBareShortFormWhenQualifiedAgentDead is the negative
+// control for TestOrphanSweepPreservesBareShortFormOfLiveQualifiedAgent: with
+// no live session for the qualified agent, the same bare "backend_dev" bead is
+// a genuine orphan and must still be reset. This proves the live-owner
+// preservation did not weaken the sweep.
+func TestOrphanSweepResetsBareShortFormWhenQualifiedAgentDead(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+
+	orphanSweepBareShortFormGCStub(t, binDir, false)
+
+	env := map[string]string{
+		"GC_CITY":      cityDir,
+		"GC_CITY_PATH": cityDir,
+		"GC_CALL_LOG":  gcLog,
+		"PATH":         binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+
+	script := filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "orphan-sweep.sh")
+	cmd := exec.Command(script)
+	cmd.Env = mergeTestEnv(env)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("%s failed: %v\n%s", filepath.Base(script), err, out)
+	}
+	if !strings.Contains(string(out), "orphan-sweep: reset 1 orphaned beads") {
+		t.Fatalf("dead qualified agent's bare-short-form bead was not swept:\n%s", out)
+	}
+
+	logData, err := os.ReadFile(gcLog)
+	if err != nil {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	if log := string(logData); !strings.Contains(log, "bd release-if-current ga-bare backend_dev") {
+		t.Fatalf("orphan bead was not reset:\n%s", log)
+	}
+}
+
 func TestOrphanSweepConfigShowFallbackPreservesQualifiedAssignees(t *testing.T) {
 	cityDir := t.TempDir()
 	binDir := t.TempDir()

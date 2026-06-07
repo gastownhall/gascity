@@ -9,12 +9,12 @@ func TestBuiltinProviders(t *testing.T) {
 	providers := BuiltinProviders()
 	order := BuiltinProviderOrder()
 
-	// Must have exactly 15 built-in providers.
-	if len(providers) != 15 {
-		t.Fatalf("len(BuiltinProviders()) = %d, want 15", len(providers))
+	// Must have exactly 16 built-in providers.
+	if len(providers) != 16 {
+		t.Fatalf("len(BuiltinProviders()) = %d, want 16", len(providers))
 	}
-	if len(order) != 15 {
-		t.Fatalf("len(BuiltinProviderOrder()) = %d, want 15", len(order))
+	if len(order) != 16 {
+		t.Fatalf("len(BuiltinProviderOrder()) = %d, want 16", len(order))
 	}
 
 	// Every entry in order must exist in providers.
@@ -495,6 +495,51 @@ func TestBuiltinProvidersGroqOpenCodePreset(t *testing.T) {
 	}
 	if want := "opencode acp --model groq/openai/gpt-oss-120b"; launch.Command != want {
 		t.Fatalf("Command = %q, want %q", launch.Command, want)
+	}
+}
+
+func TestBuiltinProvidersGrokPreset(t *testing.T) {
+	p := BuiltinProviders()["grok"]
+	if p.Command != "grok" {
+		t.Errorf("Command = %q, want %q", p.Command, "grok")
+	}
+	if p.PromptMode != "none" {
+		t.Errorf("PromptMode = %q, want %q", p.PromptMode, "none")
+	}
+	if p.InstructionsFile != "AGENTS.md" {
+		t.Errorf("InstructionsFile = %q, want %q", p.InstructionsFile, "AGENTS.md")
+	}
+	if derefBool(p.SupportsACP) {
+		t.Error("SupportsACP = true, want false")
+	}
+	if derefBool(p.SupportsHooks) {
+		t.Error("SupportsHooks = true, want false")
+	}
+	if got, want := p.PermissionModes["unrestricted"], "--permission-mode bypassPermissions"; got != want {
+		t.Errorf("PermissionModes[unrestricted] = %q, want %q", got, want)
+	}
+	if p.OptionDefaults["permission_mode"] != "unrestricted" {
+		t.Errorf("OptionDefaults[permission_mode] = %q, want unrestricted", p.OptionDefaults["permission_mode"])
+	}
+	if p.ResumeFlag != "--resume" {
+		t.Errorf("ResumeFlag = %q, want %q", p.ResumeFlag, "--resume")
+	}
+	if p.TitleModel != "grok-composer-2.5-fast" {
+		t.Errorf("TitleModel = %q, want %q", p.TitleModel, "grok-composer-2.5-fast")
+	}
+
+	rp := specToResolved("grok", &p)
+	if got := rp.ProviderSessionCreateTransport(); got != "" {
+		t.Fatalf("ProviderSessionCreateTransport() = %q, want \"\" (no ACP)", got)
+	}
+	if p.OptionDefaults["model"] != "grok-composer-2.5" {
+		t.Errorf("OptionDefaults[model] = %q, want grok-composer-2.5", p.OptionDefaults["model"])
+	}
+	if got, want := rp.ResolveDefaultArgs(), []string{"--permission-mode", "bypassPermissions", "--model", "grok-composer-2.5"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("ResolveDefaultArgs() = %v, want %v", got, want)
+	}
+	if got, want := rp.TitleModelFlagArgs(), []string{"--model", "grok-composer-2.5-fast"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("TitleModelFlagArgs() = %v, want %v", got, want)
 	}
 }
 
