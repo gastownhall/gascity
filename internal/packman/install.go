@@ -97,6 +97,42 @@ func InstallLocked(cityRoot string) (*Lockfile, error) {
 	return lock, nil
 }
 
+// EnsureBundledPacksCurrent repairs any bundled pack synthetic caches that were
+// written by a different binary version. Each call to EnsureRepoInCache for a
+// bundled source validates the cache against the running binary's embedded
+// content and re-materializes it when the hashes differ. This prevents the
+// config loader's strict content-hash check from failing after a binary upgrade
+// where the running controller and the most-recently-installed binary differ.
+//
+// Callers that need to ensure all packs (including remote git clones) are
+// present should use InstallLocked instead.
+func EnsureBundledPacksCurrent(cityRoot string) error {
+	lock, err := ReadLockfile(fsys.OSFS{}, cityRoot)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil // No lockfile; nothing to repair.
+		}
+		return err
+	}
+	sources := make([]string, 0, len(lock.Packs))
+	for source := range lock.Packs {
+		if builtinpacks.IsSource(source) {
+			sources = append(sources, source)
+		}
+	}
+	sort.Strings(sources)
+	for _, source := range sources {
+		pack := lock.Packs[source]
+		if pack.Commit == "" {
+			continue
+		}
+		if _, err := EnsureRepoInCache(source, pack.Commit); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // SyncLock resolves the reachable remote-import closure and returns the updated lock.
 func SyncLock(cityRoot string, imports map[string]config.Import, mode InstallMode) (*Lockfile, error) {
 	return syncLock(cityRoot, imports, mode, nil)

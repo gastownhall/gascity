@@ -125,6 +125,55 @@ func TestPublicGastownPackSourceMapsToBundledGastownPack(t *testing.T) {
 	}
 }
 
+func TestResolvePackRefServesLockedImportEvenWithGitRef(t *testing.T) {
+	// Regression test: a workspace.includes entry with an explicit "#ref"
+	// (e.g., "#main") previously bypassed the import lock and required the
+	// city-local .gc/cache/includes/ directory to exist. After the fix,
+	// resolvePackRef checks the lock first regardless of the gitRef.
+	home, cityDir := setupBundledImportTest(t)
+	const source = "https://github.com/example/mypack.git"
+	const commit = "abc123def456abc123def456abc123def456abc123de"
+
+	// Write packs.lock so the source is treated as installed.
+	writeTestFile(t, cityDir, "packs.lock", fmt.Sprintf(`
+schema = 1
+
+[packs.%q]
+version = "1.0.0"
+commit = %q
+fetched = "2026-01-01T00:00:00Z"
+`, source, commit))
+
+	// Populate the shared repo cache with a fake git checkout.
+	cacheRoot := filepath.Join(home, ".gc", "cache", "repos")
+	cacheDir := filepath.Join(cacheRoot, RepoCacheKey(source, commit))
+	mustMkdirAll(t, filepath.Join(cacheDir, ".git"), 0o755)
+	writeTestFile(t, cacheDir, ".git/index", "idx")
+	writeTestFile(t, cacheDir, "pack.toml", "[pack]\nname = \"mypack\"\nschema = 1\n")
+
+	// Stub the git rev-parse / status calls used by validateInstalledRemoteCache.
+	orig := runRepoCacheGit
+	runRepoCacheGit = func(_ string, args ...string) (string, error) {
+		if len(args) > 0 && args[0] == "rev-parse" {
+			return commit + "\n", nil
+		}
+		return "", nil // status --porcelain: clean
+	}
+	t.Cleanup(func() { runRepoCacheGit = orig })
+
+	// With a "#main" gitRef the old code skipped the lock entirely and
+	// went to fetchRemoteInclude (which would fail with "not cached at ...").
+	refWithGitRef := source + "#main"
+
+	got, err := resolvePackRef(refWithGitRef, cityDir, cityDir)
+	if err != nil {
+		t.Fatalf("resolvePackRef(%q): %v", refWithGitRef, err)
+	}
+	if got != cacheDir {
+		t.Fatalf("resolvePackRef = %q, want %q", got, cacheDir)
+	}
+}
+
 func TestResolveLockedRemoteImportSurfacesInvalidBundledMarker(t *testing.T) {
 	home, cityDir := setupBundledImportTest(t)
 	source := bundledPackSource()

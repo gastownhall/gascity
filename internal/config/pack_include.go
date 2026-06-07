@@ -109,13 +109,26 @@ func resolvePackRef(ref, declDir, cityRoot string) (string, error) {
 		// locked imports (including registry-recommended GitHub tree
 		// URLs) resolvable without the legacy include cache, which has
 		// no remaining writer.
-		if cacheDir, ok, err := resolveLockedRemoteImport(ref, cityRoot); err != nil {
-			return "", err
-		} else if ok {
-			if subpath != "" {
-				return filepath.Join(cacheDir, subpath), nil
+		//
+		// The lock may key the import either under the verbatim authored
+		// ref (e.g. a GitHub tree URL) or under the base clone URL (e.g. a
+		// "src.git#ref" form whose ref is normalized away at install
+		// time). Try the authored ref first, then fall back to the base
+		// source so both lock-key shapes resolve from the shared repo
+		// cache.
+		lockKeys := []string{ref}
+		if source != ref {
+			lockKeys = append(lockKeys, source)
+		}
+		for _, key := range lockKeys {
+			if cacheDir, ok, err := resolveLockedRemoteImport(key, cityRoot); err != nil {
+				return "", err
+			} else if ok {
+				if subpath != "" {
+					return filepath.Join(cacheDir, subpath), nil
+				}
+				return cacheDir, nil
 			}
-			return cacheDir, nil
 		}
 		cacheDir, err := fetchRemoteInclude(source, gitRef, cityRoot)
 		if err != nil {
