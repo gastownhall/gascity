@@ -6139,3 +6139,152 @@ func TestCityRuntimeClearActiveReloadIfRespectsIdentity(t *testing.T) {
 		t.Fatalf("activeReload = %p, want nil after identity-matched clear", gotAfter)
 	}
 }
+
+func TestOrderTrackingRetentionWatchdog_SkipsWhenIntervalNotElapsed(t *testing.T) {
+	now := time.Date(2026, 6, 7, 12, 0, 0, 0, time.UTC)
+	// Seed 11 eligible beads (8 days old > 7d default TTL) so deletion would occur if the watchdog runs.
+	seed := make([]beads.Bead, 0, minClosedOrderTrackingRetained+1)
+	for i := range minClosedOrderTrackingRetained + 1 {
+		seed = append(seed, beads.Bead{
+			ID:        fmt.Sprintf("skip-%02d", i),
+			Title:     "order:skip",
+			Status:    "closed",
+			Type:      "task",
+			CreatedAt: now.Add(-8*24*time.Hour + time.Duration(i)*time.Minute),
+			Labels:    []string{"order-run:skip", labelOrderTracking},
+			Ephemeral: true,
+		})
+	}
+	store := beads.NewMemStoreFrom(100, seed, nil)
+	cr := &CityRuntime{
+		cityName:            "test-city",
+		cfg:                 &config.City{Workspace: config.Workspace{Name: "test-city"}},
+		standaloneCityStore: store,
+		stdout:              io.Discard,
+		stderr:              io.Discard,
+		logPrefix:           "gc test",
+		// Set last to now-1s: interval has not elapsed.
+		orderTrackingRetentionWatchdogLast: now.Add(-time.Second),
+	}
+	cr.runOrderTrackingRetentionWatchdog(now)
+
+	// Bead skip-00 should still exist (watchdog skipped).
+	if _, err := store.Get("skip-00"); err != nil {
+		t.Fatalf("skip-00 should be preserved when watchdog skips: %v", err)
+	}
+}
+
+func TestOrderTrackingRetentionWatchdog_PrunesEligibleBeads(t *testing.T) {
+	now := time.Date(2026, 6, 7, 12, 0, 0, 0, time.UTC)
+	// Beads are 8 days old (> 7d default TTL). The 2 oldest exceed the retain-10 floor.
+	seed := make([]beads.Bead, 0, minClosedOrderTrackingRetained+2)
+	for i := range minClosedOrderTrackingRetained + 2 {
+		seed = append(seed, beads.Bead{
+			ID:        fmt.Sprintf("prune-%02d", i),
+			Title:     "order:prune",
+			Status:    "closed",
+			Type:      "task",
+			CreatedAt: now.Add(-8*24*time.Hour + time.Duration(i)*time.Minute),
+			Labels:    []string{"order-run:prune", labelOrderTracking},
+			Ephemeral: true,
+		})
+	}
+	store := beads.NewMemStoreFrom(100, seed, nil)
+	cr := &CityRuntime{
+		cityName:            "test-city",
+		cfg:                 &config.City{Workspace: config.Workspace{Name: "test-city"}},
+		standaloneCityStore: store,
+		stdout:              io.Discard,
+		stderr:              io.Discard,
+		logPrefix:           "gc test",
+		// Zero last: watchdog fires immediately.
+	}
+	cr.runOrderTrackingRetentionWatchdog(now)
+
+	// 2 oldest beads (prune-00, prune-01) should be deleted.
+	for _, id := range []string{"prune-00", "prune-01"} {
+		if _, err := store.Get(id); !errors.Is(err, beads.ErrNotFound) {
+			t.Fatalf("Get(%s) err = %v, want ErrNotFound (should be pruned)", id, err)
+		}
+	}
+	// Remaining 10 beads (retain floor) should be preserved.
+	for i := 2; i < minClosedOrderTrackingRetained+2; i++ {
+		id := fmt.Sprintf("prune-%02d", i)
+		if _, err := store.Get(id); err != nil {
+			t.Fatalf("%s should be preserved at retain floor: %v", id, err)
+		}
+	}
+}
+
+func TestOrderTrackingRetentionWatchdog_LogsPrunedCount(t *testing.T) {
+	now := time.Date(2026, 6, 7, 12, 0, 0, 0, time.UTC)
+	// Beads are 8 days old (> 7d default TTL). One exceeds the retain-10 floor.
+	seed := make([]beads.Bead, 0, minClosedOrderTrackingRetained+1)
+	for i := range minClosedOrderTrackingRetained + 1 {
+		seed = append(seed, beads.Bead{
+			ID:        fmt.Sprintf("log-%02d", i),
+			Title:     "order:log",
+			Status:    "closed",
+			Type:      "task",
+			CreatedAt: now.Add(-8*24*time.Hour + time.Duration(i)*time.Minute),
+			Labels:    []string{"order-run:log", labelOrderTracking},
+			Ephemeral: true,
+		})
+	}
+	store := beads.NewMemStoreFrom(100, seed, nil)
+	var stderrBuf bytes.Buffer
+	cr := &CityRuntime{
+		cityName:            "test-city",
+		cfg:                 &config.City{Workspace: config.Workspace{Name: "test-city"}},
+		standaloneCityStore: store,
+		stdout:              io.Discard,
+		stderr:              &stderrBuf,
+		logPrefix:           "gc test",
+	}
+	cr.runOrderTrackingRetentionWatchdog(now)
+
+	got := stderrBuf.String()
+	if !strings.Contains(got, "pruned") {
+		t.Fatalf("stderr = %q, want 'pruned' in output", got)
+	}
+	if !strings.Contains(got, "1") {
+		t.Fatalf("stderr = %q, want pruned count in output", got)
+	}
+}
+
+func TestOrderTrackingRetentionWatchdog_NilCfgSkipsWithoutPanic(_ *testing.T) {
+	now := time.Date(2026, 6, 7, 12, 0, 0, 0, time.UTC)
+	cr := &CityRuntime{
+		cityName:  "test-city",
+		cfg:       nil, // nil cfg: watchdog must not panic
+		stdout:    io.Discard,
+		stderr:    io.Discard,
+		logPrefix: "gc test",
+	}
+	// Must not panic.
+	cr.runOrderTrackingRetentionWatchdog(now)
+}
+
+func TestOrderTrackingRetentionWatchdog_StampsLastAfterFiring(t *testing.T) {
+	now := time.Date(2026, 6, 7, 12, 0, 0, 0, time.UTC)
+	store := beads.NewMemStore()
+	cr := &CityRuntime{
+		cityName:            "test-city",
+		cfg:                 &config.City{Workspace: config.Workspace{Name: "test-city"}},
+		standaloneCityStore: store,
+		stdout:              io.Discard,
+		stderr:              io.Discard,
+		logPrefix:           "gc test",
+	}
+	cr.runOrderTrackingRetentionWatchdog(now)
+
+	if !cr.orderTrackingRetentionWatchdogLast.Equal(now) {
+		t.Fatalf("orderTrackingRetentionWatchdogLast = %v, want %v", cr.orderTrackingRetentionWatchdogLast, now)
+	}
+	// Second call within the interval must not update the timestamp.
+	later := now.Add(time.Minute)
+	cr.runOrderTrackingRetentionWatchdog(later)
+	if !cr.orderTrackingRetentionWatchdogLast.Equal(now) {
+		t.Fatalf("orderTrackingRetentionWatchdogLast = %v, want unchanged %v", cr.orderTrackingRetentionWatchdogLast, now)
+	}
+}
