@@ -1162,7 +1162,13 @@ kill_imposter() {
 # callers keep the legacy behavior.
 dolt_data_lock_holder() {
     local lock_file
-    command -v flock >/dev/null 2>&1 || return 1
+    if ! command -v flock >/dev/null 2>&1; then
+        if [ -z "${GC_DOLT_LOCK_PROBE_WARNED:-}" ]; then
+            GC_DOLT_LOCK_PROBE_WARNED=1
+            echo "warning: flock unavailable; dolt store lock guard disabled (gastownhall/gascity#3174)" >&2
+        fi
+        return 1
+    fi
     for lock_file in "$DATA_DIR"/.dolt/noms/LOCK "$DATA_DIR"/*/.dolt/noms/LOCK; do
         [ -f "$lock_file" ] || continue
         if ! flock -n "$lock_file" true 2>/dev/null; then

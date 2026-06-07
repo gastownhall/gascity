@@ -58,6 +58,14 @@ func managedDoltDataDirLockHolder(dataDir string) string {
 	for _, path := range managedDoltDataDirLockFiles(dataDir) {
 		f, err := os.Open(path) //nolint:gosec // path derives from the managed data dir layout
 		if err != nil {
+			// Vanishing between glob and open means the store was removed —
+			// genuinely free. Anything else means the lock state is unknowable;
+			// fail open to keep the legacy behavior, but say so (the guard is
+			// silently disabled otherwise). Mirrors the disk-preflight
+			// fail-open-with-warning convention.
+			if !errors.Is(err, os.ErrNotExist) {
+				fmt.Fprintf(os.Stderr, "warning: cannot probe dolt store lock %s: %v; treating as free (gastownhall/gascity#3174)\n", path, err)
+			}
 			continue
 		}
 		err = syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
@@ -70,6 +78,7 @@ func managedDoltDataDirLockHolder(dataDir string) string {
 		if errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EAGAIN) {
 			return path
 		}
+		fmt.Fprintf(os.Stderr, "warning: cannot probe dolt store lock %s: %v; treating as free (gastownhall/gascity#3174)\n", path, err)
 	}
 	return ""
 }
