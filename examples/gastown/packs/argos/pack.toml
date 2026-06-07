@@ -11,11 +11,15 @@
 # the watchdog is not a Gas Town role, it is a reusable capability a city
 # opts into.
 #
-# This pack is at the DETECTION stage: each wake the agent enumerates every
+# This pack is at the RECOVERY stage: each wake the agent enumerates every
 # session, cross-references claimed in-progress work, peeks the pane, and
 # classifies each session (healthy / idle-no-work / rate-limit-stalled /
-# context-frozen), then drain-acks and exits. The triage is read-only —
-# recovery lands in the next step and lives in the prompt, not in Go.
+# context-frozen). For a candidate the fire gate clears it then recovers —
+# nudges a rate-limit wall with "continue" (waking a suspended holder
+# first), "/compact"s a frozen context — timed to the wall's reset window
+# and rate-limited by an anti-storm backoff derived from the session bead's
+# observable last_nudge_delivered_at. It never unclaims (the orphan sweep
+# owns dead-owner reclaim). All judgment lives in the prompt, not in Go.
 #
 # Compose it by importing from a city's root pack:
 #   [imports.argos]

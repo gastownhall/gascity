@@ -4,12 +4,16 @@
 // Argos is the rate-limit-recovery watchdog: a city-scoped, always-resident
 // named session modeled on the boot agent that wakes each patrol tick, runs a
 // single pass of triage with a fresh provider context, then drain-acks and
-// exits. At this (.3) stage the triage is read-only detection — it enumerates
-// every session, cross-references claimed work, peeks the pane, and classifies
-// each session, but takes no recovery action. These tests pin the agent's
-// structure (so the lifecycle is what the prompt documents) and its read-only
-// boundary (so recovery arrives as a deliberate, reviewed change in .4, not by
-// accident).
+// exits. At this (.4) stage the triage detects AND recovers — it enumerates
+// every session, cross-references claimed work, peeks the pane, classifies each
+// session, and then acts on a recoverable stall: it nudges a rate-limit wall
+// with "continue" (waking a suspended holder first), "/compact"s a frozen
+// context, times the nudge to the wall's reset window, and backs off via the
+// observable last_nudge_delivered_at so consecutive ticks never storm. These
+// tests pin the agent's structure (so the lifecycle is what the prompt
+// documents) and its recovery contract (the actions it takes, the timing and
+// anti-storm it obeys, and the actions it still must NOT take — unclaim,
+// mayor-mail escalation, warrants, kills).
 package gastown_test
 
 import (
@@ -105,16 +109,20 @@ func TestArgosPromptMatchesNamedSessionLifecycle(t *testing.T) {
 	}
 }
 
-// TestArgosPromptIsReadOnlyDetection locks the .3 boundary: the prompt now
-// DETECTS and CLASSIFIES (read-only triage), but still takes no recovery
-// action. Recovery (.4) — nudges, wakes, unclaims, warrants — must therefore
-// be a deliberate edit here, not a silent regression.
-func TestArgosPromptIsReadOnlyDetection(t *testing.T) {
+// TestArgosPromptRecovers locks the .4 boundary: detection graduates to
+// recovery. The prompt must (1) keep the detection surface intact as the input
+// contract, (2) issue the recovery actions — "continue" for a rate-limit wall,
+// wake-then-nudge for a suspended holder, "/compact" for a frozen context —
+// (3) time the nudge to the wall's reset window with a blind tiered-backoff
+// fallback, (4) derive its anti-storm backoff from the observable
+// last_nudge_delivered_at rather than a status file, and (5) still NOT unclaim
+// work, escalate by mayor-mail, file warrants, or kill sessions.
+func TestArgosPromptRecovers(t *testing.T) {
 	body := renderArgosPrompt(t)
 	lower := strings.ToLower(body)
 
-	// Observation surface: enumerate, cross-reference claimed work, confirm
-	// by reading the pane, close the single-pass wake.
+	// Input contract: the detection observation surface is unchanged — it is
+	// what recovery consumes.
 	for _, want := range []string{
 		"gc session list --json", // enumerate the field of view
 		"--status=in_progress",   // list claimed, in-progress work
@@ -123,11 +131,11 @@ func TestArgosPromptIsReadOnlyDetection(t *testing.T) {
 		"gc runtime drain-ack",   // single-pass lifecycle close
 	} {
 		if !strings.Contains(body, want) {
-			t.Errorf("argos detection prompt missing observation step %q", want)
+			t.Errorf("argos recovery prompt dropped detection step %q", want)
 		}
 	}
 
-	// The four verdicts the read-only triage classifies into.
+	// The four verdicts still drive the decision.
 	for _, want := range []string{
 		"healthy",
 		"idle-no-work",
@@ -135,36 +143,63 @@ func TestArgosPromptIsReadOnlyDetection(t *testing.T) {
 		"context-frozen",
 	} {
 		if !strings.Contains(body, want) {
-			t.Errorf("argos detection prompt missing classification %q", want)
+			t.Errorf("argos recovery prompt missing classification %q", want)
 		}
 	}
 
-	// The fire gate is a conjunction: a claimed in-progress bead AND the
-	// rate-limit marker visible on the pane. Both clauses must be named.
+	// The fire gate conjunction is still named: a claimed in-progress bead AND
+	// the rate-limit marker visible on the pane.
 	for _, want := range []string{
 		"fire gate",     // named explicitly so the conjunction is unmissable
 		"claimed",       // the work-in-flight clause
 		"session limit", // the marker clause (the b7691626 inline wall)
 	} {
 		if !strings.Contains(lower, want) {
-			t.Errorf("argos detection prompt missing fire-gate element %q", want)
+			t.Errorf("argos recovery prompt missing fire-gate element %q", want)
 		}
 	}
 
-	// Read-only boundary: the prompt declares itself read-only and issues NO
-	// mutating or recovery command. Detection classifies; .4 acts.
-	if !strings.Contains(lower, "read-only") {
-		t.Error("argos detection prompt must declare itself read-only")
+	// Recovery actions: the verbs the act step issues.
+	for _, want := range []string{
+		"gc session nudge", // the core recovery
+		"gc session wake",  // suspended -> wake, then nudge
+		"continue",         // the rate-limit nudge payload
+		"/compact",         // the context-frozen recovery
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("argos recovery prompt missing recovery action %q", want)
+		}
+	}
+
+	// Reset-window timing (primary) with a blind tiered-backoff fallback.
+	if !strings.Contains(lower, "resets") {
+		t.Error("argos recovery prompt must time the nudge to the wall's reset window")
+	}
+	for _, tier := range []string{"15m", "30m", "1h", "2h", "4h"} {
+		if !strings.Contains(lower, tier) {
+			t.Errorf("argos recovery prompt missing backoff tier %q", tier)
+		}
+	}
+
+	// Anti-storm derives from observable state, not a status file.
+	if !strings.Contains(lower, "last_nudge_delivered_at") {
+		t.Error("argos recovery prompt must derive backoff from the observable last_nudge_delivered_at, not a status file")
+	}
+
+	// No-unclaim contract: the orphan sweep, not Argos, reclaims dead-owner
+	// work, so the prompt must say so and must not mutate work beads. It also
+	// must not escalate by mail, file warrants, or kill sessions.
+	if !strings.Contains(lower, "orphan") {
+		t.Error("argos recovery prompt must explain that the orphan sweep, not Argos, owns unclaim")
 	}
 	for _, forbidden := range []string{
-		"gc session nudge",
-		"gc session wake",
-		"gc bd update",
-		"gc mail send",
-		"--label=warrant",
+		"gc bd update",    // no unclaim / no work-bead mutation
+		"gc mail send",    // no mayor escalation (cut by design)
+		"gc session kill", // no kill/restart
+		"--label=warrant", // no warrants (boot/dog own those)
 	} {
 		if strings.Contains(body, forbidden) {
-			t.Errorf("argos .3 is read-only; prompt must not issue recovery command %q", forbidden)
+			t.Errorf("argos recovery prompt must not issue %q", forbidden)
 		}
 	}
 }
