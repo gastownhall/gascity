@@ -17,16 +17,19 @@ func TestCustomTypesCheck_NoBeadsDir(t *testing.T) {
 }
 
 func TestCustomTypesCheck_MissingTypes(t *testing.T) {
-	// Scrub inherited beads env (BEADS_DIR / BEADS_ACTOR /
-	// GC_BEADS_SCOPE_ROOT) so the `bd config get` subprocess below
-	// resolves to the empty .beads/ in the temp dir instead of an
-	// outer gc city's beads database that a polecat/refinery worktree
-	// passes down via the environment. Without this, bd finds the
-	// outer city's store, reports all required types as present, and
-	// the check returns StatusOK — defeating the test's assertion.
-	// Same root cause class as ga-10qg / ga-766q; leak vector here is
-	// BEADS_DIR into a bd subprocess.
-	for _, key := range []string{"BEADS_DIR", "BEADS_ACTOR", "GC_BEADS_SCOPE_ROOT"} {
+	// Scrub inherited beads env so the `bd config get` subprocess below
+	// resolves to the empty .beads/ in the temp dir instead of an outer
+	// gc city's beads database. Without this, bd can reach a live dolt
+	// server (via GC_BEADS=bd + BEADS_DOLT_SERVER_PORT), reports all
+	// required types as present, and the check returns StatusOK —
+	// defeating the assertion. Clearing GC_BEADS and the dolt connection
+	// vars prevents bd from connecting even if testenv.init() has not
+	// yet added them to its LeakVectorVars scrub list.
+	for _, key := range []string{
+		"BEADS_DIR", "BEADS_ACTOR", "GC_BEADS_SCOPE_ROOT",
+		"GC_BEADS", "BEADS_DOLT_SERVER_PORT", "GC_DOLT_HOST", "GC_DOLT_PORT",
+		"BEADS_DOLT_SERVER_HOST",
+	} {
 		t.Setenv(key, "")
 	}
 

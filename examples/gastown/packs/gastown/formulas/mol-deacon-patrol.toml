@@ -444,19 +444,13 @@ Do not sleep with the current wisp still open. The backoff belongs to the
 already-assigned successor wisp; if the session restarts during the sleep, the
 successor remains the single resumable patrol item.
 
-**5. Wait before next cycle:**
-```bash
-sleep {{event_timeout}}
+**5. Exit this turn:**
+Write exactly:
 ```
-
-Previous implementation watched `gc events --type=bead.updated` for fast wake-up, but cache-reconcile fires that event constantly, turning the watch into a tight loop with no useful backoff. Fixed sleep gives predictable idle cost.
-
-**6. Re-enter the hook:**
-```bash
-gc hook
+IDLE: no work, exiting turn.
 ```
+Then stop immediately. Do NOT sleep, call ScheduleWakeup, or use Monitor.
+The session_sleep policy will restart this session after the configured idle interval;
+the next wisp is already assigned and the restarted session resumes from it.
 
-The new wisp is ready. Re-read formula steps to start the next patrol cycle.
-
-**Exit criteria:** Next wisp poured and assigned, this wisp burned, backoff
-elapsed, and `gc hook` re-entered."""
+**Exit criteria:** Next wisp poured and assigned, this wisp burned, turn ended with IDLE signal."""

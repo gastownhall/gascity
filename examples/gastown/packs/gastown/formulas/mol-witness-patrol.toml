@@ -515,19 +515,18 @@ NEXT=$(gc bd mol wisp mol-witness-patrol --root-only --var binding_prefix='{{bin
 gc bd update "$NEXT" --assignee=$GC_AGENT
 ```
 
-**3. Wait before next cycle:**
-```bash
-sleep {{event_timeout}}
-```
-
-Previous implementation watched `gc events --type=bead.updated` for fast wake-up, but cache-reconcile fires that event constantly, turning the watch into a tight loop with no useful backoff. Fixed sleep gives predictable idle cost.
-
-**4. Burn this wisp:**
+**3. Burn this wisp:**
 ```bash
 gc bd mol burn <this-wisp-id> --force
 ```
 
-The new wisp is ready. Re-read formula steps to start
-the next patrol cycle.
+**4. Exit this turn:**
+Write exactly:
+```
+IDLE: no work, exiting turn.
+```
+Then stop immediately. Do NOT sleep, call ScheduleWakeup, or use Monitor.
+The session_sleep policy will restart this session after the configured idle interval;
+the next wisp is already assigned and the restarted session resumes from it.
 
-**Exit criteria:** Next wisp poured, this wisp burned."""
+**Exit criteria:** Next wisp poured, this wisp burned, turn ended with IDLE signal."""
