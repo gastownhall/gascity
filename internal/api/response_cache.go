@@ -11,6 +11,30 @@ import (
 
 var responseCacheTTL = 2 * time.Second
 
+// timeBucketResponseCacheTTL bounds how long a built body is reused by the
+// endpoints that key their response-cache entry on a TIME bucket rather than
+// the event sequence: /status (gascity#3186), /formulas/feed, and bounded
+// all=true /beads reads (#3208). The shared index-keyed cache misses on every
+// poll of a busy city — the sequence advances each tick — so O(store-size)
+// bodies were rebuilt per request. These are coarse views where a few seconds
+// of staleness is acceptable (responses report X-GC-Cache-Age-S where a
+// CachingStore backs them); strict-freshness callers (blocking ?index=&wait=
+// requests) bypass the time cache at each handler.
+var timeBucketResponseCacheTTL = 2 * time.Second
+
+// responseCacheTimeBucket returns a monotonically increasing generation that
+// only changes once per timeBucketResponseCacheTTL window. Passing it where
+// the shared cache expects an event index makes an entry survive across the
+// event-sequence churn of a busy city while still expiring on a wall-clock
+// TTL.
+func responseCacheTimeBucket(now time.Time) uint64 {
+	ttl := timeBucketResponseCacheTTL
+	if ttl <= 0 {
+		return uint64(now.UnixNano())
+	}
+	return uint64(now.UnixNano() / int64(ttl))
+}
+
 // responseCacheMaxEntries caps the in-memory cache. Query-parameter
 // combinations (Rig, Pool, blocking index, etc.) produce a wide but
 // bounded key space; a hostile or buggy client could still exhaust

@@ -28,30 +28,6 @@ type (
 
 var statusStoreReadTimeout = time.Second
 
-// statusResponseCacheTTL bounds how long a built /status body is reused.
-//
-// Unlike the shared response cache (which keys on the event sequence and so
-// misses on every poll of a busy city — the sequence advances each tick),
-// /status keys its cache entry on a TIME bucket of this width. /status is a
-// coarse operator overview where a few seconds of staleness is acceptable
-// (the response already reports X-GC-Cache-Age-S), so on a busy city the
-// dashboard's high-frequency polls hit the cache instead of rebuilding the
-// O(store-size) body every time (gascity#3186). Strict-freshness callers
-// (blocking ?index=&wait= requests) bypass this cache; see humaHandleStatus.
-var statusResponseCacheTTL = 2 * time.Second
-
-// statusCacheBucket returns a monotonically increasing generation that only
-// changes once per statusResponseCacheTTL window. Passing it where the shared
-// cache expects an event index makes /status's cache entry survive across the
-// event-sequence churn of a busy city while still expiring on a wall-clock TTL.
-func statusCacheBucket(now time.Time) uint64 {
-	ttl := statusResponseCacheTTL
-	if ttl <= 0 {
-		return uint64(now.UnixNano())
-	}
-	return uint64(now.UnixNano() / int64(ttl))
-}
-
 // StatusInput is the Huma input for GET /v0/status.
 type StatusInput struct {
 	CityScope
@@ -87,7 +63,7 @@ func (s *Server) humaHandleStatus(ctx context.Context, input *StatusInput) (*Ind
 	// on a busy city the sequence advances every poll, so an index-keyed
 	// entry would miss on nearly every request and force a full O(store-size)
 	// rebuild (gascity#3186). The bucket changes only once per
-	// statusResponseCacheTTL, so high-frequency dashboard polls reuse the
+	// timeBucketResponseCacheTTL, so high-frequency dashboard polls reuse the
 	// built body. The ?lite variant caches under its own key (the shared
 	// cache map keys on the string key, so the suffix is enough).
 	//
@@ -98,7 +74,7 @@ func (s *Server) humaHandleStatus(ctx context.Context, input *StatusInput) (*Ind
 	if input.Lite {
 		cacheKey = "status?lite"
 	}
-	bucket := statusCacheBucket(time.Now())
+	bucket := responseCacheTimeBucket(time.Now())
 	if !blocking {
 		if body, ok := cachedResponseAs[StatusBody](s, cacheKey, bucket); ok {
 			return &IndexOutput[StatusBody]{Index: index, CacheAgeS: cacheAgeSeconds(store), Body: body}, nil

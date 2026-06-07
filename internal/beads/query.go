@@ -234,6 +234,14 @@ func applyListQuery(items []Bead, q ListQuery) []Bead {
 	return ApplyListQuery(items, q)
 }
 
+// SortBeads sorts items into the canonical (created_at, id) total order for
+// the given direction. SortDefault leaves the slice order unchanged. Callers
+// that merge results across stores use this to impose one deterministic
+// global order on the merged set (#3208).
+func SortBeads(items []Bead, order SortOrder) {
+	sortBeadsForQuery(items, order)
+}
+
 func sortBeadsForQuery(items []Bead, order SortOrder) {
 	switch order {
 	case SortCreatedAsc:

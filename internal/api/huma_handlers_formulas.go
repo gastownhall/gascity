@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/danielgtaylor/huma/v2"
 )
@@ -195,10 +196,17 @@ func (s *Server) humaHandleFormulaFeed(_ context.Context, input *FormulaFeedInpu
 	}
 
 	limit := normalizeFeedLimit(input.Limit)
-	index := s.latestIndex()
 
+	// The feed body is O(store history) to build (a full active scan plus a
+	// closed-history workflow-roots scan per rig). Key its cache entry on a
+	// time bucket, not the event index: on a busy city the index advances
+	// every tick, so the index-keyed entry missed on nearly every poll and
+	// the slow body was rebuilt per request — the #3208 feed latency. The
+	// endpoint has no blocking variant, so there is no strict-freshness
+	// caller to bypass for (same lever as /status in gascity#3186).
 	cacheKey := "formula-feed?" + scopeKind + "|" + scopeRef + "|" + strconv.Itoa(input.Limit)
-	if body, ok := cachedResponseAs[formulaFeedBody](s, cacheKey, index); ok {
+	bucket := responseCacheTimeBucket(time.Now())
+	if body, ok := cachedResponseAs[formulaFeedBody](s, cacheKey, bucket); ok {
 		return &struct {
 			Body formulaFeedBody
 		}{Body: body}, nil
@@ -225,7 +233,7 @@ func (s *Server) humaHandleFormulaFeed(_ context.Context, input *FormulaFeedInpu
 		body.PartialErrors = projections.PartialErrors
 	}
 
-	s.storeResponse(cacheKey, index, body)
+	s.storeResponse(cacheKey, bucket, body)
 
 	return &struct {
 		Body formulaFeedBody

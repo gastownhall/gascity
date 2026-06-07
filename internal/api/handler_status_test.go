@@ -661,9 +661,9 @@ func TestBuildStatusBodyLiteOmitsExpensiveBlocks(t *testing.T) {
 func TestHandleStatusLiteSkipsWorkScanAndCachesSeparately(t *testing.T) {
 	// Pin a wide TTL so every request lands in the same time bucket; this test
 	// asserts cache-key separation, not TTL expiry.
-	oldTTL := statusResponseCacheTTL
-	statusResponseCacheTTL = time.Hour
-	t.Cleanup(func() { statusResponseCacheTTL = oldTTL })
+	oldTTL := timeBucketResponseCacheTTL
+	timeBucketResponseCacheTTL = time.Hour
+	t.Cleanup(func() { timeBucketResponseCacheTTL = oldTTL })
 
 	state := newFakeState(t)
 	store := &countingStore{Store: beads.NewMemStore()}

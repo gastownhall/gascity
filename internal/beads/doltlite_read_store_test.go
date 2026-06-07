@@ -767,6 +767,56 @@ func TestDoltliteReadStoreFiltersPluralAssigneesAcrossTiers(t *testing.T) {
 	}
 }
 
+// TestDoltliteReadStoreLimitCutsDeterministicPrefixOnCreatedAtTies pins the
+// (created_at, id) total order at the SQL layer (#3208): when rows share a
+// created_at timestamp, a LIMIT-bounded read must cut the same prefix on
+// every call. Without the id tiebreaker in ORDER BY, SQLite resolves ties in
+// unspecified (rowid/insertion) order and the bounded subset is arbitrary.
+func TestDoltliteReadStoreLimitCutsDeterministicPrefixOnCreatedAtTies(t *testing.T) {
+	store, closeStore := newTestDoltliteReadStore(t)
+	defer closeStore()
+	writer := openTestDoltliteWriter(t, store.db)
+	defer writer.Close() //nolint:errcheck // test cleanup
+
+	tie := doltliteSQLiteTime(time.Date(2026, 6, 7, 12, 0, 0, 0, time.UTC))
+	// Insert in an order (c, a, b) that differs from both id directions so
+	// an insertion-ordered tie-cut cannot accidentally match the contract.
+	for _, id := range []string{"gc-tie-c", "gc-tie-a", "gc-tie-b"} {
+		if _, err := writer.Exec(`INSERT INTO issues (
+			id, title, status, issue_type, priority, created_at, updated_at,
+			assignee, description, design, acceptance_criteria, notes, metadata
+		) VALUES (?, ?, 'open', 'task', 2, ?, ?, 'rig/tie-order', '', '', '', '', '{}')`,
+			id, id, tie, tie); err != nil {
+			t.Fatalf("insert tie issue %s: %v", id, err)
+		}
+	}
+
+	descTop2, err := store.List(ListQuery{
+		Assignee:   "rig/tie-order",
+		Sort:       SortCreatedDesc,
+		Limit:      2,
+		SkipLabels: true,
+	})
+	if err != nil {
+		t.Fatalf("List desc limit 2: %v", err)
+	}
+	if got := testBeadIDs(descTop2); !slices.Equal(got, []string{"gc-tie-c", "gc-tie-b"}) {
+		t.Fatalf("desc limit-2 ids = %v, want [gc-tie-c gc-tie-b]", got)
+	}
+
+	ascAll, err := store.List(ListQuery{
+		Assignee:   "rig/tie-order",
+		Sort:       SortCreatedAsc,
+		SkipLabels: true,
+	})
+	if err != nil {
+		t.Fatalf("List asc: %v", err)
+	}
+	if got := testBeadIDs(ascAll); !slices.Equal(got, []string{"gc-tie-a", "gc-tie-b", "gc-tie-c"}) {
+		t.Fatalf("asc ids = %v, want [gc-tie-a gc-tie-b gc-tie-c]", got)
+	}
+}
+
 func TestDoltliteCachingStoreLiveFastReadDoesNotEraseDependencyCache(t *testing.T) {
 	store, closeStore := newTestDoltliteReadStore(t)
 	defer closeStore()

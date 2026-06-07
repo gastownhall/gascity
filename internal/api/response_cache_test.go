@@ -57,9 +57,9 @@ func TestHandleStatusCachesAcrossIndexChanges(t *testing.T) {
 	// bucket; this isolates the "index churn must not bust the cache" property
 	// from wall-clock bucket-boundary timing. The TTL-expiry/staleness bound is
 	// covered separately by TestHandleStatusCacheExpiresOnTTL.
-	oldTTL := statusResponseCacheTTL
-	statusResponseCacheTTL = time.Hour
-	t.Cleanup(func() { statusResponseCacheTTL = oldTTL })
+	oldTTL := timeBucketResponseCacheTTL
+	timeBucketResponseCacheTTL = time.Hour
+	t.Cleanup(func() { timeBucketResponseCacheTTL = oldTTL })
 
 	state := newFakeState(t)
 	store := &countingStore{Store: beads.NewMemStore()}
@@ -104,12 +104,12 @@ func TestHandleStatusCachesAcrossIndexChanges(t *testing.T) {
 }
 
 // TestHandleStatusCacheExpiresOnTTL verifies the staleness bound: once the
-// time bucket rolls over, the next /status rebuilds. Drives statusCacheBucket
+// time bucket rolls over, the next /status rebuilds. Drives responseCacheTimeBucket
 // directly by collapsing the TTL so the test stays fast and deterministic.
 func TestHandleStatusCacheExpiresOnTTL(t *testing.T) {
-	oldTTL := statusResponseCacheTTL
-	statusResponseCacheTTL = time.Nanosecond // every request lands in a new bucket
-	t.Cleanup(func() { statusResponseCacheTTL = oldTTL })
+	oldTTL := timeBucketResponseCacheTTL
+	timeBucketResponseCacheTTL = time.Nanosecond // every request lands in a new bucket
+	t.Cleanup(func() { timeBucketResponseCacheTTL = oldTTL })
 
 	state := newFakeState(t)
 	store := &countingStore{Store: beads.NewMemStore()}
@@ -254,5 +254,177 @@ func TestHandleOrdersFeedCachesUntilIndexChanges(t *testing.T) {
 	}
 	if cityStore.listByLabelCalls != 2 {
 		t.Fatalf("city ListByLabel calls after index change = %d, want 2", cityStore.listByLabelCalls)
+	}
+}
+
+// newFormulaFeedCacheFixture seeds a rig store with one graph.v2 workflow
+// root so /formulas/feed has a body to build, and returns the wrapped store
+// whose listCalls counts feed rebuilds.
+func newFormulaFeedCacheFixture(t *testing.T) (*fakeState, *countingStore, http.Handler) {
+	t.Helper()
+	state := newFakeState(t)
+	rigStore := &countingStore{Store: beads.NewMemStore()}
+	state.stores["myrig"] = rigStore
+	if _, err := rigStore.Create(beads.Bead{
+		Title: "Adopt PR",
+		Ref:   "mol-adopt-pr-v2",
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+			"gc.workflow_id":      "wf-123",
+			"gc.scope_kind":       "rig",
+			"gc.scope_ref":        "myrig",
+		},
+	}); err != nil {
+		t.Fatalf("create workflow root: %v", err)
+	}
+	return state, rigStore, newTestCityHandler(t, state)
+}
+
+// TestHandleFormulaFeedCachesAcrossIndexChanges pins the #3208 feed-latency
+// fix: /formulas/feed keys its response cache on a wall-clock TTL bucket, not
+// the event sequence, so a busy city (whose sequence advances every poll) no
+// longer rebuilds the O(store-history) feed body on every request.
+func TestHandleFormulaFeedCachesAcrossIndexChanges(t *testing.T) {
+	oldTTL := timeBucketResponseCacheTTL
+	timeBucketResponseCacheTTL = time.Hour
+	t.Cleanup(func() { timeBucketResponseCacheTTL = oldTTL })
+
+	state, rigStore, h := newFormulaFeedCacheFixture(t)
+
+	req := httptest.NewRequest(http.MethodGet, cityURL(state, "/formulas/feed?scope_kind=rig&scope_ref=myrig"), nil)
+	for i := 0; i < 2; i++ {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("feed #%d = %d, want 200", i, rec.Code)
+		}
+	}
+	if rigStore.listCalls != 1 {
+		t.Fatalf("rig List calls after cached repeat = %d, want 1", rigStore.listCalls)
+	}
+
+	// A moving event sequence — the busy-city scenario from #3208 — must
+	// keep hitting the time-bucketed cache, not force a rebuild per poll.
+	for i := 0; i < 5; i++ {
+		state.eventProv.Record(events.Event{Type: events.BeadCreated, Actor: "human"})
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("feed after event %d = %d, want 200", i, rec.Code)
+		}
+	}
+	if rigStore.listCalls != 1 {
+		t.Fatalf("rig List calls across index churn = %d, want 1 (feed must key on time bucket)", rigStore.listCalls)
+	}
+}
+
+// TestHandleFormulaFeedCacheExpiresOnTTL verifies the feed's staleness bound:
+// once the time bucket rolls over, the next request rebuilds.
+func TestHandleFormulaFeedCacheExpiresOnTTL(t *testing.T) {
+	oldTTL := timeBucketResponseCacheTTL
+	timeBucketResponseCacheTTL = time.Nanosecond // every request lands in a new bucket
+	t.Cleanup(func() { timeBucketResponseCacheTTL = oldTTL })
+
+	state, rigStore, h := newFormulaFeedCacheFixture(t)
+
+	req := httptest.NewRequest(http.MethodGet, cityURL(state, "/formulas/feed?scope_kind=rig&scope_ref=myrig"), nil)
+	for i := 0; i < 3; i++ {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("feed #%d = %d, want 200", i, rec.Code)
+		}
+	}
+	if rigStore.listCalls < 2 {
+		t.Fatalf("rig List calls with expiring TTL = %d, want >= 2", rigStore.listCalls)
+	}
+}
+
+// TestHandleBeadListAllCachesAcrossIndexChanges pins the #3208 large-read
+// lever: all=true /beads reads (which bypass the CachingStore and scan full
+// history per rig) key their response cache on a time bucket, so concurrent
+// pollers share one rebuild per TTL window. Open-only reads stay uncached.
+func TestHandleBeadListAllCachesAcrossIndexChanges(t *testing.T) {
+	oldTTL := timeBucketResponseCacheTTL
+	timeBucketResponseCacheTTL = time.Hour
+	t.Cleanup(func() { timeBucketResponseCacheTTL = oldTTL })
+
+	state := newFakeState(t)
+	store := &countingStore{Store: beads.NewMemStore()}
+	state.stores["myrig"] = store
+	if _, err := store.Create(beads.Bead{Title: "task one", Type: "task"}); err != nil {
+		t.Fatalf("create bead: %v", err)
+	}
+	h := newTestCityHandler(t, state)
+
+	req := httptest.NewRequest(http.MethodGet, cityURL(state, "/beads?all=true"), nil)
+	for i := 0; i < 2; i++ {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("beads all #%d = %d, want 200", i, rec.Code)
+		}
+	}
+	if store.listCalls != 1 {
+		t.Fatalf("List calls after cached all=true repeat = %d, want 1", store.listCalls)
+	}
+
+	state.eventProv.Record(events.Event{Type: events.BeadCreated, Actor: "human"})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("beads all after event = %d, want 200", rec.Code)
+	}
+	if store.listCalls != 1 {
+		t.Fatalf("List calls across index churn = %d, want 1 (all=true must key on time bucket)", store.listCalls)
+	}
+
+	// Open-only reads are served from the store every time — they hit the
+	// in-memory CachingStore in production and must stay fresh.
+	openReq := httptest.NewRequest(http.MethodGet, cityURL(state, "/beads"), nil)
+	for i := 0; i < 2; i++ {
+		rec = httptest.NewRecorder()
+		h.ServeHTTP(rec, openReq)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("open beads #%d = %d, want 200", i, rec.Code)
+		}
+	}
+	if store.listCalls != 3 {
+		t.Fatalf("List calls after open-only reads = %d, want 3 (open reads must not be response-cached)", store.listCalls)
+	}
+}
+
+// TestHandleBeadListAllBlockingBypassesTimeCache verifies the preserved
+// strict-freshness path on /beads: a blocking ?index=&wait= all=true request
+// must rebuild the body rather than be served an entry built before the
+// event it waited for.
+func TestHandleBeadListAllBlockingBypassesTimeCache(t *testing.T) {
+	state := newFakeState(t)
+	store := &countingStore{Store: beads.NewMemStore()}
+	state.stores["myrig"] = store
+	if _, err := store.Create(beads.Bead{Title: "task one", Type: "task"}); err != nil {
+		t.Fatalf("create bead: %v", err)
+	}
+	h := newTestCityHandler(t, state)
+
+	req := httptest.NewRequest(http.MethodGet, cityURL(state, "/beads?all=true"), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("priming beads all = %d, want 200", rec.Code)
+	}
+	if store.listCalls != 1 {
+		t.Fatalf("List calls after priming = %d, want 1", store.listCalls)
+	}
+
+	blockReq := httptest.NewRequest(http.MethodGet, cityURL(state, "/beads?all=true&index=0&wait=1s"), nil)
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, blockReq)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("blocking beads all = %d, want 200", rec.Code)
+	}
+	if store.listCalls != 2 {
+		t.Fatalf("List calls after blocking request = %d, want 2 (blocking must bypass time cache)", store.listCalls)
 	}
 }
