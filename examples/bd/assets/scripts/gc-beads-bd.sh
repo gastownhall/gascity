@@ -1291,11 +1291,12 @@ write_config_yaml() {
             ;;
     esac
     # Incremental auto-GC defaults to ON; only explicit false-y overrides
-    # disable it. Mirrors parseEnvAutoGCEnabled in cmd/gc/dolt_start_managed.go.
+    # disable it. Mirrors parseEnvAutoGCEnabled in cmd/gc/dolt_start_managed.go,
+    # including its whitespace trim.
     auto_gc_enabled=true
     auto_gc_sysvar=ON
-    case "${GC_DOLT_AUTO_GC_ENABLED:-}" in
-        0|[Ff][Aa][Ll][Ss][Ee]|[Oo][Ff][Ff])
+    case "$(printf '%s' "${GC_DOLT_AUTO_GC_ENABLED:-}" | tr -d '[:space:]')" in
+        0|[Ff]|[Ff][Aa][Ll][Ss][Ee]|[Oo][Ff][Ff])
             auto_gc_enabled=false
             auto_gc_sysvar=OFF
             ;;
@@ -2080,7 +2081,10 @@ log_tail_has_journal_corruption() {
 # full timeout, turning every healthy-database probe into a 30s stall.
 database_journal_corrupt() {
     local probe_db_dir="$1" probe_out probe_hit=1
-    probe_out=$(mktemp) || return 1
+    probe_out=$(mktemp) || {
+        echo "gc-beads-bd: probe tempfile unavailable; treating $probe_db_dir as not corrupt" >&2
+        return 1
+    }
     (cd "$probe_db_dir" && run_with_timeout 30 dolt status) > "$probe_out" 2>&1 || true
     if journal_corruption_signature < "$probe_out"; then
         probe_hit=0
@@ -2099,7 +2103,7 @@ backup_remote_url_for_recovery() {
     repo_state="$recovery_db_dir/.dolt/repo_state.json"
     [ -f "$repo_state" ] || return 1
     if command -v jq >/dev/null 2>&1; then
-        url=$(jq -r --arg name "${recovery_db}-backup" '.backups[$name].url // .backups[$name] // empty' "$repo_state" 2>/dev/null)
+        url=$(jq -r --arg name "${recovery_db}-backup" '.backups[$name].url? // .backups[$name] // empty' "$repo_state" 2>/dev/null)
     else
         url=$(tr -d '\n' < "$repo_state" | sed -n "s/.*\"${recovery_db}-backup\"[^}]*\"url\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p")
         if [ -z "$url" ]; then

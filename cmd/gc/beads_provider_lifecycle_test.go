@@ -7918,11 +7918,11 @@ data_dir: "$data_dir"
 
 behavior:
   auto_gc_behavior:
-    enable: false
+    enable: true
     archive_level: 0
 
 system_variables:
-  dolt_auto_gc_enabled: "OFF"
+  dolt_auto_gc_enabled: "ON"
   dolt_stats_enabled: "OFF"
   dolt_stats_gc_enabled: "OFF"
   dolt_stats_memory_only: "ON"
@@ -8180,11 +8180,11 @@ data_dir: "$data_dir"
 
 behavior:
   auto_gc_behavior:
-    enable: false
+    enable: true
     archive_level: 0
 
 system_variables:
-  dolt_auto_gc_enabled: "OFF"
+  dolt_auto_gc_enabled: "ON"
   dolt_stats_enabled: "OFF"
   dolt_stats_gc_enabled: "OFF"
   dolt_stats_memory_only: "ON"

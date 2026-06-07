@@ -172,7 +172,7 @@ for db in $DATABASES; do
         continue
     fi
     db_dir="$DOLT_DATA_DIR/$db"
-    if [ ! -d "$db_dir" ]; then
+    if [ ! -d "$db_dir/.dolt" ]; then
         append_failed_db "$db(not found)"
         continue
     fi

@@ -266,7 +266,11 @@ func TestJournalRecoveryReportsWhenNoCorruptionConfirmed(t *testing.T) {
 	}
 }
 
-func TestBackupRemoteURLForRecoveryParsesBothShapesWithoutJQ(t *testing.T) {
+// runBackupRemoteURLShapeTests exercises backup_remote_url_for_recovery
+// against both repo_state.json backup shapes. maskJQ forces the sed fallback
+// by hiding jq from `command -v`; otherwise the host jq path is exercised.
+func runBackupRemoteURLShapeTests(t *testing.T, maskJQ bool) {
+	t.Helper()
 	if _, err := exec.LookPath("bash"); err != nil {
 		t.Skip("bash not available; skipping shell-function test")
 	}
@@ -302,11 +306,13 @@ func TestBackupRemoteURLForRecoveryParsesBothShapesWithoutJQ(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(dbDir, ".dolt", "repo_state.json"), []byte(tc.repoState), 0o644); err != nil {
 				t.Fatal(err)
 			}
-			// The `command` override masks jq so the sed fallback is what
-			// gets exercised regardless of the host toolchain.
-			harness := "#!/usr/bin/env bash\nset -u\n" +
-				"command() { case \"$*\" in '-v jq') return 1 ;; esac; builtin command \"$@\"; }\n" +
-				fn + "\nbackup_remote_url_for_recovery prod \"$1\"\n"
+			harness := "#!/usr/bin/env bash\nset -u\n"
+			if maskJQ {
+				// The `command` override masks jq so the sed fallback is what
+				// gets exercised regardless of the host toolchain.
+				harness += "command() { case \"$*\" in '-v jq') return 1 ;; esac; builtin command \"$@\"; }\n"
+			}
+			harness += fn + "\nbackup_remote_url_for_recovery prod \"$1\"\n"
 			out, err := exec.Command("bash", "-c", harness, "harness", dbDir).CombinedOutput()
 			if err != nil {
 				t.Fatalf("backup_remote_url_for_recovery failed: %v\n%s", err, out)
@@ -316,4 +322,18 @@ func TestBackupRemoteURLForRecoveryParsesBothShapesWithoutJQ(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestBackupRemoteURLForRecoveryParsesBothShapesWithoutJQ(t *testing.T) {
+	runBackupRemoteURLShapeTests(t, true)
+}
+
+// The jq path must handle the legacy string form too: `.url` on a string
+// errors in jq, so the expression uses `.url?` — this test pins that (#3176
+// review finding).
+func TestBackupRemoteURLForRecoveryParsesBothShapesWithJQ(t *testing.T) {
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skip("jq not available; skipping jq-path test")
+	}
+	runBackupRemoteURLShapeTests(t, false)
 }
