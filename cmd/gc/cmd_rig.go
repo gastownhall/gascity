@@ -89,7 +89,9 @@ The rig's agents won't spawn until explicitly resumed with "gc rig resume".
 
 Use --adopt to register a directory that already has a fully initialized
 .beads/ directory (must include both metadata.json and config.yaml).
-Skips beads init; the git repo check remains informational.`,
+For managed-Dolt rigs, runs an idempotent config sync (registers types.custom
+and other config into the DB, never destructively reinitializes). The git repo
+check remains informational.`,
 		Example: `  gc rig add /path/to/project
   gc rig add /path/to/project --name myrig
   gc rig add /path/to/project --prefix r1
@@ -491,16 +493,21 @@ func doRigAddWithResult(fs fsys.FS, cityPath, rigPath string, includes []string,
 		}
 	}
 
+	deferred := false
 	if adopt {
 		if err := prepareRigAdoptProviderState(cityPath, rigPath); err != nil {
 			fmt.Fprintf(stderr, "gc rig add: prepare adopted rig store: %v\n", err) //nolint:errcheck // best-effort stderr
 			return config.Rig{}, 1
 		}
+		if cityUsesBdStoreContract(cityPath) {
+			deferred, err = initDirIfReady(cityPath, rigPath, prefix)
+			if err != nil {
+				fmt.Fprintf(stderr, "gc rig add: %v\n", err) //nolint:errcheck // best-effort stderr
+				return config.Rig{}, 1
+			}
+		}
 		w("  Adopted existing beads database")
-	}
-
-	deferred := false
-	if !adopt {
+	} else {
 		deferred, err = initDirIfReady(cityPath, rigPath, prefix)
 		if err != nil {
 			fmt.Fprintf(stderr, "gc rig add: %v\n", err) //nolint:errcheck // best-effort stderr
