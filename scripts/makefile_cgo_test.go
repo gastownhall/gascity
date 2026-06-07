@@ -209,6 +209,7 @@ printf '%s\n' '#include <...> search starts here:' ' /nix/store/include' 'End of
 	if count := countExactField(ldflags, "-L"+sysLib); count != 1 {
 		t.Fatalf("system lib dir appears %d times, want 1:\n%s", count, out)
 	}
+	assertFieldsInOrder(t, ldflags, "-L"+multiarchLib, "-L"+sysLib)
 }
 
 func TestMakefileLinuxCGOPathsTreatNestedIncludeAsMissingSystemRoot(t *testing.T) {
@@ -366,4 +367,19 @@ func countExactField(fields, want string) int {
 		}
 	}
 	return count
+}
+
+func assertFieldsInOrder(t *testing.T, fields string, want ...string) {
+	t.Helper()
+	allFields := strings.Fields(fields)
+	next := 0
+	for _, field := range allFields {
+		if field == want[next] {
+			next++
+			if next == len(want) {
+				return
+			}
+		}
+	}
+	t.Fatalf("fields are not in required order %v:\n%s", want, fields)
 }
