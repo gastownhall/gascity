@@ -225,6 +225,57 @@ func TestFindAntigravitySessionFileUsesSingleConfiguredBrainTranscriptWhenIndexe
 	}
 }
 
+func TestFindAntigravitySessionFileRequiresWorkspaceEvidenceForSingleTranscriptFallback(t *testing.T) {
+	// Point HOME at an empty dir so only the configured search path can match.
+	t.Setenv("HOME", t.TempDir())
+
+	fixtureRoot := t.TempDir()
+	brainRoot := filepath.Join(fixtureRoot, "brain")
+	convID := "18e4eb9f-1b1d-4dbc-966b-c06e3646f3c4"
+	transcriptPath := filepath.Join(brainRoot, convID, ".system_generated", "logs", "transcript.jsonl")
+	if err := os.MkdirAll(filepath.Dir(transcriptPath), 0o755); err != nil {
+		t.Fatalf("mkdir setup: %v", err)
+	}
+	if err := os.WriteFile(transcriptPath, []byte("turns\n"), 0o644); err != nil {
+		t.Fatalf("write transcript: %v", err)
+	}
+
+	workDir := "/tmp/gascity/phase1/antigravity"
+	otherRow := []byte(`{"workspace":"/tmp/other/project","timestamp":1770000300}` + "\n")
+	if err := os.WriteFile(filepath.Join(fixtureRoot, "history.jsonl"), otherRow, 0o644); err != nil {
+		t.Fatalf("write history: %v", err)
+	}
+
+	if got := FindAntigravitySessionFile([]string{brainRoot}, workDir); got != "" {
+		t.Fatalf("FindAntigravitySessionFile() without matching workspace evidence = %q, want empty", got)
+	}
+}
+
+func TestFindAntigravitySessionFileSingleTranscriptFallbackIsBrainRootBounded(t *testing.T) {
+	// Point HOME at an empty dir so only the configured search path can match.
+	t.Setenv("HOME", t.TempDir())
+
+	fixtureRoot := t.TempDir()
+	brainRoot := filepath.Join(fixtureRoot, "brain")
+	transcriptPath := filepath.Join(brainRoot, "nested", "too-deep", "18e4eb9f-1b1d-4dbc-966b-c06e3646f3c4", ".system_generated", "logs", "transcript.jsonl")
+	if err := os.MkdirAll(filepath.Dir(transcriptPath), 0o755); err != nil {
+		t.Fatalf("mkdir setup: %v", err)
+	}
+	if err := os.WriteFile(transcriptPath, []byte("turns\n"), 0o644); err != nil {
+		t.Fatalf("write transcript: %v", err)
+	}
+
+	workDir := "/tmp/gascity/phase1/antigravity"
+	historyRow := []byte(`{"workspace":"/tmp/gascity/phase1/antigravity","timestamp":1770000300}` + "\n")
+	if err := os.WriteFile(filepath.Join(fixtureRoot, "history.jsonl"), historyRow, 0o644); err != nil {
+		t.Fatalf("write history: %v", err)
+	}
+
+	if got := FindAntigravitySessionFile([]string{brainRoot}, workDir); got != "" {
+		t.Fatalf("FindAntigravitySessionFile() for nested non-brain-layout transcript = %q, want empty", got)
+	}
+}
+
 func TestFindAntigravitySessionFileScansPastLargeHistoryRows(t *testing.T) {
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)

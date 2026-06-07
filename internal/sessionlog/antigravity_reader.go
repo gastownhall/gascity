@@ -421,17 +421,22 @@ func FindAntigravitySessionFile(searchPaths []string, workDir string) string {
 
 	var bestID string
 	var bestTime int64
+	var fallbackRoots []string
 
 	// The history index lives alongside the brain directory
 	// (~/.gemini/antigravity-cli/history.jsonl next to .../brain). Honor any
 	// configured search paths so discovery is hermetic, while the default path
 	// still resolves the real home-directory index.
 	for _, brainRoot := range mergeAntigravitySearchPaths(searchPaths) {
-		bestID, bestTime = scanAntigravityHistory(filepath.Join(filepath.Dir(brainRoot), "history.jsonl"), workDir, bestID, bestTime)
+		var matchedWorkDir bool
+		bestID, bestTime, matchedWorkDir = scanAntigravityHistory(filepath.Join(filepath.Dir(brainRoot), "history.jsonl"), workDir, bestID, bestTime)
+		if matchedWorkDir {
+			fallbackRoots = append(fallbackRoots, brainRoot)
+		}
 	}
 
 	if bestID == "" {
-		return findUnambiguousAntigravitySessionFile(searchPaths)
+		return findUnambiguousAntigravitySessionFile(fallbackRoots)
 	}
 	return FindAntigravitySessionFileByID(searchPaths, workDir, bestID)
 }
@@ -476,28 +481,23 @@ func findUnambiguousAntigravitySessionFile(searchPaths []string) string {
 	var match string
 	matches := 0
 	for _, root := range mergePaths(nil, searchPaths) {
-		err := filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
-			if walkErr != nil {
-				return nil
+		entries, err := os.ReadDir(root)
+		if err != nil {
+			continue
+		}
+		for _, entry := range entries {
+			if !entry.IsDir() {
+				continue
 			}
-			if entry.IsDir() || filepath.Base(path) != "transcript.jsonl" {
-				return nil
-			}
-			if filepath.Base(filepath.Dir(path)) != "logs" {
-				return nil
-			}
-			if filepath.Base(filepath.Dir(filepath.Dir(path))) != ".system_generated" {
-				return nil
+			path := filepath.Join(root, entry.Name(), ".system_generated", "logs", "transcript.jsonl")
+			if info, err := os.Stat(path); err != nil || info.IsDir() {
+				continue
 			}
 			matches++
 			if matches > 1 {
-				return filepath.SkipAll
+				return ""
 			}
 			match = path
-			return nil
-		})
-		if err != nil {
-			continue
 		}
 		if matches > 1 {
 			return ""
@@ -512,13 +512,14 @@ func findUnambiguousAntigravitySessionFile(searchPaths []string) string {
 // scanAntigravityHistory reads one history index file and returns the
 // conversation id with the newest timestamp matching workDir, preserving any
 // better match already found in a prior index.
-func scanAntigravityHistory(historyPath, workDir, bestID string, bestTime int64) (string, int64) {
+func scanAntigravityHistory(historyPath, workDir, bestID string, bestTime int64) (string, int64, bool) {
 	f, err := os.Open(historyPath)
 	if err != nil {
-		return bestID, bestTime
+		return bestID, bestTime, false
 	}
 	defer f.Close() //nolint:errcheck // read-only file
 
+	matchedWorkDir := false
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 0, 256*1024), 50*1024*1024)
 	for scanner.Scan() {
@@ -526,10 +527,14 @@ func scanAntigravityHistory(historyPath, workDir, bestID string, bestTime int64)
 		if err := json.Unmarshal(scanner.Bytes(), &entry); err != nil {
 			continue
 		}
+		if filepath.Clean(entry.Workspace) != workDir {
+			continue
+		}
+		matchedWorkDir = true
 		if strings.TrimSpace(entry.ConversationID) == "" {
 			continue
 		}
-		if filepath.Clean(entry.Workspace) == workDir && entry.Timestamp > bestTime {
+		if entry.Timestamp > bestTime {
 			bestTime = entry.Timestamp
 			bestID = entry.ConversationID
 		}
@@ -537,7 +542,7 @@ func scanAntigravityHistory(historyPath, workDir, bestID string, bestTime int64)
 	if err := scanner.Err(); err != nil {
 		log.Printf("sessionlog: antigravity history scan failed path=%q err=%v", historyPath, err)
 	}
-	return bestID, bestTime
+	return bestID, bestTime, matchedWorkDir
 }
 
 func safeAntigravitySessionDirName(sessionID string) string {

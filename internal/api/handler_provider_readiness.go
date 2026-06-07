@@ -10,11 +10,11 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"sort"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/searchpath"
 	"gopkg.in/yaml.v3"
 )
@@ -182,10 +182,11 @@ func SupportsProviderReadiness(name string) bool {
 // canonical onboarding order.
 func ProviderReadinessNames() []string {
 	names := make([]string, 0, len(supportedProviderReadiness))
-	for name := range supportedProviderReadiness {
-		names = append(names, name)
+	for _, name := range config.BuiltinProviderOrder() {
+		if _, ok := supportedProviderReadiness[name]; ok {
+			names = append(names, name)
+		}
 	}
-	sort.Strings(names)
 	return names
 }
 

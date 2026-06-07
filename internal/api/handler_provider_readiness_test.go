@@ -46,12 +46,13 @@ func TestReadinessRegistrySync(t *testing.T) {
 		}
 	}
 
-	wantProviders := []string{"antigravity", "claude", "codex", "gemini"}
-	if got := slices.Sorted(maps.Keys(supportedProviderReadiness)); !slices.Equal(got, wantProviders) {
-		t.Fatalf("supportedProviderReadiness keys = %v, want %v", got, wantProviders)
+	wantProviderKeys := []string{"antigravity", "claude", "codex", "gemini"}
+	if got := slices.Sorted(maps.Keys(supportedProviderReadiness)); !slices.Equal(got, wantProviderKeys) {
+		t.Fatalf("supportedProviderReadiness keys = %v, want %v", got, wantProviderKeys)
 	}
-	if got := ProviderReadinessNames(); !slices.Equal(got, wantProviders) {
-		t.Fatalf("ProviderReadinessNames() = %v, want %v", got, wantProviders)
+	wantProviderOrder := []string{"claude", "codex", "gemini", "antigravity"}
+	if got := ProviderReadinessNames(); !slices.Equal(got, wantProviderOrder) {
+		t.Fatalf("ProviderReadinessNames() = %v, want %v", got, wantProviderOrder)
 	}
 }
 
