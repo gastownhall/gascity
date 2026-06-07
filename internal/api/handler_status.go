@@ -522,22 +522,17 @@ type statusWorkResult struct {
 // concurrently; results aggregate in deterministic rig order.
 func (s *Server) statusWorkCounts(ctx context.Context) (workCounts, []string) {
 	stores := s.state.BeadStores()
+	// sortedRigNames deduplicates rigs sharing one store instance, so each
+	// store is counted exactly once.
 	rigNames := sortedRigNames(stores)
 	results := make([]statusWorkResult, len(rigNames))
-	seenStores := make(map[string]bool, len(rigNames))
 	var wg sync.WaitGroup
 	for i, rigName := range rigNames {
-		store := stores[rigName]
-		key := fmt.Sprintf("%p", store)
-		if seenStores[key] {
-			continue
-		}
-		seenStores[key] = true
 		wg.Add(1)
 		go func(i int, rigName string, store beads.Store) {
 			defer wg.Done()
 			results[i] = statusStoreWorkCounts(ctx, rigName, store)
-		}(i, rigName, store)
+		}(i, rigName, stores[rigName])
 	}
 	wg.Wait()
 
@@ -591,9 +586,11 @@ func statusStoreWorkCounts(ctx context.Context, rigName string, store beads.Stor
 	return result
 }
 
-// statusCountWork fills the work-count buckets via beads.Counter. The
-// per-store read timeout derives from ctx, so a slow backend query is
-// canceled (releasing its connection) rather than abandoned.
+// statusCountWork fills the work-count buckets via beads.Counter. One
+// shared statusStoreReadTimeout window bounds all three bucket queries —
+// the same per-store budget the legacy single-List path had — and derives
+// from ctx, so a slow backend query is canceled (releasing its
+// connection) rather than abandoned.
 func statusCountWork(ctx context.Context, counter beads.Counter) (workCounts, error) {
 	ctx, cancel := context.WithTimeout(ctx, statusStoreReadTimeout)
 	defer cancel()
@@ -615,6 +612,11 @@ func statusCountWork(ctx context.Context, counter beads.Counter) (workCounts, er
 	return wc, nil
 }
 
+// statusListStoreWithTimeout lists with the per-store read timeout.
+// Store.List takes no context, so on timeout the goroutine is abandoned
+// (it keeps its connection until the scan returns). Counter-capable
+// stores avoid this path entirely; fixing it for the remaining stores
+// requires plumbing context through Store.List.
 func statusListStoreWithTimeout(store beads.Store, query beads.ListQuery) ([]beads.Bead, error) {
 	if store == nil {
 		return nil, nil

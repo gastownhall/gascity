@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 
@@ -21,9 +22,11 @@ type counterBeadStore struct {
 	counts        map[string]int // status → count
 	countErr      error
 	listForbidden bool
+	gotExcludes   []string
 }
 
-func (s *counterBeadStore) Count(_ context.Context, query beads.ListQuery, _ ...string) (int, error) {
+func (s *counterBeadStore) Count(_ context.Context, query beads.ListQuery, excludeTypes ...string) (int, error) {
+	s.gotExcludes = excludeTypes
 	if s.countErr != nil {
 		return 0, s.countErr
 	}
@@ -56,12 +59,13 @@ func getStatus(t *testing.T, state *fakeState) statusResponse {
 
 func TestHandleStatusWorkCountsUseCounterStores(t *testing.T) {
 	state := newFakeState(t)
-	state.stores["myrig"] = &counterBeadStore{
+	counter := &counterBeadStore{
 		Store:         beads.NewMemStore(),
 		t:             t,
 		counts:        map[string]int{"open": 2, "in_progress": 1, "ready": 0},
 		listForbidden: true,
 	}
+	state.stores["myrig"] = counter
 
 	resp := getStatus(t, state)
 
@@ -70,6 +74,9 @@ func TestHandleStatusWorkCountsUseCounterStores(t *testing.T) {
 	}
 	if resp.Partial {
 		t.Fatalf("Partial = true, want false; errors: %v", resp.PartialErrors)
+	}
+	if !slices.Equal(counter.gotExcludes, statusWorkExcludedTypes) {
+		t.Fatalf("excludeTypes = %v, want %v (infrastructure beads are not work)", counter.gotExcludes, statusWorkExcludedTypes)
 	}
 }
 

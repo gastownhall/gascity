@@ -12,6 +12,10 @@ import (
 	"github.com/gastownhall/gascity/internal/storehealth"
 )
 
+// storeHealthCountTimeout bounds the Counter row-count query for the CLI
+// store-health block, mirroring the API side's per-store read timeout.
+const storeHealthCountTimeout = time.Second
+
 // storeHealthFromInputs assembles a CLI-facing *StoreHealth from the raw
 // measurements. LastGCAt is serialized as RFC3339 UTC when present;
 // when the maintenance log is empty, LastGCAt and LastGCStatus are
@@ -35,8 +39,8 @@ func storeHealthFromInputs(cityPath string, sizeBytes int64, liveRows int, lastG
 
 // collectStoreHealth measures the Dolt store at cityPath and the latest
 // maintenance event via ep, returning a populated *StoreHealth.
-// store.List(AllowScan) provides the live row count; callers without a
-// store pass nil and LiveRows is reported as zero.
+// liveRowCount provides the live row count; callers without a store pass
+// nil and LiveRows is reported as zero.
 func collectStoreHealth(cityPath string, store beads.Store, ep events.Provider) *StoreHealth {
 	size := storehealth.WalkSize(storehealth.StorePath(cityPath))
 	rows := liveRowCount(store)
@@ -55,7 +59,9 @@ func liveRowCount(store beads.Store) int {
 		return 0
 	}
 	if counter, ok := store.(beads.Counter); ok {
-		n, err := counter.Count(context.Background(), beads.ListQuery{AllowScan: true, IncludeClosed: true})
+		ctx, cancel := context.WithTimeout(context.Background(), storeHealthCountTimeout)
+		defer cancel()
+		n, err := counter.Count(ctx, beads.ListQuery{AllowScan: true, IncludeClosed: true})
 		if err == nil {
 			return n
 		}

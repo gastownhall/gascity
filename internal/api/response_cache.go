@@ -219,6 +219,9 @@ func (s *Server) cachedResponseWithinAge(key string, maxAge time.Duration) (any,
 	}
 	s.responseCacheMu.Lock()
 	defer s.responseCacheMu.Unlock()
+	if s.responseCacheEntries == nil {
+		return nil, false
+	}
 	entry, ok := s.responseCacheEntries[key]
 	if !ok || time.Since(entry.storedAt) > maxAge {
 		return nil, false
