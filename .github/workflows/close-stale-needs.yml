@@ -57,6 +57,7 @@ jobs:
                 });
 
                 const visibleRequest = comments.find(c => {
+                  if (c.user?.login === issue.user?.login) return false;
                   const lower = (c.body || '').toLowerCase();
                   if (lower.includes('closing')) return false;
                   if (!/14\s*-?\s*days?/.test(lower)) return false;

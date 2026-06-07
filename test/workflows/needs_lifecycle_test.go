@@ -261,6 +261,35 @@ func TestNeedsStatusLabelCreatesVisibleIdempotentRequestForReporter(t *testing.T
 	}
 }
 
+func TestNeedsStatusLabelIgnoresReporterAuthoredRequestComment(t *testing.T) {
+	repo := repoRoot(t)
+	scripts := workflowScriptsFor(t, repo, "issues", "labeled", func(workflowScript) bool {
+		return true
+	})
+	if len(scripts) == 0 {
+		t.Fatal("no issues/labeled github-script workflow found for needs-info or needs-repro requests")
+	}
+
+	now := time.Date(2026, 6, 6, 12, 0, 0, 0, time.UTC)
+	for _, label := range needsLabels {
+		t.Run(label, func(t *testing.T) {
+			comments := []map[string]any{
+				reporterRequestComment(now.Add(-time.Minute), label),
+			}
+			state := lifecycleState(now, label, []string{now.Add(-2 * time.Minute).Format(time.RFC3339)}, comments, false)
+			result := runScripts(t, scripts, labeledContext(label), state)
+			if result.hasErrors() {
+				t.Fatalf("workflow scripts errored before creating request:\n%s", result.debugString())
+			}
+
+			requests := visibleRequestComments(result.ops(), label)
+			if len(requests) != 1 {
+				t.Fatalf("visible request comment count = %d, want 1 for %s (reporter-authored matching comment must not suppress bot request)\n%s", len(requests), label, result.debugString())
+			}
+		})
+	}
+}
+
 func TestNeedsStatusLabelReapplyPostsFreshRequestForReporter(t *testing.T) {
 	repo := repoRoot(t)
 	scripts := workflowScriptsFor(t, repo, "issues", "labeled", func(workflowScript) bool {
@@ -339,6 +368,14 @@ func TestCloseStaleNeedsLabelsRequiresVisibleRequestAfterLatestLabelEvent(t *tes
 				requestComment(now.Add(-15*24*time.Hour), "status/needs-info"),
 			},
 			wantClosed: true,
+		},
+		{
+			name:      "reporter_authored_request_comment_does_not_seed_close_clock",
+			labelAges: []time.Duration{16 * 24 * time.Hour},
+			comments: []map[string]any{
+				reporterRequestComment(now.Add(-15*24*time.Hour), "status/needs-info"),
+			},
+			wantClosed: false,
 		},
 	}
 
@@ -730,6 +767,14 @@ func authorPullRequestSynchronizeContext() map[string]any {
 func requestComment(createdAt time.Time, label string) map[string]any {
 	return map[string]any{
 		"user":       map[string]any{"login": "github-actions[bot]"},
+		"created_at": createdAt.Format(time.RFC3339),
+		"body":       requestBody(label),
+	}
+}
+
+func reporterRequestComment(createdAt time.Time, label string) map[string]any {
+	return map[string]any{
+		"user":       map[string]any{"login": "reporter"},
 		"created_at": createdAt.Format(time.RFC3339),
 		"body":       requestBody(label),
 	}

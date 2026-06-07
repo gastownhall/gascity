@@ -28,6 +28,7 @@ jobs:
 
             const owner = context.repo.owner;
             const repo = context.repo.repo;
+            const reporter = context.payload.issue?.user?.login;
 
             const events = await github.paginate(github.rest.issues.listEvents, {
               owner,
@@ -49,6 +50,7 @@ jobs:
             });
 
             const hasVisibleRequest = existingComments.some(c => {
+              if (reporter && c.user?.login === reporter) return false;
               const lower = (c.body || '').toLowerCase();
               if (lower.includes('closing')) return false;
               if (!/14\s*-?\s*days?/.test(lower)) return false;
