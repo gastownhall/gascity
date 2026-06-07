@@ -89,11 +89,9 @@ func TestHandleStatusWorkCountsUseCounterStores(t *testing.T) {
 func TestHandleStatusCounterUnsupportedFallsBackToList(t *testing.T) {
 	state := newFakeState(t)
 	mem := beads.NewMemStore()
-	created, err := mem.Create(beads.Bead{Type: "task", Title: "open work"})
-	if err != nil {
+	if _, err := mem.Create(beads.Bead{Type: "task", Title: "open work"}); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	_ = created
 	state.stores["myrig"] = &counterBeadStore{
 		Store:    mem,
 		t:        t,

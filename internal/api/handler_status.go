@@ -589,9 +589,10 @@ func statusStoreWorkCounts(ctx context.Context, rigName string, store beads.Stor
 
 // statusCountWork fills the work-count buckets via beads.Counter. One
 // shared statusStoreReadTimeout window bounds all three bucket queries —
-// the same per-store budget the legacy single-List path had — and derives
-// from ctx, so a slow backend query is canceled (releasing its
-// connection) rather than abandoned.
+// the same per-store budget the legacy single-List path had, though the
+// three queries consume it serially — and derives from ctx, so a slow
+// backend query is canceled (releasing its connection) rather than
+// abandoned.
 func statusCountWork(ctx context.Context, counter beads.Counter) (workCounts, error) {
 	ctx, cancel := context.WithTimeout(ctx, statusStoreReadTimeout)
 	defer cancel()
