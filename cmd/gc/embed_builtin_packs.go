@@ -2,6 +2,9 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"io/fs"
@@ -20,6 +23,7 @@ import (
 
 const (
 	legacyOrderConfigFile = "order.toml"
+	packHashManifestFile  = ".gc-pack-hashes.json"
 )
 
 // builtinPacks lists all packs embedded in the gc binary. These are
@@ -63,7 +67,7 @@ func MaterializeBuiltinPacks(cityPath string) error {
 	for _, bp := range builtinPacks {
 		dst := filepath.Join(cityPath, citylayout.SystemPacksRoot, bp.Name)
 		_, isRequired := required[bp.Name]
-		desired, err := materializeFS(bp.FS, dst, !isRequired)
+		desired, err := materializeFS(bp.FS, dst, !isRequired, os.Stderr)
 		if err != nil {
 			return fmt.Errorf("materializing %s pack: %w", bp.Name, err)
 		}
@@ -355,25 +359,31 @@ func peekEventsProvider(tomlPath string) string {
 // materializeFS walks an embed.FS, writes all files to dstDir, and returns the
 // relative file paths that belong in the generated directory.
 //
-// When preserveOperatorEdits is true, existing regular files with the correct
-// mode are preserved verbatim — content is NOT overwritten even when it differs
-// from the embedded bytes. This protects operator-authored edits to non-required
-// pack files (formula TOMLs, command scripts, etc.) from being silently reverted
-// on every gc subcommand invocation (see gastownhall/gascity#2429). Operators
-// who want to pick up a fresh embedded version after a binary upgrade must delete
-// the on-disk file first.
+// When preserveOperatorEdits is true, a per-pack hash manifest
+// (.gc-pack-hashes.json) distinguishes stale embedded content from operator
+// edits. A file whose on-disk hash matches the last binary-written hash is
+// stale and refreshed silently. A file whose on-disk hash differs from the
+// manifest entry has been operator-edited and is preserved with a warning. A
+// file with no manifest entry is conservatively preserved without a warning
+// (migration path for cities without a prior manifest).
 //
-// When preserveOperatorEdits is false (required packs), the preservation skip is
-// disabled: every file is refreshed and validated against the embedded bytes, so
-// a stale or corrupt required pack is repaired rather than silently accepted.
+// When preserveOperatorEdits is false (required packs), every file is refreshed
+// and validated against the embedded bytes regardless of the manifest.
+//
+// The manifest is written after a successful walk even when the merged map is
+// empty; write failures are non-fatal and surface through w. The manifest file
+// itself is not included in the returned desired set.
 //
 // The remaining repair semantics are independent of the flag: missing files are
 // written (initial scaffolding), wrong-mode files are rewritten (e.g., script
 // that lost its +x bit), and non-regular files (symlinks, etc.) are replaced
 // with the embedded content.
-func materializeFS(embedded fs.FS, dstDir string, preserveOperatorEdits bool) (map[string]struct{}, error) {
+func materializeFS(embedded fs.FS, dstDir string, preserveOperatorEdits bool, w io.Writer) (map[string]struct{}, error) {
+	existingManifest := readPackHashManifest(dstDir)
+	pendingManifest := make(map[string]string)
 	desired := make(map[string]struct{})
-	err := fs.WalkDir(embedded, ".", func(path string, d fs.DirEntry, err error) error {
+
+	walkErr := fs.WalkDir(embedded, ".", func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -383,24 +393,37 @@ func materializeFS(embedded fs.FS, dstDir string, preserveOperatorEdits bool) (m
 		if d.IsDir() {
 			return os.MkdirAll(dst, 0o755)
 		}
-		desired[filepath.ToSlash(path)] = struct{}{}
+
+		rel := filepath.ToSlash(path)
+		desired[rel] = struct{}{}
 
 		perm := builtinpacks.MaterializedFileMode(path)
 
-		// Preserve operator-authored content for non-required packs. Skip the
-		// embedded write only when the existing on-disk entry is a regular file
-		// with the correct mode — that's a file the operator might have edited.
-		// Non-regular files (symlinks) and wrong-mode files still get repaired
-		// below, matching the prior contract. Mode comparison uses
+		// For non-required packs, use the hash manifest to distinguish stale
+		// embedded content from operator edits. Mode comparison uses
 		// fsys.ComparableMode (perm + setuid/setgid/sticky) so it agrees with
-		// the WriteFileIfContentOrModeChangedAtomic repair path below. Required
-		// packs (preserveOperatorEdits == false) skip this branch entirely so
-		// stale content is always refreshed.
+		// the WriteFileIfContentOrModeChangedAtomic repair path below.
 		if preserveOperatorEdits {
 			if info, statErr := os.Lstat(dst); statErr == nil {
 				if info.Mode().IsRegular() && fsys.ComparableMode(info.Mode()) == fsys.ComparableMode(perm) {
-					return nil
+					if knownHash, ok := existingManifest[rel]; ok {
+						onDiskData, readErr := os.ReadFile(dst)
+						if readErr != nil {
+							return fmt.Errorf("reading %s for hash comparison: %w", dst, readErr)
+						}
+						if sha256Hex(onDiskData) != knownHash {
+							// On-disk content differs from last binary-written hash: operator edit.
+							emitBuiltinPackRefreshWarning(w, fmt.Errorf("file %s has local edits; newer version available in the binary", rel))
+							pendingManifest[rel] = knownHash
+							return nil
+						}
+						// On-disk hash matches manifest: stale embed, fall through to refresh.
+					} else {
+						// No manifest entry: conservatively preserve without warning.
+						return nil
+					}
 				}
+				// Wrong mode or non-regular: fall through to repair.
 			} else if !os.IsNotExist(statErr) {
 				return fmt.Errorf("stat %s: %w", dst, statErr)
 			}
@@ -411,16 +434,58 @@ func materializeFS(embedded fs.FS, dstDir string, preserveOperatorEdits bool) (m
 			return fmt.Errorf("reading embedded %s: %w", path, err)
 		}
 
+		pendingManifest[rel] = sha256Hex(data)
+
 		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 			return err
 		}
 
 		return fsys.WriteFileIfContentOrModeChangedAtomic(fsys.OSFS{}, dst, data, perm)
 	})
-	if err != nil {
-		return nil, err
+
+	if walkErr != nil {
+		return nil, walkErr
 	}
+
+	if writeErr := writePackHashManifest(dstDir, pendingManifest); writeErr != nil {
+		emitBuiltinPackRefreshWarning(w, fmt.Errorf("could not write pack hash manifest: %w", writeErr))
+	}
+
 	return desired, nil
+}
+
+// sha256Hex returns the hex-encoded SHA-256 digest of data.
+func sha256Hex(data []byte) string {
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
+}
+
+// readPackHashManifest reads the pack hash manifest from dstDir. Returns an
+// empty map when the manifest is absent or contains invalid JSON.
+func readPackHashManifest(dstDir string) map[string]string {
+	data, err := os.ReadFile(filepath.Join(dstDir, packHashManifestFile))
+	if err != nil {
+		return map[string]string{}
+	}
+	var manifest map[string]string
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		return map[string]string{}
+	}
+	if manifest == nil {
+		return map[string]string{}
+	}
+	return manifest
+}
+
+// writePackHashManifest writes manifest to dstDir/.gc-pack-hashes.json
+// atomically. The caller is responsible for treating write errors as non-fatal.
+func writePackHashManifest(dstDir string, manifest map[string]string) error {
+	data, err := json.Marshal(manifest)
+	if err != nil {
+		return fmt.Errorf("marshaling pack hash manifest: %w", err)
+	}
+	dst := filepath.Join(dstDir, packHashManifestFile)
+	return fsys.WriteFileIfContentOrModeChangedAtomic(fsys.OSFS{}, dst, data, 0o644)
 }
 
 func repairLegacyGcBeadsBdScript(cityPath string) error {
@@ -523,6 +588,11 @@ func pruneStaleGeneratedPackFiles(dstDir string, desired map[string]struct{}) er
 			_, ok := desired[path]
 			return ok
 		}) {
+			return nil
+		}
+		// Preserve the pack hash manifest and its atomic temp siblings — they
+		// are runtime metadata produced by materializeFS, not embedded content.
+		if rel == packHashManifestFile || strings.HasPrefix(rel, packHashManifestFile+".tmp.") {
 			return nil
 		}
 		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
