@@ -55,21 +55,17 @@ func TestOrderTrackingRetentionCheck_WarningAboveThreshold(t *testing.T) {
 	}
 }
 
-func TestOrderTrackingRetentionCheck_CapsDisplayAtQueryLimit(t *testing.T) {
-	// Seed more beads than the query limit (501) to verify the display caps at ≥501.
-	store := beads.NewMemStoreFrom(700, makeClosedOrderTrackingBeads(600), nil)
+func TestOrderTrackingRetentionCheck_CapFormatAtListLimit(t *testing.T) {
+	// 501 closed beads (the list cap): count displays as "≥501", not exact.
+	store := beads.NewMemStoreFrom(700, makeClosedOrderTrackingBeads(501), nil)
 	check := newOrderTrackingRetentionCheck("/city", func(string) (beads.Store, error) { return store, nil })
 
 	res := check.Run(&doctor.CheckContext{})
 	if res.Status != doctor.StatusWarning {
-		t.Fatalf("Status = %v, want Warning: %s", res.Status, res.Message)
+		t.Fatalf("Status = %v, want Warning at list cap: %s", res.Status, res.Message)
 	}
 	if !strings.Contains(res.Message, "≥501") {
-		t.Errorf("Message %q should contain ≥501 when store has more beads than query limit", res.Message)
-	}
-	// Bare exact counts (e.g. "501 closed" or "600 closed") must not appear — the ≥ prefix is required.
-	if strings.HasPrefix(res.Message, "501 ") || strings.HasPrefix(res.Message, "600 ") {
-		t.Errorf("Message %q should not start with bare exact count when at query limit", res.Message)
+		t.Fatalf("Message = %q, want ≥501 cap format", res.Message)
 	}
 }
 

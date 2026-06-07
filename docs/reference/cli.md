@@ -2636,7 +2636,9 @@ The rig's agents won't spawn until explicitly resumed with "gc rig resume".
 
 Use --adopt to register a directory that already has a fully initialized
 .beads/ directory (must include both metadata.json and config.yaml).
-Skips beads init; the git repo check remains informational.
+For managed-Dolt rigs, runs an idempotent config sync (registers types.custom
+and other config into the DB, never destructively reinitializes). The git repo
+check remains informational.
 
 ```
 gc rig add <path> [flags]

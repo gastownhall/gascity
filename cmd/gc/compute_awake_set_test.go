@@ -2044,6 +2044,98 @@ func TestNamedAlways_SuspensionPropagation(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// Ad-hoc session grace period (ga-dr4)
+// ---------------------------------------------------------------------------
+
+func TestGracePeriod_ProtectsManualFromIdleSleep(t *testing.T) {
+	// A manual session created 3 min ago with ChatIdleTimeout=2min should
+	// normally be idle-slept. But the 10-min grace period protects it.
+	result := ComputeAwakeSet(AwakeInput{
+		Agents: []AwakeAgent{{QualifiedName: "gascity/claude"}},
+		SessionBeads: []AwakeSessionBead{{
+			ID: "mc-1", SessionName: "s-mc-1", Template: "gascity/claude", State: "active",
+			ManualSession: true, IdleSince: now.Add(-3 * time.Minute),
+			CreatedAt: now.Add(-3 * time.Minute),
+		}},
+		RunningSessions:   map[string]bool{"s-mc-1": true},
+		ChatIdleTimeout:   2 * time.Minute,
+		ManualGracePeriod: 10 * time.Minute,
+		Now:               now,
+	})
+	assertAwake(t, result, "s-mc-1")
+}
+
+func TestGracePeriod_Expired_IdleSleepApplies(t *testing.T) {
+	// A manual session created 15 min ago, idle for 3 min, with
+	// ChatIdleTimeout=2min. Grace period (10m) has expired → idle sleep.
+	result := ComputeAwakeSet(AwakeInput{
+		Agents: []AwakeAgent{{QualifiedName: "gascity/claude"}},
+		SessionBeads: []AwakeSessionBead{{
+			ID: "mc-1", SessionName: "s-mc-1", Template: "gascity/claude", State: "active",
+			ManualSession: true, IdleSince: now.Add(-3 * time.Minute),
+			CreatedAt: now.Add(-15 * time.Minute),
+		}},
+		RunningSessions:   map[string]bool{"s-mc-1": true},
+		ChatIdleTimeout:   2 * time.Minute,
+		ManualGracePeriod: 10 * time.Minute,
+		Now:               now,
+	})
+	assertAsleep(t, result, "s-mc-1")
+}
+
+func TestGracePeriod_ZeroDisabled_IdleSleepApplies(t *testing.T) {
+	// ManualGracePeriod=0 disables the grace period. Normal idle sleep applies.
+	result := ComputeAwakeSet(AwakeInput{
+		Agents: []AwakeAgent{{QualifiedName: "gascity/claude"}},
+		SessionBeads: []AwakeSessionBead{{
+			ID: "mc-1", SessionName: "s-mc-1", Template: "gascity/claude", State: "active",
+			ManualSession: true, IdleSince: now.Add(-3 * time.Minute),
+			CreatedAt: now.Add(-3 * time.Minute),
+		}},
+		RunningSessions:   map[string]bool{"s-mc-1": true},
+		ChatIdleTimeout:   2 * time.Minute,
+		ManualGracePeriod: 0,
+		Now:               now,
+	})
+	assertAsleep(t, result, "s-mc-1")
+}
+
+func TestGracePeriod_NonManualSession_NoEffect(t *testing.T) {
+	// Grace period should NOT protect non-manual (ephemeral) sessions.
+	result := ComputeAwakeSet(AwakeInput{
+		Agents: []AwakeAgent{{QualifiedName: "hello-world/polecat", SleepAfterIdle: 2 * time.Minute}},
+		SessionBeads: []AwakeSessionBead{{
+			ID: "mc-1", SessionName: "polecat-mc-1", Template: "hello-world/polecat", State: "active",
+			IdleSince: now.Add(-3 * time.Minute),
+			CreatedAt: now.Add(-3 * time.Minute),
+		}},
+		ScaleCheckCounts:  map[string]int{"hello-world/polecat": 1},
+		RunningSessions:   map[string]bool{"polecat-mc-1": true},
+		ManualGracePeriod: 10 * time.Minute,
+		Now:               now,
+	})
+	assertAsleep(t, result, "polecat-mc-1")
+}
+
+func TestGracePeriod_ReasonIsGracePeriod(t *testing.T) {
+	// When grace period protects a session from idle sleep, the reason
+	// should remain "manual" (the desired-set reason), not change.
+	result := ComputeAwakeSet(AwakeInput{
+		Agents: []AwakeAgent{{QualifiedName: "gascity/claude"}},
+		SessionBeads: []AwakeSessionBead{{
+			ID: "mc-1", SessionName: "s-mc-1", Template: "gascity/claude", State: "active",
+			ManualSession: true, IdleSince: now.Add(-3 * time.Minute),
+			CreatedAt: now.Add(-3 * time.Minute),
+		}},
+		RunningSessions:   map[string]bool{"s-mc-1": true},
+		ChatIdleTimeout:   2 * time.Minute,
+		ManualGracePeriod: 10 * time.Minute,
+		Now:               now,
+	})
+	assertReason(t, result, "s-mc-1", "manual")
+}
+
 func TestScaledPool_NotAffectedByRunningOverride(t *testing.T) {
 	// Pool with scale=0 and running session. Override must NOT
 	// keep pool sessions alive — scale-down must work.

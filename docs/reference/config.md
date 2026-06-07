@@ -278,6 +278,7 @@ ChatSessionsConfig configures chat session behavior.
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
 | `idle_timeout` | string |  |  | IdleTimeout is the duration after which a detached chat session is auto-suspended. Duration string (e.g., "30m", "1h"). 0 = disabled. |
+| `grace_period` | string |  |  | GracePeriod is the duration after creation during which a manual session is protected from idle-sleep scale-to-zero. Duration string (e.g., "10m"). Empty = use default (10m). "0" = disabled. |
 
 ## ConvergenceConfig
 

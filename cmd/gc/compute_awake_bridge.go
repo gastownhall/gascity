@@ -37,6 +37,7 @@ func buildAwakeInputFromReconciler(
 		AttachedSessions:   make(map[string]bool),
 		PendingSessions:    make(map[string]bool),
 		ChatIdleTimeout:    cfg.ChatSessions.IdleTimeoutDuration(),
+		ManualGracePeriod:  cfg.ChatSessions.GracePeriodDuration(),
 		Now:                clk,
 	}
 
@@ -120,6 +121,7 @@ func buildAwakeInputFromReconciler(
 		}
 		bead.HeldUntil = lifecycle.HeldUntil
 		bead.QuarantinedUntil = lifecycle.QuarantinedUntil
+		bead.CreatedAt = b.CreatedAt
 		if t, err := time.Parse(time.RFC3339, b.Metadata["detached_at"]); err == nil && !t.IsZero() {
 			bead.IdleSince = t
 		}

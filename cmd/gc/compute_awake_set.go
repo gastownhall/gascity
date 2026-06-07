@@ -32,6 +32,7 @@ type AwakeInput struct {
 	PendingSessions    map[string]bool // session name → pending interaction
 	ReadyWaitSet       map[string]bool // session bead ID → durable wait is ready
 	ChatIdleTimeout    time.Duration   // global idle timeout for manual/chat sessions (0 = disabled)
+	ManualGracePeriod  time.Duration   // grace period before manual sessions can be idle-slept (0 = disabled)
 	Now                time.Time
 }
 
@@ -71,6 +72,7 @@ type AwakeSessionBead struct {
 	HeldUntil                time.Time // zero = not held
 	QuarantinedUntil         time.Time // zero = not quarantined
 	IdleSince                time.Time // zero = unknown/not idle
+	CreatedAt                time.Time // bead creation time (for grace period checks)
 	RestartRequested         bool      // restart_requested metadata is still active
 	ContinuationResetPending bool      // continuation_reset_pending metadata is set
 }
@@ -400,11 +402,13 @@ func ComputeAwakeSet(input AwakeInput) map[string]AwakeDecision {
 		// Attached, pending, pinned, mode=always named, and sessions with
 		// assigned demand work are exempt. Assigned demand work means either
 		// in_progress ownership or open work with Ready=true; blocked open
-		// assignments do not prevent idle sleep.
+		// assignments do not prevent idle sleep. Manual sessions within their
+		// grace period are also exempt.
 		if decision.ShouldWake && !input.AttachedSessions[name] && !input.PendingSessions[name] && !bead.Pinned && !bead.IdleSince.IsZero() &&
 			!isAlwaysNamedSession(input.NamedSessions, bead) &&
 			desired[name] != "assigned-work" && desired[name] != "min-active" &&
-			desired[name] != "reset-pending" {
+			desired[name] != "reset-pending" &&
+			!inManualGracePeriod(bead, input.ManualGracePeriod, input.Now) {
 			agent, hasAgent := lookupAgent(bead.Template)
 			var idleTimeout time.Duration
 			switch {
@@ -721,4 +725,11 @@ func isCreatingCandidateState(state string) bool {
 	default:
 		return false
 	}
+}
+
+// inManualGracePeriod returns true if the session is a manual session
+// created recently enough to be protected from idle sleep.
+func inManualGracePeriod(bead AwakeSessionBead, gracePeriod time.Duration, now time.Time) bool {
+	return bead.ManualSession && gracePeriod > 0 && !bead.CreatedAt.IsZero() &&
+		now.Sub(bead.CreatedAt) < gracePeriod
 }

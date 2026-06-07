@@ -2758,6 +2758,105 @@ func TestDoRigAdd_AdoptWithoutPrefixMismatch(t *testing.T) {
 	}
 }
 
+// TestDoRigAdd_AdoptWithBdContractInvokesInitAndHook verifies that --adopt on
+// a managed-Dolt (bd-contract) city invokes the init/hook machinery to
+// register types.custom and other config into the adopted store's DB.
+// Regression for ga-fg1ht3: the adopt branch previously skipped the init
+// path entirely, leaving the DB config table out of sync with config.yaml.
+func TestDoRigAdd_AdoptWithBdContractInvokesInitAndHook(t *testing.T) {
+	cityPath := t.TempDir()
+	writeSchema2RigCity(t, cityPath, "test-city", "[workspace]\n", "")
+	t.Setenv("GC_BEADS", "exec:"+filepath.Join(cityPath, "gc-beads-bd"))
+	t.Setenv("GC_DOLT", "")
+
+	// Stub lifecycle hooks — no real Dolt in unit tests. Record that the
+	// init path was invoked with the adopted rig dir.
+	origEnsure := initDirIfReadyEnsureBeadsProvider
+	origInit := initDirIfReadyInitAndHookDir
+	t.Cleanup(func() {
+		initDirIfReadyEnsureBeadsProvider = origEnsure
+		initDirIfReadyInitAndHookDir = origInit
+	})
+	initDirIfReadyEnsureBeadsProvider = func(_ string) error { return nil }
+
+	var initCalls []string
+	initDirIfReadyInitAndHookDir = func(_, dir, _ string) error {
+		initCalls = append(initCalls, dir)
+		return nil
+	}
+
+	rigPath := filepath.Join(t.TempDir(), "adopted-rig")
+	if err := os.MkdirAll(filepath.Join(rigPath, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	meta := `{"name":"adopted-rig","issue_prefix":"ar"}`
+	if err := os.WriteFile(filepath.Join(rigPath, ".beads", "metadata.json"), []byte(meta), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	configYaml := "issue_prefix: ar\n" +
+		"types.custom: molecule,convoy,session,merge-request,agent,role,rig,spec,convergence,step\n"
+	if err := os.WriteFile(filepath.Join(rigPath, ".beads", "config.yaml"), []byte(configYaml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doRigAdd(fsys.OSFS{}, cityPath, rigPath, nil, "", "ar", "", false, true, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doRigAdd --adopt returned %d, stderr: %s", code, stderr.String())
+	}
+	if len(initCalls) == 0 {
+		t.Fatalf("ga-fg1ht3: --adopt on bd-contract city must invoke initAndHookDir to register types.custom; initCalls=%v", initCalls)
+	}
+	found := false
+	for _, dir := range initCalls {
+		if samePath(dir, rigPath) {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("initAndHookDir called but not for adopted rig path %q; calls=%v", rigPath, initCalls)
+	}
+	if !strings.Contains(stdout.String(), "Adopted existing beads database") {
+		t.Errorf("stdout should mention adoption: %s", stdout.String())
+	}
+}
+
+// TestDoRigAdd_AdoptWithBdContractProvider_NonAdoptControlInvokesInit is a
+// control: the same stubbed harness wired through a NON-adopt add also calls
+// initAndHookDir, proving that the empty-initCalls failure above (pre-fix) was
+// real (adopt invoked init 0 times), not a harness artifact.
+func TestDoRigAdd_AdoptWithBdContractProvider_NonAdoptControlInvokesInit(t *testing.T) {
+	cityPath := t.TempDir()
+	writeSchema2RigCity(t, cityPath, "test-city", "[workspace]\n", "")
+	t.Setenv("GC_BEADS", "exec:"+filepath.Join(cityPath, "gc-beads-bd"))
+	t.Setenv("GC_DOLT", "")
+
+	origEnsure := initDirIfReadyEnsureBeadsProvider
+	origInit := initDirIfReadyInitAndHookDir
+	t.Cleanup(func() {
+		initDirIfReadyEnsureBeadsProvider = origEnsure
+		initDirIfReadyInitAndHookDir = origInit
+	})
+	initDirIfReadyEnsureBeadsProvider = func(_ string) error { return nil }
+
+	var initCalls []string
+	initDirIfReadyInitAndHookDir = func(_, dir, _ string) error {
+		initCalls = append(initCalls, dir)
+		return nil
+	}
+
+	rigPath := filepath.Join(t.TempDir(), "fresh-rig")
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	doRigAdd(fsys.OSFS{}, cityPath, rigPath, nil, "", "fr", "", false, false, &stdout, &stderr)
+	if len(initCalls) == 0 {
+		t.Fatalf("control: non-adopt rig add invoked initAndHookDir 0 times; stub not wired in? stderr=%s", stderr.String())
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Six-row read-path routing matrix for `gc rig list` (ADR 0001, ga-h6w).
 // ---------------------------------------------------------------------------

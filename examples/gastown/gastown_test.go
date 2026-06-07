@@ -3774,7 +3774,7 @@ func TestDeaconPatrolDetectsQueueStarvation(t *testing.T) {
 	)
 }
 
-func TestDeaconPatrolNextIterationBurnsCurrentBeforeBackoff(t *testing.T) {
+func TestDeaconPatrolNextIterationBurnsCurrentBeforeIdleExit(t *testing.T) {
 	dir := exampleDir()
 	path := filepath.Join(dir, "packs", "gastown", "formulas", "mol-deacon-patrol.toml")
 	data, err := os.ReadFile(path)
@@ -3793,11 +3793,16 @@ func TestDeaconPatrolNextIterationBurnsCurrentBeforeBackoff(t *testing.T) {
 		`if ! gc bd update "$NEXT" --assignee="$GC_AGENT"; then`,
 		`if [ -n "$CURRENT_WISP" ]; then`,
 		`gc bd mol burn "$CURRENT_WISP" --force`,
-		`sleep {{event_timeout}}`,
-		`gc hook`,
+		`IDLE: no work, exiting turn.`,
 	)
 	if strings.Contains(section, "<this-wisp-id>") {
 		t.Fatal("next-iteration still uses placeholder burn target")
+	}
+	if strings.Contains(section, "sleep {{event_timeout}}") {
+		t.Fatal("next-iteration still contains sleep backoff — should use clean idle exit")
+	}
+	if strings.Contains(section, "gc hook") {
+		t.Fatal("next-iteration still calls gc hook — should use clean idle exit")
 	}
 }
 

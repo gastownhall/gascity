@@ -81,7 +81,7 @@ const (
 )
 
 var builtinProviderOrder = []string{
-	"claude", "codex", "gemini", "kimi", "kiro", "cursor", "copilot",
+	"claude", "codex", "gemini", "grok", "kimi", "kiro", "cursor", "copilot",
 	"amp", "opencode", "groq", "cerebras", "auggie", "pi", "omp", "antigravity",
 }
 
@@ -266,6 +266,71 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 					{Value: "", Label: "Default"},
 					{Value: "gemini-2.5-pro", Label: "Gemini 2.5 Pro", FlagArgs: []string{"--model", "gemini-2.5-pro"}, FlagAliases: [][]string{{"-m", "gemini-2.5-pro"}}},
 					{Value: "gemini-2.5-flash", Label: "Gemini 2.5 Flash", FlagArgs: []string{"--model", "gemini-2.5-flash"}, FlagAliases: [][]string{{"-m", "gemini-2.5-flash"}}},
+				},
+			},
+		},
+	},
+	"grok": {
+		DisplayName: "Grok Build",
+		Command:     "grok",
+		OptionDefaults: map[string]string{
+			"permission_mode": "unrestricted",
+			"model":           "grok-composer-2.5",
+		},
+		// The grok TUI accepts no positional or flag-delivered initial
+		// prompt (`-p/--single` is print-and-exit), so prompts are
+		// delivered via tmux send-keys.
+		PromptMode:       "none",
+		ReadyDelayMs:     5000,
+		ProcessNames:     []string{"grok"},
+		InstructionsFile: "AGENTS.md",
+		ResumeFlag:       "--resume",
+		ResumeStyle:      "flag",
+		PrintArgs:        []string{"-p"},
+		TitleModel:       "grok-composer-2.5-fast",
+		PermissionModes: map[string]string{
+			"default":      "--permission-mode default",
+			"auto-edit":    "--permission-mode acceptEdits",
+			"plan":         "--permission-mode plan",
+			"full-auto":    "--permission-mode dontAsk",
+			"unrestricted": "--permission-mode bypassPermissions",
+		},
+		OptionsSchema: []BuiltinProviderOption{
+			{
+				Key:     "permission_mode",
+				Label:   "Permission Mode",
+				Type:    "select",
+				Default: "unrestricted",
+				Choices: []BuiltinOptionChoice{
+					{Value: "default", Label: "Ask before actions", FlagArgs: []string{"--permission-mode", "default"}},
+					{Value: "auto-edit", Label: "Auto-approve edits", FlagArgs: []string{"--permission-mode", "acceptEdits"}},
+					{Value: "plan", Label: "Plan mode", FlagArgs: []string{"--permission-mode", "plan"}},
+					{Value: "full-auto", Label: "Full auto", FlagArgs: []string{"--permission-mode", "dontAsk"}},
+					{Value: "unrestricted", Label: "Bypass permissions", FlagArgs: []string{"--permission-mode", "bypassPermissions"}},
+				},
+			},
+			{
+				Key:   "effort",
+				Label: "Effort",
+				Type:  "select",
+				Choices: []BuiltinOptionChoice{
+					{Value: "", Label: "Default"},
+					{Value: "low", Label: "Low", FlagArgs: []string{"--effort", "low"}},
+					{Value: "medium", Label: "Medium", FlagArgs: []string{"--effort", "medium"}},
+					{Value: "high", Label: "High", FlagArgs: []string{"--effort", "high"}},
+					{Value: "xhigh", Label: "Extra High", FlagArgs: []string{"--effort", "xhigh"}},
+					{Value: "max", Label: "Max", FlagArgs: []string{"--effort", "max"}},
+				},
+			},
+			{
+				Key:   "model",
+				Label: "Model",
+				Type:  "select",
+				Choices: []BuiltinOptionChoice{
+					{Value: "", Label: "Default"},
+					{Value: "grok-build", Label: "Grok Build", FlagArgs: []string{"--model", "grok-build"}, FlagAliases: [][]string{{"-m", "grok-build"}}},
+					{Value: "grok-composer-2.5", Label: "Grok Composer 2.5", FlagArgs: []string{"--model", "grok-composer-2.5"}, FlagAliases: [][]string{{"-m", "grok-composer-2.5"}}},
+					{Value: "grok-composer-2.5-fast", Label: "Grok Composer 2.5 Fast", FlagArgs: []string{"--model", "grok-composer-2.5-fast"}, FlagAliases: [][]string{{"-m", "grok-composer-2.5-fast"}}},
 				},
 			},
 		},
