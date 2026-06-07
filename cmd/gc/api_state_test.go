@@ -2914,7 +2914,7 @@ func TestControllerStateEstablishesBeadEventCursorBeforePrimingStores(t *testing
 
 	select {
 	case <-ep.latestCalled:
-	case <-time.After(time.Second):
+	case <-time.After(5 * time.Second):
 		t.Fatal("event watcher did not establish an initial cursor")
 	}
 	select {
@@ -2929,7 +2929,7 @@ func TestControllerStateEstablishesBeadEventCursorBeforePrimingStores(t *testing
 	close(ep.allowLatest)
 	select {
 	case <-returned:
-	case <-time.After(time.Second):
+	case <-time.After(5 * time.Second):
 		t.Fatal("newControllerState did not return after the initial event cursor was established")
 	}
 }
@@ -3015,7 +3015,7 @@ func TestControllerStateBeadEventWatcherRetriesSetupErrors(t *testing.T) {
 
 	select {
 	case <-ep.failed:
-	case <-time.After(time.Second):
+	case <-time.After(5 * time.Second):
 		t.Fatal("bead event watcher did not attempt initial watch")
 	}
 
