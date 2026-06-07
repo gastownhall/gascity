@@ -2448,6 +2448,18 @@ type SessionPermissionModeBody struct {
 // SessionRawMessageFrame Provider-native transcript frame. Gas City forwards the exact JSON the provider wrote to its session log, so the shape is provider-specific and can be any JSON value. The producing provider is identified by the Provider field on the enclosing envelope; consumers dispatch per-provider frame parsing keyed by that identifier.
 type SessionRawMessageFrame = interface{}
 
+// SessionRecoveredPayload defines model for SessionRecoveredPayload.
+type SessionRecoveredPayload struct {
+	// Action Free-form recovery action taken, e.g. "nudge-continue", "wake-then-nudge", or "nudge-compact". Diagnostic only.
+	Action *string `json:"action,omitempty"`
+
+	// Reason Free-form recovery reason, e.g. "rate_limit" or "context_frozen". Never a role name.
+	Reason *string `json:"reason,omitempty"`
+
+	// SessionId Canonical session bead ID of the recovered session, when the emitter knows it. The event envelope's Subject carries the same id.
+	SessionId *string `json:"session_id,omitempty"`
+}
+
 // SessionRenameInputBody defines model for SessionRenameInputBody.
 type SessionRenameInputBody struct {
 	// Title New session title.
@@ -3384,6 +3396,18 @@ type TypedEventStreamEnvelopeSessionQuarantined struct {
 	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
+// TypedEventStreamEnvelopeSessionRecovered defines model for TypedEventStreamEnvelopeSessionRecovered.
+type TypedEventStreamEnvelopeSessionRecovered struct {
+	Actor    string                   `json:"actor"`
+	Message  *string                  `json:"message,omitempty"`
+	Payload  SessionRecoveredPayload  `json:"payload"`
+	Seq      int64                    `json:"seq"`
+	Subject  *string                  `json:"subject,omitempty"`
+	Ts       time.Time                `json:"ts"`
+	Type     string                   `json:"type"`
+	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
 // TypedEventStreamEnvelopeSessionStopped defines model for TypedEventStreamEnvelopeSessionStopped.
 type TypedEventStreamEnvelopeSessionStopped struct {
 	Actor    string                   `json:"actor"`
@@ -4062,6 +4086,19 @@ type TypedTaggedEventStreamEnvelopeSessionQuarantined struct {
 	City     string                   `json:"city"`
 	Message  *string                  `json:"message,omitempty"`
 	Payload  NoPayload                `json:"payload"`
+	Seq      int64                    `json:"seq"`
+	Subject  *string                  `json:"subject,omitempty"`
+	Ts       time.Time                `json:"ts"`
+	Type     string                   `json:"type"`
+	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeSessionRecovered defines model for TypedTaggedEventStreamEnvelopeSessionRecovered.
+type TypedTaggedEventStreamEnvelopeSessionRecovered struct {
+	Actor    string                   `json:"actor"`
+	City     string                   `json:"city"`
+	Message  *string                  `json:"message,omitempty"`
+	Payload  SessionRecoveredPayload  `json:"payload"`
 	Seq      int64                    `json:"seq"`
 	Subject  *string                  `json:"subject,omitempty"`
 	Ts       time.Time                `json:"ts"`
@@ -5856,6 +5893,32 @@ func (t *EventPayload) MergeSessionMessageSucceededPayload(v SessionMessageSucce
 	return err
 }
 
+// AsSessionRecoveredPayload returns the union data inside the EventPayload as a SessionRecoveredPayload
+func (t EventPayload) AsSessionRecoveredPayload() (SessionRecoveredPayload, error) {
+	var body SessionRecoveredPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromSessionRecoveredPayload overwrites any union data inside the EventPayload as the provided SessionRecoveredPayload
+func (t *EventPayload) FromSessionRecoveredPayload(v SessionRecoveredPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeSessionRecoveredPayload performs a merge with any union data inside the EventPayload, using the provided SessionRecoveredPayload
+func (t *EventPayload) MergeSessionRecoveredPayload(v SessionRecoveredPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsSessionSubmitSucceededPayload returns the union data inside the EventPayload as a SessionSubmitSucceededPayload
 func (t EventPayload) AsSessionSubmitSucceededPayload() (SessionSubmitSucceededPayload, error) {
 	var body SessionSubmitSucceededPayload
@@ -7288,6 +7351,34 @@ func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeSessionQuarantin
 	return err
 }
 
+// AsTypedEventStreamEnvelopeSessionRecovered returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeSessionRecovered
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeSessionRecovered() (TypedEventStreamEnvelopeSessionRecovered, error) {
+	var body TypedEventStreamEnvelopeSessionRecovered
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeSessionRecovered overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeSessionRecovered
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeSessionRecovered(v TypedEventStreamEnvelopeSessionRecovered) error {
+	v.Type = "session.recovered"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeSessionRecovered performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeSessionRecovered
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeSessionRecovered(v TypedEventStreamEnvelopeSessionRecovered) error {
+	v.Type = "session.recovered"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedEventStreamEnvelopeSessionStopped returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeSessionStopped
 func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeSessionStopped() (TypedEventStreamEnvelopeSessionStopped, error) {
 	var body TypedEventStreamEnvelopeSessionStopped
@@ -7670,6 +7761,8 @@ func (t TypedEventStreamEnvelope) ValueByDiscriminator() (interface{}, error) {
 		return t.AsTypedEventStreamEnvelopeSessionMaxAgeKilled()
 	case "session.quarantined":
 		return t.AsTypedEventStreamEnvelopeSessionQuarantined()
+	case "session.recovered":
+		return t.AsTypedEventStreamEnvelopeSessionRecovered()
 	case "session.stopped":
 		return t.AsTypedEventStreamEnvelopeSessionStopped()
 	case "session.suspended":
@@ -8907,6 +9000,34 @@ func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeSess
 	return err
 }
 
+// AsTypedTaggedEventStreamEnvelopeSessionRecovered returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeSessionRecovered
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeSessionRecovered() (TypedTaggedEventStreamEnvelopeSessionRecovered, error) {
+	var body TypedTaggedEventStreamEnvelopeSessionRecovered
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeSessionRecovered overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeSessionRecovered
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeSessionRecovered(v TypedTaggedEventStreamEnvelopeSessionRecovered) error {
+	v.Type = "session.recovered"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeSessionRecovered performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeSessionRecovered
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeSessionRecovered(v TypedTaggedEventStreamEnvelopeSessionRecovered) error {
+	v.Type = "session.recovered"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedTaggedEventStreamEnvelopeSessionStopped returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeSessionStopped
 func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeSessionStopped() (TypedTaggedEventStreamEnvelopeSessionStopped, error) {
 	var body TypedTaggedEventStreamEnvelopeSessionStopped
@@ -9289,6 +9410,8 @@ func (t TypedTaggedEventStreamEnvelope) ValueByDiscriminator() (interface{}, err
 		return t.AsTypedTaggedEventStreamEnvelopeSessionMaxAgeKilled()
 	case "session.quarantined":
 		return t.AsTypedTaggedEventStreamEnvelopeSessionQuarantined()
+	case "session.recovered":
+		return t.AsTypedTaggedEventStreamEnvelopeSessionRecovered()
 	case "session.stopped":
 		return t.AsTypedTaggedEventStreamEnvelopeSessionStopped()
 	case "session.suspended":

@@ -560,6 +560,34 @@ func TestPolecatPromptDoneSequenceSignalsRefinery(t *testing.T) {
 	}
 }
 
+// TestPolecatPromptEmitsWorkBeadHeartbeat pins the .6 heartbeat adoption: the
+// canonical worker stamps `gc bd heartbeat <work-bead>` while it grinds, so the
+// city watchdog has a clean liveness signal (metadata.gc.last_heartbeat_at) to
+// tell a progressing worker from a wedged one — one that, unlike last_active,
+// the controller's own nudges cannot pollute. Without worker adoption the gate
+// reads null for every session and is useless, so this is the worker half of
+// the contract the argos heartbeat gate consumes.
+func TestPolecatPromptEmitsWorkBeadHeartbeat(t *testing.T) {
+	dir := exampleDir()
+	path := filepath.Join(dir, "packs", "gastown", "agents", "polecat", "prompt.template.md")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading polecat prompt: %v", err)
+	}
+	body := string(data)
+
+	if !strings.Contains(body, "gc bd heartbeat") {
+		t.Fatal("polecat prompt must instruct the worker to stamp `gc bd heartbeat` while it works")
+	}
+	// The heartbeat must be tied to the clean liveness signal the watchdog
+	// reads, and framed as the unpolluted complement to last_active.
+	for _, want := range []string{"last_heartbeat_at", "last_active"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("polecat heartbeat guidance must reference %q so the worker knows why it beats", want)
+		}
+	}
+}
+
 func TestRefineryFormulaRespectsExistingPRMetadata(t *testing.T) {
 	dir := exampleDir()
 	path := filepath.Join(dir, "packs", "gastown", "formulas", "mol-refinery-patrol.toml")

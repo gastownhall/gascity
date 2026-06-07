@@ -754,7 +754,7 @@ export type EventEmitRequest = {
     type: string;
 };
 
-export type EventPayload = AdapterEventPayload | BeadEventPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | GroupCreatedEventPayload | InboundEventPayload | MailEventPayload | NoPayload | OutboundEventPayload | ProjectIdentityStampedPayload | RequestFailedPayload | RotatedPayload | SessionCreateSucceededPayload | SessionDrainAckedWithAssignedWorkPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionSubmitSucceededPayload | SupervisorFsPressureSkippedTickPayload | SupervisorShutdownPayload | UnboundEventPayload | WorkerOperationEventPayload;
+export type EventPayload = AdapterEventPayload | BeadEventPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | GroupCreatedEventPayload | InboundEventPayload | MailEventPayload | NoPayload | OutboundEventPayload | ProjectIdentityStampedPayload | RequestFailedPayload | RotatedPayload | SessionCreateSucceededPayload | SessionDrainAckedWithAssignedWorkPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionRecoveredPayload | SessionSubmitSucceededPayload | SupervisorFsPressureSkippedTickPayload | SupervisorShutdownPayload | UnboundEventPayload | WorkerOperationEventPayload;
 
 export type EventRotateAnchor = {
     /**
@@ -2513,6 +2513,21 @@ export type SessionPermissionModeBody = {
  */
 export type SessionRawMessageFrame = unknown;
 
+export type SessionRecoveredPayload = {
+    /**
+     * Free-form recovery action taken, e.g. "nudge-continue", "wake-then-nudge", or "nudge-compact". Diagnostic only.
+     */
+    action?: string;
+    /**
+     * Free-form recovery reason, e.g. "rate_limit" or "context_frozen". Never a role name.
+     */
+    reason?: string;
+    /**
+     * Canonical session bead ID of the recovered session, when the emitter knows it. The event envelope's Subject carries the same id.
+     */
+    session_id?: string;
+};
+
 export type SessionRenameInputBody = {
     /**
      * New session title.
@@ -3099,6 +3114,8 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeSessionMaxAgeKilled) | ({
     type: 'session.quarantined';
 } & TypedEventStreamEnvelopeSessionQuarantined) | ({
+    type: 'session.recovered';
+} & TypedEventStreamEnvelopeSessionRecovered) | ({
     type: 'session.stopped';
 } & TypedEventStreamEnvelopeSessionStopped) | ({
     type: 'session.suspended';
@@ -3737,6 +3754,20 @@ export type TypedEventStreamEnvelopeSessionQuarantined = {
 };
 
 /**
+ * TypedEventStreamEnvelope session.recovered
+ */
+export type TypedEventStreamEnvelopeSessionRecovered = {
+    actor: string;
+    message?: string;
+    payload: SessionRecoveredPayload;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'session.recovered';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
  * TypedEventStreamEnvelope session.stopped
  */
 export type TypedEventStreamEnvelopeSessionStopped = {
@@ -3954,6 +3985,8 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeSessionMaxAgeKilled) | ({
     type: 'session.quarantined';
 } & TypedTaggedEventStreamEnvelopeSessionQuarantined) | ({
+    type: 'session.recovered';
+} & TypedTaggedEventStreamEnvelopeSessionRecovered) | ({
     type: 'session.stopped';
 } & TypedTaggedEventStreamEnvelopeSessionStopped) | ({
     type: 'session.suspended';
@@ -4632,6 +4665,21 @@ export type TypedTaggedEventStreamEnvelopeSessionQuarantined = {
     subject?: string;
     ts: string;
     type: 'session.quarantined';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope session.recovered
+ */
+export type TypedTaggedEventStreamEnvelopeSessionRecovered = {
+    actor: string;
+    city: string;
+    message?: string;
+    payload: SessionRecoveredPayload;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'session.recovered';
     workflow?: WorkflowEventProjection;
 };
 

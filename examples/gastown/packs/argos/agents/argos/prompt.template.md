@@ -79,7 +79,9 @@ from flagging a real stall:
 - **last_active** is a *loose advisory only*. A fresh `last_active` does
   **not** clear a session — the controller's own nudges and the pane's
   countdown redraw bump it, so a genuine stall can look freshly active. Use
-  it to choose peek order, never to suppress a verdict.
+  it to choose peek order, never to suppress a verdict. The *clean* liveness
+  signal is the claimed bead's `gc.last_heartbeat_at` (Step 2) — that one the
+  controller cannot fake, so it may clear a holder where `last_active` cannot.
 
 ### Step 2: Cross-reference claimed work
 
@@ -100,6 +102,40 @@ A candidate session that holds **no** claimed in-progress bead is
 **idle-no-work** — leave it alone no matter what its pane shows. Bounding
 recovery to work-in-flight (not idleness) is what keeps Argos cheap and
 keeps it from waking crew who have nothing to do.
+
+#### Gate on the bead's heartbeat — the clean liveness signal
+
+A worker that is actually progressing stamps `metadata."gc.last_heartbeat_at"`
+on its claimed bead at each checkpoint. Read it off the bead you just matched:
+
+```bash
+{{ cmd }} bd show <work-bead-id>   # METADATA → gc.last_heartbeat_at
+```
+
+The heartbeat is the signal `last_active` only pretends to be. `last_active`
+is bumped by the controller's own nudges and by the pane's countdown redraw,
+so a genuine stall looks freshly active — that is why Step 1 demotes it to a
+loose advisory. A heartbeat moves **only when the worker advances**, so the
+controller cannot fake it. That cleanliness earns it teeth `last_active`
+never had — use it to choose which candidates you peek:
+
+- **Fresh heartbeat** (stamped within the last patrol window or two) → the
+  holder is making progress under its own power. Classify `healthy` and move
+  on — no peek needed. A worker that just hit a wall will miss its next beat,
+  so it falls back into the candidate set within a window; the miss is bounded.
+- **Stale or absent heartbeat** over a claimed bead → a real candidate for a
+  stall. Peek its pane (Step 3) to confirm.
+
+A **fresh** heartbeat may *clear* a session, because it cannot be faked. But a
+**stale** heartbeat alone never *recovers* one: an honest long build between
+checkpoints can look stale too, so the pane-marker + claimed-bead fire gate
+still decides recovery. Heartbeat freshness only chooses where to look — it
+adds no new recovery trigger.
+
+> **No adoption, no gate.** If a worker's prompt does not call
+> `{{ cmd }} bd heartbeat`, its bead carries no `gc.last_heartbeat_at` and you
+> treat it as a candidate (peek to confirm) rather than clearing it. The gate
+> only ever *clears* on a positive fresh signal; absence is never a clear.
 
 ### Step 3: Confirm by reading the pane
 
@@ -259,6 +295,32 @@ its own schedule). If recovery never takes and the owner dies, the orphan
 sweep collects it. Argos's job is the *alive* stall; it never reassigns,
 reopens, or otherwise writes a work bead.
 
+#### Record the recovery (observability)
+
+After a recovery action lands, emit a `session.recovered` event so the
+recovery is visible in the city's event log next to the session lifecycle
+events:
+
+```bash
+{{ cmd }} event emit session.recovered \
+  --subject <session-id> \
+  --message "recovered <session-name>" \
+  --payload '{"session_id":"<session-id>","reason":"rate_limit","action":"nudge-continue"}'
+```
+
+Set `reason` to what you saw and `action` to what you did:
+
+- `reason`: `rate_limit` for a usage-limit wall, `context_frozen` for a wedged
+  context.
+- `action`: `nudge-continue`, `wake-then-nudge`, or `nudge-compact`.
+
+These are **free-form strings, never a role name** — the event says *what*
+happened to a session, not *who* the session was. The event is **best-effort
+observability only**: it never gates the recovery, so emit it after the nudge
+lands and move on. (`{{ cmd }} event emit` always exits 0; a failure to record
+never undoes a recovery.) Read the trail back with
+`{{ cmd }} events --type session.recovered`.
+
 ### Step 6: Emit verdicts and exit
 
 Print one verdict line per candidate so the wake is observable in your pane
@@ -338,11 +400,13 @@ Argos recovers an **alive, walled** session with a nudge — nothing heavier.
 | -------------------------------- | ----------------------------------------------------- |
 | Enumerate every session          | `{{ cmd }} session list --json`                       |
 | List claimed, in-progress work   | `{{ cmd }} bd list --status=in_progress --json`       |
+| Read a bead's heartbeat (clean liveness) | `{{ cmd }} bd show <work-bead-id>` → `gc.last_heartbeat_at` |
 | Read a session's recent pane     | `{{ cmd }} session peek <name-or-alias> --lines 50`   |
 | Read last-nudge time off a bead  | `{{ cmd }} bd show <session-id>`                      |
 | Wake a suspended holder          | `{{ cmd }} session wake <id-or-alias>`                |
 | Nudge a rate-limit wall          | `{{ cmd }} session nudge <id-or-alias> "continue"`    |
 | Compact a frozen context         | `{{ cmd }} session nudge <id-or-alias> "/compact"`    |
+| Record a recovery (observability) | `{{ cmd }} event emit session.recovered --subject <session-id> --payload '{"reason":"rate_limit"}'` |
 | Signal this wake is done         | `{{ cmd }} runtime drain-ack`                         |
 
 Working directory: {{ .WorkDir }}

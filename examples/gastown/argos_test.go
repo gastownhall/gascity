@@ -341,6 +341,60 @@ func TestArgosPatrolScenarioContract(t *testing.T) {
 	}
 }
 
+// TestArgosGatesOnHeartbeatAndEmitsRecovered locks the .6 additions on top of
+// the recovery contract: (1) the watchdog promotes the clean
+// metadata.gc.last_heartbeat_at signal (now that workers adopt it) to gate
+// which candidates it peeks — a fresh heartbeat clears a holder that
+// last_active never could because the controller's own nudges cannot fake a
+// heartbeat — while a stale/absent heartbeat keeps a claimed bead a candidate;
+// and (2) after a recovery lands the watchdog emits the optional, role-free
+// session.recovered observability event via `gc event emit`, with a free-form
+// reason (rate_limit / context_frozen), never a role name. The heartbeat gate
+// must not become a new recovery trigger: the pane-marker + claimed-bead fire
+// gate still decides recovery, so freshness only chooses where to look.
+func TestArgosGatesOnHeartbeatAndEmitsRecovered(t *testing.T) {
+	body := renderArgosPrompt(t)
+	lower := strings.ToLower(body)
+
+	// Heartbeat gate: the clean liveness signal, read off the claimed bead.
+	for _, want := range []string{
+		"gc.last_heartbeat_at", // the exact metadata field the gate reads
+		"heartbeat",            // named so the signal is unmissable
+	} {
+		if !strings.Contains(lower, strings.ToLower(want)) {
+			t.Errorf("argos prompt must gate on the heartbeat signal %q", want)
+		}
+	}
+	// Freshness has teeth (it can clear a holder) but staleness never recovers
+	// on its own — the fire gate still decides. Both poles must be present.
+	for _, want := range []string{"fresh", "stale"} {
+		if !strings.Contains(lower, want) {
+			t.Errorf("argos heartbeat gate must distinguish %q heartbeats", want)
+		}
+	}
+
+	// session.recovered emission: the optional role-free observability event.
+	if !strings.Contains(body, "gc event emit session.recovered") {
+		t.Error("argos prompt must emit the role-free session.recovered event after recovery via `gc event emit`")
+	}
+	// The payload carries a free-form reason, not a role name.
+	if !strings.Contains(lower, "rate_limit") {
+		t.Error("session.recovered payload must carry a free-form reason like rate_limit")
+	}
+	// Best-effort observability must never gate the recovery itself.
+	if !strings.Contains(lower, "best-effort") && !strings.Contains(lower, "best effort") {
+		t.Error("argos prompt should frame session.recovered as best-effort so it never gates recovery")
+	}
+
+	// The event emission must stay role-free: no hardcoded role names leak into
+	// the recovery event the way the rest of the watchdog stays role-blind.
+	for _, role := range []string{"mayor", "deacon", "polecat", "witness", "refinery"} {
+		if strings.Contains(strings.ToLower(sectionBetween(t, body, "Record the recovery", "\n## ")), role) {
+			t.Errorf("session.recovered guidance must be role-free, found role name %q", role)
+		}
+	}
+}
+
 // scenarioRow returns the single line of the patrol-scenario table that
 // contains anchor, failing if anchor does not identify exactly one row.
 func scenarioRow(t *testing.T, table, anchor string) string {

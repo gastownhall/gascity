@@ -41,6 +41,16 @@ const (
 	SessionMaxAgeKilled = "session.max_age_killed"
 	SessionSuspended    = "session.suspended"
 	SessionUpdated      = "session.updated"
+	// SessionRecovered is an optional, role-free observability event emitted
+	// best-effort by a recovery actor (e.g. a watchdog agent) after it nudges
+	// or wakes a stalled session back to life. It is not produced by any SDK
+	// mechanism and depends on no specific configured role: a pack's recovery
+	// flow emits it via `gc event emit session.recovered`. The payload carries
+	// a free-form reason (e.g. "rate_limit") and action, never a role name, so
+	// the recovery of a rate-limited or context-frozen session is observable in
+	// the event log without baking pack-specific knowledge into core. See the
+	// #2194 watchdog design (§2).
+	SessionRecovered = "session.recovered"
 	// SessionDrainAckedWithAssignedWork fires when a session acknowledges
 	// drain (via `gc runtime drain-ack`) while still holding the assignee
 	// on an open or in-progress work bead. Distinguishes a worker that
@@ -115,6 +125,7 @@ var KnownEventTypes = []string{
 	SessionWoke, SessionStopped, SessionCrashed,
 	SessionDraining, SessionUndrained, SessionQuarantined,
 	SessionIdleKilled, SessionMaxAgeKilled, SessionSuspended, SessionUpdated,
+	SessionRecovered,
 	SessionDrainAckedWithAssignedWork,
 	SessionWorkQueryFailed,
 	BeadCreated, BeadClosed, BeadUpdated,

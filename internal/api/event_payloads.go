@@ -413,6 +413,28 @@ func SessionDrainAckedWithAssignedWorkPayloadJSON(sessionID, beadID, template, b
 	return b
 }
 
+// SessionRecoveredPayload is the typed payload for the optional, role-free
+// session.recovered observability event (events.SessionRecovered). A recovery
+// actor — e.g. a watchdog agent — emits it best-effort via
+// `gc event emit session.recovered` after it nudges or wakes a stalled session
+// back to life, so the recovery is visible in the event log alongside the
+// session.* lifecycle events.
+//
+// Every field is deliberately free-form and optional. Reason and Action are
+// never role names: the SDK learns nothing about specific roles from this
+// event, which keeps it emittable by any pack's recovery flow (Principle:
+// ZERO hardcoded roles). The envelope's Subject carries the recovered
+// session's id; SessionID repeats it in the payload for consumers that read
+// the typed payload alone, and may be empty when the emitter omits it.
+type SessionRecoveredPayload struct {
+	SessionID string `json:"session_id,omitempty" doc:"Canonical session bead ID of the recovered session, when the emitter knows it. The event envelope's Subject carries the same id."`
+	Reason    string `json:"reason,omitempty" doc:"Free-form recovery reason, e.g. \"rate_limit\" or \"context_frozen\". Never a role name."`
+	Action    string `json:"action,omitempty" doc:"Free-form recovery action taken, e.g. \"nudge-continue\", \"wake-then-nudge\", or \"nudge-compact\". Diagnostic only."`
+}
+
+// IsEventPayload marks SessionRecoveredPayload as an events.Payload variant.
+func (SessionRecoveredPayload) IsEventPayload() {}
+
 func init() {
 	// mail.* — all seven types share one payload shape.
 	events.RegisterPayload(events.MailSent, MailEventPayload{})
@@ -444,6 +466,9 @@ func init() {
 	events.RegisterPayload(events.SessionMaxAgeKilled, events.NoPayload{})
 	events.RegisterPayload(events.SessionSuspended, events.NoPayload{})
 	events.RegisterPayload(events.SessionUpdated, events.NoPayload{})
+	// session.recovered carries a free-form reason/action so a recovery is
+	// observable beyond the bare envelope. Role-free by construction.
+	events.RegisterPayload(events.SessionRecovered, SessionRecoveredPayload{})
 	events.RegisterPayload(events.SessionDrainAckedWithAssignedWork, SessionDrainAckedWithAssignedWorkPayload{})
 	events.RegisterPayload(events.SessionWorkQueryFailed, SessionLifecyclePayload{})
 	events.RegisterPayload(events.ConvoyCreated, events.NoPayload{})

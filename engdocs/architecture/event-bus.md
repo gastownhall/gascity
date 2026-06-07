@@ -270,6 +270,7 @@ API/SSE projection:
 | `SessionIdleKilled` | `session.idle_killed` | `cmd/gc/session_reconciler.go` when idle timeout handling stops a session |
 | `SessionSuspended` | `session.suspended` | Registered/reserved; no production emitter today |
 | `SessionUpdated` | `session.updated` | `cmd/gc/session_reconciler.go` on live-only config drift repair |
+| `SessionRecovered` | `session.recovered` | No core Go emitter; emitted best-effort via `gc event emit session.recovered` by a recovery actor (e.g. the argos watchdog pack) after it nudges/wakes a stalled session. Role-free payload carries a free-form `reason`/`action`. |
 | `BeadCreated` | `bead.created` | Bead creation hooks |
 | `BeadClosed` | `bead.closed` | Bead close hooks |
 | `BeadUpdated` | `bead.updated` | Bead update hooks |

@@ -2073,6 +2073,9 @@
             "$ref": "#/components/schemas/SessionMessageSucceededPayload"
           },
           {
+            "$ref": "#/components/schemas/SessionRecoveredPayload"
+          },
+          {
             "$ref": "#/components/schemas/SessionSubmitSucceededPayload"
           },
           {
@@ -6038,6 +6041,24 @@
         "description": "Provider-native transcript frame. Gas City forwards the exact JSON the provider wrote to its session log, so the shape is provider-specific and can be any JSON value. The producing provider is identified by the Provider field on the enclosing envelope; consumers dispatch per-provider frame parsing keyed by that identifier.",
         "title": "Session raw transcript frame"
       },
+      "SessionRecoveredPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "description": "Free-form recovery action taken, e.g. \"nudge-continue\", \"wake-then-nudge\", or \"nudge-compact\". Diagnostic only.",
+            "type": "string"
+          },
+          "reason": {
+            "description": "Free-form recovery reason, e.g. \"rate_limit\" or \"context_frozen\". Never a role name.",
+            "type": "string"
+          },
+          "session_id": {
+            "description": "Canonical session bead ID of the recovered session, when the emitter knows it. The event envelope's Subject carries the same id.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
       "SessionRenameInputBody": {
         "additionalProperties": false,
         "properties": {
@@ -7075,6 +7096,7 @@
             "session.idle_killed": "#/components/schemas/TypedEventStreamEnvelopeSessionIdleKilled",
             "session.max_age_killed": "#/components/schemas/TypedEventStreamEnvelopeSessionMaxAgeKilled",
             "session.quarantined": "#/components/schemas/TypedEventStreamEnvelopeSessionQuarantined",
+            "session.recovered": "#/components/schemas/TypedEventStreamEnvelopeSessionRecovered",
             "session.stopped": "#/components/schemas/TypedEventStreamEnvelopeSessionStopped",
             "session.suspended": "#/components/schemas/TypedEventStreamEnvelopeSessionSuspended",
             "session.undrained": "#/components/schemas/TypedEventStreamEnvelopeSessionUndrained",
@@ -7216,6 +7238,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeSessionQuarantined"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeSessionRecovered"
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeSessionStopped"
@@ -7747,6 +7772,7 @@
                 "session.max_age_killed",
                 "session.suspended",
                 "session.updated",
+                "session.recovered",
                 "session.drain_acked_with_assigned_work",
                 "session.work_query_failed",
                 "bead.created",
@@ -9151,6 +9177,48 @@
         "title": "TypedEventStreamEnvelope session.quarantined",
         "type": "object"
       },
+      "TypedEventStreamEnvelopeSessionRecovered": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/SessionRecoveredPayload"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "session.recovered",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope session.recovered",
+        "type": "object"
+      },
       "TypedEventStreamEnvelopeSessionStopped": {
         "additionalProperties": false,
         "properties": {
@@ -9576,6 +9644,7 @@
             "session.idle_killed": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionIdleKilled",
             "session.max_age_killed": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionMaxAgeKilled",
             "session.quarantined": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionQuarantined",
+            "session.recovered": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionRecovered",
             "session.stopped": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionStopped",
             "session.suspended": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionSuspended",
             "session.undrained": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionUndrained",
@@ -9717,6 +9786,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionQuarantined"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionRecovered"
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionStopped"
@@ -10295,6 +10367,7 @@
                 "session.max_age_killed",
                 "session.suspended",
                 "session.updated",
+                "session.recovered",
                 "session.drain_acked_with_assigned_work",
                 "session.work_query_failed",
                 "bead.created",
@@ -11826,6 +11899,52 @@
           "city"
         ],
         "title": "TypedTaggedEventStreamEnvelope session.quarantined",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopeSessionRecovered": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/SessionRecoveredPayload"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "session.recovered",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope session.recovered",
         "type": "object"
       },
       "TypedTaggedEventStreamEnvelopeSessionStopped": {

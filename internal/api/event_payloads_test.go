@@ -122,6 +122,65 @@ func TestSessionLifecyclePayloadRegisteredForStoppedAndCrashed(t *testing.T) {
 	}
 }
 
+func TestSessionRecoveredPayloadRoundTrip(t *testing.T) {
+	// The watchdog emits session.recovered as a raw JSON payload string via
+	// `gc event emit --payload`; this is the wire shape it produces. Decoding
+	// it through the registry must yield the typed value with the free-form
+	// reason and action intact.
+	raw := json.RawMessage(`{"session_id":"sess-9","reason":"rate_limit","action":"nudge-continue"}`)
+
+	got, registered, err := events.DecodePayload(events.SessionRecovered, raw)
+	if err != nil {
+		t.Fatalf("DecodePayload: %v", err)
+	}
+	if !registered {
+		t.Fatal("registered = false, want true")
+	}
+	payload, ok := got.(SessionRecoveredPayload)
+	if !ok {
+		t.Fatalf("payload = %T, want SessionRecoveredPayload", got)
+	}
+	if payload.SessionID != "sess-9" {
+		t.Fatalf("SessionID = %q, want sess-9", payload.SessionID)
+	}
+	if payload.Reason != "rate_limit" {
+		t.Fatalf("Reason = %q, want rate_limit", payload.Reason)
+	}
+	if payload.Action != "nudge-continue" {
+		t.Fatalf("Action = %q, want nudge-continue", payload.Action)
+	}
+}
+
+func TestSessionRecoveredPayloadOmitemptyFields(t *testing.T) {
+	// Every field is optional and role-free: a payload carrying only a reason
+	// must marshal without the empty fields and decode cleanly.
+	b, err := json.Marshal(SessionRecoveredPayload{Reason: "context_frozen"})
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if got := string(b); got != `{"reason":"context_frozen"}` {
+		t.Fatalf("payload = %s, want only the reason field", got)
+	}
+
+	decoded, registered, err := events.DecodePayload(events.SessionRecovered, b)
+	if err != nil {
+		t.Fatalf("DecodePayload: %v", err)
+	}
+	if !registered {
+		t.Fatal("registered = false, want true")
+	}
+	payload, ok := decoded.(SessionRecoveredPayload)
+	if !ok {
+		t.Fatalf("payload = %T, want SessionRecoveredPayload", decoded)
+	}
+	if payload.Reason != "context_frozen" {
+		t.Fatalf("Reason = %q, want context_frozen", payload.Reason)
+	}
+	if payload.SessionID != "" || payload.Action != "" {
+		t.Fatalf("expected empty SessionID/Action, got %q/%q", payload.SessionID, payload.Action)
+	}
+}
+
 func TestDecodeBeadEventPayloadCoercesNonStringMetadata(t *testing.T) {
 	raw := json.RawMessage(`{"bead":{"id":"bd-123","title":"test bead","status":"open","issue_type":"session","created_at":"2026-04-26T21:37:46Z","metadata":{"generation":3,"pending_create_claim":true,"wake_attempts":0}}}`)
 

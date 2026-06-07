@@ -21,13 +21,18 @@ runs one single-pass triage:
 2. enumerate `gc session list --json` and pre-filter candidates
    (`provider == claude`, alive, `last_active` as a loose advisory),
 3. cross-reference claimed work — join each candidate's `session_name`
-   against the `assignee` of an `in_progress` bead,
+   against the `assignee` of an `in_progress` bead, and read that bead's
+   `gc.last_heartbeat_at` (the clean liveness signal): a **fresh** heartbeat
+   clears the holder as progressing, a **stale/absent** one keeps it a
+   candidate,
 4. confirm by reading the pane (`gc session peek`),
 5. classify each candidate — `healthy` / `idle-no-work` /
    `rate-limit-stalled` / `context-frozen`,
 6. **recover** a candidate the fire gate clears — `gc session nudge <id>
    "continue"` for a rate-limit wall (`gc session wake <id>` first if it is
-   suspended), `gc session nudge <id> "/compact"` for a frozen context,
+   suspended), `gc session nudge <id> "/compact"` for a frozen context, then
+   emit a role-free `session.recovered` event (`gc event emit`) so the
+   recovery is observable in the event log,
 7. print one verdict line per candidate, then `gc runtime drain-ack` and
    exit.
 
@@ -60,14 +65,28 @@ per-provider format zoo).
 The patrol-scenario contract — which live state maps to which verdict and which
 action — is pinned in the prompt's **"Patrol scenarios (the contract)"** table
 and regression-tested in `examples/gastown/argos_test.go`
-(`TestArgosPatrolScenarioContract`, `TestArgosWiredIntoCity`).
+(`TestArgosPatrolScenarioContract`, `TestArgosWiredIntoCity`,
+`TestArgosGatesOnHeartbeatAndEmitsRecovered`).
 
-Remaining roadmap (optional):
+Heartbeat adoption and the `session.recovered` event (`.6`) have landed:
 
-- **`.6` heartbeat adoption + `session.recovered` event** — teach worker
-  prompts to call `gc bd heartbeat` so a clean liveness signal can replace the
-  polluted `last_active` advisory (see the staleness-gate note below), and add
-  an optional role-free `session.recovered` observability event.
+- **Workers emit heartbeats.** The polecat prompt calls `gc bd heartbeat
+  <work-bead>` at each checkpoint, stamping the clean `gc.last_heartbeat_at`
+  signal the watchdog gates on (the worker half of the contract; any pool
+  worker can adopt the same one-line call). Pinned by
+  `TestPolecatPromptEmitsWorkBeadHeartbeat`.
+- **The watchdog gates on heartbeat freshness.** A fresh heartbeat on a
+  claimed bead clears the holder as progressing where the polluted
+  `last_active` never could; a stale/absent one keeps it a candidate. The gate
+  only ever *clears* on a positive fresh signal — it adds no new recovery
+  trigger (the pane-marker + claimed-bead fire gate still decides recovery).
+- **`session.recovered` is a role-free typed event.** After a recovery lands,
+  the watchdog emits `gc event emit session.recovered` with a free-form
+  `reason` (`rate_limit` / `context_frozen`) and `action`, never a role name.
+  The typed payload (`SessionRecoveredPayload`, registered in
+  `internal/api/event_payloads.go`) is the only Go in the whole pack; it makes
+  the event a first-class typed-wire shape on `gc events`/the SSE stream. View
+  the trail with `gc events --type session.recovered`.
 
 ## Design notes
 
@@ -81,14 +100,23 @@ genuinely stalled session keeps looking freshly active. The pollution runs in
 the **false-negative** direction: a staleness gate would *suppress* recovery on
 exactly the sessions that need it.
 
-So v1 demotes `last_active` to a **loose advisory pre-filter** — it only bounds
-how many panes Argos peeks (peek the least-recently-active candidates first) and
-never suppresses a verdict. The authoritative signals are the two fire-gate
-clauses Argos reads directly: the **rate-limit marker on the live pane** and a
-**claimed `in_progress` bead**. A clean liveness signal — `gc bd heartbeat` —
-exists but has zero adoption today (it reads null for every session), so it is
-useless as a v1 gate; promoting heartbeat to the primary staleness signal is the
-optional `.6` follow-up.
+So Argos demotes `last_active` to a **loose advisory pre-filter** — it only
+bounds how many panes Argos peeks (peek the least-recently-active candidates
+first) and never suppresses a verdict. The authoritative signals are the two
+fire-gate clauses Argos reads directly: the **rate-limit marker on the live
+pane** and a **claimed `in_progress` bead**.
+
+The **clean** liveness signal is `gc.last_heartbeat_at`, stamped by
+`gc bd heartbeat`. Because a heartbeat moves only when the worker advances, the
+controller's own send-keys cannot fake it — so, unlike `last_active`, a *fresh*
+heartbeat is allowed to **clear** a holder (it is positive proof of progress).
+As of `.6` the worker prompt adopts it (the polecat calls `gc bd heartbeat` at
+each checkpoint), so the gate is live rather than null. Note the asymmetry: a
+fresh heartbeat clears, but a *stale or absent* heartbeat never recovers on its
+own — an honest long build between checkpoints can look stale too, and a worker
+whose prompt never adopted the call has no heartbeat at all. Absence is treated
+as "candidate, peek to confirm," never as a clear. Heartbeat freshness only
+chooses **where to look**; the fire gate still decides **what to recover**.
 
 ### Threshold tuning (pack env)
 

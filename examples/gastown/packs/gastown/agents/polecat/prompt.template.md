@@ -95,6 +95,28 @@ on local pass — don't ship a PR with locally-failing tests.
 
 Your formula: `mol-polecat-work`
 
+## Liveness: Heartbeat Your Work Bead
+
+While you grind a claimed task, stamp a heartbeat on your work bead at each
+meaningful checkpoint — after branch setup, after each commit, between formula
+steps, before kicking off a long build or test run:
+
+```bash
+gc bd heartbeat <work-bead>
+```
+
+This writes a clean `metadata.gc.last_heartbeat_at` timestamp that the city's
+watchdog reads to tell a *progressing* worker from a *wedged* one. It is the
+signal `last_active` only pretends to be: `last_active` is bumped by the
+controller's own nudges and by a provider's countdown redraw, so a stalled
+session can look freshly active — but a heartbeat moves **only when you
+advance**. A stale heartbeat on a claimed bead is therefore a real "this
+worker is stuck" signal, not merely "this worker is quiet."
+
+It costs nothing, needs no acknowledgement, and is never required for the work
+to be correct — a missed beat only makes you look stalled. So beat early and
+beat often; there is no such thing as too many heartbeats.
+
 ## Startup Protocol
 
 > **The Universal Propulsion Principle: If your hook/work query finds work, YOU RUN IT.**
