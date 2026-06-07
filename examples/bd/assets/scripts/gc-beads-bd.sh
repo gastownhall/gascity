@@ -18,6 +18,9 @@
 #   GC_DOLT_USER  — dolt user (default: root)
 #   GC_DOLT_PASSWORD — dolt password (default: empty)
 #   GC_DOLT_CONCURRENT_START_READY_TIMEOUT_MS — concurrent-start wait budget in milliseconds (default: 45000)
+#   GC_DOLT_LOCK_RELEASE_TIMEOUT_MS — wait budget for dolt's on-disk exclusive
+#       store lock (<data_dir>/<db>/.dolt/noms/LOCK) to be released before
+#       start/stop fail closed, in milliseconds (default: 60000)
 
 set -e
 
@@ -30,6 +33,7 @@ DOLT_PASSWORD="${GC_DOLT_PASSWORD:-}"
 DOLT_LOGLEVEL="${GC_DOLT_LOGLEVEL:-warning}"
 LSOF_TIMEOUT_SECONDS="${GC_LSOF_TIMEOUT_SECONDS:-2}"
 CONCURRENT_START_READY_TIMEOUT_MS="${GC_DOLT_CONCURRENT_START_READY_TIMEOUT_MS:-45000}"
+LOCK_RELEASE_TIMEOUT_MS="${GC_DOLT_LOCK_RELEASE_TIMEOUT_MS:-60000}"
 BEADS_BACKEND="${GC_BEADS_BACKEND:-${BEADS_BACKEND:-dolt}}"
 
 # Derived paths (set after GC_CITY_PATH validation).
@@ -1149,6 +1153,93 @@ kill_imposter() {
     sleep 1
 }
 
+# dolt_data_lock_holder prints the path of the first dolt exclusive store
+# lock (<data_dir>/<db>/.dolt/noms/LOCK) held by a live process and returns 0,
+# or returns 1 when every lock is free. Dolt holds this flock until its chunk
+# journal is flushed and the store is closed — it is the authoritative
+# "safe to bind / safe to force-kill" signal (gastownhall/gascity#3174).
+# Without the flock binary the lock state cannot be probed; report free so
+# callers keep the legacy behavior.
+dolt_data_lock_holder() {
+    local lock_file
+    command -v flock >/dev/null 2>&1 || return 1
+    for lock_file in "$DATA_DIR"/.dolt/noms/LOCK "$DATA_DIR"/*/.dolt/noms/LOCK; do
+        [ -f "$lock_file" ] || continue
+        if ! flock -n "$lock_file" true 2>/dev/null; then
+            printf '%s\n' "$lock_file"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# wait_dolt_data_lock_free blocks until no live process holds a dolt
+# exclusive store lock under DATA_DIR, or LOCK_RELEASE_TIMEOUT_MS elapses.
+# Lock release on a clean dolt shutdown happens only after the chunk journal
+# is flushed, so success also means the prior instance finished writing.
+# Returns 1 (fail closed) when a lock is still held at the deadline.
+wait_dolt_data_lock_free() {
+    local timeout_ms deadline_ms now_ms holder
+    timeout_ms="$LOCK_RELEASE_TIMEOUT_MS"
+    case "$timeout_ms" in
+        ''|*[!0-9]*)
+            timeout_ms=60000
+            ;;
+    esac
+    holder=$(dolt_data_lock_holder) || return 0
+    now_ms=$(current_time_ms) || return 1
+    deadline_ms=$((now_ms + timeout_ms))
+    while :; do
+        now_ms=$(current_time_ms) || return 1
+        if [ "$now_ms" -ge "$deadline_ms" ]; then
+            echo "dolt exclusive store lock $holder is still held by a live process after ${timeout_ms}ms; a prior dolt sql-server has not released the data dir" >&2
+            return 1
+        fi
+        sleep_ms 250 2>/dev/null || sleep 1
+        holder=$(dolt_data_lock_holder) || return 0
+    done
+}
+
+# graceful_stop_owned_pid stops one of OUR dolt server processes without ever
+# SIGKILLing it mid-journal-write: SIGTERM, wait for exit (60 × 500ms = 30s,
+# matching the gc helper's default dolt_stop_timeout), then force-kill only if
+# the dolt exclusive store lock is free. After exit, blocks until the lock is
+# released so a follow-up start cannot bind the data_dir mid-flush. Returns 1
+# (fail closed) when the process survives while still holding the lock.
+graceful_stop_owned_pid() {
+    local pid="$1" waited=0 holder lock_window_ms lock_waited_ms
+    [ -n "$pid" ] || return 0
+    kill "$pid" 2>/dev/null || true
+    while [ "$waited" -lt 60 ] && kill -0 "$pid" 2>/dev/null; do
+        sleep 0.5 2>/dev/null || sleep 1
+        waited=$((waited + 1))
+    done
+    if kill -0 "$pid" 2>/dev/null; then
+        # The process outlived the SIGTERM grace. Extend the wait by the
+        # lock-release window while the store lock is held — the holder is
+        # mid-flush — then force-kill only once the lock is free.
+        lock_window_ms="$LOCK_RELEASE_TIMEOUT_MS"
+        case "$lock_window_ms" in
+            ''|*[!0-9]*)
+                lock_window_ms=60000
+                ;;
+        esac
+        lock_waited_ms=0
+        while kill -0 "$pid" 2>/dev/null && dolt_data_lock_holder >/dev/null && [ "$lock_waited_ms" -lt "$lock_window_ms" ]; do
+            sleep_ms 250 2>/dev/null || sleep 1
+            lock_waited_ms=$((lock_waited_ms + 250))
+        done
+        if kill -0 "$pid" 2>/dev/null; then
+            if holder=$(dolt_data_lock_holder); then
+                echo "PID $pid did not exit within the SIGTERM grace and a live process still holds dolt exclusive store lock $holder; refusing SIGKILL mid-journal-write (gastownhall/gascity#3174)" >&2
+                return 1
+            fi
+            kill -9 "$pid" 2>/dev/null || true
+            sleep 1
+        fi
+    fi
+    wait_dolt_data_lock_free
+}
 
 # write_config_yaml generates a managed dolt-config.yaml with timeouts and GC settings.
 # Overwritten on each server start. Without read/write timeouts, CLOSE_WAIT connections
@@ -1960,12 +2051,8 @@ op_start() {
             exit 0
         fi
         if [ -n "$existing_pid" ] && [ "$GC_EXISTING_MANAGED_OWNED" = "true" ]; then
-            kill -9 "$existing_pid" 2>/dev/null || true
-            local waited=0
-            while [ "$waited" -lt 20 ] && kill -0 "$existing_pid" 2>/dev/null; do
-                sleep 0.5 2>/dev/null || sleep 1
-                waited=$((waited + 1))
-            done
+            graceful_stop_owned_pid "$existing_pid" || \
+                die "could not stop existing dolt server (PID $existing_pid) without risking journal corruption (check $LOG_FILE)"
         fi
     else
         if ! load_managed_process_inspection_from_gc; then
@@ -2003,12 +2090,8 @@ op_start() {
                 fi
 
                 # Our server exists but never became ready — restart it.
-                kill -9 "$existing_pid" 2>/dev/null || true
-                local waited=0
-                while [ "$waited" -lt 20 ] && kill -0 "$existing_pid" 2>/dev/null; do
-                    sleep 0.5 2>/dev/null || sleep 1
-                    waited=$((waited + 1))
-                done
+                graceful_stop_owned_pid "$existing_pid" || \
+                    die "could not stop unready dolt server (PID $existing_pid) without risking journal corruption (check $LOG_FILE)"
             fi
         fi
     fi
@@ -2024,12 +2107,8 @@ op_start() {
         fi
         if [ -n "$holder" ]; then
             if [ "$GC_PROBE_PORT_HOLDER_OWNED" = "true" ]; then
-                kill -9 "$holder" 2>/dev/null || true
-                local waited=0
-                while [ "$waited" -lt 20 ] && kill -0 "$holder" 2>/dev/null; do
-                    sleep 0.5 2>/dev/null || sleep 1
-                    waited=$((waited + 1))
-                done
+                graceful_stop_owned_pid "$holder" || \
+                    die "could not stop dolt server (PID $holder) holding port $DOLT_PORT without risking journal corruption (check $LOG_FILE)"
             else
                 if [ -z "$gc_helper_bin" ]; then
                     kill_imposter "$holder"
@@ -2084,6 +2163,14 @@ op_start() {
     while [ "$launch_attempt" -lt 5 ]; do
         # Pre-launch cleanup.
         run_preflight_cleanup
+
+        # Lock-keyed singleton guard (gastownhall/gascity#3174): never bind a
+        # data_dir whose exclusive store lock is still held. A prior instance
+        # that is shutting down holds the lock until its chunk journal is
+        # flushed; binding before release corrupts the journal. Fail closed
+        # rather than race the holder.
+        wait_dolt_data_lock_free || \
+            die "refusing to start dolt sql-server: a prior instance still holds the data dir exclusive lock (check $LOG_FILE)"
 
         # Write managed config.yaml with timeouts and GC settings.
         write_config_yaml
@@ -2796,23 +2883,14 @@ op_stop_impl() {
 
     drain_connections_before_stop
 
-    # SIGTERM and wait (10 × 500ms = 5s grace, matches upstream).
-    kill "$pid" 2>/dev/null || true
-    local waited=0
-    while [ "$waited" -lt 10 ]; do
-        if ! kill -0 "$pid" 2>/dev/null; then
-            # Clean up state files.
-            save_state 0 false
-            rm -f "$PID_FILE"
-            return 0
-        fi
-        sleep 0.5 2>/dev/null || sleep 1
-        waited=$((waited + 1))
-    done
-
-    # Force kill if still running.
-    kill -9 "$pid" 2>/dev/null || true
-    sleep 1
+    # SIGTERM and wait (60 × 500ms = 30s grace, matching the gc helper's
+    # default dolt_stop_timeout), then a
+    # lock-gated force kill: SIGKILL is only safe when the dolt exclusive
+    # store lock is free — a holder is mid-flush, and killing it tears the
+    # noms journal (gastownhall/gascity#3174). graceful_stop_owned_pid also
+    # blocks until the lock is released after exit, so a follow-up start
+    # cannot bind the data_dir mid-flush.
+    graceful_stop_owned_pid "$pid" || return 1
 
     # Clean up state files.
     save_state 0 false

@@ -2164,6 +2164,20 @@ type DaemonConfig struct {
 	// distinct-ports-tried) rather than DoltStartAddressInUseRetryWindow × 5.
 	// Negative values are rejected at config load.
 	DoltStartAddressInUseRetryWindow string `toml:"dolt_start_address_in_use_retry_window,omitempty" jsonschema:"default=30s"`
+	// DoltLockReleaseTimeout is how long managed-dolt lifecycle operations
+	// wait for dolt's on-disk exclusive store lock
+	// (`<data_dir>/<db>/.dolt/noms/LOCK`) to be released by a prior server
+	// process before failing closed. The start path refuses to launch a
+	// second `dolt sql-server` against a data_dir whose lock is still held —
+	// a prior instance that is shutting down holds the lock until its chunk
+	// journal is flushed, and binding before release corrupts the journal
+	// (see gastownhall/gascity#3174). The stop path uses the same window to
+	// wait for lock release after process exit before reporting success.
+	// Duration string (e.g., "1m", "90s"). Defaults to "1m", which covers
+	// the flush window of multi-GB journals on commodity SSDs. Set to "0s"
+	// to probe once with no wait (still fail-closed when held). Negative
+	// values are rejected at config load.
+	DoltLockReleaseTimeout string `toml:"dolt_lock_release_timeout,omitempty" jsonschema:"default=1m"`
 	// WispGCInterval is how often wisp GC runs. Duration string (e.g., "5m", "1h").
 	// Wisp GC is disabled unless both WispGCInterval and WispTTL are set.
 	WispGCInterval string `toml:"wisp_gc_interval,omitempty"`
@@ -2439,6 +2453,31 @@ func (d *DaemonConfig) DoltStartAddressInUseRetryWindowDuration() time.Duration 
 	dur, err := time.ParseDuration(d.DoltStartAddressInUseRetryWindow)
 	if err != nil {
 		return DefaultDoltStartAddressInUseRetryWindow
+	}
+	return dur
+}
+
+// DefaultDoltLockReleaseTimeout is the wait window for dolt's on-disk
+// exclusive store lock to be released when no value is configured. 1m covers
+// the longest observed clean-shutdown flush of a multi-GB chunk journal on
+// commodity SSDs (gastownhall/gascity#3174) while still bounding how long a
+// start or stop can stall on a wedged holder before failing closed.
+const DefaultDoltLockReleaseTimeout = time.Minute
+
+// DoltLockReleaseTimeoutDuration returns the configured wait window for
+// dolt's on-disk exclusive lock as a time.Duration. Defaults to
+// DefaultDoltLockReleaseTimeout (1m) when empty or unparseable. Zero means a
+// single probe with no wait — the operation still fails closed when the lock
+// is held. Negative values pass through unchanged: callers that route
+// through loadCityConfig already reject them via
+// ValidateNonNegativeDurations. Mirrors DoltStopTimeoutDuration's policy.
+func (d *DaemonConfig) DoltLockReleaseTimeoutDuration() time.Duration {
+	if d.DoltLockReleaseTimeout == "" {
+		return DefaultDoltLockReleaseTimeout
+	}
+	dur, err := time.ParseDuration(d.DoltLockReleaseTimeout)
+	if err != nil {
+		return DefaultDoltLockReleaseTimeout
 	}
 	return dur
 }

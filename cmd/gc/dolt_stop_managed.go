@@ -100,15 +100,36 @@ func stopManagedDoltProcessWithOptions(cityPath, port string, clearPublishedStat
 	for managedStopPIDAlive(targetPID) && time.Now().Before(deadline) {
 		time.Sleep(pollInterval)
 	}
+	lockWindow := managedDoltLockReleaseTimeoutFn(cityPath)
 	if managedStopPIDAlive(targetPID) {
-		report.Forced = true
-		if err := syscall.Kill(targetPID, syscall.SIGKILL); err != nil && err != syscall.ESRCH {
-			return report, fmt.Errorf("signal %d with SIGKILL: %w", targetPID, err)
+		// The process outlived the SIGTERM grace. SIGKILL is only safe when
+		// the dolt exclusive store lock is free — a holder is mid-flush, and
+		// killing it tears the noms journal (gastownhall/gascity#3174).
+		// Extend the wait by the lock-release window while the lock is held;
+		// if the holder still has not finished, fail rather than corrupt.
+		lockDeadline := time.Now().Add(lockWindow)
+		for managedStopPIDAlive(targetPID) && managedDoltDataDirLockHolder(layout.DataDir) != "" && time.Now().Before(lockDeadline) {
+			time.Sleep(pollInterval)
 		}
-		time.Sleep(time.Second)
+		if managedStopPIDAlive(targetPID) {
+			if holder := managedDoltDataDirLockHolder(layout.DataDir); holder != "" {
+				return report, fmt.Errorf("pid %d did not exit within %s and a live process still holds dolt exclusive store lock %s; refusing SIGKILL mid-journal-write (gastownhall/gascity#3174)", targetPID, gracePeriod, holder)
+			}
+			report.Forced = true
+			if err := syscall.Kill(targetPID, syscall.SIGKILL); err != nil && err != syscall.ESRCH {
+				return report, fmt.Errorf("signal %d with SIGKILL: %w", targetPID, err)
+			}
+			time.Sleep(time.Second)
+		}
 	}
 	if managedStopPIDAlive(targetPID) {
 		return report, fmt.Errorf("pid %d still alive after forced stop", targetPID)
+	}
+	// The server process is gone, but descendants (e.g. dolt gc workers) can
+	// still hold the store lock while finishing a write. Block until release
+	// so a follow-up start cannot bind the data_dir mid-flush.
+	if err := waitForManagedDoltDataDirLockFree(layout.DataDir, lockWindow); err != nil {
+		return report, fmt.Errorf("dolt process %d exited but the data dir is not yet released: %w", targetPID, err)
 	}
 	if err := clearManagedDoltRuntime(layout, port); err != nil {
 		return report, err
