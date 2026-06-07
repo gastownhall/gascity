@@ -12873,6 +12873,8 @@ export interface operations {
                 index?: string;
                 /** @description How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 2m. */
                 wait?: string;
+                /** @description When true, omit the expensive store-health, session-count, and work-count blocks for low-cost dashboard polls. */
+                lite?: boolean;
             };
             header?: never;
             path: {

@@ -5893,6 +5893,9 @@ type GetV0CityByCityNameStatusParams struct {
 
 	// Wait How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 2m.
 	Wait *string `form:"wait,omitempty" json:"wait,omitempty"`
+
+	// Lite When true, omit the expensive store-health, session-count, and work-count blocks for low-cost dashboard polls.
+	Lite *bool `form:"lite,omitempty" json:"lite,omitempty"`
 }
 
 // PostV0CityByCityNameUnregisterParams defines parameters for PostV0CityByCityNameUnregister.
@@ -22779,6 +22782,22 @@ func NewGetV0CityByCityNameStatusRequest(server string, cityName string, params 
 		if params.Wait != nil {
 
 			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "wait", *params.Wait, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Lite != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "lite", *params.Lite, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "boolean", Format: ""}); err != nil {
 				return nil, err
 			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
 				return nil, err
