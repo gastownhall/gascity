@@ -127,6 +127,39 @@ func TestSessionCreateHintsSeedsRuntimeEnv(t *testing.T) {
 	}
 }
 
+// TestSessionCreateHintsEnablesMouse locks the ga-c4w contract for the API
+// session-create paths (provider-adhoc + named): they must resolve mouse-on so
+// the tmux wheel drives copy-mode scrollback instead of leaking to the focused
+// TUI. The runtime skips disableMouseAndActivity only when MouseOn is true (the
+// guard in internal/runtime/tmux adapter), so this seam flips both API callers;
+// the `gc session new` CLI resolves MouseOn separately in cmd/gc
+// (workerSessionCreateHints + templateParamsToConfig). Headless agent sessions
+// resolve MouseOn from cmd/gc/template_resolve.go and are unaffected (guarded
+// separately in template_resolve_prompt_test.go).
+func TestSessionCreateHintsEnablesMouse(t *testing.T) {
+	hints := sessionCreateHints(&config.ResolvedProvider{Name: "stub"}, nil, nil)
+	if !hints.MouseOn {
+		t.Error("sessionCreateHints().MouseOn = false, want true (interactive wheel→scrollback, ga-c4w)")
+	}
+}
+
+// TestSessionResumeHintsEnablesMouse locks ga-c4w finding #2 and its ga-g7go
+// follow-up: an interactive (session_origin=manual) session that is suspended/
+// resumed or crash-restarted must keep mouse-on so the tmux wheel still drives
+// copy-mode scrollback after resume — symmetric with sessionCreateHints. A
+// controller-polled pool/headless resume must resolve mouse-OFF instead: the
+// resume seam may not re-enable mouse on a polled agent. The earlier form proved
+// only the interactive case and let the unconditional MouseOn=true default leak
+// mouse-on onto resumed pool agents (ga-g7go).
+func TestSessionResumeHintsEnablesMouse(t *testing.T) {
+	if hints := sessionResumeHints(&config.ResolvedProvider{Name: "stub"}, "", nil, nil, true); !hints.MouseOn {
+		t.Error("sessionResumeHints(interactive=true).MouseOn = false, want true (interactive wheel survives resume, ga-c4w)")
+	}
+	if hints := sessionResumeHints(&config.ResolvedProvider{Name: "stub"}, "", nil, nil, false); hints.MouseOn {
+		t.Error("sessionResumeHints(interactive=false).MouseOn = true, want false (polled pool agent stays mouse-off, ga-g7go)")
+	}
+}
+
 // TestResolvedSessionConfigForProviderSeedsCityRuntimeEnv is a
 // regression test for upstream gastownhall/gascity#101 (re-opened):
 // session-create paths through the API resolver dropped the

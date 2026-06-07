@@ -12,6 +12,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/worker"
@@ -155,9 +156,10 @@ func collectCityStatusSnapshotFromStoreSnapshot(
 	statusSnapshot *sessionBeadSnapshot,
 	stderr io.Writer,
 ) cityStatusSnapshot {
+	citySt, _ := loadSuspensionState(fsys.OSFS{}, cityPath)
 	suspended := os.Getenv("GC_SUSPENDED") == "1"
 	if cfg != nil {
-		suspended = citySuspended(cfg)
+		suspended = citySuspendedWithState(cfg, citySt)
 	}
 	snapshot := cityStatusSnapshot{
 		CityPath:        cityPath,
@@ -174,12 +176,8 @@ func collectCityStatusSnapshotFromStoreSnapshot(
 		return snapshot
 	}
 
-	suspendedRigs := make(map[string]bool, len(cfg.Rigs))
-	for _, r := range cfg.Rigs {
-		if r.Suspended {
-			suspendedRigs[r.Name] = true
-		}
-	}
+	suspState, _ := loadSuspensionState(fsys.OSFS{}, cityPath)
+	suspendedRigs := buildEffectiveSuspendedRigNames(cfg, suspState)
 
 	rigCounts := make(map[string]*rigStatusCounts, len(cfg.Rigs))
 	addRigCount := func(rigName string, rowSuspended bool) {
@@ -285,7 +283,7 @@ func collectCityStatusSnapshotFromStoreSnapshot(
 	}
 
 	for _, r := range cfg.Rigs {
-		suspended := r.Suspended
+		suspended := suspendedRigs[r.Name]
 		if !suspended {
 			if tally := rigCounts[r.Name]; tally != nil && tally.Total > 0 && tally.Total == tally.Suspended {
 				suspended = true

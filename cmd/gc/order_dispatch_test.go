@@ -3062,7 +3062,7 @@ func TestOrderDispatchSkipsSuspendedRig(t *testing.T) {
 	// Mark the rig as suspended.
 	mad := ad.(*memoryOrderDispatcher)
 	mad.cfg = &config.City{
-		Rigs: []config.Rig{{Name: "demo", Path: "/tmp/demo", Suspended: true}},
+		Rigs: []config.Rig{{Name: "demo", Path: "/tmp/demo", SuspendedOnStart: true}},
 	}
 
 	ad.dispatch(context.Background(), t.TempDir(), time.Now())
@@ -3094,7 +3094,7 @@ func TestOrderDispatchSkipsSuspendedRigQualifiedPool(t *testing.T) {
 
 	mad := ad.(*memoryOrderDispatcher)
 	mad.cfg = &config.City{
-		Rigs: []config.Rig{{Name: "demo", Path: "/tmp/demo", Suspended: true}},
+		Rigs: []config.Rig{{Name: "demo", Path: "/tmp/demo", SuspendedOnStart: true}},
 	}
 
 	ad.dispatch(context.Background(), t.TempDir(), time.Now())
@@ -3156,7 +3156,7 @@ func TestOrderDispatchSkipsCitySuspended(t *testing.T) {
 	// Suspend the entire workspace.
 	mad := ad.(*memoryOrderDispatcher)
 	mad.cfg = &config.City{
-		Workspace: config.Workspace{Suspended: true},
+		Workspace: config.Workspace{SuspendedOnStart: true},
 	}
 
 	ad.dispatch(context.Background(), t.TempDir(), time.Now())
@@ -3185,7 +3185,7 @@ func TestOrderDispatchSkipsSuspendedRigExec(t *testing.T) {
 
 	mad := ad.(*memoryOrderDispatcher)
 	mad.cfg = &config.City{
-		Rigs: []config.Rig{{Name: "demo", Path: "/tmp/demo", Suspended: true}},
+		Rigs: []config.Rig{{Name: "demo", Path: "/tmp/demo", SuspendedOnStart: true}},
 	}
 
 	ad.dispatch(context.Background(), t.TempDir(), time.Now())
@@ -3201,7 +3201,7 @@ func TestOrderRigSuspended(t *testing.T) {
 	cfg := &config.City{
 		Rigs: []config.Rig{
 			{Name: "active", Path: "/tmp/active", Suspended: false},
-			{Name: "frozen", Path: "/tmp/frozen", Suspended: true},
+			{Name: "frozen", Path: "/tmp/frozen", SuspendedOnStart: true},
 		},
 	}
 	m := &memoryOrderDispatcher{cfg: cfg}
@@ -3238,7 +3238,7 @@ func TestOrderRigSuspended(t *testing.T) {
 func TestOrderRigSuspendedFallsBackToOrderRigOnPoolResolutionError(t *testing.T) {
 	cfg := &config.City{
 		Rigs: []config.Rig{
-			{Name: "frozen", Path: "/tmp/frozen", Suspended: true},
+			{Name: "frozen", Path: "/tmp/frozen", SuspendedOnStart: true},
 		},
 		Agents: []config.Agent{
 			{Name: "dog", Dir: "frozen", BindingName: "alpha"},
@@ -6748,6 +6748,205 @@ func TestHasOpenWorkStrictBlocksOnWispWithOpenChildren(t *testing.T) {
 	}
 }
 
+// TestStoreHasOpenDescendantsUsesMembershipFastPath proves the #2893
+// optimization: an open descendant reachable ONLY by its gc.root_bead_id
+// membership metadata (no ParentID, no dependency edge) is found in a single
+// metadata-filtered List, without the O(tree) per-node ParentID/DepList walk.
+// Because the descendant has no walkable edge to the root, a true result can
+// only come from the membership fast path.
+func TestStoreHasOpenDescendantsUsesMembershipFastPath(t *testing.T) {
+	store := beads.NewMemStore()
+
+	root, err := store.Create(beads.Bead{
+		Title:  "mol-digest-generate",
+		Type:   "molecule",
+		Labels: []string{"order-run:digest"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Open member tied to the root only by membership metadata.
+	if _, err := store.Create(beads.Bead{
+		Title:    "determine-period",
+		Metadata: map[string]string{"gc.root_bead_id": root.ID},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	has, err := storeHasOpenDescendants(store, root.ID, nil)
+	if err != nil {
+		t.Fatalf("storeHasOpenDescendants: %v", err)
+	}
+	if !has {
+		t.Fatal("open member carrying gc.root_bead_id must count as in-flight via the membership fast path")
+	}
+}
+
+// TestStoreHasOpenDescendantsMembershipOrphanAllClosed guards against false
+// positives: when every member carries gc.root_bead_id but all are closed, the
+// root is an orphan (ga-jra/ga-lo8c) and must NOT count as in-flight work, so a
+// later cooldown tick can re-dispatch.
+func TestStoreHasOpenDescendantsMembershipOrphanAllClosed(t *testing.T) {
+	store := beads.NewMemStore()
+
+	root, err := store.Create(beads.Bead{
+		Title:  "mol-digest-generate",
+		Type:   "molecule",
+		Labels: []string{"order-run:digest"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	child, err := store.Create(beads.Bead{
+		Title:    "determine-period",
+		Metadata: map[string]string{"gc.root_bead_id": root.ID},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(child.ID); err != nil {
+		t.Fatalf("close member: %v", err)
+	}
+
+	has, err := storeHasOpenDescendants(store, root.ID, nil)
+	if err != nil {
+		t.Fatalf("storeHasOpenDescendants: %v", err)
+	}
+	if has {
+		t.Fatal("all-closed membership is an orphan root and must not count as in-flight work")
+	}
+}
+
+// TestStoreHasOpenDescendantsFallsBackWithoutMembershipMetadata proves the
+// fallback: a descendant materialized before gc.root_bead_id stamping is linked
+// only by ParentID and carries no membership metadata. The metadata List
+// returns nothing, so the gate must fall back to the authoritative tree walk
+// and still find the open child — behavior is byte-identical to the historical
+// implementation for un-stamped data.
+func TestStoreHasOpenDescendantsFallsBackWithoutMembershipMetadata(t *testing.T) {
+	store := beads.NewMemStore()
+
+	root, err := store.Create(beads.Bead{
+		Title:  "mol-digest-generate",
+		Type:   "molecule",
+		Labels: []string{"order-run:digest"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Open child linked only by ParentID — no gc.root_bead_id (pre-stamp data).
+	if _, err := store.Create(beads.Bead{
+		Title:    "determine-period",
+		ParentID: root.ID,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	has, err := storeHasOpenDescendants(store, root.ID, nil)
+	if err != nil {
+		t.Fatalf("storeHasOpenDescendants: %v", err)
+	}
+	if !has {
+		t.Fatal("ParentID-linked open child without membership metadata must be found via the walk fallback")
+	}
+}
+
+// TestStoreHasOpenDescendantsFallsBackOnPartialStampMembership guards the
+// single-flight safety of a partial-stamp molecule: some steps carry
+// gc.root_bead_id (a nested sub-molecule) while sibling ParentID-only steps do
+// not. When every stamped member is closed but an un-stamped sibling is still
+// open, the membership set is non-empty yet has no open member — the gate must
+// still fall back to the walk and report in-flight work, not declare the root
+// idle (which would re-dispatch while work is in flight).
+func TestStoreHasOpenDescendantsFallsBackOnPartialStampMembership(t *testing.T) {
+	base := beads.NewMemStore()
+	store := listIncludingClosedStore{Store: base}
+
+	root, err := store.Create(beads.Bead{
+		Title:  "mol-digest-generate",
+		Type:   "molecule",
+		Labels: []string{"order-run:digest"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A stamped member (e.g. a nested sub-molecule) that is CLOSED.
+	stamped, err := store.Create(beads.Bead{
+		Title:    "sub-molecule",
+		Metadata: map[string]string{"gc.root_bead_id": root.ID},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(stamped.ID); err != nil {
+		t.Fatalf("close stamped member: %v", err)
+	}
+	// A sibling step linked only by ParentID, NOT stamped, still OPEN.
+	if _, err := store.Create(beads.Bead{
+		Title:    "unstamped-step",
+		ParentID: root.ID,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	has, err := storeHasOpenDescendants(store, root.ID, nil)
+	if err != nil {
+		t.Fatalf("storeHasOpenDescendants: %v", err)
+	}
+	if !has {
+		t.Fatal("partial-stamp molecule with a closed stamped member and an open un-stamped ParentID sibling must still report in-flight via the walk fallback (single-flight false negative otherwise)")
+	}
+}
+
+// TestStoreHasOpenDescendantsMembershipSkipsTransientNotification proves the
+// #3102 skip predicate composes with the #2893 membership fast path: an OPEN
+// stamped transient-notification bead (a nudge or mail/message chore reaped on
+// its own TTL) carries gc.root_bead_id and so is returned by the membership
+// List, but it must NOT wedge the single-flight gate. With skip =
+// isTransientNotificationBead the fast path skips it, finds no other open
+// member, and the walk fallback (which also honors skip) likewise reports the
+// root idle so the order can re-dispatch.
+func TestStoreHasOpenDescendantsMembershipSkipsTransientNotification(t *testing.T) {
+	store := beads.NewMemStore()
+
+	root, err := store.Create(beads.Bead{
+		Title:  "mol-digest-generate",
+		Type:   "molecule",
+		Labels: []string{"order-run:digest"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// An OPEN stamped transient chore (a mail/message) tied to the root by
+	// membership metadata. Without skip it would be reported as in-flight work.
+	if _, err := store.Create(beads.Bead{
+		Title:    "delivery-mail",
+		Type:     "message",
+		Metadata: map[string]string{"gc.root_bead_id": root.ID},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Without a skip predicate the open transient member counts as in-flight.
+	has, err := storeHasOpenDescendants(store, root.ID, nil)
+	if err != nil {
+		t.Fatalf("storeHasOpenDescendants(nil): %v", err)
+	}
+	if !has {
+		t.Fatal("open stamped member must count as in-flight when skip is nil")
+	}
+
+	// With isTransientNotificationBead the transient chore is skipped on the
+	// membership fast path and must NOT wedge the gate.
+	has, err = storeHasOpenDescendants(store, root.ID, isTransientNotificationBead)
+	if err != nil {
+		t.Fatalf("storeHasOpenDescendants(skip): %v", err)
+	}
+	if has {
+		t.Fatal("open stamped transient-notification bead must not count as in-flight on the membership fast path when skip=isTransientNotificationBead")
+	}
+}
+
 func TestHasOpenWorkStrictFindsOlderInFlightWispBehindOrphanRoots(t *testing.T) {
 	const formerOpenWorkProbeLimit = 50
 
@@ -7177,7 +7376,7 @@ func TestStoreHasOpenDescendantsShortCircuitsOpenParentChildBeforeGraphReads(t *
 	}
 
 	store := depListFailStore{Store: base, failID: wispRoot.ID}
-	has, err := storeHasOpenDescendants(store, wispRoot.ID)
+	has, err := storeHasOpenDescendants(store, wispRoot.ID, nil)
 	if err != nil {
 		t.Fatalf("storeHasOpenDescendants: %v", err)
 	}

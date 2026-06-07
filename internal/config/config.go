@@ -509,8 +509,20 @@ type Rig struct {
 	// Captured by `gc rig add` from the rig's git config; set manually for
 	// rigs whose mainline isn't reachable via origin/HEAD.
 	DefaultBranch string `toml:"default_branch,omitempty"`
-	// Suspended prevents the reconciler from spawning agents in this rig. Toggle with gc rig suspend/resume.
+	// Suspended is the deprecated pre-runtime-state suspension flag.
+	// Parsed for backwards compatibility and treated as an alias for
+	// SuspendedOnStart by [Rig.EffectiveSuspendedOnStart], so existing
+	// cities with `suspended = true` continue to start their rigs
+	// suspended after upgrade. Live suspend/resume commands no longer
+	// write this field. `gc doctor` flags it and offers `--fix` to
+	// rename to suspended_on_start.
 	Suspended bool `toml:"suspended,omitempty"`
+	// SuspendedOnStart is the rig's desired suspension state at city
+	// start. When true and no explicit entry exists for this rig in
+	// .gc/runtime/suspension-state.json, the rig is treated as
+	// suspended. Once the user has explicitly suspended or resumed the
+	// rig via `gc rig suspend/resume`, the runtime state wins.
+	SuspendedOnStart bool `toml:"suspended_on_start,omitempty"`
 	// FormulasDir is a rig-local formula directory (Layer 4). Overrides
 	// pack formulas for this rig by filename.
 	// Relative paths resolve against the city directory.
@@ -1023,6 +1035,17 @@ func (r *Rig) EffectiveDefaultBranch() string {
 	return strings.TrimSpace(r.DefaultBranch)
 }
 
+// EffectiveSuspendedOnStart returns the rig's committable startup
+// suspension default. The deprecated `suspended` field is honored as
+// an alias for `suspended_on_start` so legacy city.toml files keep
+// their behavior on upgrade. Use this everywhere a read site needs
+// the authored default — never read r.Suspended directly for
+// behavior; only `gc doctor` consults it (to warn about the legacy
+// field).
+func (r *Rig) EffectiveSuspendedOnStart() bool {
+	return r.Suspended || r.SuspendedOnStart
+}
+
 // EffectiveHQPrefix returns the bead ID prefix for the city's HQ store.
 // Uses the effective site-bound prefix first, then the declared workspace
 // Prefix, then derives one from the effective city name.
@@ -1114,11 +1137,20 @@ type Workspace struct {
 	Provider string `toml:"provider,omitempty"`
 	// StartCommand overrides the provider's command for all agents.
 	StartCommand string `toml:"start_command,omitempty"`
-	// Suspended controls whether the city is suspended. When true, all
-	// agents are effectively suspended: the reconciler won't spawn them,
-	// and gc hook/prime return empty. Inherits downward — individual
-	// agent/rig suspended fields are checked independently.
+	// Suspended is the deprecated pre-runtime-state city suspension
+	// flag. Parsed for backwards compatibility and treated as an alias
+	// for SuspendedOnStart by [Workspace.EffectiveSuspendedOnStart], so
+	// existing cities with `suspended = true` continue to start
+	// suspended after upgrade. Live suspend/resume commands no longer
+	// write this field. `gc doctor` flags it and offers `--fix` to
+	// rename to suspended_on_start.
 	Suspended bool `toml:"suspended,omitempty"`
+	// SuspendedOnStart is the city's desired suspension state at start.
+	// When true and no explicit entry exists in
+	// .gc/runtime/suspension-state.json, the city is treated as
+	// suspended. Once the user has explicitly suspended or resumed via
+	// `gc suspend/resume`, the runtime state wins.
+	SuspendedOnStart bool `toml:"suspended_on_start,omitempty"`
 	// MaxActiveSessions is the workspace-level cap on total concurrent sessions.
 	// Nil means unlimited. Agents and rigs inherit this if they don't set their own.
 	MaxActiveSessions *int `toml:"max_active_sessions,omitempty"`
@@ -1130,7 +1162,8 @@ type Workspace struct {
 	// InstallAgentHooks lists provider names whose hooks should be installed
 	// into agent working directories. Agent-level overrides workspace-level
 	// (replace, not additive). Supported: "claude", "codex", "gemini",
-	// "kiro", "opencode", "copilot", "cursor", "pi", "omp".
+	// "antigravity", "kiro", "opencode", "groq", "cerebras", "copilot",
+	// "cursor", "pi", "omp".
 	InstallAgentHooks []string `toml:"install_agent_hooks,omitempty"`
 	// GlobalFragments lists named template fragments injected into every
 	// agent's rendered prompt. Applied before per-agent InjectFragments.
@@ -1177,22 +1210,39 @@ func (w *Workspace) SetLegacyDefaultRigIncludes(includes []string) {
 	w.DefaultRigIncludes = includes
 }
 
+// EffectiveSuspendedOnStart returns the workspace's committable
+// startup suspension default. The deprecated `suspended` field is
+// honored as an alias for `suspended_on_start` so legacy city.toml
+// files keep their behavior on upgrade. Use this everywhere a read
+// site needs the authored default — never read w.Suspended directly
+// for behavior; only `gc doctor` consults it (to warn about the
+// legacy field).
+func (w *Workspace) EffectiveSuspendedOnStart() bool {
+	return w.Suspended || w.SuspendedOnStart
+}
+
 // BeadsConfig holds bead store settings.
 type BeadsConfig struct {
-	// Provider selects the bead store backend: "bd" (default), "file",
-	// or "exec:<script>" for a user-supplied script.
+	// Provider selects the bead store backend: "bd" (default, Dolt-backed),
+	// "file", "exec:<script>" for a user-supplied script, or "sqlite" for
+	// the built-in coordination store (pure-Go SQLite; use when Dolt is
+	// unavailable). "sqlite-cgo" is a deprecated alias for "sqlite".
 	Provider string `toml:"provider,omitempty" jsonschema:"default=bd"`
 	// Backend selects the bd storage engine when Provider is "bd".
 	// Empty defaults to "dolt"; T3Code uses "doltlite" for local dev stores.
 	Backend string `toml:"backend,omitempty"`
 	// EventHooks controls installation of the bead event-forwarding hooks
-	// (.beads/hooks/on_create,on_update,on_close). Defaults to true.
-	// This config surface is staged ahead of the native bead-event support;
-	// current hook behavior remains unchanged until lifecycle code opts in.
+	// (.beads/hooks/on_create,on_update,on_close) that shell out to
+	// `gc event emit` on every bead write. Defaults to true. Set to false
+	// once the controller's native cache-events already observe bead changes
+	// (the bd_hooks doctor gate): the lifecycle then removes the event hooks
+	// (leaving git hooks untouched) and stops reinstalling them, clearing the
+	// per-write churn and the native-store gate.
 	EventHooks *bool `toml:"event_hooks,omitempty" jsonschema:"default=true"`
 	// BDCompatibility selects the bd CLI semantics Gas City may rely on.
 	// Empty defaults to "bd-1.0.4", which keeps claimable work history-backed
-	// and avoids ready flags whose filtering is incomplete in bd 1.0.4.
+	// and avoids bd ready/list flags that are unavailable or incomplete in bd
+	// 1.0.4.
 	BDCompatibility string `toml:"bd_compatibility,omitempty" jsonschema:"enum=bd-1.0.4,enum=bd-1.0.5"`
 	// Policies defines per-bead-use storage and garbage-collection defaults.
 	// Policy names are interpreted by higher-level systems; unknown names are
@@ -1210,7 +1260,7 @@ const (
 	// BeadsBDCompatibility104 preserves behavior supported by installed bd
 	// 1.0.4, where ready filtering is reliable only for history-backed rows.
 	BeadsBDCompatibility104 = "bd-1.0.4"
-	// BeadsBDCompatibility105 opts into bd 1.0.5 ready/storage semantics.
+	// BeadsBDCompatibility105 opts into bd 1.0.5 CLI/storage semantics.
 	BeadsBDCompatibility105 = "bd-1.0.5"
 )
 
@@ -1228,10 +1278,16 @@ func (b BeadsConfig) NormalizedBDCompatibility() string {
 	}
 }
 
+// UsesBD105CLISemantics reports whether bd-backed code may rely on bd 1.0.5
+// command-line behavior.
+func (b BeadsConfig) UsesBD105CLISemantics() bool {
+	return b.NormalizedBDCompatibility() == BeadsBDCompatibility105
+}
+
 // UsesBD105ReadySemantics reports whether generated bd ready commands may use
 // flags whose complete filter semantics require bd 1.0.5 or newer.
 func (b BeadsConfig) UsesBD105ReadySemantics() bool {
-	return b.NormalizedBDCompatibility() == BeadsBDCompatibility105
+	return b.UsesBD105CLISemantics()
 }
 
 // BeadPolicyConfig holds storage and retention defaults for a named bead use.
@@ -1751,6 +1807,9 @@ type OrderOverride struct {
 	Pool *string `toml:"pool,omitempty"`
 	// Timeout overrides the per-order timeout. Go duration string.
 	Timeout *string `toml:"timeout,omitempty"`
+	// Idempotent overrides whether the order's dispatch is safe to repeat.
+	// Idempotent orders fail open when the open-work gate times out (#2893).
+	Idempotent *bool `toml:"idempotent,omitempty"`
 	// Env adds or overrides environment variables exported into an exec
 	// order's child process.
 	Env map[string]string `toml:"env,omitempty"`
@@ -4462,7 +4521,7 @@ func DefaultCity(name string) City {
 
 func defaultInstallAgentHooksForProvider(provider string) []string {
 	switch strings.TrimSpace(provider) {
-	case "kiro", "opencode":
+	case "kiro", "opencode", "groq":
 		return []string{strings.TrimSpace(provider)}
 	default:
 		return nil

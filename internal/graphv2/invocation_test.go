@@ -822,3 +822,157 @@ func runInvocationGit(t *testing.T, dir string, args ...string) {
 		t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
 	}
 }
+
+func TestPrepareInvocationResolvesDeprecatedIssueAlias(t *testing.T) {
+	formulatest.EnableV2ForTest(t)
+	dir := t.TempDir()
+	writeFormula(t, dir, "legacy.formula.toml", `
+formula = "legacy"
+version = 1
+contract = "graph.v2"
+type = "workflow"
+
+[vars]
+[vars.issue]
+description = "legacy work bead"
+required = true
+
+[[steps]]
+id = "inspect"
+title = "Inspect {{issue}}"
+`)
+	store := beads.NewMemStore()
+	target, err := store.Create(beads.Bead{Title: "target", Type: "task"})
+	if err != nil {
+		t.Fatalf("Create target: %v", err)
+	}
+
+	inv, err := PrepareInvocation(context.Background(), store, "legacy", []string{dir}, target.ID, nil)
+	if err != nil {
+		t.Fatalf("PrepareInvocation: %v", err)
+	}
+	if got := inv.Vars[LegacyIssueVar]; got != target.ID {
+		t.Fatalf("vars[%s] = %q, want single tracked member %q", LegacyIssueVar, got, target.ID)
+	}
+	if got := inv.Vars[ConvoyIDVar]; got != inv.InputConvoy {
+		t.Fatalf("vars[%s] = %q, want %q", ConvoyIDVar, got, inv.InputConvoy)
+	}
+	if len(inv.Deprecations) == 0 {
+		t.Fatal("invocation has no deprecations, want issue alias warnings")
+	}
+	for _, d := range inv.Deprecations {
+		if !strings.Contains(d, "2941") || !strings.Contains(d, "deprecated") {
+			t.Fatalf("deprecation %q missing migration pointer", d)
+		}
+	}
+}
+
+func TestPrepareInvocationIssueAliasRequiresSingleMemberConvoy(t *testing.T) {
+	formulatest.EnableV2ForTest(t)
+	dir := t.TempDir()
+	writeFormula(t, dir, "legacy.formula.toml", `
+formula = "legacy"
+version = 1
+contract = "graph.v2"
+type = "workflow"
+
+[[steps]]
+id = "inspect"
+title = "Inspect {{issue}}"
+`)
+	store := beads.NewMemStore()
+	convoy, err := store.Create(beads.Bead{Title: "convoy", Type: "convoy"})
+	if err != nil {
+		t.Fatalf("Create convoy: %v", err)
+	}
+	for _, title := range []string{"one", "two"} {
+		member, err := store.Create(beads.Bead{Title: title, Type: "task"})
+		if err != nil {
+			t.Fatalf("Create member: %v", err)
+		}
+		if err := convoycore.TrackItem(store, convoy.ID, member.ID); err != nil {
+			t.Fatalf("TrackItem: %v", err)
+		}
+	}
+
+	_, err = PrepareInvocation(context.Background(), store, "legacy", []string{dir}, convoy.ID, nil)
+	if err == nil {
+		t.Fatal("PrepareInvocation succeeded, want single-member alias error")
+	}
+	if !strings.Contains(err.Error(), "exactly one tracked member") {
+		t.Fatalf("error = %q, want single-member alias message", err)
+	}
+}
+
+func TestPrepareInvocationWithoutLegacyRefsDoesNotInjectIssue(t *testing.T) {
+	formulatest.EnableV2ForTest(t)
+	dir := t.TempDir()
+	writeFormula(t, dir, "work.formula.toml", `
+formula = "work"
+version = 1
+contract = "graph.v2"
+type = "workflow"
+
+[[steps]]
+id = "inspect"
+title = "Inspect {{convoy_id}}"
+`)
+	store := beads.NewMemStore()
+	target, err := store.Create(beads.Bead{Title: "target", Type: "task"})
+	if err != nil {
+		t.Fatalf("Create target: %v", err)
+	}
+
+	inv, err := PrepareInvocation(context.Background(), store, "work", []string{dir}, target.ID, nil)
+	if err != nil {
+		t.Fatalf("PrepareInvocation: %v", err)
+	}
+	if _, ok := inv.Vars[LegacyIssueVar]; ok {
+		t.Fatalf("vars = %+v, want no injected issue alias", inv.Vars)
+	}
+	if len(inv.Deprecations) != 0 {
+		t.Fatalf("deprecations = %v, want none", inv.Deprecations)
+	}
+}
+
+func TestPrepareInvocationStillRejectsCallerSuppliedIssue(t *testing.T) {
+	formulatest.EnableV2ForTest(t)
+	dir := t.TempDir()
+	writeFormula(t, dir, "legacy.formula.toml", `
+formula = "legacy"
+version = 1
+contract = "graph.v2"
+type = "workflow"
+
+[[steps]]
+id = "inspect"
+title = "Inspect {{issue}}"
+`)
+	store := beads.NewMemStore()
+	target, err := store.Create(beads.Bead{Title: "target", Type: "task"})
+	if err != nil {
+		t.Fatalf("Create target: %v", err)
+	}
+
+	_, err = PrepareInvocation(context.Background(), store, "legacy", []string{dir}, target.ID, map[string]string{"issue": "user-bead"})
+	if err == nil {
+		t.Fatal("PrepareInvocation succeeded, want reserved-var rejection")
+	}
+	if !strings.Contains(err.Error(), "cannot be supplied by the caller") {
+		t.Fatalf("error = %q, want caller-reserved message", err)
+	}
+}
+
+func TestRootKeyIgnoresDeprecatedIssueRuntimeVar(t *testing.T) {
+	base := RootKey("convoy-1", "graph-work", map[string]string{
+		"mode": "review",
+	}, "", "")
+	withAlias := RootKey("convoy-1", "graph-work", map[string]string{
+		"mode":          "review",
+		LegacyIssueVar:  "gc-member",
+		legacyBeadIDVar: "gc-member",
+	}, "", "")
+	if base != withAlias {
+		t.Fatalf("RootKey with alias vars = %q, want %q (issue/bead_id must not affect idempotence keys)", withAlias, base)
+	}
+}

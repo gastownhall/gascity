@@ -15,6 +15,15 @@ import (
 func TestPhase2InitialInputDelivery(t *testing.T) {
 	reporter := newPhase2Reporter(t, "phase2-input-delivery")
 
+	// The resume cases below model a legitimate resume (the keyed transcript is
+	// present on disk). Stub the stale-resume probe to report "present" so the
+	// pre-flight guard does not reclassify these resumes as fresh starts; the
+	// guard's missing-transcript behavior is covered by TestStaleResumeKeyProbe
+	// and the transcript layer's TestHasKeyedTranscript.
+	prevProbe := staleResumeKeyProbe
+	staleResumeKeyProbe = func(string, string, string) (present, probeable bool) { return true, true }
+	t.Cleanup(func() { staleResumeKeyProbe = prevProbe })
+
 	for _, tc := range selectedPhase2ProviderCases(t) {
 		tc := tc
 		t.Run(string(tc.profileID), func(t *testing.T) {

@@ -1087,14 +1087,11 @@ func TestCmdWorkflowDeleteSourceClosesGraphV2OnlyRoot(t *testing.T) {
 }
 
 func TestCmdWorkflowReopenSourceClearsRoutedToForResling(t *testing.T) {
-	// Regression: reopen-source is the documented recovery path for a
-	// closed/assigned source bead whose workflow died. It cleared
-	// workflow_id + status + assignee but left gc.routed_to populated.
-	// sling.CheckBeadState treats a bead with gc.routed_to == target as
-	// already-routed and short-circuits on idempotency — so a re-sling
-	// of the recovered bead to the same target appeared to succeed while
-	// producing no live workflow. Operators following the cleanup hint
-	// ended up silently stuck.
+	// Backward-compat: when gc.run_target is not set on the source bead
+	// (legacy beads stamped before the field existed), reopen-source clears
+	// gc.routed_to so the caller's explicit re-sling can write the correct
+	// route.  A blank gc.routed_to is not ideal (route-reclaim skips it) but
+	// is no worse than the pre-FR-C0.1 behavior for this legacy class.
 	cityDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n"), 0o644); err != nil {
 		t.Fatalf("write city.toml: %v", err)
@@ -1143,7 +1140,76 @@ func TestCmdWorkflowReopenSourceClearsRoutedToForResling(t *testing.T) {
 		t.Fatalf("workflow_id = %q, want cleared", got)
 	}
 	if got := strings.TrimSpace(updated.Metadata["gc.routed_to"]); got != "" {
-		t.Fatalf("gc.routed_to = %q, want cleared (else re-sling hits idempotency short-circuit)", got)
+		t.Fatalf("gc.routed_to = %q, want cleared (no gc.run_target → legacy blank)", got)
+	}
+	if updated.Status != "open" {
+		t.Fatalf("status = %q, want open", updated.Status)
+	}
+	if updated.Assignee != "" {
+		t.Fatalf("assignee = %q, want empty", updated.Assignee)
+	}
+}
+
+func TestCmdWorkflowReopenSourcePreRoutesToRunTarget(t *testing.T) {
+	// FR-C0.1 (vp-nq8): when gc.run_target is set, reopen-source must write
+	// gc.routed_to = gc.run_target atomically with the status/assignee reset.
+	// This eliminates the orphan window where a blank gc.routed_to is
+	// invisible to route-reclaim (which skips blank routes) and causes
+	// unrouted-feeder to mis-route to the rig planner.
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n"), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+	prevCityFlag := cityFlag
+	cityFlag = ""
+	t.Cleanup(func() { cityFlag = prevCityFlag })
+
+	store, err := openStoreAtForCity(cityDir, cityDir)
+	if err != nil {
+		t.Fatalf("openStoreAtForCity: %v", err)
+	}
+	source, err := store.Create(beads.Bead{Title: "Source", Type: "task", Status: "closed"})
+	if err != nil {
+		t.Fatalf("Create(source): %v", err)
+	}
+	if err := store.SetMetadata(source.ID, "gc.kind", "workflow"); err != nil {
+		t.Fatalf("SetMetadata(gc.kind): %v", err)
+	}
+	if err := store.SetMetadata(source.ID, "workflow_id", "wf-old"); err != nil {
+		t.Fatalf("SetMetadata(workflow_id): %v", err)
+	}
+	if err := store.SetMetadata(source.ID, "gc.run_target", "myrig/voxist.reviewer"); err != nil {
+		t.Fatalf("SetMetadata(gc.run_target): %v", err)
+	}
+	if err := store.SetMetadata(source.ID, "gc.routed_to", "myrig/voxist.executor"); err != nil {
+		t.Fatalf("SetMetadata(gc.routed_to): %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdWorkflowReopenSource(source.ID, sourceWorkflowStoreSelector{}, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdWorkflowReopenSource returned %d; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "result=reopened") {
+		t.Fatalf("stdout = %q, want reopened result", stdout.String())
+	}
+
+	reloaded, err := openStoreAtForCity(cityDir, cityDir)
+	if err != nil {
+		t.Fatalf("openStoreAtForCity(reload): %v", err)
+	}
+	updated, err := reloaded.Get(source.ID)
+	if err != nil {
+		t.Fatalf("Get(source): %v", err)
+	}
+	if got := strings.TrimSpace(updated.Metadata["workflow_id"]); got != "" {
+		t.Fatalf("workflow_id = %q, want cleared", got)
+	}
+	const wantRoute = "myrig/voxist.reviewer"
+	if got := strings.TrimSpace(updated.Metadata["gc.routed_to"]); got != wantRoute {
+		t.Fatalf("gc.routed_to = %q, want %q (pre-routed to gc.run_target)", got, wantRoute)
 	}
 	if updated.Status != "open" {
 		t.Fatalf("status = %q, want open", updated.Status)
@@ -4256,6 +4322,75 @@ func TestRunControlDispatcherQuarantinesMalformedFanoutScopeBody(t *testing.T) {
 		t.Fatalf("labels = %#v, want gc:control-quarantined", after.Labels)
 	}
 	if got := stderr.String(); !strings.Contains(got, "control dispatch: quarantined bead="+fanout.ID) {
+		t.Fatalf("stderr = %q, want quarantine message", got)
+	}
+}
+
+func TestRunControlDispatcherQuarantinesRalphControlMissingIteration(t *testing.T) {
+	clearGCEnv(t)
+
+	// A ralph control bead with no iteration sub-DAG — the unprocessable
+	// shape left behind by the pre-seed-fix ralph-in-ralph re-spawn gap.
+	// The dispatcher must quarantine it as a malformed control graph and
+	// return nil so the serve loop keeps draining the rest of the queue.
+	// Regression for gastownhall/gascity#2798.
+	store := beads.NewMemStore()
+	workflow, err := store.Create(beads.Bead{
+		Title: "workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create workflow: %v", err)
+	}
+	control, err := store.Create(beads.Bead{
+		Title: "inner loop",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":          "ralph",
+			"gc.root_bead_id":  workflow.ID,
+			"gc.step_ref":      "mol-test.outer.iteration.2.inner",
+			"gc.step_id":       "inner",
+			"gc.max_attempts":  "3",
+			"gc.control_epoch": "1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create control: %v", err)
+	}
+
+	var stderr bytes.Buffer
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	if err := runControlDispatcherWithStoreAndConfig(t.TempDir(), t.TempDir(), store, control, control.ID, cfg, io.Discard, &stderr); err != nil {
+		t.Fatalf("runControlDispatcherWithStoreAndConfig: %v", err)
+	}
+
+	after, err := store.Get(control.ID)
+	if err != nil {
+		t.Fatalf("get control: %v", err)
+	}
+	if after.Status != "closed" {
+		t.Fatalf("control status = %q, want closed", after.Status)
+	}
+	if got := after.Metadata["gc.outcome"]; got != "fail" {
+		t.Fatalf("gc.outcome = %q, want fail", got)
+	}
+	if got := after.Metadata["gc.failure_reason"]; got != "malformed_control_graph" {
+		t.Fatalf("gc.failure_reason = %q, want malformed_control_graph", got)
+	}
+	if got := after.Metadata["gc.control_quarantined"]; got != "true" {
+		t.Fatalf("gc.control_quarantined = %q, want true", got)
+	}
+	if got := after.Metadata["gc.control_quarantine_reason"]; !strings.Contains(got, "no iteration found") {
+		t.Fatalf("gc.control_quarantine_reason = %q, want no iteration found", got)
+	}
+	if !slices.Contains(after.Labels, "gc:control-quarantined") {
+		t.Fatalf("labels = %#v, want gc:control-quarantined", after.Labels)
+	}
+	if got := stderr.String(); !strings.Contains(got, "control dispatch: quarantined bead="+control.ID) {
 		t.Fatalf("stderr = %q, want quarantine message", got)
 	}
 }

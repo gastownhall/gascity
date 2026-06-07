@@ -15,8 +15,10 @@ import (
 	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/suspensionstate"
 )
 
 // testStore wraps a bead slice for SetMetadata tracking in tests.
@@ -801,6 +803,51 @@ func TestComputeWorkSet_UsesConfiguredRigRoot(t *testing.T) {
 	work := computeWorkSet(cfg, runner, "test-city", cityDir, nil, nil, nil)
 	if !work["myrig/polecat"] {
 		t.Error("expected myrig/polecat to have work when rig root is configured externally")
+	}
+}
+
+// TestComputeWorkSet_RuntimeOnlySuspendUnderForeignCwd guards the
+// regression behind threading the in-scope city path into the
+// reconciler's suspension check: a rig suspended *only* in the runtime
+// state file (no suspended_on_start in city.toml) must keep its agents
+// out of the work set even when the controller process runs from a
+// foreign working directory. The pre-fix check resolved suspension via
+// the process cwd, so a runtime-only suspend in cityDir was invisible
+// here and the agent wrongly stayed eligible.
+func TestComputeWorkSet_RuntimeOnlySuspendUnderForeignCwd(t *testing.T) {
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "myrig")
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Runtime-only suspend: the rig declares no suspended_on_start; the
+	// suspension lives solely in .gc/runtime/suspension-state.json.
+	suspend := true
+	if err := suspensionstate.SetRigSuspended(fsys.OSFS{}, cityDir, "myrig", &suspend); err != nil {
+		t.Fatalf("SetRigSuspended: %v", err)
+	}
+
+	cfg := &config.City{
+		Rigs: []config.Rig{{Name: "myrig", Path: rigDir}},
+		Agents: []config.Agent{
+			{Name: "polecat", Dir: "myrig", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3)},
+		},
+	}
+
+	// The probe runner reports work for any dir; if the suspended agent
+	// were not filtered, it would land in the work set.
+	runner := func(_ string, _ string, _ map[string]string) (string, error) {
+		return "real-world app-1\n", nil
+	}
+
+	// Run from a foreign cwd with no city.toml, defeating any cwd-based
+	// suspension resolution.
+	t.Chdir(t.TempDir())
+
+	work := computeWorkSet(cfg, runner, "test-city", cityDir, nil, nil, nil)
+	if work["myrig/polecat"] {
+		t.Error("runtime-only suspended rig's agent must stay out of the work set even under a foreign cwd")
 	}
 }
 

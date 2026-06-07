@@ -1999,7 +1999,7 @@ func TestNamedAlways_SuspensionPropagation(t *testing.T) {
 			cfg: config.City{
 				Workspace: config.Workspace{Name: "test"},
 				Agents:    []config.Agent{{Name: "witness", Dir: "myrig"}},
-				Rigs:      []config.Rig{{Name: "myrig", Path: "/tmp/myrig", Suspended: true}},
+				Rigs:      []config.Rig{{Name: "myrig", Path: "/tmp/myrig", SuspendedOnStart: true}},
 				NamedSessions: []config.NamedSession{
 					{Template: "witness", Dir: "myrig", Mode: "always"},
 				},
@@ -2018,7 +2018,7 @@ func TestNamedAlways_SuspensionPropagation(t *testing.T) {
 		{
 			name: "city_suspended",
 			cfg: config.City{
-				Workspace: config.Workspace{Name: "test", Suspended: true},
+				Workspace: config.Workspace{Name: "test", SuspendedOnStart: true},
 				Agents:    []config.Agent{{Name: "witness"}},
 				NamedSessions: []config.NamedSession{
 					{Template: "witness", Mode: "always"},

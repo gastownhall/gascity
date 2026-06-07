@@ -833,6 +833,45 @@ func TestBdStoreUpdateEmptyOpts(t *testing.T) {
 	}
 }
 
+func TestBdStoreClaimReturnsClaimedBead(t *testing.T) {
+	var gotArgs []string
+	runner := func(_, name string, args ...string) ([]byte, error) {
+		if name != "bd" {
+			t.Fatalf("name = %q, want bd", name)
+		}
+		gotArgs = append([]string(nil), args...)
+		return []byte(`[{"id":"bd-42","title":"Do it","status":"in_progress","assignee":"worker-1","issue_type":"task","created_at":"2025-01-15T10:30:00Z"}]`), nil
+	}
+	s := beads.NewBdStore("/city", runner)
+	claimed, ok, err := s.Claim("bd-42")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok {
+		t.Fatal("Claim ok = false, want true")
+	}
+	if claimed.ID != "bd-42" || claimed.Status != "in_progress" || claimed.Assignee != "worker-1" {
+		t.Fatalf("claimed bead = %+v, want claimed bd-42 assigned to worker-1", claimed)
+	}
+	if got := strings.Join(gotArgs, " "); got != "update bd-42 --claim --json" {
+		t.Fatalf("args = %q, want bd claim update args", got)
+	}
+}
+
+func TestBdStoreClaimConflictReturnsFalse(t *testing.T) {
+	runner := func(_, _ string, _ ...string) ([]byte, error) {
+		return []byte(`{"error":"issue is already assigned to worker-2"}`), fmt.Errorf("exit status 1")
+	}
+	s := beads.NewBdStore("/city", runner)
+	claimed, ok, err := s.Claim("bd-42")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok {
+		t.Fatalf("Claim ok = true, want false; claimed=%+v", claimed)
+	}
+}
+
 func TestBdStoreUpdatePassesPriority(t *testing.T) {
 	var gotArgs []string
 	runner := func(_, _ string, args ...string) ([]byte, error) {
@@ -1738,9 +1777,34 @@ func TestBdStoreListEmptyOutputMeansNoBeads(t *testing.T) {
 	}
 }
 
-func TestBdStoreListSkipLabelsDoesNotEmitUnsupportedBd104Flag(t *testing.T) {
+func TestBdStoreListSkipLabelsEmitsFlagWhenOptedIn(t *testing.T) {
 	var gotCmd string
 	runner := func(_, name string, args ...string) ([]byte, error) {
+		if len(args) > 0 && args[0] == "version" {
+			t.Fatal("bd list --skip-labels support must come from explicit store config, not a bd version probe")
+		}
+		gotCmd = name + " " + strings.Join(args, " ")
+		return []byte(`[]`), nil
+	}
+	s := beads.NewBdStore("/city", runner, beads.WithBdStoreListSkipLabels(true))
+	if _, err := s.List(beads.ListQuery{AllowScan: true, SkipLabels: true}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(gotCmd, "--skip-labels") {
+		t.Fatalf("bd list command = %q, want --skip-labels flag", gotCmd)
+	}
+}
+
+// TestBdStoreListSkipLabelsOmittedByDefault is the regression test for the
+// unconditional --skip-labels emit introduced in 994d544fc: bd 1.0.4 (the
+// supported floor) rejects the flag, so the default store must fall back to
+// normal label hydration unless the caller opts into bd 1.0.5 semantics.
+func TestBdStoreListSkipLabelsOmittedByDefault(t *testing.T) {
+	var gotCmd string
+	runner := func(_, name string, args ...string) ([]byte, error) {
+		if len(args) > 0 && args[0] == "version" {
+			t.Fatal("bd list --skip-labels support must come from explicit store config, not a bd version probe")
+		}
 		gotCmd = name + " " + strings.Join(args, " ")
 		return []byte(`[]`), nil
 	}
@@ -1749,13 +1813,34 @@ func TestBdStoreListSkipLabelsDoesNotEmitUnsupportedBd104Flag(t *testing.T) {
 		t.Fatal(err)
 	}
 	if strings.Contains(gotCmd, "--skip-labels") {
-		t.Fatalf("bd list command = %q, --skip-labels is not supported by bd 1.0.4", gotCmd)
+		t.Fatalf("bd list command = %q, bd 1.0.4 does not support --skip-labels", gotCmd)
+	}
+}
+
+func TestBdStoreListSkipLabelsOmittedWhenOptedOut(t *testing.T) {
+	var gotCmd string
+	runner := func(_, name string, args ...string) ([]byte, error) {
+		if len(args) > 0 && args[0] == "version" {
+			t.Fatal("bd list --skip-labels support must come from explicit store config, not a bd version probe")
+		}
+		gotCmd = name + " " + strings.Join(args, " ")
+		return []byte(`[]`), nil
+	}
+	s := beads.NewBdStore("/city", runner, beads.WithBdStoreListSkipLabels(false))
+	if _, err := s.List(beads.ListQuery{AllowScan: true, SkipLabels: true}); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(gotCmd, "--skip-labels") {
+		t.Fatalf("bd list command = %q, want --skip-labels omitted when opted out", gotCmd)
 	}
 }
 
 func TestBdStoreListAcceptsBdListEnvelope(t *testing.T) {
 	var gotCmd string
 	runner := func(_, name string, args ...string) ([]byte, error) {
+		if len(args) > 0 && args[0] == "version" {
+			t.Fatal("bd list --skip-labels support must come from explicit store config, not a bd version probe")
+		}
 		gotCmd = name + " " + strings.Join(args, " ")
 		return []byte(`{
 			"issues": [
@@ -1765,13 +1850,13 @@ func TestBdStoreListAcceptsBdListEnvelope(t *testing.T) {
 			"schema_version": 1
 		}`), nil
 	}
-	s := beads.NewBdStore("/city", runner)
+	s := beads.NewBdStore("/city", runner, beads.WithBdStoreListSkipLabels(true))
 	got, err := s.List(beads.ListQuery{AllowScan: true, SkipLabels: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(gotCmd, "--skip-labels") {
-		t.Fatalf("bd list command = %q, --skip-labels is not supported by bd 1.0.4", gotCmd)
+	if !strings.Contains(gotCmd, "--skip-labels") {
+		t.Fatalf("bd list command = %q, want --skip-labels flag", gotCmd)
 	}
 	if len(got) != 1 || got[0].ID != "bd-envelope" {
 		t.Fatalf("List() = %+v, want bd-envelope from envelope", got)

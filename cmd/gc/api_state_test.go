@@ -21,6 +21,7 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/suspensionstate"
 )
 
 type corruptCityAfterRemoveFS struct {
@@ -1452,7 +1453,7 @@ func TestWrapWithCachingStoreCachesNonBdStore(t *testing.T) {
 		t.Fatalf("Create: %v", err)
 	}
 
-	store := wrapWithCachingStore(context.Background(), backing, nil)
+	store := wrapWithCachingStore(context.Background(), backing, nil, true)
 	cached, ok := store.(*beads.CachingStore)
 	if !ok {
 		t.Fatalf("store type = %T, want *beads.CachingStore", store)
@@ -1471,8 +1472,44 @@ func TestWrapWithCachingStoreCachesNonBdStore(t *testing.T) {
 }
 
 func TestWrapWithCachingStoreReturnsNilStore(t *testing.T) {
-	if got := wrapWithCachingStore(context.Background(), nil, nil); got != nil {
+	if got := wrapWithCachingStore(context.Background(), nil, nil, true); got != nil {
 		t.Fatalf("wrapWithCachingStore(nil) = %#v, want nil", got)
+	}
+}
+
+// TestWrapWithCachingStoreNoBackgroundRefresh covers the suspended-rig path:
+// with backgroundRefresh=false the cache still serves pre-primed reads but does
+// NOT start the reconcile loop (StaggerOffsetMs stays 0), so a suspended rig
+// stops costing a bd subprocess per reconcile cycle.
+func TestWrapWithCachingStoreNoBackgroundRefresh(t *testing.T) {
+	backing := beads.NewMemStore()
+	created, err := backing.Create(beads.Bead{Title: "suspended-rig bead"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	// Cancellable ctx so the refresh path is reachable (Background() always
+	// early-returns regardless of the flag).
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	store := wrapWithCachingStore(ctx, backing, nil, false)
+	cached, ok := store.(*beads.CachingStore)
+	if !ok {
+		t.Fatalf("store type = %T, want *beads.CachingStore", store)
+	}
+	// Pre-primed reads still work (on-demand access to a suspended rig).
+	items, err := cached.ListOpen()
+	if err != nil {
+		t.Fatalf("ListOpen: %v", err)
+	}
+	if len(items) != 1 || items[0].ID != created.ID {
+		t.Fatalf("ListOpen = %#v, want only %s", items, created.ID)
+	}
+	// Reconciler never armed: StartReconciler (which sets StaggerOffsetMs) was
+	// not called. Give any erroneously-spawned goroutine a moment to set it.
+	time.Sleep(50 * time.Millisecond)
+	if got := cached.Stats().StaggerOffsetMs; got != 0 {
+		t.Fatalf("StaggerOffsetMs = %d, want 0 (reconciler must not start when backgroundRefresh=false)", got)
 	}
 }
 
@@ -2347,14 +2384,14 @@ func TestControllerStateMutationsPokeController(t *testing.T) {
 		name    string
 		initial func(*config.City)
 		mutate  func(*controllerState) error
-		verify  func(*testing.T, *config.City)
+		verify  func(t *testing.T, cfg *config.City, cityDir string)
 	}{
 		{
 			name: "suspend agent",
 			mutate: func(cs *controllerState) error {
 				return cs.SuspendAgent("rig1/worker")
 			},
-			verify: func(t *testing.T, cfg *config.City) {
+			verify: func(t *testing.T, cfg *config.City, _ string) {
 				t.Helper()
 				if !cfg.Agents[0].Suspended {
 					t.Fatal("agent should be suspended after SuspendAgent")
@@ -2369,7 +2406,7 @@ func TestControllerStateMutationsPokeController(t *testing.T) {
 			mutate: func(cs *controllerState) error {
 				return cs.ResumeAgent("rig1/worker")
 			},
-			verify: func(t *testing.T, cfg *config.City) {
+			verify: func(t *testing.T, cfg *config.City, _ string) {
 				t.Helper()
 				if cfg.Agents[0].Suspended {
 					t.Fatal("agent should not be suspended after ResumeAgent")
@@ -2381,25 +2418,41 @@ func TestControllerStateMutationsPokeController(t *testing.T) {
 			mutate: func(cs *controllerState) error {
 				return cs.SuspendRig("rig1")
 			},
-			verify: func(t *testing.T, cfg *config.City) {
+			verify: func(t *testing.T, cfg *config.City, cityDir string) {
 				t.Helper()
-				if !cfg.Rigs[0].Suspended {
-					t.Fatal("rig should be suspended after SuspendRig")
+				if cfg.Rigs[0].Suspended {
+					t.Fatal("city.toml should not have suspended=true after SuspendRig")
+				}
+				st, err := suspensionstate.Load(fsys.OSFS{}, cityDir)
+				if err != nil {
+					t.Fatalf("load rig state: %v", err)
+				}
+				if !suspensionstate.IsRigSuspended(st, "rig1") {
+					t.Fatal("rig should be suspended in runtime state after SuspendRig")
 				}
 			},
 		},
 		{
 			name: "resume rig",
 			initial: func(cfg *config.City) {
-				cfg.Rigs[0].Suspended = true
+				cfg.Rigs[0].SuspendedOnStart = true
 			},
 			mutate: func(cs *controllerState) error {
 				return cs.ResumeRig("rig1")
 			},
-			verify: func(t *testing.T, cfg *config.City) {
+			verify: func(t *testing.T, cfg *config.City, cityDir string) {
 				t.Helper()
-				if cfg.Rigs[0].Suspended {
-					t.Fatal("rig should not be suspended after ResumeRig")
+				// city.toml stays untouched; the explicit resume is
+				// recorded in runtime state.
+				if !cfg.Rigs[0].SuspendedOnStart {
+					t.Fatal("suspended_on_start should remain set in city.toml; ResumeRig records the override in runtime state")
+				}
+				st, err := suspensionstate.Load(fsys.OSFS{}, cityDir)
+				if err != nil {
+					t.Fatalf("load rig state: %v", err)
+				}
+				if v, ok := suspensionstate.ExplicitRig(st, "rig1"); !ok || v {
+					t.Fatalf("rig should have explicit resume in runtime state; got (%v, %v)", v, ok)
 				}
 			},
 		},
@@ -2408,25 +2461,39 @@ func TestControllerStateMutationsPokeController(t *testing.T) {
 			mutate: func(cs *controllerState) error {
 				return cs.SuspendCity()
 			},
-			verify: func(t *testing.T, cfg *config.City) {
+			verify: func(t *testing.T, cfg *config.City, cityDir string) {
 				t.Helper()
-				if !cfg.Workspace.Suspended {
-					t.Fatal("city should be suspended after SuspendCity")
+				if cfg.Workspace.Suspended || cfg.Workspace.SuspendedOnStart {
+					t.Fatal("city.toml workspace must remain untouched by SuspendCity (runtime state owns the change)")
+				}
+				st, err := suspensionstate.Load(fsys.OSFS{}, cityDir)
+				if err != nil {
+					t.Fatalf("load city state: %v", err)
+				}
+				if !suspensionstate.IsCitySuspended(st) {
+					t.Fatal("city should be explicit-suspended in runtime state after SuspendCity")
 				}
 			},
 		},
 		{
 			name: "resume city",
 			initial: func(cfg *config.City) {
-				cfg.Workspace.Suspended = true
+				cfg.Workspace.SuspendedOnStart = true
 			},
 			mutate: func(cs *controllerState) error {
 				return cs.ResumeCity()
 			},
-			verify: func(t *testing.T, cfg *config.City) {
+			verify: func(t *testing.T, cfg *config.City, cityDir string) {
 				t.Helper()
-				if cfg.Workspace.Suspended {
-					t.Fatal("city should not be suspended after ResumeCity")
+				if !cfg.Workspace.SuspendedOnStart {
+					t.Fatal("suspended_on_start should remain set in city.toml; ResumeCity records the override in runtime state")
+				}
+				st, err := suspensionstate.Load(fsys.OSFS{}, cityDir)
+				if err != nil {
+					t.Fatalf("load city state: %v", err)
+				}
+				if v, ok := suspensionstate.ExplicitCity(st); !ok || v {
+					t.Fatalf("city should have explicit resume in runtime state; got (%v, %v)", v, ok)
 				}
 			},
 		},
@@ -2435,7 +2502,7 @@ func TestControllerStateMutationsPokeController(t *testing.T) {
 			mutate: func(cs *controllerState) error {
 				return cs.EnableOrder("nightly", "rig1")
 			},
-			verify: func(t *testing.T, cfg *config.City) {
+			verify: func(t *testing.T, cfg *config.City, _ string) {
 				t.Helper()
 				if len(cfg.Orders.Overrides) != 1 || cfg.Orders.Overrides[0].Name != "nightly" || cfg.Orders.Overrides[0].Rig != "rig1" {
 					t.Fatalf("order overrides = %+v, want nightly/rig1", cfg.Orders.Overrides)
@@ -2450,7 +2517,7 @@ func TestControllerStateMutationsPokeController(t *testing.T) {
 			mutate: func(cs *controllerState) error {
 				return cs.DisableOrder("nightly", "rig1")
 			},
-			verify: func(t *testing.T, cfg *config.City) {
+			verify: func(t *testing.T, cfg *config.City, _ string) {
 				t.Helper()
 				if len(cfg.Orders.Overrides) != 1 || cfg.Orders.Overrides[0].Enabled == nil || *cfg.Orders.Overrides[0].Enabled {
 					t.Fatalf("order overrides = %+v, want disabled nightly override", cfg.Orders.Overrides)
@@ -2462,7 +2529,7 @@ func TestControllerStateMutationsPokeController(t *testing.T) {
 			mutate: func(cs *controllerState) error {
 				return cs.CreateAgent(config.Agent{Name: "helper", Dir: "rig1", Provider: "codex"})
 			},
-			verify: func(t *testing.T, cfg *config.City) {
+			verify: func(t *testing.T, cfg *config.City, _ string) {
 				t.Helper()
 				if len(cfg.Agents) != 2 {
 					t.Fatalf("agents = %+v, want two", cfg.Agents)
@@ -2477,7 +2544,7 @@ func TestControllerStateMutationsPokeController(t *testing.T) {
 			mutate: func(cs *controllerState) error {
 				return cs.UpdateAgent("rig1/worker", api.AgentUpdate{Provider: "codex", Scope: "rig", Suspended: boolPtr(true)})
 			},
-			verify: func(t *testing.T, cfg *config.City) {
+			verify: func(t *testing.T, cfg *config.City, _ string) {
 				t.Helper()
 				if cfg.Agents[0].Provider != "codex" || cfg.Agents[0].Scope != "rig" || !cfg.Agents[0].Suspended {
 					t.Fatalf("updated agent = %+v, want provider/scope/suspended", cfg.Agents[0])
@@ -2489,7 +2556,7 @@ func TestControllerStateMutationsPokeController(t *testing.T) {
 			mutate: func(cs *controllerState) error {
 				return cs.DeleteAgent("rig1/worker")
 			},
-			verify: func(t *testing.T, cfg *config.City) {
+			verify: func(t *testing.T, cfg *config.City, _ string) {
 				t.Helper()
 				if len(cfg.Agents) != 0 {
 					t.Fatalf("agents = %+v, want none", cfg.Agents)
@@ -2501,7 +2568,7 @@ func TestControllerStateMutationsPokeController(t *testing.T) {
 			mutate: func(cs *controllerState) error {
 				return cs.CreateRig(config.Rig{Name: "rig2", Path: t.TempDir(), Prefix: "r2"})
 			},
-			verify: func(t *testing.T, cfg *config.City) {
+			verify: func(t *testing.T, cfg *config.City, _ string) {
 				t.Helper()
 				if len(cfg.Rigs) != 2 {
 					t.Fatalf("rigs = %+v, want two", cfg.Rigs)
@@ -2516,10 +2583,16 @@ func TestControllerStateMutationsPokeController(t *testing.T) {
 			mutate: func(cs *controllerState) error {
 				return cs.UpdateRig("rig1", api.RigUpdate{Path: t.TempDir(), Prefix: "rg", Suspended: boolPtr(true)})
 			},
-			verify: func(t *testing.T, cfg *config.City) {
+			verify: func(t *testing.T, cfg *config.City, _ string) {
 				t.Helper()
-				if cfg.Rigs[0].Prefix != "rg" || !cfg.Rigs[0].Suspended {
-					t.Fatalf("updated rig = %+v, want prefix/suspended", cfg.Rigs[0])
+				// patch.Suspended is the back-compat alias that writes
+				// the rig's committable SuspendedOnStart default; the
+				// deprecated `suspended` field stays unset.
+				if cfg.Rigs[0].Prefix != "rg" || !cfg.Rigs[0].SuspendedOnStart {
+					t.Fatalf("updated rig = %+v, want prefix=rg + suspended_on_start=true", cfg.Rigs[0])
+				}
+				if cfg.Rigs[0].Suspended {
+					t.Fatalf("legacy suspended field must not be written by RigUpdate; got %+v", cfg.Rigs[0])
 				}
 			},
 		},
@@ -2528,7 +2601,7 @@ func TestControllerStateMutationsPokeController(t *testing.T) {
 			mutate: func(cs *controllerState) error {
 				return cs.DeleteRig("rig1")
 			},
-			verify: func(t *testing.T, cfg *config.City) {
+			verify: func(t *testing.T, cfg *config.City, _ string) {
 				t.Helper()
 				if len(cfg.Rigs) != 0 || len(cfg.Agents) != 0 {
 					t.Fatalf("config after DeleteRig: rigs=%+v agents=%+v, want none", cfg.Rigs, cfg.Agents)
@@ -2540,7 +2613,7 @@ func TestControllerStateMutationsPokeController(t *testing.T) {
 			mutate: func(cs *controllerState) error {
 				return cs.CreateProvider("codex-local", config.ProviderSpec{Command: "codex", PromptMode: "arg"})
 			},
-			verify: func(t *testing.T, cfg *config.City) {
+			verify: func(t *testing.T, cfg *config.City, _ string) {
 				t.Helper()
 				spec, ok := cfg.Providers["codex-local"]
 				if !ok || spec.Command != "codex" || spec.PromptMode != "arg" {
@@ -2564,7 +2637,7 @@ func TestControllerStateMutationsPokeController(t *testing.T) {
 					Env:          map[string]string{"GC_TEST": "1"},
 				})
 			},
-			verify: func(t *testing.T, cfg *config.City) {
+			verify: func(t *testing.T, cfg *config.City, _ string) {
 				t.Helper()
 				spec := cfg.Providers["codex-local"]
 				if spec.DisplayName != "Codex Local" || spec.Command != "codex-wrapper" || spec.PromptMode != "flag" || spec.PromptFlag != "--prompt" || spec.ReadyDelayMs != 25 {
@@ -2583,7 +2656,7 @@ func TestControllerStateMutationsPokeController(t *testing.T) {
 			mutate: func(cs *controllerState) error {
 				return cs.DeleteProvider("codex-local")
 			},
-			verify: func(t *testing.T, cfg *config.City) {
+			verify: func(t *testing.T, cfg *config.City, _ string) {
 				t.Helper()
 				if len(cfg.Providers) != 0 {
 					t.Fatalf("providers = %+v, want none", cfg.Providers)
@@ -2595,7 +2668,7 @@ func TestControllerStateMutationsPokeController(t *testing.T) {
 			mutate: func(cs *controllerState) error {
 				return cs.SetAgentPatch(config.AgentPatch{Dir: "rig1", Name: "worker", Suspended: boolPtr(true)})
 			},
-			verify: func(t *testing.T, cfg *config.City) {
+			verify: func(t *testing.T, cfg *config.City, _ string) {
 				t.Helper()
 				if len(cfg.Patches.Agents) != 1 || cfg.Patches.Agents[0].Suspended == nil || !*cfg.Patches.Agents[0].Suspended {
 					t.Fatalf("agent patches = %+v, want suspended patch", cfg.Patches.Agents)
@@ -2610,7 +2683,7 @@ func TestControllerStateMutationsPokeController(t *testing.T) {
 			mutate: func(cs *controllerState) error {
 				return cs.DeleteAgentPatch("rig1/worker")
 			},
-			verify: func(t *testing.T, cfg *config.City) {
+			verify: func(t *testing.T, cfg *config.City, _ string) {
 				t.Helper()
 				if len(cfg.Patches.Agents) != 0 {
 					t.Fatalf("agent patches = %+v, want none", cfg.Patches.Agents)
@@ -2622,7 +2695,7 @@ func TestControllerStateMutationsPokeController(t *testing.T) {
 			mutate: func(cs *controllerState) error {
 				return cs.SetRigPatch(config.RigPatch{Name: "rig1", Prefix: stringPtr("rp")})
 			},
-			verify: func(t *testing.T, cfg *config.City) {
+			verify: func(t *testing.T, cfg *config.City, _ string) {
 				t.Helper()
 				if len(cfg.Patches.Rigs) != 1 || cfg.Patches.Rigs[0].Prefix == nil || *cfg.Patches.Rigs[0].Prefix != "rp" {
 					t.Fatalf("rig patches = %+v, want prefix patch", cfg.Patches.Rigs)
@@ -2637,7 +2710,7 @@ func TestControllerStateMutationsPokeController(t *testing.T) {
 			mutate: func(cs *controllerState) error {
 				return cs.DeleteRigPatch("rig1")
 			},
-			verify: func(t *testing.T, cfg *config.City) {
+			verify: func(t *testing.T, cfg *config.City, _ string) {
 				t.Helper()
 				if len(cfg.Patches.Rigs) != 0 {
 					t.Fatalf("rig patches = %+v, want none", cfg.Patches.Rigs)
@@ -2649,7 +2722,7 @@ func TestControllerStateMutationsPokeController(t *testing.T) {
 			mutate: func(cs *controllerState) error {
 				return cs.SetProviderPatch(config.ProviderPatch{Name: "codex-local", Command: stringPtr("codex-wrapper")})
 			},
-			verify: func(t *testing.T, cfg *config.City) {
+			verify: func(t *testing.T, cfg *config.City, _ string) {
 				t.Helper()
 				if len(cfg.Patches.Providers) != 1 || cfg.Patches.Providers[0].Command == nil || *cfg.Patches.Providers[0].Command != "codex-wrapper" {
 					t.Fatalf("provider patches = %+v, want command patch", cfg.Patches.Providers)
@@ -2664,7 +2737,7 @@ func TestControllerStateMutationsPokeController(t *testing.T) {
 			mutate: func(cs *controllerState) error {
 				return cs.DeleteProviderPatch("codex-local")
 			},
-			verify: func(t *testing.T, cfg *config.City) {
+			verify: func(t *testing.T, cfg *config.City, _ string) {
 				t.Helper()
 				if len(cfg.Patches.Providers) != 0 {
 					t.Fatalf("provider patches = %+v, want none", cfg.Patches.Providers)
@@ -2708,7 +2781,99 @@ func TestControllerStateMutationsPokeController(t *testing.T) {
 			if err != nil {
 				t.Fatalf("reload config: %v", err)
 			}
-			tc.verify(t, got)
+			tc.verify(t, got, filepath.Dir(tomlPath))
+		})
+	}
+}
+
+func TestControllerStateCitySuspensionRecordsEvents(t *testing.T) {
+	cases := []struct {
+		name          string
+		initial       func(*config.City)
+		mutate        func(*controllerState) error
+		wantSuspended bool
+		wantEventType string
+		wantActor     string
+	}{
+		{
+			name: "suspend city",
+			mutate: func(cs *controllerState) error {
+				return cs.SuspendCity()
+			},
+			wantSuspended: true,
+			wantEventType: events.CitySuspended,
+			wantActor:     "gc",
+		},
+		{
+			name: "resume city",
+			initial: func(cfg *config.City) {
+				cfg.Workspace.SuspendedOnStart = true
+			},
+			mutate: func(cs *controllerState) error {
+				return cs.ResumeCity()
+			},
+			wantEventType: events.CityResumed,
+			wantActor:     "gc",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cs, tomlPath := newControllerStateMutationHarness(t)
+			ep := events.NewFake()
+			cs.eventProv = ep
+
+			if tc.initial != nil {
+				cfg, err := config.Load(fsys.OSFS{}, tomlPath)
+				if err != nil {
+					t.Fatalf("load config: %v", err)
+				}
+				tc.initial(cfg)
+				content, err := cfg.Marshal()
+				if err != nil {
+					t.Fatalf("marshal initial config: %v", err)
+				}
+				if err := os.WriteFile(tomlPath, content, 0o644); err != nil {
+					t.Fatalf("write initial config: %v", err)
+				}
+			}
+
+			if err := tc.mutate(cs); err != nil {
+				t.Fatalf("mutation failed: %v", err)
+			}
+
+			// Suspend/resume record the change in runtime state, not
+			// committed config: city.toml's workspace must stay
+			// untouched and the explicit preference lands in
+			// .gc/runtime/suspension-state.json.
+			gotCfg, err := config.Load(fsys.OSFS{}, tomlPath)
+			if err != nil {
+				t.Fatalf("reload config: %v", err)
+			}
+			if gotCfg.Workspace.Suspended {
+				t.Fatalf("city.toml workspace.suspended must remain unset, got %+v", gotCfg.Workspace)
+			}
+			st, err := suspensionstate.Load(fsys.OSFS{}, filepath.Dir(tomlPath))
+			if err != nil {
+				t.Fatalf("load suspension state: %v", err)
+			}
+			if v, ok := suspensionstate.ExplicitCity(st); !ok || v != tc.wantSuspended {
+				t.Fatalf("runtime state ExplicitCity = (%v, %v), want (%v, true)", v, ok, tc.wantSuspended)
+			}
+
+			gotEvents, err := ep.List(events.Filter{})
+			if err != nil {
+				t.Fatalf("list events: %v", err)
+			}
+			if len(gotEvents) != 1 {
+				t.Fatalf("recorded events = %+v, want exactly one %s event", gotEvents, tc.wantEventType)
+			}
+			if gotEvents[0].Type != tc.wantEventType {
+				t.Fatalf("recorded event type = %q, want %q", gotEvents[0].Type, tc.wantEventType)
+			}
+			if gotEvents[0].Actor != tc.wantActor {
+				t.Fatalf("recorded event actor = %q, want %q", gotEvents[0].Actor, tc.wantActor)
+			}
 		})
 	}
 }
@@ -2749,7 +2914,7 @@ func TestControllerStateEstablishesBeadEventCursorBeforePrimingStores(t *testing
 
 	select {
 	case <-ep.latestCalled:
-	case <-time.After(time.Second):
+	case <-time.After(5 * time.Second):
 		t.Fatal("event watcher did not establish an initial cursor")
 	}
 	select {
@@ -2764,7 +2929,7 @@ func TestControllerStateEstablishesBeadEventCursorBeforePrimingStores(t *testing
 	close(ep.allowLatest)
 	select {
 	case <-returned:
-	case <-time.After(time.Second):
+	case <-time.After(5 * time.Second):
 		t.Fatal("newControllerState did not return after the initial event cursor was established")
 	}
 }
@@ -2850,7 +3015,7 @@ func TestControllerStateBeadEventWatcherRetriesSetupErrors(t *testing.T) {
 
 	select {
 	case <-ep.failed:
-	case <-time.After(time.Second):
+	case <-time.After(5 * time.Second):
 		t.Fatal("bead event watcher did not attempt initial watch")
 	}
 

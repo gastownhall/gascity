@@ -572,6 +572,58 @@ func TestResolveWorkerSessionRuntimeFallsBackToStoredCommandWhenTemplateOverride
 	}
 }
 
+// TestResolveWorkerSessionRuntimeResolvesMouseOnlyForInteractiveResume locks the
+// ga-c4w controller-poll-safety invariant on the API worker-factory resume seam
+// (regression ga-g7go): a resumed pool/headless agent must resolve mouse-OFF so
+// the tmux wheel never re-enables on a controller-polled session, while an
+// interactive (session_origin=manual) resume keeps mouse-ON — symmetric with the
+// create path's session_origin=="manual" gate in templateParamsToConfig. This
+// exercises the real resolveWorkerSessionRuntimeWithMetadata -> sessionResumeHints
+// chain wired as the worker factory's ResolveSessionRuntime, not a contrived stub
+// that dodges the worker-factory path.
+func TestResolveWorkerSessionRuntimeResolvesMouseOnlyForInteractiveResume(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		metadata    map[string]string
+		wantMouseOn bool
+	}{
+		{
+			name:        "pool agent resume stays mouse-off",
+			metadata:    map[string]string{"session_origin": "worker"},
+			wantMouseOn: false,
+		},
+		{
+			name:        "interactive resume keeps mouse-on",
+			metadata:    map[string]string{"agent_name": "myrig/worker", "session_origin": "manual"},
+			wantMouseOn: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fs := newSessionFakeState(t)
+			fs.cfg.Providers["test-agent"] = config.ProviderSpec{
+				Command:   "/bin/echo",
+				PathCheck: "true",
+			}
+
+			srv := New(fs)
+			runtimeCfg, err := srv.resolveWorkerSessionRuntimeWithMetadata(session.Info{
+				Template: "myrig/worker",
+				Provider: "test-agent",
+				WorkDir:  t.TempDir(),
+			}, "", tc.metadata)
+			if err != nil {
+				t.Fatalf("resolveWorkerSessionRuntimeWithMetadata: %v", err)
+			}
+			if runtimeCfg == nil {
+				t.Fatal("resolveWorkerSessionRuntimeWithMetadata() = nil")
+			}
+			if got := runtimeCfg.Hints.MouseOn; got != tc.wantMouseOn {
+				t.Errorf("Hints.MouseOn = %v, want %v (poll-safety: mouse-on only for interactive resume)", got, tc.wantMouseOn)
+			}
+		})
+	}
+}
+
 func TestResolveWorkerSessionRuntimeUsesProviderACPDefaultWithoutTemplateSessionOverride(t *testing.T) {
 	supportsACP := true
 	fs := newSessionFakeState(t)

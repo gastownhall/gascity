@@ -1045,8 +1045,8 @@ func TestPhase0CanonicalRepair_DuplicateOpenNamedBeadsRetiresLosersNonTerminally
 func TestPhase0StatusText_DegradesAlwaysNamedIdentityBlockedByCitySuspend(t *testing.T) {
 	cfg := &config.City{
 		Workspace: config.Workspace{
-			Name:      "test-city",
-			Suspended: true,
+			Name:             "test-city",
+			SuspendedOnStart: true,
 		},
 		Agents: []config.Agent{{
 			Name:         "worker",
@@ -1088,9 +1088,9 @@ func TestPhase0StatusText_DegradesAlwaysNamedIdentityBlockedByRigSuspend(t *test
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "test-city"},
 		Rigs: []config.Rig{{
-			Name:      "demo",
-			Path:      t.TempDir(),
-			Suspended: true,
+			Name:             "demo",
+			Path:             t.TempDir(),
+			SuspendedOnStart: true,
 		}},
 		Agents: []config.Agent{{
 			Name:         "worker",

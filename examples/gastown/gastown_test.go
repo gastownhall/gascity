@@ -8,6 +8,7 @@ package gastown_test
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -345,6 +346,30 @@ func TestPromptFilesExist(t *testing.T) {
 	}
 }
 
+// TestTmuxKeybindingsScrollWheel locks ga-c4w Part A: the gastown tmux
+// keybindings must bind the mouse wheel to copy-mode scrollback (root table),
+// so the "mouse on" set in tmux-theme.sh drives tmux scrollback instead of
+// leaking the wheel to the focused TUI. It must NOT reintroduce the po-vtg2
+// client-attached set-hook stopgap (acceptance #5) — the interactive MouseOn
+// default in internal/api (sessionCreateHints) replaces it.
+func TestTmuxKeybindingsScrollWheel(t *testing.T) {
+	dir := exampleDir()
+	path := filepath.Join(dir, "packs", "gastown", "assets", "scripts", "tmux-keybindings.sh")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading tmux-keybindings.sh: %v", err)
+	}
+	script := string(data)
+	for _, want := range []string{"WheelUpPane", "WheelDownPane"} {
+		if !strings.Contains(script, want) {
+			t.Errorf("tmux-keybindings.sh missing %q wheel binding (ga-c4w Part A):\n%s", want, script)
+		}
+	}
+	if strings.Contains(script, "client-attached") {
+		t.Error("tmux-keybindings.sh contains the po-vtg2 client-attached set-hook stopgap; the interactive MouseOn default replaces it (ga-c4w acceptance #5)")
+	}
+}
+
 func TestOverlayDirsExist(t *testing.T) {
 	dir := exampleDir()
 	cfg := loadExpanded(t)
@@ -444,6 +469,153 @@ func TestRefineryFormulaChainsMergeMetadataWithClose(t *testing.T) {
 	)
 }
 
+// TestRefineryFormulaRefusesZeroDiffMerge guards the false-completion
+// fix (gco-hu0p / upstream #3048): nothing previously stopped the refinery
+// from recording a 0-commit / no-diff branch as close-as-merged, producing
+// a false completion and silent work loss (seen as a session-starved
+// polecat handing off 0 commits). The merge-push step now defines ONE
+// shared predicate, branch_has_real_change (git merge-base + git diff
+// --quiet + >=1 commit), and calls it from BOTH terminal handoffs — the
+// direct close-as-merged AND the mr/pr publication that also closes the
+// bead — halting-and-escalating (never silent retry) on an empty branch.
+//
+// The guard must run BEFORE each handoff's bead-closing command, so a
+// regression that drops or reorders it can never close an empty branch.
+func TestRefineryFormulaRefusesZeroDiffMerge(t *testing.T) {
+	dir := exampleDir()
+	path := filepath.Join(dir, "packs", "gastown", "formulas", "mol-refinery-patrol.toml")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading refinery formula: %v", err)
+	}
+	body := string(data)
+
+	// ONE shared predicate, defined exactly once, using the authoritative
+	// diff check (commit-count alone is a weaker proxy).
+	if count := strings.Count(body, "branch_has_real_change() {"); count != 1 {
+		t.Fatalf("expected exactly one branch_has_real_change definition, found %d", count)
+	}
+	assertContainsInOrder(t, body,
+		"branch_has_real_change() {",
+		`bhrc_base=$(git merge-base "$bhrc_target" "$bhrc_branch"`,
+		`git diff --quiet "$bhrc_base" "$bhrc_branch"`,
+		`0) return 1 ;;`, // no diff -> empty -> refuse
+		`*) return 2 ;;`, // git diff errored -> suspect -> refuse (fail closed)
+	)
+
+	// Halt-and-escalate, never silent retry: blocked + structured note +
+	// mayor/witness nudges, defined once.
+	if count := strings.Count(body, "halt_false_completion() {"); count != 1 {
+		t.Fatalf("expected exactly one halt_false_completion definition, found %d", count)
+	}
+	assertContainsInOrder(t, body,
+		"halt_false_completion() {",
+		"--status=blocked",
+		`--set-metadata false_completion_suspected="branch $fc_branch no verified change vs $fc_base; refused merge-close"`,
+		"gc session nudge mayor",
+		"{{binding_prefix}}witness",
+		"gc runtime drain-ack",
+	)
+
+	// Both terminal handoffs call the shared predicate before closing.
+	if count := strings.Count(body, `branch_has_real_change "origin/$TARGET" temp ||`); count != 2 {
+		t.Fatalf("expected the guard at both the direct-merge and mr/pr handoff sites, found %d call sites", count)
+	}
+
+	// Direct close-as-merged path: guard precedes the merge and the close.
+	assertContainsInOrder(t, body,
+		`**If MERGE_STRATEGY = "direct" (default):**`,
+		`branch_has_real_change "origin/$TARGET" temp ||`,
+		"git merge --ff-only temp",
+		`gc bd close $WORK --reason "Merged to $TARGET at $MERGED_SHORT"`,
+	)
+
+	// mr/pr publication path: guard precedes the push and the close.
+	assertContainsInOrder(t, body,
+		`**If MERGE_STRATEGY = "mr":**`,
+		`branch_has_real_change "origin/$TARGET" temp ||`,
+		"git push origin HEAD:$BRANCH --force-with-lease",
+		`gc bd close $WORK --reason "Pull request ready: $PR_URL"`,
+	)
+}
+
+// TestRefineryBranchHasRealChangeExec runs the extracted predicate against
+// real git repositories — the production code path, not just its formula
+// text (the static assertions above lock structure; this proves behavior).
+// It certifies the contract the #3048 guard depends on: diff is the
+// authority (a net-zero branch carrying commits is still "empty"), and a
+// tool error fails closed (exit 2) rather than reading as "safe to merge".
+func TestRefineryBranchHasRealChangeExec(t *testing.T) {
+	fn := extractBetween(t, refineryMergePushDescription(t),
+		"branch_has_real_change() {", "\nhalt_false_completion() {")
+
+	repo := t.TempDir()
+	git := func(args ...string) {
+		runCmd(t, repo, "git", append([]string{"-C", repo}, args...)...)
+	}
+	commit := func(msg string) {
+		git("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", msg)
+	}
+	write := func(name, content string) {
+		if err := os.WriteFile(filepath.Join(repo, name), []byte(content), 0o644); err != nil {
+			t.Fatalf("writing %s: %v", name, err)
+		}
+	}
+
+	git("init", "-q", "-b", "main")
+	write("base.txt", "base\n")
+	git("add", "base.txt")
+	commit("base")
+
+	// empty: no commits beyond main -> no diff.
+	git("branch", "empty")
+
+	// real: one commit that adds a file -> a real diff.
+	git("checkout", "-q", "-b", "real", "main")
+	write("f.txt", "x\n")
+	git("add", "f.txt")
+	commit("add f")
+
+	// netzero: two commits that cancel -> commits exist, but the diff vs
+	// main is empty. Diff must win over commit-count.
+	git("checkout", "-q", "-b", "netzero", "main")
+	write("g.txt", "y\n")
+	git("add", "g.txt")
+	commit("add g")
+	git("rm", "-q", "g.txt")
+	commit("remove g")
+
+	git("checkout", "-q", "main")
+
+	cases := []struct {
+		name, base, branch string
+		want               int
+	}{
+		{"empty_refuses", "main", "empty", 1},
+		{"real_allows", "main", "real", 0},
+		{"netzero_refuses", "main", "netzero", 1},
+		{"uncomputable_base_refuses", "does-not-exist", "real", 2},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			script := fn + "\nbranch_has_real_change \"" + c.base + "\" \"" + c.branch + "\"\n"
+			cmd := exec.Command("sh", "-c", script)
+			cmd.Dir = repo
+			got := 0
+			if err := cmd.Run(); err != nil {
+				var ee *exec.ExitError
+				if !errors.As(err, &ee) {
+					t.Fatalf("running predicate: %v", err)
+				}
+				got = ee.ExitCode()
+			}
+			if got != c.want {
+				t.Fatalf("branch_has_real_change %q %q exit=%d, want %d", c.base, c.branch, got, c.want)
+			}
+		})
+	}
+}
+
 // TestRefineryPromptRejectionFlowEnforcesClearOnMerge guards against
 // the regression observed in L5c (2026-05-10): the refinery agent
 // merged a previously-rejected work bead and closed it, but never ran
@@ -540,7 +712,7 @@ func TestPolecatFormulaSignalsRefineryAfterReassign(t *testing.T) {
 	assertContainsInOrder(t, body,
 		"**6. Reassign to refinery:**",
 		refineryTarget,
-		`gc bd update {{issue}} --status=open --assignee="$REFINERY_TARGET" --set-metadata gc.routed_to=""`,
+		`gc bd update "$WORK_BEAD_ID" --status=open --assignee="$REFINERY_TARGET" --set-metadata gc.routed_to=""`,
 		"**7. Signal refinery to check for work immediately",
 		refineryTarget,
 		`gc session wake "$REFINERY_TARGET" || true`,
@@ -585,7 +757,7 @@ func TestPolecatFormulaSubmitHasBranchShapeGate(t *testing.T) {
 	assertContainsInOrder(t, body,
 		"**1. Branch-shape gate (fails closed",
 		`CURRENT_BRANCH=$(git branch --show-current)`,
-		`EXPECTED_BRANCH="polecat/{{issue}}"`,
+		`EXPECTED_BRANCH="polecat/$WORK_BEAD_ID"`,
 		`if [ "$CURRENT_BRANCH" != "$EXPECTED_BRANCH" ]; then`,
 		`BRANCH SHAPE GATE FAILED`,
 		`gc runtime drain-ack`,
@@ -599,8 +771,8 @@ func TestPolecatFormulaSubmitHasBranchShapeGate(t *testing.T) {
 	// workspace-setup step that ran but failed to record the branch
 	// is repaired before refinery handoff.
 	assertContainsInOrder(t, body,
-		`METADATA_BRANCH=$(gc bd show {{issue}} --json | jq -r '.[0].metadata.branch // empty')`,
-		`gc bd update {{issue}} --set-metadata branch="$EXPECTED_BRANCH"`,
+		`METADATA_BRANCH=$(gc bd show "$WORK_BEAD_ID" --json | jq -r '.[0].metadata.branch // empty')`,
+		`gc bd update "$WORK_BEAD_ID" --set-metadata branch="$EXPECTED_BRANCH"`,
 	)
 }
 
@@ -779,10 +951,10 @@ func TestPolecatFormulaHaltsOnAutoPushFalse(t *testing.T) {
 
 	assertContainsInOrder(t, submit,
 		"Push your branch:",
-		`AUTO_PUSH=$(gc bd show {{issue}} --json | jq -r '.[0].metadata | if has("auto_push") then (.auto_push | tostring) else "" end')`,
+		`AUTO_PUSH=$(gc bd show "$WORK_BEAD_ID" --json | jq -r '.[0].metadata | if has("auto_push") then (.auto_push | tostring) else "" end')`,
 		`if [ "$AUTO_PUSH" = "false" ]; then`,
 		`BRANCH=$(git branch --show-current)`,
-		`gc bd update {{issue}} \`,
+		`gc bd update "$WORK_BEAD_ID" \`,
 		`--status=open --assignee=""`,
 		`--set-metadata branch="$BRANCH"`,
 		`--set-metadata target={{base_branch}}`,
@@ -2860,9 +3032,9 @@ func TestReviewLegFormulaPersistsReportAndNotifiesCoordinator(t *testing.T) {
 	for _, want := range []string{
 		`formula = "mol-review-leg"`,
 		`coordinator`,
-		`gc bd update {{issue}} --notes`,
+		`gc bd update "$WORK_BEAD_ID" --notes`,
 		`gc mail send "$COORD"`,
-		`gc bd update {{issue}} --status=closed`,
+		`gc bd update "$WORK_BEAD_ID" --status=closed`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("review-leg formula missing %q", want)

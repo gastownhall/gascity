@@ -40,14 +40,14 @@ func (s *sessionObservationGetErrorStore) Get(id string) (beads.Bead, error) {
 	return s.Store.Get(id)
 }
 
-func newProgressStallTestEnv(t *testing.T, timeout string) (*restartRequestTestEnv, beads.Bead, string) {
+func newProgressStallTestEnv(t *testing.T) (*restartRequestTestEnv, beads.Bead, string) {
 	t.Helper()
 
 	env := newRestartRequestTestEnv()
 	env.cfg = &config.City{
 		Workspace: config.Workspace{Name: "test-city"},
 		Session: config.SessionConfig{
-			ProgressStallTimeout: timeout,
+			ProgressStallTimeout: "30m",
 			StartupTimeout:       "60s",
 		},
 		Agents:        []config.Agent{{Name: "worker", StartCommand: "true", MaxActiveSessions: restartRequestTestIntPtr(1)}},
@@ -125,7 +125,7 @@ func (e *restartRequestTestEnv) reconcileAtPathWithProvider(cityPath string, sp 
 }
 
 func TestReconcileSessionBeads_ProgressStallRecyclesStaleClaimlessHealthySession(t *testing.T) {
-	env, session, sessionName := newProgressStallTestEnv(t, "30m")
+	env, session, sessionName := newProgressStallTestEnv(t)
 
 	env.reconcileAtPath(t.TempDir(), []beads.Bead{session})
 
@@ -148,7 +148,7 @@ func TestReconcileSessionBeads_ProgressStallRecyclesStaleClaimlessHealthySession
 }
 
 func TestReconcileSessionBeads_ProgressStallRecyclesWithOpenAssignedWork(t *testing.T) {
-	env, session, sessionName := newProgressStallTestEnv(t, "30m")
+	env, session, sessionName := newProgressStallTestEnv(t)
 	work, err := env.store.Create(beads.Bead{
 		Title:    "ready work not yet claimed",
 		Type:     "task",
@@ -274,7 +274,7 @@ func TestReconcileSessionBeads_ProgressStallDoesNotRecycleExemptOrSafeSessions(t
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			env, session, sessionName := newProgressStallTestEnv(t, "30m")
+			env, session, sessionName := newProgressStallTestEnv(t)
 			cityPath := t.TempDir()
 			if tc.cityPath != nil {
 				cityPath = tc.cityPath(t)
@@ -306,5 +306,68 @@ func TestReconcileSessionBeads_ProgressStallDoesNotRecycleExemptOrSafeSessions(t
 				t.Fatalf("stderr = %q, want %q", env.stderr.String(), tc.wantLog)
 			}
 		})
+	}
+}
+
+// TestReconcileSessionBeads_ProgressStallExemptsMinFloorIdleWorker drives the
+// reconciler's pool-counting branch (not just the extracted predicate): a stale,
+// claimless, healthy session whose pool is at its configured floor
+// (min_active_sessions == open == 1) must be left running. The floor worker is
+// waiting for routed work, not parked on an error, so it is exempt from the
+// progress-stall recycler.
+func TestReconcileSessionBeads_ProgressStallExemptsMinFloorIdleWorker(t *testing.T) {
+	env, session, sessionName := newProgressStallTestEnv(t)
+	env.cfg.Agents[0].MinActiveSessions = restartRequestTestIntPtr(1)
+
+	// Pool at floor: this single open session is the entire always-warm
+	// contingent (open == min == 1).
+	env.reconcileAtPath(t.TempDir(), []beads.Bead{session})
+
+	if !env.sp.IsRunning(sessionName) {
+		t.Fatalf("session %q was recycled; floor worker at pool floor must be exempt", sessionName)
+	}
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("store.Get(%s): %v", session.ID, err)
+	}
+	if got.Metadata["restart_requested"] != "" {
+		t.Fatalf("restart_requested = %q, want empty for exempt floor worker", got.Metadata["restart_requested"])
+	}
+	if got.Metadata["continuation_reset_pending"] != "" {
+		t.Fatalf("continuation_reset_pending = %q, want empty", got.Metadata["continuation_reset_pending"])
+	}
+	if strings.Contains(env.stderr.String(), "progress-stalled") {
+		t.Fatalf("stderr = %q, want no progress-stalled diagnostic", env.stderr.String())
+	}
+}
+
+// TestReconcileSessionBeads_ProgressStallRecyclesAboveFloorWorker is the
+// counter-case proving the floor exemption is floor-bounded, not blanket: with
+// the same min_active_sessions floor of 1 but two open sessions in the pool
+// (open == 2 > min == 1), a stale claimless session is above the always-warm
+// contingent and IS recycled.
+func TestReconcileSessionBeads_ProgressStallRecyclesAboveFloorWorker(t *testing.T) {
+	env, session, sessionName := newProgressStallTestEnv(t)
+	env.cfg.Agents[0].MinActiveSessions = restartRequestTestIntPtr(1)
+	env.cfg.Agents[0].MaxActiveSessions = restartRequestTestIntPtr(2)
+
+	// A second open worker session lifts the pool above its floor (open == 2 >
+	// min == 1), so the stale session under test is no longer floor-protected.
+	companion := env.createSessionBead("worker-floor-companion")
+
+	env.reconcileAtPath(t.TempDir(), []beads.Bead{session, companion})
+
+	if env.sp.IsRunning(sessionName) {
+		t.Fatalf("session %q still running; above-floor stale claimless session should be recycled", sessionName)
+	}
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("store.Get(%s): %v", session.ID, err)
+	}
+	if got.Metadata["continuation_reset_pending"] != "true" {
+		t.Fatalf("continuation_reset_pending = %q, want true", got.Metadata["continuation_reset_pending"])
+	}
+	if !strings.Contains(env.stderr.String(), "progress-stalled") {
+		t.Fatalf("stderr = %q, want progress-stalled diagnostic", env.stderr.String())
 	}
 }

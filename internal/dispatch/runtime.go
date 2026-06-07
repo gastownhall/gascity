@@ -128,6 +128,8 @@ func ProcessControl(store beads.Store, bead beads.Bead, opts ProcessOptions) (Co
 		return processRetryEval(store, bead, opts)
 	case "fanout":
 		return processFanout(store, bead, opts)
+	case "tally":
+		return processTallyControl(store, bead, opts)
 	case "drain":
 		return processDrain(store, bead, opts)
 	case "scope-check":
@@ -680,6 +682,9 @@ func processWorkflowFinalize(store beads.Store, bead beads.Bead, opts ProcessOpt
 			return ControlResult{Processed: true, Action: "workflow-missing_root"}, nil
 		}
 		return ControlResult{}, recordWorkflowFinalizeError(store, bead.ID, fmt.Errorf("%s: completing workflow head: %w", rootID, err))
+	}
+	if _, err := sourceworkflow.CloseSpecSidecarsForRoot(store, rootID, sourceworkflow.WorkflowSpecSidecarClosedReason); err != nil {
+		return ControlResult{}, recordWorkflowFinalizeError(store, bead.ID, fmt.Errorf("%s: closing workflow spec sidecars: %w", rootID, err))
 	}
 	if outcome == "pass" {
 		if err := closeSourceBeadChain(store, rootID, opts); err != nil {

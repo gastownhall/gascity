@@ -282,6 +282,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	sm := NewSupervisorMux(&singleStateResolver{state: s.state}, nil, s.readOnly, "test", "", time.Now())
+	sm.WithAnyHostAllowed()
 	sm.cacheMu.Lock()
 	sm.cache[s.state.CityName()] = cachedCityServer{state: s.state, srv: s}
 	sm.cacheMu.Unlock()

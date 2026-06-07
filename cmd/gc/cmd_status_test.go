@@ -142,7 +142,7 @@ func TestDoRigStatusJSON(t *testing.T) {
 func TestDoRigStatusSuspendedRig(t *testing.T) {
 	sp := runtime.NewFake()
 	dops := newFakeDrainOps()
-	rig := config.Rig{Name: "frontend", Path: "/tmp/frontend", Suspended: true}
+	rig := config.Rig{Name: "frontend", Path: "/tmp/frontend", SuspendedOnStart: true}
 	agents := []config.Agent{
 		{Name: "polecat", Dir: "frontend", Suspended: true},
 	}

@@ -951,6 +951,94 @@ func TestDoSlingSuspendedAgentWarns(t *testing.T) {
 	}
 }
 
+func TestDoSlingSuspendedRigWarns(t *testing.T) {
+	runner := newFakeRunner()
+	sp := runtime.NewFake()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs:      []config.Rig{{Name: "myrig", Suspended: true}},
+	}
+	a := config.Agent{Name: "polecat", Dir: "myrig", MaxActiveSessions: intPtr(1)}
+
+	deps := testDeps(cfg, sp, runner.run)
+	deps.Store = seededStore("my-42")
+	result, err := DoSling(testOpts(a, "my-42"), deps, nil)
+	if err != nil {
+		t.Fatalf("DoSling error: %v", err)
+	}
+	if result.SuspendedRig != "myrig" {
+		t.Errorf("SuspendedRig = %q, want %q", result.SuspendedRig, "myrig")
+	}
+	if result.AgentSuspended {
+		t.Error("expected AgentSuspended=false: only the rig is suspended, not the agent")
+	}
+}
+
+func TestDoSlingSuspendedRigForce(t *testing.T) {
+	runner := newFakeRunner()
+	sp := runtime.NewFake()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs:      []config.Rig{{Name: "myrig", Suspended: true}},
+	}
+	a := config.Agent{Name: "polecat", Dir: "myrig", MaxActiveSessions: intPtr(1)}
+
+	deps := testDeps(cfg, sp, runner.run)
+	deps.Store = seededStore("my-42")
+	opts := testOpts(a, "my-42")
+	opts.Force = true
+	result, err := DoSling(opts, deps, nil)
+	if err != nil {
+		t.Fatalf("DoSling error: %v", err)
+	}
+	if result.SuspendedRig != "" {
+		t.Errorf("SuspendedRig = %q, want empty with --force", result.SuspendedRig)
+	}
+}
+
+func TestDoSlingLiveRigNoSuspendedRigWarning(t *testing.T) {
+	runner := newFakeRunner()
+	sp := runtime.NewFake()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs:      []config.Rig{{Name: "myrig"}},
+	}
+	a := config.Agent{Name: "polecat", Dir: "myrig", MaxActiveSessions: intPtr(1)}
+
+	deps := testDeps(cfg, sp, runner.run)
+	deps.Store = seededStore("my-42")
+	result, err := DoSling(testOpts(a, "my-42"), deps, nil)
+	if err != nil {
+		t.Fatalf("DoSling error: %v", err)
+	}
+	if result.SuspendedRig != "" {
+		t.Errorf("SuspendedRig = %q, want empty for live rig", result.SuspendedRig)
+	}
+}
+
+func TestDoSlingSuspendedRigWarnsEvenOnFailure(t *testing.T) {
+	// Mirrors TestDoSlingSuspendedAgentWarnsEvenOnFailure: the warning flag
+	// must survive a routing failure so the CLI can still display it.
+	runner := newFakeRunner()
+	runner.on("bd update", fmt.Errorf("runner failed"))
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test"},
+		Rigs:      []config.Rig{{Name: "myrig", Suspended: true}},
+	}
+	a := config.Agent{Name: "polecat", Dir: "myrig", MaxActiveSessions: intPtr(1)}
+
+	deps := testDeps(cfg, runtime.NewFake(), runner.run)
+	deps.Store = seededStore("my-1")
+	result, err := DoSling(testOpts(a, "my-1"), deps, nil)
+
+	if err == nil {
+		t.Fatal("expected runner error")
+	}
+	if result.SuspendedRig != "myrig" {
+		t.Errorf("SuspendedRig = %q, want %q even when routing fails", result.SuspendedRig, "myrig")
+	}
+}
+
 func TestDoSlingRunnerError(t *testing.T) {
 	runner := newFakeRunner()
 	runner.on("bd update", fmt.Errorf("runner failed"))
@@ -987,6 +1075,65 @@ func TestDoSlingFormulaToAgent(t *testing.T) {
 	}
 	if result.BeadID == "" {
 		t.Error("expected non-empty BeadID (wisp root)")
+	}
+}
+
+// TestDoSlingFormulaToPoolStampsPoolDemand asserts that slinging a formula
+// to a multi-session pool target stamps PoolDemandMetadataPair() on the wisp
+// root. The wisp lands as a molecule that readyExcludeTypes filters out of
+// Ready() (per PR #1154), so without the sentinel defaultScaleCheckCounts
+// sees zero demand and the pool never spawns a worker. Regression for
+// https://github.com/gastownhall/gascity/issues/2986.
+func TestDoSlingFormulaToPoolStampsPoolDemand(t *testing.T) {
+	runner := newFakeRunner()
+	sp := runtime.NewFake()
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	a := config.Agent{Name: "polecat", MaxActiveSessions: intPtr(3)}
+
+	deps := testDeps(cfg, sp, runner.run)
+	result, err := DoSling(SlingOpts{
+		Target:        a,
+		BeadOrFormula: "code-review",
+		IsFormula:     true,
+	}, deps, nil)
+	if err != nil {
+		t.Fatalf("DoSling error: %v", err)
+	}
+	root, err := deps.Store.Get(result.BeadID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", result.BeadID, err)
+	}
+	for k, v := range PoolDemandMetadataPair() {
+		if got := root.Metadata[k]; got != v {
+			t.Errorf("wisp root %s = %q, want %q (pool-slung formula wisps must carry the demand sentinel so defaultScaleCheckCounts can count them despite readyExcludeTypes filtering molecules out of Ready())", k, got, v)
+		}
+	}
+}
+
+// TestDoSlingFormulaToSingleSessionAgentSkipsPoolDemand asserts the demand
+// sentinel is pool-only: a formula slung at a fixed single-session agent
+// (woken by nudge, not scale_check counts) must not carry gc.pool_demand.
+func TestDoSlingFormulaToSingleSessionAgentSkipsPoolDemand(t *testing.T) {
+	runner := newFakeRunner()
+	sp := runtime.NewFake()
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
+
+	deps := testDeps(cfg, sp, runner.run)
+	result, err := DoSling(SlingOpts{
+		Target:        a,
+		BeadOrFormula: "code-review",
+		IsFormula:     true,
+	}, deps, nil)
+	if err != nil {
+		t.Fatalf("DoSling error: %v", err)
+	}
+	root, err := deps.Store.Get(result.BeadID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", result.BeadID, err)
+	}
+	if got, ok := root.Metadata[PoolDemandMetadataKey]; ok {
+		t.Errorf("wisp root %s = %q, want absent (single-session agents are woken by nudge, not pool scale_check demand)", PoolDemandMetadataKey, got)
 	}
 }
 

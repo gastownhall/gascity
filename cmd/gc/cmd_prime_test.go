@@ -595,21 +595,23 @@ func TestDoPrimeWithHookFormat_FormatsDefaultFallback(t *testing.T) {
 		t.Fatalf("additionalContext = %q, want default prime prompt", payload.HookSpecificOutput.AdditionalContext)
 	}
 	for _, want := range []string{
-		"managed runtime session",
-		"If $GC_SESSION_NAME is empty",
-		"bd update <id> --claim",
-		"gc.continuation_group",
-		"--metadata-field gc.routed_to=\"$GC_TEMPLATE\"",
-		"--no-assignee",
-		"gc runtime drain-ack",
+		"You are an agent in a Gas City workspace. Claim available work and execute it.",
+		"`gc hook --claim --json`",
+		"`bd show <id>`",
+		"`bd close <id>`",
+		"Read the claimed bead and execute the work described in its title",
+		"Check for more work. Repeat until the queue is empty.",
 	} {
 		if !strings.Contains(payload.HookSpecificOutput.AdditionalContext, want) {
 			t.Fatalf("additionalContext missing %q:\n%s", want, payload.HookSpecificOutput.AdditionalContext)
 		}
 	}
 	for _, stale := range []string{
-		"Pick a bead and execute the work described in its title",
-		"Repeat until the queue is empty",
+		"managed runtime session",
+		"If $GC_SESSION_NAME is empty",
+		"bd update <id> --claim",
+		"gc runtime drain-ack",
+		"bd ready",
 	} {
 		if strings.Contains(payload.HookSpecificOutput.AdditionalContext, stale) {
 			t.Fatalf("additionalContext contains stale fallback protocol %q:\n%s", stale, payload.HookSpecificOutput.AdditionalContext)

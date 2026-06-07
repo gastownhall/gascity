@@ -1179,6 +1179,114 @@ func TestTranscriptServiceListOrderLimitAndCursor(t *testing.T) {
 	}
 }
 
+func TestTranscriptServiceListOrderCrossBucket(t *testing.T) {
+	freezeTestClock(t)
+	store := beads.NewMemStore()
+	svc := NewServices(store).Transcript
+	ref := testConversationRef()
+
+	// 130 entries guarantee the stream spans more than one transcript bucket
+	// regardless of the exact bucket-boundary arithmetic, so the descending
+	// walk must cross at least one boundary to collect the newest entries.
+	const total = 130
+	for i := 0; i < total; i++ {
+		id := fmt.Sprintf("msg-%d", i+1)
+		if _, err := svc.Append(context.Background(), AppendTranscriptInput{
+			Caller:            testAdapterCaller(),
+			Conversation:      ref,
+			Kind:              TranscriptMessageInbound,
+			Provenance:        TranscriptProvenanceLive,
+			ProviderMessageID: id,
+			Text:              id,
+			CreatedAt:         testNow().Add(time.Duration(i) * time.Minute),
+		}); err != nil {
+			t.Fatalf("Append(%s): %v", id, err)
+		}
+	}
+
+	providerIDs := func(records []ConversationTranscriptRecord) []string {
+		ids := make([]string, len(records))
+		for i, r := range records {
+			ids[i] = r.ProviderMessageID
+		}
+		return ids
+	}
+
+	// Full ascending read establishes the ground-truth ordering without
+	// hardcoding which sequence lands in which bucket.
+	all, err := svc.List(context.Background(), ListTranscriptInput{
+		Caller:       testControllerCaller(),
+		Conversation: ref,
+		Limit:        total,
+	})
+	if err != nil {
+		t.Fatalf("List(asc full): %v", err)
+	}
+	if len(all) != total {
+		t.Fatalf("List(asc full) returned %d records, want %d", len(all), total)
+	}
+	highestSeq := all[len(all)-1].Sequence
+
+	// Descending + limit returns the highest sequences, newest-first, even
+	// though the newest entries live in a later bucket than the oldest.
+	const topN = 10
+	desc, err := svc.List(context.Background(), ListTranscriptInput{
+		Caller:       testControllerCaller(),
+		Conversation: ref,
+		Limit:        topN,
+		Order:        TranscriptOrderDesc,
+	})
+	if err != nil {
+		t.Fatalf("List(desc): %v", err)
+	}
+	if len(desc) != topN {
+		t.Fatalf("List(desc) returned %d records, want %d", len(desc), topN)
+	}
+	// Strictly descending by sequence.
+	for i := 1; i < len(desc); i++ {
+		if desc[i-1].Sequence <= desc[i].Sequence {
+			t.Fatalf("List(desc) not strictly descending at %d: %d <= %d",
+				i, desc[i-1].Sequence, desc[i].Sequence)
+		}
+	}
+	// Derive the expectation: the newest topN entries from the ascending read,
+	// reversed. This proves the descending walk pulled the highest sequences
+	// across the bucket boundary.
+	wantDesc := make([]string, 0, topN)
+	for i := 0; i < topN; i++ {
+		wantDesc = append(wantDesc, all[len(all)-1-i].ProviderMessageID)
+	}
+	if got := providerIDs(desc); !slices.Equal(got, wantDesc) {
+		t.Fatalf("List(desc) = %#v, want %#v", got, wantDesc)
+	}
+	// Sanity: the returned window genuinely spans more than one bucket.
+	if transcriptBucket(desc[0].Sequence) == transcriptBucket(desc[len(desc)-1].Sequence) {
+		t.Fatalf("List(desc) window did not cross a bucket boundary: seq %d..%d in bucket %d",
+			desc[len(desc)-1].Sequence, desc[0].Sequence, transcriptBucket(desc[0].Sequence))
+	}
+
+	// AfterSequence as an exclusive lower bound near the top of the stream:
+	// the top 5 entries, descending.
+	const tail = 5
+	descAfter, err := svc.List(context.Background(), ListTranscriptInput{
+		Caller:        testControllerCaller(),
+		Conversation:  ref,
+		AfterSequence: highestSeq - tail,
+		Limit:         100,
+		Order:         TranscriptOrderDesc,
+	})
+	if err != nil {
+		t.Fatalf("List(desc, after=%d): %v", highestSeq-tail, err)
+	}
+	wantAfter := make([]string, 0, tail)
+	for i := 0; i < tail; i++ {
+		wantAfter = append(wantAfter, all[len(all)-1-i].ProviderMessageID)
+	}
+	if got := providerIDs(descAfter); !slices.Equal(got, wantAfter) {
+		t.Fatalf("List(desc, after=%d) = %#v, want %#v", highestSeq-tail, got, wantAfter)
+	}
+}
+
 func TestTranscriptServiceMembershipBackfillAndAck(t *testing.T) {
 	freezeTestClock(t)
 	store := beads.NewMemStore()

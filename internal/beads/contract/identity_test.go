@@ -594,6 +594,10 @@ func TestNoExternalIdentityWriters(t *testing.T) {
 			if _, skip := skipDirs[d.Name()]; skip {
 				return filepath.SkipDir
 			}
+			// Skip git worktrees embedded in the repo (have a .git file, not dir).
+			if fi, serr := os.Stat(filepath.Join(path, ".git")); serr == nil && !fi.IsDir() {
+				return filepath.SkipDir
+			}
 			return nil
 		}
 		if !strings.HasSuffix(path, ".go") {

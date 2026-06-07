@@ -20,8 +20,10 @@ var graphV2ReservedVarNames = map[string]struct{}{
 }
 
 // ValidateGraphV2ReservedSymbols enforces the graph.v2 reserved input contract.
-// Graph formulas may reference convoy_id only for targeted invocations. Legacy
-// bead-scoped names never have a graph.v2 compatibility mapping.
+// Graph formulas may reference convoy_id only for targeted invocations. The
+// legacy issue variable is tolerated as a deprecated one-release compat alias
+// (resolved to the single tracked member of the input convoy, see #2941);
+// bead_id never has a graph.v2 compatibility mapping.
 func ValidateGraphV2ReservedSymbols(f *Formula, allowConvoyReference bool) error {
 	errs := graphV2ReservedSymbolErrors(f, allowConvoyReference)
 	if len(errs) == 0 {
@@ -80,8 +82,8 @@ func ValidateGraphV2RecipeReservedSymbols(recipe *Recipe, allowConvoyReference b
 }
 
 // GraphV2FormulaReferencesInputConvoy reports whether a formula requires a
-// targeted graph.v2 invocation because it references convoy_id or contains a
-// drain control.
+// targeted graph.v2 invocation because it references convoy_id (or the
+// deprecated issue alias) or contains a drain control.
 func GraphV2FormulaReferencesInputConvoy(f *Formula) bool {
 	if f == nil {
 		return false
@@ -91,11 +93,19 @@ func GraphV2FormulaReferencesInputConvoy(f *Formula) bool {
 	}
 	found := false
 	_ = ValidateGraphV2ReservedSymbolsWithVisitor(f, true, func(name string) {
-		if name == "convoy_id" {
+		if graphV2NameRequiresInputConvoy(name) {
 			found = true
 		}
 	})
 	return found
+}
+
+// graphV2NameRequiresInputConvoy reports whether a reserved runtime variable
+// reference forces a targeted graph.v2 invocation. convoy_id is the canonical
+// input; issue is the deprecated compat alias that resolves to the single
+// tracked member of the input convoy and therefore also needs one.
+func graphV2NameRequiresInputConvoy(name string) bool {
+	return name == "convoy_id" || name == "issue"
 }
 
 // GraphV2FormulaReferencesInputConvoyTransitively reports whether a resolved
@@ -106,7 +116,7 @@ func GraphV2FormulaReferencesInputConvoyTransitively(f *Formula, parser *Parser)
 		parser:               parser,
 		allowConvoyReference: true,
 		visited:              make(map[string]bool),
-		visit: func(_ string) {
+		visit: func(_, _ string) {
 			// Keep scanning after finding convoy_id so callers get load/resolve
 			// errors from every reachable expansion path.
 		},
@@ -118,8 +128,8 @@ func GraphV2FormulaReferencesInputConvoyTransitively(f *Formula, parser *Parser)
 }
 
 // GraphV2RecipeReferencesInputConvoy reports whether a compiled graph.v2
-// recipe requires a targeted invocation because it references convoy_id or has
-// a drain control step.
+// recipe requires a targeted invocation because it references convoy_id (or
+// the deprecated issue alias) or has a drain control step.
 func GraphV2RecipeReferencesInputConvoy(recipe *Recipe) bool {
 	if recipe == nil {
 		return false
@@ -128,12 +138,56 @@ func GraphV2RecipeReferencesInputConvoy(recipe *Recipe) bool {
 		return true
 	}
 	found := false
-	_ = graphV2RecipeReservedSymbolErrors(recipe, true, func(name string) {
-		if name == "convoy_id" {
+	_ = graphV2RecipeReservedSymbolErrors(recipe, true, func(_, name string) {
+		if graphV2NameRequiresInputConvoy(name) {
 			found = true
 		}
 	})
 	return found
+}
+
+// GraphV2LegacyIssueRefsTransitively returns the template paths in a resolved
+// formula — plus any expansion templates and aspect advice that can
+// materialize into its graph — that reference or declare the deprecated
+// legacy work-bead variables (issue, bead_id). In graph.v2 formulas, issue is
+// tolerated for one release as a compat alias (#2941); callers should surface
+// every returned path as a deprecation warning. The scan does not gate on the
+// formula's compiler contract so whole-pack audits can also flag legacy
+// formulas that would poison graph.v2 compositions.
+func GraphV2LegacyIssueRefsTransitively(f *Formula, parser *Parser) []string {
+	if f == nil {
+		return nil
+	}
+	var refs []string
+	scanner := graphV2TransitiveReferenceScanner{
+		parser:               parser,
+		allowConvoyReference: true,
+		visited:              make(map[string]bool),
+		visit:                graphV2LegacyIssueRefCollector(&refs),
+	}
+	// Load/resolve errors on expansion paths surface through the validation
+	// entry points; this scan only gathers deprecation warnings.
+	_ = scanner.scanFormula("", f)
+	sort.Strings(refs)
+	return refs
+}
+
+// GraphV2RecipeLegacyIssueRefs returns the deprecated legacy work-bead
+// references found in a compiled graph.v2 recipe.
+func GraphV2RecipeLegacyIssueRefs(recipe *Recipe) []string {
+	var refs []string
+	_ = graphV2RecipeReservedSymbolErrors(recipe, true, graphV2LegacyIssueRefCollector(&refs))
+	sort.Strings(refs)
+	return refs
+}
+
+func graphV2LegacyIssueRefCollector(refs *[]string) func(path, name string) {
+	return func(path, name string) {
+		if name != "issue" && name != "bead_id" {
+			return
+		}
+		*refs = append(*refs, path+": "+name)
+	}
 }
 
 // GraphV2FormulaHasDrain reports whether any step in a formula uses drain.
@@ -223,8 +277,12 @@ func ValidateGraphV2ReservedSymbolsWithVisitor(f *Formula, allowConvoyReference 
 	if f == nil {
 		return nil
 	}
+	var pathVisit func(path, name string)
+	if visit != nil {
+		pathVisit = func(_, name string) { visit(name) }
+	}
 	var errs []string
-	collectGraphV2ReservedRefsInFormula("", f, allowConvoyReference, &errs, visit, false)
+	collectGraphV2ReservedRefsInFormula("", f, allowConvoyReference, &errs, pathVisit, false)
 	if len(errs) == 0 {
 		return nil
 	}
@@ -232,15 +290,26 @@ func ValidateGraphV2ReservedSymbolsWithVisitor(f *Formula, allowConvoyReference 
 	return fmt.Errorf("graph.v2 reserved variable validation failed:\n  - %s", strings.Join(errs, "\n  - "))
 }
 
-func collectGraphV2ReservedRefsInFormula(prefix string, f *Formula, allowConvoyReference bool, errs *[]string, visit func(name string), checkVarNames bool) {
+func collectGraphV2ReservedRefsInFormula(prefix string, f *Formula, allowConvoyReference bool, errs *[]string, visit func(path, name string), checkVarNames bool) {
 	if f == nil {
 		return
 	}
 	if checkVarNames {
 		for name := range f.Vars {
-			if isGraphV2ReservedVarName(name) {
-				*errs = append(*errs, fmt.Sprintf("%s: graph.v2 reserved variable cannot be declared", graphV2Path(prefix, "vars."+name)))
+			if !isGraphV2ReservedVarName(name) {
+				continue
 			}
+			declPath := graphV2Path(prefix, "vars."+name)
+			if visit != nil {
+				visit(declPath, strings.TrimSpace(name))
+			}
+			if strings.TrimSpace(name) == "issue" {
+				// Deprecated one-release compat alias (#2941): declaring
+				// vars.issue is tolerated; the runtime injects the single
+				// tracked member of the input convoy.
+				continue
+			}
+			*errs = append(*errs, fmt.Sprintf("%s: graph.v2 reserved variable cannot be declared", declPath))
 		}
 	}
 	collectGraphV2ReservedRefsInStringWithVisitor(graphV2Path(prefix, "description"), f.Description, allowConvoyReference, errs, visit)
@@ -279,7 +348,7 @@ func graphV2Path(prefix, leaf string) string {
 	return prefix + "." + leaf
 }
 
-func graphV2RecipeReservedSymbolErrors(recipe *Recipe, allowConvoyReference bool, visit func(name string)) []string {
+func graphV2RecipeReservedSymbolErrors(recipe *Recipe, allowConvoyReference bool, visit func(path, name string)) []string {
 	if recipe == nil || !recipeDeclaresGraphV2Contract(recipe) {
 		return nil
 	}
@@ -287,7 +356,12 @@ func graphV2RecipeReservedSymbolErrors(recipe *Recipe, allowConvoyReference bool
 	collectGraphV2ReservedRefsInStringWithVisitor("description", recipe.Description, allowConvoyReference, &errs, visit)
 	for name, def := range recipe.Vars {
 		if isGraphV2ReservedVarName(name) {
-			errs = append(errs, fmt.Sprintf("vars.%s: graph.v2 reserved variable cannot be declared", name))
+			if visit != nil {
+				visit("vars."+name, strings.TrimSpace(name))
+			}
+			if strings.TrimSpace(name) != "issue" {
+				errs = append(errs, fmt.Sprintf("vars.%s: graph.v2 reserved variable cannot be declared", name))
+			}
 		}
 		if def == nil {
 			continue
@@ -379,7 +453,7 @@ func validateGraphV2RecipeDrainStep(prefix string, step RecipeStep, errs *[]stri
 	}
 }
 
-func collectGraphV2ReservedRefsInStepsWithVisitor(prefix string, steps []*Step, allowConvoyReference bool, errs *[]string, visit func(name string)) {
+func collectGraphV2ReservedRefsInStepsWithVisitor(prefix string, steps []*Step, allowConvoyReference bool, errs *[]string, visit func(path, name string)) {
 	for i, step := range steps {
 		if step == nil {
 			continue
@@ -446,7 +520,7 @@ func collectGraphV2ReservedRefsInStepsWithVisitor(prefix string, steps []*Step, 
 	}
 }
 
-func collectGraphV2ReservedRefsInCompose(prefix string, compose *ComposeRules, allowConvoyReference bool, errs *[]string, visit func(name string)) {
+func collectGraphV2ReservedRefsInCompose(prefix string, compose *ComposeRules, allowConvoyReference bool, errs *[]string, visit func(path, name string)) {
 	if compose == nil {
 		return
 	}
@@ -518,7 +592,7 @@ func collectGraphV2ReservedRefsInCompose(prefix string, compose *ComposeRules, a
 	}
 }
 
-func collectGraphV2ReservedRefsInAdvice(prefix string, advice []*AdviceRule, allowConvoyReference bool, errs *[]string, visit func(name string)) {
+func collectGraphV2ReservedRefsInAdvice(prefix string, advice []*AdviceRule, allowConvoyReference bool, errs *[]string, visit func(path, name string)) {
 	for i, rule := range advice {
 		if rule == nil {
 			continue
@@ -538,7 +612,7 @@ func collectGraphV2ReservedRefsInAdvice(prefix string, advice []*AdviceRule, all
 	}
 }
 
-func collectGraphV2ReservedRefsInAdviceStep(prefix string, step *AdviceStep, allowConvoyReference bool, errs *[]string, visit func(name string)) {
+func collectGraphV2ReservedRefsInAdviceStep(prefix string, step *AdviceStep, allowConvoyReference bool, errs *[]string, visit func(path, name string)) {
 	if step == nil {
 		return
 	}
@@ -560,7 +634,7 @@ type graphV2TransitiveReferenceScanner struct {
 	visited              map[string]bool
 	errs                 []string
 	requiresInputConvoy  bool
-	visit                func(name string)
+	visit                func(path, name string)
 }
 
 func (s *graphV2TransitiveReferenceScanner) scanFormula(prefix string, f *Formula) error {
@@ -573,12 +647,12 @@ func (s *graphV2TransitiveReferenceScanner) scanFormula(prefix string, f *Formul
 	}
 	s.visited[key] = true
 
-	visit := func(name string) {
-		if name == "convoy_id" {
+	visit := func(path, name string) {
+		if graphV2NameRequiresInputConvoy(name) {
 			s.requiresInputConvoy = true
 		}
 		if s.visit != nil {
-			s.visit(name)
+			s.visit(path, name)
 		}
 	}
 	collectGraphV2ReservedRefsInFormula(prefix, f, s.allowConvoyReference, &s.errs, visit, true)
@@ -676,7 +750,7 @@ func (s *graphV2TransitiveReferenceScanner) scanAspectFormula(prefix, name strin
 	return s.scanFormula(prefix+" "+strconv.Quote(name), resolved)
 }
 
-func collectGraphV2ReservedRefsInStringWithVisitor(path, value string, allowConvoyReference bool, errs *[]string, visit func(name string)) {
+func collectGraphV2ReservedRefsInStringWithVisitor(path, value string, allowConvoyReference bool, errs *[]string, visit func(path, name string)) {
 	for _, pattern := range []*regexp.Regexp{graphV2DirectReservedRefPattern, graphV2IndexReservedRefPattern} {
 		for _, match := range pattern.FindAllStringSubmatch(value, -1) {
 			if len(match) < 2 {
@@ -684,7 +758,7 @@ func collectGraphV2ReservedRefsInStringWithVisitor(path, value string, allowConv
 			}
 			name := match[1]
 			if visit != nil {
-				visit(name)
+				visit(path, name)
 			}
 			if name == "convoy_id" && allowConvoyReference {
 				if match[0] != "{{convoy_id}}" {
@@ -695,7 +769,12 @@ func collectGraphV2ReservedRefsInStringWithVisitor(path, value string, allowConv
 			switch name {
 			case "convoy_id":
 				*errs = append(*errs, fmt.Sprintf("%s: convoy_id requires a targeted graph.v2 invocation", path))
-			case "issue", "bead_id":
+			case "issue":
+				// Deprecated one-release compat alias (#2941): {{issue}}
+				// resolves to the single tracked member of the input convoy.
+				// GraphV2LegacyIssueRefs surfaces these for deprecation
+				// warnings.
+			case "bead_id":
 				*errs = append(*errs, fmt.Sprintf("%s: %s is not available in graph.v2 formulas; use convoy_id", path, name))
 			}
 		}

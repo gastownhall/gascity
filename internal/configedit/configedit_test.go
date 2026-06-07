@@ -10,6 +10,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/configedit"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/suspensionstate"
 )
 
 type failRenameFS struct {
@@ -247,13 +248,13 @@ func TestSetAgentSuspended_NotFound(t *testing.T) {
 	}
 }
 
-func TestSetRigSuspended(t *testing.T) {
+func TestSetRigSuspendedOnStart(t *testing.T) {
 	dir := t.TempDir()
 	path := writeTOML(t, dir, cityWithRig())
 	ed := configedit.NewEditor(fsys.OSFS{}, path)
 
 	err := ed.Edit(func(cfg *config.City) error {
-		return configedit.SetRigSuspended(cfg, "my-rig", true)
+		return configedit.SetRigSuspendedOnStart(cfg, "my-rig", true)
 	})
 	if err != nil {
 		t.Fatalf("Edit: %v", err)
@@ -262,8 +263,11 @@ func TestSetRigSuspended(t *testing.T) {
 	cfg := readTOML(t, path)
 	for _, r := range cfg.Rigs {
 		if r.Name == "my-rig" {
-			if !r.Suspended {
-				t.Error("expected my-rig to be suspended")
+			if !r.SuspendedOnStart {
+				t.Error("expected my-rig to have suspended_on_start = true")
+			}
+			if r.Suspended {
+				t.Error("legacy suspended field must not be set by SetRigSuspendedOnStart")
 			}
 			return
 		}
@@ -271,14 +275,14 @@ func TestSetRigSuspended(t *testing.T) {
 	t.Error("my-rig not found after edit")
 }
 
-func TestSetRigSuspended_NotFound(t *testing.T) {
+func TestSetRigSuspendedOnStart_NotFound(t *testing.T) {
 	dir := t.TempDir()
 	path := writeTOML(t, dir, minimalCity())
 	cfg, err := config.Load(fsys.OSFS{}, path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := configedit.SetRigSuspended(cfg, "nonexistent", true); err == nil {
+	if err := configedit.SetRigSuspendedOnStart(cfg, "nonexistent", true); err == nil {
 		t.Error("expected error for nonexistent rig")
 	}
 }
@@ -879,9 +883,30 @@ func TestSuspendRig(t *testing.T) {
 		t.Fatalf("SuspendRig: %v", err)
 	}
 
+	// Suspension is recorded in the runtime state file, not city.toml.
+	st, err := suspensionstate.Load(fsys.OSFS{}, dir)
+	if err != nil {
+		t.Fatalf("Load suspension state: %v", err)
+	}
+	if !suspensionstate.IsRigSuspended(st, "my-rig") {
+		t.Error("expected my-rig to be suspended in runtime state")
+	}
 	cfg := readTOML(t, path)
-	if !cfg.Rigs[0].Suspended {
-		t.Error("expected my-rig to be suspended")
+	if cfg.Rigs[0].Suspended {
+		t.Error("expected city.toml to NOT have suspended=true (legacy field is deprecated)")
+	}
+	if cfg.Rigs[0].SuspendedOnStart {
+		t.Error("expected city.toml to NOT have suspended_on_start=true (runtime state owns transient suspend)")
+	}
+}
+
+func TestSuspendRig_NotFound(t *testing.T) {
+	dir := t.TempDir()
+	path := writeTOML(t, dir, cityWithRig())
+	ed := configedit.NewEditor(fsys.OSFS{}, path)
+
+	if err := ed.SuspendRig("nonexistent"); err == nil {
+		t.Fatal("expected ErrNotFound for nonexistent rig")
 	}
 }
 
@@ -893,18 +918,45 @@ name = "test-city"
 [[rigs]]
 name = "my-rig"
 path = "/tmp/my-rig"
-suspended = true
+suspended_on_start = true
 `
 	path := writeTOML(t, dir, city)
+	want := true
+	if err := suspensionstate.SetRigSuspended(fsys.OSFS{}, dir, "my-rig", &want); err != nil {
+		t.Fatalf("pre-suspend: %v", err)
+	}
 	ed := configedit.NewEditor(fsys.OSFS{}, path)
 
 	if err := ed.ResumeRig("my-rig"); err != nil {
 		t.Fatalf("ResumeRig: %v", err)
 	}
 
+	// city.toml must NOT be edited; the SuspendedOnStart flag is the
+	// committable default and resume records the override in runtime state.
 	cfg := readTOML(t, path)
-	if cfg.Rigs[0].Suspended {
-		t.Error("expected my-rig to not be suspended")
+	if !cfg.Rigs[0].SuspendedOnStart {
+		t.Error("expected city.toml suspended_on_start to remain set after resume")
+	}
+	st, err := suspensionstate.Load(fsys.OSFS{}, dir)
+	if err != nil {
+		t.Fatalf("Load suspension state: %v", err)
+	}
+	if v, ok := suspensionstate.ExplicitRig(st, "my-rig"); !ok || v {
+		t.Errorf("expected explicit resume in runtime state, got (%v, %v)", v, ok)
+	}
+	// Effective state must be not-suspended (explicit resume wins).
+	if suspensionstate.EffectiveRigSuspended(st, "my-rig", cfg.Rigs[0].SuspendedOnStart) {
+		t.Error("explicit resume in runtime state must beat suspended_on_start=true")
+	}
+}
+
+func TestResumeRig_NotFound(t *testing.T) {
+	dir := t.TempDir()
+	path := writeTOML(t, dir, cityWithRig())
+	ed := configedit.NewEditor(fsys.OSFS{}, path)
+
+	if err := ed.ResumeRig("nonexistent"); err == nil {
+		t.Fatal("expected ErrNotFound for nonexistent rig")
 	}
 }
 
@@ -937,9 +989,20 @@ func TestSuspendCity(t *testing.T) {
 		t.Fatalf("SuspendCity: %v", err)
 	}
 
+	// city.toml must remain untouched — suspension lives in runtime state.
 	cfg := readTOML(t, path)
-	if !cfg.Workspace.Suspended {
-		t.Error("expected workspace to be suspended")
+	if cfg.Workspace.Suspended {
+		t.Error("expected city.toml workspace.suspended to remain unset")
+	}
+	if cfg.Workspace.SuspendedOnStart {
+		t.Error("expected city.toml workspace.suspended_on_start to remain unset")
+	}
+	st, err := suspensionstate.Load(fsys.OSFS{}, dir)
+	if err != nil {
+		t.Fatalf("suspensionstate.Load: %v", err)
+	}
+	if !suspensionstate.IsCitySuspended(st) {
+		t.Error("expected city to be suspended in runtime state")
 	}
 }
 
@@ -947,18 +1010,34 @@ func TestResumeCity(t *testing.T) {
 	dir := t.TempDir()
 	city := `[workspace]
 name = "test-city"
-suspended = true
+suspended_on_start = true
 `
 	path := writeTOML(t, dir, city)
+	want := true
+	if err := suspensionstate.SetCitySuspended(fsys.OSFS{}, dir, &want); err != nil {
+		t.Fatalf("pre-suspend: %v", err)
+	}
 	ed := configedit.NewEditor(fsys.OSFS{}, path)
 
 	if err := ed.ResumeCity(); err != nil {
 		t.Fatalf("ResumeCity: %v", err)
 	}
 
+	// city.toml suspended_on_start stays as committed default; explicit
+	// resume sticks in runtime state and wins at read time.
 	cfg := readTOML(t, path)
-	if cfg.Workspace.Suspended {
-		t.Error("expected workspace to not be suspended")
+	if !cfg.Workspace.SuspendedOnStart {
+		t.Error("expected workspace.suspended_on_start to remain set after resume")
+	}
+	st, err := suspensionstate.Load(fsys.OSFS{}, dir)
+	if err != nil {
+		t.Fatalf("suspensionstate.Load: %v", err)
+	}
+	if v, ok := suspensionstate.ExplicitCity(st); !ok || v {
+		t.Errorf("expected explicit resume in runtime state, got (%v, %v)", v, ok)
+	}
+	if suspensionstate.EffectiveCitySuspended(st, cfg.Workspace.SuspendedOnStart) {
+		t.Error("explicit resume in runtime state must beat workspace.suspended_on_start=true")
 	}
 }
 
@@ -2429,6 +2508,37 @@ func TestDeleteOrderOverride_NotFound(t *testing.T) {
 	err := ed.DeleteOrderOverride("nonexistent", "")
 	if err == nil {
 		t.Fatal("expected error for deleting nonexistent override")
+	}
+}
+
+func TestMergeOrderOverrideMergesIdempotent(t *testing.T) {
+	dir := t.TempDir()
+	path := writeTOML(t, dir, minimalCity())
+	ed := configedit.NewEditor(fsys.OSFS{}, path)
+
+	tru := true
+	if err := ed.SetOrderOverride(config.OrderOverride{Name: "unrouted-feeder", Idempotent: &tru}); err != nil {
+		t.Fatalf("SetOrderOverride: %v", err)
+	}
+
+	// A partial merge that does not mention idempotent must PRESERVE it.
+	trig := "cooldown"
+	if err := ed.MergeOrderOverride(config.OrderOverride{Name: "unrouted-feeder", Trigger: &trig}); err != nil {
+		t.Fatalf("MergeOrderOverride: %v", err)
+	}
+	cfg := readTOML(t, path)
+	if got := cfg.Orders.Overrides[0].Idempotent; got == nil || !*got {
+		t.Fatalf("idempotent should be preserved through a partial merge, got %v", got)
+	}
+
+	// An explicit idempotent=false must be APPLIED through the merge.
+	fls := false
+	if err := ed.MergeOrderOverride(config.OrderOverride{Name: "unrouted-feeder", Idempotent: &fls}); err != nil {
+		t.Fatalf("MergeOrderOverride: %v", err)
+	}
+	cfg = readTOML(t, path)
+	if got := cfg.Orders.Overrides[0].Idempotent; got == nil || *got {
+		t.Fatalf("idempotent=false should be applied through merge, got %v", got)
 	}
 }
 

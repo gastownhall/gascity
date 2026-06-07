@@ -19,6 +19,7 @@ import (
 	"github.com/BurntSushi/toml"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/suspensionstate"
 	"github.com/gastownhall/gascity/internal/workspacesvc"
 )
 
@@ -232,12 +233,15 @@ func SetAgentSuspended(cfg *config.City, name string, suspended bool) error {
 	return fmt.Errorf("%w: agent %q", ErrNotFound, name)
 }
 
-// SetRigSuspended sets the suspended field on an inline rig.
-// Returns an error if the rig is not found in the config.
-func SetRigSuspended(cfg *config.City, name string, suspended bool) error {
+// SetRigSuspendedOnStart sets the suspended_on_start field on an
+// inline rig. This is the committable "default suspension state at city
+// start" — the explicit runtime override in
+// .gc/runtime/suspension-state.json still wins when present. Returns an error
+// if the rig is not found in the config.
+func SetRigSuspendedOnStart(cfg *config.City, name string, suspended bool) error {
 	for i := range cfg.Rigs {
 		if cfg.Rigs[i].Name == name {
-			cfg.Rigs[i].Suspended = suspended
+			cfg.Rigs[i].SuspendedOnStart = suspended
 			return nil
 		}
 	}
@@ -599,34 +603,73 @@ func removeLocalDiscoveredAgentConfig(fs fsys.FS, cityRoot string, agent config.
 	return nil
 }
 
-// SuspendRig suspends a rig by setting suspended=true in city.toml.
+// SuspendRig suspends a rig by recording an explicit "suspended"
+// preference in the runtime state file (.gc/runtime/suspension-state.json).
+// The rig must exist in the config. The legacy `suspended` field in
+// city.toml is no longer touched — `gc doctor` warns about it
+// separately.
 func (e *Editor) SuspendRig(name string) error {
-	return e.Edit(func(cfg *config.City) error {
-		return SetRigSuspended(cfg, name, true)
-	})
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	cfg, err := e.loadForEdit()
+	if err != nil {
+		return err
+	}
+	if !rigDeclared(cfg, name) {
+		return fmt.Errorf("%w: rig %q", ErrNotFound, name)
+	}
+	cityPath := filepath.Dir(e.tomlPath)
+	t := true
+	return suspensionstate.SetRigSuspended(e.fs, cityPath, name, &t)
 }
 
-// ResumeRig resumes a rig by clearing suspended in city.toml.
+// ResumeRig records an explicit "resumed" preference in the runtime
+// state file. The explicit-resume override sticks across city restarts
+// even when the rig declares suspended_on_start = true, so users don't
+// have to edit city.toml to keep a committed-default rig running.
 func (e *Editor) ResumeRig(name string) error {
-	return e.Edit(func(cfg *config.City) error {
-		return SetRigSuspended(cfg, name, false)
-	})
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	cfg, err := e.loadForEdit()
+	if err != nil {
+		return err
+	}
+	if !rigDeclared(cfg, name) {
+		return fmt.Errorf("%w: rig %q", ErrNotFound, name)
+	}
+	cityPath := filepath.Dir(e.tomlPath)
+	f := false
+	return suspensionstate.SetRigSuspended(e.fs, cityPath, name, &f)
 }
 
-// SuspendCity sets workspace.suspended = true.
+// SuspendCity records an explicit "suspended" preference for the city
+// in .gc/runtime/suspension-state.json. The legacy `[workspace] suspended`
+// field in city.toml is no longer touched.
 func (e *Editor) SuspendCity() error {
-	return e.Edit(func(cfg *config.City) error {
-		cfg.Workspace.Suspended = true
-		return nil
-	})
+	cityPath := filepath.Dir(e.tomlPath)
+	t := true
+	return suspensionstate.SetCitySuspended(e.fs, cityPath, &t)
 }
 
-// ResumeCity sets workspace.suspended = false.
+// ResumeCity records an explicit "resumed" preference in the runtime
+// state file. The explicit-resume override sticks across city restarts
+// even when [workspace] declares suspended_on_start = true.
 func (e *Editor) ResumeCity() error {
-	return e.Edit(func(cfg *config.City) error {
-		cfg.Workspace.Suspended = false
-		return nil
-	})
+	cityPath := filepath.Dir(e.tomlPath)
+	f := false
+	return suspensionstate.SetCitySuspended(e.fs, cityPath, &f)
+}
+
+// rigDeclared reports whether a rig with the given name exists in cfg.
+func rigDeclared(cfg *config.City, name string) bool {
+	for i := range cfg.Rigs {
+		if cfg.Rigs[i].Name == name {
+			return true
+		}
+	}
+	return false
 }
 
 // CreateAgent adds a new city-local convention agent. Returns an error if an
@@ -1052,15 +1095,26 @@ func (e *Editor) CreateRig(r config.Rig) error {
 // RigUpdate holds optional fields for a partial rig update. Pointer fields
 // distinguish "not set" from "set to zero value" to avoid the PATCH
 // zero-value trap (e.g., omitting suspended must not reset it to false).
+//
+// Suspended is a back-compat alias: when set, it writes the rig's
+// SuspendedOnStart (the committable "default at city start" flag), not
+// the legacy `suspended` field that has been demoted to a parse-only
+// doctor target. New callers should prefer SuspendedOnStart for clarity.
 type RigUpdate struct {
-	Path          string
-	Prefix        string
-	DefaultBranch string
-	Suspended     *bool
+	Path             string
+	Prefix           string
+	DefaultBranch    string
+	Suspended        *bool
+	SuspendedOnStart *bool
 }
 
 // UpdateRig partially updates an existing rig. Only non-nil/non-empty
 // fields are applied. Returns an error if the rig is not found.
+//
+// patch.Suspended is a back-compat alias: it writes the rig's
+// SuspendedOnStart (the committable default), not the legacy
+// `suspended` field. patch.SuspendedOnStart, when set, takes
+// precedence over patch.Suspended for the same target.
 func (e *Editor) UpdateRig(name string, patch RigUpdate) error {
 	return e.Edit(func(cfg *config.City) error {
 		for i := range cfg.Rigs {
@@ -1074,8 +1128,11 @@ func (e *Editor) UpdateRig(name string, patch RigUpdate) error {
 				if patch.DefaultBranch != "" {
 					cfg.Rigs[i].DefaultBranch = patch.DefaultBranch
 				}
-				if patch.Suspended != nil {
-					cfg.Rigs[i].Suspended = *patch.Suspended
+				switch {
+				case patch.SuspendedOnStart != nil:
+					cfg.Rigs[i].SuspendedOnStart = *patch.SuspendedOnStart
+				case patch.Suspended != nil:
+					cfg.Rigs[i].SuspendedOnStart = *patch.Suspended
 				}
 				return nil
 			}
@@ -1407,6 +1464,9 @@ func mergeOrderOverride(dst *config.OrderOverride, src config.OrderOverride) {
 	}
 	if src.Timeout != nil {
 		dst.Timeout = src.Timeout
+	}
+	if src.Idempotent != nil {
+		dst.Idempotent = src.Idempotent
 	}
 	if len(src.Env) > 0 {
 		if dst.Env == nil {

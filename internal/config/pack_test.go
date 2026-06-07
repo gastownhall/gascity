@@ -946,6 +946,45 @@ func TestPackContentHashRecursive(t *testing.T) {
 	}
 }
 
+func TestPackContentHashRecursiveCachesUnchangedTree(t *testing.T) {
+	ResetPackContentHashCache()
+	t.Cleanup(ResetPackContentHashCache)
+
+	dir := t.TempDir()
+	writeFile(t, dir, "pack.toml", `name = "p"`)
+	writeFile(t, dir, "prompts/a.md", "prompt a")
+	writeFile(t, dir, "assets/big.txt", strings.Repeat("x", 4096))
+
+	cfs := newReadCountingFS()
+	bigPath := filepath.Join(dir, "assets/big.txt")
+
+	h1 := PackContentHashRecursive(cfs, dir)
+	if cfs.ReadCount(bigPath) == 0 {
+		t.Fatal("first hash should read file content")
+	}
+
+	// Second call on the unchanged tree: cache hit, zero additional content reads.
+	before := cfs.ReadCount(bigPath)
+	h2 := PackContentHashRecursive(cfs, dir)
+	if h2 != h1 {
+		t.Fatalf("cached hash mismatch: %q vs %q", h1, h2)
+	}
+	if after := cfs.ReadCount(bigPath); after != before {
+		t.Fatalf("cache hit re-read content (%d→%d), want no new reads (stat fingerprint should gate)", before, after)
+	}
+
+	// Mutating a file bumps its mtime/size → fingerprint changes → re-read + new hash.
+	writeFile(t, dir, "prompts/a.md", "prompt a (edited, longer)")
+	beforeChange := cfs.ReadCount(bigPath)
+	h3 := PackContentHashRecursive(cfs, dir)
+	if h3 == h1 {
+		t.Fatal("hash should change after content change")
+	}
+	if cfs.ReadCount(bigPath) == beforeChange {
+		t.Fatal("changed tree should be re-read, not served from cache")
+	}
+}
+
 func TestPackContentHashRecursiveIgnoresRuntimeDirs(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, dir, "pack.toml", "test")
@@ -960,6 +999,13 @@ func TestPackContentHashRecursiveIgnoresRuntimeDirs(t *testing.T) {
 	writeFile(t, dir, ".cache/tool/result.json", `{"cached":true}`)
 	writeFile(t, dir, ".git/HEAD", "ref: refs/heads/main")
 	writeFile(t, dir, "nested/__pycache__/helper.pyc", "compiled")
+	// gastownhall/gascity#2954: node_modules at any depth must be skipped.
+	// Packs anchored at monorepo roots previously dragged tens of thousands
+	// of node_modules files through the supervisor on every dirty reload.
+	writeFile(t, dir, "node_modules/.package-lock.json", `{"name":"x"}`)
+	writeFile(t, dir, "node_modules/lodash/index.js", "module.exports = {}")
+	writeFile(t, dir, "packages/foo/node_modules/lodash/index.js", "module.exports = {}")
+	writeFile(t, dir, "apps/bar/node_modules/.bun/install-cache.bin", "binary")
 	h2 := PackContentHashRecursive(fsys.OSFS{}, dir)
 	if h2 != h1 {
 		t.Fatalf("hash changed after runtime output writes: %q vs %q", h1, h2)

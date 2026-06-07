@@ -962,7 +962,7 @@
       "properties": {
         "provider": {
           "type": "string",
-          "description": "Provider selects the bead store backend: \"bd\" (default), \"file\",\nor \"exec:\u003cscript\u003e\" for a user-supplied script.",
+          "description": "Provider selects the bead store backend: \"bd\" (default, Dolt-backed),\n\"file\", \"exec:\u003cscript\u003e\" for a user-supplied script, or \"sqlite\" for\nthe built-in coordination store (pure-Go SQLite; use when Dolt is\nunavailable). \"sqlite-cgo\" is a deprecated alias for \"sqlite\".",
           "default": "bd"
         },
         "backend": {
@@ -971,7 +971,7 @@
         },
         "event_hooks": {
           "type": "boolean",
-          "description": "EventHooks controls installation of the bead event-forwarding hooks\n(.beads/hooks/on_create,on_update,on_close). Defaults to true.\nThis config surface is staged ahead of the native bead-event support;\ncurrent hook behavior remains unchanged until lifecycle code opts in.",
+          "description": "EventHooks controls installation of the bead event-forwarding hooks\n(.beads/hooks/on_create,on_update,on_close) that shell out to\n`gc event emit` on every bead write. Defaults to true. Set to false\nonce the controller's native cache-events already observe bead changes\n(the bd_hooks doctor gate): the lifecycle then removes the event hooks\n(leaving git hooks untouched) and stops reinstalling them, clearing the\nper-write churn and the native-store gate.",
           "default": true
         },
         "bd_compatibility": {
@@ -980,7 +980,7 @@
             "bd-1.0.4",
             "bd-1.0.5"
           ],
-          "description": "BDCompatibility selects the bd CLI semantics Gas City may rely on.\nEmpty defaults to \"bd-1.0.4\", which keeps claimable work history-backed\nand avoids ready flags whose filtering is incomplete in bd 1.0.4."
+          "description": "BDCompatibility selects the bd CLI semantics Gas City may rely on.\nEmpty defaults to \"bd-1.0.4\", which keeps claimable work history-backed\nand avoids bd ready/list flags that are unavailable or incomplete in bd\n1.0.4."
         },
         "policies": {
           "additionalProperties": {
@@ -1897,6 +1897,10 @@
           "type": "string",
           "description": "Timeout overrides the per-order timeout. Go duration string."
         },
+        "idempotent": {
+          "type": "boolean",
+          "description": "Idempotent overrides whether the order's dispatch is safe to repeat.\nIdempotent orders fail open when the open-work gate times out (#2893)."
+        },
         "env": {
           "additionalProperties": {
             "type": "string"
@@ -2344,7 +2348,11 @@
         },
         "suspended": {
           "type": "boolean",
-          "description": "Suspended prevents the reconciler from spawning agents in this rig. Toggle with gc rig suspend/resume."
+          "description": "Suspended is the deprecated pre-runtime-state suspension flag.\nParsed for backwards compatibility and treated as an alias for\nSuspendedOnStart by [Rig.EffectiveSuspendedOnStart], so existing\ncities with `suspended = true` continue to start their rigs\nsuspended after upgrade. Live suspend/resume commands no longer\nwrite this field. `gc doctor` flags it and offers `--fix` to\nrename to suspended_on_start."
+        },
+        "suspended_on_start": {
+          "type": "boolean",
+          "description": "SuspendedOnStart is the rig's desired suspension state at city\nstart. When true and no explicit entry exists for this rig in\n.gc/runtime/suspension-state.json, the rig is treated as\nsuspended. Once the user has explicitly suspended or resumed the\nrig via `gc rig suspend/resume`, the runtime state wins."
         },
         "formulas_dir": {
           "type": "string",
@@ -2433,7 +2441,11 @@
         },
         "suspended": {
           "type": "boolean",
-          "description": "Suspended overrides the rig's suspended state."
+          "description": "Suspended is the deprecated, pre-runtime-state suspension override.\nParsed for backwards compatibility; `gc doctor` surfaces it as a\nwarning and recommends the rename to SuspendedOnStart. No behavioral\ncode path reads it."
+        },
+        "suspended_on_start": {
+          "type": "boolean",
+          "description": "SuspendedOnStart overrides the rig's desired suspension state at\ncity start. Mirrors Rig.SuspendedOnStart."
         },
         "formula_vars": {
           "additionalProperties": {
@@ -2679,7 +2691,11 @@
         },
         "suspended": {
           "type": "boolean",
-          "description": "Suspended controls whether the city is suspended. When true, all\nagents are effectively suspended: the reconciler won't spawn them,\nand gc hook/prime return empty. Inherits downward — individual\nagent/rig suspended fields are checked independently."
+          "description": "Suspended is the deprecated pre-runtime-state city suspension\nflag. Parsed for backwards compatibility and treated as an alias\nfor SuspendedOnStart by [Workspace.EffectiveSuspendedOnStart], so\nexisting cities with `suspended = true` continue to start\nsuspended after upgrade. Live suspend/resume commands no longer\nwrite this field. `gc doctor` flags it and offers `--fix` to\nrename to suspended_on_start."
+        },
+        "suspended_on_start": {
+          "type": "boolean",
+          "description": "SuspendedOnStart is the city's desired suspension state at start.\nWhen true and no explicit entry exists in\n.gc/runtime/suspension-state.json, the city is treated as\nsuspended. Once the user has explicitly suspended or resumed via\n`gc suspend/resume`, the runtime state wins."
         },
         "max_active_sessions": {
           "type": "integer",
@@ -2694,7 +2710,7 @@
             "type": "string"
           },
           "type": "array",
-          "description": "InstallAgentHooks lists provider names whose hooks should be installed\ninto agent working directories. Agent-level overrides workspace-level\n(replace, not additive). Supported: \"claude\", \"codex\", \"gemini\",\n\"kiro\", \"opencode\", \"copilot\", \"cursor\", \"pi\", \"omp\"."
+          "description": "InstallAgentHooks lists provider names whose hooks should be installed\ninto agent working directories. Agent-level overrides workspace-level\n(replace, not additive). Supported: \"claude\", \"codex\", \"gemini\",\n\"antigravity\", \"kiro\", \"opencode\", \"groq\", \"cerebras\", \"copilot\",\n\"cursor\", \"pi\", \"omp\"."
         },
         "global_fragments": {
           "items": {

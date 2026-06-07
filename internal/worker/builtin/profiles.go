@@ -82,7 +82,7 @@ const (
 
 var builtinProviderOrder = []string{
 	"claude", "codex", "gemini", "kimi", "kiro", "cursor", "copilot",
-	"amp", "opencode", "auggie", "pi", "omp", "antigravity",
+	"amp", "opencode", "groq", "cerebras", "auggie", "pi", "omp", "antigravity",
 }
 
 var builtinProviderSpecs = map[string]BuiltinProviderSpec{
@@ -299,16 +299,19 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 		},
 	},
 	"kiro": {
-		DisplayName:      "Kiro",
-		Command:          "kiro-cli",
-		Args:             []string{"chat", "--no-interactive", "--agent", "gascity", "--trust-all-tools"},
-		PromptMode:       "arg",
-		ReadyDelayMs:     5000,
-		ProcessNames:     []string{"kiro-cli", "kiro", "node"},
-		SupportsACP:      true,
-		SupportsHooks:    true,
-		InstructionsFile: "AGENTS.md",
-		ACPArgs:          []string{"acp", "--agent", "gascity"},
+		DisplayName:  "Kiro",
+		Command:      "kiro-cli",
+		Args:         []string{"chat", "--no-interactive", "--agent", "gascity", "--trust-all-tools"},
+		PromptMode:   "arg",
+		ReadyDelayMs: 5000,
+		ProcessNames: []string{"kiro-cli", "kiro", "node"},
+		// kiro launches with --trust-all-tools and never shows trust/permission
+		// dialogs, so skip the 7-dialog startup polling (~56s/call, run twice).
+		AcceptStartupDialogs: boolPtr(false),
+		SupportsACP:          true,
+		SupportsHooks:        true,
+		InstructionsFile:     "AGENTS.md",
+		ACPArgs:              []string{"acp", "--agent", "gascity"},
 	},
 	"cursor": {
 		DisplayName:       "Cursor Agent",
@@ -403,6 +406,67 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 			},
 		},
 	},
+	"cerebras": {
+		DisplayName: "Cerebras (OpenCode)",
+		Command:     "opencode",
+		OptionDefaults: map[string]string{
+			"model": "cerebras/gpt-oss-120b",
+		},
+		PromptMode:       "none",
+		ReadyDelayMs:     8000,
+		ProcessNames:     []string{"opencode", "node", "bun"},
+		Env:              map[string]string{"OPENCODE_PERMISSION": `{"*":"allow"}`},
+		SupportsACP:      true,
+		SupportsHooks:    true,
+		InstructionsFile: "AGENTS.md",
+		ACPArgs:          []string{"acp"},
+		TitleModel:       "cerebras/gpt-oss-120b",
+		OptionsSchema: []BuiltinProviderOption{
+			{
+				Key:   "model",
+				Label: "Model",
+				Type:  "select",
+				Choices: []BuiltinOptionChoice{
+					{Value: "", Label: "Default"},
+					{Value: "cerebras/gpt-oss-120b", Label: "GPT-OSS 120B", FlagArgs: []string{"--model", "cerebras/gpt-oss-120b"}},
+					{Value: "cerebras/zai-glm-4.7", Label: "GLM 4.7", FlagArgs: []string{"--model", "cerebras/zai-glm-4.7"}},
+					{Value: "cerebras/qwen-3-235b-a22b-instruct-2507", Label: "Qwen 3 235B A22B Instruct", FlagArgs: []string{"--model", "cerebras/qwen-3-235b-a22b-instruct-2507"}},
+				},
+			},
+		},
+	},
+	"groq": {
+		DisplayName: "Groq (OpenCode)",
+		Command:     "opencode",
+		OptionDefaults: map[string]string{
+			"model": "groq/openai/gpt-oss-120b",
+		},
+		PromptMode:       "none",
+		ReadyDelayMs:     8000,
+		ProcessNames:     []string{"opencode", "node", "bun"},
+		Env:              map[string]string{"OPENCODE_PERMISSION": `{"*":"allow"}`},
+		SupportsACP:      true,
+		SupportsHooks:    true,
+		InstructionsFile: "AGENTS.md",
+		ACPArgs:          []string{"acp"},
+		TitleModel:       "groq/openai/gpt-oss-20b",
+		OptionsSchema: []BuiltinProviderOption{
+			{
+				Key:   "model",
+				Label: "Model",
+				Type:  "select",
+				Choices: []BuiltinOptionChoice{
+					{Value: "", Label: "Default"},
+					{Value: "groq/openai/gpt-oss-120b", Label: "GPT-OSS 120B", FlagArgs: []string{"--model", "groq/openai/gpt-oss-120b"}},
+					{Value: "groq/openai/gpt-oss-20b", Label: "GPT-OSS 20B", FlagArgs: []string{"--model", "groq/openai/gpt-oss-20b"}},
+					{Value: "groq/llama-3.3-70b-versatile", Label: "Llama 3.3 70B Versatile", FlagArgs: []string{"--model", "groq/llama-3.3-70b-versatile"}},
+					{Value: "groq/llama-3.1-8b-instant", Label: "Llama 3.1 8B Instant", FlagArgs: []string{"--model", "groq/llama-3.1-8b-instant"}},
+					{Value: "groq/qwen/qwen3-32b", Label: "Qwen 3 32B", FlagArgs: []string{"--model", "groq/qwen/qwen3-32b"}},
+					{Value: "groq/meta-llama/llama-4-scout-17b-16e-instruct", Label: "Llama 4 Scout 17B", FlagArgs: []string{"--model", "groq/meta-llama/llama-4-scout-17b-16e-instruct"}},
+				},
+			},
+		},
+	},
 	"auggie": {
 		// Hook mechanism: Auggie CLI exposes SessionStart, SessionEnd,
 		// Stop, PreToolUse, PostToolUse hooks via ~/.augment/settings.json
@@ -458,9 +522,6 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 		ResumeStyle:      "flag",
 	},
 	"antigravity": {
-		// Antigravity does not currently expose a provider hook mechanism
-		// that Gas City can install; nudges still drain via the supervisor
-		// dispatcher / per-session poller.
 		DisplayName: "Antigravity",
 		Command:     "agy",
 		OptionDefaults: map[string]string{
@@ -471,6 +532,7 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 		ReadyPromptPrefix: "> ",
 		ReadyDelayMs:      5000,
 		ProcessNames:      []string{"agy"},
+		SupportsHooks:     true,
 		InstructionsFile:  "AGENTS.md",
 		ResumeFlag:        "--conversation",
 		ResumeStyle:       "flag",

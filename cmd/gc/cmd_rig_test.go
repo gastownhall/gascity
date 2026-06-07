@@ -18,6 +18,7 @@ import (
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/suspensionstate"
 )
 
 type mkdirAllErrorFS struct {
@@ -1113,13 +1114,20 @@ func TestDoRigSuspend(t *testing.T) {
 		t.Errorf("output = %q, want suspend message", stdout.String())
 	}
 
-	// Verify config written with suspended=true.
+	// Verify suspension recorded in runtime state, not city.toml.
+	st, err := suspensionstate.Load(fsys.OSFS{}, cityPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !suspensionstate.IsRigSuspended(st, "frontend") {
+		t.Errorf("rig should be suspended in runtime state, got %+v", st)
+	}
 	cfg, err := config.Load(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(cfg.Rigs) != 1 || !cfg.Rigs[0].Suspended {
-		t.Errorf("rig should be suspended, got %+v", cfg.Rigs)
+	if len(cfg.Rigs) != 1 || cfg.Rigs[0].Suspended {
+		t.Errorf("city.toml should NOT have suspended=true, got %+v", cfg.Rigs)
 	}
 }
 
@@ -1152,7 +1160,7 @@ func TestDoRigSuspendAlreadySuspended(t *testing.T) {
 
 func TestDoRigResume(t *testing.T) {
 	cityPath := t.TempDir()
-	cityToml := "[workspace]\n\n[[rigs]]\nname = \"frontend\"\nsuspended = true\n"
+	cityToml := "[workspace]\n\n[[rigs]]\nname = \"frontend\"\nsuspended_on_start = true\n"
 	siteToml := "workspace_name = \"test-city\"\n\n[[rig]]\nname = \"frontend\"\npath = \"/some/path\"\n"
 	writeSchema2RigCity(t, cityPath, "test-city", cityToml, siteToml)
 
@@ -1165,13 +1173,24 @@ func TestDoRigResume(t *testing.T) {
 		t.Errorf("output = %q, want resume message", stdout.String())
 	}
 
-	// Verify config written with suspended=false.
+	// city.toml is intentionally NOT mutated; the explicit resume is
+	// recorded in .gc/runtime/rig-state.json and beats SuspendedOnStart.
 	cfg, err := config.Load(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(cfg.Rigs) != 1 || cfg.Rigs[0].Suspended {
-		t.Errorf("rig should not be suspended, got %+v", cfg.Rigs)
+	if len(cfg.Rigs) != 1 || !cfg.Rigs[0].SuspendedOnStart {
+		t.Errorf("city.toml suspended_on_start should remain set, got %+v", cfg.Rigs)
+	}
+	st, err := suspensionstate.Load(fsys.OSFS{}, cityPath)
+	if err != nil {
+		t.Fatalf("suspensionstate.Load: %v", err)
+	}
+	if v, ok := suspensionstate.ExplicitRig(st, "frontend"); !ok || v {
+		t.Errorf("frontend should have explicit resume in runtime state, got (%v, %v)", v, ok)
+	}
+	if suspensionstate.EffectiveRigSuspended(st, "frontend", cfg.Rigs[0].SuspendedOnStart) {
+		t.Error("explicit resume in runtime state must beat suspended_on_start=true")
 	}
 }
 
@@ -1208,7 +1227,7 @@ func TestDoRigListShowsSuspended(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cityToml := "[workspace]\n\n[[rigs]]\nname = \"my-frontend\"\nsuspended = true\n"
+	cityToml := "[workspace]\n\n[[rigs]]\nname = \"my-frontend\"\nsuspended_on_start = true\n"
 	siteToml := fmt.Sprintf("workspace_name = \"test-city\"\n\n[[rig]]\nname = \"my-frontend\"\npath = %q\n", rigPath)
 	writeSchema2RigCity(t, cityPath, "test-city", cityToml, siteToml)
 

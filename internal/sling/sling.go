@@ -149,10 +149,12 @@ type SlingResult struct {
 
 	// Structured warnings (callers decide how to display).
 	AgentSuspended bool     // target agent is suspended
+	SuspendedRig   string   // non-empty: name of the target's rig, which is suspended
 	PoolEmpty      bool     // pool max=0
 	AutoBurned     []string // IDs of auto-burned stale molecules
 	MetadataErrors []string // non-fatal metadata write failures
 	BeadWarnings   []string // pre-flight bead state warnings
+	Deprecations   []string // deprecated formula constructs (graph.v2 issue alias)
 
 	// Batch fields (populated by DoSlingBatch).
 	ContainerType string // "convoy", "epic", etc. (batch only)

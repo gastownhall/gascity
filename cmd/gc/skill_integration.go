@@ -387,7 +387,7 @@ func writeSkillBullets(b *strings.Builder, entries []materialize.SkillEntry, ori
 // setup) with "gc" as a fallback if the env var isn't available at
 // PreStart expansion time. Argument values are shell-quoted.
 func appendMaterializeSkillsPreStart(prestart []string, qualifiedName, workDir string) []string {
-	cmd := `"${GC_BIN:-gc}" internal materialize-skills --agent ` +
+	cmd := `"${GC_BIN:-gc}" internal materialize-skills --best-effort --agent ` +
 		shellquote.Join([]string{qualifiedName}) + ` --workdir ` + shellquote.Join([]string{workDir})
 	return append(prestart, cmd)
 }

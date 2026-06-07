@@ -10,6 +10,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/suspensionstate"
 )
 
 type registeredRigFixture struct {
@@ -61,7 +62,7 @@ name = %q
 path = %q
 `, rigName, rigPath)
 	if suspended {
-		toml += "suspended = true\n"
+		toml += "suspended_on_start = true\n"
 	}
 	writeRigAnywhereCityToml(t, cityPath, toml)
 
@@ -207,12 +208,19 @@ func TestRigAnywhere_CmdRigSuspendFromRigDir(t *testing.T) {
 				t.Fatalf("stdout = %q, want rig suspend confirmation", stdout.String())
 			}
 
+			st, err := suspensionstate.Load(fsys.OSFS{}, fx.cityPath)
+			if err != nil {
+				t.Fatalf("load suspension state: %v", err)
+			}
+			if !suspensionstate.IsRigSuspended(st, fx.rigName) {
+				t.Fatalf("rig should be suspended in runtime state, got %+v", st)
+			}
 			cfg, err := config.Load(fsys.OSFS{}, filepath.Join(fx.cityPath, "city.toml"))
 			if err != nil {
 				t.Fatalf("load city config: %v", err)
 			}
-			if len(cfg.Rigs) != 1 || !cfg.Rigs[0].Suspended {
-				t.Fatalf("rig suspended = %v, want true", cfg.Rigs)
+			if len(cfg.Rigs) != 1 || cfg.Rigs[0].Suspended {
+				t.Fatalf("city.toml should NOT have suspended=true, got %v", cfg.Rigs)
 			}
 		})
 	}
@@ -285,8 +293,17 @@ func TestRigAnywhere_CmdRigResumeFromRigDir(t *testing.T) {
 			if err != nil {
 				t.Fatalf("load city config: %v", err)
 			}
-			if len(cfg.Rigs) != 1 || cfg.Rigs[0].Suspended {
-				t.Fatalf("rig suspended = %v, want false", cfg.Rigs)
+			// city.toml's suspended_on_start stays as the committable
+			// default; the explicit resume is recorded in runtime state.
+			if len(cfg.Rigs) != 1 || !cfg.Rigs[0].SuspendedOnStart {
+				t.Fatalf("city.toml suspended_on_start should remain set, got %+v", cfg.Rigs)
+			}
+			st, err := suspensionstate.Load(fsys.OSFS{}, fx.cityPath)
+			if err != nil {
+				t.Fatalf("suspensionstate.Load: %v", err)
+			}
+			if v, ok := suspensionstate.ExplicitRig(st, fx.rigName); !ok || v {
+				t.Fatalf("rig should have explicit resume in runtime state; got (%v, %v)", v, ok)
 			}
 		})
 	}

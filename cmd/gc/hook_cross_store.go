@@ -36,27 +36,73 @@ func appendRigHookStores(stores []hookStore, cityPath string, cfg *config.City, 
 		return stores
 	}
 	for i := range cfg.Rigs {
-		rigName := strings.TrimSpace(cfg.Rigs[i].Name)
-		if rigName == "" {
-			continue
-		}
-		view := *a
-		view.Dir = rigName
-		rigEnv, err := hookQueryEnv(cityPath, cfg, &view)
-		if err != nil || rigEnv == nil {
-			continue
-		}
-		for _, k := range hookIdentityEnvKeys {
-			if v, ok := identityOverrides[k]; ok {
-				rigEnv[k] = v
-			}
-		}
-		stores = append(stores, hookStore{
-			dir: agentCommandDir(cityPath, &view, cfg.Rigs),
-			env: mergeRuntimeEnv(os.Environ(), rigEnv),
-		})
+		stores = appendOneRigHookStore(stores, cityPath, cfg, a, cfg.Rigs[i].Name, identityOverrides)
 	}
 	return stores
+}
+
+// appendOneRigHookStore appends the hookStore for a single named rig, reusing
+// the per-rig env machinery (a per-rig agent view whose store env points bd at
+// that rig, with the agent's identity overrides preserved so the query still
+// matches work routed/assigned to this agent). Best-effort: returns stores
+// unchanged if the rig is unknown or its env cannot be built. Shared by
+// appendRigHookStores (city-scoped read federation, #2877, which keeps the
+// agent's own store first) and the rig-scoped hook path (which puts the rig
+// store first, as the agent's primary store).
+func appendOneRigHookStore(stores []hookStore, cityPath string, cfg *config.City, a *config.Agent, rigName string, identityOverrides map[string]string) []hookStore {
+	rigName = strings.TrimSpace(rigName)
+	if cfg == nil || a == nil || rigName == "" {
+		return stores
+	}
+	known := false
+	for i := range cfg.Rigs {
+		if strings.TrimSpace(cfg.Rigs[i].Name) == rigName {
+			known = true
+			break
+		}
+	}
+	if !known {
+		return stores
+	}
+	view := *a
+	view.Dir = rigName
+	rigEnv, err := hookQueryEnv(cityPath, cfg, &view)
+	if err != nil || rigEnv == nil {
+		return stores
+	}
+	for _, k := range hookIdentityEnvKeys {
+		if v, ok := identityOverrides[k]; ok {
+			rigEnv[k] = v
+		}
+	}
+	return append(stores, hookStore{
+		dir: agentCommandDir(cityPath, &view, cfg.Rigs),
+		env: mergeRuntimeEnv(os.Environ(), rigEnv),
+	})
+}
+
+// rigScopedHookRig returns the rig whose store a rig-scoped agent must ALSO
+// query, or "" if none applies. A rig-scoped agent's identity is "<rig>/<name>"
+// (its GC_AGENT) and its routed work lives in the <rig> store, which the agent's
+// own (city-scoped) work-query env never reaches — so without this the hook
+// returns empty, the session spawns, finds nothing, and exits (churn).
+// Returns "" for a city-scoped identity (no "/") or an unknown rig, so a caller
+// only adds a real rig store. City-scoped agents already federate every rig via
+// appendRigHookStores and must not use this path.
+func rigScopedHookRig(cfg *config.City, agentIdentity string) string {
+	if cfg == nil {
+		return ""
+	}
+	rig, _, ok := strings.Cut(strings.TrimSpace(agentIdentity), "/")
+	if !ok || rig == "" {
+		return ""
+	}
+	for i := range cfg.Rigs {
+		if strings.TrimSpace(cfg.Rigs[i].Name) == rig {
+			return rig
+		}
+	}
+	return ""
 }
 
 // firstStoreWithWork runs command against each store in order and returns the

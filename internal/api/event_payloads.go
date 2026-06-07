@@ -140,6 +140,23 @@ type SupervisorShutdownPayload struct {
 // IsEventPayload marks SupervisorShutdownPayload as an events.Payload variant.
 func (SupervisorShutdownPayload) IsEventPayload() {}
 
+// SupervisorRequestPayload is a bounded audit record for the machine-wide
+// supervisor API. It intentionally omits request bodies, query strings, raw
+// remote addresses, and origins.
+type SupervisorRequestPayload struct {
+	Method          string `json:"method" doc:"HTTP method."`
+	Path            string `json:"path" doc:"Request path with query string omitted and length bounded."`
+	Status          int    `json:"status" doc:"HTTP response status code. Start-phase records use 0 before the final response status is known."`
+	DurationMs      int64  `json:"duration_ms" doc:"Handler duration in milliseconds."`
+	RemoteAddrClass string `json:"remote_addr_class" enum:"loopback,private,public,unknown" doc:"Network class of the remote address, not the raw address."`
+	Host            string `json:"host,omitempty" doc:"Canonical Host header without port."`
+	OriginAllowed   bool   `json:"origin_allowed" doc:"Whether the Origin header, if present, matched CORS policy."`
+	Phase           string `json:"phase" enum:"start,complete" doc:"Audit phase. Long-lived event streams emit a start record immediately after Host validation, then a complete record when the handler returns. Non-stream requests emit complete only."`
+}
+
+// IsEventPayload marks SupervisorRequestPayload as an events.Payload variant.
+func (SupervisorRequestPayload) IsEventPayload() {}
+
 // CityLifecyclePayload is the shape of non-terminal city.created and
 // city.unregister_requested events recorded in the per-city event log
 // during init/unregister for diagnostics.
@@ -462,6 +479,7 @@ func init() {
 	events.RegisterPayload(events.ControllerStarted, events.NoPayload{})
 	events.RegisterPayload(events.ControllerStopped, events.NoPayload{})
 	events.RegisterPayload(events.SupervisorShutdownRequested, SupervisorShutdownPayload{})
+	events.RegisterPayload(events.SupervisorRequest, SupervisorRequestPayload{})
 	events.RegisterPayload(events.CitySuspended, events.NoPayload{})
 	events.RegisterPayload(events.CityResumed, events.NoPayload{})
 	// Typed async request result events.

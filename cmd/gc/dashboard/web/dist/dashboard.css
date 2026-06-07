@@ -4052,3 +4052,52 @@
             border-bottom: 1px dashed var(--border);
             background: var(--bg-dark);
         }
+
+/* Agent Comms panel */
+.comms-body {
+    max-height: none;
+    padding: 0;
+}
+.comms-canvas {
+    width: 100%;
+    height: 340px;
+    display: block;
+}
+.comms-foot {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 6px 14px;
+    border-top: 1px solid var(--border);
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text-muted);
+}
+.comms-legend span { margin-right: 14px; }
+.comms-legend b { color: var(--text-primary); font-weight: 600; }
+.comms-live::before {
+    content: "● ";
+    color: var(--green);
+}
+.comms-ticker {
+    border-top: 1px solid var(--border);
+    max-height: 120px;
+    overflow-y: auto;
+}
+.comms-tick {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 10px;
+    align-items: center;
+    padding: 5px 14px;
+    border-bottom: 1px solid var(--border);
+    font-size: 0.72rem;
+}
+.comms-tick .t {
+    color: var(--text-muted);
+    font-variant-numeric: tabular-nums;
+}
+.comms-tick .m b { color: var(--text-primary); font-weight: 600; }
+.comms-tick .arr { color: var(--cyan); margin: 0 6px; }
+.comms-tick .sub { color: var(--text-secondary); }

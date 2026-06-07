@@ -641,11 +641,17 @@ func printSlingWarnings(result sling.SlingResult, stderr io.Writer) {
 	if result.AgentSuspended {
 		fmt.Fprintf(stderr, "warning: agent %q is suspended — bead routed but may not be picked up\n", result.Target) //nolint:errcheck
 	}
+	if result.SuspendedRig != "" {
+		fmt.Fprintf(stderr, "warning: rig %q is suspended — bead routed but no worker will spawn until 'gc rig resume %s'\n", result.SuspendedRig, result.SuspendedRig) //nolint:errcheck
+	}
 	if result.PoolEmpty {
 		fmt.Fprintf(stderr, "warning: session config %q has max_active_sessions=0 — bead routed but no sessions can claim it\n", result.Target) //nolint:errcheck
 	}
 	for _, w := range result.BeadWarnings {
 		fmt.Fprintln(stderr, w) //nolint:errcheck
+	}
+	for _, d := range result.Deprecations {
+		fmt.Fprintf(stderr, "warning: %s\n", d) //nolint:errcheck
 	}
 	for _, id := range result.AutoBurned {
 		fmt.Fprintf(stderr, "Auto-burned stale molecule %s\n", id) //nolint:errcheck
@@ -706,6 +712,9 @@ func printBatchSlingResult(result sling.SlingResult, stdout, stderr io.Writer) {
 	// Warnings.
 	for _, w := range result.BeadWarnings {
 		fmt.Fprintln(stderr, w) //nolint:errcheck
+	}
+	for _, d := range result.Deprecations {
+		fmt.Fprintf(stderr, "warning: %s\n", d) //nolint:errcheck
 	}
 	for _, id := range result.AutoBurned {
 		fmt.Fprintf(stderr, "Auto-burned stale molecule %s\n", id) //nolint:errcheck
@@ -996,10 +1005,14 @@ func slingJSONWarnings(result sling.SlingResult) []string {
 	if result.AgentSuspended {
 		warnings = append(warnings, "agent_suspended")
 	}
+	if result.SuspendedRig != "" {
+		warnings = append(warnings, "rig_suspended")
+	}
 	if result.PoolEmpty {
 		warnings = append(warnings, "pool_empty")
 	}
 	warnings = append(warnings, result.BeadWarnings...)
+	warnings = append(warnings, result.Deprecations...)
 	warnings = append(warnings, result.MetadataErrors...)
 	return warnings
 }

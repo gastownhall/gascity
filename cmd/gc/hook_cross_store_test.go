@@ -3,9 +3,69 @@ package main
 import (
 	"errors"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/config"
 )
 
 var errTestStoreTimeout = errors.New("store timed out")
+
+// TestRigScopedHookRig is the core of the rig-scope hook fix: a rig-scoped agent
+// ("<rig>/<name>") must resolve to its own rig so the hook also queries that
+// rig's store, where its routed work lives. City-scoped identities (no "/") and
+// unknown rigs resolve to "" so no spurious store is added.
+func TestRigScopedHookRig(t *testing.T) {
+	cfg := &config.City{Rigs: []config.Rig{{Name: "voxist-web"}, {Name: "voxist-api"}}}
+	cases := []struct {
+		name     string
+		identity string
+		want     string
+	}{
+		{"rig-scoped known rig", "voxist-web/voxist.executor", "voxist-web"},
+		{"rig-scoped other known rig", "voxist-api/voxist.reviewer", "voxist-api"},
+		{"rig-scoped unknown rig", "hq/voxist.executor", ""},
+		{"city-scoped (no slash)", "voxist.architect", ""},
+		{"empty identity", "", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := rigScopedHookRig(cfg, tc.identity); got != tc.want {
+				t.Fatalf("rigScopedHookRig(%q) = %q, want %q", tc.identity, got, tc.want)
+			}
+		})
+	}
+	if got := rigScopedHookRig(nil, "voxist-web/x"); got != "" {
+		t.Fatalf("rigScopedHookRig(nil, ...) = %q, want \"\"", got)
+	}
+}
+
+// TestAppendOneRigHookStoreSkipsUnknownInput guards the best-effort contract:
+// an unknown rig, empty rig, or nil cfg/agent must leave the store list
+// unchanged (and must not reach hookQueryEnv), so a stray GC_AGENT prefix can
+// never add a bogus store or wedge the hook.
+func TestAppendOneRigHookStoreSkipsUnknownInput(t *testing.T) {
+	cfg := &config.City{Rigs: []config.Rig{{Name: "voxist-web"}}}
+	a := &config.Agent{Name: "voxist.executor"}
+	base := []hookStore{{dir: "own"}}
+
+	for _, tc := range []struct {
+		name    string
+		cfg     *config.City
+		agent   *config.Agent
+		rigName string
+	}{
+		{"unknown rig", cfg, a, "nope"},
+		{"empty rig", cfg, a, ""},
+		{"nil cfg", nil, a, "voxist-web"},
+		{"nil agent", cfg, nil, "voxist-web"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := appendOneRigHookStore(base, t.TempDir(), tc.cfg, tc.agent, tc.rigName, nil)
+			if len(got) != len(base) {
+				t.Fatalf("appendOneRigHookStore added a store for %s: len=%d, want %d", tc.name, len(got), len(base))
+			}
+		})
+	}
+}
 
 func TestFirstStoreWithWorkReturnsFirstStoreThatHasWork(t *testing.T) {
 	stores := []hookStore{{dir: "city"}, {dir: "riga"}, {dir: "rigb"}}

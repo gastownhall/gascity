@@ -4203,6 +4203,115 @@ func TestSyncSessionBeads_RefreshesStoredCommandOnConfigChange(t *testing.T) {
 	}
 }
 
+// TestSyncSessionBeads_RefreshesResolvedProviderMetadataOnProviderSwitch is the
+// gc-rhp36 guard. #1044 made the stored `command` refresh on config change, but
+// the resolved-provider projection fields (provider, provider_kind,
+// builtin_ancestor, resume_flag, resume_style, resume_command) were left
+// backfill-only on the observe path, so they freeze at their creation-time
+// values when agent.toml switches an agent's provider (e.g. the 2026-05-15
+// claude->omp switch on the mayor): `command` follows but `provider` does not.
+// Those stale fields are consumed by cmd_nudge.go, cmd_session_logs.go and
+// mcp_integration.go. This test extends #1044's refresh-on-change contract to
+// the resolved-provider fields.
+func TestSyncSessionBeads_RefreshesResolvedProviderMetadataOnProviderSwitch(t *testing.T) {
+	store := beads.NewMemStore()
+	// countingStore lets the churn tick assert that an unchanged sync writes
+	// nothing (diff-gated), the load-bearing property for #1205.
+	cs := &countingStore{Store: store}
+	clk := &clock.Fake{Time: time.Date(2026, 5, 15, 12, 0, 0, 0, time.UTC)}
+	sp := runtime.NewFake()
+	_ = sp.Start(context.TODO(), "mayor", runtime.Config{Command: "claude --dangerously-skip-permissions"})
+
+	// Tick 1: session created on the claude provider. provider_kind and
+	// builtin_ancestor derive from BuiltinAncestor (resolvedProviderFamilyMetadata),
+	// not the deprecated Kind field, so the literals omit Kind.
+	claudeCmd := "claude --dangerously-skip-permissions"
+	ds := map[string]TemplateParams{
+		"mayor": {
+			TemplateName: "mayor",
+			Command:      claudeCmd,
+			ResolvedProvider: &config.ResolvedProvider{
+				Name: "claude-max", BuiltinAncestor: "claude",
+				ResumeFlag: "--resume", ResumeStyle: "flag", ResumeCommand: "claude --resume",
+			},
+		},
+	}
+	var stderr bytes.Buffer
+	syncSessionBeads("", cs, ds, sp, allConfiguredDS(ds), nil, clk, &stderr, false)
+
+	beads1 := allSessionBeads(t, cs)
+	if len(beads1) != 1 {
+		t.Fatalf("expected 1 bead after tick 1, got %d", len(beads1))
+	}
+	if got := beads1[0].Metadata["provider"]; got != "claude-max" {
+		t.Fatalf("tick 1: provider = %q, want claude-max", got)
+	}
+
+	// Tick 2: agent.toml provider switched to omp. The resolved provider now
+	// reports omp with deliberately DIFFERENT resume semantics (resume by
+	// session-id, not --resume). The divergent resume values are intentional:
+	// they exercise the generic refresh-on-change contract for a provider whose
+	// resume behavior differs from the prior one (#1655 makes resume_flag
+	// load-bearing in the stale-key recovery path). Do NOT "correct" them to
+	// match claude — in this deployment omp happens to share claude's --resume,
+	// but the bug is the frozen-projection mechanism, not the specific values.
+	ompCmd := "omp --hook .omp/hooks/gc-hook.ts"
+	ds["mayor"] = TemplateParams{
+		TemplateName: "mayor",
+		Command:      ompCmd,
+		ResolvedProvider: &config.ResolvedProvider{
+			Name: "omp-azure", BuiltinAncestor: "omp",
+			ResumeFlag: "-r", ResumeStyle: "session-id", ResumeCommand: "omp -r",
+		},
+	}
+	clk.Advance(3 * 24 * time.Hour)
+	syncSessionBeads("", cs, ds, sp, allConfiguredDS(ds), nil, clk, &stderr, false)
+
+	got := allSessionBeads(t, cs)[0].Metadata
+	for _, c := range []struct{ key, want string }{
+		{"command", ompCmd},
+		{"provider", "omp-azure"},
+		{"provider_kind", "omp"},
+		{"builtin_ancestor", "omp"},
+		{"resume_flag", "-r"},
+		{"resume_style", "session-id"},
+		{"resume_command", "omp -r"},
+	} {
+		if got[c.key] != c.want {
+			t.Errorf("tick 2: %s = %q, want %q\ngc-rhp36: resolved-provider metadata must refresh on a provider switch, like command does (#1044)", c.key, got[c.key], c.want)
+		}
+	}
+
+	// Tick 3 (churn guard): re-running with the SAME resolved provider must queue
+	// no metadata and therefore write nothing. event_hooks defaults to true
+	// upstream, so an unconditional rewrite would forward a bead event every tick
+	// (the #1205 churn pathology). The refresh is diff-gated, so a no-op sync must
+	// not write.
+	writesBefore := cs.writes
+	clk.Advance(time.Minute)
+	syncSessionBeads("", cs, ds, sp, allConfiguredDS(ds), nil, clk, &stderr, false)
+	if cs.writes != writesBefore {
+		t.Errorf("tick 3: unchanged sync wrote metadata (%d -> %d writes); the refresh must be diff-gated (#1205)", writesBefore, cs.writes)
+	}
+	if got := allSessionBeads(t, cs)[0].Metadata["provider"]; got != "omp-azure" {
+		t.Errorf("tick 3: provider changed on a no-op sync: got %q, want omp-azure", got)
+	}
+
+	// Tick 4 (clobber guard): a nil ResolvedProvider (transient resolution
+	// failure) must NOT wipe the cached values — mirror the `command != ""`
+	// guard that #1044 added.
+	ds["mayor"] = TemplateParams{TemplateName: "mayor", Command: ompCmd, ResolvedProvider: nil}
+	clk.Advance(time.Minute)
+	syncSessionBeads("", cs, ds, sp, allConfiguredDS(ds), nil, clk, &stderr, false)
+	if got := allSessionBeads(t, cs)[0].Metadata["provider"]; got != "omp-azure" {
+		t.Errorf("tick 4: nil ResolvedProvider clobbered provider: got %q, want omp-azure", got)
+	}
+
+	if stderr.Len() > 0 {
+		t.Fatalf("unexpected stderr: %s", stderr.String())
+	}
+}
+
 func TestSyncSessionBeadsWithSnapshot_RefreshesMissingNamedSessionFromStore(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()

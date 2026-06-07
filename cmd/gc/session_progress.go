@@ -2,6 +2,20 @@ package main
 
 import "time"
 
+// isMinFloorIdleWorker reports whether a session is a legitimate pool floor
+// worker that should be exempt from the progress-stall recycler.
+//
+// A session is a floor worker when the pool has a configured floor
+// (minActiveSessions > 0) AND the number of currently open sessions in the
+// pool is at or below that floor. In this state every live session is part of
+// the always-warm contingent; none should be recycled for being unclaimed —
+// they are waiting for routed work, not parked on an error.
+//
+// Inputs are in-memory values available to the caller; no I/O required.
+func isMinFloorIdleWorker(minActiveSessions, openSessionsInPool int) bool {
+	return minActiveSessions > 0 && openSessionsInPool <= minActiveSessions
+}
+
 // sessionProgressStalled reports whether a desired, alive session has stopped
 // making progress and should be recycled with a fresh restart. It is the
 // progress-aware half of the liveness predicate (ADR-0013 Amendment A1, move

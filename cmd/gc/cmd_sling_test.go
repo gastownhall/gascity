@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -20,6 +21,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
+	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/pgauth"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/shellquote"
@@ -851,6 +853,66 @@ func TestDoSlingSuspendedAgentForce(t *testing.T) {
 	}
 }
 
+func TestDoSlingSuspendedRigWarns(t *testing.T) {
+	runner := newFakeRunner()
+	sp := runtime.NewFake()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs:      []config.Rig{{Name: "myrig", Suspended: true}},
+	}
+	a := config.Agent{Name: "polecat", Dir: "myrig", MaxActiveSessions: intPtr(1)}
+
+	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
+	// Rig-scoped agents read their rig's store; match it so the
+	// cross-store route guard does not trip before the rig check.
+	deps.StoreRef = "rig:myrig"
+	opts := testOpts(a, "my-1")
+	code := doSling(opts, deps, nil, stdout, stderr)
+
+	if code != 0 {
+		t.Fatalf("doSling returned %d, want 0 (still routes)", code)
+	}
+	if !strings.Contains(stderr.String(), `rig "myrig" is suspended`) {
+		t.Errorf("stderr = %q, want suspended-rig warning", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "gc rig resume myrig") {
+		t.Errorf("stderr = %q, want resume hint", stderr.String())
+	}
+	assertStoreRoutedTo(t, deps.Store, "my-1", "myrig/polecat")
+}
+
+func TestDoSlingSuspendedRigForce(t *testing.T) {
+	runner := newFakeRunner()
+	sp := runtime.NewFake()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs:      []config.Rig{{Name: "myrig", Suspended: true}},
+	}
+	a := config.Agent{Name: "polecat", Dir: "myrig", MaxActiveSessions: intPtr(1)}
+
+	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
+	// Rig-scoped agents read their rig's store; match it so the
+	// cross-store route guard does not trip before the rig check.
+	deps.StoreRef = "rig:myrig"
+	opts := testOpts(a, "my-1")
+	opts.Force = true
+	code := doSling(opts, deps, nil, stdout, stderr)
+
+	if code != 0 {
+		t.Fatalf("doSling returned %d, want 0", code)
+	}
+	if strings.Contains(stderr.String(), "suspended") {
+		t.Errorf("--force should suppress warning; stderr = %q", stderr.String())
+	}
+}
+
+func TestSlingJSONWarningsSuspendedRig(t *testing.T) {
+	warnings := slingJSONWarnings(sling.SlingResult{SuspendedRig: "myrig"})
+	if !slices.Contains(warnings, "rig_suspended") {
+		t.Errorf("warnings = %v, want to contain rig_suspended", warnings)
+	}
+}
+
 func TestDoSlingMultiSessionMaxZeroWarns(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()
@@ -1655,16 +1717,52 @@ max_active_sessions = 1
 		t.Fatalf("session bead count = %d, want 0 after sling; sessions=%#v", len(sessions), sessions)
 	}
 
-	counts, _, errs := defaultScaleCheckCounts([]defaultScaleCheckTarget{{
-		template: "worker",
-		storeKey: "city",
-		store:    store,
-	}})
-	if len(errs) != 0 {
-		t.Fatalf("defaultScaleCheckCounts errs = %v", errs)
+	// mol-do-work is a graph.v2 formula (#2941): the default-formula sling
+	// creates a one-item input convoy plus a workflow root instead of
+	// routing the bare work bead.
+	all, err := store.List(beads.ListQuery{AllowScan: true, TierMode: beads.TierBoth})
+	if err != nil {
+		t.Fatalf("store.List: %v", err)
 	}
-	if got := counts["worker"]; got != 1 {
-		t.Fatalf("defaultScaleCheckCounts[worker] = %d, want 1 routed work bead demand", got)
+	var root *beads.Bead
+	for i := range all {
+		if all[i].Metadata["gc.kind"] == "workflow" {
+			root = &all[i]
+			break
+		}
+	}
+	if root == nil {
+		t.Fatalf("no graph.v2 workflow root created; beads=%#v", all)
+	}
+	inputConvoyID := root.Metadata["gc.input_convoy_id"]
+	if inputConvoyID == "" {
+		t.Fatalf("workflow root %s missing gc.input_convoy_id: %v", root.ID, root.Metadata)
+	}
+	members, err := convoycore.Members(store, inputConvoyID, true)
+	if err != nil {
+		t.Fatalf("convoycore.Members(%s): %v", inputConvoyID, err)
+	}
+	if len(members) != 1 || members[0].Title != "ship feature" {
+		t.Fatalf("input convoy members = %#v, want the slung work bead", members)
+	}
+
+	// Demand surfaces through the assigned-work path: the routed graph step
+	// bead makes the reconciler desire a worker session even though sling
+	// itself materialized nothing.
+	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityDir, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+	var dsErr bytes.Buffer
+	ds := buildDesiredState("demo", cityDir, time.Now().UTC(), cfg, runtime.NewFake(), store, &dsErr)
+	desiredWorkers := 0
+	for name := range ds.State {
+		if strings.HasPrefix(name, "worker-") {
+			desiredWorkers++
+		}
+	}
+	if desiredWorkers != 1 {
+		t.Fatalf("desired worker sessions = %d, want 1 from routed graph step demand; state=%v stderr=%s", desiredWorkers, ds.State, dsErr.String())
 	}
 }
 

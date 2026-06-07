@@ -23,6 +23,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionauto "github.com/gastownhall/gascity/internal/runtime/auto"
@@ -82,7 +83,8 @@ type CityRuntime struct {
 	orderRescanLast         time.Time
 	trace                   *sessionReconcilerTraceManager
 
-	orderSweepWatchdogLast time.Time
+	orderSweepWatchdogLast     time.Time
+	nudgeMailSweepWatchdogLast time.Time
 
 	rec events.Recorder
 	cs  *controllerState // nil when controller-managed bead stores are unavailable
@@ -1220,6 +1222,7 @@ func (cr *CityRuntime) dispatchOrders(ctx context.Context, cityRoot string) {
 	now := time.Now()
 	cr.rescanOrderDispatcherIfDue(ctx, cityRoot, now)
 	cr.runOrderTrackingSweepWatchdog(now)
+	cr.runNudgeMailSweepWatchdog(now)
 	if cr.od != nil {
 		cr.od.dispatch(ctx, cityRoot, now)
 	}
@@ -1346,6 +1349,39 @@ func (cr *CityRuntime) runOrderTrackingSweepWatchdog(now time.Time) {
 	n := result.trackingClosed
 	if n > 0 && cr.stderr != nil {
 		fmt.Fprintf(cr.stderr, "%s: order tracking sweep watchdog closed %d stale tracking bead(s)\n", cr.logPrefix, n) //nolint:errcheck // best-effort stderr
+	}
+}
+
+func (cr *CityRuntime) runNudgeMailSweepWatchdog(now time.Time) {
+	if !cr.nudgeMailSweepWatchdogLast.IsZero() && now.Sub(cr.nudgeMailSweepWatchdogLast) < nudgeMailSweepWatchdogInterval {
+		return
+	}
+	cr.nudgeMailSweepWatchdogLast = now
+
+	store := cr.cityBeadStore()
+	if store == nil {
+		return
+	}
+	// Load nudge state to protect live nudge IDs. A missing state file is not an
+	// error (LoadState returns empty state), so any error here is a real
+	// read/parse failure: fail closed and skip this sweep rather than sweeping
+	// without live-ID protection, which could close beads for in-flight nudges.
+	nudgeState, stateErr := nudgequeue.LoadState(cr.cityPath)
+	if stateErr != nil {
+		if cr.stderr != nil {
+			fmt.Fprintf(cr.stderr, "%s: nudge-mail-sweep watchdog: load nudge state: %v\n", cr.logPrefix, stateErr) //nolint:errcheck // best-effort stderr
+		}
+		return
+	}
+	statePtr := &nudgeState
+
+	result, sweepErr := sweepStaleNudgeMail(store, statePtr, now, nudgeMailSweepDefaultNudgeTTL, nudgeMailSweepDefaultMailTTL, nudgeMailSweepWatchdogCloseBudget)
+	if sweepErr != nil && cr.stderr != nil {
+		fmt.Fprintf(cr.stderr, "%s: nudge-mail-sweep watchdog: %v\n", cr.logPrefix, sweepErr) //nolint:errcheck // best-effort stderr
+	}
+	total := result.NudgeClosed + result.MailClosed
+	if total > 0 && cr.stderr != nil {
+		fmt.Fprintf(cr.stderr, "%s: nudge-mail-sweep watchdog closed %d nudge bead(s), %d mail bead(s)\n", cr.logPrefix, result.NudgeClosed, result.MailClosed) //nolint:errcheck // best-effort stderr
 	}
 }
 
@@ -1934,6 +1970,19 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 		}
 		assignedWorkBeads, assignedWorkStoreRefs = filterReleasedAssignedWorkSnapshot(assignedWorkBeads, assignedWorkStoreRefs, released)
 	}
+	// Squatter guard (gastownhall/gascity#2930): a foreign Dolt that has bound
+	// this city's managed port returns zero demand, indistinguishable from a
+	// genuinely-idle fleet — and would drain every running pool. This runs on
+	// the steady-state tick (not just startup), before the sweep and the
+	// singleton reconcile below. The ctx-bounded @@datadir probe is paid only
+	// when the sweep would actually close a running pool session this tick (a
+	// scale-down event), so a steady warm fleet pays nothing; a confirmed
+	// data-dir mismatch marks the tick partial so the existing hold suppresses
+	// the drain. Fail-open in every other case.
+	if storeIdentityHold(ctx, cr.cityPath, poolSweepWouldDrain(sessionBeads, result.State, cr.cfg), cr.stderr) {
+		fmt.Fprintf(cr.stderr, "%s: managed dolt serves an unexpected data-dir (squatter on the managed port?); holding pools this tick — see gastownhall/gascity#2930\n", cr.logPrefix) //nolint:errcheck // best-effort stderr
+		result.StoreQueryPartial = true
+	}
 	// poolDesired determines how many sessions should be AWAKE. Uses the
 	// same scale_check counts that buildDesiredState already computed (no
 	// duplicate shell-outs). Resume tier from cross-referenced assigned
@@ -2313,6 +2362,32 @@ func (cr *CityRuntime) waitForAsyncStops() bool {
 		return false
 	}
 	return true
+}
+
+// poolSweepWouldDrain reports whether sweepUndesiredPoolSessionBeads would
+// close at least one running pool session this tick — i.e. an open pool session
+// bead is not present in desiredState. It mirrors the sweep's core candidate
+// filter (open, not desired, not a manual/named session); it intentionally
+// omits the sweep's transient create/post-create grace checks because an
+// over-inclusive answer only costs an extra identity probe, never a wrong hold.
+// Used to gate the managed-Dolt squatter probe to actual scale-down events.
+func poolSweepWouldDrain(sessionBeads *sessionBeadSnapshot, desiredState map[string]TemplateParams, cfg *config.City) bool {
+	if sessionBeads == nil || cfg == nil {
+		return false
+	}
+	for _, bead := range sessionBeads.Open() {
+		if bead.Status == "closed" {
+			continue
+		}
+		if _, desired := desiredState[bead.Metadata["session_name"]]; desired {
+			continue
+		}
+		if isManualSessionBead(bead) || isNamedSessionBead(bead) {
+			continue
+		}
+		return true
+	}
+	return false
 }
 
 func sweepUndesiredPoolSessionBeads(

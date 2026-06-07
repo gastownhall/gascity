@@ -9,6 +9,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/suspensionstate"
 	"github.com/gastownhall/gascity/internal/worker"
 	"github.com/spf13/cobra"
 )
@@ -289,8 +290,9 @@ func doRigStatusWithStoreAndSnapshot(
 		return renderRigStatusJSON(sp, dops, rig, agents, cityPath, cityName, sessionTemplate, cfg, store, statusSnapshot, stdout, stderr)
 	}
 
+	suspState, _ := loadSuspensionState(fsys.OSFS{}, cityPath)
 	suspStr := "no"
-	if rig.Suspended {
+	if suspensionstate.EffectiveRigSuspended(suspState, rig.Name, rig.EffectiveSuspendedOnStart()) {
 		suspStr = "yes"
 	}
 

@@ -65,3 +65,41 @@ func DiscoverFallbackPath(searchPaths []string, provider, workDir, gcSessionID s
 	}
 	return sessionlog.FindSessionFileForProvider(searchPaths, provider, workDir)
 }
+
+// HasKeyedTranscript reports whether the per-session ("keyed") transcript that
+// a resume would reattach to is present on disk, and whether this provider
+// exposes a keyed transcript that can be probed on disk at all.
+//
+// probeable is true only for provider families that store a transcript keyed by
+// the gc session id, so that its absence on disk is a reliable stale-resume
+// signal: claude (and claude-eco), kimi, and pi. It is false for providers that
+// discover transcripts by cwd/date (codex/gemini/opencode), for unknown or
+// custom providers whose layout we cannot assume, and when no session key or
+// work dir is supplied — callers should leave such sessions' resume metadata
+// untouched rather than guess. When probeable is true, exists reports whether
+// the keyed transcript file was found. The per-provider readers reached through
+// DiscoverKeyedPath merge their own default roots on top of searchPaths, so
+// claude/kimi/pi each probe their real on-disk location even when given only
+// the claude default search root.
+func HasKeyedTranscript(searchPaths []string, provider, workDir, sessionKey string) (exists, probeable bool) {
+	if strings.TrimSpace(sessionKey) == "" || strings.TrimSpace(workDir) == "" || !providerHasKeyedTranscript(provider) {
+		return false, false
+	}
+	return DiscoverKeyedPath(searchPaths, provider, workDir, sessionKey) != "", true
+}
+
+// providerHasKeyedTranscript reports whether the provider family persists a
+// per-session transcript keyed by the gc session id. This is stricter than
+// SupportsIDLookup (which treats any non-codex/gemini/opencode provider as
+// id-capable for discovery-strategy purposes): here we only claim a provider
+// when we actually know its on-disk keyed layout, so the stale-resume guard
+// never clears a resume key for a provider whose transcript we cannot verify.
+func providerHasKeyedTranscript(provider string) bool {
+	switch sessionlog.ProviderFamily(provider) {
+	case "kimi", "pi":
+		return true
+	}
+	// claude and claude-eco fall through ProviderFamily unchanged; match them
+	// by name since both store keyed JSONL under ~/.claude/projects.
+	return strings.Contains(strings.ToLower(strings.TrimSpace(provider)), "claude")
+}

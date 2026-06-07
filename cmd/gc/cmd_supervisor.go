@@ -266,6 +266,9 @@ const supervisorPreserveSessionsOnSignalEnv = "GC_SUPERVISOR_PRESERVE_SESSIONS_O
 // around `gc supervisor run` that sources a credentials file).
 const supervisorOmitProviderCredsEnv = "GC_SUPERVISOR_OMIT_PROVIDER_CREDS"
 
+// 32768 is the Linux kernel default for net.ipv4.ip_local_port_range lower bound.
+const supervisorEphemeralPortWarningThreshold = 32768
+
 var supervisorShutdownSettleDelay = 50 * time.Millisecond
 
 var supervisorSignalNotify = signal.Notify
@@ -770,25 +773,54 @@ func waitForSupervisorExitUntil(sockPath string, deadline time.Time) error {
 
 func supervisorStatusWithOptions(stdout, _ io.Writer, asJSON bool) int {
 	sockPath, pid := runningSupervisorSocket()
+	running := pid > 0
+	pidSource := ""
+	if pid > 0 {
+		pidSource = "control_socket"
+	}
+	// Fallback liveness when the control socket is unreachable (gascity#2984):
+	// a launchd/systemd-managed supervisor may bind its socket at a path the
+	// CLI environment does not resolve. Trust the service manager, then the API.
+	if !running {
+		switch {
+		case supervisorServiceManagerActive():
+			running, pidSource = true, "service_manager"
+		case supervisorAPIReachable():
+			running, pidSource = true, "api"
+		}
+	}
 	if asJSON {
 		payload := map[string]any{
 			"schema_version": "1",
-			"running":        pid > 0,
+			"running":        running,
 			"pid":            pid,
 			"socket_path":    sockPath,
 			"checked_paths":  supervisorSocketPathCandidates(),
+		}
+		if pidSource != "" {
+			payload["pid_source"] = pidSource
+		}
+		if running && pid == 0 {
+			// Distinct diagnostic state (gascity#2984): running per service
+			// manager / API, but pid discovery via the socket failed.
+			payload["socket_status"] = "unreachable"
 		}
 		if err := writeCLIJSONLine(stdout, payload); err != nil {
 			return 1
 		}
 		return 0
 	}
-	if pid > 0 {
+	switch {
+	case pid > 0:
 		fmt.Fprintf(stdout, "Supervisor is running (PID %d)\n", pid) //nolint:errcheck
 		return 0
+	case running:
+		fmt.Fprintf(stdout, "Supervisor is running (pid unavailable: control socket unreachable; liveness confirmed via %s)\n", pidSource) //nolint:errcheck
+		return 0
+	default:
+		fmt.Fprintln(stdout, "Supervisor is not running") //nolint:errcheck
+		return 1
 	}
-	fmt.Fprintln(stdout, "Supervisor is not running") //nolint:errcheck
-	return 1
 }
 
 func newSupervisorReloadCmd(stdout, stderr io.Writer) *cobra.Command {
@@ -1044,7 +1076,7 @@ func runSupervisor(stdout, stderr io.Writer) int {
 	// lock-free (atomic pointer load); mutations go through citiesMu.
 	registry := newCityRegistry()
 	supEvPath := filepath.Join(supervisor.RuntimeDir(), "events.jsonl")
-	if supFR, supErr := events.NewFileRecorder(supEvPath, stderr); supErr == nil {
+	if supFR, supErr := newFileEventsRecorder(supEvPath, config.EventsConfig{}, stderr); supErr == nil {
 		registry.SetSupervisorRecorder(supFR)
 		defer supFR.Close() //nolint:errcheck
 	}
@@ -1101,6 +1133,9 @@ func runSupervisor(stdout, stderr io.Writer) int {
 	if len(supCfg.Supervisor.AllowedOrigins) > 0 {
 		apiMux.WithAllowedOrigins(supCfg.Supervisor.AllowedOrigins)
 	}
+	if len(supCfg.Supervisor.AllowedHosts) > 0 {
+		apiMux.WithAllowedHosts(supCfg.Supervisor.AllowedHosts)
+	}
 
 	pprofSrv, pprofErr := api.StartPprof("")
 	if pprofErr != nil {
@@ -1119,6 +1154,11 @@ func runSupervisor(stdout, stderr io.Writer) int {
 	if apiErr != nil {
 		fmt.Fprintf(stderr, "gc supervisor: api: listen %s failed: %v\n", addr, apiErr) //nolint:errcheck
 		return 1
+	}
+	if port >= supervisorEphemeralPortWarningThreshold {
+		_, _ = fmt.Fprintf(stderr,
+			"gc supervisor: WARNING: API binding to ephemeral port %d -- "+
+				"set port = 8372 in ~/.gc/supervisor.toml\n", port)
 	}
 	go func() {
 		if err := apiMux.Serve(apiLis); err != nil && !errors.Is(err, http.ErrServerClosed) {

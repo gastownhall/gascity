@@ -841,7 +841,7 @@ func TestFormulaFilesystemSearchGuidanceCoversPromptSources(t *testing.T) {
 	}
 }
 
-func TestCoreWorkerPromptsUseAssignedReadyQueryTemplate(t *testing.T) {
+func TestCoreWorkerPromptsUseHookClaimProtocol(t *testing.T) {
 	repoRoot, err := filepath.Abs(filepath.Join("..", ".."))
 	if err != nil {
 		t.Fatalf("filepath.Abs(repo root): %v", err)
@@ -857,11 +857,20 @@ func TestCoreWorkerPromptsUseAssignedReadyQueryTemplate(t *testing.T) {
 				t.Fatalf("ReadFile(%s): %v", rel, err)
 			}
 			text := string(data)
-			if !strings.Contains(text, "{{ .AssignedReadyQuery }}") {
-				t.Fatalf("%s missing AssignedReadyQuery placeholder", rel)
+			if !strings.Contains(text, "gc hook --claim --drain-ack --json") {
+				t.Fatalf("%s missing drain-aware hook claim startup protocol", rel)
+			}
+			if !strings.Contains(text, "gc hook --claim --json") {
+				t.Fatalf("%s missing hook claim polling protocol", rel)
+			}
+			if strings.Contains(text, "{{ .AssignedReadyQuery }}") {
+				t.Fatalf("%s still uses AssignedReadyQuery instead of hook claim protocol", rel)
+			}
+			if strings.Contains(text, "bd ready") {
+				t.Fatalf("%s hardcodes bd ready instead of hook claim protocol", rel)
 			}
 			if strings.Contains(text, "bd ready --include-ephemeral --assignee") {
-				t.Fatalf("%s hardcodes bd ready --include-ephemeral instead of AssignedReadyQuery", rel)
+				t.Fatalf("%s hardcodes bd ready --include-ephemeral instead of hook claim protocol", rel)
 			}
 		})
 	}
