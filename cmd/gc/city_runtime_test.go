@@ -6288,3 +6288,67 @@ func TestOrderTrackingRetentionWatchdog_StampsLastAfterFiring(t *testing.T) {
 		t.Fatalf("orderTrackingRetentionWatchdogLast = %v, want unchanged %v", cr.orderTrackingRetentionWatchdogLast, now)
 	}
 }
+
+func TestWarnIfClosedOrderTrackingBacklogLarge_SilentAtThreshold(t *testing.T) {
+	// 100 closed beads: at the threshold, no warning (fires only when > 100).
+	seed := make([]beads.Bead, 100)
+	for i := range seed {
+		seed[i] = beads.Bead{
+			ID:     fmt.Sprintf("ot-%03d", i),
+			Status: "closed",
+			Labels: []string{labelOrderTracking},
+		}
+	}
+	store := beads.NewMemStoreFrom(200, seed, nil)
+	var buf bytes.Buffer
+	warnIfClosedOrderTrackingBacklogLarge(store, &buf)
+	if buf.Len() > 0 {
+		t.Fatalf("got unexpected warning at count=100: %q", buf.String())
+	}
+}
+
+func TestWarnIfClosedOrderTrackingBacklogLarge_FiresAboveThreshold(t *testing.T) {
+	// 101 closed beads: above the threshold, warning must fire.
+	seed := make([]beads.Bead, 101)
+	for i := range seed {
+		seed[i] = beads.Bead{
+			ID:     fmt.Sprintf("ot-%03d", i),
+			Status: "closed",
+			Labels: []string{labelOrderTracking},
+		}
+	}
+	store := beads.NewMemStoreFrom(200, seed, nil)
+	var buf bytes.Buffer
+	warnIfClosedOrderTrackingBacklogLarge(store, &buf)
+	got := buf.String()
+	if !strings.Contains(got, "101") {
+		t.Fatalf("warning = %q, want count 101", got)
+	}
+	if !strings.Contains(got, "gc start:") {
+		t.Fatalf("warning = %q, missing 'gc start:' prefix", got)
+	}
+}
+
+func TestWarnIfClosedOrderTrackingBacklogLarge_CapFormatAtLimit(t *testing.T) {
+	// 1001 closed beads: at the list limit, count displays as "≥1001".
+	seed := make([]beads.Bead, 1001)
+	for i := range seed {
+		seed[i] = beads.Bead{
+			ID:     fmt.Sprintf("ot-%04d", i),
+			Status: "closed",
+			Labels: []string{labelOrderTracking},
+		}
+	}
+	store := beads.NewMemStoreFrom(1100, seed, nil)
+	var buf bytes.Buffer
+	warnIfClosedOrderTrackingBacklogLarge(store, &buf)
+	got := buf.String()
+	if !strings.Contains(got, "≥1001") {
+		t.Fatalf("warning = %q, want ≥1001 cap format", got)
+	}
+}
+
+func TestWarnIfClosedOrderTrackingBacklogLarge_SilentOnNilStore(_ *testing.T) {
+	// nil store: must not panic.
+	warnIfClosedOrderTrackingBacklogLarge(nil, io.Discard)
+}
