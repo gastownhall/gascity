@@ -55,6 +55,24 @@ func TestOrderTrackingRetentionCheck_WarningAboveThreshold(t *testing.T) {
 	}
 }
 
+func TestOrderTrackingRetentionCheck_CapsDisplayAtQueryLimit(t *testing.T) {
+	// Seed more beads than the query limit (501) to verify the display caps at ≥501.
+	store := beads.NewMemStoreFrom(700, makeClosedOrderTrackingBeads(600), nil)
+	check := newOrderTrackingRetentionCheck("/city", func(string) (beads.Store, error) { return store, nil })
+
+	res := check.Run(&doctor.CheckContext{})
+	if res.Status != doctor.StatusWarning {
+		t.Fatalf("Status = %v, want Warning: %s", res.Status, res.Message)
+	}
+	if !strings.Contains(res.Message, "≥501") {
+		t.Errorf("Message %q should contain ≥501 when store has more beads than query limit", res.Message)
+	}
+	// Bare exact counts (e.g. "501 closed" or "600 closed") must not appear — the ≥ prefix is required.
+	if strings.HasPrefix(res.Message, "501 ") || strings.HasPrefix(res.Message, "600 ") {
+		t.Errorf("Message %q should not start with bare exact count when at query limit", res.Message)
+	}
+}
+
 func TestOrderTrackingRetentionCheck_OKWhenNoStore(t *testing.T) {
 	check := newOrderTrackingRetentionCheck("", nil)
 	res := check.Run(&doctor.CheckContext{})
