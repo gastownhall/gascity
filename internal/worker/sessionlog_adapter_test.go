@@ -245,6 +245,34 @@ func TestSessionLogAdapterDiscoverTranscriptPiExplicitIDFailsClosed(t *testing.T
 	}
 }
 
+func TestSessionLogAdapterDiscoverTranscriptAntigravityProvisionalIDUsesLastConversation(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	workDir := filepath.Join(t.TempDir(), "antigravity-project")
+	fixtureRoot := t.TempDir()
+	brainRoot := filepath.Join(fixtureRoot, "brain")
+	convID := "750fa972-4c56-4215-99b9-893382aee2b4"
+	path := filepath.Join(brainRoot, convID, ".system_generated", "logs", "transcript.jsonl")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir transcript dir: %v", err)
+	}
+	writeLines(t, path, `{"step_index":0,"type":"USER_INPUT","content":"hello"}`)
+
+	cachePath := filepath.Join(fixtureRoot, "cache", "last_conversations.json")
+	if err := os.MkdirAll(filepath.Dir(cachePath), 0o755); err != nil {
+		t.Fatalf("mkdir cache dir: %v", err)
+	}
+	if err := os.WriteFile(cachePath, []byte(fmt.Sprintf("{%q:%q}\n", workDir, convID)), 0o644); err != nil {
+		t.Fatalf("write cache: %v", err)
+	}
+
+	adapter := SessionLogAdapter{SearchPaths: []string{brainRoot}}
+	discovered := adapter.DiscoverTranscript("antigravity/tmux-cli", workDir, "gc-1")
+	if discovered != path {
+		t.Fatalf("DiscoverTranscript() = %q, want %q", discovered, path)
+	}
+}
+
 func TestSessionLogAdapterLoadHistoryCodex(t *testing.T) {
 	t.Parallel()
 

@@ -109,9 +109,10 @@ func prepareProviderSetup(gcHome string, env *helpers.Env) providerSetup {
 		setup.SetupError = "bd not found in PATH"
 		return setup
 	}
-	binaryPath, err := exec.LookPath(setup.Provider)
+	binaryName := profileExecutable(setup.Profile, setup.Provider)
+	binaryPath, err := exec.LookPath(binaryName)
 	if err != nil {
-		setup.SetupError = fmt.Sprintf("%s CLI not found in PATH", setup.Provider)
+		setup.SetupError = fmt.Sprintf("%s CLI not found in PATH", binaryName)
 		return setup
 	}
 	setup.BinaryPath = binaryPath
@@ -138,6 +139,8 @@ func resolveProfile(raw string) workerpkg.Profile {
 		return workerpkg.ProfileOpenCodeTmuxCLI
 	case string(workerpkg.ProfilePiTmuxCLI):
 		return workerpkg.ProfilePiTmuxCLI
+	case string(workerpkg.ProfileAntigravityTmuxCLI):
+		return workerpkg.ProfileAntigravityTmuxCLI
 	default:
 		return workerpkg.Profile(strings.TrimSpace(raw))
 	}
@@ -157,9 +160,18 @@ func profileProvider(profile workerpkg.Profile) string {
 		return "opencode"
 	case workerpkg.ProfilePiTmuxCLI:
 		return "pi"
+	case workerpkg.ProfileAntigravityTmuxCLI:
+		return "antigravity"
 	default:
 		return ""
 	}
+}
+
+func profileExecutable(profile workerpkg.Profile, provider string) string {
+	if profile == workerpkg.ProfileAntigravityTmuxCLI {
+		return "agy"
+	}
+	return provider
 }
 
 func profileSearchPaths(gcHome string, profile workerpkg.Profile) []string {
@@ -174,6 +186,8 @@ func profileSearchPaths(gcHome string, profile workerpkg.Profile) []string {
 		return []string{filepath.Join(gcHome, ".local", "share", "gascity", "opencode-transcripts")}
 	case workerpkg.ProfilePiTmuxCLI:
 		return []string{filepath.Join(gcHome, ".pi", "agent", "sessions")}
+	case workerpkg.ProfileAntigravityTmuxCLI:
+		return []string{filepath.Join(gcHome, ".gemini", "antigravity-cli", "brain")}
 	default:
 		return []string{filepath.Join(gcHome, ".claude", "projects")}
 	}
@@ -193,9 +207,100 @@ func stageProviderAuth(gcHome string, env *helpers.Env, profile workerpkg.Profil
 		return stageOpenCodeGeminiAuth(gcHome, env)
 	case workerpkg.ProfilePiTmuxCLI:
 		return stagePiOllamaCloudAuth(gcHome, env)
+	case workerpkg.ProfileAntigravityTmuxCLI:
+		return stageAntigravityAuth(gcHome, env)
 	default:
 		return "", fmt.Errorf("unsupported worker-inference profile %q", profile)
 	}
+}
+
+func stageAntigravityAuth(gcHome string, env *helpers.Env) (string, error) {
+	_ = env
+
+	cliDir := filepath.Join(gcHome, ".gemini", "antigravity-cli")
+	if err := os.MkdirAll(filepath.Join(cliDir, "brain"), 0o755); err != nil {
+		return "", err
+	}
+
+	token, tokenFromFile, err := stagedValue(
+		"GC_WORKER_INFERENCE_ANTIGRAVITY_OAUTH_TOKEN",
+		"GC_WORKER_INFERENCE_ANTIGRAVITY_OAUTH_TOKEN_FILE",
+	)
+	if err != nil {
+		return "", fmt.Errorf("antigravity auth unavailable: %w", err)
+	}
+	if strings.TrimSpace(token) != "" {
+		if err := os.WriteFile(filepath.Join(cliDir, "antigravity-oauth-token"), []byte(token), 0o600); err != nil {
+			return "", err
+		}
+		if err := stageAntigravityOnboarding("", gcHome); err != nil {
+			return "", err
+		}
+		return stagedSecretSource("antigravity", tokenFromFile), nil
+	}
+
+	if sourceHome := strings.TrimSpace(os.Getenv("GC_WORKER_INFERENCE_ANTIGRAVITY_HOME")); sourceHome != "" {
+		if err := stageAntigravityHomeSource(sourceHome, gcHome); err != nil {
+			return "", fmt.Errorf("antigravity auth unavailable: %w", err)
+		}
+		return "env:GC_WORKER_INFERENCE_ANTIGRAVITY_HOME", nil
+	}
+
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("antigravity auth unavailable: %w", err)
+	}
+	if err := stageAntigravityHomeSource(home, gcHome); err == nil {
+		return "host-home:antigravity", nil
+	}
+	return "", fmt.Errorf("antigravity auth unavailable: set GC_WORKER_INFERENCE_ANTIGRAVITY_HOME or GC_WORKER_INFERENCE_ANTIGRAVITY_OAUTH_TOKEN")
+}
+
+func stageAntigravityHomeSource(sourceHome, gcHome string) error {
+	sourceHome = strings.TrimSpace(sourceHome)
+	if sourceHome == "" {
+		return fmt.Errorf("source home is empty")
+	}
+	srcCLI := filepath.Join(sourceHome, ".gemini", "antigravity-cli")
+	dstCLI := filepath.Join(gcHome, ".gemini", "antigravity-cli")
+	for _, name := range []string{"antigravity-oauth-token", "settings.json", "installation_id", "keybindings.json"} {
+		if err := copyFileIfExists(filepath.Join(srcCLI, name), filepath.Join(dstCLI, name), 0o600); err != nil {
+			return err
+		}
+	}
+	srcConfig := filepath.Join(sourceHome, ".gemini", "config")
+	dstConfig := filepath.Join(gcHome, ".gemini", "config")
+	for _, name := range []string{".migrated", "import_manifest.json", "mcp_config.json"} {
+		if err := copyFileIfExists(filepath.Join(srcConfig, name), filepath.Join(dstConfig, name), 0o600); err != nil {
+			return err
+		}
+	}
+	if err := stageAntigravityOnboarding(srcCLI, gcHome); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Join(dstCLI, "brain"), 0o755); err != nil {
+		return err
+	}
+	if !fileExists(filepath.Join(dstCLI, "antigravity-oauth-token")) {
+		return fmt.Errorf("missing %s", filepath.Join(srcCLI, "antigravity-oauth-token"))
+	}
+	return nil
+}
+
+func stageAntigravityOnboarding(srcCLI, gcHome string) error {
+	dst := filepath.Join(gcHome, ".gemini", "antigravity-cli", "cache", "onboarding.json")
+	if strings.TrimSpace(srcCLI) != "" {
+		if err := copyFileIfExists(filepath.Join(srcCLI, "cache", "onboarding.json"), dst, 0o600); err != nil {
+			return err
+		}
+		if fileExists(dst) {
+			return nil
+		}
+	}
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(dst, []byte("{\n  \"consumerOnboardingComplete\": true,\n  \"enterpriseOnboardingComplete\": true,\n  \"onboardingComplete\": true\n}\n"), 0o600)
 }
 
 func stageKimiAuth(gcHome string, env *helpers.Env) (string, error) {

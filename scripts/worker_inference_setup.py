@@ -32,8 +32,13 @@ def main() -> int:
     if args.command != "install":
         raise SystemExit(f"unsupported command: {args.command}")
     provider = args.profile.split("/", 1)[0].strip().lower()
-    if provider not in {"claude", "kimi", *NPM_PACKAGE_BY_PROVIDER}:
+    if provider not in {"claude", "kimi", "antigravity", *NPM_PACKAGE_BY_PROVIDER}:
         raise SystemExit(f"unsupported worker-inference profile: {args.profile!r}")
+    if provider == "antigravity":
+        if not shutil.which("agy"):
+            raise SystemExit("agy was not found in PATH; install Antigravity CLI before running antigravity/tmux-cli worker inference")
+        print("agy already present in PATH; skipping install")
+        return 0
     already_present = shutil.which(provider) is not None
     if already_present and not args.force and provider != "pi":
         print(f"{provider} already present in PATH; skipping install")

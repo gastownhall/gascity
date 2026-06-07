@@ -962,6 +962,35 @@ func TestSubmissionCapabilitiesRemainEnabledForPoolManagedSessions(t *testing.T)
 	}
 }
 
+func TestSubmissionCapabilitiesDisableInterruptNowForAntigravity(t *testing.T) {
+	caps := SubmissionCapabilitiesForMetadata(
+		map[string]string{
+			"provider_kind": "antigravity",
+			"provider":      "antigravity",
+		},
+		true,
+	)
+	if !caps.SupportsFollowUp {
+		t.Fatal("SupportsFollowUp = false, want true")
+	}
+	if caps.SupportsInterruptNow {
+		t.Fatal("SupportsInterruptNow = true, want false for Antigravity")
+	}
+}
+
+func TestSubmissionCapabilitiesDisableInterruptNowForWrappedAntigravity(t *testing.T) {
+	caps := SubmissionCapabilitiesForMetadata(
+		map[string]string{
+			"builtin_ancestor": "antigravity",
+			"provider":         "custom-antigravity",
+		},
+		true,
+	)
+	if caps.SupportsInterruptNow {
+		t.Fatal("SupportsInterruptNow = true, want false for wrapped Antigravity")
+	}
+}
+
 func TestSubmitInterruptNowUsesInterruptAndIdleWaitForGemini(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
