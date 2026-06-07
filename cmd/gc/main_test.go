@@ -48,8 +48,14 @@ func configureTestscriptEnvDefaults() {
 
 func configureIsolatedRuntimeEnv(t *testing.T) {
 	t.Helper()
-	t.Setenv("GC_HOME", t.TempDir())
+	td := t.TempDir()
+	t.Setenv("GC_HOME", td)
 	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	// Prevent city discovery from walking above the test temp dir and finding
+	// a .gc/ directory left by a running city or a prior test run in /tmp.
+	// t.Chdir + os.Getwd() returns the path as-is (symlinks not resolved), so
+	// the ceiling must match the unresolved TMPDIR-based path.
+	t.Setenv("GC_CEILING_DIRECTORIES", filepath.Dir(td))
 	if os.Getenv("GC_SESSION") == "" {
 		t.Setenv("GC_SESSION", "fake")
 	}
@@ -205,6 +211,14 @@ func TestMain(m *testing.M) {
 		panic(err)
 	}
 	if err := os.Setenv("TMPDIR", testTempRoot); err != nil {
+		panic(err)
+	}
+	// Prevent city discovery from walking above testTempRoot and finding a
+	// .gc/ directory left by a running city in /tmp. Tests that need a
+	// tighter ceiling override this via t.Setenv in configureIsolatedRuntimeEnv
+	// or clearGCEnv. normalizeDiscoveryPath resolves symlinks so both
+	// /tmp/... and /private/tmp/... forms match the same ceiling.
+	if err := os.Setenv("GC_CEILING_DIRECTORIES", testTempRoot); err != nil {
 		panic(err)
 	}
 	if err := tmuxtest.ConfigureProcessEnv(filepath.Join(testTempRoot, "tmux")); err != nil {
@@ -574,6 +588,10 @@ func TestFindCity(t *testing.T) {
 		}
 		t.Setenv("HOME", homeDir)
 		t.Setenv("GC_HOME", filepath.Join(homeDir, ".gc"))
+		// Clear the global TestMain ceiling so the $HOME-based ceiling
+		// takes effect; the test is specifically verifying that $HOME
+		// acts as a ceiling when GC_CEILING_DIRECTORIES is unset.
+		t.Setenv("GC_CEILING_DIRECTORIES", "")
 
 		if err := os.WriteFile(filepath.Join(root, "city.toml"), []byte("[workspace]\nname = \"root\"\n"), 0o644); err != nil {
 			t.Fatal(err)

@@ -89,6 +89,13 @@ func configuredSupervisorRuntimeRoot() string {
 
 func isCityDiscoveryCeiling(dir string, ceilings []string) bool {
 	dir = normalizeDiscoveryPath(dir)
+	if f := os.Getenv("GC_DEBUG_CEILING"); f != "" {
+		dbg, _ := os.OpenFile(f, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+		if dbg != nil {
+			fmt.Fprintf(dbg, "isCityDiscoveryCeiling: dir=%q ceilings=%v\n", dir, ceilings)
+			dbg.Close()
+		}
+	}
 	for _, ceiling := range ceilings {
 		if dir == ceiling {
 			return true
@@ -132,6 +139,12 @@ func normalizeDiscoveryPath(path string) string {
 	abs, err := filepath.Abs(path)
 	if err == nil {
 		path = abs
+	}
+	// Resolve symlinks so ceiling comparisons work regardless of whether the
+	// path was obtained via os.Getwd() (which may or may not resolve symlinks
+	// depending on how the chdir was performed) or a literal string.
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		path = resolved
 	}
 	return filepath.Clean(path)
 }

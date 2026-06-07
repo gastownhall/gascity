@@ -1,0 +1,11 @@
+# Reconcile GitHub PR state against delivery beads. Runs every 2 minutes and
+# repairs orphaned/zombie PRs, escalates stalled phases, and writes a heartbeat
+# for the supervisor liveness check. Idempotent: safe to dispatch in parallel or
+# on retry without side-effects.
+[order]
+description = "Reconcile GitHub PR state with delivery beads (orphan/zombie/dwell/lifetime)"
+trigger     = "cooldown"
+interval    = "2m"
+idempotent  = true
+exec        = "delivery-warden"
+timeout     = "90s"

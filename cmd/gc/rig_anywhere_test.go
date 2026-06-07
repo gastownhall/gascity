@@ -425,7 +425,9 @@ func TestRigAnywhere_ResolveContext(t *testing.T) {
 
 	t.Run("failure_nothing_matches", func(t *testing.T) {
 		resetFlags(t)
-		t.Setenv("GC_HOME", t.TempDir())
+		td := t.TempDir()
+		t.Setenv("GC_HOME", td)
+		t.Setenv("GC_CEILING_DIRECTORIES", filepath.Dir(td))
 
 		isolated := t.TempDir()
 		setCwd(t, isolated)

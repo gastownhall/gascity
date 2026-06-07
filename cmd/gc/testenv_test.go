@@ -80,7 +80,13 @@ func clearGCEnv(t *testing.T) {
 	for _, k := range liveEnvKeysForTests() {
 		t.Setenv(k, "")
 	}
-	t.Setenv("GC_HOME", filepath.Join(t.TempDir(), "gc-home"))
+	td := t.TempDir()
+	t.Setenv("GC_HOME", filepath.Join(td, "gc-home"))
+	// Prevent city discovery from walking above the test temp dir and finding
+	// a .gc/ directory left by a running city or a prior test run in /tmp.
+	// t.Chdir + os.Getwd() returns the path as-is (symlinks not resolved), so
+	// the ceiling must match the unresolved TMPDIR-based path.
+	t.Setenv("GC_CEILING_DIRECTORIES", filepath.Dir(td))
 }
 
 func clearProcessLiveEnvForTests() {
