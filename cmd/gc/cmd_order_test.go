@@ -1669,6 +1669,50 @@ description = "Do the cleanup."
 	}
 }
 
+func TestOrderRunPoolLegacyFormulaWarnsWhenRootIsNotReadyVisible(t *testing.T) {
+	formulaDir := t.TempDir()
+	writeFile(t, filepath.Join(formulaDir, "mol-legacy-cleanup.toml"), `
+formula = "mol-legacy-cleanup"
+version = 1
+
+[[steps]]
+id = "work"
+title = "Do legacy cleanup"
+description = "Do the cleanup."
+`)
+
+	aa := []orders.Order{
+		{Name: "legacy-cleanup", Formula: "mol-legacy-cleanup", Trigger: "cron", Schedule: "0 3 * * *", Pool: "dog", FormulaLayer: formulaDir},
+	}
+	store := beads.NewMemStore()
+
+	var stdout, stderr bytes.Buffer
+	code := doOrderRun(aa, "legacy-cleanup", "", "/city", store, nil, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doOrderRun = %d, want 0; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "scale-from-zero pools will not wake") {
+		t.Fatalf("stderr = %q, want pool visibility warning", stderr.String())
+	}
+	results, err := store.ListByLabel("order-run:legacy-cleanup", 0)
+	if err != nil {
+		t.Fatalf("store.ListByLabel(): %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("store.ListByLabel() len = %d, want 1 (%#v)", len(results), results)
+	}
+	if results[0].Type != "molecule" {
+		t.Fatalf("legacy root Type = %q, want molecule", results[0].Type)
+	}
+	ready, err := store.Ready()
+	if err != nil {
+		t.Fatalf("store.Ready(): %v", err)
+	}
+	if len(ready) != 0 {
+		t.Fatalf("Ready() = %#v, want no Ready-visible root for legacy molecule formula", ready)
+	}
+}
+
 func TestOrderRunNonPoolDoesNotSetRouteMetadata(t *testing.T) {
 	aa := []orders.Order{
 		{Name: "cleanup", Formula: "mol-cleanup", Trigger: "cron", Schedule: "0 3 * * *", FormulaLayer: sharedTestFormulaDir},

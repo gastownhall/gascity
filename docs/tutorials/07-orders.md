@@ -66,6 +66,11 @@ orders that should wake a pool must create a Ready-visible root, such as a
 vapor/root-only wisp, rather than relying on workflow container beads that
 `bd ready` filters out.
 
+After upgrading from older dispatcher versions, close any open legacy
+molecule-shaped pool-order wisps with `gc order sweep-tracking --include-wisps
+<order>` or let a min-floor worker drain them before expecting that order to
+fire again from a scale-from-zero pool.
+
 Orders are discovered when the city starts and whenever the controller reloads
 config. You don't need to restart anything if the city is already watching the
 orders directory.

@@ -1542,13 +1542,60 @@ func readyForControllerDemandQuery(store beads.Store, query beads.ReadyQuery) ([
 	if errors.Is(err, beads.ErrCacheUnavailable) {
 		return handles.Live.Ready(query)
 	}
-	return rows, err
+	if _, hasExplicitHandles := store.(interface {
+		Handles() beads.StoreHandles
+	}); !hasExplicitHandles {
+		return rows, err
+	}
+	if err != nil && !beads.IsPartialResult(err) {
+		rows = nil
+	}
+	liveRows, liveErr := handles.Live.Ready(query)
+	if liveErr != nil && !beads.IsPartialResult(liveErr) {
+		liveRows = nil
+	}
+	rows = mergeReadyRowsByID(rows, liveRows)
+	if joined := errors.Join(err, liveErr); joined != nil && len(rows) > 0 && !beads.IsPartialResult(joined) {
+		return rows, &beads.PartialResultError{Op: "controller ready demand", Err: joined}
+	} else if joined != nil {
+		return rows, joined
+	}
+	return rows, nil
 }
 
 func liveReadyForControllerDemandQuery(store beads.Store, query beads.ReadyQuery) ([]beads.Bead, error) {
 	query.TierMode = beads.TierBoth
 	handles := beads.HandlesFor(store)
 	return handles.Live.Ready(query)
+}
+
+func mergeReadyRowsByID(primary, secondary []beads.Bead) []beads.Bead {
+	if len(primary) == 0 {
+		return secondary
+	}
+	if len(secondary) == 0 {
+		return primary
+	}
+	seen := make(map[string]struct{}, len(primary)+len(secondary))
+	out := make([]beads.Bead, 0, len(primary)+len(secondary))
+	for _, row := range primary {
+		if row.ID == "" {
+			continue
+		}
+		seen[row.ID] = struct{}{}
+		out = append(out, row)
+	}
+	for _, row := range secondary {
+		if row.ID == "" {
+			continue
+		}
+		if _, ok := seen[row.ID]; ok {
+			continue
+		}
+		seen[row.ID] = struct{}{}
+		out = append(out, row)
+	}
+	return out
 }
 
 // mergeNamedSessionDemand ensures that named-session assignee demand is

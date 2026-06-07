@@ -1165,6 +1165,24 @@ func prepareOrderWispRecipe(ctx context.Context, store beads.Store, a orders.Ord
 	return formula.CompileWithoutRuntimeVarValidation(ctx, a.Formula, searchPaths, inv.Vars)
 }
 
+func poolOrderRouteVisibilityWarning(a orders.Order, recipe *formula.Recipe) string {
+	if strings.TrimSpace(a.Pool) == "" || poolOrderRecipeHasReadySurface(recipe) {
+		return ""
+	}
+	return fmt.Sprintf("warning: pool order %q uses formula %q whose root is a molecule container, not Ready-visible work; scale-from-zero pools will not wake for this wisp. Convert the formula to phase=\"vapor\"/root-only or graph.v2 before routing it to a pool.", a.ScopedName(), a.Formula)
+}
+
+func poolOrderRecipeHasReadySurface(recipe *formula.Recipe) bool {
+	if recipe == nil {
+		return false
+	}
+	if recipe.RootOnly {
+		return true
+	}
+	root := recipe.RootStep()
+	return root != nil && root.Metadata["gc.kind"] == "workflow"
+}
+
 func redactOrderEnvError(err error, env []string) string {
 	if err == nil {
 		return ""
@@ -1231,6 +1249,9 @@ func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, store beads.St
 		})
 		m.markTrackingFailure(store, trackingID, scoped, a, headSeq)
 		return
+	}
+	if warning := poolOrderRouteVisibilityWarning(a, recipe); warning != "" {
+		logDispatchError(m.stderr, "gc: order %s: %s", scoped, warning)
 	}
 
 	var pool string

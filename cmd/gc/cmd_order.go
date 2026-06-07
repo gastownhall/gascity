@@ -678,6 +678,9 @@ func doOrderRunWithJSON(aa []orders.Order, name, rig, cityPath string, store bea
 		fmt.Fprintf(stderr, "gc order run: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	if warning := poolOrderRouteVisibilityWarning(a, recipe); warning != "" {
+		fmt.Fprintf(stderr, "gc order run: %s\n", warning) //nolint:errcheck // best-effort stderr
+	}
 
 	var pool string
 	if a.Pool != "" {

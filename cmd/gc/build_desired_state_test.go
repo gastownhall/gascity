@@ -539,7 +539,7 @@ func TestCollectAssignedWorkBeads_ExcludesBlockedOpenAssignedHandoff(t *testing.
 	}
 }
 
-func TestDefaultScaleCheckCountsUsesCachedReadyReadModel(t *testing.T) {
+func TestDefaultScaleCheckCountsKeepsCachedRowsWhenLiveFreshnessFails(t *testing.T) {
 	backing := &readyFailStore{Store: beads.NewMemStore()}
 	if _, err := backing.Create(beads.Bead{
 		Title:  "queued routed work",
@@ -551,24 +551,70 @@ func TestDefaultScaleCheckCountsUsesCachedReadyReadModel(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("create routed bead: %v", err)
 	}
+	const template = "gascity/workflows.codex-min"
 	cache := beads.NewCachingStoreForTest(backing, nil)
 	if err := cache.PrimeActive(); err != nil {
 		t.Fatalf("PrimeActive: %v", err)
 	}
 
+	counts, partialTemplates, errs := defaultScaleCheckCounts([]defaultScaleCheckTarget{{
+		template: template,
+		storeKey: "rig:gascity",
+		store:    cache,
+	}})
+	if len(errs) != 1 || !beads.IsPartialResult(errs[0]) {
+		t.Fatalf("defaultScaleCheckCounts errs = %v, want one partial live-freshness error", errs)
+	}
+	if !partialTemplates[template] {
+		t.Fatalf("partialTemplates = %v, want %q marked partial", partialTemplates, template)
+	}
+	if got := counts[template]; got != 1 {
+		t.Fatalf("defaultScaleCheckCounts = %d, want 1", got)
+	}
+	if backing.readyCalls != 1 {
+		t.Fatalf("backing Ready calls = %d, want one live freshness read", backing.readyCalls)
+	}
+}
+
+func TestDefaultScaleCheckCountsSeesExternalRoutedWorkAfterCachePrime(t *testing.T) {
+	const template = "gascity/workflows.codex-min"
+	backing := beads.NewMemStore()
+	cache := beads.NewCachingStoreForTest(backing, nil)
+	if err := cache.PrimeActive(); err != nil {
+		t.Fatalf("PrimeActive: %v", err)
+	}
 	counts, _, errs := defaultScaleCheckCounts([]defaultScaleCheckTarget{{
-		template: "gascity/workflows.codex-min",
+		template: template,
+		storeKey: "rig:gascity",
+		store:    cache,
+	}})
+	if len(errs) != 0 {
+		t.Fatalf("initial defaultScaleCheckCounts errs = %v", errs)
+	}
+	if got := counts[template]; got != 0 {
+		t.Fatalf("initial defaultScaleCheckCounts[%q] = %d, want 0", template, got)
+	}
+	if _, err := backing.Create(beads.Bead{
+		Title:  "manual order run wisp",
+		Type:   "task",
+		Status: "open",
+		Metadata: map[string]string{
+			"gc.routed_to": template,
+		},
+	}); err != nil {
+		t.Fatalf("create externally routed bead: %v", err)
+	}
+
+	counts, _, errs = defaultScaleCheckCounts([]defaultScaleCheckTarget{{
+		template: template,
 		storeKey: "rig:gascity",
 		store:    cache,
 	}})
 	if len(errs) != 0 {
 		t.Fatalf("defaultScaleCheckCounts errs = %v", errs)
 	}
-	if got := counts["gascity/workflows.codex-min"]; got != 1 {
-		t.Fatalf("defaultScaleCheckCounts = %d, want 1", got)
-	}
-	if backing.readyCalls != 0 {
-		t.Fatalf("backing Ready calls = %d, want cached demand read", backing.readyCalls)
+	if got := counts[template]; got != 1 {
+		t.Fatalf("defaultScaleCheckCounts[%q] = %d, want 1 for post-prime external routed work", template, got)
 	}
 }
 
@@ -951,6 +997,7 @@ func TestDefaultScaleCheckCountsIgnoresGraphV2StepRoutedToPool(t *testing.T) {
 }
 
 func TestDefaultScaleCheckCountsHonorsCachedWriteThroughDependencies(t *testing.T) {
+	const template = "gascity/workflows.codex-max"
 	backing := &readyFailStore{Store: beads.NewMemStore()}
 	blocker, err := backing.Create(beads.Bead{
 		Title:  "blocked earlier step",
@@ -965,7 +1012,7 @@ func TestDefaultScaleCheckCountsHonorsCachedWriteThroughDependencies(t *testing.
 		Type:   "task",
 		Status: "open",
 		Metadata: map[string]string{
-			"gc.routed_to": "gascity/workflows.codex-max",
+			"gc.routed_to": template,
 		},
 	})
 	if err != nil {
@@ -979,19 +1026,22 @@ func TestDefaultScaleCheckCountsHonorsCachedWriteThroughDependencies(t *testing.
 		t.Fatalf("DepAdd: %v", err)
 	}
 
-	counts, _, errs := defaultScaleCheckCounts([]defaultScaleCheckTarget{{
-		template: "gascity/workflows.codex-max",
+	counts, partialTemplates, errs := defaultScaleCheckCounts([]defaultScaleCheckTarget{{
+		template: template,
 		storeKey: "rig:gascity",
 		store:    cache,
 	}})
-	if len(errs) != 0 {
-		t.Fatalf("defaultScaleCheckCounts errs = %v", errs)
+	if len(errs) != 1 || !beads.IsPartialResult(errs[0]) {
+		t.Fatalf("defaultScaleCheckCounts errs = %v, want one partial live-freshness error", errs)
 	}
-	if got := counts["gascity/workflows.codex-max"]; got != 0 {
+	if !partialTemplates[template] {
+		t.Fatalf("partialTemplates = %v, want %q marked partial", partialTemplates, template)
+	}
+	if got := counts[template]; got != 0 {
 		t.Fatalf("defaultScaleCheckCounts = %d, want blocked future work excluded", got)
 	}
-	if backing.readyCalls != 0 {
-		t.Fatalf("backing Ready calls = %d, want cached demand read", backing.readyCalls)
+	if backing.readyCalls != 1 {
+		t.Fatalf("backing Ready calls = %d, want one live freshness read", backing.readyCalls)
 	}
 }
 
