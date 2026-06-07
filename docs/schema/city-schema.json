@@ -951,7 +951,7 @@
         },
         "delete_after_close": {
           "type": "string",
-          "description": "DeleteAfterClose deletes matching GC-owned beads after they have been\nclosed for this duration. Accepts Go duration syntax plus whole-day \"d\"\nunits, e.g. \"7d\" or \"1d12h\". Empty defers to any controller-managed\ndefault for the policy type (e.g. order_tracking defaults to 7d)."
+          "description": "DeleteAfterClose deletes matching GC-owned beads after they have been\nclosed for this duration. Accepts Go duration syntax plus whole-day \"d\"\nunits, e.g. \"7d\" or \"1d12h\". Empty means the policy is not GC-managed."
         }
       },
       "additionalProperties": false,
