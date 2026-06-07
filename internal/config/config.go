@@ -1224,9 +1224,9 @@ func (w *Workspace) EffectiveSuspendedOnStart() bool {
 // BeadsConfig holds bead store settings.
 type BeadsConfig struct {
 	// Provider selects the bead store backend: "bd" (default, Dolt-backed),
-	// "file", "exec:<script>" for a user-supplied script, or "sqlite" for
-	// the built-in coordination store (pure-Go SQLite; use when Dolt is
-	// unavailable). "sqlite-cgo" is a deprecated alias for "sqlite".
+	// "file", or "exec:<script>" for a user-supplied script. The "sqlite",
+	// "sqlite-cgo", and "coordstore" coordination-store providers were removed
+	// and now hard-error; migrate to "doltlite" or remove the setting.
 	Provider string `toml:"provider,omitempty" jsonschema:"default=bd"`
 	// Backend selects the bd storage engine when Provider is "bd".
 	// Empty defaults to "dolt"; T3Code uses "doltlite" for local dev stores.
