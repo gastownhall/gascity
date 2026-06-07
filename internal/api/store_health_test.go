@@ -185,7 +185,7 @@ func TestBuildStatusBodyIncludesStoreHealth(t *testing.T) {
 	state := newFakeState(t)
 	s := &Server{state: state}
 
-	body := s.buildStatusBody()
+	body := s.buildStatusBody(false)
 	if body.StoreHealth == nil {
 		t.Fatal("StoreHealth = nil, want populated")
 	}
@@ -207,7 +207,7 @@ func TestBuildStatusBodyIncludesBeadsDiagnostic(t *testing.T) {
 	}
 	s := &Server{state: state}
 
-	body := s.buildStatusBody()
+	body := s.buildStatusBody(false)
 	if body.Beads == nil {
 		t.Fatal("Beads = nil, want diagnostic")
 	}
