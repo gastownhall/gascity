@@ -88,5 +88,5 @@ vulnerabilities:
   - id: CVE-2026-41602
     paths:
       - "usr/local/bin/dolt"
-    expired_at: 2026-06-07
+    expired_at: 2026-07-07
     statement: Latest Dolt 1.88.0 still embeds github.com/apache/thrift v0.13.1; remove after a Dolt release includes thrift 0.23.0 or later.
