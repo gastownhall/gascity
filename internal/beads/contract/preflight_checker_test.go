@@ -82,6 +82,46 @@ func TestPreflightBlocksNativeOnContextDisagreement(t *testing.T) {
 	assertCheckState(t, result, PreflightCheckBDContextAgreement, PreflightCheckFail)
 }
 
+// An UNREACHABLE bd context (e.g. a non-git city root where `bd context` cannot
+// run) is not evidence of a backend disagreement — it only means the native
+// store's bd-context cross-checks cannot be verified. It must DEGRADE eligibility
+// (operator opt-in) rather than hard-BLOCK it, so the bd-context-derived checks
+// report WARN, not FAIL. (A real disagreement, with a readable bd context, still
+// blocks — see TestPreflightBlocksNativeOnContextDisagreement.)
+func TestPreflightDegradesNativeOnUnreachableBDContext(t *testing.T) {
+	scope := "/city"
+	fs := fsys.NewFake()
+	fs.Dirs[filepath.Join(scope, ".beads")] = true
+	fs.Files[filepath.Join(scope, ".beads", "metadata.json")] = []byte(`{
+		"backend": "dolt",
+		"dolt_mode": "server",
+		"dolt_database": "gascity",
+		"project_id": "gc-local"
+	}`)
+	checker := PreflightChecker{
+		FS:                  fs,
+		Provider:            "bd",
+		BeadsLibraryVersion: "1.0.4",
+		BDContext: func(string) (PreflightBDContext, error) {
+			return PreflightBDContext{}, errors.New("bd context unavailable: not a git repository")
+		},
+		DatabaseProjectID: func(string) (string, bool, error) {
+			return "gc-local", true, nil
+		},
+	}
+
+	result, err := checker.Check(scope)
+	if err != nil {
+		t.Fatalf("Check() error = %v", err)
+	}
+
+	// Unreachable (not disagreeing) bd context => DEGRADED + opt-in, never BLOCKED.
+	assertPreflightVerdict(t, result, PreflightVerdictDegraded, false)
+	assertCheckState(t, result, PreflightCheckBDContextAgreement, PreflightCheckWarn)
+	assertCheckState(t, result, PreflightCheckDoltModeSafe, PreflightCheckWarn)
+	assertCheckState(t, result, PreflightCheckVersionCompat, PreflightCheckWarn)
+}
+
 func TestPreflightBlocksNativeOnIdentityMismatch(t *testing.T) {
 	scope := "/city"
 	checker := testPreflightChecker(preflightMetadataJSON(`{

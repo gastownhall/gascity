@@ -149,7 +149,11 @@ func (c PreflightChecker) checkBDContextAgreement(metadata preflightMetadata, ct
 	details := PreflightDetails{MetadataBackend: metadata.Backend}
 	details.BDContextBackend = ctx.Backend
 	if err != nil {
-		return NewPreflightCheckResult(PreflightCheckBDContextAgreement, PreflightCheckFail, "bd context is unreachable", details)
+		// Unreachable bd context (e.g. a non-git city root where `bd context`
+		// cannot run) is not evidence of backend DISAGREEMENT — only that we
+		// cannot cross-verify. Degrade (opt-in) rather than hard-block; a real
+		// mismatch is still caught below once bd context is readable.
+		return NewPreflightCheckResult(PreflightCheckBDContextAgreement, PreflightCheckWarn, "bd context is unreachable; cannot cross-verify backend agreement", details)
 	}
 	if details.MetadataBackend == "" || details.BDContextBackend == "" {
 		return NewPreflightCheckResult(PreflightCheckBDContextAgreement, PreflightCheckFail, "bd context agreement cannot be determined", details)
@@ -167,7 +171,10 @@ func (c PreflightChecker) checkDoltModeSafe(metadata preflightMetadata, ctx Pref
 		BDContextDoltMode: ctx.DoltMode,
 	}
 	if err != nil {
-		return NewPreflightCheckResult(PreflightCheckDoltModeSafe, PreflightCheckFail, "bd context is unreachable", details)
+		// Unreachable bd context cannot confirm dolt server mode; degrade
+		// (opt-in) rather than hard-block. embedded mode is still rejected
+		// below once bd context is readable.
+		return NewPreflightCheckResult(PreflightCheckDoltModeSafe, PreflightCheckWarn, "bd context is unreachable; cannot confirm dolt server mode", details)
 	}
 	if metadata.Backend != "dolt" || ctx.Backend != "dolt" {
 		return NewPreflightCheckResult(PreflightCheckDoltModeSafe, PreflightCheckPass, "Dolt mode check is not required for non-dolt backend", details)
@@ -212,7 +219,10 @@ func (c PreflightChecker) checkVersionCompat(ctx PreflightBDContext, err error) 
 		SchemaVersion:       ctx.SchemaVersion,
 	}
 	if err != nil {
-		return NewPreflightCheckResult(PreflightCheckVersionCompat, PreflightCheckFail, "bd context is unreachable", details)
+		// Unreachable bd context cannot confirm bd/beads version parity; degrade
+		// (opt-in) rather than hard-block. A real version skew is still caught
+		// below once bd context is readable.
+		return NewPreflightCheckResult(PreflightCheckVersionCompat, PreflightCheckWarn, "bd context is unreachable; cannot confirm bd/beads version compatibility", details)
 	}
 	if ctx.SchemaVersion <= 0 {
 		return NewPreflightCheckResult(PreflightCheckVersionCompat, PreflightCheckFail, "bd context did not report a schema version", details)
