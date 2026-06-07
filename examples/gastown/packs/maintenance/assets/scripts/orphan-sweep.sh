@@ -305,6 +305,23 @@ is_known_agent() {
     # is currently running with a matching ID, SessionName, Alias, or
     # AgentName. Mirrors liveOpenSessionAssignmentExists in the Go path.
     if live_session_match "$name"; then return 0; fi
+    # Bare short-form assignee whose canonical agent is LIVE: an assignee like
+    # "backend_dev" can be the last-dot segment of a configured qualified agent
+    # ("thriva/devpipeline.backend_dev") whose live session is known only by the
+    # qualified name. Without this, such an assignee looks like a dead agent and
+    # the LIVE owner's in-progress work is reset every cycle. Match the assignee
+    # against each configured agent's short form, and accept ONLY when that
+    # qualified agent currently has a live session (so genuinely dead-agent work
+    # still resets). Mirrors the Go reconciler's multi-identity resolution
+    # (sessionBeadAssigneeIdentities / liveOpenSessionAssignmentExists).
+    if [ -n "$name" ] && [ -n "$AGENTS" ]; then
+        while IFS= read -r _cfg_agent; do
+            [ -z "$_cfg_agent" ] && continue
+            if [ "${_cfg_agent##*.}" = "$name" ] && live_session_match "$_cfg_agent"; then
+                return 0
+            fi
+        done <<<"$AGENTS"
+    fi
     return 1
 }
 
