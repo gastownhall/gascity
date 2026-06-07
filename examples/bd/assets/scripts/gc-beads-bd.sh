@@ -36,6 +36,17 @@ CONCURRENT_START_READY_TIMEOUT_MS="${GC_DOLT_CONCURRENT_START_READY_TIMEOUT_MS:-
 LOCK_RELEASE_TIMEOUT_MS="${GC_DOLT_LOCK_RELEASE_TIMEOUT_MS:-60000}"
 BEADS_BACKEND="${GC_BEADS_BACKEND:-${BEADS_BACKEND:-dolt}}"
 
+# Probed once in the parent shell — dolt_data_lock_holder runs in $(...)
+# subshells, so a lazily-set memo there would never persist. Without flock
+# the dolt store lock guard (gastownhall/gascity#3174) cannot probe and
+# falls back to the legacy fail-open behavior; warn once so the disabled
+# guard is visible.
+FLOCK_AVAILABLE=true
+if ! command -v flock >/dev/null 2>&1; then
+    FLOCK_AVAILABLE=false
+    echo "warning: flock unavailable; dolt store lock guard disabled (gastownhall/gascity#3174)" >&2
+fi
+
 # Derived paths (set after GC_CITY_PATH validation).
 GC_DIR=""
 PACK_STATE_DIR=""
@@ -1162,13 +1173,7 @@ kill_imposter() {
 # callers keep the legacy behavior.
 dolt_data_lock_holder() {
     local lock_file
-    if ! command -v flock >/dev/null 2>&1; then
-        if [ -z "${GC_DOLT_LOCK_PROBE_WARNED:-}" ]; then
-            GC_DOLT_LOCK_PROBE_WARNED=1
-            echo "warning: flock unavailable; dolt store lock guard disabled (gastownhall/gascity#3174)" >&2
-        fi
-        return 1
-    fi
+    [ "$FLOCK_AVAILABLE" = "true" ] || return 1
     for lock_file in "$DATA_DIR"/.dolt/noms/LOCK "$DATA_DIR"/*/.dolt/noms/LOCK; do
         [ -f "$lock_file" ] || continue
         if ! flock -n "$lock_file" true 2>/dev/null; then
