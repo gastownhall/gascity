@@ -11,10 +11,11 @@
 # the watchdog is not a Gas Town role, it is a reusable capability a city
 # opts into.
 #
-# This pack is the SCAFFOLD stage: the agent wakes each patrol tick, logs
-# a one-line session-count summary, drain-acks, and exits. Detection and
-# recovery land in later steps — the prompt deliberately contains neither
-# yet.
+# This pack is at the DETECTION stage: each wake the agent enumerates every
+# session, cross-references claimed in-progress work, peeks the pane, and
+# classifies each session (healthy / idle-no-work / rate-limit-stalled /
+# context-frozen), then drain-acks and exits. The triage is read-only —
+# recovery lands in the next step and lives in the prompt, not in Go.
 #
 # Compose it by importing from a city's root pack:
 #   [imports.argos]

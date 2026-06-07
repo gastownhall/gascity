@@ -1,12 +1,15 @@
 // Package gastown_test also validates the argos watchdog pack, which the
 // gastown example city composes alongside its domain roster.
 //
-// Argos is the scaffold stage of the rate-limit-recovery watchdog: a
-// city-scoped, always-resident named session modeled on the boot agent
-// that wakes each patrol tick, logs a one-line session summary, drain-acks,
-// and exits. These tests pin the scaffold's structure (so the lifecycle is
-// what the prompt documents) and its no-op boundary (so detection and
-// recovery arrive as a deliberate, reviewed change, not by accident).
+// Argos is the rate-limit-recovery watchdog: a city-scoped, always-resident
+// named session modeled on the boot agent that wakes each patrol tick, runs a
+// single pass of triage with a fresh provider context, then drain-acks and
+// exits. At this (.3) stage the triage is read-only detection — it enumerates
+// every session, cross-references claimed work, peeks the pane, and classifies
+// each session, but takes no recovery action. These tests pin the agent's
+// structure (so the lifecycle is what the prompt documents) and its read-only
+// boundary (so recovery arrives as a deliberate, reviewed change in .4, not by
+// accident).
 package gastown_test
 
 import (
@@ -102,31 +105,66 @@ func TestArgosPromptMatchesNamedSessionLifecycle(t *testing.T) {
 	}
 }
 
-// TestArgosPromptIsScaffoldOnly locks the no-op boundary: the scaffold
-// observes and logs, and explicitly takes no detection or recovery action.
-// Detection (.3) and recovery (.4) must therefore be a deliberate edit
-// here, not a silent regression.
-func TestArgosPromptIsScaffoldOnly(t *testing.T) {
+// TestArgosPromptIsReadOnlyDetection locks the .3 boundary: the prompt now
+// DETECTS and CLASSIFIES (read-only triage), but still takes no recovery
+// action. Recovery (.4) — nudges, wakes, unclaims, warrants — must therefore
+// be a deliberate edit here, not a silent regression.
+func TestArgosPromptIsReadOnlyDetection(t *testing.T) {
 	body := renderArgosPrompt(t)
+	lower := strings.ToLower(body)
 
-	// The three actions a scaffold wake performs, fully rendered.
+	// Observation surface: enumerate, cross-reference claimed work, confirm
+	// by reading the pane, close the single-pass wake.
 	for _, want := range []string{
-		"gc session list --json",
-		"gc runtime drain-ack",
+		"gc session list --json", // enumerate the field of view
+		"--status=in_progress",   // list claimed, in-progress work
+		"assignee",               // the session_name == assignee join
+		"gc session peek",        // confirm by reading the pane
+		"gc runtime drain-ack",   // single-pass lifecycle close
 	} {
 		if !strings.Contains(body, want) {
-			t.Errorf("argos prompt missing required scaffold command %q", want)
+			t.Errorf("argos detection prompt missing observation step %q", want)
 		}
 	}
 
-	// Explicit no-op disclaimers — the scaffold must announce that it does
-	// not yet detect or recover.
+	// The four verdicts the read-only triage classifies into.
 	for _, want := range []string{
-		"No detection, no nudges, no warrants.",
-		"What Argos does NOT do (yet)",
+		"healthy",
+		"idle-no-work",
+		"rate-limit-stalled",
+		"context-frozen",
 	} {
 		if !strings.Contains(body, want) {
-			t.Errorf("argos prompt missing scaffold-boundary disclaimer %q", want)
+			t.Errorf("argos detection prompt missing classification %q", want)
+		}
+	}
+
+	// The fire gate is a conjunction: a claimed in-progress bead AND the
+	// rate-limit marker visible on the pane. Both clauses must be named.
+	for _, want := range []string{
+		"fire gate",     // named explicitly so the conjunction is unmissable
+		"claimed",       // the work-in-flight clause
+		"session limit", // the marker clause (the b7691626 inline wall)
+	} {
+		if !strings.Contains(lower, want) {
+			t.Errorf("argos detection prompt missing fire-gate element %q", want)
+		}
+	}
+
+	// Read-only boundary: the prompt declares itself read-only and issues NO
+	// mutating or recovery command. Detection classifies; .4 acts.
+	if !strings.Contains(lower, "read-only") {
+		t.Error("argos detection prompt must declare itself read-only")
+	}
+	for _, forbidden := range []string{
+		"gc session nudge",
+		"gc session wake",
+		"gc bd update",
+		"gc mail send",
+		"--label=warrant",
+	} {
+		if strings.Contains(body, forbidden) {
+			t.Errorf("argos .3 is read-only; prompt must not issue recovery command %q", forbidden)
 		}
 	}
 }

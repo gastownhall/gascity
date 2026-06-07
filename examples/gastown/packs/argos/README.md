@@ -10,25 +10,31 @@ It is modeled on the in-tree `boot` agent
 named session that the controller re-wakes each patrol tick, runs a single
 pass of triage with a fresh provider context, then drain-acks and exits.
 
-## Status: scaffold (no-op triage)
+## Status: read-only detection
 
-This is the **scaffold** stage of the Argos build. The agent proves the
-lifecycle only:
+Argos now **detects and classifies**, but still takes no action. Each wake
+runs one single-pass triage:
 
 1. wake (fresh context, single pass),
-2. enumerate `gc session list --json`,
-3. log a one-line session-count summary,
-4. `gc runtime drain-ack` and exit.
+2. enumerate `gc session list --json` and pre-filter candidates
+   (`provider == claude`, alive, `last_active` as a loose advisory),
+3. cross-reference claimed work — join each candidate's `session_name`
+   against the `assignee` of an `in_progress` bead,
+4. confirm by reading the pane (`gc session peek`),
+5. classify each candidate — `healthy` / `idle-no-work` /
+   `rate-limit-stalled` / `context-frozen` — and print one verdict line,
+6. `gc runtime drain-ack` and exit.
 
-There is **no detection and no recovery yet** — by design. The detection
-judgment and the recovery actions land in later steps and live in the
-**prompt**, not in Go (Zero Framework Cognition: the model reads the pane
-and decides; no Go string-matcher, no per-provider format zoo).
+The **fire gate** for a recoverable stall is a conjunction: the pane shows
+the rate-limit marker as its current state **and** the session holds a
+claimed `in_progress` bead. Only `rate-limit-stalled` trips it in v1.
 
-Roadmap after this scaffold:
+All of this judgment lives in the **prompt**, not in Go (Zero Framework
+Cognition: the model reads the pane and decides; no Go string-matcher, no
+per-provider format zoo). **No recovery yet** — that is the next step.
 
-- **Detection** — read-only: gate on alive + claimed in-progress bead +
-  the rate-limit marker on the pane; decide stalled / not.
+Roadmap after this detection stage:
+
 - **Recovery** — nudge the stalled session (suspended → wake, then nudge),
   with anti-storm tiered backoff.
 - **City wiring + tests + docs** — promote from the example city to the
@@ -79,5 +85,5 @@ packs/argos/
 ├── README.md                       ← this file
 └── agents/argos/
     ├── agent.toml                  ← scope=city, wake_mode=fresh, max_active=1
-    └── prompt.template.md          ← single-pass no-op triage
+    └── prompt.template.md          ← single-pass read-only detection triage
 ```
