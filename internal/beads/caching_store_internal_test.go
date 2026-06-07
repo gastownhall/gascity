@@ -3360,3 +3360,63 @@ func hasDep(deps []Dep, dependsOnID string) bool {
 	}
 	return false
 }
+
+// TestCachingStoreReadyReturnsCanonicalOrder pins the (priority, created_at,
+// id) ascending ready order on the cache-served paths (#3208): c.beads is a
+// map, so without an explicit sort Ready/CachedReady returned a different
+// order on every call and disagreed with the SQL-backed ready readers.
+func TestCachingStoreReadyReturnsCanonicalOrder(t *testing.T) {
+	t.Parallel()
+
+	backing := NewMemStore()
+	cache := NewCachingStoreForTest(backing, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+
+	// Creation order scrambles priorities so neither insertion order nor any
+	// single-key order matches the canonical (priority, created_at, id) one.
+	for i, priority := range []int{3, 0, 2, 1, 4, 2, 0, 1} {
+		p := priority
+		if _, err := cache.Create(Bead{Title: fmt.Sprintf("ready-%d", i), Priority: &p}); err != nil {
+			t.Fatalf("Create ready-%d: %v", i, err)
+		}
+	}
+	// MemStore assigns sequential ids gc-1..gc-8 with non-decreasing
+	// created_at, so canonical order groups by priority, then insertion.
+	want := []string{"gc-2", "gc-7", "gc-4", "gc-8", "gc-3", "gc-6", "gc-1", "gc-5"}
+
+	readyIDs := func(rows []Bead) []string {
+		ids := make([]string, len(rows))
+		for i, b := range rows {
+			ids[i] = b.ID
+		}
+		return ids
+	}
+
+	got, err := cache.Ready()
+	if err != nil {
+		t.Fatalf("Ready: %v", err)
+	}
+	if ids := readyIDs(got); !reflect.DeepEqual(ids, want) {
+		t.Fatalf("Ready order = %v, want %v", ids, want)
+	}
+
+	cached, ok := cache.CachedReady()
+	if !ok {
+		t.Fatal("CachedReady reported cache unavailable")
+	}
+	if ids := readyIDs(cached); !reflect.DeepEqual(ids, want) {
+		t.Fatalf("CachedReady order = %v, want %v", ids, want)
+	}
+
+	// A bounded read must cut the canonical prefix, not an arbitrary
+	// map-iteration subset.
+	limited, err := cache.cachedReadyOnly(ReadyQuery{Limit: 3})
+	if err != nil {
+		t.Fatalf("cachedReadyOnly limit 3: %v", err)
+	}
+	if ids := readyIDs(limited); !reflect.DeepEqual(ids, want[:3]) {
+		t.Fatalf("cachedReadyOnly limit-3 order = %v, want %v", ids, want[:3])
+	}
+}

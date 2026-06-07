@@ -442,6 +442,10 @@ func (c *CachingStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 				result = append(result, cloneBead(b))
 			}
 		}
+		// c.beads is a map, so the scan above yields a different order per
+		// call; impose the canonical ready order so cache-served results
+		// match the SQL-backed ready readers (#3208).
+		sortBeadsReadyOrder(result)
 		return result, nil
 	}
 	c.mu.RUnlock()
@@ -486,6 +490,9 @@ func (c *CachingStore) CachedReady() ([]Bead, bool) {
 			result = append(result, cloneBead(b))
 		}
 	}
+	// Map-scan order is nondeterministic; match the canonical ready order of
+	// the SQL-backed ready readers (#3208).
+	sortBeadsReadyOrder(result)
 	return result, true
 }
 

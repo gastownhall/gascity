@@ -40,11 +40,13 @@ func (s *Server) humaHandleBeadList(ctx context.Context, input *BeadListInput) (
 
 	// all=true reads bypass the CachingStore (closed history lives only in
 	// the backing store) and are O(full history) per rig — seconds on a
-	// large city. Key their response cache on a time bucket so concurrent
-	// pollers share one rebuild per TTL window instead of stacking slow
-	// reads (#3208, same lever as /status in gascity#3186). Open-only reads
-	// are served from the in-memory cache and stay uncached here; blocking
-	// callers bypass so the body reflects the event they waited for.
+	// large city. Key their response cache on a time bucket so polls within
+	// a TTL window reuse the first completed rebuild instead of each
+	// rebuilding (#3208, same lever as /status in gascity#3186; there is no
+	// single-flight, so simultaneous misses on a cold bucket still rebuild
+	// independently). Open-only reads are served from the in-memory cache
+	// and stay uncached here; blocking callers bypass so the body reflects
+	// the event they waited for.
 	cacheKey := ""
 	var bucket uint64
 	if input.All && !blocking {
@@ -124,10 +126,14 @@ func (s *Server) humaHandleBeadList(ctx context.Context, input *BeadListInput) (
 	if all == nil {
 		all = []beads.Bead{}
 	}
-	// Per-store results are each (created_at, id)-ordered, but the rig
-	// concatenation above is not: re-sort so the merged set has one global
-	// total order and a bounded read is a deterministic prefix of it (#3208).
-	beads.SortBeads(all, beads.SortCreatedDesc)
+	// Per-store results are each (created_at, id)-ordered, but the
+	// concatenation across rigs and assignee terms is not: re-sort so the
+	// merged set has one global total order and a bounded read is a
+	// deterministic prefix of it (#3208). A single (rig, assignee) source is
+	// already in canonical order — skip the redundant hot-path sort.
+	if len(rigNames)*len(assigneeTerms) > 1 {
+		beads.SortBeads(all, beads.SortCreatedDesc)
+	}
 
 	index := s.latestIndex()
 	cacheAge := cacheAgeSeconds(cityStore)

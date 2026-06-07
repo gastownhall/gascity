@@ -242,6 +242,31 @@ func SortBeads(items []Bead, order SortOrder) {
 	sortBeadsForQuery(items, order)
 }
 
+// sortBeadsReadyOrder sorts ready results into the canonical
+// (priority, created_at, id) ascending order used by the SQL-backed ready
+// readers (a nil priority sorts as 2, matching their COALESCE(i.priority, 2)),
+// so a bounded ready read cuts the same deterministic prefix regardless of
+// which store path served it (#3208).
+func sortBeadsReadyOrder(items []Bead) {
+	sort.Slice(items, func(i, j int) bool {
+		pi, pj := readySortPriority(items[i]), readySortPriority(items[j])
+		if pi != pj {
+			return pi < pj
+		}
+		if !items[i].CreatedAt.Equal(items[j].CreatedAt) {
+			return items[i].CreatedAt.Before(items[j].CreatedAt)
+		}
+		return items[i].ID < items[j].ID
+	})
+}
+
+func readySortPriority(b Bead) int {
+	if b.Priority == nil {
+		return 2
+	}
+	return *b.Priority
+}
+
 func sortBeadsForQuery(items []Bead, order SortOrder) {
 	switch order {
 	case SortCreatedAsc:
